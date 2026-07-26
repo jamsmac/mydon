@@ -6,9 +6,18 @@ import { EntitiesModule } from "./entities/entities.module";
 import { EventsModule } from "./events/events.module";
 import { HealthController } from "./health.controller";
 import { RegistryModule } from "./registry/registry.module";
+import { RulesModule } from "./rules/rules.module";
 
 @Module({
-  imports: [DbModule, AuditModule, EntitiesModule, EventsModule, ApprovalsModule, RegistryModule],
+  imports: [
+    DbModule,
+    AuditModule,
+    EntitiesModule,
+    EventsModule,
+    ApprovalsModule,
+    RegistryModule,
+    RulesModule,
+  ],
   controllers: [HealthController],
 })
 export class AppModule {}

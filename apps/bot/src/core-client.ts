@@ -26,6 +26,12 @@ export interface EntityRow {
   attrs: Record<string, unknown>;
 }
 
+export interface PendingNotifications {
+  since: string;
+  events: number;
+  notifications: { ruleId: string; urgency: string; text: string; eventId: string }[];
+}
+
 /** Тонкий клиент к MYDON Core. Бот не ходит в БД напрямую — только через API. */
 export class CoreClient {
   constructor(
@@ -76,5 +82,12 @@ export class CoreClient {
 
   obligations(domain: Domain): Promise<{ domain: Domain; totals: unknown[]; overdue: unknown[] }> {
     return this.request(`/registry/obligations/${domain}`);
+  }
+
+  /** Уведомления, которые правила сочли срочными, с момента `since` (FR-2). */
+  pendingNotifications(since: Date): Promise<PendingNotifications> {
+    return this.request<PendingNotifications>(
+      `/rules/pending?immediate=1&since=${encodeURIComponent(since.toISOString())}`,
+    );
   }
 }

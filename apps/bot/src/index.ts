@@ -4,6 +4,7 @@ import { TZ } from "@mydon/shared";
 import { formatBriefing, msUntilBriefing } from "./briefing";
 import { CoreClient } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
+import { Notifier } from "./notifier";
 import { parseAllowlist, RateLimiter, isAllowed } from "./security/access";
 import { TelegramApi } from "./telegram";
 
@@ -62,6 +63,24 @@ async function main(): Promise<void> {
   scheduleBriefing();
 
   setInterval(() => deps.limiter.sweep(), 5 * 60_000).unref();
+
+  // Срочные уведомления (FR-2): опрос правил и доставка владельцу
+  const notifier = new Notifier(deps.core);
+  const notifyEveryMs = Number(process.env.NOTIFY_INTERVAL_MS ?? 60_000);
+  setInterval(() => {
+    void (async () => {
+      try {
+        const texts = await notifier.collect();
+        for (const text of texts) {
+          for (const chatId of allowlist) {
+            await tg.sendMessage(chatId, text);
+          }
+        }
+      } catch (err) {
+        console.error("Уведомления не доставлены:", err);
+      }
+    })();
+  }, notifyEveryMs).unref();
 
   // Опрос обновлений
   for (;;) {
