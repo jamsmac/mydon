@@ -1,0 +1,91 @@
+import { DOMAINS, type Domain } from "@mydon/shared";
+
+/**
+ * Разбор вопросов на естественном языке (ТЗ FR-4).
+ * Примеры из ТЗ: «сколько должен Olma», «какие автоматы простаивают»,
+ * «статус претензии к ADNUR», «что просрочено».
+ *
+ * Это правила, а не модель: предсказуемо и работает без обращения к LLM.
+ * Что не распознано — уходит в LLM-обработку на следующем шаге.
+ */
+
+export type Intent =
+  | { kind: "briefing" }
+  | { kind: "approvals" }
+  | { kind: "overdue" }
+  | { kind: "machines" }
+  | { kind: "obligations"; domain: Domain }
+  | { kind: "search"; query: string; domain?: Domain }
+  | { kind: "unknown"; text: string };
+
+const DOMAIN_WORDS: Record<string, Domain> = {
+  глоберент: "globerent",
+  globerent: "globerent",
+  хели: "globerent",
+  heli: "globerent",
+  погрузчик: "globerent",
+  вендхаб: "vendhub",
+  вендхаб24: "vendhub",
+  vendhub: "vendhub",
+  вендинг: "vendhub",
+  автомат: "vendhub",
+  кофе: "vendhub",
+  трент: "trent",
+  trent: "trent",
+  аренда: "trent",
+  личное: "personal",
+  личный: "personal",
+  personal: "personal",
+};
+
+function detectDomain(text: string): Domain | undefined {
+  for (const [word, domain] of Object.entries(DOMAIN_WORDS)) {
+    if (text.includes(word)) return domain;
+  }
+  return undefined;
+}
+
+export function parseIntent(raw: string): Intent {
+  const text = raw.trim().toLowerCase();
+  if (!text) return { kind: "unknown", text: raw };
+
+  // Команды
+  if (text === "/start" || text === "/help" || text.includes("что ты умеешь")) {
+    return { kind: "unknown", text: raw };
+  }
+  if (text === "/briefing" || /(брифинг|сводк|что за ночь|доброе утро)/.test(text)) {
+    return { kind: "briefing" };
+  }
+  if (text === "/approvals" || /(согласован|одобр|на подпис|требует решени)/.test(text)) {
+    return { kind: "approvals" };
+  }
+  // "долж" покрывает должен/должна/должны/задолженность; "долг" — долг/долги
+  if (/(просроч|долг|задолж|долж)/.test(text)) {
+    const domain = detectDomain(text);
+    // «сколько должен <контрагент>» — это поиск по имени, а не общая просрочка
+    const named = /(должен|должна|должны)\s+([a-zа-яё0-9«"'-]{3,})/i.exec(raw);
+    if (named && named[2] && !DOMAIN_WORDS[named[2].toLowerCase()]) {
+      return { kind: "search", query: named[2].replace(/[«»"']/g, ""), ...(domain ? { domain } : {}) };
+    }
+    return domain ? { kind: "obligations", domain } : { kind: "overdue" };
+  }
+  if (/(простаива|не работа|не продаёт|не продает|встал|офлайн)/.test(text)) {
+    return { kind: "machines" };
+  }
+  if (/(обязательств|договор|счёт|счет)/.test(text)) {
+    const domain = detectDomain(text) ?? "globerent";
+    return { kind: "obligations", domain };
+  }
+
+  // «статус претензии к ADNUR», «найди Olma»
+  const search = /(?:статус|найд[иы]|покажи|что по)\s+(?:претензи[а-яё]*\s+к\s+)?(.{2,})/i.exec(raw);
+  if (search && search[1]) {
+    const domain = detectDomain(text);
+    return { kind: "search", query: search[1].trim(), ...(domain ? { domain } : {}) };
+  }
+
+  return { kind: "unknown", text: raw };
+}
+
+/** Список доменов для подсказки пользователю. */
+export const DOMAIN_HINT = DOMAINS.join(", ");
