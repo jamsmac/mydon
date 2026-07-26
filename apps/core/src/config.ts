@@ -1,5 +1,12 @@
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
+import { TZ } from "@mydon/shared";
+
+// Часовой пояс закрепляем В КОДЕ, до первого обращения к датам.
+// Полагаться на окружение нельзя: контейнер по умолчанию стартует с TZ=UTC,
+// dotenv уже выставленную переменную не перезаписывает — и весь брифинг 07:30
+// вместе с ночными выборками молча уезжал бы на 5 часов.
+process.env.TZ = TZ;
 
 // .env лежит в корне монорепо. Секретов в коде нет — только чтение окружения.
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
@@ -17,5 +24,8 @@ export const appConfig = {
     return required("DATABASE_URL");
   },
   port: process.env.PORT ? Number(process.env.PORT) : 3001,
-  tz: process.env.TZ ?? "Asia/Tashkent",
+  /** Фактический пояс процесса — сообщаем то, что есть, а не то, что хотелось бы. */
+  get tz(): string {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  },
 };

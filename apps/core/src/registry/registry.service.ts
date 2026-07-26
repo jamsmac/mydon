@@ -1,13 +1,23 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { approval, entity, moneyFlow, org } from "@mydon/db";
-import type { Domain } from "@mydon/shared";
+import { TZ, type Domain } from "@mydon/shared";
 import { and, asc, count, desc, eq, lt, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 export interface ObligationsSummary {
   domain: Domain;
-  totals: { direction: "in" | "out"; status: string; count: number; amount: string }[];
+  /** Суммы разбиты ПО ВАЛЮТАМ: складывать UZS с USD в одно число бессмысленно. */
+  totals: {
+    direction: "in" | "out";
+    status: string;
+    currency: string;
+    count: number;
+    amount: string;
+  }[];
   overdue: (typeof moneyFlow.$inferSelect)[];
+  /** Сколько просроченных позиций всего и не обрезан ли список. */
+  overdueTotal: number;
+  overdueTruncated: boolean;
 }
 
 export interface Briefing {
@@ -21,6 +31,8 @@ export interface Briefing {
   pendingApprovals: number;
   /** Договоры с приближающимся сроком. */
   contractsDueSoon: number;
+  /** Договоры с датой, которую не удалось разобрать — чтобы они не пропадали молча. */
+  contractsBadDate: number;
 }
 
 /**
@@ -50,23 +62,40 @@ export class RegistryService {
       .select({
         direction: moneyFlow.direction,
         status: moneyFlow.status,
+        currency: moneyFlow.currency,
         count: count(),
         amount: sql<string>`coalesce(sum(${moneyFlow.amount}), 0)::text`,
       })
       .from(moneyFlow)
       .where(eq(moneyFlow.orgId, id))
-      .groupBy(moneyFlow.direction, moneyFlow.status);
+      .groupBy(moneyFlow.direction, moneyFlow.status, moneyFlow.currency);
 
+    const overdueWhere = and(
+      eq(moneyFlow.orgId, id),
+      ne(moneyFlow.status, "actual"),
+      lt(moneyFlow.date, new Date()),
+    );
+
+    const OVERDUE_LIMIT = 200;
     const overdue = await this.db
       .select()
       .from(moneyFlow)
-      .where(
-        and(eq(moneyFlow.orgId, id), ne(moneyFlow.status, "actual"), lt(moneyFlow.date, new Date())),
-      )
+      .where(overdueWhere)
       .orderBy(asc(moneyFlow.date))
-      .limit(200);
+      .limit(OVERDUE_LIMIT);
 
-    return { domain, totals, overdue };
+    // Считаем общее число отдельно: без него владелец видел бы 200 позиций
+    // и считал список полным, не зная, что часть просрочек скрыта.
+    const [total] = await this.db.select({ n: count() }).from(moneyFlow).where(overdueWhere);
+    const overdueTotal = total?.n ?? 0;
+
+    return {
+      domain,
+      totals,
+      overdue,
+      overdueTotal,
+      overdueTruncated: overdueTotal > overdue.length,
+    };
   }
 
   /** Сущности направления по типу — например автоматы VendHub. */
@@ -100,30 +129,60 @@ export class RegistryService {
       .from(approval)
       .where(eq(approval.decision, "pending"));
 
-    // Дату передаём строкой ISO с явным приведением: драйвер не принимает объект Date
-    // внутри сырого SQL. CASE защищает от битой даты в attrs — иначе одна кривая
-    // строка уронила бы весь брифинг в 07:30.
+    // Даты сравниваем КАК СТРОКИ, без приведения к timestamptz.
+    //
+    // Приведение падало на датах, которые проходят проверку формы, но не существуют
+    // ('2026-02-30' — типичная опечатка или результат выгрузки из Excel). Одна такая
+    // строка роняла весь брифинг: владелец не получал НИ ОДНОЙ из четырёх тревог.
+    // Строки в формате ISO-8601 сравниваются лексикографически так же, как даты,
+    // и такое сравнение не может упасть в принципе.
+    const today = this.dayKey(now);
+    const horizon = this.dayKey(soon);
+
     const [contractsDueSoon] = await this.db
       .select({ n: count() })
       .from(entity)
       .where(
         and(
           eq(entity.type, "contract"),
-          sql`case
-                when (${entity.attrs} ->> 'endDate') ~ '^\\d{4}-\\d{2}-\\d{2}'
-                then (${entity.attrs} ->> 'endDate')::timestamptz
-                else null
-              end between ${now.toISOString()}::timestamptz and ${soon.toISOString()}::timestamptz`,
+          // Границы включают сегодняшний день: договор, истекающий сегодня, —
+          // последняя возможность его продлить, о нём обязательно нужно сказать.
+          sql`(${entity.attrs} ->> 'endDate') >= ${today}`,
+          sql`(${entity.attrs} ->> 'endDate') < ${horizon}`,
+        ),
+      );
+
+    // Договоры с датой, которую мы не понимаем (например «31.12.2026»), не должны
+    // молча выпадать из тревог — считаем их отдельно и показываем владельцу.
+    const [contractsBadDate] = await this.db
+      .select({ n: count() })
+      .from(entity)
+      .where(
+        and(
+          eq(entity.type, "contract"),
+          sql`(${entity.attrs} ->> 'endDate') is not null`,
+          sql`(${entity.attrs} ->> 'endDate') !~ '^\\d{4}-\\d{2}-\\d{2}'`,
         ),
       );
 
     return {
       generatedAt: now.toISOString(),
-      tz: process.env.TZ ?? "Asia/Tashkent",
+      tz: TZ,
       overdueMoney: overdueMoney?.n ?? 0,
       idleMachines: idleMachines?.n ?? 0,
       pendingApprovals: pendingApprovals?.n ?? 0,
       contractsDueSoon: contractsDueSoon?.n ?? 0,
+      contractsBadDate: contractsBadDate?.n ?? 0,
     };
+  }
+
+  /** Дата в виде YYYY-MM-DD по ташкентскому поясу — ключ для сравнения строк. */
+  private dayKey(date: Date): string {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(date);
   }
 }

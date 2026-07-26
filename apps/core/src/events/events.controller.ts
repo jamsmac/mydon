@@ -22,6 +22,21 @@ export class CreateEventDto {
   occurredAt?: string;
 }
 
+/**
+ * Фильтр событий. Раньше ?since=abc уходил в new Date() и падал
+ * с 500 (Invalid time value) уже на уровне драйвера.
+ */
+export class ListEventsDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  type?: string;
+
+  @IsOptional()
+  @IsISO8601()
+  since?: string;
+}
+
 @Controller("events")
 export class EventsController {
   constructor(private readonly events: EventsService) {}
@@ -37,10 +52,10 @@ export class EventsController {
   }
 
   @Get()
-  list(@Query("type") type?: string, @Query("since") since?: string) {
+  list(@Query() filter: ListEventsDto) {
     return this.events.list({
-      ...(type ? { type } : {}),
-      ...(since ? { since: new Date(since) } : {}),
+      ...(filter.type ? { type: filter.type } : {}),
+      ...(filter.since ? { since: new Date(filter.since) } : {}),
     });
   }
 }

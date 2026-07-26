@@ -34,6 +34,9 @@ export class AuditService {
   }
 
   async list(limit = 50): Promise<(typeof auditLog.$inferSelect)[]> {
-    return this.db.select().from(auditLog).orderBy(desc(auditLog.ts)).limit(limit);
+    // Границы зажимаем и здесь: контроллер не должен быть единственной защитой
+    // от выгрузки всего журнала одним запросом.
+    const take = Math.min(Math.max(Number.isFinite(limit) ? Math.trunc(limit) : 50, 1), 500);
+    return this.db.select().from(auditLog).orderBy(desc(auditLog.ts)).limit(take);
   }
 }

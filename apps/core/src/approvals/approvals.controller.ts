@@ -33,6 +33,16 @@ export class DecideDto {
   actor?: string;
 }
 
+/**
+ * Фильтр списка. Значение раньше уходило прямо в PG-enum:
+ * ?decision=что-угодно давало 500 вместо понятного 400.
+ */
+export class ListApprovalsDto {
+  @IsOptional()
+  @IsIn(["pending", "approved", "rejected", "clarify"])
+  decision?: "pending" | "approved" | "rejected" | "clarify";
+}
+
 @Controller("approvals")
 export class ApprovalsController {
   constructor(private readonly approvals: ApprovalsService) {}
@@ -43,8 +53,8 @@ export class ApprovalsController {
   }
 
   @Get()
-  list(@Query("decision") decision?: "pending" | "approved" | "rejected" | "clarify") {
-    return decision ? this.approvals.list({ decision }) : this.approvals.list();
+  list(@Query() filter: ListApprovalsDto) {
+    return filter.decision ? this.approvals.list({ decision: filter.decision }) : this.approvals.list();
   }
 
   @Get("pending")

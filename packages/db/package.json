@@ -19,7 +19,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "db:seed": "node dist/seed.js",
-    "clean": "rm -rf dist .turbo *.tsbuildinfo"
+    "clean": "rm -rf dist .turbo *.tsbuildinfo",
+    "test": "node --test dist"
   },
   "dependencies": {
     "@mydon/shared": "workspace:*",

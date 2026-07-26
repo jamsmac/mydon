@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { approval } from "@mydon/db";
+import { approval, auditLog, event } from "@mydon/db";
 import { and, desc, eq, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
@@ -29,30 +29,34 @@ export class ApprovalsService {
     private readonly events: EventsService,
   ) {}
 
+  /** Запрос агента. Всё одной транзакцией: запрос без следа в журнале недопустим. */
   async request(input: RequestApprovalInput): Promise<ApprovalRow> {
-    const [created] = await this.db
-      .insert(approval)
-      .values({
-        agent: input.agent,
-        action: input.action,
-        tier: input.tier,
-        payload: input.payload ?? {},
-      })
-      .returning();
+    return this.db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(approval)
+        .values({
+          agent: input.agent,
+          action: input.action,
+          tier: input.tier,
+          payload: input.payload ?? {},
+        })
+        .returning();
 
-    await this.events.record({
-      source: `agent:${input.agent}`,
-      type: "approval.requested",
-      payload: { approvalId: created.id, action: input.action, tier: input.tier },
+      await tx.insert(event).values({
+        source: `agent:${input.agent}`,
+        type: "approval.requested",
+        payload: { approvalId: created.id, action: input.action, tier: input.tier },
+      });
+      await tx.insert(auditLog).values({
+        actorKind: "agent",
+        actorRef: input.agent,
+        action: "approval.request",
+        target: created.id,
+        after: created,
+      });
+
+      return created;
     });
-    await this.audit.record({
-      actorKind: "agent",
-      actorRef: input.agent,
-      action: "approval.request",
-      target: created.id,
-      after: created,
-    });
-    return created;
   }
 
   async pending(): Promise<ApprovalRow[]> {
@@ -74,35 +78,51 @@ export class ApprovalsService {
       .limit(200);
   }
 
-  /** Решение принимает только владелец — фиксируется в журнале (ТЗ FR-3, FR-9). */
+  /**
+   * Решение принимает только владелец — фиксируется в журнале (ТЗ FR-3, FR-9).
+   *
+   * Запись атомарна намеренно. Раньше проверка «уже закрыт» и UPDATE были
+   * отдельными запросами: два одновременных нажатия в боте («Отклонить», затем
+   * сразу «Одобрить») проходили ОБА, инициатор получал один ответ, а в базе
+   * оставался другой. Теперь условие decision='pending' стоит в самом UPDATE —
+   * побеждает ровно один вызов.
+   *
+   * Изменение, событие и запись в журнал идут одной транзакцией: иначе решение
+   * могло сохраниться, а журнал остаться пустым — и кто согласовал платёж,
+   * установить было бы невозможно.
+   */
   async decide(id: string, decision: Decision, actorRef: string): Promise<ApprovalRow> {
-    const [before] = await this.db.select().from(approval).where(eq(approval.id, id));
-    if (!before) throw new NotFoundException(`Запрос на согласование ${id} не найден`);
-    if (before.decision !== "pending") {
-      throw new BadRequestException(
-        `Запрос ${id} уже закрыт решением "${before.decision}" — повторное решение не принимается.`,
-      );
-    }
+    return this.db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(approval)
+        .set({ decision, decidedAt: new Date() })
+        .where(and(eq(approval.id, id), eq(approval.decision, "pending")))
+        .returning();
 
-    const [updated] = await this.db
-      .update(approval)
-      .set({ decision, decidedAt: new Date() })
-      .where(eq(approval.id, id))
-      .returning();
+      if (!updated) {
+        // Ничего не обновилось — разбираемся почему: нет запроса или он уже закрыт.
+        const [row] = await tx.select().from(approval).where(eq(approval.id, id));
+        if (!row) throw new NotFoundException(`Запрос на согласование ${id} не найден`);
+        throw new BadRequestException(
+          `Запрос ${id} уже закрыт решением "${row.decision}" — повторное решение не принимается.`,
+        );
+      }
 
-    await this.events.record({
-      source: "owner",
-      type: "approval.decided",
-      payload: { approvalId: id, decision },
+      await tx.insert(event).values({
+        source: "owner",
+        type: "approval.decided",
+        payload: { approvalId: id, decision },
+      });
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: `approval.${decision}`,
+        target: id,
+        before: { ...updated, decision: "pending", decidedAt: null },
+        after: updated,
+      });
+
+      return updated;
     });
-    await this.audit.record({
-      actorKind: "human",
-      actorRef,
-      action: `approval.${decision}`,
-      target: id,
-      before,
-      after: updated,
-    });
-    return updated;
   }
 }
