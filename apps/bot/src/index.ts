@@ -6,7 +6,7 @@ import { CoreClient } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { Notifier } from "./notifier";
 import { parseAllowlist, RateLimiter, isAllowed } from "./security/access";
-import { TelegramApi } from "./telegram";
+import { InvalidTokenError, TelegramApi } from "./telegram";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
@@ -120,6 +120,12 @@ async function main(): Promise<void> {
         }
       }
     } catch (err) {
+      if (err instanceof InvalidTokenError) {
+        // Неверный токен не «пройдёт сам»: вместо бесконечного потока одинаковых
+        // ошибок говорим один раз понятно и ждём, пока значение исправят.
+        console.error(`\nБОТ НЕ ЗАПУСТИЛСЯ: ${err.message}\n`);
+        await idle();
+      }
       console.error("Ошибка опроса Telegram:", err);
       await new Promise((r) => setTimeout(r, 5_000));
     }

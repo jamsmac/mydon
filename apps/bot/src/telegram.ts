@@ -24,6 +24,11 @@ export interface InlineKeyboard {
   inline_keyboard: { text: string; callback_data: string }[][];
 }
 
+/** Токен неверен или отозван. Повторять запросы бессмысленно. */
+export class InvalidTokenError extends Error {
+  readonly fatal = true;
+}
+
 export class TelegramApi {
   private offset = 0;
 
@@ -42,6 +47,16 @@ export class TelegramApi {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+
+    // 401/404 от Bot API означают одно: токен неверный или отозван.
+    // Это не временный сбой — повторять бессмысленно, нужно сказать об этом прямо.
+    if (res.status === 401 || res.status === 404) {
+      throw new InvalidTokenError(
+        `Telegram отклонил токен (HTTP ${res.status}). Проверьте TELEGRAM_BOT_TOKEN в .env: ` +
+          `значение должно выглядеть как 1234567890:AA... — возможно, туда попал текст-заглушка.`,
+      );
+    }
+
     const json = (await res.json()) as { ok: boolean; result?: T; description?: string };
     if (!json.ok) throw new Error(`Telegram ${method}: ${json.description ?? "неизвестная ошибка"}`);
     return json.result as T;
