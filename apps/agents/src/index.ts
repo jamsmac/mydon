@@ -12,6 +12,19 @@ loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 const AGENTS_DIR = path.resolve(__dirname, "../agents");
 
 /**
+ * Держит процесс живым, когда работать не с чем. Завершается по SIGTERM от Docker.
+ *
+ * Одного «зависшего» промиса НЕДОСТАТОЧНО: незавершённый промис не является
+ * дескриптором цикла событий, и Node всё равно выходит. Нужен настоящий таймер
+ * (намеренно без unref — именно он и удерживает процесс).
+ */
+function idle(): Promise<never> {
+  return new Promise<never>(() => {
+    setInterval(() => {}, 1 << 30);
+  });
+}
+
+/**
  * MYDON Agents — исполнительный слой.
  * Агенты не действуют напрямую: пишут события и создают запросы на согласование в Core.
  * Расписание — в часовом поясе Asia/Tashkent (правило ТЗ для всех cron).
@@ -33,8 +46,9 @@ async function main(): Promise<void> {
   );
 
   if (process.env.AGENTS_SCHEDULES_PAUSED === "1") {
-    console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания не запускаются.");
-    return;
+    console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания не запускаются. Ожидаю снятия паузы.");
+    // Не выходим: иначе Docker с restart-политикой поднимал бы контейнер по кругу.
+    await idle();
   }
 
   let jobs = 0;
@@ -62,7 +76,10 @@ async function main(): Promise<void> {
   }
 
   console.log(`Запланировано заданий: ${jobs} (часовой пояс ${TZ}).`);
-  if (jobs === 0) console.log("Активных расписаний нет — процесс завершает работу.");
+  if (jobs === 0) {
+    console.log("Активных расписаний нет — жду появления.");
+    await idle();
+  }
 }
 
 main().catch((err: unknown) => {

@@ -11,6 +11,19 @@ import { TelegramApi } from "./telegram";
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
 /**
+ * Держит процесс живым, когда работать не с чем. Завершается по SIGTERM от Docker.
+ *
+ * Одного «зависшего» промиса НЕДОСТАТОЧНО: незавершённый промис не является
+ * дескриптором цикла событий, и Node всё равно выходит. Нужен настоящий таймер
+ * (намеренно без unref — именно он и удерживает процесс).
+ */
+function idle(): Promise<never> {
+  return new Promise<never>(() => {
+    setInterval(() => {}, 1 << 30);
+  });
+}
+
+/**
  * MYDON Bot — основной канал (ТЗ FR-1a).
  * Уведомления, согласования, вопросы. Long polling: наружу портов не открываем.
  */
@@ -27,8 +40,10 @@ async function main(): Promise<void> {
 
   if (!token) {
     console.warn("TELEGRAM_BOT_TOKEN не задан — бот запущен в режиме скелета, опрос не начат.");
-    console.log(`MYDON Bot готов (TZ=${TZ}, Core=${coreUrl}).`);
-    return;
+    console.log(`MYDON Bot готов (TZ=${TZ}, Core=${coreUrl}). Ожидаю токен.`);
+    // Не выходим: служба под restart-политикой Docker уходила бы в бесконечный
+    // цикл перезапусков. Ждём — токен появится, контейнер перезапустят штатно.
+    await idle();
   }
   if (allowlist.size === 0) {
     console.warn(
