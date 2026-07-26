@@ -1,0 +1,57 @@
+name: market-analyst
+business: globerent
+status: paused
+description: Разведка рынка — вилочные погрузчики, складская техника, AGV. Мир + Узбекистан/ЦА.
+
+# Паспорт/роль (Карточка агента)
+version: 1.4.0
+mission: Находить релевантные сигналы рынка (тендеры, цены, FX, конкуренты) и докладывать, не действуя наружу.
+non_goals:
+  - НЕ готовит КП (это globerent-sales)
+  - НЕ подаёт заявки и не пишет контрагентам
+  - НЕ принимает решения об участии в тендере — только сигнал
+changelog:
+  - 1.4.0 — non_goals дополнен (граница по решению об участии), правка через Карточку
+  - 1.3.0 — добавлены mission/non_goals (структурно)
+
+# Графики «что когда» (TZ Asia/Tashkent). Меняй частоту прямо здесь — код не трогать.
+schedule:
+  - cron: "0 8 * * 1-5" # ежедневно Пн–Пт утром
+    skill: scan-tenders
+  - cron: "30 9 * * *" # ежедневно
+    skill: scan-fx
+  - cron: "0 9 * * 1" # еженедельно, понедельник
+    skill: scan-prices
+  - cron: "0 9 1 * *" # ежемесячно, 1-е число
+    skill: scan-uz-market
+  - cron: "0 9 1 1,4,7,10 *" # раз в квартал
+    skill: scan-global
+  - cron: "0 9 1 1 *" # раз в год, 1 января
+    skill: scan-strategy
+
+autonomy_default: T1 # разведка: читает и докладывает, наружу не действует
+
+kb_pages:
+  - shared/kb/globerent/heli-models.md
+  - shared/kb/globerent/pricelist.md
+  - shared/kb/globerent/clients.md
+  - shared/kb/globerent/competitors.md # базлайн конкурентов (diff новизны/цен)
+  - shared/kb/globerent/market-research-metaprompt.md # 16-блочный фреймворк (для deep-research)
+
+skills:
+  - scan-tenders
+  - scan-fx
+  - scan-prices
+  - scan-uz-market
+  - scan-global
+  - scan-strategy
+  - deep-research # полное исследование по фреймворку (по запросу, не cron)
+
+# Все сканы требуют веб → claude -p (у него есть WebSearch/WebFetch). Ollama без веба.
+model_routing:
+  simple: "claude-p"
+  complex: "claude-p"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

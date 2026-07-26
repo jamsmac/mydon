@@ -8,11 +8,14 @@
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
-    "clean": "rm -rf dist .turbo *.tsbuildinfo"
+    "clean": "rm -rf dist .turbo *.tsbuildinfo",
+    "test": "node --test dist"
   },
   "dependencies": {
-    "@mydon/db": "workspace:*",
-    "@mydon/shared": "workspace:*"
+    "@mydon/shared": "workspace:*",
+    "croner": "^9.0.0",
+    "dotenv": "^16.4.7",
+    "yaml": "^2.6.1"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",

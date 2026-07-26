@@ -1,0 +1,31 @@
+name: globerent-service
+business: globerent
+status: paused
+description: Послепродажный сервис HELI — триаж сервисных обращений (запчасти/ТО/гарантия/ремонт) + черновики ответов клиентам.
+
+# Графики «что когда» (TZ Asia/Tashkent). triage-service — утренний разбор открытых обращений.
+schedule:
+  - cron: "30 9 * * 1-5"       # будни, утро — триаж открытых сервис-обращений
+    skill: triage-service
+
+autonomy_default: T1
+
+kb_pages:
+  - shared/kb/globerent/heli-models.md
+  - shared/kb/globerent/service-criteria.md
+  - shared/kb/globerent/faq.md
+  - shared/kb/globerent/clients.md
+
+skills:
+  - triage-service
+  - draft-service-reply
+  - service-dispatch        # диспетчер новой сервис-заявки из intake (T2, событие, не cron)
+
+# triage — структурный разбор внутренних данных (можно ollama); draft клиенту — claude-p за качество.
+model_routing:
+  simple: "ollama"
+  complex: "claude-p"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

@@ -1,0 +1,25 @@
+name: vendhub-ceo
+business: vendhub
+status: paused
+description: Директор предприятия VendHub — единое окно, сводка, эскалация владельцу.
+
+schedule:
+  - cron: "0 18 * * *"      # ежедневная сводка по бизнесу (перед вечерним стендапом холдинга)
+    skill: business-brief
+
+autonomy_default: T1        # сводит и докладывает; деньги/договоры — эскалация владельцу
+
+kb_pages:
+  - shared/kb/vendhub/sop.md
+
+skills:
+  - business-brief
+
+# Сводка строится из данных БД (локально) → ollama; веб не нужен.
+model_routing:
+  simple: "ollama/qwen2.5:14b"
+  complex: "claude-p"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

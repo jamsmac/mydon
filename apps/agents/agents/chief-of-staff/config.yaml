@@ -1,0 +1,28 @@
+name: chief-of-staff
+business: shared
+status: paused
+description: Оркестратор и Telegram-шлюз. Маршрутизирует задачи, собирает дайджесты.
+
+schedule:
+  - cron: "0 9 * * *"
+    skill: morning-digest
+  - cron: "0 19 * * *"
+    skill: evening-standup
+
+autonomy_default: T1
+
+kb_pages:
+  - shared/kb/index.md
+
+skills:
+  - route-task
+  - morning-digest
+  - evening-standup
+
+model_routing:
+  simple: "ollama/qwen2.5:14b"
+  complex: "claude-p"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

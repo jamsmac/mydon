@@ -1,0 +1,26 @@
+name: call-analyst
+business: shared
+status: active
+description: AI-разбор звонков — тип, портрет клиента, баллы по скрипту, нарушения, next step.
+
+schedule: []          # по событию (загружен звонок), не по cron
+
+autonomy_default: T1  # разбирает и докладывает, наружу не действует
+
+kb_pages:
+  - shared/kb/globerent/call-criteria.md
+  - shared/kb/globerent/heli-models.md
+
+skills:
+  - analyze-call
+
+# ПРИВАТНОСТЬ: транскрипт содержит PII → по умолчанию анализ ЛОКАЛЬНО (ollama, не покидает Mac),
+# в пару к локальному Whisper. claude-p даёт выше качество структурного скоринга, НО отправляет
+# транскрипт в облако — включать осознанно (заменить на "claude-p" ниже).
+model_routing:
+  simple: "ollama/qwen2.5:14b"
+  complex: "ollama/qwen2.5:14b"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

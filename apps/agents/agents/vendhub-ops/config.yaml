@@ -1,0 +1,37 @@
+name: vendhub-ops
+business: vendhub
+status: paused
+description: Мониторинг 31 автомата, деплеция, заявки, маршрут.
+
+schedule:
+  - cron: "0 8 * * *"
+    skill: monitor-stock
+  # быстрый прогон */30 убран до появления телеметрии (на пустом KB только шумит).
+  # Вернуть через Пункт управления, когда будут реальные данные остатков.
+
+autonomy_default: T1
+
+kb_pages:
+  - shared/kb/vendhub/machines-map.md
+  - shared/kb/vendhub/thresholds.md
+  - shared/kb/vendhub/sop.md
+
+skills:
+  - monitor-stock
+
+model_routing:
+  simple: "ollama/qwen2.5:14b"
+  complex: "claude-p"
+version: 1.0.0
+mission: Следить за остатками 31 автомата, считать деплецию и дни-до-нуля, формировать заявки на пополнение и маршрут — докладывать, физически наружу не действовать.
+non_goals:
+  - НЕ закупает товар (закупки — это люди/Бехруз)
+  - НЕ выезжает и не пополняет автоматы физически (это Рустам на Damas)
+  - НЕ принимает стратегические решения по сети (это vendhub-ceo)
+  - НЕ трогает GLOBERENT — только VendHub
+changelog:
+  - 1.0.0 — заполнены mission/non_goals через Карточку агента
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

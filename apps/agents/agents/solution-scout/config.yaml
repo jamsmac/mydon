@@ -1,0 +1,24 @@
+name: solution-scout
+business: shared
+status: active
+description: Поиск готовых AI-решений (GitHub/YouTube/web/n8n) под задачу. Ранкед-список с оценками, ценами, CIS-флагами.
+
+schedule: []                 # по запросу (CLI / Пункт управления); плановый скан — позже
+
+autonomy_default: T1         # разведка, read-only, доклад; внедрение/деньги решает человек
+
+kb_pages:
+  - shared/kb/index.md
+  # полный мета-промпт — в shared/kb/globerent/solution-scout-metaprompt.md (референс, не грузим каждый прогон)
+
+skills:
+  - find-solution
+
+# Нужен веб (WebSearch/WebFetch) + рассуждение → claude -p.
+model_routing:
+  simple: "claude-p"
+  complex: "claude-p"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

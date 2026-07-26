@@ -1,0 +1,20 @@
+name: coach-agent
+business: shared
+status: paused
+version: 1.0.0
+description: Оценивает результаты агентов и предлагает улучшения их SKILL.md (не исполняя наружу).
+mission: Оценивать результаты агентов по рубрике и предлагать улучшения их SKILL.md — не исполняя ничего наружу.
+non_goals:
+  - НЕ применяет правки сам (только через одобрение человека)
+  - НЕ трогает ROLE.md, config, код, KB-факты
+break_glass: []
+autonomy_default: T2
+budget:
+  per_day_usd: 2.0
+  on_exceeded: pause
+model_routing:
+  simple: reasoning-strong
+  complex: reasoning-strong
+skills: []
+changelog:
+  - "1.0.0 — coach-agent (петля самоулучшения, scope B)"

@@ -1,0 +1,28 @@
+name: mydon-finance
+business: globerent
+status: paused
+description: Финансовый дайджест и контроль дебиторки (приоритет — риск концентрации OLMA в GLOBERENT) + черновики напоминаний о платежах.
+
+# Графики (TZ Asia/Tashkent). Понедельник 09:00 — недельный обзор дебиторки/кэша.
+# На проде расписания на паузе (SCHEDULES_PAUSED) — оживёт, когда владелец снимет паузу.
+schedule:
+  - cron: "0 9 * * 1"
+    skill: watch-receivables
+
+autonomy_default: T1
+
+kb_pages:
+  - shared/kb/globerent/clients.md
+
+skills:
+  - watch-receivables
+  - draft-reminder
+
+# Анализ дебиторки — лёгкая модель ок; в облаке доедет до OpenRouter по fallback.
+model_routing:
+  simple: cheap-local
+  complex: reasoning-strong
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

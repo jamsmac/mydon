@@ -1,0 +1,25 @@
+name: globerent-ceo
+business: globerent
+status: paused
+description: Директор предприятия GLOBERENT (дистрибуция HELI) — единое окно, сводка, риск дебиторки, эскалация.
+
+schedule:
+  - cron: "0 18 * * *"      # ежедневная сводка по бизнесу
+    skill: business-brief
+
+autonomy_default: T1        # сводит и докладывает; КП/договоры/деньги — эскалация владельцу
+
+kb_pages:
+  - shared/kb/globerent/clients.md
+  - shared/kb/globerent/faq.md
+
+skills:
+  - business-brief
+
+model_routing:
+  simple: "ollama/qwen2.5:14b"
+  complex: "claude-p"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

@@ -1,0 +1,40 @@
+# agents/_template/config.yaml — шаблон конфигурации агента
+name: template
+business: shared       # vendhub | globerent | shared
+status: draft          # active | paused | draft | deprecated
+description: Краткое описание роли.
+
+# Паспорт/роль (Карточка агента)
+version: 0.1.0
+mission: Одна задача агента — узко (правится в Карточке).
+non_goals:
+  - Чего агент НЕ делает (границы)
+changelog:
+  - "0.1.0 — скелет"
+
+# Расписание (cron, Asia/Tashkent). Пусто = только по событию/маршрутизации.
+schedule: []
+# Пример:
+# schedule:
+#   - cron: "0 8 * * *"
+#     skill: monitor-stock
+
+autonomy_default: T0   # минимальный тир; см. engine/autonomy.yaml
+break_glass: []          # аварийные op (actionType) — всегда HITL+аудит, см. §4.5
+
+# Страницы KB, которые агент подгружает в контекст (не всё сразу — только нужное)
+kb_pages: []
+
+# Скиллы агента (файлы в skills/)
+skills: []
+
+secrets: []              # ссылки на секреты (имена env/secrets.json), не значения — см. §4.4
+
+# Маршрутизация модели (NeoMind): простое локально, сложное в облако
+model_routing:
+  simple: "ollama/qwen2.5:14b"
+  complex: "claude-p"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause

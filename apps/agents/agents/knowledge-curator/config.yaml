@@ -1,0 +1,24 @@
+name: knowledge-curator
+business: shared
+status: paused
+description: Поддерживает базу знаний актуальной. Аудит и предложение правок.
+
+schedule:
+  - cron: "0 0 */7 * *"
+    skill: kb-review
+
+autonomy_default: T2
+
+kb_pages:
+  - shared/kb/index.md
+
+skills:
+  - kb-review
+
+model_routing:
+  simple: "ollama/qwen2.5:14b"
+  complex: "claude-p"
+# CLOUD-2: явный дневной потолок трат (safe-default в executor — этот делает его явным/тюнимым)
+budget:
+  per_day_usd: 3.0
+  on_exceeded: pause
