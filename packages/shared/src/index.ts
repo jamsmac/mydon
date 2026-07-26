@@ -1,0 +1,45 @@
+/**
+ * @mydon/shared — общие типы, утилиты и константы MYDON.
+ * Русский в UI, английский в коде.
+ */
+
+/** Часовой пояс проекта. Использовать везде, включая cron. */
+export const TZ = "Asia/Tashkent" as const;
+
+/** Валюта по умолчанию. */
+export const DEFAULT_CURRENCY = "UZS" as const;
+
+/** Направления (домены) MYDON. */
+export const DOMAINS = ["globerent", "vendhub", "trent", "personal", "mydon"] as const;
+export type Domain = (typeof DOMAINS)[number];
+
+/** Читаемые названия доменов (для UI). */
+export const DOMAIN_LABELS: Record<Domain, string> = {
+  globerent: "GLOBERENT",
+  vendhub: "VendHub",
+  trent: "TRent",
+  personal: "Личный контур",
+  mydon: "MYDON",
+};
+
+/**
+ * Уровни автономии агентов (T0–T4).
+ * T0 — только предложение, ничего не исполняет; T4 — полная автономия.
+ * Текущий порог владельца: всё вручную (T0).
+ */
+export const AUTONOMY_TIERS = ["T0", "T1", "T2", "T3", "T4"] as const;
+export type AutonomyTier = (typeof AUTONOMY_TIERS)[number];
+
+/** Решение по запросу согласования. */
+export type ApprovalDecision = "approved" | "rejected" | "clarify";
+
+/** Срочность доставки уведомления. */
+export type NotifyUrgency = "immediate" | "briefing" | "weekly";
+
+/** Строка времени в часовом поясе проекта (для отображения). */
+export function formatTashkent(date: Date = new Date()): string {
+  return date.toLocaleString("ru-RU", { timeZone: TZ });
+}
+
+/** Тип-хелпер: сделать перечисленные поля обязательными. */
+export type WithRequired<T, K extends keyof T> = T & Required<Pick<T, K>>;
