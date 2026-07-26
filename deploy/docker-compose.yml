@@ -1,0 +1,77 @@
+# MYDON на MYDON/OS (Hetzner + Tailscale).
+# Портов наружу не открываем: Core слушает только локально, бот работает
+# через long polling. Это требование ТЗ §6.
+#
+# Запуск:  docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+
+services:
+  mydon-db:
+    image: postgres:16-alpine
+    container_name: mydon-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mydon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен}
+      POSTGRES_DB: ${POSTGRES_DB:-mydon}
+      TZ: Asia/Tashkent
+    volumes:
+      - mydon-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mydon} -d ${POSTGRES_DB:-mydon}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Наружу не публикуем: доступ только внутри сети compose.
+
+  mydon-core:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: mydon:latest
+    container_name: mydon-core
+    restart: unless-stopped
+    depends_on:
+      mydon-db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Tashkent
+      PORT: 3001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mydon}:${POSTGRES_PASSWORD}@mydon-db:5432/${POSTGRES_DB:-mydon}
+      INGEST_KEY: ${INGEST_KEY:-}
+    command: ["node", "apps/core/dist/main.js"]
+    # Порт только в сети Tailscale, не в интернет:
+    ports:
+      - "127.0.0.1:3001:3001"
+
+  mydon-bot:
+    image: mydon:latest
+    container_name: mydon-bot
+    restart: unless-stopped
+    depends_on:
+      - mydon-core
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Tashkent
+      CORE_API_URL: http://mydon-core:3001
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
+    command: ["node", "apps/bot/dist/index.js"]
+
+  mydon-agents:
+    image: mydon:latest
+    container_name: mydon-agents
+    restart: unless-stopped
+    depends_on:
+      - mydon-core
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Tashkent
+      CORE_API_URL: http://mydon-core:3001
+      # Порог автономии: T0 — агенты только предлагают (ответ владельца Ф6)
+      AGENT_AUTONOMY_MAX: ${AGENT_AUTONOMY_MAX:-T0}
+      AGENTS_SCHEDULES_PAUSED: ${AGENTS_SCHEDULES_PAUSED:-1}
+    command: ["node", "apps/agents/dist/index.js"]
+
+volumes:
+  mydon-db-data:
