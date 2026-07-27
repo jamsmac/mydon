@@ -94,10 +94,18 @@ export async function handleMessage(
       }
 
       case "search": {
-        const found = await deps.core.searchEntities({
+        let found = await deps.core.searchEntities({
           q: intent.query,
           ...(intent.domain ? { domain: intent.domain } : {}),
         });
+
+        // Слово из запроса может совпасть с названием направления («аренда» → TRent)
+        // и случайно сузить поиск до чужого домена. Если там пусто — ищем везде,
+        // иначе владелец получает «не найдено» на существующую запись.
+        if (found.length === 0 && intent.domain) {
+          found = await deps.core.searchEntities({ q: intent.query });
+        }
+
         if (found.length === 0) return { text: `По запросу «${intent.query}» ничего не найдено.` };
         const lines = found.slice(0, 10).map((e) => `• ${e.name} (${e.type})`);
         if (found.length > 10) lines.push(`…и ещё ${found.length - 10}`);
