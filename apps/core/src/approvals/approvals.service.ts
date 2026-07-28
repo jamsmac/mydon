@@ -1,11 +1,14 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { approval, auditLog, event } from "@mydon/db";
+import { approval, auditLog, entity, event, org } from "@mydon/db";
 import { and, desc, eq, type SQL } from "drizzle-orm";
+import { DOMAINS, type Domain } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import { EventsService } from "../events/events.service";
 
 type ApprovalRow = typeof approval.$inferSelect;
+/** Тип транзакции drizzle: выводится из сигнатуры db.transaction. */
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Tier = "T0" | "T1" | "T2" | "T3" | "T4";
 type Decision = "approved" | "rejected" | "clarify";
 
@@ -122,7 +125,82 @@ export class ApprovalsService {
         after: updated,
       });
 
+      // Одобренный импорт данных исполняется сразу, той же транзакцией:
+      // «одобрить» должно означать «карточки появились», а не «записано в журнал».
+      if (decision === "approved") {
+        await this.executeImport(tx, updated, actorRef);
+      }
+
       return updated;
+    });
+  }
+
+  /**
+   * Исполнение одобренного импорта: payload.import = { domain, type, records }.
+   *
+   * Дубли не плодим: запись с тем же названием и типом внутри направления
+   * пропускается — повторное одобрение того же списка безопасно.
+   * Кривой payload — не ошибка решения: одобрение остаётся, импорт пропускается.
+   */
+  private async executeImport(tx: Tx, row: ApprovalRow, actorRef: string): Promise<void> {
+    const imp = (row.payload as { import?: unknown } | null)?.import as
+      | { domain?: unknown; type?: unknown; records?: unknown }
+      | undefined;
+    if (!imp || typeof imp !== "object") return;
+
+    const domain = typeof imp.domain === "string" ? imp.domain : "";
+    const type = typeof imp.type === "string" ? imp.type.slice(0, 64) : "";
+    const records = Array.isArray(imp.records) ? imp.records.slice(0, 500) : [];
+    if (!DOMAINS.includes(domain as Domain) || type.length === 0 || records.length === 0) return;
+
+    const [orgRow] = await tx.select().from(org).where(eq(org.code, domain as Domain)).limit(1);
+    if (!orgRow) return;
+
+    let created = 0;
+    let skipped = 0;
+    for (const r of records) {
+      const rec = r as { name?: unknown; externalRef?: unknown; attrs?: unknown };
+      const name = typeof rec.name === "string" ? rec.name.trim().slice(0, 512) : "";
+      if (name.length === 0) continue;
+
+      const [existing] = await tx
+        .select({ id: entity.id })
+        .from(entity)
+        .where(and(eq(entity.orgId, orgRow.id), eq(entity.type, type), eq(entity.name, name)))
+        .limit(1);
+      if (existing) {
+        skipped += 1;
+        continue;
+      }
+
+      const [createdRow] = await tx
+        .insert(entity)
+        .values({
+          orgId: orgRow.id,
+          type,
+          name,
+          externalRef: typeof rec.externalRef === "string" ? rec.externalRef.slice(0, 256) : null,
+          attrs:
+            rec.attrs !== null && typeof rec.attrs === "object"
+              ? (rec.attrs as Record<string, unknown>)
+              : {},
+        })
+        .returning();
+      created += 1;
+
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "entity.create",
+        target: createdRow.id,
+        after: createdRow,
+      });
+    }
+
+    await tx.insert(event).values({
+      source: "owner",
+      type: "import.executed",
+      payload: { approvalId: row.id, domain, type, created, skipped },
     });
   }
 }

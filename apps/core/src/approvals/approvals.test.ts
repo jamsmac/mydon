@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { entity, org } from "@mydon/db";
 import { ApprovalsService } from "./approvals.service";
 
 type Row = Record<string, unknown>;
@@ -77,5 +78,85 @@ describe("ApprovalsService.decide", () => {
     const created = await service.request({ agent: "test", action: "действие", tier: "T3" });
     assert.equal(created.id, "new-1");
     assert.equal(inserts.length, 3, "должны быть запрос, событие и запись журнала — все в одной транзакции");
+  });
+});
+
+describe("Одобренный импорт данных → карточки в реестре", () => {
+  // Заглушка с поддержкой .limit() и вставок: считаем, что легло в entity.
+  function importStub(payload: Row, entityLookup: Row[] = []) {
+    const inserted: Row[] = [];
+    const withLimit = (rows: Row[]) =>
+      Object.assign(Promise.resolve(rows), { limit: async () => rows });
+    const tx = {
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () =>
+            withLimit(
+              table === org ? [{ id: "org-1", code: "globerent" }] : entityLookup,
+            ),
+        }),
+      }),
+      update: () => ({
+        set: () => ({
+          where: () => ({
+            returning: async () => [{ id: "a1", decision: "approved", payload }],
+          }),
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: (v: Row) => {
+          if (table === entity) inserted.push(v);
+          return Object.assign(Promise.resolve(undefined), {
+            returning: async () => [{ id: `e${inserted.length}`, ...v }],
+          });
+        },
+      }),
+    };
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
+    return { db, inserted };
+  }
+
+  it("«одобрить» заводит карточки из payload.import — записи без имени пропускаются", async () => {
+    const { db, inserted } = importStub({
+      import: {
+        domain: "globerent",
+        type: "contractor",
+        records: [{ name: "Olma Cafe", externalRef: "ИНН 123" }, { name: "  " }, { name: "Chinor" }],
+      },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 2, "должны появиться две карточки: пустое имя — мимо");
+    assert.equal(inserted[0].name, "Olma Cafe");
+    assert.equal(inserted[0].externalRef, "ИНН 123");
+  });
+
+  it("дубль по имени и типу внутри направления не плодится", async () => {
+    const { db, inserted } = importStub(
+      { import: { domain: "globerent", type: "contractor", records: [{ name: "Olma Cafe" }] } },
+      [{ id: "существующая" }],
+    );
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 0, "существующая карточка не должна дублироваться");
+  });
+
+  it("одобрение без import-полезной нагрузки ничего не заводит (обычные согласования)", async () => {
+    const { db, inserted } = importStub({ facts: { сумма: 1 } });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 0);
+  });
+
+  it("кривое направление в import — импорт пропускается, решение остаётся", async () => {
+    const { db, inserted } = importStub({
+      import: { domain: "марс", type: "contractor", records: [{ name: "X" }] },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    const row = await service.decide("a1", "approved", "owner");
+    assert.equal(row.decision, "approved");
+    assert.equal(inserted.length, 0);
   });
 });
