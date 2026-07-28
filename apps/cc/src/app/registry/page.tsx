@@ -109,7 +109,11 @@ export default async function Registry({
                 </div>
                 <div className="rows">
                   {rows.map((r) => (
-                    <Link href={`/domain/${d}`} className="row rowlink" key={`${d}:${r.type}`}>
+                    <Link
+                      href={`/registry/${d}/${encodeURIComponent(r.type)}`}
+                      className="row rowlink"
+                      key={`${d}:${r.type}`}
+                    >
                       <div className="t">
                         <b>{typeLabel(r.type)}</b>
                         <small>записей: {r.n}</small>
@@ -136,7 +140,7 @@ export default async function Registry({
             </div>
             <div className="rows">
               {g.items.map((e) => (
-                <div className="row" key={e.id}>
+                <Link href={`/card/${e.id}`} className="row rowlink" key={e.id}>
                   <div className="t">
                     <b>{e.name}</b>
                     <small>
@@ -145,7 +149,7 @@ export default async function Registry({
                     </small>
                   </div>
                   <span className="when">{when(e.updatedAt)}</span>
-                </div>
+                </Link>
               ))}
             </div>
           </div>

@@ -223,6 +223,11 @@ export const core = {
     return get<Entity[]>(`/entities?${p.toString()}`);
   },
   entitiesOf: (domain: string) => get<Entity[]>(`/entities?domain=${domain}`),
+  entitiesOfType: (domain: string, type: string) =>
+    get<Entity[]>(`/entities?domain=${domain}&type=${encodeURIComponent(type)}`),
+  entity: (id: string) => get<Entity>(`/entities/${id}`),
+  updateEntity: (id: string, input: Record<string, unknown>) =>
+    send<Entity>(`/entities/${id}`, "PATCH", input),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
 };
