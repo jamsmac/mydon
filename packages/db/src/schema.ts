@@ -27,6 +27,7 @@ export const approvalDecisionEnum = pgEnum("approval_decision", [
   "rejected",
   "clarify",
 ]);
+export const taskPriorityEnum = pgEnum("task_priority", ["low", "normal", "high", "urgent"]);
 export const moneyDirectionEnum = pgEnum("money_direction", ["in", "out"]);
 export const actorKindEnum = pgEnum("actor_kind", ["human", "agent", "system"]);
 
@@ -67,6 +68,10 @@ export const entity = pgTable(
 );
 
 // ── person: сотрудники, партнёры, контакты ──
+// Задачи людям доходят через Telegram (решение владельца): для этого нужны
+// tgUsername (его называет владелец) и tgChatId (появляется, когда сотрудник
+// нажал /start у бота). Разделены намеренно — по имени пользователя писать
+// нельзя, писать можно только по chat_id.
 export const person = pgTable("person", {
   id: id(),
   orgId: uuid("org_id").references(() => org.id),
@@ -74,22 +79,60 @@ export const person = pgTable("person", {
   role: text("role"),
   email: text("email"),
   phone: text("phone"),
+  /** @username в Telegram — как владелец записал в карточке. */
+  tgUsername: text("tg_username"),
+  /** Числовой chat_id: один Telegram — один сотрудник, иначе задачи уйдут не туда. */
+  tgChatId: text("tg_chat_id").unique(),
+  /** Уволенный сотрудник не удаляется: его задачи и история должны остаться. */
+  active: text("active").default("yes").notNull(),
   attrs: jsonb("attrs").default({}).notNull(),
   createdAt: createdAt(),
 });
 
-// ── task: задачи (владелец — человек или агент) ──
-export const task = pgTable("task", {
-  id: id(),
-  title: text("title").notNull(),
-  ownerKind: ownerKindEnum("owner_kind").notNull(),
-  ownerRef: text("owner_ref"), // person.id или имя агента
-  domain: domainEnum("domain"),
-  status: taskStatusEnum("status").default("todo").notNull(),
-  due: timestamp("due", { withTimezone: true }),
-  source: text("source"), // откуда пришла задача
-  createdAt: createdAt(),
-});
+// ── task: задачи (исполнитель — человек или агент) ──
+export const task = pgTable(
+  "task",
+  {
+    id: id(),
+    title: text("title").notNull(),
+    /** Подробности: что именно сделать. Заголовка часто мало. */
+    description: text("description"),
+    ownerKind: ownerKindEnum("owner_kind").notNull(),
+    ownerRef: text("owner_ref"), // person.id или имя агента
+    domain: domainEnum("domain"),
+    status: taskStatusEnum("status").default("todo").notNull(),
+    /** Срочность — чтобы список сортировался по важности, а не по алфавиту. */
+    priority: taskPriorityEnum("priority").default("normal").notNull(),
+    due: timestamp("due", { withTimezone: true }),
+    source: text("source"), // откуда пришла задача
+    /** Кто поставил: владелец, агент, расписание. */
+    createdBy: text("created_by"),
+    /** Отчёт при закрытии: без него «сделано» ничего не значит. */
+    resultNote: text("result_note"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    /** Когда исполнителю уже напомнили — чтобы не слать одно и то же дважды. */
+    remindedAt: timestamp("reminded_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  // Главные запросы: «что у этого исполнителя» и «что горит по срокам».
+  (t) => [index("task_owner_idx").on(t.ownerKind, t.ownerRef), index("task_due_idx").on(t.due)],
+);
+
+// ── task_comment: переписка по задаче (уточнения, отчёты, вопросы) ──
+export const taskComment = pgTable(
+  "task_comment",
+  {
+    id: id(),
+    taskId: uuid("task_id")
+      .references(() => task.id, { onDelete: "cascade" })
+      .notNull(),
+    /** Кто написал: "owner", "person:<id>", "agent:<имя>". */
+    authorRef: text("author_ref").notNull(),
+    body: text("body").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("task_comment_task_idx").on(t.taskId)],
+);
 
 // ── approval: запрос на согласование действия агента ──
 export const approval = pgTable("approval", {
@@ -220,4 +263,5 @@ export const schema = {
   note,
   auditLog,
   agent,
+  taskComment,
 };
