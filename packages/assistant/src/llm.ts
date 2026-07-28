@@ -46,46 +46,50 @@ const ACTIONS = [
   "none",
 ] as const;
 
+/** Схема решения. Общая для обоих путей: API (инструмент) и подписка (json_schema). */
+export const CLASSIFY_SCHEMA: Tool["input_schema"] = {
+  type: "object",
+  properties: {
+    action: {
+      type: "string",
+      enum: [...ACTIONS],
+      description:
+        "briefing — сводка/как дела/что нового; approvals — очередь на решение владельца; " +
+        "overdue — просроченные платежи и долги (без привязки к направлению); " +
+        "machines — простаивающие кофе-автоматы; obligations — обязательства по направлению (заполни domain); " +
+        "search — найти запись по имени (заполни query); recent — память, «что было / что я делал»; " +
+        "answer — короткий фактический ответ ТОЛЬКО по снимку системы; none — не понял или данных нет.",
+    },
+    domain: {
+      type: "string",
+      enum: [...DOMAINS],
+      description: "Направление для obligations/search, если оно ясно из вопроса.",
+    },
+    query: {
+      type: "string",
+      description: "Для action=search — что искать: имя контрагента, автомата или фрагмент.",
+    },
+    answer: {
+      type: "string",
+      description:
+        "Для action=answer — короткий ответ по-русски, опираясь ТОЛЬКО на факты из снимка " +
+        "и на прошлые разговоры/знания, если они приложены. " +
+        "Нет ни фактов, ни выдержек — не пиши сюда, ставь action=none.",
+    },
+  },
+  required: ["action"],
+};
+
 const CLASSIFY_TOOL = {
   name: "classify_question",
   description:
     "Понять вопрос владельца MYDON и выбрать РОВНО ОДНО действие. " +
     "Никогда не придумывай данные. Всегда вызывай этот инструмент, не отвечай прозой.",
-  input_schema: {
-    type: "object",
-    properties: {
-      action: {
-        type: "string",
-        enum: [...ACTIONS],
-        description:
-          "briefing — сводка/как дела/что нового; approvals — очередь на решение владельца; " +
-          "overdue — просроченные платежи и долги (без привязки к направлению); " +
-          "machines — простаивающие кофе-автоматы; obligations — обязательства по направлению (заполни domain); " +
-          "search — найти запись по имени (заполни query); recent — память, «что было / что я делал»; " +
-          "answer — короткий фактический ответ ТОЛЬКО по снимку системы; none — не понял или данных нет.",
-      },
-      domain: {
-        type: "string",
-        enum: [...DOMAINS],
-        description: "Направление для obligations/search, если оно ясно из вопроса.",
-      },
-      query: {
-        type: "string",
-        description: "Для action=search — что искать: имя контрагента, автомата или фрагмент.",
-      },
-      answer: {
-        type: "string",
-        description:
-          "Для action=answer — короткий ответ по-русски, опираясь ТОЛЬКО на факты из снимка " +
-          "и на прошлые разговоры/знания, если они приложены. " +
-          "Нет ни фактов, ни выдержек — не пиши сюда, ставь action=none.",
-      },
-    },
-    required: ["action"],
-  },
+  input_schema: CLASSIFY_SCHEMA,
 } satisfies Tool;
 
-const SYSTEM = [
+/** Системный промпт-диспетчер. Общий для API-пути и пути подписки. */
+export const SYSTEM = [
   "Ты — секретарь-диспетчер владельца MYDON. Владелец пишет по-русски, он не программист.",
   "Твоя задача: понять суть вопроса и выбрать одно действие инструментом classify_question.",
   "",

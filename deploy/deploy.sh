@@ -54,6 +54,10 @@ AGENT_AUTONOMY_MAX=T0
 AGENTS_SCHEDULES_PAUSED=1
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_CHAT_IDS=
+# LLM помощника: подписка Claude (claude setup-token) и/или API-ключ.
+CLAUDE_CODE_OAUTH_TOKEN=
+ANTHROPIC_API_KEY=
+MYDON_ASSISTANT_MODEL=
 EOF
     chmod 600 .env
     echo '  .env создан, секреты сгенерированы на сервере (значения не выводятся)'

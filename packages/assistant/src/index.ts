@@ -13,6 +13,10 @@ export type { LlmConfig } from "./llm";
 export { createContextSearch } from "./context";
 export type { ContextConfig } from "./context";
 
+// LLM от подписки Claude владельца (Agent SDK) — без отдельного API-ключа.
+export { createSubscriptionResolver, withLlmFallback } from "./llm-subscription";
+export type { SubscriptionLlmConfig } from "./llm-subscription";
+
 // ── Данные, которые помощнику нужны от Core. Сурфейс (бот/панель) даёт адаптер. ──
 export interface AssistantBriefing {
   overdueMoney: number;
@@ -188,8 +192,11 @@ export async function answer(
     }
     const snapshot = await buildSnapshot(core, context);
     res = await opts.llm(intent.text, snapshot);
-  } catch {
-    // LLM недоступен (нет ключа, сеть, лимит) — не роняем помощника, даём подсказку.
+  } catch (err) {
+    // LLM недоступен (нет ключа, сеть, лимит) — не роняем помощника, даём
+    // подсказку. Но след в журнале обязателен: иначе «кончился лимит подписки»
+    // неотличим от «вопрос не понят», и владелец не узнает о поломке.
+    console.error("LLM-слой не ответил, отвечаю подсказкой:", err instanceof Error ? err.message : err);
     return { text: HELP };
   }
 

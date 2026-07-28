@@ -1,6 +1,13 @@
 "use server";
 
-import { answer, createContextSearch, createLlmResolver, type LlmResolver } from "@mydon/assistant";
+import {
+  answer,
+  createContextSearch,
+  createLlmResolver,
+  createSubscriptionResolver,
+  withLlmFallback,
+  type LlmResolver,
+} from "@mydon/assistant";
 import { assistantCore } from "../../lib/assistant-core";
 
 export interface AskResult {
@@ -10,14 +17,22 @@ export interface AskResult {
 
 const BASE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
 
-// LLM-слой включается только при наличии ключа. Нет ключа → помощник работает
-// по правилам, непонятые вопросы получают подсказку (без сбоев).
-const llm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
-  ? createLlmResolver({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-      ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),
-    })
+// LLM-слой. Два пути входа, включаются тем, что задано в окружении:
+//   • подписка Claude владельца (CLAUDE_CODE_OAUTH_TOKEN) — без платного ключа;
+//   • API-ключ (ANTHROPIC_API_KEY).
+// Заданы оба — сначала подписка, при её сбое (кончился лимит) отвечает API.
+// Не задано ничего → помощник работает по правилам, непонятое — подсказка.
+const modelOverride = process.env.MYDON_ASSISTANT_MODEL
+  ? { model: process.env.MYDON_ASSISTANT_MODEL }
+  : {};
+const apiLlm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
+  ? createLlmResolver({ apiKey: process.env.ANTHROPIC_API_KEY, ...modelOverride })
   : undefined;
+const subLlm: LlmResolver | undefined = process.env.CLAUDE_CODE_OAUTH_TOKEN
+  ? createSubscriptionResolver(modelOverride)
+  : undefined;
+const llm: LlmResolver | undefined =
+  subLlm && apiLlm ? withLlmFallback(subLlm, apiLlm) : (subLlm ?? apiLlm);
 
 // Память помощника: перед ответом ищем в заметках и прошлых разговорах через Core.
 // Оба источника необязательны — не нашлось, ответ будет прежним.

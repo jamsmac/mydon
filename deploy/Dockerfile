@@ -4,6 +4,8 @@
 # slim (Debian/glibc), НЕ alpine: sqlite-vec и движок модели (onnxruntime)
 # распространяются готовыми двоичными файлами только под glibc — под musl
 # смысловой поиск по истории молча не работал бы.
+# Node не ниже 20.19: слой подписки помощника подгружает ESM-пакет из CJS —
+# на более старых Node такой require падает (см. engines в package.json).
 FROM node:20-slim AS base
 RUN corepack enable
 WORKDIR /app

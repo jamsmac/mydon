@@ -1,6 +1,12 @@
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
-import { createContextSearch, createLlmResolver, type LlmResolver } from "@mydon/assistant";
+import {
+  createContextSearch,
+  createLlmResolver,
+  createSubscriptionResolver,
+  withLlmFallback,
+  type LlmResolver,
+} from "@mydon/assistant";
 import { createDocumentBuilder } from "@mydon/documents";
 import { dueLabel, TZ } from "@mydon/shared";
 import { formatBriefing, msUntilBriefing } from "./briefing";
@@ -35,13 +41,22 @@ async function main(): Promise<void> {
   const allowlist = parseAllowlist(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
 
-  // LLM-слой: включается при наличии ключа. Нет ключа — бот работает по правилам.
-  const llm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
-    ? createLlmResolver({
-        apiKey: process.env.ANTHROPIC_API_KEY,
-        ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),
-      })
+  // LLM-слой. Два пути входа: подписка Claude владельца (CLAUDE_CODE_OAUTH_TOKEN)
+  // и API-ключ (ANTHROPIC_API_KEY). Заданы оба — сначала подписка, при её сбое
+  // (кончился лимит) отвечает API. Не задано ничего — бот работает по правилам.
+  const modelOverride = process.env.MYDON_ASSISTANT_MODEL
+    ? { model: process.env.MYDON_ASSISTANT_MODEL }
+    : {};
+  const apiLlm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
+    ? createLlmResolver({ apiKey: process.env.ANTHROPIC_API_KEY, ...modelOverride })
     : undefined;
+  // Таймаут короче обычного (обычный ответ ~4с): бот разбирает сообщения по
+  // одному, и зависший вопрос заморозил бы кнопки и чаты всех остальных.
+  const subLlm: LlmResolver | undefined = process.env.CLAUDE_CODE_OAUTH_TOKEN
+    ? createSubscriptionResolver({ ...modelOverride, timeoutMs: 20_000 })
+    : undefined;
+  const llm: LlmResolver | undefined =
+    subLlm && apiLlm ? withLlmFallback(subLlm, apiLlm) : (subLlm ?? apiLlm);
 
   // Документы (Excel, Word) через готовые навыки Anthropic. Ключ тот же, что
   // и у помощника: нет ключа — файлов не делаем, но бот работает дальше.

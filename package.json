@@ -5,7 +5,7 @@
   "description": "MYDON — единый контур управления направлениями (GLOBERENT, VendHub, TRent, личное)",
   "packageManager": "pnpm@10.19.0",
   "engines": {
-    "node": ">=20.9"
+    "node": ">=20.19"
   },
   "scripts": {
     "build": "turbo run build",
