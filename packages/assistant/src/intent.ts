@@ -17,6 +17,8 @@ export type Intent =
   | { kind: "obligations"; domain: Domain }
   | { kind: "search"; query: string; domain?: Domain }
   | { kind: "recent" } // память: «что было», «что я решал»
+  /** Готовый файл: Excel с дебиторкой, отчёт в Word и т.п. */
+  | { kind: "report"; format: "xlsx" | "docx"; topic: "receivables" | "tasks"; domain?: Domain }
   | { kind: "help" }
   | { kind: "unknown"; text: string };
 
@@ -61,6 +63,15 @@ export function parseIntent(raw: string): Intent {
   // Память: «что было», «что произошло», «что я решал», «история», «последнее»
   if (/(что было|что произошло|что я решал|истори|последн|недавн|журнал)/.test(text)) {
     return { kind: "recent" };
+  }
+
+  // Просьба о ФАЙЛЕ: «excel по дебиторке», «выгрузи в таблицу», «отчёт в ворде».
+  // Проверяем раньше денежных правил: «excel по долгам» — это файл, а не сводка.
+  if (/(excel|эксель|таблиц|xlsx|выгруз|файл|отчёт в|отчет в|word|ворд|docx)/.test(text)) {
+    const format: "xlsx" | "docx" = /(word|ворд|docx)/.test(text) ? "docx" : "xlsx";
+    const topic: "receivables" | "tasks" = /(задач|поручен)/.test(text) ? "tasks" : "receivables";
+    const domain = detectDomain(text);
+    return { kind: "report", format, topic, ...(domain ? { domain } : {}) };
   }
 
   // "долж" покрывает должен/должна/должны/задолженность; "долг" — долг/долги

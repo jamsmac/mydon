@@ -9,6 +9,8 @@ import {
   taskKeyboard,
 } from "./staff";
 import type { PersonRow, TaskRow } from "./core-client";
+import { parseIntent } from "./intent";
+import { planReport } from "./reports";
 
 const ME: PersonRow = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -164,5 +166,68 @@ describe("Что видит сотрудник", () => {
     });
     assert.match(res.reply.text, /передал владельцу/i);
     assert.match(calls[0] ?? "", /comment:Ключей нет/);
+  });
+});
+
+describe("Отчёты файлами", () => {
+  it("«excel по дебиторке» — это просьба о файле, а не сводка", () => {
+    const i = parseIntent("сделай excel по дебиторке");
+    assert.equal(i.kind, "report");
+    if (i.kind === "report") {
+      assert.equal(i.format, "xlsx");
+      assert.equal(i.topic, "receivables");
+    }
+  });
+
+  it("слово «word» даёт документ, а не таблицу", () => {
+    const i = parseIntent("отчёт в word по задачам");
+    assert.equal(i.kind, "report");
+    if (i.kind === "report") {
+      assert.equal(i.format, "docx");
+      assert.equal(i.topic, "tasks");
+    }
+  });
+
+  it("направление из запроса попадает в отчёт", () => {
+    const i = parseIntent("выгрузи таблицу по вендхаб");
+    assert.equal(i.kind, "report");
+    if (i.kind === "report") assert.equal(i.domain, "vendhub");
+  });
+
+  it("обычный вопрос про долги остаётся вопросом, а не файлом", () => {
+    assert.equal(parseIntent("что просрочено").kind, "overdue");
+  });
+
+  it("в отчёт по дебиторке идут данные Core, а не выдумка модели", async () => {
+    const core = {
+      obligations: async () => ({
+        domain: "globerent",
+        totals: [{ status: "plan", count: 3 }],
+        overdue: [{ id: "1", amount: "5000000", currency: "UZS", date: "2026-03-01" }],
+        overdueTotal: 7,
+        overdueTruncated: true,
+      }),
+    } as never;
+    const plan = await planReport({ format: "xlsx", topic: "receivables" }, core);
+    assert.equal(plan.kind, "xlsx");
+    assert.match(plan.filename, /Дебиторка/);
+    // Про урезанный список модель обязана предупредить в документе.
+    assert.match(plan.instruction, /список неполный/i);
+    const data = plan.data as Record<string, unknown>;
+    assert.equal(data.всего_просрочено_позиций, 7);
+  });
+
+  it("нет просрочек — файл не строим, объясняем словами", async () => {
+    const core = {
+      obligations: async () => ({
+        domain: "globerent",
+        totals: [],
+        overdue: [],
+        overdueTotal: 0,
+        overdueTruncated: false,
+      }),
+    } as never;
+    const plan = await planReport({ format: "xlsx", topic: "receivables" }, core);
+    assert.match(plan.emptyReason ?? "", /просрочек нет/i);
   });
 });

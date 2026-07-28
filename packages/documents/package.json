@@ -1,22 +1,26 @@
 {
-  "name": "@mydon/bot",
+  "name": "@mydon/documents",
   "version": "0.0.0",
   "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
-    "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
-    "clean": "rm -rf dist .turbo *.tsbuildinfo",
-    "test": "node --test dist"
+    "test": "node --test dist",
+    "clean": "rm -rf dist .turbo *.tsbuildinfo"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
-    "@mydon/assistant": "workspace:*",
-    "@mydon/documents": "workspace:*",
-    "@mydon/shared": "workspace:*",
-    "dotenv": "^16.4.7"
+    "@mydon/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",

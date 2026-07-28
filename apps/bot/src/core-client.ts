@@ -102,7 +102,15 @@ export class CoreClient {
     return this.request<EntityRow[]>(`/entities?${qs.toString()}`);
   }
 
-  obligations(domain: Domain): Promise<{ domain: Domain; totals: unknown[]; overdue: unknown[] }> {
+  obligations(domain: Domain): Promise<{
+    domain: Domain;
+    totals: unknown[];
+    overdue: unknown[];
+    /** Сколько просрочек всего — список может быть урезан Core. */
+    overdueTotal: number;
+    /** true — показаны не все: в отчёте это надо оговорить, а не выдавать за полный. */
+    overdueTruncated: boolean;
+  }> {
     return this.request(`/registry/obligations/${domain}`);
   }
 

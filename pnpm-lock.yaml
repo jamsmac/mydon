@@ -60,6 +60,9 @@ importers:
       '@mydon/assistant':
         specifier: workspace:*
         version: link:../../packages/assistant
+      '@mydon/documents':
+        specifier: workspace:*
+        version: link:../../packages/documents
       '@mydon/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -226,6 +229,22 @@ importers:
       drizzle-kit:
         specifier: ^0.31.10
         version: 0.31.10
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/documents:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.115.0
+        version: 0.115.0(zod@4.4.3)
+      '@mydon/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      '@types/node':
+        specifier: ^20.17.6
+        version: 20.19.43
       typescript:
         specifier: ^5.6.3
         version: 5.9.3

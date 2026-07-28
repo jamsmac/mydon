@@ -1,10 +1,14 @@
 import { answer, type LlmResolver } from "@mydon/assistant";
+import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
 import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, formatApproval, formatBriefing } from "./briefing";
 import type { CoreClient } from "./core-client";
 import { parseIntent } from "./intent";
+import { planReport } from "./reports";
 import type { RateLimiter } from "./security/access";
 import { isAllowed } from "./security/access";
+
+export type DocumentBuilder = (req: DocumentRequest) => Promise<GeneratedDocument>;
 
 export interface HandlerDeps {
   core: CoreClient;
@@ -12,11 +16,15 @@ export interface HandlerDeps {
   limiter: RateLimiter;
   /** LLM-слой: понимает вопросы вне правил. Нет ключа → ветка «непонятно» = подсказка. */
   llm?: LlmResolver;
+  /** Построение документов (Excel, Word). Нет ключа — файлов не делаем. */
+  buildDocument?: DocumentBuilder;
 }
 
 export interface Reply {
   text: string;
   keyboard?: ReturnType<typeof approvalKeyboard>;
+  /** Готовый файл: владелец получает его в чат, а не текст для переписывания. */
+  document?: { filename: string; content: Buffer; caption?: string };
 }
 
 const HELP = [
@@ -96,6 +104,35 @@ export async function handleMessage(
           return { text: `По направлению ${label} обязательств в реестре пока нет.` };
         }
         return { text: `Обязательства ${label}: позиций ${o.totals.length}, просрочено ${o.overdue.length}.` };
+      }
+
+      case "report": {
+        // Готовые навыки Anthropic (xlsx/docx). Нет ключа — честно говорим,
+        // а не отдаём текст вместо обещанного файла.
+        if (!deps.buildDocument) {
+          return {
+            text:
+              "Чтобы делать файлы (Excel, Word), нужен ключ Claude в настройках сервера. " +
+              "Пока могу ответить только текстом.",
+          };
+        }
+
+        const plan = await planReport(
+          { format: intent.format, topic: intent.topic, ...(intent.domain ? { domain: intent.domain } : {}) },
+          deps.core,
+        );
+        if (plan.emptyReason) return { text: plan.emptyReason };
+
+        const doc = await deps.buildDocument({
+          kind: plan.kind,
+          instruction: plan.instruction,
+          data: plan.data,
+          filename: plan.filename,
+        });
+        return {
+          text: doc.summary.length > 0 ? doc.summary : "Готово.",
+          document: { filename: doc.filename, content: doc.content },
+        };
       }
 
       case "recent": {

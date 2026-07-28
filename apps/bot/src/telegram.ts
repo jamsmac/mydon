@@ -72,6 +72,40 @@ export class TelegramApi {
     });
   }
 
+  /**
+   * Отправка файла (Excel, Word, отчёт).
+   *
+   * Идёт не через JSON, а multipart — файл нельзя вложить в обычный запрос.
+   * Владелец получает документ прямо в чат: открыть, переслать бухгалтеру,
+   * подшить — без выгрузок и панелей.
+   */
+  async sendDocument(
+    chatId: number,
+    filename: string,
+    content: Buffer,
+    caption?: string,
+  ): Promise<void> {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption) form.append("caption", caption.slice(0, 1024)); // предел Telegram
+    form.append("document", new Blob([new Uint8Array(content)]), filename);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000); // файл дольше текста
+    try {
+      const res = await fetch(this.url("sendDocument"), {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new Error(`Telegram ответил ${res.status} на sendDocument`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async answerCallback(callbackId: string, text: string): Promise<void> {
     await this.call("answerCallbackQuery", { callback_query_id: callbackId, text });
   }

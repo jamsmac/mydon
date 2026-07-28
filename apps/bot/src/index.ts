@@ -1,6 +1,7 @@
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import { createLlmResolver, type LlmResolver } from "@mydon/assistant";
+import { createDocumentBuilder } from "@mydon/documents";
 import { dueLabel, TZ } from "@mydon/shared";
 import { formatBriefing, msUntilBriefing } from "./briefing";
 import { CoreClient, type PersonRow } from "./core-client";
@@ -42,11 +43,21 @@ async function main(): Promise<void> {
       })
     : undefined;
 
+  // Документы (Excel, Word) через готовые навыки Anthropic. Ключ тот же, что
+  // и у помощника: нет ключа — файлов не делаем, но бот работает дальше.
+  const buildDocument = process.env.ANTHROPIC_API_KEY
+    ? createDocumentBuilder({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+        ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),
+      })
+    : undefined;
+
   const deps: HandlerDeps = {
     core: new CoreClient(coreUrl),
     allowlist,
     limiter: new RateLimiter(),
     ...(llm ? { llm } : {}),
+    ...(buildDocument ? { buildDocument } : {}),
   };
 
   if (!token) {
@@ -231,7 +242,19 @@ async function main(): Promise<void> {
           const chatId = u.message.chat.id;
           if (isAllowed(chatId, allowlist)) {
             const reply = await handleMessage(chatId, u.message.text, deps);
-            if (reply) await tg.sendMessage(chatId, reply.text, reply.keyboard);
+            if (reply) {
+              await tg.sendMessage(chatId, reply.text, reply.keyboard);
+              // Файл идёт отдельным сообщением: у документа своя доставка,
+              // и она не должна мешать тексту, если сорвётся.
+              if (reply.document) {
+                try {
+                  await tg.sendDocument(chatId, reply.document.filename, reply.document.content);
+                } catch (err) {
+                  console.error("Файл не отправлен:", err);
+                  await tg.sendMessage(chatId, "Файл получился, но отправить не вышло. Повтори запрос.");
+                }
+              }
+            }
           } else {
             // Не владелец — возможно, сотрудник. Ему доступны только свои задачи.
             await routeStaffMessage(chatId, u.message.text, u.message.from?.username);
