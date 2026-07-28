@@ -233,6 +233,16 @@ export const RULES: Rule[] = [
     format: (c) => `🗄 Бэкап готов: ${str(c.payload.what, "база")} (${str(c.payload.size, "—")})`,
   },
   {
+    // Дамп больше лимита Bot API (50 МБ): бэкап сделан, но offsite-копии НЕТ.
+    // Это не «успех с оговоркой», а дыра в защите — говорим немедленно.
+    id: "infra.backup_oversize",
+    eventType: "infra.backup_oversize",
+    urgency: "immediate",
+    format: (c) =>
+      `⚠️ Бэкап ${str(c.payload.what, "базы")} (${str(c.payload.size)}) больше лимита Telegram — ` +
+      `внешней копии нет, файл только на сервере. Пора настроить Storage Box.`,
+  },
+  {
     id: "task.overdue",
     eventType: "task.overdue",
     urgency: "immediate",
