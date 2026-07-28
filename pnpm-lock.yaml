@@ -54,6 +54,9 @@ importers:
 
   apps/bot:
     dependencies:
+      '@mydon/assistant':
+        specifier: workspace:*
+        version: link:../../packages/assistant
       '@mydon/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -70,6 +73,9 @@ importers:
 
   apps/cc:
     dependencies:
+      '@mydon/assistant':
+        specifier: workspace:*
+        version: link:../../packages/assistant
       '@mydon/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -153,6 +159,19 @@ importers:
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1
+    devDependencies:
+      '@types/node':
+        specifier: ^20.17.6
+        version: 20.19.43
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/assistant:
+    dependencies:
+      '@mydon/shared':
+        specifier: workspace:*
+        version: link:../shared
     devDependencies:
       '@types/node':
         specifier: ^20.17.6

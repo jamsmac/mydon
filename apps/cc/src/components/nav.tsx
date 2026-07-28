@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { DOMAIN_LABELS, DOMAINS } from "@mydon/shared";
 
 /** Разделы оболочки. Порядок — от «что требует решения» к справочному. */
+// Помощник — не в этом списке: он плавающий, доступен на любом экране (FloatingChat).
 const MAIN = [
   { href: "/mydon", icon: "◉", label: "Главное" },
   { href: "/approvals", icon: "✋", label: "Решения" },

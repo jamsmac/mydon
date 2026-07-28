@@ -16,6 +16,7 @@ COPY apps/watchdog/package.json ./apps/watchdog/
 COPY packages/db/package.json ./packages/db/
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/connectors/package.json ./packages/connectors/
+COPY packages/assistant/package.json ./packages/assistant/
 RUN pnpm install --frozen-lockfile
 
 # ── Сборка ──

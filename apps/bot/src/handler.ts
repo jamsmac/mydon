@@ -93,6 +93,21 @@ export async function handleMessage(
         return { text: `Обязательства ${label}: позиций ${o.totals.length}, просрочено ${o.overdue.length}.` };
       }
 
+      case "recent": {
+        const log = await deps.core.recent(10);
+        if (log.length === 0) return { text: "Пока ничего не происходило — журнал пуст." };
+        const label: Record<string, string> = {
+          "entity.create": "завёл карточку",
+          "task.create": "поставил задачу",
+          "task.done": "закрыл задачу",
+          "approval.request": "агент попросил разрешения",
+          "approval.approved": "ты одобрил",
+          "approval.rejected": "ты отклонил",
+        };
+        const lines = log.map((e) => `• ${label[e.action] ?? e.action}`);
+        return { text: ["Последнее в системе:", "", ...lines].join("\n") };
+      }
+
       case "search": {
         let found = await deps.core.searchEntities({
           q: intent.query,

@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { IBM_Plex_Mono, Manrope, Syne } from "next/font/google";
 import { core } from "../lib/core";
 import { Sidebar, TabBar } from "../components/nav";
+import { FloatingChat } from "../components/floating-chat";
 import "./globals.css";
 
 // Шрифты фирменные (ТЗ). next/font забирает их на сборке и раздаёт со своего
@@ -63,6 +64,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
           </div>
 
           <TabBar pendingCount={pending} />
+          <FloatingChat />
         </div>
       </body>
     </html>

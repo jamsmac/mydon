@@ -475,3 +475,206 @@ main {
     transition: none !important;
   }
 }
+
+/* ── Помощник (чат) ──────────────────────────────────── */
+.chat {
+  display: flex;
+  flex-direction: column;
+  /* высота экрана минус шапка, отступы и нижняя панель */
+  height: calc(100dvh - var(--nav-h) - 130px);
+  min-height: 340px;
+}
+.chat-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 12px;
+}
+.msg {
+  display: flex;
+  flex-direction: column;
+  max-width: 88%;
+}
+.msg.you {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+.msg .bubble {
+  padding: 11px 14px;
+  border-radius: 14px;
+  font-size: 15px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg.mydon .bubble {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px 14px 14px 14px;
+}
+.msg.you .bubble {
+  background: #16305c;
+  border-radius: 14px 4px 14px 14px;
+}
+.msg .bubble.typing {
+  color: var(--steel);
+  letter-spacing: 2px;
+}
+.msg-link {
+  font-size: 13px;
+  color: var(--blue);
+  margin-top: 5px;
+  padding-left: 4px;
+}
+.chips {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 8px 0;
+  scrollbar-width: none;
+}
+.chips::-webkit-scrollbar {
+  display: none;
+}
+.chip {
+  flex: none;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  color: var(--steel);
+  border-radius: 18px;
+  padding: 7px 13px;
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chip:hover {
+  border-color: var(--blue);
+  color: var(--white);
+}
+.chat-input {
+  display: flex;
+  gap: 8px;
+  padding-top: 6px;
+}
+.chat-input input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  color: var(--white);
+  font: inherit;
+  font-size: 15px;
+  padding: 12px 16px;
+}
+.chat-input input:focus {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+.chat-input button {
+  flex: none;
+  width: 46px;
+  border: none;
+  border-radius: 50%;
+  background: var(--blue);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+}
+.chat-input button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── Плавающий помощник ──────────────────────────────── */
+.fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--nav-h) + 16px + env(safe-area-inset-bottom));
+  z-index: 30;
+  width: 54px;
+  height: 54px;
+  border: none;
+  border-radius: 50%;
+  background: var(--blue);
+  color: #fff;
+  font-size: 24px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(26, 107, 255, 0.4);
+}
+.fab.hidden {
+  display: none;
+}
+.fab-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(5, 10, 20, 0.55);
+}
+.fab-panel {
+  position: fixed;
+  z-index: 50;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 80dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--navy);
+  border-top: 1px solid var(--line);
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.5);
+  padding: 0 16px 12px;
+}
+.fab-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 2px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.fab-title {
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 700;
+  font-size: 16px;
+}
+.fab-title span {
+  color: var(--blue);
+}
+.fab-close {
+  background: none;
+  border: none;
+  color: var(--steel);
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.fab-close:hover {
+  color: var(--white);
+}
+/* Внутри плавающей панели чат занимает всю высоту, без своего расчёта. */
+.fab-panel .chat {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+@media (min-width: 860px) {
+  .fab {
+    right: 28px;
+    bottom: 28px;
+  }
+  .fab-panel {
+    left: auto;
+    right: 24px;
+    bottom: 24px;
+    width: 400px;
+    height: 580px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+}

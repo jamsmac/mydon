@@ -84,6 +84,13 @@ export class CoreClient {
     return this.request(`/registry/obligations/${domain}`);
   }
 
+  /** Последние действия из журнала — память помощника («что было»). */
+  recent(
+    limit = 10,
+  ): Promise<{ actorKind: "human" | "agent" | "system"; action: string; actorRef: string | null; ts: string }[]> {
+    return this.request(`/audit?limit=${limit}`);
+  }
+
   /** Уведомления, которые правила сочли срочными, с момента `since` (FR-2). */
   pendingNotifications(since: Date): Promise<PendingNotifications> {
     return this.request<PendingNotifications>(
