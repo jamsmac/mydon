@@ -207,6 +207,19 @@ export const RULES: Rule[] = [
       `🔴 Не отвечает: ${str(c.payload.service)}. ${str(c.payload.detail, "Причина не указана.")}`,
   },
   {
+    // Восстановление сообщаем немедленно: получив тревогу, владелец ждёт отбоя.
+    // Без него приходится лезть на сервер и проверять руками — а это ровно то,
+    // от чего система должна избавлять.
+    id: "infra.service_up",
+    eventType: "infra.service_up",
+    urgency: "immediate",
+    format: (c) =>
+      `🟢 Снова отвечает: ${str(c.payload.service)}` +
+      (num(c.payload.downChecks) > 0
+        ? ` (был недоступен ${num(c.payload.downChecks)} проверок)`
+        : ""),
+  },
+  {
     id: "infra.backup_failed",
     eventType: "infra.backup_failed",
     urgency: "immediate",
