@@ -40,6 +40,8 @@ export async function handleMessage(
   deps: HandlerDeps,
   now: number = Date.now(),
 ): Promise<Reply | null> {
+  // Здесь обрабатывается только владелец. Сообщения сотрудников маршрутизирует
+  // цикл бота: у них свой, узкий режим (см. staff.ts) — только свои задачи.
   if (!isAllowed(chatId, deps.allowlist)) {
     // Чужим не отвечаем вовсе: молчание не подтверждает существование бота.
     return null;

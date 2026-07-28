@@ -134,6 +134,35 @@ export class AgentsCoreClient {
     return this.request("/agents");
   }
 
+  // ── Задачи агента: владелец может поручить агенту дело, как человеку ───────
+
+  /** Открытые задачи, поставленные этому агенту. */
+  myTasks(agentName: string): Promise<
+    { id: string; title: string; status: string; ownerRef: string | null }[]
+  > {
+    const qs = new URLSearchParams({ ownerKind: "agent", ownerRef: agentName, open: "1" });
+    return this.request(`/tasks?${qs.toString()}`);
+  }
+
+  setTaskStatus(
+    id: string,
+    status: "in_progress" | "done" | "cancelled",
+    actor: string,
+    resultNote?: string,
+  ): Promise<unknown> {
+    return this.request(`/tasks/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, actor, ...(resultNote ? { resultNote } : {}) }),
+    });
+  }
+
+  addTaskComment(id: string, body: string, author: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body, author }),
+    });
+  }
+
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }

@@ -10,6 +10,8 @@ export interface TgUpdate {
   message?: {
     message_id: number;
     chat: { id: number };
+    /** Кто написал: @username нужен, чтобы привязать сотрудника по «Старту». */
+    from?: { id: number; username?: string };
     text?: string;
     voice?: { file_id: string };
   };

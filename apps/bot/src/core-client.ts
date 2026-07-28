@@ -26,6 +26,28 @@ export interface EntityRow {
   attrs: Record<string, unknown>;
 }
 
+/** Сотрудник. tgChatId появляется, когда он нажал «Старт» у бота. */
+export interface PersonRow {
+  id: string;
+  name: string;
+  role: string | null;
+  tgUsername: string | null;
+  tgChatId: string | null;
+  active: string;
+}
+
+export interface TaskRow {
+  id: string;
+  title: string;
+  description: string | null;
+  ownerKind: "human" | "agent";
+  ownerRef: string | null;
+  status: "todo" | "in_progress" | "done" | "cancelled";
+  priority: "low" | "normal" | "high" | "urgent";
+  due: string | null;
+  resultNote: string | null;
+}
+
 export interface PendingNotifications {
   since: string;
   events: number;
@@ -96,5 +118,65 @@ export class CoreClient {
     return this.request<PendingNotifications>(
       `/rules/pending?immediate=1&since=${encodeURIComponent(since.toISOString())}`,
     );
+  }
+
+  // ── Задачи и сотрудники ───────────────────────────────────────────────────
+  // Сотрудник работает с задачами прямо в Telegram: ставить ему пароли и учить
+  // веб-панели бессмысленно — Telegram у него уже есть и уже открыт.
+
+  /** Привязка по «Старту»: возвращает сотрудника или отметку, что не нашли. */
+  linkTelegram(chatId: string, username: string | null): Promise<PersonRow | { linked: false }> {
+    return this.request(`/people/link`, {
+      method: "POST",
+      body: JSON.stringify({ chatId, ...(username ? { username } : {}) }),
+    });
+  }
+
+  /** Кто написал: сотрудник или посторонний. */
+  personByChat(chatId: string): Promise<PersonRow | { found: false }> {
+    return this.request(`/people/by-chat/${encodeURIComponent(chatId)}`);
+  }
+
+  /** Открытые задачи исполнителя — то, что он видит по команде «мои задачи». */
+  myTasks(ownerKind: "human" | "agent", ownerRef: string): Promise<TaskRow[]> {
+    const qs = new URLSearchParams({ ownerKind, ownerRef, open: "1" });
+    return this.request<TaskRow[]>(`/tasks?${qs.toString()}`);
+  }
+
+  task(id: string): Promise<TaskRow> {
+    return this.request<TaskRow>(`/tasks/${id}`);
+  }
+
+  setTaskStatus(
+    id: string,
+    status: "todo" | "in_progress" | "done" | "cancelled",
+    actor: string,
+    resultNote?: string,
+  ): Promise<TaskRow> {
+    return this.request<TaskRow>(`/tasks/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, actor, ...(resultNote ? { resultNote } : {}) }),
+    });
+  }
+
+  addTaskComment(id: string, body: string, author: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body, author }),
+    });
+  }
+
+  /** Кому пора напомнить (срок близко или прошёл, ещё не напоминали). */
+  tasksDueSoon(hours = 24): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>(`/tasks/due-soon?hours=${hours}`);
+  }
+
+  /** Отметка «напомнили» — ставится ПОСЛЕ фактической отправки. */
+  markReminded(id: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/reminded`, { method: "POST" });
+  }
+
+  people(): Promise<PersonRow[]> {
+    return this.request<PersonRow[]>("/people");
   }
 }

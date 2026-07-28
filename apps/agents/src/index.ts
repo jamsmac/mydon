@@ -7,6 +7,7 @@ import { autonomyThreshold } from "./policy";
 import { loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { hasSkill } from "./skills";
+import { runAgentTasks } from "./task-worker";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
@@ -148,6 +149,30 @@ async function main(): Promise<void> {
       }
     }
   }
+
+  /**
+   * Задачи, поручённые агентам владельцем. Проверяем регулярно: владелец
+   * ставит задачу в панели и вправе ждать, что агент займётся ею сам,
+   * не дожидаясь своего расписания.
+   */
+  async function pollAgentTasks(): Promise<void> {
+    for (const agent of active) {
+      try {
+        const results = await runAgentTasks(agent, core, threshold);
+        for (const r of results) {
+          console.log(`[${agent.name}] задача ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`);
+        }
+      } catch (err) {
+        console.error(`[${agent.name}] задачи не обработаны:`, err);
+      }
+    }
+  }
+
+  const taskEveryMs = Number(process.env.AGENT_TASK_INTERVAL_MS ?? 5 * 60_000);
+  setInterval(() => {
+    void pollAgentTasks().catch((err: unknown) => console.error("Задачи агентов:", err));
+  }, taskEveryMs).unref();
+  void pollAgentTasks(); // первый проход сразу при старте
 
   console.log(`Запланировано заданий: ${jobs} (часовой пояс ${TZ}).`);
   if (notWired.length > 0) {

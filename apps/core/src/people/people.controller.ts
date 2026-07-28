@@ -23,6 +23,14 @@ export class CreatePersonDto {
   active?: boolean;
 }
 
+export class LinkTelegramDto {
+  @IsString() @IsNotEmpty() @MaxLength(32)
+  chatId!: string;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  username?: string;
+}
+
 export class UpdatePersonDto extends CreatePersonDto {
   @IsOptional() @IsString() @MaxLength(256)
   declare name: string;
@@ -36,6 +44,23 @@ export class PeopleController {
   @Get()
   list(@Query("all") all?: string) {
     return this.people.list({ includeInactive: all === "1" });
+  }
+
+  /**
+   * Привязка Telegram: сотрудник нажал «Старт» у бота.
+   * Объявлено ВЫШЕ параметрических маршрутов, иначе "link" уедет в :id.
+   */
+  @Post("link")
+  async link(@Body() dto: LinkTelegramDto) {
+    const person = await this.people.linkTelegram(dto.chatId, dto.username ?? null);
+    return person ?? { linked: false };
+  }
+
+  /** Кто написал боту — по chat_id. Бот отличает сотрудника от постороннего. */
+  @Get("by-chat/:chatId")
+  async byChat(@Param("chatId") chatId: string) {
+    const person = await this.people.byChatId(chatId);
+    return person ?? { found: false };
   }
 
   @Get(":id")
