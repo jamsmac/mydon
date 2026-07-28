@@ -73,5 +73,24 @@ services:
       AGENTS_SCHEDULES_PAUSED: ${AGENTS_SCHEDULES_PAUSED:-1}
     command: ["node", "apps/agents/dist/index.js"]
 
+  # Веб-панель (оболочка Command Center). Наружу не публикуется:
+  # только 127.0.0.1 — доступ через Tailscale, как требует ТЗ §6.
+  mydon-cc:
+    image: mydon:latest
+    container_name: mydon-cc
+    restart: unless-stopped
+    depends_on:
+      - mydon-core
+    working_dir: /app/apps/cc
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Tashkent
+      PORT: 3002
+      HOSTNAME: 0.0.0.0
+      CORE_API_URL: http://mydon-core:3001
+    command: ["node_modules/.bin/next", "start", "-p", "3002"]
+    ports:
+      - "127.0.0.1:3002:3002"
+
 volumes:
   mydon-db-data:

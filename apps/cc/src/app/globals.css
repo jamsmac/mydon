@@ -1,0 +1,477 @@
+/*
+ * Фирменная система MYDON (ТЗ, раздел «Оформление»).
+ * Свёрстано mobile-first: владелец работает поровну с телефона и компьютера (Ф11),
+ * а у прежней панели мобильной версии почти не было (Ф7).
+ */
+:root {
+  --navy: #0a1628;
+  --surface: #0f1e33;
+  --raised: #152640;
+  --line: #1e3350;
+  --blue: #1a6bff;
+  --white: #e8ecf2;
+  --steel: #8494a8;
+  --steel-dim: #5a6b80;
+  --orange: #ff6b1a;
+  --ok: #2bd9a0;
+  --red: #ff4d5e;
+
+  --nav-h: 56px;
+  --side-w: 232px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--navy);
+  color: var(--white);
+  font-family: var(--font-body), system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display), system-ui, sans-serif;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Каркас ─────────────────────────────────────────── */
+.shell {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  height: var(--nav-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 800;
+  font-size: 18px;
+  letter-spacing: -0.03em;
+}
+
+.brand span {
+  color: var(--blue);
+}
+
+.topbar .where {
+  color: var(--steel);
+  font-size: 13.5px;
+  margin-left: auto;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+}
+
+/* Боковое меню: на телефоне уезжает вниз отдельной полосой */
+.side {
+  display: none;
+  width: var(--side-w);
+  flex: none;
+  border-right: 1px solid var(--line);
+  padding: 18px 12px;
+  gap: 3px;
+  flex-direction: column;
+}
+
+.side .group {
+  font-family: var(--font-mono), monospace;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--steel-dim);
+  padding: 14px 12px 7px;
+}
+
+.navlink {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 14.5px;
+  color: var(--steel);
+  border-left: 2px solid transparent;
+}
+
+.navlink:hover {
+  background: var(--raised);
+  color: var(--white);
+}
+
+.navlink[aria-current="page"] {
+  background: var(--raised);
+  color: var(--white);
+  border-left-color: var(--blue);
+}
+
+.navlink .badge {
+  margin-left: auto;
+  background: var(--orange);
+  color: #fff;
+  font-family: var(--font-mono), monospace;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 20px;
+}
+
+main {
+  flex: 1;
+  min-width: 0;
+  padding: 20px 16px calc(var(--nav-h) + 28px);
+}
+
+/* Нижняя навигация — основной способ на телефоне */
+.tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.tabbar a {
+  flex: 1;
+  text-align: center;
+  padding: 9px 4px 10px;
+  font-size: 10.5px;
+  color: var(--steel-dim);
+  position: relative;
+}
+
+.tabbar a[aria-current="page"] {
+  color: var(--blue);
+}
+
+.tabbar a i {
+  display: block;
+  font-style: normal;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.tabbar .dot {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  margin-left: 8px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--orange);
+}
+
+/* ── Общие элементы ─────────────────────────────────── */
+.page-head {
+  margin-bottom: 18px;
+}
+
+.page-head h1 {
+  font-size: 25px;
+  font-weight: 800;
+}
+
+.page-head p {
+  color: var(--steel);
+  font-size: 14px;
+  margin: 5px 0 0;
+}
+
+.tiles {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.tile {
+  background: var(--surface);
+  padding: 16px 15px;
+}
+
+.tile .v {
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 800;
+  font-size: 30px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile .v.calm {
+  color: var(--steel-dim);
+}
+.tile .v.alarm {
+  color: var(--orange);
+}
+.tile .k {
+  color: var(--steel);
+  font-size: 12.5px;
+  margin-top: 7px;
+  line-height: 1.4;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 17px;
+  margin-bottom: 12px;
+}
+
+.card.attention {
+  border-color: rgba(255, 107, 26, 0.4);
+}
+
+.card .who {
+  font-family: var(--font-mono), monospace;
+  font-size: 11.5px;
+  color: var(--steel);
+  margin-bottom: 7px;
+}
+
+.card .what {
+  font-size: 15.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.section-title {
+  font-family: var(--font-mono), monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--steel-dim);
+  margin: 26px 0 11px;
+}
+
+.btns {
+  display: flex;
+  gap: 7px;
+  margin-top: 13px;
+}
+
+.btn {
+  flex: 1;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--white);
+  cursor: pointer;
+  /* ВАЖЕН ПОРЯДОК: `font: inherit` — сокращённое свойство, оно сбрасывает
+     font-size. Поэтому размер задаём строго ПОСЛЕ него, иначе он не применится. */
+  font: inherit;
+  /* На узком экране три кнопки в ряд: текст не должен рваться на две строки,
+     иначе карточки прыгают по высоте и промахнуться по кнопке легче. */
+  padding: 11px 4px;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.btn:hover {
+  border-color: var(--blue);
+}
+
+.btn.yes {
+  border-color: rgba(43, 217, 160, 0.45);
+}
+.btn.no {
+  border-color: rgba(255, 107, 26, 0.42);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.empty {
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 28px 20px;
+  text-align: center;
+  color: var(--steel);
+  font-size: 14.5px;
+}
+
+.empty b {
+  color: var(--white);
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 600;
+}
+
+.rows {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 12px 15px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row .t {
+  flex: 1;
+  min-width: 0;
+}
+
+.row .t b {
+  font-weight: 600;
+}
+
+.row .t small {
+  display: block;
+  color: var(--steel);
+  font-size: 12.5px;
+  margin-top: 2px;
+}
+
+.row .when {
+  color: var(--steel-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.pill {
+  font-family: var(--font-mono), monospace;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  color: var(--steel);
+  white-space: nowrap;
+}
+
+.pill.human {
+  border-color: rgba(26, 107, 255, 0.5);
+  color: var(--blue);
+}
+.pill.agent {
+  border-color: rgba(255, 107, 26, 0.45);
+  color: var(--orange);
+}
+.pill.ok {
+  border-color: rgba(43, 217, 160, 0.45);
+  color: var(--ok);
+}
+.pill.bad {
+  border-color: rgba(255, 77, 94, 0.45);
+  color: var(--red);
+}
+
+.search {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--white);
+  font: inherit;
+  font-size: 15px;
+  padding: 11px 13px;
+}
+
+.search input:focus {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.warn {
+  border: 1px solid rgba(255, 77, 94, 0.4);
+  background: rgba(255, 77, 94, 0.07);
+  border-radius: 12px;
+  padding: 15px 17px;
+  font-size: 14.5px;
+}
+
+.warn b {
+  color: var(--red);
+  display: block;
+  margin-bottom: 5px;
+}
+
+/* ── Компьютер ──────────────────────────────────────── */
+@media (min-width: 860px) {
+  .side {
+    display: flex;
+  }
+  .tabbar {
+    display: none;
+  }
+  main {
+    padding: 26px 32px 48px;
+    max-width: 1000px;
+  }
+  .tiles {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .page-head h1 {
+    font-size: 30px;
+  }
+  .btn {
+    padding: 11px 8px;
+    font-size: 13.5px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}
