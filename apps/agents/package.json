@@ -9,7 +9,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "clean": "rm -rf dist .turbo *.tsbuildinfo",
-    "test": "node --test dist"
+    "test": "node --test dist",
+    "check:passports": "node dist/check-passports.js"
   },
   "dependencies": {
     "@mydon/shared": "workspace:*",
