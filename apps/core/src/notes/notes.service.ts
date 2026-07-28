@@ -26,15 +26,47 @@ export class NotesService {
     return this.db.select().from(note).orderBy(desc(note.createdAt)).limit(limit);
   }
 
-  /** Поиск по заголовку и тексту — помощник ищет здесь ответ на вопрос. */
-  search(q: string, limit = 20): Promise<NoteRow[]> {
-    const like = `%${q}%`;
-    return this.db
+  /**
+   * Поиск по заголовку и тексту — помощник ищет здесь ответ на вопрос.
+   *
+   * По словам, а не по фразе целиком: вопрос «что решили по архитектуре vendhub»
+   * никогда не совпадёт дословно с заметкой «VendHub architecture». Короткие
+   * слова («что», «по») отбрасываем — они совпали бы с чем угодно. Выше в выдаче
+   * заметки, где совпало больше слов.
+   */
+  async search(q: string, limit = 20): Promise<NoteRow[]> {
+    const words = [...new Set(q.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length >= 4))];
+    // Ни одного значимого слова — ищем фразой, как раньше (например, «ЦРУ»).
+    if (words.length === 0) {
+      const like = `%${q}%`;
+      return this.db
+        .select()
+        .from(note)
+        .where(or(ilike(note.title, like), ilike(note.body, like)))
+        .orderBy(desc(note.createdAt))
+        .limit(limit);
+    }
+
+    const perWord = words.slice(0, 8).map((w) => {
+      const like = `%${w}%`;
+      return or(ilike(note.title, like), ilike(note.body, like));
+    });
+    const found = await this.db
       .select()
       .from(note)
-      .where(or(ilike(note.title, like), ilike(note.body, like)))
+      .where(or(...perWord))
       .orderBy(desc(note.createdAt))
-      .limit(limit);
+      .limit(50);
+
+    const matches = (n: NoteRow): number => {
+      const hay = `${n.title ?? ""} ${n.body}`.toLowerCase();
+      return words.reduce((k, w) => (hay.includes(w) ? k + 1 : k), 0);
+    };
+    return found
+      .map((n) => ({ n, k: matches(n) }))
+      .sort((a, b) => b.k - a.k)
+      .slice(0, limit)
+      .map(({ n }) => n);
   }
 
   /**
