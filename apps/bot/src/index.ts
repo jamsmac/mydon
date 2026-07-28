@@ -230,6 +230,39 @@ async function main(): Promise<void> {
     }
   }
 
+  /**
+   * Возвраты на доработку: владелец нажал «Переделать» — исполнитель должен
+   * узнать сразу, а не при следующем напоминании о сроке. Порядок тот же,
+   * что у напоминаний: сначала доставка, потом отметка.
+   */
+  async function sendRedoNotices(): Promise<void> {
+    const tasks = await deps.core.redoUnnotified();
+    if (tasks.length === 0) return;
+
+    const people = await deps.core.people();
+    const chatById = new Map(people.filter((p) => p.tgChatId).map((p) => [p.id, p.tgChatId!]));
+
+    for (const t of tasks) {
+      const chat = t.ownerRef !== null ? chatById.get(t.ownerRef) : undefined;
+      if (chat === undefined) continue; // не подключён к Telegram — увидит в списке
+      try {
+        await tg.sendMessage(
+          Number(chat),
+          `↩ Возвращена на доработку: ${t.title}\nПрошлый отчёт не принят — детали в комментариях к задаче.`,
+          taskKeyboard(t),
+        );
+        await deps.core.markRedoNotified(t.id);
+      } catch (err) {
+        console.error("Сообщение о переделке не доставлено:", err);
+      }
+    }
+  }
+
+  const redoEveryMs = Number(process.env.REDO_NOTIFY_INTERVAL_MS ?? 60_000);
+  setInterval(() => {
+    void sendRedoNotices().catch((err: unknown) => console.error("Переделки:", err));
+  }, redoEveryMs).unref();
+
   const remindEveryMs = Number(process.env.REMIND_INTERVAL_MS ?? 30 * 60_000);
   setInterval(() => {
     void sendReminders().catch((err: unknown) => console.error("Напоминания:", err));

@@ -72,7 +72,7 @@ export class EntitiesService {
     });
   }
 
-  async find(filter: FindEntitiesDto): Promise<EntityRow[]> {
+  async find(filter: FindEntitiesDto): Promise<(EntityRow & { domain: string | null })[]> {
     const conditions: SQL[] = [];
     // Фильтр по id раньше объявлялся, но не применялся: клиент получал весь
     // реестр и мог принять чужую карточку за найденную.
@@ -81,9 +81,22 @@ export class EntitiesService {
     if (filter.type) conditions.push(eq(entity.type, filter.type));
     if (filter.q) conditions.push(nameMatches(filter.q));
 
+    // Домен добавляется к каждой строке: реестр показывается по направлениям,
+    // и без этого поля клиенту пришлось бы угадывать, чьё это.
     return this.db
-      .select()
+      .select({
+        id: entity.id,
+        orgId: entity.orgId,
+        type: entity.type,
+        name: entity.name,
+        externalRef: entity.externalRef,
+        attrs: entity.attrs,
+        createdAt: entity.createdAt,
+        updatedAt: entity.updatedAt,
+        domain: org.code,
+      })
       .from(entity)
+      .leftJoin(org, eq(org.id, entity.orgId))
       .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(entity.createdAt))
       .limit(500);

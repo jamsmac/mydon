@@ -115,6 +115,8 @@ export const task = pgTable(
     resultNote: text("result_note"),
     /** Оценка владельца после «сделано»: отлично / принято / переделать. */
     quality: taskQualityEnum("quality"),
+    /** Когда исполнителю сообщили о возврате на доработку — защита от повторов. */
+    redoNotifiedAt: timestamp("redo_notified_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     /** Когда исполнителю уже напомнили — чтобы не слать одно и то же дважды. */
     remindedAt: timestamp("reminded_at", { withTimezone: true }),

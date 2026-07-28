@@ -100,6 +100,19 @@ export class RegistryService {
     };
   }
 
+  /**
+   * Сводка реестра: сколько каких записей в каждом направлении.
+   * Владелец видит «GLOBERENT: контрагенты ×205, договоры ×496», а не пустой поиск.
+   */
+  async overview() {
+    return this.db
+      .select({ domain: org.code, type: entity.type, n: count() })
+      .from(entity)
+      .innerJoin(org, eq(org.id, entity.orgId))
+      .groupBy(org.code, entity.type)
+      .orderBy(org.code, entity.type);
+  }
+
   /** Сущности направления по типу — например автоматы VendHub. */
   async byType(domain: Domain, type: string) {
     const id = await this.orgId(domain);

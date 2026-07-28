@@ -28,6 +28,12 @@ export class RegistryController {
     return this.registry.obligations(asDomain(domain));
   }
 
+  /** Сводка по направлениям: важно объявить ДО маршрута :domain/:type. */
+  @Get("overview")
+  overview() {
+    return this.registry.overview();
+  }
+
   @Get()
   domains(@Query("only") only?: string) {
     return only ? [asDomain(only)] : DOMAINS;

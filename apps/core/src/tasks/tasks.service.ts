@@ -1,7 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, task, taskComment } from "@mydon/db";
 import type { Domain } from "@mydon/shared";
-import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL, isNull } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 type TaskRow = typeof task.$inferSelect;
@@ -221,6 +221,7 @@ export class TasksService {
         patch.status = "in_progress";
         patch.completedAt = null;
         patch.remindedAt = null; // напоминания должны включиться заново
+        patch.redoNotifiedAt = null; // и сообщение о возврате должно уйти снова
       }
       const [updated] = await tx.update(task).set(patch).where(eq(task.id, id)).returning();
 
@@ -242,6 +243,30 @@ export class TasksService {
       });
       return updated;
     });
+  }
+
+  /** Кому ещё не сообщили о возврате на доработку — бот заберёт и доставит. */
+  redoUnnotified(): Promise<TaskRow[]> {
+    return this.db
+      .select()
+      .from(task)
+      .where(
+        and(
+          eq(task.quality, "redo"),
+          ne(task.status, "done"),
+          ne(task.status, "cancelled"),
+          isNull(task.redoNotifiedAt),
+          eq(task.ownerKind, "human"),
+          isNotNull(task.ownerRef),
+        ),
+      )
+      .limit(50);
+  }
+
+  /** Отметка ставится ПОСЛЕ доставки — как у напоминаний: сбой сети не должен
+   *  превращаться в «сотрудник так и не узнал». */
+  async markRedoNotified(id: string): Promise<void> {
+    await this.db.update(task).set({ redoNotifiedAt: new Date() }).where(eq(task.id, id));
   }
 
   async addComment(taskId: string, authorRef: string, body: string): Promise<CommentRow> {

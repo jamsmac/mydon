@@ -51,6 +51,8 @@ export interface Approval {
 
 export interface Entity {
   id: string;
+  /** Направление, которому принадлежит запись (из поиска Core). */
+  domain?: string | null;
   type: string;
   name: string;
   externalRef: string | null;
@@ -221,4 +223,6 @@ export const core = {
     return get<Entity[]>(`/entities?${p.toString()}`);
   },
   entitiesOf: (domain: string) => get<Entity[]>(`/entities?domain=${domain}`),
+  /** Сводка реестра: сколько каких записей в каждом направлении. */
+  registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
 };

@@ -1,0 +1,1 @@
+ALTER TABLE "task" ADD COLUMN "redo_notified_at" timestamp with time zone;

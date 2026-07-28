@@ -113,6 +113,12 @@ export class TasksController {
   }
 
   /** Картина по людям и агентам: висит / просрочено / сделано за неделю. */
+  /** Кому сообщить о возврате на доработку. До маршрута :id — иначе перехват. */
+  @Get("redo-unnotified")
+  redoUnnotified() {
+    return this.tasks.redoUnnotified();
+  }
+
   @Get("workload")
   workload() {
     return this.tasks.workload();
@@ -146,6 +152,12 @@ export class TasksController {
   @Post(":id/quality")
   rate(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetQualityDto) {
     return this.tasks.rate(id, dto.quality);
+  }
+
+  @Post(":id/redo-notified")
+  async markRedoNotified(@Param("id", ParseUUIDPipe) id: string) {
+    await this.tasks.markRedoNotified(id);
+    return { ok: true };
   }
 
   @Post(":id/reminded")

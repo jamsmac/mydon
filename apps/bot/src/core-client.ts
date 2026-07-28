@@ -184,6 +184,16 @@ export class CoreClient {
     return this.request(`/tasks/${id}/reminded`, { method: "POST" });
   }
 
+  /** Задачи, о возврате которых исполнителю ещё не сообщили. */
+  redoUnnotified(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks/redo-unnotified");
+  }
+
+  /** Отметка «о переделке сообщили» — ставится ПОСЛЕ фактической отправки. */
+  markRedoNotified(id: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/redo-notified`, { method: "POST" });
+  }
+
   people(): Promise<PersonRow[]> {
     return this.request<PersonRow[]>("/people");
   }
