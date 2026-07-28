@@ -18,7 +18,7 @@ export interface TgUpdate {
   callback_query?: {
     id: string;
     data?: string;
-    message?: { chat: { id: number }; message_id: number };
+    message?: { chat: { id: number }; message_id: number; text?: string };
   };
 }
 
@@ -104,6 +104,16 @@ export class TelegramApi {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** Переписать отправленное сообщение (и убрать кнопки): карточка согласования
+   *  после решения должна показывать итог, а не предлагать решать снова. */
+  async editMessage(chatId: number, messageId: number, text: string): Promise<void> {
+    await this.call("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+    });
   }
 
   async answerCallback(callbackId: string, text: string): Promise<void> {

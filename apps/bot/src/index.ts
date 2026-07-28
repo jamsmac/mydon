@@ -319,13 +319,39 @@ async function main(): Promise<void> {
 
           if (isAllowed(chatId, allowlist)) {
             const parsed = parseApprovalCallback(data);
-            if (!parsed) continue;
+            if (!parsed) {
+              // Неизвестная кнопка: молчание оставляет вечный спиннер —
+              // выглядит как «кнопки не работают».
+              await tg.answerCallback(u.callback_query.id, "Эта кнопка устарела");
+              continue;
+            }
+            const DECIDED_LABEL = {
+              approved: "✅ Одобрено — исполняю",
+              rejected: "❌ Отклонено",
+              clarify: "❓ Отправлено на уточнение",
+            } as const;
             try {
               await deps.core.decide(parsed.id, parsed.decision, `telegram:${chatId}`);
               await tg.answerCallback(u.callback_query.id, "Решение записано");
+              // Карточка должна показать итог и перестать предлагать кнопки:
+              // иначе кажется, что нажатие не сработало.
+              const msg = u.callback_query.message;
+              if (msg?.message_id !== undefined && typeof msg.text === "string") {
+                try {
+                  await tg.editMessage(chatId, msg.message_id, `${msg.text}
+
+${DECIDED_LABEL[parsed.decision]}`);
+                } catch {
+                  // Не переписалось (старое сообщение) — решение всё равно записано.
+                }
+              }
             } catch (err) {
               console.error("Решение не записано:", err);
-              await tg.answerCallback(u.callback_query.id, "Не удалось записать решение");
+              // Самая частая причина — уже решено (в панели или тут же раньше).
+              const detail = err instanceof Error && err.message.includes("уже закрыт")
+                ? "Уже решено раньше — карточка устарела"
+                : "Не удалось записать решение";
+              await tg.answerCallback(u.callback_query.id, detail);
             }
             continue;
           }
