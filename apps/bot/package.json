@@ -12,9 +12,10 @@
     "test": "node --test dist"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@mydon/assistant": "workspace:*",
     "@mydon/shared": "workspace:*",
-    "dotenv": "^16.4.7",
-    "@mydon/assistant": "workspace:*"
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",

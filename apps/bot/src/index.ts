@@ -1,5 +1,6 @@
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
+import { createLlmResolver, type LlmResolver } from "@mydon/assistant";
 import { TZ } from "@mydon/shared";
 import { formatBriefing, msUntilBriefing } from "./briefing";
 import { CoreClient } from "./core-client";
@@ -32,10 +33,19 @@ async function main(): Promise<void> {
   const allowlist = parseAllowlist(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
 
+  // LLM-слой: включается при наличии ключа. Нет ключа — бот работает по правилам.
+  const llm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
+    ? createLlmResolver({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+        ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),
+      })
+    : undefined;
+
   const deps: HandlerDeps = {
     core: new CoreClient(coreUrl),
     allowlist,
     limiter: new RateLimiter(),
+    ...(llm ? { llm } : {}),
   };
 
   if (!token) {

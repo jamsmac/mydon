@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { answer, parseIntent, type AssistantCore } from "./index";
+import { answer, parseIntent, type AssistantCore, type LlmResolver, type LlmSnapshot } from "./index";
 
 // Заглушка Core: возвращает заданное, чтобы проверить именно логику помощника.
 function fakeCore(over: Partial<AssistantCore> = {}): AssistantCore {
@@ -92,5 +92,62 @@ describe("Ответы помощника", () => {
   it("поиск без результата отвечает понятно", async () => {
     const r = await answer("найди Ромашка", fakeCore());
     assert.match(r.text, /ничего не найдено/);
+  });
+});
+
+describe("LLM-слой: вопросы вне готовых правил", () => {
+  const question = "во сколько мне сегодня выходить чтобы успеть";
+
+  it("без резолвера непонятый вопрос — это подсказка (прежнее поведение)", async () => {
+    const r = await answer(question, fakeCore());
+    assert.match(r.text, /Что умею/);
+  });
+
+  it("резолвер может ответить словами — отдаём его текст", async () => {
+    const llm: LlmResolver = async () => ({ kind: "answer", text: "Тревог нет, можешь не спешить." });
+    const r = await answer(question, fakeCore(), { llm });
+    assert.match(r.text, /можешь не спешить/);
+  });
+
+  it("резолвер может распознать намерение — Core собирает честный ответ", async () => {
+    // LLM понял «непонятный» вопрос как «автоматы простаивают».
+    const llm: LlmResolver = async () => ({ kind: "intent", intent: { kind: "machines" } });
+    const r = await answer(question, fakeCore({
+      briefing: async () => ({ overdueMoney: 0, idleMachines: 3, pendingApprovals: 0, contractsDueSoon: 0, overdueTasks: 0 }),
+    }), { llm });
+    assert.match(r.text, /Простаивают автоматы: 3/);
+  });
+
+  it("резолвер получает снимок с фактами для заземления", async () => {
+    const seen: LlmSnapshot[] = [];
+    const llm: LlmResolver = async (_q, snapshot) => {
+      seen.push(snapshot);
+      return { kind: "answer", text: "ок" };
+    };
+    await answer(question, fakeCore({
+      briefing: async () => ({ overdueMoney: 5, idleMachines: 1, pendingApprovals: 0, contractsDueSoon: 2, overdueTasks: 0 }),
+      pendingApprovals: async () => [{ id: "a1", agent: "x", action: "y", tier: "T3" }],
+      recent: async () => [{ actorKind: "human", action: "approval.approved", actorRef: "panel", ts: "2026-07-28T10:00:00Z" }],
+    }), { llm });
+    assert.equal(seen.length, 1, "снимок должен дойти до резолвера");
+    const s = seen[0]!;
+    assert.equal(s.briefing.overdueMoney, 5);
+    assert.equal(s.pendingApprovals, 1);
+    assert.deepEqual(s.recentLabels, ["ты одобрил"]);
+    assert.match(s.domains, /vendhub/);
+  });
+
+  it("падение резолвера не роняет помощника — откат к подсказке", async () => {
+    const llm: LlmResolver = async () => {
+      throw new Error("нет ключа");
+    };
+    const r = await answer(question, fakeCore(), { llm });
+    assert.match(r.text, /Что умею/);
+  });
+
+  it("none от резолвера — честная подсказка, ничего не выдумываем", async () => {
+    const llm: LlmResolver = async () => ({ kind: "none" });
+    const r = await answer(question, fakeCore(), { llm });
+    assert.match(r.text, /Что умею/);
   });
 });

@@ -56,6 +56,9 @@ services:
       CORE_API_URL: http://mydon-core:3001
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
+      # LLM-слой помощника (FR-4). Пусто → бот работает по правилам.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
     command: ["node", "apps/bot/dist/index.js"]
 
   mydon-agents:
@@ -88,6 +91,9 @@ services:
       PORT: 3002
       HOSTNAME: 0.0.0.0
       CORE_API_URL: http://mydon-core:3001
+      # LLM-слой помощника (FR-4). Пусто → панель отвечает по правилам.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
     command: ["node_modules/.bin/next", "start", "-p", "3002"]
     ports:
       - "127.0.0.1:3002:3002"

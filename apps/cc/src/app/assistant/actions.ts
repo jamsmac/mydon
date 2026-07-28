@@ -1,6 +1,6 @@
 "use server";
 
-import { answer } from "@mydon/assistant";
+import { answer, createLlmResolver, type LlmResolver } from "@mydon/assistant";
 import { assistantCore } from "../../lib/assistant-core";
 
 export interface AskResult {
@@ -9,6 +9,15 @@ export interface AskResult {
 }
 
 const BASE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
+
+// LLM-слой включается только при наличии ключа. Нет ключа → помощник работает
+// по правилам, непонятые вопросы получают подсказку (без сбоев).
+const llm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
+  ? createLlmResolver({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),
+    })
+  : undefined;
 
 /** Запоминаем вопрос как событие — это эпизодическая память помощника. */
 async function remember(question: string): Promise<void> {
@@ -30,7 +39,7 @@ export async function ask(question: string): Promise<AskResult> {
   if (!clean) return { text: "Спроси что-нибудь — например «брифинг» или «что просрочено»." };
 
   try {
-    const reply = await answer(clean, assistantCore);
+    const reply = await answer(clean, assistantCore, llm ? { llm } : {});
     void remember(clean);
     return reply.approvalId ? { text: reply.text, approvalId: reply.approvalId } : { text: reply.text };
   } catch (err) {

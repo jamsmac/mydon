@@ -1,3 +1,4 @@
+import { answer, type LlmResolver } from "@mydon/assistant";
 import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, formatApproval, formatBriefing } from "./briefing";
 import type { CoreClient } from "./core-client";
@@ -9,6 +10,8 @@ export interface HandlerDeps {
   core: CoreClient;
   allowlist: Set<number>;
   limiter: RateLimiter;
+  /** LLM-слой: понимает вопросы вне правил. Нет ключа → ветка «непонятно» = подсказка. */
+  llm?: LlmResolver;
 }
 
 export interface Reply {
@@ -127,8 +130,16 @@ export async function handleMessage(
         return { text: [`Нашёл по «${intent.query}»:`, "", ...lines].join("\n") };
       }
 
-      default:
-        return { text: HELP };
+      default: {
+        // Непонятый правилами вопрос. Есть LLM — отдаём общему «мозгу» помощника
+        // (тот же answer(), что и в панели): распознает намерение → Core ответит
+        // фактами, либо короткий ответ по снимку. Нет ключа — подсказка.
+        if (!deps.llm) return { text: HELP };
+        const reply = await answer(text, deps.core, { llm: deps.llm });
+        return reply.approvalId
+          ? { text: reply.text, keyboard: approvalKeyboard(reply.approvalId) }
+          : { text: reply.text };
+      }
     }
   } catch (err) {
     // Наружу — понятная фраза, детали только в лог.
