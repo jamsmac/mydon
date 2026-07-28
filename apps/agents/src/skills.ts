@@ -27,7 +27,7 @@ export interface Proposal {
 export type Skill = (agent: AgentDefinition, core: AgentsCoreClient) => Promise<Proposal | null>;
 
 function asDomain(business: string): Domain {
-  const known = ["globerent", "vendhub", "trent", "personal", "mydon"];
+  const known = ["globerent", "vendhub", "personal", "mydon"];
   return (known.includes(business) ? business : "mydon") as Domain;
 }
 

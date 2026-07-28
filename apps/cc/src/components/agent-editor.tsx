@@ -17,7 +17,6 @@ const BUSINESSES = [
   { value: "shared", label: "Общий" },
   { value: "globerent", label: "GLOBERENT" },
   { value: "vendhub", label: "VendHub" },
-  { value: "trent", label: "TRent" },
   { value: "personal", label: "Личное" },
   { value: "mydon", label: "MYDON" },
 ];

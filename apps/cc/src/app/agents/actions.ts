@@ -82,7 +82,7 @@ export async function createAgent(form: FormData): Promise<ActionResult> {
   if (!/^[a-z][a-z0-9-]{1,63}$/.test(name)) {
     return {
       ok: false,
-      error: "Имя: латиница в нижнем регистре, цифры и дефис. Например: trent-ops",
+      error: "Имя: латиница в нижнем регистре, цифры и дефис. Например: globerent-ops",
     };
   }
 

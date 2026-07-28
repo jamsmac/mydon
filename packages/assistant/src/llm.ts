@@ -98,7 +98,7 @@ const SYSTEM = [
   "• Долги и просрочки без направления → overdue; по конкретному направлению → obligations с domain.",
   "• Поиск записи по названию → search с query.",
   "",
-  "Направления MYDON: globerent (погрузчики HELI), vendhub (кофе-автоматы), trent (аренда техники), personal (личное).",
+  "Направления MYDON: globerent (погрузчики HELI), vendhub (кофе-автоматы), personal (личное).",
 ].join("\n");
 
 /** exported для тестов: как факты снимка ложатся в запрос модели. */

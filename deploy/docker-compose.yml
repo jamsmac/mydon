@@ -95,8 +95,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
     command: ["node_modules/.bin/next", "start", "-p", "3002"]
+    # Панель нужна владельцу с телефона и компьютера — значит адрес Tailscale,
+    # а не только localhost. В интернет (eth0) порт по-прежнему не смотрит:
+    # PANEL_BIND задаёт конкретный интерфейс. По умолчанию — localhost, чтобы
+    # случайная выкладка без .env не открыла панель шире, чем задумано.
     ports:
-      - "127.0.0.1:3002:3002"
+      - "${PANEL_BIND:-127.0.0.1}:3002:3002"
 
 volumes:
   mydon-db-data:

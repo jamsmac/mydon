@@ -34,7 +34,7 @@ export function NewAgentForm() {
     <form action={onSubmit} className="form card">
       <label>
         <span>Имя (машинное)</span>
-        <input name="name" placeholder="trent-ops" autoFocus />
+        <input name="name" placeholder="globerent-ops" autoFocus />
         <small className="hint">
           Латиница, цифры и дефис. По этому имени агент виден в журнале — потом не меняется.
         </small>
@@ -46,8 +46,7 @@ export function NewAgentForm() {
           <option value="shared">Общий</option>
           <option value="globerent">GLOBERENT</option>
           <option value="vendhub">VendHub</option>
-          <option value="trent">TRent</option>
-          <option value="personal">Личное</option>
+            <option value="personal">Личное</option>
           <option value="mydon">MYDON</option>
         </select>
       </label>

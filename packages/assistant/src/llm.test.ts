@@ -63,7 +63,7 @@ describe("LLM: заземление запроса", () => {
     briefing: { overdueMoney: 5, idleMachines: 2, pendingApprovals: 0, contractsDueSoon: 1, contractsBadDate: 2, overdueTasks: 3 },
     pendingApprovals: 4,
     recentLabels: ["ты одобрил", "агент попросил разрешения"],
-    domains: "globerent, vendhub, trent, personal",
+    domains: "globerent, vendhub, personal",
   };
 
   it("вопрос и факты снимка попадают в запрос к модели", () => {

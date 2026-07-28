@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 /** «shared» — кросс-доменный агент: рантайм подставляет это значение по умолчанию. */
-const DOMAINS = ["globerent", "vendhub", "trent", "personal", "mydon", "shared"];
+const DOMAINS = ["globerent", "vendhub", "personal", "mydon", "shared"];
 const STATUSES = ["active", "paused"];
 
 interface ScheduleEntry {

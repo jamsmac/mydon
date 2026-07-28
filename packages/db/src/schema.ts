@@ -3,7 +3,7 @@
  * Единый реестр по ТЗ §7: org · project · entity · person · task ·
  * approval · event · document · money_flow · note · audit_log.
  *
- * Принцип: сначала реестр, потом дашборд. Базы движков (VHM24, TRent) — отдельные, здесь не хранятся.
+ * Принцип: сначала реестр, потом дашборд. Базы движков (VHM24 и др.) — отдельные, здесь не хранятся.
  */
 import {
   pgTable,
@@ -17,7 +17,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 // ── Перечисления ──
-export const domainEnum = pgEnum("domain", ["globerent", "vendhub", "trent", "personal", "mydon"]);
+export const domainEnum = pgEnum("domain", ["globerent", "vendhub", "personal", "mydon"]);
 export const ownerKindEnum = pgEnum("owner_kind", ["human", "agent"]);
 export const taskStatusEnum = pgEnum("task_status", ["todo", "in_progress", "done", "cancelled"]);
 export const approvalTierEnum = pgEnum("approval_tier", ["T0", "T1", "T2", "T3", "T4"]);

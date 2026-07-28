@@ -9,15 +9,14 @@ export const TZ = "Asia/Tashkent" as const;
 /** Валюта по умолчанию. */
 export const DEFAULT_CURRENCY = "UZS" as const;
 
-/** Направления (домены) MYDON. */
-export const DOMAINS = ["globerent", "vendhub", "trent", "personal", "mydon"] as const;
+/** Направления (домены) MYDON. TRent убран по решению владельца 2026-07-28. */
+export const DOMAINS = ["globerent", "vendhub", "personal", "mydon"] as const;
 export type Domain = (typeof DOMAINS)[number];
 
 /** Читаемые названия доменов (для UI). */
 export const DOMAIN_LABELS: Record<Domain, string> = {
   globerent: "GLOBERENT",
   vendhub: "VendHub",
-  trent: "TRent",
   personal: "Личный контур",
   mydon: "MYDON",
 };

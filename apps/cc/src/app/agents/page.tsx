@@ -8,7 +8,6 @@ export const dynamic = "force-dynamic";
 const BUSINESS_LABEL: Record<string, string> = {
   globerent: "GLOBERENT",
   vendhub: "VendHub",
-  trent: "TRent",
   personal: "Личное",
   mydon: "MYDON",
   shared: "Общий",

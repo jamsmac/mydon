@@ -11,7 +11,9 @@ describe("@mydon/shared", () => {
     for (const d of DOMAINS) {
       assert.ok(DOMAIN_LABELS[d], `нет названия для домена ${d}`);
     }
-    assert.equal(DOMAINS.length, 5);
+    // Сторожим состав, а не число: молчаливое появление или пропажа направления
+    // ломает и панель, и агентов, и enum в базе. TRent убран владельцем 2026-07-28.
+    assert.deepEqual([...DOMAINS], ["globerent", "vendhub", "personal", "mydon"]);
   });
 
   it("уровни автономии агентов — от T0 до T4", () => {
