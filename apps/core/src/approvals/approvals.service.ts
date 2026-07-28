@@ -163,10 +163,21 @@ export class ApprovalsService {
       const name = typeof rec.name === "string" ? rec.name.trim().slice(0, 512) : "";
       if (name.length === 0) continue;
 
+      // Идентичность записи — внешний номер (серийник, ИНН), если он есть:
+      // две машины могут стоять в одной точке с одинаковым названием.
+      const ref = typeof rec.externalRef === "string" && rec.externalRef.length > 0
+        ? rec.externalRef.slice(0, 256)
+        : null;
       const [existing] = await tx
         .select({ id: entity.id })
         .from(entity)
-        .where(and(eq(entity.orgId, orgRow.id), eq(entity.type, type), eq(entity.name, name)))
+        .where(
+          and(
+            eq(entity.orgId, orgRow.id),
+            eq(entity.type, type),
+            ref !== null ? eq(entity.externalRef, ref) : eq(entity.name, name),
+          ),
+        )
         .limit(1);
       if (existing) {
         skipped += 1;
@@ -179,7 +190,7 @@ export class ApprovalsService {
           orgId: orgRow.id,
           type,
           name,
-          externalRef: typeof rec.externalRef === "string" ? rec.externalRef.slice(0, 256) : null,
+          externalRef: ref,
           attrs:
             rec.attrs !== null && typeof rec.attrs === "object"
               ? (rec.attrs as Record<string, unknown>)

@@ -159,4 +159,19 @@ describe("Одобренный импорт данных → карточки в
     assert.equal(row.decision, "approved");
     assert.equal(inserted.length, 0);
   });
+  it("две машины в одной точке (одно имя, разные серийники) — обе заводятся", async () => {
+    const { db, inserted } = importStub({
+      import: {
+        domain: "globerent",
+        type: "machine",
+        records: [
+          { name: "American hospital", externalRef: "3266181f0000" },
+          { name: "American hospital", externalRef: "9999181f0000" },
+        ],
+      },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 2, "разные серийники = разные машины, имя точки не важно");
+  });
 });

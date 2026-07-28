@@ -11,7 +11,13 @@ export function ApprovalCard({ item }: { item: Approval }) {
 
   function decide(decision: "approved" | "rejected" | "clarify") {
     startTransition(async () => {
-      setResult(await decideApproval(item.id, decision));
+      try {
+        setResult(await decideApproval(item.id, decision));
+      } catch {
+        // Сервер мог перезапускаться в момент нажатия: молчание выглядит как
+        // «кнопки не работают». Говорим честно и предлагаем повторить.
+        setResult({ ok: false, message: "Сервер не ответил — обнови страницу и нажми ещё раз" });
+      }
     });
   }
 
