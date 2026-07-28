@@ -6,6 +6,7 @@ import { DbModule } from "./db/db.module";
 import { EntitiesModule } from "./entities/entities.module";
 import { EventsModule } from "./events/events.module";
 import { HealthController } from "./health.controller";
+import { NotesModule } from "./notes/notes.module";
 import { PeopleModule } from "./people/people.module";
 import { RegistryModule } from "./registry/registry.module";
 import { RulesModule } from "./rules/rules.module";
@@ -22,6 +23,7 @@ import { VerificationModule } from "./verification/verification.module";
     ApprovalsModule,
     RegistryModule,
     RulesModule,
+    NotesModule,
     PeopleModule,
     TasksModule,
     VerificationModule,

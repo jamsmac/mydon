@@ -62,3 +62,6 @@ export const connectors = { cbu, vhm24, payments, zadarma };
 
 // Notion: отчёты агентов туда, куда владелец и так смотрит.
 export * from "./notion";
+
+// Cowork: агент и память Claude Desktop — читаются файлами с Мака владельца.
+export * from "./cowork";
