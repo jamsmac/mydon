@@ -21,11 +21,35 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     "auditLog",
   ];
 
+  // Служебные таблицы вне §7. Держим отдельным списком, чтобы состав реестра
+  // оставался под охраной, а новые служебные добавлялись осознанно.
+  const SERVICE = ["agent"];
+
   it("содержит все 11 таблиц реестра", () => {
     for (const name of REQUIRED) {
       assert.ok(name in schema, `в схеме нет таблицы ${name}`);
     }
-    assert.equal(Object.keys(schema).length, REQUIRED.length);
+    assert.equal(REQUIRED.length, 11, "состав реестра §7 не должен меняться молча");
+  });
+
+  it("служебные таблицы объявлены явно, лишних в схеме нет", () => {
+    for (const name of SERVICE) {
+      assert.ok(name in schema, `в схеме нет служебной таблицы ${name}`);
+    }
+    assert.equal(
+      Object.keys(schema).length,
+      REQUIRED.length + SERVICE.length,
+      "появилась таблица, не внесённая ни в реестр §7, ни в список служебных",
+    );
+  });
+
+  it("настройки агентов переживают обновление системы", () => {
+    const cols = Object.keys(schema.agent as unknown as Record<string, unknown>);
+    // Раньше настройки жили в файлах образа и слетали при пересборке.
+    assert.ok(cols.includes("schedule"), "расписания должны храниться в базе");
+    assert.ok(cols.includes("autonomyDefault"), "уровень самостоятельности — настройка владельца");
+    assert.ok(cols.includes("nonGoals"), "границы агента: чего он НЕ делает");
+    assert.ok(cols.includes("archivedAt"), "удаление — архивация, история должна оставаться");
   });
 
   it("у ключевых таблиц есть обязательные поля", () => {

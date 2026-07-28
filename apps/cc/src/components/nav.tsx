@@ -9,6 +9,7 @@ import { DOMAIN_LABELS, DOMAINS } from "@mydon/shared";
 const MAIN = [
   { href: "/mydon", icon: "◉", label: "Главное" },
   { href: "/approvals", icon: "✋", label: "Решения" },
+  { href: "/agents", icon: "⚙", label: "Агенты" },
   { href: "/registry", icon: "▤", label: "Реестр" },
   { href: "/audit", icon: "≡", label: "Журнал" },
 ];

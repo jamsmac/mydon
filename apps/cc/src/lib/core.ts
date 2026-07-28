@@ -74,8 +74,63 @@ export interface Obligations {
   overdue: { id: string; amount: string; currency: string; date: string; status: string }[];
 }
 
+/** Настройки агента — то, что владелец видит и меняет в карточке. */
+export interface AgentCard {
+  id: string;
+  name: string;
+  business: string;
+  status: "active" | "paused" | "draft" | "deprecated";
+  description: string | null;
+  mission: string | null;
+  nonGoals: string[];
+  autonomyDefault: "T0" | "T1" | "T2" | "T3" | "T4";
+  skills: string[];
+  schedule: { cron: string; skill: string }[];
+  budgetPerDayUsd: string | null;
+  archivedAt: string | null;
+  updatedAt: string;
+}
+
+/** Запись в Core. Ошибку отдаём словами: её увидит владелец, а не разработчик. */
+async function send<T>(path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+      ...(body !== undefined
+        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+        : {}),
+    });
+  } catch (err) {
+    throw new CoreUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (!res.ok) {
+    // Core объясняет отказ по-человечески (например про неверное расписание) —
+    // показываем это объяснение, а не голый код ошибки.
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { message?: unknown };
+      const m = body.message;
+      if (typeof m === "string") detail = m;
+      else if (Array.isArray(m) && m.length > 0) detail = m.map(String).join("; ");
+    } catch {
+      // тело не JSON — оставляем код
+    }
+    throw new CoreUnavailable(detail);
+  }
+  return (await res.json()) as T;
+}
+
 export const core = {
   briefing: () => get<Briefing>("/registry/briefing"),
+  agents: () => get<AgentCard[]>("/agents"),
+  agent: (name: string) => get<AgentCard>(`/agents/${encodeURIComponent(name)}`),
+  createAgent: (input: Record<string, unknown>) => send<AgentCard>("/agents", "POST", input),
+  updateAgent: (name: string, patch: Record<string, unknown>) =>
+    send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "PATCH", patch),
+  archiveAgent: (name: string) => send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "DELETE"),
   pendingApprovals: () => get<Approval[]>("/approvals/pending"),
   allApprovals: () => get<Approval[]>("/approvals"),
   audit: (limit = 40) => get<AuditEntry[]>(`/audit?limit=${limit}`),

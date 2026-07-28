@@ -678,3 +678,124 @@ main {
     border-radius: 16px;
   }
 }
+
+/* ── Карточка агента: формы настроек ──────────────────── */
+.card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.card-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.form {
+  display: grid;
+  gap: 14px;
+}
+.form label {
+  display: grid;
+  gap: 6px;
+}
+.form label > span {
+  font-size: 13px;
+  color: var(--steel);
+}
+.form input,
+.form select,
+.form textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--navy);
+  color: var(--white);
+  font: inherit;
+  font-size: 15px;
+}
+.form textarea {
+  resize: vertical;
+  font-family: var(--font-mono), monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.form input:focus,
+.form select:focus,
+.form textarea:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+.hint {
+  color: var(--steel);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.btn {
+  padding: 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--white);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--blue);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.btn.primary {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.btn.danger-btn {
+  border-color: var(--orange);
+  color: var(--orange);
+}
+.ok-text {
+  color: #3ddc84;
+  font-size: 14px;
+}
+.err-text {
+  color: var(--orange);
+  font-size: 14px;
+}
+.danger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.rowlink {
+  text-decoration: none;
+  color: inherit;
+}
+.rowlink:hover {
+  border-color: var(--blue);
+}
+.back {
+  display: inline-block;
+  color: var(--steel);
+  text-decoration: none;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+.back:hover {
+  color: var(--blue);
+}

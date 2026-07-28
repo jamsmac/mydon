@@ -105,6 +105,35 @@ export class AgentsCoreClient {
     return this.request(`/entities${suffix ? `?${suffix}` : ""}`);
   }
 
+  // ── Настройки агентов: источник истины — база Core, а не файлы образа ──
+  // Файлы-паспорта остаются начальным сидом; правки владельца в карточке
+  // переживают обновление системы только потому, что живут в базе.
+
+  /** Перенести паспорта-файлы в базу. Идемпотентно: существующих не трогает. */
+  seedAgents(agents: unknown[]): Promise<{ seeded: number; skipped: number }> {
+    return this.request<{ seeded: number; skipped: number }>("/agents/seed", {
+      method: "POST",
+      body: JSON.stringify({ agents }),
+    });
+  }
+
+  /** Настройки агентов из базы — то, что владелец видит и меняет в карточке. */
+  listAgents(): Promise<
+    {
+      name: string;
+      business: string;
+      status: string;
+      description: string | null;
+      autonomyDefault: "T0" | "T1" | "T2" | "T3" | "T4";
+      skills: unknown;
+      schedule: unknown;
+      budgetPerDayUsd: string | null;
+      archivedAt: string | null;
+    }[]
+  > {
+    return this.request("/agents");
+  }
+
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }

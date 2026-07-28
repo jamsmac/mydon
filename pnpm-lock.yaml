@@ -134,6 +134,9 @@ importers:
       class-validator:
         specifier: ^0.14.1
         version: 0.14.4
+      croner:
+        specifier: ^9.0.0
+        version: 9.1.0
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1

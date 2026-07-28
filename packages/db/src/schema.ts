@@ -171,6 +171,41 @@ export const auditLog = pgTable(
   (t) => [index("audit_log_ts_idx").on(t.ts)],
 );
 
+// ── agent: настройки агентов (карточка агента в панели) ──
+// Раньше настройки жили только в файлах внутри образа — правки владельца
+// слетали бы при каждом обновлении. Здесь они переживают пересборку.
+// Паспорта-файлы остаются НАЧАЛЬНЫМ сидом: первый запуск переносит их сюда.
+export const agent = pgTable(
+  "agent",
+  {
+    id: id(),
+    /** Машинное имя (vendhub-ops). По нему агент связан с журналом и согласованиями. */
+    name: text("name").notNull().unique(),
+    /** Направление бизнеса; shared — общий для всех. */
+    business: text("business").default("shared").notNull(),
+    /** active | paused | draft | deprecated — работает ли агент. */
+    status: text("status").default("paused").notNull(),
+    description: text("description"),
+    /** Зачем агент нужен — владелец должен видеть это словами. */
+    mission: text("mission"),
+    /** Чего агент НЕ делает: границы важнее возможностей. */
+    nonGoals: jsonb("non_goals").default([]).notNull(),
+    /** Уровень самостоятельности по умолчанию (T0…T4). */
+    autonomyDefault: approvalTierEnum("autonomy_default").default("T1").notNull(),
+    /** Навыки агента: ["monitor-stock", ...]. */
+    skills: jsonb("skills").default([]).notNull(),
+    /** Расписания: [{cron, skill}]. Меняются целиком при сохранении карточки. */
+    schedule: jsonb("schedule").default([]).notNull(),
+    /** Дневной потолок трат, USD. */
+    budgetPerDayUsd: numeric("budget_per_day_usd", { precision: 10, scale: 2 }),
+    /** Архив: агент убран из работы, но его история сохранена. */
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("agent_status_idx").on(t.status)],
+);
+
 /** Полная схема — для drizzle-клиента. */
 export const schema = {
   org,
@@ -184,4 +219,5 @@ export const schema = {
   moneyFlow,
   note,
   auditLog,
+  agent,
 };
