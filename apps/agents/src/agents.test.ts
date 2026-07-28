@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { autonomyThreshold, explainPolicy, requiresApproval, tierRank } from "./policy";
 import { loadAgents } from "./registry";
 import { runSkill } from "./runner";
+import { SKILLS } from "./skills";
 import type { AgentDefinition } from "./registry";
 
 const AGENTS_DIR = path.resolve(__dirname, "../agents");
@@ -59,9 +62,28 @@ describe("Паспорта агентов (перенесены как есть)
   });
 
   it("статус разбирается даже с комментарием в строке", () => {
-    const byName = Object.fromEntries(agents.map((a) => [a.name, a]));
-    assert.equal(byName["call-analyst"].status, "active");
-    assert.equal(byName["chief-of-staff"].status, "paused");
+    // Проверяем САМ разбор на временном паспорте: привязка к статусу живого
+    // агента ломала бы тест при каждом включении/выключении агента владельцем.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mydon-agents-"));
+    try {
+      const dir = path.join(tmp, "sample");
+      fs.mkdirSync(dir);
+      fs.writeFileSync(
+        path.join(dir, "config.yaml"),
+        "name: sample\nbusiness: shared\nstatus: active   # active | paused | draft\nautonomy_default: T1\n",
+      );
+      const res = loadAgents(tmp);
+      assert.deepEqual(res.errors, []);
+      assert.equal(res.agents[0]?.status, "active");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("статусы боевых паспортов — только из допустимого набора", () => {
+    for (const a of agents) {
+      assert.ok(["active", "paused", "draft", "deprecated"].includes(a.status), `${a.name}: ${a.status}`);
+    }
   });
 
   it("несуществующий каталог даёт ошибку, а не падение", () => {
@@ -78,45 +100,158 @@ describe("Прогон навыка", () => {
     status: "active",
     autonomyDefault: "T1",
     schedule: [],
-    skills: ["do-something"],
+    skills: ["watch-receivables"],
     dir: "/tmp",
   };
 
-  function stubCore() {
+  const EMPTY_BRIEFING = {
+    overdueMoney: 0,
+    idleMachines: 0,
+    pendingApprovals: 0,
+    contractsDueSoon: 0,
+    contractsBadDate: 0,
+    overdueTasks: 0,
+  };
+
+  /** Заглушка Core: по умолчанию данных нет — как на пустой базе владельца. */
+  function stubCore(over: Record<string, unknown> = {}) {
     const calls: string[] = [];
+    const captured: { action?: string; payload?: Record<string, unknown> } = {};
     return {
       calls,
+      captured,
       client: {
         recordEvent: async () => {
           calls.push("event");
         },
-        requestApproval: async () => {
+        requestApproval: async (input: { action: string; payload?: Record<string, unknown> }) => {
           calls.push("approval");
+          captured.action = input.action;
+          if (input.payload) captured.payload = input.payload;
           return { id: "appr-1" };
         },
+        briefing: async () => EMPTY_BRIEFING,
+        obligations: async () => ({
+          domain: "globerent",
+          totals: [],
+          overdue: [],
+          overdueTotal: 0,
+          overdueTruncated: false,
+        }),
+        entities: async () => [],
+        ...over,
       } as never,
     };
   }
 
-  it("при пороге T0 запрашивает согласование, а не исполняет", async () => {
+  it("нет повода в данных — согласование НЕ создаётся (очередь остаётся сигналом)", async () => {
     const { client, calls } = stubCore();
-    const res = await runSkill(base, "do-something", client, "T0");
+    const res = await runSkill(base, "watch-receivables", client, "T0");
+    assert.equal(res.outcome, "skipped");
+    assert.match(res.reason, /повода нет/);
+    assert.deepEqual(calls, ["event"], "событие о прогоне есть, а пустого согласования быть не должно");
+  });
+
+  it("есть просрочка — при T0 выносит ПРЕДМЕТНОЕ предложение с фактами", async () => {
+    const { client, calls, captured } = stubCore({
+      obligations: async () => ({
+        domain: "globerent",
+        totals: [],
+        overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+        overdueTotal: 3,
+        overdueTruncated: false,
+      }),
+    });
+    const res = await runSkill(base, "watch-receivables", client, "T0");
     assert.equal(res.outcome, "approval_requested");
     assert.equal(res.approvalId, "appr-1");
-    assert.deepEqual(calls, ["event", "approval"], "должно быть записано событие и создан запрос");
+    assert.deepEqual(calls, ["event", "approval"]);
+    assert.match(captured.action ?? "", /дебиторк/i, "формулировка должна быть по делу, а не именем навыка");
+    assert.match(captured.action ?? "", /3 позиц/, "владельцу нужна конкретика: сколько позиций");
+    assert.equal((captured.payload?.facts as Record<string, unknown>)?.overdueTotal, 3, "факты кладутся для проверки по следам");
+  });
+
+  it("нереализованный навык честно помечается, а не изображает работу", async () => {
+    const { client, calls } = stubCore();
+    const res = await runSkill(base, "draft-reminder", client, "T0");
+    assert.equal(res.outcome, "skipped");
+    assert.match(res.reason, /не подключён/);
+    assert.deepEqual(calls, ["event"]);
   });
 
   it("агент на паузе не запускается вовсе", async () => {
     const { client, calls } = stubCore();
-    const res = await runSkill({ ...base, status: "paused" }, "do-something", client, "T4");
+    const res = await runSkill({ ...base, status: "paused" }, "watch-receivables", client, "T4");
     assert.equal(res.outcome, "skipped");
     assert.deepEqual(calls, [], "у остановленного агента не должно быть ни событий, ни запросов");
   });
 
-  it("при поднятом пороге исполняет без согласования", async () => {
-    const { client, calls } = stubCore();
-    const res = await runSkill(base, "do-something", client, "T2");
+  it("при поднятом пороге исполняет без согласования (когда повод есть)", async () => {
+    const { client, calls } = stubCore({
+      obligations: async () => ({
+        domain: "globerent",
+        totals: [],
+        overdue: [{ id: "m1", amount: "1000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+        overdueTotal: 1,
+        overdueTruncated: false,
+      }),
+    });
+    const res = await runSkill(base, "watch-receivables", client, "T2");
     assert.equal(res.outcome, "executed");
     assert.deepEqual(calls, ["event"]);
+  });
+});
+
+describe("Навыки агентов, подключённые к Core", () => {
+  const agent: AgentDefinition = {
+    name: "a", business: "vendhub", status: "active", autonomyDefault: "T1",
+    schedule: [], skills: [], dir: "/tmp",
+  };
+  const briefing = {
+    overdueMoney: 0, idleMachines: 0, pendingApprovals: 0,
+    contractsDueSoon: 0, contractsBadDate: 0, overdueTasks: 0,
+  };
+
+  it("monitor-stock молчит, когда все автоматы работают", async () => {
+    const core = { briefing: async () => briefing } as never;
+    assert.equal(await SKILLS["monitor-stock"](agent, core), null);
+  });
+
+  it("monitor-stock предлагает проверку, когда есть простой", async () => {
+    const core = { briefing: async () => ({ ...briefing, idleMachines: 4 }) } as never;
+    const p = await SKILLS["monitor-stock"](agent, core);
+    assert.ok(p, "должно быть предложение");
+    assert.match(p.action, /4/);
+    assert.equal(p.facts.idleMachines, 4);
+  });
+
+  it("morning-digest молчит при полном штиле и не дёргает владельца", async () => {
+    const core = { briefing: async () => briefing } as never;
+    assert.equal(await SKILLS["morning-digest"](agent, core), null);
+  });
+
+  it("morning-digest сообщает и о нераспознанных датах (известная неизвестность)", async () => {
+    const core = { briefing: async () => ({ ...briefing, contractsBadDate: 7 }) } as never;
+    const p = await SKILLS["morning-digest"](agent, core);
+    assert.ok(p);
+    assert.match(p.action, /нераспознанной датой: 7/);
+  });
+
+  it("watch-receivables показывает сумму и что список урезан", async () => {
+    const core = {
+      obligations: async () => ({
+        domain: "globerent", totals: [],
+        overdue: [
+          { id: "1", amount: "1500000", currency: "UZS", date: "2026-01-10", direction: "in", status: "plan" },
+          { id: "2", amount: "500000", currency: "UZS", date: "2026-02-10", direction: "in", status: "plan" },
+        ],
+        overdueTotal: 250, overdueTruncated: true,
+      }),
+    } as never;
+    const p = await SKILLS["watch-receivables"]({ ...agent, business: "globerent" }, core);
+    assert.ok(p);
+    assert.match(p.action, /250 позиций/);
+    assert.match(p.action, /показаны первые 2/, "нельзя выдавать урезанный список за полный");
+    assert.equal(p.facts.sum, 2000000);
   });
 });

@@ -1,6 +1,6 @@
 name: mydon-finance
 business: globerent
-status: paused
+status: active
 description: Финансовый дайджест и контроль дебиторки (приоритет — риск концентрации OLMA в GLOBERENT) + черновики напоминаний о платежах.
 
 # Графики (TZ Asia/Tashkent). Понедельник 09:00 — недельный обзор дебиторки/кэша.

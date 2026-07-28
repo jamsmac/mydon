@@ -1,6 +1,6 @@
 name: chief-of-staff
 business: shared
-status: paused
+status: active
 description: Оркестратор и Telegram-шлюз. Маршрутизирует задачи, собирает дайджесты.
 
 schedule:

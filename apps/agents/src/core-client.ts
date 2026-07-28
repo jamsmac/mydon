@@ -1,4 +1,33 @@
-import type { AutonomyTier } from "@mydon/shared";
+import type { AutonomyTier, Domain } from "@mydon/shared";
+
+/** Сводка Core — на её основе навыки решают, есть ли повод что-то предлагать. */
+export interface AgentsBriefing {
+  overdueMoney: number;
+  idleMachines: number;
+  pendingApprovals: number;
+  contractsDueSoon: number;
+  contractsBadDate: number;
+  overdueTasks: number;
+}
+
+/** Просроченная позиция обязательств (форма Core: money_flow). */
+export interface OverdueRow {
+  id: string;
+  amount: string;
+  currency: string;
+  date: string;
+  direction: string;
+  status: string;
+  counterpartyId?: string | null;
+}
+
+export interface AgentsObligations {
+  domain: Domain;
+  totals: unknown[];
+  overdue: OverdueRow[];
+  overdueTotal: number;
+  overdueTruncated: boolean;
+}
 
 /**
  * Клиент агентов к MYDON Core.
@@ -48,6 +77,32 @@ export class AgentsCoreClient {
     payload?: Record<string, unknown>;
   }): Promise<unknown> {
     return this.request("/events", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  // ── Чтение данных: агент смотрит факты ПЕРЕД тем, как что-то предлагать ──
+  // Без этого навык слал бы согласование «в пустоту», приучая владельца
+  // одобрять не глядя. Очередь должна оставаться сигналом, а не лентой.
+
+  /** Сводка по системе — есть ли вообще повод для предложения. */
+  briefing(): Promise<AgentsBriefing> {
+    return this.request<AgentsBriefing>("/registry/briefing");
+  }
+
+  /** Обязательства направления: просрочка с суммами и датами. */
+  obligations(domain: Domain): Promise<AgentsObligations> {
+    return this.request<AgentsObligations>(`/registry/obligations/${domain}`);
+  }
+
+  /** Записи реестра (автоматы, контрагенты, договоры). */
+  entities(params: { domain?: Domain; type?: string; q?: string } = {}): Promise<
+    { id: string; type: string; name: string; attrs: Record<string, unknown> }[]
+  > {
+    const qs = new URLSearchParams();
+    if (params.domain) qs.set("domain", params.domain);
+    if (params.type) qs.set("type", params.type);
+    if (params.q) qs.set("q", params.q);
+    const suffix = qs.toString();
+    return this.request(`/entities${suffix ? `?${suffix}` : ""}`);
   }
 
   health(): Promise<{ status: string }> {

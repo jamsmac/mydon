@@ -1,6 +1,6 @@
 name: vendhub-ops
 business: vendhub
-status: paused
+status: active
 description: Мониторинг 31 автомата, деплеция, заявки, маршрут.
 
 schedule:

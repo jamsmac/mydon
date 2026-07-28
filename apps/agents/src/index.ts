@@ -6,6 +6,7 @@ import { AgentsCoreClient } from "./core-client";
 import { autonomyThreshold } from "./policy";
 import { loadAgents } from "./registry";
 import { runSkill } from "./runner";
+import { hasSkill } from "./skills";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
@@ -52,8 +53,15 @@ async function main(): Promise<void> {
   }
 
   let jobs = 0;
+  const notWired: string[] = [];
   for (const agent of active) {
     for (const item of agent.schedule) {
+      // Навык без реализации планировать бессмысленно: он всё равно вернёт
+      // «не подключён». Говорим об этом один раз, а не по будильнику каждый день.
+      if (!hasSkill(item.skill)) {
+        notWired.push(`${agent.name}/${item.skill}`);
+        continue;
+      }
       try {
         new Cron(item.cron, { timezone: TZ, name: `${agent.name}:${item.skill}` }, () => {
           void (async () => {
@@ -76,6 +84,9 @@ async function main(): Promise<void> {
   }
 
   console.log(`Запланировано заданий: ${jobs} (часовой пояс ${TZ}).`);
+  if (notWired.length > 0) {
+    console.log(`Навыки без реализации (не планируются): ${notWired.join(", ")}.`);
+  }
   if (jobs === 0) {
     console.log("Активных расписаний нет — жду появления.");
     await idle();
