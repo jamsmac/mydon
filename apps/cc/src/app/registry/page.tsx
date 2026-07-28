@@ -23,6 +23,7 @@ const TYPE_LABELS: Record<string, string> = {
   equipment: "техника",
   object: "объекты",
   invoice: "счета",
+  product: "товары",
 };
 const typeLabel = (t: string): string => TYPE_LABELS[t] ?? t;
 
