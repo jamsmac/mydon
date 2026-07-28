@@ -13,6 +13,7 @@
     "check:passports": "node dist/check-passports.js"
   },
   "dependencies": {
+    "@mydon/connectors": "workspace:*",
     "@mydon/shared": "workspace:*",
     "croner": "^9.0.0",
     "dotenv": "^16.4.7",

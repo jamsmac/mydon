@@ -74,6 +74,10 @@ services:
       # Порог автономии: T0 — агенты только предлагают (ответ владельца Ф6)
       AGENT_AUTONOMY_MAX: ${AGENT_AUTONOMY_MAX:-T0}
       AGENTS_SCHEDULES_PAUSED: ${AGENTS_SCHEDULES_PAUSED:-1}
+      # Notion: отчёты агентов туда, куда владелец и так смотрит.
+      # Пусто → агенты работают, но в Notion не пишут.
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_PARENT_PAGE_ID: ${NOTION_PARENT_PAGE_ID:-}
     command: ["node", "apps/agents/dist/index.js"]
 
   # Веб-панель (оболочка Command Center). Наружу не публикуется:

@@ -32,6 +32,9 @@ importers:
 
   apps/agents:
     dependencies:
+      '@mydon/connectors':
+        specifier: workspace:*
+        version: link:../../packages/connectors
       '@mydon/shared':
         specifier: workspace:*
         version: link:../../packages/shared

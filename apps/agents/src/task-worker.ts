@@ -1,3 +1,4 @@
+import { notion } from "@mydon/connectors";
 import type { AutonomyTier } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
 import type { AgentDefinition } from "./registry";
@@ -86,10 +87,15 @@ export async function runAgentTasks(
     // Есть предложение. При пороге T0 агент не действует сам: результат идёт
     // владельцу на согласование, а задача закрывается отчётом о находке.
     const run = await runSkill(agent, skill, core, threshold);
-    const note =
+    let note =
       run.outcome === "approval_requested"
         ? `${proposal.action}\n\nВынес на твоё решение.`
         : proposal.action;
+
+    // Notion — место, куда владелец и так смотрит. Отчёт уходит туда, ссылка —
+    // в задачу. Не настроен или не ответил — не беда: отчёт уже есть в MYDON.
+    const link = await publishToNotion(agent, skill, proposal.action, proposal.facts);
+    if (link !== null) note += `\n\nПодробнее: ${link}`;
 
     await core.setTaskStatus(t.id, "done", `agent:${agent.name}`, note);
     results.push({
@@ -100,4 +106,48 @@ export async function runAgentTasks(
   }
 
   return results;
+}
+
+/**
+ * Публикация находки в Notion.
+ *
+ * Возвращает ссылку или null. Ошибка Notion НЕ должна ронять работу агента:
+ * отчёт уже записан в MYDON, Notion — дополнительное место для чтения,
+ * а не источник правды.
+ */
+async function publishToNotion(
+  agent: AgentDefinition,
+  skill: string,
+  action: string,
+  facts: Record<string, unknown>,
+): Promise<string | null> {
+  const config = notion.fromEnv();
+  if (config === null) return null; // не настроен — молчим
+
+  try {
+    const { url } = await notion.publish(
+      {
+        title: `${action.slice(0, 80)} — ${new Date().toLocaleDateString("ru-RU")}`,
+        author: agent.name,
+        blocks: [
+          { heading: "Что нашёл", paragraphs: [action] },
+          {
+            heading: "На чём это основано",
+            // Факты рядом с выводом: по ним видно, что агент не выдумал повод.
+            bullets: Object.entries(facts).map(([k, v]) => `${k}: ${String(v)}`),
+          },
+          {
+            paragraphs: [
+              `Навык: ${skill}. Решение принимает владелец — агент только предлагает.`,
+            ],
+          },
+        ],
+      },
+      config,
+    );
+    return url;
+  } catch (err) {
+    console.error(`[${agent.name}] отчёт в Notion не опубликован:`, err);
+    return null;
+  }
 }

@@ -59,3 +59,6 @@ export const zadarma = {
 
 /** Реестр коннекторов. */
 export const connectors = { cbu, vhm24, payments, zadarma };
+
+// Notion: отчёты агентов туда, куда владелец и так смотрит.
+export * from "./notion";
