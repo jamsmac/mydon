@@ -20,6 +20,8 @@ import {
 export const domainEnum = pgEnum("domain", ["globerent", "vendhub", "personal", "mydon"]);
 export const ownerKindEnum = pgEnum("owner_kind", ["human", "agent"]);
 export const taskStatusEnum = pgEnum("task_status", ["todo", "in_progress", "done", "cancelled"]);
+/** Оценка сделанной задачи владельцем: качество должно отмечаться, а не подразумеваться. */
+export const taskQualityEnum = pgEnum("task_quality", ["excellent", "accepted", "redo"]);
 export const approvalTierEnum = pgEnum("approval_tier", ["T0", "T1", "T2", "T3", "T4"]);
 export const approvalDecisionEnum = pgEnum("approval_decision", [
   "pending",
@@ -77,6 +79,8 @@ export const person = pgTable("person", {
   orgId: uuid("org_id").references(() => org.id),
   name: text("name").notNull(),
   role: text("role"),
+  /** Направление, куда нанят: сотрудник живёт внутри GLOBERENT/VendHub, а не отдельно. */
+  domain: domainEnum("domain"),
   email: text("email"),
   phone: text("phone"),
   /** @username в Telegram — как владелец записал в карточке. */
@@ -109,6 +113,8 @@ export const task = pgTable(
     createdBy: text("created_by"),
     /** Отчёт при закрытии: без него «сделано» ничего не значит. */
     resultNote: text("result_note"),
+    /** Оценка владельца после «сделано»: отлично / принято / переделать. */
+    quality: taskQualityEnum("quality"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     /** Когда исполнителю уже напомнили — чтобы не слать одно и то же дважды. */
     remindedAt: timestamp("reminded_at", { withTimezone: true }),

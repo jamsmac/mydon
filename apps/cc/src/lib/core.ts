@@ -137,6 +137,8 @@ export interface Task {
   source: string | null;
   createdBy: string | null;
   resultNote: string | null;
+  /** Оценка владельца после «сделано»: excellent / accepted / redo. */
+  quality: "excellent" | "accepted" | "redo" | null;
   completedAt: string | null;
   createdAt: string;
 }
@@ -154,6 +156,8 @@ export interface Person {
   id: string;
   name: string;
   role: string | null;
+  /** Направление, куда нанят. */
+  domain: string | null;
   email: string | null;
   phone: string | null;
   tgUsername: string | null;
@@ -169,6 +173,10 @@ export interface Workload {
   open: number;
   overdue: number;
   doneLast7d: number;
+  excellent: number;
+  redo: number;
+  doneOnTime: number;
+  doneWithDue: number;
 }
 
 export const core = {
@@ -184,6 +192,8 @@ export const core = {
   taskComments: (id: string) => get<TaskComment[]>(`/tasks/${id}/comments`),
   workload: () => get<Workload[]>("/tasks/workload"),
   createTask: (input: Record<string, unknown>) => send<Task>("/tasks", "POST", input),
+  rateTask: (id: string, quality: "excellent" | "accepted" | "redo") =>
+    send<Task>(`/tasks/${id}/quality`, "POST", { quality }),
   setTaskStatus: (id: string, input: Record<string, unknown>) =>
     send<Task>(`/tasks/${id}`, "PATCH", input),
   addTaskComment: (id: string, input: Record<string, unknown>) =>

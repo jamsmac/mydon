@@ -43,6 +43,15 @@ export function NewPersonForm() {
         <input name="role" placeholder="оператор автоматов" />
       </label>
       <label>
+        <span>Направление</span>
+        <select name="domain" defaultValue="">
+          <option value="">без направления</option>
+          <option value="globerent">GLOBERENT</option>
+          <option value="vendhub">VendHub</option>
+          <option value="personal">Личный контур</option>
+        </select>
+      </label>
+      <label>
         <span>Телефон</span>
         <input name="phone" placeholder="+998 90 123-45-67" inputMode="tel" />
       </label>

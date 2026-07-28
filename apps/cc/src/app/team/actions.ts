@@ -22,6 +22,7 @@ export async function createPerson(form: FormData): Promise<ActionResult> {
     await core.createPerson({
       name,
       role: String(form.get("role") ?? "").trim() || null,
+      domain: String(form.get("domain") ?? "").trim() || null,
       phone: String(form.get("phone") ?? "").trim() || null,
       tgUsername: String(form.get("tgUsername") ?? "").trim() || null,
     });
@@ -37,6 +38,7 @@ export async function savePerson(id: string, form: FormData): Promise<ActionResu
     await core.updatePerson(id, {
       name: String(form.get("name") ?? "").trim(),
       role: String(form.get("role") ?? "").trim() || null,
+      domain: String(form.get("domain") ?? "").trim() || null,
       phone: String(form.get("phone") ?? "").trim() || null,
       email: String(form.get("email") ?? "").trim() || null,
       tgUsername: String(form.get("tgUsername") ?? "").trim() || null,

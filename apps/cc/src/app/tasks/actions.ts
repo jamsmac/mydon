@@ -64,6 +64,22 @@ export async function completeTask(id: string, resultNote: string): Promise<Acti
   return { ok: true };
 }
 
+/** Оценка сделанной задачи. «Переделать» возвращает её в работу с напоминаниями. */
+export async function rateTask(
+  id: string,
+  quality: "excellent" | "accepted" | "redo",
+): Promise<ActionResult> {
+  try {
+    await core.rateTask(id, quality);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/tasks");
+  revalidatePath(`/tasks/${id}`);
+  revalidatePath("/team");
+  return { ok: true };
+}
+
 /** Смена статуса без закрытия: «взял в работу», «отменить». */
 export async function changeStatus(
   id: string,

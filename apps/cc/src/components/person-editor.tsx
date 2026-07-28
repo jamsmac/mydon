@@ -60,6 +60,16 @@ export function PersonEditor({ person }: { person: Person }) {
           <input name="role" defaultValue={person.role ?? ""} placeholder="оператор автоматов" />
         </label>
         <label>
+          <span>Направление</span>
+          <select name="domain" defaultValue={person.domain ?? ""}>
+            <option value="">без направления</option>
+            <option value="globerent">GLOBERENT</option>
+            <option value="vendhub">VendHub</option>
+            <option value="personal">Личный контур</option>
+          </select>
+          <small className="hint">Куда нанят: задачи и качество видны внутри этого дела.</small>
+        </label>
+        <label>
           <span>Телефон</span>
           <input name="phone" defaultValue={person.phone ?? ""} inputMode="tel" />
         </label>

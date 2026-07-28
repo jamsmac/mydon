@@ -67,6 +67,11 @@ export class SetStatusDto {
   resultNote?: string;
 }
 
+export class SetQualityDto {
+  @IsIn(["excellent", "accepted", "redo"])
+  quality!: "excellent" | "accepted" | "redo";
+}
+
 export class AddCommentDto {
   @IsString() @IsNotEmpty() @MaxLength(2000)
   body!: string;
@@ -137,6 +142,12 @@ export class TasksController {
   }
 
   /** Отметка «напомнили» — чтобы одно и то же не слалось дважды. */
+  /** Оценка сделанной задачи. «Переделать» возвращает её в работу. */
+  @Post(":id/quality")
+  rate(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetQualityDto) {
+    return this.tasks.rate(id, dto.quality);
+  }
+
   @Post(":id/reminded")
   async markReminded(@Param("id", ParseUUIDPipe) id: string) {
     await this.tasks.markReminded(id);

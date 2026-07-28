@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, task, taskComment } from "@mydon/db";
 import type { Domain } from "@mydon/shared";
 import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL } from "drizzle-orm";
@@ -28,6 +28,12 @@ export interface WorkloadRow {
   open: number;
   overdue: number;
   doneLast7d: number;
+  /** Качество: сколько сделанных отмечено «отлично» и сколько вернулось на доработку. */
+  excellent: number;
+  redo: number;
+  /** Дисциплина сроков: сделано в срок / сделано со сроком. */
+  doneOnTime: number;
+  doneWithDue: number;
 }
 
 /**
@@ -195,6 +201,49 @@ export class TasksService {
   }
 
   /** Комментарий = уточнение, вопрос или отчёт. Проверяем, что задача есть. */
+  /**
+   * Оценка сделанной задачи владельцем: отлично / принято / переделать.
+   *
+   * «Переделать» — не просто отметка: задача возвращается в работу, отчёт
+   * остаётся в переписке, а напоминания включаются заново. Так качество
+   * отмечается делом, а не забытым флажком.
+   */
+  async rate(id: string, quality: "excellent" | "accepted" | "redo", actorRef = "owner"): Promise<TaskRow> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx.select().from(task).where(eq(task.id, id));
+      if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
+      if (row.status !== "done") {
+        throw new BadRequestException("Оценить можно только сделанную задачу");
+      }
+
+      const patch: Record<string, unknown> = { quality };
+      if (quality === "redo") {
+        patch.status = "in_progress";
+        patch.completedAt = null;
+        patch.remindedAt = null; // напоминания должны включиться заново
+      }
+      const [updated] = await tx.update(task).set(patch).where(eq(task.id, id)).returning();
+
+      if (quality === "redo") {
+        await tx.insert(taskComment).values({
+          taskId: id,
+          authorRef: actorRef,
+          body: `Возвращено на доработку. Прошлый отчёт: ${row.resultNote ?? "—"}`,
+        });
+      }
+
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: quality === "redo" ? "task.redo" : "task.rated",
+        target: id,
+        before: row,
+        after: updated,
+      });
+      return updated;
+    });
+  }
+
   async addComment(taskId: string, authorRef: string, body: string): Promise<CommentRow> {
     await this.byId(taskId);
     const [created] = await this.db
@@ -257,6 +306,16 @@ export class TasksService {
           sql<number>`count(*) filter (where ${task.status} = 'done' and ${task.completedAt} >= ${weekAgo}::timestamptz)`.as(
             "done_last_7d",
           ),
+        excellent: sql<number>`count(*) filter (where ${task.quality} = 'excellent')`.as("excellent"),
+        redo: sql<number>`count(*) filter (where ${task.quality} = 'redo')`.as("redo"),
+        doneOnTime:
+          sql<number>`count(*) filter (where ${task.status} = 'done' and ${task.due} is not null and ${task.completedAt} <= ${task.due})`.as(
+            "done_on_time",
+          ),
+        doneWithDue:
+          sql<number>`count(*) filter (where ${task.status} = 'done' and ${task.due} is not null)`.as(
+            "done_with_due",
+          ),
       })
       .from(task)
       .groupBy(task.ownerKind, task.ownerRef);
@@ -267,6 +326,10 @@ export class TasksService {
       open: Number(r.open ?? 0),
       overdue: Number(r.overdue ?? 0),
       doneLast7d: Number(r.doneLast7d ?? 0),
+      excellent: Number(r.excellent ?? 0),
+      redo: Number(r.redo ?? 0),
+      doneOnTime: Number(r.doneOnTime ?? 0),
+      doneWithDue: Number(r.doneWithDue ?? 0),
     }));
   }
 }

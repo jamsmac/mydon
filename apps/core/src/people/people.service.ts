@@ -71,6 +71,7 @@ export class PeopleService {
           email: input.email ?? null,
           phone: input.phone ?? null,
           tgUsername: uname,
+          domain: input.domain ?? null,
           active: input.active === false ? "no" : "yes",
         })
         .returning();
@@ -94,6 +95,7 @@ export class PeopleService {
     if (patch.email !== undefined) values.email = patch.email;
     if (patch.phone !== undefined) values.phone = patch.phone;
     if (patch.tgUsername !== undefined) values.tgUsername = normalizeUsername(patch.tgUsername);
+    if (patch.domain !== undefined) values.domain = patch.domain;
     if (patch.active !== undefined) values.active = patch.active ? "yes" : "no";
 
     return this.db.transaction(async (tx) => {

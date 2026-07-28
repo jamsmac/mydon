@@ -63,3 +63,62 @@ describe("Задачи", () => {
     assert.match(String(created?.source), /2026-07-29/);
   });
 });
+
+describe("Оценка сделанной задачи", () => {
+  it("«переделать» возвращает задачу в работу и включает напоминания заново", async () => {
+    const captured: Record<string, unknown>[] = [];
+    const done = { id: "t1", status: "done", resultNote: "готово", quality: null };
+    const tx = {
+      select: () => ({ from: () => ({ where: async () => [done] }) }),
+      update: () => ({
+        set: (patch: Record<string, unknown>) => {
+          captured.push(patch);
+          return { where: () => ({ returning: async () => [{ ...done, ...patch }] }) };
+        },
+      }),
+      insert: () => ({ values: async () => [] }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+
+    const s = new TasksService(db);
+    const updated = await s.rate("t1", "redo");
+    assert.equal(updated.status, "in_progress");
+    assert.equal(captured[0].completedAt, null, "время закрытия должно сброситься");
+    assert.equal(captured[0].remindedAt, null, "напоминания должны включиться заново");
+  });
+
+  it("«отлично» не меняет статус — только отметка качества", async () => {
+    const captured: Record<string, unknown>[] = [];
+    const done = { id: "t1", status: "done", resultNote: "готово", quality: null };
+    const tx = {
+      select: () => ({ from: () => ({ where: async () => [done] }) }),
+      update: () => ({
+        set: (patch: Record<string, unknown>) => {
+          captured.push(patch);
+          return { where: () => ({ returning: async () => [{ ...done, ...patch }] }) };
+        },
+      }),
+      insert: () => ({ values: async () => [] }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+
+    const s = new TasksService(db);
+    const updated = await s.rate("t1", "excellent");
+    assert.equal(updated.status, "done");
+    assert.equal(captured[0].quality, "excellent");
+    assert.equal("completedAt" in captured[0], false, "время закрытия трогать нельзя");
+  });
+
+  it("несделанную задачу оценить нельзя — понятная ошибка", async () => {
+    const open = { id: "t1", status: "in_progress" };
+    const tx = {
+      select: () => ({ from: () => ({ where: async () => [open] }) }),
+      update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
+      insert: () => ({ values: async () => [] }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+
+    const s = new TasksService(db);
+    await assert.rejects(() => s.rate("t1", "excellent"), /только сделанную/);
+  });
+});

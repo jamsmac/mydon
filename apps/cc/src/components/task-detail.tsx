@@ -2,9 +2,15 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { addComment, changeStatus, completeTask } from "../app/tasks/actions";
+import { addComment, changeStatus, completeTask, rateTask } from "../app/tasks/actions";
 import type { Task, TaskComment } from "../lib/core";
 import { when } from "../lib/format";
+
+const QUALITY_LABEL = {
+  excellent: "⭐ отлично",
+  accepted: "принято",
+  redo: "возвращена на доработку",
+} as const;
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   todo: "не начата",
@@ -80,6 +86,29 @@ export function TaskDetail({ task, comments }: { task: Task; comments: TaskComme
             <div className="result-title">Отчёт о выполнении</div>
             <p>{task.resultNote}</p>
             {task.completedAt && <small>Закрыта {when(task.completedAt)}</small>}
+            {task.status === "done" &&
+              (task.quality ? (
+                <div className="form-actions">
+                  <span className={`pill ${task.quality === "redo" ? "bad" : "ok"}`}>
+                    {QUALITY_LABEL[task.quality]}
+                  </span>
+                </div>
+              ) : (
+                <div className="form-actions">
+                  <button type="button" className="btn" disabled={pending}
+                    onClick={() => act(() => rateTask(task.id, "excellent"))}>
+                    ⭐ Отлично
+                  </button>
+                  <button type="button" className="btn" disabled={pending}
+                    onClick={() => act(() => rateTask(task.id, "accepted"))}>
+                    Принято
+                  </button>
+                  <button type="button" className="btn" disabled={pending}
+                    onClick={() => act(() => rateTask(task.id, "redo"))}>
+                    ↩ Переделать
+                  </button>
+                </div>
+              ))}
           </div>
         ) : (
           !closed && (

@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
-import { IsBoolean, IsEmail, IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
+import { IsBoolean, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
+import { DOMAINS, type Domain } from "@mydon/shared";
 import { PeopleService } from "./people.service";
 
 export class CreatePersonDto {
@@ -8,6 +9,10 @@ export class CreatePersonDto {
 
   @IsOptional() @IsString() @MaxLength(128)
   role?: string;
+
+  /** Направление, куда нанят: сотрудник живёт внутри дела, а не отдельным списком. */
+  @IsOptional() @IsIn(DOMAINS)
+  domain?: Domain;
 
   @IsOptional() @IsEmail({}, { message: "email: похоже, адрес записан неверно" })
   email?: string;

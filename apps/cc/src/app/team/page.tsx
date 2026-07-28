@@ -11,12 +11,49 @@ import { NewPersonForm } from "../../components/person-new";
 
 export const dynamic = "force-dynamic";
 
+/** Порядок разделов: сначала дела, потом личное, потом неприкаянные. */
+const DOMAIN_ORDER = ["globerent", "vendhub", "personal", "mydon", null] as const;
+const DOMAIN_TITLES: Record<string, string> = {
+  globerent: "GLOBERENT",
+  vendhub: "VendHub",
+  personal: "Личный контур",
+  mydon: "MYDON",
+};
+
+/** Короткая строка качества: показываем только то, что есть — без нулей-шума. */
+function qualityLine(w: Workload | undefined): string {
+  if (!w) return "";
+  const parts: string[] = [];
+  if (w.doneWithDue > 0) parts.push(`в срок ${Math.round((w.doneOnTime / w.doneWithDue) * 100)}%`);
+  if (w.excellent > 0) parts.push(`отлично ×${w.excellent}`);
+  if (w.redo > 0) parts.push(`переделки ×${w.redo}`);
+  return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
+}
+
+function PersonRow({ p, w }: { p: Person; w: Workload | undefined }) {
+  return (
+    <Link href={`/team/${p.id}`} className="row rowlink">
+      <div className="t">
+        <b>{p.name}</b>
+        <small>
+          {p.role ?? "роль не указана"}
+          {w ? ` · висит ${w.open}${w.overdue > 0 ? `, просрочено ${w.overdue}` : ""}` : ""}
+          {qualityLine(w)}
+        </small>
+      </div>
+      <span className={`pill ${p.tgChatId ? "ok" : ""}`}>
+        {p.tgChatId ? "в Telegram" : "не подключён"}
+      </span>
+    </Link>
+  );
+}
+
 /**
- * Команда: люди и агенты в одном месте.
+ * Команда: люди внутри своих направлений, агенты рядом.
  *
- * Исполнители бывают живые и виртуальные, но задачи им ставятся одинаково —
- * значит и смотреть на них владелец должен в одном списке, а не гадать,
- * в каком разделе искать «кто на меня работает».
+ * Сотрудник нанят в конкретное дело (GLOBERENT, VendHub…) — значит и смотреть
+ * на него надо внутри дела: кто где работает, что висит, какое качество.
+ * Плоский список прятал главное — картину по направлениям.
  */
 export default async function Team() {
   let people: Person[];
@@ -52,33 +89,29 @@ export default async function Team() {
         </div>
       )}
 
-      <div className="section-title">Люди</div>
       {people.length === 0 ? (
         <div className="empty">
           <b>Сотрудников пока нет</b>
           Добавь первого — и сможешь поручать ему задачи.
         </div>
       ) : (
-        <div className="rows">
-          {people.map((p) => {
-            const w = byRef.get(`human:${p.id}`);
-            return (
-              <Link href={`/team/${p.id}`} className="row rowlink" key={p.id}>
-                <div className="t">
-                  <b>{p.name}</b>
-                  <small>
-                    {p.role ?? "роль не указана"}
-                    {w ? ` · висит ${w.open}${w.overdue > 0 ? `, просрочено ${w.overdue}` : ""}` : ""}
-                    {w && w.doneLast7d > 0 ? ` · за неделю сделал ${w.doneLast7d}` : ""}
-                  </small>
-                </div>
-                <span className={`pill ${p.tgChatId ? "ok" : ""}`}>
-                  {p.tgChatId ? "в Telegram" : "не подключён"}
-                </span>
-              </Link>
-            );
-          })}
-        </div>
+        DOMAIN_ORDER.map((d) => {
+          const group = people.filter((p) => (p.domain ?? null) === d);
+          if (group.length === 0) return null;
+          return (
+            <div key={d ?? "none"}>
+              <div className="section-title">
+                {d === null ? "Без направления" : DOMAIN_TITLES[d]}
+                <span className="group-count">{group.length}</span>
+              </div>
+              <div className="rows">
+                {group.map((p) => (
+                  <PersonRow key={p.id} p={p} w={byRef.get(`human:${p.id}`)} />
+                ))}
+              </div>
+            </div>
+          );
+        })
       )}
 
       <div className="section-title">Добавить сотрудника</div>
