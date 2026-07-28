@@ -1,6 +1,6 @@
 "use server";
 
-import { answer, createLlmResolver, type LlmResolver } from "@mydon/assistant";
+import { answer, createContextSearch, createLlmResolver, type LlmResolver } from "@mydon/assistant";
 import { assistantCore } from "../../lib/assistant-core";
 
 export interface AskResult {
@@ -18,6 +18,10 @@ const llm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
       ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),
     })
   : undefined;
+
+// Память помощника: перед ответом ищем в заметках и прошлых разговорах через Core.
+// Оба источника необязательны — не нашлось, ответ будет прежним.
+const context = createContextSearch({ baseUrl: BASE });
 
 /** Запоминаем вопрос как событие — это эпизодическая память помощника. */
 async function remember(question: string): Promise<void> {
@@ -39,7 +43,7 @@ export async function ask(question: string): Promise<AskResult> {
   if (!clean) return { text: "Спроси что-нибудь — например «брифинг» или «что просрочено»." };
 
   try {
-    const reply = await answer(clean, assistantCore, llm ? { llm } : {});
+    const reply = await answer(clean, assistantCore, llm ? { llm, context } : {});
     void remember(clean);
     return reply.approvalId ? { text: reply.text, approvalId: reply.approvalId } : { text: reply.text };
   } catch (err) {

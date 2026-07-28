@@ -18,6 +18,7 @@ COPY packages/shared/package.json ./packages/shared/
 COPY packages/connectors/package.json ./packages/connectors/
 COPY packages/assistant/package.json ./packages/assistant/
 COPY packages/documents/package.json ./packages/documents/
+COPY packages/history/package.json ./packages/history/
 RUN pnpm install --frozen-lockfile
 
 # ── Сборка ──

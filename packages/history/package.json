@@ -1,0 +1,31 @@
+{
+  "name": "@mydon/history",
+  "version": "0.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "node --test dist",
+    "clean": "rm -rf dist .turbo *.tsbuildinfo"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.17.6",
+    "typescript": "^5.6.3"
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "better-sqlite3": "^12.2.0",
+    "sqlite-vec": "^0.1.9"
+  }
+}

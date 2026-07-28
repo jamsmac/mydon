@@ -1,6 +1,6 @@
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
-import { createLlmResolver, type LlmResolver } from "@mydon/assistant";
+import { createContextSearch, createLlmResolver, type LlmResolver } from "@mydon/assistant";
 import { createDocumentBuilder } from "@mydon/documents";
 import { dueLabel, TZ } from "@mydon/shared";
 import { formatBriefing, msUntilBriefing } from "./briefing";
@@ -52,8 +52,13 @@ async function main(): Promise<void> {
       })
     : undefined;
 
+  // Память помощника: заметки и история разговоров через Core. Работает всегда —
+  // не настроено на стороне Core, вернётся пусто, и ответ будет как раньше.
+  const context = createContextSearch({ baseUrl: coreUrl });
+
   const deps: HandlerDeps = {
     core: new CoreClient(coreUrl),
+    context,
     allowlist,
     limiter: new RateLimiter(),
     ...(llm ? { llm } : {}),

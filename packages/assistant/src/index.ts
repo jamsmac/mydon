@@ -9,6 +9,10 @@ export type { Intent };
 export { createLlmResolver } from "./llm";
 export type { LlmConfig } from "./llm";
 
+// Память помощника: поиск по прошлым разговорам и знаниям (через Core).
+export { createContextSearch } from "./context";
+export type { ContextConfig } from "./context";
+
 // ── Данные, которые помощнику нужны от Core. Сурфейс (бот/панель) даёт адаптер. ──
 export interface AssistantBriefing {
   overdueMoney: number;
@@ -69,6 +73,8 @@ export interface LlmSnapshot {
   recentLabels: string[];
   /** Список направлений («globerent, vendhub, …») для распознавания домена. */
   domains: string;
+  /** Что нашлось в прошлых разговорах и знаниях по этому вопросу. */
+  context?: ContextHit[];
 }
 
 export type LlmResolution =
@@ -78,9 +84,27 @@ export type LlmResolution =
 
 export type LlmResolver = (question: string, snapshot: LlmSnapshot) => Promise<LlmResolution>;
 
+/**
+ * Поиск по прошлым разговорам и знаниям.
+ *
+ * Без него помощник отвечает «с чистого листа» и предлагает то, что владелец
+ * уже решил. С ним — видит, о чём договаривались, и опирается на это.
+ */
+export type ContextSearch = (query: string) => Promise<ContextHit[]>;
+
+export interface ContextHit {
+  /** Откуда: «разговор» (история) или «знание» (заметка). */
+  kind: "разговор" | "знание";
+  /** Где именно: проект или заголовок заметки. */
+  where: string;
+  text: string;
+}
+
 export interface AnswerOptions {
   /** Если задан — непонятые вопросы уходят в LLM. Нет ключа/резолвера → подсказка. */
   llm?: LlmResolver;
+  /** Поиск по истории и заметкам: помощник отвечает, зная контекст. */
+  context?: ContextSearch;
 }
 
 const HELP = [
@@ -113,7 +137,7 @@ function actionLabel(action: string): string {
 
 /** Компактный снимок для заземления LLM-ответа. Собирается только при непонятом
  * вопросе — на распознанные правилами вопросы лишних обращений к Core нет. */
-async function buildSnapshot(core: AssistantCore): Promise<LlmSnapshot> {
+async function buildSnapshot(core: AssistantCore, context: ContextHit[] = []): Promise<LlmSnapshot> {
   const [briefing, approvals, recent] = await Promise.all([
     core.briefing(),
     core.pendingApprovals(),
@@ -124,6 +148,7 @@ async function buildSnapshot(core: AssistantCore): Promise<LlmSnapshot> {
     pendingApprovals: approvals.length,
     recentLabels: recent.map((e) => actionLabel(e.action)),
     domains: DOMAINS.join(", "),
+    ...(context.length > 0 ? { context } : {}),
   };
 }
 
@@ -150,7 +175,18 @@ export async function answer(
 
   let res: LlmResolution;
   try {
-    const snapshot = await buildSnapshot(core);
+    // Ищем в прошлых разговорах и знаниях ДО обращения к модели: ответ должен
+    // опираться на то, о чём уже договаривались, а не начинаться с нуля.
+    // Поиск не обязателен — не нашёлся или сломался, отвечаем как раньше.
+    let context: ContextHit[] = [];
+    if (opts.context) {
+      try {
+        context = await opts.context(intent.text);
+      } catch {
+        context = [];
+      }
+    }
+    const snapshot = await buildSnapshot(core, context);
     res = await opts.llm(intent.text, snapshot);
   } catch {
     // LLM недоступен (нет ключа, сеть, лимит) — не роняем помощника, даём подсказку.

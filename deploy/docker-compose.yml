@@ -39,6 +39,13 @@ services:
       PORT: 3001
       DATABASE_URL: postgresql://${POSTGRES_USER:-mydon}:${POSTGRES_PASSWORD}@mydon-db:5432/${POSTGRES_DB:-mydon}
       INGEST_KEY: ${INGEST_KEY:-}
+      # Память: индекс прошлых разговоров. Готовится отдельно и только читается.
+      # Пусто → поиск по разговорам выключен, заметки работают как обычно.
+      HISTORY_DB_PATH: ${HISTORY_DB_PATH:-}
+      HISTORY_MODEL_DIR: ${HISTORY_MODEL_DIR:-/data/history/models}
+    volumes:
+      # Только чтение: MYDON не должен менять индекс разговоров.
+      - /opt/mydon-data/history:/data/history:ro
     command: ["node", "apps/core/dist/main.js"]
     # Порт только в сети Tailscale, не в интернет:
     ports:

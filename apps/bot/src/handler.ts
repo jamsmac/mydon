@@ -1,4 +1,4 @@
-import { answer, type LlmResolver } from "@mydon/assistant";
+import { answer, type ContextSearch, type LlmResolver } from "@mydon/assistant";
 import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
 import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, formatApproval, formatBriefing } from "./briefing";
@@ -16,6 +16,8 @@ export interface HandlerDeps {
   limiter: RateLimiter;
   /** LLM-слой: понимает вопросы вне правил. Нет ключа → ветка «непонятно» = подсказка. */
   llm?: LlmResolver;
+  /** Память: поиск по прошлым разговорам и заметкам перед ответом. */
+  context?: ContextSearch;
   /** Построение документов (Excel, Word). Нет ключа — файлов не делаем. */
   buildDocument?: DocumentBuilder;
 }
@@ -174,7 +176,10 @@ export async function handleMessage(
         // (тот же answer(), что и в панели): распознает намерение → Core ответит
         // фактами, либо короткий ответ по снимку. Нет ключа — подсказка.
         if (!deps.llm) return { text: HELP };
-        const reply = await answer(text, deps.core, { llm: deps.llm });
+        const reply = await answer(text, deps.core, {
+          llm: deps.llm,
+          ...(deps.context ? { context: deps.context } : {}),
+        });
         return reply.approvalId
           ? { text: reply.text, keyboard: approvalKeyboard(reply.approvalId) }
           : { text: reply.text };

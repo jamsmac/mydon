@@ -97,3 +97,38 @@ describe("LLM: конструирование резолвера", () => {
     assert.equal(before, after);
   });
 });
+
+describe("LLM: память в запросе к модели", () => {
+  const base: LlmSnapshot = {
+    briefing: { overdueMoney: 0, idleMachines: 0, pendingApprovals: 0, contractsDueSoon: 0 },
+    pendingApprovals: 0,
+    recentLabels: [],
+    domains: "globerent, vendhub, personal",
+  };
+
+  it("выдержки попадают в запрос и помечены как память, а не как текущие цифры", () => {
+    const text = buildUserContent("что решали по кофейне", {
+      ...base,
+      context: [{ kind: "знание", where: "Решения VendHub", text: "поставщика не меняем" }],
+    });
+    assert.ok(text.includes("поставщика не меняем"), "выдержка не попала в запрос");
+    assert.ok(text.includes("Решения VendHub"), "источник не указан — модель не сможет сослаться");
+    assert.ok(text.includes("НЕ текущие показатели"), "память не отделена от снимка");
+  });
+
+  it("без памяти запрос прежний — лишнего раздела нет", () => {
+    const text = buildUserContent("вопрос", base);
+    assert.ok(!text.includes("Прошлые разговоры"));
+  });
+
+  it("выдержек много — в запрос идёт ограниченное число (контекст не резиновый)", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      kind: "разговор" as const,
+      where: `сессия ${i}`,
+      text: `фрагмент ${i}`,
+    }));
+    const text = buildUserContent("вопрос", { ...base, context: many });
+    assert.ok(text.includes("фрагмент 0"));
+    assert.ok(!text.includes("фрагмент 19"), "в запрос ушли все выдержки — будет шум");
+  });
+});
