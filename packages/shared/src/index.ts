@@ -42,3 +42,6 @@ export function formatTashkent(date: Date = new Date()): string {
 
 /** Тип-хелпер: сделать перечисленные поля обязательными. */
 export type WithRequired<T, K extends keyof T> = T & Required<Pick<T, K>>;
+
+// Логика задач: разбор сроков словами и группировка по срочности (панель + бот).
+export * from "./tasks";

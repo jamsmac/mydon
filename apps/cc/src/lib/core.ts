@@ -123,9 +123,78 @@ async function send<T>(path: string, method: "POST" | "PATCH" | "DELETE", body?:
   return (await res.json()) as T;
 }
 
+/** Задача: одна очередь на людей и агентов. */
+export interface Task {
+  id: string;
+  title: string;
+  description: string | null;
+  ownerKind: "human" | "agent";
+  ownerRef: string | null;
+  domain: string | null;
+  status: "todo" | "in_progress" | "done" | "cancelled";
+  priority: "low" | "normal" | "high" | "urgent";
+  due: string | null;
+  source: string | null;
+  createdBy: string | null;
+  resultNote: string | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export interface TaskComment {
+  id: string;
+  taskId: string;
+  authorRef: string;
+  body: string;
+  createdAt: string;
+}
+
+/** Сотрудник. Telegram-привязка появляется после его /start у бота. */
+export interface Person {
+  id: string;
+  name: string;
+  role: string | null;
+  email: string | null;
+  phone: string | null;
+  tgUsername: string | null;
+  tgChatId: string | null;
+  active: string;
+  createdAt: string;
+}
+
+/** Нагрузка исполнителя — для картины по людям. */
+export interface Workload {
+  ownerKind: "human" | "agent";
+  ownerRef: string | null;
+  open: number;
+  overdue: number;
+  doneLast7d: number;
+}
+
 export const core = {
   briefing: () => get<Briefing>("/registry/briefing"),
   agents: () => get<AgentCard[]>("/agents"),
+
+  // ── Задачи ──
+  tasks: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<Task[]>(`/tasks${qs ? `?${qs}` : ""}`);
+  },
+  task: (id: string) => get<Task>(`/tasks/${id}`),
+  taskComments: (id: string) => get<TaskComment[]>(`/tasks/${id}/comments`),
+  workload: () => get<Workload[]>("/tasks/workload"),
+  createTask: (input: Record<string, unknown>) => send<Task>("/tasks", "POST", input),
+  setTaskStatus: (id: string, input: Record<string, unknown>) =>
+    send<Task>(`/tasks/${id}`, "PATCH", input),
+  addTaskComment: (id: string, input: Record<string, unknown>) =>
+    send<TaskComment>(`/tasks/${id}/comments`, "POST", input),
+
+  // ── Сотрудники ──
+  people: (all = false) => get<Person[]>(`/people${all ? "?all=1" : ""}`),
+  person: (id: string) => get<Person>(`/people/${id}`),
+  createPerson: (input: Record<string, unknown>) => send<Person>("/people", "POST", input),
+  updatePerson: (id: string, input: Record<string, unknown>) =>
+    send<Person>(`/people/${id}`, "PATCH", input),
   agent: (name: string) => get<AgentCard>(`/agents/${encodeURIComponent(name)}`),
   createAgent: (input: Record<string, unknown>) => send<AgentCard>("/agents", "POST", input),
   updateAgent: (name: string, patch: Record<string, unknown>) =>

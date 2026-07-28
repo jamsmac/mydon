@@ -799,3 +799,174 @@ main {
 .back:hover {
   color: var(--blue);
 }
+
+/* ── Задачи: быстрое создание и список ─────────────────── */
+.quickadd {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 18px;
+}
+.qa-title {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--navy);
+  color: var(--white);
+  font: inherit;
+  font-size: 16px;
+}
+.qa-title:focus,
+.qa-owner:focus,
+.qa-due:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+.qa-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.qa-owner,
+.qa-due {
+  flex: 1 1 140px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--navy);
+  color: var(--white);
+  font: inherit;
+  font-size: 14px;
+}
+.qa-flag {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 16px;
+  opacity: 0.45;
+}
+.qa-flag.on {
+  opacity: 1;
+  border-color: var(--orange);
+}
+
+.group-block {
+  margin-bottom: 20px;
+}
+.group-count {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+.group-hint {
+  margin: -6px 0 10px;
+  color: var(--steel);
+  font-size: 13px;
+}
+
+.taskrow {
+  align-items: flex-start;
+  gap: 10px;
+}
+.taskrow.urgent {
+  border-color: rgba(255, 107, 26, 0.4);
+}
+.tick {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin-top: 2px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--steel);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tick:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.tasklink {
+  color: inherit;
+  text-decoration: none;
+}
+.tasklink:hover {
+  color: var(--blue);
+}
+.close-box {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.close-note {
+  flex: 1 1 200px;
+  padding: 9px 12px;
+  border: 1px solid var(--blue);
+  border-radius: 10px;
+  background: var(--navy);
+  color: var(--white);
+  font: inherit;
+  font-size: 14px;
+}
+.close-note:focus {
+  outline: none;
+}
+
+.task-desc {
+  margin: 0 0 14px;
+  color: var(--white);
+  line-height: 1.55;
+}
+.result-box {
+  padding: 12px 14px;
+  border: 1px solid rgba(61, 220, 132, 0.3);
+  border-radius: 10px;
+  background: rgba(61, 220, 132, 0.05);
+}
+.result-title {
+  color: #3ddc84;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.result-box p {
+  margin: 0 0 6px;
+  line-height: 1.5;
+}
+.result-box small {
+  color: var(--steel);
+  font-size: 12px;
+}
+
+.notice {
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 107, 26, 0.35);
+  border-radius: 12px;
+  background: rgba(255, 107, 26, 0.06);
+  margin-bottom: 18px;
+  line-height: 1.5;
+}
+.notice b {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--orange);
+}
+.pill.bad {
+  border-color: rgba(255, 107, 26, 0.4);
+  color: var(--orange);
+}

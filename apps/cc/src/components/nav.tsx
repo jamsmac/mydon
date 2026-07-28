@@ -8,11 +8,18 @@ import { DOMAIN_LABELS, DOMAINS } from "@mydon/shared";
 // Помощник — не в этом списке: он плавающий, доступен на любом экране (FloatingChat).
 const MAIN = [
   { href: "/mydon", icon: "◉", label: "Главное" },
+  { href: "/tasks", icon: "✓", label: "Задачи" },
   { href: "/approvals", icon: "✋", label: "Решения" },
+  { href: "/team", icon: "👥", label: "Команда" },
   { href: "/agents", icon: "⚙", label: "Агенты" },
   { href: "/registry", icon: "▤", label: "Реестр" },
   { href: "/audit", icon: "≡", label: "Журнал" },
 ];
+
+// На телефоне в нижней панели — только то, чем пользуются каждый день.
+// Больше пяти вкладок превращают панель в кашу: подписи не читаются,
+// попасть пальцем сложно. Остальное доступно с «Главного» и на компьютере.
+const PHONE = ["/mydon", "/tasks", "/approvals", "/team", "/agents"];
 
 function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(href + "/");
@@ -59,7 +66,7 @@ export function TabBar({ pendingCount }: { pendingCount: number }) {
   const pathname = usePathname();
   return (
     <nav className="tabbar" aria-label="Разделы">
-      {MAIN.map((item) => (
+      {MAIN.filter((item) => PHONE.includes(item.href)).map((item) => (
         <Link
           key={item.href}
           href={item.href}
