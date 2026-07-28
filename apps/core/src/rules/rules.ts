@@ -173,6 +173,58 @@ export const RULES: Rule[] = [
     urgency: "weekly",
     format: (c) => `📉 Продажи ниже плана на ${num(c.payload.percent)}%`,
   },
+
+  // ── Инфраструктура ──
+  // Сторожа на сервере (диск, здоровье сервисов, бэкапы) сейчас шлют в Telegram
+  // каждый сам, своим кодом и своим форматом. Эти правила позволяют им слать
+  // событие в MYDON, а решение «срочно или в брифинг» принимается здесь,
+  // в одном месте, и попадает в журнал.
+  {
+    id: "infra.disk",
+    eventType: "infra.disk",
+    urgency: "immediate",
+    when: (c) => num(c.payload.usedPercent) >= 85,
+    format: (c) =>
+      `🚨 Диск ${str(c.payload.host, "сервера")} заполнен на ${num(c.payload.usedPercent)}%. ` +
+      `Скоро остановятся записи и бэкапы.`,
+  },
+  {
+    id: "infra.disk.watch",
+    // Тот же тип события, но спокойный диапазон — в утренний брифинг, а не будить.
+    eventType: "infra.disk",
+    urgency: "briefing",
+    when: (c) => {
+      const used = num(c.payload.usedPercent);
+      return used >= 70 && used < 85;
+    },
+    format: (c) => `💽 Диск заполнен на ${num(c.payload.usedPercent)}% — стоит присмотреть.`,
+  },
+  {
+    id: "infra.service_down",
+    eventType: "infra.service_down",
+    urgency: "immediate",
+    format: (c) =>
+      `🔴 Не отвечает: ${str(c.payload.service)}. ${str(c.payload.detail, "Причина не указана.")}`,
+  },
+  {
+    id: "infra.backup_failed",
+    eventType: "infra.backup_failed",
+    urgency: "immediate",
+    format: (c) =>
+      `❌ Бэкап не сделан: ${str(c.payload.what, "база")}. ${str(c.payload.detail, "")}`.trim(),
+  },
+  {
+    id: "infra.backup_ok",
+    eventType: "infra.backup_ok",
+    urgency: "briefing",
+    format: (c) => `🗄 Бэкап готов: ${str(c.payload.what, "база")} (${str(c.payload.size, "—")})`,
+  },
+  {
+    id: "task.overdue",
+    eventType: "task.overdue",
+    urgency: "immediate",
+    format: (c) => `⏰ Просрочена задача: ${str(c.payload.title)}`,
+  },
 ];
 
 /** Подбирает уведомления под событие. Одно событие может дать несколько. */

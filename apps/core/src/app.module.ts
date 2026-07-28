@@ -7,6 +7,7 @@ import { EventsModule } from "./events/events.module";
 import { HealthController } from "./health.controller";
 import { RegistryModule } from "./registry/registry.module";
 import { RulesModule } from "./rules/rules.module";
+import { TasksModule } from "./tasks/tasks.module";
 import { VerificationModule } from "./verification/verification.module";
 
 @Module({
@@ -18,6 +19,7 @@ import { VerificationModule } from "./verification/verification.module";
     ApprovalsModule,
     RegistryModule,
     RulesModule,
+    TasksModule,
     VerificationModule,
   ],
   controllers: [HealthController],

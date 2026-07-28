@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { approval, entity, moneyFlow, org } from "@mydon/db";
+import { approval, entity, moneyFlow, org, task } from "@mydon/db";
 import { TZ, type Domain } from "@mydon/shared";
 import { and, asc, count, desc, eq, lt, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -33,6 +33,8 @@ export interface Briefing {
   contractsDueSoon: number;
   /** Договоры с датой, которую не удалось разобрать — чтобы они не пропадали молча. */
   contractsBadDate: number;
+  /** Задачи с прошедшим сроком: заводить задачи и не показывать просрочку бессмысленно. */
+  overdueTasks: number;
 }
 
 /**
@@ -165,6 +167,13 @@ export class RegistryService {
         ),
       );
 
+    // Просроченные задачи — наравне с деньгами и автоматами: заводить задачи
+    // и не показывать просрочку означало бы, что их можно спокойно не делать.
+    const [overdueTasks] = await this.db
+      .select({ n: count() })
+      .from(task)
+      .where(and(lt(task.due, now), ne(task.status, "done"), ne(task.status, "cancelled")));
+
     return {
       generatedAt: now.toISOString(),
       tz: TZ,
@@ -173,6 +182,7 @@ export class RegistryService {
       pendingApprovals: pendingApprovals?.n ?? 0,
       contractsDueSoon: contractsDueSoon?.n ?? 0,
       contractsBadDate: contractsBadDate?.n ?? 0,
+      overdueTasks: overdueTasks?.n ?? 0,
     };
   }
 
