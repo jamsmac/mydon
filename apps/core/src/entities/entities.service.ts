@@ -102,10 +102,24 @@ export class EntitiesService {
       .limit(500);
   }
 
-  async byId(id: string): Promise<EntityRow> {
-    const [row] = await this.db.select().from(entity).where(eq(entity.id, id));
+  async byId(id: string): Promise<EntityRow & { domain: string | null }> {
+    const [row] = await this.db
+      .select({
+        id: entity.id,
+        orgId: entity.orgId,
+        type: entity.type,
+        name: entity.name,
+        externalRef: entity.externalRef,
+        attrs: entity.attrs,
+        createdAt: entity.createdAt,
+        updatedAt: entity.updatedAt,
+        domain: org.code,
+      })
+      .from(entity)
+      .leftJoin(org, eq(org.id, entity.orgId))
+      .where(eq(entity.id, id));
     if (!row) throw new NotFoundException(`Сущность ${id} не найдена`);
-    return row;
+    return row as EntityRow & { domain: string | null };
   }
 
   /**

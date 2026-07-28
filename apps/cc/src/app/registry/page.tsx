@@ -110,7 +110,7 @@ export default async function Registry({
                 <div className="rows">
                   {rows.map((r) => (
                     <Link
-                      href={`/registry/${d}/${encodeURIComponent(r.type)}`}
+                      href={`/domain/${d}?tab=catalog:${encodeURIComponent(r.type)}`}
                       className="row rowlink"
                       key={`${d}:${r.type}`}
                     >

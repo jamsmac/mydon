@@ -29,7 +29,12 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   return (
     <>
       <div className="page-head">
-        <Link href="/registry" className="back">← Реестр</Link>
+        <Link
+          href={entity.domain ? `/domain/${entity.domain}?tab=catalog:${entity.type}` : "/registry"}
+          className="back"
+        >
+          ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}
+        </Link>
         <h1>{entity.name}</h1>
         <p>
           {typeOne(entity.type)}
