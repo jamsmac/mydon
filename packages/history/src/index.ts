@@ -203,15 +203,19 @@ export async function openHistory(dbPath: string, opts: { modelCacheDir?: string
     LIMIT ?
   `);
 
-  const byVector = db.prepare(`
-    SELECT c.session_id AS sessionId, c.msg_idx AS idx, c.text AS text,
-           s.title AS title, s.project AS project
-    FROM vec_chunks v
-    JOIN chunks c ON c.rowid = v.rowid
-    LEFT JOIN sessions s ON s.id = c.session_id
-    WHERE v.embedding MATCH ? AND k = ?
-    ORDER BY distance
-  `);
+  // Готовим ТОЛЬКО при загруженном расширении: без него prepare падает с
+  // «no such module: vec0» — и уронил бы даже текстовый поиск, который работает.
+  const byVector = vectorsReady
+    ? db.prepare(`
+        SELECT c.session_id AS sessionId, c.msg_idx AS idx, c.text AS text,
+               s.title AS title, s.project AS project
+        FROM vec_chunks v
+        JOIN chunks c ON c.rowid = v.rowid
+        LEFT JOIN sessions s ON s.id = c.session_id
+        WHERE v.embedding MATCH ? AND k = ?
+        ORDER BY distance
+      `)
+    : null;
 
   return {
     stats() {
@@ -244,7 +248,7 @@ export async function openHistory(dbPath: string, opts: { modelCacheDir?: string
 
       // Смысловой поиск — только если есть и векторы, и модель.
       let vecHits: Record<string, unknown>[] = [];
-      if (vectorsReady) {
+      if (byVector !== null) {
         const embed = await ensureEmbedder();
         if (embed !== null) {
           try {

@@ -1,16 +1,19 @@
 # MYDON — сборка всех приложений монорепо одним образом.
 # Многоступенчатая: сборочные зависимости не попадают в финальный образ.
 
-FROM node:20-alpine AS base
+# slim (Debian/glibc), НЕ alpine: sqlite-vec и движок модели (onnxruntime)
+# распространяются готовыми двоичными файлами только под glibc — под musl
+# смысловой поиск по истории молча не работал бы.
+FROM node:20-slim AS base
 RUN corepack enable
 WORKDIR /app
 
 # ── Зависимости ──
 FROM base AS deps
 # Инструменты сборки нативных модулей (better-sqlite3 — поиск по истории):
-# под musl готовых двоичных файлов нет, модуль компилируется на месте.
-# Ставятся только в этот слой — в итоговый образ не попадают.
-RUN apk add --no-cache python3 make g++
+# на случай, если готового двоичного файла не нашлось. Только в этот слой.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY apps/core/package.json ./apps/core/
 COPY apps/agents/package.json ./apps/agents/
