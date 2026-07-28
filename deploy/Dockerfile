@@ -7,6 +7,10 @@ WORKDIR /app
 
 # ── Зависимости ──
 FROM base AS deps
+# Инструменты сборки нативных модулей (better-sqlite3 — поиск по истории):
+# под musl готовых двоичных файлов нет, модуль компилируется на месте.
+# Ставятся только в этот слой — в итоговый образ не попадают.
+RUN apk add --no-cache python3 make g++
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY apps/core/package.json ./apps/core/
 COPY apps/agents/package.json ./apps/agents/
