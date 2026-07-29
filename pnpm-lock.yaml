@@ -167,6 +167,9 @@ importers:
       express:
         specifier: ^5.1.0
         version: 5.2.1
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.9
       reflect-metadata:
         specifier: ^0.2.2
         version: 0.2.2

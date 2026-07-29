@@ -14,6 +14,8 @@ import {
   jsonb,
   numeric,
   index,
+  date,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 // ── Перечисления ──
@@ -154,6 +156,34 @@ export const collection = pgTable(
   (t) => [
     index("collection_machine_date_idx").on(t.machineId, t.collectedAt),
     index("collection_status_idx").on(t.status),
+  ],
+);
+
+// ── sale: продажи автоматов (этап 1 миграции: синк из mydon-stock/OurVend) ──
+// Дневные сводки «дата · автомат · товар»: источник отдаёт агрегаты за день,
+// и строка дообновляется в течение дня — поэтому уникальный ключ и upsert.
+export const sale = pgTable(
+  "sale",
+  {
+    id: id(),
+    /** День продажи (у источника нет времени внутри дня). */
+    dt: date("dt").notNull(),
+    /** Серийник автомата из источника — ключ сопоставления. */
+    machineSerial: text("machine_serial").notNull(),
+    /** Автомат в реестре, если серийник узнан. */
+    machineId: uuid("machine_id").references(() => entity.id),
+    product: text("product").notNull(),
+    qty: numeric("qty", { precision: 12, scale: 2 }).default("0").notNull(),
+    amount: numeric("amount", { precision: 15, scale: 2 }).default("0").notNull(),
+    source: text("source").default("ourvend").notNull(),
+    /** Когда источник видел эти цифры — по нему выбираем свежее. */
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
+    importedAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("sale_src_day_key").on(t.source, t.dt, t.machineSerial, t.product),
+    index("sale_dt_idx").on(t.dt),
+    index("sale_machine_idx").on(t.machineId, t.dt),
   ],
 );
 

@@ -43,10 +43,16 @@ services:
       # Пусто → поиск по разговорам выключен, заметки работают как обычно.
       HISTORY_DB_PATH: ${HISTORY_DB_PATH:-}
       HISTORY_MODEL_DIR: ${HISTORY_MODEL_DIR:-/data/history/models}
+      # Этап 1 миграции: чтение продаж из mydon-stock (пользователь только-чтение).
+      # Пусто → синк продаж выключен, панель показывает «появится после сбора».
+      STOCK_DATABASE_URL: ${STOCK_DATABASE_URL:-}
     volumes:
       # Только чтение: MYDON не должен менять индекс разговоров.
       - /opt/mydon-data/history:/data/history:ro
     command: ["node", "apps/core/dist/main.js"]
+    networks:
+      - default
+      - stock
     # Порт только в сети Tailscale, не в интернет:
     ports:
       - "127.0.0.1:3001:3001"
@@ -116,6 +122,14 @@ services:
     # случайная выкладка без .env не открыла панель шире, чем задумано.
     ports:
       - "${PANEL_BIND:-127.0.0.1}:3002:3002"
+
+networks:
+  default:
+  # Сеть mydon-stock: Core читает оттуда продажи. Сеть уже существует —
+  # мы к ней только присоединяемся, ничего в ней не меняя.
+  stock:
+    external: true
+    name: mydon-stock_default
 
 volumes:
   mydon-db-data:

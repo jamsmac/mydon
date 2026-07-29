@@ -169,6 +169,19 @@ export interface Person {
 }
 
 /** Нагрузка исполнителя — для картины по людям. */
+/** Продажа (дневная позиция) из синка mydon-stock. */
+export interface SaleRow {
+  id: string;
+  dt: string;
+  machineSerial: string;
+  machineId: string | null;
+  machineName: string | null;
+  product: string;
+  qty: string;
+  amount: string;
+  source: string;
+}
+
 /** Инкассация: строка списка с именами автомата и оператора. */
 export interface CollectionRow {
   id: string;
@@ -256,6 +269,19 @@ export const core = {
     send<CollectionRow>(`/collections/${id}/receive`, "POST", { amount, manager: "owner" }),
   cancelCollection: (id: string) =>
     send<CollectionRow>(`/collections/${id}/cancel`, "POST", { manager: "owner" }),
+  salesSummary: () =>
+    get<{
+      today: { qty: number; amount: number };
+      yesterday: { qty: number; amount: number };
+      days30: { qty: number; amount: number };
+      lastSaleDt: string | null;
+      configured: boolean;
+    }>("/sales/summary"),
+  sales: (days = 7, limit = 300) => get<SaleRow[]>(`/sales?days=${days}&limit=${limit}`),
+  salesSilent: (days = 2) =>
+    get<{ machineId: string | null; serial: string; name: string | null; lastDt: string }[]>(
+      `/sales/silent?days=${days}`,
+    ),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
 };

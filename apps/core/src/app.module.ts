@@ -12,6 +12,7 @@ import { NotesModule } from "./notes/notes.module";
 import { PeopleModule } from "./people/people.module";
 import { RegistryModule } from "./registry/registry.module";
 import { RulesModule } from "./rules/rules.module";
+import { SalesModule } from "./sales/sales.module";
 import { TasksModule } from "./tasks/tasks.module";
 import { VerificationModule } from "./verification/verification.module";
 
@@ -26,6 +27,7 @@ import { VerificationModule } from "./verification/verification.module";
     ApprovalsModule,
     RegistryModule,
     RulesModule,
+    SalesModule,
     HistoryModule,
     NotesModule,
     PeopleModule,

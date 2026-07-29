@@ -13,6 +13,7 @@ import { CoreDown } from "../../../components/core-down";
 import { groupsFor } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
+import { SalesView } from "../../../components/sales-view";
 import { MachineMap } from "../../../components/machine-map";
 import { QuickActions } from "../../../components/quick-actions";
 import { typeOne } from "../../../lib/labels";
@@ -68,11 +69,17 @@ export default async function DomainPage({
 
   // Инкассация на дашборде: владелец должен видеть «ждут приёма» без раскопок.
   let collSummary: { pending: number; receivedCount: number; receivedSum: number } | null = null;
+  let salesSummary: Awaited<ReturnType<typeof core.salesSummary>> | null = null;
   if (domain === "vendhub") {
     try {
       collSummary = await core.collectionsSummary(30);
     } catch {
       collSummary = null;
+    }
+    try {
+      salesSummary = await core.salesSummary();
+    } catch {
+      salesSummary = null;
     }
   }
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
@@ -138,7 +145,7 @@ export default async function DomainPage({
         <div className="subtabs">
           {group.leaves.map((l) => {
             // Инкассация живёт своей таблицей, а не реестром — не затемняем.
-            const n = l.type === "collection" ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
+            const n = l.type === "collection" || l.type === "sale" ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
             const isActive = leaf === l;
             return (
               <Link
@@ -241,21 +248,42 @@ export default async function DomainPage({
             <div className="sect">
               <div className="sect-h">
                 <h3 className="h2">Продажи и выручка</h3>
-                <span className="chip">структура из VendHub-OS</span>
+                {salesSummary?.lastSaleDt && <span className="chip g">живые · OurVend</span>}
               </div>
-              <div className="wgrid">
-                {["Выручка сегодня", "Продажи сегодня", "Оплаты Payme · Click · Uzum", "Топ товаров по выручке"].map((l) => (
-                  <div className="wt off" key={l}>
-                    <div className="wl">{l}</div>
+              {salesSummary && salesSummary.lastSaleDt ? (
+                <div className="wgrid">
+                  <Link href={href("reports:sale")} className="wt">
+                    <div className="wl">Выручка сегодня</div>
+                    <div className="wv">{Number(salesSummary.today.amount).toLocaleString("ru-RU")}</div>
+                    <div className="wf">вчера: {Number(salesSummary.yesterday.amount).toLocaleString("ru-RU")} сум<span className="go">→</span></div>
+                  </Link>
+                  <Link href={href("reports:sale")} className="wt">
+                    <div className="wl">Продано сегодня</div>
+                    <div className="wv">{Number(salesSummary.today.qty).toLocaleString("ru-RU")}</div>
+                    <div className="wf">вчера: {Number(salesSummary.yesterday.qty).toLocaleString("ru-RU")}<span className="go">→</span></div>
+                  </Link>
+                  <Link href={href("reports:sale")} className="wt">
+                    <div className="wl">За 30 дней</div>
+                    <div className="wv">{Number(salesSummary.days30.amount).toLocaleString("ru-RU")}</div>
+                    <div className="wf">сум · журнал продаж<span className="go">→</span></div>
+                  </Link>
+                  <div className="wt off">
+                    <div className="wl">Оплаты Payme · Click · Uzum</div>
                     <div className="wv">—</div>
-                    <div className="wf">появится после сбора</div>
+                    <div className="wf">этап 3 плана миграции</div>
                   </div>
-                ))}
-              </div>
-              <p className="hint" style={{ marginTop: 8 }}>
-                Эти цифры живут в журнале продаж твоего ПО (VHM24). Пришли сохранённую
-                страницу «Журнал продаж» — и виджеты оживут, как ожили товары и автоматы.
-              </p>
+                </div>
+              ) : (
+                <div className="wgrid">
+                  {["Выручка сегодня", "Продажи сегодня", "За 30 дней", "Оплаты"].map((l) => (
+                    <div className="wt off" key={l}>
+                      <div className="wl">{l}</div>
+                      <div className="wv">—</div>
+                      <div className="wf">синк продаж включается на сервере</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -313,8 +341,11 @@ export default async function DomainPage({
       {/* ── Инкассация: живой экран VendCash (верхняя вкладка и подвкладка отчётов) ── */}
       {(activeGroup === "collect" || (group && leaf?.type === "collection")) && <CollectionsView />}
 
+      {/* ── Журнал продаж: живые данные из mydon-stock (этап 1 миграции) ── */}
+      {group && leaf?.type === "sale" && <SalesView />}
+
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && leaf.type !== "collection" && (
+      {group && leaf?.type && leaf.type !== "collection" && leaf.type !== "sale" && (
         <>
           {leafItems.length > 0 ? (
             <>
