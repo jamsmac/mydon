@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MYDON · Общий план миграции</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Manrope:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+:root{--bg:#0A1628;--surf:#0F1E33;--line:#1E3350;--accent:#1A6BFF;--tx:#E8ECF2;--tx2:#3D4A5C;--tx2l:#8494A8;--hot:#FF6B1A;--ok:#2BD9A0}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:'Manrope',sans-serif;font-size:15.5px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:880px;margin:0 auto;padding:40px 20px 80px}
+h1{font-family:'Syne',sans-serif;font-weight:800;font-size:30px;margin:0 0 6px;letter-spacing:-.01em}
+h2{font-family:'Syne',sans-serif;font-weight:700;font-size:19px;margin:42px 0 14px}
+.sub{color:var(--tx2l);margin:0 0 6px}
+.mono{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+.rule{background:var(--surf);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:10px;font-size:14.5px}
+.rule b{color:var(--accent)}
+.stage{background:var(--surf);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:16px}
+.stage.reco{border-color:rgba(255,107,26,.5)}
+.stage .num{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.15em;color:var(--tx2l);text-transform:uppercase}
+.stage h3{font-family:'Syne',sans-serif;font-size:17px;margin:6px 0 10px}
+.stage p{margin:8px 0;font-size:14.5px}
+.k{color:var(--tx2l);font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;display:block;margin-top:12px}
+.tag{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);color:var(--tx2l);margin-right:6px}
+.tag.hot{color:var(--hot);border-color:rgba(255,107,26,.5);background:rgba(255,107,26,.1)}
+.tag.ok{color:var(--ok);border-color:rgba(43,217,160,.4);background:rgba(43,217,160,.08)}
+.tag.b{color:var(--accent);border-color:rgba(26,107,255,.42);background:rgba(26,107,255,.12)}
+.done{opacity:.75}
+footer{margin-top:48px;color:var(--tx2l);font-size:12.5px;border-top:1px solid var(--line);padding-top:16px}
+@media(max-width:600px){.wrap{padding:24px 14px 60px}h1{font-size:24px}}
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>Общий план миграции в MYDON</h1>
+<p class="sub">Лучшее из VendHub&nbsp;OS, mydon-stock, VHM24 и родственных проектов — поэтапно, только после твоего одобрения. Составлен 29.07.2026 по живой разведке проектов.</p>
+
+<h2>Правила процесса — закреплены</h2>
+<div class="rule"><b>1.</b> Я предлагаю этап → ты говоришь «делай» → только тогда вношу. Без одобрения — ничего.</div>
+<div class="rule"><b>2.</b> Готовые решения копирую и интегрирую, не переписываю с нуля (так перенесены дизайн, инкассация, структура вкладок).</div>
+<div class="rule"><b>3.</b> Данные попадают в реестр только через согласование в панели или твоё прямое распоряжение. Каждый перенос обратим: git, бэкапы, след в Журнале.</div>
+<div class="rule"><b>4.</b> Каждый этап заканчивается живой проверкой на сервере — я показываю, что работает, а не обещаю.</div>
+
+<h2>Уже перенесено — фундамент готов</h2>
+<div class="stage done">
+  <span class="tag ok">сделано</span>
+  <p style="margin-top:10px">Дизайн-система и рабочее место направлений (Claude Design + command-center) · товары, автоматы, все справочники VendHub из VHM24 · <b>VendCash целиком с годом данных</b> (386 инкассаций, 264,5&nbsp;млн сум, операторы, история точек) · помощник с памятью и подпиской Claude · задачи с оценкой качества · агенты с согласованиями.</p>
+</div>
+
+<h2>Этапы — жду твоего слова по каждому</h2>
+
+<div class="stage reco">
+  <span class="num">Этап 1 · рекомендую первым</span>
+  <h3>Живые продажи VendHub — из mydon-stock</h3>
+  <p>На нашем же сервере уже 12 дней работает твой синк продаж OurVend (контейнер mydon-stock): таблицы продаж, автоматов, товаров пополняются сами. Это готовый «Журнал продаж», который я подключу к MYDON чтением — ничего не ломая.</p>
+  <span class="k">Что увидишь</span>
+  <p>«Выручка сегодня» и «Продажи сегодня» на дашборде — живые. Журнал продаж во вкладке Отчёты. Сигнал «автомат молчит N часов» — замена телеметрии связи.</p>
+  <span class="k">Оценка</span>
+  <p><span class="tag b">усилие: низкое</span><span class="tag ok">риск: низкий — только чтение</span><span class="tag hot">ценность: высокая</span></p>
+</div>
+
+<div class="stage">
+  <span class="num">Этап 2</span>
+  <h3>Склад и приход — из mydon-stock</h3>
+  <p>Там же лежат закупки, приход и складские остатки. Оживают вкладки «Приход сырья», «Расходники», остатки по товарам — видно, что заканчивается, до того как автомат опустел.</p>
+  <p><span class="tag b">усилие: среднее</span><span class="tag ok">риск: низкий</span></p>
+</div>
+
+<div class="stage">
+  <span class="num">Этап 3</span>
+  <h3>Платежи и сверка — лучшие модули VendHub OS</h3>
+  <p>В VendHub OS готовы экраны платежей Click/Payme/Uzum, фискализации и сверки. Переношу распределение оплат на дашборд и сверку «продажи ↔ деньги» — расхождения будут гореть оранжевым. Понадобятся доступы к платёжным кабинетам — спрошу отдельно.</p>
+  <p><span class="tag b">усилие: среднее-высокое</span><span class="tag">риск: средний — нужны доступы</span></p>
+</div>
+
+<div class="stage">
+  <span class="num">Этап 4</span>
+  <h3>Маршруты и умное пополнение — из VendHub OS</h3>
+  <p>Модули routes и predictive-refill: система сама предлагает, какие автоматы объезжать и что везти, — а оператор получает маршрут в Telegram. Ставится на данные этапов 1–2.</p>
+  <p><span class="tag b">усилие: высокое</span><span class="tag hot">ценность: меньше ручного планирования</span></p>
+</div>
+
+<div class="stage">
+  <span class="num">Этап 5</span>
+  <h3>GLOBERENT — сделки, контрагенты, сервис HELI</h3>
+  <p>Каркас направления готов и ждёт данных. Формы сделок и контрагентов возьму из VendHub OS (contractors, counterparties). Источник данных назовёшь ты: 1С, таблицы или сайт — соберу любым из проверенных путей через согласование.</p>
+  <p><span class="tag b">усилие: среднее</span><span class="tag">ждёт: источник данных от тебя</span></p>
+</div>
+
+<div class="stage">
+  <span class="num">Этап 6</span>
+  <h3>Сводка владельца — всё в одном экране</h3>
+  <p>По образцу экрана investor из VendHub OS: одно число дня по каждому направлению, деньги, тревоги — то, что ты смотришь утром за 30 секунд вместе с брифингом в Telegram.</p>
+  <p><span class="tag b">усилие: низкое</span><span class="tag">после этапов 1 и 3</span></p>
+</div>
+
+<h2>Сознательно не переносим (пока не попросишь)</h2>
+<div class="rule">Лояльность, рефералы, сайт-витрина, жалобы, приглашения сотрудников по ссылкам — есть в VendHub OS, но сейчас не двигают дело. Вернёмся по твоему слову.</div>
+
+<h2>Как одобрять</h2>
+<div class="rule">Просто напиши: <b>«этап 1 — делай»</b> (или несколько сразу: «этапы 1 и 2»). Я перенесу, проверю вживую и покажу результат. Захочешь изменить порядок или содержание — скажи, план твой.</div>
+
+<footer>MYDON · план миграции · 29.07.2026 · Ташкент. Составил помощник по живой разведке: VendHub&nbsp;OS (~60 модулей admin-панели), mydon-stock (живой синк OurVend), VHM24, inventory-platform, command-center, VendCashBot (перенесён).</footer>
+
+</div></body>
+</html>
