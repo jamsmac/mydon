@@ -22,27 +22,27 @@ export function ApprovalCard({ item }: { item: Approval }) {
   }
 
   return (
-    <article className="card attention">
-      <div className="who">
-        {item.agent} · уровень {item.tier}
-      </div>
-      <div className="what">{item.action}</div>
+    <article className={result ? "card" : "dec"}>
+      <div className="dt">{item.action}</div>
+      <div className="dby">просит {item.agent} · уровень {item.tier}</div>
 
       {result ? (
-        <p style={{ marginTop: 12, marginBottom: 0, fontSize: 14 }}>
-          <span className={`pill ${result.ok ? "ok" : "bad"}`}>{result.ok ? "готово" : "не принято"}</span>{" "}
-          <span style={{ color: "var(--steel)" }}>{result.message}</span>
-        </p>
+        <div
+          className="res"
+          style={{ color: result.ok ? "var(--ok)" : "var(--err)", background: "var(--bg)" }}
+        >
+          {result.ok ? "Решение записано" : result.message}
+        </div>
       ) : (
-        <div className="btns">
-          <button className="btn yes" onClick={() => decide("approved")} disabled={pending}>
-            ✅ Одобрить
+        <div className="acts">
+          <button className="btn ok" onClick={() => decide("approved")} disabled={pending}>
+            Одобрить
           </button>
           <button className="btn no" onClick={() => decide("rejected")} disabled={pending}>
-            ❌ Отклонить
+            Отклонить
           </button>
-          <button className="btn" onClick={() => decide("clarify")} disabled={pending}>
-            ❓ Уточнить
+          <button className="btn ghost" onClick={() => decide("clarify")} disabled={pending}>
+            Уточнить
           </button>
         </div>
       )}

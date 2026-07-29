@@ -72,8 +72,8 @@ export default async function Registry({
   return (
     <>
       <div className="page-head">
-        <h1>Реестр</h1>
-        <p>Контрагенты, договоры, автоматы, техника — отдельно по каждому направлению.</p>
+        <h1 className="h1">Реестр</h1>
+        <p className="lead">Контрагенты, договоры, автоматы, техника — отдельно по каждому направлению.</p>
       </div>
 
       <form className="search" action="/registry" method="get">
@@ -107,18 +107,16 @@ export default async function Registry({
                   {DOMAIN_TITLES[d]}
                   <span className="group-count">{total}</span>
                 </div>
-                <div className="rows">
+                <div className="wgrid">
                   {rows.map((r) => (
                     <Link
                       href={`/domain/${d}?tab=catalog:${encodeURIComponent(r.type)}`}
-                      className="row rowlink"
+                      className="wt"
                       key={`${d}:${r.type}`}
                     >
-                      <div className="t">
-                        <b>{typeLabel(r.type)}</b>
-                        <small>записей: {r.n}</small>
-                      </div>
-                      <span className="pill">открыть</span>
+                      <div className="wl">{typeLabel(r.type)}</div>
+                      <div className="wv">{r.n}</div>
+                      <div className="wf">записей<span className="go">→</span></div>
                     </Link>
                   ))}
                 </div>

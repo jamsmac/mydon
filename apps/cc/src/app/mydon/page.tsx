@@ -31,15 +31,36 @@ export default async function Main() {
   return (
     <>
       <div className="page-head">
-        <h1>Главное</h1>
-        <p>Обновлено {when(briefing.generatedAt)} · то же, что приходит в 07:30 в Telegram</p>
+        <h1 className="h1">Главное</h1>
+        <p className="lead">Обновлено {when(briefing.generatedAt)} · то же, что приходит в 07:30 в Telegram</p>
       </div>
+
+      {pending.length > 0 && (
+        <div className="card hot" style={{ marginBottom: 16 }}>
+          <div className="sect-h">
+            <span className="chip h">требует решения · {pending.length}</span>
+          </div>
+          {pending.slice(0, 2).map((a) => (
+            <Link href="/approvals" className="trow hot" key={a.id}>
+              <div className="tb">
+                <div className="tt">{a.action}</div>
+                <div className="tm">
+                  <span className="who"><span className="av ag">✦</span>{a.agent}</span>
+                </div>
+              </div>
+              <span className="due hot">решить</span>
+            </Link>
+          ))}
+          <Link href="/approvals" className="btn full sm">Все решения</Link>
+        </div>
+      )}
 
       <div className="tiles">
         {list.map((a) => (
-          <div className="tile" key={a.k}>
-            <div className={`v ${a.n > 0 ? "alarm" : "calm"}`}>{a.n}</div>
-            <div className="k">{a.k}</div>
+          <div className={`tile ${a.n > 0 ? "is-hot" : "zero"}`} key={a.k}>
+            <div className="lab">{a.k}</div>
+            <div className="v">{a.n}</div>
+            <div className="foot"><span className="mk" />{a.n > 0 ? "нужно внимание" : "спокойно"}</div>
           </div>
         ))}
       </div>
@@ -59,7 +80,7 @@ export default async function Main() {
         </div>
       )}
 
-      <div className="section-title">Требует решения</div>
+      <div className="sect-h" style={{ marginTop: 26 }}><h3 className="h2">Очередь решений</h3></div>
       {pending.length === 0 ? (
         <div className="empty">
           <b>Очередь пуста</b>

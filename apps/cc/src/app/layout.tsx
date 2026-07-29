@@ -4,6 +4,8 @@ import { IBM_Plex_Mono, Manrope, Syne } from "next/font/google";
 import { core } from "../lib/core";
 import { Sidebar, TabBar } from "../components/nav";
 import { FloatingChat } from "../components/floating-chat";
+import { HeaderActions } from "../components/header-actions";
+import { Background } from "../components/bg/background";
 import "./globals.css";
 
 // Шрифты фирменные (ТЗ). next/font забирает их на сборке и раздаёт со своего
@@ -20,12 +22,12 @@ const manrope = Manrope({
 });
 const mono = IBM_Plex_Mono({
   subsets: ["latin", "cyrillic"],
-  weight: ["400", "500"],
+  weight: ["400", "500", "600"],
   variable: "--font-mono",
 });
 
 export const metadata: Metadata = {
-  title: "MYDON",
+  title: "MYDON · командный центр",
   description: "Единый контур управления направлениями",
 };
 
@@ -50,17 +52,23 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   return (
     <html lang="ru" className={`${syne.variable} ${manrope.variable} ${mono.variable}`}>
       <body>
-        <div className="shell">
-          <header className="topbar">
-            <span className="brand">
-              MY<span>DON</span>
-            </span>
-            <span className="where">Asia/Tashkent</span>
+        <Background />
+        <div className="app">
+          <header className="hdr">
+            <svg className="logo" viewBox="0 0 24 24" aria-hidden>
+              <path d="M4 20 12 4l8 16-8-5z" fill="#1A6BFF" />
+            </svg>
+            <h1>MYDON</h1>
+            <span className="sub">· командный центр</span>
+            <span className="sp" />
+            <HeaderActions pendingCount={pending} />
           </header>
 
           <div className="body">
             <Sidebar pendingCount={pending} />
-            <main>{children}</main>
+            <main className="scroll">
+              <div className="wrap">{children}</div>
+            </main>
           </div>
 
           <TabBar pendingCount={pending} />

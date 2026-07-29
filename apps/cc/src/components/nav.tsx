@@ -3,23 +3,23 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { DOMAIN_LABELS, DOMAINS } from "@mydon/shared";
+import { Ic } from "./icons";
 
-/** Разделы оболочки. Порядок — от «что требует решения» к справочному. */
-// Помощник — не в этом списке: он плавающий, доступен на любом экране (FloatingChat).
+/**
+ * Навигация — структура из дизайна Claude Design: три группы на компьютере,
+ * пять пунктов внизу на телефоне. Помощник — плавающая кнопка, не пункт меню.
+ */
 const MAIN = [
-  { href: "/mydon", icon: "◉", label: "Главное" },
-  { href: "/tasks", icon: "✓", label: "Задачи" },
-  { href: "/approvals", icon: "✋", label: "Решения" },
-  { href: "/team", icon: "👥", label: "Команда" },
-  { href: "/agents", icon: "⚙", label: "Агенты" },
-  { href: "/registry", icon: "▤", label: "Реестр" },
-  { href: "/audit", icon: "≡", label: "Журнал" },
+  { href: "/mydon", icon: "home", label: "Главное" },
+  { href: "/tasks", icon: "tasks", label: "Задачи" },
+  { href: "/approvals", icon: "dec", label: "Решения", hot: true },
+  { href: "/team", icon: "team", label: "Команда" },
+  { href: "/agents", icon: "agents", label: "Агенты" },
 ];
-
-// На телефоне в нижней панели — только то, чем пользуются каждый день.
-// Больше пяти вкладок превращают панель в кашу: подписи не читаются,
-// попасть пальцем сложно. Остальное доступно с «Главного» и на компьютере.
-const PHONE = ["/mydon", "/tasks", "/approvals", "/team", "/agents"];
+const SYSTEM = [
+  { href: "/registry", icon: "reg", label: "Реестр" },
+  { href: "/audit", icon: "jour", label: "Журнал" },
+];
 
 function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(href + "/");
@@ -28,35 +28,27 @@ function isActive(pathname: string, href: string): boolean {
 /** Боковое меню — только на компьютере. */
 export function Sidebar({ pendingCount }: { pendingCount: number }) {
   const pathname = usePathname();
+  const item = (n: { href: string; icon: string; label: string; hot?: boolean }) => (
+    <Link
+      key={n.href}
+      href={n.href}
+      aria-current={isActive(pathname, n.href) ? "page" : undefined}
+    >
+      <Ic name={n.icon} />
+      {n.label}
+      {n.hot && pendingCount > 0 && <span className="bdg2">{pendingCount}</span>}
+    </Link>
+  );
   return (
     <nav className="side" aria-label="Разделы">
-      {MAIN.map((item) => (
-        <Link
-          key={item.href}
-          href={item.href}
-          className="navlink"
-          aria-current={isActive(pathname, item.href) ? "page" : undefined}
-        >
-          <span aria-hidden>{item.icon}</span>
-          {item.label}
-          {item.href === "/approvals" && pendingCount > 0 && (
-            <span className="badge">{pendingCount}</span>
-          )}
-        </Link>
-      ))}
-
-      <div className="group">Направления</div>
-      {DOMAINS.filter((d) => d !== "mydon").map((d) => (
-        <Link
-          key={d}
-          href={`/domain/${d}`}
-          className="navlink"
-          aria-current={isActive(pathname, `/domain/${d}`) ? "page" : undefined}
-        >
-          <span aria-hidden>·</span>
-          {DOMAIN_LABELS[d]}
-        </Link>
-      ))}
+      <div className="gl">Обзор</div>
+      {MAIN.map(item)}
+      <div className="gl">Направления</div>
+      {DOMAINS.filter((d) => d !== "mydon").map((d) =>
+        item({ href: `/domain/${d}`, icon: "biz", label: DOMAIN_LABELS[d] }),
+      )}
+      <div className="gl">Система</div>
+      {SYSTEM.map(item)}
     </nav>
   );
 }
@@ -66,17 +58,17 @@ export function TabBar({ pendingCount }: { pendingCount: number }) {
   const pathname = usePathname();
   return (
     <nav className="tabbar" aria-label="Разделы">
-      {MAIN.filter((item) => PHONE.includes(item.href)).map((item) => (
+      {MAIN.map((n) => (
         <Link
-          key={item.href}
-          href={item.href}
-          aria-current={isActive(pathname, item.href) ? "page" : undefined}
+          key={n.href}
+          href={n.href}
+          aria-current={isActive(pathname, n.href) ? "page" : undefined}
         >
-          <i aria-hidden>{item.icon}</i>
-          {item.label}
-          {item.href === "/approvals" && pendingCount > 0 && (
-            <span className="dot" aria-label={`требуют решения: ${pendingCount}`} />
+          <Ic name={n.icon} />
+          {n.hot && pendingCount > 0 && (
+            <span className="bdg" aria-label={`решений: ${pendingCount}`} />
           )}
+          <span>{n.label}</span>
         </Link>
       ))}
     </nav>

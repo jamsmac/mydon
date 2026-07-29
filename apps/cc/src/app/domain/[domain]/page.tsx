@@ -12,24 +12,13 @@ import {
 import { CoreDown } from "../../../components/core-down";
 import { groupsFor } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
-import { MONO_KEYS, typeOne } from "../../../lib/labels";
+import { typeOne } from "../../../lib/labels";
 import { money, plural, when } from "../../../lib/format";
 
 export const dynamic = "force-dynamic";
 
-const mono = { fontFamily: "'IBM Plex Mono', ui-monospace, monospace" } as const;
-
 function isDomain(v: string): v is Domain {
   return (DOMAINS as readonly string[]).includes(v);
-}
-
-/** Краткая строка под названием записи: цена для товара, номер для машины. */
-function subtitle(e: Entity): string {
-  const a = e.attrs ?? {};
-  const parts: string[] = [];
-  if (typeof a["цена"] === "number") parts.push(`${Number(a["цена"]).toLocaleString("ru-RU")} сум`);
-  if (e.externalRef) parts.push(e.externalRef);
-  return parts.join(" · ") || "—";
 }
 
 /**
@@ -101,8 +90,8 @@ export default async function DomainPage({
   return (
     <>
       <div className="page-head">
-        <h1>{DOMAIN_LABELS[domain]}</h1>
-        <p>
+        <h1 className="h1">{DOMAIN_LABELS[domain]}</h1>
+        <p className="lead">
           {entities.length} {plural(entities.length, "запись", "записи", "записей")} в реестре
           {openTasks.length > 0 ? ` · открытых задач: ${openTasks.length}` : ""}
         </p>
@@ -145,24 +134,26 @@ export default async function DomainPage({
       {activeGroup === "overview" && (
         <>
           <div className="tiles">
-            <div className="tile">
-              <div className="v calm">{money(sum(owedToUs))}</div>
-              <div className="k">должны нам</div>
+            <div className={`tile ${sum(owedToUs) === 0 ? "zero" : ""}`}>
+              <div className="lab">Должны нам</div>
+              <div className="v">{money(sum(owedToUs))}</div>
+              <div className="foot"><span className="mk" />{sum(owedToUs) === 0 ? "нет открытых счетов" : "по реестру обязательств"}</div>
             </div>
-            <div className="tile">
-              <div className="v calm">{money(sum(owedByUs))}</div>
-              <div className="k">должны мы</div>
+            <div className={`tile ${sum(owedByUs) === 0 ? "zero" : ""}`}>
+              <div className="lab">Должны мы</div>
+              <div className="v">{money(sum(owedByUs))}</div>
+              <div className="foot"><span className="mk" />{sum(owedByUs) === 0 ? "нет открытых счетов" : "поставщики и аренда"}</div>
             </div>
-            <div className="tile">
-              <div className={`v ${obligations.overdue.length > 0 ? "alarm" : "calm"}`}>
-                {obligations.overdue.length}
-              </div>
-              <div className="k">просрочено</div>
+            <div className={`tile ${obligations.overdue.length > 0 ? "is-hot" : "zero"}`}>
+              <div className="lab">Просрочено</div>
+              <div className="v">{obligations.overdue.length}</div>
+              <div className="foot"><span className="mk" />{obligations.overdue.length > 0 ? "требует твоего решения" : "просрочек нет"}</div>
             </div>
-            <div className="tile">
-              <div className={`v ${openTasks.length > 0 ? "" : "calm"}`}>{openTasks.length}</div>
-              <div className="k">открытых задач</div>
-            </div>
+            <Link href={href("tasks")} className={`tile ${openTasks.length === 0 ? "zero" : ""}`}>
+              <div className="lab">Открытых задач</div>
+              <div className="v">{openTasks.length}</div>
+              <div className="foot"><span className="mk" />{openTasks.length > 0 ? "по направлению" : "задач нет"}<span className="go">→</span></div>
+            </Link>
           </div>
 
           {obligations.overdue.length > 0 && (
@@ -182,33 +173,37 @@ export default async function DomainPage({
             </>
           )}
 
-          <div className="section-title">Что заведено</div>
+          <div className="sect"><div className="sect-h"><h3 className="h2">Что заведено</h3></div>
           {entities.length === 0 ? (
             <div className="empty">
               <b>Пока пусто</b>
               Данные собираются со страниц ПО и попадают сюда после твоего «Одобрить».
             </div>
           ) : (
-            <div className="rows">
+            <div className="wgrid">
               {groups.flatMap((g) =>
                 g.leaves
-                  .filter((l) => l.type !== null && (byType[l.type] ?? 0) > 0)
-                  .map((l) => (
-                    <Link
-                      href={href(`${g.key}:${l.type}`)}
-                      className="row rowlink"
-                      key={`${g.key}:${l.type}`}
-                    >
-                      <div className="t">
-                        <b>{l.label}</b>
-                        <small>{g.label}</small>
+                  .filter((l) => l.type !== null)
+                  .map((l) => {
+                    const n = byType[l.type!] ?? 0;
+                    return n > 0 ? (
+                      <Link href={href(`${g.key}:${l.type}`)} className="wt" key={`${g.key}:${l.type}`}>
+                        <div className="wl">{l.label}</div>
+                        <div className="wv">{n}</div>
+                        <div className="wf">записей<span className="go">→</span></div>
+                      </Link>
+                    ) : (
+                      <div className="wt off" key={`${g.key}:${l.type}`}>
+                        <div className="wl">{l.label}</div>
+                        <div className="wv">—</div>
+                        <div className="wf">появится после сбора</div>
                       </div>
-                      <span className="pill">{byType[l.type!]}</span>
-                    </Link>
-                  )),
+                    );
+                  }),
               )}
             </div>
           )}
+          </div>
         </>
       )}
 
@@ -216,19 +211,30 @@ export default async function DomainPage({
       {group && leaf?.type && (
         <>
           {leafItems.length > 0 ? (
-            <div className="rows">
-              {leafItems.map((e) => (
-                <Link href={`/card/${e.id}`} className="row rowlink" key={e.id}>
-                  <div className="t">
-                    <b>{e.name}</b>
-                    <small style={e.externalRef && MONO_KEYS.has("серийник") ? mono : undefined}>
-                      {subtitle(e)}
-                    </small>
-                  </div>
-                  <span className="pill">открыть</span>
-                </Link>
-              ))}
-            </div>
+            <>
+              <div className="book">
+                <div className="th">
+                  <span>Название</span>
+                  <span>Код</span>
+                  <span style={{ textAlign: "right" }}>{leaf.type === "product" ? "Цена" : "Номер"}</span>
+                </div>
+                {leafItems.map((e) => {
+                  const price = (e.attrs ?? {})["цена"];
+                  return (
+                    <Link href={`/card/${e.id}`} className="tr" key={e.id}>
+                      <span className="nm">{e.name}</span>
+                      <span className="cd">{String((e.attrs ?? {})["ИКПУ"] ?? (e.attrs ?? {})["код"] ?? "")}</span>
+                      <span className="pr">
+                        {typeof price === "number"
+                          ? <>{Number(price).toLocaleString("ru-RU")} <span className="u">сум</span></>
+                          : (e.externalRef ?? "—")}
+                      </span>
+                    </Link>
+                  );
+                })}
+              </div>
+              <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>{leafItems.length} записей</p>
+            </>
           ) : (
             <div className="empty">
               <b>{leaf.label}: данных пока нет</b>
@@ -254,16 +260,15 @@ export default async function DomainPage({
             Назначь сотруднику направление в его карточке — он появится здесь.
           </div>
         ) : (
-          <div className="rows">
+          <div>
             {ourPeople.map((p) => (
-              <Link href={`/team/${p.id}`} className="row rowlink" key={p.id}>
-                <div className="t">
-                  <b>{p.name}</b>
-                  <small>{p.role ?? "роль не указана"}</small>
+              <Link href={`/team/${p.id}`} className="prow" key={p.id}>
+                <span className="av2">{p.name.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}</span>
+                <div className="pb">
+                  <div className="pn">{p.name}</div>
+                  <div className="pr2">{p.role ?? "роль не указана"}</div>
                 </div>
-                <span className={`pill ${p.tgChatId ? "ok" : ""}`}>
-                  {p.tgChatId ? "в Telegram" : "не подключён"}
-                </span>
+                {p.tgChatId ? <span className="tag-tg">в Telegram</span> : <span className="chip">не подключён</span>}
               </Link>
             ))}
           </div>
@@ -277,15 +282,16 @@ export default async function DomainPage({
             Задачи с этим направлением появятся здесь.
           </div>
         ) : (
-          <div className="rows">
-            {openTasks.map((t) => (
-              <Link href={`/tasks/${t.id}`} className="row rowlink" key={t.id}>
-                <div className="t">
-                  <b>{t.title}</b>
-                  <small>{dueLabel(t.due)}</small>
-                </div>
-              </Link>
-            ))}
+          <div>
+            {openTasks.map((t) => {
+              const late = t.due !== null && new Date(t.due).getTime() < Date.now();
+              return (
+                <Link href={`/tasks/${t.id}`} className={`trow ${late ? "hot" : ""}`} key={t.id}>
+                  <div className="tb"><div className="tt">{t.title}</div></div>
+                  <span className={`due ${late ? "hot" : ""}`}>{dueLabel(t.due)}</span>
+                </Link>
+              );
+            })}
           </div>
         ))}
     </>

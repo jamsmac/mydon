@@ -20,30 +20,27 @@ const DOMAIN_TITLES: Record<string, string> = {
   mydon: "MYDON",
 };
 
-/** Короткая строка качества: показываем только то, что есть — без нулей-шума. */
-function qualityLine(w: Workload | undefined): string {
-  if (!w) return "";
-  const parts: string[] = [];
-  if (w.doneWithDue > 0) parts.push(`в срок ${Math.round((w.doneOnTime / w.doneWithDue) * 100)}%`);
-  if (w.excellent > 0) parts.push(`отлично ×${w.excellent}`);
-  if (w.redo > 0) parts.push(`переделки ×${w.redo}`);
-  return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
-}
-
 function PersonRow({ p, w }: { p: Person; w: Workload | undefined }) {
+  const initials = p.name.split(" ").map((x) => x[0]).slice(0, 2).join("").toUpperCase();
   return (
-    <Link href={`/team/${p.id}`} className="row rowlink">
-      <div className="t">
-        <b>{p.name}</b>
-        <small>
-          {p.role ?? "роль не указана"}
-          {w ? ` · висит ${w.open}${w.overdue > 0 ? `, просрочено ${w.overdue}` : ""}` : ""}
-          {qualityLine(w)}
-        </small>
+    <Link href={`/team/${p.id}`} className="prow">
+      <span className="av2">{initials}</span>
+      <div className="pb">
+        <div className="pn">{p.name}</div>
+        <div className="pr2">{p.role ?? "роль не указана"}</div>
+        {w && (
+          <div className="stats">
+            <span>висит <b>{w.open}</b></span>
+            {w.overdue > 0 && (
+              <span style={{ color: "var(--hot)" }}>просрочено <b style={{ color: "var(--hot)" }}>{w.overdue}</b></span>
+            )}
+            {w.doneWithDue > 0 && <span>в срок <b>{Math.round((w.doneOnTime / w.doneWithDue) * 100)}%</b></span>}
+            {w.excellent > 0 && <span>отлично <b>×{w.excellent}</b></span>}
+            {w.redo > 0 && <span>переделки <b>×{w.redo}</b></span>}
+          </div>
+        )}
       </div>
-      <span className={`pill ${p.tgChatId ? "ok" : ""}`}>
-        {p.tgChatId ? "в Telegram" : "не подключён"}
-      </span>
+      {p.tgChatId ? <span className="tag-tg">в Telegram</span> : <span className="chip">не подключён</span>}
     </Link>
   );
 }
@@ -104,7 +101,7 @@ export default async function Team() {
                 {d === null ? "Без направления" : DOMAIN_TITLES[d]}
                 <span className="group-count">{group.length}</span>
               </div>
-              <div className="rows">
+              <div>
                 {group.map((p) => (
                   <PersonRow key={p.id} p={p} w={byRef.get(`human:${p.id}`)} />
                 ))}
@@ -118,19 +115,20 @@ export default async function Team() {
       <NewPersonForm />
 
       <div className="section-title">Агенты</div>
-      <div className="rows">
+      <div>
         {agents.map((a) => {
           const w = byRef.get(`agent:${a.name}`);
           return (
-            <Link href={`/agents/${a.name}`} className="row rowlink" key={a.id}>
-              <div className="t">
-                <b>{a.name}</b>
-                <small>
-                  {a.description ?? "без описания"}
-                  {w && w.open > 0 ? ` · висит ${w.open}` : ""}
-                </small>
+            <Link href={`/agents/${a.name}`} className="prow" key={a.id}>
+              <span className="av2 ag">✦</span>
+              <div className="pb">
+                <div className="pn">{a.name}</div>
+                <div className="pr2">{a.description ?? "без описания"}</div>
+                {w && w.open > 0 && (
+                  <div className="stats"><span>висит <b>{w.open}</b></span></div>
+                )}
               </div>
-              <span className={`pill ${a.status === "active" ? "ok" : ""}`}>
+              <span className={`chip ${a.status === "active" ? "g" : ""}`}>
                 {a.status === "active" ? "работает" : "выключен"}
               </span>
             </Link>

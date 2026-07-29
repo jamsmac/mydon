@@ -42,28 +42,35 @@ export function TaskRow({
     });
   }
 
+  const initials = ownerName.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+
   return (
-    <div className={`row taskrow ${urgent ? "urgent" : ""}`}>
+    <div className={`trow ${urgent ? "hot" : ""}`}>
       <button
         type="button"
         className="tick"
         onClick={() => setClosing((v) => !v)}
         aria-label="Отметить выполненной"
         disabled={pending}
+        style={{ background: "none", border: "none", color: "var(--tx-3)", fontSize: 17, padding: 0 }}
       >
         {closing ? "×" : "○"}
       </button>
 
-      <div className="t">
-        <Link href={`/tasks/${task.id}`} className="tasklink">
-          <b>{task.title}</b>
+      <div className="tb">
+        <Link href={`/tasks/${task.id}`} className="tt" style={{ display: "block" }}>
+          {task.title}
         </Link>
-        <small>
-          {ownerName}
-          {task.ownerKind === "agent" ? " · агент" : ""} · {dueLabel(task.due)}
-          {prio ? ` · ${prio}` : ""}
-          {task.status === "in_progress" ? " · в работе" : ""}
-        </small>
+        <div className="tm">
+          <span className="who">
+            <span className={`av ${task.ownerKind === "agent" ? "ag" : ""}`}>
+              {task.ownerKind === "agent" ? "✦" : initials || "?"}
+            </span>
+            {ownerName}
+          </span>
+          {prio ? <span>{prio}</span> : null}
+          {task.status === "in_progress" ? <span>в работе</span> : null}
+        </div>
 
         {closing && (
           <div className="close-box">
@@ -85,6 +92,7 @@ export function TaskRow({
           </div>
         )}
       </div>
+      <span className={`due ${urgent ? "hot" : ""}`}>{dueLabel(task.due)}</span>
     </div>
   );
 }

@@ -24,12 +24,48 @@ export function EntityEditor({ entity }: { entity: Entity }) {
       setMsg(res.ok ? { ok: true, text: "Сохранено" } : { ok: false, text: res.error ?? "Ошибка" });
       if (res.ok) {
         setAdding(false);
+        setEditing(false);
         router.refresh();
       }
     });
   }
 
   const attrs = Object.entries(entity.attrs ?? {});
+  const [editing, setEditing] = useState(false);
+
+  // Сначала ЧТЕНИЕ — паспорт записи, как в дизайне. Правка — по кнопке.
+  if (!editing) {
+    return (
+      <>
+        <div className="pass">
+          <div className="f">
+            <div className="k">Название</div>
+            <div className="val">{entity.name}</div>
+          </div>
+          <div className="f">
+            <div className="k">Номер / код</div>
+            <div className="val mono">{entity.externalRef ?? "—"}</div>
+          </div>
+          {attrs.map(([key, value]) => (
+            <div className="f" key={key}>
+              <div className="k">{key}</div>
+              <div className={`val ${MONO_KEYS.has(key) ? "mono" : ""}`}>
+                {key === "цена" && typeof value === "number"
+                  ? `${Number(value).toLocaleString("ru-RU")} сум`
+                  : String(value ?? "—")}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 9, marginTop: 14, flexWrap: "wrap" }}>
+          <button type="button" className="btn pri" onClick={() => setEditing(true)}>
+            Изменить
+          </button>
+        </div>
+        {msg && <p className={msg.ok ? "ok-text" : "err-text"}>{msg.text}</p>}
+      </>
+    );
+  }
 
   return (
     <form action={onSave} className="form card">
@@ -74,6 +110,9 @@ export function EntityEditor({ entity }: { entity: Entity }) {
       <div className="form-actions">
         <button type="submit" className="btn primary" disabled={pending}>
           {pending ? "Сохраняю…" : "Сохранить"}
+        </button>
+        <button type="button" className="btn ghost" onClick={() => setEditing(false)}>
+          Отмена
         </button>
         {msg && <span className={msg.ok ? "ok-text" : "err-text"}>{msg.text}</span>}
       </div>
