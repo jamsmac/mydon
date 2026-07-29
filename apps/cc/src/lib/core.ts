@@ -169,6 +169,19 @@ export interface Person {
 }
 
 /** Нагрузка исполнителя — для картины по людям. */
+/** Приход товара/сырья из синка mydon-stock. */
+export interface PurchaseRow {
+  id: string;
+  dt: string;
+  product: string;
+  unit: string | null;
+  qty: string;
+  unitPrice: string | null;
+  total: string | null;
+  note: string | null;
+  expiryDate: string | null;
+}
+
 /** Продажа (дневная позиция) из синка mydon-stock. */
 export interface SaleRow {
   id: string;
@@ -281,6 +294,19 @@ export const core = {
   salesSilent: (days = 2) =>
     get<{ machineId: string | null; serial: string; name: string | null; lastDt: string }[]>(
       `/sales/silent?days=${days}`,
+    ),
+  supplySummary: () =>
+    get<{
+      purchases30: { count: number; total: number };
+      emptyPositions: number;
+      lowPositions: number;
+      lastStockDt: string | null;
+    }>("/supply/summary"),
+  purchases: (days = 30, limit = 300) =>
+    get<PurchaseRow[]>(`/supply/purchases?days=${days}&limit=${limit}`),
+  machineStockLevels: () =>
+    get<{ machineSerial: string; machineId: string | null; machineName: string | null; dt: string; product: string; qty: number }[]>(
+      "/supply/machine-stock",
     ),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),

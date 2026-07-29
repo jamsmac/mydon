@@ -57,6 +57,13 @@
       "when": 1785343081776,
       "tag": "0007_organic_tomorrow_man",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1785367833724,
+      "tag": "0008_silent_epoch",
+      "breakpoints": true
     }
   ]
 }

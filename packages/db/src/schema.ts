@@ -187,6 +187,50 @@ export const sale = pgTable(
   ],
 );
 
+// ── purchase: приход товара/сырья (этап 2: синк из mydon-stock) ──
+export const purchase = pgTable(
+  "purchase",
+  {
+    id: id(),
+    /** id строки в источнике — ключ идемпотентного синка. */
+    extId: text("ext_id").notNull(),
+    dt: date("dt").notNull(),
+    product: text("product").notNull(),
+    unit: text("unit"),
+    qty: numeric("qty", { precision: 12, scale: 2 }).default("0").notNull(),
+    unitPrice: numeric("unit_price", { precision: 15, scale: 2 }),
+    total: numeric("total", { precision: 15, scale: 2 }),
+    note: text("note"),
+    /** Срок годности партии — для отчёта «Сроки годности». */
+    expiryDate: date("expiry_date"),
+    source: text("source").default("stock").notNull(),
+    importedAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("purchase_src_key").on(t.source, t.extId),
+    index("purchase_dt_idx").on(t.dt),
+  ],
+);
+
+// ── machine_stock: остатки внутри автоматов (снапшоты OurVend по дням) ──
+export const machineStock = pgTable(
+  "machine_stock",
+  {
+    id: id(),
+    dt: date("dt").notNull(),
+    machineSerial: text("machine_serial").notNull(),
+    machineId: uuid("machine_id").references(() => entity.id),
+    product: text("product").notNull(),
+    qty: numeric("qty", { precision: 12, scale: 2 }).default("0").notNull(),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
+    importedAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("machine_stock_day_key").on(t.dt, t.machineSerial, t.product),
+    index("machine_stock_serial_idx").on(t.machineSerial, t.dt),
+  ],
+);
+
 // ── task_comment: переписка по задаче (уточнения, отчёты, вопросы) ──
 export const taskComment = pgTable(
   "task_comment",

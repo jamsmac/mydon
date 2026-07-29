@@ -15,6 +15,7 @@ import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
 import { ProductsBook } from "../../../components/products-book";
+import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MachineMap } from "../../../components/machine-map";
 import { QuickActions } from "../../../components/quick-actions";
 import { typeOne } from "../../../lib/labels";
@@ -83,6 +84,14 @@ export default async function DomainPage({
       salesSummary = null;
     }
   }
+  let supplySummary: Awaited<ReturnType<typeof core.supplySummary>> | null = null;
+  if (domain === "vendhub") {
+    try {
+      supplySummary = await core.supplySummary();
+    } catch {
+      supplySummary = null;
+    }
+  }
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.type] = (acc[e.type] ?? 0) + 1;
@@ -146,7 +155,8 @@ export default async function DomainPage({
         <div className="subtabs">
           {group.leaves.map((l) => {
             // Инкассация живёт своей таблицей, а не реестром — не затемняем.
-            const n = l.type === "collection" || l.type === "sale" ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
+            const LIVE = ["collection", "sale", "purchase", "machine_stock"];
+            const n = l.type && LIVE.includes(l.type) ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
             const isActive = leaf === l;
             return (
               <Link
@@ -187,6 +197,16 @@ export default async function DomainPage({
               <div className="foot"><span className="mk" />{openTasks.length > 0 ? "по направлению" : "задач нет"}<span className="go">→</span></div>
             </Link>
           </div>
+
+          {domain === "vendhub" && supplySummary && supplySummary.emptyPositions > 0 && (
+            <div className="notice" style={{ marginTop: 16 }}>
+              <b>В автоматах пусто: {supplySummary.emptyPositions} позиций</b>
+              Спирали закончились — пора везти пополнение.{" "}
+              <Link href={href("catalog:machine_stock")} style={{ color: "var(--hot)", fontWeight: 600 }}>
+                Смотреть остатки →
+              </Link>
+            </div>
+          )}
 
           {domain === "vendhub" && machines.length > 0 && (
             <div className="sect">
@@ -345,6 +365,10 @@ export default async function DomainPage({
       {/* ── Журнал продаж: живые данные из mydon-stock (этап 1 миграции) ── */}
       {group && leaf?.type === "sale" && <SalesView />}
 
+      {/* ── Приход и остатки: живые данные mydon-stock (этап 2 миграции) ── */}
+      {group && leaf?.type === "purchase" && <PurchasesView />}
+      {group && leaf?.type === "machine_stock" && <MachineStockView />}
+
       {/* ── Товары: журнал как в ПО владельца — поиск, категории, незаполненные ── */}
       {group && leaf?.type === "product" && (
         <>
@@ -360,7 +384,7 @@ export default async function DomainPage({
       )}
 
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && leaf.type !== "collection" && leaf.type !== "sale" && leaf.type !== "product" && (
+      {group && leaf?.type && !["collection", "sale", "product", "purchase", "machine_stock"].includes(leaf.type) && (
         <>
           {leafItems.length > 0 ? (
             <>

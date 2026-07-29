@@ -13,6 +13,7 @@ import { PeopleModule } from "./people/people.module";
 import { RegistryModule } from "./registry/registry.module";
 import { RulesModule } from "./rules/rules.module";
 import { SalesModule } from "./sales/sales.module";
+import { SupplyModule } from "./supply/supply.module";
 import { TasksModule } from "./tasks/tasks.module";
 import { VerificationModule } from "./verification/verification.module";
 
@@ -28,6 +29,7 @@ import { VerificationModule } from "./verification/verification.module";
     RegistryModule,
     RulesModule,
     SalesModule,
+    SupplyModule,
     HistoryModule,
     NotesModule,
     PeopleModule,
