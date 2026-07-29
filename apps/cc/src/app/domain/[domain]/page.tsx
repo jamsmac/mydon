@@ -12,6 +12,8 @@ import {
 import { CoreDown } from "../../../components/core-down";
 import { groupsFor } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
+import { MachineMap } from "../../../components/machine-map";
+import { QuickActions } from "../../../components/quick-actions";
 import { typeOne } from "../../../lib/labels";
 import { money, plural, when } from "../../../lib/format";
 
@@ -58,6 +60,10 @@ export default async function DomainPage({
   }
 
   const ourPeople = people.filter((p) => p.domain === domain);
+  const machines = entities.filter((e) => e.type === "machine");
+  const coffeeMachines = machines.filter((e) => Number((e.attrs ?? {})["категория"]) === 10).length;
+  const snackMachines = machines.length - coffeeMachines;
+  const defaultOwner = ourPeople.find((p) => p.active === "yes" && p.tgChatId) ?? ourPeople[0] ?? null;
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.type] = (acc[e.type] ?? 0) + 1;
@@ -155,6 +161,33 @@ export default async function DomainPage({
               <div className="foot"><span className="mk" />{openTasks.length > 0 ? "по направлению" : "задач нет"}<span className="go">→</span></div>
             </Link>
           </div>
+
+          {domain === "vendhub" && machines.length > 0 && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Автоматы на карте</h3>
+                <span className="chip b">кофе ×{coffeeMachines}</span>
+                <span className="chip g">снеки ×{snackMachines}</span>
+              </div>
+              <MachineMap machines={machines} />
+            </div>
+          )}
+
+          {domain === "vendhub" && (
+            <div className="sect">
+              <div className="sect-h"><h3 className="h2">Быстрые действия</h3></div>
+              <QuickActions
+                domain={domain}
+                actions={["Пополнение автоматов", "Инкассация", "Чистка кофемолок", "Ремонт / выезд"]}
+                defaultOwnerRef={defaultOwner?.id ?? null}
+              />
+              {defaultOwner && (
+                <p className="hint" style={{ marginTop: 6 }}>
+                  Задача уйдёт исполнителю: {defaultOwner.name}. Поменять можно в карточке задачи.
+                </p>
+              )}
+            </div>
+          )}
 
           {domain === "vendhub" && (
             <div className="sect">

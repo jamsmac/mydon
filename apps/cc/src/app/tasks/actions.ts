@@ -47,6 +47,35 @@ export async function quickAddTask(form: FormData): Promise<ActionResult> {
   return { ok: true };
 }
 
+/**
+ * Быстрая кнопка с дашборда направления: «Пополнение», «Инкассация»…
+ * Исполнитель выбирается позже в задаче — кнопка не должна требовать раздумий.
+ */
+export async function quickDomainTask(
+  domain: string,
+  title: string,
+  ownerRef: string | null,
+): Promise<ActionResult> {
+  try {
+    await core.createTask({
+      title,
+      domain,
+      // Есть кому поручить (первый активный человек направления) — сразу ему,
+      // нет — задача встаёт без исполнителя, назначается в карточке.
+      ownerKind: "human",
+      ownerRef: ownerRef ?? "",
+      priority: "high",
+      createdBy: "owner",
+      due: new Date(Date.now() + 24 * 3600_000).toISOString(),
+    });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/tasks");
+  revalidatePath(`/domain/${domain}`);
+  return { ok: true };
+}
+
 /** Закрытие задачи. Отчёт обязателен: «сделано» без объяснения ничего не значит. */
 export async function completeTask(id: string, resultNote: string): Promise<ActionResult> {
   const note = resultNote.trim();
