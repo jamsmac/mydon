@@ -14,6 +14,7 @@ import { groupsFor } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
+import { ProductsBook } from "../../../components/products-book";
 import { MachineMap } from "../../../components/machine-map";
 import { QuickActions } from "../../../components/quick-actions";
 import { typeOne } from "../../../lib/labels";
@@ -36,10 +37,10 @@ export default async function DomainPage({
   searchParams,
 }: {
   params: Promise<{ domain: string }>;
-  searchParams: Promise<{ tab?: string }>;
+  searchParams: Promise<{ tab?: string; q?: string; cat?: string; inc?: string }>;
 }) {
   const { domain } = await params;
-  const { tab } = await searchParams;
+  const { tab, q, cat, inc } = await searchParams;
   if (!isDomain(domain)) notFound();
 
   const groups = groupsFor(domain);
@@ -344,8 +345,22 @@ export default async function DomainPage({
       {/* ── Журнал продаж: живые данные из mydon-stock (этап 1 миграции) ── */}
       {group && leaf?.type === "sale" && <SalesView />}
 
+      {/* ── Товары: журнал как в ПО владельца — поиск, категории, незаполненные ── */}
+      {group && leaf?.type === "product" && (
+        <>
+          <ProductsBook
+            items={leafItems}
+            q={q ?? ""}
+            cat={cat ?? ""}
+            inc={inc === "1"}
+            hrefBase={`/domain/${domain}`}
+          />
+          <NewEntityForm domain={domain} type="product" label={typeOne("product")} />
+        </>
+      )}
+
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && leaf.type !== "collection" && leaf.type !== "sale" && (
+      {group && leaf?.type && leaf.type !== "collection" && leaf.type !== "sale" && leaf.type !== "product" && (
         <>
           {leafItems.length > 0 ? (
             <>
