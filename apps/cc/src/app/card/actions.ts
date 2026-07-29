@@ -3,6 +3,54 @@
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
 
+export interface CreateResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** Создание записи руками владельца — прямо из вкладки направления. */
+export async function createEntity(
+  domain: string,
+  type: string,
+  form: FormData,
+): Promise<CreateResult> {
+  const name = String(form.get("name") ?? "").trim();
+  if (name.length < 2) return { ok: false, error: "Впиши название" };
+
+  const attrs: Record<string, unknown> = {};
+  const price = String(form.get("price") ?? "").trim();
+  if (/^\d+$/.test(price)) attrs["цена"] = Number(price);
+
+  try {
+    await core.createEntity({
+      domain,
+      type,
+      name,
+      externalRef: String(form.get("externalRef") ?? "").trim() || undefined,
+      ...(Object.keys(attrs).length > 0 ? { attrs } : {}),
+    });
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось создать" };
+  }
+  revalidatePath(`/domain/${domain}`);
+  revalidatePath("/registry");
+  return { ok: true };
+}
+
+/** Удаление записи. Содержимое остаётся в журнале — «что это было» видно всегда. */
+export async function deleteEntity(id: string, domain: string | null): Promise<CreateResult> {
+  try {
+    await core.deleteEntity(id);
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось удалить" };
+  }
+  if (domain) revalidatePath(`/domain/${domain}`);
+  revalidatePath("/registry");
+  return { ok: true };
+}
+
 export interface ActionResult {
   ok: boolean;
   error?: string;

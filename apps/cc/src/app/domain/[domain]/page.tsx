@@ -11,7 +11,8 @@ import {
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { groupsFor } from "../../../lib/domain-nav";
-import { MONO_KEYS } from "../../../lib/labels";
+import { NewEntityForm } from "../../../components/entity-new";
+import { MONO_KEYS, typeOne } from "../../../lib/labels";
 import { money, plural, when } from "../../../lib/format";
 
 export const dynamic = "force-dynamic";
@@ -212,28 +213,38 @@ export default async function DomainPage({
       )}
 
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group &&
-        (leaf?.type && leafItems.length > 0 ? (
-          <div className="rows">
-            {leafItems.map((e) => (
-              <Link href={`/card/${e.id}`} className="row rowlink" key={e.id}>
-                <div className="t">
-                  <b>{e.name}</b>
-                  <small style={e.externalRef && MONO_KEYS.has("серийник") ? mono : undefined}>
-                    {subtitle(e)}
-                  </small>
-                </div>
-                <span className="pill">открыть</span>
-              </Link>
-            ))}
-          </div>
-        ) : (
-          <div className="empty">
-            <b>{leaf?.label}: данных пока нет</b>
-            Появятся после сбора со страницы ПО и твоего «Одобрить». Пришли сохранённую
-            страницу с этими данными — и вкладка оживёт.
-          </div>
-        ))}
+      {group && leaf?.type && (
+        <>
+          {leafItems.length > 0 ? (
+            <div className="rows">
+              {leafItems.map((e) => (
+                <Link href={`/card/${e.id}`} className="row rowlink" key={e.id}>
+                  <div className="t">
+                    <b>{e.name}</b>
+                    <small style={e.externalRef && MONO_KEYS.has("серийник") ? mono : undefined}>
+                      {subtitle(e)}
+                    </small>
+                  </div>
+                  <span className="pill">открыть</span>
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <div className="empty">
+              <b>{leaf.label}: данных пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО,
+              соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type={leaf.type} label={typeOne(leaf.type)} />
+        </>
+      )}
+      {group && !leaf?.type && (
+        <div className="empty">
+          <b>{leaf?.label}: данных пока нет</b>
+          Появятся после сбора со страницы ПО.
+        </div>
+      )}
 
       {/* ── Команда направления ── */}
       {activeGroup === "team" &&

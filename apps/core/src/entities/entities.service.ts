@@ -123,6 +123,27 @@ export class EntitiesService {
   }
 
   /**
+   * Удаление записи — руками владельца, с полным следом в журнале.
+   *
+   * Запись стирается, но её содержимое остаётся в журнале (before):
+   * «что это было и когда убрали» можно посмотреть всегда.
+   */
+  async remove(id: string, actorRef = "owner"): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      const [before] = await tx.select().from(entity).where(eq(entity.id, id)).for("update");
+      if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
+      await tx.delete(entity).where(eq(entity.id, id));
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "entity.delete",
+        target: id,
+        before,
+      });
+    });
+  }
+
+  /**
    * Правка карточки.
    *
    * Строка блокируется на время транзакции (FOR UPDATE). Без блокировки две

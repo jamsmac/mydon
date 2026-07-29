@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
 import { EntitiesService } from "./entities.service";
 import { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
 
@@ -24,5 +24,11 @@ export class EntitiesController {
   @Patch(":id")
   update(@Param("id", ParseUUIDPipe) id: string, @Body() dto: UpdateEntityDto) {
     return this.entities.update(id, dto);
+  }
+
+  @Delete(":id")
+  async remove(@Param("id", ParseUUIDPipe) id: string) {
+    await this.entities.remove(id);
+    return { ok: true };
   }
 }

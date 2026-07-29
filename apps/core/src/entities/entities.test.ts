@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { nameMatches } from "./entities.service";
+import { EntitiesService, nameMatches } from "./entities.service";
 
 /** Достаёт подставляемые значения из SQL-выражения Drizzle. */
 function params(expr: ReturnType<typeof nameMatches>): string[] {
@@ -45,5 +45,36 @@ describe("Поиск по имени", () => {
     assert.match(text, /und-x-icu/);
     assert.match(text, /ESCAPE/);
     assert.match(text, /ILIKE/);
+  });
+});
+
+describe("Удаление записи", () => {
+  it("удаляет и оставляет содержимое в журнале (before)", async () => {
+    const audit: Record<string, unknown>[] = [];
+    const row = { id: "e1", name: "Test1", type: "machine" };
+    const tx = {
+      select: () => ({ from: () => ({ where: () => ({ for: async () => [row] }) }) }),
+      delete: () => ({ where: async () => undefined }),
+      insert: () => ({ values: async (v: Record<string, unknown>) => { audit.push(v); } }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const s = new EntitiesService(db, { record: async () => undefined } as never);
+    await s.remove("e1", "owner");
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].action, "entity.delete");
+    assert.deepEqual(audit[0].before, row);
+  });
+
+  it("несуществующая запись → понятная ошибка, журнал чист", async () => {
+    const audit: unknown[] = [];
+    const tx = {
+      select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
+      delete: () => ({ where: async () => undefined }),
+      insert: () => ({ values: async (v: unknown) => { audit.push(v); } }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const s = new EntitiesService(db, { record: async () => undefined } as never);
+    await assert.rejects(() => s.remove("нет-такой"), /не найдена/);
+    assert.equal(audit.length, 0);
   });
 });

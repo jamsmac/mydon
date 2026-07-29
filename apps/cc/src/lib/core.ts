@@ -226,8 +226,10 @@ export const core = {
   entitiesOfType: (domain: string, type: string) =>
     get<Entity[]>(`/entities?domain=${domain}&type=${encodeURIComponent(type)}`),
   entity: (id: string) => get<Entity>(`/entities/${id}`),
+  createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
   updateEntity: (id: string, input: Record<string, unknown>) =>
     send<Entity>(`/entities/${id}`, "PATCH", input),
+  deleteEntity: (id: string) => send<{ ok: boolean }>(`/entities/${id}`, "DELETE"),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
 };

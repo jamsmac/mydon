@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { core, CoreUnavailable, type Entity } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
+import { DeleteEntityButton } from "../../../components/entity-delete";
 import { EntityEditor } from "../../../components/entity-editor";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
 import { when } from "../../../lib/format";
@@ -59,6 +60,13 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       )}
 
       <EntityEditor entity={entity} />
+
+      <DeleteEntityButton
+        id={entity.id}
+        domain={entity.domain ?? null}
+        type={entity.type}
+        name={entity.name}
+      />
     </>
   );
 }
