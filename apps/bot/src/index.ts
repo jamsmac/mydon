@@ -363,6 +363,16 @@ ${DECIDED_LABEL[parsed.decision]}`);
             const res = await handleStaffCallback(chatId, data, person, staffDeps);
             await tg.answerCallback(u.callback_query.id, res.answer);
             if (res.message) await tg.sendMessage(chatId, res.message);
+            // Владелец узнаёт о сборе сразу — деньги в пути, приём ждёт в панели.
+            if (res.ownerNote) {
+              for (const ownerChat of allowlist) {
+                try {
+                  await tg.sendMessage(ownerChat, res.ownerNote);
+                } catch (err) {
+                  console.error("Владелец не уведомлён об инкассации:", err);
+                }
+              }
+            }
           } catch (err) {
             console.error("Кнопка задачи не сработала:", err);
             await tg.answerCallback(u.callback_query.id, "Не получилось, попробуй ещё раз");

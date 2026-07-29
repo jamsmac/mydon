@@ -126,6 +126,37 @@ export const task = pgTable(
   (t) => [index("task_owner_idx").on(t.ownerKind, t.ownerRef), index("task_due_idx").on(t.due)],
 );
 
+// ── collection: инкассация автоматов (перенос VendCash внутрь MYDON) ──
+// Двухэтапный процесс из спецификации VendCash: оператор фиксирует сбор
+// (время до секунды), менеджер принимает и вводит сумму.
+export const collectionStatusEnum = pgEnum("collection_status", ["collected", "received", "cancelled"]);
+export const collectionSourceEnum = pgEnum("collection_source", ["realtime", "manual_history", "import"]);
+export const collection = pgTable(
+  "collection",
+  {
+    id: id(),
+    /** Автомат — запись реестра (entity типа machine). */
+    machineId: uuid("machine_id").references(() => entity.id).notNull(),
+    /** Кто собрал. Пусто у перенесённой истории без оператора. */
+    operatorId: uuid("operator_id").references(() => person.id),
+    /** Кто принял и пересчитал: "owner" или person:<id>. */
+    managerRef: text("manager_ref"),
+    /** Время сбора — до секунды (требование спецификации VendCash). */
+    collectedAt: timestamp("collected_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }),
+    /** Сумма в сумах. Появляется только при приёме. */
+    amount: numeric("amount", { precision: 15, scale: 2 }),
+    status: collectionStatusEnum("status").default("collected").notNull(),
+    source: collectionSourceEnum("source").default("realtime").notNull(),
+    notes: text("notes"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("collection_machine_date_idx").on(t.machineId, t.collectedAt),
+    index("collection_status_idx").on(t.status),
+  ],
+);
+
 // ── task_comment: переписка по задаче (уточнения, отчёты, вопросы) ──
 export const taskComment = pgTable(
   "task_comment",

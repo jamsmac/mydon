@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { AgentsModule } from "./agents/agents.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
 import { AuditModule } from "./audit/audit.module";
+import { CollectionsModule } from "./collections/collections.module";
 import { DbModule } from "./db/db.module";
 import { EntitiesModule } from "./entities/entities.module";
 import { EventsModule } from "./events/events.module";
@@ -19,6 +20,7 @@ import { VerificationModule } from "./verification/verification.module";
     DbModule,
     AgentsModule,
     AuditModule,
+    CollectionsModule,
     EntitiesModule,
     EventsModule,
     ApprovalsModule,

@@ -12,6 +12,7 @@ import {
 import { CoreDown } from "../../../components/core-down";
 import { groupsFor } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
+import { CollectionsView } from "../../../components/collections-view";
 import { MachineMap } from "../../../components/machine-map";
 import { QuickActions } from "../../../components/quick-actions";
 import { typeOne } from "../../../lib/labels";
@@ -120,7 +121,8 @@ export default async function DomainPage({
       {group && (
         <div className="subtabs">
           {group.leaves.map((l) => {
-            const n = l.type ? (byType[l.type] ?? 0) : 0;
+            // Инкассация живёт своей таблицей, а не реестром — не затемняем.
+            const n = l.type === "collection" ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
             const isActive = leaf === l;
             return (
               <Link
@@ -262,8 +264,11 @@ export default async function DomainPage({
         </>
       )}
 
+      {/* ── Инкассация: живой экран VendCash вместо пустого списка записей ── */}
+      {group && leaf?.type === "collection" && <CollectionsView />}
+
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && (
+      {group && leaf?.type && leaf.type !== "collection" && (
         <>
           {leafItems.length > 0 ? (
             <>

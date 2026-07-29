@@ -169,6 +169,20 @@ export interface Person {
 }
 
 /** Нагрузка исполнителя — для картины по людям. */
+/** Инкассация: строка списка с именами автомата и оператора. */
+export interface CollectionRow {
+  id: string;
+  machineId: string;
+  machineName: string | null;
+  operatorName: string | null;
+  collectedAt: string;
+  receivedAt: string | null;
+  amount: string | null;
+  status: "collected" | "received" | "cancelled";
+  source: string;
+  notes: string | null;
+}
+
 export interface Workload {
   ownerKind: "human" | "agent";
   ownerRef: string | null;
@@ -230,6 +244,18 @@ export const core = {
   updateEntity: (id: string, input: Record<string, unknown>) =>
     send<Entity>(`/entities/${id}`, "PATCH", input),
   deleteEntity: (id: string) => send<{ ok: boolean }>(`/entities/${id}`, "DELETE"),
+  collections: (params: Record<string, string> = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return get<CollectionRow[]>(`/collections${q ? `?${q}` : ""}`);
+  },
+  collectionsSummary: (days = 30) =>
+    get<{ pending: number; receivedCount: number; receivedSum: number; days: number }>(
+      `/collections/summary?days=${days}`,
+    ),
+  receiveCollection: (id: string, amount: number) =>
+    send<CollectionRow>(`/collections/${id}/receive`, "POST", { amount, manager: "owner" }),
+  cancelCollection: (id: string) =>
+    send<CollectionRow>(`/collections/${id}/cancel`, "POST", { manager: "owner" }),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
 };

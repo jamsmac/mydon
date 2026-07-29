@@ -194,6 +194,19 @@ export class CoreClient {
     return this.request(`/tasks/${id}/redo-notified`, { method: "POST" });
   }
 
+  /** Автоматы направления — для клавиатуры инкассации. */
+  machines(domain = "vendhub"): Promise<{ id: string; name: string }[]> {
+    return this.request<{ id: string; name: string }[]>(`/entities?domain=${domain}&type=machine`);
+  }
+
+  /** Оператор зафиксировал сбор денег с автомата. */
+  createCollection(machineId: string, operatorId: string): Promise<{ id: string; collectedAt: string }> {
+    return this.request<{ id: string; collectedAt: string }>("/collections", {
+      method: "POST",
+      body: JSON.stringify({ machineId, operatorId }),
+    });
+  }
+
   people(): Promise<PersonRow[]> {
     return this.request<PersonRow[]>("/people");
   }

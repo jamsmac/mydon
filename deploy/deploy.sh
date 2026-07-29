@@ -83,6 +83,11 @@ ssh "$HOST" "
     node packages/db/dist/seed.js
 "
 
+say "6.5/7 Уборка: старые слои и кэш сборки"
+# Каждый пересбор оставляет висячие слои — без уборки диск кончается за день.
+# Удаляется ТОЛЬКО неиспользуемое: работающие и остановленные контейнеры целы.
+ssh "$HOST" "docker image prune -f >/dev/null 2>&1; docker builder prune -f --keep-storage 1GB >/dev/null 2>&1; df -BG --output=avail / | tail -1 | xargs echo '  свободно после уборки:'"
+
 say "7/7 Проверка"
 ssh "$HOST" "
   cd $REMOTE_DIR

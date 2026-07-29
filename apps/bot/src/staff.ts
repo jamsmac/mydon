@@ -53,9 +53,32 @@ const HELP_STAFF = [
   "Что можно писать:",
   "",
   "• «задачи» — список того, что на тебе",
+  "• «инкассация» — сдать выручку с автомата",
   "• кнопки под задачей: «Взял» и «Сделал»",
   "• после «Сделал» напиши одной строкой, что именно сделано — это отчёт",
 ].join("\n");
+
+/** Кнопки выбора автомата для инкассации. Префикс «c:» — отдельное пространство. */
+export function machinesKeyboard(machines: { id: string; name: string }[]): StaffReply["keyboard"] {
+  return {
+    inline_keyboard: machines
+      .slice(0, 30)
+      .map((m) => [{ text: m.name.slice(0, 40), callback_data: `c:${m.id}` }]),
+  };
+}
+
+/** Строгий разбор нажатия инкассации. */
+export function parseCollectCallback(data: string): { machineId: string } | null {
+  const m = /^c:([0-9a-f-]{36})$/.exec(data);
+  return m ? { machineId: m[1] } : null;
+}
+
+/** Время сбора — до секунды, по-ташкентски (требование спецификации VendCash). */
+export function formatCollectedAt(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 
 /**
  * Ожидание отчёта: сотрудник нажал «Сделал», следующее его сообщение — отчёт.
@@ -130,6 +153,20 @@ export async function handleStaffMessage(
     return { reply: { text: formatMyTasks(person, tasks) }, tasks };
   }
 
+  // Инкассация: оператор выбирает автомат кнопкой — время зафиксируется само.
+  if (/инкасс|выручк|сдать деньги/i.test(clean)) {
+    const machines = await deps.core.machines();
+    if (machines.length === 0) {
+      return { reply: { text: "Автоматов в реестре пока нет — скажи владельцу." } };
+    }
+    return {
+      reply: {
+        text: "С какого автомата собраны деньги? Время зафиксируется в момент нажатия.",
+        keyboard: machinesKeyboard(machines),
+      },
+    };
+  }
+
   // Всё остальное от сотрудника — комментарий к его текущей задаче:
   // проще написать боту, чем звонить владельцу.
   const tasks = await deps.core.myTasks("human", person.id);
@@ -147,7 +184,21 @@ export async function handleStaffCallback(
   data: string,
   person: PersonRow,
   deps: StaffDeps,
-): Promise<{ answer: string; message?: string }> {
+): Promise<{ answer: string; message?: string; ownerNote?: string }> {
+  // Кнопка инкассации: фиксируем сбор с точным временем.
+  const collect = parseCollectCallback(data);
+  if (collect) {
+    const created = await deps.core.createCollection(collect.machineId, person.id);
+    const when = formatCollectedAt(created.collectedAt);
+    return {
+      answer: "Сбор записан",
+      message:
+        `📥 Сбор зафиксирован: ${when}\n` +
+        "Деньги передай менеджеру — сумму введут при приёме.",
+      ownerNote: `📥 Инкассация: ${person.name} снял(а) выручку с автомата · ${when}. Ожидает приёма и пересчёта в панели.`,
+    };
+  }
+
   const parsed = parseTaskCallback(data);
   if (!parsed) return { answer: "Не понял кнопку" };
 
