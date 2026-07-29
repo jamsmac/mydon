@@ -156,6 +156,27 @@ export class EntitiesService {
       const [before] = await tx.select().from(entity).where(eq(entity.id, id)).for("update");
       if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
 
+      // История цен (слово владельца): смена цены не стирает старую, а
+      // дописывает её в поле «история цен» — видно прямо в карточке товара.
+      if (dto.attrs) {
+        const oldAttrs = (before.attrs ?? {}) as Record<string, unknown>;
+        const oldPrice = oldAttrs["цена"];
+        const newPrice = dto.attrs["цена"];
+        if (
+          typeof oldPrice === "number" &&
+          typeof newPrice === "number" &&
+          oldPrice !== newPrice
+        ) {
+          const d = new Date();
+          const stamp = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+          const prev =
+            typeof oldAttrs["история цен"] === "string" && oldAttrs["история цен"].length > 0
+              ? `${oldAttrs["история цен"]}; `
+              : "";
+          dto.attrs["история цен"] = `${prev}${oldPrice.toLocaleString("ru-RU")} сум (до ${stamp})`;
+        }
+      }
+
       const [updated] = await tx
         .update(entity)
         .set({

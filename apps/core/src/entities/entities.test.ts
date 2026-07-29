@@ -78,3 +78,49 @@ describe("Удаление записи", () => {
     assert.equal(audit.length, 0);
   });
 });
+
+describe("История цен товара", () => {
+  function priceStub(before: Record<string, unknown>) {
+    const updates: Record<string, unknown>[] = [];
+    const tx = {
+      select: () => ({ from: () => ({ where: () => ({ for: async () => [before] }) }) }),
+      update: () => ({
+        set: (v: Record<string, unknown>) => {
+          updates.push(v);
+          return { where: () => ({ returning: async () => [{ ...before, ...v }] }) };
+        },
+      }),
+      insert: () => ({ values: async () => undefined }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    return { db, updates };
+  }
+
+  it("смена цены дописывает старую в «история цен», а не стирает", async () => {
+    const { db } = priceStub({ id: "e1", attrs: { цена: 20000 } });
+    const s = new EntitiesService(db, { record: async () => undefined } as never);
+    const r = await s.update("e1", { attrs: { цена: 22000 } });
+    const hist = (r.attrs as Record<string, unknown>)["история цен"];
+    assert.ok(typeof hist === "string" && hist.includes("20"), `история не записана: ${hist}`);
+    assert.ok(String(hist).includes("(до "), "нет даты, до которой действовала цена");
+  });
+
+  it("вторая смена цены добавляется к истории через точку с запятой", async () => {
+    const { db } = priceStub({
+      id: "e1",
+      attrs: { цена: 22000, "история цен": "20 000 сум (до 01.07.2026)" },
+    });
+    const s = new EntitiesService(db, { record: async () => undefined } as never);
+    const r = await s.update("e1", { attrs: { цена: 25000 } });
+    const hist = String((r.attrs as Record<string, unknown>)["история цен"]);
+    assert.ok(hist.startsWith("20 000 сум (до 01.07.2026); "), `старая история потеряна: ${hist}`);
+    assert.ok(hist.includes("22"), "новая запись не добавлена");
+  });
+
+  it("цена не менялась — история не трогается", async () => {
+    const { db } = priceStub({ id: "e1", attrs: { цена: 20000 } });
+    const s = new EntitiesService(db, { record: async () => undefined } as never);
+    const r = await s.update("e1", { attrs: { цена: 20000, ИКПУ: "123" } });
+    assert.equal((r.attrs as Record<string, unknown>)["история цен"], undefined);
+  });
+});
