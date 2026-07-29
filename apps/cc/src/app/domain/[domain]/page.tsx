@@ -91,6 +91,10 @@ export default async function DomainPage({
   const topTabs = [
     { key: "overview", label: "Дашборд" },
     ...groups.map((g) => ({ key: g.key, label: g.label })),
+    // Инкассация — ежедневная операция, ей место в верхнем ряду (слово владельца).
+    ...(domain === "vendhub"
+      ? [{ key: "collect", label: `Инкассация${(collSummary?.pending ?? 0) > 0 ? ` ${collSummary!.pending}` : ""}` }]
+      : []),
     { key: "team", label: `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
     { key: "tasks", label: `Задачи${openTasks.length > 0 ? ` ${openTasks.length}` : ""}` },
   ];
@@ -195,7 +199,7 @@ export default async function DomainPage({
               </div>
               <div className="tiles" style={{ marginBottom: 10 }}>
                 <Link
-                  href={href("reports:collection")}
+                  href={href("collect")}
                   className={`tile ${collSummary.pending > 0 ? "is-hot" : "zero"}`}
                 >
                   <div className="lab">Ждут приёма</div>
@@ -205,7 +209,7 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("reports:collection")} className={`tile ${collSummary.receivedSum === 0 ? "zero" : ""}`}>
+                <Link href={href("collect")} className={`tile ${collSummary.receivedSum === 0 ? "zero" : ""}`}>
                   <div className="lab">Наличные · 30 дней</div>
                   <div className="v">{Number(collSummary.receivedSum).toLocaleString("ru-RU")} <span className="u">сум</span></div>
                   <div className="foot"><span className="mk" />принято инкассаций: {collSummary.receivedCount}<span className="go">→</span></div>
@@ -306,8 +310,8 @@ export default async function DomainPage({
         </>
       )}
 
-      {/* ── Инкассация: живой экран VendCash вместо пустого списка записей ── */}
-      {group && leaf?.type === "collection" && <CollectionsView />}
+      {/* ── Инкассация: живой экран VendCash (верхняя вкладка и подвкладка отчётов) ── */}
+      {(activeGroup === "collect" || (group && leaf?.type === "collection")) && <CollectionsView />}
 
       {/* ── Группа: записи выбранной подвкладки ── */}
       {group && leaf?.type && leaf.type !== "collection" && (
