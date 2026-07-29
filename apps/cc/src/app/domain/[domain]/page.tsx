@@ -65,6 +65,16 @@ export default async function DomainPage({
   const coffeeMachines = machines.filter((e) => Number((e.attrs ?? {})["категория"]) === 10).length;
   const snackMachines = machines.length - coffeeMachines;
   const defaultOwner = ourPeople.find((p) => p.active === "yes" && p.tgChatId) ?? ourPeople[0] ?? null;
+
+  // Инкассация на дашборде: владелец должен видеть «ждут приёма» без раскопок.
+  let collSummary: { pending: number; receivedCount: number; receivedSum: number } | null = null;
+  if (domain === "vendhub") {
+    try {
+      collSummary = await core.collectionsSummary(30);
+    } catch {
+      collSummary = null;
+    }
+  }
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.type] = (acc[e.type] ?? 0) + 1;
@@ -90,6 +100,8 @@ export default async function DomainPage({
   const leaf =
     group?.leaves.find((l) => l.type === activeLeaf) ??
     group?.leaves.find((l) => l.type !== null && (byType[l.type] ?? 0) > 0) ??
+    // Единственный живой отчёт — Инкассация: группа открывается сразу на нём.
+    group?.leaves.find((l) => l.type === "collection") ??
     group?.leaves[0];
   const leafItems =
     group && leaf?.type ? entities.filter((e) => e.type === leaf.type).sort((a, b) => a.name.localeCompare(b.name, "ru")) : [];
@@ -172,6 +184,36 @@ export default async function DomainPage({
                 <span className="chip g">снеки ×{snackMachines}</span>
               </div>
               <MachineMap machines={machines} />
+            </div>
+          )}
+
+          {domain === "vendhub" && collSummary && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Инкассация</h3>
+                {collSummary.pending > 0 && <span className="chip h">ждут приёма · {collSummary.pending}</span>}
+              </div>
+              <div className="tiles" style={{ marginBottom: 10 }}>
+                <Link
+                  href={href("reports:collection")}
+                  className={`tile ${collSummary.pending > 0 ? "is-hot" : "zero"}`}
+                >
+                  <div className="lab">Ждут приёма</div>
+                  <div className="v">{collSummary.pending}</div>
+                  <div className="foot"><span className="mk" />
+                    {collSummary.pending > 0 ? "пересчитай и прими" : "всё принято"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("reports:collection")} className={`tile ${collSummary.receivedSum === 0 ? "zero" : ""}`}>
+                  <div className="lab">Наличные · 30 дней</div>
+                  <div className="v">{Number(collSummary.receivedSum).toLocaleString("ru-RU")} <span className="u">сум</span></div>
+                  <div className="foot"><span className="mk" />принято инкассаций: {collSummary.receivedCount}<span className="go">→</span></div>
+                </Link>
+              </div>
+              <p className="hint">
+                Оператор пишет боту «инкассация» и выбирает автомат — сбор появляется здесь сам.
+              </p>
             </div>
           )}
 
