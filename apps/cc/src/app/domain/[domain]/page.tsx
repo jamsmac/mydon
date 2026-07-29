@@ -156,6 +156,28 @@ export default async function DomainPage({
             </Link>
           </div>
 
+          {domain === "vendhub" && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Продажи и выручка</h3>
+                <span className="chip">структура из VendHub-OS</span>
+              </div>
+              <div className="wgrid">
+                {["Выручка сегодня", "Продажи сегодня", "Оплаты Payme · Click · Uzum", "Топ товаров по выручке"].map((l) => (
+                  <div className="wt off" key={l}>
+                    <div className="wl">{l}</div>
+                    <div className="wv">—</div>
+                    <div className="wf">появится после сбора</div>
+                  </div>
+                ))}
+              </div>
+              <p className="hint" style={{ marginTop: 8 }}>
+                Эти цифры живут в журнале продаж твоего ПО (VHM24). Пришли сохранённую
+                страницу «Журнал продаж» — и виджеты оживут, как ожили товары и автоматы.
+              </p>
+            </div>
+          )}
+
           {obligations.overdue.length > 0 && (
             <>
               <div className="section-title">Просрочено</div>
