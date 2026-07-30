@@ -16,7 +16,7 @@ import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
 import { ProductsBook } from "../../../components/products-book";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
-import { MachineMap } from "../../../components/machine-map";
+import { MapPanel } from "../../../components/map-panel";
 import { QuickActions } from "../../../components/quick-actions";
 import { typeOne } from "../../../lib/labels";
 import { money, plural, when } from "../../../lib/format";
@@ -229,7 +229,7 @@ export default async function DomainPage({
                   <span className="chip">тип не указан ×{unknownMachines}</span>
                 )}
               </div>
-              <MachineMap machines={machines} />
+              <MapPanel machines={machines} />
               {(unknownMachines > 0 || noCoords.length > 0) && (
                 <p className="hint" style={{ marginTop: 8 }}>
                   Данные неполные:{" "}

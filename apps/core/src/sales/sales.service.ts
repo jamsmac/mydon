@@ -199,18 +199,27 @@ export class SalesService implements OnModuleInit {
     };
   }
 
-  /** Журнал: дневные позиции с именем автомата. */
-  async journal(days = 7, limit = 300): Promise<(SaleRow & { machineName: string | null })[]> {
+  /** Журнал: дневные позиции с именем автомата и точкой (адресом) из карточки. */
+  async journal(
+    days = 7,
+    limit = 300,
+  ): Promise<(SaleRow & { machineName: string | null; point: string | null })[]> {
     const since = new Date();
     since.setDate(since.getDate() - days);
     const rows = await this.db
-      .select({ row: sale, machineName: entity.name })
+      .select({ row: sale, machineName: entity.name, machineAttrs: entity.attrs })
       .from(sale)
       .leftJoin(entity, eq(entity.id, sale.machineId))
       .where(gte(sale.dt, todayLocal(since)))
       .orderBy(desc(sale.dt), desc(sale.amount))
       .limit(limit);
-    return rows.map((r) => ({ ...r.row, machineName: r.machineName }));
+    return rows.map((r) => {
+      const a = (r.machineAttrs ?? {}) as Record<string, unknown>;
+      const point = [a["точка"], a["адрес"], a["локация"]].find(
+        (v): v is string => typeof v === "string" && v.length > 0,
+      );
+      return { ...r.row, machineName: r.machineName, point: point ?? null };
+    });
   }
 
   /** Автоматы, молчащие N дней: продажи были раньше, а теперь нет — сигнал связи. */

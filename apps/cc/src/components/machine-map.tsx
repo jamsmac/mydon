@@ -1,32 +1,16 @@
 import Link from "next/link";
 import type { Entity } from "../lib/core";
+import { machinePoints, KIND_COLOR } from "../lib/machine-points";
 
 /**
- * Карта автоматов — по настоящим координатам из карточек, без внешних сервисов.
+ * Карта-схема автоматов — по настоящим координатам из карточек, без интернета.
  *
  * Точки спроецированы на рамку по широте/долготе: взаимное расположение
  * честное (север сверху). Синие — кофе, зелёные — снеки. Клик — карточка
- * автомата, там же кнопка «Открыть на карте» с настоящей картой города.
+ * автомата. Это запасной вид: работает, даже если внешняя подложка не открылась.
  */
 export function MachineMap({ machines }: { machines: Entity[] }) {
-  const pts = machines
-    .map((m) => {
-      const a = m.attrs ?? {};
-      const lat = Number(a["широта"]);
-      const lng = Number(a["долгота"]);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < 30 || lat > 55) return null;
-      // Тип берём только из заполненного поля. Пустая категория — «не указан»,
-      // а не «снеки»: выдавать незаполненное за факт нельзя (ревизия 2026-07-30).
-      const raw = a["категория"];
-      const kind: "coffee" | "snack" | "unknown" =
-        raw === undefined || raw === null || raw === ""
-          ? "unknown"
-          : Number(raw) === 10
-            ? "coffee"
-            : "snack";
-      return { id: m.id, name: m.name, lat, lng, kind };
-    })
-    .filter((p): p is NonNullable<typeof p> => p !== null);
+  const pts = machinePoints(machines);
 
   if (pts.length === 0) return null;
 
@@ -37,7 +21,7 @@ export function MachineMap({ machines }: { machines: Entity[] }) {
   const maxLat = Math.max(...lats) + pad;
   const minLng = Math.min(...lngs) - pad;
   const maxLng = Math.max(...lngs) + pad;
-  const COLOR = { coffee: "#1A6BFF", snack: "#2BD9A0", unknown: "#5A6B80" } as const;
+  const COLOR = KIND_COLOR;
   const FILL = {
     coffee: "rgba(26,107,255,.22)",
     snack: "rgba(43,217,160,.2)",
@@ -49,8 +33,7 @@ export function MachineMap({ machines }: { machines: Entity[] }) {
   const y = (lat: number) => H - (((lat - minLat) / (maxLat - minLat)) * (H - 50) + 30);
 
   return (
-    <div className="card" style={{ padding: 10 }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
         <defs>
           <pattern id="mgrid" width="35" height="35" patternUnits="userSpaceOnUse">
             <path d="M35 0H0V35" fill="none" stroke="#1E3350" strokeWidth="0.5" opacity="0.5" />
@@ -82,15 +65,6 @@ export function MachineMap({ machines }: { machines: Entity[] }) {
             </g>
           </Link>
         ))}
-      </svg>
-      <div style={{ display: "flex", gap: 14, padding: "8px 6px 2px", fontSize: 11.5, color: "var(--tx-2)", flexWrap: "wrap" }}>
-        <span><span style={{ color: COLOR.coffee }}>●</span> кофе {pts.filter((p) => p.kind === "coffee").length}</span>
-        <span><span style={{ color: COLOR.snack }}>●</span> снеки и напитки {pts.filter((p) => p.kind === "snack").length}</span>
-        {pts.some((p) => p.kind === "unknown") && (
-          <span><span style={{ color: COLOR.unknown }}>○</span> тип не указан {pts.filter((p) => p.kind === "unknown").length}</span>
-        )}
-        <span style={{ marginLeft: "auto", color: "var(--tx-3)" }}>клик по точке — карточка автомата</span>
-      </div>
-    </div>
+    </svg>
   );
 }

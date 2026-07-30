@@ -5,6 +5,7 @@
  *
  * Принцип: сначала реестр, потом дашборд. Базы движков (VHM24 и др.) — отдельные, здесь не хранятся.
  */
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   pgEnum,
@@ -148,6 +149,10 @@ export const collection = pgTable(
     receivedAt: timestamp("received_at", { withTimezone: true }),
     /** Сумма в сумах. Появляется только при приёме. */
     amount: numeric("amount", { precision: 15, scale: 2 }),
+    /** Направление бизнеса. Пока вся инкассация — VendHub. */
+    domain: domainEnum("domain").default("vendhub").notNull(),
+    /** Валюта суммы. Пока сумы. */
+    currency: text("currency").default("UZS").notNull(),
     status: collectionStatusEnum("status").default("collected").notNull(),
     source: collectionSourceEnum("source").default("realtime").notNull(),
     notes: text("notes"),
@@ -175,6 +180,10 @@ export const sale = pgTable(
     product: text("product").notNull(),
     qty: numeric("qty", { precision: 12, scale: 2 }).default("0").notNull(),
     amount: numeric("amount", { precision: 15, scale: 2 }).default("0").notNull(),
+    /** Направление бизнеса. Пока все продажи — VendHub (расчётов по направлениям нет). */
+    domain: domainEnum("domain").default("vendhub").notNull(),
+    /** Валюта суммы. Пока сумы. */
+    currency: text("currency").default("UZS").notNull(),
     source: text("source").default("ourvend").notNull(),
     /** Когда источник видел эти цифры — по нему выбираем свежее. */
     fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
@@ -200,6 +209,10 @@ export const purchase = pgTable(
     qty: numeric("qty", { precision: 12, scale: 2 }).default("0").notNull(),
     unitPrice: numeric("unit_price", { precision: 15, scale: 2 }),
     total: numeric("total", { precision: 15, scale: 2 }),
+    /** Направление бизнеса. Пока весь приход — VendHub. */
+    domain: domainEnum("domain").default("vendhub").notNull(),
+    /** Валюта суммы. Пока сумы. */
+    currency: text("currency").default("UZS").notNull(),
     note: text("note"),
     /** Срок годности партии — для отчёта «Сроки годности». */
     expiryDate: date("expiry_date"),
@@ -222,6 +235,8 @@ export const machineStock = pgTable(
     machineId: uuid("machine_id").references(() => entity.id),
     product: text("product").notNull(),
     qty: numeric("qty", { precision: 12, scale: 2 }).default("0").notNull(),
+    /** Направление бизнеса. Остатки — количества, валюты здесь нет. */
+    domain: domainEnum("domain").default("vendhub").notNull(),
     fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
     importedAt: createdAt(),
   },
@@ -291,14 +306,32 @@ export const moneyFlow = pgTable(
     id: id(),
     orgId: uuid("org_id").references(() => org.id),
     entityId: uuid("entity_id").references(() => entity.id),
+    /** Направление бизнеса — чтобы деньги GLOBERENT и VendHub не смешивались. */
+    domain: domainEnum("domain"),
     direction: moneyDirectionEnum("direction").notNull(),
     amount: numeric("amount", { precision: 18, scale: 2 }).notNull(),
     currency: text("currency").default("UZS").notNull(),
+    /** Откуда операция: click | payme | uzum | bank | cash | manual. */
+    source: text("source").default("manual").notNull(),
+    /** Идентификатор транзакции у источника. Пусто у ручных записей. */
+    extId: text("ext_id"),
+    /** Назначение человеческими словами: «инкассация автомата», «оплата HELI». */
+    purpose: text("purpose"),
+    /** Связь с инкассацией: наличные из автомата → сдача в банк. */
+    collectionId: uuid("collection_id").references(() => collection.id),
     date: timestamp("date", { withTimezone: true }).notNull(),
     status: text("status").default("actual").notNull(), // planned | actual | overdue
     createdAt: createdAt(),
   },
-  (t) => [index("money_flow_org_date_idx").on(t.orgId, t.date)],
+  (t) => [
+    index("money_flow_org_date_idx").on(t.orgId, t.date),
+    // Защита от двойного импорта: одна транзакция источника — одна запись.
+    // Частичный индекс: ручные записи (ext_id пуст) под ограничение не попадают.
+    uniqueIndex("money_flow_source_ext_key")
+      .on(t.source, t.extId)
+      .where(sql`${t.extId} is not null`),
+    index("money_flow_collection_idx").on(t.collectionId),
+  ],
 );
 
 // ── note: заметки и знания (вход для knowledge-curator) ──

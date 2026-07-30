@@ -86,22 +86,63 @@ export async function SalesView() {
         </div>
       )}
 
-      <div className="book">
-        <div className="th">
-          <span>Товар · автомат</span>
-          <span>День</span>
-          <span style={{ textAlign: "right" }}>Сумма</span>
-        </div>
-        {rows.map((r) => (
-          <div className="tr" key={r.id}>
-            <span className="nm">
-              {r.product}
-              <span style={{ color: "var(--tx-3)" }}> · {r.machineName ?? r.machineSerial}{Number(r.qty) > 1 ? ` · ×${Number(r.qty)}` : ""}</span>
-            </span>
-            <span className="cd">{day(r.dt)}</span>
-            <span className="pr">{money(r.amount)} <span className="u">сум</span></span>
-          </div>
-        ))}
+      <p className="hint" style={{ marginBottom: 8 }}>
+        Журнал по твоей форме — 13 колонок. Выгрузка ПО сегодня даёт{" "}
+        <b>5</b>: Время (день), Товар, Сумма, Аппарат, Точка. Остальные{" "}
+        <b>8</b> (Тип, № заказа, Код, Оплата, Статус, Чек, ИКПУ) ПО не отдаёт —
+        помечены «—». Появятся, когда ПО включит выгрузку по каждой операции.
+      </p>
+
+      <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+        <table className="jtable">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Время</th>
+              <th>Тип</th>
+              <th>Товар</th>
+              <th style={{ textAlign: "right" }}>Сумма</th>
+              <th>№ заказа</th>
+              <th>Код товара</th>
+              <th>Аппарат</th>
+              <th>Точка</th>
+              <th>Оплата</th>
+              <th>Статус</th>
+              <th>Чек</th>
+              <th>ИКПУ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td className="mono dim">{r.id.slice(0, 8)}</td>
+                <td className="mono">{day(r.dt)}</td>
+                <td className="dash">—</td>
+                <td>
+                  {r.product}
+                  {Number(r.qty) > 1 && <span className="dim"> ×{Number(r.qty)}</span>}
+                </td>
+                <td className="mono num">{money(r.amount)} <span className="u">сум</span></td>
+                <td className="dash">—</td>
+                <td className="dash">—</td>
+                <td>
+                  {r.machineId ? (
+                    <Link href={`/card/${r.machineId}`} style={{ color: "var(--accent-tx, #5B9BFF)" }}>
+                      {r.machineName ?? r.machineSerial}
+                    </Link>
+                  ) : (
+                    r.machineName ?? r.machineSerial
+                  )}
+                </td>
+                <td>{r.point ?? <span className="dash">—</span>}</td>
+                <td className="dash">—</td>
+                <td className="dash">—</td>
+                <td className="dash">—</td>
+                <td className="dash">—</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
       <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
         {rows.length} позиций за 7 дней · дневные сводки OurVend, обновляются каждые 10 минут

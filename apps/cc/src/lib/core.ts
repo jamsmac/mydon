@@ -189,10 +189,16 @@ export interface SaleRow {
   machineSerial: string;
   machineId: string | null;
   machineName: string | null;
+  /** Точка (адрес) автомата из карточки — колонка «Точка» в форме. */
+  point: string | null;
   product: string;
   qty: string;
   amount: string;
   source: string;
+  /** Направление бизнеса (пока vendhub). */
+  domain: string;
+  /** Валюта суммы (пока UZS). */
+  currency: string;
 }
 
 /** Инкассация: строка списка с именами автомата и оператора. */
