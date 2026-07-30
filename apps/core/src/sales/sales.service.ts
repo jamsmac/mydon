@@ -134,10 +134,26 @@ export class SalesService implements OnModuleInit {
         upserted += chunk.length;
       }
 
+      // Карточка автомата могла появиться ПОЗЖЕ продаж (так и было с тремя
+      // снек-автоматами: 10,4 млн сум висели «ничьими»). Привязываем задним
+      // числом всё, что теперь узнаётся по серийнику. Обычный синк этого не
+      // делает — он трогает только последние дни.
+      const linked = await this.db.execute(sql`
+        update ${sale} set machine_id = e.id
+        from ${entity} e
+        where ${sale.machineId} is null
+          and e.type = 'machine'
+          and lower(coalesce(e.external_ref, '')) = ${sale.machineSerial}
+      `);
+      const linkedCount = Number((linked as unknown as { count?: number }).count ?? 0);
+      if (linkedCount > 0) {
+        this.log.log(`Продажи привязаны к автоматам задним числом: ${linkedCount} строк.`);
+      }
+
       await this.db.insert(event).values({
         source: "sales-sync",
         type: "sales.sync",
-        payload: { upserted, из: "mydon-stock/ourvend" },
+        payload: { upserted, привязано_задним_числом: linkedCount, из: "mydon-stock/ourvend" },
       });
       this.log.log(`Продажи синхронизированы: ${upserted} строк.`);
       return { upserted };

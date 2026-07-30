@@ -224,6 +224,19 @@ export class SupplyService implements OnModuleInit {
       }
       if (filled > 0) this.log.log(`Карточек автоматов дозаполнено из источника: ${filled}.`);
 
+      // Остатки, пришедшие до появления карточки автомата, тоже привязываем.
+      const linked = await this.db.execute(sql`
+        update ${machineStock} set machine_id = e.id
+        from ${entity} e
+        where ${machineStock.machineId} is null
+          and e.type = 'machine'
+          and lower(coalesce(e.external_ref, '')) = ${machineStock.machineSerial}
+      `);
+      const linkedCount = Number((linked as unknown as { count?: number }).count ?? 0);
+      if (linkedCount > 0) {
+        this.log.log(`Остатки привязаны к автоматам задним числом: ${linkedCount} строк.`);
+      }
+
       if (pValues.length + sValues.length > 0) {
         await this.db.insert(event).values({
           source: "supply-sync",
