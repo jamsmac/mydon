@@ -65,8 +65,15 @@ export default async function DomainPage({
 
   const ourPeople = people.filter((p) => p.domain === domain);
   const machines = entities.filter((e) => e.type === "machine");
-  const coffeeMachines = machines.filter((e) => Number((e.attrs ?? {})["категория"]) === 10).length;
-  const snackMachines = machines.length - coffeeMachines;
+  // Тип автомата — только из заполненного поля. Пустое — «не указан»,
+  // а не «снеки» (находка ревизии 2026-07-30).
+  const catOf = (e: Entity) => (e.attrs ?? {})["категория"];
+  const coffeeMachines = machines.filter((e) => Number(catOf(e)) === 10).length;
+  const unknownMachines = machines.filter((e) => {
+    const c = catOf(e);
+    return c === undefined || c === null || c === "";
+  }).length;
+  const snackMachines = machines.length - coffeeMachines - unknownMachines;
   const defaultOwner = ourPeople.find((p) => p.active === "yes" && p.tgChatId) ?? ourPeople[0] ?? null;
 
   // Инкассация на дашборде: владелец должен видеть «ждут приёма» без раскопок.
@@ -213,7 +220,10 @@ export default async function DomainPage({
               <div className="sect-h">
                 <h3 className="h2">Автоматы на карте</h3>
                 <span className="chip b">кофе ×{coffeeMachines}</span>
-                <span className="chip g">снеки ×{snackMachines}</span>
+                {snackMachines > 0 && <span className="chip g">снеки ×{snackMachines}</span>}
+                {unknownMachines > 0 && (
+                  <span className="chip">тип не указан ×{unknownMachines}</span>
+                )}
               </div>
               <MachineMap machines={machines} />
             </div>

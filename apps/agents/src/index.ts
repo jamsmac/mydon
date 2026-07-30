@@ -91,21 +91,68 @@ async function main(): Promise<void> {
 
   // Источник истины — база Core: только там правки владельца из карточки агента
   // переживают обновление системы. Файлы-паспорта служат начальным сидом.
-  // Core недоступен → работаем по файлам, чтобы агенты не встали совсем.
+  //
+  // Контекст: контейнеры поднимаются одновременно, и Core обычно ещё не готов,
+  // когда агенты уже стартовали. Раньше мы один раз падали на файлы и больше
+  // не пробовали — правки владельца в карточках не действовали до рестарта
+  // (найдено ревизией 2026-07-30). Теперь пробуем несколько раз при старте
+  // и перечитываем базу по расписанию.
   let agents = fromFiles;
-  try {
-    const seed = await core.seedAgents(fromFiles.map(toPassport));
-    if (seed.seeded > 0) {
-      console.log(`Паспорта перенесены в базу: заведено ${seed.seeded}, уже было ${seed.skipped}.`);
+  let fromCoreOk = false;
+
+  async function loadFromCore(): Promise<AgentDefinition[] | null> {
+    try {
+      const seed = await core.seedAgents(fromFiles.map(toPassport));
+      if (seed.seeded > 0) {
+        console.log(`Паспорта перенесены в базу: заведено ${seed.seeded}, уже было ${seed.skipped}.`);
+      }
+      return (await core.listAgents()).map(fromCore);
+    } catch {
+      return null;
     }
-    agents = (await core.listAgents()).map(fromCore);
-    console.log("Настройки агентов прочитаны из базы (карточка агента — источник истины).");
-  } catch (err) {
-    console.warn(
-      "Core недоступен — работаю по паспортам-файлам: " +
-        (err instanceof Error ? err.message : String(err)),
-    );
   }
+
+  // До 10 попыток с паузой 6 секунд — минута ожидания покрывает запуск Core
+  // вместе с миграциями базы.
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    const loaded = await loadFromCore();
+    if (loaded !== null) {
+      agents = loaded;
+      fromCoreOk = true;
+      console.log("Настройки агентов прочитаны из базы (карточка агента — источник истины).");
+      break;
+    }
+    if (attempt === 1) console.warn("Core пока не отвечает — ждём и пробуем снова…");
+    if (attempt === 10) {
+      console.warn(
+        "Core не ответил за минуту — работаю по паспортам-файлам. " +
+          "Настройки из карточек агентов подхватятся при следующей перечитке.",
+      );
+    } else {
+      await new Promise((r) => setTimeout(r, 6000));
+    }
+  }
+
+  // Перечитка настроек раз в 10 минут: правки владельца в карточке агента
+  // начинают действовать сами, без перезапуска контейнера. Заодно это лечит
+  // случай «Core поднялся позже нас».
+  setInterval(
+    () => {
+      void (async () => {
+        const loaded = await loadFromCore();
+        if (loaded === null) return;
+        const changed = JSON.stringify(loaded) !== JSON.stringify(agents);
+        agents = loaded;
+        if (!fromCoreOk) {
+          fromCoreOk = true;
+          console.log("Связь с Core появилась — настройки агентов взяты из базы.");
+        } else if (changed) {
+          console.log("Настройки агентов обновлены из базы.");
+        }
+      })();
+    },
+    10 * 60_000,
+  ).unref();
 
   const active = agents.filter((a) => a.status === "active");
   console.log(

@@ -16,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "clean": "rm -rf dist .turbo *.tsbuildinfo",
-    "test": "node --test dist"
+    "test": "find dist -name '*.test.js' -print0 | xargs -0 --no-run-if-empty node --test"
   },
   "dependencies": {
     "@mydon/shared": "workspace:*"

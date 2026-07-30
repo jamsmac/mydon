@@ -186,7 +186,14 @@ export async function answer(
     if (opts.context) {
       try {
         context = await opts.context(intent.text);
-      } catch {
+      } catch (err) {
+        // Память не критична — отвечаем без неё. Но молчать нельзя: иначе
+        // владелец не отличит «в памяти ничего нет» от «поиск сломан»
+        // (находка ревизии 2026-07-30).
+        console.warn(
+          "Память недоступна — отвечаю без прошлых разговоров:",
+          err instanceof Error ? err.message : err,
+        );
         context = [];
       }
     }
