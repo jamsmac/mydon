@@ -29,13 +29,17 @@ export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecki
 # 2. Git-трекинг main в /opt/mydon-app.
 cd "$APP_DIR"
 [ -f .env ] && cp -a .env .env.autodeploy-bak   # страховка перед git-операциями
+# Каталог пришёл через rsync (владелец — чужой UID), поэтому доверяем явно.
+# Нужно и для автодеплоя под systemd от root.
+git config --global --add safe.directory "$APP_DIR"
 if [ ! -d .git ]; then
-  git init -q
-  git remote add origin "$REPO_SSH"
+  git init -q -b main
 fi
-git remote set-url origin "$REPO_SSH"
+git remote add origin "$REPO_SSH" 2>/dev/null || git remote set-url origin "$REPO_SSH"
 git fetch -q origin
-git checkout -B main origin/main
+# reset (а не checkout): каталог уже полон файлов от rsync — checkout бы отказался,
+# reset их перезапишет версией из main, а untracked .env оставит на месте.
+git reset --hard origin/main
 git branch --set-upstream-to=origin/main main >/dev/null 2>&1 || true
 
 # 3. systemd-таймер.
