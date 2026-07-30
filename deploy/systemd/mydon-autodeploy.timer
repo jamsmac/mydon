@@ -1,0 +1,12 @@
+[Unit]
+Description=MYDON auto-deploy — проверять main каждые 2 минуты
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+# Если сервер был выключен — не запускать пачку пропущенных, только один раз.
+Persistent=false
+Unit=mydon-autodeploy.service
+
+[Install]
+WantedBy=timers.target

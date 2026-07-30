@@ -1,0 +1,11 @@
+[Unit]
+Description=MYDON auto-deploy (подтянуть main из GitHub и пересобрать)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mydon-app/deploy/auto-deploy.sh
+# Долгая сборка не должна убиваться по таймауту.
+TimeoutStartSec=1800
