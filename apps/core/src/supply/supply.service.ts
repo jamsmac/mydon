@@ -19,6 +19,14 @@ export interface StockPurchaseRow {
   note: string | null;
   expiry_date: string | null;
 }
+/** Автомат в источнике: тип и координаты — ими дозаполняем свои карточки. */
+export interface StockMachineRow {
+  serial: string | null;
+  name: string;
+  kind: string | null;
+  location: string | null;
+}
+
 export interface StockLevelRow {
   dt: string;
   machine_serial: string;
@@ -59,6 +67,31 @@ export function buildStockUpserts(
       qty: String(Number(r.qty) || 0),
       fetchedAt: new Date(r.fetched_at),
     }));
+}
+
+/**
+ * Чем дозаполнить карточку автомата из источника.
+ *
+ * Правило: трогаем ТОЛЬКО пустые поля. Если владелец что-то заполнил руками —
+ * его значение важнее любого источника. Возвращает патч или null, если
+ * дозаполнять нечего. exported для тестов.
+ */
+export function fillFromStock(
+  attrs: Record<string, unknown>,
+  src: { kind: string | null; location: string | null },
+): Record<string, unknown> | null {
+  const patch: Record<string, unknown> = {};
+  const empty = (v: unknown) => v === undefined || v === null || v === "";
+
+  if (empty(attrs["категория"]) && src.kind) {
+    // Словарь источника: coffee → кофейные (10), snack → прохладительные (11).
+    // Незнакомое значение не переводим — лучше «не указан», чем догадка.
+    if (src.kind === "coffee") patch["категория"] = 10;
+    else if (src.kind === "snack") patch["категория"] = 11;
+  }
+  if (empty(attrs["точка"]) && src.location) patch["точка"] = src.location;
+
+  return Object.keys(patch).length > 0 ? patch : null;
 }
 
 /**
@@ -159,6 +192,37 @@ export class SupplyService implements OnModuleInit {
             },
           });
       }
+
+      // Дозаполнение карточек автоматов из источника: тип (кофе/снеки) и точка.
+      // Ревизия 2026-07-30: у 11 из 26 автоматов тип был не указан — панель
+      // честно писала «не указан», но пустоту надо закрывать, а не только
+      // показывать. Заполняем лишь пустые поля.
+      const stockMachines = (await stock`
+        select serial, name, kind, location from machines where serial is not null
+      `) as unknown as StockMachineRow[];
+      const bySerial = new Map(
+        stockMachines
+          .filter((m) => m.serial)
+          .map((m) => [m.serial!.toLowerCase(), m]),
+      );
+      const ours = await this.db
+        .select({ id: entity.id, ref: entity.externalRef, attrs: entity.attrs })
+        .from(entity)
+        .where(eq(entity.type, "machine"));
+      let filled = 0;
+      for (const row of ours) {
+        if (!row.ref) continue;
+        const src = bySerial.get(row.ref.toLowerCase());
+        if (!src) continue;
+        const patch = fillFromStock((row.attrs ?? {}) as Record<string, unknown>, src);
+        if (patch === null) continue;
+        await this.db
+          .update(entity)
+          .set({ attrs: sql`${entity.attrs} || ${JSON.stringify(patch)}::jsonb` })
+          .where(eq(entity.id, row.id));
+        filled += 1;
+      }
+      if (filled > 0) this.log.log(`Карточек автоматов дозаполнено из источника: ${filled}.`);
 
       if (pValues.length + sValues.length > 0) {
         await this.db.insert(event).values({

@@ -41,8 +41,19 @@ export function createSubscriptionResolver(config: SubscriptionLlmConfig = {}): 
   const timeoutMs = config.timeoutMs ?? 60_000;
 
   return async (question, snapshot) => {
-    // Ленивый импорт: пакет тяжёлый, а без подписки он вообще не нужен.
-    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    // Ленивый импорт настоящим ESM-import, а не через require.
+    //
+    // Пакет — чистый ESM. Наш код компилируется в CommonJS, и обычный
+    // `await import(...)` TypeScript превращает в require() — тогда Next.js
+    // не может оставить пакет внешним и предупреждает при каждой сборке
+    // («Package can't be external», ревизия 2026-07-30), а сам пакет
+    // затягивается в бандл вместе с нативным CLI внутри. Обёртка через
+    // Function не даёт компилятору тронуть import — в рантайме это честный
+    // динамический ESM-импорт.
+    const esmImport = new Function("s", "return import(s)") as (
+      s: string,
+    ) => Promise<typeof import("@anthropic-ai/claude-agent-sdk")>;
+    const { query } = await esmImport("@anthropic-ai/claude-agent-sdk");
 
     // Таймаут: без него зависший процесс держал бы ответ бота бесконечно.
     const abort = new AbortController();

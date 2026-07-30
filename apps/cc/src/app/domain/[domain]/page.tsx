@@ -73,6 +73,10 @@ export default async function DomainPage({
     const c = catOf(e);
     return c === undefined || c === null || c === "";
   }).length;
+  const noCoords = machines.filter((e) => {
+    const a = e.attrs ?? {};
+    return !a["широта"] || !a["долгота"];
+  });
   const snackMachines = machines.length - coffeeMachines - unknownMachines;
   const defaultOwner = ourPeople.find((p) => p.active === "yes" && p.tgChatId) ?? ourPeople[0] ?? null;
 
@@ -226,6 +230,28 @@ export default async function DomainPage({
                 )}
               </div>
               <MachineMap machines={machines} />
+              {(unknownMachines > 0 || noCoords.length > 0) && (
+                <p className="hint" style={{ marginTop: 8 }}>
+                  Данные неполные:{" "}
+                  {unknownMachines > 0 && <>у {unknownMachines} автоматов не указан тип. </>}
+                  {noCoords.length > 0 && (
+                    <>
+                      без координат на карте нет:{" "}
+                      {noCoords.slice(0, 3).map((e, i) => (
+                        <span key={e.id}>
+                          {i > 0 && ", "}
+                          <Link href={`/card/${e.id}`} style={{ color: "var(--accent)" }}>
+                            {e.name}
+                          </Link>
+                        </span>
+                      ))}
+                      {noCoords.length > 3 && ` и ещё ${noCoords.length - 3}`}.{" "}
+                    </>
+                  )}
+                  Тип и точка подтягиваются из учёта склада сами; остальное можно
+                  дозаполнить в карточке.
+                </p>
+              )}
             </div>
           )}
 

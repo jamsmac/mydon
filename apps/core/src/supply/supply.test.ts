@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildPurchaseUpserts, buildStockUpserts } from "./supply.service";
+import { buildPurchaseUpserts, buildStockUpserts, fillFromStock } from "./supply.service";
 
 describe("Снабжение: подготовка строк источника", () => {
   it("приход: числа и срок годности переносятся, id источника — ключ", () => {
@@ -35,5 +35,30 @@ describe("Снабжение: подготовка строк источника
     assert.equal(a.machineId, "ent-1");
     assert.equal(a.qty, "0");
     assert.equal(b.machineId, null);
+  });
+});
+
+describe("Дозаполнение карточек автоматов из источника", () => {
+  it("пустой тип заполняется: coffee → 10, snack → 11", () => {
+    assert.deepEqual(fillFromStock({}, { kind: "coffee", location: null }), { категория: 10 });
+    assert.deepEqual(fillFromStock({}, { kind: "snack", location: null }), { категория: 11 });
+  });
+
+  it("заполненное владельцем НЕ перезатирается", () => {
+    const patch = fillFromStock(
+      { категория: 11, точка: "моя точка" },
+      { kind: "coffee", location: "точка из источника" },
+    );
+    assert.equal(patch, null, "источник не должен спорить с владельцем");
+  });
+
+  it("незнакомый тип не переводим — лучше «не указан», чем догадка", () => {
+    assert.equal(fillFromStock({}, { kind: "непонятно", location: null }), null);
+  });
+
+  it("точка заполняется, если её не было", () => {
+    assert.deepEqual(fillFromStock({ категория: 10 }, { kind: "coffee", location: "ТЦ Compass" }), {
+      точка: "ТЦ Compass",
+    });
   });
 });
