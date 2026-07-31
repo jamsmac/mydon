@@ -43,14 +43,28 @@ export function UnifiedView({
 
   const pages = Math.max(1, Math.ceil(u.union / u.size));
 
+  // Пара источников передаётся в выгрузку как есть — файл забирает весь союз.
+  const exportQs = new URLSearchParams({
+    ra: u.a.source,
+    rar: u.a.report,
+    rb: u.b.source,
+    rbr: u.b.report,
+  }).toString();
+
   return (
     <>
-      <p className="hint" style={{ marginBottom: 12 }}>
-        Объединяются <b>{u.a.title}</b> и <b>{u.b.title}</b> по номеру операции —
-        одни и те же заказы в двух системах, сведённые в один журнал. Каждый заказ
-        здесь ровно один раз: сложить источники порознь значило бы задвоить
-        выручку. Где значения расходятся, показаны оба — какое верное, решаешь ты.
-      </p>
+      <div className="srcbar" style={{ marginBottom: 12, alignItems: "flex-start" }}>
+        <p className="hint" style={{ margin: 0 }}>
+          Объединяются <b>{u.a.title}</b> и <b>{u.b.title}</b> по номеру операции —
+          одни и те же заказы в двух системах, сведённые в один журнал. Каждый
+          заказ здесь ровно один раз: сложить источники порознь значило бы
+          задвоить выручку. Где значения расходятся, показаны оба — какое верное,
+          решаешь ты.
+        </p>
+        <a className="btn sm ghost" href={`/api/sources/unify-export?${exportQs}`}>
+          Скачать CSV
+        </a>
+      </div>
 
       <div className="tiles" style={{ marginBottom: 14 }}>
         <div className="tile mini">
