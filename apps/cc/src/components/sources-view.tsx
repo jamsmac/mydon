@@ -13,9 +13,10 @@ import { RawMapping } from "./raw-mapping";
 import { RawTable } from "./raw-table";
 import { MachineStaysView } from "./machine-stays";
 import { PricesView } from "./prices-view";
+import { ProductsReview } from "./products-review";
 
 /** Что показывает вкладка отчёта. */
-type ReportView = "rows" | "map" | "stays" | "prices";
+type ReportView = "rows" | "map" | "stays" | "prices" | "goods";
 
 export interface SourcesViewProps {
   /** Адрес страницы направления: /domain/vendhub */
@@ -90,7 +91,9 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
   }
   const report = source.reports.find((r) => r.reportCode === sp.rep) ?? source.reports[0];
   const view: ReportView =
-    sp.view === "map" || sp.view === "stays" || sp.view === "prices" ? sp.view : "rows";
+    sp.view === "map" || sp.view === "stays" || sp.view === "prices" || sp.view === "goods"
+      ? sp.view
+      : "rows";
   const clean = withoutTableState(sp);
 
   // Сводка сверху: сколько систем реально что-то принесли и где давно не снимали.
@@ -319,6 +322,9 @@ async function ReportPane({
         <Link href={viewHref("prices")} className={`subtab ${view === "prices" ? "active" : ""}`}>
           Цены
         </Link>
+        <Link href={viewHref("goods")} className={`subtab ${view === "goods" ? "active" : ""}`}>
+          Товары
+        </Link>
       </div>
 
       {view === "rows" ? (
@@ -341,11 +347,35 @@ async function ReportPane({
         <MappingPane source={source.code} reportCode={reportCode} />
       ) : view === "prices" ? (
         <PricesPane source={source.code} reportCode={reportCode} />
+      ) : view === "goods" ? (
+        <GoodsPane source={source.code} reportCode={reportCode} />
       ) : (
         <StaysPane source={source.code} reportCode={reportCode} />
       )}
     </>
   );
+}
+
+/** Ассортимент источника: что продаётся и по чему не собирается чек. */
+async function GoodsPane({ source, reportCode }: { source: string; reportCode: string }) {
+  try {
+    const [review, products] = await Promise.all([
+      core.rawProducts(source, reportCode),
+      core.entitiesOfType("vendhub", "product"),
+    ]);
+    return (
+      <ProductsReview
+        source={source}
+        review={review}
+        cards={products
+          .slice()
+          .sort((a, b) => a.name.localeCompare(b.name, "ru"))
+          .map((e) => ({ id: e.id, name: e.name }))}
+      />
+    );
+  } catch (err) {
+    return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
 }
 
 /** Где какой товар почём и кто отстал с ценой. */

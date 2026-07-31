@@ -1,12 +1,15 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { entity, rawLink, rawRow, rawSnapshot } from "@mydon/db";
 import {
+  FISCAL_FIELDS,
   RAW_LINK_LABELS,
   RAW_SOURCES,
   findRawReport,
+  fiscalGaps,
   normalizeSourceKey,
   roleColumnIndex,
   roleColumnName,
+  type FiscalGap,
   type RawColumnRoles,
   type RawFreshness,
   type RawLinkKind,
@@ -330,6 +333,60 @@ export interface PriceReview {
   lastOrderAt: string | null;
   /** Заказы, у которых цена не читается числом. Молча отбрасывать их нельзя. */
   unreadable: number;
+}
+
+/**
+ * Подсказка «похоже, это тот же напиток под другим именем».
+ *
+ * Именно подсказка: сливать названия сам код не имеет права. В панели живут
+ * «Какао» и Cocoa, и решить, один это товар или два, может только владелец —
+ * поэтому рядом с подсказкой всегда лежит основание, по которому она выдана.
+ */
+export interface ProductLookalike {
+  name: string;
+  /** Почему подсказали — словами и с числами, а не «похоже». */
+  reason: string;
+  entityId: string | null;
+  entityName: string | null;
+  revenue: number;
+  orders: number;
+}
+
+/** Товар глазами источника: сколько принёс и можно ли по нему выбить чек. */
+export interface SourceProduct {
+  /** Название так, как его пишет источник. */
+  name: string;
+  orders: number;
+  revenue: number;
+  /** Заказы с нечитаемой ценой — в выручку не вошли. */
+  unreadable: number;
+  firstOrderAt: string;
+  lastOrderAt: string;
+  entityId: string | null;
+  entityName: string | null;
+  /** Владелец решил, что карточка не нужна. Не то же самое, что «не смотрел». */
+  dismissed: boolean;
+  decidedBy: string | null;
+  /**
+   * Что мешает выбить чек по карточке. Пусто — соберётся.
+   * Карточки нет вовсе — здесь весь список: не собирается ничего.
+   */
+  gaps: FiscalGap[];
+  lookalikes: ProductLookalike[];
+}
+
+/** Разбор ассортимента источника. */
+export interface ProductReview {
+  products: SourceProduct[];
+  /** Вся выручка выгрузки (без тестовых отгрузок). */
+  revenue: number;
+  /** Выручка, по которой чек не собирается: нет карточки или она неполная. */
+  blockedRevenue: number;
+  /** Позиций без карточки. */
+  noCard: number;
+  /** Позиций с карточкой, но без фискальных полей. */
+  incomplete: number;
+  lastOrderAt: string | null;
 }
 
 /** Что принимаем при загрузке выгрузки. */
@@ -1043,6 +1100,162 @@ export class RawService {
   }
 
   /**
+   * Разбор ассортимента источника: что продаётся и по чему не собирается чек.
+   *
+   * Считается в деньгах, а не в строках. «Товар встречается часто» и «товар
+   * приносит много» — разные вещи, и владельцу нужно второе: 14 позиций без
+   * карточек дают 42% выручки месяца, а по числу строк они теряются в хвосте.
+   *
+   * Нет карточки и есть карточка без ИКПУ — для кассы одно и то же: чек не
+   * собирается. Поэтому оба состояния считаются вместе, но называются раздельно.
+   */
+  async productReview(sourceCode: string, reportCode: string): Promise<ProductReview> {
+    const report = findRawReport(sourceCode, reportCode);
+    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    if (!snapshot) {
+      return { products: [], revenue: 0, blockedRevenue: 0, noCard: 0, incomplete: 0, lastOrderAt: null };
+    }
+
+    const pIdx = roleColumnIndex(snapshot.columns, report.roles, "product");
+    const aIdx = roleColumnIndex(snapshot.columns, report.roles, "amount");
+    const tIdx = roleColumnIndex(snapshot.columns, report.roles, "ts");
+    if (pIdx < 0 || aIdx < 0 || tIdx < 0) {
+      return { products: [], revenue: 0, blockedRevenue: 0, noCard: 0, incomplete: 0, lastOrderAt: null };
+    }
+    const fIdx = roleColumnIndex(snapshot.columns, report.roles, "flavour");
+    const kIdx = roleColumnIndex(snapshot.columns, report.roles, "kind");
+
+    const cell = (idx: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
+    const product = cell(pIdx);
+    const ts = cell(tIdx);
+    const amount = cell(aIdx);
+    const price = sql<string>`case when ${amount} ~ '^\\s*-?[0-9]+([.,][0-9]+)?\\s*$'
+      then replace(btrim(${amount}), ',', '.')::numeric end`;
+
+    // Тестовые отгрузки не продажа: они и в выручку не идут, и ассортиментом
+    // не являются. Всё остальное — идёт, включая нулевые суммы: заказ был.
+    const conds: SQL[] = [eq(rawRow.snapshotId, snapshot.id)];
+    if (kIdx >= 0) conds.push(sql`lower(btrim(${cell(kIdx)})) <> 'testshipment'`);
+
+    const rows = await this.db
+      .select({
+        name: product,
+        n: sql<number>`count(*)`,
+        revenue: sql<string>`coalesce(sum(${price}), 0)`,
+        unreadable: sql<number>`count(*) filter (where ${price} is null)`,
+        first: sql<string>`min(${ts})`,
+        last: sql<string>`max(${ts})`,
+      })
+      .from(rawRow)
+      .where(and(...conds))
+      .groupBy(product);
+
+    const flavourRows =
+      fIdx < 0
+        ? []
+        : await this.db
+            .select({ product, flavour: cell(fIdx), n: sql<number>`count(*)` })
+            .from(rawRow)
+            .where(and(...conds))
+            .groupBy(product, cell(fIdx));
+
+    const [cards, links] = await Promise.all([
+      this.db
+        .select({ id: entity.id, name: entity.name, attrs: entity.attrs })
+        .from(entity)
+        .where(eq(entity.type, "product")),
+      this.db
+        .select()
+        .from(rawLink)
+        .where(and(eq(rawLink.sourceCode, sourceCode), eq(rawLink.kind, "product"))),
+    ]);
+    const cardById = new Map(cards.map((c) => [c.id, c]));
+    const cardByName = new Map(cards.map((c) => [normalizeSourceKey(c.name), c]));
+    const linkByKey = new Map(links.map((l) => [l.externalKey, l]));
+
+    // Разные написания одного значения схлопываются так же, как на экране
+    // сопоставления: владельцу разбирать один раз, а не по разу на регистр.
+    const merged = new Map<string, SourceProduct>();
+    let lastOrderAt: string | null = null;
+    for (const r of rows) {
+      if (r.name.trim().length === 0) continue;
+      const key = normalizeSourceKey(r.name);
+      const seen = merged.get(key);
+      if (seen) {
+        seen.orders += Number(r.n);
+        seen.revenue += Number(r.revenue);
+        seen.unreadable += Number(r.unreadable);
+        if (r.first < seen.firstOrderAt) seen.firstOrderAt = r.first;
+        if (r.last > seen.lastOrderAt) seen.lastOrderAt = r.last;
+        continue;
+      }
+      const decided = linkByKey.get(key);
+      const card = decided
+        ? decided.entityId
+          ? (cardById.get(decided.entityId) ?? null)
+          : null
+        : (cardByName.get(key) ?? null);
+      const dismissed = decided !== undefined && decided.entityId === null;
+      merged.set(key, {
+        name: r.name,
+        orders: Number(r.n),
+        revenue: Number(r.revenue),
+        unreadable: Number(r.unreadable),
+        firstOrderAt: r.first,
+        lastOrderAt: r.last,
+        entityId: card?.id ?? null,
+        entityName: card?.name ?? null,
+        dismissed,
+        decidedBy: decided ? decided.decidedBy : card ? "auto" : null,
+        lookalikes: [],
+        // Нет карточки — не собирается ничего: пустой список значил бы «всё
+        // заполнено», а заполнять тут нечего. Разные вещи, и путать их нельзя.
+        gaps: card
+          ? fiscalGaps(card.attrs as Record<string, unknown>)
+          : dismissed
+            ? []
+            : FISCAL_FIELDS.map((field) => ({ field, flaw: "нет" as const, why: "карточки нет" })),
+      });
+      if (lastOrderAt === null || r.last > lastOrderAt) lastOrderAt = r.last;
+    }
+
+    const products = [...merged.values()];
+    const hints = findLookalikes(
+      products.map((p) => ({ name: p.name, orders: p.orders, revenue: p.revenue })),
+      flavourRows.map((f) => ({ product: f.product, flavour: f.flavour, orders: Number(f.n) })),
+    );
+    const byKey = new Map(products.map((p) => [normalizeSourceKey(p.name), p]));
+    for (const p of products) {
+      p.lookalikes = (hints.get(normalizeSourceKey(p.name)) ?? []).map((h) => {
+        const other = byKey.get(normalizeSourceKey(h.name));
+        return {
+          name: h.name,
+          reason: h.reason,
+          entityId: other?.entityId ?? null,
+          entityName: other?.entityName ?? null,
+          revenue: other?.revenue ?? 0,
+          orders: other?.orders ?? 0,
+        };
+      });
+    }
+
+    // Сверху то, где больше денег: разбирать хвост из одного стакана незачем,
+    // пока наверху висит позиция на десятки миллионов.
+    products.sort((a, b) => b.revenue - a.revenue || a.name.localeCompare(b.name, "ru"));
+
+    const blocked = products.filter((p) => p.gaps.length > 0);
+    return {
+      products,
+      revenue: products.reduce((n, p) => n + p.revenue, 0),
+      blockedRevenue: blocked.reduce((n, p) => n + p.revenue, 0),
+      noCard: products.filter((p) => p.entityId === null && !p.dismissed).length,
+      incomplete: products.filter((p) => p.entityId !== null && p.gaps.length > 0).length,
+      lastOrderAt,
+    };
+  }
+
+  /**
    * Решение владельца по одному значению источника.
    * `entityId: null` — осознанное «карточка не нужна» (тестовые отгрузки и т.п.):
    * значение перестаёт числиться неразобранным, но и в реестр не попадает.
@@ -1392,6 +1605,131 @@ export function daysBefore(ts: string, days: number): string {
   if (Number.isNaN(d.getTime())) return ts;
   d.setUTCDate(d.getUTCDate() - days);
   return d.toISOString().slice(0, 10);
+}
+
+/** Сколько подсказок «тот же напиток» показываем: длинный список никто не читает. */
+const MAX_LOOKALIKES = 3;
+/**
+ * Насколько вкус должен покрывать заказы товара, чтобы стать основанием.
+ *
+ * Один заказ с чужим вкусом — не признак того, что это тот же напиток, а шум.
+ */
+const LOOKALIKE_SHARE = 0.2;
+/**
+ * Со сколькими товарами вкус перестаёт что-либо значить.
+ *
+ * «Без сахара» встречается у половины ассортимента и потому не связывает
+ * ничего. Основанием остаются только вкусы, привязанные к немногим товарам.
+ */
+const GENERIC_FLAVOUR_PRODUCTS = 5;
+
+/** Товар для поиска двойников. */
+export interface LookalikeInput {
+  name: string;
+  orders: number;
+  revenue: number;
+}
+
+/** Название без пробелов и знаков: «MacCoffee 3in1» и «MacCoffee 3 in 1» — одно. */
+export function tightKey(name: string): string {
+  return normalizeSourceKey(name).replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+/**
+ * Двойники товара: одно и то же под разными именами.
+ *
+ * В панели живут «Какао» и Cocoa — один напиток, две записи, и оттого 137
+ * наименований против 34 карточек. Слить их сам код не имеет права: решает
+ * владелец. Задача здесь — не решить за него, а показать основание.
+ *
+ * Оснований ровно два, и оба взяты из данных, а не из словаря переводов:
+ *
+ * 1. **То же название без пробелов и знаков.** Чисто механическая разница.
+ * 2. **Общий вкус.** Названия напитков переводят, а вкусы в панели остаются
+ *    как есть, поэтому «Какао» и Cocoa приходят с одним `Flavour name`.
+ *
+ * Второе основание умеет ошибаться, и ошибка эта полезная: если по кнопке
+ * одного напитка пробивают другой, вкусы у них тоже общие. Поэтому в
+ * основании стоят числа — по ним видно, двойник это или подмена кнопки.
+ */
+export function findLookalikes(
+  products: readonly LookalikeInput[],
+  flavours: readonly { product: string; flavour: string; orders: number }[],
+): Map<string, { name: string; reason: string }[]> {
+  const out = new Map<string, { name: string; reason: string; weight: number }[]>();
+  const add = (from: string, to: string, reason: string, weight: number) => {
+    const key = normalizeSourceKey(from);
+    const list = out.get(key) ?? [];
+    if (list.some((x) => normalizeSourceKey(x.name) === normalizeSourceKey(to))) return;
+    list.push({ name: to, reason, weight });
+    out.set(key, list);
+  };
+
+  // 1. Механически то же название.
+  const byTight = new Map<string, LookalikeInput[]>();
+  for (const p of products) {
+    const k = tightKey(p.name);
+    if (k.length === 0) continue;
+    byTight.set(k, [...(byTight.get(k) ?? []), p]);
+  }
+  for (const group of byTight.values()) {
+    if (group.length < 2) continue;
+    for (const a of group) {
+      for (const b of group) {
+        if (normalizeSourceKey(a.name) === normalizeSourceKey(b.name)) continue;
+        add(a.name, b.name, "то же название без пробелов и знаков", b.revenue);
+      }
+    }
+  }
+
+  // 2. Общий вкус — с числами, по которым видно, двойник это или подмена кнопки.
+  const ordersOf = new Map(products.map((p) => [normalizeSourceKey(p.name), p.orders]));
+  const revenueOf = new Map(products.map((p) => [normalizeSourceKey(p.name), p.revenue]));
+  const byFlavour = new Map<string, { label: string; users: { product: string; orders: number }[] }>();
+  for (const f of flavours) {
+    if (f.flavour.trim().length === 0 || f.product.trim().length === 0) continue;
+    const k = normalizeSourceKey(f.flavour);
+    const bucket = byFlavour.get(k) ?? { label: f.flavour, users: [] };
+    bucket.users.push({ product: f.product, orders: f.orders });
+    byFlavour.set(k, bucket);
+  }
+  for (const { label, users } of byFlavour.values()) {
+    // Схлопываем написания товара, иначе один товар «связывается» сам с собой.
+    const per = new Map<string, { name: string; orders: number }>();
+    for (const u of users) {
+      const k = normalizeSourceKey(u.product);
+      const seen = per.get(k);
+      if (seen) seen.orders += u.orders;
+      else per.set(k, { name: u.product, orders: u.orders });
+    }
+    const list = [...per.values()];
+    if (list.length < 2 || list.length > GENERIC_FLAVOUR_PRODUCTS) continue;
+    for (const a of list) {
+      const total = ordersOf.get(normalizeSourceKey(a.name)) ?? a.orders;
+      if (total === 0 || a.orders / total < LOOKALIKE_SHARE) continue;
+      for (const b of list) {
+        if (normalizeSourceKey(a.name) === normalizeSourceKey(b.name)) continue;
+        add(
+          a.name,
+          b.name,
+          `общий вкус «${label}» — ${a.orders} из ${total} заказов`,
+          revenueOf.get(normalizeSourceKey(b.name)) ?? 0,
+        );
+      }
+    }
+  }
+
+  const result = new Map<string, { name: string; reason: string }[]>();
+  for (const [key, list] of out) {
+    result.set(
+      key,
+      list
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, MAX_LOOKALIKES)
+        .map(({ name, reason }) => ({ name, reason })),
+    );
+  }
+  return result;
 }
 
 /**

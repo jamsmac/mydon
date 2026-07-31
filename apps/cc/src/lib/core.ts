@@ -338,6 +338,51 @@ export interface PriceReview {
   unreadable: number;
 }
 
+/** Что мешает выбить чек по карточке: поля нет или оно заполнено неверно. */
+export interface FiscalGap {
+  field: string;
+  flaw: "нет" | "неверно";
+  why: string;
+}
+
+/** Подсказка «похоже, это тот же напиток под другим именем». */
+export interface ProductLookalike {
+  name: string;
+  /** Основание подсказки — словами и с числами. */
+  reason: string;
+  entityId: string | null;
+  entityName: string | null;
+  revenue: number;
+  orders: number;
+}
+
+/** Товар глазами источника: сколько принёс и можно ли по нему выбить чек. */
+export interface SourceProduct {
+  name: string;
+  orders: number;
+  revenue: number;
+  unreadable: number;
+  firstOrderAt: string;
+  lastOrderAt: string;
+  entityId: string | null;
+  entityName: string | null;
+  dismissed: boolean;
+  decidedBy: string | null;
+  /** Что мешает выбить чек. Пусто — соберётся. */
+  gaps: FiscalGap[];
+  lookalikes: ProductLookalike[];
+}
+
+/** Разбор ассортимента источника. */
+export interface ProductReview {
+  products: SourceProduct[];
+  revenue: number;
+  blockedRevenue: number;
+  noCard: number;
+  incomplete: number;
+  lastOrderAt: string | null;
+}
+
 /** Состав колонок изменился между двумя последними выгрузками. */
 export interface RawDrift {
   prevFetchedAt: string;
@@ -511,6 +556,8 @@ export const core = {
     get<{ machines: MachineStays[] }>(
       `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
     ),
+  rawProducts: (source: string, report: string) =>
+    get<ProductReview>(`/raw/products/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawPrices: (source: string, report: string) =>
     get<PriceReview>(`/raw/prices/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawMachinePrices: (source: string, report: string, serial: string) =>

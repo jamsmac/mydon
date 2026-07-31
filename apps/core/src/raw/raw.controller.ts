@@ -187,6 +187,12 @@ export class RawController {
     return this.raw.prices(source, report);
   }
 
+  /** Ассортимент источника: что продаётся и по чему не собирается чек. */
+  @Get("products/:source/:report")
+  products(@Param("source") source: string, @Param("report") report: string) {
+    return this.raw.productReview(source, report);
+  }
+
   /** Ассортимент и история цен одного автомата — для его карточки. */
   @Get("prices/:source/:report/machine/:serial")
   machinePrices(

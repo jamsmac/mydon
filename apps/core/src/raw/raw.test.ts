@@ -5,14 +5,17 @@ import {
   compareColumns,
   csvCell,
   daysBefore,
+  findLookalikes,
   markOverlaps,
   normalizeRowsQuery,
   parseColumnFilters,
   priceAt,
   referencePrice,
   referenceSince,
+  tightKey,
   toCsv,
 } from "./raw.service";
+import { fiscalGaps } from "@mydon/shared";
 
 describe("Сырой слой: разбор параметров страницы", () => {
   it("номера колонок и страниц берутся только целыми и положительными", () => {
@@ -357,5 +360,144 @@ describe("Цены: молчащий автомат — не отставший"
 
   it("нечитаемое время не роняет расчёт", () => {
     assert.equal(daysBefore("", 14), "");
+  });
+});
+
+describe("Товары: без чего не собирается чек", () => {
+  const full = { ИКПУ: "02201001001000000", упаковка: "стакан 0.2", НДС: "12%" };
+  const of = (attrs: Record<string, unknown>) => fiscalGaps(attrs).map((g) => `${g.field}:${g.flaw}`);
+
+  it("заполненная карточка не требует ничего", () => {
+    assert.deepEqual(fiscalGaps(full), []);
+  });
+
+  it("пустое поле и пробелы — это «не выяснили», а не значение", () => {
+    assert.deepEqual(of({ ИКПУ: "", упаковка: "   ", НДС: null }), [
+      "ИКПУ:нет",
+      "упаковка:нет",
+      "НДС:нет",
+    ]);
+  });
+
+  it("нулевая ставка НДС записана явно и полем считается", () => {
+    // «0%» — законное значение для льготных позиций, а пустое поле значит, что
+    // ставку не выясняли. Чек по первому соберётся, по второму нет.
+    assert.deepEqual(fiscalGaps({ ...full, НДС: "0%" }), []);
+    assert.deepEqual(fiscalGaps({ ...full, НДС: 0 }), []);
+  });
+
+  it("огрызок ИКПУ опаснее пустого: карточка выглядит заполненной, чек не пройдёт", () => {
+    // Правило перенесено из mydon-stock (validate_fiscal) и VendHub-OS
+    // (IKPU_CODE_REGEX): ровно 17 цифр. Своего мы не выдумываем — чек
+    // принимает касса.
+    const g = fiscalGaps({ ...full, ИКПУ: "0220100" });
+    assert.deepEqual(g.map((x) => x.flaw), ["неверно"]);
+    assert.match(g[0].why, /17 цифр, а тут 7/);
+  });
+
+  it("пробелы и дефисы в ИКПУ разницей не считаются", () => {
+    assert.deepEqual(fiscalGaps({ ...full, ИКПУ: "02201-001 001000000" }), []);
+  });
+
+  it("буквы в ИКПУ — это неверно, а не «нет»", () => {
+    assert.deepEqual(of({ ...full, ИКПУ: "0220100100100000A" }), ["ИКПУ:неверно"]);
+  });
+
+  it("ставка, которая не читается процентом, отмечается отдельно", () => {
+    assert.deepEqual(of({ ...full, НДС: "как обычно" }), ["НДС:неверно"]);
+    assert.deepEqual(of({ ...full, НДС: "180%" }), ["НДС:неверно"]);
+  });
+
+  it("дробная ставка через запятую читается", () => {
+    assert.deepEqual(fiscalGaps({ ...full, НДС: "12,5" }), []);
+  });
+
+  it("карточки нет вовсе — не хватает всего", () => {
+    assert.equal(fiscalGaps(null).length, 3);
+  });
+
+  it("посторонние поля карточки на фискализацию не влияют", () => {
+    assert.deepEqual(fiscalGaps({ ...full, цена: 20000, категория: 10 }), []);
+  });
+});
+
+describe("Товары: двойники под разными именами", () => {
+  const p = (name: string, orders: number, revenue = orders * 20000) => ({ name, orders, revenue });
+  const f = (product: string, flavour: string, orders: number) => ({ product, flavour, orders });
+
+  it("«Какао» и Cocoa связываются общим вкусом — названия переводят, вкусы нет", () => {
+    const hints = findLookalikes(
+      [p("Cocoa", 130), p("Какао", 45)],
+      [f("Cocoa", "Какао без сахара", 130), f("Какао", "Какао без сахара", 45)],
+    );
+    assert.deepEqual(
+      hints.get("cocoa")?.map((h) => h.name),
+      ["Какао"],
+    );
+    assert.match(hints.get("какао")?.[0].reason ?? "", /общий вкус «Какао без сахара» — 45 из 45/);
+  });
+
+  it("основание всегда с числами: по ним видно двойник это или подмена кнопки", () => {
+    // Настоящий Espresso: 414 из 700 заказов пробиты его кнопкой, а приготовлен
+    // MacCoffee. Вкус общий, но это не двойник. Числа в основании дают владельцу
+    // это различить — за него код решать не имеет права.
+    const hints = findLookalikes(
+      [p("Espresso", 700), p("MacCoffee 3in1", 2000)],
+      [
+        f("Espresso", "Эспрессо", 286),
+        f("Espresso", "MacCoffee с сахаром", 414),
+        f("MacCoffee 3in1", "MacCoffee с сахаром", 2000),
+      ],
+    );
+    assert.match(
+      hints.get("espresso")?.[0].reason ?? "",
+      /общий вкус «MacCoffee с сахаром» — 414 из 700 заказов/,
+    );
+  });
+
+  it("одиночный чужой вкус основанием не считается", () => {
+    const hints = findLookalikes(
+      [p("Americano", 1000), p("Latte", 800)],
+      [f("Americano", "Американо", 999), f("Americano", "Латте", 1), f("Latte", "Латте", 800)],
+    );
+    assert.equal(hints.get("americano"), undefined, "один заказ из тысячи — шум, а не признак");
+  });
+
+  it("вкус, встречающийся у половины ассортимента, не связывает ничего", () => {
+    const items = ["A", "B", "C", "D", "E", "F"].map((n) => p(n, 100));
+    const hints = findLookalikes(
+      items,
+      items.map((i) => f(i.name, "без сахара", 100)),
+    );
+    assert.equal(hints.size, 0, "«без сахара» — не признак одного напитка");
+  });
+
+  it("разница только в пробелах и знаках — механический двойник", () => {
+    const hints = findLookalikes([p("MacCoffee 3in1", 100), p("MacCoffee 3-in-1", 40)], []);
+    assert.deepEqual(hints.get("maccoffee 3in1"), [
+      { name: "MacCoffee 3-in-1", reason: "то же название без пробелов и знаков" },
+    ]);
+  });
+
+  it("товар не связывается сам с собой, как бы ни писался в выгрузке", () => {
+    const hints = findLookalikes(
+      [p("Ice Lemon Tea", 500)],
+      [f("Ice Lemon Tea", "Ice tea", 300), f("ice lemon  tea", "Ice tea", 200)],
+    );
+    assert.equal(hints.size, 0);
+  });
+
+  it("подсказок не больше трёх — длинный список никто не читает", () => {
+    const items = ["A", "B", "C", "D"].map((n) => p(n, 100));
+    const hints = findLookalikes(
+      items,
+      items.map((i) => f(i.name, "шоколад", 100)),
+    );
+    assert.equal(hints.get("a")?.length, 3);
+  });
+
+  it("название без пробелов и знаков: регистр и «ё» тоже не считаются разницей", () => {
+    assert.equal(tightKey("MacCoffee 3-in-1"), "maccoffee3in1");
+    assert.equal(tightKey("Тёплый  чай!"), "теплыйчай");
   });
 });
