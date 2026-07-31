@@ -187,6 +187,27 @@ export class RawController {
     return this.raw.prices(source, report);
   }
 
+  /**
+   * Журнал продаж: каждая продажа с её родословной.
+   *
+   * Отдельным эндпоинтом, а не расширением строк: строки сырого слоя обязаны
+   * оставаться строками сырого слоя, без наших выводов рядом.
+   */
+  @Get("journal/:source/:report")
+  journal(
+    @Param("source") source: string,
+    @Param("report") report: string,
+    @Query() query: Record<string, string>,
+  ) {
+    return this.raw.journal(source, report, normalizeRowsQuery(query));
+  }
+
+  /** Каким способом приходят деньги — срез для сверки с платёжными системами. */
+  @Get("payments/:source/:report")
+  payments(@Param("source") source: string, @Param("report") report: string) {
+    return this.raw.paymentReview(source, report);
+  }
+
   /** Ассортимент источника: что продаётся и по чему не собирается чек. */
   @Get("products/:source/:report")
   products(@Param("source") source: string, @Param("report") report: string) {

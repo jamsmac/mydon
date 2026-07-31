@@ -632,3 +632,102 @@ a.rowlink:hover { background: var(--surf-2); }
   .prow { grid-template-columns: minmax(0, 320px) 1fr auto; align-items: center; gap: 12px; }
   .prow .plook { grid-column: 1 / -1; }
 }
+
+/* срез по каналам оплаты: месяц — строка, с которой идут сверять выписку */
+.mlist { display: flex; flex-direction: column; gap: 3px; }
+.mrow {
+  display: grid; grid-template-columns: 84px 1fr 110px 64px; gap: 10px;
+  align-items: center; padding: 4px 2px; font-size: 12.5px;
+}
+.mrow .mname { color: var(--tx-2); }
+.mrow .mbar { display: block; height: 7px; background: rgba(30, 51, 80, 0.6); border-radius: 4px; overflow: hidden; }
+.mrow .mbar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.mrow .mval { text-align: right; font-weight: 600; }
+.mrow .mcnt { text-align: right; color: var(--tx-3); font-size: 11.5px; }
+.mdet { margin-top: 10px; }
+.mdet summary { cursor: pointer; font-size: 12.5px; color: var(--tx-2); }
+.mdet summary:hover { color: var(--accent); }
+
+/* журнал продаж: строка раскрывается, цвет означает происхождение величины */
+.jlegend { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; font-size: 11.5px; color: var(--tx-3); }
+.jlg { display: inline-flex; align-items: center; gap: 6px; }
+.jlg i { width: 9px; height: 9px; border-radius: 3px; background: var(--line); display: block; }
+.jlg.s-source i { background: var(--tx-3); }
+.jlg.s-matched i { background: var(--ok); }
+.jlg.s-unchecked i { background: var(--accent); }
+.jlg.s-mismatch i { background: var(--hot); }
+.jlg.s-absent i { background: #8a6d3b; }
+
+.jhead-row,
+.jhead {
+  display: grid;
+  grid-template-columns: 26px 92px minmax(0, 1.2fr) minmax(0, 1.4fr) 96px minmax(0, 0.9fr) 104px;
+  gap: 10px; align-items: center;
+}
+.jhead-row {
+  padding: 0 12px 6px; font-size: 11px; color: var(--tx-3);
+  border-bottom: 1px solid var(--line);
+}
+.jlist { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.jrow {
+  background: var(--surf); border: 1px solid var(--line); border-radius: var(--r-s);
+  border-left: 3px solid var(--tx-3);
+}
+.jrow.s-matched { border-left-color: var(--ok); }
+.jrow.s-unchecked { border-left-color: var(--accent); }
+.jrow.s-mismatch { border-left-color: var(--hot); }
+.jrow.s-absent { border-left-color: #8a6d3b; }
+.jrow.open { background: var(--surf-2, #1B3358); }
+.jhead {
+  width: 100%; padding: 9px 12px; background: none; border: none; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.jhead:hover { color: var(--accent); }
+.jtoggle { font-family: var(--fm); color: var(--tx-3); }
+.jrow .jts { font-size: 12px; color: var(--tx-2); }
+.jrow .jmach,
+.jrow .jprod,
+.jrow .jpay { display: flex; flex-direction: column; gap: 1px; font-size: 13px; min-width: 0; }
+.jrow .jprod { flex-direction: row; align-items: center; gap: 7px; flex-wrap: wrap; }
+.jrow .jsub { font-size: 10.5px; color: var(--tx-3); }
+.jrow .jamt { text-align: right; font-weight: 600; font-size: 13px; }
+.jrow .jstate { font-size: 11px; color: var(--tx-3); text-align: right; }
+.jrow .jstate.s-matched { color: var(--ok); }
+.jrow .jstate.s-unchecked { color: var(--accent); }
+.jrow .jstate.s-mismatch { color: var(--hot); }
+.jrow .jstate.s-absent { color: #c79a4a; }
+
+.jbody { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+.jgrp { border-left: 2px solid var(--line); padding-left: 10px; }
+.jgrp.o-source { border-left-color: var(--tx-3); }
+.jgrp.o-registry { border-left-color: var(--accent); }
+.jgrp.o-derived { border-left-color: #9b6dff; }
+.jgrp.o-cross { border-left-color: var(--ok); }
+.jgh { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; font-size: 12.5px; }
+.jgh .jsub { font-size: 11px; color: var(--tx-3); }
+.jfields { display: grid; grid-template-columns: 1fr; gap: 4px; }
+.jf { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px; align-items: baseline; font-size: 12.5px; }
+.jf .jfl { color: var(--tx-3); font-size: 11.5px; }
+.jf .jfv { word-break: break-word; }
+.jf .jfn { grid-column: 2; font-size: 11px; color: var(--tx-3); }
+.jf.s-matched .jfv { color: var(--ok); }
+.jf.s-unchecked .jfv { color: var(--accent); }
+.jf.s-mismatch .jfv { color: var(--hot); }
+.jf.s-mismatch .jfn { color: var(--hot); }
+.jf.s-absent .jfv { color: #c79a4a; }
+.jflink { color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
+.jflink:hover { color: var(--accent); }
+.pager { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+@media (min-width: 900px) {
+  .jfields { grid-template-columns: 1fr 1fr; gap: 4px 20px; }
+}
+@media (max-width: 899px) {
+  .jhead-row { display: none; }
+  .jhead { grid-template-columns: 22px 1fr auto; row-gap: 4px; }
+  .jrow .jmach { grid-column: 2 / -1; }
+  .jrow .jprod { grid-column: 2 / -1; }
+  .jrow .jamt { grid-column: 2; text-align: left; }
+  .jrow .jpay { grid-column: 3; }
+  .jrow .jstate { grid-column: 2 / -1; text-align: left; }
+}

@@ -338,6 +338,110 @@ export interface PriceReview {
   unreadable: number;
 }
 
+/** Откуда взялась величина журнала: первоисточник, реестр, наш разбор, сверка. */
+export type FieldOrigin = "source" | "registry" | "derived" | "cross";
+/** Состояние величины по отношению к сверке. */
+export type FieldState = "source" | "unchecked" | "matched" | "mismatch" | "absent";
+
+/** Куда ведёт ссылка «посмотреть первоисточник». */
+export interface FieldLink {
+  kind: "raw" | "prices" | "goods" | "payments" | "stays" | "card";
+  ref?: string;
+}
+
+/** Одна величина журнала со своей родословной. */
+export interface JournalField {
+  label: string;
+  value: string | null;
+  origin: FieldOrigin;
+  state: FieldState;
+  note?: string | null;
+  link?: FieldLink | null;
+}
+
+/** Группа величин в раскрытой строке журнала. */
+export interface JournalGroup {
+  title: string;
+  origin: FieldOrigin;
+  subtitle: string;
+  fields: JournalField[];
+}
+
+/** Одна продажа в журнале. */
+export interface JournalOrder {
+  idx: number;
+  externalId: string;
+  ts: string;
+  machine: string;
+  machineEntityId: string | null;
+  machineName: string | null;
+  product: string;
+  productEntityId: string | null;
+  amount: string;
+  payment: string;
+  paymentLabel: string | null;
+  paymentConfirmed: boolean;
+  status: string;
+  state: FieldState;
+  groups: JournalGroup[];
+}
+
+/** Страница журнала продаж. */
+export interface Journal {
+  snapshot: RawSnapshotMeta | null;
+  total: number;
+  page: number;
+  size: number;
+  orders: JournalOrder[];
+  externalIdColumn: number;
+  sourceUrl: string;
+  checked: number;
+  mismatched: number;
+}
+
+/** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
+export interface PaymentMonth {
+  month: string;
+  orders: number;
+  revenue: number;
+}
+
+/** Автомат в разрезе одного канала оплаты. */
+export interface PaymentMachine {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  orders: number;
+  revenue: number;
+}
+
+/** Канал оплаты так, как его называет источник. */
+export interface PaymentChannel {
+  code: string;
+  /** Как называет его источник. null — расшифровки нет. */
+  label: string | null;
+  /** Смысл подтверждён. false — показывать вопросом, а не фактом. */
+  confirmed: boolean;
+  orders: number;
+  revenue: number;
+  unreadable: number;
+  firstOrderAt: string;
+  lastOrderAt: string;
+  months: PaymentMonth[];
+  machines: PaymentMachine[];
+}
+
+/** Срез по каналам оплаты — основание для сверки с платёжными системами. */
+export interface PaymentReview {
+  channels: PaymentChannel[];
+  orders: number;
+  revenue: number;
+  unconfirmedRevenue: number;
+  /** Номер колонки канала в этой выгрузке — для ухода в сами заказы. */
+  column: number;
+  lastOrderAt: string | null;
+}
+
 /** Что мешает выбить чек по карточке: поля нет или оно заполнено неверно. */
 export interface FiscalGap {
   field: string;
@@ -556,6 +660,14 @@ export const core = {
     get<{ machines: MachineStays[] }>(
       `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
     ),
+  rawJournal: (source: string, report: string, params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<Journal>(
+      `/raw/journal/${encodeURIComponent(source)}/${encodeURIComponent(report)}${qs ? `?${qs}` : ""}`,
+    );
+  },
+  rawPayments: (source: string, report: string) =>
+    get<PaymentReview>(`/raw/payments/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawProducts: (source: string, report: string) =>
     get<ProductReview>(`/raw/products/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawPrices: (source: string, report: string) =>

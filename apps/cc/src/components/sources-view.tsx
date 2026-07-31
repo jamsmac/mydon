@@ -14,9 +14,11 @@ import { RawTable } from "./raw-table";
 import { MachineStaysView } from "./machine-stays";
 import { PricesView } from "./prices-view";
 import { ProductsReview } from "./products-review";
+import { PaymentsView } from "./payments-view";
+import { JournalView } from "./journal-view";
 
 /** Что показывает вкладка отчёта. */
-type ReportView = "rows" | "map" | "stays" | "prices" | "goods";
+type ReportView = "rows" | "map" | "stays" | "prices" | "goods" | "pay" | "journal";
 
 export interface SourcesViewProps {
   /** Адрес страницы направления: /domain/vendhub */
@@ -91,7 +93,12 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
   }
   const report = source.reports.find((r) => r.reportCode === sp.rep) ?? source.reports[0];
   const view: ReportView =
-    sp.view === "map" || sp.view === "stays" || sp.view === "prices" || sp.view === "goods"
+    sp.view === "map" ||
+    sp.view === "stays" ||
+    sp.view === "prices" ||
+    sp.view === "goods" ||
+    sp.view === "pay" ||
+    sp.view === "journal"
       ? sp.view
       : "rows";
   const clean = withoutTableState(sp);
@@ -325,6 +332,12 @@ async function ReportPane({
         <Link href={viewHref("goods")} className={`subtab ${view === "goods" ? "active" : ""}`}>
           Товары
         </Link>
+        <Link href={viewHref("pay")} className={`subtab ${view === "pay" ? "active" : ""}`}>
+          Оплата
+        </Link>
+        <Link href={viewHref("journal")} className={`subtab ${view === "journal" ? "active" : ""}`}>
+          Журнал продаж
+        </Link>
       </div>
 
       {view === "rows" ? (
@@ -349,11 +362,71 @@ async function ReportPane({
         <PricesPane source={source.code} reportCode={reportCode} />
       ) : view === "goods" ? (
         <GoodsPane source={source.code} reportCode={reportCode} />
+      ) : view === "pay" ? (
+        <PayPane base={base} sp={sp} source={source.code} reportCode={reportCode} />
+      ) : view === "journal" ? (
+        <JournalPane base={base} sp={sp} params={params} source={source.code} reportCode={reportCode} />
       ) : (
         <StaysPane source={source.code} reportCode={reportCode} />
       )}
     </>
   );
+}
+
+/** Журнал продаж: каждая продажа с её родословной. */
+async function JournalPane({
+  base,
+  sp,
+  params,
+  source,
+  reportCode,
+}: {
+  base: string;
+  sp: Record<string, string>;
+  params: Record<string, string>;
+  source: string;
+  reportCode: string;
+}) {
+  try {
+    // Журналу нужен свой размер страницы: строка раскрывается, и сотня таких
+    // строк на экране — это уже не журнал, а стена.
+    const journal = await core.rawJournal(source, reportCode, { size: "50", ...params });
+    return (
+      <JournalView journal={journal} base={base} sp={sp} sourceCode={source} reportCode={reportCode} />
+    );
+  } catch (err) {
+    return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
+}
+
+/** Каким способом приходят деньги — срез для сверки с платёжными системами. */
+async function PayPane({
+  base,
+  sp,
+  source,
+  reportCode,
+}: {
+  base: string;
+  sp: Record<string, string>;
+  source: string;
+  reportCode: string;
+}) {
+  try {
+    const review = await core.rawPayments(source, reportCode);
+    // Сводке верить на слово не надо: с каждого кода можно уйти в сами заказы,
+    // отфильтрованные по этой колонке.
+    // «=» перед значением — точное совпадение: иначе код cash открывал бы
+    // заказы вместе с cash0, а это другой канал, и при сверке с выпиской такая
+    // подмена дорого стоит.
+    const rowsHref =
+      review.column < 0
+        ? null
+        : (code: string) =>
+            href(base, withoutTableState(sp), { view: null, [`f${review.column}`]: `=${code}` });
+    return <PaymentsView review={review} rowsHref={rowsHref} />;
+  } catch (err) {
+    return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
 }
 
 /** Ассортимент источника: что продаётся и по чему не собирается чек. */

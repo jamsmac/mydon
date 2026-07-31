@@ -1,10 +1,12 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { entity, rawLink, rawRow, rawSnapshot } from "@mydon/db";
+import { entity, rawLink, rawRow, rawSnapshot, sale } from "@mydon/db";
 import {
   FISCAL_FIELDS,
   RAW_LINK_LABELS,
   RAW_SOURCES,
+  decodeRawValue,
   findRawReport,
+  findRawSource,
   fiscalGaps,
   normalizeSourceKey,
   roleColumnIndex,
@@ -15,7 +17,7 @@ import {
   type RawLinkKind,
   rawFreshness,
 } from "@mydon/shared";
-import { and, asc, eq, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
 
@@ -85,16 +87,34 @@ export interface RawOverview {
   }[];
 }
 
+/**
+ * Фильтр по одной колонке.
+ *
+ * По умолчанию — вхождение: владелец ищет «кардио» и находит все точки
+ * кардиологии. Но у кодов источника вхождение врёт: `cash` находит и `cash0`,
+ * а это разные каналы оплаты, и при сверке с выпиской такая подмена дорого
+ * стоит. Поэтому значение, начинающееся с `=`, ищется целиком.
+ */
+export interface ColumnFilter {
+  value: string;
+  exact: boolean;
+}
+
 /** Разбор фильтров по колонкам: ключи вида `f3` → индекс колонки. */
-export function parseColumnFilters(query: Record<string, unknown>): Map<number, string> {
-  const out = new Map<number, string>();
+export function parseColumnFilters(query: Record<string, unknown>): Map<number, ColumnFilter> {
+  const out = new Map<number, ColumnFilter>();
   for (const [key, value] of Object.entries(query)) {
     const m = /^f(\d+)$/.exec(key);
     if (!m) continue;
     const idx = Number(m[1]);
     if (!Number.isInteger(idx) || idx < 0 || idx >= MAX_COLUMNS) continue;
-    const v = typeof value === "string" ? value.trim() : "";
-    if (v.length > 0) out.set(idx, v);
+    const raw = typeof value === "string" ? value.trim() : "";
+    if (raw.length === 0) continue;
+    const exact = raw.startsWith("=");
+    const v = exact ? raw.slice(1).trim() : raw;
+    // «=» без значения — это не фильтр «пусто», а мусор в адресе.
+    if (v.length === 0) continue;
+    out.set(idx, { value: v, exact });
   }
   return out;
 }
@@ -117,7 +137,7 @@ export interface RawRowsQuery {
   page: number;
   size: number;
   offset: number;
-  filters: Map<number, string>;
+  filters: Map<number, ColumnFilter>;
 }
 
 /**
@@ -389,6 +409,155 @@ export interface ProductReview {
   lastOrderAt: string | null;
 }
 
+/** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
+export interface PaymentMonth {
+  month: string;
+  orders: number;
+  revenue: number;
+}
+
+/** Автомат в разрезе одного канала оплаты. */
+export interface PaymentMachine {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  orders: number;
+  revenue: number;
+}
+
+/**
+ * Канал оплаты так, как его называет источник.
+ *
+ * Код не переводится и не переименовывается: `userDefined` остаётся
+ * `userDefined`, а рядом лежит то, как его называет сама панель. Чем канал
+ * окажется на деле, решит сверка с платёжными системами, а не мы.
+ */
+export interface PaymentChannel {
+  /** Код источника. */
+  code: string;
+  /** Как называет его источник. null — расшифровки нет, и выдумывать её нельзя. */
+  label: string | null;
+  /** Смысл подтверждён. false — показывать вопросом, а не фактом. */
+  confirmed: boolean;
+  orders: number;
+  revenue: number;
+  /** Заказы с нечитаемой ценой — в сумму не вошли. */
+  unreadable: number;
+  firstOrderAt: string;
+  lastOrderAt: string;
+  months: PaymentMonth[];
+  machines: PaymentMachine[];
+}
+
+/** Срез по каналам оплаты — основание для сверки с платёжными системами. */
+export interface PaymentReview {
+  channels: PaymentChannel[];
+  orders: number;
+  revenue: number;
+  /** Выручка по каналам, смысл которых источник не объясняет. */
+  unconfirmedRevenue: number;
+  /**
+   * Номер колонки канала в этой выгрузке — чтобы с экрана можно было уйти
+   * в сами заказы, отфильтрованные по коду, а не верить сводке на слово.
+   */
+  column: number;
+  lastOrderAt: string | null;
+}
+
+/**
+ * Откуда взялась величина в журнале.
+ *
+ * Это не оформление, а суть: владелец обязан видеть, что перед ним — цифра
+ * панели, наша догадка или результат сверки. Смешивать их в одну таблицу без
+ * пометки значит выдавать одно за другое.
+ */
+export type FieldOrigin =
+  /** Первоисточник: ровно то, что отдала панель. Мы это не считали. */
+  | "source"
+  /** Реестр MYDON: сопоставленная карточка. */
+  | "registry"
+  /** Наш разбор поверх сырья: цена периода, точка на момент заказа. */
+  | "derived"
+  /** Другой источник: то, с чем сверяем. */
+  | "cross";
+
+/** Состояние величины по отношению к сверке. */
+export type FieldState =
+  /** Первоисточник — сверять не с чем и не нужно. */
+  | "source"
+  /** Ещё не сверено с другими источниками. */
+  | "unchecked"
+  /** Сверено, сходится. */
+  | "matched"
+  /** Сверено, расходится — обе цифры показываются рядом. */
+  | "mismatch"
+  /** В другом источнике этого нет. */
+  | "absent";
+
+/** Куда ведёт ссылка «посмотреть первоисточник». */
+export interface FieldLink {
+  kind: "raw" | "prices" | "goods" | "payments" | "stays" | "card";
+  /** Значение для фильтра или идентификатор карточки. */
+  ref?: string;
+}
+
+/** Одна величина журнала со своей родословной. */
+export interface JournalField {
+  label: string;
+  value: string | null;
+  origin: FieldOrigin;
+  state: FieldState;
+  /** Пояснение словами: почему расходится, чего не хватает. */
+  note?: string | null;
+  link?: FieldLink | null;
+}
+
+/** Группа величин в раскрытой строке журнала. */
+export interface JournalGroup {
+  title: string;
+  origin: FieldOrigin;
+  /** Откуда группа: имя системы или слоя — владелец читает это, а не код. */
+  subtitle: string;
+  fields: JournalField[];
+}
+
+/** Одна продажа в журнале. */
+export interface JournalOrder {
+  /** Номер строки в снимке — по нему находится первоисточник. */
+  idx: number;
+  externalId: string;
+  ts: string;
+  machine: string;
+  machineEntityId: string | null;
+  machineName: string | null;
+  product: string;
+  productEntityId: string | null;
+  amount: string;
+  payment: string;
+  paymentLabel: string | null;
+  paymentConfirmed: boolean;
+  status: string;
+  /** Худшее состояние среди величин строки — по нему красится строка. */
+  state: FieldState;
+  groups: JournalGroup[];
+}
+
+/** Страница журнала продаж. */
+export interface Journal {
+  snapshot: RawSnapshotMeta | null;
+  total: number;
+  page: number;
+  size: number;
+  orders: JournalOrder[];
+  /** Колонка № заказа в этой выгрузке — для ссылки в первоисточник. */
+  externalIdColumn: number;
+  /** Адрес кабинета источника: сама панель, а не наша копия. */
+  sourceUrl: string;
+  /** Сколько строк страницы уже сверено с другим источником. */
+  checked: number;
+  mismatched: number;
+}
+
 /** Что принимаем при загрузке выгрузки. */
 export interface RawImportInput {
   source: string;
@@ -529,12 +698,16 @@ export class RawService {
     if (query.q.length > 0) {
       conds.push(sql`${rawRow.cells}::text ilike ${`%${query.q}%`}`);
     }
-    for (const [idx, value] of query.filters) {
+    for (const [idx, filter] of query.filters) {
       // Индекс колонки — только проверенное целое (normalizeRowsQuery), поэтому
       // его можно подставить в текст запроса: параметром оператор `->>` не
-      // выбрать, Postgres не знает, число это или ключ объекта.
+      // выбрать, Postgres не знает, число это или ключ объекта. Само значение
+      // всегда идёт параметром.
+      const cell = sql`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
       conds.push(
-        sql`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '') ilike ${`%${value}%`}`,
+        filter.exact
+          ? sql`lower(btrim(${cell})) = lower(btrim(${filter.value}))`
+          : sql`${cell} ilike ${`%${filter.value}%`}`,
       );
     }
     return conds;
@@ -871,8 +1044,12 @@ export class RawService {
       then replace(btrim(${amount}), ',', '.')::numeric end`;
     const month = sql<string>`substr(${ts}, 1, 7)`;
 
-    const conds: SQL[] = [eq(rawRow.snapshotId, snapshot.id), sql`${price} > 0`];
-    if (kIdx >= 0) conds.push(sql`lower(btrim(${cell(kIdx)})) <> 'testshipment'`);
+    // Тестовые отгрузки не продажа, поэтому не участвуют ни в расчёте, ни в
+    // счётчике нечитаемых цен: иначе «не вошло в расчёт» относилось бы к
+    // другому набору строк, чем сам расчёт.
+    const base: SQL[] = [eq(rawRow.snapshotId, snapshot.id)];
+    if (kIdx >= 0) base.push(sql`lower(btrim(${cell(kIdx)})) <> 'testshipment'`);
+    const conds: SQL[] = [...base, sql`${price} > 0`];
 
     const rows = await this.db
       .select({
@@ -891,7 +1068,7 @@ export class RawService {
     const [{ n: unreadable }] = await this.db
       .select({ n: sql<number>`count(*)` })
       .from(rawRow)
-      .where(and(eq(rawRow.snapshotId, snapshot.id), sql`${price} is null`));
+      .where(and(...base, sql`${price} is null`));
 
     return {
       rows: rows
@@ -966,11 +1143,13 @@ export class RawService {
     const names = new Map<string, { serial: string; product: string }>();
     let lastOrderAt: string | null = null;
     for (const r of rows) {
-      const key = `${r.serial} ${r.product}`;
+      const key = timelineKey(r.serial, r.product);
       const list = buckets.get(key) ?? [];
       list.push(r.bucket);
       buckets.set(key, list);
-      names.set(key, { serial: r.serial, product: r.product });
+      // Написание берём от первой встреченной строки: владельцу показывают то,
+      // как пишет источник, а не наш нормализованный вид.
+      if (!names.has(key)) names.set(key, { serial: r.serial, product: r.product });
       if (lastOrderAt === null || r.bucket.to > lastOrderAt) lastOrderAt = r.bucket.to;
     }
 
@@ -1054,7 +1233,7 @@ export class RawService {
         const ordersSince =
           gap === 0 || since === null
             ? 0
-            : (buckets.get(`${i.serial} ${i.product}`) ?? [])
+            : (buckets.get(timelineKey(i.serial, i.product)) ?? [])
                 .filter((b) => b.price === i.price && b.to >= since)
                 .reduce((n, b) => n + b.orders, 0);
         return {
@@ -1096,6 +1275,510 @@ export class RawService {
       lost: products.reduce((n, p) => n + p.lost, 0),
       lastOrderAt,
       unreadable,
+    };
+  }
+
+  /**
+   * Журнал продаж: каждая продажа с её родословной.
+   *
+   * Главное здесь не колонки, а происхождение каждой величины. Номер заказа,
+   * машинный код, ресурс заказа, статус платежа, цена и время — это
+   * ПЕРВОИСТОЧНИК: ровно то, что отдала панель, и мы это не считали. Рядом
+   * лежат величины другого рода — сопоставленная карточка, точка на момент
+   * заказа, цена периода — и они помечены иначе, потому что это уже наш вывод.
+   *
+   * Третий род — сверка с другим источником. Пока OurVend отдаёт только дневные
+   * итоги, сверка идёт по тройке «день + автомат + товар», и так и написано:
+   * выдавать дневное сравнение за построчное нельзя.
+   */
+  async journal(
+    sourceCode: string,
+    reportCode: string,
+    query: RawRowsQuery,
+  ): Promise<Journal> {
+    const report = findRawReport(sourceCode, reportCode);
+    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const src = findRawSource(sourceCode);
+    const empty: Journal = {
+      snapshot: null,
+      total: 0,
+      page: query.page,
+      size: query.size,
+      orders: [],
+      externalIdColumn: -1,
+      sourceUrl: src?.url ?? "",
+      checked: 0,
+      mismatched: 0,
+    };
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    if (!snapshot) return empty;
+
+    const at = (role: keyof RawColumnRoles) => roleColumnIndex(snapshot.columns, report.roles, role);
+    const idx = {
+      machine: at("machine"),
+      product: at("product"),
+      flavour: at("flavour"),
+      amount: at("amount"),
+      ts: at("ts"),
+      externalId: at("externalId"),
+      status: at("status"),
+      kind: at("kind"),
+      payment: at("payment"),
+      fulfilment: at("fulfilment"),
+      point: at("point"),
+    };
+    if (idx.machine < 0 || idx.product < 0 || idx.ts < 0) return { ...empty, snapshot };
+
+    const { total, rows } = await this.rows(snapshot.id, query);
+    if (rows.length === 0) return { ...empty, snapshot, total };
+
+    const cell = (r: RawRowOut, i: number) => (i < 0 ? "" : (r.cells[i] ?? ""));
+
+    // Всё, что нужно для родословной. Стоянки и цены считаются по всей выгрузке
+    // — иначе «точка на момент заказа» и «цена периода» брались бы из воздуха.
+    const [cards, stays, timelines, dicts] = await Promise.all([
+      this.priceCards(sourceCode),
+      this.machineStays(sourceCode, reportCode),
+      this.priceTimelines(sourceCode, reportCode),
+      Promise.resolve(report.dicts ?? []),
+    ]);
+    const paymentDict = dicts.find((d) => d.role === "payment");
+    const fulfilDict = dicts.find((d) => d.role === "fulfilment");
+
+    const staysBySerial = new Map(stays.map((m) => [normalizeSourceKey(m.serial), m]));
+    const priceByKey = new Map(
+      timelines.items.map((i) => [timelineKey(i.serial, i.product), i]),
+    );
+    const productCards = await this.db
+      .select({ id: entity.id, name: entity.name, attrs: entity.attrs })
+      .from(entity)
+      .where(eq(entity.type, "product"));
+    const attrsById = new Map(productCards.map((c) => [c.id, c.attrs as Record<string, unknown>]));
+
+    // Сверка с другим источником: OurVend отдаёт дневные итоги, поэтому берём
+    // ровно те тройки «день + автомат + товар», что встретились на странице.
+    const triples = new Set<string>();
+    for (const r of rows) {
+      const day = cell(r, idx.ts).slice(0, 10);
+      if (day.length !== 10) continue;
+      triples.add(`${day}|${normalizeSourceKey(cell(r, idx.machine))}|${normalizeSourceKey(cell(r, idx.product))}`);
+    }
+    const days = [...new Set([...triples].map((t) => t.split("|")[0]))].sort();
+    const otherByTriple = new Map<string, { qty: number; amount: number; source: string }>();
+    if (days.length > 0) {
+      const other = await this.db
+        .select({
+          dt: sale.dt,
+          serial: sale.machineSerial,
+          product: sale.product,
+          qty: sale.qty,
+          amount: sale.amount,
+          source: sale.source,
+        })
+        .from(sale)
+        .where(and(gte(sale.dt, days[0]), lte(sale.dt, days[days.length - 1])));
+      for (const o of other) {
+        const key = `${o.dt}|${normalizeSourceKey(o.serial)}|${normalizeSourceKey(o.product)}`;
+        const seen = otherByTriple.get(key);
+        if (seen) {
+          seen.qty += Number(o.qty);
+          seen.amount += Number(o.amount);
+        } else {
+          otherByTriple.set(key, { qty: Number(o.qty), amount: Number(o.amount), source: o.source });
+        }
+      }
+    }
+
+    // Итог этой же выгрузки по тем же тройкам — вторая половина сверки.
+    const ourByTriple = new Map<string, { qty: number; amount: number }>();
+    if (idx.amount >= 0 && triples.size > 0) {
+      const c = (i: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(i))}, '')`;
+      const price = sql<string>`case when ${c(idx.amount)} ~ '^\\s*-?[0-9]+([.,][0-9]+)?\\s*$'
+        then replace(btrim(${c(idx.amount)}), ',', '.')::numeric end`;
+      const day = sql<string>`substr(${c(idx.ts)}, 1, 10)`;
+      const conds: SQL[] = [
+        eq(rawRow.snapshotId, snapshot.id),
+        sql`${day} >= ${days[0]}`,
+        sql`${day} <= ${days[days.length - 1]}`,
+      ];
+      if (idx.kind >= 0) conds.push(sql`lower(btrim(${c(idx.kind)})) <> 'testshipment'`);
+      const agg = await this.db
+        .select({
+          day,
+          serial: c(idx.machine),
+          product: c(idx.product),
+          qty: sql<number>`count(*)`,
+          amount: sql<string>`coalesce(sum(${price}), 0)`,
+        })
+        .from(rawRow)
+        .where(and(...conds))
+        .groupBy(day, c(idx.machine), c(idx.product));
+      for (const a of agg) {
+        const key = `${a.day}|${normalizeSourceKey(a.serial)}|${normalizeSourceKey(a.product)}`;
+        const seen = ourByTriple.get(key);
+        if (seen) {
+          seen.qty += Number(a.qty);
+          seen.amount += Number(a.amount);
+        } else {
+          ourByTriple.set(key, { qty: Number(a.qty), amount: Number(a.amount) });
+        }
+      }
+    }
+
+    let checked = 0;
+    let mismatched = 0;
+    const orders: JournalOrder[] = rows.map((r) => {
+      const machine = cell(r, idx.machine);
+      const product = cell(r, idx.product);
+      const ts = cell(r, idx.ts);
+      const amount = cell(r, idx.amount);
+      const externalId = cell(r, idx.externalId);
+      const payment = cell(r, idx.payment);
+      const rawLink: FieldLink = { kind: "raw", ref: externalId };
+
+      // ── Первоисточник: то, что отдала панель, слово в слово ──
+      const fromSource = (label: string, value: string): JournalField => ({
+        label,
+        value: value || null,
+        origin: "source",
+        state: "source",
+        link: rawLink,
+      });
+      const sourceFields: JournalField[] = [
+        fromSource("Номер заказа", externalId),
+        fromSource("Машинный код", machine),
+        fromSource("Товар", product),
+        fromSource("Вкус", cell(r, idx.flavour)),
+        fromSource("Цена заказа", amount),
+        fromSource("Ресурс заказа", payment),
+        fromSource("Статус платежа", cell(r, idx.status)),
+        fromSource("Тип заказа", cell(r, idx.kind)),
+        fromSource("Статус варки", cell(r, idx.fulfilment)),
+        fromSource("Время создания", ts),
+        fromSource("Адрес в заказе", cell(r, idx.point)),
+      ].filter((f) => f.value !== null);
+
+      // ── Расшифровки: слова панели, а не наш перевод ──
+      const paymentDecoded = decodeRawValue(paymentDict, payment);
+      const fulfilDecoded = decodeRawValue(fulfilDict, cell(r, idx.fulfilment));
+      const decoded: JournalField[] = [];
+      if (payment) {
+        decoded.push({
+          label: "Ресурс заказа",
+          value: paymentDecoded?.label ?? null,
+          origin: "source",
+          state: paymentDecoded && !paymentDecoded.confirmed ? "unchecked" : "source",
+          note: paymentDecoded
+            ? paymentDecoded.confirmed
+              ? "как называет панель"
+              : "как называет панель; чем это на деле, покажет сверка с платёжной системой"
+            : "источник не объясняет этот код",
+          link: { kind: "payments", ref: payment },
+        });
+      }
+      if (fulfilDecoded) {
+        decoded.push({
+          label: "Статус варки",
+          value: fulfilDecoded.label,
+          origin: "source",
+          state: "source",
+          note: "как называет панель",
+          link: rawLink,
+        });
+      }
+
+      // ── Реестр MYDON: что узнано по карточкам ──
+      const mcard = cards.bySerial.get(normalizeSourceKey(machine)) ?? null;
+      const pcard = cards.byProduct.get(normalizeSourceKey(product)) ?? null;
+      const gaps = pcard ? fiscalGaps(attrsById.get(pcard.id)) : [];
+      const registry: JournalField[] = [
+        {
+          label: "Карточка автомата",
+          value: mcard?.name ?? null,
+          origin: "registry",
+          state: mcard ? "matched" : "absent",
+          note: mcard ? null : "серийник не сопоставлен ни с одной карточкой",
+          link: mcard ? { kind: "card", ref: mcard.id } : { kind: "raw", ref: externalId },
+        },
+        {
+          label: "Карточка товара",
+          value: pcard?.name ?? null,
+          origin: "registry",
+          state: pcard ? "matched" : "absent",
+          note: pcard ? null : "товара нет в реестре — чек по нему не собрать",
+          link: pcard ? { kind: "card", ref: pcard.id } : { kind: "goods", ref: product },
+        },
+        {
+          label: "ИКПУ",
+          value: pcard ? String(attrsById.get(pcard.id)?.["ИКПУ"] ?? "") || null : null,
+          origin: "registry",
+          state: pcard ? (gaps.length === 0 ? "matched" : "absent") : "absent",
+          note:
+            gaps.length > 0
+              ? `чек не соберётся: ${gaps.map((g) => `${g.field} — ${g.why}`).join("; ")}`
+              : pcard
+                ? "фискальные поля заполнены"
+                : "нет карточки",
+          link: { kind: "goods", ref: product },
+        },
+      ];
+
+      // ── Разбор: наш вывод поверх сырья, а не цифра панели ──
+      const stay = staysBySerial.get(normalizeSourceKey(machine));
+      const pointThen = stay?.stays.find((s) => s.from <= ts && ts <= s.to) ?? null;
+      const line = priceByKey.get(timelineKey(machine, product));
+      const periodPrice = line ? priceAt(line.periods, ts) : null;
+      const orderPrice = Number(String(amount).replace(",", "."));
+      const priceAgrees =
+        periodPrice === null || !Number.isFinite(orderPrice) ? null : periodPrice === orderPrice;
+      const derived: JournalField[] = [
+        {
+          label: "Точка на момент заказа",
+          value: pointThen?.point ?? null,
+          origin: "derived",
+          state: pointThen ? (pointThen.overlaps ? "mismatch" : "matched") : "absent",
+          note: pointThen
+            ? pointThen.overlaps
+              ? "периоды стоянки пересекаются — источник путает адреса"
+              : "по истории переездов, восстановленной из заказов"
+            : "период стоянки для этого времени не найден",
+          link: { kind: "stays", ref: machine },
+        },
+        {
+          label: "Цена периода",
+          value: periodPrice === null ? null : String(periodPrice),
+          origin: "derived",
+          state: priceAgrees === null ? "absent" : priceAgrees ? "matched" : "mismatch",
+          note:
+            priceAgrees === false
+              ? "цена заказа не совпадает с ценой, действовавшей тогда: возможна подмена кнопки"
+              : priceAgrees
+                ? "совпадает с ценой заказа"
+                : "цена периода не определена",
+          link: { kind: "prices", ref: product },
+        },
+      ];
+
+      // ── Сверка с другим источником ──
+      const day = ts.slice(0, 10);
+      const tri = `${day}|${normalizeSourceKey(machine)}|${normalizeSourceKey(product)}`;
+      const them = otherByTriple.get(tri);
+      const us = ourByTriple.get(tri);
+      const cross: JournalField[] = [];
+      if (them && us) {
+        const agrees = Math.round(them.amount) === Math.round(us.amount);
+        checked += 1;
+        if (!agrees) mismatched += 1;
+        cross.push({
+          label: `За день у ${them.source}`,
+          value: `${them.qty.toLocaleString("ru-RU")} шт · ${Math.round(them.amount).toLocaleString("ru-RU")} сум`,
+          origin: "cross",
+          state: agrees ? "matched" : "mismatch",
+          note: agrees
+            ? `сходится с этой выгрузкой (${us.qty} шт · ${Math.round(us.amount).toLocaleString("ru-RU")} сум). Сверка дневная, не построчная: у ${them.source} нет времени внутри дня`
+            : `у этой выгрузки за тот же день ${us.qty} шт · ${Math.round(us.amount).toLocaleString("ru-RU")} сум — расходится`,
+          link: rawLink,
+        });
+      } else if (us) {
+        cross.push({
+          label: "Другие источники",
+          value: null,
+          origin: "cross",
+          state: "unchecked",
+          note: "за этот день по этому автомату и товару другой источник ничего не показывает — сверить не с чем",
+          link: null,
+        });
+      }
+
+      const order: JournalOrder = {
+        idx: r.idx,
+        externalId,
+        ts,
+        machine,
+        machineEntityId: mcard?.id ?? null,
+        machineName: mcard?.name ?? null,
+        product,
+        productEntityId: pcard?.id ?? null,
+        amount,
+        payment,
+        paymentLabel: paymentDecoded?.label ?? null,
+        paymentConfirmed: paymentDecoded?.confirmed ?? false,
+        status: cell(r, idx.status),
+        state: worstState([...decoded, ...registry, ...derived, ...cross]),
+        groups: [
+          {
+            title: "Первоисточник",
+            origin: "source",
+            subtitle: `${src?.title ?? sourceCode} · ${report.title}`,
+            fields: sourceFields,
+          },
+          ...(decoded.length > 0
+            ? [{ title: "Как называет панель", origin: "source" as const, subtitle: "расшифровки источника", fields: decoded }]
+            : []),
+          { title: "Реестр MYDON", origin: "registry" as const, subtitle: "сопоставленные карточки", fields: registry },
+          { title: "Разбор", origin: "derived" as const, subtitle: "наш вывод поверх сырья", fields: derived },
+          ...(cross.length > 0
+            ? [{ title: "Сверка с другими источниками", origin: "cross" as const, subtitle: "дневные итоги", fields: cross }]
+            : []),
+        ],
+      };
+      return order;
+    });
+
+    return {
+      snapshot,
+      total,
+      page: query.page,
+      size: query.size,
+      orders,
+      externalIdColumn: idx.externalId,
+      sourceUrl: src?.url ?? "",
+      checked,
+      mismatched,
+    };
+  }
+
+  /**
+   * Срез по каналам оплаты: сколько денег пришло каким способом.
+   *
+   * Существует ради сверки. Панель называет один из своих кодов «Таможенный
+   * платеж», и на нём 181,3 млн сум — название явно не про вендинг, но
+   * заменять его нашей догадкой нельзя: справочник расшифровок такое же
+   * сырьё, как и строки. Чем канал окажется на деле — Payme, Click, Uzum или
+   * списание бонусов, — покажет сверка с этими системами, а до неё честнее
+   * показать код источника со словами «не подтверждено».
+   *
+   * Поэтому срез разложен по месяцам и автоматам: месячная сумма — это то, с
+   * чем идут к выписке платёжной системы, а не просто цифра на экране.
+   *
+   * Ничего не отфильтровано, включая тестовые выдачи: это срез источника
+   * как он есть, и итог обязан сходиться с тем, что показывает панель.
+   */
+  async paymentReview(sourceCode: string, reportCode: string): Promise<PaymentReview> {
+    const report = findRawReport(sourceCode, reportCode);
+    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const empty: PaymentReview = {
+      channels: [],
+      orders: 0,
+      revenue: 0,
+      unconfirmedRevenue: 0,
+      column: -1,
+      lastOrderAt: null,
+    };
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    if (!snapshot) return empty;
+
+    const cIdx = roleColumnIndex(snapshot.columns, report.roles, "payment");
+    const aIdx = roleColumnIndex(snapshot.columns, report.roles, "amount");
+    const tIdx = roleColumnIndex(snapshot.columns, report.roles, "ts");
+    if (cIdx < 0 || aIdx < 0 || tIdx < 0) return empty;
+    const mIdx = roleColumnIndex(snapshot.columns, report.roles, "machine");
+
+    const cell = (idx: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
+    const code = cell(cIdx);
+    const ts = cell(tIdx);
+    const amount = cell(aIdx);
+    const price = sql<string>`case when ${amount} ~ '^\\s*-?[0-9]+([.,][0-9]+)?\\s*$'
+      then replace(btrim(${amount}), ',', '.')::numeric end`;
+    const month = sql<string>`substr(${ts}, 1, 7)`;
+
+    const byMonth = await this.db
+      .select({
+        code,
+        month,
+        n: sql<number>`count(*)`,
+        revenue: sql<string>`coalesce(sum(${price}), 0)`,
+        unreadable: sql<number>`count(*) filter (where ${price} is null)`,
+        first: sql<string>`min(${ts})`,
+        last: sql<string>`max(${ts})`,
+      })
+      .from(rawRow)
+      .where(eq(rawRow.snapshotId, snapshot.id))
+      .groupBy(code, month);
+
+    const byMachine =
+      mIdx < 0
+        ? []
+        : await this.db
+            .select({
+              code,
+              serial: cell(mIdx),
+              n: sql<number>`count(*)`,
+              revenue: sql<string>`coalesce(sum(${price}), 0)`,
+            })
+            .from(rawRow)
+            .where(eq(rawRow.snapshotId, snapshot.id))
+            .groupBy(code, cell(mIdx));
+
+    const machines = await this.db
+      .select({ id: entity.id, name: entity.name, ref: entity.externalRef })
+      .from(entity)
+      .where(eq(entity.type, "machine"));
+    const bySerial = new Map(
+      machines
+        .filter((m) => m.ref !== null && m.ref.length > 0)
+        .map((m) => [normalizeSourceKey(m.ref!), { id: m.id, name: m.name }]),
+    );
+
+    const dict = (report.dicts ?? []).find((d) => d.role === "payment");
+    const channels = new Map<string, PaymentChannel>();
+    let lastOrderAt: string | null = null;
+    for (const r of byMonth) {
+      // Пустой код — это тоже факт источника, а не повод пропустить строку.
+      const key = r.code;
+      const decoded = decodeRawValue(dict, key);
+      const ch =
+        channels.get(key) ??
+        ({
+          code: key,
+          label: decoded?.label ?? null,
+          confirmed: decoded?.confirmed ?? false,
+          orders: 0,
+          revenue: 0,
+          unreadable: 0,
+          firstOrderAt: r.first,
+          lastOrderAt: r.last,
+          months: [],
+          machines: [],
+        } satisfies PaymentChannel);
+      ch.orders += Number(r.n);
+      ch.revenue += Number(r.revenue);
+      ch.unreadable += Number(r.unreadable);
+      if (r.first < ch.firstOrderAt) ch.firstOrderAt = r.first;
+      if (r.last > ch.lastOrderAt) ch.lastOrderAt = r.last;
+      ch.months.push({ month: r.month, orders: Number(r.n), revenue: Number(r.revenue) });
+      channels.set(key, ch);
+      if (lastOrderAt === null || r.last > lastOrderAt) lastOrderAt = r.last;
+    }
+
+    for (const r of byMachine) {
+      const ch = channels.get(r.code);
+      if (!ch || r.serial.trim().length === 0) continue;
+      const card = bySerial.get(normalizeSourceKey(r.serial)) ?? null;
+      ch.machines.push({
+        serial: r.serial,
+        entityId: card?.id ?? null,
+        entityName: card?.name ?? null,
+        orders: Number(r.n),
+        revenue: Number(r.revenue),
+      });
+    }
+
+    const list = [...channels.values()];
+    for (const ch of list) {
+      ch.months.sort((a, b) => a.month.localeCompare(b.month));
+      ch.machines.sort((a, b) => b.revenue - a.revenue || a.serial.localeCompare(b.serial));
+    }
+    // Сверху то, где больше денег: с этого и начинают сверку.
+    list.sort((a, b) => b.revenue - a.revenue || b.orders - a.orders);
+
+    return {
+      channels: list,
+      orders: list.reduce((n, c) => n + c.orders, 0),
+      revenue: list.reduce((n, c) => n + c.revenue, 0),
+      unconfirmedRevenue: list.filter((c) => !c.confirmed).reduce((n, c) => n + c.revenue, 0),
+      column: cIdx,
+      lastOrderAt,
     };
   }
 
@@ -1180,6 +1863,9 @@ export class RawService {
     let lastOrderAt: string | null = null;
     for (const r of rows) {
       if (r.name.trim().length === 0) continue;
+      // Последний заказ считается до схлопывания написаний: иначе самый свежий
+      // заказ, пришедший вторым написанием уже знакомого товара, потеряется.
+      if (lastOrderAt === null || r.last > lastOrderAt) lastOrderAt = r.last;
       const key = normalizeSourceKey(r.name);
       const seen = merged.get(key);
       if (seen) {
@@ -1217,7 +1903,6 @@ export class RawService {
             ? []
             : FISCAL_FIELDS.map((field) => ({ field, flaw: "нет" as const, why: "карточки нет" })),
       });
-      if (lastOrderAt === null || r.last > lastOrderAt) lastOrderAt = r.last;
     }
 
     const products = [...merged.values()];
@@ -1477,11 +2162,21 @@ export function buildPricePeriods(buckets: readonly PriceBucket[]): {
   periods: PricePeriod[];
   mismatched: number;
 } {
-  const byMonth = new Map<string, PriceBucket[]>();
+  // Одна цена в одном месяце — одно ведро, даже если пришла несколькими
+  // строками: у товара бывает два написания, и это не две разные цены,
+  // соперничающие за месяц, а одна и та же.
+  const byMonth = new Map<string, Map<number, PriceBucket>>();
   for (const b of buckets) {
-    const list = byMonth.get(b.month) ?? [];
-    list.push(b);
-    byMonth.set(b.month, list);
+    const month = byMonth.get(b.month) ?? new Map<number, PriceBucket>();
+    const seen = month.get(b.price);
+    if (seen) {
+      seen.orders += b.orders;
+      if (b.from < seen.from) seen.from = b.from;
+      if (b.to > seen.to) seen.to = b.to;
+    } else {
+      month.set(b.price, { ...b });
+    }
+    byMonth.set(b.month, month);
   }
 
   let mismatched = 0;
@@ -1490,12 +2185,12 @@ export function buildPricePeriods(buckets: readonly PriceBucket[]): {
     // Внутри месяца сначала берём цену, по которой прошло больше заказов: она
     // и есть цена месяца. Остальные попадают в отрезки, только если легли
     // строго врозь с уже принятыми — то есть выглядят сменой, а не примесью.
-    const list = [...(byMonth.get(month) ?? [])].sort(
+    const list = [...(byMonth.get(month)?.values() ?? [])].sort(
       (a, b) => b.orders - a.orders || (a.from < b.from ? -1 : a.from > b.from ? 1 : 0),
     );
     const kept: PriceBucket[] = [];
     for (const cand of list) {
-      if (kept.some((k) => !(cand.to < k.from || cand.from > k.to))) {
+      if (kept.some((k) => interleaved(cand, k))) {
         mismatched += cand.orders;
         continue;
       }
@@ -1527,6 +2222,81 @@ export function buildPricePeriods(buckets: readonly PriceBucket[]): {
   return { periods: mergeAdjacent(cleaned), mismatched };
 }
 
+/**
+ * Насколько цены должны перекрываться по времени, чтобы это считалось примесью.
+ *
+ * Касание хвостами — не примесь. У настоящей смены цены старая держится до
+ * последнего своего заказа, а новая уже началась, и хвосты налезают друг на
+ * друга на несколько дней: достаточно одного позднего заказа по старой цене,
+ * чтобы границы пересеклись. Примесь выглядит иначе — чужая цена рассыпана по
+ * всему отрезку основной, а не жмётся к его краю.
+ */
+const INTERLEAVE_SHARE = 0.5;
+
+/** Время источника («ГГГГ-ММ-ДД ЧЧ:ММ:СС») в миллисекунды. */
+function ms(ts: string): number {
+  // Часовой пояс подставляется один и тот же для всех значений, поэтому
+  // разности точны, а от зоны машины результат не зависит.
+  const t = Date.parse(`${ts.replace(" ", "T")}Z`);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Идут ли две цены вперемешку — то есть примесь это, а не смена.
+ *
+ * Раньше здесь стояла проверка «границы вообще пересеклись», и она путала два
+ * разных случая: один поздний заказ по старой цене выбрасывал весь отрезок
+ * новой вместе с сотнями заказов, а автомат, который цену как раз поднял,
+ * попадал в отставшие с выдуманным недобором.
+ *
+ * Различает их доля перекрытия: у смены цены она мала (хвост), у примеси —
+ * почти вся длина более короткого отрезка. Мгновение (один заказ) считается
+ * примесью, если попало внутрь чужого отрезка.
+ */
+export function interleaved(a: PriceBucket, b: PriceBucket): boolean {
+  const from = Math.max(ms(a.from), ms(b.from));
+  const to = Math.min(ms(a.to), ms(b.to));
+  if (to < from) return false;
+  const shorter = Math.min(ms(a.to) - ms(a.from), ms(b.to) - ms(b.from));
+  if (shorter <= 0) return true;
+  return (to - from) / shorter > INTERLEAVE_SHARE;
+}
+
+/**
+ * Ключ пары «автомат + товар» для истории цен.
+ *
+ * Нормализованный: «Ice Lemon Tea» и «ice lemon  tea» — один товар, и в срезе по
+ * нему автомат обязан встретиться один раз. По сырому тексту он попадал в
+ * список дважды, и большинство при выборе эталона считалось по нему дважды же —
+ * эталон мог перевернуться из-за разницы в пробелах.
+ *
+ * Разделитель — символ, которого не бывает в данных: иначе серийник с пробелом
+ * на конце склеился бы с чужим названием товара.
+ */
+export function timelineKey(serial: string, product: string): string {
+  return `${normalizeSourceKey(serial)}\u0000${normalizeSourceKey(product)}`;
+}
+
+/**
+ * Худшее состояние среди величин строки — им и красится строка журнала.
+ *
+ * Порядок именно такой: расхождение важнее отсутствия, отсутствие важнее
+ * «не сверено». Строка должна кричать о самом плохом, что в ней есть, а не
+ * о среднем по ней.
+ */
+export function worstState(fields: readonly { state: FieldState }[]): FieldState {
+  const rank: Record<FieldState, number> = {
+    mismatch: 0,
+    absent: 1,
+    unchecked: 2,
+    matched: 3,
+    source: 4,
+  };
+  let worst: FieldState = "source";
+  for (const f of fields) if (rank[f.state] < rank[worst]) worst = f.state;
+  return worst;
+}
+
 /** Склеить соседние отрезки с одинаковой ценой: смены цены между ними нет. */
 function mergeAdjacent(list: readonly PricePeriod[]): PricePeriod[] {
   const out: PricePeriod[] = [];
@@ -1542,12 +2312,27 @@ function mergeAdjacent(list: readonly PricePeriod[]): PricePeriod[] {
   return out;
 }
 
-/** Цена товара на автомате в указанный момент. null — тогда он им не торговал. */
+/**
+ * Последняя известная цена товара на автомате к этому моменту.
+ *
+ * Именно «последняя известная», а не «цена в момент заказа». Отрезок кончается
+ * последним заказом, но цена на этом не кончается: пока её не поменяли, она
+ * держится, даже если товар неделю никто не покупал.
+ *
+ * Разница не косметическая. Считать «после последнего заказа цены нет» значит
+ * уравнять «автомат не торговал» с «данных нет», и тогда при подсчёте
+ * большинства один торгующий отставший автомат перевешивает любое число
+ * эталонных, просто не продавших товар в тот день.
+ *
+ * null остаётся только до самого первого заказа: до него цены действительно
+ * не было.
+ */
 export function priceAt(periods: readonly PricePeriod[], at: string): number | null {
+  let price: number | null = null;
   for (const p of periods) {
-    if (p.from <= at && at <= p.to) return p.price;
+    if (p.from <= at) price = p.price;
   }
-  return null;
+  return price;
 }
 
 /**
@@ -1704,15 +2489,26 @@ export function findLookalikes(
     }
     const list = [...per.values()];
     if (list.length < 2 || list.length > GENERIC_FLAVOUR_PRODUCTS) continue;
+    // Доля проверяется у ОБОИХ товаров пары, а не только у того, на чьей строке
+    // встанет подсказка. Иначе три случайных заказа Cappuccino с чужим вкусом
+    // рождали подсказку на строке Latte, и владелец читал в основании «4000 из
+    // 4000» — числа Latte при трёх заказах доказательства. Один клик по такой
+    // подсказке вешал всю выручку Latte на чужую карточку.
+    const shareOf = (x: { name: string; orders: number }) => {
+      const total = ordersOf.get(normalizeSourceKey(x.name)) ?? x.orders;
+      return total === 0 ? 0 : x.orders / total;
+    };
     for (const a of list) {
+      if (shareOf(a) < LOOKALIKE_SHARE) continue;
       const total = ordersOf.get(normalizeSourceKey(a.name)) ?? a.orders;
-      if (total === 0 || a.orders / total < LOOKALIKE_SHARE) continue;
       for (const b of list) {
         if (normalizeSourceKey(a.name) === normalizeSourceKey(b.name)) continue;
+        if (shareOf(b) < LOOKALIKE_SHARE) continue;
+        const totalB = ordersOf.get(normalizeSourceKey(b.name)) ?? b.orders;
         add(
           a.name,
           b.name,
-          `общий вкус «${label}» — ${a.orders} из ${total} заказов`,
+          `общий вкус «${label}» — ${a.orders} из ${total} заказов здесь и ${b.orders} из ${totalB} там`,
           revenueOf.get(normalizeSourceKey(b.name)) ?? 0,
         );
       }
