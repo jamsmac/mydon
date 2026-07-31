@@ -22,9 +22,11 @@ import {
   type RawLinkKind,
   rawFreshness,
   reconcile,
+  unify,
   type ReconField,
   type ReconRow,
   type Reconciliation,
+  type UnifiedJournal,
 } from "@mydon/shared";
 import { and, asc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -1153,6 +1155,93 @@ export class RawService {
       b: { source: string; report: string; title: string };
     }
   > {
+    const input = await this.reconInputs(aSource, aReport, bSource, bReport);
+    if (!input) {
+      return {
+        totalA: 0, totalB: 0, matched: 0, conflicts: [], onlyA: [], onlyB: [],
+        onlyACount: 0, onlyBCount: 0, duplicatesA: [], duplicatesB: [], fields: [],
+        ...(await this.reconMeta(aSource, aReport, bSource, bReport)),
+      };
+    }
+    return { ...reconcile(input.rowsA, input.rowsB, input.fields), ...input.meta };
+  }
+
+  /**
+   * Объединённый журнал: два источника — один список заказов по номеру операции.
+   *
+   * То же извлечение строк, что и у сверки, но итог иной: не «где расходятся», а
+   * единый журнал без задвоения. Сверка — предшественник, объединение — цель.
+   * Правило слоя цело: где источники спорят, показаны оба значения, победителя
+   * не назначаем.
+   */
+  async unifySources(
+    aSource: string,
+    aReport: string,
+    bSource: string,
+    bReport: string,
+    query: RawRowsQuery,
+  ): Promise<
+    UnifiedJournal & {
+      a: { source: string; report: string; title: string };
+      b: { source: string; report: string; title: string };
+    }
+  > {
+    const input = await this.reconInputs(aSource, aReport, bSource, bReport);
+    if (!input) {
+      return {
+        totalA: 0, totalB: 0, union: 0, both: 0, onlyA: 0, onlyB: 0,
+        conflicts: 0, duplicated: 0, page: query.page, size: query.size, orders: [],
+        ...(await this.reconMeta(aSource, aReport, bSource, bReport)),
+      };
+    }
+    return {
+      ...unify(input.rowsA, input.rowsB, input.fields, query.page, query.size),
+      ...input.meta,
+    };
+  }
+
+  /** Заголовки источников для шапки сверки/объединения — без строк. */
+  private async reconMeta(
+    aSource: string,
+    aReport: string,
+    bSource: string,
+    bReport: string,
+  ): Promise<{
+    a: { source: string; report: string; title: string };
+    b: { source: string; report: string; title: string };
+  }> {
+    const [defA, defB] = await Promise.all([
+      this.report(aSource, aReport),
+      this.report(bSource, bReport),
+    ]);
+    return {
+      a: { source: aSource, report: aReport, title: defA.title },
+      b: { source: bSource, report: bReport, title: defB.title },
+    };
+  }
+
+  /**
+   * Общая заготовка для сверки и объединения: строки обоих источников, ключом
+   * которых служит externalId, плюс роли, присутствующие у ОБОИХ отчётов.
+   *
+   * Ключ — externalId: сопоставлять заказы по совпадению всех полей значило бы
+   * выдумать связь, которой в данных нет. Нет ключа хоть у одного — сводить
+   * нечем, возвращаем null.
+   */
+  private async reconInputs(
+    aSource: string,
+    aReport: string,
+    bSource: string,
+    bReport: string,
+  ): Promise<{
+    meta: {
+      a: { source: string; report: string; title: string };
+      b: { source: string; report: string; title: string };
+    };
+    fields: ReconField[];
+    rowsA: ReconRow[];
+    rowsB: ReconRow[];
+  } | null> {
     const [defA, defB] = await Promise.all([
       this.report(aSource, aReport),
       this.report(bSource, bReport),
@@ -1161,23 +1250,17 @@ export class RawService {
       a: { source: aSource, report: aReport, title: defA.title },
       b: { source: bSource, report: bReport, title: defB.title },
     };
-    const empty = {
-      totalA: 0, totalB: 0, matched: 0, conflicts: [], onlyA: [], onlyB: [],
-      onlyACount: 0, onlyBCount: 0, duplicatesA: [], duplicatesB: [], fields: [], ...meta,
-    };
     const [snapA, snapB] = await Promise.all([
       this.latestSnapshot(aSource, aReport),
       this.latestSnapshot(bSource, bReport),
     ]);
-    if (!snapA || !snapB) return empty;
+    if (!snapA || !snapB) return null;
 
-    // Ключ сверки — externalId. Без него сверять нечего: сопоставлять заказы по
-    // совпадению всех полей значило бы выдумать связь, которой в данных нет.
     const keyA = roleColumnIndex(snapA.columns, defA.roles, "externalId");
     const keyB = roleColumnIndex(snapB.columns, defB.roles, "externalId");
-    if (keyA < 0 || keyB < 0) return empty;
+    if (keyA < 0 || keyB < 0) return null;
 
-    // Сверяем роли, общие для обоих отчётов, кроме самого ключа.
+    // Берём роли, общие для обоих отчётов, кроме самого ключа.
     const COMPARABLE: { role: keyof RawColumnRoles; label: string; compare: ReconField["compare"] }[] = [
       { role: "machine", label: "Автомат", compare: "key" },
       { role: "product", label: "Товар", compare: "key" },
@@ -1221,7 +1304,7 @@ export class RawService {
       toRows(snapB.id, keyB, idxB),
     ]);
 
-    return { ...reconcile(rowsA, rowsB, fields), ...meta };
+    return { meta, fields, rowsA, rowsB };
   }
 
   /**

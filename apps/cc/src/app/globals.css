@@ -795,3 +795,26 @@ a.rowlink:hover { background: var(--surf-2); }
   .rrow { grid-template-columns: 1fr 1fr; row-gap: 2px; }
   .rrow > :first-child { grid-column: 1 / -1; }
 }
+
+/* Объединённый журнал: каждый заказ — карточкой, поля обеих сторон рядом. */
+.ulist { display: flex; flex-direction: column; gap: 8px; }
+.urow {
+  border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--r);
+  background: var(--surf); padding: 10px 12px;
+}
+.urow.s-matched { border-left-color: var(--ok); }
+.urow.s-unchecked { border-left-color: var(--accent); }
+.urow.s-mismatch { border-left-color: var(--hot); }
+.uhead { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.uhead .uno { font-size: 13px; color: var(--tx); }
+.ufields { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 16px; }
+.ufield { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; min-width: 0; }
+.ufield.hot .uval { color: var(--hot); }
+.ulab { color: var(--tx-3); font-size: 11px; white-space: nowrap; }
+.uval { color: var(--tx); min-width: 0; overflow-wrap: anywhere; }
+.uval.two { display: inline-flex; align-items: baseline; gap: 6px; }
+.uval .vs { color: var(--hot); font-weight: 600; }
+.uside { color: var(--tx-3); font-size: 11px; }
+@media (max-width: 720px) {
+  .ufields { grid-template-columns: 1fr; }
+}

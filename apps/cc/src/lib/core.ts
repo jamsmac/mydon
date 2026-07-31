@@ -453,6 +453,45 @@ export interface Reconciliation {
   b: { source: string; report: string; title: string };
 }
 
+/** Где встретился заказ в объединённом журнале. */
+export type Presence = "both" | "onlyA" | "onlyB";
+
+/** Поле объединённого заказа: значения обеих сторон и их согласие. */
+export interface UnifiedField {
+  role: string;
+  label: string;
+  compare: "number" | "key" | "exact";
+  a: string | null;
+  b: string | null;
+  agree: boolean | null;
+}
+
+/** Заказ объединённого журнала. */
+export interface UnifiedOrder {
+  key: string;
+  presence: Presence;
+  conflict: boolean;
+  duplicated: boolean;
+  fields: UnifiedField[];
+}
+
+/** Объединённый журнал двух источников: каждый заказ один раз, по номеру. */
+export interface UnifiedJournal {
+  totalA: number;
+  totalB: number;
+  union: number;
+  both: number;
+  onlyA: number;
+  onlyB: number;
+  conflicts: number;
+  duplicated: number;
+  page: number;
+  size: number;
+  orders: UnifiedOrder[];
+  a: { source: string; report: string; title: string };
+  b: { source: string; report: string; title: string };
+}
+
 /** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
 export interface PaymentMonth {
   month: string;
@@ -782,6 +821,16 @@ export const core = {
     get<Reconciliation>(
       `/raw/reconcile/${encodeURIComponent(a.source)}/${encodeURIComponent(a.report)}/vs/${encodeURIComponent(b.source)}/${encodeURIComponent(b.report)}`,
     ),
+  rawUnify: (
+    a: { source: string; report: string },
+    b: { source: string; report: string },
+    params: Record<string, string> = {},
+  ) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<UnifiedJournal>(
+      `/raw/unify/${encodeURIComponent(a.source)}/${encodeURIComponent(a.report)}/vs/${encodeURIComponent(b.source)}/${encodeURIComponent(b.report)}${qs ? `?${qs}` : ""}`,
+    );
+  },
   rawProducts: (source: string, report: string) =>
     get<ProductReview>(`/raw/products/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawPrices: (source: string, report: string) =>
