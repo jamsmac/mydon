@@ -927,8 +927,12 @@ export class RawService {
       then replace(btrim(${amount}), ',', '.')::numeric end`;
     const month = sql<string>`substr(${ts}, 1, 7)`;
 
-    const conds: SQL[] = [eq(rawRow.snapshotId, snapshot.id), sql`${price} > 0`];
-    if (kIdx >= 0) conds.push(sql`lower(btrim(${cell(kIdx)})) <> 'testshipment'`);
+    // Тестовые отгрузки не продажа, поэтому не участвуют ни в расчёте, ни в
+    // счётчике нечитаемых цен: иначе «не вошло в расчёт» относилось бы к
+    // другому набору строк, чем сам расчёт.
+    const base: SQL[] = [eq(rawRow.snapshotId, snapshot.id)];
+    if (kIdx >= 0) base.push(sql`lower(btrim(${cell(kIdx)})) <> 'testshipment'`);
+    const conds: SQL[] = [...base, sql`${price} > 0`];
 
     const rows = await this.db
       .select({
@@ -947,7 +951,7 @@ export class RawService {
     const [{ n: unreadable }] = await this.db
       .select({ n: sql<number>`count(*)` })
       .from(rawRow)
-      .where(and(eq(rawRow.snapshotId, snapshot.id), sql`${price} is null`));
+      .where(and(...base, sql`${price} is null`));
 
     return {
       rows: rows
@@ -1380,6 +1384,9 @@ export class RawService {
     let lastOrderAt: string | null = null;
     for (const r of rows) {
       if (r.name.trim().length === 0) continue;
+      // Последний заказ считается до схлопывания написаний: иначе самый свежий
+      // заказ, пришедший вторым написанием уже знакомого товара, потеряется.
+      if (lastOrderAt === null || r.last > lastOrderAt) lastOrderAt = r.last;
       const key = normalizeSourceKey(r.name);
       const seen = merged.get(key);
       if (seen) {
@@ -1417,7 +1424,6 @@ export class RawService {
             ? []
             : FISCAL_FIELDS.map((field) => ({ field, flaw: "нет" as const, why: "карточки нет" })),
       });
-      if (lastOrderAt === null || r.last > lastOrderAt) lastOrderAt = r.last;
     }
 
     const products = [...merged.values()];
