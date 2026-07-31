@@ -462,6 +462,113 @@ a.rowlink:hover { background: var(--surf-2); }
 }
 .leaflet-control-attribution a { color: var(--accent-tx, #5B9BFF) !important; }
 
+/* ============ ИСТОЧНИКИ: сырой слой ============
+   Отчёт чужой системы показывается как есть: те же колонки, тот же порядок.
+   Отсюда широкая таблица с прокруткой в обе стороны и закреплённой шапкой. */
+
+/* выбор системы-источника */
+.srcs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+.src {
+  display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; align-items: center;
+  padding: 10px 12px; background: var(--surf); border: 1px solid var(--line);
+  border-radius: var(--r-s); color: inherit;
+}
+.src:hover { border-color: var(--accent-line); }
+.src.on { background: var(--surf-2); border-color: var(--accent-line); }
+.src .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tx-3); }
+.src .dot.on { background: var(--ok); }
+.src .srct { font-size: 13.5px; font-weight: 600; }
+.src .srcs2 { grid-column: 2; font-size: 11.5px; color: var(--tx-3); line-height: 1.3; }
+
+/* панель поиска над таблицей */
+.rawbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.rawsearch {
+  flex: 1; min-width: 190px; height: 36px; background: var(--surf); color: var(--tx);
+  border: 1px solid var(--line); border-radius: var(--r-s); padding: 0 12px; font-size: 14px; outline: none;
+}
+.rawsearch:focus { border-color: var(--accent); }
+
+/* сама таблица */
+.rawwrap {
+  overflow: auto; max-height: 68vh; background: var(--surf);
+  border: 1px solid var(--line); border-radius: var(--r);
+}
+.rawwrap.busy { opacity: 0.6; }
+.rawtable { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; font-size: 12.5px; }
+.rawtable thead th {
+  position: sticky; top: 0; z-index: 2; background: var(--surf-2); text-align: left;
+  padding: 8px 11px; font-size: 11px; font-weight: 700; color: var(--tx-2); white-space: nowrap;
+  border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); cursor: pointer;
+}
+.rawtable thead th:hover { color: var(--accent); }
+.rawtable thead th .ci { color: var(--tx-3); font-family: var(--fm); font-weight: 400; margin-right: 6px; }
+.rawtable thead tr.filt th { top: 33px; padding: 4px 6px; background: var(--surf); cursor: auto; }
+.rawtable thead tr.filt input {
+  width: 100%; min-width: 92px; background: var(--bg); color: var(--tx);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; font-size: 12px; outline: none;
+}
+.rawtable thead tr.filt input:focus { border-color: var(--accent); }
+.rawtable tbody td {
+  padding: 7px 11px; border-bottom: 1px solid rgba(30, 51, 80, 0.6); border-right: 1px solid rgba(30, 51, 80, 0.4);
+  white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; vertical-align: top;
+  font-family: var(--fm); font-variant-numeric: tabular-nums; font-size: 12px;
+}
+.rawtable tbody tr:hover td { background: var(--surf-2); cursor: pointer; }
+.rawtable tbody td.sel { background: var(--accent-soft); }
+.rawtable .rawno {
+  position: sticky; left: 0; z-index: 1; background: var(--surf-2); color: var(--tx-3);
+  font-family: var(--fm); font-variant-numeric: tabular-nums; text-align: right;
+}
+.rawtable thead .rawno { z-index: 3; }
+
+/* страницы */
+.pager { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; font-size: 12.5px; color: var(--tx-2); }
+.pager .sp { flex: 1; }
+.pager b { color: var(--tx); font-weight: 600; }
+.rawsize {
+  height: 32px; background: var(--surf); color: var(--tx); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0 8px; font-size: 12.5px; outline: none;
+}
+
+/* выдвижная карточка строки */
+.ovl { position: fixed; inset: 0; z-index: 50; background: rgba(6, 14, 26, 0.6); }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 51; width: min(560px, 94vw);
+  background: var(--surf); border-left: 1px solid var(--accent-line);
+  display: flex; flex-direction: column; backdrop-filter: blur(14px);
+}
+.drawer-h { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--line); }
+.drawer-t { flex: 1; font-family: var(--fh); font-weight: 700; font-size: 15px; }
+.drawer-b { flex: 1; overflow-y: auto; padding: 14px 16px calc(14px + env(safe-area-inset-bottom)); }
+.kv { margin: 0; }
+.kv .kvr { display: grid; grid-template-columns: 1fr; gap: 2px; padding: 8px 0; border-bottom: 1px solid rgba(30, 51, 80, 0.6); }
+.kv .kvr:last-child { border-bottom: none; }
+.kv dt { font-size: 11px; color: var(--tx-3); }
+.kv dd { margin: 0; font-family: var(--fm); font-size: 13px; word-break: break-word; }
+
+/* сопоставление с реестром */
+.maplist { display: flex; flex-direction: column; gap: 6px; }
+.maprow {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 9px 12px;
+  background: var(--surf); border: 1px solid var(--line); border-radius: var(--r-s);
+}
+.maprow.hot { border-left: 3px solid var(--hot); }
+.maprow .mapv { display: flex; align-items: baseline; gap: 8px; min-width: 190px; flex: 1; }
+.maprow .mapl { font-size: 13px; word-break: break-word; }
+.maprow .mapc { font-size: 11px; color: var(--tx-3); }
+.maprow .mapt { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12.5px; }
+.maprow .mapok { color: var(--ok); font-weight: 600; }
+.mapsel {
+  height: 32px; max-width: 220px; background: var(--bg); color: var(--tx);
+  border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; font-size: 12.5px; outline: none;
+}
+.mapsel:focus { border-color: var(--accent); }
+
+@media (min-width: 900px) {
+  .srcs { grid-template-columns: repeat(4, 1fr); }
+  .maprow .mapv { flex: 0 0 300px; }
+}
+
 /* Журнал продаж — таблица по форме владельца (13 колонок, прокрутка на телефоне). */
 .jtable { width: 100%; min-width: 1080px; border-collapse: collapse; font-size: 13px; }
 .jtable th {

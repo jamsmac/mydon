@@ -18,6 +18,7 @@ import { ProductsBook } from "../../../components/products-book";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MapPanel } from "../../../components/map-panel";
 import { QuickActions } from "../../../components/quick-actions";
+import { SourcesView } from "../../../components/sources-view";
 import { typeOne } from "../../../lib/labels";
 import { money, plural, when } from "../../../lib/format";
 
@@ -38,10 +39,18 @@ export default async function DomainPage({
   searchParams,
 }: {
   params: Promise<{ domain: string }>;
-  searchParams: Promise<{ tab?: string; q?: string; cat?: string; inc?: string }>;
+  // Вкладка «Источники» держит своё состояние в адресе (фильтры по колонкам
+  // f0, f1…), поэтому параметры принимаем целиком, а не перечислением.
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { domain } = await params;
-  const { tab, q, cat, inc } = await searchParams;
+  const raw = await searchParams;
+  const sp: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const v = Array.isArray(value) ? value[0] : value;
+    if (typeof v === "string") sp[key] = v;
+  }
+  const { tab, q, cat, inc } = sp;
   if (!isDomain(domain)) notFound();
 
   const groups = groupsFor(domain);
@@ -121,7 +130,11 @@ export default async function DomainPage({
     ...groups.map((g) => ({ key: g.key, label: g.label })),
     // Инкассация — ежедневная операция, ей место в верхнем ряду (слово владельца).
     ...(domain === "vendhub"
-      ? [{ key: "collect", label: `Инкассация${(collSummary?.pending ?? 0) > 0 ? ` ${collSummary!.pending}` : ""}` }]
+      ? [
+          { key: "collect", label: `Инкассация${(collSummary?.pending ?? 0) > 0 ? ` ${collSummary!.pending}` : ""}` },
+          // Источники — сырьё, из которого берутся все остальные цифры.
+          { key: "sources", label: "Источники" },
+        ]
       : []),
     { key: "team", label: `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
     { key: "tasks", label: `Задачи${openTasks.length > 0 ? ` ${openTasks.length}` : ""}` },
@@ -394,6 +407,9 @@ export default async function DomainPage({
           </div>
         </>
       )}
+
+      {/* ── Источники: сырые выгрузки чужих систем, как они пришли ── */}
+      {activeGroup === "sources" && <SourcesView base={`/domain/${domain}`} sp={sp} />}
 
       {/* ── Инкассация: живой экран VendCash (верхняя вкладка и подвкладка отчётов) ── */}
       {(activeGroup === "collect" || (group && leaf?.type === "collection")) && <CollectionsView />}

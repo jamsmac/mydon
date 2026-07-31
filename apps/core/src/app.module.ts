@@ -10,6 +10,7 @@ import { HealthController } from "./health.controller";
 import { HistoryModule } from "./history/history.module";
 import { NotesModule } from "./notes/notes.module";
 import { PeopleModule } from "./people/people.module";
+import { RawModule } from "./raw/raw.module";
 import { RegistryModule } from "./registry/registry.module";
 import { RulesModule } from "./rules/rules.module";
 import { SalesModule } from "./sales/sales.module";
@@ -33,6 +34,7 @@ import { VerificationModule } from "./verification/verification.module";
     HistoryModule,
     NotesModule,
     PeopleModule,
+    RawModule,
     TasksModule,
     VerificationModule,
   ],
