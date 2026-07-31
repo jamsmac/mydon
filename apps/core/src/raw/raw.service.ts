@@ -86,16 +86,34 @@ export interface RawOverview {
   }[];
 }
 
+/**
+ * Фильтр по одной колонке.
+ *
+ * По умолчанию — вхождение: владелец ищет «кардио» и находит все точки
+ * кардиологии. Но у кодов источника вхождение врёт: `cash` находит и `cash0`,
+ * а это разные каналы оплаты, и при сверке с выпиской такая подмена дорого
+ * стоит. Поэтому значение, начинающееся с `=`, ищется целиком.
+ */
+export interface ColumnFilter {
+  value: string;
+  exact: boolean;
+}
+
 /** Разбор фильтров по колонкам: ключи вида `f3` → индекс колонки. */
-export function parseColumnFilters(query: Record<string, unknown>): Map<number, string> {
-  const out = new Map<number, string>();
+export function parseColumnFilters(query: Record<string, unknown>): Map<number, ColumnFilter> {
+  const out = new Map<number, ColumnFilter>();
   for (const [key, value] of Object.entries(query)) {
     const m = /^f(\d+)$/.exec(key);
     if (!m) continue;
     const idx = Number(m[1]);
     if (!Number.isInteger(idx) || idx < 0 || idx >= MAX_COLUMNS) continue;
-    const v = typeof value === "string" ? value.trim() : "";
-    if (v.length > 0) out.set(idx, v);
+    const raw = typeof value === "string" ? value.trim() : "";
+    if (raw.length === 0) continue;
+    const exact = raw.startsWith("=");
+    const v = exact ? raw.slice(1).trim() : raw;
+    // «=» без значения — это не фильтр «пусто», а мусор в адресе.
+    if (v.length === 0) continue;
+    out.set(idx, { value: v, exact });
   }
   return out;
 }
@@ -118,7 +136,7 @@ export interface RawRowsQuery {
   page: number;
   size: number;
   offset: number;
-  filters: Map<number, string>;
+  filters: Map<number, ColumnFilter>;
 }
 
 /**
@@ -585,12 +603,16 @@ export class RawService {
     if (query.q.length > 0) {
       conds.push(sql`${rawRow.cells}::text ilike ${`%${query.q}%`}`);
     }
-    for (const [idx, value] of query.filters) {
+    for (const [idx, filter] of query.filters) {
       // Индекс колонки — только проверенное целое (normalizeRowsQuery), поэтому
       // его можно подставить в текст запроса: параметром оператор `->>` не
-      // выбрать, Postgres не знает, число это или ключ объекта.
+      // выбрать, Postgres не знает, число это или ключ объекта. Само значение
+      // всегда идёт параметром.
+      const cell = sql`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
       conds.push(
-        sql`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '') ilike ${`%${value}%`}`,
+        filter.exact
+          ? sql`lower(btrim(${cell})) = lower(btrim(${filter.value}))`
+          : sql`${cell} ilike ${`%${filter.value}%`}`,
       );
     }
     return conds;
@@ -1026,11 +1048,13 @@ export class RawService {
     const names = new Map<string, { serial: string; product: string }>();
     let lastOrderAt: string | null = null;
     for (const r of rows) {
-      const key = `${r.serial} ${r.product}`;
+      const key = timelineKey(r.serial, r.product);
       const list = buckets.get(key) ?? [];
       list.push(r.bucket);
       buckets.set(key, list);
-      names.set(key, { serial: r.serial, product: r.product });
+      // Написание берём от первой встреченной строки: владельцу показывают то,
+      // как пишет источник, а не наш нормализованный вид.
+      if (!names.has(key)) names.set(key, { serial: r.serial, product: r.product });
       if (lastOrderAt === null || r.bucket.to > lastOrderAt) lastOrderAt = r.bucket.to;
     }
 
@@ -1114,7 +1138,7 @@ export class RawService {
         const ordersSince =
           gap === 0 || since === null
             ? 0
-            : (buckets.get(`${i.serial} ${i.product}`) ?? [])
+            : (buckets.get(timelineKey(i.serial, i.product)) ?? [])
                 .filter((b) => b.price === i.price && b.to >= since)
                 .reduce((n, b) => n + b.orders, 0);
         return {
@@ -1683,11 +1707,21 @@ export function buildPricePeriods(buckets: readonly PriceBucket[]): {
   periods: PricePeriod[];
   mismatched: number;
 } {
-  const byMonth = new Map<string, PriceBucket[]>();
+  // Одна цена в одном месяце — одно ведро, даже если пришла несколькими
+  // строками: у товара бывает два написания, и это не две разные цены,
+  // соперничающие за месяц, а одна и та же.
+  const byMonth = new Map<string, Map<number, PriceBucket>>();
   for (const b of buckets) {
-    const list = byMonth.get(b.month) ?? [];
-    list.push(b);
-    byMonth.set(b.month, list);
+    const month = byMonth.get(b.month) ?? new Map<number, PriceBucket>();
+    const seen = month.get(b.price);
+    if (seen) {
+      seen.orders += b.orders;
+      if (b.from < seen.from) seen.from = b.from;
+      if (b.to > seen.to) seen.to = b.to;
+    } else {
+      month.set(b.price, { ...b });
+    }
+    byMonth.set(b.month, month);
   }
 
   let mismatched = 0;
@@ -1696,12 +1730,12 @@ export function buildPricePeriods(buckets: readonly PriceBucket[]): {
     // Внутри месяца сначала берём цену, по которой прошло больше заказов: она
     // и есть цена месяца. Остальные попадают в отрезки, только если легли
     // строго врозь с уже принятыми — то есть выглядят сменой, а не примесью.
-    const list = [...(byMonth.get(month) ?? [])].sort(
+    const list = [...(byMonth.get(month)?.values() ?? [])].sort(
       (a, b) => b.orders - a.orders || (a.from < b.from ? -1 : a.from > b.from ? 1 : 0),
     );
     const kept: PriceBucket[] = [];
     for (const cand of list) {
-      if (kept.some((k) => !(cand.to < k.from || cand.from > k.to))) {
+      if (kept.some((k) => interleaved(cand, k))) {
         mismatched += cand.orders;
         continue;
       }
@@ -1733,6 +1767,61 @@ export function buildPricePeriods(buckets: readonly PriceBucket[]): {
   return { periods: mergeAdjacent(cleaned), mismatched };
 }
 
+/**
+ * Насколько цены должны перекрываться по времени, чтобы это считалось примесью.
+ *
+ * Касание хвостами — не примесь. У настоящей смены цены старая держится до
+ * последнего своего заказа, а новая уже началась, и хвосты налезают друг на
+ * друга на несколько дней: достаточно одного позднего заказа по старой цене,
+ * чтобы границы пересеклись. Примесь выглядит иначе — чужая цена рассыпана по
+ * всему отрезку основной, а не жмётся к его краю.
+ */
+const INTERLEAVE_SHARE = 0.5;
+
+/** Время источника («ГГГГ-ММ-ДД ЧЧ:ММ:СС») в миллисекунды. */
+function ms(ts: string): number {
+  // Часовой пояс подставляется один и тот же для всех значений, поэтому
+  // разности точны, а от зоны машины результат не зависит.
+  const t = Date.parse(`${ts.replace(" ", "T")}Z`);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Идут ли две цены вперемешку — то есть примесь это, а не смена.
+ *
+ * Раньше здесь стояла проверка «границы вообще пересеклись», и она путала два
+ * разных случая: один поздний заказ по старой цене выбрасывал весь отрезок
+ * новой вместе с сотнями заказов, а автомат, который цену как раз поднял,
+ * попадал в отставшие с выдуманным недобором.
+ *
+ * Различает их доля перекрытия: у смены цены она мала (хвост), у примеси —
+ * почти вся длина более короткого отрезка. Мгновение (один заказ) считается
+ * примесью, если попало внутрь чужого отрезка.
+ */
+export function interleaved(a: PriceBucket, b: PriceBucket): boolean {
+  const from = Math.max(ms(a.from), ms(b.from));
+  const to = Math.min(ms(a.to), ms(b.to));
+  if (to < from) return false;
+  const shorter = Math.min(ms(a.to) - ms(a.from), ms(b.to) - ms(b.from));
+  if (shorter <= 0) return true;
+  return (to - from) / shorter > INTERLEAVE_SHARE;
+}
+
+/**
+ * Ключ пары «автомат + товар» для истории цен.
+ *
+ * Нормализованный: «Ice Lemon Tea» и «ice lemon  tea» — один товар, и в срезе по
+ * нему автомат обязан встретиться один раз. По сырому тексту он попадал в
+ * список дважды, и большинство при выборе эталона считалось по нему дважды же —
+ * эталон мог перевернуться из-за разницы в пробелах.
+ *
+ * Разделитель — символ, которого не бывает в данных: иначе серийник с пробелом
+ * на конце склеился бы с чужим названием товара.
+ */
+export function timelineKey(serial: string, product: string): string {
+  return `${normalizeSourceKey(serial)}\u0000${normalizeSourceKey(product)}`;
+}
+
 /** Склеить соседние отрезки с одинаковой ценой: смены цены между ними нет. */
 function mergeAdjacent(list: readonly PricePeriod[]): PricePeriod[] {
   const out: PricePeriod[] = [];
@@ -1748,12 +1837,27 @@ function mergeAdjacent(list: readonly PricePeriod[]): PricePeriod[] {
   return out;
 }
 
-/** Цена товара на автомате в указанный момент. null — тогда он им не торговал. */
+/**
+ * Последняя известная цена товара на автомате к этому моменту.
+ *
+ * Именно «последняя известная», а не «цена в момент заказа». Отрезок кончается
+ * последним заказом, но цена на этом не кончается: пока её не поменяли, она
+ * держится, даже если товар неделю никто не покупал.
+ *
+ * Разница не косметическая. Считать «после последнего заказа цены нет» значит
+ * уравнять «автомат не торговал» с «данных нет», и тогда при подсчёте
+ * большинства один торгующий отставший автомат перевешивает любое число
+ * эталонных, просто не продавших товар в тот день.
+ *
+ * null остаётся только до самого первого заказа: до него цены действительно
+ * не было.
+ */
 export function priceAt(periods: readonly PricePeriod[], at: string): number | null {
+  let price: number | null = null;
   for (const p of periods) {
-    if (p.from <= at && at <= p.to) return p.price;
+    if (p.from <= at) price = p.price;
   }
-  return null;
+  return price;
 }
 
 /**
@@ -1910,15 +2014,26 @@ export function findLookalikes(
     }
     const list = [...per.values()];
     if (list.length < 2 || list.length > GENERIC_FLAVOUR_PRODUCTS) continue;
+    // Доля проверяется у ОБОИХ товаров пары, а не только у того, на чьей строке
+    // встанет подсказка. Иначе три случайных заказа Cappuccino с чужим вкусом
+    // рождали подсказку на строке Latte, и владелец читал в основании «4000 из
+    // 4000» — числа Latte при трёх заказах доказательства. Один клик по такой
+    // подсказке вешал всю выручку Latte на чужую карточку.
+    const shareOf = (x: { name: string; orders: number }) => {
+      const total = ordersOf.get(normalizeSourceKey(x.name)) ?? x.orders;
+      return total === 0 ? 0 : x.orders / total;
+    };
     for (const a of list) {
+      if (shareOf(a) < LOOKALIKE_SHARE) continue;
       const total = ordersOf.get(normalizeSourceKey(a.name)) ?? a.orders;
-      if (total === 0 || a.orders / total < LOOKALIKE_SHARE) continue;
       for (const b of list) {
         if (normalizeSourceKey(a.name) === normalizeSourceKey(b.name)) continue;
+        if (shareOf(b) < LOOKALIKE_SHARE) continue;
+        const totalB = ordersOf.get(normalizeSourceKey(b.name)) ?? b.orders;
         add(
           a.name,
           b.name,
-          `общий вкус «${label}» — ${a.orders} из ${total} заказов`,
+          `общий вкус «${label}» — ${a.orders} из ${total} заказов здесь и ${b.orders} из ${totalB} там`,
           revenueOf.get(normalizeSourceKey(b.name)) ?? 0,
         );
       }

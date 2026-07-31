@@ -382,11 +382,14 @@ async function PayPane({
     const review = await core.rawPayments(source, reportCode);
     // Сводке верить на слово не надо: с каждого кода можно уйти в сами заказы,
     // отфильтрованные по этой колонке.
+    // «=» перед значением — точное совпадение: иначе код cash открывал бы
+    // заказы вместе с cash0, а это другой канал, и при сверке с выпиской такая
+    // подмена дорого стоит.
     const rowsHref =
       review.column < 0
         ? null
         : (code: string) =>
-            href(base, withoutTableState(sp), { view: null, [`f${review.column}`]: code });
+            href(base, withoutTableState(sp), { view: null, [`f${review.column}`]: `=${code}` });
     return <PaymentsView review={review} rowsHref={rowsHref} />;
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
