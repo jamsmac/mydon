@@ -17,6 +17,7 @@ import { ProductsReview } from "./products-review";
 import { PaymentsView } from "./payments-view";
 import { JournalView } from "./journal-view";
 import { NewReport, NewSource, RolesEditor } from "./source-editor";
+import { RawUpload } from "./raw-upload";
 
 /** Что показывает вкладка отчёта. */
 type ReportView = "rows" | "map" | "stays" | "prices" | "goods" | "pay" | "journal" | "roles";
@@ -262,12 +263,23 @@ async function ReportPane({
 
   if (!snapshot) {
     return (
-      <div className="empty">
-        <b>Отчёт ещё не выгружался</b>
-        Путь в системе: {report.path}. Как только первая выгрузка попадёт в
-        хранилище, здесь появится таблица — с теми же колонками и в том же
-        порядке, что и в источнике.
-      </div>
+      <>
+        <div className="empty">
+          <b>Отчёт ещё не выгружался</b>
+          Путь в системе: {report.path || "не записан"}. Сними отчёт в кабинете
+          источника и положи файл сюда — появится таблица с теми же колонками и
+          в том же порядке, что и в источнике. После этого можно назначить роли
+          колонок, и отчёт заработает наравне с остальными.
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <RawUpload
+            source={source.code}
+            report={reportCode}
+            reportTitle={report.title}
+            path={report.path}
+          />
+        </div>
+      </>
     );
   }
 
@@ -332,6 +344,19 @@ async function ReportPane({
           <div className="wv" style={{ fontSize: 17 }}>{snapshot.account ?? "—"}</div>
           <div className="wf">{report.ru}</div>
         </div>
+      </div>
+
+      <div className="srcbar">
+        <span className="hint" style={{ margin: 0 }}>
+          Свежая выгрузка ложится поверх: повтор того же снимка заменяет строки,
+          а не плодит дубли.
+        </span>
+        <RawUpload
+          source={source.code}
+          report={reportCode}
+          reportTitle={report.title}
+          path={report.path}
+        />
       </div>
 
       <div className="subtabs">

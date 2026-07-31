@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { DELIMITERS, decodeUpload, parseDelimited } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
 
 export interface ActionResult {
@@ -159,4 +160,82 @@ export async function setRoles(
   }
   revalidatePath("/domain/vendhub");
   return { ok: true };
+}
+
+/**
+ * Загрузка выгрузки файлом.
+ *
+ * До сих пор положить выгрузку мог только разработчик — скриптом, с ключом
+ * приёма и туннелем до сервера. Пока это так, «заполнить источник» означало
+ * «продиктовать разработчику»: роли колонок назначать не по чему, пока нет
+ * первой выгрузки, а выгрузку не положить без чужих рук.
+ *
+ * Файл разбирается ЗДЕСЬ, на сервере оболочки, и уходит в Core тем же приёмом,
+ * что и скрипт: сырой слой не знает, кто принёс строки, и правила у всех одни.
+ */
+export async function importFile(form: FormData): Promise<ActionResult & { rows?: number }> {
+  const key = process.env.INGEST_KEY ?? "";
+  if (key.length === 0) {
+    return {
+      ok: false,
+      error: "Приём выгрузок выключен: INGEST_KEY не задан в окружении оболочки",
+    };
+  }
+
+  const file = form.get("file");
+  if (!(file instanceof File) || file.size === 0) return { ok: false, error: "Файл не выбран" };
+
+  const source = String(form.get("source") ?? "");
+  const report = String(form.get("report") ?? "");
+  const str = (name: string) => {
+    const v = String(form.get(name) ?? "").trim();
+    return v.length > 0 ? v : undefined;
+  };
+
+  const { text, encoding } = decodeUpload(new Uint8Array(await file.arrayBuffer()));
+  const chosen = String(form.get("delimiter") ?? "");
+  const parsed = parseDelimited(
+    text,
+    (DELIMITERS as readonly string[]).includes(chosen) ? (chosen as (typeof DELIMITERS)[number]) : undefined,
+  );
+  if (parsed.columns.length === 0) {
+    return { ok: false, error: `Файл прочитан как ${encoding}, но заголовков в нём нет` };
+  }
+  if (parsed.rows.length === 0) {
+    return { ok: false, error: `Файл прочитан как ${encoding}: одни заголовки, ни одной строки` };
+  }
+
+  // Время съёма: владелец называет его сам — это НЕ время загрузки. Именно оно
+  // отвечает на вопрос «насколько свежо», и подменять его «сейчас» нельзя.
+  const fetchedAt = str("fetchedAt") ?? new Date().toISOString();
+
+  // Тело запроса ограничено, поэтому большая выгрузка идёт пачками. Каждая
+  // несёт свою позицию: повтор после обрыва ляжет на место, а не хвостом.
+  const CHUNK = 500;
+  try {
+    for (let i = 0; i < parsed.rows.length; i += CHUNK) {
+      await core.importRaw(key, {
+        source,
+        report,
+        fetchedAt,
+        columns: parsed.columns,
+        rows: parsed.rows.slice(i, i + CHUNK),
+        offset: i,
+        append: i > 0,
+        periodFrom: str("periodFrom"),
+        periodTo: str("periodTo"),
+        account: str("account"),
+        note:
+          str("note") ??
+          `Загружено файлом «${file.name}», прочитано как ${encoding}, разделитель «${
+            parsed.delimiter === "\t" ? "таб" : parsed.delimiter
+          }»${parsed.ragged > 0 ? `, строк с неровным числом ячеек: ${parsed.ragged}` : ""}`,
+        importedBy: "owner",
+      });
+    }
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  return { ok: true, rows: parsed.rows.length };
 }
