@@ -23,10 +23,14 @@ import {
   rawFreshness,
   reconcile,
   unify,
+  reconcileOurVend,
   type ReconField,
   type ReconRow,
   type Reconciliation,
   type UnifiedJournal,
+  type OurVendRecon,
+  type OurVendBucket,
+  type DailyBucket,
 } from "@mydon/shared";
 import { and, asc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -1184,6 +1188,7 @@ export class RawService {
     UnifiedJournal & {
       a: { source: string; report: string; title: string };
       b: { source: string; report: string; title: string };
+      ourvend: OurVendRecon;
     }
   > {
     const input = await this.reconInputs(aSource, aReport, bSource, bReport);
@@ -1191,13 +1196,53 @@ export class RawService {
       return {
         totalA: 0, totalB: 0, union: 0, both: 0, onlyA: 0, onlyB: 0,
         conflicts: 0, duplicated: 0, page: query.page, size: query.size, orders: [],
+        ourvend: reconcileOurVend([], []),
         ...(await this.reconMeta(aSource, aReport, bSource, bReport)),
       };
     }
-    return {
-      ...unify(input.rowsA, input.rowsB, input.fields, query.page, query.size),
-      ...input.meta,
-    };
+    // daily — свёртка ВСЕГО союза до «день+автомат+товар»; сюда OurVend и
+    // приходит третьей дневной дорожкой. Из ответа клиенту daily убираем: ему
+    // нужен итог сверки (ourvend), а не сами корзины.
+    const { daily, ...journal } = unify(input.rowsA, input.rowsB, input.fields, query.page, query.size);
+    const ourvend = await this.ourvendReconciliation(daily);
+    return { ...journal, ...input.meta, ourvend };
+  }
+
+  /**
+   * Дневная сверка союза с дневным потоком OurVend (строки `sale`).
+   *
+   * Поток `sale` (синк OurVend через mydon-stock) свёрнут до дня — в нём нет ни
+   * номера заказа, ни времени внутри дня, поэтому вливается он не построчно, как
+   * gjvending с vendinghub, а дневным итогом. Это ограничение потока, а не
+   * платформы: отчёт OurVend по времени, загруженный в сырой слой, войдёт в союз
+   * построчно через тот же unifySources. Диапазон берём по дням союза:
+   * спрашивать у потока больше, чем есть в союзе, незачем.
+   */
+  private async ourvendReconciliation(daily: DailyBucket[]): Promise<OurVendRecon> {
+    if (daily.length === 0) return reconcileOurVend([], []);
+    const days = daily.map((b) => b.day).sort();
+    const from = days[0];
+    const to = days[days.length - 1];
+    const rows = await this.db
+      .select({
+        dt: sale.dt,
+        serial: sale.machineSerial,
+        product: sale.product,
+        qty: sale.qty,
+        amount: sale.amount,
+        source: sale.source,
+      })
+      .from(sale)
+      .where(and(gte(sale.dt, from), lte(sale.dt, to)));
+    const ourvend: OurVendBucket[] = rows.map((r) => ({
+      day: r.dt,
+      serial: r.serial,
+      product: r.product,
+      revenue: Number(r.amount),
+      orders: Number(r.qty),
+      source: r.source,
+    }));
+    return reconcileOurVend(daily, ourvend);
   }
 
   /**

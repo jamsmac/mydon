@@ -1,8 +1,12 @@
 import Link from "next/link";
-import type { UnifiedJournal, UnifiedOrder } from "../lib/core";
+import type { OurVendRecon, UnifiedJournal, UnifiedOrder } from "../lib/core";
 
 function num(n: number): string {
   return n.toLocaleString("ru-RU");
+}
+
+function sum(n: number): string {
+  return `${Math.round(n).toLocaleString("ru-RU")} сум`;
 }
 
 /**
@@ -109,6 +113,8 @@ export function UnifiedView({
         </div>
       )}
 
+      <OurVendLane r={u.ourvend} />
+
       <div className="jlegend" style={{ marginBottom: 8 }}>
         <span className="jlg s-matched">
           <i />
@@ -195,6 +201,135 @@ function UnifiedRow({ o, a, b }: { o: UnifiedOrder; a: string; b: string }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Дневная сверка союза с дневным потоком OurVend (`sale`).
+ *
+ * Поток OurVend (синк через mydon-stock) свёрнут до дня — ни номера заказа, ни
+ * времени внутри дня. Поэтому он сверяется с союзом дневным итогом «день +
+ * автомат + товар», а не заказом. Это ограничение потока: в кабинете OurVend
+ * есть отчёт по времени, и когда он ляжет в сырой слой, войдёт в союз построчно.
+ * Это НЕ добавка к выручке: те же продажи, третий взгляд. Где OurVend расходится
+ * с союзом — вопрос владельцу, где видит то, чего в союзе нет — пропущенный
+ * автомат или товар.
+ */
+function OurVendLane({ r }: { r: OurVendRecon }) {
+  const src = r.source ?? "OurVend";
+
+  if (!r.synced) {
+    return (
+      <div className="notice" style={{ marginBottom: 14 }}>
+        <b>OurVend за эти дни ничего не показывает</b>
+        Дневной поток OurVend (синк через mydon-stock) не синхронизирован или пуст
+        за диапазон союза{r.fromDay ? ` (${r.fromDay} — ${r.toDay})` : ""} —
+        дневную сверку сделать не с чем. Как появятся продажи OurVend, они сойдутся
+        здесь. Отчёт OurVend по времени, загруженный в сырой слой, войдёт в союз
+        построчно и без этого потока.
+      </div>
+    );
+  }
+
+  const revenueClose = Math.round(r.unionRevenue) === Math.round(r.ourvendRevenue);
+
+  return (
+    <div className="sect" style={{ marginBottom: 14 }}>
+      <div className="sect-h">
+        <h3 className="h2">Дневная сверка с {src}</h3>
+        <span className="chip">{r.fromDay} — {r.toDay}</span>
+      </div>
+
+      <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
+        Здесь {src} приходит дневным потоком (синк через mydon-stock): он свёрнут
+        до дня, без номера заказа и времени, поэтому сверяется с союзом итогом за
+        день по автомату и товару, а не построчно. Отчёт {src} по времени, когда
+        ляжет в сырой слой, войдёт в союз построчно — как gjvending и vendinghub.
+        И там и там это <b>те же продажи третьим взглядом</b>, а не добавка к
+        выручке — складывать нельзя, можно только сверять.
+      </p>
+
+      <div className="tiles" style={{ marginBottom: 12 }}>
+        <div className={`tile mini ${r.agree > 0 ? "" : "zero"}`}>
+          <div className="lab">Сошлось за день</div>
+          <div className="v">{num(r.agree)}</div>
+          <div className="foot">
+            <span className="mk" />
+            из {num(r.matched)} общих корзин
+          </div>
+        </div>
+        <div className={`tile mini ${r.differ > 0 ? "is-hot" : "zero"}`}>
+          <div className="lab">Разошлось за день</div>
+          <div className="v">{num(r.differ)}</div>
+          <div className="foot">
+            <span className="mk" />
+            {r.differ > 0 ? "выручка не сходится" : "по общим — сходится"}
+          </div>
+        </div>
+        <div className={`tile mini ${r.onlyOurVend > 0 ? "is-hot" : "zero"}`}>
+          <div className="lab">Только у {src}</div>
+          <div className="v">{num(r.onlyOurVend)}</div>
+          <div className="foot">
+            <span className="mk" />
+            союз этих продаж не видит
+          </div>
+        </div>
+        <div className={`tile mini ${r.onlyUnion > 0 ? "" : "zero"}`}>
+          <div className="lab">Только у союза</div>
+          <div className="v">{num(r.onlyUnion)}</div>
+          <div className="foot">
+            <span className="mk" />
+            {src} их не показывает
+          </div>
+        </div>
+      </div>
+
+      <div className={`maprow ${revenueClose ? "" : "hot"}`} style={{ marginBottom: 4 }}>
+        <div className="mapv">
+          <span className="mapl">Выручка по пересечению</span>
+        </div>
+        <div className="mapt">
+          <span className="chip g">союз {sum(r.unionRevenue)}</span>
+          <span className={`chip ${revenueClose ? "" : "h"}`}>{src} {sum(r.ourvendRevenue)}</span>
+        </div>
+      </div>
+
+      {r.conflicts.length > 0 && (
+        <div className="sect" style={{ marginTop: 10 }}>
+          <div className="sect-h">
+            <h3 className="h2">Где день не сходится</h3>
+          </div>
+          <div className="rlist">
+            <div className="rhead">
+              <span>День · автомат · товар</span>
+              <span>Заказов союза</span>
+              <span>Союз</span>
+              <span>{src}</span>
+            </div>
+            {r.conflicts.slice(0, 30).map((c) => (
+              <div className="rrow" key={`${c.day}-${c.serial}-${c.product}`}>
+                <span className="mono dim">
+                  {c.day} · {c.serial} · {c.product}
+                  {c.provisional && <span className="chip" title="в корзине союза есть спорные суммы"> спорн.</span>}
+                </span>
+                <span className="mono">{num(c.unionOrders)}</span>
+                <span className="mono">{sum(c.unionRevenue)}</span>
+                <span className="mono warn">{sum(c.ourvendRevenue)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {r.onlyOurVendSamples.length > 0 && (
+        <p className="hint" style={{ marginTop: 8 }}>
+          {src} видит продажи, которых нет в союзе (первые по выручке):{" "}
+          {r.onlyOurVendSamples.slice(0, 8).map((s) => `${s.serial}/${s.product} ${sum(s.revenue)}`).join("; ")}
+          {r.onlyOurVend > 8 && " …"}. Возможно, автомат или товар не попал в
+          построчные источники — стоит проверить.
+        </p>
+      )}
     </div>
   );
 }
