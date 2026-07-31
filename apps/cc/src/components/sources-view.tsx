@@ -16,9 +16,10 @@ import { PricesView } from "./prices-view";
 import { ProductsReview } from "./products-review";
 import { PaymentsView } from "./payments-view";
 import { JournalView } from "./journal-view";
+import { NewReport, NewSource, RolesEditor } from "./source-editor";
 
 /** Что показывает вкладка отчёта. */
-type ReportView = "rows" | "map" | "stays" | "prices" | "goods" | "pay" | "journal";
+type ReportView = "rows" | "map" | "stays" | "prices" | "goods" | "pay" | "journal" | "roles";
 
 export interface SourcesViewProps {
   /** Адрес страницы направления: /domain/vendhub */
@@ -98,7 +99,8 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
     sp.view === "prices" ||
     sp.view === "goods" ||
     sp.view === "pay" ||
-    sp.view === "journal"
+    sp.view === "journal" ||
+    sp.view === "roles"
       ? sp.view
       : "rows";
   const clean = withoutTableState(sp);
@@ -163,12 +165,20 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
         ))}
       </div>
 
-      <p className="hint" style={{ marginBottom: 10 }}>
-        Кабинет источника:{" "}
-        <a href={source.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>
-          {source.url}
-        </a>
-      </p>
+      <div className="srcbar">
+        <p className="hint" style={{ margin: 0 }}>
+          Кабинет источника:{" "}
+          {source.url ? (
+            <a href={source.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>
+              {source.url}
+            </a>
+          ) : (
+            <span className="warn">адрес ещё не записан</span>
+          )}
+          {source.origin === "owner" && <span className="chip" style={{ marginLeft: 8 }}>завёл ты</span>}
+        </p>
+        <NewSource />
+      </div>
 
       {/* Отчёты выбранной системы */}
       <div className="subtabs">
@@ -184,6 +194,14 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
             {r.rows > 0 ? <span className="n"> {r.rows.toLocaleString("ru-RU")}</span> : ""}
           </Link>
         ))}
+      </div>
+
+      <div className="srcbar" style={{ marginBottom: 10 }}>
+        <span className="hint" style={{ margin: 0 }}>
+          Отчёта нет в списке — заведи его, и он заработает наравне с описанными
+          в коде, как только придёт первая выгрузка.
+        </span>
+        <NewReport source={source} />
       </div>
 
       {report ? (
@@ -338,6 +356,9 @@ async function ReportPane({
         <Link href={viewHref("journal")} className={`subtab ${view === "journal" ? "active" : ""}`}>
           Журнал продаж
         </Link>
+        <Link href={viewHref("roles")} className={`subtab ${view === "roles" ? "active" : ""}`}>
+          Роли колонок
+        </Link>
       </div>
 
       {view === "rows" ? (
@@ -366,6 +387,14 @@ async function ReportPane({
         <PayPane base={base} sp={sp} source={source.code} reportCode={reportCode} />
       ) : view === "journal" ? (
         <JournalPane base={base} sp={sp} params={params} source={source.code} reportCode={reportCode} />
+      ) : view === "roles" ? (
+        <RolesEditor
+          source={source.code}
+          report={reportCode}
+          columns={snapshot.columns}
+          roles={report.roles as never}
+          origin={report.origin}
+        />
       ) : (
         <StaysPane source={source.code} reportCode={reportCode} />
       )}

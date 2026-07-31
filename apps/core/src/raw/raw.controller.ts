@@ -19,13 +19,14 @@ import {
   IsISO8601,
   IsInt,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
   MaxLength,
   Min,
 } from "class-validator";
-import { RAW_LINK_KINDS, findRawReport, roleColumnIndex, type RawLinkKind } from "@mydon/shared";
+import { RAW_LINK_KINDS, roleColumnIndex, type RawLinkKind } from "@mydon/shared";
 import { MAX_EXPORT, RawService, normalizeRowsQuery, toCsv } from "./raw.service";
 
 export class RawImportDto {
@@ -90,6 +91,55 @@ export class RawLinkDto {
   note?: string;
 }
 
+
+export class RawSourceDefDto {
+  /** Код системы: латиница, цифры, подчёркивание. Попадает в адрес и в базу. */
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  code!: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(128)
+  title!: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  subtitle?: string;
+
+  /** Адрес кабинета. Пусто — честное «ещё не записан». */
+  @IsOptional() @IsString() @MaxLength(512)
+  url?: string;
+
+  @IsOptional() @IsBoolean()
+  archived?: boolean;
+}
+
+export class RawReportDefDto {
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  source!: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  code!: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(128)
+  title!: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  ru?: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  path?: string;
+
+  @IsOptional() @IsBoolean()
+  archived?: boolean;
+}
+
+export class RawRolesDto {
+  /**
+   * Роль → название колонки этой выгрузки. Пустое значение — осознанное
+   * «этой роли в отчёте нет», и это законное состояние.
+   */
+  @IsObject()
+  roles!: Record<string, string>;
+}
+
 /** Сравнение в постоянное время: иначе ключ подбирается по времени ответа. */
 function secretEquals(a: string, b: string): boolean {
   const bufA = Buffer.from(a, "utf8");
@@ -114,13 +164,43 @@ export class RawController {
     return this.raw.overview();
   }
 
+  /**
+   * Завести или поправить систему-источник.
+   *
+   * Справочник в коде остаётся основой: здесь только правки владельца, и
+   * пустое поле ничего в коде не затирает.
+   */
+  @Post("source")
+  saveSource(@Body() dto: RawSourceDefDto) {
+    return this.raw.saveSource(dto);
+  }
+
+  /** Завести или поправить отчёт системы. Роли назначаются отдельно. */
+  @Post("report")
+  saveReport(@Body() dto: RawReportDefDto) {
+    return this.raw.saveReport(dto);
+  }
+
+  /**
+   * Назначить роли колонок по настоящим заголовкам выгрузки.
+   *
+   * Отдельно от заведения отчёта: роль указывает на колонку, а колонки видно
+   * только после первой выгрузки. Угадывать их по памяти нельзя.
+   */
+  @Post("roles/:source/:report")
+  setRoles(
+    @Param("source") source: string,
+    @Param("report") report: string,
+    @Body() dto: RawRolesDto,
+  ) {
+    return this.raw.setRoles(source, report, dto.roles);
+  }
+
   /** Последний снимок отчёта: чем именно мы располагаем. */
   @Get("report/:source/:report")
   async report(@Param("source") source: string, @Param("report") report: string) {
-    const def = findRawReport(source, report);
-    if (!def) {
-      throw new NotFoundException("Такого отчёта нет в справочнике источников");
-    }
+    // Проверка существования: отчёта нет — дальше идти незачем.
+    await this.raw.report(source, report);
     return {
       snapshot: await this.raw.latestSnapshot(source, report),
       drift: await this.raw.columnDrift(source, report),
@@ -140,8 +220,7 @@ export class RawController {
     @Param("report") report: string,
     @Query() query: Record<string, string>,
   ) {
-    const def = findRawReport(source, report);
-    if (!def) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const def = await this.raw.report(source, report);
     const snapshot = await this.raw.latestSnapshot(source, report);
     if (!snapshot) return { snapshot: null, total: 0, rows: [], decoders: [] };
     const q = normalizeRowsQuery(query);

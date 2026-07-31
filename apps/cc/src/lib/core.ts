@@ -501,6 +501,10 @@ export interface RawReportState {
   title: string;
   ru: string;
   path: string;
+  /** Откуда запись: из кода или заведена владельцем. */
+  origin: "code" | "owner";
+  /** Роли колонок, действующие сейчас. Пусто — состав отчёта ещё не видели. */
+  roles: Record<string, unknown>;
   snapshots: number;
   lastFetchedAt: string | null;
   freshness: RawFreshnessState;
@@ -514,6 +518,7 @@ export interface RawSourceState {
   title: string;
   subtitle: string;
   url: string;
+  origin: "code" | "owner";
   connected: boolean;
   reports: RawReportState[];
 }
@@ -659,6 +664,27 @@ export const core = {
   rawStays: (source: string, report: string) =>
     get<{ machines: MachineStays[] }>(
       `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
+    ),
+  saveRawSource: (input: {
+    code: string;
+    title: string;
+    subtitle?: string;
+    url?: string;
+    archived?: boolean;
+  }) => send<{ ok: true }>("/raw/source", "POST", input),
+  saveRawReport: (input: {
+    source: string;
+    code: string;
+    title: string;
+    ru?: string;
+    path?: string;
+    archived?: boolean;
+  }) => send<{ ok: true }>("/raw/report", "POST", input),
+  setRawRoles: (source: string, report: string, roles: Record<string, string>) =>
+    send<{ ok: true }>(
+      `/raw/roles/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
+      "POST",
+      { roles },
     ),
   rawJournal: (source: string, report: string, params: Record<string, string> = {}) => {
     const qs = new URLSearchParams(params).toString();

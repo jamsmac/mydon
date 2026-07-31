@@ -311,6 +311,63 @@ export const rawRow = pgTable(
 // связывается с нашей карточкой товара здесь. Хранится, а не вычисляется
 // на лету: решение владельца обязано пережить следующую выгрузку, иначе он
 // будет разбирать одни и те же незнакомые названия каждую неделю.
+/**
+ * Справочник источников, заполняемый владельцем.
+ *
+ * Основа справочника — код (`packages/shared/src/sources.ts`): он типизирован,
+ * лежит в git и проходит ревью. Но добавить систему или отчёт выкладкой можно
+ * только тогда, когда рядом есть разработчик, а владелец заводит кабинеты сам и
+ * тогда, когда они у него появляются.
+ *
+ * Поэтому здесь — ДОПОЛНЕНИЯ и ПРАВКИ владельца. Правило разрешения: запись
+ * отсюда важнее записи в коде с тем же кодом; записи, которых в коде нет,
+ * просто добавляются. Код при этом остаётся основой и никуда не девается —
+ * иначе выложенное однажды знание об источнике потерялось бы при чистке базы.
+ */
+export const rawSourceDef = pgTable("raw_source_def", {
+  /** Код системы: латиницей, стабилен — по нему связаны снимки. */
+  code: text("code").primaryKey(),
+  title: text("title").notNull(),
+  /** Чем эта система является в хозяйстве владельца. */
+  subtitle: text("subtitle").default("").notNull(),
+  /** Адрес кабинета. Пусто — честное «ещё не записан», а не выдуманный адрес. */
+  url: text("url").default("").notNull(),
+  /** Убран с глаз, но не удалён: снимки на него по-прежнему ссылаются. */
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  createdAt: createdAt(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/**
+ * Отчёт внутри системы-источника, заведённый владельцем.
+ *
+ * `roles` заполняется НЕ вручную по памяти, а выбором из настоящих заголовков
+ * первой выгрузки: угадывать название колонки, которой не видел, — то же самое,
+ * что выдумывать данные.
+ */
+export const rawReportDef = pgTable(
+  "raw_report_def",
+  {
+    id: id(),
+    sourceCode: text("source_code").notNull(),
+    code: text("code").notNull(),
+    title: text("title").notNull(),
+    /** Что это по-русски — владелец читает эту строку, а не английский заголовок. */
+    ru: text("ru").default("").notNull(),
+    /** Где его нажать в чужом интерфейсе: «Report Query → Order Query». */
+    path: text("path").default("").notNull(),
+    /**
+     * Роли колонок: ключ роли → названия колонки у источника.
+     * Пусто — состав отчёта ещё не видели, и это честное состояние.
+     */
+    roles: jsonb("roles").$type<Record<string, string[]>>().default({}).notNull(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("ux_raw_report_def").on(t.sourceCode, t.code)],
+);
+
 export const rawLinkKindEnum = pgEnum("raw_link_kind", ["machine", "product", "point"]);
 export const rawLink = pgTable(
   "raw_link",
