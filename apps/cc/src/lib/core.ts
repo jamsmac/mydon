@@ -259,6 +259,25 @@ export interface RawDecoder {
   unconfirmed: string[];
 }
 
+/** Отрезок стоянки автомата на одной точке. */
+export interface MachineStay {
+  point: string;
+  from: string;
+  to: string;
+  orders: number;
+  /** Пересекается с соседним отрезком — значит это не переезд, а путаница. */
+  overlaps: boolean;
+}
+
+/** История стоянок одного автомата. */
+export interface MachineStays {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  stays: MachineStay[];
+  moves: number;
+}
+
 /** Состав колонок изменился между двумя последними выгрузками. */
 export interface RawDrift {
   prevFetchedAt: string;
@@ -428,6 +447,10 @@ export const core = {
       drift?: RawDrift | null;
     }>(`/raw/report/${encodeURIComponent(source)}/${encodeURIComponent(report)}/rows${qs ? `?${qs}` : ""}`);
   },
+  rawStays: (source: string, report: string) =>
+    get<{ machines: MachineStays[] }>(
+      `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
+    ),
   rawMapping: (source: string, report: string) =>
     get<{ snapshot: RawSnapshotMeta | null; groups: RawMappingGroup[] }>(
       `/raw/mapping/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,

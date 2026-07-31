@@ -175,6 +175,12 @@ export class RawController {
     return toCsv(snapshot.columns, rows);
   }
 
+  /** Где стоял каждый автомат и когда переезжал — по заказам источника. */
+  @Get("stays/:source/:report")
+  stays(@Param("source") source: string, @Param("report") report: string) {
+    return this.raw.machineStays(source, report).then((machines) => ({ machines }));
+  }
+
   /** Что из выгрузки узнано по карточкам реестра, а что — нет. */
   @Get("mapping/:source/:report")
   mapping(@Param("source") source: string, @Param("report") report: string) {
