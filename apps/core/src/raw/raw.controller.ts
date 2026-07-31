@@ -25,7 +25,7 @@ import {
   MaxLength,
   Min,
 } from "class-validator";
-import { RAW_LINK_KINDS, findRawReport, type RawLinkKind } from "@mydon/shared";
+import { RAW_LINK_KINDS, findRawReport, roleColumnIndex, type RawLinkKind } from "@mydon/shared";
 import { MAX_EXPORT, RawService, normalizeRowsQuery, toCsv } from "./raw.service";
 
 export class RawImportDto {
@@ -65,6 +65,10 @@ export class RawImportDto {
 
   @IsOptional() @IsBoolean()
   append?: boolean;
+
+  /** Номер первой строки пачки в исходной выгрузке — чтобы повтор лёг на место. */
+  @IsOptional() @IsInt() @Min(0)
+  offset?: number;
 }
 
 export class RawLinkDto {
@@ -113,10 +117,20 @@ export class RawController {
   /** Последний снимок отчёта: чем именно мы располагаем. */
   @Get("report/:source/:report")
   async report(@Param("source") source: string, @Param("report") report: string) {
-    if (!findRawReport(source, report)) {
+    const def = findRawReport(source, report);
+    if (!def) {
       throw new NotFoundException("Такого отчёта нет в справочнике источников");
     }
-    return { snapshot: await this.raw.latestSnapshot(source, report) };
+    return {
+      snapshot: await this.raw.latestSnapshot(source, report),
+      drift: await this.raw.columnDrift(source, report),
+    };
+  }
+
+  /** Изменился ли состав колонок между двумя последними выгрузками. */
+  @Get("report/:source/:report/drift")
+  drift(@Param("source") source: string, @Param("report") report: string) {
+    return this.raw.columnDrift(source, report).then((drift) => ({ drift }));
   }
 
   /** Страница строк последнего снимка. Фильтры по колонкам — параметрами f0, f1… */
@@ -126,11 +140,25 @@ export class RawController {
     @Param("report") report: string,
     @Query() query: Record<string, string>,
   ) {
+    const def = findRawReport(source, report);
+    if (!def) throw new NotFoundException("Такого отчёта нет в справочнике источников");
     const snapshot = await this.raw.latestSnapshot(source, report);
-    if (!snapshot) return { snapshot: null, total: 0, rows: [] };
+    if (!snapshot) return { snapshot: null, total: 0, rows: [], decoders: [] };
     const q = normalizeRowsQuery(query);
-    const { total, rows } = await this.raw.rows(snapshot.id, q);
-    return { snapshot, total, rows, page: q.page, size: q.size };
+    const [{ total, rows }, drift] = await Promise.all([
+      this.raw.rows(snapshot.id, q),
+      this.raw.columnDrift(source, report),
+    ]);
+    // Расшифровки привязываем к НОМЕРУ колонки в этой конкретной выгрузке:
+    // панель отдаёт один отчёт двумя словарями, и номер — единственное общее.
+    const decoders = (def.dicts ?? [])
+      .map((dict) => ({
+        column: roleColumnIndex(snapshot.columns, def.roles, dict.role),
+        values: dict.values,
+        unconfirmed: dict.unconfirmed ?? [],
+      }))
+      .filter((d) => d.column >= 0);
+    return { snapshot, total, rows, page: q.page, size: q.size, decoders, drift };
   }
 
   /** Выгрузка того, что сейчас на экране, — в CSV (Excel открывает его напрямую). */

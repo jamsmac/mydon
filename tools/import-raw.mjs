@@ -106,7 +106,9 @@ try {
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK).map((r) => r.map((c) => (c === null || c === undefined ? "" : String(c))));
     // Первая пачка заменяет снимок целиком, остальные дописываются к нему.
-    const out = await send({ ...meta, rows: chunk, ...(i === 0 ? {} : { append: true }) });
+    // offset — позиция пачки в выгрузке: повтор после обрыва ляжет на своё
+    // место, а не добавится хвостом.
+    const out = await send({ ...meta, rows: chunk, offset: i, ...(i === 0 ? {} : { append: true }) });
     sent += chunk.length;
     console.log(`  отправлено ${sent.toLocaleString("ru-RU")} / ${rows.length.toLocaleString("ru-RU")} (в снимке: ${out.total})`);
   }

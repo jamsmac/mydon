@@ -6,6 +6,7 @@ import {
   findRawReport,
   normalizeSourceKey,
   roleColumnIndex,
+  roleColumnName,
   type RawColumnRoles,
   type RawFreshness,
   type RawLinkKind,
@@ -205,6 +206,15 @@ export interface RawImportInput {
   importedBy?: string;
   /** Дописать строки к уже начатому снимку (выгрузка приходит частями). */
   append?: boolean;
+  /**
+   * Номер первой строки пачки в исходной выгрузке (с нуля).
+   *
+   * Нужен, чтобы повтор пачки после обрыва связи лёг на то же место, а не
+   * добавился хвостом. Дедупликация именно по позиции, а НЕ по содержимому:
+   * в самой панели три заказа задвоены, и отбрасывание одинаковых строк
+   * молча выкинуло бы то, что источник действительно отдал.
+   */
+  offset?: number;
 }
 
 /**
@@ -452,7 +462,7 @@ export class RawService {
 
     const groups: RawMappingGroup[] = [];
     for (const step of plan) {
-      const columnName = report.roles?.[step.role] ?? null;
+      const columnName = roleColumnName(report.roles, step.role);
       const idx = roleColumnIndex(snapshot.columns, report.roles, step.role);
       if (idx < 0) {
         groups.push({
@@ -611,21 +621,41 @@ export class RawService {
       snapshotId = created.id;
     }
 
-    // Нумерация продолжается: части выгрузки сохраняют порядок источника.
-    const [{ n: already }] = await this.db
-      .select({ n: sql<number>`count(*)` })
-      .from(rawRow)
-      .where(eq(rawRow.snapshotId, snapshotId));
-    let idx = Number(already);
+    // Позиция первой строки пачки. Отправитель называет её сам — тогда повтор
+    // пачки после обрыва ляжет на своё место. Не назвал — считаем от того, что
+    // уже лежит (порядок источника сохраняется в любом случае).
+    let start: number;
+    if (typeof input.offset === "number" && Number.isInteger(input.offset) && input.offset >= 0) {
+      start = input.offset;
+    } else {
+      const [{ n: already }] = await this.db
+        .select({ n: sql<number>`count(*)` })
+        .from(rawRow)
+        .where(eq(rawRow.snapshotId, snapshotId));
+      start = Number(already);
+    }
 
-    const values = input.rows.map((cells) => ({
+    const values = input.rows.map((cells, i) => ({
       snapshotId,
-      idx: ++idx,
+      idx: start + i + 1,
       cells: cells.map((c) => (c === null || c === undefined ? "" : String(c))),
     }));
     for (let i = 0; i < values.length; i += 500) {
-      await this.db.insert(rawRow).values(values.slice(i, i + 500)).onConflictDoNothing();
+      // Конфликт по (снимок, номер строки) — это повтор той же пачки.
+      // Перезаписываем: свежая отправка вернее прежней попытки.
+      await this.db
+        .insert(rawRow)
+        .values(values.slice(i, i + 500))
+        .onConflictDoUpdate({
+          target: [rawRow.snapshotId, rawRow.idx],
+          set: { cells: sql`excluded.cells` },
+        });
     }
+
+    const [{ n: total }] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(rawRow)
+      .where(eq(rawRow.snapshotId, snapshotId));
 
     await this.events.record({
       source: `raw:${input.source}`,
@@ -639,6 +669,54 @@ export class RawService {
       occurredAt: fetchedAt,
     });
 
-    return { snapshotId, rows: values.length, total: idx };
+    return { snapshotId, rows: values.length, total: Number(total) };
   }
+
+  /**
+   * Изменился ли состав колонок между двумя последними выгрузками.
+   *
+   * Источник вправе переименовать или переставить колонку, и загрузку это не
+   * ломает — новый снимок ложится со своим составом. Но роли колонок после
+   * такого могут перестать находиться, поэтому владельцу об этом говорят
+   * словами, а не оставляют выяснять по пустому экрану сопоставления.
+   */
+  async columnDrift(
+    sourceCode: string,
+    reportCode: string,
+  ): Promise<{ prevFetchedAt: string; added: string[]; removed: string[]; reordered: boolean } | null> {
+    const rows = await this.db
+      .select({ fetchedAt: rawSnapshot.fetchedAt, columns: rawSnapshot.columns })
+      .from(rawSnapshot)
+      .where(and(eq(rawSnapshot.sourceCode, sourceCode), eq(rawSnapshot.reportCode, reportCode)))
+      .orderBy(sql`${rawSnapshot.fetchedAt} desc`)
+      .limit(2);
+    if (rows.length < 2) return null;
+
+    const [now, prev] = rows;
+    const drift = compareColumns(prev.columns, now.columns);
+    if (!drift.added.length && !drift.removed.length && !drift.reordered) return null;
+    return { prevFetchedAt: prev.fetchedAt.toISOString(), ...drift };
+  }
+}
+
+/**
+ * Сравнение состава колонок двух выгрузок. Отдельной функцией — чтобы поведение
+ * на переименовании и перестановке было закреплено тестом, а не догадкой.
+ */
+export function compareColumns(
+  prev: readonly string[],
+  next: readonly string[],
+): { added: string[]; removed: string[]; reordered: boolean } {
+  const key = (c: string) => normalizeSourceKey(c);
+  const prevKeys = prev.map(key);
+  const nextKeys = next.map(key);
+  const added = next.filter((c) => !prevKeys.includes(key(c)));
+  const removed = prev.filter((c) => !nextKeys.includes(key(c)));
+  // Перестановка считается только когда состав тот же: иначе о ней сообщать
+  // бессмысленно — владельцу важнее, что колонка появилась или пропала.
+  const reordered =
+    added.length === 0 &&
+    removed.length === 0 &&
+    prevKeys.some((c, i) => c !== nextKeys[i]);
+  return { added, removed, reordered };
 }

@@ -546,6 +546,10 @@ a.rowlink:hover { background: var(--surf-2); }
 .kv dt { font-size: 11px; color: var(--tx-3); }
 .kv dd { margin: 0; font-family: var(--fm); font-size: 13px; word-break: break-word; }
 
+/* расшифровка кода источника рядом со значением */
+.decoded { display: block; margin-top: 2px; font-family: var(--fu); font-size: 11.5px; color: var(--tx-3); }
+.decoded.unsure { color: var(--hot); }
+
 /* сопоставление с реестром */
 .maplist { display: flex; flex-direction: column; gap: 6px; }
 .maprow {

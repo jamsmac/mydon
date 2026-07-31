@@ -3,6 +3,8 @@ import {
   core,
   CoreUnavailable,
   type Entity,
+  type RawDecoder,
+  type RawDrift,
   type RawSourceState,
   type RawSnapshotMeta,
 } from "../lib/core";
@@ -209,6 +211,8 @@ async function ReportPane({
   let total = 0;
   let page = 1;
   let size = 100;
+  let decoders: RawDecoder[] = [];
+  let drift: RawDrift | null = null;
   try {
     const res = await core.rawRows(source.code, reportCode, params);
     snapshot = res.snapshot;
@@ -216,6 +220,8 @@ async function ReportPane({
     total = res.total;
     page = res.page ?? 1;
     size = res.size ?? 100;
+    decoders = res.decoders ?? [];
+    drift = res.drift ?? null;
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
@@ -255,6 +261,17 @@ async function ReportPane({
 
   return (
     <>
+      {drift && (
+        <div className="notice">
+          <b>Источник изменил состав колонок</b>
+          {drift.added.length > 0 && <>Появились: {drift.added.join(", ")}. </>}
+          {drift.removed.length > 0 && <>Пропали: {drift.removed.join(", ")}. </>}
+          {drift.reordered && <>Колонки переставлены местами. </>}
+          Загрузку это не ломает — снимок лёг со своим составом. Но связь с
+          карточками может перестать находиться: проверь вкладку «Сопоставление».
+        </div>
+      )}
+
       <div className="wgrid" style={{ marginBottom: 14 }}>
         <div className="wt">
           <div className="wl">Снято</div>
@@ -305,6 +322,7 @@ async function ReportPane({
           base={base}
           keep={keep}
           exportHref={exportHref}
+          decoders={decoders}
         />
       ) : (
         <MappingPane source={source.code} reportCode={reportCode} />

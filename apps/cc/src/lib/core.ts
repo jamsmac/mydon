@@ -250,6 +250,23 @@ export interface RawSnapshotMeta {
 
 export type RawFreshnessState = "never" | "stale" | "fresh";
 
+/** Расшифровка кодов одной колонки этой выгрузки. */
+export interface RawDecoder {
+  /** Номер колонки в текущем снимке. */
+  column: number;
+  values: Record<string, string>;
+  /** Коды, смысл которых не подтверждён: показываем вопросом, а не фактом. */
+  unconfirmed: string[];
+}
+
+/** Состав колонок изменился между двумя последними выгрузками. */
+export interface RawDrift {
+  prevFetchedAt: string;
+  added: string[];
+  removed: string[];
+  reordered: boolean;
+}
+
 export interface RawReportState {
   sourceCode: string;
   reportCode: string;
@@ -405,6 +422,8 @@ export const core = {
       rows: { idx: number; cells: string[] }[];
       page?: number;
       size?: number;
+      decoders: RawDecoder[];
+      drift?: RawDrift | null;
     }>(`/raw/report/${encodeURIComponent(source)}/${encodeURIComponent(report)}/rows${qs ? `?${qs}` : ""}`);
   },
   rawMapping: (source: string, report: string) =>

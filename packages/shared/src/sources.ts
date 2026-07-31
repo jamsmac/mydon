@@ -10,33 +10,44 @@
  */
 
 /**
+ * Названия колонки, под которыми роль встречается у источника.
+ *
+ * Их бывает несколько: один и тот же отчёт панели gjvending отдаёт «Machine
+ * Code» при выгрузке файлом и `machine_code` при чтении через /api/order/list.
+ * Это один отчёт с двумя словарями, а не два разных.
+ */
+export type RoleNames = string | readonly string[];
+
+/**
  * Роли колонок — договор о том, как отчёт связан с реестром MYDON.
  *
- * Ключ роли → ТОЧНОЕ название колонки у источника. Название, а не номер:
- * порядок колонок источник однажды поменяет, а заголовок держится годами.
- * Роль, которой нет в отчёте, просто не указывается — выдумывать нельзя.
+ * Ключ роли → название колонки у источника (или несколько названий). Название,
+ * а не номер: порядок колонок источник однажды поменяет, а заголовок держится
+ * годами. Роль, которой нет в отчёте, просто не указывается — выдумывать нельзя.
  */
 export interface RawColumnRoles {
   /** Серийник автомата: сопоставляется с entity.externalRef карточки автомата. */
-  machine?: string;
+  machine?: RoleNames;
   /** Точка (адрес) — сверяется с attrs «точка» карточки автомата. */
-  point?: string;
+  point?: RoleNames;
   /** Товар: сопоставляется с карточкой товара (entity type=product). */
-  product?: string;
+  product?: RoleNames;
   /** Вкус/вариант товара — уточнение к товару, отдельной карточкой не является. */
-  flavour?: string;
+  flavour?: RoleNames;
   /** Сумма операции. Приводить к числу можно только на слое разбора. */
-  amount?: string;
+  amount?: RoleNames;
   /** Время операции у источника (локальное, Asia/Tashkent). */
-  ts?: string;
+  ts?: RoleNames;
   /** Идентификатор операции у источника — ключ от двойного учёта. */
-  externalId?: string;
-  /** Статус операции: оплачено, возврат… */
-  status?: string;
+  externalId?: RoleNames;
+  /** Статус оплаты. */
+  status?: RoleNames;
   /** Тип операции: обычная продажа или тестовая отгрузка (в выручку не идёт). */
-  kind?: string;
+  kind?: RoleNames;
   /** Способ оплаты: мост к инкассации (наличные) и к money_flow (Payme, Click). */
-  payment?: string;
+  payment?: RoleNames;
+  /** Чем закончилась выдача: доставлено, сбой, не доставлено. */
+  fulfilment?: RoleNames;
 }
 
 /** Отчёт внутри системы-источника. */
@@ -54,6 +65,43 @@ export interface RawReportDef {
    * связать с карточками нечего, пока не пришла первая выгрузка.
    */
   roles?: RawColumnRoles;
+  /** Расшифровки кодов источника: «cash» → «наличные». */
+  dicts?: readonly RawValueDict[];
+}
+
+/**
+ * Расшифровка кодов одной колонки.
+ *
+ * Сырьё остаётся сырьём: в базе лежит «userDefined», а расшифровка живёт
+ * рядом и показывается подсказкой. Заменять код переводом нельзя — тогда
+ * выгрузку не сверить с источником.
+ */
+export interface RawValueDict {
+  role: keyof RawColumnRoles;
+  values: Readonly<Record<string, string>>;
+  /**
+   * Коды, смысл которых НЕ подтверждён. Показываются со знаком вопроса:
+   * догадка, выданная за факт, хуже отсутствия расшифровки.
+   */
+  unconfirmed?: readonly string[];
+}
+
+/** Расшифровка значения. `confirmed: false` — смысл не подтверждён. */
+export interface RawDecoded {
+  label: string;
+  confirmed: boolean;
+}
+
+/** Расшифровать код источника. null — расшифровки нет, и выдумывать её нельзя. */
+export function decodeRawValue(
+  dict: RawValueDict | undefined,
+  value: string,
+): RawDecoded | null {
+  if (!dict) return null;
+  const key = value.trim();
+  const label = dict.values[key];
+  if (label === undefined) return null;
+  return { label, confirmed: !(dict.unconfirmed ?? []).includes(key) };
 }
 
 /** Что сопоставляется с карточками реестра. */
@@ -117,18 +165,51 @@ export const RAW_SOURCES: readonly RawSourceDef[] = [
         // Роли выверены по выгрузке от 30.07.2026: «Machine Code» отдаёт тот же
         // серийник, что уже лежит в карточках автоматов (6620191f0000), поэтому
         // автоматы связываются точно, без догадок.
+        //
+        // Второе название в каждой паре — поле /api/order/list: панель отдаёт
+        // один и тот же отчёт двумя словарями, и оба должны узнаваться.
         roles: {
-          machine: "Machine Code",
-          point: "Address",
-          product: "Goods name",
-          flavour: "Flavour name",
-          amount: "Order price",
-          ts: "Creation time",
-          externalId: "Order number",
-          status: "Order status",
-          kind: "Order type",
-          payment: "Order resource",
+          machine: ["Machine Code", "machine_code"],
+          point: ["Address", "address"],
+          product: ["Goods name", "operate_goods_name"],
+          flavour: ["Flavour name", "taste_name"],
+          amount: ["Order price", "orderPrice"],
+          ts: ["Creation time", "gmt_create"],
+          externalId: ["Order number", "order_no"],
+          status: ["Order status", "payment_status"],
+          kind: ["Order type", "order_type"],
+          payment: ["Order resource", "order_source"],
+          fulfilment: ["Brew status", "brewing_status"],
         },
+        dicts: [
+          {
+            role: "payment",
+            // Расшифровки сняты с форматтеров панели. «userDefined» интерфейс
+            // переводит как «Таможенный платеж» — это ошибка перевода
+            // китайского «пользовательский способ». Что за канал на самом деле,
+            // не подтверждено, а на нём 181 млн сум: показываем вопросом.
+            values: {
+              cash: "наличные",
+              cash0: "наличные с нулевой суммой",
+              userDefined: "пользовательский способ",
+              vip: "VIP-карта",
+              credit: "карта",
+              testShipment: "тестовая выдача",
+              send: "выдача вручную",
+            },
+            unconfirmed: ["userDefined"],
+          },
+          {
+            role: "fulfilment",
+            values: {
+              "0": "не доставлено",
+              "1": "в процессе выдачи",
+              "2": "доставлен",
+              "10": "доставка подтверждена",
+              "11": "сбой доставки",
+            },
+          },
+        ],
       },
       {
         code: "goods_sale",
@@ -212,10 +293,20 @@ export function roleColumnIndex(
   roles: RawColumnRoles | undefined,
   role: keyof RawColumnRoles,
 ): number {
-  const name = roles?.[role];
-  if (!name) return -1;
-  const wanted = normalizeSourceKey(name);
-  return columns.findIndex((c) => normalizeSourceKey(c) === wanted);
+  const names = roles?.[role];
+  if (!names) return -1;
+  const wanted = (typeof names === "string" ? [names] : names).map(normalizeSourceKey);
+  return columns.findIndex((c) => wanted.includes(normalizeSourceKey(c)));
+}
+
+/** Как роль называется у источника — для показа владельцу («колонка …»). */
+export function roleColumnName(
+  roles: RawColumnRoles | undefined,
+  role: keyof RawColumnRoles,
+): string | null {
+  const names = roles?.[role];
+  if (!names) return null;
+  return typeof names === "string" ? names : (names[0] ?? null);
 }
 
 /** Система по коду. undefined — код чужой, принимать выгрузку нельзя. */

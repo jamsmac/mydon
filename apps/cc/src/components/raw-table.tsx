@@ -19,6 +19,8 @@ export interface RawTableProps {
   keep: Record<string, string>;
   /** Ссылка на скачивание с текущими фильтрами. */
   exportHref: string;
+  /** Расшифровки кодов источника: номер колонки → словарь значений. */
+  decoders: { column: number; values: Record<string, string>; unconfirmed: string[] }[];
 }
 
 const SIZES = [50, 100, 250, 500, 1000];
@@ -31,7 +33,7 @@ const SIZES = [50, 100, 250, 500, 1000];
  * на сервере: в выгрузке бывают десятки тысяч строк, в браузер их тянуть нельзя.
  */
 export function RawTable(props: RawTableProps) {
-  const { columns, rows, total, page, size, sort, dir, base, keep, exportHref } = props;
+  const { columns, rows, total, page, size, sort, dir, base, keep, exportHref, decoders } = props;
   const router = useRouter();
   const [pending, start] = useTransition();
   const [q, setQ] = useState(props.q);
@@ -70,6 +72,19 @@ export function RawTable(props: RawTableProps) {
   function sortBy(i: number): void {
     if (sort === i) go({ sort: String(i), dir: dir === "asc" ? "desc" : "asc", page: null });
     else go({ sort: String(i), dir: "asc", page: null });
+  }
+
+  /**
+   * Расшифровка кода источника. Сырьё остаётся сырьём: в ячейке по-прежнему
+   * «userDefined», а перевод идёт подсказкой рядом. Неподтверждённый смысл
+   * помечаем вопросом — догадка, выданная за факт, хуже её отсутствия.
+   */
+  function decode(colIdx: number, value: string): { label: string; confirmed: boolean } | null {
+    const d = decoders.find((x) => x.column === colIdx);
+    if (!d) return null;
+    const label = d.values[value.trim()];
+    if (label === undefined) return null;
+    return { label, confirmed: !d.unconfirmed.includes(value.trim()) };
   }
 
   const activeFilters = Object.values(filters).filter((v) => v.trim()).length;
@@ -237,14 +252,25 @@ export function RawTable(props: RawTableProps) {
                 </>
               ) : (
                 <dl className="kv">
-                  {columns.map((c, i) => (
-                    <div className="kvr" key={`r-${c}-${i}`}>
-                      <dt>
-                        {i + 1}. {c}
-                      </dt>
-                      <dd>{row?.cells[i] ? row.cells[i] : "—"}</dd>
-                    </div>
-                  ))}
+                  {columns.map((c, i) => {
+                    const v = row?.cells[i] ?? "";
+                    const d = v ? decode(i, v) : null;
+                    return (
+                      <div className="kvr" key={`r-${c}-${i}`}>
+                        <dt>
+                          {i + 1}. {c}
+                        </dt>
+                        <dd>
+                          {v ? v : "—"}
+                          {d && (
+                            <span className={`decoded ${d.confirmed ? "" : "unsure"}`}>
+                              {d.confirmed ? d.label : `${d.label} — не подтверждено`}
+                            </span>
+                          )}
+                        </dd>
+                      </div>
+                    );
+                  })}
                 </dl>
               )}
             </div>

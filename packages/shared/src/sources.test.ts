@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   RAW_SOURCES,
+  decodeRawValue,
   findRawReport,
   normalizeSourceKey,
   rawFreshness,
   roleColumnIndex,
+  roleColumnName,
 } from "./sources";
 
 describe("Справочник источников VendHub", () => {
@@ -86,5 +88,52 @@ describe("Свежесть выгрузки", () => {
   it("граница порога считается свежей", () => {
     assert.equal(rawFreshness("2026-07-23T22:00:00+05:00", now, 7), "fresh");
     assert.equal(rawFreshness("2026-07-23T21:00:00+05:00", now, 7), "stale");
+  });
+});
+
+describe("Один отчёт — два словаря колонок", () => {
+  // Панель отдаёт «Machine Code» при выгрузке файлом и `machine_code`
+  // через /api/order/list. Это один отчёт, а не два разных.
+  const roles = findRawReport("gjvending", "order_query")?.roles;
+
+  it("колонка узнаётся и в выгрузке файлом, и в ответе API", () => {
+    const asFile = ["Order number", "Goods name", "Machine Code"];
+    const asApi = ["order_no", "operate_goods_name", "machine_code"];
+    assert.equal(roleColumnIndex(asFile, roles, "machine"), 2);
+    assert.equal(roleColumnIndex(asApi, roles, "machine"), 2);
+    assert.equal(roleColumnIndex(asFile, roles, "product"), 1);
+    assert.equal(roleColumnIndex(asApi, roles, "product"), 1);
+  });
+
+  it("владельцу показывается первое название — то, что он видит в панели", () => {
+    assert.equal(roleColumnName(roles, "machine"), "Machine Code");
+    assert.equal(roleColumnName(roles, "product"), "Goods name");
+    assert.equal(roleColumnName(roles, "amount"), "Order price");
+    assert.equal(roleColumnName(undefined, "machine"), null);
+  });
+});
+
+describe("Расшифровка кодов источника", () => {
+  const dict = findRawReport("gjvending", "order_query")?.dicts?.find((d) => d.role === "payment");
+
+  it("известный код переводится", () => {
+    assert.deepEqual(decodeRawValue(dict, "cash"), { label: "наличные", confirmed: true });
+    assert.deepEqual(decodeRawValue(dict, "vip"), { label: "VIP-карта", confirmed: true });
+  });
+
+  it("userDefined помечен как неподтверждённый: на нём 181 млн сум", () => {
+    const d = decodeRawValue(dict, "userDefined");
+    assert.equal(d?.confirmed, false, "догадка не должна выдаваться за факт");
+  });
+
+  it("незнакомый код не переводится наугад", () => {
+    assert.equal(decodeRawValue(dict, "неведомое"), null);
+    assert.equal(decodeRawValue(undefined, "cash"), null);
+  });
+
+  it("статус выдачи расшифрован по кодам панели", () => {
+    const brew = findRawReport("gjvending", "order_query")?.dicts?.find((d) => d.role === "fulfilment");
+    assert.equal(decodeRawValue(brew, "2")?.label, "доставлен");
+    assert.equal(decodeRawValue(brew, "11")?.label, "сбой доставки");
   });
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { csvCell, normalizeRowsQuery, parseColumnFilters, toCsv } from "./raw.service";
+import { compareColumns, csvCell, normalizeRowsQuery, parseColumnFilters, toCsv } from "./raw.service";
 
 describe("Сырой слой: разбор параметров страницы", () => {
   it("номера колонок и страниц берутся только целыми и положительными", () => {
@@ -77,5 +77,39 @@ describe("Сырой слой: выгрузка в CSV", () => {
   it("цифры не приводятся к числу: «15000.00» остаётся как в источнике", () => {
     const csv = toCsv(["Order price"], [{ idx: 1, cells: ["15000.00"] }]);
     assert.ok(csv.includes("15000.00"), "приведение типов на сыром слое запрещено");
+  });
+});
+
+describe("Сырой слой: дрейф состава колонок", () => {
+  const base = ["Order number", "Goods name", "Machine Code"];
+
+  it("одинаковый состав — дрейфа нет", () => {
+    const d = compareColumns(base, [...base]);
+    assert.deepEqual(d, { added: [], removed: [], reordered: false });
+  });
+
+  it("появилась и пропала колонка — обе названы", () => {
+    const d = compareColumns(base, ["Order number", "Machine Code", "Cup type"]);
+    assert.deepEqual(d.added, ["Cup type"]);
+    assert.deepEqual(d.removed, ["Goods name"]);
+  });
+
+  it("перестановка при том же составе замечается", () => {
+    const d = compareColumns(base, ["Machine Code", "Order number", "Goods name"]);
+    assert.equal(d.reordered, true);
+    assert.deepEqual(d.added, []);
+    assert.deepEqual(d.removed, []);
+  });
+
+  it("о перестановке не сообщаем, когда состав и так изменился", () => {
+    // Владельцу важнее пропажа колонки: «ещё и переставлены» только шумит.
+    const d = compareColumns(base, ["Machine Code", "Order number"]);
+    assert.equal(d.reordered, false);
+    assert.deepEqual(d.removed, ["Goods name"]);
+  });
+
+  it("регистр и лишние пробелы не считаются изменением", () => {
+    const d = compareColumns(base, ["order number", "  Goods   name", "MACHINE CODE"]);
+    assert.deepEqual(d, { added: [], removed: [], reordered: false });
   });
 });
