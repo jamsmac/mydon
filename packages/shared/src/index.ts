@@ -58,3 +58,4 @@ export * from "./vendinghub";
 // Построчная сверка двух источников по номеру операции.
 export * from "./reconcile";
 export * from "./unify";
+export * from "./xlsx";

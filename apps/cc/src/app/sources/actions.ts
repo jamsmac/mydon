@@ -1,7 +1,15 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { DELIMITERS, FISCAL_FIELDS, decodeUpload, fiscalGaps, parseDelimited } from "@mydon/shared";
+import {
+  DELIMITERS,
+  FISCAL_FIELDS,
+  decodeUpload,
+  fiscalGaps,
+  looksLikeXlsx,
+  parseDelimited,
+  parseXlsx,
+} from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
 
 export interface ActionResult {
@@ -227,17 +235,43 @@ export async function importFile(form: FormData): Promise<ActionResult & { rows?
     return v.length > 0 ? v : undefined;
   };
 
-  const { text, encoding } = decodeUpload(new Uint8Array(await file.arrayBuffer()));
-  const chosen = String(form.get("delimiter") ?? "");
-  const parsed = parseDelimited(
-    text,
-    (DELIMITERS as readonly string[]).includes(chosen) ? (chosen as (typeof DELIMITERS)[number]) : undefined,
-  );
-  if (parsed.columns.length === 0) {
-    return { ok: false, error: `Файл прочитан как ${encoding}, но заголовков в нём нет` };
-  }
-  if (parsed.rows.length === 0) {
-    return { ok: false, error: `Файл прочитан как ${encoding}: одни заголовки, ни одной строки` };
+  // Excel-файл (.xlsx) — это zip, а не текст: читаем его своим разбором. CSV/TSV
+  // идут прежним путём. Что именно прочитали, попадёт в примечание снимка.
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let columns: string[];
+  let rows: string[][];
+  let readAs: string;
+  if (looksLikeXlsx(bytes)) {
+    let sheet;
+    try {
+      sheet = await parseXlsx(bytes);
+    } catch (err) {
+      return { ok: false, error: `Excel-файл не прочитался: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    columns = sheet.columns;
+    rows = sheet.rows;
+    readAs =
+      `Excel, лист «${sheet.sheet}»` + (sheet.ragged > 0 ? `, строк с неровным числом ячеек: ${sheet.ragged}` : "");
+    if (columns.length === 0) return { ok: false, error: "В Excel-файле нет заголовков" };
+    if (rows.length === 0) return { ok: false, error: "В Excel-файле одни заголовки, ни одной строки" };
+  } else {
+    const { text, encoding } = decodeUpload(bytes);
+    const chosen = String(form.get("delimiter") ?? "");
+    const parsed = parseDelimited(
+      text,
+      (DELIMITERS as readonly string[]).includes(chosen) ? (chosen as (typeof DELIMITERS)[number]) : undefined,
+    );
+    if (parsed.columns.length === 0) {
+      return { ok: false, error: `Файл прочитан как ${encoding}, но заголовков в нём нет` };
+    }
+    if (parsed.rows.length === 0) {
+      return { ok: false, error: `Файл прочитан как ${encoding}: одни заголовки, ни одной строки` };
+    }
+    columns = parsed.columns;
+    rows = parsed.rows;
+    readAs =
+      `прочитано как ${encoding}, разделитель «${parsed.delimiter === "\t" ? "таб" : parsed.delimiter}»` +
+      (parsed.ragged > 0 ? `, строк с неровным числом ячеек: ${parsed.ragged}` : "");
   }
 
   // Время съёма: владелец называет его сам — это НЕ время загрузки. Именно оно
@@ -248,23 +282,19 @@ export async function importFile(form: FormData): Promise<ActionResult & { rows?
   // несёт свою позицию: повтор после обрыва ляжет на место, а не хвостом.
   const CHUNK = 500;
   try {
-    for (let i = 0; i < parsed.rows.length; i += CHUNK) {
+    for (let i = 0; i < rows.length; i += CHUNK) {
       await core.importRaw(key, {
         source,
         report,
         fetchedAt,
-        columns: parsed.columns,
-        rows: parsed.rows.slice(i, i + CHUNK),
+        columns,
+        rows: rows.slice(i, i + CHUNK),
         offset: i,
         append: i > 0,
         periodFrom: str("periodFrom"),
         periodTo: str("periodTo"),
         account: str("account"),
-        note:
-          str("note") ??
-          `Загружено файлом «${file.name}», прочитано как ${encoding}, разделитель «${
-            parsed.delimiter === "\t" ? "таб" : parsed.delimiter
-          }»${parsed.ragged > 0 ? `, строк с неровным числом ячеек: ${parsed.ragged}` : ""}`,
+        note: str("note") ?? `Загружено файлом «${file.name}», ${readAs}`,
         importedBy: "owner",
       });
     }
@@ -272,7 +302,7 @@ export async function importFile(form: FormData): Promise<ActionResult & { rows?
     return fail(err);
   }
   revalidatePath("/domain/vendhub");
-  return { ok: true, rows: parsed.rows.length };
+  return { ok: true, rows: rows.length };
 }
 
 /**
