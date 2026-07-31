@@ -104,6 +104,92 @@ export function decodeRawValue(
   return { label, confirmed: !(dict.unconfirmed ?? []).includes(key) };
 }
 
+/**
+ * Поля карточки товара, без которых чек по нему не собирается.
+ *
+ * Это не «желательно заполнить», а условие фискализации: нет ИКПУ, упаковки
+ * или ставки НДС — чек не примут, и продажа пройдёт мимо кассы, даже если
+ * деньги получены. Список живёт здесь, а не в экране: по нему считают и Core,
+ * и оболочка, и расходиться они не имеют права.
+ */
+export const FISCAL_FIELDS = ["ИКПУ", "упаковка", "НДС"] as const;
+export type FiscalField = (typeof FISCAL_FIELDS)[number];
+
+/**
+ * Длина кода ИКПУ.
+ *
+ * Перенесено из рабочих систем владельца, где правило одно и то же:
+ * `validate_fiscal` в mydon-stock («ИКПУ должен быть 17 цифр или пусто») и
+ * `IKPU_CODE_REGEX = /^\d{17}$/` в VendHub-OS. Своего правила не выдумываем:
+ * чек принимает касса, а не мы.
+ */
+export const IKPU_DIGITS = 17;
+
+/** Чем именно плохо поле: его нет или оно заполнено неверно. */
+export type FiscalFlaw = "нет" | "неверно";
+
+export interface FiscalGap {
+  field: FiscalField;
+  flaw: FiscalFlaw;
+  /** Что не так — словами, чтобы владелец чинил, а не гадал. */
+  why: string;
+}
+
+/** Число из значения поля: «12», «12%», «12 %», «12,5» — одно и то же. */
+function asRate(value: unknown): number | null {
+  // Неразрывные пробелы записаны кодами: в исходнике их не отличить от обычных.
+  const s = String(value)
+    .replace(/[\s\u00A0\u202F%]/g, "")
+    .replace(",", ".");
+  if (s.length === 0) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Что мешает выбить чек по карточке. Пусто — соберётся.
+ *
+ * Различаются два состояния, и смешивать их нельзя: поля нет — его не
+ * выясняли; поле есть, но короче 17 цифр — кто-то вписал огрызок, карточка
+ * выглядит заполненной, а чек всё равно не пройдёт. Второе опаснее первого
+ * именно тем, что незаметно.
+ *
+ * Ставка НДС 0 — законное значение (льготные позиции), и незаполненным оно не
+ * считается: в Узбекистане ноль записывается явно, а пустое поле значит «не
+ * выясняли». Выдавать одно за другое нельзя.
+ */
+export function fiscalGaps(attrs: Record<string, unknown> | null | undefined): FiscalGap[] {
+  const a = attrs ?? {};
+  const gaps: FiscalGap[] = [];
+  const empty = (v: unknown) => v === null || v === undefined || String(v).trim().length === 0;
+
+  const ikpu = a["ИКПУ"];
+  if (empty(ikpu)) gaps.push({ field: "ИКПУ", flaw: "нет", why: "код не выяснен" });
+  else {
+    const digits = String(ikpu).replace(/[\s\u00A0\u202F-]/g, "");
+    if (!new RegExp(`^\\d{${IKPU_DIGITS}}$`).test(digits)) {
+      gaps.push({
+        field: "ИКПУ",
+        flaw: "неверно",
+        why: `должно быть ${IKPU_DIGITS} цифр, а тут ${digits.length}`,
+      });
+    }
+  }
+
+  if (empty(a["упаковка"])) gaps.push({ field: "упаковка", flaw: "нет", why: "единица не выбрана" });
+
+  const vat = a["НДС"];
+  if (empty(vat)) gaps.push({ field: "НДС", flaw: "нет", why: "ставка не выяснена" });
+  else {
+    const rate = asRate(vat);
+    if (rate === null || rate < 0 || rate > 100) {
+      gaps.push({ field: "НДС", flaw: "неверно", why: "ставка читается не как процент" });
+    }
+  }
+
+  return gaps;
+}
+
 /** Что сопоставляется с карточками реестра. */
 export const RAW_LINK_KINDS = ["machine", "product", "point"] as const;
 export type RawLinkKind = (typeof RAW_LINK_KINDS)[number];
