@@ -757,3 +757,6 @@ a.rowlink:hover { background: var(--surf-2); }
 @media (min-width: 700px) {
   .srcfr { grid-template-columns: 1fr 1fr; }
 }
+.srcform input[type="file"] { padding: 6px 8px; height: auto; font-size: 12.5px; }
+.srcform input[type="date"],
+.srcform input[type="datetime-local"] { color-scheme: dark; }

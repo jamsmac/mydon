@@ -665,6 +665,16 @@ export const core = {
     get<{ machines: MachineStays[] }>(
       `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
     ),
+  /**
+   * Приём выгрузки. Ключ тот же, что у скрипта: сырой слой не знает, кто принёс
+   * строки, и правила приёма у всех одни.
+   */
+  importRaw: (key: string, input: Record<string, unknown>) =>
+    send<{ snapshotId: string; rows: number; total: number }>(
+      `/raw/import/${encodeURIComponent(key)}`,
+      "POST",
+      input,
+    ),
   saveRawSource: (input: {
     code: string;
     title: string;
