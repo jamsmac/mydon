@@ -1200,6 +1200,47 @@ export class RawService {
     };
   }
 
+  /**
+   * Объединённый журнал файлом: весь союз, чтобы разобрать спорные в Excel.
+   *
+   * Плоская таблица, а не карточки экрана: на каждый заказ — строка, на каждое
+   * поле — две колонки, по одной на источник. Владелец видит оба значения рядом
+   * и решает, какое верное. Разбивки на страницы в файле нет — забираем весь
+   * союз (до MAX_EXPORT, как и выгрузка сырых строк).
+   */
+  async unifyExportCsv(
+    aSource: string,
+    aReport: string,
+    bSource: string,
+    bReport: string,
+  ): Promise<string> {
+    const input = await this.reconInputs(aSource, aReport, bSource, bReport);
+    // BOM записан кодом: без него Excel открывает кириллицу кракозябрами.
+    if (!input) return `\uFEFFНечего объединять: у одного из отчётов нет роли «номер операции»`;
+
+    const { fields, rowsA, rowsB, meta } = input;
+    const u = unify(rowsA, rowsB, fields, 1, MAX_EXPORT);
+    const aT = meta.a.title;
+    const bT = meta.b.title;
+
+    const header = ["Номер операции", "Где", "Спорный", "Задвоен"];
+    for (const f of fields) header.push(`${f.label} · ${aT}`, `${f.label} · ${bT}`);
+
+    const lines = [header.map(csvCell).join(";")];
+    for (const o of u.orders) {
+      const byRole = new Map(o.fields.map((x) => [x.role, x]));
+      const where =
+        o.presence === "both" ? "оба" : o.presence === "onlyA" ? `только ${aT}` : `только ${bT}`;
+      const cols: string[] = [o.key, where, o.conflict ? "да" : "", o.duplicated ? "да" : ""];
+      for (const f of fields) {
+        const v = byRole.get(f.role);
+        cols.push(v?.a ?? "", v?.b ?? "");
+      }
+      lines.push(cols.map(csvCell).join(";"));
+    }
+    return `\uFEFF${lines.join("\r\n")}`;
+  }
+
   /** Заголовки источников для шапки сверки/объединения — без строк. */
   private async reconMeta(
     aSource: string,

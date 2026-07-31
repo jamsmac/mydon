@@ -312,6 +312,18 @@ export class RawController {
     return this.raw.unifySources(aSource, aReport, bSource, bReport, normalizeRowsQuery(query));
   }
 
+  /** Объединённый журнал файлом: весь союз в CSV, чтобы разобрать спорные в Excel. */
+  @Get("unify/:aSource/:aReport/vs/:bSource/:bReport/export.csv")
+  @Header("Content-Type", "text/csv; charset=utf-8")
+  unifyExportCsv(
+    @Param("aSource") aSource: string,
+    @Param("aReport") aReport: string,
+    @Param("bSource") bSource: string,
+    @Param("bReport") bReport: string,
+  ): Promise<string> {
+    return this.raw.unifyExportCsv(aSource, aReport, bSource, bReport);
+  }
+
   /** Каким способом приходят деньги — срез для сверки с платёжными системами. */
   @Get("payments/:source/:report")
   payments(@Param("source") source: string, @Param("report") report: string) {
