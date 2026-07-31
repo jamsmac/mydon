@@ -67,10 +67,60 @@ export const entity = pgTable(
     name: text("name").notNull(),
     externalRef: text("external_ref"), // ссылка на источник (ИНН, id в VHM24 и т.п.)
     attrs: jsonb("attrs").default({}).notNull(),
+    /**
+     * Карточка утверждена владельцем.
+     *
+     * NULL — заведена не им (из выгрузки источника, кодом, агентом) и ждёт
+     * утверждения. До него карточка существует и её видно, но фактом она не
+     * считается и на экранах помечена отдельно.
+     *
+     * Слово владельца — единственное, что делает запись реестра фактом.
+     */
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approvedBy: text("approved_by"),
+    /** Откуда карточка взялась: код источника или пусто, если завёл владелец. */
+    createdFrom: text("created_from"),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [index("entity_org_type_idx").on(t.orgId, t.type)],
+);
+
+/**
+ * Значение поля карточки, предложенное НЕ владельцем.
+ *
+ * Правило владельца: всё, что по автоматам и товарам вписал не он, лежит
+ * отдельно и ждёт утверждения. Поэтому такие значения НЕ попадают в
+ * `entity.attrs` сразу: пока значение здесь, оно не факт, и всё, что считается
+ * поверх реестра — фискальная готовность, журнал, сверки, — его не видит.
+ *
+ * Утвердил — значение переехало в карточку и запись отсюда ушла. Отклонил —
+ * ушла без следа в карточке. Промежуточного состояния «вроде записано, но
+ * не совсем» быть не должно.
+ */
+export const entityDraft = pgTable(
+  "entity_draft",
+  {
+    id: id(),
+    entityId: uuid("entity_id")
+      .notNull()
+      .references(() => entity.id, { onDelete: "cascade" }),
+    /** Имя поля: ключ attrs, либо «название» / «номер» для полей самой карточки. */
+    field: text("field").notNull(),
+    /** Предложенное значение строкой — как его дал источник. */
+    value: text("value").notNull(),
+    /** Что стоит в карточке сейчас: владелец должен видеть, что заменяется. */
+    current: text("current"),
+    /** Откуда взято: код источника, имя агента. Владелец читает это словами. */
+    origin: text("origin").notNull(),
+    /** Кто предложил: ingest | agent:<имя> | source:<код>. */
+    setBy: text("set_by").default("system").notNull(),
+    /** Почему предложено — если требуется объяснение. */
+    note: text("note"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("ux_entity_draft").on(t.entityId, t.field)],
 );
 
 // ── person: сотрудники, партнёры, контакты ──

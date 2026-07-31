@@ -3,8 +3,20 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import Link from "next/link";
-import { createProductFromSource, linkRawValue } from "../app/sources/actions";
+import { FISCAL_FIELDS } from "@mydon/shared";
+import {
+  approveEntity,
+  createProductWithFiscal,
+  linkRawValue,
+  saveFiscal,
+} from "../app/sources/actions";
 import type { ProductReview, SourceProduct } from "../lib/core";
+
+/** Заготовки: значения и карточки-доноры из уже заполненных карточек. */
+export interface FiscalPresets {
+  values: Record<string, string[]>;
+  donors: { id: string; name: string; fields: Record<string, string> }[];
+}
 
 /** Сумма без «сум» в хвосте: в столбце денег единица и так очевидна. */
 function num(n: number): string {
@@ -35,11 +47,13 @@ function ProductRow({
   p,
   total,
   options,
+  presets,
 }: {
   source: string;
   p: SourceProduct;
   total: number;
   options: { id: string; name: string }[];
+  presets: FiscalPresets;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -56,6 +70,15 @@ function ProductRow({
 
   const blocked = p.gaps.length > 0;
   const noCard = p.entityId === null && !p.dismissed;
+
+  /** Поле уже годное: карточка есть и претензий к этому полю нет. */
+  const isFilled = (f: string): boolean =>
+    p.entityId !== null && !p.gaps.some((g) => g.field === f);
+  const [fiscal, setFiscal] = useState<Record<string, string>>(() =>
+    Object.fromEntries(FISCAL_FIELDS.map((f) => [f, ""])),
+  );
+  const [filling, setFilling] = useState(false);
+  const touched = FISCAL_FIELDS.some((f) => (fiscal[f] ?? "").trim().length > 0);
 
   return (
     <div className={`prow ${blocked ? "hot" : ""}`}>
@@ -77,10 +100,23 @@ function ProductRow({
           <span className="chip h">нет карточки</span>
         ) : (
           <>
-            <Link href={`/card/${p.entityId}`} className="mapok">
+            <Link href={`/card/${p.entityId}`} className={p.approved ? "mapok" : "warn"}>
               {p.entityName}
             </Link>
             <span className="chip">{p.decidedBy === "auto" ? "совпало точно" : "связал ты"}</span>
+            {!p.approved && (
+              <>
+                <span className="chip h">ждёт твоего слова</span>
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  disabled={pending}
+                  onClick={() => act(() => approveEntity(p.entityId!))}
+                >
+                  Утвердить
+                </button>
+              </>
+            )}
             {blocked ? (
               p.gaps.map((g) => (
                 <span className="chip h" key={g.field} title={g.why}>
@@ -113,17 +149,82 @@ function ProductRow({
           ))}
           <option value="__none__">карточка не нужна</option>
         </select>
-        {noCard && (
-          <button
-            type="button"
-            className="btn sm"
-            disabled={pending}
-            onClick={() => act(() => createProductFromSource(source, p.name))}
-          >
-            Завести карточку
+        {(noCard || blocked) && !filling && (
+          <button type="button" className="btn sm" onClick={() => setFilling(true)}>
+            {noCard ? "Завести карточку" : "Дозаполнить"}
           </button>
         )}
       </div>
+
+      {/* Заполнение фискальных полей прямо здесь: открывать каждую из
+          четырнадцати карточек по отдельности — час работы там, где нужна
+          минута. Значения подсказываются из тех карточек, что уже заполнены;
+          выдуманных «правильных» значений у нас нет. */}
+      {filling && (
+        <div className="pfisc">
+          {presets.donors.length > 0 && (
+            <div className="pfrow">
+              <span className="pmeta">Взять как у:</span>
+              {presets.donors.slice(0, 6).map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  className="btn sm ghost"
+                  disabled={pending}
+                  onClick={() => setFiscal({ ...d.fields })}
+                >
+                  {d.name}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="pfrow">
+            {FISCAL_FIELDS.map((f) => (
+              <label className="pfl" key={f}>
+                {f}
+                {isFilled(f) && <span className="chip g">уже есть</span>}
+                <input
+                  list={`preset-${f}`}
+                  value={fiscal[f] ?? ""}
+                  disabled={pending}
+                  placeholder={f === "ИКПУ" ? "17 цифр" : f === "НДС" ? "12%" : "стакан 0.2"}
+                  onChange={(e) => setFiscal({ ...fiscal, [f]: e.target.value })}
+                />
+                <datalist id={`preset-${f}`}>
+                  {(presets.values[f] ?? []).map((v) => (
+                    <option key={v} value={v} />
+                  ))}
+                </datalist>
+              </label>
+            ))}
+          </div>
+          <div className="pfrow">
+            <button
+              type="button"
+              className="btn sm"
+              disabled={pending || (noCard ? false : !touched)}
+              onClick={() =>
+                act(async () => {
+                  const res = noCard
+                    ? await createProductWithFiscal(source, p.name, fiscal)
+                    : await saveFiscal(p.entityId!, fiscal);
+                  if (res.ok) setFilling(false);
+                  return res;
+                })
+              }
+            >
+              {noCard ? "Завести и заполнить" : "Сохранить"}
+            </button>
+            <button type="button" className="btn sm ghost" onClick={() => setFilling(false)}>
+              Отмена
+            </button>
+            <span className="pmeta">
+              Пустое поле — честное «не выяснили». Неверное не примется: ИКПУ ровно
+              17 цифр, как в кассе.
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Двойники: решает владелец, поэтому рядом всегда лежит основание. */}
       {noCard && p.lookalikes.length > 0 && (
@@ -163,10 +264,12 @@ export function ProductsReview({
   source,
   review,
   cards,
+  presets,
 }: {
   source: string;
   review: ProductReview;
   cards: { id: string; name: string }[];
+  presets: FiscalPresets;
 }) {
   const [onlyBlocked, setOnlyBlocked] = useState(true);
 
@@ -219,7 +322,9 @@ export function ProductsReview({
       </div>
 
       <p className="hint" style={{ marginBottom: 10 }}>
-        Разбирать сверху вниз: там деньги. Нет карточки и карточка без ИКПУ — для
+        Карточка, заведённая из выгрузки, помечена «ждёт твоего слова»: название
+        взято из чужой панели, и записью реестра оно становится, когда ты
+        подтвердишь. Разбирать сверху вниз: там деньги. Нет карточки и карточка без ИКПУ — для
         кассы одно и то же, чек не собирается, но чинятся они по-разному. Отдельно
         отмечено «заполнено, но неверно»: огрызок ИКПУ опаснее пустого поля, потому
         что карточка выглядит готовой. Правило — ровно 17 цифр, как в mydon-stock
@@ -255,7 +360,14 @@ export function ProductsReview({
       ) : (
         <div className="plist">
           {shown.map((p) => (
-            <ProductRow key={p.name} source={source} p={p} total={review.revenue} options={cards} />
+            <ProductRow
+              key={p.name}
+              source={source}
+              p={p}
+              total={review.revenue}
+              options={cards}
+              presets={presets}
+            />
           ))}
         </div>
       )}

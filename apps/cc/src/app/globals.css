@@ -760,3 +760,23 @@ a.rowlink:hover { background: var(--surf-2); }
 .srcform input[type="file"] { padding: 6px 8px; height: auto; font-size: 12.5px; }
 .srcform input[type="date"],
 .srcform input[type="datetime-local"] { color-scheme: dark; }
+
+/* заполнение фискальных полей прямо в строке ассортимента */
+.prow .pfisc {
+  display: flex; flex-direction: column; gap: 8px;
+  padding-top: 8px; border-top: 1px solid rgba(30, 51, 80, 0.6);
+}
+.prow .pfrow { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.prow .pfl { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--tx-3); }
+.prow .pfl input {
+  height: 32px; min-width: 170px; background: var(--bg); color: var(--tx);
+  border: 1px solid var(--line); border-radius: 8px; padding: 0 9px; font-size: 12.5px; outline: none;
+}
+.prow .pfl input:focus { border-color: var(--accent); }
+@media (min-width: 900px) {
+  .prow .pfisc { grid-column: 1 / -1; }
+}
+
+/* то, что ждёт слова владельца: данные, вписанные не им */
+.sect.appr { border-left: 3px solid var(--hot); padding-left: 12px; }
+.sect.appr .maprow .mapt { gap: 6px; }

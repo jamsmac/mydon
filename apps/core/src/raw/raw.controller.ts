@@ -287,6 +287,17 @@ export class RawController {
     return this.raw.paymentReview(source, report);
   }
 
+  /**
+   * Заготовки для фискальных полей: значения и карточки-доноры.
+   *
+   * Берутся из уже заполненных карточек, а не из справочника «правильных»
+   * значений: своего мы не выдумываем.
+   */
+  @Get("fiscal-presets")
+  fiscalPresets() {
+    return this.raw.fiscalPresets();
+  }
+
   /** Ассортимент источника: что продаётся и по чему не собирается чек. */
   @Get("products/:source/:report")
   products(@Param("source") source: string, @Param("report") report: string) {

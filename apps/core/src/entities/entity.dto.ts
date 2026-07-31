@@ -33,6 +33,16 @@ export class CreateEntityDto {
   @IsOptional()
   @IsObject()
   attrs?: Record<string, unknown>;
+
+  /**
+   * Откуда карточка взялась: код источника, имя агента.
+   *
+   * Пусто — завёл владелец, и карточка сразу считается утверждённой. Заполнено
+   * — карточка ждёт его слова: всё, что по автоматам и товарам вписал не он,
+   * фактом не считается, пока он не утвердил.
+   */
+  @IsOptional() @IsString() @MaxLength(128)
+  createdFrom?: string;
 }
 
 export class UpdateEntityDto {

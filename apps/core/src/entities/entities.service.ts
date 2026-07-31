@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, entity, org } from "@mydon/db";
+import { auditLog, entity, entityDraft, org } from "@mydon/db";
 import type { Domain } from "@mydon/shared";
 import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -35,6 +35,178 @@ export class EntitiesService {
     private readonly audit: AuditService,
   ) {}
 
+  /**
+   * Утвердить карточку: слово владельца делает её фактом.
+   *
+   * Вместе с карточкой утверждаются и все предложенные ей значения, если
+   * владелец этого попросил: разбирать четырнадцать позиций по одному полю —
+   * та же лишняя работа, от которой мы уходили.
+   */
+  async approve(id: string, actorRef = "owner", withDrafts = true): Promise<EntityRow> {
+    const [card] = await this.db.select().from(entity).where(eq(entity.id, id));
+    if (!card) throw new NotFoundException("Карточки нет");
+    return this.db.transaction(async (tx) => {
+      const attrs = { ...((card.attrs ?? {}) as Record<string, unknown>) };
+      let name = card.name;
+      if (withDrafts) {
+        const drafts = await tx.select().from(entityDraft).where(eq(entityDraft.entityId, id));
+        for (const d of drafts) {
+          if (d.field === "название") name = d.value;
+          else attrs[d.field] = d.value;
+        }
+        await tx.delete(entityDraft).where(eq(entityDraft.entityId, id));
+      }
+      const [updated] = await tx
+        .update(entity)
+        .set({ name, attrs, approvedAt: new Date(), approvedBy: actorRef, updatedAt: new Date() })
+        .where(eq(entity.id, id))
+        .returning();
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "entity.approve",
+        target: id,
+        before: card,
+        after: updated,
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * Предложить значение поля карточки.
+   *
+   * Значение НЕ попадает в карточку: пока оно здесь, оно не факт, и всё, что
+   * считается поверх реестра — фискальная готовность, журнал, сверки, — его не
+   * видит. Промежуточного состояния «вроде записано, но не совсем» быть не
+   * должно.
+   */
+  async propose(input: {
+    entityId: string;
+    field: string;
+    value: string;
+    origin: string;
+    setBy?: string;
+    note?: string;
+  }): Promise<{ ok: true }> {
+    const [card] = await this.db.select().from(entity).where(eq(entity.id, input.entityId));
+    if (!card) throw new NotFoundException("Карточки нет");
+    const attrs = (card.attrs ?? {}) as Record<string, unknown>;
+    const current =
+      input.field === "название" ? card.name : (attrs[input.field] as string | undefined);
+    // Предлагать то, что уже стоит, незачем — это шум, а не решение.
+    if (String(current ?? "") === input.value) return { ok: true };
+    const values = {
+      entityId: input.entityId,
+      field: input.field,
+      value: input.value,
+      current: current === undefined ? null : String(current),
+      origin: input.origin,
+      setBy: input.setBy ?? "system",
+      note: input.note ?? null,
+      updatedAt: new Date(),
+    };
+    await this.db
+      .insert(entityDraft)
+      .values(values)
+      .onConflictDoUpdate({ target: [entityDraft.entityId, entityDraft.field], set: values });
+    return { ok: true };
+  }
+
+  /** Утвердить одно предложенное значение. */
+  async approveField(entityId: string, field: string, actorRef = "owner"): Promise<EntityRow> {
+    const [draft] = await this.db
+      .select()
+      .from(entityDraft)
+      .where(and(eq(entityDraft.entityId, entityId), eq(entityDraft.field, field)));
+    if (!draft) throw new NotFoundException("Такого предложения нет");
+    const [card] = await this.db.select().from(entity).where(eq(entity.id, entityId));
+    if (!card) throw new NotFoundException("Карточки нет");
+    return this.db.transaction(async (tx) => {
+      const attrs = { ...((card.attrs ?? {}) as Record<string, unknown>) };
+      const patch: Record<string, unknown> = { updatedAt: new Date() };
+      if (field === "название") patch.name = draft.value;
+      else {
+        attrs[field] = draft.value;
+        patch.attrs = attrs;
+      }
+      const [updated] = await tx.update(entity).set(patch).where(eq(entity.id, entityId)).returning();
+      await tx.delete(entityDraft).where(eq(entityDraft.id, draft.id));
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "entity.field.approve",
+        target: entityId,
+        before: card,
+        after: updated,
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * Отклонить предложенное значение.
+   *
+   * Уходит без следа в карточке: «отклонено» — это решение, а не запись данных.
+   * След остаётся в журнале действий, где ему и место.
+   */
+  async rejectField(entityId: string, field: string, actorRef = "owner"): Promise<{ ok: true }> {
+    const [draft] = await this.db
+      .select()
+      .from(entityDraft)
+      .where(and(eq(entityDraft.entityId, entityId), eq(entityDraft.field, field)));
+    if (!draft) return { ok: true };
+    await this.db.delete(entityDraft).where(eq(entityDraft.id, draft.id));
+    await this.audit.record({
+      actorKind: "human",
+      actorRef,
+      action: "entity.field.reject",
+      target: entityId,
+      before: draft,
+    });
+    return { ok: true };
+  }
+
+  /** Предложенные значения карточки. Пусто — предлагать нечего. */
+  async drafts(entityId: string) {
+    return this.db
+      .select()
+      .from(entityDraft)
+      .where(eq(entityDraft.entityId, entityId))
+      .orderBy(entityDraft.field);
+  }
+
+  /** Всё, что ждёт слова владельца: карточки и предложенные значения. */
+  async pending(): Promise<{
+    cards: EntityRow[];
+    fields: (typeof entityDraft.$inferSelect & { entityName: string; entityType: string })[];
+  }> {
+    const cards = await this.db
+      .select()
+      .from(entity)
+      .where(sql`${entity.approvedAt} is null`)
+      .orderBy(desc(entity.createdAt));
+    const fields = await this.db
+      .select({
+        id: entityDraft.id,
+        entityId: entityDraft.entityId,
+        field: entityDraft.field,
+        value: entityDraft.value,
+        current: entityDraft.current,
+        origin: entityDraft.origin,
+        setBy: entityDraft.setBy,
+        note: entityDraft.note,
+        createdAt: entityDraft.createdAt,
+        updatedAt: entityDraft.updatedAt,
+        entityName: entity.name,
+        entityType: entity.type,
+      })
+      .from(entityDraft)
+      .innerJoin(entity, eq(entity.id, entityDraft.entityId))
+      .orderBy(entity.name);
+    return { cards, fields };
+  }
+
   /** id направления по коду; направления заводятся структурным сидом. */
   private async orgIdByDomain(domain: Domain): Promise<string> {
     const [row] = await this.db.select({ id: org.id }).from(org).where(eq(org.code, domain));
@@ -49,6 +221,11 @@ export class EntitiesService {
   /** Создание и запись в журнал — одной транзакцией (данные без следа недопустимы). */
   async create(dto: CreateEntityDto, actorRef = "system"): Promise<EntityRow> {
     const orgId = await this.orgIdByDomain(dto.domain);
+    // Слово владельца — единственное, что делает запись реестра фактом. Всё,
+    // что завёл не он (выгрузка источника, код, агент), ждёт утверждения:
+    // карточка видна, но фактом не считается и помечена отдельно.
+    const fromSource = (dto.createdFrom ?? "").trim();
+    const byOwner = fromSource.length === 0;
     return this.db.transaction(async (tx) => {
       const [created] = await tx
         .insert(entity)
@@ -58,6 +235,9 @@ export class EntitiesService {
           name: dto.name,
           externalRef: dto.externalRef ?? null,
           attrs: dto.attrs ?? {},
+          createdFrom: byOwner ? null : fromSource,
+          approvedAt: byOwner ? new Date() : null,
+          approvedBy: byOwner ? actorRef : null,
         })
         .returning();
 
@@ -91,6 +271,11 @@ export class EntitiesService {
         name: entity.name,
         externalRef: entity.externalRef,
         attrs: entity.attrs,
+        // Состояние утверждения едет вместе с карточкой: экран обязан отличать
+        // то, что владелец подтвердил, от того, что вписали за него.
+        approvedAt: entity.approvedAt,
+        approvedBy: entity.approvedBy,
+        createdFrom: entity.createdFrom,
         createdAt: entity.createdAt,
         updatedAt: entity.updatedAt,
         domain: org.code,

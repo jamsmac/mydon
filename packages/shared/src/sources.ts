@@ -166,8 +166,13 @@ export function fiscalGaps(attrs: Record<string, unknown> | null | undefined): F
   const ikpu = a["ИКПУ"];
   if (empty(ikpu)) gaps.push({ field: "ИКПУ", flaw: "нет", why: "код не выяснен" });
   else {
+    // Пробелы и дефисы разделяют код при наборе и разницей не считаются.
     const digits = String(ikpu).replace(/[\s\u00A0\u202F-]/g, "");
-    if (!new RegExp(`^\\d{${IKPU_DIGITS}}$`).test(digits)) {
+    // «Не цифра» и «не столько цифр» — разные беды, и путать их в объяснении
+    // нельзя: владелец должен понять, что именно чинить.
+    if (!/^\d*$/.test(digits)) {
+      gaps.push({ field: "ИКПУ", flaw: "неверно", why: "в коде есть не только цифры" });
+    } else if (digits.length !== IKPU_DIGITS) {
       gaps.push({
         field: "ИКПУ",
         flaw: "неверно",
@@ -224,6 +229,18 @@ export const RAW_ROLE_LABELS: Record<keyof RawColumnRoles, string> = {
   payment: "Способ оплаты",
   fulfilment: "Чем закончилась выдача",
 };
+
+/**
+ * Годится ли значение для этого поля.
+ *
+ * Нужна, чтобы в подсказки не попадало сломанное: если в одной карточке уже
+ * лежит огрызок ИКПУ, предлагать его остальным значило бы размножить поломку
+ * одним нажатием.
+ */
+export function isValidFiscalValue(field: FiscalField, value: string): boolean {
+  if (value.trim().length === 0) return false;
+  return !fiscalGaps({ [field]: value }).some((g) => g.field === field && g.flaw === "неверно");
+}
 
 /** Что сопоставляется с карточками реестра. */
 export const RAW_LINK_KINDS = ["machine", "product", "point"] as const;
