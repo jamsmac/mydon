@@ -18,6 +18,7 @@ import { PaymentsView } from "./payments-view";
 import { JournalView } from "./journal-view";
 import { NewReport, NewSource, RolesEditor } from "./source-editor";
 import { RawUpload } from "./raw-upload";
+import { ReconcileView } from "./reconcile-view";
 
 /** Что показывает вкладка отчёта. */
 type ReportView = "rows" | "map" | "stays" | "prices" | "goods" | "pay" | "journal" | "roles";
@@ -151,6 +152,24 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
         </div>
       </div>
 
+      {/* Построчная сверка источников: отдельный режим, не привязан к одной
+          системе — сверяет две. Заказы gjvending и vendinghub — одни и те же,
+          и по номеру операции их видно построчно. */}
+      <div className="srcbar" style={{ marginBottom: 12 }}>
+        <div className="subtabs" style={{ margin: 0 }}>
+          <Link href={href(base, clean, { mode: null })} className={`subtab ${sp.mode === "reconcile" ? "" : "active"}`}>
+            Источники по одному
+          </Link>
+          <Link href={href(base, clean, { mode: "reconcile" })} className={`subtab ${sp.mode === "reconcile" ? "active" : ""}`}>
+            Сверка источников
+          </Link>
+        </div>
+      </div>
+
+      {sp.mode === "reconcile" ? (
+        <ReconcilePane base={base} sp={sp} />
+      ) : (
+      <>
       {/* Системы-источники */}
       <div className="srcs">
         {sources.map((s) => (
@@ -213,8 +232,26 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
           Добавь его в справочник источников — и он появится здесь.
         </div>
       )}
+      </>
+      )}
     </>
   );
+}
+
+/** Пара источников по умолчанию: панель gjvending и кабинет vendinghub. */
+async function ReconcilePane({ base, sp }: { base: string; sp: Record<string, string> }) {
+  void base;
+  // По умолчанию — панель против кабинета. У кабинета берём отчёт operating: его
+  // товар (goodsName из JSON) чистый, тогда как у reports к названию приклеен
+  // «чек NNNNN», и сверка по товару ложно расходилась бы на каждой строке.
+  const a = { source: sp.ra ?? "gjvending", report: sp.rar ?? "order_query" };
+  const b = { source: sp.rb ?? "vendinghub", report: sp.rbr ?? "operating" };
+  try {
+    const r = await core.rawReconcile(a, b);
+    return <ReconcileView r={r} />;
+  } catch (err) {
+    return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
 }
 
 /** Один отчёт: шапка снимка и либо строки, либо сопоставление. */

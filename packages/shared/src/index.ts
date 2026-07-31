@@ -54,3 +54,6 @@ export * from "./delimited";
 
 // Кабинет VendHub office: отчёт приходит HTML-страницей, а не файлом.
 export * from "./vendinghub";
+
+// Построчная сверка двух источников по номеру операции.
+export * from "./reconcile";

@@ -21,6 +21,10 @@ import {
   type RawSourceOverride,
   type RawLinkKind,
   rawFreshness,
+  reconcile,
+  type ReconField,
+  type ReconRow,
+  type Reconciliation,
 } from "@mydon/shared";
 import { and, asc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -1125,6 +1129,99 @@ export class RawService {
     }
 
     return { snapshot, groups };
+  }
+
+  /**
+   * Построчная сверка двух источников по номеру операции.
+   *
+   * Существует ради вопроса «где источники расходятся», а не ради их слияния:
+   * свести журнал можно только после того, как видно, где они не сходятся.
+   * gjvending и vendinghub показывают одни и те же заказы (Order number =
+   * orderNo), поэтому сверка построчная, а не дневная, как с OurVend.
+   *
+   * Сверяются роли, которые есть у ОБОИХ отчётов: чего у одного нет, тем и
+   * сверять нечего. Правило слоя цело — сверка ничего не пишет.
+   */
+  async reconcileSources(
+    aSource: string,
+    aReport: string,
+    bSource: string,
+    bReport: string,
+  ): Promise<
+    Reconciliation & {
+      a: { source: string; report: string; title: string };
+      b: { source: string; report: string; title: string };
+    }
+  > {
+    const [defA, defB] = await Promise.all([
+      this.report(aSource, aReport),
+      this.report(bSource, bReport),
+    ]);
+    const meta = {
+      a: { source: aSource, report: aReport, title: defA.title },
+      b: { source: bSource, report: bReport, title: defB.title },
+    };
+    const empty = {
+      totalA: 0, totalB: 0, matched: 0, conflicts: [], onlyA: [], onlyB: [],
+      onlyACount: 0, onlyBCount: 0, duplicatesA: [], duplicatesB: [], fields: [], ...meta,
+    };
+    const [snapA, snapB] = await Promise.all([
+      this.latestSnapshot(aSource, aReport),
+      this.latestSnapshot(bSource, bReport),
+    ]);
+    if (!snapA || !snapB) return empty;
+
+    // Ключ сверки — externalId. Без него сверять нечего: сопоставлять заказы по
+    // совпадению всех полей значило бы выдумать связь, которой в данных нет.
+    const keyA = roleColumnIndex(snapA.columns, defA.roles, "externalId");
+    const keyB = roleColumnIndex(snapB.columns, defB.roles, "externalId");
+    if (keyA < 0 || keyB < 0) return empty;
+
+    // Сверяем роли, общие для обоих отчётов, кроме самого ключа.
+    const COMPARABLE: { role: keyof RawColumnRoles; label: string; compare: ReconField["compare"] }[] = [
+      { role: "machine", label: "Автомат", compare: "key" },
+      { role: "product", label: "Товар", compare: "key" },
+      { role: "amount", label: "Сумма", compare: "number" },
+      { role: "ts", label: "Время", compare: "exact" },
+      { role: "payment", label: "Оплата", compare: "exact" },
+      { role: "status", label: "Статус", compare: "exact" },
+      { role: "kind", label: "Тип", compare: "exact" },
+    ];
+    const fields: ReconField[] = [];
+    const idxA: Record<string, number> = {};
+    const idxB: Record<string, number> = {};
+    for (const c of COMPARABLE) {
+      const ia = roleColumnIndex(snapA.columns, defA.roles, c.role);
+      const ib = roleColumnIndex(snapB.columns, defB.roles, c.role);
+      if (ia < 0 || ib < 0) continue;
+      fields.push({ role: c.role, label: c.label, compare: c.compare });
+      idxA[c.role] = ia;
+      idxB[c.role] = ib;
+    }
+
+    const toRows = async (
+      snapshotId: string,
+      keyIdx: number,
+      idx: Record<string, number>,
+    ): Promise<ReconRow[]> => {
+      const rows = await this.db
+        .select({ cells: rawRow.cells })
+        .from(rawRow)
+        .where(eq(rawRow.snapshotId, snapshotId));
+      return rows.map((r) => {
+        const cells = r.cells;
+        const values: Record<string, string> = {};
+        for (const [role, i] of Object.entries(idx)) values[role] = cells[i] ?? "";
+        return { key: cells[keyIdx] ?? "", values };
+      });
+    };
+
+    const [rowsA, rowsB] = await Promise.all([
+      toRows(snapA.id, keyA, idxA),
+      toRows(snapB.id, keyB, idxB),
+    ]);
+
+    return { ...reconcile(rowsA, rowsB, fields), ...meta };
   }
 
   /**
