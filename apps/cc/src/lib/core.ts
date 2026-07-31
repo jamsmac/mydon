@@ -338,6 +338,49 @@ export interface PriceReview {
   unreadable: number;
 }
 
+/** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
+export interface PaymentMonth {
+  month: string;
+  orders: number;
+  revenue: number;
+}
+
+/** Автомат в разрезе одного канала оплаты. */
+export interface PaymentMachine {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  orders: number;
+  revenue: number;
+}
+
+/** Канал оплаты так, как его называет источник. */
+export interface PaymentChannel {
+  code: string;
+  /** Как называет его источник. null — расшифровки нет. */
+  label: string | null;
+  /** Смысл подтверждён. false — показывать вопросом, а не фактом. */
+  confirmed: boolean;
+  orders: number;
+  revenue: number;
+  unreadable: number;
+  firstOrderAt: string;
+  lastOrderAt: string;
+  months: PaymentMonth[];
+  machines: PaymentMachine[];
+}
+
+/** Срез по каналам оплаты — основание для сверки с платёжными системами. */
+export interface PaymentReview {
+  channels: PaymentChannel[];
+  orders: number;
+  revenue: number;
+  unconfirmedRevenue: number;
+  /** Номер колонки канала в этой выгрузке — для ухода в сами заказы. */
+  column: number;
+  lastOrderAt: string | null;
+}
+
 /** Что мешает выбить чек по карточке: поля нет или оно заполнено неверно. */
 export interface FiscalGap {
   field: string;
@@ -556,6 +599,8 @@ export const core = {
     get<{ machines: MachineStays[] }>(
       `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
     ),
+  rawPayments: (source: string, report: string) =>
+    get<PaymentReview>(`/raw/payments/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawProducts: (source: string, report: string) =>
     get<ProductReview>(`/raw/products/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawPrices: (source: string, report: string) =>

@@ -4,6 +4,7 @@ import {
   FISCAL_FIELDS,
   RAW_LINK_LABELS,
   RAW_SOURCES,
+  decodeRawValue,
   findRawReport,
   fiscalGaps,
   normalizeSourceKey,
@@ -386,6 +387,61 @@ export interface ProductReview {
   noCard: number;
   /** Позиций с карточкой, но без фискальных полей. */
   incomplete: number;
+  lastOrderAt: string | null;
+}
+
+/** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
+export interface PaymentMonth {
+  month: string;
+  orders: number;
+  revenue: number;
+}
+
+/** Автомат в разрезе одного канала оплаты. */
+export interface PaymentMachine {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  orders: number;
+  revenue: number;
+}
+
+/**
+ * Канал оплаты так, как его называет источник.
+ *
+ * Код не переводится и не переименовывается: `userDefined` остаётся
+ * `userDefined`, а рядом лежит то, как его называет сама панель. Чем канал
+ * окажется на деле, решит сверка с платёжными системами, а не мы.
+ */
+export interface PaymentChannel {
+  /** Код источника. */
+  code: string;
+  /** Как называет его источник. null — расшифровки нет, и выдумывать её нельзя. */
+  label: string | null;
+  /** Смысл подтверждён. false — показывать вопросом, а не фактом. */
+  confirmed: boolean;
+  orders: number;
+  revenue: number;
+  /** Заказы с нечитаемой ценой — в сумму не вошли. */
+  unreadable: number;
+  firstOrderAt: string;
+  lastOrderAt: string;
+  months: PaymentMonth[];
+  machines: PaymentMachine[];
+}
+
+/** Срез по каналам оплаты — основание для сверки с платёжными системами. */
+export interface PaymentReview {
+  channels: PaymentChannel[];
+  orders: number;
+  revenue: number;
+  /** Выручка по каналам, смысл которых источник не объясняет. */
+  unconfirmedRevenue: number;
+  /**
+   * Номер колонки канала в этой выгрузке — чтобы с экрана можно было уйти
+   * в сами заказы, отфильтрованные по коду, а не верить сводке на слово.
+   */
+  column: number;
   lastOrderAt: string | null;
 }
 
@@ -1096,6 +1152,150 @@ export class RawService {
       lost: products.reduce((n, p) => n + p.lost, 0),
       lastOrderAt,
       unreadable,
+    };
+  }
+
+  /**
+   * Срез по каналам оплаты: сколько денег пришло каким способом.
+   *
+   * Существует ради сверки. Панель называет один из своих кодов «Таможенный
+   * платеж», и на нём 181,3 млн сум — название явно не про вендинг, но
+   * заменять его нашей догадкой нельзя: справочник расшифровок такое же
+   * сырьё, как и строки. Чем канал окажется на деле — Payme, Click, Uzum или
+   * списание бонусов, — покажет сверка с этими системами, а до неё честнее
+   * показать код источника со словами «не подтверждено».
+   *
+   * Поэтому срез разложен по месяцам и автоматам: месячная сумма — это то, с
+   * чем идут к выписке платёжной системы, а не просто цифра на экране.
+   *
+   * Ничего не отфильтровано, включая тестовые выдачи: это срез источника
+   * как он есть, и итог обязан сходиться с тем, что показывает панель.
+   */
+  async paymentReview(sourceCode: string, reportCode: string): Promise<PaymentReview> {
+    const report = findRawReport(sourceCode, reportCode);
+    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const empty: PaymentReview = {
+      channels: [],
+      orders: 0,
+      revenue: 0,
+      unconfirmedRevenue: 0,
+      column: -1,
+      lastOrderAt: null,
+    };
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    if (!snapshot) return empty;
+
+    const cIdx = roleColumnIndex(snapshot.columns, report.roles, "payment");
+    const aIdx = roleColumnIndex(snapshot.columns, report.roles, "amount");
+    const tIdx = roleColumnIndex(snapshot.columns, report.roles, "ts");
+    if (cIdx < 0 || aIdx < 0 || tIdx < 0) return empty;
+    const mIdx = roleColumnIndex(snapshot.columns, report.roles, "machine");
+
+    const cell = (idx: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
+    const code = cell(cIdx);
+    const ts = cell(tIdx);
+    const amount = cell(aIdx);
+    const price = sql<string>`case when ${amount} ~ '^\\s*-?[0-9]+([.,][0-9]+)?\\s*$'
+      then replace(btrim(${amount}), ',', '.')::numeric end`;
+    const month = sql<string>`substr(${ts}, 1, 7)`;
+
+    const byMonth = await this.db
+      .select({
+        code,
+        month,
+        n: sql<number>`count(*)`,
+        revenue: sql<string>`coalesce(sum(${price}), 0)`,
+        unreadable: sql<number>`count(*) filter (where ${price} is null)`,
+        first: sql<string>`min(${ts})`,
+        last: sql<string>`max(${ts})`,
+      })
+      .from(rawRow)
+      .where(eq(rawRow.snapshotId, snapshot.id))
+      .groupBy(code, month);
+
+    const byMachine =
+      mIdx < 0
+        ? []
+        : await this.db
+            .select({
+              code,
+              serial: cell(mIdx),
+              n: sql<number>`count(*)`,
+              revenue: sql<string>`coalesce(sum(${price}), 0)`,
+            })
+            .from(rawRow)
+            .where(eq(rawRow.snapshotId, snapshot.id))
+            .groupBy(code, cell(mIdx));
+
+    const machines = await this.db
+      .select({ id: entity.id, name: entity.name, ref: entity.externalRef })
+      .from(entity)
+      .where(eq(entity.type, "machine"));
+    const bySerial = new Map(
+      machines
+        .filter((m) => m.ref !== null && m.ref.length > 0)
+        .map((m) => [normalizeSourceKey(m.ref!), { id: m.id, name: m.name }]),
+    );
+
+    const dict = (report.dicts ?? []).find((d) => d.role === "payment");
+    const channels = new Map<string, PaymentChannel>();
+    let lastOrderAt: string | null = null;
+    for (const r of byMonth) {
+      // Пустой код — это тоже факт источника, а не повод пропустить строку.
+      const key = r.code;
+      const decoded = decodeRawValue(dict, key);
+      const ch =
+        channels.get(key) ??
+        ({
+          code: key,
+          label: decoded?.label ?? null,
+          confirmed: decoded?.confirmed ?? false,
+          orders: 0,
+          revenue: 0,
+          unreadable: 0,
+          firstOrderAt: r.first,
+          lastOrderAt: r.last,
+          months: [],
+          machines: [],
+        } satisfies PaymentChannel);
+      ch.orders += Number(r.n);
+      ch.revenue += Number(r.revenue);
+      ch.unreadable += Number(r.unreadable);
+      if (r.first < ch.firstOrderAt) ch.firstOrderAt = r.first;
+      if (r.last > ch.lastOrderAt) ch.lastOrderAt = r.last;
+      ch.months.push({ month: r.month, orders: Number(r.n), revenue: Number(r.revenue) });
+      channels.set(key, ch);
+      if (lastOrderAt === null || r.last > lastOrderAt) lastOrderAt = r.last;
+    }
+
+    for (const r of byMachine) {
+      const ch = channels.get(r.code);
+      if (!ch || r.serial.trim().length === 0) continue;
+      const card = bySerial.get(normalizeSourceKey(r.serial)) ?? null;
+      ch.machines.push({
+        serial: r.serial,
+        entityId: card?.id ?? null,
+        entityName: card?.name ?? null,
+        orders: Number(r.n),
+        revenue: Number(r.revenue),
+      });
+    }
+
+    const list = [...channels.values()];
+    for (const ch of list) {
+      ch.months.sort((a, b) => a.month.localeCompare(b.month));
+      ch.machines.sort((a, b) => b.revenue - a.revenue || a.serial.localeCompare(b.serial));
+    }
+    // Сверху то, где больше денег: с этого и начинают сверку.
+    list.sort((a, b) => b.revenue - a.revenue || b.orders - a.orders);
+
+    return {
+      channels: list,
+      orders: list.reduce((n, c) => n + c.orders, 0),
+      revenue: list.reduce((n, c) => n + c.revenue, 0),
+      unconfirmedRevenue: list.filter((c) => !c.confirmed).reduce((n, c) => n + c.revenue, 0),
+      column: cIdx,
+      lastOrderAt,
     };
   }
 

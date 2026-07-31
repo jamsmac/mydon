@@ -14,9 +14,10 @@ import { RawTable } from "./raw-table";
 import { MachineStaysView } from "./machine-stays";
 import { PricesView } from "./prices-view";
 import { ProductsReview } from "./products-review";
+import { PaymentsView } from "./payments-view";
 
 /** Что показывает вкладка отчёта. */
-type ReportView = "rows" | "map" | "stays" | "prices" | "goods";
+type ReportView = "rows" | "map" | "stays" | "prices" | "goods" | "pay";
 
 export interface SourcesViewProps {
   /** Адрес страницы направления: /domain/vendhub */
@@ -91,7 +92,11 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
   }
   const report = source.reports.find((r) => r.reportCode === sp.rep) ?? source.reports[0];
   const view: ReportView =
-    sp.view === "map" || sp.view === "stays" || sp.view === "prices" || sp.view === "goods"
+    sp.view === "map" ||
+    sp.view === "stays" ||
+    sp.view === "prices" ||
+    sp.view === "goods" ||
+    sp.view === "pay"
       ? sp.view
       : "rows";
   const clean = withoutTableState(sp);
@@ -325,6 +330,9 @@ async function ReportPane({
         <Link href={viewHref("goods")} className={`subtab ${view === "goods" ? "active" : ""}`}>
           Товары
         </Link>
+        <Link href={viewHref("pay")} className={`subtab ${view === "pay" ? "active" : ""}`}>
+          Оплата
+        </Link>
       </div>
 
       {view === "rows" ? (
@@ -349,11 +357,40 @@ async function ReportPane({
         <PricesPane source={source.code} reportCode={reportCode} />
       ) : view === "goods" ? (
         <GoodsPane source={source.code} reportCode={reportCode} />
+      ) : view === "pay" ? (
+        <PayPane base={base} sp={sp} source={source.code} reportCode={reportCode} />
       ) : (
         <StaysPane source={source.code} reportCode={reportCode} />
       )}
     </>
   );
+}
+
+/** Каким способом приходят деньги — срез для сверки с платёжными системами. */
+async function PayPane({
+  base,
+  sp,
+  source,
+  reportCode,
+}: {
+  base: string;
+  sp: Record<string, string>;
+  source: string;
+  reportCode: string;
+}) {
+  try {
+    const review = await core.rawPayments(source, reportCode);
+    // Сводке верить на слово не надо: с каждого кода можно уйти в сами заказы,
+    // отфильтрованные по этой колонке.
+    const rowsHref =
+      review.column < 0
+        ? null
+        : (code: string) =>
+            href(base, withoutTableState(sp), { view: null, [`f${review.column}`]: code });
+    return <PaymentsView review={review} rowsHref={rowsHref} />;
+  } catch (err) {
+    return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
 }
 
 /** Ассортимент источника: что продаётся и по чему не собирается чек. */

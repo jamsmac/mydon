@@ -187,6 +187,12 @@ export class RawController {
     return this.raw.prices(source, report);
   }
 
+  /** Каким способом приходят деньги — срез для сверки с платёжными системами. */
+  @Get("payments/:source/:report")
+  payments(@Param("source") source: string, @Param("report") report: string) {
+    return this.raw.paymentReview(source, report);
+  }
+
   /** Ассортимент источника: что продаётся и по чему не собирается чек. */
   @Get("products/:source/:report")
   products(@Param("source") source: string, @Param("report") report: string) {

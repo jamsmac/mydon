@@ -632,3 +632,18 @@ a.rowlink:hover { background: var(--surf-2); }
   .prow { grid-template-columns: minmax(0, 320px) 1fr auto; align-items: center; gap: 12px; }
   .prow .plook { grid-column: 1 / -1; }
 }
+
+/* срез по каналам оплаты: месяц — строка, с которой идут сверять выписку */
+.mlist { display: flex; flex-direction: column; gap: 3px; }
+.mrow {
+  display: grid; grid-template-columns: 84px 1fr 110px 64px; gap: 10px;
+  align-items: center; padding: 4px 2px; font-size: 12.5px;
+}
+.mrow .mname { color: var(--tx-2); }
+.mrow .mbar { display: block; height: 7px; background: rgba(30, 51, 80, 0.6); border-radius: 4px; overflow: hidden; }
+.mrow .mbar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.mrow .mval { text-align: right; font-weight: 600; }
+.mrow .mcnt { text-align: right; color: var(--tx-3); font-size: 11.5px; }
+.mdet { margin-top: 10px; }
+.mdet summary { cursor: pointer; font-size: 12.5px; color: var(--tx-2); }
+.mdet summary:hover { color: var(--accent); }
