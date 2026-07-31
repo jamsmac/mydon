@@ -776,3 +776,7 @@ a.rowlink:hover { background: var(--surf-2); }
 @media (min-width: 900px) {
   .prow .pfisc { grid-column: 1 / -1; }
 }
+
+/* то, что ждёт слова владельца: данные, вписанные не им */
+.sect.appr { border-left: 3px solid var(--hot); padding-left: 12px; }
+.sect.appr .maprow .mapt { gap: 6px; }

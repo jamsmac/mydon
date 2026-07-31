@@ -3,6 +3,7 @@ import {
   core,
   CoreUnavailable,
   type Entity,
+  type EntityDraft,
   type MachineProductPrice,
   type MachineStays,
 } from "../../../lib/core";
@@ -11,6 +12,7 @@ import { DeleteEntityButton } from "../../../components/entity-delete";
 import { EntityEditor } from "../../../components/entity-editor";
 import { StayTimeline } from "../../../components/machine-stays";
 import { MachinePricesView } from "../../../components/prices-view";
+import { EntityApproval } from "../../../components/entity-approval";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
 import { plural, when } from "../../../lib/format";
 
@@ -50,6 +52,15 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Что предложено этой карточке не владельцем. Ошибка здесь не должна ронять
+  // карточку: это дополнение, а не её суть.
+  let drafts: EntityDraft[] = [];
+  try {
+    drafts = await core.entityDrafts(entity.id);
+  } catch {
+    drafts = [];
+  }
+
   const a = entity.attrs ?? {};
   const lat = a["широта"];
   const lng = a["долгота"];
@@ -71,6 +82,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           {` · обновлено ${when(entity.updatedAt)}`}
         </p>
       </div>
+
+      <EntityApproval entity={entity} drafts={drafts} />
 
       {hasGeo && (
         <div className="card">

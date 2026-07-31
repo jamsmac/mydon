@@ -5,6 +5,7 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { FISCAL_FIELDS } from "@mydon/shared";
 import {
+  approveEntity,
   createProductWithFiscal,
   linkRawValue,
   saveFiscal,
@@ -99,10 +100,23 @@ function ProductRow({
           <span className="chip h">нет карточки</span>
         ) : (
           <>
-            <Link href={`/card/${p.entityId}`} className="mapok">
+            <Link href={`/card/${p.entityId}`} className={p.approved ? "mapok" : "warn"}>
               {p.entityName}
             </Link>
             <span className="chip">{p.decidedBy === "auto" ? "совпало точно" : "связал ты"}</span>
+            {!p.approved && (
+              <>
+                <span className="chip h">ждёт твоего слова</span>
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  disabled={pending}
+                  onClick={() => act(() => approveEntity(p.entityId!))}
+                >
+                  Утвердить
+                </button>
+              </>
+            )}
             {blocked ? (
               p.gaps.map((g) => (
                 <span className="chip h" key={g.field} title={g.why}>
@@ -308,7 +322,9 @@ export function ProductsReview({
       </div>
 
       <p className="hint" style={{ marginBottom: 10 }}>
-        Разбирать сверху вниз: там деньги. Нет карточки и карточка без ИКПУ — для
+        Карточка, заведённая из выгрузки, помечена «ждёт твоего слова»: название
+        взято из чужой панели, и записью реестра оно становится, когда ты
+        подтвердишь. Разбирать сверху вниз: там деньги. Нет карточки и карточка без ИКПУ — для
         кассы одно и то же, чек не собирается, но чинятся они по-разному. Отдельно
         отмечено «заполнено, но неверно»: огрызок ИКПУ опаснее пустого поля, потому
         что карточка выглядит готовой. Правило — ровно 17 цифр, как в mydon-stock

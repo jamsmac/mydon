@@ -389,6 +389,11 @@ export interface SourceProduct {
   lastOrderAt: string;
   entityId: string | null;
   entityName: string | null;
+  /**
+   * Карточка утверждена владельцем. false — заведена из источника и ждёт его
+   * слова: она есть, но фактом реестра ещё не стала.
+   */
+  approved: boolean;
   /** Владелец решил, что карточка не нужна. Не то же самое, что «не смотрел». */
   dismissed: boolean;
   decidedBy: string | null;
@@ -2080,7 +2085,12 @@ export class RawService {
 
     const [cards, links] = await Promise.all([
       this.db
-        .select({ id: entity.id, name: entity.name, attrs: entity.attrs })
+        .select({
+          id: entity.id,
+          name: entity.name,
+          attrs: entity.attrs,
+          approvedAt: entity.approvedAt,
+        })
         .from(entity)
         .where(eq(entity.type, "product")),
       this.db
@@ -2127,6 +2137,7 @@ export class RawService {
         lastOrderAt: r.last,
         entityId: card?.id ?? null,
         entityName: card?.name ?? null,
+        approved: card ? card.approvedAt !== null : false,
         dismissed,
         decidedBy: decided ? decided.decidedBy : card ? "auto" : null,
         lookalikes: [],

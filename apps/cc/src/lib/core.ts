@@ -57,8 +57,30 @@ export interface Entity {
   name: string;
   externalRef: string | null;
   attrs: Record<string, unknown>;
+  /**
+   * Карточка утверждена владельцем. null — заведена не им и ждёт его слова:
+   * видна, но фактом не считается.
+   */
+  approvedAt?: string | null;
+  approvedBy?: string | null;
+  /** Откуда карточка взялась: код источника. Пусто — завёл владелец. */
+  createdFrom?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Значение поля карточки, предложенное не владельцем. */
+export interface EntityDraft {
+  id: string;
+  entityId: string;
+  field: string;
+  value: string;
+  /** Что стоит в карточке сейчас — владелец видит, что заменяется. */
+  current: string | null;
+  origin: string;
+  setBy: string;
+  note: string | null;
+  createdAt: string;
 }
 
 export interface AuditEntry {
@@ -470,6 +492,8 @@ export interface SourceProduct {
   lastOrderAt: string;
   entityId: string | null;
   entityName: string | null;
+  /** Карточка утверждена владельцем. false — ждёт его слова. */
+  approved: boolean;
   dismissed: boolean;
   decidedBy: string | null;
   /** Что мешает выбить чек. Пусто — соберётся. */
@@ -603,6 +627,18 @@ export const core = {
     get<Entity[]>(`/entities?domain=${domain}&type=${encodeURIComponent(type)}`),
   entity: (id: string) => get<Entity>(`/entities/${id}`),
   createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
+  entityDrafts: (id: string) => get<EntityDraft[]>(`/entities/${id}/drafts`),
+  pendingEntities: () =>
+    get<{ cards: Entity[]; fields: (EntityDraft & { entityName: string; entityType: string })[] }>(
+      "/entities/pending",
+    ),
+  proposeField: (id: string, input: Record<string, unknown>) =>
+    send<{ ok: true }>(`/entities/${id}/propose`, "POST", input),
+  approveEntity: (id: string) => send<Entity>(`/entities/${id}/approve`, "POST", {}),
+  approveField: (id: string, field: string) =>
+    send<Entity>(`/entities/${id}/approve-field/${encodeURIComponent(field)}`, "POST", {}),
+  rejectField: (id: string, field: string) =>
+    send<{ ok: true }>(`/entities/${id}/reject-field/${encodeURIComponent(field)}`, "POST", {}),
   updateEntity: (id: string, input: Record<string, unknown>) =>
     send<Entity>(`/entities/${id}`, "PATCH", input),
   deleteEntity: (id: string) => send<{ ok: boolean }>(`/entities/${id}`, "DELETE"),

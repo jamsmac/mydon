@@ -56,11 +56,15 @@ export async function createProductFromSource(
   const name = label.trim();
   if (name.length === 0) return { ok: false, error: "Пустое название заводить нельзя" };
   try {
+    // Карточка заведена ИЗ ИСТОЧНИКА, а не владельцем, поэтому ждёт его слова:
+    // название взято из чужой панели, и фактом реестра оно станет, когда он
+    // подтвердит. Видна она при этом сразу — иначе связывать было бы не с чем.
     const created = await core.createEntity({
       domain: "vendhub",
       type: "product",
       name,
       attrs: { источник: source },
+      createdFrom: source,
     });
     // Связь пишем решением владельца: карточку завёл он, а не правило совпало.
     await core.rawLink({ source, kind: "product", label: name, entityId: created.id });
@@ -72,28 +76,59 @@ export async function createProductFromSource(
 }
 
 /**
- * Записать точку в карточку автомата.
+ * Предложить точку в карточку автомата.
  *
- * Заполняется ТОЛЬКО пустое поле. Если владелец уже написал там своё — его
- * значение важнее любого источника (то же правило, что в синке снабжения), и
- * вместо тихой перезаписи он получает ответ словами.
+ * Раньше значение писалось прямо в карточку. По правилу владельца данные по
+ * автоматам и товарам, вписанные не им, фактом не считаются: адрес приходит из
+ * чужой панели, поэтому он ЛОЖИТСЯ РЯДОМ и ждёт утверждения, а не подменяет
+ * собой поле карточки.
+ *
+ * Совпадающее значение не предлагается — это шум, а не решение.
  */
 export async function fillMachinePoint(machineId: string, point: string): Promise<ActionResult> {
   const value = point.trim();
   if (value.length === 0) return { ok: false, error: "Пустую точку записывать нечего" };
   try {
-    const card = await core.entity(machineId);
-    const attrs = { ...(card.attrs ?? {}) };
-    const current = attrs["точка"];
-    if (typeof current === "string" && current.trim().length > 0) {
-      if (current.trim() === value) return { ok: true };
-      return {
-        ok: false,
-        error: `В карточке уже указано «${current}» — поменять можно в самой карточке.`,
-      };
-    }
-    // attrs при правке заменяются целиком, поэтому сливаем, а не подставляем.
-    await core.updateEntity(machineId, { attrs: { ...attrs, точка: value } });
+    await core.proposeField(machineId, {
+      field: "точка",
+      value,
+      origin: "выгрузка источника",
+      setBy: "source:gjvending",
+      note: "адрес взят из заказов этого автомата",
+    });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
+}
+
+/** Слово владельца: утвердить карточку вместе со всем, что ей предложено. */
+export async function approveEntity(id: string): Promise<ActionResult> {
+  try {
+    await core.approveEntity(id);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
+}
+
+/** Утвердить одно предложенное значение. */
+export async function approveField(id: string, field: string): Promise<ActionResult> {
+  try {
+    await core.approveField(id, field);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
+}
+
+/** Отклонить предложенное значение: уходит без следа в карточке. */
+export async function rejectField(id: string, field: string): Promise<ActionResult> {
+  try {
+    await core.rejectField(id, field);
   } catch (err) {
     return fail(err);
   }
