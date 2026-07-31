@@ -1,11 +1,18 @@
 import Link from "next/link";
-import { core, CoreUnavailable, type Entity, type MachineStays } from "../../../lib/core";
+import {
+  core,
+  CoreUnavailable,
+  type Entity,
+  type MachineProductPrice,
+  type MachineStays,
+} from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { DeleteEntityButton } from "../../../components/entity-delete";
 import { EntityEditor } from "../../../components/entity-editor";
 import { StayTimeline } from "../../../components/machine-stays";
+import { MachinePricesView } from "../../../components/prices-view";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
-import { when } from "../../../lib/format";
+import { plural, when } from "../../../lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -23,16 +30,23 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
 
-  // История стоянок нужна только автоматам и только если она вообще собрана.
-  // Ошибка здесь не должна ронять карточку: это дополнение, а не её суть.
+  // История стоянок и цен нужна только автоматам и только если она вообще
+  // собрана. Ошибка здесь не должна ронять карточку: это дополнение, а не её суть.
   let stays: MachineStays | null = null;
+  let prices: MachineProductPrice[] = [];
   if (entity.type === "machine" && entity.externalRef) {
+    const ref = entity.externalRef.toLowerCase();
     try {
       const { machines } = await core.rawStays("gjvending", "order_query");
-      const ref = entity.externalRef.toLowerCase();
       stays = machines.find((m) => m.serial.toLowerCase() === ref) ?? null;
     } catch {
       stays = null;
+    }
+    try {
+      const { items } = await core.rawMachinePrices("gjvending", "order_query", entity.externalRef);
+      prices = items;
+    } catch {
+      prices = [];
     }
   }
 
@@ -87,6 +101,22 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           <p className="hint" style={{ marginTop: 8 }}>
             Восстановлено из заказов источника: адрес и время есть в каждом.
             Точка — период, а не одно значение: переставили автомат, начался новый отрезок.
+          </p>
+        </div>
+      )}
+
+      {prices.length > 0 && (
+        <div className="sect">
+          <div className="sect-h">
+            <h3 className="h2">Чем торгует и почём</h3>
+            <span className="chip b">
+              {prices.length} {plural(prices.length, "товар", "товара", "товаров")}
+            </span>
+          </div>
+          <MachinePricesView items={prices} />
+          <p className="hint" style={{ marginTop: 8 }}>
+            Цена восстановлена из заказов и, как точка, является периодом: пока её
+            не поменяли, она держится. Сквозной срез — во вкладке «Источники → Цены».
           </p>
         </div>
       )}

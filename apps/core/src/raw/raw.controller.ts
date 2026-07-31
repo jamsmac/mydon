@@ -181,6 +181,22 @@ export class RawController {
     return this.raw.machineStays(source, report).then((machines) => ({ machines }));
   }
 
+  /** Где какой товар почём и кто отстал с ценой — по заказам источника. */
+  @Get("prices/:source/:report")
+  prices(@Param("source") source: string, @Param("report") report: string) {
+    return this.raw.prices(source, report);
+  }
+
+  /** Ассортимент и история цен одного автомата — для его карточки. */
+  @Get("prices/:source/:report/machine/:serial")
+  machinePrices(
+    @Param("source") source: string,
+    @Param("report") report: string,
+    @Param("serial") serial: string,
+  ) {
+    return this.raw.machinePrices(source, report, serial).then((items) => ({ items }));
+  }
+
   /** Что из выгрузки узнано по карточкам реестра, а что — нет. */
   @Get("mapping/:source/:report")
   mapping(@Param("source") source: string, @Param("report") report: string) {
