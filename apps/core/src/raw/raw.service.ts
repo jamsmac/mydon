@@ -198,6 +198,37 @@ export interface RawMapping {
 /** Сколько разных значений одной роли разбираем: длинный хвост владельцу не нужен. */
 const MAX_MAPPING_VALUES = 500;
 
+/** Отрезок стоянки автомата на одной точке. */
+export interface MachineStay {
+  /** Адрес так, как его пишет источник. */
+  point: string;
+  /** Первый и последний заказ на этой точке — по ним и виден переезд. */
+  from: string;
+  to: string;
+  orders: number;
+  /**
+   * Отрезок пересекается с соседним по времени.
+   *
+   * У переезда стыки идут подряд: последний заказ на старой точке, потом
+   * первый на новой. Пересечение значит, что источник путает адреса, и
+   * выдавать такое за переезд нельзя.
+   */
+  overlaps: boolean;
+}
+
+/** История стоянок одного автомата. */
+export interface MachineStays {
+  /** Серийник, как его пишет источник. */
+  serial: string;
+  /** Карточка автомата, если серийник узнан. */
+  entityId: string | null;
+  entityName: string | null;
+  /** Отрезки по возрастанию времени: первый — самый старый. */
+  stays: MachineStay[];
+  /** Сколько раз автомат переезжал (отрезков минус один). */
+  moves: number;
+}
+
 /** Что принимаем при загрузке выгрузки. */
 export interface RawImportInput {
   source: string;
@@ -572,6 +603,79 @@ export class RawService {
   }
 
   /**
+   * История стоянок автоматов, восстановленная из заказов.
+   *
+   * Точка автомата — не поле, а период: переставили автомат, начался новый
+   * отрезок. Журнала переездов никто не вёл, но факт уже записан в каждом
+   * заказе — адрес и время. Отсюда история строится задним числом за весь
+   * период выгрузки и ничего не требует от владельца.
+   *
+   * Ничего не додумывается: если отрезки пересекаются, это не переезд, а
+   * путаница в источнике, и она помечается, а не сглаживается.
+   */
+  async machineStays(sourceCode: string, reportCode: string): Promise<MachineStays[]> {
+    const report = findRawReport(sourceCode, reportCode);
+    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    if (!snapshot) return [];
+
+    const mIdx = roleColumnIndex(snapshot.columns, report.roles, "machine");
+    const pIdx = roleColumnIndex(snapshot.columns, report.roles, "point");
+    const tIdx = roleColumnIndex(snapshot.columns, report.roles, "ts");
+    if (mIdx < 0 || pIdx < 0 || tIdx < 0) return [];
+
+    const m = sql.raw(String(mIdx));
+    const p = sql.raw(String(pIdx));
+    const t = sql.raw(String(tIdx));
+    const serial = sql<string>`coalesce(${rawRow.cells}->>${m}, '')`;
+    const point = sql<string>`coalesce(${rawRow.cells}->>${p}, '')`;
+    const rows = await this.db
+      .select({
+        serial,
+        point,
+        from: sql<string>`min(coalesce(${rawRow.cells}->>${t}, ''))`,
+        to: sql<string>`max(coalesce(${rawRow.cells}->>${t}, ''))`,
+        n: sql<number>`count(*)`,
+      })
+      .from(rawRow)
+      .where(eq(rawRow.snapshotId, snapshot.id))
+      .groupBy(serial, point);
+
+    const machines = await this.db
+      .select({ id: entity.id, name: entity.name, ref: entity.externalRef })
+      .from(entity)
+      .where(eq(entity.type, "machine"));
+    const bySerial = new Map(
+      machines
+        .filter((x) => x.ref !== null && x.ref.length > 0)
+        .map((x) => [normalizeSourceKey(x.ref!), { id: x.id, name: x.name }]),
+    );
+
+    const grouped = new Map<string, { point: string; from: string; to: string; orders: number }[]>();
+    for (const r of rows) {
+      if (r.serial.trim().length === 0 || r.point.trim().length === 0) continue;
+      const list = grouped.get(r.serial) ?? [];
+      list.push({ point: r.point, from: r.from, to: r.to, orders: Number(r.n) });
+      grouped.set(r.serial, list);
+    }
+
+    const out: MachineStays[] = [];
+    for (const [serialValue, list] of grouped) {
+      const card = bySerial.get(normalizeSourceKey(serialValue)) ?? null;
+      out.push({
+        serial: serialValue,
+        entityId: card?.id ?? null,
+        entityName: card?.name ?? null,
+        stays: markOverlaps(list),
+        moves: Math.max(0, list.length - 1),
+      });
+    }
+    // Сначала те, кто переезжал чаще: там и вопросов больше.
+    out.sort((a, b) => b.moves - a.moves || a.serial.localeCompare(b.serial));
+    return out;
+  }
+
+  /**
    * Решение владельца по одному значению источника.
    * `entityId: null` — осознанное «карточка не нужна» (тестовые отгрузки и т.п.):
    * значение перестаёт числиться неразобранным, но и в реестр не попадает.
@@ -745,6 +849,27 @@ export class RawService {
     if (!drift.added.length && !drift.removed.length && !drift.reordered) return null;
     return { prevFetchedAt: prev.fetchedAt.toISOString(), ...drift };
   }
+}
+
+/**
+ * Упорядочить отрезки по времени и отметить пересечения.
+ *
+ * Отдельной функцией — правило «пересеклись, значит не переезд» должно быть
+ * закреплено тестом, а не жить внутри запроса. Времена сравниваются строками:
+ * источник отдаёт их в формате «ГГГГ-ММ-ДД ЧЧ:ММ:СС», где порядок строк
+ * совпадает с порядком дат, и приводить их к датам на сыром слое незачем.
+ */
+export function markOverlaps(
+  list: { point: string; from: string; to: string; orders: number }[],
+): MachineStay[] {
+  const sorted = [...list].sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+  return sorted.map((cur, i) => {
+    const prev = sorted[i - 1];
+    const next = sorted[i + 1];
+    const overlaps =
+      (prev !== undefined && cur.from <= prev.to) || (next !== undefined && next.from <= cur.to);
+    return { ...cur, overlaps };
+  });
 }
 
 /**

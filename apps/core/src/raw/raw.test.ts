@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compareColumns, csvCell, normalizeRowsQuery, parseColumnFilters, toCsv } from "./raw.service";
+import {
+  compareColumns,
+  csvCell,
+  markOverlaps,
+  normalizeRowsQuery,
+  parseColumnFilters,
+  toCsv,
+} from "./raw.service";
 
 describe("Сырой слой: разбор параметров страницы", () => {
   it("номера колонок и страниц берутся только целыми и положительными", () => {
@@ -111,5 +118,53 @@ describe("Сырой слой: дрейф состава колонок", () => 
   it("регистр и лишние пробелы не считаются изменением", () => {
     const d = compareColumns(base, ["order number", "  Goods   name", "MACHINE CODE"]);
     assert.deepEqual(d, { added: [], removed: [], reordered: false });
+  });
+});
+
+describe("История стоянок: переезд или путаница", () => {
+  const stay = (point: string, from: string, to: string, orders = 1) => ({ point, from, to, orders });
+
+  it("отрезки упорядочиваются по времени, а не по тому, как легли в базу", () => {
+    const r = markOverlaps([
+      stay("4 корпус", "2025-05-21 20:05:10", "2026-04-26 15:40:07"),
+      stay("宁波乐仝", "2024-05-21 15:05:51", "2024-10-11 14:06:17"),
+      stay("hamid alimjan", "2024-10-11 16:13:29", "2025-05-21 17:31:29"),
+    ]);
+    assert.deepEqual(r.map((x) => x.point), ["宁波乐仝", "hamid alimjan", "4 корпус"]);
+  });
+
+  it("переезд в тот же день пересечением не считается", () => {
+    // Настоящий случай 039ec91c0000: последний заказ на старой точке в 14:06,
+    // первый на новой в 16:13 того же дня. Это переезд, а не путаница.
+    const r = markOverlaps([
+      stay("宁波乐仝", "2024-05-21 15:05:51", "2024-10-11 14:06:17"),
+      stay("hamid alimjan", "2024-10-11 16:13:29", "2025-05-21 17:31:29"),
+    ]);
+    assert.deepEqual(r.map((x) => x.overlaps), [false, false]);
+  });
+
+  it("пересечение помечается у обоих отрезков", () => {
+    const r = markOverlaps([
+      stay("A", "2025-01-01 10:00:00", "2025-06-01 10:00:00"),
+      stay("B", "2025-03-01 10:00:00", "2025-09-01 10:00:00"),
+    ]);
+    assert.deepEqual(r.map((x) => x.overlaps), [true, true]);
+  });
+
+  it("единственная точка — переездов не было", () => {
+    const r = markOverlaps([stay("Logistics", "2025-01-01 10:00:00", "2026-07-31 10:00:00", 900)]);
+    assert.equal(r.length, 1);
+    assert.equal(r[0].overlaps, false);
+  });
+
+  it("время сравнивается как строки — формат источника это позволяет", () => {
+    // «2024-10-11 14:06:17» < «2024-10-11 16:13:29» и как строки, и как даты.
+    // Приводить к датам на сыром слое незачем, и тест это закрепляет.
+    const r = markOverlaps([
+      stay("B", "2024-10-11 16:13:29", "2024-12-01 10:00:00"),
+      stay("A", "2024-10-11 09:00:00", "2024-10-11 14:06:17"),
+    ]);
+    assert.deepEqual(r.map((x) => x.point), ["A", "B"]);
+    assert.deepEqual(r.map((x) => x.overlaps), [false, false]);
   });
 });
