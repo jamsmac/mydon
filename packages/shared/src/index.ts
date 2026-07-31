@@ -51,3 +51,6 @@ export * from "./sources";
 
 // Разбор выгрузки, сохранённой файлом: владелец кладёт её сам, без разработчика.
 export * from "./delimited";
+
+// Кабинет VendHub office: отчёт приходит HTML-страницей, а не файлом.
+export * from "./vendinghub";
