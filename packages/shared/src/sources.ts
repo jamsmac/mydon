@@ -444,8 +444,47 @@ export const RAW_SOURCES: readonly RawSourceDef[] = [
       {
         code: "operating",
         title: "Operating report",
-        ru: "состав уточняется",
+        ru: "Журнал операций",
         path: "office/operatingReport",
+        // Роли выверены по настоящей странице, снятой 31.07.2026. Кабинет не
+        // отдаёт файла: отчёт приходит HTML-таблицей, а внутри первой ячейки
+        // спрятан JSON заказа и фискальные поля. Разбор — в `vendinghub.ts`,
+        // имена колонок здесь — его же собственные имена, не наши.
+        //
+        // Это ВТОРОЙ поштучный источник тех же заказов: `orderNo` совпадает с
+        // «Order number» панели gjvending. По нему станет возможной построчная
+        // сверка, а не только дневная.
+        roles: {
+          machine: ["machineCode", "Код аппарата"],
+          point: ["Точка"],
+          product: ["goodsName", "Товар"],
+          flavour: ["tasteName"],
+          amount: ["orderPrice"],
+          ts: ["Время"],
+          externalId: ["orderNo"],
+          kind: ["orderType"],
+          payment: ["orderSource"],
+          // `status` и `fulfilment` намеренно НЕ назначены. У кабинета есть
+          // `salesStatus` со значением «2» — числом, как у «Brew status»
+          // панели, а не словом, как у её «Order status». Похоже на статус
+          // выдачи, но подтверждения нет, и назначать роль по сходству
+          // нельзя. Владелец назначит её с экрана «Роли колонок», когда
+          // сверит смысл.
+        },
+        dicts: [
+          {
+            role: "payment",
+            // Те же коды, что и у панели: кабинет показывает её же заказы.
+            values: {
+              cash: "наличные",
+              userDefined: "Таможенный платеж",
+              vip: "VIP-карта",
+              credit: "карта",
+              testShipment: "тестовая выдача",
+            },
+            unconfirmed: ["userDefined"],
+          },
+        ],
       },
     ],
   },
