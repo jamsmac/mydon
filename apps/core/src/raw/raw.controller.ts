@@ -296,6 +296,22 @@ export class RawController {
     return this.raw.reconcileSources(aSource, aReport, bSource, bReport);
   }
 
+  /**
+   * Объединённый журнал двух источников: каждый заказ один раз, по номеру.
+   *
+   * Пути: /raw/unify/gjvending/order_query/vs/vendinghub/operating
+   */
+  @Get("unify/:aSource/:aReport/vs/:bSource/:bReport")
+  unify(
+    @Param("aSource") aSource: string,
+    @Param("aReport") aReport: string,
+    @Param("bSource") bSource: string,
+    @Param("bReport") bReport: string,
+    @Query() query: Record<string, string>,
+  ) {
+    return this.raw.unifySources(aSource, aReport, bSource, bReport, normalizeRowsQuery(query));
+  }
+
   /** Каким способом приходят деньги — срез для сверки с платёжными системами. */
   @Get("payments/:source/:report")
   payments(@Param("source") source: string, @Param("report") report: string) {
