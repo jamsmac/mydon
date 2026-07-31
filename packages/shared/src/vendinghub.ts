@@ -170,5 +170,12 @@ export function cellValue(cell: string): string {
   if (marked) return text(marked[1]);
   const rowId = /data-row-id="([^"]*)"/.exec(cell);
   if (rowId) return rowId[1].trim();
-  return text(cell.split("<")[0]);
+  // Вложенного блока нет — значит вся ячейка это одно значение, даже если оно
+  // обёрнуто в тег (кабинет пишет то «<nobr>39384</nobr>», то просто «39384»).
+  // Если же блок есть, весь его текст брать нельзя — вернём то, что стоит до
+  // него, иначе в колонку ушёл бы трёхкилобайтный разворот.
+  const detail = /<(?:div|pre)[^>]*class="[^"]*(?:vhj-df|detail-container|order-container)[^"]*"/i.exec(
+    cell,
+  );
+  return text(detail ? cell.slice(0, detail.index) : cell);
 }

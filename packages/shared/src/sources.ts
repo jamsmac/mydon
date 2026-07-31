@@ -442,6 +442,51 @@ export const RAW_SOURCES: readonly RawSourceDef[] = [
     url: "https://vendinghub.uz/office/",
     reports: [
       {
+        // Плоский журнал: те же заказы, что и operatingReport, но фискальные
+        // поля уже отдельными колонками — разворачивать вложенный блок не надо.
+        // «Goods name» тут с хвостом «чек 20547» (номер фискального чека);
+        // роль product указывает на него, а очистка хвоста — работа слоя
+        // разбора, не сырья.
+        code: "reports",
+        title: "Report table",
+        ru: "Журнал (плоский)",
+        path: "office/reports",
+        roles: {
+          machine: ["Machine Code"],
+          point: ["Machine category"],
+          product: ["Goods name"],
+          amount: ["Order price"],
+          ts: ["Time"],
+          externalId: ["Order number"],
+          payment: ["Payment type", "Order resource"],
+        },
+        dicts: [
+          {
+            role: "payment",
+            values: {
+              cash: "наличные",
+              userDefined: "Таможенный платеж",
+              vip: "VIP-карта",
+              credit: "карта",
+            },
+            unconfirmed: ["userDefined"],
+          },
+        ],
+      },
+      {
+        // Справочник товаров кабинета: наименование, стоимость, классификатор и
+        // ИКПУ — прямой мост к карточкам товаров. Роль product тут указывает на
+        // саму карточку товара источника, а не на строку заказа.
+        code: "goods",
+        title: "Goods reference",
+        ru: "Справочник товаров",
+        path: "office/goods",
+        roles: {
+          product: ["Наименование"],
+          amount: ["Стоимость"],
+        },
+      },
+      {
         code: "operating",
         title: "Operating report",
         ru: "Журнал операций",

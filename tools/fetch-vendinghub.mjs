@@ -54,6 +54,8 @@ const DRY = args.includes("--dry");
 /** Отчёты кабинета: код в справочнике MYDON → путь внутри кабинета. */
 const REPORTS = {
   operating: "/office/operatingReport/",
+  reports: "/office/reports/",
+  goods: "/office/goods/",
 };
 
 const REPORT = opt("report", "operating");

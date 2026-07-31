@@ -129,7 +129,11 @@ describe("Кабинет VendHub office: страница отчёта", () => {
     // данные, а где оформление. Лучшего указания у нас нет.
     assert.equal(cellValue('<svg data-row-id="7"></svg><span data-target="for-excel">42</span><div>хлам</div>'), "42");
     assert.equal(cellValue('<svg data-row-id="7"></svg><div>хлам</div>'), "7", "без пометки — номер строки");
-    assert.equal(cellValue("просто текст<div>хлам</div>"), "просто текст");
+    assert.equal(cellValue("просто текст"), "просто текст");
+    // Плоский отчёт кабинета оборачивает значение в тег, а блока в ячейке нет.
+    assert.equal(cellValue("<nobr>39384</nobr>"), "39384");
+    // А вот при вложенном блоке берётся только то, что стоит до него.
+    assert.equal(cellValue('<span>7</span><div class="vhj-df">разворот</div>'), "7");
   });
 
   it("значения не приводятся к типам: цена остаётся строкой источника", () => {
