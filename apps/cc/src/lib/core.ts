@@ -278,6 +278,66 @@ export interface MachineStays {
   moves: number;
 }
 
+/** Отрезок, на котором у автомата держалась одна цена товара. */
+export interface PricePeriod {
+  price: number;
+  from: string;
+  to: string;
+  orders: number;
+}
+
+/** Цены одного товара на одном автомате. */
+export interface MachineProductPrice {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  product: string;
+  productEntityId: string | null;
+  productEntityName: string | null;
+  price: number | null;
+  periods: PricePeriod[];
+  changes: number;
+  orders: number;
+  /** Заказы по другой цене вперемешку с основной — признак подмены кнопки. */
+  mismatched: number;
+  lastOrderAt: string | null;
+}
+
+/** Один автомат в сквозном срезе по товару. */
+export interface ProductPriceMachine {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  price: number;
+  since: string;
+  orders: number;
+  lastOrderAt: string;
+  active: boolean;
+  gap: number;
+  ordersSince: number;
+  lost: number;
+}
+
+/** Цены одного товара по всем автоматам. */
+export interface ProductPriceSpread {
+  product: string;
+  entityId: string | null;
+  entityName: string | null;
+  reference: number | null;
+  referenceSince: string | null;
+  machines: ProductPriceMachine[];
+  behind: number;
+  lost: number;
+}
+
+/** Разбор цен по всей выгрузке. */
+export interface PriceReview {
+  products: ProductPriceSpread[];
+  lost: number;
+  lastOrderAt: string | null;
+  unreadable: number;
+}
+
 /** Состав колонок изменился между двумя последними выгрузками. */
 export interface RawDrift {
   prevFetchedAt: string;
@@ -450,6 +510,12 @@ export const core = {
   rawStays: (source: string, report: string) =>
     get<{ machines: MachineStays[] }>(
       `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
+    ),
+  rawPrices: (source: string, report: string) =>
+    get<PriceReview>(`/raw/prices/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
+  rawMachinePrices: (source: string, report: string, serial: string) =>
+    get<{ items: MachineProductPrice[] }>(
+      `/raw/prices/${encodeURIComponent(source)}/${encodeURIComponent(report)}/machine/${encodeURIComponent(serial)}`,
     ),
   rawMapping: (source: string, report: string) =>
     get<{ snapshot: RawSnapshotMeta | null; groups: RawMappingGroup[] }>(

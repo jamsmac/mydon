@@ -12,6 +12,10 @@ import { CoreDown } from "./core-down";
 import { RawMapping } from "./raw-mapping";
 import { RawTable } from "./raw-table";
 import { MachineStaysView } from "./machine-stays";
+import { PricesView } from "./prices-view";
+
+/** Что показывает вкладка отчёта. */
+type ReportView = "rows" | "map" | "stays" | "prices";
 
 export interface SourcesViewProps {
   /** Адрес страницы направления: /domain/vendhub */
@@ -85,7 +89,8 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
     );
   }
   const report = source.reports.find((r) => r.reportCode === sp.rep) ?? source.reports[0];
-  const view = sp.view === "map" ? "map" : sp.view === "stays" ? "stays" : "rows";
+  const view: ReportView =
+    sp.view === "map" || sp.view === "stays" || sp.view === "prices" ? sp.view : "rows";
   const clean = withoutTableState(sp);
 
   // Сводка сверху: сколько систем реально что-то принесли и где давно не снимали.
@@ -195,7 +200,7 @@ async function ReportPane({
   sp: Record<string, string>;
   source: RawSourceState;
   reportCode: string;
-  view: "rows" | "map" | "stays";
+  view: ReportView;
 }) {
   const report = source.reports.find((r) => r.reportCode === reportCode);
   if (!report) return null;
@@ -238,7 +243,7 @@ async function ReportPane({
     );
   }
 
-  const viewHref = (v: "rows" | "map" | "stays") =>
+  const viewHref = (v: ReportView) =>
     href(base, sp, { view: v === "rows" ? null : v });
   const exportParams = new URLSearchParams(params);
   exportParams.set("src", source.code);
@@ -311,6 +316,9 @@ async function ReportPane({
         <Link href={viewHref("stays")} className={`subtab ${view === "stays" ? "active" : ""}`}>
           Где стояли автоматы
         </Link>
+        <Link href={viewHref("prices")} className={`subtab ${view === "prices" ? "active" : ""}`}>
+          Цены
+        </Link>
       </div>
 
       {view === "rows" ? (
@@ -331,11 +339,22 @@ async function ReportPane({
         />
       ) : view === "map" ? (
         <MappingPane source={source.code} reportCode={reportCode} />
+      ) : view === "prices" ? (
+        <PricesPane source={source.code} reportCode={reportCode} />
       ) : (
         <StaysPane source={source.code} reportCode={reportCode} />
       )}
     </>
   );
+}
+
+/** Где какой товар почём и кто отстал с ценой. */
+async function PricesPane({ source, reportCode }: { source: string; reportCode: string }) {
+  try {
+    return <PricesView review={await core.rawPrices(source, reportCode)} />;
+  } catch (err) {
+    return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
 }
 
 /** Где стоял каждый автомат и когда переезжал. */

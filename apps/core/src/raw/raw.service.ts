@@ -22,6 +22,13 @@ const MAX_PAGE = 1000;
 export const MAX_EXPORT = 20_000;
 /** Разумный предел числа колонок — защита от мусорного индекса в фильтре. */
 const MAX_COLUMNS = 512;
+/**
+ * Сколько дней без заказов делают автомат молчащим.
+ *
+ * Считается от последнего заказа в выгрузке, а не от сегодняшнего дня: выгрузка
+ * может быть месячной давности, и тогда молчащими вышли бы все.
+ */
+export const PRICE_ACTIVE_DAYS = 14;
 
 /** Снимок отчёта: что и когда сняли у источника. */
 export interface RawSnapshotMeta {
@@ -227,6 +234,102 @@ export interface MachineStays {
   stays: MachineStay[];
   /** Сколько раз автомат переезжал (отрезков минус один). */
   moves: number;
+}
+
+/**
+ * Ведро цены: сколько заказов одного товара прошло по одной цене за один месяц.
+ *
+ * Месяц — не произвол, а компромисс: по одному ведру на цену за всю выгрузку
+ * нельзя восстановить порядок (цена вернулась — отрезки слиплись бы в один), а
+ * по дням вёдер выходит сотни тысяч. Внутри месяца порядок всё равно точный:
+ * у ведра есть время первого и последнего заказа.
+ */
+export interface PriceBucket {
+  month: string;
+  price: number;
+  from: string;
+  to: string;
+  orders: number;
+}
+
+/** Отрезок, на котором у автомата держалась одна цена товара. */
+export interface PricePeriod {
+  price: number;
+  from: string;
+  to: string;
+  orders: number;
+}
+
+/** Цены одного товара на одном автомате. */
+export interface MachineProductPrice {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  /** Название товара так, как его пишет источник. */
+  product: string;
+  productEntityId: string | null;
+  productEntityName: string | null;
+  /** Текущая цена — цена последнего отрезка. null — отрезков не вышло. */
+  price: number | null;
+  periods: PricePeriod[];
+  /** Сколько раз цена менялась (отрезков минус один). */
+  changes: number;
+  orders: number;
+  /**
+   * Заказы по другой цене вперемешку с основной.
+   *
+   * Сменой цены это не считается: у настоящей смены старая цена кончается
+   * раньше, чем начинается новая. Вперемешку — признак подмены кнопки
+   * (пробит один напиток, приготовлен другой), и деньги там от другого товара.
+   */
+  mismatched: number;
+  lastOrderAt: string | null;
+}
+
+/** Один автомат в сквозном срезе по товару. */
+export interface ProductPriceMachine {
+  serial: string;
+  entityId: string | null;
+  entityName: string | null;
+  price: number;
+  /** С какого момента держится эта цена. */
+  since: string;
+  orders: number;
+  lastOrderAt: string;
+  /** Автомат ещё торгует — иначе это не отставание, а молчание. */
+  active: boolean;
+  /** Насколько ниже эталона. 0 — вровень или выше. */
+  gap: number;
+  /** Заказов с того момента, как эталон стал ценой большинства. */
+  ordersSince: number;
+  /** Недобор: разница в цене на эти заказы. */
+  lost: number;
+}
+
+/** Цены одного товара по всем автоматам. */
+export interface ProductPriceSpread {
+  product: string;
+  entityId: string | null;
+  entityName: string | null;
+  /** Цена большинства автоматов. null — большинства нет, эталон брать неоткуда. */
+  reference: number | null;
+  /** Когда эталон стал ценой большинства. От него и считается недобор. */
+  referenceSince: string | null;
+  machines: ProductPriceMachine[];
+  /** Сколько автоматов торгует дешевле эталона. */
+  behind: number;
+  lost: number;
+}
+
+/** Разбор цен по всей выгрузке. */
+export interface PriceReview {
+  products: ProductPriceSpread[];
+  /** Суммарный недобор по всем товарам. */
+  lost: number;
+  /** Последний заказ в выгрузке — от него, а не от «сегодня», считается «активен». */
+  lastOrderAt: string | null;
+  /** Заказы, у которых цена не читается числом. Молча отбрасывать их нельзя. */
+  unreadable: number;
 }
 
 /** Что принимаем при загрузке выгрузки. */
@@ -676,6 +779,270 @@ export class RawService {
   }
 
   /**
+   * Вёдра цен: заказы, сгруппированные по автомату, товару, цене и месяцу.
+   *
+   * Здесь впервые за весь сырой слой цена приводится к числу — и это законно:
+   * слой разбора имеет на это право, сырьё при этом не меняется. «15000» и
+   * «15000.00» — одна цена, и считать их разными значило бы придумать смену.
+   *
+   * Что в расчёт не идёт и почему:
+   * - тестовые отгрузки (`testShipment`) — это не продажа;
+   * - нулевая цена — не цена, а отметка о выдаче без денег.
+   */
+  private async priceBuckets(
+    snapshot: RawSnapshotMeta,
+    roles: RawColumnRoles | undefined,
+  ): Promise<{
+    rows: { serial: string; product: string; bucket: PriceBucket }[];
+    unreadable: number;
+  }> {
+    const mIdx = roleColumnIndex(snapshot.columns, roles, "machine");
+    const pIdx = roleColumnIndex(snapshot.columns, roles, "product");
+    const aIdx = roleColumnIndex(snapshot.columns, roles, "amount");
+    const tIdx = roleColumnIndex(snapshot.columns, roles, "ts");
+    if (mIdx < 0 || pIdx < 0 || aIdx < 0 || tIdx < 0) return { rows: [], unreadable: 0 };
+    const kIdx = roleColumnIndex(snapshot.columns, roles, "kind");
+
+    const cell = (idx: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
+    const serial = cell(mIdx);
+    const product = cell(pIdx);
+    const ts = cell(tIdx);
+    const amount = cell(aIdx);
+    // Цена числом. Не число — не цена: такие заказы считаются отдельно и
+    // показываются владельцу, а не выбрасываются молча.
+    const price = sql<string>`case when ${amount} ~ '^\\s*-?[0-9]+([.,][0-9]+)?\\s*$'
+      then replace(btrim(${amount}), ',', '.')::numeric end`;
+    const month = sql<string>`substr(${ts}, 1, 7)`;
+
+    const conds: SQL[] = [eq(rawRow.snapshotId, snapshot.id), sql`${price} > 0`];
+    if (kIdx >= 0) conds.push(sql`lower(btrim(${cell(kIdx)})) <> 'testshipment'`);
+
+    const rows = await this.db
+      .select({
+        serial,
+        product,
+        month,
+        price,
+        from: sql<string>`min(${ts})`,
+        to: sql<string>`max(${ts})`,
+        n: sql<number>`count(*)`,
+      })
+      .from(rawRow)
+      .where(and(...conds))
+      .groupBy(serial, product, month, price);
+
+    const [{ n: unreadable }] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(rawRow)
+      .where(and(eq(rawRow.snapshotId, snapshot.id), sql`${price} is null`));
+
+    return {
+      rows: rows
+        .filter((r) => r.serial.trim().length > 0 && r.product.trim().length > 0)
+        .map((r) => ({
+          serial: r.serial,
+          product: r.product,
+          bucket: {
+            month: r.month,
+            price: Number(r.price),
+            from: r.from,
+            to: r.to,
+            orders: Number(r.n),
+          },
+        })),
+      unreadable: Number(unreadable),
+    };
+  }
+
+  /** Карточки автоматов и товаров по ключам источника — для подписей и ссылок. */
+  private async priceCards(sourceCode: string): Promise<{
+    bySerial: Map<string, { id: string; name: string }>;
+    byProduct: Map<string, { id: string; name: string }>;
+  }> {
+    const [machines, products, links] = await Promise.all([
+      this.db
+        .select({ id: entity.id, name: entity.name, ref: entity.externalRef })
+        .from(entity)
+        .where(eq(entity.type, "machine")),
+      this.db.select({ id: entity.id, name: entity.name }).from(entity).where(eq(entity.type, "product")),
+      this.db.select().from(rawLink).where(eq(rawLink.sourceCode, sourceCode)),
+    ]);
+    const bySerial = new Map<string, { id: string; name: string }>();
+    for (const m of machines) {
+      if (m.ref) bySerial.set(normalizeSourceKey(m.ref), { id: m.id, name: m.name });
+    }
+    const byProduct = new Map<string, { id: string; name: string }>();
+    for (const p of products) byProduct.set(normalizeSourceKey(p.name), { id: p.id, name: p.name });
+    // Решение владельца важнее совпадения по названию — как и на экране
+    // сопоставления: «карточка не нужна» тоже решение и его надо уважать.
+    const nameById = new Map(products.map((p) => [p.id, p.name] as const));
+    for (const l of links) {
+      if (l.kind !== "product") continue;
+      const card = l.entityId ? nameById.get(l.entityId) : undefined;
+      if (l.entityId && card) byProduct.set(l.externalKey, { id: l.entityId, name: card });
+      else byProduct.delete(l.externalKey);
+    }
+    return { bySerial, byProduct };
+  }
+
+  /** Отрезки цен по каждой паре «автомат + товар». Основа обоих срезов. */
+  private async priceTimelines(
+    sourceCode: string,
+    reportCode: string,
+  ): Promise<{
+    items: MachineProductPrice[];
+    buckets: Map<string, PriceBucket[]>;
+    unreadable: number;
+    lastOrderAt: string | null;
+  }> {
+    const report = findRawReport(sourceCode, reportCode);
+    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    if (!snapshot) return { items: [], buckets: new Map(), unreadable: 0, lastOrderAt: null };
+
+    const [{ rows, unreadable }, cards] = await Promise.all([
+      this.priceBuckets(snapshot, report.roles),
+      this.priceCards(sourceCode),
+    ]);
+
+    const buckets = new Map<string, PriceBucket[]>();
+    const names = new Map<string, { serial: string; product: string }>();
+    let lastOrderAt: string | null = null;
+    for (const r of rows) {
+      const key = `${r.serial} ${r.product}`;
+      const list = buckets.get(key) ?? [];
+      list.push(r.bucket);
+      buckets.set(key, list);
+      names.set(key, { serial: r.serial, product: r.product });
+      if (lastOrderAt === null || r.bucket.to > lastOrderAt) lastOrderAt = r.bucket.to;
+    }
+
+    const items: MachineProductPrice[] = [];
+    for (const [key, list] of buckets) {
+      const { serial, product } = names.get(key)!;
+      const { periods, mismatched } = buildPricePeriods(list);
+      const card = cards.bySerial.get(normalizeSourceKey(serial)) ?? null;
+      const pcard = cards.byProduct.get(normalizeSourceKey(product)) ?? null;
+      const last = periods[periods.length - 1];
+      items.push({
+        serial,
+        entityId: card?.id ?? null,
+        entityName: card?.name ?? null,
+        product,
+        productEntityId: pcard?.id ?? null,
+        productEntityName: pcard?.name ?? null,
+        price: last?.price ?? null,
+        periods,
+        changes: Math.max(0, periods.length - 1),
+        orders: periods.reduce((n, p) => n + p.orders, 0),
+        mismatched,
+        lastOrderAt: last?.to ?? null,
+      });
+    }
+    return { items, buckets, unreadable, lastOrderAt };
+  }
+
+  /** Ассортимент и цены одного автомата — для его карточки. */
+  async machinePrices(
+    sourceCode: string,
+    reportCode: string,
+    serial: string,
+  ): Promise<MachineProductPrice[]> {
+    const { items } = await this.priceTimelines(sourceCode, reportCode);
+    const wanted = normalizeSourceKey(serial);
+    return items
+      .filter((i) => normalizeSourceKey(i.serial) === wanted)
+      // Сначала то, чем торгуют сейчас и чаще: остальное — хвост истории.
+      .sort((a, b) => b.orders - a.orders || a.product.localeCompare(b.product, "ru"));
+  }
+
+  /**
+   * Сквозной срез по ценам: где какой товар почём и кто отстал.
+   *
+   * Отставание считается не «дешевле всех», а «дешевле цены большинства»:
+   * один автомат, где цену подняли раньше срока, не делает остальные отставшими.
+   */
+  async prices(sourceCode: string, reportCode: string): Promise<PriceReview> {
+    const { items, buckets, unreadable, lastOrderAt } = await this.priceTimelines(
+      sourceCode,
+      reportCode,
+    );
+    // «Активен» считается от последнего заказа в выгрузке, а не от сегодняшнего
+    // дня: выгрузка может быть месячной давности, и тогда молчали бы все.
+    const activeAfter = lastOrderAt === null ? null : daysBefore(lastOrderAt, PRICE_ACTIVE_DAYS);
+
+    const byProduct = new Map<string, MachineProductPrice[]>();
+    for (const i of items) {
+      if (i.price === null || i.lastOrderAt === null) continue;
+      const key = normalizeSourceKey(i.product);
+      const list = byProduct.get(key) ?? [];
+      list.push(i);
+      byProduct.set(key, list);
+    }
+
+    const products: ProductPriceSpread[] = [];
+    for (const list of byProduct.values()) {
+      const active = list.filter(
+        (i) => activeAfter === null || (i.lastOrderAt !== null && i.lastOrderAt >= activeAfter),
+      );
+      const reference = referencePrice(active.map((i) => i.price!));
+      const since =
+        reference === null ? null : referenceSince(active.map((i) => i.periods), reference);
+
+      const machines: ProductPriceMachine[] = list.map((i) => {
+        const isActive = activeAfter === null || (i.lastOrderAt !== null && i.lastOrderAt >= activeAfter);
+        const gap = reference !== null && isActive && i.price! < reference ? reference - i.price! : 0;
+        // Недобор считается только с того момента, как эталон стал ценой
+        // большинства: до него отставания не было.
+        const ordersSince =
+          gap === 0 || since === null
+            ? 0
+            : (buckets.get(`${i.serial} ${i.product}`) ?? [])
+                .filter((b) => b.price === i.price && b.to >= since)
+                .reduce((n, b) => n + b.orders, 0);
+        return {
+          serial: i.serial,
+          entityId: i.entityId,
+          entityName: i.entityName,
+          price: i.price!,
+          since: i.periods[i.periods.length - 1]?.from ?? "",
+          orders: i.orders,
+          lastOrderAt: i.lastOrderAt!,
+          active: isActive,
+          gap,
+          ordersSince,
+          lost: gap * ordersSince,
+        };
+      });
+      machines.sort((a, b) => b.lost - a.lost || a.price - b.price || b.orders - a.orders);
+
+      const first = list[0];
+      products.push({
+        product: first.product,
+        entityId: first.productEntityId,
+        entityName: first.productEntityName,
+        reference,
+        referenceSince: since,
+        machines,
+        behind: machines.filter((m) => m.gap > 0).length,
+        lost: machines.reduce((n, m) => n + m.lost, 0),
+      });
+    }
+
+    // Сверху то, где деньги уже потеряны; дальше — где просто разнобой в ценах.
+    products.sort(
+      (a, b) => b.lost - a.lost || b.behind - a.behind || a.product.localeCompare(b.product, "ru"),
+    );
+
+    return {
+      products,
+      lost: products.reduce((n, p) => n + p.lost, 0),
+      lastOrderAt,
+      unreadable,
+    };
+  }
+
+  /**
    * Решение владельца по одному значению источника.
    * `entityId: null` — осознанное «карточка не нужна» (тестовые отгрузки и т.п.):
    * значение перестаёт числиться неразобранным, но и в реестр не попадает.
@@ -870,6 +1237,161 @@ export function markOverlaps(
       (prev !== undefined && cur.from <= prev.to) || (next !== undefined && next.from <= cur.to);
     return { ...cur, overlaps };
   });
+}
+
+/**
+ * Сколько заказов должно быть в отрезке, чтобы он считался сменой цены.
+ *
+ * Один-два заказа между двумя отрезками одной цены — не смена и не возврат к
+ * прежней цене, а сбой источника. Правило срабатывает только когда соседи
+ * согласны между собой: если слева и справа цены разные, отрезок остаётся, даже
+ * будь он из одного заказа.
+ */
+export const MIN_PERIOD_ORDERS = 3;
+
+/**
+ * Отрезки цены одного товара на одном автомате — из вёдер по месяцам.
+ *
+ * Цена, как и точка, не поле, а период: пока её не поменяли, она держится.
+ * Отсюда и правило смены: старая цена кончается раньше, чем начинается новая.
+ * Если же две цены идут вперемешку, это не смена — по одной кнопке пробивают
+ * разные напитки, и вторая цена принадлежит не этому товару.
+ *
+ * Отдельной функцией — потому что здесь решается, чему верить, а такое место
+ * должно быть закреплено тестом, а не спрятано внутри запроса.
+ */
+export function buildPricePeriods(buckets: readonly PriceBucket[]): {
+  periods: PricePeriod[];
+  mismatched: number;
+} {
+  const byMonth = new Map<string, PriceBucket[]>();
+  for (const b of buckets) {
+    const list = byMonth.get(b.month) ?? [];
+    list.push(b);
+    byMonth.set(b.month, list);
+  }
+
+  let mismatched = 0;
+  const segments: PriceBucket[] = [];
+  for (const month of [...byMonth.keys()].sort()) {
+    // Внутри месяца сначала берём цену, по которой прошло больше заказов: она
+    // и есть цена месяца. Остальные попадают в отрезки, только если легли
+    // строго врозь с уже принятыми — то есть выглядят сменой, а не примесью.
+    const list = [...(byMonth.get(month) ?? [])].sort(
+      (a, b) => b.orders - a.orders || (a.from < b.from ? -1 : a.from > b.from ? 1 : 0),
+    );
+    const kept: PriceBucket[] = [];
+    for (const cand of list) {
+      if (kept.some((k) => !(cand.to < k.from || cand.from > k.to))) {
+        mismatched += cand.orders;
+        continue;
+      }
+      kept.push(cand);
+    }
+    kept.sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+    segments.push(...kept);
+  }
+
+  const periods = mergeAdjacent(segments);
+  // Короткий отрезок между двумя одинаковыми ценами — сбой, а не смена.
+  const cleaned: PricePeriod[] = [];
+  for (let i = 0; i < periods.length; i += 1) {
+    const cur = periods[i];
+    const prev = cleaned[cleaned.length - 1];
+    const next = periods[i + 1];
+    if (
+      prev !== undefined &&
+      next !== undefined &&
+      prev.price === next.price &&
+      cur.orders < MIN_PERIOD_ORDERS
+    ) {
+      mismatched += cur.orders;
+      continue;
+    }
+    cleaned.push({ ...cur });
+  }
+
+  return { periods: mergeAdjacent(cleaned), mismatched };
+}
+
+/** Склеить соседние отрезки с одинаковой ценой: смены цены между ними нет. */
+function mergeAdjacent(list: readonly PricePeriod[]): PricePeriod[] {
+  const out: PricePeriod[] = [];
+  for (const s of list) {
+    const last = out[out.length - 1];
+    if (last && last.price === s.price) {
+      if (s.to > last.to) last.to = s.to;
+      last.orders += s.orders;
+      continue;
+    }
+    out.push({ price: s.price, from: s.from, to: s.to, orders: s.orders });
+  }
+  return out;
+}
+
+/** Цена товара на автомате в указанный момент. null — тогда он им не торговал. */
+export function priceAt(periods: readonly PricePeriod[], at: string): number | null {
+  for (const p of periods) {
+    if (p.from <= at && at <= p.to) return p.price;
+  }
+  return null;
+}
+
+/**
+ * С какого момента эталонная цена стала ценой большинства.
+ *
+ * Недобор нельзя считать с того дня, когда первый автомат поднял цену: пока
+ * большинство торгует по-старому, отставших нет — есть один опередивший.
+ * Поэтому ищется начало последнего непрерывного отрезка, на котором эталон
+ * держит большинство и не теряет его до конца.
+ *
+ * null — большинство так и не сложилось, и требовать с кого-то недобор не за что.
+ */
+export function referenceSince(
+  timelines: readonly (readonly PricePeriod[])[],
+  reference: number,
+): string | null {
+  const dates = [...new Set(timelines.flatMap((t) => t.map((p) => p.from)))].sort();
+  let since: string | null = null;
+  for (const at of dates) {
+    let ref = 0;
+    let other = 0;
+    for (const t of timelines) {
+      const p = priceAt(t, at);
+      if (p === null) continue;
+      if (p === reference) ref += 1;
+      else other += 1;
+    }
+    if (ref > other) {
+      if (since === null) since = at;
+    } else {
+      since = null;
+    }
+  }
+  return since;
+}
+
+/**
+ * Цена большинства. null — большинства нет: либо цен поровну, либо считать не с чего.
+ *
+ * Ничью не разрешаем в пользу большей цены: «половина торгует дороже» — это
+ * разнобой, а не эталон, и назначать его самим значит выдумать факт.
+ */
+export function referencePrice(prices: readonly number[]): number | null {
+  if (prices.length === 0) return null;
+  const count = new Map<number, number>();
+  for (const p of prices) count.set(p, (count.get(p) ?? 0) + 1);
+  const ranked = [...count.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+  if (ranked.length > 1 && ranked[0][1] === ranked[1][1]) return null;
+  return ranked[0][0];
+}
+
+/** Дата на N дней раньше времени источника («ГГГГ-ММ-ДД ЧЧ:ММ:СС»). */
+export function daysBefore(ts: string, days: number): string {
+  const d = new Date(`${ts.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return ts;
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
 }
 
 /**
