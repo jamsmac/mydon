@@ -475,6 +475,44 @@ export interface UnifiedOrder {
   fields: UnifiedField[];
 }
 
+/** Расхождение дневной выручки: союз против OurVend по одной корзине. */
+export interface OurVendConflict {
+  day: string;
+  serial: string;
+  product: string;
+  unionOrders: number;
+  unionRevenue: number;
+  ourvendRevenue: number;
+  provisional: boolean;
+}
+
+/** Пример дневной корзины — односторонней. */
+export interface BucketSample {
+  day: string;
+  serial: string;
+  product: string;
+  revenue: number;
+  orders: number;
+}
+
+/** Дневная сверка союза с OurVend: третий взгляд, а не слагаемое. */
+export interface OurVendRecon {
+  source: string | null;
+  synced: boolean;
+  fromDay: string | null;
+  toDay: string | null;
+  matched: number;
+  agree: number;
+  differ: number;
+  onlyUnion: number;
+  onlyOurVend: number;
+  unionRevenue: number;
+  ourvendRevenue: number;
+  conflicts: OurVendConflict[];
+  onlyUnionSamples: BucketSample[];
+  onlyOurVendSamples: BucketSample[];
+}
+
 /** Объединённый журнал двух источников: каждый заказ один раз, по номеру. */
 export interface UnifiedJournal {
   totalA: number;
@@ -490,6 +528,8 @@ export interface UnifiedJournal {
   orders: UnifiedOrder[];
   a: { source: string; report: string; title: string };
   b: { source: string; report: string; title: string };
+  /** Дневная сверка с OurVend (третий, дневной источник). */
+  ourvend: OurVendRecon;
 }
 
 /** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
