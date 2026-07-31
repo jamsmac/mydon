@@ -227,6 +227,101 @@ export interface Workload {
   doneWithDue: number;
 }
 
+// ── Сырой слой источников ──
+// Строки лежат так, как пришли из чужой системы: те же колонки, тот же порядок,
+// значения строками. Поэтому здесь нет типизации полей отчёта — их состав
+// диктует источник, а не мы.
+
+/** Снимок отчёта: что и когда сняли. */
+export interface RawSnapshotMeta {
+  id: string;
+  sourceCode: string;
+  reportCode: string;
+  fetchedAt: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  account: string | null;
+  rowsTotal: number | null;
+  columns: string[];
+  rows: number;
+  importedBy: string | null;
+  note: string | null;
+}
+
+export type RawFreshnessState = "never" | "stale" | "fresh";
+
+/** Расшифровка кодов одной колонки этой выгрузки. */
+export interface RawDecoder {
+  /** Номер колонки в текущем снимке. */
+  column: number;
+  values: Record<string, string>;
+  /** Коды, смысл которых не подтверждён: показываем вопросом, а не фактом. */
+  unconfirmed: string[];
+}
+
+/** Состав колонок изменился между двумя последними выгрузками. */
+export interface RawDrift {
+  prevFetchedAt: string;
+  added: string[];
+  removed: string[];
+  reordered: boolean;
+}
+
+export interface RawReportState {
+  sourceCode: string;
+  reportCode: string;
+  title: string;
+  ru: string;
+  path: string;
+  snapshots: number;
+  lastFetchedAt: string | null;
+  freshness: RawFreshnessState;
+  rows: number;
+  rowsTotal: number | null;
+  columns: number;
+}
+
+export interface RawSourceState {
+  code: string;
+  title: string;
+  subtitle: string;
+  url: string;
+  connected: boolean;
+  reports: RawReportState[];
+}
+
+export interface RawMappingValue {
+  key: string;
+  label: string;
+  count: number;
+  entityId: string | null;
+  entityName: string | null;
+  decidedBy: string | null;
+  dismissed: boolean;
+}
+
+export interface RawMappingGroup {
+  kind: "machine" | "product" | "point";
+  label: string;
+  column: string | null;
+  bindable: boolean;
+  matched: number;
+  unmatched: number;
+  values: RawMappingValue[];
+}
+
+/** Текстовый ответ Core — для выгрузки CSV, который нельзя разбирать как JSON. */
+export async function coreText(path: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, { cache: "no-store", signal: AbortSignal.timeout(30000) });
+  } catch (err) {
+    throw new CoreUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (!res.ok) throw new CoreUnavailable(`HTTP ${res.status} на ${path}`);
+  return res.text();
+}
+
 export const core = {
   briefing: () => get<Briefing>("/registry/briefing"),
   agents: () => get<AgentCard[]>("/agents"),
@@ -316,4 +411,30 @@ export const core = {
     ),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
+
+  // ── Источники (сырой слой) ──
+  rawSources: () => get<{ sources: RawSourceState[] }>("/raw/sources"),
+  rawRows: (source: string, report: string, params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<{
+      snapshot: RawSnapshotMeta | null;
+      total: number;
+      rows: { idx: number; cells: string[] }[];
+      page?: number;
+      size?: number;
+      decoders: RawDecoder[];
+      drift?: RawDrift | null;
+    }>(`/raw/report/${encodeURIComponent(source)}/${encodeURIComponent(report)}/rows${qs ? `?${qs}` : ""}`);
+  },
+  rawMapping: (source: string, report: string) =>
+    get<{ snapshot: RawSnapshotMeta | null; groups: RawMappingGroup[] }>(
+      `/raw/mapping/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
+    ),
+  rawLink: (input: {
+    source: string;
+    kind: "machine" | "product" | "point";
+    label: string;
+    entityId?: string;
+    note?: string;
+  }) => send<{ ok: true }>("/raw/link", "POST", input),
 };

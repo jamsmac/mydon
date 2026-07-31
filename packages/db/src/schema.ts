@@ -14,6 +14,7 @@ import {
   timestamp,
   jsonb,
   numeric,
+  integer,
   index,
   date,
   uniqueIndex,
@@ -243,6 +244,100 @@ export const machineStock = pgTable(
   (t) => [
     uniqueIndex("machine_stock_day_key").on(t.dt, t.machineSerial, t.product),
     index("machine_stock_serial_idx").on(t.machineSerial, t.dt),
+  ],
+);
+
+// ── raw_snapshot / raw_row: сырой слой источников ──
+//
+// Сюда кладётся выгрузка отчёта внешней системы РОВНО как она пришла: те же
+// названия колонок, тот же порядок, значения строками. Ничего не переименовано
+// и не приведено к типам — иначе спорную цифру нечем будет подтвердить.
+// Разбор в аналитику (sale, purchase, machine_stock) живёт отдельно и этот
+// слой не меняет: он остаётся распечаткой источника на дату.
+export const rawSnapshot = pgTable(
+  "raw_snapshot",
+  {
+    id: id(),
+    /** Код системы-источника: gjvending | ourvend | payme | vendinghub. */
+    sourceCode: text("source_code").notNull(),
+    /** Код отчёта внутри системы: order_query, machine_cash… */
+    reportCode: text("report_code").notNull(),
+    /** Направление бизнеса. Пока все источники — VendHub. */
+    domain: domainEnum("domain").default("vendhub").notNull(),
+    /** Когда снято у источника — это, а не время загрузки, отвечает «насколько свежо». */
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
+    /** Период выгрузки, как он был выбран в источнике. */
+    periodFrom: date("period_from"),
+    periodTo: date("period_to"),
+    /** Учётная запись, под которой снималось: выгрузки разных кабинетов не путаются. */
+    account: text("account"),
+    /** Сколько строк показывал источник. Может быть больше, чем влезло в снимок. */
+    rowsTotal: integer("rows_total"),
+    /** Названия колонок в порядке источника. Порядок — часть данных. */
+    columns: jsonb("columns").$type<string[]>().default([]).notNull(),
+    /** Кто принёс: owner | agent:<имя> | ingest. */
+    importedBy: text("imported_by"),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Один и тот же снимок не должен лечь дважды при повторной отправке.
+    uniqueIndex("raw_snapshot_key").on(t.sourceCode, t.reportCode, t.fetchedAt),
+    index("raw_snapshot_report_idx").on(t.sourceCode, t.reportCode, t.fetchedAt),
+  ],
+);
+
+export const rawRow = pgTable(
+  "raw_row",
+  {
+    id: id(),
+    snapshotId: uuid("snapshot_id")
+      .references(() => rawSnapshot.id, { onDelete: "cascade" })
+      .notNull(),
+    /** Номер строки в источнике, с единицы: порядок выгрузки тоже факт. */
+    idx: integer("idx").notNull(),
+    /** Значения строки, порядок соответствует columns снимка. Всё строками. */
+    cells: jsonb("cells").$type<string[]>().default([]).notNull(),
+  },
+  (t) => [
+    uniqueIndex("raw_row_key").on(t.snapshotId, t.idx),
+    index("raw_row_snapshot_idx").on(t.snapshotId),
+  ],
+);
+
+// ── raw_link: сопоставление значений источника с карточками реестра ──
+//
+// Второй слой: сырьё лежит как пришло, а «Ice Lemon Tea» из чужой панели
+// связывается с нашей карточкой товара здесь. Хранится, а не вычисляется
+// на лету: решение владельца обязано пережить следующую выгрузку, иначе он
+// будет разбирать одни и те же незнакомые названия каждую неделю.
+export const rawLinkKindEnum = pgEnum("raw_link_kind", ["machine", "product", "point"]);
+export const rawLink = pgTable(
+  "raw_link",
+  {
+    id: id(),
+    sourceCode: text("source_code").notNull(),
+    kind: rawLinkKindEnum("kind").notNull(),
+    /** Значение источника после нормализации — по нему ищем совпадение. */
+    externalKey: text("external_key").notNull(),
+    /** Как оно выглядело в источнике: владельцу показываем его написание. */
+    externalLabel: text("external_label").notNull(),
+    /** Карточка реестра. Пусто = «разобрано и решено карточку не заводить». */
+    entityId: uuid("entity_id").references(() => entity.id, { onDelete: "set null" }),
+    /**
+     * Кто решил: owner — владелец руками, agent:<имя> — предложил агент.
+     * Автосовпадения по точному ключу здесь НЕ хранятся: они пересчитываются
+     * от текущих карточек, и запись о них протухла бы при переименовании.
+     */
+    decidedBy: text("decided_by").default("owner").notNull(),
+    /** Почему связано именно так — если владельцу пришлось объяснять. */
+    note: text("note"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("raw_link_key").on(t.sourceCode, t.kind, t.externalKey),
+    index("raw_link_entity_idx").on(t.entityId),
   ],
 );
 

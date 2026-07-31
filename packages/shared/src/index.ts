@@ -45,3 +45,6 @@ export type WithRequired<T, K extends keyof T> = T & Required<Pick<T, K>>;
 
 // Логика задач: разбор сроков словами и группировка по срочности (панель + бот).
 export * from "./tasks";
+
+// Справочник источников VendHub: откуда берутся сырые выгрузки.
+export * from "./sources";
