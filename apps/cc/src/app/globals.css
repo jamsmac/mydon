@@ -780,3 +780,18 @@ a.rowlink:hover { background: var(--surf-2); }
 /* то, что ждёт слова владельца: данные, вписанные не им */
 .sect.appr { border-left: 3px solid var(--hot); padding-left: 12px; }
 .sect.appr .maprow .mapt { gap: 6px; }
+
+/* построчная сверка источников */
+.rlist { display: flex; flex-direction: column; }
+.rhead, .rrow {
+  display: grid; grid-template-columns: minmax(0,1.4fr) 120px minmax(0,1fr) minmax(0,1fr);
+  gap: 10px; align-items: center; padding: 6px 10px; font-size: 12.5px;
+}
+.rhead { color: var(--tx-3); font-size: 11px; border-bottom: 1px solid var(--line); }
+.rrow { border-bottom: 1px solid rgba(30,51,80,0.5); }
+.rrow:hover { background: var(--surf); }
+@media (max-width: 720px) {
+  .rhead { display: none; }
+  .rrow { grid-template-columns: 1fr 1fr; row-gap: 2px; }
+  .rrow > :first-child { grid-column: 1 / -1; }
+}

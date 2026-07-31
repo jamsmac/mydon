@@ -421,6 +421,38 @@ export interface Journal {
   mismatched: number;
 }
 
+/** Расхождение по одному полю одной операции. */
+export interface FieldDiff {
+  role: string;
+  label: string;
+  a: string;
+  b: string;
+}
+/** Итог сверки поля. */
+export interface FieldSummary {
+  role: string;
+  label: string;
+  agree: number;
+  differ: number;
+  absent: number;
+}
+/** Построчная сверка двух источников. */
+export interface Reconciliation {
+  totalA: number;
+  totalB: number;
+  matched: number;
+  conflicts: { key: string; diffs: FieldDiff[] }[];
+  onlyA: string[];
+  onlyB: string[];
+  onlyACount: number;
+  onlyBCount: number;
+  duplicatesA: { key: string; count: number }[];
+  duplicatesB: { key: string; count: number }[];
+  fields: FieldSummary[];
+  a: { source: string; report: string; title: string };
+  b: { source: string; report: string; title: string };
+}
+
 /** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
 export interface PaymentMonth {
   month: string;
@@ -746,6 +778,10 @@ export const core = {
   },
   rawPayments: (source: string, report: string) =>
     get<PaymentReview>(`/raw/payments/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
+  rawReconcile: (a: { source: string; report: string }, b: { source: string; report: string }) =>
+    get<Reconciliation>(
+      `/raw/reconcile/${encodeURIComponent(a.source)}/${encodeURIComponent(a.report)}/vs/${encodeURIComponent(b.source)}/${encodeURIComponent(b.report)}`,
+    ),
   rawProducts: (source: string, report: string) =>
     get<ProductReview>(`/raw/products/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawPrices: (source: string, report: string) =>

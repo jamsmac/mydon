@@ -281,6 +281,21 @@ export class RawController {
     return this.raw.journal(source, report, normalizeRowsQuery(query));
   }
 
+  /**
+   * Построчная сверка двух источников по номеру операции.
+   *
+   * Пути: /raw/reconcile/gjvending/order_query/vs/vendinghub/operating
+   */
+  @Get("reconcile/:aSource/:aReport/vs/:bSource/:bReport")
+  reconcile(
+    @Param("aSource") aSource: string,
+    @Param("aReport") aReport: string,
+    @Param("bSource") bSource: string,
+    @Param("bReport") bReport: string,
+  ) {
+    return this.raw.reconcileSources(aSource, aReport, bSource, bReport);
+  }
+
   /** Каким способом приходят деньги — срез для сверки с платёжными системами. */
   @Get("payments/:source/:report")
   payments(@Param("source") source: string, @Param("report") report: string) {

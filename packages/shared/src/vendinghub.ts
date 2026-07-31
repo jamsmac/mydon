@@ -33,7 +33,7 @@ export function isBlank(value: string): boolean {
   return v === "" || v === "—" || v.toLowerCase() === "нет данных";
 }
 
-/** Снять разметку и схлопнуть пробелы: в ячейках кабинета их десятки. *//** Снять разметку и схлопнуть пробелы: в ячейках кабинета их десятки. */
+/** Снять разметку и схлопнуть пробелы: в ячейках кабинета их десятки. */
 function text(fragment: string): string {
   return unescapeHtml(fragment.replace(/<[^>]+>/g, " "))
     .replace(/\s+/g, " ")
