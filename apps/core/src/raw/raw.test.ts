@@ -16,6 +16,7 @@ import {
   tightKey,
   timelineKey,
   toCsv,
+  worstState,
 } from "./raw.service";
 import { fiscalGaps } from "@mydon/shared";
 
@@ -682,5 +683,26 @@ describe("Цены: одна цена в месяце — одно ведро", 
     assert.equal(periods[0].from, "2026-06-01 08:00:00", "начало — самое раннее из двух");
     assert.equal(periods[0].to, "2026-06-30 21:00:00");
     assert.equal(mismatched, 0, "одна цена сама себе не примесь");
+  });
+});
+
+describe("Журнал: строка красится по худшему, что в ней есть", () => {
+  const f = (state: string) => ({ state }) as { state: Parameters<typeof worstState>[0][number]["state"] };
+
+  it("расхождение важнее всего остального", () => {
+    assert.equal(worstState([f("source"), f("matched"), f("mismatch"), f("unchecked")]), "mismatch");
+  });
+
+  it("отсутствие данных важнее «не сверено»", () => {
+    assert.equal(worstState([f("matched"), f("unchecked"), f("absent")]), "absent");
+  });
+
+  it("всё сошлось — строка спокойная", () => {
+    assert.equal(worstState([f("source"), f("matched"), f("matched")]), "matched");
+  });
+
+  it("сверять нечего — состояние первоисточника", () => {
+    assert.equal(worstState([]), "source");
+    assert.equal(worstState([f("source")]), "source");
   });
 });

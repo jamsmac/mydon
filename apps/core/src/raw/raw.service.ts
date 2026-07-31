@@ -1,11 +1,12 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { entity, rawLink, rawRow, rawSnapshot } from "@mydon/db";
+import { entity, rawLink, rawRow, rawSnapshot, sale } from "@mydon/db";
 import {
   FISCAL_FIELDS,
   RAW_LINK_LABELS,
   RAW_SOURCES,
   decodeRawValue,
   findRawReport,
+  findRawSource,
   fiscalGaps,
   normalizeSourceKey,
   roleColumnIndex,
@@ -16,7 +17,7 @@ import {
   type RawLinkKind,
   rawFreshness,
 } from "@mydon/shared";
-import { and, asc, eq, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
 
@@ -461,6 +462,100 @@ export interface PaymentReview {
    */
   column: number;
   lastOrderAt: string | null;
+}
+
+/**
+ * Откуда взялась величина в журнале.
+ *
+ * Это не оформление, а суть: владелец обязан видеть, что перед ним — цифра
+ * панели, наша догадка или результат сверки. Смешивать их в одну таблицу без
+ * пометки значит выдавать одно за другое.
+ */
+export type FieldOrigin =
+  /** Первоисточник: ровно то, что отдала панель. Мы это не считали. */
+  | "source"
+  /** Реестр MYDON: сопоставленная карточка. */
+  | "registry"
+  /** Наш разбор поверх сырья: цена периода, точка на момент заказа. */
+  | "derived"
+  /** Другой источник: то, с чем сверяем. */
+  | "cross";
+
+/** Состояние величины по отношению к сверке. */
+export type FieldState =
+  /** Первоисточник — сверять не с чем и не нужно. */
+  | "source"
+  /** Ещё не сверено с другими источниками. */
+  | "unchecked"
+  /** Сверено, сходится. */
+  | "matched"
+  /** Сверено, расходится — обе цифры показываются рядом. */
+  | "mismatch"
+  /** В другом источнике этого нет. */
+  | "absent";
+
+/** Куда ведёт ссылка «посмотреть первоисточник». */
+export interface FieldLink {
+  kind: "raw" | "prices" | "goods" | "payments" | "stays" | "card";
+  /** Значение для фильтра или идентификатор карточки. */
+  ref?: string;
+}
+
+/** Одна величина журнала со своей родословной. */
+export interface JournalField {
+  label: string;
+  value: string | null;
+  origin: FieldOrigin;
+  state: FieldState;
+  /** Пояснение словами: почему расходится, чего не хватает. */
+  note?: string | null;
+  link?: FieldLink | null;
+}
+
+/** Группа величин в раскрытой строке журнала. */
+export interface JournalGroup {
+  title: string;
+  origin: FieldOrigin;
+  /** Откуда группа: имя системы или слоя — владелец читает это, а не код. */
+  subtitle: string;
+  fields: JournalField[];
+}
+
+/** Одна продажа в журнале. */
+export interface JournalOrder {
+  /** Номер строки в снимке — по нему находится первоисточник. */
+  idx: number;
+  externalId: string;
+  ts: string;
+  machine: string;
+  machineEntityId: string | null;
+  machineName: string | null;
+  product: string;
+  productEntityId: string | null;
+  amount: string;
+  payment: string;
+  paymentLabel: string | null;
+  paymentConfirmed: boolean;
+  status: string;
+  /** Худшее состояние среди величин строки — по нему красится строка. */
+  state: FieldState;
+  groups: JournalGroup[];
+}
+
+/** Страница журнала продаж. */
+export interface Journal {
+  snapshot: RawSnapshotMeta | null;
+  total: number;
+  page: number;
+  size: number;
+  orders: JournalOrder[];
+  /** Колонка № заказа в этой выгрузке — для ссылки в первоисточник. */
+  externalIdColumn: number;
+  /** Адрес кабинета источника: сама панель, а не наша копия. */
+  sourceUrl: string;
+  /** Сколько строк страницы уже сверено с другим источником. */
+  checked: number;
+  mismatched: number;
 }
 
 /** Что принимаем при загрузке выгрузки. */
@@ -1184,6 +1279,366 @@ export class RawService {
   }
 
   /**
+   * Журнал продаж: каждая продажа с её родословной.
+   *
+   * Главное здесь не колонки, а происхождение каждой величины. Номер заказа,
+   * машинный код, ресурс заказа, статус платежа, цена и время — это
+   * ПЕРВОИСТОЧНИК: ровно то, что отдала панель, и мы это не считали. Рядом
+   * лежат величины другого рода — сопоставленная карточка, точка на момент
+   * заказа, цена периода — и они помечены иначе, потому что это уже наш вывод.
+   *
+   * Третий род — сверка с другим источником. Пока OurVend отдаёт только дневные
+   * итоги, сверка идёт по тройке «день + автомат + товар», и так и написано:
+   * выдавать дневное сравнение за построчное нельзя.
+   */
+  async journal(
+    sourceCode: string,
+    reportCode: string,
+    query: RawRowsQuery,
+  ): Promise<Journal> {
+    const report = findRawReport(sourceCode, reportCode);
+    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const src = findRawSource(sourceCode);
+    const empty: Journal = {
+      snapshot: null,
+      total: 0,
+      page: query.page,
+      size: query.size,
+      orders: [],
+      externalIdColumn: -1,
+      sourceUrl: src?.url ?? "",
+      checked: 0,
+      mismatched: 0,
+    };
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    if (!snapshot) return empty;
+
+    const at = (role: keyof RawColumnRoles) => roleColumnIndex(snapshot.columns, report.roles, role);
+    const idx = {
+      machine: at("machine"),
+      product: at("product"),
+      flavour: at("flavour"),
+      amount: at("amount"),
+      ts: at("ts"),
+      externalId: at("externalId"),
+      status: at("status"),
+      kind: at("kind"),
+      payment: at("payment"),
+      fulfilment: at("fulfilment"),
+      point: at("point"),
+    };
+    if (idx.machine < 0 || idx.product < 0 || idx.ts < 0) return { ...empty, snapshot };
+
+    const { total, rows } = await this.rows(snapshot.id, query);
+    if (rows.length === 0) return { ...empty, snapshot, total };
+
+    const cell = (r: RawRowOut, i: number) => (i < 0 ? "" : (r.cells[i] ?? ""));
+
+    // Всё, что нужно для родословной. Стоянки и цены считаются по всей выгрузке
+    // — иначе «точка на момент заказа» и «цена периода» брались бы из воздуха.
+    const [cards, stays, timelines, dicts] = await Promise.all([
+      this.priceCards(sourceCode),
+      this.machineStays(sourceCode, reportCode),
+      this.priceTimelines(sourceCode, reportCode),
+      Promise.resolve(report.dicts ?? []),
+    ]);
+    const paymentDict = dicts.find((d) => d.role === "payment");
+    const fulfilDict = dicts.find((d) => d.role === "fulfilment");
+
+    const staysBySerial = new Map(stays.map((m) => [normalizeSourceKey(m.serial), m]));
+    const priceByKey = new Map(
+      timelines.items.map((i) => [timelineKey(i.serial, i.product), i]),
+    );
+    const productCards = await this.db
+      .select({ id: entity.id, name: entity.name, attrs: entity.attrs })
+      .from(entity)
+      .where(eq(entity.type, "product"));
+    const attrsById = new Map(productCards.map((c) => [c.id, c.attrs as Record<string, unknown>]));
+
+    // Сверка с другим источником: OurVend отдаёт дневные итоги, поэтому берём
+    // ровно те тройки «день + автомат + товар», что встретились на странице.
+    const triples = new Set<string>();
+    for (const r of rows) {
+      const day = cell(r, idx.ts).slice(0, 10);
+      if (day.length !== 10) continue;
+      triples.add(`${day}|${normalizeSourceKey(cell(r, idx.machine))}|${normalizeSourceKey(cell(r, idx.product))}`);
+    }
+    const days = [...new Set([...triples].map((t) => t.split("|")[0]))].sort();
+    const otherByTriple = new Map<string, { qty: number; amount: number; source: string }>();
+    if (days.length > 0) {
+      const other = await this.db
+        .select({
+          dt: sale.dt,
+          serial: sale.machineSerial,
+          product: sale.product,
+          qty: sale.qty,
+          amount: sale.amount,
+          source: sale.source,
+        })
+        .from(sale)
+        .where(and(gte(sale.dt, days[0]), lte(sale.dt, days[days.length - 1])));
+      for (const o of other) {
+        const key = `${o.dt}|${normalizeSourceKey(o.serial)}|${normalizeSourceKey(o.product)}`;
+        const seen = otherByTriple.get(key);
+        if (seen) {
+          seen.qty += Number(o.qty);
+          seen.amount += Number(o.amount);
+        } else {
+          otherByTriple.set(key, { qty: Number(o.qty), amount: Number(o.amount), source: o.source });
+        }
+      }
+    }
+
+    // Итог этой же выгрузки по тем же тройкам — вторая половина сверки.
+    const ourByTriple = new Map<string, { qty: number; amount: number }>();
+    if (idx.amount >= 0 && triples.size > 0) {
+      const c = (i: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(i))}, '')`;
+      const price = sql<string>`case when ${c(idx.amount)} ~ '^\\s*-?[0-9]+([.,][0-9]+)?\\s*$'
+        then replace(btrim(${c(idx.amount)}), ',', '.')::numeric end`;
+      const day = sql<string>`substr(${c(idx.ts)}, 1, 10)`;
+      const conds: SQL[] = [
+        eq(rawRow.snapshotId, snapshot.id),
+        sql`${day} >= ${days[0]}`,
+        sql`${day} <= ${days[days.length - 1]}`,
+      ];
+      if (idx.kind >= 0) conds.push(sql`lower(btrim(${c(idx.kind)})) <> 'testshipment'`);
+      const agg = await this.db
+        .select({
+          day,
+          serial: c(idx.machine),
+          product: c(idx.product),
+          qty: sql<number>`count(*)`,
+          amount: sql<string>`coalesce(sum(${price}), 0)`,
+        })
+        .from(rawRow)
+        .where(and(...conds))
+        .groupBy(day, c(idx.machine), c(idx.product));
+      for (const a of agg) {
+        const key = `${a.day}|${normalizeSourceKey(a.serial)}|${normalizeSourceKey(a.product)}`;
+        const seen = ourByTriple.get(key);
+        if (seen) {
+          seen.qty += Number(a.qty);
+          seen.amount += Number(a.amount);
+        } else {
+          ourByTriple.set(key, { qty: Number(a.qty), amount: Number(a.amount) });
+        }
+      }
+    }
+
+    let checked = 0;
+    let mismatched = 0;
+    const orders: JournalOrder[] = rows.map((r) => {
+      const machine = cell(r, idx.machine);
+      const product = cell(r, idx.product);
+      const ts = cell(r, idx.ts);
+      const amount = cell(r, idx.amount);
+      const externalId = cell(r, idx.externalId);
+      const payment = cell(r, idx.payment);
+      const rawLink: FieldLink = { kind: "raw", ref: externalId };
+
+      // ── Первоисточник: то, что отдала панель, слово в слово ──
+      const fromSource = (label: string, value: string): JournalField => ({
+        label,
+        value: value || null,
+        origin: "source",
+        state: "source",
+        link: rawLink,
+      });
+      const sourceFields: JournalField[] = [
+        fromSource("Номер заказа", externalId),
+        fromSource("Машинный код", machine),
+        fromSource("Товар", product),
+        fromSource("Вкус", cell(r, idx.flavour)),
+        fromSource("Цена заказа", amount),
+        fromSource("Ресурс заказа", payment),
+        fromSource("Статус платежа", cell(r, idx.status)),
+        fromSource("Тип заказа", cell(r, idx.kind)),
+        fromSource("Статус варки", cell(r, idx.fulfilment)),
+        fromSource("Время создания", ts),
+        fromSource("Адрес в заказе", cell(r, idx.point)),
+      ].filter((f) => f.value !== null);
+
+      // ── Расшифровки: слова панели, а не наш перевод ──
+      const paymentDecoded = decodeRawValue(paymentDict, payment);
+      const fulfilDecoded = decodeRawValue(fulfilDict, cell(r, idx.fulfilment));
+      const decoded: JournalField[] = [];
+      if (payment) {
+        decoded.push({
+          label: "Ресурс заказа",
+          value: paymentDecoded?.label ?? null,
+          origin: "source",
+          state: paymentDecoded && !paymentDecoded.confirmed ? "unchecked" : "source",
+          note: paymentDecoded
+            ? paymentDecoded.confirmed
+              ? "как называет панель"
+              : "как называет панель; чем это на деле, покажет сверка с платёжной системой"
+            : "источник не объясняет этот код",
+          link: { kind: "payments", ref: payment },
+        });
+      }
+      if (fulfilDecoded) {
+        decoded.push({
+          label: "Статус варки",
+          value: fulfilDecoded.label,
+          origin: "source",
+          state: "source",
+          note: "как называет панель",
+          link: rawLink,
+        });
+      }
+
+      // ── Реестр MYDON: что узнано по карточкам ──
+      const mcard = cards.bySerial.get(normalizeSourceKey(machine)) ?? null;
+      const pcard = cards.byProduct.get(normalizeSourceKey(product)) ?? null;
+      const gaps = pcard ? fiscalGaps(attrsById.get(pcard.id)) : [];
+      const registry: JournalField[] = [
+        {
+          label: "Карточка автомата",
+          value: mcard?.name ?? null,
+          origin: "registry",
+          state: mcard ? "matched" : "absent",
+          note: mcard ? null : "серийник не сопоставлен ни с одной карточкой",
+          link: mcard ? { kind: "card", ref: mcard.id } : { kind: "raw", ref: externalId },
+        },
+        {
+          label: "Карточка товара",
+          value: pcard?.name ?? null,
+          origin: "registry",
+          state: pcard ? "matched" : "absent",
+          note: pcard ? null : "товара нет в реестре — чек по нему не собрать",
+          link: pcard ? { kind: "card", ref: pcard.id } : { kind: "goods", ref: product },
+        },
+        {
+          label: "ИКПУ",
+          value: pcard ? String(attrsById.get(pcard.id)?.["ИКПУ"] ?? "") || null : null,
+          origin: "registry",
+          state: pcard ? (gaps.length === 0 ? "matched" : "absent") : "absent",
+          note:
+            gaps.length > 0
+              ? `чек не соберётся: ${gaps.map((g) => `${g.field} — ${g.why}`).join("; ")}`
+              : pcard
+                ? "фискальные поля заполнены"
+                : "нет карточки",
+          link: { kind: "goods", ref: product },
+        },
+      ];
+
+      // ── Разбор: наш вывод поверх сырья, а не цифра панели ──
+      const stay = staysBySerial.get(normalizeSourceKey(machine));
+      const pointThen = stay?.stays.find((s) => s.from <= ts && ts <= s.to) ?? null;
+      const line = priceByKey.get(timelineKey(machine, product));
+      const periodPrice = line ? priceAt(line.periods, ts) : null;
+      const orderPrice = Number(String(amount).replace(",", "."));
+      const priceAgrees =
+        periodPrice === null || !Number.isFinite(orderPrice) ? null : periodPrice === orderPrice;
+      const derived: JournalField[] = [
+        {
+          label: "Точка на момент заказа",
+          value: pointThen?.point ?? null,
+          origin: "derived",
+          state: pointThen ? (pointThen.overlaps ? "mismatch" : "matched") : "absent",
+          note: pointThen
+            ? pointThen.overlaps
+              ? "периоды стоянки пересекаются — источник путает адреса"
+              : "по истории переездов, восстановленной из заказов"
+            : "период стоянки для этого времени не найден",
+          link: { kind: "stays", ref: machine },
+        },
+        {
+          label: "Цена периода",
+          value: periodPrice === null ? null : String(periodPrice),
+          origin: "derived",
+          state: priceAgrees === null ? "absent" : priceAgrees ? "matched" : "mismatch",
+          note:
+            priceAgrees === false
+              ? "цена заказа не совпадает с ценой, действовавшей тогда: возможна подмена кнопки"
+              : priceAgrees
+                ? "совпадает с ценой заказа"
+                : "цена периода не определена",
+          link: { kind: "prices", ref: product },
+        },
+      ];
+
+      // ── Сверка с другим источником ──
+      const day = ts.slice(0, 10);
+      const tri = `${day}|${normalizeSourceKey(machine)}|${normalizeSourceKey(product)}`;
+      const them = otherByTriple.get(tri);
+      const us = ourByTriple.get(tri);
+      const cross: JournalField[] = [];
+      if (them && us) {
+        const agrees = Math.round(them.amount) === Math.round(us.amount);
+        checked += 1;
+        if (!agrees) mismatched += 1;
+        cross.push({
+          label: `За день у ${them.source}`,
+          value: `${them.qty.toLocaleString("ru-RU")} шт · ${Math.round(them.amount).toLocaleString("ru-RU")} сум`,
+          origin: "cross",
+          state: agrees ? "matched" : "mismatch",
+          note: agrees
+            ? `сходится с этой выгрузкой (${us.qty} шт · ${Math.round(us.amount).toLocaleString("ru-RU")} сум). Сверка дневная, не построчная: у ${them.source} нет времени внутри дня`
+            : `у этой выгрузки за тот же день ${us.qty} шт · ${Math.round(us.amount).toLocaleString("ru-RU")} сум — расходится`,
+          link: rawLink,
+        });
+      } else if (us) {
+        cross.push({
+          label: "Другие источники",
+          value: null,
+          origin: "cross",
+          state: "unchecked",
+          note: "за этот день по этому автомату и товару другой источник ничего не показывает — сверить не с чем",
+          link: null,
+        });
+      }
+
+      const order: JournalOrder = {
+        idx: r.idx,
+        externalId,
+        ts,
+        machine,
+        machineEntityId: mcard?.id ?? null,
+        machineName: mcard?.name ?? null,
+        product,
+        productEntityId: pcard?.id ?? null,
+        amount,
+        payment,
+        paymentLabel: paymentDecoded?.label ?? null,
+        paymentConfirmed: paymentDecoded?.confirmed ?? false,
+        status: cell(r, idx.status),
+        state: worstState([...decoded, ...registry, ...derived, ...cross]),
+        groups: [
+          {
+            title: "Первоисточник",
+            origin: "source",
+            subtitle: `${src?.title ?? sourceCode} · ${report.title}`,
+            fields: sourceFields,
+          },
+          ...(decoded.length > 0
+            ? [{ title: "Как называет панель", origin: "source" as const, subtitle: "расшифровки источника", fields: decoded }]
+            : []),
+          { title: "Реестр MYDON", origin: "registry" as const, subtitle: "сопоставленные карточки", fields: registry },
+          { title: "Разбор", origin: "derived" as const, subtitle: "наш вывод поверх сырья", fields: derived },
+          ...(cross.length > 0
+            ? [{ title: "Сверка с другими источниками", origin: "cross" as const, subtitle: "дневные итоги", fields: cross }]
+            : []),
+        ],
+      };
+      return order;
+    });
+
+    return {
+      snapshot,
+      total,
+      page: query.page,
+      size: query.size,
+      orders,
+      externalIdColumn: idx.externalId,
+      sourceUrl: src?.url ?? "",
+      checked,
+      mismatched,
+    };
+  }
+
+  /**
    * Срез по каналам оплаты: сколько денег пришло каким способом.
    *
    * Существует ради сверки. Панель называет один из своих кодов «Таможенный
@@ -1820,6 +2275,26 @@ export function interleaved(a: PriceBucket, b: PriceBucket): boolean {
  */
 export function timelineKey(serial: string, product: string): string {
   return `${normalizeSourceKey(serial)}\u0000${normalizeSourceKey(product)}`;
+}
+
+/**
+ * Худшее состояние среди величин строки — им и красится строка журнала.
+ *
+ * Порядок именно такой: расхождение важнее отсутствия, отсутствие важнее
+ * «не сверено». Строка должна кричать о самом плохом, что в ней есть, а не
+ * о среднем по ней.
+ */
+export function worstState(fields: readonly { state: FieldState }[]): FieldState {
+  const rank: Record<FieldState, number> = {
+    mismatch: 0,
+    absent: 1,
+    unchecked: 2,
+    matched: 3,
+    source: 4,
+  };
+  let worst: FieldState = "source";
+  for (const f of fields) if (rank[f.state] < rank[worst]) worst = f.state;
+  return worst;
 }
 
 /** Склеить соседние отрезки с одинаковой ценой: смены цены между ними нет. */

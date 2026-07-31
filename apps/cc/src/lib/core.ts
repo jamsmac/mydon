@@ -338,6 +338,67 @@ export interface PriceReview {
   unreadable: number;
 }
 
+/** Откуда взялась величина журнала: первоисточник, реестр, наш разбор, сверка. */
+export type FieldOrigin = "source" | "registry" | "derived" | "cross";
+/** Состояние величины по отношению к сверке. */
+export type FieldState = "source" | "unchecked" | "matched" | "mismatch" | "absent";
+
+/** Куда ведёт ссылка «посмотреть первоисточник». */
+export interface FieldLink {
+  kind: "raw" | "prices" | "goods" | "payments" | "stays" | "card";
+  ref?: string;
+}
+
+/** Одна величина журнала со своей родословной. */
+export interface JournalField {
+  label: string;
+  value: string | null;
+  origin: FieldOrigin;
+  state: FieldState;
+  note?: string | null;
+  link?: FieldLink | null;
+}
+
+/** Группа величин в раскрытой строке журнала. */
+export interface JournalGroup {
+  title: string;
+  origin: FieldOrigin;
+  subtitle: string;
+  fields: JournalField[];
+}
+
+/** Одна продажа в журнале. */
+export interface JournalOrder {
+  idx: number;
+  externalId: string;
+  ts: string;
+  machine: string;
+  machineEntityId: string | null;
+  machineName: string | null;
+  product: string;
+  productEntityId: string | null;
+  amount: string;
+  payment: string;
+  paymentLabel: string | null;
+  paymentConfirmed: boolean;
+  status: string;
+  state: FieldState;
+  groups: JournalGroup[];
+}
+
+/** Страница журнала продаж. */
+export interface Journal {
+  snapshot: RawSnapshotMeta | null;
+  total: number;
+  page: number;
+  size: number;
+  orders: JournalOrder[];
+  externalIdColumn: number;
+  sourceUrl: string;
+  checked: number;
+  mismatched: number;
+}
+
 /** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
 export interface PaymentMonth {
   month: string;
@@ -599,6 +660,12 @@ export const core = {
     get<{ machines: MachineStays[] }>(
       `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
     ),
+  rawJournal: (source: string, report: string, params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<Journal>(
+      `/raw/journal/${encodeURIComponent(source)}/${encodeURIComponent(report)}${qs ? `?${qs}` : ""}`,
+    );
+  },
   rawPayments: (source: string, report: string) =>
     get<PaymentReview>(`/raw/payments/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),
   rawProducts: (source: string, report: string) =>
