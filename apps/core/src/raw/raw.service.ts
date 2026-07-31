@@ -168,6 +168,13 @@ export interface RawMappingValue {
   decidedBy: "auto" | "owner" | string | null;
   /** Владелец решил, что карточка не нужна (например «testShipment»). */
   dismissed: boolean;
+  /**
+   * Куда это значение можно записать одним нажатием.
+   *
+   * У адреса это карточки автоматов, которые стоят на нём по той же выгрузке:
+   * незнакомая точка чинится не новой сущностью, а дозаполнением карточки.
+   */
+  targets?: { id: string; name: string }[];
 }
 
 /** Группа сопоставления — одна роль колонки. */
@@ -389,6 +396,29 @@ export class RawService {
     return rows;
   }
 
+  /**
+   * Пары значений двух колонок снимка.
+   *
+   * Нужны, чтобы связать адрес с автоматом, который на нём стоит: сама выгрузка
+   * это знает, и спрашивать владельца незачем.
+   */
+  private async distinctPairs(
+    snapshotId: string,
+    idxA: number,
+    idxB: number,
+  ): Promise<{ a: string; b: string }[]> {
+    const colA = sql.raw(String(idxA));
+    const colB = sql.raw(String(idxB));
+    const a = sql<string>`coalesce(${rawRow.cells}->>${colA}, '')`;
+    const b = sql<string>`coalesce(${rawRow.cells}->>${colB}, '')`;
+    const rows = await this.db
+      .selectDistinct({ a, b })
+      .from(rawRow)
+      .where(eq(rawRow.snapshotId, snapshotId))
+      .limit(MAX_MAPPING_VALUES * 4);
+    return rows;
+  }
+
   /** Разные значения одной колонки снимка с частотой. */
   private async distinctValues(
     snapshotId: string,
@@ -460,6 +490,23 @@ export class RawService {
       { kind: "point", role: "point", bindable: false },
     ];
 
+    // Адрес чинится дозаполнением карточки автомата, поэтому для точек заранее
+    // выясняем, какие автоматы стоят на каждом адресе по этой же выгрузке.
+    const machineIdx = roleColumnIndex(snapshot.columns, report.roles, "machine");
+    const pointIdx = roleColumnIndex(snapshot.columns, report.roles, "point");
+    const machinesAtPoint = new Map<string, { id: string; name: string }[]>();
+    if (machineIdx >= 0 && pointIdx >= 0) {
+      for (const pair of await this.distinctPairs(snapshot.id, pointIdx, machineIdx)) {
+        if (pair.a.trim().length === 0 || pair.b.trim().length === 0) continue;
+        const card = byMachineSerial.get(normalizeSourceKey(pair.b));
+        if (!card) continue;
+        const key = normalizeSourceKey(pair.a);
+        const list = machinesAtPoint.get(key) ?? [];
+        if (!list.some((m) => m.id === card.id)) list.push(card);
+        machinesAtPoint.set(key, list);
+      }
+    }
+
     const groups: RawMappingGroup[] = [];
     for (const step of plan) {
       const columnName = roleColumnName(report.roles, step.role);
@@ -505,6 +552,7 @@ export class RawService {
             : (hit?.name ?? null),
           decidedBy: decided ? decided.decidedBy : hit ? "auto" : null,
           dismissed: decided ? decided.entityId === null : false,
+          ...(step.kind === "point" ? { targets: machinesAtPoint.get(key) ?? [] } : {}),
         });
       }
 

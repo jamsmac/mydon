@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { linkRawValue } from "../app/sources/actions";
+import { createProductFromSource, fillMachinePoint, linkRawValue } from "../app/sources/actions";
 import type { RawMappingGroup, RawMappingValue } from "../lib/core";
 
 export interface RawMappingProps {
@@ -28,13 +28,17 @@ function ValueRow({
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
-  function bind(entityId: string): void {
+  function act(fn: () => Promise<{ ok: boolean; error?: string }>): void {
+    setError(null);
     start(async () => {
-      const res = await linkRawValue(source, group.kind, value.label, entityId);
+      const res = await fn();
       if (res.ok) router.refresh();
       else setError(res.error ?? "Не получилось");
     });
   }
+
+  const bind = (entityId: string) =>
+    act(() => linkRawValue(source, group.kind, value.label, entityId));
 
   const unresolved = value.entityId === null && !value.dismissed;
 
@@ -74,6 +78,34 @@ function ValueRow({
           <option value="__none__">карточка не нужна</option>
         </select>
       )}
+
+      {/* Товара нет в реестре — заводим карточку тут же, не уходя с экрана. */}
+      {unresolved && group.kind === "product" && (
+        <button
+          type="button"
+          className="btn sm"
+          disabled={pending}
+          onClick={() => act(() => createProductFromSource(source, value.label))}
+        >
+          Завести карточку
+        </button>
+      )}
+
+      {/* Адрес незнаком — это не новая сущность, а пустое поле в карточке автомата. */}
+      {unresolved &&
+        group.kind === "point" &&
+        (value.targets ?? []).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className="btn sm"
+            disabled={pending}
+            onClick={() => act(() => fillMachinePoint(t.id, value.label))}
+          >
+            Записать в «{t.name}»
+          </button>
+        ))}
+
       {error && <span className="err-text">{error}</span>}
     </div>
   );
@@ -123,7 +155,15 @@ export function RawMapping({ source, groups, cards }: RawMappingProps) {
                 {!g.bindable && (
                   <p className="hint" style={{ marginBottom: 8 }}>
                     Точка узнаётся по карточке автомата: отдельных карточек точек в реестре пока нет.
-                    Незнакомый адрес — повод дозаполнить «точку» в карточке автомата.
+                    Незнакомый адрес пишется прямо в карточку того автомата, который на нём стоит —
+                    выгрузка сама говорит, какого именно.
+                  </p>
+                )}
+                {g.kind === "product" && g.unmatched > 0 && (
+                  <p className="hint" style={{ marginBottom: 8 }}>
+                    Нет карточки — заводи прямо отсюда: название возьмётся как у источника, и
+                    следующая выгрузка узнает товар сама. ИКПУ, упаковку и НДС допиши в карточке:
+                    без них чек по товару не соберётся.
                   </p>
                 )}
                 <div className="maplist">

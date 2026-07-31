@@ -298,6 +298,8 @@ export interface RawMappingValue {
   entityName: string | null;
   decidedBy: string | null;
   dismissed: boolean;
+  /** Карточки, в которые это значение можно записать одним нажатием. */
+  targets?: { id: string; name: string }[];
 }
 
 export interface RawMappingGroup {
