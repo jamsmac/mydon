@@ -486,14 +486,16 @@ async function PayPane({
 /** Ассортимент источника: что продаётся и по чему не собирается чек. */
 async function GoodsPane({ source, reportCode }: { source: string; reportCode: string }) {
   try {
-    const [review, products] = await Promise.all([
+    const [review, products, presets] = await Promise.all([
       core.rawProducts(source, reportCode),
       core.entitiesOfType("vendhub", "product"),
+      core.fiscalPresets(),
     ]);
     return (
       <ProductsReview
         source={source}
         review={review}
+        presets={presets}
         cards={products
           .slice()
           .sort((a, b) => a.name.localeCompare(b.name, "ru"))

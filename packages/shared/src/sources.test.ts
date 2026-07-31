@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   RAW_SOURCES,
   decodeRawValue,
+  fiscalGaps,
+  isValidFiscalValue,
   isValidSourceCode,
   mergeRegistry,
   findRawReport,
@@ -255,5 +257,41 @@ describe("Справочник источников: код системы", () 
     for (const bad of ["Клик", "click uz", "click-uz", "2click", "c", "", "CLICK"]) {
       assert.equal(isValidSourceCode(bad), false, `пропущено: ${bad}`);
     }
+  });
+});
+
+describe("Карточки товара: годность значения для подсказок", () => {
+  it("годное значение предлагается остальным карточкам", () => {
+    assert.equal(isValidFiscalValue("ИКПУ", "02201001001000000"), true);
+    assert.equal(isValidFiscalValue("НДС", "0%"), true);
+    assert.equal(isValidFiscalValue("упаковка", "стакан 0.2"), true);
+  });
+
+  it("огрызок ИКПУ в подсказки не идёт: одним нажатием размножилась бы поломка", () => {
+    assert.equal(isValidFiscalValue("ИКПУ", "0220100"), false);
+    assert.equal(isValidFiscalValue("ИКПУ", "0220100100100000A"), false);
+  });
+
+  it("пустое значение подсказкой не является", () => {
+    assert.equal(isValidFiscalValue("ИКПУ", ""), false);
+    assert.equal(isValidFiscalValue("упаковка", "   "), false);
+  });
+
+  it("нечитаемая ставка не предлагается", () => {
+    assert.equal(isValidFiscalValue("НДС", "как обычно"), false);
+    assert.equal(isValidFiscalValue("НДС", "180%"), false);
+  });
+});
+
+describe("Карточки товара: чем именно плох ИКПУ", () => {
+  const full = { упаковка: "стакан", НДС: "12%" };
+
+  it("не столько цифр и не цифры вовсе — разные беды", () => {
+    // Владелец должен понять, что чинить: дописать код или убрать лишний знак.
+    assert.match(fiscalGaps({ ...full, ИКПУ: "0220100" })[0].why, /должно быть 17 цифр, а тут 7/);
+    assert.match(
+      fiscalGaps({ ...full, ИКПУ: "0220100100100000A" })[0].why,
+      /есть не только цифры/,
+    );
   });
 });

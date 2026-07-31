@@ -665,6 +665,12 @@ export const core = {
     get<{ machines: MachineStays[] }>(
       `/raw/stays/${encodeURIComponent(source)}/${encodeURIComponent(report)}`,
     ),
+  /** Заготовки для фискальных полей: из уже заполненных карточек. */
+  fiscalPresets: () =>
+    get<{
+      values: Record<string, string[]>;
+      donors: { id: string; name: string; fields: Record<string, string> }[];
+    }>("/raw/fiscal-presets"),
   /**
    * Приём выгрузки. Ключ тот же, что у скрипта: сырой слой не знает, кто принёс
    * строки, и правила приёма у всех одни.

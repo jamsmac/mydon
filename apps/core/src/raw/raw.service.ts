@@ -6,6 +6,7 @@ import {
   RAW_ROLES,
   RAW_SOURCES,
   decodeRawValue,
+  isValidFiscalValue,
   isValidSourceCode,
   mergeRegistry,
   fiscalGaps,
@@ -1968,6 +1969,53 @@ export class RawService {
       column: cIdx,
       lastOrderAt,
     };
+  }
+
+  /**
+   * Заготовки для заполнения фискальных полей.
+   *
+   * Ничего не выдумывает: и значения, и доноры берутся из карточек, которые
+   * владелец УЖЕ заполнил. Кофейные напитки обычно делят ИКПУ, упаковку и
+   * ставку, поэтому четырнадцатая карточка заполняется не набором семнадцати
+   * цифр вручную, а выбором из того, что уже проверено.
+   *
+   * Живёт рядом с разбором ассортимента, потому что обслуживает тот же экран:
+   * заводить ради одного метода отдельный модуль незачем.
+   */
+  async fiscalPresets(): Promise<{
+    values: Record<string, string[]>;
+    donors: { id: string; name: string; fields: Record<string, string> }[];
+  }> {
+    const cards = await this.db
+      .select({ id: entity.id, name: entity.name, attrs: entity.attrs })
+      .from(entity)
+      .where(eq(entity.type, "product"));
+
+    const values: Record<string, string[]> = {};
+    const donors: { id: string; name: string; fields: Record<string, string> }[] = [];
+    for (const f of FISCAL_FIELDS) values[f] = [];
+
+    for (const c of cards) {
+      const attrs = (c.attrs ?? {}) as Record<string, unknown>;
+      for (const f of FISCAL_FIELDS) {
+        const v = String(attrs[f] ?? "").trim();
+        // В подсказки идёт только годное: предложить огрызок ИКПУ остальным
+        // значило бы размножить поломку одним нажатием.
+        if (isValidFiscalValue(f, v) && !values[f].includes(v)) values[f].push(v);
+      }
+      // Донором становится только полностью годная карточка: копировать
+      // огрызок ИКПУ значило бы размножить поломку.
+      if (fiscalGaps(attrs).length === 0) {
+        donors.push({
+          id: c.id,
+          name: c.name,
+          fields: Object.fromEntries(FISCAL_FIELDS.map((f) => [f, String(attrs[f] ?? "")])),
+        });
+      }
+    }
+    for (const f of FISCAL_FIELDS) values[f].sort((a, b) => a.localeCompare(b, "ru"));
+    donors.sort((a, b) => a.name.localeCompare(b.name, "ru"));
+    return { values, donors };
   }
 
   /**

@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { DELIMITERS, decodeUpload, parseDelimited } from "@mydon/shared";
+import { DELIMITERS, FISCAL_FIELDS, decodeUpload, fiscalGaps, parseDelimited } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
 
 export interface ActionResult {
@@ -238,4 +238,71 @@ export async function importFile(form: FormData): Promise<ActionResult & { rows?
   }
   revalidatePath("/domain/vendhub");
   return { ok: true, rows: parsed.rows.length };
+}
+
+/**
+ * Заполнить фискальные поля карточки товара.
+ *
+ * Заполняется прямо из строки ассортимента: открывать каждую из четырнадцати
+ * карточек по отдельности — час работы там, где нужна минута.
+ *
+ * Пустое поле разрешено: владелец может знать ИКПУ и ещё не знать ставку, и
+ * это честное «не выяснили». А вот заполненное НЕВЕРНО не принимается —
+ * карточка с огрызком ИКПУ выглядит готовой, а чек по ней не пройдёт.
+ */
+export async function saveFiscal(
+  entityId: string,
+  fields: Record<string, string>,
+): Promise<ActionResult> {
+  const patch: Record<string, string> = {};
+  for (const f of FISCAL_FIELDS) {
+    const v = (fields[f] ?? "").trim();
+    if (v.length > 0) patch[f] = v;
+  }
+  // Проверяем ровно то, что вписали: незаполненное поле — не ошибка, а неверно
+  // заполненное — ошибка, и о ней надо сказать до сохранения.
+  const bad = fiscalGaps(patch).filter((g) => g.flaw === "неверно");
+  if (bad.length > 0) {
+    return { ok: false, error: bad.map((g) => `${g.field}: ${g.why}`).join("; ") };
+  }
+  try {
+    const card = await core.entity(entityId);
+    const attrs = { ...(card.attrs ?? {}) };
+    for (const f of FISCAL_FIELDS) {
+      const v = (fields[f] ?? "").trim();
+      // Пустое значение стирает поле: владелец мог вписать не то и захотеть убрать.
+      if (v.length > 0) attrs[f] = v;
+      else delete attrs[f];
+    }
+    // attrs при правке заменяются целиком, поэтому сливаем, а не подставляем.
+    await core.updateEntity(entityId, { attrs });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
+}
+
+/**
+ * Завести карточку товара сразу с фискальными полями.
+ *
+ * Один шаг вместо двух: заводить пустую карточку, чтобы потом её открыть и
+ * дозаполнить, — лишняя работа там, где владелец уже знает значения.
+ */
+export async function createProductWithFiscal(
+  source: string,
+  label: string,
+  fields: Record<string, string>,
+): Promise<ActionResult> {
+  const created = await createProductFromSource(source, label);
+  if (!created.ok) return created;
+  if (!FISCAL_FIELDS.some((f) => (fields[f] ?? "").trim().length > 0)) return created;
+  try {
+    const cards = await core.entitiesOfType("vendhub", "product");
+    const card = cards.find((c) => c.name === label.trim());
+    if (!card) return { ok: false, error: "Карточка заведена, но не нашлась для заполнения" };
+    return await saveFiscal(card.id, fields);
+  } catch (err) {
+    return fail(err);
+  }
 }
