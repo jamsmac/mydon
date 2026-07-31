@@ -190,6 +190,41 @@ export function fiscalGaps(attrs: Record<string, unknown> | null | undefined): F
   return gaps;
 }
 
+/**
+ * Все роли колонок и как они называются по-русски.
+ *
+ * Нужен списком, а не только типом: экран назначения ролей перебирает его,
+ * чтобы владелец видел все роли сразу, включая те, которых в отчёте нет.
+ */
+export const RAW_ROLES = [
+  "machine",
+  "point",
+  "product",
+  "flavour",
+  "amount",
+  "ts",
+  "externalId",
+  "status",
+  "kind",
+  "payment",
+  "fulfilment",
+] as const satisfies readonly (keyof RawColumnRoles)[];
+
+/** Что роль значит — владелец читает это, а не английский ключ. */
+export const RAW_ROLE_LABELS: Record<keyof RawColumnRoles, string> = {
+  machine: "Автомат (серийник)",
+  point: "Точка (адрес)",
+  product: "Товар",
+  flavour: "Вкус",
+  amount: "Сумма",
+  ts: "Время операции",
+  externalId: "Номер операции",
+  status: "Статус оплаты",
+  kind: "Тип операции",
+  payment: "Способ оплаты",
+  fulfilment: "Чем закончилась выдача",
+};
+
 /** Что сопоставляется с карточками реестра. */
 export const RAW_LINK_KINDS = ["machine", "product", "point"] as const;
 export type RawLinkKind = (typeof RAW_LINK_KINDS)[number];
@@ -360,6 +395,30 @@ export const RAW_SOURCES: readonly RawSourceDef[] = [
     ],
   },
   {
+    // Системы владельца, названные в ТЗ и в отчёте по данным. Адреса кабинетов
+    // намеренно пусты: их вписывает владелец с экрана. Выдумать правдоподобный
+    // адрес — та же подмена факта догадкой, что и выдумать колонку отчёта.
+    code: "click",
+    title: "Click",
+    subtitle: "Платежи · кабинет мерчанта",
+    url: "",
+    reports: [{ code: "reports", title: "Отчёты", ru: "состав уточняется", path: "после первого входа" }],
+  },
+  {
+    code: "uzum",
+    title: "Uzum",
+    subtitle: "Платежи · кабинет мерчанта",
+    url: "",
+    reports: [{ code: "reports", title: "Отчёты", ru: "состав уточняется", path: "после первого входа" }],
+  },
+  {
+    code: "multikassa",
+    title: "Multikassa",
+    subtitle: "Фискализация чеков",
+    url: "",
+    reports: [{ code: "reports", title: "Отчёты", ru: "состав уточняется", path: "после первого входа" }],
+  },
+  {
     code: "vendinghub",
     title: "VendHub office",
     subtitle: "Наш кабинет",
@@ -401,6 +460,140 @@ export function roleColumnName(
   const names = roles?.[role];
   if (!names) return null;
   return typeof names === "string" ? names : (names[0] ?? null);
+}
+
+/**
+ * Правка или дополнение справочника, сделанные владельцем.
+ *
+ * Приходит из базы. Отличается от `RawSourceDef` тем, что отчёты могут быть
+ * заданы частично: владелец завёл систему, а отчёты добавит позже.
+ */
+export interface RawSourceOverride {
+  code: string;
+  title: string;
+  subtitle: string;
+  url: string;
+  archived: boolean;
+  reports: RawReportOverride[];
+}
+
+export interface RawReportOverride {
+  code: string;
+  title: string;
+  ru: string;
+  path: string;
+  /** Роли, назначенные владельцем по настоящим заголовкам выгрузки. */
+  roles: RawColumnRoles;
+  archived: boolean;
+}
+
+/** Откуда взялась запись справочника — владельцу это видно на экране. */
+export type RegistryOrigin = "code" | "owner";
+
+/** Отчёт действующего справочника: определение плюс его происхождение. */
+export type EffectiveReport = RawReportDef & { origin: RegistryOrigin };
+/** Система действующего справочника. */
+export type EffectiveSource = Omit<RawSourceDef, "reports"> & {
+  origin: RegistryOrigin;
+  reports: EffectiveReport[];
+};
+
+/** Пусто ли назначение ролей: ни одной роли не задано. */
+function noRoles(roles: RawColumnRoles | undefined): boolean {
+  return roles === undefined || Object.keys(roles).length === 0;
+}
+
+/**
+ * Действующий справочник: код плюс правки владельца.
+ *
+ * Правило разрешения одно и простое: **запись владельца важнее записи в коде**
+ * с тем же кодом, а записи, которых в коде нет, добавляются. Код при этом
+ * остаётся основой — выложенное однажды знание об источнике не теряется, даже
+ * если базу вычистят.
+ *
+ * Исключение ровно одно: пустое поле правки не затирает заполненное в коде.
+ * Владелец, заведший систему одним названием, не должен нечаянно стереть адрес
+ * кабинета, который уже был описан.
+ *
+ * Отдельной функцией — здесь решается, чьё слово главнее, и такое место обязано
+ * быть закреплено тестом.
+ */
+export function mergeRegistry(
+  seed: readonly RawSourceDef[],
+  overrides: readonly RawSourceOverride[],
+): EffectiveSource[] {
+  const byCode = new Map<string, RawSourceOverride>(overrides.map((o) => [o.code, o]));
+  const out: EffectiveSource[] = [];
+
+  for (const src of seed) {
+    const own = byCode.get(src.code);
+    byCode.delete(src.code);
+    if (own?.archived) continue;
+    const reportOverrides = new Map((own?.reports ?? []).map((r) => [r.code, r]));
+    const reports: EffectiveReport[] = [];
+    for (const rep of src.reports) {
+      const ro = reportOverrides.get(rep.code);
+      reportOverrides.delete(rep.code);
+      if (ro?.archived) continue;
+      reports.push({
+        ...rep,
+        title: ro?.title || rep.title,
+        ru: ro?.ru || rep.ru,
+        path: ro?.path || rep.path,
+        // Роли — целиком чьи-то одни: смешивать назначения владельца с
+        // описанием в коде значило бы собрать отчёт, которого нет ни у кого.
+        ...(ro && !noRoles(ro.roles) ? { roles: ro.roles } : {}),
+        origin: ro ? "owner" : "code",
+      });
+    }
+    for (const ro of reportOverrides.values()) {
+      if (ro.archived) continue;
+      reports.push({
+        code: ro.code,
+        title: ro.title,
+        ru: ro.ru,
+        path: ro.path,
+        ...(noRoles(ro.roles) ? {} : { roles: ro.roles }),
+        origin: "owner",
+      });
+    }
+    out.push({
+      code: src.code,
+      title: own?.title || src.title,
+      subtitle: own?.subtitle || src.subtitle,
+      url: own?.url || src.url,
+      origin: own ? "owner" : "code",
+      reports,
+    });
+  }
+
+  for (const own of byCode.values()) {
+    if (own.archived) continue;
+    out.push({
+      code: own.code,
+      title: own.title,
+      subtitle: own.subtitle,
+      url: own.url,
+      origin: "owner",
+      reports: own.reports
+        .filter((r) => !r.archived)
+        .map((r) => ({
+          code: r.code,
+          title: r.title,
+          ru: r.ru,
+          path: r.path,
+          ...(noRoles(r.roles) ? {} : { roles: r.roles }),
+          origin: "owner" as const,
+        })),
+    });
+  }
+
+  return out;
+}
+
+/** Код источника: латиница, цифры и подчёркивание. Он попадает в адреса и в базу. */
+export function isValidSourceCode(code: string): boolean {
+  return /^[a-z][a-z0-9_]{1,63}$/.test(code);
 }
 
 /** Система по коду. undefined — код чужой, принимать выгрузку нельзя. */

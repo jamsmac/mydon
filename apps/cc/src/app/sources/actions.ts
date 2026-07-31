@@ -99,3 +99,64 @@ export async function fillMachinePoint(machineId: string, point: string): Promis
   revalidatePath("/domain/vendhub");
   return { ok: true };
 }
+
+/**
+ * Завести или поправить систему-источник.
+ *
+ * Справочник в коде остаётся основой; отсюда идут только правки владельца.
+ * Пустой адрес кабинета — законное состояние: «ещё не записан» честнее
+ * выдуманного адреса.
+ */
+export async function saveSource(input: {
+  code: string;
+  title: string;
+  subtitle?: string;
+  url?: string;
+  archived?: boolean;
+}): Promise<ActionResult> {
+  try {
+    await core.saveRawSource(input);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
+}
+
+/** Завести или поправить отчёт системы. Роли назначаются отдельно. */
+export async function saveReport(input: {
+  source: string;
+  code: string;
+  title: string;
+  ru?: string;
+  path?: string;
+  archived?: boolean;
+}): Promise<ActionResult> {
+  try {
+    await core.saveRawReport(input);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
+}
+
+/**
+ * Назначить роли колонок отчёта.
+ *
+ * Выбор идёт из настоящих заголовков последней выгрузки: роль, указывающая на
+ * колонку, которой в отчёте нет, — это молчаливо сломанный срез.
+ */
+export async function setRoles(
+  source: string,
+  report: string,
+  roles: Record<string, string>,
+): Promise<ActionResult> {
+  try {
+    await core.setRawRoles(source, report, roles);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  return { ok: true };
+}

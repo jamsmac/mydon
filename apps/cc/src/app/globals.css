@@ -731,3 +731,29 @@ a.rowlink:hover { background: var(--surf-2); }
   .jrow .jpay { grid-column: 3; }
   .jrow .jstate { grid-column: 2 / -1; text-align: left; }
 }
+
+/* заведение источников и назначение ролей колонок */
+.srcbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.srcbar .hint { flex: 1; min-width: 200px; }
+.srcform {
+  display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;
+  padding: 12px 14px; background: var(--surf); border: 1px solid var(--line); border-radius: var(--r-s);
+}
+.srcfr { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.srcform label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--tx-3); }
+.srcform input {
+  height: 34px; background: var(--bg); color: var(--tx); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0 9px; font-size: 13px; outline: none;
+}
+.srcform input:focus { border-color: var(--accent); }
+.srcfa { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.roleslist { display: flex; flex-direction: column; gap: 5px; }
+.rolerow {
+  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+  padding: 7px 12px; background: var(--surf); border: 1px solid var(--line); border-radius: var(--r-s);
+}
+.rolerow.hot { border-color: var(--hot-line); }
+.rolerow .rolel { font-size: 13px; }
+@media (min-width: 700px) {
+  .srcfr { grid-template-columns: 1fr 1fr; }
+}

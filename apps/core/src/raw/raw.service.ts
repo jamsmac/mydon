@@ -1,19 +1,23 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { entity, rawLink, rawRow, rawSnapshot, sale } from "@mydon/db";
+import { entity, rawLink, rawReportDef, rawRow, rawSnapshot, rawSourceDef, sale } from "@mydon/db";
 import {
   FISCAL_FIELDS,
   RAW_LINK_LABELS,
+  RAW_ROLES,
   RAW_SOURCES,
   decodeRawValue,
-  findRawReport,
-  findRawSource,
+  isValidSourceCode,
+  mergeRegistry,
   fiscalGaps,
   normalizeSourceKey,
   roleColumnIndex,
   roleColumnName,
   type FiscalGap,
   type RawColumnRoles,
+  type EffectiveReport,
+  type EffectiveSource,
   type RawFreshness,
+  type RawSourceOverride,
   type RawLinkKind,
   rawFreshness,
 } from "@mydon/shared";
@@ -599,6 +603,185 @@ export class RawService {
     private readonly events: EventsService,
   ) {}
 
+  /**
+   * Действующий справочник: код плюс правки владельца из базы.
+   *
+   * Всё, что спрашивает про источник или отчёт, ходит сюда, а не в RAW_SOURCES
+   * напрямую: иначе система, заведённая владельцем с экрана, была бы видна на
+   * одном экране и невидима на другом.
+   */
+  async registry(): Promise<EffectiveSource[]> {
+    const [sources, reports] = await Promise.all([
+      this.db.select().from(rawSourceDef),
+      this.db.select().from(rawReportDef),
+    ]);
+    const byCode = new Map<string, RawSourceOverride>();
+    for (const s of sources) {
+      byCode.set(s.code, {
+        code: s.code,
+        title: s.title,
+        subtitle: s.subtitle,
+        url: s.url,
+        archived: s.archivedAt !== null,
+        reports: [],
+      });
+    }
+    for (const r of reports) {
+      const own =
+        byCode.get(r.sourceCode) ??
+        // Отчёт заведён у системы, которая целиком описана в коде: правки по
+        // самой системе нет, но отчёт всё равно должен попасть в справочник.
+        ({ code: r.sourceCode, title: "", subtitle: "", url: "", archived: false, reports: [] } satisfies RawSourceOverride);
+      own.reports.push({
+        code: r.code,
+        title: r.title,
+        ru: r.ru,
+        path: r.path,
+        roles: r.roles as RawColumnRoles,
+        archived: r.archivedAt !== null,
+      });
+      byCode.set(r.sourceCode, own);
+    }
+    return mergeRegistry(RAW_SOURCES, [...byCode.values()]);
+  }
+
+  /** Система действующего справочника. undefined — код чужой. */
+  async source(sourceCode: string): Promise<EffectiveSource | undefined> {
+    return (await this.registry()).find((s) => s.code === sourceCode);
+  }
+
+  /** Отчёт действующего справочника. Бросает — значит такого отчёта нет. */
+  async report(sourceCode: string, reportCode: string): Promise<EffectiveReport> {
+    const rep = (await this.source(sourceCode))?.reports.find((r) => r.code === reportCode);
+    if (!rep) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    return rep;
+  }
+
+  /**
+   * Завести или поправить систему-источник.
+   *
+   * Пустое поле НЕ затирает то, что описано в коде: владелец, заведший систему
+   * одним названием, не должен нечаянно стереть адрес кабинета.
+   */
+  async saveSource(input: {
+    code: string;
+    title: string;
+    subtitle?: string;
+    url?: string;
+    archived?: boolean;
+  }): Promise<{ ok: true }> {
+    if (!isValidSourceCode(input.code)) {
+      throw new NotFoundException(
+        "Код системы — латиница, цифры и подчёркивание, начиная с буквы: он попадает в адрес и в базу",
+      );
+    }
+    const values = {
+      code: input.code,
+      title: input.title.trim(),
+      subtitle: (input.subtitle ?? "").trim(),
+      url: (input.url ?? "").trim(),
+      archivedAt: input.archived ? new Date() : null,
+      updatedAt: new Date(),
+    };
+    if (values.title.length === 0) throw new NotFoundException("У системы должно быть название");
+    await this.db
+      .insert(rawSourceDef)
+      .values(values)
+      .onConflictDoUpdate({ target: rawSourceDef.code, set: values });
+    return { ok: true };
+  }
+
+  /**
+   * Завести или поправить отчёт.
+   *
+   * Роли здесь не задаются: их назначают по настоящим заголовкам выгрузки
+   * (setRoles), а не по памяти. Угадывать название колонки, которой не видел, —
+   * то же самое, что выдумывать данные.
+   */
+  async saveReport(input: {
+    source: string;
+    code: string;
+    title: string;
+    ru?: string;
+    path?: string;
+    archived?: boolean;
+  }): Promise<{ ok: true }> {
+    if (!isValidSourceCode(input.code)) {
+      throw new NotFoundException("Код отчёта — латиница, цифры и подчёркивание, начиная с буквы");
+    }
+    if (!(await this.source(input.source))) {
+      throw new NotFoundException(`Системы «${input.source}» нет в справочнике`);
+    }
+    const title = input.title.trim();
+    if (title.length === 0) throw new NotFoundException("У отчёта должно быть название");
+    const values = {
+      sourceCode: input.source,
+      code: input.code,
+      title,
+      ru: (input.ru ?? "").trim(),
+      path: (input.path ?? "").trim(),
+      archivedAt: input.archived ? new Date() : null,
+      updatedAt: new Date(),
+    };
+    await this.db
+      .insert(rawReportDef)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [rawReportDef.sourceCode, rawReportDef.code],
+        set: { ...values, roles: sql`${rawReportDef.roles}` },
+      });
+    return { ok: true };
+  }
+
+  /**
+   * Назначить роли колонок отчёта.
+   *
+   * Принимаются только те названия, которые действительно есть в последней
+   * выгрузке: роль, указывающая на несуществующую колонку, — это молчаливо
+   * сломанный срез, а не описание отчёта.
+   */
+  async setRoles(
+    sourceCode: string,
+    reportCode: string,
+    roles: Record<string, string>,
+  ): Promise<{ ok: true; roles: RawColumnRoles }> {
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    const columns = snapshot?.columns ?? [];
+    const known = new Map(columns.map((c) => [normalizeSourceKey(c), c]));
+    const next: Record<string, string[]> = {};
+    for (const [role, column] of Object.entries(roles)) {
+      if (!RAW_ROLES.includes(role as keyof RawColumnRoles)) continue;
+      const value = (column ?? "").trim();
+      // Пусто — осознанное «этой роли в отчёте нет». Это законное состояние.
+      if (value.length === 0) continue;
+      const real = known.get(normalizeSourceKey(value));
+      if (!real) {
+        throw new NotFoundException(
+          `Колонки «${value}» нет в последней выгрузке — назначать роль на неё нельзя`,
+        );
+      }
+      next[role] = [real];
+    }
+    const rep = await this.report(sourceCode, reportCode);
+    const values = {
+      sourceCode,
+      code: reportCode,
+      title: rep.title,
+      ru: rep.ru,
+      path: rep.path,
+      roles: next,
+      updatedAt: new Date(),
+    };
+    await this.db
+      .insert(rawReportDef)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [rawReportDef.sourceCode, rawReportDef.code],
+        set: { roles: next, updatedAt: values.updatedAt },
+      });
+    return { ok: true, roles: next as RawColumnRoles };
+  }
+
   /** Список источников с состоянием каждого отчёта. */
   async overview(): Promise<RawOverview> {
     const snapshots = await this.db
@@ -628,7 +811,8 @@ export class RawService {
       else byReport.set(k, [s]);
     }
 
-    const sources = RAW_SOURCES.map((src) => {
+    const effective = await this.registry();
+    const sources = effective.map((src) => {
       const reports = src.reports.map((rep) => {
         const list = (byReport.get(key(src.code, rep.code)) ?? [])
           .slice()
@@ -640,6 +824,8 @@ export class RawService {
           title: rep.title,
           ru: rep.ru,
           path: rep.path,
+          origin: rep.origin,
+          roles: (rep.roles ?? {}) as Record<string, unknown>,
           snapshots: list.length,
           lastFetchedAt: last ? last.fetchedAt.toISOString() : null,
           freshness: rawFreshness(last?.fetchedAt ?? null, now),
@@ -653,6 +839,7 @@ export class RawService {
         title: src.title,
         subtitle: src.subtitle,
         url: src.url,
+        origin: src.origin,
         connected: reports.some((r) => r.snapshots > 0),
         reports,
       };
@@ -808,8 +995,7 @@ export class RawService {
    * «не узнано», и это работа для владельца, а не повод что-то придумать.
    */
   async mapping(sourceCode: string, reportCode: string): Promise<RawMapping> {
-    const report = findRawReport(sourceCode, reportCode);
-    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const report = await this.report(sourceCode, reportCode);
 
     const snapshot = await this.latestSnapshot(sourceCode, reportCode);
     if (!snapshot) return { snapshot: null, groups: [] };
@@ -947,8 +1133,7 @@ export class RawService {
    * путаница в источнике, и она помечается, а не сглаживается.
    */
   async machineStays(sourceCode: string, reportCode: string): Promise<MachineStays[]> {
-    const report = findRawReport(sourceCode, reportCode);
-    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const report = await this.report(sourceCode, reportCode);
     const snapshot = await this.latestSnapshot(sourceCode, reportCode);
     if (!snapshot) return [];
 
@@ -1129,8 +1314,7 @@ export class RawService {
     unreadable: number;
     lastOrderAt: string | null;
   }> {
-    const report = findRawReport(sourceCode, reportCode);
-    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const report = await this.report(sourceCode, reportCode);
     const snapshot = await this.latestSnapshot(sourceCode, reportCode);
     if (!snapshot) return { items: [], buckets: new Map(), unreadable: 0, lastOrderAt: null };
 
@@ -1296,9 +1480,8 @@ export class RawService {
     reportCode: string,
     query: RawRowsQuery,
   ): Promise<Journal> {
-    const report = findRawReport(sourceCode, reportCode);
-    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
-    const src = findRawSource(sourceCode);
+    const report = await this.report(sourceCode, reportCode);
+    const src = await this.source(sourceCode);
     const empty: Journal = {
       snapshot: null,
       total: 0,
@@ -1327,7 +1510,10 @@ export class RawService {
       fulfilment: at("fulfilment"),
       point: at("point"),
     };
-    if (idx.machine < 0 || idx.product < 0 || idx.ts < 0) return { ...empty, snapshot };
+    // Обязательно только время: без него строка не ложится ни в какой порядок.
+    // Автомат и товар нужны не всякому источнику — у выписки платёжной системы
+    // их нет вовсе, и требовать их значило бы объявить её непригодной.
+    if (idx.ts < 0) return { ...empty, snapshot };
 
     const { total, rows } = await this.rows(snapshot.id, query);
     if (rows.length === 0) return { ...empty, snapshot, total };
@@ -1357,8 +1543,11 @@ export class RawService {
 
     // Сверка с другим источником: OurVend отдаёт дневные итоги, поэтому берём
     // ровно те тройки «день + автомат + товар», что встретились на странице.
+    // Сверка возможна только там, где есть и автомат, и товар: другой источник
+    // отдаёт дневные итоги именно по этой тройке.
+    const canCross = idx.machine >= 0 && idx.product >= 0;
     const triples = new Set<string>();
-    for (const r of rows) {
+    for (const r of canCross ? rows : []) {
       const day = cell(r, idx.ts).slice(0, 10);
       if (day.length !== 10) continue;
       triples.add(`${day}|${normalizeSourceKey(cell(r, idx.machine))}|${normalizeSourceKey(cell(r, idx.product))}`);
@@ -1391,7 +1580,7 @@ export class RawService {
 
     // Итог этой же выгрузки по тем же тройкам — вторая половина сверки.
     const ourByTriple = new Map<string, { qty: number; amount: number }>();
-    if (idx.amount >= 0 && triples.size > 0) {
+    if (canCross && idx.amount >= 0 && triples.size > 0) {
       const c = (i: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(i))}, '')`;
       const price = sql<string>`case when ${c(idx.amount)} ~ '^\\s*-?[0-9]+([.,][0-9]+)?\\s*$'
         then replace(btrim(${c(idx.amount)}), ',', '.')::numeric end`;
@@ -1655,8 +1844,7 @@ export class RawService {
    * как он есть, и итог обязан сходиться с тем, что показывает панель.
    */
   async paymentReview(sourceCode: string, reportCode: string): Promise<PaymentReview> {
-    const report = findRawReport(sourceCode, reportCode);
-    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const report = await this.report(sourceCode, reportCode);
     const empty: PaymentReview = {
       channels: [],
       orders: 0,
@@ -1793,8 +1981,7 @@ export class RawService {
    * собирается. Поэтому оба состояния считаются вместе, но называются раздельно.
    */
   async productReview(sourceCode: string, reportCode: string): Promise<ProductReview> {
-    const report = findRawReport(sourceCode, reportCode);
-    if (!report) throw new NotFoundException("Такого отчёта нет в справочнике источников");
+    const report = await this.report(sourceCode, reportCode);
     const snapshot = await this.latestSnapshot(sourceCode, reportCode);
     if (!snapshot) {
       return { products: [], revenue: 0, blockedRevenue: 0, noCard: 0, incomplete: 0, lastOrderAt: null };
@@ -1989,12 +2176,12 @@ export class RawService {
    * `append: true` — тело запроса ограничено мегабайтом, и делить её нормально.
    */
   async import(input: RawImportInput): Promise<{ snapshotId: string; rows: number; total: number }> {
-    const report = findRawReport(input.source, input.report);
-    if (!report) {
-      throw new NotFoundException(
-        `Источник «${input.source}» или отчёт «${input.report}» не значится в справочнике`,
-      );
+    // Отчёт обязан быть в действующем справочнике: принимать выгрузку под
+    // незнакомым кодом нельзя — её потом не с чем связать.
+    if (!(await this.source(input.source))) {
+      throw new NotFoundException(`Источника «${input.source}» нет в справочнике`);
     }
+    await this.report(input.source, input.report);
     const fetchedAt = new Date(input.fetchedAt);
     if (Number.isNaN(fetchedAt.getTime())) {
       throw new NotFoundException("Время съёма выгрузки нечитаемо");

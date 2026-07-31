@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   RAW_SOURCES,
   decodeRawValue,
+  isValidSourceCode,
+  mergeRegistry,
   findRawReport,
   normalizeSourceKey,
   rawFreshness,
@@ -144,5 +146,114 @@ describe("Расшифровка кодов источника", () => {
     const brew = findRawReport("gjvending", "order_query")?.dicts?.find((d) => d.role === "fulfilment");
     assert.equal(decodeRawValue(brew, "2")?.label, "доставлен");
     assert.equal(decodeRawValue(brew, "11")?.label, "сбой доставки");
+  });
+});
+
+describe("Справочник источников: код плюс правки владельца", () => {
+  const seed = [
+    {
+      code: "gjvending",
+      title: "gjvending",
+      subtitle: "Панель автоматов",
+      url: "https://www.gjvending.net",
+      reports: [
+        { code: "order_query", title: "Order Query", ru: "Запрос заказов", path: "Report Query", roles: { machine: "Machine Code" } },
+        { code: "machine_cash", title: "Machine Cash Record", ru: "Касса", path: "Report Query" },
+      ],
+    },
+  ];
+  const own = (patch: Record<string, unknown> = {}) => ({
+    code: "gjvending",
+    title: "",
+    subtitle: "",
+    url: "",
+    archived: false,
+    reports: [],
+    ...patch,
+  });
+
+  it("без правок справочник — это ровно код", () => {
+    const r = mergeRegistry(seed, []);
+    assert.equal(r.length, 1);
+    assert.equal(r[0].origin, "code");
+    assert.equal(r[0].url, "https://www.gjvending.net");
+    assert.deepEqual(r[0].reports.map((x) => x.origin), ["code", "code"]);
+  });
+
+  it("правка владельца важнее записи в коде", () => {
+    const r = mergeRegistry(seed, [own({ title: "Панель GJ", url: "https://gj.example" })]);
+    assert.equal(r[0].title, "Панель GJ");
+    assert.equal(r[0].url, "https://gj.example");
+    assert.equal(r[0].origin, "owner");
+  });
+
+  it("пустое поле правки не затирает заполненное в коде", () => {
+    // Владелец завёл систему одним названием — адрес кабинета, уже описанный
+    // в коде, не должен нечаянно стереться.
+    const r = mergeRegistry(seed, [own({ title: "Панель GJ" })]);
+    assert.equal(r[0].url, "https://www.gjvending.net");
+    assert.equal(r[0].subtitle, "Панель автоматов");
+  });
+
+  it("система, которой нет в коде, просто добавляется", () => {
+    const r = mergeRegistry(seed, [
+      { code: "click", title: "Click", subtitle: "Платежи", url: "", archived: false, reports: [] },
+    ]);
+    assert.deepEqual(r.map((x) => x.code), ["gjvending", "click"]);
+    assert.equal(r[1].origin, "owner");
+  });
+
+  it("отчёт владельца добавляется к отчётам из кода", () => {
+    const r = mergeRegistry(seed, [
+      own({
+        reports: [
+          { code: "refunds", title: "Refunds", ru: "Возвраты", path: "Report Query → Refunds", roles: {}, archived: false },
+        ],
+      }),
+    ]);
+    assert.deepEqual(r[0].reports.map((x) => x.code), ["order_query", "machine_cash", "refunds"]);
+    assert.equal(r[0].reports[2].origin, "owner");
+  });
+
+  it("роли берутся целиком чьи-то одни, а не смешиваются", () => {
+    // Смешать назначения владельца с описанием в коде значило бы собрать
+    // отчёт, которого нет ни у кого.
+    const r = mergeRegistry(seed, [
+      own({
+        reports: [
+          { code: "order_query", title: "", ru: "", path: "", roles: { product: ["Goods name"] }, archived: false },
+        ],
+      }),
+    ]);
+    assert.deepEqual(r[0].reports[0].roles, { product: ["Goods name"] });
+    assert.equal(r[0].reports[0].title, "Order Query", "название при этом осталось из кода");
+  });
+
+  it("пустое назначение ролей не стирает роли из кода", () => {
+    const r = mergeRegistry(seed, [
+      own({ reports: [{ code: "order_query", title: "", ru: "", path: "", roles: {}, archived: false }] }),
+    ]);
+    assert.deepEqual(r[0].reports[0].roles, { machine: "Machine Code" });
+  });
+
+  it("убранное с глаз не показывается — ни система, ни отчёт", () => {
+    assert.equal(mergeRegistry(seed, [own({ archived: true })]).length, 0);
+    const r = mergeRegistry(seed, [
+      own({ reports: [{ code: "machine_cash", title: "", ru: "", path: "", roles: {}, archived: true }] }),
+    ]);
+    assert.deepEqual(r[0].reports.map((x) => x.code), ["order_query"]);
+  });
+});
+
+describe("Справочник источников: код системы", () => {
+  it("латиница, цифры и подчёркивание", () => {
+    assert.equal(isValidSourceCode("click"), true);
+    assert.equal(isValidSourceCode("uzum_bank2"), true);
+  });
+
+  it("кириллица, пробелы и знаки не годятся: код идёт в адрес и в базу", () => {
+    for (const bad of ["Клик", "click uz", "click-uz", "2click", "c", "", "CLICK"]) {
+      assert.equal(isValidSourceCode(bad), false, `пропущено: ${bad}`);
+    }
   });
 });
