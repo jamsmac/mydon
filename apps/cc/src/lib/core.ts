@@ -723,6 +723,32 @@ export interface RawMappingGroup {
   values: RawMappingValue[];
 }
 
+/** Строка рецепта с посчитанной стоимостью — как её отдаёт Core. */
+export interface RecipeCostLine {
+  ingredientId: string;
+  ingredientName: string | null;
+  /** Карточка ингредиента утверждена владельцем. false — ждёт слова. */
+  approved: boolean;
+  quantity: number;
+  unit: string;
+  /** Цена покупки ингредиента за `priceUnit`. null — не заведена. */
+  price: number | null;
+  priceUnit: string | null;
+  /** Стоимость строки. null — посчитать нечем (см. `why`). */
+  cost: number | null;
+  why: string | null;
+}
+
+/** Рецепт товара: состав, цены ингредиентов и себестоимость. */
+export interface RecipeView {
+  productId: string;
+  lines: RecipeCostLine[];
+  /** Себестоимость: сумма посчитанных строк. */
+  total: number;
+  /** Строк, которые посчитать не удалось, — итог неполон. */
+  unresolved: number;
+}
+
 /** Текстовый ответ Core — для выгрузки CSV, который нельзя разбирать как JSON. */
 export async function coreText(path: string): Promise<string> {
   let res: Response;
@@ -782,6 +808,8 @@ export const core = {
   entity: (id: string) => get<Entity>(`/entities/${id}`),
   createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
   entityDrafts: (id: string) => get<EntityDraft[]>(`/entities/${id}/drafts`),
+  /** Рецепт товара: состав, цены ингредиентов и себестоимость. */
+  entityRecipe: (id: string) => get<RecipeView>(`/entities/${id}/recipe`),
   pendingEntities: () =>
     get<{ cards: Entity[]; fields: (EntityDraft & { entityName: string; entityType: string })[] }>(
       "/entities/pending",

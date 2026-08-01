@@ -6,6 +6,7 @@ import {
   type EntityDraft,
   type MachineProductPrice,
   type MachineStays,
+  type RecipeView,
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { DeleteEntityButton } from "../../../components/entity-delete";
@@ -13,6 +14,7 @@ import { EntityEditor } from "../../../components/entity-editor";
 import { StayTimeline } from "../../../components/machine-stays";
 import { MachinePricesView } from "../../../components/prices-view";
 import { EntityApproval } from "../../../components/entity-approval";
+import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
 import { plural, when } from "../../../lib/format";
 
@@ -65,6 +67,28 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   const lat = a["широта"];
   const lng = a["долгота"];
   const hasGeo = typeof lat === "string" && typeof lng === "string" && lat.length > 0;
+
+  // Рецепт показываем только у товара с принципом «рецепт»: состав из
+  // ингредиентов и себестоимость. Ингредиенты берём того же направления —
+  // из них собирается состав. Ошибка здесь не роняет карточку.
+  const isRecipe = entity.type === "product" && a["вид"] === "рецепт";
+  let recipe: RecipeView | null = null;
+  let ingredients: IngredientOption[] = [];
+  if (isRecipe) {
+    try {
+      recipe = await core.entityRecipe(entity.id);
+    } catch {
+      recipe = null;
+    }
+    try {
+      const cards = entity.domain
+        ? await core.entitiesOfType(entity.domain, "ingredient")
+        : [];
+      ingredients = cards.map((c) => ({ id: c.id, name: c.name, approved: c.approvedAt != null }));
+    } catch {
+      ingredients = [];
+    }
+  }
 
   return (
     <>
@@ -132,6 +156,10 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
             не поменяли, она держится. Сквозной срез — во вкладке «Источники → Цены».
           </p>
         </div>
+      )}
+
+      {isRecipe && recipe && (
+        <RecipeEditor entity={{ id: entity.id }} ingredients={ingredients} recipe={recipe} />
       )}
 
       <EntityEditor entity={entity} />

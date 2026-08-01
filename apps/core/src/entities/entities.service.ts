@@ -1,7 +1,7 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, entity, entityDraft, org } from "@mydon/db";
-import type { Domain } from "@mydon/shared";
-import { and, desc, eq, sql, type SQL } from "drizzle-orm";
+import { isUnit, parseRecipe, recipeCost, type Domain, type IngredientPrice, type Unit } from "@mydon/shared";
+import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import type { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
@@ -413,5 +413,77 @@ export class EntitiesService {
    */
   async duplicatesByExternalRef(externalRef: string): Promise<EntityRow[]> {
     return this.db.select().from(entity).where(eq(entity.externalRef, externalRef));
+  }
+
+  /**
+   * Рецепт товара: состав с именами ингредиентов и себестоимостью.
+   *
+   * Себестоимость считается ТУТ, на чтении, из текущих цен ингредиентов — не
+   * хранится полем: так она не разойдётся с ценами (у донора кэш `totalCost`
+   * расходился). Ингредиент без цены не обнуляется молча — строка помечена
+   * непосчитанной, и итог честно неполон.
+   */
+  async recipeOf(productId: string): Promise<{
+    productId: string;
+    lines: {
+      ingredientId: string;
+      ingredientName: string | null;
+      approved: boolean;
+      quantity: number;
+      unit: string;
+      price: number | null;
+      priceUnit: string | null;
+      cost: number | null;
+      why: string | null;
+    }[];
+    total: number;
+    unresolved: number;
+  }> {
+    const [card] = await this.db.select().from(entity).where(eq(entity.id, productId));
+    if (!card) throw new NotFoundException("Карточки нет");
+    const lines = parseRecipe(card.attrs as Record<string, unknown>);
+
+    const ids = [...new Set(lines.map((l) => l.ingredientId))];
+    const ings =
+      ids.length === 0
+        ? []
+        : await this.db.select().from(entity).where(inArray(entity.id, ids));
+    const byId = new Map(ings.map((i) => [i.id, i]));
+
+    const priceOf = (id: string): IngredientPrice => {
+      const ing = byId.get(id);
+      const a = (ing?.attrs ?? {}) as Record<string, unknown>;
+      const raw = a["цена покупки"];
+      const price =
+        typeof raw === "number" && Number.isFinite(raw) && raw > 0
+          ? raw
+          : typeof raw === "string" && raw.trim().length > 0 && Number.isFinite(Number(raw))
+            ? Number(raw)
+            : null;
+      const unit = isUnit(a["единица"]) ? (a["единица"] as Unit) : null;
+      return { price, unit };
+    };
+
+    const costed = recipeCost(lines, priceOf);
+    return {
+      productId,
+      total: costed.total,
+      unresolved: costed.unresolved,
+      lines: costed.lines.map((lc) => {
+        const ing = byId.get(lc.line.ingredientId);
+        const p = priceOf(lc.line.ingredientId);
+        return {
+          ingredientId: lc.line.ingredientId,
+          ingredientName: ing?.name ?? null,
+          approved: ing ? ing.approvedAt !== null : false,
+          quantity: lc.line.quantity,
+          unit: lc.line.unit,
+          price: p.price,
+          priceUnit: p.unit,
+          cost: lc.cost,
+          why: lc.why,
+        };
+      }),
+    };
   }
 }

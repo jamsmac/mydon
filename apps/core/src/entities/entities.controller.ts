@@ -58,6 +58,12 @@ export class EntitiesController {
     return this.entities.drafts(id);
   }
 
+  /** Рецепт товара: состав, цены ингредиентов и себестоимость. */
+  @Get(":id/recipe")
+  recipe(@Param("id", ParseUUIDPipe) id: string) {
+    return this.entities.recipeOf(id);
+  }
+
   /** Предложить значение поля. В карточку оно не попадёт до утверждения. */
   @Post(":id/propose")
   propose(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ProposeFieldDto) {
