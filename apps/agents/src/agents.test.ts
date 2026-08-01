@@ -188,7 +188,10 @@ describe("Прогон навыка", () => {
     assert.deepEqual(calls, [], "у остановленного агента не должно быть ни событий, ни запросов");
   });
 
-  it("при поднятом пороге исполняет без согласования (когда повод есть)", async () => {
+  it("поднятый порог НЕ исполняет сам — исполнителя навыка нет, идёт через согласование", async () => {
+    // Раньше при T2+ навык возвращал «executed» без реального исполнителя — ложь
+    // (аудит P1). Пока исполнителя и проверки результата нет, любое действие —
+    // только предложение владельцу, независимо от порога.
     const { client, calls } = stubCore({
       obligations: async () => ({
         domain: "globerent",
@@ -199,9 +202,10 @@ describe("Прогон навыка", () => {
       }),
     });
     const res = await runSkill(base, "watch-receivables", client, "T2");
-    assert.equal(res.outcome, "executed");
-    // event(agent.run) → event(agent.action): исполнение тоже считается действием.
-    assert.deepEqual(calls, ["event", "event"]);
+    assert.equal(res.outcome, "approval_requested");
+    assert.match(res.reason, /исполнителя навыка ещё нет/);
+    // event(agent.run) → approval → event(agent.action): всё через согласование.
+    assert.deepEqual(calls, ["event", "approval", "event"]);
   });
 
   it("дневной потолок исчерпан — предложение НЕ выносится", async () => {

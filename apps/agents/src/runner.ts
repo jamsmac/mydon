@@ -11,6 +11,12 @@ export interface RunResult {
   outcome: "approval_requested" | "executed" | "skipped";
   approvalId?: string;
   reason: string;
+  /** Почему пропущено — вызывающий отличает «нет повода» от «потолок исчерпан». */
+  skipReason?: "inactive" | "not_implemented" | "no_signal" | "capped";
+  /** Предложение навыка (текст и факты) — чтобы отчёт по задаче не звал навык
+   *  повторно (иначе первый прогон и отчёт могут разойтись). */
+  action?: string;
+  facts?: Record<string, unknown>;
 }
 
 /**
@@ -35,6 +41,7 @@ export async function runSkill(
       agent: agent.name,
       skill,
       outcome: "skipped",
+      skipReason: "inactive",
       reason: `агент со статусом "${agent.status}" не запускается`,
     };
   }
@@ -53,6 +60,7 @@ export async function runSkill(
       agent: agent.name,
       skill,
       outcome: "skipped",
+      skipReason: "not_implemented",
       reason: `навык "${skill}" ещё не подключён к данным`,
     };
   }
@@ -63,6 +71,7 @@ export async function runSkill(
       agent: agent.name,
       skill,
       outcome: "skipped",
+      skipReason: "no_signal",
       reason: "повода нет: по данным Core предлагать нечего",
     };
   }
@@ -79,44 +88,43 @@ export async function runSkill(
         agent: agent.name,
         skill,
         outcome: "skipped",
+        skipReason: "capped",
         reason: limit.reason ?? `дневной потолок действий исчерпан (${used}/${cap})`,
       };
     }
   }
 
-  if (requiresApproval(tier, threshold)) {
-    const approval = await core.requestApproval({
-      agent: agent.name,
-      action: proposal.action,
-      tier,
-      // Факты кладём рядом с предложением: по ним проверяется «по следам»,
-      // что агент не выдумал повод.
-      payload: { skill, business: agent.business, facts: proposal.facts },
-    });
-    // Действие состоялось — отмечаем в журнале, по нему считается потолок.
-    await core.recordEvent({
-      source: `agent:${agent.name}`,
-      type: "agent.action",
-      payload: { skill, action: proposal.action, approvalId: approval.id },
-    });
-    return {
-      agent: agent.name,
-      skill,
-      outcome: "approval_requested",
-      approvalId: approval.id,
-      reason: explainPolicy(tier, threshold),
-    };
-  }
-
+  // Действие ВСЕГДА идёт через согласование, независимо от порога автономии.
+  //
+  // Раньше при поднятом пороге (requiresApproval=false) навык возвращал
+  // `executed` и писал в журнал `executed:true` — но РЕАЛЬНОГО исполнителя у
+  // навыков нет: ничего не выполнялось, а task-worker закрывал задачу как
+  // «сделано». Это ложь (аудит P1). Пока нет настоящего исполнителя и проверки
+  // результата, единственное честное действие — предложить владельцу. Порог
+  // сохраняем в payload и в reason: он снова заработает, когда появятся
+  // исполнители, и тогда здесь вернётся ветка реального выполнения.
+  const approval = await core.requestApproval({
+    agent: agent.name,
+    action: proposal.action,
+    tier,
+    // Факты кладём рядом с предложением: по ним проверяется «по следам»,
+    // что агент не выдумал повод.
+    payload: { skill, business: agent.business, facts: proposal.facts },
+  });
   await core.recordEvent({
     source: `agent:${agent.name}`,
     type: "agent.action",
-    payload: { skill, action: proposal.action, executed: true },
+    payload: { skill, action: proposal.action, approvalId: approval.id },
   });
   return {
     agent: agent.name,
     skill,
-    outcome: "executed",
-    reason: explainPolicy(tier, threshold),
+    outcome: "approval_requested",
+    approvalId: approval.id,
+    action: proposal.action,
+    facts: proposal.facts,
+    reason: requiresApproval(tier, threshold)
+      ? explainPolicy(tier, threshold)
+      : "порог допускает исполнение, но исполнителя навыка ещё нет — вынесено на согласование",
   };
 }
