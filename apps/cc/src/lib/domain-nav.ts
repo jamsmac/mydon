@@ -52,6 +52,7 @@ export const VENDHUB_GROUPS: NavGroup[] = [
     label: "Отчёты",
     leaves: [
       { label: "Журнал продаж", type: "sale" },
+      { label: "Расход сырья", type: "consumption" },
       { label: "Инкассация", type: "collection" },
       { label: "Сроки годности", type: null },
       { label: "Себестоимость", type: null },
