@@ -386,14 +386,34 @@ export const RAW_SOURCES: readonly RawSourceDef[] = [
   {
     code: "ourvend",
     title: "OurVend",
-    subtitle: "Вторая вендинговая платформа",
+    subtitle: "Вторая вендинговая платформа (автоматы TCN)",
     url: "https://os.ourvend.com/Account/Login",
     reports: [
       {
-        code: "reports",
-        title: "Отчёты",
-        ru: "состав уточняется",
-        path: "после первого входа",
+        // Order Query кабинета: заказ = строка, с номером операции, товаром и
+        // временем. Роли назначены по НАСТОЯЩИМ заголовкам Excel-выгрузки
+        // (Machine ID, Commodity Name, Order Number, Server Time…), а не по
+        // памяти. У OurVend свой производитель (TCN), поэтому номер операции
+        // свой — с vendinghub он сверяется по «автомат + время + сумма», а не
+        // по общему номеру.
+        code: "order_query",
+        title: "Order Query",
+        ru: "Заказы по времени (Sales details)",
+        path: "Report → Order Query → Export",
+        roles: {
+          // Machine ID — серийный код автомата (стабильный ключ сопоставления).
+          machine: ["Machine ID"],
+          // Machine Name — как автомат назван в кабинете («Olma Администрация»).
+          point: ["Machine Name"],
+          product: ["Commodity Name"],
+          amount: ["Price"],
+          // Server Time — местное время (машинное + 3ч), сходится с часами
+          // gjvending и vendinghub; Machine Time оставлено сырой колонкой.
+          ts: ["Server Time"],
+          externalId: ["Order Number"],
+          status: ["Result"],
+          payment: ["Payment Type"],
+        },
       },
     ],
   },
