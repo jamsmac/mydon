@@ -135,6 +135,23 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 /* Секции не должны прятаться под липкое оглавление при переходе к ним. */
 [data-toc] { scroll-margin-top: 60px; }
 
+/* Палитра ⌘K: «Найти карточку или отчёт» поверх всего. */
+.cmdk-back { position: fixed; inset: 0; z-index: 50; background: rgba(4, 10, 20, 0.6); backdrop-filter: blur(3px); display: flex; align-items: flex-start; justify-content: center; padding: 12vh 16px 16px; }
+.cmdk { width: 100%; max-width: 560px; background: var(--surf-2); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.85); overflow: hidden; }
+.cmdk-in { width: 100%; border: 0; background: transparent; color: var(--tx); font-size: 16px; padding: 16px 18px; outline: none; border-bottom: 1px solid var(--line); }
+.cmdk-in::placeholder { color: var(--tx-3); }
+.cmdk-list { max-height: 52vh; overflow-y: auto; padding: 6px; }
+.cmdk-empty { color: var(--tx-3); font-size: 13px; padding: 18px; text-align: center; }
+.cmdk-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 10px 12px; border-radius: 9px; background: transparent; border: 0; color: inherit; }
+.cmdk-row.on { background: var(--surf); }
+.cmdk-k { font-family: var(--fm); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--tx-3); flex: none; }
+.cmdk-k.card { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.cmdk-k.report { color: var(--ok); border-color: rgba(43, 217, 160, 0.4); background: rgba(43, 217, 160, 0.1); }
+.cmdk-t { font-size: 14px; color: var(--tx); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmdk-s { font-size: 12px; color: var(--tx-3); flex: none; white-space: nowrap; }
+.cmdk-foot { display: flex; gap: 16px; padding: 9px 14px; border-top: 1px solid var(--line); font-size: 11px; color: var(--tx-3); }
+.cmdk-foot b { font-family: var(--fm); color: var(--tx-2); font-weight: 500; }
+
 /* Витрина «Отчёты»: источники группами, отчёты карточками с главной метрикой. */
 .rgroup { margin-top: 22px; }
 .rgroup-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }

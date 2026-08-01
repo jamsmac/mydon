@@ -4,6 +4,7 @@ import { IBM_Plex_Mono, Manrope, Syne } from "next/font/google";
 import { core } from "../lib/core";
 import { Sidebar, TabBar } from "../components/nav";
 import { FloatingChat } from "../components/floating-chat";
+import { CommandPalette } from "../components/command-palette";
 import { HeaderActions } from "../components/header-actions";
 import { Background } from "../components/bg/background";
 import "./globals.css";
@@ -90,6 +91,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
 
           <TabBar pendingCount={inbox} />
           <FloatingChat />
+          <CommandPalette />
         </div>
       </body>
     </html>
