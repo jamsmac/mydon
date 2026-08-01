@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { core, type PurchaseRow } from "../lib/core";
+import { SyncIntakeButton } from "./sync-intake-button";
 
 const money = (v: string | number | null) =>
   v === null ? "—" : `${Number(v).toLocaleString("ru-RU")}`;
@@ -27,6 +28,7 @@ export async function PurchasesView() {
   }
   return (
     <>
+      <SyncIntakeButton />
       {summary && (
         <div className="tiles" style={{ marginBottom: 14 }}>
           <div className="tile">

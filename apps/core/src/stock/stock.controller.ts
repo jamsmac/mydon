@@ -71,6 +71,12 @@ export class StockController {
     return this.stock.warehouseStock(id);
   }
 
+  /** Свести приход из mydon-stock в ленту склада (идемпотентно). */
+  @Post("sync-intake")
+  syncIntake() {
+    return this.stock.syncIntakeFromPurchases();
+  }
+
   /**
    * Расход сырья за период. По умолчанию — последние 30 дней. Даты в формате
    * YYYY-MM-DD; нераспознанные молча заменяются умолчанием.

@@ -138,6 +138,31 @@ export async function addIntake(
   return { ok: true };
 }
 
+export interface SyncIntakeResult {
+  ok: boolean;
+  error?: string;
+  summary?: {
+    warehouse: string | null;
+    created: number;
+    alreadySynced: number;
+    noCard: number;
+    badUnit: number;
+    noWarehouse: "нет" | "неоднозначно" | null;
+  };
+}
+
+/** Свести приход из mydon-stock в ленту склада (по кнопке). */
+export async function syncIntake(): Promise<SyncIntakeResult> {
+  try {
+    const summary = await core.syncIntake();
+    revalidatePath("/domain/vendhub");
+    return { ok: true, summary };
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось свести приход" };
+  }
+}
+
 /** Удалить движение склада (правка ручного прихода). */
 export async function removeMovement(movementId: string, cardId: string): Promise<ActionResult> {
   try {
