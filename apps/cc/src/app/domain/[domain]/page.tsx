@@ -21,7 +21,7 @@ import { MapPanel } from "../../../components/map-panel";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
 import { typeOne } from "../../../lib/labels";
-import { money, plural, when } from "../../../lib/format";
+import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -121,7 +121,6 @@ export default async function DomainPage({
 
   const owedToUs = obligations.totals.filter((t) => t.direction === "in");
   const owedByUs = obligations.totals.filter((t) => t.direction === "out");
-  const sum = (rows: typeof owedToUs) => rows.reduce((s, r) => s + Number(r.amount || 0), 0);
 
   const href = (t: string) => `/domain/${domain}?tab=${encodeURIComponent(t)}`;
 
@@ -201,20 +200,20 @@ export default async function DomainPage({
       {activeGroup === "overview" && (
         <>
           <div className="tiles">
-            <div className={`tile ${sum(owedToUs) === 0 ? "zero" : ""}`}>
+            <div className={`tile ${hasMoney(owedToUs) ? "" : "zero"}`}>
               <div className="lab">Должны нам</div>
-              <div className="v">{money(sum(owedToUs))}</div>
-              <div className="foot"><span className="mk" />{sum(owedToUs) === 0 ? "нет открытых счетов" : "по реестру обязательств"}</div>
+              <div className="v">{moneyByCurrency(owedToUs)}</div>
+              <div className="foot"><span className="mk" />{hasMoney(owedToUs) ? "по реестру обязательств" : "нет открытых счетов"}</div>
             </div>
-            <div className={`tile ${sum(owedByUs) === 0 ? "zero" : ""}`}>
+            <div className={`tile ${hasMoney(owedByUs) ? "" : "zero"}`}>
               <div className="lab">Должны мы</div>
-              <div className="v">{money(sum(owedByUs))}</div>
-              <div className="foot"><span className="mk" />{sum(owedByUs) === 0 ? "нет открытых счетов" : "поставщики и аренда"}</div>
+              <div className="v">{moneyByCurrency(owedByUs)}</div>
+              <div className="foot"><span className="mk" />{hasMoney(owedByUs) ? "поставщики и аренда" : "нет открытых счетов"}</div>
             </div>
-            <div className={`tile ${obligations.overdue.length > 0 ? "is-hot" : "zero"}`}>
+            <div className={`tile ${obligations.overdueTotal > 0 ? "is-hot" : "zero"}`}>
               <div className="lab">Просрочено</div>
-              <div className="v">{obligations.overdue.length}</div>
-              <div className="foot"><span className="mk" />{obligations.overdue.length > 0 ? "требует твоего решения" : "просрочек нет"}</div>
+              <div className="v">{obligations.overdueTotal}</div>
+              <div className="foot"><span className="mk" />{obligations.overdueTotal > 0 ? "требует твоего решения" : "просрочек нет"}</div>
             </div>
             <Link href={href("tasks")} className={`tile ${openTasks.length === 0 ? "zero" : ""}`}>
               <div className="lab">Открытых задач</div>
@@ -360,7 +359,9 @@ export default async function DomainPage({
 
           {obligations.overdue.length > 0 && (
             <>
-              <div className="section-title">Просрочено</div>
+              <div className="section-title">
+                Просрочено{obligations.overdueTotal > 20 ? ` — показаны 20 из ${obligations.overdueTotal}` : ""}
+              </div>
               <div className="rows">
                 {obligations.overdue.slice(0, 20).map((o) => (
                   <div className="row" key={o.id}>
@@ -372,6 +373,12 @@ export default async function DomainPage({
                   </div>
                 ))}
               </div>
+              {obligations.overdueTruncated && (
+                <p className="hint">
+                  Всего просрочек: {obligations.overdueTotal}. Список показывает первые 200 по дате —
+                  разберись со старшими, остальные подтянутся.
+                </p>
+              )}
             </>
           )}
 

@@ -18,6 +18,34 @@ export function money(amount: string | number, currency = "UZS"): string {
   return `${n.toLocaleString("ru-RU")} ${currency === "UZS" ? "сум" : currency}`;
 }
 
+/**
+ * Сумма по валютам: складывать разные валюты в одно число нельзя (UZS и USD —
+ * не одна цифра). Группируем по валюте и показываем каждую отдельно
+ * («1 500 000 сум · 2 000 USD»). Пустой список — «0 сум».
+ */
+export function moneyByCurrency(rows: readonly { amount: string | number; currency: string }[]): string {
+  const byCur = new Map<string, number>();
+  for (const r of rows) {
+    const n = typeof r.amount === "string" ? Number(r.amount) : r.amount;
+    if (!Number.isFinite(n)) continue;
+    byCur.set(r.currency, (byCur.get(r.currency) ?? 0) + n);
+  }
+  if (byCur.size === 0) return money(0);
+  // Сначала сум (основная валюта), потом прочие по алфавиту — порядок стабилен.
+  return [...byCur.entries()]
+    .sort((a, b) => (a[0] === "UZS" ? -1 : b[0] === "UZS" ? 1 : a[0].localeCompare(b[0])))
+    .map(([currency, amount]) => money(amount, currency))
+    .join(" · ");
+}
+
+/** Есть ли ненулевая сумма хоть в одной валюте — для подсветки плитки. */
+export function hasMoney(rows: readonly { amount: string | number }[]): boolean {
+  return rows.some((r) => {
+    const n = typeof r.amount === "string" ? Number(r.amount) : r.amount;
+    return Number.isFinite(n) && n !== 0;
+  });
+}
+
 /** Слово в правильном числе: 1 автомат, 2 автомата, 5 автоматов. */
 export function plural(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10;

@@ -96,8 +96,12 @@ export interface AuditEntry {
 
 export interface Obligations {
   domain: string;
-  totals: { direction: "in" | "out"; status: string; count: number; amount: string }[];
+  /** Свод по обязательствам. Валюта обязательна: без неё суммы складывать нельзя. */
+  totals: { direction: "in" | "out"; status: string; currency: string; count: number; amount: string }[];
   overdue: { id: string; amount: string; currency: string; date: string; status: string }[];
+  /** Всего просрочек (список может быть усечён — тогда это больше его длины). */
+  overdueTotal: number;
+  overdueTruncated: boolean;
 }
 
 /** Настройки агента — то, что владелец видит и меняет в карточке. */
