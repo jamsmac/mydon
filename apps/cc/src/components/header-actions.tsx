@@ -27,7 +27,7 @@ export function HeaderActions({ pendingCount }: { pendingCount: number }) {
       >
         <Ic name="sky" />
       </button>
-      <Link href="/approvals" className="iconbtn" aria-label="Решения">
+      <Link href="/inbox" className="iconbtn" aria-label="Входящие">
         <Ic name="bell" />
         {pendingCount > 0 && <span className="cnt">{pendingCount}</span>}
       </Link>

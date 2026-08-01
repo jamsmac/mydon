@@ -12,12 +12,12 @@ import { Ic } from "./icons";
 const MAIN = [
   { href: "/mydon", icon: "home", label: "Главное" },
   { href: "/tasks", icon: "tasks", label: "Задачи" },
-  { href: "/approvals", icon: "dec", label: "Решения", hot: true },
+  // Один вход вместо двух очередей: решения агентов + карточки на утверждение.
+  { href: "/inbox", icon: "dec", label: "Входящие", hot: true },
   { href: "/team", icon: "team", label: "Команда" },
   { href: "/agents", icon: "agents", label: "Агенты" },
 ];
 const SYSTEM = [
-  { href: "/queue", icon: "check", label: "На утверждение", queue: true },
   { href: "/registry", icon: "reg", label: "Реестр" },
   { href: "/audit", icon: "jour", label: "Журнал" },
 ];
@@ -27,34 +27,19 @@ function isActive(pathname: string, href: string): boolean {
 }
 
 /** Боковое меню — только на компьютере. */
-export function Sidebar({
-  pendingCount,
-  queueCount = 0,
-}: {
-  pendingCount: number;
-  queueCount?: number;
-}) {
+export function Sidebar({ pendingCount }: { pendingCount: number }) {
   const pathname = usePathname();
-  const item = (n: {
-    href: string;
-    icon: string;
-    label: string;
-    hot?: boolean;
-    queue?: boolean;
-  }) => {
-    const badge = n.hot ? pendingCount : n.queue ? queueCount : 0;
-    return (
-      <Link
-        key={n.href}
-        href={n.href}
-        aria-current={isActive(pathname, n.href) ? "page" : undefined}
-      >
-        <Ic name={n.icon} />
-        {n.label}
-        {badge > 0 && <span className="bdg2">{badge}</span>}
-      </Link>
-    );
-  };
+  const item = (n: { href: string; icon: string; label: string; hot?: boolean }) => (
+    <Link
+      key={n.href}
+      href={n.href}
+      aria-current={isActive(pathname, n.href) ? "page" : undefined}
+    >
+      <Ic name={n.icon} />
+      {n.label}
+      {n.hot && pendingCount > 0 && <span className="bdg2">{pendingCount}</span>}
+    </Link>
+  );
   return (
     <nav className="side" aria-label="Разделы">
       <div className="gl">Обзор</div>

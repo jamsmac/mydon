@@ -61,7 +61,10 @@ async function queueCount(): Promise<number> {
 }
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
+  // «Входящие» = решения агентов + карточки реестра на утверждение. Один счётчик
+  // на объединённый вход.
   const [pending, queue] = await Promise.all([pendingCount(), queueCount()]);
+  const inbox = pending + queue;
 
   return (
     <html lang="ru" className={`${syne.variable} ${manrope.variable} ${mono.variable}`}>
@@ -75,17 +78,17 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
             <h1>MYDON</h1>
             <span className="sub">· командный центр</span>
             <span className="sp" />
-            <HeaderActions pendingCount={pending} />
+            <HeaderActions pendingCount={inbox} />
           </header>
 
           <div className="body">
-            <Sidebar pendingCount={pending} queueCount={queue} />
+            <Sidebar pendingCount={inbox} />
             <main className="scroll">
               <div className="wrap">{children}</div>
             </main>
           </div>
 
-          <TabBar pendingCount={pending} />
+          <TabBar pendingCount={inbox} />
           <FloatingChat />
         </div>
       </body>

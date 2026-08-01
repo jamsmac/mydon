@@ -51,7 +51,7 @@ export default async function Main() {
             <span className="chip h">требует решения · {pending.length}</span>
           </div>
           {pending.slice(0, 2).map((a) => (
-            <Link href="/approvals" className="trow hot" key={a.id}>
+            <Link href="/inbox" className="trow hot" key={a.id}>
               <div className="tb">
                 <div className="tt">{a.action}</div>
                 <div className="tm">
@@ -61,12 +61,12 @@ export default async function Main() {
               <span className="due hot">решить</span>
             </Link>
           ))}
-          <Link href="/approvals" className="btn full sm">Все решения</Link>
+          <Link href="/inbox" className="btn full sm">Все решения</Link>
         </div>
       )}
 
       {queue > 0 && (
-        <Link href="/queue" className="trow hot" style={{ marginBottom: 16 }}>
+        <Link href="/inbox" className="trow hot" style={{ marginBottom: 16 }}>
           <div className="tb">
             <div className="tt">На утверждение</div>
             <div className="tm">
@@ -114,7 +114,7 @@ export default async function Main() {
             <ApprovalCard key={a.id} item={a} />
           ))}
           {pending.length > 3 && (
-            <Link href="/approvals" className="navlink" style={{ justifyContent: "center" }}>
+            <Link href="/inbox" className="navlink" style={{ justifyContent: "center" }}>
               Показать все — {pending.length}
             </Link>
           )}
