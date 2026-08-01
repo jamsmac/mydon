@@ -49,6 +49,21 @@ export class AttachmentsController {
     return this.attachments.ofOwner(ownerType, ownerId);
   }
 
+  /**
+   * Вложения многих записей одним запросом (очередь утверждения).
+   *
+   * Стоит ВЫШЕ маршрута `:id` — иначе «batch» ушло бы в него как в
+   * идентификатор и упало бы на разборе UUID.
+   */
+  @Get("batch")
+  batch(@Query("ownerType") ownerType: string, @Query("ids") ids?: string) {
+    const list = (ids ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    return this.attachments.ofOwners(ownerType, list);
+  }
+
   @Get(":id")
   meta(@Param("id", ParseUUIDPipe) id: string) {
     return this.attachments.meta(id);

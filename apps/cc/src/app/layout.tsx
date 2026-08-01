@@ -46,8 +46,22 @@ async function pendingCount(): Promise<number> {
   }
 }
 
+/**
+ * Сколько записей ждёт слова владельца — для значка «На утверждение».
+ * Считаем плитки очереди: новые карточки плюс карточки с предложенными
+ * значениями, чтобы число в меню совпадало с тем, что владелец там увидит.
+ */
+async function queueCount(): Promise<number> {
+  try {
+    const { cards, fields } = await core.pendingEntities();
+    return cards.length + new Set(fields.map((f) => f.entityId)).size;
+  } catch {
+    return 0;
+  }
+}
+
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const pending = await pendingCount();
+  const [pending, queue] = await Promise.all([pendingCount(), queueCount()]);
 
   return (
     <html lang="ru" className={`${syne.variable} ${manrope.variable} ${mono.variable}`}>
@@ -65,7 +79,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
           </header>
 
           <div className="body">
-            <Sidebar pendingCount={pending} />
+            <Sidebar pendingCount={pending} queueCount={queue} />
             <main className="scroll">
               <div className="wrap">{children}</div>
             </main>

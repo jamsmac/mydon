@@ -119,6 +119,7 @@ export async function approveEntity(id: string): Promise<ActionResult> {
     return fail(err);
   }
   revalidatePath("/domain/vendhub");
+  revalidatePath("/queue");
   return { ok: true };
 }
 
@@ -130,6 +131,7 @@ export async function approveField(id: string, field: string): Promise<ActionRes
     return fail(err);
   }
   revalidatePath("/domain/vendhub");
+  revalidatePath("/queue");
   return { ok: true };
 }
 
@@ -141,6 +143,7 @@ export async function rejectField(id: string, field: string): Promise<ActionResu
     return fail(err);
   }
   revalidatePath("/domain/vendhub");
+  revalidatePath("/queue");
   return { ok: true };
 }
 

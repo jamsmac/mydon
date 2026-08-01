@@ -939,6 +939,17 @@ export const core = {
     get<Attachment[]>(
       `/attachments?ownerType=${encodeURIComponent(ownerType)}&ownerId=${encodeURIComponent(ownerId)}`,
     ),
+  /**
+   * Вложения многих записей одним запросом — для очереди утверждения: пачка
+   * черновиков показывается сразу с фото, без похода в хранилище по одному.
+   * Пустой набор ходить незачем — отдаём пустую карту сразу.
+   */
+  attachmentsBatch: (ownerType: string, ids: string[]) =>
+    ids.length === 0
+      ? Promise.resolve<Record<string, Attachment[]>>({})
+      : get<Record<string, Attachment[]>>(
+          `/attachments/batch?ownerType=${encodeURIComponent(ownerType)}&ids=${encodeURIComponent(ids.join(","))}`,
+        ),
   entityDrafts: (id: string) => get<EntityDraft[]>(`/entities/${id}/drafts`),
   /** Рецепт товара: состав, цены ингредиентов и себестоимость. */
   entityRecipe: (id: string) => get<RecipeView>(`/entities/${id}/recipe`),

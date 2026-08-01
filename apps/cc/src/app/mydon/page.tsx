@@ -25,6 +25,16 @@ export default async function Main() {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
 
+  // Сколько записей ждёт слова владельца — вход в очередь утверждения прямо с
+  // главной (на телефоне это основной путь). Ошибка тут не должна ронять сводку.
+  let queue = 0;
+  try {
+    const p = await core.pendingEntities();
+    queue = p.cards.length + new Set(p.fields.map((f) => f.entityId)).size;
+  } catch {
+    queue = 0;
+  }
+
   const list = alarms(briefing);
   const total = list.reduce((s, a) => s + a.n, 0);
 
@@ -53,6 +63,18 @@ export default async function Main() {
           ))}
           <Link href="/approvals" className="btn full sm">Все решения</Link>
         </div>
+      )}
+
+      {queue > 0 && (
+        <Link href="/queue" className="trow hot" style={{ marginBottom: 16 }}>
+          <div className="tb">
+            <div className="tt">На утверждение</div>
+            <div className="tm">
+              заведено не тобой · {queue} {queue === 1 ? "запись" : "записей"}
+            </div>
+          </div>
+          <span className="due hot">открыть</span>
+        </Link>
       )}
 
       <div className="tiles">

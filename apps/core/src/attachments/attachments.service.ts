@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { attachment } from "@mydon/db";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { StorageService } from "./storage.service";
 
@@ -79,6 +79,27 @@ export class AttachmentsService {
       .where(and(eq(attachment.ownerType, ownerType), eq(attachment.ownerId, ownerId)))
       .orderBy(desc(attachment.createdAt));
     return Promise.all(rows.map((r) => this.toMeta(r)));
+  }
+
+  /**
+   * Вложения многих записей одним запросом — для очереди утверждения.
+   *
+   * Очередь показывает пачку черновиков сразу с их фото. Ходить в хранилище по
+   * одной карточке — тот же лишний труд, от которого уводит весь проект: берём
+   * все вложения набора одним запросом и раскладываем по владельцам.
+   */
+  async ofOwners(ownerType: string, ownerIds: string[]): Promise<Record<string, AttachmentMeta[]>> {
+    const ids = [...new Set(ownerIds)].filter((s) => s.length > 0);
+    if (ids.length === 0) return {};
+    const rows = await this.db
+      .select()
+      .from(attachment)
+      .where(and(eq(attachment.ownerType, ownerType), inArray(attachment.ownerId, ids)))
+      .orderBy(desc(attachment.createdAt));
+    const metas = await Promise.all(rows.map((r) => this.toMeta(r)));
+    const byOwner: Record<string, AttachmentMeta[]> = {};
+    for (const m of metas) (byOwner[m.ownerId] ??= []).push(m);
+    return byOwner;
   }
 
   async meta(id: string): Promise<AttachmentMeta> {
