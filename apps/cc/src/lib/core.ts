@@ -901,6 +901,16 @@ export const core = {
     const qs = new URLSearchParams(params).toString();
     return get<ConsumptionReport>(`/stock/consumption${qs ? `?${qs}` : ""}`);
   },
+  /** Свести приход из mydon-stock в ленту склада (идемпотентно). */
+  syncIntake: () =>
+    send<{
+      warehouse: string | null;
+      created: number;
+      alreadySynced: number;
+      noCard: number;
+      badUnit: number;
+      noWarehouse: "нет" | "неоднозначно" | null;
+    }>("/stock/sync-intake", "POST", {}),
   pendingEntities: () =>
     get<{ cards: Entity[]; fields: (EntityDraft & { entityName: string; entityType: string })[] }>(
       "/entities/pending",

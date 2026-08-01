@@ -1,20 +1,25 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { entity, rawLink, sale, stockMovement } from "@mydon/db";
+import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
+import { BadRequestException } from "@nestjs/common";
+import { entity, purchase, rawLink, sale, stockMovement } from "@mydon/db";
 import {
   consumptionReport,
   convertQty,
   isUnit,
   normalizeSourceKey,
   parseRecipe,
+  planPurchaseIntake,
   productKind,
   recipeCost,
   stockBalance,
   type IngredientPrice,
+  type PurchaseInput,
   type RecipeLine,
+  type ResolvedIngredient,
   type SoldProduct,
   type StockMovement,
   type Unit,
 } from "@mydon/shared";
+import { Cron } from "croner";
 import { and, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
@@ -57,8 +62,24 @@ function readIngredientPrice(attrs: Record<string, unknown>): IngredientPrice {
  * держат.
  */
 @Injectable()
-export class StockService {
+export class StockService implements OnModuleInit {
+  private readonly log = new Logger(StockService.name);
+  private cron: Cron | null = null;
+
   constructor(@Inject(DB) private readonly db: Db) {}
+
+  /**
+   * Приход из mydon-stock сводим в ленту склада потоком: тем же ритмом, что и
+   * зеркало закупок (supply-sync), но со сдвигом, чтобы читать уже пополненную
+   * таблицу purchase. Идемпотентно — повторный проход не двоит.
+   */
+  onModuleInit(): void {
+    this.cron = new Cron("7-59/10 * * * *", { timezone: "Asia/Tashkent" }, () => {
+      void this.syncIntakeFromPurchases().catch((e: unknown) =>
+        this.log.warn(`Синк прихода не удался: ${e instanceof Error ? e.message : String(e)}`),
+      );
+    });
+  }
 
   /** Базовая единица ингредиента: та, в которой заведена его цена покупки. */
   private baseUnitOf(attrs: Record<string, unknown>): Unit | null {
@@ -405,6 +426,132 @@ export class StockService {
         .sort((a, b) => b.soldQty - a.soldQty),
       noRecipe: [...noRecipe].map(([productId, v]) => ({ productId, ...v })),
       unmatched: unmatched.sort((a, b) => b.revenue - a.revenue),
+    };
+  }
+
+  /** Значение поля карточки — «истинное»: да/true/1/непустое. */
+  private truthy(v: unknown): boolean {
+    if (v === true) return true;
+    if (typeof v === "number") return v !== 0;
+    if (typeof v === "string") {
+      const s = v.trim().toLowerCase();
+      return s === "да" || s === "true" || s === "1" || s === "yes" || s === "+";
+    }
+    return false;
+  }
+
+  /**
+   * Целевой склад приёма: помеченный «приём по умолчанию»; если такого нет, но
+   * склад один — он; если складов несколько и ни один не помечен — не решаем за
+   * владельца, возвращаем null (синк честно скажет, что цель не выбрана).
+   */
+  private async defaultWarehouse(): Promise<typeof entity.$inferSelect | null> {
+    const whs = await this.db.select().from(entity).where(eq(entity.type, "warehouse"));
+    const flagged = whs.find((w) => this.truthy((w.attrs as Record<string, unknown>)["приём по умолчанию"]));
+    if (flagged) return flagged;
+    return whs.length === 1 ? whs[0] : null;
+  }
+
+  /**
+   * Свести приход из зеркала mydon-stock (таблица purchase) в ленту склада.
+   *
+   * Строку закупки сопоставляем с карточкой ингредиента по имени и ручным
+   * связкам (raw_link) — как в разборе источников и расходе. Пишем движение
+   * прихода идемпотентно (ключ `purchase:<id>`): повторный синк не двоит.
+   * Товары без карточки-ингредиента и несводимые единицы не молчим — считаем.
+   */
+  async syncIntakeFromPurchases(): Promise<{
+    warehouse: string | null;
+    created: number;
+    alreadySynced: number;
+    noCard: number;
+    badUnit: number;
+    noWarehouse: "нет" | "неоднозначно" | null;
+  }> {
+    const wh = await this.defaultWarehouse();
+    if (!wh) {
+      const [{ n }] = await this.db
+        .select({ n: sql<number>`count(*)` })
+        .from(entity)
+        .where(eq(entity.type, "warehouse"));
+      return {
+        warehouse: null,
+        created: 0,
+        alreadySynced: 0,
+        noCard: 0,
+        badUnit: 0,
+        noWarehouse: Number(n) === 0 ? "нет" : "неоднозначно",
+      };
+    }
+
+    const rows = await this.db.select().from(purchase);
+    // Карточки ингредиентов и связки — сопоставление имени с карточкой.
+    const ings = await this.db.select().from(entity).where(eq(entity.type, "ingredient"));
+    const ingByName = new Map(ings.map((i) => [normalizeSourceKey(i.name), i]));
+    const ingById = new Map(ings.map((i) => [i.id, i]));
+    const links = await this.db.select().from(rawLink).where(eq(rawLink.kind, "product"));
+    const linkByKey = new Map(links.map((l) => [`${l.sourceCode}::${l.externalKey}`, l]));
+
+    const resolve = (p: PurchaseInput): ResolvedIngredient | null => {
+      const key = normalizeSourceKey(p.product);
+      const link = linkByKey.get(`${p.source}::${key}`);
+      const card = link
+        ? link.entityId
+          ? ingById.get(link.entityId) ?? null // связка на не-ингредиент → не приход сырья
+          : null
+        : ingByName.get(key) ?? null;
+      if (!card) return null;
+      return {
+        ingredientId: card.id,
+        baseUnit: isUnit((card.attrs as Record<string, unknown>)["единица"])
+          ? ((card.attrs as Record<string, unknown>)["единица"] as Unit)
+          : null,
+      };
+    };
+
+    const inputs: PurchaseInput[] = rows.map((r) => ({
+      id: r.extId,
+      source: r.source,
+      product: r.product,
+      unit: r.unit,
+      qty: Number(r.qty) || 0,
+      unitPrice: r.unitPrice != null ? Number(r.unitPrice) : null,
+      dt: String(r.dt),
+    }));
+
+    const plan = planPurchaseIntake(inputs, resolve);
+
+    let created = 0;
+    for (const it of plan.intakes) {
+      const total = it.unitPrice != null ? String(it.unitPrice * it.qty) : null;
+      const inserted = await this.db
+        .insert(stockMovement)
+        .values({
+          kind: "intake",
+          ingredientId: it.ingredientId,
+          warehouseId: wh.id,
+          dt: it.dt,
+          qty: String(it.qty),
+          unit: it.unit,
+          unitPrice: it.unitPrice != null ? String(it.unitPrice) : null,
+          total,
+          source: "stock",
+          extId: it.extId,
+          createdBy: "stock-sync",
+        })
+        .onConflictDoNothing({ target: [stockMovement.source, stockMovement.extId] })
+        .returning();
+      if (inserted.length > 0) created += 1;
+    }
+
+    if (created > 0) this.log.log(`Синк прихода: заведено ${created} движений на «${wh.name}».`);
+    return {
+      warehouse: wh.name,
+      created,
+      alreadySynced: plan.intakes.length - created,
+      noCard: plan.noCard.length,
+      badUnit: plan.badUnit.length,
+      noWarehouse: null,
     };
   }
 }

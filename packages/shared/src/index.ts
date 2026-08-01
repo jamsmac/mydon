@@ -63,3 +63,4 @@ export * from "./combine";
 export * from "./recipe";
 export * from "./stock";
 export * from "./consumption";
+export * from "./intake-sync";
