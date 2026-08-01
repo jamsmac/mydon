@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
-import { IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
+import { ArrayMaxSize, IsArray, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
 import { EntitiesService } from "./entities.service";
 import { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
 
@@ -22,6 +22,14 @@ export class ProposeFieldDto {
   note?: string;
 }
 
+/** Набор карточек к утверждению разом — «утвердить все» из очереди. */
+export class ApproveBatchDto {
+  @IsArray()
+  @ArrayMaxSize(500)
+  @IsUUID("all", { each: true })
+  ids!: string[];
+}
+
 @Controller("entities")
 export class EntitiesController {
   constructor(private readonly entities: EntitiesService) {}
@@ -29,6 +37,12 @@ export class EntitiesController {
   @Post()
   create(@Body() dto: CreateEntityDto) {
     return this.entities.create(dto);
+  }
+
+  /** Утвердить пачку карточек разом. Пропавшие/уже утверждённые пропускаются. */
+  @Post("approve-batch")
+  approveBatch(@Body() dto: ApproveBatchDto) {
+    return this.entities.approveMany(dto.ids, "owner");
   }
 
   @Get()

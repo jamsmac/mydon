@@ -123,6 +123,23 @@ export async function approveEntity(id: string): Promise<ActionResult> {
   return { ok: true };
 }
 
+/**
+ * Утвердить все переданные карточки разом — «утвердить все новые» из очереди.
+ *
+ * Пустой список — не ошибка, а «нечего утверждать»: молча ничего не делаем.
+ */
+export async function approveAllCards(ids: string[]): Promise<ActionResult> {
+  if (ids.length === 0) return { ok: true };
+  try {
+    await core.approveEntities(ids);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  revalidatePath("/queue");
+  return { ok: true };
+}
+
 /** Утвердить одно предложенное значение. */
 export async function approveField(id: string, field: string): Promise<ActionResult> {
   try {

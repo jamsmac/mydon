@@ -127,6 +127,72 @@ describe("История цен товара", () => {
   });
 });
 
+describe("Утвердить пачку карточек", () => {
+  /** db, у которого select().from().where() отдаёт заготовленные ответы по порядку. */
+  function seqDb(responses: Record<string, unknown>[][]) {
+    let i = 0;
+    return {
+      select: () => ({ from: () => ({ where: async () => responses[i++] ?? [] }) }),
+    } as never;
+  }
+
+  it("утверждает все ждущие, считает пройденные", async () => {
+    const s = new EntitiesService(seqDb([[{ approvedAt: null }], [{ approvedAt: null }]]), {
+      record: async () => undefined,
+    } as never);
+    let calls = 0;
+    s.approve = (async () => {
+      calls += 1;
+      return {};
+    }) as never;
+    const r = await s.approveMany(["a", "b"]);
+    assert.deepEqual(r, { approved: 2, skipped: 0 });
+    assert.equal(calls, 2);
+  });
+
+  it("пропавшую и уже утверждённую пропускает, не роняя остальных", async () => {
+    const s = new EntitiesService(seqDb([[], [{ approvedAt: new Date() }]]), {
+      record: async () => undefined,
+    } as never);
+    let calls = 0;
+    s.approve = (async () => {
+      calls += 1;
+      return {};
+    }) as never;
+    const r = await s.approveMany(["missing", "already"]);
+    assert.deepEqual(r, { approved: 0, skipped: 2 });
+    assert.equal(calls, 0, "утверждать нечего — approve не звался");
+  });
+
+  it("дубликаты в списке не утверждаются дважды", async () => {
+    const s = new EntitiesService(seqDb([[{ approvedAt: null }]]), {
+      record: async () => undefined,
+    } as never);
+    let calls = 0;
+    s.approve = (async () => {
+      calls += 1;
+      return {};
+    }) as never;
+    const r = await s.approveMany(["x", "x"]);
+    assert.deepEqual(r, { approved: 1, skipped: 0 });
+    assert.equal(calls, 1);
+  });
+
+  it("сбой на одной карточке не срывает остальные — она уходит в пропущенные", async () => {
+    const s = new EntitiesService(seqDb([[{ approvedAt: null }], [{ approvedAt: null }]]), {
+      record: async () => undefined,
+    } as never);
+    let calls = 0;
+    s.approve = (async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("сбой");
+      return {};
+    }) as never;
+    const r = await s.approveMany(["bad", "good"]);
+    assert.deepEqual(r, { approved: 1, skipped: 1 });
+  });
+});
+
 describe("Координаты карточки", () => {
   function stub(before: Record<string, unknown>) {
     const tx = {

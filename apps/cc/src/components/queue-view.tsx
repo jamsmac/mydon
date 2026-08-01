@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { approveEntity, approveField, rejectField } from "../app/sources/actions";
+import { approveAllCards, approveEntity, approveField, rejectField } from "../app/sources/actions";
 import type { ActionResult } from "../app/sources/actions";
 import type { Attachment, Entity, EntityDraft } from "../lib/core";
 import { typeOne } from "../lib/labels";
@@ -32,6 +32,40 @@ function useAct() {
     });
   };
   return { pending, error, act };
+}
+
+/**
+ * «Утвердить все новые карточки» — на случай пачки (например стартового
+ * каталога в 40 позиций): кликать по одной там незачем.
+ *
+ * Массовое действие спрашивает подтверждение: утвердить разом — решение
+ * заметное, случайный клик по нему не должен превращать сорок черновиков в
+ * факты. Утверждается ровно то, что видно сейчас (переданные id).
+ */
+export function ApproveAllCards({ ids }: { ids: string[] }) {
+  const { pending, error, act } = useAct();
+  if (ids.length === 0) return null;
+  return (
+    <>
+      <button
+        type="button"
+        className="btn sm"
+        disabled={pending}
+        onClick={() => {
+          if (
+            typeof window !== "undefined" &&
+            !window.confirm(`Утвердить все новые карточки разом (${ids.length})?`)
+          ) {
+            return;
+          }
+          act(() => approveAllCards(ids));
+        }}
+      >
+        Утвердить все ({ids.length})
+      </button>
+      {error && <span className="err-text">{error}</span>}
+    </>
+  );
 }
 
 /**

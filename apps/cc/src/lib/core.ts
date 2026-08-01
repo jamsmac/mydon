@@ -984,6 +984,9 @@ export const core = {
   proposeField: (id: string, input: Record<string, unknown>) =>
     send<{ ok: true }>(`/entities/${id}/propose`, "POST", input),
   approveEntity: (id: string) => send<Entity>(`/entities/${id}/approve`, "POST", {}),
+  /** Утвердить пачку карточек разом — «утвердить все» из очереди. */
+  approveEntities: (ids: string[]) =>
+    send<{ approved: number; skipped: number }>("/entities/approve-batch", "POST", { ids }),
   approveField: (id: string, field: string) =>
     send<Entity>(`/entities/${id}/approve-field/${encodeURIComponent(field)}`, "POST", {}),
   rejectField: (id: string, field: string) =>

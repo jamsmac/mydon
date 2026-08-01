@@ -1,6 +1,6 @@
 import { core, CoreUnavailable, type Attachment, type EntityDraft } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
-import { PendingCardTile, PendingFieldGroup } from "../../components/queue-view";
+import { ApproveAllCards, PendingCardTile, PendingFieldGroup } from "../../components/queue-view";
 import { plural } from "../../lib/format";
 
 export const dynamic = "force-dynamic";
@@ -76,6 +76,8 @@ export default async function Queue() {
                 <span className="chip h">
                   {cards.length} {plural(cards.length, "карточка", "карточки", "карточек")}
                 </span>
+                <span className="sp" />
+                <ApproveAllCards ids={cards.map((c) => c.id)} />
               </div>
               <div className="qgrid">
                 {cards.map((c) => (

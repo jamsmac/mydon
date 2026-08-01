@@ -116,6 +116,7 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 .eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; color: var(--tx-3); margin: 0 0 8px; }
 .sect { margin-top: 26px; }
 .sect-h { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.sect-h .sp { flex: 1; }
 
 /* Галерея фото карточки: адаптивная сетка миниатюр, снимок открывается по клику. */
 .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }

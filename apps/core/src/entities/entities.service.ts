@@ -175,6 +175,40 @@ export class EntitiesService {
   }
 
   /**
+   * Утвердить пачку карточек разом — очередь даёт «утвердить все новые».
+   *
+   * Каждая карточка утверждается СВОЕЙ транзакцией (как одиночная), вместе со
+   * всем предложенным ей. Одна пропавшая или уже утверждённая не роняет
+   * остальные: её пропускаем и считаем отдельно — владелец увидит, сколько
+   * прошло, а сколько нет.
+   */
+  async approveMany(
+    ids: string[],
+    actorRef = "owner",
+  ): Promise<{ approved: number; skipped: number }> {
+    let approved = 0;
+    let skipped = 0;
+    for (const id of [...new Set(ids)]) {
+      const [card] = await this.db
+        .select({ approvedAt: entity.approvedAt })
+        .from(entity)
+        .where(eq(entity.id, id));
+      // Уже утверждённую повторно не трогаем — «утвердить» дважды бессмысленно.
+      if (!card || card.approvedAt !== null) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        await this.approve(id, actorRef, true);
+        approved += 1;
+      } catch {
+        skipped += 1;
+      }
+    }
+    return { approved, skipped };
+  }
+
+  /**
    * Предложить значение поля карточки.
    *
    * Значение НЕ попадает в карточку: пока оно здесь, оно не факт, и всё, что
