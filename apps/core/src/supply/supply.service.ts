@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { entity, event, machineStock, purchase } from "@mydon/db";
+import { strictNumber } from "@mydon/shared";
 import { desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
@@ -35,38 +36,88 @@ export interface StockLevelRow {
   fetched_at: string | Date;
 }
 
-/** exported для тестов: превращение строк источника в наши. */
-export function buildPurchaseUpserts(rows: StockPurchaseRow[]): (typeof purchase.$inferInsert)[] {
-  return rows
-    .filter((r) => r.product && r.dt)
-    .map((r) => ({
-      extId: String(r.id),
+/** Строка снабжения, не прошедшая проверку чисел, — в карантин, не в упсерт. */
+export interface QuarantinedSupply {
+  key: string;
+  product: string;
+  field: "qty" | "unit_price" | "total";
+  value: unknown;
+}
+
+/**
+ * exported для тестов: превращение строк источника в наши.
+ *
+ * Числа проверяем строго: qty обязано быть числом; цена/сумма — либо пусто
+ * (нет цены), либо число. Непарсимое не вливаем нулём (это занизило бы приход и
+ * себестоимость) — откладываем в карантин с причиной.
+ */
+export function buildPurchaseUpserts(rows: StockPurchaseRow[]): {
+  values: (typeof purchase.$inferInsert)[];
+  quarantined: QuarantinedSupply[];
+} {
+  const values: (typeof purchase.$inferInsert)[] = [];
+  const quarantined: QuarantinedSupply[] = [];
+  for (const r of rows) {
+    if (!(r.product && r.dt)) continue;
+    const product = String(r.product).slice(0, 512);
+    const key = String(r.id);
+    const qty = strictNumber(r.qty);
+    if (qty === null) {
+      quarantined.push({ key, product, field: "qty", value: r.qty });
+      continue;
+    }
+    // Пусто — законно «цены нет»; непусто, но не число — брак.
+    const unitPrice = r.unit_price === null ? null : strictNumber(r.unit_price);
+    if (r.unit_price !== null && unitPrice === null) {
+      quarantined.push({ key, product, field: "unit_price", value: r.unit_price });
+      continue;
+    }
+    const total = r.total === null ? null : strictNumber(r.total);
+    if (r.total !== null && total === null) {
+      quarantined.push({ key, product, field: "total", value: r.total });
+      continue;
+    }
+    values.push({
+      extId: key,
       dt: String(r.dt).slice(0, 10),
-      product: String(r.product).slice(0, 512),
+      product,
       unit: r.unit ? String(r.unit) : null,
-      qty: String(Number(r.qty) || 0),
-      unitPrice: r.unit_price === null ? null : String(Number(r.unit_price) || 0),
-      total: r.total === null ? null : String(Number(r.total) || 0),
+      qty: String(qty),
+      unitPrice: unitPrice === null ? null : String(unitPrice),
+      total: total === null ? null : String(total),
       note: r.note ? String(r.note).slice(0, 1000) : null,
       expiryDate: r.expiry_date ? String(r.expiry_date).slice(0, 10) : null,
       source: "stock",
-    }));
+    });
+  }
+  return { values, quarantined };
 }
 
 export function buildStockUpserts(
   rows: StockLevelRow[],
   serialToEntity: Map<string, string>,
-): (typeof machineStock.$inferInsert)[] {
-  return rows
-    .filter((r) => r.machine_serial && r.ourvend_name && r.dt)
-    .map((r) => ({
+): { values: (typeof machineStock.$inferInsert)[]; quarantined: QuarantinedSupply[] } {
+  const values: (typeof machineStock.$inferInsert)[] = [];
+  const quarantined: QuarantinedSupply[] = [];
+  for (const r of rows) {
+    if (!(r.machine_serial && r.ourvend_name && r.dt)) continue;
+    const machineSerial = String(r.machine_serial).toLowerCase();
+    const product = String(r.ourvend_name).slice(0, 512);
+    const qty = strictNumber(r.qty);
+    if (qty === null) {
+      quarantined.push({ key: `${machineSerial}|${r.dt}`, product, field: "qty", value: r.qty });
+      continue;
+    }
+    values.push({
       dt: String(r.dt).slice(0, 10),
-      machineSerial: String(r.machine_serial).toLowerCase(),
-      machineId: serialToEntity.get(String(r.machine_serial).toLowerCase()) ?? null,
-      product: String(r.ourvend_name).slice(0, 512),
-      qty: String(Number(r.qty) || 0),
+      machineSerial,
+      machineId: serialToEntity.get(machineSerial) ?? null,
+      product,
+      qty: String(qty),
       fetchedAt: new Date(r.fetched_at),
-    }));
+    });
+  }
+  return { values, quarantined };
 }
 
 /**
@@ -161,7 +212,19 @@ export class SupplyService implements OnModuleInit {
         machines.filter((m) => m.ref).map((m) => [m.ref!.toLowerCase(), m.id]),
       );
 
-      const pValues = buildPurchaseUpserts(pRows);
+      const { values: pValues, quarantined: pBad } = buildPurchaseUpserts(pRows);
+      const { values: sValues, quarantined: sBad } = buildStockUpserts(sRows, serialToEntity);
+      // Мусорные числа не вливаем нулём — откладываем в событие, чтобы приход и
+      // остатки не занижались тихо.
+      const bad = [...pBad.map((q) => ({ ...q, of: "purchase" })), ...sBad.map((q) => ({ ...q, of: "stock" }))];
+      if (bad.length > 0) {
+        await this.db.insert(event).values({
+          source: "supply-sync",
+          type: "supply.quarantine",
+          payload: { count: bad.length, rows: bad.slice(0, 50) },
+        });
+        this.log.warn(`Снабжение: карантин ${bad.length} строк с нечисловыми значениями — не влиты.`);
+      }
       for (let i = 0; i < pValues.length; i += 500) {
         await this.db
           .insert(purchase)
@@ -178,7 +241,6 @@ export class SupplyService implements OnModuleInit {
           });
       }
 
-      const sValues = buildStockUpserts(sRows, serialToEntity);
       for (let i = 0; i < sValues.length; i += 500) {
         await this.db
           .insert(machineStock)
