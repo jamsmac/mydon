@@ -127,6 +127,14 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 .photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .photo-thumb:hover { border-color: var(--tx-2); }
 
+/* Оглавление карточки: липкая строка-переход по секциям длинной карточки. */
+.cardtoc { position: sticky; top: 0; z-index: 4; display: flex; gap: 6px; overflow-x: auto; padding: 8px 0; margin-bottom: 12px; background: var(--bg); border-bottom: 1px solid var(--line); scrollbar-width: none; }
+.cardtoc::-webkit-scrollbar { display: none; }
+.ctchip { white-space: nowrap; font-size: 12.5px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surf); color: var(--tx-2); }
+.ctchip:hover { color: var(--tx); border-color: var(--accent-line); }
+/* Секции не должны прятаться под липкое оглавление при переходе к ним. */
+[data-toc] { scroll-margin-top: 60px; }
+
 /* Витрина «Отчёты»: источники группами, отчёты карточками с главной метрикой. */
 .rgroup { margin-top: 22px; }
 .rgroup-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }

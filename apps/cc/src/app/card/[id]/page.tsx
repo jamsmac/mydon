@@ -13,6 +13,7 @@ import {
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { PhotoGallery } from "../../../components/photo-gallery";
+import { CardToc } from "../../../components/card-toc";
 import { DeleteEntityButton } from "../../../components/entity-delete";
 import { EntityEditor } from "../../../components/entity-editor";
 import { StayTimeline } from "../../../components/machine-stays";
@@ -160,12 +161,18 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         </p>
       </div>
 
-      <EntityApproval entity={entity} drafts={drafts} />
+      <CardToc />
 
-      <PhotoGallery attachments={photos} />
+      <section id="appr" data-toc="Утверждение">
+        <EntityApproval entity={entity} drafts={drafts} />
+      </section>
+
+      <section id="photo" data-toc="Фото">
+        <PhotoGallery attachments={photos} />
+      </section>
 
       {hasGeo && (
-        <div className="card">
+        <div className="card" id="geo" data-toc="Где стоит">
           <div className="result-title">Где стоит</div>
           <p>
             <a
@@ -180,7 +187,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       )}
 
       {stays && (
-        <div className="sect">
+        <div className="sect" id="stays" data-toc="Где стоял">
           <div className="sect-h">
             <h3 className="h2">Где стоял</h3>
             {stays.moves > 0 ? (
@@ -198,7 +205,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       )}
 
       {prices.length > 0 && (
-        <div className="sect">
+        <div className="sect" id="prices" data-toc="Цены">
           <div className="sect-h">
             <h3 className="h2">Чем торгует и почём</h3>
             <span className="chip b">
@@ -214,21 +221,31 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       )}
 
       {isRecipe && recipe && (
-        <RecipeEditor entity={{ id: entity.id }} ingredients={ingredients} recipe={recipe} />
+        <section id="recipe" data-toc="Рецепт">
+          <RecipeEditor entity={{ id: entity.id }} ingredients={ingredients} recipe={recipe} />
+        </section>
       )}
 
       {isIngredient && stock && (
-        <StockPanel
-          ingredientId={entity.id}
-          baseUnitHint={stock.baseUnit}
-          stock={stock}
-          warehouses={warehouses}
-        />
+        <section id="stock" data-toc="Склад">
+          <StockPanel
+            ingredientId={entity.id}
+            baseUnitHint={stock.baseUnit}
+            stock={stock}
+            warehouses={warehouses}
+          />
+        </section>
       )}
 
-      {isWarehouse && warehouseStock && <WarehouseStockView stock={warehouseStock} />}
+      {isWarehouse && warehouseStock && (
+        <section id="whstock" data-toc="Остаток">
+          <WarehouseStockView stock={warehouseStock} />
+        </section>
+      )}
 
-      <EntityEditor entity={entity} />
+      <section id="fields" data-toc="Поля">
+        <EntityEditor entity={entity} />
+      </section>
 
       <DeleteEntityButton
         id={entity.id}
