@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { autonomyThreshold, explainPolicy, requiresApproval, tierRank } from "./policy";
 import { loadAgents } from "./registry";
 import { runSkill } from "./runner";
+import { runAgentTasks } from "./task-worker";
 import { SKILLS } from "./skills";
 import type { AgentDefinition } from "./registry";
 
@@ -304,5 +305,118 @@ describe("Навыки агентов, подключённые к Core", () => 
     assert.match(p.action, /250 позиций/);
     assert.match(p.action, /показаны первые 2/, "нельзя выдавать урезанный список за полный");
     assert.equal(p.facts.sum, 2000000);
+  });
+});
+
+describe("Задачи агента и дневной потолок", () => {
+  const agent: AgentDefinition = {
+    name: "receivables",
+    business: "globerent",
+    status: "active",
+    autonomyDefault: "T0",
+    schedule: [],
+    skills: ["watch-receivables"],
+    dir: "/tmp",
+  };
+
+  /** Обязательство с просрочкой — чтобы навык вынес предложение (proposal ≠ null). */
+  const overdue = {
+    domain: "globerent",
+    totals: [],
+    overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+    overdueTotal: 1,
+    overdueTruncated: false,
+  };
+
+  /** Заглушка Core под задачи: пишем, какие статусы проставлены. */
+  function stub(over: Record<string, unknown> = {}) {
+    const statuses: { id: string; status: string }[] = [];
+    const comments: string[] = [];
+    return {
+      statuses,
+      comments,
+      client: {
+        myTasks: async () => [{ id: "t1", title: "проверь дебиторку", status: "todo", ownerRef: "receivables" }],
+        setTaskStatus: async (id: string, status: string) => {
+          statuses.push({ id, status });
+        },
+        addTaskComment: async (_id: string, body: string) => {
+          comments.push(body);
+        },
+        recordEvent: async () => undefined,
+        requestApproval: async () => ({ id: "appr-1" }),
+        countAgentActions: async () => 0,
+        obligations: async () => overdue,
+        ...over,
+      } as never,
+    };
+  }
+
+  it("потолок исчерпан — задача НЕ берётся в работу и не помечается сделанной", async () => {
+    const prev = process.env.AGENT_DAILY_ACTION_CAP;
+    process.env.AGENT_DAILY_ACTION_CAP = "3";
+    try {
+      // Уже 3 действия за сутки при потолке 3 — исчерпано ещё до захода в задачу.
+      const { client, statuses } = stub({ countAgentActions: async () => 3 });
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res.length, 1);
+      assert.equal(res[0].outcome, "skipped");
+      assert.match(res[0].note, /потолок действий исчерпан/);
+      assert.deepEqual(statuses, [], "капнутую задачу нельзя даже переводить в работу");
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
+      else process.env.AGENT_DAILY_ACTION_CAP = prev;
+    }
+  });
+
+  it("под потолком — задача проходит: предложение владельцу, задача закрыта", async () => {
+    const prev = process.env.AGENT_DAILY_ACTION_CAP;
+    process.env.AGENT_DAILY_ACTION_CAP = "5";
+    try {
+      const { client, statuses } = stub({ countAgentActions: async () => 0 });
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "proposed");
+      assert.deepEqual(
+        statuses.map((s) => s.status),
+        ["in_progress", "done"],
+        "нормальный путь: взял в работу и закрыл отчётом",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
+      else process.env.AGENT_DAILY_ACTION_CAP = prev;
+    }
+  });
+
+  it("runSkill скипнул действие — задача НЕ выдаётся за сделанную", async () => {
+    // Потолок в task-worker пройден (used=0), но внутри runSkill свежий счёт Core
+    // уже упёрся в потолок — действие не состоялось. Задачу закрывать нельзя.
+    const prev = process.env.AGENT_DAILY_ACTION_CAP;
+    process.env.AGENT_DAILY_ACTION_CAP = "1";
+    try {
+      let calls = 0;
+      const { client, statuses } = stub({
+        // Первый счёт (в task-worker) — 0, второй (в runSkill) — 1: догнало.
+        countAgentActions: async () => (calls++ === 0 ? 0 : 1),
+      });
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "skipped");
+      assert.ok(!statuses.some((s) => s.status === "done"), "скипнутую задачу нельзя закрывать");
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
+      else process.env.AGENT_DAILY_ACTION_CAP = prev;
+    }
+  });
+
+  it("без потолка (cap=0) задачи идут как раньше", async () => {
+    const prev = process.env.AGENT_DAILY_ACTION_CAP;
+    delete process.env.AGENT_DAILY_ACTION_CAP;
+    try {
+      const { client, statuses } = stub();
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "proposed");
+      assert.deepEqual(statuses.map((s) => s.status), ["in_progress", "done"]);
+    } finally {
+      if (prev !== undefined) process.env.AGENT_DAILY_ACTION_CAP = prev;
+    }
   });
 });
