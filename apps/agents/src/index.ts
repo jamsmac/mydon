@@ -6,6 +6,7 @@ import { AgentsCoreClient } from "./core-client";
 import { autonomyThreshold } from "./policy";
 import { loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
+import { desiredJobs, jobKey } from "./schedule";
 import { hasSkill } from "./skills";
 import { runAgentTasks } from "./task-worker";
 
@@ -133,9 +134,93 @@ async function main(): Promise<void> {
     }
   }
 
+  console.log(
+    `MYDON Agents: паспортов ${agents.length}, активных ${agents.filter((a) => a.status === "active").length}, ` +
+      `порог автономии ${threshold}${threshold === "T0" ? " (всё через согласование)" : ""}.`,
+  );
+
+  if (process.env.AGENTS_SCHEDULES_PAUSED === "1") {
+    console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания не запускаются. Ожидаю снятия паузы.");
+    // Не выходим: иначе Docker с restart-политикой поднимал бы контейнер по кругу.
+    await idle();
+    return;
+  }
+
+  // Запущенные cron-задания по ключу «агент навык расписание». Перечитка
+  // настроек примиряет этот набор с желаемым: снятые/изменённые — гасим,
+  // новые — заводим. Раньше набор считался ОДИН раз, и правки владельца в
+  // карточке (пауза агента, новое расписание) не действовали до перезапуска.
+  const cronJobs = new Map<string, Cron>();
+  let lastNotWired = "";
+
+  function reconcileSchedules(): void {
+    const { jobs, notWired } = desiredJobs(agents, hasSkill);
+    const want = new Set(jobs.map(jobKey));
+
+    // Гасим то, чего в желаемом наборе больше нет.
+    for (const [key, job] of cronJobs) {
+      if (!want.has(key)) {
+        job.stop();
+        cronJobs.delete(key);
+      }
+    }
+
+    // Заводим недостающее. Колбэк ищет агента по имени в момент срабатывания —
+    // так он видит СВЕЖИЕ настройки (статус, автономию), а не снимок на старте.
+    for (const j of jobs) {
+      const key = jobKey(j);
+      if (cronJobs.has(key)) continue;
+      try {
+        const job = new Cron(j.cron, { timezone: TZ, name: `${j.agent}:${j.skill}` }, () => {
+          void (async () => {
+            const current = agents.find((a) => a.name === j.agent && a.status === "active");
+            if (!current) return; // агента отключили — расписание догаснет на след. перечитке
+            try {
+              const result = await runSkill(current, j.skill, core, threshold);
+              console.log(`[${result.agent}/${result.skill}] ${result.outcome} — ${result.reason}`);
+            } catch (err) {
+              console.error(`[${j.agent}/${j.skill}] сбой:`, err);
+            }
+          })();
+        });
+        cronJobs.set(key, job);
+      } catch (err) {
+        console.warn(
+          `Расписание "${j.cron}" агента ${j.agent} не принято: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    const nw = notWired.join(", ");
+    if (nw !== lastNotWired) {
+      lastNotWired = nw;
+      if (nw.length > 0) console.log(`Навыки без реализации (не планируются): ${nw}.`);
+    }
+  }
+
+  /**
+   * Задачи, поручённые агентам владельцем. Проверяем регулярно: владелец
+   * ставит задачу в панели и вправе ждать, что агент займётся ею сам,
+   * не дожидаясь своего расписания. Список активных берём СВЕЖИЙ на каждый
+   * проход — не снимок на старте.
+   */
+  async function pollAgentTasks(): Promise<void> {
+    for (const agent of agents.filter((a) => a.status === "active")) {
+      try {
+        const results = await runAgentTasks(agent, core, threshold);
+        for (const r of results) {
+          console.log(`[${agent.name}] задача ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`);
+        }
+      } catch (err) {
+        console.error(`[${agent.name}] задачи не обработаны:`, err);
+      }
+    }
+  }
+
   // Перечитка настроек раз в 10 минут: правки владельца в карточке агента
   // начинают действовать сами, без перезапуска контейнера. Заодно это лечит
-  // случай «Core поднялся позже нас».
+  // случай «Core поднялся позже нас». После перечитки — примиряем расписания.
   setInterval(
     () => {
       void (async () => {
@@ -149,71 +234,13 @@ async function main(): Promise<void> {
         } else if (changed) {
           console.log("Настройки агентов обновлены из базы.");
         }
+        if (changed) reconcileSchedules();
       })();
     },
     10 * 60_000,
   ).unref();
 
-  const active = agents.filter((a) => a.status === "active");
-  console.log(
-    `MYDON Agents: паспортов ${agents.length}, активных ${active.length}, ` +
-      `порог автономии ${threshold}${threshold === "T0" ? " (всё через согласование)" : ""}.`,
-  );
-
-  if (process.env.AGENTS_SCHEDULES_PAUSED === "1") {
-    console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания не запускаются. Ожидаю снятия паузы.");
-    // Не выходим: иначе Docker с restart-политикой поднимал бы контейнер по кругу.
-    await idle();
-  }
-
-  let jobs = 0;
-  const notWired: string[] = [];
-  for (const agent of active) {
-    for (const item of agent.schedule) {
-      // Навык без реализации планировать бессмысленно: он всё равно вернёт
-      // «не подключён». Говорим об этом один раз, а не по будильнику каждый день.
-      if (!hasSkill(item.skill)) {
-        notWired.push(`${agent.name}/${item.skill}`);
-        continue;
-      }
-      try {
-        new Cron(item.cron, { timezone: TZ, name: `${agent.name}:${item.skill}` }, () => {
-          void (async () => {
-            try {
-              const result = await runSkill(agent, item.skill, core, threshold);
-              console.log(`[${result.agent}/${result.skill}] ${result.outcome} — ${result.reason}`);
-            } catch (err) {
-              console.error(`[${agent.name}/${item.skill}] сбой:`, err);
-            }
-          })();
-        });
-        jobs += 1;
-      } catch (err) {
-        console.warn(
-          `Расписание "${item.cron}" агента ${agent.name} не принято: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
-    }
-  }
-
-  /**
-   * Задачи, поручённые агентам владельцем. Проверяем регулярно: владелец
-   * ставит задачу в панели и вправе ждать, что агент займётся ею сам,
-   * не дожидаясь своего расписания.
-   */
-  async function pollAgentTasks(): Promise<void> {
-    for (const agent of active) {
-      try {
-        const results = await runAgentTasks(agent, core, threshold);
-        for (const r of results) {
-          console.log(`[${agent.name}] задача ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`);
-        }
-      } catch (err) {
-        console.error(`[${agent.name}] задачи не обработаны:`, err);
-      }
-    }
-  }
+  reconcileSchedules();
 
   const taskEveryMs = Number(process.env.AGENT_TASK_INTERVAL_MS ?? 5 * 60_000);
   setInterval(() => {
@@ -221,14 +248,10 @@ async function main(): Promise<void> {
   }, taskEveryMs).unref();
   void pollAgentTasks(); // первый проход сразу при старте
 
-  console.log(`Запланировано заданий: ${jobs} (часовой пояс ${TZ}).`);
-  if (notWired.length > 0) {
-    console.log(`Навыки без реализации (не планируются): ${notWired.join(", ")}.`);
-  }
-  if (jobs === 0) {
-    console.log("Активных расписаний нет — жду появления.");
-    await idle();
-  }
+  console.log(`Запланировано заданий: ${cronJobs.size} (часовой пояс ${TZ}).`);
+  // Держим процесс живым всегда: расписания могут появиться после перечитки,
+  // задачи опрашиваются по таймеру — выходить на «сейчас заданий нет» нельзя.
+  await idle();
 }
 
 main().catch((err: unknown) => {

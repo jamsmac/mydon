@@ -1,6 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { event } from "@mydon/db";
-import { and, desc, eq, gte, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 type EventRow = typeof event.$inferSelect;
@@ -44,5 +44,22 @@ export class EventsService {
       .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(event.occurredAt))
       .limit(Math.min(filter.limit ?? 100, 500));
+  }
+
+  /**
+   * Сколько событий подходит под фильтр. Нужно для лимита действий агента: он
+   * считает свои `agent.action` за сутки по журналу, а не по счётчику в памяти —
+   * тот разошёлся бы с фактом при перезапуске контейнера.
+   */
+  async count(filter: { source?: string; type?: string; since?: Date } = {}): Promise<number> {
+    const conditions: SQL[] = [];
+    if (filter.source) conditions.push(eq(event.source, filter.source));
+    if (filter.type) conditions.push(eq(event.type, filter.type));
+    if (filter.since) conditions.push(gte(event.occurredAt, filter.since));
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(event)
+      .where(conditions.length ? and(...conditions) : undefined);
+    return Number(row?.n ?? 0);
   }
 }

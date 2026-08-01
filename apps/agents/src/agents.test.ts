@@ -165,7 +165,8 @@ describe("Прогон навыка", () => {
     const res = await runSkill(base, "watch-receivables", client, "T0");
     assert.equal(res.outcome, "approval_requested");
     assert.equal(res.approvalId, "appr-1");
-    assert.deepEqual(calls, ["event", "approval"]);
+    // event(agent.run) → approval → event(agent.action, для дневного потолка)
+    assert.deepEqual(calls, ["event", "approval", "event"]);
     assert.match(captured.action ?? "", /дебиторк/i, "формулировка должна быть по делу, а не именем навыка");
     assert.match(captured.action ?? "", /3 позиц/, "владельцу нужна конкретика: сколько позиций");
     assert.equal((captured.payload?.facts as Record<string, unknown>)?.overdueTotal, 3, "факты кладутся для проверки по следам");
@@ -198,7 +199,57 @@ describe("Прогон навыка", () => {
     });
     const res = await runSkill(base, "watch-receivables", client, "T2");
     assert.equal(res.outcome, "executed");
-    assert.deepEqual(calls, ["event"]);
+    // event(agent.run) → event(agent.action): исполнение тоже считается действием.
+    assert.deepEqual(calls, ["event", "event"]);
+  });
+
+  it("дневной потолок исчерпан — предложение НЕ выносится", async () => {
+    const prev = process.env.AGENT_DAILY_ACTION_CAP;
+    process.env.AGENT_DAILY_ACTION_CAP = "3";
+    try {
+      const { client, calls } = stubCore({
+        obligations: async () => ({
+          domain: "globerent",
+          totals: [],
+          overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+          overdueTotal: 3,
+          overdueTruncated: false,
+        }),
+        // За сутки агент уже сделал 3 действия при потолке 3 — исчерпано.
+        countAgentActions: async () => 3,
+      });
+      const res = await runSkill(base, "watch-receivables", client, "T0");
+      assert.equal(res.outcome, "skipped");
+      assert.match(res.reason, /потолок действий исчерпан/);
+      // Событие о прогоне есть; согласования и записи действия — нет.
+      assert.deepEqual(calls, ["event"]);
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
+      else process.env.AGENT_DAILY_ACTION_CAP = prev;
+    }
+  });
+
+  it("под потолком — действие проходит и считается", async () => {
+    const prev = process.env.AGENT_DAILY_ACTION_CAP;
+    process.env.AGENT_DAILY_ACTION_CAP = "5";
+    try {
+      const { client, calls } = stubCore({
+        obligations: async () => ({
+          domain: "globerent",
+          totals: [],
+          overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+          overdueTotal: 2,
+          overdueTruncated: false,
+        }),
+        countAgentActions: async () => 2, // 2 из 5 — ещё можно
+      });
+      const res = await runSkill(base, "watch-receivables", client, "T0");
+      assert.equal(res.outcome, "approval_requested");
+      assert.deepEqual(calls, ["event", "approval", "event"]);
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
+      else process.env.AGENT_DAILY_ACTION_CAP = prev;
+    }
   });
 });
 
