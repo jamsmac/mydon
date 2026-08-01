@@ -2,11 +2,19 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { PRODUCT_KINDS, PRODUCT_KIND_LABELS, RESALE_FIELDS } from "@mydon/shared";
 import { saveEntity } from "../app/card/actions";
 import type { Entity } from "../lib/core";
 import { MONO_KEYS } from "../lib/labels";
 
 const mono = { fontFamily: "'IBM Plex Mono', ui-monospace, monospace" } as const;
+
+/**
+ * Поля карточки товара, которыми управляет отдельный блок «Товар»: принцип
+ * (перепродажа/рецепт), перепродажные поля и авто-история цены покупки. Их
+ * убираем из общего списка attrs, чтобы не задвоить те же поля.
+ */
+const PRODUCT_KEYS = new Set<string>(["вид", ...RESALE_FIELDS, "история цены покупки"]);
 
 /**
  * Редактор карточки: как в ПО владельца — поля пополняются и меняются на месте.
@@ -30,8 +38,15 @@ export function EntityEditor({ entity }: { entity: Entity }) {
     });
   }
 
-  const attrs = Object.entries(entity.attrs ?? {});
+  const isProduct = entity.type === "product";
+  const attrsAll = Object.entries(entity.attrs ?? {});
+  // У товара принцип и перепродажные поля живут в своём блоке; из общего списка
+  // их убираем, иначе те же поля появятся дважды.
+  const attrs = isProduct ? attrsAll.filter(([k]) => !PRODUCT_KEYS.has(k)) : attrsAll;
   const [editing, setEditing] = useState(false);
+  const initialKind = typeof entity.attrs?.["вид"] === "string" ? String(entity.attrs["вид"]) : "";
+  const [kind, setKind] = useState(initialKind);
+  const buyHistory = entity.attrs?.["история цены покупки"];
 
   // Сначала ЧТЕНИЕ — паспорт записи, как в дизайне. Правка — по кнопке.
   if (!editing) {
@@ -46,13 +61,16 @@ export function EntityEditor({ entity }: { entity: Entity }) {
             <div className="k">Номер / код</div>
             <div className="val mono">{entity.externalRef ?? "—"}</div>
           </div>
-          {attrs.map(([key, value]) => (
+          {attrsAll.map(([key, value]) => (
             <div className="f" key={key}>
-              <div className="k">{key}</div>
+              <div className="k">{key === "вид" ? "Принцип карточки" : key}</div>
               <div className={`val ${MONO_KEYS.has(key) ? "mono" : ""}`}>
-                {key === "цена" && typeof value === "number"
-                  ? `${Number(value).toLocaleString("ru-RU")} сум`
-                  : String(value ?? "—")}
+                {key === "вид" && typeof value === "string" && value in PRODUCT_KIND_LABELS
+                  ? PRODUCT_KIND_LABELS[value as keyof typeof PRODUCT_KIND_LABELS]
+                  : (key === "цена" || key === "цена покупки" || key === "цена продажи") &&
+                      typeof value === "number"
+                    ? `${Number(value).toLocaleString("ru-RU")} сум`
+                    : String(value ?? "—")}
               </div>
             </div>
           ))}
@@ -77,6 +95,51 @@ export function EntityEditor({ entity }: { entity: Entity }) {
         <span>Номер (серийник, ИНН, штрих-код)</span>
         <input name="externalRef" defaultValue={entity.externalRef ?? ""} style={mono} />
       </label>
+
+      {isProduct && (
+        <fieldset className="form card" style={{ margin: 0 }}>
+          <legend>Товар</legend>
+          <label>
+            <span>Принцип карточки</span>
+            <select name="attr:вид" value={kind} onChange={(e) => setKind(e.target.value)}>
+              <option value="">— не выбран —</option>
+              {PRODUCT_KINDS.map((k) => (
+                <option value={k} key={k}>
+                  {PRODUCT_KIND_LABELS[k]}
+                </option>
+              ))}
+            </select>
+            <small className="hint">
+              Перепродажа — куплен и продан как есть (нужна цена покупки). Рецепт —
+              готовится из ингредиентов (состав добавим следующим шагом).
+            </small>
+          </label>
+
+          {kind === "перепродажа" &&
+            RESALE_FIELDS.map((f) => (
+              <label key={f}>
+                <span>{f}</span>
+                <input
+                  name={`attr:${f}`}
+                  defaultValue={String(entity.attrs?.[f] ?? "")}
+                  inputMode={f.startsWith("цена") ? "numeric" : undefined}
+                />
+              </label>
+            ))}
+
+          {typeof buyHistory === "string" && buyHistory.length > 0 && (
+            <>
+              {/* Историю ведёт Core сам; сохраняем её скрытым полем, иначе форма,
+                  собирающая attrs заново, затёрла бы её. */}
+              <input type="hidden" name="attr:история цены покупки" value={buyHistory} />
+              <p className="hint">
+                История цены покупки: <b>{buyHistory}</b>. Ведётся сама при смене цены —
+                менять руками не нужно.
+              </p>
+            </>
+          )}
+        </fieldset>
+      )}
 
       {attrs.map(([key, value]) => (
         <label key={key}>

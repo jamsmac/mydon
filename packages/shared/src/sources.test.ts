@@ -9,7 +9,9 @@ import {
   mergeRegistry,
   findRawReport,
   normalizeSourceKey,
+  productKind,
   rawFreshness,
+  resaleGaps,
   roleColumnIndex,
   roleColumnName,
 } from "./sources";
@@ -295,3 +297,37 @@ describe("Карточки товара: чем именно плох ИКПУ",
     );
   });
 });
+
+describe("Принцип карточки товара: перепродажа или рецепт", () => {
+  it("вид читается из attrs", () => {
+    assert.equal(productKind({ вид: "перепродажа" }), "перепродажа");
+    assert.equal(productKind({ вид: "рецепт" }), "рецепт");
+  });
+
+  it("не выбран или мусор — null", () => {
+    assert.equal(productKind({}), null);
+    assert.equal(productKind({ вид: "что-то" }), null);
+    assert.equal(productKind(null), null);
+  });
+
+  it("перепродаже без цены покупки нечем считать себестоимость", () => {
+    const gaps = resaleGaps({ вид: "перепродажа" });
+    assert.equal(gaps.length, 1);
+    assert.equal(gaps[0].field, "цена покупки");
+  });
+
+  it("перепродажа с ценой покупки — нехватки нет (число и строка)", () => {
+    assert.deepEqual(resaleGaps({ вид: "перепродажа", "цена покупки": 12000 }), []);
+    assert.deepEqual(resaleGaps({ вид: "перепродажа", "цена покупки": "12000" }), []);
+  });
+
+  it("нулевая или пустая цена покупки — всё ещё нехватка", () => {
+    assert.equal(resaleGaps({ вид: "перепродажа", "цена покупки": 0 }).length, 1);
+    assert.equal(resaleGaps({ вид: "перепродажа", "цена покупки": "" }).length, 1);
+  });
+
+  it("у рецептурной карточки перепродажных нехваток нет — у неё свой принцип", () => {
+    assert.deepEqual(resaleGaps({ вид: "рецепт" }), []);
+    assert.deepEqual(resaleGaps({}), []);
+  });
+})

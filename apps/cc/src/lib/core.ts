@@ -637,6 +637,8 @@ export interface ProductLookalike {
 /** Товар глазами источника: сколько принёс и можно ли по нему выбить чек. */
 export interface SourceProduct {
   name: string;
+  /** Артикулы источника (у OurVend — Commodity Code). Пусто — источник кода не даёт. */
+  codes: string[];
   orders: number;
   revenue: number;
   unreadable: number;
