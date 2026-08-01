@@ -297,6 +297,62 @@ export const machineStock = pgTable(
   ],
 );
 
+// ── stock_movement: движения склада (приход, расход, перемещение) ──
+//
+// Append-only лента: остаток = сумма движений НА ЧТЕНИИ, как себестоимость
+// рецепта. Ничего не пересчитывается в мутабельное поле — производное выводим
+// из данных, не держим (у донора кэш остатка расходился с движениями).
+// Схема сразу под несколько складов и будущий расход по продажам, но первый
+// срез пишет только приход; расход и перемещение включатся своими срезами.
+export const stockMovementKindEnum = pgEnum("stock_movement_kind", [
+  "intake", // приход: закупка сырья на склад (+)
+  "consumption", // расход: списание по продажам (−)
+  "transfer", // перемещение между складами (− со склада, + на встречный)
+]);
+
+export const stockMovement = pgTable(
+  "stock_movement",
+  {
+    id: id(),
+    kind: stockMovementKindEnum("kind").notNull(),
+    /** Ингредиент — карточка entity type=ingredient. */
+    ingredientId: uuid("ingredient_id")
+      .notNull()
+      .references(() => entity.id),
+    /** Склад — карточка entity type=warehouse, куда/откуда движение. */
+    warehouseId: uuid("warehouse_id")
+      .notNull()
+      .references(() => entity.id),
+    /** Встречный склад (для перемещения) — куда легло. Пусто у прихода/расхода. */
+    counterpartyId: uuid("counterparty_id").references(() => entity.id),
+    dt: date("dt").notNull(),
+    /** Количество в `unit`, всегда положительное. Знак задаёт вид движения. */
+    qty: numeric("qty", { precision: 14, scale: 3 }).notNull(),
+    unit: text("unit").notNull(),
+    /** Цена за единицу и сумма — только у прихода. */
+    unitPrice: numeric("unit_price", { precision: 15, scale: 2 }),
+    total: numeric("total", { precision: 15, scale: 2 }),
+    supplier: text("supplier"),
+    /** Направление бизнеса. Пока весь склад — VendHub. */
+    domain: domainEnum("domain").default("vendhub").notNull(),
+    currency: text("currency").default("UZS").notNull(),
+    /** Откуда движение: owner | stock (синк) | sales-derived (расход). */
+    source: text("source").default("owner").notNull(),
+    /** id строки в источнике — ключ идемпотентного синка. У ручных пусто. */
+    extId: text("ext_id"),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("stock_movement_ing_idx").on(t.ingredientId, t.dt),
+    index("stock_movement_wh_idx").on(t.warehouseId, t.dt),
+    // Идемпотентность синка: одна строка источника — одно движение. Ручные
+    // (extId = NULL) не конфликтуют: NULL в уникальном индексе различны.
+    uniqueIndex("stock_movement_src_key").on(t.source, t.extId),
+  ],
+);
+
 // ── raw_snapshot / raw_row: сырой слой источников ──
 //
 // Сюда кладётся выгрузка отчёта внешней системы РОВНО как она пришла: те же

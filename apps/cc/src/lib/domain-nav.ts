@@ -30,6 +30,7 @@ export const VENDHUB_GROUPS: NavGroup[] = [
       { label: "Ингредиенты", type: "ingredient" },
       { label: "Рецепты", type: "recipe" },
       { label: "Расходники (тара)", type: "consumable" },
+      { label: "Склады", type: "warehouse" },
       { label: "Приход", type: "purchase" },
       { label: "Остатки в автоматах", type: "machine_stock" },
     ],

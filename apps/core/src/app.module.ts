@@ -14,6 +14,7 @@ import { RawModule } from "./raw/raw.module";
 import { RegistryModule } from "./registry/registry.module";
 import { RulesModule } from "./rules/rules.module";
 import { SalesModule } from "./sales/sales.module";
+import { StockModule } from "./stock/stock.module";
 import { SupplyModule } from "./supply/supply.module";
 import { TasksModule } from "./tasks/tasks.module";
 import { VerificationModule } from "./verification/verification.module";
@@ -30,6 +31,7 @@ import { VerificationModule } from "./verification/verification.module";
     RegistryModule,
     RulesModule,
     SalesModule,
+    StockModule,
     SupplyModule,
     HistoryModule,
     NotesModule,

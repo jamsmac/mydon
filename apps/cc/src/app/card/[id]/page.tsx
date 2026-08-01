@@ -7,6 +7,8 @@ import {
   type MachineProductPrice,
   type MachineStays,
   type RecipeView,
+  type IngredientStock,
+  type WarehouseStock,
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { DeleteEntityButton } from "../../../components/entity-delete";
@@ -15,6 +17,8 @@ import { StayTimeline } from "../../../components/machine-stays";
 import { MachinePricesView } from "../../../components/prices-view";
 import { EntityApproval } from "../../../components/entity-approval";
 import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
+import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
+import { WarehouseStockView } from "../../../components/warehouse-stock";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
 import { plural, when } from "../../../lib/format";
 
@@ -90,6 +94,36 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Склад ингредиента: остаток по складам + приход. Список складов того же
+  // направления — на них заводится приход. Ошибка здесь не роняет карточку.
+  const isIngredient = entity.type === "ingredient";
+  let stock: IngredientStock | null = null;
+  let warehouses: WarehouseOption[] = [];
+  if (isIngredient) {
+    try {
+      stock = await core.ingredientStock(entity.id);
+    } catch {
+      stock = null;
+    }
+    try {
+      const cards = entity.domain ? await core.entitiesOfType(entity.domain, "warehouse") : [];
+      warehouses = cards.map((c) => ({ id: c.id, name: c.name }));
+    } catch {
+      warehouses = [];
+    }
+  }
+
+  // Остаток склада: что и сколько лежит.
+  const isWarehouse = entity.type === "warehouse";
+  let warehouseStock: WarehouseStock | null = null;
+  if (isWarehouse) {
+    try {
+      warehouseStock = await core.warehouseStock(entity.id);
+    } catch {
+      warehouseStock = null;
+    }
+  }
+
   return (
     <>
       <div className="page-head">
@@ -161,6 +195,17 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       {isRecipe && recipe && (
         <RecipeEditor entity={{ id: entity.id }} ingredients={ingredients} recipe={recipe} />
       )}
+
+      {isIngredient && stock && (
+        <StockPanel
+          ingredientId={entity.id}
+          baseUnitHint={stock.baseUnit}
+          stock={stock}
+          warehouses={warehouses}
+        />
+      )}
+
+      {isWarehouse && warehouseStock && <WarehouseStockView stock={warehouseStock} />}
 
       <EntityEditor entity={entity} />
 

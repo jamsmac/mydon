@@ -749,6 +749,51 @@ export interface RecipeView {
   unresolved: number;
 }
 
+/** Одно движение склада в ленте ингредиента. */
+export interface StockMovementRow {
+  id: string;
+  kind: string;
+  dt: string;
+  warehouseId: string;
+  warehouseName: string | null;
+  counterpartyId: string | null;
+  counterpartyName: string | null;
+  qty: number;
+  unit: string;
+  unitPrice: number | null;
+  total: number | null;
+  supplier: string | null;
+  source: string;
+  note: string | null;
+}
+
+/** Остаток ингредиента по складам — считается на чтении из движений. */
+export interface IngredientStock {
+  ingredientId: string;
+  ingredientName: string;
+  /** Базовая единица (в которой заведена цена покупки). null — не задана. */
+  baseUnit: string | null;
+  /** Сводный остаток в базовой единице. null — базовой единицы нет. */
+  total: number | null;
+  /** Движений, что не удалось привести к базовой единице. */
+  unconvertible: number;
+  warehouses: { warehouseId: string; warehouseName: string; qty: number; unconvertible: number }[];
+  movements: StockMovementRow[];
+}
+
+/** Остаток склада: что и сколько лежит. */
+export interface WarehouseStock {
+  warehouseId: string;
+  warehouseName: string;
+  items: {
+    ingredientId: string;
+    ingredientName: string;
+    baseUnit: string | null;
+    qty: number | null;
+    unconvertible: number;
+  }[];
+}
+
 /** Текстовый ответ Core — для выгрузки CSV, который нельзя разбирать как JSON. */
 export async function coreText(path: string): Promise<string> {
   let res: Response;
@@ -810,6 +855,15 @@ export const core = {
   entityDrafts: (id: string) => get<EntityDraft[]>(`/entities/${id}/drafts`),
   /** Рецепт товара: состав, цены ингредиентов и себестоимость. */
   entityRecipe: (id: string) => get<RecipeView>(`/entities/${id}/recipe`),
+  /** Остаток ингредиента по складам и лента его движений. */
+  ingredientStock: (id: string) => get<IngredientStock>(`/stock/ingredient/${id}`),
+  /** Остаток склада: что и сколько лежит. */
+  warehouseStock: (id: string) => get<WarehouseStock>(`/stock/warehouse/${id}`),
+  /** Завести движение склада (приход). */
+  createMovement: (input: Record<string, unknown>) =>
+    send<StockMovementRow>("/stock/movement", "POST", input),
+  /** Удалить движение (правка ручного прихода). */
+  deleteMovement: (id: string) => send<{ ok: boolean }>(`/stock/movement/${id}`, "DELETE"),
   pendingEntities: () =>
     get<{ cards: Entity[]; fields: (EntityDraft & { entityName: string; entityType: string })[] }>(
       "/entities/pending",

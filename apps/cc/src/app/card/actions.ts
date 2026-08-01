@@ -99,6 +99,47 @@ export async function saveEntity(id: string, form: FormData): Promise<ActionResu
 }
 
 /**
+ * Приход ингредиента на склад. Остаток Core считает на чтении из движений —
+ * здесь только заводим одну строку прихода.
+ */
+export async function addIntake(
+  ingredientId: string,
+  input: {
+    warehouseId: string;
+    qty: number;
+    unit: string;
+    unitPrice?: number;
+    dt?: string;
+    supplier?: string;
+    note?: string;
+  },
+): Promise<ActionResult> {
+  if (!input.warehouseId) return { ok: false, error: "Выбери склад" };
+  if (!(input.qty > 0)) return { ok: false, error: "Количество должно быть больше нуля" };
+  if (!input.unit) return { ok: false, error: "Выбери единицу" };
+  try {
+    await core.createMovement({ kind: "intake", ingredientId, ...input });
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось завести приход" };
+  }
+  revalidatePath(`/card/${ingredientId}`);
+  return { ok: true };
+}
+
+/** Удалить движение склада (правка ручного прихода). */
+export async function removeMovement(movementId: string, cardId: string): Promise<ActionResult> {
+  try {
+    await core.deleteMovement(movementId);
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось удалить" };
+  }
+  revalidatePath(`/card/${cardId}`);
+  return { ok: true };
+}
+
+/**
  * Сохранение состава рецепта. Пишем только поле `состав`, остальные attrs
  * карточки берём как есть — иначе форма затёрла бы их. Пустой состав убирает
  * поле: у товара без рецепта его быть не должно.
