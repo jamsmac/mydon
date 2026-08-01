@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { PRODUCT_KINDS, PRODUCT_KIND_LABELS, RESALE_FIELDS } from "@mydon/shared";
+import { PRODUCT_KINDS, PRODUCT_KIND_LABELS, RESALE_FIELDS, UNITS } from "@mydon/shared";
 import { saveEntity } from "../app/card/actions";
 import type { Entity } from "../lib/core";
 import { MONO_KEYS } from "../lib/labels";
@@ -15,6 +15,13 @@ const mono = { fontFamily: "'IBM Plex Mono', ui-monospace, monospace" } as const
  * убираем из общего списка attrs, чтобы не задвоить те же поля.
  */
 const PRODUCT_KEYS = new Set<string>(["вид", ...RESALE_FIELDS, "история цены покупки"]);
+
+/**
+ * Поля карточки ингредиента, которыми управляет блок «Ингредиент»: цена покупки,
+ * её единица и авто-история цены. Убираем их из общего списка attrs, чтобы не
+ * задвоить. Состав ингредиенту не нужен — он сам сырьё, а не рецепт.
+ */
+const INGREDIENT_KEYS = new Set<string>(["цена покупки", "единица", "история цены покупки"]);
 
 /**
  * Редактор карточки: как в ПО владельца — поля пополняются и меняются на месте.
@@ -39,10 +46,13 @@ export function EntityEditor({ entity }: { entity: Entity }) {
   }
 
   const isProduct = entity.type === "product";
+  const isIngredient = entity.type === "ingredient";
   const attrsAll = Object.entries(entity.attrs ?? {});
-  // У товара принцип и перепродажные поля живут в своём блоке; из общего списка
-  // их убираем, иначе те же поля появятся дважды.
-  const attrs = isProduct ? attrsAll.filter(([k]) => !PRODUCT_KEYS.has(k)) : attrsAll;
+  // У товара принцип и перепродажные поля живут в своём блоке; у ингредиента —
+  // цена покупки и единица. Из общего списка их убираем, иначе те же поля
+  // появятся дважды.
+  const hidden = isProduct ? PRODUCT_KEYS : isIngredient ? INGREDIENT_KEYS : null;
+  const attrs = hidden ? attrsAll.filter(([k]) => !hidden.has(k)) : attrsAll;
   const [editing, setEditing] = useState(false);
   const initialKind = typeof entity.attrs?.["вид"] === "string" ? String(entity.attrs["вид"]) : "";
   const [kind, setKind] = useState(initialKind);
@@ -135,6 +145,43 @@ export function EntityEditor({ entity }: { entity: Entity }) {
               <p className="hint">
                 История цены покупки: <b>{buyHistory}</b>. Ведётся сама при смене цены —
                 менять руками не нужно.
+              </p>
+            </>
+          )}
+        </fieldset>
+      )}
+
+      {isIngredient && (
+        <fieldset className="form card" style={{ margin: 0 }}>
+          <legend>Ингредиент</legend>
+          <label>
+            <span>Цена покупки</span>
+            <input
+              name="attr:цена покупки"
+              defaultValue={String(entity.attrs?.["цена покупки"] ?? "")}
+              inputMode="numeric"
+            />
+          </label>
+          <label>
+            <span>Единица цены</span>
+            <select name="attr:единица" defaultValue={String(entity.attrs?.["единица"] ?? "")}>
+              <option value="">— не выбрана —</option>
+              {UNITS.map((u) => (
+                <option value={u} key={u}>
+                  {u}
+                </option>
+              ))}
+            </select>
+            <small className="hint">
+              За что цена: 80&nbsp;000 сум за «кг». В рецепте количество переведём в эту единицу.
+            </small>
+          </label>
+          {typeof buyHistory === "string" && buyHistory.length > 0 && (
+            <>
+              {/* Историю ведёт Core сам; сохраняем скрытым полем, иначе форма затёрла бы её. */}
+              <input type="hidden" name="attr:история цены покупки" value={buyHistory} />
+              <p className="hint">
+                История цены покупки: <b>{buyHistory}</b>. Ведётся сама при смене цены.
               </p>
             </>
           )}

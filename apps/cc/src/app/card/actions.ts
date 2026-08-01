@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { isUnit, type RecipeLine } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
 
 export interface CreateResult {
@@ -94,5 +95,55 @@ export async function saveEntity(id: string, form: FormData): Promise<ActionResu
   }
   revalidatePath(`/card/${id}`);
   revalidatePath("/registry");
+  return { ok: true };
+}
+
+/**
+ * Сохранение состава рецепта. Пишем только поле `состав`, остальные attrs
+ * карточки берём как есть — иначе форма затёрла бы их. Пустой состав убирает
+ * поле: у товара без рецепта его быть не должно.
+ *
+ * Строки чистим здесь же: без ингредиента, с неположительным количеством или
+ * чужой единицей — не сохраняем. Себестоимость Core пересчитает на чтении.
+ */
+export async function saveRecipe(id: string, rawLines: unknown): Promise<ActionResult> {
+  const lines: RecipeLine[] = [];
+  if (Array.isArray(rawLines)) {
+    for (const item of rawLines) {
+      if (typeof item !== "object" || item === null) continue;
+      const o = item as Record<string, unknown>;
+      const ingredientId = typeof o.ingredientId === "string" ? o.ingredientId : "";
+      const quantity = typeof o.quantity === "number" ? o.quantity : Number(o.quantity);
+      const unit = o.unit;
+      if (ingredientId.length === 0 || !Number.isFinite(quantity) || quantity <= 0 || !isUnit(unit)) {
+        continue;
+      }
+      lines.push({ ingredientId, quantity, unit });
+    }
+  }
+
+  let entity;
+  try {
+    entity = await core.entity(id);
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Карточка не найдена" };
+  }
+
+  const attrs: Record<string, unknown> = { ...(entity.attrs ?? {}) };
+  if (lines.length > 0) attrs["состав"] = JSON.stringify(lines);
+  else delete attrs["состав"];
+
+  try {
+    await core.updateEntity(id, {
+      name: entity.name,
+      externalRef: entity.externalRef,
+      attrs,
+    });
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось сохранить состав" };
+  }
+  revalidatePath(`/card/${id}`);
   return { ok: true };
 }
