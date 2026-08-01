@@ -167,6 +167,8 @@ export default async function DomainPage({
           <Link
             key={t.key}
             href={href(t.key)}
+            // Переключение вкладки не прыгает наверх — позиция прокрутки держится.
+            scroll={false}
             className={`tab ${activeGroup === t.key ? "active" : ""}`}
             role="tab"
             aria-selected={activeGroup === t.key}
@@ -187,6 +189,7 @@ export default async function DomainPage({
               <Link
                 key={l.label}
                 href={href(`${group.key}:${l.type ?? l.label}`)}
+                scroll={false}
                 className={`subtab ${isActive ? "active" : ""} ${n === 0 ? "dim" : ""}`}
               >
                 {l.label}

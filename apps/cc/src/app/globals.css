@@ -191,8 +191,8 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 .chip.g { color: var(--ok); border-color: rgba(43, 217, 160, 0.4); background: rgba(43, 217, 160, 0.1); }
 .tag-tg { font-size: 11px; color: var(--tx-2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
 
-/* вкладки */
-.tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin: 0 -14px 14px; padding-left: 14px; padding-right: 14px; scrollbar-width: none; }
+/* вкладки — липкие: при прокрутке остаются наверху, контент уезжает под них */
+.tabs { display: flex; gap: 6px; overflow-x: auto; padding: 8px 14px 8px; margin: 0 -14px 14px; scrollbar-width: none; position: sticky; top: 0; z-index: 4; background: var(--bg); border-bottom: 1px solid var(--line); }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs a, .tabs button {
   flex: 0 0 auto; height: 38px; padding: 0 14px; border-radius: var(--r-s); border: 1px solid var(--line);
