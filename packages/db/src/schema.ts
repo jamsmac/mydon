@@ -719,13 +719,22 @@ export const agent = pgTable(
   (t) => [index("agent_status_idx").on(t.status)],
 );
 
-/** Полная схема — для drizzle-клиента. */
+/**
+ * Полная схема — для drizzle-клиента.
+ *
+ * ВСЕ таблицы обязаны быть здесь: этот объект — то, что видит `db.query.*` и
+ * интроспекция схемы. Пропущенная таблица экспортируется, но реляционному слою
+ * и инструментам невидима — молча неполная схема. Тест `schema.test.ts` держит
+ * список в согласии с экспортами, чтобы новая таблица не потерялась.
+ */
 export const schema = {
   org,
   project,
   entity,
+  entityDraft,
   person,
   task,
+  taskComment,
   approval,
   event,
   document,
@@ -733,5 +742,20 @@ export const schema = {
   note,
   auditLog,
   agent,
-  taskComment,
+  // Операционные таблицы VendHub (движения, сырьё, инкассация).
+  collection,
+  sale,
+  purchase,
+  machineStock,
+  stockMovement,
+  // Сырой слой источников.
+  rawSnapshot,
+  rawRow,
+  rawSourceDef,
+  rawReportDef,
+  rawLink,
+  // Типизированные точки, вложения, доставка уведомлений.
+  geoPoint,
+  attachment,
+  notificationDelivery,
 };
