@@ -6,6 +6,7 @@ import {
   IsPositive,
   IsString,
   IsUUID,
+  Min,
   MaxLength,
 } from "class-validator";
 import { StockService } from "./stock.service";
@@ -43,6 +44,27 @@ export class CreateMovementDto {
   note?: string;
 }
 
+/** Пересчёт: фактическое количество ингредиента на складе. */
+export class StocktakeDto {
+  @IsUUID()
+  warehouseId!: string;
+
+  @IsUUID()
+  ingredientId!: string;
+
+  @IsNumber() @Min(0)
+  actual!: number;
+
+  @IsOptional() @IsString() @MaxLength(16)
+  unit?: string;
+
+  @IsOptional() @IsString() @MaxLength(1000)
+  note?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  countedBy?: string;
+}
+
 /** Склад: движения сырья и остаток на чтении. */
 @Controller("stock")
 export class StockController {
@@ -69,6 +91,21 @@ export class StockController {
   @Get("warehouse/:id")
   warehouse(@Param("id", ParseUUIDPipe) id: string) {
     return this.stock.warehouseStock(id);
+  }
+
+  /** Остаток пары «склад × ингредиент» — что показать перед вводом факта. */
+  @Get("balance")
+  balance(
+    @Query("warehouseId", ParseUUIDPipe) warehouseId: string,
+    @Query("ingredientId", ParseUUIDPipe) ingredientId: string,
+  ) {
+    return this.stock.pairBalance(warehouseId, ingredientId);
+  }
+
+  /** Инвентаризация: записать факт пересчёта корректировкой на дельту. */
+  @Post("stocktake")
+  stocktake(@Body() dto: StocktakeDto) {
+    return this.stock.stocktake(dto);
   }
 
   /** Свести приход из mydon-stock в ленту склада (идемпотентно). */

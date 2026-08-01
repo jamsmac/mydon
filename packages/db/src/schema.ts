@@ -309,6 +309,7 @@ export const stockMovementKindEnum = pgEnum("stock_movement_kind", [
   "intake", // приход: закупка сырья на склад (+)
   "consumption", // расход: списание по продажам (−)
   "transfer", // перемещение между складами (− со склада, + на встречный)
+  "adjustment", // корректировка инвентаризации: подписанная дельта «стало − было»
 ]);
 
 export const stockMovement = pgTable(

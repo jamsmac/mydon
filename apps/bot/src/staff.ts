@@ -9,6 +9,14 @@ import {
   registerStepHint,
   startRegister,
 } from "./staff-register";
+import {
+  handleInventoryCallback,
+  handleInventoryCount,
+  inventoryStepHint,
+  isInventoryTrigger,
+  parseInventoryCallback,
+  startInventory,
+} from "./staff-inventory";
 
 /**
  * Работа сотрудника в Telegram (решение владельца: сотрудники — через бота).
@@ -64,6 +72,7 @@ const HELP_STAFF = [
   "• «задачи» — список того, что на тебе",
   "• «инкассация» — сдать выручку с автомата",
   "• «новый ингредиент» / «новая запчасть» — завести карточку с фото",
+  "• «инвентаризация» — пересчитать остаток на складе",
   "• кнопки под задачей: «Взял» и «Сделал»",
   "• после «Сделал» напиши одной строкой, что именно сделано — это отчёт",
 ].join("\n");
@@ -147,8 +156,8 @@ export async function handleStaffMessage(
     }
   }
 
-  // Активное заведение забирает ввод по шагу: название — текстом, остальное —
-  // кнопками и фото. Это идёт прежде отчётов и триггеров, иначе визард перебьётся.
+  // Активный визард забирает ввод по шагу (название/факт — текстом, остальное —
+  // кнопками и фото). Идёт прежде отчётов и триггеров, иначе визард перебьётся.
   const conv = deps.conversations.get(chatId);
   if (conv?.flow === "register") {
     if (conv.step === "name" && clean.length > 0 && !clean.startsWith("/")) {
@@ -156,10 +165,21 @@ export async function handleStaffMessage(
     }
     return { reply: { text: registerStepHint(conv.step) } };
   }
+  if (conv?.flow === "inventory") {
+    if (conv.step === "count" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await handleInventoryCount(chatId, clean, person, deps) };
+    }
+    return { reply: { text: inventoryStepHint(conv.step) } };
+  }
 
   // Завести номенклатуру: «новый ингредиент», «новая запчасть».
   if (isRegisterTrigger(clean)) {
     return { reply: startRegister(chatId, deps) };
+  }
+
+  // Инвентаризация склада: «инвентаризация», «пересчёт».
+  if (isInventoryTrigger(clean)) {
+    return { reply: await startInventory(chatId, deps) };
   }
 
   // Ждём отчёт после «Сделал» — любое следующее сообщение считаем отчётом.
@@ -223,6 +243,16 @@ export async function handleStaffCallback(
   const reg = parseRegisterCallback(data);
   if (reg) {
     const res = await handleRegisterCallback(chatId, reg, person, deps);
+    return {
+      answer: res.answer,
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
+  // Кнопки инвентаризации (i:wh/ing/cancel).
+  const inv = parseInventoryCallback(data);
+  if (inv) {
+    const res = await handleInventoryCallback(chatId, inv, person, deps);
     return {
       answer: res.answer,
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
