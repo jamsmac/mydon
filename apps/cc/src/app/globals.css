@@ -129,6 +129,12 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 .photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .photo-thumb:hover { border-color: var(--tx-2); }
 
+/* Планограмма автомата: компактная карта занятых слотов «слот → товар». */
+.planogrid { display: flex; flex-wrap: wrap; gap: 8px; }
+.pslot { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--surf); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; }
+.pslot-k { font-family: var(--fm); font-size: 11px; color: var(--accent); border: 1px solid var(--accent-line); background: var(--accent-soft); border-radius: 5px; padding: 1px 6px; }
+.pslot-n { color: var(--tx); }
+
 /* Оглавление карточки: липкая строка-переход по секциям длинной карточки. */
 .cardtoc { position: sticky; top: 0; z-index: 4; display: flex; gap: 6px; overflow-x: auto; padding: 8px 0; margin-bottom: 12px; background: var(--bg); border-bottom: 1px solid var(--line); scrollbar-width: none; }
 .cardtoc::-webkit-scrollbar { display: none; }

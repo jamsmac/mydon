@@ -224,3 +224,47 @@ export async function saveRecipe(id: string, rawLines: unknown): Promise<ActionR
   revalidatePath(`/card/${id}`);
   return { ok: true };
 }
+
+/**
+ * Сохранение планограммы автомата: какой товар в каком слоте.
+ *
+ * Пишем только поле `раскладка`, прочие attrs берём как есть. Строки чистим:
+ * без слота или без товара — не сохраняем; повторный слот отбрасываем (в ячейке
+ * один товар). Пустая планограмма убирает поле.
+ */
+export async function savePlanogram(id: string, rawLines: unknown): Promise<ActionResult> {
+  const lines: { slot: string; productId: string }[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(rawLines)) {
+    for (const item of rawLines) {
+      if (typeof item !== "object" || item === null) continue;
+      const o = item as Record<string, unknown>;
+      const slot = typeof o.slot === "string" ? o.slot.trim() : "";
+      const productId = typeof o.productId === "string" ? o.productId : "";
+      if (slot.length === 0 || productId.length === 0 || seen.has(slot)) continue;
+      seen.add(slot);
+      lines.push({ slot, productId });
+    }
+  }
+
+  let entity;
+  try {
+    entity = await core.entity(id);
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Карточка не найдена" };
+  }
+
+  const attrs: Record<string, unknown> = { ...(entity.attrs ?? {}) };
+  if (lines.length > 0) attrs["раскладка"] = JSON.stringify(lines);
+  else delete attrs["раскладка"];
+
+  try {
+    await core.updateEntity(id, { name: entity.name, externalRef: entity.externalRef, attrs });
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось сохранить раскладку" };
+  }
+  revalidatePath(`/card/${id}`);
+  return { ok: true };
+}

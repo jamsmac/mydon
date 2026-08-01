@@ -62,6 +62,7 @@ export * from "./xlsx";
 export * from "./combine";
 export * from "./recipe";
 export * from "./stock";
+export * from "./planogram";
 export * from "./consumption";
 export * from "./intake-sync";
 export * from "./numguard";
