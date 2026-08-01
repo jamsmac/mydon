@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { entity, event, sale } from "@mydon/db";
+import { strictNumber } from "@mydon/shared";
 import { desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
@@ -16,23 +17,57 @@ export interface StockSaleRow {
   fetched_at: string | Date;
 }
 
-/** Что пойдёт в нашу таблицу. exported для тестов — это сердце синка. */
+/** Строка, не прошедшая проверку чисел, — в карантин, а не в упсерт. */
+export interface QuarantinedSale {
+  dt: string;
+  machineSerial: string;
+  product: string;
+  field: "qty" | "amount";
+  value: unknown;
+}
+
+/**
+ * Разобрать строки источника: годные — в упсерт, с нечисловыми qty/amount — в
+ * карантин. exported для тестов — это сердце синка. Раньше `Number(x) || 0`
+ * превращал мусор в ноль и тихо занижал выручку; теперь такое не вливается.
+ */
 export function buildUpserts(
   rows: StockSaleRow[],
   serialToEntity: Map<string, string>,
-): (typeof sale.$inferInsert)[] {
-  return rows
-    .filter((r) => r.machine_serial && r.ourvend_name && r.dt)
-    .map((r) => ({
-      dt: String(r.dt).slice(0, 10),
-      machineSerial: String(r.machine_serial).toLowerCase(),
-      machineId: serialToEntity.get(String(r.machine_serial).toLowerCase()) ?? null,
-      product: String(r.ourvend_name).slice(0, 512),
-      qty: String(Number(r.qty) || 0),
-      amount: String(Number(r.amount) || 0),
+): { values: (typeof sale.$inferInsert)[]; quarantined: QuarantinedSale[] } {
+  const values: (typeof sale.$inferInsert)[] = [];
+  const quarantined: QuarantinedSale[] = [];
+  for (const r of rows) {
+    // Неполные ключи молча пропускаем как раньше — их нечем ни записать, ни
+    // осмысленно посадить в карантин.
+    if (!(r.machine_serial && r.ourvend_name && r.dt)) continue;
+    const dt = String(r.dt).slice(0, 10);
+    const machineSerial = String(r.machine_serial).toLowerCase();
+    const product = String(r.ourvend_name).slice(0, 512);
+    const qty = strictNumber(r.qty);
+    const amount = strictNumber(r.amount);
+    if (qty === null || amount === null) {
+      quarantined.push({
+        dt,
+        machineSerial,
+        product,
+        field: qty === null ? "qty" : "amount",
+        value: qty === null ? r.qty : r.amount,
+      });
+      continue;
+    }
+    values.push({
+      dt,
+      machineSerial,
+      machineId: serialToEntity.get(machineSerial) ?? null,
+      product,
+      qty: String(qty),
+      amount: String(amount),
       source: "ourvend",
       fetchedAt: new Date(r.fetched_at),
-    }));
+    });
+  }
+  return { values, quarantined };
 }
 
 /** Сегодняшняя дата по-ташкентски (в контейнере TZ=Asia/Tashkent). */
@@ -114,7 +149,19 @@ export class SalesService implements OnModuleInit {
           .map((m) => [m.ref!.toLowerCase(), m.id]),
       );
 
-      const values = buildUpserts(all, serialToEntity);
+      const { values, quarantined } = buildUpserts(all, serialToEntity);
+      if (quarantined.length > 0) {
+        // Мусорные числа не вливаем нулём — откладываем в событие, чтобы
+        // расхождение было видно, а не растворилось в выручке.
+        await this.db.insert(event).values({
+          source: "sales-sync",
+          type: "sales.quarantine",
+          payload: { count: quarantined.length, rows: quarantined.slice(0, 50) },
+        });
+        this.log.warn(
+          `Продажи: карантин ${quarantined.length} строк с нечисловыми qty/amount — не влиты.`,
+        );
+      }
       let upserted = 0;
       // Пачками: источник маленький (сотни строк), но не полагаемся на это.
       for (let i = 0; i < values.length; i += 500) {
