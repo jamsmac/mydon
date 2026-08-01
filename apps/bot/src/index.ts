@@ -14,8 +14,10 @@ import { CoreClient, type PersonRow } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { Notifier } from "./notifier";
 import { parseAllowlist, RateLimiter, isAllowed } from "./security/access";
+import { Conversations } from "./conversation";
 import { AwaitingReport, handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
-import { InvalidTokenError, TelegramApi } from "./telegram";
+import { handleRegisterPhoto } from "./staff-register";
+import { InvalidTokenError, TelegramApi, type TgUpdate } from "./telegram";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
@@ -98,8 +100,10 @@ async function main(): Promise<void> {
 
   // ── Сотрудники: свой узкий режим (только свои задачи) ──────────────────────
   const awaiting = new AwaitingReport();
-  const staffDeps = { core: deps.core, awaiting };
+  const conversations = new Conversations();
+  const staffDeps = { core: deps.core, awaiting, conversations };
   setInterval(() => awaiting.sweep(), 10 * 60_000).unref();
+  setInterval(() => conversations.sweep(), 10 * 60_000).unref();
 
   /** Кто написал: сотрудник или посторонний. Ошибка Core = «неизвестен». */
   async function personOf(chatId: number): Promise<PersonRow | null> {
@@ -147,6 +151,27 @@ async function main(): Promise<void> {
       }
     } catch (err) {
       console.error("Сообщение сотрудника не обработано:", err);
+    }
+  }
+
+  /**
+   * Фото от сотрудника: имеет смысл только внутри активного заведения. Берём
+   * последний размер (максимальное разрешение), качаем байты и грузим в Core.
+   * Чужому/вне визарда молчим — как и на текст.
+   */
+  async function routeStaffPhoto(
+    chatId: number,
+    photo: NonNullable<NonNullable<TgUpdate["message"]>["photo"]>,
+  ): Promise<void> {
+    try {
+      const person = await personOf(chatId);
+      if (person === null) return;
+      const largest = photo[photo.length - 1];
+      const file = await tg.downloadFile(largest.file_id);
+      const reply = await handleRegisterPhoto(chatId, file, person, staffDeps);
+      if (reply) await tg.sendMessage(chatId, reply.text, reply.keyboard);
+    } catch (err) {
+      console.error("Фото сотрудника не обработано:", err);
     }
   }
 
@@ -305,7 +330,11 @@ async function main(): Promise<void> {
     try {
       const updates = await tg.getUpdates();
       for (const u of updates) {
-        if (u.message?.text) {
+        if (u.message?.photo && u.message.photo.length > 0) {
+          // Фото — только для сотрудника в активном заведении. Владелец шлёт
+          // фото редко и здесь его не обрабатываем (личный режим — текстовый).
+          await routeStaffPhoto(u.message.chat.id, u.message.photo);
+        } else if (u.message?.text) {
           const chatId = u.message.chat.id;
           if (isAllowed(chatId, allowlist)) {
             const reply = await handleMessage(chatId, u.message.text, deps);
@@ -376,7 +405,7 @@ ${DECIDED_LABEL[parsed.decision]}`);
           try {
             const res = await handleStaffCallback(chatId, data, person, staffDeps);
             await tg.answerCallback(u.callback_query.id, res.answer);
-            if (res.message) await tg.sendMessage(chatId, res.message);
+            if (res.message) await tg.sendMessage(chatId, res.message, res.keyboard);
             // Владелец узнаёт о сборе сразу — деньги в пути, приём ждёт в панели.
             if (res.ownerNote) {
               for (const ownerChat of allowlist) {

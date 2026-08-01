@@ -12,6 +12,8 @@
     "test": "find dist -name '*.test.js' -print0 | xargs -0 --no-run-if-empty node --test"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1101.0",
+    "@aws-sdk/s3-request-presigner": "^3.1101.0",
     "@mydon/db": "workspace:*",
     "@mydon/history": "workspace:*",
     "@mydon/shared": "workspace:*",
@@ -29,8 +31,8 @@
     "rxjs": "^7.8.1"
   },
   "devDependencies": {
+    "@types/express": "^5.0.0",
     "@types/node": "^20.17.6",
-    "typescript": "^5.6.3",
-    "@types/express": "^5.0.0"
+    "typescript": "^5.6.3"
   }
 }

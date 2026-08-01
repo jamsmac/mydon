@@ -14,6 +14,10 @@ export interface TgUpdate {
     from?: { id: number; username?: string };
     text?: string;
     voice?: { file_id: string };
+    /** Фото приходит набором размеров; берём последний (максимальное разрешение). */
+    photo?: { file_id: string; file_unique_id: string; width: number; height: number; file_size?: number }[];
+    /** Подпись к фото — можно сразу написать название. */
+    caption?: string;
   };
   callback_query?: {
     id: string;
@@ -120,11 +124,30 @@ export class TelegramApi {
     await this.call("answerCallbackQuery", { callback_query_id: callbackId, text });
   }
 
+  /**
+   * Скачать файл (например фото номенклатуры) по file_id.
+   *
+   * Два шага Bot API: getFile отдаёт временный путь, затем сам файл забирается
+   * с /file/bot<token>/<path>. Токен в URL — так устроен Telegram; наружу он не
+   * уходит, запрос идёт от бота.
+   */
+  async downloadFile(fileId: string): Promise<{ bytes: Buffer; mime: string | null }> {
+    const file = await this.call<{ file_path?: string }>("getFile", { file_id: fileId });
+    if (!file.file_path) throw new Error("Telegram не отдал путь файла");
+    const res = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`, {
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error(`Не скачать файл Telegram: HTTP ${res.status}`);
+    const mime = res.headers.get("content-type");
+    return { bytes: Buffer.from(await res.arrayBuffer()), mime };
+  }
+
   /** Забирает пачку обновлений. Смещение двигаем сами, чтобы не обрабатывать дважды. */
   async getUpdates(): Promise<TgUpdate[]> {
     const updates = await this.call<TgUpdate[]>("getUpdates", {
       offset: this.offset,
       timeout: this.timeoutSec,
+      // message покрывает и фото (оно приходит как message с полем photo).
       allowed_updates: ["message", "callback_query"],
     });
     for (const u of updates) {

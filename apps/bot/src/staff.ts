@@ -1,5 +1,14 @@
 import { dueLabel } from "@mydon/shared";
 import type { CoreClient, PersonRow, TaskRow } from "./core-client";
+import type { Conversations } from "./conversation";
+import {
+  handleRegisterCallback,
+  handleRegisterName,
+  isRegisterTrigger,
+  parseRegisterCallback,
+  registerStepHint,
+  startRegister,
+} from "./staff-register";
 
 /**
  * Работа сотрудника в Telegram (решение владельца: сотрудники — через бота).
@@ -54,6 +63,7 @@ const HELP_STAFF = [
   "",
   "• «задачи» — список того, что на тебе",
   "• «инкассация» — сдать выручку с автомата",
+  "• «новый ингредиент» / «новая запчасть» — завести карточку с фото",
   "• кнопки под задачей: «Взял» и «Сделал»",
   "• после «Сделал» напиши одной строкой, что именно сделано — это отчёт",
 ].join("\n");
@@ -113,6 +123,7 @@ export class AwaitingReport {
 export interface StaffDeps {
   core: CoreClient;
   awaiting: AwaitingReport;
+  conversations: Conversations;
 }
 
 /**
@@ -127,6 +138,29 @@ export async function handleStaffMessage(
   deps: StaffDeps,
 ): Promise<{ reply: StaffReply; tasks?: TaskRow[] }> {
   const clean = text.trim();
+
+  // «Отмена» бросает любой активный визард (заведение) — раньше всего прочего.
+  if (/^(отмена|стоп|cancel)$/i.test(clean)) {
+    if (deps.conversations.get(chatId)) {
+      deps.conversations.clear(chatId);
+      return { reply: { text: "Отменил." } };
+    }
+  }
+
+  // Активное заведение забирает ввод по шагу: название — текстом, остальное —
+  // кнопками и фото. Это идёт прежде отчётов и триггеров, иначе визард перебьётся.
+  const conv = deps.conversations.get(chatId);
+  if (conv?.flow === "register") {
+    if (conv.step === "name" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await handleRegisterName(chatId, clean, person, deps) };
+    }
+    return { reply: { text: registerStepHint(conv.step) } };
+  }
+
+  // Завести номенклатуру: «новый ингредиент», «новая запчасть».
+  if (isRegisterTrigger(clean)) {
+    return { reply: startRegister(chatId, deps) };
+  }
 
   // Ждём отчёт после «Сделал» — любое следующее сообщение считаем отчётом.
   const awaitingTaskId = deps.awaiting.take(chatId);
@@ -184,7 +218,17 @@ export async function handleStaffCallback(
   data: string,
   person: PersonRow,
   deps: StaffDeps,
-): Promise<{ answer: string; message?: string; ownerNote?: string }> {
+): Promise<{ answer: string; message?: string; keyboard?: StaffReply["keyboard"]; ownerNote?: string }> {
+  // Кнопки визарда заведения (r:type/photo/unit/cancel).
+  const reg = parseRegisterCallback(data);
+  if (reg) {
+    const res = await handleRegisterCallback(chatId, reg, person, deps);
+    return {
+      answer: res.answer,
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
   // Кнопка инкассации: фиксируем сбор с точным временем.
   const collect = parseCollectCallback(data);
   if (collect) {

@@ -49,9 +49,19 @@ services:
       # Этап 1 миграции: чтение продаж из mydon-stock (пользователь только-чтение).
       # Пусто → синк продаж выключен, панель показывает «появится после сбора».
       STOCK_DATABASE_URL: ${STOCK_DATABASE_URL:-}
+      # Хранилище файлов: S3/MinIO при заданных ключах, иначе локальный том ниже.
+      STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-}
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-}
+      STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_FORCE_PATH_STYLE: ${STORAGE_FORCE_PATH_STYLE:-true}
+      STORAGE_LOCAL_DIR: ${STORAGE_LOCAL_DIR:-/data/attachments}
     volumes:
       # Только чтение: MYDON не должен менять индекс разговоров.
       - /opt/mydon-data/history:/data/history:ro
+      # Вложения (фото/чеки), когда S3 не настроен — переживают пересборку.
+      - /opt/mydon-data/attachments:/data/attachments
     command: ["node", "apps/core/dist/main.js"]
     networks:
       - default

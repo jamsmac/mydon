@@ -224,4 +224,58 @@ export class CoreClient {
   people(): Promise<PersonRow[]> {
     return this.request<PersonRow[]>("/people");
   }
+
+  /**
+   * Завести карточку реестра. `createdFrom` заполнен → карточка ляжет
+   * черновиком на утверждение владельцу (сотрудник заводит, владелец
+   * подтверждает — главное правило MYDON).
+   */
+  createEntity(input: {
+    domain: string;
+    type: string;
+    name: string;
+    attrs?: Record<string, unknown>;
+    createdFrom: string;
+  }): Promise<{ id: string; name: string }> {
+    return this.request<{ id: string; name: string }>("/entities", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Дописать поля карточки (например единицу измерения). */
+  updateEntity(id: string, attrs: Record<string, unknown>): Promise<unknown> {
+    return this.request(`/entities/${id}`, { method: "PATCH", body: JSON.stringify({ attrs }) });
+  }
+
+  /**
+   * Загрузить фото и привязать к записи. Идёт multipart (файл нельзя в JSON),
+   * поэтому не через общий request: свой fetch с тем же service-token.
+   */
+  async uploadPhoto(input: {
+    ownerType: string;
+    ownerId: string;
+    bytes: Buffer;
+    mime: string | null;
+    filename: string;
+    createdBy: string;
+  }): Promise<{ id: string; url: string }> {
+    const form = new FormData();
+    form.append("ownerType", input.ownerType);
+    form.append("ownerId", input.ownerId);
+    form.append("kind", "photo");
+    form.append("createdBy", input.createdBy);
+    const blob = input.mime
+      ? new Blob([new Uint8Array(input.bytes)], { type: input.mime })
+      : new Blob([new Uint8Array(input.bytes)]);
+    form.append("file", blob, input.filename);
+    const res = await fetch(`${this.baseUrl}/attachments`, {
+      method: "POST",
+      signal: AbortSignal.timeout(this.timeoutMs),
+      headers: this.serviceToken ? { "x-service-token": this.serviceToken } : {},
+      body: form,
+    });
+    if (!res.ok) throw new Error(`Core ответил ${res.status} на /attachments`);
+    return (await res.json()) as { id: string; url: string };
+  }
 }
