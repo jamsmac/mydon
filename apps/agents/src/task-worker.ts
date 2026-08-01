@@ -4,7 +4,7 @@ import type { AgentsCoreClient } from "./core-client";
 import { dailyCap, startOfTashkentDay } from "./limits";
 import type { AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
-import { hasSkill, SKILLS } from "./skills";
+import { hasSkill } from "./skills";
 
 /**
  * Задачи, поручённые агенту (решение владельца: «агент берёт и делает»).
@@ -94,50 +94,40 @@ export async function runAgentTasks(
 
     await core.setTaskStatus(t.id, "in_progress", `agent:${agent.name}`);
 
-    const impl = SKILLS[skill];
-    const proposal = await impl(agent, core);
-
-    if (proposal === null) {
-      // Навык отработал, но повода нет — это тоже результат, и он честный.
-      const note = "Проверил — по данным MYDON повода для действий нет.";
-      await core.setTaskStatus(t.id, "done", `agent:${agent.name}`, note);
-      results.push({ taskId: t.id, outcome: "done", note });
-      continue;
-    }
-
-    // Есть предложение. При пороге T0 агент не действует сам: результат идёт
-    // владельцу на согласование, а задача закрывается отчётом о находке.
+    // ОДИН прогон навыка: он и решает, и отдаёт предложение (action/facts).
+    // Раньше task-worker звал навык отдельно ради отчёта, а runSkill — ещё раз
+    // ради согласования; при смене данных между ними отчёт по задаче и заявка
+    // на согласование расходились (аудит P2). Теперь источник один.
     const run = await runSkill(agent, skill, core, threshold);
 
-    // Действие могло не состояться: потолок догнал по свежему счёту Core внутри
-    // runSkill, либо повод исчез между проверкой и прогоном. Тогда НЕ выдаём
-    // задачу за сделанную и НЕ публикуем отчёт — она остаётся открытой и
-    // вернётся в следующий проход.
     if (run.outcome === "skipped") {
-      results.push({ taskId: t.id, outcome: "skipped", note: run.reason });
+      if (run.skipReason === "no_signal") {
+        // Навык отработал, но повода нет — честный результат, задачу закрываем.
+        const note = "Проверил — по данным MYDON повода для действий нет.";
+        await core.setTaskStatus(t.id, "done", `agent:${agent.name}`, note);
+        results.push({ taskId: t.id, outcome: "done", note });
+      } else {
+        // Потолок догнал по свежему счёту Core или иная причина — НЕ выдаём за
+        // сделанную и НЕ публикуем отчёт: остаётся открытой, вернётся в следующий проход.
+        results.push({ taskId: t.id, outcome: "skipped", note: run.reason });
+      }
       continue;
     }
 
-    // Действие состоялось — учитываем его в дневном счёте (журнал Core уже
-    // записал agent.action; локальный счётчик держим в согласии для этого прохода).
+    // Действие состоялось (при текущем пороге — предложение владельцу).
+    // Учитываем в дневном счёте (журнал Core уже записал agent.action).
     used += 1;
 
-    let note =
-      run.outcome === "approval_requested"
-        ? `${proposal.action}\n\nВынес на твоё решение.`
-        : proposal.action;
+    const action = run.action ?? "";
+    let note = `${action}\n\nВынес на твоё решение.`;
 
     // Notion — место, куда владелец и так смотрит. Отчёт уходит туда, ссылка —
     // в задачу. Не настроен или не ответил — не беда: отчёт уже есть в MYDON.
-    const link = await publishToNotion(agent, skill, proposal.action, proposal.facts);
+    const link = await publishToNotion(agent, skill, action, run.facts ?? {});
     if (link !== null) note += `\n\nПодробнее: ${link}`;
 
     await core.setTaskStatus(t.id, "done", `agent:${agent.name}`, note);
-    results.push({
-      taskId: t.id,
-      outcome: run.outcome === "approval_requested" ? "proposed" : "done",
-      note,
-    });
+    results.push({ taskId: t.id, outcome: "proposed", note });
   }
 
   return results;
