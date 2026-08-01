@@ -842,6 +842,41 @@ export interface ConsumptionReport {
 }
 
 /** Текстовый ответ Core — для выгрузки CSV, который нельзя разбирать как JSON. */
+/** Вложение записи: фото номенклатуры или чек. Файл — в хранилище Core. */
+export interface Attachment {
+  id: string;
+  ownerType: string;
+  ownerId: string;
+  kind: string;
+  mime: string | null;
+  bytes: number | null;
+  /**
+   * Ссылка на файл. У S3 — presigned (браузер идёт прямо туда); у локального
+   * хранилища — относительный путь Core (`/attachments/:id/raw`), который панель
+   * проксирует через свой маршрут `/api/attachments/:id/raw`.
+   */
+  url: string;
+  createdAt: string;
+}
+
+/**
+ * Забрать бинарный файл из Core (фото карточки) для проксирования браузеру.
+ *
+ * Core наружу не смотрит, а `<img>` в браузере ходит на панель — поэтому байты
+ * идут через неё же, как и выгрузки. Отдаём тело и тип, а стримингом займётся
+ * маршрут.
+ */
+export async function coreBytes(path: string): Promise<{ body: ArrayBuffer; contentType: string | null }> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, { cache: "no-store", signal: AbortSignal.timeout(15000) });
+  } catch (err) {
+    throw new CoreUnavailable(err instanceof Error ? err.message : String(err));
+  }
+  if (!res.ok) throw new CoreUnavailable(`HTTP ${res.status} на ${path}`);
+  return { body: await res.arrayBuffer(), contentType: res.headers.get("content-type") };
+}
+
 export async function coreText(path: string): Promise<string> {
   let res: Response;
   try {
@@ -899,6 +934,22 @@ export const core = {
     get<Entity[]>(`/entities?domain=${domain}&type=${encodeURIComponent(type)}`),
   entity: (id: string) => get<Entity>(`/entities/${id}`),
   createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
+  /** Вложения записи (фото номенклатуры, чеки) — для галереи карточки. */
+  attachments: (ownerType: string, ownerId: string) =>
+    get<Attachment[]>(
+      `/attachments?ownerType=${encodeURIComponent(ownerType)}&ownerId=${encodeURIComponent(ownerId)}`,
+    ),
+  /**
+   * Вложения многих записей одним запросом — для очереди утверждения: пачка
+   * черновиков показывается сразу с фото, без похода в хранилище по одному.
+   * Пустой набор ходить незачем — отдаём пустую карту сразу.
+   */
+  attachmentsBatch: (ownerType: string, ids: string[]) =>
+    ids.length === 0
+      ? Promise.resolve<Record<string, Attachment[]>>({})
+      : get<Record<string, Attachment[]>>(
+          `/attachments/batch?ownerType=${encodeURIComponent(ownerType)}&ids=${encodeURIComponent(ids.join(","))}`,
+        ),
   entityDrafts: (id: string) => get<EntityDraft[]>(`/entities/${id}/drafts`),
   /** Рецепт товара: состав, цены ингредиентов и себестоимость. */
   entityRecipe: (id: string) => get<RecipeView>(`/entities/${id}/recipe`),
@@ -933,6 +984,9 @@ export const core = {
   proposeField: (id: string, input: Record<string, unknown>) =>
     send<{ ok: true }>(`/entities/${id}/propose`, "POST", input),
   approveEntity: (id: string) => send<Entity>(`/entities/${id}/approve`, "POST", {}),
+  /** Утвердить пачку карточек разом — «утвердить все» из очереди. */
+  approveEntities: (ids: string[]) =>
+    send<{ approved: number; skipped: number }>("/entities/approve-batch", "POST", { ids }),
   approveField: (id: string, field: string) =>
     send<Entity>(`/entities/${id}/approve-field/${encodeURIComponent(field)}`, "POST", {}),
   rejectField: (id: string, field: string) =>

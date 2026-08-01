@@ -63,4 +63,32 @@ describe("Склад: остаток на чтении", () => {
     assert.equal(b.qty, 2);
     assert.equal(b.unconvertible, 0);
   });
+
+  it("корректировка инвентаризации: отрицательная дельта уменьшает остаток", () => {
+    // Было 10 кг, пересчёт показал 8 → дельта −2 → остаток 8.
+    const ms: StockMovement[] = [
+      { kind: "intake", warehouseId: "w1", qty: 10, unit: "кг" },
+      { kind: "adjustment", warehouseId: "w1", qty: -2, unit: "кг" },
+    ];
+    assert.equal(stockBalance(ms, "кг", "w1").qty, 8);
+    assert.equal(stockBalance(ms, "кг").qty, 8); // и в сводном
+  });
+
+  it("корректировка: положительная дельта — излишек", () => {
+    const ms: StockMovement[] = [
+      { kind: "intake", warehouseId: "w1", qty: 3, unit: "кг" },
+      { kind: "adjustment", warehouseId: "w1", qty: 1.5, unit: "кг" },
+    ];
+    assert.equal(stockBalance(ms, "кг", "w1").qty, 4.5);
+  });
+
+  it("корректировка привязана к своему складу и не течёт на чужой", () => {
+    const ms: StockMovement[] = [
+      { kind: "intake", warehouseId: "w1", qty: 5, unit: "кг" },
+      { kind: "intake", warehouseId: "w2", qty: 5, unit: "кг" },
+      { kind: "adjustment", warehouseId: "w1", qty: -1, unit: "кг" },
+    ];
+    assert.equal(stockBalance(ms, "кг", "w1").qty, 4);
+    assert.equal(stockBalance(ms, "кг", "w2").qty, 5, "чужой склад не тронут");
+  });
 });

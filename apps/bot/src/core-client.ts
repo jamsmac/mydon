@@ -248,6 +248,71 @@ export class CoreClient {
     return this.request(`/entities/${id}`, { method: "PATCH", body: JSON.stringify({ attrs }) });
   }
 
+  /** Склады направления — для клавиатуры инвентаризации. */
+  warehouses(domain: Domain = "vendhub"): Promise<EntityRow[]> {
+    return this.searchEntities({ domain, type: "warehouse" });
+  }
+
+  /** Ингредиенты направления — для выбора при инвентаризации/приходе. */
+  ingredients(domain: Domain = "vendhub"): Promise<EntityRow[]> {
+    return this.searchEntities({ domain, type: "ingredient" });
+  }
+
+  /** Остаток пары «склад × ингредиент» — показать перед вводом факта. */
+  stockBalance(
+    warehouseId: string,
+    ingredientId: string,
+  ): Promise<{
+    warehouseId: string;
+    warehouseName: string;
+    ingredientId: string;
+    ingredientName: string;
+    baseUnit: string | null;
+    qty: number | null;
+    unconvertible: number;
+  }> {
+    const qs = new URLSearchParams({ warehouseId, ingredientId });
+    return this.request(`/stock/balance?${qs.toString()}`);
+  }
+
+  /** Приход сырья: движение на склад. Цена/поставщик — по желанию. */
+  addIntake(input: {
+    warehouseId: string;
+    ingredientId: string;
+    qty: number;
+    unit: string;
+    createdBy?: string;
+    unitPrice?: number;
+    supplier?: string;
+    note?: string;
+  }): Promise<{ id: string }> {
+    return this.request("/stock/movement", {
+      method: "POST",
+      body: JSON.stringify({ kind: "intake", ...input }),
+    });
+  }
+
+  /** Инвентаризация: записать факт пересчёта — сервер сам считает дельту. */
+  stocktake(input: {
+    warehouseId: string;
+    ingredientId: string;
+    actual: number;
+    unit?: string;
+    countedBy?: string;
+    note?: string;
+  }): Promise<{
+    changed: boolean;
+    before: number;
+    actual: number;
+    delta: number;
+    unit: string;
+    ingredientName: string;
+    warehouseName: string;
+    movementId: string | null;
+  }> {
+    return this.request("/stock/stocktake", { method: "POST", body: JSON.stringify(input) });
+  }
+
   /**
    * Загрузить фото и привязать к записи. Идёт multipart (файл нельзя в JSON),
    * поэтому не через общий request: свой fetch с тем же service-token.

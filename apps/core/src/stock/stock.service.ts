@@ -38,6 +38,18 @@ export interface CreateMovementInput {
   createdBy?: string | null;
 }
 
+/** Пересчёт: сколько по факту насчитали ингредиента на складе. */
+export interface StocktakeInput {
+  warehouseId: string;
+  ingredientId: string;
+  /** Фактическое количество по пересчёту, ≥ 0. */
+  actual: number;
+  /** Единица пересчёта; пусто — считаем в базовой единице ингредиента. */
+  unit?: string | null;
+  note?: string | null;
+  countedBy?: string | null;
+}
+
 type MovementRow = typeof stockMovement.$inferSelect;
 
 /** Цена покупки ингредиента из его карточки: число-или-строка + единица. */
@@ -294,6 +306,126 @@ export class StockService implements OnModuleInit {
     });
 
     return { warehouseId, warehouseName: wh.name, items };
+  }
+
+  /**
+   * Остаток одной пары «склад × ингредиент» в базовой единице — то, что видит
+   * сотрудник перед вводом факта при инвентаризации.
+   */
+  async pairBalance(warehouseId: string, ingredientId: string): Promise<{
+    warehouseId: string;
+    warehouseName: string;
+    ingredientId: string;
+    ingredientName: string;
+    baseUnit: Unit | null;
+    qty: number | null;
+    unconvertible: number;
+  }> {
+    const wh = await this.cardOfType(warehouseId, "warehouse");
+    const ing = await this.cardOfType(ingredientId, "ingredient");
+    const base = this.baseUnitOf((ing.attrs ?? {}) as Record<string, unknown>);
+    const rows = await this.movementsOf(eq(stockMovement.ingredientId, ingredientId));
+    const b = base ? stockBalance(this.toBalanceInput(rows), base, warehouseId) : null;
+    return {
+      warehouseId,
+      warehouseName: wh.name,
+      ingredientId,
+      ingredientName: ing.name,
+      baseUnit: base,
+      qty: b ? b.qty : null,
+      unconvertible: b ? b.unconvertible : 0,
+    };
+  }
+
+  /**
+   * Инвентаризация: сотрудник насчитал по факту `actual` — записываем
+   * корректировку на дельту «стало − было».
+   *
+   * Дельту считает сервер (единственный источник правды об остатке), а не
+   * клиент: два человека могли считать один склад, и вычитать надо из текущего
+   * остатка на момент записи. Корректировка — обычное движение ленты
+   * (append-only), поэтому история пересчётов видна, а прежние движения не
+   * переписываются.
+   */
+  async stocktake(input: StocktakeInput): Promise<{
+    changed: boolean;
+    before: number;
+    actual: number;
+    delta: number;
+    unit: Unit;
+    ingredientName: string;
+    warehouseName: string;
+    movementId: string | null;
+  }> {
+    if (!(input.actual >= 0)) {
+      throw new BadRequestException("Фактическое количество не может быть отрицательным");
+    }
+    const pair = await this.pairBalance(input.warehouseId, input.ingredientId);
+    const base = pair.baseUnit;
+    if (!base) {
+      throw new BadRequestException(
+        `У ингредиента «${pair.ingredientName}» не задана базовая единица — сначала укажите её, потом инвентаризация`,
+      );
+    }
+    if (pair.unconvertible > 0) {
+      throw new BadRequestException(
+        "Часть движений в несводимой единице — остаток неполон, инвентаризация дала бы неверную дельту. Сначала выправьте единицы.",
+      );
+    }
+
+    // Факт приводим к базовой единице ингредиента: считать могли в любой из
+    // совместимых (кг вместо г), но остаток и дельта — в базовой.
+    let actualBase = input.actual;
+    if (input.unit && input.unit !== base) {
+      if (!isUnit(input.unit)) throw new BadRequestException(`Единица «${input.unit}» неизвестна`);
+      const conv = convertQty(input.actual, input.unit, base);
+      if (conv === null) {
+        throw new BadRequestException(`«${input.unit}» не перевести в базовую единицу «${base}»`);
+      }
+      actualBase = conv;
+    }
+
+    const before = pair.qty ?? 0;
+    // Округляем до точности хранения (scale 3), иначе дельта копит хвосты.
+    const delta = Math.round((actualBase - before) * 1000) / 1000;
+    if (delta === 0) {
+      return {
+        changed: false,
+        before,
+        actual: actualBase,
+        delta: 0,
+        unit: base,
+        ingredientName: pair.ingredientName,
+        warehouseName: pair.warehouseName,
+        movementId: null,
+      };
+    }
+
+    const [row] = await this.db
+      .insert(stockMovement)
+      .values({
+        kind: "adjustment",
+        ingredientId: input.ingredientId,
+        warehouseId: input.warehouseId,
+        dt: new Date().toISOString().slice(0, 10),
+        qty: String(delta), // подписанная дельта; знак несёт вид adjustment
+        unit: base,
+        source: "stocktake",
+        note: input.note ?? null,
+        createdBy: input.countedBy ?? "owner",
+      })
+      .returning();
+
+    return {
+      changed: true,
+      before,
+      actual: actualBase,
+      delta,
+      unit: base,
+      ingredientName: pair.ingredientName,
+      warehouseName: pair.warehouseName,
+      movementId: row.id,
+    };
   }
 
   /**

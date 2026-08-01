@@ -119,6 +119,24 @@ export async function approveEntity(id: string): Promise<ActionResult> {
     return fail(err);
   }
   revalidatePath("/domain/vendhub");
+  revalidatePath("/queue");
+  return { ok: true };
+}
+
+/**
+ * Утвердить все переданные карточки разом — «утвердить все новые» из очереди.
+ *
+ * Пустой список — не ошибка, а «нечего утверждать»: молча ничего не делаем.
+ */
+export async function approveAllCards(ids: string[]): Promise<ActionResult> {
+  if (ids.length === 0) return { ok: true };
+  try {
+    await core.approveEntities(ids);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/domain/vendhub");
+  revalidatePath("/queue");
   return { ok: true };
 }
 
@@ -130,6 +148,7 @@ export async function approveField(id: string, field: string): Promise<ActionRes
     return fail(err);
   }
   revalidatePath("/domain/vendhub");
+  revalidatePath("/queue");
   return { ok: true };
 }
 
@@ -141,6 +160,7 @@ export async function rejectField(id: string, field: string): Promise<ActionResu
     return fail(err);
   }
   revalidatePath("/domain/vendhub");
+  revalidatePath("/queue");
   return { ok: true };
 }
 

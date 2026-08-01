@@ -12,7 +12,7 @@
 import { convertQty, type Unit } from "./recipe";
 
 /** Вид движения склада. */
-export type StockMovementKind = "intake" | "consumption" | "transfer";
+export type StockMovementKind = "intake" | "consumption" | "transfer" | "adjustment";
 
 /** Одно движение склада для подсчёта остатка. */
 export interface StockMovement {
@@ -21,7 +21,12 @@ export interface StockMovement {
   warehouseId: string;
   /** Встречный склад перемещения (куда легло). */
   counterpartyId?: string | null;
-  /** Количество, всегда положительное; знак задаёт вид. */
+  /**
+   * Количество. У прихода/расхода/перемещения — всегда положительное, знак
+   * задаёт вид. У корректировки инвентаризации (`adjustment`) — подписанная
+   * дельта «стало − было»: может быть отрицательной (недостача) или
+   * положительной (излишек).
+   */
   qty: number;
   unit: Unit;
 }
@@ -49,6 +54,12 @@ function signedFor(m: StockMovement, warehouseId: string | null, converted: numb
   }
   if (m.kind === "consumption") {
     return warehouseId === null || m.warehouseId === warehouseId ? -converted : 0;
+  }
+  if (m.kind === "adjustment") {
+    // Корректировка инвентаризации привязана к своему складу; `converted` уже
+    // несёт знак (дельта «стало − было» могла быть отрицательной), поэтому
+    // добавляем её как есть, без внешнего знака.
+    return warehouseId === null || m.warehouseId === warehouseId ? converted : 0;
   }
   // transfer
   if (warehouseId === null) return 0; // в сводном остатке перемещение нейтрально

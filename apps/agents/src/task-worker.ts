@@ -1,6 +1,7 @@
 import { notion } from "@mydon/connectors";
 import type { AutonomyTier } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
+import { dailyCap, startOfTashkentDay } from "./limits";
 import type { AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { hasSkill, SKILLS } from "./skills";
@@ -58,6 +59,13 @@ export async function runAgentTasks(
   const tasks = await core.myTasks(agent.name);
   const results: TaskRunResult[] = [];
 
+  // Дневной потолок действий распространяется и на задачи, не только на
+  // расписание: иначе поручениями его можно было бы обойти. Считаем разово по
+  // журналу Core (истина об уже сделанном там, а не в памяти) и ведём локально —
+  // каждое действие в этом проходе приближает к потолку.
+  const cap = dailyCap();
+  let used = cap > 0 ? await core.countAgentActions(`agent:${agent.name}`, startOfTashkentDay()) : 0;
+
   for (const t of tasks) {
     const skill = matchSkill(agent, t.title);
 
@@ -69,6 +77,19 @@ export async function runAgentTasks(
       await core.addTaskComment(t.id, note, `agent:${agent.name}`);
       results.push({ taskId: t.id, outcome: "returned", note });
       continue;
+    }
+
+    // Задача требует действия навыком, а дневной потолок исчерпан: НЕ берём её в
+    // работу и НЕ изображаем отчёт. Оставляем как есть (не трогаем статус) —
+    // вернётся в следующий проход, а сбросится потолок в полночь по Ташкенту.
+    // Останавливаемся: раз действовать сегодня нельзя, порядок задач сохраняем.
+    if (cap > 0 && used >= cap) {
+      results.push({
+        taskId: t.id,
+        outcome: "skipped",
+        note: `дневной потолок действий исчерпан (${used}/${cap}) — вернусь после полуночи по Ташкенту`,
+      });
+      break;
     }
 
     await core.setTaskStatus(t.id, "in_progress", `agent:${agent.name}`);
@@ -87,6 +108,20 @@ export async function runAgentTasks(
     // Есть предложение. При пороге T0 агент не действует сам: результат идёт
     // владельцу на согласование, а задача закрывается отчётом о находке.
     const run = await runSkill(agent, skill, core, threshold);
+
+    // Действие могло не состояться: потолок догнал по свежему счёту Core внутри
+    // runSkill, либо повод исчез между проверкой и прогоном. Тогда НЕ выдаём
+    // задачу за сделанную и НЕ публикуем отчёт — она остаётся открытой и
+    // вернётся в следующий проход.
+    if (run.outcome === "skipped") {
+      results.push({ taskId: t.id, outcome: "skipped", note: run.reason });
+      continue;
+    }
+
+    // Действие состоялось — учитываем его в дневном счёте (журнал Core уже
+    // записал agent.action; локальный счётчик держим в согласии для этого прохода).
+    used += 1;
+
     let note =
       run.outcome === "approval_requested"
         ? `${proposal.action}\n\nВынес на твоё решение.`

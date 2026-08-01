@@ -19,6 +19,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "db:seed": "node dist/seed.js",
+    "db:seed:catalog": "node dist/seed-catalog.js",
     "clean": "rm -rf dist .turbo *.tsbuildinfo",
     "test": "find dist -name '*.test.js' -print0 | xargs -0 --no-run-if-empty node --test"
   },
