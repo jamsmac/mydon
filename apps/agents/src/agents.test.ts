@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { autonomyThreshold, explainPolicy, requiresApproval, tierRank } from "./policy";
 import { loadAgents } from "./registry";
 import { runSkill } from "./runner";
+import { EXECUTORS } from "./executors";
 import { runAgentTasks } from "./task-worker";
 import { SKILLS } from "./skills";
 import type { AgentDefinition } from "./registry";
@@ -206,6 +207,42 @@ describe("Прогон навыка", () => {
     assert.match(res.reason, /исполнителя навыка ещё нет/);
     // event(agent.run) → approval → event(agent.action): всё через согласование.
     assert.deepEqual(calls, ["event", "approval", "event"]);
+  });
+
+  const OVERDUE = {
+    domain: "globerent",
+    totals: [],
+    overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+    overdueTotal: 1,
+    overdueTruncated: false,
+  };
+
+  it("исполнитель есть и порог позволяет — исполняет и проверяет, без согласования", async () => {
+    const { client, calls } = stubCore({ obligations: async () => OVERDUE });
+    // Регистрируем временный исполнитель, подтверждающий результат.
+    EXECUTORS["watch-receivables"] = async () => ({ ok: true, detail: "напоминание создано и перечитано" });
+    try {
+      const res = await runSkill(base, "watch-receivables", client, "T2");
+      assert.equal(res.outcome, "executed");
+      assert.match(res.reason, /исполнено и проверено/);
+      // event(agent.run) → event(agent.action): согласования нет — реально исполнено.
+      assert.deepEqual(calls, ["event", "event"]);
+    } finally {
+      delete EXECUTORS["watch-receivables"];
+    }
+  });
+
+  it("исполнитель не подтвердил результат — не врём, выносим на согласование", async () => {
+    const { client, calls } = stubCore({ obligations: async () => OVERDUE });
+    EXECUTORS["watch-receivables"] = async () => ({ ok: false, detail: "перечитка эффекта не нашла" });
+    try {
+      const res = await runSkill(base, "watch-receivables", client, "T2");
+      assert.equal(res.outcome, "approval_requested");
+      // Провал проверки → согласование: run → approval → action.
+      assert.deepEqual(calls, ["event", "approval", "event"]);
+    } finally {
+      delete EXECUTORS["watch-receivables"];
+    }
   });
 
   it("дневной потолок исчерпан — предложение НЕ выносится", async () => {

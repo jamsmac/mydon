@@ -114,12 +114,14 @@ export async function runAgentTasks(
       continue;
     }
 
-    // Действие состоялось (при текущем пороге — предложение владельцу).
-    // Учитываем в дневном счёте (журнал Core уже записал agent.action).
+    // Действие состоялось. Учитываем в дневном счёте (журнал Core уже записал
+    // agent.action). Исполнено с проверкой — задача сделана; вынесено на
+    // согласование — предложена (решает владелец).
     used += 1;
 
     const action = run.action ?? "";
-    let note = `${action}\n\nВынес на твоё решение.`;
+    const executed = run.outcome === "executed";
+    let note = executed ? `${action}\n\nСделано и проверено.` : `${action}\n\nВынес на твоё решение.`;
 
     // Notion — место, куда владелец и так смотрит. Отчёт уходит туда, ссылка —
     // в задачу. Не настроен или не ответил — не беда: отчёт уже есть в MYDON.
@@ -127,7 +129,7 @@ export async function runAgentTasks(
     if (link !== null) note += `\n\nПодробнее: ${link}`;
 
     await core.setTaskStatus(t.id, "done", `agent:${agent.name}`, note);
-    results.push({ taskId: t.id, outcome: "proposed", note });
+    results.push({ taskId: t.id, outcome: executed ? "done" : "proposed", note });
   }
 
   return results;
