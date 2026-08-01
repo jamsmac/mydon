@@ -2,7 +2,7 @@
   "name": "mydon",
   "version": "0.0.0",
   "private": true,
-  "description": "MYDON — единый контур управления направлениями (GLOBERENT, VendHub, TRent, личное)",
+  "description": "MYDON — единый контур управления направлениями (GLOBERENT, VendHub, личное)",
   "packageManager": "pnpm@10.19.0",
   "engines": {
     "node": ">=20.19"
