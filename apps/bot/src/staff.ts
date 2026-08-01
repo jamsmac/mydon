@@ -17,6 +17,14 @@ import {
   parseInventoryCallback,
   startInventory,
 } from "./staff-inventory";
+import {
+  handleIntakeCallback,
+  handleIntakeCount,
+  intakeStepHint,
+  isIntakeTrigger,
+  parseIntakeCallback,
+  startIntake,
+} from "./staff-intake";
 
 /**
  * Работа сотрудника в Telegram (решение владельца: сотрудники — через бота).
@@ -72,6 +80,7 @@ const HELP_STAFF = [
   "• «задачи» — список того, что на тебе",
   "• «инкассация» — сдать выручку с автомата",
   "• «новый ингредиент» / «новая запчасть» — завести карточку с фото",
+  "• «приход» — отметить, что сырьё пришло на склад",
   "• «инвентаризация» — пересчитать остаток на складе",
   "• кнопки под задачей: «Взял» и «Сделал»",
   "• после «Сделал» напиши одной строкой, что именно сделано — это отчёт",
@@ -171,10 +180,21 @@ export async function handleStaffMessage(
     }
     return { reply: { text: inventoryStepHint(conv.step) } };
   }
+  if (conv?.flow === "intake") {
+    if (conv.step === "count" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await handleIntakeCount(chatId, clean, person, deps) };
+    }
+    return { reply: { text: intakeStepHint(conv.step) } };
+  }
 
   // Завести номенклатуру: «новый ингредиент», «новая запчасть».
   if (isRegisterTrigger(clean)) {
     return { reply: startRegister(chatId, deps) };
+  }
+
+  // Приход сырья на склад: «приход», «пришло», «завоз».
+  if (isIntakeTrigger(clean)) {
+    return { reply: await startIntake(chatId, deps) };
   }
 
   // Инвентаризация склада: «инвентаризация», «пересчёт».
@@ -253,6 +273,16 @@ export async function handleStaffCallback(
   const inv = parseInventoryCallback(data);
   if (inv) {
     const res = await handleInventoryCallback(chatId, inv, person, deps);
+    return {
+      answer: res.answer,
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
+  // Кнопки прихода (n:wh/ing/cancel).
+  const intake = parseIntakeCallback(data);
+  if (intake) {
+    const res = await handleIntakeCallback(chatId, intake, person, deps);
     return {
       answer: res.answer,
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),

@@ -275,6 +275,23 @@ export class CoreClient {
     return this.request(`/stock/balance?${qs.toString()}`);
   }
 
+  /** Приход сырья: движение на склад. Цена/поставщик — по желанию. */
+  addIntake(input: {
+    warehouseId: string;
+    ingredientId: string;
+    qty: number;
+    unit: string;
+    createdBy?: string;
+    unitPrice?: number;
+    supplier?: string;
+    note?: string;
+  }): Promise<{ id: string }> {
+    return this.request("/stock/movement", {
+      method: "POST",
+      body: JSON.stringify({ kind: "intake", ...input }),
+    });
+  }
+
   /** Инвентаризация: записать факт пересчёта — сервер сам считает дельту. */
   stocktake(input: {
     warehouseId: string;
