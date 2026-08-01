@@ -3,6 +3,7 @@ import { APP_GUARD } from "@nestjs/core";
 import { ServiceTokenGuard } from "./common/service-token.guard";
 import { AgentsModule } from "./agents/agents.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
+import { AttachmentsModule } from "./attachments/attachments.module";
 import { AuditModule } from "./audit/audit.module";
 import { CollectionsModule } from "./collections/collections.module";
 import { DbModule } from "./db/db.module";
@@ -25,6 +26,7 @@ import { VerificationModule } from "./verification/verification.module";
   imports: [
     DbModule,
     AgentsModule,
+    AttachmentsModule,
     AuditModule,
     CollectionsModule,
     EntitiesModule,

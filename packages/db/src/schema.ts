@@ -572,6 +572,32 @@ export const geoPoint = pgTable(
   ],
 );
 
+// ── attachment: файлы (фото номенклатуры, чеки), привязанные к записи ──
+//
+// Полиморфная привязка: одна таблица под фото карточек, чеки приходов и т.п.
+// Сам файл лежит в объектном хранилище (S3/MinIO) или на диске — здесь только
+// ключ и метаданные. Так фото товара/запчасти, снятое сотрудником в Telegram,
+// привязывается к карточке (owner_type='entity') или движению склада.
+export const attachment = pgTable(
+  "attachment",
+  {
+    id: id(),
+    /** К чему привязано: 'entity' | 'stock_movement' | ... */
+    ownerType: text("owner_type").notNull(),
+    ownerId: uuid("owner_id").notNull(),
+    /** Что это: photo | receipt | doc. */
+    kind: text("kind").default("photo").notNull(),
+    /** Ключ в хранилище (S3-ключ или относительный путь на диске). */
+    storageKey: text("storage_key").notNull(),
+    mime: text("mime"),
+    bytes: integer("bytes"),
+    /** Кто загрузил: owner | staff:<id> | agent:<имя>. */
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("attachment_owner_idx").on(t.ownerType, t.ownerId)],
+);
+
 // ── notification_delivery: что уже доставлено владельцу (FR-2) ──
 //
 // Срочное уведомление выводится из события правилом детерминированно, поэтому
