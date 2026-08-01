@@ -435,7 +435,7 @@ async function ReportPane({
         />
       </div>
 
-      <div className="subtabs">
+      <div className="subtabs stick">
         <Link href={viewHref("rows")} scroll={false} className={`subtab ${view === "rows" ? "active" : ""}`}>
           Строки
         </Link>

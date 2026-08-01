@@ -26,6 +26,8 @@
   --r: 12px;
   --r-s: 10px;
   --bar: 64px;
+  /* Высота липкой панели вкладок направления — офсет для липких панелей под ней. */
+  --tabs-h: 55px;
 
   /* старые имена — часть компонентов ещё ссылается на них */
   --navy: var(--bg);
@@ -234,6 +236,9 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 }
 .subtabs a.on, .subtabs a.active, .subtabs button.on { color: #fff; background: var(--surf-2); border-color: var(--accent-line); }
 .subtabs a.empty, .subtabs a.dim, .subtabs button.empty { color: var(--tx-3); opacity: 0.6; padding: 0 12px; border: 1px solid transparent; background: var(--surf); text-align: left; }
+/* Липкая панель срезов: держится под вкладками направления, чтобы в глубине
+   отчёта переключатель Строки/Журнал/Цены не уезжал вместе с таблицей. */
+.subtabs.stick { position: sticky; top: var(--tabs-h); z-index: 3; background: var(--bg); padding-top: 8px; border-bottom: 1px solid var(--line); }
 .subtabs .n { font-family: var(--fm); font-size: 11px; opacity: 0.75; }
 
 /* плитки KPI */
