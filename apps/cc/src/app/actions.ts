@@ -52,7 +52,7 @@ export async function searchRegistry(q: string): Promise<PaletteHit[]> {
             kind: "report",
             title,
             sub: `${s.title} · отчёт`,
-            href: `/domain/vendhub?tab=sources&src=${encodeURIComponent(
+            href: `/domain/vendhub?tab=reports:sources&src=${encodeURIComponent(
               s.code,
             )}&rep=${encodeURIComponent(r.reportCode)}`,
           });

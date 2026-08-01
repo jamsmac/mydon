@@ -20,6 +20,9 @@ import { StayTimeline } from "../../../components/machine-stays";
 import { MachinePricesView } from "../../../components/prices-view";
 import { EntityApproval } from "../../../components/entity-approval";
 import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
+import { PlanogramEditor } from "../../../components/planogram-editor";
+import { StocktakeSession } from "../../../components/stocktake-session";
+import { parsePlanogram } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
 import { WarehouseStockView } from "../../../components/warehouse-stock";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
@@ -144,6 +147,24 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Планограмма автомата: какой товар в каком слоте. Товары того же направления —
+  // из них расставляется раскладка. Ошибка здесь не роняет карточку.
+  const isMachine = entity.type === "machine";
+  let planogramProducts: { id: string; name: string; approved: boolean }[] = [];
+  if (isMachine) {
+    try {
+      const cards = entity.domain ? await core.entitiesOfType(entity.domain, "product") : [];
+      planogramProducts = cards.map((c) => ({
+        id: c.id,
+        name: c.name,
+        approved: c.approvedAt != null,
+      }));
+    } catch {
+      planogramProducts = [];
+    }
+  }
+  const planogram = parsePlanogram(entity.attrs);
+
   return (
     <>
       <div className="page-head">
@@ -220,6 +241,14 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         </div>
       )}
 
+      {isMachine && (
+        <PlanogramEditor
+          entity={{ id: entity.id }}
+          products={planogramProducts}
+          planogram={planogram}
+        />
+      )}
+
       {isRecipe && recipe && (
         <section id="recipe" data-toc="Рецепт">
           <RecipeEditor entity={{ id: entity.id }} ingredients={ingredients} recipe={recipe} />
@@ -241,6 +270,10 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         <section id="whstock" data-toc="Остаток">
           <WarehouseStockView stock={warehouseStock} />
         </section>
+      )}
+
+      {isWarehouse && warehouseStock && warehouseStock.items.length > 0 && (
+        <StocktakeSession warehouseId={entity.id} items={warehouseStock.items} />
       )}
 
       <section id="fields" data-toc="Поля">

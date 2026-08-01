@@ -152,8 +152,6 @@ export default async function DomainPage({
     ...(domain === "vendhub"
       ? [
           { key: "collect", label: `Инкассация${(collSummary?.pending ?? 0) > 0 ? ` ${collSummary!.pending}` : ""}` },
-          // Отчёты — витрина по источникам (сырьё, из которого берутся все цифры).
-          { key: "sources", label: "Отчёты" },
         ]
       : []),
     { key: "team", label: `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
@@ -164,8 +162,10 @@ export default async function DomainPage({
   // Внутри группы по умолчанию открыта первая подвкладка с данными.
   const leaf =
     group?.leaves.find((l) => l.type === activeLeaf) ??
+    // Витрина по источникам — вид отчётов по умолчанию (там, где она есть).
+    group?.leaves.find((l) => l.type === "sources") ??
     group?.leaves.find((l) => l.type !== null && (byType[l.type] ?? 0) > 0) ??
-    // Единственный живой отчёт — Инкассация: группа открывается сразу на нём.
+    // Иначе первый живой отчёт — Инкассация.
     group?.leaves.find((l) => l.type === "collection") ??
     group?.leaves[0];
   const leafItems =
@@ -176,7 +176,7 @@ export default async function DomainPage({
   const activeTab = topTabs.find((t) => t.key === activeGroup);
   const crumbLabel =
     activeTab && activeGroup !== "overview" ? activeTab.label.replace(/\s+\d+$/, "") : null;
-  const routeSlug = activeGroup === "overview" ? "" : activeGroup === "sources" ? "reports" : activeGroup;
+  const routeSlug = activeGroup === "overview" ? "" : activeGroup;
   const routePath = `/${domain}${routeSlug ? `/${routeSlug}` : ""}${activeLeaf ? `/${activeLeaf}` : ""}`;
 
   return (
@@ -221,7 +221,7 @@ export default async function DomainPage({
         <div className="subtabs">
           {group.leaves.map((l) => {
             // Инкассация живёт своей таблицей, а не реестром — не затемняем.
-            const LIVE = ["collection", "sale", "purchase", "machine_stock", "consumption"];
+            const LIVE = ["sources", "collection", "sale", "purchase", "machine_stock", "consumption"];
             const n = l.type && LIVE.includes(l.type) ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
             const isActive = leaf === l;
             return (
@@ -459,8 +459,8 @@ export default async function DomainPage({
         </>
       )}
 
-      {/* ── Отчёты: витрина по источникам; вход в детальный срез — драйв по params ── */}
-      {activeGroup === "sources" &&
+      {/* ── Отчёты → По источникам: витрина; вход в детальный срез — драйв по params ── */}
+      {group && leaf?.type === "sources" &&
         (sp.src || sp.rep || sp.view || sp.mode || sp.ra || sp.rb ? (
           <SourcesView base={`/domain/${domain}`} sp={sp} />
         ) : (
@@ -495,7 +495,7 @@ export default async function DomainPage({
       )}
 
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && !["collection", "sale", "product", "purchase", "machine_stock"].includes(leaf.type) && (
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock"].includes(leaf.type) && (
         <>
           {leafItems.length > 0 ? (
             <>

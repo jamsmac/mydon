@@ -51,6 +51,8 @@ export const VENDHUB_GROUPS: NavGroup[] = [
     key: "reports",
     label: "Отчёты",
     leaves: [
+      // Витрина по источникам — основной вид отчётов (источник → отчёт → срез).
+      { label: "По источникам", type: "sources" },
       { label: "Журнал продаж", type: "sale" },
       { label: "Расход сырья", type: "consumption" },
       { label: "Инкассация", type: "collection" },

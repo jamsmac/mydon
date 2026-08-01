@@ -61,7 +61,7 @@ export async function ReportsOverview({ base }: { base: string }) {
   // Ссылка в детальный срез отчёта: остаёмся на вкладке «Отчёты», выбираем
   // источник/отчёт и вид. Пустой view → строки (как раньше).
   const drill = (src: string, rep: string, view?: string): string => {
-    const p = new URLSearchParams({ tab: "sources", src, rep });
+    const p = new URLSearchParams({ tab: "reports:sources", src, rep });
     if (view) p.set("view", view);
     return `${base}?${p.toString()}`;
   };
@@ -69,7 +69,7 @@ export async function ReportsOverview({ base }: { base: string }) {
   return (
     <>
       <div className="page-head" style={{ marginBottom: 12 }}>
-        <h1 className="h1">Отчёты</h1>
+        <h1 className="h1">Отчёты по источникам</h1>
         <p className="lead">
           {allReports.length} {allReports.length === 1 ? "отчёт" : "отчётов"} из {sources.length}{" "}
           {sources.length === 1 ? "источника" : "источников"} · новые появляются здесь сами, как

@@ -962,6 +962,18 @@ export const core = {
     send<StockMovementRow>("/stock/movement", "POST", input),
   /** Удалить движение (правка ручного прихода). */
   deleteMovement: (id: string) => send<{ ok: boolean }>(`/stock/movement/${id}`, "DELETE"),
+  /** Пересчёт: сервер сам считает дельту от книжного остатка и пишет корректировку. */
+  stocktake: (input: Record<string, unknown>) =>
+    send<{
+      changed: boolean;
+      before: number;
+      actual: number;
+      delta: number;
+      unit: string;
+      ingredientName: string;
+      warehouseName: string;
+      movementId: string | null;
+    }>("/stock/stocktake", "POST", input),
   /** Расход сырья за период (списание из журнала продаж по рецептам). */
   consumption: (params: Record<string, string> = {}) => {
     const qs = new URLSearchParams(params).toString();
