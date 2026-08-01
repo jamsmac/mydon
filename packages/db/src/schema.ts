@@ -18,6 +18,7 @@ import {
   index,
   date,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
 
 // ── Перечисления ──
@@ -544,6 +545,31 @@ export const event = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("event_type_time_idx").on(t.type, t.occurredAt)],
+);
+
+// ── geo_point: типизированные координаты карточки ──
+//
+// Раньше широта/долгота жили в entity.attrs строками без всякой проверки: можно
+// было записать «широта: 999» или перепутать её с долготой. Здесь координаты
+// лежат ЧИСЛАМИ с ограничением диапазона на уровне БД — мусор не запишется
+// вовсе, а не всплывёт позже пропавшей с карты точкой. Одна точка на карточку.
+// attrs остаются для совместимости; Core держит эту таблицу в согласии с ними.
+export const geoPoint = pgTable(
+  "geo_point",
+  {
+    entityId: uuid("entity_id")
+      .primaryKey()
+      .references(() => entity.id, { onDelete: "cascade" }),
+    lat: numeric("lat", { precision: 9, scale: 6 }).notNull(),
+    lng: numeric("lng", { precision: 9, scale: 6 }).notNull(),
+    /** Адрес точки словами — из «точка»/«адрес»/«локация». */
+    address: text("address"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    check("geo_point_lat_range", sql`${t.lat} >= -90 and ${t.lat} <= 90`),
+    check("geo_point_lng_range", sql`${t.lng} >= -180 and ${t.lng} <= 180`),
+  ],
 );
 
 // ── notification_delivery: что уже доставлено владельцу (FR-2) ──

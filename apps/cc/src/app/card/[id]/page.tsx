@@ -68,15 +68,16 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   }
 
   const a = entity.attrs ?? {};
-  // Координаты приходят и строкой, и числом (после парсинга дробей) — принимаем оба.
+  // Источник истины — типизированная точка (проверена по диапазону на записи).
+  // Пока карточка не мигрировала — принимаем координаты из attrs (строкой/числом).
   const coord = (v: unknown): string | null =>
     typeof v === "number" && Number.isFinite(v)
       ? String(v)
       : typeof v === "string" && v.trim().length > 0
         ? v.trim()
         : null;
-  const lat = coord(a["широта"]);
-  const lng = coord(a["долгота"]);
+  const lat = entity.geo ? String(entity.geo.lat) : coord(a["широта"]);
+  const lng = entity.geo ? String(entity.geo.lng) : coord(a["долгота"]);
   const hasGeo = lat !== null && lng !== null;
 
   // Рецепт показываем только у товара с принципом «рецепт»: состав из

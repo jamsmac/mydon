@@ -69,6 +69,12 @@ export interface Entity {
   createdFrom?: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Типизированная точка карточки: координаты числами, проверенные по диапазону
+   * на записи. null — координат нет. Источник истины для карты; attrs остаются
+   * для совместимости.
+   */
+  geo?: { lat: number; lng: number; address: string | null } | null;
 }
 
 /** Значение поля карточки, предложенное не владельцем. */
