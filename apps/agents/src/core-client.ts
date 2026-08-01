@@ -85,6 +85,13 @@ export class AgentsCoreClient {
     return this.request("/events", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** Сколько действий (agent.action) агент совершил с момента `since`. */
+  async countAgentActions(source: string, since: Date): Promise<number> {
+    const qs = new URLSearchParams({ source, type: "agent.action", since: since.toISOString() });
+    const { count } = await this.request<{ count: number }>(`/events/count?${qs.toString()}`);
+    return count;
+  }
+
   // ── Чтение данных: агент смотрит факты ПЕРЕД тем, как что-то предлагать ──
   // Без этого навык слал бы согласование «в пустоту», приучая владельца
   // одобрять не глядя. Очередь должна оставаться сигналом, а не лентой.

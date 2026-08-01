@@ -33,6 +33,11 @@ export class ListEventsDto {
   type?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  source?: string;
+
+  @IsOptional()
   @IsISO8601()
   since?: string;
 }
@@ -57,5 +62,16 @@ export class EventsController {
       ...(filter.type ? { type: filter.type } : {}),
       ...(filter.since ? { since: new Date(filter.since) } : {}),
     });
+  }
+
+  /** Счётчик событий под фильтр (источник/тип/с даты). */
+  @Get("count")
+  async count(@Query() filter: ListEventsDto) {
+    const count = await this.events.count({
+      ...(filter.source ? { source: filter.source } : {}),
+      ...(filter.type ? { type: filter.type } : {}),
+      ...(filter.since ? { since: new Date(filter.since) } : {}),
+    });
+    return { count };
   }
 }

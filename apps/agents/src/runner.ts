@@ -1,5 +1,6 @@
 import type { AutonomyTier } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
+import { checkLimit, dailyCap, startOfTashkentDay } from "./limits";
 import { explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
 import { SKILLS } from "./skills";
@@ -66,6 +67,23 @@ export async function runSkill(
     };
   }
 
+  // Дневной потолок действий: считаем ДО того, как агент вынесет предложение
+  // или исполнит. Потолок написали давно (Ф9), но в рантайме не применяли —
+  // теперь применяем. Использование берём из журнала Core, а не из памяти.
+  const cap = dailyCap();
+  if (cap > 0) {
+    const used = await core.countAgentActions(`agent:${agent.name}`, startOfTashkentDay());
+    const limit = checkLimit(used, cap);
+    if (!limit.allowed) {
+      return {
+        agent: agent.name,
+        skill,
+        outcome: "skipped",
+        reason: limit.reason ?? `дневной потолок действий исчерпан (${used}/${cap})`,
+      };
+    }
+  }
+
   if (requiresApproval(tier, threshold)) {
     const approval = await core.requestApproval({
       agent: agent.name,
@@ -74,6 +92,12 @@ export async function runSkill(
       // Факты кладём рядом с предложением: по ним проверяется «по следам»,
       // что агент не выдумал повод.
       payload: { skill, business: agent.business, facts: proposal.facts },
+    });
+    // Действие состоялось — отмечаем в журнале, по нему считается потолок.
+    await core.recordEvent({
+      source: `agent:${agent.name}`,
+      type: "agent.action",
+      payload: { skill, action: proposal.action, approvalId: approval.id },
     });
     return {
       agent: agent.name,
@@ -84,6 +108,11 @@ export async function runSkill(
     };
   }
 
+  await core.recordEvent({
+    source: `agent:${agent.name}`,
+    type: "agent.action",
+    payload: { skill, action: proposal.action, executed: true },
+  });
   return {
     agent: agent.name,
     skill,
