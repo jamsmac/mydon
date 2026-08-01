@@ -274,11 +274,25 @@ async function main(): Promise<void> {
   setInterval(() => {
     void (async () => {
       try {
-        const texts = await notifier.collect();
-        for (const text of texts) {
-          for (const chatId of allowlist) {
-            await tg.sendMessage(chatId, text);
+        const items = await notifier.collect();
+        // Отправляем каждое отдельно: сбой одного не роняет остальные и не
+        // отмечает недоставленное. Отмечаем ПОСЛЕ успешной отправки — иначе при
+        // сбое sendMessage сигнал бы потерялся.
+        const delivered: string[] = [];
+        for (const { key, text } of items) {
+          try {
+            for (const chatId of allowlist) {
+              await tg.sendMessage(chatId, text);
+            }
+            delivered.push(key);
+          } catch (err) {
+            console.error("Уведомление не доставлено (повторю на следующем опросе):", err);
           }
+        }
+        try {
+          await notifier.ack(delivered);
+        } catch (err) {
+          console.error("Отметку о доставке не сохранить (повторю):", err);
         }
       } catch (err) {
         console.error("Уведомления не доставлены:", err);

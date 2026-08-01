@@ -128,6 +128,14 @@ export class CoreClient {
     );
   }
 
+  /** Отметить уведомления доставленными — после успешной отправки владельцу. */
+  ackNotifications(keys: string[]): Promise<{ acked: number }> {
+    return this.request<{ acked: number }>("/rules/ack", {
+      method: "POST",
+      body: JSON.stringify({ keys }),
+    });
+  }
+
   // ── Задачи и сотрудники ───────────────────────────────────────────────────
   // Сотрудник работает с задачами прямо в Telegram: ставить ему пароли и учить
   // веб-панели бессмысленно — Telegram у него уже есть и уже открыт.
