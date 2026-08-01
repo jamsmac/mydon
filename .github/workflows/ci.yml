@@ -34,6 +34,10 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Тесты гоняются по собранному dist/**/*.test.js, поэтому строго после build.
+      - name: Test
+        run: pnpm -r --if-present test
+
       - name: Audit (high+)
         run: pnpm audit --audit-level high
         continue-on-error: true

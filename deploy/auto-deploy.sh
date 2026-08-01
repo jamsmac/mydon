@@ -40,10 +40,16 @@ log "новый main $REMOTE (было $LOCAL) — начинаю деплой"
 mkdir -p "$BACKUP_DIR"
 if docker ps --format '{{.Names}}' | grep -qx mydon-db; then
   stamp="$(date '+%Y%m%d_%H%M%S')"
-  if docker exec -t mydon-db pg_dump -U mydon mydon | gzip > "$BACKUP_DIR/pre_${stamp}.sql.gz"; then
-    log "бэкап базы: $BACKUP_DIR/pre_${stamp}.sql.gz"
+  # ВАЖНО: без -t. TTY подмешивает CR в бинарный поток дампа и портит его —
+  # архив создаётся «успешно», но не восстанавливается. -i держит STDIN без TTY.
+  # Целостность gzip сразу проверяем: битый бэкап хуже отсутствующего.
+  dump="$BACKUP_DIR/pre_${stamp}.sql.gz"
+  if docker exec -i mydon-db pg_dump -U mydon mydon | gzip > "$dump" && gunzip -t "$dump"; then
+    log "бэкап базы: $dump"
   else
-    log "ВНИМАНИЕ: бэкап базы не удался — деплой останавливаю"; exit 1
+    log "ВНИМАНИЕ: бэкап базы не удался или повреждён — деплой останавливаю"
+    rm -f "$dump"
+    exit 1
   fi
   # держим последние 10 бэкапов
   ls -1t "$BACKUP_DIR"/pre_*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f

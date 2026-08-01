@@ -68,9 +68,16 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   }
 
   const a = entity.attrs ?? {};
-  const lat = a["широта"];
-  const lng = a["долгота"];
-  const hasGeo = typeof lat === "string" && typeof lng === "string" && lat.length > 0;
+  // Координаты приходят и строкой, и числом (после парсинга дробей) — принимаем оба.
+  const coord = (v: unknown): string | null =>
+    typeof v === "number" && Number.isFinite(v)
+      ? String(v)
+      : typeof v === "string" && v.trim().length > 0
+        ? v.trim()
+        : null;
+  const lat = coord(a["широта"]);
+  const lng = coord(a["долгота"]);
+  const hasGeo = lat !== null && lng !== null;
 
   // Рецепт показываем только у товара с принципом «рецепт»: состав из
   // ингредиентов и себестоимость. Ингредиенты берём того же направления —
