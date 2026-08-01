@@ -59,3 +59,4 @@ export * from "./vendinghub";
 export * from "./reconcile";
 export * from "./unify";
 export * from "./xlsx";
+export * from "./combine";
