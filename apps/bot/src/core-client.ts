@@ -59,6 +59,8 @@ export class CoreClient {
   constructor(
     private readonly baseUrl: string,
     private readonly timeoutMs = 10_000,
+    /** Внутренний токен Core: нужен на мутации (approvals, ack, задачи). */
+    private readonly serviceToken = "",
   ) {}
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -68,7 +70,11 @@ export class CoreClient {
       const res = await fetch(`${this.baseUrl}${path}`, {
         ...init,
         signal: controller.signal,
-        headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.serviceToken ? { "x-service-token": this.serviceToken } : {}),
+          ...(init?.headers ?? {}),
+        },
       });
       if (!res.ok) {
         throw new Error(`Core ответил ${res.status} на ${path}`);

@@ -25,6 +25,12 @@ async function bootstrap(): Promise<void> {
 
   await app.listen(appConfig.port);
   console.log(`MYDON Core слушает :${appConfig.port} (TZ=${appConfig.tz})`);
+  if (!appConfig.serviceToken) {
+    console.warn(
+      "ВНИМАНИЕ: SERVICE_TOKEN не задан — мутации Core открыты, защита держится " +
+        "только на сети (Docker/Tailscale). Задайте его в .env и клиентам.",
+    );
+  }
 }
 
 void bootstrap();

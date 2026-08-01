@@ -39,6 +39,8 @@ export class AgentsCoreClient {
   constructor(
     private readonly baseUrl: string,
     private readonly timeoutMs = 10_000,
+    /** Внутренний токен Core: агенты пишут события и меняют задачи. */
+    private readonly serviceToken = "",
   ) {}
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -48,7 +50,11 @@ export class AgentsCoreClient {
       const res = await fetch(`${this.baseUrl}${path}`, {
         ...init,
         signal: controller.signal,
-        headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.serviceToken ? { "x-service-token": this.serviceToken } : {}),
+          ...(init?.headers ?? {}),
+        },
       });
       if (!res.ok) throw new Error(`Core ответил ${res.status} на ${path}`);
       return (await res.json()) as T;

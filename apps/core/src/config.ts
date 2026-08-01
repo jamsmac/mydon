@@ -24,6 +24,14 @@ export const appConfig = {
     return required("DATABASE_URL");
   },
   port: process.env.PORT ? Number(process.env.PORT) : 3001,
+  /**
+   * Внутренний токен доступа к мутациям Core. Пусто — guard пропускает всё, но
+   * Core предупреждает на старте: тогда защита держится лишь на сети
+   * (Docker/Tailscale). Заполнен — мутации требуют его, чтения открыты.
+   */
+  get serviceToken(): string {
+    return process.env.SERVICE_TOKEN ?? "";
+  },
   /** Фактический пояс процесса — сообщаем то, что есть, а не то, что хотелось бы. */
   get tz(): string {
     return Intl.DateTimeFormat().resolvedOptions().timeZone;

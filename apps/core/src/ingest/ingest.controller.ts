@@ -8,6 +8,7 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from "class-validator";
+import { Public } from "../common/public.decorator";
 import { EventsService } from "../events/events.service";
 import { RulesService } from "../rules/rules.service";
 
@@ -47,6 +48,7 @@ export class IngestController {
     private readonly rules: RulesService,
   ) {}
 
+  @Public() // своя дверь: ключ INGEST_KEY в пути, не service-token
   @Post(":key")
   async ingest(@Param("key") key: string, @Body() dto: IngestDto) {
     const expected = process.env.INGEST_KEY ?? "";

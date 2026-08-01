@@ -27,6 +27,7 @@ import {
   Min,
 } from "class-validator";
 import { RAW_LINK_KINDS, roleColumnIndex, type RawLinkKind } from "@mydon/shared";
+import { Public } from "../common/public.decorator";
 import { MAX_EXPORT, RawService, normalizeRowsQuery, toCsv } from "./raw.service";
 
 export class RawImportDto {
@@ -387,6 +388,7 @@ export class RawController {
   }
 
   /** Приём выгрузки. Ключ тот же, что у шлюза событий. */
+  @Public() // своя дверь: ключ INGEST_KEY в пути, не service-token
   @Post("import/:key")
   import(@Param("key") key: string, @Body() dto: RawImportDto) {
     const expected = process.env.INGEST_KEY ?? "";
