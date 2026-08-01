@@ -152,9 +152,29 @@ export default async function DomainPage({
   const leafItems =
     group && leaf?.type ? entities.filter((e) => e.type === leaf.type).sort((a, b) => a.name.localeCompare(b.name, "ru")) : [];
 
+  // Хлебные крошки и чип маршрута (расположение из обложки): где я и как это
+  // адресуется. Счётчик из подписи вкладки для крошки убираем — «Задачи 6» → «Задачи».
+  const activeTab = topTabs.find((t) => t.key === activeGroup);
+  const crumbLabel =
+    activeTab && activeGroup !== "overview" ? activeTab.label.replace(/\s+\d+$/, "") : null;
+  const routeSlug = activeGroup === "overview" ? "" : activeGroup === "sources" ? "reports" : activeGroup;
+  const routePath = `/${domain}${routeSlug ? `/${routeSlug}` : ""}${activeLeaf ? `/${activeLeaf}` : ""}`;
+
   return (
     <>
       <div className="page-head">
+        <nav className="crumbs" aria-label="Хлебные крошки">
+          <Link href="/mydon">MYDON</Link>
+          <span className="sep">/</span>
+          <span className="cur">{DOMAIN_LABELS[domain]}</span>
+          {crumbLabel && (
+            <>
+              <span className="sep">/</span>
+              <span className="cur">{crumbLabel}</span>
+            </>
+          )}
+          <span className="route" title="Адрес раздела">{routePath}</span>
+        </nav>
         <h1 className="h1">{DOMAIN_LABELS[domain]}</h1>
         <p className="lead">
           {entities.length} {plural(entities.length, "запись", "записи", "записей")} в реестре
