@@ -1,7 +1,21 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { entity, stockMovement } from "@mydon/db";
-import { convertQty, isUnit, stockBalance, type StockMovement, type Unit } from "@mydon/shared";
-import { desc, eq, inArray, or } from "drizzle-orm";
+import { entity, rawLink, sale, stockMovement } from "@mydon/db";
+import {
+  consumptionReport,
+  convertQty,
+  isUnit,
+  normalizeSourceKey,
+  parseRecipe,
+  productKind,
+  recipeCost,
+  stockBalance,
+  type IngredientPrice,
+  type RecipeLine,
+  type SoldProduct,
+  type StockMovement,
+  type Unit,
+} from "@mydon/shared";
+import { and, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 /** Заявка на движение склада. */
@@ -20,6 +34,19 @@ export interface CreateMovementInput {
 }
 
 type MovementRow = typeof stockMovement.$inferSelect;
+
+/** Цена покупки ингредиента из его карточки: число-или-строка + единица. */
+function readIngredientPrice(attrs: Record<string, unknown>): IngredientPrice {
+  const raw = attrs["цена покупки"];
+  const price =
+    typeof raw === "number" && Number.isFinite(raw) && raw > 0
+      ? raw
+      : typeof raw === "string" && raw.trim().length > 0 && Number.isFinite(Number(raw))
+        ? Number(raw)
+        : null;
+  const unit = isUnit(attrs["единица"]) ? (attrs["единица"] as Unit) : null;
+  return { price, unit };
+}
 
 /**
  * Склад: движения сырья и остаток НА ЧТЕНИИ.
@@ -246,5 +273,138 @@ export class StockService {
     });
 
     return { warehouseId, warehouseName: wh.name, items };
+  }
+
+  /**
+   * Расход сырья за период: сколько ингредиентов списали продажи.
+   *
+   * Считается НА ЧТЕНИИ из журнала продаж и рецептов — не хранится и не пишется
+   * движениями. Продажа товара-рецепта раскрывается в состав × количество и
+   * приводится к базовой единице ингредиента. Товар из продажи сопоставляется с
+   * карточкой так же, как в разборе источников: по имени и ручным связкам
+   * (raw_link), чтобы владелец правил соответствие в одном месте.
+   */
+  async consumption(from: string, to: string): Promise<{
+    from: string;
+    to: string;
+    soldRecipeUnits: number;
+    totalCost: number;
+    unresolved: number;
+    ingredients: {
+      ingredientId: string;
+      ingredientName: string;
+      approved: boolean;
+      consumed: number | null;
+      unit: string | null;
+      cost: number | null;
+      unconvertible: number;
+      fromProducts: number;
+    }[];
+    products: { productId: string; productName: string; soldQty: number; cost: number | null }[];
+    noRecipe: { productId: string; productName: string; soldQty: number }[];
+    unmatched: { product: string; source: string; soldQty: number; revenue: number }[];
+  }> {
+    // Продажи за период, свёрнутые по источнику и названию товара.
+    const rows = await this.db
+      .select({
+        source: sale.source,
+        product: sale.product,
+        qty: sql<string>`sum(${sale.qty})`,
+        amount: sql<string>`sum(${sale.amount})`,
+      })
+      .from(sale)
+      .where(and(gte(sale.dt, from), lte(sale.dt, to)))
+      .groupBy(sale.source, sale.product);
+
+    // Карточки товаров и ручные связки — для сопоставления имени с карточкой.
+    const products = await this.db.select().from(entity).where(eq(entity.type, "product"));
+    const byId = new Map(products.map((p) => [p.id, p]));
+    const byName = new Map(products.map((p) => [normalizeSourceKey(p.name), p]));
+    const links = await this.db.select().from(rawLink).where(eq(rawLink.kind, "product"));
+    const linkByKey = new Map(links.map((l) => [`${l.sourceCode}::${l.externalKey}`, l]));
+
+    const soldByProduct = new Map<string, number>();
+    const noRecipe = new Map<string, { productName: string; soldQty: number }>();
+    const unmatched: { product: string; source: string; soldQty: number; revenue: number }[] = [];
+
+    for (const r of rows) {
+      const qty = Number(r.qty) || 0;
+      if (qty <= 0) continue;
+      const key = normalizeSourceKey(r.product);
+      const link = linkByKey.get(`${r.source}::${key}`);
+      // Связка владельца сильнее авто-совпадения; связка с пустой карточкой —
+      // осознанное «карточку не заводить», товар в расход не идёт.
+      const card = link ? (link.entityId ? byId.get(link.entityId) ?? null : null) : byName.get(key) ?? null;
+
+      if (!card) {
+        unmatched.push({ product: r.product, source: r.source, soldQty: qty, revenue: Number(r.amount) || 0 });
+        continue;
+      }
+      if (productKind((card.attrs ?? {}) as Record<string, unknown>) !== "рецепт") {
+        const cur = noRecipe.get(card.id) ?? { productName: card.name, soldQty: 0 };
+        cur.soldQty += qty;
+        noRecipe.set(card.id, cur);
+        continue;
+      }
+      soldByProduct.set(card.id, (soldByProduct.get(card.id) ?? 0) + qty);
+    }
+
+    // Составы проданных рецептов и карточки их ингредиентов.
+    const recipeLines = new Map<string, RecipeLine[]>();
+    const ingIds = new Set<string>();
+    for (const productId of soldByProduct.keys()) {
+      const card = byId.get(productId);
+      const lines = parseRecipe((card?.attrs ?? {}) as Record<string, unknown>);
+      recipeLines.set(productId, lines);
+      for (const l of lines) ingIds.add(l.ingredientId);
+    }
+    const ingCards =
+      ingIds.size === 0
+        ? []
+        : await this.db.select().from(entity).where(inArray(entity.id, [...ingIds]));
+    const ingById = new Map(ingCards.map((i) => [i.id, i]));
+
+    const priceOf = (id: string): IngredientPrice =>
+      readIngredientPrice((ingById.get(id)?.attrs ?? {}) as Record<string, unknown>);
+    const recipeOf = (id: string): RecipeLine[] => recipeLines.get(id) ?? [];
+    const sold: SoldProduct[] = [...soldByProduct].map(([productId, qty]) => ({ productId, qty }));
+
+    const report = consumptionReport(sold, recipeOf, priceOf);
+
+    return {
+      from,
+      to,
+      soldRecipeUnits: sold.reduce((n, s) => n + s.qty, 0),
+      totalCost: report.totalCost,
+      unresolved: report.unresolved,
+      ingredients: report.ingredients
+        .map((i) => {
+          const ing = ingById.get(i.ingredientId);
+          return {
+            ingredientId: i.ingredientId,
+            ingredientName: ing?.name ?? "ингредиент",
+            approved: ing ? ing.approvedAt !== null : false,
+            consumed: i.consumed,
+            unit: i.unit,
+            cost: i.cost,
+            unconvertible: i.unconvertible,
+            fromProducts: i.fromProducts,
+          };
+        })
+        .sort((a, b) => (b.cost ?? 0) - (a.cost ?? 0)),
+      products: sold
+        .map((s) => {
+          const cost = recipeCost(recipeOf(s.productId), priceOf);
+          return {
+            productId: s.productId,
+            productName: byId.get(s.productId)?.name ?? "товар",
+            soldQty: s.qty,
+            cost: cost.unresolved > 0 && cost.total === 0 ? null : s.qty * cost.total,
+          };
+        })
+        .sort((a, b) => b.soldQty - a.soldQty),
+      noRecipe: [...noRecipe].map(([productId, v]) => ({ productId, ...v })),
+      unmatched: unmatched.sort((a, b) => b.revenue - a.revenue),
+    };
   }
 }

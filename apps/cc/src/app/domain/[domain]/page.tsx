@@ -14,6 +14,7 @@ import { groupsFor } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
+import { ConsumptionView } from "../../../components/consumption-view";
 import { ProductsBook } from "../../../components/products-book";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MapPanel } from "../../../components/map-panel";
@@ -179,7 +180,7 @@ export default async function DomainPage({
         <div className="subtabs">
           {group.leaves.map((l) => {
             // Инкассация живёт своей таблицей, а не реестром — не затемняем.
-            const LIVE = ["collection", "sale", "purchase", "machine_stock"];
+            const LIVE = ["collection", "sale", "purchase", "machine_stock", "consumption"];
             const n = l.type && LIVE.includes(l.type) ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
             const isActive = leaf === l;
             return (
@@ -416,6 +417,9 @@ export default async function DomainPage({
 
       {/* ── Журнал продаж: живые данные из mydon-stock (этап 1 миграции) ── */}
       {group && leaf?.type === "sale" && <SalesView />}
+
+      {/* ── Расход сырья: списание из журнала продаж по рецептам (на чтении) ── */}
+      {group && leaf?.type === "consumption" && <ConsumptionView />}
 
       {/* ── Приход и остатки: живые данные mydon-stock (этап 2 миграции) ── */}
       {group && leaf?.type === "purchase" && <PurchasesView />}

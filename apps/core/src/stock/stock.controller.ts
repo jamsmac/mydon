@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
 import {
   IsIn,
   IsNumber,
@@ -69,5 +69,21 @@ export class StockController {
   @Get("warehouse/:id")
   warehouse(@Param("id", ParseUUIDPipe) id: string) {
     return this.stock.warehouseStock(id);
+  }
+
+  /**
+   * Расход сырья за период. По умолчанию — последние 30 дней. Даты в формате
+   * YYYY-MM-DD; нераспознанные молча заменяются умолчанием.
+   */
+  @Get("consumption")
+  consumption(@Query("from") from?: string, @Query("to") to?: string) {
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    const today = new Date();
+    const past = new Date();
+    past.setDate(past.getDate() - 30);
+    const day = (d: Date) => d.toISOString().slice(0, 10);
+    const f = from && iso.test(from) ? from : day(past);
+    const t = to && iso.test(to) ? to : day(today);
+    return this.stock.consumption(f, t);
   }
 }

@@ -794,6 +794,38 @@ export interface WarehouseStock {
   }[];
 }
 
+/** Расход одного ингредиента за период — списано продажами. */
+export interface ConsumptionIngredient {
+  ingredientId: string;
+  ingredientName: string;
+  approved: boolean;
+  /** Списано в базовой единице. null — базовой единицы/перевода нет. */
+  consumed: number | null;
+  unit: string | null;
+  /** Стоимость списанного. null — цены нет. */
+  cost: number | null;
+  unconvertible: number;
+  fromProducts: number;
+}
+
+/** Расход сырья за период: списание из журнала продаж по рецептам. */
+export interface ConsumptionReport {
+  from: string;
+  to: string;
+  /** Продано единиц товаров-рецептов за период. */
+  soldRecipeUnits: number;
+  /** Себестоимость списанного. */
+  totalCost: number;
+  /** Строк списания, где стоимость посчитать не удалось. */
+  unresolved: number;
+  ingredients: ConsumptionIngredient[];
+  products: { productId: string; productName: string; soldQty: number; cost: number | null }[];
+  /** Проданные товары с карточкой, но без рецепта — расхода не дают. */
+  noRecipe: { productId: string; productName: string; soldQty: number }[];
+  /** Проданные названия без карточки — расход по ним не сведён. */
+  unmatched: { product: string; source: string; soldQty: number; revenue: number }[];
+}
+
 /** Текстовый ответ Core — для выгрузки CSV, который нельзя разбирать как JSON. */
 export async function coreText(path: string): Promise<string> {
   let res: Response;
@@ -864,6 +896,11 @@ export const core = {
     send<StockMovementRow>("/stock/movement", "POST", input),
   /** Удалить движение (правка ручного прихода). */
   deleteMovement: (id: string) => send<{ ok: boolean }>(`/stock/movement/${id}`, "DELETE"),
+  /** Расход сырья за период (списание из журнала продаж по рецептам). */
+  consumption: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<ConsumptionReport>(`/stock/consumption${qs ? `?${qs}` : ""}`);
+  },
   pendingEntities: () =>
     get<{ cards: Entity[]; fields: (EntityDraft & { entityName: string; entityType: string })[] }>(
       "/entities/pending",
