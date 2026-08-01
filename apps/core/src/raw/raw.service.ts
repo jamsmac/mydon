@@ -24,6 +24,7 @@ import {
   reconcile,
   unify,
   reconcileOurVend,
+  combineSales,
   type ReconField,
   type ReconRow,
   type Reconciliation,
@@ -31,6 +32,9 @@ import {
   type OurVendRecon,
   type OurVendBucket,
   type DailyBucket,
+  type Fleet,
+  type RawOrder,
+  type CombinedSales,
 } from "@mydon/shared";
 import { and, asc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -1284,6 +1288,75 @@ export class RawService {
       lines.push(cols.map(csvCell).join(";"));
     }
     return `\uFEFF${lines.join("\r\n")}`;
+  }
+
+  /**
+   * Поштучные флоты, из которых складывается журнал «Все продажи».
+   *
+   * gjvending и OurVend — разные производители и разные автоматы. Каждый отдаёт
+   * заказ строкой с номером, товаром, суммой и временем. vendinghub сюда не
+   * входит — это хаб фискализации (проверка), а не отдельный флот продаж.
+   */
+  private static readonly SALES_FLEETS: { source: string; report: string }[] = [
+    { source: "gjvending", report: "order_query" },
+    { source: "ourvend", report: "order_query" },
+  ];
+
+  /**
+   * Объединённый журнал «Все продажи»: gjvending + OurVend в одной ленте.
+   *
+   * OurVend в vendinghub пока не интегрирован, а gjvending и OurVend — разные
+   * системы без общего свода. Значит весь оборот сразу виден только здесь. Это
+   * не сверка: флоты не пересекаются, их продажи складываются, а не сличаются.
+   */
+  async combinedJournal(query: RawRowsQuery): Promise<CombinedSales> {
+    const fleets = await Promise.all(
+      RawService.SALES_FLEETS.map((f) => this.fleetOrders(f.source, f.report)),
+    );
+    return combineSales(fleets, query.page, query.size);
+  }
+
+  /** Вынуть заказы одного флота по ролям колонок его последнего снимка. */
+  private async fleetOrders(sourceCode: string, reportCode: string): Promise<Fleet> {
+    const src = await this.source(sourceCode);
+    const title = src?.title ?? sourceCode;
+    let def;
+    try {
+      def = await this.report(sourceCode, reportCode);
+    } catch {
+      // Отчёта нет в реестре — флот показываем незагруженным, а не роняем журнал.
+      return { source: sourceCode, title, loaded: false, orders: [] };
+    }
+    const snapshot = await this.latestSnapshot(sourceCode, reportCode);
+    if (!snapshot) return { source: sourceCode, title, loaded: false, orders: [] };
+
+    const at = (role: keyof RawColumnRoles) => roleColumnIndex(snapshot.columns, def.roles, role);
+    const idx = {
+      externalId: at("externalId"),
+      ts: at("ts"),
+      machine: at("machine"),
+      product: at("product"),
+      amount: at("amount"),
+      payment: at("payment"),
+      status: at("status"),
+      kind: at("kind"),
+    };
+    const rows = await this.db
+      .select({ cells: rawRow.cells })
+      .from(rawRow)
+      .where(eq(rawRow.snapshotId, snapshot.id));
+    const cell = (cells: string[], i: number) => (i < 0 ? "" : (cells[i] ?? ""));
+    const orders: RawOrder[] = rows.map((r) => ({
+      externalId: cell(r.cells, idx.externalId),
+      ts: cell(r.cells, idx.ts),
+      machine: cell(r.cells, idx.machine),
+      product: cell(r.cells, idx.product),
+      amount: cell(r.cells, idx.amount),
+      payment: cell(r.cells, idx.payment),
+      status: cell(r.cells, idx.status),
+      kind: cell(r.cells, idx.kind),
+    }));
+    return { source: sourceCode, title, loaded: true, orders };
   }
 
   /** Заголовки источников для шапки сверки/объединения — без строк. */

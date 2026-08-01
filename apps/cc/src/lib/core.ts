@@ -532,6 +532,47 @@ export interface UnifiedJournal {
   ourvend: OurVendRecon;
 }
 
+/** Заказ ленты «Все продажи»: строка источника плюс метка источника. */
+export interface CombinedOrder {
+  source: string;
+  title: string;
+  externalId: string;
+  ts: string;
+  machine: string;
+  product: string;
+  amount: string;
+  amountNum: number | null;
+  payment: string;
+  status: string;
+}
+
+/** Итог по разрезу (источник, оплата, месяц). */
+export interface Bucket {
+  key: string;
+  orders: number;
+  revenue: number;
+}
+
+/** Свод по источнику — с пометкой, загружен ли он. */
+export interface SourceBucket extends Bucket {
+  source: string;
+  loaded: boolean;
+}
+
+/** Объединённый журнал «Все продажи»: gjvending + OurVend в одной ленте. */
+export interface CombinedSales {
+  totalOrders: number;
+  totalRevenue: number;
+  bySource: SourceBucket[];
+  byPayment: Bucket[];
+  byMonth: Bucket[];
+  unreadable: number;
+  page: number;
+  size: number;
+  count: number;
+  orders: CombinedOrder[];
+}
+
 /** Месяц одного канала оплаты — строка, с которой идут сверять выписку. */
 export interface PaymentMonth {
   month: string;
@@ -870,6 +911,10 @@ export const core = {
     return get<UnifiedJournal>(
       `/raw/unify/${encodeURIComponent(a.source)}/${encodeURIComponent(a.report)}/vs/${encodeURIComponent(b.source)}/${encodeURIComponent(b.report)}${qs ? `?${qs}` : ""}`,
     );
+  },
+  rawAllSales: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<CombinedSales>(`/raw/all-sales${qs ? `?${qs}` : ""}`);
   },
   rawProducts: (source: string, report: string) =>
     get<ProductReview>(`/raw/products/${encodeURIComponent(source)}/${encodeURIComponent(report)}`),

@@ -796,6 +796,15 @@ a.rowlink:hover { background: var(--surf-2); }
   .rrow > :first-child { grid-column: 1 / -1; }
 }
 
+/* Лента «Все продажи»: источник · время · автомат · товар · сумма · оплата. */
+.rhead.asales, .rrow.asales {
+  grid-template-columns: 120px 150px minmax(0,1fr) minmax(0,1.4fr) 110px 110px;
+}
+@media (max-width: 720px) {
+  .rrow.asales { grid-template-columns: 1fr 1fr; }
+  .rrow.asales > :first-child { grid-column: 1 / -1; }
+}
+
 /* Объединённый журнал: каждый заказ — карточкой, поля обеих сторон рядом. */
 .ulist { display: flex; flex-direction: column; gap: 8px; }
 .urow {

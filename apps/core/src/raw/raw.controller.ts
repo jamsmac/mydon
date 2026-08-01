@@ -324,6 +324,17 @@ export class RawController {
     return this.raw.unifyExportCsv(aSource, aReport, bSource, bReport);
   }
 
+  /**
+   * Объединённый журнал «Все продажи»: gjvending + OurVend в одной ленте.
+   *
+   * OurVend в vendinghub не интегрирован, поэтому весь оборот сразу виден
+   * только здесь. Флоты разные — их продажи складываются, а не сличаются.
+   */
+  @Get("all-sales")
+  allSales(@Query() query: Record<string, string>) {
+    return this.raw.combinedJournal(normalizeRowsQuery(query));
+  }
+
   /** Каким способом приходят деньги — срез для сверки с платёжными системами. */
   @Get("payments/:source/:report")
   payments(@Param("source") source: string, @Param("report") report: string) {

@@ -20,6 +20,7 @@ import { NewReport, NewSource, RolesEditor } from "./source-editor";
 import { RawUpload } from "./raw-upload";
 import { ReconcileView } from "./reconcile-view";
 import { UnifiedView } from "./unified-view";
+import { AllSalesView } from "./all-sales-view";
 
 /** Что показывает вкладка отчёта. */
 type ReportView = "rows" | "map" | "stays" | "prices" | "goods" | "pay" | "journal" | "roles";
@@ -167,6 +168,9 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
           <Link href={href(base, clean, { mode: "unified" })} className={`subtab ${sp.mode === "unified" ? "active" : ""}`}>
             Объединённый журнал
           </Link>
+          <Link href={href(base, clean, { mode: "all" })} className={`subtab ${sp.mode === "all" ? "active" : ""}`}>
+            Все продажи
+          </Link>
         </div>
       </div>
 
@@ -174,6 +178,8 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
         <ReconcilePane base={base} sp={sp} />
       ) : sp.mode === "unified" ? (
         <UnifyPane base={base} sp={sp} />
+      ) : sp.mode === "all" ? (
+        <AllSalesPane base={base} sp={sp} />
       ) : (
       <>
       {/* Системы-источники */}
@@ -269,6 +275,16 @@ async function UnifyPane({ base, sp }: { base: string; sp: Record<string, string
   try {
     const u = await core.rawUnify(a, b, sp.upage ? { page: sp.upage } : {});
     return <UnifiedView u={u} base={base} sp={sp} />;
+  } catch (err) {
+    return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
+}
+
+/** «Все продажи»: gjvending + OurVend в одной ленте. */
+async function AllSalesPane({ base, sp }: { base: string; sp: Record<string, string> }) {
+  try {
+    const r = await core.rawAllSales(sp.apage ? { page: sp.apage } : {});
+    return <AllSalesView r={r} base={base} sp={sp} />;
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
