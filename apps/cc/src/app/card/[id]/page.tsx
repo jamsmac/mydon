@@ -21,6 +21,7 @@ import { MachinePricesView } from "../../../components/prices-view";
 import { EntityApproval } from "../../../components/entity-approval";
 import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
 import { PlanogramEditor } from "../../../components/planogram-editor";
+import { StocktakeSession } from "../../../components/stocktake-session";
 import { parsePlanogram } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
 import { WarehouseStockView } from "../../../components/warehouse-stock";
@@ -269,6 +270,10 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         <section id="whstock" data-toc="Остаток">
           <WarehouseStockView stock={warehouseStock} />
         </section>
+      )}
+
+      {isWarehouse && warehouseStock && warehouseStock.items.length > 0 && (
+        <StocktakeSession warehouseId={entity.id} items={warehouseStock.items} />
       )}
 
       <section id="fields" data-toc="Поля">
