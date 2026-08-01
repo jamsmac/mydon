@@ -546,6 +546,19 @@ export const event = pgTable(
   (t) => [index("event_type_time_idx").on(t.type, t.occurredAt)],
 );
 
+// ── notification_delivery: что уже доставлено владельцу (FR-2) ──
+//
+// Срочное уведомление выводится из события правилом детерминированно, поэтому
+// ключ `<eventId>:<ruleId>` стабилен. Отметку о доставке храним ЗДЕСЬ, а не в
+// памяти бота: иначе перезапуск бота задвоил бы тревоги, а сбой отправки — терял
+// бы их. Бот отмечает доставку ПОСЛЕ успешной отправки в Telegram, и `pending`
+// уже доставленное не возвращает.
+export const notificationDelivery = pgTable("notification_delivery", {
+  /** `<eventId>:<ruleId>` — одно уведомление. */
+  key: text("key").primaryKey(),
+  deliveredAt: createdAt(),
+});
+
 // ── document: ссылки на файлы (в архив/knowledge-curator) ──
 export const document = pgTable("document", {
   id: id(),
