@@ -58,6 +58,17 @@ export interface ActionResult {
 }
 
 /**
+ * Значение поля в число, если оно число, — иначе строкой.
+ *
+ * Дроби тоже: координаты «41.311» и объём «0.5» должны стать числами, а не
+ * остаться строками (раньше парсились только целые — карта на дробных широтах
+ * не поднималась). «1.2.3», телефоны с «+», коды с буквами — остаются строками.
+ */
+function coerce(value: string): string | number {
+  return /^-?\d+(\.\d+)?$/.test(value) ? Number(value) : value;
+}
+
+/**
  * Сохранение карточки записи: имя, номер, поля.
  *
  * Поля приходят из формы парами attr:<ключ> → значение. Числа остаются
@@ -74,13 +85,13 @@ export async function saveEntity(id: string, form: FormData): Promise<ActionResu
     const attrKey = key.slice(5);
     const value = String(raw).trim();
     if (value.length === 0) continue; // пустое = убрать поле
-    attrs[attrKey] = /^-?\d+$/.test(value) ? Number(value) : value;
+    attrs[attrKey] = coerce(value);
   }
   // Новое поле, если владелец его добавил
   const newKey = String(form.get("newKey") ?? "").trim();
   const newValue = String(form.get("newValue") ?? "").trim();
   if (newKey.length > 0 && newValue.length > 0) {
-    attrs[newKey] = /^-?\d+$/.test(newValue) ? Number(newValue) : newValue;
+    attrs[newKey] = coerce(newValue);
   }
 
   try {
