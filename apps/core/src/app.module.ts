@@ -1,4 +1,6 @@
 import { Module } from "@nestjs/common";
+import { APP_GUARD } from "@nestjs/core";
+import { ServiceTokenGuard } from "./common/service-token.guard";
 import { AgentsModule } from "./agents/agents.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
 import { AuditModule } from "./audit/audit.module";
@@ -41,5 +43,6 @@ import { VerificationModule } from "./verification/verification.module";
     VerificationModule,
   ],
   controllers: [HealthController],
+  providers: [{ provide: APP_GUARD, useClass: ServiceTokenGuard }],
 })
 export class AppModule {}

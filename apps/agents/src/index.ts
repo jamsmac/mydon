@@ -81,7 +81,7 @@ function idle(): Promise<never> {
  */
 async function main(): Promise<void> {
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
-  const core = new AgentsCoreClient(coreUrl);
+  const core = new AgentsCoreClient(coreUrl, 10_000, process.env.SERVICE_TOKEN ?? "");
   const threshold = autonomyThreshold();
 
   const { agents: fromFiles, errors } = loadAgents(AGENTS_DIR);

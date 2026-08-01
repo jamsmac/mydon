@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   const context = createContextSearch({ baseUrl: coreUrl });
 
   const deps: HandlerDeps = {
-    core: new CoreClient(coreUrl),
+    core: new CoreClient(coreUrl, 10_000, process.env.SERVICE_TOKEN ?? ""),
     context,
     allowlist,
     limiter: new RateLimiter(),

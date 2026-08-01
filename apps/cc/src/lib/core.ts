@@ -8,6 +8,8 @@ import "server-only";
  * сводка про долги хуже, чем её отсутствие.
  */
 const BASE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
+/** Внутренний токен Core: панель ходит на сервере, ключ наружу не уходит. */
+const SERVICE_TOKEN = process.env.SERVICE_TOKEN ?? "";
 
 export class CoreUnavailable extends Error {
   constructor(readonly detail: string) {
@@ -118,14 +120,17 @@ export interface AgentCard {
 /** Запись в Core. Ошибку отдаём словами: её увидит владелец, а не разработчик. */
 async function send<T>(path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
   let res: Response;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  // Мутации требуют внутренний токен Core (когда он задан).
+  if (SERVICE_TOKEN) headers["x-service-token"] = SERVICE_TOKEN;
   try {
     res = await fetch(`${BASE}${path}`, {
       method,
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
-      ...(body !== undefined
-        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
-        : {}),
+      headers,
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
   } catch (err) {
     throw new CoreUnavailable(err instanceof Error ? err.message : String(err));
