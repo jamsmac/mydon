@@ -2,6 +2,7 @@ import Link from "next/link";
 import {
   core,
   CoreUnavailable,
+  type Attachment,
   type Entity,
   type EntityDraft,
   type MachineProductPrice,
@@ -11,6 +12,7 @@ import {
   type WarehouseStock,
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
+import { PhotoGallery } from "../../../components/photo-gallery";
 import { DeleteEntityButton } from "../../../components/entity-delete";
 import { EntityEditor } from "../../../components/entity-editor";
 import { StayTimeline } from "../../../components/machine-stays";
@@ -65,6 +67,15 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     drafts = await core.entityDrafts(entity.id);
   } catch {
     drafts = [];
+  }
+
+  // Фото карточки (приложил сотрудник при заведении). Дополнение — ошибка не
+  // должна ронять карточку.
+  let photos: Attachment[] = [];
+  try {
+    photos = await core.attachments("entity", entity.id);
+  } catch {
+    photos = [];
   }
 
   const a = entity.attrs ?? {};
@@ -150,6 +161,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       </div>
 
       <EntityApproval entity={entity} drafts={drafts} />
+
+      <PhotoGallery attachments={photos} />
 
       {hasGeo && (
         <div className="card">
