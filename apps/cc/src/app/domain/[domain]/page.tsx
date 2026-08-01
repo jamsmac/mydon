@@ -20,6 +20,7 @@ import { MachineStockView, PurchasesView } from "../../../components/supply-view
 import { MapPanel } from "../../../components/map-panel";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
+import { ReportsOverview } from "../../../components/reports-overview";
 import { typeOne } from "../../../lib/labels";
 import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
 
@@ -132,8 +133,8 @@ export default async function DomainPage({
     ...(domain === "vendhub"
       ? [
           { key: "collect", label: `Инкассация${(collSummary?.pending ?? 0) > 0 ? ` ${collSummary!.pending}` : ""}` },
-          // Источники — сырьё, из которого берутся все остальные цифры.
-          { key: "sources", label: "Источники" },
+          // Отчёты — витрина по источникам (сырьё, из которого берутся все цифры).
+          { key: "sources", label: "Отчёты" },
         ]
       : []),
     { key: "team", label: `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
@@ -416,8 +417,13 @@ export default async function DomainPage({
         </>
       )}
 
-      {/* ── Источники: сырые выгрузки чужих систем, как они пришли ── */}
-      {activeGroup === "sources" && <SourcesView base={`/domain/${domain}`} sp={sp} />}
+      {/* ── Отчёты: витрина по источникам; вход в детальный срез — драйв по params ── */}
+      {activeGroup === "sources" &&
+        (sp.src || sp.rep || sp.view || sp.mode || sp.ra || sp.rb ? (
+          <SourcesView base={`/domain/${domain}`} sp={sp} />
+        ) : (
+          <ReportsOverview base={`/domain/${domain}`} />
+        ))}
 
       {/* ── Инкассация: живой экран VendCash (верхняя вкладка и подвкладка отчётов) ── */}
       {(activeGroup === "collect" || (group && leaf?.type === "collection")) && <CollectionsView />}
