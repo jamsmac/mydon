@@ -59,12 +59,15 @@ export default async function DomainPage({
   const active = tab ?? "overview";
   const [activeGroup, activeLeaf] = active.includes(":") ? active.split(":") : [active, null];
 
-  let obligations: Obligations;
+  const isOverview = activeGroup === "overview";
+
+  // Реестр направления и метки вкладок (команда, задачи) нужны на любой вкладке —
+  // их тянем всегда. Реестр — сердце страницы: его провал показываем как «Core лёг».
   let entities: Entity[];
   let people: Person[] = [];
   let tasks: Task[] = [];
   try {
-    [obligations, entities] = await Promise.all([core.obligations(domain), core.entitiesOf(domain)]);
+    entities = await core.entitiesOf(domain);
     try {
       [people, tasks] = await Promise.all([core.people(), core.tasks({ domain })]);
     } catch {
@@ -72,6 +75,24 @@ export default async function DomainPage({
     }
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
+
+  // Ленивая загрузка (Фаза 2): обязательства нужны ТОЛЬКО дашборду. На других
+  // вкладках их не тянем — переключение вкладки больше не запрашивает данные
+  // всех разделов сразу. Провал здесь не роняет страницу: дашборд покажет нули.
+  let obligations: Obligations = {
+    domain,
+    totals: [],
+    overdue: [],
+    overdueTotal: 0,
+    overdueTruncated: false,
+  };
+  if (isOverview) {
+    try {
+      obligations = await core.obligations(domain);
+    } catch {
+      // Core ответил на реестр, но не на обязательства — показываем нули.
+    }
   }
 
   const ourPeople = people.filter((p) => p.domain === domain);
@@ -91,28 +112,26 @@ export default async function DomainPage({
   const snackMachines = machines.length - coffeeMachines - unknownMachines;
   const defaultOwner = ourPeople.find((p) => p.active === "yes" && p.tgChatId) ?? ourPeople[0] ?? null;
 
-  // Инкассация на дашборде: владелец должен видеть «ждут приёма» без раскопок.
+  // Инкассация нужна и МЕТКЕ вкладки (счётчик «ждут приёма»), поэтому тянется
+  // всегда для vendhub — это один дешёвый запрос.
   let collSummary: { pending: number; receivedCount: number; receivedSum: number } | null = null;
-  let salesSummary: Awaited<ReturnType<typeof core.salesSummary>> | null = null;
   if (domain === "vendhub") {
     try {
       collSummary = await core.collectionsSummary(30);
     } catch {
       collSummary = null;
     }
-    try {
-      salesSummary = await core.salesSummary();
-    } catch {
-      salesSummary = null;
-    }
   }
+
+  // Ленивая загрузка (Фаза 2): сводки продаж и склада — только для плиток
+  // дашборда. На других вкладках vendhub их не тянем.
+  let salesSummary: Awaited<ReturnType<typeof core.salesSummary>> | null = null;
   let supplySummary: Awaited<ReturnType<typeof core.supplySummary>> | null = null;
-  if (domain === "vendhub") {
-    try {
-      supplySummary = await core.supplySummary();
-    } catch {
-      supplySummary = null;
-    }
+  if (domain === "vendhub" && isOverview) {
+    [salesSummary, supplySummary] = await Promise.all([
+      core.salesSummary().catch(() => null),
+      core.supplySummary().catch(() => null),
+    ]);
   }
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
