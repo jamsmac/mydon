@@ -9,6 +9,7 @@ import {
   taskKeyboard,
 } from "./staff";
 import type { PersonRow, TaskRow } from "./core-client";
+import { Conversations } from "./conversation";
 import { parseIntent } from "./intent";
 import { planReport } from "./reports";
 
@@ -81,6 +82,7 @@ describe("Доступ сотрудника: только свои задачи"
     const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, {
       core,
       awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
     });
     assert.match(res.answer, /не твоя/i);
     assert.deepEqual(calls, [], "никаких изменений по чужой задаче быть не должно");
@@ -93,6 +95,7 @@ describe("Доступ сотрудника: только свои задачи"
     const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, {
       core,
       awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
     });
     assert.match(res.answer, /не твоя/i);
     assert.deepEqual(calls, []);
@@ -104,7 +107,7 @@ describe("Доступ сотрудника: только свои задачи"
     const { core, calls } = stubCore({
       task: async () => task({ ownerRef: "99999999-9999-4999-8999-999999999999" }),
     });
-    const res = await handleStaffMessage(555, "сделал", ME, { core, awaiting });
+    const res = await handleStaffMessage(555, "сделал", ME, { core, awaiting, conversations: new Conversations() });
     assert.match(res.reply.text, /не на тебе/i);
     assert.deepEqual(calls, []);
   });
@@ -114,7 +117,7 @@ describe("Закрытие с отчётом", () => {
   it("«Сделал» не закрывает сразу, а просит отчёт", async () => {
     const awaiting = new AwaitingReport();
     const { core, calls } = stubCore();
-    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, { core, awaiting });
+    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, { core, awaiting, conversations: new Conversations() });
     assert.match(res.message ?? "", /что сделано/i);
     assert.deepEqual(calls, [], "закрытия без отчёта быть не должно");
   });
@@ -123,7 +126,7 @@ describe("Закрытие с отчётом", () => {
     const awaiting = new AwaitingReport();
     awaiting.set(555, task().id);
     const { core, calls } = stubCore();
-    const res = await handleStaffMessage(555, "Пополнил, всё работает", ME, { core, awaiting });
+    const res = await handleStaffMessage(555, "Пополнил, всё работает", ME, { core, awaiting, conversations: new Conversations() });
     assert.match(res.reply.text, /закрыта/i);
     assert.equal(calls.length, 1);
     assert.match(calls[0], /status:done:person:.*:Пополнил, всё работает/);
@@ -134,6 +137,7 @@ describe("Закрытие с отчётом", () => {
     const res = await handleStaffCallback(555, `t:${task().id}:progress`, ME, {
       core,
       awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
     });
     assert.match(res.answer, /в работе/i);
     assert.match(calls[0] ?? "", /status:in_progress/);
@@ -163,6 +167,7 @@ describe("Что видит сотрудник", () => {
     const res = await handleStaffMessage(555, "Ключей нет, охрана не пускает", ME, {
       core,
       awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
     });
     assert.match(res.reply.text, /передал владельцу/i);
     assert.match(calls[0] ?? "", /comment:Ключей нет/);
