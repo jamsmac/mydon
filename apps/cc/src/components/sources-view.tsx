@@ -159,16 +159,17 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
           и по номеру операции их видно построчно. */}
       <div className="srcbar" style={{ marginBottom: 12 }}>
         <div className="subtabs" style={{ margin: 0 }}>
-          <Link href={href(base, clean, { mode: null })} className={`subtab ${sp.mode ? "" : "active"}`}>
+          {/* Смена режима не прыгает наверх — позиция прокрутки держится. */}
+          <Link href={href(base, clean, { mode: null })} scroll={false} className={`subtab ${sp.mode ? "" : "active"}`}>
             Источники по одному
           </Link>
-          <Link href={href(base, clean, { mode: "reconcile" })} className={`subtab ${sp.mode === "reconcile" ? "active" : ""}`}>
+          <Link href={href(base, clean, { mode: "reconcile" })} scroll={false} className={`subtab ${sp.mode === "reconcile" ? "active" : ""}`}>
             Сверка источников
           </Link>
-          <Link href={href(base, clean, { mode: "unified" })} className={`subtab ${sp.mode === "unified" ? "active" : ""}`}>
+          <Link href={href(base, clean, { mode: "unified" })} scroll={false} className={`subtab ${sp.mode === "unified" ? "active" : ""}`}>
             Объединённый журнал
           </Link>
-          <Link href={href(base, clean, { mode: "all" })} className={`subtab ${sp.mode === "all" ? "active" : ""}`}>
+          <Link href={href(base, clean, { mode: "all" })} scroll={false} className={`subtab ${sp.mode === "all" ? "active" : ""}`}>
             Все продажи
           </Link>
         </div>
@@ -188,6 +189,7 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
           <Link
             key={s.code}
             href={href(base, withoutTableState({ ...sp, src: s.code }), { src: s.code, rep: null })}
+            scroll={false}
             className={`src ${s.code === source.code ? "on" : ""}`}
           >
             <span className={`dot ${s.connected ? "on" : ""}`} />
@@ -218,6 +220,7 @@ export async function SourcesView({ base, sp }: SourcesViewProps) {
           <Link
             key={r.reportCode}
             href={href(base, clean, { rep: r.reportCode })}
+            scroll={false}
             className={`subtab ${r.reportCode === report?.reportCode ? "active" : ""} ${
               r.snapshots === 0 ? "dim" : ""
             }`}
@@ -432,29 +435,29 @@ async function ReportPane({
         />
       </div>
 
-      <div className="subtabs">
-        <Link href={viewHref("rows")} className={`subtab ${view === "rows" ? "active" : ""}`}>
+      <div className="subtabs stick">
+        <Link href={viewHref("rows")} scroll={false} className={`subtab ${view === "rows" ? "active" : ""}`}>
           Строки
         </Link>
-        <Link href={viewHref("map")} className={`subtab ${view === "map" ? "active" : ""}`}>
+        <Link href={viewHref("map")} scroll={false} className={`subtab ${view === "map" ? "active" : ""}`}>
           Сопоставление с реестром
         </Link>
-        <Link href={viewHref("stays")} className={`subtab ${view === "stays" ? "active" : ""}`}>
+        <Link href={viewHref("stays")} scroll={false} className={`subtab ${view === "stays" ? "active" : ""}`}>
           Где стояли автоматы
         </Link>
-        <Link href={viewHref("prices")} className={`subtab ${view === "prices" ? "active" : ""}`}>
+        <Link href={viewHref("prices")} scroll={false} className={`subtab ${view === "prices" ? "active" : ""}`}>
           Цены
         </Link>
-        <Link href={viewHref("goods")} className={`subtab ${view === "goods" ? "active" : ""}`}>
+        <Link href={viewHref("goods")} scroll={false} className={`subtab ${view === "goods" ? "active" : ""}`}>
           Товары
         </Link>
-        <Link href={viewHref("pay")} className={`subtab ${view === "pay" ? "active" : ""}`}>
+        <Link href={viewHref("pay")} scroll={false} className={`subtab ${view === "pay" ? "active" : ""}`}>
           Оплата
         </Link>
-        <Link href={viewHref("journal")} className={`subtab ${view === "journal" ? "active" : ""}`}>
+        <Link href={viewHref("journal")} scroll={false} className={`subtab ${view === "journal" ? "active" : ""}`}>
           Журнал продаж
         </Link>
-        <Link href={viewHref("roles")} className={`subtab ${view === "roles" ? "active" : ""}`}>
+        <Link href={viewHref("roles")} scroll={false} className={`subtab ${view === "roles" ? "active" : ""}`}>
           Роли колонок
         </Link>
       </div>

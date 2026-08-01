@@ -16,9 +16,15 @@ export function HeaderActions({ pendingCount }: { pendingCount: number }) {
 
   return (
     <>
-      <Link href="/registry" className="iconbtn" aria-label="Поиск по реестру">
+      <button
+        type="button"
+        className="iconbtn"
+        aria-label="Найти карточку или отчёт (⌘K)"
+        title="Найти карточку или отчёт  ⌘K"
+        onClick={() => window.dispatchEvent(new CustomEvent("mydon:palette-open"))}
+      >
         <Ic name="search" />
-      </Link>
+      </button>
       <button
         type="button"
         className={`iconbtn ${bgOn ? "on" : ""}`}
@@ -27,7 +33,7 @@ export function HeaderActions({ pendingCount }: { pendingCount: number }) {
       >
         <Ic name="sky" />
       </button>
-      <Link href="/approvals" className="iconbtn" aria-label="Решения">
+      <Link href="/inbox" className="iconbtn" aria-label="Входящие">
         <Ic name="bell" />
         {pendingCount > 0 && <span className="cnt">{pendingCount}</span>}
       </Link>

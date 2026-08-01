@@ -20,6 +20,7 @@ import { MachineStockView, PurchasesView } from "../../../components/supply-view
 import { MapPanel } from "../../../components/map-panel";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
+import { ReportsOverview } from "../../../components/reports-overview";
 import { typeOne } from "../../../lib/labels";
 import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
 
@@ -132,8 +133,8 @@ export default async function DomainPage({
     ...(domain === "vendhub"
       ? [
           { key: "collect", label: `Инкассация${(collSummary?.pending ?? 0) > 0 ? ` ${collSummary!.pending}` : ""}` },
-          // Источники — сырьё, из которого берутся все остальные цифры.
-          { key: "sources", label: "Источники" },
+          // Отчёты — витрина по источникам (сырьё, из которого берутся все цифры).
+          { key: "sources", label: "Отчёты" },
         ]
       : []),
     { key: "team", label: `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
@@ -151,9 +152,29 @@ export default async function DomainPage({
   const leafItems =
     group && leaf?.type ? entities.filter((e) => e.type === leaf.type).sort((a, b) => a.name.localeCompare(b.name, "ru")) : [];
 
+  // Хлебные крошки и чип маршрута (расположение из обложки): где я и как это
+  // адресуется. Счётчик из подписи вкладки для крошки убираем — «Задачи 6» → «Задачи».
+  const activeTab = topTabs.find((t) => t.key === activeGroup);
+  const crumbLabel =
+    activeTab && activeGroup !== "overview" ? activeTab.label.replace(/\s+\d+$/, "") : null;
+  const routeSlug = activeGroup === "overview" ? "" : activeGroup === "sources" ? "reports" : activeGroup;
+  const routePath = `/${domain}${routeSlug ? `/${routeSlug}` : ""}${activeLeaf ? `/${activeLeaf}` : ""}`;
+
   return (
     <>
       <div className="page-head">
+        <nav className="crumbs" aria-label="Хлебные крошки">
+          <Link href="/mydon">MYDON</Link>
+          <span className="sep">/</span>
+          <span className="cur">{DOMAIN_LABELS[domain]}</span>
+          {crumbLabel && (
+            <>
+              <span className="sep">/</span>
+              <span className="cur">{crumbLabel}</span>
+            </>
+          )}
+          <span className="route" title="Адрес раздела">{routePath}</span>
+        </nav>
         <h1 className="h1">{DOMAIN_LABELS[domain]}</h1>
         <p className="lead">
           {entities.length} {plural(entities.length, "запись", "записи", "записей")} в реестре
@@ -166,6 +187,8 @@ export default async function DomainPage({
           <Link
             key={t.key}
             href={href(t.key)}
+            // Переключение вкладки не прыгает наверх — позиция прокрутки держится.
+            scroll={false}
             className={`tab ${activeGroup === t.key ? "active" : ""}`}
             role="tab"
             aria-selected={activeGroup === t.key}
@@ -186,6 +209,7 @@ export default async function DomainPage({
               <Link
                 key={l.label}
                 href={href(`${group.key}:${l.type ?? l.label}`)}
+                scroll={false}
                 className={`subtab ${isActive ? "active" : ""} ${n === 0 ? "dim" : ""}`}
               >
                 {l.label}
@@ -416,8 +440,13 @@ export default async function DomainPage({
         </>
       )}
 
-      {/* ── Источники: сырые выгрузки чужих систем, как они пришли ── */}
-      {activeGroup === "sources" && <SourcesView base={`/domain/${domain}`} sp={sp} />}
+      {/* ── Отчёты: витрина по источникам; вход в детальный срез — драйв по params ── */}
+      {activeGroup === "sources" &&
+        (sp.src || sp.rep || sp.view || sp.mode || sp.ra || sp.rb ? (
+          <SourcesView base={`/domain/${domain}`} sp={sp} />
+        ) : (
+          <ReportsOverview base={`/domain/${domain}`} />
+        ))}
 
       {/* ── Инкассация: живой экран VendCash (верхняя вкладка и подвкладка отчётов) ── */}
       {(activeGroup === "collect" || (group && leaf?.type === "collection")) && <CollectionsView />}

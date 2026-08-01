@@ -26,6 +26,8 @@
   --r: 12px;
   --r-s: 10px;
   --bar: 64px;
+  /* Высота липкой панели вкладок направления — офсет для липких панелей под ней. */
+  --tabs-h: 55px;
 
   /* старые имена — часть компонентов ещё ссылается на них */
   --navy: var(--bg);
@@ -127,6 +129,52 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 .photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .photo-thumb:hover { border-color: var(--tx-2); }
 
+/* Оглавление карточки: липкая строка-переход по секциям длинной карточки. */
+.cardtoc { position: sticky; top: 0; z-index: 4; display: flex; gap: 6px; overflow-x: auto; padding: 8px 0; margin-bottom: 12px; background: var(--bg); border-bottom: 1px solid var(--line); scrollbar-width: none; }
+.cardtoc::-webkit-scrollbar { display: none; }
+.ctchip { white-space: nowrap; font-size: 12.5px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surf); color: var(--tx-2); }
+.ctchip:hover { color: var(--tx); border-color: var(--accent-line); }
+/* Секции не должны прятаться под липкое оглавление при переходе к ним. */
+[data-toc] { scroll-margin-top: 60px; }
+
+/* Палитра ⌘K: «Найти карточку или отчёт» поверх всего. */
+.cmdk-back { position: fixed; inset: 0; z-index: 50; background: rgba(4, 10, 20, 0.6); backdrop-filter: blur(3px); display: flex; align-items: flex-start; justify-content: center; padding: 12vh 16px 16px; }
+.cmdk { width: 100%; max-width: 560px; background: var(--surf-2); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.85); overflow: hidden; }
+.cmdk-in { width: 100%; border: 0; background: transparent; color: var(--tx); font-size: 16px; padding: 16px 18px; outline: none; border-bottom: 1px solid var(--line); }
+.cmdk-in::placeholder { color: var(--tx-3); }
+.cmdk-list { max-height: 52vh; overflow-y: auto; padding: 6px; }
+.cmdk-empty { color: var(--tx-3); font-size: 13px; padding: 18px; text-align: center; }
+.cmdk-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 10px 12px; border-radius: 9px; background: transparent; border: 0; color: inherit; }
+.cmdk-row.on { background: var(--surf); }
+.cmdk-k { font-family: var(--fm); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--tx-3); flex: none; }
+.cmdk-k.card { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.cmdk-k.report { color: var(--ok); border-color: rgba(43, 217, 160, 0.4); background: rgba(43, 217, 160, 0.1); }
+.cmdk-t { font-size: 14px; color: var(--tx); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmdk-s { font-size: 12px; color: var(--tx-3); flex: none; white-space: nowrap; }
+.cmdk-foot { display: flex; gap: 16px; padding: 9px 14px; border-top: 1px solid var(--line); font-size: 11px; color: var(--tx-3); }
+.cmdk-foot b { font-family: var(--fm); color: var(--tx-2); font-weight: 500; }
+
+/* Витрина «Отчёты»: источники группами, отчёты карточками с главной метрикой. */
+.rgroup { margin-top: 22px; }
+.rgroup-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.rgroup-h .dot { width: 8px; height: 8px; border-radius: 50%; align-self: center; flex: none; }
+.rgroup-h b { font-family: var(--fh); font-weight: 700; font-size: 14.5px; }
+.rgroup-h small { color: var(--tx-3); font-size: 12px; }
+.rgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.rcard { background: var(--surf); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.rcard-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.rcard-h .t { font-weight: 600; font-size: 14px; word-break: break-word; }
+.rcard-h .ts { font-family: var(--fm); font-size: 11px; color: var(--tx-3); white-space: nowrap; }
+.rcard .big { font-family: var(--fh); font-weight: 800; font-size: 24px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.rcard .big .u { font-size: 12.5px; color: var(--tx-2); font-weight: 600; margin-left: 6px; }
+.rcard .sub { font-size: 12.5px; color: var(--tx-2); display: flex; gap: 14px; flex-wrap: wrap; }
+.rcard .sub .n { font-family: var(--fm); font-variant-numeric: tabular-nums; color: var(--tx); }
+.rcard-f { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.rcard-f .sp { flex: 1; }
+.rlinks { display: flex; gap: 12px; flex-wrap: wrap; }
+.rlinks a { font-size: 12px; color: var(--tx-2); }
+.rlinks a:hover { color: var(--accent); }
+
 /* Очередь утверждения: черновики карточек и предложенные значения плитками. */
 .qgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
 .qcard { background: var(--surf); border: 1px solid var(--line); border-left: 3px solid var(--hot); border-radius: var(--r); padding: 14px; }
@@ -170,8 +218,8 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 .chip.g { color: var(--ok); border-color: rgba(43, 217, 160, 0.4); background: rgba(43, 217, 160, 0.1); }
 .tag-tg { font-size: 11px; color: var(--tx-2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
 
-/* вкладки */
-.tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin: 0 -14px 14px; padding-left: 14px; padding-right: 14px; scrollbar-width: none; }
+/* вкладки — липкие: при прокрутке остаются наверху, контент уезжает под них */
+.tabs { display: flex; gap: 6px; overflow-x: auto; padding: 8px 14px 8px; margin: 0 -14px 14px; scrollbar-width: none; position: sticky; top: 0; z-index: 4; background: var(--bg); border-bottom: 1px solid var(--line); }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs a, .tabs button {
   flex: 0 0 auto; height: 38px; padding: 0 14px; border-radius: var(--r-s); border: 1px solid var(--line);
@@ -188,6 +236,9 @@ h1, h2, h3 { font-family: var(--fh); letter-spacing: -0.01em; margin: 0; }
 }
 .subtabs a.on, .subtabs a.active, .subtabs button.on { color: #fff; background: var(--surf-2); border-color: var(--accent-line); }
 .subtabs a.empty, .subtabs a.dim, .subtabs button.empty { color: var(--tx-3); opacity: 0.6; padding: 0 12px; border: 1px solid transparent; background: var(--surf); text-align: left; }
+/* Липкая панель срезов: держится под вкладками направления, чтобы в глубине
+   отчёта переключатель Строки/Журнал/Цены не уезжал вместе с таблицей. */
+.subtabs.stick { position: sticky; top: var(--tabs-h); z-index: 3; background: var(--bg); padding-top: 8px; border-bottom: 1px solid var(--line); }
 .subtabs .n { font-family: var(--fm); font-size: 11px; opacity: 0.75; }
 
 /* плитки KPI */
@@ -356,6 +407,14 @@ a.prow:hover { border-color: var(--accent-line); }
 .chat-input button { width: 42px; height: 42px; flex: 0 0 auto; border-radius: var(--r-s); border: none; background: var(--accent); color: #fff; display: grid; place-items: center; font-size: 16px; }
 
 /* ============ СОВМЕСТИМОСТЬ (старые классы страниц) ============ */
+/* Хлебные крошки + чип маршрута (расположение из обложки): где я и как адресуется. */
+.crumbs { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; font-size: 12.5px; flex-wrap: wrap; }
+.crumbs a { color: var(--tx-2); }
+.crumbs a:hover { color: var(--accent); }
+.crumbs .sep { color: var(--tx-3); }
+.crumbs .cur { color: var(--tx); font-weight: 600; }
+.crumbs .route { margin-left: 6px; font-family: var(--fm); font-size: 11px; color: var(--tx-3); border: 1px solid var(--line); background: var(--surf); border-radius: 999px; padding: 2px 9px; }
+
 .page-head { margin-bottom: 16px; }
 .page-head h1 { font-family: var(--fh); font-weight: 800; font-size: 22px; margin: 0 0 2px; }
 .page-head p { color: var(--tx-2); font-size: 13px; margin: 0; }

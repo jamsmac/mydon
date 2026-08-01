@@ -1,6 +1,70 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { core } from "../lib/core";
+import { DOMAIN_TITLES, typeOne } from "../lib/labels";
+
+/** Находка палитры ⌘K: карточка реестра или отчёт источника. */
+export interface PaletteHit {
+  kind: "card" | "report";
+  title: string;
+  sub: string;
+  href: string;
+}
+
+/**
+ * Поиск для палитры ⌘K: «Найти карточку или отчёт».
+ *
+ * Карточки — тем же поиском реестра, что и на экране «Реестр». Отчёты — из
+ * справочника источников по совпадению названия. Короткий запрос не гоняем:
+ * одна-две буквы вернули бы весь реестр.
+ */
+export async function searchRegistry(q: string): Promise<PaletteHit[]> {
+  const query = q.trim();
+  if (query.length < 2) return [];
+
+  const hits: PaletteHit[] = [];
+  try {
+    const cards = await core.search(query);
+    for (const c of cards.slice(0, 8)) {
+      hits.push({
+        kind: "card",
+        title: c.name,
+        sub: [typeOne(c.type), c.domain ? DOMAIN_TITLES[c.domain] ?? c.domain : null]
+          .filter(Boolean)
+          .join(" · "),
+        href: `/card/${c.id}`,
+      });
+    }
+  } catch {
+    // Core недоступен — отдаём то, что нашлось (возможно, ничего). Палитра
+    // покажет «ничего не найдено», а не упадёт.
+  }
+
+  try {
+    const ql = query.toLowerCase();
+    const { sources } = await core.rawSources();
+    for (const s of sources) {
+      for (const r of s.reports) {
+        const title = r.ru || r.title;
+        if (title.toLowerCase().includes(ql) || s.title.toLowerCase().includes(ql)) {
+          hits.push({
+            kind: "report",
+            title,
+            sub: `${s.title} · отчёт`,
+            href: `/domain/vendhub?tab=sources&src=${encodeURIComponent(
+              s.code,
+            )}&rep=${encodeURIComponent(r.reportCode)}`,
+          });
+        }
+      }
+    }
+  } catch {
+    // Источники недоступны — карточки всё равно покажем.
+  }
+
+  return hits.slice(0, 12);
+}
 
 /**
  * Решение по согласованию из панели.
