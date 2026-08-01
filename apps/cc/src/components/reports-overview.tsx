@@ -41,11 +41,19 @@ export async function ReportsOverview({ base }: { base: string }) {
   }
 
   // Операционные сводки — best-effort: их отсутствие не должно ронять витрину.
-  const [sales, supply, coll] = await Promise.all([
+  const [sales, supply, coll, allSales] = await Promise.all([
     core.salesSummary().catch(() => null),
     core.supplySummary().catch(() => null),
     core.collectionsSummary(7).catch(() => null),
+    core.rawAllSales().catch(() => null),
   ]);
+
+  // Выручка и заказы по каждому источнику — для крупной метрики на карточке
+  // источника (как в обложке). Пусто — карточку продаж не показываем.
+  const revBySource = new Map<string, { orders: number; revenue: number }>();
+  for (const b of allSales?.bySource ?? []) {
+    revBySource.set(b.source, { orders: b.orders, revenue: b.revenue });
+  }
 
   const allReports = sources.flatMap((s) => s.reports);
   const connected = sources.filter((s) => s.connected).length;
@@ -177,6 +185,38 @@ export async function ReportsOverview({ base }: { base: string }) {
               <p className="hint" style={{ margin: 0 }}>Отчёты источника ещё не заведены.</p>
             ) : (
               <div className="rgrid">
+                {/* Продажи источника — крупная метрика из заказов (как в обложке).
+                    Показываем, только когда есть посчитанная выручка. */}
+                {(() => {
+                  const rev = revBySource.get(s.code);
+                  if (!rev || rev.orders === 0) return null;
+                  const orderRep =
+                    s.reports.find((r) => Object.keys(r.roles ?? {}).length > 0) ?? s.reports[0];
+                  const m = compactSum(rev.revenue);
+                  return (
+                    <div className="rcard" key="__sales">
+                      <div className="rcard-h">
+                        <span className="t">Продажи источника</span>
+                        <span className="ts">из заказов</span>
+                      </div>
+                      <div className="big">
+                        {m.v}
+                        <span className="u">{m.u} сум</span>
+                      </div>
+                      <div className="sub">
+                        <span>заказов <span className="n">{rev.orders.toLocaleString("ru-RU")}</span></span>
+                      </div>
+                      <div className="rcard-f">
+                        <span className="chip g">посчитано из заказов</span>
+                        <span className="sp" />
+                        <span className="rlinks">
+                          <Link href={drill(s.code, orderRep.reportCode, "journal")}>Журнал</Link>
+                          <Link href={drill(s.code, orderRep.reportCode, "pay")}>Оплата</Link>
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 {s.reports.map((r) => {
                   const f = FRESH[r.freshness] ?? FRESH.never;
                   const orderLike = Object.keys(r.roles ?? {}).length > 0;
