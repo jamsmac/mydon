@@ -9,6 +9,38 @@ import type { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity
 type EntityRow = typeof entity.$inferSelect;
 
 /**
+ * Дописать старую цену в поле-историю при её смене.
+ *
+ * Ничего не стирается: прежняя цена уходит в историю с датой, до которой она
+ * действовала. Работает и для числа, и для числовой строки — источник и
+ * владелец пишут по-разному, а история нужна одинаково.
+ */
+function appendPriceHistory(
+  oldAttrs: Record<string, unknown>,
+  newAttrs: Record<string, unknown>,
+  priceKey: string,
+  historyKey: string,
+): void {
+  const toNum = (v: unknown): number | null => {
+    if (typeof v === "number") return Number.isFinite(v) ? v : null;
+    if (typeof v === "string") {
+      const n = Number(v.replace(/[\s\u00A0\u202F]/g, "").replace(",", "."));
+      return Number.isFinite(n) && v.trim().length > 0 ? n : null;
+    }
+    return null;
+  };
+  if (!(priceKey in newAttrs)) return;
+  const oldPrice = toNum(oldAttrs[priceKey]);
+  const newPrice = toNum(newAttrs[priceKey]);
+  if (oldPrice === null || newPrice === null || oldPrice === newPrice) return;
+  const d = new Date();
+  const stamp = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+  const cur = oldAttrs[historyKey];
+  const prev = typeof cur === "string" && cur.length > 0 ? `${cur}; ` : "";
+  newAttrs[historyKey] = `${prev}${oldPrice.toLocaleString("ru-RU")} сум (до ${stamp})`;
+}
+
+/**
  * Поиск по имени.
  *
  * Два подвоха, оба обнаружены проверкой:
@@ -342,24 +374,13 @@ export class EntitiesService {
       if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
 
       // История цен (слово владельца): смена цены не стирает старую, а
-      // дописывает её в поле «история цен» — видно прямо в карточке товара.
+      // дописывает её в поле-историю — видно прямо в карточке товара. Так ведём
+      // и цену продажи, и цену ПОКУПКИ (для перепродажи это себестоимость): у
+      // каждой своя история, путать их нельзя.
       if (dto.attrs) {
         const oldAttrs = (before.attrs ?? {}) as Record<string, unknown>;
-        const oldPrice = oldAttrs["цена"];
-        const newPrice = dto.attrs["цена"];
-        if (
-          typeof oldPrice === "number" &&
-          typeof newPrice === "number" &&
-          oldPrice !== newPrice
-        ) {
-          const d = new Date();
-          const stamp = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
-          const prev =
-            typeof oldAttrs["история цен"] === "string" && oldAttrs["история цен"].length > 0
-              ? `${oldAttrs["история цен"]}; `
-              : "";
-          dto.attrs["история цен"] = `${prev}${oldPrice.toLocaleString("ru-RU")} сум (до ${stamp})`;
-        }
+        appendPriceHistory(oldAttrs, dto.attrs, "цена", "история цен");
+        appendPriceHistory(oldAttrs, dto.attrs, "цена покупки", "история цены покупки");
       }
 
       const [updated] = await tx

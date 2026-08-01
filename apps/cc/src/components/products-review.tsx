@@ -83,7 +83,14 @@ function ProductRow({
   return (
     <div className={`prow ${blocked ? "hot" : ""}`}>
       <div className="pmain">
-        <span className="pname">{p.name}</span>
+        <span className="pname">
+          {p.name}
+          {p.codes.length > 0 && (
+            <span className="chip" style={{ marginLeft: 8 }} title="артикул источника (Commodity Code)">
+              арт. {p.codes.join(", ")}
+            </span>
+          )}
+        </span>
         <span className="pmeta mono">
           {num(p.revenue)} сум · {share(p.revenue, total)} · {p.orders.toLocaleString("ru-RU")} заказов
         </span>

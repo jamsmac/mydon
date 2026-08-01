@@ -395,6 +395,12 @@ export interface ProductLookalike {
 export interface SourceProduct {
   /** Название так, как его пишет источник. */
   name: string;
+  /**
+   * Коды товара у источника (артикул). У OurVend это `Commodity Code`. Пусто —
+   * у источника нет роли «код товара». Обычно один; несколько — сигнал, что под
+   * одним названием источник держит разные позиции, и это видно владельцу.
+   */
+  codes: string[];
   orders: number;
   revenue: number;
   /** Заказы с нечитаемой ценой — в выручку не вошли. */
@@ -2387,6 +2393,7 @@ export class RawService {
     }
     const fIdx = roleColumnIndex(snapshot.columns, report.roles, "flavour");
     const kIdx = roleColumnIndex(snapshot.columns, report.roles, "kind");
+    const cIdx = roleColumnIndex(snapshot.columns, report.roles, "productCode");
 
     const cell = (idx: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
     const product = cell(pIdx);
@@ -2421,6 +2428,26 @@ export class RawService {
             .from(rawRow)
             .where(and(...conds))
             .groupBy(product, cell(fIdx));
+
+    // Коды товара: у OurVend `Commodity Code`. Обычно один код на название, но
+    // берём все встреченные — расхождение это факт, который стоит показать.
+    const codeRows =
+      cIdx < 0
+        ? []
+        : await this.db
+            .select({ product, code: cell(cIdx), n: sql<number>`count(*)` })
+            .from(rawRow)
+            .where(and(...conds))
+            .groupBy(product, cell(cIdx));
+    const codesByKey = new Map<string, string[]>();
+    for (const r of codeRows) {
+      const code = r.code.trim();
+      if (code.length === 0) continue;
+      const key = normalizeSourceKey(r.product);
+      const list = codesByKey.get(key) ?? [];
+      if (!list.includes(code)) list.push(code);
+      codesByKey.set(key, list);
+    }
 
     const [cards, links] = await Promise.all([
       this.db
@@ -2469,6 +2496,7 @@ export class RawService {
       const dismissed = decided !== undefined && decided.entityId === null;
       merged.set(key, {
         name: r.name,
+        codes: codesByKey.get(key) ?? [],
         orders: Number(r.n),
         revenue: Number(r.revenue),
         unreadable: Number(r.unreadable),

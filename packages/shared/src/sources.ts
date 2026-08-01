@@ -32,6 +32,12 @@ export interface RawColumnRoles {
   point?: RoleNames;
   /** Товар: сопоставляется с карточкой товара (entity type=product). */
   product?: RoleNames;
+  /**
+   * Код товара у источника (артикул/SKU). У OurVend это `Commodity Code` —
+   * стабильный ключ, не зависящий от написания названия. Помогает узнать товар
+   * и заносится в карточку при её заведении.
+   */
+  productCode?: RoleNames;
   /** Вкус/вариант товара — уточнение к товару, отдельной карточкой не является. */
   flavour?: RoleNames;
   /** Сумма операции. Приводить к числу можно только на слое разбора. */
@@ -114,6 +120,61 @@ export function decodeRawValue(
  */
 export const FISCAL_FIELDS = ["ИКПУ", "упаковка", "НДС"] as const;
 export type FiscalField = (typeof FISCAL_FIELDS)[number];
+
+/**
+ * Принцип карточки товара. Модель перенесена из рабочих систем владельца
+ * (VendHub-Snack-Drinks — перепродажа, VendHub24 `product.types.ts` — рецепт):
+ *
+ * - «перепродажа» — готовый товар, куплен и продан как есть. Нужна цена покупки
+ *   и её история — из них себестоимость и наценка.
+ * - «рецепт» — готовится из ингредиентов по рецепту. Продажа списывает
+ *   ингредиенты — это расход, а себестоимость складывается из их стоимости.
+ *
+ * Каждая карточка товара — либо то, либо другое. Общее у обоих — фискальные поля
+ * (чек), они уже есть. Ингредиенты и состав рецепта — следующий этап.
+ */
+export const PRODUCT_KINDS = ["перепродажа", "рецепт"] as const;
+export type ProductKind = (typeof PRODUCT_KINDS)[number];
+
+/** Как принцип читается владельцу. */
+export const PRODUCT_KIND_LABELS: Record<ProductKind, string> = {
+  "перепродажа": "На перепродажу",
+  "рецепт": "С рецептом",
+};
+
+/** Принцип карточки из attrs; null — владелец ещё не выбрал. */
+export function productKind(attrs: Record<string, unknown> | null | undefined): ProductKind | null {
+  const v = attrs?.["вид"];
+  return typeof v === "string" && (PRODUCT_KINDS as readonly string[]).includes(v)
+    ? (v as ProductKind)
+    : null;
+}
+
+/**
+ * Поля карточки «на перепродажу» (ключи attrs).
+ *
+ * Цена покупки — главное: без неё не посчитать ни себестоимость, ни наценку.
+ * История цены покупки ведётся автоматически при её смене (см. Core update).
+ */
+export const RESALE_FIELDS = ["цена покупки", "цена продажи", "поставщик", "штрих-код"] as const;
+export type ResaleField = (typeof RESALE_FIELDS)[number];
+
+/**
+ * Чего не хватает карточке-перепродаже. Считается только для вида «перепродажа»:
+ * у рецептурной карточки своя нехватка (состав), и мешать их нельзя.
+ */
+export function resaleGaps(
+  attrs: Record<string, unknown> | null | undefined,
+): { field: string; why: string }[] {
+  if (productKind(attrs) !== "перепродажа") return [];
+  const gaps: { field: string; why: string }[] = [];
+  const price = attrs?.["цена покупки"];
+  const has =
+    (typeof price === "number" && Number.isFinite(price) && price > 0) ||
+    (typeof price === "string" && price.trim().length > 0);
+  if (!has) gaps.push({ field: "цена покупки", why: "без неё не посчитать себестоимость и наценку" });
+  return gaps;
+}
 
 /**
  * Длина кода ИКПУ.
@@ -205,6 +266,7 @@ export const RAW_ROLES = [
   "machine",
   "point",
   "product",
+  "productCode",
   "flavour",
   "amount",
   "ts",
@@ -220,6 +282,7 @@ export const RAW_ROLE_LABELS: Record<keyof RawColumnRoles, string> = {
   machine: "Автомат (серийник)",
   point: "Точка (адрес)",
   product: "Товар",
+  productCode: "Код товара",
   flavour: "Вкус",
   amount: "Сумма",
   ts: "Время операции",
@@ -406,6 +469,8 @@ export const RAW_SOURCES: readonly RawSourceDef[] = [
           // Machine Name — как автомат назван в кабинете («Olma Администрация»).
           point: ["Machine Name"],
           product: ["Commodity Name"],
+          // Commodity Code — артикул товара OurVend: стабильный код, не написание.
+          productCode: ["Commodity Code"],
           amount: ["Price"],
           // Server Time — местное время (машинное + 3ч), сходится с часами
           // gjvending и vendinghub; Machine Time оставлено сырой колонкой.
