@@ -1,5 +1,6 @@
 import type { AutonomyTier } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
+import { EXECUTORS } from "./executors";
 import { checkLimit, dailyCap, startOfTashkentDay } from "./limits";
 import { explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
@@ -94,15 +95,36 @@ export async function runSkill(
     }
   }
 
-  // Действие ВСЕГДА идёт через согласование, независимо от порога автономии.
-  //
-  // Раньше при поднятом пороге (requiresApproval=false) навык возвращал
-  // `executed` и писал в журнал `executed:true` — но РЕАЛЬНОГО исполнителя у
-  // навыков нет: ничего не выполнялось, а task-worker закрывал задачу как
-  // «сделано». Это ложь (аудит P1). Пока нет настоящего исполнителя и проверки
-  // результата, единственное честное действие — предложить владельцу. Порог
-  // сохраняем в payload и в reason: он снова заработает, когда появятся
-  // исполнители, и тогда здесь вернётся ветка реального выполнения.
+  // Реальное исполнение — только если (а) порог автономии это разрешает И
+  // (б) у навыка есть зарегистрированный исполнитель. Исполнитель САМ проверяет
+  // результат: `ok=true` лишь когда действие подтверждено перечиткой. Провал
+  // проверки НЕ выдаём за «сделано» — уходим в согласование ниже. Реестр
+  // исполнителей пуст → поведение прежнее: всё через согласование (аудит P1:
+  // не изображать исполнение без исполнителя).
+  const executor = EXECUTORS[skill];
+  if (executor && !requiresApproval(tier, threshold)) {
+    const exec = await executor(agent, proposal, core);
+    if (exec.ok) {
+      await core.recordEvent({
+        source: `agent:${agent.name}`,
+        type: "agent.action",
+        payload: { skill, action: proposal.action, executed: true, verified: exec.detail },
+      });
+      return {
+        agent: agent.name,
+        skill,
+        outcome: "executed",
+        action: proposal.action,
+        facts: proposal.facts,
+        reason: `исполнено и проверено: ${exec.detail}`,
+      };
+    }
+    // Результат не подтверждён — не врём: не считаем сделанным, выносим владельцу.
+  }
+
+  // Действие идёт через согласование: порог не разрешает исполнение, или у
+  // навыка нет исполнителя, или исполнитель не подтвердил результат. Порог
+  // сохраняем в payload и reason — он в силе, когда исполнитель появится.
   const approval = await core.requestApproval({
     agent: agent.name,
     action: proposal.action,
