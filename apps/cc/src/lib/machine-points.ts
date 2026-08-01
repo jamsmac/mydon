@@ -31,8 +31,10 @@ export function machinePoints(machines: Entity[]): MachinePoint[] {
   const out: MachinePoint[] = [];
   for (const m of machines) {
     const a = m.attrs ?? {};
-    const lat = Number(a["широта"]);
-    const lng = Number(a["долгота"]);
+    // Источник истины — типизированная точка (проверена на записи). Пока
+    // карточка не мигрировала — берём координаты из attrs, как раньше.
+    const lat = m.geo ? m.geo.lat : Number(a["широта"]);
+    const lng = m.geo ? m.geo.lng : Number(a["долгота"]);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     if (lat < 30 || lat > 55) continue;
     if (lng < 55 || lng > 80) continue;
@@ -43,7 +45,7 @@ export function machinePoints(machines: Entity[]): MachinePoint[] {
         : Number(raw) === 10
           ? "coffee"
           : "snack";
-    const addr = a["адрес"] ?? a["точка"] ?? a["локация"];
+    const addr = m.geo?.address ?? a["адрес"] ?? a["точка"] ?? a["локация"];
     out.push({
       id: m.id,
       name: m.name,

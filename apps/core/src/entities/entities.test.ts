@@ -91,6 +91,8 @@ describe("История цен товара", () => {
         },
       }),
       insert: () => ({ values: async () => undefined }),
+      // Синк типизированной точки: у товаров без координат update чистит geo_point.
+      delete: () => ({ where: async () => undefined }),
     };
     const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
     return { db, updates };
@@ -122,5 +124,37 @@ describe("История цен товара", () => {
     const s = new EntitiesService(db, { record: async () => undefined } as never);
     const r = await s.update("e1", { attrs: { цена: 20000, ИКПУ: "123" } });
     assert.equal((r.attrs as Record<string, unknown>)["история цен"], undefined);
+  });
+});
+
+describe("Координаты карточки", () => {
+  function stub(before: Record<string, unknown>) {
+    const tx = {
+      select: () => ({ from: () => ({ where: () => ({ for: async () => [before] }) }) }),
+      update: () => ({
+        set: (v: Record<string, unknown>) => ({
+          where: () => ({ returning: async () => [{ ...before, ...v }] }),
+        }),
+      }),
+      insert: () => ({ values: async () => undefined }),
+      delete: () => ({ where: async () => undefined }),
+    };
+    return { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+  }
+
+  it("координаты вне диапазона отклоняются — мусор не сохранить", async () => {
+    const s = new EntitiesService(stub({ id: "e1", attrs: {} }), { record: async () => undefined } as never);
+    await assert.rejects(
+      () => s.update("e1", { attrs: { широта: "999", долгота: "10" } }),
+      /диапазон/i,
+    );
+  });
+
+  it("перепутанные местами (широта 69) вне диапазона — тоже отказ", async () => {
+    const s = new EntitiesService(stub({ id: "e1", attrs: {} }), { record: async () => undefined } as never);
+    await assert.rejects(
+      () => s.update("e1", { attrs: { широта: "69.2", долгота: "200" } }),
+      /диапазон/i,
+    );
   });
 });

@@ -1,12 +1,78 @@
-import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, entity, entityDraft, org } from "@mydon/db";
-import { isUnit, parseRecipe, recipeCost, type Domain, type IngredientPrice, type Unit } from "@mydon/shared";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { auditLog, entity, entityDraft, geoPoint, org } from "@mydon/db";
+import {
+  addressFromAttrs,
+  coordFromAttrs,
+  isUnit,
+  parseRecipe,
+  recipeCost,
+  type Domain,
+  type IngredientPrice,
+  type Unit,
+} from "@mydon/shared";
 import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import type { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
 
 type EntityRow = typeof entity.$inferSelect;
+/** Транзакция Drizzle — та же, что даёт `db.transaction(async (tx) => …)`. */
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** Типизированная точка карточки — едет вместе с ней на чтении. */
+export interface Geo {
+  lat: number;
+  lng: number;
+  address: string | null;
+}
+
+/**
+ * Держать geo_point в согласии с attrs карточки. Координаты вводятся в attrs
+ * (широта/долгота), но хранятся ЧИСЛАМИ с проверкой диапазона здесь. Заявлены,
+ * но вне диапазона — это ошибка ввода, её возвращаем, а не проглатываем нулём.
+ * Убраны из attrs — убираем и точку. `tx` — та же транзакция, что и запись
+ * карточки: точка и карточка меняются вместе или никак.
+ */
+async function syncGeoPoint(
+  tx: Tx,
+  entityId: string,
+  attrs: Record<string, unknown> | null | undefined,
+  strict = true,
+): Promise<void> {
+  const { present, coord } = coordFromAttrs(attrs);
+  if (present && coord === null) {
+    // Прямая правка владельцем — возвращаем ошибку. Массовое утверждение
+    // предложенных значений (strict=false) не роняем из-за одной битой пары:
+    // просто не трогаем точку.
+    if (strict) {
+      throw new BadRequestException(
+        "Координаты вне диапазона: широта −90..90, долгота −180..180",
+      );
+    }
+    return;
+  }
+  if (coord === null) {
+    await tx.delete(geoPoint).where(eq(geoPoint.entityId, entityId));
+    return;
+  }
+  await tx
+    .insert(geoPoint)
+    .values({
+      entityId,
+      lat: String(coord.lat),
+      lng: String(coord.lng),
+      address: addressFromAttrs(attrs),
+    })
+    .onConflictDoUpdate({
+      target: geoPoint.entityId,
+      set: {
+        lat: String(coord.lat),
+        lng: String(coord.lng),
+        address: addressFromAttrs(attrs),
+        updatedAt: new Date(),
+      },
+    });
+}
 
 /**
  * Дописать старую цену в поле-историю при её смене.
@@ -93,6 +159,9 @@ export class EntitiesService {
         .set({ name, attrs, approvedAt: new Date(), approvedBy: actorRef, updatedAt: new Date() })
         .where(eq(entity.id, id))
         .returning();
+      // Утверждённые координаты — в типизированную точку; битую пару из
+      // источника не роняем (strict=false), а честно оставляем как есть.
+      await syncGeoPoint(tx, id, attrs, false);
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef,
@@ -273,6 +342,9 @@ export class EntitiesService {
         })
         .returning();
 
+      // Координаты — числами с проверкой диапазона, в той же транзакции.
+      await syncGeoPoint(tx, created.id, (dto.attrs ?? {}) as Record<string, unknown>);
+
       await tx.insert(auditLog).values({
         actorKind: "system",
         actorRef,
@@ -284,7 +356,9 @@ export class EntitiesService {
     });
   }
 
-  async find(filter: FindEntitiesDto): Promise<(EntityRow & { domain: string | null })[]> {
+  async find(
+    filter: FindEntitiesDto,
+  ): Promise<(EntityRow & { domain: string | null; geo: Geo | null })[]> {
     const conditions: SQL[] = [];
     // Фильтр по id раньше объявлялся, но не применялся: клиент получал весь
     // реестр и мог принять чужую карточку за найденную.
@@ -295,7 +369,7 @@ export class EntitiesService {
 
     // Домен добавляется к каждой строке: реестр показывается по направлениям,
     // и без этого поля клиенту пришлось бы угадывать, чьё это.
-    return this.db
+    const rows = await this.db
       .select({
         id: entity.id,
         orgId: entity.orgId,
@@ -317,9 +391,20 @@ export class EntitiesService {
       .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(entity.createdAt))
       .limit(500);
+    const geos = await this.geoFor(rows.map((r) => r.id));
+    return rows.map((r) => ({ ...r, geo: geos.get(r.id) ?? null }));
   }
 
-  async byId(id: string): Promise<EntityRow & { domain: string | null }> {
+  /** Типизированные точки по набору карточек — для чтения вместе с ними. */
+  private async geoFor(ids: string[]): Promise<Map<string, Geo>> {
+    if (ids.length === 0) return new Map();
+    const rows = await this.db.select().from(geoPoint).where(inArray(geoPoint.entityId, ids));
+    return new Map(
+      rows.map((g) => [g.entityId, { lat: Number(g.lat), lng: Number(g.lng), address: g.address }]),
+    );
+  }
+
+  async byId(id: string): Promise<EntityRow & { domain: string | null; geo: Geo | null }> {
     const [row] = await this.db
       .select({
         id: entity.id,
@@ -336,7 +421,8 @@ export class EntitiesService {
       .leftJoin(org, eq(org.id, entity.orgId))
       .where(eq(entity.id, id));
     if (!row) throw new NotFoundException(`Сущность ${id} не найдена`);
-    return row as EntityRow & { domain: string | null };
+    const geos = await this.geoFor([id]);
+    return { ...(row as EntityRow & { domain: string | null }), geo: geos.get(id) ?? null };
   }
 
   /**
@@ -393,6 +479,12 @@ export class EntitiesService {
         })
         .where(eq(entity.id, id))
         .returning();
+
+      // Координаты правятся через attrs — держим типизированную точку в согласии.
+      // Только когда attrs пришли: частичное обновление их не трогает.
+      if (dto.attrs !== undefined) {
+        await syncGeoPoint(tx, id, updated.attrs as Record<string, unknown>);
+      }
 
       await tx.insert(auditLog).values({
         actorKind: "system",
