@@ -109,10 +109,11 @@ describe("реальные паспорта навыков MYDON", () => {
     );
   });
 
-  it("draft-quote (деньги) объявлен не ниже T3", () => {
+  it("draft-quote (деньги) объявлен не ниже T3; monitor-stock поднят инструментами до T3", () => {
     const floors = skillTierFloors(loadSkillMeta(REAL_AGENTS_DIR));
     assert.equal(floors.get("draft-quote"), "T3");
-    assert.equal(floors.get("monitor-stock"), "T1");
+    // monitor-stock: requires-approval T1, но exec:check_inventory (exec→T3) поднимает пол.
+    assert.equal(floors.get("monitor-stock"), "T3");
   });
 });
 

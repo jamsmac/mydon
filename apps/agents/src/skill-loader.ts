@@ -3,6 +3,7 @@ import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { AutonomyTier } from "@mydon/shared";
 import { maxTier } from "./policy";
+import { toolTierFloor } from "./tools";
 
 /**
  * Загрузчик навыков-паспортов (перенос паттерна Agent Skills из прототипа).
@@ -123,19 +124,32 @@ export function loadSkillMeta(agentsDir: string): SkillMeta[] {
 }
 
 /**
+ * Пол тира одного навыка: максимум из объявленного `requires-approval` и пола
+ * по инструментам (`allowed-tools`). Так навык с `exec:`/`write` инструментом
+ * не исполнится ниже соответствующего тира, даже если `requires-approval` мягче.
+ * Ни того, ни другого нет → undefined (пол не задан).
+ */
+export function skillFloor(meta: SkillMeta): AutonomyTier | undefined {
+  const toolFloor = meta.allowedTools.length ? toolTierFloor(meta.allowedTools) : undefined;
+  if (meta.requiresApproval === undefined) return toolFloor;
+  return toolFloor ? maxTier([meta.requiresApproval, toolFloor]) : meta.requiresApproval;
+}
+
+/**
  * Карта «имя навыка → минимальный тир (floor)».
  *
  * Один навык может встречаться у нескольких агентов (напр. business-brief у
- * globerent-ceo и vendhub-ceo). Берём САМЫЙ СТРОГИЙ объявленный тир: если хоть
- * одна копия помечена строже, floor поднимается для всех запусков этого навыка.
+ * globerent-ceo и vendhub-ceo). Берём САМЫЙ СТРОГИЙ пол: если хоть одна копия
+ * строже (по тиру или по инструментам), floor поднимается для всех запусков.
  * Так гейт не зависит от каталога агента и работает и для агентов из базы.
  */
 export function skillTierFloors(metas: SkillMeta[]): Map<string, AutonomyTier> {
   const floors = new Map<string, AutonomyTier>();
   for (const m of metas) {
-    if (m.requiresApproval === undefined) continue;
+    const floor = skillFloor(m);
+    if (floor === undefined) continue;
     const current = floors.get(m.name);
-    floors.set(m.name, current ? maxTier([current, m.requiresApproval]) : m.requiresApproval);
+    floors.set(m.name, current ? maxTier([current, floor]) : floor);
   }
   return floors;
 }

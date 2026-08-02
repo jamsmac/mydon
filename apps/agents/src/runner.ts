@@ -128,8 +128,13 @@ export async function runSkill(
   // проверки НЕ выдаём за «сделано» — уходим в согласование ниже. Реестр
   // исполнителей пуст → поведение прежнее: всё через согласование (аудит P1:
   // не изображать исполнение без исполнителя).
+  // Break-glass: навык из списка агента ВСЕГДА идёт через согласование — не
+  // исполняется сам ни при каком пороге. Аварийные/особо рискованные операции
+  // владелец держит под ручным контролем осознанно.
+  const isBreakGlass = (agent.breakGlass ?? []).includes(skill);
+
   const executor = EXECUTORS[skill];
-  if (executor && !requiresApproval(tier, threshold)) {
+  if (executor && !isBreakGlass && !requiresApproval(tier, threshold)) {
     const exec = await executor(agent, proposal, core);
     if (exec.ok) {
       await core.recordEvent({
@@ -176,8 +181,10 @@ export async function runSkill(
     approvalId: approval.id,
     action: proposal.action,
     facts: proposal.facts,
-    reason: requiresApproval(tier, threshold)
-      ? explainPolicy(tier, threshold)
-      : "порог допускает исполнение, но исполнителя навыка ещё нет — вынесено на согласование",
+    reason: isBreakGlass
+      ? `break-glass: навык «${skill}» всегда идёт через согласование`
+      : requiresApproval(tier, threshold)
+        ? explainPolicy(tier, threshold)
+        : "порог допускает исполнение, но исполнителя навыка ещё нет — вынесено на согласование",
   };
 }

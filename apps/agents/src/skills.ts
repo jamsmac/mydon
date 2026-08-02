@@ -1,6 +1,7 @@
 import type { Domain } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
 import type { AgentDefinition } from "./registry";
+import { buildIdeasProposal, readIdeaChannels } from "./ideas";
 import { buildWebProposal, readWebSources } from "./web-read";
 
 /**
@@ -105,6 +106,14 @@ const readSources: Skill = async (agent) => {
   return buildWebProposal(results);
 };
 
+// ── knowledge-curator: идеи из Telegram-каналов владельца (@promtjam) ─────────
+const scanIdeas: Skill = async (agent) => {
+  const channels = agent.ideaChannels ?? [];
+  if (channels.length === 0) return null; // каналов нет — читать нечего
+  const digests = await readIdeaChannels(channels);
+  return buildIdeasProposal(digests);
+};
+
 /**
  * Реестр реализованных навыков. Навыка нет в реестре — прогон честно
  * сообщает, что он ещё не подключён (а не изображает работу).
@@ -114,6 +123,7 @@ export const SKILLS: Record<string, Skill> = {
   "monitor-stock": monitorStock,
   "morning-digest": morningDigest,
   "read-sources": readSources,
+  "scan-ideas": scanIdeas,
 };
 
 export function hasSkill(name: string): boolean {
