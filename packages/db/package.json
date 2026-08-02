@@ -21,7 +21,8 @@
     "db:seed": "node dist/seed.js",
     "db:seed:catalog": "node dist/seed-catalog.js",
     "clean": "rm -rf dist .turbo *.tsbuildinfo",
-    "test": "find dist -name '*.test.js' -print0 | xargs -0 --no-run-if-empty node --test"
+    "test": "find dist -name '*.test.js' -print0 | xargs -0 --no-run-if-empty node --test",
+    "db:seed:vending": "node dist/seed-vending.js"
   },
   "dependencies": {
     "@mydon/shared": "workspace:*",
