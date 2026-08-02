@@ -9,7 +9,7 @@
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import { createDb } from "./index";
-import { vendingProduct } from "./schema";
+import { vendingAlias, vendingProduct } from "./schema";
 
 export type VendingCat = "drink" | "snack";
 
@@ -63,6 +63,60 @@ export const VENDING_PRICELIST: PriceItem[] = [
 ];
 
 /**
+ * Алиасы имён: как товар называют на рукописных листах остатков и в заметках
+ * закупа владельца → каноническое имя из прайса. Только точные соответствия
+ * (по нормализованному ключу): нечёткое сопоставление дало бы неверную цену на
+ * похожем имени. Взято с реальных листов остатков (31.07 / 02.08.2026).
+ */
+export interface AliasItem {
+  alias: string;
+  /** Каноническое имя — обязано существовать в VENDING_PRICELIST. */
+  product: string;
+}
+
+export const VENDING_ALIASES: AliasItem[] = [
+  // Напитки
+  { alias: "Fuse Tea", product: "FuseTea Tea Mango Cham 450ml" },
+  { alias: "Fuse Tea can 0.45", product: "FuseTea Tea Mango Cham 450ml" },
+  { alias: "Coca Cola cl", product: "CocaCola Classic CAN 250ml" },
+  { alias: "Coca cola classic can 0.25", product: "CocaCola Classic CAN 250ml" },
+  { alias: "Sprite can 0.25", product: "Sprite 250ml" },
+  { alias: "Fanta", product: "Fanta Classic CAN 250ml" },
+  { alias: "Fanta can 0.25", product: "Fanta Classic CAN 250ml" },
+  { alias: "Montella", product: "Montella Вода минеральная 330ml" },
+  { alias: "Montella pet 0.33", product: "Montella Вода минеральная 330ml" },
+  { alias: "18+", product: "Plus 18 Energy 330ml" },
+  { alias: "Plus 18 can 0.33", product: "Plus 18 Energy 330ml" },
+  { alias: "Flash", product: "FlashUp Energy 330ml" },
+  { alias: "Flash can 0.33", product: "FlashUp Energy 330ml" },
+  { alias: "lemon Fr", product: "LaimonFresh Lime 330ml" },
+  { alias: "LimonFresh", product: "LaimonFresh Lime 330ml" },
+  { alias: "LimonFresh can 0.33", product: "LaimonFresh Lime 330ml" },
+  { alias: "Moxito", product: "Moxito Fresh Lime CAN 450ml" },
+  { alias: "Moxito lime can 0.45", product: "Moxito Fresh Lime CAN 450ml" },
+  { alias: "Moxito клуб", product: "Moxito Fresh Klubnika CAN 450ml" },
+  { alias: "Moxito klibn", product: "Moxito Fresh Klubnika CAN 450ml" },
+  { alias: "Moxito klubn can 0.45", product: "Moxito Fresh Klubnika CAN 450ml" },
+  { alias: "Red bull can 0.25", product: "RedBull Classic 250 ml" },
+  // Снеки
+  { alias: "Flint", product: "Flint Kabob 100gr" },
+  { alias: "Lays", product: "Lays Рифлёные Сметана и лук 70gr" },
+  { alias: "Арахис", product: "Ermak Арахис с солью 50gr" },
+  { alias: "Ermak Araxis", product: "Ermak Арахис с солью 50gr" },
+  { alias: "Choco p", product: "ChocoPie Orion 30gr" },
+  { alias: "ChocoPie", product: "ChocoPie Orion 30gr" },
+  { alias: "Twix", product: "Twix 50gr" },
+  { alias: "Strobar", product: "Strobar 40gr" },
+  { alias: "Snickers", product: "Snickers 50gr" },
+  { alias: "Velona", product: "Velona Венские вафли с шоколадным вкусом" },
+  { alias: "Bounty", product: "Bounty Coconut 55gr" },
+  { alias: "Oreo", product: "Oreo x4 38gr" },
+  { alias: "Barni", product: "Barni Шоколадный 30gr" },
+  { alias: "Cheers 70", product: "Cheers Сметана и зелень 70gr" },
+  { alias: "TUC chees", product: "TUC Crackers Sour cream and Onion" },
+];
+
+/**
  * Занести прайс в `vending_product`. Идемпотентно: существующих по имени не
  * трогает (цена владельца важнее прайса из скрипта). Возвращает счётчики.
  */
@@ -85,6 +139,36 @@ export async function seedVendingPrices(
   return { seeded: fresh.length, skipped: VENDING_PRICELIST.length - fresh.length };
 }
 
+/**
+ * Занести алиасы в `vending_alias`. Идемпотентно: по имеющемуся алиасу не
+ * дублирует. Товар алиаса обязан быть в `vending_product` (иначе алиас
+ * пропускается со счётчиком — сид прайса должен идти первым). Возвращает счётчики.
+ */
+export async function seedVendingAliases(
+  db: ReturnType<typeof createDb>,
+): Promise<{ seeded: number; skipped: number; noProduct: number }> {
+  const [products, existing] = await Promise.all([
+    db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct),
+    db.select({ alias: vendingAlias.alias }).from(vendingAlias),
+  ]);
+  const idByName = new Map(products.map((p) => [p.name, p.id]));
+  const have = new Set(existing.map((e) => e.alias));
+
+  const rows: { productId: string; alias: string; source: "warehouse" }[] = [];
+  let noProduct = 0;
+  for (const a of VENDING_ALIASES) {
+    if (have.has(a.alias)) continue;
+    const productId = idByName.get(a.product);
+    if (!productId) {
+      noProduct += 1;
+      continue;
+    }
+    rows.push({ productId, alias: a.alias, source: "warehouse" });
+  }
+  if (rows.length > 0) await db.insert(vendingAlias).values(rows);
+  return { seeded: rows.length, skipped: VENDING_ALIASES.length - rows.length - noProduct, noProduct };
+}
+
 async function main(): Promise<void> {
   loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
   const url = process.env.DATABASE_URL;
@@ -92,6 +176,12 @@ async function main(): Promise<void> {
   const db = createDb(url);
   const { seeded, skipped } = await seedVendingPrices(db);
   console.log(`Прайс вендинга: занесено ${seeded}, уже было ${skipped} (всего ${VENDING_PRICELIST.length}).`);
+  const al = await seedVendingAliases(db);
+  console.log(
+    `Алиасы вендинга: занесено ${al.seeded}, уже было ${al.skipped}` +
+      (al.noProduct > 0 ? `, без товара ${al.noProduct}` : "") +
+      ` (всего ${VENDING_ALIASES.length}).`,
+  );
 }
 
 if (require.main === module) {

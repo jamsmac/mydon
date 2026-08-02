@@ -4,6 +4,7 @@ import {
   computePurchase,
   machineDeficit,
   needByProduct,
+  normalizeProductName,
   planogramStatus,
   runoutForecast,
   slotDeficit,
@@ -12,6 +13,19 @@ import {
   type PurchaseRow,
   type Slot,
 } from "./vending-calc";
+
+describe("Вендинг: нормализация имени товара (алиасы)", () => {
+  it("сводит регистр, пробелы и ё→е", () => {
+    assert.equal(normalizeProductName("  Coca  Cola  cl "), "coca cola cl");
+    assert.equal(normalizeProductName("Montella"), "montella");
+    assert.equal(normalizeProductName("Тёплый чай"), "теплый чай");
+  });
+
+  it("одинаковые по сути имена дают один ключ", () => {
+    assert.equal(normalizeProductName("18+"), normalizeProductName("18+ "));
+    assert.equal(normalizeProductName("Moxito КЛУБ"), normalizeProductName("moxito клуб"));
+  });
+});
 
 // ── §5.1–5.2 Слоты, валидность, статус, дефицит ──────────────────────────────
 
