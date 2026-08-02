@@ -93,6 +93,18 @@ export interface VendingPurchase {
   overpay: number;
 }
 
+/** Накладная закупа (материализована при одобрении заявки, §5.7). */
+export interface VendingOrder {
+  id: string;
+  approvalId: string;
+  status: "approved" | "ordered" | "received" | "cancelled";
+  positions: number;
+  totalOrder: number;
+  costRounded: number;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 /** Запуск сбора Ourvend — когда собирали и с каким итогом. */
 export interface VendingSyncRun {
   id: string;
@@ -1008,6 +1020,7 @@ export const core = {
   vendingDeficit: () => get<VendingNeed[]>("/vending/deficit"),
   vendingForecast: () => get<{ all: VendingRunout[]; critical: VendingRunout[] }>("/vending/forecast"),
   vendingPurchase: () => get<VendingPurchase>("/vending/purchase"),
+  vendingOrders: () => get<VendingOrder[]>("/vending/orders"),
   vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──

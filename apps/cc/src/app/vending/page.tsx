@@ -3,6 +3,7 @@ import {
   CoreUnavailable,
   type VendingMachine,
   type VendingNeed,
+  type VendingOrder,
   type VendingPurchase,
   type VendingRunout,
   type VendingSyncRun,
@@ -22,6 +23,14 @@ const SYNC_LABEL: Record<VendingSyncRun["status"], string> = {
   success: "успешно",
   partial: "частично",
   failed: "сбой",
+};
+
+/** Статус накладной закупа по-русски (§5.7). */
+const ORDER_LABEL: Record<VendingOrder["status"], string> = {
+  approved: "одобрена",
+  ordered: "заказана",
+  received: "принята",
+  cancelled: "отменена",
 };
 
 /** Строка «когда последний раз собирали» по журналу сбора Ourvend. */
@@ -57,6 +66,7 @@ export default async function VendingPage() {
   let needs: VendingNeed[] = [];
   let syncRuns: VendingSyncRun[] = [];
   let critical: VendingRunout[] = [];
+  let orders: VendingOrder[] = [];
   let purchase: VendingPurchase = {
     items: [],
     excludedNoSales: [],
@@ -69,11 +79,12 @@ export default async function VendingPage() {
   };
   try {
     let forecast: { critical: VendingRunout[] };
-    [machines, needs, forecast, purchase, syncRuns] = await Promise.all([
+    [machines, needs, forecast, purchase, orders, syncRuns] = await Promise.all([
       core.vendingMachines(),
       core.vendingDeficit(),
       core.vendingForecast(),
       core.vendingPurchase(),
+      core.vendingOrders(),
       core.vendingSyncRuns(),
     ]);
     critical = forecast.critical;
@@ -172,6 +183,35 @@ export default async function VendingPage() {
           {purchase.noPrice.length > 0 && (
             <p className="muted">Без цены в прайсе — на разбор: {purchase.noPrice.join(", ")}</p>
           )}
+        </>
+      )}
+
+      {orders.length > 0 && (
+        <>
+          <div className="section-title">Накладные закупа</div>
+          <div className="rows">
+            {orders.map((o) => {
+              const when = new Date(o.createdAt).toLocaleDateString("ru-RU", {
+                timeZone: "Asia/Tashkent",
+                day: "2-digit",
+                month: "2-digit",
+              });
+              return (
+                <div className="row" key={o.id}>
+                  <div className="t">
+                    <b>
+                      {when} · {o.positions} поз.
+                    </b>
+                    <small>
+                      {o.costRounded > 0 ? `${sum(o.costRounded)} сум` : "без суммы"}
+                      {o.createdBy ? ` · ${o.createdBy}` : ""}
+                    </small>
+                  </div>
+                  <span className={`pill ${o.status === "received" ? "ok" : ""}`}>{ORDER_LABEL[o.status]}</span>
+                </div>
+              );
+            })}
+          </div>
         </>
       )}
 
