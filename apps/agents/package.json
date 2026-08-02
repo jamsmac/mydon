@@ -10,7 +10,8 @@
     "lint": "eslint src",
     "clean": "rm -rf dist .turbo *.tsbuildinfo",
     "test": "find dist -name '*.test.js' -print0 | xargs -0 --no-run-if-empty node --test",
-    "check:passports": "node dist/check-passports.js"
+    "check:passports": "node dist/check-passports.js",
+    "coach:apply": "node dist/apply-coach-edit.js"
   },
   "dependencies": {
     "@mydon/connectors": "workspace:*",
