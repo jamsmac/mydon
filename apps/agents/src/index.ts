@@ -12,6 +12,7 @@ import { runSkill } from "./runner";
 import { desiredJobs, jobKey } from "./schedule";
 import { loadSkillMeta, skillTierFloors } from "./skill-loader";
 import { hasSkill } from "./skills";
+import { applySystemOverrides } from "./system-config";
 import { runAgentTasks } from "./task-worker";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
@@ -87,7 +88,18 @@ function idle(): Promise<never> {
 async function main(): Promise<void> {
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
   const core = new AgentsCoreClient(coreUrl, 10_000, process.env.SERVICE_TOKEN ?? "");
-  const threshold = autonomyThreshold();
+
+  // Порог автономии — не const: глобальный тумблер AGENT_AUTONOMY_MAX владелец
+  // может менять из панели (оверлей ниже кладёт его в env), и перечитка обновит
+  // порог без рестарта. Замыкания захватывают переменную, значит видят свежее.
+  let threshold = autonomyThreshold();
+
+  // Наложить глобальные тумблеры из Core (база важнее env) на окружение, чтобы
+  // читатели мозга/памяти/бюджета/порога видели правку владельца из панели.
+  async function refreshSystemConfig(): Promise<void> {
+    await applySystemOverrides(core);
+    threshold = autonomyThreshold();
+  }
 
   // Минимальные тиры навыков (frontmatter `requires-approval`). Файлы навыков —
   // часть образа и в рантайме не меняются, поэтому читаем один раз. Ключ — имя
@@ -116,6 +128,9 @@ async function main(): Promise<void> {
       if (seed.seeded > 0) {
         console.log(`Паспорта перенесены в базу: заведено ${seed.seeded}, уже было ${seed.skipped}.`);
       }
+      // Тумблеры системы накладываем вместе с настройками агентов: обе правки
+      // владельца живут в базе и подхватываются одной перечиткой.
+      await refreshSystemConfig();
       return (await core.listAgents()).map(fromCore);
     } catch {
       return null;
@@ -151,11 +166,14 @@ async function main(): Promise<void> {
   console.log(`Модель: ${llmPosture()}.`);
   console.log(`${coachPosture(modelGatewayFromEnv() !== null)}.`);
 
-  if (process.env.AGENTS_SCHEDULES_PAUSED === "1") {
-    console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания не запускаются. Ожидаю снятия паузы.");
-    // Не выходим: иначе Docker с restart-политикой поднимал бы контейнер по кругу.
-    await idle();
-    return;
+  // Пауза расписаний — «живой» тумблер: владелец снимает её из панели (оверлей
+  // кладёт значение в env), и перечитка включает расписания без рестарта. Раньше
+  // проверка была разовой на старте и уводила процесс в вечный idle — снять
+  // паузу можно было только перезапуском.
+  const schedulesPaused = (): boolean => process.env.AGENTS_SCHEDULES_PAUSED === "1";
+  let lastPaused = schedulesPaused();
+  if (lastPaused) {
+    console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания на паузе. Слежу за снятием (панель/env).");
   }
 
   // Запущенные cron-задания по ключу «агент навык расписание». Перечитка
@@ -166,6 +184,15 @@ async function main(): Promise<void> {
   let lastNotWired = "";
 
   function reconcileSchedules(): void {
+    // На паузе желаемый набор пуст: гасим все задания и ничего не заводим.
+    if (schedulesPaused()) {
+      for (const [key, job] of cronJobs) {
+        job.stop();
+        cronJobs.delete(key);
+      }
+      return;
+    }
+
     const { jobs, notWired } = desiredJobs(agents, hasSkill);
     const want = new Set(jobs.map(jobKey));
 
@@ -218,6 +245,7 @@ async function main(): Promise<void> {
    * проход — не снимок на старте.
    */
   async function pollAgentTasks(): Promise<void> {
+    if (schedulesPaused()) return; // на паузе агент не берёт и поручённые задачи (как раньше)
     for (const agent of agents.filter((a) => a.status === "active")) {
       try {
         const results = await runAgentTasks(agent, core, threshold, skillFloors);
@@ -236,7 +264,7 @@ async function main(): Promise<void> {
   setInterval(
     () => {
       void (async () => {
-        const loaded = await loadFromCore();
+        const loaded = await loadFromCore(); // заодно накладывает свежие тумблеры системы
         if (loaded === null) return;
         const changed = JSON.stringify(loaded) !== JSON.stringify(agents);
         agents = loaded;
@@ -246,7 +274,14 @@ async function main(): Promise<void> {
         } else if (changed) {
           console.log("Настройки агентов обновлены из базы.");
         }
-        if (changed) reconcileSchedules();
+        // Пауза — «живой» тумблер: реагируем на её смену, даже если карточки не менялись.
+        const pausedNow = schedulesPaused();
+        const pauseFlipped = pausedNow !== lastPaused;
+        if (pauseFlipped) {
+          lastPaused = pausedNow;
+          console.log(pausedNow ? "Расписания поставлены на паузу." : "Пауза снята — включаю расписания.");
+        }
+        if (changed || pauseFlipped) reconcileSchedules();
       })();
     },
     10 * 60_000,

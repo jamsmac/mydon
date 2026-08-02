@@ -719,6 +719,21 @@ export const agent = pgTable(
   (t) => [index("agent_status_idx").on(t.status)],
 );
 
+// ── system_config: глобальные тумблеры системы, редактируемые из панели ──────
+// Не-секретные настройки активации (мозг/RAG/пауза/бюджет) живут в базе, а не
+// только в .env: тогда владелец меняет их из интерфейса, и правка переживает
+// пересборку. Приоритет над окружением задаёт читатель (значение из базы важнее
+// env). Секретов здесь НЕ хранит: ключи остаются в .env (правило ТЗ).
+export const systemConfig = pgTable("system_config", {
+  /** Ключ тумблера (белый список на стороне Core): LLM_PROVIDER, EMBED_BASE_URL … */
+  key: text("key").primaryKey(),
+  /** Значение строкой. Пусто/нет строки → тумблер берётся из env/дефолта. */
+  value: text("value").notNull(),
+  /** Кто менял (владелец из панели) — для журналируемости. */
+  updatedBy: text("updated_by"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 /**
  * Полная схема — для drizzle-клиента.
  *
@@ -758,4 +773,6 @@ export const schema = {
   geoPoint,
   attachment,
   notificationDelivery,
+  // Глобальные тумблеры системы (редактируются из панели).
+  systemConfig,
 };

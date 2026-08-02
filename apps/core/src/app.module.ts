@@ -19,6 +19,7 @@ import { RulesModule } from "./rules/rules.module";
 import { SalesModule } from "./sales/sales.module";
 import { StockModule } from "./stock/stock.module";
 import { SupplyModule } from "./supply/supply.module";
+import { SystemModule } from "./system/system.module";
 import { TasksModule } from "./tasks/tasks.module";
 import { VerificationModule } from "./verification/verification.module";
 
@@ -37,6 +38,7 @@ import { VerificationModule } from "./verification/verification.module";
     SalesModule,
     StockModule,
     SupplyModule,
+    SystemModule,
     HistoryModule,
     NotesModule,
     PeopleModule,
