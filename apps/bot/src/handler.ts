@@ -4,7 +4,7 @@ import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, formatApproval, formatBriefing } from "./briefing";
 import type { CoreClient } from "./core-client";
 import { parseIntent } from "./intent";
-import { formatPurchaseBrief } from "./purchase-brief";
+import { formatPurchaseBrief, formatPurchaseSubmitAck, isPurchaseSubmitCommand } from "./purchase-brief";
 import { planReport } from "./reports";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
 import type { RateLimiter } from "./security/access";
@@ -38,6 +38,7 @@ const HELP = [
   "• «что просрочено» — обязательства и долги",
   "• «какие автоматы простаивают»",
   "• «что заказать» — сводка к закупу вендинга",
+  "• «оформить закуп» — отправить закуп тебе на утверждение",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
@@ -62,6 +63,19 @@ export async function handleMessage(
   }
   if (!deps.limiter.allow(chatId, now)) {
     return { text: "Слишком много запросов подряд. Подожди минуту." };
+  }
+
+  // Оформление закупа — мутация (создаёт заявку на утверждение), ловим до
+  // parseIntent: иначе «оформить закуп» ушёл бы в брифинг «закуп». Само «закуп»
+  // без глагола-намерения остаётся брифингом (isPurchaseSubmitCommand=false).
+  if (isPurchaseSubmitCommand(text)) {
+    try {
+      const res = await deps.core.submitVendingPurchase("owner");
+      return { text: formatPurchaseSubmitAck(res) };
+    } catch (err) {
+      console.error("Ошибка отправки закупа на утверждение:", err);
+      return { text: "Не удалось отправить закуп в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
   }
 
   // Ввод остатков склада — мутация, ловим до чтения-намерений: «склад X 24, Y 12».

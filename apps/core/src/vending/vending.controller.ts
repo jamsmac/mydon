@@ -104,6 +104,11 @@ export class IngestStockDto {
   items!: IngestStockItemDto[];
 }
 
+export class SubmitPurchaseDto {
+  @IsOptional() @IsString() @MaxLength(128)
+  createdBy?: string;
+}
+
 export class SyncFinishDto {
   @IsIn(["success", "partial", "failed"])
   status!: "success" | "partial" | "failed";
@@ -157,6 +162,12 @@ export class VendingController {
   @Get("purchase")
   purchase() {
     return this.vending.purchase();
+  }
+
+  /** Отправить актуальный закуп на утверждение владельцу (§5.7). */
+  @Post("purchase/submit")
+  submitPurchase(@Body() dto: SubmitPurchaseDto) {
+    return this.vending.submitPurchase(dto.createdBy);
   }
 
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────

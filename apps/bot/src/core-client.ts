@@ -131,6 +131,20 @@ export class CoreClient {
     });
   }
 
+  /** Отправить закуп на утверждение владельцу (§5.7). */
+  submitVendingPurchase(createdBy?: string): Promise<{
+    submitted: boolean;
+    approvalId?: string;
+    positions: number;
+    costRounded: number;
+    reason?: string;
+  }> {
+    return this.request("/vending/purchase/submit", {
+      method: "POST",
+      body: JSON.stringify(createdBy ? { createdBy } : {}),
+    });
+  }
+
   decide(id: string, decision: "approved" | "rejected" | "clarify", actor: string) {
     return this.request(`/approvals/${id}/decide`, {
       method: "POST",

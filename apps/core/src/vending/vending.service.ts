@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { desc, eq } from "drizzle-orm";
 import { machineSale, machineSlot, productSale, slotSnapshot, vendingProduct, vendingStock, vendingSyncRun } from "@mydon/db";
 import {
@@ -18,6 +18,7 @@ import {
   type Slot,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
+import { ApprovalsService } from "../approvals/approvals.service";
 
 /**
  * Вендинг: приём собранных данных и расчёт дефицита (ТЗ Фаза 1).
@@ -121,9 +122,33 @@ export interface StockLevelRow {
   countedAt: string;
 }
 
+/** Минимум, нужный сервису от очереди согласований — для подмены в тестах. */
+export interface ApprovalRequester {
+  request(input: {
+    agent: string;
+    action: string;
+    tier: "T0" | "T1" | "T2" | "T3" | "T4";
+    payload?: Record<string, unknown>;
+  }): Promise<{ id: string }>;
+}
+
+/** Итог отправки закупа на утверждение. */
+export interface SubmitPurchaseResult {
+  submitted: boolean;
+  /** id созданной заявки (когда submitted). */
+  approvalId?: string;
+  positions: number;
+  costRounded: number;
+  /** Почему не отправили (когда !submitted). */
+  reason?: string;
+}
+
 @Injectable()
 export class VendingService {
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    @Optional() @Inject(ApprovalsService) private readonly approvals?: ApprovalRequester,
+  ) {}
 
   /**
    * Принять собранные слоты: upsert актуальной планограммы + запись в историю.
@@ -362,6 +387,55 @@ export class VendingService {
       sold7: soldByProduct.get(n.product) ?? 0,
     }));
     return computePurchase(rows, prices);
+  }
+
+  /**
+   * Отправить закуп на утверждение владельцу (§5.7, главное правило MYDON:
+   * система готовит — владелец подтверждает). Считает актуальный закуп и кладёт
+   * его заявкой в очередь согласований; владелец решает ✅/❌ существующими
+   * кнопками. Снимок закупа лежит в payload заявки — на нём же 4b соберёт
+   * накладную при одобрении, без пересчёта.
+   *
+   * Нечего заказывать (нет позиций с ценой и продажами) — заявку не создаём:
+   * пустое согласование только зашумляет очередь.
+   */
+  async submitPurchase(createdBy = "system"): Promise<SubmitPurchaseResult> {
+    if (!this.approvals) throw new Error("ApprovalsService не подключён — отправка закупа недоступна");
+    const s = await this.purchase();
+    if (s.items.length === 0) {
+      return { submitted: false, positions: 0, costRounded: 0, reason: "Закупать нечего — заявка не нужна." };
+    }
+
+    // Компактный снимок: то, что нужно владельцу для решения и 4b для накладной.
+    const positions = s.items.map((i) => ({
+      product: i.product,
+      order: i.order,
+      buy: i.buy,
+      pack: i.pack,
+      price: i.price,
+      costRounded: i.costRounded,
+      noPrice: i.noPrice,
+    }));
+
+    const sum = Math.round(s.costRounded).toLocaleString("ru-RU");
+    const created = await this.approvals.request({
+      agent: "vending",
+      action: `Закуп вендинга: ${s.items.length} поз., ~${sum} сум`,
+      tier: "T2", // движение денег — не автономная операция
+      payload: {
+        purchaseOrder: {
+          positions,
+          totalBuy: s.totalBuy,
+          totalOrder: s.totalOrder,
+          costRounded: s.costRounded,
+          costExact: s.costExact,
+          overpay: s.overpay,
+          createdBy,
+        },
+      },
+    });
+
+    return { submitted: true, approvalId: created.id, positions: s.items.length, costRounded: s.costRounded };
   }
 
   // ── Журнал сбора Ourvend ──────────────────────────────────────────────────
