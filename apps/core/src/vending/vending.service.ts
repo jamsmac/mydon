@@ -1,5 +1,5 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
-import { desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   auditLog,
   event,
@@ -179,6 +179,9 @@ export interface PurchaseOrderRow {
   costRounded: number;
   createdBy: string | null;
   createdAt: string;
+  /** Заполнены только после приёмки (§5.7) — до неё null. */
+  distributedUnits: number | null;
+  unmatchedDistribution: string[] | null;
 }
 
 /** Касса закупа для ответа/списка — снимок §5.8 + кто и когда записал. */
@@ -253,6 +256,11 @@ export class VendingService {
             .onConflictDoUpdate({
               target: [machineSlot.machineSerial, machineSlot.coilId],
               set: { productName: product, capacity: s.capacity, quantity: s.quantity, isValid, syncedAt: capturedAt },
+              // Опоздавший снимок (capturedAt старше уже сохранённого syncedAt)
+              // не должен откатывать актуальную планограмму назад (найдено
+              // внешним аудитом, P2). slotSnapshot ниже — история, пишется
+              // всегда, независимо от этого условия.
+              where: sql`${machineSlot.syncedAt} <= ${capturedAt}`,
             });
           await tx.insert(slotSnapshot).values({
             machineSerial: m.serial,
@@ -310,31 +318,51 @@ export class VendingService {
   // берёт САМЫЙ СВЕЖИЙ батч (одинаковый capturedAt), иначе перекрывающиеся
   // 7-дневные окна складывались бы и завышали продажи.
 
-  /** Принять собранные продажи (по товарам и по автоматам) за окно. */
+  /**
+   * Принять собранные продажи (по товарам и по автоматам) за окно.
+   *
+   * Upsert по (автомат, товар, capturedAt) / (автомат, capturedAt) — не
+   * plain insert: повторная доставка ТОГО ЖЕ батча (сеть оборвалась после
+   * записи, коллектор ретраит) раньше создавала вторые строки с тем же
+   * capturedAt, а `latestSold7()` суммирует ВЕСЬ самый свежий батч — продажи
+   * и прогноз задваивались молча (найдено внешним аудитом, P1).
+   */
   async ingestSales(payload: IngestSalesPayload): Promise<{ productRows: number; machineRows: number }> {
     const capturedAt = payload.capturedAt ? new Date(payload.capturedAt) : new Date();
     const periodStart = new Date(payload.periodStart);
     const periodEnd = new Date(payload.periodEnd);
     await this.db.transaction(async (tx) => {
       for (const p of payload.productSales) {
-        await tx.insert(productSale).values({
-          machineSerial: p.serial,
-          productName: p.product,
-          periodStart,
-          periodEnd,
-          quantity: p.quantity,
-          capturedAt,
-        });
+        await tx
+          .insert(productSale)
+          .values({
+            machineSerial: p.serial,
+            productName: p.product,
+            periodStart,
+            periodEnd,
+            quantity: p.quantity,
+            capturedAt,
+          })
+          .onConflictDoUpdate({
+            target: [productSale.machineSerial, productSale.productName, productSale.capturedAt],
+            set: { periodStart, periodEnd, quantity: p.quantity },
+          });
       }
       for (const m of payload.machineSales) {
-        await tx.insert(machineSale).values({
-          machineSerial: m.serial,
-          periodStart,
-          periodEnd,
-          totalAmount: m.totalAmount.toFixed(2),
-          totalCount: m.totalCount,
-          capturedAt,
-        });
+        await tx
+          .insert(machineSale)
+          .values({
+            machineSerial: m.serial,
+            periodStart,
+            periodEnd,
+            totalAmount: m.totalAmount.toFixed(2),
+            totalCount: m.totalCount,
+            capturedAt,
+          })
+          .onConflictDoUpdate({
+            target: [machineSale.machineSerial, machineSale.capturedAt],
+            set: { periodStart, periodEnd, totalAmount: m.totalAmount.toFixed(2), totalCount: m.totalCount },
+          });
       }
     });
     return { productRows: payload.productSales.length, machineRows: payload.machineSales.length };
@@ -467,10 +495,17 @@ export class VendingService {
       // Снимок остатка ДО пересчёта — одним запросом на всю инвентаризацию,
       // а не по товару в цикле: избегаем N+1 и читаем согласованный срез.
       const existingRows = await tx.select().from(vendingStock);
-      const beforeByName = new Map(existingRows.map((r) => [r.productName, r.quantity]));
+      const beforeByName = new Map(existingRows.map((r) => [r.productName, { quantity: r.quantity, countedAt: r.countedAt }]));
 
       for (const [product, quantity] of finalByProduct) {
-        const before = beforeByName.get(product);
+        const prior = beforeByName.get(product);
+        // Входящий пересчёт СТАРШЕ уже сохранённого — игнорируем позицию
+        // целиком (и мнимую недостачу/излишек, и сам upsert): опоздавшее
+        // сообщение коллектора иначе откатывает актуальный остаток назад
+        // (найдено внешним аудитом, P2).
+        if (prior && prior.countedAt.getTime() > countedAt.getTime()) continue;
+
+        const before = prior?.quantity;
         if (before !== undefined && before !== quantity) {
           const delta = quantity - before;
           const price = priceByName.get(product);
@@ -493,6 +528,9 @@ export class VendingService {
           .onConflictDoUpdate({
             target: [vendingStock.productName],
             set: { quantity, countedAt, updatedAt: countedAt },
+            // Защита и от конкурентной транзакции с более новым пересчётом,
+            // не только от порядка внутри этого вызова.
+            where: sql`${vendingStock.countedAt} <= ${countedAt}`,
           });
       }
 
@@ -632,6 +670,8 @@ export class VendingService {
       costRounded: Number(r.costRounded),
       createdBy: r.createdBy,
       createdAt: r.createdAt.toISOString(),
+      distributedUnits: r.distributedUnits,
+      unmatchedDistribution: (r.unmatchedDistribution as string[] | null) ?? null,
     }));
   }
 
@@ -690,7 +730,7 @@ export class VendingService {
     }
 
     return this.db.transaction(async (tx) => {
-      const [order] = orderId
+      const [existing] = orderId
         ? await tx.select().from(vendingPurchaseOrder).where(eq(vendingPurchaseOrder.id, orderId)).limit(1)
         : await tx
             .select()
@@ -699,7 +739,7 @@ export class VendingService {
             .orderBy(desc(vendingPurchaseOrder.createdAt))
             .limit(1);
 
-      if (!order) {
+      if (!existing) {
         return {
           received: false,
           replenished: 0,
@@ -709,7 +749,7 @@ export class VendingService {
           reason: "Непринятых накладных нет.",
         };
       }
-      if (order.status === "received") {
+      if (existing.status === "received") {
         return {
           received: false,
           replenished: 0,
@@ -719,9 +759,43 @@ export class VendingService {
           reason: "Эта накладная уже принята.",
         };
       }
+      if (existing.status === "cancelled") {
+        // Отдельно от "уже принята": иначе владельцу говорим неправду про
+        // отменённую накладную (найдено ревью).
+        return {
+          received: false,
+          replenished: 0,
+          units: 0,
+          distributedUnits: 0,
+          unmatchedDistribution: [],
+          reason: "Эта накладная отменена — приёмка невозможна.",
+        };
+      }
 
       const now = new Date();
-      await tx.update(vendingPurchaseOrder).set({ status: "received" }).where(eq(vendingPurchaseOrder.id, order.id));
+      // Атомарный переход approved/ordered → received: условие статуса — прямо
+      // в UPDATE, а не только в SELECT выше. Раньше SELECT и UPDATE были
+      // раздельными запросами — два параллельных вызова приёмки одной
+      // накладной могли оба увидеть approved между собой и оба зачислить
+      // остаток на склад (найдено внешним аудитом; тот же класс гонки уже
+      // чинили в approvals.service.decide()). Побеждает ровно один: второй
+      // получит 0 строк из returning() и не тронет склад.
+      const [order] = await tx
+        .update(vendingPurchaseOrder)
+        .set({ status: "received" })
+        .where(and(eq(vendingPurchaseOrder.id, existing.id), inArray(vendingPurchaseOrder.status, ["approved", "ordered"])))
+        .returning();
+
+      if (!order) {
+        return {
+          received: false,
+          replenished: 0,
+          units: 0,
+          distributedUnits: 0,
+          unmatchedDistribution: [],
+          reason: "Эта накладная уже принята.",
+        };
+      }
 
       // Приход по позициям: остаток += (order − распределено). Без
       // распределения (по умолчанию) — как раньше: весь order идёт на склад.
@@ -764,6 +838,14 @@ export class VendingService {
         .filter((key) => !consumedDistribution.has(key))
         .map((key) => distributedDisplay.get(key) ?? key);
 
+      // Персистим на саму накладную — иначе распределение видно только в этом
+      // разовом ответе/сообщении бота, а панель (orders()) его никогда не
+      // показывает.
+      await tx
+        .update(vendingPurchaseOrder)
+        .set({ distributedUnits, unmatchedDistribution })
+        .where(eq(vendingPurchaseOrder.id, order.id));
+
       await tx.insert(event).values({
         source: "owner",
         type: "vending.purchase_order.received",
@@ -774,8 +856,8 @@ export class VendingService {
         actorRef: receivedBy,
         action: "vending.purchase_order.receive",
         target: order.id,
-        before: order,
-        after: { ...order, status: "received" },
+        before: existing,
+        after: order,
       });
 
       return { received: true, orderId: order.id, replenished, units, distributedUnits, unmatchedDistribution };
@@ -838,9 +920,14 @@ export class VendingService {
     return { id: row.id };
   }
 
-  /** Закрыть запись сбора итогом. Молча игнорирует неизвестный id. */
+  /**
+   * Закрыть запись сбора итогом. Неизвестный id — `ok: false`, а не молчаливый
+   * успех: раньше UPDATE без проверки affected rows всегда отдавал `ok: true`,
+   * даже когда коллектор передал несуществующий id — ошибка была бы незаметна
+   * (найдено внешним аудитом, P2).
+   */
   async finishSyncRun(id: string, input: SyncFinishInput): Promise<{ ok: boolean }> {
-    await this.db
+    const rows = await this.db
       .update(vendingSyncRun)
       .set({
         finishedAt: new Date(),
@@ -850,8 +937,9 @@ export class VendingService {
         durationMs: input.durationMs,
         error: input.error ?? null,
       })
-      .where(eq(vendingSyncRun.id, id));
-    return { ok: true };
+      .where(eq(vendingSyncRun.id, id))
+      .returning({ id: vendingSyncRun.id });
+    return { ok: rows.length > 0 };
   }
 
   /** Последние запуски сбора (для панели: когда собирали и с каким итогом). */

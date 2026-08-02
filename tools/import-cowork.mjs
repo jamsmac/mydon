@@ -13,6 +13,9 @@
  * Настройки (переменные окружения):
  *   COWORK_BASE_DIR — папка данных Cowork (обязательно)
  *   CORE_API_URL    — адрес Core (по умолчанию http://100.81.197.68:3001)
+ *   SERVICE_TOKEN   — внутренний токен Core (обязательно: перенос пишет данные,
+ *                     а мутации без токена Core отклоняет с 401). Значение — то
+ *                     же, что в /opt/mydon-app/.env на сервере.
  */
 
 import { cowork } from "../packages/connectors/dist/cowork.js";
@@ -34,7 +37,10 @@ async function send(path, method, body) {
   if (DRY) return { dry: true };
   const res = await fetch(`${CORE}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(process.env.SERVICE_TOKEN ? { "x-service-token": process.env.SERVICE_TOKEN } : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(15000),
   });

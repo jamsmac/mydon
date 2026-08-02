@@ -58,8 +58,23 @@ describe("ServiceTokenGuard: граница доступа Core", () => {
     assert.equal(guard().canActivate(ctx("POST", {}, true)), true);
   });
 
-  it("токен не задан — мутации пропускаются (совместимый выкат)", () => {
+  it("токен не задан — мутации отклоняются (fail-closed, найдено внешним аудитом)", () => {
     delete process.env.SERVICE_TOKEN;
-    assert.equal(guard().canActivate(ctx("POST")), true);
+    assert.throws(() => guard().canActivate(ctx("POST")), /токен/);
+  });
+
+  it("токен не задан и заголовка тоже нет — не проходит по пустой строке", () => {
+    delete process.env.SERVICE_TOKEN;
+    assert.throws(() => guard().canActivate(ctx("POST", { "x-service-token": "" })), /токен/);
+  });
+
+  it("токен не задан — чтения (GET) по-прежнему открыты", () => {
+    delete process.env.SERVICE_TOKEN;
+    assert.equal(guard().canActivate(ctx("GET")), true);
+  });
+
+  it("токен не задан — публичный маршрут по-прежнему мимо guard", () => {
+    delete process.env.SERVICE_TOKEN;
+    assert.equal(guard().canActivate(ctx("POST", {}, true)), true);
   });
 });

@@ -27,8 +27,9 @@ async function bootstrap(): Promise<void> {
   console.log(`MYDON Core слушает :${appConfig.port} (TZ=${appConfig.tz})`);
   if (!appConfig.serviceToken) {
     console.warn(
-      "ВНИМАНИЕ: SERVICE_TOKEN не задан — мутации Core открыты, защита держится " +
-        "только на сети (Docker/Tailscale). Задайте его в .env и клиентам.",
+      "ВНИМАНИЕ: SERVICE_TOKEN не задан — ВСЕ мутации Core (POST/PATCH/PUT/DELETE) " +
+        "будут отклонены 401 (fail-closed). Задайте его в .env ОДНОВРЕМЕННО в Core, " +
+        "CC, боте и агентах.",
     );
   }
 }

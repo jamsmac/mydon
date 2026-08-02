@@ -169,6 +169,20 @@
       "when": 1785699037368,
       "tag": "0023_vending_cash_session",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1785705492489,
+      "tag": "0024_talented_outlaw_kid",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1785706659243,
+      "tag": "0025_certain_brother_voodoo",
+      "breakpoints": true
     }
   ]
 }

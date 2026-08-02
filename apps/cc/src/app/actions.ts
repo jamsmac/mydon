@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { core } from "../lib/core";
+import { core, coreWriteHeaders } from "../lib/core";
 import { DOMAIN_TITLES, typeOne } from "../lib/labels";
 
 /** Находка палитры ⌘K: карточка реестра или отчёт источника. */
@@ -82,7 +82,7 @@ export async function decideApproval(
   try {
     const res = await fetch(`${base}/approvals/${id}/decide`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: coreWriteHeaders(),
       body: JSON.stringify({ decision, actor: "panel" }),
       cache: "no-store",
       signal: AbortSignal.timeout(8000),

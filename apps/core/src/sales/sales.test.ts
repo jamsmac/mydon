@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildUpserts, todayLocal, type StockSaleRow } from "./sales.service";
+import { buildUpserts, daysAgoLocal, todayLocal, type StockSaleRow } from "./sales.service";
 
 describe("Продажи: подготовка строк из mydon-stock", () => {
   const map = new Map([["72ac181f0000", "ent-1"]]);
@@ -60,5 +60,25 @@ describe("Продажи: подготовка строк из mydon-stock", () 
   it("todayLocal отдаёт дату YYYY-MM-DD по локальному времени контейнера", () => {
     const d = new Date(2026, 6, 29, 23, 59); // 29 июля, поздний вечер
     assert.equal(todayLocal(d), "2026-07-29");
+  });
+
+  it("daysAgoLocal(30) от 03.08 — это 05.07, ровно 30 календарных дат 05.07–03.08 (найдено внешним аудитом, P2)", () => {
+    const now = new Date(2026, 7, 3); // 3 августа
+    assert.equal(daysAgoLocal(30, now), "2026-07-05");
+    // Проверка счётом: 03.08 − 05.07 включительно с обеих сторон = 30 дат.
+    const from = new Date(2026, 6, 5);
+    const to = new Date(2026, 7, 3);
+    const days = Math.round((to.getTime() - from.getTime()) / 86_400_000) + 1;
+    assert.equal(days, 30);
+  });
+
+  it("daysAgoLocal(7) от 03.08 — это 28.07, не 27.07 (старая граница today−N давала 8 дат вместо 7)", () => {
+    const now = new Date(2026, 7, 3);
+    assert.equal(daysAgoLocal(7, now), "2026-07-28");
+  });
+
+  it("daysAgoLocal(1) — граница «сегодня» (N=1 значит только сегодняшняя дата)", () => {
+    const now = new Date(2026, 7, 3);
+    assert.equal(daysAgoLocal(1, now), todayLocal(now));
   });
 });

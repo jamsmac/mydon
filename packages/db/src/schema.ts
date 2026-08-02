@@ -840,7 +840,14 @@ export const productSale = pgTable(
     quantity: integer("quantity").default(0).notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
   },
-  (t) => [index("product_sale_machine_captured_idx").on(t.machineSerial, t.capturedAt)],
+  (t) => [
+    index("product_sale_machine_captured_idx").on(t.machineSerial, t.capturedAt),
+    // Ключ идемпотентности батча: повторная доставка того же сбора (тот же
+    // capturedAt) по тому же автомату/товару — апдейт, а не вторая строка,
+    // иначе latestSold7() задваивает продажи и прогноз (найдено внешним
+    // аудитом, P1).
+    uniqueIndex("product_sale_batch_key").on(t.machineSerial, t.productName, t.capturedAt),
+  ],
 );
 
 /** Продажи автомата за период (деньги и чеки). */
@@ -855,7 +862,10 @@ export const machineSale = pgTable(
     totalCount: integer("total_count").default(0).notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
   },
-  (t) => [index("machine_sale_machine_captured_idx").on(t.machineSerial, t.capturedAt)],
+  (t) => [
+    // Ключ идемпотентности батча — та же причина, что и у product_sale выше.
+    uniqueIndex("machine_sale_batch_key").on(t.machineSerial, t.capturedAt),
+  ],
 );
 
 /**
@@ -898,6 +908,13 @@ export const vendingPurchaseOrder = pgTable("vending_purchase_order", {
   costRounded: numeric("cost_rounded", { precision: 14, scale: 2 }).default("0").notNull(),
   createdBy: text("created_by"),
   createdAt: createdAt(),
+  /**
+   * Распределение при приёмке (§5.7) — заполняется receiveOrder(), пусто
+   * до приёмки. Персистентно, чтобы панель показывала его в списке
+   * накладных, а не только в разовом ответе API/сообщении бота.
+   */
+  distributedUnits: integer("distributed_units"),
+  unmatchedDistribution: jsonb("unmatched_distribution").$type<string[]>(),
 });
 
 /**

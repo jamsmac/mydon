@@ -41,6 +41,9 @@ ssh "$HOST" "
   if [ ! -f .env ]; then
     POSTGRES_PASSWORD=\$(openssl rand -base64 32 | tr -d '/+=' | head -c 40)
     INGEST_KEY=\$(openssl rand -hex 24)
+    # Без него Core поднимется fail-closed и отклонит любую запись из панели,
+    # бота и агентов — генерируем сразу, как остальные секреты.
+    SERVICE_TOKEN=\$(openssl rand -hex 32)
     cat > .env <<EOF
 NODE_ENV=production
 TZ=Asia/Tashkent
@@ -49,6 +52,7 @@ POSTGRES_PASSWORD=\$POSTGRES_PASSWORD
 POSTGRES_DB=mydon
 DATABASE_URL=postgresql://mydon:\$POSTGRES_PASSWORD@mydon-db:5432/mydon
 INGEST_KEY=\$INGEST_KEY
+SERVICE_TOKEN=\$SERVICE_TOKEN
 CORE_API_URL=http://mydon-core:3001
 AGENT_AUTONOMY_MAX=T0
 AGENTS_SCHEDULES_PAUSED=1
