@@ -2,7 +2,7 @@ import type { AutonomyTier } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
 import { EXECUTORS } from "./executors";
 import { checkLimit, dailyCap, startOfTashkentDay } from "./limits";
-import { explainPolicy, requiresApproval } from "./policy";
+import { effectiveActionTier, explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
 import { SKILLS } from "./skills";
 
@@ -36,6 +36,9 @@ export async function runSkill(
   skill: string,
   core: AgentsCoreClient,
   threshold: AutonomyTier,
+  /** Минимальный тир навыка (frontmatter `requires-approval`). Не задан —
+   *  тир берётся только из карточки агента (поведение как раньше). */
+  skillFloor?: AutonomyTier,
 ): Promise<RunResult> {
   if (agent.status !== "active") {
     return {
@@ -47,7 +50,10 @@ export async function runSkill(
     };
   }
 
-  const tier = agent.autonomyDefault;
+  // Эффективный тир — floor из карточки агента и объявленного тира навыка
+  // (строже побеждает). Раньше рантайм читал только карточку и молча игнорировал
+  // `requires-approval` навыка — навык мог исполниться ниже собственного уровня.
+  const tier = effectiveActionTier(agent.autonomyDefault, skillFloor);
   await core.recordEvent({
     source: `agent:${agent.name}`,
     type: "agent.run",
