@@ -53,6 +53,9 @@ export async function runAgentTasks(
   agent: AgentDefinition,
   core: AgentsCoreClient,
   threshold: AutonomyTier,
+  /** Карта «навык → минимальный тир» (floor). Не задана — тир берётся только
+   *  из карточки агента; гейт по навыку не применяется. */
+  skillFloors?: Map<string, AutonomyTier>,
 ): Promise<TaskRunResult[]> {
   if (agent.status !== "active") return [];
 
@@ -98,7 +101,7 @@ export async function runAgentTasks(
     // Раньше task-worker звал навык отдельно ради отчёта, а runSkill — ещё раз
     // ради согласования; при смене данных между ними отчёт по задаче и заявка
     // на согласование расходились (аудит P2). Теперь источник один.
-    const run = await runSkill(agent, skill, core, threshold);
+    const run = await runSkill(agent, skill, core, threshold, skillFloors?.get(skill));
 
     if (run.outcome === "skipped") {
       if (run.skipReason === "no_signal") {

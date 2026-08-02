@@ -7,6 +7,7 @@ import { autonomyThreshold } from "./policy";
 import { loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { desiredJobs, jobKey } from "./schedule";
+import { loadSkillMeta, skillTierFloors } from "./skill-loader";
 import { hasSkill } from "./skills";
 import { runAgentTasks } from "./task-worker";
 
@@ -84,6 +85,11 @@ async function main(): Promise<void> {
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
   const core = new AgentsCoreClient(coreUrl, 10_000, process.env.SERVICE_TOKEN ?? "");
   const threshold = autonomyThreshold();
+
+  // Минимальные тиры навыков (frontmatter `requires-approval`). Файлы навыков —
+  // часть образа и в рантайме не меняются, поэтому читаем один раз. Ключ — имя
+  // навыка, поэтому карта годится и для агентов из базы (у них нет каталога).
+  const skillFloors = skillTierFloors(loadSkillMeta(AGENTS_DIR));
 
   const { agents: fromFiles, errors } = loadAgents(AGENTS_DIR);
   for (const e of errors) {
@@ -176,7 +182,7 @@ async function main(): Promise<void> {
             const current = agents.find((a) => a.name === j.agent && a.status === "active");
             if (!current) return; // агента отключили — расписание догаснет на след. перечитке
             try {
-              const result = await runSkill(current, j.skill, core, threshold);
+              const result = await runSkill(current, j.skill, core, threshold, skillFloors.get(j.skill));
               console.log(`[${result.agent}/${result.skill}] ${result.outcome} — ${result.reason}`);
             } catch (err) {
               console.error(`[${j.agent}/${j.skill}] сбой:`, err);
@@ -208,7 +214,7 @@ async function main(): Promise<void> {
   async function pollAgentTasks(): Promise<void> {
     for (const agent of agents.filter((a) => a.status === "active")) {
       try {
-        const results = await runAgentTasks(agent, core, threshold);
+        const results = await runAgentTasks(agent, core, threshold, skillFloors);
         for (const r of results) {
           console.log(`[${agent.name}] задача ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`);
         }

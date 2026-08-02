@@ -18,6 +18,29 @@ export function tierRank(tier: AutonomyTier): number {
   return idx === -1 ? ORDER.length : idx; // неизвестное считаем максимально опасным
 }
 
+/** Самый строгий из уровней (макс. по рангу). Пустой список → T0. */
+export function maxTier(tiers: readonly AutonomyTier[]): AutonomyTier {
+  let best: AutonomyTier = "T0";
+  for (const t of tiers) {
+    if (tierRank(t) > tierRank(best)) best = t;
+  }
+  return best;
+}
+
+/**
+ * Эффективный тир действия — floor из нескольких источников по правилу «строже
+ * побеждает»: тир из карточки агента (`autonomy_default`) и объявленный тир
+ * навыка (frontmatter `requires-approval`). Навык, помеченный T3 (деньги), не
+ * исполнится ниже T3, даже если карточка агента разрешает больше. Источников
+ * пока два; добавить действие/инструмент как ещё один floor — одна правка здесь.
+ */
+export function effectiveActionTier(
+  agentDefault: AutonomyTier,
+  skillFloor?: AutonomyTier,
+): AutonomyTier {
+  return skillFloor ? maxTier([agentDefault, skillFloor]) : agentDefault;
+}
+
 /** Порог из окружения. По умолчанию — T0 (всё через владельца). */
 export function autonomyThreshold(raw: string | undefined = process.env.AGENT_AUTONOMY_MAX): AutonomyTier {
   const value = (raw ?? "").trim().toUpperCase();

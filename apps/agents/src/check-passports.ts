@@ -11,6 +11,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { loadSkillMeta } from "./skill-loader";
 
 /** «shared» — кросс-доменный агент: рантайм подставляет это значение по умолчанию. */
 const DOMAINS = ["globerent", "vendhub", "personal", "mydon", "shared"];
@@ -114,6 +115,17 @@ export function checkPassport(name: string, cfg: Passport, skills: string[]): Pa
 }
 
 export function checkAll(dir: string): PassportCheck[] {
+  // Замечания к frontmatter навыков (нет тира, name ≠ файла и т.п.) — по
+  // каталогу агента. Раньше рантайм молча выбрасывал битый frontmatter; теперь
+  // это видно в проверке паспортов рядом с остальными замечаниями.
+  const skillProblems = new Map<string, string[]>();
+  for (const m of loadSkillMeta(dir)) {
+    if (m.problems.length === 0) continue;
+    const list = skillProblems.get(m.agent) ?? [];
+    for (const p of m.problems) list.push(`навык ${m.name}: ${p}`);
+    skillProblems.set(m.agent, list);
+  }
+
   return fs
     .readdirSync(dir)
     .filter((d) => d !== "_template" && fs.statSync(path.join(dir, d)).isDirectory())
@@ -127,7 +139,9 @@ export function checkAll(dir: string): PassportCheck[] {
       const skills = fs.existsSync(skillsDir)
         ? fs.readdirSync(skillsDir).map((f) => f.replace(/\.md$/, ""))
         : [];
-      return checkPassport(name, parsePassport(fs.readFileSync(cfgPath, "utf8")), skills);
+      const check = checkPassport(name, parsePassport(fs.readFileSync(cfgPath, "utf8")), skills);
+      check.problems.push(...(skillProblems.get(name) ?? []));
+      return check;
     });
 }
 
