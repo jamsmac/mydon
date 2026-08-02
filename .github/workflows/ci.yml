@@ -38,6 +38,10 @@ jobs:
       - name: Test
         run: pnpm -r --if-present test
 
+      # Раньше continue-on-error:true молча прятал 5 high-уязвимостей —
+      # шаг всегда зеленел, даже когда pnpm audit падал кодом 1 (найдено
+      # внешним аудитом, P1). Теперь high/critical реально блокируют CI;
+      # транзитивные versions зафиксированы через pnpm.overrides в корневом
+      # package.json (adm-zip/sharp/postcss/brace-expansion).
       - name: Audit (high+)
         run: pnpm audit --audit-level high
-        continue-on-error: true
