@@ -3,6 +3,13 @@ import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
 import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, formatApproval, formatBriefing } from "./briefing";
 import type { CoreClient } from "./core-client";
+import {
+  formatCashAck,
+  formatCashSessions,
+  isCashHistoryQuery,
+  isCashPrefixed,
+  parseCashSession,
+} from "./cash-intake";
 import { parseIntent } from "./intent";
 import {
   formatPurchaseBrief,
@@ -50,6 +57,8 @@ const HELP = [
   "• «накладные» — одобренные закупы",
   "• «принять закуп» — оприходовать накладную на склад",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
+  "• «касса закупа: получил 2400000, базар 376300» — записать кассу похода на базар",
+  "• «кассы закупа» / «история кассы» — прошлые кассы",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
 ].join("\n");
@@ -73,6 +82,46 @@ export async function handleMessage(
   }
   if (!deps.limiter.allow(chatId, now)) {
     return { text: "Слишком много запросов подряд. Подожди минуту." };
+  }
+
+  // Касса закупа — мутация; СТРОГО до приёмки накладной: «касса закупа:
+  // получил N, …» содержит и «получил», и «закуп» — isPurchaseReceiveCommand
+  // перехватила бы её раньше, если бы эта проверка шла после.
+  //
+  // Гейт — isCashPrefixed (только префикс), а НЕ isCashCommand (полный разбор):
+  // если сообщение явно начинается с «касса закупа», оно КОММИТИТСЯ как
+  // кассовое — ошибка разбора отвечает подсказкой формата, а не проваливается
+  // дальше по цепочке. «касса закупа: получил 2400000» (без статьи) раньше
+  // проваливалась в isPurchaseReceiveCommand и вызывала приёмку накладной
+  // вместо ошибки формата — реальная мутация не по адресу (найдено
+  // адверсариал-ревью).
+  if (isCashPrefixed(text)) {
+    const session = parseCashSession(text);
+    if (!session) {
+      return {
+        text:
+          "Не понял формат кассы. Нужны «получил N» и хотя бы одна статья:\n" +
+          "«касса закупа: получил 2400000, базар 376300».",
+      };
+    }
+    try {
+      const res = await deps.core.recordVendingCash(session.receivedAmount, session.categories);
+      return { text: formatCashAck(res) };
+    } catch (err) {
+      console.error("Ошибка записи кассы закупа:", err);
+      return { text: "Не удалось записать кассу закупа в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // История касс закупа — чтение, отдельная фраза от «накладные».
+  if (isCashHistoryQuery(text)) {
+    try {
+      const sessions = await deps.core.vendingCashSessions();
+      return { text: formatCashSessions(sessions) };
+    } catch (err) {
+      console.error("Ошибка чтения касс закупа:", err);
+      return { text: "Не удалось получить кассы закупа из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
   }
 
   // Оформление закупа — мутация (создаёт заявку на утверждение), ловим до
@@ -117,8 +166,8 @@ export async function handleMessage(
   if (isStockCommand(text)) {
     const items = parseStockItems(text);
     try {
-      await deps.core.setVendingStock(items);
-      return { text: formatStockAck(items) };
+      const res = await deps.core.setVendingStock(items);
+      return { text: formatStockAck(items, res.adjustments) };
     } catch (err) {
       console.error("Ошибка записи остатков склада:", err);
       return { text: "Не удалось записать остатки в MYDON Core. Попробуй ещё раз чуть позже." };

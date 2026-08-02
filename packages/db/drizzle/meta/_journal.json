@@ -162,6 +162,13 @@
       "when": 1785695401849,
       "tag": "0022_vending_purchase_order",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1785699037368,
+      "tag": "0023_vending_cash_session",
+      "breakpoints": true
     }
   ]
 }

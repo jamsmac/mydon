@@ -29,10 +29,16 @@ function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[], stock: 
   } as never;
 }
 
-/** Стаб БД для ingest: копит вставки. `aliases`/`products` кормят aliasMap(). */
-function writeDb(aliases: unknown[] = [], products: unknown[] = []) {
+/**
+ * Стаб БД для ingest: копит вставки. `aliases`/`products` кормят
+ * loadProductIndex() (вне транзакции); `stockRows` — предзагрузку остатка ДО
+ * пересчёта внутри транзакции (единственный select там — фильтр по имени
+ * стабу не нужен, ingestStock сам сверяет by-name из полного среза).
+ */
+function writeDb(aliases: unknown[] = [], products: unknown[] = [], stockRows: unknown[] = []) {
   const inserts: { table: string; values: unknown }[] = [];
   const tx = {
+    select: () => ({ from: async () => stockRows }),
     insert: (table: { [Symbol.toStringTag]?: string }) => ({
       values: (v: unknown) => {
         const name = tableName(table);
@@ -41,7 +47,7 @@ function writeDb(aliases: unknown[] = [], products: unknown[] = []) {
       },
     }),
   };
-  // aliasMap() читает vending_alias затем vending_product — различаем по счётчику.
+  // loadProductIndex() читает vending_alias затем vending_product — различаем по счётчику.
   let call = 0;
   const db = {
     select: () => ({ from: async () => (call++ === 0 ? aliases : products) }),
@@ -340,7 +346,7 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
         { product: "  ", quantity: 5 }, // пустое имя → пропуск
       ],
     });
-    assert.deepEqual(res, { items: 2 }); // счётчик по входу
+    assert.deepEqual(res, { items: 2, adjustments: [] }); // счётчик по входу, расхождений нет (склад пуст)
     // Записана только валидная позиция.
     assert.equal(inserts.length, 1);
     const v = inserts[0]!.values as { productName: string; quantity: number };
@@ -365,6 +371,121 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     await svc.ingestStock({ items: [{ product: "Новый Товар", quantity: 3 }] });
     const v = inserts[0]!.values as { productName: string };
     assert.equal(v.productName, "Новый Товар");
+  });
+
+  it("недостача при пересчёте: было 55 → стало 54, оценена по цене (реальный лист 02.08.2026)", async () => {
+    const products = [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: "2090.00" }];
+    const stock = [{ productName: "Montella Вода минеральная 330ml", quantity: 55 }];
+    const { db, inserts } = writeDb(
+      [{ productId: "p1", alias: "Montella pet 0.33" }],
+      products,
+      stock,
+    );
+    const svc = new VendingService(db);
+    const res = await svc.ingestStock({ items: [{ product: "Montella pet 0.33", quantity: 54 }] });
+
+    assert.equal(res.adjustments.length, 1);
+    const a = res.adjustments[0]!;
+    assert.equal(a.product, "Montella Вода минеральная 330ml");
+    assert.equal(a.before, 55);
+    assert.equal(a.after, 54);
+    assert.equal(a.delta, -1); // недостача
+    assert.equal(a.value, 2090); // |delta| × цена
+    assert.equal(a.noPrice, false);
+
+    // Расхождение попадает в журнал (событие + audit), не только в ответ метода.
+    const ev = inserts.find((i) => (i.values as { type?: string }).type === "vending.stock.recounted");
+    assert.ok(ev, "должно быть событие о пересчёте");
+    const audit = inserts.find((i) => (i.values as { action?: string }).action === "vending.stock.recount");
+    assert.ok(audit, "должна быть запись в журнале действий");
+  });
+
+  it("излишек при пересчёте — тоже расхождение, но со знаком плюс", async () => {
+    const stock = [{ productName: "Fanta Classic CAN 250ml", quantity: 7 }];
+    const { db } = writeDb([], [], stock);
+    const svc = new VendingService(db);
+    const res = await svc.ingestStock({ items: [{ product: "Fanta Classic CAN 250ml", quantity: 19 }] });
+    assert.equal(res.adjustments.length, 1);
+    assert.equal(res.adjustments[0]!.delta, 12);
+  });
+
+  it("без цены в прайсе — value 0, noPrice=true, но расхождение видно", async () => {
+    const stock = [{ productName: "Новый Товар", quantity: 10 }];
+    const { db } = writeDb([], [], stock);
+    const svc = new VendingService(db);
+    const res = await svc.ingestStock({ items: [{ product: "Новый Товар", quantity: 8 }] });
+    assert.equal(res.adjustments[0]!.value, 0);
+    assert.equal(res.adjustments[0]!.noPrice, true);
+  });
+
+  it("цена с копейками не даёт «грязный» хвост float — value округлён до копеек", async () => {
+    // 3 × 2090.55 = 6271.6499999999996 в чистом IEEE-754 — без округления это
+    // легло бы в неизменяемый журнал как есть (найдено адверсариал-ревью).
+    const products = [{ id: "p1", name: "Товар с копейками", purchasePrice: "2090.55" }];
+    const stock = [{ productName: "Товар с копейками", quantity: 10 }];
+    const { db } = writeDb([], products, stock);
+    const svc = new VendingService(db);
+    const res = await svc.ingestStock({ items: [{ product: "Товар с копейками", quantity: 7 }] });
+    assert.equal(res.adjustments[0]!.value, 6271.65);
+  });
+
+  it("событие пересчёта пишет ПЕРЕДАННОГО actor, а не жёстко owner", async () => {
+    const stock = [{ productName: "Fanta Classic CAN 250ml", quantity: 7 }];
+    const { db, inserts } = writeDb([], [], stock);
+    const svc = new VendingService(db);
+    await svc.ingestStock({ items: [{ product: "Fanta Classic CAN 250ml", quantity: 19 }] }, "manager");
+    const ev = inserts.find((i) => (i.values as { type?: string }).type === "vending.stock.recounted");
+    assert.equal((ev!.values as { source: string }).source, "manager");
+  });
+
+  it("первый ввод по товару (в складе строки ещё не было) — не расхождение", async () => {
+    const { db } = writeDb([], [], []); // склад пуст — ничего сравнивать
+    const svc = new VendingService(db);
+    const res = await svc.ingestStock({ items: [{ product: "Совершенно новый", quantity: 30 }] });
+    assert.deepEqual(res.adjustments, []);
+  });
+
+  it("количество не изменилось — не расхождение (не шумим по пустякам)", async () => {
+    const stock = [{ productName: "Sprite 250ml", quantity: 19 }];
+    const { db } = writeDb([], [], stock);
+    const svc = new VendingService(db);
+    const res = await svc.ingestStock({ items: [{ product: "Sprite 250ml", quantity: 19 }] });
+    assert.deepEqual(res.adjustments, []);
+  });
+
+  it("два алиаса на ОДИН канон в одной инвентаризации — одна дельта, не две (регресс)", async () => {
+    // «Montella pet 0.33» и «montella zero 0.33» — оба ведут на один товар.
+    // Реальная смена: было 7 → стало 12 (последняя позиция в списке). Наивный
+    // снимок «до» один раз на батч даёт ДВЕ дельты от устаревшего 7 — баг,
+    // пойманный адверсариал-ревью до релиза.
+    const canonical = "Montella Вода минеральная 330ml";
+    const products = [{ id: "p1", name: canonical, purchasePrice: "2090.00" }];
+    const aliases = [
+      { productId: "p1", alias: "Montella pet 0.33" },
+      { productId: "p1", alias: "montella zero 0.33" },
+    ];
+    const stock = [{ productName: canonical, quantity: 7 }];
+    const { db, inserts } = writeDb(aliases, products, stock);
+    const svc = new VendingService(db);
+
+    const res = await svc.ingestStock({
+      items: [
+        { product: "Montella pet 0.33", quantity: 10 },
+        { product: "montella zero 0.33", quantity: 12 },
+      ],
+    });
+
+    assert.equal(res.adjustments.length, 1, "должна быть ровно одна дельта на канонический товар");
+    const a = res.adjustments[0]!;
+    assert.equal(a.before, 7);
+    assert.equal(a.after, 12); // последняя позиция в списке побеждает
+    assert.equal(a.delta, 5);
+    assert.equal(a.value, 5 * 2090);
+
+    // И записан склад — тоже РОВНО одной строкой на канон (не дважды).
+    const stockInserts = inserts.filter((i) => (i.values as { productName?: string }).productName === canonical);
+    assert.equal(stockInserts.length, 1);
+    assert.equal((stockInserts[0]!.values as { quantity: number }).quantity, 12);
   });
 });
 
@@ -391,5 +512,70 @@ describe("Вендинг Core: приём слотов", () => {
     const ms = inserts.find((i) => i.table === "machine_slot")!.values as { isValid: boolean; productName: string | null };
     assert.equal(ms.productName, null);
     assert.equal(ms.isValid, false);
+  });
+});
+
+describe("Вендинг Core: касса закупа (§5.8)", () => {
+  /**
+   * Стаб для recordCashSession: insert().values().returning() → строка с id
+   * и createdAt (в реальной БД проставляется defaultNow(), .values() его не
+   * передаёт — стаб должен достроить сам, иначе .toISOString() упадёт на undefined).
+   */
+  function cashInsertDb() {
+    const inserted: Record<string, unknown>[] = [];
+    const db = {
+      insert: () => ({
+        values: (v: Record<string, unknown>) => {
+          inserted.push(v);
+          return { returning: async () => [{ id: "cs1", createdAt: new Date("2026-08-02T12:00:00Z"), ...v }] };
+        },
+      }),
+    } as never;
+    return { db, inserted };
+  }
+
+  it("воспроизводит реальную запись 02.08.2026 до сума и сохраняет снимок", async () => {
+    const { db, inserted } = cashInsertDb();
+    const svc = new VendingService(db);
+    const res = await svc.recordCashSession(2_400_000, [
+      { name: "корзинка", lines: [{ label: "47×2090", amount: 98_230 }] },
+      { name: "базар", lines: [{ label: "снеки", amount: 376_300 }] },
+      { name: "базар", lines: [{ label: "напитки", amount: 1_023_000 }] },
+    ]);
+    assert.equal(res.totalSpent, 1_497_530);
+    assert.equal(res.remainder, 902_470);
+    assert.equal(res.id, "cs1");
+    // В базу уходят СТРОКОВЫЕ numeric (toFixed) — Postgres numeric ожидает текст, не число.
+    assert.equal(inserted[0]!.receivedAmount, "2400000.00");
+    assert.equal(inserted[0]!.remainder, "902470.00");
+  });
+
+  it("createdBy по умолчанию owner, можно переопределить", async () => {
+    const { db, inserted } = cashInsertDb();
+    await new VendingService(db).recordCashSession(100_000, [{ name: "базар", lines: [{ label: "X", amount: 10_000 }] }]);
+    assert.equal(inserted[0]!.createdBy, "owner");
+
+    const { db: db2, inserted: inserted2 } = cashInsertDb();
+    await new VendingService(db2).recordCashSession(100_000, [], "manager");
+    assert.equal(inserted2[0]!.createdBy, "manager");
+  });
+
+  it("cashSessions() читает numeric-строки как числа, свежие сверху", async () => {
+    const rows = [
+      {
+        id: "cs2",
+        receivedAmount: "2400000.00",
+        categories: [{ name: "базар", lines: [], subtotal: 100 }],
+        totalSpent: "1497530.00",
+        remainder: "902470.00",
+        createdBy: "owner",
+        createdAt: new Date("2026-08-02T10:00:00Z"),
+      },
+    ];
+    const db = { select: () => ({ from: () => ({ orderBy: () => ({ limit: async () => rows }) }) }) } as never;
+    const list = await new VendingService(db).cashSessions();
+    assert.equal(list[0]!.receivedAmount, 2_400_000);
+    assert.equal(list[0]!.remainder, 902_470);
+    assert.equal(list[0]!.createdAt, "2026-08-02T10:00:00.000Z");
   });
 });

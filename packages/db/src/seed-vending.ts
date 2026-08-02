@@ -8,8 +8,10 @@
  */
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
+import { eq } from "drizzle-orm";
+import { normalizeProductName } from "@mydon/shared";
 import { createDb } from "./index";
-import { vendingAlias, vendingProduct } from "./schema";
+import { vendingAlias, vendingProduct, vendingStock } from "./schema";
 
 export type VendingCat = "drink" | "snack";
 
@@ -144,18 +146,45 @@ export async function seedVendingPrices(
  * дублирует. Товар алиаса обязан быть в `vending_product` (иначе алиас
  * пропускается со счётчиком — сид прайса должен идти первым). Возвращает счётчики.
  */
+/**
+ * Занести алиасы в `vending_alias`. Идемпотентно: по имеющемуся алиасу не
+ * дублирует. Товар алиаса обязан быть в `vending_product` (иначе алиас
+ * пропускается со счётчиком — сид прайса должен идти первым).
+ *
+ * Заодно переносит остаток склада: до появления алиаса «Montella» владелец
+ * мог вводить остаток сырым именем — строка `vending_stock` легла под ним, а
+ * не под каноном. Если алиас добавляется ПОСЛЕ такого ввода, канон и старая
+ * строка расходятся: `ingestStock` ищет остаток «до» под новым каноном, не
+ * находит и молча теряет реальную недостачу/излишек, а старая строка навсегда
+ * осиротевает (найдено адверсариал-ревью). Поэтому здесь строка склада,
+ * совпавшая с алиасом (по нормализованному имени), переименовывается на
+ * канон — если канонической строки ещё нет (иначе не ясно, какая настоящая).
+ */
 export async function seedVendingAliases(
   db: ReturnType<typeof createDb>,
-): Promise<{ seeded: number; skipped: number; noProduct: number }> {
-  const [products, existing] = await Promise.all([
+): Promise<{ seeded: number; skipped: number; noProduct: number; stockRenamed: number }> {
+  const [products, existing, stockRows] = await Promise.all([
     db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct),
     db.select({ alias: vendingAlias.alias }).from(vendingAlias),
+    db.select({ productName: vendingStock.productName, updatedAt: vendingStock.updatedAt }).from(vendingStock),
   ]);
   const idByName = new Map(products.map((p) => [p.name, p.id]));
   const have = new Set(existing.map((e) => e.alias));
 
+  // Строки склада по нормализованному имени; если ввод дублировался под
+  // разным регистром до появления алиаса — берём самую свежую (не пытаемся
+  // склеивать остатки нескольких строк, это отдельная ручная сверка).
+  const stockByKey = new Map<string, { productName: string; updatedAt: Date }>();
+  for (const r of stockRows) {
+    const key = normalizeProductName(r.productName);
+    const prev = stockByKey.get(key);
+    if (!prev || r.updatedAt > prev.updatedAt) stockByKey.set(key, r);
+  }
+  const stockNames = new Set(stockRows.map((r) => r.productName));
+
   const rows: { productId: string; alias: string; source: "warehouse" }[] = [];
   let noProduct = 0;
+  let stockRenamed = 0;
   for (const a of VENDING_ALIASES) {
     if (have.has(a.alias)) continue;
     const productId = idByName.get(a.product);
@@ -164,9 +193,17 @@ export async function seedVendingAliases(
       continue;
     }
     rows.push({ productId, alias: a.alias, source: "warehouse" });
+
+    const stale = stockByKey.get(normalizeProductName(a.alias));
+    if (stale && stale.productName !== a.product && !stockNames.has(a.product)) {
+      await db.update(vendingStock).set({ productName: a.product }).where(eq(vendingStock.productName, stale.productName));
+      stockNames.delete(stale.productName);
+      stockNames.add(a.product);
+      stockRenamed += 1;
+    }
   }
   if (rows.length > 0) await db.insert(vendingAlias).values(rows);
-  return { seeded: rows.length, skipped: VENDING_ALIASES.length - rows.length - noProduct, noProduct };
+  return { seeded: rows.length, skipped: VENDING_ALIASES.length - rows.length - noProduct, noProduct, stockRenamed };
 }
 
 async function main(): Promise<void> {
@@ -180,6 +217,7 @@ async function main(): Promise<void> {
   console.log(
     `Алиасы вендинга: занесено ${al.seeded}, уже было ${al.skipped}` +
       (al.noProduct > 0 ? `, без товара ${al.noProduct}` : "") +
+      (al.stockRenamed > 0 ? `, склад перенесён на канон ${al.stockRenamed}` : "") +
       ` (всего ${VENDING_ALIASES.length}).`,
   );
 }
