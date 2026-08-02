@@ -9,6 +9,7 @@ import {
   type LlmResolver,
 } from "@mydon/assistant";
 import { assistantCore } from "../../lib/assistant-core";
+import { coreWriteHeaders } from "../../lib/core";
 
 export interface AskResult {
   text: string;
@@ -41,13 +42,17 @@ const context = createContextSearch({ baseUrl: BASE });
 /** Запоминаем вопрос как событие — это эпизодическая память помощника. */
 async function remember(question: string): Promise<void> {
   try {
-    await fetch(`${BASE}/events`, {
+    const res = await fetch(`${BASE}/events`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: coreWriteHeaders(),
       body: JSON.stringify({ source: "panel", type: "assistant.asked", payload: { question } }),
       cache: "no-store",
       signal: AbortSignal.timeout(5000),
     });
+    // Ответ важнее памяти, поэтому отказ не бросаем — но и не глотаем молча:
+    // без этой строки протухший SERVICE_TOKEN выключил бы эпизодическую память
+    // насовсем, и снаружи это выглядело бы как «помощник просто не помнит».
+    if (!res.ok) console.warn(`Память помощника: Core ответил ${res.status} на POST /events`);
   } catch {
     // Память не должна ронять ответ: не записалось — не беда, ответ важнее.
   }

@@ -223,13 +223,25 @@ export interface AgentCard {
   updatedAt: string;
 }
 
+/**
+ * Заголовки записи в Core: тип тела и внутренний токен.
+ *
+ * Единственное место в панели, где подставляется SERVICE_TOKEN. Экспортируется
+ * ради серверных действий, которым нужен свой разбор ответа и потому нельзя
+ * пройти через send(): у guard'а Core мутация без токена — 401, а не мягкая
+ * деградация, поэтому прямой fetch обязан брать заголовки отсюда.
+ */
+export function coreWriteHeaders(hasJsonBody = true): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (hasJsonBody) headers["Content-Type"] = "application/json";
+  if (SERVICE_TOKEN) headers["x-service-token"] = SERVICE_TOKEN;
+  return headers;
+}
+
 /** Запись в Core. Ошибку отдаём словами: её увидит владелец, а не разработчик. */
 async function send<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
   let res: Response;
-  const headers: Record<string, string> = {};
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  // Мутации требуют внутренний токен Core (когда он задан).
-  if (SERVICE_TOKEN) headers["x-service-token"] = SERVICE_TOKEN;
+  const headers = coreWriteHeaders(body !== undefined);
   try {
     res = await fetch(`${BASE}${path}`, {
       method,

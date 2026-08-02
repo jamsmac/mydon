@@ -13,8 +13,12 @@
  *
  * Запуск (на Маке; Core доступен через SSH-туннель):
  *   ssh -f root@100.81.197.68 -L 13001:127.0.0.1:3001 sleep 120
+ *   SERVICE_TOKEN=<из .env сервера> \
  *   node tools/ingest-site.mjs <url> --type contractor --domain globerent \
  *     [--hint "таблица дилеров"] [--cookie "..."] [--dry]
+ *
+ * SERVICE_TOKEN обязателен: создание согласования — мутация, а Core отклоняет
+ * мутации без токена (401). Значение — то же, что в /opt/mydon-app/.env.
  *
  * Типы: contractor, contract, machine, equipment, object, invoice.
  */
@@ -128,7 +132,10 @@ if (DRY) {
 // ── 3. Одно согласование со всем списком ─────────────────────────────────────
 const res = await fetch(`${CORE}/approvals`, {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    "Content-Type": "application/json",
+    ...(process.env.SERVICE_TOKEN ? { "x-service-token": process.env.SERVICE_TOKEN } : {}),
+  },
   body: JSON.stringify({
     agent: "site-ingest",
     action: `Завести ${records.length} карточек «${type}» в ${domain} с сайта ${new URL(url).hostname}`,
