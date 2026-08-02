@@ -8,6 +8,7 @@ import {
   productSale,
   slotSnapshot,
   vendingAlias,
+  vendingCashSession,
   vendingProduct,
   vendingPurchaseOrder,
   vendingStock,
@@ -16,14 +17,17 @@ import {
 import {
   MAX_CAPACITY,
   computePurchase,
+  computePurchaseCash,
   machineDeficit,
   needByProduct,
   normalizeProductName,
   planogramStatus,
   runoutForecast,
   slotValid,
+  type CashCategoryInput,
   type PlanogramStatus,
   type PriceEntry,
+  type PurchaseCashSession,
   type PurchaseRow,
   type PurchaseSummary,
   type Runout,
@@ -135,6 +139,26 @@ export interface StockLevelRow {
   countedAt: string;
 }
 
+/**
+ * Расхождение при пересчёте склада: было → стало. `delta < 0` — недостача
+ * (потеря), `delta > 0` — излишек. `value` — |delta| × закупочная цена, сум;
+ * `noPrice` — цены нет в прайсе, `value` тогда 0 и деньгам доверять нельзя.
+ */
+export interface StockAdjustment {
+  product: string;
+  before: number;
+  after: number;
+  delta: number;
+  value: number;
+  noPrice: boolean;
+}
+
+/** Итог инвентаризации: сколько позиций приняли и что разошлось с учётом. */
+export interface IngestStockResult {
+  items: number;
+  adjustments: StockAdjustment[];
+}
+
 /** Минимум, нужный сервису от очереди согласований — для подмены в тестах. */
 export interface ApprovalRequester {
   request(input: {
@@ -153,6 +177,13 @@ export interface PurchaseOrderRow {
   positions: number;
   totalOrder: number;
   costRounded: number;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+/** Касса закупа для ответа/списка — снимок §5.8 + кто и когда записал. */
+export interface CashSessionRow extends PurchaseCashSession {
+  id: string;
   createdBy: string | null;
   createdAt: string;
 }
@@ -358,23 +389,33 @@ export class VendingService {
   // реальный склад, а не «весь дефицит».
 
   /**
-   * Карта алиасов: нормализованное имя-вариант → каноническое имя товара.
-   * Рукописные листы и заметки пишут товар по-разному («Montella», «18+»,
-   * «Moxito клуб»); по этой карте имя приводится к канону из прайса, иначе
-   * остаток лёг бы отдельной «неопознанной» строкой мимо расчёта закупа.
+   * Индекс товаров, нужный при вводе склада: карта алиасов (нормализованное
+   * имя-вариант → каноническое имя) и цены по канону — обе строятся из одной
+   * загрузки `vending_product`, чтобы не делать два похода в базу.
+   *
+   * Алиасы: рукописные листы и заметки пишут товар по-разному («Montella»,
+   * «18+», «Moxito клуб»); без карты остаток лёг бы отдельной «неопознанной»
+   * строкой мимо расчёта закупа. Цены: нужны, чтобы оценить недостачу/излишек
+   * при пересчёте в сумах, а не только в штуках.
    */
-  private async aliasMap(): Promise<Map<string, string>> {
+  private async loadProductIndex(): Promise<{ aliasByKey: Map<string, string>; priceByName: Map<string, number> }> {
     const [aliases, products] = await Promise.all([
       this.db.select().from(vendingAlias),
-      this.db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct),
+      this.db
+        .select({ id: vendingProduct.id, name: vendingProduct.name, purchasePrice: vendingProduct.purchasePrice })
+        .from(vendingProduct),
     ]);
     const nameById = new Map(products.map((p) => [p.id, p.name]));
-    const map = new Map<string, string>();
+    const aliasByKey = new Map<string, string>();
     for (const a of aliases) {
       const canonical = nameById.get(a.productId);
-      if (canonical) map.set(normalizeProductName(a.alias), canonical);
+      if (canonical) aliasByKey.set(normalizeProductName(a.alias), canonical);
     }
-    return map;
+    const priceByName = new Map<string, number>();
+    for (const p of products) {
+      if (p.purchasePrice != null) priceByName.set(p.name, Number(p.purchasePrice));
+    }
+    return { aliasByKey, priceByName };
   }
 
   /** Привести имя товара к канону через алиасы; неизвестное — как есть. */
@@ -386,25 +427,85 @@ export class VendingService {
    * Принять инвентаризацию склада: перезапись остатка по каждому товару. Имена
    * приводятся к канону через алиасы — «склад Montella 24» ложится на
    * «Montella Вода минеральная 330ml», а не отдельной строкой мимо закупа.
+   *
+   * Пересчёт против ПРЕДЫДУЩЕГО остатка даёт недостачу/излишек — тот же
+   * приём, что и в общей инвентаризации ингредиентов (`stock.service.stocktake`):
+   * «было → стало» + дельта, оценённая по закупочной цене. Первый ввод по
+   * товару (строки в складе ещё не было) сравнивать не с чем — не «недостача»,
+   * а начало учёта, поэтому в adjustments не попадает.
+   *
+   * Позиции СХЛОПЫВАЮТСЯ по канону ДО расчёта расхождения (последняя в списке
+   * побеждает) — иначе два алиаса одного товара в одной инвентаризации
+   * («Montella pet 0.33» и «montella zero 0.33» → один канон) дали бы ДВЕ
+   * дельты от одного и того же снимка «до», хотя реально сменилось только
+   * конечное значение. Найдено адверсариал-ревью до релиза.
    */
-  async ingestStock(payload: IngestStockPayload): Promise<{ items: number }> {
+  async ingestStock(payload: IngestStockPayload, actor = "owner"): Promise<IngestStockResult> {
     const countedAt = payload.countedAt ? new Date(payload.countedAt) : new Date();
-    const aliases = await this.aliasMap();
+    const { aliasByKey, priceByName } = await this.loadProductIndex();
+
+    // Схлопывание по канону — последняя позиция в списке побеждает (владелец
+    // поправился по ходу диктовки/списка).
+    const finalByProduct = new Map<string, number>();
+    for (const it of payload.items) {
+      const raw = it.product.trim();
+      if (!raw) continue;
+      finalByProduct.set(this.resolveProduct(raw, aliasByKey), it.quantity);
+    }
+
+    const adjustments: StockAdjustment[] = [];
+
     await this.db.transaction(async (tx) => {
-      for (const it of payload.items) {
-        const raw = it.product.trim();
-        if (!raw) continue;
-        const product = this.resolveProduct(raw, aliases);
+      // Снимок остатка ДО пересчёта — одним запросом на всю инвентаризацию,
+      // а не по товару в цикле: избегаем N+1 и читаем согласованный срез.
+      const existingRows = await tx.select().from(vendingStock);
+      const beforeByName = new Map(existingRows.map((r) => [r.productName, r.quantity]));
+
+      for (const [product, quantity] of finalByProduct) {
+        const before = beforeByName.get(product);
+        if (before !== undefined && before !== quantity) {
+          const delta = quantity - before;
+          const price = priceByName.get(product);
+          adjustments.push({
+            product,
+            before,
+            after: quantity,
+            delta,
+            // Округляем до копеек: price — numeric(10,2), плюс IEEE-754 умножение
+            // даёт «грязные» хвосты (2090.55×3 → 6271.499999999999) — без округления
+            // они легли бы в неизменяемый журнал как есть (найдено адверсариал-ревью).
+            value: price != null ? Math.round(Math.abs(delta) * price * 100) / 100 : 0,
+            noPrice: price == null,
+          });
+        }
+
         await tx
           .insert(vendingStock)
-          .values({ productName: product, quantity: it.quantity, countedAt, updatedAt: countedAt })
+          .values({ productName: product, quantity, countedAt, updatedAt: countedAt })
           .onConflictDoUpdate({
             target: [vendingStock.productName],
-            set: { quantity: it.quantity, countedAt, updatedAt: countedAt },
+            set: { quantity, countedAt, updatedAt: countedAt },
           });
       }
+
+      if (adjustments.length > 0) {
+        await tx.insert(event).values({
+          // Тот же actor, что и в auditLog ниже — раньше здесь было жёстко "owner"
+          // независимо от переданного actor (найдено адверсариал-ревью).
+          source: actor,
+          type: "vending.stock.recounted",
+          payload: { adjustments, countedAt: countedAt.toISOString() },
+        });
+        await tx.insert(auditLog).values({
+          actorKind: "human",
+          actorRef: actor,
+          action: "vending.stock.recount",
+          after: { adjustments },
+        });
+      }
     });
-    return { items: payload.items.length };
+
+    return { items: payload.items.length, adjustments };
   }
 
   /** Текущий остаток склада по товарам (для панели/отчётов). */
@@ -593,6 +694,50 @@ export class VendingService {
 
       return { received: true, orderId: order.id, replenished, units };
     });
+  }
+
+  // ── Касса закупа (§5.8) ───────────────────────────────────────────────────
+  // Реальный поход на базар: получил наличные, потратил по статьям, что
+  // осталось. Снимок, не леджер — одна запись на один поход. Арифметика строк
+  // уже посчитана владельцем от руки (§5.8 в shared); здесь только сведение
+  // статей и запись в базу.
+
+  /** Записать кассу закупа: получил → статьи → остаток (снимок, не леджер). */
+  async recordCashSession(
+    receivedAmount: number,
+    categories: CashCategoryInput[],
+    createdBy = "owner",
+  ): Promise<CashSessionRow> {
+    const session = computePurchaseCash(receivedAmount, categories);
+    const [row] = await this.db
+      .insert(vendingCashSession)
+      .values({
+        receivedAmount: session.receivedAmount.toFixed(2),
+        categories: session.categories,
+        totalSpent: session.totalSpent.toFixed(2),
+        remainder: session.remainder.toFixed(2),
+        createdBy,
+      })
+      .returning();
+    return { ...session, id: row.id, createdBy: row.createdBy, createdAt: row.createdAt.toISOString() };
+  }
+
+  /** Последние кассы закупа (для панели/бота — история походов на базар). */
+  async cashSessions(limit = 10): Promise<CashSessionRow[]> {
+    const rows = await this.db
+      .select()
+      .from(vendingCashSession)
+      .orderBy(desc(vendingCashSession.createdAt))
+      .limit(Math.min(Math.max(limit, 1), 50));
+    return rows.map((r) => ({
+      id: r.id,
+      receivedAmount: Number(r.receivedAmount),
+      categories: r.categories, // типизировано на колонке ($type<CashCategorySummary[]>) — каста не нужно
+      totalSpent: Number(r.totalSpent),
+      remainder: Number(r.remainder),
+      createdBy: r.createdBy,
+      createdAt: r.createdAt.toISOString(),
+    }));
   }
 
   // ── Журнал сбора Ourvend ──────────────────────────────────────────────────

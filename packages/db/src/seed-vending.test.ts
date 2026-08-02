@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { normalizeProductName } from "@mydon/shared";
-import { VENDING_ALIASES, VENDING_PRICELIST, packOf } from "./seed-vending";
+import { vendingAlias, vendingProduct, vendingStock } from "./schema";
+import { VENDING_ALIASES, VENDING_PRICELIST, packOf, seedVendingAliases } from "./seed-vending";
 
 describe("Прайс вендинга (Приложение А)", () => {
   it("имена уникальны, цены положительны", () => {
@@ -44,5 +45,77 @@ describe("Алиасы вендинга (реальные листы остат�
       seen.set(key, a.product);
     }
     assert.deepEqual(clash, [], `конфликт алиасов: ${clash.join("; ")}`);
+  });
+});
+
+describe("seedVendingAliases: перенос остатка склада на канон (регресс)", () => {
+  /** Стаб: select().from(table) различает три таблицы по ссылке. */
+  function seedDb(products: unknown[], existingAliases: unknown[], stockRows: unknown[]) {
+    const aliasInserts: unknown[] = [];
+    const stockUpdates: unknown[] = [];
+    const db = {
+      select: () => ({
+        from: async (t: unknown) =>
+          t === vendingProduct ? products : t === vendingAlias ? existingAliases : t === vendingStock ? stockRows : [],
+      }),
+      insert: () => ({
+        values: (v: unknown[]) => {
+          aliasInserts.push(...v);
+          return Promise.resolve(undefined);
+        },
+      }),
+      update: () => ({
+        set: (v: unknown) => ({
+          where: () => {
+            stockUpdates.push(v);
+            return Promise.resolve(undefined);
+          },
+        }),
+      }),
+    } as never;
+    return { db, aliasInserts, stockUpdates };
+  }
+
+  it("строка склада под сырым именем переносится на канон, когда добавляется алиас", async () => {
+    // До алиаса владелец вводил остаток сырым именем «Montella» — строка легла
+    // под ним. Без переноса следующий пересчёт искал бы «до» под каноном, не
+    // нашёл бы и молча потерял недостачу/излишек (найдено адверсариал-ревью).
+    const products = [{ id: "p1", name: "Montella Вода минеральная 330ml" }];
+    const stockRows = [{ productName: "Montella", updatedAt: new Date("2026-08-01T00:00:00Z") }];
+    const { db, stockUpdates } = seedDb(products, [], stockRows);
+    const res = await seedVendingAliases(db);
+    assert.equal(res.stockRenamed, 1);
+    assert.ok(stockUpdates.some((v) => (v as { productName: string }).productName === "Montella Вода минеральная 330ml"));
+  });
+
+  it("канон уже существует — старую сырую строку не трогаем (неясно, какая настоящая)", async () => {
+    const products = [{ id: "p1", name: "Montella Вода минеральная 330ml" }];
+    const stockRows = [
+      { productName: "Montella", updatedAt: new Date("2026-08-01T00:00:00Z") },
+      { productName: "Montella Вода минеральная 330ml", updatedAt: new Date("2026-08-02T00:00:00Z") },
+    ];
+    const { db, stockUpdates } = seedDb(products, [], stockRows);
+    const res = await seedVendingAliases(db);
+    assert.equal(res.stockRenamed, 0);
+    assert.equal(stockUpdates.length, 0);
+  });
+
+  it("нет строки склада под сырым именем — переносить нечего", async () => {
+    const products = [{ id: "p1", name: "Montella Вода минеральная 330ml" }];
+    const { db, stockUpdates } = seedDb(products, [], []);
+    const res = await seedVendingAliases(db);
+    assert.equal(res.stockRenamed, 0);
+    assert.equal(stockUpdates.length, 0);
+  });
+
+  it("два алиаса на один канон переносят строку только один раз (не задваивают счётчик)", async () => {
+    // «Montella» и «Montella pet 0.33» — оба алиаса ведут на один товар;
+    // сырая строка склада только одна («Montella») и переносится единожды.
+    const products = [{ id: "p1", name: "Montella Вода минеральная 330ml" }];
+    const stockRows = [{ productName: "Montella", updatedAt: new Date("2026-08-01T00:00:00Z") }];
+    const { db, stockUpdates } = seedDb(products, [], stockRows);
+    const res = await seedVendingAliases(db);
+    assert.equal(res.stockRenamed, 1);
+    assert.equal(stockUpdates.length, 1);
   });
 });

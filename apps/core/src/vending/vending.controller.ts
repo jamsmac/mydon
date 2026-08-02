@@ -109,6 +109,43 @@ export class SubmitPurchaseDto {
   createdBy?: string;
 }
 
+export class CashLineDto {
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  label!: string;
+
+  @IsOptional() @IsNumber() @Min(0)
+  qty?: number;
+
+  @IsOptional() @IsNumber() @Min(0)
+  unitPrice?: number;
+
+  // Целое: сум без копеек. Дробное здесь дало бы независимое .toFixed(2) на
+  // receivedAmount/totalSpent/remainder разъехаться на 1 тийин (найдено
+  // адверсариал-ревью) — проще не пускать дробь на границе API, чем сверять
+  // сумму после округления.
+  @IsInt() @Min(0)
+  amount!: number;
+}
+
+export class CashCategoryDto {
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  name!: string;
+
+  @IsArray() @ArrayMaxSize(200) @ValidateNested({ each: true }) @Type(() => CashLineDto)
+  lines!: CashLineDto[];
+}
+
+export class IngestCashSessionDto {
+  @IsInt() @Min(0)
+  receivedAmount!: number;
+
+  @IsArray() @ArrayMaxSize(50) @ValidateNested({ each: true }) @Type(() => CashCategoryDto)
+  categories!: CashCategoryDto[];
+
+  @IsOptional() @IsString() @MaxLength(128)
+  createdBy?: string;
+}
+
 export class ReceiveOrderDto {
   /** Пусто → принимаем последнюю неполученную накладную. */
   @IsOptional() @IsString() @MaxLength(36)
@@ -201,6 +238,18 @@ export class VendingController {
   @Get("stock")
   stock() {
     return this.vending.stockLevels();
+  }
+
+  // ── Касса закупа (§5.8): получил → статьи → остаток ───────────────────────
+
+  @Post("cash")
+  recordCashSession(@Body() dto: IngestCashSessionDto) {
+    return this.vending.recordCashSession(dto.receivedAmount, dto.categories, dto.createdBy);
+  }
+
+  @Get("cash")
+  cashSessions() {
+    return this.vending.cashSessions();
   }
 
   // ── Журнал сбора: коллектор открывает запуск, потом закрывает итогом ───────

@@ -8,6 +8,7 @@
  *
  * Разбор детерминированный и тестируется без сети: команда → пары «товар N».
  */
+import type { VendingStockAdjustment } from "./core-client";
 
 export interface StockItem {
   product: string;
@@ -55,9 +56,47 @@ export function parseStockItems(raw: string): StockItem[] {
   return out;
 }
 
-/** Подтверждение: что именно записали (и на сколько позиций). */
-export function formatStockAck(items: StockItem[]): string {
+const RU = (n: number): string => Math.round(n).toLocaleString("ru-RU");
+
+/** Сколько строк расхождения показывать в одном блоке — остальное «…и ещё N». */
+const MAX_ADJUSTMENT_LINES = 20;
+
+/** Одна строка блока недостачи/излишка. */
+function adjustmentLine(a: VendingStockAdjustment, sign: string): string {
+  const val = a.noPrice ? "" : ` · ~${RU(a.value)} сум`;
+  return `• ${a.product}: было ${a.before} → стало ${a.after} (${sign}${Math.abs(a.delta)}${val})`;
+}
+
+/**
+ * Подтверждение: что именно записали (и на сколько позиций), плюс расхождение
+ * с предыдущим пересчётом — недостача и излишек отдельными блоками, как
+ * реальный лист владельца («было 55 → стало 54»). Одно и то же число не может
+ * быть одновременно недостачей и излишком — сортируем по знаку delta один раз.
+ *
+ * Оба блока (как и список позиций выше) режутся до MAX_ADJUSTMENT_LINES:
+ * Core допускает до 5000 позиций за раз, и без среза полный пересчёт легко
+ * пробил бы лимит Telegram в 4096 символов — сообщение не дошло бы вовсе
+ * (найдено адверсариал-ревью).
+ */
+export function formatStockAck(items: StockItem[], adjustments: VendingStockAdjustment[] = []): string {
   const lines = items.slice(0, 20).map((i) => `• ${i.product}: ${i.quantity}`);
   if (items.length > 20) lines.push(`…и ещё ${items.length - 20}`);
-  return [`📦 Склад обновлён (${items.length} поз.):`, "", ...lines, "", "«что заказать» — пересчитать закуп."].join("\n");
+  const out = [`📦 Склад обновлён (${items.length} поз.):`, "", ...lines];
+
+  const losses = adjustments.filter((a) => a.delta < 0);
+  const surplus = adjustments.filter((a) => a.delta > 0);
+
+  if (losses.length > 0) {
+    out.push("", "📉 Недостача при пересчёте:");
+    out.push(...losses.slice(0, MAX_ADJUSTMENT_LINES).map((a) => adjustmentLine(a, "−")));
+    if (losses.length > MAX_ADJUSTMENT_LINES) out.push(`…и ещё ${losses.length - MAX_ADJUSTMENT_LINES}`);
+  }
+  if (surplus.length > 0) {
+    out.push("", "📈 Излишек при пересчёте:");
+    out.push(...surplus.slice(0, MAX_ADJUSTMENT_LINES).map((a) => adjustmentLine(a, "+")));
+    if (surplus.length > MAX_ADJUSTMENT_LINES) out.push(`…и ещё ${surplus.length - MAX_ADJUSTMENT_LINES}`);
+  }
+
+  out.push("", "«что заказать» — пересчитать закуп.");
+  return out.join("\n");
 }

@@ -48,6 +48,44 @@ export interface TaskRow {
   resultNote: string | null;
 }
 
+/**
+ * Расхождение при пересчёте склада (§5.4): было → стало. delta<0 — недостача
+ * (потеря), delta>0 — излишек. value — |delta| × закупочная цена, сум;
+ * noPrice — цены нет в прайсе, деньгам тогда доверять нельзя.
+ */
+export interface VendingStockAdjustment {
+  product: string;
+  before: number;
+  after: number;
+  delta: number;
+  value: number;
+  noPrice: boolean;
+}
+
+/** Строка статьи расхода — как её видит бот (Core хранит ещё qty/unitPrice, боту не нужны). */
+export interface VendingCashLine {
+  label: string;
+  amount: number;
+}
+
+/** Статья с подытогом — «корзинка», «базар» (может повторяться для разных закупок). */
+export interface VendingCashCategory {
+  name: string;
+  lines: VendingCashLine[];
+  subtotal: number;
+}
+
+/** Касса закупа (§5.8): получил → статьи → остаток. Снимок, не леджер. */
+export interface VendingCashSession {
+  id: string;
+  receivedAmount: number;
+  categories: VendingCashCategory[];
+  totalSpent: number;
+  remainder: number;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 /** Позиция сводного закупа (§5.5) — как отдаёт Core GET /vending/purchase. */
 export interface VendingPurchaseItem {
   product: string;
@@ -135,12 +173,42 @@ export class CoreClient {
     return this.request<VendingPurchase>("/vending/purchase");
   }
 
-  /** Записать остатки склада вендинга (инвентаризация, §5.4). Перезапись по товару. */
-  setVendingStock(items: { product: string; quantity: number }[]): Promise<{ items: number }> {
-    return this.request<{ items: number }>("/vending/stock", {
+  /**
+   * Записать остатки склада вендинга (инвентаризация, §5.4). Перезапись по
+   * товару; `adjustments` — расхождение с предыдущим остатком (недостача при
+   * delta<0, излишек при delta>0), пусто — если товар вводится впервые или
+   * количество не изменилось.
+   */
+  setVendingStock(items: { product: string; quantity: number }[]): Promise<{
+    items: number;
+    adjustments: VendingStockAdjustment[];
+  }> {
+    return this.request("/vending/stock", {
       method: "POST",
       body: JSON.stringify({ items }),
     });
+  }
+
+  /**
+   * Записать кассу закупа: получил → статьи → остаток (§5.8). Снимок, а не
+   * леджер — одна запись на поход на базар.
+   */
+  recordVendingCash(
+    receivedAmount: number,
+    categories: { name: string; amount: number }[],
+  ): Promise<VendingCashSession> {
+    return this.request<VendingCashSession>("/vending/cash", {
+      method: "POST",
+      body: JSON.stringify({
+        receivedAmount,
+        categories: categories.map((c) => ({ name: c.name, lines: [{ label: c.name, amount: c.amount }] })),
+      }),
+    });
+  }
+
+  /** Прошлые кассы закупа — свежие сверху (§5.8). */
+  vendingCashSessions(): Promise<VendingCashSession[]> {
+    return this.request<VendingCashSession[]>("/vending/cash");
   }
 
   /** Накладные закупа (материализованы при одобрении, §5.7). */

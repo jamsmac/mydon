@@ -347,3 +347,56 @@ export function runoutForecast(input: RunoutInput[], criticalDays = 3): { all: R
     .sort((a, b) => a.daysLeft - b.daysLeft);
   return { all, critical };
 }
+
+// ── §5.8 Касса закупа: получил − статьи = остаток ───────────────────────────
+//
+// Реальный поход владельца на базар: взял наличные, купил по статьям
+// («корзинка», «базар» — одна и та же статья может повторяться, например
+// «базар» отдельно для снеков и отдельно для напитков), в конце — что
+// осталось. Строчная арифметика («47×2090») уже посчитана владельцем от руки
+// и приходит готовой суммой — здесь только сведение статей и остаток.
+// Воспроизводит реальную запись 02.08.2026 до сума — см. vending-calc.test.ts.
+
+export interface CashLine {
+  /** Что купили (свободный текст — «Barni», «47×2090» и т.п.). */
+  label: string;
+  qty?: number;
+  unitPrice?: number;
+  /** Сумма строки, сум — уже посчитана владельцем, не пересчитывается. */
+  amount: number;
+}
+
+export interface CashCategoryInput {
+  /** Статья расхода: «корзинка», «базар» и т.п. Может повторяться. */
+  name: string;
+  lines: CashLine[];
+}
+
+export interface CashCategorySummary extends CashCategoryInput {
+  /** Σ lines.amount. */
+  subtotal: number;
+}
+
+export interface PurchaseCashSession {
+  /** Сколько наличных получено на закуп, сум. */
+  receivedAmount: number;
+  categories: CashCategorySummary[];
+  /** Σ categories.subtotal. */
+  totalSpent: number;
+  /** receivedAmount − totalSpent. Отрицательный — потратили больше, чем получили. */
+  remainder: number;
+}
+
+/**
+ * Касса закупа: получил → статьи (со строками) → остаток. Статьи не
+ * дедуплицируются по имени намеренно — «базар» для снеков и «базар» для
+ * напитков считаются владельцем отдельно и должны остаться двумя строками.
+ */
+export function computePurchaseCash(receivedAmount: number, categories: CashCategoryInput[]): PurchaseCashSession {
+  const summarized: CashCategorySummary[] = categories.map((c) => ({
+    ...c,
+    subtotal: c.lines.reduce((a, l) => a + l.amount, 0),
+  }));
+  const totalSpent = summarized.reduce((a, c) => a + c.subtotal, 0);
+  return { receivedAmount, categories: summarized, totalSpent, remainder: receivedAmount - totalSpent };
+}

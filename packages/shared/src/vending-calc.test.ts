@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   computePurchase,
+  computePurchaseCash,
   machineDeficit,
   needByProduct,
   normalizeProductName,
@@ -9,6 +10,7 @@ import {
   runoutForecast,
   slotDeficit,
   slotValid,
+  type CashCategoryInput,
   type PriceEntry,
   type PurchaseRow,
   type Slot,
@@ -214,5 +216,63 @@ describe("Вендинг: прогноз запаса (§5.6)", () => {
       critical.map((r) => r.product),
       ["Montella", "Fanta"],
     );
+  });
+});
+
+// ── §5.8 Касса закупа: воспроизводит реальную запись владельца 02.08.2026 ────
+
+describe("Вендинг: касса закупа воспроизводит реальную запись до сума", () => {
+  // Реальная заметка: получил 2 400 000, «корзинка» 98 230, «базар» (снеки)
+  // 376 300, «базар» (напитки) 1 023 000, остаток 902 470. Строки — как в
+  // заметке (арифметика владельца), category «базар» повторяется дважды.
+  const categories: CashCategoryInput[] = [
+    { name: "корзинка", lines: [{ label: "47×2090", qty: 47, unitPrice: 2090, amount: 98_230 }] },
+    {
+      name: "базар",
+      lines: [
+        { label: "Barni", qty: 4, unitPrice: 18_500, amount: 74_000 },
+        { label: "Bounty", qty: 10, unitPrice: 8_000, amount: 80_000 },
+        { label: "ChocoPie", qty: 2, amount: 51_000 }, // 2*12*(25500/12) — уже посчитано владельцем
+        { label: "Oreo", qty: 12, unitPrice: 5_500, amount: 66_000 },
+        { label: "Cheers", qty: 6, unitPrice: 8_800, amount: 52_800 },
+        { label: "TUC", qty: 5, unitPrice: 10_500, amount: 52_500 },
+      ],
+    },
+    {
+      name: "базар",
+      lines: [
+        { label: "Moxito", amount: 235_000 },
+        { label: "Moxito klibn", amount: 235_000 },
+        { label: "Fuse Tea can 0.45", amount: 105_000 },
+        { label: "Plus 18 can 0.33", amount: 102_000 },
+        { label: "Coca Cola classic can 0.25", amount: 62_000 },
+        { label: "Fanta can 0.25", amount: 62_000 },
+        { label: "Sprite can 0.25", amount: 62_000 },
+        { label: "RedBull can 0.25", qty: 10, unitPrice: 16_000, amount: 160_000 },
+      ],
+    },
+  ];
+
+  const session = computePurchaseCash(2_400_000, categories);
+
+  it("подытоги статей совпадают с записью (корзинка 98 230, базар 376 300 и 1 023 000)", () => {
+    assert.equal(session.categories[0]!.subtotal, 98_230);
+    assert.equal(session.categories[1]!.subtotal, 376_300);
+    assert.equal(session.categories[2]!.subtotal, 1_023_000);
+  });
+
+  it("потрачено и остаток совпадают с записью: 1 497 530 и 902 470", () => {
+    assert.equal(session.totalSpent, 1_497_530);
+    assert.equal(session.remainder, 902_470);
+  });
+
+  it("повторяющаяся статья «базар» не схлопывается — две отдельные строки", () => {
+    const bazaars = session.categories.filter((c) => c.name === "базар");
+    assert.equal(bazaars.length, 2);
+  });
+
+  it("потрачено больше, чем получено — остаток уходит в минус (не скрываем перерасход)", () => {
+    const overspent = computePurchaseCash(100_000, [{ name: "базар", lines: [{ label: "X", amount: 150_000 }] }]);
+    assert.equal(overspent.remainder, -50_000);
   });
 });

@@ -124,6 +124,50 @@ describe("Доступ к боту", () => {
   });
 });
 
+describe("Касса закупа: гейт по префиксу — не проваливается в приёмку накладной (регресс)", () => {
+  function deps(spies: { received: number; cash: number }): HandlerDeps {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      receiveVendingOrder: async () => {
+        spies.received += 1;
+        return { received: false, replenished: 0, units: 0, reason: "не должно было вызваться" };
+      },
+      recordVendingCash: async (receivedAmount: number, categories: { name: string; amount: number }[]) => {
+        spies.cash += 1;
+        const totalSpent = categories.reduce((a, c) => a + c.amount, 0);
+        return {
+          id: "cs1",
+          receivedAmount,
+          categories: categories.map((c) => ({ name: c.name, lines: [{ label: c.name, amount: c.amount }], subtotal: c.amount })),
+          totalSpent,
+          remainder: receivedAmount - totalSpent,
+          createdBy: "owner",
+          createdAt: new Date().toISOString(),
+        };
+      },
+    } as unknown as HandlerDeps["core"];
+    return { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
+  }
+
+  it("полная команда кассы вызывает recordVendingCash, а не receiveVendingOrder", async () => {
+    const spies = { received: 0, cash: 0 };
+    const reply = await handleMessage(111, "касса закупа: получил 2400000, базар 376300", deps(spies));
+    assert.equal(spies.cash, 1);
+    assert.equal(spies.received, 0);
+    assert.match(reply?.text ?? "", /Касса закупа/);
+  });
+
+  it("«получил» без статьи — ошибка формата, НЕ приёмка накладной (реальный найденный баг)", async () => {
+    // Раньше это сообщение проваливалось в isPurchaseReceiveCommand (тоже
+    // содержит «получил»+«закуп») и вызывало реальную мутацию не по адресу.
+    const spies = { received: 0, cash: 0 };
+    const reply = await handleMessage(111, "касса закупа: получил 2400000", deps(spies));
+    assert.equal(spies.received, 0, "receiveVendingOrder не должен был вызваться");
+    assert.equal(spies.cash, 0);
+    assert.match(reply?.text ?? "", /Не понял формат кассы/);
+  });
+});
+
 describe("Кнопки согласования", () => {
   it("разбирает корректные данные кнопки", () => {
     const parsed = parseApprovalCallback("ap:approved:abc-123");

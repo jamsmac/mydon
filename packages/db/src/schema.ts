@@ -21,6 +21,7 @@ import {
   uniqueIndex,
   check,
 } from "drizzle-orm/pg-core";
+import type { CashCategorySummary } from "@mydon/shared";
 
 // ── Перечисления ──
 export const domainEnum = pgEnum("domain", ["globerent", "vendhub", "personal", "mydon"]);
@@ -899,6 +900,25 @@ export const vendingPurchaseOrder = pgTable("vending_purchase_order", {
   createdAt: createdAt(),
 });
 
+/**
+ * Касса закупа (§5.8): владелец пошёл на базар с наличными — сколько получил,
+ * на что потратил по статьям («корзинка», «базар» — статья может повторяться,
+ * например отдельно для снеков и напитков), сколько осталось. Строчная
+ * арифметика уже посчитана владельцем от руки; здесь снимок статей с
+ * подытогами и итоговый остаток — не леджер, одна запись на один поход.
+ */
+export const vendingCashSession = pgTable("vending_cash_session", {
+  id: id(),
+  receivedAmount: numeric("received_amount", { precision: 14, scale: 2 }).notNull(),
+  /** Статьи с подытогами: [{name, lines: [{label, qty?, unitPrice?, amount}], subtotal}]. */
+  categories: jsonb("categories").$type<CashCategorySummary[]>().default([]).notNull(),
+  totalSpent: numeric("total_spent", { precision: 14, scale: 2 }).notNull(),
+  /** receivedAmount − totalSpent. Может быть отрицательным — перерасход не скрываем. */
+  remainder: numeric("remainder", { precision: 14, scale: 2 }).notNull(),
+  createdBy: text("created_by"),
+  createdAt: createdAt(),
+});
+
 /** Неопознанные имена товаров — на разбор менеджеру (не роняют сбор). */
 export const vendingUnmatched = pgTable("vending_unmatched", {
   id: id(),
@@ -971,6 +991,7 @@ export const schema = {
   machineSale,
   vendingStock,
   vendingPurchaseOrder,
+  vendingCashSession,
   vendingUnmatched,
   vendingSyncRun,
 };
