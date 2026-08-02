@@ -3,8 +3,9 @@ import { config as loadEnv } from "dotenv";
 import { Cron } from "croner";
 import { TZ } from "@mydon/shared";
 import { budgetPosture } from "./budget";
+import { coachPosture } from "./coach";
 import { AgentsCoreClient } from "./core-client";
-import { llmPosture } from "./model-gateway";
+import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
 import { autonomyThreshold } from "./policy";
 import { loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
@@ -148,6 +149,7 @@ async function main(): Promise<void> {
   );
   console.log(`Бюджет: ${budgetPosture()}.`);
   console.log(`Модель: ${llmPosture()}.`);
+  console.log(`${coachPosture(modelGatewayFromEnv() !== null)}.`);
 
   if (process.env.AGENTS_SCHEDULES_PAUSED === "1") {
     console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания не запускаются. Ожидаю снятия паузы.");

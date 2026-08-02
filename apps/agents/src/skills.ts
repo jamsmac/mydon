@@ -1,6 +1,7 @@
 import type { Domain } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
 import type { AgentDefinition } from "./registry";
+import { buildWebProposal, readWebSources } from "./web-read";
 
 /**
  * Предметные навыки агентов (Фаза К3: агенты подключены к Core).
@@ -96,6 +97,14 @@ const morningDigest: Skill = async (_agent, core) => {
   };
 };
 
+// ── market-analyst: чтение указанных владельцем сайтов (только чтение) ────────
+const readSources: Skill = async (agent) => {
+  const sources = agent.webSources ?? [];
+  if (sources.length === 0) return null; // источников нет — читать нечего
+  const results = await readWebSources(sources);
+  return buildWebProposal(results);
+};
+
 /**
  * Реестр реализованных навыков. Навыка нет в реестре — прогон честно
  * сообщает, что он ещё не подключён (а не изображает работу).
@@ -104,6 +113,7 @@ export const SKILLS: Record<string, Skill> = {
   "watch-receivables": watchReceivables,
   "monitor-stock": monitorStock,
   "morning-digest": morningDigest,
+  "read-sources": readSources,
 };
 
 export function hasSkill(name: string): boolean {

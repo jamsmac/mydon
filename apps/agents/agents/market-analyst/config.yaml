@@ -31,6 +31,15 @@ schedule:
 
 autonomy_default: T1 # разведка: читает и докладывает, наружу не действует
 
+# Сайты, которые агенту разрешено ЧИТАТЬ (навык read-sources). Только чтение.
+# Впиши сюда реальные URL — цены, тендеры, конкуренты. Формат:
+#   web_sources:
+#     - name: Тендеры UZ
+#       url: https://example.uz/tenders
+#     - name: Цены конкурента
+#       url: https://competitor.example/catalog
+web_sources: []
+
 kb_pages:
   - shared/kb/globerent/heli-models.md
   - shared/kb/globerent/pricelist.md
