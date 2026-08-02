@@ -196,6 +196,61 @@ describe("Вендинг Core: сводный закуп (§5.4–5.5)", () => {
   });
 });
 
+describe("Вендинг Core: отправка закупа на утверждение (§5.7)", () => {
+  const t = new Date("2026-08-02T00:00:00Z");
+  const slots: Row[] = [{ machineSerial: "AH", coilId: "1", productName: "Montella", capacity: 6, quantity: 2 }];
+  const sales: SaleRow[] = [{ machineSerial: "AH", productName: "Montella", quantity: 14, capturedAt: t }];
+  const products: ProdRow[] = [{ name: "Montella", purchasePrice: "5000.00", packSize: 12 }];
+
+  /** Стаб очереди согласований: копит запросы, отдаёт id. */
+  function approvalsStub() {
+    const requests: { agent: string; action: string; tier: string; payload?: Record<string, unknown> }[] = [];
+    const svc = {
+      request: async (input: { agent: string; action: string; tier: string; payload?: Record<string, unknown> }) => {
+        requests.push(input);
+        return { id: `ap-${requests.length}` };
+      },
+    };
+    return { svc, requests };
+  }
+
+  it("создаёт заявку со снимком закупа и суммой в действии", async () => {
+    const { svc, requests } = approvalsStub();
+    const vending = new VendingService(purchaseDb(slots, sales, products), svc);
+    const res = await vending.submitPurchase("owner");
+
+    assert.equal(res.submitted, true);
+    assert.equal(res.approvalId, "ap-1");
+    assert.equal(res.positions, 1);
+    assert.equal(res.costRounded, 60000); // order 12 × 5000
+
+    assert.equal(requests.length, 1);
+    const r = requests[0]!;
+    assert.equal(r.agent, "vending");
+    assert.equal(r.tier, "T2");
+    assert.match(r.action, /Закуп вендинга: 1 поз/);
+    const po = (r.payload as { purchaseOrder: { positions: unknown[]; costRounded: number } }).purchaseOrder;
+    assert.equal(po.positions.length, 1);
+    assert.equal(po.costRounded, 60000);
+  });
+
+  it("нечего заказывать — заявку не создаёт", async () => {
+    const { svc, requests } = approvalsStub();
+    // Слот заполнен под завязку → дефицита нет.
+    const full: Row[] = [{ machineSerial: "AH", coilId: "1", productName: "Montella", capacity: 6, quantity: 6 }];
+    const vending = new VendingService(purchaseDb(full, sales, products), svc);
+    const res = await vending.submitPurchase("owner");
+    assert.equal(res.submitted, false);
+    assert.equal(requests.length, 0);
+    assert.match(res.reason ?? "", /нечего/i);
+  });
+
+  it("без подключённой очереди согласований — явная ошибка", async () => {
+    const vending = new VendingService(purchaseDb(slots, sales, products));
+    await assert.rejects(() => vending.submitPurchase(), /ApprovalsService не подключён/);
+  });
+});
+
 describe("Вендинг Core: инвентаризация склада (§5.4)", () => {
   it("перезаписывает остаток по товару (upsert), пустое имя пропускает", async () => {
     const { db, inserts } = writeDb();

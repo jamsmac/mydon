@@ -46,3 +46,32 @@ export function formatPurchaseBrief(p: VendingPurchase): string {
 
   return lines.join("\n");
 }
+
+/**
+ * Команда «оформить закуп» — отправить закуп на утверждение (§5.7), в отличие
+ * от «что заказать» (просто показать). Требуем и глагол-намерение, и слово о
+ * закупе, чтобы не спутать с брифингом: «закуп» сам по себе остаётся брифингом.
+ */
+export function isPurchaseSubmitCommand(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  const verb = /(оформ|заявк|отправ|на утвержд|подтверд|согласу)/.test(t);
+  const about = /(закуп|заказ)/.test(t);
+  return verb && about;
+}
+
+/** Подтверждение отправки закупа владельцу. */
+export function formatPurchaseSubmitAck(res: {
+  submitted: boolean;
+  positions: number;
+  costRounded: number;
+  reason?: string;
+}): string {
+  if (!res.submitted) return res.reason ?? "Закупать нечего — заявка не нужна.";
+  const sum = Math.round(res.costRounded).toLocaleString("ru-RU");
+  return [
+    `✋ Заявка на закуп отправлена на утверждение.`,
+    "",
+    `Позиций: ${res.positions} · сумма ~${sum} сум.`,
+    `Смотри «согласования» — там ✅ Одобрить / ❌ Отклонить.`,
+  ].join("\n");
+}

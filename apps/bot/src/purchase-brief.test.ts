@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { VendingPurchase, VendingPurchaseItem } from "./core-client";
-import { formatPurchaseBrief } from "./purchase-brief";
+import { formatPurchaseBrief, formatPurchaseSubmitAck, isPurchaseSubmitCommand } from "./purchase-brief";
 
 const item = (o: Partial<VendingPurchaseItem> & { product: string }): VendingPurchaseItem => ({
   need: 0,
@@ -75,5 +75,30 @@ describe("Брифинг закупа (Telegram)", () => {
     );
     const t = formatPurchaseBrief(base({ items, totalBuy: 13, totalOrder: 13, costRounded: 91 }));
     assert.match(t, /…и ещё 3/);
+  });
+});
+
+describe("Оформление закупа: команда и подтверждение (§5.7)", () => {
+  it("«оформить закуп» — команда submit, «закуп»/«что заказать» — нет", () => {
+    assert.equal(isPurchaseSubmitCommand("оформить закуп"), true);
+    assert.equal(isPurchaseSubmitCommand("отправь закуп на утверждение"), true);
+    assert.equal(isPurchaseSubmitCommand("заявка на закуп"), true);
+    assert.equal(isPurchaseSubmitCommand("согласуй заказ"), true);
+    // Брифинг закупа — не submit.
+    assert.equal(isPurchaseSubmitCommand("закуп"), false);
+    assert.equal(isPurchaseSubmitCommand("что заказать"), false);
+  });
+
+  it("подтверждение отправки перечисляет позиции, сумму и куда смотреть", () => {
+    const t = formatPurchaseSubmitAck({ submitted: true, positions: 3, costRounded: 84000 });
+    assert.match(t, /отправлена на утверждение/);
+    assert.match(t, /Позиций: 3/);
+    assert.match(t, /84\s?000 сум/);
+    assert.match(t, /согласования/);
+  });
+
+  it("нечего отправлять — показывает причину, без шума", () => {
+    const t = formatPurchaseSubmitAck({ submitted: false, positions: 0, costRounded: 0, reason: "Закупать нечего." });
+    assert.match(t, /нечего/i);
   });
 });
