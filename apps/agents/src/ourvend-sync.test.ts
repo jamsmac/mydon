@@ -5,7 +5,7 @@ import { ourvendConfigFromEnv, runOurvendSync, type SyncCoreClient } from "./our
 
 /** Стаб Core: копит вызовы, чтобы проверить, что и с каким итогом отправлено. */
 function stubCore() {
-  const calls = { starts: 0, ingests: [] as unknown[], finishes: [] as unknown[] };
+  const calls = { starts: 0, ingests: [] as unknown[], sales: [] as unknown[], finishes: [] as unknown[] };
   const core: SyncCoreClient = {
     startVendingSync: async () => {
       calls.starts += 1;
@@ -16,6 +16,10 @@ function stubCore() {
       const slots = payload.machines.reduce((a, m) => a + m.slots.length, 0);
       return { machines: payload.machines.length, slots };
     },
+    ingestVendingSales: async (payload) => {
+      calls.sales.push(payload);
+      return { productRows: payload.productSales.length, machineRows: payload.machineSales.length };
+    },
     finishVendingSync: async (id, input) => {
       calls.finishes.push({ id, ...input });
       return { ok: true };
@@ -24,10 +28,12 @@ function stubCore() {
   return { core, calls };
 }
 
-/** Стаб коннектора: слоты берутся из карты serial→slots; getSlots может бросать. */
+/** Стаб коннектора: слоты/продажи берутся из карт по serial; getSlots может бросать. */
 function stubConnector(cfg: {
   machines: RawMachine[];
   slots: Record<string, RawSlot[]>;
+  productSales?: Record<string, RawProductSale[]>;
+  machineSales?: RawMachineSale[];
   throwOn?: Set<string>;
   loginThrows?: boolean;
   listThrows?: boolean;
@@ -44,8 +50,8 @@ function stubConnector(cfg: {
       if (cfg.throwOn?.has(serial)) throw new Error(`слоты ${serial} не пришли`);
       return cfg.slots[serial] ?? [];
     },
-    getProductSales: async (): Promise<RawProductSale[]> => [],
-    getMachineSales: async (): Promise<RawMachineSale[]> => [],
+    getProductSales: async (serial: string): Promise<RawProductSale[]> => cfg.productSales?.[serial] ?? [],
+    getMachineSales: async (): Promise<RawMachineSale[]> => cfg.machineSales ?? [],
   };
 }
 
@@ -80,6 +86,51 @@ describe("ourvend:sync — коллектор вендинга", () => {
     assert.equal((calls.finishes[0] as { status: string }).status, "success");
     // capturedAt проставлен из часов.
     assert.equal((calls.ingests[0] as { capturedAt: string }).capturedAt, "2026-08-02T10:00:00.000Z");
+  });
+
+  it("собирает продажи за окно: строки одного товара суммируются, продажи автоматов проходят", async () => {
+    const { core, calls } = stubCore();
+    const connector = stubConnector({
+      machines: [{ serial: "AH", alias: "AH" }],
+      slots: { AH: [slot("31", "Montella", 6, 2)] },
+      // Одно имя в двух строках — коллектор обязан сложить (§3.2.3).
+      productSales: { AH: [{ product: "Montella", saleNum: 4 }, { product: "Montella", saleNum: 3 }] },
+      machineSales: [{ serial: "AH", totalAmount: 48000, totalCount: 7 }],
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "success");
+    assert.equal(res.productSales, 1);
+    assert.equal(calls.sales.length, 1);
+    const payload = calls.sales[0] as {
+      periodStart: string;
+      periodEnd: string;
+      productSales: { serial: string; product: string; quantity: number }[];
+      machineSales: { serial: string; totalCount: number }[];
+    };
+    assert.deepEqual(payload.productSales, [{ serial: "AH", product: "Montella", quantity: 7 }]);
+    assert.equal(payload.machineSales[0].totalCount, 7);
+    // Окно — 7 суток до момента съёма.
+    assert.equal(payload.periodEnd, "2026-08-02T10:00:00.000Z");
+    assert.equal(payload.periodStart, "2026-07-26T10:00:00.000Z");
+  });
+
+  it("сбой продаж не роняет статус (продажи — второстепенны), дописывается в ошибку", async () => {
+    const { core, calls } = stubCore();
+    const connector: VendingConnector = {
+      login: async () => {},
+      listMachines: async () => [{ serial: "AH", alias: "AH" }],
+      getSlots: async () => [slot("31", "Montella", 6, 2)],
+      getProductSales: async () => {
+        throw new Error("продажи недоступны");
+      },
+      getMachineSales: async () => [],
+    };
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+    assert.equal(res.status, "success"); // планограмма снята — статус успешен
+    assert.equal(res.productSales, 0);
+    assert.equal(calls.sales.length, 0);
+    assert.match(String((calls.finishes[0] as { error?: string }).error), /продажи AH/);
   });
 
   it("частичный сбой: один автомат без слотов → partial, остальные всё равно в базе", async () => {

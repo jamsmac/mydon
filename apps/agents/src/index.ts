@@ -335,7 +335,7 @@ async function main(): Promise<void> {
           try {
             const r = await runOurvendSync(core, vendingConfig);
             console.log(
-              `[ourvend:sync] ${r.status} — автоматов ${r.machinesOk}/${r.machinesTotal}, слотов ${r.slots}, ${r.durationMs} мс` +
+              `[ourvend:sync] ${r.status} — автоматов ${r.machinesOk}/${r.machinesTotal}, слотов ${r.slots}, продаж ${r.productSales}, ${r.durationMs} мс` +
                 (r.error ? ` — ${r.error}` : ""),
             );
           } catch (err) {

@@ -1,4 +1,4 @@
-import { OurvendConnector, type RawSlot, type VendingConnector } from "@mydon/connectors";
+import { OurvendConnector, sumProductSales, type RawSlot, type VendingConnector } from "@mydon/connectors";
 
 /**
  * ourvend:sync — коллектор вендинга (ТЗ Фаза 1, планировщик сбора).
@@ -26,11 +26,21 @@ export interface SyncCoreClient {
     capturedAt?: string;
     machines: { serial: string; alias?: string; slots: { coilId: string; product: string; capacity: number; quantity: number }[] }[];
   }): Promise<{ machines: number; slots: number }>;
+  ingestVendingSales(payload: {
+    capturedAt?: string;
+    periodStart: string;
+    periodEnd: string;
+    productSales: { serial: string; product: string; quantity: number }[];
+    machineSales: { serial: string; totalAmount: number; totalCount: number }[];
+  }): Promise<{ productRows: number; machineRows: number }>;
   finishVendingSync(
     id: string,
     input: { status: "success" | "partial" | "failed"; machinesTotal: number; machinesOk: number; durationMs: number; error?: string },
   ): Promise<{ ok: boolean }>;
 }
+
+/** Окно сбора продаж, суток (по умолчанию 7 — под §5.6). */
+const SALES_WINDOW_DAYS = 7;
 
 export interface OurvendSyncConfig {
   account: string;
@@ -44,6 +54,8 @@ export interface SyncResult {
   machinesTotal: number;
   machinesOk: number;
   slots: number;
+  /** Сколько строк продаж по товарам собрано (0, если продажи не собирались). */
+  productSales: number;
   durationMs: number;
   error?: string;
 }
@@ -107,10 +119,11 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
     await connector.login();
     machines = await connector.listMachines(config.groupId);
   } catch (err) {
-    return finish({ status: "failed", machinesTotal: 0, machinesOk: 0, slots: 0, error: errText(err) });
+    return finish({ status: "failed", machinesTotal: 0, machinesOk: 0, slots: 0, productSales: 0, error: errText(err) });
   }
 
-  const capturedAt = now().toISOString();
+  const nowDate = now();
+  const capturedAt = nowDate.toISOString();
   const collected: { serial: string; alias?: string; slots: { coilId: string; product: string; capacity: number; quantity: number }[] }[] = [];
   const failures: string[] = [];
   for (const m of machines) {
@@ -129,15 +142,59 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
       slots = res.slots;
     } catch (err) {
       // Приём не удался — весь собранный проход считаем провалом.
-      return finish({ status: "failed", machinesTotal: machines.length, machinesOk: 0, slots: 0, error: errText(err) });
+      return finish({ status: "failed", machinesTotal: machines.length, machinesOk: 0, slots: 0, productSales: 0, error: errText(err) });
+    }
+  }
+
+  // Продажи за окно (§5.6) — второстепенный артефакт: собираем «как получится»
+  // по успешно снятым автоматам. Сбой продаж НЕ меняет статус (он про
+  // планограмму) — лишь дописывается в текст ошибки.
+  const saleErrors: string[] = [];
+  let productSalesRows = 0;
+  const collectedSerials = collected.map((c) => c.serial);
+  if (collectedSerials.length > 0) {
+    const from = new Date(nowDate.getTime() - SALES_WINDOW_DAYS * 86_400_000);
+    const productSales: { serial: string; product: string; quantity: number }[] = [];
+    for (const serial of collectedSerials) {
+      try {
+        const raw = await connector.getProductSales(serial, from, nowDate);
+        for (const [product, quantity] of sumProductSales(raw)) productSales.push({ serial, product, quantity });
+      } catch (err) {
+        saleErrors.push(`продажи ${serial}: ${errText(err)}`);
+      }
+    }
+    let machineSales: { serial: string; totalAmount: number; totalCount: number }[] = [];
+    try {
+      const raw = await connector.getMachineSales(config.groupId, from, nowDate);
+      machineSales = raw.map((r) => ({ serial: r.serial, totalAmount: r.totalAmount, totalCount: r.totalCount }));
+    } catch (err) {
+      saleErrors.push(`продажи автоматов: ${errText(err)}`);
+    }
+    if (productSales.length > 0 || machineSales.length > 0) {
+      try {
+        const res = await core.ingestVendingSales({
+          capturedAt,
+          periodStart: from.toISOString(),
+          periodEnd: capturedAt,
+          productSales,
+          machineSales,
+        });
+        productSalesRows = res.productRows;
+      } catch (err) {
+        saleErrors.push(`приём продаж: ${errText(err)}`);
+      }
     }
   }
 
   const machinesOk = collected.length;
   const status: SyncResult["status"] =
     failures.length === 0 ? "success" : machinesOk > 0 ? "partial" : "failed";
-  const error = failures.length ? `Автоматы без слотов: ${failures.slice(0, 10).join("; ")}` : undefined;
-  return finish({ status, machinesTotal: machines.length, machinesOk, slots, ...(error ? { error } : {}) });
+  const errParts = [
+    ...(failures.length ? [`Автоматы без слотов: ${failures.slice(0, 10).join("; ")}`] : []),
+    ...(saleErrors.length ? [saleErrors.slice(0, 10).join("; ")] : []),
+  ];
+  const error = errParts.length ? errParts.join(" | ") : undefined;
+  return finish({ status, machinesTotal: machines.length, machinesOk, slots, productSales: productSalesRows, ...(error ? { error } : {}) });
 }
 
 function errText(err: unknown): string {

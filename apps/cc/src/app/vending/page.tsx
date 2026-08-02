@@ -3,6 +3,7 @@ import {
   CoreUnavailable,
   type VendingMachine,
   type VendingNeed,
+  type VendingRunout,
   type VendingSyncRun,
 } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
@@ -54,12 +55,16 @@ export default async function VendingPage() {
   let machines: VendingMachine[] = [];
   let needs: VendingNeed[] = [];
   let syncRuns: VendingSyncRun[] = [];
+  let critical: VendingRunout[] = [];
   try {
-    [machines, needs, syncRuns] = await Promise.all([
+    let forecast: { critical: VendingRunout[] };
+    [machines, needs, forecast, syncRuns] = await Promise.all([
       core.vendingMachines(),
       core.vendingDeficit(),
+      core.vendingForecast(),
       core.vendingSyncRuns(),
     ]);
+    critical = forecast.critical;
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
@@ -96,6 +101,27 @@ export default async function VendingPage() {
         </p>
         {syncLine && <p className="muted">{syncLine}</p>}
       </div>
+
+      {critical.length > 0 && (
+        <>
+          <div className="section-title">Скоро кончится</div>
+          <div className="rows">
+            {critical.map((r) => (
+              <div className="row" key={r.product}>
+                <div className="t">
+                  <b>{r.product}</b>
+                  <small>
+                    в автоматах {r.inMachines.toLocaleString("ru-RU")} · расход {r.daily.toFixed(1)}/день
+                  </small>
+                </div>
+                <span className={`pill ${r.daysLeft !== null && r.daysLeft <= 1 ? "bad" : ""}`}>
+                  {r.daysLeft === null ? "—" : `${r.daysLeft.toFixed(1)} дн`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="section-title">Автоматы</div>
       <div className="rows">
