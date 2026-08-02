@@ -32,6 +32,8 @@ export interface AgentDefinition {
   webSources?: WebSource[];
   /** Навыки, которые ВСЕГДА идут через согласование (паспорт: break_glass). */
   breakGlass?: string[];
+  /** Публичные Telegram-каналы идей для чтения (паспорт: idea_channels). */
+  ideaChannels?: string[];
   dir: string;
 }
 
@@ -92,6 +94,10 @@ export function loadAgents(agentsDir: string): {
         ? (raw.break_glass as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
         : [];
 
+      const ideaChannels: string[] = Array.isArray(raw.idea_channels)
+        ? (raw.idea_channels as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+        : [];
+
       agents.push({
         name: typeof raw.name === "string" ? raw.name : name,
         business: typeof raw.business === "string" ? raw.business : "shared",
@@ -104,6 +110,7 @@ export function loadAgents(agentsDir: string): {
         ...(budget?.on_exceeded !== undefined ? { budgetOnExceeded: asBudgetStrategy(budget.on_exceeded) } : {}),
         ...(webSources.length ? { webSources } : {}),
         ...(breakGlass.length ? { breakGlass } : {}),
+        ...(ideaChannels.length ? { ideaChannels } : {}),
         dir,
       });
     } catch (err) {

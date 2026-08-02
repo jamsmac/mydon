@@ -68,3 +68,4 @@ export * from "./cowork";
 
 // Чтение страниц сайтов — источник новых данных (решение владельца 2026-07-28).
 export * from "./web";
+export * from "./telegram";

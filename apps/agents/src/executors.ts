@@ -88,6 +88,36 @@ const persistMorningDigest: Executor = async (agent, proposal, core) => {
  * Первый исполнитель — `morning-digest`: сохранить сводку в заметку (тир T0, без
  * денег и внешних сообщений). Это витрина контракта, а не разрешение на риск.
  */
+/**
+ * Ингестор идей: сохранить дайджест из Telegram-каналов в заметку Core.
+ *
+ * Тот же контракт, что у morning-digest: заголовок по ташкентскому дню (upsert —
+ * без дублей), тело из фактов предложения, подтверждение перечиткой. Так идеи из
+ * канала владельца КОПЯТСЯ в реестр знаний, а не только мелькают в согласовании.
+ */
+const persistIdeas: Executor = async (agent, proposal, core) => {
+  const title = `Идеи из каналов · ${tashkentDate()}`;
+  const top = Array.isArray(proposal.facts.top) ? (proposal.facts.top as { title?: unknown; links?: unknown }[]) : [];
+  const lines = top.map((t) => {
+    const links = Array.isArray(t.links) ? (t.links as unknown[]).map(String) : [];
+    return `- ${String(t.title ?? "")}${links.length ? ` (${links.join(", ")})` : ""}`;
+  });
+  const body =
+    `${proposal.action}\n\n` +
+    `${lines.join("\n") || "- (постов нет)"}\n\n` +
+    `Сохранил агент ${agent.name}. Запись для владельца, не сообщение наружу.`;
+
+  await core.createNote({ title, body, tags: ["идея", "канал", agent.name] });
+
+  const found = await core.findNotes(title);
+  const saved = found.find((n) => n.title === title);
+  if (saved && saved.body === body) {
+    return { ok: true, detail: `дайджест идей сохранён в заметку «${title}» и подтверждён перечиткой` };
+  }
+  return { ok: false, detail: "заметку идей не удалось подтвердить перечиткой — не считаю сделанным" };
+};
+
 export const EXECUTORS: Record<string, Executor> = {
   "morning-digest": persistMorningDigest,
+  "scan-ideas": persistIdeas,
 };
