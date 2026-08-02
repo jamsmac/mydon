@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable } from "@nestjs/common";
 import { systemConfig } from "@mydon/db";
 import { sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -35,8 +35,10 @@ export class SystemService {
    * обновлённый список действующих значений.
    */
   async set(key: string, value: string, updatedBy?: string): Promise<EffectiveItem[]> {
+    // BadRequestException — не голый Error: иначе ошибка валидации пользователя
+    // уходила клиенту как 500, а не 400 (найдено внешним аудитом, P2).
     const err = validateConfig(key, value);
-    if (err) throw new Error(err);
+    if (err) throw new BadRequestException(err);
 
     const trimmed = value.trim();
     if (trimmed === "") {

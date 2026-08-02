@@ -77,6 +77,17 @@ export function todayLocal(now = new Date()): string {
 }
 
 /**
+ * Граница «N календарных дат назад, включая сегодня» — today−(N−1), не
+ * today−N: иначе `>=` этой границы захватывает N+1 дату вместо N (найдено
+ * внешним аудитом, P2: «30 дней» на деле считали 31 дату).
+ */
+export function daysAgoLocal(days: number, now = new Date()): string {
+  const d = new Date(now);
+  d.setDate(d.getDate() - (days - 1));
+  return todayLocal(d);
+}
+
+/**
  * Продажи автоматов (этап 1 плана миграции).
  *
  * Источник — mydon-stock: он уже сам забирает дневные сводки из OurVend.
@@ -222,8 +233,7 @@ export class SalesService implements OnModuleInit {
     const y = new Date();
     y.setDate(y.getDate() - 1);
     const yesterday = todayLocal(y);
-    const d30 = new Date();
-    d30.setDate(d30.getDate() - 30);
+    const days30Since = daysAgoLocal(30);
 
     const [row] = await this.db
       .select({
@@ -231,8 +241,8 @@ export class SalesService implements OnModuleInit {
         tAmt: sql<string>`coalesce(sum(${sale.amount}) filter (where ${sale.dt} = ${today}), 0)`,
         yQty: sql<string>`coalesce(sum(${sale.qty}) filter (where ${sale.dt} = ${yesterday}), 0)`,
         yAmt: sql<string>`coalesce(sum(${sale.amount}) filter (where ${sale.dt} = ${yesterday}), 0)`,
-        mQty: sql<string>`coalesce(sum(${sale.qty}) filter (where ${sale.dt} >= ${todayLocal(d30)}), 0)`,
-        mAmt: sql<string>`coalesce(sum(${sale.amount}) filter (where ${sale.dt} >= ${todayLocal(d30)}), 0)`,
+        mQty: sql<string>`coalesce(sum(${sale.qty}) filter (where ${sale.dt} >= ${days30Since}), 0)`,
+        mAmt: sql<string>`coalesce(sum(${sale.amount}) filter (where ${sale.dt} >= ${days30Since}), 0)`,
         last: sql<string | null>`max(${sale.dt})::text`,
       })
       .from(sale);
@@ -251,13 +261,12 @@ export class SalesService implements OnModuleInit {
     days = 7,
     limit = 300,
   ): Promise<(SaleRow & { machineName: string | null; point: string | null })[]> {
-    const since = new Date();
-    since.setDate(since.getDate() - days);
+    const since = daysAgoLocal(days);
     const rows = await this.db
       .select({ row: sale, machineName: entity.name, machineAttrs: entity.attrs })
       .from(sale)
       .leftJoin(entity, eq(entity.id, sale.machineId))
-      .where(gte(sale.dt, todayLocal(since)))
+      .where(gte(sale.dt, since))
       .orderBy(desc(sale.dt), desc(sale.amount))
       .limit(limit);
     return rows.map((r) => {
