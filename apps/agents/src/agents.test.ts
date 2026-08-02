@@ -538,3 +538,54 @@ describe("Дельта-память: не повторяем то же само�
     assert.equal(res.outcome, "approval_requested");
   });
 });
+
+describe("Break-glass — навык всегда через согласование", () => {
+  const base: AgentDefinition = {
+    name: "bg", business: "globerent", status: "active", autonomyDefault: "T4",
+    schedule: [], skills: ["watch-receivables"], breakGlass: ["watch-receivables"], dir: "/tmp",
+  };
+  const OVERDUE = {
+    domain: "globerent", totals: [],
+    overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+    overdueTotal: 1, overdueTruncated: false,
+  };
+  function core() {
+    const calls: string[] = [];
+    return {
+      calls,
+      client: {
+        recordEvent: async () => { calls.push("event"); },
+        requestApproval: async () => { calls.push("approval"); return { id: "a1" }; },
+        obligations: async () => OVERDUE,
+        countAgentActions: async () => 0,
+        recallMemory: async () => null,
+        rememberMemory: async () => undefined,
+      } as never,
+    };
+  }
+
+  it("даже с исполнителем и разрешающим порогом — идёт на согласование, не исполняется", async () => {
+    EXECUTORS["watch-receivables"] = async () => ({ ok: true, detail: "не должно вызваться" });
+    try {
+      const { client, calls } = core();
+      // Порог T4 разрешил бы исполнение, но навык в break-glass.
+      const res = await runSkill(base, "watch-receivables", client, "T4");
+      assert.equal(res.outcome, "approval_requested");
+      assert.match(res.reason, /break-glass/);
+      assert.deepEqual(calls, ["event", "approval", "event"]);
+    } finally {
+      delete EXECUTORS["watch-receivables"];
+    }
+  });
+
+  it("без break-glass тот же навык исполнился бы", async () => {
+    EXECUTORS["watch-receivables"] = async () => ({ ok: true, detail: "исполнено" });
+    try {
+      const { client } = core();
+      const res = await runSkill({ ...base, breakGlass: [] }, "watch-receivables", client, "T4");
+      assert.equal(res.outcome, "executed");
+    } finally {
+      delete EXECUTORS["watch-receivables"];
+    }
+  });
+});
