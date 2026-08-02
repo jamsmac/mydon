@@ -1,4 +1,10 @@
-import { core, CoreUnavailable, type VendingMachine, type VendingNeed } from "../../lib/core";
+import {
+  core,
+  CoreUnavailable,
+  type VendingMachine,
+  type VendingNeed,
+  type VendingSyncRun,
+} from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
 
 export const dynamic = "force-dynamic";
@@ -8,6 +14,28 @@ const STATUS_LABEL: Record<VendingMachine["status"], string> = {
   no_slots: "слоты не назначены",
   uncalibrated: "нужен Audit (199)",
 };
+
+const SYNC_LABEL: Record<VendingSyncRun["status"], string> = {
+  running: "идёт сбор",
+  success: "успешно",
+  partial: "частично",
+  failed: "сбой",
+};
+
+/** Строка «когда последний раз собирали» по журналу сбора Ourvend. */
+function lastSyncLine(runs: VendingSyncRun[]): string | null {
+  const last = runs[0];
+  if (!last) return null;
+  const when = new Date(last.finishedAt ?? last.startedAt).toLocaleString("ru-RU", {
+    timeZone: "Asia/Tashkent",
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const tail = last.status === "success" ? "" : ` · автоматов ${last.machinesOk}/${last.machinesTotal}`;
+  return `Сбор: ${when} — ${SYNC_LABEL[last.status]}${tail}`;
+}
 
 /** Цвет автомата по дефициту (§5.2): ≥100 красный, ≥50 жёлтый, иначе зелёный. */
 function color(deficit: number): "bad" | "warn" | "ok" {
@@ -25,11 +53,17 @@ function color(deficit: number): "bad" | "warn" | "ok" {
 export default async function VendingPage() {
   let machines: VendingMachine[] = [];
   let needs: VendingNeed[] = [];
+  let syncRuns: VendingSyncRun[] = [];
   try {
-    [machines, needs] = await Promise.all([core.vendingMachines(), core.vendingDeficit()]);
+    [machines, needs, syncRuns] = await Promise.all([
+      core.vendingMachines(),
+      core.vendingDeficit(),
+      core.vendingSyncRuns(),
+    ]);
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
+  const syncLine = lastSyncLine(syncRuns);
 
   const ok = machines.filter((m) => m.status === "ok");
   const totalDeficit = ok.reduce((a, m) => a + m.deficit, 0);
@@ -42,7 +76,7 @@ export default async function VendingPage() {
       <>
         <div className="page-head">
           <h1>Автоматы и дефицит</h1>
-          <p>Сбор ещё не приносил данных.</p>
+          <p>{syncLine ?? "Сбор ещё не приносил данных."}</p>
         </div>
         <div className="empty">
           <b>Пока пусто</b>
@@ -60,6 +94,7 @@ export default async function VendingPage() {
           К пополнению: <b>{totalDeficit.toLocaleString("ru-RU")}</b> ед · заполненность {fillRate}% · автоматов в
           расчёте {ok.length} из {machines.length}
         </p>
+        {syncLine && <p className="muted">{syncLine}</p>}
       </div>
 
       <div className="section-title">Автоматы</div>

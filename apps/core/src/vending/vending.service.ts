@@ -1,5 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { machineSlot, slotSnapshot } from "@mydon/db";
+import { desc, eq } from "drizzle-orm";
+import { machineSlot, slotSnapshot, vendingSyncRun } from "@mydon/db";
 import {
   MAX_CAPACITY,
   machineDeficit,
@@ -45,6 +46,26 @@ export interface MachineDeficitRow {
   filled: number;
   fillRate: number;
   slots: number;
+}
+
+/** Итог запуска сбора, который сообщает коллектор при завершении. */
+export interface SyncFinishInput {
+  status: "success" | "partial" | "failed";
+  machinesTotal: number;
+  machinesOk: number;
+  durationMs: number;
+  error?: string;
+}
+
+export interface SyncRunRow {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: "running" | "success" | "partial" | "failed";
+  machinesTotal: number;
+  machinesOk: number;
+  error: string | null;
+  durationMs: number | null;
 }
 
 /** Порядок статусов в отчёте: ok выше, некалиброванные/без слотов — в конце. */
@@ -132,5 +153,52 @@ export class VendingService {
     const needs = needByProduct(ok);
     needs.sort((a, b) => b.total - a.total);
     return needs.map((n) => ({ product: n.product, total: n.total, perMachine: n.perMachine }));
+  }
+
+  // ── Журнал сбора Ourvend ──────────────────────────────────────────────────
+  // Коллектор живёт в слое агентов, а факт запуска и итог фиксируются в Core:
+  // так «когда последний раз собирали и удачно ли» видно из панели, а не только
+  // в логах контейнера. Пара start/finish, а не одна запись, чтобы завис сбор
+  // было видно как «running» без finished_at.
+
+  /** Открыть запись сбора (status=running). Возвращает её id. */
+  async startSyncRun(): Promise<{ id: string }> {
+    const [row] = await this.db.insert(vendingSyncRun).values({}).returning({ id: vendingSyncRun.id });
+    return { id: row.id };
+  }
+
+  /** Закрыть запись сбора итогом. Молча игнорирует неизвестный id. */
+  async finishSyncRun(id: string, input: SyncFinishInput): Promise<{ ok: boolean }> {
+    await this.db
+      .update(vendingSyncRun)
+      .set({
+        finishedAt: new Date(),
+        status: input.status,
+        machinesTotal: input.machinesTotal,
+        machinesOk: input.machinesOk,
+        durationMs: input.durationMs,
+        error: input.error ?? null,
+      })
+      .where(eq(vendingSyncRun.id, id));
+    return { ok: true };
+  }
+
+  /** Последние запуски сбора (для панели: когда собирали и с каким итогом). */
+  async syncRuns(limit = 10): Promise<SyncRunRow[]> {
+    const rows = await this.db
+      .select()
+      .from(vendingSyncRun)
+      .orderBy(desc(vendingSyncRun.startedAt))
+      .limit(Math.min(Math.max(limit, 1), 50));
+    return rows.map((r) => ({
+      id: r.id,
+      startedAt: r.startedAt.toISOString(),
+      finishedAt: r.finishedAt ? r.finishedAt.toISOString() : null,
+      status: r.status,
+      machinesTotal: r.machinesTotal,
+      machinesOk: r.machinesOk,
+      error: r.error,
+      durationMs: r.durationMs,
+    }));
   }
 }
