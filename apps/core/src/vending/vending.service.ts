@@ -1,6 +1,8 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray, sql } from "drizzle-orm";
 import {
+  auditLog,
+  event,
   machineSale,
   machineSlot,
   productSale,
@@ -151,6 +153,19 @@ export interface PurchaseOrderRow {
   costRounded: number;
   createdBy: string | null;
   createdAt: string;
+}
+
+/** Итог приёмки накладной на склад. */
+export interface ReceiveOrderResult {
+  received: boolean;
+  /** id принятой накладной (когда received). */
+  orderId?: string;
+  /** Сколько позиций легло на склад. */
+  replenished: number;
+  /** Всего единиц принято (Σ order по позициям). */
+  units: number;
+  /** Почему не приняли (когда !received). */
+  reason?: string;
 }
 
 /** Итог отправки закупа на утверждение. */
@@ -476,6 +491,75 @@ export class VendingService {
       createdBy: r.createdBy,
       createdAt: r.createdAt.toISOString(),
     }));
+  }
+
+  /**
+   * Приёмка накладной на склад (§5.7, замыкание цикла): товар физически
+   * приехал — увеличиваем остаток склада на заказанное количество, накладная
+   * переходит в `received`. Так следующий закуп учтёт приход и не закажет
+   * повторно. Без orderId берём последнюю неполученную (approved/ordered).
+   *
+   * Пополнение — приращение (в отличие от инвентаризации-перезаписи §5.4):
+   * это приход, а не пересчёт. Всё одной транзакцией: статус и остаток должны
+   * меняться вместе, иначе «принято», но склад пуст (или наоборот).
+   */
+  async receiveOrder(orderId?: string, receivedBy = "owner"): Promise<ReceiveOrderResult> {
+    return this.db.transaction(async (tx) => {
+      const [order] = orderId
+        ? await tx.select().from(vendingPurchaseOrder).where(eq(vendingPurchaseOrder.id, orderId)).limit(1)
+        : await tx
+            .select()
+            .from(vendingPurchaseOrder)
+            .where(inArray(vendingPurchaseOrder.status, ["approved", "ordered"]))
+            .orderBy(desc(vendingPurchaseOrder.createdAt))
+            .limit(1);
+
+      if (!order) {
+        return { received: false, replenished: 0, units: 0, reason: "Непринятых накладных нет." };
+      }
+      if (order.status === "received") {
+        return { received: false, replenished: 0, units: 0, reason: "Эта накладная уже принята." };
+      }
+
+      const now = new Date();
+      await tx.update(vendingPurchaseOrder).set({ status: "received" }).where(eq(vendingPurchaseOrder.id, order.id));
+
+      // Приход по позициям: остаток += order (приращение, не перезапись).
+      const positions = Array.isArray(order.positions) ? order.positions : [];
+      let replenished = 0;
+      let units = 0;
+      for (const p of positions) {
+        const pos = p as { product?: unknown; order?: unknown };
+        const product = typeof pos.product === "string" ? pos.product.trim() : "";
+        const qty = typeof pos.order === "number" && Number.isFinite(pos.order) ? Math.trunc(pos.order) : 0;
+        if (!product || qty <= 0) continue;
+        await tx
+          .insert(vendingStock)
+          .values({ productName: product, quantity: qty, countedAt: now, updatedAt: now })
+          .onConflictDoUpdate({
+            target: [vendingStock.productName],
+            set: { quantity: sql`${vendingStock.quantity} + ${qty}`, countedAt: now, updatedAt: now },
+          });
+        replenished += 1;
+        units += qty;
+      }
+
+      await tx.insert(event).values({
+        source: "owner",
+        type: "vending.purchase_order.received",
+        payload: { orderId: order.id, replenished, units },
+      });
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: receivedBy,
+        action: "vending.purchase_order.receive",
+        target: order.id,
+        before: order,
+        after: { ...order, status: "received" },
+      });
+
+      return { received: true, orderId: order.id, replenished, units };
+    });
   }
 
   // ── Журнал сбора Ourvend ──────────────────────────────────────────────────
