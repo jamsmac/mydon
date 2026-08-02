@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { VENDING_PRICELIST, packOf } from "./seed-vending";
+import { normalizeProductName } from "@mydon/shared";
+import { VENDING_ALIASES, VENDING_PRICELIST, packOf } from "./seed-vending";
 
 describe("Прайс вендинга (Приложение А)", () => {
   it("имена уникальны, цены положительны", () => {
@@ -22,5 +23,26 @@ describe("Прайс вендинга (Приложение А)", () => {
     assert.equal(by.get("СуперКонтик Шоколадный вкус 100gr")?.price, 5000);
     assert.equal(by.get("CocaCola Classic CAN 250ml")?.category, "drink");
     assert.equal(by.get("Snickers 50gr")?.category, "snack");
+  });
+});
+
+describe("Алиасы вендинга (реальные листы остатков)", () => {
+  const names = new Set(VENDING_PRICELIST.map((p) => p.name));
+
+  it("каждый алиас указывает на существующий товар прайса", () => {
+    const orphan = VENDING_ALIASES.filter((a) => !names.has(a.product)).map((a) => `${a.alias} → ${a.product}`);
+    assert.deepEqual(orphan, [], `алиасы без товара в прайсе: ${orphan.join("; ")}`);
+  });
+
+  it("нет двух алиасов с одним нормализованным ключом на разные товары", () => {
+    const seen = new Map<string, string>();
+    const clash: string[] = [];
+    for (const a of VENDING_ALIASES) {
+      const key = normalizeProductName(a.alias);
+      const prev = seen.get(key);
+      if (prev && prev !== a.product) clash.push(`${a.alias}: ${prev} vs ${a.product}`);
+      seen.set(key, a.product);
+    }
+    assert.deepEqual(clash, [], `конфликт алиасов: ${clash.join("; ")}`);
   });
 });

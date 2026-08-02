@@ -24,6 +24,17 @@ export function packForCategory(category: Category): number {
   return category === "drink" ? PACK_DRINK : PACK_SNACK;
 }
 
+/**
+ * Ключ имени товара для сопоставления с алиасами. Рукописные листы и Ourvend
+ * пишут одно и то же по-разному («Coca Cola cl», «Coca cola classic can 0.25»):
+ * приводим к нижнему регистру, сводим пробелы и ё→е, чтобы регистр и лишние
+ * пробелы не мешали точному соответствию. Разные формулировки покрываются
+ * самими алиасами — здесь только нормализация, не нечёткое сравнение.
+ */
+export function normalizeProductName(name: string): string {
+  return name.trim().toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ");
+}
+
 // ── §5.1 Валидность слота и статус автомата ─────────────────────────────────
 
 export interface Slot {

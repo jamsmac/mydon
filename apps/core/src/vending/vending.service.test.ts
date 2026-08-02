@@ -29,8 +29,8 @@ function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[], stock: 
   } as never;
 }
 
-/** Стаб БД для ingest: копит вставки. */
-function writeDb() {
+/** Стаб БД для ingest: копит вставки. `aliases`/`products` кормят aliasMap(). */
+function writeDb(aliases: unknown[] = [], products: unknown[] = []) {
   const inserts: { table: string; values: unknown }[] = [];
   const tx = {
     insert: (table: { [Symbol.toStringTag]?: string }) => ({
@@ -41,7 +41,12 @@ function writeDb() {
       },
     }),
   };
-  const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+  // aliasMap() читает vending_alias затем vending_product — различаем по счётчику.
+  let call = 0;
+  const db = {
+    select: () => ({ from: async () => (call++ === 0 ? aliases : products) }),
+    transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+  } as never;
   return { db, inserts };
 }
 function tableName(t: unknown): string {
@@ -341,6 +346,25 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     const v = inserts[0]!.values as { productName: string; quantity: number };
     assert.equal(v.productName, "Montella");
     assert.equal(v.quantity, 24);
+  });
+
+  it("имя-вариант приводится к канону через алиас (регистр не важен)", async () => {
+    const { db, inserts } = writeDb(
+      [{ productId: "p1", alias: "Montella" }],
+      [{ id: "p1", name: "Montella Вода минеральная 330ml" }],
+    );
+    const svc = new VendingService(db);
+    await svc.ingestStock({ items: [{ product: "montella", quantity: 7 }] });
+    const v = inserts[0]!.values as { productName: string };
+    assert.equal(v.productName, "Montella Вода минеральная 330ml");
+  });
+
+  it("неизвестное имя (нет алиаса) остаётся как есть — на разбор позже", async () => {
+    const { db, inserts } = writeDb([], []);
+    const svc = new VendingService(db);
+    await svc.ingestStock({ items: [{ product: "Новый Товар", quantity: 3 }] });
+    const v = inserts[0]!.values as { productName: string };
+    assert.equal(v.productName, "Новый Товар");
   });
 });
 

@@ -7,6 +7,7 @@ import {
   machineSlot,
   productSale,
   slotSnapshot,
+  vendingAlias,
   vendingProduct,
   vendingPurchaseOrder,
   vendingStock,
@@ -17,6 +18,7 @@ import {
   computePurchase,
   machineDeficit,
   needByProduct,
+  normalizeProductName,
   planogramStatus,
   runoutForecast,
   slotValid,
@@ -355,13 +357,44 @@ export class VendingService {
   // (upsert по имени), как инвентаризация слотов автомата. Так закуп вычитает
   // реальный склад, а не «весь дефицит».
 
-  /** Принять инвентаризацию склада: перезапись остатка по каждому товару. */
+  /**
+   * Карта алиасов: нормализованное имя-вариант → каноническое имя товара.
+   * Рукописные листы и заметки пишут товар по-разному («Montella», «18+»,
+   * «Moxito клуб»); по этой карте имя приводится к канону из прайса, иначе
+   * остаток лёг бы отдельной «неопознанной» строкой мимо расчёта закупа.
+   */
+  private async aliasMap(): Promise<Map<string, string>> {
+    const [aliases, products] = await Promise.all([
+      this.db.select().from(vendingAlias),
+      this.db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct),
+    ]);
+    const nameById = new Map(products.map((p) => [p.id, p.name]));
+    const map = new Map<string, string>();
+    for (const a of aliases) {
+      const canonical = nameById.get(a.productId);
+      if (canonical) map.set(normalizeProductName(a.alias), canonical);
+    }
+    return map;
+  }
+
+  /** Привести имя товара к канону через алиасы; неизвестное — как есть. */
+  private resolveProduct(name: string, aliases: Map<string, string>): string {
+    return aliases.get(normalizeProductName(name)) ?? name;
+  }
+
+  /**
+   * Принять инвентаризацию склада: перезапись остатка по каждому товару. Имена
+   * приводятся к канону через алиасы — «склад Montella 24» ложится на
+   * «Montella Вода минеральная 330ml», а не отдельной строкой мимо закупа.
+   */
   async ingestStock(payload: IngestStockPayload): Promise<{ items: number }> {
     const countedAt = payload.countedAt ? new Date(payload.countedAt) : new Date();
+    const aliases = await this.aliasMap();
     await this.db.transaction(async (tx) => {
       for (const it of payload.items) {
-        const product = it.product.trim();
-        if (!product) continue;
+        const raw = it.product.trim();
+        if (!raw) continue;
+        const product = this.resolveProduct(raw, aliases);
         await tx
           .insert(vendingStock)
           .values({ productName: product, quantity: it.quantity, countedAt, updatedAt: countedAt })
