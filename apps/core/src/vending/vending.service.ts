@@ -1,6 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { desc, eq } from "drizzle-orm";
-import { machineSale, machineSlot, productSale, slotSnapshot, vendingProduct, vendingSyncRun } from "@mydon/db";
+import { machineSale, machineSlot, productSale, slotSnapshot, vendingProduct, vendingStock, vendingSyncRun } from "@mydon/db";
 import {
   MAX_CAPACITY,
   computePurchase,
@@ -101,6 +101,24 @@ export interface IngestSalesPayload {
 /** Порядок статусов в отчёте: ok выше, некалиброванные/без слотов — в конце. */
 function statusRank(s: PlanogramStatus): number {
   return s === "ok" ? 0 : 1;
+}
+
+/** Инвентаризация склада: остаток по товару на момент пересчёта (§5.4). */
+export interface IngestStockItemInput {
+  product: string;
+  quantity: number;
+}
+export interface IngestStockPayload {
+  /** Момент пересчёта (ISO). Пусто → сейчас. */
+  countedAt?: string;
+  items: IngestStockItemInput[];
+}
+
+/** Строка остатка склада для панели/отчётов. */
+export interface StockLevelRow {
+  product: string;
+  quantity: number;
+  countedAt: string;
 }
 
 @Injectable()
@@ -271,11 +289,52 @@ export class VendingService {
     return runoutForecast(input, criticalDays);
   }
 
+  // ── Склад: инвентаризация и остаток (§5.4) ────────────────────────────────
+  // Остаток — текущий баланс, не леджер: пересчёт перезаписывает строку товара
+  // (upsert по имени), как инвентаризация слотов автомата. Так закуп вычитает
+  // реальный склад, а не «весь дефицит».
+
+  /** Принять инвентаризацию склада: перезапись остатка по каждому товару. */
+  async ingestStock(payload: IngestStockPayload): Promise<{ items: number }> {
+    const countedAt = payload.countedAt ? new Date(payload.countedAt) : new Date();
+    await this.db.transaction(async (tx) => {
+      for (const it of payload.items) {
+        const product = it.product.trim();
+        if (!product) continue;
+        await tx
+          .insert(vendingStock)
+          .values({ productName: product, quantity: it.quantity, countedAt, updatedAt: countedAt })
+          .onConflictDoUpdate({
+            target: [vendingStock.productName],
+            set: { quantity: it.quantity, countedAt, updatedAt: countedAt },
+          });
+      }
+    });
+    return { items: payload.items.length };
+  }
+
+  /** Текущий остаток склада по товарам (для панели/отчётов). */
+  async stockLevels(): Promise<StockLevelRow[]> {
+    const rows = await this.db.select().from(vendingStock);
+    return rows
+      .map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt.toISOString() }))
+      .sort((a, b) => a.product.localeCompare(b.product, "ru"));
+  }
+
+  /** Остаток склада как карта товар → количество — для расчёта закупа. */
+  private async stockByProduct(): Promise<Map<string, number>> {
+    const rows = await this.db.select().from(vendingStock);
+    const out = new Map<string, number>();
+    for (const r of rows) out.set(r.productName, r.quantity);
+    return out;
+  }
+
   /**
-   * Сводный закуп (§5.4–5.5): потребность ok-автоматов − склад, округление до
-   * упаковок, суммы. Прайс и кратность — из `vending_product` (не из кода).
-   * Склад пока 0 — движок склада приходит Фазой 3; позиции без цены и без
-   * продаж калькулятор выносит отдельно и в денежные итоги не включает.
+   * Сводный закуп (§5.4–5.5): потребность ok-автоматов − остаток склада,
+   * округление до упаковок, суммы. Прайс и кратность — из `vending_product`
+   * (не из кода), остаток — из `vending_stock` (инвентаризация). Позиции без
+   * цены и без продаж калькулятор выносит отдельно и в денежные итоги не
+   * включает.
    */
   async purchase(): Promise<PurchaseSummary> {
     const byMachine = await this.slotsByMachine();
@@ -285,6 +344,7 @@ export class VendingService {
       .map(([machineId, slots]) => ({ machineId, slots }));
     const needs = needByProduct(ok);
     const soldByProduct = await this.latestSold7(okSerials);
+    const stockByProduct = await this.stockByProduct();
 
     // Прайс: только позиции с ценой попадают в карту — иначе калькулятор
     // пометит noPrice и выведет их на разбор менеджеру (§5.5).
@@ -298,7 +358,7 @@ export class VendingService {
       product: n.product,
       perMachine: n.perMachine,
       need: n.total,
-      stock: 0, // склад — Фаза 3; пока закупаем весь дефицит
+      stock: stockByProduct.get(n.product) ?? 0, // нет строки склада → 0 (закупаем весь дефицит)
       sold7: soldByProduct.get(n.product) ?? 0,
     }));
     return computePurchase(rows, prices);

@@ -148,6 +148,13 @@
       "when": 1785681385834,
       "tag": "0020_amusing_sentinels",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785692323593,
+      "tag": "0021_vending_stock",
+      "breakpoints": true
     }
   ]
 }

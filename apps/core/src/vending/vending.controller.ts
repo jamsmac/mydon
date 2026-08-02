@@ -88,6 +88,22 @@ export class IngestSalesDto {
   machineSales!: IngestMachineSaleDto[];
 }
 
+export class IngestStockItemDto {
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  product!: string;
+
+  @IsInt() @Min(0)
+  quantity!: number;
+}
+
+export class IngestStockDto {
+  @IsOptional() @IsISO8601()
+  countedAt?: string;
+
+  @IsArray() @ArrayMaxSize(5000) @ValidateNested({ each: true }) @Type(() => IngestStockItemDto)
+  items!: IngestStockItemDto[];
+}
+
 export class SyncFinishDto {
   @IsIn(["success", "partial", "failed"])
   status!: "success" | "partial" | "failed";
@@ -141,6 +157,18 @@ export class VendingController {
   @Get("purchase")
   purchase() {
     return this.vending.purchase();
+  }
+
+  // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────
+
+  @Post("stock")
+  ingestStock(@Body() dto: IngestStockDto) {
+    return this.vending.ingestStock(dto);
+  }
+
+  @Get("stock")
+  stock() {
+    return this.vending.stockLevels();
   }
 
   // ── Журнал сбора: коллектор открывает запуск, потом закрывает итогом ───────
