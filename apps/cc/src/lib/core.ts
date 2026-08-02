@@ -918,6 +918,8 @@ export const core = {
     send<Task>(`/tasks/${id}/quality`, "POST", { quality }),
   setTaskStatus: (id: string, input: Record<string, unknown>) =>
     send<Task>(`/tasks/${id}`, "PATCH", input),
+  editTask: (id: string, input: Record<string, unknown>) =>
+    send<Task>(`/tasks/${id}/edit`, "PATCH", input),
   addTaskComment: (id: string, input: Record<string, unknown>) =>
     send<TaskComment>(`/tasks/${id}/comments`, "POST", input),
 

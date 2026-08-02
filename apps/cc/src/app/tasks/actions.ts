@@ -124,6 +124,66 @@ export async function changeStatus(
   return { ok: true };
 }
 
+/**
+ * Правка полей задачи: переназначить исполнителя, приоритет, срок, заголовок,
+ * описание. Меняются только переданные поля. Исполнитель приходит строкой
+ * "human:<id>" | "agent:<name>" | "" (снять). Срок — словами (parseDue) или
+ * пусто (снять).
+ */
+export async function editTask(
+  id: string,
+  patch: {
+    title?: string;
+    description?: string;
+    owner?: string;
+    priority?: "low" | "normal" | "high" | "urgent";
+    due?: string;
+  },
+): Promise<ActionResult> {
+  const body: Record<string, unknown> = { actor: "owner" };
+
+  if (patch.title !== undefined) {
+    const t = patch.title.trim();
+    if (t.length < 2) return { ok: false, error: "Заголовок слишком короткий" };
+    body.title = t;
+  }
+  if (patch.description !== undefined) body.description = patch.description.trim();
+  if (patch.priority !== undefined) body.priority = patch.priority;
+
+  if (patch.owner !== undefined) {
+    const [kind, ...rest] = patch.owner.split(":");
+    if (patch.owner === "") {
+      body.ownerRef = ""; // снять исполнителя (человек по умолчанию)
+    } else if (kind === "human" || kind === "agent") {
+      body.ownerKind = kind;
+      body.ownerRef = rest.join(":");
+    } else {
+      return { ok: false, error: "Неверный исполнитель" };
+    }
+  }
+
+  if (patch.due !== undefined) {
+    const raw = patch.due.trim();
+    if (raw === "") {
+      body.due = ""; // снять срок
+    } else {
+      const d = parseDue(raw);
+      if (!d) return { ok: false, error: "Не понял срок — попробуй «завтра», «через 3 дня», дату" };
+      body.due = d.toISOString();
+    }
+  }
+
+  try {
+    await core.editTask(id, body);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/tasks");
+  revalidatePath(`/tasks/${id}`);
+  revalidatePath("/team");
+  return { ok: true };
+}
+
 export async function addComment(id: string, body: string): Promise<ActionResult> {
   const text = body.trim();
   if (text.length === 0) return { ok: false, error: "Пустой комментарий" };
