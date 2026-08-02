@@ -254,6 +254,44 @@ export class AgentsCoreClient {
     return { source: String(event.source ?? ""), skill, action: typeof p.action === "string" ? p.action : "" };
   }
 
+  // ── Сбор вендинга: коллектор Ourvend кладёт слоты и ведёт журнал запусков ──
+  // Коннектор дергает сам коллектор (слой агентов), а факты — планограмма и
+  // журнал сбора — живут в Core. Приём закрыт тем же service-token, что и
+  // остальные записи агентов.
+
+  /** Открыть запись запуска сбора (status=running). */
+  startVendingSync(): Promise<{ id: string }> {
+    return this.request<{ id: string }>("/vending/sync/start", { method: "POST", body: "{}" });
+  }
+
+  /** Закрыть запись сбора итогом. */
+  finishVendingSync(
+    id: string,
+    input: {
+      status: "success" | "partial" | "failed";
+      machinesTotal: number;
+      machinesOk: number;
+      durationMs: number;
+      error?: string;
+    },
+  ): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>(`/vending/sync/${id}/finish`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Отдать собранные слоты в Core (upsert планограммы + история). */
+  ingestVendingSlots(payload: {
+    capturedAt?: string;
+    machines: { serial: string; alias?: string; slots: { coilId: string; product: string; capacity: number; quantity: number }[] }[];
+  }): Promise<{ machines: number; slots: number }> {
+    return this.request<{ machines: number; slots: number }>("/vending/ingest", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }

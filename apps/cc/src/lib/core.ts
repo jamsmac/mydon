@@ -59,6 +59,18 @@ export interface VendingNeed {
   perMachine: Record<string, number>;
 }
 
+/** Запуск сбора Ourvend — когда собирали и с каким итогом. */
+export interface VendingSyncRun {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: "running" | "success" | "partial" | "failed";
+  machinesTotal: number;
+  machinesOk: number;
+  error: string | null;
+  durationMs: number | null;
+}
+
 /** Действующий глобальный тумблер системы (мозг/RAG/пауза/бюджет). */
 export interface SystemConfigItem {
   key: string;
@@ -960,6 +972,7 @@ export const core = {
   // ── Вендинг: автоматы и дефицит ──
   vendingMachines: () => get<VendingMachine[]>("/vending/machines"),
   vendingDeficit: () => get<VendingNeed[]>("/vending/deficit"),
+  vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),

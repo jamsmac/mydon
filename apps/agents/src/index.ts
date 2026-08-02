@@ -7,6 +7,7 @@ import { coachPosture } from "./coach";
 import { AgentsCoreClient } from "./core-client";
 import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
 import { autonomyThreshold } from "./policy";
+import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
 import { loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { desiredJobs, jobKey } from "./schedule";
@@ -320,6 +321,35 @@ async function main(): Promise<void> {
   ).unref();
 
   reconcileSchedules();
+
+  // Сбор вендинга (ourvend:sync): отдельное расписание, не привязанное к
+  // агентам-навыкам. Включается, когда заданы OURVEND_ACCOUNT/PASSWORD; иначе
+  // молчит (экран «Автоматы» покажет подсказку задать учётку). Часовой пояс —
+  // Ташкент, как и все cron. OURVEND_SYNC_CRON="off" выключает сбор явно.
+  const vendingConfig = ourvendConfigFromEnv();
+  const vendingCron = process.env.OURVEND_SYNC_CRON ?? "0 */3 * * *";
+  if (vendingConfig && vendingCron.toLowerCase() !== "off") {
+    try {
+      new Cron(vendingCron, { timezone: TZ, name: "ourvend:sync" }, () => {
+        void (async () => {
+          try {
+            const r = await runOurvendSync(core, vendingConfig);
+            console.log(
+              `[ourvend:sync] ${r.status} — автоматов ${r.machinesOk}/${r.machinesTotal}, слотов ${r.slots}, ${r.durationMs} мс` +
+                (r.error ? ` — ${r.error}` : ""),
+            );
+          } catch (err) {
+            console.error("[ourvend:sync] сбой:", err);
+          }
+        })();
+      });
+      console.log(`Сбор вендинга (ourvend:sync) включён: "${vendingCron}" (${TZ}).`);
+    } catch (err) {
+      console.warn(`Расписание сбора вендинга "${vendingCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
+    }
+  } else if (!vendingConfig) {
+    console.log("Сбор вендинга выключен: не заданы OURVEND_ACCOUNT/OURVEND_PASSWORD.");
+  }
 
   const taskEveryMs = Number(process.env.AGENT_TASK_INTERVAL_MS ?? 5 * 60_000);
   setInterval(() => {

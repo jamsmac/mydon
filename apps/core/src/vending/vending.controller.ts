@@ -1,7 +1,8 @@
-import { Body, Controller, Get, Post } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
+  IsIn,
   IsISO8601,
   IsInt,
   IsNotEmpty,
@@ -47,6 +48,23 @@ export class IngestPayloadDto {
   machines!: IngestMachineDto[];
 }
 
+export class SyncFinishDto {
+  @IsIn(["success", "partial", "failed"])
+  status!: "success" | "partial" | "failed";
+
+  @IsInt() @Min(0)
+  machinesTotal!: number;
+
+  @IsInt() @Min(0)
+  machinesOk!: number;
+
+  @IsInt() @Min(0)
+  durationMs!: number;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  error?: string;
+}
+
 /**
  * Вендинг: приём собранных данных и просмотр дефицита. Приём (POST) закрыт
  * общим ServiceTokenGuard — данные кладёт коллектор, не кто угодно.
@@ -68,5 +86,22 @@ export class VendingController {
   @Get("deficit")
   deficit() {
     return this.vending.deficitSummary();
+  }
+
+  // ── Журнал сбора: коллектор открывает запуск, потом закрывает итогом ───────
+
+  @Post("sync/start")
+  startSync() {
+    return this.vending.startSyncRun();
+  }
+
+  @Post("sync/:id/finish")
+  finishSync(@Param("id") id: string, @Body() dto: SyncFinishDto) {
+    return this.vending.finishSyncRun(id, dto);
+  }
+
+  @Get("sync")
+  syncRuns() {
+    return this.vending.syncRuns();
   }
 }
