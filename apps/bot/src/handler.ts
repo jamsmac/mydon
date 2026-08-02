@@ -19,6 +19,7 @@ import {
   isPurchaseOrdersQuery,
   isPurchaseReceiveCommand,
   isPurchaseSubmitCommand,
+  parseReceiveDistribution,
 } from "./purchase-brief";
 import { planReport } from "./reports";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
@@ -56,6 +57,7 @@ const HELP = [
   "• «оформить закуп» — отправить закуп тебе на утверждение",
   "• «накладные» — одобренные закупы",
   "• «принять закуп» — оприходовать накладную на склад",
+  "• «принять закуп: TUC 5, Flint 5» — то же, но с уточнением, сколько сразу в автоматы",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «касса закупа: получил 2400000, базар 376300» — записать кассу похода на базар",
   "• «кассы закупа» / «история кассы» — прошлые кассы",
@@ -139,9 +141,14 @@ export async function handleMessage(
 
   // Приёмка накладной на склад — мутация; до списка накладных, иначе «накладная
   // принята» ушла бы в чтение списка (обе ловят слово «накладн»).
+  //
+  // Опционально: «принять закуп: TUC 5, Flint 5» — сколько сразу раздали по
+  // автоматам (реальный процесс владельца, §5.7). Без двоеточия — как раньше,
+  // весь order идёт на склад.
   if (isPurchaseReceiveCommand(text)) {
     try {
-      const res = await deps.core.receiveVendingOrder();
+      const distributed = parseReceiveDistribution(text);
+      const res = await deps.core.receiveVendingOrder(undefined, distributed);
       return { text: formatReceiveOrderAck(res) };
     } catch (err) {
       console.error("Ошибка приёмки накладной:", err);

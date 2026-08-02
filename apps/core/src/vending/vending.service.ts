@@ -193,10 +193,12 @@ export interface ReceiveOrderResult {
   received: boolean;
   /** id принятой накладной (когда received). */
   orderId?: string;
-  /** Сколько позиций легло на склад. */
+  /** Сколько позиций легло на склад (toWarehouse > 0). */
   replenished: number;
-  /** Всего единиц принято (Σ order по позициям). */
+  /** Зачислено на склад — Σ (order − распределено) по позициям. */
   units: number;
+  /** Распределено сразу по автоматам, не зачислено на склад (§5.7). */
+  distributedUnits: number;
   /** Почему не приняли (когда !received). */
   reason?: string;
 }
@@ -636,8 +638,29 @@ export class VendingService {
    * Пополнение — приращение (в отличие от инвентаризации-перезаписи §5.4):
    * это приход, а не пересчёт. Всё одной транзакцией: статус и остаток должны
    * меняться вместе, иначе «принято», но склад пуст (или наоборот).
+   *
+   * `distributed` — реальный процесс владельца (лист «Snack склад»): часть
+   * закупа сразу уходит в автоматы, минуя склад. Без этого параметра на склад
+   * зачислялся бы ВЕСЬ order, хотя часть уже физически в автомате — до
+   * следующего пересчёта («склад X N») это выглядело бы как фиктивная
+   * недостача. Имена в `distributed` приводятся к канону через те же алиасы,
+   * что и ввод склада (§5.4); распределённое сверх заказанного — отсекается.
    */
-  async receiveOrder(orderId?: string, receivedBy = "owner"): Promise<ReceiveOrderResult> {
+  async receiveOrder(
+    orderId?: string,
+    receivedBy = "owner",
+    distributed?: Record<string, number>,
+  ): Promise<ReceiveOrderResult> {
+    const distributedByCanonical = new Map<string, number>();
+    if (distributed && Object.keys(distributed).length > 0) {
+      const { aliasByKey } = await this.loadProductIndex();
+      for (const [raw, qty] of Object.entries(distributed)) {
+        const name = raw.trim();
+        if (!name) continue;
+        distributedByCanonical.set(this.resolveProduct(name, aliasByKey), qty);
+      }
+    }
+
     return this.db.transaction(async (tx) => {
       const [order] = orderId
         ? await tx.select().from(vendingPurchaseOrder).where(eq(vendingPurchaseOrder.id, orderId)).limit(1)
@@ -649,39 +672,48 @@ export class VendingService {
             .limit(1);
 
       if (!order) {
-        return { received: false, replenished: 0, units: 0, reason: "Непринятых накладных нет." };
+        return { received: false, replenished: 0, units: 0, distributedUnits: 0, reason: "Непринятых накладных нет." };
       }
       if (order.status === "received") {
-        return { received: false, replenished: 0, units: 0, reason: "Эта накладная уже принята." };
+        return { received: false, replenished: 0, units: 0, distributedUnits: 0, reason: "Эта накладная уже принята." };
       }
 
       const now = new Date();
       await tx.update(vendingPurchaseOrder).set({ status: "received" }).where(eq(vendingPurchaseOrder.id, order.id));
 
-      // Приход по позициям: остаток += order (приращение, не перезапись).
+      // Приход по позициям: остаток += (order − распределено). Без
+      // распределения (по умолчанию) — как раньше: весь order идёт на склад.
       const positions = Array.isArray(order.positions) ? order.positions : [];
       let replenished = 0;
       let units = 0;
+      let distributedUnits = 0;
       for (const p of positions) {
         const pos = p as { product?: unknown; order?: unknown };
         const product = typeof pos.product === "string" ? pos.product.trim() : "";
         const qty = typeof pos.order === "number" && Number.isFinite(pos.order) ? Math.trunc(pos.order) : 0;
         if (!product || qty <= 0) continue;
+
+        // Не больше заказанного — опечатка владельца не должна увести склад в минус.
+        const dist = Math.min(qty, Math.max(0, distributedByCanonical.get(product) ?? 0));
+        distributedUnits += dist;
+        const toWarehouse = qty - dist;
+        if (toWarehouse <= 0) continue;
+
         await tx
           .insert(vendingStock)
-          .values({ productName: product, quantity: qty, countedAt: now, updatedAt: now })
+          .values({ productName: product, quantity: toWarehouse, countedAt: now, updatedAt: now })
           .onConflictDoUpdate({
             target: [vendingStock.productName],
-            set: { quantity: sql`${vendingStock.quantity} + ${qty}`, countedAt: now, updatedAt: now },
+            set: { quantity: sql`${vendingStock.quantity} + ${toWarehouse}`, countedAt: now, updatedAt: now },
           });
         replenished += 1;
-        units += qty;
+        units += toWarehouse;
       }
 
       await tx.insert(event).values({
         source: "owner",
         type: "vending.purchase_order.received",
-        payload: { orderId: order.id, replenished, units },
+        payload: { orderId: order.id, replenished, units, distributedUnits },
       });
       await tx.insert(auditLog).values({
         actorKind: "human",
@@ -692,7 +724,7 @@ export class VendingService {
         after: { ...order, status: "received" },
       });
 
-      return { received: true, orderId: order.id, replenished, units };
+      return { received: true, orderId: order.id, replenished, units, distributedUnits };
     });
   }
 

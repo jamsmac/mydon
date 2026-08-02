@@ -9,6 +9,7 @@ import {
   isPurchaseOrdersQuery,
   isPurchaseReceiveCommand,
   isPurchaseSubmitCommand,
+  parseReceiveDistribution,
 } from "./purchase-brief";
 
 const item = (o: Partial<VendingPurchaseItem> & { product: string }): VendingPurchaseItem => ({
@@ -156,12 +157,25 @@ describe("Приёмка накладной: команда и подтверж�
   it("подтверждение приёмки: позиции, единицы и подсказка пересчёта", () => {
     const t = formatReceiveOrderAck({ received: true, replenished: 2, units: 24 });
     assert.match(t, /принята на склад/);
-    assert.match(t, /Пополнено позиций: 2 · всего 24 ед/);
+    assert.match(t, /Зачислено на склад: 24 ед\. \(2 поз\.\)/);
     assert.match(t, /что заказать/);
+    assert.doesNotMatch(t, /Распределено/); // без distributedUnits — блока нет
   });
 
   it("нечего принимать — показывает причину", () => {
     const t = formatReceiveOrderAck({ received: false, replenished: 0, units: 0, reason: "Непринятых накладных нет." });
     assert.match(t, /Непринятых накладных нет/);
+  });
+
+  it("с распределением по автоматам — отдельная строка (§5.7)", () => {
+    const t = formatReceiveOrderAck({ received: true, replenished: 1, units: 5, distributedUnits: 5 });
+    assert.match(t, /Зачислено на склад: 5 ед\. \(1 поз\.\)/);
+    assert.match(t, /Распределено по автоматам: 5 ед\./);
+  });
+
+  it("parseReceiveDistribution: пары после первого двоеточия, без двоеточия — undefined", () => {
+    assert.deepEqual(parseReceiveDistribution("принять закуп: TUC 5, Flint 5"), { TUC: 5, Flint: 5 });
+    assert.equal(parseReceiveDistribution("принять закуп"), undefined);
+    assert.equal(parseReceiveDistribution("принять закуп: "), undefined); // двоеточие есть, пар нет
   });
 });

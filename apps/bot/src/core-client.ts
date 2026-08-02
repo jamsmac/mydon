@@ -216,17 +216,28 @@ export class CoreClient {
     return this.request<VendingOrder[]>("/vending/orders");
   }
 
-  /** Принять накладную на склад: приход += заказанное (§5.7). Пусто → последняя. */
-  receiveVendingOrder(orderId?: string): Promise<{
+  /**
+   * Принять накладную на склад: приход += (заказанное − распределено). Пусто
+   * orderId → последняя. `distributed` — сколько сразу ушло в автоматы, минуя
+   * склад (§5.7); без него весь order идёт на склад, как раньше.
+   */
+  receiveVendingOrder(
+    orderId?: string,
+    distributed?: Record<string, number>,
+  ): Promise<{
     received: boolean;
     orderId?: string;
     replenished: number;
     units: number;
+    distributedUnits: number;
     reason?: string;
   }> {
     return this.request("/vending/orders/receive", {
       method: "POST",
-      body: JSON.stringify(orderId ? { orderId } : {}),
+      body: JSON.stringify({
+        ...(orderId ? { orderId } : {}),
+        ...(distributed ? { distributed } : {}),
+      }),
     });
   }
 

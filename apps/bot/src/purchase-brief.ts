@@ -86,20 +86,52 @@ export function isPurchaseReceiveCommand(text: string): boolean {
   return /(принят|принял|приёмк|приемк|получен|получил)/.test(t) && /(закуп|заказ|товар|накладн|склад)/.test(t);
 }
 
+/**
+ * Разбор «сколько сразу раздали по автоматам» из той же команды приёмки —
+ * реальный процесс владельца (лист «Snack склад»): часть закупа при приёмке
+ * сразу уходит в автоматы, минуя склад. Без этого зачислялся бы на склад весь
+ * order, и до следующего пересчёта («склад X N») это выглядело бы как
+ * фиктивная недостача.
+ *
+ * Формат: всё после ПЕРВОГО двоеточия — пары «товар N» (как у ввода склада).
+ * Без двоеточия — распределения нет, приёмка ведёт себя как раньше (весь
+ * order на склад): «принять закуп» само по себе не требует уточнения.
+ */
+export function parseReceiveDistribution(text: string): Record<string, number> | undefined {
+  const colon = text.indexOf(":");
+  if (colon === -1) return undefined;
+  const body = text.slice(colon + 1).trim();
+  if (!body) return undefined;
+
+  const out: Record<string, number> = {};
+  for (const chunk of body.split(/[,;\n]+/)) {
+    const part = chunk.trim();
+    if (!part) continue;
+    const m = /^(.*?)[\s:.\-—=]*(\d+)$/.exec(part);
+    if (!m) continue;
+    const product = m[1].trim().replace(/[«»"']/g, "");
+    const qty = Number(m[2]);
+    if (!product || !Number.isInteger(qty) || qty < 0) continue;
+    out[product] = qty;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Подтверждение приёмки накладной на склад. */
 export function formatReceiveOrderAck(res: {
   received: boolean;
   replenished: number;
   units: number;
+  distributedUnits?: number;
   reason?: string;
 }): string {
   if (!res.received) return res.reason ?? "Непринятых накладных нет.";
-  return [
-    `📥 Накладная принята на склад.`,
-    "",
-    `Пополнено позиций: ${res.replenished} · всего ${res.units} ед.`,
-    `«что заказать» — пересчитать закуп с учётом прихода.`,
-  ].join("\n");
+  const lines = [`📥 Накладная принята на склад.`, "", `Зачислено на склад: ${res.units} ед. (${res.replenished} поз.)`];
+  if (res.distributedUnits && res.distributedUnits > 0) {
+    lines.push(`Распределено по автоматам: ${res.distributedUnits} ед.`);
+  }
+  lines.push("", `«что заказать» — пересчитать закуп с учётом прихода.`);
+  return lines.join("\n");
 }
 
 /** Запрос списка накладных закупа (материализованы при одобрении). */
