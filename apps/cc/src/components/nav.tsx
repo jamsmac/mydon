@@ -20,6 +20,7 @@ const MAIN = [
 const SYSTEM = [
   { href: "/registry", icon: "reg", label: "Реестр" },
   { href: "/audit", icon: "jour", label: "Журнал" },
+  { href: "/system", icon: "reg", label: "Система" },
 ];
 
 function isActive(pathname: string, href: string): boolean {

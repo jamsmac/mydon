@@ -41,6 +41,19 @@ export interface Briefing {
   contractsBadDate?: number;
 }
 
+/** Действующий глобальный тумблер системы (мозг/RAG/пауза/бюджет). */
+export interface SystemConfigItem {
+  key: string;
+  label: string;
+  kind: "select" | "text" | "number" | "bool";
+  options?: string[];
+  placeholder?: string;
+  help?: string;
+  value: string;
+  /** Откуда взято действующее значение: панель (db) / окружение / дефолт. */
+  source: "db" | "env" | "default";
+}
+
 export interface Approval {
   id: string;
   agent: string;
@@ -128,7 +141,7 @@ export interface AgentCard {
 }
 
 /** Запись в Core. Ошибку отдаём словами: её увидит владелец, а не разработчик. */
-async function send<T>(path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
+async function send<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
   let res: Response;
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -919,6 +932,11 @@ export const core = {
   updateAgent: (name: string, patch: Record<string, unknown>) =>
     send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "PATCH", patch),
   archiveAgent: (name: string) => send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "DELETE"),
+
+  // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
+  systemConfig: () => get<SystemConfigItem[]>("/system/config"),
+  saveSystemConfig: (input: { key: string; value: string; updatedBy?: string }) =>
+    send<SystemConfigItem[]>("/system/config", "PUT", input),
   pendingApprovals: () => get<Approval[]>("/approvals/pending"),
   allApprovals: () => get<Approval[]>("/approvals"),
   audit: (limit = 40) => get<AuditEntry[]>(`/audit?limit=${limit}`),

@@ -1,0 +1,200 @@
+/**
+ * Белый список глобальных тумблеров системы, редактируемых из панели.
+ *
+ * Здесь — ТОЛЬКО не-секретные настройки активации (мозг/RAG/пауза/бюджет).
+ * Секретов (API-ключи, токены) в этом списке нет и быть не должно: они остаются
+ * в `.env` (правило ТЗ «ни одного ключа в коде/базе»). Ключ вне списка Core
+ * отклоняет — панель не может записать произвольную переменную окружения.
+ *
+ * Приоритет чтения: значение из базы важнее env, env важнее дефолта. Так правка
+ * из панели реально перекрывает то, что задано в окружении контейнера.
+ */
+
+export type ConfigKind = "select" | "text" | "number" | "bool";
+
+export interface ConfigSpec {
+  key: string;
+  label: string;
+  kind: ConfigKind;
+  /** Для select — допустимые значения. */
+  options?: string[];
+  placeholder?: string;
+  help?: string;
+  /** Дефолт, если ни базы, ни env. */
+  fallback?: string;
+  /** Проверка значения: null — ок, строка — текст ошибки. Пустое всегда ок (= сброс). */
+  validate: (v: string) => string | null;
+}
+
+const oneOf =
+  (opts: string[]) =>
+  (v: string): string | null =>
+    opts.includes(v) ? null : `допустимо: ${opts.join(", ")}`;
+
+const nonNegNumber = (v: string): string | null => {
+  const n = Number(v.replace(",", "."));
+  return Number.isFinite(n) && n >= 0 ? null : "нужно неотрицательное число (например 5)";
+};
+
+const urlOrEmpty = (v: string): string | null =>
+  /^https?:\/\/\S+$/.test(v) ? null : "нужен URL вида http(s)://host:port";
+
+const shortText =
+  (max: number) =>
+  (v: string): string | null =>
+    v.length <= max ? null : `слишком длинно (максимум ${max})`;
+
+/** Пути мозга: подписочные харнессы (HTTP-путь задаётся через LLM_BASE_URL). */
+export const LLM_PROVIDERS = ["", "claude-cli", "codex-cli", "gemini-cli"] as const;
+
+export const CONFIG_SPECS: ConfigSpec[] = [
+  {
+    key: "AGENT_AUTONOMY_MAX",
+    label: "Глобальный порог автономии",
+    kind: "select",
+    options: ["T0", "T1", "T2", "T3", "T4"],
+    fallback: "T0",
+    help: "Потолок для ВСЕХ агентов. T0 — только предлагают.",
+    validate: oneOf(["T0", "T1", "T2", "T3", "T4"]),
+  },
+  {
+    key: "AGENTS_SCHEDULES_PAUSED",
+    label: "Расписания на паузе",
+    kind: "bool",
+    fallback: "1",
+    help: "1 — агенты не запускаются по графику; 0 — работают по расписаниям.",
+    validate: oneOf(["0", "1"]),
+  },
+  {
+    key: "AGENT_BILLING_MODE",
+    label: "Режим бюджета",
+    kind: "select",
+    options: ["subscription", "metered"],
+    fallback: "subscription",
+    help: "subscription — метрируемых трат нет, потолок спит. metered — потолок активен.",
+    validate: oneOf(["subscription", "metered"]),
+  },
+  {
+    key: "AGENT_DAILY_BUDGET_USD",
+    label: "Потолок на агента в день, $",
+    kind: "number",
+    fallback: "5",
+    validate: nonNegNumber,
+  },
+  {
+    key: "AGENT_GLOBAL_BUDGET_USD",
+    label: "Общий потолок в день, $",
+    kind: "number",
+    fallback: "5",
+    validate: nonNegNumber,
+  },
+  {
+    key: "LLM_PROVIDER",
+    label: "Мозг: подписочный харнесс",
+    kind: "select",
+    options: [...LLM_PROVIDERS],
+    help: "Пусто — LLM-путь спит (детерминированные навыки). Требует CLI в контейнере + авторизацию.",
+    validate: oneOf([...LLM_PROVIDERS]),
+  },
+  {
+    key: "LLM_BASE_URL",
+    label: "Мозг: HTTP-шлюз (OpenAI-совместимый)",
+    kind: "text",
+    placeholder: "http://100.x.y.z:port",
+    help: "Альтернатива подписке. Держать ТОЛЬКО в Tailscale. Не ключ — endpoint.",
+    validate: urlOrEmpty,
+  },
+  {
+    key: "LLM_MODEL",
+    label: "Мозг: модель",
+    kind: "text",
+    placeholder: "например claude-sonnet-4",
+    validate: shortText(128),
+  },
+  {
+    key: "LLM_FALLBACK_MODELS",
+    label: "Мозг: резервные модели (через запятую)",
+    kind: "text",
+    placeholder: "model-a, model-b",
+    validate: shortText(512),
+  },
+  {
+    key: "EMBED_BASE_URL",
+    label: "Память (RAG): шлюз эмбеддингов",
+    kind: "text",
+    placeholder: "http://100.x.y.z:port",
+    help: "Пусто — семантическая память спит. Держать в Tailscale. Не ключ — endpoint.",
+    validate: urlOrEmpty,
+  },
+  {
+    key: "EMBED_MODEL",
+    label: "Память (RAG): модель эмбеддингов",
+    kind: "text",
+    placeholder: "text-embedding-3-small",
+    validate: shortText(128),
+  },
+];
+
+const BY_KEY = new Map(CONFIG_SPECS.map((s) => [s.key, s]));
+
+/** Спека тумблера или undefined, если ключ не в белом списке. */
+export function specFor(key: string): ConfigSpec | undefined {
+  return BY_KEY.get(key);
+}
+
+/**
+ * Проверка пары ключ/значение перед записью. Ключ вне белого списка → ошибка
+ * (нельзя протащить секрет или произвольный env). Пустое значение = сброс к
+ * env/дефолту, всегда допустимо.
+ */
+export function validateConfig(key: string, value: string): string | null {
+  const spec = BY_KEY.get(key);
+  if (!spec) return `неизвестный ключ «${key}» — вне белого списка настроек`;
+  if (value.trim() === "") return null;
+  return spec.validate(value.trim());
+}
+
+export interface EffectiveItem {
+  key: string;
+  label: string;
+  kind: ConfigKind;
+  options?: string[];
+  placeholder?: string;
+  help?: string;
+  value: string;
+  /** Откуда взято действующее значение. */
+  source: "db" | "env" | "default";
+}
+
+/**
+ * Действующее значение тумблера: база важнее env, env важнее дефолта. `db` —
+ * карта записанных из панели значений; `env` — окружение процесса Core.
+ */
+export function resolveEffective(
+  spec: ConfigSpec,
+  db: Record<string, string>,
+  env: Record<string, string | undefined>,
+): EffectiveItem {
+  const dbVal = (db[spec.key] ?? "").trim();
+  const envVal = (env[spec.key] ?? "").trim();
+  const [value, source]: [string, EffectiveItem["source"]] =
+    dbVal !== "" ? [dbVal, "db"] : envVal !== "" ? [envVal, "env"] : [spec.fallback ?? "", "default"];
+  return {
+    key: spec.key,
+    label: spec.label,
+    kind: spec.kind,
+    ...(spec.options ? { options: spec.options } : {}),
+    ...(spec.placeholder ? { placeholder: spec.placeholder } : {}),
+    ...(spec.help ? { help: spec.help } : {}),
+    value,
+    source,
+  };
+}
+
+/** Все тумблеры с действующими значениями — для панели и для оверлея агентов. */
+export function resolveAll(
+  db: Record<string, string>,
+  env: Record<string, string | undefined>,
+): EffectiveItem[] {
+  return CONFIG_SPECS.map((s) => resolveEffective(s, db, env));
+}
