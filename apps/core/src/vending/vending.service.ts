@@ -199,6 +199,12 @@ export interface ReceiveOrderResult {
   units: number;
   /** Распределено сразу по автоматам, не зачислено на склад (§5.7). */
   distributedUnits: number;
+  /**
+   * Товары из `distributed`, для которых не нашлось позиции в накладной —
+   * распределение по ним НЕ учтено, вся сумма ушла на склад молча, если не
+   * показать это владельцу (найдено адверсариал-ревью).
+   */
+  unmatchedDistribution: string[];
   /** Почему не приняли (когда !received). */
   reason?: string;
 }
@@ -644,20 +650,42 @@ export class VendingService {
    * зачислялся бы ВЕСЬ order, хотя часть уже физически в автомате — до
    * следующего пересчёта («склад X N») это выглядело бы как фиктивная
    * недостача. Имена в `distributed` приводятся к канону через те же алиасы,
-   * что и ввод склада (§5.4); распределённое сверх заказанного — отсекается.
+   * что и ввод склада (§5.4), и сравниваются с позицией накладной без учёта
+   * регистра/пробелов; распределённое сверх заказанного — отсекается.
+   *
+   * Позиции накладной берутся из `purchase()`, который группирует по СЫРОМУ
+   * имени Ourvend-слота (без алиасов, отдельный давний разрыв, см. `purchase()`)
+   * — если ключ `distributed` после резолва алиасом всё равно не совпал ни с
+   * одной позицией, эта запись попадает в `unmatchedDistribution`, а её сумма
+   * уходит на склад, как будто распределения не было: не роняем приёмку из-за
+   * несовпадения имён, но и не молчим об этом (найдено адверсариал-ревью).
    */
   async receiveOrder(
     orderId?: string,
     receivedBy = "owner",
     distributed?: Record<string, number>,
   ): Promise<ReceiveOrderResult> {
+    // Ключ — normalizeProductName(канон): сравнение с позицией без учёта
+    // регистра/пробелов. display хранит канон как есть — для unmatchedDistribution.
     const distributedByCanonical = new Map<string, number>();
+    const distributedDisplay = new Map<string, string>();
     if (distributed && Object.keys(distributed).length > 0) {
       const { aliasByKey } = await this.loadProductIndex();
       for (const [raw, qty] of Object.entries(distributed)) {
         const name = raw.trim();
-        if (!name) continue;
-        distributedByCanonical.set(this.resolveProduct(name, aliasByKey), qty);
+        // Не целое неотрицательное число (NaN, дробь, строка, отрицательное) —
+        // чужой формат или опечатка: запись игнорируем, а не роняем всю
+        // приёмку и не пускаем NaN/дробь в insert по integer-колонке
+        // (найдено адверсариал-ревью).
+        if (!name || typeof qty !== "number" || !Number.isInteger(qty) || qty < 0) continue;
+        const canon = this.resolveProduct(name, aliasByKey);
+        const key = normalizeProductName(canon);
+        // Суммируем, а не перезаписываем: в отличие от ingestStock (снимок,
+        // последняя позиция побеждает), distributed — поток "сколько роздано";
+        // два алиаса одного товара в одном вызове должны сложиться, иначе
+        // часть распределения молча терялась бы (найдено адверсариал-ревью).
+        distributedByCanonical.set(key, (distributedByCanonical.get(key) ?? 0) + qty);
+        distributedDisplay.set(key, canon);
       }
     }
 
@@ -672,10 +700,24 @@ export class VendingService {
             .limit(1);
 
       if (!order) {
-        return { received: false, replenished: 0, units: 0, distributedUnits: 0, reason: "Непринятых накладных нет." };
+        return {
+          received: false,
+          replenished: 0,
+          units: 0,
+          distributedUnits: 0,
+          unmatchedDistribution: [],
+          reason: "Непринятых накладных нет.",
+        };
       }
       if (order.status === "received") {
-        return { received: false, replenished: 0, units: 0, distributedUnits: 0, reason: "Эта накладная уже принята." };
+        return {
+          received: false,
+          replenished: 0,
+          units: 0,
+          distributedUnits: 0,
+          unmatchedDistribution: [],
+          reason: "Эта накладная уже принята.",
+        };
       }
 
       const now = new Date();
@@ -687,14 +729,18 @@ export class VendingService {
       let replenished = 0;
       let units = 0;
       let distributedUnits = 0;
+      const consumedDistribution = new Set<string>();
       for (const p of positions) {
         const pos = p as { product?: unknown; order?: unknown };
         const product = typeof pos.product === "string" ? pos.product.trim() : "";
         const qty = typeof pos.order === "number" && Number.isFinite(pos.order) ? Math.trunc(pos.order) : 0;
         if (!product || qty <= 0) continue;
 
+        const key = normalizeProductName(product);
+        const requested = distributedByCanonical.get(key);
+        if (requested !== undefined) consumedDistribution.add(key);
         // Не больше заказанного — опечатка владельца не должна увести склад в минус.
-        const dist = Math.min(qty, Math.max(0, distributedByCanonical.get(product) ?? 0));
+        const dist = Math.min(qty, Math.max(0, requested ?? 0));
         distributedUnits += dist;
         const toWarehouse = qty - dist;
         if (toWarehouse <= 0) continue;
@@ -710,10 +756,18 @@ export class VendingService {
         units += toWarehouse;
       }
 
+      // Запрошенное распределение, которое не совпало ни с одной позицией
+      // накладной — молча ушло на склад вместо автомата (см. doc-комментарий
+      // метода). Показываем канон (не сырой ввод владельца) — так виднее,
+      // что именно не срослось с алиасами.
+      const unmatchedDistribution = [...distributedByCanonical.keys()]
+        .filter((key) => !consumedDistribution.has(key))
+        .map((key) => distributedDisplay.get(key) ?? key);
+
       await tx.insert(event).values({
         source: "owner",
         type: "vending.purchase_order.received",
-        payload: { orderId: order.id, replenished, units, distributedUnits },
+        payload: { orderId: order.id, replenished, units, distributedUnits, unmatchedDistribution },
       });
       await tx.insert(auditLog).values({
         actorKind: "human",
@@ -724,7 +778,7 @@ export class VendingService {
         after: { ...order, status: "received" },
       });
 
-      return { received: true, orderId: order.id, replenished, units, distributedUnits };
+      return { received: true, orderId: order.id, replenished, units, distributedUnits, unmatchedDistribution };
     });
   }
 

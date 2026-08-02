@@ -230,6 +230,7 @@ export class CoreClient {
     replenished: number;
     units: number;
     distributedUnits: number;
+    unmatchedDistribution: string[];
     reason?: string;
   }> {
     return this.request("/vending/orders/receive", {

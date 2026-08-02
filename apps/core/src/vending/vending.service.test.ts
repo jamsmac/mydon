@@ -390,6 +390,73 @@ describe("Вендинг Core: приёмка накладной на склад
     assert.equal(res.distributedUnits, 0);
     assert.equal(res.units, 10);
   });
+
+  it("нечисловое/дробное значение в distributed — запись игнорируем, приёмку не роняем (найдено адверсариал-ревью)", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", {
+      TUC: "not-a-number" as unknown as number,
+    });
+
+    assert.equal(res.distributedUnits, 0);
+    assert.equal(res.units, 10); // весь order — на склад, будто distributed не передавали
+    assert.deepEqual(res.unmatchedDistribution, []); // невалидная запись даже не попала в карту
+    assert.equal(stockUpserts[0]!.quantity, 10);
+  });
+
+  it("отрицательное/дробное целое в distributed — тоже игнорируем (§5.7)", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { TUC: 2.5 });
+    assert.equal(res.distributedUnits, 0);
+    assert.equal(res.units, 10);
+  });
+
+  it("два алиаса одного товара в distributed суммируются, а не перезаписывают друг друга (найдено адверсариал-ревью)", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      positions: [{ product: "Montella Вода минеральная 330ml", order: 30 }],
+    };
+    const { db, stockUpserts } = receiveDb(
+      order,
+      [
+        { productId: "p1", alias: "Montella" },
+        { productId: "p1", alias: "Montella pet 0.33" },
+      ],
+      [{ id: "p1", name: "Montella Вода минеральная 330ml" }],
+    );
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", {
+      Montella: 5,
+      "Montella pet 0.33": 8,
+    });
+
+    assert.equal(res.distributedUnits, 13); // 5+8, не 8 (последний не должен затирать первый)
+    assert.equal(res.units, 17); // 30-13
+    assert.equal(stockUpserts[0]!.quantity, 17);
+  });
+
+  it("distributed без совпадения ни с одной позицией — не роняет приёмку, весь order на склад, но видно в unmatchedDistribution (найдено адверсариал-ревью)", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { Flint: 5 });
+
+    assert.equal(res.distributedUnits, 0);
+    assert.equal(res.units, 10); // не нашли совпадения — всё на склад, как раньше
+    assert.deepEqual(res.unmatchedDistribution, ["Flint"]);
+    assert.equal(stockUpserts[0]!.quantity, 10);
+  });
+
+  it("сопоставление позиции и distributed без учёта регистра/пробелов даже без алиаса", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { "  tuc  ": 4 });
+
+    assert.equal(res.distributedUnits, 4);
+    assert.equal(res.units, 6);
+    assert.deepEqual(res.unmatchedDistribution, []);
+    assert.equal(stockUpserts[0]!.quantity, 6);
+  });
 });
 
 describe("Вендинг Core: инвентаризация склада (§5.4)", () => {
