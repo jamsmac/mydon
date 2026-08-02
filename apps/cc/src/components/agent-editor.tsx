@@ -147,6 +147,48 @@ export function AgentEditor({ agent }: { agent: AgentCard }) {
           />
         </label>
 
+        <label>
+          <span>При исчерпании бюджета</span>
+          <select name="budgetOnExceeded" defaultValue={agent.budgetOnExceeded ?? ""}>
+            <option value="">по умолчанию</option>
+            <option value="pause">пауза — остановиться</option>
+            <option value="downgrade">упростить — модель дешевле</option>
+            <option value="ask">спросить владельца</option>
+          </select>
+        </label>
+
+        <label>
+          <span>Каналы идей (Telegram)</span>
+          <textarea
+            name="ideaChannels"
+            rows={2}
+            defaultValue={agent.ideaChannels.join("\n")}
+            placeholder="По одному на строку. Например: promtjam"
+          />
+          <small className="hint">Публичные каналы, откуда агент берёт фишки (навыки scan-ideas / assess-ideas).</small>
+        </label>
+
+        <label>
+          <span>Веб-источники (только чтение)</span>
+          <textarea
+            name="webSources"
+            rows={3}
+            defaultValue={agent.webSources.map((s) => `${s.name} | ${s.url}`).join("\n")}
+            placeholder="Имя | https://адрес — по одному на строку"
+          />
+          <small className="hint">Сайты, которые агенту разрешено читать (навык read-sources).</small>
+        </label>
+
+        <label>
+          <span>Навыки только через согласование (break-glass)</span>
+          <textarea
+            name="breakGlass"
+            rows={2}
+            defaultValue={agent.breakGlass.join("\n")}
+            placeholder="По одному на строку. Эти навыки всегда спрашивают, даже на высокой автономии."
+          />
+        </label>
+
         <div className="form-actions">
           <button type="submit" className="btn primary" disabled={pending}>
             {pending ? "Сохраняю…" : "Сохранить"}

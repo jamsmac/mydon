@@ -10,6 +10,11 @@ export interface AgentScheduleItem {
   skill: string;
 }
 
+export interface WebSourceItem {
+  name: string;
+  url: string;
+}
+
 export interface UpsertAgentInput {
   name: string;
   business?: string;
@@ -21,6 +26,14 @@ export interface UpsertAgentInput {
   skills?: string[];
   schedule?: AgentScheduleItem[];
   budgetPerDayUsd?: number | null;
+  /** Что делать при исчерпании бюджета: pause | downgrade | ask. */
+  budgetOnExceeded?: string | null;
+  /** Сайты, разрешённые агенту для чтения. */
+  webSources?: WebSourceItem[];
+  /** Навыки, всегда идущие через согласование (break-glass). */
+  breakGlass?: string[];
+  /** Публичные Telegram-каналы идей. */
+  ideaChannels?: string[];
 }
 
 /**
@@ -76,6 +89,10 @@ export class AgentsService {
           skills: input.skills ?? [],
           schedule: input.schedule ?? [],
           budgetPerDayUsd: input.budgetPerDayUsd?.toString() ?? null,
+          budgetOnExceeded: input.budgetOnExceeded ?? null,
+          webSources: input.webSources ?? [],
+          breakGlass: input.breakGlass ?? [],
+          ideaChannels: input.ideaChannels ?? [],
         })
         .returning();
 
@@ -106,6 +123,10 @@ export class AgentsService {
     if (patch.budgetPerDayUsd !== undefined) {
       values.budgetPerDayUsd = patch.budgetPerDayUsd === null ? null : String(patch.budgetPerDayUsd);
     }
+    if (patch.budgetOnExceeded !== undefined) values.budgetOnExceeded = patch.budgetOnExceeded;
+    if (patch.webSources !== undefined) values.webSources = patch.webSources;
+    if (patch.breakGlass !== undefined) values.breakGlass = patch.breakGlass;
+    if (patch.ideaChannels !== undefined) values.ideaChannels = patch.ideaChannels;
 
     return this.db.transaction(async (tx) => {
       const [updated] = await tx

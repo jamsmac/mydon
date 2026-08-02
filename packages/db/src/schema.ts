@@ -711,6 +711,14 @@ export const agent = pgTable(
     schedule: jsonb("schedule").default([]).notNull(),
     /** Дневной потолок трат, USD. */
     budgetPerDayUsd: numeric("budget_per_day_usd", { precision: 10, scale: 2 }),
+    /** Что делать при исчерпании бюджета: pause | downgrade | ask. */
+    budgetOnExceeded: text("budget_on_exceeded"),
+    /** Сайты, которые агенту разрешено ЧИТАТЬ: [{name, url}]. */
+    webSources: jsonb("web_sources").default([]).notNull(),
+    /** Навыки, которые ВСЕГДА идут через согласование (break-glass): ["skill"]. */
+    breakGlass: jsonb("break_glass").default([]).notNull(),
+    /** Публичные Telegram-каналы идей для чтения: ["promtjam"]. */
+    ideaChannels: jsonb("idea_channels").default([]).notNull(),
     /** Архив: агент убран из работы, но его история сохранена. */
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: createdAt(),
