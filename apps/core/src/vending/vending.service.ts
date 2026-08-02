@@ -1,14 +1,18 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { desc, eq } from "drizzle-orm";
-import { machineSale, machineSlot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
+import { machineSale, machineSlot, productSale, slotSnapshot, vendingProduct, vendingSyncRun } from "@mydon/db";
 import {
   MAX_CAPACITY,
+  computePurchase,
   machineDeficit,
   needByProduct,
   planogramStatus,
   runoutForecast,
   slotValid,
   type PlanogramStatus,
+  type PriceEntry,
+  type PurchaseRow,
+  type PurchaseSummary,
   type Runout,
   type RunoutInput,
   type Slot,
@@ -217,15 +221,35 @@ export class VendingService {
   }
 
   /**
+   * Продажи за 7 суток по товару из САМОГО СВЕЖЕГО батча (одинаковый
+   * capturedAt) и только по ok-автоматах. Батч, а не сумма истории — иначе
+   * перекрывающиеся 7-дневные окна складывались бы и завышали расход.
+   */
+  private async latestSold7(okSerials: Set<string>): Promise<Map<string, number>> {
+    const saleRows = await this.db.select().from(productSale);
+    const latest = saleRows.reduce((max, r) => Math.max(max, r.capturedAt.getTime()), 0);
+    const out = new Map<string, number>();
+    for (const r of saleRows) {
+      if (r.capturedAt.getTime() !== latest) continue;
+      if (!okSerials.has(r.machineSerial)) continue;
+      out.set(r.productName, (out.get(r.productName) ?? 0) + r.quantity);
+    }
+    return out;
+  }
+
+  /** Серийники ok-автоматов из готовой карты слотов. */
+  private okSerials(byMachine: Map<string, Slot[]>): Set<string> {
+    return new Set([...byMachine.entries()].filter(([, slots]) => planogramStatus(slots) === "ok").map(([serial]) => serial));
+  }
+
+  /**
    * Прогноз «на сколько хватит» (§5.6). Остаток и продажи считаются по ОДНОМУ
    * множеству автоматов (только `ok`) — иначе прогноз занижается. Продажи —
    * из самого свежего собранного батча.
    */
   async forecast(criticalDays = 3): Promise<{ all: Runout[]; critical: Runout[] }> {
     const byMachine = await this.slotsByMachine();
-    const okSerials = new Set(
-      [...byMachine.entries()].filter(([, slots]) => planogramStatus(slots) === "ok").map(([serial]) => serial),
-    );
+    const okSerials = this.okSerials(byMachine);
 
     // Остаток в машинах по товару: Σ quantity валидных назначенных слотов ok-автоматов.
     const inByProduct = new Map<string, number>();
@@ -236,15 +260,7 @@ export class VendingService {
       }
     }
 
-    // Продажи за 7 суток: только самый свежий батч (одинаковый capturedAt), только ok-автоматы.
-    const saleRows = await this.db.select().from(productSale);
-    const latest = saleRows.reduce((max, r) => Math.max(max, r.capturedAt.getTime()), 0);
-    const soldByProduct = new Map<string, number>();
-    for (const r of saleRows) {
-      if (r.capturedAt.getTime() !== latest) continue;
-      if (!okSerials.has(r.machineSerial)) continue;
-      soldByProduct.set(r.productName, (soldByProduct.get(r.productName) ?? 0) + r.quantity);
-    }
+    const soldByProduct = await this.latestSold7(okSerials);
 
     // Прогнозируем то, что сейчас загружено в автоматы.
     const input: RunoutInput[] = [...inByProduct.entries()].map(([product, inMachines]) => ({
@@ -253,6 +269,39 @@ export class VendingService {
       sold7: soldByProduct.get(product) ?? 0,
     }));
     return runoutForecast(input, criticalDays);
+  }
+
+  /**
+   * Сводный закуп (§5.4–5.5): потребность ok-автоматов − склад, округление до
+   * упаковок, суммы. Прайс и кратность — из `vending_product` (не из кода).
+   * Склад пока 0 — движок склада приходит Фазой 3; позиции без цены и без
+   * продаж калькулятор выносит отдельно и в денежные итоги не включает.
+   */
+  async purchase(): Promise<PurchaseSummary> {
+    const byMachine = await this.slotsByMachine();
+    const okSerials = this.okSerials(byMachine);
+    const ok = [...byMachine.entries()]
+      .filter(([serial]) => okSerials.has(serial))
+      .map(([machineId, slots]) => ({ machineId, slots }));
+    const needs = needByProduct(ok);
+    const soldByProduct = await this.latestSold7(okSerials);
+
+    // Прайс: только позиции с ценой попадают в карту — иначе калькулятор
+    // пометит noPrice и выведет их на разбор менеджеру (§5.5).
+    const products = await this.db.select().from(vendingProduct);
+    const prices = new Map<string, PriceEntry>();
+    for (const p of products) {
+      if (p.purchasePrice != null) prices.set(p.name, { price: Number(p.purchasePrice), pack: p.packSize });
+    }
+
+    const rows: PurchaseRow[] = needs.map((n) => ({
+      product: n.product,
+      perMachine: n.perMachine,
+      need: n.total,
+      stock: 0, // склад — Фаза 3; пока закупаем весь дефицит
+      sold7: soldByProduct.get(n.product) ?? 0,
+    }));
+    return computePurchase(rows, prices);
   }
 
   // ── Журнал сбора Ourvend ──────────────────────────────────────────────────
