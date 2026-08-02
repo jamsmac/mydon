@@ -20,10 +20,13 @@ describe("Прайс вендинга (Приложение А)", () => {
     const by = new Map(VENDING_PRICELIST.map((p) => [p.name, p]));
     // Числа из Приложения Г/А — сверка, чтобы прайс не разъехался.
     assert.equal(by.get("Montella Вода минеральная 330ml")?.price, 2090);
-    assert.equal(by.get("RedBull Classic 250 ml")?.price, 16000);
     assert.equal(by.get("СуперКонтик Шоколадный вкус 100gr")?.price, 5000);
-    assert.equal(by.get("CocaCola Classic CAN 250ml")?.category, "drink");
     assert.equal(by.get("Snickers 50gr")?.category, "snack");
+    // Фискальный каталог напитков (реестр владельца, ИКПУ/Multikassa) —
+    // закупочная цена стабильна между периодами до/после 26.08.2025.
+    assert.equal(by.get("Red Bull CAN 0,25")?.price, 16500);
+    assert.equal(by.get("Coca-Cola Classic CAN 0,25")?.category, "drink");
+    assert.equal(by.get("Coca-Cola Classic CAN 0,25")?.price, 4999.16);
   });
 });
 

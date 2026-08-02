@@ -26,37 +26,73 @@ export interface PriceItem {
 /** Кратность по категории: напитки 12, снеки 10. */
 export const packOf = (c: VendingCat): number => (c === "drink" ? 12 : 10);
 
-/** Прайс из Приложения А (34 позиции). */
+/**
+ * Прайс вендинга.
+ *
+ * Напитки — из фискального каталога Multikassa (лист «Данные»/«Вывод цен»
+ * реестра владельца, ИКПУ/GoodsID уже зарегистрированы): 30 SKU, закупочная
+ * цена взята за период «с 26/08/2025» (для 4 позиций без цены в этом
+ * периоде — Love Is, Borjomi, Pulpy, Pepsi 0,449 — взята цена предыдущего
+ * периода, других данных о них нет). Закупочная цена почти не менялась между
+ * периодами (менялась только розничная, которую MYDON не хранит) — кроме
+ * Laimon Fresh Berries (4500→8000), взята новая. Прежние приблизительные
+ * записи напитков (из Приложения А) заменены точными фискальными именами;
+ * старые имена перенесены в VENDING_ALIASES, чтобы существующий ввод и склад
+ * не осиротели (seedVendingAliases переносит строку склада на канон).
+ *
+ * Снеки — из Приложения А, без изменений в этом сиде.
+ */
 export const VENDING_PRICELIST: PriceItem[] = [
+  // ── Напитки (фискальный каталог, 30 SKU) ──
+  { name: "Coca-Cola Classic 0,5", category: "drink", price: 5859 },
+  { name: "Fanta C 0,5", category: "drink", price: 5859 },
+  { name: "Flash Up Energy CAN 0,45", category: "drink", price: 9167 },
+  { name: "Plus 18 CAN 0,45", category: "drink", price: 9990 },
+  { name: "Laimon Fresh CAN 0,33", category: "drink", price: 8000 },
+  { name: "Laimon Fresh Mango CAN 0,33", category: "drink", price: 8000 },
+  { name: "Pepsi 0,5", category: "drink", price: 5859 },
+  { name: "Moxito Fresh Klubnika CAN 0,5", category: "drink", price: 9750 },
+  { name: "Moxito Fresh CAN 0,5", category: "drink", price: 9800 },
+  { name: "Red Bull CAN 0,25", category: "drink", price: 16500 },
+  { name: "Lit Energy Blueberry CAN 0,45", category: "drink", price: 13500 },
+  { name: "Lit Energy Mango Coco CAN 0,45", category: "drink", price: 13500 },
+  { name: "Coca-Cola Classic CAN 0,25", category: "drink", price: 4999.16 },
+  { name: "Fanta C CAN 0,25", category: "drink", price: 5000 },
+  { name: "Flash Up Mojito Straw CAN 0,45", category: "drink", price: 8333 },
+  { name: "Fresh Tag Lemonade CAN 0,45", category: "drink", price: 8333 },
+  { name: "Love Is Pineapple-Coc CAN 0,33", category: "drink", price: 11690 },
+  { name: "Borjomi Mineral Water CAN 0,33", category: "drink", price: 9000 },
+  { name: "Flash up Peach Pineap CAN 0,45", category: "drink", price: 8333 },
+  { name: "Moxito Fresh Mango CAN 0,5", category: "drink", price: 9750 },
+  { name: "Flash Up Bubble Gum CAN 0,45", category: "drink", price: 8333 },
+  { name: "FuseTea Tea Fuse Mango-Cham", category: "drink", price: 6084 },
+  { name: "Pulpy", category: "drink", price: 13990 },
+  { name: "Red Bull CAN 0,355", category: "drink", price: 28990 },
+  { name: "Pepsi CAN 0,449", category: "drink", price: 7000 },
+  { name: "Laimon Fresh Berries CAN 0,33", category: "drink", price: 8000 },
+  { name: "Royal Pomegranate CAN 0,3", category: "drink", price: 5000 },
+  { name: "Pepsi CAN 0,25", category: "drink", price: 5000 },
+  { name: "Coca-Cola ZeroS CAN 0.25", category: "drink", price: 4999.16 },
+  { name: "Lipton Lemon Tea 0.5", category: "drink", price: 5833.25 },
+  // ── Напитки вне фискального каталога напиткового автомата (снек-машина) ──
+  { name: "Montella Вода минеральная 330ml", category: "drink", price: 2090 },
+  { name: "Nesquick Choco 200ml", category: "drink", price: 6900 },
+  { name: "Ozbegim Tea Mango Moychechak 450ml", category: "drink", price: 9000 },
+  { name: "Sprite 250ml", category: "drink", price: 5167 },
+  // ── Снеки (Приложение А) ──
   { name: "Barni Шоколадный 30gr", category: "snack", price: 3875 },
-  { name: "Borjomi Mineral 330ml", category: "drink", price: 10500 },
   { name: "Bounty Coconut 55gr", category: "snack", price: 7800 },
   { name: "Cheers Сметана и зелень 70gr", category: "snack", price: 9500 },
   { name: "ChocoPie Orion 30gr", category: "snack", price: 2000 },
-  { name: "CocaCola Classic CAN 250ml", category: "drink", price: 5167 },
-  { name: "CocaCola ZERO CAN 250ml", category: "drink", price: 5250 },
   { name: "Ermak Asl Qurt 7шт 30gr", category: "snack", price: 6800 },
   { name: "Ermak Арахис с солью 50gr", category: "snack", price: 4800 },
-  { name: "Fanta Classic CAN 250ml", category: "drink", price: 5167 },
-  { name: "FlashUp Energy 330ml", category: "drink", price: 8500 },
   { name: "Flint Kabob 100gr", category: "snack", price: 5800 },
-  { name: "FuseTea Tea Mango Cham 450ml", category: "drink", price: 8500 },
   { name: "Kinder Bueno Chocolate 43gr", category: "snack", price: 11000 },
   { name: "Kitkat 40gr", category: "snack", price: 8800 },
-  { name: "LaimonFresh Lime 330ml", category: "drink", price: 8000 },
   { name: "Lays Рифлёные Сметана и лук 70gr", category: "snack", price: 13000 },
   { name: "M and Ms Шоколадный 40gr", category: "snack", price: 9000 },
-  { name: "Montella Вода минеральная 330ml", category: "drink", price: 2090 },
-  { name: "Moxito Fresh Klubnika CAN 450ml", category: "drink", price: 9800 },
-  { name: "Moxito Fresh Lime CAN 450ml", category: "drink", price: 9800 },
-  { name: "Nesquick Choco 200ml", category: "drink", price: 6900 },
   { name: "Oreo x4 38gr", category: "snack", price: 5500 },
-  { name: "Ozbegim Tea Mango Moychechak 450ml", category: "drink", price: 9000 },
-  { name: "Pepsi CAN 250ml", category: "drink", price: 5417 },
-  { name: "Plus 18 Energy 330ml", category: "drink", price: 8500 },
-  { name: "RedBull Classic 250 ml", category: "drink", price: 16000 },
   { name: "Snickers 50gr", category: "snack", price: 7000 },
-  { name: "Sprite 250ml", category: "drink", price: 5167 },
   { name: "Strobar 40gr", category: "snack", price: 4800 },
   { name: "TUC Crackers Sour cream and Onion", category: "snack", price: 10500 },
   { name: "Twix 50gr", category: "snack", price: 7000 },
@@ -77,30 +113,95 @@ export interface AliasItem {
 }
 
 export const VENDING_ALIASES: AliasItem[] = [
-  // Напитки
-  { alias: "Fuse Tea", product: "FuseTea Tea Mango Cham 450ml" },
-  { alias: "Fuse Tea can 0.45", product: "FuseTea Tea Mango Cham 450ml" },
-  { alias: "Coca Cola cl", product: "CocaCola Classic CAN 250ml" },
-  { alias: "Coca cola classic can 0.25", product: "CocaCola Classic CAN 250ml" },
+  // ── Миграция старых приблизительных имён (Приложение А) на фискальный канон.
+  // Существующие ввод/склад под старым именем не осиротеют — seedVendingAliases
+  // переносит строку склада на канон при появлении алиаса.
+  { alias: "Borjomi Mineral 330ml", product: "Borjomi Mineral Water CAN 0,33" },
+  { alias: "CocaCola Classic CAN 250ml", product: "Coca-Cola Classic CAN 0,25" },
+  { alias: "CocaCola ZERO CAN 250ml", product: "Coca-Cola ZeroS CAN 0.25" },
+  { alias: "Fanta Classic CAN 250ml", product: "Fanta C CAN 0,25" },
+  { alias: "FlashUp Energy 330ml", product: "Flash Up Energy CAN 0,45" },
+  { alias: "FuseTea Tea Mango Cham 450ml", product: "FuseTea Tea Fuse Mango-Cham" },
+  { alias: "LaimonFresh Lime 330ml", product: "Laimon Fresh CAN 0,33" },
+  { alias: "Moxito Fresh Klubnika CAN 450ml", product: "Moxito Fresh Klubnika CAN 0,5" },
+  { alias: "Moxito Fresh Lime CAN 450ml", product: "Moxito Fresh CAN 0,5" },
+  { alias: "Pepsi CAN 250ml", product: "Pepsi CAN 0,25" },
+  { alias: "Plus 18 Energy 330ml", product: "Plus 18 CAN 0,45" },
+  { alias: "RedBull Classic 250 ml", product: "Red Bull CAN 0,25" },
+
+  // ── Напитки: рукописные листы и заметки закупа (31.07–02.08.2026) ──
+  { alias: "Fuse Tea", product: "FuseTea Tea Fuse Mango-Cham" },
+  { alias: "Fuse Tea can 0.45", product: "FuseTea Tea Fuse Mango-Cham" },
+  { alias: "Coca Cola cl", product: "Coca-Cola Classic CAN 0,25" },
+  { alias: "Coca cola classic can 0.25", product: "Coca-Cola Classic CAN 0,25" },
   { alias: "Sprite can 0.25", product: "Sprite 250ml" },
-  { alias: "Fanta", product: "Fanta Classic CAN 250ml" },
-  { alias: "Fanta can 0.25", product: "Fanta Classic CAN 250ml" },
+  { alias: "Fanta", product: "Fanta C CAN 0,25" },
+  { alias: "Fanta can 0.25", product: "Fanta C CAN 0,25" },
   { alias: "Montella", product: "Montella Вода минеральная 330ml" },
   { alias: "Montella pet 0.33", product: "Montella Вода минеральная 330ml" },
-  { alias: "18+", product: "Plus 18 Energy 330ml" },
-  { alias: "Plus 18 can 0.33", product: "Plus 18 Energy 330ml" },
-  { alias: "Flash", product: "FlashUp Energy 330ml" },
-  { alias: "Flash can 0.33", product: "FlashUp Energy 330ml" },
-  { alias: "lemon Fr", product: "LaimonFresh Lime 330ml" },
-  { alias: "LimonFresh", product: "LaimonFresh Lime 330ml" },
-  { alias: "LimonFresh can 0.33", product: "LaimonFresh Lime 330ml" },
-  { alias: "Moxito", product: "Moxito Fresh Lime CAN 450ml" },
-  { alias: "Moxito lime can 0.45", product: "Moxito Fresh Lime CAN 450ml" },
-  { alias: "Moxito клуб", product: "Moxito Fresh Klubnika CAN 450ml" },
-  { alias: "Moxito klibn", product: "Moxito Fresh Klubnika CAN 450ml" },
-  { alias: "Moxito klubn can 0.45", product: "Moxito Fresh Klubnika CAN 450ml" },
-  { alias: "Red bull can 0.25", product: "RedBull Classic 250 ml" },
-  // Снеки
+  { alias: "18+", product: "Plus 18 CAN 0,45" },
+  { alias: "Plus 18 can 0.33", product: "Plus 18 CAN 0,45" },
+  { alias: "Flash", product: "Flash Up Energy CAN 0,45" },
+  { alias: "Flash can 0.33", product: "Flash Up Energy CAN 0,45" },
+  { alias: "lemon Fr", product: "Laimon Fresh CAN 0,33" },
+  { alias: "LimonFresh", product: "Laimon Fresh CAN 0,33" },
+  { alias: "LimonFresh can 0.33", product: "Laimon Fresh CAN 0,33" },
+  { alias: "Moxito", product: "Moxito Fresh CAN 0,5" },
+  { alias: "Moxito lime can 0.45", product: "Moxito Fresh CAN 0,5" },
+  { alias: "Moxito клуб", product: "Moxito Fresh Klubnika CAN 0,5" },
+  { alias: "Moxito klibn", product: "Moxito Fresh Klubnika CAN 0,5" },
+  { alias: "Moxito klubn can 0.45", product: "Moxito Fresh Klubnika CAN 0,5" },
+  { alias: "Red bull can 0.25", product: "Red Bull CAN 0,25" },
+
+  // ── Напитки: планограммы и складские листы (реестр владельца) ──
+  // «RedBull CAN 0,33» из планограммы намеренно не алиасим: такого SKU нет
+  // (только 0,25 и 0,355 с разными ценами) — похоже на опечатку владельца,
+  // а угадывать между двумя ценами на реальные деньги рискованно.
+  { alias: "Coca-cola classic 0,5", product: "Coca-Cola Classic 0,5" },
+  { alias: "Coca-cola CAN 0,25", product: "Coca-Cola Classic CAN 0,25" },
+  { alias: "Cola 0,25", product: "Coca-Cola Classic CAN 0,25" },
+  { alias: "Cola zero 0,25", product: "Coca-Cola ZeroS CAN 0.25" },
+  { alias: "Cola Zero", product: "Coca-Cola ZeroS CAN 0.25" },
+  { alias: "Fanta  0,25", product: "Fanta C CAN 0,25" },
+  { alias: "Fanta CAN 0,25", product: "Fanta C CAN 0,25" },
+  { alias: "Pepsi 0,25", product: "Pepsi CAN 0,25" },
+  { alias: "Мохито лайм", product: "Moxito Fresh CAN 0,5" },
+  { alias: "Мохито Лайм", product: "Moxito Fresh CAN 0,5" },
+  { alias: "Мохито Lime 0,45", product: "Moxito Fresh CAN 0,5" },
+  { alias: "Мохито Клубничный 0,45", product: "Moxito Fresh Klubnika CAN 0,5" },
+  { alias: "Мохито клубника", product: "Moxito Fresh Klubnika CAN 0,5" },
+  { alias: "Мохито Клубн", product: "Moxito Fresh Klubnika CAN 0,5" },
+  { alias: "18+ 0.33 ж/б", product: "Plus 18 CAN 0,45" },
+  { alias: "Plus18 0,33", product: "Plus 18 CAN 0,45" },
+  { alias: "Plus18 0,45", product: "Plus 18 CAN 0,45" },
+  { alias: "Flash 0,33", product: "Flash Up Energy CAN 0,45" },
+  { alias: "Flash 0.33 ж/б", product: "Flash Up Energy CAN 0,45" },
+  { alias: "FlashUp CAN 0,45", product: "Flash Up Energy CAN 0,45" },
+  { alias: "Flash Peach CAN 0,45", product: "Flash up Peach Pineap CAN 0,45" },
+  { alias: "Flash Molito Straw 0,45", product: "Flash Up Mojito Straw CAN 0,45" },
+  { alias: "Flash Up Bubblegum", product: "Flash Up Bubble Gum CAN 0,45" },
+  { alias: "Fuse Tea 0,45", product: "FuseTea Tea Fuse Mango-Cham" },
+  { alias: "Fusetea", product: "FuseTea Tea Fuse Mango-Cham" },
+  { alias: "FuseTea Mango-Cham", product: "FuseTea Tea Fuse Mango-Cham" },
+  { alias: "LaimonF lime", product: "Laimon Fresh CAN 0,33" },
+  { alias: "LaimonFresh lime", product: "Laimon Fresh CAN 0,33" },
+  { alias: "LaimonFresh Lime 0,33", product: "Laimon Fresh CAN 0,33" },
+  { alias: "LaimonFresh Berries 0,33", product: "Laimon Fresh Berries CAN 0,33" },
+  { alias: "Lit Mango CAN 0,5", product: "Lit Energy Mango Coco CAN 0,45" },
+  { alias: "Lit Blueberry CAN 0,45", product: "Lit Energy Blueberry CAN 0,45" },
+  { alias: "Redbull 0,25", product: "Red Bull CAN 0,25" },
+  { alias: "RedBull", product: "Red Bull CAN 0,25" },
+  { alias: "Royal Pomegranate", product: "Royal Pomegranate CAN 0,3" },
+  { alias: "Borjomi 0,33", product: "Borjomi Mineral Water CAN 0,33" },
+  { alias: "Montella Вода 0,33", product: "Montella Вода минеральная 330ml" },
+  { alias: "O'zbegim 0,45", product: "Ozbegim Tea Mango Moychechak 450ml" },
+  { alias: "O'zbegim", product: "Ozbegim Tea Mango Moychechak 450ml" },
+  { alias: "Nesquick 0,2", product: "Nesquick Choco 200ml" },
+  { alias: "Nesquick 0,25", product: "Nesquick Choco 200ml" },
+  { alias: "Sprite 0.25", product: "Sprite 250ml" },
+  { alias: "Lipton 0,25", product: "Lipton Lemon Tea 0.5" },
+
+  // ── Снеки: рукописные листы закупа ──
   { alias: "Flint", product: "Flint Kabob 100gr" },
   { alias: "Lays", product: "Lays Рифлёные Сметана и лук 70gr" },
   { alias: "Арахис", product: "Ermak Арахис с солью 50gr" },
@@ -116,6 +217,21 @@ export const VENDING_ALIASES: AliasItem[] = [
   { alias: "Barni", product: "Barni Шоколадный 30gr" },
   { alias: "Cheers 70", product: "Cheers Сметана и зелень 70gr" },
   { alias: "TUC chees", product: "TUC Crackers Sour cream and Onion" },
+
+  // ── Снеки: планограммы и складские листы (реестр владельца) ──
+  { alias: "TUC печенье", product: "TUC Crackers Sour cream and Onion" },
+  { alias: "Lays 70g", product: "Lays Рифлёные Сметана и лук 70gr" },
+  { alias: "Lays (70)", product: "Lays Рифлёные Сметана и лук 70gr" },
+  { alias: "Flint 100g", product: "Flint Kabob 100gr" },
+  { alias: "Ermak арахис", product: "Ermak Арахис с солью 50gr" },
+  { alias: "Ermak Арахис", product: "Ermak Арахис с солью 50gr" },
+  { alias: "Курт ermak", product: "Ermak Asl Qurt 7шт 30gr" },
+  { alias: "Ermak Qurt 30gr", product: "Ermak Asl Qurt 7шт 30gr" },
+  { alias: "Kit Kat", product: "Kitkat 40gr" },
+  { alias: "M&Ms", product: "M and Ms Шоколадный 40gr" },
+  { alias: "Cheers", product: "Cheers Сметана и зелень 70gr" },
+  { alias: "Oreo 4шт", product: "Oreo x4 38gr" },
+  { alias: "Суперконтик", product: "СуперКонтик Шоколадный вкус 100gr" },
 ];
 
 /**
@@ -141,11 +257,6 @@ export async function seedVendingPrices(
   return { seeded: fresh.length, skipped: VENDING_PRICELIST.length - fresh.length };
 }
 
-/**
- * Занести алиасы в `vending_alias`. Идемпотентно: по имеющемуся алиасу не
- * дублирует. Товар алиаса обязан быть в `vending_product` (иначе алиас
- * пропускается со счётчиком — сид прайса должен идти первым). Возвращает счётчики.
- */
 /**
  * Занести алиасы в `vending_alias`. Идемпотентно: по имеющемуся алиасу не
  * дублирует. Товар алиаса обязан быть в `vending_product` (иначе алиас
