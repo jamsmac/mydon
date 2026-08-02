@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { machineSlot, productSale, vendingProduct, vendingStock } from "@mydon/db";
+import { event, machineSlot, productSale, vendingProduct, vendingStock } from "@mydon/db";
 import { VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
@@ -248,6 +248,79 @@ describe("Вендинг Core: отправка закупа на утвержд
   it("без подключённой очереди согласований — явная ошибка", async () => {
     const vending = new VendingService(purchaseDb(slots, sales, products));
     await assert.rejects(() => vending.submitPurchase(), /ApprovalsService не подключён/);
+  });
+});
+
+describe("Вендинг Core: приёмка накладной на склад (§5.7)", () => {
+  type OrderRow = { id: string; status: string; positions: unknown[] };
+  /** Стаб БД приёмки: отдаёт накладную, копит апдейт статуса/приход/события. */
+  function receiveDb(order: OrderRow | null) {
+    const stockUpserts: Record<string, unknown>[] = [];
+    const updates: Record<string, unknown>[] = [];
+    const events: Record<string, unknown>[] = [];
+    const tx = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => (order ? [order] : []),
+            orderBy: () => ({ limit: async () => (order ? [order] : []) }),
+          }),
+        }),
+      }),
+      update: () => ({ set: (v: Record<string, unknown>) => ({ where: async () => void updates.push(v) }) }),
+      insert: (table: unknown) => ({
+        values: (v: Record<string, unknown>) => {
+          if (table === vendingStock) {
+            stockUpserts.push(v);
+            return { onConflictDoUpdate: async () => undefined };
+          }
+          if (table === event) events.push(v);
+          return Promise.resolve(undefined);
+        },
+      }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    return { db, stockUpserts, updates, events };
+  }
+
+  it("приёмка увеличивает остаток на заказанное и переводит в received", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      positions: [
+        { product: "Montella", order: 12 },
+        { product: "Fanta", order: 12 },
+        { product: "  ", order: 5 }, // пустое имя → мимо
+        { product: "Zero", order: 0 }, // ноль → мимо
+      ],
+    };
+    const { db, stockUpserts, updates, events } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder();
+
+    assert.equal(res.received, true);
+    assert.equal(res.orderId, "o1");
+    assert.equal(res.replenished, 2);
+    assert.equal(res.units, 24);
+    assert.deepEqual(updates[0], { status: "received" });
+    assert.equal(stockUpserts.length, 2);
+    assert.equal(stockUpserts[0]!.productName, "Montella");
+    assert.equal(stockUpserts[0]!.quantity, 12);
+    assert.equal(events[0]!.type, "vending.purchase_order.received");
+  });
+
+  it("накладная уже принята — приёмку не повторяем", async () => {
+    const { db, stockUpserts } = receiveDb({ id: "o1", status: "received", positions: [] });
+    const res = await new VendingService(db).receiveOrder();
+    assert.equal(res.received, false);
+    assert.equal(stockUpserts.length, 0);
+    assert.match(res.reason ?? "", /уже принята/i);
+  });
+
+  it("непринятых накладных нет — понятная причина", async () => {
+    const { db } = receiveDb(null);
+    const res = await new VendingService(db).receiveOrder();
+    assert.equal(res.received, false);
+    assert.match(res.reason ?? "", /нет/i);
   });
 });
 

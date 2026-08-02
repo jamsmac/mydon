@@ -148,6 +148,20 @@ export class CoreClient {
     return this.request<VendingOrder[]>("/vending/orders");
   }
 
+  /** Принять накладную на склад: приход += заказанное (§5.7). Пусто → последняя. */
+  receiveVendingOrder(orderId?: string): Promise<{
+    received: boolean;
+    orderId?: string;
+    replenished: number;
+    units: number;
+    reason?: string;
+  }> {
+    return this.request("/vending/orders/receive", {
+      method: "POST",
+      body: JSON.stringify(orderId ? { orderId } : {}),
+    });
+  }
+
   /** Отправить закуп на утверждение владельцу (§5.7). */
   submitVendingPurchase(createdBy?: string): Promise<{
     submitted: boolean;

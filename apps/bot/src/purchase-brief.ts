@@ -76,6 +76,32 @@ export function formatPurchaseSubmitAck(res: {
   ].join("\n");
 }
 
+/**
+ * Команда приёмки закупа на склад: «принять закуп», «закуп принят», «принял
+ * товар». Требуем глагол приёмки + слово о закупе/товаре, чтобы не спутать с
+ * решением по согласованию.
+ */
+export function isPurchaseReceiveCommand(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return /(принят|принял|приёмк|приемк|получен|получил)/.test(t) && /(закуп|заказ|товар|накладн|склад)/.test(t);
+}
+
+/** Подтверждение приёмки накладной на склад. */
+export function formatReceiveOrderAck(res: {
+  received: boolean;
+  replenished: number;
+  units: number;
+  reason?: string;
+}): string {
+  if (!res.received) return res.reason ?? "Непринятых накладных нет.";
+  return [
+    `📥 Накладная принята на склад.`,
+    "",
+    `Пополнено позиций: ${res.replenished} · всего ${res.units} ед.`,
+    `«что заказать» — пересчитать закуп с учётом прихода.`,
+  ].join("\n");
+}
+
 /** Запрос списка накладных закупа (материализованы при одобрении). */
 export function isPurchaseOrdersQuery(text: string): boolean {
   return /(накладн|история закуп|заказы закуп|оформленн.* закуп)/i.test(text.trim().toLowerCase());

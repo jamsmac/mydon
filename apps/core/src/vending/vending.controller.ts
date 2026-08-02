@@ -109,6 +109,15 @@ export class SubmitPurchaseDto {
   createdBy?: string;
 }
 
+export class ReceiveOrderDto {
+  /** Пусто → принимаем последнюю неполученную накладную. */
+  @IsOptional() @IsString() @MaxLength(36)
+  orderId?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  receivedBy?: string;
+}
+
 export class SyncFinishDto {
   @IsIn(["success", "partial", "failed"])
   status!: "success" | "partial" | "failed";
@@ -174,6 +183,12 @@ export class VendingController {
   @Get("orders")
   orders() {
     return this.vending.orders();
+  }
+
+  /** Принять накладную на склад (§5.7): приход += заказанное, статус received. */
+  @Post("orders/receive")
+  receiveOrder(@Body() dto: ReceiveOrderDto) {
+    return this.vending.receiveOrder(dto.orderId, dto.receivedBy);
   }
 
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────

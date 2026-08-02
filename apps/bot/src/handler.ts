@@ -8,7 +8,9 @@ import {
   formatPurchaseBrief,
   formatPurchaseOrders,
   formatPurchaseSubmitAck,
+  formatReceiveOrderAck,
   isPurchaseOrdersQuery,
+  isPurchaseReceiveCommand,
   isPurchaseSubmitCommand,
 } from "./purchase-brief";
 import { planReport } from "./reports";
@@ -46,6 +48,7 @@ const HELP = [
   "• «что заказать» — сводка к закупу вендинга",
   "• «оформить закуп» — отправить закуп тебе на утверждение",
   "• «накладные» — одобренные закупы",
+  "• «принять закуп» — оприходовать накладную на склад",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
@@ -82,6 +85,18 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка отправки закупа на утверждение:", err);
       return { text: "Не удалось отправить закуп в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Приёмка накладной на склад — мутация; до списка накладных, иначе «накладная
+  // принята» ушла бы в чтение списка (обе ловят слово «накладн»).
+  if (isPurchaseReceiveCommand(text)) {
+    try {
+      const res = await deps.core.receiveVendingOrder();
+      return { text: formatReceiveOrderAck(res) };
+    } catch (err) {
+      console.error("Ошибка приёмки накладной:", err);
+      return { text: "Не удалось принять накладную в MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 

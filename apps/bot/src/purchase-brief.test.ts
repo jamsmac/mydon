@@ -5,7 +5,9 @@ import {
   formatPurchaseBrief,
   formatPurchaseOrders,
   formatPurchaseSubmitAck,
+  formatReceiveOrderAck,
   isPurchaseOrdersQuery,
+  isPurchaseReceiveCommand,
   isPurchaseSubmitCommand,
 } from "./purchase-brief";
 
@@ -138,5 +140,28 @@ describe("Накладные закупа: запрос и список (§5.7)"
     assert.match(t, /Накладные закупа:/);
     assert.match(t, /3 поз., ~84\s?000 сум \(одобрена\)/);
     assert.match(t, /1 поз., ~5\s?000 сум \(принята\)/);
+  });
+});
+
+describe("Приёмка накладной: команда и подтверждение (§5.7)", () => {
+  it("«принять закуп»/«накладная принята» — команда приёмки; «накладные» — нет", () => {
+    assert.equal(isPurchaseReceiveCommand("принять закуп"), true);
+    assert.equal(isPurchaseReceiveCommand("накладная принята"), true);
+    assert.equal(isPurchaseReceiveCommand("принял товар"), true);
+    // Просмотр списка — не приёмка.
+    assert.equal(isPurchaseReceiveCommand("накладные"), false);
+    assert.equal(isPurchaseReceiveCommand("оформить закуп"), false);
+  });
+
+  it("подтверждение приёмки: позиции, единицы и подсказка пересчёта", () => {
+    const t = formatReceiveOrderAck({ received: true, replenished: 2, units: 24 });
+    assert.match(t, /принята на склад/);
+    assert.match(t, /Пополнено позиций: 2 · всего 24 ед/);
+    assert.match(t, /что заказать/);
+  });
+
+  it("нечего принимать — показывает причину", () => {
+    const t = formatReceiveOrderAck({ received: false, replenished: 0, units: 0, reason: "Непринятых накладных нет." });
+    assert.match(t, /Непринятых накладных нет/);
   });
 });
