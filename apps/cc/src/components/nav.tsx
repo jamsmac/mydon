@@ -18,6 +18,7 @@ const MAIN = [
   { href: "/agents", icon: "agents", label: "Агенты" },
 ];
 const SYSTEM = [
+  { href: "/vending", icon: "biz", label: "Автоматы" },
   { href: "/registry", icon: "reg", label: "Реестр" },
   { href: "/audit", icon: "jour", label: "Журнал" },
   { href: "/system", icon: "reg", label: "Система" },

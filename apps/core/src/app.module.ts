@@ -21,6 +21,7 @@ import { StockModule } from "./stock/stock.module";
 import { SupplyModule } from "./supply/supply.module";
 import { SystemModule } from "./system/system.module";
 import { TasksModule } from "./tasks/tasks.module";
+import { VendingModule } from "./vending/vending.module";
 import { VerificationModule } from "./verification/verification.module";
 
 @Module({
@@ -39,6 +40,7 @@ import { VerificationModule } from "./verification/verification.module";
     StockModule,
     SupplyModule,
     SystemModule,
+    VendingModule,
     HistoryModule,
     NotesModule,
     PeopleModule,
