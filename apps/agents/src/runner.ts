@@ -2,6 +2,7 @@ import type { AutonomyTier } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
 import { EXECUTORS } from "./executors";
 import { checkLimit, dailyCap, startOfTashkentDay } from "./limits";
+import { signature } from "./memory";
 import { effectiveActionTier, explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
 import { SKILLS } from "./skills";
@@ -13,7 +14,7 @@ export interface RunResult {
   approvalId?: string;
   reason: string;
   /** Почему пропущено — вызывающий отличает «нет повода» от «потолок исчерпан». */
-  skipReason?: "inactive" | "not_implemented" | "no_signal" | "capped";
+  skipReason?: "inactive" | "not_implemented" | "no_signal" | "capped" | "no_change";
   /** Предложение навыка (текст и факты) — чтобы отчёт по задаче не звал навык
    *  повторно (иначе первый прогон и отчёт могут разойтись). */
   action?: string;
@@ -83,6 +84,26 @@ export async function runSkill(
     };
   }
 
+  // Дельта-память: повод есть, но не изменился ли он с прошлого раза? Если тот
+  // же самый — молчим, не повторяем предложение (иначе владелец приучится жать
+  // «одобрить» не глядя). Сигнатуру прошлого повода читаем из журнала Core.
+  // Запоминаем НИЖЕ — только после успешной подачи, чтобы перекрытый потолком
+  // или несостоявшийся повод не «забылся».
+  const source = `agent:${agent.name}`;
+  const sig = signature(proposal.facts);
+  const lastSig = await core.recallMemory(source, skill);
+  if (lastSig === sig) {
+    return {
+      agent: agent.name,
+      skill,
+      outcome: "skipped",
+      skipReason: "no_change",
+      reason: "с прошлого раза ничего не изменилось — не повторяю предложение",
+      action: proposal.action,
+      facts: proposal.facts,
+    };
+  }
+
   // Дневной потолок действий: считаем ДО того, как агент вынесет предложение
   // или исполнит. Потолок написали давно (Ф9), но в рантайме не применяли —
   // теперь применяем. Использование берём из журнала Core, а не из памяти.
@@ -116,6 +137,8 @@ export async function runSkill(
         type: "agent.action",
         payload: { skill, action: proposal.action, executed: true, verified: exec.detail },
       });
+      // Подача состоялась (исполнено) — запоминаем повод, чтобы не повторять его.
+      await core.rememberMemory(source, skill, sig);
       return {
         agent: agent.name,
         skill,
@@ -144,6 +167,8 @@ export async function runSkill(
     type: "agent.action",
     payload: { skill, action: proposal.action, approvalId: approval.id },
   });
+  // Подача состоялась (вынесено владельцу) — запоминаем повод, чтобы не повторять.
+  await core.rememberMemory(source, skill, sig);
   return {
     agent: agent.name,
     skill,

@@ -141,6 +141,9 @@ describe("Прогон навыка", () => {
           overdueTruncated: false,
         }),
         entities: async () => [],
+        // Дельта-память по умолчанию пуста → повод считается новым (как раньше).
+        recallMemory: async () => null,
+        rememberMemory: async () => undefined,
         ...over,
       } as never,
     };
@@ -388,6 +391,8 @@ describe("Задачи агента и дневной потолок", () => {
         requestApproval: async () => ({ id: "appr-1" }),
         countAgentActions: async () => 0,
         obligations: async () => overdue,
+        recallMemory: async () => null,
+        rememberMemory: async () => undefined,
         ...over,
       } as never,
     };
@@ -459,5 +464,77 @@ describe("Задачи агента и дневной потолок", () => {
     } finally {
       if (prev !== undefined) process.env.AGENT_DAILY_ACTION_CAP = prev;
     }
+  });
+});
+
+describe("Дельта-память: не повторяем то же самое предложение", () => {
+  const base: AgentDefinition = {
+    name: "mem",
+    business: "globerent",
+    status: "active",
+    autonomyDefault: "T0",
+    schedule: [],
+    skills: ["watch-receivables"],
+    dir: "/tmp",
+  };
+  const OVERDUE = {
+    domain: "globerent",
+    totals: [],
+    overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+    overdueTotal: 1,
+    overdueTruncated: false,
+  };
+
+  /** Core с управляемой прошлой сигнатурой; ловим, что запомнили и какие вызовы были. */
+  function memCore(lastSig: string | null) {
+    const remembered: string[] = [];
+    const calls: string[] = [];
+    return {
+      remembered,
+      calls,
+      client: {
+        recordEvent: async () => {
+          calls.push("event");
+        },
+        requestApproval: async () => {
+          calls.push("approval");
+          return { id: "a1" };
+        },
+        obligations: async () => OVERDUE,
+        countAgentActions: async () => 0,
+        recallMemory: async () => lastSig,
+        rememberMemory: async (_s: string, _k: string, sig: string) => {
+          remembered.push(sig);
+        },
+      } as never,
+    };
+  }
+
+  it("первый раз повод новый → подача владельцу + запоминание сигнатуры", async () => {
+    const { client, remembered, calls } = memCore(null);
+    const res = await runSkill(base, "watch-receivables", client, "T0");
+    assert.equal(res.outcome, "approval_requested");
+    assert.equal(remembered.length, 1, "после подачи сигнатуру запомнили");
+    assert.deepEqual(calls, ["event", "approval", "event"]);
+  });
+
+  it("тот же повод второй раз → молчим (no_change), без подачи и без повторного запоминания", async () => {
+    // Сигнатуру берём из первого прогона и подаём как «прошлую».
+    const first = memCore(null);
+    await runSkill(base, "watch-receivables", first.client, "T0");
+    const sig = first.remembered[0];
+
+    const second = memCore(sig);
+    const res = await runSkill(base, "watch-receivables", second.client, "T0");
+    assert.equal(res.outcome, "skipped");
+    assert.equal(res.skipReason, "no_change");
+    assert.equal(second.remembered.length, 0, "повторно не запоминаем");
+    assert.deepEqual(second.calls, ["event"], "только событие о прогоне; ни approval, ни action");
+  });
+
+  it("повод изменился → снова подача", async () => {
+    const { client } = memCore("СИГНАТУРА-НЕ-СОВПАДАЕТ");
+    const res = await runSkill(base, "watch-receivables", client, "T0");
+    assert.equal(res.outcome, "approval_requested");
   });
 });
