@@ -198,6 +198,12 @@ export class AgentsCoreClient {
     return this.request(`/notes?q=${encodeURIComponent(q)}`);
   }
 
+  /** События заданного типа (с полезной нагрузкой) — для семантической памяти. */
+  listEvents(type: string): Promise<{ payload: unknown }[]> {
+    const qs = new URLSearchParams({ type });
+    return this.request(`/events?${qs.toString()}`);
+  }
+
   // ── Дельта-память агента ──────────────────────────────────────────────────
   // Агент помнит СВОЙ прошлый результат по журналу Core (последнее событие
   // agent.memory:<навык>), а не в памяти процесса: иначе после рестарта он
