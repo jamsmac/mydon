@@ -2,6 +2,7 @@ import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Cron } from "croner";
 import { TZ } from "@mydon/shared";
+import { budgetPosture } from "./budget";
 import { AgentsCoreClient } from "./core-client";
 import { autonomyThreshold } from "./policy";
 import { loadAgents, type AgentDefinition } from "./registry";
@@ -144,6 +145,7 @@ async function main(): Promise<void> {
     `MYDON Agents: паспортов ${agents.length}, активных ${agents.filter((a) => a.status === "active").length}, ` +
       `порог автономии ${threshold}${threshold === "T0" ? " (всё через согласование)" : ""}.`,
   );
+  console.log(`Бюджет: ${budgetPosture()}.`);
 
   if (process.env.AGENTS_SCHEDULES_PAUSED === "1") {
     console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания не запускаются. Ожидаю снятия паузы.");

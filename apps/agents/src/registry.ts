@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { AutonomyTier } from "@mydon/shared";
+import { asBudgetStrategy, type BudgetStrategy } from "./budget";
 
 /** Расписание запуска навыка агента. */
 export interface AgentSchedule {
@@ -19,6 +20,8 @@ export interface AgentDefinition {
   schedule: AgentSchedule[];
   skills: string[];
   budgetPerDayUsd?: number;
+  /** Что делать при исчерпании бюджета (паспорт: budget.on_exceeded). */
+  budgetOnExceeded?: BudgetStrategy;
   dir: string;
 }
 
@@ -67,7 +70,7 @@ export function loadAgents(agentsDir: string): {
             .map((s) => ({ cron: String(s.cron), skill: String(s.skill) }))
         : [];
 
-      const budget = raw.budget as { per_day_usd?: unknown } | undefined;
+      const budget = raw.budget as { per_day_usd?: unknown; on_exceeded?: unknown } | undefined;
 
       agents.push({
         name: typeof raw.name === "string" ? raw.name : name,
@@ -78,6 +81,7 @@ export function loadAgents(agentsDir: string): {
         schedule,
         skills: Array.isArray(raw.skills) ? raw.skills.map(String) : [],
         ...(typeof budget?.per_day_usd === "number" ? { budgetPerDayUsd: budget.per_day_usd } : {}),
+        ...(budget?.on_exceeded !== undefined ? { budgetOnExceeded: asBudgetStrategy(budget.on_exceeded) } : {}),
         dir,
       });
     } catch (err) {
