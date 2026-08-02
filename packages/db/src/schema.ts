@@ -15,6 +15,7 @@ import {
   jsonb,
   numeric,
   integer,
+  boolean,
   index,
   date,
   uniqueIndex,
@@ -742,6 +743,140 @@ export const systemConfig = pgTable("system_config", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ── Вендинг-операции (ТЗ «Вендинг-операции», §4) ─────────────────────────────
+// Перенос Ourvend-скрипта в продукт. Машины и товары живут в общем реестре
+// (entity), склад — в stock_movement; здесь — вендинг-специфика: слоты с
+// ВМЕСТИМОСТЬЮ (её нет в machine_stock), снапшоты, продажи за период, прайс и
+// алиасы имён вендора. Числа Ourvend приходят строками — в базе храним числами.
+
+export const vendingCategoryEnum = pgEnum("vending_category", ["drink", "snack", "other"]);
+export const vendingAliasSourceEnum = pgEnum("vending_alias_source", ["ourvend", "warehouse", "manual"]);
+export const vendingSyncStatusEnum = pgEnum("vending_sync_status", ["running", "success", "partial", "failed"]);
+
+/** Справочник товаров вендинга: прайс и кратность (Приложение А ТЗ). */
+export const vendingProduct = pgTable("vending_product", {
+  id: id(),
+  /** Каноническое имя товара. */
+  name: text("name").notNull().unique(),
+  category: vendingCategoryEnum("category").default("other").notNull(),
+  /** Закупочная цена за единицу, сум. Пусто → в сумму закупа не входит. */
+  purchasePrice: numeric("purchase_price", { precision: 10, scale: 2 }),
+  /** Кратность закупки: напитки 12, снеки 10 (решение владельца 02.08.2026). */
+  packSize: integer("pack_size").default(1).notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: createdAt(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/**
+ * Алиасы имён: строка ровно как в Ourvend/рукописном листе → товар. Только
+ * ТОЧНЫЕ соответствия (нечёткое сопоставление по подстроке в продукт не
+ * переносим — оно даёт неверную цену на новом похожем имени).
+ */
+export const vendingAlias = pgTable(
+  "vending_alias",
+  {
+    id: id(),
+    productId: uuid("product_id")
+      .references(() => vendingProduct.id, { onDelete: "cascade" })
+      .notNull(),
+    alias: text("alias").notNull().unique(),
+    source: vendingAliasSourceEnum("source").default("ourvend").notNull(),
+  },
+  (t) => [index("vending_alias_alias_idx").on(t.alias)],
+);
+
+/** Актуальная планограмма: слот → товар → вместимость/остаток (SoltInfo). */
+export const machineSlot = pgTable(
+  "machine_slot",
+  {
+    id: id(),
+    /** Машина в реестре, если сопоставлена. */
+    machineId: uuid("machine_id").references(() => entity.id),
+    /** MuMachineID Ourvend (серийный). */
+    machineSerial: text("machine_serial").notNull(),
+    /** SiCoilId — номер слота (пружины). */
+    coilId: text("coil_id").notNull(),
+    /** Имя товара как в вендоре; пусто → слот не назначен. */
+    productName: text("product_name"),
+    productId: uuid("product_id").references(() => vendingProduct.id),
+    capacity: integer("capacity").default(0).notNull(),
+    quantity: integer("quantity").default(0).notNull(),
+    /** Прошёл ли валидацию 0 < capacity ≤ 100. */
+    isValid: boolean("is_valid").default(false).notNull(),
+    syncedAt: timestamp("synced_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [uniqueIndex("machine_slot_key").on(t.machineSerial, t.coilId)],
+);
+
+/** История слотов: пишется каждым сбором. По ней считается реальный расход. */
+export const slotSnapshot = pgTable(
+  "slot_snapshot",
+  {
+    id: id(),
+    machineSerial: text("machine_serial").notNull(),
+    coilId: text("coil_id").notNull(),
+    productName: text("product_name"),
+    capacity: integer("capacity").default(0).notNull(),
+    quantity: integer("quantity").default(0).notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [index("slot_snapshot_machine_captured_idx").on(t.machineSerial, t.capturedAt)],
+);
+
+/** Продажи по товарам за период (для прогноза и пометки «нет продаж»). */
+export const productSale = pgTable(
+  "product_sale",
+  {
+    id: id(),
+    machineSerial: text("machine_serial").notNull(),
+    productName: text("product_name").notNull(),
+    productId: uuid("product_id").references(() => vendingProduct.id),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    quantity: integer("quantity").default(0).notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [index("product_sale_machine_captured_idx").on(t.machineSerial, t.capturedAt)],
+);
+
+/** Продажи автомата за период (деньги и чеки). */
+export const machineSale = pgTable(
+  "machine_sale",
+  {
+    id: id(),
+    machineSerial: text("machine_serial").notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    totalAmount: numeric("total_amount", { precision: 14, scale: 2 }).default("0").notNull(),
+    totalCount: integer("total_count").default(0).notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [index("machine_sale_machine_captured_idx").on(t.machineSerial, t.capturedAt)],
+);
+
+/** Неопознанные имена товаров — на разбор менеджеру (не роняют сбор). */
+export const vendingUnmatched = pgTable("vending_unmatched", {
+  id: id(),
+  externalName: text("external_name").notNull().unique(),
+  source: vendingAliasSourceEnum("source").default("ourvend").notNull(),
+  occurrences: integer("occurrences").default(1).notNull(),
+  firstSeenAt: createdAt(),
+  resolvedProductId: uuid("resolved_product_id").references(() => vendingProduct.id),
+});
+
+/** Журнал запусков сбора Ourvend. */
+export const vendingSyncRun = pgTable("vending_sync_run", {
+  id: id(),
+  startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  status: vendingSyncStatusEnum("status").default("running").notNull(),
+  machinesTotal: integer("machines_total").default(0).notNull(),
+  machinesOk: integer("machines_ok").default(0).notNull(),
+  error: text("error"),
+  durationMs: integer("duration_ms"),
+});
+
 /**
  * Полная схема — для drizzle-клиента.
  *
@@ -783,4 +918,13 @@ export const schema = {
   notificationDelivery,
   // Глобальные тумблеры системы (редактируются из панели).
   systemConfig,
+  // Вендинг-операции (§4): слоты, снапшоты, продажи, прайс, алиасы, сбор.
+  vendingProduct,
+  vendingAlias,
+  machineSlot,
+  slotSnapshot,
+  productSale,
+  machineSale,
+  vendingUnmatched,
+  vendingSyncRun,
 };
