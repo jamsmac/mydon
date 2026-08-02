@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { machineSlot, productSale, vendingProduct } from "@mydon/db";
+import { machineSlot, productSale, vendingProduct, vendingStock } from "@mydon/db";
 import { VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
@@ -17,11 +17,14 @@ function forecastDb(slots: Row[], sales: SaleRow[]) {
   return { select: () => ({ from: async (t: unknown) => (t === productSale ? sales : t === machineSlot ? slots : slots) }) } as never;
 }
 
-/** Стаб БД для закупа: слоты + продажи + прайс, различаем таблицы по ссылке. */
-function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[]) {
+type StockRow = { productName: string; quantity: number; countedAt: Date };
+
+/** Стаб БД для закупа: слоты + продажи + прайс + склад, различаем по ссылке. */
+function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[], stock: StockRow[] = []) {
   return {
     select: () => ({
-      from: async (t: unknown) => (t === productSale ? sales : t === vendingProduct ? products : slots),
+      from: async (t: unknown) =>
+        t === productSale ? sales : t === vendingProduct ? products : t === vendingStock ? stock : slots,
     }),
   } as never;
 }
@@ -166,6 +169,50 @@ describe("Вендинг Core: сводный закуп (§5.4–5.5)", () => {
     assert.ok(s.noPrice.includes("NoPrice"));
     assert.ok(s.items.some((i) => i.product === "NoPrice")); // есть продажи → участвует
     assert.equal(s.costRounded, 60000); // деньги — только Montella
+  });
+
+  it("остаток склада вычитается из потребности: buy = need − stock (§5.4)", async () => {
+    // Склад Montella 1 → нехватка 4−1=3, но округление до упаковки 12 то же.
+    const stock: StockRow[] = [{ productName: "Montella", quantity: 1, countedAt: t }];
+    const svc = new VendingService(purchaseDb(slots, sales, products, stock));
+    const s = await svc.purchase();
+    const montella = s.items.find((i) => i.product === "Montella")!;
+    assert.equal(montella.stock, 1);
+    assert.equal(montella.covered, 1); // min(1, 4)
+    assert.equal(montella.buy, 3); // max(0, 4−1)
+    assert.equal(montella.order, 12); // ceil(3/12)*12
+    assert.equal(montella.costExact, 15000); // 3×5000
+  });
+
+  it("склад покрывает потребность полностью — товар выпадает из закупа (buy=0)", async () => {
+    const stock: StockRow[] = [{ productName: "Montella", quantity: 10, countedAt: t }];
+    const svc = new VendingService(purchaseDb(slots, sales, products, stock));
+    const s = await svc.purchase();
+    const montella = s.items.find((i) => i.product === "Montella")!;
+    assert.equal(montella.buy, 0);
+    assert.equal(montella.order, 0); // buy 0 → заказывать нечего
+    assert.equal(montella.surplus, 6); // 10 − 4
+    assert.equal(s.costRounded, 0); // единственная денежная позиция закрыта складом
+  });
+});
+
+describe("Вендинг Core: инвентаризация склада (§5.4)", () => {
+  it("перезаписывает остаток по товару (upsert), пустое имя пропускает", async () => {
+    const { db, inserts } = writeDb();
+    const svc = new VendingService(db);
+    const res = await svc.ingestStock({
+      countedAt: "2026-08-02T09:00:00Z",
+      items: [
+        { product: "Montella", quantity: 24 },
+        { product: "  ", quantity: 5 }, // пустое имя → пропуск
+      ],
+    });
+    assert.deepEqual(res, { items: 2 }); // счётчик по входу
+    // Записана только валидная позиция.
+    assert.equal(inserts.length, 1);
+    const v = inserts[0]!.values as { productName: string; quantity: number };
+    assert.equal(v.productName, "Montella");
+    assert.equal(v.quantity, 24);
   });
 });
 

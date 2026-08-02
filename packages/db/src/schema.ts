@@ -855,6 +855,23 @@ export const machineSale = pgTable(
   (t) => [index("machine_sale_machine_captured_idx").on(t.machineSerial, t.capturedAt)],
 );
 
+/**
+ * Остаток центрального склада вендинга по товару (§5.4). Одна строка на товар —
+ * текущий баланс, вводится инвентаризацией (перезапись, а не леджер): владелец
+ * пересчитывает склад и вводит факт, как со слотами автоматов. По этому остатку
+ * закуп считает `buy = max(0, потребность − склад)`, а не «весь дефицит».
+ */
+export const vendingStock = pgTable("vending_stock", {
+  id: id(),
+  /** Каноническое имя товара (как в vending_product / слотах). */
+  productName: text("product_name").notNull().unique(),
+  productId: uuid("product_id").references(() => vendingProduct.id),
+  quantity: integer("quantity").default(0).notNull(),
+  /** Когда пересчитали склад (ISO приходит от инвентаризации). */
+  countedAt: timestamp("counted_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 /** Неопознанные имена товаров — на разбор менеджеру (не роняют сбор). */
 export const vendingUnmatched = pgTable("vending_unmatched", {
   id: id(),
@@ -925,6 +942,7 @@ export const schema = {
   slotSnapshot,
   productSale,
   machineSale,
+  vendingStock,
   vendingUnmatched,
   vendingSyncRun,
 };
