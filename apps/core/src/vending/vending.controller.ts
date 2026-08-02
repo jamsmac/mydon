@@ -7,6 +7,7 @@ import {
   IsInt,
   IsNotEmpty,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   MaxLength,
@@ -153,6 +154,10 @@ export class ReceiveOrderDto {
 
   @IsOptional() @IsString() @MaxLength(128)
   receivedBy?: string;
+
+  /** Товар → сколько сразу распределили по автоматам, минуя склад (§5.7). */
+  @IsOptional() @IsObject()
+  distributed?: Record<string, number>;
 }
 
 export class SyncFinishDto {
@@ -225,7 +230,7 @@ export class VendingController {
   /** Принять накладную на склад (§5.7): приход += заказанное, статус received. */
   @Post("orders/receive")
   receiveOrder(@Body() dto: ReceiveOrderDto) {
-    return this.vending.receiveOrder(dto.orderId, dto.receivedBy);
+    return this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
   }
 
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────

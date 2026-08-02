@@ -9,6 +9,7 @@ import {
   isPurchaseOrdersQuery,
   isPurchaseReceiveCommand,
   isPurchaseSubmitCommand,
+  parseReceiveDistribution,
 } from "./purchase-brief";
 
 const item = (o: Partial<VendingPurchaseItem> & { product: string }): VendingPurchaseItem => ({
@@ -153,15 +154,58 @@ describe("Приёмка накладной: команда и подтверж�
     assert.equal(isPurchaseReceiveCommand("оформить закуп"), false);
   });
 
+  it("отрицание перед глаголом — это НЕ приёмка (найдено адверсариал-ревью)", () => {
+    assert.equal(isPurchaseReceiveCommand("ещё не принял закуп, жду курьера"), false);
+    assert.equal(isPurchaseReceiveCommand("не получил товар"), false);
+    assert.equal(isPurchaseReceiveCommand("пока не принят закуп"), false);
+    // Отрицание не по глаголу приёмки — не должно гасить настоящую команду.
+    assert.equal(isPurchaseReceiveCommand("товар не бракованный, принял накладную"), true);
+  });
+
   it("подтверждение приёмки: позиции, единицы и подсказка пересчёта", () => {
     const t = formatReceiveOrderAck({ received: true, replenished: 2, units: 24 });
     assert.match(t, /принята на склад/);
-    assert.match(t, /Пополнено позиций: 2 · всего 24 ед/);
+    assert.match(t, /Зачислено на склад: 24 ед\. \(2 поз\.\)/);
     assert.match(t, /что заказать/);
+    assert.doesNotMatch(t, /Распределено/); // без distributedUnits — блока нет
   });
 
   it("нечего принимать — показывает причину", () => {
     const t = formatReceiveOrderAck({ received: false, replenished: 0, units: 0, reason: "Непринятых накладных нет." });
     assert.match(t, /Непринятых накладных нет/);
+  });
+
+  it("с распределением по автоматам — отдельная строка (§5.7)", () => {
+    const t = formatReceiveOrderAck({ received: true, replenished: 1, units: 5, distributedUnits: 5 });
+    assert.match(t, /Зачислено на склад: 5 ед\. \(1 поз\.\)/);
+    assert.match(t, /Распределено по автоматам: 5 ед\./);
+  });
+
+  it("несовпавшее распределение — предупреждение, а не тишина (найдено адверсариал-ревью)", () => {
+    const t = formatReceiveOrderAck({
+      received: true,
+      replenished: 1,
+      units: 10,
+      distributedUnits: 0,
+      unmatchedDistribution: ["Flint"],
+    });
+    assert.match(t, /Не найдено в накладной \(ушло на склад\): Flint/);
+  });
+
+  it("parseReceiveDistribution: пары после первого двоеточия, без двоеточия — undefined", () => {
+    assert.deepEqual(parseReceiveDistribution("принять закуп: TUC 5, Flint 5"), { TUC: 5, Flint: 5 });
+    assert.equal(parseReceiveDistribution("принять закуп"), undefined);
+    assert.equal(parseReceiveDistribution("принять закуп: "), undefined); // двоеточие есть, пар нет
+  });
+
+  it("parseReceiveDistribution: двоеточие с текстом без чисел — безопасный undefined", () => {
+    assert.equal(parseReceiveDistribution("накладная принята: спасибо"), undefined);
+  });
+
+  it("parseReceiveDistribution: посторонний текст со своим двоеточием ДО списка не склеивается в мусорный ключ (найдено адверсариал-ревью)", () => {
+    // Двоеточие внутри пояснения («раскладка:») не должно попасть в имя товара —
+    // этот кусок просто не распознаётся, а не превращается в мусорную пару.
+    const parsed = parseReceiveDistribution("Принял: по факту вот такая раскладка: Кола 5, Спрайт 3");
+    assert.deepEqual(parsed, { Спрайт: 3 });
   });
 });

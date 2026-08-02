@@ -264,8 +264,12 @@ describe("Вендинг Core: отправка закупа на утвержд
 
 describe("Вендинг Core: приёмка накладной на склад (§5.7)", () => {
   type OrderRow = { id: string; status: string; positions: unknown[] };
-  /** Стаб БД приёмки: отдаёт накладную, копит апдейт статуса/приход/события. */
-  function receiveDb(order: OrderRow | null) {
+  /**
+   * Стаб БД приёмки: отдаёт накладную, копит апдейт статуса/приход/события.
+   * `aliases`/`products` — только для тестов с `distributed` (loadProductIndex
+   * читает их вне транзакции); без distributed этот select не вызывается.
+   */
+  function receiveDb(order: OrderRow | null, aliases: unknown[] = [], products: unknown[] = []) {
     const stockUpserts: Record<string, unknown>[] = [];
     const updates: Record<string, unknown>[] = [];
     const events: Record<string, unknown>[] = [];
@@ -290,7 +294,12 @@ describe("Вендинг Core: приёмка накладной на склад
         },
       }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    // loadProductIndex() читает vendingAlias затем vendingProduct — различаем по счётчику.
+    let call = 0;
+    const db = {
+      select: () => ({ from: async () => (call++ === 0 ? aliases : products) }),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
     return { db, stockUpserts, updates, events };
   }
 
@@ -332,6 +341,121 @@ describe("Вендинг Core: приёмка накладной на склад
     const res = await new VendingService(db).receiveOrder();
     assert.equal(res.received, false);
     assert.match(res.reason ?? "", /нет/i);
+  });
+
+  it("распределение по автоматам уменьшает зачисление на склад (реальный процесс, лист «Snack склад»)", async () => {
+    // Было 0, закуп 10, сразу 5 в автомат — на складе должно остаться только 5.
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { TUC: 5 });
+
+    assert.equal(res.units, 5); // на складе
+    assert.equal(res.distributedUnits, 5); // в автоматах
+    assert.equal(stockUpserts.length, 1);
+    assert.equal(stockUpserts[0]!.quantity, 5);
+  });
+
+  it("распределено больше заказанного — отсекается до order, склад не уходит в минус", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { TUC: 15 });
+
+    assert.equal(res.distributedUnits, 10); // не больше order
+    assert.equal(res.units, 0);
+    assert.equal(stockUpserts.length, 0); // toWarehouse=0 → нечего вставлять
+  });
+
+  it("распределение по алиасу резолвится к канону — то же пространство имён, что и склад §5.4", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      positions: [{ product: "Montella Вода минеральная 330ml", order: 24 }],
+    };
+    const { db, stockUpserts } = receiveDb(
+      order,
+      [{ productId: "p1", alias: "Montella" }],
+      [{ id: "p1", name: "Montella Вода минеральная 330ml" }],
+    );
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { montella: 10 });
+
+    assert.equal(res.distributedUnits, 10);
+    assert.equal(res.units, 14);
+    assert.equal(stockUpserts[0]!.quantity, 14);
+  });
+
+  it("без distributed — как раньше: весь order идёт на склад", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder();
+    assert.equal(res.distributedUnits, 0);
+    assert.equal(res.units, 10);
+  });
+
+  it("нечисловое/дробное значение в distributed — запись игнорируем, приёмку не роняем (найдено адверсариал-ревью)", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", {
+      TUC: "not-a-number" as unknown as number,
+    });
+
+    assert.equal(res.distributedUnits, 0);
+    assert.equal(res.units, 10); // весь order — на склад, будто distributed не передавали
+    assert.deepEqual(res.unmatchedDistribution, []); // невалидная запись даже не попала в карту
+    assert.equal(stockUpserts[0]!.quantity, 10);
+  });
+
+  it("отрицательное/дробное целое в distributed — тоже игнорируем (§5.7)", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { TUC: 2.5 });
+    assert.equal(res.distributedUnits, 0);
+    assert.equal(res.units, 10);
+  });
+
+  it("два алиаса одного товара в distributed суммируются, а не перезаписывают друг друга (найдено адверсариал-ревью)", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      positions: [{ product: "Montella Вода минеральная 330ml", order: 30 }],
+    };
+    const { db, stockUpserts } = receiveDb(
+      order,
+      [
+        { productId: "p1", alias: "Montella" },
+        { productId: "p1", alias: "Montella pet 0.33" },
+      ],
+      [{ id: "p1", name: "Montella Вода минеральная 330ml" }],
+    );
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", {
+      Montella: 5,
+      "Montella pet 0.33": 8,
+    });
+
+    assert.equal(res.distributedUnits, 13); // 5+8, не 8 (последний не должен затирать первый)
+    assert.equal(res.units, 17); // 30-13
+    assert.equal(stockUpserts[0]!.quantity, 17);
+  });
+
+  it("distributed без совпадения ни с одной позицией — не роняет приёмку, весь order на склад, но видно в unmatchedDistribution (найдено адверсариал-ревью)", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { Flint: 5 });
+
+    assert.equal(res.distributedUnits, 0);
+    assert.equal(res.units, 10); // не нашли совпадения — всё на склад, как раньше
+    assert.deepEqual(res.unmatchedDistribution, ["Flint"]);
+    assert.equal(stockUpserts[0]!.quantity, 10);
+  });
+
+  it("сопоставление позиции и distributed без учёта регистра/пробелов даже без алиаса", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { "  tuc  ": 4 });
+
+    assert.equal(res.distributedUnits, 4);
+    assert.equal(res.units, 6);
+    assert.deepEqual(res.unmatchedDistribution, []);
+    assert.equal(stockUpserts[0]!.quantity, 6);
   });
 });
 

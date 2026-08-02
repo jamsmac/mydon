@@ -83,7 +83,48 @@ export function formatPurchaseSubmitAck(res: {
  */
 export function isPurchaseReceiveCommand(text: string): boolean {
   const t = text.trim().toLowerCase();
+  // «ещё не принял», «не получил» — отрицание прямо перед глаголом: владелец
+  // говорит, что приёмки НЕ было, а не наоборот (найдено адверсариал-ревью).
+  // Без \b: в JS-regex он не срабатывает после кириллицы (не входит в \w) —
+  // тот же нюанс, что и в stock-intake.ts.
+  if (/не\s+(прин\w*|получ\w*)/.test(t)) return false;
   return /(принят|принял|приёмк|приемк|получен|получил)/.test(t) && /(закуп|заказ|товар|накладн|склад)/.test(t);
+}
+
+/**
+ * Разбор «сколько сразу раздали по автоматам» из той же команды приёмки —
+ * реальный процесс владельца (лист «Snack склад»): часть закупа при приёмке
+ * сразу уходит в автоматы, минуя склад. Без этого зачислялся бы на склад весь
+ * order, и до следующего пересчёта («склад X N») это выглядело бы как
+ * фиктивная недостача.
+ *
+ * Формат: всё после ПЕРВОГО двоеточия — пары «товар N» (как у ввода склада).
+ * Без двоеточия — распределения нет, приёмка ведёт себя как раньше (весь
+ * order на склад): «принять закуп» само по себе не требует уточнения.
+ *
+ * Имя товара не может содержать двоеточие: если владелец вставил пояснение
+ * с своим двоеточием ДО списка («Принял: по факту раскладка: Кола 5, …»),
+ * этот кусок просто не распознаётся как пара, а не склеивается в мусорный
+ * ключ вида «по факту раскладка: Кола» → 5 (найдено адверсариал-ревью).
+ */
+export function parseReceiveDistribution(text: string): Record<string, number> | undefined {
+  const colon = text.indexOf(":");
+  if (colon === -1) return undefined;
+  const body = text.slice(colon + 1).trim();
+  if (!body) return undefined;
+
+  const out: Record<string, number> = {};
+  for (const chunk of body.split(/[,;\n]+/)) {
+    const part = chunk.trim();
+    if (!part) continue;
+    const m = /^([^:]*?)[\s:.\-—=]*(\d+)$/.exec(part);
+    if (!m) continue;
+    const product = m[1].trim().replace(/[«»"']/g, "");
+    const qty = Number(m[2]);
+    if (!product || !Number.isInteger(qty) || qty < 0) continue;
+    out[product] = qty;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** Подтверждение приёмки накладной на склад. */
@@ -91,15 +132,23 @@ export function formatReceiveOrderAck(res: {
   received: boolean;
   replenished: number;
   units: number;
+  distributedUnits?: number;
+  unmatchedDistribution?: string[];
   reason?: string;
 }): string {
   if (!res.received) return res.reason ?? "Непринятых накладных нет.";
-  return [
-    `📥 Накладная принята на склад.`,
-    "",
-    `Пополнено позиций: ${res.replenished} · всего ${res.units} ед.`,
-    `«что заказать» — пересчитать закуп с учётом прихода.`,
-  ].join("\n");
+  const lines = [`📥 Накладная принята на склад.`, "", `Зачислено на склад: ${res.units} ед. (${res.replenished} поз.)`];
+  if (res.distributedUnits && res.distributedUnits > 0) {
+    lines.push(`Распределено по автоматам: ${res.distributedUnits} ед.`);
+  }
+  // Не молчим, если распределение не совпало ни с одной позицией накладной —
+  // иначе выглядит так, будто оно учтено, а сумма тихо ушла на склад
+  // (найдено адверсариал-ревью).
+  if (res.unmatchedDistribution && res.unmatchedDistribution.length > 0) {
+    lines.push(`⚠️ Не найдено в накладной (ушло на склад): ${res.unmatchedDistribution.join(", ")}`);
+  }
+  lines.push("", `«что заказать» — пересчитать закуп с учётом прихода.`);
+  return lines.join("\n");
 }
 
 /** Запрос списка накладных закупа (материализованы при одобрении). */
