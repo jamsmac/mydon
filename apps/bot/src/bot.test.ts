@@ -59,6 +59,16 @@ describe("Брифинг", () => {
     assert.doesNotMatch(text, /Договоры на исходе: 0/);
   });
 
+  it("строка закупа появляется, когда есть что заказать", () => {
+    const text = formatBriefing(base, [], { positions: 3, costRounded: 84000 });
+    assert.match(text, /🛒 К закупу: 3 поз\. на ~84\s?000 сум — «оформить закуп»/);
+  });
+
+  it("без закупа (0 позиций) строки нет", () => {
+    assert.doesNotMatch(formatBriefing(base, [], { positions: 0, costRounded: 0 }), /К закупу/);
+    assert.doesNotMatch(formatBriefing(base), /К закупу/);
+  });
+
   it("время показывает в ташкентском поясе", () => {
     // 02:30 UTC = 07:30 в Ташкенте
     assert.match(formatBriefing(base), /07:30/);

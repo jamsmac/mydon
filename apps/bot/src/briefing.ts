@@ -6,7 +6,17 @@ import type { ApprovalRow, Briefing } from "./core-client";
  * Порядок блоков — по тревогам владельца из фронта Ф11:
  * долги · автоматы · заявки · сроки договоров · что требует решения.
  */
-export function formatBriefing(b: Briefing, approvals: ApprovalRow[] = []): string {
+/** Сводка закупа для брифинга: сколько позиций и на сколько (§5.7). */
+export interface BriefingPurchase {
+  positions: number;
+  costRounded: number;
+}
+
+export function formatBriefing(
+  b: Briefing,
+  approvals: ApprovalRow[] = [],
+  purchase?: BriefingPurchase,
+): string {
   const when = new Date(b.generatedAt).toLocaleString("ru-RU", {
     timeZone: TZ,
     day: "2-digit",
@@ -36,6 +46,12 @@ export function formatBriefing(b: Briefing, approvals: ApprovalRow[] = []): stri
   const calm = rows.filter(([, n]) => n === 0).map(([label]) => label);
   if (alarms.length > 0 && calm.length > 0) {
     lines.push("", `Спокойно: ${calm.join(", ").toLowerCase()}.`);
+  }
+
+  if (purchase && purchase.positions > 0) {
+    const sum = Math.round(purchase.costRounded).toLocaleString("ru-RU");
+    const tail = purchase.costRounded > 0 ? ` на ~${sum} сум` : "";
+    lines.push("", `🛒 К закупу: ${purchase.positions} поз.${tail} — «оформить закуп».`);
   }
 
   if (approvals.length > 0) {
