@@ -32,6 +32,8 @@ export function RawUpload({
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<number | null>(null);
+  // Многолистовой Excel: когда приёмка вернула список листов — показываем выбор.
+  const [sheets, setSheets] = useState<string[] | null>(null);
 
   if (!open) {
     return (
@@ -55,15 +57,25 @@ export function RawUpload({
           const res = await importFile(form);
           if (res.ok) {
             setDone(res.rows ?? 0);
+            setSheets(null);
             router.refresh();
+          } else if (res.needsSheet && res.sheets) {
+            // Не ошибка, а развилка: книга многолистовая — просим выбрать лист.
+            setSheets(res.sheets);
+            setError(res.error ?? null);
           } else setError(res.error ?? "Не получилось");
         });
       }}
     >
       <div className="srcfr">
         <label>
-          Файл выгрузки (CSV, TSV)
-          <input type="file" name="file" accept=".csv,.tsv,.txt,text/csv,text/plain" required />
+          Файл выгрузки (CSV, TSV, Excel)
+          <input
+            type="file"
+            name="file"
+            accept=".csv,.tsv,.txt,.xlsx,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            required
+          />
         </label>
         <label>
           Когда снято у источника
@@ -97,9 +109,27 @@ export function RawUpload({
         </label>
       </div>
 
+      {sheets && (
+        <div className="srcfr" style={{ background: "var(--warn-bg, transparent)" }}>
+          <label>
+            Лист книги Excel
+            <select name="sheet" className="mapsel" style={{ maxWidth: "none", height: 34 }} defaultValue={sheets[0]}>
+              {sheets.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label style={{ alignSelf: "end" }}>
+            <input type="checkbox" name="mergeSheets" value="1" /> Объединить все листы (одинаковые заголовки)
+          </label>
+        </div>
+      )}
+
       <div className="srcfa">
         <button className="btn sm" type="submit" disabled={pending}>
-          {pending ? "Загружаю…" : "Загрузить"}
+          {pending ? "Загружаю…" : sheets ? "Импортировать выбранное" : "Загрузить"}
         </button>
         <button type="button" className="btn sm ghost" onClick={() => setOpen(false)}>
           Закрыть

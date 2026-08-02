@@ -63,4 +63,118 @@ describe("Excel: разбор листа", () => {
     const s = await parseXlsx(bytes());
     assert.equal(s.rows[0][0], "26042418364631");
   });
+
+  it("одна книга — один лист в sheetNames", async () => {
+    const s = await parseXlsx(bytes());
+    assert.deepEqual(s.sheetNames, ["Отчёт"]);
+  });
+});
+
+// ── Многолистовая книга ─────────────────────────────────────────────────────
+// Строим минимальный .xlsx вручную (stored-zip, без сжатия): парсер CRC не
+// проверяет, ячейки — inlineStr, поэтому sharedStrings не нужен. Так тест не
+// зависит от внешнего генератора и проверяет выбор листа по имени.
+
+/** Собрать zip из записей {name, content} (метод store). */
+function buildZip(entries: { name: string; content: string }[]): Uint8Array {
+  const u16 = (n: number) => {
+    const b = Buffer.alloc(2);
+    b.writeUInt16LE(n);
+    return b;
+  };
+  const u32 = (n: number) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE(n);
+    return b;
+  };
+  const locals: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = Buffer.from(e.name, "utf8");
+    const data = Buffer.from(e.content, "utf8");
+    const local = Buffer.concat([
+      u32(0x04034b50), u16(20), u16(0), u16(0), u16(0), u16(0),
+      u32(0), u32(data.length), u32(data.length), u16(name.length), u16(0), name, data,
+    ]);
+    locals.push(local);
+    central.push(
+      Buffer.concat([
+        u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(0), u16(0),
+        u32(0), u32(data.length), u32(data.length),
+        u16(name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), name,
+      ]),
+    );
+    offset += local.length;
+  }
+  const cd = Buffer.concat(central);
+  const eocd = Buffer.concat([
+    u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length), u32(cd.length), u32(offset), u16(0),
+  ]);
+  return new Uint8Array(Buffer.concat([...locals, cd, eocd]));
+}
+
+/** Лист из строк inlineStr: первая строка — заголовки. */
+function sheetXml(rows: string[][]): string {
+  const col = (i: number) => String.fromCharCode(65 + i);
+  const body = rows
+    .map(
+      (r, ri) =>
+        `<row r="${ri + 1}">` +
+        r.map((v, ci) => `<c r="${col(ci)}${ri + 1}" t="inlineStr"><is><t>${v}</t></is></c>`).join("") +
+        `</row>`,
+    )
+    .join("");
+  return `<?xml version="1.0"?><worksheet><sheetData>${body}</sheetData></worksheet>`;
+}
+
+/** Книга из нескольких листов (name → строки), связи по r:id. */
+function buildWorkbook(sheets: { name: string; rows: string[][] }[]): Uint8Array {
+  const wbSheets = sheets
+    .map((s, i) => `<sheet name="${s.name}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`)
+    .join("");
+  const rels = sheets
+    .map((_, i) => `<Relationship Id="rId${i + 1}" Target="worksheets/sheet${i + 1}.xml"/>`)
+    .join("");
+  const entries = [
+    {
+      name: "xl/workbook.xml",
+      content: `<?xml version="1.0"?><workbook xmlns:r="http://x"><sheets>${wbSheets}</sheets></workbook>`,
+    },
+    { name: "xl/_rels/workbook.xml.rels", content: `<?xml version="1.0"?><Relationships>${rels}</Relationships>` },
+    ...sheets.map((s, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, content: sheetXml(s.rows) })),
+  ];
+  return buildZip(entries);
+}
+
+describe("Excel: многолистовая книга", () => {
+  const book = () =>
+    buildWorkbook([
+      { name: "Продажи", rows: [["Товар", "Сумма"], ["Латте", "15000"]] },
+      { name: "Остатки", rows: [["Слот", "Кол-во"], ["A1", "5"], ["A2", "3"]] },
+    ]);
+
+  it("sheetNames перечисляет все листы по порядку", async () => {
+    const s = await parseXlsx(book());
+    assert.deepEqual(s.sheetNames, ["Продажи", "Остатки"]);
+  });
+
+  it("без имени берётся первый лист", async () => {
+    const s = await parseXlsx(book());
+    assert.equal(s.sheet, "Продажи");
+    assert.deepEqual(s.columns, ["Товар", "Сумма"]);
+    assert.equal(s.rows.length, 1);
+  });
+
+  it("по имени читается именно указанный лист (не теряется молча)", async () => {
+    const s = await parseXlsx(book(), "Остатки");
+    assert.equal(s.sheet, "Остатки");
+    assert.deepEqual(s.columns, ["Слот", "Кол-во"]);
+    assert.equal(s.rows.length, 2);
+    assert.equal(s.rows[1][0], "A2");
+  });
+
+  it("несуществующий лист → понятная ошибка со списком", async () => {
+    await assert.rejects(() => parseXlsx(book(), "Нет такого"), /не найден.*Продажи, Остатки/s);
+  });
 });

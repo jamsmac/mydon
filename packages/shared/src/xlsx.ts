@@ -19,8 +19,10 @@
 export interface XlsxSheet {
   columns: string[];
   rows: string[][];
-  /** Имя первого листа — владельцу видно, из чего читали. */
+  /** Имя разобранного листа — владельцу видно, из чего читали. */
   sheet: string;
+  /** ВСЕ листы книги по порядку — чтобы приёмка не проглатывала лишние молча. */
+  sheetNames: string[];
   /** Строк, где ячеек оказалось не столько, сколько заголовков. */
   ragged: number;
 }
@@ -318,52 +320,103 @@ function alignRows(rows: string[][]): { rows: string[][]; ragged: number } {
   return { rows: out, ragged };
 }
 
-/** Путь к первому листу книги (обычно xl/worksheets/sheet1.xml). */
-function firstSheetPath(files: Map<string, string>): string {
-  const names = [...files.keys()].filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n));
-  names.sort((a, b) => {
-    const na = Number(/sheet(\d+)\.xml/.exec(a)![1]);
-    const nb = Number(/sheet(\d+)\.xml/.exec(b)![1]);
-    return na - nb;
-  });
-  return names[0] ?? "xl/worksheets/sheet1.xml";
+/** Номер файла листа: «xl/worksheets/sheet12.xml» → 12. */
+function sheetNum(path: string): number {
+  const m = /sheet(\d+)\.xml/.exec(path);
+  return m ? Number(m[1]) : 0;
 }
 
-/** Имя первого листа из workbook.xml (для показа владельцу). */
-function firstSheetName(workbook: string | undefined): string {
-  if (!workbook) return "Лист 1";
-  const m = /<sheet\b[^>]*\bname="([^"]*)"/.exec(workbook);
-  return m ? unescapeXml(m[1]) : "Лист 1";
+/** Листы книги по порядку из workbook.xml: имя + идентификатор связи (r:id). */
+function parseWorkbookSheets(xml: string | undefined): { name: string; rId: string | null }[] {
+  if (!xml) return [];
+  const out: { name: string; rId: string | null }[] = [];
+  const re = /<sheet\b[^>]*\/?>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const tag = m[0];
+    const name = /\bname="([^"]*)"/.exec(tag)?.[1];
+    const rId = /\br:id="([^"]*)"/.exec(tag)?.[1] ?? null;
+    if (name !== undefined) out.push({ name: unescapeXml(name), rId });
+  }
+  return out;
+}
+
+/** Связи книги: r:id → путь файла листа (workbook.xml.rels). */
+function parseRels(xml: string | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!xml) return map;
+  const re = /<Relationship\b[^>]*\/?>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const tag = m[0];
+    const id = /\bId="([^"]*)"/.exec(tag)?.[1];
+    const target = /\bTarget="([^"]*)"/.exec(tag)?.[1];
+    if (!id || !target) continue;
+    // Target относителен к xl/: «worksheets/sheet1.xml» (или «/xl/…») → «xl/…».
+    const norm = `xl/${target.replace(/^\//, "").replace(/^xl\//, "")}`;
+    map.set(id, norm);
+  }
+  return map;
 }
 
 /**
- * Разобрать .xlsx: первый лист в заголовки и строки.
+ * Все листы книги по порядку: имя + путь файла. Сопоставление имя→файл идёт
+ * через связи (workbook.xml.rels) — порядок файлов sheetN.xml не обязан совпадать
+ * с порядком листов. Нет связей (битая/необычная книга) → фолбэк по номерам
+ * файлов, имена берём из workbook по порядку (или «Лист N»).
+ */
+function resolveSheets(files: Map<string, string>): { name: string; path: string }[] {
+  const wbSheets = parseWorkbookSheets(files.get("xl/workbook.xml"));
+  const relMap = parseRels(files.get("xl/_rels/workbook.xml.rels"));
+
+  const byRels: { name: string; path: string }[] = [];
+  for (const s of wbSheets) {
+    const path = s.rId ? relMap.get(s.rId) : undefined;
+    if (path && files.has(path)) byRels.push({ name: s.name, path });
+  }
+  if (byRels.length > 0) return byRels;
+
+  const paths = [...files.keys()]
+    .filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))
+    .sort((a, b) => sheetNum(a) - sheetNum(b));
+  return paths.map((p, i) => ({ name: wbSheets[i]?.name ?? `Лист ${i + 1}`, path: p }));
+}
+
+/**
+ * Разобрать .xlsx в заголовки и строки. Без `sheetName` берётся ПЕРВЫЙ лист;
+ * `sheetNames` в ответе перечисляет ВСЕ листы книги — приёмка по нему предлагает
+ * выбор и не теряет остальные листы молча. Указан `sheetName` — читается именно он.
  *
- * Читаются только нужные части архива (лист, общие строки, стили, книга) —
+ * Читаются только нужные части архива (лист, общие строки, стили, книга, связи) —
  * тему и картинки не трогаем.
  */
-export async function parseXlsx(bytes: Uint8Array): Promise<XlsxSheet> {
+export async function parseXlsx(bytes: Uint8Array, sheetName?: string): Promise<XlsxSheet> {
   const files = await unzip(
     bytes,
     (n) =>
       n === "xl/sharedStrings.xml" ||
       n === "xl/styles.xml" ||
       n === "xl/workbook.xml" ||
+      n === "xl/_rels/workbook.xml.rels" ||
       /^xl\/worksheets\/sheet\d+\.xml$/.test(n),
   );
 
   const shared = parseSharedStrings(files.get("xl/sharedStrings.xml"));
   const { dateXf, timeXf } = parseDateStyles(files.get("xl/styles.xml"));
-  const sheetPath = firstSheetPath(files);
-  const sheetXml = files.get(sheetPath);
+  const sheets = resolveSheets(files);
+  const sheetNames = sheets.map((s) => s.name);
+
+  const target = sheetName !== undefined ? sheets.find((s) => s.name === sheetName) : sheets[0];
+  if (!target) {
+    if (sheetName !== undefined) {
+      throw new Error(`Лист «${sheetName}» не найден. В книге: ${sheetNames.join(", ") || "нет листов"}.`);
+    }
+    throw new Error("В книге не найден лист с данными.");
+  }
+  const sheetXml = files.get(target.path);
   if (!sheetXml) throw new Error("В книге не найден лист с данными.");
 
   const { rows, ragged } = parseSheet(sheetXml, shared, dateXf, timeXf);
   const columns = rows.length > 0 ? rows[0] : [];
-  return {
-    columns,
-    rows: rows.slice(1),
-    sheet: firstSheetName(files.get("xl/workbook.xml")),
-    ragged,
-  };
+  return { columns, rows: rows.slice(1), sheet: target.name, sheetNames, ragged };
 }

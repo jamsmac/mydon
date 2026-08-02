@@ -236,7 +236,14 @@ export async function setRoles(
  * Файл разбирается ЗДЕСЬ, на сервере оболочки, и уходит в Core тем же приёмом,
  * что и скрипт: сырой слой не знает, кто принёс строки, и правила у всех одни.
  */
-export async function importFile(form: FormData): Promise<ActionResult & { rows?: number }> {
+/** Совпадают ли заголовки листов (для объединения книги «лист 1/3, 2/3…»). */
+function sameHeaders(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((h, i) => h === b[i]);
+}
+
+export async function importFile(
+  form: FormData,
+): Promise<ActionResult & { rows?: number; needsSheet?: boolean; sheets?: string[] }> {
   const key = process.env.INGEST_KEY ?? "";
   if (key.length === 0) {
     return {
@@ -262,16 +269,51 @@ export async function importFile(form: FormData): Promise<ActionResult & { rows?
   let rows: string[][];
   let readAs: string;
   if (looksLikeXlsx(bytes)) {
-    let sheet;
+    const chosenSheet = str("sheet"); // выбранный владельцем лист (если уже выбрал)
+    const mergeAll = String(form.get("mergeSheets") ?? "") === "1";
     try {
-      sheet = await parseXlsx(bytes);
+      const probe = await parseXlsx(bytes, chosenSheet);
+      const sheetNames = probe.sheetNames;
+
+      // Много листов, а владелец ещё не выбрал — НЕ глотаем первый молча:
+      // возвращаем список, пусть выберет лист или отметит «объединить все».
+      if (sheetNames.length > 1 && chosenSheet === undefined && !mergeAll) {
+        return {
+          ok: false,
+          needsSheet: true,
+          sheets: sheetNames,
+          error:
+            `В книге ${sheetNames.length} листа(ов): ${sheetNames.join(", ")}. ` +
+            `Выбери, какой импортировать, или отметь «объединить все листы».`,
+        };
+      }
+
+      if (mergeAll && sheetNames.length > 1) {
+        // Объединяем листы с ТЕМИ ЖЕ заголовками (книга «лист 1/3, 2/3, 3/3»).
+        // Иная структура — пропускаем с предупреждением, а не смешиваем молча.
+        const first = await parseXlsx(bytes, sheetNames[0]);
+        columns = first.columns;
+        rows = [...first.rows];
+        const skipped: string[] = [];
+        for (const nm of sheetNames.slice(1)) {
+          const s = await parseXlsx(bytes, nm);
+          if (sameHeaders(s.columns, columns)) rows.push(...s.rows);
+          else skipped.push(nm);
+        }
+        readAs =
+          `Excel, объединено листов ${sheetNames.length - skipped.length}/${sheetNames.length}` +
+          (skipped.length ? `; пропущены (другие заголовки): ${skipped.join(", ")}` : "");
+      } else {
+        columns = probe.columns;
+        rows = probe.rows;
+        const more = sheetNames.length > 1 ? ` (в книге ${sheetNames.length} листов)` : "";
+        readAs =
+          `Excel, лист «${probe.sheet}»${more}` +
+          (probe.ragged > 0 ? `, строк с неровным числом ячеек: ${probe.ragged}` : "");
+      }
     } catch (err) {
       return { ok: false, error: `Excel-файл не прочитался: ${err instanceof Error ? err.message : String(err)}` };
     }
-    columns = sheet.columns;
-    rows = sheet.rows;
-    readAs =
-      `Excel, лист «${sheet.sheet}»` + (sheet.ragged > 0 ? `, строк с неровным числом ячеек: ${sheet.ragged}` : "");
     if (columns.length === 0) return { ok: false, error: "В Excel-файле нет заголовков" };
     if (rows.length === 0) return { ok: false, error: "В Excel-файле одни заголовки, ни одной строки" };
   } else {
