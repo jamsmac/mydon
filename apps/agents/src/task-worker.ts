@@ -36,6 +36,7 @@ export function matchSkill(agent: AgentDefinition, title: string): string | null
     "morning-digest": /сводк|дайджест|обзор|что нового|как дела/,
     "read-sources": /источник|сайт|страниц|прочит|разведк|рынок|тендер|цен[аы]/,
     "scan-ideas": /иде[яйи]|канал|что нового|фишк|перенять|promtjam/,
+    "coach-review": /обзор|оцени агент|самоулучшен|coach|разбор недел/,
   };
   for (const skill of agent.skills) {
     const re = HINTS[skill];

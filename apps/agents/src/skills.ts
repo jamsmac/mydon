@@ -1,9 +1,16 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { Domain } from "@mydon/shared";
+import { runCoachReview } from "./coach-review";
 import type { AgentsCoreClient } from "./core-client";
 import type { AgentDefinition } from "./registry";
 import { assessIdeas, buildIdeasProposal, readIdeaChannels } from "./ideas";
 import { modelGatewayFromEnv } from "./model-gateway";
+import { loadSkillMeta } from "./skill-loader";
 import { buildWebProposal, readWebSources } from "./web-read";
+
+/** Каталог агентов — как в index.ts; нужен coach-у для чтения файлов навыков. */
+const AGENTS_DIR = path.resolve(__dirname, "../agents");
 
 /**
  * Предметные навыки агентов (Фаза К3: агенты подключены к Core).
@@ -130,6 +137,35 @@ const assessIdeasSkill: Skill = async (agent) => {
   });
 };
 
+// ── coach-agent: судья + предложение правки навыка (EVAL/PROPOSE) ────────────
+/** Читатель SKILL.md по имени навыка — из каталога агентов на диске. */
+function readSkillFile(skill: string): { content: string; rel: string } | null {
+  const meta = loadSkillMeta(AGENTS_DIR).find((m) => m.name === skill);
+  if (!meta) return null;
+  try {
+    return { content: fs.readFileSync(meta.file, "utf8"), rel: `${meta.agent}/skills/${skill}.md` };
+  } catch {
+    return null;
+  }
+}
+
+const coachReview: Skill = async (agent, core) => {
+  const gateway = modelGatewayFromEnv();
+  if (gateway === null) return null; // судья не подключён — навык спит
+  return runCoachReview(
+    gateway,
+    {
+      latestAction: () => core.latestAgentAction(),
+      readSkill: readSkillFile,
+      selfSource: `agent:${agent.name}`,
+    },
+    {
+      ...(agent.budgetPerDayUsd !== undefined ? { perDayUsd: agent.budgetPerDayUsd } : {}),
+      ...(agent.budgetOnExceeded !== undefined ? { strategy: agent.budgetOnExceeded } : {}),
+    },
+  );
+};
+
 /**
  * Реестр реализованных навыков. Навыка нет в реестре — прогон честно
  * сообщает, что он ещё не подключён (а не изображает работу).
@@ -141,6 +177,7 @@ export const SKILLS: Record<string, Skill> = {
   "read-sources": readSources,
   "scan-ideas": scanIdeas,
   "assess-ideas": assessIdeasSkill,
+  "coach-review": coachReview,
 };
 
 export function hasSkill(name: string): boolean {

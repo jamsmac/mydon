@@ -219,6 +219,22 @@ export class AgentsCoreClient {
     return this.recordEvent({ source, type: `agent.memory:${skill}`, payload: { signature } });
   }
 
+  /**
+   * Последнее действие любого агента (событие agent.action) — что coach судит.
+   * Нет действий → null. Источник возвращаем, чтобы coach не судил сам себя.
+   */
+  async latestAgentAction(): Promise<{ source: string; skill: string; action: string } | null> {
+    const qs = new URLSearchParams({ type: "agent.action" });
+    const { event } = await this.request<{ event: { source?: string; payload?: unknown } | null }>(
+      `/events/latest?${qs.toString()}`,
+    );
+    if (!event) return null;
+    const p = (event.payload ?? {}) as { skill?: unknown; action?: unknown };
+    const skill = typeof p.skill === "string" ? p.skill : "";
+    if (!skill) return null;
+    return { source: String(event.source ?? ""), skill, action: typeof p.action === "string" ? p.action : "" };
+  }
+
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }

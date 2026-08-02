@@ -1,7 +1,7 @@
 name: coach-agent
 business: shared
-status: paused
-version: 1.0.0
+status: active
+version: 1.2.0
 description: Оценивает результаты агентов и предлагает улучшения их SKILL.md (не исполняя наружу).
 mission: Оценивать результаты агентов по рубрике и предлагать улучшения их SKILL.md — не исполняя ничего наружу.
 non_goals:
@@ -9,13 +9,19 @@ non_goals:
   - НЕ трогает ROLE.md, config, код, KB-факты
 break_glass: []
 autonomy_default: T2
+# Оркестрация: раз в неделю судить последнее действие агента (спит без LLM-шлюза).
+schedule:
+  - cron: "0 10 * * 1" # понедельник 10:00 — обзор недели
+    skill: coach-review
 budget:
   per_day_usd: 2.0
   on_exceeded: pause
 model_routing:
   simple: reasoning-strong
   complex: reasoning-strong
-skills: []
+skills:
+  - coach-review
 changelog:
+  - "1.2.0 — EVAL/PROPOSE на живом LLM-пути: судья по рубрике + предложение правки SKILL.md (HITL). Активирован, еженедельная оркестрация. Спит без шлюза."
   - "1.1.0 — детерминированный скелет: рубрика, вердикт, safety-блок, path-guard, применение diff (coach.ts). EVAL/PROPOSE включатся со шлюзом."
   - "1.0.0 — coach-agent (петля самоулучшения, scope B)"
