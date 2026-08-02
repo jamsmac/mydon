@@ -6,6 +6,7 @@ import type { CoreClient } from "./core-client";
 import { parseIntent } from "./intent";
 import { formatPurchaseBrief } from "./purchase-brief";
 import { planReport } from "./reports";
+import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
 import type { RateLimiter } from "./security/access";
 import { isAllowed } from "./security/access";
 
@@ -37,6 +38,7 @@ const HELP = [
   "• «что просрочено» — обязательства и долги",
   "• «какие автоматы простаивают»",
   "• «что заказать» — сводка к закупу вендинга",
+  "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
 ].join("\n");
@@ -60,6 +62,19 @@ export async function handleMessage(
   }
   if (!deps.limiter.allow(chatId, now)) {
     return { text: "Слишком много запросов подряд. Подожди минуту." };
+  }
+
+  // Ввод остатков склада — мутация, ловим до чтения-намерений: «склад X 24, Y 12».
+  // Без разбираемых пар (просто «остаток?») isStockCommand=false — уйдёт в общий разбор.
+  if (isStockCommand(text)) {
+    const items = parseStockItems(text);
+    try {
+      await deps.core.setVendingStock(items);
+      return { text: formatStockAck(items) };
+    } catch (err) {
+      console.error("Ошибка записи остатков склада:", err);
+      return { text: "Не удалось записать остатки в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
   }
 
   const intent = parseIntent(text);
