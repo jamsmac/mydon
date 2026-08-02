@@ -130,11 +130,18 @@ export async function handleMessage(
   try {
     switch (intent.kind) {
       case "briefing": {
-        const [b, approvals] = await Promise.all([
+        const [b, approvals, purchase] = await Promise.all([
           deps.core.briefing(),
           deps.core.pendingApprovals(),
+          deps.core.vendingPurchase().catch(() => null),
         ]);
-        return { text: formatBriefing(b, approvals) };
+        return {
+          text: formatBriefing(
+            b,
+            approvals,
+            purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
+          ),
+        };
       }
 
       case "approvals": {

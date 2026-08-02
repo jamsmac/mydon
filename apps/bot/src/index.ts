@@ -180,11 +180,16 @@ async function main(): Promise<void> {
     setTimeout(() => {
       void (async () => {
         try {
-          const [b, approvals] = await Promise.all([
+          const [b, approvals, purchase] = await Promise.all([
             deps.core.briefing(),
             deps.core.pendingApprovals(),
+            deps.core.vendingPurchase().catch(() => null),
           ]);
-          const text = formatBriefing(b, approvals);
+          const text = formatBriefing(
+            b,
+            approvals,
+            purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
+          );
           for (const chatId of allowlist) {
             await tg.sendMessage(chatId, text);
           }
