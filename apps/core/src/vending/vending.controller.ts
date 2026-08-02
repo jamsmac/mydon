@@ -6,6 +6,7 @@ import {
   IsISO8601,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   MaxLength,
@@ -48,6 +49,45 @@ export class IngestPayloadDto {
   machines!: IngestMachineDto[];
 }
 
+export class IngestProductSaleDto {
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  serial!: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  product!: string;
+
+  @IsInt() @Min(0)
+  quantity!: number;
+}
+
+export class IngestMachineSaleDto {
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  serial!: string;
+
+  @IsNumber() @Min(0)
+  totalAmount!: number;
+
+  @IsInt() @Min(0)
+  totalCount!: number;
+}
+
+export class IngestSalesDto {
+  @IsOptional() @IsISO8601()
+  capturedAt?: string;
+
+  @IsISO8601()
+  periodStart!: string;
+
+  @IsISO8601()
+  periodEnd!: string;
+
+  @IsArray() @ArrayMaxSize(5000) @ValidateNested({ each: true }) @Type(() => IngestProductSaleDto)
+  productSales!: IngestProductSaleDto[];
+
+  @IsArray() @ArrayMaxSize(500) @ValidateNested({ each: true }) @Type(() => IngestMachineSaleDto)
+  machineSales!: IngestMachineSaleDto[];
+}
+
 export class SyncFinishDto {
   @IsIn(["success", "partial", "failed"])
   status!: "success" | "partial" | "failed";
@@ -86,6 +126,16 @@ export class VendingController {
   @Get("deficit")
   deficit() {
     return this.vending.deficitSummary();
+  }
+
+  @Post("ingest-sales")
+  ingestSales(@Body() dto: IngestSalesDto) {
+    return this.vending.ingestSales(dto);
+  }
+
+  @Get("forecast")
+  forecast() {
+    return this.vending.forecast();
   }
 
   // ── Журнал сбора: коллектор открывает запуск, потом закрывает итогом ───────

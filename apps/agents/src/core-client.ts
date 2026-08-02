@@ -292,6 +292,20 @@ export class AgentsCoreClient {
     });
   }
 
+  /** Отдать собранные продажи в Core (история для прогноза расхода). */
+  ingestVendingSales(payload: {
+    capturedAt?: string;
+    periodStart: string;
+    periodEnd: string;
+    productSales: { serial: string; product: string; quantity: number }[];
+    machineSales: { serial: string; totalAmount: number; totalCount: number }[];
+  }): Promise<{ productRows: number; machineRows: number }> {
+    return this.request<{ productRows: number; machineRows: number }>("/vending/ingest-sales", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }

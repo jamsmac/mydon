@@ -1,12 +1,16 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { desc, eq } from "drizzle-orm";
-import { machineSlot, slotSnapshot, vendingSyncRun } from "@mydon/db";
+import { machineSale, machineSlot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
 import {
   MAX_CAPACITY,
   machineDeficit,
   needByProduct,
   planogramStatus,
+  runoutForecast,
+  slotValid,
   type PlanogramStatus,
+  type Runout,
+  type RunoutInput,
   type Slot,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
@@ -66,6 +70,28 @@ export interface SyncRunRow {
   machinesOk: number;
   error: string | null;
   durationMs: number | null;
+}
+
+/** Продажи, собранные коллектором за окно (для прогноза расхода). */
+export interface IngestProductSaleInput {
+  serial: string;
+  product: string;
+  quantity: number;
+}
+export interface IngestMachineSaleInput {
+  serial: string;
+  totalAmount: number;
+  totalCount: number;
+}
+export interface IngestSalesPayload {
+  /** Момент съёма (ISO). Пусто → сейчас. */
+  capturedAt?: string;
+  /** Начало окна продаж (ISO). */
+  periodStart: string;
+  /** Конец окна продаж (ISO). */
+  periodEnd: string;
+  productSales: IngestProductSaleInput[];
+  machineSales: IngestMachineSaleInput[];
 }
 
 /** Порядок статусов в отчёте: ok выше, некалиброванные/без слотов — в конце. */
@@ -153,6 +179,80 @@ export class VendingService {
     const needs = needByProduct(ok);
     needs.sort((a, b) => b.total - a.total);
     return needs.map((n) => ({ product: n.product, total: n.total, perMachine: n.perMachine }));
+  }
+
+  // ── Продажи и прогноз расхода (§5.6) ──────────────────────────────────────
+  // Продажи — история, а не upsert: каждый сбор пишет окно как есть. Прогноз
+  // берёт САМЫЙ СВЕЖИЙ батч (одинаковый capturedAt), иначе перекрывающиеся
+  // 7-дневные окна складывались бы и завышали продажи.
+
+  /** Принять собранные продажи (по товарам и по автоматам) за окно. */
+  async ingestSales(payload: IngestSalesPayload): Promise<{ productRows: number; machineRows: number }> {
+    const capturedAt = payload.capturedAt ? new Date(payload.capturedAt) : new Date();
+    const periodStart = new Date(payload.periodStart);
+    const periodEnd = new Date(payload.periodEnd);
+    await this.db.transaction(async (tx) => {
+      for (const p of payload.productSales) {
+        await tx.insert(productSale).values({
+          machineSerial: p.serial,
+          productName: p.product,
+          periodStart,
+          periodEnd,
+          quantity: p.quantity,
+          capturedAt,
+        });
+      }
+      for (const m of payload.machineSales) {
+        await tx.insert(machineSale).values({
+          machineSerial: m.serial,
+          periodStart,
+          periodEnd,
+          totalAmount: m.totalAmount.toFixed(2),
+          totalCount: m.totalCount,
+          capturedAt,
+        });
+      }
+    });
+    return { productRows: payload.productSales.length, machineRows: payload.machineSales.length };
+  }
+
+  /**
+   * Прогноз «на сколько хватит» (§5.6). Остаток и продажи считаются по ОДНОМУ
+   * множеству автоматов (только `ok`) — иначе прогноз занижается. Продажи —
+   * из самого свежего собранного батча.
+   */
+  async forecast(criticalDays = 3): Promise<{ all: Runout[]; critical: Runout[] }> {
+    const byMachine = await this.slotsByMachine();
+    const okSerials = new Set(
+      [...byMachine.entries()].filter(([, slots]) => planogramStatus(slots) === "ok").map(([serial]) => serial),
+    );
+
+    // Остаток в машинах по товару: Σ quantity валидных назначенных слотов ok-автоматов.
+    const inByProduct = new Map<string, number>();
+    for (const [serial, slots] of byMachine) {
+      if (!okSerials.has(serial)) continue;
+      for (const s of slots) {
+        if (s.product && slotValid(s)) inByProduct.set(s.product, (inByProduct.get(s.product) ?? 0) + s.quantity);
+      }
+    }
+
+    // Продажи за 7 суток: только самый свежий батч (одинаковый capturedAt), только ok-автоматы.
+    const saleRows = await this.db.select().from(productSale);
+    const latest = saleRows.reduce((max, r) => Math.max(max, r.capturedAt.getTime()), 0);
+    const soldByProduct = new Map<string, number>();
+    for (const r of saleRows) {
+      if (r.capturedAt.getTime() !== latest) continue;
+      if (!okSerials.has(r.machineSerial)) continue;
+      soldByProduct.set(r.productName, (soldByProduct.get(r.productName) ?? 0) + r.quantity);
+    }
+
+    // Прогнозируем то, что сейчас загружено в автоматы.
+    const input: RunoutInput[] = [...inByProduct.entries()].map(([product, inMachines]) => ({
+      product,
+      inMachines,
+      sold7: soldByProduct.get(product) ?? 0,
+    }));
+    return runoutForecast(input, criticalDays);
   }
 
   // ── Журнал сбора Ourvend ──────────────────────────────────────────────────

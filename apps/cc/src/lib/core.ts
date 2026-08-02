@@ -59,6 +59,15 @@ export interface VendingNeed {
   perMachine: Record<string, number>;
 }
 
+/** Прогноз «на сколько хватит» по товару (§5.6). */
+export interface VendingRunout {
+  product: string;
+  inMachines: number;
+  daily: number;
+  /** Дней до нуля; null (из Infinity) — если продаж нет. */
+  daysLeft: number | null;
+}
+
 /** Запуск сбора Ourvend — когда собирали и с каким итогом. */
 export interface VendingSyncRun {
   id: string;
@@ -972,6 +981,7 @@ export const core = {
   // ── Вендинг: автоматы и дефицит ──
   vendingMachines: () => get<VendingMachine[]>("/vending/machines"),
   vendingDeficit: () => get<VendingNeed[]>("/vending/deficit"),
+  vendingForecast: () => get<{ all: VendingRunout[]; critical: VendingRunout[] }>("/vending/forecast"),
   vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──

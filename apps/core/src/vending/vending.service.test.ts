@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { machineSlot, productSale } from "@mydon/db";
 import { VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
+type SaleRow = { machineSerial: string; productName: string; quantity: number; capturedAt: Date };
 
 /** Стаб БД: machines()/deficitSummary() читают `select().from()`. */
 function readDb(rows: Row[]) {
   return { select: () => ({ from: async () => rows }) } as never;
+}
+
+/** Стаб БД для прогноза: слоты и продажи в разные таблицы, различаем по ссылке. */
+function forecastDb(slots: Row[], sales: SaleRow[]) {
+  return { select: () => ({ from: async (t: unknown) => (t === productSale ? sales : t === machineSlot ? slots : slots) }) } as never;
 }
 
 /** Стаб БД для ingest: копит вставки. */
@@ -71,6 +78,36 @@ describe("Вендинг Core: дефицит по автоматам (Фаза 
     assert.equal(m.total, 9);
     assert.deepEqual(m.perMachine, { AH: 6, Olma: 3 });
     assert.ok(!summary.some((s) => s.product === "Fanta"), "нулевой дефицит не попадает в сводку");
+  });
+});
+
+describe("Вендинг Core: прогноз расхода (§5.6)", () => {
+  it("daysLeft = остаток / (продажи7/7), только ok-автоматы, свежий батч продаж", async () => {
+    const t1 = new Date("2026-07-30T00:00:00Z"); // старый батч — игнор
+    const t2 = new Date("2026-08-02T00:00:00Z"); // свежий
+    const slots: Row[] = [
+      // AH ok: Montella остаток 2 (валиден), Fanta остаток 6 (продаж нет)
+      { machineSerial: "AH", coilId: "31", productName: "Montella", capacity: 6, quantity: 2 },
+      { machineSerial: "AH", coilId: "32", productName: "Fanta", capacity: 6, quantity: 6 },
+      // NOSLOT: без назначенных слотов → не ok, его остаток в прогноз не идёт
+      { machineSerial: "NOSLOT", coilId: "1", productName: null, capacity: 6, quantity: 0 },
+    ];
+    const sales: SaleRow[] = [
+      { machineSerial: "AH", productName: "Montella", quantity: 999, capturedAt: t1 }, // старый — игнор
+      { machineSerial: "AH", productName: "Montella", quantity: 14, capturedAt: t2 }, // sold7=14 → daily=2
+    ];
+    const svc = new VendingService(forecastDb(slots, sales));
+    const { all, critical } = await svc.forecast();
+
+    const montella = all.find((r) => r.product === "Montella")!;
+    assert.equal(montella.inMachines, 2);
+    assert.equal(montella.daily, 2);
+    assert.equal(montella.daysLeft, 1); // 2 / 2
+    // Fanta без продаж → хватит «навсегда», не критичен.
+    const fanta = all.find((r) => r.product === "Fanta")!;
+    assert.equal(fanta.daysLeft, Infinity);
+    // Критичны только те, чей запас ≤ 3 дней.
+    assert.deepEqual(critical.map((r) => r.product), ["Montella"]);
   });
 });
 
