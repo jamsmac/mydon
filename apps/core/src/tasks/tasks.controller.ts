@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
-import { IsIn, IsISO8601, IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
+import { IsIn, IsISO8601, IsNotEmpty, IsOptional, IsString, MaxLength, ValidateIf } from "class-validator";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { TasksService } from "./tasks.service";
 
@@ -65,6 +65,30 @@ export class SetStatusDto {
   /** Отчёт при закрытии: без него «сделано» ничего не значит. */
   @IsOptional() @IsString() @MaxLength(2000)
   resultNote?: string;
+}
+
+export class EditTaskDto {
+  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(512)
+  title?: string;
+
+  @IsOptional() @IsString() @MaxLength(4000)
+  description?: string;
+
+  @IsOptional() @IsIn(["human", "agent"], { message: "ownerKind: human или agent" })
+  ownerKind?: "human" | "agent";
+
+  @IsOptional() @IsString() @MaxLength(128)
+  ownerRef?: string;
+
+  @IsOptional() @IsIn([...PRIORITIES])
+  priority?: Priority;
+
+  // Пустая строка допустима — это снятие срока. Иначе — ISO-дата.
+  @IsOptional() @ValidateIf((o: EditTaskDto) => o.due !== "") @IsISO8601({}, { message: "due: дата в формате ISO" })
+  due?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
 }
 
 export class SetQualityDto {
@@ -169,5 +193,23 @@ export class TasksController {
   @Patch(":id")
   setStatus(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetStatusDto) {
     return this.tasks.setStatus(id, dto.status, dto.actor ?? "owner", dto.resultNote);
+  }
+
+  /** Правка полей задачи (переназначение, приоритет, срок, заголовок, описание). */
+  @Patch(":id/edit")
+  edit(@Param("id", ParseUUIDPipe) id: string, @Body() dto: EditTaskDto) {
+    return this.tasks.edit(
+      id,
+      {
+        ...(dto.title !== undefined ? { title: dto.title } : {}),
+        ...(dto.description !== undefined ? { description: dto.description } : {}),
+        ...(dto.ownerKind !== undefined ? { ownerKind: dto.ownerKind } : {}),
+        ...(dto.ownerRef !== undefined ? { ownerRef: dto.ownerRef } : {}),
+        ...(dto.priority !== undefined ? { priority: dto.priority } : {}),
+        // "" → снять срок; иначе ISO-строка → дата.
+        ...(dto.due !== undefined ? { due: dto.due === "" ? null : new Date(dto.due) } : {}),
+      },
+      dto.actor ?? "owner",
+    );
   }
 }

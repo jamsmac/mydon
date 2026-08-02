@@ -176,6 +176,58 @@ export class TasksService {
   }
 
   /**
+   * Правка полей задачи владельцем из панели: переназначить исполнителя,
+   * сменить приоритет, срок, заголовок, описание. Меняем ТОЛЬКО переданные поля
+   * (частичное обновление) — статус и отчёт живут своим потоком (setStatus/rate)
+   * и здесь не трогаются. Пустой патч → возвращаем задачу без записи в журнал.
+   */
+  async edit(
+    id: string,
+    patch: {
+      title?: string;
+      description?: string | null;
+      ownerKind?: "human" | "agent";
+      ownerRef?: string | null;
+      priority?: Priority;
+      due?: Date | null;
+    },
+    actorRef = "owner",
+  ): Promise<TaskRow> {
+    const set: Record<string, unknown> = {};
+    if (patch.title !== undefined) {
+      const t = patch.title.trim();
+      if (t.length === 0) throw new BadRequestException("Заголовок не может быть пустым");
+      set.title = t;
+    }
+    if (patch.description !== undefined) {
+      const d = (patch.description ?? "").trim();
+      set.description = d.length > 0 ? d : null;
+    }
+    if (patch.ownerKind !== undefined) set.ownerKind = patch.ownerKind;
+    if (patch.ownerRef !== undefined) {
+      const r = (patch.ownerRef ?? "").trim();
+      set.ownerRef = r.length > 0 ? r : null;
+    }
+    if (patch.priority !== undefined) set.priority = patch.priority;
+    if (patch.due !== undefined) set.due = patch.due;
+
+    if (Object.keys(set).length === 0) return this.byId(id);
+
+    return this.db.transaction(async (tx) => {
+      const [updated] = await tx.update(task).set(set).where(eq(task.id, id)).returning();
+      if (!updated) throw new NotFoundException(`Задача ${id} не найдена`);
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "task.edit",
+        target: id,
+        after: updated,
+      });
+      return updated;
+    });
+  }
+
+  /**
    * Заводит задачу, если такой ещё нет на сегодня.
    *
    * Нужно для повторяющихся задач: планировщик может сработать дважды

@@ -122,3 +122,67 @@ describe("Оценка сделанной задачи", () => {
     await assert.rejects(() => s.rate("t1", "excellent"), /только сделанную/);
   });
 });
+
+describe("Правка полей задачи (edit)", () => {
+  function editStub(existing: Row) {
+    const captured: Record<string, unknown>[] = [];
+    const tx = {
+      update: () => ({
+        set: (p: Record<string, unknown>) => {
+          captured.push(p);
+          return { where: () => ({ returning: async () => [{ ...existing, ...p }] }) };
+        },
+      }),
+      insert: () => ({ values: async () => [] }),
+      select: () => ({ from: () => ({ where: async () => [existing] }) }),
+    };
+    const db = {
+      // byId использует .limit(1) — where возвращает объект с limit.
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [existing] }) }) }),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
+    return { db, captured };
+  }
+
+  it("переназначает исполнителя и меняет приоритет — трогает только эти поля", async () => {
+    const { db, captured } = editStub({ id: "t1", ownerKind: "human", ownerRef: null, priority: "normal" });
+    const t = await new TasksService(db).edit("t1", {
+      ownerKind: "agent",
+      ownerRef: "vendhub-ops",
+      priority: "high",
+    });
+    assert.equal(t.ownerKind, "agent");
+    assert.equal(captured[0].ownerRef, "vendhub-ops");
+    assert.equal(captured[0].priority, "high");
+    assert.equal("status" in captured[0], false, "статус правкой полей не трогаем");
+  });
+
+  it("пустое описание/исполнитель → снятие (null)", async () => {
+    const { db, captured } = editStub({ id: "t1" });
+    await new TasksService(db).edit("t1", { description: "  ", ownerRef: "" });
+    assert.equal(captured[0].description, null);
+    assert.equal(captured[0].ownerRef, null);
+  });
+
+  it("пустой заголовок отклоняется", async () => {
+    const { db } = editStub({ id: "t1" });
+    await assert.rejects(() => new TasksService(db).edit("t1", { title: "   " }), /пустым/);
+  });
+
+  it("пустой патч не трогает базу и возвращает задачу", async () => {
+    const { db, captured } = editStub({ id: "t1", title: "Как есть" });
+    const t = await new TasksService(db).edit("t1", {});
+    assert.equal(t.id, "t1");
+    assert.equal(captured.length, 0, "нечего менять — не пишем в журнал");
+  });
+
+  it("нет задачи → понятная ошибка", async () => {
+    const tx = {
+      update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
+      insert: () => ({ values: async () => [] }),
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    await assert.rejects(() => new TasksService(db).edit("нет", { priority: "high" }), /не найдена/);
+  });
+});
