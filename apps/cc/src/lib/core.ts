@@ -41,6 +41,24 @@ export interface Briefing {
   contractsBadDate?: number;
 }
 
+/** Автомат с дефицитом и статусом планограммы (вендинг). */
+export interface VendingMachine {
+  serial: string;
+  status: "ok" | "no_slots" | "uncalibrated";
+  deficit: number;
+  capacity: number;
+  filled: number;
+  fillRate: number;
+  slots: number;
+}
+
+/** Сводная потребность по товару с разбивкой по автоматам. */
+export interface VendingNeed {
+  product: string;
+  total: number;
+  perMachine: Record<string, number>;
+}
+
 /** Действующий глобальный тумблер системы (мозг/RAG/пауза/бюджет). */
 export interface SystemConfigItem {
   key: string;
@@ -938,6 +956,10 @@ export const core = {
   updateAgent: (name: string, patch: Record<string, unknown>) =>
     send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "PATCH", patch),
   archiveAgent: (name: string) => send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "DELETE"),
+
+  // ── Вендинг: автоматы и дефицит ──
+  vendingMachines: () => get<VendingMachine[]>("/vending/machines"),
+  vendingDeficit: () => get<VendingNeed[]>("/vending/deficit"),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),
