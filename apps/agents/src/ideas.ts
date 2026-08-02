@@ -1,4 +1,7 @@
 import { telegram, type ChannelPost } from "@mydon/connectors";
+import type { BudgetStrategy } from "./budget";
+import { callModel } from "./llm";
+import { resolveModelChain, type ModelGateway } from "./model-gateway";
 import type { Proposal } from "./skills";
 
 /**
@@ -33,6 +36,58 @@ export async function readIdeaChannels(
     }
   }
   return out;
+}
+
+/**
+ * Оценка идей моделью (первый LLM-навык, Stage 0 плана мозга).
+ *
+ * Просит модель выбрать из постов канала фишки, которые стоит внедрить в MYDON,
+ * и коротко объяснить куда. Посты — ВНЕШНИЙ контент, поэтому идут как
+ * `untrustedContext`: callModel оборачивает их от инъекций, а системный страж
+ * запрещает исполнять инструкции из них. Бюджет проверяется до вызова.
+ *
+ * Нет постов → null. Модель не ответила (или путь выключен) → null: не выдаём
+ * пустую оценку за работу.
+ */
+export async function assessIdeas(
+  gateway: ModelGateway,
+  digests: ChannelDigest[],
+  opts: { perDayUsd?: number; strategy?: BudgetStrategy } = {},
+): Promise<Proposal | null> {
+  const posts = digests.flatMap((d) => d.posts.map((p) => `[${p.id}] ${p.text}`));
+  if (posts.length === 0) return null;
+
+  // Шлюз есть → путь включён. Нет явной модели в env → «default» (харнесс/шлюз
+  // возьмёт свою), иначе callModel бы отказал на пустой цепочке.
+  const chain = resolveModelChain();
+  const res = await callModel(
+    gateway,
+    {
+      system:
+        "Ты — куратор идей MYDON (агенты · оболочка · ядро; бизнесы GLOBERENT и VendHub). " +
+        "Оцени фишки из канала: какие стоит внедрить в MYDON и куда именно.",
+      prompt:
+        "Ниже посты канала идей. Выбери 3–5 самых полезных для MYDON и на каждую — одной строкой: " +
+        "что это и в какой слой встроить. Коротко, по делу, без воды.",
+      untrustedContext: posts.join("\n\n---\n\n"),
+      ...(opts.perDayUsd !== undefined ? { perDayUsd: opts.perDayUsd } : {}),
+      ...(opts.strategy !== undefined ? { strategy: opts.strategy } : {}),
+    },
+    chain.length ? chain : ["default"],
+  );
+  if (!res.ok || res.text.trim().length === 0) return null;
+
+  const firstLine = res.text.trim().split("\n")[0].slice(0, 160);
+  return {
+    action: `Оценка идей канала (модель ${res.model ?? "?"}): ${firstLine}`,
+    facts: {
+      assessment: res.text.slice(0, 4000),
+      ...(res.model !== undefined ? { model: res.model } : {}),
+      costUsd: res.costUsd,
+      channels: digests.map((d) => d.channel),
+      posts: posts.length,
+    },
+  };
 }
 
 /** Первая строка поста как заголовок идеи (обрезанная). */

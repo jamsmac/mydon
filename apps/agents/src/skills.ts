@@ -1,7 +1,8 @@
 import type { Domain } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
 import type { AgentDefinition } from "./registry";
-import { buildIdeasProposal, readIdeaChannels } from "./ideas";
+import { assessIdeas, buildIdeasProposal, readIdeaChannels } from "./ideas";
+import { modelGatewayFromEnv } from "./model-gateway";
 import { buildWebProposal, readWebSources } from "./web-read";
 
 /**
@@ -116,6 +117,19 @@ const scanIdeas: Skill = async (agent) => {
   return buildIdeasProposal(digests);
 };
 
+// ── knowledge-curator: ОЦЕНКА идей моделью (первый LLM-навык, Stage 0) ────────
+const assessIdeasSkill: Skill = async (agent) => {
+  const gateway = modelGatewayFromEnv();
+  if (gateway === null) return null; // LLM-путь выключен — навык спит
+  const channels = agent.ideaChannels ?? [];
+  if (channels.length === 0) return null;
+  const digests = await readIdeaChannels(channels);
+  return assessIdeas(gateway, digests, {
+    ...(agent.budgetPerDayUsd !== undefined ? { perDayUsd: agent.budgetPerDayUsd } : {}),
+    ...(agent.budgetOnExceeded !== undefined ? { strategy: agent.budgetOnExceeded } : {}),
+  });
+};
+
 /**
  * Реестр реализованных навыков. Навыка нет в реестре — прогон честно
  * сообщает, что он ещё не подключён (а не изображает работу).
@@ -126,6 +140,7 @@ export const SKILLS: Record<string, Skill> = {
   "morning-digest": morningDigest,
   "read-sources": readSources,
   "scan-ideas": scanIdeas,
+  "assess-ideas": assessIdeasSkill,
 };
 
 export function hasSkill(name: string): boolean {
