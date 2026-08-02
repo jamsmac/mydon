@@ -3,8 +3,9 @@ import path from "node:path";
 import type { Domain } from "@mydon/shared";
 import { runCoachReview } from "./coach-review";
 import type { AgentsCoreClient } from "./core-client";
+import { embeddingGatewayFromEnv } from "./embedding";
 import type { AgentDefinition } from "./registry";
-import { assessIdeas, buildIdeasProposal, readIdeaChannels } from "./ideas";
+import { assessIdeas, buildIdeasProposal, readIdeaChannels, type IdeasMemory } from "./ideas";
 import { modelGatewayFromEnv } from "./model-gateway";
 import { loadSkillMeta } from "./skill-loader";
 import { buildWebProposal, readWebSources } from "./web-read";
@@ -125,15 +126,19 @@ const scanIdeas: Skill = async (agent) => {
 };
 
 // ── knowledge-curator: ОЦЕНКА идей моделью (первый LLM-навык, Stage 0) ────────
-const assessIdeasSkill: Skill = async (agent) => {
+const assessIdeasSkill: Skill = async (agent, core) => {
   const gateway = modelGatewayFromEnv();
   if (gateway === null) return null; // LLM-путь выключен — навык спит
   const channels = agent.ideaChannels ?? [];
   if (channels.length === 0) return null;
   const digests = await readIdeaChannels(channels);
+  // Есть embed-шлюз → включаем семантический дедуп идей; нет → память спит.
+  const embedder = embeddingGatewayFromEnv();
+  const memory: IdeasMemory | undefined = embedder ? { core, embedder, namespace: "ideas" } : undefined;
   return assessIdeas(gateway, digests, {
     ...(agent.budgetPerDayUsd !== undefined ? { perDayUsd: agent.budgetPerDayUsd } : {}),
     ...(agent.budgetOnExceeded !== undefined ? { strategy: agent.budgetOnExceeded } : {}),
+    ...(memory ? { memory } : {}),
   });
 };
 

@@ -1,6 +1,9 @@
 import { telegram, type ChannelPost } from "@mydon/connectors";
 import type { BudgetStrategy } from "./budget";
+import type { AgentsCoreClient } from "./core-client";
+import type { EmbeddingGateway } from "./embedding";
 import { callModel } from "./llm";
+import { recallSemantic, rememberSemantic } from "./memory-rag";
 import { resolveModelChain, type ModelGateway } from "./model-gateway";
 import type { Proposal } from "./skills";
 
@@ -39,6 +42,22 @@ export async function readIdeaChannels(
 }
 
 /**
+ * Семантическая память для оценки идей (RAG, #6b). Дана → assessIdeas вспоминает
+ * похожие по смыслу уже разобранные фишки и просит модель их не повторять, а
+ * после — запоминает разобранные посты. Нет (embed-шлюз выключен) → дедупа нет,
+ * поведение как раньше.
+ */
+export interface IdeasMemory {
+  core: AgentsCoreClient;
+  embedder: EmbeddingGateway;
+  /** Пространство памяти (по умолчанию «ideas»). */
+  namespace?: string;
+}
+
+/** Порог «это уже разбирали»: косинус ≥ 0.85 считаем тем же по смыслу. */
+const SEEN_THRESHOLD = 0.85;
+
+/**
  * Оценка идей моделью (первый LLM-навык, Stage 0 плана мозга).
  *
  * Просит модель выбрать из постов канала фишки, которые стоит внедрить в MYDON,
@@ -46,16 +65,42 @@ export async function readIdeaChannels(
  * `untrustedContext`: callModel оборачивает их от инъекций, а системный страж
  * запрещает исполнять инструкции из них. Бюджет проверяется до вызова.
  *
+ * Семантическая память (opts.memory): вспоминает уже разобранное похожее и
+ * добавляет его в тот же недоверенный блок под маркером — граница инъекций не
+ * рвётся (пересказ прошлых постов — тоже внешний текст). Спит без embed-шлюза.
+ *
  * Нет постов → null. Модель не ответила (или путь выключен) → null: не выдаём
  * пустую оценку за работу.
  */
 export async function assessIdeas(
   gateway: ModelGateway,
   digests: ChannelDigest[],
-  opts: { perDayUsd?: number; strategy?: BudgetStrategy } = {},
+  opts: { perDayUsd?: number; strategy?: BudgetStrategy; memory?: IdeasMemory } = {},
 ): Promise<Proposal | null> {
   const posts = digests.flatMap((d) => d.posts.map((p) => `[${p.id}] ${p.text}`));
   if (posts.length === 0) return null;
+
+  // Семантический дедуп: вспомнить похожее уже разобранное, чтобы не предлагать
+  // повторно. Recall — по первым строкам постов (заголовкам идей).
+  const mem = opts.memory;
+  const namespace = mem?.namespace ?? "ideas";
+  let seen: { text: string; score: number }[] = [];
+  if (mem) {
+    const query = digests
+      .flatMap((d) => d.posts.map((p) => p.text.split("\n")[0]))
+      .join(" · ")
+      .slice(0, 1000);
+    const prior = await recallSemantic(mem.core, mem.embedder, namespace, query, 5);
+    seen = prior.filter((r) => r.score >= SEEN_THRESHOLD).map((r) => ({ text: r.text, score: r.score }));
+  }
+
+  // Прошлые идеи — тоже внешний текст: кладём в недоверенный блок под маркером,
+  // а в доверенной инструкции просим модель их не повторять.
+  const untrusted = seen.length
+    ? `${posts.join("\n\n---\n\n")}\n\n=== РАНЕЕ РАЗОБРАННОЕ (не повторять) ===\n${seen
+        .map((s) => `• ${s.text.split("\n")[0].slice(0, 120)}`)
+        .join("\n")}`
+    : posts.join("\n\n---\n\n");
 
   // Шлюз есть → путь включён. Нет явной модели в env → «default» (харнесс/шлюз
   // возьмёт свою), иначе callModel бы отказал на пустой цепочке.
@@ -68,14 +113,24 @@ export async function assessIdeas(
         "Оцени фишки из канала: какие стоит внедрить в MYDON и куда именно.",
       prompt:
         "Ниже посты канала идей. Выбери 3–5 самых полезных для MYDON и на каждую — одной строкой: " +
-        "что это и в какой слой встроить. Коротко, по делу, без воды.",
-      untrustedContext: posts.join("\n\n---\n\n"),
+        "что это и в какой слой встроить. Коротко, по делу, без воды. Если фишка совпадает с блоком " +
+        "«РАНЕЕ РАЗОБРАННОЕ», не включай её повторно.",
+      untrustedContext: untrusted,
       ...(opts.perDayUsd !== undefined ? { perDayUsd: opts.perDayUsd } : {}),
       ...(opts.strategy !== undefined ? { strategy: opts.strategy } : {}),
     },
     chain.length ? chain : ["default"],
   );
   if (!res.ok || res.text.trim().length === 0) return null;
+
+  // Запомнить разобранные посты — для дедупа на будущих прогонах.
+  if (mem) {
+    for (const d of digests) {
+      for (const p of d.posts) {
+        await rememberSemantic(mem.core, mem.embedder, namespace, p.id, p.text.slice(0, 1000));
+      }
+    }
+  }
 
   const firstLine = res.text.trim().split("\n")[0].slice(0, 160);
   return {
@@ -86,6 +141,7 @@ export async function assessIdeas(
       costUsd: res.costUsd,
       channels: digests.map((d) => d.channel),
       posts: posts.length,
+      priorHits: seen.length,
     },
   };
 }

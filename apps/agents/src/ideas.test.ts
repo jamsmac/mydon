@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ChannelPost } from "@mydon/connectors";
-import { assessIdeas, buildIdeasProposal, readIdeaChannels, type ChannelDigest } from "./ideas";
+import type { EmbeddingGateway } from "./embedding";
+import { assessIdeas, buildIdeasProposal, readIdeaChannels, type ChannelDigest, type IdeasMemory } from "./ideas";
 import type { ModelGateway, ModelRequest } from "./model-gateway";
 
 function post(num: number, text: string, links: string[] = []): ChannelPost {
@@ -81,5 +82,59 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
   it("модель не ответила → null (не выдаём пустую оценку за работу)", async () => {
     const { gateway } = fakeGateway("", false);
     assert.equal(await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(1, "идея")] }]), null);
+  });
+
+  // ── Семантическая память (RAG, #6b): дедуп уже разобранных идей ──────────────
+  function fakeEmbedder(map: Record<string, number[]>): EmbeddingGateway {
+    return { embed: async (t) => map[t] ?? [0, 0, 1] };
+  }
+  function fakeCore(seed: { type: string; payload: unknown }[] = []) {
+    const events = [...seed];
+    return {
+      events,
+      client: {
+        recordEvent: async (i: { type: string; payload?: unknown }) => {
+          events.push({ type: i.type, payload: i.payload });
+        },
+        listEvents: async (type: string) => events.filter((e) => e.type === type).map((e) => ({ payload: e.payload })),
+      } as never,
+    };
+  }
+
+  it("память: запоминает разобранные посты (для будущего дедупа)", async () => {
+    const { gateway } = fakeGateway("1. идея — в ядро");
+    const { client, events } = fakeCore();
+    const emb = fakeEmbedder({ "новая фишка": [1, 0, 0] });
+    const memory: IdeasMemory = { core: client, embedder: emb, namespace: "ideas" };
+    const p = await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(7, "новая фишка")] }], { memory });
+    assert.ok(p);
+    assert.equal(p.facts.priorHits, 0, "в пустой памяти совпадений нет");
+    const remembered = events.filter((e) => e.type === "agent.embed:ideas");
+    assert.equal(remembered.length, 1, "разобранный пост записан в семантическую память");
+  });
+
+  it("память: похожую уже разобранную идею помечает и просит не повторять", async () => {
+    const { gateway, seen } = fakeGateway("1. что-то новое");
+    // В памяти уже лежит «claudexor ротация» с вектором [1,0,0].
+    const stored = [
+      { type: "agent.embed:ideas", payload: { id: "promtjam/1", text: "claudexor ротация квот", vector: [1, 0, 0] } },
+    ];
+    const { client } = fakeCore(stored);
+    // Новый пост про claudexor — эмбеддер даёт близкий вектор (косинус ≈ 1 ≥ 0.85).
+    const emb = fakeEmbedder({
+      "claudexor снова": [0.99, 0.01, 0],
+      "claudexor снова про ротацию": [0.99, 0.01, 0],
+    });
+    const memory: IdeasMemory = { core: client, embedder: emb };
+    const p = await assessIdeas(
+      gateway,
+      [{ channel: "promtjam", posts: [post(9, "claudexor снова про ротацию")] }],
+      { memory },
+    );
+    assert.ok(p);
+    assert.equal(p.facts.priorHits, 1, "нашли одну уже разобранную похожую идею");
+    // Прошлая идея попала в НЕДОВЕРЕННЫЙ блок под маркером, инструкция — не повторять.
+    assert.match(seen[0].prompt, /РАНЕЕ РАЗОБРАННОЕ/);
+    assert.match(seen[0].prompt, /claudexor/);
   });
 });
