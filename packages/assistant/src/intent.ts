@@ -17,6 +17,8 @@ export type Intent =
   | { kind: "obligations"; domain: Domain }
   | { kind: "search"; query: string; domain?: Domain }
   | { kind: "recent" } // память: «что было», «что я решал»
+  /** Сводка к закупу вендинга: что заказать, на сколько, что на разбор. */
+  | { kind: "purchase" }
   /** Готовый файл: Excel с дебиторкой, отчёт в Word и т.п. */
   | { kind: "report"; format: "xlsx" | "docx"; topic: "receivables" | "tasks"; domain?: Domain }
   | { kind: "help" }
@@ -72,6 +74,12 @@ export function parseIntent(raw: string): Intent {
     const topic: "receivables" | "tasks" = /(задач|поручен)/.test(text) ? "tasks" : "receivables";
     const domain = detectDomain(text);
     return { kind: "report", format, topic, ...(domain ? { domain } : {}) };
+  }
+
+  // Закуп: «что заказать», «закуп», «что купить», «что докупить». Ниже файлового
+  // правила — «выгрузи закуп в excel» остаётся отчётом-файлом, а не сводкой.
+  if (/(что заказать|что закупить|что купить|что докупить|закуп|докуп)/.test(text)) {
+    return { kind: "purchase" };
   }
 
   // "долж" покрывает должен/должна/должны/задолженность; "долг" — долг/долги

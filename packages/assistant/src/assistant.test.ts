@@ -34,6 +34,14 @@ describe("Разбор вопросов", () => {
     assert.equal(parseIntent("покажи историю").kind, "recent");
   });
 
+  it("«что заказать / закуп» — сводка к закупу, но «закуп в excel» — файл", () => {
+    assert.equal(parseIntent("что заказать").kind, "purchase");
+    assert.equal(parseIntent("закуп").kind, "purchase");
+    assert.equal(parseIntent("что докупить").kind, "purchase");
+    // Файловое правило выше по приоритету: с «excel» это отчёт, а не сводка.
+    assert.equal(parseIntent("выгрузи закуп в excel").kind, "report");
+  });
+
   it("«сколько должен Olma» — поиск по имени, а не общая просрочка", () => {
     const i = parseIntent("сколько должен Olma");
     assert.equal(i.kind, "search");
