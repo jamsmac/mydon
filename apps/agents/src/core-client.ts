@@ -176,6 +176,28 @@ export class AgentsCoreClient {
     });
   }
 
+  // ── Заметки: артефакт исполнителя ─────────────────────────────────────────
+  // Исполнитель навыка оставляет реальный, видимый владельцу след — заметку в
+  // Core — и проверяет себя, ПЕРЕЧИТАВ её. Пара «записать → найти» и есть
+  // само-проверка из контракта исполнителя.
+
+  /**
+   * Создать заметку. Идемпотентно по заголовку: Core делает upsert, поэтому
+   * повторный прогон по тому же поводу не плодит дубли, а обновляет запись.
+   */
+  createNote(input: { title?: string; body: string; tags?: string[] }): Promise<{
+    id: string;
+    title: string | null;
+    body: string;
+  }> {
+    return this.request("/notes", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Найти заметки по тексту — независимая перечитка для само-проверки. */
+  findNotes(q: string): Promise<{ id: string; title: string | null; body: string }[]> {
+    return this.request(`/notes?q=${encodeURIComponent(q)}`);
+  }
+
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }
