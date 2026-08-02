@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { CliModelGateway, type CliSpawn, isCliProvider, resolveModelChain } from "./model-gateway";
+import { CliModelGateway, type CliSpawn, harnessPreset, isCliProvider, resolveModelChain } from "./model-gateway";
 
 const KEYS = ["LLM_MODEL", "LLM_FALLBACK_MODELS", "LLM_BASE_URL", "LLM_API_KEY"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -92,5 +92,41 @@ describe("CliModelGateway — подписочный claude -p", () => {
     const res = await new CliModelGateway("claude", ["-p"], spawn).call("default", { prompt: "x" });
     assert.equal(res.ok, false);
     assert.match(res.error ?? "", /ENOENT/);
+  });
+
+  it("promptVia=arg — промпт уходит аргументом, stdin пуст; свой modelFlag", async () => {
+    const { spawn, seen } = fakeSpawn({ stdout: "ok" });
+    // Как codex/gemini: промпт последним аргументом, модель через -m.
+    await new CliModelGateway("codex", ["exec"], spawn, 120_000, "arg", "-m").call("gpt-x", { prompt: "задача" });
+    assert.deepEqual(seen[0].args, ["exec", "-m", "gpt-x", "задача"]);
+    assert.equal(seen[0].input, "", "в arg-режиме stdin пуст");
+  });
+});
+
+describe("harnessPreset — харнессы claude/codex/gemini", () => {
+  it("claude → claude -p, stdin, --model", () => {
+    const p = harnessPreset("claude-cli");
+    assert.equal(p?.cmd, "claude");
+    assert.deepEqual(p?.baseArgs, ["-p"]);
+    assert.equal(p?.modelFlag, "--model");
+  });
+  it("codex → codex exec, -m", () => {
+    const p = harnessPreset("codex-cli");
+    assert.equal(p?.cmd, "codex");
+    assert.deepEqual(p?.baseArgs, ["exec"]);
+    assert.equal(p?.modelFlag, "-m");
+  });
+  it("gemini → gemini, -m", () => {
+    const p = harnessPreset("gemini-cli");
+    assert.equal(p?.cmd, "gemini");
+    assert.equal(p?.modelFlag, "-m");
+  });
+  it("все три — подписочные CLI-провайдеры (claudexor их ротирует)", () => {
+    assert.equal(isCliProvider("codex-cli"), true);
+    assert.equal(isCliProvider("gemini-cli"), true);
+  });
+  it("не-CLI провайдер → null пресет", () => {
+    assert.equal(harnessPreset("http"), null);
+    assert.equal(harnessPreset(undefined), null);
   });
 });

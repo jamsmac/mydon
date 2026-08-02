@@ -44,7 +44,7 @@ export interface ModelGateway {
  * через запятую). callModel пробует по порядку — первая ответившая даёт ответ.
  * Дубли и пустые отбрасываются; пустая цепочка означает «модель не настроена».
  */
-const CLI_PROVIDERS = new Set(["claude-cli", "claude-subscription", "cli"]);
+const CLI_PROVIDERS = new Set(["claude-cli", "claude-subscription", "codex-cli", "gemini-cli", "cli"]);
 
 /** Провайдер — подписочный CLI-харнесс (claude -p), а не HTTP. */
 export function isCliProvider(provider: string | undefined = process.env.LLM_PROVIDER): boolean {
@@ -176,14 +176,22 @@ export class CliModelGateway implements ModelGateway {
     private readonly baseArgs: readonly string[] = ["-p"],
     private readonly spawnImpl: CliSpawn = defaultCliSpawn,
     private readonly timeoutMs = 120_000,
+    /** Как передать промпт: через STDIN (по умолчанию, робастно) или как аргумент. */
+    private readonly promptVia: "stdin" | "arg" = "stdin",
+    /** Флаг выбора модели у харнесса: `--model` (claude), `-m` (codex/gemini). */
+    private readonly modelFlag = "--model",
   ) {}
 
   async call(model: string, req: ModelRequest): Promise<ModelResult> {
     const input = [req.system, req.prompt].filter(Boolean).join("\n\n");
     const args = [...this.baseArgs];
-    if (model && model !== "default") args.push("--model", model);
+    if (model && model !== "default") args.push(this.modelFlag, model);
+    // STDIN — самый робастный путь между харнессами (claude/codex/gemini читают
+    // пайп). Промпт по-прежнему НЕ идёт через shell — защита от инъекции команд.
+    const stdin = this.promptVia === "stdin" ? input : "";
+    if (this.promptVia === "arg") args.push(input);
     try {
-      const run = await this.spawnImpl(this.cmd, args, input, this.timeoutMs);
+      const run = await this.spawnImpl(this.cmd, args, stdin, this.timeoutMs);
       if (run.code !== 0) {
         return { text: "", model, costUsd: 0, ok: false, error: `${this.cmd} код ${run.code}: ${run.stderr.slice(0, 200)}` };
       }
@@ -194,13 +202,49 @@ export class CliModelGateway implements ModelGateway {
   }
 }
 
+/** Пресет харнесса: как запускать конкретный CLI подписки. */
+export interface HarnessPreset {
+  cmd: string;
+  baseArgs: string[];
+  promptVia: "stdin" | "arg";
+  modelFlag: string;
+}
+
+/**
+ * Пресеты подписочных CLI-харнессов. Промпт всем идёт через STDIN (робастно —
+ * claude/codex/gemini читают пайп). Точная команда зависит от версии CLI, поэтому
+ * всё переопределяется env (LLM_CLI_CMD/BASE_ARGS/PROMPT_VIA/MODEL_FLAG). Именно
+ * эти харнессы claudexor ротирует по квотам поверх.
+ */
+const HARNESS_PRESETS: Record<string, HarnessPreset> = {
+  "claude-cli": { cmd: "claude", baseArgs: ["-p"], promptVia: "stdin", modelFlag: "--model" },
+  "claude-subscription": { cmd: "claude", baseArgs: ["-p"], promptVia: "stdin", modelFlag: "--model" },
+  "codex-cli": { cmd: "codex", baseArgs: ["exec"], promptVia: "stdin", modelFlag: "-m" },
+  "gemini-cli": { cmd: "gemini", baseArgs: [], promptVia: "stdin", modelFlag: "-m" },
+};
+
+/** Пресет харнесса по провайдеру (или null, если не CLI-провайдер). */
+export function harnessPreset(provider: string | undefined = process.env.LLM_PROVIDER): HarnessPreset | null {
+  return HARNESS_PRESETS[(provider ?? "").trim().toLowerCase()] ?? null;
+}
+
 /**
  * Шлюз из окружения. `LLM_PROVIDER=claude-cli` → подписочный CLI. Иначе задан
  * `LLM_BASE_URL` → HTTP-шлюз. Ничего не задано → `null`: LLM-путь выключен.
  * Подключение модели — сознательное действие владельца, а не поведение по умолчанию.
  */
 export function modelGatewayFromEnv(): ModelGateway | null {
-  if (isCliProvider()) return new CliModelGateway();
+  if (isCliProvider()) {
+    // Пресет харнесса + env-переопределения (точная команда зависит от версии CLI).
+    const preset = harnessPreset() ?? { cmd: "claude", baseArgs: ["-p"], promptVia: "stdin" as const, modelFlag: "--model" };
+    const cmd = (process.env.LLM_CLI_CMD ?? "").trim() || preset.cmd;
+    const baseArgs = (process.env.LLM_CLI_BASE_ARGS ?? "").trim()
+      ? process.env.LLM_CLI_BASE_ARGS!.trim().split(/\s+/)
+      : preset.baseArgs;
+    const promptVia = (process.env.LLM_CLI_PROMPT_VIA ?? "").trim().toLowerCase() === "arg" ? "arg" : preset.promptVia;
+    const modelFlag = (process.env.LLM_CLI_MODEL_FLAG ?? "").trim() || preset.modelFlag;
+    return new CliModelGateway(cmd, baseArgs, defaultCliSpawn, 120_000, promptVia, modelFlag);
+  }
   const baseUrl = (process.env.LLM_BASE_URL ?? "").trim();
   if (baseUrl) return new HttpModelGateway(baseUrl, (process.env.LLM_API_KEY ?? "").trim());
   return null;
@@ -212,6 +256,7 @@ export function llmPosture(): string {
   if (modelGatewayFromEnv() === null || chain.length === 0) {
     return "LLM-путь выключен — работают детерминированные навыки (LLM_PROVIDER/LLM_BASE_URL не заданы)";
   }
-  const via = isCliProvider() ? "подписка (claude -p)" : "HTTP-шлюз";
+  const preset = harnessPreset();
+  const via = preset ? `подписка (${preset.cmd})` : isCliProvider() ? "подписка (CLI)" : "HTTP-шлюз";
   return `LLM-путь включён (${via}): цепочка моделей ${chain.join(" → ")}`;
 }
