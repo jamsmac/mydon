@@ -104,9 +104,12 @@ export async function runAgentTasks(
     const run = await runSkill(agent, skill, core, threshold, skillFloors?.get(skill));
 
     if (run.outcome === "skipped") {
-      if (run.skipReason === "no_signal") {
-        // Навык отработал, но повода нет — честный результат, задачу закрываем.
-        const note = "Проверил — по данным MYDON повода для действий нет.";
+      if (run.skipReason === "no_signal" || run.skipReason === "no_change") {
+        // Навык отработал, но повода/изменений нет — честный результат, закрываем.
+        const note =
+          run.skipReason === "no_change"
+            ? "Проверил — с прошлого раза ничего не изменилось."
+            : "Проверил — по данным MYDON повода для действий нет.";
         await core.setTaskStatus(t.id, "done", `agent:${agent.name}`, note);
         results.push({ taskId: t.id, outcome: "done", note });
       } else {

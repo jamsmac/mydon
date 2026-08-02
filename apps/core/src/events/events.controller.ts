@@ -74,4 +74,14 @@ export class EventsController {
     });
     return { count };
   }
+
+  /** Самое свежее событие под фильтр (источник/тип) — для дельта-памяти агента. */
+  @Get("latest")
+  async latest(@Query() filter: ListEventsDto) {
+    const row = await this.events.latest({
+      ...(filter.source ? { source: filter.source } : {}),
+      ...(filter.type ? { type: filter.type } : {}),
+    });
+    return { event: row ?? null };
+  }
 }

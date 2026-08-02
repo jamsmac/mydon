@@ -198,6 +198,27 @@ export class AgentsCoreClient {
     return this.request(`/notes?q=${encodeURIComponent(q)}`);
   }
 
+  // ── Дельта-память агента ──────────────────────────────────────────────────
+  // Агент помнит СВОЙ прошлый результат по журналу Core (последнее событие
+  // agent.memory:<навык>), а не в памяти процесса: иначе после рестарта он
+  // «забыл бы» и повторил бы то же самое предложение. Хранится сигнатура
+  // прошлого повода — по ней runner решает, изменилось ли что-то.
+
+  /** Сигнатура прошлого результата навыка или null (ещё не было). */
+  async recallMemory(source: string, skill: string): Promise<string | null> {
+    const qs = new URLSearchParams({ source, type: `agent.memory:${skill}` });
+    const { event } = await this.request<{ event: { payload?: unknown } | null }>(
+      `/events/latest?${qs.toString()}`,
+    );
+    const sig = (event?.payload as { signature?: unknown } | undefined)?.signature;
+    return typeof sig === "string" ? sig : null;
+  }
+
+  /** Запомнить сигнатуру текущего результата навыка (после успешной подачи). */
+  rememberMemory(source: string, skill: string, signature: string): Promise<unknown> {
+    return this.recordEvent({ source, type: `agent.memory:${skill}`, payload: { signature } });
+  }
+
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }

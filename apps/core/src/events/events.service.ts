@@ -47,6 +47,26 @@ export class EventsService {
   }
 
   /**
+   * Самое свежее событие под фильтр source+type (или undefined, если ни одного).
+   *
+   * Нужно для дельта-памяти агента: он вспоминает СВОЙ прошлый результат по
+   * журналу (последнее событие `agent.memory:<навык>`), а не из памяти процесса —
+   * иначе после рестарта контейнера агент «забыл бы» и повторил бы то же самое.
+   */
+  async latest(filter: { source?: string; type?: string } = {}): Promise<EventRow | undefined> {
+    const conditions: SQL[] = [];
+    if (filter.source) conditions.push(eq(event.source, filter.source));
+    if (filter.type) conditions.push(eq(event.type, filter.type));
+    const [row] = await this.db
+      .select()
+      .from(event)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(event.occurredAt))
+      .limit(1);
+    return row;
+  }
+
+  /**
    * Сколько событий подходит под фильтр. Нужно для лимита действий агента: он
    * считает свои `agent.action` за сутки по журналу, а не по счётчику в памяти —
    * тот разошёлся бы с фактом при перезапуске контейнера.
