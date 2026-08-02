@@ -30,6 +30,12 @@ function toPassport(a: AgentDefinition): Record<string, unknown> {
     skills: a.skills,
     schedule: a.schedule,
     ...(a.budgetPerDayUsd !== undefined ? { budgetPerDayUsd: a.budgetPerDayUsd } : {}),
+    // Конфиг-поля навыков переносим в базу, иначе при загрузке из базы (источник
+    // истины) они бы терялись: ингестор идей молчал бы, break-glass был бы пуст.
+    ...(a.budgetOnExceeded !== undefined ? { budgetOnExceeded: a.budgetOnExceeded } : {}),
+    ...(a.webSources !== undefined ? { webSources: a.webSources } : {}),
+    ...(a.breakGlass !== undefined ? { breakGlass: a.breakGlass } : {}),
+    ...(a.ideaChannels !== undefined ? { ideaChannels: a.ideaChannels } : {}),
   };
 }
 
@@ -43,6 +49,10 @@ function fromCore(row: {
   skills: unknown;
   schedule: unknown;
   budgetPerDayUsd: string | null;
+  budgetOnExceeded: string | null;
+  webSources: unknown;
+  breakGlass: unknown;
+  ideaChannels: unknown;
 }): AgentDefinition {
   const schedule = Array.isArray(row.schedule)
     ? (row.schedule as { cron?: unknown; skill?: unknown }[])
@@ -54,6 +64,24 @@ function fromCore(row: {
     ? (row.status as AgentDefinition["status"])
     : "draft";
 
+  // Конфиг-поля навыков из базы: без их переноса ингестор идей и read-sources
+  // получали бы пусто (агенты грузятся из базы — источник истины).
+  const webSources = Array.isArray(row.webSources)
+    ? (row.webSources as { name?: unknown; url?: unknown }[])
+        .filter((s) => typeof s?.name === "string" && typeof s?.url === "string")
+        .map((s) => ({ name: String(s.name), url: String(s.url) }))
+    : [];
+  const breakGlass = Array.isArray(row.breakGlass)
+    ? (row.breakGlass as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+    : [];
+  const ideaChannels = Array.isArray(row.ideaChannels)
+    ? (row.ideaChannels as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+    : [];
+  const onExceeded =
+    row.budgetOnExceeded === "pause" || row.budgetOnExceeded === "downgrade" || row.budgetOnExceeded === "ask"
+      ? row.budgetOnExceeded
+      : undefined;
+
   return {
     name: row.name,
     business: row.business,
@@ -63,6 +91,10 @@ function fromCore(row: {
     schedule,
     skills: Array.isArray(row.skills) ? row.skills.map(String) : [],
     ...(budget !== undefined && Number.isFinite(budget) ? { budgetPerDayUsd: budget } : {}),
+    ...(onExceeded !== undefined ? { budgetOnExceeded: onExceeded } : {}),
+    ...(webSources.length ? { webSources } : {}),
+    ...(breakGlass.length ? { breakGlass } : {}),
+    ...(ideaChannels.length ? { ideaChannels } : {}),
     dir: "(из базы)",
   };
 }

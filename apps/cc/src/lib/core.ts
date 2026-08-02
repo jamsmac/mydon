@@ -136,6 +136,10 @@ export interface AgentCard {
   skills: string[];
   schedule: { cron: string; skill: string }[];
   budgetPerDayUsd: string | null;
+  budgetOnExceeded: "pause" | "downgrade" | "ask" | null;
+  webSources: { name: string; url: string }[];
+  breakGlass: string[];
+  ideaChannels: string[];
   archivedAt: string | null;
   updatedAt: string;
 }

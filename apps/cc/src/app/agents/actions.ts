@@ -35,6 +35,28 @@ function parseList(raw: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+/** Веб-источники строкой "Имя | https://url" на строку. */
+function parseWebSources(raw: string): { name: string; url: string }[] {
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [name, url] = line.split("|").map((p) => p.trim());
+      return { name: name ?? "", url: url ?? "" };
+    })
+    .filter((s) => s.name.length > 0 && s.url.length > 0);
+}
+
+/** Каналы идей: убираем ведущий @, чтобы форма прощала обе записи. */
+function parseChannels(raw: string): string[] {
+  return parseList(raw).map((c) => c.replace(/^@/, ""));
+}
+
+function parseStrategy(raw: string): "pause" | "downgrade" | "ask" | undefined {
+  return raw === "pause" || raw === "downgrade" || raw === "ask" ? raw : undefined;
+}
+
 /** Сохранение карточки: настройки живут в базе и переживают обновление системы. */
 export async function saveAgent(name: string, form: FormData): Promise<ActionResult> {
   const budgetRaw = String(form.get("budgetPerDayUsd") ?? "").trim();
@@ -54,6 +76,10 @@ export async function saveAgent(name: string, form: FormData): Promise<ActionRes
       skills: parseList(String(form.get("skills") ?? "")),
       schedule: parseSchedule(String(form.get("schedule") ?? "")),
       budgetPerDayUsd: budget,
+      budgetOnExceeded: parseStrategy(String(form.get("budgetOnExceeded") ?? "")) ?? null,
+      webSources: parseWebSources(String(form.get("webSources") ?? "")),
+      breakGlass: parseList(String(form.get("breakGlass") ?? "")),
+      ideaChannels: parseChannels(String(form.get("ideaChannels") ?? "")),
     });
   } catch (err) {
     return fail(err);

@@ -18,6 +18,7 @@ import { AgentsService } from "./agents.service";
 
 const STATUSES = ["active", "paused", "draft", "deprecated"] as const;
 const TIERS = ["T0", "T1", "T2", "T3", "T4"] as const;
+const STRATEGIES = ["pause", "downgrade", "ask"] as const;
 
 export class ScheduleItemDto {
   @IsString() @IsNotEmpty() @MaxLength(64)
@@ -25,6 +26,14 @@ export class ScheduleItemDto {
 
   @IsString() @IsNotEmpty() @MaxLength(64)
   skill!: string;
+}
+
+export class WebSourceDto {
+  @IsString() @IsNotEmpty() @MaxLength(128)
+  name!: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(512)
+  url!: string;
 }
 
 export class CreateAgentDto {
@@ -61,6 +70,18 @@ export class CreateAgentDto {
 
   @IsOptional() @IsNumber() @Min(0)
   budgetPerDayUsd?: number;
+
+  @IsOptional() @IsIn([...STRATEGIES], { message: "on_exceeded: pause | downgrade | ask" })
+  budgetOnExceeded?: (typeof STRATEGIES)[number];
+
+  @IsOptional() @IsArray() @ArrayMaxSize(30) @ValidateNested({ each: true }) @Type(() => WebSourceDto)
+  webSources?: WebSourceDto[];
+
+  @IsOptional() @IsArray() @ArrayMaxSize(30) @IsString({ each: true }) @MaxLength(64, { each: true })
+  breakGlass?: string[];
+
+  @IsOptional() @IsArray() @ArrayMaxSize(30) @IsString({ each: true }) @MaxLength(128, { each: true })
+  ideaChannels?: string[];
 }
 
 export class SeedAgentsDto {
@@ -155,6 +176,12 @@ export class AgentsController {
         ? { schedule: dto.schedule.map((s) => ({ cron: s.cron, skill: s.skill })) }
         : {}),
       ...(dto.budgetPerDayUsd !== undefined ? { budgetPerDayUsd: dto.budgetPerDayUsd } : {}),
+      ...(dto.budgetOnExceeded !== undefined ? { budgetOnExceeded: dto.budgetOnExceeded } : {}),
+      ...(dto.webSources !== undefined
+        ? { webSources: dto.webSources.map((s) => ({ name: s.name, url: s.url })) }
+        : {}),
+      ...(dto.breakGlass !== undefined ? { breakGlass: dto.breakGlass } : {}),
+      ...(dto.ideaChannels !== undefined ? { ideaChannels: dto.ideaChannels } : {}),
     };
   }
 }

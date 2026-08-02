@@ -134,6 +134,13 @@
       "when": 1785668399856,
       "tag": "0018_wise_vin_gonzales",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1785670604123,
+      "tag": "0019_furry_adam_warlock",
+      "breakpoints": true
     }
   ]
 }

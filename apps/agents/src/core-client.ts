@@ -141,6 +141,10 @@ export class AgentsCoreClient {
       skills: unknown;
       schedule: unknown;
       budgetPerDayUsd: string | null;
+      budgetOnExceeded: string | null;
+      webSources: unknown;
+      breakGlass: unknown;
+      ideaChannels: unknown;
       archivedAt: string | null;
     }[]
   > {
