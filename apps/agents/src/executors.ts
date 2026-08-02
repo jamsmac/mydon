@@ -88,33 +88,60 @@ const persistMorningDigest: Executor = async (agent, proposal, core) => {
  * Первый исполнитель — `morning-digest`: сохранить сводку в заметку (тир T0, без
  * денег и внешних сообщений). Это витрина контракта, а не разрешение на риск.
  */
+/** Одна идея из канала: заголовок по id поста (дедуп), текст, ссылки. */
+interface IdeaCard {
+  id: string;
+  title: string;
+  text: string;
+  links: string[];
+}
+
+function ideaCards(proposal: Proposal): IdeaCard[] {
+  const top = Array.isArray(proposal.facts.top) ? (proposal.facts.top as Record<string, unknown>[]) : [];
+  return top
+    .filter((t) => typeof t.id === "string")
+    .map((t) => ({
+      id: String(t.id),
+      title: typeof t.title === "string" ? t.title : "",
+      text: typeof t.text === "string" ? t.text : "",
+      links: Array.isArray(t.links) ? (t.links as unknown[]).map(String) : [],
+    }));
+}
+
 /**
- * Ингестор идей: сохранить дайджест из Telegram-каналов в заметку Core.
+ * Ингестор идей: КАЖДЫЙ пост канала — отдельной карточкой-заметкой в Core.
  *
- * Тот же контракт, что у morning-digest: заголовок по ташкентскому дню (upsert —
- * без дублей), тело из фактов предложения, подтверждение перечиткой. Так идеи из
- * канала владельца КОПЯТСЯ в реестр знаний, а не только мелькают в согласовании.
+ * Заголовок карточки привязан к id поста (`Идея <канал/номер>`), а Core пишет
+ * заметку upsert-ом по заголовку — значит дедуп по посту бесплатный: повторный
+ * прогон обновляет ту же карточку, а не плодит копии. Так идеи из канала
+ * КОПЯТСЯ в реестр знаний по одной, а не тонут в общем дайджесте.
+ *
+ * Само-проверка: после записи перечитываем одну карточку и сверяем тело. Не
+ * подтвердилось — ok:false, не считаем сделанным.
  */
 const persistIdeas: Executor = async (agent, proposal, core) => {
-  const title = `Идеи из каналов · ${tashkentDate()}`;
-  const top = Array.isArray(proposal.facts.top) ? (proposal.facts.top as { title?: unknown; links?: unknown }[]) : [];
-  const lines = top.map((t) => {
-    const links = Array.isArray(t.links) ? (t.links as unknown[]).map(String) : [];
-    return `- ${String(t.title ?? "")}${links.length ? ` (${links.join(", ")})` : ""}`;
-  });
-  const body =
-    `${proposal.action}\n\n` +
-    `${lines.join("\n") || "- (постов нет)"}\n\n` +
-    `Сохранил агент ${agent.name}. Запись для владельца, не сообщение наружу.`;
+  const cards = ideaCards(proposal);
+  if (cards.length === 0) return { ok: false, detail: "нет идей для сохранения" };
 
-  await core.createNote({ title, body, tags: ["идея", "канал", agent.name] });
-
-  const found = await core.findNotes(title);
-  const saved = found.find((n) => n.title === title);
-  if (saved && saved.body === body) {
-    return { ok: true, detail: `дайджест идей сохранён в заметку «${title}» и подтверждён перечиткой` };
+  const saved: { title: string; body: string }[] = [];
+  for (const card of cards) {
+    const title = `Идея ${card.id}`;
+    const body =
+      `${card.title}\n\n${card.text}` +
+      (card.links.length ? `\n\nСсылки: ${card.links.join(", ")}` : "") +
+      `\n\nИз канала. Сохранил агент ${agent.name} — запись для владельца.`;
+    await core.createNote({ title, body, tags: ["идея", "канал", agent.name] });
+    saved.push({ title, body });
   }
-  return { ok: false, detail: "заметку идей не удалось подтвердить перечиткой — не считаю сделанным" };
+
+  // Перечитка одной карточки (последней) — подтверждаем, что запись состоялась.
+  const probe = saved[saved.length - 1];
+  const found = await core.findNotes(probe.title);
+  const hit = found.find((n) => n.title === probe.title);
+  if (hit && hit.body === probe.body) {
+    return { ok: true, detail: `сохранено идей-карточек: ${saved.length} (дедуп по id поста), подтверждено перечиткой` };
+  }
+  return { ok: false, detail: "карточки идей не подтвердились перечиткой — не считаю сделанным" };
 };
 
 export const EXECUTORS: Record<string, Executor> = {
