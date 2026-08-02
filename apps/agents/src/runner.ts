@@ -19,6 +19,8 @@ export interface RunResult {
    *  повторно (иначе первый прогон и отчёт могут разойтись). */
   action?: string;
   facts?: Record<string, unknown>;
+  /** Подсказки «что дальше» (follow-up) от навыка. */
+  next?: string[];
 }
 
 /**
@@ -165,7 +167,12 @@ export async function runSkill(
     tier,
     // Факты кладём рядом с предложением: по ним проверяется «по следам»,
     // что агент не выдумал повод.
-    payload: { skill, business: agent.business, facts: proposal.facts },
+    payload: {
+      skill,
+      business: agent.business,
+      facts: proposal.facts,
+      ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
+    },
   });
   await core.recordEvent({
     source: `agent:${agent.name}`,
@@ -181,6 +188,7 @@ export async function runSkill(
     approvalId: approval.id,
     action: proposal.action,
     facts: proposal.facts,
+    ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
     reason: isBreakGlass
       ? `break-glass: навык «${skill}» всегда идёт через согласование`
       : requiresApproval(tier, threshold)

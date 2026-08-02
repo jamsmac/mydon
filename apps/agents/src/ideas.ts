@@ -70,7 +70,9 @@ export function buildIdeasProposal(digests: ChannelDigest[]): Proposal | null {
       top: top.map((t) => ({
         id: t.post.id,
         title: title(t.post),
-        links: t.post.links.slice(0, 3),
+        // Полный текст (с потолком) — исполнитель кладёт каждую идею отдельной карточкой.
+        text: t.post.text.length > 1500 ? `${t.post.text.slice(0, 1500)}…` : t.post.text,
+        links: t.post.links.slice(0, 5),
       })),
     },
   };

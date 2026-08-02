@@ -105,3 +105,57 @@ describe("Исполнитель morning-digest → заметка", () => {
     assert.equal(res.ok, false);
   });
 });
+
+describe("Исполнитель scan-ideas → карточка на пост", () => {
+  const agent2 = { ...agent, name: "knowledge-curator" };
+  const proposalIdeas: Proposal = {
+    action: "Идеи из каналов (@promtjam): 2 постов.",
+    facts: {
+      total: 2,
+      latestNum: 420,
+      top: [
+        { id: "promtjam/420", title: "claudexor", text: "ротация квот между подписками", links: ["https://x/claudexor"] },
+        { id: "promtjam/414", title: "OmniRoute", text: "AI-gateway", links: [] },
+      ],
+    },
+  };
+  const scanIdeas = EXECUTORS["scan-ideas"];
+
+  function notesCore() {
+    const store = new Map<string, { id: string; title: string | null; body: string }>();
+    let seq = 0;
+    return {
+      store,
+      core: {
+        createNote: async (i: { title?: string; body: string }) => {
+          const key = i.title ?? `u${(seq += 1)}`;
+          const row = { id: store.get(key)?.id ?? `n${(seq += 1)}`, title: i.title ?? null, body: i.body };
+          store.set(key, row);
+          return row;
+        },
+        findNotes: async (q: string) => [...store.values()].filter((n) => (n.title ?? "").includes(q)),
+      } as never,
+    };
+  }
+
+  it("сохраняет по карточке на пост, подтверждает перечиткой", async () => {
+    const { core, store } = notesCore();
+    const res = await scanIdeas(agent2, proposalIdeas, core);
+    assert.equal(res.ok, true);
+    assert.equal(store.size, 2, "две карточки — по одной на пост");
+    assert.ok([...store.keys()].includes("Идея promtjam/420"));
+  });
+
+  it("идемпотентно: повторный прогон не плодит дубли (дедуп по id поста)", async () => {
+    const { core, store } = notesCore();
+    await scanIdeas(agent2, proposalIdeas, core);
+    await scanIdeas(agent2, proposalIdeas, core);
+    assert.equal(store.size, 2, "тот же набор постов — те же карточки, upsert");
+  });
+
+  it("нет идей → ok=false", async () => {
+    const { core } = notesCore();
+    const res = await scanIdeas(agent2, { action: "x", facts: { top: [] } }, core);
+    assert.equal(res.ok, false);
+  });
+});
