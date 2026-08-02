@@ -66,6 +66,16 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     assert.ok(cols.includes("archivedAt"), "удаление — архивация, история должна оставаться");
   });
 
+  it("вендинг: слот хранит ВМЕСТИМОСТЬ и остаток — основу расчёта дефицита", () => {
+    const slot = Object.keys(schema.machineSlot as unknown as Record<string, unknown>);
+    // Ради вместимости и заводилась таблица: machine_stock её не хранит.
+    assert.ok(slot.includes("capacity"), "вместимость слота — без неё дефицит не посчитать");
+    assert.ok(slot.includes("quantity"), "остаток слота");
+    assert.ok(slot.includes("machineSerial") && slot.includes("coilId"), "ключ слота: автомат + пружина");
+    const prod = Object.keys(schema.vendingProduct as unknown as Record<string, unknown>);
+    assert.ok(prod.includes("purchasePrice") && prod.includes("packSize"), "прайс и кратность — в базе, не в коде");
+  });
+
   it("у ключевых таблиц есть обязательные поля", () => {
     const cols = (t: unknown) => Object.keys(t as Record<string, unknown>);
 
