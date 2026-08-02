@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { entity, org } from "@mydon/db";
+import { entity, org, vendingPurchaseOrder } from "@mydon/db";
 import { ApprovalsService } from "./approvals.service";
 
 type Row = Record<string, unknown>;
@@ -173,5 +173,63 @@ describe("Одобренный импорт данных → карточки в
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     await service.decide("a1", "approved", "owner");
     assert.equal(inserted.length, 2, "разные серийники = разные машины, имя точки не важно");
+  });
+});
+
+describe("Одобренная заявка закупа → накладная (§5.7)", () => {
+  function orderStub(payload: Row) {
+    const orders: Row[] = [];
+    const tx = {
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+      update: () => ({
+        set: () => ({
+          where: () => ({ returning: async () => [{ id: "a1", decision: "approved", payload }] }),
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: (v: Row) => {
+          if (table === vendingPurchaseOrder) orders.push(v);
+          return Object.assign(Promise.resolve(undefined), {
+            returning: async () => [{ id: `o${orders.length}`, ...v }],
+          });
+        },
+      }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    return { db, orders };
+  }
+
+  it("«одобрить» материализует накладную со снимком сумм из payload", async () => {
+    const { db, orders } = orderStub({
+      purchaseOrder: {
+        positions: [{ product: "Montella", order: 12, buy: 4 }],
+        totalBuy: 4,
+        totalOrder: 12,
+        costExact: 20000,
+        costRounded: 60000,
+        createdBy: "owner",
+      },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(orders.length, 1);
+    assert.equal(orders[0].approvalId, "a1");
+    assert.equal(orders[0].totalOrder, 12);
+    assert.equal(orders[0].costRounded, "60000.00"); // numeric → строка
+    assert.equal((orders[0].positions as unknown[]).length, 1);
+  });
+
+  it("одобрение без purchaseOrder — накладную не создаёт", async () => {
+    const { db, orders } = orderStub({ facts: { сумма: 1 } });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(orders.length, 0);
+  });
+
+  it("пустые позиции — накладную не создаёт", async () => {
+    const { db, orders } = orderStub({ purchaseOrder: { positions: [], totalOrder: 0 } });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(orders.length, 0);
   });
 });

@@ -170,6 +170,12 @@ export class VendingController {
     return this.vending.submitPurchase(dto.createdBy);
   }
 
+  /** Накладные закупа (материализованы при одобрении заявки). */
+  @Get("orders")
+  orders() {
+    return this.vending.orders();
+  }
+
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────
 
   @Post("stock")
