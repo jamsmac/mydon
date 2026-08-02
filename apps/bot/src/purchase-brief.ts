@@ -1,4 +1,4 @@
-import type { VendingPurchase } from "./core-client";
+import type { VendingPurchase, VendingOrder } from "./core-client";
 
 /**
  * Телеграм-брифинг закупа (ТЗ Фаза 2): владелец спрашивает «что заказать» —
@@ -74,4 +74,30 @@ export function formatPurchaseSubmitAck(res: {
     `Позиций: ${res.positions} · сумма ~${sum} сум.`,
     `Смотри «согласования» — там ✅ Одобрить / ❌ Отклонить.`,
   ].join("\n");
+}
+
+/** Запрос списка накладных закупа (материализованы при одобрении). */
+export function isPurchaseOrdersQuery(text: string): boolean {
+  return /(накладн|история закуп|заказы закуп|оформленн.* закуп)/i.test(text.trim().toLowerCase());
+}
+
+const ORDER_STATUS: Record<VendingOrder["status"], string> = {
+  approved: "одобрена",
+  ordered: "заказана",
+  received: "принята",
+  cancelled: "отменена",
+};
+
+/** Список накладных закупа для владельца. */
+export function formatPurchaseOrders(orders: VendingOrder[]): string {
+  if (orders.length === 0) {
+    return "📄 Накладных закупа пока нет. Одобри заявку — «оформить закуп», затем «согласования».";
+  }
+  const lines = orders.slice(0, 10).map((o) => {
+    const when = new Date(o.createdAt).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+    const sum = Math.round(o.costRounded).toLocaleString("ru-RU");
+    return `• ${when} — ${o.positions} поз., ~${sum} сум (${ORDER_STATUS[o.status] ?? o.status})`;
+  });
+  if (orders.length > 10) lines.push(`…и ещё ${orders.length - 10}`);
+  return ["📄 Накладные закупа:", "", ...lines].join("\n");
 }

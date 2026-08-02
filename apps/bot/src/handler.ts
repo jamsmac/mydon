@@ -4,7 +4,13 @@ import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, formatApproval, formatBriefing } from "./briefing";
 import type { CoreClient } from "./core-client";
 import { parseIntent } from "./intent";
-import { formatPurchaseBrief, formatPurchaseSubmitAck, isPurchaseSubmitCommand } from "./purchase-brief";
+import {
+  formatPurchaseBrief,
+  formatPurchaseOrders,
+  formatPurchaseSubmitAck,
+  isPurchaseOrdersQuery,
+  isPurchaseSubmitCommand,
+} from "./purchase-brief";
 import { planReport } from "./reports";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
 import type { RateLimiter } from "./security/access";
@@ -39,6 +45,7 @@ const HELP = [
   "• «какие автоматы простаивают»",
   "• «что заказать» — сводка к закупу вендинга",
   "• «оформить закуп» — отправить закуп тебе на утверждение",
+  "• «накладные» — одобренные закупы",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
@@ -75,6 +82,18 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка отправки закупа на утверждение:", err);
       return { text: "Не удалось отправить закуп в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Накладные закупа — чтение результата одобрения; ловим здесь, чтобы «накладные»
+  // не ушло в общий разбор как непонятое.
+  if (isPurchaseOrdersQuery(text)) {
+    try {
+      const orders = await deps.core.vendingOrders();
+      return { text: formatPurchaseOrders(orders) };
+    } catch (err) {
+      console.error("Ошибка чтения накладных:", err);
+      return { text: "Не удалось получить накладные из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 

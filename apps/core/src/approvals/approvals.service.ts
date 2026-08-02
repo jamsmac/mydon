@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { approval, auditLog, entity, event, org } from "@mydon/db";
+import { approval, auditLog, entity, event, org, vendingPurchaseOrder } from "@mydon/db";
 import { and, desc, eq, type SQL } from "drizzle-orm";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
@@ -125,10 +125,12 @@ export class ApprovalsService {
         after: updated,
       });
 
-      // Одобренный импорт данных исполняется сразу, той же транзакцией:
-      // «одобрить» должно означать «карточки появились», а не «записано в журнал».
+      // Одобрение исполняется сразу, той же транзакцией: «одобрить» должно
+      // означать «результат появился», а не «записано в журнал». По виду payload
+      // выбираем исполнителя — импорт карточек или накладная закупа.
       if (decision === "approved") {
         await this.executeImport(tx, updated, actorRef);
+        await this.executePurchaseOrder(tx, updated, actorRef);
       }
 
       return updated;
@@ -212,6 +214,53 @@ export class ApprovalsService {
       source: "owner",
       type: "import.executed",
       payload: { approvalId: row.id, domain, type, created, skipped },
+    });
+  }
+
+  /**
+   * Материализация накладной закупа при одобрении: payload.purchaseOrder →
+   * строка `vending_purchase_order`. Снимок цифр берётся из заявки (зафиксирован
+   * на момент решения, не пересчитывается). Идемпотентно: approval_id уникален,
+   * повторное одобрение той же заявки невозможно (decide закрывает pending), а
+   * ручной ретрай упрётся в уникальность — дубль-накладной не будет.
+   * Нет/кривой payload — не ошибка решения: одобрение остаётся, накладная нет.
+   */
+  private async executePurchaseOrder(tx: Tx, row: ApprovalRow, actorRef: string): Promise<void> {
+    const po = (row.payload as { purchaseOrder?: unknown } | null)?.purchaseOrder as
+      | { positions?: unknown; totalBuy?: unknown; totalOrder?: unknown; costExact?: unknown; costRounded?: unknown; createdBy?: unknown }
+      | undefined;
+    if (!po || typeof po !== "object") return;
+
+    const positions = Array.isArray(po.positions) ? po.positions : [];
+    if (positions.length === 0) return;
+
+    const int = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0);
+    const money = (v: unknown): string => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "0");
+
+    const [order] = await tx
+      .insert(vendingPurchaseOrder)
+      .values({
+        approvalId: row.id,
+        positions,
+        totalBuy: int(po.totalBuy),
+        totalOrder: int(po.totalOrder),
+        costExact: money(po.costExact),
+        costRounded: money(po.costRounded),
+        createdBy: typeof po.createdBy === "string" ? po.createdBy.slice(0, 128) : null,
+      })
+      .returning();
+
+    await tx.insert(event).values({
+      source: "owner",
+      type: "vending.purchase_order.created",
+      payload: { approvalId: row.id, orderId: order.id, positions: positions.length, costRounded: money(po.costRounded) },
+    });
+    await tx.insert(auditLog).values({
+      actorKind: "human",
+      actorRef,
+      action: "vending.purchase_order.create",
+      target: order.id,
+      after: order,
     });
   }
 }

@@ -73,6 +73,18 @@ export interface VendingPurchase {
   overpay: number;
 }
 
+/** Накладная закупа (материализована при одобрении заявки, §5.7). */
+export interface VendingOrder {
+  id: string;
+  approvalId: string;
+  status: "approved" | "ordered" | "received" | "cancelled";
+  positions: number;
+  totalOrder: number;
+  costRounded: number;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 export interface PendingNotifications {
   since: string;
   events: number;
@@ -129,6 +141,11 @@ export class CoreClient {
       method: "POST",
       body: JSON.stringify({ items }),
     });
+  }
+
+  /** Накладные закупа (материализованы при одобрении, §5.7). */
+  vendingOrders(): Promise<VendingOrder[]> {
+    return this.request<VendingOrder[]>("/vending/orders");
   }
 
   /** Отправить закуп на утверждение владельцу (§5.7). */

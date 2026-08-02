@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { VendingPurchase, VendingPurchaseItem } from "./core-client";
-import { formatPurchaseBrief, formatPurchaseSubmitAck, isPurchaseSubmitCommand } from "./purchase-brief";
+import type { VendingOrder, VendingPurchase, VendingPurchaseItem } from "./core-client";
+import {
+  formatPurchaseBrief,
+  formatPurchaseOrders,
+  formatPurchaseSubmitAck,
+  isPurchaseOrdersQuery,
+  isPurchaseSubmitCommand,
+} from "./purchase-brief";
 
 const item = (o: Partial<VendingPurchaseItem> & { product: string }): VendingPurchaseItem => ({
   need: 0,
@@ -100,5 +106,37 @@ describe("Оформление закупа: команда и подтверж�
   it("нечего отправлять — показывает причину, без шума", () => {
     const t = formatPurchaseSubmitAck({ submitted: false, positions: 0, costRounded: 0, reason: "Закупать нечего." });
     assert.match(t, /нечего/i);
+  });
+});
+
+describe("Накладные закупа: запрос и список (§5.7)", () => {
+  const order = (o: Partial<VendingOrder> = {}): VendingOrder => ({
+    id: "o1",
+    approvalId: "a1",
+    status: "approved",
+    positions: 3,
+    totalOrder: 24,
+    costRounded: 84000,
+    createdBy: "owner",
+    createdAt: "2026-08-02T10:00:00Z",
+    ...o,
+  });
+
+  it("«накладные» / «история закупа» — запрос списка, «закуп» — нет", () => {
+    assert.equal(isPurchaseOrdersQuery("накладные"), true);
+    assert.equal(isPurchaseOrdersQuery("история закупа"), true);
+    assert.equal(isPurchaseOrdersQuery("закуп"), false);
+    assert.equal(isPurchaseOrdersQuery("оформить закуп"), false);
+  });
+
+  it("пусто — подсказывает оформить закуп", () => {
+    assert.match(formatPurchaseOrders([]), /Накладных закупа пока нет/);
+  });
+
+  it("список показывает позиции, сумму и статус по-русски", () => {
+    const t = formatPurchaseOrders([order(), order({ id: "o2", status: "received", positions: 1, costRounded: 5000 })]);
+    assert.match(t, /Накладные закупа:/);
+    assert.match(t, /3 поз., ~84\s?000 сум \(одобрена\)/);
+    assert.match(t, /1 поз., ~5\s?000 сум \(принята\)/);
   });
 });

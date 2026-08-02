@@ -1,6 +1,15 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import { desc, eq } from "drizzle-orm";
-import { machineSale, machineSlot, productSale, slotSnapshot, vendingProduct, vendingStock, vendingSyncRun } from "@mydon/db";
+import {
+  machineSale,
+  machineSlot,
+  productSale,
+  slotSnapshot,
+  vendingProduct,
+  vendingPurchaseOrder,
+  vendingStock,
+  vendingSyncRun,
+} from "@mydon/db";
 import {
   MAX_CAPACITY,
   computePurchase,
@@ -130,6 +139,18 @@ export interface ApprovalRequester {
     tier: "T0" | "T1" | "T2" | "T3" | "T4";
     payload?: Record<string, unknown>;
   }): Promise<{ id: string }>;
+}
+
+/** Накладная закупа для списка (панель/бот). */
+export interface PurchaseOrderRow {
+  id: string;
+  approvalId: string;
+  status: "approved" | "ordered" | "received" | "cancelled";
+  positions: number;
+  totalOrder: number;
+  costRounded: number;
+  createdBy: string | null;
+  createdAt: string;
 }
 
 /** Итог отправки закупа на утверждение. */
@@ -436,6 +457,25 @@ export class VendingService {
     });
 
     return { submitted: true, approvalId: created.id, positions: s.items.length, costRounded: s.costRounded };
+  }
+
+  /** Накладные закупа (материализованы при одобрении) — последние сверху. */
+  async orders(limit = 10): Promise<PurchaseOrderRow[]> {
+    const rows = await this.db
+      .select()
+      .from(vendingPurchaseOrder)
+      .orderBy(desc(vendingPurchaseOrder.createdAt))
+      .limit(Math.min(Math.max(limit, 1), 50));
+    return rows.map((r) => ({
+      id: r.id,
+      approvalId: r.approvalId,
+      status: r.status,
+      positions: Array.isArray(r.positions) ? r.positions.length : 0,
+      totalOrder: r.totalOrder,
+      costRounded: Number(r.costRounded),
+      createdBy: r.createdBy,
+      createdAt: r.createdAt.toISOString(),
+    }));
   }
 
   // ── Журнал сбора Ourvend ──────────────────────────────────────────────────

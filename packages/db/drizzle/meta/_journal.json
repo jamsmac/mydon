@@ -155,6 +155,13 @@
       "when": 1785692323593,
       "tag": "0021_vending_stock",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1785695401849,
+      "tag": "0022_vending_purchase_order",
+      "breakpoints": true
     }
   ]
 }

@@ -752,6 +752,8 @@ export const systemConfig = pgTable("system_config", {
 export const vendingCategoryEnum = pgEnum("vending_category", ["drink", "snack", "other"]);
 export const vendingAliasSourceEnum = pgEnum("vending_alias_source", ["ourvend", "warehouse", "manual"]);
 export const vendingSyncStatusEnum = pgEnum("vending_sync_status", ["running", "success", "partial", "failed"]);
+/** Жизненный цикл накладной закупа: одобрена → заказана → принята | отменена. */
+export const vendingOrderStatusEnum = pgEnum("vending_order_status", ["approved", "ordered", "received", "cancelled"]);
 
 /** Справочник товаров вендинга: прайс и кратность (Приложение А ТЗ). */
 export const vendingProduct = pgTable("vending_product", {
@@ -872,6 +874,31 @@ export const vendingStock = pgTable("vending_stock", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+/**
+ * Накладная закупа (§5.7): материализуется, когда владелец ОДОБРИЛ заявку.
+ * Снимок позиций и сумм берётся из payload одобренной заявки — цифры фиксируются
+ * на момент решения, а не пересчитываются задним числом. Одна накладная на
+ * одобрение (approval_id уникален).
+ */
+export const vendingPurchaseOrder = pgTable("vending_purchase_order", {
+  id: id(),
+  /** Одобренная заявка-источник (approval). */
+  approvalId: uuid("approval_id")
+    .references(() => approval.id)
+    .notNull()
+    .unique(),
+  status: vendingOrderStatusEnum("status").default("approved").notNull(),
+  /** Позиции закупа как в момент одобрения: [{product, order, buy, price, …}]. */
+  positions: jsonb("positions").default([]).notNull(),
+  totalBuy: integer("total_buy").default(0).notNull(),
+  totalOrder: integer("total_order").default(0).notNull(),
+  /** Суммы, сум. Держим и точную (по нехватке), и с округлением до упаковок. */
+  costExact: numeric("cost_exact", { precision: 14, scale: 2 }).default("0").notNull(),
+  costRounded: numeric("cost_rounded", { precision: 14, scale: 2 }).default("0").notNull(),
+  createdBy: text("created_by"),
+  createdAt: createdAt(),
+});
+
 /** Неопознанные имена товаров — на разбор менеджеру (не роняют сбор). */
 export const vendingUnmatched = pgTable("vending_unmatched", {
   id: id(),
@@ -943,6 +970,7 @@ export const schema = {
   productSale,
   machineSale,
   vendingStock,
+  vendingPurchaseOrder,
   vendingUnmatched,
   vendingSyncRun,
 };
