@@ -48,6 +48,31 @@ export interface TaskRow {
   resultNote: string | null;
 }
 
+/** Позиция сводного закупа (§5.5) — как отдаёт Core GET /vending/purchase. */
+export interface VendingPurchaseItem {
+  product: string;
+  need: number;
+  buy: number;
+  pack: number;
+  order: number;
+  price: number;
+  costRounded: number;
+  noPrice: boolean;
+  noSales: boolean;
+}
+
+/** Сводный закуп: позиции + денежные итоги (§5.4–5.5). */
+export interface VendingPurchase {
+  items: VendingPurchaseItem[];
+  excludedNoSales: VendingPurchaseItem[];
+  noPrice: string[];
+  totalBuy: number;
+  totalOrder: number;
+  costExact: number;
+  costRounded: number;
+  overpay: number;
+}
+
 export interface PendingNotifications {
   since: string;
   events: number;
@@ -91,6 +116,11 @@ export class CoreClient {
 
   pendingApprovals(): Promise<ApprovalRow[]> {
     return this.request<ApprovalRow[]>("/approvals/pending");
+  }
+
+  /** Сводный закуп вендинга: что заказать, суммы, что на разбор (§5.4–5.5). */
+  vendingPurchase(): Promise<VendingPurchase> {
+    return this.request<VendingPurchase>("/vending/purchase");
   }
 
   decide(id: string, decision: "approved" | "rejected" | "clarify", actor: string) {

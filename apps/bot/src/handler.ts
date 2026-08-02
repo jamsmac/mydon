@@ -4,6 +4,7 @@ import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, formatApproval, formatBriefing } from "./briefing";
 import type { CoreClient } from "./core-client";
 import { parseIntent } from "./intent";
+import { formatPurchaseBrief } from "./purchase-brief";
 import { planReport } from "./reports";
 import type { RateLimiter } from "./security/access";
 import { isAllowed } from "./security/access";
@@ -35,6 +36,7 @@ const HELP = [
   "• «брифинг» — сводка: просрочки, автоматы, сроки, что требует решения",
   "• «что просрочено» — обязательства и долги",
   "• «какие автоматы простаивают»",
+  "• «что заказать» — сводка к закупу вендинга",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
 ].join("\n");
@@ -97,6 +99,11 @@ export async function handleMessage(
               ? `Простаивают автоматы: ${b.idleMachines}.`
               : "Простаивающих автоматов не найдено.",
         };
+      }
+
+      case "purchase": {
+        const p = await deps.core.vendingPurchase();
+        return { text: formatPurchaseBrief(p) };
       }
 
       case "obligations": {
