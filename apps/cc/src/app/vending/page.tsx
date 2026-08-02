@@ -3,6 +3,7 @@ import {
   CoreUnavailable,
   type VendingMachine,
   type VendingNeed,
+  type VendingPurchase,
   type VendingRunout,
   type VendingSyncRun,
 } from "../../lib/core";
@@ -56,18 +57,30 @@ export default async function VendingPage() {
   let needs: VendingNeed[] = [];
   let syncRuns: VendingSyncRun[] = [];
   let critical: VendingRunout[] = [];
+  let purchase: VendingPurchase = {
+    items: [],
+    excludedNoSales: [],
+    noPrice: [],
+    totalBuy: 0,
+    totalOrder: 0,
+    costExact: 0,
+    costRounded: 0,
+    overpay: 0,
+  };
   try {
     let forecast: { critical: VendingRunout[] };
-    [machines, needs, forecast, syncRuns] = await Promise.all([
+    [machines, needs, forecast, purchase, syncRuns] = await Promise.all([
       core.vendingMachines(),
       core.vendingDeficit(),
       core.vendingForecast(),
+      core.vendingPurchase(),
       core.vendingSyncRuns(),
     ]);
     critical = forecast.critical;
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
+  const sum = (n: number) => n.toLocaleString("ru-RU");
   const syncLine = lastSyncLine(syncRuns);
 
   const ok = machines.filter((m) => m.status === "ok");
@@ -120,6 +133,45 @@ export default async function VendingPage() {
               </div>
             ))}
           </div>
+        </>
+      )}
+
+      {purchase.items.length > 0 && (
+        <>
+          <div className="section-title">Закуп</div>
+          <div className="page-head">
+            <p>
+              Купить <b>{sum(purchase.totalBuy)}</b> ед · с округлением до упаковок <b>{sum(purchase.totalOrder)}</b> ед
+              {purchase.costRounded > 0 && (
+                <>
+                  {" "}на <b>{sum(purchase.costRounded)}</b> сум
+                  {purchase.overpay > 0 && <span className="muted"> (переплата за упаковки {sum(purchase.overpay)})</span>}
+                </>
+              )}
+            </p>
+          </div>
+          <div className="rows">
+            {purchase.items.map((i) => (
+              <div className="row" key={i.product}>
+                <div className="t">
+                  <b>{i.product}</b>
+                  <small>
+                    нехватка {sum(i.buy)} · упаковка {i.pack}
+                    {i.noPrice ? " · нет цены" : ` · ${sum(i.costRounded)} сум`}
+                  </small>
+                </div>
+                <span className="pill">{sum(i.order)} ед</span>
+              </div>
+            ))}
+          </div>
+          {purchase.excludedNoSales.length > 0 && (
+            <p className="muted">
+              Не закупать (нет продаж): {purchase.excludedNoSales.map((i) => i.product).join(", ")}
+            </p>
+          )}
+          {purchase.noPrice.length > 0 && (
+            <p className="muted">Без цены в прайсе — на разбор: {purchase.noPrice.join(", ")}</p>
+          )}
         </>
       )}
 

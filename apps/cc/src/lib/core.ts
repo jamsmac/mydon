@@ -68,6 +68,31 @@ export interface VendingRunout {
   daysLeft: number | null;
 }
 
+/** Позиция сводного закупа (§5.5). */
+export interface VendingPurchaseItem {
+  product: string;
+  need: number;
+  buy: number;
+  pack: number;
+  order: number;
+  price: number;
+  costRounded: number;
+  noPrice: boolean;
+  noSales: boolean;
+}
+
+/** Сводный закуп: позиции + денежные итоги (§5.4–5.5). */
+export interface VendingPurchase {
+  items: VendingPurchaseItem[];
+  excludedNoSales: VendingPurchaseItem[];
+  noPrice: string[];
+  totalBuy: number;
+  totalOrder: number;
+  costExact: number;
+  costRounded: number;
+  overpay: number;
+}
+
 /** Запуск сбора Ourvend — когда собирали и с каким итогом. */
 export interface VendingSyncRun {
   id: string;
@@ -982,6 +1007,7 @@ export const core = {
   vendingMachines: () => get<VendingMachine[]>("/vending/machines"),
   vendingDeficit: () => get<VendingNeed[]>("/vending/deficit"),
   vendingForecast: () => get<{ all: VendingRunout[]; critical: VendingRunout[] }>("/vending/forecast"),
+  vendingPurchase: () => get<VendingPurchase>("/vending/purchase"),
   vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──

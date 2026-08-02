@@ -138,6 +138,11 @@ export class VendingController {
     return this.vending.forecast();
   }
 
+  @Get("purchase")
+  purchase() {
+    return this.vending.purchase();
+  }
+
   // ── Журнал сбора: коллектор открывает запуск, потом закрывает итогом ───────
 
   @Post("sync/start")

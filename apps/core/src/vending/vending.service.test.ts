@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { machineSlot, productSale } from "@mydon/db";
+import { machineSlot, productSale, vendingProduct } from "@mydon/db";
 import { VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
 type SaleRow = { machineSerial: string; productName: string; quantity: number; capturedAt: Date };
+type ProdRow = { name: string; purchasePrice: string | null; packSize: number };
 
 /** Стаб БД: machines()/deficitSummary() читают `select().from()`. */
 function readDb(rows: Row[]) {
@@ -14,6 +15,15 @@ function readDb(rows: Row[]) {
 /** Стаб БД для прогноза: слоты и продажи в разные таблицы, различаем по ссылке. */
 function forecastDb(slots: Row[], sales: SaleRow[]) {
   return { select: () => ({ from: async (t: unknown) => (t === productSale ? sales : t === machineSlot ? slots : slots) }) } as never;
+}
+
+/** Стаб БД для закупа: слоты + продажи + прайс, различаем таблицы по ссылке. */
+function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[]) {
+  return {
+    select: () => ({
+      from: async (t: unknown) => (t === productSale ? sales : t === vendingProduct ? products : slots),
+    }),
+  } as never;
 }
 
 /** Стаб БД для ingest: копит вставки. */
@@ -108,6 +118,54 @@ describe("Вендинг Core: прогноз расхода (§5.6)", () => {
     assert.equal(fanta.daysLeft, Infinity);
     // Критичны только те, чей запас ≤ 3 дней.
     assert.deepEqual(critical.map((r) => r.product), ["Montella"]);
+  });
+});
+
+describe("Вендинг Core: сводный закуп (§5.4–5.5)", () => {
+  const t = new Date("2026-08-02T00:00:00Z");
+  // Один ok-автомат: Montella нужна 4 (есть цена+продажи), Dead нужна 2 (цена
+  // есть, продаж нет → «не закупать»), NoPrice нужна 3 (нет цены → на разбор).
+  const slots: Row[] = [
+    { machineSerial: "AH", coilId: "1", productName: "Montella", capacity: 6, quantity: 2 },
+    { machineSerial: "AH", coilId: "2", productName: "Dead", capacity: 5, quantity: 3 },
+    { machineSerial: "AH", coilId: "3", productName: "NoPrice", capacity: 6, quantity: 3 },
+  ];
+  const sales: SaleRow[] = [
+    { machineSerial: "AH", productName: "Montella", quantity: 14, capturedAt: t },
+    { machineSerial: "AH", productName: "NoPrice", quantity: 5, capturedAt: t }, // продажи есть, цены нет
+  ];
+  const products: ProdRow[] = [
+    { name: "Montella", purchasePrice: "5000.00", packSize: 12 },
+    { name: "Dead", purchasePrice: "3000.00", packSize: 10 },
+    // NoPrice отсутствует в прайсе намеренно.
+  ];
+
+  it("округляет до упаковки, считает обе суммы и переплату по товару с ценой и продажами", async () => {
+    const svc = new VendingService(purchaseDb(slots, sales, products));
+    const s = await svc.purchase();
+
+    const montella = s.items.find((i) => i.product === "Montella")!;
+    assert.equal(montella.buy, 4); // дефицит 6−2, склад 0
+    assert.equal(montella.order, 12); // ceil(4/12)*12
+    assert.equal(montella.costExact, 20000); // 4×5000
+    assert.equal(montella.costRounded, 60000); // 12×5000
+    assert.equal(s.overpay, 40000);
+  });
+
+  it("товар без продаж выносит в excludedNoSales и не включает в денежные итоги", async () => {
+    const svc = new VendingService(purchaseDb(slots, sales, products));
+    const s = await svc.purchase();
+    assert.deepEqual(s.excludedNoSales.map((i) => i.product), ["Dead"]);
+    // В items только Montella (Dead исключён, NoPrice без цены, но продажи?)
+    assert.ok(!s.items.some((i) => i.product === "Dead"));
+  });
+
+  it("товар без цены помечает noPrice и держит вне денежных итогов, но в items", async () => {
+    const svc = new VendingService(purchaseDb(slots, sales, products));
+    const s = await svc.purchase();
+    assert.ok(s.noPrice.includes("NoPrice"));
+    assert.ok(s.items.some((i) => i.product === "NoPrice")); // есть продажи → участвует
+    assert.equal(s.costRounded, 60000); // деньги — только Montella
   });
 });
 
