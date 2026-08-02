@@ -17,4 +17,5 @@ model_routing:
   complex: reasoning-strong
 skills: []
 changelog:
+  - "1.1.0 — детерминированный скелет: рубрика, вердикт, safety-блок, path-guard, применение diff (coach.ts). EVAL/PROPOSE включатся со шлюзом."
   - "1.0.0 — coach-agent (петля самоулучшения, scope B)"
