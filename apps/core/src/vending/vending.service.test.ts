@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { event, machineSlot, productSale, vendingProduct, vendingStock } from "@mydon/db";
+import { event, machineSale, machineSlot, productSale, vendingProduct, vendingStock } from "@mydon/db";
 import { VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
@@ -37,8 +37,13 @@ function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[], stock: 
  */
 function writeDb(aliases: unknown[] = [], products: unknown[] = [], stockRows: unknown[] = []) {
   const inserts: { table: string; values: unknown }[] = [];
+  // Реальные строки vending_stock всегда имеют countedAt (NOT NULL) — большинство
+  // тестов его не задают, раз речь не про порядок во времени; эпоха 0 заведомо
+  // «старее» любого countedAt в тестах, так что обычные сценарии недостачи/
+  // излишка ведут себя как раньше без правки каждого литерала.
+  const stockRowsWithCountedAt = stockRows.map((r) => ({ countedAt: new Date(0), ...(r as object) }));
   const tx = {
-    select: () => ({ from: async () => stockRows }),
+    select: () => ({ from: async () => stockRowsWithCountedAt }),
     insert: (table: { [Symbol.toStringTag]?: string }) => ({
       values: (v: unknown) => {
         const name = tableName(table);
@@ -132,6 +137,68 @@ describe("Вендинг Core: прогноз расхода (§5.6)", () => {
     assert.equal(fanta.daysLeft, Infinity);
     // Критичны только те, чей запас ≤ 3 дней.
     assert.deepEqual(critical.map((r) => r.product), ["Montella"]);
+  });
+});
+
+describe("Вендинг Core: приём продаж — идемпотентность батча (§5.6)", () => {
+  /**
+   * Стаб БД для ingestSales: копит вызовы insert(...).onConflictDoUpdate(...).
+   * Реальный unique-индекс (миграция 0024) эти тесты не проверяют — только то,
+   * что код идёт через upsert с правильным target, а не голый insert
+   * (проверка самого constraint — вне мокового unit-теста, найдено внешним
+   * аудитом п.13: нет реальных DB-тестов на конкурентность/ограничения).
+   */
+  function ingestSalesDb() {
+    const calls: { table: "product_sale" | "machine_sale"; values: Record<string, unknown>; target: unknown[] }[] = [];
+    const tx = {
+      insert: (table: unknown) => ({
+        values: (v: Record<string, unknown>) => ({
+          onConflictDoUpdate: (opts: { target: unknown[]; set: Record<string, unknown> }) => {
+            calls.push({ table: table === productSale ? "product_sale" : "machine_sale", values: v, target: opts.target });
+            return Promise.resolve(undefined);
+          },
+        }),
+      }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    return { db, calls };
+  }
+
+  const payload = {
+    capturedAt: "2026-08-02T00:00:00Z",
+    periodStart: "2026-07-26T00:00:00Z",
+    periodEnd: "2026-08-02T00:00:00Z",
+    productSales: [{ serial: "AH", product: "Montella", quantity: 5 }],
+    machineSales: [{ serial: "AH", totalAmount: 12345.6, totalCount: 7 }],
+  };
+
+  it("продажи по товарам и по автоматам идут через upsert, не голый insert", async () => {
+    const { db, calls } = ingestSalesDb();
+    const res = await new VendingService(db).ingestSales(payload);
+
+    assert.equal(res.productRows, 1);
+    assert.equal(res.machineRows, 1);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(
+      calls.find((c) => c.table === "product_sale")!.target,
+      [productSale.machineSerial, productSale.productName, productSale.capturedAt],
+    );
+    assert.deepEqual(
+      calls.find((c) => c.table === "machine_sale")!.target,
+      [machineSale.machineSerial, machineSale.capturedAt],
+    );
+  });
+
+  it("повторная доставка того же батча (тот же capturedAt/автомат/товар) конфликтует по ключу идемпотентности, а не создаёт вторую строку (найдено внешним аудитом, P1)", async () => {
+    const { db, calls } = ingestSalesDb();
+    const svc = new VendingService(db);
+    await svc.ingestSales(payload);
+    await svc.ingestSales(payload); // ретрай того же батча — сеть оборвалась после первой доставки
+
+    const productCalls = calls.filter((c) => c.table === "product_sale");
+    assert.equal(productCalls.length, 2); // оба раза — insert...onConflictDoUpdate с одним и тем же target
+    assert.deepEqual(productCalls[0]!.target, productCalls[1]!.target);
+    assert.deepEqual(productCalls[0]!.values, productCalls[1]!.values);
   });
 });
 
@@ -269,7 +336,12 @@ describe("Вендинг Core: приёмка накладной на склад
    * `aliases`/`products` — только для тестов с `distributed` (loadProductIndex
    * читает их вне транзакции); без distributed этот select не вызывается.
    */
-  function receiveDb(order: OrderRow | null, aliases: unknown[] = [], products: unknown[] = []) {
+  function receiveDb(
+    order: OrderRow | null,
+    aliases: unknown[] = [],
+    products: unknown[] = [],
+    opts: { updateReturnsEmpty?: boolean } = {},
+  ) {
     const stockUpserts: Record<string, unknown>[] = [];
     const updates: Record<string, unknown>[] = [];
     const events: Record<string, unknown>[] = [];
@@ -282,7 +354,20 @@ describe("Вендинг Core: приёмка накладной на склад
           }),
         }),
       }),
-      update: () => ({ set: (v: Record<string, unknown>) => ({ where: async () => void updates.push(v) }) }),
+      // .returning() имитирует условный UPDATE...WHERE status IN (...): пустой
+      // массив — «проиграли гонку», кто-то другой уже перевёл накладную в
+      // received между нашим SELECT и этим UPDATE (opts.updateReturnsEmpty).
+      update: () => ({
+        set: (v: Record<string, unknown>) => ({
+          where: () => ({
+            returning: async () => {
+              updates.push(v);
+              if (opts.updateReturnsEmpty || !order) return [];
+              return [{ ...order, ...v }];
+            },
+          }),
+        }),
+      }),
       insert: (table: unknown) => ({
         values: (v: Record<string, unknown>) => {
           if (table === vendingStock) {
@@ -341,6 +426,28 @@ describe("Вендинг Core: приёмка накладной на склад
     const res = await new VendingService(db).receiveOrder();
     assert.equal(res.received, false);
     assert.match(res.reason ?? "", /нет/i);
+  });
+
+  it("отменённая накладная — отдельная причина, не «уже принята» (найдено ревью)", async () => {
+    const { db, stockUpserts } = receiveDb({ id: "o1", status: "cancelled", positions: [] });
+    const res = await new VendingService(db).receiveOrder("o1");
+    assert.equal(res.received, false);
+    assert.equal(stockUpserts.length, 0);
+    assert.match(res.reason ?? "", /отменена/i);
+    assert.doesNotMatch(res.reason ?? "", /уже принята/i);
+  });
+
+  it("гонка: конкурентный запрос уже перевёл накладную в received между SELECT и UPDATE — остаток не зачисляется дважды (найдено внешним аудитом)", async () => {
+    // SELECT ещё видит approved (order.status), но условный
+    // UPDATE...RETURNING (opts.updateReturnsEmpty) имитирует, что параллельная
+    // приёмка уже выиграла гонку и статус реально уже received.
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 10 }] };
+    const { db, stockUpserts } = receiveDb(order, [], [], { updateReturnsEmpty: true });
+    const res = await new VendingService(db).receiveOrder();
+
+    assert.equal(res.received, false);
+    assert.match(res.reason ?? "", /уже принята/i);
+    assert.equal(stockUpserts.length, 0); // остаток НЕ зачислен второй раз
   });
 
   it("распределение по автоматам уменьшает зачисление на склад (реальный процесс, лист «Snack склад»)", async () => {
@@ -562,6 +669,21 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     assert.equal((ev!.values as { source: string }).source, "manager");
   });
 
+  it("опоздавший пересчёт (countedAt старше уже сохранённого) — не откатывает остаток и не считается расхождением (найдено внешним аудитом, P2)", async () => {
+    const stock = [
+      { productName: "Montella Вода минеральная 330ml", quantity: 54, countedAt: new Date("2026-08-02T12:00:00Z") },
+    ];
+    const { db, inserts } = writeDb([], [], stock);
+    const svc = new VendingService(db);
+    const res = await svc.ingestStock({
+      countedAt: "2026-08-02T09:00:00Z", // раньше уже сохранённого 12:00 — опоздавшее сообщение
+      items: [{ product: "Montella Вода минеральная 330ml", quantity: 999 }],
+    });
+
+    assert.deepEqual(res.adjustments, []); // мнимого расхождения по устаревшим данным нет
+    assert.equal(inserts.length, 0); // и более новый остаток не перезаписан старым
+  });
+
   it("первый ввод по товару (в складе строки ещё не было) — не расхождение", async () => {
     const { db } = writeDb([], [], []); // склад пуст — ничего сравнивать
     const svc = new VendingService(db);
@@ -636,6 +758,46 @@ describe("Вендинг Core: приём слотов", () => {
     const ms = inserts.find((i) => i.table === "machine_slot")!.values as { isValid: boolean; productName: string | null };
     assert.equal(ms.productName, null);
     assert.equal(ms.isValid, false);
+  });
+});
+
+describe("Вендинг Core: журнал сбора — finishSyncRun (§ коллектор)", () => {
+  /** Стаб: update(...).returning() отдаёт строку только если id "существует". */
+  function syncRunDb(existingId: string | null) {
+    const tx = {
+      update: () => ({
+        set: () => ({
+          where: () => ({
+            returning: async () => (existingId ? [{ id: existingId }] : []),
+          }),
+        }),
+      }),
+    };
+    return { update: tx.update } as never;
+  }
+
+  it("известный id — ok: true", async () => {
+    const db = syncRunDb("run-1");
+    const svc = new VendingService(db);
+    const res = await svc.finishSyncRun("run-1", {
+      status: "success",
+      machinesTotal: 29,
+      machinesOk: 25,
+      durationMs: 1200,
+    });
+    assert.deepEqual(res, { ok: true });
+  });
+
+  it("неизвестный id — ok: false, а не молчаливый успех (найдено внешним аудитом, P2)", async () => {
+    const db = syncRunDb(null);
+    const svc = new VendingService(db);
+    const res = await svc.finishSyncRun("no-such-id", {
+      status: "failed",
+      machinesTotal: 0,
+      machinesOk: 0,
+      durationMs: 500,
+    });
+    assert.deepEqual(res, { ok: false });
   });
 });
 

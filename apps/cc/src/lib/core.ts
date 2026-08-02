@@ -103,6 +103,9 @@ export interface VendingOrder {
   costRounded: number;
   createdBy: string | null;
   createdAt: string;
+  /** Заполнены только после приёмки — до неё null. */
+  distributedUnits: number | null;
+  unmatchedDistribution: string[] | null;
 }
 
 /** Запуск сбора Ourvend — когда собирали и с каким итогом. */

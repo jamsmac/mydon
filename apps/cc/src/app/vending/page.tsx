@@ -205,6 +205,16 @@ export default async function VendingPage() {
                     <small>
                       {o.costRounded > 0 ? `${sum(o.costRounded)} сум` : "без суммы"}
                       {o.createdBy ? ` · ${o.createdBy}` : ""}
+                      {/* Показываем только после приёмки (§5.7) — до неё оба поля null. */}
+                      {o.distributedUnits != null && o.distributedUnits > 0 && (
+                        <> · в автоматы {sum(o.distributedUnits)} ед.</>
+                      )}
+                      {o.unmatchedDistribution != null && o.unmatchedDistribution.length > 0 && (
+                        <span style={{ color: "var(--hot)" }}>
+                          {" "}
+                          · не найдено в накладной: {o.unmatchedDistribution.join(", ")}
+                        </span>
+                      )}
                     </small>
                   </div>
                   <span className={`pill ${o.status === "received" ? "ok" : ""}`}>{ORDER_LABEL[o.status]}</span>
