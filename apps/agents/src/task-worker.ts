@@ -34,6 +34,7 @@ export function matchSkill(agent: AgentDefinition, title: string): string | null
     "watch-receivables": /дебитор|долг|просроч|платеж|оплат/,
     "monitor-stock": /остат|автомат|пополн|простаив|запас/,
     "morning-digest": /сводк|дайджест|обзор|что нового|как дела/,
+    "read-sources": /источник|сайт|страниц|прочит|разведк|рынок|тендер|цен[аы]/,
   };
   for (const skill of agent.skills) {
     const re = HINTS[skill];

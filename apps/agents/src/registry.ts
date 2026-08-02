@@ -10,6 +10,12 @@ export interface AgentSchedule {
   skill: string;
 }
 
+/** Источник для чтения из веба (паспорт: web_sources). Только чтение. */
+export interface WebSource {
+  name: string;
+  url: string;
+}
+
 /** Паспорт агента: у агента нет своего кода, только описание (перенесено как есть). */
 export interface AgentDefinition {
   name: string;
@@ -22,6 +28,8 @@ export interface AgentDefinition {
   budgetPerDayUsd?: number;
   /** Что делать при исчерпании бюджета (паспорт: budget.on_exceeded). */
   budgetOnExceeded?: BudgetStrategy;
+  /** Сайты, которые агенту разрешено ЧИТАТЬ (паспорт: web_sources). */
+  webSources?: WebSource[];
   dir: string;
 }
 
@@ -72,6 +80,12 @@ export function loadAgents(agentsDir: string): {
 
       const budget = raw.budget as { per_day_usd?: unknown; on_exceeded?: unknown } | undefined;
 
+      const webSources: WebSource[] = Array.isArray(raw.web_sources)
+        ? (raw.web_sources as Record<string, unknown>[])
+            .filter((s) => typeof s?.name === "string" && typeof s?.url === "string")
+            .map((s) => ({ name: String(s.name), url: String(s.url) }))
+        : [];
+
       agents.push({
         name: typeof raw.name === "string" ? raw.name : name,
         business: typeof raw.business === "string" ? raw.business : "shared",
@@ -82,6 +96,7 @@ export function loadAgents(agentsDir: string): {
         skills: Array.isArray(raw.skills) ? raw.skills.map(String) : [],
         ...(typeof budget?.per_day_usd === "number" ? { budgetPerDayUsd: budget.per_day_usd } : {}),
         ...(budget?.on_exceeded !== undefined ? { budgetOnExceeded: asBudgetStrategy(budget.on_exceeded) } : {}),
+        ...(webSources.length ? { webSources } : {}),
         dir,
       });
     } catch (err) {
