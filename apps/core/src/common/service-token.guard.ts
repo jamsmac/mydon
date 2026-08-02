@@ -24,9 +24,12 @@ function secretEquals(a: string, b: string): boolean {
  * (или `Authorization: Bearer`). Чтения (GET) открыты: панель и бот читают много,
  * а вреда от чтения в закрытой сети нет.
  *
- * Если SERVICE_TOKEN не задан — guard пропускает всё (Core об этом предупреждает
- * на старте). Так включение токена не ломает уже работающий контур: сначала
- * выкатывается токен всем клиентам, потом задаётся в Core.
+ * Fail-closed: если SERVICE_TOKEN не задан, мутации ОТКАЗЫВАЮТСЯ, а не
+ * пропускаются — раньше здесь был fail-open (`return true`), и любой в сети
+ * Core мог писать данные без токена вообще (найдено внешним аудитом,
+ * P1-риск). Перед выкатом этого guard'а SERVICE_TOKEN должен быть выставлен
+ * ОДНОВРЕМЕННО в Core, CC, боте и агентах — иначе все мутации из панели/бота
+ * начнут получать 401.
  */
 @Injectable()
 export class ServiceTokenGuard implements CanActivate {
@@ -44,8 +47,6 @@ export class ServiceTokenGuard implements CanActivate {
     if (isPublic) return true;
 
     const expected = appConfig.serviceToken;
-    if (!expected) return true; // токен не задан — предупреждение на старте, не блок
-
     const header = req.headers["x-service-token"];
     const bearer = req.headers.authorization;
     const provided =
@@ -55,7 +56,9 @@ export class ServiceTokenGuard implements CanActivate {
           ? bearer.slice("Bearer ".length)
           : "";
 
-    if (provided.length === 0 || !secretEquals(provided, expected)) {
+    // !expected — токен не настроен вообще: ни одна пара secretEquals("", "")
+    // не должна тут случайно пройти, поэтому проверяем явно и первым.
+    if (!expected || provided.length === 0 || !secretEquals(provided, expected)) {
       throw new UnauthorizedException("Нужен внутренний токен доступа к Core");
     }
     return true;
