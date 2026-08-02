@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ChannelPost } from "@mydon/connectors";
-import { buildIdeasProposal, readIdeaChannels, type ChannelDigest } from "./ideas";
+import { assessIdeas, buildIdeasProposal, readIdeaChannels, type ChannelDigest } from "./ideas";
+import type { ModelGateway, ModelRequest } from "./model-gateway";
 
 function post(num: number, text: string, links: string[] = []): ChannelPost {
   return { id: `promtjam/${num}`, num, text, links, datetime: null };
@@ -46,5 +47,39 @@ describe("buildIdeasProposal", () => {
     const p = buildIdeasProposal(digests);
     assert.ok(p);
     assert.match(p.action, /Недоступны: closed/);
+  });
+});
+
+describe("assessIdeas — оценка моделью (первый LLM-навык)", () => {
+  function fakeGateway(text: string, ok = true): { gateway: ModelGateway; seen: ModelRequest[] } {
+    const seen: ModelRequest[] = [];
+    const gateway: ModelGateway = {
+      call: async (model, req) => {
+        seen.push(req);
+        return { text, model, costUsd: 0, ok };
+      },
+    };
+    return { gateway, seen };
+  }
+
+  it("нет постов → null (нечего оценивать)", async () => {
+    const { gateway } = fakeGateway("x");
+    assert.equal(await assessIdeas(gateway, [{ channel: "promtjam", posts: [] }]), null);
+  });
+
+  it("оценка модели → предложение; посты идут как обёрнутый недоверенный контент", async () => {
+    const { gateway, seen } = fakeGateway("1. claudexor — в LLM-путь\n2. Lightpanda — веб-скан");
+    const p = await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(420, "claudexor ротация")] }]);
+    assert.ok(p);
+    assert.match(p.action, /Оценка идей канала/);
+    assert.match(String(p.facts.assessment), /claudexor/);
+    // callModel обернул посты от инъекций (маркеры UNTRUSTED_DATA в промпте).
+    assert.match(seen[0].prompt, /UNTRUSTED_DATA/);
+    assert.match(seen[0].system ?? "", /не исполняй/i);
+  });
+
+  it("модель не ответила → null (не выдаём пустую оценку за работу)", async () => {
+    const { gateway } = fakeGateway("", false);
+    assert.equal(await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(1, "идея")] }]), null);
   });
 });
