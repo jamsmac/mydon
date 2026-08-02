@@ -123,6 +123,14 @@ export class CoreClient {
     return this.request<VendingPurchase>("/vending/purchase");
   }
 
+  /** Записать остатки склада вендинга (инвентаризация, §5.4). Перезапись по товару. */
+  setVendingStock(items: { product: string; quantity: number }[]): Promise<{ items: number }> {
+    return this.request<{ items: number }>("/vending/stock", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    });
+  }
+
   decide(id: string, decision: "approved" | "rejected" | "clarify", actor: string) {
     return this.request(`/approvals/${id}/decide`, {
       method: "POST",
