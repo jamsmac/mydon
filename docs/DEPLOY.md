@@ -19,9 +19,16 @@ POSTGRES_PASSWORD=<длинный пароль>
 TELEGRAM_BOT_TOKEN=<токен бота>
 TELEGRAM_ALLOWED_CHAT_IDS=<твой chat_id>
 INGEST_KEY=<случайный ключ для приёма внешних событий>
+SERVICE_TOKEN=<случайный токен: openssl rand -hex 32>
 AGENT_AUTONOMY_MAX=T0
 AGENTS_SCHEDULES_PAUSED=1
 ```
+
+`SERVICE_TOKEN` обязателен. Core отклоняет любую запись (POST/PATCH/PUT/DELETE)
+без него — 401, чтения при этом работают. Один и тот же токен из `.env` compose
+раздаёт Core, панели, боту и агентам сразу, поэтому задавать его нужно в одном
+месте, но ДО первого `up -d`: иначе панель и бот поднимутся с пустым токеном и
+запись откажет, пока контейнеры не пересоздадут.
 
 `AGENT_AUTONOMY_MAX=T0` и `AGENTS_SCHEDULES_PAUSED=1` — осознанные значения:
 агенты только предлагают и не запускаются по расписанию, пока владелец не решит иначе.
