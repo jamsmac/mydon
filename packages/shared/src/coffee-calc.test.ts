@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   RECONCILE_THRESHOLD_RATIO,
+  UNDERFILL_RATIO,
   buildLocationSummary,
   consumedSince,
+  costOf,
+  fillStatus,
   netWeight,
   reconcileConsumption,
   type LatestRefillRow,
@@ -27,6 +30,40 @@ describe("Кофе-бункеры: чистый вес и расход (§ item 
   it("consumedSince: нет одной из сторон — null", () => {
     assert.equal(consumedSince(null, 200), null);
     assert.equal(consumedSince(580, null), null);
+  });
+
+  it("costOf — грамм × цена за грамм; без цены или без грамм — null, не ноль", () => {
+    assert.equal(costOf(380, 80), 30400); // 380г кофе по 80 сум/г
+    assert.equal(costOf(null, 80), null);
+    assert.equal(costOf(380, null), null, "цена не заведена — себестоимость неизвестна, а не 0");
+  });
+});
+
+describe("Кофе-бункеры: недолив заливки (fillStatus)", () => {
+  it("залили по норме или больше — ok", () => {
+    const r = fillStatus(600, 600);
+    assert.equal(r.status, "ok");
+    assert.equal(r.fillRatio, 1);
+    assert.equal(fillStatus(650, 600).status, "ok");
+  });
+
+  it("залили заметно меньше нормы — underfill", () => {
+    const r = fillStatus(400, 600, UNDERFILL_RATIO); // 400/600 ≈ 0.67 < 0.85
+    assert.equal(r.status, "underfill");
+    assert.ok(r.fillRatio! < UNDERFILL_RATIO);
+  });
+
+  it("ровно на границе порога — ok (порог — «ниже», не «на»)", () => {
+    const target = 600;
+    const atThreshold = target * UNDERFILL_RATIO;
+    assert.equal(fillStatus(atThreshold, target).status, "ok");
+    assert.equal(fillStatus(atThreshold - 1, target).status, "underfill");
+  });
+
+  it("нет эталона или нет факта — unknown, не молчаливый ok", () => {
+    assert.equal(fillStatus(400, null).status, "unknown");
+    assert.equal(fillStatus(null, 600).status, "unknown");
+    assert.equal(fillStatus(400, 0).status, "unknown", "эталон 0 — бессмысленное деление, не считаем недоливом");
   });
 });
 

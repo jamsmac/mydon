@@ -15,6 +15,8 @@ import {
   buildLocationSummary,
   consumedSince,
   consumptionReport,
+  costOf,
+  fillStatus,
   netWeight,
   reconcileConsumption,
   type LatestRefillRow,
@@ -40,6 +42,22 @@ export interface BunkerIngredientRow {
   position: number;
   ingredientId: string;
   ingredientName: string;
+  /** Закупочная цена за грамм, сум. null — не заведена, себестоимость расхода не считается. */
+  purchasePrice: number | null;
+  /** Эталонный чистый вес заливки, г. null — не задан, недолив не проверяется. */
+  targetFillWeight: number | null;
+}
+
+export interface FillStatusRow {
+  locationId: string;
+  locationName: string;
+  position: number;
+  ingredientId: string | null;
+  ingredientName: string | null;
+  netFillWeight: number | null;
+  targetFillWeight: number | null;
+  status: "ok" | "underfill" | "unknown";
+  fillRatio: number | null;
 }
 
 export interface SubmitRefillInput {
@@ -114,11 +132,28 @@ export class CoffeeService {
         position: coffeeBunkerConfig.position,
         ingredientId: coffeeIngredient.id,
         ingredientName: coffeeIngredient.name,
+        purchasePrice: coffeeIngredient.purchasePrice,
+        targetFillWeight: coffeeBunkerConfig.targetFillWeight,
       })
       .from(coffeeBunkerConfig)
       .innerJoin(coffeeIngredient, eq(coffeeBunkerConfig.ingredientId, coffeeIngredient.id))
       .orderBy(asc(coffeeBunkerConfig.position));
-    return rows;
+    return rows.map((r) => ({ ...r, purchasePrice: r.purchasePrice != null ? Number(r.purchasePrice) : null }));
+  }
+
+  /** Проставить/поправить закупочную цену ингредиента (сум за грамм) — для себестоимости расхода. */
+  async setIngredientPrice(ingredientId: string, purchasePrice: number): Promise<{ ok: true }> {
+    await this.db.update(coffeeIngredient).set({ purchasePrice: purchasePrice.toString() }).where(eq(coffeeIngredient.id, ingredientId));
+    return { ok: true };
+  }
+
+  /** Проставить/поправить эталонный чистый вес заливки (недолив-сигнал) для (позиция, ингредиент). */
+  async setTargetFillWeight(position: number, ingredientId: string, targetFillWeight: number): Promise<{ ok: true }> {
+    await this.db
+      .update(coffeeBunkerConfig)
+      .set({ targetFillWeight })
+      .where(and(eq(coffeeBunkerConfig.position, position), eq(coffeeBunkerConfig.ingredientId, ingredientId)));
+    return { ok: true };
   }
 
   /** Добавить ингредиент в позицию («+ Добавить» в Настройках). Заводит ингредиент, если его ещё нет. */
@@ -264,6 +299,56 @@ export class CoffeeService {
     );
   }
 
+  /**
+   * Недолив по последней заливке на (точка, позиция): сравнивает чистый вес
+   * (`netWeight()`) с эталоном для (позиция, ингредиент этой заливки) —
+   * `coffee_bunker_config.targetFillWeight`. Нет эталона/тары/ингредиента у
+   * заливки — `status: "unknown"`, а не молчаливый `ok` (см. `fillStatus()`).
+   */
+  async fillStatusByLocation(): Promise<FillStatusRow[]> {
+    const [rows, tareByKey, config] = await Promise.all([
+      this.db
+        .select({
+          locationId: coffeeRefill.locationId,
+          locationName: coffeeLocation.name,
+          position: coffeeRefill.position,
+          ingredientId: coffeeRefill.ingredientId,
+          containerNumber: coffeeRefill.containerNumber,
+          filledWeight: coffeeRefill.filledWeight,
+          enteredDate: coffeeRefill.enteredDate,
+        })
+        .from(coffeeRefill)
+        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .orderBy(asc(coffeeRefill.enteredDate)),
+      this.tareByKey(),
+      this.bunkerConfig(),
+    ]);
+
+    // Последняя заливка на (точка, позиция) — тот же приём, что в locationSummary().
+    const latestByKey = new Map<string, (typeof rows)[number]>();
+    for (const r of rows) latestByKey.set(`${r.locationId}:${r.position}`, r);
+
+    const targetByKey = new Map(config.map((c) => [`${c.position}:${c.ingredientId}`, c.targetFillWeight]));
+    const nameById = new Map(config.map((c) => [c.ingredientId, c.ingredientName]));
+
+    return [...latestByKey.values()].map((r) => {
+      const netFillWeight = netWeight(r.filledWeight, tareByKey.get(`${r.containerNumber}:${r.position}`) ?? null);
+      const targetFillWeight = r.ingredientId ? (targetByKey.get(`${r.position}:${r.ingredientId}`) ?? null) : null;
+      const fs = fillStatus(netFillWeight, targetFillWeight);
+      return {
+        locationId: r.locationId,
+        locationName: r.locationName,
+        position: r.position,
+        ingredientId: r.ingredientId,
+        ingredientName: r.ingredientId ? (nameById.get(r.ingredientId) ?? null) : null,
+        netFillWeight,
+        targetFillWeight,
+        status: fs.status,
+        fillRatio: fs.fillRatio,
+      };
+    });
+  }
+
   // ── Расходники: вода/стаканчики/крышки ──────────────────────────────────
 
   /** Занести/поправить расход за день по точке (upsert по (точка, дата)). */
@@ -381,12 +466,26 @@ export class CoffeeService {
    * точки за период. Возвращает только то, что реально удалось посчитать —
    * без пары «продажи+рецепт» и «две заливки подряд одного ингредиента» по
    * позиции сверка для неё не строится (status: "unknown"), а не подделывается.
+   *
+   * Себестоимость (`costActual`/`costExpected`) — грамм × `coffee_ingredient.
+   * purchasePrice` (сум за грамм). Цена не заведена — `null`, а не 0: непосчитанную
+   * себестоимость нельзя выдавать за нулевую (тот же принцип, что у `recipeCost()`).
    */
   async reconcileLocation(
     locationId: string,
     fromDate: string,
     toDate: string,
-  ): Promise<{ ingredientId: string; ingredientName: string; actualGrams: number | null; expectedGrams: number | null; reconcile: ReconcileResult }[]> {
+  ): Promise<
+    {
+      ingredientId: string;
+      ingredientName: string;
+      actualGrams: number | null;
+      expectedGrams: number | null;
+      costActual: number | null;
+      costExpected: number | null;
+      reconcile: ReconcileResult;
+    }[]
+  > {
     const [refills, salesRows, products, ingredients, tareByKey] = await Promise.all([
       this.db
         .select()
@@ -420,15 +519,22 @@ export class CoffeeService {
       }
     }
 
-    // Ожидаемый расход: продажи периода × состав товара.
+    // Цена за грамм — по canonical-ингредиенту; нет цены → null (не 0).
+    const priceByIngredient = new Map(
+      ingredients.map((i) => [i.id, i.purchasePrice != null ? Number(i.purchasePrice) : null]),
+    );
+
+    // Ожидаемый расход: продажи периода × состав товара. priceOf отдаёт ту же
+    // цену за грамм — consumptionReport() сам считает себестоимость строки.
     const sold = salesInRange.map((s) => ({ productId: s.productId, qty: s.quantity }));
     const recipeById = new Map(products.map((p) => [p.id, p.recipe]));
     const report = consumptionReport(
       sold,
       (productId) => recipeById.get(productId) ?? [],
-      () => ({ price: null, unit: "г" }), // себестоимость здесь не считаем — только граммы
+      (ingredientId) => ({ price: priceByIngredient.get(ingredientId) ?? null, unit: "г" }),
     );
     const expectedByIngredient = new Map(report.ingredients.map((i) => [i.ingredientId, i.consumed]));
+    const expectedCostByIngredient = new Map(report.ingredients.map((i) => [i.ingredientId, i.cost]));
 
     const ingredientIds = new Set([...actualByIngredient.keys(), ...expectedByIngredient.keys()]);
     const nameById = new Map(ingredients.map((i) => [i.id, i.name]));
@@ -440,6 +546,8 @@ export class CoffeeService {
         ingredientName: nameById.get(ingredientId) ?? ingredientId,
         actualGrams,
         expectedGrams,
+        costActual: costOf(actualGrams, priceByIngredient.get(ingredientId) ?? null),
+        costExpected: expectedCostByIngredient.get(ingredientId) ?? null,
         reconcile: reconcileConsumption(actualGrams, expectedGrams),
       };
     });

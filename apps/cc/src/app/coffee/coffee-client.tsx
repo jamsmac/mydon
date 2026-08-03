@@ -13,7 +13,9 @@ import {
   addBunkerIngredient,
   recordCoffeeConsumable,
   removeBunkerIngredient,
+  setCoffeeIngredientPrice,
   setCoffeeTare,
+  setCoffeeTargetFillWeight,
   submitCoffeeRefill,
 } from "./actions";
 
@@ -352,6 +354,43 @@ function BunkerIngredients({ position, items }: { position: number; items: Coffe
         {items.map((it) => (
           <span className="tag" key={it.ingredientId}>
             {it.ingredientName}
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              className="tag-price"
+              disabled={pending}
+              defaultValue={it.purchasePrice ?? ""}
+              placeholder="цена/г"
+              title="Закупочная цена за грамм, сум — для себестоимости расхода"
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v === "") return;
+                const price = Number(v);
+                if (!Number.isFinite(price) || price < 0) return;
+                start(async () => {
+                  await setCoffeeIngredientPrice(it.ingredientId, price);
+                });
+              }}
+            />
+            <input
+              type="number"
+              min={0}
+              className="tag-price"
+              disabled={pending}
+              defaultValue={it.targetFillWeight ?? ""}
+              placeholder="эталон г"
+              title="Эталонный чистый вес заливки, г — сигнал недолива"
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v === "") return;
+                const target = Number(v);
+                if (!Number.isFinite(target) || target < 0) return;
+                start(async () => {
+                  await setCoffeeTargetFillWeight(position, it.ingredientId, target);
+                });
+              }}
+            />
             <button
               className="tag-x"
               disabled={pending}

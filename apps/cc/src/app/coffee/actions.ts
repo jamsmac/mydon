@@ -53,6 +53,28 @@ export async function removeBunkerIngredient(position: number, ingredientId: str
   }
 }
 
+/** Поправить закупочную цену ингредиента (сум за грамм) — для себестоимости расхода. */
+export async function setCoffeeIngredientPrice(ingredientId: string, purchasePrice: number): Promise<ActionResult> {
+  try {
+    await core.setCoffeeIngredientPrice(ingredientId, purchasePrice);
+    revalidatePath("/coffee");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
+/** Поправить эталонный чистый вес заливки (недолив-сигнал) для (позиция, ингредиент). */
+export async function setCoffeeTargetFillWeight(position: number, ingredientId: string, targetFillWeight: number): Promise<ActionResult> {
+  try {
+    await core.setCoffeeTargetFillWeight(position, ingredientId, targetFillWeight);
+    revalidatePath("/coffee");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
 /** Поправить тару одной ячейки (набор × позиция) — «Веса бункеров» в Настройках. */
 export async function setCoffeeTare(containerNumber: number, position: number, tareWeight: number): Promise<ActionResult> {
   try {

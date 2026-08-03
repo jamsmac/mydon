@@ -32,6 +32,42 @@ export function consumedSince(prevFilledNet: number | null, measuredBeforeNet: n
   return delta >= 0 ? delta : null;
 }
 
+/**
+ * Себестоимость расхода: грамм × цена за грамм (`coffee_ingredient.purchasePrice`).
+ * null — цена не заведена: себестоимость неизвестна, а не ноль (тот же приём,
+ * что и `recipeCost()`/`consumptionReport()` в `recipe.ts`/`consumption.ts` —
+ * непосчитанное не выдаётся за посчитанный ноль).
+ */
+export function costOf(grams: number | null, pricePerGram: number | null): number | null {
+  if (grams === null || pricePerGram === null) return null;
+  return grams * pricePerGram;
+}
+
+export type FillStatus = "ok" | "underfill" | "unknown";
+
+export interface FillCheckResult {
+  status: FillStatus;
+  /** Фактический чистый вес / эталон, доля (1 = точно по норме). null — не с чем сравнить. */
+  fillRatio: number | null;
+}
+
+/** Ниже какой доли от эталона заливка считается недоливом (решение как у доноров: 85%). */
+export const UNDERFILL_RATIO = 0.85;
+
+/**
+ * Недолив бункера: сравнивает фактический ЧИСТЫЙ вес после заливки
+ * (`netWeight()`) с эталонным (`coffee_bunker_config.targetFillWeight`).
+ * Нет эталона или веса — `unknown`, а не молчаливый `ok`: отсутствие сигнала
+ * не должно читаться как «всё в порядке».
+ */
+export function fillStatus(netFillWeight: number | null, targetFillWeight: number | null, threshold = UNDERFILL_RATIO): FillCheckResult {
+  if (netFillWeight === null || targetFillWeight === null || targetFillWeight <= 0) {
+    return { status: "unknown", fillRatio: null };
+  }
+  const fillRatio = netFillWeight / targetFillWeight;
+  return { status: fillRatio < threshold ? "underfill" : "ok", fillRatio };
+}
+
 export type ReconcileStatus = "ok" | "anomaly" | "unknown";
 
 export interface ReconcileResult {

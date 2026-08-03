@@ -35,6 +35,25 @@ export class RemoveBunkerIngredientDto {
   ingredientId!: string;
 }
 
+export class SetIngredientPriceDto {
+  @IsUUID()
+  ingredientId!: string;
+
+  @IsNumber() @Min(0)
+  purchasePrice!: number;
+}
+
+export class SetTargetFillWeightDto {
+  @IsInt() @Min(1) @Max(8)
+  position!: number;
+
+  @IsUUID()
+  ingredientId!: string;
+
+  @IsInt() @Min(0)
+  targetFillWeight!: number;
+}
+
 export class SetTareDto {
   @IsInt() @Min(1) @Max(27)
   containerNumber!: number;
@@ -173,6 +192,21 @@ export class CoffeeController {
   @Delete("bunker-config")
   removeBunkerIngredient(@Body() dto: RemoveBunkerIngredientDto) {
     return this.coffee.removeBunkerIngredient(dto.position, dto.ingredientId);
+  }
+
+  @Put("ingredient-price")
+  setIngredientPrice(@Body() dto: SetIngredientPriceDto) {
+    return this.coffee.setIngredientPrice(dto.ingredientId, dto.purchasePrice);
+  }
+
+  @Put("target-fill")
+  setTargetFillWeight(@Body() dto: SetTargetFillWeightDto) {
+    return this.coffee.setTargetFillWeight(dto.position, dto.ingredientId, dto.targetFillWeight);
+  }
+
+  @Get("fill-status")
+  fillStatusByLocation() {
+    return this.coffee.fillStatusByLocation();
   }
 
   @Get("tare")

@@ -132,6 +132,32 @@ export interface CoffeeBunkerIngredient {
   position: number;
   ingredientId: string;
   ingredientName: string;
+  /** Закупочная цена за грамм, сум. null — не заведена, себестоимость расхода не считается. */
+  purchasePrice: number | null;
+  /** Эталонный чистый вес заливки, г. null — не задан, недолив не проверяется. */
+  targetFillWeight: number | null;
+}
+
+export interface CoffeeFillStatusRow {
+  locationId: string;
+  locationName: string;
+  position: number;
+  ingredientId: string | null;
+  ingredientName: string | null;
+  netFillWeight: number | null;
+  targetFillWeight: number | null;
+  status: "ok" | "underfill" | "unknown";
+  fillRatio: number | null;
+}
+
+export interface CoffeeReconcileRow {
+  ingredientId: string;
+  ingredientName: string;
+  actualGrams: number | null;
+  expectedGrams: number | null;
+  costActual: number | null;
+  costExpected: number | null;
+  reconcile: { status: "ok" | "anomaly" | "unknown"; deltaGrams: number | null; deltaRatio: number | null };
 }
 
 export interface CoffeeTareCell {
@@ -1108,6 +1134,13 @@ export const core = {
     send<{ ingredientId: string }>("/coffee/bunker-config", "POST", { position, ingredientName }),
   removeCoffeeBunkerIngredient: (position: number, ingredientId: string) =>
     send<{ ok: true }>("/coffee/bunker-config", "DELETE", { position, ingredientId }),
+  setCoffeeIngredientPrice: (ingredientId: string, purchasePrice: number) =>
+    send<{ ok: true }>("/coffee/ingredient-price", "PUT", { ingredientId, purchasePrice }),
+  setCoffeeTargetFillWeight: (position: number, ingredientId: string, targetFillWeight: number) =>
+    send<{ ok: true }>("/coffee/target-fill", "PUT", { position, ingredientId, targetFillWeight }),
+  coffeeFillStatus: () => get<CoffeeFillStatusRow[]>("/coffee/fill-status"),
+  coffeeReconcile: (locationId: string, from: string, to: string) =>
+    get<CoffeeReconcileRow[]>(`/coffee/reconcile/${locationId}?from=${from}&to=${to}`),
   coffeeTareGrid: () => get<CoffeeTareCell[]>("/coffee/tare"),
   setCoffeeTare: (containerNumber: number, position: number, tareWeight: number) =>
     send<{ ok: true }>("/coffee/tare", "PUT", { containerNumber, position, tareWeight }),

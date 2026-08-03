@@ -990,6 +990,8 @@ export const coffeeIngredient = pgTable("coffee_ingredient", {
   id: id(),
   name: text("name").notNull().unique(),
   unit: text("unit").default("g").notNull(),
+  /** Закупочная цена за единицу `unit` (обычно за грамм), сум. Пусто — себестоимость расхода не считается (§ reconcile). */
+  purchasePrice: numeric("purchase_price", { precision: 10, scale: 4 }),
   createdAt: createdAt(),
 });
 
@@ -1010,6 +1012,12 @@ export const coffeeBunkerConfig = pgTable(
     ingredientId: uuid("ingredient_id")
       .references(() => coffeeIngredient.id)
       .notNull(),
+    /**
+     * Эталонный чистый вес заливки (без тары), г — «сколько должно получиться,
+     * когда досыпали полную норму». Пусто — эталон не задан, недолив не
+     * проверяем (coffee-calc.ts fillStatus() отдаёт "unknown", не выдумывает).
+     */
+    targetFillWeight: integer("target_fill_weight"),
   },
   (t) => [
     uniqueIndex("coffee_bunker_config_position_ingredient_key").on(t.position, t.ingredientId),
