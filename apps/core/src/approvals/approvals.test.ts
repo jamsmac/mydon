@@ -259,11 +259,14 @@ describe("Одобренный исторический импорт кофе-б
         }),
       }),
       insert: (table: unknown) => ({
-        values: (v: Row) => {
-          if (table === coffeeRefill) inserted.push(v);
-          if (table === coffeeContainerReturn) insertedReturns.push(v);
-          if (table === coffeeConsumable) upsertedConsumables.push(v);
-          if (table === coffeeLocation) insertedLocations.push(v);
+        // Исполнение теперь пакетное: values() приходит и одной строкой,
+        // и массивом (куски по 500) — раскладываем в плоский список.
+        values: (v: Row | Row[]) => {
+          const rows = Array.isArray(v) ? v : [v];
+          if (table === coffeeRefill) inserted.push(...rows);
+          if (table === coffeeContainerReturn) insertedReturns.push(...rows);
+          if (table === coffeeConsumable) upsertedConsumables.push(...rows);
+          if (table === coffeeLocation) insertedLocations.push(...rows);
           return Object.assign(Promise.resolve(undefined), {
             onConflictDoUpdate: async () => undefined,
             returning: async () => [{ id: `loc-new-${insertedLocations.length}` }],
@@ -318,7 +321,8 @@ describe("Одобренный исторический импорт кофе-б
   it("точно такая же запись уже есть (точка/позиция/дата/вес/упаковки) — не дублирует", async () => {
     const { db, inserted } = coffeeImportStub(
       { coffeeImport: { records: [validRecord] } },
-      { existingRefills: [{ id: "existing-1" }] },
+      // Дедуп теперь сверяет составной ключ по колонкам, а не наличие строки.
+      { existingRefills: [{ locationId: "loc-1", position: 7, enteredDate: "2026-07-01", filledWeight: 1200, packageCount: 1 }] },
     );
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     await service.decide("a1", "approved", "owner");
@@ -386,7 +390,7 @@ describe("Одобренный исторический импорт кофе-б
   it("точно такой же возврат уже есть — не дублируется", async () => {
     const { db, insertedReturns } = coffeeImportStub(
       { coffeeImport: { returns: [validReturn] } },
-      { existingReturns: [{ id: "r-1" }] },
+      { existingReturns: [{ position: 1, containerNumber: 27, returnedDate: "2026-07-30", weight: 787 }] },
     );
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     await service.decide("a1", "approved", "owner");
