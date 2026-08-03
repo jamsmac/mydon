@@ -25,6 +25,20 @@ import {
   parseIntakeCallback,
   startIntake,
 } from "./staff-intake";
+import {
+  coffeeRefillStepHint,
+  handleCoffeeRefillCallback,
+  handleCoffeeRefillContainer,
+  handleCoffeeRefillPackages,
+  handleCoffeeRefillWeight,
+  handleCoffeeWashCallback,
+  isCoffeeRefillTrigger,
+  isCoffeeWashTrigger,
+  parseCoffeeRefillCallback,
+  parseCoffeeWashCallback,
+  startCoffeeRefill,
+  startCoffeeWash,
+} from "./coffee-refill";
 
 /**
  * Работа сотрудника в Telegram (решение владельца: сотрудники — через бота).
@@ -82,6 +96,8 @@ const HELP_STAFF = [
   "• «новый ингредиент» / «новая запчасть» — завести карточку с фото",
   "• «приход» — отметить, что сырьё пришло на склад",
   "• «инвентаризация» — пересчитать остаток на складе",
+  "• «бункер» — занести заливку кофейного бункера (вес, упаковки)",
+  "• «помыл» — отметить мойку бункера",
   "• кнопки под задачей: «Взял» и «Сделал»",
   "• после «Сделал» напиши одной строкой, что именно сделано — это отчёт",
 ].join("\n");
@@ -186,6 +202,14 @@ export async function handleStaffMessage(
     }
     return { reply: { text: intakeStepHint(conv.step) } };
   }
+  if (conv?.flow === "coffee-refill") {
+    if (clean.length > 0 && !clean.startsWith("/")) {
+      if (conv.step === "weight") return { reply: await handleCoffeeRefillWeight(chatId, clean, deps) };
+      if (conv.step === "packages") return { reply: await handleCoffeeRefillPackages(chatId, clean, deps) };
+      if (conv.step === "container") return { reply: await handleCoffeeRefillContainer(chatId, clean, person, deps) };
+    }
+    return { reply: { text: coffeeRefillStepHint(conv.step) } };
+  }
 
   // Завести номенклатуру: «новый ингредиент», «новая запчасть».
   if (isRegisterTrigger(clean)) {
@@ -200,6 +224,16 @@ export async function handleStaffMessage(
   // Инвентаризация склада: «инвентаризация», «пересчёт».
   if (isInventoryTrigger(clean)) {
     return { reply: await startInventory(chatId, deps) };
+  }
+
+  // Заливка кофейного бункера: «бункер», «засыпал».
+  if (isCoffeeRefillTrigger(clean)) {
+    return { reply: await startCoffeeRefill(chatId, deps) };
+  }
+
+  // Мойка/обслуживание кофейного бункера: «помыл», «мойка бункер».
+  if (isCoffeeWashTrigger(clean)) {
+    return { reply: await startCoffeeWash(chatId, deps) };
   }
 
   // Ждём отчёт после «Сделал» — любое следующее сообщение считаем отчётом.
@@ -283,6 +317,26 @@ export async function handleStaffCallback(
   const intake = parseIntakeCallback(data);
   if (intake) {
     const res = await handleIntakeCallback(chatId, intake, person, deps);
+    return {
+      answer: res.answer,
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
+  // Кнопки заливки кофейного бункера (cf:loc/pos/cancel).
+  const coffeeRefill = parseCoffeeRefillCallback(data);
+  if (coffeeRefill) {
+    const res = await handleCoffeeRefillCallback(chatId, coffeeRefill, person, deps);
+    return {
+      answer: res.answer,
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
+  // Кнопки мойки кофейного бункера (cw:loc/pos/cancel).
+  const coffeeWash = parseCoffeeWashCallback(data);
+  if (coffeeWash) {
+    const res = await handleCoffeeWashCallback(chatId, coffeeWash, person, deps);
     return {
       answer: res.answer,
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),

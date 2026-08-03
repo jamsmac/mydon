@@ -64,6 +64,7 @@ export * from "./recipe";
 export * from "./stock";
 export * from "./planogram";
 export * from "./vending-calc";
+export * from "./coffee-calc";
 export * from "./consumption";
 export * from "./intake-sync";
 export * from "./numguard";

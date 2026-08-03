@@ -921,3 +921,57 @@ a.rowlink:hover { background: var(--surf-2); }
 @media (max-width: 720px) {
   .ufields { grid-template-columns: 1fr; }
 }
+
+/* Приглушённый вспомогательный текст — уже использовался (vending), но не был объявлен. */
+.muted { color: var(--tx-2); font-size: 13px; }
+
+/* Кофе-бункеры: вкладки, форма ввода, сетчатые таблицы (§ item — coffee bunkers). */
+.coffee-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.coffee-tabs button {
+  background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--tx-2);
+  font-weight: 600; font-size: 13.5px; padding: 10px 14px; cursor: pointer;
+}
+.coffee-tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+.coffee-tabs button:hover { color: var(--tx); }
+
+.coffee-form { display: flex; flex-direction: column; gap: 12px; max-width: 440px; margin-bottom: 24px; }
+.coffee-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--tx-2); }
+.coffee-form input, .coffee-form select {
+  background: var(--surf-2); border: 1px solid var(--line); border-radius: var(--r-s); color: var(--tx);
+  padding: 9px 11px; font-size: 14px; font-family: inherit;
+}
+.coffee-form input:focus, .coffee-form select:focus { outline: none; border-color: var(--accent-line); }
+.ok-msg { color: var(--ok); font-size: 13px; }
+.err-msg { color: var(--err); font-size: 13px; }
+
+.table-scroll { overflow-x: auto; margin-bottom: 24px; border: 1px solid var(--line); border-radius: var(--r); }
+.coffee-table { border-collapse: collapse; width: 100%; font-size: 12.5px; white-space: nowrap; }
+.coffee-table th, .coffee-table td { border: 1px solid var(--line); padding: 6px 8px; text-align: center; }
+.coffee-table th { background: var(--accent); color: #fff; font-weight: 600; }
+.coffee-table th.sub { background: var(--surf-2); color: var(--tx-2); font-weight: 500; font-size: 11px; }
+.coffee-table td.addr { text-align: left; background: var(--surf-2); font-weight: 600; white-space: normal; min-width: 140px; }
+.coffee-table td.num-cell { background: var(--hot-soft); color: var(--hot); font-weight: 600; }
+.cell-input {
+  width: 64px; text-align: center; background: transparent; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--tx); padding: 3px 4px; font-size: 12.5px; font-family: inherit;
+}
+.cell-input:focus { outline: none; border-color: var(--accent-line); }
+
+.bunker-ing { margin-bottom: 16px; }
+.bunker-ing-h { color: var(--accent); font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+.tags { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.tag {
+  display: inline-flex; align-items: center; gap: 6px; background: var(--surf); border: 1px solid var(--line);
+  color: var(--tx); font-size: 13px; border-radius: 8px; padding: 6px 10px 6px 12px;
+}
+.tag-x { background: transparent; border: 0; color: var(--tx-3); cursor: pointer; font-size: 14px; line-height: 1; padding: 0; }
+.tag-x:hover { color: var(--err); }
+.tag-add {
+  background: var(--surf); border: 1px dashed var(--line); color: var(--tx-2); border-radius: 8px;
+  padding: 6px 12px; font-size: 13px; cursor: pointer;
+}
+.tag-add:hover { color: var(--tx); border-color: var(--accent-line); }
+.tag-add-form input {
+  background: var(--surf-2); border: 1px solid var(--accent-line); border-radius: 8px; color: var(--tx);
+  padding: 6px 10px; font-size: 13px; font-family: inherit;
+}

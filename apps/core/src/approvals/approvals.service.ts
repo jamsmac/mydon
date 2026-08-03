@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { approval, auditLog, entity, event, org, vendingPurchaseOrder } from "@mydon/db";
+import { approval, auditLog, coffeeLocation, coffeeRefill, entity, event, org, vendingPurchaseOrder } from "@mydon/db";
 import { and, desc, eq, type SQL } from "drizzle-orm";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
@@ -131,6 +131,7 @@ export class ApprovalsService {
       if (decision === "approved") {
         await this.executeImport(tx, updated, actorRef);
         await this.executePurchaseOrder(tx, updated, actorRef);
+        await this.executeCoffeeImport(tx, updated);
       }
 
       return updated;
@@ -261,6 +262,98 @@ export class ApprovalsService {
       action: "vending.purchase_order.create",
       target: order.id,
       after: order,
+    });
+  }
+
+  /**
+   * Материализация исторического импорта кофе-бункеров при одобрении:
+   * `payload.coffeeImport = { records: [...] }` → строки `coffee_refill`.
+   * Источник — `tools/import-telegram-coffee.mjs`: LLM извлекает записи из
+   * экспорта переписки, но ничего не пишет в базу напрямую — только заявкой,
+   * тот же T0-гейт, что и у site-ingest (payload.import).
+   *
+   * `locationId` в записи ДОЛЖЕН существовать в `coffee_location` — модель
+   * могла ошибиться или выдумать точку, доверять чужому payload нельзя.
+   * Дубли (тот же адрес/позиция/дата/вес/упаковки) пропускаются — повторное
+   * одобрение или ретрай импорта безопасны. Кривой payload — не ошибка
+   * решения: одобрение остаётся, импорт пропускается.
+   */
+  private async executeCoffeeImport(tx: Tx, row: ApprovalRow): Promise<void> {
+    const imp = (row.payload as { coffeeImport?: unknown } | null)?.coffeeImport as
+      | { records?: unknown }
+      | undefined;
+    if (!imp || typeof imp !== "object") return;
+    const records = Array.isArray(imp.records) ? imp.records.slice(0, 2000) : [];
+    if (records.length === 0) return;
+
+    const locations = await tx.select({ id: coffeeLocation.id }).from(coffeeLocation);
+    const validLocationIds = new Set(locations.map((l) => l.id));
+
+    let created = 0;
+    let skipped = 0;
+    for (const r of records) {
+      const rec = r as {
+        locationId?: unknown;
+        position?: unknown;
+        containerNumber?: unknown;
+        filledWeight?: unknown;
+        measuredBefore?: unknown;
+        packageCount?: unknown;
+        enteredDate?: unknown;
+      };
+      const locationId = typeof rec.locationId === "string" ? rec.locationId : "";
+      const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
+      const filledWeight = typeof rec.filledWeight === "number" ? Math.trunc(rec.filledWeight) : NaN;
+      const enteredDate = typeof rec.enteredDate === "string" ? rec.enteredDate.slice(0, 10) : "";
+      const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(enteredDate);
+      if (!validLocationIds.has(locationId) || position < 1 || position > 8 || !(filledWeight > 0) || !dateOk) {
+        skipped += 1;
+        continue;
+      }
+      const containerNumber =
+        typeof rec.containerNumber === "number" && rec.containerNumber >= 1 && rec.containerNumber <= 27
+          ? Math.trunc(rec.containerNumber)
+          : null;
+      const measuredBefore =
+        typeof rec.measuredBefore === "number" && rec.measuredBefore >= 0 ? Math.trunc(rec.measuredBefore) : null;
+      const packageCount =
+        typeof rec.packageCount === "number" && rec.packageCount >= 1 ? Math.trunc(rec.packageCount) : 1;
+
+      const [existing] = await tx
+        .select({ id: coffeeRefill.id })
+        .from(coffeeRefill)
+        .where(
+          and(
+            eq(coffeeRefill.locationId, locationId),
+            eq(coffeeRefill.position, position),
+            eq(coffeeRefill.enteredDate, enteredDate),
+            eq(coffeeRefill.filledWeight, filledWeight),
+            eq(coffeeRefill.packageCount, packageCount),
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        skipped += 1;
+        continue;
+      }
+
+      await tx.insert(coffeeRefill).values({
+        locationId,
+        position,
+        containerNumber,
+        filledWeight,
+        measuredBefore,
+        packageCount,
+        enteredDate,
+        createdBy: "import:telegram-history",
+      });
+      created += 1;
+    }
+
+    await tx.insert(event).values({
+      source: "owner",
+      type: "coffee.import.executed",
+      payload: { approvalId: row.id, created, skipped },
     });
   }
 }

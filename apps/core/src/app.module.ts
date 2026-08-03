@@ -5,6 +5,7 @@ import { AgentsModule } from "./agents/agents.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
 import { AttachmentsModule } from "./attachments/attachments.module";
 import { AuditModule } from "./audit/audit.module";
+import { CoffeeModule } from "./coffee/coffee.module";
 import { CollectionsModule } from "./collections/collections.module";
 import { DbModule } from "./db/db.module";
 import { EntitiesModule } from "./entities/entities.module";
@@ -30,6 +31,7 @@ import { VerificationModule } from "./verification/verification.module";
     AgentsModule,
     AttachmentsModule,
     AuditModule,
+    CoffeeModule,
     CollectionsModule,
     EntitiesModule,
     EventsModule,

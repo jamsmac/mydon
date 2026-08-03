@@ -302,12 +302,18 @@ export class VendingService {
     return out;
   }
 
-  /** Сводная потребность по товарам (только ok-автоматы), с разбивкой. */
+  /**
+   * Сводная потребность по товарам (только ok-автоматы), с разбивкой. Имена
+   * слотов приводятся к канону через алиасы — иначе один и тот же товар,
+   * записанный в разных автоматах разными Ourvend-именами, ложится двумя
+   * отдельными позициями вместо одной (тот же приём, что в `purchase()`).
+   */
   async deficitSummary(): Promise<{ product: string; total: number; perMachine: Record<string, number> }[]> {
+    const { aliasByKey } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
     const ok = [...byMachine.entries()]
       .filter(([, slots]) => planogramStatus(slots) === "ok")
-      .map(([machineId, slots]) => ({ machineId, slots }));
+      .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, aliasByKey) }));
     const needs = needByProduct(ok);
     needs.sort((a, b) => b.total - a.total);
     return needs.map((n) => ({ product: n.product, total: n.total, perMachine: n.perMachine }));
@@ -371,16 +377,19 @@ export class VendingService {
   /**
    * Продажи за 7 суток по товару из САМОГО СВЕЖЕГО батча (одинаковый
    * capturedAt) и только по ok-автоматах. Батч, а не сумма истории — иначе
-   * перекрывающиеся 7-дневные окна складывались бы и завышали расход.
+   * перекрывающиеся 7-дневные окна складывались бы и завышали расход. Имя
+   * приводится к канону через алиасы — иначе не сойдётся с потребностью
+   * (`needByProduct`) и остатком склада, которые уже в каноне.
    */
-  private async latestSold7(okSerials: Set<string>): Promise<Map<string, number>> {
+  private async latestSold7(okSerials: Set<string>, aliasByKey: Map<string, string>): Promise<Map<string, number>> {
     const saleRows = await this.db.select().from(productSale);
     const latest = saleRows.reduce((max, r) => Math.max(max, r.capturedAt.getTime()), 0);
     const out = new Map<string, number>();
     for (const r of saleRows) {
       if (r.capturedAt.getTime() !== latest) continue;
       if (!okSerials.has(r.machineSerial)) continue;
-      out.set(r.productName, (out.get(r.productName) ?? 0) + r.quantity);
+      const name = this.resolveProduct(r.productName, aliasByKey);
+      out.set(name, (out.get(name) ?? 0) + r.quantity);
     }
     return out;
   }
@@ -396,19 +405,24 @@ export class VendingService {
    * из самого свежего собранного батча.
    */
   async forecast(criticalDays = 3): Promise<{ all: Runout[]; critical: Runout[] }> {
+    const { aliasByKey } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
     const okSerials = this.okSerials(byMachine);
 
-    // Остаток в машинах по товару: Σ quantity валидных назначенных слотов ok-автоматов.
+    // Остаток в машинах по товару (в каноне через алиасы): Σ quantity валидных
+    // назначенных слотов ok-автоматов.
     const inByProduct = new Map<string, number>();
     for (const [serial, slots] of byMachine) {
       if (!okSerials.has(serial)) continue;
       for (const s of slots) {
-        if (s.product && slotValid(s)) inByProduct.set(s.product, (inByProduct.get(s.product) ?? 0) + s.quantity);
+        if (s.product && slotValid(s)) {
+          const name = this.resolveProduct(s.product, aliasByKey);
+          inByProduct.set(name, (inByProduct.get(name) ?? 0) + s.quantity);
+        }
       }
     }
 
-    const soldByProduct = await this.latestSold7(okSerials);
+    const soldByProduct = await this.latestSold7(okSerials, aliasByKey);
 
     // Прогнозируем то, что сейчас загружено в автоматы.
     const input: RunoutInput[] = [...inByProduct.entries()].map(([product, inMachines]) => ({
@@ -434,11 +448,20 @@ export class VendingService {
    * строкой мимо расчёта закупа. Цены: нужны, чтобы оценить недостачу/излишек
    * при пересчёте в сумах, а не только в штуках.
    */
-  private async loadProductIndex(): Promise<{ aliasByKey: Map<string, string>; priceByName: Map<string, number> }> {
+  private async loadProductIndex(): Promise<{
+    aliasByKey: Map<string, string>;
+    priceByName: Map<string, number>;
+    packByName: Map<string, number>;
+  }> {
     const [aliases, products] = await Promise.all([
       this.db.select().from(vendingAlias),
       this.db
-        .select({ id: vendingProduct.id, name: vendingProduct.name, purchasePrice: vendingProduct.purchasePrice })
+        .select({
+          id: vendingProduct.id,
+          name: vendingProduct.name,
+          purchasePrice: vendingProduct.purchasePrice,
+          packSize: vendingProduct.packSize,
+        })
         .from(vendingProduct),
     ]);
     const nameById = new Map(products.map((p) => [p.id, p.name]));
@@ -448,15 +471,22 @@ export class VendingService {
       if (canonical) aliasByKey.set(normalizeProductName(a.alias), canonical);
     }
     const priceByName = new Map<string, number>();
+    const packByName = new Map<string, number>();
     for (const p of products) {
       if (p.purchasePrice != null) priceByName.set(p.name, Number(p.purchasePrice));
+      packByName.set(p.name, p.packSize);
     }
-    return { aliasByKey, priceByName };
+    return { aliasByKey, priceByName, packByName };
   }
 
   /** Привести имя товара к канону через алиасы; неизвестное — как есть. */
   private resolveProduct(name: string, aliases: Map<string, string>): string {
     return aliases.get(normalizeProductName(name)) ?? name;
+  }
+
+  /** Слоты автомата с именем товара, приведённым к канону через алиасы. */
+  private resolveSlots(slots: Slot[], aliases: Map<string, string>): Slot[] {
+    return slots.map((s) => (s.product ? { ...s, product: this.resolveProduct(s.product, aliases) } : s));
   }
 
   /**
@@ -576,23 +606,30 @@ export class VendingService {
    * (не из кода), остаток — из `vending_stock` (инвентаризация). Позиции без
    * цены и без продаж калькулятор выносит отдельно и в денежные итоги не
    * включает.
+   *
+   * Имена слотов приводятся к канону через алиасы ДО расчёта потребности —
+   * иначе один и тот же товар, записанный в разных автоматах разными
+   * Ourvend-именами («Montella», «18+»), уходит в закуп двумя отдельными
+   * позициями вместо одной (склад и продажи уже в каноне — `ingestStock`
+   * и `latestSold7` резолвят его же картой алиасов, иначе позиции просто
+   * не сойдутся друг с другом).
    */
   async purchase(): Promise<PurchaseSummary> {
+    const { aliasByKey, priceByName, packByName } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
     const okSerials = this.okSerials(byMachine);
     const ok = [...byMachine.entries()]
       .filter(([serial]) => okSerials.has(serial))
-      .map(([machineId, slots]) => ({ machineId, slots }));
+      .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, aliasByKey) }));
     const needs = needByProduct(ok);
-    const soldByProduct = await this.latestSold7(okSerials);
+    const soldByProduct = await this.latestSold7(okSerials, aliasByKey);
     const stockByProduct = await this.stockByProduct();
 
     // Прайс: только позиции с ценой попадают в карту — иначе калькулятор
     // пометит noPrice и выведет их на разбор менеджеру (§5.5).
-    const products = await this.db.select().from(vendingProduct);
     const prices = new Map<string, PriceEntry>();
-    for (const p of products) {
-      if (p.purchasePrice != null) prices.set(p.name, { price: Number(p.purchasePrice), pack: p.packSize });
+    for (const [name, price] of priceByName) {
+      prices.set(name, { price, pack: packByName.get(name) ?? 1 });
     }
 
     const rows: PurchaseRow[] = needs.map((n) => ({
@@ -693,12 +730,13 @@ export class VendingService {
    * что и ввод склада (§5.4), и сравниваются с позицией накладной без учёта
    * регистра/пробелов; распределённое сверх заказанного — отсекается.
    *
-   * Позиции накладной берутся из `purchase()`, который группирует по СЫРОМУ
-   * имени Ourvend-слота (без алиасов, отдельный давний разрыв, см. `purchase()`)
-   * — если ключ `distributed` после резолва алиасом всё равно не совпал ни с
-   * одной позицией, эта запись попадает в `unmatchedDistribution`, а её сумма
-   * уходит на склад, как будто распределения не было: не роняем приёмку из-за
-   * несовпадения имён, но и не молчим об этом (найдено адверсариал-ревью).
+   * Позиции накладной берутся из `purchase()`, который теперь тоже группирует
+   * по канону (§ item 38) — но алиас в `distributed` мог появиться ПОСЛЕ того,
+   * как накладная создана, или ссылаться на товар не из этого закупа. Если
+   * ключ после резолва всё равно не совпал ни с одной позицией, запись
+   * попадает в `unmatchedDistribution`, а её сумма уходит на склад, как будто
+   * распределения не было: не роняем приёмку из-за несовпадения имён, но и не
+   * молчим об этом (найдено адверсариал-ревью).
    */
   async receiveOrder(
     orderId?: string,

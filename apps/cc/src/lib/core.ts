@@ -120,6 +120,69 @@ export interface VendingSyncRun {
   durationMs: number | null;
 }
 
+// ── Кофе-бункеры: ручные кофемашины, ежедневная заливка/мойка ────────────
+
+export interface CoffeeLocation {
+  id: string;
+  name: string;
+  isActive: boolean;
+}
+
+export interface CoffeeBunkerIngredient {
+  position: number;
+  ingredientId: string;
+  ingredientName: string;
+}
+
+export interface CoffeeTareCell {
+  containerNumber: number;
+  position: number;
+  tareWeight: number | null;
+}
+
+export interface CoffeeRefillRow {
+  id: string;
+  locationId: string;
+  locationName: string;
+  position: number;
+  containerNumber: number | null;
+  ingredientId: string | null;
+  filledWeight: number;
+  measuredBefore: number | null;
+  packageCount: number;
+  enteredDate: string;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface CoffeeBunkerCell {
+  packageCount: number;
+  weight: number;
+}
+
+export interface CoffeeLocationSummaryRow {
+  location: string;
+  byPosition: Record<number, CoffeeBunkerCell>;
+}
+
+export interface CoffeeConsumableRow {
+  location: string;
+  water: number;
+  cups: number;
+  lids: number;
+}
+
+export interface CoffeeWashRow {
+  id: string;
+  locationId: string;
+  locationName: string;
+  position: number | null;
+  kind: "wash" | "clean" | "replace" | "service";
+  note: string | null;
+  performedBy: string | null;
+  performedAt: string;
+}
+
 /** Действующий глобальный тумблер системы (мозг/RAG/пауза/бюджет). */
 export interface SystemConfigItem {
   key: string;
@@ -1037,6 +1100,35 @@ export const core = {
   vendingPurchase: () => get<VendingPurchase>("/vending/purchase"),
   vendingOrders: () => get<VendingOrder[]>("/vending/orders"),
   vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
+
+  // ── Кофе-бункеры: ручные кофемашины ──
+  coffeeLocations: () => get<CoffeeLocation[]>("/coffee/locations"),
+  coffeeBunkerConfig: () => get<CoffeeBunkerIngredient[]>("/coffee/bunker-config"),
+  addCoffeeBunkerIngredient: (position: number, ingredientName: string) =>
+    send<{ ingredientId: string }>("/coffee/bunker-config", "POST", { position, ingredientName }),
+  removeCoffeeBunkerIngredient: (position: number, ingredientId: string) =>
+    send<{ ok: true }>("/coffee/bunker-config", "DELETE", { position, ingredientId }),
+  coffeeTareGrid: () => get<CoffeeTareCell[]>("/coffee/tare"),
+  setCoffeeTare: (containerNumber: number, position: number, tareWeight: number) =>
+    send<{ ok: true }>("/coffee/tare", "PUT", { containerNumber, position, tareWeight }),
+  submitCoffeeRefill: (input: {
+    locationId: string;
+    position: number;
+    containerNumber?: number;
+    filledWeight: number;
+    packageCount?: number;
+    enteredDate: string;
+    createdBy?: string;
+  }) => send<{ id: string }>("/coffee/refill", "POST", input),
+  recentCoffeeRefills: (limit = 20) => get<CoffeeRefillRow[]>(`/coffee/refill/recent?limit=${limit}`),
+  coffeeLocationSummary: () => get<CoffeeLocationSummaryRow[]>("/coffee/summary"),
+  recordCoffeeConsumable: (input: { locationId: string; loggedDate: string; water?: number; cups?: number; lids?: number }) =>
+    send<{ ok: true }>("/coffee/consumables", "POST", input),
+  coffeeConsumablesSummary: () => get<CoffeeConsumableRow[]>("/coffee/consumables"),
+  recordCoffeeWash: (input: { locationId: string; position?: number; note?: string; performedBy?: string }) =>
+    send<{ id: string }>("/coffee/wash", "POST", input),
+  coffeeWashHistory: (locationId?: string, limit = 50) =>
+    get<CoffeeWashRow[]>(`/coffee/wash?limit=${limit}${locationId ? `&locationId=${locationId}` : ""}`),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),

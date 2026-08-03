@@ -1,30 +1,52 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { event, machineSale, machineSlot, productSale, vendingProduct, vendingStock } from "@mydon/db";
+import { event, machineSale, productSale, vendingAlias, vendingProduct, vendingStock } from "@mydon/db";
 import { VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
 type SaleRow = { machineSerial: string; productName: string; quantity: number; capturedAt: Date };
-type ProdRow = { name: string; purchasePrice: string | null; packSize: number };
+type ProdRow = { id?: string; name: string; purchasePrice: string | null; packSize: number };
+type AliasRow = { productId: string; alias: string };
 
-/** Стаб БД: machines()/deficitSummary() читают `select().from()`. */
-function readDb(rows: Row[]) {
-  return { select: () => ({ from: async () => rows }) } as never;
+/**
+ * Стаб БД: machines()/deficitSummary() читают `select().from()`. `deficitSummary()`
+ * тоже резолвит алиасы (loadProductIndex()) — по умолчанию пустые, отдельные тесты
+ * передают их явно.
+ */
+function readDb(rows: Row[], aliases: AliasRow[] = [], products: ProdRow[] = []) {
+  return {
+    select: () => ({
+      from: async (t: unknown) => (t === vendingAlias ? aliases : t === vendingProduct ? products : rows),
+    }),
+  } as never;
 }
 
-/** Стаб БД для прогноза: слоты и продажи в разные таблицы, различаем по ссылке. */
-function forecastDb(slots: Row[], sales: SaleRow[]) {
-  return { select: () => ({ from: async (t: unknown) => (t === productSale ? sales : t === machineSlot ? slots : slots) }) } as never;
+/** Стаб БД для прогноза: слоты, продажи, алиасы — различаем по ссылке. */
+function forecastDb(slots: Row[], sales: SaleRow[], aliases: AliasRow[] = [], products: ProdRow[] = []) {
+  return {
+    select: () => ({
+      from: async (t: unknown) =>
+        t === productSale ? sales : t === vendingAlias ? aliases : t === vendingProduct ? products : slots,
+    }),
+  } as never;
 }
 
 type StockRow = { productName: string; quantity: number; countedAt: Date };
 
-/** Стаб БД для закупа: слоты + продажи + прайс + склад, различаем по ссылке. */
-function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[], stock: StockRow[] = []) {
+/** Стаб БД для закупа: слоты + продажи + прайс + склад + алиасы, различаем по ссылке. */
+function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[], stock: StockRow[] = [], aliases: AliasRow[] = []) {
   return {
     select: () => ({
       from: async (t: unknown) =>
-        t === productSale ? sales : t === vendingProduct ? products : t === vendingStock ? stock : slots,
+        t === productSale
+          ? sales
+          : t === vendingProduct
+            ? products
+            : t === vendingStock
+              ? stock
+              : t === vendingAlias
+                ? aliases
+                : slots,
     }),
   } as never;
 }
@@ -108,6 +130,24 @@ describe("Вендинг Core: дефицит по автоматам (Фаза 
     assert.deepEqual(m.perMachine, { AH: 6, Olma: 3 });
     assert.ok(!summary.some((s) => s.product === "Fanta"), "нулевой дефицит не попадает в сводку");
   });
+
+  it("два сырых имени одного канона — одна строка сводки, а не две (item 38)", async () => {
+    const rows = [
+      slot("AH", "31", "Montella", 6, 0), // деф 6
+      slot("Olma", "40", "18+", 6, 3), // деф 3, другое сырое имя того же товара
+    ];
+    const aliases: AliasRow[] = [
+      { productId: "p1", alias: "Montella" },
+      { productId: "p1", alias: "18+" },
+    ];
+    const products: ProdRow[] = [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: null, packSize: 1 }];
+    const svc = new VendingService(readDb(rows, aliases, products));
+    const summary = await svc.deficitSummary();
+    assert.equal(summary.filter((s) => s.product.startsWith("Montella") || s.product === "18+").length, 1);
+    const m = summary.find((s) => s.product === "Montella Вода минеральная 330ml")!;
+    assert.equal(m.total, 9);
+    assert.deepEqual(m.perMachine, { AH: 6, Olma: 3 });
+  });
 });
 
 describe("Вендинг Core: прогноз расхода (§5.6)", () => {
@@ -137,6 +177,31 @@ describe("Вендинг Core: прогноз расхода (§5.6)", () => {
     assert.equal(fanta.daysLeft, Infinity);
     // Критичны только те, чей запас ≤ 3 дней.
     assert.deepEqual(critical.map((r) => r.product), ["Montella"]);
+  });
+
+  it("остаток и продажи под разными сырыми именами одного канона сходятся в один прогноз (item 38)", async () => {
+    const t2 = new Date("2026-08-02T00:00:00Z");
+    const slots: Row[] = [
+      { machineSerial: "AH", coilId: "31", productName: "Montella", capacity: 6, quantity: 2 },
+      { machineSerial: "Olma", coilId: "1", productName: "18+", capacity: 6, quantity: 3 },
+    ];
+    const sales: SaleRow[] = [
+      { machineSerial: "AH", productName: "Montella", quantity: 7, capturedAt: t2 },
+      { machineSerial: "Olma", productName: "18+", quantity: 7, capturedAt: t2 },
+    ];
+    const aliases: AliasRow[] = [
+      { productId: "p1", alias: "Montella" },
+      { productId: "p1", alias: "18+" },
+    ];
+    const products: ProdRow[] = [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: null, packSize: 1 }];
+    const svc = new VendingService(forecastDb(slots, sales, aliases, products));
+    const { all } = await svc.forecast();
+
+    const rows = all.filter((r) => r.product === "Montella" || r.product === "18+" || r.product === "Montella Вода минеральная 330ml");
+    assert.equal(rows.length, 1, "должна остаться одна строка прогноза под каноном");
+    const canon = all.find((r) => r.product === "Montella Вода минеральная 330ml")!;
+    assert.equal(canon.inMachines, 5); // 2+3
+    assert.equal(canon.daily, 2); // (7+7)/7
   });
 });
 
@@ -272,6 +337,47 @@ describe("Вендинг Core: сводный закуп (§5.4–5.5)", () => {
     assert.equal(montella.surplus, 6); // 10 − 4
     assert.equal(s.costRounded, 0); // единственная денежная позиция закрыта складом
   });
+
+  it(
+    "два разных сырых имени слота на один канон — ОДНА позиция закупа с суммарной " +
+      "потребностью и разбивкой по автоматам, а не две отдельные строки с раздельным " +
+      "дефицитом и продажами (item 38, найдено внешним аудитом)",
+    async () => {
+      // Один и тот же товар записан в разных автоматах разными Ourvend-именами
+      // («Montella» и «18+») — рукописный лист сборщика их не различает.
+      const aliasSlots: Row[] = [
+        { machineSerial: "AH", coilId: "1", productName: "Montella", capacity: 6, quantity: 2 }, // деф 4
+        { machineSerial: "Olma", coilId: "1", productName: "18+", capacity: 6, quantity: 1 }, // деф 5
+      ];
+      // Продажи собраны Ourvend тоже под сырыми именами — обе должны сойтись на каноне.
+      const aliasSales: SaleRow[] = [
+        { machineSerial: "AH", productName: "Montella", quantity: 7, capturedAt: t },
+        { machineSerial: "Olma", productName: "18+", quantity: 7, capturedAt: t },
+      ];
+      const aliasProducts: ProdRow[] = [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: "5000.00", packSize: 12 }];
+      const aliases: AliasRow[] = [
+        { productId: "p1", alias: "Montella" },
+        { productId: "p1", alias: "18+" },
+      ];
+      // Остаток склада тоже в каноне (как пишет ingestStock) — должен вычесться
+      // из ОБЩЕЙ потребности, а не из одной из двух раздельных позиций.
+      const stock: StockRow[] = [{ productName: "Montella Вода минеральная 330ml", quantity: 1, countedAt: t }];
+
+      const svc = new VendingService(purchaseDb(aliasSlots, aliasSales, aliasProducts, stock, aliases));
+      const s = await svc.purchase();
+
+      const rows = s.items.filter((i) => i.product === "Montella Вода минеральная 330ml");
+      assert.equal(rows.length, 1, "должна остаться одна позиция под каноном, а не по одной на сырое имя");
+      const item = rows[0]!;
+      assert.deepEqual(item.perMachine, { AH: 4, Olma: 5 }); // разбивка по автоматам сохранена
+      assert.equal(item.need, 9); // 4+5, а не два раза по 4 и 5 раздельно
+      assert.equal(item.stock, 1); // склад найден по канону
+      assert.equal(item.buy, 8); // 9−1
+      assert.equal(item.noSales, false); // продажи под обоими сырыми именами сошлись на каноне (7+7=14>0)
+
+      assert.ok(!s.items.some((i) => i.product === "Montella" || i.product === "18+"), "сырые имена не должны утекать в items");
+    },
+  );
 });
 
 describe("Вендинг Core: отправка закупа на утверждение (§5.7)", () => {
