@@ -248,6 +248,46 @@ export const RULES: Rule[] = [
     urgency: "immediate",
     format: (c) => `⏰ Просрочена задача: ${str(c.payload.title)}`,
   },
+
+  // ── Кофе-бункеры: проактивный мониторинг (порт monitor-stock донора) ──
+  // Как и infra.disk: одно и то же событие, два правила по порогу — тяжёлый
+  // случай будит немедленно, обычный ждёт до брифинга.
+  {
+    id: "coffee.underfill.critical",
+    eventType: "coffee.underfill",
+    urgency: "immediate",
+    when: (c) => num(c.payload.fillRatio) < 0.3,
+    format: (c) =>
+      `☕🔴 Бункер почти пуст: ${str(c.payload.location)}, бункер ${str(c.payload.position)} ` +
+      `(${str(c.payload.ingredient)}) — ${num(c.payload.netFillWeight)} г из ${num(c.payload.targetFillWeight)} г эталона.`,
+  },
+  {
+    id: "coffee.underfill.watch",
+    eventType: "coffee.underfill",
+    urgency: "briefing",
+    when: (c) => num(c.payload.fillRatio) >= 0.3,
+    format: (c) =>
+      `☕🟡 Недолив: ${str(c.payload.location)}, бункер ${str(c.payload.position)} ` +
+      `(${str(c.payload.ingredient)}) — ${num(c.payload.netFillWeight)} г из ${num(c.payload.targetFillWeight)} г эталона.`,
+  },
+  {
+    id: "coffee.anomaly.critical",
+    eventType: "coffee.anomaly",
+    urgency: "immediate",
+    when: (c) => Math.abs(num(c.payload.deltaRatio)) >= 0.5,
+    format: (c) =>
+      `☕🔴 Сильное расхождение расхода: ${str(c.payload.location)} — ${str(c.payload.ingredient)}, ` +
+      `факт ${num(c.payload.actualGrams)} г против ожидания ${num(c.payload.expectedGrams)} г.`,
+  },
+  {
+    id: "coffee.anomaly.watch",
+    eventType: "coffee.anomaly",
+    urgency: "briefing",
+    when: (c) => Math.abs(num(c.payload.deltaRatio)) < 0.5,
+    format: (c) =>
+      `☕🟡 Расхождение расхода: ${str(c.payload.location)} — ${str(c.payload.ingredient)}, ` +
+      `факт ${num(c.payload.actualGrams)} г против ожидания ${num(c.payload.expectedGrams)} г.`,
+  },
 ];
 
 /** Подбирает уведомления под событие. Одно событие может дать несколько. */

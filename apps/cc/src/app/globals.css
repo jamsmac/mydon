@@ -966,6 +966,11 @@ a.rowlink:hover { background: var(--surf-2); }
 }
 .tag-x { background: transparent; border: 0; color: var(--tx-3); cursor: pointer; font-size: 14px; line-height: 1; padding: 0; }
 .tag-x:hover { color: var(--err); }
+.tag-price {
+  width: 56px; text-align: right; background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  color: var(--tx-2); padding: 2px 5px; font-size: 12px; font-family: inherit;
+}
+.tag-price:focus { outline: none; border-color: var(--accent-line); color: var(--tx); }
 .tag-add {
   background: var(--surf); border: 1px dashed var(--line); color: var(--tx-2); border-radius: 8px;
   padding: 6px 12px; font-size: 13px; cursor: pointer;

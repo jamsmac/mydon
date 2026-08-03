@@ -9,7 +9,9 @@ import {
   coffeeProduct,
   coffeeRefill,
   coffeeSale,
+  coffeeStock,
   coffeeWashLog,
+  coffeeWashSchedule,
 } from "@mydon/db";
 import { CoffeeService } from "./coffee.service";
 
@@ -29,6 +31,8 @@ function coffeeDb(tables: {
   products?: unknown[];
   consumables?: unknown[];
   washLog?: unknown[];
+  stock?: unknown[];
+  washSchedule?: unknown[];
 }) {
   const inserts: { table: string; values: unknown }[] = [];
   const updates: { table: string; values: unknown }[] = [];
@@ -44,6 +48,8 @@ function coffeeDb(tables: {
     if (t === coffeeProduct) return tables.products ?? [];
     if (t === coffeeConsumable) return tables.consumables ?? [];
     if (t === coffeeWashLog) return tables.washLog ?? [];
+    if (t === coffeeStock) return tables.stock ?? [];
+    if (t === coffeeWashSchedule) return tables.washSchedule ?? [];
     return [];
   };
   const nameOf = (t: unknown): string => {
@@ -56,6 +62,8 @@ function coffeeDb(tables: {
     if (t === coffeeConsumable) return "coffee_consumable";
     if (t === coffeeWashLog) return "coffee_wash_log";
     if (t === coffeeProduct) return "coffee_product";
+    if (t === coffeeStock) return "coffee_stock";
+    if (t === coffeeWashSchedule) return "coffee_wash_schedule";
     return "unknown";
   };
 
@@ -97,6 +105,7 @@ function coffeeDb(tables: {
         return undefined;
       },
     }),
+    transaction: async <T>(cb: (tx: unknown) => Promise<T>): Promise<T> => cb(db),
   } as never;
 
   return { db, inserts, updates, deletes };
@@ -238,5 +247,343 @@ describe("CoffeeService: сверка факт/ожидание (reconcileLocati
     const res = await svc.reconcileLocation("loc-1", "2026-08-01", "2026-08-02");
     const coffee = res.find((r) => r.ingredientId === "ing-coffee")!;
     assert.equal(coffee.reconcile.status, "anomaly");
+  });
+
+  it("цена заведена — считает себестоимость факта и ожидания; цены нет — null, не 0", async () => {
+    const refills = [
+      { id: "r1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01" },
+      { id: "r2", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: 850, enteredDate: "2026-08-02" },
+    ];
+    const products = [{ id: "prod-americano", name: "Американо", recipe: [{ ingredientId: "ing-coffee", quantity: 18, unit: "г" }] }];
+    const sales = [{ locationId: "loc-1", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 20 }];
+
+    const priced = [{ id: "ing-coffee", name: "Кофе", purchasePrice: "80.0000" }];
+    const { db: dbPriced } = coffeeDb({ refills, sales, products, ingredients: priced, tare });
+    const priced1 = (await new CoffeeService(dbPriced).reconcileLocation("loc-1", "2026-08-01", "2026-08-02")).find(
+      (r) => r.ingredientId === "ing-coffee",
+    )!;
+    assert.equal(priced1.actualGrams, 350);
+    assert.equal(priced1.costActual, 28000); // 350 × 80
+    assert.equal(priced1.costExpected, 28800); // 360 × 80
+
+    const { db: dbNoPrice } = coffeeDb({ refills, sales, products, ingredients, tare });
+    const noPrice = (await new CoffeeService(dbNoPrice).reconcileLocation("loc-1", "2026-08-01", "2026-08-02")).find(
+      (r) => r.ingredientId === "ing-coffee",
+    )!;
+    assert.equal(noPrice.costActual, null, "цена не заведена — себестоимость неизвестна, а не 0");
+    assert.equal(noPrice.costExpected, null);
+  });
+});
+
+describe("CoffeeService: сверка по всем точкам сразу (reconcileAllLocations)", () => {
+  const tare = [{ containerNumber: 1, position: 7, tareWeight: 620 }];
+  const ingredients = [{ id: "ing-coffee", name: "Кофе" }];
+  const products = [{ id: "prod-americano", name: "Американо", recipe: [{ ingredientId: "ing-coffee", quantity: 18, unit: "г" }] }];
+  const locations = [
+    { id: "loc-1", name: "AH", sortOrder: 0, isActive: true },
+    { id: "loc-2", name: "Grand clinic", sortOrder: 1, isActive: true },
+  ];
+
+  it("группирует сверку по точкам, точки без данных в периоде не попадают в ответ", async () => {
+    const refills = [
+      { id: "r1", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01" },
+      { id: "r2", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: 630, enteredDate: "2026-08-02" },
+    ];
+    // Факт loc-1: 580 − 10 = 570г. Ожидание: 5 × 18 = 90г — аномалия.
+    const sales = [{ locationId: "loc-1", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 5 }];
+    const { db } = coffeeDb({ refills, sales, products, ingredients, tare, locations });
+    const svc = new CoffeeService(db);
+    const res = await svc.reconcileAllLocations("2026-08-01", "2026-08-02");
+    assert.equal(res.length, 1, "loc-2 без заливок/продаж — сверять нечего");
+    assert.equal(res[0]!.locationId, "loc-1");
+    assert.equal(res[0]!.locationName, "AH");
+    const coffee = res[0]!.rows.find((r) => r.ingredientId === "ing-coffee")!;
+    assert.equal(coffee.reconcile.status, "anomaly");
+  });
+
+  it("две точки с данными — каждая своей группой, факт не путается между точками", async () => {
+    const refills = [
+      { id: "r1", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01" },
+      { id: "r2", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: 850, enteredDate: "2026-08-02" },
+      { id: "r3", locationId: "loc-2", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01" },
+      { id: "r4", locationId: "loc-2", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: 850, enteredDate: "2026-08-02" },
+    ];
+    // Обе точки: факт 350г. loc-1 — 20 чашек (ожидание 360, ok). loc-2 — 5 чашек (ожидание 90, anomaly).
+    const sales = [
+      { locationId: "loc-1", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 20 },
+      { locationId: "loc-2", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 5 },
+    ];
+    const { db } = coffeeDb({ refills, sales, products, ingredients, tare, locations });
+    const svc = new CoffeeService(db);
+    const res = await svc.reconcileAllLocations("2026-08-01", "2026-08-02");
+    assert.equal(res.length, 2);
+    const g1 = res.find((g) => g.locationId === "loc-1")!;
+    const g2 = res.find((g) => g.locationId === "loc-2")!;
+    assert.equal(g1.rows.find((r) => r.ingredientId === "ing-coffee")!.reconcile.status, "ok");
+    assert.equal(g2.rows.find((r) => r.ingredientId === "ing-coffee")!.reconcile.status, "anomaly");
+  });
+});
+
+describe("CoffeeService: настройки — цена ингредиента", () => {
+  it("setIngredientPrice — обновляет цену по id", async () => {
+    const { db, updates } = coffeeDb({});
+    const svc = new CoffeeService(db);
+    await svc.setIngredientPrice("ing-coffee", 82.5);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0]!.table, "coffee_ingredient");
+    assert.equal((updates[0]!.values as Record<string, unknown>).purchasePrice, "82.5");
+  });
+
+  it("bunkerConfig — отдаёт purchasePrice числом, а не строкой numeric", async () => {
+    const { db } = coffeeDb({
+      bunkerConfig: [{ position: 7, ingredientId: "ing-coffee", ingredientName: "Кофе", purchasePrice: "80.0000" }],
+    });
+    const svc = new CoffeeService(db);
+    const rows = await svc.bunkerConfig();
+    assert.equal(rows[0]!.purchasePrice, 80);
+    assert.equal(typeof rows[0]!.purchasePrice, "number");
+  });
+});
+
+describe("CoffeeService: недолив заливки (targetFillWeight/fillStatusByLocation)", () => {
+  it("setTargetFillWeight — обновляет эталон по (позиция, ингредиент)", async () => {
+    const { db, updates } = coffeeDb({});
+    const svc = new CoffeeService(db);
+    await svc.setTargetFillWeight(7, "ing-coffee", 600);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0]!.table, "coffee_bunker_config");
+    assert.equal((updates[0]!.values as Record<string, unknown>).targetFillWeight, 600);
+  });
+
+  it("fillStatusByLocation — считает недолив по последней заливке против эталона позиции/ингредиента", async () => {
+    const refills = [
+      { locationId: "loc-1", locationName: "AH", position: 7, ingredientId: "ing-coffee", containerNumber: 1, filledWeight: 1200, enteredDate: "2026-08-01" },
+      // Свежее — заливка почти пустая (недолив): брутто 700, тара 620 → чистый 80 при эталоне 600.
+      { locationId: "loc-1", locationName: "AH", position: 7, ingredientId: "ing-coffee", containerNumber: 1, filledWeight: 700, enteredDate: "2026-08-02" },
+    ];
+    const tare = [{ containerNumber: 1, position: 7, tareWeight: 620 }];
+    const bunkerConfig = [{ position: 7, ingredientId: "ing-coffee", ingredientName: "Кофе", targetFillWeight: 600 }];
+    const { db } = coffeeDb({ refills, tare, bunkerConfig });
+    const svc = new CoffeeService(db);
+    const res = await svc.fillStatusByLocation();
+    assert.equal(res.length, 1);
+    assert.equal(res[0]!.netFillWeight, 80); // 700 − 620, самая свежая заливка
+    assert.equal(res[0]!.targetFillWeight, 600);
+    assert.equal(res[0]!.status, "underfill");
+  });
+
+  it("fillStatusByLocation — эталон не задан → unknown, не молчаливый ok", async () => {
+    const refills = [
+      { locationId: "loc-1", locationName: "AH", position: 7, ingredientId: "ing-coffee", containerNumber: 1, filledWeight: 1200, enteredDate: "2026-08-01" },
+    ];
+    const tare = [{ containerNumber: 1, position: 7, tareWeight: 620 }];
+    const bunkerConfig = [{ position: 7, ingredientId: "ing-coffee", ingredientName: "Кофе", targetFillWeight: null }];
+    const { db } = coffeeDb({ refills, tare, bunkerConfig });
+    const svc = new CoffeeService(db);
+    const res = await svc.fillStatusByLocation();
+    assert.equal(res[0]!.status, "unknown");
+  });
+});
+
+describe("CoffeeService: склад ингредиентов (ingestCoffeeStock/coffeeStockLevels)", () => {
+  it("первый ввод по ингредиенту (в складе строки ещё не было) — не расхождение", async () => {
+    const { db, inserts } = coffeeDb({ stock: [], ingredients: [{ id: "ing-1", name: "Кофе", purchasePrice: null }] });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 5000 }]);
+    assert.deepEqual(res.adjustments, []);
+    assert.equal(res.items, 1);
+    const stockInsert = inserts.find((i) => i.table === "coffee_stock");
+    assert.ok(stockInsert);
+    assert.equal((stockInsert!.values as Record<string, unknown>).quantity, 5000);
+  });
+
+  it("недостача при пересчёте оценена по цене ингредиента (сум/г)", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 5000, countedAt: new Date("2026-08-01T00:00:00Z") }];
+    const ingredients = [{ id: "ing-1", name: "Кофе", purchasePrice: "0.5000" }];
+    const { db } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 4800 }], "2026-08-02T00:00:00Z");
+    assert.equal(res.adjustments.length, 1);
+    const a = res.adjustments[0]!;
+    assert.equal(a.ingredientName, "Кофе");
+    assert.equal(a.before, 5000);
+    assert.equal(a.after, 4800);
+    assert.equal(a.delta, -200);
+    assert.equal(a.value, 100); // 200 г × 0.5 сум/г
+    assert.equal(a.noPrice, false);
+  });
+
+  it("без цены у ингредиента — value 0, noPrice=true, но расхождение видно (unknown ≠ zero)", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 1000, countedAt: new Date("2026-08-01T00:00:00Z") }];
+    const ingredients = [{ id: "ing-1", name: "Матча", purchasePrice: null }];
+    const { db } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 900 }], "2026-08-02T00:00:00Z");
+    assert.equal(res.adjustments[0]!.value, 0);
+    assert.equal(res.adjustments[0]!.noPrice, true);
+  });
+
+  it("количество не изменилось — не расхождение, но остаток всё равно перезаписывается", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 1000, countedAt: new Date("2026-08-01T00:00:00Z") }];
+    const ingredients = [{ id: "ing-1", name: "Сахар", purchasePrice: "0.1" }];
+    const { db, inserts } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 1000 }], "2026-08-02T00:00:00Z");
+    assert.deepEqual(res.adjustments, []);
+    assert.ok(inserts.some((i) => i.table === "coffee_stock"));
+  });
+
+  it("опоздавший пересчёт (countedAt старше уже сохранённого) — пропускается целиком", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 1000, countedAt: new Date("2026-08-02T12:00:00Z") }];
+    const ingredients = [{ id: "ing-1", name: "Кофе", purchasePrice: "0.5" }];
+    const { db, inserts } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock(
+      [{ ingredientId: "ing-1", quantity: 1 }],
+      "2026-08-02T09:00:00Z", // раньше уже сохранённого 12:00
+    );
+    assert.deepEqual(res.adjustments, []);
+    assert.equal(inserts.length, 0);
+  });
+
+  it("coffeeStockLevels — отдаёт остаток по всем ингредиентам, отсортированный по имени", async () => {
+    const stock = [
+      { ingredientId: "ing-2", quantity: 300, countedAt: new Date("2026-08-02T00:00:00Z") },
+      { ingredientId: "ing-1", quantity: 5000, countedAt: new Date("2026-08-02T00:00:00Z") },
+    ];
+    const ingredients = [
+      { id: "ing-1", name: "Кофе" },
+      { id: "ing-2", name: "Ароматизатор" },
+    ];
+    const { db } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.coffeeStockLevels();
+    assert.equal(res.length, 2);
+    assert.equal(res[0]!.ingredientName, "Ароматизатор");
+    assert.equal(res[1]!.ingredientName, "Кофе");
+  });
+});
+
+describe("CoffeeService: расписание мойки (washSchedule*)", () => {
+  const DAY = 86_400_000;
+  const locations = [{ id: "loc-1", name: "AH", sortOrder: 0, isActive: true }];
+
+  it("setWashSchedule — без хотя бы одной частоты бросает ошибку", async () => {
+    const { db } = coffeeDb({});
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.setWashSchedule({ locationId: "loc-1", position: 7 }));
+  });
+
+  it("setWashSchedule — новый план (нет существующего) заводит строку", async () => {
+    const { db, inserts } = coffeeDb({ locations, washSchedule: [] });
+    const svc = new CoffeeService(db);
+    const res = await svc.setWashSchedule({ locationId: "loc-1", position: 7, frequencyDays: 7 });
+    assert.equal(res.locationName, "AH");
+    assert.equal(res.frequencyDays, 7);
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0]!.table, "coffee_wash_schedule");
+  });
+
+  it("setWashSchedule — существующий план (та же точка/бункер) обновляется, не дублируется", async () => {
+    const { db, inserts, updates } = coffeeDb({
+      locations,
+      washSchedule: [{ id: "sched-1", locationId: "loc-1", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null }],
+    });
+    const svc = new CoffeeService(db);
+    const res = await svc.setWashSchedule({ locationId: "loc-1", position: 7, frequencyDays: 10 });
+    assert.equal(res.id, "sched-1");
+    assert.equal(inserts.length, 0, "не должен дублировать план");
+    assert.equal(updates.length, 1);
+    assert.equal((updates[0]!.values as Record<string, unknown>).frequencyDays, 10);
+  });
+
+  it("removeWashSchedule — неизвестный id бросает 404, не молчаливый успех", async () => {
+    const { db } = coffeeDb({ washSchedule: [] });
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.removeWashSchedule("missing-id"));
+  });
+
+  it("removeWashSchedule — известный id удаляет и подтверждает", async () => {
+    const { db, deletes } = coffeeDb({ washSchedule: [{ id: "sched-1" }] });
+    const svc = new CoffeeService(db);
+    const res = await svc.removeWashSchedule("sched-1");
+    assert.deepEqual(res, { ok: true });
+    assert.equal(deletes.length, 1);
+    assert.equal(deletes[0]!.table, "coffee_wash_schedule");
+  });
+
+  it("washScheduleStatus — по дням: не мыли ни разу → overdue сразу (не 'ok' по умолчанию)", async () => {
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null }];
+    const { db } = coffeeDb({ locations, washSchedule, washLog: [], sales: [] });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.status, "overdue");
+    assert.equal(row!.lastWashAt, null);
+    assert.equal(row!.nextDueAt, null, "эталонной даты без факта мойки нет");
+  });
+
+  it("washScheduleStatus — по дням: помыли недавно → ok, срок посчитан от последней мойки", async () => {
+    const lastWash = new Date(Date.now() - 2 * DAY);
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null }];
+    const washLog = [{ locationId: "loc-1", position: 7, performedAt: lastWash }];
+    const { db } = coffeeDb({ locations, washSchedule, washLog, sales: [] });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.status, "ok");
+    assert.equal(row!.daysSinceWash, 2);
+    assert.equal(row!.nextDueAt, new Date(lastWash.getTime() + 7 * DAY).toISOString());
+  });
+
+  it("washScheduleStatus — по дням: срок вышел → overdue", async () => {
+    const lastWash = new Date(Date.now() - 10 * DAY);
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null }];
+    const washLog = [{ locationId: "loc-1", position: 7, performedAt: lastWash }];
+    const { db } = coffeeDb({ locations, washSchedule, washLog, sales: [] });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.status, "overdue");
+  });
+
+  it("washScheduleStatus — по чашкам: считает продажи ТОЛЬКО после дня последней мойки", async () => {
+    const lastWash = new Date(Date.now() - 3 * DAY);
+    const lastWashDay = lastWash.toISOString().slice(0, 10);
+    const dayBefore = new Date(lastWash.getTime() - DAY).toISOString().slice(0, 10);
+    const dayAfter = new Date(lastWash.getTime() + DAY).toISOString().slice(0, 10);
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: null, frequencyDays: null, frequencyCups: 50, isActive: true, notes: null }];
+    const washLog = [{ locationId: "loc-1", position: null, performedAt: lastWash }];
+    const sales = [
+      { locationId: "loc-1", loggedDate: dayBefore, quantity: 999 }, // до мойки — не считается
+      { locationId: "loc-1", loggedDate: lastWashDay, quantity: 999 }, // в день мойки — не считается (см. docstring)
+      { locationId: "loc-1", loggedDate: dayAfter, quantity: 30 },
+    ];
+    const { db } = coffeeDb({ locations, washSchedule, washLog, sales });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.cupsSinceWash, 30);
+    assert.equal(row!.status, "ok"); // 30 < 50
+  });
+
+  it("washScheduleStatus — по чашкам: превышен порог → overdue, даже если по дням ещё рано", async () => {
+    const lastWash = new Date(Date.now() - DAY);
+    const dayAfter = new Date(lastWash.getTime() + DAY).toISOString().slice(0, 10);
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: null, frequencyDays: 30, frequencyCups: 50, isActive: true, notes: null }];
+    const washLog = [{ locationId: "loc-1", position: null, performedAt: lastWash }];
+    const sales = [{ locationId: "loc-1", loggedDate: dayAfter, quantity: 60 }];
+    const { db } = coffeeDb({ locations, washSchedule, washLog, sales });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.status, "overdue");
+  });
+
+  it("washSchedules — список планов отдаёт всё, включая выключенные", async () => {
+    const washSchedule = [
+      { id: "s1", locationId: "loc-1", locationName: "AH", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null },
+      { id: "s2", locationId: "loc-1", locationName: "AH", position: null, frequencyDays: 14, frequencyCups: null, isActive: false, notes: null },
+    ];
+    const { db } = coffeeDb({ washSchedule });
+    const svc = new CoffeeService(db);
+    const res = await svc.washSchedules();
+    assert.equal(res.length, 2);
+    assert.ok(res.every((r) => r.locationName === "AH"));
   });
 });

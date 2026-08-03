@@ -132,6 +132,64 @@ export interface CoffeeBunkerIngredient {
   position: number;
   ingredientId: string;
   ingredientName: string;
+  /** Закупочная цена за грамм, сум. null — не заведена, себестоимость расхода не считается. */
+  purchasePrice: number | null;
+  /** Эталонный чистый вес заливки, г. null — не задан, недолив не проверяется. */
+  targetFillWeight: number | null;
+}
+
+export interface CoffeeFillStatusRow {
+  locationId: string;
+  locationName: string;
+  position: number;
+  ingredientId: string | null;
+  ingredientName: string | null;
+  netFillWeight: number | null;
+  targetFillWeight: number | null;
+  status: "ok" | "underfill" | "unknown";
+  fillRatio: number | null;
+}
+
+export interface CoffeeReconcileRow {
+  ingredientId: string;
+  ingredientName: string;
+  actualGrams: number | null;
+  expectedGrams: number | null;
+  costActual: number | null;
+  costExpected: number | null;
+  reconcile: { status: "ok" | "anomaly" | "unknown"; deltaGrams: number | null; deltaRatio: number | null };
+}
+
+export interface CoffeeLocationReconcileGroup {
+  locationId: string;
+  locationName: string;
+  rows: CoffeeReconcileRow[];
+}
+
+export interface CoffeeWashScheduleRow {
+  id: string;
+  locationId: string;
+  locationName: string;
+  position: number | null;
+  frequencyDays: number | null;
+  frequencyCups: number | null;
+  isActive: boolean;
+  notes: string | null;
+}
+
+export interface CoffeeWashScheduleStatusRow extends CoffeeWashScheduleRow {
+  lastWashAt: string | null;
+  daysSinceWash: number | null;
+  cupsSinceWash: number | null;
+  nextDueAt: string | null;
+  status: "ok" | "overdue" | "unknown";
+}
+
+export interface CoffeeStockLevelRow {
+  ingredientId: string;
+  ingredientName: string;
+  quantity: number;
+  countedAt: string;
 }
 
 export interface CoffeeTareCell {
@@ -1108,6 +1166,15 @@ export const core = {
     send<{ ingredientId: string }>("/coffee/bunker-config", "POST", { position, ingredientName }),
   removeCoffeeBunkerIngredient: (position: number, ingredientId: string) =>
     send<{ ok: true }>("/coffee/bunker-config", "DELETE", { position, ingredientId }),
+  setCoffeeIngredientPrice: (ingredientId: string, purchasePrice: number) =>
+    send<{ ok: true }>("/coffee/ingredient-price", "PUT", { ingredientId, purchasePrice }),
+  setCoffeeTargetFillWeight: (position: number, ingredientId: string, targetFillWeight: number) =>
+    send<{ ok: true }>("/coffee/target-fill", "PUT", { position, ingredientId, targetFillWeight }),
+  coffeeFillStatus: () => get<CoffeeFillStatusRow[]>("/coffee/fill-status"),
+  coffeeReconcile: (locationId: string, from: string, to: string) =>
+    get<CoffeeReconcileRow[]>(`/coffee/reconcile/${locationId}?from=${from}&to=${to}`),
+  coffeeReconcileAll: (from: string, to: string) =>
+    get<CoffeeLocationReconcileGroup[]>(`/coffee/reconcile?from=${from}&to=${to}`),
   coffeeTareGrid: () => get<CoffeeTareCell[]>("/coffee/tare"),
   setCoffeeTare: (containerNumber: number, position: number, tareWeight: number) =>
     send<{ ok: true }>("/coffee/tare", "PUT", { containerNumber, position, tareWeight }),
@@ -1129,6 +1196,20 @@ export const core = {
     send<{ id: string }>("/coffee/wash", "POST", input),
   coffeeWashHistory: (locationId?: string, limit = 50) =>
     get<CoffeeWashRow[]>(`/coffee/wash?limit=${limit}${locationId ? `&locationId=${locationId}` : ""}`),
+  coffeeStockLevels: () => get<CoffeeStockLevelRow[]>("/coffee/stock"),
+  ingestCoffeeStock: (input: { countedAt?: string; items: { ingredientId: string; quantity: number }[] }) =>
+    send<{ items: number; adjustments: unknown[] }>("/coffee/stock", "POST", input),
+  coffeeWashScheduleStatus: () => get<CoffeeWashScheduleStatusRow[]>("/coffee/wash-schedule"),
+  coffeeWashSchedules: () => get<CoffeeWashScheduleRow[]>("/coffee/wash-schedule/all"),
+  setCoffeeWashSchedule: (input: {
+    locationId: string;
+    position?: number;
+    frequencyDays?: number;
+    frequencyCups?: number;
+    isActive?: boolean;
+    notes?: string;
+  }) => send<CoffeeWashScheduleRow>("/coffee/wash-schedule", "POST", input),
+  removeCoffeeWashSchedule: (id: string) => send<{ ok: true }>(`/coffee/wash-schedule/${id}`, "DELETE"),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),

@@ -190,6 +190,34 @@
       "when": 1785717447327,
       "tag": "0026_coffee_bunkers",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1785737021956,
+      "tag": "0027_coffee_ingredient_price",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1785737684683,
+      "tag": "0028_coffee_target_fill",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1785738393254,
+      "tag": "0029_coffee_stock",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1785741288028,
+      "tag": "0030_coffee_wash_schedule",
+      "breakpoints": true
     }
   ]
 }

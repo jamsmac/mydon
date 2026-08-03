@@ -1,0 +1,1 @@
+ALTER TABLE "coffee_bunker_config" ADD COLUMN "target_fill_weight" integer;

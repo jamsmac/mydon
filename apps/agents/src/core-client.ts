@@ -309,4 +309,47 @@ export class AgentsCoreClient {
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }
+
+  // ── Кофе-бункеры: проактивный мониторинг (порт monitor-stock донора) ──
+  // Чистое чтение — коффе-сервис уже считает недолив и расхождение расхода
+  // (CC «Сверка», задачи 47/49); монитор здесь только эмитит события по
+  // порогам, решение «немедленно или в брифинг» остаётся за правилами (rules.ts).
+
+  /** Недолив по последней заливке каждого (точка, бункер) против эталона. */
+  coffeeFillStatus(): Promise<CoffeeFillStatusRow[]> {
+    return this.request("/coffee/fill-status");
+  }
+
+  /** Сверка факт/ожидание расхода ингредиентов по всем точкам за период. */
+  coffeeReconcileAll(from: string, to: string): Promise<CoffeeReconcileGroup[]> {
+    return this.request(`/coffee/reconcile?from=${from}&to=${to}`);
+  }
+}
+
+export interface CoffeeFillStatusRow {
+  locationId: string;
+  locationName: string;
+  position: number;
+  ingredientId: string | null;
+  ingredientName: string | null;
+  netFillWeight: number | null;
+  targetFillWeight: number | null;
+  status: "ok" | "underfill" | "unknown";
+  fillRatio: number | null;
+}
+
+export interface CoffeeReconcileRow {
+  ingredientId: string;
+  ingredientName: string;
+  actualGrams: number | null;
+  expectedGrams: number | null;
+  costActual: number | null;
+  costExpected: number | null;
+  reconcile: { status: "ok" | "anomaly" | "unknown"; deltaGrams: number | null; deltaRatio: number | null };
+}
+
+export interface CoffeeReconcileGroup {
+  locationId: string;
+  locationName: string;
+  rows: CoffeeReconcileRow[];
 }

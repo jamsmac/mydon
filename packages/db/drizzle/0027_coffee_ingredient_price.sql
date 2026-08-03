@@ -1,0 +1,1 @@
+ALTER TABLE "coffee_ingredient" ADD COLUMN "purchase_price" numeric(10, 4);

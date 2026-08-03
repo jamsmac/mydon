@@ -4,16 +4,27 @@ import { Fragment, useMemo, useState, useTransition } from "react";
 import type {
   CoffeeBunkerIngredient,
   CoffeeConsumableRow,
+  CoffeeFillStatusRow,
   CoffeeLocation,
+  CoffeeLocationReconcileGroup,
   CoffeeLocationSummaryRow,
   CoffeeRefillRow,
+  CoffeeStockLevelRow,
   CoffeeTareCell,
+  CoffeeWashScheduleRow,
+  CoffeeWashScheduleStatusRow,
 } from "../../lib/core";
 import {
   addBunkerIngredient,
+  createCoffeeAlertTask,
+  ingestCoffeeStock,
   recordCoffeeConsumable,
   removeBunkerIngredient,
+  removeCoffeeWashSchedule,
+  setCoffeeIngredientPrice,
   setCoffeeTare,
+  setCoffeeTargetFillWeight,
+  setCoffeeWashSchedule,
   submitCoffeeRefill,
 } from "./actions";
 
@@ -30,7 +41,7 @@ import {
 const POSITIONS = [1, 2, 3, 4, 5, 6, 7, 8];
 const CONTAINERS = Array.from({ length: 27 }, (_, i) => i + 1);
 
-type Tab = "entry" | "table" | "settings";
+type Tab = "entry" | "table" | "reconcile" | "settings";
 
 function todayIso(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
@@ -43,20 +54,32 @@ export function CoffeeClient(props: {
   recentRefills: CoffeeRefillRow[];
   summary: CoffeeLocationSummaryRow[];
   consumables: CoffeeConsumableRow[];
+  stockLevels: CoffeeStockLevelRow[];
+  fillStatus: CoffeeFillStatusRow[];
+  reconcile: CoffeeLocationReconcileGroup[];
+  reconcileFrom: string;
+  reconcileTo: string;
+  washScheduleStatus: CoffeeWashScheduleStatusRow[];
+  washSchedules: CoffeeWashScheduleRow[];
+  /** Первый активный человек VendHub — кому уходит задача из «Сверки». */
+  defaultOwnerRef: string | null;
 }) {
   const [tab, setTab] = useState<Tab>("entry");
+  const alertCount =
+    props.fillStatus.filter((r) => r.status === "underfill").length +
+    props.reconcile.reduce((n, g) => n + g.rows.filter((r) => r.reconcile.status === "anomaly").length, 0) +
+    props.washScheduleStatus.filter((r) => r.status === "overdue").length;
   return (
     <>
-      <div className="page-head">
-        <h1>Кофе-бункеры</h1>
-        <p>Ежедневная заливка, сводка по точкам, настройки ингредиентов и тары.</p>
-      </div>
       <div className="coffee-tabs">
         <button className={tab === "entry" ? "on" : ""} onClick={() => setTab("entry")}>
           Ввод данных
         </button>
         <button className={tab === "table" ? "on" : ""} onClick={() => setTab("table")}>
           Таблица
+        </button>
+        <button className={tab === "reconcile" ? "on" : ""} onClick={() => setTab("reconcile")}>
+          Сверка{alertCount > 0 ? ` (${alertCount})` : ""}
         </button>
         <button className={tab === "settings" ? "on" : ""} onClick={() => setTab("settings")}>
           Настройки
@@ -66,7 +89,25 @@ export function CoffeeClient(props: {
         <EntryTab locations={props.locations} bunkerConfig={props.bunkerConfig} recentRefills={props.recentRefills} />
       )}
       {tab === "table" && <TableTab summary={props.summary} consumables={props.consumables} locations={props.locations} />}
-      {tab === "settings" && <SettingsTab bunkerConfig={props.bunkerConfig} tareGrid={props.tareGrid} />}
+      {tab === "reconcile" && (
+        <ReconcileTab
+          fillStatus={props.fillStatus}
+          reconcile={props.reconcile}
+          from={props.reconcileFrom}
+          to={props.reconcileTo}
+          washScheduleStatus={props.washScheduleStatus}
+          defaultOwnerRef={props.defaultOwnerRef}
+        />
+      )}
+      {tab === "settings" && (
+        <SettingsTab
+          bunkerConfig={props.bunkerConfig}
+          tareGrid={props.tareGrid}
+          stockLevels={props.stockLevels}
+          locations={props.locations}
+          washSchedules={props.washSchedules}
+        />
+      )}
     </>
   );
 }
@@ -323,9 +364,221 @@ function ConsumablesTable({ consumables, locations }: { consumables: CoffeeConsu
   );
 }
 
+// ── Вкладка: Сверка (алерты недолива и расхождения факт/ожидание) ──────────
+
+const RECONCILE_LABEL: Record<"ok" | "anomaly" | "unknown", string> = {
+  ok: "Сходится",
+  anomaly: "Расхождение",
+  unknown: "Нет данных",
+};
+
+const FILL_LABEL: Record<"ok" | "underfill" | "unknown", string> = {
+  ok: "Норма",
+  underfill: "Недолив",
+  unknown: "Нет эталона",
+};
+
+function StatusBadge({ status, label }: { status: "ok" | "anomaly" | "unknown" | "underfill" | "overdue"; label: string }) {
+  const cls = status === "ok" ? "ok" : status === "unknown" ? "" : "bad";
+  return <span className={`pill ${cls}`}>{label}</span>;
+}
+
+const WASH_LABEL: Record<"ok" | "overdue" | "unknown", string> = {
+  ok: "В графике",
+  overdue: "Пора мыть",
+  unknown: "Нет данных",
+};
+
+/** Кнопка «→ задача»: сигнал сверки превращается в задачу VendHub (срок завтра, high). */
+function AlertTaskButton({ title, description, ownerRef }: { title: string; description: string; ownerRef: string | null }) {
+  const [pending, start] = useTransition();
+  const [done, setDone] = useState(false);
+  if (done) return <span className="muted">задача поставлена</span>;
+  return (
+    <button
+      className="tag-add"
+      disabled={pending}
+      title="Поставить задачу по этому сигналу (VendHub, срок завтра)"
+      onClick={() =>
+        start(async () => {
+          const res = await createCoffeeAlertTask({ title, description, ownerRef });
+          if (res.ok) setDone(true);
+        })
+      }
+    >
+      → задача
+    </button>
+  );
+}
+
+function ReconcileTab({
+  fillStatus,
+  reconcile,
+  from,
+  to,
+  washScheduleStatus,
+  defaultOwnerRef,
+}: {
+  fillStatus: CoffeeFillStatusRow[];
+  reconcile: CoffeeLocationReconcileGroup[];
+  from: string;
+  to: string;
+  washScheduleStatus: CoffeeWashScheduleStatusRow[];
+  defaultOwnerRef: string | null;
+}) {
+  const underfills = fillStatus.filter((r) => r.status === "underfill");
+  const anomalyGroups = reconcile
+    .map((g) => ({ ...g, rows: g.rows.filter((r) => r.reconcile.status === "anomaly") }))
+    .filter((g) => g.rows.length > 0);
+  const overdueWash = washScheduleStatus.filter((r) => r.status === "overdue");
+
+  return (
+    <>
+      <div className="section-title">Недолив заливки (последняя заливка против эталона)</div>
+      {underfills.length === 0 ? (
+        <p className="muted">Недолива не обнаружено.</p>
+      ) : (
+        <table className="coffee-table">
+          <thead>
+            <tr>
+              <th>Точка</th>
+              <th>Бункер</th>
+              <th>Ингредиент</th>
+              <th>Чистый вес, г</th>
+              <th>Эталон, г</th>
+              <th>Статус</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {underfills.map((r) => (
+              <tr key={`${r.locationId}:${r.position}`}>
+                <td>{r.locationName}</td>
+                <td className="num-cell">{r.position}</td>
+                <td>{r.ingredientName ?? "—"}</td>
+                <td className="num-cell">{r.netFillWeight ?? "—"}</td>
+                <td className="num-cell">{r.targetFillWeight ?? "—"}</td>
+                <td>
+                  <StatusBadge status={r.status} label={FILL_LABEL[r.status]} />
+                </td>
+                <td>
+                  <AlertTaskButton
+                    title={`Долить бункер ${r.position} (${r.ingredientName ?? "?"}) — ${r.locationName}`}
+                    description={`Недолив: чистый вес ${r.netFillWeight ?? "?"} г при эталоне ${r.targetFillWeight ?? "?"} г. Сигнал вкладки «Сверка» кофе-бункеров.`}
+                    ownerRef={defaultOwnerRef}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="section-title">
+        Расхождение факт/ожидание за период {from} — {to}
+      </div>
+      {anomalyGroups.length === 0 ? (
+        <p className="muted">Расхождений сверх порога не найдено.</p>
+      ) : (
+        anomalyGroups.map((g) => (
+          <Fragment key={g.locationId}>
+            <div className="sub" style={{ marginTop: 8 }}>
+              {g.locationName}
+            </div>
+            <table className="coffee-table">
+              <thead>
+                <tr>
+                  <th>Ингредиент</th>
+                  <th>Факт, г</th>
+                  <th>Ожидание, г</th>
+                  <th>Себестоимость факта</th>
+                  <th>Себестоимость ожидания</th>
+                  <th>Статус</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {g.rows.map((r) => (
+                  <tr key={r.ingredientId}>
+                    <td>{r.ingredientName}</td>
+                    <td className="num-cell">{r.actualGrams ?? "—"}</td>
+                    <td className="num-cell">{r.expectedGrams ?? "—"}</td>
+                    <td className="num-cell">{r.costActual ?? "—"}</td>
+                    <td className="num-cell">{r.costExpected ?? "—"}</td>
+                    <td>
+                      <StatusBadge status={r.reconcile.status} label={RECONCILE_LABEL[r.reconcile.status]} />
+                    </td>
+                    <td>
+                      <AlertTaskButton
+                        title={`Разобраться с расходом «${r.ingredientName}» — ${g.locationName}`}
+                        description={`Расхождение факт/ожидание за ${from} — ${to}: факт ${r.actualGrams ?? "?"} г против ожидания ${r.expectedGrams ?? "?"} г. Сигнал вкладки «Сверка» кофе-бункеров.`}
+                        ownerRef={defaultOwnerRef}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Fragment>
+        ))
+      )}
+
+      <div className="section-title">Мойка/обслуживание — просрочено</div>
+      {overdueWash.length === 0 ? (
+        <p className="muted">Просроченных нет.</p>
+      ) : (
+        <table className="coffee-table">
+          <thead>
+            <tr>
+              <th>Точка</th>
+              <th>Бункер</th>
+              <th>Дней с мойки</th>
+              <th>Чашек с мойки</th>
+              <th>Статус</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {overdueWash.map((r) => (
+              <tr key={r.id}>
+                <td>{r.locationName}</td>
+                <td className="num-cell">{r.position ?? "вся точка"}</td>
+                <td className="num-cell">{r.daysSinceWash ?? "—"}</td>
+                <td className="num-cell">{r.cupsSinceWash ?? "—"}</td>
+                <td>
+                  <StatusBadge status={r.status} label={WASH_LABEL[r.status]} />
+                </td>
+                <td>
+                  <AlertTaskButton
+                    title={`Помыть ${r.position != null ? `бункер ${r.position}` : "кофемашину"} — ${r.locationName}`}
+                    description={`Мойка просрочена: ${r.daysSinceWash != null ? `${r.daysSinceWash} дн. с последней` : "ещё ни разу не мыли"}${r.cupsSinceWash != null ? `, чашек с мойки ${r.cupsSinceWash}` : ""}. Сигнал вкладки «Сверка» кофе-бункеров.`}
+                    ownerRef={defaultOwnerRef}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+}
+
 // ── Вкладка 3: Настройки ──────────────────────────────────────────────────
 
-function SettingsTab({ bunkerConfig, tareGrid }: { bunkerConfig: CoffeeBunkerIngredient[]; tareGrid: CoffeeTareCell[] }) {
+function SettingsTab({
+  bunkerConfig,
+  tareGrid,
+  stockLevels,
+  locations,
+  washSchedules,
+}: {
+  bunkerConfig: CoffeeBunkerIngredient[];
+  tareGrid: CoffeeTareCell[];
+  stockLevels: CoffeeStockLevelRow[];
+  locations: CoffeeLocation[];
+  washSchedules: CoffeeWashScheduleRow[];
+}) {
   return (
     <>
       <div className="section-title">Ингредиенты по бункерам</div>
@@ -335,7 +588,168 @@ function SettingsTab({ bunkerConfig, tareGrid }: { bunkerConfig: CoffeeBunkerIng
 
       <div className="section-title">Веса бункеров (тара, г)</div>
       <TareGridEditor tareGrid={tareGrid} />
+
+      <div className="section-title">Склад ингредиентов (остаток, г)</div>
+      <StockSection bunkerConfig={bunkerConfig} stockLevels={stockLevels} />
+
+      <div className="section-title">Расписание мойки/обслуживания</div>
+      <WashScheduleSection locations={locations} schedules={washSchedules} />
     </>
+  );
+}
+
+function WashScheduleSection({ locations, schedules }: { locations: CoffeeLocation[]; schedules: CoffeeWashScheduleRow[] }) {
+  const [pending, start] = useTransition();
+  const [adding, setAdding] = useState(false);
+  const [locationId, setLocationId] = useState("");
+  const [position, setPosition] = useState("");
+  const [frequencyDays, setFrequencyDays] = useState("");
+  const [frequencyCups, setFrequencyCups] = useState("");
+
+  return (
+    <>
+      <table className="coffee-table">
+        <thead>
+          <tr>
+            <th>Точка</th>
+            <th>Бункер</th>
+            <th>Частота, дней</th>
+            <th>Частота, чашек</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {schedules.length === 0 && (
+            <tr>
+              <td colSpan={5} className="muted">
+                Планов пока нет.
+              </td>
+            </tr>
+          )}
+          {schedules.map((s) => (
+            <tr key={s.id}>
+              <td>{s.locationName}</td>
+              <td className="num-cell">{s.position ?? "вся точка"}</td>
+              <td className="num-cell">{s.frequencyDays ?? "—"}</td>
+              <td className="num-cell">{s.frequencyCups ?? "—"}</td>
+              <td>
+                <button
+                  className="tag-x"
+                  disabled={pending}
+                  onClick={() =>
+                    start(async () => {
+                      await removeCoffeeWashSchedule(s.id);
+                    })
+                  }
+                >
+                  ×
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {adding ? (
+        <div className="coffee-form" style={{ marginTop: 8 }}>
+          <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+            <option value="">Точка…</option>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name}
+              </option>
+            ))}
+          </select>
+          <input type="number" min={1} max={8} placeholder="Бункер (пусто — вся точка)" value={position} onChange={(e) => setPosition(e.target.value)} />
+          <input type="number" min={1} placeholder="Частота, дней" value={frequencyDays} onChange={(e) => setFrequencyDays(e.target.value)} />
+          <input type="number" min={1} placeholder="Частота, чашек" value={frequencyCups} onChange={(e) => setFrequencyCups(e.target.value)} />
+          <button
+            disabled={pending || !locationId || (!frequencyDays && !frequencyCups)}
+            onClick={() =>
+              start(async () => {
+                await setCoffeeWashSchedule({
+                  locationId,
+                  ...(position ? { position: Number(position) } : {}),
+                  ...(frequencyDays ? { frequencyDays: Number(frequencyDays) } : {}),
+                  ...(frequencyCups ? { frequencyCups: Number(frequencyCups) } : {}),
+                });
+                setAdding(false);
+                setLocationId("");
+                setPosition("");
+                setFrequencyDays("");
+                setFrequencyCups("");
+              })
+            }
+          >
+            Сохранить
+          </button>
+          <button onClick={() => setAdding(false)}>Отмена</button>
+        </div>
+      ) : (
+        <button className="tag-add" onClick={() => setAdding(true)}>
+          + Добавить план
+        </button>
+      )}
+    </>
+  );
+}
+
+function StockSection({
+  bunkerConfig,
+  stockLevels,
+}: {
+  bunkerConfig: CoffeeBunkerIngredient[];
+  stockLevels: CoffeeStockLevelRow[];
+}) {
+  const [pending, start] = useTransition();
+  const stockById = new Map(stockLevels.map((s) => [s.ingredientId, s]));
+  const ingredients = new Map<string, string>();
+  for (const c of bunkerConfig) ingredients.set(c.ingredientId, c.ingredientName);
+  for (const s of stockLevels) ingredients.set(s.ingredientId, s.ingredientName);
+  const rows = [...ingredients.entries()].sort((a, b) => a[1].localeCompare(b[1], "ru"));
+
+  if (rows.length === 0) return <p className="muted">Пока нет ингредиентов — заведите их в бункерах выше.</p>;
+
+  return (
+    <table className="coffee-table">
+      <thead>
+        <tr>
+          <th>Ингредиент</th>
+          <th>Остаток, г</th>
+          <th>Пересчитано</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(([ingredientId, ingredientName]) => {
+          const s = stockById.get(ingredientId);
+          return (
+            <tr key={ingredientId}>
+              <td>{ingredientName}</td>
+              <td className="num-cell">
+                <input
+                  type="number"
+                  min={0}
+                  className="cell-input"
+                  disabled={pending}
+                  defaultValue={s?.quantity ?? ""}
+                  placeholder="—"
+                  title="Пересчёт остатка склада, г — расхождение с прошлым уходит в лог"
+                  onBlur={(e) => {
+                    const v = e.target.value.trim();
+                    if (v === "") return;
+                    const quantity = Number(v);
+                    if (!Number.isFinite(quantity) || quantity < 0) return;
+                    start(async () => {
+                      await ingestCoffeeStock(ingredientId, Math.round(quantity));
+                    });
+                  }}
+                />
+              </td>
+              <td className="sub">{s ? new Date(s.countedAt).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent" }) : "—"}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 
@@ -352,6 +766,43 @@ function BunkerIngredients({ position, items }: { position: number; items: Coffe
         {items.map((it) => (
           <span className="tag" key={it.ingredientId}>
             {it.ingredientName}
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              className="tag-price"
+              disabled={pending}
+              defaultValue={it.purchasePrice ?? ""}
+              placeholder="цена/г"
+              title="Закупочная цена за грамм, сум — для себестоимости расхода"
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v === "") return;
+                const price = Number(v);
+                if (!Number.isFinite(price) || price < 0) return;
+                start(async () => {
+                  await setCoffeeIngredientPrice(it.ingredientId, price);
+                });
+              }}
+            />
+            <input
+              type="number"
+              min={0}
+              className="tag-price"
+              disabled={pending}
+              defaultValue={it.targetFillWeight ?? ""}
+              placeholder="эталон г"
+              title="Эталонный чистый вес заливки, г — сигнал недолива"
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v === "") return;
+                const target = Number(v);
+                if (!Number.isFinite(target) || target < 0) return;
+                start(async () => {
+                  await setCoffeeTargetFillWeight(position, it.ingredientId, target);
+                });
+              }}
+            />
             <button
               className="tag-x"
               disabled={pending}

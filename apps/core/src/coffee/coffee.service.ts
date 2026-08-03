@@ -1,5 +1,5 @@
-import { Inject, Injectable } from "@nestjs/common";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
@@ -9,12 +9,16 @@ import {
   coffeeProduct,
   coffeeRefill,
   coffeeSale,
+  coffeeStock,
   coffeeWashLog,
+  coffeeWashSchedule,
 } from "@mydon/db";
 import {
   buildLocationSummary,
   consumedSince,
   consumptionReport,
+  costOf,
+  fillStatus,
   netWeight,
   reconcileConsumption,
   type LatestRefillRow,
@@ -40,6 +44,61 @@ export interface BunkerIngredientRow {
   position: number;
   ingredientId: string;
   ingredientName: string;
+  /** Закупочная цена за грамм, сум. null — не заведена, себестоимость расхода не считается. */
+  purchasePrice: number | null;
+  /** Эталонный чистый вес заливки, г. null — не задан, недолив не проверяется. */
+  targetFillWeight: number | null;
+}
+
+export interface FillStatusRow {
+  locationId: string;
+  locationName: string;
+  position: number;
+  ingredientId: string | null;
+  ingredientName: string | null;
+  netFillWeight: number | null;
+  targetFillWeight: number | null;
+  status: "ok" | "underfill" | "unknown";
+  fillRatio: number | null;
+}
+
+export interface ReconcileRow {
+  ingredientId: string;
+  ingredientName: string;
+  actualGrams: number | null;
+  expectedGrams: number | null;
+  costActual: number | null;
+  costExpected: number | null;
+  reconcile: ReconcileResult;
+}
+
+export interface LocationReconcileGroup {
+  locationId: string;
+  locationName: string;
+  rows: ReconcileRow[];
+}
+
+interface ReconcileRefillRow {
+  position: number;
+  containerNumber: number | null;
+  filledWeight: number;
+  measuredBefore: number | null;
+  ingredientId: string | null;
+  enteredDate: string;
+  locationId: string;
+}
+
+interface ReconcileSaleRow {
+  productId: string;
+  quantity: number;
+  loggedDate: string;
+  locationId: string;
+}
+
+interface ReconcileIngredientRow {
+  id: string;
+  name: string;
+  purchasePrice: string | null;
 }
 
 export interface SubmitRefillInput {
@@ -78,12 +137,64 @@ export interface ConsumableInput {
   createdBy?: string;
 }
 
+export interface IngestCoffeeStockItem {
+  ingredientId: string;
+  quantity: number;
+}
+
+export interface CoffeeStockAdjustment {
+  ingredientId: string;
+  ingredientName: string;
+  before: number;
+  after: number;
+  delta: number;
+  value: number;
+  noPrice: boolean;
+}
+
+export interface CoffeeStockLevelRow {
+  ingredientId: string;
+  ingredientName: string;
+  quantity: number;
+  countedAt: string;
+}
+
 export interface RecordWashInput {
   locationId: string;
   position?: number;
   kind?: "wash" | "clean" | "replace" | "service";
   note?: string;
   performedBy?: string;
+}
+
+export interface SetWashScheduleInput {
+  locationId: string;
+  /** null/undefined — вся точка целиком. */
+  position?: number | null;
+  frequencyDays?: number | null;
+  frequencyCups?: number | null;
+  isActive?: boolean;
+  notes?: string | null;
+}
+
+export interface WashScheduleRow {
+  id: string;
+  locationId: string;
+  locationName: string;
+  position: number | null;
+  frequencyDays: number | null;
+  frequencyCups: number | null;
+  isActive: boolean;
+  notes: string | null;
+}
+
+export interface WashScheduleStatusRow extends WashScheduleRow {
+  lastWashAt: string | null;
+  daysSinceWash: number | null;
+  cupsSinceWash: number | null;
+  /** Только для частоты по дням — проекция даты. По чашкам срок не календарный. */
+  nextDueAt: string | null;
+  status: "ok" | "overdue" | "unknown";
 }
 
 export interface RecordSaleInput {
@@ -114,11 +225,28 @@ export class CoffeeService {
         position: coffeeBunkerConfig.position,
         ingredientId: coffeeIngredient.id,
         ingredientName: coffeeIngredient.name,
+        purchasePrice: coffeeIngredient.purchasePrice,
+        targetFillWeight: coffeeBunkerConfig.targetFillWeight,
       })
       .from(coffeeBunkerConfig)
       .innerJoin(coffeeIngredient, eq(coffeeBunkerConfig.ingredientId, coffeeIngredient.id))
       .orderBy(asc(coffeeBunkerConfig.position));
-    return rows;
+    return rows.map((r) => ({ ...r, purchasePrice: r.purchasePrice != null ? Number(r.purchasePrice) : null }));
+  }
+
+  /** Проставить/поправить закупочную цену ингредиента (сум за грамм) — для себестоимости расхода. */
+  async setIngredientPrice(ingredientId: string, purchasePrice: number): Promise<{ ok: true }> {
+    await this.db.update(coffeeIngredient).set({ purchasePrice: purchasePrice.toString() }).where(eq(coffeeIngredient.id, ingredientId));
+    return { ok: true };
+  }
+
+  /** Проставить/поправить эталонный чистый вес заливки (недолив-сигнал) для (позиция, ингредиент). */
+  async setTargetFillWeight(position: number, ingredientId: string, targetFillWeight: number): Promise<{ ok: true }> {
+    await this.db
+      .update(coffeeBunkerConfig)
+      .set({ targetFillWeight })
+      .where(and(eq(coffeeBunkerConfig.position, position), eq(coffeeBunkerConfig.ingredientId, ingredientId)));
+    return { ok: true };
   }
 
   /** Добавить ингредиент в позицию («+ Добавить» в Настройках). Заводит ингредиент, если его ещё нет. */
@@ -264,6 +392,56 @@ export class CoffeeService {
     );
   }
 
+  /**
+   * Недолив по последней заливке на (точка, позиция): сравнивает чистый вес
+   * (`netWeight()`) с эталоном для (позиция, ингредиент этой заливки) —
+   * `coffee_bunker_config.targetFillWeight`. Нет эталона/тары/ингредиента у
+   * заливки — `status: "unknown"`, а не молчаливый `ok` (см. `fillStatus()`).
+   */
+  async fillStatusByLocation(): Promise<FillStatusRow[]> {
+    const [rows, tareByKey, config] = await Promise.all([
+      this.db
+        .select({
+          locationId: coffeeRefill.locationId,
+          locationName: coffeeLocation.name,
+          position: coffeeRefill.position,
+          ingredientId: coffeeRefill.ingredientId,
+          containerNumber: coffeeRefill.containerNumber,
+          filledWeight: coffeeRefill.filledWeight,
+          enteredDate: coffeeRefill.enteredDate,
+        })
+        .from(coffeeRefill)
+        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .orderBy(asc(coffeeRefill.enteredDate)),
+      this.tareByKey(),
+      this.bunkerConfig(),
+    ]);
+
+    // Последняя заливка на (точка, позиция) — тот же приём, что в locationSummary().
+    const latestByKey = new Map<string, (typeof rows)[number]>();
+    for (const r of rows) latestByKey.set(`${r.locationId}:${r.position}`, r);
+
+    const targetByKey = new Map(config.map((c) => [`${c.position}:${c.ingredientId}`, c.targetFillWeight]));
+    const nameById = new Map(config.map((c) => [c.ingredientId, c.ingredientName]));
+
+    return [...latestByKey.values()].map((r) => {
+      const netFillWeight = netWeight(r.filledWeight, tareByKey.get(`${r.containerNumber}:${r.position}`) ?? null);
+      const targetFillWeight = r.ingredientId ? (targetByKey.get(`${r.position}:${r.ingredientId}`) ?? null) : null;
+      const fs = fillStatus(netFillWeight, targetFillWeight);
+      return {
+        locationId: r.locationId,
+        locationName: r.locationName,
+        position: r.position,
+        ingredientId: r.ingredientId,
+        ingredientName: r.ingredientId ? (nameById.get(r.ingredientId) ?? null) : null,
+        netFillWeight,
+        targetFillWeight,
+        status: fs.status,
+        fillRatio: fs.fillRatio,
+      };
+    });
+  }
+
   // ── Расходники: вода/стаканчики/крышки ──────────────────────────────────
 
   /** Занести/поправить расход за день по точке (upsert по (точка, дата)). */
@@ -342,6 +520,131 @@ export class CoffeeService {
     return rows.map((r) => ({ ...r, performedAt: r.performedAt.toISOString() }));
   }
 
+  // ── Расписание мойки (план обслуживания, порт WashingSchedule донора) ──
+
+  /** Последняя фактическая мойка на (точка, бункер|целиком) — из журнала coffeeWashLog. */
+  private async lastWashByKey(): Promise<Map<string, Date>> {
+    const rows = await this.db
+      .select({ locationId: coffeeWashLog.locationId, position: coffeeWashLog.position, performedAt: coffeeWashLog.performedAt })
+      .from(coffeeWashLog)
+      .orderBy(asc(coffeeWashLog.performedAt));
+    const out = new Map<string, Date>();
+    for (const r of rows) out.set(`${r.locationId}:${r.position ?? "all"}`, r.performedAt);
+    return out;
+  }
+
+  /** Планы обслуживания со статусом «пора/не пора» — Настройки и брифинг читают отсюда. */
+  async washScheduleStatus(): Promise<WashScheduleStatusRow[]> {
+    const [schedules, lastWashByKey, sales, locations] = await Promise.all([
+      this.db.select().from(coffeeWashSchedule).where(eq(coffeeWashSchedule.isActive, true)),
+      this.lastWashByKey(),
+      this.db.select({ locationId: coffeeSale.locationId, loggedDate: coffeeSale.loggedDate, quantity: coffeeSale.quantity }).from(coffeeSale),
+      this.locations(),
+    ]);
+    const nameByLocation = new Map(locations.map((l) => [l.id, l.name]));
+    const now = Date.now();
+
+    return schedules.map((s) => {
+      const key = `${s.locationId}:${s.position ?? "all"}`;
+      const lastWashAt = lastWashByKey.get(key) ?? null;
+      const daysSinceWash = lastWashAt ? Math.floor((now - lastWashAt.getTime()) / 86_400_000) : null;
+
+      // Чашки считаются по всей точке (не по конкретному бункеру — рецепты
+      // используют несколько бункеров сразу, точной атрибуции нет), строго
+      // после дня последней мойки. Не мыли ни разу → считаем весь период.
+      let cupsSinceWash: number | null = null;
+      if (s.frequencyCups != null) {
+        const sinceDate = lastWashAt ? lastWashAt.toISOString().slice(0, 10) : null;
+        cupsSinceWash = sales
+          .filter((r) => r.locationId === s.locationId && (sinceDate === null || r.loggedDate > sinceDate))
+          .reduce((sum, r) => sum + r.quantity, 0);
+      }
+
+      const dueByDays = s.frequencyDays != null && (lastWashAt === null || (daysSinceWash ?? 0) >= s.frequencyDays);
+      const dueByCups = s.frequencyCups != null && cupsSinceWash != null && cupsSinceWash >= s.frequencyCups;
+      const status: WashScheduleStatusRow["status"] =
+        s.frequencyDays == null && s.frequencyCups == null ? "unknown" : dueByDays || dueByCups ? "overdue" : "ok";
+      const nextDueAt =
+        s.frequencyDays != null && lastWashAt != null
+          ? new Date(lastWashAt.getTime() + s.frequencyDays * 86_400_000).toISOString()
+          : null;
+
+      return {
+        id: s.id,
+        locationId: s.locationId,
+        locationName: nameByLocation.get(s.locationId) ?? s.locationId,
+        position: s.position,
+        frequencyDays: s.frequencyDays,
+        frequencyCups: s.frequencyCups,
+        isActive: s.isActive,
+        notes: s.notes,
+        lastWashAt: lastWashAt ? lastWashAt.toISOString() : null,
+        daysSinceWash,
+        cupsSinceWash,
+        nextDueAt,
+        status,
+      };
+    });
+  }
+
+  /** Список планов (все, включая выключенные) — для управления в Настройках. */
+  async washSchedules(): Promise<WashScheduleRow[]> {
+    const rows = await this.db
+      .select({
+        id: coffeeWashSchedule.id,
+        locationId: coffeeWashSchedule.locationId,
+        locationName: coffeeLocation.name,
+        position: coffeeWashSchedule.position,
+        frequencyDays: coffeeWashSchedule.frequencyDays,
+        frequencyCups: coffeeWashSchedule.frequencyCups,
+        isActive: coffeeWashSchedule.isActive,
+        notes: coffeeWashSchedule.notes,
+      })
+      .from(coffeeWashSchedule)
+      .innerJoin(coffeeLocation, eq(coffeeWashSchedule.locationId, coffeeLocation.id))
+      .orderBy(asc(coffeeLocation.name), asc(coffeeWashSchedule.position));
+    return rows;
+  }
+
+  /** Завести/поправить план (точка × бункер|целиком) — upsert по частичным уникальным индексам схемы. */
+  async setWashSchedule(input: SetWashScheduleInput): Promise<WashScheduleRow> {
+    if (input.frequencyDays == null && input.frequencyCups == null) {
+      throw new BadRequestException("Нужна хотя бы одна частота — по дням или по проданным чашкам");
+    }
+    const position = input.position ?? null;
+    const cond = and(
+      eq(coffeeWashSchedule.locationId, input.locationId),
+      position === null ? isNull(coffeeWashSchedule.position) : eq(coffeeWashSchedule.position, position),
+    );
+    const existing = await this.db.select({ id: coffeeWashSchedule.id }).from(coffeeWashSchedule).where(cond);
+    const values = {
+      locationId: input.locationId,
+      position,
+      frequencyDays: input.frequencyDays ?? null,
+      frequencyCups: input.frequencyCups ?? null,
+      isActive: input.isActive ?? true,
+      notes: input.notes ?? null,
+    };
+
+    const id = existing[0]
+      ? (await (async () => {
+          await this.db.update(coffeeWashSchedule).set(values).where(eq(coffeeWashSchedule.id, existing[0]!.id));
+          return existing[0]!.id;
+        })())
+      : (await this.db.insert(coffeeWashSchedule).values(values).returning({ id: coffeeWashSchedule.id }))[0]!.id;
+
+    const [loc] = await this.db.select({ name: coffeeLocation.name }).from(coffeeLocation).where(eq(coffeeLocation.id, input.locationId));
+    return { id, locationName: loc?.name ?? input.locationId, ...values };
+  }
+
+  /** Удалить план обслуживания. */
+  async removeWashSchedule(id: string): Promise<{ ok: true }> {
+    const existing = await this.db.select({ id: coffeeWashSchedule.id }).from(coffeeWashSchedule).where(eq(coffeeWashSchedule.id, id));
+    if (existing.length === 0) throw new NotFoundException(`План обслуживания ${id} не найден`);
+    await this.db.delete(coffeeWashSchedule).where(eq(coffeeWashSchedule.id, id));
+    return { ok: true };
+  }
+
   // ── Товары/рецепты и продажи (для сверки факт/ожидание) ─────────────────
 
   async products(): Promise<{ id: string; name: string; recipe: RecipeLine[] }[]> {
@@ -381,12 +684,12 @@ export class CoffeeService {
    * точки за период. Возвращает только то, что реально удалось посчитать —
    * без пары «продажи+рецепт» и «две заливки подряд одного ингредиента» по
    * позиции сверка для неё не строится (status: "unknown"), а не подделывается.
+   *
+   * Себестоимость (`costActual`/`costExpected`) — грамм × `coffee_ingredient.
+   * purchasePrice` (сум за грамм). Цена не заведена — `null`, а не 0: непосчитанную
+   * себестоимость нельзя выдавать за нулевую (тот же принцип, что у `recipeCost()`).
    */
-  async reconcileLocation(
-    locationId: string,
-    fromDate: string,
-    toDate: string,
-  ): Promise<{ ingredientId: string; ingredientName: string; actualGrams: number | null; expectedGrams: number | null; reconcile: ReconcileResult }[]> {
+  async reconcileLocation(locationId: string, fromDate: string, toDate: string): Promise<ReconcileRow[]> {
     const [refills, salesRows, products, ingredients, tareByKey] = await Promise.all([
       this.db
         .select()
@@ -398,6 +701,61 @@ export class CoffeeService {
       this.db.select().from(coffeeIngredient),
       this.tareByKey(),
     ]);
+    return this.reconcileRows(refills, salesRows, products, ingredients, tareByKey, fromDate, toDate);
+  }
+
+  /**
+   * То же, что `reconcileLocation()`, но по ВСЕМ точкам сразу — порт
+   * `ReconcileView` донора mydon-command-center как алерт-сводка, без
+   * N запросов к API на точку. Точки без заливок/продаж в периоде не
+   * попадают в ответ — сверять там нечего.
+   */
+  async reconcileAllLocations(fromDate: string, toDate: string): Promise<LocationReconcileGroup[]> {
+    const [refills, sales, products, ingredients, tareByKey, locations] = await Promise.all([
+      this.db
+        .select()
+        .from(coffeeRefill)
+        .orderBy(asc(coffeeRefill.position), asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
+      this.db.select().from(coffeeSale),
+      this.products(),
+      this.db.select().from(coffeeIngredient),
+      this.tareByKey(),
+      this.locations(),
+    ]);
+    const nameByLocation = new Map(locations.map((l) => [l.id, l.name]));
+
+    const refillsByLocation = new Map<string, typeof refills>();
+    for (const r of refills) refillsByLocation.set(r.locationId, [...(refillsByLocation.get(r.locationId) ?? []), r]);
+    const salesByLocation = new Map<string, typeof sales>();
+    for (const s of sales) salesByLocation.set(s.locationId, [...(salesByLocation.get(s.locationId) ?? []), s]);
+
+    const locationIds = new Set([...refillsByLocation.keys(), ...salesByLocation.keys()]);
+    const groups: LocationReconcileGroup[] = [];
+    for (const locationId of locationIds) {
+      const rows = this.reconcileRows(
+        refillsByLocation.get(locationId) ?? [],
+        salesByLocation.get(locationId) ?? [],
+        products,
+        ingredients,
+        tareByKey,
+        fromDate,
+        toDate,
+      );
+      if (rows.length > 0) groups.push({ locationId, locationName: nameByLocation.get(locationId) ?? locationId, rows });
+    }
+    return groups;
+  }
+
+  /** Общая логика факт/ожидание для одной точки — используется и по одной, и по всем сразу. */
+  private reconcileRows(
+    refills: ReconcileRefillRow[],
+    salesRows: ReconcileSaleRow[],
+    products: Awaited<ReturnType<CoffeeService["products"]>>,
+    ingredients: ReconcileIngredientRow[],
+    tareByKey: Map<string, number>,
+    fromDate: string,
+    toDate: string,
+  ): ReconcileRow[] {
     const salesInRange = salesRows.filter((s) => s.loggedDate >= fromDate && s.loggedDate <= toDate);
 
     // Фактический расход по ингредиенту: идём по каждой позиции, сравниваем
@@ -420,15 +778,22 @@ export class CoffeeService {
       }
     }
 
-    // Ожидаемый расход: продажи периода × состав товара.
+    // Цена за грамм — по canonical-ингредиенту; нет цены → null (не 0).
+    const priceByIngredient = new Map(
+      ingredients.map((i) => [i.id, i.purchasePrice != null ? Number(i.purchasePrice) : null]),
+    );
+
+    // Ожидаемый расход: продажи периода × состав товара. priceOf отдаёт ту же
+    // цену за грамм — consumptionReport() сам считает себестоимость строки.
     const sold = salesInRange.map((s) => ({ productId: s.productId, qty: s.quantity }));
     const recipeById = new Map(products.map((p) => [p.id, p.recipe]));
     const report = consumptionReport(
       sold,
       (productId) => recipeById.get(productId) ?? [],
-      () => ({ price: null, unit: "г" }), // себестоимость здесь не считаем — только граммы
+      (ingredientId) => ({ price: priceByIngredient.get(ingredientId) ?? null, unit: "г" }),
     );
     const expectedByIngredient = new Map(report.ingredients.map((i) => [i.ingredientId, i.consumed]));
+    const expectedCostByIngredient = new Map(report.ingredients.map((i) => [i.ingredientId, i.cost]));
 
     const ingredientIds = new Set([...actualByIngredient.keys(), ...expectedByIngredient.keys()]);
     const nameById = new Map(ingredients.map((i) => [i.id, i.name]));
@@ -440,8 +805,88 @@ export class CoffeeService {
         ingredientName: nameById.get(ingredientId) ?? ingredientId,
         actualGrams,
         expectedGrams,
+        costActual: costOf(actualGrams, priceByIngredient.get(ingredientId) ?? null),
+        costExpected: expectedCostByIngredient.get(ingredientId) ?? null,
         reconcile: reconcileConsumption(actualGrams, expectedGrams),
       };
     });
+  }
+
+  // ── Склад: центральный остаток ингредиентов (грамм) ──────────────────────
+  // Тот же приём, что и у `vending_stock`: одна строка на ингредиент —
+  // текущий баланс, вводится инвентаризацией (перезапись, а не леджер).
+  // Заливки бункеров его не списывают автоматически — умышленно: пересчёт
+  // следует за реальностью на складе, а не наоборот (симулировать расход по
+  // заливкам означало бы дублировать факт вторым, неточным источником).
+
+  /**
+   * Занести пересчёт склада. Идентично `vending.service.ingestStock()`:
+   * опоздавший пересчёт (`countedAt` старше уже сохранённого) игнорируется
+   * целиком — иначе задержавшееся сообщение откатывает актуальный остаток
+   * назад. Расхождение с прошлым остатком оценивается в сумах, если у
+   * ингредиента есть цена (`purchasePrice`) — иначе `noPrice: true`, деньгам
+   * доверять нельзя.
+   */
+  async ingestCoffeeStock(items: IngestCoffeeStockItem[], countedAt?: string): Promise<{ items: number; adjustments: CoffeeStockAdjustment[] }> {
+    const counted = countedAt ? new Date(countedAt) : new Date();
+    const adjustments: CoffeeStockAdjustment[] = [];
+
+    await this.db.transaction(async (tx) => {
+      const [existingRows, ingredients] = await Promise.all([
+        tx.select().from(coffeeStock),
+        tx.select().from(coffeeIngredient),
+      ]);
+      const beforeById = new Map(existingRows.map((r) => [r.ingredientId, { quantity: r.quantity, countedAt: r.countedAt }]));
+      const nameById = new Map(ingredients.map((i) => [i.id, i.name]));
+      const priceById = new Map(ingredients.map((i) => [i.id, i.purchasePrice != null ? Number(i.purchasePrice) : null]));
+
+      for (const item of items) {
+        const prior = beforeById.get(item.ingredientId);
+        if (prior && prior.countedAt.getTime() > counted.getTime()) continue;
+
+        if (prior && prior.quantity !== item.quantity) {
+          const delta = item.quantity - prior.quantity;
+          const price = priceById.get(item.ingredientId) ?? null;
+          adjustments.push({
+            ingredientId: item.ingredientId,
+            ingredientName: nameById.get(item.ingredientId) ?? item.ingredientId,
+            before: prior.quantity,
+            after: item.quantity,
+            delta,
+            value: price != null ? Math.round(Math.abs(delta) * price * 100) / 100 : 0,
+            noPrice: price == null,
+          });
+        }
+
+        await tx
+          .insert(coffeeStock)
+          .values({ ingredientId: item.ingredientId, quantity: item.quantity, countedAt: counted })
+          .onConflictDoUpdate({
+            target: coffeeStock.ingredientId,
+            set: { quantity: item.quantity, countedAt: counted, updatedAt: new Date() },
+            // Дата интерполируется в сырой sql-фрагмент как строка ISO — drizzle
+            // не знает целевой тип колонки внутри `where:` и без этого
+            // сериализует Date через toString(), что ловит Postgres как
+            // невалидный часовой пояс (найдено при живом e2e-тесте, не в стабах).
+            where: sql`${coffeeStock.countedAt} <= ${counted.toISOString()}`,
+          });
+      }
+    });
+
+    return { items: items.length, adjustments };
+  }
+
+  /** Текущий остаток склада по ингредиентам. */
+  async coffeeStockLevels(): Promise<CoffeeStockLevelRow[]> {
+    const [rows, ingredients] = await Promise.all([this.db.select().from(coffeeStock), this.db.select().from(coffeeIngredient)]);
+    const nameById = new Map(ingredients.map((i) => [i.id, i.name]));
+    return rows
+      .map((r) => ({
+        ingredientId: r.ingredientId,
+        ingredientName: nameById.get(r.ingredientId) ?? r.ingredientId,
+        quantity: r.quantity,
+        countedAt: r.countedAt.toISOString(),
+      }))
+      .sort((a, b) => a.ingredientName.localeCompare(b.ingredientName, "ru"));
   }
 }

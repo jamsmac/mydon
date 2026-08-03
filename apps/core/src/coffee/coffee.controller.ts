@@ -1,7 +1,8 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsIn,
   IsISO8601,
   IsInt,
@@ -33,6 +34,25 @@ export class RemoveBunkerIngredientDto {
 
   @IsUUID()
   ingredientId!: string;
+}
+
+export class SetIngredientPriceDto {
+  @IsUUID()
+  ingredientId!: string;
+
+  @IsNumber() @Min(0)
+  purchasePrice!: number;
+}
+
+export class SetTargetFillWeightDto {
+  @IsInt() @Min(1) @Max(8)
+  position!: number;
+
+  @IsUUID()
+  ingredientId!: string;
+
+  @IsInt() @Min(0)
+  targetFillWeight!: number;
 }
 
 export class SetTareDto {
@@ -148,6 +168,42 @@ export class RecordSaleDto {
   createdBy?: string;
 }
 
+export class SetWashScheduleDto {
+  @IsUUID()
+  locationId!: string;
+
+  @IsOptional() @IsInt() @Min(1) @Max(8)
+  position?: number;
+
+  @IsOptional() @IsInt() @Min(1)
+  frequencyDays?: number;
+
+  @IsOptional() @IsInt() @Min(1)
+  frequencyCups?: number;
+
+  @IsOptional() @IsBoolean()
+  isActive?: boolean;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  notes?: string;
+}
+
+export class IngestCoffeeStockItemDto {
+  @IsUUID()
+  ingredientId!: string;
+
+  @IsInt() @Min(0)
+  quantity!: number;
+}
+
+export class IngestCoffeeStockDto {
+  @IsOptional() @IsISO8601()
+  countedAt?: string;
+
+  @IsArray() @ArrayMaxSize(200) @ValidateNested({ each: true }) @Type(() => IngestCoffeeStockItemDto)
+  items!: IngestCoffeeStockItemDto[];
+}
+
 /** Кофе-бункеры: точки, тара, ежедневная заливка, расходники, мойка, сверка расхода. */
 @Controller("coffee")
 export class CoffeeController {
@@ -173,6 +229,21 @@ export class CoffeeController {
   @Delete("bunker-config")
   removeBunkerIngredient(@Body() dto: RemoveBunkerIngredientDto) {
     return this.coffee.removeBunkerIngredient(dto.position, dto.ingredientId);
+  }
+
+  @Put("ingredient-price")
+  setIngredientPrice(@Body() dto: SetIngredientPriceDto) {
+    return this.coffee.setIngredientPrice(dto.ingredientId, dto.purchasePrice);
+  }
+
+  @Put("target-fill")
+  setTargetFillWeight(@Body() dto: SetTargetFillWeightDto) {
+    return this.coffee.setTargetFillWeight(dto.position, dto.ingredientId, dto.targetFillWeight);
+  }
+
+  @Get("fill-status")
+  fillStatusByLocation() {
+    return this.coffee.fillStatusByLocation();
   }
 
   @Get("tare")
@@ -226,6 +297,26 @@ export class CoffeeController {
     return this.coffee.washHistory(locationId, limit ? Number(limit) : undefined);
   }
 
+  @Get("wash-schedule")
+  washScheduleStatus() {
+    return this.coffee.washScheduleStatus();
+  }
+
+  @Get("wash-schedule/all")
+  washSchedules() {
+    return this.coffee.washSchedules();
+  }
+
+  @Post("wash-schedule")
+  setWashSchedule(@Body() dto: SetWashScheduleDto) {
+    return this.coffee.setWashSchedule(dto);
+  }
+
+  @Delete("wash-schedule/:id")
+  removeWashSchedule(@Param("id", ParseUUIDPipe) id: string) {
+    return this.coffee.removeWashSchedule(id);
+  }
+
   // ── Товары/рецепты, продажи, сверка ─────────────────────────────────────
 
   @Get("products")
@@ -246,5 +337,22 @@ export class CoffeeController {
   @Get("reconcile/:locationId")
   reconcile(@Param("locationId") locationId: string, @Query("from") from: string, @Query("to") to: string) {
     return this.coffee.reconcileLocation(locationId, from, to);
+  }
+
+  @Get("reconcile")
+  reconcileAll(@Query("from") from: string, @Query("to") to: string) {
+    return this.coffee.reconcileAllLocations(from, to);
+  }
+
+  // ── Склад ─────────────────────────────────────────────────────────────
+
+  @Post("stock")
+  ingestCoffeeStock(@Body() dto: IngestCoffeeStockDto) {
+    return this.coffee.ingestCoffeeStock(dto.items, dto.countedAt);
+  }
+
+  @Get("stock")
+  coffeeStockLevels() {
+    return this.coffee.coffeeStockLevels();
   }
 }

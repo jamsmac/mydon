@@ -17,9 +17,9 @@ const MAIN = [
   { href: "/team", icon: "team", label: "Команда" },
   { href: "/agents", icon: "agents", label: "Агенты" },
 ];
+// «Автоматы» и «Кофе-бункеры» — теперь вкладки рабочего места VendHub
+// (/domain/vendhub), а не отдельные пункты: операционка живёт при направлении.
 const SYSTEM = [
-  { href: "/vending", icon: "biz", label: "Автоматы" },
-  { href: "/coffee", icon: "biz", label: "Кофе-бункеры" },
   { href: "/registry", icon: "reg", label: "Реестр" },
   { href: "/audit", icon: "jour", label: "Журнал" },
   { href: "/system", icon: "reg", label: "Система" },

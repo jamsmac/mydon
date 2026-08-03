@@ -69,6 +69,17 @@ describe("Брифинг", () => {
     assert.doesNotMatch(formatBriefing(base), /К закупу/);
   });
 
+  it("строка кофе-бункеров появляется, когда есть хоть один сигнал", () => {
+    const text = formatBriefing(base, [], undefined, { underfill: 2, anomaly: 0, overdueWash: 1 });
+    assert.match(text, /☕ Кофе-бункеры: недолив 2, мойка просрочена 1/);
+    assert.doesNotMatch(text, /расхождение/);
+  });
+
+  it("без кофе-сигналов (всё по нулям) строки нет", () => {
+    assert.doesNotMatch(formatBriefing(base, [], undefined, { underfill: 0, anomaly: 0, overdueWash: 0 }), /Кофе-бункеры/);
+    assert.doesNotMatch(formatBriefing(base), /Кофе-бункеры/);
+  });
+
   it("время показывает в ташкентском поясе", () => {
     // 02:30 UTC = 07:30 в Ташкенте
     assert.match(formatBriefing(base), /07:30/);

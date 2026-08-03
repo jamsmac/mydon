@@ -90,4 +90,34 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.equal(formatAmount(1234567), "1 234 567 UZS");
     assert.equal(formatAmount("не число"), "0 UZS");
   });
+
+  it("недолив бункера: почти пустой — немедленно, обычный — в брифинг", () => {
+    const critical = applyRules(
+      ctx("coffee.underfill", { location: "AH", position: 7, ingredient: "Кофе", netFillWeight: 80, targetFillWeight: 600, fillRatio: 0.13 }),
+    );
+    assert.equal(critical.length, 1);
+    assert.equal(critical[0].urgency, "immediate");
+    assert.match(critical[0].text, /AH/);
+    assert.match(critical[0].text, /бункер 7/);
+
+    const watch = applyRules(
+      ctx("coffee.underfill", { location: "AH", position: 7, ingredient: "Кофе", netFillWeight: 400, targetFillWeight: 600, fillRatio: 0.67 }),
+    );
+    assert.equal(watch.length, 1);
+    assert.equal(watch[0].urgency, "briefing");
+  });
+
+  it("расхождение расхода: сильное — немедленно, умеренное — в брифинг", () => {
+    const critical = applyRules(
+      ctx("coffee.anomaly", { location: "AH", ingredient: "Кофе", actualGrams: 570, expectedGrams: 90, deltaRatio: 5.33 }),
+    );
+    assert.equal(critical.length, 1);
+    assert.equal(critical[0].urgency, "immediate");
+
+    const watch = applyRules(
+      ctx("coffee.anomaly", { location: "AH", ingredient: "Кофе", actualGrams: 360, expectedGrams: 330, deltaRatio: 0.15 }),
+    );
+    assert.equal(watch.length, 1);
+    assert.equal(watch[0].urgency, "briefing");
+  });
 });
