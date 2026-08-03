@@ -21,6 +21,8 @@ import { MapPanel } from "../../../components/map-panel";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
+import { VendingPanel } from "../../../components/vending-panel";
+import { CoffeePanel } from "../../../components/coffee-panel";
 import { typeOne } from "../../../lib/labels";
 import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
 
@@ -147,6 +149,10 @@ export default async function DomainPage({
   // ── верхний ряд вкладок ────────────────────────────────────────────────────
   const topTabs = [
     { key: "overview", label: "Дашборд" },
+    // Живые операционные инструменты VendHub — раньше отдельные пункты сайдбара
+    // («Система»), теперь вкладки этого же рабочего места: один адрес
+    // направления, а не разрозненные экраны.
+    ...(domain === "vendhub" ? [{ key: "vending", label: "Автоматы" }, { key: "coffee", label: "Кофе-бункеры" }] : []),
     ...groups.map((g) => ({ key: g.key, label: g.label })),
     // Инкассация — ежедневная операция, ей место в верхнем ряду (слово владельца).
     ...(domain === "vendhub"
@@ -238,6 +244,10 @@ export default async function DomainPage({
           })}
         </div>
       )}
+
+      {/* ── Живые операционные вкладки VendHub ── */}
+      {activeGroup === "vending" && <VendingPanel />}
+      {activeGroup === "coffee" && <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />}
 
       {/* ── Дашборд ── */}
       {activeGroup === "overview" && (

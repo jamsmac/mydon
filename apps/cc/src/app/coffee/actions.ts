@@ -24,7 +24,7 @@ export async function submitCoffeeRefill(input: {
 }): Promise<ActionResult> {
   try {
     await core.submitCoffeeRefill({ ...input, createdBy: "panel" });
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -35,7 +35,7 @@ export async function submitCoffeeRefill(input: {
 export async function addBunkerIngredient(position: number, ingredientName: string): Promise<ActionResult> {
   try {
     await core.addCoffeeBunkerIngredient(position, ingredientName);
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -46,7 +46,7 @@ export async function addBunkerIngredient(position: number, ingredientName: stri
 export async function removeBunkerIngredient(position: number, ingredientId: string): Promise<ActionResult> {
   try {
     await core.removeCoffeeBunkerIngredient(position, ingredientId);
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -57,7 +57,7 @@ export async function removeBunkerIngredient(position: number, ingredientId: str
 export async function setCoffeeIngredientPrice(ingredientId: string, purchasePrice: number): Promise<ActionResult> {
   try {
     await core.setCoffeeIngredientPrice(ingredientId, purchasePrice);
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -68,7 +68,7 @@ export async function setCoffeeIngredientPrice(ingredientId: string, purchasePri
 export async function setCoffeeTargetFillWeight(position: number, ingredientId: string, targetFillWeight: number): Promise<ActionResult> {
   try {
     await core.setCoffeeTargetFillWeight(position, ingredientId, targetFillWeight);
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -79,7 +79,7 @@ export async function setCoffeeTargetFillWeight(position: number, ingredientId: 
 export async function setCoffeeTare(containerNumber: number, position: number, tareWeight: number): Promise<ActionResult> {
   try {
     await core.setCoffeeTare(containerNumber, position, tareWeight);
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -96,7 +96,7 @@ export async function recordCoffeeConsumable(input: {
 }): Promise<ActionResult> {
   try {
     await core.recordCoffeeConsumable(input);
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -107,7 +107,7 @@ export async function recordCoffeeConsumable(input: {
 export async function recordCoffeeWash(input: { locationId: string; position?: number; note?: string }): Promise<ActionResult> {
   try {
     await core.recordCoffeeWash({ ...input, performedBy: "panel" });
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -118,7 +118,7 @@ export async function recordCoffeeWash(input: { locationId: string; position?: n
 export async function ingestCoffeeStock(ingredientId: string, quantity: number): Promise<ActionResult> {
   try {
     await core.ingestCoffeeStock({ items: [{ ingredientId, quantity }] });
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -134,7 +134,7 @@ export async function setCoffeeWashSchedule(input: {
 }): Promise<ActionResult> {
   try {
     await core.setCoffeeWashSchedule(input);
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
@@ -145,7 +145,37 @@ export async function setCoffeeWashSchedule(input: {
 export async function removeCoffeeWashSchedule(id: string): Promise<ActionResult> {
   try {
     await core.removeCoffeeWashSchedule(id);
-    revalidatePath("/coffee");
+    revalidatePath("/domain/vendhub");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
+/**
+ * Завести задачу по сигналу вкладки «Сверка» (недолив/расхождение/просроченная
+ * мойка) — та же очередь, что «Быстрые действия» дашборда VendHub: домен
+ * vendhub, срок завтра, высокий приоритет, исполнитель — тот же, что и там
+ * (первый активный человек направления), правится в карточке задачи.
+ */
+export async function createCoffeeAlertTask(input: {
+  title: string;
+  description: string;
+  ownerRef: string | null;
+}): Promise<ActionResult> {
+  try {
+    await core.createTask({
+      title: input.title,
+      description: input.description,
+      domain: "vendhub",
+      ownerKind: "human",
+      ownerRef: input.ownerRef ?? "",
+      priority: "high",
+      source: "coffee-alert",
+      createdBy: "panel",
+      due: new Date(Date.now() + 24 * 3600_000).toISOString(),
+    });
+    revalidatePath("/domain/vendhub");
     return { ok: true };
   } catch (err) {
     return { ok: false, message: detailOf(err) };

@@ -16,6 +16,7 @@ import type {
 } from "../../lib/core";
 import {
   addBunkerIngredient,
+  createCoffeeAlertTask,
   ingestCoffeeStock,
   recordCoffeeConsumable,
   removeBunkerIngredient,
@@ -60,6 +61,8 @@ export function CoffeeClient(props: {
   reconcileTo: string;
   washScheduleStatus: CoffeeWashScheduleStatusRow[];
   washSchedules: CoffeeWashScheduleRow[];
+  /** Первый активный человек VendHub — кому уходит задача из «Сверки». */
+  defaultOwnerRef: string | null;
 }) {
   const [tab, setTab] = useState<Tab>("entry");
   const alertCount =
@@ -68,10 +71,6 @@ export function CoffeeClient(props: {
     props.washScheduleStatus.filter((r) => r.status === "overdue").length;
   return (
     <>
-      <div className="page-head">
-        <h1>Кофе-бункеры</h1>
-        <p>Ежедневная заливка, сводка по точкам, настройки ингредиентов и тары.</p>
-      </div>
       <div className="coffee-tabs">
         <button className={tab === "entry" ? "on" : ""} onClick={() => setTab("entry")}>
           Ввод данных
@@ -97,6 +96,7 @@ export function CoffeeClient(props: {
           from={props.reconcileFrom}
           to={props.reconcileTo}
           washScheduleStatus={props.washScheduleStatus}
+          defaultOwnerRef={props.defaultOwnerRef}
         />
       )}
       {tab === "settings" && (
@@ -389,18 +389,42 @@ const WASH_LABEL: Record<"ok" | "overdue" | "unknown", string> = {
   unknown: "Нет данных",
 };
 
+/** Кнопка «→ задача»: сигнал сверки превращается в задачу VendHub (срок завтра, high). */
+function AlertTaskButton({ title, description, ownerRef }: { title: string; description: string; ownerRef: string | null }) {
+  const [pending, start] = useTransition();
+  const [done, setDone] = useState(false);
+  if (done) return <span className="muted">задача поставлена</span>;
+  return (
+    <button
+      className="tag-add"
+      disabled={pending}
+      title="Поставить задачу по этому сигналу (VendHub, срок завтра)"
+      onClick={() =>
+        start(async () => {
+          const res = await createCoffeeAlertTask({ title, description, ownerRef });
+          if (res.ok) setDone(true);
+        })
+      }
+    >
+      → задача
+    </button>
+  );
+}
+
 function ReconcileTab({
   fillStatus,
   reconcile,
   from,
   to,
   washScheduleStatus,
+  defaultOwnerRef,
 }: {
   fillStatus: CoffeeFillStatusRow[];
   reconcile: CoffeeLocationReconcileGroup[];
   from: string;
   to: string;
   washScheduleStatus: CoffeeWashScheduleStatusRow[];
+  defaultOwnerRef: string | null;
 }) {
   const underfills = fillStatus.filter((r) => r.status === "underfill");
   const anomalyGroups = reconcile
@@ -423,6 +447,7 @@ function ReconcileTab({
               <th>Чистый вес, г</th>
               <th>Эталон, г</th>
               <th>Статус</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -435,6 +460,13 @@ function ReconcileTab({
                 <td className="num-cell">{r.targetFillWeight ?? "—"}</td>
                 <td>
                   <StatusBadge status={r.status} label={FILL_LABEL[r.status]} />
+                </td>
+                <td>
+                  <AlertTaskButton
+                    title={`Долить бункер ${r.position} (${r.ingredientName ?? "?"}) — ${r.locationName}`}
+                    description={`Недолив: чистый вес ${r.netFillWeight ?? "?"} г при эталоне ${r.targetFillWeight ?? "?"} г. Сигнал вкладки «Сверка» кофе-бункеров.`}
+                    ownerRef={defaultOwnerRef}
+                  />
                 </td>
               </tr>
             ))}
@@ -462,6 +494,7 @@ function ReconcileTab({
                   <th>Себестоимость факта</th>
                   <th>Себестоимость ожидания</th>
                   <th>Статус</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -474,6 +507,13 @@ function ReconcileTab({
                     <td className="num-cell">{r.costExpected ?? "—"}</td>
                     <td>
                       <StatusBadge status={r.reconcile.status} label={RECONCILE_LABEL[r.reconcile.status]} />
+                    </td>
+                    <td>
+                      <AlertTaskButton
+                        title={`Разобраться с расходом «${r.ingredientName}» — ${g.locationName}`}
+                        description={`Расхождение факт/ожидание за ${from} — ${to}: факт ${r.actualGrams ?? "?"} г против ожидания ${r.expectedGrams ?? "?"} г. Сигнал вкладки «Сверка» кофе-бункеров.`}
+                        ownerRef={defaultOwnerRef}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -495,6 +535,7 @@ function ReconcileTab({
               <th>Дней с мойки</th>
               <th>Чашек с мойки</th>
               <th>Статус</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -506,6 +547,13 @@ function ReconcileTab({
                 <td className="num-cell">{r.cupsSinceWash ?? "—"}</td>
                 <td>
                   <StatusBadge status={r.status} label={WASH_LABEL[r.status]} />
+                </td>
+                <td>
+                  <AlertTaskButton
+                    title={`Помыть ${r.position != null ? `бункер ${r.position}` : "кофемашину"} — ${r.locationName}`}
+                    description={`Мойка просрочена: ${r.daysSinceWash != null ? `${r.daysSinceWash} дн. с последней` : "ещё ни разу не мыли"}${r.cupsSinceWash != null ? `, чашек с мойки ${r.cupsSinceWash}` : ""}. Сигнал вкладки «Сверка» кофе-бункеров.`}
+                    ownerRef={defaultOwnerRef}
+                  />
                 </td>
               </tr>
             ))}
