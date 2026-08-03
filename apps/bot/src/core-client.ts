@@ -544,4 +544,24 @@ export class CoreClient {
   }): Promise<{ id: string }> {
     return this.request("/coffee/wash", { method: "POST", body: JSON.stringify(input) });
   }
+
+  // ── Кофе-бункеры: чтение для утреннего брифинга (§ мониторинг) ────────────
+
+  /** Недолив по последней заливке каждого (точка, бункер) против эталона. */
+  coffeeFillStatus(): Promise<{ status: "ok" | "underfill" | "unknown" }[]> {
+    return this.request("/coffee/fill-status");
+  }
+
+  /** Сверка факт/ожидание расхода ингредиентов по всем точкам за период. */
+  coffeeReconcileAll(
+    from: string,
+    to: string,
+  ): Promise<{ rows: { reconcile: { status: "ok" | "anomaly" | "unknown" } }[] }[]> {
+    return this.request(`/coffee/reconcile?from=${from}&to=${to}`);
+  }
+
+  /** Планы обслуживания со статусом «пора/не пора». */
+  coffeeWashScheduleStatus(): Promise<{ status: "ok" | "overdue" | "unknown" }[]> {
+    return this.request("/coffee/wash-schedule");
+  }
 }

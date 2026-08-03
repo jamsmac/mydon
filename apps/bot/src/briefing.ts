@@ -12,10 +12,18 @@ export interface BriefingPurchase {
   costRounded: number;
 }
 
+/** Сводка кофе-бункеров для брифинга: сколько сигналов каждого рода сейчас открыто. */
+export interface BriefingCoffee {
+  underfill: number;
+  anomaly: number;
+  overdueWash: number;
+}
+
 export function formatBriefing(
   b: Briefing,
   approvals: ApprovalRow[] = [],
   purchase?: BriefingPurchase,
+  coffee?: BriefingCoffee,
 ): string {
   const when = new Date(b.generatedAt).toLocaleString("ru-RU", {
     timeZone: TZ,
@@ -52,6 +60,14 @@ export function formatBriefing(
     const sum = Math.round(purchase.costRounded).toLocaleString("ru-RU");
     const tail = purchase.costRounded > 0 ? ` на ~${sum} сум` : "";
     lines.push("", `🛒 К закупу: ${purchase.positions} поз.${tail} — «оформить закуп».`);
+  }
+
+  if (coffee && (coffee.underfill > 0 || coffee.anomaly > 0 || coffee.overdueWash > 0)) {
+    const parts: string[] = [];
+    if (coffee.underfill > 0) parts.push(`недолив ${coffee.underfill}`);
+    if (coffee.anomaly > 0) parts.push(`расхождение ${coffee.anomaly}`);
+    if (coffee.overdueWash > 0) parts.push(`мойка просрочена ${coffee.overdueWash}`);
+    lines.push("", `☕ Кофе-бункеры: ${parts.join(", ")} — вкладка «Сверка».`);
   }
 
   if (approvals.length > 0) {

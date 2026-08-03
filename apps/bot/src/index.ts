@@ -34,6 +34,11 @@ function idle(): Promise<never> {
   });
 }
 
+/** YYYY-MM-DD по Ташкенту — окно сверки коффе-бункеров для брифинга. */
+function isoDate(d: Date): string {
+  return d.toLocaleDateString("sv-SE", { timeZone: TZ });
+}
+
 /**
  * MYDON Bot — основной канал (ТЗ FR-1a).
  * Уведомления, согласования, вопросы. Long polling: наружу портов не открываем.
@@ -180,15 +185,29 @@ async function main(): Promise<void> {
     setTimeout(() => {
       void (async () => {
         try {
-          const [b, approvals, purchase] = await Promise.all([
+          const to = isoDate(new Date());
+          const from = isoDate(new Date(Date.now() - 3 * 86_400_000));
+          const [b, approvals, purchase, fillStatus, reconcile, washSchedule] = await Promise.all([
             deps.core.briefing(),
             deps.core.pendingApprovals(),
             deps.core.vendingPurchase().catch(() => null),
+            deps.core.coffeeFillStatus().catch(() => null),
+            deps.core.coffeeReconcileAll(from, to).catch(() => null),
+            deps.core.coffeeWashScheduleStatus().catch(() => null),
           ]);
+          const coffee =
+            fillStatus || reconcile || washSchedule
+              ? {
+                  underfill: fillStatus?.filter((r) => r.status === "underfill").length ?? 0,
+                  anomaly: reconcile?.reduce((n, g) => n + g.rows.filter((r) => r.reconcile.status === "anomaly").length, 0) ?? 0,
+                  overdueWash: washSchedule?.filter((r) => r.status === "overdue").length ?? 0,
+                }
+              : undefined;
           const text = formatBriefing(
             b,
             approvals,
             purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
+            coffee,
           );
           for (const chatId of allowlist) {
             await tg.sendMessage(chatId, text);
