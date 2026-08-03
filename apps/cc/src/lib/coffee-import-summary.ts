@@ -49,9 +49,29 @@ export function summarizeCoffeeImport(
   if (typeof payload !== "object" || payload === null) return null;
   const imp = (payload as Record<string, unknown>)["coffeeImport"];
   if (typeof imp !== "object" || imp === null) return null;
-  const { records, returns, consumables } = imp as Record<string, unknown>;
+  const { records, returns, consumables, newLocations } = imp as Record<string, unknown>;
 
   const parts: CoffeeImportPart[] = [];
+
+  // Исторические точки, которых нет в справочнике: «Одобрить» их СОЗДАСТ —
+  // владелец должен увидеть имена до решения, а не после.
+  if (Array.isArray(newLocations) && newLocations.length > 0) {
+    const names = newLocations.filter((n): n is string => typeof n === "string");
+    parts.push({
+      label: "Новые точки (будут созданы)",
+      count: names.length,
+      from: null,
+      to: null,
+      notes: names.slice(0, 8),
+    });
+  }
+
+  // Имя точки строки: по id из справочника, либо locationName исторической точки.
+  const rowLocation = (r: Record<string, unknown>): string | null => {
+    if (typeof r["locationId"] === "string") return locationName(r["locationId"]);
+    if (typeof r["locationName"] === "string") return r["locationName"];
+    return null;
+  };
 
   if (Array.isArray(records) && records.length > 0) {
     const rows = records as Record<string, unknown>[];
@@ -59,10 +79,7 @@ export function summarizeCoffeeImport(
       label: "Заливки",
       count: rows.length,
       ...dateRange(rows.map((r) => r["enteredDate"])),
-      notes: topCounts(
-        rows.map((r) => (typeof r["locationId"] === "string" ? locationName(r["locationId"]) : null)),
-        6,
-      ),
+      notes: topCounts(rows.map(rowLocation), 6),
     });
   }
 
@@ -85,10 +102,7 @@ export function summarizeCoffeeImport(
       label: "Расходники (вода · стаканчики · крышки)",
       count: rows.length,
       ...dateRange(rows.map((r) => r["loggedDate"])),
-      notes: topCounts(
-        rows.map((r) => (typeof r["locationId"] === "string" ? locationName(r["locationId"]) : null)),
-        6,
-      ),
+      notes: topCounts(rows.map(rowLocation), 6),
     });
   }
 

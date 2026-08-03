@@ -545,6 +545,30 @@ export class CoreClient {
     return this.request("/coffee/wash", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** Возврат набора: строка «позиция. набор. вес» из привычного формата группы. */
+  recordContainerReturn(input: {
+    position: number;
+    containerNumber: number;
+    weight: number;
+    returnedDate: string;
+    locationNote?: string;
+    createdBy?: string;
+  }): Promise<{ id: string }> {
+    return this.request("/coffee/container-return", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Расходники точки за день (вода/стаканчики/крышки) — upsert по (точка, дата). */
+  recordCoffeeConsumable(input: {
+    locationId: string;
+    loggedDate: string;
+    water?: number;
+    cups?: number;
+    lids?: number;
+    createdBy?: string;
+  }): Promise<{ id: string }> {
+    return this.request("/coffee/consumables", { method: "POST", body: JSON.stringify(input) });
+  }
+
   // ── Кофе-бункеры: чтение для утреннего брифинга (§ мониторинг) ────────────
 
   /** Недолив по последней заливке каждого (точка, бункер) против эталона. */

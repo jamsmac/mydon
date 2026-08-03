@@ -39,6 +39,16 @@ import {
   startCoffeeRefill,
   startCoffeeWash,
 } from "./coffee-refill";
+import {
+  coffeeConsumableStepHint,
+  handleCoffeeConsumableCallback,
+  handleCoffeeConsumableCounts,
+  isCoffeeConsumableTrigger,
+  parseCoffeeConsumableCallback,
+  recordContainerReturns,
+  startCoffeeConsumable,
+  tryParseContainerReturns,
+} from "./coffee-returns";
 
 /**
  * Работа сотрудника в Telegram (решение владельца: сотрудники — через бота).
@@ -98,6 +108,8 @@ const HELP_STAFF = [
   "• «инвентаризация» — пересчитать остаток на складе",
   "• «бункер» — занести заливку кофейного бункера (вес, упаковки)",
   "• «помыл» — отметить мойку бункера",
+  "• остатки бункеров — строками как в группе: «1. 027. 787» (позиция. набор. вес)",
+  "• «вода» — записать расходники точки (вода, стаканчики, крышки)",
   "• кнопки под задачей: «Взял» и «Сделал»",
   "• после «Сделал» напиши одной строкой, что именно сделано — это отчёт",
 ].join("\n");
@@ -210,6 +222,20 @@ export async function handleStaffMessage(
     }
     return { reply: { text: coffeeRefillStepHint(conv.step) } };
   }
+  if (conv?.flow === "coffee-consumable") {
+    if (conv.step === "counts" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await handleCoffeeConsumableCounts(chatId, clean, person, deps) };
+    }
+    return { reply: { text: coffeeConsumableStepHint(conv.step) } };
+  }
+
+  // Возвраты наборов — привычный формат группы «позиция. набор. вес», без
+  // команд: строки вида «1. 027. 787» ни с чем не спутать, разбор
+  // детерминированный. Сотрудник шлёт то же сообщение, что раньше в тему.
+  const containerReturns = tryParseContainerReturns(clean);
+  if (containerReturns) {
+    return { reply: await recordContainerReturns(containerReturns, person, deps) };
+  }
 
   // Завести номенклатуру: «новый ингредиент», «новая запчасть».
   if (isRegisterTrigger(clean)) {
@@ -234,6 +260,11 @@ export async function handleStaffMessage(
   // Мойка/обслуживание кофейного бункера: «помыл», «мойка бункер».
   if (isCoffeeWashTrigger(clean)) {
     return { reply: await startCoffeeWash(chatId, deps) };
+  }
+
+  // Расходники точки: «вода», «стаканчики», «крышки», «расходники».
+  if (isCoffeeConsumableTrigger(clean)) {
+    return { reply: await startCoffeeConsumable(chatId, deps) };
   }
 
   // Ждём отчёт после «Сделал» — любое следующее сообщение считаем отчётом.
@@ -337,6 +368,16 @@ export async function handleStaffCallback(
   const coffeeWash = parseCoffeeWashCallback(data);
   if (coffeeWash) {
     const res = await handleCoffeeWashCallback(chatId, coffeeWash, person, deps);
+    return {
+      answer: res.answer,
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
+  // Кнопки расходников (cc:loc/cancel).
+  const coffeeConsumable = parseCoffeeConsumableCallback(data);
+  if (coffeeConsumable) {
+    const res = await handleCoffeeConsumableCallback(chatId, coffeeConsumable, deps);
     return {
       answer: res.answer,
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),

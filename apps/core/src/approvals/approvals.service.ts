@@ -283,15 +283,17 @@ export class ApprovalsService {
    * экспорта переписки, но ничего не пишет в базу напрямую — только заявкой,
    * тот же T0-гейт, что и у site-ingest (payload.import).
    *
-   * `locationId` в записи ДОЛЖЕН существовать в `coffee_location` — модель
-   * могла ошибиться или выдумать точку, доверять чужому payload нельзя.
+   * Точка записи — существующий `locationId` ЛИБО `locationName` из списка
+   * `newLocations` (исторические точки, которых в справочнике уже нет —
+   * создаются здесь же, после «Одобрить»). Остальному payload не доверяем:
+   * модель могла ошибиться или выдумать точку.
    * Дубли (тот же адрес/позиция/дата/вес/упаковки) пропускаются — повторное
    * одобрение или ретрай импорта безопасны. Кривой payload — не ошибка
    * решения: одобрение остаётся, импорт пропускается.
    */
   private async executeCoffeeImport(tx: Tx, row: ApprovalRow): Promise<void> {
     const imp = (row.payload as { coffeeImport?: unknown } | null)?.coffeeImport as
-      | { records?: unknown; returns?: unknown; consumables?: unknown }
+      | { records?: unknown; returns?: unknown; consumables?: unknown; newLocations?: unknown }
       | undefined;
     if (!imp || typeof imp !== "object") return;
     const records = Array.isArray(imp.records) ? imp.records.slice(0, 2000) : [];
@@ -299,14 +301,40 @@ export class ApprovalsService {
     const consumables = Array.isArray(imp.consumables) ? imp.consumables.slice(0, 2000) : [];
     if (records.length === 0 && returns.length === 0 && consumables.length === 0) return;
 
-    const locations = await tx.select({ id: coffeeLocation.id }).from(coffeeLocation);
+    const locations = await tx.select({ id: coffeeLocation.id, name: coffeeLocation.name }).from(coffeeLocation);
     const validLocationIds = new Set(locations.map((l) => l.id));
+    const idByName = new Map(locations.map((l) => [l.name.toLowerCase().trim(), l.id]));
+
+    // ── Исторические точки: в архиве встречаются адреса, которых в сегодняшнем
+    // справочнике нет (машину перевезли, точку закрыли). Импорт предлагает их
+    // списком newLocations; создаём ПОСЛЕ «Одобрить» — владелец видел имена в
+    // сводке согласования. Идемпотентно по имени (без учёта регистра).
+    let locationsCreated = 0;
+    const newLocations = Array.isArray(imp.newLocations) ? imp.newLocations.slice(0, 50) : [];
+    for (const n of newLocations) {
+      const name = typeof n === "string" ? n.trim().slice(0, 128) : "";
+      if (name.length < 2 || idByName.has(name.toLowerCase())) continue;
+      const [createdLoc] = await tx.insert(coffeeLocation).values({ name }).returning({ id: coffeeLocation.id });
+      idByName.set(name.toLowerCase(), createdLoc.id);
+      validLocationIds.add(createdLoc.id);
+      locationsCreated += 1;
+    }
+
+    // Точка записи: либо существующий id, либо имя (для исторических точек).
+    const resolveLocation = (rec: { locationId?: unknown; locationName?: unknown }): string | null => {
+      if (typeof rec.locationId === "string" && validLocationIds.has(rec.locationId)) return rec.locationId;
+      if (typeof rec.locationName === "string") {
+        return idByName.get(rec.locationName.toLowerCase().trim()) ?? null;
+      }
+      return null;
+    };
 
     let created = 0;
     let skipped = 0;
     for (const r of records) {
       const rec = r as {
         locationId?: unknown;
+        locationName?: unknown;
         position?: unknown;
         containerNumber?: unknown;
         filledWeight?: unknown;
@@ -314,12 +342,12 @@ export class ApprovalsService {
         packageCount?: unknown;
         enteredDate?: unknown;
       };
-      const locationId = typeof rec.locationId === "string" ? rec.locationId : "";
+      const locationId = resolveLocation(rec) ?? "";
       const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
       const filledWeight = typeof rec.filledWeight === "number" ? Math.trunc(rec.filledWeight) : NaN;
       const enteredDate = typeof rec.enteredDate === "string" ? rec.enteredDate.slice(0, 10) : "";
       const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(enteredDate);
-      if (!validLocationIds.has(locationId) || position < 1 || position > 8 || !(filledWeight > 0) || !dateOk) {
+      if (locationId === "" || position < 1 || position > 8 || !(filledWeight > 0) || !dateOk) {
         skipped += 1;
         continue;
       }
@@ -422,12 +450,12 @@ export class ApprovalsService {
     let consumablesUpserted = 0;
     let consumablesSkipped = 0;
     for (const c of consumables) {
-      const rec = c as { locationId?: unknown; loggedDate?: unknown; water?: unknown; cups?: unknown; lids?: unknown };
-      const locationId = typeof rec.locationId === "string" ? rec.locationId : "";
+      const rec = c as { locationId?: unknown; locationName?: unknown; loggedDate?: unknown; water?: unknown; cups?: unknown; lids?: unknown };
+      const locationId = resolveLocation(rec) ?? "";
       const loggedDate = typeof rec.loggedDate === "string" ? rec.loggedDate.slice(0, 10) : "";
       const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(loggedDate);
       const num = (v: unknown) => (typeof v === "number" && v >= 0 ? Math.trunc(v) : 0);
-      if (!validLocationIds.has(locationId) || !dateOk) {
+      if (locationId === "" || !dateOk) {
         consumablesSkipped += 1;
         continue;
       }
@@ -444,7 +472,7 @@ export class ApprovalsService {
     await tx.insert(event).values({
       source: "owner",
       type: "coffee.import.executed",
-      payload: { approvalId: row.id, created, skipped, returnsCreated, returnsSkipped, consumablesUpserted, consumablesSkipped },
+      payload: { approvalId: row.id, created, skipped, returnsCreated, returnsSkipped, consumablesUpserted, consumablesSkipped, locationsCreated },
     });
   }
 }
