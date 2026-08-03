@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { entity, org, vendingPurchaseOrder } from "@mydon/db";
+import { coffeeLocation, coffeeRefill, entity, org, vendingPurchaseOrder } from "@mydon/db";
 import { ApprovalsService } from "./approvals.service";
 
 type Row = Record<string, unknown>;
@@ -231,5 +231,110 @@ describe("Одобренная заявка закупа → накладная 
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     await service.decide("a1", "approved", "owner");
     assert.equal(orders.length, 0);
+  });
+});
+
+describe("Одобренный исторический импорт кофе-бункеров (payload.coffeeImport)", () => {
+  function coffeeImportStub(payload: Row, opts: { locations?: Row[]; existingRefills?: Row[] } = {}) {
+    const inserted: Row[] = [];
+    const withLimit = (rows: Row[]) => Object.assign(Promise.resolve(rows), { limit: async () => rows });
+    const tx = {
+      select: () => ({
+        from: (table: unknown) => {
+          if (table === coffeeLocation) return Promise.resolve(opts.locations ?? [{ id: "loc-1" }]);
+          return { where: () => withLimit(opts.existingRefills ?? []) };
+        },
+      }),
+      update: () => ({
+        set: () => ({
+          where: () => ({ returning: async () => [{ id: "a1", decision: "approved", payload }] }),
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: (v: Row) => {
+          if (table === coffeeRefill) inserted.push(v);
+          return Promise.resolve(undefined);
+        },
+      }),
+    };
+    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    return { db, inserted };
+  }
+
+  const validRecord = { locationId: "loc-1", position: 7, filledWeight: 1200, enteredDate: "2026-07-01" };
+
+  it("«одобрить» заносит валидные записи как coffee_refill с меткой источника", async () => {
+    const { db, inserted } = coffeeImportStub({ coffeeImport: { records: [validRecord] } });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 1);
+    assert.equal(inserted[0].locationId, "loc-1");
+    assert.equal(inserted[0].position, 7);
+    assert.equal(inserted[0].filledWeight, 1200);
+    assert.equal(inserted[0].packageCount, 1, "по умолчанию 1 упаковка");
+    assert.equal(inserted[0].createdBy, "import:telegram-history");
+  });
+
+  it("locationId не из справочника (модель могла выдумать точку) — запись пропускается", async () => {
+    const { db, inserted } = coffeeImportStub(
+      { coffeeImport: { records: [{ ...validRecord, locationId: "выдуманная-точка" }] } },
+      { locations: [{ id: "loc-1" }] },
+    );
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    const row = await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 0);
+    assert.equal(row.decision, "approved", "решение остаётся даже если импорт ничего не занёс");
+  });
+
+  it("позиция вне 1–8 или неположительный вес — запись пропускается", async () => {
+    const { db, inserted } = coffeeImportStub({
+      coffeeImport: {
+        records: [
+          { ...validRecord, position: 9 },
+          { ...validRecord, filledWeight: 0 },
+          { ...validRecord, enteredDate: "не дата" },
+        ],
+      },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 0);
+  });
+
+  it("точно такая же запись уже есть (точка/позиция/дата/вес/упаковки) — не дублирует", async () => {
+    const { db, inserted } = coffeeImportStub(
+      { coffeeImport: { records: [validRecord] } },
+      { existingRefills: [{ id: "existing-1" }] },
+    );
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 0, "повторное одобрение/ретрай импорта не плодит дубли");
+  });
+
+  it("необязательные поля (набор, вес до досыпки) переносятся, если валидны", async () => {
+    const { db, inserted } = coffeeImportStub({
+      coffeeImport: { records: [{ ...validRecord, containerNumber: 7, measuredBefore: 200 }] },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted[0].containerNumber, 7);
+    assert.equal(inserted[0].measuredBefore, 200);
+  });
+
+  it("набор вне 1–27 — молча отбрасывается (не вся запись, только поле)", async () => {
+    const { db, inserted } = coffeeImportStub({
+      coffeeImport: { records: [{ ...validRecord, containerNumber: 99 }] },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 1, "запись всё равно заносится");
+    assert.equal(inserted[0].containerNumber, null);
+  });
+
+  it("одобрение без coffeeImport-нагрузки ничего не заносит (обычные согласования)", async () => {
+    const { db, inserted } = coffeeImportStub({ facts: { сумма: 1 } });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(inserted.length, 0);
   });
 });

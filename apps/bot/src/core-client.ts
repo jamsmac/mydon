@@ -506,4 +506,42 @@ export class CoreClient {
     if (!res.ok) throw new Error(`Core ответил ${res.status} на /attachments`);
     return (await res.json()) as { id: string; url: string };
   }
+
+  // ── Кофе-бункеры: ручные кофемашины, ежедневная заливка/мойка ────────────
+
+  /** Точки с кофемашинами. */
+  coffeeLocations(): Promise<{ id: string; name: string; isActive: boolean }[]> {
+    return this.request("/coffee/locations");
+  }
+
+  /** Позиция бункера 1–8 → допустимые ингредиенты (для подсказки технику при выборе). */
+  coffeeBunkerConfig(): Promise<{ position: number; ingredientId: string; ingredientName: string }[]> {
+    return this.request("/coffee/bunker-config");
+  }
+
+  /** Занести заливку бункера («Ввод данных»). */
+  submitCoffeeRefill(input: {
+    locationId: string;
+    position: number;
+    containerNumber?: number;
+    ingredientId?: string;
+    filledWeight: number;
+    measuredBefore?: number;
+    packageCount?: number;
+    enteredDate: string;
+    createdBy?: string;
+  }): Promise<{ id: string }> {
+    return this.request("/coffee/refill", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Отметить мойку/обслуживание бункера или машины целиком. */
+  recordCoffeeWash(input: {
+    locationId: string;
+    position?: number;
+    kind?: "wash" | "clean" | "replace" | "service";
+    note?: string;
+    performedBy?: string;
+  }): Promise<{ id: string }> {
+    return this.request("/coffee/wash", { method: "POST", body: JSON.stringify(input) });
+  }
 }

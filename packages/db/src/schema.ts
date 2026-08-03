@@ -21,7 +21,7 @@ import {
   uniqueIndex,
   check,
 } from "drizzle-orm/pg-core";
-import type { CashCategorySummary } from "@mydon/shared";
+import type { CashCategorySummary, RecipeLine } from "@mydon/shared";
 
 // ── Перечисления ──
 export const domainEnum = pgEnum("domain", ["globerent", "vendhub", "personal", "mydon"]);
@@ -958,6 +958,214 @@ export const vendingSyncRun = pgTable("vending_sync_run", {
   durationMs: integer("duration_ms"),
 });
 
+// ── Кофе-вендинг: бункеры, вес, мойка, ингредиенты ──────────────────────────
+// Ручные кофемашины на точках владельца — Ourvend их не видит (нет сетевого
+// сбора), поэтому весь учёт человеческий: техник обходит точки и заносит вес.
+// Модель сверена с уже работающим у владельца приложением-референсом
+// (vendhubunker) и портирована с трёх доноров (VendHub-OS Container/
+// ContainerWeighing/WashingSchedule/Recipe, mydon-command-center
+// BunkerWeighing/reconcile, mydon-agent-os refill_events/component_events) —
+// везде независимо сошлись на одной и той же форме: точка → позиция бункера
+// (1–8) → физический сменный контейнер («набор», 1–27, техники их
+// перевешивают между точками) → вес.
+//
+// Тара: у каждого физического контейнера («набора») в каждой позиции свой
+// пустой вес (эталон из Настроек, ~600–680г) — чистый вес ингредиента при
+// заливке = filledWeight − тара(набор, позиция). Без тары зачёт возможен
+// только по факту (сырой вес) — coffee-calc.ts требует тару явно, не гадает.
+
+export const coffeeWashEventKindEnum = pgEnum("coffee_wash_event_kind", ["wash", "clean", "replace", "service"]);
+
+/** Точка (адрес), где стоит кофемашина. */
+export const coffeeLocation = pgTable("coffee_location", {
+  id: id(),
+  name: text("name").notNull().unique(),
+  sortOrder: integer("sort_order").default(0).notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: createdAt(),
+});
+
+/** Ингредиент бункера (молоко, кофе, сахар, чай…) — canonical-имя, без алиасов (список закрытый, 8 позиций). */
+export const coffeeIngredient = pgTable("coffee_ingredient", {
+  id: id(),
+  name: text("name").notNull().unique(),
+  unit: text("unit").default("g").notNull(),
+  createdAt: createdAt(),
+});
+
+/**
+ * Какие ингредиенты вообще заливаются в позицию бункера 1–8 — ОДНА
+ * конфигурация на все точки (машины у владельца унифицированы), не
+ * per-точка. Это СПИСОК допустимых ингредиентов на позицию, не жёсткая
+ * привязка одна-к-одной: например позиция 3 у владельца держит и лимонный
+ * чай, и матчу — техник заправляет то, что есть на складе (Настройки →
+ * теги ингредиентов с ×/+ на позицию, порт 1:1 с референсным приложением).
+ * Позиция без ни одной строки — бункер не используется («Бункер 8 — Пусто»).
+ */
+export const coffeeBunkerConfig = pgTable(
+  "coffee_bunker_config",
+  {
+    id: id(),
+    position: integer("position").notNull(),
+    ingredientId: uuid("ingredient_id")
+      .references(() => coffeeIngredient.id)
+      .notNull(),
+  },
+  (t) => [
+    uniqueIndex("coffee_bunker_config_position_ingredient_key").on(t.position, t.ingredientId),
+    index("coffee_bunker_config_position_idx").on(t.position),
+    check("coffee_bunker_config_position_range", sql`${t.position} between 1 and 8`),
+  ],
+);
+
+/**
+ * Тара физического контейнера («набор» 1–27) в позиции 1–8 — эталонный
+ * пустой вес, грамм. Матрица 27×8 задаётся в Настройках техником один раз
+ * (калибровка); пусто — контейнер в этой позиции ещё не калибровали, чистый
+ * вес посчитать нельзя, только сырой.
+ */
+export const coffeeContainerTare = pgTable(
+  "coffee_container_tare",
+  {
+    id: id(),
+    containerNumber: integer("container_number").notNull(),
+    position: integer("position").notNull(),
+    tareWeight: integer("tare_weight"),
+  },
+  (t) => [
+    uniqueIndex("coffee_container_tare_key").on(t.containerNumber, t.position),
+    check("coffee_container_tare_container_range", sql`${t.containerNumber} between 1 and 27`),
+    check("coffee_container_tare_position_range", sql`${t.position} between 1 and 8`),
+  ],
+);
+
+/**
+ * Ежедневная заливка бункера («Ввод данных») — источник истины расхода.
+ * `measuredBefore` — вес ДО досыпки (если техник взвесил остаток перед тем,
+ * как досыпать) — опционально: даёт точный расход с прошлой заливки этой же
+ * позиции на этой же точке; без него расход виден только по числу упаковок
+ * (грубее, см. coffee-calc.ts consumedSince()). `ingredientId` — пусто, если
+ * у позиции только один допустимый ингредиент (тогда очевиден из
+ * `coffee_bunker_config`); обязателен, если их несколько — иначе расход по
+ * конкретному ингредиенту не восстановить (см. coffee.service.ts).
+ */
+export const coffeeRefill = pgTable(
+  "coffee_refill",
+  {
+    id: id(),
+    locationId: uuid("location_id")
+      .references(() => coffeeLocation.id)
+      .notNull(),
+    position: integer("position").notNull(),
+    /** «Набор» — номер физического контейнера, если техник его записал. */
+    containerNumber: integer("container_number"),
+    ingredientId: uuid("ingredient_id").references(() => coffeeIngredient.id),
+    filledWeight: integer("filled_weight").notNull(),
+    measuredBefore: integer("measured_before"),
+    packageCount: integer("package_count").default(1).notNull(),
+    /** «Дата» из формы — календарная дата обхода, без времени. */
+    enteredDate: date("entered_date").notNull(),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("coffee_refill_location_position_idx").on(t.locationId, t.position, t.enteredDate),
+    check("coffee_refill_position_range", sql`${t.position} between 1 and 8`),
+    check("coffee_refill_container_range", sql`${t.containerNumber} is null or ${t.containerNumber} between 1 and 27`),
+  ],
+);
+
+/**
+ * Расход воды/стаканчиков/крышек по точке за день — отдельно от бункеров
+ * (они не ингредиент из бункера). Одна строка на (точка, дата) — повторный
+ * ввод за тот же день правит её же, а не плодит дубли.
+ */
+export const coffeeConsumable = pgTable(
+  "coffee_consumable",
+  {
+    id: id(),
+    locationId: uuid("location_id")
+      .references(() => coffeeLocation.id)
+      .notNull(),
+    loggedDate: date("logged_date").notNull(),
+    water: integer("water").default(0).notNull(),
+    cups: integer("cups").default(0).notNull(),
+    lids: integer("lids").default(0).notNull(),
+    createdBy: text("created_by"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("coffee_consumable_location_date_key").on(t.locationId, t.loggedDate)],
+);
+
+/**
+ * Мойка/обслуживание бункера или машины целиком (`position: null` — вся
+ * точка). Событийный журнал, не расписание — план обслуживания (частота по
+ * дням) на первом шаге не нужен владельцу, история фактов важнее.
+ */
+export const coffeeWashLog = pgTable(
+  "coffee_wash_log",
+  {
+    id: id(),
+    locationId: uuid("location_id")
+      .references(() => coffeeLocation.id)
+      .notNull(),
+    position: integer("position"),
+    kind: coffeeWashEventKindEnum("kind").default("wash").notNull(),
+    note: text("note"),
+    performedBy: text("performed_by"),
+    performedAt: timestamp("performed_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("coffee_wash_log_location_idx").on(t.locationId, t.performedAt),
+    check("coffee_wash_log_position_range", sql`${t.position} is null or ${t.position} between 1 and 8`),
+  ],
+);
+
+/**
+ * Товар кофемашины (Американо, Капучино…) и его состав — тот же формат
+ * `RecipeLine`, что `recipeCost()`/`consumptionReport()` в `@mydon/shared`
+ * (перенесено из VHM24 `product.types.ts`, уже используется общим рецептом
+ * entity — здесь тот же контракт, своя таблица по той же причине, что и у
+ * `vendingProduct`: движок вендинга держит свою схему, общую БД не сливаем).
+ * Себестоимость и расход считаются на чтении из состава и текущих цен
+ * ингредиентов — не хранятся отдельно, чтобы не разъехаться с ценами.
+ */
+export const coffeeProduct = pgTable("coffee_product", {
+  id: id(),
+  name: text("name").notNull().unique(),
+  recipe: jsonb("recipe").$type<RecipeLine[]>().default([]).notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: createdAt(),
+});
+
+/**
+ * Проданные чашки по точке за день — вводится сотрудником вручную: у этих
+ * машин нет сетевого сбора и POS не подключён, «продажа» здесь факт с чужих
+ * слов, как и весь остальной учёт вендинга. Источник «продаж» для сверки
+ * факт/ожидание: `consumptionReport(coffee_sale × coffee_product.recipe)`
+ * даёт ОЖИДАЕМЫЙ расход ингредиента, `coffee_refill` (вес) — ФАКТИЧЕСКИЙ;
+ * расхождение за порогом — сигнал на разбор (`coffee-calc.ts`
+ * `reconcileConsumption()`). Одна строка на (точка, товар, день) — повторный
+ * ввод за тот же день правит её же, не плодит дубли (как у `coffee_consumable`).
+ */
+export const coffeeSale = pgTable(
+  "coffee_sale",
+  {
+    id: id(),
+    locationId: uuid("location_id")
+      .references(() => coffeeLocation.id)
+      .notNull(),
+    productId: uuid("product_id")
+      .references(() => coffeeProduct.id)
+      .notNull(),
+    loggedDate: date("logged_date").notNull(),
+    quantity: integer("quantity").default(0).notNull(),
+    createdBy: text("created_by"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("coffee_sale_location_product_date_key").on(t.locationId, t.productId, t.loggedDate)],
+);
+
 /**
  * Полная схема — для drizzle-клиента.
  *
@@ -1011,4 +1219,14 @@ export const schema = {
   vendingCashSession,
   vendingUnmatched,
   vendingSyncRun,
+  // Кофе-вендинг: бункеры, тара, ежедневная заливка, расходники, мойка.
+  coffeeLocation,
+  coffeeIngredient,
+  coffeeBunkerConfig,
+  coffeeContainerTare,
+  coffeeRefill,
+  coffeeConsumable,
+  coffeeWashLog,
+  coffeeProduct,
+  coffeeSale,
 };
