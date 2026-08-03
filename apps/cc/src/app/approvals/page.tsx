@@ -1,6 +1,7 @@
 import { core, CoreUnavailable, type Approval } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
 import { ApprovalCard } from "../../components/approval-card";
+import { coffeeImportDetails, stripPayload } from "../../lib/approval-details";
 import { when } from "../../lib/format";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +23,7 @@ export default async function Approvals() {
 
   const pending = all.filter((a) => a.decision === "pending");
   const decided = all.filter((a) => a.decision !== "pending");
+  const importDetails = await coffeeImportDetails(pending);
 
   return (
     <>
@@ -36,7 +38,7 @@ export default async function Approvals() {
           Порог автономии T0: агенты только предлагают, сами не действуют.
         </div>
       ) : (
-        pending.map((a) => <ApprovalCard key={a.id} item={a} />)
+        pending.map((a) => <ApprovalCard key={a.id} item={stripPayload(a)} details={importDetails.get(a.id)} />)
       )}
 
       {decided.length > 0 && (

@@ -274,6 +274,8 @@ export interface Approval {
   decision: "pending" | "approved" | "rejected" | "clarify";
   createdAt: string;
   decidedAt: string | null;
+  /** Что именно предлагается сделать — сырой payload запроса (Core отдаёт всегда). */
+  payload?: Record<string, unknown> | null;
 }
 
 export interface Entity {

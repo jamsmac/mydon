@@ -3,9 +3,14 @@
 import { useState, useTransition } from "react";
 import { decideApproval } from "../app/actions";
 import type { Approval } from "../lib/core";
+import type { CoffeeImportPart } from "../lib/coffee-import-summary";
 
-/** Карточка согласования с теми же тремя кнопками, что и в Telegram. */
-export function ApprovalCard({ item }: { item: Approval }) {
+/**
+ * Карточка согласования с теми же тремя кнопками, что и в Telegram.
+ * details — сводка «что внутри» для больших импортов: считается на сервере
+ * (payload в браузер не едет), без неё карточка выглядит как раньше.
+ */
+export function ApprovalCard({ item, details }: { item: Approval; details?: CoffeeImportPart[] | null }) {
   const [pending, startTransition] = useTransition();
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
 
@@ -25,6 +30,24 @@ export function ApprovalCard({ item }: { item: Approval }) {
     <article className={result ? "card" : "dec"}>
       <div className="dt">{item.action}</div>
       <div className="dby">просит {item.agent} · уровень {item.tier}</div>
+
+      {details && details.length > 0 && (
+        <div className="rows" style={{ margin: "10px 0" }}>
+          {details.map((p) => (
+            <div className="row" key={p.label}>
+              <div className="t">
+                <b>
+                  {p.label}: {p.count.toLocaleString("ru-RU")}
+                </b>
+                <small>
+                  {p.from && p.to && (p.from === p.to ? p.from : `${p.from} — ${p.to}`)}
+                  {p.notes.length > 0 ? ` · ${p.notes.join(" · ")}` : ""}
+                </small>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {result ? (
         <div
