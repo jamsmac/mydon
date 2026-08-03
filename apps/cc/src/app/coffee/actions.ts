@@ -152,6 +152,31 @@ export async function removeCoffeeWashSchedule(id: string): Promise<ActionResult
   }
 }
 
+/** Привязать/отвязать кофе-точку от карточки автомата реестра (Настройки). */
+export async function linkCoffeeLocation(locationId: string, entityId: string | null): Promise<ActionResult> {
+  try {
+    await core.linkCoffeeLocation(locationId, entityId);
+    revalidatePath("/domain/vendhub");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
+/** Автопривязка точек по названию — только однозначные совпадения. */
+export async function autoLinkCoffeeLocations(): Promise<ActionResult> {
+  try {
+    const res = await core.autoLinkCoffeeLocations();
+    revalidatePath("/domain/vendhub");
+    const parts = [`привязано: ${res.linked}`];
+    if (res.ambiguous.length > 0) parts.push(`неоднозначно: ${res.ambiguous.join(", ")}`);
+    if (res.unmatched.length > 0) parts.push(`не найдено: ${res.unmatched.join(", ")}`);
+    return { ok: true, message: parts.join(" · ") };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
 /**
  * Завести задачу по сигналу вкладки «Сверка» (недолив/расхождение/просроченная
  * мойка) — та же очередь, что «Быстрые действия» дашборда VendHub: домен

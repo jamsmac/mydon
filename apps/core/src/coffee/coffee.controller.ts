@@ -168,6 +168,15 @@ export class RecordSaleDto {
   createdBy?: string;
 }
 
+export class LinkLocationDto {
+  @IsUUID()
+  locationId!: string;
+
+  // null — снять привязку; UUID — привязать к карточке автомата.
+  @IsOptional() @IsUUID()
+  entityId?: string | null;
+}
+
 export class SetWashScheduleDto {
   @IsUUID()
   locationId!: string;
@@ -212,6 +221,23 @@ export class CoffeeController {
   @Get("locations")
   locations() {
     return this.coffee.locations();
+  }
+
+  // ── Привязка точек к автоматам реестра ─────────────────────────────────
+
+  @Get("machines")
+  machineCandidates() {
+    return this.coffee.machineCandidates();
+  }
+
+  @Put("location-link")
+  linkLocation(@Body() dto: LinkLocationDto) {
+    return this.coffee.linkLocation(dto.locationId, dto.entityId ?? null);
+  }
+
+  @Post("location-link/auto")
+  autoLinkLocations() {
+    return this.coffee.autoLinkLocations();
   }
 
   // ── Настройки ─────────────────────────────────────────────────────────
