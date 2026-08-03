@@ -260,6 +260,12 @@ export class CoffeeController {
     return this.coffee.autoLinkLocations();
   }
 
+  /** История размещений: какой аппарат когда на какой точке стоял. */
+  @Get("placements")
+  placements(@Query("locationId") locationId?: string) {
+    return this.coffee.placements(locationId || undefined);
+  }
+
   // ── Настройки ─────────────────────────────────────────────────────────
 
   @Get("bunker-config")

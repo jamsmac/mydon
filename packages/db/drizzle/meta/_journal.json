@@ -232,6 +232,13 @@
       "when": 1785750048035,
       "tag": "0032_coffee_container_return",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1785788298850,
+      "tag": "0033_coffee_machine_placement",
+      "breakpoints": true
     }
   ]
 }

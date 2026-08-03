@@ -10,6 +10,7 @@ import type {
   CoffeeLocationReconcileGroup,
   CoffeeLocationSummaryRow,
   CoffeeMachineCandidate,
+  CoffeePlacementRow,
   CoffeeRefillRow,
   CoffeeStockLevelRow,
   CoffeeTareCell,
@@ -69,6 +70,8 @@ export function CoffeeClient(props: {
   /** Журнал: история заливок (включая импорт Telegram) и возвратов наборов. */
   refillJournal: CoffeeRefillRow[];
   containerReturns: CoffeeContainerReturnRow[];
+  /** История размещений: какой аппарат когда на какой точке стоял. */
+  placements: CoffeePlacementRow[];
   /** Первый активный человек VendHub — кому уходит задача из «Сверки». */
   defaultOwnerRef: string | null;
 }) {
@@ -121,6 +124,7 @@ export function CoffeeClient(props: {
           locations={props.locations}
           washSchedules={props.washSchedules}
           machineCandidates={props.machineCandidates}
+          placements={props.placements}
         />
       )}
     </>
@@ -686,6 +690,7 @@ function SettingsTab({
   locations,
   washSchedules,
   machineCandidates,
+  placements,
 }: {
   bunkerConfig: CoffeeBunkerIngredient[];
   tareGrid: CoffeeTareCell[];
@@ -693,11 +698,15 @@ function SettingsTab({
   locations: CoffeeLocation[];
   washSchedules: CoffeeWashScheduleRow[];
   machineCandidates: CoffeeMachineCandidate[];
+  placements: CoffeePlacementRow[];
 }) {
   return (
     <>
       <div className="section-title">Привязка точек к автоматам реестра</div>
       <LocationLinkSection locations={locations} machines={machineCandidates} />
+
+      <div className="section-title">История размещений</div>
+      <PlacementHistorySection placements={placements} />
 
       <div className="section-title">Ингредиенты по бункерам</div>
       {POSITIONS.map((p) => (
@@ -713,6 +722,38 @@ function SettingsTab({
       <div className="section-title">Расписание мойки/обслуживания</div>
       <WashScheduleSection locations={locations} schedules={washSchedules} />
     </>
+  );
+}
+
+/**
+ * История размещений: один аппарат мог работать на разных точках, на одной
+ * точке — разные аппараты (слово владельца). Перепривязка в секции выше не
+ * стирает прошлое — закрывает период и открывает новый; здесь видно всё.
+ */
+function PlacementHistorySection({ placements }: { placements: CoffeePlacementRow[] }) {
+  if (placements.length === 0) {
+    return <p className="hint">Пока пусто: история копится сама при каждой привязке/перестановке аппарата.</p>;
+  }
+  const period = (p: CoffeePlacementRow) =>
+    `${p.startDate ?? "с неизвестной даты"} — ${p.endDate ?? "сейчас"}`;
+  return (
+    <div className="rows">
+      {placements.map((p) => (
+        <div className="row" key={p.id}>
+          <div className="t">
+            <b>
+              {p.locationName} · {p.machineName}
+              {p.machineRef ? ` №${p.machineRef}` : ""}
+            </b>
+            <small>
+              {period(p)}
+              {p.note ? ` · ${p.note}` : ""}
+            </small>
+          </div>
+          <span className={`pill ${p.endDate === null ? "ok" : ""}`}>{p.endDate === null ? "стоит сейчас" : "история"}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
