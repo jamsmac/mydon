@@ -30,6 +30,7 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       reconcile,
       washScheduleStatus,
       washSchedules,
+      machineCandidates,
     ] = await Promise.all([
       core.coffeeLocations(),
       core.coffeeBunkerConfig(),
@@ -42,6 +43,7 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       core.coffeeReconcileAll(from, to),
       core.coffeeWashScheduleStatus(),
       core.coffeeWashSchedules(),
+      core.coffeeMachineCandidates(),
     ]);
     return (
       <CoffeeClient
@@ -58,6 +60,7 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
         reconcileTo={to}
         washScheduleStatus={washScheduleStatus}
         washSchedules={washSchedules}
+        machineCandidates={machineCandidates}
         defaultOwnerRef={defaultOwnerRef}
       />
     );

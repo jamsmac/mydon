@@ -8,6 +8,7 @@ import type {
   CoffeeLocation,
   CoffeeLocationReconcileGroup,
   CoffeeLocationSummaryRow,
+  CoffeeMachineCandidate,
   CoffeeRefillRow,
   CoffeeStockLevelRow,
   CoffeeTareCell,
@@ -16,8 +17,10 @@ import type {
 } from "../../lib/core";
 import {
   addBunkerIngredient,
+  autoLinkCoffeeLocations,
   createCoffeeAlertTask,
   ingestCoffeeStock,
+  linkCoffeeLocation,
   recordCoffeeConsumable,
   removeBunkerIngredient,
   removeCoffeeWashSchedule,
@@ -61,6 +64,7 @@ export function CoffeeClient(props: {
   reconcileTo: string;
   washScheduleStatus: CoffeeWashScheduleStatusRow[];
   washSchedules: CoffeeWashScheduleRow[];
+  machineCandidates: CoffeeMachineCandidate[];
   /** Первый активный человек VendHub — кому уходит задача из «Сверки». */
   defaultOwnerRef: string | null;
 }) {
@@ -106,6 +110,7 @@ export function CoffeeClient(props: {
           stockLevels={props.stockLevels}
           locations={props.locations}
           washSchedules={props.washSchedules}
+          machineCandidates={props.machineCandidates}
         />
       )}
     </>
@@ -572,15 +577,20 @@ function SettingsTab({
   stockLevels,
   locations,
   washSchedules,
+  machineCandidates,
 }: {
   bunkerConfig: CoffeeBunkerIngredient[];
   tareGrid: CoffeeTareCell[];
   stockLevels: CoffeeStockLevelRow[];
   locations: CoffeeLocation[];
   washSchedules: CoffeeWashScheduleRow[];
+  machineCandidates: CoffeeMachineCandidate[];
 }) {
   return (
     <>
+      <div className="section-title">Привязка точек к автоматам реестра</div>
+      <LocationLinkSection locations={locations} machines={machineCandidates} />
+
       <div className="section-title">Ингредиенты по бункерам</div>
       {POSITIONS.map((p) => (
         <BunkerIngredients key={p} position={p} items={bunkerConfig.filter((c) => c.position === p)} />
@@ -594,6 +604,78 @@ function SettingsTab({
 
       <div className="section-title">Расписание мойки/обслуживания</div>
       <WashScheduleSection locations={locations} schedules={washSchedules} />
+    </>
+  );
+}
+
+/**
+ * Точка кофе ↔ карточка автомата в реестре: постоянная связь по id (переживает
+ * переименования), автоподбор — по названию, только однозначные совпадения.
+ * Через карточку точка получает серийник, координаты и место в общем учёте.
+ */
+function LocationLinkSection({ locations, machines }: { locations: CoffeeLocation[]; machines: CoffeeMachineCandidate[] }) {
+  const [pending, start] = useTransition();
+  const [note, setNote] = useState<string | null>(null);
+
+  const machineLabel = (m: CoffeeMachineCandidate) =>
+    `${m.name}${m.ref ? ` · №${m.ref}` : ""}${m.point ? ` · ${m.point}` : ""}`;
+  const linked = locations.filter((l) => l.entityId !== null).length;
+
+  return (
+    <>
+      <p className="hint">
+        Привязано {linked} из {locations.length}. Связь даёт точке серийник и координаты карточки автомата.{" "}
+        {machines.length === 0 && "В реестре пока нет карточек автоматов — они появляются из сбора/выгрузок ПО."}
+      </p>
+      {machines.length > 0 && (
+        <button
+          className="tag-add"
+          disabled={pending}
+          onClick={() =>
+            start(async () => {
+              const res = await autoLinkCoffeeLocations();
+              setNote(res.message ?? (res.ok ? "Готово" : "Не получилось"));
+            })
+          }
+        >
+          Автопривязка по названию
+        </button>
+      )}
+      {note && <p className="hint">{note}</p>}
+      <table className="coffee-table">
+        <thead>
+          <tr>
+            <th>Точка</th>
+            <th>Автомат в реестре</th>
+          </tr>
+        </thead>
+        <tbody>
+          {locations.map((l) => (
+            <tr key={l.id}>
+              <td>{l.name}</td>
+              <td>
+                <select
+                  disabled={pending || machines.length === 0}
+                  value={l.entityId ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    start(async () => {
+                      await linkCoffeeLocation(l.id, v === "" ? null : v);
+                    });
+                  }}
+                >
+                  <option value="">— не привязана —</option>
+                  {machines.map((m) => (
+                    <option key={m.entityId} value={m.entityId}>
+                      {machineLabel(m)}
+                    </option>
+                  ))}
+                </select>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </>
   );
 }

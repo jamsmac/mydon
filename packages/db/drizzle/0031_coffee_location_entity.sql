@@ -1,0 +1,2 @@
+ALTER TABLE "coffee_location" ADD COLUMN "entity_id" uuid;--> statement-breakpoint
+ALTER TABLE "coffee_location" ADD CONSTRAINT "coffee_location_entity_id_entity_id_fk" FOREIGN KEY ("entity_id") REFERENCES "public"."entity"("id") ON DELETE no action ON UPDATE no action;

@@ -12,6 +12,7 @@ import {
   coffeeStock,
   coffeeWashLog,
   coffeeWashSchedule,
+  entity,
 } from "@mydon/db";
 import {
   buildLocationSummary,
@@ -20,6 +21,7 @@ import {
   costOf,
   fillStatus,
   netWeight,
+  normalizeSourceKey,
   reconcileConsumption,
   type LatestRefillRow,
   type ReconcileResult,
@@ -38,6 +40,19 @@ export interface LocationRow {
   id: string;
   name: string;
   isActive: boolean;
+  /** Карточка автомата в реестре (entity, type=machine). null — точка не привязана. */
+  entityId: string | null;
+  /** Имя и серийник привязанного автомата — для отображения; null без привязки. */
+  machineName: string | null;
+  machineRef: string | null;
+}
+
+/** Кандидат привязки: автомат из реестра с адресом точки из его карточки. */
+export interface MachineCandidateRow {
+  entityId: string;
+  name: string;
+  ref: string | null;
+  point: string | null;
 }
 
 export interface BunkerIngredientRow {
@@ -212,8 +227,98 @@ export class CoffeeService {
   // ── Точки ──────────────────────────────────────────────────────────────
 
   async locations(): Promise<LocationRow[]> {
-    const rows = await this.db.select().from(coffeeLocation).orderBy(asc(coffeeLocation.sortOrder));
-    return rows.map((r) => ({ id: r.id, name: r.name, isActive: r.isActive }));
+    // leftJoin, не innerJoin: непривязанные точки должны остаться в списке.
+    const rows = await this.db
+      .select({
+        id: coffeeLocation.id,
+        name: coffeeLocation.name,
+        isActive: coffeeLocation.isActive,
+        entityId: coffeeLocation.entityId,
+        machineName: entity.name,
+        machineRef: entity.externalRef,
+      })
+      .from(coffeeLocation)
+      .leftJoin(entity, eq(coffeeLocation.entityId, entity.id))
+      .orderBy(asc(coffeeLocation.sortOrder));
+    return rows;
+  }
+
+  // ── Привязка точек к автоматам реестра ──────────────────────────────────
+  // Кофе-точка — тот же физический автомат, что и карточка реестра (у неё
+  // серийник, координаты, адрес «точка»). Постоянная связь — по id карточки;
+  // имена участвуют только в автоподборе.
+
+  /** Автоматы реестра — кандидаты привязки (id, имя, серийник, адрес точки). */
+  async machineCandidates(): Promise<MachineCandidateRow[]> {
+    const rows = await this.db
+      .select({ id: entity.id, name: entity.name, ref: entity.externalRef, attrs: entity.attrs })
+      .from(entity)
+      .where(eq(entity.type, "machine"));
+    return rows
+      .map((m) => {
+        const point = (m.attrs as Record<string, unknown>)["точка"];
+        return {
+          entityId: m.id,
+          name: m.name,
+          ref: m.ref,
+          point: typeof point === "string" && point.trim().length > 0 ? point.trim() : null,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  }
+
+  /** Привязать/отвязать точку от карточки автомата. entityId=null — снять связь. */
+  async linkLocation(locationId: string, entityId: string | null): Promise<{ ok: true }> {
+    const [loc] = await this.db.select({ id: coffeeLocation.id }).from(coffeeLocation).where(eq(coffeeLocation.id, locationId));
+    if (!loc) throw new NotFoundException(`Точка ${locationId} не найдена`);
+    if (entityId !== null) {
+      const [card] = await this.db
+        .select({ id: entity.id, type: entity.type })
+        .from(entity)
+        .where(eq(entity.id, entityId));
+      if (!card) throw new NotFoundException(`Карточка ${entityId} не найдена`);
+      if (card.type !== "machine") throw new BadRequestException("Привязать можно только карточку автомата (type=machine)");
+    }
+    await this.db.update(coffeeLocation).set({ entityId }).where(eq(coffeeLocation.id, locationId));
+    return { ok: true };
+  }
+
+  /**
+   * Автопривязка по названию: нормализованное имя точки сверяется с адресом
+   * («точка» в карточке) и именем автомата. Привязывает ТОЛЬКО однозначные
+   * совпадения — ноль или несколько кандидатов оставляются владельцу
+   * (неоднозначность не угадывается). Уже привязанные точки не трогаются.
+   */
+  async autoLinkLocations(): Promise<{ linked: number; ambiguous: string[]; unmatched: string[] }> {
+    const [locations, machines] = await Promise.all([this.locations(), this.machineCandidates()]);
+
+    const candidatesByKey = new Map<string, string[]>();
+    const add = (key: string, entityId: string) => {
+      const list = candidatesByKey.get(key) ?? [];
+      if (!list.includes(entityId)) list.push(entityId);
+      candidatesByKey.set(key, list);
+    };
+    for (const m of machines) {
+      if (m.point) add(normalizeSourceKey(m.point), m.entityId);
+      add(normalizeSourceKey(m.name), m.entityId);
+    }
+
+    let linked = 0;
+    const ambiguous: string[] = [];
+    const unmatched: string[] = [];
+    for (const loc of locations) {
+      if (loc.entityId !== null) continue; // ручную привязку не перетираем
+      const found = candidatesByKey.get(normalizeSourceKey(loc.name)) ?? [];
+      if (found.length === 1) {
+        await this.linkLocation(loc.id, found[0]!);
+        linked += 1;
+      } else if (found.length > 1) {
+        ambiguous.push(loc.name);
+      } else {
+        unmatched.push(loc.name);
+      }
+    }
+    return { linked, ambiguous, unmatched };
   }
 
   // ── Настройки: ингредиенты по позициям бункера ────────────────────────

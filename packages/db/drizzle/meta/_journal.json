@@ -218,6 +218,13 @@
       "when": 1785741288028,
       "tag": "0030_coffee_wash_schedule",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1785746652233,
+      "tag": "0031_coffee_location_entity",
+      "breakpoints": true
     }
   ]
 }

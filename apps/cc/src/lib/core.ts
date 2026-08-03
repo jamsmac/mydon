@@ -126,6 +126,18 @@ export interface CoffeeLocation {
   id: string;
   name: string;
   isActive: boolean;
+  /** Карточка автомата в реестре. null — точка не привязана. */
+  entityId: string | null;
+  machineName: string | null;
+  machineRef: string | null;
+}
+
+/** Автомат реестра — кандидат привязки кофе-точки. */
+export interface CoffeeMachineCandidate {
+  entityId: string;
+  name: string;
+  ref: string | null;
+  point: string | null;
 }
 
 export interface CoffeeBunkerIngredient {
@@ -1199,6 +1211,11 @@ export const core = {
   coffeeStockLevels: () => get<CoffeeStockLevelRow[]>("/coffee/stock"),
   ingestCoffeeStock: (input: { countedAt?: string; items: { ingredientId: string; quantity: number }[] }) =>
     send<{ items: number; adjustments: unknown[] }>("/coffee/stock", "POST", input),
+  coffeeMachineCandidates: () => get<CoffeeMachineCandidate[]>("/coffee/machines"),
+  linkCoffeeLocation: (locationId: string, entityId: string | null) =>
+    send<{ ok: true }>("/coffee/location-link", "PUT", { locationId, ...(entityId !== null ? { entityId } : {}) }),
+  autoLinkCoffeeLocations: () =>
+    send<{ linked: number; ambiguous: string[]; unmatched: string[] }>("/coffee/location-link/auto", "POST", {}),
   coffeeWashScheduleStatus: () => get<CoffeeWashScheduleStatusRow[]>("/coffee/wash-schedule"),
   coffeeWashSchedules: () => get<CoffeeWashScheduleRow[]>("/coffee/wash-schedule/all"),
   setCoffeeWashSchedule: (input: {

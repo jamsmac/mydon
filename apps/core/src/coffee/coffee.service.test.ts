@@ -12,6 +12,7 @@ import {
   coffeeStock,
   coffeeWashLog,
   coffeeWashSchedule,
+  entity,
 } from "@mydon/db";
 import { CoffeeService } from "./coffee.service";
 
@@ -33,6 +34,8 @@ function coffeeDb(tables: {
   washLog?: unknown[];
   stock?: unknown[];
   washSchedule?: unknown[];
+  /** Карточки реестра (entity) — кандидаты привязки точек. */
+  registry?: unknown[];
 }) {
   const inserts: { table: string; values: unknown }[] = [];
   const updates: { table: string; values: unknown }[] = [];
@@ -50,6 +53,7 @@ function coffeeDb(tables: {
     if (t === coffeeWashLog) return tables.washLog ?? [];
     if (t === coffeeStock) return tables.stock ?? [];
     if (t === coffeeWashSchedule) return tables.washSchedule ?? [];
+    if (t === entity) return tables.registry ?? [];
     return [];
   };
   const nameOf = (t: unknown): string => {
@@ -64,6 +68,7 @@ function coffeeDb(tables: {
     if (t === coffeeProduct) return "coffee_product";
     if (t === coffeeStock) return "coffee_stock";
     if (t === coffeeWashSchedule) return "coffee_wash_schedule";
+    if (t === entity) return "entity";
     return "unknown";
   };
 
@@ -74,6 +79,7 @@ function coffeeDb(tables: {
       orderBy: () => chain,
       limit: () => Promise.resolve(rows),
       innerJoin: () => chain,
+      leftJoin: () => chain,
       then: (resolve: (v: unknown[]) => void) => resolve(rows),
     };
     return chain;
@@ -585,5 +591,103 @@ describe("CoffeeService: расписание мойки (washSchedule*)", () =>
     const res = await svc.washSchedules();
     assert.equal(res.length, 2);
     assert.ok(res.every((r) => r.locationName === "AH"));
+  });
+});
+
+describe("CoffeeService: привязка точек к автоматам реестра", () => {
+  // Стаб не фильтрует .where(): проверки существования в linkLocation видят
+  // первую строку скормленного массива — тесты кормят только релевантные строки.
+  const loc = (over: Record<string, unknown> = {}) => ({
+    id: "loc-1",
+    name: "American Hospital",
+    isActive: true,
+    entityId: null,
+    machineName: null,
+    machineRef: null,
+    sortOrder: 0,
+    ...over,
+  });
+
+  it("linkLocation — неизвестная точка отклоняется, не молчаливый успех", async () => {
+    const { db } = coffeeDb({ locations: [] });
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.linkLocation("missing", "ent-1"));
+  });
+
+  it("linkLocation — карточка не-автомата (type≠machine) отклоняется", async () => {
+    const { db } = coffeeDb({ locations: [loc()], registry: [{ id: "ent-1", type: "contractor", name: "Olma" }] });
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.linkLocation("loc-1", "ent-1"));
+  });
+
+  it("linkLocation — валидная привязка пишет entityId; null снимает связь", async () => {
+    const { db, updates } = coffeeDb({
+      locations: [loc()],
+      registry: [{ id: "ent-1", type: "machine", name: "Кофемашина AH" }],
+    });
+    const svc = new CoffeeService(db);
+    await svc.linkLocation("loc-1", "ent-1");
+    await svc.linkLocation("loc-1", null);
+    assert.equal(updates.length, 2);
+    assert.equal(updates[0]!.table, "coffee_location");
+    assert.equal((updates[0]!.values as Record<string, unknown>).entityId, "ent-1");
+    assert.equal((updates[1]!.values as Record<string, unknown>).entityId, null);
+  });
+
+  it("machineCandidates — отдаёт только осмысленный адрес точки (пустая строка → null)", async () => {
+    const registry = [
+      { id: "m1", type: "machine", name: "Автомат 1", externalRef: "199", attrs: { точка: "American Hospital" } },
+      { id: "m2", type: "machine", name: "Автомат 2", externalRef: null, attrs: { точка: "  " } },
+    ];
+    const { db } = coffeeDb({ registry });
+    const svc = new CoffeeService(db);
+    const res = await svc.machineCandidates();
+    assert.equal(res.find((m) => m.entityId === "m1")!.point, "American Hospital");
+    assert.equal(res.find((m) => m.entityId === "m2")!.point, null);
+  });
+
+  it("autoLinkLocations — однозначное совпадение по адресу точки привязывается (регистр/ё не мешают)", async () => {
+    const registry = [
+      { id: "m1", type: "machine", name: "Кофемашина №1", externalRef: "101", attrs: { точка: "AMERICAN  hospital" } },
+    ];
+    const { db, updates } = coffeeDb({ locations: [loc()], registry });
+    const svc = new CoffeeService(db);
+    const res = await svc.autoLinkLocations();
+    assert.equal(res.linked, 1);
+    assert.deepEqual(res.ambiguous, []);
+    assert.deepEqual(res.unmatched, []);
+    assert.equal((updates[0]!.values as Record<string, unknown>).entityId, "m1");
+  });
+
+  it("autoLinkLocations — два автомата на одном адресе → неоднозначно, НЕ привязывается", async () => {
+    const registry = [
+      { id: "m1", type: "machine", name: "Автомат A", externalRef: "1", attrs: { точка: "American Hospital" } },
+      { id: "m2", type: "machine", name: "Автомат B", externalRef: "2", attrs: { точка: "American Hospital" } },
+    ];
+    const { db, updates } = coffeeDb({ locations: [loc()], registry });
+    const svc = new CoffeeService(db);
+    const res = await svc.autoLinkLocations();
+    assert.equal(res.linked, 0);
+    assert.deepEqual(res.ambiguous, ["American Hospital"]);
+    assert.equal(updates.length, 0);
+  });
+
+  it("autoLinkLocations — уже привязанная точка не перетирается", async () => {
+    const registry = [
+      { id: "m1", type: "machine", name: "Автомат A", externalRef: "1", attrs: { точка: "American Hospital" } },
+    ];
+    const { db, updates } = coffeeDb({ locations: [loc({ entityId: "m-old" })], registry });
+    const svc = new CoffeeService(db);
+    const res = await svc.autoLinkLocations();
+    assert.equal(res.linked, 0);
+    assert.equal(updates.length, 0);
+  });
+
+  it("autoLinkLocations — нет кандидатов → в unmatched, без выдумывания", async () => {
+    const { db, updates } = coffeeDb({ locations: [loc({ name: "Grand clinic" })], registry: [] });
+    const svc = new CoffeeService(db);
+    const res = await svc.autoLinkLocations();
+    assert.deepEqual(res.unmatched, ["Grand clinic"]);
+    assert.equal(updates.length, 0);
   });
 });

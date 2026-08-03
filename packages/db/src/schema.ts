@@ -976,12 +976,21 @@ export const vendingSyncRun = pgTable("vending_sync_run", {
 
 export const coffeeWashEventKindEnum = pgEnum("coffee_wash_event_kind", ["wash", "clean", "replace", "service"]);
 
-/** Точка (адрес), где стоит кофемашина. */
+/**
+ * Точка (адрес), где стоит кофемашина.
+ *
+ * `entityId` — связь с карточкой автомата в реестре (`entity`, type=machine):
+ * у карточки есть серийник (`externalRef`), координаты и адрес («точка» в
+ * attrs), поэтому кофе-точка через неё попадает на карту и в общий учёт.
+ * Связь по id, не по имени — переименование ничего не рвёт. Пусто — точка
+ * ещё не привязана (автоподбор по названию + ручная привязка в Настройках).
+ */
 export const coffeeLocation = pgTable("coffee_location", {
   id: id(),
   name: text("name").notNull().unique(),
   sortOrder: integer("sort_order").default(0).notNull(),
   isActive: boolean("is_active").default(true).notNull(),
+  entityId: uuid("entity_id").references(() => entity.id),
   createdAt: createdAt(),
 });
 
