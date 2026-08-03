@@ -1,6 +1,8 @@
+import Link from "next/link";
 import {
   core,
   CoreUnavailable,
+  type Entity,
   type VendingMachine,
   type VendingNeed,
   type VendingOrder,
@@ -9,6 +11,8 @@ import {
   type VendingSyncRun,
 } from "../lib/core";
 import { CoreDown } from "./core-down";
+import { NewEntityForm } from "./entity-new";
+import { typeOne } from "../lib/labels";
 
 const STATUS_LABEL: Record<VendingMachine["status"], string> = {
   ok: "в расчёте",
@@ -53,14 +57,21 @@ function color(deficit: number): "bad" | "warn" | "ok" {
   return "ok";
 }
 
+/** Тип автомата из карточки реестра: категория 10 — кофе (как на дашборде). */
+function machineKind(e: Entity): "кофе" | "снек" | null {
+  const cat = (e.attrs ?? {})["категория"];
+  if (cat === undefined || cat === null || cat === "") return null;
+  return Number(cat) === 10 ? "кофе" : "снек";
+}
+
 /**
- * Автоматы и дефицит (ТЗ Фаза 1) — вкладка «Автоматы» рабочего места VendHub.
- * Данные собирает коннектор Ourvend и кладёт в базу; здесь — что доложить по
- * каждому автомату и сводная потребность по товарам. Пусто → сбор ещё не
- * приносил данных (коннектор выключен или не запускался).
+ * Автоматы — единая вкладка рабочего места VendHub. «Автоматы» и «аппараты» —
+ * одно и то же (слово владельца), поэтому здесь И карточки реестра (всегда),
+ * И живой дефицит из Ourvend поверх, когда сбор приносил данные. Отдельного
+ * листа «Аппараты» в Каталоге больше нет.
  */
-export async function VendingPanel() {
-  let machines: VendingMachine[] = [];
+export async function VendingPanel({ machines }: { machines: Entity[] }) {
+  let ourvendMachines: VendingMachine[] = [];
   let needs: VendingNeed[] = [];
   let syncRuns: VendingSyncRun[] = [];
   let critical: VendingRunout[] = [];
@@ -77,7 +88,7 @@ export async function VendingPanel() {
   };
   try {
     let forecast: { critical: VendingRunout[] };
-    [machines, needs, forecast, purchase, orders, syncRuns] = await Promise.all([
+    [ourvendMachines, needs, forecast, purchase, orders, syncRuns] = await Promise.all([
       core.vendingMachines(),
       core.vendingDeficit(),
       core.vendingForecast(),
@@ -92,31 +103,29 @@ export async function VendingPanel() {
   const sum = (n: number) => n.toLocaleString("ru-RU");
   const syncLine = lastSyncLine(syncRuns);
 
-  const ok = machines.filter((m) => m.status === "ok");
+  const ok = ourvendMachines.filter((m) => m.status === "ok");
   const totalDeficit = ok.reduce((a, m) => a + m.deficit, 0);
   const totalCap = ok.reduce((a, m) => a + m.capacity, 0);
   const totalFilled = ok.reduce((a, m) => a + m.filled, 0);
   const fillRate = totalCap > 0 ? Math.round((totalFilled / totalCap) * 100) : 0;
+  const hasLive = ourvendMachines.length > 0;
 
-  if (machines.length === 0) {
-    return (
-      <>
-        <p className="lead">{syncLine ?? "Сбор ещё не приносил данных."}</p>
-        <div className="empty">
-          <b>Пока пусто</b>
-          Коннектор Ourvend выключен или не запускался. Задай <code>OURVEND_*</code> в окружении и запусти сбор — здесь появятся автоматы, дефицит и что доложить.
-        </div>
-      </>
-    );
-  }
+  const cards = [...machines].sort((a, b) => a.name.localeCompare(b.name, "ru"));
 
   return (
     <>
-      <p className="lead">
-        К пополнению: <b>{totalDeficit.toLocaleString("ru-RU")}</b> ед · заполненность {fillRate}% · автоматов в
-        расчёте {ok.length} из {machines.length}
-      </p>
-      {syncLine && <p className="muted">{syncLine}</p>}
+      {hasLive ? (
+        <p className="lead">
+          К пополнению: <b>{totalDeficit.toLocaleString("ru-RU")}</b> ед · заполненность {fillRate}% · автоматов в
+          расчёте {ok.length} из {ourvendMachines.length}
+        </p>
+      ) : (
+        <p className="lead">
+          Автоматов в реестре: <b>{cards.length}</b>
+          {syncLine ? ` · ${syncLine.toLowerCase()}` : " · живой сбор Ourvend ещё не приносил данных"}
+        </p>
+      )}
+      {hasLive && syncLine && <p className="muted">{syncLine}</p>}
 
       {critical.length > 0 && (
         <>
@@ -217,28 +226,32 @@ export async function VendingPanel() {
         </>
       )}
 
-      <div className="section-title">Автоматы</div>
-      <div className="rows">
-        {machines.map((m) => (
-          <div className="row" key={m.serial}>
-            <div className="t">
-              <b>{m.serial}</b>
-              <small>
-                {m.status === "ok"
-                  ? `${m.filled}/${m.capacity} · заполнено ${m.fillRate}%`
-                  : STATUS_LABEL[m.status]}
-              </small>
-            </div>
-            {m.status === "ok" ? (
-              <span className={`pill ${color(m.deficit) === "ok" ? "ok" : color(m.deficit) === "bad" ? "bad" : ""}`}>
-                −{m.deficit.toLocaleString("ru-RU")} ед
-              </span>
-            ) : (
-              <span className="pill">вне расчёта</span>
-            )}
+      {hasLive && (
+        <>
+          <div className="section-title">Дефицит по автоматам</div>
+          <div className="rows">
+            {ourvendMachines.map((m) => (
+              <div className="row" key={m.serial}>
+                <div className="t">
+                  <b>{m.serial}</b>
+                  <small>
+                    {m.status === "ok"
+                      ? `${m.filled}/${m.capacity} · заполнено ${m.fillRate}%`
+                      : STATUS_LABEL[m.status]}
+                  </small>
+                </div>
+                {m.status === "ok" ? (
+                  <span className={`pill ${color(m.deficit) === "ok" ? "ok" : color(m.deficit) === "bad" ? "bad" : ""}`}>
+                    −{m.deficit.toLocaleString("ru-RU")} ед
+                  </span>
+                ) : (
+                  <span className="pill">вне расчёта</span>
+                )}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      )}
 
       {needs.length > 0 && (
         <>
@@ -259,6 +272,44 @@ export async function VendingPanel() {
             ))}
           </div>
         </>
+      )}
+
+      {/* ── Карточки реестра: те же автоматы, паспортные данные ── */}
+      <div className="section-title">Карточки автоматов{cards.length > 0 ? ` · ${cards.length}` : ""}</div>
+      {cards.length === 0 ? (
+        <div className="empty">
+          <b>В реестре пока нет автоматов</b>
+          Добавь карточку кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+        </div>
+      ) : (
+        <div className="rows">
+          {cards.map((e) => {
+            const attrs = e.attrs ?? {};
+            const point = attrs["точка"];
+            const kind = machineKind(e);
+            return (
+              <Link href={`/card/${e.id}`} className="row" key={e.id}>
+                <div className="t">
+                  <b>{e.name}</b>
+                  <small>
+                    {e.externalRef ? `серийник ${e.externalRef}` : "серийник не указан"}
+                    {typeof point === "string" && point !== "" ? ` · ${point}` : ""}
+                  </small>
+                </div>
+                <span className={`chip ${kind === "кофе" ? "b" : kind === "снек" ? "g" : ""}`}>
+                  {kind ?? "тип не указан"}
+                </span>
+              </Link>
+            );
+          })}
+        </div>
+      )}
+      <NewEntityForm domain="vendhub" type="machine" label={typeOne("machine")} />
+      {!hasLive && (
+        <p className="hint" style={{ marginTop: 10 }}>
+          Живые остатки и дефицит появятся поверх карточек, когда заработает сбор Ourvend:
+          задай <code>OURVEND_*</code> в окружении сервера и запусти синк.
+        </p>
       )}
     </>
   );

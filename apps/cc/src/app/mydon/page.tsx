@@ -2,6 +2,7 @@ import Link from "next/link";
 import { core, CoreUnavailable, type Approval, type Briefing } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
 import { ApprovalCard } from "../../components/approval-card";
+import { coffeeImportDetails, stripPayload } from "../../lib/approval-details";
 import { when } from "../../lib/format";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +38,7 @@ export default async function Main() {
 
   const list = alarms(briefing);
   const total = list.reduce((s, a) => s + a.n, 0);
+  const importDetails = await coffeeImportDetails(pending.slice(0, 3));
 
   return (
     <>
@@ -111,7 +113,7 @@ export default async function Main() {
       ) : (
         <>
           {pending.slice(0, 3).map((a) => (
-            <ApprovalCard key={a.id} item={a} />
+            <ApprovalCard key={a.id} item={stripPayload(a)} details={importDetails.get(a.id)} />
           ))}
           {pending.length > 3 && (
             <Link href="/inbox" className="navlink" style={{ justifyContent: "center" }}>

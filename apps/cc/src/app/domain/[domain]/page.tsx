@@ -246,7 +246,7 @@ export default async function DomainPage({
       )}
 
       {/* ── Живые операционные вкладки VendHub ── */}
-      {activeGroup === "vending" && <VendingPanel />}
+      {activeGroup === "vending" && <VendingPanel machines={machines} />}
       {activeGroup === "coffee" && <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />}
 
       {/* ── Дашборд ── */}

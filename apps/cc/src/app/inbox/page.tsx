@@ -8,6 +8,7 @@ import {
 import { CoreDown } from "../../components/core-down";
 import { ApprovalCard } from "../../components/approval-card";
 import { ApproveAllCards, PendingCardTile, PendingFieldGroup } from "../../components/queue-view";
+import { coffeeImportDetails, stripPayload } from "../../lib/approval-details";
 import { plural } from "../../lib/format";
 
 export const dynamic = "force-dynamic";
@@ -35,6 +36,9 @@ export default async function Inbox() {
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
+
+  // Сводки больших импортов (кофе): владелец видит, что именно заносится.
+  const importDetails = await coffeeImportDetails(approvals);
 
   // Фото всех черновиков — одним запросом, не по одному на карточку. Ошибка тут
   // не должна ронять экран: снимки — дополнение, решение принимается и без них.
@@ -82,7 +86,7 @@ export default async function Inbox() {
                 </span>
               </div>
               {approvals.map((a) => (
-                <ApprovalCard key={a.id} item={a} />
+                <ApprovalCard key={a.id} item={stripPayload(a)} details={importDetails.get(a.id)} />
               ))}
             </div>
           )}
