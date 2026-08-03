@@ -4,6 +4,7 @@ import { Cron } from "croner";
 import { TZ } from "@mydon/shared";
 import { budgetPosture } from "./budget";
 import { coachPosture } from "./coach";
+import { runCoffeeMonitor } from "./coffee-monitor";
 import { AgentsCoreClient } from "./core-client";
 import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
 import { autonomyThreshold } from "./policy";
@@ -349,6 +350,31 @@ async function main(): Promise<void> {
     }
   } else if (!vendingConfig) {
     console.log("Сбор вендинга выключен: не заданы OURVEND_ACCOUNT/OURVEND_PASSWORD.");
+  }
+
+  // Мониторинг кофе-бункеров (monitor-coffee-bunkers, T0): не требует внешней
+  // учётки — читает уже посчитанные Core недолив/сверку. По умолчанию раз в
+  // сутки к утреннему брифингу; COFFEE_MONITOR_CRON="off" выключает явно.
+  const coffeeMonitorCron = process.env.COFFEE_MONITOR_CRON ?? "0 7 * * *";
+  if (coffeeMonitorCron.toLowerCase() !== "off") {
+    try {
+      new Cron(coffeeMonitorCron, { timezone: TZ, name: "coffee:monitor" }, () => {
+        void (async () => {
+          try {
+            const r = await runCoffeeMonitor(core);
+            console.log(
+              `[coffee:monitor] недолив ${r.underfillEvents}, расхождение ${r.anomalyEvents}` +
+                (r.errors.length ? ` — ошибки: ${r.errors.join("; ")}` : ""),
+            );
+          } catch (err) {
+            console.error("[coffee:monitor] сбой:", err);
+          }
+        })();
+      });
+      console.log(`Мониторинг кофе-бункеров (coffee:monitor) включён: "${coffeeMonitorCron}" (${TZ}).`);
+    } catch (err) {
+      console.warn(`Расписание мониторинга кофе-бункеров "${coffeeMonitorCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
+    }
   }
 
   const taskEveryMs = Number(process.env.AGENT_TASK_INTERVAL_MS ?? 5 * 60_000);
