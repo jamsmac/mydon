@@ -1,7 +1,8 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsIn,
   IsISO8601,
   IsInt,
@@ -167,6 +168,26 @@ export class RecordSaleDto {
   createdBy?: string;
 }
 
+export class SetWashScheduleDto {
+  @IsUUID()
+  locationId!: string;
+
+  @IsOptional() @IsInt() @Min(1) @Max(8)
+  position?: number;
+
+  @IsOptional() @IsInt() @Min(1)
+  frequencyDays?: number;
+
+  @IsOptional() @IsInt() @Min(1)
+  frequencyCups?: number;
+
+  @IsOptional() @IsBoolean()
+  isActive?: boolean;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  notes?: string;
+}
+
 export class IngestCoffeeStockItemDto {
   @IsUUID()
   ingredientId!: string;
@@ -274,6 +295,26 @@ export class CoffeeController {
   @Get("wash")
   washHistory(@Query("locationId") locationId?: string, @Query("limit") limit?: string) {
     return this.coffee.washHistory(locationId, limit ? Number(limit) : undefined);
+  }
+
+  @Get("wash-schedule")
+  washScheduleStatus() {
+    return this.coffee.washScheduleStatus();
+  }
+
+  @Get("wash-schedule/all")
+  washSchedules() {
+    return this.coffee.washSchedules();
+  }
+
+  @Post("wash-schedule")
+  setWashSchedule(@Body() dto: SetWashScheduleDto) {
+    return this.coffee.setWashSchedule(dto);
+  }
+
+  @Delete("wash-schedule/:id")
+  removeWashSchedule(@Param("id", ParseUUIDPipe) id: string) {
+    return this.coffee.removeWashSchedule(id);
   }
 
   // ── Товары/рецепты, продажи, сверка ─────────────────────────────────────

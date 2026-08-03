@@ -1,5 +1,5 @@
-import { Inject, Injectable } from "@nestjs/common";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
@@ -11,6 +11,7 @@ import {
   coffeeSale,
   coffeeStock,
   coffeeWashLog,
+  coffeeWashSchedule,
 } from "@mydon/db";
 import {
   buildLocationSummary,
@@ -164,6 +165,36 @@ export interface RecordWashInput {
   kind?: "wash" | "clean" | "replace" | "service";
   note?: string;
   performedBy?: string;
+}
+
+export interface SetWashScheduleInput {
+  locationId: string;
+  /** null/undefined — вся точка целиком. */
+  position?: number | null;
+  frequencyDays?: number | null;
+  frequencyCups?: number | null;
+  isActive?: boolean;
+  notes?: string | null;
+}
+
+export interface WashScheduleRow {
+  id: string;
+  locationId: string;
+  locationName: string;
+  position: number | null;
+  frequencyDays: number | null;
+  frequencyCups: number | null;
+  isActive: boolean;
+  notes: string | null;
+}
+
+export interface WashScheduleStatusRow extends WashScheduleRow {
+  lastWashAt: string | null;
+  daysSinceWash: number | null;
+  cupsSinceWash: number | null;
+  /** Только для частоты по дням — проекция даты. По чашкам срок не календарный. */
+  nextDueAt: string | null;
+  status: "ok" | "overdue" | "unknown";
 }
 
 export interface RecordSaleInput {
@@ -487,6 +518,131 @@ export class CoffeeService {
       .orderBy(desc(coffeeWashLog.performedAt))
       .limit(Math.min(Math.max(limit, 1), 200));
     return rows.map((r) => ({ ...r, performedAt: r.performedAt.toISOString() }));
+  }
+
+  // ── Расписание мойки (план обслуживания, порт WashingSchedule донора) ──
+
+  /** Последняя фактическая мойка на (точка, бункер|целиком) — из журнала coffeeWashLog. */
+  private async lastWashByKey(): Promise<Map<string, Date>> {
+    const rows = await this.db
+      .select({ locationId: coffeeWashLog.locationId, position: coffeeWashLog.position, performedAt: coffeeWashLog.performedAt })
+      .from(coffeeWashLog)
+      .orderBy(asc(coffeeWashLog.performedAt));
+    const out = new Map<string, Date>();
+    for (const r of rows) out.set(`${r.locationId}:${r.position ?? "all"}`, r.performedAt);
+    return out;
+  }
+
+  /** Планы обслуживания со статусом «пора/не пора» — Настройки и брифинг читают отсюда. */
+  async washScheduleStatus(): Promise<WashScheduleStatusRow[]> {
+    const [schedules, lastWashByKey, sales, locations] = await Promise.all([
+      this.db.select().from(coffeeWashSchedule).where(eq(coffeeWashSchedule.isActive, true)),
+      this.lastWashByKey(),
+      this.db.select({ locationId: coffeeSale.locationId, loggedDate: coffeeSale.loggedDate, quantity: coffeeSale.quantity }).from(coffeeSale),
+      this.locations(),
+    ]);
+    const nameByLocation = new Map(locations.map((l) => [l.id, l.name]));
+    const now = Date.now();
+
+    return schedules.map((s) => {
+      const key = `${s.locationId}:${s.position ?? "all"}`;
+      const lastWashAt = lastWashByKey.get(key) ?? null;
+      const daysSinceWash = lastWashAt ? Math.floor((now - lastWashAt.getTime()) / 86_400_000) : null;
+
+      // Чашки считаются по всей точке (не по конкретному бункеру — рецепты
+      // используют несколько бункеров сразу, точной атрибуции нет), строго
+      // после дня последней мойки. Не мыли ни разу → считаем весь период.
+      let cupsSinceWash: number | null = null;
+      if (s.frequencyCups != null) {
+        const sinceDate = lastWashAt ? lastWashAt.toISOString().slice(0, 10) : null;
+        cupsSinceWash = sales
+          .filter((r) => r.locationId === s.locationId && (sinceDate === null || r.loggedDate > sinceDate))
+          .reduce((sum, r) => sum + r.quantity, 0);
+      }
+
+      const dueByDays = s.frequencyDays != null && (lastWashAt === null || (daysSinceWash ?? 0) >= s.frequencyDays);
+      const dueByCups = s.frequencyCups != null && cupsSinceWash != null && cupsSinceWash >= s.frequencyCups;
+      const status: WashScheduleStatusRow["status"] =
+        s.frequencyDays == null && s.frequencyCups == null ? "unknown" : dueByDays || dueByCups ? "overdue" : "ok";
+      const nextDueAt =
+        s.frequencyDays != null && lastWashAt != null
+          ? new Date(lastWashAt.getTime() + s.frequencyDays * 86_400_000).toISOString()
+          : null;
+
+      return {
+        id: s.id,
+        locationId: s.locationId,
+        locationName: nameByLocation.get(s.locationId) ?? s.locationId,
+        position: s.position,
+        frequencyDays: s.frequencyDays,
+        frequencyCups: s.frequencyCups,
+        isActive: s.isActive,
+        notes: s.notes,
+        lastWashAt: lastWashAt ? lastWashAt.toISOString() : null,
+        daysSinceWash,
+        cupsSinceWash,
+        nextDueAt,
+        status,
+      };
+    });
+  }
+
+  /** Список планов (все, включая выключенные) — для управления в Настройках. */
+  async washSchedules(): Promise<WashScheduleRow[]> {
+    const rows = await this.db
+      .select({
+        id: coffeeWashSchedule.id,
+        locationId: coffeeWashSchedule.locationId,
+        locationName: coffeeLocation.name,
+        position: coffeeWashSchedule.position,
+        frequencyDays: coffeeWashSchedule.frequencyDays,
+        frequencyCups: coffeeWashSchedule.frequencyCups,
+        isActive: coffeeWashSchedule.isActive,
+        notes: coffeeWashSchedule.notes,
+      })
+      .from(coffeeWashSchedule)
+      .innerJoin(coffeeLocation, eq(coffeeWashSchedule.locationId, coffeeLocation.id))
+      .orderBy(asc(coffeeLocation.name), asc(coffeeWashSchedule.position));
+    return rows;
+  }
+
+  /** Завести/поправить план (точка × бункер|целиком) — upsert по частичным уникальным индексам схемы. */
+  async setWashSchedule(input: SetWashScheduleInput): Promise<WashScheduleRow> {
+    if (input.frequencyDays == null && input.frequencyCups == null) {
+      throw new BadRequestException("Нужна хотя бы одна частота — по дням или по проданным чашкам");
+    }
+    const position = input.position ?? null;
+    const cond = and(
+      eq(coffeeWashSchedule.locationId, input.locationId),
+      position === null ? isNull(coffeeWashSchedule.position) : eq(coffeeWashSchedule.position, position),
+    );
+    const existing = await this.db.select({ id: coffeeWashSchedule.id }).from(coffeeWashSchedule).where(cond);
+    const values = {
+      locationId: input.locationId,
+      position,
+      frequencyDays: input.frequencyDays ?? null,
+      frequencyCups: input.frequencyCups ?? null,
+      isActive: input.isActive ?? true,
+      notes: input.notes ?? null,
+    };
+
+    const id = existing[0]
+      ? (await (async () => {
+          await this.db.update(coffeeWashSchedule).set(values).where(eq(coffeeWashSchedule.id, existing[0]!.id));
+          return existing[0]!.id;
+        })())
+      : (await this.db.insert(coffeeWashSchedule).values(values).returning({ id: coffeeWashSchedule.id }))[0]!.id;
+
+    const [loc] = await this.db.select({ name: coffeeLocation.name }).from(coffeeLocation).where(eq(coffeeLocation.id, input.locationId));
+    return { id, locationName: loc?.name ?? input.locationId, ...values };
+  }
+
+  /** Удалить план обслуживания. */
+  async removeWashSchedule(id: string): Promise<{ ok: true }> {
+    const existing = await this.db.select({ id: coffeeWashSchedule.id }).from(coffeeWashSchedule).where(eq(coffeeWashSchedule.id, id));
+    if (existing.length === 0) throw new NotFoundException(`План обслуживания ${id} не найден`);
+    await this.db.delete(coffeeWashSchedule).where(eq(coffeeWashSchedule.id, id));
+    return { ok: true };
   }
 
   // ── Товары/рецепты и продажи (для сверки факт/ожидание) ─────────────────

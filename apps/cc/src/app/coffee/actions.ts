@@ -124,3 +124,30 @@ export async function ingestCoffeeStock(ingredientId: string, quantity: number):
     return { ok: false, message: detailOf(err) };
   }
 }
+
+/** Завести/поправить план обслуживания (частота по дням и/или по чашкам). */
+export async function setCoffeeWashSchedule(input: {
+  locationId: string;
+  position?: number;
+  frequencyDays?: number;
+  frequencyCups?: number;
+}): Promise<ActionResult> {
+  try {
+    await core.setCoffeeWashSchedule(input);
+    revalidatePath("/coffee");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
+/** Удалить план обслуживания. */
+export async function removeCoffeeWashSchedule(id: string): Promise<ActionResult> {
+  try {
+    await core.removeCoffeeWashSchedule(id);
+    revalidatePath("/coffee");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}

@@ -19,18 +19,31 @@ export default async function CoffeePage() {
     fromDate.setDate(fromDate.getDate() - 30);
     const from = isoDate(fromDate);
 
-    const [locations, bunkerConfig, tareGrid, recentRefills, summary, consumables, stockLevels, fillStatus, reconcile] =
-      await Promise.all([
-        core.coffeeLocations(),
-        core.coffeeBunkerConfig(),
-        core.coffeeTareGrid(),
-        core.recentCoffeeRefills(30),
-        core.coffeeLocationSummary(),
-        core.coffeeConsumablesSummary(),
-        core.coffeeStockLevels(),
-        core.coffeeFillStatus(),
-        core.coffeeReconcileAll(from, to),
-      ]);
+    const [
+      locations,
+      bunkerConfig,
+      tareGrid,
+      recentRefills,
+      summary,
+      consumables,
+      stockLevels,
+      fillStatus,
+      reconcile,
+      washScheduleStatus,
+      washSchedules,
+    ] = await Promise.all([
+      core.coffeeLocations(),
+      core.coffeeBunkerConfig(),
+      core.coffeeTareGrid(),
+      core.recentCoffeeRefills(30),
+      core.coffeeLocationSummary(),
+      core.coffeeConsumablesSummary(),
+      core.coffeeStockLevels(),
+      core.coffeeFillStatus(),
+      core.coffeeReconcileAll(from, to),
+      core.coffeeWashScheduleStatus(),
+      core.coffeeWashSchedules(),
+    ]);
     return (
       <CoffeeClient
         locations={locations}
@@ -44,6 +57,8 @@ export default async function CoffeePage() {
         reconcile={reconcile}
         reconcileFrom={from}
         reconcileTo={to}
+        washScheduleStatus={washScheduleStatus}
+        washSchedules={washSchedules}
       />
     );
   } catch (err) {

@@ -1107,8 +1107,8 @@ export const coffeeConsumable = pgTable(
 
 /**
  * Мойка/обслуживание бункера или машины целиком (`position: null` — вся
- * точка). Событийный журнал, не расписание — план обслуживания (частота по
- * дням) на первом шаге не нужен владельцу, история фактов важнее.
+ * точка). Событийный журнал фактов; план обслуживания (частота, срок) —
+ * отдельная таблица `coffeeWashSchedule` ниже.
  */
 export const coffeeWashLog = pgTable(
   "coffee_wash_log",
@@ -1126,6 +1126,48 @@ export const coffeeWashLog = pgTable(
   (t) => [
     index("coffee_wash_log_location_idx").on(t.locationId, t.performedAt),
     check("coffee_wash_log_position_range", sql`${t.position} is null or ${t.position} between 1 and 8`),
+  ],
+);
+
+/**
+ * План обслуживания: как часто мыть точку целиком (`position: null`) или
+ * конкретный бункер. Порт `WashingSchedule` донора VendHub-OS, расширенный
+ * вторым триггером: частота по календарю (`frequencyDays`, как у донора) И/ИЛИ
+ * по проданным чашкам с точки (`frequencyCups`) — хотя бы один должен быть
+ * задан (проверка в сервисе; счёт чашек не привязан к конкретному бункеру —
+ * рецепты используют несколько бункеров сразу, точной атрибуции пока нет).
+ * `nextDueAt`/`overdue` считает сервис от `coffeeWashLog` — здесь только план.
+ */
+export const coffeeWashSchedule = pgTable(
+  "coffee_wash_schedule",
+  {
+    id: id(),
+    locationId: uuid("location_id")
+      .references(() => coffeeLocation.id)
+      .notNull(),
+    /** null — вся точка целиком, 1..8 — конкретный бункер (см. coffee_wash_log.position). */
+    position: integer("position"),
+    frequencyDays: integer("frequency_days"),
+    frequencyCups: integer("frequency_cups"),
+    isActive: boolean("is_active").default(true).notNull(),
+    notes: text("notes"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check("coffee_wash_schedule_position_range", sql`${t.position} is null or ${t.position} between 1 and 8`),
+    check(
+      "coffee_wash_schedule_frequency_set",
+      sql`${t.frequencyDays} is not null or ${t.frequencyCups} is not null`,
+    ),
+    // Частичные уникальные индексы: NULL в обычном UNIQUE не схлопывается
+    // (постгрес считает NULL≠NULL), поэтому «вся точка» (position IS NULL)
+    // защищена отдельным индексом от «конкретный бункер» (position IS NOT NULL).
+    uniqueIndex("coffee_wash_schedule_location_position_key")
+      .on(t.locationId, t.position)
+      .where(sql`${t.position} is not null`),
+    uniqueIndex("coffee_wash_schedule_location_whole_key")
+      .on(t.locationId)
+      .where(sql`${t.position} is null`),
   ],
 );
 
@@ -1255,6 +1297,7 @@ export const schema = {
   coffeeRefill,
   coffeeConsumable,
   coffeeWashLog,
+  coffeeWashSchedule,
   coffeeProduct,
   coffeeSale,
   coffeeStock,

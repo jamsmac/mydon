@@ -166,6 +166,25 @@ export interface CoffeeLocationReconcileGroup {
   rows: CoffeeReconcileRow[];
 }
 
+export interface CoffeeWashScheduleRow {
+  id: string;
+  locationId: string;
+  locationName: string;
+  position: number | null;
+  frequencyDays: number | null;
+  frequencyCups: number | null;
+  isActive: boolean;
+  notes: string | null;
+}
+
+export interface CoffeeWashScheduleStatusRow extends CoffeeWashScheduleRow {
+  lastWashAt: string | null;
+  daysSinceWash: number | null;
+  cupsSinceWash: number | null;
+  nextDueAt: string | null;
+  status: "ok" | "overdue" | "unknown";
+}
+
 export interface CoffeeStockLevelRow {
   ingredientId: string;
   ingredientName: string;
@@ -1180,6 +1199,17 @@ export const core = {
   coffeeStockLevels: () => get<CoffeeStockLevelRow[]>("/coffee/stock"),
   ingestCoffeeStock: (input: { countedAt?: string; items: { ingredientId: string; quantity: number }[] }) =>
     send<{ items: number; adjustments: unknown[] }>("/coffee/stock", "POST", input),
+  coffeeWashScheduleStatus: () => get<CoffeeWashScheduleStatusRow[]>("/coffee/wash-schedule"),
+  coffeeWashSchedules: () => get<CoffeeWashScheduleRow[]>("/coffee/wash-schedule/all"),
+  setCoffeeWashSchedule: (input: {
+    locationId: string;
+    position?: number;
+    frequencyDays?: number;
+    frequencyCups?: number;
+    isActive?: boolean;
+    notes?: string;
+  }) => send<CoffeeWashScheduleRow>("/coffee/wash-schedule", "POST", input),
+  removeCoffeeWashSchedule: (id: string) => send<{ ok: true }>(`/coffee/wash-schedule/${id}`, "DELETE"),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),

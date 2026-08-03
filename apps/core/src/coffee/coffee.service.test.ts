@@ -11,6 +11,7 @@ import {
   coffeeSale,
   coffeeStock,
   coffeeWashLog,
+  coffeeWashSchedule,
 } from "@mydon/db";
 import { CoffeeService } from "./coffee.service";
 
@@ -31,6 +32,7 @@ function coffeeDb(tables: {
   consumables?: unknown[];
   washLog?: unknown[];
   stock?: unknown[];
+  washSchedule?: unknown[];
 }) {
   const inserts: { table: string; values: unknown }[] = [];
   const updates: { table: string; values: unknown }[] = [];
@@ -47,6 +49,7 @@ function coffeeDb(tables: {
     if (t === coffeeConsumable) return tables.consumables ?? [];
     if (t === coffeeWashLog) return tables.washLog ?? [];
     if (t === coffeeStock) return tables.stock ?? [];
+    if (t === coffeeWashSchedule) return tables.washSchedule ?? [];
     return [];
   };
   const nameOf = (t: unknown): string => {
@@ -60,6 +63,7 @@ function coffeeDb(tables: {
     if (t === coffeeWashLog) return "coffee_wash_log";
     if (t === coffeeProduct) return "coffee_product";
     if (t === coffeeStock) return "coffee_stock";
+    if (t === coffeeWashSchedule) return "coffee_wash_schedule";
     return "unknown";
   };
 
@@ -457,5 +461,129 @@ describe("CoffeeService: склад ингредиентов (ingestCoffeeStock/
     assert.equal(res.length, 2);
     assert.equal(res[0]!.ingredientName, "Ароматизатор");
     assert.equal(res[1]!.ingredientName, "Кофе");
+  });
+});
+
+describe("CoffeeService: расписание мойки (washSchedule*)", () => {
+  const DAY = 86_400_000;
+  const locations = [{ id: "loc-1", name: "AH", sortOrder: 0, isActive: true }];
+
+  it("setWashSchedule — без хотя бы одной частоты бросает ошибку", async () => {
+    const { db } = coffeeDb({});
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.setWashSchedule({ locationId: "loc-1", position: 7 }));
+  });
+
+  it("setWashSchedule — новый план (нет существующего) заводит строку", async () => {
+    const { db, inserts } = coffeeDb({ locations, washSchedule: [] });
+    const svc = new CoffeeService(db);
+    const res = await svc.setWashSchedule({ locationId: "loc-1", position: 7, frequencyDays: 7 });
+    assert.equal(res.locationName, "AH");
+    assert.equal(res.frequencyDays, 7);
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0]!.table, "coffee_wash_schedule");
+  });
+
+  it("setWashSchedule — существующий план (та же точка/бункер) обновляется, не дублируется", async () => {
+    const { db, inserts, updates } = coffeeDb({
+      locations,
+      washSchedule: [{ id: "sched-1", locationId: "loc-1", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null }],
+    });
+    const svc = new CoffeeService(db);
+    const res = await svc.setWashSchedule({ locationId: "loc-1", position: 7, frequencyDays: 10 });
+    assert.equal(res.id, "sched-1");
+    assert.equal(inserts.length, 0, "не должен дублировать план");
+    assert.equal(updates.length, 1);
+    assert.equal((updates[0]!.values as Record<string, unknown>).frequencyDays, 10);
+  });
+
+  it("removeWashSchedule — неизвестный id бросает 404, не молчаливый успех", async () => {
+    const { db } = coffeeDb({ washSchedule: [] });
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.removeWashSchedule("missing-id"));
+  });
+
+  it("removeWashSchedule — известный id удаляет и подтверждает", async () => {
+    const { db, deletes } = coffeeDb({ washSchedule: [{ id: "sched-1" }] });
+    const svc = new CoffeeService(db);
+    const res = await svc.removeWashSchedule("sched-1");
+    assert.deepEqual(res, { ok: true });
+    assert.equal(deletes.length, 1);
+    assert.equal(deletes[0]!.table, "coffee_wash_schedule");
+  });
+
+  it("washScheduleStatus — по дням: не мыли ни разу → overdue сразу (не 'ok' по умолчанию)", async () => {
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null }];
+    const { db } = coffeeDb({ locations, washSchedule, washLog: [], sales: [] });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.status, "overdue");
+    assert.equal(row!.lastWashAt, null);
+    assert.equal(row!.nextDueAt, null, "эталонной даты без факта мойки нет");
+  });
+
+  it("washScheduleStatus — по дням: помыли недавно → ok, срок посчитан от последней мойки", async () => {
+    const lastWash = new Date(Date.now() - 2 * DAY);
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null }];
+    const washLog = [{ locationId: "loc-1", position: 7, performedAt: lastWash }];
+    const { db } = coffeeDb({ locations, washSchedule, washLog, sales: [] });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.status, "ok");
+    assert.equal(row!.daysSinceWash, 2);
+    assert.equal(row!.nextDueAt, new Date(lastWash.getTime() + 7 * DAY).toISOString());
+  });
+
+  it("washScheduleStatus — по дням: срок вышел → overdue", async () => {
+    const lastWash = new Date(Date.now() - 10 * DAY);
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null }];
+    const washLog = [{ locationId: "loc-1", position: 7, performedAt: lastWash }];
+    const { db } = coffeeDb({ locations, washSchedule, washLog, sales: [] });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.status, "overdue");
+  });
+
+  it("washScheduleStatus — по чашкам: считает продажи ТОЛЬКО после дня последней мойки", async () => {
+    const lastWash = new Date(Date.now() - 3 * DAY);
+    const lastWashDay = lastWash.toISOString().slice(0, 10);
+    const dayBefore = new Date(lastWash.getTime() - DAY).toISOString().slice(0, 10);
+    const dayAfter = new Date(lastWash.getTime() + DAY).toISOString().slice(0, 10);
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: null, frequencyDays: null, frequencyCups: 50, isActive: true, notes: null }];
+    const washLog = [{ locationId: "loc-1", position: null, performedAt: lastWash }];
+    const sales = [
+      { locationId: "loc-1", loggedDate: dayBefore, quantity: 999 }, // до мойки — не считается
+      { locationId: "loc-1", loggedDate: lastWashDay, quantity: 999 }, // в день мойки — не считается (см. docstring)
+      { locationId: "loc-1", loggedDate: dayAfter, quantity: 30 },
+    ];
+    const { db } = coffeeDb({ locations, washSchedule, washLog, sales });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.cupsSinceWash, 30);
+    assert.equal(row!.status, "ok"); // 30 < 50
+  });
+
+  it("washScheduleStatus — по чашкам: превышен порог → overdue, даже если по дням ещё рано", async () => {
+    const lastWash = new Date(Date.now() - DAY);
+    const dayAfter = new Date(lastWash.getTime() + DAY).toISOString().slice(0, 10);
+    const washSchedule = [{ id: "s1", locationId: "loc-1", position: null, frequencyDays: 30, frequencyCups: 50, isActive: true, notes: null }];
+    const washLog = [{ locationId: "loc-1", position: null, performedAt: lastWash }];
+    const sales = [{ locationId: "loc-1", loggedDate: dayAfter, quantity: 60 }];
+    const { db } = coffeeDb({ locations, washSchedule, washLog, sales });
+    const svc = new CoffeeService(db);
+    const [row] = await svc.washScheduleStatus();
+    assert.equal(row!.status, "overdue");
+  });
+
+  it("washSchedules — список планов отдаёт всё, включая выключенные", async () => {
+    const washSchedule = [
+      { id: "s1", locationId: "loc-1", locationName: "AH", position: 7, frequencyDays: 7, frequencyCups: null, isActive: true, notes: null },
+      { id: "s2", locationId: "loc-1", locationName: "AH", position: null, frequencyDays: 14, frequencyCups: null, isActive: false, notes: null },
+    ];
+    const { db } = coffeeDb({ washSchedule });
+    const svc = new CoffeeService(db);
+    const res = await svc.washSchedules();
+    assert.equal(res.length, 2);
+    assert.ok(res.every((r) => r.locationName === "AH"));
   });
 });
