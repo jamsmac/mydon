@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { coffeeLocation, coffeeRefill, entity, org, vendingPurchaseOrder } from "@mydon/db";
+import { coffeeConsumable, coffeeContainerReturn, coffeeLocation, coffeeRefill, entity, org, vendingPurchaseOrder } from "@mydon/db";
 import { ApprovalsService } from "./approvals.service";
 
 type Row = Record<string, unknown>;
@@ -235,13 +235,19 @@ describe("Одобренная заявка закупа → накладная 
 });
 
 describe("Одобренный исторический импорт кофе-бункеров (payload.coffeeImport)", () => {
-  function coffeeImportStub(payload: Row, opts: { locations?: Row[]; existingRefills?: Row[] } = {}) {
+  function coffeeImportStub(
+    payload: Row,
+    opts: { locations?: Row[]; existingRefills?: Row[]; existingReturns?: Row[] } = {},
+  ) {
     const inserted: Row[] = [];
+    const insertedReturns: Row[] = [];
+    const upsertedConsumables: Row[] = [];
     const withLimit = (rows: Row[]) => Object.assign(Promise.resolve(rows), { limit: async () => rows });
     const tx = {
       select: () => ({
         from: (table: unknown) => {
           if (table === coffeeLocation) return Promise.resolve(opts.locations ?? [{ id: "loc-1" }]);
+          if (table === coffeeContainerReturn) return { where: () => withLimit(opts.existingReturns ?? []) };
           return { where: () => withLimit(opts.existingRefills ?? []) };
         },
       }),
@@ -253,12 +259,14 @@ describe("Одобренный исторический импорт кофе-б
       insert: (table: unknown) => ({
         values: (v: Row) => {
           if (table === coffeeRefill) inserted.push(v);
-          return Promise.resolve(undefined);
+          if (table === coffeeContainerReturn) insertedReturns.push(v);
+          if (table === coffeeConsumable) upsertedConsumables.push(v);
+          return Object.assign(Promise.resolve(undefined), { onConflictDoUpdate: async () => undefined });
         },
       }),
     };
     const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
-    return { db, inserted };
+    return { db, inserted, insertedReturns, upsertedConsumables };
   }
 
   const validRecord = { locationId: "loc-1", position: 7, filledWeight: 1200, enteredDate: "2026-07-01" };
@@ -336,5 +344,74 @@ describe("Одобренный исторический импорт кофе-б
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     await service.decide("a1", "approved", "owner");
     assert.equal(inserted.length, 0);
+  });
+
+  // ── Возвраты наборов (payload.coffeeImport.returns) ────────────────────────
+
+  const validReturn = { position: 1, containerNumber: 27, weight: 787, returnedDate: "2026-07-30" };
+
+  it("возврат «позиция. набор. вес» заносится с меткой источника", async () => {
+    const { db, insertedReturns } = coffeeImportStub({ coffeeImport: { returns: [validReturn] } });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(insertedReturns.length, 1);
+    assert.equal(insertedReturns[0].position, 1);
+    assert.equal(insertedReturns[0].containerNumber, 27);
+    assert.equal(insertedReturns[0].weight, 787);
+    assert.equal(insertedReturns[0].createdBy, "import:telegram-history");
+  });
+
+  it("возврат с кривыми полями (позиция 9, набор 28, вес −1, не дата) — пропускается", async () => {
+    const { db, insertedReturns } = coffeeImportStub({
+      coffeeImport: {
+        returns: [
+          { ...validReturn, position: 9 },
+          { ...validReturn, containerNumber: 28 },
+          { ...validReturn, weight: -1 },
+          { ...validReturn, returnedDate: "июль" },
+        ],
+      },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(insertedReturns.length, 0);
+  });
+
+  it("точно такой же возврат уже есть — не дублируется", async () => {
+    const { db, insertedReturns } = coffeeImportStub(
+      { coffeeImport: { returns: [validReturn] } },
+      { existingReturns: [{ id: "r-1" }] },
+    );
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(insertedReturns.length, 0);
+  });
+
+  it("подсказка точки из заголовка сообщения сохраняется как примечание", async () => {
+    const { db, insertedReturns } = coffeeImportStub({
+      coffeeImport: { returns: [{ ...validReturn, locationNote: "  Кпп остатки  " }] },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(insertedReturns[0].locationNote, "Кпп остатки");
+  });
+
+  // ── Расходники из фото-таблиц (payload.coffeeImport.consumables) ──────────
+
+  it("расходники по точке/дате заносятся upsert-ом; чужая точка пропускается", async () => {
+    const { db, upsertedConsumables } = coffeeImportStub({
+      coffeeImport: {
+        consumables: [
+          { locationId: "loc-1", loggedDate: "2026-08-03", water: 1, cups: 0, lids: 0 },
+          { locationId: "не-точка", loggedDate: "2026-08-03", water: 5 },
+        ],
+      },
+    });
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    await service.decide("a1", "approved", "owner");
+    assert.equal(upsertedConsumables.length, 1);
+    assert.equal(upsertedConsumables[0].locationId, "loc-1");
+    assert.equal(upsertedConsumables[0].water, 1);
+    assert.equal(upsertedConsumables[0].createdBy, "import:telegram-history");
   });
 });

@@ -3,6 +3,7 @@ import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
+  coffeeContainerReturn,
   coffeeContainerTare,
   coffeeIngredient,
   coffeeLocation,
@@ -172,6 +173,28 @@ export interface CoffeeStockLevelRow {
   ingredientName: string;
   quantity: number;
   countedAt: string;
+}
+
+export interface RecordContainerReturnInput {
+  position: number;
+  containerNumber: number;
+  /** Вес брутто при возврате (с тарой), г. */
+  weight: number;
+  returnedDate: string;
+  locationNote?: string;
+  createdBy?: string;
+}
+
+export interface ContainerReturnRow {
+  id: string;
+  position: number;
+  containerNumber: number;
+  weight: number;
+  /** Чистый остаток: вес − тара(набор, позиция); null, если тара не заведена. */
+  netWeight: number | null;
+  returnedDate: string;
+  locationNote: string | null;
+  createdBy: string | null;
 }
 
 export interface RecordWashInput {
@@ -587,6 +610,47 @@ export class CoffeeService {
     const latest = new Map<string, { water: number; cups: number; lids: number }>();
     for (const r of rows) latest.set(r.locationName, { water: r.water, cups: r.cups, lids: r.lids });
     return locations.map((l) => ({ location: l.name, ...(latest.get(l.name) ?? { water: 0, cups: 0, lids: 0 }) }));
+  }
+
+  // ── Возвраты наборов: остаток в снятом контейнере ────────────────────────
+  // Формат из рабочей группы: «позиция. набор. вес» (брутто). Чистый остаток
+  // считается на чтении через матрицу тары — не хардкодим на записи, тару
+  // могут уточнить позже.
+
+  async recordContainerReturn(input: RecordContainerReturnInput): Promise<{ id: string }> {
+    const [row] = await this.db
+      .insert(coffeeContainerReturn)
+      .values({
+        position: input.position,
+        containerNumber: input.containerNumber,
+        weight: input.weight,
+        returnedDate: input.returnedDate,
+        locationNote: input.locationNote ?? null,
+        createdBy: input.createdBy ?? null,
+      })
+      .returning({ id: coffeeContainerReturn.id });
+    return { id: row!.id };
+  }
+
+  async containerReturns(limit = 100): Promise<ContainerReturnRow[]> {
+    const [rows, tareByKey] = await Promise.all([
+      this.db
+        .select()
+        .from(coffeeContainerReturn)
+        .orderBy(desc(coffeeContainerReturn.returnedDate), desc(coffeeContainerReturn.createdAt))
+        .limit(Math.min(Math.max(limit, 1), 500)),
+      this.tareByKey(),
+    ]);
+    return rows.map((r) => ({
+      id: r.id,
+      position: r.position,
+      containerNumber: r.containerNumber,
+      weight: r.weight,
+      netWeight: netWeight(r.weight, tareByKey.get(`${r.containerNumber}:${r.position}`) ?? null),
+      returnedDate: r.returnedDate,
+      locationNote: r.locationNote,
+      createdBy: r.createdBy,
+    }));
   }
 
   // ── Мойка/обслуживание ───────────────────────────────────────────────────

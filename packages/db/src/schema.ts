@@ -1093,6 +1093,36 @@ export const coffeeRefill = pgTable(
 );
 
 /**
+ * Возврат набора: снятый с точки контейнер взвешивают с остатком ингредиента.
+ * Формат из рабочей группы владельца — строка «позиция. набор. вес» (брутто,
+ * с тарой): и позиция бункера, и номер набора известны, поэтому чистый
+ * остаток = weight − тара(набор, позиция), а расход цикла = заливка − возврат
+ * того же набора. `locationNote` — подсказка точки из текста сообщения
+ * («Кпп остатки»), сырьём, без угадывания: связка с точкой достаётся из
+ * парной заливки этого набора, а не из вольного заголовка.
+ */
+export const coffeeContainerReturn = pgTable(
+  "coffee_container_return",
+  {
+    id: id(),
+    position: integer("position").notNull(),
+    containerNumber: integer("container_number").notNull(),
+    /** Вес брутто при возврате (с тарой), г. */
+    weight: integer("weight").notNull(),
+    returnedDate: date("returned_date").notNull(),
+    locationNote: text("location_note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("coffee_container_return_container_idx").on(t.containerNumber, t.returnedDate),
+    check("coffee_container_return_position_range", sql`${t.position} between 1 and 8`),
+    check("coffee_container_return_container_range", sql`${t.containerNumber} between 1 and 27`),
+    check("coffee_container_return_weight_range", sql`${t.weight} between 0 and 10000`),
+  ],
+);
+
+/**
  * Расход воды/стаканчиков/крышек по точке за день — отдельно от бункеров
  * (они не ингредиент из бункера). Одна строка на (точка, дата) — повторный
  * ввод за тот же день правит её же, а не плодит дубли.
@@ -1304,6 +1334,7 @@ export const schema = {
   coffeeBunkerConfig,
   coffeeContainerTare,
   coffeeRefill,
+  coffeeContainerReturn,
   coffeeConsumable,
   coffeeWashLog,
   coffeeWashSchedule,
