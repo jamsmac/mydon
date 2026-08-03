@@ -123,7 +123,7 @@ const allMessages = Array.isArray(raw.messages) ? raw.messages : [];
 if (PAYLOAD_FILE) {
   const p = JSON.parse(readFileSync(PAYLOAD_FILE, "utf8"));
   try {
-    await submitApproval(p.records ?? [], p.returns ?? [], p.consumables ?? []);
+    await submitApproval(p.records ?? [], p.returns ?? [], p.consumables ?? [], p.newLocations ?? []);
   } catch (err) {
     console.error(`Отправка согласования не удалась: ${err.message}`);
     console.error("Проверь туннель к Core (порт 3001) и SERVICE_TOKEN, затем повтори ту же команду.");
@@ -226,6 +226,19 @@ const records = [];
 const unmatchedFromModel = [];
 const unmatchedLocationName = [];
 
+// Исторические точки: валидная запись с адресом, которого в справочнике уже
+// нет (точку закрыли, машину перевезли), не выбрасывается — уходит в payload
+// с locationName, а имя копится в newLocations. Создаст их Core, и только
+// после «Одобрить» — владелец видит список новых точек в сводке согласования.
+const newLocationNames = new Map(); // lower → каноничное имя (первое встреченное)
+function rememberNewLocation(raw) {
+  const name = String(raw ?? "").trim();
+  if (name.length < 2 || name.length > 128) return null;
+  const key = name.toLowerCase();
+  if (!newLocationNames.has(key)) newLocationNames.set(key, name);
+  return newLocationNames.get(key);
+}
+
 for (let i = 0; i < messages.length; i += BATCH_SIZE) {
   const batch = messages.slice(i, i + BATCH_SIZE);
   console.log(`Пачка ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(messages.length / BATCH_SIZE)} (${batch.length} сообщ.)…`);
@@ -268,18 +281,19 @@ for (let i = 0; i < messages.length; i += BATCH_SIZE) {
   for (const r of extracted.records ?? []) {
     const key = String(r.locationName ?? "").toLowerCase().trim();
     const loc = locationByName.get(key);
-    if (!loc) {
-      unmatchedLocationName.push(`${r.locationName} (бункер ${r.position}, ${r.filledWeight}г, ${r.enteredDate})`);
-      continue;
-    }
     const position = Number(r.position);
     const filledWeight = Number(r.filledWeight);
     if (!(position >= 1 && position <= 8) || !(filledWeight > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(String(r.enteredDate))) {
       unmatchedLocationName.push(`${r.locationName}: кривые данные (бункер ${r.position}, ${r.filledWeight}г, ${r.enteredDate})`);
       continue;
     }
+    const canonName = loc ? null : rememberNewLocation(r.locationName);
+    if (!loc && !canonName) {
+      unmatchedLocationName.push(`${r.locationName} (бункер ${r.position}, ${r.filledWeight}г, ${r.enteredDate})`);
+      continue;
+    }
     records.push({
-      locationId: loc.id,
+      ...(loc ? { locationId: loc.id } : { locationName: canonName }),
       position,
       filledWeight,
       enteredDate: r.enteredDate,
@@ -415,12 +429,17 @@ if (PHOTOS && photoMessages.length > 0) {
       const position = Number(r.position);
       const filledWeight = Number(r.filledWeight);
       const date = /^\d{4}-\d{2}-\d{2}$/.test(String(r.date)) ? r.date : batch[0]?.date;
-      if (!loc || !(position >= 1 && position <= 8) || !(filledWeight > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+      if (!(position >= 1 && position <= 8) || !(filledWeight > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+        unmatchedLocationName.push(`${r.locationName} (фото: бункер ${r.position}, ${r.filledWeight}г, ${r.date})`);
+        continue;
+      }
+      const canonName = loc ? null : rememberNewLocation(r.locationName);
+      if (!loc && !canonName) {
         unmatchedLocationName.push(`${r.locationName} (фото: бункер ${r.position}, ${r.filledWeight}г, ${r.date})`);
         continue;
       }
       records.push({
-        locationId: loc.id,
+        ...(loc ? { locationId: loc.id } : { locationName: canonName }),
         position,
         filledWeight,
         enteredDate: date,
@@ -432,12 +451,23 @@ if (PHOTOS && photoMessages.length > 0) {
     for (const c of extracted.consumables ?? []) {
       const loc = locationByName.get(String(c.locationName ?? "").toLowerCase().trim());
       const date = /^\d{4}-\d{2}-\d{2}$/.test(String(c.date)) ? c.date : batch[0]?.date;
-      if (!loc || !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+        unmatchedLocationName.push(`${c.locationName} (фото расходников, ${c.date})`);
+        continue;
+      }
+      const canonName = loc ? null : rememberNewLocation(c.locationName);
+      if (!loc && !canonName) {
         unmatchedLocationName.push(`${c.locationName} (фото расходников, ${c.date})`);
         continue;
       }
       const num = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.trunc(Number(v)) : 0);
-      consumables.push({ locationId: loc.id, loggedDate: date, water: num(c.water), cups: num(c.cups), lids: num(c.lids) });
+      consumables.push({
+        ...(loc ? { locationId: loc.id } : { locationName: canonName }),
+        loggedDate: date,
+        water: num(c.water),
+        cups: num(c.cups),
+        lids: num(c.lids),
+      });
     }
     unreadablePhotos.push(...(extracted.unreadable ?? []));
   }
@@ -448,11 +478,19 @@ if (PHOTOS && photoMessages.length > 0) {
 }
 
 // ── 4. Итог ──────────────────────────────────────────────────────────────
+const newLocations = [...newLocationNames.values()];
 console.log(`\nРаспознано заливок: ${records.length}`);
 console.log(`Возвратов наборов (детерминированно): ${returns.length}`);
 console.log(`Расходников (вода/стаканчики/крышки): ${consumables.length}`);
-console.log(`Точка не найдена в справочнике: ${unmatchedLocationName.length}`);
+console.log(`Кривые данные (выброшено): ${unmatchedLocationName.length}`);
 console.log(`Похоже на заливку, но неполно: ${unmatchedFromModel.length}`);
+if (newLocations.length > 0) {
+  console.log(`\nИсторические точки, которых нет в справочнике (${newLocations.length}) — будут созданы после «Одобрить»:`);
+  for (const n of newLocations) console.log(`  • ${n}`);
+  if (newLocations.length > 50) {
+    console.log("  ⚠ больше 50 — Core создаст только первые 50; проверь, не разъехались ли имена одной точки.");
+  }
+}
 if (returnsRejected.length > 0) {
   console.log("\nОтклонённые строки возвратов (числа вне диапазонов, первые 20):");
   for (const u of returnsRejected.slice(0, 20)) console.log(`  • ${u}`);
@@ -479,10 +517,10 @@ if (DRY) {
 // Многочасовой vision-разбор не должен пропасть из-за отвалившегося туннеля к
 // Core: payload сохраняется на диск ДО отправки, повтор — через --payload.
 const payloadPath = join(dirname(file), "coffee-import-payload.json");
-writeFileSync(payloadPath, JSON.stringify({ records, returns, consumables }, null, 1));
+writeFileSync(payloadPath, JSON.stringify({ records, returns, consumables, newLocations }, null, 1));
 console.log(`\nPayload сохранён: ${payloadPath}`);
 try {
-  await submitApproval(records, returns, consumables);
+  await submitApproval(records, returns, consumables, newLocations);
 } catch (err) {
   console.error(`\nОтправка согласования не удалась: ${err.message}`);
   console.error(
@@ -491,7 +529,7 @@ try {
   process.exit(1);
 }
 
-async function submitApproval(records, returns, consumables) {
+async function submitApproval(records, returns, consumables, newLocations = []) {
   if (records.length === 0 && returns.length === 0 && consumables.length === 0) {
     console.log("Предлагать нечего — согласование не создаётся.");
     return;
@@ -500,13 +538,14 @@ async function submitApproval(records, returns, consumables) {
   if (records.length > 0) parts.push(`${records.length} заливок`);
   if (returns.length > 0) parts.push(`${returns.length} возвратов наборов`);
   if (consumables.length > 0) parts.push(`${consumables.length} строк расходников`);
+  if (newLocations.length > 0) parts.push(`${newLocations.length} новых точек`);
   const approval = await coreFetch("/approvals", {
     method: "POST",
     body: JSON.stringify({
       agent: "telegram-coffee-import",
       action: `Занести из «${raw.name ?? file}»: ${parts.join(", ")} (история Telegram)`,
       tier: "T0",
-      payload: { source: file, coffeeImport: { records, returns, consumables } },
+      payload: { source: file, coffeeImport: { records, returns, consumables, newLocations } },
     }),
   });
   console.log(`\nСогласование создано: ${approval.id}`);
