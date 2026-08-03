@@ -4,6 +4,7 @@ import { Fragment, useMemo, useState, useTransition } from "react";
 import type {
   CoffeeBunkerIngredient,
   CoffeeConsumableRow,
+  CoffeeContainerReturnRow,
   CoffeeFillStatusRow,
   CoffeeLocation,
   CoffeeLocationReconcileGroup,
@@ -44,7 +45,7 @@ import {
 const POSITIONS = [1, 2, 3, 4, 5, 6, 7, 8];
 const CONTAINERS = Array.from({ length: 27 }, (_, i) => i + 1);
 
-type Tab = "entry" | "table" | "reconcile" | "settings";
+type Tab = "entry" | "table" | "journal" | "reconcile" | "settings";
 
 function todayIso(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
@@ -65,6 +66,9 @@ export function CoffeeClient(props: {
   washScheduleStatus: CoffeeWashScheduleStatusRow[];
   washSchedules: CoffeeWashScheduleRow[];
   machineCandidates: CoffeeMachineCandidate[];
+  /** Журнал: история заливок (включая импорт Telegram) и возвратов наборов. */
+  refillJournal: CoffeeRefillRow[];
+  containerReturns: CoffeeContainerReturnRow[];
   /** Первый активный человек VendHub — кому уходит задача из «Сверки». */
   defaultOwnerRef: string | null;
 }) {
@@ -82,6 +86,9 @@ export function CoffeeClient(props: {
         <button className={tab === "table" ? "on" : ""} onClick={() => setTab("table")}>
           Таблица
         </button>
+        <button className={tab === "journal" ? "on" : ""} onClick={() => setTab("journal")}>
+          Журнал
+        </button>
         <button className={tab === "reconcile" ? "on" : ""} onClick={() => setTab("reconcile")}>
           Сверка{alertCount > 0 ? ` (${alertCount})` : ""}
         </button>
@@ -93,6 +100,9 @@ export function CoffeeClient(props: {
         <EntryTab locations={props.locations} bunkerConfig={props.bunkerConfig} recentRefills={props.recentRefills} />
       )}
       {tab === "table" && <TableTab summary={props.summary} consumables={props.consumables} locations={props.locations} />}
+      {tab === "journal" && (
+        <JournalTab locations={props.locations} refills={props.refillJournal} containerReturns={props.containerReturns} />
+      )}
       {tab === "reconcile" && (
         <ReconcileTab
           fillStatus={props.fillStatus}
@@ -243,6 +253,104 @@ function EntryTab({
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Вкладка: Журнал — история заливок и возвратов ─────────────────────────
+
+/** Откуда запись: импорт истории, сотрудник через бота, панель. */
+function sourceLabel(createdBy: string | null): string | null {
+  if (!createdBy) return null;
+  if (createdBy.startsWith("import:")) return "импорт истории";
+  if (createdBy.startsWith("person:")) return "сотрудник";
+  return createdBy;
+}
+
+function JournalTab({
+  locations,
+  refills,
+  containerReturns,
+}: {
+  locations: CoffeeLocation[];
+  refills: CoffeeRefillRow[];
+  containerReturns: CoffeeContainerReturnRow[];
+}) {
+  const [locationId, setLocationId] = useState("");
+  const shownRefills = locationId ? refills.filter((r) => r.locationId === locationId) : refills;
+
+  return (
+    <div className="card">
+      <label style={{ display: "block", marginBottom: 12 }}>
+        Точка{" "}
+        <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+          <option value="">все точки</option>
+          {locations.map((l) => (
+            <option key={l.id} value={l.id}>
+              {l.name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div className="section-title">Заливки · {shownRefills.length}</div>
+      {shownRefills.length === 0 ? (
+        <p className="muted">Заливок пока нет.</p>
+      ) : (
+        <div className="rows">
+          {shownRefills.map((r) => (
+            <div className="row" key={r.id}>
+              <div className="t">
+                <b>
+                  {r.enteredDate} · {r.locationName}
+                </b>
+                <small>
+                  бункер {r.position}
+                  {r.containerNumber ? ` · набор ${String(r.containerNumber).padStart(3, "0")}` : ""}
+                  {sourceLabel(r.createdBy) ? ` · ${sourceLabel(r.createdBy)}` : ""}
+                </small>
+              </div>
+              <span className="pill">
+                {r.filledWeight}г · {r.packageCount} уп.
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {refills.length >= 300 && (
+        <p className="hint">Показаны последние 300 заливок — более старое есть в базе и участвует в сверке.</p>
+      )}
+
+      {/* Возвраты не привязаны к точке в учёте (заголовок сообщения — лишь
+          подсказка), поэтому фильтр по точке на них не действует. */}
+      <div className="section-title" style={{ marginTop: 18 }}>
+        Возвраты наборов · {containerReturns.length}
+      </div>
+      {containerReturns.length === 0 ? (
+        <p className="muted">Возвратов пока нет.</p>
+      ) : (
+        <div className="rows">
+          {containerReturns.map((r) => (
+            <div className="row" key={r.id}>
+              <div className="t">
+                <b>
+                  {r.returnedDate} · набор {String(r.containerNumber).padStart(3, "0")} · поз. {r.position}
+                </b>
+                <small>
+                  {r.locationNote ? `${r.locationNote} · ` : ""}
+                  {sourceLabel(r.createdBy) ?? ""}
+                </small>
+              </div>
+              <span className="pill">
+                {r.weight}г{r.netWeight !== null ? ` · нетто ${r.netWeight}г` : " · тара не калибрована"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {containerReturns.length >= 300 && (
+        <p className="hint">Показаны последние 300 возвратов.</p>
       )}
     </div>
   );

@@ -242,6 +242,18 @@ export interface CoffeeConsumableRow {
   lids: number;
 }
 
+/** Возврат набора: брутто с весов, нетто — минус эталонная тара (null без калибровки). */
+export interface CoffeeContainerReturnRow {
+  id: string;
+  position: number;
+  containerNumber: number;
+  weight: number;
+  netWeight: number | null;
+  returnedDate: string;
+  locationNote: string | null;
+  createdBy: string | null;
+}
+
 export interface CoffeeWashRow {
   id: string;
   locationId: string;
@@ -1206,6 +1218,8 @@ export const core = {
   recordCoffeeConsumable: (input: { locationId: string; loggedDate: string; water?: number; cups?: number; lids?: number }) =>
     send<{ ok: true }>("/coffee/consumables", "POST", input),
   coffeeConsumablesSummary: () => get<CoffeeConsumableRow[]>("/coffee/consumables"),
+  coffeeContainerReturns: (limit = 200) =>
+    get<CoffeeContainerReturnRow[]>(`/coffee/container-return?limit=${limit}`),
   recordCoffeeWash: (input: { locationId: string; position?: number; note?: string; performedBy?: string }) =>
     send<{ id: string }>("/coffee/wash", "POST", input),
   coffeeWashHistory: (locationId?: string, limit = 50) =>

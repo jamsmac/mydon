@@ -31,6 +31,8 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       washScheduleStatus,
       washSchedules,
       machineCandidates,
+      refillJournal,
+      containerReturns,
     ] = await Promise.all([
       core.coffeeLocations(),
       core.coffeeBunkerConfig(),
@@ -44,6 +46,9 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       core.coffeeWashScheduleStatus(),
       core.coffeeWashSchedules(),
       core.coffeeMachineCandidates(),
+      // Журнал: история заливок и возвратов (включая импортированную из Telegram).
+      core.recentCoffeeRefills(300),
+      core.coffeeContainerReturns(300),
     ]);
     return (
       <CoffeeClient
@@ -61,6 +66,8 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
         washScheduleStatus={washScheduleStatus}
         washSchedules={washSchedules}
         machineCandidates={machineCandidates}
+        refillJournal={refillJournal}
+        containerReturns={containerReturns}
         defaultOwnerRef={defaultOwnerRef}
       />
     );

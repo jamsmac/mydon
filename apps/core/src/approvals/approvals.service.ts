@@ -11,7 +11,7 @@ import {
   org,
   vendingPurchaseOrder,
 } from "@mydon/db";
-import { and, desc, eq, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
@@ -329,119 +329,165 @@ export class ApprovalsService {
       return null;
     };
 
+    // Пачками, не построчно: первый боевой импорт (~5000 строк) построчными
+    // SELECT+INSERT не уложился в таймаут панели, и «Одобрить» выглядело как
+    // сбой (2026-08-03). Теперь: одна выборка существующих на диапазон дат,
+    // дедуп в памяти, вставка кусками.
+    const CHUNK = 500;
+    const chunked = <T>(rows: T[]): T[][] => {
+      const out: T[][] = [];
+      for (let i = 0; i < rows.length; i += CHUNK) out.push(rows.slice(i, i + CHUNK));
+      return out;
+    };
+
     let created = 0;
     let skipped = 0;
-    for (const r of records) {
-      const rec = r as {
-        locationId?: unknown;
-        locationName?: unknown;
-        position?: unknown;
-        containerNumber?: unknown;
-        filledWeight?: unknown;
-        measuredBefore?: unknown;
-        packageCount?: unknown;
-        enteredDate?: unknown;
-      };
-      const locationId = resolveLocation(rec) ?? "";
-      const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
-      const filledWeight = typeof rec.filledWeight === "number" ? Math.trunc(rec.filledWeight) : NaN;
-      const enteredDate = typeof rec.enteredDate === "string" ? rec.enteredDate.slice(0, 10) : "";
-      const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(enteredDate);
-      if (locationId === "" || position < 1 || position > 8 || !(filledWeight > 0) || !dateOk) {
-        skipped += 1;
-        continue;
+    {
+      const valid: {
+        locationId: string;
+        position: number;
+        containerNumber: number | null;
+        filledWeight: number;
+        measuredBefore: number | null;
+        packageCount: number;
+        enteredDate: string;
+        createdBy: string;
+      }[] = [];
+      for (const r of records) {
+        const rec = r as {
+          locationId?: unknown;
+          locationName?: unknown;
+          position?: unknown;
+          containerNumber?: unknown;
+          filledWeight?: unknown;
+          measuredBefore?: unknown;
+          packageCount?: unknown;
+          enteredDate?: unknown;
+        };
+        const locationId = resolveLocation(rec) ?? "";
+        const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
+        const filledWeight = typeof rec.filledWeight === "number" ? Math.trunc(rec.filledWeight) : NaN;
+        const enteredDate = typeof rec.enteredDate === "string" ? rec.enteredDate.slice(0, 10) : "";
+        const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(enteredDate);
+        if (locationId === "" || position < 1 || position > 8 || !(filledWeight > 0) || !dateOk) {
+          skipped += 1;
+          continue;
+        }
+        valid.push({
+          locationId,
+          position,
+          containerNumber:
+            typeof rec.containerNumber === "number" && rec.containerNumber >= 1 && rec.containerNumber <= 27
+              ? Math.trunc(rec.containerNumber)
+              : null,
+          filledWeight,
+          measuredBefore:
+            typeof rec.measuredBefore === "number" && rec.measuredBefore >= 0 ? Math.trunc(rec.measuredBefore) : null,
+          packageCount: typeof rec.packageCount === "number" && rec.packageCount >= 1 ? Math.trunc(rec.packageCount) : 1,
+          enteredDate,
+          createdBy: "import:telegram-history",
+        });
       }
-      const containerNumber =
-        typeof rec.containerNumber === "number" && rec.containerNumber >= 1 && rec.containerNumber <= 27
-          ? Math.trunc(rec.containerNumber)
-          : null;
-      const measuredBefore =
-        typeof rec.measuredBefore === "number" && rec.measuredBefore >= 0 ? Math.trunc(rec.measuredBefore) : null;
-      const packageCount =
-        typeof rec.packageCount === "number" && rec.packageCount >= 1 ? Math.trunc(rec.packageCount) : 1;
-
-      const [existing] = await tx
-        .select({ id: coffeeRefill.id })
-        .from(coffeeRefill)
-        .where(
-          and(
-            eq(coffeeRefill.locationId, locationId),
-            eq(coffeeRefill.position, position),
-            eq(coffeeRefill.enteredDate, enteredDate),
-            eq(coffeeRefill.filledWeight, filledWeight),
-            eq(coffeeRefill.packageCount, packageCount),
-          ),
-        )
-        .limit(1);
-      if (existing) {
-        skipped += 1;
-        continue;
+      if (valid.length > 0) {
+        const refillKey = (v: { locationId: string; position: number; enteredDate: string; filledWeight: number; packageCount: number }) =>
+          `${v.locationId}|${v.position}|${v.enteredDate}|${v.filledWeight}|${v.packageCount}`;
+        const dates = valid.map((v) => v.enteredDate).sort();
+        const existing = await tx
+          .select({
+            locationId: coffeeRefill.locationId,
+            position: coffeeRefill.position,
+            enteredDate: coffeeRefill.enteredDate,
+            filledWeight: coffeeRefill.filledWeight,
+            packageCount: coffeeRefill.packageCount,
+          })
+          .from(coffeeRefill)
+          .where(and(gte(coffeeRefill.enteredDate, dates[0]), lte(coffeeRefill.enteredDate, dates[dates.length - 1])));
+        const seen = new Set(existing.map(refillKey));
+        const fresh: typeof valid = [];
+        for (const v of valid) {
+          const k = refillKey(v);
+          if (seen.has(k)) {
+            skipped += 1;
+            continue;
+          }
+          seen.add(k);
+          fresh.push(v);
+        }
+        for (const part of chunked(fresh)) await tx.insert(coffeeRefill).values(part);
+        created = fresh.length;
       }
-
-      await tx.insert(coffeeRefill).values({
-        locationId,
-        position,
-        containerNumber,
-        filledWeight,
-        measuredBefore,
-        packageCount,
-        enteredDate,
-        createdBy: "import:telegram-history",
-      });
-      created += 1;
     }
 
     // ── Возвраты наборов: «позиция. набор. вес» из темы «Остатки с бункеров» ──
     let returnsCreated = 0;
     let returnsSkipped = 0;
-    for (const r of returns) {
-      const rec = r as {
-        position?: unknown;
-        containerNumber?: unknown;
-        weight?: unknown;
-        returnedDate?: unknown;
-        locationNote?: unknown;
-      };
-      const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
-      const containerNumber = typeof rec.containerNumber === "number" ? Math.trunc(rec.containerNumber) : NaN;
-      const weight = typeof rec.weight === "number" ? Math.trunc(rec.weight) : NaN;
-      const returnedDate = typeof rec.returnedDate === "string" ? rec.returnedDate.slice(0, 10) : "";
-      const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(returnedDate);
-      if (position < 1 || position > 8 || containerNumber < 1 || containerNumber > 27 || !(weight >= 0) || weight > 10000 || !dateOk) {
-        returnsSkipped += 1;
-        continue;
+    {
+      const valid: {
+        position: number;
+        containerNumber: number;
+        weight: number;
+        returnedDate: string;
+        locationNote: string | null;
+        createdBy: string;
+      }[] = [];
+      for (const r of returns) {
+        const rec = r as {
+          position?: unknown;
+          containerNumber?: unknown;
+          weight?: unknown;
+          returnedDate?: unknown;
+          locationNote?: unknown;
+        };
+        const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
+        const containerNumber = typeof rec.containerNumber === "number" ? Math.trunc(rec.containerNumber) : NaN;
+        const weight = typeof rec.weight === "number" ? Math.trunc(rec.weight) : NaN;
+        const returnedDate = typeof rec.returnedDate === "string" ? rec.returnedDate.slice(0, 10) : "";
+        const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(returnedDate);
+        if (position < 1 || position > 8 || containerNumber < 1 || containerNumber > 27 || !(weight >= 0) || weight > 10000 || !dateOk) {
+          returnsSkipped += 1;
+          continue;
+        }
+        valid.push({
+          position,
+          containerNumber,
+          weight,
+          returnedDate,
+          locationNote:
+            typeof rec.locationNote === "string" && rec.locationNote.trim().length > 0
+              ? rec.locationNote.trim().slice(0, 256)
+              : null,
+          createdBy: "import:telegram-history",
+        });
       }
-      const locationNote =
-        typeof rec.locationNote === "string" && rec.locationNote.trim().length > 0
-          ? rec.locationNote.trim().slice(0, 256)
-          : null;
-
-      const [existing] = await tx
-        .select({ id: coffeeContainerReturn.id })
-        .from(coffeeContainerReturn)
-        .where(
-          and(
-            eq(coffeeContainerReturn.position, position),
-            eq(coffeeContainerReturn.containerNumber, containerNumber),
-            eq(coffeeContainerReturn.returnedDate, returnedDate),
-            eq(coffeeContainerReturn.weight, weight),
-          ),
-        )
-        .limit(1);
-      if (existing) {
-        returnsSkipped += 1;
-        continue;
+      if (valid.length > 0) {
+        const returnKey = (v: { position: number; containerNumber: number; returnedDate: string; weight: number }) =>
+          `${v.position}|${v.containerNumber}|${v.returnedDate}|${v.weight}`;
+        const dates = valid.map((v) => v.returnedDate).sort();
+        const existing = await tx
+          .select({
+            position: coffeeContainerReturn.position,
+            containerNumber: coffeeContainerReturn.containerNumber,
+            returnedDate: coffeeContainerReturn.returnedDate,
+            weight: coffeeContainerReturn.weight,
+          })
+          .from(coffeeContainerReturn)
+          .where(
+            and(gte(coffeeContainerReturn.returnedDate, dates[0]), lte(coffeeContainerReturn.returnedDate, dates[dates.length - 1])),
+          );
+        const seen = new Set(existing.map(returnKey));
+        const fresh: typeof valid = [];
+        for (const v of valid) {
+          const k = returnKey(v);
+          if (seen.has(k)) {
+            returnsSkipped += 1;
+            continue;
+          }
+          seen.add(k);
+          fresh.push(v);
+        }
+        for (const part of chunked(fresh)) await tx.insert(coffeeContainerReturn).values(part);
+        returnsCreated = fresh.length;
       }
-
-      await tx.insert(coffeeContainerReturn).values({
-        position,
-        containerNumber,
-        weight,
-        returnedDate,
-        locationNote,
-        createdBy: "import:telegram-history",
-      });
-      returnsCreated += 1;
     }
 
     // ── Расходники: «Вода, стаканчики и крышки» из фото-таблиц ──────────────
@@ -449,24 +495,44 @@ export class ApprovalsService {
     // ту же строку, а не плодит дубли.
     let consumablesUpserted = 0;
     let consumablesSkipped = 0;
-    for (const c of consumables) {
-      const rec = c as { locationId?: unknown; locationName?: unknown; loggedDate?: unknown; water?: unknown; cups?: unknown; lids?: unknown };
-      const locationId = resolveLocation(rec) ?? "";
-      const loggedDate = typeof rec.loggedDate === "string" ? rec.loggedDate.slice(0, 10) : "";
-      const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(loggedDate);
-      const num = (v: unknown) => (typeof v === "number" && v >= 0 ? Math.trunc(v) : 0);
-      if (locationId === "" || !dateOk) {
-        consumablesSkipped += 1;
-        continue;
-      }
-      await tx
-        .insert(coffeeConsumable)
-        .values({ locationId, loggedDate, water: num(rec.water), cups: num(rec.cups), lids: num(rec.lids), createdBy: "import:telegram-history" })
-        .onConflictDoUpdate({
-          target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
-          set: { water: num(rec.water), cups: num(rec.cups), lids: num(rec.lids) },
+    {
+      // Дедуп внутри payload по (точка, дата) — побеждает последняя строка:
+      // два конфликта на одну строку в одном multi-row INSERT Postgres
+      // отвергает («cannot affect row a second time»).
+      const byKey = new Map<string, { locationId: string; loggedDate: string; water: number; cups: number; lids: number; createdBy: string }>();
+      for (const c of consumables) {
+        const rec = c as { locationId?: unknown; locationName?: unknown; loggedDate?: unknown; water?: unknown; cups?: unknown; lids?: unknown };
+        const locationId = resolveLocation(rec) ?? "";
+        const loggedDate = typeof rec.loggedDate === "string" ? rec.loggedDate.slice(0, 10) : "";
+        const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(loggedDate);
+        const num = (v: unknown) => (typeof v === "number" && v >= 0 ? Math.trunc(v) : 0);
+        if (locationId === "" || !dateOk) {
+          consumablesSkipped += 1;
+          continue;
+        }
+        byKey.set(`${locationId}|${loggedDate}`, {
+          locationId,
+          loggedDate,
+          water: num(rec.water),
+          cups: num(rec.cups),
+          lids: num(rec.lids),
+          createdBy: "import:telegram-history",
         });
-      consumablesUpserted += 1;
+      }
+      for (const part of chunked([...byKey.values()])) {
+        await tx
+          .insert(coffeeConsumable)
+          .values(part)
+          .onConflictDoUpdate({
+            target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
+            set: {
+              water: sql`excluded.water`,
+              cups: sql`excluded.cups`,
+              lids: sql`excluded.lids`,
+            },
+          });
+      }
+      consumablesUpserted = byKey.size;
     }
 
     await tx.insert(event).values({

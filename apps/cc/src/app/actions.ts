@@ -85,7 +85,10 @@ export async function decideApproval(
       headers: coreWriteHeaders(),
       body: JSON.stringify({ decision, actor: "panel" }),
       cache: "no-store",
-      signal: AbortSignal.timeout(8000),
+      // «Одобрить» может исполнять большой импорт (тысячи строк одной
+      // транзакцией) — 8с обрывали ожидание на живом одобрении 2026-08-03,
+      // хотя Core продолжал работу. Дать исполнению договорить.
+      signal: AbortSignal.timeout(120_000),
     });
 
     if (!res.ok) {
