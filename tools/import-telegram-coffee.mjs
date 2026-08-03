@@ -25,6 +25,11 @@
  *   SERVICE_TOKEN=<из .env сервера> \
  *   node tools/import-telegram-coffee.mjs <result.json> [--limit 5000] [--dry]
  *
+ * Группа-источник (указана владельцем 2026-08-03): t.me/c/3307473916 —
+ * приватная группа заливок; для Bot API это чат -1003307473916 (см.
+ * TELEGRAM_COFFEE_HISTORY_CHAT в .env.example). Экспортировать её историю
+ * может участник группы через Telegram Desktop.
+ *
  * Формат экспорта — стандартный Telegram Desktop JSON: {messages: [{type,
  * date, from, text}]}. `text` — строка или массив {type, text} (entities);
  * оба варианта разбираются.
