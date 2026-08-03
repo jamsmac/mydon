@@ -25,7 +25,8 @@ export const VENDHUB_GROUPS: NavGroup[] = [
     label: "Каталог",
     leaves: [
       { label: "Товары", type: "product" },
-      { label: "Аппараты", type: "machine" },
+      // «Аппараты» здесь больше нет: автоматы и аппараты — одно и то же,
+      // их единое место — верхняя вкладка «Автоматы» (карточки + живой дефицит).
       { label: "Компоненты", type: "component" },
       { label: "Ингредиенты", type: "ingredient" },
       { label: "Рецепты", type: "recipe" },
