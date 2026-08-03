@@ -35,7 +35,8 @@
       "adm-zip": ">=0.6.0",
       "sharp": ">=0.35.0",
       "postcss": ">=8.5.18",
-      "brace-expansion": ">=5.0.9"
+      "brace-expansion": ">=5.0.9",
+      "fast-uri": ">=3.1.5"
     }
   }
 }
