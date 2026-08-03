@@ -204,6 +204,13 @@
       "when": 1785737684683,
       "tag": "0028_coffee_target_fill",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1785738393254,
+      "tag": "0029_coffee_stock",
+      "breakpoints": true
     }
   ]
 }

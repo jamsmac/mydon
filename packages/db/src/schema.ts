@@ -1175,6 +1175,26 @@ export const coffeeSale = pgTable(
 );
 
 /**
+ * Остаток центрального склада кофе-ингредиентов, грамм (тот же приём, что
+ * `vending_stock`, — своя таблица, а не общий `entity`/`stock_movement`:
+ * движки не сливают базы, а объём и природа расхода тут иные — граммы из
+ * бункеров, не штуки/партии общего склада). Одна строка на ингредиент —
+ * текущий баланс, вводится инвентаризацией (перезапись, а не леджер), как и
+ * у `vending_stock`; заливки бункеров его не списывают автоматически —
+ * пересчёт следует за реальностью, а не наоборот.
+ */
+export const coffeeStock = pgTable("coffee_stock", {
+  id: id(),
+  ingredientId: uuid("ingredient_id")
+    .references(() => coffeeIngredient.id)
+    .notNull()
+    .unique(),
+  quantity: integer("quantity").default(0).notNull(),
+  countedAt: timestamp("counted_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/**
  * Полная схема — для drizzle-клиента.
  *
  * ВСЕ таблицы обязаны быть здесь: этот объект — то, что видит `db.query.*` и
@@ -1237,4 +1257,5 @@ export const schema = {
   coffeeWashLog,
   coffeeProduct,
   coffeeSale,
+  coffeeStock,
 };

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
@@ -9,6 +9,7 @@ import {
   coffeeProduct,
   coffeeRefill,
   coffeeSale,
+  coffeeStock,
   coffeeWashLog,
 } from "@mydon/db";
 import {
@@ -94,6 +95,28 @@ export interface ConsumableInput {
   cups?: number;
   lids?: number;
   createdBy?: string;
+}
+
+export interface IngestCoffeeStockItem {
+  ingredientId: string;
+  quantity: number;
+}
+
+export interface CoffeeStockAdjustment {
+  ingredientId: string;
+  ingredientName: string;
+  before: number;
+  after: number;
+  delta: number;
+  value: number;
+  noPrice: boolean;
+}
+
+export interface CoffeeStockLevelRow {
+  ingredientId: string;
+  ingredientName: string;
+  quantity: number;
+  countedAt: string;
 }
 
 export interface RecordWashInput {
@@ -551,5 +574,79 @@ export class CoffeeService {
         reconcile: reconcileConsumption(actualGrams, expectedGrams),
       };
     });
+  }
+
+  // ── Склад: центральный остаток ингредиентов (грамм) ──────────────────────
+  // Тот же приём, что и у `vending_stock`: одна строка на ингредиент —
+  // текущий баланс, вводится инвентаризацией (перезапись, а не леджер).
+  // Заливки бункеров его не списывают автоматически — умышленно: пересчёт
+  // следует за реальностью на складе, а не наоборот (симулировать расход по
+  // заливкам означало бы дублировать факт вторым, неточным источником).
+
+  /**
+   * Занести пересчёт склада. Идентично `vending.service.ingestStock()`:
+   * опоздавший пересчёт (`countedAt` старше уже сохранённого) игнорируется
+   * целиком — иначе задержавшееся сообщение откатывает актуальный остаток
+   * назад. Расхождение с прошлым остатком оценивается в сумах, если у
+   * ингредиента есть цена (`purchasePrice`) — иначе `noPrice: true`, деньгам
+   * доверять нельзя.
+   */
+  async ingestCoffeeStock(items: IngestCoffeeStockItem[], countedAt?: string): Promise<{ items: number; adjustments: CoffeeStockAdjustment[] }> {
+    const counted = countedAt ? new Date(countedAt) : new Date();
+    const adjustments: CoffeeStockAdjustment[] = [];
+
+    await this.db.transaction(async (tx) => {
+      const [existingRows, ingredients] = await Promise.all([
+        tx.select().from(coffeeStock),
+        tx.select().from(coffeeIngredient),
+      ]);
+      const beforeById = new Map(existingRows.map((r) => [r.ingredientId, { quantity: r.quantity, countedAt: r.countedAt }]));
+      const nameById = new Map(ingredients.map((i) => [i.id, i.name]));
+      const priceById = new Map(ingredients.map((i) => [i.id, i.purchasePrice != null ? Number(i.purchasePrice) : null]));
+
+      for (const item of items) {
+        const prior = beforeById.get(item.ingredientId);
+        if (prior && prior.countedAt.getTime() > counted.getTime()) continue;
+
+        if (prior && prior.quantity !== item.quantity) {
+          const delta = item.quantity - prior.quantity;
+          const price = priceById.get(item.ingredientId) ?? null;
+          adjustments.push({
+            ingredientId: item.ingredientId,
+            ingredientName: nameById.get(item.ingredientId) ?? item.ingredientId,
+            before: prior.quantity,
+            after: item.quantity,
+            delta,
+            value: price != null ? Math.round(Math.abs(delta) * price * 100) / 100 : 0,
+            noPrice: price == null,
+          });
+        }
+
+        await tx
+          .insert(coffeeStock)
+          .values({ ingredientId: item.ingredientId, quantity: item.quantity, countedAt: counted })
+          .onConflictDoUpdate({
+            target: coffeeStock.ingredientId,
+            set: { quantity: item.quantity, countedAt: counted, updatedAt: new Date() },
+            where: sql`${coffeeStock.countedAt} <= ${counted}`,
+          });
+      }
+    });
+
+    return { items: items.length, adjustments };
+  }
+
+  /** Текущий остаток склада по ингредиентам. */
+  async coffeeStockLevels(): Promise<CoffeeStockLevelRow[]> {
+    const [rows, ingredients] = await Promise.all([this.db.select().from(coffeeStock), this.db.select().from(coffeeIngredient)]);
+    const nameById = new Map(ingredients.map((i) => [i.id, i.name]));
+    return rows
+      .map((r) => ({
+        ingredientId: r.ingredientId,
+        ingredientName: nameById.get(r.ingredientId) ?? r.ingredientId,
+        quantity: r.quantity,
+        countedAt: r.countedAt.toISOString(),
+      }))
+      .sort((a, b) => a.ingredientName.localeCompare(b.ingredientName, "ru"));
   }
 }

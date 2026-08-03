@@ -7,10 +7,12 @@ import type {
   CoffeeLocation,
   CoffeeLocationSummaryRow,
   CoffeeRefillRow,
+  CoffeeStockLevelRow,
   CoffeeTareCell,
 } from "../../lib/core";
 import {
   addBunkerIngredient,
+  ingestCoffeeStock,
   recordCoffeeConsumable,
   removeBunkerIngredient,
   setCoffeeIngredientPrice,
@@ -45,6 +47,7 @@ export function CoffeeClient(props: {
   recentRefills: CoffeeRefillRow[];
   summary: CoffeeLocationSummaryRow[];
   consumables: CoffeeConsumableRow[];
+  stockLevels: CoffeeStockLevelRow[];
 }) {
   const [tab, setTab] = useState<Tab>("entry");
   return (
@@ -68,7 +71,9 @@ export function CoffeeClient(props: {
         <EntryTab locations={props.locations} bunkerConfig={props.bunkerConfig} recentRefills={props.recentRefills} />
       )}
       {tab === "table" && <TableTab summary={props.summary} consumables={props.consumables} locations={props.locations} />}
-      {tab === "settings" && <SettingsTab bunkerConfig={props.bunkerConfig} tareGrid={props.tareGrid} />}
+      {tab === "settings" && (
+        <SettingsTab bunkerConfig={props.bunkerConfig} tareGrid={props.tareGrid} stockLevels={props.stockLevels} />
+      )}
     </>
   );
 }
@@ -327,7 +332,15 @@ function ConsumablesTable({ consumables, locations }: { consumables: CoffeeConsu
 
 // ── Вкладка 3: Настройки ──────────────────────────────────────────────────
 
-function SettingsTab({ bunkerConfig, tareGrid }: { bunkerConfig: CoffeeBunkerIngredient[]; tareGrid: CoffeeTareCell[] }) {
+function SettingsTab({
+  bunkerConfig,
+  tareGrid,
+  stockLevels,
+}: {
+  bunkerConfig: CoffeeBunkerIngredient[];
+  tareGrid: CoffeeTareCell[];
+  stockLevels: CoffeeStockLevelRow[];
+}) {
   return (
     <>
       <div className="section-title">Ингредиенты по бункерам</div>
@@ -337,7 +350,70 @@ function SettingsTab({ bunkerConfig, tareGrid }: { bunkerConfig: CoffeeBunkerIng
 
       <div className="section-title">Веса бункеров (тара, г)</div>
       <TareGridEditor tareGrid={tareGrid} />
+
+      <div className="section-title">Склад ингредиентов (остаток, г)</div>
+      <StockSection bunkerConfig={bunkerConfig} stockLevels={stockLevels} />
     </>
+  );
+}
+
+function StockSection({
+  bunkerConfig,
+  stockLevels,
+}: {
+  bunkerConfig: CoffeeBunkerIngredient[];
+  stockLevels: CoffeeStockLevelRow[];
+}) {
+  const [pending, start] = useTransition();
+  const stockById = new Map(stockLevels.map((s) => [s.ingredientId, s]));
+  const ingredients = new Map<string, string>();
+  for (const c of bunkerConfig) ingredients.set(c.ingredientId, c.ingredientName);
+  for (const s of stockLevels) ingredients.set(s.ingredientId, s.ingredientName);
+  const rows = [...ingredients.entries()].sort((a, b) => a[1].localeCompare(b[1], "ru"));
+
+  if (rows.length === 0) return <p className="muted">Пока нет ингредиентов — заведите их в бункерах выше.</p>;
+
+  return (
+    <table className="coffee-table">
+      <thead>
+        <tr>
+          <th>Ингредиент</th>
+          <th>Остаток, г</th>
+          <th>Пересчитано</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(([ingredientId, ingredientName]) => {
+          const s = stockById.get(ingredientId);
+          return (
+            <tr key={ingredientId}>
+              <td>{ingredientName}</td>
+              <td className="num-cell">
+                <input
+                  type="number"
+                  min={0}
+                  className="cell-input"
+                  disabled={pending}
+                  defaultValue={s?.quantity ?? ""}
+                  placeholder="—"
+                  title="Пересчёт остатка склада, г — расхождение с прошлым уходит в лог"
+                  onBlur={(e) => {
+                    const v = e.target.value.trim();
+                    if (v === "") return;
+                    const quantity = Number(v);
+                    if (!Number.isFinite(quantity) || quantity < 0) return;
+                    start(async () => {
+                      await ingestCoffeeStock(ingredientId, Math.round(quantity));
+                    });
+                  }}
+                />
+              </td>
+              <td className="sub">{s ? new Date(s.countedAt).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent" }) : "—"}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 

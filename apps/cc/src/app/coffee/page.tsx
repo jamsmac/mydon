@@ -10,13 +10,14 @@ export const dynamic = "force-dynamic";
  */
 export default async function CoffeePage() {
   try {
-    const [locations, bunkerConfig, tareGrid, recentRefills, summary, consumables] = await Promise.all([
+    const [locations, bunkerConfig, tareGrid, recentRefills, summary, consumables, stockLevels] = await Promise.all([
       core.coffeeLocations(),
       core.coffeeBunkerConfig(),
       core.coffeeTareGrid(),
       core.recentCoffeeRefills(30),
       core.coffeeLocationSummary(),
       core.coffeeConsumablesSummary(),
+      core.coffeeStockLevels(),
     ]);
     return (
       <CoffeeClient
@@ -26,6 +27,7 @@ export default async function CoffeePage() {
         recentRefills={recentRefills}
         summary={summary}
         consumables={consumables}
+        stockLevels={stockLevels}
       />
     );
   } catch (err) {

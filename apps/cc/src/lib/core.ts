@@ -160,6 +160,13 @@ export interface CoffeeReconcileRow {
   reconcile: { status: "ok" | "anomaly" | "unknown"; deltaGrams: number | null; deltaRatio: number | null };
 }
 
+export interface CoffeeStockLevelRow {
+  ingredientId: string;
+  ingredientName: string;
+  quantity: number;
+  countedAt: string;
+}
+
 export interface CoffeeTareCell {
   containerNumber: number;
   position: number;
@@ -1162,6 +1169,9 @@ export const core = {
     send<{ id: string }>("/coffee/wash", "POST", input),
   coffeeWashHistory: (locationId?: string, limit = 50) =>
     get<CoffeeWashRow[]>(`/coffee/wash?limit=${limit}${locationId ? `&locationId=${locationId}` : ""}`),
+  coffeeStockLevels: () => get<CoffeeStockLevelRow[]>("/coffee/stock"),
+  ingestCoffeeStock: (input: { countedAt?: string; items: { ingredientId: string; quantity: number }[] }) =>
+    send<{ items: number; adjustments: unknown[] }>("/coffee/stock", "POST", input),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),

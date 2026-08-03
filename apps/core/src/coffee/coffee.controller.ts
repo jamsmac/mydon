@@ -167,6 +167,22 @@ export class RecordSaleDto {
   createdBy?: string;
 }
 
+export class IngestCoffeeStockItemDto {
+  @IsUUID()
+  ingredientId!: string;
+
+  @IsInt() @Min(0)
+  quantity!: number;
+}
+
+export class IngestCoffeeStockDto {
+  @IsOptional() @IsISO8601()
+  countedAt?: string;
+
+  @IsArray() @ArrayMaxSize(200) @ValidateNested({ each: true }) @Type(() => IngestCoffeeStockItemDto)
+  items!: IngestCoffeeStockItemDto[];
+}
+
 /** Кофе-бункеры: точки, тара, ежедневная заливка, расходники, мойка, сверка расхода. */
 @Controller("coffee")
 export class CoffeeController {
@@ -280,5 +296,17 @@ export class CoffeeController {
   @Get("reconcile/:locationId")
   reconcile(@Param("locationId") locationId: string, @Query("from") from: string, @Query("to") to: string) {
     return this.coffee.reconcileLocation(locationId, from, to);
+  }
+
+  // ── Склад ─────────────────────────────────────────────────────────────
+
+  @Post("stock")
+  ingestCoffeeStock(@Body() dto: IngestCoffeeStockDto) {
+    return this.coffee.ingestCoffeeStock(dto.items, dto.countedAt);
+  }
+
+  @Get("stock")
+  coffeeStockLevels() {
+    return this.coffee.coffeeStockLevels();
   }
 }

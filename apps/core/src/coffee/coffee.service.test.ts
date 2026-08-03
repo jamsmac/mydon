@@ -9,6 +9,7 @@ import {
   coffeeProduct,
   coffeeRefill,
   coffeeSale,
+  coffeeStock,
   coffeeWashLog,
 } from "@mydon/db";
 import { CoffeeService } from "./coffee.service";
@@ -29,6 +30,7 @@ function coffeeDb(tables: {
   products?: unknown[];
   consumables?: unknown[];
   washLog?: unknown[];
+  stock?: unknown[];
 }) {
   const inserts: { table: string; values: unknown }[] = [];
   const updates: { table: string; values: unknown }[] = [];
@@ -44,6 +46,7 @@ function coffeeDb(tables: {
     if (t === coffeeProduct) return tables.products ?? [];
     if (t === coffeeConsumable) return tables.consumables ?? [];
     if (t === coffeeWashLog) return tables.washLog ?? [];
+    if (t === coffeeStock) return tables.stock ?? [];
     return [];
   };
   const nameOf = (t: unknown): string => {
@@ -56,6 +59,7 @@ function coffeeDb(tables: {
     if (t === coffeeConsumable) return "coffee_consumable";
     if (t === coffeeWashLog) return "coffee_wash_log";
     if (t === coffeeProduct) return "coffee_product";
+    if (t === coffeeStock) return "coffee_stock";
     return "unknown";
   };
 
@@ -97,6 +101,7 @@ function coffeeDb(tables: {
         return undefined;
       },
     }),
+    transaction: async <T>(cb: (tx: unknown) => Promise<T>): Promise<T> => cb(db),
   } as never;
 
   return { db, inserts, updates, deletes };
@@ -324,5 +329,84 @@ describe("CoffeeService: недолив заливки (targetFillWeight/fillSta
     const svc = new CoffeeService(db);
     const res = await svc.fillStatusByLocation();
     assert.equal(res[0]!.status, "unknown");
+  });
+});
+
+describe("CoffeeService: склад ингредиентов (ingestCoffeeStock/coffeeStockLevels)", () => {
+  it("первый ввод по ингредиенту (в складе строки ещё не было) — не расхождение", async () => {
+    const { db, inserts } = coffeeDb({ stock: [], ingredients: [{ id: "ing-1", name: "Кофе", purchasePrice: null }] });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 5000 }]);
+    assert.deepEqual(res.adjustments, []);
+    assert.equal(res.items, 1);
+    const stockInsert = inserts.find((i) => i.table === "coffee_stock");
+    assert.ok(stockInsert);
+    assert.equal((stockInsert!.values as Record<string, unknown>).quantity, 5000);
+  });
+
+  it("недостача при пересчёте оценена по цене ингредиента (сум/г)", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 5000, countedAt: new Date("2026-08-01T00:00:00Z") }];
+    const ingredients = [{ id: "ing-1", name: "Кофе", purchasePrice: "0.5000" }];
+    const { db } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 4800 }], "2026-08-02T00:00:00Z");
+    assert.equal(res.adjustments.length, 1);
+    const a = res.adjustments[0]!;
+    assert.equal(a.ingredientName, "Кофе");
+    assert.equal(a.before, 5000);
+    assert.equal(a.after, 4800);
+    assert.equal(a.delta, -200);
+    assert.equal(a.value, 100); // 200 г × 0.5 сум/г
+    assert.equal(a.noPrice, false);
+  });
+
+  it("без цены у ингредиента — value 0, noPrice=true, но расхождение видно (unknown ≠ zero)", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 1000, countedAt: new Date("2026-08-01T00:00:00Z") }];
+    const ingredients = [{ id: "ing-1", name: "Матча", purchasePrice: null }];
+    const { db } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 900 }], "2026-08-02T00:00:00Z");
+    assert.equal(res.adjustments[0]!.value, 0);
+    assert.equal(res.adjustments[0]!.noPrice, true);
+  });
+
+  it("количество не изменилось — не расхождение, но остаток всё равно перезаписывается", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 1000, countedAt: new Date("2026-08-01T00:00:00Z") }];
+    const ingredients = [{ id: "ing-1", name: "Сахар", purchasePrice: "0.1" }];
+    const { db, inserts } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 1000 }], "2026-08-02T00:00:00Z");
+    assert.deepEqual(res.adjustments, []);
+    assert.ok(inserts.some((i) => i.table === "coffee_stock"));
+  });
+
+  it("опоздавший пересчёт (countedAt старше уже сохранённого) — пропускается целиком", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 1000, countedAt: new Date("2026-08-02T12:00:00Z") }];
+    const ingredients = [{ id: "ing-1", name: "Кофе", purchasePrice: "0.5" }];
+    const { db, inserts } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock(
+      [{ ingredientId: "ing-1", quantity: 1 }],
+      "2026-08-02T09:00:00Z", // раньше уже сохранённого 12:00
+    );
+    assert.deepEqual(res.adjustments, []);
+    assert.equal(inserts.length, 0);
+  });
+
+  it("coffeeStockLevels — отдаёт остаток по всем ингредиентам, отсортированный по имени", async () => {
+    const stock = [
+      { ingredientId: "ing-2", quantity: 300, countedAt: new Date("2026-08-02T00:00:00Z") },
+      { ingredientId: "ing-1", quantity: 5000, countedAt: new Date("2026-08-02T00:00:00Z") },
+    ];
+    const ingredients = [
+      { id: "ing-1", name: "Кофе" },
+      { id: "ing-2", name: "Ароматизатор" },
+    ];
+    const { db } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.coffeeStockLevels();
+    assert.equal(res.length, 2);
+    assert.equal(res[0]!.ingredientName, "Ароматизатор");
+    assert.equal(res[1]!.ingredientName, "Кофе");
   });
 });

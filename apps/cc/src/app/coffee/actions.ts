@@ -113,3 +113,14 @@ export async function recordCoffeeWash(input: { locationId: string; position?: n
     return { ok: false, message: detailOf(err) };
   }
 }
+
+/** Пересчёт остатка ингредиента на складе (грамм) — расхождение с прошлым уходит в ответ. */
+export async function ingestCoffeeStock(ingredientId: string, quantity: number): Promise<ActionResult> {
+  try {
+    await core.ingestCoffeeStock({ items: [{ ingredientId, quantity }] });
+    revalidatePath("/coffee");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
