@@ -41,7 +41,7 @@
  * реально писали в группе.
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 
 const args = process.argv.slice(2);
@@ -52,6 +52,11 @@ const opt = (name, def = null) => {
 };
 const DRY = args.includes("--dry");
 const PHOTOS = args.includes("--photos");
+// Фото только из одной темы форума (id из fetch-telegram-history.mjs --topics):
+// тема «Заполнение бункеров» — таблицы, остальные темы vision не гоняем.
+const PHOTO_TOPIC = opt("photo-topic") !== null ? Number(opt("photo-topic")) : null;
+// Готовый payload прошлого прогона (страховка): сразу к согласованию, без LLM.
+const PAYLOAD_FILE = opt("payload");
 const LIMIT = Number(opt("limit", "100000"));
 const BATCH_SIZE = 250;
 const CORE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
@@ -61,9 +66,11 @@ const HINT = process.env.TELEGRAM_COFFEE_HINT ?? "";
 
 if (!file) {
   console.error(
-    "Использование: node tools/import-telegram-coffee.mjs <result.json> [--photos] [--limit N] [--dry]\n" +
+    "Использование: node tools/import-telegram-coffee.mjs <result.json> [--photos] [--photo-topic N] [--limit N] [--dry]\n" +
       "  result.json — экспорт чата/канала (Telegram Desktop → Настройки → Экспорт данных → JSON).\n" +
-      "  --photos — разбирать фото-таблицы (экспорт должен включать картинки; лежат рядом с result.json).",
+      "  --photos — разбирать фото-таблицы (экспорт должен включать картинки; лежат рядом с result.json).\n" +
+      "  --photo-topic N — фото только из темы форума N (id — из fetch-telegram-history.mjs --topics).\n" +
+      "  --payload файл — отправить на согласование готовый payload прошлого прогона (без пере-разбора).",
   );
   process.exit(1);
 }
@@ -111,6 +118,19 @@ try {
   process.exit(1);
 }
 const allMessages = Array.isArray(raw.messages) ? raw.messages : [];
+
+// Готовый payload прошлого прогона: сразу на согласование, без LLM-разбора.
+if (PAYLOAD_FILE) {
+  const p = JSON.parse(readFileSync(PAYLOAD_FILE, "utf8"));
+  try {
+    await submitApproval(p.records ?? [], p.returns ?? [], p.consumables ?? []);
+  } catch (err) {
+    console.error(`Отправка согласования не удалась: ${err.message}`);
+    console.error("Проверь туннель к Core (порт 3001) и SERVICE_TOKEN, затем повтори ту же команду.");
+    process.exit(1);
+  }
+  process.exit(0);
+}
 const textMessages = allMessages
   .filter((m) => m.type === "message" && textOf(m).trim().length > 0)
   .slice(0, LIMIT)
@@ -138,13 +158,36 @@ console.log(
   `Экспорт «${raw.name ?? file}»: сообщений всего ${allMessages.length}, с текстом ${textMessages.length}; ` +
     `возвратов наборов разобрано детерминированно: ${returns.length}${returnsRejected.length ? ` (отклонено строк: ${returnsRejected.length})` : ""}.`,
 );
-if (messages.length === 0 && returns.length === 0) {
+// Фото считаются работой тоже: экспорт одной фото-темы текста может не иметь.
+const hasPhotosToDo =
+  PHOTOS && allMessages.some((m) => m.type === "message" && typeof m.photo === "string" && m.photo.length > 0);
+if (messages.length === 0 && returns.length === 0 && !hasPhotosToDo) {
   console.log("Разбирать нечего.");
   process.exit(0);
 }
+// Просят фильтр по теме, а выгрузка тем не знает — сказать ДО того, как
+// потрачены LLM-прогоны, а не в середине.
+if (
+  PHOTO_TOPIC !== null &&
+  hasPhotosToDo &&
+  !allMessages.some((m) => m.type === "message" && m.photo && m.topicId)
+) {
+  console.error(
+    `--photo-topic ${PHOTO_TOPIC}: в экспорте нет topicId — он из старой выгрузки. ` +
+      "Перегони: node tools/fetch-telegram-history.mjs --out <та же папка> (фото возьмутся из кэша).",
+  );
+  process.exit(1);
+}
 
 // ── 2. Известные точки — справочник, не угадываем ──────────────────────────
-const locations = await coreFetch("/coffee/locations");
+let locations;
+try {
+  locations = await coreFetch("/coffee/locations");
+} catch (err) {
+  console.error(`Core недоступен (${err.message}).`);
+  console.error("Подними туннель к серверу: ssh -N -L 3001:127.0.0.1:3001 root@<mydon-os> — и задай SERVICE_TOKEN.");
+  process.exit(1);
+}
 const locationByName = new Map(locations.map((l) => [l.name.toLowerCase().trim(), l]));
 console.log(`Точек в справочнике: ${locations.length}.`);
 
@@ -255,7 +298,12 @@ for (let i = 0; i < messages.length; i += BATCH_SIZE) {
 // набор+вес) и «Вода, стаканчики и крышки - YYYY-MM-DD». Дата — в заголовке
 // самой картинки, поэтому модель читает её ОТТУДА, а дата сообщения — запасная.
 const consumables = [];
-const photoMessages = allMessages.filter((m) => m.type === "message" && typeof m.photo === "string" && m.photo.length > 0);
+const allPhotoMessages = allMessages.filter((m) => m.type === "message" && typeof m.photo === "string" && m.photo.length > 0);
+const photoMessages =
+  PHOTO_TOPIC === null ? allPhotoMessages : allPhotoMessages.filter((m) => Number(m.topicId) === PHOTO_TOPIC);
+if (PHOTO_TOPIC !== null) {
+  console.log(`\nФото: тема ${PHOTO_TOPIC} — ${photoMessages.length} из ${allPhotoMessages.length} в экспорте.`);
+}
 if (!PHOTOS && photoMessages.length > 0) {
   console.log(`\nФото в экспорте: ${photoMessages.length} — пропущены (запусти с --photos и экспортом, включающим картинки).`);
 }
@@ -428,18 +476,39 @@ if (DRY) {
 }
 
 // ── 5. Одно согласование со всем списком (T0 — владелец решает) ────────────
-const parts = [];
-if (records.length > 0) parts.push(`${records.length} заливок`);
-if (returns.length > 0) parts.push(`${returns.length} возвратов наборов`);
-if (consumables.length > 0) parts.push(`${consumables.length} строк расходников`);
-const approval = await coreFetch("/approvals", {
-  method: "POST",
-  body: JSON.stringify({
-    agent: "telegram-coffee-import",
-    action: `Занести из «${raw.name ?? file}»: ${parts.join(", ")} (история Telegram)`,
-    tier: "T0",
-    payload: { source: file, coffeeImport: { records, returns, consumables } },
-  }),
-});
-console.log(`\nСогласование создано: ${approval.id}`);
-console.log("Открой панель → Согласования. После «Одобрить» записи появятся в кофе-бункерах VendHub.");
+// Многочасовой vision-разбор не должен пропасть из-за отвалившегося туннеля к
+// Core: payload сохраняется на диск ДО отправки, повтор — через --payload.
+const payloadPath = join(dirname(file), "coffee-import-payload.json");
+writeFileSync(payloadPath, JSON.stringify({ records, returns, consumables }, null, 1));
+console.log(`\nPayload сохранён: ${payloadPath}`);
+try {
+  await submitApproval(records, returns, consumables);
+} catch (err) {
+  console.error(`\nОтправка согласования не удалась: ${err.message}`);
+  console.error(
+    `Разбор цел. Повторная отправка без пере-разбора:\n  node tools/import-telegram-coffee.mjs ${file} --payload ${payloadPath}`,
+  );
+  process.exit(1);
+}
+
+async function submitApproval(records, returns, consumables) {
+  if (records.length === 0 && returns.length === 0 && consumables.length === 0) {
+    console.log("Предлагать нечего — согласование не создаётся.");
+    return;
+  }
+  const parts = [];
+  if (records.length > 0) parts.push(`${records.length} заливок`);
+  if (returns.length > 0) parts.push(`${returns.length} возвратов наборов`);
+  if (consumables.length > 0) parts.push(`${consumables.length} строк расходников`);
+  const approval = await coreFetch("/approvals", {
+    method: "POST",
+    body: JSON.stringify({
+      agent: "telegram-coffee-import",
+      action: `Занести из «${raw.name ?? file}»: ${parts.join(", ")} (история Telegram)`,
+      tier: "T0",
+      payload: { source: file, coffeeImport: { records, returns, consumables } },
+    }),
+  });
+  console.log(`\nСогласование создано: ${approval.id}`);
+  console.log("Открой панель → Согласования. После «Одобрить» записи появятся в кофе-бункерах VendHub.");
+}
