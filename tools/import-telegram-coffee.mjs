@@ -60,6 +60,10 @@ const PAYLOAD_FILE = opt("payload");
 const LIMIT = Number(opt("limit", "100000"));
 const BATCH_SIZE = 250;
 const CORE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
+// Модель разбора (слово владельца, 2026-08-03): Sonnet — точный на чтении
+// таблиц и экономит лимиты подписки на сотнях пачек. Прогон не зависит от
+// того, какая модель выбрана в Claude Code запускающего.
+const MODEL = process.env.COFFEE_IMPORT_MODEL ?? "claude-sonnet-5";
 
 /** Подсказка модели, если формат сообщений в конкретной группе нестандартный (например «АХ б7 1200/2»). */
 const HINT = process.env.TELEGRAM_COFFEE_HINT ?? "";
@@ -258,6 +262,7 @@ for (let i = 0; i < messages.length; i += BATCH_SIZE) {
     ].join("\n"),
     options: {
       systemPrompt: "Ты аккуратно извлекаешь структурированные записи из переписки техников про кофейные бункеры.",
+      model: MODEL,
       tools: [],
       settingSources: [],
       maxTurns: 1,
@@ -405,6 +410,7 @@ if (PHOTOS && photoMessages.length > 0) {
       prompt: photoPrompt(),
       options: {
         systemPrompt: "Ты аккуратно читаешь таблицы с картинок и переносишь числа как есть, не выдумывая.",
+        model: MODEL,
         tools: [],
         settingSources: [],
         maxTurns: 1,
