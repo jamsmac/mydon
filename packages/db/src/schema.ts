@@ -1123,6 +1123,49 @@ export const coffeeContainerReturn = pgTable(
 );
 
 /**
+ * Размещение аппарата на точке — история с периодами (слово владельца,
+ * 2026-08-03): один и тот же аппарат мог работать на разных точках, и на
+ * одной точке в разное время работали разные аппараты. Открытое размещение
+ * (end_date IS NULL) — «стоит сейчас»; перестановка ЗАКРЫВАЕТ старое и
+ * открывает новое, история не переписывается. `coffee_location.entity_id`
+ * остаётся кэшем текущего аппарата — его ведёт linkLocation() там же,
+ * где пишет размещения.
+ */
+export const coffeeMachinePlacement = pgTable(
+  "coffee_machine_placement",
+  {
+    id: id(),
+    locationId: uuid("location_id")
+      .references(() => coffeeLocation.id)
+      .notNull(),
+    entityId: uuid("entity_id")
+      .references(() => entity.id)
+      .notNull(),
+    /** null — стоял «с неизвестной даты» (бэкфилл существующих привязок). */
+    startDate: date("start_date"),
+    endDate: date("end_date"),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("coffee_machine_placement_location_idx").on(t.locationId, t.startDate),
+    index("coffee_machine_placement_entity_idx").on(t.entityId, t.startDate),
+    // Физика: на точке не больше одного текущего аппарата, аппарат — не
+    // больше чем на одной точке. История (закрытые периоды) не ограничена.
+    uniqueIndex("coffee_machine_placement_location_open_key")
+      .on(t.locationId)
+      .where(sql`${t.endDate} is null`),
+    uniqueIndex("coffee_machine_placement_entity_open_key")
+      .on(t.entityId)
+      .where(sql`${t.endDate} is null`),
+    check(
+      "coffee_machine_placement_dates",
+      sql`${t.endDate} is null or ${t.startDate} is null or ${t.endDate} >= ${t.startDate}`,
+    ),
+  ],
+);
+
+/**
  * Расход воды/стаканчиков/крышек по точке за день — отдельно от бункеров
  * (они не ингредиент из бункера). Одна строка на (точка, дата) — повторный
  * ввод за тот же день правит её же, а не плодит дубли.
@@ -1341,4 +1384,5 @@ export const schema = {
   coffeeProduct,
   coffeeSale,
   coffeeStock,
+  coffeeMachinePlacement,
 };

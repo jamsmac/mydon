@@ -254,6 +254,20 @@ export interface CoffeeContainerReturnRow {
   createdBy: string | null;
 }
 
+/** Период размещения аппарата на точке. endDate=null — стоит сейчас. */
+export interface CoffeePlacementRow {
+  id: string;
+  locationId: string;
+  locationName: string;
+  entityId: string;
+  machineName: string;
+  machineRef: string | null;
+  /** null — «с неизвестной даты» (бэкфилл существовавших привязок). */
+  startDate: string | null;
+  endDate: string | null;
+  note: string | null;
+}
+
 export interface CoffeeWashRow {
   id: string;
   locationId: string;
@@ -1220,6 +1234,7 @@ export const core = {
   coffeeConsumablesSummary: () => get<CoffeeConsumableRow[]>("/coffee/consumables"),
   coffeeContainerReturns: (limit = 200) =>
     get<CoffeeContainerReturnRow[]>(`/coffee/container-return?limit=${limit}`),
+  coffeePlacements: () => get<CoffeePlacementRow[]>("/coffee/placements"),
   recordCoffeeWash: (input: { locationId: string; position?: number; note?: string; performedBy?: string }) =>
     send<{ id: string }>("/coffee/wash", "POST", input),
   coffeeWashHistory: (locationId?: string, limit = 50) =>

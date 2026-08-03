@@ -7,6 +7,7 @@ import {
   coffeeContainerTare,
   coffeeIngredient,
   coffeeLocation,
+  coffeeMachinePlacement,
   coffeeProduct,
   coffeeRefill,
   coffeeSale,
@@ -54,6 +55,20 @@ export interface MachineCandidateRow {
   name: string;
   ref: string | null;
   point: string | null;
+}
+
+/** Период размещения аппарата на точке. endDate=null — стоит сейчас. */
+export interface PlacementRow {
+  id: string;
+  locationId: string;
+  locationName: string;
+  entityId: string;
+  machineName: string;
+  machineRef: string | null;
+  /** null — стоял «с неизвестной даты» (бэкфилл существовавших привязок). */
+  startDate: string | null;
+  endDate: string | null;
+  note: string | null;
 }
 
 export interface BunkerIngredientRow {
@@ -290,7 +305,16 @@ export class CoffeeService {
       .sort((a, b) => a.name.localeCompare(b.name, "ru"));
   }
 
-  /** Привязать/отвязать точку от карточки автомата. entityId=null — снять связь. */
+  /**
+   * Привязать/отвязать точку от карточки автомата. entityId=null — снять связь.
+   *
+   * Move-семантика (слово владельца, 2026-08-03): один аппарат мог работать на
+   * разных точках, на одной точке — разные аппараты. Поэтому привязка не
+   * перетирает факт, а ведёт историю: открытые размещения точки И аппарата
+   * закрываются сегодняшним днём, открывается новое. `coffee_location.entityId`
+   * остаётся кэшем текущего состояния. Всё одной транзакцией — история и кэш
+   * не могут разъехаться.
+   */
   async linkLocation(locationId: string, entityId: string | null): Promise<{ ok: true }> {
     const [loc] = await this.db.select({ id: coffeeLocation.id }).from(coffeeLocation).where(eq(coffeeLocation.id, locationId));
     if (!loc) throw new NotFoundException(`Точка ${locationId} не найдена`);
@@ -302,8 +326,59 @@ export class CoffeeService {
       if (!card) throw new NotFoundException(`Карточка ${entityId} не найдена`);
       if (card.type !== "machine") throw new BadRequestException("Привязать можно только карточку автомата (type=machine)");
     }
-    await this.db.update(coffeeLocation).set({ entityId }).where(eq(coffeeLocation.id, locationId));
+
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    await this.db.transaction(async (tx) => {
+      // Тот же аппарат уже стоит на этой точке — не плодим период-дубль.
+      const [current] = await tx
+        .select({ id: coffeeMachinePlacement.id, entityId: coffeeMachinePlacement.entityId })
+        .from(coffeeMachinePlacement)
+        .where(and(eq(coffeeMachinePlacement.locationId, locationId), isNull(coffeeMachinePlacement.endDate)));
+      if (current && entityId !== null && current.entityId === entityId) {
+        await tx.update(coffeeLocation).set({ entityId }).where(eq(coffeeLocation.id, locationId));
+        return;
+      }
+
+      // Закрыть открытое размещение точки (какой бы аппарат там ни стоял).
+      await tx
+        .update(coffeeMachinePlacement)
+        .set({ endDate: today })
+        .where(and(eq(coffeeMachinePlacement.locationId, locationId), isNull(coffeeMachinePlacement.endDate)));
+
+      if (entityId !== null) {
+        // И открытое размещение самого аппарата — он не может стоять в двух местах.
+        await tx
+          .update(coffeeMachinePlacement)
+          .set({ endDate: today })
+          .where(and(eq(coffeeMachinePlacement.entityId, entityId), isNull(coffeeMachinePlacement.endDate)));
+        await tx.insert(coffeeMachinePlacement).values({ locationId, entityId, startDate: today });
+      }
+
+      await tx.update(coffeeLocation).set({ entityId }).where(eq(coffeeLocation.id, locationId));
+    });
     return { ok: true };
+  }
+
+  /** История размещений: какой аппарат когда на какой точке стоял. */
+  async placements(locationId?: string): Promise<PlacementRow[]> {
+    const rows = await this.db
+      .select({
+        id: coffeeMachinePlacement.id,
+        locationId: coffeeMachinePlacement.locationId,
+        locationName: coffeeLocation.name,
+        entityId: coffeeMachinePlacement.entityId,
+        machineName: entity.name,
+        machineRef: entity.externalRef,
+        startDate: coffeeMachinePlacement.startDate,
+        endDate: coffeeMachinePlacement.endDate,
+        note: coffeeMachinePlacement.note,
+      })
+      .from(coffeeMachinePlacement)
+      .innerJoin(coffeeLocation, eq(coffeeMachinePlacement.locationId, coffeeLocation.id))
+      .innerJoin(entity, eq(coffeeMachinePlacement.entityId, entity.id))
+      .where(locationId ? eq(coffeeMachinePlacement.locationId, locationId) : undefined)
+      .orderBy(desc(sql`${coffeeMachinePlacement.endDate} is null`), desc(coffeeMachinePlacement.startDate));
+    return rows;
   }
 
   /**
