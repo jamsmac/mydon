@@ -260,7 +260,10 @@ export class VendingService {
               // не должен откатывать актуальную планограмму назад (найдено
               // внешним аудитом, P2). slotSnapshot ниже — история, пишется
               // всегда, независимо от этого условия.
-              where: sql`${machineSlot.syncedAt} <= ${capturedAt}`,
+              // Дата — строкой ISO: сырой sql-фрагмент не знает тип колонки и
+              // без этого сериализует Date через toString(), что Postgres не
+              // парсит как часовой пояс (найдено при живом e2e-тесте на коффе-складе).
+              where: sql`${machineSlot.syncedAt} <= ${capturedAt.toISOString()}`,
             });
           await tx.insert(slotSnapshot).values({
             machineSerial: m.serial,
@@ -560,7 +563,10 @@ export class VendingService {
             set: { quantity, countedAt, updatedAt: countedAt },
             // Защита и от конкурентной транзакции с более новым пересчётом,
             // не только от порядка внутри этого вызова.
-            where: sql`${vendingStock.countedAt} <= ${countedAt}`,
+            // Дата — строкой ISO: сырой sql-фрагмент не знает тип колонки и
+            // без этого сериализует Date через toString(), что Postgres не
+            // парсит как часовой пояс (найдено при живом e2e-тесте на коффе-складе).
+            where: sql`${vendingStock.countedAt} <= ${countedAt.toISOString()}`,
           });
       }
 

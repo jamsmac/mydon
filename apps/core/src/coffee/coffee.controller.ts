@@ -298,6 +298,11 @@ export class CoffeeController {
     return this.coffee.reconcileLocation(locationId, from, to);
   }
 
+  @Get("reconcile")
+  reconcileAll(@Query("from") from: string, @Query("to") to: string) {
+    return this.coffee.reconcileAllLocations(from, to);
+  }
+
   // ── Склад ─────────────────────────────────────────────────────────────
 
   @Post("stock")

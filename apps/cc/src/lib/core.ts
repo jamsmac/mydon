@@ -160,6 +160,12 @@ export interface CoffeeReconcileRow {
   reconcile: { status: "ok" | "anomaly" | "unknown"; deltaGrams: number | null; deltaRatio: number | null };
 }
 
+export interface CoffeeLocationReconcileGroup {
+  locationId: string;
+  locationName: string;
+  rows: CoffeeReconcileRow[];
+}
+
 export interface CoffeeStockLevelRow {
   ingredientId: string;
   ingredientName: string;
@@ -1148,6 +1154,8 @@ export const core = {
   coffeeFillStatus: () => get<CoffeeFillStatusRow[]>("/coffee/fill-status"),
   coffeeReconcile: (locationId: string, from: string, to: string) =>
     get<CoffeeReconcileRow[]>(`/coffee/reconcile/${locationId}?from=${from}&to=${to}`),
+  coffeeReconcileAll: (from: string, to: string) =>
+    get<CoffeeLocationReconcileGroup[]>(`/coffee/reconcile?from=${from}&to=${to}`),
   coffeeTareGrid: () => get<CoffeeTareCell[]>("/coffee/tare"),
   setCoffeeTare: (containerNumber: number, position: number, tareWeight: number) =>
     send<{ ok: true }>("/coffee/tare", "PUT", { containerNumber, position, tareWeight }),

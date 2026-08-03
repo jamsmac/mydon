@@ -4,7 +4,9 @@ import { Fragment, useMemo, useState, useTransition } from "react";
 import type {
   CoffeeBunkerIngredient,
   CoffeeConsumableRow,
+  CoffeeFillStatusRow,
   CoffeeLocation,
+  CoffeeLocationReconcileGroup,
   CoffeeLocationSummaryRow,
   CoffeeRefillRow,
   CoffeeStockLevelRow,
@@ -34,7 +36,7 @@ import {
 const POSITIONS = [1, 2, 3, 4, 5, 6, 7, 8];
 const CONTAINERS = Array.from({ length: 27 }, (_, i) => i + 1);
 
-type Tab = "entry" | "table" | "settings";
+type Tab = "entry" | "table" | "reconcile" | "settings";
 
 function todayIso(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
@@ -48,8 +50,15 @@ export function CoffeeClient(props: {
   summary: CoffeeLocationSummaryRow[];
   consumables: CoffeeConsumableRow[];
   stockLevels: CoffeeStockLevelRow[];
+  fillStatus: CoffeeFillStatusRow[];
+  reconcile: CoffeeLocationReconcileGroup[];
+  reconcileFrom: string;
+  reconcileTo: string;
 }) {
   const [tab, setTab] = useState<Tab>("entry");
+  const alertCount =
+    props.fillStatus.filter((r) => r.status === "underfill").length +
+    props.reconcile.reduce((n, g) => n + g.rows.filter((r) => r.reconcile.status === "anomaly").length, 0);
   return (
     <>
       <div className="page-head">
@@ -63,6 +72,9 @@ export function CoffeeClient(props: {
         <button className={tab === "table" ? "on" : ""} onClick={() => setTab("table")}>
           Таблица
         </button>
+        <button className={tab === "reconcile" ? "on" : ""} onClick={() => setTab("reconcile")}>
+          Сверка{alertCount > 0 ? ` (${alertCount})` : ""}
+        </button>
         <button className={tab === "settings" ? "on" : ""} onClick={() => setTab("settings")}>
           Настройки
         </button>
@@ -71,6 +83,9 @@ export function CoffeeClient(props: {
         <EntryTab locations={props.locations} bunkerConfig={props.bunkerConfig} recentRefills={props.recentRefills} />
       )}
       {tab === "table" && <TableTab summary={props.summary} consumables={props.consumables} locations={props.locations} />}
+      {tab === "reconcile" && (
+        <ReconcileTab fillStatus={props.fillStatus} reconcile={props.reconcile} from={props.reconcileFrom} to={props.reconcileTo} />
+      )}
       {tab === "settings" && (
         <SettingsTab bunkerConfig={props.bunkerConfig} tareGrid={props.tareGrid} stockLevels={props.stockLevels} />
       )}
@@ -327,6 +342,119 @@ function ConsumablesTable({ consumables, locations }: { consumables: CoffeeConsu
         </tbody>
       </table>
     </div>
+  );
+}
+
+// ── Вкладка: Сверка (алерты недолива и расхождения факт/ожидание) ──────────
+
+const RECONCILE_LABEL: Record<"ok" | "anomaly" | "unknown", string> = {
+  ok: "Сходится",
+  anomaly: "Расхождение",
+  unknown: "Нет данных",
+};
+
+const FILL_LABEL: Record<"ok" | "underfill" | "unknown", string> = {
+  ok: "Норма",
+  underfill: "Недолив",
+  unknown: "Нет эталона",
+};
+
+function StatusBadge({ status, label }: { status: "ok" | "anomaly" | "unknown" | "underfill"; label: string }) {
+  const cls = status === "ok" ? "ok" : status === "unknown" ? "" : "bad";
+  return <span className={`pill ${cls}`}>{label}</span>;
+}
+
+function ReconcileTab({
+  fillStatus,
+  reconcile,
+  from,
+  to,
+}: {
+  fillStatus: CoffeeFillStatusRow[];
+  reconcile: CoffeeLocationReconcileGroup[];
+  from: string;
+  to: string;
+}) {
+  const underfills = fillStatus.filter((r) => r.status === "underfill");
+  const anomalyGroups = reconcile
+    .map((g) => ({ ...g, rows: g.rows.filter((r) => r.reconcile.status === "anomaly") }))
+    .filter((g) => g.rows.length > 0);
+
+  return (
+    <>
+      <div className="section-title">Недолив заливки (последняя заливка против эталона)</div>
+      {underfills.length === 0 ? (
+        <p className="muted">Недолива не обнаружено.</p>
+      ) : (
+        <table className="coffee-table">
+          <thead>
+            <tr>
+              <th>Точка</th>
+              <th>Бункер</th>
+              <th>Ингредиент</th>
+              <th>Чистый вес, г</th>
+              <th>Эталон, г</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>
+            {underfills.map((r) => (
+              <tr key={`${r.locationId}:${r.position}`}>
+                <td>{r.locationName}</td>
+                <td className="num-cell">{r.position}</td>
+                <td>{r.ingredientName ?? "—"}</td>
+                <td className="num-cell">{r.netFillWeight ?? "—"}</td>
+                <td className="num-cell">{r.targetFillWeight ?? "—"}</td>
+                <td>
+                  <StatusBadge status={r.status} label={FILL_LABEL[r.status]} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="section-title">
+        Расхождение факт/ожидание за период {from} — {to}
+      </div>
+      {anomalyGroups.length === 0 ? (
+        <p className="muted">Расхождений сверх порога не найдено.</p>
+      ) : (
+        anomalyGroups.map((g) => (
+          <Fragment key={g.locationId}>
+            <div className="sub" style={{ marginTop: 8 }}>
+              {g.locationName}
+            </div>
+            <table className="coffee-table">
+              <thead>
+                <tr>
+                  <th>Ингредиент</th>
+                  <th>Факт, г</th>
+                  <th>Ожидание, г</th>
+                  <th>Себестоимость факта</th>
+                  <th>Себестоимость ожидания</th>
+                  <th>Статус</th>
+                </tr>
+              </thead>
+              <tbody>
+                {g.rows.map((r) => (
+                  <tr key={r.ingredientId}>
+                    <td>{r.ingredientName}</td>
+                    <td className="num-cell">{r.actualGrams ?? "—"}</td>
+                    <td className="num-cell">{r.expectedGrams ?? "—"}</td>
+                    <td className="num-cell">{r.costActual ?? "—"}</td>
+                    <td className="num-cell">{r.costExpected ?? "—"}</td>
+                    <td>
+                      <StatusBadge status={r.reconcile.status} label={RECONCILE_LABEL[r.reconcile.status]} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Fragment>
+        ))
+      )}
+    </>
   );
 }
 

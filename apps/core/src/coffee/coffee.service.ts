@@ -61,6 +61,45 @@ export interface FillStatusRow {
   fillRatio: number | null;
 }
 
+export interface ReconcileRow {
+  ingredientId: string;
+  ingredientName: string;
+  actualGrams: number | null;
+  expectedGrams: number | null;
+  costActual: number | null;
+  costExpected: number | null;
+  reconcile: ReconcileResult;
+}
+
+export interface LocationReconcileGroup {
+  locationId: string;
+  locationName: string;
+  rows: ReconcileRow[];
+}
+
+interface ReconcileRefillRow {
+  position: number;
+  containerNumber: number | null;
+  filledWeight: number;
+  measuredBefore: number | null;
+  ingredientId: string | null;
+  enteredDate: string;
+  locationId: string;
+}
+
+interface ReconcileSaleRow {
+  productId: string;
+  quantity: number;
+  loggedDate: string;
+  locationId: string;
+}
+
+interface ReconcileIngredientRow {
+  id: string;
+  name: string;
+  purchasePrice: string | null;
+}
+
 export interface SubmitRefillInput {
   locationId: string;
   position: number;
@@ -494,21 +533,7 @@ export class CoffeeService {
    * purchasePrice` (сум за грамм). Цена не заведена — `null`, а не 0: непосчитанную
    * себестоимость нельзя выдавать за нулевую (тот же принцип, что у `recipeCost()`).
    */
-  async reconcileLocation(
-    locationId: string,
-    fromDate: string,
-    toDate: string,
-  ): Promise<
-    {
-      ingredientId: string;
-      ingredientName: string;
-      actualGrams: number | null;
-      expectedGrams: number | null;
-      costActual: number | null;
-      costExpected: number | null;
-      reconcile: ReconcileResult;
-    }[]
-  > {
+  async reconcileLocation(locationId: string, fromDate: string, toDate: string): Promise<ReconcileRow[]> {
     const [refills, salesRows, products, ingredients, tareByKey] = await Promise.all([
       this.db
         .select()
@@ -520,6 +545,61 @@ export class CoffeeService {
       this.db.select().from(coffeeIngredient),
       this.tareByKey(),
     ]);
+    return this.reconcileRows(refills, salesRows, products, ingredients, tareByKey, fromDate, toDate);
+  }
+
+  /**
+   * То же, что `reconcileLocation()`, но по ВСЕМ точкам сразу — порт
+   * `ReconcileView` донора mydon-command-center как алерт-сводка, без
+   * N запросов к API на точку. Точки без заливок/продаж в периоде не
+   * попадают в ответ — сверять там нечего.
+   */
+  async reconcileAllLocations(fromDate: string, toDate: string): Promise<LocationReconcileGroup[]> {
+    const [refills, sales, products, ingredients, tareByKey, locations] = await Promise.all([
+      this.db
+        .select()
+        .from(coffeeRefill)
+        .orderBy(asc(coffeeRefill.position), asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
+      this.db.select().from(coffeeSale),
+      this.products(),
+      this.db.select().from(coffeeIngredient),
+      this.tareByKey(),
+      this.locations(),
+    ]);
+    const nameByLocation = new Map(locations.map((l) => [l.id, l.name]));
+
+    const refillsByLocation = new Map<string, typeof refills>();
+    for (const r of refills) refillsByLocation.set(r.locationId, [...(refillsByLocation.get(r.locationId) ?? []), r]);
+    const salesByLocation = new Map<string, typeof sales>();
+    for (const s of sales) salesByLocation.set(s.locationId, [...(salesByLocation.get(s.locationId) ?? []), s]);
+
+    const locationIds = new Set([...refillsByLocation.keys(), ...salesByLocation.keys()]);
+    const groups: LocationReconcileGroup[] = [];
+    for (const locationId of locationIds) {
+      const rows = this.reconcileRows(
+        refillsByLocation.get(locationId) ?? [],
+        salesByLocation.get(locationId) ?? [],
+        products,
+        ingredients,
+        tareByKey,
+        fromDate,
+        toDate,
+      );
+      if (rows.length > 0) groups.push({ locationId, locationName: nameByLocation.get(locationId) ?? locationId, rows });
+    }
+    return groups;
+  }
+
+  /** Общая логика факт/ожидание для одной точки — используется и по одной, и по всем сразу. */
+  private reconcileRows(
+    refills: ReconcileRefillRow[],
+    salesRows: ReconcileSaleRow[],
+    products: Awaited<ReturnType<CoffeeService["products"]>>,
+    ingredients: ReconcileIngredientRow[],
+    tareByKey: Map<string, number>,
+    fromDate: string,
+    toDate: string,
+  ): ReconcileRow[] {
     const salesInRange = salesRows.filter((s) => s.loggedDate >= fromDate && s.loggedDate <= toDate);
 
     // Фактический расход по ингредиенту: идём по каждой позиции, сравниваем
@@ -628,7 +708,11 @@ export class CoffeeService {
           .onConflictDoUpdate({
             target: coffeeStock.ingredientId,
             set: { quantity: item.quantity, countedAt: counted, updatedAt: new Date() },
-            where: sql`${coffeeStock.countedAt} <= ${counted}`,
+            // Дата интерполируется в сырой sql-фрагмент как строка ISO — drizzle
+            // не знает целевой тип колонки внутри `where:` и без этого
+            // сериализует Date через toString(), что ловит Postgres как
+            // невалидный часовой пояс (найдено при живом e2e-тесте, не в стабах).
+            where: sql`${coffeeStock.countedAt} <= ${counted.toISOString()}`,
           });
       }
     });

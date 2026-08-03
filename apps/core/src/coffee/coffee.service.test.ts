@@ -271,6 +271,55 @@ describe("CoffeeService: сверка факт/ожидание (reconcileLocati
   });
 });
 
+describe("CoffeeService: сверка по всем точкам сразу (reconcileAllLocations)", () => {
+  const tare = [{ containerNumber: 1, position: 7, tareWeight: 620 }];
+  const ingredients = [{ id: "ing-coffee", name: "Кофе" }];
+  const products = [{ id: "prod-americano", name: "Американо", recipe: [{ ingredientId: "ing-coffee", quantity: 18, unit: "г" }] }];
+  const locations = [
+    { id: "loc-1", name: "AH", sortOrder: 0, isActive: true },
+    { id: "loc-2", name: "Grand clinic", sortOrder: 1, isActive: true },
+  ];
+
+  it("группирует сверку по точкам, точки без данных в периоде не попадают в ответ", async () => {
+    const refills = [
+      { id: "r1", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01" },
+      { id: "r2", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: 630, enteredDate: "2026-08-02" },
+    ];
+    // Факт loc-1: 580 − 10 = 570г. Ожидание: 5 × 18 = 90г — аномалия.
+    const sales = [{ locationId: "loc-1", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 5 }];
+    const { db } = coffeeDb({ refills, sales, products, ingredients, tare, locations });
+    const svc = new CoffeeService(db);
+    const res = await svc.reconcileAllLocations("2026-08-01", "2026-08-02");
+    assert.equal(res.length, 1, "loc-2 без заливок/продаж — сверять нечего");
+    assert.equal(res[0]!.locationId, "loc-1");
+    assert.equal(res[0]!.locationName, "AH");
+    const coffee = res[0]!.rows.find((r) => r.ingredientId === "ing-coffee")!;
+    assert.equal(coffee.reconcile.status, "anomaly");
+  });
+
+  it("две точки с данными — каждая своей группой, факт не путается между точками", async () => {
+    const refills = [
+      { id: "r1", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01" },
+      { id: "r2", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: 850, enteredDate: "2026-08-02" },
+      { id: "r3", locationId: "loc-2", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01" },
+      { id: "r4", locationId: "loc-2", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: 850, enteredDate: "2026-08-02" },
+    ];
+    // Обе точки: факт 350г. loc-1 — 20 чашек (ожидание 360, ok). loc-2 — 5 чашек (ожидание 90, anomaly).
+    const sales = [
+      { locationId: "loc-1", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 20 },
+      { locationId: "loc-2", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 5 },
+    ];
+    const { db } = coffeeDb({ refills, sales, products, ingredients, tare, locations });
+    const svc = new CoffeeService(db);
+    const res = await svc.reconcileAllLocations("2026-08-01", "2026-08-02");
+    assert.equal(res.length, 2);
+    const g1 = res.find((g) => g.locationId === "loc-1")!;
+    const g2 = res.find((g) => g.locationId === "loc-2")!;
+    assert.equal(g1.rows.find((r) => r.ingredientId === "ing-coffee")!.reconcile.status, "ok");
+    assert.equal(g2.rows.find((r) => r.ingredientId === "ing-coffee")!.reconcile.status, "anomaly");
+  });
+});
+
 describe("CoffeeService: настройки — цена ингредиента", () => {
   it("setIngredientPrice — обновляет цену по id", async () => {
     const { db, updates } = coffeeDb({});
