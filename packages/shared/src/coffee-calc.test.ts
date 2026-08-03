@@ -8,6 +8,7 @@ import {
   costOf,
   fillStatus,
   netWeight,
+  parseContainerReturnMessage,
   reconcileConsumption,
   type LatestRefillRow,
 } from "./coffee-calc";
@@ -118,5 +119,37 @@ describe("Кофе-бункеры: сводная таблица по точка
     assert.equal(ah.byPosition[3], undefined);
     const grand = rows.find((r) => r.location === "Grand clinic")!;
     assert.deepEqual(grand.byPosition[1], { packageCount: 1, weight: 600 });
+  });
+});
+
+describe("parseContainerReturnMessage — строки «позиция. набор. вес»", () => {
+  it("реальное сообщение с заголовком точки (Кпп остатки, 30 июля)", () => {
+    const res = parseContainerReturnMessage(
+      "Кпп остатки\n1. 026. 1119\n2. 019. 1944\n3. 016. 1231\n4. 012. 1135\n5. 022. 1465\n6. 013. 902\n7. 007. 1116",
+    );
+    assert.equal(res.locationNote, "Кпп остатки");
+    assert.equal(res.returns.length, 7);
+    assert.deepEqual(res.returns[0], { position: 1, containerNumber: 26, weight: 1119 });
+    assert.deepEqual(res.returns[6], { position: 7, containerNumber: 7, weight: 1116 });
+    assert.deepEqual(res.rejected, []);
+  });
+
+  it("сообщение без заголовка, пробел вместо точки («7  024. 936») тоже разбирается", () => {
+    const res = parseContainerReturnMessage("7. 027. 993\n1. 001. 893\n7  024. 936\n2. 015. 1086");
+    assert.equal(res.locationNote, null);
+    assert.equal(res.returns.length, 4);
+    assert.deepEqual(res.returns[2], { position: 7, containerNumber: 24, weight: 936 });
+  });
+
+  it("числа вне диапазонов не чинятся, а уходят в rejected", () => {
+    const res = parseContainerReturnMessage("9. 010. 500\n1. 030. 700\n2. 012. 555");
+    assert.equal(res.returns.length, 1);
+    assert.deepEqual(res.returns[0], { position: 2, containerNumber: 12, weight: 555 });
+    assert.equal(res.rejected.length, 2);
+  });
+
+  it("обычный текст без числовых строк — не сообщение о возвратах", () => {
+    const res = parseContainerReturnMessage("Привет, завтра приедем позже");
+    assert.deepEqual(res, { returns: [], locationNote: null, rejected: [] });
   });
 });

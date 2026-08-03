@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
+  coffeeContainerReturn,
   coffeeContainerTare,
   coffeeIngredient,
   coffeeLocation,
@@ -36,6 +37,7 @@ function coffeeDb(tables: {
   washSchedule?: unknown[];
   /** Карточки реестра (entity) — кандидаты привязки точек. */
   registry?: unknown[];
+  returns?: unknown[];
 }) {
   const inserts: { table: string; values: unknown }[] = [];
   const updates: { table: string; values: unknown }[] = [];
@@ -54,6 +56,7 @@ function coffeeDb(tables: {
     if (t === coffeeStock) return tables.stock ?? [];
     if (t === coffeeWashSchedule) return tables.washSchedule ?? [];
     if (t === entity) return tables.registry ?? [];
+    if (t === coffeeContainerReturn) return tables.returns ?? [];
     return [];
   };
   const nameOf = (t: unknown): string => {
@@ -69,6 +72,7 @@ function coffeeDb(tables: {
     if (t === coffeeStock) return "coffee_stock";
     if (t === coffeeWashSchedule) return "coffee_wash_schedule";
     if (t === entity) return "entity";
+    if (t === coffeeContainerReturn) return "coffee_container_return";
     return "unknown";
   };
 
@@ -689,5 +693,31 @@ describe("CoffeeService: привязка точек к автоматам ре�
     const res = await svc.autoLinkLocations();
     assert.deepEqual(res.unmatched, ["Grand clinic"]);
     assert.equal(updates.length, 0);
+  });
+});
+
+describe("CoffeeService: возвраты наборов (recordContainerReturn/containerReturns)", () => {
+  it("recordContainerReturn — пишет строку с брутто-весом как есть", async () => {
+    const { db, inserts } = coffeeDb({});
+    const svc = new CoffeeService(db);
+    await svc.recordContainerReturn({ position: 1, containerNumber: 27, weight: 787, returnedDate: "2026-07-30", locationNote: "Кпп остатки" });
+    const row = inserts.find((i) => i.table === "coffee_container_return")!.values as Record<string, unknown>;
+    assert.equal(row.position, 1);
+    assert.equal(row.containerNumber, 27);
+    assert.equal(row.weight, 787);
+    assert.equal(row.locationNote, "Кпп остатки");
+  });
+
+  it("containerReturns — чистый остаток через тару (набор, позиция); нет тары → null, не 0", async () => {
+    const returns = [
+      { id: "r1", position: 1, containerNumber: 27, weight: 787, returnedDate: "2026-07-30", locationNote: null, createdBy: null, createdAt: new Date() },
+      { id: "r2", position: 5, containerNumber: 13, weight: 1078, returnedDate: "2026-07-31", locationNote: null, createdBy: null, createdAt: new Date() },
+    ];
+    const tare = [{ containerNumber: 27, position: 1, tareWeight: 620 }]; // для набора 13 тары нет
+    const { db } = coffeeDb({ returns, tare });
+    const svc = new CoffeeService(db);
+    const res = await svc.containerReturns();
+    assert.equal(res.find((r) => r.id === "r1")!.netWeight, 167); // 787 − 620
+    assert.equal(res.find((r) => r.id === "r2")!.netWeight, null, "тара не заведена — остаток неизвестен, а не 0");
   });
 });

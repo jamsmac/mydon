@@ -41,7 +41,8 @@
  * реально писали в группе.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, extname, join } from "node:path";
 
 const args = process.argv.slice(2);
 const file = args.find((a) => !a.startsWith("--"));
@@ -50,6 +51,7 @@ const opt = (name, def = null) => {
   return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : def;
 };
 const DRY = args.includes("--dry");
+const PHOTOS = args.includes("--photos");
 const LIMIT = Number(opt("limit", "100000"));
 const BATCH_SIZE = 250;
 const CORE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
@@ -59,8 +61,9 @@ const HINT = process.env.TELEGRAM_COFFEE_HINT ?? "";
 
 if (!file) {
   console.error(
-    "Использование: node tools/import-telegram-coffee.mjs <result.json> [--limit N] [--dry]\n" +
-      "  result.json — экспорт чата/канала (Telegram Desktop → Настройки → Экспорт данных → JSON).",
+    "Использование: node tools/import-telegram-coffee.mjs <result.json> [--photos] [--limit N] [--dry]\n" +
+      "  result.json — экспорт чата/канала (Telegram Desktop → Настройки → Экспорт данных → JSON).\n" +
+      "  --photos — разбирать фото-таблицы (экспорт должен включать картинки; лежат рядом с result.json).",
   );
   process.exit(1);
 }
@@ -97,6 +100,8 @@ function textOf(msg) {
   return "";
 }
 
+const { parseContainerReturnMessage } = await import("../packages/shared/dist/coffee-calc.js");
+
 // ── 1. Читаем экспорт ──────────────────────────────────────────────────────
 let raw;
 try {
@@ -106,13 +111,34 @@ try {
   process.exit(1);
 }
 const allMessages = Array.isArray(raw.messages) ? raw.messages : [];
-const messages = allMessages
+const textMessages = allMessages
   .filter((m) => m.type === "message" && textOf(m).trim().length > 0)
   .slice(0, LIMIT)
   .map((m) => ({ date: m.date, from: m.from ?? m.actor ?? "?", text: textOf(m).trim() }));
 
-console.log(`Экспорт «${raw.name ?? file}»: сообщений всего ${allMessages.length}, с текстом ${messages.length}.`);
-if (messages.length === 0) {
+// ── 0. Детерминированный проход: возвраты «позиция. набор. вес» ────────────
+// Формат известен точно (тема «Остатки с бункеров») — регулярка надёжнее
+// модели: ни одного выдуманного числа. Разобранные сообщения в LLM не идут.
+const returns = [];
+const returnsRejected = [];
+const messages = [];
+for (const m of textMessages) {
+  const parsed = parseContainerReturnMessage(m.text);
+  if (parsed.returns.length === 0 && parsed.rejected.length === 0) {
+    messages.push(m); // не про возвраты — пойдёт в общий LLM-разбор
+    continue;
+  }
+  const returnedDate = String(m.date ?? "").slice(0, 10);
+  for (const r of parsed.returns) {
+    returns.push({ ...r, returnedDate, ...(parsed.locationNote ? { locationNote: parsed.locationNote } : {}) });
+  }
+  for (const line of parsed.rejected) returnsRejected.push(`[${m.date}] ${line}`);
+}
+console.log(
+  `Экспорт «${raw.name ?? file}»: сообщений всего ${allMessages.length}, с текстом ${textMessages.length}; ` +
+    `возвратов наборов разобрано детерминированно: ${returns.length}${returnsRejected.length ? ` (отклонено строк: ${returnsRejected.length})` : ""}.`,
+);
+if (messages.length === 0 && returns.length === 0) {
   console.log("Разбирать нечего.");
   process.exit(0);
 }
@@ -223,10 +249,166 @@ for (let i = 0; i < messages.length; i += BATCH_SIZE) {
   unmatchedFromModel.push(...(extracted.unmatched ?? []));
 }
 
+// ── 3b. Фото-таблицы: заливки и расходники (--photos) ──────────────────────
+// В теме «Заполнение бункеров» данные живут в скриншотах таблиц референс-
+// приложения: «Таблица бункеров - YYYY-MM-DD» (адрес × позиция, в ячейке
+// набор+вес) и «Вода, стаканчики и крышки - YYYY-MM-DD». Дата — в заголовке
+// самой картинки, поэтому модель читает её ОТТУДА, а дата сообщения — запасная.
+const consumables = [];
+const photoMessages = allMessages.filter((m) => m.type === "message" && typeof m.photo === "string" && m.photo.length > 0);
+if (!PHOTOS && photoMessages.length > 0) {
+  console.log(`\nФото в экспорте: ${photoMessages.length} — пропущены (запусти с --photos и экспортом, включающим картинки).`);
+}
+if (PHOTOS && photoMessages.length > 0) {
+  const exportDir = dirname(file);
+  const MEDIA_TYPE = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp" };
+  const photos = [];
+  let missing = 0;
+  for (const m of photoMessages.slice(0, LIMIT)) {
+    const path = join(exportDir, m.photo);
+    const mediaType = MEDIA_TYPE[extname(path).toLowerCase()];
+    if (!mediaType || !existsSync(path)) {
+      missing += 1;
+      continue;
+    }
+    photos.push({ date: String(m.date ?? "").slice(0, 10), path, mediaType });
+  }
+  console.log(`\nФото-таблиц к разбору: ${photos.length}${missing ? ` (не найдено файлов/формат: ${missing})` : ""}.`);
+
+  const photoSchema = {
+    type: "object",
+    properties: {
+      refills: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            locationName: { type: "string" },
+            position: { type: "integer", description: "Колонка 1–8" },
+            containerNumber: { type: "integer", description: "Номер набора из ячейки (зелёная пометка), 1–27" },
+            filledWeight: { type: "integer", description: "Вес из ячейки, грамм" },
+            date: { type: "string", description: "Дата из ЗАГОЛОВКА таблицы, YYYY-MM-DD" },
+          },
+          required: ["locationName", "position", "filledWeight", "date"],
+        },
+      },
+      consumables: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            locationName: { type: "string" },
+            date: { type: "string", description: "Дата из заголовка таблицы, YYYY-MM-DD" },
+            water: { type: "integer" },
+            cups: { type: "integer" },
+            lids: { type: "integer" },
+          },
+          required: ["locationName", "date"],
+        },
+      },
+      unreadable: { type: "array", items: { type: "string" }, description: "Что не удалось прочитать и почему" },
+    },
+    required: ["refills", "consumables", "unreadable"],
+  };
+
+  const PHOTO_BATCH = 3;
+  const unreadablePhotos = [];
+  for (let i = 0; i < photos.length; i += PHOTO_BATCH) {
+    const batch = photos.slice(i, i + PHOTO_BATCH);
+    console.log(`Фото-пачка ${Math.floor(i / PHOTO_BATCH) + 1}/${Math.ceil(photos.length / PHOTO_BATCH)}…`);
+    const content = [
+      {
+        type: "text",
+        text: [
+          "На картинках — скриншоты дневных таблиц кофе-бункеров.",
+          "Виды таблиц: «Таблица бункеров - ДАТА» (строки — адреса, колонки — позиции 1–8;",
+          "в заполненной ячейке два числа: номер набора (зелёная пометка, 1–27) и вес в граммах)",
+          "и «Вода, стаканчики и крышки - ДАТА» (адрес → вода/стаканчики/крышки; строку «Итого» пропускай).",
+          "Таблицу «Потраченные ингредиенты» пропускай — это производные данные.",
+          `Известные точки (locationName пиши максимально близко к списку): ${knownLocations}`,
+          "Дату бери из ЗАГОЛОВКА таблицы. Читай ТОЛЬКО то, что видно; нечитаемое — в unreadable.",
+          `Даты сообщений по порядку картинок (запасные): ${batch.map((p) => p.date).join(", ")}`,
+        ].join("\n"),
+      },
+      ...batch.map((p) => ({
+        type: "image",
+        source: { type: "base64", media_type: p.mediaType, data: readFileSync(p.path).toString("base64") },
+      })),
+    ];
+    async function* photoPrompt() {
+      yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+    }
+
+    const q = query({
+      prompt: photoPrompt(),
+      options: {
+        systemPrompt: "Ты аккуратно читаешь таблицы с картинок и переносишь числа как есть, не выдумывая.",
+        tools: [],
+        settingSources: [],
+        maxTurns: 1,
+        persistSession: false,
+        outputFormat: { type: "json_schema", schema: photoSchema },
+      },
+    });
+    let extracted = null;
+    for await (const msg of q) {
+      if (msg.type === "result") {
+        if (msg.subtype !== "success" || msg.is_error) {
+          console.error(`  фото-пачка: не разобралась (${msg.subtype}) — пропущена`);
+          continue;
+        }
+        extracted = msg.structured_output;
+      }
+    }
+    if (!extracted) continue;
+
+    for (const r of extracted.refills ?? []) {
+      const loc = locationByName.get(String(r.locationName ?? "").toLowerCase().trim());
+      const position = Number(r.position);
+      const filledWeight = Number(r.filledWeight);
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(String(r.date)) ? r.date : batch[0]?.date;
+      if (!loc || !(position >= 1 && position <= 8) || !(filledWeight > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+        unmatchedLocationName.push(`${r.locationName} (фото: бункер ${r.position}, ${r.filledWeight}г, ${r.date})`);
+        continue;
+      }
+      records.push({
+        locationId: loc.id,
+        position,
+        filledWeight,
+        enteredDate: date,
+        ...(Number.isInteger(r.containerNumber) && r.containerNumber >= 1 && r.containerNumber <= 27
+          ? { containerNumber: r.containerNumber }
+          : {}),
+      });
+    }
+    for (const c of extracted.consumables ?? []) {
+      const loc = locationByName.get(String(c.locationName ?? "").toLowerCase().trim());
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(String(c.date)) ? c.date : batch[0]?.date;
+      if (!loc || !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+        unmatchedLocationName.push(`${c.locationName} (фото расходников, ${c.date})`);
+        continue;
+      }
+      const num = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.trunc(Number(v)) : 0);
+      consumables.push({ locationId: loc.id, loggedDate: date, water: num(c.water), cups: num(c.cups), lids: num(c.lids) });
+    }
+    unreadablePhotos.push(...(extracted.unreadable ?? []));
+  }
+  if (unreadablePhotos.length > 0) {
+    console.log("\nНечитаемое на фото (первые 10):");
+    for (const u of unreadablePhotos.slice(0, 10)) console.log(`  • ${u}`);
+  }
+}
+
 // ── 4. Итог ──────────────────────────────────────────────────────────────
-console.log(`\nРаспознано записей: ${records.length}`);
+console.log(`\nРаспознано заливок: ${records.length}`);
+console.log(`Возвратов наборов (детерминированно): ${returns.length}`);
+console.log(`Расходников (вода/стаканчики/крышки): ${consumables.length}`);
 console.log(`Точка не найдена в справочнике: ${unmatchedLocationName.length}`);
 console.log(`Похоже на заливку, но неполно: ${unmatchedFromModel.length}`);
+if (returnsRejected.length > 0) {
+  console.log("\nОтклонённые строки возвратов (числа вне диапазонов, первые 20):");
+  for (const u of returnsRejected.slice(0, 20)) console.log(`  • ${u}`);
+}
 if (unmatchedLocationName.length > 0) {
   console.log("\nНе распознанные точки (первые 20):");
   for (const u of unmatchedLocationName.slice(0, 20)) console.log(`  • ${u}`);
@@ -236,7 +418,7 @@ if (unmatchedFromModel.length > 0) {
   for (const u of unmatchedFromModel.slice(0, 20)) console.log(`  • ${u}`);
 }
 
-if (records.length === 0) {
+if (records.length === 0 && returns.length === 0 && consumables.length === 0) {
   console.log("\nПредлагать нечего — согласование не создаётся.");
   process.exit(0);
 }
@@ -246,14 +428,18 @@ if (DRY) {
 }
 
 // ── 5. Одно согласование со всем списком (T0 — владелец решает) ────────────
+const parts = [];
+if (records.length > 0) parts.push(`${records.length} заливок`);
+if (returns.length > 0) parts.push(`${returns.length} возвратов наборов`);
+if (consumables.length > 0) parts.push(`${consumables.length} строк расходников`);
 const approval = await coreFetch("/approvals", {
   method: "POST",
   body: JSON.stringify({
     agent: "telegram-coffee-import",
-    action: `Занести ${records.length} исторических заливок бункеров из «${raw.name ?? file}»`,
+    action: `Занести из «${raw.name ?? file}»: ${parts.join(", ")} (история Telegram)`,
     tier: "T0",
-    payload: { source: file, coffeeImport: { records } },
+    payload: { source: file, coffeeImport: { records, returns, consumables } },
   }),
 });
 console.log(`\nСогласование создано: ${approval.id}`);
-console.log("Открой панель → Согласования. После «Одобрить» записи появятся в /coffee → История ввода.");
+console.log("Открой панель → Согласования. После «Одобрить» записи появятся в кофе-бункерах VendHub.");

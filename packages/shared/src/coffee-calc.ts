@@ -140,3 +140,57 @@ export function buildLocationSummary(locations: readonly string[], latest: reado
   }
   return locations.map((name) => byLocation.get(name)!);
 }
+
+// ── Возвраты наборов: разбор строк «позиция. набор. вес» ────────────────────
+
+export interface ReturnLine {
+  position: number;
+  containerNumber: number;
+  /** Вес брутто (с тарой), г — как написали в сообщении. */
+  weight: number;
+}
+
+export interface ParsedReturnMessage {
+  returns: ReturnLine[];
+  /** Заголовок сообщения («Кпп остатки») — подсказка точки, сырьём. */
+  locationNote: string | null;
+  /** Строки, похожие на возврат, но с числами вне диапазонов — на разбор глазами. */
+  rejected: string[];
+}
+
+const RETURN_LINE = /^(\d{1,2})[.\s]+(\d{1,3})[.\s]+(\d{1,5})\s*\.?$/;
+
+/**
+ * Разобрать сообщение о возвратах наборов. Формат из рабочей группы владельца:
+ * строка «позиция. набор. вес» (напр. «1. 027. 787», допускаются пробелы вместо
+ * точек — «7  024. 936»). Первая строка без чисел («Кпп остатки») — подсказка
+ * точки, сохраняется как есть. Числа вне диапазонов (позиция 1–8, набор 1–27,
+ * вес ≤10000) не «чинятся», а уходят в rejected — решает человек.
+ */
+export function parseContainerReturnMessage(text: string): ParsedReturnMessage {
+  const returns: ReturnLine[] = [];
+  const rejected: string[] = [];
+  let locationNote: string | null = null;
+
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (line.length === 0) continue;
+    const m = RETURN_LINE.exec(line);
+    if (!m) {
+      if (locationNote === null && returns.length === 0 && rejected.length === 0) locationNote = line;
+      continue;
+    }
+    const position = Number(m[1]);
+    const containerNumber = Number(m[2]);
+    const weight = Number(m[3]);
+    if (position >= 1 && position <= 8 && containerNumber >= 1 && containerNumber <= 27 && weight <= 10000) {
+      returns.push({ position, containerNumber, weight });
+    } else {
+      rejected.push(line);
+    }
+  }
+
+  // Ни одной валидной строки — это не сообщение о возвратах, заголовок не в счёт.
+  if (returns.length === 0 && rejected.length === 0) return { returns: [], locationNote: null, rejected: [] };
+  return { returns, locationNote, rejected };
+}

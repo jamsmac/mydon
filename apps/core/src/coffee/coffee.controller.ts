@@ -115,6 +115,26 @@ export class RecordConsumableDto {
   createdBy?: string;
 }
 
+export class RecordContainerReturnDto {
+  @IsInt() @Min(1) @Max(8)
+  position!: number;
+
+  @IsInt() @Min(1) @Max(27)
+  containerNumber!: number;
+
+  @IsInt() @Min(0) @Max(10000)
+  weight!: number;
+
+  @IsISO8601()
+  returnedDate!: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  locationNote?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  createdBy?: string;
+}
+
 export class RecordWashDto {
   @IsUUID()
   locationId!: string;
@@ -309,6 +329,18 @@ export class CoffeeController {
   @Get("consumables")
   consumablesSummary() {
     return this.coffee.consumablesSummary();
+  }
+
+  // ── Возвраты наборов ─────────────────────────────────────────────────
+
+  @Post("container-return")
+  recordContainerReturn(@Body() dto: RecordContainerReturnDto) {
+    return this.coffee.recordContainerReturn(dto);
+  }
+
+  @Get("container-return")
+  containerReturns(@Query("limit") limit?: string) {
+    return this.coffee.containerReturns(limit ? Number(limit) : undefined);
   }
 
   // ── Мойка/обслуживание ───────────────────────────────────────────────

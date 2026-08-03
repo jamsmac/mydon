@@ -1,5 +1,16 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { approval, auditLog, coffeeLocation, coffeeRefill, entity, event, org, vendingPurchaseOrder } from "@mydon/db";
+import {
+  approval,
+  auditLog,
+  coffeeConsumable,
+  coffeeContainerReturn,
+  coffeeLocation,
+  coffeeRefill,
+  entity,
+  event,
+  org,
+  vendingPurchaseOrder,
+} from "@mydon/db";
 import { and, desc, eq, type SQL } from "drizzle-orm";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
@@ -280,11 +291,13 @@ export class ApprovalsService {
    */
   private async executeCoffeeImport(tx: Tx, row: ApprovalRow): Promise<void> {
     const imp = (row.payload as { coffeeImport?: unknown } | null)?.coffeeImport as
-      | { records?: unknown }
+      | { records?: unknown; returns?: unknown; consumables?: unknown }
       | undefined;
     if (!imp || typeof imp !== "object") return;
     const records = Array.isArray(imp.records) ? imp.records.slice(0, 2000) : [];
-    if (records.length === 0) return;
+    const returns = Array.isArray(imp.returns) ? imp.returns.slice(0, 2000) : [];
+    const consumables = Array.isArray(imp.consumables) ? imp.consumables.slice(0, 2000) : [];
+    if (records.length === 0 && returns.length === 0 && consumables.length === 0) return;
 
     const locations = await tx.select({ id: coffeeLocation.id }).from(coffeeLocation);
     const validLocationIds = new Set(locations.map((l) => l.id));
@@ -350,10 +363,88 @@ export class ApprovalsService {
       created += 1;
     }
 
+    // ── Возвраты наборов: «позиция. набор. вес» из темы «Остатки с бункеров» ──
+    let returnsCreated = 0;
+    let returnsSkipped = 0;
+    for (const r of returns) {
+      const rec = r as {
+        position?: unknown;
+        containerNumber?: unknown;
+        weight?: unknown;
+        returnedDate?: unknown;
+        locationNote?: unknown;
+      };
+      const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
+      const containerNumber = typeof rec.containerNumber === "number" ? Math.trunc(rec.containerNumber) : NaN;
+      const weight = typeof rec.weight === "number" ? Math.trunc(rec.weight) : NaN;
+      const returnedDate = typeof rec.returnedDate === "string" ? rec.returnedDate.slice(0, 10) : "";
+      const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(returnedDate);
+      if (position < 1 || position > 8 || containerNumber < 1 || containerNumber > 27 || !(weight >= 0) || weight > 10000 || !dateOk) {
+        returnsSkipped += 1;
+        continue;
+      }
+      const locationNote =
+        typeof rec.locationNote === "string" && rec.locationNote.trim().length > 0
+          ? rec.locationNote.trim().slice(0, 256)
+          : null;
+
+      const [existing] = await tx
+        .select({ id: coffeeContainerReturn.id })
+        .from(coffeeContainerReturn)
+        .where(
+          and(
+            eq(coffeeContainerReturn.position, position),
+            eq(coffeeContainerReturn.containerNumber, containerNumber),
+            eq(coffeeContainerReturn.returnedDate, returnedDate),
+            eq(coffeeContainerReturn.weight, weight),
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        returnsSkipped += 1;
+        continue;
+      }
+
+      await tx.insert(coffeeContainerReturn).values({
+        position,
+        containerNumber,
+        weight,
+        returnedDate,
+        locationNote,
+        createdBy: "import:telegram-history",
+      });
+      returnsCreated += 1;
+    }
+
+    // ── Расходники: «Вода, стаканчики и крышки» из фото-таблиц ──────────────
+    // Upsert по (точка, дата) — как ручной ввод: повторное одобрение правит
+    // ту же строку, а не плодит дубли.
+    let consumablesUpserted = 0;
+    let consumablesSkipped = 0;
+    for (const c of consumables) {
+      const rec = c as { locationId?: unknown; loggedDate?: unknown; water?: unknown; cups?: unknown; lids?: unknown };
+      const locationId = typeof rec.locationId === "string" ? rec.locationId : "";
+      const loggedDate = typeof rec.loggedDate === "string" ? rec.loggedDate.slice(0, 10) : "";
+      const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(loggedDate);
+      const num = (v: unknown) => (typeof v === "number" && v >= 0 ? Math.trunc(v) : 0);
+      if (!validLocationIds.has(locationId) || !dateOk) {
+        consumablesSkipped += 1;
+        continue;
+      }
+      await tx
+        .insert(coffeeConsumable)
+        .values({ locationId, loggedDate, water: num(rec.water), cups: num(rec.cups), lids: num(rec.lids), createdBy: "import:telegram-history" })
+        .onConflictDoUpdate({
+          target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
+          set: { water: num(rec.water), cups: num(rec.cups), lids: num(rec.lids) },
+        });
+      consumablesUpserted += 1;
+    }
+
     await tx.insert(event).values({
       source: "owner",
       type: "coffee.import.executed",
-      payload: { approvalId: row.id, created, skipped },
+      payload: { approvalId: row.id, created, skipped, returnsCreated, returnsSkipped, consumablesUpserted, consumablesSkipped },
     });
   }
 }
