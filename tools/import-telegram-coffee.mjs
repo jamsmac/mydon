@@ -41,7 +41,7 @@
  * реально писали в группе.
  */
 
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 
 const args = process.argv.slice(2);
@@ -265,21 +265,31 @@ for (let i = 0; i < messages.length; i += BATCH_SIZE) {
       model: MODEL,
       tools: [],
       settingSources: [],
-      maxTurns: 1,
+      // Структурированный вывод по схеме может занять больше одного хода
+      // (валидация с повтором) — 1 приводил к error_max_turns на ровном месте.
+      maxTurns: 8,
       persistSession: false,
       outputFormat: { type: "json_schema", schema },
     },
   });
 
   let extracted = null;
-  for await (const msg of q) {
-    if (msg.type === "result") {
-      if (msg.subtype !== "success" || msg.is_error) {
-        console.error(`  пачка ${Math.floor(i / BATCH_SIZE) + 1}: извлечение не удалось (${msg.subtype}) — пропущена`);
-        continue;
+  // Ошибка одной пачки (сбой сети, лимит, кривой ответ) не должна ронять весь
+  // прогон — реальный крах 2026-08-03: невыловленный reject убил процесс на
+  // пачке 22 из 164, разбор пропал.
+  try {
+    for await (const msg of q) {
+      if (msg.type === "result") {
+        if (msg.subtype !== "success" || msg.is_error) {
+          console.error(`  пачка ${Math.floor(i / BATCH_SIZE) + 1}: извлечение не удалось (${msg.subtype}) — пропущена`);
+          continue;
+        }
+        extracted = msg.structured_output;
       }
-      extracted = msg.structured_output;
     }
+  } catch (err) {
+    console.error(`  пачка ${Math.floor(i / BATCH_SIZE) + 1}: сбой (${err.message}) — пропущена, продолжаю`);
+    continue;
   }
   if (!extracted) continue;
 
@@ -380,9 +390,30 @@ if (PHOTOS && photoMessages.length > 0) {
 
   const PHOTO_BATCH = 3;
   const unreadablePhotos = [];
+
+  // Кэш разбора: многочасовой vision-прогон не должен начинаться с нуля после
+  // сбоя. Успешно разобранные пачки пишутся в jsonl рядом с экспортом;
+  // перезапуск берёт их оттуда мгновенно и пересчитывает только остаток.
+  const visionCachePath = join(exportDir, "coffee-vision-cache.jsonl");
+  const visionCache = new Map();
+  if (existsSync(visionCachePath)) {
+    for (const line of readFileSync(visionCachePath, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const j = JSON.parse(line);
+        if (typeof j.key === "string" && j.extracted) visionCache.set(j.key, j.extracted);
+      } catch {
+        /* битая строка кэша — просто пересчитаем эту пачку */
+      }
+    }
+    if (visionCache.size > 0) console.log(`Кэш vision: ${visionCache.size} пачек с прошлого прогона — не пересчитываем.`);
+  }
+
   for (let i = 0; i < photos.length; i += PHOTO_BATCH) {
     const batch = photos.slice(i, i + PHOTO_BATCH);
-    console.log(`Фото-пачка ${Math.floor(i / PHOTO_BATCH) + 1}/${Math.ceil(photos.length / PHOTO_BATCH)}…`);
+    const batchNo = Math.floor(i / PHOTO_BATCH) + 1;
+    const cacheKey = batch.map((p) => p.path).join("|");
+    console.log(`Фото-пачка ${batchNo}/${Math.ceil(photos.length / PHOTO_BATCH)}…`);
     const content = [
       {
         type: "text",
@@ -406,29 +437,40 @@ if (PHOTOS && photoMessages.length > 0) {
       yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
     }
 
-    const q = query({
-      prompt: photoPrompt(),
-      options: {
-        systemPrompt: "Ты аккуратно читаешь таблицы с картинок и переносишь числа как есть, не выдумывая.",
-        model: MODEL,
-        tools: [],
-        settingSources: [],
-        maxTurns: 1,
-        persistSession: false,
-        outputFormat: { type: "json_schema", schema: photoSchema },
-      },
-    });
-    let extracted = null;
-    for await (const msg of q) {
-      if (msg.type === "result") {
-        if (msg.subtype !== "success" || msg.is_error) {
-          console.error(`  фото-пачка: не разобралась (${msg.subtype}) — пропущена`);
-          continue;
+    let extracted = visionCache.get(cacheKey) ?? null;
+    if (!extracted) {
+      const q = query({
+        prompt: photoPrompt(),
+        options: {
+          systemPrompt: "Ты аккуратно читаешь таблицы с картинок и переносишь числа как есть, не выдумывая.",
+          model: MODEL,
+          tools: [],
+          settingSources: [],
+          // 1 хода мало для вывода по схеме (валидация с повтором) —
+          // реальный error_max_turns на пачке 21 из 164 (2026-08-03).
+          maxTurns: 8,
+          persistSession: false,
+          outputFormat: { type: "json_schema", schema: photoSchema },
+        },
+      });
+      // Сбой одной пачки не роняет прогон: пропуск, остальное продолжается.
+      try {
+        for await (const msg of q) {
+          if (msg.type === "result") {
+            if (msg.subtype !== "success" || msg.is_error) {
+              console.error(`  фото-пачка ${batchNo}: не разобралась (${msg.subtype}) — пропущена`);
+              continue;
+            }
+            extracted = msg.structured_output;
+          }
         }
-        extracted = msg.structured_output;
+      } catch (err) {
+        console.error(`  фото-пачка ${batchNo}: сбой (${err.message}) — пропущена, продолжаю`);
+        continue;
       }
+      if (!extracted) continue;
+      appendFileSync(visionCachePath, `${JSON.stringify({ key: cacheKey, extracted })}\n`);
     }
-    if (!extracted) continue;
 
     for (const r of extracted.refills ?? []) {
       const loc = locationByName.get(String(r.locationName ?? "").toLowerCase().trim());
