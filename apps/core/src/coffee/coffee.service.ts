@@ -1057,7 +1057,7 @@ export class CoffeeService {
    * себестоимость нельзя выдавать за нулевую (тот же принцип, что у `recipeCost()`).
    */
   async reconcileLocation(locationId: string, fromDate: string, toDate: string): Promise<ReconcileRow[]> {
-    const [refills, salesRows, products, ingredients, tareByKey] = await Promise.all([
+    const [refills, salesRows, products, ingredients, tareByKey, containerActuals] = await Promise.all([
       this.db
         .select()
         .from(coffeeRefill)
@@ -1067,8 +1067,74 @@ export class CoffeeService {
       this.products(),
       this.db.select().from(coffeeIngredient),
       this.tareByKey(),
+      this.containerActualsByLocation(fromDate, toDate),
     ]);
-    return this.reconcileRows(refills, salesRows, products, ingredients, tareByKey, fromDate, toDate);
+    return this.reconcileRows(refills, salesRows, products, ingredients, tareByKey, fromDate, toDate, containerActuals.get(locationId));
+  }
+
+  /**
+   * Фактический расход по (точка, ингредиент) из возвратов наборов: пары
+   * «заливка → возврат» (matchReturnsToRefills, та же математика, что в
+   * containerConsumption), расход относится к дате возврата. Ингредиент — по
+   * позиции бункера; позиция с двумя ингредиентами пропускается (какой именно
+   * расходовался — неизвестно, не угадываем). Сопоставление глобальное:
+   * набор мог переехать между точками, пары рвать нельзя.
+   */
+  private async containerActualsByLocation(fromDate: string, toDate: string): Promise<Map<string, Map<string, number>>> {
+    const [fills, returns, tareByKey, config] = await Promise.all([
+      this.db
+        .select({
+          date: coffeeRefill.enteredDate,
+          position: coffeeRefill.position,
+          containerNumber: coffeeRefill.containerNumber,
+          filledWeight: coffeeRefill.filledWeight,
+          locationId: coffeeRefill.locationId,
+          locationName: coffeeLocation.name,
+        })
+        .from(coffeeRefill)
+        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .where(isNotNull(coffeeRefill.containerNumber)),
+      this.db.select().from(coffeeContainerReturn),
+      this.tareByKey(),
+      this.bunkerConfig(),
+    ]);
+
+    const countByPosition = new Map<number, number>();
+    for (const c of config) countByPosition.set(c.position, (countByPosition.get(c.position) ?? 0) + 1);
+    const ingredientByPosition = new Map<number, string>();
+    for (const c of config) if (countByPosition.get(c.position) === 1) ingredientByPosition.set(c.position, c.ingredientId);
+
+    const rows = matchReturnsToRefills(
+      fills
+        // Без даты или номера набора пара не сопоставима — такие строки вне игры.
+        .filter((f) => f.containerNumber !== null && typeof f.date === "string")
+        .map((f) => ({
+          date: f.date,
+          position: f.position,
+          containerNumber: f.containerNumber!,
+          netWeight: netWeight(f.filledWeight, tareByKey.get(`${f.containerNumber}:${f.position}`) ?? null),
+          locationId: f.locationId,
+          locationName: f.locationName,
+        })),
+      returns.map((r) => ({
+        date: r.returnedDate,
+        position: r.position,
+        containerNumber: r.containerNumber,
+        netWeight: netWeight(r.weight, tareByKey.get(`${r.containerNumber}:${r.position}`) ?? null),
+      })),
+    );
+
+    const out = new Map<string, Map<string, number>>();
+    for (const r of rows) {
+      if (r.consumedGrams === null) continue;
+      if (r.returnDate < fromDate || r.returnDate > toDate) continue;
+      const ingredientId = ingredientByPosition.get(r.position);
+      if (!ingredientId) continue;
+      const m = out.get(r.locationId) ?? new Map<string, number>();
+      m.set(ingredientId, (m.get(ingredientId) ?? 0) + r.consumedGrams);
+      out.set(r.locationId, m);
+    }
+    return out;
   }
 
   /**
@@ -1078,7 +1144,7 @@ export class CoffeeService {
    * попадают в ответ — сверять там нечего.
    */
   async reconcileAllLocations(fromDate: string, toDate: string): Promise<LocationReconcileGroup[]> {
-    const [refills, sales, products, ingredients, tareByKey, locations] = await Promise.all([
+    const [refills, sales, products, ingredients, tareByKey, locations, containerActuals] = await Promise.all([
       this.db
         .select()
         .from(coffeeRefill)
@@ -1088,6 +1154,7 @@ export class CoffeeService {
       this.db.select().from(coffeeIngredient),
       this.tareByKey(),
       this.locations(),
+      this.containerActualsByLocation(fromDate, toDate),
     ]);
     const nameByLocation = new Map(locations.map((l) => [l.id, l.name]));
 
@@ -1096,7 +1163,8 @@ export class CoffeeService {
     const salesByLocation = new Map<string, typeof sales>();
     for (const s of sales) salesByLocation.set(s.locationId, [...(salesByLocation.get(s.locationId) ?? []), s]);
 
-    const locationIds = new Set([...refillsByLocation.keys(), ...salesByLocation.keys()]);
+    // Точка с одними лишь контейнерными парами (история без замеров) — тоже сверяется.
+    const locationIds = new Set([...refillsByLocation.keys(), ...salesByLocation.keys(), ...containerActuals.keys()]);
     const groups: LocationReconcileGroup[] = [];
     for (const locationId of locationIds) {
       const rows = this.reconcileRows(
@@ -1107,6 +1175,7 @@ export class CoffeeService {
         tareByKey,
         fromDate,
         toDate,
+        containerActuals.get(locationId),
       );
       if (rows.length > 0) groups.push({ locationId, locationName: nameByLocation.get(locationId) ?? locationId, rows });
     }
@@ -1122,6 +1191,8 @@ export class CoffeeService {
     tareByKey: Map<string, number>,
     fromDate: string,
     toDate: string,
+    /** Факт из возвратов наборов (containerActualsByLocation) — приоритетный. */
+    containerActual?: Map<string, number>,
   ): ReconcileRow[] {
     const salesInRange = salesRows.filter((s) => s.loggedDate >= fromDate && s.loggedDate <= toDate);
 
@@ -1143,6 +1214,13 @@ export class CoffeeService {
         if (consumed == null) continue;
         actualByIngredient.set(curr.ingredientId, (actualByIngredient.get(curr.ingredientId) ?? 0) + consumed);
       }
+    }
+
+    // Возвраты наборов — более надёжный факт, чем редкие «замеры до»: там,
+    // где он есть, он ЗАМЕНЯЕТ measuredBefore-оценку ингредиента (не
+    // суммируется — оба меряют один и тот же расход, сумма задвоила бы).
+    for (const [ingredientId, grams] of containerActual ?? []) {
+      actualByIngredient.set(ingredientId, grams);
     }
 
     // Цена за грамм — по canonical-ингредиенту; нет цены → null (не 0).
