@@ -133,6 +133,29 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     placeholder: "text-embedding-3-small",
     validate: shortText(128),
   },
+  // ── GLOBERENT: комиссия менеджера — у донора PROMACH жили ТРИ формулы,
+  // перенесены все три (packages/shared/globerent/commission.ts); какая
+  // действует — решает владелец здесь, а не константа кода. ──
+  {
+    key: "GR_COMMISSION_METHOD",
+    label: "GLOBERENT: метод комиссии менеджера",
+    kind: "select",
+    options: ["flat_bonus", "margin_rate", "tiers"],
+    fallback: "flat_bonus",
+    help:
+      "flat_bonus — % от фактической прибыли (бонус калькулятора, уточнение владельца донору 2026-05-17); " +
+      "margin_rate — % от маржи сделки по ставке должности; " +
+      "tiers — тиры 0.5–3.5% в зависимости от % маржи.",
+    validate: oneOf(["flat_bonus", "margin_rate", "tiers"]),
+  },
+  {
+    key: "GR_COMMISSION_RATE_PCT",
+    label: "GLOBERENT: ставка комиссии, % (для flat_bonus и margin_rate)",
+    kind: "number",
+    fallback: "8",
+    help: "flat_bonus донора — 8% от фактической прибыли; для margin_rate — ставка должности.",
+    validate: nonNegNumber,
+  },
 ];
 
 const BY_KEY = new Map(CONFIG_SPECS.map((s) => [s.key, s]));
