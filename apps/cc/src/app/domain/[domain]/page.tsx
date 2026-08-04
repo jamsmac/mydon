@@ -10,6 +10,7 @@ import {
   type FinanceFlow,
   type FinanceSummary,
   type GrContract,
+  type GrImport,
   type GrUnit,
   type Obligations,
   type Person,
@@ -42,6 +43,7 @@ import { CustomsRatesPanel } from "../../../components/customs-rates";
 import { NewContractForm } from "../../../components/contract-forms";
 import { CalcPanel } from "../../../components/calc-panel";
 import { UnitsPanel } from "../../../components/units-panel";
+import { ImportsPanel } from "../../../components/imports-panel";
 import { fmtDay } from "../../../lib/globerent";
 import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
@@ -255,10 +257,11 @@ export default async function DomainPage({
     // («Система»), теперь вкладки этого же рабочего места: один адрес
     // направления, а не разрозненные экраны.
     ...(domain === "vendhub" ? [{ key: "vending", label: "Автоматы" }, { key: "coffee", label: "Кофе-бункеры" }] : []),
-    // Живые контуры GLOBERENT (перенос PROMACH): склад, финансы, калькулятор.
+    // Живые контуры GLOBERENT (перенос PROMACH): склад, импорт, финансы, калькулятор.
     ...(domain === "globerent"
       ? [
           { key: "units", label: "Склад" },
+          { key: "imports", label: "Импорт" },
           { key: "finance", label: "Финансы" },
           { key: "calc", label: "Калькулятор" },
         ]
@@ -327,6 +330,16 @@ export default async function DomainPage({
     [units, unitsSummary, unitClients] = await Promise.all([
       core.units(domain).catch(() => [] as GrUnit[]),
       core.unitsSummary(domain).catch(() => []),
+      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+    ]);
+  }
+
+  // Импортные контракты (перенос import_contracts PROMACH).
+  let importsList: GrImport[] = [];
+  let importSuppliers: FinanceCounterparty[] = [];
+  if (domain === "globerent" && activeGroup === "imports") {
+    [importsList, importSuppliers] = await Promise.all([
+      core.imports(domain).catch(() => [] as GrImport[]),
       core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
     ]);
   }
@@ -867,6 +880,11 @@ export default async function DomainPage({
       {/* ── Склад техники: конвейер 17 статусов (перенос PROMACH) ── */}
       {domain === "globerent" && activeGroup === "units" && (
         <UnitsPanel units={units} summary={unitsSummary} clients={unitClients} />
+      )}
+
+      {/* ── Импортные контракты: завод → таможня → склад (перенос PROMACH) ── */}
+      {domain === "globerent" && activeGroup === "imports" && (
+        <ImportsPanel imports={importsList} suppliers={importSuppliers} />
       )}
 
       {/* ── Калькулятор цены HELI: движок PROMACH, расчёт в браузере ── */}

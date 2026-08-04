@@ -682,6 +682,8 @@ export const moneyFlow = pgTable(
     paidAt: timestamp("paid_at", { withTimezone: true }),
     /** Основание платежа: UZS-договор. Оплаченность договора считается по этой связке. */
     contractId: uuid("contract_id").references(() => grContract.id),
+    /** Основание платежа: импортный контракт (оплаты заводу по графику). */
+    importContractId: uuid("import_contract_id").references(() => grImportContract.id),
     createdAt: createdAt(),
   },
   (t) => [
@@ -771,6 +773,52 @@ export const contractAct = pgTable(
   (t) => [index("contract_act_contract_idx").on(t.contractId)],
 );
 
+// ── gr_import_contract: импортный контракт с заводом (перенос import_contracts PROMACH) ──
+// Контур односторонний: портала поставщика нет, менеджер отмечает за завод
+// (решение сверки переноса — HELI в систему не логинится). Материализация
+// спецификации создаёт единицы globerent_unit; lifecycle — монотонный синк.
+export const grImportContract = pgTable(
+  "gr_import_contract",
+  {
+    id: id(),
+    orgId: uuid("org_id").references(() => org.id),
+    domain: domainEnum("domain").default("globerent").notNull(),
+    contractNo: text("contract_no").notNull(),
+    contractDate: date("contract_date").notNull(),
+    /** Завод-поставщик — карточка contractor с ролью supplier. */
+    supplierId: uuid("supplier_id").references(() => entity.id),
+    currency: text("currency").default("USD").notNull(),
+    totalAmount: numeric("total_amount", { precision: 18, scale: 2 }).notNull(),
+    /** Позиции: [{modelId: uuid|null, name, qty, price}] в валюте контракта. */
+    items: jsonb("items").default([]).notNull(),
+    /** for_stock | under_client | for_sum_contract (требует saleContractId). */
+    purpose: text("purpose").default("for_stock").notNull(),
+    /** UZS-договор продажи, под который везём (purpose=for_sum_contract). */
+    saleContractId: uuid("sale_contract_id").references(() => grContract.id),
+    /** Договорной статус (односторонний): draft | in_progress | completed | cancelled. */
+    status: text("status").default("draft").notNull(),
+    /** Физический lifecycle (draft…closed) — монотонный синк от единиц. */
+    lifecycleStatus: text("lifecycle_status").default("draft").notNull(),
+    // График оплат заводу (миграция 064 донора): предоплата + баланс.
+    prepaymentAmount: numeric("prepayment_amount", { precision: 18, scale: 2 }),
+    prepaymentDueDate: date("prepayment_due_date"),
+    prepaymentPaidAt: timestamp("prepayment_paid_at", { withTimezone: true }),
+    balanceAmount: numeric("balance_amount", { precision: 18, scale: 2 }),
+    balanceDueDate: date("balance_due_date"),
+    balancePaidAt: timestamp("balance_paid_at", { withTimezone: true }),
+    notes: text("notes"),
+    createdFrom: text("created_from"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // Уникальность номера в паре с поставщиком — правило донора.
+    uniqueIndex("ux_import_contract_supplier_no").on(t.supplierId, t.contractNo),
+    index("gr_import_contract_org_idx").on(t.orgId, t.contractDate),
+    index("gr_import_contract_lifecycle_idx").on(t.lifecycleStatus),
+  ],
+);
+
 // ── globerent_unit: единица техники (перенос warehouse_vehicles PROMACH) ──
 // Операционный конвейер: 17 статусов от заявки до передачи клиенту,
 // fromStatuses-переходы — в shared/globerent/unit-status (единый словарь).
@@ -798,6 +846,8 @@ export const globerentUnit = pgTable(
     /** Покупатель (contractor) и договор — связи по FK, не по имени. */
     clientId: uuid("client_id").references(() => entity.id),
     contractId: uuid("contract_id").references(() => grContract.id),
+    /** Импортный контракт, из которого единица материализована. */
+    importContractId: uuid("import_contract_id").references(() => grImportContract.id),
     /** Дата прихода на склад. */
     arrivalDate: date("arrival_date"),
     /** Таможенное оформление: тип/номер/дата последней ГТД. */
@@ -1616,6 +1666,8 @@ export const schema = {
   // Склад техники GLOBERENT: единицы конвейера и резервы (перенос PROMACH).
   globerentUnit,
   unitReserve,
+  // Импортные контракты GLOBERENT (перенос import_contracts PROMACH).
+  grImportContract,
   note,
   auditLog,
   agent,

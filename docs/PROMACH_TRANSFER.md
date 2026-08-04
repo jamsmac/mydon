@@ -23,9 +23,9 @@
 | UZS-договоры (contracts, payments, acts) | ✅ перенесён | таблицы contract/contract_act, money_flow.contract_id, apps/core/src/contracts, вкладка «Документы → Договоры» + /contracts/[id]; спецификация: scratchpad SPEC_UZS_CONTRACTS.md |
 | Калькулятор v3 (calculator-engine, excel ground-truth) | ✅ перенесён | packages/shared/src/globerent/calc.ts (43 golden-теста, паритет с Excel до копейки), вкладка «Калькулятор» |
 | Склад техники (warehouse, 17 статусов, VIN, резервы, стадии продажи) | ✅ перенесён | globerent_unit + unit_reserve, shared/globerent/unit-status (матрица под тестами), apps/core/src/units, вкладка «Склад» |
+| Импортные контракты (график оплат, материализация, массовые ГТД, monotonic lifecycle) | ✅ перенесён | gr_import_contract, apps/core/src/imports, shared/import-lifecycle (баг донора с рангом paying исправлен + тест), вкладка «Импорт» + /imports/[id]. Контур односторонний: менеджер отмечает за завод |
 | DOCX-генерация договора | ⏳ следующий | builder донора переносится 1:1 в Node-сервис (docx работает на сервере), файл → document |
-| Импортные контракты (график, ГТД-автопереходы, материализация в globerent_unit) | ⏳ следующий | статусная машина единицы уже готова; lifecycle-синк — через события contract.paid_in_full / unit.status_changed (уже публикуются) |
-| Предзаказы (preorders, 8 статусов ALLOWED_TRANSITIONS) | ⏳ после импорта | матрица — в спецификации разведки |
+| Предзаказы (preorders, 8 статусов ALLOWED_TRANSITIONS) | ⏳ следующий | матрица — в спецификации разведки |
 | КП-шаблоны (kp-templates DOCX) | ⏳ после договоров | серверная генерация |
 | Себестоимость единицы (recalc по платежам) | ⏳ после склада | по money_flow на unit — механизм выбран сверкой |
 | Комиссии менеджеров | ✅ все три метода | shared/globerent/commission.ts: margin_rate (Math.round(margin×rate)/100 по месяцу выдачи), tiers (полуоткрытые [from,to), персональный бьёт общий, seed 0.5–3.5%), flat_bonus (% от ФАКТ-прибыли). Действующий метод — тумблер «Системы» GR_COMMISSION_METHOD (+ ставка GR_COMMISSION_RATE_PCT); дефолт flat_bonus — самое свежее решение владельца донору (2026-05-17). Начисление в money_flow подключается вместе с COGS единицы |

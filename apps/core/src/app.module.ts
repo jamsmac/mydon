@@ -15,6 +15,7 @@ import { EventsModule } from "./events/events.module";
 import { FinanceModule } from "./finance/finance.module";
 import { HealthController } from "./health.controller";
 import { HistoryModule } from "./history/history.module";
+import { ImportsModule } from "./imports/imports.module";
 import { NotesModule } from "./notes/notes.module";
 import { PeopleModule } from "./people/people.module";
 import { RawModule } from "./raw/raw.module";
@@ -51,6 +52,7 @@ import { VerificationModule } from "./verification/verification.module";
     SystemModule,
     VendingModule,
     HistoryModule,
+    ImportsModule,
     NotesModule,
     PeopleModule,
     RawModule,

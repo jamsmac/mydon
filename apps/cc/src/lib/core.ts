@@ -538,6 +538,46 @@ export interface GrUnit {
   activeReserve: UnitReserveRow | null;
 }
 
+// ── Импортные контракты GLOBERENT (перенос import_contracts PROMACH) ──
+
+export interface GrImportItem {
+  modelId?: string | null;
+  name: string;
+  qty: number;
+  price: number;
+}
+
+export interface GrImport {
+  id: string;
+  domain: string;
+  contractNo: string;
+  contractDate: string;
+  supplierId: string | null;
+  currency: string;
+  totalAmount: string;
+  items: GrImportItem[];
+  purpose: string;
+  saleContractId: string | null;
+  status: string;
+  lifecycleStatus: string;
+  prepaymentAmount: string | null;
+  prepaymentDueDate: string | null;
+  prepaymentPaidAt: string | null;
+  balanceAmount: string | null;
+  balanceDueDate: string | null;
+  balancePaidAt: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  supplierName: string | null;
+  unitsTotal: number;
+  unitsActive: number;
+}
+
+export interface GrImportDetail extends GrImport {
+  units: GrUnit[];
+}
+
 // ── UZS-договоры GLOBERENT (перенос contracts PROMACH) ──
 
 export interface ContractItemRow {
@@ -1686,6 +1726,21 @@ export const core = {
   cancelUnitReserve: (id: string) => send<GrUnit>(`/units/${id}/reserve/cancel`, "PATCH", {}),
   setUnitSalesStage: (id: string, input: Record<string, unknown>) =>
     send<GrUnit>(`/units/${id}/sales-stage`, "PATCH", input),
+
+  // ── Импортные контракты ──
+  imports: (domain: string) => get<GrImport[]>(`/imports?domain=${domain}`),
+  importContract: (id: string) => get<GrImportDetail>(`/imports/${id}`),
+  createImport: (input: Record<string, unknown>) => send<GrImport>("/imports", "POST", input),
+  signImport: (id: string) => send<GrImportDetail>(`/imports/${id}/sign`, "PATCH", {}),
+  markImportPaid: (id: string, kind: "prepayment" | "balance") =>
+    send<GrImport>(`/imports/${id}/paid/${kind}`, "PATCH", {}),
+  bulkImportAction: (id: string, action: string, extra: Record<string, unknown> = {}) =>
+    send<{ moved: number; skipped: number; lifecycle: string }>(
+      `/imports/${id}/bulk/${encodeURIComponent(action)}`,
+      "PATCH",
+      extra,
+    ),
+  cancelImport: (id: string) => send<GrImport>(`/imports/${id}/cancel`, "PATCH", {}),
 
   // ── UZS-договоры ──
   contracts: (domain: string) => get<GrContract[]>(`/contracts?domain=${domain}`),

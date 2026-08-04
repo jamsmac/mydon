@@ -267,6 +267,13 @@
       "when": 1785835092969,
       "tag": "0037_needy_yellow_claw",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1785837751353,
+      "tag": "0038_yummy_puck",
+      "breakpoints": true
     }
   ]
 }
