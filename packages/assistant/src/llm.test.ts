@@ -85,6 +85,26 @@ describe("LLM: заземление запроса", () => {
     const content = buildUserContent("что там", { ...snapshot, recentLabels: [] });
     assert.match(content, /последнее в системе: —/);
   });
+
+  it("кофе-факты попадают в снимок: граммы, себестоимость, топ-точка", () => {
+    const content = buildUserContent("сколько кофе ушло?", {
+      ...snapshot,
+      coffee: { totalGrams: 20500, totalCost: 1640000, topLocation: "American Hospital" },
+    });
+    assert.match(content, /расход кофе-ингредиентов за 30 дней.*20500 г/);
+    assert.match(content, /себестоимость 1640000 сум/);
+    assert.match(content, /больше всего — American Hospital/);
+  });
+
+  it("кофе без цен: «цены не заведены», а не 0 сум; без кофе — строки нет вовсе", () => {
+    const noPrices = buildUserContent("расход?", {
+      ...snapshot,
+      coffee: { totalGrams: 100, totalCost: null, topLocation: null },
+    });
+    assert.match(noPrices, /цены не заведены/);
+    const noCoffee = buildUserContent("расход?", snapshot);
+    assert.doesNotMatch(noCoffee, /расход кофе/);
+  });
 });
 
 describe("LLM: конструирование резолвера", () => {

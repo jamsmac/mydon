@@ -122,6 +122,13 @@ export function buildUserContent(question: string, s: LlmSnapshot): string {
     `- просроченных задач: ${s.briefing.overdueTasks ?? 0}`,
     `- ждут решения: ${s.pendingApprovals}`,
     `- последнее в системе: ${s.recentLabels.length > 0 ? s.recentLabels.join("; ") : "—"}`,
+    ...(s.coffee
+      ? [
+          `- расход кофе-ингредиентов за 30 дней (по возвратам наборов): ${s.coffee.totalGrams} г` +
+            (s.coffee.totalCost !== null ? `, себестоимость ${Math.round(s.coffee.totalCost)} сум` : ", цены не заведены") +
+            (s.coffee.topLocation !== null ? `, больше всего — ${s.coffee.topLocation}` : ""),
+        ]
+      : []),
   ].join("\n");
 
   // Выдержки из истории и заметок. Нумеруем и подписываем источник: модель должна
