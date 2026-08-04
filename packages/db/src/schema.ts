@@ -86,7 +86,14 @@ export const entity = pgTable(
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("entity_org_type_idx").on(t.orgId, t.type)],
+  (t) => [
+    index("entity_org_type_idx").on(t.orgId, t.type),
+    // ИНН контрагента уникален (перенос правила PROMACH uq_clients_inn):
+    // пустой ИНН не конфликтует — физлица и незаполненные карточки допустимы.
+    uniqueIndex("ux_entity_contractor_inn")
+      .on(t.type, t.externalRef)
+      .where(sql`type = 'contractor' and external_ref is not null and external_ref <> ''`),
+  ],
 );
 
 /**
@@ -687,6 +694,65 @@ export const moneyFlow = pgTable(
     index("money_flow_due_idx").on(t.domain, t.status, t.dueDate),
     index("money_flow_counterparty_idx").on(t.counterpartyId),
   ],
+);
+
+// ── tnved_rate: ставки ТН ВЭД для расчёта растаможки (GLOBERENT, донор PROMACH) ──
+// Отдельная таблица, не реестр: ставки — числовая основа калькулятора, им нужны
+// NUMERIC-типизация и JOIN; EAV-attrs это ломает (решение сверки переноса).
+// Ставки в долях: 0.05 = 5%. valid_from — историчность, которой у донора не было.
+export const tnvedRate = pgTable(
+  "tnved_rate",
+  {
+    id: id(),
+    /** Код ТН ВЭД: 8429519900. Не уникален — разные товары под одним кодом. */
+    code: text("code").notNull(),
+    nameRu: text("name_ru").notNull(),
+    /** autotransport | spec_tech — у HELI почти всё spec_tech. */
+    vehicleCategory: text("vehicle_category").default("spec_tech").notNull(),
+    /** Импортная пошлина, доля (0.05 = 5%). */
+    importDutyRate: numeric("import_duty_rate", { precision: 7, scale: 4 }).default("0").notNull(),
+    /** Сбор за таможенное оформление, доля (стандарт 0.002 = 0.2%). */
+    customsFeeRate: numeric("customs_fee_rate", { precision: 7, scale: 4 }).default("0.002").notNull(),
+    exciseRate: numeric("excise_rate", { precision: 7, scale: 4 }).default("0").notNull(),
+    vatRate: numeric("vat_rate", { precision: 7, scale: 4 }).default("0.12").notNull(),
+    /** Утильсбор: сколько БРВ (0 — не облагается). */
+    utilizationBrvCount: integer("utilization_brv_count").default(0).notNull(),
+    /** Доп. пошлина за см³ двигателя, USD (3.36 у тягачей; 0 у погрузчиков). */
+    extraDutyPerCcUsd: numeric("extra_duty_per_cc_usd", { precision: 10, scale: 4 }).default("0").notNull(),
+    /** gibdd — авто, gostechnadzor — спецтехника (влияет на регистрацию). */
+    registrationType: text("registration_type").default("gostechnadzor").notNull(),
+    /** Дефолт сертификации: нал / безнал (может быть пусто). */
+    certCashDefaultUzs: numeric("cert_cash_default_uzs", { precision: 12, scale: 2 }),
+    certBankDefaultUzs: numeric("cert_bank_default_uzs", { precision: 12, scale: 2 }),
+    /** Валидация перед расчётом (Phase 15.22 донора): диапазон массы брутто. */
+    grossMassMinKg: integer("gross_mass_min_kg"),
+    grossMassMaxKg: integer("gross_mass_max_kg"),
+    /** CSV допустимых типов двигателя: "diesel,electric". Пусто — любой. */
+    engineTypeConstraint: text("engine_type_constraint"),
+    isActive: boolean("is_active").default(true).notNull(),
+    notes: text("notes"),
+    /** С какой даты действует ставка (YYYY-MM-DD). */
+    validFrom: date("valid_from"),
+    setBy: text("set_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("tnved_rate_code_idx").on(t.code), index("tnved_rate_active_idx").on(t.isActive)],
+);
+
+// ── brv_value: базовая расчётная величина РУз по датам (утильсбор = БРВ × count) ──
+export const brvValue = pgTable(
+  "brv_value",
+  {
+    id: id(),
+    valueUzs: numeric("value_uzs", { precision: 12, scale: 2 }).notNull(),
+    /** Действует с даты (YYYY-MM-DD). Актуальная — последняя по valid_from ≤ сегодня. */
+    validFrom: date("valid_from").notNull(),
+    note: text("note"),
+    setBy: text("set_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("brv_value_from_idx").on(t.validFrom)],
 );
 
 // ── fx_rate: курс валют к суму — ручной ввод владельца, история сохраняется ──
@@ -1391,6 +1457,9 @@ export const schema = {
   moneyFlow,
   // Финансовый контур: курс валют к суму (перенос паттерна PROMACH).
   fxRate,
+  // Расчётные справочники GLOBERENT: ставки ТН ВЭД и БРВ (перенос PROMACH).
+  tnvedRate,
+  brvValue,
   note,
   auditLog,
   agent,

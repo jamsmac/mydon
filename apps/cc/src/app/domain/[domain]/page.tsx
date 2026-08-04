@@ -4,6 +4,7 @@ import { DOMAINS, DOMAIN_LABELS, dueLabel, type Domain } from "@mydon/shared";
 import {
   core,
   CoreUnavailable,
+  type BrvValue,
   type Entity,
   type FinanceCounterparty,
   type FinanceFlow,
@@ -11,6 +12,7 @@ import {
   type Obligations,
   type Person,
   type Task,
+  type TnvedRate,
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { groupsFor } from "../../../lib/domain-nav";
@@ -34,6 +36,7 @@ import {
   InvoicesBook,
 } from "../../../components/globerent-books";
 import { FinancePanel } from "../../../components/finance-panel";
+import { CustomsRatesPanel } from "../../../components/customs-rates";
 import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
 import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
@@ -272,6 +275,16 @@ export default async function DomainPage({
   const leafItems =
     group && leaf?.type ? entities.filter((e) => e.type === leaf.type).sort((a, b) => a.name.localeCompare(b.name, "ru")) : [];
 
+  // Справочник растаможки (ставки ТН ВЭД + БРВ) — живые таблицы Core, не реестр.
+  let tnved: TnvedRate[] = [];
+  let brv: BrvValue[] = [];
+  if (group && leaf?.type === "customs_rates") {
+    [tnved, brv] = await Promise.all([
+      core.tnvedRates().catch(() => [] as TnvedRate[]),
+      core.brvValues().catch(() => [] as BrvValue[]),
+    ]);
+  }
+
   // Хлебные крошки и чип маршрута (расположение из обложки): где я и как это
   // адресуется. Счётчик из подписи вкладки для крошки убираем — «Задачи 6» → «Задачи».
   const activeTab = topTabs.find((t) => t.key === activeGroup);
@@ -322,7 +335,7 @@ export default async function DomainPage({
         <div className="subtabs">
           {group.leaves.map((l) => {
             // Инкассация живёт своей таблицей, а не реестром — не затемняем.
-            const LIVE = ["sources", "collection", "sale", "purchase", "machine_stock", "consumption"];
+            const LIVE = ["sources", "collection", "sale", "purchase", "machine_stock", "consumption", "customs_rates"];
             const n = l.type && LIVE.includes(l.type) ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
             const isActive = leaf === l;
             return (
@@ -805,6 +818,26 @@ export default async function DomainPage({
         </>
       )}
 
+      {/* ── Справочник растаможки: живые ставки ТН ВЭД + БРВ (перенос PROMACH) ── */}
+      {group && leaf?.type === "customs_rates" && (
+        <CustomsRatesPanel domain={domain} rates={tnved} brv={brv} />
+      )}
+
+      {/* ── Модели каталога: колонки техники подходят и моделям ── */}
+      {group && leaf?.type === "equipment_model" && (
+        <>
+          {leafItems.length > 0 ? (
+            <EquipmentBook items={leafItems} />
+          ) : (
+            <div className="empty">
+              <b>Моделей пока нет</b>
+              Заведи модели HELI (CPD30, CPCD50…) — на них ссылаются техника, КП и расчёты.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="equipment_model" label={typeOne("equipment_model")} />
+        </>
+      )}
+
       {/* ── GLOBERENT и личный контур: документы и каталог со своими колонками ── */}
       {group && leaf?.type === "contract" && (
         <>
@@ -860,7 +893,7 @@ export default async function DomainPage({
       )}
 
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment"].includes(leaf.type) && (
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates"].includes(leaf.type) && (
         <>
           {leafItems.length > 0 ? (
             <>

@@ -74,6 +74,8 @@ export const GLOBERENT_GROUPS: NavGroup[] = [
     key: "catalog",
     label: "Каталог",
     leaves: [
+      // Модели каталога (HELI CPD30…) отдельно от физических единиц с VIN.
+      { label: "Модели", type: "equipment_model" },
       { label: "Техника", type: "equipment" },
       { label: "Контрагенты", type: "contractor" },
       { label: "Объекты", type: "object" },
@@ -85,6 +87,15 @@ export const GLOBERENT_GROUPS: NavGroup[] = [
     leaves: [
       { label: "Договоры", type: "contract" },
       { label: "Счета", type: "invoice" },
+    ],
+  },
+  {
+    key: "refs",
+    label: "Справочники",
+    leaves: [
+      // Живая таблица ставок растаможки (tnved_rate + brv_value, перенос PROMACH).
+      { label: "Растаможка", type: "customs_rates" },
+      { label: "Таможенные посты", type: "customs_post" },
     ],
   },
 ];

@@ -51,8 +51,12 @@ export function NewEntityForm({
         <input name="name" autoFocus />
       </label>
       <label>
-        <span>Номер или код (серийник, штрих-код) — можно позже</span>
-        <input name="externalRef" />
+        <span>
+          {type === "contractor"
+            ? "ИНН — ключ против дублей, можно позже"
+            : "Номер или код (серийник, штрих-код) — можно позже"}
+        </span>
+        <input name="externalRef" inputMode={type === "contractor" ? "numeric" : undefined} />
       </label>
       {type === "product" && (
         <label>
@@ -69,6 +73,39 @@ export function NewEntityForm({
           <label>
             <span>Срок окончания — без него договор не попадёт в тревогу о сроках</span>
             <input name="endDate" type="date" />
+          </label>
+        </>
+      )}
+      {type === "contractor" && (
+        <>
+          <label>
+            <span>Тип</span>
+            <select name="clientType" defaultValue="legal">
+              <option value="legal">юридическое лицо</option>
+              <option value="individual">физическое лицо</option>
+            </select>
+          </label>
+          <label>
+            <span>Роли (кто это для нас)</span>
+            <span style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <label style={{ display: "flex", gap: 6, alignItems: "center", margin: 0 }}>
+                <input type="checkbox" name="roleClient" defaultChecked /> клиент
+              </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center", margin: 0 }}>
+                <input type="checkbox" name="roleSupplier" /> поставщик
+              </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center", margin: 0 }}>
+                <input type="checkbox" name="roleAgent" /> агент
+              </label>
+            </span>
+          </label>
+          <label>
+            <span>Телефон</span>
+            <input name="phone" inputMode="tel" placeholder="+998 …" />
+          </label>
+          <label>
+            <span>Почта</span>
+            <input name="email" inputMode="email" />
           </label>
         </>
       )}

@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, entity, entityDraft, geoPoint, org } from "@mydon/db";
 import {
   addressFromAttrs,
@@ -356,6 +356,10 @@ export class EntitiesService {
   /** Создание и запись в журнал — одной транзакцией (данные без следа недопустимы). */
   async create(dto: CreateEntityDto, actorRef = "system"): Promise<EntityRow> {
     const orgId = await this.orgIdByDomain(dto.domain);
+    // ИНН контрагента уникален (правило PROMACH): при дубле отвечаем адресом
+    // существующей карточки — панель предложит «открыть существующего», а не
+    // молча заведёт двойника. Гонку добивает частичный индекс ux_entity_contractor_inn.
+    await this.rejectDuplicateInn(dto.type, dto.externalRef ?? null, null);
     // Слово владельца — единственное, что делает запись реестра фактом. Всё,
     // что завёл не он (выгрузка источника, код, агент), ждёт утверждения:
     // карточка видна, но фактом не считается и помечена отдельно.
@@ -492,6 +496,9 @@ export class EntitiesService {
     return this.db.transaction(async (tx) => {
       const [before] = await tx.select().from(entity).where(eq(entity.id, id)).for("update");
       if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
+      if (dto.externalRef !== undefined) {
+        await this.rejectDuplicateInn(before.type, dto.externalRef ?? null, id);
+      }
 
       // История цен (слово владельца): смена цены не стирает старую, а
       // дописывает её в поле-историю — видно прямо в карточке товара. Так ведём
@@ -539,6 +546,34 @@ export class EntitiesService {
    */
   async duplicatesByExternalRef(externalRef: string): Promise<EntityRow[]> {
     return this.db.select().from(entity).where(eq(entity.externalRef, externalRef));
+  }
+
+  /**
+   * Дубль ИНН контрагента: структурный 409 с адресом существующей карточки
+   * (UX донора PROMACH — «Открыть существующего клиента»). excludeId — сама
+   * карточка при обновлении.
+   */
+  private async rejectDuplicateInn(
+    type: string,
+    externalRef: string | null,
+    excludeId: string | null,
+  ): Promise<void> {
+    if (type !== "contractor") return;
+    const inn = (externalRef ?? "").trim();
+    if (inn === "") return;
+    const [existing] = await this.db
+      .select({ id: entity.id, name: entity.name })
+      .from(entity)
+      .where(and(eq(entity.type, "contractor"), eq(entity.externalRef, inn)))
+      .limit(2);
+    if (existing && existing.id !== excludeId) {
+      throw new ConflictException({
+        error: "duplicate_inn",
+        message: `Контрагент с ИНН ${inn} уже заведён: ${existing.name}`,
+        existingId: existing.id,
+        existingName: existing.name,
+      });
+    }
   }
 
   /**

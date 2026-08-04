@@ -499,6 +499,43 @@ export interface FinanceCounterparty {
   inn: string | null;
 }
 
+// ── Расчётные справочники GLOBERENT: ставки ТН ВЭД и БРВ (перенос PROMACH) ──
+
+export interface TnvedRate {
+  id: string;
+  code: string;
+  nameRu: string;
+  vehicleCategory: string;
+  /** Доли: 0.05 = 5%. */
+  importDutyRate: string;
+  customsFeeRate: string;
+  exciseRate: string;
+  vatRate: string;
+  utilizationBrvCount: number;
+  extraDutyPerCcUsd: string;
+  registrationType: string;
+  certCashDefaultUzs: string | null;
+  certBankDefaultUzs: string | null;
+  grossMassMinKg: number | null;
+  grossMassMaxKg: number | null;
+  engineTypeConstraint: string | null;
+  isActive: boolean;
+  notes: string | null;
+  validFrom: string | null;
+  setBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BrvValue {
+  id: string;
+  valueUzs: string;
+  validFrom: string;
+  note: string | null;
+  setBy: string | null;
+  createdAt: string;
+}
+
 /** Настройки агента — то, что владелец видит и меняет в карточке. */
 export interface AgentCard {
   id: string;
@@ -1538,6 +1575,16 @@ export const core = {
   },
   financeCounterparties: (domain: string) =>
     get<FinanceCounterparty[]>(`/finance/counterparties/${domain}`),
+  // ── Расчётные справочники (ставки ТН ВЭД, БРВ) ──
+  tnvedRates: (all = false) => get<TnvedRate[]>(`/catalog/tnved${all ? "?all=1" : ""}`),
+  saveTnvedRate: (input: Record<string, unknown>) =>
+    send<TnvedRate>("/catalog/tnved", "POST", input),
+  deactivateTnvedRate: (id: string) =>
+    send<TnvedRate>(`/catalog/tnved/${id}/deactivate`, "PATCH", {}),
+  brvValues: () => get<BrvValue[]>("/catalog/brv"),
+  setBrvValue: (input: { valueUzs: number; validFrom: string; note?: string }) =>
+    send<BrvValue[]>("/catalog/brv", "PUT", input),
+
   fxRates: () => get<FxCurrent[]>("/finance/fx"),
   setFxRate: (input: { currency: string; rate: number; note?: string }) =>
     send<FxCurrent[]>("/finance/fx", "PUT", input),

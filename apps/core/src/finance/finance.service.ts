@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, entity, fxRate, moneyFlow, org } from "@mydon/db";
-import { TZ, type Domain } from "@mydon/shared";
+import { MONEY_CATEGORIES, TZ, type Domain } from "@mydon/shared";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import {
@@ -19,18 +19,11 @@ import {
 type FlowRow = typeof moneyFlow.$inferSelect;
 type FxRow = typeof fxRate.$inferSelect;
 
-/** Категории — словарь PROMACH (warehouse_payments), сжатый под GLOBERENT. */
-export const FLOW_CATEGORIES = [
-  "sale", // продажа техники/услуг клиенту
-  "service", // сервис и запчасти
-  "supplier", // оплата заводу/поставщику
-  "logistics",
-  "customs",
-  "certification",
-  "tax",
-  "rent",
-  "other",
-] as const;
+/**
+ * Категории — ЕДИНЫЙ словарь MONEY_CATEGORIES из packages/shared: у донора
+ * четыре платёжных контура несли каждый свой словарь, здесь источник один.
+ */
+export const FLOW_CATEGORIES = MONEY_CATEGORIES;
 
 const METHODS = ["bank", "cash"] as const;
 const CURRENCY_RE = /^[A-Z]{3}$/;
