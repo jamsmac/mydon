@@ -39,6 +39,7 @@ import {
 import { FinancePanel } from "../../../components/finance-panel";
 import { CustomsRatesPanel } from "../../../components/customs-rates";
 import { NewContractForm } from "../../../components/contract-forms";
+import { CalcPanel } from "../../../components/calc-panel";
 import { fmtDay } from "../../../lib/globerent";
 import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
@@ -252,8 +253,13 @@ export default async function DomainPage({
     // («Система»), теперь вкладки этого же рабочего места: один адрес
     // направления, а не разрозненные экраны.
     ...(domain === "vendhub" ? [{ key: "vending", label: "Автоматы" }, { key: "coffee", label: "Кофе-бункеры" }] : []),
-    // Финансы GLOBERENT — живой контур (перенос PROMACH): агинг, к сроку, курс.
-    ...(domain === "globerent" ? [{ key: "finance", label: "Финансы" }] : []),
+    // Живые контуры GLOBERENT (перенос PROMACH): финансы и калькулятор цены.
+    ...(domain === "globerent"
+      ? [
+          { key: "finance", label: "Финансы" },
+          { key: "calc", label: "Калькулятор" },
+        ]
+      : []),
     ...groups.map((g) => ({ key: g.key, label: g.label })),
     // Инкассация — ежедневная операция, ей место в верхнем ряду (слово владельца).
     ...(domain === "vendhub"
@@ -295,6 +301,18 @@ export default async function DomainPage({
     [liveContracts, contractClients] = await Promise.all([
       core.contracts(domain).catch(() => [] as GrContract[]),
       core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+    ]);
+  }
+
+  // Калькулятор цены: ставки, БРВ и курс — входы движка (сам расчёт в браузере).
+  let calcRates: TnvedRate[] = [];
+  let calcBrv: BrvValue[] = [];
+  let calcFx: Awaited<ReturnType<typeof core.fxRates>> = [];
+  if (domain === "globerent" && activeGroup === "calc") {
+    [calcRates, calcBrv, calcFx] = await Promise.all([
+      core.tnvedRates().catch(() => [] as TnvedRate[]),
+      core.brvValues().catch(() => [] as BrvValue[]),
+      core.fxRates().catch(() => []),
     ]);
   }
 
@@ -829,6 +847,11 @@ export default async function DomainPage({
           />
           <NewEntityForm domain={domain} type="product" label={typeOne("product")} />
         </>
+      )}
+
+      {/* ── Калькулятор цены HELI: движок PROMACH, расчёт в браузере ── */}
+      {domain === "globerent" && activeGroup === "calc" && (
+        <CalcPanel rates={calcRates} brv={calcBrv} fx={calcFx} />
       )}
 
       {/* ── Справочник растаможки: живые ставки ТН ВЭД + БРВ (перенос PROMACH) ── */}
