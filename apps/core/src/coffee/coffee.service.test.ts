@@ -337,6 +337,31 @@ describe("CoffeeService: сверка по всем точкам сразу (rec
     assert.equal(g1.rows.find((r) => r.ingredientId === "ing-coffee")!.reconcile.status, "ok");
     assert.equal(g2.rows.find((r) => r.ingredientId === "ing-coffee")!.reconcile.status, "anomaly");
   });
+
+  it("факт из возвратов наборов: без «замеров до» сверка всё равно считается", async () => {
+    // Одна заливка без measuredBefore (как вся импортированная история) +
+    // возврат набора. Строки несут ключи обеих выборок сервиса:
+    // enteredDate (сырая) и date/locationName (джойн containerActuals).
+    const refills = [
+      {
+        id: "r1", locationId: "loc-1", position: 7, containerNumber: 1, ingredientId: null,
+        filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01",
+        date: "2026-08-01", locationName: "AH",
+      },
+    ];
+    const returns = [{ position: 7, containerNumber: 1, weight: 630, returnedDate: "2026-08-02" }];
+    const bunkerConfig = [
+      { position: 7, ingredientId: "ing-coffee", ingredientName: "Кофе", purchasePrice: null, targetFillWeight: null },
+    ];
+    // Факт: нетто 580 − нетто 10 = 570г. Ожидание: 5 × 18 = 90г — аномалия.
+    const sales = [{ locationId: "loc-1", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 5 }];
+    const { db } = coffeeDb({ refills, returns, bunkerConfig, sales, products, ingredients, tare, locations });
+    const svc = new CoffeeService(db);
+    const res = await svc.reconcileAllLocations("2026-08-01", "2026-08-02");
+    const coffee = res.find((g) => g.locationId === "loc-1")!.rows.find((r) => r.ingredientId === "ing-coffee")!;
+    assert.equal(coffee.actualGrams, 570, "факт пришёл из пары заливка→возврат, а не из замеров");
+    assert.equal(coffee.reconcile.status, "anomaly");
+  });
 });
 
 describe("CoffeeService: настройки — цена ингредиента", () => {
