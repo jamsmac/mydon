@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
@@ -345,10 +345,18 @@ export class CoffeeController {
     return this.coffee.recentRefills(limit ? Number(limit) : undefined);
   }
 
-  /** Удалить ошибочную заливку (строка целиком уходит в audit_log). */
+  /** Удалить ошибочную заливку (строка целиком уходит в audit_log).
+   *  `actor` — кто удаляет (в аудит); `by` — удалить только запись этого автора (бот). */
   @Delete("refill/:id")
-  deleteRefill(@Param("id", ParseUUIDPipe) id: string) {
-    return this.coffee.deleteRefill(id);
+  deleteRefill(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string, @Query("by") by?: string) {
+    return this.coffee.deleteRefill(id, { ...(actor ? { actor } : {}), ...(by ? { onlyIfCreatedBy: by } : {}) });
+  }
+
+  /** Последняя запись автора среди заливок/возвратов/расходников (бот «ошибся»). */
+  @Get("last-entry")
+  lastEntry(@Query("createdBy") createdBy?: string) {
+    if (!createdBy) throw new BadRequestException("createdBy обязателен");
+    return this.coffee.lastEntry(createdBy);
   }
 
   @Get("summary")
@@ -368,6 +376,12 @@ export class CoffeeController {
     return this.coffee.consumablesSummary();
   }
 
+  /** Удалить строку расходников за день (строка целиком уходит в audit_log). */
+  @Delete("consumable/:id")
+  deleteConsumable(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string, @Query("by") by?: string) {
+    return this.coffee.deleteConsumable(id, { ...(actor ? { actor } : {}), ...(by ? { onlyIfCreatedBy: by } : {}) });
+  }
+
   // ── Возвраты наборов ─────────────────────────────────────────────────
 
   @Post("container-return")
@@ -382,8 +396,8 @@ export class CoffeeController {
 
   /** Удалить ошибочный возврат набора (строка целиком уходит в audit_log). */
   @Delete("container-return/:id")
-  deleteContainerReturn(@Param("id", ParseUUIDPipe) id: string) {
-    return this.coffee.deleteContainerReturn(id);
+  deleteContainerReturn(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string, @Query("by") by?: string) {
+    return this.coffee.deleteContainerReturn(id, { ...(actor ? { actor } : {}), ...(by ? { onlyIfCreatedBy: by } : {}) });
   }
 
   /** Фактический расход по наборам за период: заливка − возврат через тару. */

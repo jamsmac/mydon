@@ -616,6 +616,27 @@ export class CoreClient {
     return this.request("/coffee/consumables", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** Последняя запись автора среди заливок/возвратов/расходников («ошибся»). */
+  coffeeLastEntry(createdBy: string): Promise<{
+    entry: { kind: "refill" | "container_return" | "consumable"; id: string; at: string; text: string } | null;
+  }> {
+    return this.request(`/coffee/last-entry?createdBy=${encodeURIComponent(createdBy)}`);
+  }
+
+  /**
+   * Удалить свою запись журнала (бот «ошибся — исправить»). `personRef` идёт
+   * и как actor (в аудит), и как страховка «только свои записи» на стороне Core.
+   */
+  deleteCoffeeEntry(
+    kind: "refill" | "container_return" | "consumable",
+    id: string,
+    personRef: string,
+  ): Promise<{ ok: boolean }> {
+    const path = kind === "refill" ? "refill" : kind === "container_return" ? "container-return" : "consumable";
+    const q = `actor=${encodeURIComponent(personRef)}&by=${encodeURIComponent(personRef)}`;
+    return this.request(`/coffee/${path}/${id}?${q}`, { method: "DELETE" });
+  }
+
   // ── Кофе-бункеры: чтение для утреннего брифинга (§ мониторинг) ────────────
 
   /** Недолив по последней заливке каждого (точка, бункер) против эталона. */

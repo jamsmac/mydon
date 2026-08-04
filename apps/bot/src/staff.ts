@@ -49,6 +49,7 @@ import {
   startCoffeeConsumable,
   tryParseContainerReturns,
 } from "./coffee-returns";
+import { handleCoffeeFixCallback, isCoffeeFixTrigger, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
 
 /**
  * Работа сотрудника в Telegram (решение владельца: сотрудники — через бота).
@@ -110,6 +111,7 @@ const HELP_STAFF = [
   "• «помыл» — отметить мойку бункера",
   "• остатки бункеров — строками как в группе: «1. 027. 787» (позиция. набор. вес)",
   "• «вода» — записать расходники точки (вода, стаканчики, крышки)",
+  "• «ошибся» — удалить свою последнюю запись и внести заново",
   "• кнопки под задачей: «Взял» и «Сделал»",
   "• после «Сделал» напиши одной строкой, что именно сделано — это отчёт",
 ].join("\n");
@@ -267,6 +269,11 @@ export async function handleStaffMessage(
     return { reply: await startCoffeeConsumable(chatId, deps) };
   }
 
+  // «Ошибся — исправить»: показать свою последнюю запись и предложить удалить.
+  if (isCoffeeFixTrigger(clean)) {
+    return { reply: await startCoffeeFix(person, deps) };
+  }
+
   // Ждём отчёт после «Сделал» — любое следующее сообщение считаем отчётом.
   const awaitingTaskId = deps.awaiting.take(chatId);
   if (awaitingTaskId !== null && clean.length > 0 && !clean.startsWith("/")) {
@@ -382,6 +389,13 @@ export async function handleStaffCallback(
       answer: res.answer,
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
     };
+  }
+
+  // Кнопки «ошибся — исправить» (fx:del/keep). Core не даст удалить чужое.
+  const coffeeFix = parseCoffeeFixCallback(data);
+  if (coffeeFix) {
+    const res = await handleCoffeeFixCallback(coffeeFix, person, deps);
+    return { answer: res.answer, ...(res.message ? { message: res.message } : {}) };
   }
 
   // Кнопка инкассации: фиксируем сбор с точным временем.
