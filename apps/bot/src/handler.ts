@@ -22,6 +22,7 @@ import {
   parseReceiveDistribution,
 } from "./purchase-brief";
 import { planReport } from "./reports";
+import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
 import type { RateLimiter } from "./security/access";
 import { isAllowed } from "./security/access";
@@ -61,6 +62,7 @@ const HELP = [
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «касса закупа: получил 2400000, базар 376300» — записать кассу похода на базар",
   "• «кассы закупа» / «история кассы» — прошлые кассы",
+  "• «расход кофе» — расход по наборам за 30 дней (граммы и себестоимость)",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
 ].join("\n");
@@ -165,6 +167,19 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка чтения накладных:", err);
       return { text: "Не удалось получить накладные из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Расход кофе по наборам — чтение; своя фраза, чтобы «расход кофе» не ушёл
+  // в общий разбор как непонятое.
+  if (isCoffeeConsumptionQuery(text)) {
+    try {
+      const { from, to } = consumptionPeriod();
+      const rep = await deps.core.coffeeContainerConsumption(from, to);
+      return { text: formatCoffeeConsumption(rep) };
+    } catch (err) {
+      console.error("Ошибка отчёта о расходе кофе:", err);
+      return { text: "Не удалось получить расход кофе из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 
