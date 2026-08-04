@@ -22,10 +22,10 @@
 | Каталог моделей (vehicle_catalog) | ✅ каркас | entity equipment_model, вкладка «Каталог → Модели»; дерево групп/анкета — позже |
 | UZS-договоры (contracts, payments, acts) | ✅ перенесён | таблицы contract/contract_act, money_flow.contract_id, apps/core/src/contracts, вкладка «Документы → Договоры» + /contracts/[id]; спецификация: scratchpad SPEC_UZS_CONTRACTS.md |
 | Калькулятор v3 (calculator-engine, excel ground-truth) | ✅ перенесён | packages/shared/src/globerent/calc.ts (43 golden-теста, паритет с Excel до копейки), вкладка «Калькулятор» |
+| Склад техники (warehouse, 17 статусов, VIN, резервы, стадии продажи) | ✅ перенесён | globerent_unit + unit_reserve, shared/globerent/unit-status (матрица под тестами), apps/core/src/units, вкладка «Склад» |
 | DOCX-генерация договора | ⏳ следующий | builder донора переносится 1:1 в Node-сервис (docx работает на сервере), файл → document |
-| Склад техники (warehouse, 17 статусов, VIN, резервы) | ⏳ следующий | таблица globerent_unit + статусная машина с fromStatuses; ПЕРЕНОСИТСЯ СВЯЗКОЙ с импортом |
-| Импортные контракты (двустороннее подписание, график, ГТД, материализация) | ⏳ следующий | вместе со складом; lifecycle-синк — через события contract.paid_in_full (уже публикуются) |
-| Сделки/предзаказы (sales 12 стадий, preorders 8 статусов) | ⏳ после склада | требуют units; матрицы переходов — из спецификаций разведки |
+| Импортные контракты (график, ГТД-автопереходы, материализация в globerent_unit) | ⏳ следующий | статусная машина единицы уже готова; lifecycle-синк — через события contract.paid_in_full / unit.status_changed (уже публикуются) |
+| Предзаказы (preorders, 8 статусов ALLOWED_TRANSITIONS) | ⏳ после импорта | матрица — в спецификации разведки |
 | КП-шаблоны (kp-templates DOCX) | ⏳ после договоров | серверная генерация |
 | Себестоимость единицы (recalc по платежам) | ⏳ после склада | по money_flow на unit — механизм выбран сверкой |
 | Комиссии менеджеров | ⏸ вопрос владельцу | у донора ТРИ несовместимые формулы (sales-analytics: margin×rate по месяцу; commission_tiers v2; калькулятор: 8% от NET_PROFIT_TOTAL) — в код пойдёт одна, нужно слово владельца |
