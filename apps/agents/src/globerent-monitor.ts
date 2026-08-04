@@ -20,7 +20,11 @@
 export interface GloberentMonitorCoreClient {
   globerentUnits(): Promise<MonitorUnitRow[]>;
   globerentContracts(): Promise<MonitorContractRow[]>;
-  recordEvent(input: { source: string; type: string; payload?: Record<string, unknown> }): Promise<unknown>;
+  recordEvent(input: {
+    source: string;
+    type: string;
+    payload?: Record<string, unknown>;
+  }): Promise<unknown>;
 }
 
 export interface MonitorUnitRow {
@@ -36,6 +40,8 @@ export interface MonitorContractRow {
   status: string;
   totalWithVat: string;
   paidUzs: number;
+  /** Провенанс: у карточек из выгрузки Didox заполнен. */
+  createdFrom?: string | null;
 }
 
 /** Статусы, в которых номер ГТД обязателен (словарь unit-status shared). */
@@ -76,6 +82,9 @@ export async function runGloberentMonitor(
     const contracts = await core.globerentContracts();
     for (const c of contracts) {
       if (c.status !== "active") continue;
+      // Историческая карточка из выгрузки: денег по ней в системе нет,
+      // «оплачен, но не закрыт» на таких данных не проверяется.
+      if ((c.createdFrom ?? "").trim()) continue;
       const total = Number(c.totalWithVat);
       // Сумма договора кривая или нулевая — инвариант не про неё; не выдумываем.
       if (!Number.isFinite(total) || total <= 0) continue;
@@ -83,7 +92,12 @@ export async function runGloberentMonitor(
       await core.recordEvent({
         source: "globerent-monitor",
         type: "globerent.contract_paid_unclosed",
-        payload: { contractId: c.id, contractNo: c.contractNo, totalWithVat: total, paidUzs: c.paidUzs },
+        payload: {
+          contractId: c.id,
+          contractNo: c.contractNo,
+          totalWithVat: total,
+          paidUzs: c.paidUzs,
+        },
       });
       contractsPaidUnclosed += 1;
     }

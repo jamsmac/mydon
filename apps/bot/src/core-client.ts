@@ -183,9 +183,11 @@ export class CoreClient {
     );
   }
 
-  /** Договоры купли-продажи: статус и сколько оплачено (сум-эквивалент). */
-  globerentContracts(): Promise<{ status: string; paidUzs: number }[]> {
-    return this.request<{ status: string; paidUzs: number }[]>("/contracts?domain=globerent");
+  /** Договоры купли-продажи: статус, оплата (сум-эквивалент) и провенанс. */
+  globerentContracts(): Promise<{ status: string; paidUzs: number; createdFrom: string | null }[]> {
+    return this.request<{ status: string; paidUzs: number; createdFrom: string | null }[]>(
+      "/contracts?domain=globerent",
+    );
   }
 
   /** Единицы техники: стадия продажи и когда карточку трогали в последний раз. */
@@ -223,7 +225,10 @@ export class CoreClient {
       method: "POST",
       body: JSON.stringify({
         receivedAmount,
-        categories: categories.map((c) => ({ name: c.name, lines: [{ label: c.name, amount: c.amount }] })),
+        categories: categories.map((c) => ({
+          name: c.name,
+          lines: [{ label: c.name, amount: c.amount }],
+        })),
       }),
     });
   }
@@ -308,7 +313,14 @@ export class CoreClient {
   /** Последние действия из журнала — память помощника («что было»). */
   recent(
     limit = 10,
-  ): Promise<{ actorKind: "human" | "agent" | "system"; action: string; actorRef: string | null; ts: string }[]> {
+  ): Promise<
+    {
+      actorKind: "human" | "agent" | "system";
+      action: string;
+      actorRef: string | null;
+      ts: string;
+    }[]
+  > {
     return this.request(`/audit?limit=${limit}`);
   }
 
@@ -399,7 +411,10 @@ export class CoreClient {
   }
 
   /** Оператор зафиксировал сбор денег с автомата. */
-  createCollection(machineId: string, operatorId: string): Promise<{ id: string; collectedAt: string }> {
+  createCollection(
+    machineId: string,
+    operatorId: string,
+  ): Promise<{ id: string; collectedAt: string }> {
     return this.request<{ id: string; collectedAt: string }>("/collections", {
       method: "POST",
       body: JSON.stringify({ machineId, operatorId }),
@@ -537,7 +552,9 @@ export class CoreClient {
   }
 
   /** Позиция бункера 1–8 → допустимые ингредиенты (для подсказки технику при выборе). */
-  coffeeBunkerConfig(): Promise<{ position: number; ingredientId: string; ingredientName: string }[]> {
+  coffeeBunkerConfig(): Promise<
+    { position: number; ingredientId: string; ingredientName: string }[]
+  > {
     return this.request("/coffee/bunker-config");
   }
 
@@ -576,7 +593,10 @@ export class CoreClient {
     locationNote?: string;
     createdBy?: string;
   }): Promise<{ id: string }> {
-    return this.request("/coffee/container-return", { method: "POST", body: JSON.stringify(input) });
+    return this.request("/coffee/container-return", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   }
 
   /** Сводка продаж автоматов — те же цифры, что на дашборде VendHub. */
@@ -595,7 +615,11 @@ export class CoreClient {
    * расход за 30 дней одним объектом — вопросы «сколько кофе ушло?» получают
    * цифры из снимка, а не выдумку.
    */
-  async coffeeConsumption30d(): Promise<{ totalGrams: number; totalCost: number | null; topLocation: string | null }> {
+  async coffeeConsumption30d(): Promise<{
+    totalGrams: number;
+    totalCost: number | null;
+    topLocation: string | null;
+  }> {
     const iso = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
     const fromDate = new Date();
     fromDate.setDate(fromDate.getDate() - 30);
@@ -608,7 +632,10 @@ export class CoreClient {
   }
 
   /** Фактический расход по наборам за период (заливка − возврат через тару). */
-  coffeeContainerConsumption(from: string, to: string): Promise<{
+  coffeeContainerConsumption(
+    from: string,
+    to: string,
+  ): Promise<{
     from: string;
     to: string;
     rows: unknown[];
@@ -640,7 +667,12 @@ export class CoreClient {
 
   /** Последняя запись автора среди заливок/возвратов/расходников («ошибся»). */
   coffeeLastEntry(createdBy: string): Promise<{
-    entry: { kind: "refill" | "container_return" | "consumable"; id: string; at: string; text: string } | null;
+    entry: {
+      kind: "refill" | "container_return" | "consumable";
+      id: string;
+      at: string;
+      text: string;
+    } | null;
   }> {
     return this.request(`/coffee/last-entry?createdBy=${encodeURIComponent(createdBy)}`);
   }
@@ -654,7 +686,12 @@ export class CoreClient {
     id: string,
     personRef: string,
   ): Promise<{ ok: boolean }> {
-    const path = kind === "refill" ? "refill" : kind === "container_return" ? "container-return" : "consumable";
+    const path =
+      kind === "refill"
+        ? "refill"
+        : kind === "container_return"
+          ? "container-return"
+          : "consumable";
     const q = `actor=${encodeURIComponent(personRef)}&by=${encodeURIComponent(personRef)}`;
     return this.request(`/coffee/${path}/${id}?${q}`, { method: "DELETE" });
   }

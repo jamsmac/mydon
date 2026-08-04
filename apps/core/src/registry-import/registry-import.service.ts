@@ -1,7 +1,15 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, entity, globerentUnit, grContract, moneyFlow, org } from "@mydon/db";
+import {
+  auditLog,
+  contractAct,
+  entity,
+  globerentUnit,
+  grContract,
+  moneyFlow,
+  org,
+} from "@mydon/db";
 import { MONEY_CATEGORIES } from "@mydon/shared";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, like, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 /**
@@ -66,6 +74,11 @@ export interface ImportPayload {
   ownCompany?: { name: string; attrs: Record<string, unknown> };
   flows?: ImportFlow[];
   contracts?: ImportContract[];
+  /**
+   * «В этой партии весь набор договоров»: свои карточки, которых в наборе
+   * нет, удаляются. Импортёр ставит флаг только на последней партии.
+   */
+  contractsFinal?: boolean;
 }
 
 /**
@@ -129,7 +142,12 @@ export interface ImportSummary {
   units: ImportCount & { errors: string[] };
   ownCompany: ImportCount;
   flows: ImportCount & { errors: string[] };
-  contracts: ImportCount & { errors: string[]; flowsLinked: number };
+  contracts: ImportCount & {
+    errors: string[];
+    flowsLinked: number;
+    updated: number;
+    deleted: number;
+  };
 }
 
 const UNIT_STATUSES_ALLOWED = ["IN_STOCK", "DELIVERED_TO_CLIENT"] as const;
@@ -210,7 +228,7 @@ export class RegistryImportService {
       units: { created: 0, skipped: 0, errors: [] },
       ownCompany: { created: 0, skipped: 0 },
       flows: { created: 0, skipped: 0, errors: [] },
-      contracts: { created: 0, skipped: 0, errors: [], flowsLinked: 0 },
+      contracts: { created: 0, skipped: 0, errors: [], flowsLinked: 0, updated: 0, deleted: 0 },
     };
 
     if (payload.contractors?.length) {
@@ -239,23 +257,39 @@ export class RegistryImportService {
     }
     // Договоры — после flows: привязка приходов ждёт сами записи денег.
     if (payload.contracts?.length) {
-      summary.contracts = await this.importContracts(orgId, payload.contracts, source, actorRef);
+      summary.contracts = await this.importContracts(
+        orgId,
+        payload.contracts,
+        source,
+        actorRef,
+        payload.contractsFinal ?? false,
+      );
     }
     return summary;
   }
 
   /**
-   * Договоры покупателей из Didox. Идемпотентность — по (org, номер):
-   * существующий договор не перезаписывается (правки владельца из панели
-   * важнее сида), но привязка приходов по flowDocNos добирается и для него —
-   * повторный прогон после нового импорта денег дотягивает связи.
+   * Договоры покупателей из Didox.
+   *
+   * Своя запись (createdFrom начинается с источника Didox) — обновляется:
+   * сумма, статус, покупатель и провенанс пересчитываются при каждом прогоне,
+   * потому что разбор выгрузки уточняется. Заведённая владельцем вручную
+   * (createdFrom пуст или другой) — не трогается никогда.
+   *
+   * contractsFinal=true означает «в этой партии весь набор»: свои записи,
+   * которых в наборе больше нет, удаляются — так уходят карточки, собранные
+   * прошлой версией разбора. Удаление щадящее: договор с актами или
+   * привязанными единицами остаётся жить (с ним уже работали).
    */
   private async importContracts(
     orgId: string,
     rows: ImportContract[],
     source: string,
     actorRef: string,
-  ): Promise<ImportCount & { errors: string[]; flowsLinked: number }> {
+    final: boolean,
+  ): Promise<
+    ImportCount & { errors: string[]; flowsLinked: number; updated: number; deleted: number }
+  > {
     const errors: string[] = [];
     const valid: ImportContract[] = [];
     for (const c of rows) {
@@ -263,6 +297,21 @@ export class RegistryImportService {
       if (err !== null) errors.push(err);
       else valid.push(c);
     }
+
+    // Метка своих записей: провенанс начинается с названия источника до двоеточия
+    // («Didox»), поэтому уточнение текста источника не рвёт связь с прошлым прогоном.
+    const ownPrefix = `${source.split(":")[0].trim()}%`;
+    const mine = await this.db
+      .select({ id: grContract.id, no: grContract.contractNo })
+      .from(grContract)
+      .where(
+        and(
+          eq(grContract.orgId, orgId),
+          isNotNull(grContract.createdFrom),
+          like(grContract.createdFrom, ownPrefix),
+        ),
+      );
+    const mineIds = new Set(mine.map((e) => e.id));
 
     const nos = valid.map((c) => c.contractNo.trim());
     const existing = nos.length
@@ -288,11 +337,35 @@ export class RegistryImportService {
       .where(and(eq(entity.orgId, orgId), eq(entity.type, "own_company")));
 
     let created = 0;
+    let updated = 0;
     let skipped = 0;
+    let deleted = 0;
     let flowsLinked = 0;
     await this.db.transaction(async (tx) => {
       for (const c of valid) {
         const no = c.contractNo.trim();
+        const fields = {
+          contractDate: c.contractDate,
+          clientId: c.buyerInn !== undefined ? (clientByInn.get(c.buyerInn) ?? null) : null,
+          buyer: {
+            name: c.buyerName.trim(),
+            ...(c.buyerInn !== undefined ? { inn: c.buyerInn } : {}),
+          },
+          totalWithVat: String(c.totalWithVat),
+          totalVat: String(c.totalVat ?? 0),
+          status: c.status ?? "active",
+          docParams: {
+            didox: {
+              ...(c.subject !== undefined && c.subject !== null ? { subject: c.subject } : {}),
+              ...(c.didoxRows !== undefined ? { rows: c.didoxRows } : {}),
+              ...(c.didoxDuplicatesDropped !== undefined
+                ? { duplicatesDropped: c.didoxDuplicatesDropped }
+                : {}),
+              ...(c.extraDates !== undefined ? { extraDates: c.extraDates } : {}),
+              ...(c.invoicedTotal !== undefined ? { invoicedTotal: c.invoicedTotal } : {}),
+            },
+          },
+        };
         let contractId = idByNo.get(no);
         if (contractId === undefined) {
           const [inserted] = await tx
@@ -301,33 +374,20 @@ export class RegistryImportService {
               orgId,
               domain: "globerent",
               contractNo: no,
-              contractDate: c.contractDate,
-              clientId: c.buyerInn !== undefined ? (clientByInn.get(c.buyerInn) ?? null) : null,
-              buyer: {
-                name: c.buyerName.trim(),
-                ...(c.buyerInn !== undefined ? { inn: c.buyerInn } : {}),
-              },
               sellerCompanyId: seller?.id ?? null,
-              totalWithVat: String(c.totalWithVat),
-              totalVat: String(c.totalVat ?? 0),
-              status: c.status ?? "active",
-              docParams: {
-                didox: {
-                  ...(c.subject !== undefined && c.subject !== null ? { subject: c.subject } : {}),
-                  ...(c.didoxRows !== undefined ? { rows: c.didoxRows } : {}),
-                  ...(c.didoxDuplicatesDropped !== undefined
-                    ? { duplicatesDropped: c.didoxDuplicatesDropped }
-                    : {}),
-                  ...(c.extraDates !== undefined ? { extraDates: c.extraDates } : {}),
-                  ...(c.invoicedTotal !== undefined ? { invoicedTotal: c.invoicedTotal } : {}),
-                },
-              },
               createdFrom: source,
+              ...fields,
             })
             .returning({ id: grContract.id });
           contractId = inserted.id;
           idByNo.set(no, contractId);
           created += 1;
+        } else if (mineIds.has(contractId)) {
+          await tx
+            .update(grContract)
+            .set({ ...fields, createdFrom: source, updatedAt: new Date() })
+            .where(eq(grContract.id, contractId));
+          updated += 1;
         } else {
           skipped += 1;
         }
@@ -346,18 +406,47 @@ export class RegistryImportService {
           flowsLinked += linked.length;
         }
       }
-      if (created > 0 || flowsLinked > 0) {
+
+      // Свои карточки, которых в наборе больше нет, — след прошлой версии
+      // разбора. Уходят только нетронутые: есть акт или привязанная единица —
+      // значит с договором работали, такой остаётся владельцу на разбор.
+      if (final) {
+        const keep = new Set(valid.map((c) => c.contractNo.trim()));
+        const stale = mine.filter((m) => !keep.has(m.no));
+        for (const s of stale) {
+          const [{ n: acts }] = await tx
+            .select({ n: sql<number>`count(*)::int` })
+            .from(contractAct)
+            .where(eq(contractAct.contractId, s.id));
+          const [{ n: units }] = await tx
+            .select({ n: sql<number>`count(*)::int` })
+            .from(globerentUnit)
+            .where(eq(globerentUnit.contractId, s.id));
+          if (acts > 0 || units > 0) {
+            errors.push(`«${s.no}»: карточка устарела, но с ней работали — оставлена`);
+            continue;
+          }
+          await tx
+            .update(moneyFlow)
+            .set({ contractId: null })
+            .where(eq(moneyFlow.contractId, s.id));
+          await tx.delete(grContract).where(eq(grContract.id, s.id));
+          deleted += 1;
+        }
+      }
+
+      if (created > 0 || updated > 0 || deleted > 0 || flowsLinked > 0) {
         await tx.insert(auditLog).values({
           actorKind: "human",
           actorRef,
           action: "registry_import.contracts",
           target: source,
-          after: { created, skipped, flowsLinked, errors: errors.length },
+          after: { created, updated, deleted, skipped, flowsLinked, errors: errors.length },
         });
       }
     });
 
-    return { created, skipped, errors, flowsLinked };
+    return { created, updated, deleted, skipped, errors, flowsLinked };
   }
 
   /**

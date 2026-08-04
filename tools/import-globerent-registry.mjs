@@ -64,7 +64,7 @@ const totals = {
   units: { created: 0, skipped: 0, errors: [] },
   ownCompany: { created: 0, skipped: 0, errors: [] },
   flows: { created: 0, skipped: 0, errors: [] },
-  contracts: { created: 0, skipped: 0, flowsLinked: 0, errors: [] },
+  contracts: { created: 0, skipped: 0, flowsLinked: 0, updated: 0, deleted: 0, errors: [] },
 };
 
 // Реквизиты своей компании — отдельный сид: они не из книги, а из
@@ -185,10 +185,17 @@ if (fs.existsSync(didoxPath)) {
   for (const batch of chunks(didox.flows ?? [], 200)) {
     add(totals.flows, (await postDidox({ flows: batch })).flows);
   }
-  for (const batch of chunks(didox.contracts ?? [], 100)) {
-    const part = (await postDidox({ contracts: batch })).contracts;
+  // contractsFinal на последней партии: Core удалит свои карточки, которых
+  // в наборе больше нет (следы прошлой версии разбора выгрузки).
+  const contractBatches = chunks(didox.contracts ?? [], 100);
+  for (const [i, batch] of contractBatches.entries()) {
+    const part = (
+      await postDidox({ contracts: batch, contractsFinal: i === contractBatches.length - 1 })
+    ).contracts;
     add(totals.contracts, part);
     totals.contracts.flowsLinked += part.flowsLinked ?? 0;
+    totals.contracts.updated += part.updated ?? 0;
+    totals.contracts.deleted += part.deleted ?? 0;
   }
 }
 
@@ -206,6 +213,9 @@ for (const [k, label] of [
   console.log(`  ${label}: создано ${t.created}, пропущено (уже были) ${t.skipped}`);
   for (const e of t.errors) console.log(`    ⚠ ${e}`);
 }
+console.log(
+  `  договоры: обновлено ${totals.contracts.updated}, удалено устаревших ${totals.contracts.deleted}`,
+);
 console.log(`  приходов привязано к договорам: ${totals.contracts.flowsLinked}`);
 console.log(
   `  ставки ТН ВЭД: создано ${customsTotals.tnved.created}, пропущено ${customsTotals.tnved.skipped}; ` +

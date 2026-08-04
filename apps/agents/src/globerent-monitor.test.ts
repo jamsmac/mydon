@@ -11,8 +11,7 @@ import {
 function stubCore(units: MonitorUnitRow[] | Error, contracts: MonitorContractRow[] | Error) {
   const events: { type: string; payload?: Record<string, unknown> }[] = [];
   const core: GloberentMonitorCoreClient = {
-    globerentUnits: () =>
-      units instanceof Error ? Promise.reject(units) : Promise.resolve(units),
+    globerentUnits: () => (units instanceof Error ? Promise.reject(units) : Promise.resolve(units)),
     globerentContracts: () =>
       contracts instanceof Error ? Promise.reject(contracts) : Promise.resolve(contracts),
     recordEvent: (e) => {
@@ -72,6 +71,24 @@ describe("монитор инвариантов конвейера GLOBERENT", (
     const r = await runGloberentMonitor(core);
     assert.equal(r.contractsPaidUnclosed, 1);
     assert.equal(events[0]?.payload?.["contractNo"], "5");
+  });
+
+  it("историческая карточка из выгрузки не проверяется: денег по ней в системе нет", async () => {
+    const { core, events } = stubCore(
+      [],
+      [
+        contract({
+          id: "c1",
+          contractNo: "9",
+          paidUzs: 100_000_000,
+          createdFrom: "Didox: реестры",
+        }),
+        contract({ id: "c2", contractNo: "10", paidUzs: 100_000_000 }),
+      ],
+    );
+    const r = await runGloberentMonitor(core);
+    assert.equal(r.contractsPaidUnclosed, 1);
+    assert.equal(events[0]?.payload?.["contractNo"], "10");
   });
 
   it("кривая или нулевая сумма договора — инвариант молчит, не выдумывает", async () => {
