@@ -1,7 +1,9 @@
 import Link from "next/link";
+import { BunkerLevels } from "./bunker-levels";
 import {
   core,
   CoreUnavailable,
+  type CoffeeFillStatusRow,
   type Entity,
   type VendingMachine,
   type VendingNeed,
@@ -102,6 +104,23 @@ export async function VendingPanel({ machines }: { machines: Entity[] }) {
   }
   const sum = (n: number) => n.toLocaleString("ru-RU");
   const syncLine = lastSyncLine(syncRuns);
+
+  // Наглядные бункеры у кофе-машин (слово владельца): карточка автомата,
+  // привязанного к кофе-точке, показывает уровни прямо в списке. Кофе-данные —
+  // дополнение: их провал списка автоматов не роняет.
+  const bunkersByEntity = new Map<string, CoffeeFillStatusRow[]>();
+  try {
+    const [coffeeLocations, fillStatus] = await Promise.all([core.coffeeLocations(), core.coffeeFillStatus()]);
+    const locationByEntity = new Map(
+      coffeeLocations.filter((l) => l.entityId !== null).map((l) => [l.entityId!, l.id]),
+    );
+    for (const [entityId, locationId] of locationByEntity) {
+      const rows = fillStatus.filter((r) => r.locationId === locationId);
+      if (rows.length > 0) bunkersByEntity.set(entityId, rows);
+    }
+  } catch {
+    // без кофе-данных карточки просто без бункеров
+  }
 
   const ok = ourvendMachines.filter((m) => m.status === "ok");
   const totalDeficit = ok.reduce((a, m) => a + m.deficit, 0);
@@ -287,6 +306,7 @@ export async function VendingPanel({ machines }: { machines: Entity[] }) {
             const attrs = e.attrs ?? {};
             const point = attrs["точка"];
             const kind = machineKind(e);
+            const bunkers = bunkersByEntity.get(e.id);
             return (
               <Link href={`/card/${e.id}`} className="row" key={e.id}>
                 <div className="t">
@@ -296,6 +316,7 @@ export async function VendingPanel({ machines }: { machines: Entity[] }) {
                     {typeof point === "string" && point !== "" ? ` · ${point}` : ""}
                   </small>
                 </div>
+                {bunkers && <BunkerLevels rows={bunkers} compact />}
                 <span className={`chip ${kind === "кофе" ? "b" : kind === "снек" ? "g" : ""}`}>
                   {kind ?? "тип не указан"}
                 </span>
