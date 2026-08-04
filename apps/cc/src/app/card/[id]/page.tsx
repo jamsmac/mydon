@@ -3,6 +3,7 @@ import {
   core,
   CoreUnavailable,
   type Attachment,
+  type CoffeePlacementRow,
   type Entity,
   type EntityDraft,
   type MachineProductPrice,
@@ -61,6 +62,17 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       prices = items;
     } catch {
       prices = [];
+    }
+  }
+
+  // Кофе-размещения: на каких кофе-точках этот аппарат работал (история с
+  // периодами, ведёт привязка в Кофе-бункерах). Дополнение — ошибка не роняет.
+  let coffeePlacements: CoffeePlacementRow[] = [];
+  if (entity.type === "machine") {
+    try {
+      coffeePlacements = (await core.coffeePlacements()).filter((p) => p.entityId === entity.id);
+    } catch {
+      coffeePlacements = [];
     }
   }
 
@@ -221,6 +233,34 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           <p className="hint" style={{ marginTop: 8 }}>
             Восстановлено из заказов источника: адрес и время есть в каждом.
             Точка — период, а не одно значение: переставили автомат, начался новый отрезок.
+          </p>
+        </div>
+      )}
+
+      {coffeePlacements.length > 0 && (
+        <div className="sect" id="coffee-placements" data-toc="Кофе-точки">
+          <div className="sect-h">
+            <h3 className="h2">Кофе-точки</h3>
+            <span className="chip b">периодов: {coffeePlacements.length}</span>
+          </div>
+          <div className="rows">
+            {coffeePlacements.map((p) => (
+              <div className="row" key={p.id}>
+                <div className="t">
+                  <b>{p.locationName}</b>
+                  <small>
+                    {p.startDate ?? "с неизвестной даты"} — {p.endDate ?? "сейчас"}
+                    {p.note ? ` · ${p.note}` : ""}
+                  </small>
+                </div>
+                <span className={`pill ${p.endDate === null ? "ok" : ""}`}>
+                  {p.endDate === null ? "стоит сейчас" : "история"}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="hint" style={{ marginTop: 8 }}>
+            Из привязок кофе-бункеров: перестановка аппарата закрывает период и открывает новый.
           </p>
         </div>
       )}
