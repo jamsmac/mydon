@@ -275,6 +275,48 @@ export function CalcPanel({ rates, brv, fx }: { rates: TnvedRate[]; brv: BrvValu
             )}
           </div>
 
+          {/* ── КП по фирменному бланку (реальные образцы владельца) ── */}
+          <div className="sect">
+            <div className="sect-h"><h3 className="h2">КП по бланку GLOBERENT</h3></div>
+            <form method="post" action="/kp/download" className="form">
+              <input type="hidden" name="priceWithVat" value={salePrice} />
+              <label>
+                <span>Шапка таблицы (тип · серия · модель)</span>
+                <input name="tableTitle" placeholder="ЭЛЕКТРИЧЕСКИЙ ВИЛОЧНЫЙ ПОГРУЗЧИК  LI-ION  ·  G3 СЕРИЯ  ·  CPD 15-GB3LI-S" />
+              </label>
+              <label>
+                <span>Теглайн (по центру, как в образце)</span>
+                <input name="tagline" placeholder="Электрический вилочный погрузчик 1 500 кг · 4 500 мм" />
+              </label>
+              <label>
+                <span>Абзац о модели — можно пусто</span>
+                <input name="aboutModel" placeholder="В предложении представлен …" />
+              </label>
+              <label>
+                <span>Характеристики: по строке «Ярлык | Значение»</span>
+                <textarea
+                  name="rows"
+                  rows={6}
+                  placeholder={"Модель | CPD 15-GB3Li\nГрузоподъёмность, кг | 1 500\nВысота подъёма груза, мм | 4 500"}
+                  style={{ width: "100%", fontFamily: "var(--fm)", fontSize: 13 }}
+                />
+              </label>
+              <label>
+                <span>Номер КП — пусто, чтобы взять КП-ГГГГ/ММДД-1</span>
+                <input name="kpNo" placeholder="авто" />
+              </label>
+              <div className="form-actions">
+                <button type="submit" className="btn primary" disabled={numOf(salePrice) <= 0}>
+                  Скачать КП (DOCX)
+                </button>
+              </div>
+              <p className="hint">
+                Цена с НДС берётся из сценария выше ({salePrice !== "" ? `${nfmt(numOf(salePrice))} сум` : "задай цену"}).
+                Условия оплаты, гарантия HELI и реквизиты футера — с образцов, меняются в документе.
+              </p>
+            </form>
+          </div>
+
           <div className="sect">
             <div className="sect-h"><h3 className="h2">Строки затрат (авто)</h3></div>
             <div className="book">
