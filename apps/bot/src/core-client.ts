@@ -173,6 +173,28 @@ export class CoreClient {
     return this.request<VendingPurchase>("/vending/purchase");
   }
 
+  // ── Сигналы GLOBERENT для брифинга (перенос PROMACH) ──
+  // Берём ровно те поля, что нужны счётчикам briefing.ts, — не полные типы Core.
+
+  /** «К сроку ≤ 7 дней» из финансового свода GLOBERENT. */
+  globerentDueSoon(): Promise<{ dueSoonIn: unknown[]; dueSoonOut: unknown[] }> {
+    return this.request<{ dueSoonIn: unknown[]; dueSoonOut: unknown[] }>(
+      "/finance/summary/globerent",
+    );
+  }
+
+  /** Договоры купли-продажи: статус и сколько оплачено (сум-эквивалент). */
+  globerentContracts(): Promise<{ status: string; paidUzs: number }[]> {
+    return this.request<{ status: string; paidUzs: number }[]>("/contracts?domain=globerent");
+  }
+
+  /** Единицы техники: стадия продажи и когда карточку трогали в последний раз. */
+  globerentUnits(): Promise<{ salesStage: string | null; updatedAt: string }[]> {
+    return this.request<{ salesStage: string | null; updatedAt: string }[]>(
+      "/units?domain=globerent",
+    );
+  }
+
   /**
    * Записать остатки склада вендинга (инвентаризация, §5.4). Перезапись по
    * товару; `adjustments` — расхождение с предыдущим остатком (недостача при

@@ -25,6 +25,7 @@ export const TYPE_LABELS: Record<string, string> = {
   equipment_group: "группы каталога",
   equipment_subgroup: "подгруппы каталога",
   customs_post: "таможенные посты",
+  own_company: "мои компании",
 };
 
 /** Единственное число — для заголовка карточки. */
@@ -46,6 +47,7 @@ export const TYPE_ONE: Record<string, string> = {
   equipment_group: "группа каталога",
   equipment_subgroup: "подгруппа каталога",
   customs_post: "таможенный пост",
+  own_company: "моя компания",
 };
 
 export const typeLabel = (t: string): string => TYPE_LABELS[t] ?? t;

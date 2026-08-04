@@ -481,6 +481,13 @@ export interface FxCurrent {
   createdAt: string;
 }
 
+/** Итог обновления курсов из ЦБ РУз: что встало, что пропущено и почему. */
+export interface FxRefreshResult {
+  updated: string[];
+  skipped: { currency: string; reason: string }[];
+  fx: FxCurrent[];
+}
+
 export interface FinanceSummary {
   domain: string;
   today: string;
@@ -1797,6 +1804,7 @@ export const core = {
   fxRates: () => get<FxCurrent[]>("/finance/fx"),
   setFxRate: (input: { currency: string; rate: number; note?: string }) =>
     send<FxCurrent[]>("/finance/fx", "PUT", input),
+  refreshFxRates: () => send<FxRefreshResult>("/finance/fx/refresh", "POST", { actorRef: "owner" }),
   createFinanceFlow: (input: Record<string, unknown>) =>
     send<FinanceFlow>("/finance/flows", "POST", input),
   payFinanceFlow: (id: string, rate?: number) =>

@@ -50,14 +50,16 @@ export function NewEntityForm({
         <span>Название</span>
         <input name="name" autoFocus />
       </label>
-      <label>
-        <span>
-          {type === "contractor"
-            ? "ИНН — ключ против дублей, можно позже"
-            : "Номер или код (серийник, штрих-код) — можно позже"}
-        </span>
-        <input name="externalRef" inputMode={type === "contractor" ? "numeric" : undefined} />
-      </label>
+      {type !== "own_company" && (
+        <label>
+          <span>
+            {type === "contractor"
+              ? "ИНН — ключ против дублей, можно позже"
+              : "Номер или код (серийник, штрих-код) — можно позже"}
+          </span>
+          <input name="externalRef" inputMode={type === "contractor" ? "numeric" : undefined} />
+        </label>
+      )}
       {type === "product" && (
         <label>
           <span>Цена, сум</span>
@@ -106,6 +108,49 @@ export function NewEntityForm({
           <label>
             <span>Почта</span>
             <input name="email" inputMode="email" />
+          </label>
+        </>
+      )}
+      {type === "own_company" && (
+        <>
+          <p className="hint" style={{ margin: 0 }}>
+            Реквизиты идут в договор (DOCX) как продавец — что заполнишь, то и попадёт в документ.
+          </p>
+          <label>
+            <span>Директор (ФИО подписанта)</span>
+            <input name="director" placeholder="Фамилия И. О." />
+          </label>
+          <label>
+            <span>ИНН</span>
+            <input name="inn" inputMode="numeric" />
+          </label>
+          <label>
+            <span>Юридический адрес</span>
+            <input name="address" placeholder="г. Ташкент, …" />
+          </label>
+          <label>
+            <span>Банк</span>
+            <input name="bank" placeholder="АКБ «…»" />
+          </label>
+          <label>
+            <span>Расчётный счёт</span>
+            <input name="account" inputMode="numeric" />
+          </label>
+          <label>
+            <span>МФО</span>
+            <input name="mfo" inputMode="numeric" />
+          </label>
+          <label>
+            <span>ОКЭД</span>
+            <input name="oked" inputMode="numeric" />
+          </label>
+          <label>
+            <span>Рег. код плательщика НДС</span>
+            <input name="ndsCode" />
+          </label>
+          <label>
+            <span>Телефон</span>
+            <input name="phone" inputMode="tel" placeholder="+998 …" />
           </label>
         </>
       )}

@@ -85,6 +85,28 @@ export class AgentsCoreClient {
     return this.request("/events", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** Единицы техники GLOBERENT — поля для монитора инвариантов конвейера. */
+  globerentUnits(): Promise<
+    { code: string; name: string; status: string; declarationNumber: string | null }[]
+  > {
+    return this.request("/units?domain=globerent");
+  }
+
+  /** Договоры GLOBERENT — статус и оплата для монитора инвариантов. */
+  globerentContracts(): Promise<
+    { id: string; contractNo: string; status: string; totalWithVat: string; paidUzs: number }[]
+  > {
+    return this.request("/contracts?domain=globerent");
+  }
+
+  /** Обновить курсы валют из ЦБ РУз — Core сам ходит в cbu.uz (коннектор). */
+  refreshFx(): Promise<{ updated: string[]; skipped: { currency: string; reason: string }[] }> {
+    return this.request("/finance/fx/refresh", {
+      method: "POST",
+      body: JSON.stringify({ actorRef: "agent:fx-refresh" }),
+    });
+  }
+
   /** Сколько действий (agent.action) агент совершил с момента `since`. */
   async countAgentActions(source: string, since: Date): Promise<number> {
     const qs = new URLSearchParams({ source, type: "agent.action", since: since.toISOString() });

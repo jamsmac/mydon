@@ -7,6 +7,7 @@ import {
   cancelFinanceFlow,
   createFinanceFlow,
   payFinanceFlow,
+  refreshFxRates,
   setFxRate,
 } from "../app/finance/actions";
 
@@ -249,6 +250,20 @@ export function FxForm({ domain }: { domain: string }) {
       </label>
       <button type="submit" className="btn sm" disabled={pending}>
         {pending ? "…" : "Задать курс"}
+      </button>
+      <button
+        type="button"
+        className="btn sm"
+        disabled={pending}
+        onClick={() =>
+          start(async () => {
+            const res = await refreshFxRates(domain);
+            setMsg(res.message ?? (res.ok ? "Курсы обновлены" : "Не получилось"));
+            if (res.ok) router.refresh();
+          })
+        }
+      >
+        {pending ? "…" : "Обновить из ЦБ"}
       </button>
       {msg && <span className="hint">{msg}</span>}
     </form>

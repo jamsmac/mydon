@@ -9,7 +9,7 @@ import {
 } from "@mydon/assistant";
 import { createDocumentBuilder } from "@mydon/documents";
 import { dueLabel, TZ } from "@mydon/shared";
-import { formatBriefing, msUntilBriefing } from "./briefing";
+import { collectGloberentSignals, formatBriefing, msUntilBriefing } from "./briefing";
 import { CoreClient, type PersonRow } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { Notifier } from "./notifier";
@@ -187,13 +187,14 @@ async function main(): Promise<void> {
         try {
           const to = isoDate(new Date());
           const from = isoDate(new Date(Date.now() - 3 * 86_400_000));
-          const [b, approvals, purchase, fillStatus, reconcile, washSchedule] = await Promise.all([
+          const [b, approvals, purchase, fillStatus, reconcile, washSchedule, globerent] = await Promise.all([
             deps.core.briefing(),
             deps.core.pendingApprovals(),
             deps.core.vendingPurchase().catch(() => null),
             deps.core.coffeeFillStatus().catch(() => null),
             deps.core.coffeeReconcileAll(from, to).catch(() => null),
             deps.core.coffeeWashScheduleStatus().catch(() => null),
+            collectGloberentSignals(deps.core),
           ]);
           const coffee =
             fillStatus || reconcile || washSchedule
@@ -208,6 +209,7 @@ async function main(): Promise<void> {
             approvals,
             purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
             coffee,
+            globerent,
           );
           for (const chatId of allowlist) {
             await tg.sendMessage(chatId, text);

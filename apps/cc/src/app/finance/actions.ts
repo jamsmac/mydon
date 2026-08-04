@@ -114,3 +114,21 @@ export async function setFxRate(domain: string, form: FormData): Promise<ActionR
     return { ok: false, message: detailOf(err) };
   }
 }
+
+/**
+ * Подтянуть курсы из ЦБ РУз. Core сам решает, что обновлять: ручной курс
+ * за сегодня главнее, неизменившийся курс не плодит строк истории.
+ */
+export async function refreshFxRates(domain: string): Promise<ActionResult> {
+  try {
+    const r = await core.refreshFxRates();
+    revalidatePath(`/domain/${domain}`);
+    const message =
+      r.updated.length > 0
+        ? `Обновлено из ЦБ: ${r.updated.join(", ")}`
+        : `Новых курсов нет${r.skipped.length > 0 ? ` (${r.skipped.map((s) => `${s.currency} — ${s.reason}`).join("; ")})` : ""}`;
+    return { ok: true, message };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}

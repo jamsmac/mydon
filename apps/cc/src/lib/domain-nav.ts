@@ -96,6 +96,8 @@ export const GLOBERENT_GROUPS: NavGroup[] = [
       // Живая таблица ставок растаможки (tnved_rate + brv_value, перенос PROMACH).
       { label: "Растаможка", type: "customs_rates" },
       { label: "Таможенные посты", type: "customs_post" },
+      // Реквизиты продавца для договорного DOCX и КП (замена SELLER-хардкода донора).
+      { label: "Моя компания", type: "own_company" },
     ],
   },
 ];

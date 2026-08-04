@@ -1,7 +1,7 @@
 import { answer, type ContextSearch, type LlmResolver } from "@mydon/assistant";
 import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
 import { DOMAIN_LABELS } from "@mydon/shared";
-import { approvalKeyboard, formatApproval, formatBriefing } from "./briefing";
+import { approvalKeyboard, collectGloberentSignals, formatApproval, formatBriefing } from "./briefing";
 import type { CoreClient } from "./core-client";
 import {
   formatCashAck,
@@ -214,16 +214,19 @@ export async function handleMessage(
   try {
     switch (intent.kind) {
       case "briefing": {
-        const [b, approvals, purchase] = await Promise.all([
+        const [b, approvals, purchase, globerent] = await Promise.all([
           deps.core.briefing(),
           deps.core.pendingApprovals(),
           deps.core.vendingPurchase().catch(() => null),
+          collectGloberentSignals(deps.core),
         ]);
         return {
           text: formatBriefing(
             b,
             approvals,
             purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
+            undefined,
+            globerent,
           ),
         };
       }
