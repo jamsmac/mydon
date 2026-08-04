@@ -225,7 +225,7 @@
       }
     },
     {
-      "ref": "СФ 2024-129",
+      "ref": "СФ 2024-129 (Didox)",
       "name": "СФ №129 от 2024-09-13 — \"MERLION TRADE INC\" XK",
       "attrs": {
         "номер": "129",
@@ -289,7 +289,7 @@
       }
     },
     {
-      "ref": "СФ 2026-80",
+      "ref": "СФ 2026-80 (Didox)",
       "name": "СФ №80 от 2026-05-25 — \"XALQ RETAIL\" MCHJ XK",
       "attrs": {
         "номер": "80",
@@ -532,7 +532,7 @@
       "category": "service",
       "date": "2024-09-13",
       "purpose": "СФ №129 — \"MERLION TRADE INC\" XK",
-      "docNo": "СФ 2024-129",
+      "docNo": "СФ 2024-129 (Didox)",
       "method": "bank",
       "isOfficial": true,
       "counterpartyInn": "305379078",
@@ -580,7 +580,7 @@
       "category": "sale",
       "date": "2026-05-25",
       "purpose": "СФ №80 — \"XALQ RETAIL\" MCHJ XK",
-      "docNo": "СФ 2026-80",
+      "docNo": "СФ 2026-80 (Didox)",
       "method": "bank",
       "isOfficial": true,
       "counterpartyInn": "306955509",
@@ -2317,7 +2317,7 @@
         }
       ],
       "invoicedTotal": 2268000.0,
-      "flowDocNos": ["СФ 2024-129", "СФ 2024-130"]
+      "flowDocNos": ["СФ 2024-129 (Didox)", "СФ 2024-130"]
     },
     {
       "contractNo": "PGF-11/0824",
@@ -4907,7 +4907,7 @@
         }
       ],
       "invoicedTotal": 8232000.0,
-      "flowDocNos": ["СФ 2026-80"]
+      "flowDocNos": ["СФ 2026-80 (Didox)"]
     },
     {
       "contractNo": "PGF-24/1225",
