@@ -60,6 +60,7 @@ export class RegistryService {
   async obligations(domain: Domain): Promise<ObligationsSummary> {
     const id = await this.orgId(domain);
 
+    // Отменённые записи (ввод финконтура) — не обязательства: в своды не входят.
     const totals = await this.db
       .select({
         direction: moneyFlow.direction,
@@ -69,12 +70,13 @@ export class RegistryService {
         amount: sql<string>`coalesce(sum(${moneyFlow.amount}), 0)::text`,
       })
       .from(moneyFlow)
-      .where(eq(moneyFlow.orgId, id))
+      .where(and(eq(moneyFlow.orgId, id), ne(moneyFlow.status, "cancelled")))
       .groupBy(moneyFlow.direction, moneyFlow.status, moneyFlow.currency);
 
     const overdueWhere = and(
       eq(moneyFlow.orgId, id),
       ne(moneyFlow.status, "actual"),
+      ne(moneyFlow.status, "cancelled"),
       lt(moneyFlow.date, new Date()),
     );
 
@@ -132,7 +134,13 @@ export class RegistryService {
     const [overdueMoney] = await this.db
       .select({ n: count() })
       .from(moneyFlow)
-      .where(and(ne(moneyFlow.status, "actual"), lt(moneyFlow.date, now)));
+      .where(
+        and(
+          ne(moneyFlow.status, "actual"),
+          ne(moneyFlow.status, "cancelled"),
+          lt(moneyFlow.date, now),
+        ),
+      );
 
     const [idleMachines] = await this.db
       .select({ n: count() })

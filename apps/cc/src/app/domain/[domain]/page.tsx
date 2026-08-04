@@ -4,10 +4,19 @@ import { DOMAINS, DOMAIN_LABELS, dueLabel, type Domain } from "@mydon/shared";
 import {
   core,
   CoreUnavailable,
+  type BrvValue,
   type Entity,
+  type FinanceCounterparty,
+  type FinanceFlow,
+  type FinanceSummary,
+  type GrContract,
+  type GrImport,
+  type GrPreorder,
+  type GrUnit,
   type Obligations,
   type Person,
   type Task,
+  type TnvedRate,
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { groupsFor } from "../../../lib/domain-nav";
@@ -24,6 +33,21 @@ import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingPanel } from "../../../components/vending-panel";
 import { CoffeePanel } from "../../../components/coffee-panel";
+import {
+  ContractorsBook,
+  ContractsBook,
+  EquipmentBook,
+  InvoicesBook,
+} from "../../../components/globerent-books";
+import { FinancePanel } from "../../../components/finance-panel";
+import { CustomsRatesPanel } from "../../../components/customs-rates";
+import { NewContractForm } from "../../../components/contract-forms";
+import { CalcPanel } from "../../../components/calc-panel";
+import { UnitsPanel } from "../../../components/units-panel";
+import { ImportsPanel } from "../../../components/imports-panel";
+import { PreordersSection } from "../../../components/preorders-section";
+import { fmtDay } from "../../../lib/globerent";
+import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
 import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
 
@@ -189,8 +213,46 @@ export default async function DomainPage({
     return acc;
   }, {});
 
-  const owedToUs = obligations.totals.filter((t) => t.direction === "in");
-  const owedByUs = obligations.totals.filter((t) => t.direction === "out");
+  // GLOBERENT: раскладка договоров по срокам — тот же 14-дневный горизонт и то же
+  // строковое сравнение дат, что в брифинге Core, чтобы панель и бот сходились в цифре.
+  const todayKey = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+  let grContracts: ContractStats | null = null;
+  if (domain === "globerent") {
+    const horizonDate = new Date();
+    horizonDate.setDate(horizonDate.getDate() + 14);
+    grContracts = contractStats(
+      entities.filter((e) => e.type === "contract"),
+      todayKey,
+      horizonDate.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" }),
+    );
+  }
+
+  // Финансовый контур GLOBERENT (перенос PROMACH): свод нужен вкладке «Финансы»
+  // целиком, а дашборду — сигналом (к сроку ≤ 7 дней, просрочка, термометр).
+  // Провал запроса не роняет страницу: секция честно скажет, что данных нет.
+  const isFinanceTab = activeGroup === "finance";
+  let finSummary: FinanceSummary | null = null;
+  let finFlows: FinanceFlow[] = [];
+  let finCounterparties: FinanceCounterparty[] = [];
+  let finUnits: { id: string; label: string }[] = [];
+  if (domain === "globerent" && (isFinanceTab || isOverview)) {
+    finSummary = await core.financeSummary(domain).catch(() => null);
+    if (isFinanceTab) {
+      let unitRows: GrUnit[] = [];
+      [finFlows, finCounterparties, unitRows] = await Promise.all([
+        core.financeFlows(domain, { limit: "100" }).catch(() => [] as FinanceFlow[]),
+        core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+        core.units(domain).catch(() => [] as GrUnit[]),
+      ]);
+      finUnits = unitRows.map((u) => ({ id: u.id, label: `${u.code} · ${u.name}` }));
+    }
+  }
+
+  // «Должны» — только открытые обязательства: оплаченное (actual) и отменённое
+  // долгом не является (ловилось при переносе финконтура PROMACH).
+  const isOpenObligation = (t: { status: string }) => t.status !== "actual" && t.status !== "cancelled";
+  const owedToUs = obligations.totals.filter((t) => t.direction === "in" && isOpenObligation(t));
+  const owedByUs = obligations.totals.filter((t) => t.direction === "out" && isOpenObligation(t));
 
   const href = (t: string) => `/domain/${domain}?tab=${encodeURIComponent(t)}`;
 
@@ -201,6 +263,15 @@ export default async function DomainPage({
     // («Система»), теперь вкладки этого же рабочего места: один адрес
     // направления, а не разрозненные экраны.
     ...(domain === "vendhub" ? [{ key: "vending", label: "Автоматы" }, { key: "coffee", label: "Кофе-бункеры" }] : []),
+    // Живые контуры GLOBERENT (перенос PROMACH): склад, импорт, финансы, калькулятор.
+    ...(domain === "globerent"
+      ? [
+          { key: "units", label: "Склад" },
+          { key: "imports", label: "Импорт" },
+          { key: "finance", label: "Финансы" },
+          { key: "calc", label: "Калькулятор" },
+        ]
+      : []),
     ...groups.map((g) => ({ key: g.key, label: g.label })),
     // Инкассация — ежедневная операция, ей место в верхнем ряду (слово владельца).
     ...(domain === "vendhub"
@@ -224,6 +295,62 @@ export default async function DomainPage({
     group?.leaves[0];
   const leafItems =
     group && leaf?.type ? entities.filter((e) => e.type === leaf.type).sort((a, b) => a.name.localeCompare(b.name, "ru")) : [];
+
+  // Справочник растаможки (ставки ТН ВЭД + БРВ) — живые таблицы Core, не реестр.
+  let tnved: TnvedRate[] = [];
+  let brv: BrvValue[] = [];
+  if (group && leaf?.type === "customs_rates") {
+    [tnved, brv] = await Promise.all([
+      core.tnvedRates().catch(() => [] as TnvedRate[]),
+      core.brvValues().catch(() => [] as BrvValue[]),
+    ]);
+  }
+
+  // Живые UZS-договоры (перенос PROMACH) — поверх собранных карточек реестра.
+  let liveContracts: GrContract[] = [];
+  let contractClients: FinanceCounterparty[] = [];
+  if (domain === "globerent" && group && leaf?.type === "contract") {
+    [liveContracts, contractClients] = await Promise.all([
+      core.contracts(domain).catch(() => [] as GrContract[]),
+      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+    ]);
+  }
+
+  // Калькулятор цены: ставки, БРВ и курс — входы движка (сам расчёт в браузере).
+  let calcRates: TnvedRate[] = [];
+  let calcBrv: BrvValue[] = [];
+  let calcFx: Awaited<ReturnType<typeof core.fxRates>> = [];
+  if (domain === "globerent" && activeGroup === "calc") {
+    [calcRates, calcBrv, calcFx] = await Promise.all([
+      core.tnvedRates().catch(() => [] as TnvedRate[]),
+      core.brvValues().catch(() => [] as BrvValue[]),
+      core.fxRates().catch(() => []),
+    ]);
+  }
+
+  // Склад техники: конвейер единиц (перенос warehouse_vehicles PROMACH).
+  let units: GrUnit[] = [];
+  let unitsSummary: { key: string; label: string; n: number }[] = [];
+  let unitClients: FinanceCounterparty[] = [];
+  if (domain === "globerent" && activeGroup === "units") {
+    [units, unitsSummary, unitClients] = await Promise.all([
+      core.units(domain).catch(() => [] as GrUnit[]),
+      core.unitsSummary(domain).catch(() => []),
+      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+    ]);
+  }
+
+  // Импортные контракты и предзаказы (перенос PROMACH).
+  let importsList: GrImport[] = [];
+  let importSuppliers: FinanceCounterparty[] = [];
+  let preorders: GrPreorder[] = [];
+  if (domain === "globerent" && activeGroup === "imports") {
+    [importsList, importSuppliers, preorders] = await Promise.all([
+      core.imports(domain).catch(() => [] as GrImport[]),
+      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+      core.preorders(domain).catch(() => [] as GrPreorder[]),
+    ]);
+  }
 
   // Хлебные крошки и чип маршрута (расположение из обложки): где я и как это
   // адресуется. Счётчик из подписи вкладки для крошки убираем — «Задачи 6» → «Задачи».
@@ -275,7 +402,7 @@ export default async function DomainPage({
         <div className="subtabs">
           {group.leaves.map((l) => {
             // Инкассация живёт своей таблицей, а не реестром — не затемняем.
-            const LIVE = ["sources", "collection", "sale", "purchase", "machine_stock", "consumption"];
+            const LIVE = ["sources", "collection", "sale", "purchase", "machine_stock", "consumption", "customs_rates"];
             const n = l.type && LIVE.includes(l.type) ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
             const isActive = leaf === l;
             return (
@@ -296,6 +423,24 @@ export default async function DomainPage({
       {/* ── Живые операционные вкладки VendHub ── */}
       {activeGroup === "vending" && <VendingPanel machines={machines} />}
       {activeGroup === "coffee" && <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />}
+
+      {/* ── Финансы GLOBERENT: агинг, к сроку, термометр, кэш-флоу, ввод ── */}
+      {isFinanceTab &&
+        (finSummary !== null ? (
+          <FinancePanel
+            domain={domain}
+            summary={finSummary}
+            flows={finFlows}
+            counterparties={finCounterparties}
+            units={finUnits}
+          />
+        ) : (
+          <div className="empty">
+            <b>Финансовый свод недоступен</b>
+            Core не ответил на запрос финансов. Обнови страницу; если повторяется —
+            проверь, что Core обновлён до версии с финансовым контуром.
+          </div>
+        ))}
 
       {/* ── Дашборд ── */}
       {activeGroup === "overview" && (
@@ -329,6 +474,130 @@ export default async function DomainPage({
               </div>
             </Link>
           </div>
+
+          {/* ── Контур GLOBERENT: договоры и парк — тревога №1 владельца это сроки ── */}
+          {grContracts !== null && entities.length > 0 && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Договоры и парк</h3>
+                {grContracts.dueSoon.length > 0 && (
+                  <span className="chip h">на исходе · {grContracts.dueSoon.length}</span>
+                )}
+              </div>
+              <div className="wgrid">
+                <Link
+                  href={href("docs:contract")}
+                  className={`wt ${grContracts.dueSoon.length > 0 ? "" : "off"}`}
+                >
+                  <div className="wl">Истекают ≤ 14 дней</div>
+                  <div className="wv">{grContracts.dueSoon.length}</div>
+                  <div className="wf">
+                    {grContracts.dueSoon.length > 0 ? "успей продлить" : "спокойно"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("docs:contract")} className="wt">
+                  <div className="wl">Действующие договоры</div>
+                  <div className="wv">{grContracts.active}</div>
+                  <div className="wf">
+                    {grContracts.noDate + grContracts.expired > 0
+                      ? `без даты ${grContracts.noDate} · истекло ${grContracts.expired}`
+                      : "все со сроком"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("catalog:contractor")} className="wt">
+                  <div className="wl">Контрагенты</div>
+                  <div className="wv">{byType["contractor"] ?? 0}</div>
+                  <div className="wf">ключ сведения — ИНН<span className="go">→</span></div>
+                </Link>
+                <Link href={href("catalog:equipment")} className="wt">
+                  <div className="wl">Техника HELI</div>
+                  <div className="wv">{byType["equipment"] ?? 0}</div>
+                  <div className="wf">единиц в каталоге<span className="go">→</span></div>
+                </Link>
+              </div>
+              {grContracts.dueSoon.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  {grContracts.dueSoon.slice(0, 8).map((e) => {
+                    const { text, hot } = endLabel(contractEnd(e), todayKey);
+                    return (
+                      <Link href={`/card/${e.id}`} className="trow hot" key={e.id}>
+                        <div className="tb">
+                          <div className="tt">{e.name}</div>
+                        </div>
+                        <span className={`due ${hot ? "hot" : ""}`}>{text}</span>
+                      </Link>
+                    );
+                  })}
+                  {grContracts.dueSoon.length > 8 && (
+                    <Link href={href("docs:contract")} className="navlink" style={{ justifyContent: "center" }}>
+                      Все на исходе — {grContracts.dueSoon.length}
+                    </Link>
+                  )}
+                </div>
+              )}
+              {grContracts.badDate > 0 && (
+                <div className="warn" style={{ marginTop: 10 }}>
+                  <b>Договоры с непонятной датой: {grContracts.badDate}</b>
+                  Срок окончания не разобрать — в «на исходе» они не попали. Открой карточку
+                  и поправь дату, иначе срок пройдёт незамеченным.
+                </div>
+              )}
+              <div style={{ marginTop: 12 }}>
+                <QuickActions
+                  domain={domain}
+                  actions={["Продлить договор", "Выставить счёт", "Напомнить об оплате"]}
+                  defaultOwnerRef={defaultOwner?.id ?? null}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* ── Контур GLOBERENT: деньги — сигнал с вкладки «Финансы» ── */}
+          {domain === "globerent" && finSummary !== null && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Деньги</h3>
+                {finSummary.concentration.alarm && finSummary.concentration.topShare !== null && (
+                  <span className="chip h">
+                    концентрация · {Math.round(finSummary.concentration.topShare * 100)}%
+                  </span>
+                )}
+              </div>
+              <div className="wgrid">
+                <Link
+                  href={href("finance")}
+                  className={`wt ${finSummary.dueSoonIn.length > 0 ? "" : "off"}`}
+                >
+                  <div className="wl">К сроку ≤ 7 дней · нам</div>
+                  <div className="wv">{finSummary.dueSoonIn.length}</div>
+                  <div className="wf">
+                    {finSummary.dueSoonIn.length > 0 ? "напомни клиентам" : "неделя спокойна"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link
+                  href={href("finance")}
+                  className={`wt ${finSummary.dueSoonOut.length > 0 ? "" : "off"}`}
+                >
+                  <div className="wl">К сроку ≤ 7 дней · мы</div>
+                  <div className="wv">{finSummary.dueSoonOut.length}</div>
+                  <div className="wf">свои платежи<span className="go">→</span></div>
+                </Link>
+                <Link href={href("finance")} className="wt">
+                  <div className="wl">Открытая дебиторка</div>
+                  <div className="wv">{finSummary.receivables.total.count}</div>
+                  <div className="wf">
+                    {finSummary.receivables.total.uzs > 0
+                      ? `≈ ${Math.round(finSummary.receivables.total.uzs).toLocaleString("ru-RU")} сум`
+                      : "записей со суммой нет"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+              </div>
+            </div>
+          )}
 
           {domain === "vendhub" && supplySummary && supplySummary.emptyPositions > 0 && (
             <div className="notice" style={{ marginTop: 16 }}>
@@ -617,8 +886,137 @@ export default async function DomainPage({
         </>
       )}
 
+      {/* ── Склад техники: конвейер 17 статусов (перенос PROMACH) ── */}
+      {domain === "globerent" && activeGroup === "units" && (
+        <UnitsPanel units={units} summary={unitsSummary} clients={unitClients} />
+      )}
+
+      {/* ── Импортные контракты: завод → таможня → склад (перенос PROMACH) ── */}
+      {domain === "globerent" && activeGroup === "imports" && (
+        <>
+          <PreordersSection preorders={preorders} clients={importSuppliers} />
+          <ImportsPanel imports={importsList} suppliers={importSuppliers} />
+        </>
+      )}
+
+      {/* ── Калькулятор цены HELI: движок PROMACH, расчёт в браузере ── */}
+      {domain === "globerent" && activeGroup === "calc" && (
+        <CalcPanel rates={calcRates} brv={calcBrv} fx={calcFx} />
+      )}
+
+      {/* ── Справочник растаможки: живые ставки ТН ВЭД + БРВ (перенос PROMACH) ── */}
+      {group && leaf?.type === "customs_rates" && (
+        <CustomsRatesPanel domain={domain} rates={tnved} brv={brv} />
+      )}
+
+      {/* ── Модели каталога: колонки техники подходят и моделям ── */}
+      {group && leaf?.type === "equipment_model" && (
+        <>
+          {leafItems.length > 0 ? (
+            <EquipmentBook items={leafItems} />
+          ) : (
+            <div className="empty">
+              <b>Моделей пока нет</b>
+              Заведи модели HELI (CPD30, CPCD50…) — на них ссылаются техника, КП и расчёты.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="equipment_model" label={typeOne("equipment_model")} />
+        </>
+      )}
+
+      {/* ── GLOBERENT и личный контур: документы и каталог со своими колонками ── */}
+      {group && leaf?.type === "contract" && (
+        <>
+          {/* Живой контур продаж GLOBERENT: договор → график → оплата → акты. */}
+          {domain === "globerent" && (
+            <div className="sect" style={{ marginTop: 0 }}>
+              <div className="sect-h">
+                <h3 className="h2">Договоры купли-продажи</h3>
+                {liveContracts.length > 0 && <span className="chip">{liveContracts.length}</span>}
+              </div>
+              {liveContracts.map((c) => {
+                const total = Number(c.totalWithVat);
+                const paidPct = total > 0 ? Math.min(100, Math.round((c.paidUzs / total) * 100)) : 0;
+                const hot = c.status === "active" && paidPct < 100;
+                return (
+                  <Link href={`/contracts/${c.id}`} className={`trow ${hot ? "hot" : ""}`} key={c.id}>
+                    <div className="tb">
+                      <div className="tt">№ {c.contractNo}/ОП · {c.clientName ?? (c.buyer["name"] ?? "покупатель не указан")}</div>
+                      <div className="tm">
+                        {new Intl.NumberFormat("ru-RU").format(total)} сум ·{" "}
+                        {c.status === "cancelled" ? "отменён" : c.status === "closed" ? "закрыт" : `оплачено ${paidPct}%`}
+                        {c.actsCount > 0 ? ` · актов ${c.actsCount}` : ""}
+                      </div>
+                    </div>
+                    <span className={`due ${hot ? "hot" : ""}`}>{fmtDay(c.contractDate)}</span>
+                  </Link>
+                );
+              })}
+              <div style={{ marginTop: 10 }}>
+                <NewContractForm clients={contractClients} />
+              </div>
+            </div>
+          )}
+          {leafItems.length > 0 && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Собранные карточки договоров</h3>
+                <span className="chip">{leafItems.length}</span>
+              </div>
+              <ContractsBook items={leafItems} today={todayKey} />
+            </div>
+          )}
+          {domain !== "globerent" && leafItems.length === 0 && (
+            <div className="empty">
+              <b>Договоров пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="contract" label={typeOne("contract")} />
+        </>
+      )}
+      {group && leaf?.type === "invoice" && (
+        <>
+          {leafItems.length > 0 ? (
+            <InvoicesBook items={leafItems} />
+          ) : (
+            <div className="empty">
+              <b>Счетов пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="invoice" label={typeOne("invoice")} />
+        </>
+      )}
+      {group && leaf?.type === "contractor" && (
+        <>
+          {leafItems.length > 0 ? (
+            <ContractorsBook items={leafItems} />
+          ) : (
+            <div className="empty">
+              <b>Контрагентов пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="contractor" label={typeOne("contractor")} />
+        </>
+      )}
+      {group && leaf?.type === "equipment" && (
+        <>
+          {leafItems.length > 0 ? (
+            <EquipmentBook items={leafItems} />
+          ) : (
+            <div className="empty">
+              <b>Техники пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="equipment" label={typeOne("equipment")} />
+        </>
+      )}
+
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock"].includes(leaf.type) && (
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates"].includes(leaf.type) && (
         <>
           {leafItems.length > 0 ? (
             <>

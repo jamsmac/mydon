@@ -86,7 +86,14 @@ export const entity = pgTable(
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("entity_org_type_idx").on(t.orgId, t.type)],
+  (t) => [
+    index("entity_org_type_idx").on(t.orgId, t.type),
+    // ИНН контрагента уникален (перенос правила PROMACH uq_clients_inn):
+    // пустой ИНН не конфликтует — физлица и незаполненные карточки допустимы.
+    uniqueIndex("ux_entity_contractor_inn")
+      .on(t.type, t.externalRef)
+      .where(sql`type = 'contractor' and external_ref is not null and external_ref <> ''`),
+  ],
 );
 
 /**
@@ -647,6 +654,38 @@ export const moneyFlow = pgTable(
     collectionId: uuid("collection_id").references(() => collection.id),
     date: timestamp("date", { withTimezone: true }).notNull(),
     status: text("status").default("actual").notNull(), // planned | actual | overdue
+    // ── Модель платежа — перенос из PROMACH (warehouse_payments + финзаписи
+    // контракта). Донор: ~/Developer/promach; поля выбраны по анализу
+    // «PROMACH_анализ_и_интеграция_globerent_finans.md», Часть B, шаг 1. ──
+    /** Категория: supplier | logistics | customs | certification | sale | service | tax | other. */
+    category: text("category"),
+    /** Способ оплаты: bank | cash. Критично для разделения бухгалтерий (PROMACH). */
+    method: text("method"),
+    /** Официальная операция (банк, в бухгалтерии) или внутренний учёт (нал). */
+    isOfficial: boolean("is_official").default(true).notNull(),
+    /**
+     * Курс к суму НА ДАТУ ОПЕРАЦИИ (PROMACH, миграция 083): исторические суммы
+     * не «плавают» при смене курса. null — запись уже в сумах.
+     */
+    rate: numeric("rate", { precision: 18, scale: 4 }),
+    /** Эквивалент в сумах по rate. null — запись уже в сумах. */
+    amountUzs: numeric("amount_uzs", { precision: 18, scale: 2 }),
+    /** Контрагент из реестра (карточка contractor). */
+    counterpartyId: uuid("counterparty_id").references(() => entity.id),
+    /** Имя контрагента словами — когда карточки в реестре ещё нет. */
+    counterparty: text("counterparty"),
+    /** Номер документа: счёт, платёжка, инвойс. */
+    docNo: text("doc_no"),
+    /** Срок оплаты (для planned) — по нему считается агинг и «к сроку ≤ 7 дней». */
+    dueDate: date("due_date"),
+    /** Когда фактически оплачено. null у планов. */
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    /** Основание платежа: UZS-договор. Оплаченность договора считается по этой связке. */
+    contractId: uuid("contract_id").references(() => grContract.id),
+    /** Основание платежа: импортный контракт (оплаты заводу по графику). */
+    importContractId: uuid("import_contract_id").references(() => grImportContract.id),
+    /** Привязка к единице техники: из этих записей считается её себестоимость. */
+    unitId: uuid("unit_id").references(() => globerentUnit.id),
     createdAt: createdAt(),
   },
   (t) => [
@@ -657,7 +696,322 @@ export const moneyFlow = pgTable(
       .on(t.source, t.extId)
       .where(sql`${t.extId} is not null`),
     index("money_flow_collection_idx").on(t.collectionId),
+    // Агинг и «к сроку»: выборка открытых обязательств по сроку.
+    index("money_flow_due_idx").on(t.domain, t.status, t.dueDate),
+    index("money_flow_counterparty_idx").on(t.counterpartyId),
+    index("money_flow_contract_idx").on(t.contractId),
+    index("money_flow_unit_idx").on(t.unitId),
   ],
+);
+
+// ── contract: UZS-договор купли-продажи (GLOBERENT, перенос contracts PROMACH) ──
+// Операционная сущность с потоком записей (платежи → money_flow, акты, статусы),
+// поэтому отдельная таблица, а не EAV-карточка (SPEC_UZS_CONTRACTS §9.1).
+// Реквизиты покупателя — snapshot на момент подписания: за справочником не «плывут».
+export const grContract = pgTable(
+  "contract",
+  {
+    id: id(),
+    orgId: uuid("org_id").references(() => org.id),
+    domain: domainEnum("domain").default("globerent").notNull(),
+    /** Номер без суффикса «/ОП» — суффикс существует только в рендере документа. */
+    contractNo: text("contract_no").notNull(),
+    contractDate: date("contract_date").notNull(),
+    /** Покупатель — карточка реестра (contractor). nullable как у донора. */
+    clientId: uuid("client_id").references(() => entity.id),
+    /** Snapshot реквизитов покупателя: name, director, inn, address, account, bank, mfo, oked, nds, phone. */
+    buyer: jsonb("buyer").default({}).notNull(),
+    /** Продавец — наша карточка own_company (замена SELLER-хардкода донора). */
+    sellerCompanyId: uuid("seller_company_id").references(() => entity.id),
+    totalWithVat: numeric("total_with_vat", { precision: 18, scale: 2 }).notNull(),
+    totalVat: numeric("total_vat", { precision: 18, scale: 2 }).notNull(),
+    /** 100 | partial | install | post. */
+    payType: text("pay_type"),
+    warranty: text("warranty"),
+    deliveryDays: integer("delivery_days"),
+    /** Позиции: [{equipmentId: uuid|null, name, unit, qty, price}] — структурные, без парсинга строк. */
+    items: jsonb("items").default([]).notNull(),
+    /**
+     * Параметры документа (payDays, prepayPct, installMonths, installInterest,
+     * installFirstDate, partialTranches, penaSeller/Buyer/Max, copies, warrantyMode):
+     * у донора жили только в state формы — документ был невоспроизводим.
+     */
+    docParams: jsonb("doc_params").default({}).notNull(),
+    status: text("status").default("active").notNull(), // active | closed | cancelled
+    /** Агент-посредник (contractor c ролью agent). Snapshot комиссии — на договоре. */
+    agentId: uuid("agent_id").references(() => entity.id),
+    agentCommissionAmount: numeric("agent_commission_amount", { precision: 18, scale: 2 }),
+    agentCommissionCurrency: text("agent_commission_currency"),
+    createdFrom: text("created_from"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("ux_contract_org_no").on(t.orgId, t.contractNo),
+    index("contract_org_date_idx").on(t.orgId, t.contractDate),
+    index("contract_status_idx").on(t.status),
+    index("contract_client_idx").on(t.clientId),
+  ],
+);
+
+// ── contract_act: акт приёма-передачи по договору (партиями, 1 договор → N актов) ──
+export const contractAct = pgTable(
+  "contract_act",
+  {
+    id: id(),
+    /** НЕ cascade: акты не исчезают вместе с договором (у донора исчезали). */
+    contractId: uuid("contract_id")
+      .references(() => grContract.id)
+      .notNull(),
+    actNo: text("act_no").notNull(),
+    actDate: date("act_date").notNull(),
+    /** Какие позиции сданы: [{equipmentId: uuid|null, name}] — замена vehicle_ids INTEGER[] без FK. */
+    itemRefs: jsonb("item_refs").default([]).notNull(),
+    signedBySeller: text("signed_by_seller"),
+    signedByBuyer: text("signed_by_buyer"),
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("contract_act_contract_idx").on(t.contractId)],
+);
+
+// ── gr_import_contract: импортный контракт с заводом (перенос import_contracts PROMACH) ──
+// Контур односторонний: портала поставщика нет, менеджер отмечает за завод
+// (решение сверки переноса — HELI в систему не логинится). Материализация
+// спецификации создаёт единицы globerent_unit; lifecycle — монотонный синк.
+export const grImportContract = pgTable(
+  "gr_import_contract",
+  {
+    id: id(),
+    orgId: uuid("org_id").references(() => org.id),
+    domain: domainEnum("domain").default("globerent").notNull(),
+    contractNo: text("contract_no").notNull(),
+    contractDate: date("contract_date").notNull(),
+    /** Завод-поставщик — карточка contractor с ролью supplier. */
+    supplierId: uuid("supplier_id").references(() => entity.id),
+    currency: text("currency").default("USD").notNull(),
+    totalAmount: numeric("total_amount", { precision: 18, scale: 2 }).notNull(),
+    /** Позиции: [{modelId: uuid|null, name, qty, price}] в валюте контракта. */
+    items: jsonb("items").default([]).notNull(),
+    /** for_stock | under_client | for_sum_contract (требует saleContractId). */
+    purpose: text("purpose").default("for_stock").notNull(),
+    /** UZS-договор продажи, под который везём (purpose=for_sum_contract). */
+    saleContractId: uuid("sale_contract_id").references(() => grContract.id),
+    /** Договорной статус (односторонний): draft | in_progress | completed | cancelled. */
+    status: text("status").default("draft").notNull(),
+    /** Физический lifecycle (draft…closed) — монотонный синк от единиц. */
+    lifecycleStatus: text("lifecycle_status").default("draft").notNull(),
+    // График оплат заводу (миграция 064 донора): предоплата + баланс.
+    prepaymentAmount: numeric("prepayment_amount", { precision: 18, scale: 2 }),
+    prepaymentDueDate: date("prepayment_due_date"),
+    prepaymentPaidAt: timestamp("prepayment_paid_at", { withTimezone: true }),
+    balanceAmount: numeric("balance_amount", { precision: 18, scale: 2 }),
+    balanceDueDate: date("balance_due_date"),
+    balancePaidAt: timestamp("balance_paid_at", { withTimezone: true }),
+    notes: text("notes"),
+    createdFrom: text("created_from"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // Уникальность номера в паре с поставщиком — правило донора.
+    uniqueIndex("ux_import_contract_supplier_no").on(t.supplierId, t.contractNo),
+    index("gr_import_contract_org_idx").on(t.orgId, t.contractDate),
+    index("gr_import_contract_lifecycle_idx").on(t.lifecycleStatus),
+  ],
+);
+
+// ── globerent_unit: единица техники (перенос warehouse_vehicles PROMACH) ──
+// Операционный конвейер: 17 статусов от заявки до передачи клиенту,
+// fromStatuses-переходы — в shared/globerent/unit-status (единый словарь).
+// История статусов — audit_log + event (решение сверки: без отдельной таблицы).
+export const globerentUnit = pgTable(
+  "globerent_unit",
+  {
+    id: id(),
+    orgId: uuid("org_id").references(() => org.id),
+    domain: domainEnum("domain").default("globerent").notNull(),
+    /** Складской номер: WH-0001. Генерируется сервисом в транзакции. */
+    code: text("code").notNull(),
+    /** Модель каталога (entity equipment_model). */
+    modelId: uuid("model_id").references(() => entity.id),
+    /** Название единицы словами (модель + год) — живёт и без карточки каталога. */
+    name: text("name").notNull(),
+    year: integer("year"),
+    /** VIN появляется при привязке инвойса; до того NULL. */
+    vin: text("vin"),
+    status: text("status").default("NEW_REQUEST").notNull(),
+    /** Стадия продажи — надстройка; NULL = продажа не начата. */
+    salesStage: text("sales_stage"),
+    lostReason: text("lost_reason"),
+    salesPrice: numeric("sales_price", { precision: 18, scale: 2 }),
+    /** Покупатель (contractor) и договор — связи по FK, не по имени. */
+    clientId: uuid("client_id").references(() => entity.id),
+    contractId: uuid("contract_id").references(() => grContract.id),
+    /** Импортный контракт, из которого единица материализована. */
+    importContractId: uuid("import_contract_id").references(() => grImportContract.id),
+    /** Дата прихода на склад. */
+    arrivalDate: date("arrival_date"),
+    /** Таможенное оформление: тип/номер/дата последней ГТД. */
+    declarationType: text("declaration_type"),
+    declarationNumber: text("declaration_number"),
+    declarationDate: date("declaration_date"),
+    transportCompany: text("transport_company"),
+    notes: text("notes"),
+    createdFrom: text("created_from"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("ux_globerent_unit_code").on(t.orgId, t.code),
+    index("globerent_unit_status_idx").on(t.orgId, t.status),
+    index("globerent_unit_contract_idx").on(t.contractId),
+    // VIN уникален среди заполненных: одна физическая машина — одна карточка.
+    uniqueIndex("ux_globerent_unit_vin")
+      .on(t.vin)
+      .where(sql`vin is not null and vin <> ''`),
+  ],
+);
+
+// ── gr_preorder: предзаказ техники (перенос pre_orders PROMACH, 8 статусов) ──
+export const grPreorder = pgTable(
+  "gr_preorder",
+  {
+    id: id(),
+    orgId: uuid("org_id").references(() => org.id),
+    domain: domainEnum("domain").default("globerent").notNull(),
+    /** Номер PO-#### — генерируется сервисом в транзакции. */
+    code: text("code").notNull(),
+    /** Модель каталога (entity equipment_model). */
+    modelId: uuid("model_id").references(() => entity.id),
+    name: text("name").notNull(),
+    qty: integer("qty").default(1).notNull(),
+    /** Клиент, под которого везём (пусто — на склад). */
+    clientId: uuid("client_id").references(() => entity.id),
+    supplierId: uuid("supplier_id").references(() => entity.id),
+    /** Ссылка на контракт завода — ОБЯЗАТЕЛЬНА при переходе в ordered (правило донора). */
+    contractRef: text("contract_ref"),
+    factoryPriceUsd: numeric("factory_price_usd", { precision: 18, scale: 2 }),
+    promisedDeliveryDate: date("promised_delivery_date"),
+    status: text("status").default("draft").notNull(),
+    /** Причина отмены — обязательна (правило донора). */
+    cancelledReason: text("cancelled_reason"),
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("ux_gr_preorder_code").on(t.orgId, t.code),
+    index("gr_preorder_status_idx").on(t.orgId, t.status),
+  ],
+);
+
+// ── unit_reserve: резерв единицы под клиента (максимум один активный) ──
+export const unitReserve = pgTable(
+  "unit_reserve",
+  {
+    id: id(),
+    unitId: uuid("unit_id")
+      .references(() => globerentUnit.id)
+      .notNull(),
+    clientId: uuid("client_id").references(() => entity.id),
+    /** До какой даты держим. Просрочка снимается expire-проходом при чтении. */
+    endDate: date("end_date").notNull(),
+    status: text("status").default("active").notNull(), // active | cancelled | expired
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("unit_reserve_unit_idx").on(t.unitId),
+    // Один активный резерв на единицу — правило донора, закреплённое индексом.
+    uniqueIndex("ux_unit_reserve_active")
+      .on(t.unitId)
+      .where(sql`status = 'active'`),
+  ],
+);
+
+// ── tnved_rate: ставки ТН ВЭД для расчёта растаможки (GLOBERENT, донор PROMACH) ──
+// Отдельная таблица, не реестр: ставки — числовая основа калькулятора, им нужны
+// NUMERIC-типизация и JOIN; EAV-attrs это ломает (решение сверки переноса).
+// Ставки в долях: 0.05 = 5%. valid_from — историчность, которой у донора не было.
+export const tnvedRate = pgTable(
+  "tnved_rate",
+  {
+    id: id(),
+    /** Код ТН ВЭД: 8429519900. Не уникален — разные товары под одним кодом. */
+    code: text("code").notNull(),
+    nameRu: text("name_ru").notNull(),
+    /** autotransport | spec_tech — у HELI почти всё spec_tech. */
+    vehicleCategory: text("vehicle_category").default("spec_tech").notNull(),
+    /** Импортная пошлина, доля (0.05 = 5%). */
+    importDutyRate: numeric("import_duty_rate", { precision: 7, scale: 4 }).default("0").notNull(),
+    /** Сбор за таможенное оформление, доля (стандарт 0.002 = 0.2%). */
+    customsFeeRate: numeric("customs_fee_rate", { precision: 7, scale: 4 }).default("0.002").notNull(),
+    exciseRate: numeric("excise_rate", { precision: 7, scale: 4 }).default("0").notNull(),
+    vatRate: numeric("vat_rate", { precision: 7, scale: 4 }).default("0.12").notNull(),
+    /** Утильсбор: сколько БРВ (0 — не облагается). */
+    utilizationBrvCount: integer("utilization_brv_count").default(0).notNull(),
+    /** Доп. пошлина за см³ двигателя, USD (3.36 у тягачей; 0 у погрузчиков). */
+    extraDutyPerCcUsd: numeric("extra_duty_per_cc_usd", { precision: 10, scale: 4 }).default("0").notNull(),
+    /** gibdd — авто, gostechnadzor — спецтехника (влияет на регистрацию). */
+    registrationType: text("registration_type").default("gostechnadzor").notNull(),
+    /** Дефолт сертификации: нал / безнал (может быть пусто). */
+    certCashDefaultUzs: numeric("cert_cash_default_uzs", { precision: 12, scale: 2 }),
+    certBankDefaultUzs: numeric("cert_bank_default_uzs", { precision: 12, scale: 2 }),
+    /** Валидация перед расчётом (Phase 15.22 донора): диапазон массы брутто. */
+    grossMassMinKg: integer("gross_mass_min_kg"),
+    grossMassMaxKg: integer("gross_mass_max_kg"),
+    /** CSV допустимых типов двигателя: "diesel,electric". Пусто — любой. */
+    engineTypeConstraint: text("engine_type_constraint"),
+    isActive: boolean("is_active").default(true).notNull(),
+    notes: text("notes"),
+    /** С какой даты действует ставка (YYYY-MM-DD). */
+    validFrom: date("valid_from"),
+    setBy: text("set_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("tnved_rate_code_idx").on(t.code), index("tnved_rate_active_idx").on(t.isActive)],
+);
+
+// ── brv_value: базовая расчётная величина РУз по датам (утильсбор = БРВ × count) ──
+export const brvValue = pgTable(
+  "brv_value",
+  {
+    id: id(),
+    valueUzs: numeric("value_uzs", { precision: 12, scale: 2 }).notNull(),
+    /** Действует с даты (YYYY-MM-DD). Актуальная — последняя по valid_from ≤ сегодня. */
+    validFrom: date("valid_from").notNull(),
+    note: text("note"),
+    setBy: text("set_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("brv_value_from_idx").on(t.validFrom)],
+);
+
+// ── fx_rate: курс валют к суму — ручной ввод владельца, история сохраняется ──
+// Перенос паттерна exchange-rates.ts PROMACH без внешнего источника: сначала
+// ручной override (он в PROMACH был страховкой, у нас — основной путь),
+// источник курса ЦБ РУз можно добавить позже тем же интерфейсом.
+// История нужна аудиту: «какой курс действовал на дату платежа».
+export const fxRate = pgTable(
+  "fx_rate",
+  {
+    id: id(),
+    /** Валюта, курс которой задан к суму: USD | CNY | EUR | RUB. */
+    currency: text("currency").notNull(),
+    /** Сколько сумов за единицу валюты. */
+    rate: numeric("rate", { precision: 18, scale: 4 }).notNull(),
+    /** Откуда курс: manual | cbu (задел под ЦБ РУз). */
+    source: text("source").default("manual").notNull(),
+    note: text("note"),
+    setBy: text("set_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("fx_rate_currency_idx").on(t.currency, t.createdAt)],
 );
 
 // ── note: заметки и знания (вход для knowledge-curator) ──
@@ -1338,6 +1692,21 @@ export const schema = {
   event,
   document,
   moneyFlow,
+  // Финансовый контур: курс валют к суму (перенос паттерна PROMACH).
+  fxRate,
+  // Расчётные справочники GLOBERENT: ставки ТН ВЭД и БРВ (перенос PROMACH).
+  tnvedRate,
+  brvValue,
+  // UZS-договоры GLOBERENT: договор и акты приёма-передачи (перенос PROMACH).
+  grContract,
+  contractAct,
+  // Склад техники GLOBERENT: единицы конвейера и резервы (перенос PROMACH).
+  globerentUnit,
+  unitReserve,
+  // Импортные контракты GLOBERENT (перенос import_contracts PROMACH).
+  grImportContract,
+  // Предзаказы GLOBERENT (перенос pre_orders PROMACH).
+  grPreorder,
   note,
   auditLog,
   agent,

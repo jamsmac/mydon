@@ -63,6 +63,43 @@ export const VENDHUB_GROUPS: NavGroup[] = [
   },
 ];
 
+/**
+ * GLOBERENT — дистрибуция погрузчиков HELI. Состав из описи данных владельца
+ * (docs/LEGACY_DATA.md): контрагенты, договоры, счета-фактуры, техника.
+ * Документы отделены от каталога: договор живёт сроком, счёт — суммой,
+ * им нужны свои колонки, а не общий список «название — код».
+ */
+export const GLOBERENT_GROUPS: NavGroup[] = [
+  {
+    key: "catalog",
+    label: "Каталог",
+    leaves: [
+      // Модели каталога (HELI CPD30…) отдельно от физических единиц с VIN.
+      { label: "Модели", type: "equipment_model" },
+      { label: "Техника", type: "equipment" },
+      { label: "Контрагенты", type: "contractor" },
+      { label: "Объекты", type: "object" },
+    ],
+  },
+  {
+    key: "docs",
+    label: "Документы",
+    leaves: [
+      { label: "Договоры", type: "contract" },
+      { label: "Счета", type: "invoice" },
+    ],
+  },
+  {
+    key: "refs",
+    label: "Справочники",
+    leaves: [
+      // Живая таблица ставок растаможки (tnved_rate + brv_value, перенос PROMACH).
+      { label: "Растаможка", type: "customs_rates" },
+      { label: "Таможенные посты", type: "customs_post" },
+    ],
+  },
+];
+
 /** Прочие направления: без вендинговой специфики — типы берутся из данных. */
 export const GENERIC_GROUPS: NavGroup[] = [
   {
@@ -100,5 +137,6 @@ export const PERSONAL_GROUPS: NavGroup[] = [
 export function groupsFor(domain: string): NavGroup[] {
   if (domain === "vendhub") return VENDHUB_GROUPS;
   if (domain === "personal") return PERSONAL_GROUPS;
+  if (domain === "globerent") return GLOBERENT_GROUPS;
   return GENERIC_GROUPS;
 }

@@ -69,3 +69,12 @@ export * from "./consumption";
 export * from "./intake-sync";
 export * from "./numguard";
 export * from "./geo";
+// GLOBERENT: словарь реестра и расчётные движки (перенос PROMACH).
+export * from "./globerent/registry";
+export * from "./globerent/contract-calc";
+export * from "./globerent/calc";
+export * from "./globerent/unit-status";
+export * from "./globerent/commission";
+export * from "./globerent/import-lifecycle";
+export * from "./globerent/unit-cogs";
+export * from "./globerent/preorder-status";

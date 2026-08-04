@@ -239,6 +239,48 @@
       "when": 1785788298850,
       "tag": "0033_coffee_machine_placement",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1785829786589,
+      "tag": "0034_normal_tiger_shark",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1785833522457,
+      "tag": "0035_organic_sister_grimm",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1785834080032,
+      "tag": "0036_ambiguous_smasher",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1785835092969,
+      "tag": "0037_needy_yellow_claw",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1785837751353,
+      "tag": "0038_yummy_puck",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1785838597595,
+      "tag": "0039_freezing_ricochet",
+      "breakpoints": true
     }
   ]
 }

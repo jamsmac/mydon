@@ -394,6 +394,307 @@ export interface Obligations {
   overdueTruncated: boolean;
 }
 
+// ── Финансовый контур (модель PROMACH поверх money_flow) ──
+
+export interface CurrencyAmount {
+  currency: string;
+  amount: number;
+  count: number;
+}
+
+export interface FinanceBucket {
+  count: number;
+  byCurrency: CurrencyAmount[];
+  /** Сумовой эквивалент только приведённых записей. */
+  uzs: number;
+  /** Записей без курса — в uzs не вошли. */
+  unconverted: number;
+}
+
+export interface FinanceAging {
+  notDue: FinanceBucket;
+  d0_30: FinanceBucket;
+  d31_60: FinanceBucket;
+  d61_90: FinanceBucket;
+  d90plus: FinanceBucket;
+  noDue: FinanceBucket;
+  total: FinanceBucket;
+}
+
+/** Запись money_flow с именем контрагента и сумовым эквивалентом. */
+export interface FinanceFlow {
+  id: string;
+  domain: string | null;
+  direction: "in" | "out";
+  amount: string;
+  currency: string;
+  source: string;
+  purpose: string | null;
+  category: string | null;
+  method: string | null;
+  isOfficial: boolean;
+  rate: string | null;
+  amountUzs: string | null;
+  counterpartyId: string | null;
+  counterparty: string | null;
+  docNo: string | null;
+  dueDate: string | null;
+  paidAt: string | null;
+  date: string;
+  status: string;
+  createdAt: string;
+  counterpartyEntityName: string | null;
+  uzs: number | null;
+}
+
+export interface FinanceConcentrationRow {
+  key: string;
+  name: string;
+  uzs: number;
+  byCurrency: CurrencyAmount[];
+  share: number | null;
+}
+
+export interface FinanceConcentration {
+  rows: FinanceConcentrationRow[];
+  topShare: number | null;
+  /** ≥60% на одном должнике — красный термометр (правило OLMA). */
+  alarm: boolean;
+  totalUzs: number;
+  unconverted: number;
+}
+
+export interface FinanceMonth {
+  month: string;
+  inflow: CurrencyAmount[];
+  outflow: CurrencyAmount[];
+  inflowUzs: number;
+  outflowUzs: number;
+}
+
+export interface FxCurrent {
+  currency: string;
+  rate: string;
+  source: string;
+  note: string | null;
+  setBy: string | null;
+  createdAt: string;
+}
+
+export interface FinanceSummary {
+  domain: string;
+  today: string;
+  receivables: FinanceAging;
+  payables: FinanceAging;
+  dueSoonIn: FinanceFlow[];
+  dueSoonOut: FinanceFlow[];
+  concentration: FinanceConcentration;
+  months: FinanceMonth[];
+  fx: FxCurrent[];
+}
+
+export interface FinanceCounterparty {
+  id: string;
+  name: string;
+  inn: string | null;
+}
+
+// ── Склад техники GLOBERENT (перенос warehouse_vehicles PROMACH) ──
+
+export interface UnitReserveRow {
+  id: string;
+  unitId: string;
+  clientId: string | null;
+  endDate: string;
+  status: string;
+  note: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface GrUnit {
+  id: string;
+  domain: string;
+  code: string;
+  modelId: string | null;
+  name: string;
+  year: number | null;
+  vin: string | null;
+  status: string;
+  salesStage: string | null;
+  lostReason: string | null;
+  salesPrice: string | null;
+  clientId: string | null;
+  contractId: string | null;
+  arrivalDate: string | null;
+  declarationType: string | null;
+  declarationNumber: string | null;
+  declarationDate: string | null;
+  transportCompany: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  clientName: string | null;
+  activeReserve: UnitReserveRow | null;
+  /** Себестоимость по привязанным платежам, сумовой эквивалент. */
+  costUzs: number;
+}
+
+export interface GrPreorder {
+  id: string;
+  domain: string;
+  code: string;
+  modelId: string | null;
+  name: string;
+  qty: number;
+  clientId: string | null;
+  supplierId: string | null;
+  contractRef: string | null;
+  factoryPriceUsd: string | null;
+  promisedDeliveryDate: string | null;
+  status: string;
+  cancelledReason: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  clientName: string | null;
+}
+
+// ── Импортные контракты GLOBERENT (перенос import_contracts PROMACH) ──
+
+export interface GrImportItem {
+  modelId?: string | null;
+  name: string;
+  qty: number;
+  price: number;
+}
+
+export interface GrImport {
+  id: string;
+  domain: string;
+  contractNo: string;
+  contractDate: string;
+  supplierId: string | null;
+  currency: string;
+  totalAmount: string;
+  items: GrImportItem[];
+  purpose: string;
+  saleContractId: string | null;
+  status: string;
+  lifecycleStatus: string;
+  prepaymentAmount: string | null;
+  prepaymentDueDate: string | null;
+  prepaymentPaidAt: string | null;
+  balanceAmount: string | null;
+  balanceDueDate: string | null;
+  balancePaidAt: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  supplierName: string | null;
+  unitsTotal: number;
+  unitsActive: number;
+}
+
+export interface GrImportDetail extends GrImport {
+  units: GrUnit[];
+}
+
+// ── UZS-договоры GLOBERENT (перенос contracts PROMACH) ──
+
+export interface ContractItemRow {
+  equipmentId?: string | null;
+  name: string;
+  unit?: string;
+  qty: number;
+  price: number;
+}
+
+export interface GrContract {
+  id: string;
+  domain: string;
+  contractNo: string;
+  contractDate: string;
+  clientId: string | null;
+  buyer: Record<string, string | undefined>;
+  sellerCompanyId: string | null;
+  totalWithVat: string;
+  totalVat: string;
+  payType: string | null;
+  warranty: string | null;
+  deliveryDays: number | null;
+  items: ContractItemRow[];
+  docParams: Record<string, unknown>;
+  status: string;
+  agentId: string | null;
+  agentCommissionAmount: string | null;
+  agentCommissionCurrency: string | null;
+  createdAt: string;
+  updatedAt: string;
+  clientName: string | null;
+  /** Оплачено в сумовом эквиваленте — валюты не складываются сырыми. */
+  paidUzs: number;
+  paymentsCount: number;
+  actsCount: number;
+}
+
+export interface ContractActRow {
+  id: string;
+  contractId: string;
+  actNo: string;
+  actDate: string;
+  itemRefs: { equipmentId?: string | null; name: string }[];
+  signedBySeller: string | null;
+  signedByBuyer: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface GrContractDetail extends GrContract {
+  payments: FinanceFlow[];
+  planned: FinanceFlow[];
+  acts: ContractActRow[];
+}
+
+// ── Расчётные справочники GLOBERENT: ставки ТН ВЭД и БРВ (перенос PROMACH) ──
+
+export interface TnvedRate {
+  id: string;
+  code: string;
+  nameRu: string;
+  vehicleCategory: string;
+  /** Доли: 0.05 = 5%. */
+  importDutyRate: string;
+  customsFeeRate: string;
+  exciseRate: string;
+  vatRate: string;
+  utilizationBrvCount: number;
+  extraDutyPerCcUsd: string;
+  registrationType: string;
+  certCashDefaultUzs: string | null;
+  certBankDefaultUzs: string | null;
+  grossMassMinKg: number | null;
+  grossMassMaxKg: number | null;
+  engineTypeConstraint: string | null;
+  isActive: boolean;
+  notes: string | null;
+  validFrom: string | null;
+  setBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BrvValue {
+  id: string;
+  valueUzs: string;
+  validFrom: string;
+  note: string | null;
+  setBy: string | null;
+  createdAt: string;
+}
+
 /** Настройки агента — то, что владелец видит и меняет в карточке. */
 export interface AgentCard {
   id: string;
@@ -1424,6 +1725,83 @@ export const core = {
     ),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
+
+  // ── Финансовый контур (агинг, «к сроку», термометр, курс) ──
+  financeSummary: (domain: string) => get<FinanceSummary>(`/finance/summary/${domain}`),
+  financeFlows: (domain: string, params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<FinanceFlow[]>(`/finance/flows/${domain}${qs ? `?${qs}` : ""}`);
+  },
+  financeCounterparties: (domain: string) =>
+    get<FinanceCounterparty[]>(`/finance/counterparties/${domain}`),
+  // ── Склад техники ──
+  units: (domain: string, group?: string) =>
+    get<GrUnit[]>(`/units?domain=${domain}${group !== undefined ? `&group=${group}` : ""}`),
+  unitsSummary: (domain: string) =>
+    get<{ key: string; label: string; n: number }[]>(`/units/summary?domain=${domain}`),
+  createUnit: (input: Record<string, unknown>) => send<GrUnit>("/units", "POST", input),
+  unitAction: (id: string, action: string, extra: Record<string, unknown> = {}) =>
+    send<GrUnit>(`/units/${id}/action/${encodeURIComponent(action)}`, "PATCH", extra),
+  setUnitVin: (id: string, vin: string) => send<GrUnit>(`/units/${id}/vin`, "PATCH", { vin }),
+  unbindUnitVin: (id: string) => send<GrUnit>(`/units/${id}/vin/unbind`, "PATCH", {}),
+  reserveUnit: (id: string, input: Record<string, unknown>) =>
+    send<UnitReserveRow>(`/units/${id}/reserve`, "POST", input),
+  cancelUnitReserve: (id: string) => send<GrUnit>(`/units/${id}/reserve/cancel`, "PATCH", {}),
+  setUnitSalesStage: (id: string, input: Record<string, unknown>) =>
+    send<GrUnit>(`/units/${id}/sales-stage`, "PATCH", input),
+
+  // ── Предзаказы ──
+  preorders: (domain: string) => get<GrPreorder[]>(`/preorders?domain=${domain}`),
+  createPreorder: (input: Record<string, unknown>) => send<GrPreorder>("/preorders", "POST", input),
+  preorderAction: (id: string, action: string, extra: Record<string, unknown> = {}) =>
+    send<GrPreorder>(`/preorders/${id}/action/${encodeURIComponent(action)}`, "PATCH", extra),
+  cancelPreorder: (id: string, reason: string) =>
+    send<GrPreorder>(`/preorders/${id}/cancel`, "PATCH", { reason }),
+
+  // ── Импортные контракты ──
+  imports: (domain: string) => get<GrImport[]>(`/imports?domain=${domain}`),
+  importContract: (id: string) => get<GrImportDetail>(`/imports/${id}`),
+  createImport: (input: Record<string, unknown>) => send<GrImport>("/imports", "POST", input),
+  signImport: (id: string) => send<GrImportDetail>(`/imports/${id}/sign`, "PATCH", {}),
+  markImportPaid: (id: string, kind: "prepayment" | "balance") =>
+    send<GrImport>(`/imports/${id}/paid/${kind}`, "PATCH", {}),
+  bulkImportAction: (id: string, action: string, extra: Record<string, unknown> = {}) =>
+    send<{ moved: number; skipped: number; lifecycle: string }>(
+      `/imports/${id}/bulk/${encodeURIComponent(action)}`,
+      "PATCH",
+      extra,
+    ),
+  cancelImport: (id: string) => send<GrImport>(`/imports/${id}/cancel`, "PATCH", {}),
+
+  // ── UZS-договоры ──
+  contracts: (domain: string) => get<GrContract[]>(`/contracts?domain=${domain}`),
+  contract: (id: string) => get<GrContractDetail>(`/contracts/${id}`),
+  createContract: (input: Record<string, unknown>) => send<GrContract>("/contracts", "POST", input),
+  setContractStatus: (id: string, status: string) =>
+    send<GrContract>(`/contracts/${id}/status`, "PATCH", { status }),
+  addContractPayment: (id: string, input: Record<string, unknown>) =>
+    send<FinanceFlow>(`/contracts/${id}/payments`, "POST", input),
+  addContractAct: (id: string, input: Record<string, unknown>) =>
+    send<ContractActRow>(`/contracts/${id}/acts`, "POST", input),
+
+  // ── Расчётные справочники (ставки ТН ВЭД, БРВ) ──
+  tnvedRates: (all = false) => get<TnvedRate[]>(`/catalog/tnved${all ? "?all=1" : ""}`),
+  saveTnvedRate: (input: Record<string, unknown>) =>
+    send<TnvedRate>("/catalog/tnved", "POST", input),
+  deactivateTnvedRate: (id: string) =>
+    send<TnvedRate>(`/catalog/tnved/${id}/deactivate`, "PATCH", {}),
+  brvValues: () => get<BrvValue[]>("/catalog/brv"),
+  setBrvValue: (input: { valueUzs: number; validFrom: string; note?: string }) =>
+    send<BrvValue[]>("/catalog/brv", "PUT", input),
+
+  fxRates: () => get<FxCurrent[]>("/finance/fx"),
+  setFxRate: (input: { currency: string; rate: number; note?: string }) =>
+    send<FxCurrent[]>("/finance/fx", "PUT", input),
+  createFinanceFlow: (input: Record<string, unknown>) =>
+    send<FinanceFlow>("/finance/flows", "POST", input),
+  payFinanceFlow: (id: string, rate?: number) =>
+    send<FinanceFlow>(`/finance/flows/${id}/pay`, "PATCH", rate !== undefined ? { rate } : {}),
+  cancelFinanceFlow: (id: string) => send<FinanceFlow>(`/finance/flows/${id}/cancel`, "PATCH", {}),
 
   // ── Источники (сырой слой) ──
   rawSources: () => get<{ sources: RawSourceState[] }>("/raw/sources"),
