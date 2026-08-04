@@ -144,6 +144,31 @@ describe("импорт реестра из книги владельца", () =>
   });
 });
 
+describe("своя компания (own_company)", () => {
+  it("создаётся с ИНН как номером записи, утверждённая и с провенансом", async () => {
+    const { db, inserted } = stubDb([ORG, []]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({
+      ownCompany: { name: 'OOO "GLOBERENT FINANCE"', attrs: { inn: "303736663", mfo: "01145" } },
+    });
+    assert.deepEqual(r.ownCompany, { created: 1, skipped: 0 });
+    const row = inserted[0]?.rows[0];
+    assert.equal(row?.type, "own_company");
+    assert.equal(row?.externalRef, "303736663");
+    assert.ok(row?.approvedAt instanceof Date);
+  });
+
+  it("существующая карточка НЕ перезаписывается — правки из панели важнее сида", async () => {
+    const { db, inserted } = stubDb([ORG, [{ id: "own-1" }]]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({
+      ownCompany: { name: "Другое имя", attrs: {} },
+    });
+    assert.deepEqual(r.ownCompany, { created: 0, skipped: 1 });
+    assert.equal(inserted.length, 0);
+  });
+});
+
 describe("чистые правила импорта", () => {
   it("unitImportError: даты только ГГГГ-ММ-ДД, статусы из белого списка", () => {
     const base: ImportUnit = { name: "CPD15", vin: "1", status: "IN_STOCK" };
