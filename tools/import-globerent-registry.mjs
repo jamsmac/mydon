@@ -64,6 +64,7 @@ const totals = {
   units: { created: 0, skipped: 0, errors: [] },
   ownCompany: { created: 0, skipped: 0, errors: [] },
   flows: { created: 0, skipped: 0, errors: [] },
+  contracts: { created: 0, skipped: 0, flowsLinked: 0, errors: [] },
 };
 
 // Реквизиты своей компании — отдельный сид: они не из книги, а из
@@ -76,7 +77,10 @@ if (fs.existsSync(ownPath)) {
     headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
     body: JSON.stringify({ source: own.source, ownCompany: own.ownCompany }),
   });
-  if (!res.ok) throw new Error(`Core ответил ${res.status} на own-company: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok)
+    throw new Error(
+      `Core ответил ${res.status} на own-company: ${(await res.text()).slice(0, 300)}`,
+    );
   add(totals.ownCompany, (await res.json()).ownCompany);
 }
 
@@ -99,7 +103,10 @@ if (fs.existsSync(customsPath)) {
       headers,
       body: JSON.stringify({ ...row, notes: customs.source }),
     });
-    if (!res.ok) throw new Error(`Core ответил ${res.status} на ТН ВЭД ${row.code}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok)
+      throw new Error(
+        `Core ответил ${res.status} на ТН ВЭД ${row.code}: ${(await res.text()).slice(0, 300)}`,
+      );
     customsTotals.tnved.created += 1;
   }
   if (customs.brv) {
@@ -114,7 +121,8 @@ if (fs.existsSync(customsPath)) {
         headers,
         body: JSON.stringify(customs.brv),
       });
-      if (!res.ok) throw new Error(`Core ответил ${res.status} на БРВ: ${(await res.text()).slice(0, 300)}`);
+      if (!res.ok)
+        throw new Error(`Core ответил ${res.status} на БРВ: ${(await res.text()).slice(0, 300)}`);
       customsTotals.brv.created += 1;
     }
   }
@@ -145,8 +153,42 @@ if (fs.existsSync(flowsPath)) {
       headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
       body: JSON.stringify({ source: flowsSeed.source, flows: batch }),
     });
-    if (!res.ok) throw new Error(`Core ответил ${res.status} на flows: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok)
+      throw new Error(`Core ответил ${res.status} на flows: ${(await res.text()).slice(0, 300)}`);
     add(totals.flows, (await res.json()).flows);
+  }
+}
+
+// Реестры Didox: недостающие СФ + их приходы, новые контрагенты и договоры
+// покупателей. После книги — договоры привязывают приходы (и книжные тоже)
+// к contract_id по docNo счетов.
+const didoxPath = path.join(ROOT, "data/globerent/didox-2026-08-04.json");
+if (fs.existsSync(didoxPath)) {
+  const didox = JSON.parse(fs.readFileSync(didoxPath, "utf8"));
+  const postDidox = async (payload) => {
+    const res = await fetch(`${CORE}/registry-import/globerent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+      body: JSON.stringify({ source: didox.source, ...payload }),
+    });
+    if (!res.ok) {
+      throw new Error(`Core ответил ${res.status} на didox: ${(await res.text()).slice(0, 500)}`);
+    }
+    return res.json();
+  };
+  for (const batch of chunks(didox.contractors ?? [], 200)) {
+    add(totals.contractors, (await postDidox({ contractors: batch })).contractors);
+  }
+  for (const batch of chunks(didox.invoices ?? [], 150)) {
+    add(totals.invoices, (await postDidox({ invoices: batch })).invoices);
+  }
+  for (const batch of chunks(didox.flows ?? [], 200)) {
+    add(totals.flows, (await postDidox({ flows: batch })).flows);
+  }
+  for (const batch of chunks(didox.contracts ?? [], 100)) {
+    const part = (await postDidox({ contracts: batch })).contracts;
+    add(totals.contracts, part);
+    totals.contracts.flowsLinked += part.flowsLinked ?? 0;
   }
 }
 
@@ -158,11 +200,13 @@ for (const [k, label] of [
   ["invoices", "счета-фактуры"],
   ["units", "машины склада"],
   ["flows", "денежные записи"],
+  ["contracts", "договоры (Didox)"],
 ]) {
   const t = totals[k];
   console.log(`  ${label}: создано ${t.created}, пропущено (уже были) ${t.skipped}`);
   for (const e of t.errors) console.log(`    ⚠ ${e}`);
 }
+console.log(`  приходов привязано к договорам: ${totals.contracts.flowsLinked}`);
 console.log(
   `  ставки ТН ВЭД: создано ${customsTotals.tnved.created}, пропущено ${customsTotals.tnved.skipped}; ` +
     `БРВ: создано ${customsTotals.brv.created}, пропущено ${customsTotals.brv.skipped}`,

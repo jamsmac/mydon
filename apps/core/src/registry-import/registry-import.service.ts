@@ -1,7 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, entity, globerentUnit, moneyFlow, org } from "@mydon/db";
+import { auditLog, entity, globerentUnit, grContract, moneyFlow, org } from "@mydon/db";
 import { MONEY_CATEGORIES } from "@mydon/shared";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 /**
@@ -65,6 +65,7 @@ export interface ImportPayload {
    */
   ownCompany?: { name: string; attrs: Record<string, unknown> };
   flows?: ImportFlow[];
+  contracts?: ImportContract[];
 }
 
 /**
@@ -90,6 +91,32 @@ export interface ImportFlow {
   unitVin?: string;
 }
 
+/**
+ * Договор с покупателем из реестра Didox (исходящие «Договор (НК)»).
+ * Статус проставляет генератор сида: closed — отгрузка по СФ покрыла сумму,
+ * active — остаток виден владельцу. flowDocNos — docNo приходов money_flow
+ * (СФ по этому договору): импорт привяжет их через contract_id, чтобы
+ * paidUzs договора и сигнал брифинга «без оплаты» считались по факту.
+ */
+export interface ImportContract {
+  contractNo: string;
+  /** YYYY-MM-DD. */
+  contractDate: string;
+  buyerName: string;
+  buyerInn?: string;
+  totalWithVat: number;
+  totalVat?: number;
+  status?: "active" | "closed";
+  /** Из «Номер документа» Didox: «купля-продажа», «на сервисное обслуживание»… */
+  subject?: string | null;
+  /** Строки Didox, из которых собрана сумма, — провенанс в docParams. */
+  didoxRows?: { doc: string; date: string | null; totalWithVat: number }[];
+  didoxDuplicatesDropped?: number;
+  extraDates?: string[];
+  invoicedTotal?: number;
+  flowDocNos?: string[];
+}
+
 export interface ImportCount {
   created: number;
   skipped: number;
@@ -102,6 +129,7 @@ export interface ImportSummary {
   units: ImportCount & { errors: string[] };
   ownCompany: ImportCount;
   flows: ImportCount & { errors: string[] };
+  contracts: ImportCount & { errors: string[]; flowsLinked: number };
 }
 
 const UNIT_STATUSES_ALLOWED = ["IN_STOCK", "DELIVERED_TO_CLIENT"] as const;
@@ -124,6 +152,21 @@ export function flowImportError(f: ImportFlow): string | null {
   if (!ISO_DAY.test(f.date ?? "")) return `${tag}: дата не ГГГГ-ММ-ДД: «${f.date}»`;
   if ((f.docNo ?? "").trim().length === 0) return "запись без docNo — идемпотентности не будет";
   if ((f.purpose ?? "").trim().length === 0) return `${tag}: пустое назначение`;
+  return null;
+}
+
+/** Проверка договора ДО базы: null — можно, строка — почему нельзя. */
+export function contractImportError(c: ImportContract): string | null {
+  const tag = `«${c.contractNo ?? "?"}»`;
+  if ((c.contractNo ?? "").trim().length === 0)
+    return "договор без номера — идемпотентности не будет";
+  if (!ISO_DAY.test(c.contractDate ?? "")) return `${tag}: дата не ГГГГ-ММ-ДД: «${c.contractDate}»`;
+  if ((c.buyerName ?? "").trim().length < 2) return `${tag}: нет покупателя`;
+  if (!Number.isFinite(c.totalWithVat) || c.totalWithVat <= 0)
+    return `${tag}: сумма — число больше нуля`;
+  if (c.status !== undefined && c.status !== "active" && c.status !== "closed") {
+    return `${tag}: статус импорта только active или closed, а не «${c.status}»`;
+  }
   return null;
 }
 
@@ -152,7 +195,8 @@ export class RegistryImportService {
 
   private async orgId(): Promise<string> {
     const [row] = await this.db.select({ id: org.id }).from(org).where(eq(org.code, "globerent"));
-    if (!row) throw new NotFoundException("Направление globerent не заведено. Выполните pnpm db:seed.");
+    if (!row)
+      throw new NotFoundException("Направление globerent не заведено. Выполните pnpm db:seed.");
     return row.id;
   }
 
@@ -166,10 +210,16 @@ export class RegistryImportService {
       units: { created: 0, skipped: 0, errors: [] },
       ownCompany: { created: 0, skipped: 0 },
       flows: { created: 0, skipped: 0, errors: [] },
+      contracts: { created: 0, skipped: 0, errors: [], flowsLinked: 0 },
     };
 
     if (payload.contractors?.length) {
-      summary.contractors = await this.importContractors(orgId, payload.contractors, source, actorRef);
+      summary.contractors = await this.importContractors(
+        orgId,
+        payload.contractors,
+        source,
+        actorRef,
+      );
     }
     if (payload.invoices?.length) {
       summary.invoices = await this.importInvoices(orgId, payload.invoices, source, actorRef);
@@ -187,7 +237,127 @@ export class RegistryImportService {
     if (payload.flows?.length) {
       summary.flows = await this.importFlows(orgId, payload.flows, source, actorRef);
     }
+    // Договоры — после flows: привязка приходов ждёт сами записи денег.
+    if (payload.contracts?.length) {
+      summary.contracts = await this.importContracts(orgId, payload.contracts, source, actorRef);
+    }
     return summary;
+  }
+
+  /**
+   * Договоры покупателей из Didox. Идемпотентность — по (org, номер):
+   * существующий договор не перезаписывается (правки владельца из панели
+   * важнее сида), но привязка приходов по flowDocNos добирается и для него —
+   * повторный прогон после нового импорта денег дотягивает связи.
+   */
+  private async importContracts(
+    orgId: string,
+    rows: ImportContract[],
+    source: string,
+    actorRef: string,
+  ): Promise<ImportCount & { errors: string[]; flowsLinked: number }> {
+    const errors: string[] = [];
+    const valid: ImportContract[] = [];
+    for (const c of rows) {
+      const err = contractImportError(c);
+      if (err !== null) errors.push(err);
+      else valid.push(c);
+    }
+
+    const nos = valid.map((c) => c.contractNo.trim());
+    const existing = nos.length
+      ? await this.db
+          .select({ id: grContract.id, no: grContract.contractNo })
+          .from(grContract)
+          .where(and(eq(grContract.orgId, orgId), inArray(grContract.contractNo, nos)))
+      : [];
+    const idByNo = new Map(existing.map((e) => [e.no, e.id]));
+
+    const inns = [...new Set(valid.map((c) => c.buyerInn).filter((s): s is string => !!s))];
+    const clientRows = inns.length
+      ? await this.db
+          .select({ id: entity.id, ref: entity.externalRef })
+          .from(entity)
+          .where(and(eq(entity.type, "contractor"), inArray(entity.externalRef, inns)))
+      : [];
+    const clientByInn = new Map(clientRows.map((c) => [c.ref, c.id]));
+
+    const [seller] = await this.db
+      .select({ id: entity.id })
+      .from(entity)
+      .where(and(eq(entity.orgId, orgId), eq(entity.type, "own_company")));
+
+    let created = 0;
+    let skipped = 0;
+    let flowsLinked = 0;
+    await this.db.transaction(async (tx) => {
+      for (const c of valid) {
+        const no = c.contractNo.trim();
+        let contractId = idByNo.get(no);
+        if (contractId === undefined) {
+          const [inserted] = await tx
+            .insert(grContract)
+            .values({
+              orgId,
+              domain: "globerent",
+              contractNo: no,
+              contractDate: c.contractDate,
+              clientId: c.buyerInn !== undefined ? (clientByInn.get(c.buyerInn) ?? null) : null,
+              buyer: {
+                name: c.buyerName.trim(),
+                ...(c.buyerInn !== undefined ? { inn: c.buyerInn } : {}),
+              },
+              sellerCompanyId: seller?.id ?? null,
+              totalWithVat: String(c.totalWithVat),
+              totalVat: String(c.totalVat ?? 0),
+              status: c.status ?? "active",
+              docParams: {
+                didox: {
+                  ...(c.subject !== undefined && c.subject !== null ? { subject: c.subject } : {}),
+                  ...(c.didoxRows !== undefined ? { rows: c.didoxRows } : {}),
+                  ...(c.didoxDuplicatesDropped !== undefined
+                    ? { duplicatesDropped: c.didoxDuplicatesDropped }
+                    : {}),
+                  ...(c.extraDates !== undefined ? { extraDates: c.extraDates } : {}),
+                  ...(c.invoicedTotal !== undefined ? { invoicedTotal: c.invoicedTotal } : {}),
+                },
+              },
+              createdFrom: source,
+            })
+            .returning({ id: grContract.id });
+          contractId = inserted.id;
+          idByNo.set(no, contractId);
+          created += 1;
+        } else {
+          skipped += 1;
+        }
+        if (c.flowDocNos?.length) {
+          const linked = await tx
+            .update(moneyFlow)
+            .set({ contractId })
+            .where(
+              and(
+                eq(moneyFlow.orgId, orgId),
+                inArray(moneyFlow.docNo, c.flowDocNos),
+                isNull(moneyFlow.contractId),
+              ),
+            )
+            .returning({ id: moneyFlow.id });
+          flowsLinked += linked.length;
+        }
+      }
+      if (created > 0 || flowsLinked > 0) {
+        await tx.insert(auditLog).values({
+          actorKind: "human",
+          actorRef,
+          action: "registry_import.contracts",
+          target: source,
+          after: { created, skipped, flowsLinked, errors: errors.length },
+        });
+      }
+    });
+
+    return { created, skipped, errors, flowsLinked };
   }
 
   /**
@@ -261,7 +431,8 @@ export class RegistryImportService {
           paidAt: new Date(`${f.date}T00:00:00+05:00`),
           purpose: f.purpose,
           docNo: f.docNo,
-          counterpartyId: f.counterpartyInn !== undefined ? (cpByInn.get(f.counterpartyInn) ?? null) : null,
+          counterpartyId:
+            f.counterpartyInn !== undefined ? (cpByInn.get(f.counterpartyInn) ?? null) : null,
           counterparty: f.counterpartyName ?? null,
           unitId: f.unitVin !== undefined ? (unitByVin.get(f.unitVin) ?? null) : null,
         });
@@ -328,7 +499,9 @@ export class RegistryImportService {
     source: string,
     actorRef: string,
   ): Promise<ImportCount> {
-    const clean = rows.filter((c) => (c.name ?? "").trim().length >= 2 && INN_RE.test((c.inn ?? "").trim()));
+    const clean = rows.filter(
+      (c) => (c.name ?? "").trim().length >= 2 && INN_RE.test((c.inn ?? "").trim()),
+    );
     if (clean.length < rows.length) {
       throw new BadRequestException(
         `Контрагенты без имени или с кривым ИНН: ${rows.length - clean.length} строк — почини сид`,
@@ -383,7 +556,9 @@ export class RegistryImportService {
     const existing = await this.db
       .select({ ref: entity.externalRef })
       .from(entity)
-      .where(and(eq(entity.orgId, orgId), eq(entity.type, "invoice"), inArray(entity.externalRef, refs)));
+      .where(
+        and(eq(entity.orgId, orgId), eq(entity.type, "invoice"), inArray(entity.externalRef, refs)),
+      );
     const seen = new Set(existing.map((e) => e.ref));
     const batch = new Map<string, ImportInvoice>();
     for (const r of rows) if (!seen.has(r.ref) && !batch.has(r.ref)) batch.set(r.ref, r);
@@ -437,7 +612,7 @@ export class RegistryImportService {
             orgId,
             type: "equipment_model",
             name,
-            attrs: { "бренд": "HELI" },
+            attrs: { бренд: "HELI" },
             ...this.approvedRow(source, actorRef),
           })),
         );
@@ -497,7 +672,9 @@ export class RegistryImportService {
     const batchVins = new Set<string>();
     await this.db.transaction(async (tx) => {
       const [m] = await tx
-        .select({ n: sql<string>`coalesce(max((substring(${globerentUnit.code} from 4))::int), 0)::text` })
+        .select({
+          n: sql<string>`coalesce(max((substring(${globerentUnit.code} from 4))::int), 0)::text`,
+        })
         .from(globerentUnit)
         .where(eq(globerentUnit.orgId, orgId));
       let next = Number(m?.n ?? "0");
@@ -514,7 +691,8 @@ export class RegistryImportService {
           domain: "globerent",
           code: `WH-${String(next).padStart(4, "0")}`,
           name: u.name.trim(),
-          modelId: u.modelName !== undefined ? (modelByKey.get(modelKey(u.modelName)) ?? null) : null,
+          modelId:
+            u.modelName !== undefined ? (modelByKey.get(modelKey(u.modelName)) ?? null) : null,
           vin,
           status: u.status,
           arrivalDate: u.arrivalDate ?? null,
