@@ -34,6 +34,7 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       refillJournal,
       containerReturns,
       placements,
+      containerConsumption,
     ] = await Promise.all([
       core.coffeeLocations(),
       core.coffeeBunkerConfig(),
@@ -51,6 +52,7 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       core.recentCoffeeRefills(300),
       core.coffeeContainerReturns(300),
       core.coffeePlacements(),
+      core.coffeeContainerConsumption(from, to),
     ]);
     return (
       <CoffeeClient
@@ -71,6 +73,7 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
         refillJournal={refillJournal}
         containerReturns={containerReturns}
         placements={placements}
+        containerConsumption={containerConsumption}
         defaultOwnerRef={defaultOwnerRef}
       />
     );

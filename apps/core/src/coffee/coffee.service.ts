@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
@@ -22,9 +22,13 @@ import {
   consumptionReport,
   costOf,
   fillStatus,
+  matchReturnsToRefills,
   netWeight,
   normalizeSourceKey,
   reconcileConsumption,
+  type ContainerConsumptionRow,
+  type ContainerFillEvent,
+  type ContainerReturnEvent,
   type LatestRefillRow,
   type ReconcileResult,
   type RecipeLine,
@@ -55,6 +59,28 @@ export interface MachineCandidateRow {
   name: string;
   ref: string | null;
   point: string | null;
+}
+
+/** Сводка расхода по наборам одной точки за период. */
+export interface ContainerConsumptionLocation {
+  locationId: string;
+  locationName: string;
+  /** Сумма расхода по посчитанным парам, г. */
+  grams: number;
+  /** Себестоимость по ценам ингредиентов; null — цены не заведены. */
+  cost: number | null;
+  pairs: number;
+  /** Пары, где расход посчитать нельзя (нет тары / возврат тяжелее заливки). */
+  unknownPairs: number;
+}
+
+export interface ContainerConsumptionReport {
+  from: string;
+  to: string;
+  rows: (ContainerConsumptionRow & { ingredient: string | null })[];
+  locations: ContainerConsumptionLocation[];
+  totalGrams: number;
+  totalCost: number | null;
 }
 
 /** Период размещения аппарата на точке. endDate=null — стоит сейчас. */
@@ -726,6 +752,103 @@ export class CoffeeService {
       locationNote: r.locationNote,
       createdBy: r.createdBy,
     }));
+  }
+
+  /**
+   * Фактический расход по наборам за период: возврат закрывает предыдущую
+   * заливку того же (набор, позиция), расход = нетто заливки − нетто возврата
+   * (обе стороны через одну тару). Это то, что референс-приложение владельца
+   * считало руками в «Потраченных ингредиентах», — теперь считается само,
+   * включая импортированную историю. Себестоимость — по цене ингредиента
+   * позиции; у позиции с двумя ингредиентами цена неоднозначна → null.
+   */
+  async containerConsumption(from: string, to: string): Promise<ContainerConsumptionReport> {
+    const [fills, returns, tareByKey, config] = await Promise.all([
+      this.db
+        .select({
+          date: coffeeRefill.enteredDate,
+          position: coffeeRefill.position,
+          containerNumber: coffeeRefill.containerNumber,
+          filledWeight: coffeeRefill.filledWeight,
+          locationId: coffeeRefill.locationId,
+          locationName: coffeeLocation.name,
+        })
+        .from(coffeeRefill)
+        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .where(
+          and(isNotNull(coffeeRefill.containerNumber), gte(coffeeRefill.enteredDate, from), lte(coffeeRefill.enteredDate, to)),
+        ),
+      this.db
+        .select()
+        .from(coffeeContainerReturn)
+        .where(and(gte(coffeeContainerReturn.returnedDate, from), lte(coffeeContainerReturn.returnedDate, to))),
+      this.tareByKey(),
+      this.bunkerConfig(),
+    ]);
+
+    const fillEvents: ContainerFillEvent[] = fills.map((f) => ({
+      date: f.date,
+      position: f.position,
+      containerNumber: f.containerNumber!,
+      netWeight: netWeight(f.filledWeight, tareByKey.get(`${f.containerNumber}:${f.position}`) ?? null),
+      locationId: f.locationId,
+      locationName: f.locationName,
+    }));
+    const returnEvents: ContainerReturnEvent[] = returns.map((r) => ({
+      date: r.returnedDate,
+      position: r.position,
+      containerNumber: r.containerNumber,
+      netWeight: netWeight(r.weight, tareByKey.get(`${r.containerNumber}:${r.position}`) ?? null),
+    }));
+
+    const rows = matchReturnsToRefills(fillEvents, returnEvents);
+
+    // Цена позиции: единственный ингредиент с заведённой ценой, иначе null.
+    const priceByPosition = new Map<number, number | null>();
+    for (let pos = 1; pos <= 8; pos++) {
+      const items = config.filter((c) => c.position === pos);
+      priceByPosition.set(pos, items.length === 1 ? (items[0]!.purchasePrice ?? null) : null);
+    }
+    const ingredientByPosition = new Map<number, string>();
+    for (const c of config) {
+      const prev = ingredientByPosition.get(c.position);
+      ingredientByPosition.set(c.position, prev ? `${prev}/${c.ingredientName}` : c.ingredientName);
+    }
+
+    const acc = new Map<
+      string,
+      { locationId: string; locationName: string; grams: number; cost: number; costKnown: boolean; pairs: number; unknownPairs: number }
+    >();
+    for (const r of rows) {
+      const g =
+        acc.get(r.locationId) ??
+        { locationId: r.locationId, locationName: r.locationName, grams: 0, cost: 0, costKnown: false, pairs: 0, unknownPairs: 0 };
+      g.pairs += 1;
+      if (r.consumedGrams === null) {
+        g.unknownPairs += 1;
+      } else {
+        g.grams += r.consumedGrams;
+        const cost = costOf(r.consumedGrams, priceByPosition.get(r.position) ?? null);
+        if (cost !== null) {
+          g.cost += cost;
+          g.costKnown = true;
+        }
+      }
+      acc.set(r.locationId, g);
+    }
+    // Цены нет ни у одной пары точки — стоимость null, а не «0 сум».
+    const locations = [...acc.values()]
+      .map(({ costKnown, cost, ...rest }) => ({ ...rest, cost: costKnown ? cost : null }))
+      .sort((a, b) => b.grams - a.grams);
+
+    return {
+      from,
+      to,
+      rows: rows.map((r) => ({ ...r, ingredient: ingredientByPosition.get(r.position) ?? null })),
+      locations,
+      totalGrams: locations.reduce((s, l) => s + l.grams, 0),
+      totalCost: locations.some((l) => l.cost !== null) ? locations.reduce((s, l) => s + (l.cost ?? 0), 0) : null,
+    };
   }
 
   // ── Мойка/обслуживание ───────────────────────────────────────────────────

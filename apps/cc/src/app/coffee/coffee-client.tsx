@@ -4,6 +4,7 @@ import { Fragment, useMemo, useState, useTransition } from "react";
 import type {
   CoffeeBunkerIngredient,
   CoffeeConsumableRow,
+  CoffeeContainerConsumptionReport,
   CoffeeContainerReturnRow,
   CoffeeFillStatusRow,
   CoffeeLocation,
@@ -72,6 +73,8 @@ export function CoffeeClient(props: {
   containerReturns: CoffeeContainerReturnRow[];
   /** История размещений: какой аппарат когда на какой точке стоял. */
   placements: CoffeePlacementRow[];
+  /** Фактический расход по наборам за период сверки (заливка − возврат). */
+  containerConsumption: CoffeeContainerConsumptionReport;
   /** Первый активный человек VendHub — кому уходит задача из «Сверки». */
   defaultOwnerRef: string | null;
 }) {
@@ -113,6 +116,7 @@ export function CoffeeClient(props: {
           from={props.reconcileFrom}
           to={props.reconcileTo}
           washScheduleStatus={props.washScheduleStatus}
+          containerConsumption={props.containerConsumption}
           defaultOwnerRef={props.defaultOwnerRef}
         />
       )}
@@ -534,6 +538,7 @@ function ReconcileTab({
   from,
   to,
   washScheduleStatus,
+  containerConsumption,
   defaultOwnerRef,
 }: {
   fillStatus: CoffeeFillStatusRow[];
@@ -541,6 +546,7 @@ function ReconcileTab({
   from: string;
   to: string;
   washScheduleStatus: CoffeeWashScheduleStatusRow[];
+  containerConsumption: CoffeeContainerConsumptionReport;
   defaultOwnerRef: string | null;
 }) {
   const underfills = fillStatus.filter((r) => r.status === "underfill");
@@ -548,9 +554,55 @@ function ReconcileTab({
     .map((g) => ({ ...g, rows: g.rows.filter((r) => r.reconcile.status === "anomaly") }))
     .filter((g) => g.rows.length > 0);
   const overdueWash = washScheduleStatus.filter((r) => r.status === "overdue");
+  const cc = containerConsumption;
+  const num = (n: number) => n.toLocaleString("ru-RU");
 
   return (
     <>
+      <div className="section-title">
+        Расход по наборам (факт) · {cc.from} — {cc.to}
+      </div>
+      {cc.locations.length === 0 ? (
+        <p className="muted">
+          Пар «заливка → возврат» за период нет. Расход появляется, когда набор засыпали (с номером) и вернули.
+        </p>
+      ) : (
+        <>
+          <p className="hint">
+            Всего израсходовано <b>{num(cc.totalGrams)} г</b>
+            {cc.totalCost !== null ? <> · себестоимость <b>{num(Math.round(cc.totalCost))} сум</b></> : " · цены ингредиентов не заведены"}
+            {" "}· пар {cc.rows.length}. Считается как нетто заливки − нетто возврата через тару набора — без телеметрии.
+          </p>
+          <table className="coffee-table">
+            <thead>
+              <tr>
+                <th>Точка</th>
+                <th>Расход, г</th>
+                <th>Себестоимость, сум</th>
+                <th>Пар</th>
+                <th>Не посчитать</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cc.locations.map((l) => (
+                <tr key={l.locationId}>
+                  <td>{l.locationName}</td>
+                  <td>{num(l.grams)}</td>
+                  <td>{l.cost !== null ? num(Math.round(l.cost)) : "—"}</td>
+                  <td>{l.pairs}</td>
+                  <td>{l.unknownPairs > 0 ? l.unknownPairs : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {cc.locations.some((l) => l.unknownPairs > 0) && (
+            <p className="hint">
+              «Не посчитать» — пары без калиброванной тары или где возврат тяжелее заливки; они не выдумываются нулями.
+            </p>
+          )}
+        </>
+      )}
+
       <div className="section-title">Недолив заливки (последняя заливка против эталона)</div>
       {underfills.length === 0 ? (
         <p className="muted">Недолива не обнаружено.</p>

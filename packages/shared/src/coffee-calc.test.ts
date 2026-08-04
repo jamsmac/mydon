@@ -7,9 +7,12 @@ import {
   consumedSince,
   costOf,
   fillStatus,
+  matchReturnsToRefills,
   netWeight,
   parseContainerReturnMessage,
   reconcileConsumption,
+  type ContainerFillEvent,
+  type ContainerReturnEvent,
   type LatestRefillRow,
 } from "./coffee-calc";
 
@@ -151,5 +154,68 @@ describe("parseContainerReturnMessage — строки «позиция. наб�
   it("обычный текст без числовых строк — не сообщение о возвратах", () => {
     const res = parseContainerReturnMessage("Привет, завтра приедем позже");
     assert.deepEqual(res, { returns: [], locationNote: null, rejected: [] });
+  });
+});
+
+describe("matchReturnsToRefills — расход по наборам (заливка − возврат)", () => {
+  const fill = (over: Partial<ContainerFillEvent> = {}): ContainerFillEvent => ({
+    date: "2026-01-10",
+    position: 7,
+    containerNumber: 5,
+    netWeight: 1000,
+    locationId: "loc-1",
+    locationName: "AH",
+    ...over,
+  });
+  const ret = (over: Partial<ContainerReturnEvent> = {}): ContainerReturnEvent => ({
+    date: "2026-01-17",
+    position: 7,
+    containerNumber: 5,
+    netWeight: 400,
+    ...over,
+  });
+
+  it("возврат закрывает предыдущую заливку той же пары: расход = fillNet − returnNet", () => {
+    const rows = matchReturnsToRefills([fill()], [ret()]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.consumedGrams, 600);
+    assert.equal(rows[0]!.locationName, "AH", "расход относится к точке заливки");
+  });
+
+  it("цикл заливка→возврат→заливка→возврат: каждая пара считается отдельно", () => {
+    const rows = matchReturnsToRefills(
+      [fill(), fill({ date: "2026-01-20", netWeight: 900, locationName: "Кпп", locationId: "loc-2" })],
+      [ret(), ret({ date: "2026-01-27", netWeight: 300 })],
+    );
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0]!.consumedGrams, 600);
+    assert.equal(rows[1]!.consumedGrams, 600);
+    assert.equal(rows[1]!.locationName, "Кпп", "второй период — уже на новой точке");
+  });
+
+  it("возврат тяжелее заливки — противоречие: consumedGrams=null, не отрицательный расход", () => {
+    const rows = matchReturnsToRefills([fill({ netWeight: 300 })], [ret({ netWeight: 700 })]);
+    assert.equal(rows[0]!.consumedGrams, null);
+  });
+
+  it("нет тары (netWeight null с любой стороны) — расход честно неизвестен", () => {
+    assert.equal(matchReturnsToRefills([fill({ netWeight: null })], [ret()])[0]!.consumedGrams, null);
+    assert.equal(matchReturnsToRefills([fill()], [ret({ netWeight: null })])[0]!.consumedGrams, null);
+  });
+
+  it("возврат без предыдущей заливки (история началась с возврата) — пропускается", () => {
+    const rows = matchReturnsToRefills([fill({ date: "2026-02-01" })], [ret({ date: "2026-01-05" })]);
+    assert.equal(rows.length, 0);
+  });
+
+  it("другая пара (набор, позиция) не подхватывается", () => {
+    const rows = matchReturnsToRefills([fill({ containerNumber: 6 })], [ret()]);
+    assert.equal(rows.length, 0);
+  });
+
+  it("два возврата после одной заливки: второй остаётся без пары, а не делит её", () => {
+    const rows = matchReturnsToRefills([fill()], [ret(), ret({ date: "2026-01-25", netWeight: 100 })]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.returnDate, "2026-01-17");
   });
 });
