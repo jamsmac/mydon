@@ -21,6 +21,7 @@ type Row = Record<string, unknown>;
 function stubDb(selects: Row[][], updateResults: Row[][] = []) {
   const inserted: { rows: Row[] }[] = [];
   const updated: { set: Row }[] = [];
+  const deletes: number[] = [];
   let call = 0;
   let updCall = 0;
   const makeChain = () => {
@@ -54,15 +55,23 @@ function stubDb(selects: Row[][], updateResults: Row[][] = []) {
         updated.push({ set });
         const result = updateResults[updCall] ?? [];
         updCall += 1;
-        return { where: () => ({ returning: async () => result }) };
+        const p = Promise.resolve();
+        return {
+          where: () => ({
+            returning: async () => result,
+            then: p.then.bind(p),
+            catch: p.catch.bind(p),
+          }),
+        };
       },
     }),
+    delete: () => ({ where: async () => deletes.push(1) }),
   };
   const db = {
     select: makeChain,
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
-  return { db, inserted, updated };
+  return { db, inserted, updated, deletes };
 }
 
 const ORG = [{ id: "org-1" }];
@@ -261,19 +270,28 @@ describe("договоры (contracts)", () => {
     flowDocNos: ["СФ 2026-15", "СФ 2026-31"],
   };
 
+  // Порядок select-ов шага: свои карточки (провенанс), существующие по номеру,
+  // клиенты по ИНН, своя компания.
+  const SELECTS = (mine: Row[], existing: Row[]) => [
+    ORG,
+    mine,
+    existing,
+    [{ id: "client-1", ref: "306955509" }],
+    [{ id: "own-1" }],
+  ];
+
   it("новый договор создаётся: клиент и продавец по FK, приходы привязываются", async () => {
-    const { db, inserted, updated } = stubDb(
-      [
-        ORG,
-        [], // существующих договоров нет
-        [{ id: "client-1", ref: "306955509" }],
-        [{ id: "own-1" }],
-      ],
-      [[{ id: "mf-1" }, { id: "mf-2" }]],
-    );
+    const { db, inserted, updated } = stubDb(SELECTS([], []), [[{ id: "mf-1" }, { id: "mf-2" }]]);
     const s = new RegistryImportService(db);
     const r = await s.importGloberent({ contracts: [base] });
-    assert.deepEqual(r.contracts, { created: 1, skipped: 0, errors: [], flowsLinked: 2 });
+    assert.deepEqual(r.contracts, {
+      created: 1,
+      updated: 0,
+      deleted: 0,
+      skipped: 0,
+      errors: [],
+      flowsLinked: 2,
+    });
     const row = inserted[0].rows[0];
     assert.equal(row.contractNo, "GFH-04/0126");
     assert.equal(row.clientId, "client-1");
@@ -285,26 +303,82 @@ describe("договоры (contracts)", () => {
     assert.equal((updated[0].set as { contractId?: unknown }).contractId, "ins-1");
   });
 
-  it("существующий номер пропускается, но привязка приходов добирается", async () => {
-    const { db, inserted, updated } = stubDb(
-      [
-        ORG,
-        [{ id: "c-old", no: "GFH-04/0126" }],
-        [{ id: "client-1", ref: "306955509" }],
-        [{ id: "own-1" }],
-      ],
-      [[{ id: "mf-9" }]],
-    );
+  it("своя карточка обновляется: разбор выгрузки уточняется каждым прогоном", async () => {
+    const mine = [{ id: "c-mine", no: "GFH-04/0126" }];
+    const { db, updated } = stubDb(SELECTS(mine, mine), [[], [{ id: "mf-9" }]]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({
+      source: "Didox: реестры документов",
+      contracts: [{ ...base, totalWithVat: 999, status: "closed" }],
+    });
+    assert.equal(r.contracts.updated, 1);
+    assert.equal(r.contracts.created, 0);
+    assert.equal(r.contracts.skipped, 0);
+    const set = updated[0].set as { totalWithVat?: unknown; status?: unknown };
+    assert.equal(set.totalWithVat, "999");
+    assert.equal(set.status, "closed");
+  });
+
+  it("карточка владельца не трогается: правки из панели важнее сида", async () => {
+    const { db, updated } = stubDb(SELECTS([], [{ id: "c-hand", no: "GFH-04/0126" }]), [
+      [{ id: "mf-1" }],
+    ]);
     const s = new RegistryImportService(db);
     const r = await s.importGloberent({ contracts: [base] });
-    assert.deepEqual(r.contracts, { created: 0, skipped: 1, errors: [], flowsLinked: 1 });
-    // Вставок договора не было — только аудит не пишется отдельной records.
-    assert.equal(inserted.filter((i) => i.rows[0].contractNo !== undefined).length, 0);
-    assert.equal((updated[0].set as { contractId?: unknown }).contractId, "c-old");
+    assert.equal(r.contracts.skipped, 1);
+    assert.equal(r.contracts.updated, 0);
+    // Единственный update — привязка прихода, самой карточки он не касается.
+    assert.equal(updated.length, 1);
+    assert.equal((updated[0].set as { contractId?: unknown }).contractId, "c-hand");
+  });
+
+  it("устаревшая своя карточка удаляется, если с ней не работали", async () => {
+    const mine = [
+      { id: "c-mine", no: "GFH-04/0126" },
+      { id: "c-junk", no: "1" }, // прошлая версия разбора — в наборе больше нет
+    ];
+    const { db, deletes, updated } = stubDb(
+      [...SELECTS(mine, mine), [{ n: 0 }], [{ n: 0 }]],
+      [[], [{ id: "mf-1" }], []],
+    );
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({ contracts: [base], contractsFinal: true });
+    assert.equal(r.contracts.deleted, 1);
+    assert.equal(deletes.length, 1);
+    // Приходы удалённой карточки сначала отвязываются, иначе FK не пустит.
+    assert.ok(updated.some((u) => (u.set as { contractId?: unknown }).contractId === null));
+  });
+
+  it("устаревшая карточка с актами остаётся жить и говорит об этом словами", async () => {
+    const mine = [
+      { id: "c-mine", no: "GFH-04/0126" },
+      { id: "c-used", no: "СТАРЫЙ-1/24" },
+    ];
+    const { db, deletes } = stubDb(
+      [...SELECTS(mine, mine), [{ n: 2 }], [{ n: 0 }]],
+      [[], [{ id: "mf-1" }]],
+    );
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({ contracts: [base], contractsFinal: true });
+    assert.equal(r.contracts.deleted, 0);
+    assert.equal(deletes.length, 0);
+    assert.match(r.contracts.errors[0], /с ней работали/);
+  });
+
+  it("без contractsFinal ничего не удаляется — партия не весь набор", async () => {
+    const mine = [
+      { id: "c-mine", no: "GFH-04/0126" },
+      { id: "c-junk", no: "1" },
+    ];
+    const { db, deletes } = stubDb(SELECTS(mine, mine), [[], [{ id: "mf-1" }]]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({ contracts: [base] });
+    assert.equal(r.contracts.deleted, 0);
+    assert.equal(deletes.length, 0);
   });
 
   it("кривой договор падает в errors словами, остальные создаются", async () => {
-    const { db } = stubDb([ORG, [], [{ id: "client-1", ref: "306955509" }], []]);
+    const { db } = stubDb(SELECTS([], []));
     const s = new RegistryImportService(db);
     const r = await s.importGloberent({
       contracts: [base, { ...base, contractNo: "X-1/24", contractDate: "28.01.2026" }],

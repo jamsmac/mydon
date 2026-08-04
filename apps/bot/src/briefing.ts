@@ -52,17 +52,26 @@ export function countStuckDeals(
   }).length;
 }
 
-/** Действующие договоры, по которым не пришло ни сума. */
+/**
+ * Действующие договоры, по которым не пришло ни сума.
+ *
+ * Исторические карточки из выгрузки Didox (createdFrom) в счёт не идут:
+ * платежей по ним в системе нет вовсе — Didox знает документы, но не деньги,
+ * поэтому «без оплаты» у них не факт, а пробел в данных. Сигнал остаётся про
+ * договоры, заведённые в системе, где оплату действительно ждут.
+ */
 export function countUnpaidContracts(
-  contracts: readonly { status: string; paidUzs: number }[],
+  contracts: readonly { status: string; paidUzs: number; createdFrom?: string | null }[],
 ): number {
-  return contracts.filter((c) => c.status === "active" && !(c.paidUzs > 0)).length;
+  return contracts.filter(
+    (c) => c.status === "active" && !(c.paidUzs > 0) && !(c.createdFrom ?? "").trim(),
+  ).length;
 }
 
 /** Узкий контракт клиента Core для сбора сигналов GLOBERENT (упрощает тесты). */
 export interface GloberentSignalsSource {
   globerentDueSoon(): Promise<{ dueSoonIn: unknown[]; dueSoonOut: unknown[] }>;
-  globerentContracts(): Promise<{ status: string; paidUzs: number }[]>;
+  globerentContracts(): Promise<{ status: string; paidUzs: number; createdFrom?: string | null }[]>;
   globerentUnits(): Promise<{ salesStage: string | null; updatedAt: string }[]>;
 }
 
@@ -151,8 +160,10 @@ export function formatBriefing(
     const parts: string[] = [];
     if (globerent.dueSoonIn > 0) parts.push(`получить в ≤7 дней: ${globerent.dueSoonIn}`);
     if (globerent.dueSoonOut > 0) parts.push(`заплатить в ≤7 дней: ${globerent.dueSoonOut}`);
-    if (globerent.contractsUnpaid > 0) parts.push(`договоры без оплаты: ${globerent.contractsUnpaid}`);
-    if (globerent.dealsStuck > 0) parts.push(`сделки без движения >14 дней: ${globerent.dealsStuck}`);
+    if (globerent.contractsUnpaid > 0)
+      parts.push(`договоры без оплаты: ${globerent.contractsUnpaid}`);
+    if (globerent.dealsStuck > 0)
+      parts.push(`сделки без движения >14 дней: ${globerent.dealsStuck}`);
     lines.push("", `🏗 GLOBERENT: ${parts.join(", ")} — вкладки «Финансы» и «Склад».`);
   }
 
@@ -169,14 +180,9 @@ export function formatBriefing(
 
 /** Карточка согласования с кнопками (ТЗ FR-3). */
 export function formatApproval(a: ApprovalRow): string {
-  return [
-    "✋ Требуется решение",
-    "",
-    a.action,
-    "",
-    `Агент: ${a.agent}`,
-    `Уровень: ${a.tier}`,
-  ].join("\n");
+  return ["✋ Требуется решение", "", a.action, "", `Агент: ${a.agent}`, `Уровень: ${a.tier}`].join(
+    "\n",
+  );
 }
 
 export function approvalKeyboard(id: string) {

@@ -745,7 +745,7 @@
   ],
   "contracts": [
     {
-      "contractNo": "GHTO 08/0523",
+      "contractNo": "GHTO-08/0523",
       "contractDate": "2023-05-11",
       "buyerName": "\"ALG SALES\" MCHJ",
       "buyerInn": "305143862",
@@ -798,17 +798,17 @@
           "totalWithVat": 360640000.0
         }
       ],
-      "invoicedTotal": 367920000.0,
-      "flowDocNos": ["СФ 2024-3", "СФ 2024-30"]
+      "invoicedTotal": 360640000.0,
+      "flowDocNos": ["СФ 2024-30"]
     },
     {
-      "contractNo": "RA 03/2024",
+      "contractNo": "RA-03/2024",
       "contractDate": "2024-01-03",
       "buyerName": "\"ALLIANCE-LEASING\" AJ",
       "buyerInn": "300658446",
       "totalWithVat": 694848.0,
       "totalVat": 0.0,
-      "status": "active",
+      "status": "closed",
       "subject": "Аренда",
       "didoxRows": [
         {
@@ -818,17 +818,30 @@
         }
       ],
       "didoxDuplicatesDropped": 1,
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 8338176.0,
+      "flowDocNos": [
+        "СФ 2024-124",
+        "СФ 2024-139",
+        "СФ 2024-155",
+        "СФ 2024-177",
+        "СФ 2024-190",
+        "СФ 2024-22",
+        "СФ 2024-41",
+        "СФ 2024-53",
+        "СФ 2024-6",
+        "СФ 2024-67",
+        "СФ 2024-83",
+        "СФ 2024-98"
+      ]
     },
     {
-      "contractNo": "RA 02/2024",
+      "contractNo": "RA-02/2024",
       "contractDate": "2024-01-03",
       "buyerName": "\"KVORUM\" MCHJ",
       "buyerInn": "300732670",
       "totalWithVat": 694848.0,
       "totalVat": 0.0,
-      "status": "active",
+      "status": "closed",
       "subject": "Аренда",
       "didoxRows": [
         {
@@ -838,17 +851,30 @@
         }
       ],
       "didoxDuplicatesDropped": 1,
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 8338176.0,
+      "flowDocNos": [
+        "СФ 2024-123",
+        "СФ 2024-138",
+        "СФ 2024-154",
+        "СФ 2024-176",
+        "СФ 2024-189",
+        "СФ 2024-21",
+        "СФ 2024-40",
+        "СФ 2024-5",
+        "СФ 2024-52",
+        "СФ 2024-66",
+        "СФ 2024-82",
+        "СФ 2024-97"
+      ]
     },
     {
-      "contractNo": "RA 01/2024",
+      "contractNo": "RA-01/2024",
       "contractDate": "2024-01-03",
       "buyerName": "\"ALG SALES\" MCHJ",
       "buyerInn": "305143862",
       "totalWithVat": 3126816.0,
       "totalVat": 0.0,
-      "status": "active",
+      "status": "closed",
       "subject": "Аренда",
       "didoxRows": [
         {
@@ -857,11 +883,24 @@
           "totalWithVat": 3126816.0
         }
       ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 37521792.0,
+      "flowDocNos": [
+        "СФ 2024-122",
+        "СФ 2024-137",
+        "СФ 2024-153",
+        "СФ 2024-175",
+        "СФ 2024-188",
+        "СФ 2024-20",
+        "СФ 2024-39",
+        "СФ 2024-4",
+        "СФ 2024-51",
+        "СФ 2024-65",
+        "СФ 2024-81",
+        "СФ 2024-96"
+      ]
     },
     {
-      "contractNo": "GHTO-1/0124",
+      "contractNo": "GHTO-01/0124",
       "contractDate": "2024-01-04",
       "buyerName": "\"DECONEXT CORP\" MCHJ XK",
       "buyerInn": "309709343",
@@ -1152,13 +1191,13 @@
       "flowDocNos": ["СФ 2024-29"]
     },
     {
-      "contractNo": "RA 04/2024",
+      "contractNo": "RA-04/2024",
       "contractDate": "2024-03-01",
       "buyerName": "\"ASIA LEASING GROUP\" MCHJ",
       "buyerInn": "207137324",
       "totalWithVat": 1042272.0,
       "totalVat": 0.0,
-      "status": "active",
+      "status": "closed",
       "subject": "Аренда",
       "didoxRows": [
         {
@@ -1167,8 +1206,19 @@
           "totalWithVat": 1042272.0
         }
       ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 10422720.0,
+      "flowDocNos": [
+        "СФ 2024-125",
+        "СФ 2024-140",
+        "СФ 2024-156",
+        "СФ 2024-178",
+        "СФ 2024-191",
+        "СФ 2024-42",
+        "СФ 2024-54",
+        "СФ 2024-68",
+        "СФ 2024-84",
+        "СФ 2024-99"
+      ]
     },
     {
       "contractNo": "GHTO-07/0324",
@@ -1475,29 +1525,23 @@
       "flowDocNos": ["СФ 2024-58"]
     },
     {
-      "contractNo": "GFH-18/0424",
+      "contractNo": "GFH-18/0424 (310817718)",
       "contractDate": "2024-04-17",
       "buyerName": "\"KMITA POLYMERS\" MCHJ XK",
       "buyerInn": "310817718",
-      "totalWithVat": 587608000.0,
+      "totalWithVat": 574560000.0,
       "totalVat": 0.0,
       "status": "closed",
       "subject": "купля-продажа",
       "didoxRows": [
         {
           "doc": "купля-продажа",
-          "date": "2024-04-22",
-          "totalWithVat": 13048000.0
-        },
-        {
-          "doc": "купля-продажа",
           "date": "2024-04-17",
           "totalWithVat": 574560000.0
         }
       ],
-      "extraDates": ["2024-04-22"],
-      "invoicedTotal": 587608000.0,
-      "flowDocNos": ["СФ 2024-102", "СФ 2024-49", "СФ 2024-70"]
+      "invoicedTotal": 574560000.0,
+      "flowDocNos": ["СФ 2024-102", "СФ 2024-70"]
     },
     {
       "contractNo": "GFH-10/0324",
@@ -1536,6 +1580,25 @@
       ],
       "invoicedTotal": 1701000.0,
       "flowDocNos": ["СФ 2024-59"]
+    },
+    {
+      "contractNo": "GFH-18/0424 (304455578)",
+      "contractDate": "2024-04-22",
+      "buyerName": "\"IDEAL WATER SERVICE\" MCHJ",
+      "buyerInn": "304455578",
+      "totalWithVat": 13048000.0,
+      "totalVat": 0.0,
+      "status": "closed",
+      "subject": "купля-продажа",
+      "didoxRows": [
+        {
+          "doc": "купля-продажа",
+          "date": "2024-04-22",
+          "totalWithVat": 13048000.0
+        }
+      ],
+      "invoicedTotal": 13048000.0,
+      "flowDocNos": ["СФ 2024-49"]
     },
     {
       "contractNo": "GHTO-14/0424",
@@ -1668,8 +1731,8 @@
           "totalWithVat": 1529920000.0
         }
       ],
-      "invoicedTotal": 3059840000.0,
-      "flowDocNos": ["СФ 2024-101", "СФ 2024-110", "СФ 2024-144", "СФ 2024-145", "СФ 2024-64"]
+      "invoicedTotal": 1529920000.0,
+      "flowDocNos": ["СФ 2024-101", "СФ 2024-110", "СФ 2024-64"]
     },
     {
       "contractNo": "GHTO-17/0524",
@@ -1695,8 +1758,8 @@
       "contractDate": "2024-05-30",
       "buyerName": "\"TARLEPLAST\" MCHJ",
       "buyerInn": "204567228",
-      "totalWithVat": 36274827.28,
-      "totalVat": 3524849.62,
+      "totalWithVat": 66363780.78,
+      "totalVat": 6748666.07,
       "status": "active",
       "subject": "счет на оплату к",
       "didoxRows": [
@@ -1758,11 +1821,11 @@
       "flowDocNos": ["СФ 2024-73"]
     },
     {
-      "contractNo": "GHTO-18/0624",
+      "contractNo": "GHTO-18/0624 (202331182)",
       "contractDate": "2024-06-05",
       "buyerName": "\"UZCASEMASH\" MCHJ QK",
       "buyerInn": "202331182",
-      "totalWithVat": 73391360.0,
+      "totalWithVat": 70560000.0,
       "totalVat": 0.0,
       "status": "active",
       "subject": "на годовое сервисное обслуживание",
@@ -1778,11 +1841,6 @@
           "totalWithVat": 12152000.0
         },
         {
-          "doc": "ремонтное и техническое обслуживание  спецтехники",
-          "date": "2024-06-19",
-          "totalWithVat": 2831360.0
-        },
-        {
           "doc": "счет на оплату к",
           "date": "2024-06-05",
           "totalWithVat": 11389000.0
@@ -1793,9 +1851,9 @@
           "totalWithVat": 70560000.0
         }
       ],
-      "extraDates": ["2024-06-19", "2024-07-23", "2024-09-17"],
-      "invoicedTotal": 33204360.0,
-      "flowDocNos": ["СФ 2024-132", "СФ 2024-134", "СФ 2024-74", "СФ 2024-86"]
+      "extraDates": ["2024-07-23", "2024-09-17"],
+      "invoicedTotal": 30373000.0,
+      "flowDocNos": ["СФ 2024-132", "СФ 2024-134", "СФ 2024-74"]
     },
     {
       "contractNo": "GHTO-20/0624",
@@ -1854,6 +1912,25 @@
       ],
       "invoicedTotal": 2576000.0,
       "flowDocNos": ["СФ 2024-77"]
+    },
+    {
+      "contractNo": "GHTO-18/0624 (310443930)",
+      "contractDate": "2024-06-19",
+      "buyerName": "\"A POLYMER INDUSTRIES\" MCHJ",
+      "buyerInn": "310443930",
+      "totalWithVat": 2831360.0,
+      "totalVat": 0.0,
+      "status": "closed",
+      "subject": "ремонтное и техническое обслуживание  спецтехники",
+      "didoxRows": [
+        {
+          "doc": "ремонтное и техническое обслуживание  спецтехники",
+          "date": "2024-06-19",
+          "totalWithVat": 2831360.0
+        }
+      ],
+      "invoicedTotal": 2831360.0,
+      "flowDocNos": ["СФ 2024-86"]
     },
     {
       "contractNo": "PGF-07/0624",
@@ -2003,25 +2080,6 @@
           "doc": "купля-продажа",
           "date": "2024-07-11",
           "totalWithVat": 7280000.0
-        }
-      ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
-    },
-    {
-      "contractNo": "AB225",
-      "contractDate": "2024-07-11",
-      "buyerName": "\"TOSHKENT METALLURGIYA ZAVODI\" MCHJ",
-      "buyerInn": "304574612",
-      "totalWithVat": 336000000.0,
-      "totalVat": 0.0,
-      "status": "active",
-      "subject": "Договор",
-      "didoxRows": [
-        {
-          "doc": "Договор",
-          "date": "2024-07-11",
-          "totalWithVat": 336000000.0
         }
       ],
       "invoicedTotal": 0.0,
@@ -2257,29 +2315,23 @@
       "flowDocNos": ["СФ 2024-112"]
     },
     {
-      "contractNo": "GFH-32/0824",
+      "contractNo": "GFH-32/0824 (301447185)",
       "contractDate": "2024-08-19",
       "buyerName": "\"NAVOBOD NASLLI PARRANDA\" FX",
       "buyerInn": "301447185",
-      "totalWithVat": 284480000.0,
+      "totalWithVat": 269920000.0,
       "totalVat": 0.0,
-      "status": "active",
+      "status": "closed",
       "subject": "купля-продажа",
       "didoxRows": [
-        {
-          "doc": "купля-продажа",
-          "date": "2024-08-26",
-          "totalWithVat": 14560000.0
-        },
         {
           "doc": "купля-продажа",
           "date": "2024-08-19",
           "totalWithVat": 269920000.0
         }
       ],
-      "extraDates": ["2024-08-26"],
-      "invoicedTotal": 14560000.0,
-      "flowDocNos": ["СФ 2024-120"]
+      "invoicedTotal": 269920000.0,
+      "flowDocNos": ["СФ 2024-115"]
     },
     {
       "contractNo": "GFH-33/1224",
@@ -2339,6 +2391,25 @@
       "flowDocNos": ["СФ 2024-119"]
     },
     {
+      "contractNo": "GFH-32/0824 (309728684)",
+      "contractDate": "2024-08-26",
+      "buyerName": "\"NOVOPLAST TPE\" MCHJ",
+      "buyerInn": "309728684",
+      "totalWithVat": 14560000.0,
+      "totalVat": 0.0,
+      "status": "closed",
+      "subject": "купля-продажа",
+      "didoxRows": [
+        {
+          "doc": "купля-продажа",
+          "date": "2024-08-26",
+          "totalWithVat": 14560000.0
+        }
+      ],
+      "invoicedTotal": 14560000.0,
+      "flowDocNos": ["СФ 2024-120"]
+    },
+    {
       "contractNo": "GHTO-31/0824",
       "contractDate": "2024-08-26",
       "buyerName": "SP OOO \"CHORTOQ MINERAL WATER\"",
@@ -2396,32 +2467,26 @@
       "flowDocNos": ["СФ 2024-152"]
     },
     {
-      "contractNo": "GHTO-33/0924",
-      "contractDate": "2024-09-12",
-      "buyerName": "\"JIHOZVENT\" MCHJ",
-      "buyerInn": "203973278",
-      "totalWithVat": 7000000.0,
+      "contractNo": "GHTO-33/0924 (205946578)",
+      "contractDate": "2024-09-04",
+      "buyerName": "\"DAIICHI AGRO MASHINE\" MCHJ",
+      "buyerInn": "205946578",
+      "totalWithVat": 2632000.0,
       "totalVat": 0.0,
       "status": "closed",
       "subject": "ремонтное и техническое обслуживание  спецтехники",
       "didoxRows": [
         {
           "doc": "ремонтное и техническое обслуживание  спецтехники",
-          "date": "2024-09-12",
-          "totalWithVat": 4368000.0
-        },
-        {
-          "doc": "ремонтное и техническое обслуживание  спецтехники",
           "date": "2024-09-04",
           "totalWithVat": 2632000.0
         }
       ],
-      "extraDates": ["2024-09-04"],
-      "invoicedTotal": 7000000.0,
-      "flowDocNos": ["СФ 2024-127", "СФ 2024-129"]
+      "invoicedTotal": 2632000.0,
+      "flowDocNos": ["СФ 2024-127"]
     },
     {
-      "contractNo": "GFH-35-0924",
+      "contractNo": "GFH-35/0924",
       "contractDate": "2024-09-06",
       "buyerName": "\"BEK PRO\" MCHJ",
       "buyerInn": "305801842",
@@ -2438,6 +2503,25 @@
       ],
       "invoicedTotal": 330050000.0,
       "flowDocNos": ["СФ 2024-184"]
+    },
+    {
+      "contractNo": "GHTO-33/0924 (203973278)",
+      "contractDate": "2024-09-12",
+      "buyerName": "\"JIHOZVENT\" MCHJ",
+      "buyerInn": "203973278",
+      "totalWithVat": 4368000.0,
+      "totalVat": 0.0,
+      "status": "closed",
+      "subject": "ремонтное и техническое обслуживание  спецтехники",
+      "didoxRows": [
+        {
+          "doc": "ремонтное и техническое обслуживание  спецтехники",
+          "date": "2024-09-12",
+          "totalWithVat": 4368000.0
+        }
+      ],
+      "invoicedTotal": 4368000.0,
+      "flowDocNos": ["СФ 2024-129"]
     },
     {
       "contractNo": "GHTO-34/0924",
@@ -2478,7 +2562,7 @@
       "flowDocNos": ["СФ 2024-169"]
     },
     {
-      "contractNo": "ZH-08-0924",
+      "contractNo": "ZH-08/0924",
       "contractDate": "2024-09-30",
       "buyerName": "\"ZALALMOWAFAQ FZ\" MCHJ XK",
       "buyerInn": "311451249",
@@ -2514,26 +2598,6 @@
       ],
       "invoicedTotal": 3808000.0,
       "flowDocNos": ["СФ 2024-142"]
-    },
-    {
-      "contractNo": "TП-29069 oт 29.07.24",
-      "contractDate": "2024-10-08",
-      "buyerName": "\"TEXNOPARK\" MCHJ",
-      "buyerInn": "306493973",
-      "totalWithVat": 7952000.0,
-      "totalVat": 0.0,
-      "status": "active",
-      "subject": "счет на оплату №12 к",
-      "didoxRows": [
-        {
-          "doc": "счет на оплату №12 к",
-          "date": "2024-10-08",
-          "totalWithVat": 7952000.0
-        }
-      ],
-      "didoxDuplicatesDropped": 1,
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
     },
     {
       "contractNo": "GHTO-36/1024",
@@ -2597,7 +2661,7 @@
       "contractDate": "2024-10-21",
       "buyerName": "\"ENCO GROUP\" MCHJ",
       "buyerInn": "309961111",
-      "totalWithVat": 765811200.0,
+      "totalWithVat": 957264000.0,
       "totalVat": 20512800.0,
       "status": "closed",
       "subject": "счет на оплату №2 к",
@@ -2637,29 +2701,23 @@
       "flowDocNos": ["СФ 2024-167"]
     },
     {
-      "contractNo": "GFH-40/1024",
-      "contractDate": "2024-10-31",
-      "buyerName": "\"JBS7\" MCHJ",
-      "buyerInn": "302790623",
-      "totalWithVat": 283808000.0,
-      "totalVat": 30000000.0,
+      "contractNo": "GFH-40/1024 (302987384)",
+      "contractDate": "2024-10-28",
+      "buyerName": "MCHJ TEADORA PLYUS",
+      "buyerInn": "302987384",
+      "totalWithVat": 3808000.0,
+      "totalVat": 0.0,
       "status": "closed",
       "subject": "купля-продажа",
       "didoxRows": [
-        {
-          "doc": "купля-продажа",
-          "date": "2024-10-31",
-          "totalWithVat": 280000000.0
-        },
         {
           "doc": "купля-продажа",
           "date": "2024-10-28",
           "totalWithVat": 3808000.0
         }
       ],
-      "extraDates": ["2024-10-28"],
-      "invoicedTotal": 283808000.0,
-      "flowDocNos": ["СФ 2024-161", "СФ 2024-164"]
+      "invoicedTotal": 3808000.0,
+      "flowDocNos": ["СФ 2024-161"]
     },
     {
       "contractNo": "GHTO-38/1024",
@@ -2698,6 +2756,25 @@
       ],
       "invoicedTotal": 140000000.0,
       "flowDocNos": ["СФ 2024-163"]
+    },
+    {
+      "contractNo": "GFH-40/1024 (302790623)",
+      "contractDate": "2024-10-31",
+      "buyerName": "\"JBS7\" MCHJ",
+      "buyerInn": "302790623",
+      "totalWithVat": 280000000.0,
+      "totalVat": 30000000.0,
+      "status": "closed",
+      "subject": "купля-продажа",
+      "didoxRows": [
+        {
+          "doc": "купля-продажа",
+          "date": "2024-10-31",
+          "totalWithVat": 280000000.0
+        }
+      ],
+      "invoicedTotal": 280000000.0,
+      "flowDocNos": ["СФ 2024-164"]
     },
     {
       "contractNo": "ZH-11/1124",
@@ -3023,13 +3100,13 @@
       "flowDocNos": ["СФ 2025-1"]
     },
     {
-      "contractNo": "RA 03/2025",
+      "contractNo": "RA-03/2025",
       "contractDate": "2025-01-03",
       "buyerName": "\"ALLIANCE-LEASING\" AJ",
       "buyerInn": "300658446",
       "totalWithVat": 750000.0,
       "totalVat": 80357.14,
-      "status": "active",
+      "status": "closed",
       "subject": "Аренда",
       "didoxRows": [
         {
@@ -3038,17 +3115,17 @@
           "totalWithVat": 750000.0
         }
       ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 1500000.0,
+      "flowDocNos": ["СФ 2025-13", "СФ 2025-27"]
     },
     {
-      "contractNo": "RA 01/2025",
+      "contractNo": "RA-01/2025",
       "contractDate": "2025-01-03",
       "buyerName": "\"ALG SALES\" MCHJ",
       "buyerInn": "305143862",
       "totalWithVat": 1125000.0,
       "totalVat": 120535.71,
-      "status": "active",
+      "status": "closed",
       "subject": "Аренда",
       "didoxRows": [
         {
@@ -3057,17 +3134,17 @@
           "totalWithVat": 1125000.0
         }
       ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 2250000.0,
+      "flowDocNos": ["СФ 2025-11", "СФ 2025-25"]
     },
     {
-      "contractNo": "RA 02/2025",
+      "contractNo": "RA-02/2025",
       "contractDate": "2025-01-03",
       "buyerName": "\"KVORUM\" MCHJ",
       "buyerInn": "300732670",
       "totalWithVat": 562500.0,
       "totalVat": 60267.86,
-      "status": "active",
+      "status": "closed",
       "subject": "Аренда",
       "didoxRows": [
         {
@@ -3076,17 +3153,17 @@
           "totalWithVat": 562500.0
         }
       ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 1125000.0,
+      "flowDocNos": ["СФ 2025-12", "СФ 2025-26"]
     },
     {
-      "contractNo": "RA 04/2025",
+      "contractNo": "RA-04/2025",
       "contractDate": "2025-01-03",
       "buyerName": "\"ASIA LEASING GROUP\" MCHJ",
       "buyerInn": "207137324",
       "totalWithVat": 1125000.0,
       "totalVat": 120535.71,
-      "status": "active",
+      "status": "closed",
       "subject": "Аренда",
       "didoxRows": [
         {
@@ -3095,8 +3172,8 @@
           "totalWithVat": 1125000.0
         }
       ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 2250000.0,
+      "flowDocNos": ["СФ 2025-14", "СФ 2025-28"]
     },
     {
       "contractNo": "GHTO-01/0125",
@@ -3137,31 +3214,6 @@
       "flowDocNos": ["СФ 2025-2"]
     },
     {
-      "contractNo": "GFH-02/0125",
-      "contractDate": "2025-01-13",
-      "buyerName": "\"SULTON TEX GROUP\" MCHJ",
-      "buyerInn": "301796852",
-      "totalWithVat": 610400000.0,
-      "totalVat": 65400000.0,
-      "status": "closed",
-      "subject": "купля-продажа",
-      "didoxRows": [
-        {
-          "doc": "купля-продажа",
-          "date": "2025-01-17",
-          "totalWithVat": 280000000.0
-        },
-        {
-          "doc": "купля-продажа",
-          "date": "2025-01-13",
-          "totalWithVat": 330400000.0
-        }
-      ],
-      "extraDates": ["2025-01-17"],
-      "invoicedTotal": 610400000.0,
-      "flowDocNos": ["СФ 2025-4", "СФ 2025-9"]
-    },
-    {
       "contractNo": "PGF-01/0125",
       "contractDate": "2025-01-13",
       "buyerName": "\"ARSENAL UNIGROUP\" MCHJ XK СHEIIK",
@@ -3181,84 +3233,42 @@
       "flowDocNos": ["СФ 2025-44"]
     },
     {
-      "contractNo": "1",
-      "contractDate": "2025-02-07",
-      "buyerName": "\"UZCASEMASH\" MCHJ XK",
-      "buyerInn": "202331182",
-      "totalWithVat": 19040000.0,
-      "totalVat": 2040000.0,
-      "status": "active",
-      "subject": "счет на оплату к Договору GHTO-04/0225 от 06.02.2025",
+      "contractNo": "GFH-02/0125 (301796852)",
+      "contractDate": "2025-01-13",
+      "buyerName": "\"SULTON TEX GROUP\" MCHJ",
+      "buyerInn": "301796852",
+      "totalWithVat": 330400000.0,
+      "totalVat": 35400000.0,
+      "status": "closed",
+      "subject": "купля-продажа",
       "didoxRows": [
         {
-          "doc": "Дефектный акт к Договору № GHTO-02/0125 23/01/25",
-          "date": "2025-04-21",
-          "totalWithVat": 10416000.0
-        },
-        {
-          "doc": "счет на оплату к Договору GHTO-04/0225 от 06.02.2025",
-          "date": "2025-02-07",
-          "totalWithVat": 19040000.0
-        },
-        {
-          "doc": "счет на оплату к Договору GHTO-04/0225 от 04.02.2025",
-          "date": "2025-02-07",
-          "totalWithVat": 19040000.0
-        },
-        {
-          "doc": "счет на оплату к Договору № GHTO-02/0125 230125",
-          "date": "2025-02-03",
-          "totalWithVat": 1008000.0
-        },
-        {
-          "doc": "счет на оплату к Договору № GHTO-01/0125",
-          "date": "2025-01-15",
-          "totalWithVat": 9212000.0
-        },
-        {
-          "doc": "Дополнительное соглашение к Договору  GFH-01/0125 от 10.01.2025",
-          "date": "2025-01-15",
-          "totalWithVat": 4057984.0
+          "doc": "купля-продажа",
+          "date": "2025-01-13",
+          "totalWithVat": 330400000.0
         }
       ],
-      "extraDates": ["2025-01-15", "2025-02-03", "2025-04-21"],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 330400000.0,
+      "flowDocNos": ["СФ 2025-9"]
     },
     {
-      "contractNo": "2",
-      "contractDate": "2025-02-10",
-      "buyerName": "\"NOVIY DOM TASHKENT\" MCHJ",
-      "buyerInn": "306018952",
-      "totalWithVat": 13440000.0,
-      "totalVat": 1440000.0,
-      "status": "active",
-      "subject": "счет на оплату к Договору № GHTO-02/0125 23/01/25",
+      "contractNo": "GFH-02/0125 (308530688)",
+      "contractDate": "2025-01-17",
+      "buyerName": "\"AION BEVERAGES\" MCHJ",
+      "buyerInn": "308530688",
+      "totalWithVat": 280000000.0,
+      "totalVat": 30000000.0,
+      "status": "closed",
+      "subject": "купля-продажа",
       "didoxRows": [
         {
-          "doc": "счет на оплату к Договору GHTO-04/0225 от 06.02.2025",
-          "date": "2025-02-10",
-          "totalWithVat": 7116200.0
-        },
-        {
-          "doc": "счет на оплату к Договору GHTO-04/0225 от 04.02.2025",
-          "date": "2025-02-10",
-          "totalWithVat": 7116200.0
-        },
-        {
-          "doc": "счет на оплату к Договору № GHTO-02/0125 23/01/25",
-          "date": "2025-02-04",
-          "totalWithVat": 13440000.0
-        },
-        {
-          "doc": "счет на оплату к Договору № GHTO-01/0125",
-          "date": "2025-01-15",
-          "totalWithVat": 7280000.0
+          "doc": "купля-продажа",
+          "date": "2025-01-17",
+          "totalWithVat": 280000000.0
         }
       ],
-      "extraDates": ["2025-01-15", "2025-02-04"],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
+      "invoicedTotal": 280000000.0,
+      "flowDocNos": ["СФ 2025-4"]
     },
     {
       "contractNo": "PGF-02/0125",
@@ -3345,31 +3355,6 @@
       "flowDocNos": ["СФ 2025-37"]
     },
     {
-      "contractNo": "3",
-      "contractDate": "2025-02-04",
-      "buyerName": "\"NOVIY DOM TASHKENT\" MCHJ",
-      "buyerInn": "306018952",
-      "totalWithVat": 3360000.0,
-      "totalVat": 360000.0,
-      "status": "active",
-      "subject": "счет на оплату к Договору № GHTO-02/0125 23/01/25",
-      "didoxRows": [
-        {
-          "doc": "счет на оплату к Договору GHTO-04/0225 от 06.02.2025",
-          "date": "2025-05-12",
-          "totalWithVat": 448000.0
-        },
-        {
-          "doc": "счет на оплату к Договору № GHTO-02/0125 23/01/25",
-          "date": "2025-02-04",
-          "totalWithVat": 3360000.0
-        }
-      ],
-      "extraDates": ["2025-05-12"],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
-    },
-    {
       "contractNo": "GHTO-04/0225",
       "contractDate": "2025-02-06",
       "buyerName": "\"UZCASEMASH\" MCHJ XK",
@@ -3399,45 +3384,34 @@
       "flowDocNos": ["СФ 2025-138", "СФ 2025-149", "СФ 2025-23", "СФ 2025-24", "СФ 2025-81"]
     },
     {
-      "contractNo": "GFH-05/0225",
-      "contractDate": "2025-02-27",
-      "buyerName": "\"JBS7\" MCHJ",
-      "buyerInn": "302790623",
-      "totalWithVat": 566944000.0,
-      "totalVat": 60744000.0,
+      "contractNo": "GFH-05/0225 (303457361)",
+      "contractDate": "2025-02-06",
+      "buyerName": "\"FAMILY GROUP \" MCHJ",
+      "buyerInn": "303457361",
+      "totalWithVat": 43008000.0,
+      "totalVat": 4608000.0,
       "status": "closed",
       "subject": "купля-продажа",
       "didoxRows": [
-        {
-          "doc": "купля-продажа",
-          "date": "2025-02-27",
-          "totalWithVat": 523936000.0
-        },
         {
           "doc": "купля-продажа",
           "date": "2025-02-06",
           "totalWithVat": 43008000.0
         }
       ],
-      "extraDates": ["2025-02-06"],
-      "invoicedTotal": 566944000.0,
-      "flowDocNos": ["СФ 2025-22", "СФ 2025-29"]
+      "invoicedTotal": 43008000.0,
+      "flowDocNos": ["СФ 2025-22"]
     },
     {
-      "contractNo": "GHTO-05/0225",
-      "contractDate": "2025-02-20",
-      "buyerName": "\"UZ-SEMYUNG KO\" AJ",
-      "buyerInn": "202128505",
-      "totalWithVat": 252000000.0,
-      "totalVat": 27000000.0,
-      "status": "active",
-      "subject": "на годовое сервисное обслуживание",
+      "contractNo": "GHTO-05/0225 (305252861)",
+      "contractDate": "2025-02-18",
+      "buyerName": "\"ARTEL ELECTRONICS MANUFACTURING\" MCHJ",
+      "buyerInn": "305252861",
+      "totalWithVat": 106176000.0,
+      "totalVat": 11376000.0,
+      "status": "closed",
+      "subject": "счет на оплату №4к Договору",
       "didoxRows": [
-        {
-          "doc": "на годовое сервисное обслуживание",
-          "date": "2025-02-20",
-          "totalWithVat": 252000000.0
-        },
         {
           "doc": "счет на оплату №5 к Договору",
           "date": "2025-07-24",
@@ -3464,16 +3438,28 @@
           "totalWithVat": 22478400.0
         }
       ],
-      "extraDates": ["2025-02-18", "2025-04-04", "2025-05-12", "2025-05-20", "2025-07-24"],
-      "invoicedTotal": 229208000.0,
-      "flowDocNos": [
-        "СФ 2025-118",
-        "СФ 2025-160",
-        "СФ 2025-50",
-        "СФ 2025-62",
-        "СФ 2025-74",
-        "СФ 2025-75"
-      ]
+      "extraDates": ["2025-04-04", "2025-05-12", "2025-05-20", "2025-07-24"],
+      "invoicedTotal": 106176000.0,
+      "flowDocNos": ["СФ 2025-118", "СФ 2025-50", "СФ 2025-62", "СФ 2025-74", "СФ 2025-75"]
+    },
+    {
+      "contractNo": "GHTO-05/0225 (202128505)",
+      "contractDate": "2025-02-20",
+      "buyerName": "\"UZ-SEMYUNG KO\" AJ",
+      "buyerInn": "202128505",
+      "totalWithVat": 252000000.0,
+      "totalVat": 27000000.0,
+      "status": "active",
+      "subject": "на годовое сервисное обслуживание",
+      "didoxRows": [
+        {
+          "doc": "на годовое сервисное обслуживание",
+          "date": "2025-02-20",
+          "totalWithVat": 252000000.0
+        }
+      ],
+      "invoicedTotal": 123032000.0,
+      "flowDocNos": ["СФ 2025-160"]
     },
     {
       "contractNo": "GHTO-06/0225",
@@ -3512,6 +3498,25 @@
       ],
       "invoicedTotal": 4256000.0,
       "flowDocNos": ["СФ 2025-53"]
+    },
+    {
+      "contractNo": "GFH-05/0225 (302790623)",
+      "contractDate": "2025-02-27",
+      "buyerName": "\"JBS7\" MCHJ",
+      "buyerInn": "302790623",
+      "totalWithVat": 523936000.0,
+      "totalVat": 56136000.0,
+      "status": "closed",
+      "subject": "купля-продажа",
+      "didoxRows": [
+        {
+          "doc": "купля-продажа",
+          "date": "2025-02-27",
+          "totalWithVat": 523936000.0
+        }
+      ],
+      "invoicedTotal": 523936000.0,
+      "flowDocNos": ["СФ 2025-29"]
     },
     {
       "contractNo": "GHTO-07/0325",
@@ -3655,44 +3660,6 @@
       ],
       "invoicedTotal": 221760000.0,
       "flowDocNos": ["СФ 2025-51"]
-    },
-    {
-      "contractNo": "4",
-      "contractDate": "2025-03-28",
-      "buyerName": "\"NOVIY DOM TASHKENT\" MCHJ XK",
-      "buyerInn": "306018952",
-      "totalWithVat": 4446400.0,
-      "totalVat": 476400.0,
-      "status": "active",
-      "subject": "счет на оплату к Договору № GHTO-02/0125 23/01/25",
-      "didoxRows": [
-        {
-          "doc": "счет на оплату к Договору № GHTO-02/0125 23/01/25",
-          "date": "2025-03-28",
-          "totalWithVat": 4446400.0
-        }
-      ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
-    },
-    {
-      "contractNo": "5",
-      "contractDate": "2025-04-02",
-      "buyerName": "\"NOVIY DOM TASHKENT\" MCHJ XK",
-      "buyerInn": "306018952",
-      "totalWithVat": 1377600.0,
-      "totalVat": 147600.0,
-      "status": "active",
-      "subject": "счет на оплату к Договору № GHTO-02/0125 23/01/25",
-      "didoxRows": [
-        {
-          "doc": "счет на оплату к Договору № GHTO-02/0125 23/01/25",
-          "date": "2025-04-02",
-          "totalWithVat": 1377600.0
-        }
-      ],
-      "invoicedTotal": 0.0,
-      "flowDocNos": []
     },
     {
       "contractNo": "GHTO-11/0425",
@@ -3915,12 +3882,31 @@
       "flowDocNos": ["СФ 2025-76"]
     },
     {
-      "contractNo": "PGF-09/0625",
+      "contractNo": "PGF-09/0625 (300829826)",
       "contractDate": "2025-06-24",
       "buyerName": "\"AKFA BUILDING MATERIALS \" MCHJ",
       "buyerInn": "300829826",
-      "totalWithVat": 32144000.0,
-      "totalVat": 3444000.0,
+      "totalWithVat": 25424000.0,
+      "totalVat": 2724000.0,
+      "status": "closed",
+      "subject": "купля-продажа",
+      "didoxRows": [
+        {
+          "doc": "купля-продажа",
+          "date": "2025-06-24",
+          "totalWithVat": 25424000.0
+        }
+      ],
+      "invoicedTotal": 25424000.0,
+      "flowDocNos": ["СФ 2025-131"]
+    },
+    {
+      "contractNo": "PGF-09/0625 (303457361)",
+      "contractDate": "2025-06-27",
+      "buyerName": "\"FAMILY GROUP \" MCHJ",
+      "buyerInn": "303457361",
+      "totalWithVat": 6720000.0,
+      "totalVat": 720000.0,
       "status": "closed",
       "subject": "купля-продажа",
       "didoxRows": [
@@ -3928,16 +3914,10 @@
           "doc": "купля-продажа",
           "date": "2025-06-27",
           "totalWithVat": 6720000.0
-        },
-        {
-          "doc": "купля-продажа",
-          "date": "2025-06-24",
-          "totalWithVat": 25424000.0
         }
       ],
-      "extraDates": ["2025-06-27"],
-      "invoicedTotal": 32144000.0,
-      "flowDocNos": ["СФ 2025-131", "СФ 2025-141", "СФ 2025-84"]
+      "invoicedTotal": 6720000.0,
+      "flowDocNos": ["СФ 2025-141", "СФ 2025-84"]
     },
     {
       "contractNo": "PGF-10/0625",
@@ -4126,8 +4106,8 @@
           "totalWithVat": 749000.0
         }
       ],
-      "invoicedTotal": 6349000.0,
-      "flowDocNos": ["СФ 2025-137", "СФ 2025-91"]
+      "invoicedTotal": 749000.0,
+      "flowDocNos": ["СФ 2025-137"]
     },
     {
       "contractNo": "GHTO-26/0725",
@@ -4206,12 +4186,12 @@
       "flowDocNos": ["СФ 2025-105"]
     },
     {
-      "contractNo": "GHTO-28/0825",
+      "contractNo": "GHTO-28/0825 (302849293)",
       "contractDate": "2025-08-12",
       "buyerName": "\"DARVOZA SAVDO\" MCHJ",
       "buyerInn": "302849293",
-      "totalWithVat": 8736000.0,
-      "totalVat": 936000.0,
+      "totalWithVat": 8344000.0,
+      "totalVat": 894000.0,
       "status": "closed",
       "subject": "ремонтное и техническое обслуживание  спецтехники",
       "didoxRows": [
@@ -4219,16 +4199,10 @@
           "doc": "ремонтное и техническое обслуживание  спецтехники",
           "date": "2025-08-12",
           "totalWithVat": 8344000.0
-        },
-        {
-          "doc": "ремонтное и техническое обслуживание  спецтехники",
-          "date": "2025-08-25",
-          "totalWithVat": 392000.0
         }
       ],
-      "extraDates": ["2025-08-25"],
-      "invoicedTotal": 8736000.0,
-      "flowDocNos": ["СФ 2025-111", "СФ 2026-27"]
+      "invoicedTotal": 8344000.0,
+      "flowDocNos": ["СФ 2026-27"]
     },
     {
       "contractNo": "GFH-13/0825",
@@ -4284,8 +4258,27 @@
           "totalWithVat": 1904000.0
         }
       ],
-      "invoicedTotal": 10696000.0,
-      "flowDocNos": ["СФ 2025-109", "СФ 2026-29"]
+      "invoicedTotal": 1904000.0,
+      "flowDocNos": ["СФ 2025-109"]
+    },
+    {
+      "contractNo": "GHTO-28/0825 (205637337)",
+      "contractDate": "2025-08-25",
+      "buyerName": "\"ASTOR ALLIANCE\" MCHJ",
+      "buyerInn": "205637337",
+      "totalWithVat": 392000.0,
+      "totalVat": 42000.0,
+      "status": "closed",
+      "subject": "ремонтное и техническое обслуживание  спецтехники",
+      "didoxRows": [
+        {
+          "doc": "ремонтное и техническое обслуживание  спецтехники",
+          "date": "2025-08-25",
+          "totalWithVat": 392000.0
+        }
+      ],
+      "invoicedTotal": 392000.0,
+      "flowDocNos": ["СФ 2025-111"]
     },
     {
       "contractNo": "GFH-16/0825",
@@ -4421,48 +4414,23 @@
       "flowDocNos": ["СФ 2025-130"]
     },
     {
-      "contractNo": "GHTO-31/0925",
+      "contractNo": "GHTO-31/0925 (300829826)",
       "contractDate": "2025-09-24",
       "buyerName": "\"AKFA BUILDING MATERIALS \" MCHJ",
       "buyerInn": "300829826",
-      "totalWithVat": 23496200.0,
-      "totalVat": 2517450.0,
+      "totalWithVat": 21812000.0,
+      "totalVat": 2337000.0,
       "status": "closed",
       "subject": "Договор на сервисное обслуживание",
       "didoxRows": [
-        {
-          "doc": "ремонтное и техническое обслуживание  спецтехники",
-          "date": "2025-09-29",
-          "totalWithVat": 1684200.0
-        },
         {
           "doc": "Договор на сервисное обслуживание",
           "date": "2025-09-24",
           "totalWithVat": 21812000.0
         }
       ],
-      "extraDates": ["2025-09-29"],
-      "invoicedTotal": 23496200.0,
-      "flowDocNos": ["СФ 2025-129", "СФ 2025-132"]
-    },
-    {
-      "contractNo": "GHTO-29-1",
-      "contractDate": "2025-09-24",
-      "buyerName": "\"NAVOIY KON-METALLURGIYA KOMBINATI JAMG`ARMASI\" DM",
-      "buyerInn": "308450922",
-      "totalWithVat": 1344000.0,
-      "totalVat": 144000.0,
-      "status": "closed",
-      "subject": "Договор на сервисное обслуживание",
-      "didoxRows": [
-        {
-          "doc": "Договор на сервисное обслуживание",
-          "date": "2025-09-24",
-          "totalWithVat": 1344000.0
-        }
-      ],
-      "invoicedTotal": 1344000.0,
-      "flowDocNos": ["СФ 2025-125"]
+      "invoicedTotal": 21812000.0,
+      "flowDocNos": ["СФ 2025-132"]
     },
     {
       "contractNo": "PGF-14/0925",
@@ -4482,6 +4450,25 @@
       ],
       "invoicedTotal": 28336000.0,
       "flowDocNos": ["СФ 2025-126"]
+    },
+    {
+      "contractNo": "GHTO-31/0925 (205889808)",
+      "contractDate": "2025-09-29",
+      "buyerName": "\"PAKSHOO TASHKENT\" MCHJ XK",
+      "buyerInn": "205889808",
+      "totalWithVat": 1684200.0,
+      "totalVat": 180450.0,
+      "status": "closed",
+      "subject": "ремонтное и техническое обслуживание  спецтехники",
+      "didoxRows": [
+        {
+          "doc": "ремонтное и техническое обслуживание  спецтехники",
+          "date": "2025-09-29",
+          "totalWithVat": 1684200.0
+        }
+      ],
+      "invoicedTotal": 1684200.0,
+      "flowDocNos": ["СФ 2025-129"]
     },
     {
       "contractNo": "GFH-20/1025",
@@ -4541,12 +4528,12 @@
       "flowDocNos": ["СФ 2026-15"]
     },
     {
-      "contractNo": "GFH-21/1025",
+      "contractNo": "GFH-21/1025 (202331182)",
       "contractDate": "2025-10-14",
       "buyerName": "\"UZCASEMASH\" MCHJ XK",
       "buyerInn": "202331182",
-      "totalWithVat": 327040000.0,
-      "totalVat": 35040000.0,
+      "totalWithVat": 312480000.0,
+      "totalVat": 33480000.0,
       "status": "closed",
       "subject": "купля-продажа",
       "didoxRows": [
@@ -4554,16 +4541,10 @@
           "doc": "купля-продажа",
           "date": "2025-10-14",
           "totalWithVat": 312480000.0
-        },
-        {
-          "doc": "купля-продажа",
-          "date": "2025-10-28",
-          "totalWithVat": 14560000.0
         }
       ],
-      "extraDates": ["2025-10-28"],
-      "invoicedTotal": 327040000.0,
-      "flowDocNos": ["СФ 2025-156", "СФ 2026-14"]
+      "invoicedTotal": 312480000.0,
+      "flowDocNos": ["СФ 2026-14"]
     },
     {
       "contractNo": "GHTO-32/1025",
@@ -4623,29 +4604,23 @@
       "flowDocNos": ["СФ 2025-148"]
     },
     {
-      "contractNo": "GHTO-35/1025",
-      "contractDate": "2025-10-29",
+      "contractNo": "GFH-21/1025 (310817718)",
+      "contractDate": "2025-10-28",
       "buyerName": "\"KMITA POLYMERS\" MCHJ XK",
       "buyerInn": "310817718",
-      "totalWithVat": 16139200.0,
-      "totalVat": 1729200.0,
+      "totalWithVat": 14560000.0,
+      "totalVat": 1560000.0,
       "status": "closed",
-      "subject": "ремонтное и техническое обслуживание  спецтехники",
+      "subject": "купля-продажа",
       "didoxRows": [
         {
-          "doc": "ремонтное и техническое обслуживание  спецтехники",
-          "date": "2025-10-31",
-          "totalWithVat": 907200.0
-        },
-        {
-          "doc": "ремонтное и техническое обслуживание  спецтехники",
-          "date": "2025-10-29",
-          "totalWithVat": 15232000.0
+          "doc": "купля-продажа",
+          "date": "2025-10-28",
+          "totalWithVat": 14560000.0
         }
       ],
-      "extraDates": ["2025-10-31"],
-      "invoicedTotal": 16139200.0,
-      "flowDocNos": ["СФ 2025-157", "СФ 2025-164"]
+      "invoicedTotal": 14560000.0,
+      "flowDocNos": ["СФ 2025-156"]
     },
     {
       "contractNo": "PGF-15/1025",
@@ -4665,6 +4640,44 @@
       ],
       "invoicedTotal": 5600000.0,
       "flowDocNos": ["СФ 2025-151"]
+    },
+    {
+      "contractNo": "GHTO-35/1025 (310817718)",
+      "contractDate": "2025-10-29",
+      "buyerName": "\"KMITA POLYMERS\" MCHJ XK",
+      "buyerInn": "310817718",
+      "totalWithVat": 15232000.0,
+      "totalVat": 1632000.0,
+      "status": "closed",
+      "subject": "ремонтное и техническое обслуживание  спецтехники",
+      "didoxRows": [
+        {
+          "doc": "ремонтное и техническое обслуживание  спецтехники",
+          "date": "2025-10-29",
+          "totalWithVat": 15232000.0
+        }
+      ],
+      "invoicedTotal": 15232000.0,
+      "flowDocNos": ["СФ 2025-157"]
+    },
+    {
+      "contractNo": "GHTO-35/1025 (305348432)",
+      "contractDate": "2025-10-31",
+      "buyerName": "\"FOAMLINE VOSTOK\" MCHJ XK",
+      "buyerInn": "305348432",
+      "totalWithVat": 907200.0,
+      "totalVat": 97200.0,
+      "status": "closed",
+      "subject": "ремонтное и техническое обслуживание  спецтехники",
+      "didoxRows": [
+        {
+          "doc": "ремонтное и техническое обслуживание  спецтехники",
+          "date": "2025-10-31",
+          "totalWithVat": 907200.0
+        }
+      ],
+      "invoicedTotal": 907200.0,
+      "flowDocNos": ["СФ 2025-164"]
     },
     {
       "contractNo": "GFH-23/1125",
@@ -4786,25 +4799,6 @@
       "flowDocNos": ["СФ 2025-168"]
     },
     {
-      "contractNo": "GHTO-22-1",
-      "contractDate": "2025-11-24",
-      "buyerName": "\"KEDR\" MCHJ",
-      "buyerInn": "206942947",
-      "totalWithVat": 4088000.0,
-      "totalVat": 438000.0,
-      "status": "closed",
-      "subject": "ремонтное и техническое обслуживание  спецтехники",
-      "didoxRows": [
-        {
-          "doc": "ремонтное и техническое обслуживание  спецтехники",
-          "date": "2025-11-24",
-          "totalWithVat": 4088000.0
-        }
-      ],
-      "invoicedTotal": 4088000.0,
-      "flowDocNos": ["СФ 2025-179"]
-    },
-    {
       "contractNo": "GFH-22/1125",
       "contractDate": "2025-11-26",
       "buyerName": "\"FAMILY GROUP \" MCHJ",
@@ -4820,8 +4814,8 @@
           "totalWithVat": 2443840000.0
         }
       ],
-      "invoicedTotal": 2502080000.0,
-      "flowDocNos": ["СФ 2025-162", "СФ 2026-37"]
+      "invoicedTotal": 2443840000.0,
+      "flowDocNos": ["СФ 2026-37"]
     },
     {
       "contractNo": "GFH-23/1225",
@@ -4948,7 +4942,7 @@
       "flowDocNos": ["СФ 2026-1"]
     },
     {
-      "contractNo": "GHTO-0/0126",
+      "contractNo": "GHTO-00/0126",
       "contractDate": "2026-01-05",
       "buyerName": "\"KMITA POLYMERS\" MCHJ XK",
       "buyerInn": "310817718",
@@ -5006,7 +5000,7 @@
       "flowDocNos": ["СФ 2026-108", "СФ 2026-51"]
     },
     {
-      "contractNo": "PGF-1/0126",
+      "contractNo": "PGF-01/0126 (302506894)",
       "contractDate": "2026-01-14",
       "buyerName": "\"CHIN WOOD SERVICE\" MCHJ",
       "buyerInn": "302506894",
@@ -5025,7 +5019,7 @@
       "flowDocNos": ["СФ 2026-49"]
     },
     {
-      "contractNo": "GFH-03/0126",
+      "contractNo": "GFH-03/0126 (306955509)",
       "contractDate": "2026-01-26",
       "buyerName": "\"XALQ RETAIL\" MCHJ XK",
       "buyerInn": "306955509",
@@ -5082,7 +5076,7 @@
       "flowDocNos": ["СФ 2026-31"]
     },
     {
-      "contractNo": "GFH-3/0126",
+      "contractNo": "GFH-03/0126 (311725049)",
       "contractDate": "2026-01-26",
       "buyerName": "\"PANZER\" MCHJ",
       "buyerInn": "311725049",
@@ -5101,37 +5095,50 @@
       "flowDocNos": ["СФ 2026-21"]
     },
     {
-      "contractNo": "PGF-01/0126",
-      "contractDate": "2026-02-27",
-      "buyerName": "\"XALQ RETAIL\" MCHJ XK",
-      "buyerInn": "306955509",
-      "totalWithVat": 20076000.0,
-      "totalVat": 2151000.0,
+      "contractNo": "GFH-04/0126 (309728684)",
+      "contractDate": "2026-01-27",
+      "buyerName": "\"NOVOPLAST TPE\" MCHJ",
+      "buyerInn": "309728684",
+      "totalWithVat": 29120000.0,
+      "totalVat": 3120000.0,
       "status": "closed",
       "subject": "купля-продажа",
       "didoxRows": [
         {
           "doc": "купля-продажа",
-          "date": "2026-02-27",
-          "totalWithVat": 10892000.0
-        },
+          "date": "2026-01-27",
+          "totalWithVat": 29120000.0
+        }
+      ],
+      "invoicedTotal": 29120000.0,
+      "flowDocNos": ["СФ 2026-20"]
+    },
+    {
+      "contractNo": "PGF-01/0126 (202331182)",
+      "contractDate": "2026-01-27",
+      "buyerName": "\"UZCASEMASH\" MCHJ XK",
+      "buyerInn": "202331182",
+      "totalWithVat": 9184000.0,
+      "totalVat": 984000.0,
+      "status": "closed",
+      "subject": "купля-продажа",
+      "didoxRows": [
         {
           "doc": "купля-продажа",
           "date": "2026-01-27",
           "totalWithVat": 9184000.0
         }
       ],
-      "extraDates": ["2026-01-27"],
-      "invoicedTotal": 20076000.0,
-      "flowDocNos": ["СФ 2026-19", "СФ 2026-81"]
+      "invoicedTotal": 9184000.0,
+      "flowDocNos": ["СФ 2026-19"]
     },
     {
-      "contractNo": "GFH-04/0126",
+      "contractNo": "GFH-04/0126 (306955509)",
       "contractDate": "2026-01-28",
       "buyerName": "\"XALQ RETAIL\" MCHJ XK",
       "buyerInn": "306955509",
-      "totalWithVat": 5479488000.0,
-      "totalVat": 587088000.0,
+      "totalWithVat": 5450368000.0,
+      "totalVat": 583968000.0,
       "status": "active",
       "subject": "купля-продажа",
       "didoxRows": [
@@ -5139,16 +5146,10 @@
           "doc": "купля-продажа",
           "date": "2026-01-28",
           "totalWithVat": 5450368000.0
-        },
-        {
-          "doc": "купля-продажа",
-          "date": "2026-01-27",
-          "totalWithVat": 29120000.0
         }
       ],
-      "extraDates": ["2026-01-27"],
-      "invoicedTotal": 1661744000.0,
-      "flowDocNos": ["СФ 2026-20", "СФ 2026-93"]
+      "invoicedTotal": 1632624000.0,
+      "flowDocNos": ["СФ 2026-93"]
     },
     {
       "contractNo": "GFH-05/0126",
@@ -5189,27 +5190,21 @@
       "flowDocNos": []
     },
     {
-      "contractNo": "GFH-07/0226",
-      "contractDate": "2026-02-26",
-      "buyerName": "\"SAM RAFOAT TEKSTIL\" MCHJ",
-      "buyerInn": "302051419",
-      "totalWithVat": 220880800.0,
-      "totalVat": 23665800.0,
-      "status": "active",
+      "contractNo": "GFH-07/0226 (306217641)",
+      "contractDate": "2026-02-09",
+      "buyerName": "\"NOVA  PLUMBING SOLUTIONS\" MCHJ XK",
+      "buyerInn": "306217641",
+      "totalWithVat": 3600800.0,
+      "totalVat": 385800.0,
+      "status": "closed",
       "subject": "купля-продажа",
       "didoxRows": [
-        {
-          "doc": "купля-продажа",
-          "date": "2026-02-26",
-          "totalWithVat": 217280000.0
-        },
         {
           "doc": "купля-продажа",
           "date": "2026-02-09",
           "totalWithVat": 3600800.0
         }
       ],
-      "extraDates": ["2026-02-09"],
       "invoicedTotal": 3600800.0,
       "flowDocNos": ["СФ 2026-35"]
     },
@@ -5312,6 +5307,44 @@
       ],
       "invoicedTotal": 1932000.0,
       "flowDocNos": ["СФ 2026-77"]
+    },
+    {
+      "contractNo": "GFH-07/0226 (302051419)",
+      "contractDate": "2026-02-26",
+      "buyerName": "\"SAM RAFOAT TEKSTIL\" MCHJ",
+      "buyerInn": "302051419",
+      "totalWithVat": 217280000.0,
+      "totalVat": 23280000.0,
+      "status": "active",
+      "subject": "купля-продажа",
+      "didoxRows": [
+        {
+          "doc": "купля-продажа",
+          "date": "2026-02-26",
+          "totalWithVat": 217280000.0
+        }
+      ],
+      "invoicedTotal": 0.0,
+      "flowDocNos": []
+    },
+    {
+      "contractNo": "PGF-01/0126 (306955509)",
+      "contractDate": "2026-02-27",
+      "buyerName": "\"XALQ RETAIL\" MCHJ XK",
+      "buyerInn": "306955509",
+      "totalWithVat": 10892000.0,
+      "totalVat": 1167000.0,
+      "status": "closed",
+      "subject": "купля-продажа",
+      "didoxRows": [
+        {
+          "doc": "купля-продажа",
+          "date": "2026-02-27",
+          "totalWithVat": 10892000.0
+        }
+      ],
+      "invoicedTotal": 10892000.0,
+      "flowDocNos": ["СФ 2026-81"]
     },
     {
       "contractNo": "GHTO-07/0326",
@@ -5542,29 +5575,42 @@
       "flowDocNos": []
     },
     {
-      "contractNo": "GFH-17/0426",
+      "contractNo": "GFH-17/0426 (306955509)",
       "contractDate": "2026-04-16",
       "buyerName": "\"XALQ RETAIL\" MCHJ XK",
       "buyerInn": "306955509",
-      "totalWithVat": 1192800000.0,
-      "totalVat": 127800000.0,
+      "totalWithVat": 920640000.0,
+      "totalVat": 98640000.0,
       "status": "active",
       "subject": "купля-продажа",
       "didoxRows": [
-        {
-          "doc": "купля-продажа",
-          "date": "2026-04-20",
-          "totalWithVat": 272160000.0
-        },
         {
           "doc": "купля-продажа",
           "date": "2026-04-16",
           "totalWithVat": 920640000.0
         }
       ],
-      "extraDates": ["2026-04-20"],
-      "invoicedTotal": 732480000.0,
-      "flowDocNos": ["СФ 2026-82", "СФ 2026-91"]
+      "invoicedTotal": 460320000.0,
+      "flowDocNos": ["СФ 2026-91"]
+    },
+    {
+      "contractNo": "GFH-17/0426 (203973278)",
+      "contractDate": "2026-04-20",
+      "buyerName": "\"JIHOZVENT\" MCHJ",
+      "buyerInn": "203973278",
+      "totalWithVat": 272160000.0,
+      "totalVat": 29160000.0,
+      "status": "closed",
+      "subject": "купля-продажа",
+      "didoxRows": [
+        {
+          "doc": "купля-продажа",
+          "date": "2026-04-20",
+          "totalWithVat": 272160000.0
+        }
+      ],
+      "invoicedTotal": 272160000.0,
+      "flowDocNos": ["СФ 2026-82"]
     },
     {
       "contractNo": "GFH-19/0426",
@@ -5791,8 +5837,8 @@
           "totalWithVat": 2576000.0
         }
       ],
-      "invoicedTotal": 2380224000.0,
-      "flowDocNos": ["СФ 2026-94", "СФ 2026-96"]
+      "invoicedTotal": 2576000.0,
+      "flowDocNos": ["СФ 2026-96"]
     },
     {
       "contractNo": "GFH-28/0726",

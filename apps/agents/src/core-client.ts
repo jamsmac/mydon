@@ -94,7 +94,14 @@ export class AgentsCoreClient {
 
   /** Договоры GLOBERENT — статус и оплата для монитора инвариантов. */
   globerentContracts(): Promise<
-    { id: string; contractNo: string; status: string; totalWithVat: string; paidUzs: number }[]
+    {
+      id: string;
+      contractNo: string;
+      status: string;
+      totalWithVat: string;
+      paidUzs: number;
+      createdFrom: string | null;
+    }[]
   > {
     return this.request("/contracts?domain=globerent");
   }
@@ -129,9 +136,9 @@ export class AgentsCoreClient {
   }
 
   /** Записи реестра (автоматы, контрагенты, договоры). */
-  entities(params: { domain?: Domain; type?: string; q?: string } = {}): Promise<
-    { id: string; type: string; name: string; attrs: Record<string, unknown> }[]
-  > {
+  entities(
+    params: { domain?: Domain; type?: string; q?: string } = {},
+  ): Promise<{ id: string; type: string; name: string; attrs: Record<string, unknown> }[]> {
     const qs = new URLSearchParams();
     if (params.domain) qs.set("domain", params.domain);
     if (params.type) qs.set("type", params.type);
@@ -176,9 +183,9 @@ export class AgentsCoreClient {
   // ── Задачи агента: владелец может поручить агенту дело, как человеку ───────
 
   /** Открытые задачи, поставленные этому агенту. */
-  myTasks(agentName: string): Promise<
-    { id: string; title: string; status: string; ownerRef: string | null }[]
-  > {
+  myTasks(
+    agentName: string,
+  ): Promise<{ id: string; title: string; status: string; ownerRef: string | null }[]> {
     const qs = new URLSearchParams({ ownerKind: "agent", ownerRef: agentName, open: "1" });
     return this.request(`/tasks?${qs.toString()}`);
   }
@@ -273,7 +280,11 @@ export class AgentsCoreClient {
     const p = (event.payload ?? {}) as { skill?: unknown; action?: unknown };
     const skill = typeof p.skill === "string" ? p.skill : "";
     if (!skill) return null;
-    return { source: String(event.source ?? ""), skill, action: typeof p.action === "string" ? p.action : "" };
+    return {
+      source: String(event.source ?? ""),
+      skill,
+      action: typeof p.action === "string" ? p.action : "",
+    };
   }
 
   // ── Сбор вендинга: коллектор Ourvend кладёт слоты и ведёт журнал запусков ──
@@ -306,7 +317,11 @@ export class AgentsCoreClient {
   /** Отдать собранные слоты в Core (upsert планограммы + история). */
   ingestVendingSlots(payload: {
     capturedAt?: string;
-    machines: { serial: string; alias?: string; slots: { coilId: string; product: string; capacity: number; quantity: number }[] }[];
+    machines: {
+      serial: string;
+      alias?: string;
+      slots: { coilId: string; product: string; capacity: number; quantity: number }[];
+    }[];
   }): Promise<{ machines: number; slots: number }> {
     return this.request<{ machines: number; slots: number }>("/vending/ingest", {
       method: "POST",
@@ -372,7 +387,11 @@ export interface CoffeeReconcileRow {
   expectedGrams: number | null;
   costActual: number | null;
   costExpected: number | null;
-  reconcile: { status: "ok" | "anomaly" | "unknown"; deltaGrams: number | null; deltaRatio: number | null };
+  reconcile: {
+    status: "ok" | "anomaly" | "unknown";
+    deltaGrams: number | null;
+    deltaRatio: number | null;
+  };
 }
 
 export interface CoffeeReconcileGroup {

@@ -82,7 +82,10 @@ describe("Брифинг", () => {
   });
 
   it("без кофе-сигналов (всё по нулям) строки нет", () => {
-    assert.doesNotMatch(formatBriefing(base, [], undefined, { underfill: 0, anomaly: 0, overdueWash: 0 }), /Кофе-бункеры/);
+    assert.doesNotMatch(
+      formatBriefing(base, [], undefined, { underfill: 0, anomaly: 0, overdueWash: 0 }),
+      /Кофе-бункеры/,
+    );
     assert.doesNotMatch(formatBriefing(base), /Кофе-бункеры/);
   });
 
@@ -93,7 +96,10 @@ describe("Брифинг", () => {
       contractsUnpaid: 1,
       dealsStuck: 3,
     });
-    assert.match(text, /🏗 GLOBERENT: получить в ≤7 дней: 2, договоры без оплаты: 1, сделки без движения >14 дней: 3/);
+    assert.match(
+      text,
+      /🏗 GLOBERENT: получить в ≤7 дней: 2, договоры без оплаты: 1, сделки без движения >14 дней: 3/,
+    );
     assert.doesNotMatch(text, /заплатить/);
   });
 
@@ -140,6 +146,15 @@ describe("Сигналы GLOBERENT для брифинга", () => {
       { status: "cancelled", paidUzs: 0 }, // отменён — не тревога
     ];
     assert.equal(countUnpaidContracts(contracts), 1);
+  });
+
+  it("исторические карточки из выгрузки не считаются: там нет денег вовсе", () => {
+    const contracts = [
+      { status: "active", paidUzs: 0, createdFrom: "Didox: реестры документов" },
+      { status: "active", paidUzs: 0, createdFrom: null }, // заведён в системе — тревога
+      { status: "active", paidUzs: 0, createdFrom: "   " }, // пробелы — тоже свой
+    ];
+    assert.equal(countUnpaidContracts(contracts), 2);
   });
 
   it("сбор сигналов: упавший источник даёт ноль, а не прячет остальные", async () => {
@@ -214,13 +229,20 @@ describe("Касса закупа: гейт по префиксу — не пр�
         spies.received += 1;
         return { received: false, replenished: 0, units: 0, reason: "не должно было вызваться" };
       },
-      recordVendingCash: async (receivedAmount: number, categories: { name: string; amount: number }[]) => {
+      recordVendingCash: async (
+        receivedAmount: number,
+        categories: { name: string; amount: number }[],
+      ) => {
         spies.cash += 1;
         const totalSpent = categories.reduce((a, c) => a + c.amount, 0);
         return {
           id: "cs1",
           receivedAmount,
-          categories: categories.map((c) => ({ name: c.name, lines: [{ label: c.name, amount: c.amount }], subtotal: c.amount })),
+          categories: categories.map((c) => ({
+            name: c.name,
+            lines: [{ label: c.name, amount: c.amount }],
+            subtotal: c.amount,
+          })),
           totalSpent,
           remainder: receivedAmount - totalSpent,
           createdBy: "owner",
@@ -233,7 +255,11 @@ describe("Касса закупа: гейт по префиксу — не пр�
 
   it("полная команда кассы вызывает recordVendingCash, а не receiveVendingOrder", async () => {
     const spies = { received: 0, cash: 0 };
-    const reply = await handleMessage(111, "касса закупа: получил 2400000, базар 376300", deps(spies));
+    const reply = await handleMessage(
+      111,
+      "касса закупа: получил 2400000, базар 376300",
+      deps(spies),
+    );
     assert.equal(spies.cash, 1);
     assert.equal(spies.received, 0);
     assert.match(reply?.text ?? "", /Касса закупа/);
