@@ -324,6 +324,11 @@ export class AgentsCoreClient {
   coffeeReconcileAll(from: string, to: string): Promise<CoffeeReconcileGroup[]> {
     return this.request(`/coffee/reconcile?from=${from}&to=${to}`);
   }
+
+  /** Автопривязка точек к карточкам автоматов: только однозначные совпадения. */
+  autoLinkCoffeeLocations(): Promise<{ linked: number; ambiguous: string[]; unmatched: string[] }> {
+    return this.request("/coffee/location-link/auto", { method: "POST", body: JSON.stringify({}) });
+  }
 }
 
 export interface CoffeeFillStatusRow {

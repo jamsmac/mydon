@@ -20,6 +20,19 @@ import { Type } from "class-transformer";
 import { UNITS, type Unit } from "@mydon/shared";
 import { CoffeeService } from "./coffee.service";
 
+export class CreateLocationDto {
+  @IsString() @IsNotEmpty() @MaxLength(128)
+  name!: string;
+}
+
+export class UpdateLocationDto {
+  @IsOptional() @IsString() @MaxLength(128)
+  name?: string;
+
+  @IsOptional() @IsBoolean()
+  isActive?: boolean;
+}
+
 export class AddBunkerIngredientDto {
   @IsInt() @Min(1) @Max(8)
   position!: number;
@@ -243,6 +256,18 @@ export class CoffeeController {
     return this.coffee.locations();
   }
 
+  /** Завести точку из панели. */
+  @Post("locations")
+  createLocation(@Body() dto: CreateLocationDto) {
+    return this.coffee.createLocation(dto.name);
+  }
+
+  /** Переименовать / включить-выключить точку. */
+  @Put("locations/:id")
+  updateLocation(@Param("id", ParseUUIDPipe) id: string, @Body() dto: UpdateLocationDto) {
+    return this.coffee.updateLocation(id, dto);
+  }
+
   // ── Привязка точек к автоматам реестра ─────────────────────────────────
 
   @Get("machines")
@@ -320,6 +345,12 @@ export class CoffeeController {
     return this.coffee.recentRefills(limit ? Number(limit) : undefined);
   }
 
+  /** Удалить ошибочную заливку (строка целиком уходит в audit_log). */
+  @Delete("refill/:id")
+  deleteRefill(@Param("id", ParseUUIDPipe) id: string) {
+    return this.coffee.deleteRefill(id);
+  }
+
   @Get("summary")
   locationSummary() {
     return this.coffee.locationSummary();
@@ -347,6 +378,12 @@ export class CoffeeController {
   @Get("container-return")
   containerReturns(@Query("limit") limit?: string) {
     return this.coffee.containerReturns(limit ? Number(limit) : undefined);
+  }
+
+  /** Удалить ошибочный возврат набора (строка целиком уходит в audit_log). */
+  @Delete("container-return/:id")
+  deleteContainerReturn(@Param("id", ParseUUIDPipe) id: string) {
+    return this.coffee.deleteContainerReturn(id);
   }
 
   /** Фактический расход по наборам за период: заливка − возврат через тару. */

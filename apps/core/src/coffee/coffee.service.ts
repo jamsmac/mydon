@@ -5,6 +5,7 @@ import {
   coffeeConsumable,
   coffeeContainerReturn,
   coffeeContainerTare,
+  auditLog,
   coffeeIngredient,
   coffeeLocation,
   coffeeMachinePlacement,
@@ -443,6 +444,79 @@ export class CoffeeService {
       }
     }
     return { linked, ambiguous, unmatched };
+  }
+
+  // ── Точки: правка из панели (слово владельца: всё редактируется легко) ──
+
+  /** Завести точку вручную. Уникальность имени держит БД. */
+  async createLocation(name: string): Promise<{ id: string }> {
+    const clean = name.trim();
+    if (clean.length < 2 || clean.length > 128) throw new BadRequestException("Имя точки — от 2 до 128 символов");
+    const [row] = await this.db.insert(coffeeLocation).values({ name: clean }).returning({ id: coffeeLocation.id });
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: "panel",
+      action: "coffee.location.create",
+      target: row.id,
+      after: { name: clean },
+    });
+    return { id: row.id };
+  }
+
+  /** Переименовать / включить-выключить точку. */
+  async updateLocation(id: string, patch: { name?: string; isActive?: boolean }): Promise<{ ok: true }> {
+    const [loc] = await this.db.select().from(coffeeLocation).where(eq(coffeeLocation.id, id));
+    if (!loc) throw new NotFoundException(`Точка ${id} не найдена`);
+    const set: { name?: string; isActive?: boolean } = {};
+    if (patch.name !== undefined) {
+      const clean = patch.name.trim();
+      if (clean.length < 2 || clean.length > 128) throw new BadRequestException("Имя точки — от 2 до 128 символов");
+      set.name = clean;
+    }
+    if (patch.isActive !== undefined) set.isActive = patch.isActive;
+    if (Object.keys(set).length === 0) return { ok: true };
+    await this.db.update(coffeeLocation).set(set).where(eq(coffeeLocation.id, id));
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: "panel",
+      action: "coffee.location.update",
+      target: id,
+      before: { name: loc.name, isActive: loc.isActive },
+      after: set,
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Удалить ошибочную запись журнала. Правка истории — честная: строка
+   * целиком уходит в audit_log (кто, что, когда стояло), а не исчезает молча.
+   */
+  async deleteRefill(id: string): Promise<{ ok: true }> {
+    const [row] = await this.db.select().from(coffeeRefill).where(eq(coffeeRefill.id, id));
+    if (!row) throw new NotFoundException(`Заливка ${id} не найдена`);
+    await this.db.delete(coffeeRefill).where(eq(coffeeRefill.id, id));
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: "panel",
+      action: "coffee.refill.delete",
+      target: id,
+      before: row,
+    });
+    return { ok: true };
+  }
+
+  async deleteContainerReturn(id: string): Promise<{ ok: true }> {
+    const [row] = await this.db.select().from(coffeeContainerReturn).where(eq(coffeeContainerReturn.id, id));
+    if (!row) throw new NotFoundException(`Возврат ${id} не найден`);
+    await this.db.delete(coffeeContainerReturn).where(eq(coffeeContainerReturn.id, id));
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: "panel",
+      action: "coffee.return.delete",
+      target: id,
+      before: row,
+    });
+    return { ok: true };
   }
 
   // ── Настройки: ингредиенты по позициям бункера ────────────────────────
