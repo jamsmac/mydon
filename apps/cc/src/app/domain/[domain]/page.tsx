@@ -5,6 +5,9 @@ import {
   core,
   CoreUnavailable,
   type Entity,
+  type FinanceCounterparty,
+  type FinanceFlow,
+  type FinanceSummary,
   type Obligations,
   type Person,
   type Task,
@@ -30,6 +33,7 @@ import {
   EquipmentBook,
   InvoicesBook,
 } from "../../../components/globerent-books";
+import { FinancePanel } from "../../../components/finance-panel";
 import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
 import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
@@ -210,8 +214,28 @@ export default async function DomainPage({
     );
   }
 
-  const owedToUs = obligations.totals.filter((t) => t.direction === "in");
-  const owedByUs = obligations.totals.filter((t) => t.direction === "out");
+  // Финансовый контур GLOBERENT (перенос PROMACH): свод нужен вкладке «Финансы»
+  // целиком, а дашборду — сигналом (к сроку ≤ 7 дней, просрочка, термометр).
+  // Провал запроса не роняет страницу: секция честно скажет, что данных нет.
+  const isFinanceTab = activeGroup === "finance";
+  let finSummary: FinanceSummary | null = null;
+  let finFlows: FinanceFlow[] = [];
+  let finCounterparties: FinanceCounterparty[] = [];
+  if (domain === "globerent" && (isFinanceTab || isOverview)) {
+    finSummary = await core.financeSummary(domain).catch(() => null);
+    if (isFinanceTab) {
+      [finFlows, finCounterparties] = await Promise.all([
+        core.financeFlows(domain, { limit: "100" }).catch(() => [] as FinanceFlow[]),
+        core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+      ]);
+    }
+  }
+
+  // «Должны» — только открытые обязательства: оплаченное (actual) и отменённое
+  // долгом не является (ловилось при переносе финконтура PROMACH).
+  const isOpenObligation = (t: { status: string }) => t.status !== "actual" && t.status !== "cancelled";
+  const owedToUs = obligations.totals.filter((t) => t.direction === "in" && isOpenObligation(t));
+  const owedByUs = obligations.totals.filter((t) => t.direction === "out" && isOpenObligation(t));
 
   const href = (t: string) => `/domain/${domain}?tab=${encodeURIComponent(t)}`;
 
@@ -222,6 +246,8 @@ export default async function DomainPage({
     // («Система»), теперь вкладки этого же рабочего места: один адрес
     // направления, а не разрозненные экраны.
     ...(domain === "vendhub" ? [{ key: "vending", label: "Автоматы" }, { key: "coffee", label: "Кофе-бункеры" }] : []),
+    // Финансы GLOBERENT — живой контур (перенос PROMACH): агинг, к сроку, курс.
+    ...(domain === "globerent" ? [{ key: "finance", label: "Финансы" }] : []),
     ...groups.map((g) => ({ key: g.key, label: g.label })),
     // Инкассация — ежедневная операция, ей место в верхнем ряду (слово владельца).
     ...(domain === "vendhub"
@@ -317,6 +343,23 @@ export default async function DomainPage({
       {/* ── Живые операционные вкладки VendHub ── */}
       {activeGroup === "vending" && <VendingPanel machines={machines} />}
       {activeGroup === "coffee" && <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />}
+
+      {/* ── Финансы GLOBERENT: агинг, к сроку, термометр, кэш-флоу, ввод ── */}
+      {isFinanceTab &&
+        (finSummary !== null ? (
+          <FinancePanel
+            domain={domain}
+            summary={finSummary}
+            flows={finFlows}
+            counterparties={finCounterparties}
+          />
+        ) : (
+          <div className="empty">
+            <b>Финансовый свод недоступен</b>
+            Core не ответил на запрос финансов. Обнови страницу; если повторяется —
+            проверь, что Core обновлён до версии с финансовым контуром.
+          </div>
+        ))}
 
       {/* ── Дашборд ── */}
       {activeGroup === "overview" && (
@@ -426,6 +469,51 @@ export default async function DomainPage({
                   actions={["Продлить договор", "Выставить счёт", "Напомнить об оплате"]}
                   defaultOwnerRef={defaultOwner?.id ?? null}
                 />
+              </div>
+            </div>
+          )}
+
+          {/* ── Контур GLOBERENT: деньги — сигнал с вкладки «Финансы» ── */}
+          {domain === "globerent" && finSummary !== null && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Деньги</h3>
+                {finSummary.concentration.alarm && finSummary.concentration.topShare !== null && (
+                  <span className="chip h">
+                    концентрация · {Math.round(finSummary.concentration.topShare * 100)}%
+                  </span>
+                )}
+              </div>
+              <div className="wgrid">
+                <Link
+                  href={href("finance")}
+                  className={`wt ${finSummary.dueSoonIn.length > 0 ? "" : "off"}`}
+                >
+                  <div className="wl">К сроку ≤ 7 дней · нам</div>
+                  <div className="wv">{finSummary.dueSoonIn.length}</div>
+                  <div className="wf">
+                    {finSummary.dueSoonIn.length > 0 ? "напомни клиентам" : "неделя спокойна"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link
+                  href={href("finance")}
+                  className={`wt ${finSummary.dueSoonOut.length > 0 ? "" : "off"}`}
+                >
+                  <div className="wl">К сроку ≤ 7 дней · мы</div>
+                  <div className="wv">{finSummary.dueSoonOut.length}</div>
+                  <div className="wf">свои платежи<span className="go">→</span></div>
+                </Link>
+                <Link href={href("finance")} className="wt">
+                  <div className="wl">Открытая дебиторка</div>
+                  <div className="wv">{finSummary.receivables.total.count}</div>
+                  <div className="wf">
+                    {finSummary.receivables.total.uzs > 0
+                      ? `≈ ${Math.round(finSummary.receivables.total.uzs).toLocaleString("ru-RU")} сум`
+                      : "записей со суммой нет"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
               </div>
             </div>
           )}

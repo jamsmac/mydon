@@ -647,6 +647,32 @@ export const moneyFlow = pgTable(
     collectionId: uuid("collection_id").references(() => collection.id),
     date: timestamp("date", { withTimezone: true }).notNull(),
     status: text("status").default("actual").notNull(), // planned | actual | overdue
+    // ── Модель платежа — перенос из PROMACH (warehouse_payments + финзаписи
+    // контракта). Донор: ~/Developer/promach; поля выбраны по анализу
+    // «PROMACH_анализ_и_интеграция_globerent_finans.md», Часть B, шаг 1. ──
+    /** Категория: supplier | logistics | customs | certification | sale | service | tax | other. */
+    category: text("category"),
+    /** Способ оплаты: bank | cash. Критично для разделения бухгалтерий (PROMACH). */
+    method: text("method"),
+    /** Официальная операция (банк, в бухгалтерии) или внутренний учёт (нал). */
+    isOfficial: boolean("is_official").default(true).notNull(),
+    /**
+     * Курс к суму НА ДАТУ ОПЕРАЦИИ (PROMACH, миграция 083): исторические суммы
+     * не «плавают» при смене курса. null — запись уже в сумах.
+     */
+    rate: numeric("rate", { precision: 18, scale: 4 }),
+    /** Эквивалент в сумах по rate. null — запись уже в сумах. */
+    amountUzs: numeric("amount_uzs", { precision: 18, scale: 2 }),
+    /** Контрагент из реестра (карточка contractor). */
+    counterpartyId: uuid("counterparty_id").references(() => entity.id),
+    /** Имя контрагента словами — когда карточки в реестре ещё нет. */
+    counterparty: text("counterparty"),
+    /** Номер документа: счёт, платёжка, инвойс. */
+    docNo: text("doc_no"),
+    /** Срок оплаты (для planned) — по нему считается агинг и «к сроку ≤ 7 дней». */
+    dueDate: date("due_date"),
+    /** Когда фактически оплачено. null у планов. */
+    paidAt: timestamp("paid_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -657,7 +683,32 @@ export const moneyFlow = pgTable(
       .on(t.source, t.extId)
       .where(sql`${t.extId} is not null`),
     index("money_flow_collection_idx").on(t.collectionId),
+    // Агинг и «к сроку»: выборка открытых обязательств по сроку.
+    index("money_flow_due_idx").on(t.domain, t.status, t.dueDate),
+    index("money_flow_counterparty_idx").on(t.counterpartyId),
   ],
+);
+
+// ── fx_rate: курс валют к суму — ручной ввод владельца, история сохраняется ──
+// Перенос паттерна exchange-rates.ts PROMACH без внешнего источника: сначала
+// ручной override (он в PROMACH был страховкой, у нас — основной путь),
+// источник курса ЦБ РУз можно добавить позже тем же интерфейсом.
+// История нужна аудиту: «какой курс действовал на дату платежа».
+export const fxRate = pgTable(
+  "fx_rate",
+  {
+    id: id(),
+    /** Валюта, курс которой задан к суму: USD | CNY | EUR | RUB. */
+    currency: text("currency").notNull(),
+    /** Сколько сумов за единицу валюты. */
+    rate: numeric("rate", { precision: 18, scale: 4 }).notNull(),
+    /** Откуда курс: manual | cbu (задел под ЦБ РУз). */
+    source: text("source").default("manual").notNull(),
+    note: text("note"),
+    setBy: text("set_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("fx_rate_currency_idx").on(t.currency, t.createdAt)],
 );
 
 // ── note: заметки и знания (вход для knowledge-curator) ──
@@ -1338,6 +1389,8 @@ export const schema = {
   event,
   document,
   moneyFlow,
+  // Финансовый контур: курс валют к суму (перенос паттерна PROMACH).
+  fxRate,
   note,
   auditLog,
   agent,

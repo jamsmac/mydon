@@ -10,6 +10,7 @@ import { CollectionsModule } from "./collections/collections.module";
 import { DbModule } from "./db/db.module";
 import { EntitiesModule } from "./entities/entities.module";
 import { EventsModule } from "./events/events.module";
+import { FinanceModule } from "./finance/finance.module";
 import { HealthController } from "./health.controller";
 import { HistoryModule } from "./history/history.module";
 import { NotesModule } from "./notes/notes.module";
@@ -36,6 +37,7 @@ import { VerificationModule } from "./verification/verification.module";
     EntitiesModule,
     EventsModule,
     ApprovalsModule,
+    FinanceModule,
     RegistryModule,
     RulesModule,
     SalesModule,

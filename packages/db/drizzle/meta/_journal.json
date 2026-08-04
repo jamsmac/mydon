@@ -239,6 +239,13 @@
       "when": 1785788298850,
       "tag": "0033_coffee_machine_placement",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1785829786589,
+      "tag": "0034_normal_tiger_shark",
+      "breakpoints": true
     }
   ]
 }

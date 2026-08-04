@@ -394,6 +394,111 @@ export interface Obligations {
   overdueTruncated: boolean;
 }
 
+// ── Финансовый контур (модель PROMACH поверх money_flow) ──
+
+export interface CurrencyAmount {
+  currency: string;
+  amount: number;
+  count: number;
+}
+
+export interface FinanceBucket {
+  count: number;
+  byCurrency: CurrencyAmount[];
+  /** Сумовой эквивалент только приведённых записей. */
+  uzs: number;
+  /** Записей без курса — в uzs не вошли. */
+  unconverted: number;
+}
+
+export interface FinanceAging {
+  notDue: FinanceBucket;
+  d0_30: FinanceBucket;
+  d31_60: FinanceBucket;
+  d61_90: FinanceBucket;
+  d90plus: FinanceBucket;
+  noDue: FinanceBucket;
+  total: FinanceBucket;
+}
+
+/** Запись money_flow с именем контрагента и сумовым эквивалентом. */
+export interface FinanceFlow {
+  id: string;
+  domain: string | null;
+  direction: "in" | "out";
+  amount: string;
+  currency: string;
+  source: string;
+  purpose: string | null;
+  category: string | null;
+  method: string | null;
+  isOfficial: boolean;
+  rate: string | null;
+  amountUzs: string | null;
+  counterpartyId: string | null;
+  counterparty: string | null;
+  docNo: string | null;
+  dueDate: string | null;
+  paidAt: string | null;
+  date: string;
+  status: string;
+  createdAt: string;
+  counterpartyEntityName: string | null;
+  uzs: number | null;
+}
+
+export interface FinanceConcentrationRow {
+  key: string;
+  name: string;
+  uzs: number;
+  byCurrency: CurrencyAmount[];
+  share: number | null;
+}
+
+export interface FinanceConcentration {
+  rows: FinanceConcentrationRow[];
+  topShare: number | null;
+  /** ≥60% на одном должнике — красный термометр (правило OLMA). */
+  alarm: boolean;
+  totalUzs: number;
+  unconverted: number;
+}
+
+export interface FinanceMonth {
+  month: string;
+  inflow: CurrencyAmount[];
+  outflow: CurrencyAmount[];
+  inflowUzs: number;
+  outflowUzs: number;
+}
+
+export interface FxCurrent {
+  currency: string;
+  rate: string;
+  source: string;
+  note: string | null;
+  setBy: string | null;
+  createdAt: string;
+}
+
+export interface FinanceSummary {
+  domain: string;
+  today: string;
+  receivables: FinanceAging;
+  payables: FinanceAging;
+  dueSoonIn: FinanceFlow[];
+  dueSoonOut: FinanceFlow[];
+  concentration: FinanceConcentration;
+  months: FinanceMonth[];
+  fx: FxCurrent[];
+}
+
+export interface FinanceCounterparty {
+  id: string;
+  name: string;
+  inn: string | null;
+}
+
 /** Настройки агента — то, что владелец видит и меняет в карточке. */
 export interface AgentCard {
   id: string;
@@ -1424,6 +1529,23 @@ export const core = {
     ),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
+
+  // ── Финансовый контур (агинг, «к сроку», термометр, курс) ──
+  financeSummary: (domain: string) => get<FinanceSummary>(`/finance/summary/${domain}`),
+  financeFlows: (domain: string, params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<FinanceFlow[]>(`/finance/flows/${domain}${qs ? `?${qs}` : ""}`);
+  },
+  financeCounterparties: (domain: string) =>
+    get<FinanceCounterparty[]>(`/finance/counterparties/${domain}`),
+  fxRates: () => get<FxCurrent[]>("/finance/fx"),
+  setFxRate: (input: { currency: string; rate: number; note?: string }) =>
+    send<FxCurrent[]>("/finance/fx", "PUT", input),
+  createFinanceFlow: (input: Record<string, unknown>) =>
+    send<FinanceFlow>("/finance/flows", "POST", input),
+  payFinanceFlow: (id: string, rate?: number) =>
+    send<FinanceFlow>(`/finance/flows/${id}/pay`, "PATCH", rate !== undefined ? { rate } : {}),
+  cancelFinanceFlow: (id: string) => send<FinanceFlow>(`/finance/flows/${id}/cancel`, "PATCH", {}),
 
   // ── Источники (сырой слой) ──
   rawSources: () => get<{ sources: RawSourceState[] }>("/raw/sources"),
