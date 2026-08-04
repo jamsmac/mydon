@@ -349,6 +349,12 @@ export class CoffeeController {
     return this.coffee.containerReturns(limit ? Number(limit) : undefined);
   }
 
+  /** Фактический расход по наборам за период: заливка − возврат через тару. */
+  @Get("container-consumption")
+  containerConsumption(@Query("from") from: string, @Query("to") to: string) {
+    return this.coffee.containerConsumption(from, to);
+  }
+
   // ── Мойка/обслуживание ───────────────────────────────────────────────
 
   @Post("wash")

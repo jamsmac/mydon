@@ -194,3 +194,102 @@ export function parseContainerReturnMessage(text: string): ParsedReturnMessage {
   if (returns.length === 0 && rejected.length === 0) return { returns: [], locationNote: null, rejected: [] };
   return { returns, locationNote, rejected };
 }
+
+// ── Расход по наборам: заливка − возврат через тару ─────────────────────────
+
+/** Заливка для сопоставления с возвратом (нетто уже посчитан через тару). */
+export interface ContainerFillEvent {
+  /** Дата заливки ISO (YYYY-MM-DD). */
+  date: string;
+  position: number;
+  containerNumber: number;
+  /** Нетто засыпанного, г; null — тара набора не калибрована. */
+  netWeight: number | null;
+  /** Точка заливки — расход относится к ней. */
+  locationId: string;
+  locationName: string;
+}
+
+/** Возврат для сопоставления (нетто через ту же тару). */
+export interface ContainerReturnEvent {
+  date: string;
+  position: number;
+  containerNumber: number;
+  netWeight: number | null;
+}
+
+export interface ContainerConsumptionRow {
+  containerNumber: number;
+  position: number;
+  locationId: string;
+  locationName: string;
+  fillDate: string;
+  returnDate: string;
+  fillNet: number | null;
+  returnNet: number | null;
+  /**
+   * Израсходовано, г: fillNet − returnNet. null — посчитать честно нельзя
+   * (нет тары, либо возврат тяжелее заливки — противоречие, не «0»).
+   */
+  consumedGrams: number | null;
+}
+
+/**
+ * Сопоставить возвраты наборов с заливками: возврат закрывает БЛИЖАЙШУЮ
+ * предыдущую заливку того же (набор, позиция), ещё не закрытую другим
+ * возвратом. Физика процесса: набор засыпали на точке → он стоял → его
+ * сняли и взвесили. Разница нетто — фактический расход ингредиента на точке
+ * между визитами, безо всякой телеметрии.
+ *
+ * Возврат без предыдущей заливки (история началась с возврата) пропускается —
+ * расход по нему неизвестен, выдумывать нечего.
+ */
+export function matchReturnsToRefills(
+  fills: readonly ContainerFillEvent[],
+  returns: readonly ContainerReturnEvent[],
+): ContainerConsumptionRow[] {
+  // По (набор, позиция): события в хронологии, заливки и возвраты вперемешку.
+  const key = (e: { containerNumber: number; position: number }) => `${e.containerNumber}:${e.position}`;
+  const fillsByKey = new Map<string, ContainerFillEvent[]>();
+  for (const f of fills) {
+    const list = fillsByKey.get(key(f)) ?? [];
+    list.push(f);
+    fillsByKey.set(key(f), list);
+  }
+  for (const list of fillsByKey.values()) list.sort((a, b) => a.date.localeCompare(b.date));
+
+  const rows: ContainerConsumptionRow[] = [];
+  const sortedReturns = [...returns].sort((a, b) => a.date.localeCompare(b.date));
+  const consumedFillIdx = new Map<string, number>(); // сколько заливок пары уже закрыто
+
+  for (const r of sortedReturns) {
+    const k = key(r);
+    const list = fillsByKey.get(k) ?? [];
+    const from = consumedFillIdx.get(k) ?? 0;
+    // Ближайшая ещё не закрытая заливка с датой ≤ даты возврата.
+    let picked = -1;
+    for (let i = from; i < list.length; i++) {
+      if (list[i]!.date <= r.date) picked = i;
+      else break;
+    }
+    if (picked < 0) continue; // возврат без заливки в истории — расход неизвестен
+    consumedFillIdx.set(k, picked + 1);
+    const fill = list[picked]!;
+    const consumed =
+      fill.netWeight !== null && r.netWeight !== null && fill.netWeight >= r.netWeight
+        ? fill.netWeight - r.netWeight
+        : null;
+    rows.push({
+      containerNumber: r.containerNumber,
+      position: r.position,
+      locationId: fill.locationId,
+      locationName: fill.locationName,
+      fillDate: fill.date,
+      returnDate: r.date,
+      fillNet: fill.netWeight,
+      returnNet: r.netWeight,
+      consumedGrams: consumed,
+    });
+  }
+  return rows;
+}

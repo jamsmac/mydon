@@ -254,6 +254,37 @@ export interface CoffeeContainerReturnRow {
   createdBy: string | null;
 }
 
+/** Расход по наборам: сводка точки за период (заливка − возврат через тару). */
+export interface CoffeeContainerConsumptionLocation {
+  locationId: string;
+  locationName: string;
+  grams: number;
+  /** Себестоимость; null — цены ингредиентов не заведены. */
+  cost: number | null;
+  pairs: number;
+  unknownPairs: number;
+}
+
+export interface CoffeeContainerConsumptionReport {
+  from: string;
+  to: string;
+  rows: {
+    containerNumber: number;
+    position: number;
+    locationId: string;
+    locationName: string;
+    fillDate: string;
+    returnDate: string;
+    fillNet: number | null;
+    returnNet: number | null;
+    consumedGrams: number | null;
+    ingredient: string | null;
+  }[];
+  locations: CoffeeContainerConsumptionLocation[];
+  totalGrams: number;
+  totalCost: number | null;
+}
+
 /** Период размещения аппарата на точке. endDate=null — стоит сейчас. */
 export interface CoffeePlacementRow {
   id: string;
@@ -1235,6 +1266,8 @@ export const core = {
   coffeeContainerReturns: (limit = 200) =>
     get<CoffeeContainerReturnRow[]>(`/coffee/container-return?limit=${limit}`),
   coffeePlacements: () => get<CoffeePlacementRow[]>("/coffee/placements"),
+  coffeeContainerConsumption: (from: string, to: string) =>
+    get<CoffeeContainerConsumptionReport>(`/coffee/container-consumption?from=${from}&to=${to}`),
   recordCoffeeWash: (input: { locationId: string; position?: number; note?: string; performedBy?: string }) =>
     send<{ id: string }>("/coffee/wash", "POST", input),
   coffeeWashHistory: (locationId?: string, limit = 50) =>

@@ -767,6 +767,49 @@ describe("CoffeeService: история размещений (аппарат ↔
   });
 });
 
+describe("CoffeeService: расход по наборам (containerConsumption)", () => {
+  it("пара заливка→возврат: расход в граммах, ингредиент позиции и себестоимость по цене", async () => {
+    const { db } = coffeeDb({
+      refills: [
+        { date: "2026-01-10", position: 7, containerNumber: 5, filledWeight: 1600, locationId: "loc-1", locationName: "AH" },
+      ],
+      returns: [{ position: 7, containerNumber: 5, weight: 1000, returnedDate: "2026-01-17" }],
+      tare: [{ containerNumber: 5, position: 7, tareWeight: 600 }],
+      bunkerConfig: [
+        { position: 7, ingredientId: "ing-7", ingredientName: "Кофе", purchasePrice: "80", targetFillWeight: null },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    const rep = await svc.containerConsumption("2026-01-01", "2026-01-31");
+    assert.equal(rep.rows.length, 1);
+    assert.equal(rep.rows[0]!.consumedGrams, 600, "нетто 1000 − нетто 400");
+    assert.equal(rep.rows[0]!.ingredient, "Кофе");
+    assert.equal(rep.locations.length, 1);
+    assert.equal(rep.locations[0]!.grams, 600);
+    assert.equal(rep.locations[0]!.cost, 48000, "600г × 80 сум/г");
+    assert.equal(rep.totalGrams, 600);
+    assert.equal(rep.totalCost, 48000);
+  });
+
+  it("нет тары пары — расход честно неизвестен: unknownPairs, стоимость null (не 0)", async () => {
+    const { db } = coffeeDb({
+      refills: [
+        { date: "2026-01-10", position: 3, containerNumber: 9, filledWeight: 1600, locationId: "loc-1", locationName: "AH" },
+      ],
+      returns: [{ position: 3, containerNumber: 9, weight: 1000, returnedDate: "2026-01-17" }],
+      tare: [],
+      bunkerConfig: [],
+    });
+    const svc = new CoffeeService(db);
+    const rep = await svc.containerConsumption("2026-01-01", "2026-01-31");
+    assert.equal(rep.rows[0]!.consumedGrams, null);
+    assert.equal(rep.locations[0]!.unknownPairs, 1);
+    assert.equal(rep.locations[0]!.grams, 0);
+    assert.equal(rep.locations[0]!.cost, null);
+    assert.equal(rep.totalCost, null);
+  });
+});
+
 describe("CoffeeService: возвраты наборов (recordContainerReturn/containerReturns)", () => {
   it("recordContainerReturn — пишет строку с брутто-весом как есть", async () => {
     const { db, inserts } = coffeeDb({});
