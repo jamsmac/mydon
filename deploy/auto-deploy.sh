@@ -105,11 +105,24 @@ git clean -fd -e '.env*' # вся .env-семья (.env, .env.local, ...) — к
 #    "успешный" запуск таймера даже при нездоровом приложении, и это некому
 #    было заметить (найдено внешним аудитом, P1). Контейнеры к этому моменту
 #    уже переключены — при провале нужна ручная проверка/откат.
-if "${COMPOSE[@]}" exec -T mydon-core node -e \
-  'fetch("http://127.0.0.1:3001/health").then(r=>r.json()).then(d=>process.exit(d.status==="ok"?0:1)).catch(()=>process.exit(1))'; then
-  log "деплой ok: $REMOTE"
+#
+#    С РЕТРАЯМИ: NestJS поднимается несколько секунд, а раньше проверка шла
+#    в ту же секунду, что и `up -d` — живой деплой 07946da получил ложное
+#    «health не ok», хотя Core отвечал уже через пару секунд (2026-08-04).
+#    До 30 попыток раз в 2 секунды — минута на подъём, потом честный провал.
+health_ok=""
+for attempt in $(seq 1 30); do
+  if "${COMPOSE[@]}" exec -T mydon-core node -e \
+    'fetch("http://127.0.0.1:3001/health").then(r=>r.json()).then(d=>process.exit(d.status==="ok"?0:1)).catch(()=>process.exit(1))' 2>/dev/null; then
+    health_ok="да"
+    break
+  fi
+  sleep 2
+done
+if [ -n "$health_ok" ]; then
+  log "деплой ok: $REMOTE (health поднялся с попытки $attempt)"
 else
-  log "ОШИБКА: health не ok после деплоя $REMOTE — контейнеры уже переключены, нужна ручная проверка"
+  log "ОШИБКА: health не ok спустя минуту после деплоя $REMOTE — контейнеры уже переключены, нужна ручная проверка"
   exit 1
 fi
 
