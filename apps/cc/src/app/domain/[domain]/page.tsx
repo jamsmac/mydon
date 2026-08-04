@@ -18,6 +18,7 @@ import { ConsumptionView } from "../../../components/consumption-view";
 import { ProductsBook } from "../../../components/products-book";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MapPanel } from "../../../components/map-panel";
+import { MiniBars } from "../../../components/mini-bars";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
@@ -133,18 +134,20 @@ export default async function DomainPage({
   // запроса не роняет дашборд — секция просто не показывается.
   let coffeeAlerts: number | null = null;
   let coffeeConsumption: Awaited<ReturnType<typeof core.coffeeContainerConsumption>> | null = null;
+  let salesDaily: Awaited<ReturnType<typeof core.salesDaily>> | null = null;
   if (domain === "vendhub" && isOverview) {
     const isoDate = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
     const fromDate = new Date();
     fromDate.setDate(fromDate.getDate() - 30);
     let coffeeFill: Awaited<ReturnType<typeof core.coffeeFillStatus>> | null = null;
     let coffeeWash: Awaited<ReturnType<typeof core.coffeeWashScheduleStatus>> | null = null;
-    [salesSummary, supplySummary, coffeeFill, coffeeWash, coffeeConsumption] = await Promise.all([
+    [salesSummary, supplySummary, coffeeFill, coffeeWash, coffeeConsumption, salesDaily] = await Promise.all([
       core.salesSummary().catch(() => null),
       core.supplySummary().catch(() => null),
       core.coffeeFillStatus().catch(() => null),
       core.coffeeWashScheduleStatus().catch(() => null),
       core.coffeeContainerConsumption(isoDate(fromDate), isoDate(new Date())).catch(() => null),
+      core.salesDaily(30).catch(() => null),
     ]);
     if (coffeeFill !== null || coffeeWash !== null) {
       coffeeAlerts =
@@ -159,6 +162,28 @@ export default async function DomainPage({
   const isCoffeeTask = (t: Task) => /кофе|бункер|мойк|кофемолк|заливк/i.test(t.title);
   const coffeeTasks = openTasks.filter(isCoffeeTask).length;
   const snackTasks = openTasks.filter((t) => !isCoffeeTask(t) && /пополнен|инкасс|закуп|автомат|снек/i.test(t.title)).length;
+
+  // Расход кофе по неделям (для мини-графика): пары группируются по понедельнику
+  // недели даты возврата. Пары без посчитанного расхода в график не попадают.
+  const coffeeWeeklyBars = (() => {
+    if (coffeeConsumption === null) return [];
+    const byWeek = new Map<string, number>();
+    for (const r of coffeeConsumption.rows) {
+      if (r.consumedGrams === null) continue;
+      const d = new Date(`${r.returnDate}T00:00:00`);
+      const monday = new Date(d);
+      monday.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+      const key = monday.toLocaleDateString("en-CA");
+      byWeek.set(key, (byWeek.get(key) ?? 0) + r.consumedGrams);
+    }
+    return [...byWeek.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([k, grams]) => ({
+        label: `${k.slice(8)}.${k.slice(5, 7)}`,
+        value: grams,
+        title: `неделя с ${k}: ${(grams / 1000).toFixed(1)} кг`,
+      }));
+  })();
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.type] = (acc[e.type] ?? 0) + 1;
     return acc;
@@ -423,6 +448,18 @@ export default async function DomainPage({
                   ))}
                 </div>
               )}
+              {salesDaily !== null && salesDaily.length > 1 && (
+                <>
+                  <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>Выручка по дням · 30 дней:</p>
+                  <MiniBars
+                    bars={salesDaily.map((d) => ({
+                      label: d.dt.slice(8),
+                      value: d.amount,
+                      title: `${d.dt}: ${Math.round(d.amount).toLocaleString("ru-RU")} сум · ${d.qty} шт`,
+                    }))}
+                  />
+                </>
+              )}
               <div style={{ marginTop: 12 }}>
                 <QuickActions
                   domain={domain}
@@ -465,6 +502,12 @@ export default async function DomainPage({
                   <div className="wf">за 30 дней<span className="go">→</span></div>
                 </Link>
               </div>
+              {coffeeWeeklyBars.length > 1 && (
+                <>
+                  <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>Расход по неделям (кг, по возвратам):</p>
+                  <MiniBars bars={coffeeWeeklyBars} hot />
+                </>
+              )}
               <div style={{ marginTop: 12 }}>
                 <QuickActions
                   domain={domain}

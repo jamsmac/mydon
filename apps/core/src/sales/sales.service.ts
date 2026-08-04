@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { entity, event, sale } from "@mydon/db";
 import { strictNumber } from "@mydon/shared";
-import { desc, eq, gte, sql } from "drizzle-orm";
+import { asc, desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
 
@@ -254,6 +254,25 @@ export class SalesService implements OnModuleInit {
       lastSaleDt: row?.last ?? null,
       configured,
     };
+  }
+
+  /**
+   * Динамика по дням для графика дашборда. Дни без продаж в ответе
+   * отсутствуют — график сам решает, как показать дыру (нули не выдумываем).
+   */
+  async daily(days = 30): Promise<{ dt: string; qty: number; amount: number }[]> {
+    const since = daysAgoLocal(Math.min(Math.max(days, 1), 120));
+    const rows = await this.db
+      .select({
+        dt: sale.dt,
+        qty: sql<string>`sum(${sale.qty})`,
+        amount: sql<string>`sum(${sale.amount})`,
+      })
+      .from(sale)
+      .where(gte(sale.dt, since))
+      .groupBy(sale.dt)
+      .orderBy(asc(sale.dt));
+    return rows.map((r) => ({ dt: r.dt, qty: Number(r.qty), amount: Number(r.amount) }));
   }
 
   /** Журнал: дневные позиции с именем автомата и точкой (адресом) из карточки. */
