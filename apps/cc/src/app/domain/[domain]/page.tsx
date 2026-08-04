@@ -10,6 +10,7 @@ import {
   type FinanceFlow,
   type FinanceSummary,
   type GrContract,
+  type GrUnit,
   type Obligations,
   type Person,
   type Task,
@@ -40,6 +41,7 @@ import { FinancePanel } from "../../../components/finance-panel";
 import { CustomsRatesPanel } from "../../../components/customs-rates";
 import { NewContractForm } from "../../../components/contract-forms";
 import { CalcPanel } from "../../../components/calc-panel";
+import { UnitsPanel } from "../../../components/units-panel";
 import { fmtDay } from "../../../lib/globerent";
 import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
@@ -253,9 +255,10 @@ export default async function DomainPage({
     // («Система»), теперь вкладки этого же рабочего места: один адрес
     // направления, а не разрозненные экраны.
     ...(domain === "vendhub" ? [{ key: "vending", label: "Автоматы" }, { key: "coffee", label: "Кофе-бункеры" }] : []),
-    // Живые контуры GLOBERENT (перенос PROMACH): финансы и калькулятор цены.
+    // Живые контуры GLOBERENT (перенос PROMACH): склад, финансы, калькулятор.
     ...(domain === "globerent"
       ? [
+          { key: "units", label: "Склад" },
           { key: "finance", label: "Финансы" },
           { key: "calc", label: "Калькулятор" },
         ]
@@ -313,6 +316,18 @@ export default async function DomainPage({
       core.tnvedRates().catch(() => [] as TnvedRate[]),
       core.brvValues().catch(() => [] as BrvValue[]),
       core.fxRates().catch(() => []),
+    ]);
+  }
+
+  // Склад техники: конвейер единиц (перенос warehouse_vehicles PROMACH).
+  let units: GrUnit[] = [];
+  let unitsSummary: { key: string; label: string; n: number }[] = [];
+  let unitClients: FinanceCounterparty[] = [];
+  if (domain === "globerent" && activeGroup === "units") {
+    [units, unitsSummary, unitClients] = await Promise.all([
+      core.units(domain).catch(() => [] as GrUnit[]),
+      core.unitsSummary(domain).catch(() => []),
+      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
     ]);
   }
 
@@ -847,6 +862,11 @@ export default async function DomainPage({
           />
           <NewEntityForm domain={domain} type="product" label={typeOne("product")} />
         </>
+      )}
+
+      {/* ── Склад техники: конвейер 17 статусов (перенос PROMACH) ── */}
+      {domain === "globerent" && activeGroup === "units" && (
+        <UnitsPanel units={units} summary={unitsSummary} clients={unitClients} />
       )}
 
       {/* ── Калькулятор цены HELI: движок PROMACH, расчёт в браузере ── */}

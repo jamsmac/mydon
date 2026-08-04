@@ -25,6 +25,7 @@ import { StockModule } from "./stock/stock.module";
 import { SupplyModule } from "./supply/supply.module";
 import { SystemModule } from "./system/system.module";
 import { TasksModule } from "./tasks/tasks.module";
+import { UnitsModule } from "./units/units.module";
 import { VendingModule } from "./vending/vending.module";
 import { VerificationModule } from "./verification/verification.module";
 
@@ -54,6 +55,7 @@ import { VerificationModule } from "./verification/verification.module";
     PeopleModule,
     RawModule,
     TasksModule,
+    UnitsModule,
     VerificationModule,
   ],
   controllers: [HealthController],

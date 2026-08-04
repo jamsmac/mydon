@@ -499,6 +499,45 @@ export interface FinanceCounterparty {
   inn: string | null;
 }
 
+// ── Склад техники GLOBERENT (перенос warehouse_vehicles PROMACH) ──
+
+export interface UnitReserveRow {
+  id: string;
+  unitId: string;
+  clientId: string | null;
+  endDate: string;
+  status: string;
+  note: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface GrUnit {
+  id: string;
+  domain: string;
+  code: string;
+  modelId: string | null;
+  name: string;
+  year: number | null;
+  vin: string | null;
+  status: string;
+  salesStage: string | null;
+  lostReason: string | null;
+  salesPrice: string | null;
+  clientId: string | null;
+  contractId: string | null;
+  arrivalDate: string | null;
+  declarationType: string | null;
+  declarationNumber: string | null;
+  declarationDate: string | null;
+  transportCompany: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  clientName: string | null;
+  activeReserve: UnitReserveRow | null;
+}
+
 // ── UZS-договоры GLOBERENT (перенос contracts PROMACH) ──
 
 export interface ContractItemRow {
@@ -1632,6 +1671,22 @@ export const core = {
   },
   financeCounterparties: (domain: string) =>
     get<FinanceCounterparty[]>(`/finance/counterparties/${domain}`),
+  // ── Склад техники ──
+  units: (domain: string, group?: string) =>
+    get<GrUnit[]>(`/units?domain=${domain}${group !== undefined ? `&group=${group}` : ""}`),
+  unitsSummary: (domain: string) =>
+    get<{ key: string; label: string; n: number }[]>(`/units/summary?domain=${domain}`),
+  createUnit: (input: Record<string, unknown>) => send<GrUnit>("/units", "POST", input),
+  unitAction: (id: string, action: string, extra: Record<string, unknown> = {}) =>
+    send<GrUnit>(`/units/${id}/action/${encodeURIComponent(action)}`, "PATCH", extra),
+  setUnitVin: (id: string, vin: string) => send<GrUnit>(`/units/${id}/vin`, "PATCH", { vin }),
+  unbindUnitVin: (id: string) => send<GrUnit>(`/units/${id}/vin/unbind`, "PATCH", {}),
+  reserveUnit: (id: string, input: Record<string, unknown>) =>
+    send<UnitReserveRow>(`/units/${id}/reserve`, "POST", input),
+  cancelUnitReserve: (id: string) => send<GrUnit>(`/units/${id}/reserve/cancel`, "PATCH", {}),
+  setUnitSalesStage: (id: string, input: Record<string, unknown>) =>
+    send<GrUnit>(`/units/${id}/sales-stage`, "PATCH", input),
+
   // ── UZS-договоры ──
   contracts: (domain: string) => get<GrContract[]>(`/contracts?domain=${domain}`),
   contract: (id: string) => get<GrContractDetail>(`/contracts/${id}`),

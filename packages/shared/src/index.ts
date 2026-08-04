@@ -73,3 +73,4 @@ export * from "./geo";
 export * from "./globerent/registry";
 export * from "./globerent/contract-calc";
 export * from "./globerent/calc";
+export * from "./globerent/unit-status";

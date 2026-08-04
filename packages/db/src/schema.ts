@@ -771,6 +771,81 @@ export const contractAct = pgTable(
   (t) => [index("contract_act_contract_idx").on(t.contractId)],
 );
 
+// ── globerent_unit: единица техники (перенос warehouse_vehicles PROMACH) ──
+// Операционный конвейер: 17 статусов от заявки до передачи клиенту,
+// fromStatuses-переходы — в shared/globerent/unit-status (единый словарь).
+// История статусов — audit_log + event (решение сверки: без отдельной таблицы).
+export const globerentUnit = pgTable(
+  "globerent_unit",
+  {
+    id: id(),
+    orgId: uuid("org_id").references(() => org.id),
+    domain: domainEnum("domain").default("globerent").notNull(),
+    /** Складской номер: WH-0001. Генерируется сервисом в транзакции. */
+    code: text("code").notNull(),
+    /** Модель каталога (entity equipment_model). */
+    modelId: uuid("model_id").references(() => entity.id),
+    /** Название единицы словами (модель + год) — живёт и без карточки каталога. */
+    name: text("name").notNull(),
+    year: integer("year"),
+    /** VIN появляется при привязке инвойса; до того NULL. */
+    vin: text("vin"),
+    status: text("status").default("NEW_REQUEST").notNull(),
+    /** Стадия продажи — надстройка; NULL = продажа не начата. */
+    salesStage: text("sales_stage"),
+    lostReason: text("lost_reason"),
+    salesPrice: numeric("sales_price", { precision: 18, scale: 2 }),
+    /** Покупатель (contractor) и договор — связи по FK, не по имени. */
+    clientId: uuid("client_id").references(() => entity.id),
+    contractId: uuid("contract_id").references(() => grContract.id),
+    /** Дата прихода на склад. */
+    arrivalDate: date("arrival_date"),
+    /** Таможенное оформление: тип/номер/дата последней ГТД. */
+    declarationType: text("declaration_type"),
+    declarationNumber: text("declaration_number"),
+    declarationDate: date("declaration_date"),
+    transportCompany: text("transport_company"),
+    notes: text("notes"),
+    createdFrom: text("created_from"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("ux_globerent_unit_code").on(t.orgId, t.code),
+    index("globerent_unit_status_idx").on(t.orgId, t.status),
+    index("globerent_unit_contract_idx").on(t.contractId),
+    // VIN уникален среди заполненных: одна физическая машина — одна карточка.
+    uniqueIndex("ux_globerent_unit_vin")
+      .on(t.vin)
+      .where(sql`vin is not null and vin <> ''`),
+  ],
+);
+
+// ── unit_reserve: резерв единицы под клиента (максимум один активный) ──
+export const unitReserve = pgTable(
+  "unit_reserve",
+  {
+    id: id(),
+    unitId: uuid("unit_id")
+      .references(() => globerentUnit.id)
+      .notNull(),
+    clientId: uuid("client_id").references(() => entity.id),
+    /** До какой даты держим. Просрочка снимается expire-проходом при чтении. */
+    endDate: date("end_date").notNull(),
+    status: text("status").default("active").notNull(), // active | cancelled | expired
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("unit_reserve_unit_idx").on(t.unitId),
+    // Один активный резерв на единицу — правило донора, закреплённое индексом.
+    uniqueIndex("ux_unit_reserve_active")
+      .on(t.unitId)
+      .where(sql`status = 'active'`),
+  ],
+);
+
 // ── tnved_rate: ставки ТН ВЭД для расчёта растаможки (GLOBERENT, донор PROMACH) ──
 // Отдельная таблица, не реестр: ставки — числовая основа калькулятора, им нужны
 // NUMERIC-типизация и JOIN; EAV-attrs это ломает (решение сверки переноса).
@@ -1538,6 +1613,9 @@ export const schema = {
   // UZS-договоры GLOBERENT: договор и акты приёма-передачи (перенос PROMACH).
   grContract,
   contractAct,
+  // Склад техники GLOBERENT: единицы конвейера и резервы (перенос PROMACH).
+  globerentUnit,
+  unitReserve,
   note,
   auditLog,
   agent,
