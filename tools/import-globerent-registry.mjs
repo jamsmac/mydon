@@ -63,6 +63,7 @@ const totals = {
   models: { created: 0, skipped: 0, errors: [] },
   units: { created: 0, skipped: 0, errors: [] },
   ownCompany: { created: 0, skipped: 0, errors: [] },
+  flows: { created: 0, skipped: 0, errors: [] },
 };
 
 // Реквизиты своей компании — отдельный сид: они не из книги, а из
@@ -79,6 +80,46 @@ if (fs.existsSync(ownPath)) {
   add(totals.ownCompany, (await res.json()).ownCompany);
 }
 
+// Ставки растаможки (ТН ВЭД + БРВ) — через штатные ручки каталога.
+// Идемпотентность здесь, по GET-листингу: код+название / значение+дата.
+const customsPath = path.join(ROOT, "data/globerent/customs-rates.json");
+const customsTotals = { tnved: { created: 0, skipped: 0 }, brv: { created: 0, skipped: 0 } };
+if (fs.existsSync(customsPath)) {
+  const customs = JSON.parse(fs.readFileSync(customsPath, "utf8"));
+  const headers = { "Content-Type": "application/json", "x-service-token": TOKEN };
+  const existing = await (await fetch(`${CORE}/catalog/tnved?all=1`)).json();
+  const seen = new Set(existing.map((r) => `${r.code}|${r.nameRu}`));
+  for (const row of customs.tnved ?? []) {
+    if (seen.has(`${row.code}|${row.nameRu}`)) {
+      customsTotals.tnved.skipped += 1;
+      continue;
+    }
+    const res = await fetch(`${CORE}/catalog/tnved`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...row, notes: customs.source }),
+    });
+    if (!res.ok) throw new Error(`Core ответил ${res.status} на ТН ВЭД ${row.code}: ${(await res.text()).slice(0, 300)}`);
+    customsTotals.tnved.created += 1;
+  }
+  if (customs.brv) {
+    const brvList = await (await fetch(`${CORE}/catalog/brv`)).json();
+    const has = brvList.some(
+      (b) => Number(b.valueUzs) === customs.brv.valueUzs && b.validFrom === customs.brv.validFrom,
+    );
+    if (has) customsTotals.brv.skipped += 1;
+    else {
+      const res = await fetch(`${CORE}/catalog/brv`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(customs.brv),
+      });
+      if (!res.ok) throw new Error(`Core ответил ${res.status} на БРВ: ${(await res.text()).slice(0, 300)}`);
+      customsTotals.brv.created += 1;
+    }
+  }
+}
+
 // Порядок обязателен: машины ссылаются на модели и контрагентов по ключам.
 for (const batch of chunks(seed.contractors ?? [], 200)) {
   add(totals.contractors, (await post({ contractors: batch })).contractors);
@@ -93,6 +134,22 @@ for (const batch of chunks(seed.units ?? [], 100)) {
   add(totals.units, (await post({ units: batch })).units);
 }
 
+// Денежный контур: приход по счетам-фактурам + сервисные расходы.
+// Отдельный сид — после машин: продажи привязываются к единицам по VIN.
+const flowsPath = path.join(ROOT, "data/globerent/flows-2026-08-04.json");
+if (fs.existsSync(flowsPath)) {
+  const flowsSeed = JSON.parse(fs.readFileSync(flowsPath, "utf8"));
+  for (const batch of chunks(flowsSeed.flows ?? [], 200)) {
+    const res = await fetch(`${CORE}/registry-import/globerent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+      body: JSON.stringify({ source: flowsSeed.source, flows: batch }),
+    });
+    if (!res.ok) throw new Error(`Core ответил ${res.status} на flows: ${(await res.text()).slice(0, 300)}`);
+    add(totals.flows, (await res.json()).flows);
+  }
+}
+
 console.log("Импорт книги завершён:");
 for (const [k, label] of [
   ["ownCompany", "моя компания"],
@@ -100,8 +157,13 @@ for (const [k, label] of [
   ["models", "модели"],
   ["invoices", "счета-фактуры"],
   ["units", "машины склада"],
+  ["flows", "денежные записи"],
 ]) {
   const t = totals[k];
   console.log(`  ${label}: создано ${t.created}, пропущено (уже были) ${t.skipped}`);
   for (const e of t.errors) console.log(`    ⚠ ${e}`);
 }
+console.log(
+  `  ставки ТН ВЭД: создано ${customsTotals.tnved.created}, пропущено ${customsTotals.tnved.skipped}; ` +
+    `БРВ: создано ${customsTotals.brv.created}, пропущено ${customsTotals.brv.skipped}`,
+);
