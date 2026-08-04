@@ -4,7 +4,11 @@ import { runCoffeeMonitor, type CoffeeMonitorCoreClient } from "./coffee-monitor
 import type { CoffeeFillStatusRow, CoffeeReconcileGroup } from "./core-client";
 
 /** Стаб Core: отдаёт заданные fillStatus/reconcile, копит эмитированные события. */
-function stubCore(fillStatus: CoffeeFillStatusRow[], reconcile: CoffeeReconcileGroup[]) {
+function stubCore(
+  fillStatus: CoffeeFillStatusRow[],
+  reconcile: CoffeeReconcileGroup[],
+  autoLink: { linked: number; ambiguous: string[]; unmatched: string[] } = { linked: 0, ambiguous: [], unmatched: [] },
+) {
   const events: { source: string; type: string; payload?: Record<string, unknown> }[] = [];
   const reconcileCalls: { from: string; to: string }[] = [];
   const core: CoffeeMonitorCoreClient = {
@@ -13,6 +17,7 @@ function stubCore(fillStatus: CoffeeFillStatusRow[], reconcile: CoffeeReconcileG
       reconcileCalls.push({ from, to });
       return reconcile;
     },
+    autoLinkCoffeeLocations: async () => autoLink,
     recordEvent: async (input) => {
       events.push(input);
       return { ok: true };
@@ -118,6 +123,7 @@ describe("monitor-coffee-bunkers: проактивный мониторинг (T
       coffeeReconcileAll: async () => {
         throw new Error("Core недоступен");
       },
+      autoLinkCoffeeLocations: async () => ({ linked: 0, ambiguous: [], unmatched: [] }),
       recordEvent: async (input) => {
         events.push(input);
         return { ok: true };
@@ -129,5 +135,17 @@ describe("monitor-coffee-bunkers: проактивный мониторинг (T
     assert.equal(res.errors.length, 1);
     assert.match(res.errors[0], /Core недоступен/);
     assert.equal(events.length, 1);
+  });
+
+  it("автопривязка: связала точки — событие coffee.autolink; нечего связывать — тишина", async () => {
+    const linked = stubCore([], [], { linked: 2, ambiguous: ["AH"], unmatched: [] });
+    const res = await runCoffeeMonitor(linked.core);
+    assert.equal(res.autoLinked, 2);
+    const ev = linked.events.find((e) => e.type === "coffee.autolink")!;
+    assert.deepEqual(ev.payload, { linked: 2, ambiguous: ["AH"], unmatched: [] });
+
+    const quiet = stubCore([], []);
+    await runCoffeeMonitor(quiet.core);
+    assert.equal(quiet.events.filter((e) => e.type === "coffee.autolink").length, 0, "нулевая привязка не шумит");
   });
 });

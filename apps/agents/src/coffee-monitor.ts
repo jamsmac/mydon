@@ -23,6 +23,8 @@ import type { CoffeeFillStatusRow, CoffeeReconcileGroup } from "./core-client";
 export interface CoffeeMonitorCoreClient {
   coffeeFillStatus(): Promise<CoffeeFillStatusRow[]>;
   coffeeReconcileAll(from: string, to: string): Promise<CoffeeReconcileGroup[]>;
+  /** Автопривязка точек к карточкам автоматов — идемпотентна, ручное не трогает. */
+  autoLinkCoffeeLocations(): Promise<{ linked: number; ambiguous: string[]; unmatched: string[] }>;
   recordEvent(input: { source: string; type: string; payload?: Record<string, unknown> }): Promise<unknown>;
 }
 
@@ -32,6 +34,8 @@ const RECONCILE_WINDOW_DAYS = 3;
 export interface CoffeeMonitorResult {
   underfillEvents: number;
   anomalyEvents: number;
+  /** Сколько точек автопривязка связала с карточками в этот проход. */
+  autoLinked: number;
   /** Что не удалось прочитать — второй источник всё равно проверяется (см. docstring). */
   errors: string[];
 }
@@ -61,6 +65,25 @@ export async function runCoffeeMonitor(
   const from = isoDate(new Date(nowDate.getTime() - RECONCILE_WINDOW_DAYS * 86_400_000));
 
   const errors: string[] = [];
+
+  // Автопривязка — ПЕРЕД чтением сигналов: новые карточки автоматов
+  // (из сборов/выгрузок) сами цепляются к точкам без кнопки в панели
+  // (слово владельца, 2026-08-04). Идемпотентна: связывает только
+  // однозначные совпадения, ручные связи не перетирает.
+  let autoLinked = 0;
+  try {
+    const res = await core.autoLinkCoffeeLocations();
+    autoLinked = res.linked;
+    if (res.linked > 0) {
+      await core.recordEvent({
+        source: "coffee-monitor",
+        type: "coffee.autolink",
+        payload: { linked: res.linked, ambiguous: res.ambiguous, unmatched: res.unmatched },
+      });
+    }
+  } catch (err) {
+    errors.push(`автопривязка: ${errText(err)}`);
+  }
 
   let underfillEvents = 0;
   try {
@@ -109,7 +132,7 @@ export async function runCoffeeMonitor(
     errors.push(`сверка расхода: ${errText(err)}`);
   }
 
-  return { underfillEvents, anomalyEvents, errors };
+  return { underfillEvents, anomalyEvents, autoLinked, errors };
 }
 
 function errText(err: unknown): string {

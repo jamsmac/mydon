@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
@@ -19,6 +19,19 @@ import {
 import { Type } from "class-transformer";
 import { UNITS, type Unit } from "@mydon/shared";
 import { CoffeeService } from "./coffee.service";
+
+export class CreateLocationDto {
+  @IsString() @IsNotEmpty() @MaxLength(128)
+  name!: string;
+}
+
+export class UpdateLocationDto {
+  @IsOptional() @IsString() @MaxLength(128)
+  name?: string;
+
+  @IsOptional() @IsBoolean()
+  isActive?: boolean;
+}
 
 export class AddBunkerIngredientDto {
   @IsInt() @Min(1) @Max(8)
@@ -243,6 +256,18 @@ export class CoffeeController {
     return this.coffee.locations();
   }
 
+  /** Завести точку из панели. */
+  @Post("locations")
+  createLocation(@Body() dto: CreateLocationDto) {
+    return this.coffee.createLocation(dto.name);
+  }
+
+  /** Переименовать / включить-выключить точку. */
+  @Put("locations/:id")
+  updateLocation(@Param("id", ParseUUIDPipe) id: string, @Body() dto: UpdateLocationDto) {
+    return this.coffee.updateLocation(id, dto);
+  }
+
   // ── Привязка точек к автоматам реестра ─────────────────────────────────
 
   @Get("machines")
@@ -320,6 +345,20 @@ export class CoffeeController {
     return this.coffee.recentRefills(limit ? Number(limit) : undefined);
   }
 
+  /** Удалить ошибочную заливку (строка целиком уходит в audit_log).
+   *  `actor` — кто удаляет (в аудит); `by` — удалить только запись этого автора (бот). */
+  @Delete("refill/:id")
+  deleteRefill(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string, @Query("by") by?: string) {
+    return this.coffee.deleteRefill(id, { ...(actor ? { actor } : {}), ...(by ? { onlyIfCreatedBy: by } : {}) });
+  }
+
+  /** Последняя запись автора среди заливок/возвратов/расходников (бот «ошибся»). */
+  @Get("last-entry")
+  lastEntry(@Query("createdBy") createdBy?: string) {
+    if (!createdBy) throw new BadRequestException("createdBy обязателен");
+    return this.coffee.lastEntry(createdBy);
+  }
+
   @Get("summary")
   locationSummary() {
     return this.coffee.locationSummary();
@@ -337,6 +376,12 @@ export class CoffeeController {
     return this.coffee.consumablesSummary();
   }
 
+  /** Удалить строку расходников за день (строка целиком уходит в audit_log). */
+  @Delete("consumable/:id")
+  deleteConsumable(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string, @Query("by") by?: string) {
+    return this.coffee.deleteConsumable(id, { ...(actor ? { actor } : {}), ...(by ? { onlyIfCreatedBy: by } : {}) });
+  }
+
   // ── Возвраты наборов ─────────────────────────────────────────────────
 
   @Post("container-return")
@@ -347,6 +392,12 @@ export class CoffeeController {
   @Get("container-return")
   containerReturns(@Query("limit") limit?: string) {
     return this.coffee.containerReturns(limit ? Number(limit) : undefined);
+  }
+
+  /** Удалить ошибочный возврат набора (строка целиком уходит в audit_log). */
+  @Delete("container-return/:id")
+  deleteContainerReturn(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string, @Query("by") by?: string) {
+    return this.coffee.deleteContainerReturn(id, { ...(actor ? { actor } : {}), ...(by ? { onlyIfCreatedBy: by } : {}) });
   }
 
   /** Фактический расход по наборам за период: заливка − возврат через тару. */

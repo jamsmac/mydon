@@ -152,6 +152,53 @@ export async function removeCoffeeWashSchedule(id: string): Promise<ActionResult
   }
 }
 
+/** Завести кофе-точку из панели (Настройки → Точки). */
+export async function createCoffeeLocation(name: string): Promise<ActionResult> {
+  try {
+    await core.createCoffeeLocation(name);
+    revalidatePath("/domain/vendhub");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
+/** Переименовать / включить-выключить кофе-точку. */
+export async function updateCoffeeLocation(
+  id: string,
+  patch: { name?: string; isActive?: boolean },
+): Promise<ActionResult> {
+  try {
+    await core.updateCoffeeLocation(id, patch);
+    revalidatePath("/domain/vendhub");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
+/** Удалить ошибочную заливку — строка целиком уходит в audit_log. */
+export async function deleteCoffeeRefill(id: string): Promise<ActionResult> {
+  try {
+    await core.deleteCoffeeRefill(id);
+    revalidatePath("/domain/vendhub");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
+/** Удалить ошибочный возврат набора — строка целиком уходит в audit_log. */
+export async function deleteCoffeeContainerReturn(id: string): Promise<ActionResult> {
+  try {
+    await core.deleteCoffeeContainerReturn(id);
+    revalidatePath("/domain/vendhub");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
 /** Привязать/отвязать кофе-точку от карточки автомата реестра (Настройки). */
 export async function linkCoffeeLocation(locationId: string, entityId: string | null): Promise<ActionResult> {
   try {

@@ -5,6 +5,7 @@ import {
   coffeeConsumable,
   coffeeContainerReturn,
   coffeeContainerTare,
+  auditLog,
   coffeeIngredient,
   coffeeLocation,
   coffeeMachinePlacement,
@@ -51,6 +52,24 @@ export interface LocationRow {
   /** Имя и серийник привязанного автомата — для отображения; null без привязки. */
   machineName: string | null;
   machineRef: string | null;
+}
+
+/** Кто удаляет запись журнала и чьи записи ему можно трогать. */
+export interface DeleteEntryOpts {
+  /** Кто удалил — в audit_log (по умолчанию «panel»). */
+  actor?: string;
+  /** Задано — удалить можно только запись этого автора (сотрудник в боте). */
+  onlyIfCreatedBy?: string;
+}
+
+/** Последняя запись автора (бот «ошибся — исправить»): что и когда внесено. */
+export interface LastEntryRow {
+  kind: "refill" | "container_return" | "consumable";
+  id: string;
+  /** ISO-время записи — по нему выбрана самая свежая из трёх журналов. */
+  at: string;
+  /** Готовая строка по-русски: сотрудник видит, что именно удаляет. */
+  text: string;
 }
 
 /** Кандидат привязки: автомат из реестра с адресом точки из его карточки. */
@@ -443,6 +462,191 @@ export class CoffeeService {
       }
     }
     return { linked, ambiguous, unmatched };
+  }
+
+  // ── Точки: правка из панели (слово владельца: всё редактируется легко) ──
+
+  /** Завести точку вручную. Уникальность имени держит БД. */
+  async createLocation(name: string): Promise<{ id: string }> {
+    const clean = name.trim();
+    if (clean.length < 2 || clean.length > 128) throw new BadRequestException("Имя точки — от 2 до 128 символов");
+    const [row] = await this.db.insert(coffeeLocation).values({ name: clean }).returning({ id: coffeeLocation.id });
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: "panel",
+      action: "coffee.location.create",
+      target: row.id,
+      after: { name: clean },
+    });
+    return { id: row.id };
+  }
+
+  /** Переименовать / включить-выключить точку. */
+  async updateLocation(id: string, patch: { name?: string; isActive?: boolean }): Promise<{ ok: true }> {
+    const [loc] = await this.db.select().from(coffeeLocation).where(eq(coffeeLocation.id, id));
+    if (!loc) throw new NotFoundException(`Точка ${id} не найдена`);
+    const set: { name?: string; isActive?: boolean } = {};
+    if (patch.name !== undefined) {
+      const clean = patch.name.trim();
+      if (clean.length < 2 || clean.length > 128) throw new BadRequestException("Имя точки — от 2 до 128 символов");
+      set.name = clean;
+    }
+    if (patch.isActive !== undefined) set.isActive = patch.isActive;
+    if (Object.keys(set).length === 0) return { ok: true };
+    await this.db.update(coffeeLocation).set(set).where(eq(coffeeLocation.id, id));
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: "panel",
+      action: "coffee.location.update",
+      target: id,
+      before: { name: loc.name, isActive: loc.isActive },
+      after: set,
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Удалить ошибочную запись журнала. Правка истории — честная: строка
+   * целиком уходит в audit_log (кто, что, когда стояло), а не исчезает молча.
+   * `onlyIfCreatedBy` — страховка для бота: сотрудник удаляет только своё,
+   * владелец из панели (без ограничения) — что угодно.
+   */
+  async deleteRefill(id: string, opts: DeleteEntryOpts = {}): Promise<{ ok: true }> {
+    const [row] = await this.db.select().from(coffeeRefill).where(eq(coffeeRefill.id, id));
+    if (!row) throw new NotFoundException(`Заливка ${id} не найдена`);
+    if (opts.onlyIfCreatedBy !== undefined && row.createdBy !== opts.onlyIfCreatedBy) {
+      throw new BadRequestException("Это не твоя запись — её может удалить только автор или владелец в панели");
+    }
+    await this.db.delete(coffeeRefill).where(eq(coffeeRefill.id, id));
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: opts.actor ?? "panel",
+      action: "coffee.refill.delete",
+      target: id,
+      before: row,
+    });
+    return { ok: true };
+  }
+
+  async deleteContainerReturn(id: string, opts: DeleteEntryOpts = {}): Promise<{ ok: true }> {
+    const [row] = await this.db.select().from(coffeeContainerReturn).where(eq(coffeeContainerReturn.id, id));
+    if (!row) throw new NotFoundException(`Возврат ${id} не найден`);
+    if (opts.onlyIfCreatedBy !== undefined && row.createdBy !== opts.onlyIfCreatedBy) {
+      throw new BadRequestException("Это не твоя запись — её может удалить только автор или владелец в панели");
+    }
+    await this.db.delete(coffeeContainerReturn).where(eq(coffeeContainerReturn.id, id));
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: opts.actor ?? "panel",
+      action: "coffee.return.delete",
+      target: id,
+      before: row,
+    });
+    return { ok: true };
+  }
+
+  /** Удалить строку расходников (вода/стаканы/крышки) за день — с тем же аудитом. */
+  async deleteConsumable(id: string, opts: DeleteEntryOpts = {}): Promise<{ ok: true }> {
+    const [row] = await this.db.select().from(coffeeConsumable).where(eq(coffeeConsumable.id, id));
+    if (!row) throw new NotFoundException(`Запись расходников ${id} не найдена`);
+    if (opts.onlyIfCreatedBy !== undefined && row.createdBy !== opts.onlyIfCreatedBy) {
+      throw new BadRequestException("Это не твоя запись — её может удалить только автор или владелец в панели");
+    }
+    await this.db.delete(coffeeConsumable).where(eq(coffeeConsumable.id, id));
+    await this.db.insert(auditLog).values({
+      actorKind: "human",
+      actorRef: opts.actor ?? "panel",
+      action: "coffee.consumable.delete",
+      target: id,
+      before: row,
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Последняя запись автора среди заливок, возвратов и расходников — для
+   * «ошибся — исправить» в боте: сотрудник видит, что именно удаляет,
+   * прежде чем подтвердить.
+   */
+  async lastEntry(createdBy: string): Promise<{ entry: LastEntryRow | null }> {
+    const [refills, returns, consumables] = await Promise.all([
+      this.db
+        .select({
+          id: coffeeRefill.id,
+          at: coffeeRefill.createdAt,
+          locationName: coffeeLocation.name,
+          position: coffeeRefill.position,
+          containerNumber: coffeeRefill.containerNumber,
+          filledWeight: coffeeRefill.filledWeight,
+          packageCount: coffeeRefill.packageCount,
+          enteredDate: coffeeRefill.enteredDate,
+        })
+        .from(coffeeRefill)
+        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .where(eq(coffeeRefill.createdBy, createdBy))
+        .orderBy(desc(coffeeRefill.createdAt))
+        .limit(1),
+      this.db
+        .select({
+          id: coffeeContainerReturn.id,
+          at: coffeeContainerReturn.createdAt,
+          position: coffeeContainerReturn.position,
+          containerNumber: coffeeContainerReturn.containerNumber,
+          weight: coffeeContainerReturn.weight,
+          returnedDate: coffeeContainerReturn.returnedDate,
+        })
+        .from(coffeeContainerReturn)
+        .where(eq(coffeeContainerReturn.createdBy, createdBy))
+        .orderBy(desc(coffeeContainerReturn.createdAt))
+        .limit(1),
+      this.db
+        .select({
+          id: coffeeConsumable.id,
+          at: coffeeConsumable.updatedAt,
+          locationName: coffeeLocation.name,
+          loggedDate: coffeeConsumable.loggedDate,
+          water: coffeeConsumable.water,
+          cups: coffeeConsumable.cups,
+          lids: coffeeConsumable.lids,
+        })
+        .from(coffeeConsumable)
+        .innerJoin(coffeeLocation, eq(coffeeConsumable.locationId, coffeeLocation.id))
+        .where(eq(coffeeConsumable.createdBy, createdBy))
+        .orderBy(desc(coffeeConsumable.updatedAt))
+        .limit(1),
+    ]);
+
+    const pad3 = (n: number) => String(n).padStart(3, "0");
+    const candidates: LastEntryRow[] = [];
+    for (const r of refills) {
+      const container = r.containerNumber != null ? ` · набор ${pad3(r.containerNumber)}` : "";
+      candidates.push({
+        kind: "refill",
+        id: r.id,
+        at: new Date(r.at).toISOString(),
+        text: `заливка ${r.enteredDate} · ${r.locationName} · бункер ${r.position}${container} · ${r.filledWeight}г · ${r.packageCount} уп.`,
+      });
+    }
+    for (const r of returns) {
+      candidates.push({
+        kind: "container_return",
+        id: r.id,
+        at: new Date(r.at).toISOString(),
+        text: `возврат ${r.returnedDate} · набор ${pad3(r.containerNumber)} · поз. ${r.position} · ${r.weight}г`,
+      });
+    }
+    for (const r of consumables) {
+      candidates.push({
+        kind: "consumable",
+        id: r.id,
+        at: new Date(r.at).toISOString(),
+        text: `расходники ${r.loggedDate} · ${r.locationName} · вода ${r.water} · стаканы ${r.cups} · крышки ${r.lids}`,
+      });
+    }
+    if (candidates.length === 0) return { entry: null };
+    // Сортировка в JS, не в SQL: три источника сравниваются между собой здесь.
+    candidates.sort((a, b) => b.at.localeCompare(a.at));
+    return { entry: candidates[0] };
   }
 
   // ── Настройки: ингредиенты по позициям бункера ────────────────────────

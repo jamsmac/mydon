@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  auditLog,
   coffeeBunkerConfig,
   coffeeConsumable,
   coffeeContainerReturn,
@@ -78,6 +79,7 @@ function coffeeDb(tables: {
     if (t === entity) return "entity";
     if (t === coffeeContainerReturn) return "coffee_container_return";
     if (t === coffeeMachinePlacement) return "coffee_machine_placement";
+    if (t === auditLog) return "audit_log";
     return "unknown";
   };
 
@@ -789,6 +791,130 @@ describe("CoffeeService: история размещений (аппарат ↔
     const rows = await svc.placements();
     assert.equal(rows.length, 1);
     assert.equal(rows[0]!.endDate, null);
+  });
+});
+
+describe("CoffeeService: правка точек и журнала из панели", () => {
+  it("createLocation: короткое имя отклоняется, годное — пишется с аудитом", async () => {
+    const { db, inserts } = coffeeDb({});
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.createLocation(" x "));
+    await svc.createLocation("  Новая точка  ");
+    const loc = inserts.find((i) => i.table === "coffee_location")!;
+    assert.equal((loc.values as Record<string, unknown>).name, "Новая точка", "имя триммится");
+    const audit = inserts.find((i) => i.table === "audit_log")!;
+    assert.equal((audit.values as Record<string, unknown>).action, "coffee.location.create");
+  });
+
+  it("updateLocation: переименование пишет before/after в аудит; пустой patch — no-op", async () => {
+    const { db, updates, inserts } = coffeeDb({
+      locations: [{ id: "loc-1", name: "Старое имя", isActive: true, entityId: null, sortOrder: 0 }],
+    });
+    const svc = new CoffeeService(db);
+    await svc.updateLocation("loc-1", {});
+    assert.equal(updates.length, 0, "нечего менять — не трогаем базу");
+    await svc.updateLocation("loc-1", { name: "Новое имя", isActive: false });
+    assert.equal(updates.filter((u) => u.table === "coffee_location").length, 1);
+    const audit = inserts.find((i) => i.table === "audit_log")!.values as Record<string, Record<string, unknown>>;
+    assert.equal(audit.before!.name, "Старое имя");
+    assert.equal(audit.after!.name, "Новое имя");
+  });
+
+  it("deleteRefill: строка целиком уходит в аудит, потом удаляется; неизвестный id — отказ", async () => {
+    const row = { id: "r1", locationId: "loc-1", position: 7, filledWeight: 1200, enteredDate: "2026-08-01" };
+    const { db, deletes, inserts } = coffeeDb({ refills: [row] });
+    const svc = new CoffeeService(db);
+    await svc.deleteRefill("r1");
+    assert.equal(deletes.filter((d) => d.table === "coffee_refill").length, 1);
+    const audit = inserts.find((i) => i.table === "audit_log")!.values as Record<string, unknown>;
+    assert.equal(audit.action, "coffee.refill.delete");
+    assert.deepEqual(audit.before, row, "удалённое сохранено целиком — восстановимо глазами");
+
+    const empty = new CoffeeService(coffeeDb({ refills: [] }).db);
+    await assert.rejects(empty.deleteRefill("missing"));
+  });
+
+  it("deleteContainerReturn: то же для возвратов", async () => {
+    const row = { id: "ret-1", position: 1, containerNumber: 27, weight: 787, returnedDate: "2026-07-30" };
+    const { db, deletes, inserts } = coffeeDb({ returns: [row] });
+    const svc = new CoffeeService(db);
+    await svc.deleteContainerReturn("ret-1");
+    assert.equal(deletes.filter((d) => d.table === "coffee_container_return").length, 1);
+    assert.equal((inserts.find((i) => i.table === "audit_log")!.values as Record<string, unknown>).action, "coffee.return.delete");
+  });
+});
+
+describe("CoffeeService: «ошибся — исправить» (только своё + последняя запись)", () => {
+  it("onlyIfCreatedBy: чужую запись бот удалить не может, свою — можно, актор в аудите", async () => {
+    const row = { id: "r1", locationId: "loc-1", position: 7, filledWeight: 1200, enteredDate: "2026-08-01", createdBy: "person:p1" };
+    const { db, deletes, inserts } = coffeeDb({ refills: [row] });
+    const svc = new CoffeeService(db);
+    await assert.rejects(
+      svc.deleteRefill("r1", { actor: "person:p2", onlyIfCreatedBy: "person:p2" }),
+      /не твоя запись/i,
+    );
+    assert.equal(deletes.length, 0, "отказ — до удаления");
+    await svc.deleteRefill("r1", { actor: "person:p1", onlyIfCreatedBy: "person:p1" });
+    assert.equal(deletes.filter((d) => d.table === "coffee_refill").length, 1);
+    const audit = inserts.find((i) => i.table === "audit_log")!.values as Record<string, unknown>;
+    assert.equal(audit.actorRef, "person:p1", "в аудите — кто удалил на самом деле, не «panel»");
+  });
+
+  it("deleteConsumable: строка расходников целиком уходит в аудит", async () => {
+    const row = { id: "cons-1", locationId: "loc-1", loggedDate: "2026-08-04", water: 2, cups: 100, lids: 100, createdBy: "person:p1" };
+    const { db, deletes, inserts } = coffeeDb({ consumables: [row] });
+    const svc = new CoffeeService(db);
+    await svc.deleteConsumable("cons-1", { actor: "person:p1", onlyIfCreatedBy: "person:p1" });
+    assert.equal(deletes.filter((d) => d.table === "coffee_consumable").length, 1);
+    const audit = inserts.find((i) => i.table === "audit_log")!.values as Record<string, unknown>;
+    assert.equal(audit.action, "coffee.consumable.delete");
+    assert.deepEqual(audit.before, row, "удалённое сохранено целиком");
+
+    const empty = new CoffeeService(coffeeDb({}).db);
+    await assert.rejects(empty.deleteConsumable("missing"));
+  });
+
+  it("lastEntry: выбирает самую свежую из трёх журналов, текст читается по-русски", async () => {
+    const { db } = coffeeDb({
+      refills: [
+        {
+          id: "r1",
+          at: "2026-08-01T10:00:00Z",
+          locationName: "AH",
+          position: 7,
+          containerNumber: 5,
+          filledWeight: 1200,
+          packageCount: 2,
+          enteredDate: "2026-08-01",
+        },
+      ],
+      returns: [
+        { id: "ret-1", at: "2026-08-03T09:00:00Z", position: 1, containerNumber: 27, weight: 787, returnedDate: "2026-08-03" },
+      ],
+      consumables: [
+        {
+          id: "cons-1",
+          at: "2026-08-02T08:00:00Z",
+          locationName: "AH",
+          loggedDate: "2026-08-02",
+          water: 2,
+          cups: 100,
+          lids: 100,
+        },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    const { entry } = await svc.lastEntry("person:p1");
+    assert.ok(entry);
+    assert.equal(entry.kind, "container_return", "возврат новее заливки и расходников");
+    assert.equal(entry.id, "ret-1");
+    assert.match(entry.text, /возврат 2026-08-03 · набор 027 · поз\. 1 · 787г/);
+  });
+
+  it("lastEntry: записей нет — entry null (не выдумываем)", async () => {
+    const svc = new CoffeeService(coffeeDb({}).db);
+    const { entry } = await svc.lastEntry("person:p1");
+    assert.equal(entry, null);
   });
 });
 

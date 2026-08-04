@@ -1584,6 +1584,11 @@ export const core = {
   ingestCoffeeStock: (input: { countedAt?: string; items: { ingredientId: string; quantity: number }[] }) =>
     send<{ items: number; adjustments: unknown[] }>("/coffee/stock", "POST", input),
   coffeeMachineCandidates: () => get<CoffeeMachineCandidate[]>("/coffee/machines"),
+  createCoffeeLocation: (name: string) => send<{ id: string }>("/coffee/locations", "POST", { name }),
+  updateCoffeeLocation: (id: string, patch: { name?: string; isActive?: boolean }) =>
+    send<{ ok: true }>(`/coffee/locations/${id}`, "PUT", patch),
+  deleteCoffeeRefill: (id: string) => send<{ ok: true }>(`/coffee/refill/${id}`, "DELETE"),
+  deleteCoffeeContainerReturn: (id: string) => send<{ ok: true }>(`/coffee/container-return/${id}`, "DELETE"),
   linkCoffeeLocation: (locationId: string, entityId: string | null) =>
     send<{ ok: true }>("/coffee/location-link", "PUT", { locationId, ...(entityId !== null ? { entityId } : {}) }),
   autoLinkCoffeeLocations: () =>

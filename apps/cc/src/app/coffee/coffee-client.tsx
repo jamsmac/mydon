@@ -23,6 +23,10 @@ import {
   addBunkerIngredient,
   autoLinkCoffeeLocations,
   createCoffeeAlertTask,
+  createCoffeeLocation,
+  deleteCoffeeContainerReturn,
+  deleteCoffeeRefill,
+  updateCoffeeLocation,
   ingestCoffeeStock,
   linkCoffeeLocation,
   recordCoffeeConsumable,
@@ -289,7 +293,21 @@ function JournalTab({
   containerReturns: CoffeeContainerReturnRow[];
 }) {
   const [locationId, setLocationId] = useState("");
-  const shownRefills = locationId ? refills.filter((r) => r.locationId === locationId) : refills;
+  const [pending, start] = useTransition();
+  // Удалённое скрываем сразу (оптимистично) — сервер уже пишет строку в аудит.
+  const [gone, setGone] = useState<Set<string>>(new Set());
+  const shownRefills = (locationId ? refills.filter((r) => r.locationId === locationId) : refills).filter(
+    (r) => !gone.has(r.id),
+  );
+  const shownReturns = containerReturns.filter((r) => !gone.has(r.id));
+
+  const remove = (id: string, action: (id: string) => Promise<{ ok: boolean; message?: string }>) => {
+    if (!window.confirm("Удалить запись? Строка целиком сохранится в журнале аудита.")) return;
+    start(async () => {
+      const res = await action(id);
+      if (res.ok) setGone((prev) => new Set([...prev, id]));
+    });
+  };
 
   return (
     <div className="card">
@@ -325,6 +343,15 @@ function JournalTab({
               <span className="pill">
                 {r.filledWeight}г · {r.packageCount} уп.
               </span>
+              <button
+                type="button"
+                className="row-x"
+                title="Удалить запись (сохранится в аудите)"
+                disabled={pending}
+                onClick={() => remove(r.id, deleteCoffeeRefill)}
+              >
+                ✕
+              </button>
             </div>
           ))}
         </div>
@@ -336,13 +363,13 @@ function JournalTab({
       {/* Возвраты не привязаны к точке в учёте (заголовок сообщения — лишь
           подсказка), поэтому фильтр по точке на них не действует. */}
       <div className="section-title" style={{ marginTop: 18 }}>
-        Возвраты наборов · {containerReturns.length}
+        Возвраты наборов · {shownReturns.length}
       </div>
-      {containerReturns.length === 0 ? (
+      {shownReturns.length === 0 ? (
         <p className="muted">Возвратов пока нет.</p>
       ) : (
         <div className="rows">
-          {containerReturns.map((r) => (
+          {shownReturns.map((r) => (
             <div className="row" key={r.id}>
               <div className="t">
                 <b>
@@ -356,6 +383,15 @@ function JournalTab({
               <span className="pill">
                 {r.weight}г{r.netWeight !== null ? ` · нетто ${r.netWeight}г` : " · тара не калибрована"}
               </span>
+              <button
+                type="button"
+                className="row-x"
+                title="Удалить запись (сохранится в аудите)"
+                disabled={pending}
+                onClick={() => remove(r.id, deleteCoffeeContainerReturn)}
+              >
+                ✕
+              </button>
             </div>
           ))}
         </div>
@@ -780,6 +816,9 @@ function SettingsTab({
 }) {
   return (
     <>
+      <div className="section-title">Точки</div>
+      <LocationsEditSection locations={locations} />
+
       <div className="section-title">Привязка точек к автоматам реестра</div>
       <LocationLinkSection locations={locations} machines={machineCandidates} />
 
@@ -799,6 +838,97 @@ function SettingsTab({
 
       <div className="section-title">Расписание мойки/обслуживания</div>
       <WashScheduleSection locations={locations} schedules={washSchedules} />
+    </>
+  );
+}
+
+/**
+ * Точки как справочник: переименование прямо в строке (сохранение по уходу из
+ * поля), выключение вместо удаления (история заливок остаётся), добавление
+ * новой. Каждая правка уходит в журнал аудита на стороне Core.
+ */
+function LocationsEditSection({ locations }: { locations: CoffeeLocation[] }) {
+  const [pending, start] = useTransition();
+  const [note, setNote] = useState<string | null>(null);
+  const [newName, setNewName] = useState("");
+
+  const run = (fn: () => Promise<{ ok: boolean; message?: string }>, after?: () => void) =>
+    start(async () => {
+      const res = await fn();
+      setNote(res.ok ? null : res.message ?? "Не получилось");
+      if (res.ok) after?.();
+    });
+
+  const rename = (l: CoffeeLocation, raw: string) => {
+    const name = raw.trim();
+    if (name.length === 0 || name === l.name) return;
+    run(() => updateCoffeeLocation(l.id, { name }));
+  };
+
+  return (
+    <>
+      <p className="hint">
+        Название правится прямо в поле (сохранится само). Ошибочную точку не удаляем, а выключаем — история
+        заливок остаётся; выключенная не предлагается при вводе.
+      </p>
+      {note && <p className="hint">{note}</p>}
+      <table className="coffee-table">
+        <thead>
+          <tr>
+            <th>Название</th>
+            <th>Активна</th>
+          </tr>
+        </thead>
+        <tbody>
+          {locations.map((l) => (
+            <tr key={l.id}>
+              <td>
+                <input
+                  className="tag-price"
+                  style={{ width: "100%", textAlign: "left" }}
+                  defaultValue={l.name}
+                  disabled={pending}
+                  onBlur={(e) => rename(l, e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                  }}
+                />
+              </td>
+              <td>
+                <input
+                  type="checkbox"
+                  checked={l.isActive}
+                  disabled={pending}
+                  onChange={(e) => run(() => updateCoffeeLocation(l.id, { isActive: e.target.checked }))}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <form
+        className="tag-add-form"
+        style={{ marginTop: 10, display: "flex", gap: 8 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          const name = newName.trim();
+          if (name.length === 0) return;
+          run(
+            () => createCoffeeLocation(name),
+            () => setNewName(""),
+          );
+        }}
+      >
+        <input
+          placeholder="Новая точка — название"
+          value={newName}
+          disabled={pending}
+          onChange={(e) => setNewName(e.target.value)}
+        />
+        <button className="tag-add" disabled={pending || newName.trim().length === 0} type="submit">
+          Добавить точку
+        </button>
+      </form>
     </>
   );
 }
