@@ -20,7 +20,7 @@ describe("Сводка продаж в боте", () => {
   });
 
   it("сводка: сегодня/вчера/30 дней и дата последней продажи", () => {
-    const text = formatSalesSummary(S).replace(/ /g, " ");
+    const text = formatSalesSummary(S).replace(/\u00A0/g, " ");
     assert.match(text, /Сегодня: 1 260 000 сум · 42 шт/);
     assert.match(text, /Вчера: 1 650 000 сум · 55 шт/);
     assert.match(text, /30 дней: 42 000 000 сум/);
