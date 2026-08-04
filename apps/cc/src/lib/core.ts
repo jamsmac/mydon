@@ -1404,6 +1404,7 @@ export const core = {
       configured: boolean;
     }>("/sales/summary"),
   sales: (days = 7, limit = 300) => get<SaleRow[]>(`/sales?days=${days}&limit=${limit}`),
+  salesDaily: (days = 30) => get<{ dt: string; qty: number; amount: number }[]>(`/sales/daily?days=${days}`),
   salesSilent: (days = 2) =>
     get<{ machineId: string | null; serial: string; name: string | null; lastDt: string }[]>(
       `/sales/silent?days=${days}`,

@@ -18,6 +18,7 @@ import { ConsumptionView } from "../../../components/consumption-view";
 import { ProductsBook } from "../../../components/products-book";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MapPanel } from "../../../components/map-panel";
+import { MiniBars } from "../../../components/mini-bars";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
@@ -129,13 +130,60 @@ export default async function DomainPage({
   // дашборда. На других вкладках vendhub их не тянем.
   let salesSummary: Awaited<ReturnType<typeof core.salesSummary>> | null = null;
   let supplySummary: Awaited<ReturnType<typeof core.supplySummary>> | null = null;
+  // Кофе-бункеры на дашборде: алерты и расход за 30 дней. Провал любого
+  // запроса не роняет дашборд — секция просто не показывается.
+  let coffeeAlerts: number | null = null;
+  let coffeeConsumption: Awaited<ReturnType<typeof core.coffeeContainerConsumption>> | null = null;
+  let salesDaily: Awaited<ReturnType<typeof core.salesDaily>> | null = null;
   if (domain === "vendhub" && isOverview) {
-    [salesSummary, supplySummary] = await Promise.all([
+    const isoDate = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 30);
+    let coffeeFill: Awaited<ReturnType<typeof core.coffeeFillStatus>> | null = null;
+    let coffeeWash: Awaited<ReturnType<typeof core.coffeeWashScheduleStatus>> | null = null;
+    [salesSummary, supplySummary, coffeeFill, coffeeWash, coffeeConsumption, salesDaily] = await Promise.all([
       core.salesSummary().catch(() => null),
       core.supplySummary().catch(() => null),
+      core.coffeeFillStatus().catch(() => null),
+      core.coffeeWashScheduleStatus().catch(() => null),
+      core.coffeeContainerConsumption(isoDate(fromDate), isoDate(new Date())).catch(() => null),
+      core.salesDaily(30).catch(() => null),
     ]);
+    if (coffeeFill !== null || coffeeWash !== null) {
+      coffeeAlerts =
+        (coffeeFill ?? []).filter((r) => r.status === "underfill").length +
+        (coffeeWash ?? []).filter((r) => r.status === "overdue").length;
+    }
   }
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
+  // Задачи по контурам (слово владельца: смотреть и вместе, и по отдельности).
+  // Эвристика по заголовку — задачи создаются с говорящими названиями
+  // («Чистка кофемолок», «Пополнение автоматов»), точного тега контура нет.
+  const isCoffeeTask = (t: Task) => /кофе|бункер|мойк|кофемолк|заливк/i.test(t.title);
+  const coffeeTasks = openTasks.filter(isCoffeeTask).length;
+  const snackTasks = openTasks.filter((t) => !isCoffeeTask(t) && /пополнен|инкасс|закуп|автомат|снек/i.test(t.title)).length;
+
+  // Расход кофе по неделям (для мини-графика): пары группируются по понедельнику
+  // недели даты возврата. Пары без посчитанного расхода в график не попадают.
+  const coffeeWeeklyBars = (() => {
+    if (coffeeConsumption === null) return [];
+    const byWeek = new Map<string, number>();
+    for (const r of coffeeConsumption.rows) {
+      if (r.consumedGrams === null) continue;
+      const d = new Date(`${r.returnDate}T00:00:00`);
+      const monday = new Date(d);
+      monday.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+      const key = monday.toLocaleDateString("en-CA");
+      byWeek.set(key, (byWeek.get(key) ?? 0) + r.consumedGrams);
+    }
+    return [...byWeek.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([k, grams]) => ({
+        label: `${k.slice(8)}.${k.slice(5, 7)}`,
+        value: grams,
+        title: `неделя с ${k}: ${(grams / 1000).toFixed(1)} кг`,
+      }));
+  })();
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.type] = (acc[e.type] ?? 0) + 1;
     return acc;
@@ -271,7 +319,14 @@ export default async function DomainPage({
             <Link href={href("tasks")} className={`tile ${openTasks.length === 0 ? "zero" : ""}`}>
               <div className="lab">Открытых задач</div>
               <div className="v">{openTasks.length}</div>
-              <div className="foot"><span className="mk" />{openTasks.length > 0 ? "по направлению" : "задач нет"}<span className="go">→</span></div>
+              <div className="foot"><span className="mk" />
+                {openTasks.length === 0
+                  ? "задач нет"
+                  : domain === "vendhub" && (coffeeTasks > 0 || snackTasks > 0)
+                    ? `кофе ${coffeeTasks} · снек ${snackTasks} · прочее ${openTasks.length - coffeeTasks - snackTasks}`
+                    : "по направлению"}
+                <span className="go">→</span>
+              </div>
             </Link>
           </div>
 
@@ -351,27 +406,13 @@ export default async function DomainPage({
             </div>
           )}
 
-          {domain === "vendhub" && (
-            <div className="sect">
-              <div className="sect-h"><h3 className="h2">Быстрые действия</h3></div>
-              <QuickActions
-                domain={domain}
-                actions={["Пополнение автоматов", "Инкассация", "Чистка кофемолок", "Ремонт / выезд"]}
-                defaultOwnerRef={defaultOwner?.id ?? null}
-              />
-              {defaultOwner && (
-                <p className="hint" style={{ marginTop: 6 }}>
-                  Задача уйдёт исполнителю: {defaultOwner.name}. Поменять можно в карточке задачи.
-                </p>
-              )}
-            </div>
-          )}
-
+          {/* ── Контур: снек-автоматы — свои цифры и свои быстрые действия ── */}
           {domain === "vendhub" && (
             <div className="sect">
               <div className="sect-h">
-                <h3 className="h2">Продажи и выручка</h3>
+                <h3 className="h2">Снек-автоматы</h3>
                 {salesSummary?.lastSaleDt && <span className="chip g">живые · OurVend</span>}
+                {snackTasks > 0 && <span className="chip">задач · {snackTasks}</span>}
               </div>
               {salesSummary && salesSummary.lastSaleDt ? (
                 <div className="wgrid">
@@ -406,6 +447,78 @@ export default async function DomainPage({
                     </div>
                   ))}
                 </div>
+              )}
+              {salesDaily !== null && salesDaily.length > 1 && (
+                <>
+                  <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>Выручка по дням · 30 дней:</p>
+                  <MiniBars
+                    bars={salesDaily.map((d) => ({
+                      label: d.dt.slice(8),
+                      value: d.amount,
+                      title: `${d.dt}: ${Math.round(d.amount).toLocaleString("ru-RU")} сум · ${d.qty} шт`,
+                    }))}
+                  />
+                </>
+              )}
+              <div style={{ marginTop: 12 }}>
+                <QuickActions
+                  domain={domain}
+                  actions={["Пополнение автоматов", "Инкассация", "Ремонт / выезд"]}
+                  defaultOwnerRef={defaultOwner?.id ?? null}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* ── Контур: кофе-бункеры — свои цифры и свои быстрые действия ── */}
+          {domain === "vendhub" && (coffeeAlerts !== null || coffeeConsumption !== null) && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Кофе-бункеры</h3>
+                {coffeeAlerts !== null && coffeeAlerts > 0 && <span className="chip h">внимание · {coffeeAlerts}</span>}
+                {coffeeTasks > 0 && <span className="chip">задач · {coffeeTasks}</span>}
+              </div>
+              <div className="wgrid">
+                <Link href={href("coffee")} className="wt">
+                  <div className="wl">Сигналы (недолив · мойка)</div>
+                  <div className="wv">{coffeeAlerts ?? "—"}</div>
+                  <div className="wf">{coffeeAlerts === 0 ? "спокойно" : "смотреть сверку"}<span className="go">→</span></div>
+                </Link>
+                <Link href={href("coffee")} className="wt">
+                  <div className="wl">Расход · 30 дней</div>
+                  <div className="wv">
+                    {coffeeConsumption !== null ? `${(coffeeConsumption.totalGrams / 1000).toFixed(1)} кг` : "—"}
+                  </div>
+                  <div className="wf">
+                    {coffeeConsumption !== null && coffeeConsumption.totalCost !== null
+                      ? `${Math.round(coffeeConsumption.totalCost).toLocaleString("ru-RU")} сум`
+                      : "по возвратам наборов"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("coffee")} className="wt">
+                  <div className="wl">Точек в расходе</div>
+                  <div className="wv">{coffeeConsumption !== null ? coffeeConsumption.locations.length : "—"}</div>
+                  <div className="wf">за 30 дней<span className="go">→</span></div>
+                </Link>
+              </div>
+              {coffeeWeeklyBars.length > 1 && (
+                <>
+                  <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>Расход по неделям (кг, по возвратам):</p>
+                  <MiniBars bars={coffeeWeeklyBars} hot />
+                </>
+              )}
+              <div style={{ marginTop: 12 }}>
+                <QuickActions
+                  domain={domain}
+                  actions={["Чистка кофемолок", "Заливка бункеров"]}
+                  defaultOwnerRef={defaultOwner?.id ?? null}
+                />
+              </div>
+              {defaultOwner && (
+                <p className="hint" style={{ marginTop: 6 }}>
+                  Быстрое действие ставит задачу исполнителю: {defaultOwner.name}. Поменять можно в карточке задачи.
+                </p>
               )}
             </div>
           )}

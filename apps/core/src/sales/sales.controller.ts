@@ -11,6 +11,13 @@ export class SalesController {
     return this.sales.summary();
   }
 
+  /** Динамика по дням — для графика дашборда. */
+  @Get("daily")
+  daily(@Query("days") days?: string) {
+    const n = Number(days);
+    return this.sales.daily(Number.isFinite(n) && n > 0 ? n : 30);
+  }
+
   @Get("silent")
   silent(@Query("days") days?: string) {
     const n = Number(days);

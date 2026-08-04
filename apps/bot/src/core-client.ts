@@ -557,6 +557,23 @@ export class CoreClient {
     return this.request("/coffee/container-return", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /**
+   * Кофе-факты для LLM-помощника (порт AssistantCore.coffeeConsumption30d):
+   * расход за 30 дней одним объектом — вопросы «сколько кофе ушло?» получают
+   * цифры из снимка, а не выдумку.
+   */
+  async coffeeConsumption30d(): Promise<{ totalGrams: number; totalCost: number | null; topLocation: string | null }> {
+    const iso = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 30);
+    const rep = await this.coffeeContainerConsumption(iso(fromDate), iso(new Date()));
+    return {
+      totalGrams: rep.totalGrams,
+      totalCost: rep.totalCost,
+      topLocation: rep.locations[0]?.locationName ?? null,
+    };
+  }
+
   /** Фактический расход по наборам за период (заливка − возврат через тару). */
   coffeeContainerConsumption(from: string, to: string): Promise<{
     from: string;

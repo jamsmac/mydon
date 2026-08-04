@@ -1,0 +1,11 @@
+[Unit]
+Description=MYDON heartbeat — каждые 2 минуты
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Persistent=false
+Unit=mydon-heartbeat.service
+
+[Install]
+WantedBy=timers.target

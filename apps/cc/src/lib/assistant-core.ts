@@ -20,4 +20,16 @@ export const assistantCore: AssistantCore = {
     core.audit(limit).then((list) =>
       list.map((e) => ({ actorKind: e.actorKind, action: e.action, actorRef: e.actorRef, ts: e.ts })),
     ),
+  // Кофе-факты: вопросы «сколько кофе ушло?» получают цифры, а не выдумку.
+  coffeeConsumption30d: async () => {
+    const iso = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 30);
+    const rep = await core.coffeeContainerConsumption(iso(fromDate), iso(new Date()));
+    return {
+      totalGrams: rep.totalGrams,
+      totalCost: rep.totalCost,
+      topLocation: rep.locations[0]?.locationName ?? null,
+    };
+  },
 };

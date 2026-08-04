@@ -18,6 +18,7 @@ import type {
   CoffeeWashScheduleRow,
   CoffeeWashScheduleStatusRow,
 } from "../../lib/core";
+import { BunkerLevels } from "../../components/bunker-levels";
 import {
   addBunkerIngredient,
   autoLinkCoffeeLocations,
@@ -105,7 +106,9 @@ export function CoffeeClient(props: {
       {tab === "entry" && (
         <EntryTab locations={props.locations} bunkerConfig={props.bunkerConfig} recentRefills={props.recentRefills} />
       )}
-      {tab === "table" && <TableTab summary={props.summary} consumables={props.consumables} locations={props.locations} />}
+      {tab === "table" && (
+        <TableTab summary={props.summary} consumables={props.consumables} locations={props.locations} fillStatus={props.fillStatus} />
+      )}
       {tab === "journal" && (
         <JournalTab locations={props.locations} refills={props.refillJournal} containerReturns={props.containerReturns} />
       )}
@@ -370,13 +373,36 @@ function TableTab({
   summary,
   consumables,
   locations,
+  fillStatus,
 }: {
   summary: CoffeeLocationSummaryRow[];
   consumables: CoffeeConsumableRow[];
   locations: CoffeeLocation[];
+  fillStatus: CoffeeFillStatusRow[];
 }) {
+  // Наглядные бункеры (слово владельца): столбики уровней по точкам —
+  // как в референс-приложении, но живьём из последних заливок.
+  const fillByLocation = new Map<string, CoffeeFillStatusRow[]>();
+  for (const r of fillStatus) fillByLocation.set(r.locationName, [...(fillByLocation.get(r.locationName) ?? []), r]);
+
   return (
     <>
+      {fillByLocation.size > 0 && (
+        <>
+          <div className="section-title">Наглядно: уровни бункеров (последняя заливка против эталона)</div>
+          <div className="bunker-grid">
+            {[...fillByLocation.entries()]
+              .sort((a, b) => a[0].localeCompare(b[0], "ru"))
+              .map(([name, rows]) => (
+                <div className="bunker-card" key={name}>
+                  <div className="bk-loc">{name}</div>
+                  <BunkerLevels rows={rows} />
+                </div>
+              ))}
+          </div>
+        </>
+      )}
+
       <div className="section-title">Сводка по бункерам</div>
       <div className="table-scroll">
         <table className="coffee-table">

@@ -1,0 +1,7 @@
+[Unit]
+Description=MYDON heartbeat — отметка «я жив» для внешнего сторожа
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mydon-app/deploy/heartbeat.sh

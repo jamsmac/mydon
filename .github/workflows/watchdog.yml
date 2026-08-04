@@ -1,0 +1,53 @@
+# Внешний сторож MYDON (ТЗ §6: монитор НЕ на том же провайдере, что сервер).
+#
+# Сервер пишет heartbeat в приватный gist каждые 2 минуты
+# (deploy/heartbeat.sh); этот workflow с инфраструктуры GitHub проверяет
+# свежесть отметки и бьёт тревогу в отдельный Telegram-бот. Расписание
+# */10 — реальный интервал Actions плавает до ~15 минут, поэтому порог
+# протухания по умолчанию 10 минут задаётся в секрете с запасом.
+#
+# Секреты (Settings → Secrets and variables → Actions):
+#   WATCHDOG_GIST_ID, WATCHDOG_GH_TOKEN (gist read),
+#   WATCHDOG_BOT_TOKEN, WATCHDOG_CHAT_IDS, [WATCHDOG_STALE_MINUTES]
+name: watchdog
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Не даём зависшему запуску съедать лимит.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/watchdog-check.mjs
+          sparse-checkout-cone-mode: false
+
+      # Состояние «падение уже объявлено» между запусками: restore по префиксу,
+      # save под уникальным ключом (кэш GitHub неизменяем по ключу).
+      - uses: actions/cache/restore@v4
+        with:
+          path: .watchdog-state.json
+          key: watchdog-state-${{ github.run_id }}
+          restore-keys: watchdog-state-
+
+      - name: Check heartbeat
+        env:
+          WATCHDOG_GIST_ID: ${{ secrets.WATCHDOG_GIST_ID }}
+          WATCHDOG_GH_TOKEN: ${{ secrets.WATCHDOG_GH_TOKEN }}
+          WATCHDOG_BOT_TOKEN: ${{ secrets.WATCHDOG_BOT_TOKEN }}
+          WATCHDOG_CHAT_IDS: ${{ secrets.WATCHDOG_CHAT_IDS }}
+          WATCHDOG_STALE_MINUTES: ${{ secrets.WATCHDOG_STALE_MINUTES }}
+        run: node tools/watchdog-check.mjs
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .watchdog-state.json
+          key: watchdog-state-${{ github.run_id }}

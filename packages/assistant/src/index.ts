@@ -48,6 +48,15 @@ export interface AssistantAudit {
   ts: string;
 }
 
+/** Кофе-факт для заземления LLM: расход по наборам за последние 30 дней. */
+export interface AssistantCoffeeFacts {
+  totalGrams: number;
+  /** Себестоимость; null — цены ингредиентов не заведены. */
+  totalCost: number | null;
+  /** Точка с наибольшим расходом; null — пар нет. */
+  topLocation: string | null;
+}
+
 /** Что помощник умеет спросить у Core. Реализуется и ботом, и панелью. */
 export interface AssistantCore {
   briefing(): Promise<AssistantBriefing>;
@@ -55,6 +64,8 @@ export interface AssistantCore {
   obligations(domain: Domain): Promise<AssistantObligations>;
   searchEntities(q: { q: string; domain?: Domain }): Promise<AssistantEntity[]>;
   recent(limit: number): Promise<AssistantAudit[]>;
+  /** Опционально: сурфейс без кофе-данных просто не отдаёт этот метод. */
+  coffeeConsumption30d?(): Promise<AssistantCoffeeFacts | null>;
 }
 
 export interface AssistantReply {
@@ -77,6 +88,8 @@ export interface LlmSnapshot {
   recentLabels: string[];
   /** Список направлений («globerent, vendhub, …») для распознавания домена. */
   domains: string;
+  /** Расход кофе за 30 дней — если сурфейс отдаёт кофе-данные. */
+  coffee?: AssistantCoffeeFacts;
   /** Что нашлось в прошлых разговорах и знаниях по этому вопросу. */
   context?: ContextHit[];
 }
@@ -142,16 +155,19 @@ function actionLabel(action: string): string {
 /** Компактный снимок для заземления LLM-ответа. Собирается только при непонятом
  * вопросе — на распознанные правилами вопросы лишних обращений к Core нет. */
 async function buildSnapshot(core: AssistantCore, context: ContextHit[] = []): Promise<LlmSnapshot> {
-  const [briefing, approvals, recent] = await Promise.all([
+  const [briefing, approvals, recent, coffee] = await Promise.all([
     core.briefing(),
     core.pendingApprovals(),
     core.recent(5),
+    // Кофе — дополнение: нет метода или он упал → снимок без кофе, не ошибка.
+    core.coffeeConsumption30d ? core.coffeeConsumption30d().catch(() => null) : Promise.resolve(null),
   ]);
   return {
     briefing,
     pendingApprovals: approvals.length,
     recentLabels: recent.map((e) => actionLabel(e.action)),
     domains: DOMAINS.join(", "),
+    ...(coffee !== null ? { coffee } : {}),
     ...(context.length > 0 ? { context } : {}),
   };
 }
