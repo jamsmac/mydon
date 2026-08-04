@@ -21,6 +21,7 @@ import {
   AlignmentType,
   BorderStyle,
   Document,
+  ImageRun,
   Packer,
   PageBreak,
   Paragraph,
@@ -30,6 +31,10 @@ import {
   TextRun,
   WidthType,
 } from "docx";
+import {
+  LOGO_GLOBERENT_PNG_BASE64,
+  LOGO_HELI_PNG_BASE64,
+} from "./logo-assets";
 
 // ── Палитра бланка (приближение к образцам) ──
 const BROWN_DARK = "5C3A21"; // шапки таблиц, полоса футера
@@ -268,20 +273,40 @@ export function buildKpDocument(input: KpGloberentInput): Document {
   const footer = input.footer ?? KP_DEFAULT_FOOTER;
 
   const children: (Paragraph | Table)[] = [
-    // Шапка: два «логотипа» текстом (фирменные картинки — параметром позже).
+    // Шапка: оригинальные логотипы бланка (извлечены из PDF-образцов владельца).
+    // Размеры — пропорции образца: GLOBERENT ~150×40, HELI ~126×42 (при 96 dpi).
     new Table({
       width: { size: TW, type: WidthType.DXA },
       rows: [
         new TableRow({
           children: [
             new TableCell({
-              children: [p([run("GLOBERENT", { bold: true, size: 30 }), run(" FINANCE", { size: 30 })], { align: AlignmentType.LEFT, after: 0 })],
+              children: [
+                new Paragraph({
+                  children: [
+                    new ImageRun({
+                      data: Buffer.from(LOGO_GLOBERENT_PNG_BASE64, "base64"),
+                      transformation: { width: 150, height: 40 },
+                    }),
+                  ],
+                  alignment: AlignmentType.LEFT,
+                  spacing: { after: 0 },
+                }),
+              ],
               borders: { top: NO_BORDER, bottom: NO_BORDER, left: NO_BORDER, right: NO_BORDER },
             }),
             new TableCell({
               children: [
-                p([run("HELI", { bold: true, color: "C00000", size: 34 })], { align: AlignmentType.RIGHT, after: 0 }),
-                p([run("LIFTING THE FUTURE", { bold: true, color: "C00000", size: 14 })], { align: AlignmentType.RIGHT, after: 0 }),
+                new Paragraph({
+                  children: [
+                    new ImageRun({
+                      data: Buffer.from(LOGO_HELI_PNG_BASE64, "base64"),
+                      transformation: { width: 126, height: 42 },
+                    }),
+                  ],
+                  alignment: AlignmentType.RIGHT,
+                  spacing: { after: 0 },
+                }),
               ],
               borders: { top: NO_BORDER, bottom: NO_BORDER, left: NO_BORDER, right: NO_BORDER },
             }),
