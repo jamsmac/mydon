@@ -349,6 +349,27 @@ describe("договоры (contracts)", () => {
     assert.ok(updated.some((u) => (u.set as { contractId?: unknown }).contractId === null));
   });
 
+  it("приход, занятый мусорной карточкой, переезжает на живой договор тем же прогоном", async () => {
+    const mine = [
+      { id: "c-mine", no: "GFH-04/0126" },
+      { id: "c-junk", no: "1" }, // держит на себе приход прошлого разбора
+    ];
+    // Порядок update-ов и есть предмет проверки: отвязка приходов мусорной
+    // карточки, затем сама карточка договора, затем привязка приходов к нему.
+    // Освободившийся приход отдаёт последний update — значит уборка прошла
+    // раньше и приход успел переехать, а не остался ничей до следующего раза.
+    const { db, updated } = stubDb(
+      [...SELECTS(mine, mine), [{ n: 0 }], [{ n: 0 }]],
+      [[], [], [{ id: "mf-1" }]],
+    );
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({ contracts: [base], contractsFinal: true });
+    assert.equal(r.contracts.deleted, 1);
+    assert.equal(r.contracts.flowsLinked, 1);
+    assert.equal((updated[0].set as { contractId?: unknown }).contractId, null);
+    assert.equal((updated[2].set as { contractId?: unknown }).contractId, "c-mine");
+  });
+
   it("устаревшая карточка с актами остаётся жить и говорит об этом словами", async () => {
     const mine = [
       { id: "c-mine", no: "GFH-04/0126" },

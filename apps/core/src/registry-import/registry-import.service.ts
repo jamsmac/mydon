@@ -342,6 +342,35 @@ export class RegistryImportService {
     let deleted = 0;
     let flowsLinked = 0;
     await this.db.transaction(async (tx) => {
+      // Уборка идёт ПЕРВОЙ: карточки прошлого разбора держат на себе приходы,
+      // и пока они живы, привязка ниже видит эти приходы занятыми и проходит
+      // мимо. Снести сначала — значит вернуть приходы в оборот к тому же
+      // прогону, а не оставить их без договора до следующего.
+      if (final) {
+        const keep = new Set(valid.map((c) => c.contractNo.trim()));
+        const stale = mine.filter((m) => !keep.has(m.no));
+        for (const s of stale) {
+          const [{ n: acts }] = await tx
+            .select({ n: sql<number>`count(*)::int` })
+            .from(contractAct)
+            .where(eq(contractAct.contractId, s.id));
+          const [{ n: units }] = await tx
+            .select({ n: sql<number>`count(*)::int` })
+            .from(globerentUnit)
+            .where(eq(globerentUnit.contractId, s.id));
+          if (acts > 0 || units > 0) {
+            errors.push(`«${s.no}»: карточка устарела, но с ней работали — оставлена`);
+            continue;
+          }
+          await tx
+            .update(moneyFlow)
+            .set({ contractId: null })
+            .where(eq(moneyFlow.contractId, s.id));
+          await tx.delete(grContract).where(eq(grContract.id, s.id));
+          deleted += 1;
+        }
+      }
+
       for (const c of valid) {
         const no = c.contractNo.trim();
         const fields = {
@@ -404,34 +433,6 @@ export class RegistryImportService {
             )
             .returning({ id: moneyFlow.id });
           flowsLinked += linked.length;
-        }
-      }
-
-      // Свои карточки, которых в наборе больше нет, — след прошлой версии
-      // разбора. Уходят только нетронутые: есть акт или привязанная единица —
-      // значит с договором работали, такой остаётся владельцу на разбор.
-      if (final) {
-        const keep = new Set(valid.map((c) => c.contractNo.trim()));
-        const stale = mine.filter((m) => !keep.has(m.no));
-        for (const s of stale) {
-          const [{ n: acts }] = await tx
-            .select({ n: sql<number>`count(*)::int` })
-            .from(contractAct)
-            .where(eq(contractAct.contractId, s.id));
-          const [{ n: units }] = await tx
-            .select({ n: sql<number>`count(*)::int` })
-            .from(globerentUnit)
-            .where(eq(globerentUnit.contractId, s.id));
-          if (acts > 0 || units > 0) {
-            errors.push(`«${s.no}»: карточка устарела, но с ней работали — оставлена`);
-            continue;
-          }
-          await tx
-            .update(moneyFlow)
-            .set({ contractId: null })
-            .where(eq(moneyFlow.contractId, s.id));
-          await tx.delete(grContract).where(eq(grContract.id, s.id));
-          deleted += 1;
         }
       }
 
