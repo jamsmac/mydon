@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  contractImportError,
   flowImportError,
   modelKey,
   RegistryImportService,
   unitImportError,
+  type ImportContract,
   type ImportFlow,
   type ImportUnit,
 } from "./registry-import.service";
@@ -16,9 +18,11 @@ type Row = Record<string, unknown>;
  * ПО ПОРЯДКУ вызовов, insert копит вставленные values — тесты фиксируют
  * идемпотентность (пропуск существующих) и связи по FK, не по имени.
  */
-function stubDb(selects: Row[][]) {
+function stubDb(selects: Row[][], updateResults: Row[][] = []) {
   const inserted: { rows: Row[] }[] = [];
+  const updated: { set: Row }[] = [];
   let call = 0;
+  let updCall = 0;
   const makeChain = () => {
     const result = selects[call] ?? [];
     call += 1;
@@ -34,8 +38,23 @@ function stubDb(selects: Row[][]) {
   const tx = {
     select: makeChain,
     insert: () => ({
-      values: async (rows: Row | Row[]) => {
+      // Ожидаемо и как await values(...), и как values(...).returning(...).
+      values: (rows: Row | Row[]) => {
         inserted.push({ rows: Array.isArray(rows) ? rows : [rows] });
+        const p = Promise.resolve();
+        return {
+          then: p.then.bind(p),
+          catch: p.catch.bind(p),
+          returning: async () => [{ id: `ins-${inserted.length}` }],
+        };
+      },
+    }),
+    update: () => ({
+      set: (set: Row) => {
+        updated.push({ set });
+        const result = updateResults[updCall] ?? [];
+        updCall += 1;
+        return { where: () => ({ returning: async () => result }) };
       },
     }),
   };
@@ -43,7 +62,7 @@ function stubDb(selects: Row[][]) {
     select: makeChain,
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
-  return { db, inserted };
+  return { db, inserted, updated };
 }
 
 const ORG = [{ id: "org-1" }];
@@ -193,7 +212,12 @@ describe("денежные записи (flows)", () => {
     const r = await s.importGloberent({
       flows: [
         flow({}), // дубль — пропуск
-        flow({ docNo: "СФ 2026-3", purpose: "CPD35GC6LI-S-M300 - 1168", counterpartyInn: "202328794", unitVin: "1168" }),
+        flow({
+          docNo: "СФ 2026-3",
+          purpose: "CPD35GC6LI-S-M300 - 1168",
+          counterpartyInn: "202328794",
+          unitVin: "1168",
+        }),
       ],
     });
     assert.equal(r.flows.created, 1);
@@ -225,7 +249,86 @@ describe("денежные записи (flows)", () => {
   });
 });
 
+describe("договоры (contracts)", () => {
+  const base: ImportContract = {
+    contractNo: "GFH-04/0126",
+    contractDate: "2026-01-28",
+    buyerName: '"XALQ RETAIL" MCHJ XK',
+    buyerInn: "306955509",
+    totalWithVat: 5479488000,
+    totalVat: 587088000,
+    status: "active",
+    flowDocNos: ["СФ 2026-15", "СФ 2026-31"],
+  };
+
+  it("новый договор создаётся: клиент и продавец по FK, приходы привязываются", async () => {
+    const { db, inserted, updated } = stubDb(
+      [
+        ORG,
+        [], // существующих договоров нет
+        [{ id: "client-1", ref: "306955509" }],
+        [{ id: "own-1" }],
+      ],
+      [[{ id: "mf-1" }, { id: "mf-2" }]],
+    );
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({ contracts: [base] });
+    assert.deepEqual(r.contracts, { created: 1, skipped: 0, errors: [], flowsLinked: 2 });
+    const row = inserted[0].rows[0];
+    assert.equal(row.contractNo, "GFH-04/0126");
+    assert.equal(row.clientId, "client-1");
+    assert.equal(row.sellerCompanyId, "own-1");
+    assert.equal(row.status, "active");
+    assert.deepEqual(row.buyer, { name: '"XALQ RETAIL" MCHJ XK', inn: "306955509" });
+    // Привязка — установка contract_id на money_flow, не вторая запись денег.
+    assert.equal(updated.length, 1);
+    assert.equal((updated[0].set as { contractId?: unknown }).contractId, "ins-1");
+  });
+
+  it("существующий номер пропускается, но привязка приходов добирается", async () => {
+    const { db, inserted, updated } = stubDb(
+      [
+        ORG,
+        [{ id: "c-old", no: "GFH-04/0126" }],
+        [{ id: "client-1", ref: "306955509" }],
+        [{ id: "own-1" }],
+      ],
+      [[{ id: "mf-9" }]],
+    );
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({ contracts: [base] });
+    assert.deepEqual(r.contracts, { created: 0, skipped: 1, errors: [], flowsLinked: 1 });
+    // Вставок договора не было — только аудит не пишется отдельной records.
+    assert.equal(inserted.filter((i) => i.rows[0].contractNo !== undefined).length, 0);
+    assert.equal((updated[0].set as { contractId?: unknown }).contractId, "c-old");
+  });
+
+  it("кривой договор падает в errors словами, остальные создаются", async () => {
+    const { db } = stubDb([ORG, [], [{ id: "client-1", ref: "306955509" }], []]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({
+      contracts: [base, { ...base, contractNo: "X-1/24", contractDate: "28.01.2026" }],
+    });
+    assert.equal(r.contracts.created, 1);
+    assert.equal(r.contracts.errors.length, 1);
+    assert.match(r.contracts.errors[0], /ГГГГ-ММ-ДД/);
+  });
+});
+
 describe("чистые правила импорта", () => {
+  it("contractImportError: номер, дата, покупатель и сумма обязательны", () => {
+    const ok: ImportContract = {
+      contractNo: "GFH-1/24",
+      contractDate: "2024-01-01",
+      buyerName: "OQ SUV",
+      totalWithVat: 1,
+    };
+    assert.equal(contractImportError(ok), null);
+    assert.match(contractImportError({ ...ok, contractNo: " " }) ?? "", /без номера/);
+    assert.match(contractImportError({ ...ok, totalWithVat: 0 }) ?? "", /больше нуля/);
+    assert.match(contractImportError({ ...ok, status: "draft" as never }) ?? "", /статус импорта/);
+  });
+
   it("unitImportError: даты только ГГГГ-ММ-ДД, статусы из белого списка", () => {
     const base: ImportUnit = { name: "CPD15", vin: "1", status: "IN_STOCK" };
     assert.equal(unitImportError(base), null);
