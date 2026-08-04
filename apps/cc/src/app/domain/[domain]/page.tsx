@@ -129,11 +129,28 @@ export default async function DomainPage({
   // дашборда. На других вкладках vendhub их не тянем.
   let salesSummary: Awaited<ReturnType<typeof core.salesSummary>> | null = null;
   let supplySummary: Awaited<ReturnType<typeof core.supplySummary>> | null = null;
+  // Кофе-бункеры на дашборде: алерты и расход за 30 дней. Провал любого
+  // запроса не роняет дашборд — секция просто не показывается.
+  let coffeeAlerts: number | null = null;
+  let coffeeConsumption: Awaited<ReturnType<typeof core.coffeeContainerConsumption>> | null = null;
   if (domain === "vendhub" && isOverview) {
-    [salesSummary, supplySummary] = await Promise.all([
+    const isoDate = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - 30);
+    let coffeeFill: Awaited<ReturnType<typeof core.coffeeFillStatus>> | null = null;
+    let coffeeWash: Awaited<ReturnType<typeof core.coffeeWashScheduleStatus>> | null = null;
+    [salesSummary, supplySummary, coffeeFill, coffeeWash, coffeeConsumption] = await Promise.all([
       core.salesSummary().catch(() => null),
       core.supplySummary().catch(() => null),
+      core.coffeeFillStatus().catch(() => null),
+      core.coffeeWashScheduleStatus().catch(() => null),
+      core.coffeeContainerConsumption(isoDate(fromDate), isoDate(new Date())).catch(() => null),
     ]);
+    if (coffeeFill !== null || coffeeWash !== null) {
+      coffeeAlerts =
+        (coffeeFill ?? []).filter((r) => r.status === "underfill").length +
+        (coffeeWash ?? []).filter((r) => r.status === "overdue").length;
+    }
   }
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
@@ -348,6 +365,39 @@ export default async function DomainPage({
               <p className="hint">
                 Оператор пишет боту «инкассация» и выбирает автомат — сбор появляется здесь сам.
               </p>
+            </div>
+          )}
+
+          {domain === "vendhub" && (coffeeAlerts !== null || coffeeConsumption !== null) && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Кофе-бункеры</h3>
+                {coffeeAlerts !== null && coffeeAlerts > 0 && <span className="chip h">внимание · {coffeeAlerts}</span>}
+              </div>
+              <div className="wgrid">
+                <Link href={href("coffee")} className={`wt ${coffeeAlerts !== null && coffeeAlerts > 0 ? "" : ""}`}>
+                  <div className="wl">Сигналы (недолив · мойка)</div>
+                  <div className="wv">{coffeeAlerts ?? "—"}</div>
+                  <div className="wf">{coffeeAlerts === 0 ? "спокойно" : "смотреть сверку"}<span className="go">→</span></div>
+                </Link>
+                <Link href={href("coffee")} className="wt">
+                  <div className="wl">Расход · 30 дней</div>
+                  <div className="wv">
+                    {coffeeConsumption !== null ? `${(coffeeConsumption.totalGrams / 1000).toFixed(1)} кг` : "—"}
+                  </div>
+                  <div className="wf">
+                    {coffeeConsumption !== null && coffeeConsumption.totalCost !== null
+                      ? `${Math.round(coffeeConsumption.totalCost).toLocaleString("ru-RU")} сум`
+                      : "по возвратам наборов"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("coffee")} className="wt">
+                  <div className="wl">Точек в расходе</div>
+                  <div className="wv">{coffeeConsumption !== null ? coffeeConsumption.locations.length : "—"}</div>
+                  <div className="wf">за 30 дней<span className="go">→</span></div>
+                </Link>
+              </div>
             </div>
           )}
 
