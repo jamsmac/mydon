@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, entity, globerentUnit, org } from "@mydon/db";
+import { auditLog, entity, globerentUnit, moneyFlow, org } from "@mydon/db";
+import { MONEY_CATEGORIES } from "@mydon/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
@@ -63,6 +64,30 @@ export interface ImportPayload {
    * правки владельца из панели важнее сида.
    */
   ownCompany?: { name: string; attrs: Record<string, unknown> };
+  flows?: ImportFlow[];
+}
+
+/**
+ * Историческая денежная запись (money_flow, status=actual): приход по
+ * счетам-фактурам книги и сервисные расходы. Суммы всегда в сумах —
+ * валютных операций реестр счетов не несёт.
+ */
+export interface ImportFlow {
+  direction: "in" | "out";
+  amount: number;
+  /** Из словаря MONEY_CATEGORIES (sale | service | rent | other…). */
+  category: string;
+  /** YYYY-MM-DD — дата документа. */
+  date: string;
+  purpose: string;
+  /** Ключ идемпотентности вместе с purpose, например «СФ 2026-5». */
+  docNo: string;
+  method?: "bank" | "cash";
+  isOfficial?: boolean;
+  counterpartyInn?: string;
+  counterpartyName?: string;
+  /** Серийник машины — свяжем по карточке единицы, не по строке. */
+  unitVin?: string;
 }
 
 export interface ImportCount {
@@ -76,6 +101,7 @@ export interface ImportSummary {
   models: ImportCount;
   units: ImportCount & { errors: string[] };
   ownCompany: ImportCount;
+  flows: ImportCount & { errors: string[] };
 }
 
 const UNIT_STATUSES_ALLOWED = ["IN_STOCK", "DELIVERED_TO_CLIENT"] as const;
@@ -85,6 +111,20 @@ const INN_RE = /^\d{9}$|^\d{14}$/;
 /** Ключ сравнения имён моделей: регистр и лишние пробелы не различаются. */
 export function modelKey(name: string): string {
   return name.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** Проверка денежной записи ДО базы: null — можно, строка — почему нельзя. */
+export function flowImportError(f: ImportFlow): string | null {
+  const tag = `«${f.docNo ?? "?"}»`;
+  if (f.direction !== "in" && f.direction !== "out") return `${tag}: направление in или out`;
+  if (!Number.isFinite(f.amount) || f.amount <= 0) return `${tag}: сумма — число больше нуля`;
+  if (!(MONEY_CATEGORIES as readonly string[]).includes(f.category)) {
+    return `${tag}: категория «${f.category}» не из словаря MONEY_CATEGORIES`;
+  }
+  if (!ISO_DAY.test(f.date ?? "")) return `${tag}: дата не ГГГГ-ММ-ДД: «${f.date}»`;
+  if ((f.docNo ?? "").trim().length === 0) return "запись без docNo — идемпотентности не будет";
+  if ((f.purpose ?? "").trim().length === 0) return `${tag}: пустое назначение`;
+  return null;
 }
 
 /** Проверка единицы ДО базы: null — можно, строка — почему нельзя (словами). */
@@ -125,6 +165,7 @@ export class RegistryImportService {
       models: { created: 0, skipped: 0 },
       units: { created: 0, skipped: 0, errors: [] },
       ownCompany: { created: 0, skipped: 0 },
+      flows: { created: 0, skipped: 0, errors: [] },
     };
 
     if (payload.contractors?.length) {
@@ -143,7 +184,101 @@ export class RegistryImportService {
     if (payload.ownCompany !== undefined) {
       summary.ownCompany = await this.importOwnCompany(orgId, payload.ownCompany, source, actorRef);
     }
+    if (payload.flows?.length) {
+      summary.flows = await this.importFlows(orgId, payload.flows, source, actorRef);
+    }
     return summary;
+  }
+
+  /**
+   * Исторические денежные записи (приход по счетам, сервисные расходы).
+   * Идемпотентность — по паре docNo+purpose: повторный прогон не задваивает
+   * кэш-флоу. Всё в сумах, status=actual, связи контрагент/машина — по FK.
+   */
+  private async importFlows(
+    orgId: string,
+    rows: ImportFlow[],
+    source: string,
+    actorRef: string,
+  ): Promise<ImportCount & { errors: string[] }> {
+    const errors: string[] = [];
+    const valid: ImportFlow[] = [];
+    for (const f of rows) {
+      const err = flowImportError(f);
+      if (err !== null) errors.push(err);
+      else valid.push(f);
+    }
+
+    const docNos = [...new Set(valid.map((f) => f.docNo))];
+    const existing = docNos.length
+      ? await this.db
+          .select({ docNo: moneyFlow.docNo, purpose: moneyFlow.purpose })
+          .from(moneyFlow)
+          .where(and(eq(moneyFlow.orgId, orgId), inArray(moneyFlow.docNo, docNos)))
+      : [];
+    const seen = new Set(existing.map((e) => `${e.docNo}|${e.purpose}`));
+
+    const inns = [...new Set(valid.map((f) => f.counterpartyInn).filter((s): s is string => !!s))];
+    const cpRows = inns.length
+      ? await this.db
+          .select({ id: entity.id, ref: entity.externalRef })
+          .from(entity)
+          .where(and(eq(entity.type, "contractor"), inArray(entity.externalRef, inns)))
+      : [];
+    const cpByInn = new Map(cpRows.map((c) => [c.ref, c.id]));
+
+    const vins = [...new Set(valid.map((f) => f.unitVin).filter((s): s is string => !!s))];
+    const unitRows = vins.length
+      ? await this.db
+          .select({ id: globerentUnit.id, vin: globerentUnit.vin })
+          .from(globerentUnit)
+          .where(and(eq(globerentUnit.orgId, orgId), inArray(globerentUnit.vin, vins)))
+      : [];
+    const unitByVin = new Map(unitRows.map((u) => [u.vin, u.id]));
+
+    let created = 0;
+    let skipped = 0;
+    await this.db.transaction(async (tx) => {
+      for (const f of valid) {
+        const key = `${f.docNo}|${f.purpose}`;
+        if (seen.has(key)) {
+          skipped += 1;
+          continue;
+        }
+        seen.add(key);
+        await tx.insert(moneyFlow).values({
+          orgId,
+          domain: "globerent",
+          direction: f.direction,
+          status: "actual",
+          amount: String(f.amount),
+          currency: "UZS",
+          category: f.category,
+          method: f.method ?? null,
+          ...(f.isOfficial !== undefined ? { isOfficial: f.isOfficial } : {}),
+          // Дата документа — полночь по Ташкенту, не по поясу сервера.
+          date: new Date(`${f.date}T00:00:00+05:00`),
+          paidAt: new Date(`${f.date}T00:00:00+05:00`),
+          purpose: f.purpose,
+          docNo: f.docNo,
+          counterpartyId: f.counterpartyInn !== undefined ? (cpByInn.get(f.counterpartyInn) ?? null) : null,
+          counterparty: f.counterpartyName ?? null,
+          unitId: f.unitVin !== undefined ? (unitByVin.get(f.unitVin) ?? null) : null,
+        });
+        created += 1;
+      }
+      if (created > 0) {
+        await tx.insert(auditLog).values({
+          actorKind: "human",
+          actorRef,
+          action: "registry_import.flows",
+          target: source,
+          after: { created, skipped, errors: errors.length },
+        });
+      }
+    });
+
+    return { created, skipped, errors };
   }
 
   /** Карточка своей компании — одна на направление; существующая не трогается. */

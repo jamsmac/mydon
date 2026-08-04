@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  flowImportError,
   modelKey,
   RegistryImportService,
   unitImportError,
+  type ImportFlow,
   type ImportUnit,
 } from "./registry-import.service";
 
@@ -166,6 +168,60 @@ describe("своя компания (own_company)", () => {
     });
     assert.deepEqual(r.ownCompany, { created: 0, skipped: 1 });
     assert.equal(inserted.length, 0);
+  });
+});
+
+describe("денежные записи (flows)", () => {
+  const flow = (over: Partial<ImportFlow>): ImportFlow => ({
+    direction: "in",
+    amount: 327040000,
+    category: "sale",
+    date: "2026-01-08",
+    purpose: "CPD35GC6LI-S-M300 - 1167",
+    docNo: "СФ 2026-2",
+    ...over,
+  });
+
+  it("дедуп по docNo+purpose; контрагент и машина связываются по FK", async () => {
+    const { db, inserted } = stubDb([
+      ORG,
+      [{ docNo: "СФ 2026-2", purpose: "CPD35GC6LI-S-M300 - 1167" }], // уже есть
+      [{ id: "client-1", ref: "202328794" }],
+      [{ id: "unit-1", vin: "1168" }],
+    ]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({
+      flows: [
+        flow({}), // дубль — пропуск
+        flow({ docNo: "СФ 2026-3", purpose: "CPD35GC6LI-S-M300 - 1168", counterpartyInn: "202328794", unitVin: "1168" }),
+      ],
+    });
+    assert.equal(r.flows.created, 1);
+    assert.equal(r.flows.skipped, 1);
+    assert.deepEqual(r.flows.errors, []);
+    const rows = inserted.flatMap((i) => i.rows).filter((x) => x.docNo !== undefined);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.counterpartyId, "client-1");
+    assert.equal(rows[0]?.unitId, "unit-1");
+    assert.equal(rows[0]?.status, "actual");
+    assert.equal(rows[0]?.currency, "UZS");
+  });
+
+  it("кривые записи падают в errors словами, не в базу", () => {
+    assert.match(flowImportError(flow({ amount: 0 })) ?? "", /больше нуля/);
+    assert.match(flowImportError(flow({ category: "прибыль" })) ?? "", /словаря/);
+    assert.match(flowImportError(flow({ date: "08.01.2026" })) ?? "", /ГГГГ-ММ-ДД/);
+    assert.match(flowImportError(flow({ docNo: "" })) ?? "", /docNo/);
+    assert.equal(flowImportError(flow({})), null);
+  });
+
+  it("дубль ключа внутри одной партии тоже пропускается", async () => {
+    const { db, inserted } = stubDb([ORG, [], [], []]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({ flows: [flow({}), flow({})] });
+    assert.equal(r.flows.created, 1);
+    assert.equal(r.flows.skipped, 1);
+    assert.equal(inserted.flatMap((i) => i.rows).filter((x) => x.docNo !== undefined).length, 1);
   });
 });
 
