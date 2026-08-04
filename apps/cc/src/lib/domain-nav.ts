@@ -78,6 +78,27 @@ export const GENERIC_GROUPS: NavGroup[] = [
   },
 ];
 
+/**
+ * Личный контур владельца (CLAUDE.md: недвижимость, транспорт, накопления;
+ * только владелец). Каркас: вкладки готовы принимать записи, данные появятся
+ * из документов/выгрузок владельца — тем же путём, что и в VendHub.
+ */
+export const PERSONAL_GROUPS: NavGroup[] = [
+  {
+    key: "catalog",
+    label: "Каталог",
+    leaves: [
+      { label: "Недвижимость", type: "property" },
+      { label: "Транспорт", type: "vehicle" },
+      { label: "Накопления", type: "saving" },
+      { label: "Договоры", type: "contract" },
+      { label: "Счета", type: "invoice" },
+    ],
+  },
+];
+
 export function groupsFor(domain: string): NavGroup[] {
-  return domain === "vendhub" ? VENDHUB_GROUPS : GENERIC_GROUPS;
+  if (domain === "vendhub") return VENDHUB_GROUPS;
+  if (domain === "personal") return PERSONAL_GROUPS;
+  return GENERIC_GROUPS;
 }

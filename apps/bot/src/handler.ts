@@ -23,6 +23,7 @@ import {
 } from "./purchase-brief";
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
+import { formatSalesSummary, isSalesQuery } from "./sales-brief";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
 import type { RateLimiter } from "./security/access";
 import { isAllowed } from "./security/access";
@@ -62,6 +63,7 @@ const HELP = [
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «касса закупа: получил 2400000, базар 376300» — записать кассу похода на базар",
   "• «кассы закупа» / «история кассы» — прошлые кассы",
+  "• «продажи» / «выручка» — сегодня, вчера, 30 дней",
   "• «расход кофе» — расход по наборам за 30 дней (граммы и себестоимость)",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
@@ -167,6 +169,17 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка чтения накладных:", err);
       return { text: "Не удалось получить накладные из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Продажи/выручка — чтение, мгновенные цифры вместо общего LLM-разбора.
+  if (isSalesQuery(text)) {
+    try {
+      const s = await deps.core.salesSummary();
+      return { text: formatSalesSummary(s) };
+    } catch (err) {
+      console.error("Ошибка сводки продаж:", err);
+      return { text: "Не удалось получить продажи из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 
