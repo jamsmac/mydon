@@ -24,10 +24,13 @@ export function NewFlowForm({
   domain,
   counterparties,
   fx,
+  units = [],
 }: {
   domain: string;
   counterparties: FinanceCounterparty[];
   fx: FxCurrent[];
+  /** Единицы техники — для привязки расхода к себестоимости. */
+  units?: { id: string; label: string }[];
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -126,6 +129,17 @@ export function NewFlowForm({
           <option value="cash">наличные (внутренний учёт)</option>
         </select>
       </label>
+      {units.length > 0 && (
+        <label>
+          <span>Единица техники — расход войдёт в её себестоимость</span>
+          <select name="unitId" defaultValue="">
+            <option value="">— не привязывать —</option>
+            {units.map((u) => (
+              <option value={u.id} key={u.id}>{u.label}</option>
+            ))}
+          </select>
+        </label>
+      )}
       <label>
         <span>Срок оплаты — по нему считается просрочка</span>
         <input name="dueDate" type="date" />

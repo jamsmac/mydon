@@ -49,6 +49,8 @@ export interface CreateFlowInput {
   date?: string;
   /** Срок оплаты YYYY-MM-DD — для planned. */
   dueDate?: string;
+  /** Единица техники: из привязанных записей считается её себестоимость. */
+  unitId?: string;
 }
 
 /** Строка списка: с именем контрагента из реестра — панель не делает лишних запросов. */
@@ -225,6 +227,7 @@ export class FinanceService {
           status: input.status,
           dueDate: input.dueDate ?? null,
           paidAt: input.status === "actual" ? new Date() : null,
+          unitId: input.unitId ?? null,
         })
         .returning();
       await tx.insert(auditLog).values({

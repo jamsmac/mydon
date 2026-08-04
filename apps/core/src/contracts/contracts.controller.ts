@@ -1,4 +1,17 @@
-import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Header,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Res,
+  StreamableFile,
+} from "@nestjs/common";
+import type { Response } from "express";
 import { DOMAINS, type ContractItem, type Domain } from "@mydon/shared";
 import { ContractsService, type BuyerSnapshot } from "./contracts.service";
 
@@ -25,6 +38,15 @@ export class ContractsController {
   @Get(":id")
   detail(@Param("id") id: string) {
     return this.contracts.detail(id);
+  }
+
+  /** DOCX договора — воспроизводимый рендер (GET: чтение, не мутация). */
+  @Get(":id/docx")
+  @Header("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+  async docx(@Param("id") id: string, @Res({ passthrough: true }) res: Response) {
+    const { buffer, filename } = await this.contracts.renderDocx(id);
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+    return new StreamableFile(buffer);
   }
 
   @Post()

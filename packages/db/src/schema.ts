@@ -684,6 +684,8 @@ export const moneyFlow = pgTable(
     contractId: uuid("contract_id").references(() => grContract.id),
     /** Основание платежа: импортный контракт (оплаты заводу по графику). */
     importContractId: uuid("import_contract_id").references(() => grImportContract.id),
+    /** Привязка к единице техники: из этих записей считается её себестоимость. */
+    unitId: uuid("unit_id").references(() => globerentUnit.id),
     createdAt: createdAt(),
   },
   (t) => [
@@ -698,6 +700,7 @@ export const moneyFlow = pgTable(
     index("money_flow_due_idx").on(t.domain, t.status, t.dueDate),
     index("money_flow_counterparty_idx").on(t.counterpartyId),
     index("money_flow_contract_idx").on(t.contractId),
+    index("money_flow_unit_idx").on(t.unitId),
   ],
 );
 
@@ -868,6 +871,40 @@ export const globerentUnit = pgTable(
     uniqueIndex("ux_globerent_unit_vin")
       .on(t.vin)
       .where(sql`vin is not null and vin <> ''`),
+  ],
+);
+
+// ── gr_preorder: предзаказ техники (перенос pre_orders PROMACH, 8 статусов) ──
+export const grPreorder = pgTable(
+  "gr_preorder",
+  {
+    id: id(),
+    orgId: uuid("org_id").references(() => org.id),
+    domain: domainEnum("domain").default("globerent").notNull(),
+    /** Номер PO-#### — генерируется сервисом в транзакции. */
+    code: text("code").notNull(),
+    /** Модель каталога (entity equipment_model). */
+    modelId: uuid("model_id").references(() => entity.id),
+    name: text("name").notNull(),
+    qty: integer("qty").default(1).notNull(),
+    /** Клиент, под которого везём (пусто — на склад). */
+    clientId: uuid("client_id").references(() => entity.id),
+    supplierId: uuid("supplier_id").references(() => entity.id),
+    /** Ссылка на контракт завода — ОБЯЗАТЕЛЬНА при переходе в ordered (правило донора). */
+    contractRef: text("contract_ref"),
+    factoryPriceUsd: numeric("factory_price_usd", { precision: 18, scale: 2 }),
+    promisedDeliveryDate: date("promised_delivery_date"),
+    status: text("status").default("draft").notNull(),
+    /** Причина отмены — обязательна (правило донора). */
+    cancelledReason: text("cancelled_reason"),
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("ux_gr_preorder_code").on(t.orgId, t.code),
+    index("gr_preorder_status_idx").on(t.orgId, t.status),
   ],
 );
 
@@ -1668,6 +1705,8 @@ export const schema = {
   unitReserve,
   // Импортные контракты GLOBERENT (перенос import_contracts PROMACH).
   grImportContract,
+  // Предзаказы GLOBERENT (перенос pre_orders PROMACH).
+  grPreorder,
   note,
   auditLog,
   agent,

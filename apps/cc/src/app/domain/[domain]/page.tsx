@@ -11,6 +11,7 @@ import {
   type FinanceSummary,
   type GrContract,
   type GrImport,
+  type GrPreorder,
   type GrUnit,
   type Obligations,
   type Person,
@@ -44,6 +45,7 @@ import { NewContractForm } from "../../../components/contract-forms";
 import { CalcPanel } from "../../../components/calc-panel";
 import { UnitsPanel } from "../../../components/units-panel";
 import { ImportsPanel } from "../../../components/imports-panel";
+import { PreordersSection } from "../../../components/preorders-section";
 import { fmtDay } from "../../../lib/globerent";
 import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
@@ -232,13 +234,17 @@ export default async function DomainPage({
   let finSummary: FinanceSummary | null = null;
   let finFlows: FinanceFlow[] = [];
   let finCounterparties: FinanceCounterparty[] = [];
+  let finUnits: { id: string; label: string }[] = [];
   if (domain === "globerent" && (isFinanceTab || isOverview)) {
     finSummary = await core.financeSummary(domain).catch(() => null);
     if (isFinanceTab) {
-      [finFlows, finCounterparties] = await Promise.all([
+      let unitRows: GrUnit[] = [];
+      [finFlows, finCounterparties, unitRows] = await Promise.all([
         core.financeFlows(domain, { limit: "100" }).catch(() => [] as FinanceFlow[]),
         core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+        core.units(domain).catch(() => [] as GrUnit[]),
       ]);
+      finUnits = unitRows.map((u) => ({ id: u.id, label: `${u.code} · ${u.name}` }));
     }
   }
 
@@ -334,13 +340,15 @@ export default async function DomainPage({
     ]);
   }
 
-  // Импортные контракты (перенос import_contracts PROMACH).
+  // Импортные контракты и предзаказы (перенос PROMACH).
   let importsList: GrImport[] = [];
   let importSuppliers: FinanceCounterparty[] = [];
+  let preorders: GrPreorder[] = [];
   if (domain === "globerent" && activeGroup === "imports") {
-    [importsList, importSuppliers] = await Promise.all([
+    [importsList, importSuppliers, preorders] = await Promise.all([
       core.imports(domain).catch(() => [] as GrImport[]),
       core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
+      core.preorders(domain).catch(() => [] as GrPreorder[]),
     ]);
   }
 
@@ -424,6 +432,7 @@ export default async function DomainPage({
             summary={finSummary}
             flows={finFlows}
             counterparties={finCounterparties}
+            units={finUnits}
           />
         ) : (
           <div className="empty">
@@ -884,7 +893,10 @@ export default async function DomainPage({
 
       {/* ── Импортные контракты: завод → таможня → склад (перенос PROMACH) ── */}
       {domain === "globerent" && activeGroup === "imports" && (
-        <ImportsPanel imports={importsList} suppliers={importSuppliers} />
+        <>
+          <PreordersSection preorders={preorders} clients={importSuppliers} />
+          <ImportsPanel imports={importsList} suppliers={importSuppliers} />
+        </>
       )}
 
       {/* ── Калькулятор цены HELI: движок PROMACH, расчёт в браузере ── */}

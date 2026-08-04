@@ -97,11 +97,14 @@ export function FinancePanel({
   summary,
   flows,
   counterparties,
+  units = [],
 }: {
   domain: string;
   summary: FinanceSummary;
   flows: FinanceFlow[];
   counterparties: FinanceCounterparty[];
+  /** Единицы техники — для привязки расхода к себестоимости. */
+  units?: { id: string; label: string }[];
 }) {
   const r = summary.receivables;
   const p = summary.payables;
@@ -144,7 +147,7 @@ export function FinancePanel({
 
       {/* ── Ввод денег — единственная дверь money-домена ── */}
       <div style={{ marginTop: 12 }}>
-        <NewFlowForm domain={domain} counterparties={counterparties} fx={summary.fx} />
+        <NewFlowForm domain={domain} counterparties={counterparties} fx={summary.fx} units={units} />
       </div>
 
       {/* ── К сроку на неделе (паттерн notifications.ts PROMACH) ── */}

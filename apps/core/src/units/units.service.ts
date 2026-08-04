@@ -5,8 +5,10 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { auditLog, entity, globerentUnit, org, unitReserve } from "@mydon/db";
+import { auditLog, entity, globerentUnit, moneyFlow, org, systemConfig, unitReserve } from "@mydon/db";
 import {
+  cogsBreakdown,
+  computeCommission,
   RESERVE_ALLOWED,
   SALE_START_ALLOWED,
   SALES_STAGES,
@@ -14,8 +16,11 @@ import {
   TZ,
   UNIT_GROUPS,
   UNIT_TRANSITIONS,
+  unitMargin,
   unitTransitionError,
   VIN_UNBIND_ALLOWED,
+  type CogsBreakdown,
+  type CommissionMethod,
   type Domain,
   type SalesStage,
   type UnitStatus,
@@ -42,6 +47,15 @@ export interface CreateUnitInput {
 export interface UnitListRow extends UnitRow {
   clientName: string | null;
   activeReserve: ReserveRow | null;
+  /** Себестоимость по привязанным платежам (сумовой эквивалент). */
+  costUzs: number;
+}
+
+/** Себестоимость единицы: корзины донора + маржа против цены продажи. */
+export interface UnitCost extends CogsBreakdown {
+  salesPrice: number | null;
+  margin: number | null;
+  marginPct: number | null;
 }
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -98,7 +112,18 @@ export class UnitsService {
       conditions.push(inArray(globerentUnit.status, [...group.statuses]));
     }
     const rows = await this.db
-      .select({ unit: globerentUnit, clientName: entity.name, reserve: unitReserve })
+      .select({
+        unit: globerentUnit,
+        clientName: entity.name,
+        reserve: unitReserve,
+        // Себестоимость — фактические out-платежи, привязанные к единице,
+        // в сумовом эквиваленте (сум как есть, валюта — по amount_uzs записи).
+        costUzs: sql<string>`coalesce((
+          select sum(case when mf.currency = 'UZS' then mf.amount else coalesce(mf.amount_uzs, 0) end)
+          from ${moneyFlow} mf
+          where mf.unit_id = ${globerentUnit.id} and mf.direction = 'out' and mf.status = 'actual'
+        ), 0)::text`,
+      })
       .from(globerentUnit)
       .leftJoin(entity, eq(entity.id, globerentUnit.clientId))
       .leftJoin(
@@ -108,7 +133,36 @@ export class UnitsService {
       .where(and(...conditions))
       .orderBy(desc(globerentUnit.updatedAt))
       .limit(500);
-    return rows.map((r) => ({ ...r.unit, clientName: r.clientName, activeReserve: r.reserve }));
+    return rows.map((r) => ({
+      ...r.unit,
+      clientName: r.clientName,
+      activeReserve: r.reserve,
+      costUzs: Number(r.costUzs),
+    }));
+  }
+
+  /** Себестоимость единицы по корзинам донора + маржа против цены продажи. */
+  async cost(id: string): Promise<UnitCost> {
+    const [unit] = await this.db.select().from(globerentUnit).where(eq(globerentUnit.id, id)).limit(1);
+    if (!unit) throw new NotFoundException("Единица не найдена");
+    const flows = await this.db
+      .select()
+      .from(moneyFlow)
+      .where(and(eq(moneyFlow.unitId, id), eq(moneyFlow.direction, "out"), eq(moneyFlow.status, "actual")));
+    const breakdown = cogsBreakdown(
+      flows.map((f) => ({
+        category: f.category,
+        uzs: f.currency === "UZS" ? Number(f.amount) : f.amountUzs !== null ? Number(f.amountUzs) : null,
+      })),
+    );
+    const salesPrice = unit.salesPrice !== null ? Number(unit.salesPrice) : null;
+    const m = salesPrice !== null && breakdown.totalUzs > 0 ? unitMargin(salesPrice, breakdown.totalUzs) : null;
+    return {
+      ...breakdown,
+      salesPrice,
+      margin: m?.margin ?? null,
+      marginPct: m?.marginPct ?? null,
+    };
   }
 
   /** Заявка или своя техника на склад. Складской номер WH-#### — в транзакции. */
@@ -410,6 +464,83 @@ export class UnitsService {
         after: { salesStage: stage },
       });
       return updated;
+    }).then(async (updated) => {
+      // Закрытие сделки — начисление комиссии методом, который выбрал
+      // владелец тумблером «Системы». Провал не роняет закрытие.
+      if (stage === "CLOSED") {
+        try {
+          await this.accrueCommission(updated, actorRef);
+        } catch {
+          // комиссию можно завести руками во вкладке «Финансы»
+        }
+      }
+      return updated;
+    });
+  }
+
+  /**
+   * Автокомиссия при закрытии сделки: метод — из GR_COMMISSION_METHOD,
+   * ставка — из GR_COMMISSION_RATE_PCT. Недостающие входы (например,
+   * ФАКТ-прибыль для flat_bonus без расчёта калькулятора) дают событие
+   * с причиной словами, а не тихий ноль или выдуманную цифру.
+   */
+  private async accrueCommission(unit: UnitRow, actorRef: string): Promise<void> {
+    const cfg = await this.db
+      .select()
+      .from(systemConfig)
+      .where(inArray(systemConfig.key, ["GR_COMMISSION_METHOD", "GR_COMMISSION_RATE_PCT"]));
+    const byKey = new Map(cfg.map((c) => [c.key, c.value]));
+    const method = (byKey.get("GR_COMMISSION_METHOD") ?? "flat_bonus") as CommissionMethod;
+    const ratePct = Number(byKey.get("GR_COMMISSION_RATE_PCT") ?? "8");
+
+    const cost = await this.cost(unit.id);
+    const salePrice = unit.salesPrice !== null ? Number(unit.salesPrice) : null;
+    const result = computeCommission(method, {
+      salePrice,
+      costTotal: cost.totalUzs > 0 ? cost.totalUzs : null,
+      costOfficialTotal: cost.totalUzs > 0 ? cost.totalUzs : null,
+      // ФАКТ-прибыль без расчёта калькулятора неизвестна — не выдумываем.
+      netProfitTotal: null,
+      ratePct: Number.isFinite(ratePct) ? ratePct : 8,
+      qty: 1,
+    });
+
+    if (result.commission > 0) {
+      const created = await this.db
+        .insert(moneyFlow)
+        .values({
+          orgId: unit.orgId,
+          domain: unit.domain,
+          direction: "out",
+          amount: String(result.commission),
+          currency: "UZS",
+          source: "manual",
+          category: "commission",
+          isOfficial: false,
+          purpose: `комиссия менеджера по ${unit.code} (метод ${result.method})`,
+          date: new Date(),
+          status: "planned",
+          unitId: unit.id,
+        })
+        .returning();
+      await this.db.insert(auditLog).values({
+        actorKind: "system",
+        actorRef,
+        action: "unit.commission_accrued",
+        target: unit.id,
+        after: created[0],
+      });
+    }
+    await this.events.record({
+      source: "units",
+      type: "unit.sale_closed",
+      payload: {
+        unitId: unit.id,
+        code: unit.code,
+        method: result.method,
+        commission: result.commission,
+        note: result.note,
+      },
     });
   }
 

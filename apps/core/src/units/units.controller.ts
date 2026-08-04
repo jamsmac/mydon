@@ -42,6 +42,12 @@ export class UnitsController {
     );
   }
 
+  /** Себестоимость единицы: корзины донора + маржа. */
+  @Get(":id/cost")
+  cost(@Param("id") id: string) {
+    return this.units.cost(id);
+  }
+
   /** Семантический переход конвейера: действие из единой матрицы shared. */
   @Patch(":id/action/:action")
   action(

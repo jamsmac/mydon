@@ -18,6 +18,12 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
 import { FinanceService } from "../finance/finance.service";
+import {
+  renderContractDocx,
+  type ContractDocxInput,
+  type ContractParty,
+  type PayType,
+} from "./contract-docx";
 
 type ContractRow = typeof grContract.$inferSelect;
 type ActRow = typeof contractAct.$inferSelect;
@@ -490,6 +496,66 @@ export class ContractsService {
       .from(moneyFlow)
       .where(eq(moneyFlow.contractId, id));
     return Number(r?.paid ?? 0);
+  }
+
+  /**
+   * DOCX договора — серверный рендер (перенос generateDocx донора 1:1).
+   * Продавец — карточка own_company из реестра (замена SELLER-хардкода):
+   * либо привязанная к договору, либо единственная в направлении.
+   */
+  async renderDocx(id: string): Promise<{ buffer: Buffer; filename: string }> {
+    const [row] = await this.db.select().from(grContract).where(eq(grContract.id, id)).limit(1);
+    if (!row) throw new NotFoundException("Договор не найден");
+
+    let sellerEntity: { name: string; attrs: unknown } | null = null;
+    if (row.sellerCompanyId !== null) {
+      const [e] = await this.db
+        .select({ name: entity.name, attrs: entity.attrs })
+        .from(entity)
+        .where(eq(entity.id, row.sellerCompanyId))
+        .limit(1);
+      sellerEntity = e ?? null;
+    } else {
+      const [e] = await this.db
+        .select({ name: entity.name, attrs: entity.attrs })
+        .from(entity)
+        .where(and(eq(entity.orgId, row.orgId ?? sql`null`), eq(entity.type, "own_company")))
+        .limit(1);
+      sellerEntity = e ?? null;
+    }
+    if (sellerEntity === null) {
+      throw new BadRequestException(
+        "Не заведена карточка своей компании (тип own_company) — реквизиты продавца брать неоткуда",
+      );
+    }
+    const a = (sellerEntity.attrs ?? {}) as Record<string, unknown>;
+    const s = (k: string): string => (typeof a[k] === "string" ? (a[k] as string) : "");
+    const seller: ContractParty = {
+      name: sellerEntity.name,
+      director: s("director"),
+      inn: s("inn"),
+      address: s("address"),
+      account: s("account"),
+      bank: s("bank"),
+      mfo: s("mfo"),
+      oked: s("oked"),
+      nds: s("nds_code") || s("nds"),
+      phone: s("phone"),
+    };
+
+    const buyer = (row.buyer ?? {}) as ContractDocxInput["buyer"];
+    const input: ContractDocxInput = {
+      contractNo: row.contractNo,
+      contractDate: row.contractDate,
+      buyer: { ...buyer, name: buyer.name ?? "Покупатель" },
+      seller,
+      items: (row.items ?? []) as ContractDocxInput["items"],
+      payType: (row.payType ?? "100") as PayType,
+      docParams: (row.docParams ?? {}) as ContractDocxInput["docParams"],
+      deliveryDays: row.deliveryDays ?? 0,
+    };
+    const buffer = await renderContractDocx(input);
+    return { buffer, filename: `Dogovor_KP_${row.contractNo}_${row.contractDate}.docx` };
   }
 
   /** Акт приёма-передачи. По cancelled — 409. Создаёт событие для будущего склада. */

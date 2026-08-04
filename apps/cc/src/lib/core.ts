@@ -536,6 +536,29 @@ export interface GrUnit {
   updatedAt: string;
   clientName: string | null;
   activeReserve: UnitReserveRow | null;
+  /** Себестоимость по привязанным платежам, сумовой эквивалент. */
+  costUzs: number;
+}
+
+export interface GrPreorder {
+  id: string;
+  domain: string;
+  code: string;
+  modelId: string | null;
+  name: string;
+  qty: number;
+  clientId: string | null;
+  supplierId: string | null;
+  contractRef: string | null;
+  factoryPriceUsd: string | null;
+  promisedDeliveryDate: string | null;
+  status: string;
+  cancelledReason: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  clientName: string | null;
 }
 
 // ── Импортные контракты GLOBERENT (перенос import_contracts PROMACH) ──
@@ -1726,6 +1749,14 @@ export const core = {
   cancelUnitReserve: (id: string) => send<GrUnit>(`/units/${id}/reserve/cancel`, "PATCH", {}),
   setUnitSalesStage: (id: string, input: Record<string, unknown>) =>
     send<GrUnit>(`/units/${id}/sales-stage`, "PATCH", input),
+
+  // ── Предзаказы ──
+  preorders: (domain: string) => get<GrPreorder[]>(`/preorders?domain=${domain}`),
+  createPreorder: (input: Record<string, unknown>) => send<GrPreorder>("/preorders", "POST", input),
+  preorderAction: (id: string, action: string, extra: Record<string, unknown> = {}) =>
+    send<GrPreorder>(`/preorders/${id}/action/${encodeURIComponent(action)}`, "PATCH", extra),
+  cancelPreorder: (id: string, reason: string) =>
+    send<GrPreorder>(`/preorders/${id}/cancel`, "PATCH", { reason }),
 
   // ── Импортные контракты ──
   imports: (domain: string) => get<GrImport[]>(`/imports?domain=${domain}`),

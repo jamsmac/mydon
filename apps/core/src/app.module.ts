@@ -18,6 +18,7 @@ import { HistoryModule } from "./history/history.module";
 import { ImportsModule } from "./imports/imports.module";
 import { NotesModule } from "./notes/notes.module";
 import { PeopleModule } from "./people/people.module";
+import { PreordersModule } from "./preorders/preorders.module";
 import { RawModule } from "./raw/raw.module";
 import { RegistryModule } from "./registry/registry.module";
 import { RulesModule } from "./rules/rules.module";
@@ -55,6 +56,7 @@ import { VerificationModule } from "./verification/verification.module";
     ImportsModule,
     NotesModule,
     PeopleModule,
+    PreordersModule,
     RawModule,
     TasksModule,
     UnitsModule,

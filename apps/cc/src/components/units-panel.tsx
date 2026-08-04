@@ -67,6 +67,10 @@ function UnitRow({ unit, clients }: { unit: GrUnit; clients: FinanceCounterparty
           {UNIT_STATUS_LABELS[unit.status as UnitStatus] ?? unit.status}
           {unit.vin !== null ? ` · VIN ${unit.vin}` : " · VIN не привязан"}
           {unit.salesPrice !== null ? ` · цена ${nfmt(unit.salesPrice)} сум` : ""}
+          {unit.costUzs > 0 ? ` · себестоимость ≈ ${nfmt(unit.costUzs)} сум` : ""}
+          {unit.costUzs > 0 && unit.salesPrice !== null && Number(unit.salesPrice) > 0
+            ? ` · маржа ${Math.round(((Number(unit.salesPrice) - unit.costUzs) / Number(unit.salesPrice)) * 100)}%`
+            : ""}
           {unit.salesStage !== null
             ? ` · продажа: ${SALES_STAGE_LABELS[unit.salesStage as SalesStage] ?? unit.salesStage}`
             : ""}

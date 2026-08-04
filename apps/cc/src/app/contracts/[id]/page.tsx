@@ -76,9 +76,16 @@ export default async function ContractPage({ params }: { params: Promise<{ id: s
             {STATUS_RU[c.status] ?? c.status}
           </span>
         </div>
-        <ContractStatusButtons id={c.id} status={c.status} />
+        <span style={{ display: "inline-flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <ContractStatusButtons id={c.id} status={c.status} />
+          <a className="btn sm" href={`/contracts/${c.id}/docx`}>
+            Скачать договор (DOCX)
+          </a>
+        </span>
         <p className="hint" style={{ marginTop: 6 }}>
-          Между «закрыт» и «отменён» — только через «действует». По отменённому платежи и акты не принимаются.
+          Между «закрыт» и «отменён» — только через «действует». По отменённому платежи и акты не
+          принимаются. Документ собирается по структуре донора; реквизиты продавца — из карточки
+          own_company в реестре.
         </p>
       </div>
 

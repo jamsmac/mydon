@@ -64,6 +64,7 @@ export async function createFinanceFlow(
       docNo: str("docNo"),
       purpose: str("purpose"),
       dueDate: str("dueDate"),
+      unitId: str("unitId"),
       actorRef: "owner",
     });
     revalidatePath(`/domain/${domain}`);

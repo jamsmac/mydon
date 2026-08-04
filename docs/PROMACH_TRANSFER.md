@@ -24,10 +24,11 @@
 | Калькулятор v3 (calculator-engine, excel ground-truth) | ✅ перенесён | packages/shared/src/globerent/calc.ts (43 golden-теста, паритет с Excel до копейки), вкладка «Калькулятор» |
 | Склад техники (warehouse, 17 статусов, VIN, резервы, стадии продажи) | ✅ перенесён | globerent_unit + unit_reserve, shared/globerent/unit-status (матрица под тестами), apps/core/src/units, вкладка «Склад» |
 | Импортные контракты (график оплат, материализация, массовые ГТД, monotonic lifecycle) | ✅ перенесён | gr_import_contract, apps/core/src/imports, shared/import-lifecycle (баг донора с рангом paying исправлен + тест), вкладка «Импорт» + /imports/[id]. Контур односторонний: менеджер отмечает за завод |
-| DOCX-генерация договора | ⏳ следующий | builder донора переносится 1:1 в Node-сервис (docx работает на сервере), файл → document |
-| Предзаказы (preorders, 8 статусов ALLOWED_TRANSITIONS) | ⏳ следующий | матрица — в спецификации разведки |
+| DOCX-генерация договора | ✅ перенесён | contract-docx.ts (builder донора 1:1, 13 разделов; SELLER-хардкод → карточка own_company, «TAS MOTORS» и НДС — параметры), GET /contracts/:id/docx + кнопка в карточке. 16 тестов |
+| Предзаказы (preorders, 8 статусов ALLOWED_TRANSITIONS) | ✅ перенесён | gr_preorder + shared/preorder-status (матрица дословно, скипы донора живы), секция «Предзаказы» на вкладке «Импорт». order требует контракт, отмена — причину |
+| КП (kp-templates classic) | ✅ рендерер | apps/core/src/kp/kp-classic.ts (хардкоды → параметры, 14 тестов). UI-обвязка (кнопка из калькулятора) и шаблон modern — следующий шаг |
 | КП-шаблоны (kp-templates DOCX) | ⏳ после договоров | серверная генерация |
-| Себестоимость единицы (recalc по платежам) | ⏳ после склада | по money_flow на unit — механизм выбран сверкой |
+| Себестоимость единицы (recalc по платежам) | ✅ перенесён | money_flow.unit_id + cogsBreakdown (4 корзины донора, суммы в сум. эквиваленте, «неприведённые» — счётчиком), GET /units/:id/cost, себестоимость и маржа в списке склада; при закрытии сделки — автокомиссия выбранным методом (planned money_flow + событие unit.sale_closed с причиной, если посчитать нечем) |
 | Комиссии менеджеров | ✅ все три метода | shared/globerent/commission.ts: margin_rate (Math.round(margin×rate)/100 по месяцу выдачи), tiers (полуоткрытые [from,to), персональный бьёт общий, seed 0.5–3.5%), flat_bonus (% от ФАКТ-прибыли). Действующий метод — тумблер «Системы» GR_COMMISSION_METHOD (+ ставка GR_COMMISSION_RATE_PCT); дефолт flat_bonus — самое свежее решение владельца донору (2026-05-17). Начисление в money_flow подключается вместе с COGS единицы |
 | Монитор инвариантов pipeline | ⏳ со складом | как агент MYDON |
 | Рекламации (claims) | ⏸ отложен | половина ценности — чат с заводом через портал; пока task+document |
