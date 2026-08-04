@@ -21,6 +21,12 @@ export async function createEntity(
   const attrs: Record<string, unknown> = {};
   const price = String(form.get("price") ?? "").trim();
   if (/^\d+$/.test(price)) attrs["цена"] = Number(price);
+  // Договор: срок окончания пишем в endDate — этот ключ читают брифинг Core
+  // («договоры на исходе») и дашборд GLOBERENT. Кривую дату не пишем вовсе.
+  const endDate = String(form.get("endDate") ?? "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(endDate)) attrs["endDate"] = endDate;
+  const client = String(form.get("client") ?? "").trim();
+  if (client.length > 0) attrs["client"] = client;
 
   try {
     await core.createEntity({

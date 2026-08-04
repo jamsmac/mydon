@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { core, CoreUnavailable, type Entity } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
+import { groupsFor } from "../../lib/domain-nav";
 import { when } from "../../lib/format";
 
 export const dynamic = "force-dynamic";
@@ -26,6 +27,10 @@ const TYPE_LABELS: Record<string, string> = {
   product: "товары",
 };
 const typeLabel = (t: string): string => TYPE_LABELS[t] ?? t;
+
+/** Группа вкладок направления, где живёт тип: у GLOBERENT договоры — в «Документах». */
+const groupKeyFor = (domain: string, type: string): string =>
+  groupsFor(domain).find((g) => g.leaves.some((l) => l.type === type))?.key ?? "catalog";
 
 /**
  * Реестр по направлениям (ТЗ FR-5).
@@ -110,7 +115,7 @@ export default async function Registry({
                 <div className="wgrid">
                   {rows.map((r) => (
                     <Link
-                      href={`/domain/${d}?tab=catalog:${encodeURIComponent(r.type)}`}
+                      href={`/domain/${d}?tab=${groupKeyFor(d, r.type)}:${encodeURIComponent(r.type)}`}
                       className="wt"
                       key={`${d}:${r.type}`}
                     >

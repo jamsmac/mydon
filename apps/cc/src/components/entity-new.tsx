@@ -60,6 +60,18 @@ export function NewEntityForm({
           <input name="price" inputMode="numeric" placeholder="20000" />
         </label>
       )}
+      {type === "contract" && (
+        <>
+          <label>
+            <span>Контрагент — можно позже</span>
+            <input name="client" placeholder="ООО «…»" />
+          </label>
+          <label>
+            <span>Срок окончания — без него договор не попадёт в тревогу о сроках</span>
+            <input name="endDate" type="date" />
+          </label>
+        </>
+      )}
       <div className="form-actions">
         <button type="submit" className="btn primary" disabled={pending}>
           {pending ? "…" : "Добавить"}

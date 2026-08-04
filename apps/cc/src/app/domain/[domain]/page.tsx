@@ -24,6 +24,13 @@ import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingPanel } from "../../../components/vending-panel";
 import { CoffeePanel } from "../../../components/coffee-panel";
+import {
+  ContractorsBook,
+  ContractsBook,
+  EquipmentBook,
+  InvoicesBook,
+} from "../../../components/globerent-books";
+import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
 import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
 
@@ -189,6 +196,20 @@ export default async function DomainPage({
     return acc;
   }, {});
 
+  // GLOBERENT: раскладка договоров по срокам — тот же 14-дневный горизонт и то же
+  // строковое сравнение дат, что в брифинге Core, чтобы панель и бот сходились в цифре.
+  const todayKey = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+  let grContracts: ContractStats | null = null;
+  if (domain === "globerent") {
+    const horizonDate = new Date();
+    horizonDate.setDate(horizonDate.getDate() + 14);
+    grContracts = contractStats(
+      entities.filter((e) => e.type === "contract"),
+      todayKey,
+      horizonDate.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" }),
+    );
+  }
+
   const owedToUs = obligations.totals.filter((t) => t.direction === "in");
   const owedByUs = obligations.totals.filter((t) => t.direction === "out");
 
@@ -329,6 +350,85 @@ export default async function DomainPage({
               </div>
             </Link>
           </div>
+
+          {/* ── Контур GLOBERENT: договоры и парк — тревога №1 владельца это сроки ── */}
+          {grContracts !== null && entities.length > 0 && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Договоры и парк</h3>
+                {grContracts.dueSoon.length > 0 && (
+                  <span className="chip h">на исходе · {grContracts.dueSoon.length}</span>
+                )}
+              </div>
+              <div className="wgrid">
+                <Link
+                  href={href("docs:contract")}
+                  className={`wt ${grContracts.dueSoon.length > 0 ? "" : "off"}`}
+                >
+                  <div className="wl">Истекают ≤ 14 дней</div>
+                  <div className="wv">{grContracts.dueSoon.length}</div>
+                  <div className="wf">
+                    {grContracts.dueSoon.length > 0 ? "успей продлить" : "спокойно"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("docs:contract")} className="wt">
+                  <div className="wl">Действующие договоры</div>
+                  <div className="wv">{grContracts.active}</div>
+                  <div className="wf">
+                    {grContracts.noDate + grContracts.expired > 0
+                      ? `без даты ${grContracts.noDate} · истекло ${grContracts.expired}`
+                      : "все со сроком"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("catalog:contractor")} className="wt">
+                  <div className="wl">Контрагенты</div>
+                  <div className="wv">{byType["contractor"] ?? 0}</div>
+                  <div className="wf">ключ сведения — ИНН<span className="go">→</span></div>
+                </Link>
+                <Link href={href("catalog:equipment")} className="wt">
+                  <div className="wl">Техника HELI</div>
+                  <div className="wv">{byType["equipment"] ?? 0}</div>
+                  <div className="wf">единиц в каталоге<span className="go">→</span></div>
+                </Link>
+              </div>
+              {grContracts.dueSoon.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  {grContracts.dueSoon.slice(0, 8).map((e) => {
+                    const { text, hot } = endLabel(contractEnd(e), todayKey);
+                    return (
+                      <Link href={`/card/${e.id}`} className="trow hot" key={e.id}>
+                        <div className="tb">
+                          <div className="tt">{e.name}</div>
+                        </div>
+                        <span className={`due ${hot ? "hot" : ""}`}>{text}</span>
+                      </Link>
+                    );
+                  })}
+                  {grContracts.dueSoon.length > 8 && (
+                    <Link href={href("docs:contract")} className="navlink" style={{ justifyContent: "center" }}>
+                      Все на исходе — {grContracts.dueSoon.length}
+                    </Link>
+                  )}
+                </div>
+              )}
+              {grContracts.badDate > 0 && (
+                <div className="warn" style={{ marginTop: 10 }}>
+                  <b>Договоры с непонятной датой: {grContracts.badDate}</b>
+                  Срок окончания не разобрать — в «на исходе» они не попали. Открой карточку
+                  и поправь дату, иначе срок пройдёт незамеченным.
+                </div>
+              )}
+              <div style={{ marginTop: 12 }}>
+                <QuickActions
+                  domain={domain}
+                  actions={["Продлить договор", "Выставить счёт", "Напомнить об оплате"]}
+                  defaultOwnerRef={defaultOwner?.id ?? null}
+                />
+              </div>
+            </div>
+          )}
 
           {domain === "vendhub" && supplySummary && supplySummary.emptyPositions > 0 && (
             <div className="notice" style={{ marginTop: 16 }}>
@@ -617,8 +717,62 @@ export default async function DomainPage({
         </>
       )}
 
+      {/* ── GLOBERENT и личный контур: документы и каталог со своими колонками ── */}
+      {group && leaf?.type === "contract" && (
+        <>
+          {leafItems.length > 0 ? (
+            <ContractsBook items={leafItems} today={todayKey} />
+          ) : (
+            <div className="empty">
+              <b>Договоров пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="contract" label={typeOne("contract")} />
+        </>
+      )}
+      {group && leaf?.type === "invoice" && (
+        <>
+          {leafItems.length > 0 ? (
+            <InvoicesBook items={leafItems} />
+          ) : (
+            <div className="empty">
+              <b>Счетов пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="invoice" label={typeOne("invoice")} />
+        </>
+      )}
+      {group && leaf?.type === "contractor" && (
+        <>
+          {leafItems.length > 0 ? (
+            <ContractorsBook items={leafItems} />
+          ) : (
+            <div className="empty">
+              <b>Контрагентов пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="contractor" label={typeOne("contractor")} />
+        </>
+      )}
+      {group && leaf?.type === "equipment" && (
+        <>
+          {leafItems.length > 0 ? (
+            <EquipmentBook items={leafItems} />
+          ) : (
+            <div className="empty">
+              <b>Техники пока нет</b>
+              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+            </div>
+          )}
+          <NewEntityForm domain={domain} type="equipment" label={typeOne("equipment")} />
+        </>
+      )}
+
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock"].includes(leaf.type) && (
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment"].includes(leaf.type) && (
         <>
           {leafItems.length > 0 ? (
             <>
