@@ -19,11 +19,82 @@ export interface BriefingCoffee {
   overdueWash: number;
 }
 
+/** Сигналы контуров GLOBERENT (финансы, договоры, склад — перенос PROMACH). */
+export interface BriefingGloberent {
+  /** Обязательств «нам заплатят» со сроком ≤ 7 дней. */
+  dueSoonIn: number;
+  /** Обязательств «мы платим» со сроком ≤ 7 дней. */
+  dueSoonOut: number;
+  /** Действующих договоров без единой оплаты. */
+  contractsUnpaid: number;
+  /** Открытых сделок без движения дольше 14 дней. */
+  dealsStuck: number;
+}
+
+/** Завершённые ветки стадий продажи — застрять в них нельзя. */
+const STAGES_DONE = new Set(["CLOSED", "LOST"]);
+
+/**
+ * Сделки без движения: стадия продажи открыта, а карточку не трогали
+ * дольше `days` дней. Отдельной метки «когда сменилась стадия» нет —
+ * честная опора на updatedAt (любая правка карточки сбрасывает счётчик).
+ */
+export function countStuckDeals(
+  units: readonly { salesStage: string | null; updatedAt: string }[],
+  now: Date,
+  days = 14,
+): number {
+  const cutoff = now.getTime() - days * 86_400_000;
+  return units.filter((u) => {
+    if (u.salesStage === null || STAGES_DONE.has(u.salesStage)) return false;
+    const touched = new Date(u.updatedAt).getTime();
+    return Number.isFinite(touched) && touched < cutoff;
+  }).length;
+}
+
+/** Действующие договоры, по которым не пришло ни сума. */
+export function countUnpaidContracts(
+  contracts: readonly { status: string; paidUzs: number }[],
+): number {
+  return contracts.filter((c) => c.status === "active" && !(c.paidUzs > 0)).length;
+}
+
+/** Узкий контракт клиента Core для сбора сигналов GLOBERENT (упрощает тесты). */
+export interface GloberentSignalsSource {
+  globerentDueSoon(): Promise<{ dueSoonIn: unknown[]; dueSoonOut: unknown[] }>;
+  globerentContracts(): Promise<{ status: string; paidUzs: number }[]>;
+  globerentUnits(): Promise<{ salesStage: string | null; updatedAt: string }[]>;
+}
+
+/**
+ * Собрать сигналы GLOBERENT для брифинга. Каждый источник читается
+ * независимо: упавшие финансы не прячут застрявшие сделки. Все три упали —
+ * блока нет вовсе (undefined), а не ложное «всё по нулям».
+ */
+export async function collectGloberentSignals(
+  src: GloberentSignalsSource,
+  now: Date = new Date(),
+): Promise<BriefingGloberent | undefined> {
+  const [fin, contracts, units] = await Promise.all([
+    src.globerentDueSoon().catch(() => null),
+    src.globerentContracts().catch(() => null),
+    src.globerentUnits().catch(() => null),
+  ]);
+  if (fin === null && contracts === null && units === null) return undefined;
+  return {
+    dueSoonIn: fin?.dueSoonIn.length ?? 0,
+    dueSoonOut: fin?.dueSoonOut.length ?? 0,
+    contractsUnpaid: contracts !== null ? countUnpaidContracts(contracts) : 0,
+    dealsStuck: units !== null ? countStuckDeals(units, now) : 0,
+  };
+}
+
 export function formatBriefing(
   b: Briefing,
   approvals: ApprovalRow[] = [],
   purchase?: BriefingPurchase,
   coffee?: BriefingCoffee,
+  globerent?: BriefingGloberent,
 ): string {
   const when = new Date(b.generatedAt).toLocaleString("ru-RU", {
     timeZone: TZ,
@@ -68,6 +139,21 @@ export function formatBriefing(
     if (coffee.anomaly > 0) parts.push(`расхождение ${coffee.anomaly}`);
     if (coffee.overdueWash > 0) parts.push(`мойка просрочена ${coffee.overdueWash}`);
     lines.push("", `☕ Кофе-бункеры: ${parts.join(", ")} — вкладка «Сверка».`);
+  }
+
+  if (
+    globerent &&
+    (globerent.dueSoonIn > 0 ||
+      globerent.dueSoonOut > 0 ||
+      globerent.contractsUnpaid > 0 ||
+      globerent.dealsStuck > 0)
+  ) {
+    const parts: string[] = [];
+    if (globerent.dueSoonIn > 0) parts.push(`получить в ≤7 дней: ${globerent.dueSoonIn}`);
+    if (globerent.dueSoonOut > 0) parts.push(`заплатить в ≤7 дней: ${globerent.dueSoonOut}`);
+    if (globerent.contractsUnpaid > 0) parts.push(`договоры без оплаты: ${globerent.contractsUnpaid}`);
+    if (globerent.dealsStuck > 0) parts.push(`сделки без движения >14 дней: ${globerent.dealsStuck}`);
+    lines.push("", `🏗 GLOBERENT: ${parts.join(", ")} — вкладки «Финансы» и «Склад».`);
   }
 
   if (approvals.length > 0) {

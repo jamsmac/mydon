@@ -6,6 +6,7 @@ import {
   concentration,
   daysBetween,
   dueSoon,
+  fxRefreshPlan,
   uzsEquivalent,
   type FlowForMath,
 } from "./finance.math";
@@ -204,5 +205,92 @@ describe("byMonth — кэш-флоу по месяцам (by_month из PROMACH
     // 2026-07-31T20:00Z = 2026-08-01 01:00 по Ташкенту (+05:00) — это август.
     const rows = [flow({ id: "1", status: "actual", amount: "10", date: new Date("2026-07-31T20:00:00Z") })];
     assert.equal(byMonth(rows, "Asia/Tashkent")[0]?.month, "2026-08");
+  });
+});
+
+describe("fxRefreshPlan — автокурс ЦБ РУз (ручной ввод главнее)", () => {
+  const TZ = "Asia/Tashkent";
+  const TODAY = "2026-08-04";
+  const cbuRows = [
+    { Ccy: "USD", Rate: "12650.44", Date: "04.08.2026" },
+    { Ccy: "EUR", Rate: "13720.11", Date: "04.08.2026" },
+    { Ccy: "CNY", Rate: "1745.02", Date: "04.08.2026" },
+    { Ccy: "RUB", Rate: "158.9", Date: "04.08.2026" },
+  ];
+
+  it("пустая история: все четыре валюты встают из ЦБ с заметкой о дате", () => {
+    const plan = fxRefreshPlan(cbuRows, [], TODAY, TZ);
+    assert.deepEqual(
+      plan.inserts.map((i) => i.currency),
+      ["USD", "CNY", "EUR", "RUB"],
+    );
+    assert.equal(plan.inserts[0]?.rate, 12650.44);
+    assert.equal(plan.inserts[0]?.note, "ЦБ РУз на 04.08.2026");
+    assert.deepEqual(plan.skipped, []);
+  });
+
+  it("ручной курс, заданный сегодня, НЕ перекрывается автообновлением", () => {
+    const latest = [
+      { currency: "USD", rate: "12500", source: "manual", createdAt: new Date("2026-08-04T03:00:00Z") },
+    ];
+    const plan = fxRefreshPlan(cbuRows, latest, TODAY, TZ);
+    assert.ok(!plan.inserts.some((i) => i.currency === "USD"));
+    assert.deepEqual(plan.skipped.find((s) => s.currency === "USD"), {
+      currency: "USD",
+      reason: "ручной курс за сегодня главнее",
+    });
+  });
+
+  it("вчерашний ручной курс перекрывается: ЦБ снова источник по умолчанию", () => {
+    const latest = [
+      { currency: "USD", rate: "12500", source: "manual", createdAt: new Date("2026-08-03T10:00:00Z") },
+    ];
+    const plan = fxRefreshPlan(cbuRows, latest, TODAY, TZ);
+    assert.ok(plan.inserts.some((i) => i.currency === "USD" && i.rate === 12650.44));
+  });
+
+  it("граница суток — по Ташкенту: 2026-08-03T20:00Z — это уже сегодня (+05)", () => {
+    const latest = [
+      { currency: "USD", rate: "12500", source: "manual", createdAt: new Date("2026-08-03T20:00:00Z") },
+    ];
+    const plan = fxRefreshPlan(cbuRows, latest, TODAY, TZ);
+    assert.equal(plan.skipped.find((s) => s.currency === "USD")?.reason, "ручной курс за сегодня главнее");
+  });
+
+  it("курс не изменился — строка истории не плодится", () => {
+    const latest = [
+      { currency: "EUR", rate: "13720.1100", source: "cbu", createdAt: new Date("2026-08-03T05:00:00Z") },
+    ];
+    const plan = fxRefreshPlan(cbuRows, latest, TODAY, TZ);
+    assert.equal(plan.skipped.find((s) => s.currency === "EUR")?.reason, "не изменился");
+    assert.ok(!plan.inserts.some((i) => i.currency === "EUR"));
+  });
+
+  it("валюты нет в ответе ЦБ или курс не число — честный пропуск словами", () => {
+    const plan = fxRefreshPlan(
+      [{ Ccy: "USD", Rate: "мусор", Date: "04.08.2026" }],
+      [],
+      TODAY,
+      TZ,
+    );
+    for (const c of ["USD", "CNY", "EUR", "RUB"]) {
+      assert.equal(plan.skipped.find((s) => s.currency === c)?.reason, "ЦБ не дал курс");
+    }
+    assert.deepEqual(plan.inserts, []);
+  });
+
+  it("нулевой и отрицательный курс отбиваются как «ЦБ не дал курс»", () => {
+    const plan = fxRefreshPlan(
+      [
+        { Ccy: "USD", Rate: "0", Date: "04.08.2026" },
+        { Ccy: "EUR", Rate: "-5", Date: "04.08.2026" },
+      ],
+      [],
+      TODAY,
+      TZ,
+      ["USD", "EUR"],
+    );
+    assert.deepEqual(plan.inserts, []);
+    assert.equal(plan.skipped.length, 2);
   });
 });

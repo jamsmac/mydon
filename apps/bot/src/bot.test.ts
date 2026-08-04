@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { formatBriefing, msUntilBriefing } from "./briefing";
+import {
+  collectGloberentSignals,
+  countStuckDeals,
+  countUnpaidContracts,
+  formatBriefing,
+  msUntilBriefing,
+} from "./briefing";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { parseIntent } from "./intent";
 import { parseAllowlist, RateLimiter } from "./security/access";
@@ -80,6 +86,23 @@ describe("Брифинг", () => {
     assert.doesNotMatch(formatBriefing(base), /Кофе-бункеры/);
   });
 
+  it("строка GLOBERENT появляется, когда есть хоть один сигнал контуров", () => {
+    const text = formatBriefing(base, [], undefined, undefined, {
+      dueSoonIn: 2,
+      dueSoonOut: 0,
+      contractsUnpaid: 1,
+      dealsStuck: 3,
+    });
+    assert.match(text, /🏗 GLOBERENT: получить в ≤7 дней: 2, договоры без оплаты: 1, сделки без движения >14 дней: 3/);
+    assert.doesNotMatch(text, /заплатить/);
+  });
+
+  it("без сигналов GLOBERENT (всё по нулям) строки нет", () => {
+    const zeros = { dueSoonIn: 0, dueSoonOut: 0, contractsUnpaid: 0, dealsStuck: 0 };
+    assert.doesNotMatch(formatBriefing(base, [], undefined, undefined, zeros), /GLOBERENT/);
+    assert.doesNotMatch(formatBriefing(base), /GLOBERENT/);
+  });
+
   it("время показывает в ташкентском поясе", () => {
     // 02:30 UTC = 07:30 в Ташкенте
     assert.match(formatBriefing(base), /07:30/);
@@ -88,6 +111,54 @@ describe("Брифинг", () => {
   it("до брифинга всегда положительное время в пределах суток", () => {
     const ms = msUntilBriefing(new Date("2026-07-26T10:00:00Z"));
     assert.ok(ms > 0 && ms <= 24 * 3600 * 1000, `получено ${ms}`);
+  });
+});
+
+describe("Сигналы GLOBERENT для брифинга", () => {
+  const NOW = new Date("2026-08-04T05:00:00Z");
+
+  it("застрявшие сделки: открытая стадия + карточку не трогали дольше 14 дней", () => {
+    const units = [
+      { salesStage: "NEGOTIATION", updatedAt: "2026-07-01T00:00:00Z" }, // застряла
+      { salesStage: "NEGOTIATION", updatedAt: "2026-08-01T00:00:00Z" }, // свежая
+      { salesStage: "CLOSED", updatedAt: "2026-01-01T00:00:00Z" }, // закрыта — не считается
+      { salesStage: "LOST", updatedAt: "2026-01-01T00:00:00Z" }, // потеряна — не считается
+      { salesStage: null, updatedAt: "2026-01-01T00:00:00Z" }, // продажа не начата
+    ];
+    assert.equal(countStuckDeals(units, NOW), 1);
+  });
+
+  it("кривая дата updatedAt не считается застрявшей (не выдумываем)", () => {
+    assert.equal(countStuckDeals([{ salesStage: "NEW_LEAD", updatedAt: "мусор" }], NOW), 0);
+  });
+
+  it("договоры без оплаты: только действующие с нулём поступлений", () => {
+    const contracts = [
+      { status: "active", paidUzs: 0 }, // тревога
+      { status: "active", paidUzs: 1_000_000 }, // оплачивается
+      { status: "closed", paidUzs: 0 }, // закрыт — не тревога
+      { status: "cancelled", paidUzs: 0 }, // отменён — не тревога
+    ];
+    assert.equal(countUnpaidContracts(contracts), 1);
+  });
+
+  it("сбор сигналов: упавший источник даёт ноль, а не прячет остальные", async () => {
+    const src = {
+      globerentDueSoon: () => Promise.reject(new Error("core down")),
+      globerentContracts: () => Promise.resolve([{ status: "active", paidUzs: 0 }]),
+      globerentUnits: () => Promise.resolve([]),
+    };
+    const s = await collectGloberentSignals(src, NOW);
+    assert.deepEqual(s, { dueSoonIn: 0, dueSoonOut: 0, contractsUnpaid: 1, dealsStuck: 0 });
+  });
+
+  it("все три источника упали — блока нет вовсе, а не ложные нули", async () => {
+    const down = () => Promise.reject(new Error("core down"));
+    const s = await collectGloberentSignals(
+      { globerentDueSoon: down, globerentContracts: down, globerentUnits: down },
+      NOW,
+    );
+    assert.equal(s, undefined);
   });
 });
 

@@ -6,6 +6,7 @@ import { budgetPosture } from "./budget";
 import { coachPosture } from "./coach";
 import { runCoffeeMonitor } from "./coffee-monitor";
 import { AgentsCoreClient } from "./core-client";
+import { runGloberentMonitor } from "./globerent-monitor";
 import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
 import { autonomyThreshold } from "./policy";
 import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
@@ -374,6 +375,59 @@ async function main(): Promise<void> {
       console.log(`Мониторинг кофе-бункеров (coffee:monitor) включён: "${coffeeMonitorCron}" (${TZ}).`);
     } catch (err) {
       console.warn(`Расписание мониторинга кофе-бункеров "${coffeeMonitorCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  // Монитор инвариантов конвейера GLOBERENT (T0, наследник pipeline-monitor
+  // PROMACH): единица в ИМ-74/ИМ-40 без номера ГТД, оплаченный договор без
+  // закрытия. Раз в сутки к утреннему брифингу; GLOBERENT_MONITOR_CRON="off"
+  // выключает явно.
+  const grMonitorCron = process.env.GLOBERENT_MONITOR_CRON ?? "10 7 * * *";
+  if (grMonitorCron.toLowerCase() !== "off") {
+    try {
+      new Cron(grMonitorCron, { timezone: TZ, name: "globerent:monitor" }, () => {
+        void (async () => {
+          try {
+            const r = await runGloberentMonitor(core);
+            console.log(
+              `[globerent:monitor] без ГТД ${r.unitsNoGtd}, оплачен-не-закрыт ${r.contractsPaidUnclosed}` +
+                (r.errors.length ? ` — ошибки: ${r.errors.join("; ")}` : ""),
+            );
+          } catch (err) {
+            console.error("[globerent:monitor] сбой:", err);
+          }
+        })();
+      });
+      console.log(`Монитор конвейера GLOBERENT (globerent:monitor) включён: "${grMonitorCron}" (${TZ}).`);
+    } catch (err) {
+      console.warn(`Расписание монитора GLOBERENT "${grMonitorCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  // Автокурс ЦБ РУз (fx:refresh): раз в день дёргаем Core, тот сам ходит в
+  // cbu.uz. Ручной курс, заданный владельцем сегодня, Core не перекрывает —
+  // правило «manual override главнее» живёт в finance.math Core, не здесь.
+  // FX_REFRESH_CRON="off" выключает явно. Часовой пояс — Ташкент, как все cron.
+  const fxRefreshCron = process.env.FX_REFRESH_CRON ?? "5 9 * * *";
+  if (fxRefreshCron.toLowerCase() !== "off") {
+    try {
+      new Cron(fxRefreshCron, { timezone: TZ, name: "fx:refresh" }, () => {
+        void (async () => {
+          try {
+            const r = await core.refreshFx();
+            const skipped = r.skipped.map((s) => `${s.currency} — ${s.reason}`).join(", ");
+            console.log(
+              `[fx:refresh] обновлено: ${r.updated.join(", ") || "ничего"}` +
+                (skipped ? `; пропущено: ${skipped}` : ""),
+            );
+          } catch (err) {
+            console.error("[fx:refresh] сбой:", err);
+          }
+        })();
+      });
+      console.log(`Автокурс ЦБ РУз (fx:refresh) включён: "${fxRefreshCron}" (${TZ}).`);
+    } catch (err) {
+      console.warn(`Расписание автокурса "${fxRefreshCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
     }
   }
 

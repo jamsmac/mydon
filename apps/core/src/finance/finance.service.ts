@@ -1,4 +1,5 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadGatewayException, BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { cbu } from "@mydon/connectors";
 import { auditLog, entity, fxRate, moneyFlow, org } from "@mydon/db";
 import { MONEY_CATEGORIES, TZ, type Domain } from "@mydon/shared";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
@@ -9,10 +10,12 @@ import {
   concentration,
   dayKey,
   dueSoon,
+  fxRefreshPlan,
   uzsEquivalent,
   type AgingReport,
   type ConcentrationReport,
   type FlowForMath,
+  type FxRefreshSkip,
   type MonthCash,
 } from "./finance.math";
 
@@ -157,6 +160,56 @@ export class FinanceService {
       });
     });
     return this.fxCurrent();
+  }
+
+  /**
+   * Подтянуть курсы из ЦБ РУз (коннектор cbu.uz, открытый JSON без ключа).
+   * Правила решает чистый план fxRefreshPlan: ручной курс за сегодня главнее,
+   * неизменившийся курс не плодит строк. История дополняется, не переписывается.
+   */
+  async refreshFxFromCbu(actorRef = "owner"): Promise<{
+    updated: string[];
+    skipped: FxRefreshSkip[];
+    fx: FxCurrent[];
+  }> {
+    let rates: Awaited<ReturnType<typeof cbu.fetchRates>>;
+    try {
+      rates = await cbu.fetchRates();
+    } catch (err) {
+      throw new BadGatewayException(
+        `ЦБ РУз (cbu.uz) не ответил: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const latest = await this.fxCurrent();
+    const today = dayKey(new Date(), TZ);
+    const plan = fxRefreshPlan(rates, latest, today, TZ);
+
+    if (plan.inserts.length > 0) {
+      await this.db.transaction(async (tx) => {
+        for (const ins of plan.inserts) {
+          await tx.insert(fxRate).values({
+            currency: ins.currency,
+            rate: String(ins.rate),
+            source: "cbu",
+            note: ins.note,
+            setBy: actorRef,
+          });
+        }
+        await tx.insert(auditLog).values({
+          actorKind: actorRef.startsWith("agent") ? "agent" : "human",
+          actorRef,
+          action: "finance.fx_refresh",
+          target: plan.inserts.map((i) => i.currency).join(","),
+          after: { inserts: plan.inserts, skipped: plan.skipped },
+        });
+      });
+    }
+
+    return {
+      updated: plan.inserts.map((i) => i.currency),
+      skipped: plan.skipped,
+      fx: await this.fxCurrent(),
+    };
   }
 
   /** Завести обязательство или платёж. Курс не задан — подставляется действующий. */

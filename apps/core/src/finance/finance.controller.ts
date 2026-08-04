@@ -36,6 +36,12 @@ export class FinanceController {
     );
   }
 
+  /** Подтянуть курсы из ЦБ РУз. Ручной курс, заданный сегодня, не перекрывается. */
+  @Post("fx/refresh")
+  refreshFx(@Body() body: { actorRef?: string }) {
+    return this.finance.refreshFxFromCbu(body?.actorRef ?? "owner");
+  }
+
   /** Финансовый свод: агинг, «к сроку ≤ 7 дней», термометр, кэш-флоу. */
   @Get("summary/:domain")
   summary(@Param("domain") domain: string) {

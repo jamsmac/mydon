@@ -310,3 +310,78 @@ export function byMonth(rows: FlowForMath[], tz: string, months = 12): MonthCash
     .sort((a, b) => a.month.localeCompare(b.month))
     .slice(-months);
 }
+
+/* ── Автокурс ЦБ РУз (cbu.uz) ────────────────────────────────────────────── */
+
+/** Валюты, которые тянутся из ЦБ автоматически — словарь формы курса панели. */
+export const FX_AUTO_CURRENCIES: readonly string[] = ["USD", "CNY", "EUR", "RUB"];
+
+/** Строка ответа cbu.uz (форма коннектора @mydon/connectors). */
+export interface CbuRateRow {
+  Ccy: string;
+  Rate: string;
+  /** Дата курса в формате ЦБ: ДД.ММ.ГГГГ. */
+  Date: string;
+}
+
+/** Действующая строка курса — то, что уже лежит в fx_rate. */
+export interface FxLatestRow {
+  currency: string;
+  rate: string;
+  source: string;
+  createdAt: Date | string;
+}
+
+export interface FxRefreshInsert {
+  currency: string;
+  rate: number;
+  note: string;
+}
+
+export interface FxRefreshSkip {
+  currency: string;
+  /** Причина словами — панель показывает её владельцу как есть. */
+  reason: string;
+}
+
+export interface FxRefreshPlan {
+  inserts: FxRefreshInsert[];
+  skipped: FxRefreshSkip[];
+}
+
+/**
+ * План обновления курсов из ЦБ РУз. Правила (паттерн PROMACH
+ * «manual override главнее»):
+ *   • ручной курс, заданный СЕГОДНЯ, автообновление не перекрывает —
+ *     завтра ЦБ снова станет источником по умолчанию;
+ *   • курс не изменился — новая строка не пишется (история без спама);
+ *   • валюты нет в ответе ЦБ или курс не число — честный пропуск словами.
+ */
+export function fxRefreshPlan(
+  cbuRates: readonly CbuRateRow[],
+  latest: readonly FxLatestRow[],
+  todayKey: string,
+  tz: string,
+  targets: readonly string[] = FX_AUTO_CURRENCIES,
+): FxRefreshPlan {
+  const plan: FxRefreshPlan = { inserts: [], skipped: [] };
+  for (const currency of targets) {
+    const cbuRow = cbuRates.find((r) => r.Ccy === currency);
+    const rate = cbuRow !== undefined ? Number(cbuRow.Rate) : NaN;
+    if (cbuRow === undefined || !Number.isFinite(rate) || rate <= 0) {
+      plan.skipped.push({ currency, reason: "ЦБ не дал курс" });
+      continue;
+    }
+    const current = latest.find((r) => r.currency === currency);
+    if (current !== undefined && current.source === "manual" && dayKey(current.createdAt, tz) === todayKey) {
+      plan.skipped.push({ currency, reason: "ручной курс за сегодня главнее" });
+      continue;
+    }
+    if (current !== undefined && Number(current.rate) === rate) {
+      plan.skipped.push({ currency, reason: "не изменился" });
+      continue;
+    }
+    plan.inserts.push({ currency, rate, note: `ЦБ РУз на ${cbuRow.Date}` });
+  }
+  return plan;
+}

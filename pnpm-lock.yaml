@@ -156,6 +156,9 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.1101.0
         version: 3.1101.0
+      '@mydon/connectors':
+        specifier: workspace:*
+        version: link:../../packages/connectors
       '@mydon/db':
         specifier: workspace:*
         version: link:../../packages/db

@@ -42,13 +42,38 @@ export async function createEntity(
     const email = String(form.get("email") ?? "").trim();
     if (email.length > 0) attrs["email"] = email;
   }
+  // Своя компания: реквизиты продавца для договорного DOCX. Ключи attrs — те,
+  // что читает ContractsService.renderDocx (director, inn, address, account…).
+  if (type === "own_company") {
+    const req: [form: string, attr: string][] = [
+      ["director", "director"],
+      ["inn", "inn"],
+      ["address", "address"],
+      ["bank", "bank"],
+      ["account", "account"],
+      ["mfo", "mfo"],
+      ["oked", "oked"],
+      ["ndsCode", "nds_code"],
+      ["phone", "phone"],
+    ];
+    for (const [field, attrKey] of req) {
+      const value = String(form.get(field) ?? "").trim();
+      if (value.length > 0) attrs[attrKey] = value;
+    }
+  }
+
+  // У своей компании номер записи — её ИНН (отдельного поля «код» на форме нет).
+  const externalRef =
+    type === "own_company"
+      ? String(form.get("inn") ?? "").trim() || undefined
+      : String(form.get("externalRef") ?? "").trim() || undefined;
 
   try {
     await core.createEntity({
       domain,
       type,
       name,
-      externalRef: String(form.get("externalRef") ?? "").trim() || undefined,
+      externalRef,
       ...(Object.keys(attrs).length > 0 ? { attrs } : {}),
     });
   } catch (err) {
