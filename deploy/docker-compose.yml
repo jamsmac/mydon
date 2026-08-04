@@ -63,6 +63,10 @@ services:
       - /opt/mydon-data/history:/data/history:ro
       # Вложения (фото/чеки), когда S3 не настроен — переживают пересборку.
       - /opt/mydon-data/attachments:/data/attachments
+      # Сиды и выгрузки — из рабочей копии репозитория, а не из образа:
+      # обновление данных сводится к `git pull`, без пересборки и рестарта.
+      # Только чтение: импортёры данные читают, писать в них некому.
+      - ../data:/app/data:ro
     command: ["node", "apps/core/dist/main.js"]
     networks:
       - default

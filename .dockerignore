@@ -15,3 +15,6 @@ node_modules
 **/.turbo
 **/*.tsbuildinfo
 backups
+# Сиды и выгрузки приезжают томом (deploy/docker-compose.yml), а не слоем:
+# иначе правка одного JSON инвалидировала бы сборку всего монорепо.
+data

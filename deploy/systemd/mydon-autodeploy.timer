@@ -1,9 +1,10 @@
 [Unit]
-Description=MYDON auto-deploy — проверять main каждые 2 минуты
+Description=MYDON auto-deploy — проверять main каждые 30 секунд
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
+# Тик дешёвый (git fetch); ожидание после мержа было до 2 минут.
+OnBootSec=1min
+OnUnitActiveSec=30s
 # Если сервер был выключен — не запускать пачку пропущенных, только один раз.
 Persistent=false
 Unit=mydon-autodeploy.service
