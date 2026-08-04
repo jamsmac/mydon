@@ -9,6 +9,7 @@ import {
   type FinanceCounterparty,
   type FinanceFlow,
   type FinanceSummary,
+  type GrContract,
   type Obligations,
   type Person,
   type Task,
@@ -37,6 +38,8 @@ import {
 } from "../../../components/globerent-books";
 import { FinancePanel } from "../../../components/finance-panel";
 import { CustomsRatesPanel } from "../../../components/customs-rates";
+import { NewContractForm } from "../../../components/contract-forms";
+import { fmtDay } from "../../../lib/globerent";
 import { contractEnd, contractStats, endLabel, type ContractStats } from "../../../lib/globerent";
 import { typeOne } from "../../../lib/labels";
 import { hasMoney, money, moneyByCurrency, plural, when } from "../../../lib/format";
@@ -282,6 +285,16 @@ export default async function DomainPage({
     [tnved, brv] = await Promise.all([
       core.tnvedRates().catch(() => [] as TnvedRate[]),
       core.brvValues().catch(() => [] as BrvValue[]),
+    ]);
+  }
+
+  // Живые UZS-договоры (перенос PROMACH) — поверх собранных карточек реестра.
+  let liveContracts: GrContract[] = [];
+  let contractClients: FinanceCounterparty[] = [];
+  if (domain === "globerent" && group && leaf?.type === "contract") {
+    [liveContracts, contractClients] = await Promise.all([
+      core.contracts(domain).catch(() => [] as GrContract[]),
+      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
     ]);
   }
 
@@ -841,9 +854,46 @@ export default async function DomainPage({
       {/* ── GLOBERENT и личный контур: документы и каталог со своими колонками ── */}
       {group && leaf?.type === "contract" && (
         <>
-          {leafItems.length > 0 ? (
-            <ContractsBook items={leafItems} today={todayKey} />
-          ) : (
+          {/* Живой контур продаж GLOBERENT: договор → график → оплата → акты. */}
+          {domain === "globerent" && (
+            <div className="sect" style={{ marginTop: 0 }}>
+              <div className="sect-h">
+                <h3 className="h2">Договоры купли-продажи</h3>
+                {liveContracts.length > 0 && <span className="chip">{liveContracts.length}</span>}
+              </div>
+              {liveContracts.map((c) => {
+                const total = Number(c.totalWithVat);
+                const paidPct = total > 0 ? Math.min(100, Math.round((c.paidUzs / total) * 100)) : 0;
+                const hot = c.status === "active" && paidPct < 100;
+                return (
+                  <Link href={`/contracts/${c.id}`} className={`trow ${hot ? "hot" : ""}`} key={c.id}>
+                    <div className="tb">
+                      <div className="tt">№ {c.contractNo}/ОП · {c.clientName ?? (c.buyer["name"] ?? "покупатель не указан")}</div>
+                      <div className="tm">
+                        {new Intl.NumberFormat("ru-RU").format(total)} сум ·{" "}
+                        {c.status === "cancelled" ? "отменён" : c.status === "closed" ? "закрыт" : `оплачено ${paidPct}%`}
+                        {c.actsCount > 0 ? ` · актов ${c.actsCount}` : ""}
+                      </div>
+                    </div>
+                    <span className={`due ${hot ? "hot" : ""}`}>{fmtDay(c.contractDate)}</span>
+                  </Link>
+                );
+              })}
+              <div style={{ marginTop: 10 }}>
+                <NewContractForm clients={contractClients} />
+              </div>
+            </div>
+          )}
+          {leafItems.length > 0 && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Собранные карточки договоров</h3>
+                <span className="chip">{leafItems.length}</span>
+              </div>
+              <ContractsBook items={leafItems} today={todayKey} />
+            </div>
+          )}
+          {domain !== "globerent" && leafItems.length === 0 && (
             <div className="empty">
               <b>Договоров пока нет</b>
               Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.

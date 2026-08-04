@@ -7,6 +7,7 @@ import { AttachmentsModule } from "./attachments/attachments.module";
 import { AuditModule } from "./audit/audit.module";
 import { CatalogModule } from "./catalog/catalog.module";
 import { CoffeeModule } from "./coffee/coffee.module";
+import { ContractsModule } from "./contracts/contracts.module";
 import { CollectionsModule } from "./collections/collections.module";
 import { DbModule } from "./db/db.module";
 import { EntitiesModule } from "./entities/entities.module";
@@ -35,6 +36,7 @@ import { VerificationModule } from "./verification/verification.module";
     AuditModule,
     CatalogModule,
     CoffeeModule,
+    ContractsModule,
     CollectionsModule,
     EntitiesModule,
     EventsModule,

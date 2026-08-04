@@ -499,6 +499,63 @@ export interface FinanceCounterparty {
   inn: string | null;
 }
 
+// ── UZS-договоры GLOBERENT (перенос contracts PROMACH) ──
+
+export interface ContractItemRow {
+  equipmentId?: string | null;
+  name: string;
+  unit?: string;
+  qty: number;
+  price: number;
+}
+
+export interface GrContract {
+  id: string;
+  domain: string;
+  contractNo: string;
+  contractDate: string;
+  clientId: string | null;
+  buyer: Record<string, string | undefined>;
+  sellerCompanyId: string | null;
+  totalWithVat: string;
+  totalVat: string;
+  payType: string | null;
+  warranty: string | null;
+  deliveryDays: number | null;
+  items: ContractItemRow[];
+  docParams: Record<string, unknown>;
+  status: string;
+  agentId: string | null;
+  agentCommissionAmount: string | null;
+  agentCommissionCurrency: string | null;
+  createdAt: string;
+  updatedAt: string;
+  clientName: string | null;
+  /** Оплачено в сумовом эквиваленте — валюты не складываются сырыми. */
+  paidUzs: number;
+  paymentsCount: number;
+  actsCount: number;
+}
+
+export interface ContractActRow {
+  id: string;
+  contractId: string;
+  actNo: string;
+  actDate: string;
+  itemRefs: { equipmentId?: string | null; name: string }[];
+  signedBySeller: string | null;
+  signedByBuyer: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface GrContractDetail extends GrContract {
+  payments: FinanceFlow[];
+  planned: FinanceFlow[];
+  acts: ContractActRow[];
+}
+
 // ── Расчётные справочники GLOBERENT: ставки ТН ВЭД и БРВ (перенос PROMACH) ──
 
 export interface TnvedRate {
@@ -1575,6 +1632,17 @@ export const core = {
   },
   financeCounterparties: (domain: string) =>
     get<FinanceCounterparty[]>(`/finance/counterparties/${domain}`),
+  // ── UZS-договоры ──
+  contracts: (domain: string) => get<GrContract[]>(`/contracts?domain=${domain}`),
+  contract: (id: string) => get<GrContractDetail>(`/contracts/${id}`),
+  createContract: (input: Record<string, unknown>) => send<GrContract>("/contracts", "POST", input),
+  setContractStatus: (id: string, status: string) =>
+    send<GrContract>(`/contracts/${id}/status`, "PATCH", { status }),
+  addContractPayment: (id: string, input: Record<string, unknown>) =>
+    send<FinanceFlow>(`/contracts/${id}/payments`, "POST", input),
+  addContractAct: (id: string, input: Record<string, unknown>) =>
+    send<ContractActRow>(`/contracts/${id}/acts`, "POST", input),
+
   // ── Расчётные справочники (ставки ТН ВЭД, БРВ) ──
   tnvedRates: (all = false) => get<TnvedRate[]>(`/catalog/tnved${all ? "?all=1" : ""}`),
   saveTnvedRate: (input: Record<string, unknown>) =>

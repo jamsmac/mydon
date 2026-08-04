@@ -680,6 +680,8 @@ export const moneyFlow = pgTable(
     dueDate: date("due_date"),
     /** Когда фактически оплачено. null у планов. */
     paidAt: timestamp("paid_at", { withTimezone: true }),
+    /** Основание платежа: UZS-договор. Оплаченность договора считается по этой связке. */
+    contractId: uuid("contract_id").references(() => grContract.id),
     createdAt: createdAt(),
   },
   (t) => [
@@ -693,7 +695,80 @@ export const moneyFlow = pgTable(
     // Агинг и «к сроку»: выборка открытых обязательств по сроку.
     index("money_flow_due_idx").on(t.domain, t.status, t.dueDate),
     index("money_flow_counterparty_idx").on(t.counterpartyId),
+    index("money_flow_contract_idx").on(t.contractId),
   ],
+);
+
+// ── contract: UZS-договор купли-продажи (GLOBERENT, перенос contracts PROMACH) ──
+// Операционная сущность с потоком записей (платежи → money_flow, акты, статусы),
+// поэтому отдельная таблица, а не EAV-карточка (SPEC_UZS_CONTRACTS §9.1).
+// Реквизиты покупателя — snapshot на момент подписания: за справочником не «плывут».
+export const grContract = pgTable(
+  "contract",
+  {
+    id: id(),
+    orgId: uuid("org_id").references(() => org.id),
+    domain: domainEnum("domain").default("globerent").notNull(),
+    /** Номер без суффикса «/ОП» — суффикс существует только в рендере документа. */
+    contractNo: text("contract_no").notNull(),
+    contractDate: date("contract_date").notNull(),
+    /** Покупатель — карточка реестра (contractor). nullable как у донора. */
+    clientId: uuid("client_id").references(() => entity.id),
+    /** Snapshot реквизитов покупателя: name, director, inn, address, account, bank, mfo, oked, nds, phone. */
+    buyer: jsonb("buyer").default({}).notNull(),
+    /** Продавец — наша карточка own_company (замена SELLER-хардкода донора). */
+    sellerCompanyId: uuid("seller_company_id").references(() => entity.id),
+    totalWithVat: numeric("total_with_vat", { precision: 18, scale: 2 }).notNull(),
+    totalVat: numeric("total_vat", { precision: 18, scale: 2 }).notNull(),
+    /** 100 | partial | install | post. */
+    payType: text("pay_type"),
+    warranty: text("warranty"),
+    deliveryDays: integer("delivery_days"),
+    /** Позиции: [{equipmentId: uuid|null, name, unit, qty, price}] — структурные, без парсинга строк. */
+    items: jsonb("items").default([]).notNull(),
+    /**
+     * Параметры документа (payDays, prepayPct, installMonths, installInterest,
+     * installFirstDate, partialTranches, penaSeller/Buyer/Max, copies, warrantyMode):
+     * у донора жили только в state формы — документ был невоспроизводим.
+     */
+    docParams: jsonb("doc_params").default({}).notNull(),
+    status: text("status").default("active").notNull(), // active | closed | cancelled
+    /** Агент-посредник (contractor c ролью agent). Snapshot комиссии — на договоре. */
+    agentId: uuid("agent_id").references(() => entity.id),
+    agentCommissionAmount: numeric("agent_commission_amount", { precision: 18, scale: 2 }),
+    agentCommissionCurrency: text("agent_commission_currency"),
+    createdFrom: text("created_from"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("ux_contract_org_no").on(t.orgId, t.contractNo),
+    index("contract_org_date_idx").on(t.orgId, t.contractDate),
+    index("contract_status_idx").on(t.status),
+    index("contract_client_idx").on(t.clientId),
+  ],
+);
+
+// ── contract_act: акт приёма-передачи по договору (партиями, 1 договор → N актов) ──
+export const contractAct = pgTable(
+  "contract_act",
+  {
+    id: id(),
+    /** НЕ cascade: акты не исчезают вместе с договором (у донора исчезали). */
+    contractId: uuid("contract_id")
+      .references(() => grContract.id)
+      .notNull(),
+    actNo: text("act_no").notNull(),
+    actDate: date("act_date").notNull(),
+    /** Какие позиции сданы: [{equipmentId: uuid|null, name}] — замена vehicle_ids INTEGER[] без FK. */
+    itemRefs: jsonb("item_refs").default([]).notNull(),
+    signedBySeller: text("signed_by_seller"),
+    signedByBuyer: text("signed_by_buyer"),
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("contract_act_contract_idx").on(t.contractId)],
 );
 
 // ── tnved_rate: ставки ТН ВЭД для расчёта растаможки (GLOBERENT, донор PROMACH) ──
@@ -1460,6 +1535,9 @@ export const schema = {
   // Расчётные справочники GLOBERENT: ставки ТН ВЭД и БРВ (перенос PROMACH).
   tnvedRate,
   brvValue,
+  // UZS-договоры GLOBERENT: договор и акты приёма-передачи (перенос PROMACH).
+  grContract,
+  contractAct,
   note,
   auditLog,
   agent,

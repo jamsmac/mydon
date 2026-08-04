@@ -71,3 +71,5 @@ export * from "./numguard";
 export * from "./geo";
 // GLOBERENT: словарь реестра и расчётные движки (перенос PROMACH).
 export * from "./globerent/registry";
+export * from "./globerent/contract-calc";
+export * from "./globerent/calc";
