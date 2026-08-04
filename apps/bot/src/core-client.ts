@@ -557,6 +557,25 @@ export class CoreClient {
     return this.request("/coffee/container-return", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** Фактический расход по наборам за период (заливка − возврат через тару). */
+  coffeeContainerConsumption(from: string, to: string): Promise<{
+    from: string;
+    to: string;
+    rows: unknown[];
+    locations: {
+      locationId: string;
+      locationName: string;
+      grams: number;
+      cost: number | null;
+      pairs: number;
+      unknownPairs: number;
+    }[];
+    totalGrams: number;
+    totalCost: number | null;
+  }> {
+    return this.request(`/coffee/container-consumption?from=${from}&to=${to}`);
+  }
+
   /** Расходники точки за день (вода/стаканчики/крышки) — upsert по (точка, дата). */
   recordCoffeeConsumable(input: {
     locationId: string;
