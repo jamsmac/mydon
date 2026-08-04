@@ -557,6 +557,17 @@ export class CoreClient {
     return this.request("/coffee/container-return", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** Сводка продаж автоматов — те же цифры, что на дашборде VendHub. */
+  salesSummary(): Promise<{
+    today: { qty: number; amount: number };
+    yesterday: { qty: number; amount: number };
+    days30: { qty: number; amount: number };
+    lastSaleDt: string | null;
+    configured: boolean;
+  }> {
+    return this.request("/sales/summary");
+  }
+
   /**
    * Кофе-факты для LLM-помощника (порт AssistantCore.coffeeConsumption30d):
    * расход за 30 дней одним объектом — вопросы «сколько кофе ушло?» получают

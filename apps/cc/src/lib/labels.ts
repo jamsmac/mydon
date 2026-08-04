@@ -18,6 +18,9 @@ export const TYPE_LABELS: Record<string, string> = {
   product: "товары",
   ingredient: "ингредиенты",
   warehouse: "склады",
+  property: "недвижимость",
+  vehicle: "транспорт",
+  saving: "накопления",
 };
 
 /** Единственное число — для заголовка карточки. */
@@ -32,6 +35,9 @@ export const TYPE_ONE: Record<string, string> = {
   product: "товар",
   ingredient: "ингредиент",
   warehouse: "склад",
+  property: "объект недвижимости",
+  vehicle: "транспорт",
+  saving: "накопление",
 };
 
 export const typeLabel = (t: string): string => TYPE_LABELS[t] ?? t;
