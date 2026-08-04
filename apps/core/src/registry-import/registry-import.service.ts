@@ -57,6 +57,12 @@ export interface ImportPayload {
   invoices?: ImportInvoice[];
   models?: { name: string }[];
   units?: ImportUnit[];
+  /**
+   * Реквизиты своей компании (продавец договорного DOCX). Карточка
+   * own_company в направлении одна: существующая НЕ перезаписывается —
+   * правки владельца из панели важнее сида.
+   */
+  ownCompany?: { name: string; attrs: Record<string, unknown> };
 }
 
 export interface ImportCount {
@@ -69,6 +75,7 @@ export interface ImportSummary {
   invoices: ImportCount;
   models: ImportCount;
   units: ImportCount & { errors: string[] };
+  ownCompany: ImportCount;
 }
 
 const UNIT_STATUSES_ALLOWED = ["IN_STOCK", "DELIVERED_TO_CLIENT"] as const;
@@ -117,6 +124,7 @@ export class RegistryImportService {
       invoices: { created: 0, skipped: 0 },
       models: { created: 0, skipped: 0 },
       units: { created: 0, skipped: 0, errors: [] },
+      ownCompany: { created: 0, skipped: 0 },
     };
 
     if (payload.contractors?.length) {
@@ -132,7 +140,46 @@ export class RegistryImportService {
       const r = await this.importUnits(orgId, payload.units, source, actorRef);
       summary.units = r;
     }
+    if (payload.ownCompany !== undefined) {
+      summary.ownCompany = await this.importOwnCompany(orgId, payload.ownCompany, source, actorRef);
+    }
     return summary;
+  }
+
+  /** Карточка своей компании — одна на направление; существующая не трогается. */
+  private async importOwnCompany(
+    orgId: string,
+    input: { name: string; attrs: Record<string, unknown> },
+    source: string,
+    actorRef: string,
+  ): Promise<ImportCount> {
+    if ((input.name ?? "").trim().length < 2) {
+      throw new BadRequestException("У своей компании нет названия — почини сид");
+    }
+    const existing = await this.db
+      .select({ id: entity.id })
+      .from(entity)
+      .where(and(eq(entity.orgId, orgId), eq(entity.type, "own_company")));
+    if (existing.length > 0) return { created: 0, skipped: 1 };
+    const inn = typeof input.attrs["inn"] === "string" ? (input.attrs["inn"] as string) : null;
+    await this.db.transaction(async (tx) => {
+      await tx.insert(entity).values({
+        orgId,
+        type: "own_company",
+        name: input.name.trim(),
+        externalRef: inn,
+        attrs: input.attrs,
+        ...this.approvedRow(source, actorRef),
+      });
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "registry_import.own_company",
+        target: source,
+        after: { name: input.name },
+      });
+    });
+    return { created: 1, skipped: 0 };
   }
 
   /** Общие поля утверждённой карточки импорта: слово владельца + провенанс. */

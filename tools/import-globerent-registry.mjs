@@ -62,7 +62,22 @@ const totals = {
   invoices: { created: 0, skipped: 0, errors: [] },
   models: { created: 0, skipped: 0, errors: [] },
   units: { created: 0, skipped: 0, errors: [] },
+  ownCompany: { created: 0, skipped: 0, errors: [] },
 };
+
+// Реквизиты своей компании — отдельный сид: они не из книги, а из
+// свидетельства о госрегистрации и слов владельца. Нет файла — шаг молчит.
+const ownPath = path.join(ROOT, "data/globerent/own-company.json");
+if (fs.existsSync(ownPath)) {
+  const own = JSON.parse(fs.readFileSync(ownPath, "utf8"));
+  const res = await fetch(`${CORE}/registry-import/globerent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+    body: JSON.stringify({ source: own.source, ownCompany: own.ownCompany }),
+  });
+  if (!res.ok) throw new Error(`Core ответил ${res.status} на own-company: ${(await res.text()).slice(0, 300)}`);
+  add(totals.ownCompany, (await res.json()).ownCompany);
+}
 
 // Порядок обязателен: машины ссылаются на модели и контрагентов по ключам.
 for (const batch of chunks(seed.contractors ?? [], 200)) {
@@ -80,6 +95,7 @@ for (const batch of chunks(seed.units ?? [], 100)) {
 
 console.log("Импорт книги завершён:");
 for (const [k, label] of [
+  ["ownCompany", "моя компания"],
   ["contractors", "контрагенты"],
   ["models", "модели"],
   ["invoices", "счета-фактуры"],
