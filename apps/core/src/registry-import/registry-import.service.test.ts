@@ -336,7 +336,13 @@ describe("договоры (contracts)", () => {
     ];
     const { db } = stubDb(withForeign, [[{ id: "mf-1" }]]);
     const s = new RegistryImportService(db);
-    const r = await s.importGloberent({ contracts: [base] });
+    // Проверка идёт на последней партии: она смотрит на всю базу, и на каждой
+    // партии повторяла бы один и тот же список слово в слово.
+    const r = await s.importGloberent({
+      contracts: [base],
+      contractsFinal: true,
+      contractsKeep: ["GFH-04/0126"],
+    });
     assert.equal(r.contracts.errors.length, 1);
     assert.match(r.contracts.errors[0], /«СФ 2024-13».*«GFH-08\/0224».*другой компании/);
   });
@@ -418,6 +424,68 @@ describe("договоры (contracts)", () => {
     assert.equal(r.contracts.flowsLinked, 1);
     assert.equal((updated[0].set as { contractId?: unknown }).contractId, null);
     assert.equal((updated[2].set as { contractId?: unknown }).contractId, "c-mine");
+  });
+
+  it("набор задаёт contractsKeep, а не партия: договоры других партий не сносятся", async () => {
+    // Выгрузка уходит в Core партиями по сотне. Если набором считать партию,
+    // последняя снесёт всё, что создали предыдущие, — и так каждый прогон.
+    const mine = [
+      { id: "c-1", no: "GFH-04/0126" }, // в этой партии
+      { id: "c-2", no: "ИЗ-ПРОШЛОЙ-ПАРТИИ" }, // в наборе есть, в партии нет
+    ];
+    const { db, deletes } = stubDb(SELECTS(mine, mine), [[], [], []]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({
+      contracts: [base],
+      contractsFinal: true,
+      contractsKeep: ["GFH-04/0126", "ИЗ-ПРОШЛОЙ-ПАРТИИ"],
+    });
+    assert.equal(r.contracts.deleted, 0);
+    assert.equal(deletes.length, 0);
+  });
+
+  it("набор, оставляющий лишними больше половины карточек, не применяется", async () => {
+    // Так выглядит оборванная или неполная выгрузка. Снести 200 карточек из
+    // 265 — это не уточнение разбора, и применять такое молча нельзя.
+    const mine = Array.from({ length: 30 }, (_, i) => ({ id: `c-${i}`, no: `СТАРЫЙ-${i}` }));
+    const { db, deletes } = stubDb(SELECTS(mine, []), [[], []]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({
+      contracts: [base],
+      contractsFinal: true,
+      contractsKeep: ["GFH-04/0126"],
+    });
+    assert.equal(r.contracts.deleted, 0);
+    assert.equal(deletes.length, 0);
+    assert.match(r.contracts.errors[0], /уборка отменена/);
+    assert.match(r.contracts.errors[0], /30 карточек лишними|из 30/);
+  });
+
+  it("законная уборка мусора прошлого разбора не блокируется", async () => {
+    // Реальный случай: набор 265 договоров против 457 карточек в базе, из
+    // которых 242 — мусор прошлой версии. Набор большой, снос осмысленный,
+    // страховка молчит. Иначе она мешала бы ровно тому, ради чего всё это.
+    const keep = Array.from({ length: 26 }, (_, i) => `ЖИВОЙ-${i}`);
+    const mine = [
+      ...keep.map((no, i) => ({ id: `k-${i}`, no })),
+      ...Array.from({ length: 24 }, (_, i) => ({ id: `j-${i}`, no: `МУСОР-${i}` })),
+    ];
+    const { db, deletes } = stubDb(
+      [...SELECTS(mine, mine), ...Array.from({ length: 48 }, () => [{ n: 0 }])],
+      [],
+    );
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({
+      contracts: [base],
+      contractsFinal: true,
+      contractsKeep: keep,
+    });
+    assert.equal(r.contracts.deleted, 24);
+    assert.equal(deletes.length, 24);
+    assert.deepEqual(
+      r.contracts.errors.filter((e) => e.includes("уборка отменена")),
+      [],
+    );
   });
 
   it("устаревшая карточка с актами остаётся жить и говорит об этом словами", async () => {
