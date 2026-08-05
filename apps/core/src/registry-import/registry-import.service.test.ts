@@ -528,6 +528,90 @@ describe("договоры (contracts)", () => {
   });
 });
 
+describe("чужие связки: отчёт и снятие", () => {
+  const LINK = {
+    flowId: "11111111-1111-4111-8111-111111111111",
+    docNo: "СФ 2026-83",
+    date: new Date("2026-06-14T00:00:00Z"),
+    amount: "500000",
+    amountUzs: "1234567890",
+    currency: "UZS",
+    purpose: "оплата по счёту",
+    payerName: "ООО ПЛАТЕЛЬЩИК",
+    payerInn: "300000001",
+    contractId: "c-1",
+    contractNo: "PGF-09/0626",
+    contractDate: "2026-06-09",
+    buyerName: "ООО ПОКУПАТЕЛЬ",
+    buyerInn: "300000002",
+  };
+
+  it("отчёт называет обе стороны с ИНН и сумму в сумах", async () => {
+    const { db } = stubDb([ORG, [LINK]]);
+    const s = new RegistryImportService(db);
+    const [l] = await s.foreignContractLinks();
+    assert.equal(l.docNo, "СФ 2026-83");
+    assert.equal(l.date, "2026-06-14");
+    // Валютная запись показывается эквивалентом в сумах, а не суммой в валюте:
+    // сравнивать долги двух сторон можно только в одних деньгах.
+    assert.equal(l.amountUzs, "1234567890");
+    assert.deepEqual(l.payer, { name: "ООО ПЛАТЕЛЬЩИК", inn: "300000001" });
+    assert.deepEqual(l.buyer, { name: "ООО ПОКУПАТЕЛЬ", inn: "300000002" });
+    assert.equal(l.contractNo, "PGF-09/0626");
+  });
+
+  it("снятие проверяет «чужая ли» в самом UPDATE, а не до него", async () => {
+    // Список id приходит снаружи и мог устареть между отчётом и решением.
+    // Промах по id обязан оказаться ничем, а не расцепленным нормальным
+    // приходом, — поэтому условие живёт в запросе и проверяется там же.
+    const { db, updated } = stubDb([ORG, [LINK]], [[{ id: LINK.flowId, docNo: LINK.docNo }]]);
+    const s = new RegistryImportService(db);
+    const r = await s.unlinkForeignContractLinks([LINK.flowId]);
+    assert.deepEqual(r.unlinked, [{ docNo: "СФ 2026-83", contractNo: "PGF-09/0626" }]);
+    assert.equal(r.skipped, 0);
+    const { sql } = new PgDialect().sqlToQuery(updated[0].where as SQL);
+    assert.match(sql, /exists/i);
+    assert.match(sql, /"client_id" <> /);
+    // Снимается договор, а не деньги: у прихода пустеет contract_id и только.
+    assert.deepEqual(Object.keys(updated[0].set), ["contractId"]);
+    assert.equal((updated[0].set as { contractId?: unknown }).contractId, null);
+  });
+
+  it("id, под которым чужой связки нет, уходит в skipped", async () => {
+    const { db } = stubDb([ORG, [LINK]], [[]]);
+    const s = new RegistryImportService(db);
+    const r = await s.unlinkForeignContractLinks(["22222222-2222-4222-8222-222222222222"]);
+    assert.deepEqual(r.unlinked, []);
+    assert.equal(r.skipped, 1);
+  });
+
+  it("не идентификатор — отказ словами, а не запрос с мусором в базу", async () => {
+    const { db, updated } = stubDb([ORG]);
+    const s = new RegistryImportService(db);
+    await assert.rejects(() => s.unlinkForeignContractLinks(["СФ 2026-83"]), /Не идентификаторы/);
+    assert.equal(updated.length, 0);
+  });
+
+  it("пустой список ничего не трогает", async () => {
+    const { db, updated } = stubDb([ORG]);
+    const s = new RegistryImportService(db);
+    assert.deepEqual(await s.unlinkForeignContractLinks([]), { unlinked: [], skipped: 0 });
+    assert.equal(updated.length, 0);
+  });
+
+  it("снятие оставляет след в аудите: что сняли и о скольки просили", async () => {
+    const { db, inserted } = stubDb([ORG, [LINK]], [[{ id: LINK.flowId, docNo: LINK.docNo }]]);
+    const s = new RegistryImportService(db);
+    await s.unlinkForeignContractLinks([LINK.flowId], "owner");
+    const row = inserted[0].rows[0];
+    assert.equal(row.action, "registry_import.unlink_foreign");
+    assert.deepEqual(row.after, {
+      unlinked: [{ docNo: "СФ 2026-83", contractNo: "PGF-09/0626" }],
+      asked: 1,
+    });
+  });
+});
+
 describe("чистые правила импорта", () => {
   it("contractImportError: номер, дата, покупатель и сумма обязательны", () => {
     const ok: ImportContract = {
