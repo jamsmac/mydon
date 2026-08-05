@@ -194,6 +194,152 @@ export function contractKey(no: string, inn: string | null | undefined): string 
   return `${no} ${(inn ?? "").trim()}`;
 }
 
+/**
+ * Кириллические буквы, неотличимые на вид от латинских. В номерах договоров
+ * они встречаются вперемешку («GFН-31/0823» набрано с русской Н), и без
+ * приведения такой номер не находит сам себя.
+ */
+const HOMOGLYPHS: Readonly<Record<string, string>> = {
+  А: "A",
+  В: "B",
+  С: "C",
+  Е: "E",
+  Н: "H",
+  К: "K",
+  М: "M",
+  О: "O",
+  Р: "P",
+  Т: "T",
+  Х: "X",
+  У: "Y",
+  І: "I",
+};
+
+/**
+ * Номер договора, приведённый к сравнимому виду. Одна и та же бумага в книге и
+ * в Didox пишется по-разному: «RA 03/2024» и «RA-03/2024», «GHTO-1/0124» и
+ * «GHTO-01/0124». Приведение НЕ используется как имя карточки — только для
+ * сравнения; человеку показывается номер, как он записан.
+ */
+export function normalizeContractNo(raw: string | null | undefined): string {
+  let s = String(raw ?? "").toUpperCase();
+  s = s.replace(/\s*\([^)]*\)\s*$/, ""); // «GFH-18/0424 (310817718)» → базовый номер
+  s = [...s].map((ch) => HOMOGLYPHS[ch] ?? ch).join("");
+  // Разделители внутри номера ничего не значат: в книге встречаются и
+  // «GFH-35/0924», и «GFH-35-0924» — это одна бумага.
+  s = s.replace(/[\s\-_—–./\\]+/g, "");
+  s = s.replace(/(?<![0-9])0+(?=[0-9])/g, ""); // ведущие нули в числовых кусках
+  return s;
+}
+
+/**
+ * Номер договора из поля счёта «GHTO-39/1225 от 2025-12-30» → «GHTO-39/1225».
+ * Хвостовая пунктуация срезается: в книге попадается «GFH-17/0424 | от …»,
+ * и разделитель колонок не должен становиться частью номера.
+ */
+export function contractRefNo(raw: string | null | undefined): string | null {
+  const s = String(raw ?? "")
+    .split(/\s+от\s+/i)[0]
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+  return contractNo(s);
+}
+
+/** Счёт книги владельца — то, что нужно для связки с договором. */
+export interface BookInvoice {
+  /** Ключ денежной записи: «СФ 2024-30». */
+  ref: string;
+  /** ИНН контрагента счёта. */
+  inn?: string | null;
+  /** Поле «договор» как записано: «GHTO-39/1225 от 2025-12-30». */
+  contractRef?: string | null;
+}
+
+/** Итог связки: кому что досталось и почему остальное осталось без договора. */
+export interface LinkResult {
+  /** Ключ — `contractNo` договора, значение — ссылки денежных записей. */
+  byContract: Record<string, string[]>;
+  /** Счета, которым договор не назначен, с причиной словами. */
+  unlinked: { ref: string; reason: string }[];
+}
+
+/**
+ * Связать счета книги с договорами Didox.
+ *
+ * ГЛАВНОЕ ПРАВИЛО: счёт привязывается ТОЛЬКО к договору того же ИНН. Деньги
+ * одной компании на договоре другой — это не «почти угадали», это неверная
+ * дебиторка у обоих. Поэтому при любой неоднозначности связка не ставится, а
+ * счёт уходит в `unlinked` с причиной.
+ *
+ * Порядок:
+ * 1. счёт называет договор, и такой договор у этого ИНН есть — связываем;
+ * 2. счёт договор не называет, а у ИНН ровно один договор — связываем;
+ * 3. иначе — не связываем и говорим, почему (названного договора нет в Didox,
+ *    у покупателя несколько договоров, ИНН неизвестен).
+ */
+export function linkInvoicesToContracts(
+  contracts: readonly DidoxContract[],
+  invoices: readonly BookInvoice[],
+): LinkResult {
+  const byInn = new Map<string, DidoxContract[]>();
+  for (const c of contracts) {
+    const inn = (c.buyerInn ?? "").trim();
+    if (inn.length === 0) continue;
+    const list = byInn.get(inn) ?? [];
+    list.push(c);
+    byInn.set(inn, list);
+  }
+
+  const byContract: Record<string, string[]> = {};
+  const unlinked: { ref: string; reason: string }[] = [];
+  const put = (c: DidoxContract, ref: string): void => {
+    (byContract[c.contractNo] ??= []).push(ref);
+  };
+
+  for (const inv of invoices) {
+    const inn = (inv.inn ?? "").trim();
+    const named = contractRefNo(inv.contractRef);
+    if (inn.length === 0) {
+      unlinked.push({ ref: inv.ref, reason: "счёт без ИНН — не с чем сверить договор" });
+      continue;
+    }
+    const mine = byInn.get(inn) ?? [];
+    if (mine.length === 0) {
+      unlinked.push({ ref: inv.ref, reason: `ИНН ${inn}: договоров в Didox нет` });
+      continue;
+    }
+    if (named !== null) {
+      const want = normalizeContractNo(named);
+      const hit = mine.filter((c) => normalizeContractNo(c.contractNo) === want);
+      if (hit.length === 1) {
+        put(hit[0], inv.ref);
+        continue;
+      }
+      if (hit.length > 1) {
+        unlinked.push({
+          ref: inv.ref,
+          reason: `«${named}»: у ИНН ${inn} несколько договоров с этим номером`,
+        });
+        continue;
+      }
+      // Назван договор, которого в Didox нет. Подставлять соседний нельзя:
+      // это выдумывание факта, а не связка.
+      unlinked.push({ ref: inv.ref, reason: `«${named}»: такого договора у ИНН ${inn} нет` });
+      continue;
+    }
+    if (mine.length === 1) {
+      put(mine[0], inv.ref);
+      continue;
+    }
+    unlinked.push({
+      ref: inv.ref,
+      reason: `счёт не называет договор, а у ИНН ${inn} их ${mine.length} — угадывать нельзя`,
+    });
+  }
+
+  for (const refs of Object.values(byContract)) refs.sort();
+  return { byContract, unlinked };
+}
+
 /** Живой документ: не черновик, не удалён, не отказ, не аннулирован. */
 export function isLive(doc: DidoxDoc): boolean {
   return (DIDOX_LIVE_STATUSES as readonly number[]).includes(doc.doc_status);

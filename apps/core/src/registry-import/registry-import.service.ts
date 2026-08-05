@@ -9,7 +9,7 @@ import {
   org,
 } from "@mydon/db";
 import { MONEY_CATEGORIES } from "@mydon/shared";
-import { and, eq, inArray, isNotNull, isNull, like, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 /**
@@ -421,6 +421,16 @@ export class RegistryImportService {
           skipped += 1;
         }
         if (c.flowDocNos?.length) {
+          // Приход одной компании на договоре другой — неверная дебиторка
+          // сразу у обоих: у одного долг из воздуха, у второго закрытый.
+          // Сид такие связки уже приносил, поэтому запрет живёт здесь, а не
+          // только в разборе: данные можно пересобрать любым инструментом,
+          // инвариант базы — нельзя. Приход без контрагента не противоречит
+          // договору, его привязать можно.
+          const ownMoney =
+            fields.clientId !== null
+              ? or(isNull(moneyFlow.counterpartyId), eq(moneyFlow.counterpartyId, fields.clientId))
+              : undefined;
           const linked = await tx
             .update(moneyFlow)
             .set({ contractId })
@@ -429,11 +439,32 @@ export class RegistryImportService {
                 eq(moneyFlow.orgId, orgId),
                 inArray(moneyFlow.docNo, c.flowDocNos),
                 isNull(moneyFlow.contractId),
+                ...(ownMoney !== undefined ? [ownMoney] : []),
               ),
             )
             .returning({ id: moneyFlow.id });
           flowsLinked += linked.length;
         }
+      }
+
+      // Запрет выше не пускает НОВЫЕ чужие связки, но старые он не расцепит:
+      // их ставил прошлый разбор, и в базе они остались. Молча снимать нельзя —
+      // руками владельца могла быть проставлена любая из них. Поэтому импорт
+      // не чинит, а называет: приход такой-то стоит на договоре чужой компании.
+      const foreign = await tx
+        .select({ docNo: moneyFlow.docNo, no: grContract.contractNo })
+        .from(moneyFlow)
+        .innerJoin(grContract, eq(moneyFlow.contractId, grContract.id))
+        .where(
+          and(
+            eq(moneyFlow.orgId, orgId),
+            isNotNull(moneyFlow.counterpartyId),
+            isNotNull(grContract.clientId),
+            sql`${moneyFlow.counterpartyId} <> ${grContract.clientId}`,
+          ),
+        );
+      for (const f of foreign) {
+        errors.push(`приход «${f.docNo}» стоит на договоре «${f.no}» другой компании — проверьте`);
       }
 
       if (created > 0 || updated > 0 || deleted > 0 || flowsLinked > 0) {
@@ -442,7 +473,15 @@ export class RegistryImportService {
           actorRef,
           action: "registry_import.contracts",
           target: source,
-          after: { created, updated, deleted, skipped, flowsLinked, errors: errors.length },
+          after: {
+            created,
+            updated,
+            deleted,
+            skipped,
+            flowsLinked,
+            foreignLinks: foreign.length,
+            errors: errors.length,
+          },
         });
       }
     });

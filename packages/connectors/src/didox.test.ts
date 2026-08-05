@@ -10,10 +10,14 @@ import {
   DidoxNetworkError,
   DidoxShapeError,
   DIDOX_TOKEN_TTL_MS,
+  contractRefNo,
   isInvoice,
   isLive,
+  linkInvoicesToContracts,
+  normalizeContractNo,
   num,
   parsePage,
+  type DidoxContract,
   type DidoxDoc,
 } from "./didox";
 
@@ -193,6 +197,105 @@ describe("Didox: сборка договоров из документов", () 
       { inn: "302936161", name: "ПЕРВЫЙ" },
       { inn: "305143862", name: "ВТОРОЙ" },
     ]);
+  });
+});
+
+describe("Didox: связка счетов книги с договорами", () => {
+  /** Договор в наборе — минимум полей, нужных связке. */
+  const c = (contractNo: string, buyerInn: string): DidoxContract => ({
+    contractNo,
+    contractDate: "2024-01-04",
+    buyerName: "ПОКУПАТЕЛЬ",
+    buyerInn,
+    totalWithVat: 1,
+  });
+
+  it("номер сравнивается по сути: пробелы, дефисы, ведущие нули, регистр", () => {
+    assert.equal(normalizeContractNo("RA 03/2024"), normalizeContractNo("RA-03/2024"));
+    assert.equal(normalizeContractNo("GHTO-1/0124"), normalizeContractNo("GHTO-01/0124"));
+    assert.equal(normalizeContractNo("gfh-42/1223"), normalizeContractNo("GFH-42/1223"));
+  });
+
+  it("кириллические двойники латиницы не рвут номер (GFН набрано русской Н)", () => {
+    assert.equal(normalizeContractNo("GFН-31/0823"), normalizeContractNo("GFH-31/0823"));
+    assert.equal(normalizeContractNo("РGF-04/0325"), normalizeContractNo("PGF-04/0325"));
+  });
+
+  it("суффикс с ИНН в имени карточки не мешает сравнению номера", () => {
+    assert.equal(
+      normalizeContractNo("GFH-18/0424 (310817718)"),
+      normalizeContractNo("GFH-18/0424"),
+    );
+  });
+
+  it("номер договора вынимается из «GHTO-39/1225 от 2025-12-30»", () => {
+    assert.equal(contractRefNo("GHTO-39/1225 от 2025-12-30"), "GHTO-39/1225");
+    assert.equal(contractRefNo("No contract"), null);
+    assert.equal(contractRefNo(null), null);
+  });
+
+  it("разделитель колонок книги не становится частью номера", () => {
+    // Реальная строка: «GFH-17/0424 | от 2024-04-04».
+    assert.equal(contractRefNo("GFH-17/0424 | от 2024-04-04"), "GFH-17/0424");
+  });
+
+  it("дефис вместо косой черты — тот же номер (GFН-35-0924 из книги)", () => {
+    assert.equal(normalizeContractNo("GFН-35-0924"), normalizeContractNo("GFH-35/0924"));
+  });
+
+  it("счёт идёт к названному договору своего ИНН", () => {
+    const r = linkInvoicesToContracts(
+      [c("GHTO-01/0124", "309709343"), c("GFH-42/1223", "202331182")],
+      [{ ref: "СФ 2024-10", inn: "309709343", contractRef: "GHTO-1/0124 от 2024-01-04" }],
+    );
+    assert.deepEqual(r.byContract, { "GHTO-01/0124": ["СФ 2024-10"] });
+    assert.equal(r.unlinked.length, 0);
+  });
+
+  it("ГЛАВНОЕ: счёт одной компании не попадёт на договор другой", () => {
+    // Ровно случай из данных: счёт ИНН 302954970, а договор с таким номером
+    // есть только у 309174458. Прошлый разбор их связывал — это неверная
+    // дебиторка сразу у обоих.
+    const r = linkInvoicesToContracts(
+      [c("GFH-08/0224", "309174458")],
+      [{ ref: "СФ 2024-13", inn: "302954970", contractRef: "GHTO-03/0124 от 2024-01-17" }],
+    );
+    assert.deepEqual(r.byContract, {});
+    assert.match(r.unlinked[0].reason, /договоров в Didox нет/);
+  });
+
+  it("счёт без номера договора идёт к единственному договору покупателя", () => {
+    const r = linkInvoicesToContracts(
+      [c("GHTO-01/0124", "309709343")],
+      [{ ref: "СФ 2025-36", inn: "309709343" }],
+    );
+    assert.deepEqual(r.byContract, { "GHTO-01/0124": ["СФ 2025-36"] });
+  });
+
+  it("счёт без номера при нескольких договорах покупателя не угадывается", () => {
+    const r = linkInvoicesToContracts(
+      [c("GHTO-01/0124", "309709343"), c("GHTO-06/0224", "309709343")],
+      [{ ref: "СФ 2025-36", inn: "309709343" }],
+    );
+    assert.deepEqual(r.byContract, {});
+    assert.match(r.unlinked[0].reason, /их 2 — угадывать нельзя/);
+  });
+
+  it("назван договор, которого в Didox нет — сосед не подставляется", () => {
+    const r = linkInvoicesToContracts(
+      [c("GFH-11/0324", "200547208")],
+      [{ ref: "СФ 2024-56", inn: "200547208", contractRef: "GFН-31/0823 от 2023-08-21" }],
+    );
+    assert.deepEqual(r.byContract, {});
+    assert.match(r.unlinked[0].reason, /такого договора у ИНН 200547208 нет/);
+  });
+
+  it("счёт без ИНН сверить не с чем", () => {
+    const r = linkInvoicesToContracts(
+      [c("GFH-42/1223", "202331182")],
+      [{ ref: "СФ 1", inn: null }],
+    );
+    assert.match(r.unlinked[0].reason, /без ИНН/);
   });
 });
 

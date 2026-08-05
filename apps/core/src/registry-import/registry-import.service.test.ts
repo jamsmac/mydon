@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import {
   contractImportError,
   flowImportError,
@@ -20,7 +22,7 @@ type Row = Record<string, unknown>;
  */
 function stubDb(selects: Row[][], updateResults: Row[][] = []) {
   const inserted: { rows: Row[] }[] = [];
-  const updated: { set: Row }[] = [];
+  const updated: { set: Row; where?: unknown }[] = [];
   const deletes: number[] = [];
   let call = 0;
   let updCall = 0;
@@ -30,6 +32,7 @@ function stubDb(selects: Row[][], updateResults: Row[][] = []) {
     const p = Promise.resolve(result);
     const chain: Record<string, unknown> = {
       from: () => chain,
+      innerJoin: () => chain,
       where: () => chain,
       then: p.then.bind(p),
       catch: p.catch.bind(p),
@@ -52,16 +55,22 @@ function stubDb(selects: Row[][], updateResults: Row[][] = []) {
     }),
     update: () => ({
       set: (set: Row) => {
-        updated.push({ set });
+        const entry: { set: Row; where?: unknown } = { set };
+        updated.push(entry);
         const result = updateResults[updCall] ?? [];
         updCall += 1;
         const p = Promise.resolve();
         return {
-          where: () => ({
-            returning: async () => result,
-            then: p.then.bind(p),
-            catch: p.catch.bind(p),
-          }),
+          // Условие запоминается: запрет на чужие деньги живёт в WHERE,
+          // проверять его надо там же, а не в обход.
+          where: (cond: unknown) => {
+            entry.where = cond;
+            return {
+              returning: async () => result,
+              then: p.then.bind(p),
+              catch: p.catch.bind(p),
+            };
+          },
         };
       },
     }),
@@ -301,6 +310,47 @@ describe("договоры (contracts)", () => {
     // Привязка — установка contract_id на money_flow, не вторая запись денег.
     assert.equal(updated.length, 1);
     assert.equal((updated[0].set as { contractId?: unknown }).contractId, "ins-1");
+  });
+
+  it("приход чужой компании до договора не доходит: запрет стоит в самом запросе", () => {
+    // Условие читается как SQL, а не пересказывается: связка ограничена
+    // контрагентом договора, поэтому счёт другой компании физически не
+    // попадёт под UPDATE — сколько бы сид ни просил.
+    const { db, updated } = stubDb(SELECTS([], []), [[{ id: "mf-1" }]]);
+    const s = new RegistryImportService(db);
+    return s.importGloberent({ contracts: [base] }).then(() => {
+      const { sql } = new PgDialect().sqlToQuery(updated[0].where as SQL);
+      assert.match(sql, /"counterparty_id"/);
+      assert.match(sql, /"doc_no"/);
+      assert.match(sql, /"contract_id" is null/);
+    });
+  });
+
+  it("чужая связка из прошлого разбора не молчит: импорт называет её поимённо", async () => {
+    // Запрет не расцепляет то, что уже стоит в базе. Импорт обязан сказать
+    // про такие связки словами — сами их снимать нельзя, руками владельца
+    // могла быть проставлена любая.
+    const withForeign = [
+      ...SELECTS([], []),
+      [{ docNo: "СФ 2024-13", no: "GFH-08/0224" }], // проверка чужих связок
+    ];
+    const { db } = stubDb(withForeign, [[{ id: "mf-1" }]]);
+    const s = new RegistryImportService(db);
+    const r = await s.importGloberent({ contracts: [base] });
+    assert.equal(r.contracts.errors.length, 1);
+    assert.match(r.contracts.errors[0], /«СФ 2024-13».*«GFH-08\/0224».*другой компании/);
+  });
+
+  it("без карточки покупателя запрет не выдумывается — сверять не с чем", () => {
+    // Клиента по ИНН в реестре нет → clientId null. Ограничивать связку
+    // нечем, и притворяться, что ограничили, нельзя.
+    const noClient = [ORG, [], [], [], [{ id: "own-1" }]];
+    const { db, updated } = stubDb(noClient, [[{ id: "mf-1" }]]);
+    const s = new RegistryImportService(db);
+    return s.importGloberent({ contracts: [base] }).then(() => {
+      const { sql } = new PgDialect().sqlToQuery(updated[0].where as SQL);
+      assert.doesNotMatch(sql, /"counterparty_id"/);
+    });
   });
 
   it("своя карточка обновляется: разбор выгрузки уточняется каждым прогоном", async () => {
