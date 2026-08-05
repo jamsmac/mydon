@@ -70,3 +70,6 @@ export * from "./cowork";
 export * from "./web";
 export * from "./telegram";
 export * from "./ourvend";
+
+// Didox: договоры и счета GLOBERENT приходят полями API, а не разбором выгрузки.
+export * from "./didox";

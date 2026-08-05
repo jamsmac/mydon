@@ -162,8 +162,18 @@ if (fs.existsSync(flowsPath)) {
 // Реестры Didox: недостающие СФ + их приходы, новые контрагенты и договоры
 // покупателей. После книги — договоры привязывают приходы (и книжные тоже)
 // к contract_id по docNo счетов.
-const didoxPath = path.join(ROOT, "data/globerent/didox-2026-08-04.json");
-if (fs.existsSync(didoxPath)) {
+// Берётся САМЫЙ СВЕЖИЙ сид Didox, а не файл с зашитой датой: сид приходит
+// двумя путями — разбором выгрузки и выкачкой по API (tools/fetch-didox.mjs), —
+// и оба кладут файл со своей датой в имени.
+const didoxDir = path.join(ROOT, "data/globerent");
+const didoxPath = fs
+  .readdirSync(didoxDir)
+  .filter((n) => /^didox-\d{4}-\d{2}-\d{2}\.json$/.test(n))
+  .sort()
+  .map((n) => path.join(didoxDir, n))
+  .pop();
+if (didoxPath !== undefined) {
+  console.log(`Сид Didox: ${path.relative(ROOT, didoxPath)}`);
   const didox = JSON.parse(fs.readFileSync(didoxPath, "utf8"));
   const postDidox = async (payload) => {
     const res = await fetch(`${CORE}/registry-import/globerent`, {
