@@ -10,6 +10,7 @@ import {
 } from "@mydon/db";
 import { MONEY_CATEGORIES } from "@mydon/shared";
 import { and, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { DB, type Db } from "../db/db.module";
 
 /**
@@ -138,6 +139,35 @@ export interface ImportContract {
   flowDocNos?: string[];
 }
 
+/**
+ * Связка «приход → договор», у которой плательщик и покупатель — разные
+ * компании. Импорт такие больше не ставит (запрет в WHERE привязки), но
+ * старые остались от прошлого разбора: их видно отчётом и снимают отдельно.
+ * Обе стороны названы поимённо с ИНН — иначе решать, что снимать, не по чему.
+ */
+export interface ForeignContractLink {
+  flowId: string;
+  docNo: string | null;
+  /** ГГГГ-ММ-ДД. */
+  date: string;
+  /** В сумах: amountUzs, если запись валютная, иначе amount. */
+  amountUzs: string;
+  currency: string;
+  purpose: string | null;
+  payer: { name: string; inn: string | null };
+  contractId: string;
+  contractNo: string;
+  contractDate: string;
+  buyer: { name: string; inn: string | null };
+}
+
+export interface UnlinkForeignResult {
+  /** Снятые связки — поимённо, чтобы отчёт инструмента совпадал с фактом. */
+  unlinked: { docNo: string | null; contractNo: string }[];
+  /** Просьбы, под которые в базе не нашлось чужой связки (уже сняли, ошибка id). */
+  skipped: number;
+}
+
 export interface ImportCount {
   created: number;
   skipped: number;
@@ -161,6 +191,12 @@ export interface ImportSummary {
 const UNIT_STATUSES_ALLOWED = ["IN_STOCK", "DELIVERED_TO_CLIENT"] as const;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const INN_RE = /^\d{9}$|^\d{14}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** День операции строкой: в отчёт уходит дата, а не момент с зоной. */
+function isoDay(value: Date | string): string {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+}
 
 /** Ключ сравнения имён моделей: регистр и лишние пробелы не различаются. */
 export function modelKey(name: string): string {
@@ -519,6 +555,132 @@ export class RegistryImportService {
     });
 
     return { created, updated, deleted, skipped, errors, flowsLinked };
+  }
+
+  /**
+   * Чужие связки «приход → договор», которые уже лежат в базе.
+   *
+   * Импорт про них говорит одной строкой на каждую — этого хватает заметить,
+   * но не хватает решить. Здесь обе стороны названы с ИНН и суммой: видно,
+   * у кого долг из воздуха, а у кого закрытый, и на какие деньги.
+   *
+   * Чтение — не чинит ничего. Снятие отдельной ручкой и отдельным решением.
+   */
+  async foreignContractLinks(): Promise<ForeignContractLink[]> {
+    return this.foreignLinks(await this.orgId());
+  }
+
+  private async foreignLinks(orgId: string): Promise<ForeignContractLink[]> {
+    const payer = alias(entity, "payer");
+    const buyer = alias(entity, "buyer");
+    const rows = await this.db
+      .select({
+        flowId: moneyFlow.id,
+        docNo: moneyFlow.docNo,
+        date: moneyFlow.date,
+        amount: moneyFlow.amount,
+        amountUzs: moneyFlow.amountUzs,
+        currency: moneyFlow.currency,
+        purpose: moneyFlow.purpose,
+        payerName: payer.name,
+        payerInn: payer.externalRef,
+        contractId: grContract.id,
+        contractNo: grContract.contractNo,
+        contractDate: grContract.contractDate,
+        buyerName: buyer.name,
+        buyerInn: buyer.externalRef,
+      })
+      .from(moneyFlow)
+      // Обе стороны — через inner join: связка «чужая» только когда известны
+      // и плательщик прихода, и покупатель договора. Одна сторона без карточки
+      // ничему не противоречит, и в отчёте ей делать нечего.
+      .innerJoin(grContract, eq(moneyFlow.contractId, grContract.id))
+      .innerJoin(payer, eq(moneyFlow.counterpartyId, payer.id))
+      .innerJoin(buyer, eq(grContract.clientId, buyer.id))
+      .where(
+        and(eq(moneyFlow.orgId, orgId), sql`${moneyFlow.counterpartyId} <> ${grContract.clientId}`),
+      );
+    return rows.map((r) => ({
+      flowId: r.flowId,
+      docNo: r.docNo,
+      date: isoDay(r.date),
+      amountUzs: r.amountUzs ?? r.amount,
+      currency: r.currency,
+      purpose: r.purpose,
+      payer: { name: r.payerName, inn: r.payerInn },
+      contractId: r.contractId,
+      contractNo: r.contractNo,
+      contractDate: isoDay(r.contractDate),
+      buyer: { name: r.buyerName, inn: r.buyerInn },
+    }));
+  }
+
+  /**
+   * Снять названные связки — только те, что действительно чужие.
+   *
+   * Инвариант проверяется в самом UPDATE, а не перед ним: список id приходит
+   * снаружи и мог устареть между отчётом и решением. Промах по id должен
+   * оказаться ничем (skipped), а не расцепленным нормальным приходом.
+   *
+   * Отвязка не удаляет деньги: приход остаётся, у него лишь пропадает
+   * contract_id — и следующий импорт поставит его на верный договор сам,
+   * потому что привязка ищет записи именно с пустым contract_id.
+   */
+  async unlinkForeignContractLinks(
+    flowIds: string[],
+    actorRef = "owner",
+  ): Promise<UnlinkForeignResult> {
+    const ids = [...new Set(flowIds.map((s) => String(s).trim()))].filter((s) => s.length > 0);
+    const bad = ids.filter((s) => !UUID_RE.test(s));
+    if (bad.length > 0) {
+      throw new BadRequestException(`Не идентификаторы приходов: ${bad.slice(0, 3).join(", ")}`);
+    }
+    if (ids.length === 0) return { unlinked: [], skipped: 0 };
+
+    const orgId = await this.orgId();
+    // Номер договора нужен для отчёта, а после UPDATE его уже не спросить —
+    // contract_id к тому моменту пуст. Поэтому снимок берётся до.
+    const before = new Map(
+      (await this.foreignLinks(orgId)).map((l) => [l.flowId, l.contractNo] as const),
+    );
+
+    const unlinked = await this.db.transaction(async (tx) => {
+      const rows = await tx
+        .update(moneyFlow)
+        .set({ contractId: null })
+        .where(
+          and(
+            eq(moneyFlow.orgId, orgId),
+            inArray(moneyFlow.id, ids),
+            isNotNull(moneyFlow.counterpartyId),
+            sql`exists (select 1 from ${grContract} where ${grContract.id} = ${moneyFlow.contractId}
+                 and ${grContract.clientId} is not null
+                 and ${grContract.clientId} <> ${moneyFlow.counterpartyId})`,
+          ),
+        )
+        .returning({ id: moneyFlow.id, docNo: moneyFlow.docNo });
+      if (rows.length > 0) {
+        await tx.insert(auditLog).values({
+          actorKind: "human",
+          actorRef,
+          action: "registry_import.unlink_foreign",
+          target: "globerent",
+          after: {
+            unlinked: rows.map((r) => ({
+              docNo: r.docNo,
+              contractNo: before.get(r.id) ?? null,
+            })),
+            asked: ids.length,
+          },
+        });
+      }
+      return rows;
+    });
+
+    return {
+      unlinked: unlinked.map((r) => ({ docNo: r.docNo, contractNo: before.get(r.id) ?? "" })),
+      skipped: ids.length - unlinked.length,
+    };
   }
 
   /**
