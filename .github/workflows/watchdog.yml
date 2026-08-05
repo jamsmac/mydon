@@ -16,7 +16,12 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
-permissions: {}
+# Ровно то, что нужно шагу checkout: репозиторий приватный, и без contents:read
+# токен запуска не видит его вообще — git отвечает «repository not found», и
+# сторож умирает до первой проверки heartbeat. Больше сторожу не нужно ничего:
+# gist он читает своим WATCHDOG_GH_TOKEN, тревогу шлёт в Telegram.
+permissions:
+  contents: read
 
 jobs:
   check:
