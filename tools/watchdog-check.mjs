@@ -27,18 +27,60 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
-const GIST_ID = process.env.WATCHDOG_GIST_ID ?? "";
-const GH_TOKEN = process.env.WATCHDOG_GH_TOKEN ?? "";
-const BOT = process.env.WATCHDOG_BOT_TOKEN ?? "";
-const CHATS = (process.env.WATCHDOG_CHAT_IDS ?? "")
+/**
+ * Значение переменной окружения или запасное.
+ *
+ * `??` здесь мало: НЕЗАДАННЫЙ секрет GitHub подставляет в env пустой строкой,
+ * а не отсутствием. Пустая строка не nullish, `??` её пропускает — и запасное
+ * значение не срабатывает там, где обязано.
+ */
+const envText = (name, fallback = "") => (process.env[name] ?? "").trim() || fallback;
+
+/**
+ * Число из окружения — только положительное и конечное, иначе запасное.
+ *
+ * Тот же капкан, но с зубами: `Number("")` даёт 0, а не NaN. Порог протухания
+ * становится нулевым, свежайший heartbeat оказывается «старше порога», и
+ * сторож объявляет живой сервер мёртвым — на каждом прогоне.
+ *
+ * Отказ тем опаснее, что выглядит как работа: тревоги приходят настоящие с
+ * виду, владелец за день приучается их пролистывать, а вместе с ними
+ * пролистает и ту единственную, которая окажется правдой. И ловушка стояла
+ * ровно там, где на неё обязаны были наступить: WATCHDOG_STALE_MINUTES
+ * задокументирован как необязательный.
+ */
+function envNumber(name, fallback) {
+  const raw = envText(name);
+  const n = Number(raw);
+  return raw !== "" && Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const GIST_ID = envText("WATCHDOG_GIST_ID");
+const GH_TOKEN = envText("WATCHDOG_GH_TOKEN");
+const BOT = envText("WATCHDOG_BOT_TOKEN");
+const CHATS = envText("WATCHDOG_CHAT_IDS")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-const STALE_MIN = Number(process.env.WATCHDOG_STALE_MINUTES ?? "10");
-const STATE_FILE = process.env.WATCHDOG_STATE_FILE ?? ".watchdog-state.json";
+const STALE_MIN = envNumber("WATCHDOG_STALE_MINUTES", 10);
+const STATE_FILE = envText("WATCHDOG_STATE_FILE", ".watchdog-state.json");
 
-if (!GIST_ID) {
-  console.error("WATCHDOG_GIST_ID не задан — сторожу нечего проверять.");
+// Не настроен — говорим это целиком и один раз, а не по одному секрету за
+// прогон. Пустой WATCHDOG_GIST_ID почти всегда означает не «забыли один», а
+// «шаг настройки не делали вовсе», и владельцу нужен весь список сразу.
+const REQUIRED = [
+  "WATCHDOG_GIST_ID",
+  "WATCHDOG_GH_TOKEN",
+  "WATCHDOG_BOT_TOKEN",
+  "WATCHDOG_CHAT_IDS",
+];
+if (GIST_ID === "") {
+  const missing = REQUIRED.filter((n) => envText(n) === "");
+  console.error(
+    `Сторож не настроен: не заданы секреты ${missing.join(", ")}.\n` +
+      "Это не поломка кода — сторожу нечего проверять, пока их нет.\n" +
+      "Настройка: docs/watchdog.md, шаги 1–5 (gist, токены, бот, секреты Actions).",
+  );
   process.exit(1);
 }
 
