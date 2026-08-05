@@ -195,12 +195,20 @@ if (didoxPath !== undefined) {
   for (const batch of chunks(didox.flows ?? [], 200)) {
     add(totals.flows, (await postDidox({ flows: batch })).flows);
   }
-  // contractsFinal на последней партии: Core удалит свои карточки, которых
-  // в наборе больше нет (следы прошлой версии разбора выгрузки).
+  // contractsFinal на последней партии: Core уберёт свои карточки, которых в
+  // наборе больше нет (следы прошлой версии разбора). Набор — contractsKeep,
+  // ПОЛНЫЙ список номеров: последняя партия это её сотня договоров, и если
+  // считать набором её, снесётся всё остальное.
   const contractBatches = chunks(didox.contracts ?? [], 100);
+  const contractsKeep = (didox.contracts ?? []).map((c) => c.contractNo);
   for (const [i, batch] of contractBatches.entries()) {
+    const last = i === contractBatches.length - 1;
     const part = (
-      await postDidox({ contracts: batch, contractsFinal: i === contractBatches.length - 1 })
+      await postDidox({
+        contracts: batch,
+        contractsFinal: last,
+        ...(last ? { contractsKeep } : {}),
+      })
     ).contracts;
     add(totals.contracts, part);
     totals.contracts.flowsLinked += part.flowsLinked ?? 0;

@@ -75,10 +75,18 @@ export interface ImportPayload {
   flows?: ImportFlow[];
   contracts?: ImportContract[];
   /**
-   * «В этой партии весь набор договоров»: свои карточки, которых в наборе
-   * нет, удаляются. Импортёр ставит флаг только на последней партии.
+   * «Партии кончились, можно убирать устаревшее». Ставится на последней
+   * партии. САМ ПО СЕБЕ НЕ ЗАДАЁТ НАБОР: последняя партия — это её сотня
+   * договоров, а не все. Что считать набором, говорит contractsKeep.
    */
   contractsFinal?: boolean;
+  /**
+   * Полный список номеров договоров во ВСЕЙ выгрузке — по нему решается,
+   * какие свои карточки устарели. Без него набором считается сама партия:
+   * это верно, только когда партия одна. Импортёр обязан передавать список,
+   * иначе разбиение на партии превращается в снос всего, кроме последней.
+   */
+  contractsKeep?: string[];
 }
 
 /**
@@ -263,6 +271,7 @@ export class RegistryImportService {
         source,
         actorRef,
         payload.contractsFinal ?? false,
+        payload.contractsKeep,
       );
     }
     return summary;
@@ -276,9 +285,10 @@ export class RegistryImportService {
    * потому что разбор выгрузки уточняется. Заведённая владельцем вручную
    * (createdFrom пуст или другой) — не трогается никогда.
    *
-   * contractsFinal=true означает «в этой партии весь набор»: свои записи,
-   * которых в наборе больше нет, удаляются — так уходят карточки, собранные
-   * прошлой версией разбора. Удаление щадящее: договор с актами или
+   * contractsFinal=true — «партии кончились, убирай устаревшее». НАБОР при
+   * этом задаёт keepNos (полный список номеров всей выгрузки), а не сама
+   * партия: партия — это её сотня договоров, и считать набором её значит
+   * снести всё остальное. Удаление щадящее: договор с актами или
    * привязанными единицами остаётся жить (с ним уже работали).
    */
   private async importContracts(
@@ -287,6 +297,7 @@ export class RegistryImportService {
     source: string,
     actorRef: string,
     final: boolean,
+    keepNos: string[] | undefined,
   ): Promise<
     ImportCount & { errors: string[]; flowsLinked: number; updated: number; deleted: number }
   > {
@@ -347,27 +358,44 @@ export class RegistryImportService {
       // мимо. Снести сначала — значит вернуть приходы в оборот к тому же
       // прогону, а не оставить их без договора до следующего.
       if (final) {
-        const keep = new Set(valid.map((c) => c.contractNo.trim()));
+        // Набор — весь список выгрузки, а не эта партия. Без списка набором
+        // считается партия: верно только когда партия одна.
+        const keep = new Set(
+          (keepNos ?? valid.map((c) => c.contractNo)).map((no) => no.trim()).filter((no) => no),
+        );
         const stale = mine.filter((m) => !keep.has(m.no));
-        for (const s of stale) {
-          const [{ n: acts }] = await tx
-            .select({ n: sql<number>`count(*)::int` })
-            .from(contractAct)
-            .where(eq(contractAct.contractId, s.id));
-          const [{ n: units }] = await tx
-            .select({ n: sql<number>`count(*)::int` })
-            .from(globerentUnit)
-            .where(eq(globerentUnit.contractId, s.id));
-          if (acts > 0 || units > 0) {
-            errors.push(`«${s.no}»: карточка устарела, но с ней работали — оставлена`);
-            continue;
+        // Признак потерянного набора: он и сам мал против того, что уже есть,
+        // И снёс бы больше половины карточек. Именно так выглядит неполный
+        // список — оборванная выгрузка, партия вместо всего набора. Уточнение
+        // разбора выглядит иначе: набор остаётся большим, лишними становятся
+        // мусорные карточки прошлой версии. Такое чинят, а не применяют.
+        const lostSet = keep.size < mine.length / 2 && stale.length > mine.length / 2;
+        if (lostSet && stale.length > 10) {
+          errors.push(
+            `уборка отменена: набор из ${keep.size} договоров оставил бы ${stale.length} ` +
+              `из ${mine.length} карточек лишними — так выглядит неполная выгрузка, а не уточнение`,
+          );
+        } else {
+          for (const s of stale) {
+            const [{ n: acts }] = await tx
+              .select({ n: sql<number>`count(*)::int` })
+              .from(contractAct)
+              .where(eq(contractAct.contractId, s.id));
+            const [{ n: units }] = await tx
+              .select({ n: sql<number>`count(*)::int` })
+              .from(globerentUnit)
+              .where(eq(globerentUnit.contractId, s.id));
+            if (acts > 0 || units > 0) {
+              errors.push(`«${s.no}»: карточка устарела, но с ней работали — оставлена`);
+              continue;
+            }
+            await tx
+              .update(moneyFlow)
+              .set({ contractId: null })
+              .where(eq(moneyFlow.contractId, s.id));
+            await tx.delete(grContract).where(eq(grContract.id, s.id));
+            deleted += 1;
           }
-          await tx
-            .update(moneyFlow)
-            .set({ contractId: null })
-            .where(eq(moneyFlow.contractId, s.id));
-          await tx.delete(grContract).where(eq(grContract.id, s.id));
-          deleted += 1;
         }
       }
 
@@ -451,18 +479,22 @@ export class RegistryImportService {
       // их ставил прошлый разбор, и в базе они остались. Молча снимать нельзя —
       // руками владельца могла быть проставлена любая из них. Поэтому импорт
       // не чинит, а называет: приход такой-то стоит на договоре чужой компании.
-      const foreign = await tx
-        .select({ docNo: moneyFlow.docNo, no: grContract.contractNo })
-        .from(moneyFlow)
-        .innerJoin(grContract, eq(moneyFlow.contractId, grContract.id))
-        .where(
-          and(
-            eq(moneyFlow.orgId, orgId),
-            isNotNull(moneyFlow.counterpartyId),
-            isNotNull(grContract.clientId),
-            sql`${moneyFlow.counterpartyId} <> ${grContract.clientId}`,
-          ),
-        );
+      // Только на последней партии: проверка смотрит на всю базу, и на каждой
+      // партии она повторила бы один и тот же список слово в слово.
+      const foreign = final
+        ? await tx
+            .select({ docNo: moneyFlow.docNo, no: grContract.contractNo })
+            .from(moneyFlow)
+            .innerJoin(grContract, eq(moneyFlow.contractId, grContract.id))
+            .where(
+              and(
+                eq(moneyFlow.orgId, orgId),
+                isNotNull(moneyFlow.counterpartyId),
+                isNotNull(grContract.clientId),
+                sql`${moneyFlow.counterpartyId} <> ${grContract.clientId}`,
+              ),
+            )
+        : [];
       for (const f of foreign) {
         errors.push(`приход «${f.docNo}» стоит на договоре «${f.no}» другой компании — проверьте`);
       }
