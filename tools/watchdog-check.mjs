@@ -13,7 +13,13 @@
  * при переходе живой→лежит, напоминание — каждый запуск пока лежит,
  * «поднялся» — один раз при восстановлении.
  *
- * env: WATCHDOG_GIST_ID (+ WATCHDOG_GH_TOKEN для приватного gist),
+ * Обратная сторона: сторож оставляет в том же gist отметку «я отработал»
+ * (файл watchdog.json). Её читает сервер — deploy/watchdog-liveness.sh, — и
+ * бьёт тревогу, если сторож замолчал. Получается взаимная слежка: сторож
+ * следит за сервером, сервер — за сторожем.
+ *
+ * env: WATCHDOG_GIST_ID (+ WATCHDOG_GH_TOKEN — нужен Gists: Read and write,
+ *      теперь сторож не только читает gist, но и отмечается в нём),
  *      WATCHDOG_BOT_TOKEN, WATCHDOG_CHAT_IDS (через запятую),
  *      WATCHDOG_STALE_MINUTES (порог, по умолчанию 10),
  *      WATCHDOG_STATE_FILE (по умолчанию .watchdog-state.json).
@@ -24,7 +30,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 const GIST_ID = process.env.WATCHDOG_GIST_ID ?? "";
 const GH_TOKEN = process.env.WATCHDOG_GH_TOKEN ?? "";
 const BOT = process.env.WATCHDOG_BOT_TOKEN ?? "";
-const CHATS = (process.env.WATCHDOG_CHAT_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+const CHATS = (process.env.WATCHDOG_CHAT_IDS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const STALE_MIN = Number(process.env.WATCHDOG_STALE_MINUTES ?? "10");
 const STATE_FILE = process.env.WATCHDOG_STATE_FILE ?? ".watchdog-state.json";
 
@@ -75,6 +84,47 @@ export function heartbeatAgeMinutes(content, now = Date.now()) {
   }
 }
 
+/**
+ * Отметка «сторож отработал» — отдельным файлом в том же gist.
+ *
+ * Сторож видит, что сервер лежит. Обратного не знал никто: когда умирал сам
+ * сторож (сломанный workflow, отключённое расписание, отозванный токен),
+ * тишина читалась как «всё хорошо» — ровно в тот момент, когда проверять
+ * стало некому.
+ *
+ * Пишется на ОБОИХ исходах: важно, что сторож отработал, а не что ему
+ * понравилось увиденное. Ошибка записи гасится в лог — доставка тревоги о
+ * сервере важнее отметки о себе, и падать из-за неё сторож не должен.
+ */
+async function markWatchdogRan(verdict) {
+  if (!GH_TOKEN) {
+    console.warn("WATCHDOG_GH_TOKEN не задан — отметку сторожа записать нечем.");
+    return;
+  }
+  const mark = JSON.stringify({
+    ts: new Date().toISOString(),
+    verdict,
+    run: process.env.GITHUB_RUN_ID ?? null,
+  });
+  try {
+    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+      method: "PATCH",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${GH_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      // Только свой файл: PATCH с одним файлом не трогает heartbeat.json,
+      // который в этот же gist пишет сервер.
+      body: JSON.stringify({ files: { "watchdog.json": { content: mark } } }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error("Отметка сторожа не записана:", err.message);
+  }
+}
+
 const state = readState();
 let content = null;
 let detail = "";
@@ -101,6 +151,7 @@ if (alive) {
     await notify(`✅ MYDON/OS снова жив: heartbeat ${Math.round(age)} мин назад.`);
   }
   saveState({ down: false });
+  await markWatchdogRan("ok");
   console.log(`ok: heartbeat ${age.toFixed(1)} мин назад (порог ${STALE_MIN}).`);
   process.exit(0);
 }
@@ -121,4 +172,5 @@ await notify(
     "Проверь сервер: ssh root@100.81.197.68 (Tailscale) и хостинг Hetzner.",
 );
 saveState({ down: true });
+await markWatchdogRan("down");
 process.exit(0);
