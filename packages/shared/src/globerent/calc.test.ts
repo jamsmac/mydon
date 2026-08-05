@@ -10,6 +10,7 @@ import {
   generateAutoExpenseLines,
   round2,
   round4,
+  roundSalePriceToNoVatStep,
   type EstimationInputs,
   type ExpenseCategory,
   type ExpenseLine,
@@ -213,8 +214,14 @@ describe("generateAutoExpenseLines — контрольный пример: тя
   });
 
   it("акциз 0% и доп.пошлина без объёма двигателя — строки не создаются", () => {
-    assert.equal(lines.some((l) => l.category === "excise"), false);
-    assert.equal(lines.some((l) => l.category === "extra_duty"), false);
+    assert.equal(
+      lines.some((l) => l.category === "excise"),
+      false,
+    );
+    assert.equal(
+      lines.some((l) => l.category === "extra_duty"),
+      false,
+    );
   });
 
   it("Блок 4: сертификация/хранение ОФИЦ и НАЛ-строки по введённым суммам", () => {
@@ -358,8 +365,14 @@ describe("второй кейс — фронтальный погрузчик HE
   });
 
   it("утиль и доп.пошлина не начисляются (0 БРВ, 0 $/см³)", () => {
-    assert.equal(lines.some((l) => l.category === "util_fee"), false);
-    assert.equal(lines.some((l) => l.category === "extra_duty"), false);
+    assert.equal(
+      lines.some((l) => l.category === "util_fee"),
+      false,
+    );
+    assert.equal(
+      lines.some((l) => l.category === "extra_duty"),
+      false,
+    );
   });
 
   it("возврат от завода: 26 000 × 12 637.80 − 27 800 × 12 600 = −21 697 200", () => {
@@ -542,8 +555,14 @@ describe("extra_duty и порог корректировки |Δ| > 1 UZS", () 
         rate_conversion: 12_000, // markup = 1 → Δ = 0
       }),
     );
-    assert.equal(lines.some((l) => l.category === "factory_refund_cash"), false);
-    assert.equal(lines.some((l) => l.category === "factory_overpay_cash"), false);
+    assert.equal(
+      lines.some((l) => l.category === "factory_refund_cash"),
+      false,
+    );
+    assert.equal(
+      lines.some((l) => l.category === "factory_overpay_cash"),
+      false,
+    );
   });
 
   it("|Δ| ≤ 1 UZS — float-шум не рождает строку", () => {
@@ -557,8 +576,14 @@ describe("extra_duty и порог корректировки |Δ| > 1 UZS", () 
         rate_conversion: 12_000.00005, // Δ = 0.5 UZS
       }),
     );
-    assert.equal(lines.some((l) => l.category === "factory_refund_cash"), false);
-    assert.equal(lines.some((l) => l.category === "factory_overpay_cash"), false);
+    assert.equal(
+      lines.some((l) => l.category === "factory_refund_cash"),
+      false,
+    );
+    assert.equal(
+      lines.some((l) => l.category === "factory_overpay_cash"),
+      false,
+    );
   });
 
   it("банковский markup при инвойс = завод даёт overpay: 58 000 × ИМ74 × 0.003 = 2 100 924.72", () => {
@@ -662,7 +687,12 @@ describe("подбор цены — breakeven и целевая чистая п�
       assert.equal(price, expectedPrice, `цена для цели ${pct * 100}%`);
       const r = calculateScenario(
         price,
-        { cost_ddp_official_uzs: cost, cost_cash_uzs: 0, vat_customs_uzs: 0, import_vat_base_uzs: 0 },
+        {
+          cost_ddp_official_uzs: cost,
+          cost_cash_uzs: 0,
+          vat_customs_uzs: 0,
+          import_vat_base_uzs: 0,
+        },
         PNL,
       );
       assert.equal(r.net_profit_official_uzs, expectedNet);
@@ -701,5 +731,79 @@ describe("round2/round4 — арифметика донора (Math.round, не 
 
   it("отрицательные: Math.round тянет половину к +∞ (−0.025 → −0.02)", () => {
     assert.equal(round2(-0.025), -0.02);
+  });
+});
+
+describe("ровная цена без НДС — сторона, которая остаётся у нас", () => {
+  const VAT = 0.12;
+  const COST = 1_064_342_780; // тягач из эталона Excel
+
+  it("сырая цена подбора садится на круглые миллионы без НДС", () => {
+    // 1 296 539 338,45 с НДС → 1 157 624 409,33 без НДС → 1 158 000 000.
+    const raw = computeSalePriceForTargetNetProfit(COST, 0.06, VAT, 0.014, 0.15);
+    const r = roundSalePriceToNoVatStep(raw, VAT);
+    assert.equal(r.sale_price_no_vat_uzs, 1_158_000_000);
+    assert.equal(r.sale_price_with_vat_uzs, 1_296_960_000);
+  });
+
+  it("calculateScenario обратным делением возвращает ТО ЖЕ круглое число", () => {
+    // Главный инвариант. Цена с НДС считается из ровной цены без НДС, а
+    // сценарий делит обратно — если бы делили в другом порядке, здесь вышло
+    // бы 1 157 999 999,99, и в КП поехала бы цена с копейками.
+    const raw = computeSalePriceForTargetNetProfit(COST, 0.06, VAT, 0.014, 0.15);
+    const r = roundSalePriceToNoVatStep(raw, VAT);
+    const s = calculateScenario(
+      r.sale_price_with_vat_uzs,
+      {
+        cost_ddp_official_uzs: COST,
+        cost_cash_uzs: 0,
+        vat_customs_uzs: 0,
+        import_vat_base_uzs: 0,
+      },
+      {
+        vat_sale_rate: VAT,
+        corporate_tax_rate: 0.15,
+        admin_expenses_rate: 0.014,
+        salesperson_bonus_rate: 0.08,
+      },
+    );
+    assert.equal(s.sale_price_no_vat_uzs, 1_158_000_000);
+    assert.equal(s.vat_output_uzs, 138_960_000);
+  });
+
+  it("вверх по умолчанию: цену под целевую прибыль вниз не роняем", () => {
+    // Ровно на шаге остаётся на месте, чуть выше — уходит на следующий.
+    assert.equal(
+      roundSalePriceToNoVatStep(1_120_000_000 * 1.12, VAT).sale_price_no_vat_uzs,
+      1_120_000_000,
+    );
+    assert.equal(
+      roundSalePriceToNoVatStep(1_120_000_001 * 1.12, VAT).sale_price_no_vat_uzs,
+      1_121_000_000,
+    );
+  });
+
+  it("nearest — когда важнее не отходить от цели, а не только вверх", () => {
+    const near = (withVat: number) =>
+      roundSalePriceToNoVatStep(withVat * 1.12, VAT, 1_000_000, "nearest").sale_price_no_vat_uzs;
+    assert.equal(near(1_120_400_000), 1_120_000_000);
+    assert.equal(near(1_120_600_000), 1_121_000_000);
+  });
+
+  it("шаг крупнее: десятки и сотни миллионов", () => {
+    assert.equal(
+      roundSalePriceToNoVatStep(1_157_624_409.33 * 1.12, VAT, 10_000_000).sale_price_no_vat_uzs,
+      1_160_000_000,
+    );
+    assert.equal(
+      roundSalePriceToNoVatStep(1_157_624_409.33 * 1.12, VAT, 100_000_000).sale_price_no_vat_uzs,
+      1_200_000_000,
+    );
+  });
+
+  it("бессмысленный шаг не портит цену — возвращаем как есть", () => {
+    const r = roundSalePriceToNoVatStep(1_296_539_338.45, VAT, 0);
+    assert.equal(r.sale_price_with_vat_uzs, 1_296_539_338.45);
+    assert.equal(r.sale_price_no_vat_uzs, round2(1_296_539_338.45 / 1.12));
   });
 });
