@@ -1,0 +1,13 @@
+[Unit]
+Description=MYDON сторож за сторожем — каждые 15 минут
+
+[Timer]
+# Реже, чем сам сторож (*/10): проверять чаще, чем отметка обновляется,
+# смысла нет. Со сдвигом от старта, чтобы не совпадать с прогоном сторожа.
+OnBootSec=15min
+OnUnitActiveSec=15min
+Persistent=false
+Unit=mydon-watchdog-liveness.service
+
+[Install]
+WantedBy=timers.target

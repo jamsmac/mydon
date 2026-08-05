@@ -1,0 +1,7 @@
+[Unit]
+Description=MYDON сторож за сторожем — жив ли внешний watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mydon-app/deploy/watchdog-liveness.sh
