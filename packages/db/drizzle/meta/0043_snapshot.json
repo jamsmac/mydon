@@ -4618,14 +4618,36 @@
               "nulls": "last"
             },
             {
-              "expression": "coalesce(\"part_kind\"::text, '')",
+              "expression": "part_kind",
+              "isExpression": false,
               "asc": true,
-              "isExpression": true,
               "nulls": "last"
             }
           ],
           "isUnique": true,
-          "where": "is_active",
+          "where": "is_active and part_kind is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "maintenance_plan_key_nopart": {
+          "name": "maintenance_plan_key_nopart",
+          "columns": [
+            {
+              "expression": "entity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "kind",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "is_active and part_kind is null",
           "concurrently": false,
           "method": "btree",
           "with": {}

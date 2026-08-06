@@ -10,6 +10,22 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Tashkent
+    services:
+      # Версия та же, что на сервере (Postgres 16): проверять миграции на
+      # другой значит проверять не то, что поедет в бой.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mydon
+          POSTGRES_PASSWORD: mydon
+          POSTGRES_DB: mydon
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mydon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +53,17 @@ jobs:
       # Тесты гоняются по собранному dist/**/*.test.js, поэтому строго после build.
       - name: Test
         run: pnpm -r --if-present test
+
+      # Миграции против НАСТОЯЩЕГО постгреса. Юнит-тесты этого класса ошибок
+      # не ловят в принципе: SQL проверяет только сервер. Так три дня прожила
+      # 0042 с `coalesce(part_kind::text,'')` — `drizzle-kit push` на пустой
+      # базе разработчика её принимал, а `migrate` на сервере падал с 42P17
+      # («functions in index expression must be marked IMMUTABLE»), и полевой
+      # контур не разворачивался. Шаг прогоняет ВСЮ цепочку с нуля.
+      - name: Migrations (real postgres)
+        env:
+          DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
+        run: pnpm --filter @mydon/db db:migrate
 
       # Раньше continue-on-error:true молча прятал 5 high-уязвимостей —
       # шаг всегда зеленел, даже когда pnpm audit падал кодом 1 (найдено

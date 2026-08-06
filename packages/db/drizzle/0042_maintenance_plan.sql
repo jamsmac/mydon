@@ -26,6 +26,7 @@ ALTER TABLE "maintenance_plan" ADD CONSTRAINT "maintenance_plan_entity_id_entity
 ALTER TABLE "maintenance_plan" ADD CONSTRAINT "maintenance_plan_assignee_id_person_id_fk" FOREIGN KEY ("assignee_id") REFERENCES "public"."person"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "maintenance_plan_due_idx" ON "maintenance_plan" USING btree ("due_on") WHERE is_active;--> statement-breakpoint
 CREATE INDEX "maintenance_plan_entity_idx" ON "maintenance_plan" USING btree ("entity_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "maintenance_plan_key" ON "maintenance_plan" USING btree ("entity_id","kind",coalesce("part_kind"::text, '')) WHERE is_active;--> statement-breakpoint
+CREATE UNIQUE INDEX "maintenance_plan_key" ON "maintenance_plan" USING btree ("entity_id","kind","part_kind") WHERE is_active and part_kind is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX "maintenance_plan_key_nopart" ON "maintenance_plan" USING btree ("entity_id","kind") WHERE is_active and part_kind is null;--> statement-breakpoint
 ALTER TABLE "maintenance_log" ADD CONSTRAINT "maintenance_log_plan_id_maintenance_plan_id_fk" FOREIGN KEY ("plan_id") REFERENCES "public"."maintenance_plan"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "maintenance_log_plan_done_idx" ON "maintenance_log" USING btree ("plan_id","performed_on") WHERE outcome is not null;

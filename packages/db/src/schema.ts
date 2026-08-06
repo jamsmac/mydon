@@ -2061,10 +2061,21 @@ export const maintenancePlan = pgTable(
     index("maintenance_plan_entity_idx").on(t.entityId),
     // Один норматив на «объект + вид работ + узел». Дубль означал бы две
     // разные даты для одной обязанности и вечный спор, какая правильная.
-    // coalesce по той же причине, что в machine_part: NULL ≠ NULL.
+    //
+    // Два частичных индекса вместо одного с coalesce — потому что постгрес
+    // считает NULL ≠ NULL, а свернуть NULL в пустую строку здесь нечем:
+    // приведение enum к тексту помечено STABLE (метку значения enum можно
+    // переименовать), а в выражении индекса допустимы только IMMUTABLE.
+    // `coalesce(part_kind::text, '')` проходит `drizzle-kit push`, но роняет
+    // `migrate` на живой базе ошибкой 42P17 — так полевой контур и не
+    // развернулся на сервере. Пара индексов даёт ровно ту же гарантию
+    // и работает на любой версии постгреса (NULLS NOT DISTINCT — только 15+).
     uniqueIndex("maintenance_plan_key")
-      .on(t.entityId, t.kind, sql`coalesce(${t.partKind}::text, '')`)
-      .where(sql`is_active`),
+      .on(t.entityId, t.kind, t.partKind)
+      .where(sql`is_active and part_kind is not null`),
+    uniqueIndex("maintenance_plan_key_nopart")
+      .on(t.entityId, t.kind)
+      .where(sql`is_active and part_kind is null`),
     check(
       "maintenance_plan_period_set",
       sql`${t.everyDays} is not null or ${t.everyMonths} is not null or ${t.everyCount} is not null`,
