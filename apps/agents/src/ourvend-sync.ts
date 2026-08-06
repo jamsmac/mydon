@@ -76,7 +76,12 @@ export function ourvendConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Ourv
   const account = (env.OURVEND_ACCOUNT ?? "").trim();
   const password = env.OURVEND_PASSWORD ?? "";
   if (!account || !password) return null;
-  const groupId = (env.OURVEND_GROUP_ID ?? "729db8bd-02f5-49b9-bccb-53477e396a08").trim();
+  // `||`, а не `??`: docker compose подставляет ПУСТУЮ СТРОКУ для незаданной
+  // переменной (`${OURVEND_GROUP_ID:-}`), а `??` считает её заданным значением
+  // и дефолт бы не применился. Раньше переменной в compose не было вовсе, и
+  // в контейнер она приходила undefined — разница проявилась ровно в тот
+  // момент, когда её туда добавили.
+  const groupId = (env.OURVEND_GROUP_ID || "729db8bd-02f5-49b9-bccb-53477e396a08").trim();
   return { account, password, groupId };
 }
 

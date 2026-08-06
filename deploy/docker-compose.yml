@@ -126,6 +126,16 @@ services:
       # работы. 06:00 — ДО дайджеста сотрудникам (07:00) и брифинга владельца
       # (07:30): к моменту рассылки задачи уже должны стоять. "off" выключает.
       MAINTENANCE_MONITOR_CRON: ${MAINTENANCE_MONITOR_CRON:-0 6 * * *}
+      # Сбор Ourvend (ourvend:sync): планограмма и продажи автоматов раз в 3
+      # часа. Пустые учётные данные → сбор молча выключен (ourvendConfigFromEnv
+      # возвращает null). Переменных здесь не было вовсе, поэтому включить сбор
+      # через .env было нельзя: что бы владелец туда ни положил, контейнер
+      # этого не видел. Без сбора не обновляется machine_slot и не пишется
+      # slot_snapshot — а на нём стоит сверка заливки (WAREHOUSE_SPEC §4.4).
+      OURVEND_ACCOUNT: ${OURVEND_ACCOUNT:-}
+      OURVEND_PASSWORD: ${OURVEND_PASSWORD:-}
+      OURVEND_GROUP_ID: ${OURVEND_GROUP_ID:-}
+      OURVEND_SYNC_CRON: ${OURVEND_SYNC_CRON:-0 */3 * * *}
       # Бюджет: subscription — метрируемых трат нет, потолок спит.
       AGENT_BILLING_MODE: ${AGENT_BILLING_MODE:-subscription}
       AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}

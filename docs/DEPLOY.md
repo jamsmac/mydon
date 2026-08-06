@@ -254,6 +254,19 @@ chmod 600 .env
 grep -c '^[A-Z_]*=' .env        # столько строк стало — значения не печатаем
 ```
 
+**Сбор Ourvend.** Отдельно, потому что требует учётной записи кабинета:
+
+```bash
+grep -q '^OURVEND_ACCOUNT=.' .env || echo 'OURVEND_ACCOUNT=<логин кабинета>' >> .env
+grep -q '^OURVEND_PASSWORD=.' .env || echo 'OURVEND_PASSWORD=<пароль>' >> .env
+grep -q '^OURVEND_SYNC_CRON=' .env || echo 'OURVEND_SYNC_CRON=0 */3 * * *' >> .env
+```
+
+Без учётки сбор молча выключен: `machine_slot` не обновляется, `slot_snapshot`
+не пишется. Проверить после шага 4 —
+`docker logs mydon-agents 2>&1 | grep -i вендинг` должно сказать «Сбор вендинга
+включён», а не «выключен».
+
 `TELEGRAM_BOT_USERNAME` — единственная, куда надо вписать значение руками
 (имя бота без `@`). Остальные три самодостаточны.
 
