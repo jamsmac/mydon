@@ -24,6 +24,18 @@
 
 import type { MaintenanceKind, PartKind } from "./maintenance";
 
+/**
+ * Где норматив применим.
+ *
+ * `coffee` — только кофейные автоматы (привязанные к кофейной точке).
+ * У снек-автомата нет ни миксера, ни фильтра воды, и график такой работы
+ * на нём будет краснеть за работу, которой не существует. Ровно так парк
+ * и превращается в красный экран, в который перестают смотреть.
+ *
+ * `any` — любой автомат. Плановое ТО осмысленно и для кофе, и для снека.
+ */
+export type NormScope = "coffee" | "any";
+
 export interface MaintenanceNorm {
   kind: MaintenanceKind;
   /** Узел, если норматив про узел. null — про автомат целиком. */
@@ -31,6 +43,7 @@ export interface MaintenanceNorm {
   everyDays: number;
   /** Название в графике и в задаче исполнителю. */
   title: string;
+  scope: NormScope;
 }
 
 /**
@@ -45,10 +58,21 @@ export interface MaintenanceNorm {
  * сделали.
  */
 export const STANDARD_NORMS: readonly MaintenanceNorm[] = [
-  { kind: "cleaning", partKind: "mixer", everyDays: 10, title: "Мойка миксера" },
-  { kind: "part_replace", partKind: "water_filter", everyDays: 45, title: "Замена фильтра воды" },
-  { kind: "service", partKind: null, everyDays: 90, title: "Плановое ТО" },
+  { kind: "cleaning", partKind: "mixer", everyDays: 10, title: "Мойка миксера", scope: "coffee" },
+  {
+    kind: "part_replace",
+    partKind: "water_filter",
+    everyDays: 45,
+    title: "Замена фильтра воды",
+    scope: "coffee",
+  },
+  { kind: "service", partKind: null, everyDays: 90, title: "Плановое ТО", scope: "any" },
 ] as const;
+
+/** Нормативы, применимые к объекту: кофейному — все, прочему — только общие. */
+export function normsFor(isCoffee: boolean): readonly MaintenanceNorm[] {
+  return isCoffee ? STANDARD_NORMS : STANDARD_NORMS.filter((n) => n.scope === "any");
+}
 
 /**
  * Ключ норматива — тот же, что уникальный индекс `maintenance_plan_key`:

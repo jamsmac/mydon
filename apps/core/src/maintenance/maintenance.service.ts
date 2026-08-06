@@ -1,13 +1,21 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, collection, entity, machinePart, maintenanceLog, maintenancePlan } from "@mydon/db";
+import {
+  auditLog,
+  coffeeLocation,
+  collection,
+  entity,
+  machinePart,
+  maintenanceLog,
+  maintenancePlan,
+} from "@mydon/db";
 import {
   advanceAnchor,
   computeDue,
   firstDue,
   maintenanceKindLabel,
   normKey,
+  normsFor,
   partLabel,
-  STANDARD_NORMS,
   TZ,
   type DueStatus,
 } from "@mydon/shared";
@@ -339,15 +347,27 @@ export class MaintenanceService {
    * заведён заново. Это осознанно: уникальный индекс тоже частичный
    * (`where is_active`), и выключение — это «мы за этим больше не следим», а
    * повторный вызов метода — прямое «следим снова».
+   *
+   * Кофейные нормативы (мойка миксера, фильтр воды) идут только на автоматы,
+   * привязанные к кофейной точке. Различает это Core, а не вызывающий: связь
+   * лежит в `coffee_location.entity_id`, и заставлять каждого клиента её
+   * вычислять значит завести второе место правды, которое однажды разойдётся
+   * с первым.
    */
   async applyStandardNorms(
     entityIds: string[],
     actorRef = "owner",
-  ): Promise<{ created: PlanRow[]; skipped: number }> {
-    if (entityIds.length === 0) return { created: [], skipped: 0 };
+  ): Promise<{ created: PlanRow[]; skipped: number; coffee: number; other: number }> {
+    if (entityIds.length === 0) return { created: [], skipped: 0, coffee: 0, other: 0 };
     const today = todayInTz();
 
     return this.db.transaction(async (tx) => {
+      const linked = await tx
+        .select({ entityId: coffeeLocation.entityId })
+        .from(coffeeLocation)
+        .where(inArray(coffeeLocation.entityId, entityIds));
+      const isCoffee = new Set(linked.map((r) => r.entityId).filter((id): id is string => !!id));
+
       const existing = await tx
         .select({
           entityId: maintenancePlan.entityId,
@@ -362,8 +382,10 @@ export class MaintenanceService {
 
       const created: PlanRow[] = [];
       let skipped = 0;
+      const seen = new Set<string>();
       for (const entityId of entityIds) {
-        for (const norm of STANDARD_NORMS) {
+        seen.add(entityId);
+        for (const norm of normsFor(isCoffee.has(entityId))) {
           if (taken.has(normKey(entityId, norm.kind, norm.partKind))) {
             skipped += 1;
             continue;
@@ -397,7 +419,8 @@ export class MaintenanceService {
           taken.add(normKey(entityId, norm.kind, norm.partKind));
         }
       }
-      return { created, skipped };
+      const coffee = [...seen].filter((id) => isCoffee.has(id)).length;
+      return { created, skipped, coffee, other: seen.size - coffee };
     });
   }
 

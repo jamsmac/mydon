@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { firstDue } from "./maintenance-due";
 import { MAINTENANCE_KINDS, PART_KINDS } from "./maintenance";
-import { normKey, STANDARD_NORMS } from "./maintenance-norms";
+import { normKey, normsFor, STANDARD_NORMS } from "./maintenance-norms";
 
 describe("стандартные нормативы", () => {
   it("хранит числа, названные владельцем", () => {
@@ -40,5 +40,27 @@ describe("стандартные нормативы", () => {
   it("отсутствующий узел и пустая строка дают один ключ — как coalesce в индексе", () => {
     assert.equal(normKey("e1", "service", null), normKey("e1", "service", undefined));
     assert.equal(normKey("e1", "service", null), "e1|service|");
+  });
+
+  it("кофейные нормативы не уходят на снек-автомат", () => {
+    // У снека нет ни миксера, ни фильтра воды: график такой работы краснел бы
+    // за работу, которой не существует.
+    const other = normsFor(false).map((n) => n.title);
+    assert.deepEqual(other, ["Плановое ТО"]);
+  });
+
+  it("кофейный автомат получает все три", () => {
+    assert.equal(normsFor(true).length, STANDARD_NORMS.length);
+  });
+
+  it("плановое ТО применимо к любому автомату", () => {
+    const service = STANDARD_NORMS.find((n) => n.kind === "service")!;
+    assert.equal(service.scope, "any");
+  });
+
+  it("узловые нормативы помечены как кофейные", () => {
+    for (const n of STANDARD_NORMS.filter((x) => x.partKind !== null)) {
+      assert.equal(n.scope, "coffee", n.title);
+    }
   });
 });
