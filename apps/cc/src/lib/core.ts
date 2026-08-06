@@ -805,6 +805,8 @@ export interface Person {
   id: string;
   name: string;
   role: string | null;
+  /** Роли доступа: по ним фильтруется меню бота и проверяются мутации. */
+  roles?: string[];
   /** Направление, куда нанят. */
   domain: string | null;
   email: string | null;
@@ -1604,6 +1606,13 @@ export const core = {
   people: (all = false) => get<Person[]>(`/people${all ? "?all=1" : ""}`),
   person: (id: string) => get<Person>(`/people/${id}`),
   createPerson: (input: Record<string, unknown>) => send<Person>("/people", "POST", input),
+  /** Выпустить приглашение. Код возвращается ОДИН раз — в БД только хеш. */
+  invitePerson: (id: string, roles: string[]) =>
+    send<{ code: string; expiresAt: string; name: string }>(`/people/${id}/invite`, "POST", { roles }),
+  /** Отозвать доступ: снять привязку и роли, погасить живые приглашения. */
+  revokePerson: (id: string) => send<Person>(`/people/${id}/revoke`, "POST", {}),
+  setPersonRoles: (id: string, roles: string[]) =>
+    send<Person>(`/people/${id}/roles`, "POST", { roles }),
   updatePerson: (id: string, input: Record<string, unknown>) =>
     send<Person>(`/people/${id}`, "PATCH", input),
   agent: (name: string) => get<AgentCard>(`/agents/${encodeURIComponent(name)}`),

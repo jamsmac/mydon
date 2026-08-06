@@ -20,6 +20,12 @@ import { handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
 import { helpText, menuKeyboard } from "./menu";
 import { handleRegisterPhoto } from "./staff-register";
 import { attachBeforePhoto, handleTaskDonePhoto } from "./task-done";
+import {
+  handleStaffAddCallback,
+  isStaffAddTrigger,
+  parseStaffAddCallback,
+  startStaffAdd,
+} from "./staff-add";
 import { handleAfterPhoto } from "./field-work";
 import { InvalidTokenError, TelegramApi, TelegramError, type TgUpdate } from "./telegram";
 
@@ -105,6 +111,15 @@ async function main(): Promise<void> {
   }
 
   const tg = new TelegramApi(token);
+  // Имя бота нужно для ссылок-приглашений. Спрашиваем один раз у самого
+  // Telegram, а не держим в .env: рассинхрон конфига и реального бота дал бы
+  // ссылку, ведущую в никуда, и заметили бы это только на сотруднике.
+  let botUsername = process.env.TELEGRAM_BOT_USERNAME ?? "";
+  try {
+    botUsername = (await tg.getMe()).username || botUsername;
+  } catch (err) {
+    console.warn("Имя бота не получено — ссылки-приглашения будут по TELEGRAM_BOT_USERNAME:", err);
+  }
   console.log(`MYDON Bot запущен (TZ=${TZ}, Core=${coreUrl}, разрешено чатов: ${allowlist.size}).`);
 
   // ── Сотрудники: свой узкий режим (только свои задачи) ──────────────────────
@@ -558,6 +573,18 @@ async function main(): Promise<void> {
         } else if (u.message?.text) {
           const chatId = u.message.chat.id;
           if (isAllowed(chatId, allowlist)) {
+            // Подключение сотрудника — мутация с состоянием, ловим до общего
+            // обработчика: иначе «подключить» ушло бы в разбор намерений.
+            if (isStaffAddTrigger(u.message.text)) {
+              try {
+                const r = await startStaffAdd(chatId, staffDeps);
+                await tg.sendMessage(chatId, r.text, r.keyboard);
+              } catch (err) {
+                console.error("Подключение сотрудника не начато:", err);
+                await tg.sendMessage(chatId, "Не удалось прочитать список сотрудников из Core.");
+              }
+              continue;
+            }
             const reply = await handleMessage(chatId, u.message.text, deps);
             if (reply) {
               await tg.sendMessage(chatId, reply.text, reply.keyboard);
@@ -582,6 +609,22 @@ async function main(): Promise<void> {
           const data = u.callback_query.data;
 
           if (isAllowed(chatId, allowlist)) {
+            // Кнопки визарда подключения (sa:) — до согласований: у них
+            // разные пространства, но проверить надо раньше фолбэка
+            // «эта кнопка устарела».
+            const sa = parseStaffAddCallback(data);
+            if (sa) {
+              try {
+                const res = await handleStaffAddCallback(chatId, sa, staffDeps, botUsername);
+                await tg.answerCallback(u.callback_query.id, res.answer);
+                if (res.message) await tg.sendMessage(chatId, res.message.text, res.message.keyboard);
+              } catch (err) {
+                console.error("Кнопка подключения не сработала:", err);
+                await tg.answerCallback(u.callback_query.id, "Не получилось, попробуй ещё раз");
+              }
+              continue;
+            }
+
             const parsed = parseApprovalCallback(data);
             if (!parsed) {
               // Неизвестная кнопка: молчание оставляет вечный спиннер —

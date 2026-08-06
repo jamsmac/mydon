@@ -253,6 +253,11 @@ export class TelegramApi {
     return { bytes: Buffer.from(await res.arrayBuffer()), mime };
   }
 
+  /** Кто мы: нужно для ссылок-приглашений вида t.me/<bot>?start=… */
+  async getMe(): Promise<{ username: string }> {
+    return this.call<{ username: string }>("getMe", {});
+  }
+
   /** Забирает пачку обновлений. Смещение двигаем сами, чтобы не обрабатывать дважды. */
   async getUpdates(): Promise<TgUpdate[]> {
     // Свой таймаут: long polling законно молчит timeoutSec секунд, и общие

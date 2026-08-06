@@ -550,6 +550,14 @@ export class CoreClient {
     });
   }
 
+  /** Отозвать доступ: снять привязку, роли и погасить живые приглашения. */
+  revokeAccess(personId: string, actor = "owner"): Promise<PersonRow> {
+    return this.request<PersonRow>(`/people/${personId}/revoke`, {
+      method: "POST",
+      body: JSON.stringify({ actor }),
+    });
+  }
+
   /** Вернуть свою задачу в общий пул. */
   releaseTask(id: string, personId: string): Promise<unknown> {
     return this.request(`/tasks/${id}/release`, {
