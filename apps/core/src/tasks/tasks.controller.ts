@@ -103,6 +103,13 @@ export class EditTaskDto {
   entityId?: string;
 }
 
+/** Постановка повторяющейся задачи на день — от монитора графиков. */
+export class EnsureForDayDto extends CreateTaskDto {
+  /** Календарный день по Ташкенту: часть ключа идемпотентности. */
+  @IsISO8601({ strict: true }, { message: "dayKey: дата YYYY-MM-DD" })
+  dayKey!: string;
+}
+
 /** Кто берёт задачу из общего пула или возвращает её обратно. */
 export class ClaimTaskDto {
   @IsUUID()
@@ -139,6 +146,28 @@ export class TasksController {
       ...(dto.priority ? { priority: dto.priority } : {}),
       ...(dto.createdBy ? { createdBy: dto.createdBy } : {}),
       ...(dto.entityId ? { entityId: dto.entityId } : {}),
+    });
+  }
+
+  /**
+   * Идемпотентная постановка повторяющейся задачи на конкретный день.
+   *
+   * Вызывает монитор графиков. Повтор в тот же день возвращает null — дубль
+   * отсекает уникальный индекс в БД, а не проверка перед вставкой.
+   */
+  @Post("ensure-for-day")
+  ensureForDay(@Body() dto: EnsureForDayDto) {
+    return this.tasks.ensureForDay({
+      title: dto.title,
+      ownerKind: dto.ownerKind,
+      dayKey: dto.dayKey,
+      ...(dto.ownerRef ? { ownerRef: dto.ownerRef } : {}),
+      ...(dto.entityId ? { entityId: dto.entityId } : {}),
+      ...(dto.description ? { description: dto.description } : {}),
+      ...(dto.due ? { due: new Date(dto.due) } : {}),
+      ...(dto.priority ? { priority: dto.priority } : {}),
+      ...(dto.source ? { source: dto.source } : {}),
+      ...(dto.createdBy ? { createdBy: dto.createdBy } : {}),
     });
   }
 

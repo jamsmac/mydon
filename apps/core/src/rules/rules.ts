@@ -288,6 +288,60 @@ export const RULES: Rule[] = [
       `☕🟡 Расхождение расхода: ${str(c.payload.location)} — ${str(c.payload.ingredient)}, ` +
       `факт ${num(c.payload.actualGrams)} г против ожидания ${num(c.payload.expectedGrams)} г.`,
   },
+
+  // ── Обслуживание оборудования ─────────────────────────────────────────────
+  //
+  // Правила адресуются владельцу — контракт Notification не менялся.
+  // Сотрудник узнаёт о работе через ЗАДАЧУ, а не через уведомление: у
+  // Notification нет получателя, доставка идёт по allowlist владельца.
+  {
+    // Технический осмотр — регуляторная обязанность, а не «помыть попозже».
+    // Просрочка тут стоит дороже остальных, поэтому отдельное немедленное
+    // правило с первого дня, а не с третьего.
+    id: "maintenance.inspection.overdue",
+    eventType: "maintenance.overdue",
+    urgency: "immediate",
+    when: (c) =>
+      (c.payload.kind === "inspection" || c.payload.kind === "calibration") &&
+      num(c.payload.daysOverdue) >= 1,
+    format: (c) =>
+      `📋🔴 Просрочен ${str(c.payload.kindLabel).toLowerCase()}: ${str(c.payload.targetName)} — ` +
+      `срок был ${str(c.payload.dueDate)} (${num(c.payload.daysOverdue)} дн. назад).`,
+  },
+  {
+    id: "maintenance.overdue.hard",
+    eventType: "maintenance.overdue",
+    urgency: "immediate",
+    when: (c) =>
+      c.payload.kind !== "inspection" &&
+      c.payload.kind !== "calibration" &&
+      num(c.payload.daysOverdue) >= 7,
+    format: (c) =>
+      `🔧🔴 Неделю не сделано: ${str(c.payload.kindLabel)} — ${str(c.payload.targetName)}` +
+      `${c.payload.partLabel ? ` (${str(c.payload.partLabel)})` : ""}, срок был ${str(c.payload.dueDate)}.`,
+  },
+  {
+    id: "maintenance.overdue.watch",
+    eventType: "maintenance.overdue",
+    urgency: "briefing",
+    when: (c) =>
+      c.payload.kind !== "inspection" &&
+      c.payload.kind !== "calibration" &&
+      num(c.payload.daysOverdue) < 7,
+    format: (c) =>
+      `🔧🟡 Просрочено ${num(c.payload.daysOverdue)} дн.: ${str(c.payload.kindLabel)} — ` +
+      `${str(c.payload.targetName)}.`,
+  },
+  {
+    // Свободная задача со сроком сегодня, которую никто не взял. Проблема
+    // не в отсутствии исполнителя при создании — это норма при общем пуле.
+    id: "maintenance.unclaimed",
+    eventType: "maintenance.unclaimed",
+    urgency: "briefing",
+    format: (c) =>
+      `🙋 Никто не взял: ${str(c.payload.kindLabel)} — ${str(c.payload.targetName)}, ` +
+      `срок сегодня (${str(c.payload.dueDate)}).`,
+  },
 ];
 
 /** Подбирает уведомления под событие. Одно событие может дать несколько. */

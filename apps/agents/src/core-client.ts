@@ -1,3 +1,4 @@
+import type { EnsureTaskInput, MaintenanceDueRow } from "./maintenance-monitor";
 import type { AutonomyTier, Domain } from "@mydon/shared";
 
 /** Сводка Core — на её основе навыки решают, есть ли повод что-то предлагать. */
@@ -353,6 +354,25 @@ export class AgentsCoreClient {
   // порогам, решение «немедленно или в брифинг» остаётся за правилами (rules.ts).
 
   /** Недолив по последней заливке каждого (точка, бункер) против эталона. */
+  // ── Обслуживание: сроки и постановка задач ─────────────────────────────────
+
+  /** Что подходит к сроку. Статус считается на чтении, нигде не хранится. */
+  maintenanceDue(): Promise<MaintenanceDueRow[]> {
+    return this.request("/maintenance/due");
+  }
+
+  /**
+   * Идемпотентная постановка задачи на день. Повторный прогон монитора
+   * в тот же день дубля не создаёт — ставку делает уникальный индекс в БД.
+   */
+  async ensureTaskForDay(input: EnsureTaskInput): Promise<{ created: boolean; taskId?: string }> {
+    const row = await this.request<{ id?: string } | null>("/tasks/ensure-for-day", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return row?.id ? { created: true, taskId: row.id } : { created: false };
+  }
+
   coffeeFillStatus(): Promise<CoffeeFillStatusRow[]> {
     return this.request("/coffee/fill-status");
   }
