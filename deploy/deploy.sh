@@ -90,10 +90,12 @@ say "4/7 Сборка образа и запуск"
 ssh "$HOST" "cd $REMOTE_DIR && docker compose -f deploy/docker-compose.yml --env-file .env up -d --build"
 
 say "5/7 Применение схемы БД"
+# node dist/migrate.js, а не drizzle-kit: последний при отказе SQL молчит и
+# выходит кодом 1 — отладить такой деплой нечем (см. комментарий в auto-deploy.sh).
 ssh "$HOST" "
   cd $REMOTE_DIR
   docker compose -f deploy/docker-compose.yml --env-file .env exec -T mydon-core \
-    sh -c 'cd packages/db && npx drizzle-kit migrate'
+    node packages/db/dist/migrate.js
 "
 
 say "6/7 Структурный сид (только 5 направлений, без бизнес-данных)"

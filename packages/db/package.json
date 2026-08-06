@@ -16,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
+    "db:migrate": "node dist/migrate.js",
     "db:studio": "drizzle-kit studio",
     "db:seed": "node dist/seed.js",
     "db:seed:catalog": "node dist/seed-catalog.js",

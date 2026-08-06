@@ -125,7 +125,12 @@ fi
 #    container_name в docker-compose.yml, а старый контейнер с этим именем
 #    ещё работает (шаг 5 его не заменил) — без суффикса `run` уткнулся бы в
 #    конфликт имён (найдено ревью).
-"${COMPOSE[@]}" run --rm --name mydon-core-migrate mydon-core sh -c 'cd packages/db && npx drizzle-kit migrate'
+#
+#    НЕ `drizzle-kit migrate`: при отказе SQL он выходит кодом 1 и не печатает
+#    ничего (спиннер затирает строку, исключение теряется). Полевой контур
+#    из-за этого три дня не разворачивался, а в журнале было только «ОШИБКА
+#    (строка 128)». Свой скрипт печатает сообщение постгреса и сам запрос.
+"${COMPOSE[@]}" run --rm --name mydon-core-migrate mydon-core node packages/db/dist/migrate.js
 
 # 5. Переключаем контейнеры на собранный образ.
 "${COMPOSE[@]}" up -d
