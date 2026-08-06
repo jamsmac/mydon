@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
-import { ArrayMaxSize, IsArray, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
+import { ArrayMaxSize, IsArray, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
+import { MACHINE_KINDS, type MachineKind } from "@mydon/shared";
 import { EntitiesService } from "./entities.service";
 import { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
 
@@ -20,6 +21,19 @@ export class ProposeFieldDto {
 
   @IsOptional() @IsString() @MaxLength(1000)
   note?: string;
+}
+
+
+/** Вид автомата — поле карточки, а не догадка по косвенным признакам. */
+export class SetMachineKindDto {
+  @IsIn([...MACHINE_KINDS])
+  kind!: MachineKind;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  note?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
 }
 
 /** Набор карточек к утверждению разом — «утвердить все» из очереди. */
@@ -111,5 +125,18 @@ export class EntitiesController {
   async remove(@Param("id", ParseUUIDPipe) id: string) {
     await this.entities.remove(id);
     return { ok: true };
+  }
+
+  // ── Карточка автомата: вид ────────────────────────────────────────────────
+
+  /** Виды всех размеченных автоматов. Отсутствие строки = не размечен. */
+  @Get("machine-cards/all")
+  machineCards() {
+    return this.entities.machineCards();
+  }
+
+  @Patch(":id/machine-kind")
+  setMachineKind(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetMachineKindDto) {
+    return this.entities.setMachineKind(id, dto.kind, dto.actor ?? "owner", dto.note);
   }
 }

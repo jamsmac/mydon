@@ -1,19 +1,23 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, entity, entityDraft, geoPoint, org } from "@mydon/db";
+import { auditLog, entity, entityDraft, geoPoint, machineCard, org } from "@mydon/db";
 import {
   addressFromAttrs,
   coordFromAttrs,
   isUnit,
+  MACHINE_KINDS,
   parseRecipe,
   recipeCost,
   type Domain,
   type IngredientPrice,
+  type MachineKind,
   type Unit,
 } from "@mydon/shared";
 import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import type { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
+
+type MachineCardRow = typeof machineCard.$inferSelect;
 
 type EntityRow = typeof entity.$inferSelect;
 /** Транзакция Drizzle — та же, что даёт `db.transaction(async (tx) => …)`. */
@@ -646,5 +650,72 @@ export class EntitiesService {
         };
       }),
     };
+  }
+
+  // ── Карточка автомата: вид (WAREHOUSE_SPEC §4.0) ───────────────────────────
+
+  /** Карточки автоматов: entityId → вид. Без фильтра — все заведённые. */
+  async machineCards(entityIds?: string[]): Promise<MachineCardRow[]> {
+    if (entityIds && entityIds.length === 0) return [];
+    return this.db
+      .select()
+      .from(machineCard)
+      .where(entityIds ? inArray(machineCard.entityId, entityIds) : undefined)
+      .limit(1000);
+  }
+
+  /**
+   * Задать вид автомата.
+   *
+   * Проверяем, что карточка вообще автомат: вид у договора или контрагента
+   * бессмыслен, а молча записанная строка потом всплывёт в отчёте как
+   * «неразмеченный автомат», которого не существует.
+   *
+   * Пишем в аудит с переданным актором. Для трёх автоматов, которые владелец
+   * размечает руками, это единственный способ потом отличить его решение от
+   * результата массового backfill — а отличать придётся: догадка и решение
+   * имеют разный вес.
+   */
+  async setMachineKind(
+    entityId: string,
+    kind: MachineKind,
+    actorRef = "owner",
+    note?: string,
+  ): Promise<MachineCardRow> {
+    if (!(MACHINE_KINDS as readonly string[]).includes(kind)) {
+      throw new BadRequestException(`Неизвестный вид автомата: ${kind}`);
+    }
+    return this.db.transaction(async (tx) => {
+      const [card] = await tx.select().from(entity).where(eq(entity.id, entityId)).limit(1);
+      if (!card) throw new NotFoundException("Карточки нет");
+      if (card.type !== "machine") {
+        throw new BadRequestException(`Вид задаётся только автоматам, а это «${card.type}»`);
+      }
+
+      const [before] = await tx
+        .select()
+        .from(machineCard)
+        .where(eq(machineCard.entityId, entityId))
+        .limit(1);
+
+      const [after] = await tx
+        .insert(machineCard)
+        .values({ entityId, kind, note: note ?? null, createdBy: actorRef })
+        .onConflictDoUpdate({
+          target: [machineCard.entityId],
+          set: { kind, ...(note !== undefined ? { note } : {}), updatedAt: new Date() },
+        })
+        .returning();
+
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: before ? "machine.kind_changed" : "machine.kind_set",
+        target: entityId,
+        before: before ?? null,
+        after,
+      });
+      return after;
+    });
   }
 }

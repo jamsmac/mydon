@@ -316,6 +316,13 @@
       "when": 1786020330848,
       "tag": "0044_vending_refill",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1786035339310,
+      "tag": "0045_machine_card",
+      "breakpoints": true
     }
   ]
 }

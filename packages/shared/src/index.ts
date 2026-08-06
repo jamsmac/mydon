@@ -73,6 +73,7 @@ export * from "./geo";
 /** Обслуживание оборудования: узлы, виды работ, симптомы, расчёт сроков. */
 export * from "./maintenance";
 export * from "./maintenance-due";
+export * from "./catalog-kinds";
 export * from "./maintenance-norms";
 
 /** Роли сотрудников, права и приглашения в бота. */

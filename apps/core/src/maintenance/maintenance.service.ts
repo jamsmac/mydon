@@ -1,9 +1,9 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
   auditLog,
-  coffeeLocation,
   collection,
   entity,
+  machineCard,
   machinePart,
   maintenanceLog,
   maintenancePlan,
@@ -348,11 +348,15 @@ export class MaintenanceService {
    * (`where is_active`), и выключение — это «мы за этим больше не следим», а
    * повторный вызов метода — прямое «следим снова».
    *
-   * Кофейные нормативы (мойка миксера, фильтр воды) идут только на автоматы,
-   * привязанные к кофейной точке. Различает это Core, а не вызывающий: связь
-   * лежит в `coffee_location.entity_id`, и заставлять каждого клиента её
-   * вычислять значит завести второе место правды, которое однажды разойдётся
-   * с первым.
+   * Кофейные нормативы (мойка миксера, фильтр воды) идут только автоматам
+   * вида `coffee` — по карточке `machine_card`, а не по привязке к кофейной
+   * точке. Привязка была косвенным признаком: три автомата с кофейными
+   * серийниками её не имели и получали бы неполный комплект не потому, что
+   * они не кофейные, а потому что связь никто не завёл.
+   *
+   * Автомат без карточки считается неразмеченным и получает только общие
+   * нормативы. Это консервативно намеренно: пустой график чинится одной
+   * командой после разметки, красный — потерянным доверием к разделу.
    */
   async applyStandardNorms(
     entityIds: string[],
@@ -362,11 +366,11 @@ export class MaintenanceService {
     const today = todayInTz();
 
     return this.db.transaction(async (tx) => {
-      const linked = await tx
-        .select({ entityId: coffeeLocation.entityId })
-        .from(coffeeLocation)
-        .where(inArray(coffeeLocation.entityId, entityIds));
-      const isCoffee = new Set(linked.map((r) => r.entityId).filter((id): id is string => !!id));
+      const cards = await tx
+        .select({ entityId: machineCard.entityId, kind: machineCard.kind })
+        .from(machineCard)
+        .where(inArray(machineCard.entityId, entityIds));
+      const kindOf = new Map(cards.map((c) => [c.entityId, c.kind]));
 
       const existing = await tx
         .select({
@@ -385,7 +389,7 @@ export class MaintenanceService {
       const seen = new Set<string>();
       for (const entityId of entityIds) {
         seen.add(entityId);
-        for (const norm of normsFor(isCoffee.has(entityId))) {
+        for (const norm of normsFor(kindOf.get(entityId))) {
           if (taken.has(normKey(entityId, norm.kind, norm.partKind))) {
             skipped += 1;
             continue;
@@ -419,7 +423,7 @@ export class MaintenanceService {
           taken.add(normKey(entityId, norm.kind, norm.partKind));
         }
       }
-      const coffee = [...seen].filter((id) => isCoffee.has(id)).length;
+      const coffee = [...seen].filter((id) => kindOf.get(id) === "coffee").length;
       return { created, skipped, coffee, other: seen.size - coffee };
     });
   }
