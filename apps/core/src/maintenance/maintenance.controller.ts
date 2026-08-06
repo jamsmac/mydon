@@ -1,5 +1,8 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
 import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
@@ -195,6 +198,24 @@ export class UpsertPlanDto {
 }
 
 /**
+ * Массовое заведение стандартных нормативов.
+ *
+ * Список объектов приходит явно, а не «всем автоматам сразу»: у владельца
+ * есть кофейные точки и снек-автоматы, и мойка миксера раз в 10 дней имеет
+ * смысл не для всех. Кого включать — решает вызывающий, а не Core.
+ */
+export class ApplyStandardNormsDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(500)
+  @IsUUID(undefined, { each: true })
+  entityIds!: string[];
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
+/**
  * Обслуживание оборудования: журнал работ и узлы автоматов.
  *
  * Сроки следующих работ здесь не считаются — это дело нормативов, у которых
@@ -264,6 +285,18 @@ export class MaintenanceController {
   @Post("plans")
   upsertPlan(@Body() dto: UpsertPlanDto) {
     return this.maintenance.upsertPlan(dto, dto.actor ?? "owner");
+  }
+
+  /** Стандартные нормативы (10 / 45 / 90) на список объектов. Идемпотентно. */
+  @Post("plans/standard")
+  async applyStandardNorms(@Body() dto: ApplyStandardNormsDto) {
+    const { created, skipped } = await this.maintenance.applyStandardNorms(
+      dto.entityIds,
+      dto.actor ?? "owner",
+    );
+    // Наружу отдаём счётчики и заведённое, а не полный список из полутора
+    // сотен строк: вызывающему нужно «что изменилось», остальное — GET /plans.
+    return { created: created.length, skipped, plans: created };
   }
 
   @Delete("plans/:id")

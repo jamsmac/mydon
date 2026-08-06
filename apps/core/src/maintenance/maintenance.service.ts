@@ -5,7 +5,9 @@ import {
   computeDue,
   firstDue,
   maintenanceKindLabel,
+  normKey,
   partLabel,
+  STANDARD_NORMS,
   TZ,
   type DueStatus,
 } from "@mydon/shared";
@@ -318,6 +320,84 @@ export class MaintenanceService {
         after: created,
       });
       return created;
+    });
+  }
+
+  /**
+   * Завести стандартные нормативы (10 / 45 / 90) на список объектов.
+   *
+   * Ради этого метода график вообще заводится: заводить три плана на каждый
+   * автомат руками — сорок автоматов × три формы, и парк растёт. Здесь же —
+   * один вызов на весь парк.
+   *
+   * ИДЕМПОТЕНТНО. Повторный прогон ничего не создаёт и ничего не трогает:
+   * уже заведённый план мог быть поправлен владельцем («этот моем реже»), и
+   * молча вернуть его к норме значит стереть решение. Поэтому существующие
+   * только считаются в `skipped`, а не обновляются.
+   *
+   * Выключенный план (`is_active = false`) считается отсутствующим и будет
+   * заведён заново. Это осознанно: уникальный индекс тоже частичный
+   * (`where is_active`), и выключение — это «мы за этим больше не следим», а
+   * повторный вызов метода — прямое «следим снова».
+   */
+  async applyStandardNorms(
+    entityIds: string[],
+    actorRef = "owner",
+  ): Promise<{ created: PlanRow[]; skipped: number }> {
+    if (entityIds.length === 0) return { created: [], skipped: 0 };
+    const today = todayInTz();
+
+    return this.db.transaction(async (tx) => {
+      const existing = await tx
+        .select({
+          entityId: maintenancePlan.entityId,
+          kind: maintenancePlan.kind,
+          partKind: maintenancePlan.partKind,
+        })
+        .from(maintenancePlan)
+        .where(
+          and(eq(maintenancePlan.isActive, true), inArray(maintenancePlan.entityId, entityIds)),
+        );
+      const taken = new Set(existing.map((p) => normKey(p.entityId, p.kind, p.partKind)));
+
+      const created: PlanRow[] = [];
+      let skipped = 0;
+      for (const entityId of entityIds) {
+        for (const norm of STANDARD_NORMS) {
+          if (taken.has(normKey(entityId, norm.kind, norm.partKind))) {
+            skipped += 1;
+            continue;
+          }
+          const period = { everyDays: norm.everyDays, everyMonths: null, everyCount: null };
+          const [row] = await tx
+            .insert(maintenancePlan)
+            .values({
+              entityId,
+              kind: norm.kind,
+              partKind: norm.partKind,
+              title: norm.title,
+              ...period,
+              // Первый срок — от сегодня, а не от «когда-то делали». Иначе при
+              // запуске весь парк встанет красным, и в график перестанут
+              // смотреть на второй день (FIELD_OPS_SPEC §7.1).
+              dueOn: firstDue(today, period),
+              createdBy: actorRef,
+            })
+            .returning();
+          await tx.insert(auditLog).values({
+            actorKind: "human",
+            actorRef,
+            action: "maintenance.plan_created",
+            target: row.id,
+            after: row,
+          });
+          created.push(row);
+          // Тот же прогон не должен завести дубль, если объект пришёл в
+          // списке дважды: вызывающий не обязан за этим следить.
+          taken.add(normKey(entityId, norm.kind, norm.partKind));
+        }
+      }
+      return { created, skipped };
     });
   }
 
