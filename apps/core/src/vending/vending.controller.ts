@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
@@ -10,11 +10,13 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   Min,
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
+import { RefillService } from "./refill.service";
 import { VendingService } from "./vending.service";
 
 export class IngestSlotDto {
@@ -178,12 +180,60 @@ export class SyncFinishDto {
 }
 
 /**
+ * Заливка автомата сотрудником (WAREHOUSE_SPEC §4.1).
+ *
+ * `clientKey` обязателен и приходит от клиента, а не генерируется здесь:
+ * весь смысл ключа в том, чтобы ПОВТОР того же нажатия принёс то же значение.
+ * Сгенерируй его сервер — каждый повтор был бы новой записью.
+ */
+export class CreateRefillDto {
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  machineSerial!: string;
+
+  @IsOptional() @IsUUID()
+  machineId?: string;
+
+  @IsOptional() @IsString() @MaxLength(16)
+  coilId?: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  productName!: string;
+
+  @IsInt() @Min(1)
+  qty!: number;
+
+  @IsOptional() @IsUUID()
+  personId?: string;
+
+  @IsOptional() @IsUUID()
+  taskId?: string;
+
+  @IsOptional() @IsISO8601({ strict: true })
+  performedAt?: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(128)
+  clientKey!: string;
+
+  @IsOptional() @IsIn(["bot", "panel"])
+  source?: string;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  note?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  createdBy?: string;
+}
+
+/**
  * Вендинг: приём собранных данных и просмотр дефицита. Приём (POST) закрыт
  * общим ServiceTokenGuard — данные кладёт коллектор, не кто угодно.
  */
 @Controller("vending")
 export class VendingController {
-  constructor(private readonly vending: VendingService) {}
+  constructor(
+    private readonly vending: VendingService,
+    private readonly refills: RefillService,
+  ) {}
 
   @Post("ingest")
   ingest(@Body() dto: IngestPayloadDto) {
@@ -272,5 +322,33 @@ export class VendingController {
   @Get("sync")
   syncRuns() {
     return this.vending.syncRuns();
+  }
+
+  // ── Заливка автоматов: факт от сотрудника, списание со склада ─────────────
+
+  @Post("refills")
+  createRefill(@Body() dto: CreateRefillDto) {
+    return this.refills.create({
+      ...dto,
+      performedAt: dto.performedAt ? new Date(dto.performedAt) : undefined,
+    });
+  }
+
+  @Get("refills")
+  listRefills(
+    @Query("machineSerial") machineSerial?: string,
+    @Query("personId") personId?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("limit") limit?: string,
+  ) {
+    const n = Number(limit);
+    return this.refills.list({
+      machineSerial,
+      personId,
+      from: from ? new Date(from) : undefined,
+      to: to ? new Date(to) : undefined,
+      limit: Number.isFinite(n) && n > 0 ? n : undefined,
+    });
   }
 }

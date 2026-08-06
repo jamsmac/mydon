@@ -5,7 +5,7 @@
  *
  * Принцип: сначала реестр, потом дашборд. Базы движков (VHM24 и др.) — отдельные, здесь не хранятся.
  */
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import {
   pgTable,
   pgEnum,
@@ -1289,6 +1289,62 @@ export const vendingStock = pgTable("vending_stock", {
 });
 
 /**
+ * `vending_refill` — ФАКТ заливки автомата сотрудником (WAREHOUSE_SPEC §4.1).
+ *
+ * Своя таблица, а не апдейт `machine_slot`, по одной причине: зеркало Ourvend
+ * перезаписывается кроном `0 * /3 * * *`, и наша запись исчезла бы без следа
+ * и без ошибки. `slot_snapshot` тоже не подходит — это история ЗЕРКАЛА (что
+ * показал автомат), а здесь история НАША (что сделал человек). Смешав их,
+ * невозможно отличить факт от отражения.
+ *
+ * Расхождение «доложил 10, автомат показал +8» здесь не хранится: оно
+ * считается на чтении по `slot_snapshot` до и после `performed_at`. Хранить
+ * его значило бы зафиксировать разницу на момент, когда сравнивать было ещё
+ * не с чем.
+ */
+export const vendingRefill = pgTable(
+  "vending_refill",
+  {
+    id: id(),
+    /** Карточка автомата, если сопоставлена. */
+    machineId: uuid("machine_id").references(() => entity.id),
+    /** MuMachineID Ourvend — ключ, по которому живёт зеркало. */
+    machineSerial: text("machine_serial").notNull(),
+    /** Слот. NULL — заправлял автомат целиком, по товарам. */
+    coilId: text("coil_id"),
+    productId: uuid("product_id").references(() => vendingProduct.id),
+    /**
+     * Имя товара на момент заливки. Рядом с `product_id` намеренно — тот же
+     * приём, что в `machine_slot`: справочник живой, товар переименуют, и
+     * отчёт за прошлый месяц не должен менять содержание задним числом.
+     */
+    productName: text("product_name").notNull(),
+    qty: integer("qty").notNull(),
+    personId: uuid("person_id").references(() => person.id),
+    taskId: uuid("task_id").references(() => task.id),
+    performedAt: timestamp("performed_at", { withTimezone: true }).notNull(),
+    /**
+     * Ключ идемпотентности мастера, а не «(автомат, слот, минута)».
+     * Плохая связь в подвале даёт двойное нажатие «Готово»; ключ по времени
+     * ловит дубль, только если оба нажатия попали в одну минуту, и при этом
+     * ломает законное «залил тот же слот дважды подряд, не влезло сразу».
+     */
+    clientKey: text("client_key").notNull(),
+    /** Откуда факт: bot | panel. */
+    source: text("source").default("bot").notNull(),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("vending_refill_machine_idx").on(t.machineSerial, desc(t.performedAt)),
+    index("vending_refill_person_idx").on(t.personId, desc(t.performedAt)),
+    uniqueIndex("vending_refill_client_key").on(t.clientKey),
+    check("vending_refill_qty_positive", sql`${t.qty} > 0`),
+  ],
+);
+
+/**
  * Накладная закупа (§5.7): материализуется, когда владелец ОДОБРИЛ заявку.
  * Снимок позиций и сумм берётся из payload одобренной заявки — цифры фиксируются
  * на момент решения, а не пересчитываются задним числом. Одна накладная на
@@ -2081,6 +2137,7 @@ export const schema = {
   productSale,
   machineSale,
   vendingStock,
+  vendingRefill,
   vendingPurchaseOrder,
   vendingCashSession,
   vendingUnmatched,

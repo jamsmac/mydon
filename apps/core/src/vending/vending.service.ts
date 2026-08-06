@@ -482,6 +482,28 @@ export class VendingService {
     return { aliasByKey, priceByName, packByName };
   }
 
+  /**
+   * Канон имени товара и его карточка — для тех, кто пишет в `vending_stock`
+   * извне этого сервиса (заливка автомата).
+   *
+   * Публично именно потому, что канон один. `vending_stock` ключуется ИМЕНЕМ
+   * товара, и запись мимо канона («кока кола» вместо «Coca-Cola 0.5») создаёт
+   * вторую строку остатка, которую закуп никогда не сложит с первой.
+   * Неизвестное имя возвращается как есть, обрезанным: новый товар — не повод
+   * отказать сотруднику в записи факта.
+   */
+  async resolveProductRef(raw: string): Promise<{ name: string; productId: string | null }> {
+    const trimmed = raw.trim();
+    const { aliasByKey } = await this.loadProductIndex();
+    const name = this.resolveProduct(trimmed, aliasByKey);
+    const [hit] = await this.db
+      .select({ id: vendingProduct.id })
+      .from(vendingProduct)
+      .where(eq(vendingProduct.name, name))
+      .limit(1);
+    return { name, productId: hit?.id ?? null };
+  }
+
   /** Привести имя товара к канону через алиасы; неизвестное — как есть. */
   private resolveProduct(name: string, aliases: Map<string, string>): string {
     return aliases.get(normalizeProductName(name)) ?? name;
