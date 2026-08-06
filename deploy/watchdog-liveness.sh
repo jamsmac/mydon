@@ -140,16 +140,26 @@ send() {
     echo "WATCHDOG_BOT_TOKEN/WATCHDOG_CHAT_IDS не заданы — тревога только в лог: $1"
     return 0
   }
-  local chat
+  local chat resp
   IFS=',' read -ra chats <<< "$WATCHDOG_CHAT_IDS"
   for chat in "${chats[@]}"; do
     chat="$(echo "$chat" | tr -d '[:space:]')"
     [ -n "$chat" ] || continue
-    curl -sS -X POST --max-time 15 \
+    # curl без -f не отличает HTTP 200 с телом {"ok":false,...} от настоящей
+    # доставки: неверный токен бота Telegram отвечает 200/401/404, но curl
+    # сам по себе на это не падает. Найдено на практике на соседнем скрипте
+    # (heartbeat.sh) — та же ошибка молча превращала неудачу в «отправлено».
+    # Поэтому проверяем поле "ok" в самом ответе, а не только код завершения.
+    resp="$(curl -sS -X POST --max-time 15 \
       -H "Content-Type: application/json" \
       -d "$(python3 -c 'import json,sys; print(json.dumps({"chat_id": sys.argv[1], "text": sys.argv[2]}))' "$chat" "$1")" \
-      "https://api.telegram.org/bot${WATCHDOG_BOT_TOKEN}/sendMessage" >/dev/null || \
-      echo "тревога не отправлена в $chat"
+      "https://api.telegram.org/bot${WATCHDOG_BOT_TOKEN}/sendMessage")" || {
+      echo "тревога не отправлена в $chat: сеть недоступна"
+      continue
+    }
+    if ! printf '%s' "$resp" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") else 1)' 2>/dev/null; then
+      echo "тревога не отправлена в $chat: Telegram отклонил — $(printf '%s' "$resp" | head -c 200)"
+    fi
   done
 }
 

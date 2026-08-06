@@ -31,11 +31,27 @@ payload="$(printf '{"ts":"%s","host":"mydon-os","disk_avail_gb":"%s","containers
 # PATCH gist: содержимое файла heartbeat.json заменяется целиком.
 body="$(printf '{"files":{"heartbeat.json":{"content":%s}}}' "$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")"
 
-curl -sS -X PATCH \
+resp="$(mktemp)"
+trap 'rm -f "$resp"' EXIT
+
+# curl без -f не отличает HTTP-ошибку от успеха: PATCH без права записи в
+# Gist отвечает 403/404 с телом ошибки, а curl всё равно завершается нулём.
+# Найдено на практике: fine-grained PAT не поддерживает Gists вовсе, и без
+# этой проверки скрипт часами печатал "heartbeat отправлен", пока gist молча
+# оставался пустым — сторож в это время без единого сбоя решал, что сервер
+# лежит, хотя сервер был жив и исправно (как ему казалось) отчитывался.
+code="$(curl -sS -o "$resp" -w '%{http_code}' -X PATCH \
   -H "Authorization: Bearer $HEARTBEAT_GH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   --max-time 20 \
   -d "$body" \
-  "https://api.github.com/gists/$HEARTBEAT_GIST_ID" >/dev/null
+  "https://api.github.com/gists/$HEARTBEAT_GIST_ID" || echo "000")"
+
+if [ "$code" != "200" ]; then
+  echo "heartbeat НЕ отправлен: GitHub ответил HTTP $code" >&2
+  head -c 300 "$resp" >&2
+  echo >&2
+  exit 1
+fi
 
 echo "heartbeat отправлен: $ts"
