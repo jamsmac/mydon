@@ -9,6 +9,7 @@ import {
   maintenancePlan,
 } from "@mydon/db";
 import {
+  actorKindOf,
   advanceAnchor,
   computeDue,
   firstDue,
@@ -208,7 +209,7 @@ export class MaintenanceService {
       }
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "maintenance.log_closed",
         target: id,
@@ -221,9 +222,17 @@ export class MaintenanceService {
 
   // ── Нормативы: как часто положено ──────────────────────────────────────────
 
-  /** Нормативы объекта или все активные. */
-  plans(entityId?: string): Promise<PlanRow[]> {
-    const conditions: SQL[] = [eq(maintenancePlan.isActive, true)];
+  /**
+   * Нормативы объекта или все активные.
+   *
+   * `includeInactive` нужен тем, кто решает «чего не хватает»: снятый с паузы
+   * норматив существует, просто молчит, и считать его отсутствующим значит
+   * заводить дубль на каждом прогоне. Панели и монитору наоборот нужны только
+   * активные — потому умолчание прежнее.
+   */
+  plans(entityId?: string, includeInactive = false): Promise<PlanRow[]> {
+    const conditions: SQL[] = [];
+    if (!includeInactive) conditions.push(eq(maintenancePlan.isActive, true));
     if (entityId) conditions.push(eq(maintenancePlan.entityId, entityId));
     return this.db
       .select()
@@ -256,6 +265,13 @@ export class MaintenanceService {
       autoTask?: boolean;
       assigneeId?: string;
       note?: string;
+      /**
+       * Норматив в строю. Выключить можно было и раньше (`DELETE /plans/:id`
+       * не удаляет, а гасит), а включить обратно — нечем: автомат, вернувшийся
+       * из ремонта, оставался без графика навсегда. Пропуск поля ничего не
+       * меняет — паузу снимает только явное `true`.
+       */
+      isActive?: boolean;
     },
     actorRef = "owner",
   ): Promise<PlanRow> {
@@ -287,14 +303,24 @@ export class MaintenanceService {
             autoTask: input.autoTask ?? before.autoTask,
             assigneeId: input.assigneeId ?? null,
             note: input.note ?? null,
+            isActive: input.isActive ?? before.isActive,
+            // Норматив, вернувшийся из паузы, не должен прийти сразу
+            // просроченным: пока автомат стоял в ремонте, срок капал впустую.
+            // Считаем следующий срок от сегодня — так же, как при заведении.
+            ...(input.isActive === true && before.isActive === false && input.dueOn === undefined
+              ? { dueOn: firstDue(todayInTz(), period) }
+              : {}),
             updatedAt: new Date(),
           })
           .where(eq(maintenancePlan.id, input.id))
           .returning();
         await tx.insert(auditLog).values({
-          actorKind: "human",
+          actorKind: actorKindOf(actorRef),
           actorRef,
-          action: "maintenance.plan_updated",
+          action:
+            input.isActive === true && before.isActive === false
+              ? "maintenance.plan_resumed"
+              : "maintenance.plan_updated",
           target: input.id,
           before,
           after,
@@ -321,7 +347,7 @@ export class MaintenanceService {
         })
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "maintenance.plan_created",
         target: created.id,
@@ -372,6 +398,14 @@ export class MaintenanceService {
         .where(inArray(machineCard.entityId, entityIds));
       const kindOf = new Map(cards.map((c) => [c.entityId, c.kind]));
 
+      // ВСЕ нормативы объекта, включая снятые с паузы «выключенные».
+      //
+      // Раньше здесь стоял фильтр `isActive = true`, и выключенный норматив
+      // становился невидимым: массовое заведение считало его отсутствующим и
+      // заводило заново. Пауза не держалась дольше одного прогона — автомат в
+      // ремонте снова начинал требовать работу. Возврат норматива в строй —
+      // отдельное осознанное действие (`upsertPlan` с `isActive: true`), а не
+      // побочный эффект уборки.
       const existing = await tx
         .select({
           entityId: maintenancePlan.entityId,
@@ -379,9 +413,7 @@ export class MaintenanceService {
           partKind: maintenancePlan.partKind,
         })
         .from(maintenancePlan)
-        .where(
-          and(eq(maintenancePlan.isActive, true), inArray(maintenancePlan.entityId, entityIds)),
-        );
+        .where(inArray(maintenancePlan.entityId, entityIds));
       const taken = new Set(existing.map((p) => normKey(p.entityId, p.kind, p.partKind)));
 
       const created: PlanRow[] = [];
@@ -411,7 +443,7 @@ export class MaintenanceService {
             })
             .returning();
           await tx.insert(auditLog).values({
-            actorKind: "human",
+            actorKind: actorKindOf(actorRef),
             actorRef,
             action: "maintenance.plan_created",
             target: row.id,
@@ -445,7 +477,7 @@ export class MaintenanceService {
         .where(eq(maintenancePlan.id, id))
         .returning();
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "maintenance.plan_deactivated",
         target: id,
@@ -558,7 +590,7 @@ export class MaintenanceService {
 
       await tx.delete(maintenanceLog).where(eq(maintenanceLog.id, id));
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: "maintenance.log_removed",
         target: id,

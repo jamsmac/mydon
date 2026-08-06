@@ -432,3 +432,102 @@ describe("Автомат без карточки вида", () => {
     );
   });
 });
+
+describe("Пауза норматива: снять и вернуть", () => {
+  const PLAN = "55555555-5555-4555-8555-555555555555";
+  const активный = {
+    id: PLAN,
+    entityId: MACHINE,
+    kind: "cleaning",
+    partKind: "mixer",
+    everyDays: 10,
+    everyMonths: null,
+    dueOn: "2026-08-17",
+    taskLeadDays: 3,
+    autoTask: true,
+    isActive: true,
+  };
+
+  it("снятие с паузы возвращает норматив в строй", async () => {
+    const updated: Row[] = [];
+    const inserted: Row[] = [];
+    const s = new MaintenanceService(
+      stubDb({ selects: [[{ ...активный, isActive: false }]], updated, inserted }),
+    );
+    await s.upsertPlan(
+      { id: PLAN, entityId: MACHINE, kind: "cleaning", partKind: "mixer", everyDays: 10, isActive: true },
+      "owner",
+    );
+    assert.equal(updated[0]!.isActive, true);
+  });
+
+  it("вернувшийся из паузы норматив не приходит сразу просроченным", async () => {
+    // Пока автомат стоял в ремонте, срок капал впустую. Требовать работу за
+    // этот период значит начать с красного экрана — считаем от сегодня.
+    const updated: Row[] = [];
+    const s = new MaintenanceService(
+      stubDb({ selects: [[{ ...активный, isActive: false, dueOn: "2026-01-01" }]], updated }),
+    );
+    await s.upsertPlan(
+      { id: PLAN, entityId: MACHINE, kind: "cleaning", partKind: "mixer", everyDays: 10, isActive: true },
+      "owner",
+    );
+    assert.equal(updated[0]!.dueOn, addDays(todayInTz(), 10));
+  });
+
+  it("явный срок при снятии с паузы уважается — решение владельца сильнее пересчёта", async () => {
+    const updated: Row[] = [];
+    const s = new MaintenanceService(
+      stubDb({ selects: [[{ ...активный, isActive: false }]], updated }),
+    );
+    await s.upsertPlan(
+      {
+        id: PLAN,
+        entityId: MACHINE,
+        kind: "cleaning",
+        partKind: "mixer",
+        everyDays: 10,
+        isActive: true,
+        dueOn: "2026-12-01",
+      },
+      "owner",
+    );
+    assert.equal(updated[0]!.dueOn, "2026-12-01");
+  });
+
+  it("обычная правка активного норматива не трогает срок пересчётом «от сегодня»", async () => {
+    const updated: Row[] = [];
+    const s = new MaintenanceService(stubDb({ selects: [[активный]], updated }));
+    await s.upsertPlan(
+      { id: PLAN, entityId: MACHINE, kind: "cleaning", partKind: "mixer", everyDays: 10, note: "правка" },
+      "owner",
+    );
+    assert.equal(updated[0]!.dueOn, "2026-08-17", "периодичность та же — срок остаётся");
+    assert.equal(updated[0]!.isActive, true, "поле не передано — состояние не меняется");
+  });
+
+  it("выключенный норматив виден массовому заведению и не воскресает", async () => {
+    // Раньше «уже есть» считалось только по активным: выключенный норматив
+    // становился невидимым и заводился заново, то есть пауза не переживала
+    // ни одного прогона. Заглушка не исполняет SQL, поэтому тест держит
+    // JS-сторону: строку с isActive=false нельзя отфильтровать в коде.
+    const inserted: Row[] = [];
+    const s = new MaintenanceService(
+      stubDb({
+        selects: [
+          [{ entityId: MACHINE, kind: "coffee" }],
+          [
+            { entityId: MACHINE, kind: "cleaning", partKind: "mixer", isActive: false },
+            { entityId: MACHINE, kind: "part_replace", partKind: "water_filter", isActive: true },
+            { entityId: MACHINE, kind: "service", partKind: null, isActive: true },
+          ],
+        ],
+        inserted,
+      }),
+    );
+    const res = await s.applyStandardNorms([MACHINE]);
+    assert.equal(res.created.length, 0, "выключенная мойка миксера не заводится заново");
+    assert.equal(res.skipped, 3);
+    assert.ok(!inserted.some((r) => r.title === "Мойка миксера"));
+  });
+});

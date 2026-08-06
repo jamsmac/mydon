@@ -193,6 +193,16 @@ export class UpsertPlanDto {
   @IsOptional() @IsString() @MaxLength(2000)
   note?: string;
 
+  /**
+   * Вернуть норматив в строй (`true`) или снять (`false`).
+   *
+   * Гасить можно было и раньше — `DELETE /plans/:id` не удаляет, а выключает.
+   * Обратной операции не существовало: автомат, вернувшийся из ремонта,
+   * оставался без графика навсегда. Поле не передано — состояние не трогаем.
+   */
+  @IsOptional() @IsBoolean()
+  isActive?: boolean;
+
   @IsOptional() @IsString() @MaxLength(128)
   actor?: string;
 }
@@ -278,8 +288,8 @@ export class MaintenanceController {
   }
 
   @Get("plans")
-  plans(@Query("entityId") entityId?: string) {
-    return this.maintenance.plans(entityId);
+  plans(@Query("entityId") entityId?: string, @Query("includeInactive") includeInactive?: string) {
+    return this.maintenance.plans(entityId, includeInactive === "1" || includeInactive === "true");
   }
 
   @Post("plans")
