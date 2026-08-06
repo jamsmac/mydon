@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { addDays } from "@mydon/shared";
 import { MaintenanceService, todayInTz } from "./maintenance.service";
 
 type Row = Record<string, unknown>;
@@ -17,6 +18,8 @@ interface StubOpts {
   inserted?: Row[];
   /** Что удалили. */
   deleted?: string[];
+  /** Патчи, ушедшие в update — чтобы проверить сдвиг якоря. */
+  updated?: Row[];
 }
 
 /**
@@ -53,11 +56,14 @@ function stubDb(opts: StubOpts) {
       },
     }),
     update: () => ({
-      set: (patch: Row) => ({
-        where: () => ({
-          returning: async () => [{ id: "m1", ...(opts.updateResult ?? {}), ...patch }],
-        }),
-      }),
+      set: (patch: Row) => {
+        opts.updated?.push(patch);
+        const done = { returning: async () => [{ id: "m1", ...(opts.updateResult ?? {}), ...patch }] };
+        return {
+          // update(...).set(...).where(...) — и с returning, и без него.
+          where: () => Object.assign(Promise.resolve([]), done),
+        };
+      },
     }),
     delete: () => ({
       where: async () => {
@@ -224,5 +230,76 @@ describe("Замена узла", () => {
     const s = new MaintenanceService(stubDb({ selects: [[]] }));
     const res = await s.swapPart({ machineId: MACHINE, partKind: "water_filter" });
     assert.equal(res.installed.installedOn, todayInTz());
+  });
+});
+
+describe("Нормативы и сроки", () => {
+  const PLAN = { id: "pl-1", dueOn: "2026-03-01", everyDays: 30, everyMonths: null, everyCount: null };
+
+  it("закрытие работы сдвигает якорь от плановой даты, а не от фактической", async () => {
+    // Иначе график ползёт: срок 1 марта, сделали 5-го — следующий должен быть
+    // 31 марта, и «ежемесячная» работа не превращается в «раз в 35 дней».
+    const updates: Row[] = [];
+    const s = new MaintenanceService(
+      stubDb({
+        selects: [[{ id: "m1", outcome: null }], [PLAN]],
+        updateResult: { id: "m1", planId: "pl-1", outcome: "done", performedOn: "2026-03-05" },
+        updated: updates,
+      }),
+    );
+    await s.closeLog("m1", { outcome: "done" });
+    assert.ok(
+      updates.some((u) => u.dueOn === "2026-03-31"),
+      `якорь должен уехать на 31 марта, а не на дату факта: ${JSON.stringify(updates)}`,
+    );
+  });
+
+  it("незакрытая работа якорь не двигает", async () => {
+    // «Начал и не доделал» не является выполнением норматива.
+    const updates: Row[] = [];
+    const s = new MaintenanceService(
+      stubDb({
+        selects: [[{ id: "m1", outcome: null }], [PLAN]],
+        updateResult: { id: "m1", planId: "pl-1", outcome: "failed", performedOn: "2026-03-05" },
+        updated: updates,
+      }),
+    );
+    await s.closeLog("m1", { outcome: "failed" });
+    assert.ok(!updates.some((u) => u.dueOn), "срок не должен сдвинуться");
+  });
+
+  it("работа без норматива никуда не сдвигает срок", async () => {
+    const updates: Row[] = [];
+    const s = new MaintenanceService(
+      stubDb({
+        selects: [[{ id: "m1", outcome: null }]],
+        updateResult: { id: "m1", planId: null, outcome: "done", performedOn: "2026-03-05" },
+        updated: updates,
+      }),
+    );
+    await s.closeLog("m1", { outcome: "done" });
+    assert.ok(!updates.some((u) => u.dueOn));
+  });
+
+  it("новый норматив получает первый срок от сегодня, а не задним числом", async () => {
+    // Норматив заводят, когда решили следить. Требовать работу за период,
+    // за который никто не отвечал, значит начать с красного экрана.
+    const inserted: Row[] = [];
+    const s = new MaintenanceService(stubDb({ inserted }));
+    await s.upsertPlan({ entityId: MACHINE, kind: "cleaning", everyDays: 14 });
+    const plan = inserted.find((r) => r.entityId === MACHINE)!;
+    assert.equal(plan.dueOn, addDays(todayInTz(), 14), "ровно период от сегодня");
+  });
+
+  it("выключение норматива не удаляет его", async () => {
+    // Исключение «этот моем реже» выражается выключением: удаление унесло бы
+    // историю, по которой видно, что раньше следили.
+    const inserted: Row[] = [];
+    const s = new MaintenanceService(
+      stubDb({ selects: [[{ id: "pl-1", isActive: true }]], updateResult: { id: "pl-1" }, inserted }),
+    );
+    const res = await s.deactivatePlan("pl-1");
+    assert.equal(res.isActive, false);
+    assert.ok(inserted.some((r) => r.action === "maintenance.plan_deactivated"));
   });
 });

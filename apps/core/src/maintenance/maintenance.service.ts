@@ -1,11 +1,20 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, collection, entity, machinePart, maintenanceLog } from "@mydon/db";
-import { TZ } from "@mydon/shared";
-import { and, desc, eq, gte, isNull, lte, sql, type SQL } from "drizzle-orm";
+import { auditLog, collection, entity, machinePart, maintenanceLog, maintenancePlan } from "@mydon/db";
+import {
+  advanceAnchor,
+  computeDue,
+  firstDue,
+  maintenanceKindLabel,
+  partLabel,
+  TZ,
+  type DueStatus,
+} from "@mydon/shared";
+import { and, desc, eq, gte, inArray, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 type LogRow = typeof maintenanceLog.$inferSelect;
 type PartRow = typeof machinePart.$inferSelect;
+type PlanRow = typeof maintenancePlan.$inferSelect;
 
 export type MaintenanceKind =
   | "cleaning"
@@ -24,6 +33,7 @@ export interface CreateLogInput {
   entityId: string;
   kind: MaintenanceKind;
   partKind?: string;
+  planId?: string;
   personId?: string;
   taskId?: string;
   /** Календарный день по Ташкенту. Не задан — сегодня. */
@@ -59,6 +69,41 @@ export interface SwapPartInput {
  */
 const SELF_DELETE_WINDOW_MS = 60 * 60_000;
 
+/** Строка сводки сроков — то, что видят монитор, бот и панель. */
+export interface MaintenanceDueRow {
+  planId: string;
+  targetId: string;
+  targetName: string;
+  kind: string;
+  kindLabel: string;
+  partKind: string | null;
+  partLabel: string | null;
+  title: string | null;
+  nextDueOn: string | null;
+  lastDoneOn: string | null;
+  taskLeadDays: number;
+  daysLeft: number | null;
+  countLeft: number | null;
+  status: DueStatus;
+  assigneeId: string | null;
+  autoTask: boolean;
+}
+
+/**
+ * Пересчёт срока при правке периодичности.
+ *
+ * Если периодичность не менялась, срок остаётся. Изменилась — считаем от
+ * последней плановой даты новым шагом, а при её отсутствии от сегодня.
+ */
+function recalcDue(
+  before: { dueOn: string | null; everyDays: number | null; everyMonths: number | null },
+  next: { everyDays: number | null; everyMonths: number | null },
+): string | null {
+  const same = before.everyDays === next.everyDays && before.everyMonths === next.everyMonths;
+  if (same) return before.dueOn;
+  return firstDue(before.dueOn ?? todayInTz(), next);
+}
+
 /** Сегодняшний календарный день по Ташкенту (YYYY-MM-DD). */
 export function todayInTz(now = new Date()): string {
   return now.toLocaleDateString("en-CA", { timeZone: TZ });
@@ -90,6 +135,7 @@ export class MaintenanceService {
           entityId: input.entityId,
           kind: input.kind,
           partKind: (input.partKind ?? null) as LogRow["partKind"],
+          planId: input.planId ?? null,
           personId: input.personId ?? null,
           taskId: input.taskId ?? null,
           performedOn: input.performedOn ?? todayInTz(),
@@ -132,6 +178,25 @@ export class MaintenanceService {
         .where(eq(maintenanceLog.id, id))
         .returning();
 
+      // Замыкание цикла: сделал → срок сдвинулся. Без этого график остаётся
+      // стоять там же, где стоял, и назавтра снова требует ту же работу.
+      if (after.planId && after.outcome === "done") {
+        const [plan] = await tx
+          .select()
+          .from(maintenancePlan)
+          .where(eq(maintenancePlan.id, after.planId))
+          .limit(1);
+        if (plan?.dueOn) {
+          await tx
+            .update(maintenancePlan)
+            .set({
+              dueOn: advanceAnchor(plan.dueOn, after.performedOn, plan),
+              updatedAt: new Date(),
+            })
+            .where(eq(maintenancePlan.id, plan.id));
+        }
+      }
+
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef,
@@ -141,6 +206,217 @@ export class MaintenanceService {
         after,
       });
       return after;
+    });
+  }
+
+  // ── Нормативы: как часто положено ──────────────────────────────────────────
+
+  /** Нормативы объекта или все активные. */
+  plans(entityId?: string): Promise<PlanRow[]> {
+    const conditions: SQL[] = [eq(maintenancePlan.isActive, true)];
+    if (entityId) conditions.push(eq(maintenancePlan.entityId, entityId));
+    return this.db
+      .select()
+      .from(maintenancePlan)
+      .where(and(...conditions))
+      .orderBy(maintenancePlan.dueOn)
+      .limit(500);
+  }
+
+  /**
+   * Завести или поправить норматив.
+   *
+   * Первый срок считается от сегодня, а не от последней работы: норматив
+   * заводят, когда решили следить, и требовать работу задним числом за
+   * период, за который никто не отвечал, значит начать с красного экрана.
+   */
+  async upsertPlan(
+    input: {
+      id?: string;
+      entityId: string;
+      kind: MaintenanceKind;
+      partKind?: string;
+      title?: string;
+      everyDays?: number;
+      everyMonths?: number;
+      everyCount?: number;
+      counterLabel?: string;
+      dueOn?: string;
+      taskLeadDays?: number;
+      autoTask?: boolean;
+      assigneeId?: string;
+      note?: string;
+    },
+    actorRef = "owner",
+  ): Promise<PlanRow> {
+    const period = {
+      everyDays: input.everyDays ?? null,
+      everyMonths: input.everyMonths ?? null,
+      everyCount: input.everyCount ?? null,
+    };
+    return this.db.transaction(async (tx) => {
+      if (input.id) {
+        const [before] = await tx
+          .select()
+          .from(maintenancePlan)
+          .where(eq(maintenancePlan.id, input.id))
+          .limit(1);
+        if (!before) throw new NotFoundException("Норматива нет");
+        const [after] = await tx
+          .update(maintenancePlan)
+          .set({
+            kind: input.kind,
+            partKind: (input.partKind ?? null) as PlanRow["partKind"],
+            title: input.title ?? null,
+            ...period,
+            counterLabel: input.counterLabel ?? null,
+            // Правка периодичности пересчитывает срок тем же UPDATE: иначе
+            // норматив сказал бы «раз в неделю», а ждал бы месяц.
+            dueOn: input.dueOn ?? recalcDue(before, period),
+            taskLeadDays: input.taskLeadDays ?? before.taskLeadDays,
+            autoTask: input.autoTask ?? before.autoTask,
+            assigneeId: input.assigneeId ?? null,
+            note: input.note ?? null,
+            updatedAt: new Date(),
+          })
+          .where(eq(maintenancePlan.id, input.id))
+          .returning();
+        await tx.insert(auditLog).values({
+          actorKind: "human",
+          actorRef,
+          action: "maintenance.plan_updated",
+          target: input.id,
+          before,
+          after,
+        });
+        return after;
+      }
+
+      const today = todayInTz();
+      const [created] = await tx
+        .insert(maintenancePlan)
+        .values({
+          entityId: input.entityId,
+          kind: input.kind,
+          partKind: (input.partKind ?? null) as PlanRow["partKind"],
+          title: input.title ?? null,
+          ...period,
+          counterLabel: input.counterLabel ?? null,
+          dueOn: input.dueOn ?? firstDue(today, period),
+          taskLeadDays: input.taskLeadDays ?? 3,
+          autoTask: input.autoTask ?? true,
+          assigneeId: input.assigneeId ?? null,
+          note: input.note ?? null,
+          createdBy: actorRef,
+        })
+        .returning();
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "maintenance.plan_created",
+        target: created.id,
+        after: created,
+      });
+      return created;
+    });
+  }
+
+  /**
+   * Выключить норматив, а не удалить.
+   *
+   * Исключение для отдельного автомата («этот моем реже») выражается именно
+   * выключением: удалённый норматив унёс бы с собой историю, по которой видно,
+   * что раньше следили.
+   */
+  async deactivatePlan(id: string, actorRef = "owner"): Promise<PlanRow> {
+    return this.db.transaction(async (tx) => {
+      const [before] = await tx.select().from(maintenancePlan).where(eq(maintenancePlan.id, id)).limit(1);
+      if (!before) throw new NotFoundException("Норматива нет");
+      const [after] = await tx
+        .update(maintenancePlan)
+        .set({ isActive: false, updatedAt: new Date() })
+        .where(eq(maintenancePlan.id, id))
+        .returning();
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "maintenance.plan_deactivated",
+        target: id,
+        before,
+        after,
+      });
+      return after;
+    });
+  }
+
+  /**
+   * Что подходит к сроку — read-model для монитора, бота и панели.
+   *
+   * Без N+1: три выборки на любое число нормативов. Тот же дефект есть
+   * в washScheduleStatus(), который тянет весь журнал в память, — этот приём
+   * не копируем.
+   */
+  async dueList(today = todayInTz()): Promise<MaintenanceDueRow[]> {
+    const plans = await this.plans();
+    if (plans.length === 0) return [];
+
+    const targetIds = [...new Set(plans.map((p) => p.entityId))];
+    const names = new Map(
+      (await this.db
+        .select({ id: entity.id, name: entity.name })
+        .from(entity)
+        .where(inArray(entity.id, targetIds))
+      ).map((r) => [r.id, r.name]),
+    );
+
+    // Последний закрытый факт по каждому нормативу — одним запросом.
+    const lastDone = new Map(
+      (await this.db
+        .select({
+          planId: maintenanceLog.planId,
+          performedOn: sql<string>`max(${maintenanceLog.performedOn})`,
+        })
+        .from(maintenanceLog)
+        .where(
+          and(
+            inArray(maintenanceLog.planId, plans.map((p) => p.id)),
+            sql`${maintenanceLog.outcome} is not null`,
+          ),
+        )
+        .groupBy(maintenanceLog.planId)
+      ).map((r) => [r.planId, r.performedOn]),
+    );
+
+    return plans.map((p) => {
+      const due = computeDue(
+        {
+          everyDays: p.everyDays,
+          everyMonths: p.everyMonths,
+          everyCount: p.everyCount,
+          dueOn: p.dueOn,
+          lastDoneOn: lastDone.get(p.id) ?? null,
+          taskLeadDays: p.taskLeadDays,
+        },
+        today,
+      );
+      return {
+        planId: p.id,
+        targetId: p.entityId,
+        targetName: names.get(p.entityId) ?? "объект",
+        kind: p.kind,
+        kindLabel: maintenanceKindLabel(p.kind),
+        partKind: p.partKind,
+        partLabel: p.partKind ? partLabel(p.partKind) : null,
+        title: p.title,
+        nextDueOn: due.nextDueOn,
+        lastDoneOn: lastDone.get(p.id) ?? null,
+        taskLeadDays: p.taskLeadDays,
+        daysLeft: due.daysLeft,
+        countLeft: due.countLeft,
+        status: due.status,
+        assigneeId: p.assigneeId,
+        autoTask: p.autoTask,
+      };
     });
   }
 

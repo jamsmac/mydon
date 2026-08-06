@@ -1812,6 +1812,13 @@ export const maintenanceLog = pgTable(
     personId: uuid("person_id").references(() => person.id),
     /** Задача, в рамках которой сделано, если была. */
     taskId: uuid("task_id").references(() => task.id),
+    /**
+     * Норматив, по которому работа сделана. Без него закрытие работы не знает,
+     * какой якорь двигать, и график остаётся стоять там же, где был.
+     */
+    // Ссылка ленивая (() => …): maintenance_plan объявлена ниже по файлу,
+    // потому что журнал появился раньше нормативов.
+    planId: uuid("plan_id").references(() => maintenancePlan.id),
     /** Календарный день по Ташкенту. */
     performedOn: date("performed_on").notNull(),
     performedAt: timestamp("performed_at", { withTimezone: true }).defaultNow().notNull(),
@@ -1832,6 +1839,11 @@ export const maintenanceLog = pgTable(
     // работа сроки не сдвигает.
     index("maintenance_log_done_idx")
       .on(t.entityId, t.kind, t.partKind, t.performedOn)
+      .where(sql`outcome is not null`),
+    // Под «когда в последний раз делали по этому нормативу» — запрос,
+    // с которого начинается каждый расчёт срока.
+    index("maintenance_log_plan_done_idx")
+      .on(t.planId, t.performedOn)
       .where(sql`outcome is not null`),
     check("maintenance_log_counter_nonneg", sql`${t.counterValue} is null or ${t.counterValue} >= 0`),
   ],
@@ -1882,6 +1894,73 @@ export const machinePart = pgTable(
       "machine_part_dates",
       sql`${t.removedOn} is null or ${t.removedOn} >= ${t.installedOn}`,
     ),
+  ],
+);
+
+/**
+ * Норматив: как часто работу положено делать.
+ *
+ * Третья из трёх вещей, которые нельзя смешивать (норматив — факт —
+ * состояние). Статус «пора / просрочено» здесь НЕ хранится: он зависит от
+ * текущей даты и считается на чтении из `due_on`.
+ *
+ * `due_on` — это ЯКОРЬ, плановая дата следующей работы, а не «когда сделали
+ * плюс период». Разница принципиальна: мойка раз в 30 дней со сроком 1 марта,
+ * сделанная 5-го, должна ждать 31 марта, а не 4 апреля. Считая от факта,
+ * «ежемесячная» работа за год делается десять раз вместо двенадцати —
+ * и никто этого не замечает, потому что каждый отдельный раз выглядит верно.
+ */
+export const maintenancePlan = pgTable(
+  "maintenance_plan",
+  {
+    id: id(),
+    entityId: uuid("entity_id")
+      .references(() => entity.id)
+      .notNull(),
+    kind: maintenanceKindEnum("kind").notNull(),
+    /** Узел, если норматив про конкретный узел. NULL — про автомат целиком. */
+    partKind: partKindEnum("part_kind"),
+    /** Своё название, если «Плановое ТО» недостаточно точно. */
+    title: text("title"),
+    /** Периодичность: дни, месяцы или счётчик. Хотя бы одно — иначе unknown. */
+    everyDays: integer("every_days"),
+    everyMonths: integer("every_months"),
+    everyCount: integer("every_count"),
+    /** Что считаем: «чашек», «продаж», «литров». */
+    counterLabel: text("counter_label"),
+    /** Плановая дата следующей работы. NULL — норматив есть, срок не назначен. */
+    dueOn: date("due_on"),
+    /** За сколько дней до срока ставить задачу. */
+    taskLeadDays: integer("task_lead_days").default(3).notNull(),
+    /** Ставить ли задачу автоматически. */
+    autoTask: boolean("auto_task").default(true).notNull(),
+    /**
+     * Именной график: работу делает только этот человек. По умолчанию пусто —
+     * задача уходит в общий пул, потому что закрепления за объектами нет.
+     */
+    assigneeId: uuid("assignee_id").references(() => person.id),
+    isActive: boolean("is_active").default(true).notNull(),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // Основной запрос монитора: что подходит к сроку. Только активные —
+    // выключенный норматив не должен занимать место в индексе.
+    index("maintenance_plan_due_idx").on(t.dueOn).where(sql`is_active`),
+    index("maintenance_plan_entity_idx").on(t.entityId),
+    // Один норматив на «объект + вид работ + узел». Дубль означал бы две
+    // разные даты для одной обязанности и вечный спор, какая правильная.
+    // coalesce по той же причине, что в machine_part: NULL ≠ NULL.
+    uniqueIndex("maintenance_plan_key")
+      .on(t.entityId, t.kind, sql`coalesce(${t.partKind}::text, '')`)
+      .where(sql`is_active`),
+    check(
+      "maintenance_plan_period_set",
+      sql`${t.everyDays} is not null or ${t.everyMonths} is not null or ${t.everyCount} is not null`,
+    ),
+    check("maintenance_plan_lead_nonneg", sql`${t.taskLeadDays} >= 0`),
   ],
 );
 
@@ -1969,5 +2048,6 @@ export const schema = {
   // Обслуживание: журнал работ и узлы автоматов.
   maintenanceLog,
   machinePart,
+  maintenancePlan,
   coffeeMachinePlacement,
 };

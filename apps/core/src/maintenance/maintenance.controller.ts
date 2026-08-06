@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
 import {
+  IsBoolean,
   IsIn,
   IsInt,
   IsISO8601,
@@ -70,6 +71,10 @@ export class CreateLogDto {
 
   @IsOptional() @IsUUID()
   taskId?: string;
+
+  /** Норматив, по которому работа сделана: без него срок не сдвинется. */
+  @IsOptional() @IsUUID()
+  planId?: string;
 
   @IsOptional() @IsISO8601({ strict: true }, { message: "performedOn: дата YYYY-MM-DD" })
   performedOn?: string;
@@ -142,6 +147,53 @@ export class SwapPartDto {
   createdBy?: string;
 }
 
+export class UpsertPlanDto {
+  @IsOptional() @IsUUID()
+  id?: string;
+
+  @IsUUID()
+  entityId!: string;
+
+  @IsIn([...KINDS])
+  kind!: MaintenanceKind;
+
+  @IsOptional() @IsIn([...PART_KINDS])
+  partKind?: string;
+
+  @IsOptional() @IsString() @MaxLength(200)
+  title?: string;
+
+  @IsOptional() @IsInt() @IsPositive()
+  everyDays?: number;
+
+  @IsOptional() @IsInt() @IsPositive()
+  everyMonths?: number;
+
+  @IsOptional() @IsInt() @IsPositive()
+  everyCount?: number;
+
+  @IsOptional() @IsString() @MaxLength(40)
+  counterLabel?: string;
+
+  @IsOptional() @IsISO8601({ strict: true })
+  dueOn?: string;
+
+  @IsOptional() @IsInt() @Min(0)
+  taskLeadDays?: number;
+
+  @IsOptional() @IsBoolean()
+  autoTask?: boolean;
+
+  @IsOptional() @IsUUID()
+  assigneeId?: string;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  note?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
 /**
  * Обслуживание оборудования: журнал работ и узлы автоматов.
  *
@@ -194,6 +246,29 @@ export class MaintenanceController {
   ) {
     await this.maintenance.removeLog(id, personId, actor ?? `person:${personId}`);
     return { ok: true };
+  }
+
+  // ── Нормативы ──────────────────────────────────────────────────────────────
+
+  /** Что подходит к сроку. Объявлен ВЫШЕ «plans/:id», иначе уедет в параметр. */
+  @Get("due")
+  due() {
+    return this.maintenance.dueList();
+  }
+
+  @Get("plans")
+  plans(@Query("entityId") entityId?: string) {
+    return this.maintenance.plans(entityId);
+  }
+
+  @Post("plans")
+  upsertPlan(@Body() dto: UpsertPlanDto) {
+    return this.maintenance.upsertPlan(dto, dto.actor ?? "owner");
+  }
+
+  @Delete("plans/:id")
+  deactivatePlan(@Param("id", ParseUUIDPipe) id: string, @Query("actor") actor?: string) {
+    return this.maintenance.deactivatePlan(id, actor ?? "owner");
   }
 
   @Post("part-swap")
