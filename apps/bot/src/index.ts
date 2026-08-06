@@ -20,7 +20,7 @@ import { handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
 import { handleRegisterPhoto } from "./staff-register";
 import { attachBeforePhoto, handleTaskDonePhoto } from "./task-done";
 import { handleAfterPhoto } from "./field-work";
-import { InvalidTokenError, TelegramApi, type TgUpdate } from "./telegram";
+import { InvalidTokenError, TelegramApi, TelegramError, type TgUpdate } from "./telegram";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
@@ -338,18 +338,31 @@ async function main(): Promise<void> {
     for (const t of due) {
       const overdue = t.due !== null && new Date(t.due).getTime() < Date.now();
       const line = `${overdue ? "⏰ Просрочено" : "🔔 Скоро срок"}: ${t.title}\n${dueLabel(t.due)}`;
-      let delivered = false;
 
-      // Исполнителю-человеку — лично, с кнопками: напоминание без возможности
-      // ответить бесполезно.
-      if (t.ownerKind === "human" && t.ownerRef !== null) {
-        const chat = chatById.get(t.ownerRef);
+      // Доставка ИСПОЛНИТЕЛЮ и доставка ВЛАДЕЛЬЦУ считаются отдельно.
+      //
+      // Раньше был один флаг на двоих, и это теряло напоминания: если
+      // сотрудник заблокировал бота, а владельцу просрочка дошла, задача
+      // помечалась «напомнили» — и сотрудник не узнавал о ней НИКОГДА,
+      // потому что markReminded ставится один раз навсегда.
+      const needsAssignee = t.ownerKind === "human" && t.ownerRef !== null;
+      let deliveredToAssignee = false;
+      let deliveredToOwner = false;
+
+      if (needsAssignee) {
+        const chat = chatById.get(t.ownerRef!);
         if (chat !== undefined) {
           try {
             await tg.sendMessage(Number(chat), line, taskKeyboard(t));
-            delivered = true;
+            deliveredToAssignee = true;
           } catch (err) {
-            console.error("Напоминание исполнителю не доставлено:", err);
+            // Заблокировал бота — сообщаем владельцу один раз и перестаём
+            // пытаться. Задача при этом «напомненной» не считается.
+            if (err instanceof TelegramError && err.isUnreachable) {
+              await reportUnreachable(t.ownerRef!, err.description);
+            } else {
+              console.error("Напоминание исполнителю не доставлено:", err);
+            }
           }
         }
       }
@@ -359,20 +372,47 @@ async function main(): Promise<void> {
         for (const chatId of allowlist) {
           try {
             await tg.sendMessage(chatId, line);
-            delivered = true;
+            deliveredToOwner = true;
           } catch (err) {
             console.error("Напоминание владельцу не доставлено:", err);
           }
         }
       }
 
-      if (delivered) {
+      // Помечаем напомненной, только если дошло до того, кто должен делать.
+      // У задачи без исполнителя (свободной) единственный адресат — владелец.
+      if (deliveredToAssignee || (!needsAssignee && deliveredToOwner)) {
         try {
           await deps.core.markReminded(t.id);
         } catch (err) {
           console.error("Отметка «напомнили» не записана:", err);
         }
       }
+    }
+  }
+
+  /**
+   * Сотрудник недоступен: заблокировал бота или удалил чат.
+   *
+   * Владельцу сообщаем один раз за день — иначе каждое напоминание в цикле
+   * превращалось бы в отдельную жалобу. Ключ занимается в Core, поэтому
+   * ограничение переживает перезапуск бота.
+   */
+  async function reportUnreachable(personId: string, reason: string): Promise<void> {
+    try {
+      const key = `staff-unreachable:${isoDate(new Date())}:${personId}`;
+      if (!(await deps.core.claimNotification(key))) return;
+      const people = await deps.core.people();
+      const name = people.find((p) => p.id === personId)?.name ?? personId;
+      for (const chatId of allowlist) {
+        await tg.sendMessage(
+          chatId,
+          `🚫 ${name} не получает сообщения от бота (${reason}).\n` +
+            "Задачи ему не доходят — нужно, чтобы он разблокировал бота и нажал «Старт».",
+        );
+      }
+    } catch (err) {
+      console.error("Владелец не уведомлён о недоступном сотруднике:", err);
     }
   }
 
@@ -399,7 +439,14 @@ async function main(): Promise<void> {
         );
         await deps.core.markRedoNotified(t.id);
       } catch (err) {
-        console.error("Сообщение о переделке не доставлено:", err);
+        if (err instanceof TelegramError && err.isUnreachable) {
+          // Иначе цикл долбит Telegram на каждом тике: задача остаётся
+          // неотмеченной, а сотрудник недоступен всё это время.
+          await reportUnreachable(t.ownerRef!, err.description);
+          await deps.core.markRedoNotified(t.id).catch(() => undefined);
+        } else {
+          console.error("Сообщение о переделке не доставлено:", err);
+        }
       }
     }
   }
