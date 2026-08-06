@@ -651,9 +651,7 @@ export function calculateScenario(
   // ─── Маржа ────────────────────────────────────────────────────────────────
   const grossProfitOfficial = round2(salePriceNoVat - costs.cost_ddp_official_uzs);
   const markupPct =
-    costs.cost_ddp_official_uzs > 0
-      ? round4(grossProfitOfficial / costs.cost_ddp_official_uzs)
-      : 0;
+    costs.cost_ddp_official_uzs > 0 ? round4(grossProfitOfficial / costs.cost_ddp_official_uzs) : 0;
 
   // ─── Ст. 248 ч.5 НК — доплата НДС если выручка ниже импортной НДС-базы ───
   const vatExtraBase = Math.max(0, costs.import_vat_base_uzs - salePriceNoVat);
@@ -757,6 +755,51 @@ export function computeSalePriceForTargetNetProfit(
   if (factor <= 0) return 0;
   const numerator = targetNetProfitPct / (1 - corporateTaxRate) + 1;
   return round2((costDdpOfficial * numerator) / factor);
+}
+
+/**
+ * Сажает цену сценария на ровное число БЕЗ НДС.
+ *
+ * ЗАЧЕМ. Подбор целевой прибыли даёт сырую цену вида 1 296 539 338,45 с НДС —
+ * то есть 1 157 624 409,33 без НДС. Обе цифры некруглые, и в КП такую цену
+ * ставить нельзя: она выглядит как результат работы калькулятора, а не как
+ * названная владельцем цена, и первым же вопросом клиента будет «откуда
+ * копейки».
+ *
+ * Ровняем именно сторону БЕЗ НДС, потому что это и есть наши деньги: НДС
+ * сверху — транзит в бюджет, он не наш ни на копейку. Владелец думает и
+ * торгуется в суммах без НДС, а «сколько платить» считается из них.
+ *
+ * Обе цифры ровными не будут никогда: множитель 1,12 переводит круглое в
+ * круглое только при шаге, кратном 25 (1 158 млн × 1,12 = 1 296,96 млн).
+ * Выбор поэтому не «какую из двух округлить», а «какая из двух главная», и
+ * главная — та, что остаётся у нас.
+ *
+ * mode="up" по умолчанию: цену подбирали под целевую прибыль, и опускать её
+ * ниже цели ради красоты числа — терять маржу молча. Вверх — всегда в нашу
+ * сторону. "nearest" оставлен на случай, когда важнее не отходить от цели.
+ */
+export function roundSalePriceToNoVatStep(
+  salePriceWithVatUzs: number,
+  vatSaleRate: number,
+  stepUzs = 1_000_000,
+  mode: "up" | "nearest" = "up",
+): { sale_price_no_vat_uzs: number; sale_price_with_vat_uzs: number } {
+  const noVatRaw = salePriceWithVatUzs / (1 + vatSaleRate);
+  if (!(stepUzs > 0) || !Number.isFinite(noVatRaw)) {
+    return {
+      sale_price_no_vat_uzs: round2(noVatRaw),
+      sale_price_with_vat_uzs: round2(salePriceWithVatUzs),
+    };
+  }
+  const steps = mode === "up" ? Math.ceil(noVatRaw / stepUzs) : Math.round(noVatRaw / stepUzs);
+  const noVat = steps * stepUzs;
+  return {
+    sale_price_no_vat_uzs: noVat,
+    // Считаем «с НДС» из ровной цены без НДС, а не наоборот — иначе
+    // calculateScenario обратным делением вернёт не то ровное число.
+    sale_price_with_vat_uzs: round2(noVat * (1 + vatSaleRate)),
+  };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
