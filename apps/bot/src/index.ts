@@ -15,8 +15,9 @@ import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handle
 import { Notifier } from "./notifier";
 import { parseAllowlist, RateLimiter, isAllowed } from "./security/access";
 import { Conversations } from "./conversation";
-import { AwaitingReport, handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
+import { handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
 import { handleRegisterPhoto } from "./staff-register";
+import { attachBeforePhoto, handleTaskDonePhoto } from "./task-done";
 import { InvalidTokenError, TelegramApi, type TgUpdate } from "./telegram";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
@@ -104,10 +105,8 @@ async function main(): Promise<void> {
   console.log(`MYDON Bot запущен (TZ=${TZ}, Core=${coreUrl}, разрешено чатов: ${allowlist.size}).`);
 
   // ── Сотрудники: свой узкий режим (только свои задачи) ──────────────────────
-  const awaiting = new AwaitingReport();
   const conversations = new Conversations();
-  const staffDeps = { core: deps.core, awaiting, conversations };
-  setInterval(() => awaiting.sweep(), 10 * 60_000).unref();
+  const staffDeps = { core: deps.core, conversations };
   setInterval(() => conversations.sweep(), 10 * 60_000).unref();
 
   /** Кто написал: сотрудник или посторонний. Ошибка Core = «неизвестен». */
@@ -164,9 +163,14 @@ async function main(): Promise<void> {
   }
 
   /**
-   * Фото от сотрудника: имеет смысл только внутри активного заведения. Берём
-   * последний размер (максимальное разрешение), качаем байты и грузим в Core.
-   * Чужому/вне визарда молчим — как и на текст.
+   * Фото от сотрудника. Берём последний размер (максимальное разрешение),
+   * качаем байты и грузим в Core. Постороннему молчим — как и на текст.
+   *
+   * Куда приложить, решаем по контексту: активный мастер закрытия → «после»,
+   * мастер заведения карточки → к карточке, иначе единственная задача в
+   * работе → «до». Если контекста нет, отвечаем текстом, а не молчанием:
+   * снимок с точки во второй раз уже не сделать, и «бот проглотил фото» —
+   * худший из возможных ответов.
    */
   async function routeStaffPhoto(
     chatId: number,
@@ -177,8 +181,37 @@ async function main(): Promise<void> {
       if (person === null) return;
       const largest = photo[photo.length - 1];
       const file = await tg.downloadFile(largest.file_id);
-      const reply = await handleRegisterPhoto(chatId, file, person, staffDeps);
-      if (reply) await tg.sendMessage(chatId, reply.text, reply.keyboard);
+
+      // Порядок разбора: активный мастер важнее догадок.
+      const done = await handleTaskDonePhoto(chatId, file, person, staffDeps);
+      if (done) {
+        await tg.sendMessage(chatId, done.text, done.keyboard);
+        return;
+      }
+      const registered = await handleRegisterPhoto(chatId, file, person, staffDeps);
+      if (registered) {
+        await tg.sendMessage(chatId, registered.text, registered.keyboard);
+        return;
+      }
+
+      // Фото вне мастера при ровно одной задаче в работе — это снимок «до».
+      // Молчать нельзя: второй раз состояние «до» уже не сфотографировать.
+      // Именно «ровно одной»: при двух задачах в работе угадывать, к какой
+      // относится снимок, значит half the time приложить его не туда.
+      const inProgress = (await deps.core.myTasks("human", person.id)).filter(
+        (t) => t.status === "in_progress",
+      );
+      if (inProgress.length === 1) {
+        const reply = await attachBeforePhoto(inProgress[0], file, person, staffDeps);
+        await tg.sendMessage(chatId, reply.text, reply.keyboard);
+        return;
+      }
+      await tg.sendMessage(
+        chatId,
+        inProgress.length === 0
+          ? "Фото пришло, но не к чему приложить. Открой задачу, нажми «Взял в работу» — тогда пойму."
+          : "У тебя несколько задач в работе — не пойму, к какой фото. Открой нужную и нажми «Выполнил».",
+      );
     } catch (err) {
       console.error("Фото сотрудника не обработано:", err);
     }

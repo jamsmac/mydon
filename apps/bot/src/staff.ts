@@ -45,6 +45,13 @@ import {
 } from "./coffee-returns";
 import { handleCoffeeFixCallback, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
 import {
+  handleTaskDoneCallback,
+  handleTaskDoneReport,
+  parseTaskDoneCallback,
+  startTaskDone,
+  taskDoneStepHint,
+} from "./task-done";
+import {
   helpText,
   matchMenuLabel,
   matchTrigger,
@@ -176,55 +183,8 @@ export function formatCollectedAt(iso: string): string {
     .replace(", ", " ");
 }
 
-/**
- * Ожидание отчёта: сотрудник нажал «Сделал», следующее его сообщение — отчёт.
- * Держим в памяти процесса: состояние живёт минуты, переживать перезапуск ему
- * незачем — после перезапуска сотрудник просто нажмёт «Сделал» снова.
- */
-export class AwaitingReport {
-  private readonly map = new Map<number, { taskId: string; at: number }>();
-
-  constructor(private readonly ttlMs = 15 * 60_000) {}
-
-  set(chatId: number, taskId: string, now = Date.now()): void {
-    this.map.set(chatId, { taskId, at: now });
-  }
-
-  /**
-   * Посмотреть, не снимая. Нужно, чтобы решать «это отчёт или нажатие меню»
-   * до того, как ожидание израсходовано: `take()` на сообщении, которое
-   * отчётом не окажется, молча терял бы ожидание, и следующий текст сотрудника
-   * уходил бы мимо задачи.
-   */
-  peek(chatId: number, now = Date.now()): string | null {
-    const item = this.map.get(chatId);
-    if (!item) return null;
-    if (now - item.at > this.ttlMs) {
-      this.map.delete(chatId);
-      return null;
-    }
-    return item.taskId;
-  }
-
-  /** Забрать и снять ожидание. Просроченное не возвращаем. */
-  take(chatId: number, now = Date.now()): string | null {
-    const item = this.map.get(chatId);
-    if (!item) return null;
-    this.map.delete(chatId);
-    return now - item.at > this.ttlMs ? null : item.taskId;
-  }
-
-  /** Периодическая уборка: без неё карта растёт от брошенных нажатий. */
-  sweep(now = Date.now()): void {
-    for (const [chatId, item] of this.map) {
-      if (now - item.at > this.ttlMs) this.map.delete(chatId);
-    }
-  }
-}
-
 export interface StaffDeps {
   core: CoreClient;
-  awaiting: AwaitingReport;
   conversations: Conversations;
 }
 
@@ -259,7 +219,6 @@ export async function handleStaffMessage(
   if (pressed) {
     const dropped = deps.conversations.get(chatId) !== null;
     deps.conversations.clear(chatId);
-    deps.awaiting.take(chatId);
     const started = await startMenuItem(pressed, chatId, person, deps);
     if (dropped) {
       started.reply = { ...started.reply, text: `Прошлое не дописано — бросил.\n\n${started.reply.text}` };
@@ -296,32 +255,17 @@ export async function handleStaffMessage(
     }
     return { reply: { text: coffeeRefillStepHint(conv.step) } };
   }
+  if (conv?.flow === "task-done") {
+    if (conv.step === "report" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: handleTaskDoneReport(chatId, clean, deps) };
+    }
+    return { reply: { text: taskDoneStepHint(conv.step) } };
+  }
   if (conv?.flow === "coffee-consumable") {
     if (conv.step === "counts" && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: await handleCoffeeConsumableCounts(chatId, clean, person, deps) };
     }
     return { reply: { text: coffeeConsumableStepHint(conv.step) } };
-  }
-
-  // Ждём отчёт после «Сделал» — ПЕРЕД разбором триггеров.
-  //
-  // Порядок тут не косметика. Триггер задач — /задач|дела|.../, и слово
-  // «сделал» содержит «дела». Пока проверка ожидания стояла после триггеров,
-  // отчёт «сделал заливку» открывал список задач, а задача оставалась
-  // незакрытой — и сотрудник не понимал, почему.
-  //
-  // peek, а не take: если текст окажется не отчётом (пустой, команда),
-  // ожидание должно уцелеть до следующего сообщения.
-  const awaitingTaskId = deps.awaiting.peek(chatId);
-  if (awaitingTaskId !== null && clean.length > 0 && !clean.startsWith("/")) {
-    deps.awaiting.take(chatId);
-    const task = await deps.core.task(awaitingTaskId);
-    // Чужую задачу закрыть нельзя, даже если id как-то попал к сотруднику.
-    if (task.ownerKind !== "human" || task.ownerRef !== person.id) {
-      return { reply: { text: "Эта задача не на тебе." } };
-    }
-    await deps.core.setTaskStatus(awaitingTaskId, "done", `person:${person.id}`, clean);
-    return { reply: { text: `Записал: «${clean}». Задача закрыта ✅` } };
   }
 
   // Возвраты наборов — привычный формат группы «позиция. набор. вес», без
@@ -504,6 +448,16 @@ export async function handleStaffCallback(
     };
   }
 
+  // Кнопки закрытия задачи (dn:ok/np/x).
+  const done = parseTaskDoneCallback(data);
+  if (done) {
+    const res = await handleTaskDoneCallback(chatId, done, person, deps);
+    return {
+      answer: res.answer,
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
   // Кнопки «ошибся — исправить» (fx:del/keep). Core не даст удалить чужое.
   const coffeeFix = parseCoffeeFixCallback(data);
   if (coffeeFix) {
@@ -553,12 +507,19 @@ export async function handleStaffCallback(
     };
   }
 
-  // «Сделал» — просим отчёт: без него закрытие ничего не объясняет.
-  deps.awaiting.set(chatId, parsed.id);
+  // «Выполнил» — мастер закрытия: отчёт, фото, подтверждение.
+  //
+  // Раньше здесь взводился отдельный однослотовый AwaitingReport («жду одну
+  // строку»). Он удалён: мастер делает то же самое и ещё фото, а два
+  // параллельных механизма ожидания текста в одном чате рано или поздно
+  // разошлись бы — и отчёт уходил бы в тот, который не ждали.
+  const started = startTaskDone(chatId, task, deps);
   return {
     answer: "Напиши, что сделано",
-    // Кнопки снимаем: пока ждём отчёт, нажимать нечего, а живая кнопка
-    // «Выполнил» второй раз просто перезапишет ожидание.
-    edit: { text: `${formatTaskCard(task)}\n\n✍️ Что сделано? Напиши одним сообщением — это отчёт.` },
+    // Кнопки старой карточки снимаем: пока идёт мастер, нажимать на неё
+    // нечего, а повторное «Выполнил» перезапустило бы ввод с нуля.
+    edit: { text: `${formatTaskCard(task)}\n\n▶️ Закрываю…` },
+    message: started.text,
+    ...(started.keyboard ? { keyboard: started.keyboard } : {}),
   };
 }

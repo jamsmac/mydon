@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  AwaitingReport,
   formatMyTasks,
   handleStaffCallback,
   handleStaffMessage,
@@ -80,11 +79,7 @@ describe("Доступ сотрудника: только свои задачи"
     const { core, calls } = stubCore({
       task: async () => task({ ownerRef: "99999999-9999-4999-8999-999999999999" }),
     });
-    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, {
-      core,
-      awaiting: new AwaitingReport(),
-      conversations: new Conversations(),
-    });
+    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, { core, conversations: new Conversations() });
     assert.match(res.answer, /не твоя/i);
     assert.deepEqual(calls, [], "никаких изменений по чужой задаче быть не должно");
   });
@@ -93,63 +88,77 @@ describe("Доступ сотрудника: только свои задачи"
     const { core, calls } = stubCore({
       task: async () => task({ ownerKind: "agent", ownerRef: "mydon-finance" }),
     });
-    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, {
-      core,
-      awaiting: new AwaitingReport(),
-      conversations: new Conversations(),
-    });
+    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, { core, conversations: new Conversations() });
     assert.match(res.answer, /не твоя/i);
     assert.deepEqual(calls, []);
   });
 
-  it("чужой отчёт не проходит, даже если id угадан", async () => {
-    const awaiting = new AwaitingReport();
-    awaiting.set(555, task().id);
+  it("мастер закрытия для чужой задачи не запускается", async () => {
+    // Единственный вход в закрытие — кнопка «Выполнил», и владение проверяется
+    // до старта мастера. Подделать id в callback_data бесполезно.
+    const conversations = new Conversations();
     const { core, calls } = stubCore({
       task: async () => task({ ownerRef: "99999999-9999-4999-8999-999999999999" }),
     });
-    const res = await handleStaffMessage(555, "сделал", ME, { core, awaiting, conversations: new Conversations() });
-    assert.match(res.reply.text, /не на тебе/i);
+    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, { core, conversations });
+    assert.match(res.answer, /не твоя/i);
+    assert.equal(conversations.get(555), null, "мастер не должен стартовать");
     assert.deepEqual(calls, []);
+  });
+
+  it("текст без активного мастера ничего не закрывает", async () => {
+    const { core, calls } = stubCore();
+    await handleStaffMessage(555, "сделал", ME, { core, conversations: new Conversations() });
+    assert.ok(
+      !calls.some((c) => c.startsWith("status:done")),
+      "случайное слово не должно закрывать задачу",
+    );
   });
 });
 
-describe("Закрытие с отчётом", () => {
-  it("«Сделал» не закрывает сразу, а просит отчёт", async () => {
-    const awaiting = new AwaitingReport();
+describe("Закрытие с отчётом и фото", () => {
+  it("«Выполнил» не закрывает сразу, а запускает мастер", async () => {
+    const conversations = new Conversations();
     const { core, calls } = stubCore();
-    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, { core, awaiting, conversations: new Conversations() });
-    // Карточка перерисовывается на месте, а не дублируется новым сообщением.
-    assert.match(res.edit?.text ?? "", /что сделано/i);
-    assert.equal(res.edit?.keyboard, undefined, "кнопки должны сняться, пока ждём отчёт");
+    const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, { core, conversations });
+    assert.match(res.message ?? "", /что сделано/i);
+    assert.equal(conversations.get(555)?.flow, "task-done");
     assert.deepEqual(calls, [], "закрытия без отчёта быть не должно");
   });
 
-  it("следующее сообщение становится отчётом и закрывает задачу", async () => {
-    const awaiting = new AwaitingReport();
-    awaiting.set(555, task().id);
+  it("сквозной путь: кнопка → отчёт → «без фото» → задача закрыта", async () => {
+    const conversations = new Conversations();
     const { core, calls } = stubCore();
-    const res = await handleStaffMessage(555, "Пополнил, всё работает", ME, { core, awaiting, conversations: new Conversations() });
-    assert.match(res.reply.text, /закрыта/i);
+    const deps = { core, conversations };
+
+    await handleStaffCallback(555, `t:${task().id}:done`, ME, deps);
+    const afterReport = await handleStaffMessage(555, "Пополнил, всё работает", ME, deps);
+    assert.match(afterReport.reply.text, /Пополнил, всё работает/);
+    assert.deepEqual(calls, [], "отчёт записан в мастер, но задача ещё открыта");
+
+    const sent = await handleStaffCallback(555, "dn:np", ME, deps);
+    assert.match(sent.message ?? "", /Закрыл/);
     assert.equal(calls.length, 1);
-    assert.match(calls[0], /status:done:person:.*:Пополнил, всё работает/);
+    assert.match(calls[0], /status:done:person:.*:Пополнил, всё работает \(без фото\)/);
   });
 
-  it("«Взял» отмечает работу сразу, без отчёта", async () => {
+  it("«Взял в работу» отмечает работу сразу, без отчёта", async () => {
     const { core, calls } = stubCore();
     const res = await handleStaffCallback(555, `t:${task().id}:progress`, ME, {
       core,
-      awaiting: new AwaitingReport(),
       conversations: new Conversations(),
     });
     assert.match(res.answer, /в работе/i);
     assert.match(calls[0] ?? "", /status:in_progress/);
   });
 
-  it("забытое ожидание отчёта истекает и не портит следующий разговор", () => {
-    const awaiting = new AwaitingReport(1000);
-    awaiting.set(555, "task-1", 0);
-    assert.equal(awaiting.take(555, 5000), null, "просроченное ожидание не должно срабатывать");
+  it("брошенный мастер протухает и не закрывает задачу позже", () => {
+    // Состояние ожидания теперь одно — Conversations. Отдельный AwaitingReport
+    // удалён: два параллельных механизма ожидания текста в одном чате рано или
+    // поздно разошлись бы, и отчёт уходил бы в тот, который не ждали.
+    const conversations = new Conversations(1000);
+    conversations.start(555, "task-done", "report", {}, 0);
+    assert.equal(conversations.get(555, 5000), null);
   });
 });
 
@@ -167,11 +176,7 @@ describe("Что видит сотрудник", () => {
 
   it("свободный текст при одной задаче уходит комментарием владельцу", async () => {
     const { core, calls } = stubCore();
-    const res = await handleStaffMessage(555, "Ключей нет, охрана не пускает", ME, {
-      core,
-      awaiting: new AwaitingReport(),
-      conversations: new Conversations(),
-    });
+    const res = await handleStaffMessage(555, "Ключей нет, охрана не пускает", ME, { core, conversations: new Conversations() });
     assert.match(res.reply.text, /передал владельцу/i);
     assert.match(calls[0] ?? "", /comment:Ключей нет/);
   });
@@ -241,21 +246,18 @@ describe("Отчёты файлами", () => {
 });
 
 describe("Порядок разбора сообщения сотрудника", () => {
-  it("отчёт «сделал заливку» закрывает задачу, а не открывает список", async () => {
-    // Триггер задач — /задач|дела|.../, и «с-дела-л» в него попадает. Пока
-    // ожидание отчёта проверялось после триггеров, сотрудник получал список
-    // задач, а задача оставалась открытой.
-    const awaiting = new AwaitingReport();
-    awaiting.set(555, task().id);
-    const { core, calls } = stubCore();
-    const res = await handleStaffMessage(555, "сделал заливку", ME, {
-      core,
-      awaiting,
-      conversations: new Conversations(),
-    });
-    assert.match(res.reply.text, /закрыта/i);
-    assert.equal(calls.length, 1);
-    assert.match(calls[0], /status:done:.*:сделал заливку/);
+  it("отчёт «сделал заливку» идёт в мастер, а не открывает список задач", async () => {
+    // Триггер задач — /задач|дела|.../, и «с-дела-л» в него попадает. Активный
+    // мастер разбирается раньше триггеров, иначе отчёт открывал бы список,
+    // а задача оставалась незакрытой.
+    const conversations = new Conversations();
+    const { core } = stubCore();
+    const deps = { core, conversations };
+    await handleStaffCallback(555, `t:${task().id}:done`, ME, deps);
+
+    const res = await handleStaffMessage(555, "сделал заливку", ME, deps);
+    assert.match(res.reply.text, /сделал заливку/);
+    assert.equal(conversations.get(555)?.step, "photo", "мастер должен дойти до фото");
   });
 
   it("нажатие кнопки меню бросает активный мастер и говорит об этом", async () => {
@@ -264,7 +266,6 @@ describe("Порядок разбора сообщения сотрудника"
     const { core } = stubCore();
     const res = await handleStaffMessage(555, "📋 Мои задачи", ME, {
       core,
-      awaiting: new AwaitingReport(),
       conversations,
     });
     assert.equal(conversations.get(555), null, "мастер должен быть сброшен");
@@ -272,35 +273,20 @@ describe("Порядок разбора сообщения сотрудника"
     assert.match(res.reply.text, /твои задачи/i);
   });
 
-  it("кнопка меню сильнее ожидания отчёта", async () => {
-    const awaiting = new AwaitingReport();
-    awaiting.set(555, task().id);
-    const { core, calls } = stubCore();
-    await handleStaffMessage(555, "📥 Инкассация", ME, {
-      core: { ...(core as object), machines: async () => [] } as never,
-      awaiting,
-      conversations: new Conversations(),
-    });
-    assert.deepEqual(calls, [], "подпись кнопки не должна попасть в отчёт");
-    assert.equal(awaiting.peek(555), null, "ожидание снимается, а не висит");
-  });
+  it("кнопка меню сильнее активного мастера закрытия", async () => {
+    const conversations = new Conversations();
+    const { core, calls } = stubCore({ machines: async () => [] });
+    const deps = { core, conversations };
+    await handleStaffCallback(555, `t:${task().id}:done`, ME, deps);
 
-  it("ожидание отчёта переживает команду и не тратится впустую", async () => {
-    // peek вместо take: «/start» посреди ожидания не должен молча съедать его.
-    const awaiting = new AwaitingReport();
-    awaiting.set(555, task().id);
-    const { core } = stubCore();
-    await handleStaffMessage(555, "/start", ME, { core, awaiting, conversations: new Conversations() });
-    assert.equal(awaiting.peek(555), task().id, "ожидание должно уцелеть");
+    await handleStaffMessage(555, "📥 Инкассация", ME, deps);
+    assert.deepEqual(calls, [], "подпись кнопки не должна попасть в отчёт");
+    assert.equal(conversations.get(555), null, "мастер сбрасывается, а не висит");
   });
 
   it("«/start» ставит постоянное меню и показывает задачи одним сообщением", async () => {
     const { core } = stubCore();
-    const res = await handleStaffMessage(555, "/start", ME, {
-      core,
-      awaiting: new AwaitingReport(),
-      conversations: new Conversations(),
-    });
+    const res = await handleStaffMessage(555, "/start", ME, { core, conversations: new Conversations() });
     assert.ok(res.reply.replyKeyboard, "меню должно появиться при первом входе");
     assert.equal(res.reply.replyKeyboard!.is_persistent, true);
     assert.equal(res.reply.keyboard!.inline_keyboard.length, 1, "одна задача — одна номерная кнопка");
@@ -309,11 +295,7 @@ describe("Порядок разбора сообщения сотрудника"
 
   it("неготовый пункт отвечает честно, а не молчит", async () => {
     const { core } = stubCore();
-    const res = await handleStaffMessage(555, "🛠 Технический осмотр", ME, {
-      core,
-      awaiting: new AwaitingReport(),
-      conversations: new Conversations(),
-    });
+    const res = await handleStaffMessage(555, "🛠 Технический осмотр", ME, { core, conversations: new Conversations() });
     assert.match(res.reply.text, /пока не готово/i);
   });
 });
@@ -321,11 +303,7 @@ describe("Порядок разбора сообщения сотрудника"
 describe("Карточка задачи по номерной кнопке", () => {
   it("«open» раскрывает карточку на месте, без записи в Core", async () => {
     const { core, calls } = stubCore();
-    const res = await handleStaffCallback(555, `t:${task().id}:open`, ME, {
-      core,
-      awaiting: new AwaitingReport(),
-      conversations: new Conversations(),
-    });
+    const res = await handleStaffCallback(555, `t:${task().id}:open`, ME, { core, conversations: new Conversations() });
     assert.match(res.edit?.text ?? "", /Пополнить автомат/);
     assert.ok(res.edit?.keyboard, "в карточке должны быть кнопки действий");
     assert.deepEqual(calls, [], "открытие карточки ничего не меняет");
@@ -333,11 +311,7 @@ describe("Карточка задачи по номерной кнопке", () 
 
   it("«Взял в работу» перерисовывает карточку, а не шлёт вторую", async () => {
     const { core } = stubCore();
-    const res = await handleStaffCallback(555, `t:${task().id}:progress`, ME, {
-      core,
-      awaiting: new AwaitingReport(),
-      conversations: new Conversations(),
-    });
+    const res = await handleStaffCallback(555, `t:${task().id}:progress`, ME, { core, conversations: new Conversations() });
     assert.ok(res.edit, "иначе в чате две карточки одной задачи с живыми кнопками");
     assert.equal(res.message, undefined);
     const texts = res.edit!.keyboard!.inline_keyboard[0].map((b) => b.text).join(" ");
@@ -348,11 +322,7 @@ describe("Карточка задачи по номерной кнопке", () 
     const { core } = stubCore({
       task: async () => task({ ownerRef: "99999999-9999-4999-8999-999999999999" }),
     });
-    const res = await handleStaffCallback(555, `t:${task().id}:open`, ME, {
-      core,
-      awaiting: new AwaitingReport(),
-      conversations: new Conversations(),
-    });
+    const res = await handleStaffCallback(555, `t:${task().id}:open`, ME, { core, conversations: new Conversations() });
     assert.match(res.answer, /не твоя/i);
     assert.equal(res.edit, undefined);
   });

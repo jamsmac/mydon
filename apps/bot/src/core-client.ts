@@ -559,6 +559,16 @@ export class CoreClient {
     return (await res.json()) as { id: string; url: string };
   }
 
+  /** Вложения записи: сколько фото «до» и «после» уже приложено к задаче. */
+  attachmentsOfOwner(
+    ownerType: string,
+    ownerId: string,
+  ): Promise<{ id: string; kind: string; stage: string | null }[]> {
+    return this.request(
+      `/attachments?ownerType=${encodeURIComponent(ownerType)}&ownerId=${encodeURIComponent(ownerId)}`,
+    );
+  }
+
   // ── Кофе-бункеры: ручные кофемашины, ежедневная заливка/мойка ────────────
 
   /** Точки с кофемашинами. */
