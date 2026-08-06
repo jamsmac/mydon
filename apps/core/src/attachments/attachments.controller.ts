@@ -15,7 +15,12 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import { IsIn, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
 import { Public } from "../common/public.decorator";
-import { AttachmentsService, type UploadedFile as UF } from "./attachments.service";
+import {
+  ATTACHMENT_STAGES,
+  AttachmentsService,
+  type AttachmentStage,
+  type UploadedFile as UF,
+} from "./attachments.service";
 
 /** Куда привязать файл и что это. */
 export class UploadDto {
@@ -30,6 +35,10 @@ export class UploadDto {
 
   @IsOptional() @IsString() @MaxLength(128)
   createdBy?: string;
+
+  /** В какой момент снято. Незнакомое значение отвергаем здесь, а не в БД. */
+  @IsOptional() @IsIn([...ATTACHMENT_STAGES])
+  stage?: AttachmentStage;
 }
 
 /** Вложения: фото номенклатуры, чеки. Файл — в хранилище, метаданные — в БД. */

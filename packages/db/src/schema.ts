@@ -166,8 +166,21 @@ export const task = pgTable(
     /** Подробности: что именно сделать. Заголовка часто мало. */
     description: text("description"),
     ownerKind: ownerKindEnum("owner_kind").notNull(),
-    ownerRef: text("owner_ref"), // person.id или имя агента
+    /**
+     * person.id или имя агента. NULL при ownerKind='human' означает
+     * «свободная задача»: её видят все и разбирают из общего пула.
+     * Закрепления сотрудников за объектами нет — все работают по всему парку.
+     */
+    ownerRef: text("owner_ref"),
     domain: domainEnum("domain"),
+    /**
+     * По какому объекту работа: автомат, точка, склад — запись реестра.
+     *
+     * Без этого поля задачи нельзя сгруппировать по объекту, а техник ездит
+     * по точкам, а не по видам работ: «три дела на Kaffit-04» — это один
+     * заезд, а тот же список вперемешку — три.
+     */
+    entityId: uuid("entity_id").references(() => entity.id),
     status: taskStatusEnum("status").default("todo").notNull(),
     /** Срочность — чтобы список сортировался по важности, а не по алфавиту. */
     priority: taskPriorityEnum("priority").default("normal").notNull(),
@@ -187,7 +200,25 @@ export const task = pgTable(
     createdAt: createdAt(),
   },
   // Главные запросы: «что у этого исполнителя» и «что горит по срокам».
-  (t) => [index("task_owner_idx").on(t.ownerKind, t.ownerRef), index("task_due_idx").on(t.due)],
+  (t) => [
+    index("task_owner_idx").on(t.ownerKind, t.ownerRef),
+    index("task_due_idx").on(t.due),
+    index("task_entity_idx").on(t.entityId),
+    /**
+     * Идемпотентность повторяющихся задач.
+     *
+     * `ensureForDay` строит source как `<ключ>:<YYYY-MM-DD>` и раньше делал
+     * select-then-insert: два тика монитора в одну секунду создавали две
+     * задачи на один день. Ставку делает БД.
+     *
+     * Индекс ЧАСТИЧНЫЙ — только по источникам с датой на конце. Обычные
+     * source ("ourvend", "sales-sync", "owner", "agent:<имя>") повторяются
+     * у сотен задач на законных основаниях, и глобальный unique их сломал бы.
+     */
+    uniqueIndex("task_source_key")
+      .on(t.source)
+      .where(sql`source ~ ':[0-9]{4}-[0-9]{2}-[0-9]{2}$'`),
+  ],
 );
 
 // ── collection: инкассация автоматов (перенос VendCash внутрь MYDON) ──
@@ -597,6 +628,16 @@ export const attachment = pgTable(
     ownerId: uuid("owner_id").notNull(),
     /** Что это: photo | receipt | doc. */
     kind: text("kind").default("photo").notNull(),
+    /**
+     * Стадия съёмки: before | after | plate | counter. NULL — вне контекста
+     * работы (фото карточки в реестре).
+     *
+     * Без неё две фотографии задачи неразличимы, и «до/после» существует
+     * только в голове того, кто их прислал. Отдельная колонка, а не префикс
+     * в `kind`: `kind` отвечает на «что это за файл», стадия — на «в какой
+     * момент снят», и смешивать их значит терять одно из двух.
+     */
+    stage: text("stage"),
     /** Ключ в хранилище (S3-ключ или относительный путь на диске). */
     storageKey: text("storage_key").notNull(),
     mime: text("mime"),

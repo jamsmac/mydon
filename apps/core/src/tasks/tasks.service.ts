@@ -19,6 +19,8 @@ export interface CreateTaskInput {
   description?: string;
   priority?: Priority;
   createdBy?: string;
+  /** По какому объекту работа: автомат, точка, склад. */
+  entityId?: string;
 }
 
 /** Сводка по исполнителю — «картина по людям» из контроля задач. */
@@ -64,6 +66,7 @@ export class TasksService {
           source: input.source ?? null,
           priority: input.priority ?? "normal",
           createdBy: input.createdBy ?? actorRef,
+          entityId: input.entityId ?? null,
         })
         .returning();
 
@@ -190,6 +193,7 @@ export class TasksService {
       ownerRef?: string | null;
       priority?: Priority;
       due?: Date | null;
+      entityId?: string | null;
     },
     actorRef = "owner",
   ): Promise<TaskRow> {
@@ -210,6 +214,7 @@ export class TasksService {
     }
     if (patch.priority !== undefined) set.priority = patch.priority;
     if (patch.due !== undefined) set.due = patch.due;
+    if (patch.entityId !== undefined) set.entityId = patch.entityId;
 
     if (Object.keys(set).length === 0) return this.byId(id);
 
@@ -236,9 +241,118 @@ export class TasksService {
    */
   async ensureForDay(input: CreateTaskInput & { dayKey: string }): Promise<TaskRow | null> {
     const source = `${input.source ?? "recurring"}:${input.dayKey}`;
-    const [existing] = await this.db.select().from(task).where(eq(task.source, source));
-    if (existing) return null;
-    return this.create({ ...input, source }, "scheduler");
+    // Было select-then-insert: два тика монитора в одну секунду проходили
+    // проверку оба и создавали две задачи на один день. Ставку делает БД —
+    // частичный уникальный индекс task_source_key (миграция 0040).
+    const [created] = await this.db
+      .insert(task)
+      .values({
+        title: input.title,
+        description: input.description ?? null,
+        ownerKind: input.ownerKind,
+        ownerRef: input.ownerRef ?? null,
+        domain: input.domain ?? null,
+        due: input.due ?? null,
+        source,
+        priority: input.priority ?? "normal",
+        createdBy: input.createdBy ?? "scheduler",
+        entityId: input.entityId ?? null,
+      })
+      .onConflictDoNothing({ target: task.source })
+      .returning();
+    if (!created) return null;
+
+    await this.db.insert(auditLog).values({
+      actorKind: "system",
+      actorRef: "scheduler",
+      action: "task.create",
+      target: created.id,
+      after: created,
+    });
+    return created;
+  }
+
+  // ── Общий пул: свободные задачи ────────────────────────────────────────────
+  //
+  // Закрепления сотрудников за объектами нет — все работают по всему парку,
+  // поэтому автосозданная задача рождается без исполнителя и её разбирают.
+  // Это нормальное состояние, а не дефект настройки.
+
+  /** Свободные задачи: никто не взял, но работа стоит. */
+  unassigned(limit = 50): Promise<TaskRow[]> {
+    return this.db
+      .select()
+      .from(task)
+      .where(
+        and(
+          eq(task.ownerKind, "human"),
+          isNull(task.ownerRef),
+          ne(task.status, "done"),
+          ne(task.status, "cancelled"),
+        ),
+      )
+      .orderBy(asc(task.due), desc(task.priority), asc(task.createdAt))
+      .limit(limit);
+  }
+
+  /**
+   * Взять свободную задачу.
+   *
+   * Двое, нажавших «Беру» одновременно, — это не редкий случай, а обычное утро
+   * при одном общем дайджесте. Гонку разрешает БД: `WHERE owner_ref IS NULL`
+   * внутри самого UPDATE. Проигравший получает null и увидит имя победителя,
+   * а не ошибку.
+   */
+  async claim(id: string, personId: string): Promise<TaskRow | null> {
+    return this.db.transaction(async (tx) => {
+      const [claimed] = await tx
+        .update(task)
+        .set({ ownerKind: "human", ownerRef: personId })
+        .where(and(eq(task.id, id), eq(task.ownerKind, "human"), isNull(task.ownerRef)))
+        .returning();
+      if (!claimed) return null;
+
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: `person:${personId}`,
+        action: "task.claimed",
+        target: claimed.id,
+        after: claimed,
+      });
+      return claimed;
+    });
+  }
+
+  /**
+   * Вернуть задачу в пул.
+   *
+   * Без этого техник, взявший задачу и застрявший (нет запчасти, точка
+   * закрыта), молча блокирует её до срока: другим она уже не видна как
+   * свободная, а он её не сделает.
+   */
+  async release(id: string, personId: string): Promise<TaskRow | null> {
+    return this.db.transaction(async (tx) => {
+      const [before] = await tx.select().from(task).where(eq(task.id, id)).limit(1);
+      if (!before) throw new NotFoundException(`Задача ${id} не найдена`);
+      // Отпустить можно только своё: иначе один сотрудник снимает задачу с другого.
+      if (before.ownerRef !== personId) return null;
+
+      const [freed] = await tx
+        .update(task)
+        .set({ ownerRef: null, status: before.status === "in_progress" ? "todo" : before.status })
+        .where(eq(task.id, id))
+        .returning();
+
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: `person:${personId}`,
+        action: "task.released",
+        target: id,
+        before,
+        after: freed,
+      });
+      return freed;
+    });
   }
 
   // ── Переписка по задаче ────────────────────────────────────────────────────

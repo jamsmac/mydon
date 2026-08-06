@@ -4,18 +4,54 @@ import { TasksService } from "./tasks.service";
 
 type Row = Record<string, unknown>;
 
-function stubDb(opts: { existing?: Row; updateResult?: Row; selectResult?: Row[] }) {
+interface StubOpts {
+  existing?: Row;
+  updateResult?: Row;
+  selectResult?: Row[];
+  /** true — уникальный индекс отсёк вставку: задача на этот день уже есть. */
+  insertConflict?: boolean;
+  /** Куда складывать вставленные строки — чтобы проверить журнал аудита. */
+  inserted?: Row[];
+}
+
+/**
+ * Заглушка БД. Поддерживает ровно те цепочки Drizzle, которыми пользуется
+ * сервис: select().from().where()[.limit()], update().set().where().returning(),
+ * insert().values()[.onConflictDoNothing()].returning() и голый await у вставки.
+ */
+function stubDb(opts: StubOpts) {
+  const rowsOf = () => opts.selectResult ?? (opts.existing ? [opts.existing] : []);
+
+  // where() и awaitable, и с .limit() — сервис использует оба варианта.
+  const whereChain = () => {
+    const result = async () => rowsOf();
+    return Object.assign(result(), { limit: result });
+  };
+
+  const insert = () => ({
+    values: (v: unknown) => {
+      const row = { id: "t1", ...(v as Row) };
+      opts.inserted?.push(row);
+      const returning = async () => (opts.insertConflict ? [] : [row]);
+      return {
+        onConflictDoNothing: () => ({ returning }),
+        returning,
+        // `await db.insert(x).values(y)` без returning — запись в журнал.
+        then: (res: (v: unknown) => unknown) => Promise.resolve([row]).then(res),
+      };
+    },
+  });
+
   const tx = {
-    select: () => ({
-      from: () => ({ where: async () => opts.selectResult ?? (opts.existing ? [opts.existing] : []) }),
-    }),
+    select: () => ({ from: () => ({ where: whereChain }) }),
     update: () => ({
       set: () => ({ where: () => ({ returning: async () => (opts.updateResult ? [opts.updateResult] : []) }) }),
     }),
-    insert: () => ({ values: (v: unknown) => ({ returning: async () => [{ id: "t1", ...(v as Row) }] }) }),
+    insert,
   };
   return {
     select: tx.select,
+    insert,
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
 }
@@ -40,8 +76,10 @@ describe("Задачи", () => {
   });
 
   it("повторяющаяся задача не дублируется в тот же день", async () => {
-    // такая задача на сегодня уже есть
-    const s = new TasksService(stubDb({ selectResult: [{ id: "t1" }] }));
+    // Дубль отсекает БД (частичный уникальный индекс task_source_key), а не
+    // предварительный select: два тика монитора в одну секунду проходили
+    // проверку оба и создавали две задачи.
+    const s = new TasksService(stubDb({ insertConflict: true }));
     const again = await s.ensureForDay({
       title: "Инвентаризация",
       ownerKind: "human",
@@ -52,7 +90,8 @@ describe("Задачи", () => {
   });
 
   it("в новый день задача заводится заново", async () => {
-    const s = new TasksService(stubDb({ selectResult: [] }));
+    const inserted: Row[] = [];
+    const s = new TasksService(stubDb({ inserted }));
     const created = await s.ensureForDay({
       title: "Инвентаризация",
       ownerKind: "human",
@@ -61,6 +100,89 @@ describe("Задачи", () => {
     });
     assert.ok(created, "на новый день задача должна появиться");
     assert.match(String(created?.source), /2026-07-29/);
+    assert.ok(
+      inserted.some((r) => r.action === "task.create"),
+      "создание должно оставлять след в журнале аудита",
+    );
+  });
+
+  it("проигранная гонка не пишет в журнал аудита", async () => {
+    const inserted: Row[] = [];
+    await new TasksService(stubDb({ insertConflict: true, inserted })).ensureForDay({
+      title: "Инвентаризация",
+      ownerKind: "human",
+      source: "recurring:inventory",
+      dayKey: "2026-07-28",
+    });
+    assert.ok(
+      !inserted.some((r) => r.action === "task.create"),
+      "иначе журнал показывал бы созданные задачи, которых нет",
+    );
+  });
+
+  it("объект работы сохраняется вместе с задачей", async () => {
+    const inserted: Row[] = [];
+    const s = new TasksService(stubDb({ inserted }));
+    await s.create({
+      title: "Помыть миксер",
+      ownerKind: "human",
+      entityId: "33333333-3333-4333-8333-333333333333",
+    });
+    assert.equal(inserted[0]?.entityId, "33333333-3333-4333-8333-333333333333");
+  });
+});
+
+describe("Общий пул свободных задач", () => {
+  const PERSON = "11111111-1111-4111-8111-111111111111";
+
+  it("взять свободную задачу — исполнителем становится нажавший", async () => {
+    const inserted: Row[] = [];
+    const s = new TasksService(
+      stubDb({ updateResult: { id: "t1", ownerRef: PERSON }, inserted }),
+    );
+    const claimed = await s.claim("t1", PERSON);
+    assert.equal(claimed?.ownerRef, PERSON);
+    assert.ok(
+      inserted.some((r) => r.action === "task.claimed"),
+      "взятие задачи должно быть видно в журнале",
+    );
+  });
+
+  it("второй нажавший получает null, а не ошибку и не чужую задачу", async () => {
+    // UPDATE ... WHERE owner_ref IS NULL не вернул строк: успел другой.
+    // Гонку разрешает БД — при двух техниках и одном дайджесте это обычное утро.
+    const s = new TasksService(stubDb({ updateResult: undefined }));
+    assert.equal(await s.claim("t1", PERSON), null);
+  });
+
+  it("вернуть в пул можно только свою задачу", async () => {
+    const s = new TasksService(stubDb({ existing: { id: "t1", ownerRef: "чужой", status: "todo" } }));
+    assert.equal(
+      await s.release("t1", PERSON),
+      null,
+      "иначе один сотрудник снимает задачу с другого",
+    );
+  });
+
+  it("возврат в пул снимает исполнителя и выводит из работы", async () => {
+    const inserted: Row[] = [];
+    const s = new TasksService(
+      stubDb({
+        existing: { id: "t1", ownerRef: PERSON, status: "in_progress" },
+        updateResult: { id: "t1", ownerRef: null, status: "todo" },
+        inserted,
+      }),
+    );
+    const freed = await s.release("t1", PERSON);
+    assert.equal(freed?.ownerRef, null);
+    assert.equal(freed?.status, "todo", "брошенная задача не должна висеть «в работе»");
+    assert.ok(inserted.some((r) => r.action === "task.released"));
+  });
+
+  it("несуществующую задачу вернуть нельзя — это ошибка, а не отказ", async () => {
+    const s = new TasksService(stubDb({}));
+    await assert.rejects(() => new TasksService(stubDb({})).release("нет", PERSON), /не найдена/);
+    assert.ok(s);
   });
 });
 

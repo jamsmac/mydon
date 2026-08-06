@@ -784,6 +784,8 @@ export interface Task {
   source: string | null;
   createdBy: string | null;
   resultNote: string | null;
+  /** По какому объекту работа: автомат, точка, склад. */
+  entityId: string | null;
   /** Оценка владельца после «сделано»: excellent / accepted / redo. */
   quality: "excellent" | "accepted" | "redo" | null;
   completedAt: string | null;
@@ -1456,6 +1458,8 @@ export interface Attachment {
   ownerType: string;
   ownerId: string;
   kind: string;
+  /** В какой момент снято: before | after | plate | counter. */
+  stage: string | null;
   mime: string | null;
   bytes: number | null;
   /**

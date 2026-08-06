@@ -41,12 +41,21 @@ export interface TaskRow {
   title: string;
   description: string | null;
   ownerKind: "human" | "agent";
+  /** null при ownerKind='human' — задача свободна, её разбирают из пула. */
   ownerRef: string | null;
   status: "todo" | "in_progress" | "done" | "cancelled";
   priority: "low" | "normal" | "high" | "urgent";
   due: string | null;
   resultNote: string | null;
+  /** По какому объекту работа: автомат, точка, склад. */
+  entityId: string | null;
 }
+
+/**
+ * Таймаут загрузки фото. Отдельный от общего: 10 секунд достаточно для JSON,
+ * но не для мегабайтного снимка с точки на 3G.
+ */
+const PHOTO_TIMEOUT_MS = 60_000;
 
 /**
  * Расхождение при пересчёте склада (§5.4): было → стало. delta<0 — недостача
@@ -524,19 +533,25 @@ export class CoreClient {
     mime: string | null;
     filename: string;
     createdBy: string;
+    /** В какой момент снято: before | after | plate | counter. */
+    stage?: string;
   }): Promise<{ id: string; url: string }> {
     const form = new FormData();
     form.append("ownerType", input.ownerType);
     form.append("ownerId", input.ownerId);
     form.append("kind", "photo");
     form.append("createdBy", input.createdBy);
+    if (input.stage) form.append("stage", input.stage);
     const blob = input.mime
       ? new Blob([new Uint8Array(input.bytes)], { type: input.mime })
       : new Blob([new Uint8Array(input.bytes)]);
     form.append("file", blob, input.filename);
     const res = await fetch(`${this.baseUrl}/attachments`, {
       method: "POST",
-      signal: AbortSignal.timeout(this.timeoutMs),
+      // Свой таймаут, а не общий: 10 секунд хватает JSON-запросу, но не
+      // мегабайтной фотографии с точки на 3G. По общему таймауту загрузка
+      // срывалась бы ровно там, где она особенно нужна.
+      signal: AbortSignal.timeout(PHOTO_TIMEOUT_MS),
       headers: this.serviceToken ? { "x-service-token": this.serviceToken } : {},
       body: form,
     });
