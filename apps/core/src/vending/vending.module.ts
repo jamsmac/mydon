@@ -1,12 +1,13 @@
 import { Module } from "@nestjs/common";
 import { ApprovalsModule } from "../approvals/approvals.module";
+import { RefillService } from "./refill.service";
 import { VendingController } from "./vending.controller";
 import { VendingService } from "./vending.service";
 
 @Module({
   imports: [ApprovalsModule],
   controllers: [VendingController],
-  providers: [VendingService],
-  exports: [VendingService],
+  providers: [VendingService, RefillService],
+  exports: [VendingService, RefillService],
 })
 export class VendingModule {}

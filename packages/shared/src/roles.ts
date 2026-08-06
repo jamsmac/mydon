@@ -45,6 +45,7 @@ export const PERMISSIONS = [
   "cash.collect", // инкассация
   "stock.intake", // приход на склад
   "stock.count", // инвентаризация
+  "refill.create", // заливка снек/дринк-автомата (кофе — отдельное право выше)
   "registry.propose", // предложить карточку в реестр
   "system.admin", // настройки, приглашения, отзыв доступа
 ] as const;
@@ -61,12 +62,20 @@ export type Permission = (typeof PERMISSIONS)[number];
 export const BASELINE: readonly Permission[] = ["tasks.own"];
 
 export const ROLE_PERMISSIONS: Record<StaffRole, readonly Permission[]> = {
-  operator: ["tasks.own", "coffee.refill", "coffee.wash", "coffee.consumable", "registry.propose"],
+  operator: [
+    "tasks.own",
+    "coffee.refill",
+    "coffee.wash",
+    "coffee.consumable",
+    "refill.create",
+    "registry.propose",
+  ],
   technician: [
     "tasks.own",
     "maintenance.view",
     "parts.replace",
     "coffee.wash",
+    "refill.create",
     "registry.propose",
   ],
   collector: ["tasks.own", "cash.collect"],
@@ -81,6 +90,7 @@ export const ROLE_PERMISSIONS: Record<StaffRole, readonly Permission[]> = {
     "cash.collect",
     "stock.intake",
     "stock.count",
+    "refill.create",
     "registry.propose",
   ],
   owner: [...PERMISSIONS],
