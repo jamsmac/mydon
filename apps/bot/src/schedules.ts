@@ -48,6 +48,11 @@ export function selectDue(rows: MaintenanceDueRow[], horizonDays: number): Maint
   const rank: Record<string, number> = { overdue: 0, due: 1, soon: 2 };
   return rows
     .filter((r) => SHOWN.includes(r.status))
+    // Автомата нет на месте — техник туда не поедет. Показать строку значит
+    // отправить человека к аппарату, которого на точке нет, и дать ему кнопку
+    // «✅ Сделал сейчас»: срок уехал бы на весь период вперёд по работе,
+    // которой не было. Владелец видит такие строки в панели, техник — нет.
+    .filter((r) => r.operational !== false)
     .filter((r) => r.daysLeft === null || r.daysLeft <= horizonDays)
     .sort((a, b) => {
       const byStatus = (rank[a.status] ?? 9) - (rank[b.status] ?? 9);

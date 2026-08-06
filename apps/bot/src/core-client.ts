@@ -71,6 +71,13 @@ export interface MaintenanceDueRow {
   status: "ok" | "soon" | "due" | "overdue" | "unknown";
   assigneeId: string | null;
   autoTask: boolean;
+  /**
+   * Автомат в эксплуатации. Необязательное: старый Core поля не отдаёт, и
+   * тогда строка считается рабочей — отсутствие признака не повод спрятать
+   * от техника весь график.
+   */
+  operational?: boolean;
+  idleReason?: string | null;
 }
 
 /**
