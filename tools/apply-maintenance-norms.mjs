@@ -6,6 +6,10 @@
  * `packages/shared/src/maintenance-norms.ts`:
  *   мойка миксера 10 дней · фильтр воды 45 дней · плановое ТО 90 дней.
  *
+ * Первые два — только кофейным автоматам (привязанным к кофейной точке).
+ * У снек-автомата нет ни миксера, ни фильтра, и такой график краснел бы за
+ * работу, которой не существует. Плановое ТО идёт всем.
+ *
  * Запуск НА СЕРВЕРЕ (Core слушает локально, мутации закрыты сервис-токеном):
  *   cd /opt/mydon-app
  *   docker compose -f deploy/docker-compose.yml --env-file .env \
@@ -47,19 +51,33 @@ async function main() {
   // подсчёту как гарантии нельзя, между двумя вызовами парк может измениться.
   const plans = await get("/maintenance/plans");
   const covered = new Set(plans.map((p) => `${p.entityId}|${p.kind}|${p.partKind ?? ""}`));
-  const NORMS = [
-    ["cleaning", "mixer"],
-    ["part_replace", "water_filter"],
-    ["service", ""],
-  ];
-  const missing = machines.filter((m) =>
-    NORMS.some(([kind, part]) => !covered.has(`${m.id}|${kind}|${part}`)),
-  );
 
-  console.log(`Автоматов: ${machines.length}, нормативов сейчас: ${plans.length}`);
-  console.log(`Не хватает нормативов у автоматов: ${missing.length}`);
+  // Кофейный автомат — привязанный к кофейной точке. Решает это Core (он же
+  // и применяет), здесь только предпросмотр: показать разные числа для кофе
+  // и снека честнее, чем одно общее, за которым не видно, что кому достанется.
+  const locations = await get("/coffee/locations");
+  const isCoffee = new Set(locations.map((l) => l.entityId).filter(Boolean));
+  const NORMS = {
+    coffee: [
+      ["cleaning", "mixer"],
+      ["part_replace", "water_filter"],
+      ["service", ""],
+    ],
+    other: [["service", ""]],
+  };
+  const normsOf = (m) => (isCoffee.has(m.id) ? NORMS.coffee : NORMS.other);
+  const missing = machines.filter((m) =>
+    normsOf(m).some(([kind, part]) => !covered.has(`${m.id}|${kind}|${part}`)),
+  );
+  const coffeeCount = machines.filter((m) => isCoffee.has(m.id)).length;
+
+  console.log(`Автоматов: ${machines.length} (кофейных ${coffeeCount}, прочих ${machines.length - coffeeCount})`);
+  console.log(`Нормативов сейчас: ${plans.length}. Не хватает у автоматов: ${missing.length}`);
+  console.log("Кофейным — мойка миксера 10, фильтр воды 45, ТО 90. Прочим — только ТО 90.");
   if (DRY) {
-    for (const m of missing.slice(0, 20)) console.log(`  · ${m.name}`);
+    for (const m of missing.slice(0, 20)) {
+      console.log(`  · ${m.name}${isCoffee.has(m.id) ? " [кофе]" : " [прочий: только ТО]"}`);
+    }
     if (missing.length > 20) console.log(`  … и ещё ${missing.length - 20}`);
     console.log("Пробный прогон — ничего не записано.");
     return;
@@ -87,6 +105,7 @@ async function main() {
     skipped += out.skipped;
   }
   console.log(`Готово: заведено ${created}, пропущено (уже были) ${skipped}.`);
+  console.log("Кофейным ушло по три норматива, прочим — по одному (плановое ТО).");
   console.log("Проверить: панель → Обслуживание → раздел «Графики».");
 }
 

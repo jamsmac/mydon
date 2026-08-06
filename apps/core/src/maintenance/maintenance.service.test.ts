@@ -306,24 +306,51 @@ describe("Нормативы и сроки", () => {
 
 describe("Стандартные нормативы на список объектов", () => {
   const M2 = "33333333-3333-4333-8333-333333333333";
+  /** Первый select — привязка к кофейным точкам, второй — уже заведённые планы. */
+  const stub = (coffee: Row[], plans: Row[], inserted: Row[], updated?: Row[]) =>
+    stubDb({ selects: [coffee, plans], inserted, updated });
 
-  it("заводит три плана на автомат с числами владельца", async () => {
+  it("кофейному автомату заводит все три норматива с числами владельца", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stubDb({ selects: [[]], inserted }));
+    const s = new MaintenanceService(stub([{ entityId: MACHINE }], [], inserted));
     const res = await s.applyStandardNorms([MACHINE]);
 
     assert.equal(res.created.length, 3);
     assert.equal(res.skipped, 0);
-    const plans = inserted.filter((r) => r.entityId === MACHINE);
-    const days = new Map(plans.map((p) => [p.title, p.everyDays]));
+    assert.equal(res.coffee, 1);
+    const days = new Map(inserted.filter((r) => r.entityId).map((p) => [p.title, p.everyDays]));
     assert.equal(days.get("Мойка миксера"), 10);
     assert.equal(days.get("Замена фильтра воды"), 45);
     assert.equal(days.get("Плановое ТО"), 90);
   });
 
+  it("снек-автомату — только плановое ТО", async () => {
+    // У снека нет ни миксера, ни фильтра воды. График такой работы краснел бы
+    // за работу, которой не существует, — и в раздел перестали бы смотреть.
+    const inserted: Row[] = [];
+    const s = new MaintenanceService(stub([], [], inserted));
+    const res = await s.applyStandardNorms([M2]);
+
+    assert.equal(res.created.length, 1);
+    assert.equal(res.coffee, 0);
+    assert.equal(res.other, 1);
+    const titles = inserted.filter((r) => r.entityId).map((r) => r.title);
+    assert.deepEqual(titles, ["Плановое ТО"]);
+  });
+
+  it("смешанный список: каждому своё", async () => {
+    const inserted: Row[] = [];
+    const s = new MaintenanceService(stub([{ entityId: MACHINE }], [], inserted));
+    const res = await s.applyStandardNorms([MACHINE, M2]);
+
+    assert.equal(res.created.length, 4, "три кофейному, одно снеку");
+    assert.equal(res.coffee, 1);
+    assert.equal(res.other, 1);
+  });
+
   it("первый срок — период от сегодня, а не красный экран на старте", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stubDb({ selects: [[]], inserted }));
+    const s = new MaintenanceService(stub([{ entityId: MACHINE }], [], inserted));
     await s.applyStandardNorms([MACHINE]);
     const mixer = inserted.find((r) => r.title === "Мойка миксера")!;
     assert.equal(mixer.dueOn, addDays(todayInTz(), 10));
@@ -335,17 +362,16 @@ describe("Стандартные нормативы на список объек
     const inserted: Row[] = [];
     const updated: Row[] = [];
     const s = new MaintenanceService(
-      stubDb({
-        selects: [
-          [
-            { entityId: MACHINE, kind: "cleaning", partKind: "mixer" },
-            { entityId: MACHINE, kind: "part_replace", partKind: "water_filter" },
-            { entityId: MACHINE, kind: "service", partKind: null },
-          ],
+      stub(
+        [{ entityId: MACHINE }],
+        [
+          { entityId: MACHINE, kind: "cleaning", partKind: "mixer" },
+          { entityId: MACHINE, kind: "part_replace", partKind: "water_filter" },
+          { entityId: MACHINE, kind: "service", partKind: null },
         ],
         inserted,
         updated,
-      }),
+      ),
     );
     const res = await s.applyStandardNorms([MACHINE]);
     assert.equal(res.created.length, 0);
@@ -355,16 +381,17 @@ describe("Стандартные нормативы на список объек
 
   it("объект в списке дважды получает один комплект", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stubDb({ selects: [[]], inserted }));
+    const s = new MaintenanceService(stub([{ entityId: MACHINE }], [], inserted));
     const res = await s.applyStandardNorms([MACHINE, MACHINE]);
     assert.equal(res.created.length, 3, "вызывающий не обязан чистить список");
     assert.equal(res.skipped, 3);
+    assert.equal(res.coffee, 1, "тот же объект считается один раз");
   });
 
   it("недостающий норматив заводится, существующий пропускается", async () => {
     const inserted: Row[] = [];
     const s = new MaintenanceService(
-      stubDb({ selects: [[{ entityId: M2, kind: "service", partKind: null }]], inserted }),
+      stub([{ entityId: M2 }], [{ entityId: M2, kind: "service", partKind: null }], inserted),
     );
     const res = await s.applyStandardNorms([M2]);
     assert.equal(res.created.length, 2);
@@ -376,7 +403,7 @@ describe("Стандартные нормативы на список объек
     const inserted: Row[] = [];
     const s = new MaintenanceService(stubDb({ inserted }));
     const res = await s.applyStandardNorms([]);
-    assert.deepEqual(res, { created: [], skipped: 0 });
+    assert.deepEqual(res, { created: [], skipped: 0, coffee: 0, other: 0 });
     assert.equal(inserted.length, 0);
   });
 });
