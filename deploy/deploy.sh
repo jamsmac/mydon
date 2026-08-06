@@ -44,6 +44,10 @@ ssh "$HOST" "
     # Без него Core поднимется fail-closed и отклонит любую запись из панели,
     # бота и агентов — генерируем сразу, как остальные секреты.
     SERVICE_TOKEN=\$(openssl rand -hex 32)
+    # Перец приглашений. Генерируем на сервере, как остальные секреты: пустой
+    # перец не роняет Core, поэтому забытая переменная тихо оставила бы хеши
+    # приглашений открытыми для радужной таблицы.
+    INVITE_PEPPER=\$(openssl rand -hex 32)
     cat > .env <<EOF
 NODE_ENV=production
 TZ=Asia/Tashkent
@@ -53,6 +57,7 @@ POSTGRES_DB=mydon
 DATABASE_URL=postgresql://mydon:\$POSTGRES_PASSWORD@mydon-db:5432/mydon
 INGEST_KEY=\$INGEST_KEY
 SERVICE_TOKEN=\$SERVICE_TOKEN
+INVITE_PEPPER=\$INVITE_PEPPER
 CORE_API_URL=http://mydon-core:3001
 AGENT_AUTONOMY_MAX=T0
 AGENTS_SCHEDULES_PAUSED=1
@@ -66,7 +71,18 @@ EOF
     chmod 600 .env
     echo '  .env создан, секреты сгенерированы на сервере (значения не выводятся)'
   else
-    echo '  .env уже есть — не трогаем'
+    # Существующее .env не переписываем. Единственное исключение — недостающий
+    # перец: пустой не роняет Core, поэтому сервер, обновлённый со старым .env,
+    # молча хешировал бы приглашения без перца. Дописываем только отсутствующее
+    # или пустое значение; заполненное не трогаем — смена перца гасит выданные
+    # приглашения, и делать это на каждом деплое нельзя.
+    if grep -q '^INVITE_PEPPER=.' .env; then
+      echo '  .env уже есть — не трогаем'
+    else
+      sed -i '/^INVITE_PEPPER=\$/d' .env
+      printf 'INVITE_PEPPER=%s\n' \"\$(openssl rand -hex 32)\" >> .env
+      echo '  .env уже есть — дописан недостающий INVITE_PEPPER'
+    fi
   fi
 "
 
