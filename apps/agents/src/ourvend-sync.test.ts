@@ -199,4 +199,29 @@ describe("ourvend:sync — конфиг из окружения", () => {
     const c = ourvendConfigFromEnv({ OURVEND_ACCOUNT: "a", OURVEND_PASSWORD: "p", OURVEND_GROUP_ID: "xyz" } as NodeJS.ProcessEnv);
     assert.equal(c?.groupId, "xyz");
   });
+
+  it("пустая OURVEND_GROUP_ID — это «не задана», а не пустая группа", () => {
+    // docker compose подставляет пустую строку для незаданной переменной
+    // (`${OURVEND_GROUP_ID:-}`). С `??` дефолт бы не применился, и сбор пошёл
+    // бы в несуществующую группу.
+    const c = ourvendConfigFromEnv({
+      OURVEND_ACCOUNT: "a",
+      OURVEND_PASSWORD: "p",
+      OURVEND_GROUP_ID: "",
+    } as NodeJS.ProcessEnv);
+    assert.equal(c?.groupId, "729db8bd-02f5-49b9-bccb-53477e396a08");
+  });
+
+  it("пустые учётка и пароль равны отсутствующим", () => {
+    // Та же причина: в контейнере переменная всегда есть, вопрос лишь в том,
+    // пустая она или нет. Пустая обязана означать «сбор выключен».
+    assert.equal(
+      ourvendConfigFromEnv({ OURVEND_ACCOUNT: "", OURVEND_PASSWORD: "" } as NodeJS.ProcessEnv),
+      null,
+    );
+    assert.equal(
+      ourvendConfigFromEnv({ OURVEND_ACCOUNT: "a", OURVEND_PASSWORD: "" } as NodeJS.ProcessEnv),
+      null,
+    );
+  });
 });

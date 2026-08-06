@@ -306,13 +306,14 @@ describe("Нормативы и сроки", () => {
 
 describe("Стандартные нормативы на список объектов", () => {
   const M2 = "33333333-3333-4333-8333-333333333333";
-  /** Первый select — привязка к кофейным точкам, второй — уже заведённые планы. */
-  const stub = (coffee: Row[], plans: Row[], inserted: Row[], updated?: Row[]) =>
-    stubDb({ selects: [coffee, plans], inserted, updated });
+  /** Первый select — карточки автоматов с видом, второй — заведённые планы. */
+  const stub = (cards: Row[], plans: Row[], inserted: Row[], updated?: Row[]) =>
+    stubDb({ selects: [cards, plans], inserted, updated });
+  const coffeeCard = (id: string) => ({ entityId: id, kind: "coffee" });
 
   it("кофейному автомату заводит все три норматива с числами владельца", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stub([{ entityId: MACHINE }], [], inserted));
+    const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted));
     const res = await s.applyStandardNorms([MACHINE]);
 
     assert.equal(res.created.length, 3);
@@ -328,7 +329,7 @@ describe("Стандартные нормативы на список объек
     // У снека нет ни миксера, ни фильтра воды. График такой работы краснел бы
     // за работу, которой не существует, — и в раздел перестали бы смотреть.
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stub([], [], inserted));
+    const s = new MaintenanceService(stub([{ entityId: M2, kind: "snack" }], [], inserted));
     const res = await s.applyStandardNorms([M2]);
 
     assert.equal(res.created.length, 1);
@@ -340,7 +341,9 @@ describe("Стандартные нормативы на список объек
 
   it("смешанный список: каждому своё", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stub([{ entityId: MACHINE }], [], inserted));
+    const s = new MaintenanceService(
+      stub([coffeeCard(MACHINE), { entityId: M2, kind: "snack" }], [], inserted),
+    );
     const res = await s.applyStandardNorms([MACHINE, M2]);
 
     assert.equal(res.created.length, 4, "три кофейному, одно снеку");
@@ -350,7 +353,7 @@ describe("Стандартные нормативы на список объек
 
   it("первый срок — период от сегодня, а не красный экран на старте", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stub([{ entityId: MACHINE }], [], inserted));
+    const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted));
     await s.applyStandardNorms([MACHINE]);
     const mixer = inserted.find((r) => r.title === "Мойка миксера")!;
     assert.equal(mixer.dueOn, addDays(todayInTz(), 10));
@@ -363,7 +366,7 @@ describe("Стандартные нормативы на список объек
     const updated: Row[] = [];
     const s = new MaintenanceService(
       stub(
-        [{ entityId: MACHINE }],
+        [coffeeCard(MACHINE)],
         [
           { entityId: MACHINE, kind: "cleaning", partKind: "mixer" },
           { entityId: MACHINE, kind: "part_replace", partKind: "water_filter" },
@@ -381,7 +384,7 @@ describe("Стандартные нормативы на список объек
 
   it("объект в списке дважды получает один комплект", async () => {
     const inserted: Row[] = [];
-    const s = new MaintenanceService(stub([{ entityId: MACHINE }], [], inserted));
+    const s = new MaintenanceService(stub([coffeeCard(MACHINE)], [], inserted));
     const res = await s.applyStandardNorms([MACHINE, MACHINE]);
     assert.equal(res.created.length, 3, "вызывающий не обязан чистить список");
     assert.equal(res.skipped, 3);
@@ -389,9 +392,11 @@ describe("Стандартные нормативы на список объек
   });
 
   it("недостающий норматив заводится, существующий пропускается", async () => {
+    // Кофейному автомату положено три; ТО у него уже есть, значит заведутся
+    // два оставшихся, а существующий останется нетронутым.
     const inserted: Row[] = [];
     const s = new MaintenanceService(
-      stub([{ entityId: M2 }], [{ entityId: M2, kind: "service", partKind: null }], inserted),
+      stub([coffeeCard(M2)], [{ entityId: M2, kind: "service", partKind: null }], inserted),
     );
     const res = await s.applyStandardNorms([M2]);
     assert.equal(res.created.length, 2);
@@ -405,5 +410,25 @@ describe("Стандартные нормативы на список объек
     const res = await s.applyStandardNorms([]);
     assert.deepEqual(res, { created: [], skipped: 0, coffee: 0, other: 0 });
     assert.equal(inserted.length, 0);
+  });
+});
+
+describe("Автомат без карточки вида", () => {
+  const NOCARD = "44444444-4444-4444-8444-444444444444";
+
+  it("считается неразмеченным и получает только общее ТО", async () => {
+    // Раньше «кофейный ли» выводилось из привязки к точке, и автомат без
+    // привязки молча признавался прочим. Теперь отсутствие карточки — это
+    // честное «не размечен»: даём только то, что применимо к любому автомату.
+    const inserted: Row[] = [];
+    const s = new MaintenanceService(stubDb({ selects: [[], []], inserted }));
+    const res = await s.applyStandardNorms([NOCARD]);
+    assert.equal(res.created.length, 1);
+    assert.equal(res.coffee, 0);
+    assert.equal(res.other, 1);
+    assert.deepEqual(
+      inserted.filter((r) => r.entityId).map((r) => r.title),
+      ["Плановое ТО"],
+    );
   });
 });

@@ -4,6 +4,7 @@ import { isRegisterTrigger } from "./staff-register";
 import { isIntakeTrigger } from "./staff-intake";
 import { isInventoryTrigger } from "./staff-inventory";
 import { isCoffeeRefillTrigger, isCoffeeWashTrigger } from "./coffee-refill";
+import { isRefillTrigger } from "./staff-refill";
 import { isCoffeeConsumableTrigger } from "./coffee-returns";
 import { isCoffeeFixTrigger } from "./coffee-fix";
 
@@ -109,6 +110,10 @@ export const STAFF_MENU: readonly MenuItem[] = [
     match: (t) => /^(поломк|сломал|не работает|авари)/i.test(t.trim()),
   },
   { id: "refill", label: "☕ Заливка бункера", perm: "coffee.refill", ready: true, match: isCoffeeRefillTrigger },
+  // Снек/дринк — отдельный пункт от кофейной заливки: там бункеры и вес,
+  // здесь слоты и штуки. Один пункт на оба вынудил бы спрашивать «а какой
+  // автомат?» до того, как техник вообще выбрал объект.
+  { id: "mrefill", label: "📦 Заполнил автомат", perm: "refill.create", ready: true, match: isRefillTrigger },
   { id: "cons", label: "💧 Расходники", perm: "coffee.consumable", ready: true, match: isCoffeeConsumableTrigger },
   { id: "coll", label: "📥 Инкассация", perm: "cash.collect", ready: true, match: isCollectTrigger },
   { id: "intake", label: "📦 Приход", perm: "stock.intake", ready: true, match: isIntakeTrigger },
