@@ -58,15 +58,28 @@ describe("Совпадение по слову", () => {
     assert.equal(matchTrigger("что делать")?.id, "tasks");
     assert.equal(matchTrigger("инкассация")?.id, "coll");
     assert.equal(matchTrigger("залил кофе")?.id, "refill");
-    assert.equal(matchTrigger("помыл")?.id, "clean");
+    assert.equal(matchTrigger("помыл")?.id, "wash", "«помыл» техник говорит про бункер");
+    assert.equal(matchTrigger("чистка")?.id, "clean");
+    assert.equal(matchTrigger("замена купюроприёмника")?.id, "part");
+    assert.equal(matchTrigger("техосмотр")?.id, "insp");
+    assert.equal(matchTrigger("поломка")?.id, "issue");
     assert.equal(matchTrigger("приход")?.id, "intake");
   });
 
   it("не ловит неготовые потоки", () => {
     // Пока мастера нет, слово должно уйти в общий разбор, а не запускать пустоту.
-    assert.equal(matchTrigger("замена купюроприёмника"), null);
-    assert.equal(matchTrigger("техосмотр"), null);
-    assert.equal(matchTrigger("поломка"), null);
+    // Раздел графиков появится отдельным шагом.
+    assert.equal(matchTrigger("графики"), null);
+    assert.equal(matchTrigger("обслуживание"), null);
+  });
+
+  it("мойка бункера и чистка автомата не перехватывают друг друга", () => {
+    // Это разные объекты учёта: точка с бункерами 1..8 против автомата с
+    // узлами. Перепутав их, техник запишет работу не туда.
+    assert.equal(matchTrigger("помыл бункер")?.id, "wash");
+    assert.equal(matchTrigger("почистил бункер")?.id, "wash");
+    assert.equal(matchTrigger("чистка автомата")?.id, "clean");
+    assert.equal(matchTrigger("санобработка")?.id, "clean");
   });
 
   it("«точка» не считается словом раздела графиков", () => {

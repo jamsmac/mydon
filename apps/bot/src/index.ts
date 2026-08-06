@@ -18,6 +18,7 @@ import { Conversations } from "./conversation";
 import { handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
 import { handleRegisterPhoto } from "./staff-register";
 import { attachBeforePhoto, handleTaskDonePhoto } from "./task-done";
+import { handleAfterPhoto } from "./field-work";
 import { InvalidTokenError, TelegramApi, type TgUpdate } from "./telegram";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
@@ -183,6 +184,11 @@ async function main(): Promise<void> {
       const file = await tg.downloadFile(largest.file_id);
 
       // Порядок разбора: активный мастер важнее догадок.
+      const attached = await handleAfterPhoto(chatId, file, person, staffDeps);
+      if (attached) {
+        await tg.sendMessage(chatId, attached.text, attached.keyboard);
+        return;
+      }
       const done = await handleTaskDonePhoto(chatId, file, person, staffDeps);
       if (done) {
         await tg.sendMessage(chatId, done.text, done.keyboard);

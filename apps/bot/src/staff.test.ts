@@ -295,7 +295,7 @@ describe("Порядок разбора сообщения сотрудника"
 
   it("неготовый пункт отвечает честно, а не молчит", async () => {
     const { core } = stubCore();
-    const res = await handleStaffMessage(555, "🛠 Технический осмотр", ME, { core, conversations: new Conversations() });
+    const res = await handleStaffMessage(555, "🗓 Графики", ME, { core, conversations: new Conversations() });
     assert.match(res.reply.text, /пока не готово/i);
   });
 });

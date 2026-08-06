@@ -45,6 +45,26 @@ import {
 } from "./coffee-returns";
 import { handleCoffeeFixCallback, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
 import {
+  finishAfterPhoto,
+  handleCleanCallback,
+  handlePartReplaceCallback,
+  handlePartSerial,
+  handleProblemCallback,
+  handleServiceCheckCallback,
+  onObjectPicked,
+  parseAfterPhotoCallback,
+  parseCleanCallback,
+  parsePartReplaceCallback,
+  parseProblemCallback,
+  parseServiceCheckCallback,
+  partReplaceStepHint,
+  startClean,
+  startPartReplace,
+  startProblem,
+  startServiceCheck,
+} from "./field-work";
+import { allObjects, parsePickerCallback, searchObjects, searchPrompt } from "./machine-picker";
+import {
   handleTaskDoneCallback,
   handleTaskDoneReport,
   parseTaskDoneCallback,
@@ -255,6 +275,27 @@ export async function handleStaffMessage(
     }
     return { reply: { text: coffeeRefillStepHint(conv.step) } };
   }
+  if (conv?.flow === "part-replace") {
+    if (conv.step === "object" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await searchObjects(clean, deps) };
+    }
+    if (conv.step === "serial" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: handlePartSerial(chatId, clean, deps) };
+    }
+    return { reply: { text: partReplaceStepHint(conv.step) } };
+  }
+  // Остальные мастера обслуживания вводят текстом только поиск объекта.
+  if (conv?.flow === "clean" || conv?.flow === "service-check" || conv?.flow === "problem") {
+    if (conv.step === "object" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await searchObjects(clean, deps) };
+    }
+    return { reply: { text: "Выбери кнопкой." } };
+  }
+  if (conv?.flow === "after-photo") {
+    // Текст на шаге фото — это уже другой разговор. Не держим человека:
+    // запись сохранена, фото было необязательным.
+    deps.conversations.clear(chatId);
+  }
   if (conv?.flow === "task-done") {
     if (conv.step === "report" && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: handleTaskDoneReport(chatId, clean, deps) };
@@ -347,17 +388,37 @@ async function startMenuItem(
       return { reply: await startInventory(chatId, deps) };
     case "refill":
       return { reply: await startCoffeeRefill(chatId, deps) };
-    case "clean":
+    case "wash":
       return { reply: await startCoffeeWash(chatId, deps) };
     case "cons":
       return { reply: await startCoffeeConsumable(chatId, deps) };
     case "fix":
       return { reply: await startCoffeeFix(person, deps) };
+    case "part":
+      return { reply: await startPartReplace(chatId, person, deps) };
+    case "clean":
+      return { reply: await startClean(chatId, person, deps) };
+    case "insp":
+      return { reply: await startServiceCheck(chatId, person, deps) };
+    case "issue":
+      return { reply: await startProblem(chatId, person, deps) };
     default:
       // Пункт объявлен ready, но обработчика нет — это ошибка сборки меню,
       // а не сотрудника. Говорим ровно то же, что и про неготовый поток.
       return { reply: { text: `«${item.label}» пока не готово — скоро включим.` } };
   }
+}
+
+/** Ответ мастера → ответ обработчика кнопки. Четыре копии этого не нужны. */
+function unwrap(res: { answer: string; message?: StaffReply }): {
+  answer: string;
+  message?: string;
+  keyboard?: StaffReply["keyboard"];
+} {
+  return {
+    answer: res.answer,
+    ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+  };
 }
 
 /** Нажатие кнопки под задачей. Права проверяются по chat_id нажавшего. */
@@ -447,6 +508,44 @@ export async function handleStaffCallback(
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
     };
   }
+
+  // Общий пикер объекта (mp:) — един для всех мастеров обслуживания.
+  const picked = parsePickerCallback(data);
+  if (picked) {
+    if (picked.kind === "cancel") {
+      deps.conversations.clear(chatId);
+      return { answer: "Отменено", message: "Отменил." };
+    }
+    const conv = deps.conversations.get(chatId);
+    if (!conv) return { answer: "Мастер истёк", message: "Начни заново кнопкой из меню." };
+    if (picked.kind === "search") {
+      const r = searchPrompt();
+      return { answer: "Поиск", message: r.text, ...(r.keyboard ? { keyboard: r.keyboard } : {}) };
+    }
+    if (picked.kind === "all") {
+      const r = await allObjects(deps);
+      return { answer: "Все", message: r.text, ...(r.keyboard ? { keyboard: r.keyboard } : {}) };
+    }
+    const r = await onObjectPicked(chatId, picked.id, deps);
+    return { answer: "Выбрано", message: r.text, ...(r.keyboard ? { keyboard: r.keyboard } : {}) };
+  }
+
+  const partCb = parsePartReplaceCallback(data);
+  if (partCb) {
+    const res = await handlePartReplaceCallback(chatId, partCb, person, deps);
+    return unwrap(res);
+  }
+
+  const cleanCb = parseCleanCallback(data);
+  if (cleanCb) return unwrap(await handleCleanCallback(chatId, cleanCb, person, deps));
+
+  const svCb = parseServiceCheckCallback(data);
+  if (svCb) return unwrap(await handleServiceCheckCallback(chatId, svCb, person, deps));
+
+  const prCb = parseProblemCallback(data);
+  if (prCb) return unwrap(await handleProblemCallback(chatId, prCb, person, deps));
+
+  if (parseAfterPhotoCallback(data)) return unwrap(finishAfterPhoto(chatId, deps));
 
   // Кнопки закрытия задачи (dn:ok/np/x).
   const done = parseTaskDoneCallback(data);

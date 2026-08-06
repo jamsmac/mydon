@@ -69,6 +69,9 @@ export * from "./consumption";
 export * from "./intake-sync";
 export * from "./numguard";
 export * from "./geo";
+
+/** Обслуживание оборудования: узлы, виды работ, симптомы. */
+export * from "./maintenance";
 // GLOBERENT: словарь реестра и расчётные движки (перенос PROMACH).
 export * from "./globerent/registry";
 export * from "./globerent/contract-calc";

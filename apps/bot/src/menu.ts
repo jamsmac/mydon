@@ -93,22 +93,32 @@ export const STAFF_MENU: readonly MenuItem[] = [
     id: "part",
     label: "🔧 Замена детали",
     perm: "parts.replace",
-    ready: false,
+    ready: true,
     match: (t) => /^(замен|поменял|поставил нов)/i.test(t.trim()),
   },
   {
     id: "insp",
     label: "🛠 Технический осмотр",
     perm: "maintenance.view",
-    ready: false,
-    match: (t) => /^(техосмотр|технический осмотр|осмотр)/i.test(t.trim()),
+    ready: true,
+    match: (t) => /^(техосмотр|технический осмотр|осмотр|поверк)/i.test(t.trim()),
   },
-  { id: "clean", label: "🧼 Почистил", perm: "coffee.wash", ready: true, match: isCoffeeWashTrigger },
+  // Две разные чистки, и это не дублирование: у кофейной мойки ключ
+  // «точка + позиция бункера 1..8», у чистки автомата — «автомат + узел».
+  // Своим названием каждая говорит, о чём она, и путать их технику незачем.
+  { id: "wash", label: "🧼 Мойка бункера", perm: "coffee.wash", ready: true, match: isCoffeeWashTrigger },
+  {
+    id: "clean",
+    label: "🧽 Чистка автомата",
+    perm: "coffee.wash",
+    ready: true,
+    match: (t) => /^(чистк|протёр|протер|санобработ)/i.test(t.trim()),
+  },
   {
     id: "issue",
     label: "⚠️ Поломка",
     perm: "tasks.own",
-    ready: false,
+    ready: true,
     match: (t) => /^(поломк|сломал|не работает|авари)/i.test(t.trim()),
   },
   { id: "refill", label: "☕ Заливка бункера", perm: "coffee.refill", ready: true, match: isCoffeeRefillTrigger },

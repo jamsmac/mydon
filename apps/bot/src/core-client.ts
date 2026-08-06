@@ -434,6 +434,57 @@ export class CoreClient {
     return this.request<PersonRow[]>("/people");
   }
 
+  // ── Обслуживание: журнал работ, узлы автоматов ─────────────────────────────
+
+  /**
+   * Объекты, где сотрудник работал недавно, — верхний уровень пикера.
+   * Закрепления за объектами нет, но маршрут дня повторяется.
+   */
+  recentObjects(personId: string, limit = 5): Promise<{ id: string; name: string }[]> {
+    return this.request(`/maintenance/recent-objects?personId=${personId}&limit=${limit}`);
+  }
+
+  /** Записать факт работы. Без outcome — работа начата и не закрыта. */
+  createMaintenanceLog(input: {
+    entityId: string;
+    kind: string;
+    partKind?: string;
+    personId?: string;
+    taskId?: string;
+    outcome?: "done" | "partial" | "failed";
+    note?: string;
+    counterValue?: number;
+    createdBy?: string;
+  }): Promise<{ id: string }> {
+    return this.request("/maintenance/log", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Замена узла: закрыть старый период и открыть новый одной транзакцией. */
+  swapPart(input: {
+    machineId: string;
+    partKind: string;
+    slot?: number;
+    newSerial?: string;
+    reason?: string;
+    personId?: string;
+    note?: string;
+    createdBy?: string;
+  }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } | null }> {
+    return this.request("/maintenance/part-swap", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Заявка на ремонт от сотрудника. Свободная — её разберут из общего пула. */
+  createTask(input: {
+    title: string;
+    ownerKind: "human" | "agent";
+    entityId?: string;
+    description?: string;
+    priority?: "low" | "normal" | "high" | "urgent";
+    createdBy?: string;
+  }): Promise<TaskRow> {
+    return this.request<TaskRow>("/tasks", { method: "POST", body: JSON.stringify(input) });
+  }
+
   /**
    * Завести карточку реестра. `createdFrom` заполнен → карточка ляжет
    * черновиком на утверждение владельцу (сотрудник заводит, владелец
