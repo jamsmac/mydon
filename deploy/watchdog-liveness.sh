@@ -31,13 +31,26 @@ ENV_FILE="/etc/mydon-heartbeat.env"
 : "${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID не задан}"
 : "${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN не задан}"
 
-# Порог с запасом: расписание Actions плавает (10–15 минут вместо */10), и
-# 45 минут переживают два подряд пропущенных прогона без ложной тревоги.
-STALE_MIN="${WATCHDOG_LIVENESS_STALE_MINUTES:-45}"
+# Порог 6 часов — по ИЗМЕРЕННОМУ расписанию, а не по заявленному.
+#
+# В workflow стоит cron */10, но GitHub его не соблюдает и близко. Замер по
+# истории запусков за сутки: 83, 80, 65, 58, 82, 196, 166 минут между
+# соседними прогонами. Планировщик Actions отдаёт scheduled-запуски по
+# остаточному принципу и молча пропускает большинство тиков.
+#
+# Отсюда и порог: 6 часов держат худший наблюдённый промежуток (196 мин) с
+# двукратным запасом. Всё, что меньше трёх часов, превратило бы сторожа за
+# сторожем в генератор ложных тревог — то есть в то же слепое пятно, только
+# шумное: на такие сообщения перестают смотреть за день.
+#
+# Плата за это честная: смерть сторожа замечается за часы, а не за минуты.
+# Меньше и не нужно — реальный отказ, ради которого всё делалось, длился
+# сутками.
+STALE_MIN="${WATCHDOG_LIVENESS_STALE_MINUTES:-360}"
 # Повтор тревоги, пока сторож молчит. Не каждый прогон: молчащий сторож —
 # не авария, а слепое пятно, и напоминание каждые 15 минут приучает
 # пролистывать. Но и одного сообщения в 03:00 мало — его просто не увидят.
-REMIND_H="${WATCHDOG_LIVENESS_REMIND_HOURS:-6}"
+REMIND_H="${WATCHDOG_LIVENESS_REMIND_HOURS:-12}"
 STATE_FILE="${WATCHDOG_LIVENESS_STATE_FILE:-/var/lib/mydon/watchdog-liveness.json}"
 mkdir -p "$(dirname "$STATE_FILE")"
 
@@ -127,16 +140,26 @@ send() {
     echo "WATCHDOG_BOT_TOKEN/WATCHDOG_CHAT_IDS не заданы — тревога только в лог: $1"
     return 0
   }
-  local chat
+  local chat resp
   IFS=',' read -ra chats <<< "$WATCHDOG_CHAT_IDS"
   for chat in "${chats[@]}"; do
     chat="$(echo "$chat" | tr -d '[:space:]')"
     [ -n "$chat" ] || continue
-    curl -sS -X POST --max-time 15 \
+    # curl без -f не отличает HTTP 200 с телом {"ok":false,...} от настоящей
+    # доставки: неверный токен бота Telegram отвечает 200/401/404, но curl
+    # сам по себе на это не падает. Найдено на практике на соседнем скрипте
+    # (heartbeat.sh) — та же ошибка молча превращала неудачу в «отправлено».
+    # Поэтому проверяем поле "ok" в самом ответе, а не только код завершения.
+    resp="$(curl -sS -X POST --max-time 15 \
       -H "Content-Type: application/json" \
       -d "$(python3 -c 'import json,sys; print(json.dumps({"chat_id": sys.argv[1], "text": sys.argv[2]}))' "$chat" "$1")" \
-      "https://api.telegram.org/bot${WATCHDOG_BOT_TOKEN}/sendMessage" >/dev/null || \
-      echo "тревога не отправлена в $chat"
+      "https://api.telegram.org/bot${WATCHDOG_BOT_TOKEN}/sendMessage")" || {
+      echo "тревога не отправлена в $chat: сеть недоступна"
+      continue
+    }
+    if ! printf '%s' "$resp" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") else 1)' 2>/dev/null; then
+      echo "тревога не отправлена в $chat: Telegram отклонил — $(printf '%s' "$resp" | head -c 200)"
+    fi
   done
 }
 
