@@ -51,6 +51,8 @@ function stubCore(over: Record<string, unknown> = {}) {
       calls.push(`comment:${body}`);
       return {};
     },
+    unassignedTasks: async () => [],
+    maintenanceDue: async () => [],
     ...over,
   } as never;
   return { core, calls };
@@ -293,10 +295,11 @@ describe("Порядок разбора сообщения сотрудника"
     assert.match(res.reply.keyboard!.inline_keyboard[0][0].callback_data, /:open$/);
   });
 
-  it("неготовый пункт отвечает честно, а не молчит", async () => {
+  it("раздел графиков открывается и объясняет пустоту, а не молчит", async () => {
+    // Пустой ответ на нажатие читается как «кнопка не работает».
     const { core } = stubCore();
     const res = await handleStaffMessage(555, "🗓 Графики", ME, { core, conversations: new Conversations() });
-    assert.match(res.reply.text, /пока не готово/i);
+    assert.match(res.reply.text, /ничего не подходит|Предстоит/i);
   });
 });
 

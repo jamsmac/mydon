@@ -78,7 +78,7 @@ export const STAFF_MENU: readonly MenuItem[] = [
     id: "sched",
     label: "🗓 Графики",
     perm: "maintenance.view",
-    ready: false,
+    ready: true,
     // Хвостовая проверка у «то» обязательна: иначе раздел перехватывал бы
     // «точка», «товар», «тоже» — половину фраз про точки, как только поток
     // станет ready.

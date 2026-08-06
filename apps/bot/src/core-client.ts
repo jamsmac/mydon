@@ -51,6 +51,26 @@ export interface TaskRow {
   entityId: string | null;
 }
 
+/** Строка сводки сроков — то же, что отдаёт Core в /maintenance/due. */
+export interface MaintenanceDueRow {
+  planId: string;
+  targetId: string;
+  targetName: string;
+  kind: string;
+  kindLabel: string;
+  partKind: string | null;
+  partLabel: string | null;
+  title: string | null;
+  nextDueOn: string | null;
+  lastDoneOn: string | null;
+  taskLeadDays: number;
+  daysLeft: number | null;
+  countLeft: number | null;
+  status: "ok" | "soon" | "due" | "overdue" | "unknown";
+  assigneeId: string | null;
+  autoTask: boolean;
+}
+
 /**
  * Таймаут загрузки фото. Отдельный от общего: 10 секунд достаточно для JSON,
  * но не для мегабайтного снимка с точки на 3G.
@@ -449,6 +469,8 @@ export class CoreClient {
     entityId: string;
     kind: string;
     partKind?: string;
+    /** Норматив, по которому работа сделана: без него срок не сдвинется. */
+    planId?: string;
     personId?: string;
     taskId?: string;
     outcome?: "done" | "partial" | "failed";
@@ -471,6 +493,49 @@ export class CoreClient {
     createdBy?: string;
   }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } | null }> {
     return this.request("/maintenance/part-swap", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Что подходит к сроку. Статус считается на чтении, нигде не хранится. */
+  maintenanceDue(): Promise<MaintenanceDueRow[]> {
+    return this.request("/maintenance/due");
+  }
+
+  /** Свободные задачи — общий пул, из которого разбирают работу. */
+  unassignedTasks(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks?unassigned=1");
+  }
+
+  /**
+   * Взять свободную задачу. false — успел другой: это не ошибка, а обычное
+   * утро при одном дайджесте на всех.
+   */
+  async claimTask(id: string, personId: string): Promise<boolean> {
+    try {
+      await this.request(`/tasks/${id}/claim`, {
+        method: "POST",
+        body: JSON.stringify({ personId }),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Вернуть свою задачу в общий пул. */
+  releaseTask(id: string, personId: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/release`, {
+      method: "POST",
+      body: JSON.stringify({ personId }),
+    });
+  }
+
+  /** Занять ключ одноразовой рассылки: true ровно один раз. */
+  async claimNotification(key: string): Promise<boolean> {
+    const r = await this.request<{ claimed: boolean }>("/rules/claim", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    });
+    return r.claimed;
   }
 
   /** Заявка на ремонт от сотрудника. Свободная — её разберут из общего пула. */

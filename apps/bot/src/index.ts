@@ -10,6 +10,7 @@ import {
 import { createDocumentBuilder } from "@mydon/documents";
 import { dueLabel, TZ } from "@mydon/shared";
 import { collectGloberentSignals, formatBriefing, msUntilBriefing } from "./briefing";
+import { buildDigest, digestKey } from "./staff-digest";
 import { CoreClient, type PersonRow } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { Notifier } from "./notifier";
@@ -266,6 +267,57 @@ async function main(): Promise<void> {
     }, msUntilBriefing());
   };
   scheduleBriefing();
+
+  /**
+   * Утренний дайджест сотрудникам, 07:00 — раньше владельческого брифинга
+   * (07:30): владелец должен видеть картину, зная, что люди её уже получили.
+   *
+   * Это единственный канал доставки СВОБОДНЫХ задач: sendReminders ходит по
+   * ownerRef, а у свободной задачи его нет.
+   */
+  const sendStaffDigest = async (): Promise<void> => {
+    const [people, free] = await Promise.all([
+      deps.core.people(),
+      deps.core.unassignedTasks().catch(() => []),
+    ]);
+    const linked = people.filter((p) => p.tgChatId && p.active === "yes");
+    if (linked.length === 0) return;
+
+    // Имена объектов — одним запросом на всю рассылку, а не на человека.
+    const names = new Map((await deps.core.machines().catch(() => [])).map((m) => [m.id, m.name]));
+    const dayKey = isoDate(new Date());
+
+    for (const p of linked) {
+      try {
+        const mine = await deps.core.myTasks("human", p.id);
+        const digest = buildDigest({ person: p, mine, free, objectNames: names });
+        // Пустое «у тебя ноль задач» каждое утро приучает не читать дайджест.
+        if (!digest) continue;
+        // Ключ занимается ПЕРЕД отправкой: перезапуск бота в 07:00:30 не
+        // должен слать второй раз. Цена — потерянный дайджест при падении
+        // ровно между заявкой и отправкой; это лучше, чем два одинаковых.
+        if (!(await deps.core.claimNotification(digestKey(dayKey, p.id)))) continue;
+        await tg.sendMessage(Number(p.tgChatId), digest.text, digest.keyboard);
+      } catch (err) {
+        console.error(`Дайджест не доставлен (${p.name}):`, err);
+      }
+    }
+  };
+
+  const scheduleDigest = (): void => {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          await sendStaffDigest();
+        } catch (err) {
+          console.error("Дайджест сотрудникам не отправлен:", err);
+        } finally {
+          scheduleDigest();
+        }
+      })();
+    }, msUntilBriefing(new Date(), 7, 0));
+  };
+  scheduleDigest();
 
   setInterval(() => deps.limiter.sweep(), 5 * 60_000).unref();
 

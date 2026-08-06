@@ -64,6 +64,7 @@ import {
   startServiceCheck,
 } from "./field-work";
 import { allObjects, parsePickerCallback, searchObjects, searchPrompt } from "./machine-picker";
+import { handleSchedulesCallback, parseSchedulesCallback, startSchedules } from "./schedules";
 import {
   handleTaskDoneCallback,
   handleTaskDoneReport,
@@ -107,7 +108,14 @@ export function taskKeyboard(task: TaskRow): StaffReply["keyboard"] {
     row.push({ text: "▶️ Взял в работу", callback_data: `t:${task.id}:progress` });
   }
   row.push({ text: "✅ Выполнил", callback_data: `t:${task.id}:done` });
-  return { inline_keyboard: [row] };
+  return {
+    inline_keyboard: [
+      row,
+      // Отдельным рядом: «не смогу» — не повседневная кнопка, и стоять
+      // рядом с «Выполнил» ей нельзя.
+      [{ text: "↩️ Не смогу", callback_data: `t:${task.id}:free` }],
+    ],
+  };
 }
 
 /**
@@ -120,21 +128,32 @@ export function taskKeyboard(task: TaskRow): StaffReply["keyboard"] {
  * всплывающих уведомлений на телефоне. Теперь список — одно сообщение, а выбор
  * задачи — номерная кнопка.
  */
-export function tasksKeyboard(tasks: TaskRow[]): StaffReply["keyboard"] {
+export function tasksKeyboard(tasks: TaskRow[], free: TaskRow[] = []): StaffReply["keyboard"] {
   const rows = tasks.slice(0, MAX_TASKS).map((t, i) => [
     { text: `${i + 1} · ${t.title}`.slice(0, 40), callback_data: `t:${t.id}:open` },
   ]);
+  free.slice(0, MAX_FREE).forEach((t, i) => {
+    rows.push([
+      {
+        text: `✋ Взять ${tasks.length + i + 1} · ${t.title}`.slice(0, 40),
+        callback_data: `t:${t.id}:claim`,
+      },
+    ]);
+  });
   return { inline_keyboard: rows };
 }
+
+/** Сколько свободных задач показываем в списке. Дальше — «показать ещё». */
+const MAX_FREE = 5;
 
 /** Сколько задач помещаем в одно сообщение. Дальше — «показать ещё» в PR 8. */
 const MAX_TASKS = 10;
 
-export type TaskAction = "progress" | "done" | "open";
+export type TaskAction = "progress" | "done" | "open" | "claim" | "free";
 
 /** Строгий разбор нажатия: данные кнопки приходят снаружи, доверять им нельзя. */
 export function parseTaskCallback(data: string): { id: string; action: TaskAction } | null {
-  const m = /^t:([0-9a-f-]{36}):(progress|done|open)$/.exec(data);
+  const m = /^t:([0-9a-f-]{36}):(progress|done|open|claim|free)$/.exec(data);
   if (!m) return null;
   return { id: m[1], action: m[2] as TaskAction };
 }
@@ -153,16 +172,36 @@ export function formatTaskCard(t: TaskRow): string {
   return lines.join("\n");
 }
 
-/** Список задач сотрудника. Пусто — это хорошая новость, так и пишем. */
-export function formatMyTasks(person: PersonRow, tasks: TaskRow[]): string {
-  if (tasks.length === 0) {
+/**
+ * Список задач сотрудника плюс блок свободных.
+ *
+ * Свободные показываются всем: закрепления за объектами нет, и задача от
+ * монитора графиков рождается ничьей. Блок не рисуется при пустом пуле —
+ * заголовок «Свободные:» без строк читается как поломка.
+ */
+export function formatMyTasks(person: PersonRow, tasks: TaskRow[], free: TaskRow[] = []): string {
+  if (tasks.length === 0 && free.length === 0) {
     return `${person.name}, задач на тебе нет. Отдыхай 👌`;
   }
-  const shown = tasks.slice(0, MAX_TASKS);
-  const lines = shown.map((t, i) => `${i + 1}. ${taskLine(t)}`);
-  const head = `${person.name}, твои задачи (${tasks.length}):`;
-  const tail = tasks.length > shown.length ? [``, `…и ещё ${tasks.length - shown.length}.`] : [];
-  return [head, "", ...lines, ...tail].join("\n");
+
+  const parts: string[] = [];
+  if (tasks.length > 0) {
+    const shown = tasks.slice(0, MAX_TASKS);
+    parts.push(`${person.name}, твои задачи (${tasks.length}):`, "");
+    parts.push(...shown.map((t, i) => `${i + 1}. ${taskLine(t)}`));
+    if (tasks.length > shown.length) parts.push("", `…и ещё ${tasks.length - shown.length}.`);
+  } else {
+    parts.push(`${person.name}, на тебе сейчас ничего.`);
+  }
+
+  if (free.length > 0) {
+    const shown = free.slice(0, MAX_FREE);
+    parts.push("", "🆓 Свободные — кто возьмёт:", "");
+    parts.push(...shown.map((t, i) => `${tasks.length + i + 1}. ${taskLine(t)}`));
+    if (free.length > shown.length) parts.push("", `…и ещё ${free.length - shown.length} свободных.`);
+  }
+
+  return parts.join("\n");
 }
 
 /** Кнопки выбора автомата для инкассации. Префикс «c:» — отдельное пространство. */
@@ -360,11 +399,15 @@ async function startMenuItem(
 
   switch (item.id) {
     case "tasks": {
-      const tasks = await deps.core.myTasks("human", person.id);
+      const [tasks, free] = await Promise.all([
+        deps.core.myTasks("human", person.id),
+        // Свободные — общий пул. Их видят все: закрепления за объектами нет.
+        deps.core.unassignedTasks().catch(() => [] as TaskRow[]),
+      ]);
       return {
         reply: {
-          text: formatMyTasks(person, tasks),
-          ...(tasks.length > 0 ? { keyboard: tasksKeyboard(tasks) } : {}),
+          text: formatMyTasks(person, tasks, free),
+          ...(tasks.length + free.length > 0 ? { keyboard: tasksKeyboard(tasks, free) } : {}),
         },
       };
     }
@@ -402,6 +445,8 @@ async function startMenuItem(
       return { reply: await startServiceCheck(chatId, person, deps) };
     case "issue":
       return { reply: await startProblem(chatId, person, deps) };
+    case "sched":
+      return { reply: await startSchedules(chatId, deps) };
     default:
       // Пункт объявлен ready, но обработчика нет — это ошибка сборки меню,
       // а не сотрудника. Говорим ровно то же, что и про неготовый поток.
@@ -530,6 +575,9 @@ export async function handleStaffCallback(
     return { answer: "Выбрано", message: r.text, ...(r.keyboard ? { keyboard: r.keyboard } : {}) };
   }
 
+  const schedCb = parseSchedulesCallback(data);
+  if (schedCb) return unwrap(await handleSchedulesCallback(chatId, schedCb, person, deps));
+
   const partCb = parsePartReplaceCallback(data);
   if (partCb) {
     const res = await handlePartReplaceCallback(chatId, partCb, person, deps);
@@ -582,9 +630,44 @@ export async function handleStaffCallback(
   if (!parsed) return { answer: "Не понял кнопку" };
 
   const task = await deps.core.task(parsed.id);
+
+  // «Беру» — единственное действие над ЧУЖОЙ (ничьей) задачей, поэтому
+  // проверяется до проверки владения. Гонку разрешает Core.
+  if (parsed.action === "claim") {
+    if (task.ownerRef !== null) {
+      return {
+        answer: task.ownerRef === person.id ? "Она уже твоя" : "Уже взял другой",
+        edit: { text: `${formatTaskCard(task)}\n\n✋ Задачу уже взяли.` },
+      };
+    }
+    const ok = await deps.core.claimTask(parsed.id, person.id);
+    if (!ok) {
+      return {
+        answer: "Уже взял другой",
+        edit: { text: `${formatTaskCard(task)}\n\n✋ Успел кто-то другой.` },
+      };
+    }
+    const mine: TaskRow = { ...task, ownerRef: person.id };
+    return {
+      answer: "Взял",
+      edit: { text: `${formatTaskCard(mine)}\n\n✋ Задача твоя.`, keyboard: taskKeyboard(mine) },
+    };
+  }
+
   if (task.ownerKind !== "human" || task.ownerRef !== person.id) {
     // Не сообщаем ничего о чужой задаче — только отказ.
     return { answer: "Это не твоя задача" };
+  }
+
+  // «Не смогу» — вернуть задачу в пул. Без этого застрявший техник молча
+  // блокирует работу до срока: другим она уже не видна как свободная.
+  if (parsed.action === "free") {
+    await deps.core.releaseTask(parsed.id, person.id);
+    const freed: TaskRow = { ...task, ownerRef: null, status: "todo" };
+    return {
+      answer: "Вернул в общий список",
+      edit: { text: `${formatTaskCard(freed)}\n\n↩️ Вернул в общий список — возьмёт кто-то другой.` },
+    };
   }
 
   // Номерная кнопка из списка: раскрываем карточку на месте.

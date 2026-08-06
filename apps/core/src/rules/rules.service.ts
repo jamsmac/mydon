@@ -38,6 +38,24 @@ export class RulesService {
     return { acked: clean.length };
   }
 
+  /**
+   * Атомарная заявка на одноразовое действие. Вернёт true ровно один раз
+   * на ключ — дальше всегда false.
+   *
+   * Нужна рассылкам, которые идут по таймеру: перезапуск бота в 07:00:30 не
+   * должен слать дайджест второй раз. `ack` для этого не годится — он не
+   * различает «записал» и «уже было»; здесь ставку делает RETURNING.
+   */
+  async claim(key: string): Promise<boolean> {
+    if (typeof key !== "string" || key.length === 0) return false;
+    const rows = await this.db
+      .insert(notificationDelivery)
+      .values({ key })
+      .onConflictDoNothing({ target: notificationDelivery.key })
+      .returning({ key: notificationDelivery.key });
+    return rows.length > 0;
+  }
+
   /** Список правил — владелец должен видеть, что и когда его побеспокоит. */
   list() {
     return RULES.map((r) => ({

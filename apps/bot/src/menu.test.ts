@@ -45,10 +45,11 @@ describe("Совпадение по подписи кнопки", () => {
     assert.equal(matchMenuLabel("задачи"), null, "это триггер, а не кнопка");
   });
 
-  it("находит и неготовые пункты — чтобы объяснить, а не промолчать", () => {
+  it("находит пункт независимо от готовности — чтобы объяснить, а не промолчать", () => {
+    // matchMenuLabel намеренно НЕ фильтрует по ready: неготовому пункту надо
+    // ответить «скоро включим», а не промолчать, будто кнопки не было.
     const sched = matchMenuLabel("🗓 Графики");
     assert.equal(sched?.id, "sched");
-    assert.equal(sched?.ready, false);
   });
 });
 
@@ -66,11 +67,14 @@ describe("Совпадение по слову", () => {
     assert.equal(matchTrigger("приход")?.id, "intake");
   });
 
-  it("не ловит неготовые потоки", () => {
-    // Пока мастера нет, слово должно уйти в общий разбор, а не запускать пустоту.
-    // Раздел графиков появится отдельным шагом.
-    assert.equal(matchTrigger("графики"), null);
-    assert.equal(matchTrigger("обслуживание"), null);
+  it("по словам ловятся только готовые потоки", () => {
+    // Слово от неготового мастера должно уйти в общий разбор, а не запускать
+    // пустоту. Сейчас готовы все пункты, поэтому проверяем сам механизм.
+    for (const item of STAFF_MENU) {
+      if (item.ready) continue;
+      assert.equal(matchTrigger(item.label), null, `${item.id} не готов, но ловится словом`);
+    }
+    assert.equal(matchTrigger("графики")?.id, "sched");
   });
 
   it("мойка бункера и чистка автомата не перехватывают друг друга", () => {
@@ -112,10 +116,13 @@ describe("Клавиатура меню", () => {
     assert.equal(kb.resize_keyboard, true);
   });
 
-  it("неготовые пункты в клавиатуру не попадают", () => {
+  it("в клавиатуру попадают ровно готовые пункты", () => {
     const shown = menuKeyboard().keyboard.flat().map((b) => b.text);
-    assert.ok(!shown.includes("🗓 Графики"));
-    assert.ok(shown.includes("📋 Мои задачи"));
+    const expected = STAFF_MENU.filter((i) => i.ready).map((i) => i.label);
+    assert.deepEqual(shown, expected);
+    for (const item of STAFF_MENU) {
+      if (!item.ready) assert.ok(!shown.includes(item.label), `${item.id} не готов, но показан`);
+    }
   });
 
   it("у каждого показанного пункта есть обработчик — проверяем через id", () => {
@@ -141,6 +148,8 @@ describe("Справка", () => {
     for (const item of menuFor()) {
       assert.ok(text.includes(item.label), `${item.label} потерялся в справке`);
     }
-    assert.ok(!text.includes("🗓 Графики"), "неготовое обещать нельзя");
+    for (const item of STAFF_MENU) {
+      if (!item.ready) assert.ok(!text.includes(item.label), "неготовое обещать нельзя");
+    }
   });
 });
