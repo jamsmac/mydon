@@ -30,6 +30,21 @@ export interface InlineKeyboard {
   inline_keyboard: { text: string; callback_data: string }[][];
 }
 
+/**
+ * Постоянное меню под полем ввода. В отличие от inline-клавиатуры живёт не
+ * при сообщении, а при чате: Telegram держит её, пока не заменят или не
+ * уберут. Полевому сотруднику это важнее inline-дубля — кнопки под рукой
+ * всегда, а не только под последней карточкой.
+ */
+export interface ReplyKeyboard {
+  keyboard: { text: string }[][];
+  resize_keyboard: true;
+  is_persistent: true;
+  input_field_placeholder?: string;
+}
+
+export type AnyKeyboard = InlineKeyboard | ReplyKeyboard;
+
 /** Токен неверен или отозван. Повторять запросы бессмысленно. */
 export class InvalidTokenError extends Error {
   readonly fatal = true;
@@ -68,7 +83,7 @@ export class TelegramApi {
     return json.result as T;
   }
 
-  async sendMessage(chatId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
+  async sendMessage(chatId: number, text: string, keyboard?: AnyKeyboard): Promise<void> {
     await this.call("sendMessage", {
       chat_id: chatId,
       text,
@@ -110,13 +125,26 @@ export class TelegramApi {
     }
   }
 
-  /** Переписать отправленное сообщение (и убрать кнопки): карточка согласования
-   *  после решения должна показывать итог, а не предлагать решать снова. */
-  async editMessage(chatId: number, messageId: number, text: string): Promise<void> {
+  /**
+   * Переписать отправленное сообщение. Без `keyboard` кнопки СНИМАЮТСЯ —
+   * именно это нужно карточке согласования: после решения она показывает итог,
+   * а не предлагает решать снова.
+   *
+   * С `keyboard` — перерисовка на месте с новым набором кнопок: список задач
+   * после «Взял в работу» должен обновиться там же, а не падать вторым
+   * сообщением поверх первого.
+   */
+  async editMessage(
+    chatId: number,
+    messageId: number,
+    text: string,
+    keyboard?: InlineKeyboard,
+  ): Promise<void> {
     await this.call("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
       text,
+      ...(keyboard ? { reply_markup: keyboard } : {}),
     });
   }
 

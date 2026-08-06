@@ -28,9 +28,10 @@ export function isIntakeTrigger(text: string): boolean {
 /** Клавиатура выбора (склад/ингредиент). Префикс «n:» — своё пространство. */
 function pickKeyboard(items: EntityRow[], kind: "wh" | "ing"): NonNullable<StaffReply["keyboard"]> {
   return {
-    inline_keyboard: items
-      .slice(0, 30)
-      .map((it) => [{ text: it.name.slice(0, 40), callback_data: `n:${kind}:${it.id}` }]),
+    inline_keyboard: [
+      ...items.slice(0, 30).map((it) => [{ text: it.name.slice(0, 40), callback_data: `n:${kind}:${it.id}` }]),
+      [{ text: "✖️ Отмена", callback_data: "n:cancel" }],
+    ],
   };
 }
 

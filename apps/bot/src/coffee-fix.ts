@@ -47,11 +47,11 @@ export async function startCoffeeFix(person: PersonRow, deps: CoffeeFixDeps): Pr
       `Твоя последняя запись:\n${entry.text}\n\n` +
       "Удалить её? Строка сохранится в журнале аудита — потом внесёшь правильную.",
     keyboard: {
+      // Разные ряды намеренно. Удаление необратимо, и соседняя кнопка в том же
+      // ряду — это промах пальцем на морозе ценой в удалённую запись.
       inline_keyboard: [
-        [
-          { text: "🗑 Да, удалить", callback_data: `fx:del:${KIND_CODE[entry.kind]}:${entry.id}` },
-          { text: "Оставить", callback_data: "fx:keep" },
-        ],
+        [{ text: "🗑 Да, удалить", callback_data: `fx:del:${KIND_CODE[entry.kind]}:${entry.id}` }],
+        [{ text: "◀️ Оставить", callback_data: "fx:keep" }],
       ],
     },
   };

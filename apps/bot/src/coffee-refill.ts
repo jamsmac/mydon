@@ -49,7 +49,10 @@ function isSkip(text: string): boolean {
 
 function locationKeyboard(locations: { id: string; name: string }[], prefix: "cf" | "cw"): NonNullable<StaffReply["keyboard"]> {
   return {
-    inline_keyboard: locations.slice(0, 30).map((l) => [{ text: l.name.slice(0, 40), callback_data: `${prefix}:loc:${l.id}` }]),
+    inline_keyboard: [
+      ...locations.slice(0, 30).map((l) => [{ text: l.name.slice(0, 40), callback_data: `${prefix}:loc:${l.id}` }]),
+      [{ text: "✖️ Отмена", callback_data: `${prefix}:cancel` }],
+    ],
   };
 }
 
@@ -62,6 +65,7 @@ function positionKeyboard(config: { position: number; ingredientName: string }[]
     const label = names && names.length > 0 ? `${pos} · ${names.join("/")}` : `${pos} · пусто`;
     rows.push([{ text: label.slice(0, 60), callback_data: `${prefix}:pos:${pos}` }]);
   }
+  rows.push([{ text: "✖️ Отмена", callback_data: `${prefix}:cancel` }]);
   return { inline_keyboard: rows };
 }
 

@@ -66,11 +66,11 @@ describe("Разбор кнопок задачи", () => {
     assert.equal(parseTaskCallback(""), null);
   });
 
-  it("кнопка «Взял» не показывается, если задача уже в работе", () => {
+  it("кнопка «Взял в работу» не показывается, если задача уже в работе", () => {
     const inWork = taskKeyboard(task({ status: "in_progress" }));
     const texts = inWork!.inline_keyboard[0].map((b) => b.text).join(" ");
     assert.ok(!texts.includes("Взял"), "лишняя кнопка сбивает с толку");
-    assert.ok(texts.includes("Сделал"));
+    assert.ok(texts.includes("Выполнил"));
   });
 });
 
@@ -118,7 +118,9 @@ describe("Закрытие с отчётом", () => {
     const awaiting = new AwaitingReport();
     const { core, calls } = stubCore();
     const res = await handleStaffCallback(555, `t:${task().id}:done`, ME, { core, awaiting, conversations: new Conversations() });
-    assert.match(res.message ?? "", /что сделано/i);
+    // Карточка перерисовывается на месте, а не дублируется новым сообщением.
+    assert.match(res.edit?.text ?? "", /что сделано/i);
+    assert.equal(res.edit?.keyboard, undefined, "кнопки должны сняться, пока ждём отчёт");
     assert.deepEqual(calls, [], "закрытия без отчёта быть не должно");
   });
 
@@ -234,5 +236,131 @@ describe("Отчёты файлами", () => {
     } as never;
     const plan = await planReport({ format: "xlsx", topic: "receivables" }, core);
     assert.match(plan.emptyReason ?? "", /просрочек нет/i);
+  });
+});
+
+describe("Порядок разбора сообщения сотрудника", () => {
+  it("отчёт «сделал заливку» закрывает задачу, а не открывает список", async () => {
+    // Триггер задач — /задач|дела|.../, и «с-дела-л» в него попадает. Пока
+    // ожидание отчёта проверялось после триггеров, сотрудник получал список
+    // задач, а задача оставалась открытой.
+    const awaiting = new AwaitingReport();
+    awaiting.set(555, task().id);
+    const { core, calls } = stubCore();
+    const res = await handleStaffMessage(555, "сделал заливку", ME, {
+      core,
+      awaiting,
+      conversations: new Conversations(),
+    });
+    assert.match(res.reply.text, /закрыта/i);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /status:done:.*:сделал заливку/);
+  });
+
+  it("нажатие кнопки меню бросает активный мастер и говорит об этом", async () => {
+    const conversations = new Conversations();
+    conversations.start(555, "coffee-refill", "weight");
+    const { core } = stubCore();
+    const res = await handleStaffMessage(555, "📋 Мои задачи", ME, {
+      core,
+      awaiting: new AwaitingReport(),
+      conversations,
+    });
+    assert.equal(conversations.get(555), null, "мастер должен быть сброшен");
+    assert.match(res.reply.text, /бросил/i, "молча потерянный мастер выглядит как потеря данных");
+    assert.match(res.reply.text, /твои задачи/i);
+  });
+
+  it("кнопка меню сильнее ожидания отчёта", async () => {
+    const awaiting = new AwaitingReport();
+    awaiting.set(555, task().id);
+    const { core, calls } = stubCore();
+    await handleStaffMessage(555, "📥 Инкассация", ME, {
+      core: { ...(core as object), machines: async () => [] } as never,
+      awaiting,
+      conversations: new Conversations(),
+    });
+    assert.deepEqual(calls, [], "подпись кнопки не должна попасть в отчёт");
+    assert.equal(awaiting.peek(555), null, "ожидание снимается, а не висит");
+  });
+
+  it("ожидание отчёта переживает команду и не тратится впустую", async () => {
+    // peek вместо take: «/start» посреди ожидания не должен молча съедать его.
+    const awaiting = new AwaitingReport();
+    awaiting.set(555, task().id);
+    const { core } = stubCore();
+    await handleStaffMessage(555, "/start", ME, { core, awaiting, conversations: new Conversations() });
+    assert.equal(awaiting.peek(555), task().id, "ожидание должно уцелеть");
+  });
+
+  it("«/start» ставит постоянное меню и показывает задачи одним сообщением", async () => {
+    const { core } = stubCore();
+    const res = await handleStaffMessage(555, "/start", ME, {
+      core,
+      awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
+    });
+    assert.ok(res.reply.replyKeyboard, "меню должно появиться при первом входе");
+    assert.equal(res.reply.replyKeyboard!.is_persistent, true);
+    assert.equal(res.reply.keyboard!.inline_keyboard.length, 1, "одна задача — одна номерная кнопка");
+    assert.match(res.reply.keyboard!.inline_keyboard[0][0].callback_data, /:open$/);
+  });
+
+  it("неготовый пункт отвечает честно, а не молчит", async () => {
+    const { core } = stubCore();
+    const res = await handleStaffMessage(555, "🛠 Технический осмотр", ME, {
+      core,
+      awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
+    });
+    assert.match(res.reply.text, /пока не готово/i);
+  });
+});
+
+describe("Карточка задачи по номерной кнопке", () => {
+  it("«open» раскрывает карточку на месте, без записи в Core", async () => {
+    const { core, calls } = stubCore();
+    const res = await handleStaffCallback(555, `t:${task().id}:open`, ME, {
+      core,
+      awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
+    });
+    assert.match(res.edit?.text ?? "", /Пополнить автомат/);
+    assert.ok(res.edit?.keyboard, "в карточке должны быть кнопки действий");
+    assert.deepEqual(calls, [], "открытие карточки ничего не меняет");
+  });
+
+  it("«Взял в работу» перерисовывает карточку, а не шлёт вторую", async () => {
+    const { core } = stubCore();
+    const res = await handleStaffCallback(555, `t:${task().id}:progress`, ME, {
+      core,
+      awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
+    });
+    assert.ok(res.edit, "иначе в чате две карточки одной задачи с живыми кнопками");
+    assert.equal(res.message, undefined);
+    const texts = res.edit!.keyboard!.inline_keyboard[0].map((b) => b.text).join(" ");
+    assert.ok(!texts.includes("Взял"), "повторно взять уже нечего");
+  });
+
+  it("чужую задачу не открыть", async () => {
+    const { core } = stubCore({
+      task: async () => task({ ownerRef: "99999999-9999-4999-8999-999999999999" }),
+    });
+    const res = await handleStaffCallback(555, `t:${task().id}:open`, ME, {
+      core,
+      awaiting: new AwaitingReport(),
+      conversations: new Conversations(),
+    });
+    assert.match(res.answer, /не твоя/i);
+    assert.equal(res.edit, undefined);
+  });
+});
+
+describe("Время инкассации", () => {
+  it("считается по Ташкенту, а не по зоне процесса", async () => {
+    const { formatCollectedAt } = await import("./staff");
+    // 2026-08-06T19:30:00Z = 07.08.2026 00:30 в Ташкенте (UTC+5).
+    assert.equal(formatCollectedAt("2026-08-06T19:30:00.000Z"), "07.08.2026 00:30:00");
   });
 });

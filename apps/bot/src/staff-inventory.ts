@@ -41,9 +41,12 @@ export function fmtQty(n: number): string {
 /** Клавиатура выбора (склад/ингредиент). Префикс задаёт пространство callback. */
 function pickKeyboard(items: EntityRow[], kind: "wh" | "ing"): NonNullable<StaffReply["keyboard"]> {
   return {
-    inline_keyboard: items
-      .slice(0, 30)
-      .map((it) => [{ text: it.name.slice(0, 40), callback_data: `i:${kind}:${it.id}` }]),
+    inline_keyboard: [
+      ...items.slice(0, 30).map((it) => [{ text: it.name.slice(0, 40), callback_data: `i:${kind}:${it.id}` }]),
+      // Парсер «i:cancel» был с самого начала, а кнопки не было: выйти из
+      // мастера можно было только словом «отмена», о котором надо знать.
+      [{ text: "✖️ Отмена", callback_data: "i:cancel" }],
+    ],
   };
 }
 

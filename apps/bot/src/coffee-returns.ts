@@ -100,7 +100,10 @@ export async function startCoffeeConsumable(chatId: number, deps: CoffeeReturnsD
   return {
     text: "Расходники какой точки?",
     keyboard: {
-      inline_keyboard: active.slice(0, 30).map((l) => [{ text: l.name.slice(0, 40), callback_data: `cc:loc:${l.id}` }]),
+      inline_keyboard: [
+        ...active.slice(0, 30).map((l) => [{ text: l.name.slice(0, 40), callback_data: `cc:loc:${l.id}` }]),
+        [{ text: "✖️ Отмена", callback_data: "cc:cancel" }],
+      ],
     },
   };
 }

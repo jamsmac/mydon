@@ -146,13 +146,17 @@ async function main(): Promise<void> {
         );
       }
 
-      const { reply, tasks } = await handleStaffMessage(chatId, text, person, staffDeps);
-      await tg.sendMessage(chatId, reply.text, reply.keyboard);
+      const { reply } = await handleStaffMessage(chatId, text, person, staffDeps);
 
-      // Кнопки — по одному сообщению на задачу: у сообщения может быть только
-      // одна клавиатура, а действовать нужно по конкретной задаче.
-      for (const t of (tasks ?? []).slice(0, 10)) {
-        await tg.sendMessage(chatId, `📌 ${t.title}`, taskKeyboard(t));
+      // Постоянное меню и inline-кнопки не помещаются в одно сообщение:
+      // reply_markup один. Меню ставим отдельной короткой строкой — оно нужно
+      // редко (первый вход, справка), а список задач приходит со своими
+      // номерными кнопками одним сообщением, а не десятью.
+      if (reply.replyKeyboard) {
+        await tg.sendMessage(chatId, reply.text, reply.replyKeyboard);
+        if (reply.keyboard) await tg.sendMessage(chatId, "Выбери задачу:", reply.keyboard);
+      } else {
+        await tg.sendMessage(chatId, reply.text, reply.keyboard);
       }
     } catch (err) {
       console.error("Сообщение сотрудника не обработано:", err);
@@ -431,6 +435,22 @@ ${DECIDED_LABEL[parsed.decision]}`);
           try {
             const res = await handleStaffCallback(chatId, data, person, staffDeps);
             await tg.answerCallback(u.callback_query.id, res.answer);
+            // Перерисовка на месте: карточка задачи должна меняться там же, где
+            // на неё нажали. Не вышло (сообщение старое, текст тот же) — шлём
+            // новым сообщением, иначе нажатие выглядит как «ничего не сделал».
+            if (res.edit) {
+              const msgId = u.callback_query.message?.message_id;
+              let edited = false;
+              if (msgId !== undefined) {
+                try {
+                  await tg.editMessage(chatId, msgId, res.edit.text, res.edit.keyboard);
+                  edited = true;
+                } catch (err) {
+                  console.error("Карточку задачи не переписать:", err);
+                }
+              }
+              if (!edited) await tg.sendMessage(chatId, res.edit.text, res.edit.keyboard);
+            }
             if (res.message) await tg.sendMessage(chatId, res.message, res.keyboard);
             // Владелец узнаёт о сборе сразу — деньги в пути, приём ждёт в панели.
             if (res.ownerNote) {
