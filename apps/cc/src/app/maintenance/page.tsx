@@ -52,9 +52,18 @@ export default async function Maintenance() {
   const nameOf = new Map(machines.map((m) => [m.id, m.name]));
   const personOf = new Map(people.map((p) => [p.id, p.name]));
 
-  const overdue = due.filter((d) => d.status === "overdue");
-  const soon = due.filter((d) => d.status === "due" || d.status === "soon");
-  const unknown = due.filter((d) => d.status === "unknown");
+  // Автоматы вне эксплуатации — ОТДЕЛЬНАЯ группа, а не тихо смешанные строки.
+  //
+  // Из сводки они не убраны намеренно: норматив всё равно подошёл к сроку, и
+  // владелец должен видеть долг, который автомат копит, стоя в мастерской.
+  // Задачи по ним не создаются, техник их не видит — но исчезнуть со всех
+  // экранов сразу значит вернуть автомат из ремонта с невидимой просрочкой.
+  const idle = due.filter((d) => d.operational === false);
+  const живые = due.filter((d) => d.operational !== false);
+
+  const overdue = живые.filter((d) => d.status === "overdue");
+  const soon = живые.filter((d) => d.status === "due" || d.status === "soon");
+  const unknown = живые.filter((d) => d.status === "unknown");
 
   // Начатое и не закрытое старше суток — отдельный сигнал: «начал и забыл»
   // выглядит в журнале как «не приходил», и владелец не видит разницы.
@@ -70,7 +79,8 @@ export default async function Maintenance() {
           {due.length === 0
             ? "Нормативы не заведены — графиков пока нет."
             : `Нормативов ${due.length} · просрочено ${overdue.length} · скоро ${soon.length}` +
-              (unknown.length > 0 ? ` · без периодичности ${unknown.length}` : "")}
+              (unknown.length > 0 ? ` · без периодичности ${unknown.length}` : "") +
+              (idle.length > 0 ? ` · вне эксплуатации ${idle.length}` : "")}
         </p>
       </div>
 
@@ -97,9 +107,9 @@ export default async function Maintenance() {
       <section className="group-block">
         <div className="section-title">
           Графики
-          <span className="group-count">{due.length}</span>
+          <span className="group-count">{живые.length}</span>
         </div>
-        {due.length === 0 ? (
+        {живые.length === 0 ? (
           <div className="empty">
             <b>Нормативов ещё нет</b>
             Пока не задано, как часто мыть и менять, система не может ничего напомнить.
@@ -124,7 +134,7 @@ export default async function Maintenance() {
               </tr>
             </thead>
             <tbody>
-              {[...due]
+              {[...живые]
                 .sort((a, b) => severity(b.status) - severity(a.status) || (a.daysLeft ?? 0) - (b.daysLeft ?? 0))
                 .map((d) => (
                   <tr key={d.planId}>
@@ -148,6 +158,45 @@ export default async function Maintenance() {
           </table>
         )}
       </section>
+
+      {idle.length > 0 && (
+        <section className="group-block">
+          <div className="section-title">
+            Вне эксплуатации
+            <span className="group-count">{idle.length}</span>
+          </div>
+          <p className="hint" style={{ marginBottom: 10 }}>
+            Работы подошли к сроку, но автомата нет на месте: задачи по ним не
+            создаются, и техник этих строк не видит. Долг показан здесь, чтобы
+            автомат не вернулся из ремонта с невидимой просрочкой — при возврате
+            в эксплуатацию сроки пересчитаются от того дня.
+          </p>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Объект</th>
+                <th>Работа</th>
+                <th>Срок</th>
+                <th>Почему не назначено</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...idle]
+                .sort((a, b) => severity(b.status) - severity(a.status))
+                .map((d) => (
+                  <tr key={d.planId}>
+                    <td>{d.targetName}</td>
+                    <td>
+                      {d.title ?? (d.partKind ? `${d.kindLabel}: ${partLabel(d.partKind)}` : d.kindLabel)}
+                    </td>
+                    <td>{d.nextDueOn ?? "—"}</td>
+                    <td>{d.idleReason ?? "автомат не в эксплуатации"}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </section>
+      )}
 
       <section className="group-block">
         <div className="section-title">

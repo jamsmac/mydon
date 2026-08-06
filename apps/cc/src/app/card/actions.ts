@@ -103,6 +103,11 @@ export interface ActionResult {
   error?: string;
 }
 
+function fail(err: unknown): ActionResult {
+  if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+  return { ok: false, error: err instanceof Error ? err.message : "Не удалось сохранить" };
+}
+
 /**
  * Значение поля в число, если оно число, — иначе строкой.
  *
@@ -373,5 +378,50 @@ export async function savePlanogram(id: string, rawLines: unknown): Promise<Acti
     return { ok: false, error: err instanceof Error ? err.message : "Не удалось сохранить раскладку" };
   }
   revalidatePath(`/card/${id}`);
+  return { ok: true };
+}
+
+/**
+ * Вид автомата — решение владельца, а не догадка.
+ *
+ * Через API с актором `owner`: в журнале потом видно, что вид выбрал человек,
+ * а не подставил массовый прогон. Разница нужна — догадка и решение имеют
+ * разный вес (docs/REGISTRY_CLEANUP.md).
+ */
+export async function setMachineKind(
+  id: string,
+  kind: string,
+  note?: string,
+): Promise<ActionResult> {
+  try {
+    await core.setMachineKind(id, kind, note);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${id}`);
+  return { ok: true };
+}
+
+/**
+ * Состояние автомата: в эксплуатации / на складе / в ремонте.
+ *
+ * Смена состояния — не правка поля, а событие с последствиями: уход из
+ * эксплуатации отменяет висящие задачи обслуживания, возврат пересчитывает
+ * сроки от сегодня. Всё это делает Core одной транзакцией, панель лишь
+ * называет новое состояние и причину.
+ */
+export async function setMachineStatus(
+  id: string,
+  status: string,
+  note?: string,
+): Promise<ActionResult> {
+  try {
+    await core.setMachineStatus(id, status, note);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${id}`);
+  // Состояние меняет и сводку обслуживания: там пропадут или появятся строки.
+  revalidatePath("/maintenance");
   return { ok: true };
 }

@@ -22,6 +22,7 @@ import { MachinePricesView } from "../../../components/prices-view";
 import { EntityApproval } from "../../../components/entity-approval";
 import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
 import { PlanogramEditor } from "../../../components/planogram-editor";
+import { MachineCardPanel } from "../../../components/machine-card-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
 import { parsePlanogram } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
@@ -177,6 +178,17 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   }
   const planogram = parsePlanogram(entity.attrs);
 
+  // Карточка автомата: вид и состояние. Ошибка чтения не роняет страницу —
+  // блок просто не покажется, остальное о карточке важнее.
+  let machineCard: Awaited<ReturnType<typeof core.machineCard>> = null;
+  if (isMachine) {
+    try {
+      machineCard = await core.machineCard(entity.id);
+    } catch {
+      machineCard = null;
+    }
+  }
+
   return (
     <>
       <div className="page-head">
@@ -279,6 +291,17 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
             не поменяли, она держится. Сквозной срез — во вкладке «Источники → Цены».
           </p>
         </div>
+      )}
+
+      {isMachine && (
+        <MachineCardPanel
+          id={entity.id}
+          kind={machineCard?.kind ?? null}
+          status={machineCard?.status ?? null}
+          statusNote={machineCard?.statusNote ?? null}
+          statusChangedAt={machineCard?.statusChangedAt ?? null}
+          updatedBy={machineCard?.updatedBy ?? null}
+        />
       )}
 
       {isMachine && (
