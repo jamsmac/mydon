@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Table, is } from "drizzle-orm";
+import { DEFAULT_MACHINE_STATUS, MACHINE_KINDS, MACHINE_STATUSES } from "@mydon/shared";
 import * as mod from "./schema";
 import { schema } from "./schema";
 
@@ -88,5 +89,28 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     assert.ok(cols(schema.auditLog).includes("actorKind"), "журнал должен различать человека и агента");
     assert.ok(cols(schema.auditLog).includes("before"));
     assert.ok(cols(schema.auditLog).includes("after"));
+  });
+});
+
+describe("Перечисления схемы и словари @mydon/shared — один список, а не два", () => {
+  /**
+   * Значения enum'ов дублируются руками: в `schema.ts` как pgEnum, в
+   * `@mydon/shared` как массив `as const`. Ничто их не связывает — можно
+   * добавить состояние в словарь, забыть про миграцию, и Postgres отвергнет
+   * запись значением, которое TypeScript считает законным.
+   *
+   * Тест — единственный шов между этими двумя списками.
+   */
+  it("вид автомата: machineKindEnum ↔ MACHINE_KINDS", () => {
+    assert.deepEqual([...mod.machineKindEnum.enumValues].sort(), [...MACHINE_KINDS].sort());
+  });
+
+  it("состояние автомата: machineStatusEnum ↔ MACHINE_STATUSES", () => {
+    assert.deepEqual([...mod.machineStatusEnum.enumValues].sort(), [...MACHINE_STATUSES].sort());
+  });
+
+  it("умолчание состояния существует в перечислении", () => {
+    // Умолчание прописано и в колонке (DEFAULT 'in_service'), и в коде.
+    assert.ok((mod.machineStatusEnum.enumValues as readonly string[]).includes(DEFAULT_MACHINE_STATUS));
   });
 });

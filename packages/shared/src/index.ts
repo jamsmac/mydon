@@ -74,6 +74,9 @@ export * from "./geo";
 export * from "./maintenance";
 export * from "./maintenance-due";
 export * from "./catalog-kinds";
+
+/** Состояние автомата: в эксплуатации / склад / ремонт. */
+export * from "./machine-status";
 export * from "./maintenance-norms";
 
 /** Серийник автомата: две формы написания сводятся к одному ключу. */

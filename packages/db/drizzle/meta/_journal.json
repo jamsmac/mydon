@@ -330,6 +330,13 @@
       "when": 1786047121852,
       "tag": "0046_machine_card_updated_by",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1786050320388,
+      "tag": "0047_machine_status",
+      "breakpoints": true
     }
   ]
 }

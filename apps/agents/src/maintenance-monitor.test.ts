@@ -199,3 +199,56 @@ describe("Монитор графиков", () => {
     assert.equal(tasks[0].due, "2026-08-06T13:00:00.000Z");
   });
 });
+
+describe("Автомат вне эксплуатации задач не получает", () => {
+  it("автомат в ремонте — задача не ставится, причина названа", async () => {
+    // Olma склад уехал в ремонт 05.08.2026. Работа подошла к сроку, но
+    // выполнить её некому и не на чем.
+    const { core, tasks } = stubCore([
+      row({ targetName: "Olma склад", operational: false, idleReason: "автомат не в эксплуатации (в ремонте)" }),
+    ]);
+    const res = await runMaintenanceMonitor(core);
+
+    assert.equal(tasks.length, 0, "задача по автомату в ремонте не создаётся");
+    assert.equal(res.tasks, 0);
+    assert.equal(res.idle, 1, "пропуск считается отдельно от «работ не подошло»");
+    assert.deepEqual(res.idleReasons, ["Olma склад: автомат не в эксплуатации (в ремонте)"]);
+  });
+
+  it("автомат на складе — то же самое", async () => {
+    const { core, tasks } = stubCore([
+      row({ targetName: "OFFice", operational: false, idleReason: "автомат не в эксплуатации (на складе)" }),
+    ]);
+    const res = await runMaintenanceMonitor(core);
+    assert.equal(tasks.length, 0);
+    assert.equal(res.idle, 1);
+  });
+
+  it("рабочий автомат получает задачу как раньше", async () => {
+    const { core, tasks } = stubCore([row({ operational: true })]);
+    const res = await runMaintenanceMonitor(core);
+    assert.equal(tasks.length, 1);
+    assert.equal(res.idle, 0);
+  });
+
+  it("старый Core без поля — обслуживание продолжается", async () => {
+    // Признака нет → автомат считается рабочим. Отсутствие поля не повод
+    // молча прекратить обслуживание всего парка.
+    const { core, tasks } = stubCore([row()]);
+    const res = await runMaintenanceMonitor(core);
+    assert.equal(tasks.length, 1);
+    assert.equal(res.idle, 0);
+  });
+
+  it("смешанный парк: рабочим задачи, стоящим — счётчик", async () => {
+    const { core, tasks } = stubCore([
+      row({ planId: "p1", targetName: "KIMYO", operational: true }),
+      row({ planId: "p2", targetName: "OFFice", operational: false, idleReason: "автомат не в эксплуатации (на складе)" }),
+      row({ planId: "p3", targetName: "Olma склад", operational: false, idleReason: "автомат не в эксплуатации (в ремонте)" }),
+    ]);
+    const res = await runMaintenanceMonitor(core);
+    assert.equal(tasks.length, 1);
+    assert.equal(res.idle, 2);
+    assert.equal(res.idleReasons.length, 2);
+  });
+});

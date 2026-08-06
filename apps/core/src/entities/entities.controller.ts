@@ -1,6 +1,11 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
 import { ArrayMaxSize, IsArray, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
-import { MACHINE_KINDS, type MachineKind } from "@mydon/shared";
+import {
+  MACHINE_KINDS,
+  MACHINE_STATUSES,
+  type MachineKind,
+  type MachineStatus,
+} from "@mydon/shared";
 import { EntitiesService } from "./entities.service";
 import { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
 
@@ -23,6 +28,24 @@ export class ProposeFieldDto {
   note?: string;
 }
 
+
+/**
+ * Состояние автомата — работает он сейчас или нет.
+ *
+ * Отдельно от вида: вид называют один раз, состояние меняется каждый раз,
+ * когда автомат уезжает в ремонт и возвращается.
+ */
+export class SetMachineStatusDto {
+  @IsIn([...MACHINE_STATUSES])
+  status!: MachineStatus;
+
+  /** Почему: «отправлен в ремонт 05.08», номер заявки. */
+  @IsOptional() @IsString() @MaxLength(2000)
+  note?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
 
 /** Вид автомата — поле карточки, а не догадка по косвенным признакам. */
 export class SetMachineKindDto {
@@ -133,6 +156,11 @@ export class EntitiesController {
   @Get("machine-cards/all")
   machineCards() {
     return this.entities.machineCards();
+  }
+
+  @Patch(":id/machine-status")
+  setMachineStatus(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetMachineStatusDto) {
+    return this.entities.setMachineStatus(id, dto.status, dto.actor ?? "owner", dto.note);
   }
 
   @Patch(":id/machine-kind")
