@@ -334,6 +334,12 @@ export class VendingController {
     });
   }
 
+  /** Товары, стоящие в автомате по зеркалу — кнопки мастера заливки в боте. */
+  @Get("machine-products")
+  machineProducts(@Query("serial") serial?: string) {
+    return this.refills.productsOf(serial ?? "");
+  }
+
   @Get("refills")
   listRefills(
     @Query("machineSerial") machineSerial?: string,

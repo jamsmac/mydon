@@ -1,6 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
-import { auditLog, vendingRefill, vendingStock } from "@mydon/db";
+import { auditLog, machineSlot, vendingRefill, vendingStock } from "@mydon/db";
 import { DB, type Db } from "../db/db.module";
 import { VendingService } from "./vending.service";
 
@@ -140,6 +140,25 @@ export class RefillService {
 
       return { refill: created, stockLeft: stock?.quantity ?? null, duplicate: false };
     });
+  }
+
+  /**
+   * Товары, стоящие в автомате по зеркалу Ourvend.
+   *
+   * Зеркало здесь используется по назначению — как подсказка «что тут обычно
+   * бывает», а не как источник факта. Пустой ответ (автомата нет в зеркале
+   * или сбор выключен) не ошибка: мастер предложит ввести название руками.
+   */
+  async productsOf(machineSerial: string): Promise<string[]> {
+    if (!machineSerial.trim()) return [];
+    const rows = await this.db
+      .select({ productName: machineSlot.productName })
+      .from(machineSlot)
+      .where(eq(machineSlot.machineSerial, machineSerial.trim()))
+      .limit(200);
+    const names = new Set<string>();
+    for (const r of rows) if (r.productName?.trim()) names.add(r.productName.trim());
+    return [...names].sort((a, b) => a.localeCompare(b, "ru"));
   }
 
   /** Журнал заливок. Фильтры складываются; без них — последние по времени. */

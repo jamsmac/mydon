@@ -654,6 +654,36 @@ export class CoreClient {
     });
   }
 
+  /**
+   * Заливка снек/дринк-автомата: факт плюс списание со склада.
+   *
+   * `clientKey` обязателен и генерируется КЛИЕНТОМ: в нём весь смысл
+   * идемпотентности. Сгенерируй его сервер — повтор того же нажатия стал бы
+   * новой записью и списал бы склад второй раз.
+   */
+  createRefill(input: {
+    machineSerial: string;
+    machineId?: string;
+    coilId?: string;
+    productName: string;
+    qty: number;
+    personId?: string;
+    taskId?: string;
+    clientKey: string;
+    note?: string;
+    createdBy?: string;
+  }): Promise<{ refill: { id: string }; stockLeft: number | null; duplicate: boolean }> {
+    return this.request("/vending/refills", {
+      method: "POST",
+      body: JSON.stringify({ source: "bot", ...input }),
+    });
+  }
+
+  /** Товары, стоящие в автомате по зеркалу Ourvend — кнопки мастера заливки. */
+  machineProducts(machineSerial: string): Promise<string[]> {
+    return this.request(`/vending/machine-products?serial=${encodeURIComponent(machineSerial)}`);
+  }
+
   /** Инвентаризация: записать факт пересчёта — сервер сам считает дельту. */
   stocktake(input: {
     warehouseId: string;
