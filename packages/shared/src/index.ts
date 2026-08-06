@@ -88,3 +88,6 @@ export * from "./globerent/commission";
 export * from "./globerent/import-lifecycle";
 export * from "./globerent/unit-cogs";
 export * from "./globerent/preorder-status";
+
+/** Кто совершил действие: вид актора выводится из ссылки, а не задаётся руками. */
+export * from "./actor";
