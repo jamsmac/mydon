@@ -1713,6 +1713,178 @@ export const coffeeStock = pgTable("coffee_stock", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ── Обслуживание оборудования: журнал работ и узлы автоматов ────────────────
+//
+// Три вещи, которые нельзя смешивать: НОРМАТИВ (как часто положено),
+// ФАКТ (что и когда сделали) и СОСТОЯНИЕ (какой узел сейчас стоит).
+// Здесь факт и состояние; норматив — `maintenance_plan` (следующий шаг).
+//
+// Статус «пора / просрочено» НЕ хранится нигде: он зависит от now() и
+// считается на чтении. Хранимый статус — это поле, которое обязательно
+// разъедется с реальностью в тот день, когда крон не отработает.
+//
+// Кофейная мойка (`coffee_wash_log` + `coffee_wash_schedule`) сюда НЕ
+// переносится. У неё ключ «точка + позиция бункера 1..8», а здесь «автомат +
+// узел»; копия фактов в двух журналах дала бы двойной счёт и разные ответы
+// на вопрос «когда мыли».
+
+/** Вид работы. Значения английские, подписи — в @mydon/shared. */
+export const maintenanceKindEnum = pgEnum("maintenance_kind", [
+  "cleaning", // чистка
+  "sanitation", // санобработка
+  "service", // плановое ТО
+  "part_replace", // замена узла
+  "inspection", // технический осмотр
+  "calibration", // поверка, калибровка
+  "repair", // ремонт по факту поломки
+  "other",
+]);
+
+/**
+ * Узлы автомата. Список заполнен с запасом намеренно: парк подтягивается из
+ * внешних систем постепенно, и добавить значение сейчас бесплатно, а
+ * `ALTER TYPE` на живой базе — нет.
+ */
+export const partKindEnum = pgEnum("part_kind", [
+  "bill_acceptor", // купюроприёмник
+  "coin_acceptor", // монетоприёмник
+  "brewer", // варочная группа
+  "grinder", // кофемолка
+  "mixer", // миксер
+  "hopper", // бункер
+  "water_filter", // фильтр воды
+  "pump", // помпа
+  "boiler", // бойлер
+  "cooling_unit", // холодильный блок
+  "compressor", // компрессор
+  "payment_terminal", // платёжный терминал
+  "display", // дисплей
+  "mainboard", // плата управления
+  "motor", // мотор
+  "valve", // клапан
+  "sensor", // датчик
+  "lock", // замок, механизм двери
+  "spiral", // спираль выдачи (снек)
+  "elevator", // лифт выдачи
+  "other",
+]);
+
+/**
+ * Чем кончилась работа. NULL — работа начата и не закрыта: такие строки
+ * старше суток отдельно видны владельцу, иначе «начал и забыл» выглядит
+ * как «не приходил».
+ */
+export const maintenanceOutcomeEnum = pgEnum("maintenance_outcome", [
+  "done", // сделано
+  "partial", // сделано частично
+  "failed", // не смог
+]);
+
+/** Почему меняли узел — без этого нельзя отличить износ от поломки. */
+export const partSwapReasonEnum = pgEnum("part_swap_reason", [
+  "failure", // отказ
+  "preventive", // профилактика по сроку
+  "upgrade", // замена на лучшее
+  "warranty", // гарантийная замена
+  "moved", // переставили на другой автомат
+]);
+
+/**
+ * Факт работы: кто, когда, что и с каким результатом.
+ *
+ * Дата отдельно от отметки времени: `performed_on` — календарный день по
+ * Ташкенту, по нему считаются сроки и строятся сводки. Вычислять день из
+ * `performed_at` в запросе значит каждый раз помнить про часовой пояс —
+ * и однажды забыть.
+ */
+export const maintenanceLog = pgTable(
+  "maintenance_log",
+  {
+    id: id(),
+    /** Объект: автомат или точка — запись реестра. */
+    entityId: uuid("entity_id")
+      .references(() => entity.id)
+      .notNull(),
+    kind: maintenanceKindEnum("kind").notNull(),
+    /** Какой узел трогали. NULL для работ по автомату целиком. */
+    partKind: partKindEnum("part_kind"),
+    /** Кто делал. NULL у записей, внесённых владельцем задним числом. */
+    personId: uuid("person_id").references(() => person.id),
+    /** Задача, в рамках которой сделано, если была. */
+    taskId: uuid("task_id").references(() => task.id),
+    /** Календарный день по Ташкенту. */
+    performedOn: date("performed_on").notNull(),
+    performedAt: timestamp("performed_at", { withTimezone: true }).defaultNow().notNull(),
+    /** NULL — работа начата и не закрыта. */
+    outcome: maintenanceOutcomeEnum("outcome"),
+    note: text("note"),
+    /** Показания счётчика автомата на момент работы, если снимались. */
+    counterValue: integer("counter_value"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("maintenance_log_entity_idx").on(t.entityId, t.performedOn),
+    index("maintenance_log_person_idx").on(t.personId, t.performedOn),
+    // Под вопрос «когда в последний раз делали это на этом объекте» —
+    // основной запрос расчёта сроков. Только закрытые: начатая и брошенная
+    // работа сроки не сдвигает.
+    index("maintenance_log_done_idx")
+      .on(t.entityId, t.kind, t.partKind, t.performedOn)
+      .where(sql`outcome is not null`),
+    check("maintenance_log_counter_nonneg", sql`${t.counterValue} is null or ${t.counterValue} >= 0`),
+  ],
+);
+
+/**
+ * Экземпляр узла на автомате — периодами, как `coffee_machine_placement`.
+ *
+ * Не «текущий узел» одной строкой: вопрос «что стояло в марте, когда пошли
+ * жалобы» — рабочий, и ответить на него должен не нынешний узел. Замена
+ * закрывает старый период и открывает новый одной транзакцией.
+ */
+export const machinePart = pgTable(
+  "machine_part",
+  {
+    id: id(),
+    machineId: uuid("machine_id")
+      .references(() => entity.id)
+      .notNull(),
+    partKind: partKindEnum("part_kind").notNull(),
+    /** Позиция, если узлов одного вида несколько (бункер 1..8). */
+    slot: integer("slot"),
+    /** Серийный номер. NULL — не переписали; фото шильдика лежит во вложениях. */
+    serialNumber: text("serial_number"),
+    model: text("model"),
+    installedOn: date("installed_on").notNull(),
+    /** NULL — узел стоит сейчас. */
+    removedOn: date("removed_on"),
+    /** Записи журнала, которыми узел поставлен и снят. */
+    installLogId: uuid("install_log_id").references(() => maintenanceLog.id),
+    removeLogId: uuid("remove_log_id").references(() => maintenanceLog.id),
+    warrantyUntil: date("warranty_until"),
+    reason: partSwapReasonEnum("reason"),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("machine_part_machine_idx").on(t.machineId, t.partKind),
+    // Одно место — один открытый узел. coalesce обязателен: постгрес считает
+    // NULL ≠ NULL, и без него на автомате завелись бы два «текущих»
+    // купюроприёмника без слота, оба открытые.
+    uniqueIndex("machine_part_open_key")
+      .on(t.machineId, t.partKind, sql`coalesce(${t.slot}, 0)`)
+      .where(sql`removed_on is null`),
+    check("machine_part_slot_positive", sql`${t.slot} is null or ${t.slot} > 0`),
+    check(
+      "machine_part_dates",
+      sql`${t.removedOn} is null or ${t.removedOn} >= ${t.installedOn}`,
+    ),
+  ],
+);
+
 /**
  * Полная схема — для drizzle-клиента.
  *
@@ -1794,5 +1966,8 @@ export const schema = {
   coffeeProduct,
   coffeeSale,
   coffeeStock,
+  // Обслуживание: журнал работ и узлы автоматов.
+  maintenanceLog,
+  machinePart,
   coffeeMachinePlacement,
 };
