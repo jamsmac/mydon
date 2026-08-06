@@ -1,8 +1,22 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, entity, entityDraft, geoPoint, machineCard, org } from "@mydon/db";
+import {
+  auditLog,
+  entity,
+  entityDraft,
+  geoPoint,
+  machineCard,
+  maintenancePlan,
+  org,
+  task,
+} from "@mydon/db";
 import {
   actorKindOf,
   addressFromAttrs,
+  firstDue,
+  MACHINE_STATUSES,
+  TZ,
+  machineIsOperational,
+  type MachineStatus,
   coordFromAttrs,
   isUnit,
   MACHINE_KINDS,
@@ -109,6 +123,11 @@ function appendPriceHistory(
   const cur = oldAttrs[historyKey];
   const prev = typeof cur === "string" && cur.length > 0 ? `${cur}; ` : "";
   newAttrs[historyKey] = `${prev}${oldPrice.toLocaleString("ru-RU")} сум (до ${stamp})`;
+}
+
+/** Сегодняшний календарный день по Ташкенту (YYYY-MM-DD). */
+function todayTashkent(now = new Date()): string {
+  return now.toLocaleDateString("en-CA", { timeZone: TZ });
 }
 
 /**
@@ -663,6 +682,132 @@ export class EntitiesService {
       .from(machineCard)
       .where(entityIds ? inArray(machineCard.entityId, entityIds) : undefined)
       .limit(1000);
+  }
+
+  /**
+   * Задать состояние автомата: в эксплуатации / на складе / в ремонте.
+   *
+   * Отдельный метод, а не поле в `setMachineKind`: вид и состояние меняются
+   * по разным поводам и разными людьми. Вид называют один раз при заведении,
+   * состояние — каждый раз, когда автомат уезжает в ремонт и возвращается.
+   * Слив их в одну операцию заставил бы при отправке в ремонт заново называть
+   * вид, а значит рано или поздно назвать его неверно.
+   *
+   * `statusChangedAt` двигается только при РЕАЛЬНОЙ смене состояния: правка
+   * примечания не должна выглядеть как «уехал в ремонт заново», иначе
+   * «в ремонте с …» врёт при каждом уточнении текста.
+   *
+   * Карточки вида может ещё не быть — тогда заводим её с `kind: "other"`
+   * («не размечен»). Это не догадка о виде, а честная констатация: вид никто
+   * не называл. Требовать сначала задать вид значило бы запретить отметить
+   * поломку нового автомата.
+   */
+  async setMachineStatus(
+    entityId: string,
+    status: MachineStatus,
+    actorRef = "owner",
+    note?: string,
+  ): Promise<MachineCardRow> {
+    if (!(MACHINE_STATUSES as readonly string[]).includes(status)) {
+      throw new BadRequestException(`Неизвестное состояние автомата: ${status}`);
+    }
+    return this.db.transaction(async (tx) => {
+      const [card] = await tx.select().from(entity).where(eq(entity.id, entityId)).limit(1);
+      if (!card) throw new NotFoundException("Карточки нет");
+      if (card.type !== "machine") {
+        throw new BadRequestException(`Состояние задаётся только автоматам, а это «${card.type}»`);
+      }
+
+      const [before] = await tx
+        .select()
+        .from(machineCard)
+        .where(eq(machineCard.entityId, entityId))
+        .limit(1);
+
+      const changed = before?.status !== status;
+      const changedAt = changed ? new Date() : (before?.statusChangedAt ?? null);
+
+      const [after] = await tx
+        .insert(machineCard)
+        .values({
+          entityId,
+          kind: "other",
+          status,
+          statusNote: note ?? null,
+          statusChangedAt: changedAt,
+          createdBy: actorRef,
+          updatedBy: actorRef,
+        })
+        .onConflictDoUpdate({
+          target: [machineCard.entityId],
+          set: {
+            status,
+            ...(note !== undefined ? { statusNote: note } : {}),
+            statusChangedAt: changedAt,
+            updatedBy: actorRef,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+
+      // Побочные действия — только при РЕАЛЬНОЙ смене состояния и в той же
+      // транзакции: состояние и график меняются вместе или никак.
+      let anchorsReset = 0;
+      let tasksCancelled = 0;
+      if (changed && machineIsOperational(status)) {
+        // Вернулся из ремонта. Пока автомат стоял, срок капал впустую, и без
+        // пересчёта он придёт красным на весь простой — с задачей, датированной
+        // прошлым, и без единого уведомления (ступени просрочки [1,3,7] на
+        // 70-й день не срабатывают). Считаем от сегодня, как при снятии
+        // норматива с паузы.
+        const plans = await tx
+          .select()
+          .from(maintenancePlan)
+          .where(and(eq(maintenancePlan.entityId, entityId), eq(maintenancePlan.isActive, true)));
+        for (const plan of plans) {
+          const next = firstDue(todayTashkent(), {
+            everyDays: plan.everyDays,
+            everyMonths: plan.everyMonths,
+          });
+          if (next === plan.dueOn) continue;
+          await tx
+            .update(maintenancePlan)
+            .set({ dueOn: next, updatedAt: new Date() })
+            .where(eq(maintenancePlan.id, plan.id));
+          anchorsReset += 1;
+        }
+      } else if (changed && !machineIsOperational(status)) {
+        // Уехал из эксплуатации. Открытые задачи по его обслуживанию выполнить
+        // некому: автомата нет на месте. Оставить их нельзя — закрыть их тоже
+        // некому (бот умеет только «сделал», отмена есть лишь в панели по
+        // одной), и они будут вечно висеть в просрочке владельца.
+        const cancelled = await tx
+          .update(task)
+          .set({ status: "cancelled" })
+          .where(
+            and(
+              eq(task.entityId, entityId),
+              sql`${task.source} like 'maint:%'`,
+              sql`${task.status} not in ('done', 'cancelled')`,
+            ),
+          )
+          .returning({ id: task.id });
+        tasksCancelled = cancelled.length;
+      }
+
+      await tx.insert(auditLog).values({
+        actorKind: actorKindOf(actorRef),
+        actorRef,
+        // Возврат в строй — отдельное событие: по нему считается, сколько
+        // автомат простоял, и его ищут в журнале иначе, чем отправку в ремонт.
+        action:
+          changed && status === "in_service" ? "machine.status_restored" : "machine.status_changed",
+        target: entityId,
+        before: before ?? null,
+        after: { ...after, anchorsReset, tasksCancelled },
+      });
+      return after;
+    });
   }
 
   /**
