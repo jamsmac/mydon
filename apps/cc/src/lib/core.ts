@@ -1500,6 +1500,69 @@ export async function coreText(path: string): Promise<string> {
   return res.text();
 }
 
+/** Строка сводки сроков. Статус посчитан в Core на чтении. */
+export interface MaintenanceDue {
+  planId: string;
+  targetId: string;
+  targetName: string;
+  kind: string;
+  kindLabel: string;
+  partKind: string | null;
+  partLabel: string | null;
+  title: string | null;
+  nextDueOn: string | null;
+  lastDoneOn: string | null;
+  taskLeadDays: number;
+  daysLeft: number | null;
+  countLeft: number | null;
+  status: "ok" | "soon" | "due" | "overdue" | "unknown";
+  assigneeId: string | null;
+  autoTask: boolean;
+}
+
+export interface MaintenancePlan {
+  id: string;
+  entityId: string;
+  kind: string;
+  partKind: string | null;
+  title: string | null;
+  everyDays: number | null;
+  everyMonths: number | null;
+  everyCount: number | null;
+  dueOn: string | null;
+  taskLeadDays: number;
+  autoTask: boolean;
+  assigneeId: string | null;
+  isActive: boolean;
+}
+
+export interface MaintenanceLogRow {
+  id: string;
+  entityId: string;
+  kind: string;
+  partKind: string | null;
+  personId: string | null;
+  performedOn: string;
+  outcome: "done" | "partial" | "failed" | null;
+  note: string | null;
+  counterValue: number | null;
+  createdAt: string;
+}
+
+/** Узел автомата периодом: removedOn = null — стоит сейчас. */
+export interface MachinePart {
+  id: string;
+  machineId: string;
+  partKind: string;
+  slot: number | null;
+  serialNumber: string | null;
+  model: string | null;
+  installedOn: string;
+  removedOn: string | null;
+  warrantyUntil: string | null;
+  reason: string | null;
+}
+
 export const core = {
   briefing: () => get<Briefing>("/registry/briefing"),
   agents: () => get<AgentCard[]>("/agents"),
@@ -1521,6 +1584,21 @@ export const core = {
     send<Task>(`/tasks/${id}/edit`, "PATCH", input),
   addTaskComment: (id: string, input: Record<string, unknown>) =>
     send<TaskComment>(`/tasks/${id}/comments`, "POST", input),
+
+  // ── Обслуживание оборудования ──
+  //
+  // Статус «пора / просрочено» приходит посчитанным на чтении: он зависит от
+  // текущей даты и нигде не хранится, поэтому панель его не вычисляет заново.
+  maintenanceDue: () => get<MaintenanceDue[]>("/maintenance/due"),
+  maintenancePlans: (entityId?: string) =>
+    get<MaintenancePlan[]>(`/maintenance/plans${entityId ? `?entityId=${entityId}` : ""}`),
+  maintenanceLog: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<MaintenanceLogRow[]>(`/maintenance/log${qs ? `?${qs}` : ""}`);
+  },
+  machineParts: (machineId: string) => get<MachinePart[]>(`/maintenance/parts?machineId=${machineId}`),
+  upsertMaintenancePlan: (input: Record<string, unknown>) =>
+    send<MaintenancePlan>("/maintenance/plans", "POST", input),
 
   // ── Сотрудники ──
   people: (all = false) => get<Person[]>(`/people${all ? "?all=1" : ""}`),
