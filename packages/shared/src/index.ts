@@ -73,6 +73,10 @@ export * from "./geo";
 /** Обслуживание оборудования: узлы, виды работ, симптомы, расчёт сроков. */
 export * from "./maintenance";
 export * from "./maintenance-due";
+
+/** Роли сотрудников, права и приглашения в бота. */
+export * from "./roles";
+export * from "./invite";
 // GLOBERENT: словарь реестра и расчётные движки (перенос PROMACH).
 export * from "./globerent/registry";
 export * from "./globerent/contract-calc";

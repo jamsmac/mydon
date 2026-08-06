@@ -1,4 +1,4 @@
-import { dueLabel, TZ } from "@mydon/shared";
+import { can, dueLabel, TZ } from "@mydon/shared";
 import type { CoreClient, PersonRow, TaskRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import {
@@ -275,6 +275,12 @@ export async function handleStaffMessage(
   // запереть его внутри. Бросаем начатое и говорим об этом вслух — молча
   // потерянный мастер выглядит как потерянные данные.
   const pressed = matchMenuLabel(clean);
+  if (pressed && !can(person.roles, pressed.perm)) {
+    // Кнопка могла остаться на экране от прежнего набора ролей: клавиатура
+    // живёт в чате, пока её не заменят. Отказ должен быть внятным, а не
+    // «не понял» — человек нажал то, что видит.
+    return { reply: { text: `«${pressed.label}» тебе сейчас недоступно. Скажи владельцу.` } };
+  }
   if (pressed) {
     const dropped = deps.conversations.get(chatId) !== null;
     deps.conversations.clear(chatId);
@@ -361,15 +367,15 @@ export async function handleStaffMessage(
     const tasks = await deps.core.myTasks("human", person.id);
     return {
       reply: {
-        text: `${formatMyTasks(person, tasks)}\n\n${helpText()}`,
+        text: `${formatMyTasks(person, tasks)}\n\n${helpText(person.roles)}`,
         ...(tasks.length > 0 ? { keyboard: tasksKeyboard(tasks) } : {}),
-        replyKeyboard: menuKeyboard(),
+        replyKeyboard: menuKeyboard(person.roles),
       },
     };
   }
 
   // Слово попало в пункт меню — тот же обработчик, что и у кнопки.
-  const hit = matchTrigger(clean);
+  const hit = matchTrigger(clean, person.roles);
   if (hit) return startMenuItem(hit, chatId, person, deps);
 
   // Всё остальное от сотрудника — комментарий к его текущей задаче:
@@ -380,7 +386,7 @@ export async function handleStaffMessage(
     return { reply: { text: `Передал владельцу по задаче «${tasks[0].title}».` } };
   }
 
-  return { reply: { text: helpText(), replyKeyboard: menuKeyboard() } };
+  return { reply: { text: helpText(person.roles), replyKeyboard: menuKeyboard(person.roles) } };
 }
 
 /**

@@ -31,6 +31,8 @@ export interface PersonRow {
   id: string;
   name: string;
   role: string | null;
+  /** Роли сотрудника: по ним фильтруется меню и проверяются права. */
+  roles?: string[];
   tgUsername: string | null;
   tgChatId: string | null;
   active: string;
@@ -519,6 +521,33 @@ export class CoreClient {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Погасить приглашение и привязать Telegram. Ошибка — текст для сотрудника:
+   * Core уже объяснил, что не так, и придумывать своё сообщение незачем.
+   */
+  async redeemInvite(code: string, chatId: string): Promise<PersonRow | { error: string }> {
+    try {
+      return await this.request<PersonRow>("/people/redeem", {
+        method: "POST",
+        body: JSON.stringify({ code, chatId }),
+      });
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "Не получилось" };
+    }
+  }
+
+  /** Выпустить приглашение сотруднику. Код возвращается один раз. */
+  issueInvite(
+    personId: string,
+    roles: string[],
+    actor: string,
+  ): Promise<{ code: string; expiresAt: string; name: string }> {
+    return this.request(`/people/${personId}/invite`, {
+      method: "POST",
+      body: JSON.stringify({ roles, actor }),
+    });
   }
 
   /** Вернуть свою задачу в общий пул. */

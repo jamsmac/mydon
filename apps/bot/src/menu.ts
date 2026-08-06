@@ -1,3 +1,4 @@
+import { can, type Permission } from "@mydon/shared";
 import type { ReplyKeyboard } from "./telegram";
 import { isRegisterTrigger } from "./staff-register";
 import { isIntakeTrigger } from "./staff-intake";
@@ -25,22 +26,8 @@ import { isCoffeeFixTrigger } from "./coffee-fix";
  * лимит в 64 байта. Префикс «m:» свободен.
  */
 
-/**
- * Право на пункт меню. Пока не проверяется: колонки `person.roles` ещё нет,
- * все пункты доступны всем. Поле заведено сразу, чтобы при появлении ролей
- * менялась одна функция `menuFor`, а не тринадцать мест вызова.
- */
-export type MenuPerm =
-  | "tasks.own"
-  | "maintenance.view"
-  | "parts.replace"
-  | "coffee.wash"
-  | "coffee.refill"
-  | "coffee.consumable"
-  | "cash.collect"
-  | "stock.intake"
-  | "stock.count"
-  | "registry.propose";
+/** Право на пункт меню. Матрица прав живёт в @mydon/shared. */
+export type MenuPerm = Permission;
 
 export interface MenuItem {
   /** Короткий id для callback_data. */
@@ -133,12 +120,11 @@ export const STAFF_MENU: readonly MenuItem[] = [
 /**
  * Пункты, доступные сотруднику.
  *
- * `roles` пока не используется: колонки нет, фильтровать нечем, и притворяться
- * что фильтр работает — хуже, чем честно его не иметь. Параметр в сигнатуре
- * стоит уже сейчас, чтобы включение прав не переписывало вызовы.
+ * Фильтр один и тот же для кнопок, справки и текстовых триггеров: спрятанный
+ * кнопкой, но доступный словом пункт сделал бы всю модель прав косметикой.
  */
-export function menuFor(_roles?: readonly string[] | null): MenuItem[] {
-  return STAFF_MENU.filter((i) => i.ready);
+export function menuFor(roles?: readonly string[] | null): MenuItem[] {
+  return STAFF_MENU.filter((i) => i.ready && can(roles, i.perm));
 }
 
 /** Две кнопки в ряд: на телефоне это предел, при котором подпись не режется. */
@@ -176,8 +162,8 @@ export function matchMenuLabel(text: string): MenuItem | null {
  * вызывающему нужен `ready`, чтобы объяснить «поток ещё не готов», а не
  * промолчать.
  */
-export function matchTrigger(text: string): MenuItem | null {
-  return STAFF_MENU.find((i) => i.ready && i.match(text)) ?? null;
+export function matchTrigger(text: string, roles?: readonly string[] | null): MenuItem | null {
+  return STAFF_MENU.find((i) => i.ready && can(roles, i.perm) && i.match(text)) ?? null;
 }
 
 /** Пункт по id — для разбора `m:<id>`. */

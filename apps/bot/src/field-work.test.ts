@@ -25,6 +25,7 @@ const ME: PersonRow = {
   id: "11111111-1111-4111-8111-111111111111",
   name: "Володя",
   role: "техник",
+  roles: ["operator", "technician", "collector", "storekeeper"],
   tgUsername: "volodya",
   tgChatId: "555",
   active: "yes",

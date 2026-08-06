@@ -143,6 +143,14 @@ export const person = pgTable("person", {
   orgId: uuid("org_id").references(() => org.id),
   name: text("name").notNull(),
   role: text("role"),
+    /**
+     * Роли сотрудника. Массив, а не одно значение: двое в поле делают всю
+     * работу, и «оператор ИЛИ техник» описало бы их неверно.
+     *
+     * Старая колонка `role` (свободный текст) остаётся: она нигде не читалась
+     * ботом и служит подсказкой владельцу при расстановке ролей.
+     */
+    roles: text("roles").array().default(sql`'{}'::text[]`).notNull(),
   /** Направление, куда нанят: сотрудник живёт внутри GLOBERENT/VendHub, а не отдельно. */
   domain: domainEnum("domain"),
   email: text("email"),
@@ -1898,6 +1906,51 @@ export const machinePart = pgTable(
 );
 
 /**
+ * Одноразовое приглашение сотрудника в бота.
+ *
+ * Заменяет привязку по @username. Ник в Telegram освобождается после смены,
+ * и любой, кто его займёт, получал доступ к карточке сотрудника со всеми его
+ * задачами — приглашение закрывает это тем, что секрет знает только тот,
+ * кому его дали лично.
+ *
+ * Хранится ХЕШ кода, а не код: утечка дампа не должна давать работающих
+ * приглашений.
+ */
+export const staffInvite = pgTable(
+  "staff_invite",
+  {
+    id: id(),
+    personId: uuid("person_id")
+      .references(() => person.id, { onDelete: "cascade" })
+      .notNull(),
+    /** sha256(перец + код). Перец живёт в окружении, в БД его нет. */
+    codeHash: text("code_hash").notNull(),
+    /** Роли, которые получит сотрудник при подключении. */
+    roles: text("roles").array().default(sql`'{}'::text[]`).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    /** chat_id, которым приглашение погашено, — для разбора инцидентов. */
+    usedByChatId: text("used_by_chat_id"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Один код — одно приглашение. Только среди живых: погашенные хеши
+    // повторно не встретятся, но и блокировать их незачем.
+    uniqueIndex("ux_staff_invite_code")
+      .on(t.codeHash)
+      .where(sql`used_at is null and revoked_at is null`),
+    // Одно живое приглашение на человека: выпуск нового гасит прежнее, иначе
+    // по чату гуляли бы две рабочие ссылки и владелец не знал бы, какая.
+    uniqueIndex("ux_staff_invite_one_active")
+      .on(t.personId)
+      .where(sql`used_at is null and revoked_at is null`),
+    index("staff_invite_person_idx").on(t.personId),
+  ],
+);
+
+/**
  * Норматив: как часто работу положено делать.
  *
  * Третья из трёх вещей, которые нельзя смешивать (норматив — факт —
@@ -2049,5 +2102,7 @@ export const schema = {
   maintenanceLog,
   machinePart,
   maintenancePlan,
+  // Доступ сотрудников: приглашения.
+  staffInvite,
   coffeeMachinePlacement,
 };

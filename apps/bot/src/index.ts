@@ -8,7 +8,7 @@ import {
   type LlmResolver,
 } from "@mydon/assistant";
 import { createDocumentBuilder } from "@mydon/documents";
-import { dueLabel, TZ } from "@mydon/shared";
+import { dueLabel, parseStartPayload, rolesLabel, TZ } from "@mydon/shared";
 import { collectGloberentSignals, formatBriefing, msUntilBriefing } from "./briefing";
 import { buildDigest, digestKey } from "./staff-digest";
 import { CoreClient, type PersonRow } from "./core-client";
@@ -17,6 +17,7 @@ import { Notifier } from "./notifier";
 import { parseAllowlist, RateLimiter, isAllowed } from "./security/access";
 import { Conversations } from "./conversation";
 import { handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
+import { helpText, menuKeyboard } from "./menu";
 import { handleRegisterPhoto } from "./staff-register";
 import { attachBeforePhoto, handleTaskDonePhoto } from "./task-done";
 import { handleAfterPhoto } from "./field-work";
@@ -122,9 +123,37 @@ async function main(): Promise<void> {
   }
 
   /**
-   * Сообщение не от владельца. Незнакомого пробуем привязать: он мог нажать
-   * «Старт», а владелец заранее вписал его @username в карточку сотрудника.
-   * Так связь устанавливается сама, без ручного ввода chat_id.
+   * Ограничитель попыток погасить приглашение.
+   *
+   * Код — 10 символов из 27, перебор не окупается по времени, но без
+   * ограничителя ничто не мешает пробовать со скоростью сети. Пять попыток
+   * в час на чат делают перебор бессмысленным окончательно.
+   */
+  const inviteTries = new Map<number, { n: number; at: number }>();
+  const INVITE_WINDOW_MS = 60 * 60_000;
+  const INVITE_MAX = 5;
+
+  function inviteAllowed(chatId: number): boolean {
+    const now = Date.now();
+    const cur = inviteTries.get(chatId);
+    if (!cur || now - cur.at > INVITE_WINDOW_MS) {
+      inviteTries.set(chatId, { n: 1, at: now });
+      return true;
+    }
+    cur.n += 1;
+    return cur.n <= INVITE_MAX;
+  }
+  setInterval(() => {
+    const cutoff = Date.now() - INVITE_WINDOW_MS;
+    for (const [k, v] of inviteTries) if (v.at < cutoff) inviteTries.delete(k);
+  }, 10 * 60_000).unref();
+
+  /**
+   * Сообщение не от владельца.
+   *
+   * Сначала пробуем приглашение: `/start inv_XXXX` — штатный путь подключения.
+   * Привязка по @username осталась аварийной и выключается тумблером
+   * STAFF_LINK_BY_USERNAME=0: освободившийся ник давал доступ к чужой карточке.
    */
   async function routeStaffMessage(
     chatId: number,
@@ -132,6 +161,30 @@ async function main(): Promise<void> {
     username: string | undefined,
   ): Promise<void> {
     try {
+      const code = parseStartPayload(text);
+      if (code !== null) {
+        if (!inviteAllowed(chatId)) {
+          await tg.sendMessage(chatId, "Слишком много попыток. Попробуй через час.");
+          return;
+        }
+        const res = await deps.core.redeemInvite(code, String(chatId));
+        if ("error" in res) {
+          await tg.sendMessage(chatId, "Ссылка не сработала: она одноразовая и живёт сутки. Попроси новую.");
+          return;
+        }
+        await tg.sendMessage(
+          chatId,
+          `Привет, ${res.name}! Ты подключён.\n${rolesLabel(res.roles)}.\n\n${helpText(res.roles)}`,
+          menuKeyboard(res.roles),
+        );
+        for (const ownerChat of allowlist) {
+          await tg
+            .sendMessage(ownerChat, `✅ ${res.name} подключился к боту (${rolesLabel(res.roles)}).`)
+            .catch(() => undefined);
+        }
+        return;
+      }
+
       let person = await personOf(chatId);
 
       if (person === null) {

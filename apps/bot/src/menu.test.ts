@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { can } from "@mydon/shared";
 import {
   helpText,
   matchMenuLabel,
@@ -10,6 +11,14 @@ import {
   parseMenuCallback,
   STAFF_MENU,
 } from "./menu";
+
+/**
+ * Оба действующих полевых сотрудника делают всю работу, поэтому в тестах
+ * меню роли берутся полные. Урезанный доступ проверяется отдельно ниже:
+ * в бою его сейчас не воспроизвести.
+ */
+const ALL: string[] = ["operator", "technician", "collector", "storekeeper"];
+const matchTrigger2 = (text: string, roles: readonly string[] = ALL) => matchTrigger(text, roles);
 
 describe("Реестр меню сотрудника", () => {
   it("подписи уникальны — иначе точное совпадение неоднозначно", () => {
@@ -55,16 +64,16 @@ describe("Совпадение по подписи кнопки", () => {
 
 describe("Совпадение по слову", () => {
   it("ловит привычные формулировки", () => {
-    assert.equal(matchTrigger("задачи")?.id, "tasks");
-    assert.equal(matchTrigger("что делать")?.id, "tasks");
-    assert.equal(matchTrigger("инкассация")?.id, "coll");
-    assert.equal(matchTrigger("залил кофе")?.id, "refill");
-    assert.equal(matchTrigger("помыл")?.id, "wash", "«помыл» техник говорит про бункер");
-    assert.equal(matchTrigger("чистка")?.id, "clean");
-    assert.equal(matchTrigger("замена купюроприёмника")?.id, "part");
-    assert.equal(matchTrigger("техосмотр")?.id, "insp");
-    assert.equal(matchTrigger("поломка")?.id, "issue");
-    assert.equal(matchTrigger("приход")?.id, "intake");
+    assert.equal(matchTrigger2("задачи")?.id, "tasks");
+    assert.equal(matchTrigger2("что делать")?.id, "tasks");
+    assert.equal(matchTrigger2("инкассация")?.id, "coll");
+    assert.equal(matchTrigger2("залил кофе")?.id, "refill");
+    assert.equal(matchTrigger2("помыл")?.id, "wash", "«помыл» техник говорит про бункер");
+    assert.equal(matchTrigger2("чистка")?.id, "clean");
+    assert.equal(matchTrigger2("замена купюроприёмника")?.id, "part");
+    assert.equal(matchTrigger2("техосмотр")?.id, "insp");
+    assert.equal(matchTrigger2("поломка")?.id, "issue");
+    assert.equal(matchTrigger2("приход")?.id, "intake");
   });
 
   it("по словам ловятся только готовые потоки", () => {
@@ -72,18 +81,18 @@ describe("Совпадение по слову", () => {
     // пустоту. Сейчас готовы все пункты, поэтому проверяем сам механизм.
     for (const item of STAFF_MENU) {
       if (item.ready) continue;
-      assert.equal(matchTrigger(item.label), null, `${item.id} не готов, но ловится словом`);
+      assert.equal(matchTrigger2(item.label), null, `${item.id} не готов, но ловится словом`);
     }
-    assert.equal(matchTrigger("графики")?.id, "sched");
+    assert.equal(matchTrigger2("графики")?.id, "sched");
   });
 
   it("мойка бункера и чистка автомата не перехватывают друг друга", () => {
     // Это разные объекты учёта: точка с бункерами 1..8 против автомата с
     // узлами. Перепутав их, техник запишет работу не туда.
-    assert.equal(matchTrigger("помыл бункер")?.id, "wash");
-    assert.equal(matchTrigger("почистил бункер")?.id, "wash");
-    assert.equal(matchTrigger("чистка автомата")?.id, "clean");
-    assert.equal(matchTrigger("санобработка")?.id, "clean");
+    assert.equal(matchTrigger2("помыл бункер")?.id, "wash");
+    assert.equal(matchTrigger2("почистил бункер")?.id, "wash");
+    assert.equal(matchTrigger2("чистка автомата")?.id, "clean");
+    assert.equal(matchTrigger2("санобработка")?.id, "clean");
   });
 
   it("«точка» не считается словом раздела графиков", () => {
@@ -103,22 +112,22 @@ describe("Совпадение по слову", () => {
 
 describe("Клавиатура меню", () => {
   it("по две кнопки в ряд", () => {
-    const kb = menuKeyboard();
+    const kb = menuKeyboard(ALL);
     for (const row of kb.keyboard) {
       assert.ok(row.length >= 1 && row.length <= 2, "три кнопки в ряд режут подписи на телефоне");
     }
-    assert.equal(kb.keyboard.flat().length, menuFor().length);
+    assert.equal(kb.keyboard.flat().length, menuFor(ALL).length);
   });
 
   it("постоянная и подстраивается по высоте", () => {
-    const kb = menuKeyboard();
+    const kb = menuKeyboard(ALL);
     assert.equal(kb.is_persistent, true);
     assert.equal(kb.resize_keyboard, true);
   });
 
   it("в клавиатуру попадают ровно готовые пункты", () => {
-    const shown = menuKeyboard().keyboard.flat().map((b) => b.text);
-    const expected = STAFF_MENU.filter((i) => i.ready).map((i) => i.label);
+    const shown = menuKeyboard(ALL).keyboard.flat().map((b) => b.text);
+    const expected = STAFF_MENU.filter((i) => i.ready && can(ALL, i.perm)).map((i) => i.label);
     assert.deepEqual(shown, expected);
     for (const item of STAFF_MENU) {
       if (!item.ready) assert.ok(!shown.includes(item.label), `${item.id} не готов, но показан`);
@@ -126,7 +135,7 @@ describe("Клавиатура меню", () => {
   });
 
   it("у каждого показанного пункта есть обработчик — проверяем через id", () => {
-    for (const item of menuFor()) {
+    for (const item of menuFor(ALL)) {
       assert.ok(menuItemById(item.id), `${item.id} не находится по id`);
     }
   });
@@ -144,12 +153,37 @@ describe("Разбор inline-дубля меню", () => {
 
 describe("Справка", () => {
   it("строится из реестра и не расходится с кнопками", () => {
-    const text = helpText();
-    for (const item of menuFor()) {
+    const text = helpText(ALL);
+    for (const item of menuFor(ALL)) {
       assert.ok(text.includes(item.label), `${item.label} потерялся в справке`);
     }
+    // Спрятанный правами пункт не должен всплыть в справке: иначе человек
+    // прочтёт про кнопку, которой у него нет.
+    assert.ok(!helpText(["collector"]).includes("🔧 Замена детали"));
     for (const item of STAFF_MENU) {
       if (!item.ready) assert.ok(!text.includes(item.label), "неготовое обещать нельзя");
     }
+  });
+});
+
+describe("Урезанный доступ", () => {
+  it("инкассатор не видит замену детали ни кнопкой, ни словом", () => {
+    // В бою сейчас не воспроизвести: у обоих сотрудников полный набор ролей.
+    // Проверяется тестом, чтобы третий человек добавлялся строкой в матрице,
+    // а не переделкой меню.
+    const labels = menuKeyboard(["collector"]).keyboard.flat().map((b) => b.text);
+    assert.ok(!labels.includes("🔧 Замена детали"));
+    assert.ok(labels.includes("📥 Инкассация"));
+    assert.equal(matchTrigger("замена купюроприёмника", ["collector"]), null);
+    assert.equal(matchTrigger("инкассация", ["collector"])?.id, "coll");
+  });
+
+  it("пустые роли оставляют базовое, но убирают остальное", () => {
+    // Карточка заведена, роли проставить не успели — бот обязан работать.
+    // В базовое входит и «Поломка»: увидевший сломанный автомат должен уметь
+    // сказать об этом, какие бы роли ему ни забыли проставить.
+    const labels = menuKeyboard([]).keyboard.flat().map((b) => b.text);
+    assert.deepEqual(labels, ["📋 Мои задачи", "⚠️ Поломка", "↩️ Ошибся — исправить"]);
+    assert.ok(!labels.includes("📥 Инкассация"), "деньги базовым правом не даются");
   });
 });
