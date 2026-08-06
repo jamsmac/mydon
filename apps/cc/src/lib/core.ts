@@ -784,6 +784,8 @@ export interface Task {
   source: string | null;
   createdBy: string | null;
   resultNote: string | null;
+  /** По какому объекту работа: автомат, точка, склад. */
+  entityId: string | null;
   /** Оценка владельца после «сделано»: excellent / accepted / redo. */
   quality: "excellent" | "accepted" | "redo" | null;
   completedAt: string | null;
@@ -803,6 +805,8 @@ export interface Person {
   id: string;
   name: string;
   role: string | null;
+  /** Роли доступа: по ним фильтруется меню бота и проверяются мутации. */
+  roles?: string[];
   /** Направление, куда нанят. */
   domain: string | null;
   email: string | null;
@@ -1456,6 +1460,8 @@ export interface Attachment {
   ownerType: string;
   ownerId: string;
   kind: string;
+  /** В какой момент снято: before | after | plate | counter. */
+  stage: string | null;
   mime: string | null;
   bytes: number | null;
   /**
@@ -1496,6 +1502,69 @@ export async function coreText(path: string): Promise<string> {
   return res.text();
 }
 
+/** Строка сводки сроков. Статус посчитан в Core на чтении. */
+export interface MaintenanceDue {
+  planId: string;
+  targetId: string;
+  targetName: string;
+  kind: string;
+  kindLabel: string;
+  partKind: string | null;
+  partLabel: string | null;
+  title: string | null;
+  nextDueOn: string | null;
+  lastDoneOn: string | null;
+  taskLeadDays: number;
+  daysLeft: number | null;
+  countLeft: number | null;
+  status: "ok" | "soon" | "due" | "overdue" | "unknown";
+  assigneeId: string | null;
+  autoTask: boolean;
+}
+
+export interface MaintenancePlan {
+  id: string;
+  entityId: string;
+  kind: string;
+  partKind: string | null;
+  title: string | null;
+  everyDays: number | null;
+  everyMonths: number | null;
+  everyCount: number | null;
+  dueOn: string | null;
+  taskLeadDays: number;
+  autoTask: boolean;
+  assigneeId: string | null;
+  isActive: boolean;
+}
+
+export interface MaintenanceLogRow {
+  id: string;
+  entityId: string;
+  kind: string;
+  partKind: string | null;
+  personId: string | null;
+  performedOn: string;
+  outcome: "done" | "partial" | "failed" | null;
+  note: string | null;
+  counterValue: number | null;
+  createdAt: string;
+}
+
+/** Узел автомата периодом: removedOn = null — стоит сейчас. */
+export interface MachinePart {
+  id: string;
+  machineId: string;
+  partKind: string;
+  slot: number | null;
+  serialNumber: string | null;
+  model: string | null;
+  installedOn: string;
+  removedOn: string | null;
+  warrantyUntil: string | null;
+  reason: string | null;
+}
+
 export const core = {
   briefing: () => get<Briefing>("/registry/briefing"),
   agents: () => get<AgentCard[]>("/agents"),
@@ -1518,10 +1587,32 @@ export const core = {
   addTaskComment: (id: string, input: Record<string, unknown>) =>
     send<TaskComment>(`/tasks/${id}/comments`, "POST", input),
 
+  // ── Обслуживание оборудования ──
+  //
+  // Статус «пора / просрочено» приходит посчитанным на чтении: он зависит от
+  // текущей даты и нигде не хранится, поэтому панель его не вычисляет заново.
+  maintenanceDue: () => get<MaintenanceDue[]>("/maintenance/due"),
+  maintenancePlans: (entityId?: string) =>
+    get<MaintenancePlan[]>(`/maintenance/plans${entityId ? `?entityId=${entityId}` : ""}`),
+  maintenanceLog: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return get<MaintenanceLogRow[]>(`/maintenance/log${qs ? `?${qs}` : ""}`);
+  },
+  machineParts: (machineId: string) => get<MachinePart[]>(`/maintenance/parts?machineId=${machineId}`),
+  upsertMaintenancePlan: (input: Record<string, unknown>) =>
+    send<MaintenancePlan>("/maintenance/plans", "POST", input),
+
   // ── Сотрудники ──
   people: (all = false) => get<Person[]>(`/people${all ? "?all=1" : ""}`),
   person: (id: string) => get<Person>(`/people/${id}`),
   createPerson: (input: Record<string, unknown>) => send<Person>("/people", "POST", input),
+  /** Выпустить приглашение. Код возвращается ОДИН раз — в БД только хеш. */
+  invitePerson: (id: string, roles: string[]) =>
+    send<{ code: string; expiresAt: string; name: string }>(`/people/${id}/invite`, "POST", { roles }),
+  /** Отозвать доступ: снять привязку и роли, погасить живые приглашения. */
+  revokePerson: (id: string) => send<Person>(`/people/${id}/revoke`, "POST", {}),
+  setPersonRoles: (id: string, roles: string[]) =>
+    send<Person>(`/people/${id}/roles`, "POST", { roles }),
   updatePerson: (id: string, input: Record<string, unknown>) =>
     send<Person>(`/people/${id}`, "PATCH", input),
   agent: (name: string) => get<AgentCard>(`/agents/${encodeURIComponent(name)}`),

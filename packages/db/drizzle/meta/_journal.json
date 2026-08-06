@@ -281,6 +281,34 @@
       "when": 1785838597595,
       "tag": "0039_freezing_ricochet",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1786004738793,
+      "tag": "0040_task_entity_photo_stage",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1786005829969,
+      "tag": "0041_maintenance_log",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1786007079275,
+      "tag": "0042_maintenance_plan",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1786008519646,
+      "tag": "0043_staff_roles",
+      "breakpoints": true
     }
   ]
 }

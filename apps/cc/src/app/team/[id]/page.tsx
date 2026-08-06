@@ -2,6 +2,7 @@ import Link from "next/link";
 import { core, CoreUnavailable, type Person, type Task } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { PersonEditor } from "../../../components/person-editor";
+import { PersonAccess } from "../../../components/person-access";
 import { dueLabel } from "@mydon/shared";
 
 const DOMAIN_TITLES: Record<string, string> = {
@@ -49,6 +50,11 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
           {person.domain ? ` · ${DOMAIN_TITLES[person.domain] ?? person.domain}` : ""}
         </p>
       </div>
+
+      {/* Доступ выше карточки: подключён человек или нет — первое, что нужно
+          знать о сотруднике, потому что от этого зависит, дойдут ли до него
+          задачи вообще. */}
+      <PersonAccess id={person.id} linked={Boolean(person.tgChatId)} roles={person.roles ?? []} />
 
       <PersonEditor person={person} />
 

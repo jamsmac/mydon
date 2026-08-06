@@ -98,7 +98,10 @@ describe("Заливка бункера: полный визард (точка �
 
     const start = await startCoffeeRefill(1, deps);
     assert.match(start.text, /Какая точка/);
-    assert.equal(start.keyboard!.inline_keyboard.length, 1);
+    // Одна точка + ряд отмены: выйти из мастера должно быть можно кнопкой,
+    // а не только словом «отмена», о котором надо откуда-то знать.
+    assert.equal(start.keyboard!.inline_keyboard.length, 2);
+    assert.equal(start.keyboard!.inline_keyboard[1][0].callback_data, "cf:cancel");
 
     const locCb = parseCoffeeRefillCallback(`cf:loc:${LOC}`)!;
     const afterLoc = await handleCoffeeRefillCallback(1, locCb, ME, deps);

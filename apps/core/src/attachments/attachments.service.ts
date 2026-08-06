@@ -20,11 +20,23 @@ export interface AttachmentMeta {
   ownerType: string;
   ownerId: string;
   kind: string;
+  /** В какой момент снято: before | after | plate | counter. */
+  stage: string | null;
   mime: string | null;
   bytes: number | null;
   url: string;
   createdAt: string;
 }
+
+/**
+ * Стадии съёмки. Закрытый список, а не свободный текст: по стадии строится
+ * галерея «до/после» в панели, и опечатка в ней означает потерянное фото.
+ *   before  — до работы, after — после (доказательство выполнения);
+ *   plate   — шильдик узла, когда серийный номер не переписать руками;
+ *   counter — показания счётчика автомата.
+ */
+export const ATTACHMENT_STAGES = ["before", "after", "plate", "counter"] as const;
+export type AttachmentStage = (typeof ATTACHMENT_STAGES)[number];
 
 /** Разрешённые типы фото — чтобы не превращать хранилище в свалку. */
 const IMAGE_EXT: Record<string, string> = {
@@ -44,7 +56,13 @@ export class AttachmentsService {
 
   /** Загрузить файл, привязать к записи. Фото проверяем на тип изображения. */
   async upload(
-    input: { ownerType: string; ownerId: string; kind?: string; createdBy?: string },
+    input: {
+      ownerType: string;
+      ownerId: string;
+      kind?: string;
+      createdBy?: string;
+      stage?: AttachmentStage;
+    },
     file: UploadedFile | undefined,
   ): Promise<AttachmentMeta> {
     if (!file || file.size === 0) throw new BadRequestException("Файл не получен");
@@ -66,6 +84,7 @@ export class AttachmentsService {
         mime: file.mimetype,
         bytes: file.size,
         createdBy: input.createdBy ?? "owner",
+        stage: input.stage ?? null,
       })
       .returning();
     return this.toMeta(row);
@@ -130,6 +149,7 @@ export class AttachmentsService {
       ownerType: row.ownerType,
       ownerId: row.ownerId,
       kind: row.kind,
+      stage: row.stage,
       mime: row.mime,
       bytes: row.bytes,
       url: await this.storage.url(row.id, row.storageKey),

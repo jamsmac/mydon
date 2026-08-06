@@ -143,6 +143,14 @@ export const person = pgTable("person", {
   orgId: uuid("org_id").references(() => org.id),
   name: text("name").notNull(),
   role: text("role"),
+    /**
+     * Роли сотрудника. Массив, а не одно значение: двое в поле делают всю
+     * работу, и «оператор ИЛИ техник» описало бы их неверно.
+     *
+     * Старая колонка `role` (свободный текст) остаётся: она нигде не читалась
+     * ботом и служит подсказкой владельцу при расстановке ролей.
+     */
+    roles: text("roles").array().default(sql`'{}'::text[]`).notNull(),
   /** Направление, куда нанят: сотрудник живёт внутри GLOBERENT/VendHub, а не отдельно. */
   domain: domainEnum("domain"),
   email: text("email"),
@@ -166,8 +174,21 @@ export const task = pgTable(
     /** Подробности: что именно сделать. Заголовка часто мало. */
     description: text("description"),
     ownerKind: ownerKindEnum("owner_kind").notNull(),
-    ownerRef: text("owner_ref"), // person.id или имя агента
+    /**
+     * person.id или имя агента. NULL при ownerKind='human' означает
+     * «свободная задача»: её видят все и разбирают из общего пула.
+     * Закрепления сотрудников за объектами нет — все работают по всему парку.
+     */
+    ownerRef: text("owner_ref"),
     domain: domainEnum("domain"),
+    /**
+     * По какому объекту работа: автомат, точка, склад — запись реестра.
+     *
+     * Без этого поля задачи нельзя сгруппировать по объекту, а техник ездит
+     * по точкам, а не по видам работ: «три дела на Kaffit-04» — это один
+     * заезд, а тот же список вперемешку — три.
+     */
+    entityId: uuid("entity_id").references(() => entity.id),
     status: taskStatusEnum("status").default("todo").notNull(),
     /** Срочность — чтобы список сортировался по важности, а не по алфавиту. */
     priority: taskPriorityEnum("priority").default("normal").notNull(),
@@ -187,7 +208,25 @@ export const task = pgTable(
     createdAt: createdAt(),
   },
   // Главные запросы: «что у этого исполнителя» и «что горит по срокам».
-  (t) => [index("task_owner_idx").on(t.ownerKind, t.ownerRef), index("task_due_idx").on(t.due)],
+  (t) => [
+    index("task_owner_idx").on(t.ownerKind, t.ownerRef),
+    index("task_due_idx").on(t.due),
+    index("task_entity_idx").on(t.entityId),
+    /**
+     * Идемпотентность повторяющихся задач.
+     *
+     * `ensureForDay` строит source как `<ключ>:<YYYY-MM-DD>` и раньше делал
+     * select-then-insert: два тика монитора в одну секунду создавали две
+     * задачи на один день. Ставку делает БД.
+     *
+     * Индекс ЧАСТИЧНЫЙ — только по источникам с датой на конце. Обычные
+     * source ("ourvend", "sales-sync", "owner", "agent:<имя>") повторяются
+     * у сотен задач на законных основаниях, и глобальный unique их сломал бы.
+     */
+    uniqueIndex("task_source_key")
+      .on(t.source)
+      .where(sql`source ~ ':[0-9]{4}-[0-9]{2}-[0-9]{2}$'`),
+  ],
 );
 
 // ── collection: инкассация автоматов (перенос VendCash внутрь MYDON) ──
@@ -597,6 +636,16 @@ export const attachment = pgTable(
     ownerId: uuid("owner_id").notNull(),
     /** Что это: photo | receipt | doc. */
     kind: text("kind").default("photo").notNull(),
+    /**
+     * Стадия съёмки: before | after | plate | counter. NULL — вне контекста
+     * работы (фото карточки в реестре).
+     *
+     * Без неё две фотографии задачи неразличимы, и «до/после» существует
+     * только в голове того, кто их прислал. Отдельная колонка, а не префикс
+     * в `kind`: `kind` отвечает на «что это за файл», стадия — на «в какой
+     * момент снят», и смешивать их значит терять одно из двух.
+     */
+    stage: text("stage"),
     /** Ключ в хранилище (S3-ключ или относительный путь на диске). */
     storageKey: text("storage_key").notNull(),
     mime: text("mime"),
@@ -1672,6 +1721,302 @@ export const coffeeStock = pgTable("coffee_stock", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ── Обслуживание оборудования: журнал работ и узлы автоматов ────────────────
+//
+// Три вещи, которые нельзя смешивать: НОРМАТИВ (как часто положено),
+// ФАКТ (что и когда сделали) и СОСТОЯНИЕ (какой узел сейчас стоит).
+// Здесь факт и состояние; норматив — `maintenance_plan` (следующий шаг).
+//
+// Статус «пора / просрочено» НЕ хранится нигде: он зависит от now() и
+// считается на чтении. Хранимый статус — это поле, которое обязательно
+// разъедется с реальностью в тот день, когда крон не отработает.
+//
+// Кофейная мойка (`coffee_wash_log` + `coffee_wash_schedule`) сюда НЕ
+// переносится. У неё ключ «точка + позиция бункера 1..8», а здесь «автомат +
+// узел»; копия фактов в двух журналах дала бы двойной счёт и разные ответы
+// на вопрос «когда мыли».
+
+/** Вид работы. Значения английские, подписи — в @mydon/shared. */
+export const maintenanceKindEnum = pgEnum("maintenance_kind", [
+  "cleaning", // чистка
+  "sanitation", // санобработка
+  "service", // плановое ТО
+  "part_replace", // замена узла
+  "inspection", // технический осмотр
+  "calibration", // поверка, калибровка
+  "repair", // ремонт по факту поломки
+  "other",
+]);
+
+/**
+ * Узлы автомата. Список заполнен с запасом намеренно: парк подтягивается из
+ * внешних систем постепенно, и добавить значение сейчас бесплатно, а
+ * `ALTER TYPE` на живой базе — нет.
+ */
+export const partKindEnum = pgEnum("part_kind", [
+  "bill_acceptor", // купюроприёмник
+  "coin_acceptor", // монетоприёмник
+  "brewer", // варочная группа
+  "grinder", // кофемолка
+  "mixer", // миксер
+  "hopper", // бункер
+  "water_filter", // фильтр воды
+  "pump", // помпа
+  "boiler", // бойлер
+  "cooling_unit", // холодильный блок
+  "compressor", // компрессор
+  "payment_terminal", // платёжный терминал
+  "display", // дисплей
+  "mainboard", // плата управления
+  "motor", // мотор
+  "valve", // клапан
+  "sensor", // датчик
+  "lock", // замок, механизм двери
+  "spiral", // спираль выдачи (снек)
+  "elevator", // лифт выдачи
+  "other",
+]);
+
+/**
+ * Чем кончилась работа. NULL — работа начата и не закрыта: такие строки
+ * старше суток отдельно видны владельцу, иначе «начал и забыл» выглядит
+ * как «не приходил».
+ */
+export const maintenanceOutcomeEnum = pgEnum("maintenance_outcome", [
+  "done", // сделано
+  "partial", // сделано частично
+  "failed", // не смог
+]);
+
+/** Почему меняли узел — без этого нельзя отличить износ от поломки. */
+export const partSwapReasonEnum = pgEnum("part_swap_reason", [
+  "failure", // отказ
+  "preventive", // профилактика по сроку
+  "upgrade", // замена на лучшее
+  "warranty", // гарантийная замена
+  "moved", // переставили на другой автомат
+]);
+
+/**
+ * Факт работы: кто, когда, что и с каким результатом.
+ *
+ * Дата отдельно от отметки времени: `performed_on` — календарный день по
+ * Ташкенту, по нему считаются сроки и строятся сводки. Вычислять день из
+ * `performed_at` в запросе значит каждый раз помнить про часовой пояс —
+ * и однажды забыть.
+ */
+export const maintenanceLog = pgTable(
+  "maintenance_log",
+  {
+    id: id(),
+    /** Объект: автомат или точка — запись реестра. */
+    entityId: uuid("entity_id")
+      .references(() => entity.id)
+      .notNull(),
+    kind: maintenanceKindEnum("kind").notNull(),
+    /** Какой узел трогали. NULL для работ по автомату целиком. */
+    partKind: partKindEnum("part_kind"),
+    /** Кто делал. NULL у записей, внесённых владельцем задним числом. */
+    personId: uuid("person_id").references(() => person.id),
+    /** Задача, в рамках которой сделано, если была. */
+    taskId: uuid("task_id").references(() => task.id),
+    /**
+     * Норматив, по которому работа сделана. Без него закрытие работы не знает,
+     * какой якорь двигать, и график остаётся стоять там же, где был.
+     */
+    // Ссылка ленивая (() => …): maintenance_plan объявлена ниже по файлу,
+    // потому что журнал появился раньше нормативов.
+    planId: uuid("plan_id").references(() => maintenancePlan.id),
+    /** Календарный день по Ташкенту. */
+    performedOn: date("performed_on").notNull(),
+    performedAt: timestamp("performed_at", { withTimezone: true }).defaultNow().notNull(),
+    /** NULL — работа начата и не закрыта. */
+    outcome: maintenanceOutcomeEnum("outcome"),
+    note: text("note"),
+    /** Показания счётчика автомата на момент работы, если снимались. */
+    counterValue: integer("counter_value"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("maintenance_log_entity_idx").on(t.entityId, t.performedOn),
+    index("maintenance_log_person_idx").on(t.personId, t.performedOn),
+    // Под вопрос «когда в последний раз делали это на этом объекте» —
+    // основной запрос расчёта сроков. Только закрытые: начатая и брошенная
+    // работа сроки не сдвигает.
+    index("maintenance_log_done_idx")
+      .on(t.entityId, t.kind, t.partKind, t.performedOn)
+      .where(sql`outcome is not null`),
+    // Под «когда в последний раз делали по этому нормативу» — запрос,
+    // с которого начинается каждый расчёт срока.
+    index("maintenance_log_plan_done_idx")
+      .on(t.planId, t.performedOn)
+      .where(sql`outcome is not null`),
+    check("maintenance_log_counter_nonneg", sql`${t.counterValue} is null or ${t.counterValue} >= 0`),
+  ],
+);
+
+/**
+ * Экземпляр узла на автомате — периодами, как `coffee_machine_placement`.
+ *
+ * Не «текущий узел» одной строкой: вопрос «что стояло в марте, когда пошли
+ * жалобы» — рабочий, и ответить на него должен не нынешний узел. Замена
+ * закрывает старый период и открывает новый одной транзакцией.
+ */
+export const machinePart = pgTable(
+  "machine_part",
+  {
+    id: id(),
+    machineId: uuid("machine_id")
+      .references(() => entity.id)
+      .notNull(),
+    partKind: partKindEnum("part_kind").notNull(),
+    /** Позиция, если узлов одного вида несколько (бункер 1..8). */
+    slot: integer("slot"),
+    /** Серийный номер. NULL — не переписали; фото шильдика лежит во вложениях. */
+    serialNumber: text("serial_number"),
+    model: text("model"),
+    installedOn: date("installed_on").notNull(),
+    /** NULL — узел стоит сейчас. */
+    removedOn: date("removed_on"),
+    /** Записи журнала, которыми узел поставлен и снят. */
+    installLogId: uuid("install_log_id").references(() => maintenanceLog.id),
+    removeLogId: uuid("remove_log_id").references(() => maintenanceLog.id),
+    warrantyUntil: date("warranty_until"),
+    reason: partSwapReasonEnum("reason"),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("machine_part_machine_idx").on(t.machineId, t.partKind),
+    // Одно место — один открытый узел. coalesce обязателен: постгрес считает
+    // NULL ≠ NULL, и без него на автомате завелись бы два «текущих»
+    // купюроприёмника без слота, оба открытые.
+    uniqueIndex("machine_part_open_key")
+      .on(t.machineId, t.partKind, sql`coalesce(${t.slot}, 0)`)
+      .where(sql`removed_on is null`),
+    check("machine_part_slot_positive", sql`${t.slot} is null or ${t.slot} > 0`),
+    check(
+      "machine_part_dates",
+      sql`${t.removedOn} is null or ${t.removedOn} >= ${t.installedOn}`,
+    ),
+  ],
+);
+
+/**
+ * Одноразовое приглашение сотрудника в бота.
+ *
+ * Заменяет привязку по @username. Ник в Telegram освобождается после смены,
+ * и любой, кто его займёт, получал доступ к карточке сотрудника со всеми его
+ * задачами — приглашение закрывает это тем, что секрет знает только тот,
+ * кому его дали лично.
+ *
+ * Хранится ХЕШ кода, а не код: утечка дампа не должна давать работающих
+ * приглашений.
+ */
+export const staffInvite = pgTable(
+  "staff_invite",
+  {
+    id: id(),
+    personId: uuid("person_id")
+      .references(() => person.id, { onDelete: "cascade" })
+      .notNull(),
+    /** sha256(перец + код). Перец живёт в окружении, в БД его нет. */
+    codeHash: text("code_hash").notNull(),
+    /** Роли, которые получит сотрудник при подключении. */
+    roles: text("roles").array().default(sql`'{}'::text[]`).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    /** chat_id, которым приглашение погашено, — для разбора инцидентов. */
+    usedByChatId: text("used_by_chat_id"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Один код — одно приглашение. Только среди живых: погашенные хеши
+    // повторно не встретятся, но и блокировать их незачем.
+    uniqueIndex("ux_staff_invite_code")
+      .on(t.codeHash)
+      .where(sql`used_at is null and revoked_at is null`),
+    // Одно живое приглашение на человека: выпуск нового гасит прежнее, иначе
+    // по чату гуляли бы две рабочие ссылки и владелец не знал бы, какая.
+    uniqueIndex("ux_staff_invite_one_active")
+      .on(t.personId)
+      .where(sql`used_at is null and revoked_at is null`),
+    index("staff_invite_person_idx").on(t.personId),
+  ],
+);
+
+/**
+ * Норматив: как часто работу положено делать.
+ *
+ * Третья из трёх вещей, которые нельзя смешивать (норматив — факт —
+ * состояние). Статус «пора / просрочено» здесь НЕ хранится: он зависит от
+ * текущей даты и считается на чтении из `due_on`.
+ *
+ * `due_on` — это ЯКОРЬ, плановая дата следующей работы, а не «когда сделали
+ * плюс период». Разница принципиальна: мойка раз в 30 дней со сроком 1 марта,
+ * сделанная 5-го, должна ждать 31 марта, а не 4 апреля. Считая от факта,
+ * «ежемесячная» работа за год делается десять раз вместо двенадцати —
+ * и никто этого не замечает, потому что каждый отдельный раз выглядит верно.
+ */
+export const maintenancePlan = pgTable(
+  "maintenance_plan",
+  {
+    id: id(),
+    entityId: uuid("entity_id")
+      .references(() => entity.id)
+      .notNull(),
+    kind: maintenanceKindEnum("kind").notNull(),
+    /** Узел, если норматив про конкретный узел. NULL — про автомат целиком. */
+    partKind: partKindEnum("part_kind"),
+    /** Своё название, если «Плановое ТО» недостаточно точно. */
+    title: text("title"),
+    /** Периодичность: дни, месяцы или счётчик. Хотя бы одно — иначе unknown. */
+    everyDays: integer("every_days"),
+    everyMonths: integer("every_months"),
+    everyCount: integer("every_count"),
+    /** Что считаем: «чашек», «продаж», «литров». */
+    counterLabel: text("counter_label"),
+    /** Плановая дата следующей работы. NULL — норматив есть, срок не назначен. */
+    dueOn: date("due_on"),
+    /** За сколько дней до срока ставить задачу. */
+    taskLeadDays: integer("task_lead_days").default(3).notNull(),
+    /** Ставить ли задачу автоматически. */
+    autoTask: boolean("auto_task").default(true).notNull(),
+    /**
+     * Именной график: работу делает только этот человек. По умолчанию пусто —
+     * задача уходит в общий пул, потому что закрепления за объектами нет.
+     */
+    assigneeId: uuid("assignee_id").references(() => person.id),
+    isActive: boolean("is_active").default(true).notNull(),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // Основной запрос монитора: что подходит к сроку. Только активные —
+    // выключенный норматив не должен занимать место в индексе.
+    index("maintenance_plan_due_idx").on(t.dueOn).where(sql`is_active`),
+    index("maintenance_plan_entity_idx").on(t.entityId),
+    // Один норматив на «объект + вид работ + узел». Дубль означал бы две
+    // разные даты для одной обязанности и вечный спор, какая правильная.
+    // coalesce по той же причине, что в machine_part: NULL ≠ NULL.
+    uniqueIndex("maintenance_plan_key")
+      .on(t.entityId, t.kind, sql`coalesce(${t.partKind}::text, '')`)
+      .where(sql`is_active`),
+    check(
+      "maintenance_plan_period_set",
+      sql`${t.everyDays} is not null or ${t.everyMonths} is not null or ${t.everyCount} is not null`,
+    ),
+    check("maintenance_plan_lead_nonneg", sql`${t.taskLeadDays} >= 0`),
+  ],
+);
+
 /**
  * Полная схема — для drizzle-клиента.
  *
@@ -1753,5 +2098,11 @@ export const schema = {
   coffeeProduct,
   coffeeSale,
   coffeeStock,
+  // Обслуживание: журнал работ и узлы автоматов.
+  maintenanceLog,
+  machinePart,
+  maintenancePlan,
+  // Доступ сотрудников: приглашения.
+  staffInvite,
   coffeeMachinePlacement,
 };

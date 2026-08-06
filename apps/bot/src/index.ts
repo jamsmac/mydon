@@ -8,16 +8,26 @@ import {
   type LlmResolver,
 } from "@mydon/assistant";
 import { createDocumentBuilder } from "@mydon/documents";
-import { dueLabel, TZ } from "@mydon/shared";
+import { dueLabel, parseStartPayload, rolesLabel, TZ } from "@mydon/shared";
 import { collectGloberentSignals, formatBriefing, msUntilBriefing } from "./briefing";
+import { buildDigest, digestKey } from "./staff-digest";
 import { CoreClient, type PersonRow } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { Notifier } from "./notifier";
 import { parseAllowlist, RateLimiter, isAllowed } from "./security/access";
 import { Conversations } from "./conversation";
-import { AwaitingReport, handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
+import { handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
+import { helpText, menuKeyboard } from "./menu";
 import { handleRegisterPhoto } from "./staff-register";
-import { InvalidTokenError, TelegramApi, type TgUpdate } from "./telegram";
+import { attachBeforePhoto, handleTaskDonePhoto } from "./task-done";
+import {
+  handleStaffAddCallback,
+  isStaffAddTrigger,
+  parseStaffAddCallback,
+  startStaffAdd,
+} from "./staff-add";
+import { handleAfterPhoto } from "./field-work";
+import { InvalidTokenError, TelegramApi, TelegramError, type TgUpdate } from "./telegram";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
@@ -101,13 +111,20 @@ async function main(): Promise<void> {
   }
 
   const tg = new TelegramApi(token);
+  // Имя бота нужно для ссылок-приглашений. Спрашиваем один раз у самого
+  // Telegram, а не держим в .env: рассинхрон конфига и реального бота дал бы
+  // ссылку, ведущую в никуда, и заметили бы это только на сотруднике.
+  let botUsername = process.env.TELEGRAM_BOT_USERNAME ?? "";
+  try {
+    botUsername = (await tg.getMe()).username || botUsername;
+  } catch (err) {
+    console.warn("Имя бота не получено — ссылки-приглашения будут по TELEGRAM_BOT_USERNAME:", err);
+  }
   console.log(`MYDON Bot запущен (TZ=${TZ}, Core=${coreUrl}, разрешено чатов: ${allowlist.size}).`);
 
   // ── Сотрудники: свой узкий режим (только свои задачи) ──────────────────────
-  const awaiting = new AwaitingReport();
   const conversations = new Conversations();
-  const staffDeps = { core: deps.core, awaiting, conversations };
-  setInterval(() => awaiting.sweep(), 10 * 60_000).unref();
+  const staffDeps = { core: deps.core, conversations };
   setInterval(() => conversations.sweep(), 10 * 60_000).unref();
 
   /** Кто написал: сотрудник или посторонний. Ошибка Core = «неизвестен». */
@@ -121,9 +138,37 @@ async function main(): Promise<void> {
   }
 
   /**
-   * Сообщение не от владельца. Незнакомого пробуем привязать: он мог нажать
-   * «Старт», а владелец заранее вписал его @username в карточку сотрудника.
-   * Так связь устанавливается сама, без ручного ввода chat_id.
+   * Ограничитель попыток погасить приглашение.
+   *
+   * Код — 10 символов из 27, перебор не окупается по времени, но без
+   * ограничителя ничто не мешает пробовать со скоростью сети. Пять попыток
+   * в час на чат делают перебор бессмысленным окончательно.
+   */
+  const inviteTries = new Map<number, { n: number; at: number }>();
+  const INVITE_WINDOW_MS = 60 * 60_000;
+  const INVITE_MAX = 5;
+
+  function inviteAllowed(chatId: number): boolean {
+    const now = Date.now();
+    const cur = inviteTries.get(chatId);
+    if (!cur || now - cur.at > INVITE_WINDOW_MS) {
+      inviteTries.set(chatId, { n: 1, at: now });
+      return true;
+    }
+    cur.n += 1;
+    return cur.n <= INVITE_MAX;
+  }
+  setInterval(() => {
+    const cutoff = Date.now() - INVITE_WINDOW_MS;
+    for (const [k, v] of inviteTries) if (v.at < cutoff) inviteTries.delete(k);
+  }, 10 * 60_000).unref();
+
+  /**
+   * Сообщение не от владельца.
+   *
+   * Сначала пробуем приглашение: `/start inv_XXXX` — штатный путь подключения.
+   * Привязка по @username осталась аварийной и выключается тумблером
+   * STAFF_LINK_BY_USERNAME=0: освободившийся ник давал доступ к чужой карточке.
    */
   async function routeStaffMessage(
     chatId: number,
@@ -131,6 +176,30 @@ async function main(): Promise<void> {
     username: string | undefined,
   ): Promise<void> {
     try {
+      const code = parseStartPayload(text);
+      if (code !== null) {
+        if (!inviteAllowed(chatId)) {
+          await tg.sendMessage(chatId, "Слишком много попыток. Попробуй через час.");
+          return;
+        }
+        const res = await deps.core.redeemInvite(code, String(chatId));
+        if ("error" in res) {
+          await tg.sendMessage(chatId, "Ссылка не сработала: она одноразовая и живёт сутки. Попроси новую.");
+          return;
+        }
+        await tg.sendMessage(
+          chatId,
+          `Привет, ${res.name}! Ты подключён.\n${rolesLabel(res.roles)}.\n\n${helpText(res.roles)}`,
+          menuKeyboard(res.roles),
+        );
+        for (const ownerChat of allowlist) {
+          await tg
+            .sendMessage(ownerChat, `✅ ${res.name} подключился к боту (${rolesLabel(res.roles)}).`)
+            .catch(() => undefined);
+        }
+        return;
+      }
+
       let person = await personOf(chatId);
 
       if (person === null) {
@@ -146,13 +215,17 @@ async function main(): Promise<void> {
         );
       }
 
-      const { reply, tasks } = await handleStaffMessage(chatId, text, person, staffDeps);
-      await tg.sendMessage(chatId, reply.text, reply.keyboard);
+      const { reply } = await handleStaffMessage(chatId, text, person, staffDeps);
 
-      // Кнопки — по одному сообщению на задачу: у сообщения может быть только
-      // одна клавиатура, а действовать нужно по конкретной задаче.
-      for (const t of (tasks ?? []).slice(0, 10)) {
-        await tg.sendMessage(chatId, `📌 ${t.title}`, taskKeyboard(t));
+      // Постоянное меню и inline-кнопки не помещаются в одно сообщение:
+      // reply_markup один. Меню ставим отдельной короткой строкой — оно нужно
+      // редко (первый вход, справка), а список задач приходит со своими
+      // номерными кнопками одним сообщением, а не десятью.
+      if (reply.replyKeyboard) {
+        await tg.sendMessage(chatId, reply.text, reply.replyKeyboard);
+        if (reply.keyboard) await tg.sendMessage(chatId, "Выбери задачу:", reply.keyboard);
+      } else {
+        await tg.sendMessage(chatId, reply.text, reply.keyboard);
       }
     } catch (err) {
       console.error("Сообщение сотрудника не обработано:", err);
@@ -160,9 +233,14 @@ async function main(): Promise<void> {
   }
 
   /**
-   * Фото от сотрудника: имеет смысл только внутри активного заведения. Берём
-   * последний размер (максимальное разрешение), качаем байты и грузим в Core.
-   * Чужому/вне визарда молчим — как и на текст.
+   * Фото от сотрудника. Берём последний размер (максимальное разрешение),
+   * качаем байты и грузим в Core. Постороннему молчим — как и на текст.
+   *
+   * Куда приложить, решаем по контексту: активный мастер закрытия → «после»,
+   * мастер заведения карточки → к карточке, иначе единственная задача в
+   * работе → «до». Если контекста нет, отвечаем текстом, а не молчанием:
+   * снимок с точки во второй раз уже не сделать, и «бот проглотил фото» —
+   * худший из возможных ответов.
    */
   async function routeStaffPhoto(
     chatId: number,
@@ -173,8 +251,42 @@ async function main(): Promise<void> {
       if (person === null) return;
       const largest = photo[photo.length - 1];
       const file = await tg.downloadFile(largest.file_id);
-      const reply = await handleRegisterPhoto(chatId, file, person, staffDeps);
-      if (reply) await tg.sendMessage(chatId, reply.text, reply.keyboard);
+
+      // Порядок разбора: активный мастер важнее догадок.
+      const attached = await handleAfterPhoto(chatId, file, person, staffDeps);
+      if (attached) {
+        await tg.sendMessage(chatId, attached.text, attached.keyboard);
+        return;
+      }
+      const done = await handleTaskDonePhoto(chatId, file, person, staffDeps);
+      if (done) {
+        await tg.sendMessage(chatId, done.text, done.keyboard);
+        return;
+      }
+      const registered = await handleRegisterPhoto(chatId, file, person, staffDeps);
+      if (registered) {
+        await tg.sendMessage(chatId, registered.text, registered.keyboard);
+        return;
+      }
+
+      // Фото вне мастера при ровно одной задаче в работе — это снимок «до».
+      // Молчать нельзя: второй раз состояние «до» уже не сфотографировать.
+      // Именно «ровно одной»: при двух задачах в работе угадывать, к какой
+      // относится снимок, значит half the time приложить его не туда.
+      const inProgress = (await deps.core.myTasks("human", person.id)).filter(
+        (t) => t.status === "in_progress",
+      );
+      if (inProgress.length === 1) {
+        const reply = await attachBeforePhoto(inProgress[0], file, person, staffDeps);
+        await tg.sendMessage(chatId, reply.text, reply.keyboard);
+        return;
+      }
+      await tg.sendMessage(
+        chatId,
+        inProgress.length === 0
+          ? "Фото пришло, но не к чему приложить. Открой задачу, нажми «Взял в работу» — тогда пойму."
+          : "У тебя несколько задач в работе — не пойму, к какой фото. Открой нужную и нажми «Выполнил».",
+      );
     } catch (err) {
       console.error("Фото сотрудника не обработано:", err);
     }
@@ -224,6 +336,57 @@ async function main(): Promise<void> {
   };
   scheduleBriefing();
 
+  /**
+   * Утренний дайджест сотрудникам, 07:00 — раньше владельческого брифинга
+   * (07:30): владелец должен видеть картину, зная, что люди её уже получили.
+   *
+   * Это единственный канал доставки СВОБОДНЫХ задач: sendReminders ходит по
+   * ownerRef, а у свободной задачи его нет.
+   */
+  const sendStaffDigest = async (): Promise<void> => {
+    const [people, free] = await Promise.all([
+      deps.core.people(),
+      deps.core.unassignedTasks().catch(() => []),
+    ]);
+    const linked = people.filter((p) => p.tgChatId && p.active === "yes");
+    if (linked.length === 0) return;
+
+    // Имена объектов — одним запросом на всю рассылку, а не на человека.
+    const names = new Map((await deps.core.machines().catch(() => [])).map((m) => [m.id, m.name]));
+    const dayKey = isoDate(new Date());
+
+    for (const p of linked) {
+      try {
+        const mine = await deps.core.myTasks("human", p.id);
+        const digest = buildDigest({ person: p, mine, free, objectNames: names });
+        // Пустое «у тебя ноль задач» каждое утро приучает не читать дайджест.
+        if (!digest) continue;
+        // Ключ занимается ПЕРЕД отправкой: перезапуск бота в 07:00:30 не
+        // должен слать второй раз. Цена — потерянный дайджест при падении
+        // ровно между заявкой и отправкой; это лучше, чем два одинаковых.
+        if (!(await deps.core.claimNotification(digestKey(dayKey, p.id)))) continue;
+        await tg.sendMessage(Number(p.tgChatId), digest.text, digest.keyboard);
+      } catch (err) {
+        console.error(`Дайджест не доставлен (${p.name}):`, err);
+      }
+    }
+  };
+
+  const scheduleDigest = (): void => {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          await sendStaffDigest();
+        } catch (err) {
+          console.error("Дайджест сотрудникам не отправлен:", err);
+        } finally {
+          scheduleDigest();
+        }
+      })();
+    }, msUntilBriefing(new Date(), 7, 0));
+  };
+  scheduleDigest();
+
   setInterval(() => deps.limiter.sweep(), 5 * 60_000).unref();
 
   /**
@@ -243,18 +406,31 @@ async function main(): Promise<void> {
     for (const t of due) {
       const overdue = t.due !== null && new Date(t.due).getTime() < Date.now();
       const line = `${overdue ? "⏰ Просрочено" : "🔔 Скоро срок"}: ${t.title}\n${dueLabel(t.due)}`;
-      let delivered = false;
 
-      // Исполнителю-человеку — лично, с кнопками: напоминание без возможности
-      // ответить бесполезно.
-      if (t.ownerKind === "human" && t.ownerRef !== null) {
-        const chat = chatById.get(t.ownerRef);
+      // Доставка ИСПОЛНИТЕЛЮ и доставка ВЛАДЕЛЬЦУ считаются отдельно.
+      //
+      // Раньше был один флаг на двоих, и это теряло напоминания: если
+      // сотрудник заблокировал бота, а владельцу просрочка дошла, задача
+      // помечалась «напомнили» — и сотрудник не узнавал о ней НИКОГДА,
+      // потому что markReminded ставится один раз навсегда.
+      const needsAssignee = t.ownerKind === "human" && t.ownerRef !== null;
+      let deliveredToAssignee = false;
+      let deliveredToOwner = false;
+
+      if (needsAssignee) {
+        const chat = chatById.get(t.ownerRef!);
         if (chat !== undefined) {
           try {
             await tg.sendMessage(Number(chat), line, taskKeyboard(t));
-            delivered = true;
+            deliveredToAssignee = true;
           } catch (err) {
-            console.error("Напоминание исполнителю не доставлено:", err);
+            // Заблокировал бота — сообщаем владельцу один раз и перестаём
+            // пытаться. Задача при этом «напомненной» не считается.
+            if (err instanceof TelegramError && err.isUnreachable) {
+              await reportUnreachable(t.ownerRef!, err.description);
+            } else {
+              console.error("Напоминание исполнителю не доставлено:", err);
+            }
           }
         }
       }
@@ -264,20 +440,47 @@ async function main(): Promise<void> {
         for (const chatId of allowlist) {
           try {
             await tg.sendMessage(chatId, line);
-            delivered = true;
+            deliveredToOwner = true;
           } catch (err) {
             console.error("Напоминание владельцу не доставлено:", err);
           }
         }
       }
 
-      if (delivered) {
+      // Помечаем напомненной, только если дошло до того, кто должен делать.
+      // У задачи без исполнителя (свободной) единственный адресат — владелец.
+      if (deliveredToAssignee || (!needsAssignee && deliveredToOwner)) {
         try {
           await deps.core.markReminded(t.id);
         } catch (err) {
           console.error("Отметка «напомнили» не записана:", err);
         }
       }
+    }
+  }
+
+  /**
+   * Сотрудник недоступен: заблокировал бота или удалил чат.
+   *
+   * Владельцу сообщаем один раз за день — иначе каждое напоминание в цикле
+   * превращалось бы в отдельную жалобу. Ключ занимается в Core, поэтому
+   * ограничение переживает перезапуск бота.
+   */
+  async function reportUnreachable(personId: string, reason: string): Promise<void> {
+    try {
+      const key = `staff-unreachable:${isoDate(new Date())}:${personId}`;
+      if (!(await deps.core.claimNotification(key))) return;
+      const people = await deps.core.people();
+      const name = people.find((p) => p.id === personId)?.name ?? personId;
+      for (const chatId of allowlist) {
+        await tg.sendMessage(
+          chatId,
+          `🚫 ${name} не получает сообщения от бота (${reason}).\n` +
+            "Задачи ему не доходят — нужно, чтобы он разблокировал бота и нажал «Старт».",
+        );
+      }
+    } catch (err) {
+      console.error("Владелец не уведомлён о недоступном сотруднике:", err);
     }
   }
 
@@ -304,7 +507,14 @@ async function main(): Promise<void> {
         );
         await deps.core.markRedoNotified(t.id);
       } catch (err) {
-        console.error("Сообщение о переделке не доставлено:", err);
+        if (err instanceof TelegramError && err.isUnreachable) {
+          // Иначе цикл долбит Telegram на каждом тике: задача остаётся
+          // неотмеченной, а сотрудник недоступен всё это время.
+          await reportUnreachable(t.ownerRef!, err.description);
+          await deps.core.markRedoNotified(t.id).catch(() => undefined);
+        } else {
+          console.error("Сообщение о переделке не доставлено:", err);
+        }
       }
     }
   }
@@ -363,6 +573,18 @@ async function main(): Promise<void> {
         } else if (u.message?.text) {
           const chatId = u.message.chat.id;
           if (isAllowed(chatId, allowlist)) {
+            // Подключение сотрудника — мутация с состоянием, ловим до общего
+            // обработчика: иначе «подключить» ушло бы в разбор намерений.
+            if (isStaffAddTrigger(u.message.text)) {
+              try {
+                const r = await startStaffAdd(chatId, staffDeps);
+                await tg.sendMessage(chatId, r.text, r.keyboard);
+              } catch (err) {
+                console.error("Подключение сотрудника не начато:", err);
+                await tg.sendMessage(chatId, "Не удалось прочитать список сотрудников из Core.");
+              }
+              continue;
+            }
             const reply = await handleMessage(chatId, u.message.text, deps);
             if (reply) {
               await tg.sendMessage(chatId, reply.text, reply.keyboard);
@@ -387,6 +609,22 @@ async function main(): Promise<void> {
           const data = u.callback_query.data;
 
           if (isAllowed(chatId, allowlist)) {
+            // Кнопки визарда подключения (sa:) — до согласований: у них
+            // разные пространства, но проверить надо раньше фолбэка
+            // «эта кнопка устарела».
+            const sa = parseStaffAddCallback(data);
+            if (sa) {
+              try {
+                const res = await handleStaffAddCallback(chatId, sa, staffDeps, botUsername);
+                await tg.answerCallback(u.callback_query.id, res.answer);
+                if (res.message) await tg.sendMessage(chatId, res.message.text, res.message.keyboard);
+              } catch (err) {
+                console.error("Кнопка подключения не сработала:", err);
+                await tg.answerCallback(u.callback_query.id, "Не получилось, попробуй ещё раз");
+              }
+              continue;
+            }
+
             const parsed = parseApprovalCallback(data);
             if (!parsed) {
               // Неизвестная кнопка: молчание оставляет вечный спиннер —
@@ -431,6 +669,22 @@ ${DECIDED_LABEL[parsed.decision]}`);
           try {
             const res = await handleStaffCallback(chatId, data, person, staffDeps);
             await tg.answerCallback(u.callback_query.id, res.answer);
+            // Перерисовка на месте: карточка задачи должна меняться там же, где
+            // на неё нажали. Не вышло (сообщение старое, текст тот же) — шлём
+            // новым сообщением, иначе нажатие выглядит как «ничего не сделал».
+            if (res.edit) {
+              const msgId = u.callback_query.message?.message_id;
+              let edited = false;
+              if (msgId !== undefined) {
+                try {
+                  await tg.editMessage(chatId, msgId, res.edit.text, res.edit.keyboard);
+                  edited = true;
+                } catch (err) {
+                  console.error("Карточку задачи не переписать:", err);
+                }
+              }
+              if (!edited) await tg.sendMessage(chatId, res.edit.text, res.edit.keyboard);
+            }
             if (res.message) await tg.sendMessage(chatId, res.message, res.keyboard);
             // Владелец узнаёт о сборе сразу — деньги в пути, приём ждёт в панели.
             if (res.ownerNote) {

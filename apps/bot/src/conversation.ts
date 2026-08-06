@@ -23,7 +23,13 @@ export interface Conversation {
 export class Conversations {
   private readonly map = new Map<number, Conversation>();
 
-  constructor(private readonly ttlMs = 15 * 60_000) {}
+  /**
+   * 45 минут, а не 15. Мастер бросают не потому, что передумали, а потому что
+   * на точке отвалилась связь, подошёл покупатель или разрядился телефон.
+   * Пятнадцати минут на это не хватает, и человек возвращается к протухшему
+   * визарду — то есть вводит всё заново.
+   */
+  constructor(private readonly ttlMs = 45 * 60_000) {}
 
   /** Начать визард (перетирает прежний — новый разговор важнее брошенного). */
   start(chatId: number, flow: string, step: string, data: Record<string, unknown> = {}, now = Date.now()): void {

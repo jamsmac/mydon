@@ -31,6 +31,8 @@ export interface PersonRow {
   id: string;
   name: string;
   role: string | null;
+  /** Роли сотрудника: по ним фильтруется меню и проверяются права. */
+  roles?: string[];
   tgUsername: string | null;
   tgChatId: string | null;
   active: string;
@@ -41,12 +43,41 @@ export interface TaskRow {
   title: string;
   description: string | null;
   ownerKind: "human" | "agent";
+  /** null при ownerKind='human' — задача свободна, её разбирают из пула. */
   ownerRef: string | null;
   status: "todo" | "in_progress" | "done" | "cancelled";
   priority: "low" | "normal" | "high" | "urgent";
   due: string | null;
   resultNote: string | null;
+  /** По какому объекту работа: автомат, точка, склад. */
+  entityId: string | null;
 }
+
+/** Строка сводки сроков — то же, что отдаёт Core в /maintenance/due. */
+export interface MaintenanceDueRow {
+  planId: string;
+  targetId: string;
+  targetName: string;
+  kind: string;
+  kindLabel: string;
+  partKind: string | null;
+  partLabel: string | null;
+  title: string | null;
+  nextDueOn: string | null;
+  lastDoneOn: string | null;
+  taskLeadDays: number;
+  daysLeft: number | null;
+  countLeft: number | null;
+  status: "ok" | "soon" | "due" | "overdue" | "unknown";
+  assigneeId: string | null;
+  autoTask: boolean;
+}
+
+/**
+ * Таймаут загрузки фото. Отдельный от общего: 10 секунд достаточно для JSON,
+ * но не для мегабайтного снимка с точки на 3G.
+ */
+const PHOTO_TIMEOUT_MS = 60_000;
 
 /**
  * Расхождение при пересчёте склада (§5.4): было → стало. delta<0 — недостача
@@ -425,6 +456,137 @@ export class CoreClient {
     return this.request<PersonRow[]>("/people");
   }
 
+  // ── Обслуживание: журнал работ, узлы автоматов ─────────────────────────────
+
+  /**
+   * Объекты, где сотрудник работал недавно, — верхний уровень пикера.
+   * Закрепления за объектами нет, но маршрут дня повторяется.
+   */
+  recentObjects(personId: string, limit = 5): Promise<{ id: string; name: string }[]> {
+    return this.request(`/maintenance/recent-objects?personId=${personId}&limit=${limit}`);
+  }
+
+  /** Записать факт работы. Без outcome — работа начата и не закрыта. */
+  createMaintenanceLog(input: {
+    entityId: string;
+    kind: string;
+    partKind?: string;
+    /** Норматив, по которому работа сделана: без него срок не сдвинется. */
+    planId?: string;
+    personId?: string;
+    taskId?: string;
+    outcome?: "done" | "partial" | "failed";
+    note?: string;
+    counterValue?: number;
+    createdBy?: string;
+  }): Promise<{ id: string }> {
+    return this.request("/maintenance/log", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Замена узла: закрыть старый период и открыть новый одной транзакцией. */
+  swapPart(input: {
+    machineId: string;
+    partKind: string;
+    slot?: number;
+    newSerial?: string;
+    reason?: string;
+    personId?: string;
+    note?: string;
+    createdBy?: string;
+  }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } | null }> {
+    return this.request("/maintenance/part-swap", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Что подходит к сроку. Статус считается на чтении, нигде не хранится. */
+  maintenanceDue(): Promise<MaintenanceDueRow[]> {
+    return this.request("/maintenance/due");
+  }
+
+  /** Свободные задачи — общий пул, из которого разбирают работу. */
+  unassignedTasks(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks?unassigned=1");
+  }
+
+  /**
+   * Взять свободную задачу. false — успел другой: это не ошибка, а обычное
+   * утро при одном дайджесте на всех.
+   */
+  async claimTask(id: string, personId: string): Promise<boolean> {
+    try {
+      await this.request(`/tasks/${id}/claim`, {
+        method: "POST",
+        body: JSON.stringify({ personId }),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Погасить приглашение и привязать Telegram. Ошибка — текст для сотрудника:
+   * Core уже объяснил, что не так, и придумывать своё сообщение незачем.
+   */
+  async redeemInvite(code: string, chatId: string): Promise<PersonRow | { error: string }> {
+    try {
+      return await this.request<PersonRow>("/people/redeem", {
+        method: "POST",
+        body: JSON.stringify({ code, chatId }),
+      });
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "Не получилось" };
+    }
+  }
+
+  /** Выпустить приглашение сотруднику. Код возвращается один раз. */
+  issueInvite(
+    personId: string,
+    roles: string[],
+    actor: string,
+  ): Promise<{ code: string; expiresAt: string; name: string }> {
+    return this.request(`/people/${personId}/invite`, {
+      method: "POST",
+      body: JSON.stringify({ roles, actor }),
+    });
+  }
+
+  /** Отозвать доступ: снять привязку, роли и погасить живые приглашения. */
+  revokeAccess(personId: string, actor = "owner"): Promise<PersonRow> {
+    return this.request<PersonRow>(`/people/${personId}/revoke`, {
+      method: "POST",
+      body: JSON.stringify({ actor }),
+    });
+  }
+
+  /** Вернуть свою задачу в общий пул. */
+  releaseTask(id: string, personId: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/release`, {
+      method: "POST",
+      body: JSON.stringify({ personId }),
+    });
+  }
+
+  /** Занять ключ одноразовой рассылки: true ровно один раз. */
+  async claimNotification(key: string): Promise<boolean> {
+    const r = await this.request<{ claimed: boolean }>("/rules/claim", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    });
+    return r.claimed;
+  }
+
+  /** Заявка на ремонт от сотрудника. Свободная — её разберут из общего пула. */
+  createTask(input: {
+    title: string;
+    ownerKind: "human" | "agent";
+    entityId?: string;
+    description?: string;
+    priority?: "low" | "normal" | "high" | "urgent";
+    createdBy?: string;
+  }): Promise<TaskRow> {
+    return this.request<TaskRow>("/tasks", { method: "POST", body: JSON.stringify(input) });
+  }
+
   /**
    * Завести карточку реестра. `createdFrom` заполнен → карточка ляжет
    * черновиком на утверждение владельцу (сотрудник заводит, владелец
@@ -524,24 +686,40 @@ export class CoreClient {
     mime: string | null;
     filename: string;
     createdBy: string;
+    /** В какой момент снято: before | after | plate | counter. */
+    stage?: string;
   }): Promise<{ id: string; url: string }> {
     const form = new FormData();
     form.append("ownerType", input.ownerType);
     form.append("ownerId", input.ownerId);
     form.append("kind", "photo");
     form.append("createdBy", input.createdBy);
+    if (input.stage) form.append("stage", input.stage);
     const blob = input.mime
       ? new Blob([new Uint8Array(input.bytes)], { type: input.mime })
       : new Blob([new Uint8Array(input.bytes)]);
     form.append("file", blob, input.filename);
     const res = await fetch(`${this.baseUrl}/attachments`, {
       method: "POST",
-      signal: AbortSignal.timeout(this.timeoutMs),
+      // Свой таймаут, а не общий: 10 секунд хватает JSON-запросу, но не
+      // мегабайтной фотографии с точки на 3G. По общему таймауту загрузка
+      // срывалась бы ровно там, где она особенно нужна.
+      signal: AbortSignal.timeout(PHOTO_TIMEOUT_MS),
       headers: this.serviceToken ? { "x-service-token": this.serviceToken } : {},
       body: form,
     });
     if (!res.ok) throw new Error(`Core ответил ${res.status} на /attachments`);
     return (await res.json()) as { id: string; url: string };
+  }
+
+  /** Вложения записи: сколько фото «до» и «после» уже приложено к задаче. */
+  attachmentsOfOwner(
+    ownerType: string,
+    ownerId: string,
+  ): Promise<{ id: string; kind: string; stage: string | null }[]> {
+    return this.request(
+      `/attachments?ownerType=${encodeURIComponent(ownerType)}&ownerId=${encodeURIComponent(ownerId)}`,
+    );
   }
 
   // ── Кофе-бункеры: ручные кофемашины, ежедневная заливка/мойка ────────────

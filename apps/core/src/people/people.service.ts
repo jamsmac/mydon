@@ -115,13 +115,19 @@ export class PeopleService {
   /**
    * Привязка Telegram: сотрудник нажал /start.
    *
-   * Ищем по @username (как записал владелец) или по уже привязанному chat_id —
-   * повторный /start не должен ломать связь. Один Telegram = один сотрудник:
-   * если этот chat_id висел на другом, сначала отвязываем, иначе задачи
-   * уходили бы не тому человеку.
+   * ВНИМАНИЕ: привязка по @username — дыра. Ник в Telegram освобождается
+   * после смены, и любой, кто его займёт, получит карточку сотрудника со
+   * всеми задачами. Штатный путь подключения теперь — одноразовое
+   * приглашение (`InvitesService`), а этот остаётся аварийным и выключается
+   * тумблером `STAFF_LINK_BY_USERNAME=0`.
+   *
+   * Повторный /start уже привязанного не ломает связь — поиск по chat_id
+   * работает всегда, независимо от тумблера.
    */
   async linkTelegram(chatId: string, username: string | null): Promise<PersonRow | null> {
-    const uname = normalizeUsername(username);
+    // Выключено — ищем только по уже привязанному chat_id.
+    const byUsernameAllowed = (process.env.STAFF_LINK_BY_USERNAME ?? "1") !== "0";
+    const uname = byUsernameAllowed ? normalizeUsername(username) : null;
     const [found] = await this.db
       .select()
       .from(person)

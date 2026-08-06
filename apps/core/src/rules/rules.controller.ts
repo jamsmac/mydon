@@ -21,6 +21,13 @@ export class AckDto {
   keys!: string[];
 }
 
+/** Ключ одноразового действия: `staff-digest:<день>:<personId>` и подобные. */
+export class ClaimDto {
+  @IsString()
+  @MaxLength(256)
+  key!: string;
+}
+
 @Controller("rules")
 export class RulesController {
   constructor(private readonly rules: RulesService) {}
@@ -42,6 +49,15 @@ export class RulesController {
   @Post("ack")
   ack(@Body() dto: AckDto) {
     return this.rules.ack(dto.keys);
+  }
+
+  /**
+   * Занять ключ одноразового действия. `{ claimed: true }` ровно один раз.
+   * Так рассылка по таймеру переживает перезапуск, не задваивая сообщения.
+   */
+  @Post("claim")
+  async claim(@Body() dto: ClaimDto) {
+    return { claimed: await this.rules.claim(dto.key) };
   }
 
   @Post("dry-run")

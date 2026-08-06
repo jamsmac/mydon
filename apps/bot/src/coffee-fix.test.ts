@@ -47,9 +47,12 @@ describe("Бот «ошибся — исправить» — отмена сво
     assert.deepEqual(calls[0], { kind: "last", args: [`person:${ME.id}`] }, "ищем только записи этого сотрудника");
     assert.match(reply.text, /заливка 2026-08-04 · AH/);
     assert.match(reply.text, /сохранится в журнале аудита/i);
-    const row = reply.keyboard!.inline_keyboard[0];
-    assert.equal(row[0].callback_data, `fx:del:r:${ENTRY_ID}`);
-    assert.equal(row[1].callback_data, "fx:keep");
+    // Разные ряды: удаление необратимо, и промах пальцем не должен стоить записи.
+    const rows = reply.keyboard!.inline_keyboard;
+    assert.equal(rows.length, 2, "удаление и отказ — в разных рядах");
+    assert.equal(rows[0][0].callback_data, `fx:del:r:${ENTRY_ID}`);
+    assert.equal(rows[0].length, 1, "рядом с «удалить» не должно быть ничего");
+    assert.equal(rows[1][0].callback_data, "fx:keep");
   });
 
   it("старт: записей нет — честно говорим, кнопок не рисуем", async () => {

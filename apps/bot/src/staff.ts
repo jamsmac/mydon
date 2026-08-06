@@ -1,10 +1,9 @@
-import { dueLabel } from "@mydon/shared";
+import { can, dueLabel, TZ } from "@mydon/shared";
 import type { CoreClient, PersonRow, TaskRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import {
   handleRegisterCallback,
   handleRegisterName,
-  isRegisterTrigger,
   parseRegisterCallback,
   registerStepHint,
   startRegister,
@@ -13,7 +12,6 @@ import {
   handleInventoryCallback,
   handleInventoryCount,
   inventoryStepHint,
-  isInventoryTrigger,
   parseInventoryCallback,
   startInventory,
 } from "./staff-inventory";
@@ -21,7 +19,6 @@ import {
   handleIntakeCallback,
   handleIntakeCount,
   intakeStepHint,
-  isIntakeTrigger,
   parseIntakeCallback,
   startIntake,
 } from "./staff-intake";
@@ -32,8 +29,6 @@ import {
   handleCoffeeRefillPackages,
   handleCoffeeRefillWeight,
   handleCoffeeWashCallback,
-  isCoffeeRefillTrigger,
-  isCoffeeWashTrigger,
   parseCoffeeRefillCallback,
   parseCoffeeWashCallback,
   startCoffeeRefill,
@@ -43,13 +38,50 @@ import {
   coffeeConsumableStepHint,
   handleCoffeeConsumableCallback,
   handleCoffeeConsumableCounts,
-  isCoffeeConsumableTrigger,
   parseCoffeeConsumableCallback,
   recordContainerReturns,
   startCoffeeConsumable,
   tryParseContainerReturns,
 } from "./coffee-returns";
-import { handleCoffeeFixCallback, isCoffeeFixTrigger, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
+import { handleCoffeeFixCallback, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
+import {
+  finishAfterPhoto,
+  handleCleanCallback,
+  handlePartReplaceCallback,
+  handlePartSerial,
+  handleProblemCallback,
+  handleServiceCheckCallback,
+  onObjectPicked,
+  parseAfterPhotoCallback,
+  parseCleanCallback,
+  parsePartReplaceCallback,
+  parseProblemCallback,
+  parseServiceCheckCallback,
+  partReplaceStepHint,
+  startClean,
+  startPartReplace,
+  startProblem,
+  startServiceCheck,
+} from "./field-work";
+import { allObjects, parsePickerCallback, searchObjects, searchPrompt } from "./machine-picker";
+import { handleSchedulesCallback, parseSchedulesCallback, startSchedules } from "./schedules";
+import {
+  handleTaskDoneCallback,
+  handleTaskDoneReport,
+  parseTaskDoneCallback,
+  startTaskDone,
+  taskDoneStepHint,
+} from "./task-done";
+import {
+  helpText,
+  matchMenuLabel,
+  matchTrigger,
+  menuItemById,
+  menuKeyboard,
+  parseMenuCallback,
+  type MenuItem,
+} from "./menu";
+import type { ReplyKeyboard } from "./telegram";
 
 /**
  * Работа сотрудника в Telegram (решение владельца: сотрудники — через бота).
@@ -65,23 +97,65 @@ import { handleCoffeeFixCallback, isCoffeeFixTrigger, parseCoffeeFixCallback, st
 export interface StaffReply {
   text: string;
   keyboard?: { inline_keyboard: { text: string; callback_data: string }[][] };
+  /** Постоянное меню под полем ввода. Ставится редко — при /start и первом входе. */
+  replyKeyboard?: ReplyKeyboard;
 }
 
-/** Кнопки под задачей. Префикс «t:» отделяет их от кнопок согласований («ap:»). */
+/** Кнопки под карточкой задачи. Префикс «t:» отделяет их от согласований («ap:»). */
 export function taskKeyboard(task: TaskRow): StaffReply["keyboard"] {
   const row: { text: string; callback_data: string }[] = [];
   if (task.status !== "in_progress") {
-    row.push({ text: "▶️ Взял", callback_data: `t:${task.id}:progress` });
+    row.push({ text: "▶️ Взял в работу", callback_data: `t:${task.id}:progress` });
   }
-  row.push({ text: "✅ Сделал", callback_data: `t:${task.id}:done` });
-  return { inline_keyboard: [row] };
+  row.push({ text: "✅ Выполнил", callback_data: `t:${task.id}:done` });
+  return {
+    inline_keyboard: [
+      row,
+      // Отдельным рядом: «не смогу» — не повседневная кнопка, и стоять
+      // рядом с «Выполнил» ей нельзя.
+      [{ text: "↩️ Не смогу", callback_data: `t:${task.id}:free` }],
+    ],
+  };
 }
 
+/**
+ * Клавиатура списка задач: по кнопке на задачу, номер совпадает с номером
+ * строки в тексте.
+ *
+ * Раньше список приходил десятью отдельными сообщениями — по одному на задачу,
+ * потому что у сообщения может быть только одна клавиатура. Это десять запросов
+ * к Bot API подряд при персональном лимите ~1 сообщение в секунду и десять
+ * всплывающих уведомлений на телефоне. Теперь список — одно сообщение, а выбор
+ * задачи — номерная кнопка.
+ */
+export function tasksKeyboard(tasks: TaskRow[], free: TaskRow[] = []): StaffReply["keyboard"] {
+  const rows = tasks.slice(0, MAX_TASKS).map((t, i) => [
+    { text: `${i + 1} · ${t.title}`.slice(0, 40), callback_data: `t:${t.id}:open` },
+  ]);
+  free.slice(0, MAX_FREE).forEach((t, i) => {
+    rows.push([
+      {
+        text: `✋ Взять ${tasks.length + i + 1} · ${t.title}`.slice(0, 40),
+        callback_data: `t:${t.id}:claim`,
+      },
+    ]);
+  });
+  return { inline_keyboard: rows };
+}
+
+/** Сколько свободных задач показываем в списке. Дальше — «показать ещё». */
+const MAX_FREE = 5;
+
+/** Сколько задач помещаем в одно сообщение. Дальше — «показать ещё» в PR 8. */
+const MAX_TASKS = 10;
+
+export type TaskAction = "progress" | "done" | "open" | "claim" | "free";
+
 /** Строгий разбор нажатия: данные кнопки приходят снаружи, доверять им нельзя. */
-export function parseTaskCallback(data: string): { id: string; action: "progress" | "done" } | null {
-  const m = /^t:([0-9a-f-]{36}):(progress|done)$/.exec(data);
+export function parseTaskCallback(data: string): { id: string; action: TaskAction } | null {
+  const m = /^t:([0-9a-f-]{36}):(progress|done|open|claim|free)$/.exec(data);
   if (!m) return null;
-  return { id: m[1], action: m[2] as "progress" | "done" };
+  return { id: m[1], action: m[2] as TaskAction };
 }
 
 function taskLine(t: TaskRow): string {
@@ -90,31 +164,45 @@ function taskLine(t: TaskRow): string {
   return `${prio}${t.title}\n   ${dueLabel(t.due)}${state}`;
 }
 
-/** Список задач сотрудника. Пусто — это хорошая новость, так и пишем. */
-export function formatMyTasks(person: PersonRow, tasks: TaskRow[]): string {
-  if (tasks.length === 0) {
-    return `${person.name}, задач на тебе нет. Отдыхай 👌`;
-  }
-  const lines = tasks.map((t, i) => `${i + 1}. ${taskLine(t)}`);
-  return [`${person.name}, твои задачи (${tasks.length}):`, "", ...lines].join("\n");
+/** Карточка одной задачи — то, что видно после нажатия номерной кнопки. */
+export function formatTaskCard(t: TaskRow): string {
+  const lines = [`📌 ${t.title}`, `🕐 ${dueLabel(t.due)}`];
+  if (t.status === "in_progress") lines.push("▶️ В работе");
+  if (t.description) lines.push("", t.description);
+  return lines.join("\n");
 }
 
-const HELP_STAFF = [
-  "Что можно писать:",
-  "",
-  "• «задачи» — список того, что на тебе",
-  "• «инкассация» — сдать выручку с автомата",
-  "• «новый ингредиент» / «новая запчасть» — завести карточку с фото",
-  "• «приход» — отметить, что сырьё пришло на склад",
-  "• «инвентаризация» — пересчитать остаток на складе",
-  "• «бункер» — занести заливку кофейного бункера (вес, упаковки)",
-  "• «помыл» — отметить мойку бункера",
-  "• остатки бункеров — строками как в группе: «1. 027. 787» (позиция. набор. вес)",
-  "• «вода» — записать расходники точки (вода, стаканчики, крышки)",
-  "• «ошибся» — удалить свою последнюю запись и внести заново",
-  "• кнопки под задачей: «Взял» и «Сделал»",
-  "• после «Сделал» напиши одной строкой, что именно сделано — это отчёт",
-].join("\n");
+/**
+ * Список задач сотрудника плюс блок свободных.
+ *
+ * Свободные показываются всем: закрепления за объектами нет, и задача от
+ * монитора графиков рождается ничьей. Блок не рисуется при пустом пуле —
+ * заголовок «Свободные:» без строк читается как поломка.
+ */
+export function formatMyTasks(person: PersonRow, tasks: TaskRow[], free: TaskRow[] = []): string {
+  if (tasks.length === 0 && free.length === 0) {
+    return `${person.name}, задач на тебе нет. Отдыхай 👌`;
+  }
+
+  const parts: string[] = [];
+  if (tasks.length > 0) {
+    const shown = tasks.slice(0, MAX_TASKS);
+    parts.push(`${person.name}, твои задачи (${tasks.length}):`, "");
+    parts.push(...shown.map((t, i) => `${i + 1}. ${taskLine(t)}`));
+    if (tasks.length > shown.length) parts.push("", `…и ещё ${tasks.length - shown.length}.`);
+  } else {
+    parts.push(`${person.name}, на тебе сейчас ничего.`);
+  }
+
+  if (free.length > 0) {
+    const shown = free.slice(0, MAX_FREE);
+    parts.push("", "🆓 Свободные — кто возьмёт:", "");
+    parts.push(...shown.map((t, i) => `${tasks.length + i + 1}. ${taskLine(t)}`));
+    if (free.length > shown.length) parts.push("", `…и ещё ${free.length - shown.length} свободных.`);
+  }
+
+  return parts.join("\n");
+}
 
 /** Кнопки выбора автомата для инкассации. Префикс «c:» — отдельное пространство. */
 export function machinesKeyboard(machines: { id: string; name: string }[]): StaffReply["keyboard"] {
@@ -131,46 +219,31 @@ export function parseCollectCallback(data: string): { machineId: string } | null
   return m ? { machineId: m[1] } : null;
 }
 
-/** Время сбора — до секунды, по-ташкентски (требование спецификации VendCash). */
+/**
+ * Время сбора — до секунды, по-ташкентски (требование спецификации VendCash).
+ *
+ * Через `toLocaleString` с явной зоной, а не через `getHours()`: последний
+ * читает зону процесса. Сейчас это Asia/Tashkent только потому, что так задано
+ * в docker-compose, и один запуск бота вне контейнера напечатал бы инкассацию
+ * другим временем — молча и без ошибки.
+ */
 export function formatCollectedAt(iso: string): string {
   const d = new Date(iso);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-/**
- * Ожидание отчёта: сотрудник нажал «Сделал», следующее его сообщение — отчёт.
- * Держим в памяти процесса: состояние живёт минуты, переживать перезапуск ему
- * незачем — после перезапуска сотрудник просто нажмёт «Сделал» снова.
- */
-export class AwaitingReport {
-  private readonly map = new Map<number, { taskId: string; at: number }>();
-
-  constructor(private readonly ttlMs = 15 * 60_000) {}
-
-  set(chatId: number, taskId: string, now = Date.now()): void {
-    this.map.set(chatId, { taskId, at: now });
-  }
-
-  /** Забрать и снять ожидание. Просроченное не возвращаем. */
-  take(chatId: number, now = Date.now()): string | null {
-    const item = this.map.get(chatId);
-    if (!item) return null;
-    this.map.delete(chatId);
-    return now - item.at > this.ttlMs ? null : item.taskId;
-  }
-
-  /** Периодическая уборка: без неё карта растёт от брошенных нажатий. */
-  sweep(now = Date.now()): void {
-    for (const [chatId, item] of this.map) {
-      if (now - item.at > this.ttlMs) this.map.delete(chatId);
-    }
-  }
+  return d
+    .toLocaleString("ru-RU", {
+      timeZone: TZ,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
+    .replace(", ", " ");
 }
 
 export interface StaffDeps {
   core: CoreClient;
-  awaiting: AwaitingReport;
   conversations: Conversations;
 }
 
@@ -193,6 +266,29 @@ export async function handleStaffMessage(
       deps.conversations.clear(chatId);
       return { reply: { text: "Отменил." } };
     }
+  }
+
+  // Нажатие кнопки меню — раньше активного визарда и раньше ожидания отчёта.
+  //
+  // Кнопка это явное намерение сменить занятие. Отвечать на неё «выбери точку
+  // кнопкой», потому что человек не дошёл до конца прошлого мастера, значит
+  // запереть его внутри. Бросаем начатое и говорим об этом вслух — молча
+  // потерянный мастер выглядит как потерянные данные.
+  const pressed = matchMenuLabel(clean);
+  if (pressed && !can(person.roles, pressed.perm)) {
+    // Кнопка могла остаться на экране от прежнего набора ролей: клавиатура
+    // живёт в чате, пока её не заменят. Отказ должен быть внятным, а не
+    // «не понял» — человек нажал то, что видит.
+    return { reply: { text: `«${pressed.label}» тебе сейчас недоступно. Скажи владельцу.` } };
+  }
+  if (pressed) {
+    const dropped = deps.conversations.get(chatId) !== null;
+    deps.conversations.clear(chatId);
+    const started = await startMenuItem(pressed, chatId, person, deps);
+    if (dropped) {
+      started.reply = { ...started.reply, text: `Прошлое не дописано — бросил.\n\n${started.reply.text}` };
+    }
+    return started;
   }
 
   // Активный визард забирает ввод по шагу (название/факт — текстом, остальное —
@@ -224,6 +320,33 @@ export async function handleStaffMessage(
     }
     return { reply: { text: coffeeRefillStepHint(conv.step) } };
   }
+  if (conv?.flow === "part-replace") {
+    if (conv.step === "object" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await searchObjects(clean, deps) };
+    }
+    if (conv.step === "serial" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: handlePartSerial(chatId, clean, deps) };
+    }
+    return { reply: { text: partReplaceStepHint(conv.step) } };
+  }
+  // Остальные мастера обслуживания вводят текстом только поиск объекта.
+  if (conv?.flow === "clean" || conv?.flow === "service-check" || conv?.flow === "problem") {
+    if (conv.step === "object" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await searchObjects(clean, deps) };
+    }
+    return { reply: { text: "Выбери кнопкой." } };
+  }
+  if (conv?.flow === "after-photo") {
+    // Текст на шаге фото — это уже другой разговор. Не держим человека:
+    // запись сохранена, фото было необязательным.
+    deps.conversations.clear(chatId);
+  }
+  if (conv?.flow === "task-done") {
+    if (conv.step === "report" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: handleTaskDoneReport(chatId, clean, deps) };
+    }
+    return { reply: { text: taskDoneStepHint(conv.step) } };
+  }
   if (conv?.flow === "coffee-consumable") {
     if (conv.step === "counts" && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: await handleCoffeeConsumableCounts(chatId, clean, person, deps) };
@@ -239,79 +362,21 @@ export async function handleStaffMessage(
     return { reply: await recordContainerReturns(containerReturns, person, deps) };
   }
 
-  // Завести номенклатуру: «новый ингредиент», «новая запчасть».
-  if (isRegisterTrigger(clean)) {
-    return { reply: startRegister(chatId, deps) };
-  }
-
-  // Приход сырья на склад: «приход», «пришло», «завоз».
-  if (isIntakeTrigger(clean)) {
-    return { reply: await startIntake(chatId, deps) };
-  }
-
-  // Инвентаризация склада: «инвентаризация», «пересчёт».
-  if (isInventoryTrigger(clean)) {
-    return { reply: await startInventory(chatId, deps) };
-  }
-
-  // Заливка кофейного бункера: «бункер», «засыпал».
-  if (isCoffeeRefillTrigger(clean)) {
-    return { reply: await startCoffeeRefill(chatId, deps) };
-  }
-
-  // Мойка/обслуживание кофейного бункера: «помыл», «мойка бункер».
-  if (isCoffeeWashTrigger(clean)) {
-    return { reply: await startCoffeeWash(chatId, deps) };
-  }
-
-  // Расходники точки: «вода», «стаканчики», «крышки», «расходники».
-  if (isCoffeeConsumableTrigger(clean)) {
-    return { reply: await startCoffeeConsumable(chatId, deps) };
-  }
-
-  // «Ошибся — исправить»: показать свою последнюю запись и предложить удалить.
-  if (isCoffeeFixTrigger(clean)) {
-    return { reply: await startCoffeeFix(person, deps) };
-  }
-
-  // Ждём отчёт после «Сделал» — любое следующее сообщение считаем отчётом.
-  const awaitingTaskId = deps.awaiting.take(chatId);
-  if (awaitingTaskId !== null && clean.length > 0 && !clean.startsWith("/")) {
-    const task = await deps.core.task(awaitingTaskId);
-    // Чужую задачу закрыть нельзя, даже если id как-то попал к сотруднику.
-    if (task.ownerKind !== "human" || task.ownerRef !== person.id) {
-      return { reply: { text: "Эта задача не на тебе." } };
-    }
-    await deps.core.setTaskStatus(awaitingTaskId, "done", `person:${person.id}`, clean);
-    return { reply: { text: `Записал: «${clean}». Задача закрыта ✅` } };
-  }
-
+  // Первый вход: ставим постоянное меню и сразу показываем задачи.
   if (clean === "/start" || /привет|старт/i.test(clean)) {
     const tasks = await deps.core.myTasks("human", person.id);
     return {
-      reply: { text: `${formatMyTasks(person, tasks)}\n\n${HELP_STAFF}` },
-      tasks,
-    };
-  }
-
-  if (/задач|дела|что делать|мои/i.test(clean)) {
-    const tasks = await deps.core.myTasks("human", person.id);
-    return { reply: { text: formatMyTasks(person, tasks) }, tasks };
-  }
-
-  // Инкассация: оператор выбирает автомат кнопкой — время зафиксируется само.
-  if (/инкасс|выручк|сдать деньги/i.test(clean)) {
-    const machines = await deps.core.machines();
-    if (machines.length === 0) {
-      return { reply: { text: "Автоматов в реестре пока нет — скажи владельцу." } };
-    }
-    return {
       reply: {
-        text: "С какого автомата собраны деньги? Время зафиксируется в момент нажатия.",
-        keyboard: machinesKeyboard(machines),
+        text: `${formatMyTasks(person, tasks)}\n\n${helpText(person.roles)}`,
+        ...(tasks.length > 0 ? { keyboard: tasksKeyboard(tasks) } : {}),
+        replyKeyboard: menuKeyboard(person.roles),
       },
     };
   }
+
+  // Слово попало в пункт меню — тот же обработчик, что и у кнопки.
+  const hit = matchTrigger(clean, person.roles);
+  if (hit) return startMenuItem(hit, chatId, person, deps);
 
   // Всё остальное от сотрудника — комментарий к его текущей задаче:
   // проще написать боту, чем звонить владельцу.
@@ -321,7 +386,90 @@ export async function handleStaffMessage(
     return { reply: { text: `Передал владельцу по задаче «${tasks[0].title}».` } };
   }
 
-  return { reply: { text: HELP_STAFF } };
+  return { reply: { text: helpText(person.roles), replyKeyboard: menuKeyboard(person.roles) } };
+}
+
+/**
+ * Запуск пункта меню. Единственное место, где id пункта превращается в
+ * действие: и кнопка, и слово, и inline-дубль приходят сюда.
+ */
+async function startMenuItem(
+  item: MenuItem,
+  chatId: number,
+  person: PersonRow,
+  deps: StaffDeps,
+): Promise<{ reply: StaffReply; tasks?: TaskRow[] }> {
+  if (!item.ready) {
+    return { reply: { text: `«${item.label}» пока не готово — скоро включим.` } };
+  }
+
+  switch (item.id) {
+    case "tasks": {
+      const [tasks, free] = await Promise.all([
+        deps.core.myTasks("human", person.id),
+        // Свободные — общий пул. Их видят все: закрепления за объектами нет.
+        deps.core.unassignedTasks().catch(() => [] as TaskRow[]),
+      ]);
+      return {
+        reply: {
+          text: formatMyTasks(person, tasks, free),
+          ...(tasks.length + free.length > 0 ? { keyboard: tasksKeyboard(tasks, free) } : {}),
+        },
+      };
+    }
+    case "coll": {
+      const machines = await deps.core.machines();
+      if (machines.length === 0) {
+        return { reply: { text: "Автоматов в реестре пока нет — скажи владельцу." } };
+      }
+      return {
+        reply: {
+          text: "С какого автомата собраны деньги? Время зафиксируется в момент нажатия.",
+          keyboard: machinesKeyboard(machines),
+        },
+      };
+    }
+    case "new":
+      return { reply: startRegister(chatId, deps) };
+    case "intake":
+      return { reply: await startIntake(chatId, deps) };
+    case "count":
+      return { reply: await startInventory(chatId, deps) };
+    case "refill":
+      return { reply: await startCoffeeRefill(chatId, deps) };
+    case "wash":
+      return { reply: await startCoffeeWash(chatId, deps) };
+    case "cons":
+      return { reply: await startCoffeeConsumable(chatId, deps) };
+    case "fix":
+      return { reply: await startCoffeeFix(person, deps) };
+    case "part":
+      return { reply: await startPartReplace(chatId, person, deps) };
+    case "clean":
+      return { reply: await startClean(chatId, person, deps) };
+    case "insp":
+      return { reply: await startServiceCheck(chatId, person, deps) };
+    case "issue":
+      return { reply: await startProblem(chatId, person, deps) };
+    case "sched":
+      return { reply: await startSchedules(chatId, deps) };
+    default:
+      // Пункт объявлен ready, но обработчика нет — это ошибка сборки меню,
+      // а не сотрудника. Говорим ровно то же, что и про неготовый поток.
+      return { reply: { text: `«${item.label}» пока не готово — скоро включим.` } };
+  }
+}
+
+/** Ответ мастера → ответ обработчика кнопки. Четыре копии этого не нужны. */
+function unwrap(res: { answer: string; message?: StaffReply }): {
+  answer: string;
+  message?: string;
+  keyboard?: StaffReply["keyboard"];
+} {
+  return {
+    answer: res.answer,
+    ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+  };
 }
 
 /** Нажатие кнопки под задачей. Права проверяются по chat_id нажавшего. */
@@ -330,7 +478,28 @@ export async function handleStaffCallback(
   data: string,
   person: PersonRow,
   deps: StaffDeps,
-): Promise<{ answer: string; message?: string; keyboard?: StaffReply["keyboard"]; ownerNote?: string }> {
+): Promise<{
+  answer: string;
+  message?: string;
+  keyboard?: StaffReply["keyboard"];
+  ownerNote?: string;
+  /** Перерисовать исходное сообщение вместо отправки нового. */
+  edit?: { text: string; keyboard?: StaffReply["keyboard"] };
+}> {
+  // Inline-дубль меню (m:<id>) — тот же обработчик, что у кнопки снизу.
+  const menuHit = parseMenuCallback(data);
+  if (menuHit) {
+    const item = menuItemById(menuHit.id);
+    if (!item) return { answer: "Кнопка устарела" };
+    deps.conversations.clear(chatId);
+    const started = await startMenuItem(item, chatId, person, deps);
+    return {
+      answer: item.label,
+      message: started.reply.text,
+      ...(started.reply.keyboard ? { keyboard: started.reply.keyboard } : {}),
+    };
+  }
+
   // Кнопки визарда заведения (r:type/photo/unit/cancel).
   const reg = parseRegisterCallback(data);
   if (reg) {
@@ -391,6 +560,57 @@ export async function handleStaffCallback(
     };
   }
 
+  // Общий пикер объекта (mp:) — един для всех мастеров обслуживания.
+  const picked = parsePickerCallback(data);
+  if (picked) {
+    if (picked.kind === "cancel") {
+      deps.conversations.clear(chatId);
+      return { answer: "Отменено", message: "Отменил." };
+    }
+    const conv = deps.conversations.get(chatId);
+    if (!conv) return { answer: "Мастер истёк", message: "Начни заново кнопкой из меню." };
+    if (picked.kind === "search") {
+      const r = searchPrompt();
+      return { answer: "Поиск", message: r.text, ...(r.keyboard ? { keyboard: r.keyboard } : {}) };
+    }
+    if (picked.kind === "all") {
+      const r = await allObjects(deps);
+      return { answer: "Все", message: r.text, ...(r.keyboard ? { keyboard: r.keyboard } : {}) };
+    }
+    const r = await onObjectPicked(chatId, picked.id, deps);
+    return { answer: "Выбрано", message: r.text, ...(r.keyboard ? { keyboard: r.keyboard } : {}) };
+  }
+
+  const schedCb = parseSchedulesCallback(data);
+  if (schedCb) return unwrap(await handleSchedulesCallback(chatId, schedCb, person, deps));
+
+  const partCb = parsePartReplaceCallback(data);
+  if (partCb) {
+    const res = await handlePartReplaceCallback(chatId, partCb, person, deps);
+    return unwrap(res);
+  }
+
+  const cleanCb = parseCleanCallback(data);
+  if (cleanCb) return unwrap(await handleCleanCallback(chatId, cleanCb, person, deps));
+
+  const svCb = parseServiceCheckCallback(data);
+  if (svCb) return unwrap(await handleServiceCheckCallback(chatId, svCb, person, deps));
+
+  const prCb = parseProblemCallback(data);
+  if (prCb) return unwrap(await handleProblemCallback(chatId, prCb, person, deps));
+
+  if (parseAfterPhotoCallback(data)) return unwrap(finishAfterPhoto(chatId, deps));
+
+  // Кнопки закрытия задачи (dn:ok/np/x).
+  const done = parseTaskDoneCallback(data);
+  if (done) {
+    const res = await handleTaskDoneCallback(chatId, done, person, deps);
+    return {
+      answer: res.answer,
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
   // Кнопки «ошибся — исправить» (fx:del/keep). Core не даст удалить чужое.
   const coffeeFix = parseCoffeeFixCallback(data);
   if (coffeeFix) {
@@ -416,20 +636,78 @@ export async function handleStaffCallback(
   if (!parsed) return { answer: "Не понял кнопку" };
 
   const task = await deps.core.task(parsed.id);
+
+  // «Беру» — единственное действие над ЧУЖОЙ (ничьей) задачей, поэтому
+  // проверяется до проверки владения. Гонку разрешает Core.
+  if (parsed.action === "claim") {
+    if (task.ownerRef !== null) {
+      return {
+        answer: task.ownerRef === person.id ? "Она уже твоя" : "Уже взял другой",
+        edit: { text: `${formatTaskCard(task)}\n\n✋ Задачу уже взяли.` },
+      };
+    }
+    const ok = await deps.core.claimTask(parsed.id, person.id);
+    if (!ok) {
+      return {
+        answer: "Уже взял другой",
+        edit: { text: `${formatTaskCard(task)}\n\n✋ Успел кто-то другой.` },
+      };
+    }
+    const mine: TaskRow = { ...task, ownerRef: person.id };
+    return {
+      answer: "Взял",
+      edit: { text: `${formatTaskCard(mine)}\n\n✋ Задача твоя.`, keyboard: taskKeyboard(mine) },
+    };
+  }
+
   if (task.ownerKind !== "human" || task.ownerRef !== person.id) {
     // Не сообщаем ничего о чужой задаче — только отказ.
     return { answer: "Это не твоя задача" };
   }
 
-  if (parsed.action === "progress") {
-    await deps.core.setTaskStatus(parsed.id, "in_progress", `person:${person.id}`);
-    return { answer: "Отметил: в работе", message: `Взял в работу: ${task.title}` };
+  // «Не смогу» — вернуть задачу в пул. Без этого застрявший техник молча
+  // блокирует работу до срока: другим она уже не видна как свободная.
+  if (parsed.action === "free") {
+    await deps.core.releaseTask(parsed.id, person.id);
+    const freed: TaskRow = { ...task, ownerRef: null, status: "todo" };
+    return {
+      answer: "Вернул в общий список",
+      edit: { text: `${formatTaskCard(freed)}\n\n↩️ Вернул в общий список — возьмёт кто-то другой.` },
+    };
   }
 
-  // «Сделал» — просим отчёт: без него закрытие ничего не объясняет.
-  deps.awaiting.set(chatId, parsed.id);
+  // Номерная кнопка из списка: раскрываем карточку на месте.
+  if (parsed.action === "open") {
+    return {
+      answer: task.title.slice(0, 60),
+      edit: { text: formatTaskCard(task), keyboard: taskKeyboard(task) },
+    };
+  }
+
+  if (parsed.action === "progress") {
+    await deps.core.setTaskStatus(parsed.id, "in_progress", `person:${person.id}`);
+    // Перерисовываем карточку, а не шлём вторую: иначе в чате две карточки
+    // одной задачи, и обе с живыми кнопками — «Взял» можно нажать дважды.
+    const updated: TaskRow = { ...task, status: "in_progress" };
+    return {
+      answer: "Отметил: в работе",
+      edit: { text: `${formatTaskCard(updated)}\n\n▶️ Взял в работу.`, keyboard: taskKeyboard(updated) },
+    };
+  }
+
+  // «Выполнил» — мастер закрытия: отчёт, фото, подтверждение.
+  //
+  // Раньше здесь взводился отдельный однослотовый AwaitingReport («жду одну
+  // строку»). Он удалён: мастер делает то же самое и ещё фото, а два
+  // параллельных механизма ожидания текста в одном чате рано или поздно
+  // разошлись бы — и отчёт уходил бы в тот, который не ждали.
+  const started = startTaskDone(chatId, task, deps);
   return {
     answer: "Напиши, что сделано",
-    message: `Что сделано по задаче «${task.title}»? Напиши одним сообщением — это отчёт.`,
+    // Кнопки старой карточки снимаем: пока идёт мастер, нажимать на неё
+    // нечего, а повторное «Выполнил» перезапустило бы ввод с нуля.
+    edit: { text: `${formatTaskCard(task)}\n\n▶️ Закрываю…` },
+    message: started.text,
+    ...(started.keyboard ? { keyboard: started.keyboard } : {}),
   };
 }

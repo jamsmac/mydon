@@ -8,6 +8,7 @@ import {
 } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
 import { NewPersonForm } from "../../components/person-new";
+import { rolesLabel } from "@mydon/shared";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,9 @@ function PersonRow({ p, w }: { p: Person; w: Workload | undefined }) {
       <div className="pb">
         <div className="pn">{p.name}</div>
         <div className="pr2">{p.role ?? "роль не указана"}</div>
+        {/* Права доступа — не то же, что должность в карточке: от них
+            зависит, какие кнопки человек видит в боте. */}
+        {p.tgChatId && <div className="pr2">{rolesLabel(p.roles ?? [])}</div>}
         {w && (
           <div className="stats">
             <span>висит <b>{w.open}</b></span>

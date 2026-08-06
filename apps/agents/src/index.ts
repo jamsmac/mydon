@@ -5,6 +5,7 @@ import { TZ } from "@mydon/shared";
 import { budgetPosture } from "./budget";
 import { coachPosture } from "./coach";
 import { runCoffeeMonitor } from "./coffee-monitor";
+import { runMaintenanceMonitor } from "./maintenance-monitor";
 import { AgentsCoreClient } from "./core-client";
 import { runGloberentMonitor } from "./globerent-monitor";
 import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
@@ -381,6 +382,31 @@ async function main(): Promise<void> {
   // Монитор инвариантов конвейера GLOBERENT (T0, наследник pipeline-monitor
   // PROMACH): единица в ИМ-74/ИМ-40 без номера ГТД, оплаченный договор без
   // закрытия. Раз в сутки к утреннему брифингу; GLOBERENT_MONITOR_CRON="off"
+  // Графики обслуживания. 06:00 — ДО дайджеста сотрудникам (07:00) и до
+  // брифинга владельца (07:30): к моменту рассылки задачи уже должны стоять,
+  // иначе человек узнает о работе на сутки позже, чем система о ней знает.
+  const maintCron = process.env.MAINTENANCE_MONITOR_CRON ?? "0 6 * * *";
+  if (maintCron.toLowerCase() !== "off") {
+    try {
+      new Cron(maintCron, { timezone: TZ, name: "maintenance:monitor" }, () => {
+        void (async () => {
+          try {
+            const r = await runMaintenanceMonitor(core);
+            console.log(
+              `[maintenance:monitor] задач ${r.tasks}, просрочек ${r.overdue}, невзятых ${r.unclaimed}` +
+                (r.errors.length ? ` — ошибки: ${r.errors.join("; ")}` : ""),
+            );
+          } catch (err) {
+            console.error("[maintenance:monitor] сбой:", err);
+          }
+        })();
+      });
+      console.log(`Монитор графиков обслуживания: ${maintCron} (${TZ}).`);
+    } catch (err) {
+      console.error(`Расписание монитора графиков не принято (${maintCron}):`, err);
+    }
+  }
+
   // выключает явно.
   const grMonitorCron = process.env.GLOBERENT_MONITOR_CRON ?? "10 7 * * *";
   if (grMonitorCron.toLowerCase() !== "off") {

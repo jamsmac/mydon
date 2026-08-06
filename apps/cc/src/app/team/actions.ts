@@ -62,3 +62,54 @@ export async function setPersonActive(id: string, active: boolean): Promise<Acti
   revalidatePath(`/team/${id}`);
   return { ok: true };
 }
+
+/**
+ * Выпустить приглашение сотруднику.
+ *
+ * Код возвращается ОДИН раз и попадает прямо в результат действия: в базе
+ * лежит только его отпечаток, и «показать ещё раз» невозможно by design.
+ * Поэтому он не пишется ни в лог, ни в ревалидируемую страницу — только
+ * в ответ тому, кто нажал.
+ */
+export async function invitePerson(
+  id: string,
+  roles: string[],
+): Promise<ActionResult & { link?: string; expiresAt?: string }> {
+  try {
+    const res = await core.invitePerson(id, roles);
+    const bot = process.env.TELEGRAM_BOT_USERNAME ?? "";
+    revalidatePath(`/team/${id}`);
+    return {
+      ok: true,
+      // Без имени бота ссылку не собрать — отдаём хотя бы код, чтобы
+      // владелец не остался ни с чем из-за незаполненной переменной.
+      link: bot ? `https://t.me/${bot}?start=inv_${res.code}` : `код: ${res.code}`,
+      expiresAt: res.expiresAt,
+    };
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+/** Отозвать доступ. Карточка и история работ остаются в реестре. */
+export async function revokePerson(id: string): Promise<ActionResult> {
+  try {
+    await core.revokePerson(id);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/team/${id}`);
+  revalidatePath("/team");
+  return { ok: true };
+}
+
+/** Проставить роли уже подключённому — без выпуска новой ссылки. */
+export async function setPersonRoles(id: string, roles: string[]): Promise<ActionResult> {
+  try {
+    await core.setPersonRoles(id, roles);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/team/${id}`);
+  return { ok: true };
+}

@@ -1,7 +1,45 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
-import { IsBoolean, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
-import { DOMAINS, type Domain } from "@mydon/shared";
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsEmail,
+  IsIn,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from "class-validator";
+import { DOMAINS, STAFF_ROLES, type Domain } from "@mydon/shared";
+import { InvitesService } from "./invites.service";
 import { PeopleService } from "./people.service";
+
+export class ActorDto {
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
+/** Роли, которые сотрудник получит при подключении. */
+export class InviteDto extends ActorDto {
+  @IsOptional() @IsArray() @ArrayMaxSize(6)
+  @IsIn([...STAFF_ROLES], { each: true })
+  roles?: string[];
+}
+
+export class RolesDto extends ActorDto {
+  @IsArray() @ArrayMaxSize(6)
+  @IsIn([...STAFF_ROLES], { each: true })
+  roles!: string[];
+}
+
+/** Погашение приглашения ботом: код и chat_id того, кто по ссылке пришёл. */
+export class RedeemDto {
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  code!: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  chatId!: string;
+}
 
 export class CreatePersonDto {
   @IsString() @IsNotEmpty() @MaxLength(256)
@@ -44,7 +82,10 @@ export class UpdatePersonDto extends CreatePersonDto {
 /** Сотрудники: кому владелец ставит задачи (люди; агенты — отдельно). */
 @Controller("people")
 export class PeopleController {
-  constructor(private readonly people: PeopleService) {}
+  constructor(
+    private readonly people: PeopleService,
+    private readonly invites: InvitesService,
+  ) {}
 
   @Get()
   list(@Query("all") all?: string) {
@@ -55,6 +96,34 @@ export class PeopleController {
    * Привязка Telegram: сотрудник нажал «Старт» у бота.
    * Объявлено ВЫШЕ параметрических маршрутов, иначе "link" уедет в :id.
    */
+  /**
+   * Выпустить приглашение. Код возвращается ОДИН раз — в БД лежит только хеш,
+   * и «покажи ещё раз» невозможно by design.
+   */
+  @Post(":id/invite")
+  async invite(@Param("id", ParseUUIDPipe) id: string, @Body() dto: InviteDto) {
+    const res = await this.invites.issue(id, dto.roles ?? [], dto.actor ?? "owner");
+    return { code: res.code, expiresAt: res.expiresAt.toISOString(), name: res.person.name };
+  }
+
+  /** Погасить приглашение и привязать Telegram. Зовёт бот по /start inv_XXX. */
+  @Post("redeem")
+  redeem(@Body() dto: RedeemDto) {
+    return this.invites.redeem(dto.code, dto.chatId);
+  }
+
+  /** Отозвать доступ: снять привязку, погасить приглашения, снять роли. */
+  @Post(":id/revoke")
+  revoke(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ActorDto) {
+    return this.invites.revoke(id, dto.actor ?? "owner");
+  }
+
+  /** Проставить роли уже подключённому сотруднику. */
+  @Post(":id/roles")
+  setRoles(@Param("id", ParseUUIDPipe) id: string, @Body() dto: RolesDto) {
+    return this.invites.setRoles(id, dto.roles, dto.actor ?? "owner");
+  }
+
   @Post("link")
   async link(@Body() dto: LinkTelegramDto) {
     const person = await this.people.linkTelegram(dto.chatId, dto.username ?? null);
