@@ -25,7 +25,12 @@ export interface SyncCoreClient {
   ingestVendingSlots(payload: {
     capturedAt?: string;
     machines: { serial: string; alias?: string; slots: { coilId: string; product: string; capacity: number; quantity: number }[] }[];
-  }): Promise<{ machines: number; slots: number }>;
+  }): Promise<{
+    machines: number;
+    slots: number;
+    /** Пропущенные приёмом автоматы. Поле молодое — старый Core его не шлёт. */
+    skipped?: { serial: string; slots: number; reason: string }[];
+  }>;
   ingestVendingSales(payload: {
     capturedAt?: string;
     periodStart: string;
@@ -141,10 +146,17 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
   }
 
   let slots = 0;
+  const skippedNotes: string[] = [];
   if (collected.length > 0) {
     try {
       const res = await core.ingestVendingSlots({ capturedAt, machines: collected });
       slots = res.slots;
+      // Автомат, пропущенный приёмом (например, неправдоподобное число
+      // слотов), — не отказ сбора, но и не пустяк: его планограмма осталась
+      // вчерашней. Дописываем в итог прогона, чтобы пропажа была видна.
+      for (const s of res.skipped ?? []) {
+        skippedNotes.push(`автомат ${s.serial} пропущен (${s.reason}, слотов ${s.slots})`);
+      }
     } catch (err) {
       // Приём не удался — весь собранный проход считаем провалом.
       return finish({ status: "failed", machinesTotal: machines.length, machinesOk: 0, slots: 0, productSales: 0, error: errText(err) });
@@ -196,6 +208,7 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
     failures.length === 0 ? "success" : machinesOk > 0 ? "partial" : "failed";
   const errParts = [
     ...(failures.length ? [`Автоматы без слотов: ${failures.slice(0, 10).join("; ")}`] : []),
+    ...(skippedNotes.length ? [skippedNotes.slice(0, 10).join("; ")] : []),
     ...(saleErrors.length ? [saleErrors.slice(0, 10).join("; ")] : []),
   ];
   const error = errParts.length ? errParts.join(" | ") : undefined;

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { entity, event, sale } from "@mydon/db";
-import { strictNumber } from "@mydon/shared";
+import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, strictNumber } from "@mydon/shared";
 import { asc, desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
@@ -154,11 +154,14 @@ export class SalesService implements OnModuleInit {
         .select({ id: entity.id, ref: entity.externalRef })
         .from(entity)
         .where(eq(entity.type, "machine"));
-      const serialToEntity = new Map(
-        machines
-          .filter((m) => m.ref !== null && m.ref.length > 0)
-          .map((m) => [m.ref!.toLowerCase(), m.id]),
-      );
+      // Обе формы написания серийника ведут к одной карточке: реестр хранит
+      // снековые с приставкой («c2508160376»), а Ourvend отдаёт без неё.
+      const serialToEntity = new Map<string, string>();
+      for (const m of machines) {
+        for (const key of machineSerialKeys(m.ref)) {
+          if (!serialToEntity.has(key)) serialToEntity.set(key, m.id);
+        }
+      }
 
       const { values, quarantined } = buildUpserts(all, serialToEntity);
       if (quarantined.length > 0) {
@@ -196,12 +199,18 @@ export class SalesService implements OnModuleInit {
       // снек-автоматами: 10,4 млн сум висели «ничьими»). Привязываем задним
       // числом всё, что теперь узнаётся по серийнику. Обычный синк этого не
       // делает — он трогает только последние дни.
+      // Сравнение по канону, а не по написанию: реестр хранит снековые
+      // серийники с приставкой «c», Ourvend отдаёт их без неё. Regexp здесь —
+      // SQL-двойник normalizeMachineSerial из @mydon/shared (тест держит их в
+      // паре); нормализуем обе стороны, чтобы форма в базе стала безразлична.
       const linked = await this.db.execute(sql`
         update ${sale} set machine_id = e.id
         from ${entity} e
         where ${sale.machineId} is null
           and e.type = 'machine'
-          and lower(coalesce(e.external_ref, '')) = ${sale.machineSerial}
+          and regexp_replace(lower(coalesce(e.external_ref, '')), ${MACHINE_SERIAL_SQL_REGEX}, '\\1')
+            = regexp_replace(lower(coalesce(${sale.machineSerial}, '')), ${MACHINE_SERIAL_SQL_REGEX}, '\\1')
+          and coalesce(e.external_ref, '') <> ''
       `);
       const linkedCount = Number((linked as unknown as { count?: number }).count ?? 0);
       if (linkedCount > 0) {

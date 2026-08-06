@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { event, machineSale, productSale, vendingAlias, vendingProduct, vendingStock } from "@mydon/db";
-import { VendingService } from "./vending.service";
+import { entity, event, machineSale, productSale, vendingAlias, vendingProduct, vendingStock } from "@mydon/db";
+import { MAX_SLOTS_PER_MACHINE, VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
 type SaleRow = { machineSerial: string; productName: string; quantity: number; capturedAt: Date };
@@ -57,7 +57,13 @@ function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[], stock: 
  * пересчёта внутри транзакции (единственный select там — фильтр по имени
  * стабу не нужен, ingestStock сам сверяет by-name из полного среза).
  */
-function writeDb(aliases: unknown[] = [], products: unknown[] = [], stockRows: unknown[] = []) {
+function writeDb(
+  aliases: unknown[] = [],
+  products: unknown[] = [],
+  stockRows: unknown[] = [],
+  /** Карточки автоматов реестра — для привязки слотов к entity. */
+  machineCards: { id: string; ref: string | null }[] = [],
+) {
   const inserts: { table: string; values: unknown }[] = [];
   // Реальные строки vending_stock всегда имеют countedAt (NOT NULL) — большинство
   // тестов его не задают, раз речь не про порядок во времени; эпоха 0 заведомо
@@ -75,14 +81,34 @@ function writeDb(aliases: unknown[] = [], products: unknown[] = [], stockRows: u
     }),
   };
   // loadProductIndex() читает vending_alias затем vending_product — различаем по счётчику.
+  // Карточки автоматов (entity) читаются с .where() и по счётчику не идут:
+  // иначе привязка слотов сдвигала бы очередь алиасов и товаров.
   let call = 0;
   const db = {
-    select: () => ({ from: async () => (call++ === 0 ? aliases : products) }),
+    select: () => ({
+      from: (t: unknown) => {
+        if (t === entity) {
+          // Thenable + .where(): machineIdBySerial() фильтрует по типу.
+          const rows = Promise.resolve(machineCards);
+          return { where: () => rows, then: rows.then.bind(rows) };
+        }
+        const rows = Promise.resolve(call++ === 0 ? aliases : products);
+        return { where: () => rows, then: rows.then.bind(rows) };
+      },
+    }),
+    insert: (table: { [Symbol.toStringTag]?: string }) => ({
+      values: (v: unknown) => {
+        inserts.push({ table: tableName(table), values: v });
+        return Promise.resolve();
+      },
+    }),
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
   return { db, inserts };
 }
 function tableName(t: unknown): string {
+  // Журнал событий узнаём по личности: эвристика по ключам его не различает.
+  if (t === event) return "event";
   // drizzle-таблица знает своё имя; для стаба достаточно эвристики по ключам.
   const keys = Object.keys((t ?? {}) as Record<string, unknown>);
   return keys.includes("capturedAt") && !keys.includes("syncedAt") ? "slot_snapshot" : "machine_slot";
@@ -848,7 +874,7 @@ describe("Вендинг Core: приём слотов", () => {
     const res = await svc.ingestSlots({
       machines: [{ serial: "AH", slots: [{ coilId: "31", product: "Montella", capacity: 6, quantity: 0 }] }],
     });
-    assert.deepEqual(res, { machines: 1, slots: 1 });
+    assert.deepEqual(res, { machines: 1, slots: 1, linked: 0, skipped: [] });
     // Один слот → одна строка планограммы + одна строка истории.
     assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 1);
     assert.equal(inserts.filter((i) => i.table === "slot_snapshot").length, 1);
@@ -864,6 +890,89 @@ describe("Вендинг Core: приём слотов", () => {
     const ms = inserts.find((i) => i.table === "machine_slot")!.values as { isValid: boolean; productName: string | null };
     assert.equal(ms.productName, null);
     assert.equal(ms.isValid, false);
+  });
+
+  it("привязывает слот к карточке, даже если в реестре серийник с приставкой c", async () => {
+    // Боевой случай: Ourvend прислал «2508160376», в реестре лежит
+    // «c2508160376» (форма из mydon-stock). Раньше machine_id оставался NULL.
+    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", ref: "c2508160376" }]);
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({
+      machines: [{ serial: "2508160376", slots: [{ coilId: "1", product: "Snickers", capacity: 11, quantity: 8 }] }],
+    });
+    assert.equal(res.linked, 1);
+    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { machineId: string | null };
+    assert.equal(ms.machineId, "ent-1");
+  });
+
+  it("код кофемашины на c не путается с серийником Ourvend", async () => {
+    // c7a6181f0000 — живой автомат; срезать приставку у него нельзя.
+    const { db, inserts } = writeDb([], [], [], [{ id: "kofe", ref: "c7a6181f0000" }]);
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({
+      machines: [{ serial: "c7a6181f0000", slots: [{ coilId: "1", product: "x", capacity: 1, quantity: 1 }] }],
+    });
+    assert.equal(res.linked, 1);
+    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { machineId: string | null };
+    assert.equal(ms.machineId, "kofe");
+  });
+
+  it("автомат без карточки в реестре принимается, machine_id остаётся пустым", async () => {
+    // 2508160355 и 2508160358 есть в Ourvend, но карточек у них нет.
+    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", ref: "c2508160376" }]);
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({
+      machines: [{ serial: "2508160355", slots: [{ coilId: "1", product: "", capacity: 0, quantity: 0 }] }],
+    });
+    assert.equal(res.machines, 1);
+    assert.equal(res.linked, 0);
+    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { machineId: string | null };
+    assert.equal(ms.machineId, null);
+  });
+
+  it("раздутый автомат пропускается, остальные принимаются (а не падает весь приём)", async () => {
+    // Прежде потолок стоял валидатором на входе и отменял ВЕСЬ запрос.
+    const many = Array.from({ length: MAX_SLOTS_PER_MACHINE + 1 }, (_, i) => ({
+      coilId: String(i + 1),
+      product: "x",
+      capacity: 1,
+      quantity: 1,
+    }));
+    const { db, inserts } = writeDb();
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({
+      machines: [
+        { serial: "РАЗДУТЫЙ", slots: many },
+        { serial: "ОБЫЧНЫЙ", slots: [{ coilId: "1", product: "Twix", capacity: 11, quantity: 9 }] },
+      ],
+    });
+    assert.equal(res.machines, 1, "принят только обычный автомат");
+    assert.equal(res.slots, 1);
+    assert.deepEqual(res.skipped, [
+      { serial: "РАЗДУТЫЙ", slots: MAX_SLOTS_PER_MACHINE + 1, reason: "слишком много слотов" },
+    ]);
+    // Слоты обычного автомата записаны — приём не отменён.
+    assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 1);
+    // И пропуск не растворился: он в журнале событий.
+    assert.equal(inserts.filter((i) => i.table === "event").length, 1);
+  });
+
+  it("автомат ровно на потолке ещё принимается", async () => {
+    const many = Array.from({ length: MAX_SLOTS_PER_MACHINE }, (_, i) => ({
+      coilId: String(i + 1),
+      product: "x",
+      capacity: 1,
+      quantity: 1,
+    }));
+    const { db } = writeDb();
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({ machines: [{ serial: "НА_ГРАНИ", slots: many }] });
+    assert.equal(res.machines, 1);
+    assert.deepEqual(res.skipped, []);
+  });
+
+  it("потолок выше живого максимума парка (488 слотов у Olma Администрация)", () => {
+    assert.ok(MAX_SLOTS_PER_MACHINE > 488, "иначе самый большой автомат парка перестанет приниматься");
   });
 });
 
