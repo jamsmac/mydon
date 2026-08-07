@@ -42,6 +42,18 @@ export interface Briefing {
 }
 
 /** Автомат с дефицитом и статусом планограммы (вендинг). */
+/** Карточка автомата: вид и состояние. */
+export interface MachineCard {
+  entityId: string;
+  kind: string;
+  status: string;
+  statusNote: string | null;
+  statusChangedAt: string | null;
+  note: string | null;
+  createdBy: string | null;
+  updatedBy: string | null;
+}
+
 export interface VendingMachine {
   serial: string;
   status: "ok" | "no_slots" | "uncalibrated";
@@ -1520,6 +1532,11 @@ export interface MaintenanceDue {
   status: "ok" | "soon" | "due" | "overdue" | "unknown";
   assigneeId: string | null;
   autoTask: boolean;
+  /** Состояние автомата: in_service | warehouse | repair. Не автомат — null. */
+  machineStatus?: string | null;
+  /** Работы имеют смысл. Поле молодое: старый Core его не отдаёт. */
+  operational?: boolean;
+  idleReason?: string | null;
 }
 
 export interface MaintenancePlan {
@@ -1620,6 +1637,29 @@ export const core = {
   updateAgent: (name: string, patch: Record<string, unknown>) =>
     send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "PATCH", patch),
   archiveAgent: (name: string) => send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "DELETE"),
+
+  // ── Карточка автомата: вид и состояние ──
+  /**
+   * Карточка одного автомата. Core отдаёт весь список (парк — три десятка
+   * строк), поэтому фильтруем здесь: заводить ради этого второй эндпоинт с
+   * фильтром — лишняя поверхность.
+   */
+  machineCard: (entityId: string) =>
+    get<MachineCard[]>("/entities/machine-cards/all").then(
+      (rows) => rows.find((r) => r.entityId === entityId) ?? null,
+    ),
+  setMachineKind: (entityId: string, kind: string, note?: string) =>
+    send<MachineCard>(`/entities/${entityId}/machine-kind`, "PATCH", {
+      kind,
+      actor: "owner",
+      ...(note !== undefined ? { note } : {}),
+    }),
+  setMachineStatus: (entityId: string, status: string, note?: string) =>
+    send<MachineCard>(`/entities/${entityId}/machine-status`, "PATCH", {
+      status,
+      actor: "owner",
+      ...(note !== undefined ? { note } : {}),
+    }),
 
   // ── Вендинг: автоматы и дефицит ──
   vendingMachines: () => get<VendingMachine[]>("/vending/machines"),
