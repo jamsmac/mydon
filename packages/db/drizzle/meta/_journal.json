@@ -337,6 +337,13 @@
       "when": 1786050320388,
       "tag": "0047_machine_status",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1786085150819,
+      "tag": "0048_ourvend_sales_machine_id",
+      "breakpoints": true
     }
   ]
 }

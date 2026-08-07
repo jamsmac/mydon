@@ -504,12 +504,17 @@ export class VendingService {
     const capturedAt = payload.capturedAt ? new Date(payload.capturedAt) : new Date();
     const periodStart = new Date(payload.periodStart);
     const periodEnd = new Date(payload.periodEnd);
+    // Продажи Ourvend знали только серийник, поэтому вопрос «сколько принёс
+    // ЭТОТ автомат» отвечался для mydon-stock и не отвечался для Ourvend.
+    // Карта строится по обеим формам написания серийника (см. machineSerialKeys).
+    const bySerial = await this.machineIdBySerial();
     await this.db.transaction(async (tx) => {
       for (const p of payload.productSales) {
         await tx
           .insert(productSale)
           .values({
             machineSerial: p.serial,
+            machineId: bySerial.get(normalizeMachineSerial(p.serial)) ?? null,
             productName: p.product,
             periodStart,
             periodEnd,
@@ -518,7 +523,14 @@ export class VendingService {
           })
           .onConflictDoUpdate({
             target: [productSale.machineSerial, productSale.productName, productSale.capturedAt],
-            set: { periodStart, periodEnd, quantity: p.quantity },
+            // machineId обновляем тоже: карточка автомата могла появиться позже
+            // продажи — так же, как это делает приём слотов и backfill в sale.
+            set: {
+              periodStart,
+              periodEnd,
+              quantity: p.quantity,
+              machineId: bySerial.get(normalizeMachineSerial(p.serial)) ?? null,
+            },
           });
       }
       for (const m of payload.machineSales) {
@@ -526,6 +538,7 @@ export class VendingService {
           .insert(machineSale)
           .values({
             machineSerial: m.serial,
+            machineId: bySerial.get(normalizeMachineSerial(m.serial)) ?? null,
             periodStart,
             periodEnd,
             totalAmount: m.totalAmount.toFixed(2),
@@ -534,7 +547,13 @@ export class VendingService {
           })
           .onConflictDoUpdate({
             target: [machineSale.machineSerial, machineSale.capturedAt],
-            set: { periodStart, periodEnd, totalAmount: m.totalAmount.toFixed(2), totalCount: m.totalCount },
+            set: {
+              periodStart,
+              periodEnd,
+              totalAmount: m.totalAmount.toFixed(2),
+              totalCount: m.totalCount,
+              machineId: bySerial.get(normalizeMachineSerial(m.serial)) ?? null,
+            },
           });
       }
     });
