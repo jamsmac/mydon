@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { and, asc, desc, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
@@ -15,7 +16,7 @@ import {
   coffeeWashLog,
   coffeeWashSchedule,
   entity,
-} from "@mydon/db";
+  org,} from "@mydon/db";
 import {
   buildLocationSummary,
   consumedSince,
@@ -32,7 +33,7 @@ import {
   type LatestRefillRow,
   type ReconcileResult,
   type RecipeLine,
-} from "@mydon/shared";
+  isPlaceType,} from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 
 /**
@@ -55,11 +56,17 @@ export interface LocationRow {
   id: string;
   name: string;
   isActive: boolean;
-  /** Карточка автомата в реестре (entity, type=machine). null — точка не привязана. */
+  /** Порядок в списке; хранится в attrs карточки. */
+  sortOrder: number;
+  /**
+   * ПЕРВЫЙ аппарат на месте — для совместимости панели и бота, которые писались
+   * во времена «одно место = один аппарат». Полный состав в `machines`.
+   */
   entityId: string | null;
-  /** Имя и серийник привязанного автомата — для отображения; null без привязки. */
   machineName: string | null;
   machineRef: string | null;
+  /** Все аппараты, стоящие на месте сейчас. Их может быть несколько. */
+  machines: { entityId: string; name: string; ref: string | null }[];
 }
 
 /** Кто удаляет запись журнала и чьи записи ему можно трогать. */
@@ -317,21 +324,60 @@ export class CoffeeService {
 
   // ── Точки ──────────────────────────────────────────────────────────────
 
+  /**
+   * Точки со СПИСКОМ стоящих на них аппаратов.
+   *
+   * Раньше место знало один «текущий аппарат» колонкой `entity_id`, и список
+   * отдавал одно имя. Владелец 07.08.2026 разрешил ставить на место несколько
+   * аппаратов — колонка стала невыразимой, и текущий состав считается из
+   * открытых размещений (`end_date is null`), где он и был.
+   *
+   * `isActive` и порядок живут в `attrs` карточки — так в этом реестре хранятся
+   * свойства, у которых нет отдельной колонки (роли контрагента, срок договора).
+   */
   async locations(): Promise<LocationRow[]> {
-    // leftJoin, не innerJoin: непривязанные точки должны остаться в списке.
-    const rows = await this.db
+    const places = await this.db
+      .select({ id: entity.id, name: entity.name, attrs: entity.attrs })
+      .from(entity)
+      .where(eq(entity.type, "location"));
+
+    const открытые = await this.db
       .select({
-        id: place.id,
-        name: place.name,
-        isActive: place.isActive,
-        entityId: place.entityId,
+        locationId: machinePlacement.locationId,
+        entityId: machinePlacement.entityId,
         machineName: entity.name,
         machineRef: entity.externalRef,
       })
-      .from(place)
-      .leftJoin(entity, eq(place.entityId, entity.id))
-      .orderBy(asc(coffeeLocation.sortOrder));
-    return rows;
+      .from(machinePlacement)
+      .innerJoin(entity, eq(machinePlacement.entityId, entity.id))
+      .where(isNull(machinePlacement.endDate));
+
+    const поМесту = new Map<string, typeof открытые>();
+    for (const r of открытые) {
+      const list = поМесту.get(r.locationId) ?? [];
+      list.push(r);
+      поМесту.set(r.locationId, list);
+    }
+
+    return places
+      .map((p) => {
+        const attrs = (p.attrs ?? {}) as Record<string, unknown>;
+        const машины = поМесту.get(p.id) ?? [];
+        const первая = машины[0];
+        return {
+          id: p.id,
+          name: p.name,
+          isActive: attrs["выключена"] !== true,
+          sortOrder: typeof attrs["порядок"] === "number" ? (attrs["порядок"] as number) : 0,
+          // Поля в единственном числе оставлены ради совместимости панели и
+          // бота: они читают «аппарат на точке». Полный состав — в `machines`.
+          entityId: первая?.entityId ?? null,
+          machineName: первая?.machineName ?? null,
+          machineRef: первая?.machineRef ?? null,
+          machines: машины.map((m) => ({ entityId: m.entityId, name: m.machineName, ref: m.machineRef })),
+        };
+      })
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "ru"));
   }
 
   // ── Привязка точек к автоматам реестра ──────────────────────────────────
@@ -359,57 +405,89 @@ export class CoffeeService {
   }
 
   /**
-   * Привязать/отвязать точку от карточки автомата. entityId=null — снять связь.
+   * Поставить аппарат на место или снять его оттуда.
    *
-   * Move-семантика (слово владельца, 2026-08-03): один аппарат мог работать на
-   * разных точках, на одной точке — разные аппараты. Поэтому привязка не
-   * перетирает факт, а ведёт историю: открытые размещения точки И аппарата
-   * закрываются сегодняшним днём, открывается новое. `coffee_location.entityId`
-   * остаётся кэшем текущего состояния. Всё одной транзакцией — история и кэш
-   * не могут разъехаться.
+   * Операция над ПАРОЙ «место + аппарат», а не над местом. Раньше она была над
+   * местом: привязка закрывала все открытые размещения точки, «какой бы аппарат
+   * там ни стоял». Пока на месте мог стоять один аппарат, разницы не было; с
+   * решением владельца 07.08.2026 («на точке может стоять несколько, в том
+   * числе одинаковых») старое поведение стало опасным — второй сломанный
+   * автомат, приехавший в мастерскую, МОЛЧА выселил бы оттуда первого, оставив
+   * аккуратно закрытый период в истории.
+   *
+   * Что осталось прежним: аппарат не может стоять в двух местах сразу, поэтому
+   * его собственное открытое размещение закрывается. Это физика железа, и
+   * частичный уникальный индекс `machine_placement_entity_open_key` её держит.
+   *
+   * `entityId = null` больше не означает «отвязать место»: у места может быть
+   * несколько аппаратов, и какой из них снимать — вопрос, на который null не
+   * отвечает. Снятие выражается вызовом `unlinkMachine`.
    */
   async linkLocation(locationId: string, entityId: string | null): Promise<{ ok: true }> {
-    const [loc] = await this.db.select({ id: place.id }).from(place).where(eq(place.id, locationId));
-    if (!loc) throw new NotFoundException(`Точка ${locationId} не найдена`);
-    if (entityId !== null) {
-      const [card] = await this.db
-        .select({ id: entity.id, type: entity.type })
-        .from(entity)
-        .where(eq(entity.id, entityId));
-      if (!card) throw new NotFoundException(`Карточка ${entityId} не найдена`);
-      if (card.type !== "machine") throw new BadRequestException("Привязать можно только карточку автомата (type=machine)");
+    if (entityId === null) {
+      throw new BadRequestException(
+        "На месте может стоять несколько аппаратов — укажите, какой снять (unlinkMachine)",
+      );
+    }
+    const [loc] = await this.db
+      .select({ id: entity.id, type: entity.type })
+      .from(entity)
+      .where(eq(entity.id, locationId));
+    if (!loc) throw new NotFoundException(`Место ${locationId} не найдено`);
+    if (!isPlaceType(loc.type)) {
+      throw new BadRequestException(`Поставить аппарат можно только на место, а это «${loc.type}»`);
+    }
+
+    const [card] = await this.db
+      .select({ id: entity.id, type: entity.type })
+      .from(entity)
+      .where(eq(entity.id, entityId));
+    if (!card) throw new NotFoundException(`Карточка ${entityId} не найдена`);
+    if (card.type !== "machine") {
+      throw new BadRequestException("Привязать можно только карточку автомата (type=machine)");
     }
 
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
     await this.db.transaction(async (tx) => {
-      // Тот же аппарат уже стоит на этой точке — не плодим период-дубль.
-      const [current] = await tx
-        .select({ id: machinePlacement.id, entityId: machinePlacement.entityId })
+      // Уже стоит здесь — период-дубль не плодим.
+      const [уже] = await tx
+        .select({ id: machinePlacement.id })
         .from(machinePlacement)
-        .where(and(eq(machinePlacement.locationId, locationId), isNull(machinePlacement.endDate)));
-      if (current && entityId !== null && current.entityId === entityId) {
-        await tx.update(entity).set({ entityId }).where(eq(place.id, locationId));
-        return;
-      }
+        .where(
+          and(
+            eq(machinePlacement.locationId, locationId),
+            eq(machinePlacement.entityId, entityId),
+            isNull(machinePlacement.endDate),
+          ),
+        );
+      if (уже) return;
 
-      // Закрыть открытое размещение точки (какой бы аппарат там ни стоял).
+      // Закрываем открытое размещение САМОГО АППАРАТА — он уезжает сюда
+      // откуда-то ещё. Соседей по новому месту не трогаем.
       await tx
         .update(machinePlacement)
         .set({ endDate: today })
-        .where(and(eq(machinePlacement.locationId, locationId), isNull(machinePlacement.endDate)));
-
-      if (entityId !== null) {
-        // И открытое размещение самого аппарата — он не может стоять в двух местах.
-        await tx
-          .update(machinePlacement)
-          .set({ endDate: today })
-          .where(and(eq(machinePlacement.entityId, entityId), isNull(machinePlacement.endDate)));
-        await tx.insert(machinePlacement).values({ locationId, entityId, startDate: today });
-      }
-
-      await tx.update(entity).set({ entityId }).where(eq(place.id, locationId));
+        .where(and(eq(machinePlacement.entityId, entityId), isNull(machinePlacement.endDate)));
+      await tx.insert(machinePlacement).values({ locationId, entityId, startDate: today });
     });
     return { ok: true };
+  }
+
+  /**
+   * Снять аппарат с места, где он стоит.
+   *
+   * Отдельная операция, потому что «отвязать место» перестало быть однозначным:
+   * аппаратов на нём может быть несколько. Закрываем открытое размещение
+   * именно этого аппарата — остальные остаются на месте.
+   */
+  async unlinkMachine(entityId: string): Promise<{ ok: true; snятo: number }> {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    const closed = await this.db
+      .update(machinePlacement)
+      .set({ endDate: today })
+      .where(and(eq(machinePlacement.entityId, entityId), isNull(machinePlacement.endDate)))
+      .returning({ id: machinePlacement.id });
+    return { ok: true, snятo: closed.length };
   }
 
   /** История размещений: какой аппарат когда на какой точке стоял. */
@@ -458,7 +536,9 @@ export class CoffeeService {
     const ambiguous: string[] = [];
     const unmatched: string[] = [];
     for (const loc of locations) {
-      if (loc.entityId !== null) continue; // ручную привязку не перетираем
+      // Место уже занято — ручную расстановку не перетираем. Проверяем ВЕСЬ
+      // состав, а не «текущий аппарат»: аппаратов на месте может быть несколько.
+      if (loc.machines.length > 0) continue;
       const found = candidatesByKey.get(normalizeSourceKey(loc.name)) ?? [];
       if (found.length === 1) {
         await this.linkLocation(loc.id, found[0]!);
@@ -474,11 +554,30 @@ export class CoffeeService {
 
   // ── Точки: правка из панели (слово владельца: всё редактируется легко) ──
 
-  /** Завести точку вручную. Уникальность имени держит БД. */
+  /**
+   * Завести точку вручную.
+   *
+   * Точка — карточка реестра типа `location` (миграция 0049). Заводится
+   * утверждённой: её создаёт владелец через панель, а не источник данных.
+   */
   async createLocation(name: string): Promise<{ id: string }> {
     const clean = name.trim();
     if (clean.length < 2 || clean.length > 128) throw new BadRequestException("Имя точки — от 2 до 128 символов");
-    const [row] = await this.db.insert(entity).values({ name: clean }).returning({ id: place.id });
+    const [vendhub] = await this.db
+      .select({ id: org.id })
+      .from(org)
+      .where(eq(org.code, "vendhub"))
+      .limit(1);
+    const [row] = await this.db
+      .insert(entity)
+      .values({
+        ...(vendhub ? { orgId: vendhub.id } : {}),
+        type: "location",
+        name: clean,
+        approvedAt: new Date(),
+        approvedBy: "owner",
+      })
+      .returning({ id: entity.id });
     await this.db.insert(auditLog).values({
       actorKind: "human",
       actorRef: "panel",
@@ -491,23 +590,30 @@ export class CoffeeService {
 
   /** Переименовать / включить-выключить точку. */
   async updateLocation(id: string, patch: { name?: string; isActive?: boolean }): Promise<{ ok: true }> {
-    const [loc] = await this.db.select().from(place).where(eq(place.id, id));
+    const [loc] = await this.db.select().from(entity).where(eq(entity.id, id));
     if (!loc) throw new NotFoundException(`Точка ${id} не найдена`);
-    const set: { name?: string; isActive?: boolean } = {};
+    const attrs = { ...((loc.attrs ?? {}) as Record<string, unknown>) };
+    const set: { name?: string; attrs?: Record<string, unknown> } = {};
     if (patch.name !== undefined) {
       const clean = patch.name.trim();
       if (clean.length < 2 || clean.length > 128) throw new BadRequestException("Имя точки — от 2 до 128 символов");
       set.name = clean;
     }
-    if (patch.isActive !== undefined) set.isActive = patch.isActive;
+    // «Выключена», а не «активна»: в attrs пишем только отклонение от нормы,
+    // иначе у каждой карточки завёлся бы флаг со значением по умолчанию.
+    if (patch.isActive !== undefined) {
+      if (patch.isActive) delete attrs["выключена"];
+      else attrs["выключена"] = true;
+      set.attrs = attrs;
+    }
     if (Object.keys(set).length === 0) return { ok: true };
-    await this.db.update(entity).set(set).where(eq(place.id, id));
+    await this.db.update(entity).set(set).where(eq(entity.id, id));
     await this.db.insert(auditLog).values({
       actorKind: "human",
       actorRef: "panel",
       action: "coffee.location.update",
       target: id,
-      before: { name: loc.name, isActive: loc.isActive },
+      before: { name: loc.name, attrs: loc.attrs },
       after: set,
     });
     return { ok: true };
