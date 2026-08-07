@@ -75,6 +75,9 @@ export * from "./maintenance";
 export * from "./maintenance-due";
 export * from "./catalog-kinds";
 
+/** Вид места: точка продаж / склад / мастерская. */
+export * from "./place-kinds";
+
 /** Состояние автомата: в эксплуатации / склад / ремонт. */
 export * from "./machine-status";
 export * from "./maintenance-norms";
