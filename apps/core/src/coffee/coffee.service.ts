@@ -7,8 +7,7 @@ import {
   coffeeContainerTare,
   auditLog,
   coffeeIngredient,
-  coffeeLocation,
-  coffeeMachinePlacement,
+  machinePlacement,
   coffeeProduct,
   coffeeRefill,
   coffeeSale,
@@ -35,6 +34,15 @@ import {
   type RecipeLine,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
+
+/**
+ * Место в запросе — та же таблица `entity`, что и автомат.
+ *
+ * Миграция 0049 влила справочник точек в реестр, поэтому join идёт на `entity`
+ * дважды: один раз за автоматом, другой за местом. Псевдоним обязателен —
+ * иначе Postgres не различит их в одном запросе.
+ */
+const place = alias(entity, "place");
 
 /**
  * Кофе-бункеры: ручные кофемашины на точках владельца (Ourvend их не видит).
@@ -313,15 +321,15 @@ export class CoffeeService {
     // leftJoin, не innerJoin: непривязанные точки должны остаться в списке.
     const rows = await this.db
       .select({
-        id: coffeeLocation.id,
-        name: coffeeLocation.name,
-        isActive: coffeeLocation.isActive,
-        entityId: coffeeLocation.entityId,
+        id: place.id,
+        name: place.name,
+        isActive: place.isActive,
+        entityId: place.entityId,
         machineName: entity.name,
         machineRef: entity.externalRef,
       })
-      .from(coffeeLocation)
-      .leftJoin(entity, eq(coffeeLocation.entityId, entity.id))
+      .from(place)
+      .leftJoin(entity, eq(place.entityId, entity.id))
       .orderBy(asc(coffeeLocation.sortOrder));
     return rows;
   }
@@ -361,7 +369,7 @@ export class CoffeeService {
    * не могут разъехаться.
    */
   async linkLocation(locationId: string, entityId: string | null): Promise<{ ok: true }> {
-    const [loc] = await this.db.select({ id: coffeeLocation.id }).from(coffeeLocation).where(eq(coffeeLocation.id, locationId));
+    const [loc] = await this.db.select({ id: place.id }).from(place).where(eq(place.id, locationId));
     if (!loc) throw new NotFoundException(`Точка ${locationId} не найдена`);
     if (entityId !== null) {
       const [card] = await this.db
@@ -376,30 +384,30 @@ export class CoffeeService {
     await this.db.transaction(async (tx) => {
       // Тот же аппарат уже стоит на этой точке — не плодим период-дубль.
       const [current] = await tx
-        .select({ id: coffeeMachinePlacement.id, entityId: coffeeMachinePlacement.entityId })
-        .from(coffeeMachinePlacement)
-        .where(and(eq(coffeeMachinePlacement.locationId, locationId), isNull(coffeeMachinePlacement.endDate)));
+        .select({ id: machinePlacement.id, entityId: machinePlacement.entityId })
+        .from(machinePlacement)
+        .where(and(eq(machinePlacement.locationId, locationId), isNull(machinePlacement.endDate)));
       if (current && entityId !== null && current.entityId === entityId) {
-        await tx.update(coffeeLocation).set({ entityId }).where(eq(coffeeLocation.id, locationId));
+        await tx.update(entity).set({ entityId }).where(eq(place.id, locationId));
         return;
       }
 
       // Закрыть открытое размещение точки (какой бы аппарат там ни стоял).
       await tx
-        .update(coffeeMachinePlacement)
+        .update(machinePlacement)
         .set({ endDate: today })
-        .where(and(eq(coffeeMachinePlacement.locationId, locationId), isNull(coffeeMachinePlacement.endDate)));
+        .where(and(eq(machinePlacement.locationId, locationId), isNull(machinePlacement.endDate)));
 
       if (entityId !== null) {
         // И открытое размещение самого аппарата — он не может стоять в двух местах.
         await tx
-          .update(coffeeMachinePlacement)
+          .update(machinePlacement)
           .set({ endDate: today })
-          .where(and(eq(coffeeMachinePlacement.entityId, entityId), isNull(coffeeMachinePlacement.endDate)));
-        await tx.insert(coffeeMachinePlacement).values({ locationId, entityId, startDate: today });
+          .where(and(eq(machinePlacement.entityId, entityId), isNull(machinePlacement.endDate)));
+        await tx.insert(machinePlacement).values({ locationId, entityId, startDate: today });
       }
 
-      await tx.update(coffeeLocation).set({ entityId }).where(eq(coffeeLocation.id, locationId));
+      await tx.update(entity).set({ entityId }).where(eq(place.id, locationId));
     });
     return { ok: true };
   }
@@ -408,21 +416,21 @@ export class CoffeeService {
   async placements(locationId?: string): Promise<PlacementRow[]> {
     const rows = await this.db
       .select({
-        id: coffeeMachinePlacement.id,
-        locationId: coffeeMachinePlacement.locationId,
-        locationName: coffeeLocation.name,
-        entityId: coffeeMachinePlacement.entityId,
+        id: machinePlacement.id,
+        locationId: machinePlacement.locationId,
+        locationName: place.name,
+        entityId: machinePlacement.entityId,
         machineName: entity.name,
         machineRef: entity.externalRef,
-        startDate: coffeeMachinePlacement.startDate,
-        endDate: coffeeMachinePlacement.endDate,
-        note: coffeeMachinePlacement.note,
+        startDate: machinePlacement.startDate,
+        endDate: machinePlacement.endDate,
+        note: machinePlacement.note,
       })
-      .from(coffeeMachinePlacement)
-      .innerJoin(coffeeLocation, eq(coffeeMachinePlacement.locationId, coffeeLocation.id))
-      .innerJoin(entity, eq(coffeeMachinePlacement.entityId, entity.id))
-      .where(locationId ? eq(coffeeMachinePlacement.locationId, locationId) : undefined)
-      .orderBy(desc(sql`${coffeeMachinePlacement.endDate} is null`), desc(coffeeMachinePlacement.startDate));
+      .from(machinePlacement)
+      .innerJoin(place, eq(machinePlacement.locationId, place.id))
+      .innerJoin(entity, eq(machinePlacement.entityId, entity.id))
+      .where(locationId ? eq(machinePlacement.locationId, locationId) : undefined)
+      .orderBy(desc(sql`${machinePlacement.endDate} is null`), desc(machinePlacement.startDate));
     return rows;
   }
 
@@ -470,7 +478,7 @@ export class CoffeeService {
   async createLocation(name: string): Promise<{ id: string }> {
     const clean = name.trim();
     if (clean.length < 2 || clean.length > 128) throw new BadRequestException("Имя точки — от 2 до 128 символов");
-    const [row] = await this.db.insert(coffeeLocation).values({ name: clean }).returning({ id: coffeeLocation.id });
+    const [row] = await this.db.insert(entity).values({ name: clean }).returning({ id: place.id });
     await this.db.insert(auditLog).values({
       actorKind: "human",
       actorRef: "panel",
@@ -483,7 +491,7 @@ export class CoffeeService {
 
   /** Переименовать / включить-выключить точку. */
   async updateLocation(id: string, patch: { name?: string; isActive?: boolean }): Promise<{ ok: true }> {
-    const [loc] = await this.db.select().from(coffeeLocation).where(eq(coffeeLocation.id, id));
+    const [loc] = await this.db.select().from(place).where(eq(place.id, id));
     if (!loc) throw new NotFoundException(`Точка ${id} не найдена`);
     const set: { name?: string; isActive?: boolean } = {};
     if (patch.name !== undefined) {
@@ -493,7 +501,7 @@ export class CoffeeService {
     }
     if (patch.isActive !== undefined) set.isActive = patch.isActive;
     if (Object.keys(set).length === 0) return { ok: true };
-    await this.db.update(coffeeLocation).set(set).where(eq(coffeeLocation.id, id));
+    await this.db.update(entity).set(set).where(eq(place.id, id));
     await this.db.insert(auditLog).values({
       actorKind: "human",
       actorRef: "panel",
@@ -574,7 +582,7 @@ export class CoffeeService {
         .select({
           id: coffeeRefill.id,
           at: coffeeRefill.createdAt,
-          locationName: coffeeLocation.name,
+          locationName: place.name,
           position: coffeeRefill.position,
           containerNumber: coffeeRefill.containerNumber,
           filledWeight: coffeeRefill.filledWeight,
@@ -582,7 +590,7 @@ export class CoffeeService {
           enteredDate: coffeeRefill.enteredDate,
         })
         .from(coffeeRefill)
-        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .innerJoin(place, eq(coffeeRefill.locationId, place.id))
         .where(eq(coffeeRefill.createdBy, createdBy))
         .orderBy(desc(coffeeRefill.createdAt))
         .limit(1),
@@ -603,14 +611,14 @@ export class CoffeeService {
         .select({
           id: coffeeConsumable.id,
           at: coffeeConsumable.updatedAt,
-          locationName: coffeeLocation.name,
+          locationName: place.name,
           loggedDate: coffeeConsumable.loggedDate,
           water: coffeeConsumable.water,
           cups: coffeeConsumable.cups,
           lids: coffeeConsumable.lids,
         })
         .from(coffeeConsumable)
-        .innerJoin(coffeeLocation, eq(coffeeConsumable.locationId, coffeeLocation.id))
+        .innerJoin(place, eq(coffeeConsumable.locationId, place.id))
         .where(eq(coffeeConsumable.createdBy, createdBy))
         .orderBy(desc(coffeeConsumable.updatedAt))
         .limit(1),
@@ -770,7 +778,7 @@ export class CoffeeService {
       .select({
         id: coffeeRefill.id,
         locationId: coffeeRefill.locationId,
-        locationName: coffeeLocation.name,
+        locationName: place.name,
         position: coffeeRefill.position,
         containerNumber: coffeeRefill.containerNumber,
         ingredientId: coffeeRefill.ingredientId,
@@ -782,7 +790,7 @@ export class CoffeeService {
         createdAt: coffeeRefill.createdAt,
       })
       .from(coffeeRefill)
-      .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+      .innerJoin(place, eq(coffeeRefill.locationId, place.id))
       .orderBy(desc(coffeeRefill.createdAt))
       .limit(Math.min(Math.max(limit, 1), 200));
     return rows.map((r) => ({ ...r, enteredDate: String(r.enteredDate), createdAt: r.createdAt.toISOString() }));
@@ -797,14 +805,14 @@ export class CoffeeService {
       this.locations(),
       this.db
         .select({
-          locationName: coffeeLocation.name,
+          locationName: place.name,
           position: coffeeRefill.position,
           packageCount: coffeeRefill.packageCount,
           filledWeight: coffeeRefill.filledWeight,
           enteredDate: coffeeRefill.enteredDate,
         })
         .from(coffeeRefill)
-        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .innerJoin(place, eq(coffeeRefill.locationId, place.id))
         .orderBy(asc(coffeeRefill.enteredDate)),
     ]);
 
@@ -836,7 +844,7 @@ export class CoffeeService {
       this.db
         .select({
           locationId: coffeeRefill.locationId,
-          locationName: coffeeLocation.name,
+          locationName: place.name,
           position: coffeeRefill.position,
           ingredientId: coffeeRefill.ingredientId,
           containerNumber: coffeeRefill.containerNumber,
@@ -844,7 +852,7 @@ export class CoffeeService {
           enteredDate: coffeeRefill.enteredDate,
         })
         .from(coffeeRefill)
-        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .innerJoin(place, eq(coffeeRefill.locationId, place.id))
         .orderBy(asc(coffeeRefill.enteredDate)),
       this.tareByKey(),
       this.bunkerConfig(),
@@ -902,14 +910,14 @@ export class CoffeeService {
       this.locations(),
       this.db
         .select({
-          locationName: coffeeLocation.name,
+          locationName: place.name,
           water: coffeeConsumable.water,
           cups: coffeeConsumable.cups,
           lids: coffeeConsumable.lids,
           loggedDate: coffeeConsumable.loggedDate,
         })
         .from(coffeeConsumable)
-        .innerJoin(coffeeLocation, eq(coffeeConsumable.locationId, coffeeLocation.id))
+        .innerJoin(place, eq(coffeeConsumable.locationId, place.id))
         .orderBy(asc(coffeeConsumable.loggedDate)),
     ]);
     const latest = new Map<string, { water: number; cups: number; lids: number }>();
@@ -975,10 +983,10 @@ export class CoffeeService {
           containerNumber: coffeeRefill.containerNumber,
           filledWeight: coffeeRefill.filledWeight,
           locationId: coffeeRefill.locationId,
-          locationName: coffeeLocation.name,
+          locationName: place.name,
         })
         .from(coffeeRefill)
-        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .innerJoin(place, eq(coffeeRefill.locationId, place.id))
         .where(
           and(isNotNull(coffeeRefill.containerNumber), gte(coffeeRefill.enteredDate, from), lte(coffeeRefill.enteredDate, to)),
         ),
@@ -1076,7 +1084,7 @@ export class CoffeeService {
       .select({
         id: coffeeWashLog.id,
         locationId: coffeeWashLog.locationId,
-        locationName: coffeeLocation.name,
+        locationName: place.name,
         position: coffeeWashLog.position,
         kind: coffeeWashLog.kind,
         note: coffeeWashLog.note,
@@ -1084,7 +1092,7 @@ export class CoffeeService {
         performedAt: coffeeWashLog.performedAt,
       })
       .from(coffeeWashLog)
-      .innerJoin(coffeeLocation, eq(coffeeWashLog.locationId, coffeeLocation.id))
+      .innerJoin(place, eq(coffeeWashLog.locationId, place.id))
       .where(locationId ? eq(coffeeWashLog.locationId, locationId) : undefined)
       .orderBy(desc(coffeeWashLog.performedAt))
       .limit(Math.min(Math.max(limit, 1), 200));
@@ -1164,7 +1172,7 @@ export class CoffeeService {
       .select({
         id: coffeeWashSchedule.id,
         locationId: coffeeWashSchedule.locationId,
-        locationName: coffeeLocation.name,
+        locationName: place.name,
         position: coffeeWashSchedule.position,
         frequencyDays: coffeeWashSchedule.frequencyDays,
         frequencyCups: coffeeWashSchedule.frequencyCups,
@@ -1172,8 +1180,8 @@ export class CoffeeService {
         notes: coffeeWashSchedule.notes,
       })
       .from(coffeeWashSchedule)
-      .innerJoin(coffeeLocation, eq(coffeeWashSchedule.locationId, coffeeLocation.id))
-      .orderBy(asc(coffeeLocation.name), asc(coffeeWashSchedule.position));
+      .innerJoin(place, eq(coffeeWashSchedule.locationId, place.id))
+      .orderBy(asc(place.name), asc(coffeeWashSchedule.position));
     return rows;
   }
 
@@ -1204,7 +1212,7 @@ export class CoffeeService {
         })())
       : (await this.db.insert(coffeeWashSchedule).values(values).returning({ id: coffeeWashSchedule.id }))[0]!.id;
 
-    const [loc] = await this.db.select({ name: coffeeLocation.name }).from(coffeeLocation).where(eq(coffeeLocation.id, input.locationId));
+    const [loc] = await this.db.select({ name: place.name }).from(place).where(eq(place.id, input.locationId));
     return { id, locationName: loc?.name ?? input.locationId, ...values };
   }
 
@@ -1293,10 +1301,10 @@ export class CoffeeService {
           containerNumber: coffeeRefill.containerNumber,
           filledWeight: coffeeRefill.filledWeight,
           locationId: coffeeRefill.locationId,
-          locationName: coffeeLocation.name,
+          locationName: place.name,
         })
         .from(coffeeRefill)
-        .innerJoin(coffeeLocation, eq(coffeeRefill.locationId, coffeeLocation.id))
+        .innerJoin(place, eq(coffeeRefill.locationId, place.id))
         .where(isNotNull(coffeeRefill.containerNumber)),
       this.db.select().from(coffeeContainerReturn),
       this.tareByKey(),

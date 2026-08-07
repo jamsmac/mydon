@@ -10,7 +10,8 @@
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import { createDb } from "./index";
-import { coffeeBunkerConfig, coffeeContainerTare, coffeeIngredient, coffeeLocation } from "./schema";
+import { and, eq } from "drizzle-orm";
+import { coffeeBunkerConfig, coffeeContainerTare, coffeeIngredient, entity, org } from "./schema";
 
 /** 22 точки, в порядке референс-приложения. */
 export const COFFEE_LOCATIONS: string[] = [
@@ -89,13 +90,35 @@ export const COFFEE_CONTAINER_TARE: (number | null)[][] = [
   [647, 638, 622, 626, 618, 625, 618, 638], // 027
 ];
 
-/** Занести 22 точки. Идемпотентно: по имени. */
+/**
+ * Занести 22 точки. Идемпотентно: по имени.
+ *
+ * Точка — карточка реестра типа `location` (миграция 0049 влила справочник
+ * `coffee_location` в `entity`). Утверждаем сразу: эти точки владелец знает и
+ * по ним годами идёт работа — оставить их ждущими слова значило бы объявить
+ * неподтверждённым то, что работает.
+ */
 export async function seedCoffeeLocations(db: ReturnType<typeof createDb>): Promise<{ seeded: number; skipped: number }> {
-  const existing = await db.select({ name: coffeeLocation.name }).from(coffeeLocation);
+  const [vendhub] = await db.select({ id: org.id }).from(org).where(eq(org.code, "vendhub")).limit(1);
+  if (!vendhub) throw new Error("Направление vendhub не заведено — сначала структурный сид");
+
+  const existing = await db
+    .select({ name: entity.name })
+    .from(entity)
+    .where(and(eq(entity.type, "location"), eq(entity.orgId, vendhub.id)));
   const have = new Set(existing.map((e) => e.name));
   const fresh = COFFEE_LOCATIONS.filter((name) => !have.has(name));
   if (fresh.length > 0) {
-    await db.insert(coffeeLocation).values(fresh.map((name, i) => ({ name, sortOrder: COFFEE_LOCATIONS.indexOf(name) ?? i })));
+    await db.insert(entity).values(
+      fresh.map((name) => ({
+        orgId: vendhub.id,
+        type: "location",
+        name,
+        approvedAt: new Date(),
+        approvedBy: "owner",
+        createdFrom: "seed-coffee",
+      })),
+    );
   }
   return { seeded: fresh.length, skipped: COFFEE_LOCATIONS.length - fresh.length };
 }

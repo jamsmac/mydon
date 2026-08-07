@@ -1524,14 +1524,18 @@ export const coffeeWashEventKindEnum = pgEnum("coffee_wash_event_kind", ["wash",
  * Связь по id, не по имени — переименование ничего не рвёт. Пусто — точка
  * ещё не привязана (автоподбор по названию + ручная привязка в Настройках).
  */
-export const coffeeLocation = pgTable("coffee_location", {
-  id: id(),
-  name: text("name").notNull().unique(),
-  sortOrder: integer("sort_order").default(0).notNull(),
-  isActive: boolean("is_active").default(true).notNull(),
-  entityId: uuid("entity_id").references(() => entity.id),
-  createdAt: createdAt(),
-});
+/**
+ * Точки, склады и мастерские — КАРТОЧКИ РЕЕСТРА, а не своя таблица.
+ *
+ * Была `coffee_location`; влита в `entity` миграцией 0049 с сохранением
+ * идентификаторов, поэтому шесть таблиц с `location_id` просто перецелили
+ * внешний ключ. Причина: у справочника не было и не могло быть своих
+ * координат — на карту точка попадала через ссылку на стоящий там автомат, и
+ * переименование таблицы отобрало бы у неё карту вместе с этой колонкой.
+ *
+ * Вид места — это `entity.type`: location | warehouse | workshop
+ * (см. `PLACE_TYPES` в @mydon/shared).
+ */
 
 /** Ингредиент бункера (молоко, кофе, сахар, чай…) — canonical-имя, без алиасов (список закрытый, 8 позиций). */
 export const coffeeIngredient = pgTable("coffee_ingredient", {
@@ -1610,7 +1614,7 @@ export const coffeeRefill = pgTable(
   {
     id: id(),
     locationId: uuid("location_id")
-      .references(() => coffeeLocation.id)
+      .references(() => entity.id)
       .notNull(),
     position: integer("position").notNull(),
     /** «Набор» — номер физического контейнера, если техник его записал. */
@@ -1666,16 +1670,16 @@ export const coffeeContainerReturn = pgTable(
  * 2026-08-03): один и тот же аппарат мог работать на разных точках, и на
  * одной точке в разное время работали разные аппараты. Открытое размещение
  * (end_date IS NULL) — «стоит сейчас»; перестановка ЗАКРЫВАЕТ старое и
- * открывает новое, история не переписывается. `coffee_location.entity_id`
+ * открывает новое, история не переписывается. `entity.id` места
  * остаётся кэшем текущего аппарата — его ведёт linkLocation() там же,
  * где пишет размещения.
  */
-export const coffeeMachinePlacement = pgTable(
-  "coffee_machine_placement",
+export const machinePlacement = pgTable(
+  "machine_placement",
   {
     id: id(),
     locationId: uuid("location_id")
-      .references(() => coffeeLocation.id)
+      .references(() => entity.id)
       .notNull(),
     entityId: uuid("entity_id")
       .references(() => entity.id)
@@ -1687,14 +1691,15 @@ export const coffeeMachinePlacement = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    index("coffee_machine_placement_location_idx").on(t.locationId, t.startDate),
-    index("coffee_machine_placement_entity_idx").on(t.entityId, t.startDate),
+    index("machine_placement_location_idx").on(t.locationId, t.startDate),
+    index("machine_placement_entity_idx").on(t.entityId, t.startDate),
     // Физика: на точке не больше одного текущего аппарата, аппарат — не
     // больше чем на одной точке. История (закрытые периоды) не ограничена.
-    uniqueIndex("coffee_machine_placement_location_open_key")
-      .on(t.locationId)
-      .where(sql`${t.endDate} is null`),
-    uniqueIndex("coffee_machine_placement_entity_open_key")
+    // «Один аппарат на месте» СНЯТ (решение владельца 07.08.2026): на точке
+    // может стоять несколько аппаратов, в том числе одинаковых, а склад и
+    // мастерская многоместны по определению. Обратный индекс остаётся —
+    // аппарат не может стоять в двух местах сразу, это физика железа.
+    uniqueIndex("machine_placement_entity_open_key")
       .on(t.entityId)
       .where(sql`${t.endDate} is null`),
     check(
@@ -1714,7 +1719,7 @@ export const coffeeConsumable = pgTable(
   {
     id: id(),
     locationId: uuid("location_id")
-      .references(() => coffeeLocation.id)
+      .references(() => entity.id)
       .notNull(),
     loggedDate: date("logged_date").notNull(),
     water: integer("water").default(0).notNull(),
@@ -1736,7 +1741,7 @@ export const coffeeWashLog = pgTable(
   {
     id: id(),
     locationId: uuid("location_id")
-      .references(() => coffeeLocation.id)
+      .references(() => entity.id)
       .notNull(),
     position: integer("position"),
     kind: coffeeWashEventKindEnum("kind").default("wash").notNull(),
@@ -1764,7 +1769,7 @@ export const coffeeWashSchedule = pgTable(
   {
     id: id(),
     locationId: uuid("location_id")
-      .references(() => coffeeLocation.id)
+      .references(() => entity.id)
       .notNull(),
     /** null — вся точка целиком, 1..8 — конкретный бункер (см. coffee_wash_log.position). */
     position: integer("position"),
@@ -1824,7 +1829,7 @@ export const coffeeSale = pgTable(
   {
     id: id(),
     locationId: uuid("location_id")
-      .references(() => coffeeLocation.id)
+      .references(() => entity.id)
       .notNull(),
     productId: uuid("product_id")
       .references(() => coffeeProduct.id)
@@ -2235,7 +2240,6 @@ export const schema = {
   vendingUnmatched,
   vendingSyncRun,
   // Кофе-вендинг: бункеры, тара, ежедневная заливка, расходники, мойка.
-  coffeeLocation,
   coffeeIngredient,
   coffeeBunkerConfig,
   coffeeContainerTare,
@@ -2253,5 +2257,6 @@ export const schema = {
   maintenancePlan,
   // Доступ сотрудников: приглашения.
   staffInvite,
-  coffeeMachinePlacement,
+  // Места и размещения — общие для всех видов автоматов.
+  machinePlacement,
 };
