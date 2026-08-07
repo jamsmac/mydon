@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { entity, event, machineStock, purchase } from "@mydon/db";
-import { strictNumber } from "@mydon/shared";
+import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, strictNumber } from "@mydon/shared";
 import { desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
@@ -208,9 +208,13 @@ export class SupplyService implements OnModuleInit {
         .select({ id: entity.id, ref: entity.externalRef })
         .from(entity)
         .where(eq(entity.type, "machine"));
-      const serialToEntity = new Map(
-        machines.filter((m) => m.ref).map((m) => [m.ref!.toLowerCase(), m.id]),
-      );
+      // Обе формы написания серийника ведут к одной карточке (см. sales.service).
+      const serialToEntity = new Map<string, string>();
+      for (const m of machines) {
+        for (const key of machineSerialKeys(m.ref)) {
+          if (!serialToEntity.has(key)) serialToEntity.set(key, m.id);
+        }
+      }
 
       const { values: pValues, quarantined: pBad } = buildPurchaseUpserts(pRows);
       const { values: sValues, quarantined: sBad } = buildStockUpserts(sRows, serialToEntity);
@@ -287,12 +291,15 @@ export class SupplyService implements OnModuleInit {
       if (filled > 0) this.log.log(`Карточек автоматов дозаполнено из источника: ${filled}.`);
 
       // Остатки, пришедшие до появления карточки автомата, тоже привязываем.
+      // Канон вместо написания — то же правило, что в sales.service.
       const linked = await this.db.execute(sql`
         update ${machineStock} set machine_id = e.id
         from ${entity} e
         where ${machineStock.machineId} is null
           and e.type = 'machine'
-          and lower(coalesce(e.external_ref, '')) = ${machineStock.machineSerial}
+          and regexp_replace(lower(coalesce(e.external_ref, '')), ${MACHINE_SERIAL_SQL_REGEX}, '\\1')
+            = regexp_replace(lower(coalesce(${machineStock.machineSerial}, '')), ${MACHINE_SERIAL_SQL_REGEX}, '\\1')
+          and coalesce(e.external_ref, '') <> ''
       `);
       const linkedCount = Number((linked as unknown as { count?: number }).count ?? 0);
       if (linkedCount > 0) {

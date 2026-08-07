@@ -76,6 +76,9 @@ export * from "./maintenance-due";
 export * from "./catalog-kinds";
 export * from "./maintenance-norms";
 
+/** Серийник автомата: две формы написания сводятся к одному ключу. */
+export * from "./machine-serial";
+
 /** Роли сотрудников, права и приглашения в бота. */
 export * from "./roles";
 export * from "./invite";

@@ -40,7 +40,11 @@ export class IngestMachineDto {
   @IsOptional() @IsString() @MaxLength(255)
   alias?: string;
 
-  @IsArray() @ArrayMaxSize(500) @ValidateNested({ each: true }) @Type(() => IngestSlotDto)
+  // Потолок здесь — только защита от заведомо абсурдного запроса, а рабочее
+  // ограничение живёт в сервисе (MAX_SLOTS_PER_MACHINE): валидатор отклоняет
+  // ВЕСЬ запрос, поэтому одна разросшаяся машина уносила приём остальных
+  // четырёх. Прежние 500 стояли в 12 слотах от живого автомата на 488.
+  @IsArray() @ArrayMaxSize(5000) @ValidateNested({ each: true }) @Type(() => IngestSlotDto)
   slots!: IngestSlotDto[];
 }
 

@@ -2,6 +2,7 @@ import { Inject, Injectable, Optional } from "@nestjs/common";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   auditLog,
+  entity,
   event,
   machineSale,
   machineSlot,
@@ -19,7 +20,9 @@ import {
   computePurchase,
   computePurchaseCash,
   machineDeficit,
+  machineSerialKeys,
   needByProduct,
+  normalizeMachineSerial,
   normalizeProductName,
   planogramStatus,
   runoutForecast,
@@ -62,6 +65,35 @@ export interface IngestPayload {
   /** Момент съёма (ISO). Пусто → сейчас. */
   capturedAt?: string;
   machines: IngestMachineInput[];
+}
+
+/**
+ * Потолок слотов на один автомат.
+ *
+ * Число с запасом к натуре: самый крупный автомат парка отдаёт 488 позиций
+ * (`Olma Администрация · снек` — Ourvend возвращает слоты всех шкафов сразу,
+ * `boxId` уходит пустым). Смысл потолка — не отсечь большой автомат, а поймать
+ * заведомо испорченный ответ вендора, поэтому он вчетверо выше факта.
+ *
+ * Проверка живёт ЗДЕСЬ, а не в валидаторе DTO, осознанно: валидатор отклоняет
+ * запрос целиком, и одна разросшаяся машина уносила приём всех остальных.
+ */
+export const MAX_SLOTS_PER_MACHINE = 2000;
+
+/** Автомат, пропущенный при приёме, и почему. */
+export interface SkippedMachine {
+  serial: string;
+  slots: number;
+  reason: string;
+}
+
+export interface IngestSlotsResult {
+  /** Сколько автоматов принято (без пропущенных). */
+  machines: number;
+  slots: number;
+  /** Из принятых — сколько удалось привязать к карточке реестра. */
+  linked: number;
+  skipped: SkippedMachine[];
 }
 
 export interface MachineDeficitRow {
@@ -231,14 +263,54 @@ export class VendingService {
   ) {}
 
   /**
+   * Карта «серийник → карточка автомата» по обеим формам написания.
+   *
+   * Реестр хранит снековые серийники с приставкой («c2508160376»), Ourvend
+   * присылает без неё. Кладём в карту оба ключа, чтобы найти автомат по любой
+   * форме и не потерять сопоставления, работающие сегодня (см.
+   * `machineSerialKeys` в `@mydon/shared`).
+   */
+  private async machineIdBySerial(): Promise<Map<string, string>> {
+    const rows = await this.db
+      .select({ id: entity.id, ref: entity.externalRef })
+      .from(entity)
+      .where(eq(entity.type, "machine"));
+    const map = new Map<string, string>();
+    for (const r of rows) {
+      for (const key of machineSerialKeys(r.ref)) {
+        // Первая карточка выигрывает: дубли по одному серийнику — вопрос к
+        // реестру (docs/REGISTRY_CLEANUP.md), молча перезаписывать не надо.
+        if (!map.has(key)) map.set(key, r.id);
+      }
+    }
+    return map;
+  }
+
+  /**
    * Принять собранные слоты: upsert актуальной планограммы + запись в историю.
    * Идемпотентно по (serial, coil): повторный сбор обновляет слот, а не плодит.
+   *
+   * Автомат с неправдоподобным числом слотов пропускается, а не роняет приём:
+   * раньше потолок стоял валидатором на входе, и одна разросшаяся машина
+   * отменяла приём всех остальных (у `Olma Администрация · снек` уже 488 при
+   * прежнем лимите 500). Пропущенные возвращаются вызывающему — сбор запишет
+   * их в итог прогона, чтобы пропажа была видна, а не тиха.
    */
-  async ingestSlots(payload: IngestPayload): Promise<{ machines: number; slots: number }> {
+  async ingestSlots(payload: IngestPayload): Promise<IngestSlotsResult> {
     const capturedAt = payload.capturedAt ? new Date(payload.capturedAt) : new Date();
+    const bySerial = await this.machineIdBySerial();
+    const skipped: SkippedMachine[] = [];
+    const accepted = payload.machines.filter((m) => {
+      if (m.slots.length <= MAX_SLOTS_PER_MACHINE) return true;
+      skipped.push({ serial: m.serial, slots: m.slots.length, reason: "слишком много слотов" });
+      return false;
+    });
     let slots = 0;
+    let linked = 0;
     await this.db.transaction(async (tx) => {
-      for (const m of payload.machines) {
+      for (const m of accepted) {
+        const machineId = bySerial.get(normalizeMachineSerial(m.serial)) ?? null;
+        if (machineId !== null) linked += 1;
         for (const s of m.slots) {
           const isValid = s.capacity > 0 && s.capacity <= MAX_CAPACITY;
           const product = s.product.trim() || null;
@@ -246,6 +318,7 @@ export class VendingService {
             .insert(machineSlot)
             .values({
               machineSerial: m.serial,
+              machineId,
               coilId: s.coilId,
               productName: product,
               capacity: s.capacity,
@@ -255,7 +328,9 @@ export class VendingService {
             })
             .onConflictDoUpdate({
               target: [machineSlot.machineSerial, machineSlot.coilId],
-              set: { productName: product, capacity: s.capacity, quantity: s.quantity, isValid, syncedAt: capturedAt },
+              // machineId обновляем тоже: карточка автомата могла появиться
+              // позже слотов — так же, как это делает backfill в продажах.
+              set: { machineId, productName: product, capacity: s.capacity, quantity: s.quantity, isValid, syncedAt: capturedAt },
               // Опоздавший снимок (capturedAt старше уже сохранённого syncedAt)
               // не должен откатывать актуальную планограмму назад (найдено
               // внешним аудитом, P2). slotSnapshot ниже — история, пишется
@@ -277,7 +352,17 @@ export class VendingService {
         }
       }
     });
-    return { machines: payload.machines.length, slots };
+    if (skipped.length > 0) {
+      // Пропуск — не рядовое событие: планограмма автомата остаётся вчерашней,
+      // и заправка поедет по устаревшим остаткам. Пишем в журнал событий, а не
+      // только в ответ, чтобы след остался и без чтения логов агента.
+      await this.db.insert(event).values({
+        source: "vending-ingest",
+        type: "vending.slots.skipped",
+        payload: { machines: skipped, лимит: MAX_SLOTS_PER_MACHINE },
+      });
+    }
+    return { machines: accepted.length, slots, linked, skipped };
   }
 
   /** Актуальные слоты, сгруппированные по автомату, в форме ядра расчёта. */
