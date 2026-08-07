@@ -30,6 +30,8 @@ export interface SyncCoreClient {
     slots: number;
     /** Пропущенные приёмом автоматы. Поле молодое — старый Core его не шлёт. */
     skipped?: { serial: string; slots: number; reason: string }[];
+    /** Автоматы, у которых не удалась уборка зеркала. Снимок при этом записан. */
+    pruneErrors?: { serial: string; error: string }[];
   }>;
   ingestVendingSales(payload: {
     capturedAt?: string;
@@ -156,6 +158,11 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
       // вчерашней. Дописываем в итог прогона, чтобы пропажа была видна.
       for (const s of res.skipped ?? []) {
         skippedNotes.push(`автомат ${s.serial} пропущен (${s.reason}, слотов ${s.slots})`);
+      }
+      // Уборка зеркала не удалась — снимок записан, но лишние слоты остались.
+      // Не отказ сбора, но и не пустяк: планограмма показывает больше, чем есть.
+      for (const e of res.pruneErrors ?? []) {
+        skippedNotes.push(`уборка зеркала ${e.serial} не удалась: ${e.error}`);
       }
     } catch (err) {
       // Приём не удался — весь собранный проход считаем провалом.
