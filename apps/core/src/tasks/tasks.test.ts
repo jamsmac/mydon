@@ -308,3 +308,45 @@ describe("Правка полей задачи (edit)", () => {
     await assert.rejects(() => new TasksService(db).edit("нет", { priority: "high" }), /не найдена/);
   });
 });
+
+describe("Страховка: автомату вне эксплуатации задач не ставим", () => {
+  const общее = {
+    title: "Плановое ТО — Olma склад",
+    ownerKind: "human" as const,
+    source: "maint:plan-1",
+    dayKey: "2026-11-04",
+    entityId: "22222222-2222-4222-8222-222222222222",
+  };
+
+  it("автомат в ремонте задачу не получает", async () => {
+    // Правило соблюдает монитор графиков, но POST /tasks/ensure-day открыт:
+    // следующий источник повторяющихся задач обошёл бы его молча.
+    const inserted: Row[] = [];
+    const s = new TasksService(stubDb({ selectResult: [{ status: "repair" }], inserted }));
+    const res = await s.ensureForDay(общее);
+    assert.equal(res, null);
+    assert.equal(inserted.length, 0, "ни задачи, ни записи в журнале");
+  });
+
+  it("автомат на складе — то же самое", async () => {
+    const s = new TasksService(stubDb({ selectResult: [{ status: "warehouse" }] }));
+    assert.equal(await s.ensureForDay(общее), null);
+  });
+
+  it("рабочий автомат задачу получает", async () => {
+    const s = new TasksService(stubDb({ selectResult: [{ status: "in_service" }] }));
+    assert.ok(await s.ensureForDay(общее));
+  });
+
+  it("объект без карточки автомата считается рабочим", async () => {
+    // Признак заводился для парка, а не для всего реестра: техника,
+    // помещения и договоры не должны молча остаться без задач.
+    const s = new TasksService(stubDb({ selectResult: [] }));
+    assert.ok(await s.ensureForDay(общее));
+  });
+
+  it("задача без объекта проверку не проходит вовсе", async () => {
+    const s = new TasksService(stubDb({}));
+    assert.ok(await s.ensureForDay({ title: "Инвентаризация", ownerKind: "human", dayKey: "2026-08-08" }));
+  });
+});

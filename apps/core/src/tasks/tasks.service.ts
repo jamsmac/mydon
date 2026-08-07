@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, task, taskComment } from "@mydon/db";
-import type { Domain } from "@mydon/shared";
+import { auditLog, machineCard, task, taskComment } from "@mydon/db";
+import { machineIsOperational, type Domain } from "@mydon/shared";
 import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL, isNull } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
@@ -239,7 +239,34 @@ export class TasksService {
    * (перезапуск контейнера, наложение расписаний), и без этой проверки
    * владелец каждое утро получал бы по три одинаковых «сделать инвентаризацию».
    */
+  /**
+   * Автомат в эксплуатации? Объект без карточки автомата (техника, помещение,
+   * договор) считается рабочим: признак заводился для парка, а не для всего
+   * реестра, и молчаливое исключение всего остального было бы хуже задачи.
+   */
+  private async machineIsOperationalCheck(entityId: string): Promise<boolean> {
+    const [card] = await this.db
+      .select({ status: machineCard.status })
+      .from(machineCard)
+      .where(eq(machineCard.entityId, entityId))
+      .limit(1);
+    return machineIsOperational(card?.status);
+  }
+
   async ensureForDay(input: CreateTaskInput & { dayKey: string }): Promise<TaskRow | null> {
+    // Автомату вне эксплуатации повторяющиеся задачи не ставим.
+    //
+    // Правило соблюдает монитор графиков — он спрашивает состояние и
+    // пропускает такие строки. Но правило, которое живёт у ОДНОГО вызывающего,
+    // держится только пока вызывающий один: `POST /tasks/ensure-day` открыт, и
+    // следующий источник повторяющихся задач обойдёт его молча, ничего не
+    // нарушив явно.
+    //
+    // Проверка здесь — страховка, а не замена: монитор по-прежнему считает
+    // пропуски и называет причину, потому что ему есть что сказать владельцу.
+    // Core же просто не заводит работу, которую физически некому выполнить.
+    if (input.entityId && !(await this.machineIsOperationalCheck(input.entityId))) return null;
+
     const source = `${input.source ?? "recurring"}:${input.dayKey}`;
     // Было select-then-insert: два тика монитора в одну секунду проходили
     // проверку оба и создавали две задачи на один день. Ставку делает БД —
