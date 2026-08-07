@@ -43,6 +43,16 @@ export interface MaintenanceDueRow {
   status: DueStatus;
   assigneeId: string | null;
   autoTask: boolean;
+  /**
+   * Работы по объекту имеют смысл (автомат в эксплуатации).
+   *
+   * Необязательное: старый Core поля не отдаёт, и прогон против него должен
+   * вести себя как раньше — ставить задачи. Отсутствие признака не повод
+   * прекратить обслуживание парка.
+   */
+  operational?: boolean;
+  idleReason?: string | null;
+  machineStatus?: string | null;
 }
 
 export interface EnsureTaskInput {
@@ -70,6 +80,15 @@ export interface MaintenanceMonitorResult {
   tasks: number;
   overdue: number;
   unclaimed: number;
+  /**
+   * Работ, подошедших к сроку на автоматах вне эксплуатации.
+   *
+   * Не ошибка и не успех — отдельная величина. Без неё прогон, где половина
+   * парка в ремонте, выглядит одинаково с прогоном, где работ просто нет.
+   */
+  idle: number;
+  /** По каким автоматам и почему (до 20 строк — для брифинга, не для журнала). */
+  idleReasons: string[];
   errors: string[];
 }
 
@@ -110,7 +129,7 @@ export async function runMaintenanceMonitor(
 ): Promise<MaintenanceMonitorResult> {
   const now = (opts.now ?? (() => new Date()))();
   const today = isoDate(now);
-  const result: MaintenanceMonitorResult = { tasks: 0, overdue: 0, unclaimed: 0, errors: [] };
+  const result: MaintenanceMonitorResult = { tasks: 0, overdue: 0, unclaimed: 0, idle: 0, idleReasons: [], errors: [] };
 
   let rows: MaintenanceDueRow[];
   try {
@@ -125,6 +144,17 @@ export async function runMaintenanceMonitor(
       // «Норматив не задан» — дефект настройки, а не сигнал. О нём владелец
       // узнаёт на экране, а не пушем в шесть утра.
       if (row.status === "unknown" || row.status === "ok") continue;
+
+      // Автомат не в поле — задачу ставить некому и не на чем. Молча
+      // пропустить нельзя: прогон выглядел бы как «работы не подошли», хотя
+      // они подошли и не назначены. Считаем отдельно и называем причину.
+      if (row.operational === false) {
+        result.idle += 1;
+        if (result.idleReasons.length < 20) {
+          result.idleReasons.push(`${row.targetName}: ${row.idleReason ?? "не в эксплуатации"}`);
+        }
+        continue;
+      }
 
       const dayKey = row.nextDueOn ?? today;
 

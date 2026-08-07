@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { approval, entity, moneyFlow, org, task } from "@mydon/db";
+import { approval, entity, machineCard, moneyFlow, org, task } from "@mydon/db";
 import { TZ, type Domain } from "@mydon/shared";
 import { and, asc, count, desc, eq, lt, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -142,10 +142,17 @@ export class RegistryService {
         ),
       );
 
+    // Считаем по карточке автомата, а не по `attrs->>'status'`.
+    //
+    // Прежнее правило было мёртвым: атрибута `status` нет ни у одного автомата
+    // парка, счётчик всегда возвращал ноль, и брифинг годами сообщал «все
+    // работают» — включая дни, когда автомат стоял в мастерской. Теперь
+    // состояние хранится явно (`machine_card.status`), и вопрос «сколько
+    // автоматов не в работе» наконец имеет источник.
     const [idleMachines] = await this.db
       .select({ n: count() })
-      .from(entity)
-      .where(and(eq(entity.type, "machine"), sql`${entity.attrs} ->> 'status' = 'idle'`));
+      .from(machineCard)
+      .where(ne(machineCard.status, "in_service"));
 
     const [pendingApprovals] = await this.db
       .select({ n: count() })

@@ -1308,6 +1308,14 @@ export const machineKindEnum = pgEnum("machine_kind", [
 ]);
 
 /**
+ * Состояние автомата: работает он сейчас или нет.
+ *
+ * Отдельно от вида (`machine_kind`) намеренно: вид — что это за автомат,
+ * состояние — работает ли он. Кофейный автомат в ремонте остаётся кофейным.
+ */
+export const machineStatusEnum = pgEnum("machine_status", ["in_service", "warehouse", "repair"]);
+
+/**
  * Карточка автомата — то, что относится ТОЛЬКО к автоматам.
  *
  * Отдельная таблица, а не колонка в `entity` и не ключ в `attrs`: `entity`
@@ -1323,6 +1331,16 @@ export const machineCard = pgTable("machine_card", {
     .primaryKey()
     .references(() => entity.id, { onDelete: "cascade" }),
   kind: machineKindEnum("kind").notNull(),
+  /**
+   * Работает ли автомат. Умолчание `in_service`: парк работает, и молчаливое
+   * исключение автомата из обслуживания опаснее лишней задачи (см.
+   * `DEFAULT_MACHINE_STATUS` в @mydon/shared).
+   */
+  status: machineStatusEnum("status").default("in_service").notNull(),
+  /** Почему автомат не в строю: «отправлен в ремонт 05.08», номер заявки. */
+  statusNote: text("status_note"),
+  /** Когда состояние менялось последний раз — «в ремонте с …» без чтения журнала. */
+  statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
   note: text("note"),
   createdBy: text("created_by"),
   /**

@@ -329,3 +329,145 @@ describe("Вид автомата: кто поставил", () => {
     assert.equal(inserts[1]!.values.actorKind, "agent");
   });
 });
+
+/**
+ * Заглушка для setMachineStatus. Сервис делает до трёх выборок
+ * (объект, карточка автомата, активные нормативы), апсерт карточки,
+ * обновления нормативов или задач и запись в журнал.
+ */
+function statusDb(opts: {
+  entityRow?: Record<string, unknown>;
+  before?: Record<string, unknown>;
+  plans?: Record<string, unknown>[];
+}) {
+  const inserts: { values: Record<string, unknown>; conflictSet?: Record<string, unknown> }[] = [];
+  const updates: { patch: Record<string, unknown> }[] = [];
+  const queue: Record<string, unknown>[][] = [
+    opts.entityRow ? [opts.entityRow] : [],
+    opts.before ? [opts.before] : [],
+    opts.plans ?? [],
+  ];
+  const selectChain = () => {
+    const rows = async () => queue.shift() ?? [];
+    const chain: Record<string, unknown> = {};
+    chain.from = () => chain;
+    chain.where = () => chain;
+    chain.limit = rows;
+    chain.then = (res: (v: unknown) => unknown) => rows().then(res);
+    return chain;
+  };
+  const tx = {
+    select: selectChain,
+    insert: () => ({
+      values: (v: Record<string, unknown>) => {
+        const entry: { values: Record<string, unknown>; conflictSet?: Record<string, unknown> } = { values: v };
+        inserts.push(entry);
+        const result = [{ ...v }];
+        const done = {
+          returning: async () => result,
+          then: (res: (x: unknown) => unknown) => Promise.resolve(result).then(res),
+        };
+        return Object.assign(done, {
+          onConflictDoUpdate: (arg: { set: Record<string, unknown> }) => {
+            entry.conflictSet = arg.set;
+            return done;
+          },
+        });
+      },
+    }),
+    update: () => ({
+      set: (patch: Record<string, unknown>) => {
+        updates.push({ patch });
+        const rows = [{ id: "t-1" }];
+        const done = {
+          returning: async () => rows,
+          then: (res: (x: unknown) => unknown) => Promise.resolve(rows).then(res),
+        };
+        return { where: () => done };
+      },
+    }),
+  };
+  const db = {
+    transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+  } as never;
+  return { db, inserts, updates };
+}
+
+describe("Состояние автомата", () => {
+  const МАШИНА = { id: "e1", type: "machine", name: "Olma склад" };
+
+  it("отправка в ремонт пишет состояние, причину и дату", async () => {
+    const { db, inserts } = statusDb({ entityRow: МАШИНА, before: { entityId: "e1", status: "in_service" } });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineStatus("e1", "repair", "owner", "заявка №12");
+    const set = inserts[0]!.conflictSet!;
+    assert.equal(set.status, "repair");
+    assert.equal(set.statusNote, "заявка №12");
+    assert.ok(set.statusChangedAt instanceof Date, "дата смены проставлена");
+    assert.equal(set.updatedBy, "owner");
+  });
+
+  it("правка примечания без смены состояния не двигает дату", async () => {
+    // Иначе «в ремонте с …» врёт при каждом уточнении текста.
+    const было = new Date("2026-08-05T00:00:00+05:00");
+    const { db, inserts } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "repair", statusChangedAt: было },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineStatus("e1", "repair", "owner", "заявка №12, уточнение");
+    assert.equal(inserts[0]!.conflictSet!.statusChangedAt, было);
+  });
+
+  it("возврат в строй пересчитывает сроки нормативов от сегодня", async () => {
+    // Пока автомат стоял, срок капал впустую: без пересчёта он придёт красным
+    // на весь простой, с задачей, датированной прошлым, и без уведомления.
+    const { db, updates } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "repair" },
+      plans: [
+        { id: "p1", dueOn: "2026-05-01", everyDays: 10, everyMonths: null },
+        { id: "p2", dueOn: "2026-05-01", everyDays: 90, everyMonths: null },
+      ],
+    });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineStatus("e1", "in_service", "owner");
+    assert.equal(updates.length, 2, "оба норматива пересчитаны");
+    for (const u of updates) assert.ok(String(u.patch.dueOn) > "2026-05-01");
+  });
+
+  it("уход из эксплуатации закрывает висящие задачи обслуживания", async () => {
+    // Выполнить их некому: автомата нет на месте. А закрыть их тоже некому —
+    // бот умеет только «сделал», отмена есть лишь в панели по одной.
+    const { db, updates } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "in_service" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineStatus("e1", "warehouse", "owner");
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0]!.patch.status, "cancelled");
+  });
+
+  it("возврат в строй — отдельное событие журнала", async () => {
+    const { db, inserts } = statusDb({ entityRow: МАШИНА, before: { entityId: "e1", status: "repair" } });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineStatus("e1", "in_service", "owner");
+    assert.equal(inserts[1]!.values.action, "machine.status_restored");
+  });
+
+  it("неизвестное состояние отвергается", async () => {
+    const { db } = statusDb({ entityRow: МАШИНА });
+    const s = new EntitiesService(db, auditStub());
+    await assert.rejects(
+      () => s.setMachineStatus("e1", "сломан" as never, "owner"),
+      /Неизвестное состояние/,
+    );
+  });
+
+  it("состояние задаётся только автоматам", async () => {
+    const { db } = statusDb({ entityRow: { id: "e1", type: "contractor", name: "ООО Ромашка" } });
+    const s = new EntitiesService(db, auditStub());
+    await assert.rejects(() => s.setMachineStatus("e1", "repair", "owner"), /только автоматам/);
+  });
+});

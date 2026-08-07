@@ -11,6 +11,8 @@ import {
 import {
   actorKindOf,
   advanceAnchor,
+  machineIdleReason,
+  machineIsOperational,
   computeDue,
   firstDue,
   maintenanceKindLabel,
@@ -22,6 +24,9 @@ import {
 } from "@mydon/shared";
 import { and, desc, eq, gte, inArray, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+
+/** Транзакция Drizzle — та же, что даёт `db.transaction(async (tx) => …)`. */
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 type LogRow = typeof maintenanceLog.$inferSelect;
 type PartRow = typeof machinePart.$inferSelect;
@@ -98,6 +103,19 @@ export interface MaintenanceDueRow {
   status: DueStatus;
   assigneeId: string | null;
   autoTask: boolean;
+  /** Состояние автомата: in_service | warehouse | repair. Не автомат — null. */
+  machineStatus: string | null;
+  /**
+   * Работы по объекту имеют смысл.
+   *
+   * Строка НЕ исчезает из сводки, когда автомат в ремонте: норматив всё равно
+   * подходит к сроку, и владелец должен это видеть — иначе автомат вернётся
+   * из мастерской с невидимым долгом. Исчезает только ЗАДАЧА: ставить её
+   * некому и не на чем.
+   */
+  operational: boolean;
+  /** Почему работа не назначается. `null` — назначается. */
+  idleReason: string | null;
 }
 
 /**
@@ -157,6 +175,11 @@ export class MaintenanceService {
         })
         .returning();
 
+      // Факт может прийти сразу закрытым — так делает бот в «🗓 Графики».
+      // Тогда срок обязан сдвинуться здесь же, иначе сообщение сотруднику
+      // «Следующий срок пересчитан» окажется ложью.
+      await this.advanceAnchorFor(tx, row);
+
       await tx.insert(auditLog).values({
         actorKind: input.personId ? "human" : "system",
         actorRef: input.createdBy ?? "owner",
@@ -166,6 +189,34 @@ export class MaintenanceService {
       });
       return row;
     });
+  }
+
+  /**
+   * Замыкание цикла: сделал → срок сдвинулся.
+   *
+   * Вынесено из `closeLog` и вызывается ОБОИМИ путями записи факта. Раньше
+   * якорь двигал только `closeLog`, а бот в «🗓 Графики» закрывает работу
+   * через `createLog` (сразу с `outcome: "done"`) и писал сотруднику
+   * «Следующий срок пересчитан» — чего не происходило. График оставался
+   * стоять, где стоял, и назавтра требовал ту же работу, накапливая по дню
+   * просрочки в сутки. Найдено разбором до первого факта: на 07.08.2026 в
+   * журнале ноль записей, то есть парк ещё не пострадал.
+   */
+  private async advanceAnchorFor(
+    tx: Tx,
+    log: { planId: string | null; outcome: string | null; performedOn: string },
+  ): Promise<void> {
+    if (!log.planId || log.outcome !== "done") return;
+    const [plan] = await tx
+      .select()
+      .from(maintenancePlan)
+      .where(eq(maintenancePlan.id, log.planId))
+      .limit(1);
+    if (!plan?.dueOn) return;
+    await tx
+      .update(maintenancePlan)
+      .set({ dueOn: advanceAnchor(plan.dueOn, log.performedOn, plan), updatedAt: new Date() })
+      .where(eq(maintenancePlan.id, plan.id));
   }
 
   /** Закрыть начатую работу: результат, заметка, показания счётчика. */
@@ -189,24 +240,7 @@ export class MaintenanceService {
         .where(eq(maintenanceLog.id, id))
         .returning();
 
-      // Замыкание цикла: сделал → срок сдвинулся. Без этого график остаётся
-      // стоять там же, где стоял, и назавтра снова требует ту же работу.
-      if (after.planId && after.outcome === "done") {
-        const [plan] = await tx
-          .select()
-          .from(maintenancePlan)
-          .where(eq(maintenancePlan.id, after.planId))
-          .limit(1);
-        if (plan?.dueOn) {
-          await tx
-            .update(maintenancePlan)
-            .set({
-              dueOn: advanceAnchor(plan.dueOn, after.performedOn, plan),
-              updatedAt: new Date(),
-            })
-            .where(eq(maintenancePlan.id, plan.id));
-        }
-      }
+      await this.advanceAnchorFor(tx, after);
 
       await tx.insert(auditLog).values({
         actorKind: actorKindOf(actorRef),
@@ -508,6 +542,17 @@ export class MaintenanceService {
       ).map((r) => [r.id, r.name]),
     );
 
+    // Состояние автомата — оно решает, ставить ли задачу. Объекты без карточки
+    // автомата (техника, помещения) состояния не имеют и считаются рабочими:
+    // признак заводился для парка, а не для всего реестра.
+    const statuses = new Map(
+      (await this.db
+        .select({ entityId: machineCard.entityId, status: machineCard.status })
+        .from(machineCard)
+        .where(inArray(machineCard.entityId, targetIds))
+      ).map((r) => [r.entityId, r.status as string]),
+    );
+
     // Последний закрытый факт по каждому нормативу — одним запросом.
     const lastDone = new Map(
       (await this.db
@@ -555,6 +600,9 @@ export class MaintenanceService {
         status: due.status,
         assigneeId: p.assigneeId,
         autoTask: p.autoTask,
+        machineStatus: statuses.get(p.entityId) ?? null,
+        operational: machineIsOperational(statuses.get(p.entityId)),
+        idleReason: machineIdleReason(statuses.get(p.entityId)),
       };
     });
   }

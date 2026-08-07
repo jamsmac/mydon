@@ -531,3 +531,41 @@ describe("Пауза норматива: снять и вернуть", () => {
     assert.ok(!inserted.some((r) => r.title === "Мойка миксера"));
   });
 });
+
+describe("Якорь срока двигается обоими путями записи факта", () => {
+  const PLAN = "66666666-6666-4666-8666-666666666666";
+  const план = { id: PLAN, dueOn: "2026-08-16", everyDays: 10, everyMonths: null };
+
+  it("createLog сразу закрытым фактом сдвигает срок", async () => {
+    // Бот в «🗓 Графики» закрывает работу именно так: createLog c
+    // outcome='done' — и пишет сотруднику «Следующий срок пересчитан».
+    // Раньше срок не двигался, и сообщение было ложью.
+    const updated: Row[] = [];
+    const s = new MaintenanceService(stubDb({ selects: [[план]], updated }));
+    await s.createLog({
+      entityId: MACHINE,
+      kind: "cleaning",
+      partKind: "mixer",
+      planId: PLAN,
+      outcome: "done",
+      performedOn: "2026-08-16",
+    });
+    assert.equal(updated.length, 1, "план обязан обновиться");
+    assert.equal(updated[0]!.dueOn, addDays("2026-08-16", 10));
+  });
+
+  it("незакрытый факт срок не двигает", async () => {
+    // Техник отметился на точке, работу не закончил — двигать нечего.
+    const updated: Row[] = [];
+    const s = new MaintenanceService(stubDb({ selects: [[план]], updated }));
+    await s.createLog({ entityId: MACHINE, kind: "cleaning", planId: PLAN });
+    assert.equal(updated.length, 0);
+  });
+
+  it("факт без норматива срок не двигает", async () => {
+    const updated: Row[] = [];
+    const s = new MaintenanceService(stubDb({ selects: [[план]], updated }));
+    await s.createLog({ entityId: MACHINE, kind: "repair", outcome: "done" });
+    assert.equal(updated.length, 0);
+  });
+});
