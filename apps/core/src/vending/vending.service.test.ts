@@ -72,10 +72,20 @@ function writeDb(
   const stockRowsWithCountedAt = stockRows.map((r) => ({ countedAt: new Date(0), ...(r as object) }));
   /** Слоты, убранные как исчезнувшие: возвращаем то, что задали тестом. */
   const pruneRows: { id: string }[] = [];
+  /** Заставить уборку упасть — проверяем, что снимок при этом уцелел. */
+  let pruneFails = false;
+  const failPrune = () => {
+    pruneFails = true;
+  };
   const tx = {
     select: () => ({ from: async () => stockRowsWithCountedAt }),
     delete: () => ({
-      where: () => ({ returning: async () => pruneRows.splice(0, pruneRows.length) }),
+      where: () => ({
+        returning: async () => {
+          if (pruneFails) throw new Error("уборка не удалась (тест)");
+          return pruneRows.splice(0, pruneRows.length);
+        },
+      }),
     }),
     insert: (table: { [Symbol.toStringTag]?: string }) => ({
       values: (v: unknown) => {
@@ -90,6 +100,14 @@ function writeDb(
   // иначе привязка слотов сдвигала бы очередь алиасов и товаров.
   let call = 0;
   const db = {
+    delete: () => ({
+      where: () => ({
+        returning: async () => {
+          if (pruneFails) throw new Error("уборка не удалась (тест)");
+          return pruneRows.splice(0, pruneRows.length);
+        },
+      }),
+    }),
     select: () => ({
       from: (t: unknown) => {
         if (t === entity) {
@@ -109,7 +127,7 @@ function writeDb(
     }),
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
-  return { db, inserts, pruneRows };
+  return { db, inserts, pruneRows, failPrune };
 }
 function tableName(t: unknown): string {
   // Журнал событий узнаём по личности: эвристика по ключам его не различает.
@@ -879,7 +897,7 @@ describe("Вендинг Core: приём слотов", () => {
     const res = await svc.ingestSlots({
       machines: [{ serial: "AH", slots: [{ coilId: "31", product: "Montella", capacity: 6, quantity: 0 }] }],
     });
-    assert.deepEqual(res, { machines: 1, slots: 1, linked: 0, pruned: 0, skipped: [] });
+    assert.deepEqual(res, { machines: 1, slots: 1, linked: 0, pruned: 0, pruneErrors: [], skipped: [] });
     // Один слот → одна строка планограммы + одна строка истории.
     assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 1);
     assert.equal(inserts.filter((i) => i.table === "slot_snapshot").length, 1);
@@ -1110,5 +1128,52 @@ describe("Зеркало слотов умеет сокращаться", () => 
     const res = await svc.ingestSlots({ machines: [{ serial: "ПУСТОЙ", slots: [] }] });
     assert.equal(res.pruned, 0, "уборка не должна была запуститься");
     assert.equal(res.slots, 0);
+  });
+});
+
+describe("Сбой уборки не стоит снимка", () => {
+  it("упавшая уборка НЕ откатывает записанные слоты", async () => {
+    // 07.08.2026 уборка шла в одной транзакции с записью, и ошибка в условии
+    // удаления откатывала INSERT: зеркало перестало обновляться вовсе, а не
+    // просто не почистилось. Побочная функция утаскивала основную.
+    const { db, inserts, failPrune } = writeDb();
+    failPrune();
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({
+      machines: [{ serial: "2508160376", slots: [{ coilId: "1", product: "Twix", capacity: 11, quantity: 9 }] }],
+    });
+
+    assert.equal(res.slots, 1, "снимок обязан быть записан");
+    assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 1);
+    assert.equal(res.pruned, 0);
+    assert.equal(res.pruneErrors.length, 1, "о сбое уборки молчать нельзя");
+    assert.equal(res.pruneErrors[0]!.serial, "2508160376");
+  });
+
+  it("сбой уборки записывается событием, а не теряется", async () => {
+    const { db, inserts, failPrune } = writeDb();
+    failPrune();
+    const svc = new VendingService(db);
+    await svc.ingestSlots({
+      machines: [{ serial: "M1", slots: [{ coilId: "1", product: "x", capacity: 1, quantity: 1 }] }],
+    });
+    const события = inserts.filter((i) => i.table === "event");
+    assert.equal(события.length, 1);
+    assert.equal((события[0]!.values as { type: string }).type, "vending.slots.prune_failed");
+  });
+
+  it("сбой на одном автомате не лишает уборки остальных", async () => {
+    // Каждый автомат убирается своим запросом: общий try свёл бы всю пачку
+    // к судьбе первой ошибки.
+    const { db } = writeDb();
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({
+      machines: [
+        { serial: "A", slots: [{ coilId: "1", product: "x", capacity: 1, quantity: 1 }] },
+        { serial: "B", slots: [{ coilId: "1", product: "y", capacity: 1, quantity: 1 }] },
+      ],
+    });
+    assert.equal(res.machines, 2);
+    assert.equal(res.pruneErrors.length, 0);
   });
 });

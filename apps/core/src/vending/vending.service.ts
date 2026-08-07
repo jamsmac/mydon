@@ -95,6 +95,13 @@ export interface IngestSlotsResult {
   linked: number;
   /** Слотов убрано как исчезнувших из автомата. */
   pruned: number;
+  /**
+   * Автоматы, у которых уборка не удалась.
+   *
+   * Не ошибка приёма: снимок записан, планограмма свежая. Но и не пустяк —
+   * в зеркале остались лишние строки, и молчать об этом нельзя.
+   */
+  pruneErrors: { serial: string; error: string }[];
   skipped: SkippedMachine[];
 }
 
@@ -289,6 +296,50 @@ export class VendingService {
   }
 
   /**
+   * Убрать слоты, которых в автомате больше нет.
+   *
+   * `machine_slot` — зеркало, а зеркало обязано уметь сокращаться. Upsert
+   * только добавляет и обновляет, поэтому исчезнувший слот оставался в
+   * планограмме навсегда: у `2508160376` так накопилось 445 несуществующих
+   * позиций, и автомат показывал 488 слотов вместо сорока трёх.
+   *
+   * Каждый автомат убирается СВОИМ запросом, вне общей транзакции и вне общего
+   * try: сбой на одном не должен лишать уборки остальных и уж тем более
+   * откатывать записанный снимок.
+   *
+   * Пустой список — НЕ повод стирать планограмму: это чаще всего сбой
+   * выгрузки, а не автомат, из которого вынули все пружины. Стирать по
+   * молчанию источника — способ потерять данные без единой ошибки.
+   */
+  private async pruneVanishedSlots(
+    machines: IngestMachineInput[],
+  ): Promise<{ pruned: number; pruneErrors: { serial: string; error: string }[] }> {
+    let pruned = 0;
+    const pruneErrors: { serial: string; error: string }[] = [];
+    for (const m of machines) {
+      if (m.slots.length === 0) continue;
+      try {
+        // notInArray, а не сырой `<> all(...)`: Drizzle разворачивает JS-массив
+        // в список плейсхолдеров `($2, $3, …)`, и Postgres отвергает такой
+        // запрос — `all()` ждёт массив, а не строковое выражение. Поймано в
+        // бою: приём слотов отвечал 500, сбор Ourvend падал целиком.
+        const живые = m.slots.map((s) => s.coilId);
+        const убрано = await this.db
+          .delete(machineSlot)
+          .where(and(eq(machineSlot.machineSerial, m.serial), notInArray(machineSlot.coilId, живые)))
+          .returning({ id: machineSlot.id });
+        pruned += убрано.length;
+      } catch (err) {
+        pruneErrors.push({
+          serial: m.serial,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return { pruned, pruneErrors };
+  }
+
+  /**
    * Принять собранные слоты: upsert актуальной планограммы + запись в историю.
    * Идемпотентно по (serial, coil): повторный сбор обновляет слот, а не плодит.
    *
@@ -309,37 +360,22 @@ export class VendingService {
     });
     let slots = 0;
     let linked = 0;
-    let pruned = 0;
+
+    // ШАГ 1 — ДАННЫЕ. Транзакция несёт только запись снимка.
+    //
+    // Уборка вынесена наружу осознанно. Раньше она шла здесь же, и упавший
+    // DELETE откатывал вместе с собой INSERT: зеркало не просто не чистилось,
+    // а переставало обновляться вовсе. Побочная функция утаскивала основную —
+    // 07.08.2026 из-за одной ошибки в условии удаления сбор Ourvend не мог
+    // записать ни одного слота.
+    //
+    // Порядок «сначала записать, потом убрать» тоже не случаен: уборка сносит
+    // строки, которых НЕТ в снимке, поэтому только что записанные переживают
+    // её при любом исходе.
     await this.db.transaction(async (tx) => {
       for (const m of accepted) {
         const machineId = bySerial.get(normalizeMachineSerial(m.serial)) ?? null;
         if (machineId !== null) linked += 1;
-
-        // Убрать слоты, которых в автомате больше нет.
-        //
-        // `machine_slot` — зеркало, а зеркало обязано уметь сокращаться.
-        // Upsert только добавляет и обновляет, поэтому исчезнувший слот
-        // оставался в планограмме навсегда: у `2508160376` так накопилось
-        // 445 несуществующих позиций, и автомат показывал 488 слотов вместо
-        // сорока трёх.
-        //
-        // Пустой список — НЕ повод стирать планограмму: это чаще всего сбой
-        // выгрузки, а не автомат, из которого вынули все пружины. Стирать по
-        // молчанию источника — способ потерять данные без единой ошибки.
-        if (m.slots.length > 0) {
-          // notInArray, а не сырой `<> all(...)`: Drizzle разворачивает JS-массив
-          // в список плейсхолдеров `($2, $3, …)`, и Postgres отвергает такой
-          // запрос — `all()` ждёт массив, а не строковое выражение. Поймано в
-          // бою: приём слотов отвечал 500, сбор Ourvend падал целиком.
-          const живые = m.slots.map((s) => s.coilId);
-          const убрано = await tx
-            .delete(machineSlot)
-            .where(
-              and(eq(machineSlot.machineSerial, m.serial), notInArray(machineSlot.coilId, живые)),
-            )
-            .returning({ id: machineSlot.id });
-          pruned += убрано.length;
-        }
         for (const s of m.slots) {
           const isValid = s.capacity > 0 && s.capacity <= MAX_CAPACITY;
           const product = s.product.trim() || null;
@@ -381,6 +417,20 @@ export class VendingService {
         }
       }
     });
+    // ШАГ 2 — ГИГИЕНА. Отдельно от данных и по автомату за раз.
+    //
+    // Сбой уборки больше не стоит нам снимка: он записывается событием и
+    // возвращается вызывающему, а планограмма остаётся свежей.
+    const { pruned, pruneErrors } = await this.pruneVanishedSlots(accepted);
+
+    if (pruneErrors.length > 0) {
+      await this.db.insert(event).values({
+        source: "vending-ingest",
+        type: "vending.slots.prune_failed",
+        payload: { machines: pruneErrors },
+      });
+    }
+
     if (skipped.length > 0) {
       // Пропуск — не рядовое событие: планограмма автомата остаётся вчерашней,
       // и заправка поедет по устаревшим остаткам. Пишем в журнал событий, а не
@@ -391,7 +441,7 @@ export class VendingService {
         payload: { machines: skipped, лимит: MAX_SLOTS_PER_MACHINE },
       });
     }
-    return { machines: accepted.length, slots, linked, pruned, skipped };
+    return { machines: accepted.length, slots, linked, pruned, pruneErrors, skipped };
   }
 
   /** Актуальные слоты, сгруппированные по автомату, в форме ядра расчёта. */
