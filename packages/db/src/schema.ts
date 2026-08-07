@@ -1325,6 +1325,17 @@ export const machineCard = pgTable("machine_card", {
   kind: machineKindEnum("kind").notNull(),
   note: text("note"),
   createdBy: text("created_by"),
+  /**
+   * Кто поставил ТЕКУЩИЙ вид.
+   *
+   * `created_by` помнит только того, кто завёл карточку, и при смене вида не
+   * меняется — а заводит карточки массовый прогон. Без этой колонки любая
+   * карточка вечно выглядит проставленной инструментом, даже там, где вид
+   * назвал владелец: обещание «через полгода будет видно, что выбрал человек»
+   * (docs/REGISTRY_CLEANUP.md) держалось только на `audit_log`, куда никто не
+   * смотрит из карточки.
+   */
+  updatedBy: text("updated_by"),
   createdAt: createdAt(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

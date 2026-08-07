@@ -224,3 +224,108 @@ describe("Координаты карточки", () => {
     );
   });
 });
+
+/**
+ * Заглушка БД для setMachineKind: сервис делает две выборки подряд
+ * (карточка объекта, затем текущая карточка автомата) и две вставки
+ * (машинная карточка с onConflictDoUpdate, затем журнал аудита).
+ */
+function kindDb(opts: { entityRow?: Record<string, unknown>; before?: Record<string, unknown> }) {
+  const inserts: { values: Record<string, unknown>; conflictSet?: Record<string, unknown> }[] = [];
+  const queue = [
+    opts.entityRow ? [opts.entityRow] : [],
+    opts.before ? [opts.before] : [],
+  ];
+  const selectChain = () => {
+    const rows = async () => queue.shift() ?? [];
+    const chain: Record<string, unknown> = {};
+    chain.from = () => chain;
+    chain.where = () => chain;
+    chain.limit = rows;
+    chain.then = (res: (v: unknown) => unknown) => rows().then(res);
+    return chain;
+  };
+  const tx = {
+    select: selectChain,
+    insert: () => ({
+      values: (v: Record<string, unknown>) => {
+        const entry: { values: Record<string, unknown>; conflictSet?: Record<string, unknown> } = { values: v };
+        inserts.push(entry);
+        const result = [{ entityId: v.entityId, kind: v.kind, note: v.note ?? null }];
+        const done = {
+          returning: async () => result,
+          then: (res: (x: unknown) => unknown) => Promise.resolve(result).then(res),
+        };
+        return Object.assign(done, {
+          onConflictDoUpdate: (arg: { set: Record<string, unknown> }) => {
+            entry.conflictSet = arg.set;
+            return done;
+          },
+        });
+      },
+    }),
+  };
+  const db = {
+    transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+  } as never;
+  return { db, inserts };
+}
+
+const MACHINE_ENTITY = { id: "e1", type: "machine", name: "Olma office" };
+
+/** AuditService в этих сценариях не задействован — setMachineKind пишет журнал сам. */
+const auditStub = () => ({}) as never;
+
+describe("Вид автомата: кто поставил", () => {
+  it("новая карточка помнит автора и в created_by, и в updated_by", async () => {
+    const { db, inserts } = kindDb({ entityRow: MACHINE_ENTITY });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineKind("e1", "coffee", "owner", "заметка");
+    const card = inserts[0]!.values;
+    assert.equal(card.createdBy, "owner");
+    assert.equal(card.updatedBy, "owner");
+  });
+
+  it("смена вида обновляет updated_by, но НЕ created_by", async () => {
+    // Иначе карточка вечно выглядит размеченной массовым прогоном — даже там,
+    // где вид назвал владелец. Обещание REGISTRY_CLEANUP.md держится на этом.
+    const { db, inserts } = kindDb({
+      entityRow: MACHINE_ENTITY,
+      before: { entityId: "e1", kind: "other", createdBy: "tool:backfill-machine-kinds" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineKind("e1", "drink", "owner");
+    const set = inserts[0]!.conflictSet!;
+    assert.equal(set.updatedBy, "owner");
+    assert.ok(!("createdBy" in set), "created_by при смене вида не трогаем");
+  });
+
+  it("массовый прогон записывается в журнал системой, а не человеком", async () => {
+    const { db, inserts } = kindDb({ entityRow: MACHINE_ENTITY });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineKind("e1", "coffee", "tool:backfill-machine-kinds");
+    const audit = inserts[1]!.values;
+    assert.equal(audit.actorKind, "system");
+    assert.equal(audit.actorRef, "tool:backfill-machine-kinds");
+    assert.equal(audit.action, "machine.kind_set");
+  });
+
+  it("решение владельца записывается человеком и как смена вида", async () => {
+    const { db, inserts } = kindDb({
+      entityRow: MACHINE_ENTITY,
+      before: { entityId: "e1", kind: "other" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineKind("e1", "coffee", "owner");
+    const audit = inserts[1]!.values;
+    assert.equal(audit.actorKind, "human");
+    assert.equal(audit.action, "machine.kind_changed");
+  });
+
+  it("агент записывается агентом", async () => {
+    const { db, inserts } = kindDb({ entityRow: MACHINE_ENTITY });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineKind("e1", "snack", "agent:coffee-monitor");
+    assert.equal(inserts[1]!.values.actorKind, "agent");
+  });
+});

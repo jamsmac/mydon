@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, entity, entityDraft, geoPoint, machineCard, org } from "@mydon/db";
 import {
+  actorKindOf,
   addressFromAttrs,
   coordFromAttrs,
   isUnit,
@@ -700,15 +701,19 @@ export class EntitiesService {
 
       const [after] = await tx
         .insert(machineCard)
-        .values({ entityId, kind, note: note ?? null, createdBy: actorRef })
+        .values({ entityId, kind, note: note ?? null, createdBy: actorRef, updatedBy: actorRef })
         .onConflictDoUpdate({
           target: [machineCard.entityId],
-          set: { kind, ...(note !== undefined ? { note } : {}), updatedAt: new Date() },
+          // updatedBy обновляем, createdBy — нет: карточку завёл кто завёл, а
+          // вид ставил тот, кто ставил последним. Без этой строки любая
+          // карточка вечно выглядела бы размеченной массовым прогоном, даже
+          // там, где вид назвал владелец.
+          set: { kind, ...(note !== undefined ? { note } : {}), updatedBy: actorRef, updatedAt: new Date() },
         })
         .returning();
 
       await tx.insert(auditLog).values({
-        actorKind: "human",
+        actorKind: actorKindOf(actorRef),
         actorRef,
         action: before ? "machine.kind_changed" : "machine.kind_set",
         target: entityId,
