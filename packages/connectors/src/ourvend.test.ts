@@ -163,3 +163,59 @@ describe("Ourvend: логин (§3.1) и куки сессии", () => {
     await assert.rejects(() => conn.login(), (e) => e instanceof AuthError && /account locked/.test(e.detail ?? ""));
   });
 });
+
+describe("Несуществующие слоты вендора", () => {
+  const слот = (over: Record<string, unknown> = {}) => ({
+    SiCoilId: "1",
+    SiWorkStatus: "1",
+    SiCapacity: "5",
+    SiExtantQuantity: "3",
+    PrName: "Snickers 50gr",
+    ...over,
+  });
+
+  it("строка со статусом 255 — не слот, а незаполненная память", () => {
+    // Сигнатура вендора: 255 = 0xFF, цена 6553.5 = 65535/10 = 0xFFFF.
+    // У 2508160376 таких строк приходило 445 из 488.
+    const json = [
+      [],
+      [
+        слот({ SiCoilId: "1" }),
+        слот({ SiCoilId: "68", SiWorkStatus: "255", SiCapacity: "0", SiExtantQuantity: "0", PrName: "" }),
+        слот({ SiCoilId: "69", SiWorkStatus: "255", SiCapacity: "0", SiExtantQuantity: "0", PrName: "" }),
+      ],
+    ];
+    const out = parseSlots(json);
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.coilId, "1");
+  });
+
+  it("остаточное имя товара не делает фантом живым", () => {
+    // Слот 59 на обеих машинах: status=255, но имя товара осталось от прошлой
+    // раскладки. Продать из него нечего — ёмкость и остаток нулевые.
+    const json = [
+      [],
+      [слот({ SiCoilId: "59", SiWorkStatus: "255", SiCapacity: "0", SiExtantQuantity: "0", PrName: "Fanta Classic CAN 250ml" })],
+    ];
+    assert.deepEqual(parseSlots(json), []);
+  });
+
+  it("нулевая ёмкость при живом статусе — настоящий слот, не выбрасываем", () => {
+    // У 2508160360 все 43 строки со статусом 1; отсев по ёмкости выкинул бы
+    // живые позиции, которым просто не задали объём.
+    const json = [[], [слот({ SiCoilId: "7", SiWorkStatus: "1", SiCapacity: "0", SiExtantQuantity: "0", PrName: "" })]];
+    const out = parseSlots(json);
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.capacity, 0);
+  });
+
+  it("прочие статусы остаются: 4 — это рабочий слот", () => {
+    const json = [[], [слот({ SiCoilId: "12", SiWorkStatus: "4" })]];
+    assert.equal(parseSlots(json).length, 1);
+  });
+
+  it("отсутствие статуса ничего не ломает", () => {
+    const json = [[], [{ SiCoilId: "3", SiCapacity: "5", SiExtantQuantity: "1", PrName: "Twix" }]];
+    assert.equal(parseSlots(json).length, 1);
+  });
+});
