@@ -583,6 +583,20 @@ export class CoreClient {
   }
 
   /** Заявка на ремонт от сотрудника. Свободная — её разберут из общего пула. */
+  /**
+   * Перевести автомат в другое состояние (в эксплуатации / склад / ремонт).
+   *
+   * Core одной транзакцией отменяет висящие задачи обслуживания при уходе из
+   * эксплуатации и пересчитывает сроки при возврате — боту об этом знать не
+   * надо, но сотруднику последствие нужно назвать.
+   */
+  setMachineStatus(entityId: string, status: string, actor: string, note?: string): Promise<unknown> {
+    return this.request(`/entities/${entityId}/machine-status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, actor, ...(note !== undefined ? { note } : {}) }),
+    });
+  }
+
   createTask(input: {
     title: string;
     ownerKind: "human" | "agent";

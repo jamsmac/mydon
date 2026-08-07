@@ -385,10 +385,13 @@ export async function handleServiceCheckCallback(
 export type ProblemCallback =
   | { kind: "symptom"; symptom: ProblemSymptom }
   | { kind: "urgency"; urgency: ProblemUrgency }
+  | { kind: "repair"; entityId: string }
   | { kind: "cancel" };
 
 export function parseProblemCallback(data: string): ProblemCallback | null {
   if (data === "pr:x") return { kind: "cancel" };
+  const r = /^pr:rep:([0-9a-f-]{36})$/.exec(data);
+  if (r) return { kind: "repair", entityId: r[1] };
   const s = /^pr:s:([a-z]{3,6})$/.exec(data);
   if (s && (PROBLEM_SYMPTOMS as readonly string[]).includes(s[1])) {
     return { kind: "symptom", symptom: s[1] as ProblemSymptom };
@@ -417,6 +420,27 @@ function urgencyKeyboard(): NonNullable<StaffReply["keyboard"]> {
   };
 }
 
+/**
+ * Что предложить сразу после заявки о поломке.
+ *
+ * Перевод в ремонт — ПРЕДЛОЖЕНИЕ, а не следствие заявки. Отказ
+ * купюроприёмника не значит, что автомат не работает: он продолжает
+ * продавать за монеты, и снимать его с обслуживания было бы неверно.
+ * Решает человек на точке — он единственный, кто видит автомат.
+ *
+ * Фото остаётся первой кнопкой: оно про уже созданную заявку, а состояние —
+ * про автомат, и путать их местами значит подталкивать к более тяжёлому
+ * действию.
+ */
+export function problemDoneKeyboard(entityId: string): NonNullable<StaffReply["keyboard"]> {
+  return {
+    inline_keyboard: [
+      [{ text: "✅ Готово (приложи фото поломки, если можешь)", callback_data: "ph:ok" }],
+      [{ text: "🔧 Автомат не работает — в ремонт", callback_data: `pr:rep:${entityId}` }],
+    ],
+  };
+}
+
 export async function startProblem(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
   deps.conversations.start(chatId, "problem", "object");
   return pickObject(person, deps, "⚠️ Поломка. На каком автомате?");
@@ -432,6 +456,35 @@ export async function handleProblemCallback(
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Заявку отменил." } };
   }
+  // Перевод в ремонт — ПОСЛЕ созданной заявки, когда мастер уже отработал и
+  // разговор мог завершиться. Поэтому обрабатываем до проверки живого мастера:
+  // иначе кнопка под готовым сообщением отвечала бы «начни заново».
+  if (cb.kind === "repair") {
+    try {
+      await deps.core.setMachineStatus(
+        cb.entityId,
+        "repair",
+        `person:${person.id}`,
+        `Заявка о поломке от ${person.name}`,
+      );
+    } catch {
+      return {
+        answer: "Не вышло",
+        message: { text: "Не смог перевести автомат в ремонт. Заявка при этом создана — скажи владельцу." },
+      };
+    }
+    return {
+      answer: "Автомат в ремонте",
+      message: {
+        text:
+          "🔧 Автомат отмечен как «в ремонте».\n\n" +
+          "Работы по графику ему больше не назначаются, а те, что висели, закрыты — " +
+          "выполнить их всё равно некому.\n\n" +
+          "Когда вернётся в строй, владелец вернёт его в работу, и сроки пересчитаются заново.",
+      },
+    };
+  }
+
   const conv = deps.conversations.get(chatId);
   if (conv?.flow !== "problem") {
     return { answer: "Мастер истёк", message: { text: "Заявка прервалась. Начни заново." } };
@@ -470,7 +523,7 @@ export async function handleProblemCallback(
       text:
         `✅ Заявка создана.\n🏷 ${name}\n⚠️ ${SYMPTOM_LABELS[symptom]}\n${URGENCY_LABELS[cb.urgency]}\n\n` +
         "Она в общем списке — кто освободится, тот и возьмёт.",
-      keyboard: afterPhotoKeyboard("Приложи фото поломки, если можешь"),
+      keyboard: problemDoneKeyboard(entityId),
     },
     ...startAfterPhoto(chatId, "task", task.id, "заявке", deps),
   };
