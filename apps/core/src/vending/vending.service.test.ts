@@ -70,8 +70,13 @@ function writeDb(
   // «старее» любого countedAt в тестах, так что обычные сценарии недостачи/
   // излишка ведут себя как раньше без правки каждого литерала.
   const stockRowsWithCountedAt = stockRows.map((r) => ({ countedAt: new Date(0), ...(r as object) }));
+  /** Слоты, убранные как исчезнувшие: возвращаем то, что задали тестом. */
+  const pruneRows: { id: string }[] = [];
   const tx = {
     select: () => ({ from: async () => stockRowsWithCountedAt }),
+    delete: () => ({
+      where: () => ({ returning: async () => pruneRows.splice(0, pruneRows.length) }),
+    }),
     insert: (table: { [Symbol.toStringTag]?: string }) => ({
       values: (v: unknown) => {
         const name = tableName(table);
@@ -104,7 +109,7 @@ function writeDb(
     }),
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
-  return { db, inserts };
+  return { db, inserts, pruneRows };
 }
 function tableName(t: unknown): string {
   // Журнал событий узнаём по личности: эвристика по ключам его не различает.
@@ -874,7 +879,7 @@ describe("Вендинг Core: приём слотов", () => {
     const res = await svc.ingestSlots({
       machines: [{ serial: "AH", slots: [{ coilId: "31", product: "Montella", capacity: 6, quantity: 0 }] }],
     });
-    assert.deepEqual(res, { machines: 1, slots: 1, linked: 0, skipped: [] });
+    assert.deepEqual(res, { machines: 1, slots: 1, linked: 0, pruned: 0, skipped: [] });
     // Один слот → одна строка планограммы + одна строка истории.
     assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 1);
     assert.equal(inserts.filter((i) => i.table === "slot_snapshot").length, 1);
@@ -1078,5 +1083,32 @@ describe("Вендинг Core: касса закупа (§5.8)", () => {
     assert.equal(list[0]!.receivedAmount, 2_400_000);
     assert.equal(list[0]!.remainder, 902_470);
     assert.equal(list[0]!.createdAt, "2026-08-02T10:00:00.000Z");
+  });
+});
+
+describe("Зеркало слотов умеет сокращаться", () => {
+  it("исчезнувшие слоты убираются, а не живут вечно", async () => {
+    // У 2508160376 вендор годами отдавал 488 позиций; после отсева фантомов их
+    // 43. Upsert только добавляет и обновляет — без уборки в планограмме
+    // навсегда остались бы 445 несуществующих слотов.
+    const { db, pruneRows } = writeDb();
+    pruneRows.push({ id: "s1" }, { id: "s2" });
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({
+      machines: [{ serial: "2508160376", slots: [{ coilId: "1", product: "Twix", capacity: 11, quantity: 9 }] }],
+    });
+    assert.equal(res.pruned, 2);
+  });
+
+  it("пустой список слотов планограмму НЕ стирает", async () => {
+    // Пусто — это почти всегда сбой выгрузки, а не автомат, из которого вынули
+    // все пружины. Стирать по молчанию источника значит терять данные без
+    // единой ошибки.
+    const { db, pruneRows } = writeDb();
+    pruneRows.push({ id: "s1" }, { id: "s2" }, { id: "s3" });
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({ machines: [{ serial: "ПУСТОЙ", slots: [] }] });
+    assert.equal(res.pruned, 0, "уборка не должна была запуститься");
+    assert.equal(res.slots, 0);
   });
 });

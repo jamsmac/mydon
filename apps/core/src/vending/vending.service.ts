@@ -93,6 +93,8 @@ export interface IngestSlotsResult {
   slots: number;
   /** Из принятых — сколько удалось привязать к карточке реестра. */
   linked: number;
+  /** Слотов убрано как исчезнувших из автомата. */
+  pruned: number;
   skipped: SkippedMachine[];
 }
 
@@ -307,10 +309,36 @@ export class VendingService {
     });
     let slots = 0;
     let linked = 0;
+    let pruned = 0;
     await this.db.transaction(async (tx) => {
       for (const m of accepted) {
         const machineId = bySerial.get(normalizeMachineSerial(m.serial)) ?? null;
         if (machineId !== null) linked += 1;
+
+        // Убрать слоты, которых в автомате больше нет.
+        //
+        // `machine_slot` — зеркало, а зеркало обязано уметь сокращаться.
+        // Upsert только добавляет и обновляет, поэтому исчезнувший слот
+        // оставался в планограмме навсегда: у `2508160376` так накопилось
+        // 445 несуществующих позиций, и автомат показывал 488 слотов вместо
+        // сорока трёх.
+        //
+        // Пустой список — НЕ повод стирать планограмму: это чаще всего сбой
+        // выгрузки, а не автомат, из которого вынули все пружины. Стирать по
+        // молчанию источника — способ потерять данные без единой ошибки.
+        if (m.slots.length > 0) {
+          const живые = m.slots.map((s) => s.coilId);
+          const убрано = await tx
+            .delete(machineSlot)
+            .where(
+              and(
+                eq(machineSlot.machineSerial, m.serial),
+                sql`${machineSlot.coilId} <> all(${живые})`,
+              ),
+            )
+            .returning({ id: machineSlot.id });
+          pruned += убрано.length;
+        }
         for (const s of m.slots) {
           const isValid = s.capacity > 0 && s.capacity <= MAX_CAPACITY;
           const product = s.product.trim() || null;
@@ -362,7 +390,7 @@ export class VendingService {
         payload: { machines: skipped, лимит: MAX_SLOTS_PER_MACHINE },
       });
     }
-    return { machines: accepted.length, slots, linked, skipped };
+    return { machines: accepted.length, slots, linked, pruned, skipped };
   }
 
   /** Актуальные слоты, сгруппированные по автомату, в форме ядра расчёта. */
