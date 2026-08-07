@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { isUnit, type RecipeLine } from "@mydon/shared";
+import { isPlaceType, isUnit, PLACE_ATTR, type RecipeLine } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
 
 export interface CreateResult {
@@ -42,6 +42,23 @@ export async function createEntity(
     const email = String(form.get("email") ?? "").trim();
     if (email.length > 0) attrs["email"] = email;
   }
+  // Место (точка продаж / склад / мастерская): координаты и адрес.
+  //
+  // Ключи кириллические намеренно — их читает coordFromAttrs в @mydon/shared,
+  // и они же служат подписями полей в карточке. Пишем ТОЛЬКО когда введено
+  // обе координаты: одна половина пары бесполезна и превратилась бы в
+  // «координаты заявлены, но неразборчивы» на стороне Core.
+  if (isPlaceType(type)) {
+    const lat = String(form.get("lat") ?? "").trim().replace(",", ".");
+    const lng = String(form.get("lng") ?? "").trim().replace(",", ".");
+    if (lat.length > 0 && lng.length > 0) {
+      attrs[PLACE_ATTR.lat] = lat;
+      attrs[PLACE_ATTR.lng] = lng;
+    }
+    const address = String(form.get("address") ?? "").trim();
+    if (address.length > 0) attrs[PLACE_ATTR.address] = address;
+  }
+
   // Своя компания: реквизиты продавца для договорного DOCX. Ключи attrs — те,
   // что читает ContractsService.renderDocx (director, inn, address, account…).
   if (type === "own_company") {
