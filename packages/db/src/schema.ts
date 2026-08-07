@@ -1236,6 +1236,14 @@ export const productSale = pgTable(
   {
     id: id(),
     machineSerial: text("machine_serial").notNull(),
+    /**
+     * Карточка автомата из реестра.
+     *
+     * Nullable намеренно: автомат появляется в Ourvend раньше, чем карточка в
+     * реестре — так и было с 2508160355 и 2508160358. Продажа без карточки
+     * должна лечь и подождать, а не быть отвергнутой.
+     */
+    machineId: uuid("machine_id").references(() => entity.id),
     productName: text("product_name").notNull(),
     productId: uuid("product_id").references(() => vendingProduct.id),
     periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
@@ -1259,6 +1267,8 @@ export const machineSale = pgTable(
   {
     id: id(),
     machineSerial: text("machine_serial").notNull(),
+    /** Карточка автомата из реестра. Nullable — см. product_sale. */
+    machineId: uuid("machine_id").references(() => entity.id),
     periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
     periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
     totalAmount: numeric("total_amount", { precision: 14, scale: 2 }).default("0").notNull(),

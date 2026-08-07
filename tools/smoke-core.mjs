@@ -86,6 +86,16 @@ const ЗАПИСЬ = [
       }
     },
   },
+  {
+    имя: "приём продаж (привязка автомата по канону серийника)",
+    path: "/vending/ingest-sales",
+    body: {
+      periodStart: "2026-08-01T00:00:00.000Z",
+      periodEnd: "2026-08-07T00:00:00.000Z",
+      productSales: [{ serial: "SMOKE-0001", product: "Smoke A", quantity: 3 }],
+      machineSales: [{ serial: "SMOKE-0001", totalAmount: 15000, totalCount: 3 }],
+    },
+  },
 ];
 
 async function ждатьЗдоровье(proc) {

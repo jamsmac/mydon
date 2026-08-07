@@ -262,7 +262,7 @@ describe("Вендинг Core: приём продаж — идемпотент�
    * (проверка самого constraint — вне мокового unit-теста, найдено внешним
    * аудитом п.13: нет реальных DB-тестов на конкурентность/ограничения).
    */
-  function ingestSalesDb() {
+  function ingestSalesDb(machineCards: { id: string; ref: string | null }[] = []) {
     const calls: { table: "product_sale" | "machine_sale"; values: Record<string, unknown>; target: unknown[] }[] = [];
     const tx = {
       insert: (table: unknown) => ({
@@ -274,7 +274,17 @@ describe("Вендинг Core: приём продаж — идемпотент�
         }),
       }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    // Приём продаж теперь читает карточки автоматов, чтобы проставить
+    // machine_id: без этого продажи Ourvend знали только серийник.
+    const db = {
+      select: () => ({
+        from: () => {
+          const rows = Promise.resolve(machineCards);
+          return { where: () => rows, then: rows.then.bind(rows) };
+        },
+      }),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
     return { db, calls };
   }
 
@@ -1175,5 +1185,40 @@ describe("Сбой уборки не стоит снимка", () => {
     });
     assert.equal(res.machines, 2);
     assert.equal(res.pruneErrors.length, 0);
+  });
+});
+
+describe("Продажи Ourvend знают свой автомат", () => {
+  it("привязка идёт по канону серийника: реестр с приставкой, вендор без", async () => {
+    // Вопрос «сколько принёс ЭТОТ автомат» отвечался для mydon-stock и не
+    // отвечался для Ourvend: product_sale и machine_sale несли только серийник.
+    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", ref: "c2508160376" }]);
+    const svc = new VendingService(db);
+    await svc.ingestSales({
+      periodStart: "2026-08-01T00:00:00.000Z",
+      periodEnd: "2026-08-07T00:00:00.000Z",
+      productSales: [{ serial: "2508160376", product: "Snickers", quantity: 5 }],
+      machineSales: [{ serial: "2508160376", totalAmount: 561000, totalCount: 66 }],
+    });
+    const строки = inserts.filter((i) => (i.values as { machineSerial?: string }).machineSerial === "2508160376");
+    assert.ok(строки.length >= 2, "обе таблицы продаж должны получить строку");
+    for (const r of строки) {
+      assert.equal((r.values as { machineId: string | null }).machineId, "ent-1");
+    }
+  });
+
+  it("продажа автомата без карточки ложится и ждёт", async () => {
+    // Автомат появляется в Ourvend раньше карточки — так было с 2508160355
+    // и 2508160358. Отвергать такую продажу значит терять выручку.
+    const { db, inserts } = writeDb([], [], [], []);
+    const svc = new VendingService(db);
+    await svc.ingestSales({
+      periodStart: "2026-08-01T00:00:00.000Z",
+      periodEnd: "2026-08-07T00:00:00.000Z",
+      productSales: [{ serial: "2508160355", product: "Twix", quantity: 1 }],
+      machineSales: [],
+    });
+    const строка = inserts.find((i) => (i.values as { productName?: string }).productName === "Twix")!;
+    assert.equal((строка.values as { machineId: string | null }).machineId, null);
   });
 });
