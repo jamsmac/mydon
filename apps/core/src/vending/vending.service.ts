@@ -1,5 +1,5 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import {
   auditLog,
   entity,
@@ -327,14 +327,15 @@ export class VendingService {
         // выгрузки, а не автомат, из которого вынули все пружины. Стирать по
         // молчанию источника — способ потерять данные без единой ошибки.
         if (m.slots.length > 0) {
+          // notInArray, а не сырой `<> all(...)`: Drizzle разворачивает JS-массив
+          // в список плейсхолдеров `($2, $3, …)`, и Postgres отвергает такой
+          // запрос — `all()` ждёт массив, а не строковое выражение. Поймано в
+          // бою: приём слотов отвечал 500, сбор Ourvend падал целиком.
           const живые = m.slots.map((s) => s.coilId);
           const убрано = await tx
             .delete(machineSlot)
             .where(
-              and(
-                eq(machineSlot.machineSerial, m.serial),
-                sql`${machineSlot.coilId} <> all(${живые})`,
-              ),
+              and(eq(machineSlot.machineSerial, m.serial), notInArray(machineSlot.coilId, живые)),
             )
             .returning({ id: machineSlot.id });
           pruned += убрано.length;
