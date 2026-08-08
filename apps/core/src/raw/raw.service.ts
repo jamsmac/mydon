@@ -622,6 +622,36 @@ export interface RawImportInput {
  * имеет права править этот слой: он существует, чтобы спорную цифру можно было
  * сверить с распечаткой источника.
  */
+/**
+ * Словарь «адрес точки → карточка автомата» для автоподсказки сопоставления.
+ *
+ * Раньше строился однозначно: на точке стоял один аппарат. После решения
+ * владельца («в одной точке может стоять несколько, в том числе одинаковых»)
+ * один адрес есть у нескольких карточек — например у кофейной и снековой на
+ * American Hospital. Прежний код звал `set` в цикле, и ключ молча доставался
+ * ПОСЛЕДНЕМУ: строки чужой выгрузки приписывались не тому автомату, причём с
+ * пометкой «auto» — без вопроса владельцу и без следа, что выбор вообще был.
+ *
+ * Спорный ключ не подсказывает ничего. Разобрать руками один раз честнее, чем
+ * угадать в половине случаев: по этому сопоставлению продажи выгрузки ложатся
+ * на конкретный автомат, то есть оно правит деньгами.
+ */
+export function pointIndex(
+  machines: { id: string; name: string; attrs: unknown }[],
+): Map<string, { id: string; name: string }> {
+  const byPoint = new Map<string, { id: string; name: string }>();
+  const спорные = new Set<string>();
+  for (const m of machines) {
+    const point = (m.attrs as Record<string, unknown> | null)?.["точка"];
+    if (typeof point !== "string" || point.trim().length === 0) continue;
+    const key = normalizeSourceKey(point);
+    if (byPoint.has(key)) спорные.add(key);
+    else byPoint.set(key, { id: m.id, name: m.name });
+  }
+  for (const key of спорные) byPoint.delete(key);
+  return byPoint;
+}
+
 @Injectable()
 export class RawService {
   constructor(
@@ -1045,14 +1075,7 @@ export class RawService {
     }
     const byProductName = new Map<string, { id: string; name: string }>();
     for (const p of products) byProductName.set(normalizeSourceKey(p.name), { id: p.id, name: p.name });
-    // Точка узнаётся по карточке автомата: отдельных карточек точек пока нет.
-    const byPoint = new Map<string, { id: string; name: string }>();
-    for (const m of machines) {
-      const point = (m.attrs as Record<string, unknown>)["точка"];
-      if (typeof point === "string" && point.trim().length > 0) {
-        byPoint.set(normalizeSourceKey(point), { id: m.id, name: m.name });
-      }
-    }
+    const byPoint = pointIndex(machines);
 
     const linkByKey = new Map(links.map((l) => [`${l.kind}::${l.externalKey}`, l]));
     const entityNameById = new Map<string, string>([

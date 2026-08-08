@@ -10,6 +10,7 @@ import {
   markOverlaps,
   normalizeRowsQuery,
   parseColumnFilters,
+  pointIndex,
   priceAt,
   referencePrice,
   referenceSince,
@@ -704,5 +705,55 @@ describe("Журнал: строка красится по худшему, чт�
   it("сверять нечего — состояние первоисточника", () => {
     assert.equal(worstState([]), "source");
     assert.equal(worstState([f("source")]), "source");
+  });
+});
+
+
+describe("pointIndex — подсказка сопоставления по адресу точки", () => {
+  const авт = (id: string, name: string, точка?: string) => ({
+    id,
+    name,
+    attrs: точка === undefined ? {} : { точка },
+  });
+
+  it("однозначный адрес подсказывает свою карточку", () => {
+    const idx = pointIndex([авт("m1", "Кофе AH", "American Hospital")]);
+    assert.equal(idx.get("american hospital")?.id, "m1");
+  });
+
+  it("адрес у двух аппаратов не подсказывает НИЧЕГО", () => {
+    // После среза Б это норма: на точке стоят кофейный и снековый. Прежний код
+    // молча отдавал ключ последнему, и продажи выгрузки ложились не на тот
+    // автомат — с пометкой «auto», то есть без вопроса владельцу.
+    const idx = pointIndex([
+      авт("кофе", "American hospital", "American Hospital"),
+      авт("снек", "American Hospital · снек", "American Hospital"),
+    ]);
+    assert.equal(idx.has("american hospital"), false, "спорный ключ обязан молчать");
+  });
+
+  it("спор не задевает соседние адреса", () => {
+    const idx = pointIndex([
+      авт("кофе", "AH кофе", "American Hospital"),
+      авт("снек", "AH снек", "American Hospital"),
+      авт("один", "Parus F4", "Parus F4"),
+    ]);
+    assert.equal(idx.has("american hospital"), false);
+    assert.equal(idx.get("parus f4")?.id, "один");
+  });
+
+  it("регистр и лишние пробелы не создают ложной однозначности", () => {
+    // «AMERICAN  hospital» и «American Hospital» — один адрес, значит спор.
+    const idx = pointIndex([
+      авт("a", "первый", "AMERICAN  hospital"),
+      авт("b", "второй", "American Hospital"),
+    ]);
+    assert.equal(idx.has("american hospital"), false);
+  });
+
+  it("пустые и отсутствующие адреса пропускаются, а не спорят", () => {
+    const idx = pointIndex([авт("a", "без точки"), авт("b", "пусто", "   "), авт("c", "есть", "Olma office")]);
+    assert.equal(idx.size, 1);
+    assert.equal(idx.get("olma office")?.id, "c");
   });
 });
