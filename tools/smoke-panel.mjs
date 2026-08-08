@@ -77,10 +77,17 @@ async function проверить({ path, должно }) {
   console.log(`  ok  GET ${path}`);
 }
 
-const panel = spawn("npx", ["next", "start", "-p", PORT], {
+// Запускаем бинарник напрямую, а не через `npx`: лишний процесс-посредник
+// переживал снятие, и его дети оставались висеть.
+//
+// `detached: true` даёт свою группу процессов — снимаем её целиком, иначе
+// сервер Next остаётся жить: он форкает рабочие процессы, и убийство только
+// родителя оставляет сирот.
+const panel = spawn("node_modules/.bin/next", ["start", "-p", PORT], {
   cwd: "apps/cc",
   env: { ...process.env, PORT },
   stdio: ["ignore", "pipe", "pipe"],
+  detached: true,
 });
 const логи = [];
 panel.stdout.on("data", (d) => логи.push(String(d)));
@@ -93,9 +100,22 @@ try {
 } catch (e) {
   провалы.push(`старт: ${e.message}`);
 } finally {
-  panel.kill("SIGTERM");
-  await sleep(300);
-  if (panel.exitCode === null) panel.kill("SIGKILL");
+  снятьГруппу("SIGTERM");
+  await sleep(500);
+  if (panel.exitCode === null) снятьГруппу("SIGKILL");
+}
+
+function снятьГруппу(сигнал) {
+  try {
+    // Минус перед pid — вся группа, а не один процесс.
+    process.kill(-panel.pid, сигнал);
+  } catch {
+    try {
+      panel.kill(сигнал);
+    } catch {
+      // уже умер — это и требовалось
+    }
+  }
 }
 
 if (провалы.length > 0) {
