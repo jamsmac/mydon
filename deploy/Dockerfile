@@ -44,5 +44,11 @@ FROM base AS runtime
 ENV NODE_ENV=production
 ENV TZ=Asia/Tashkent
 COPY --from=build /app ./
+# Коммит, из которого собран ОБРАЗ. Проверять выкат по каталогу на сервере
+# нельзя: `git pull` обновляет его сразу, а пересборка идёт ещё минуты — и всё
+# это время работает старый код при «правильном» коммите в каталоге. 08.08.2026
+# на этом была вызвана автопривязка старой версией.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 # Запускаемое приложение задаётся командой в docker-compose
 CMD ["node", "apps/core/dist/main.js"]
