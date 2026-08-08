@@ -7,7 +7,9 @@ import {
   IsUUID,
   MaxLength,
 } from "class-validator";
-import { DOMAINS, type Domain } from "@mydon/shared";
+import { DOMAINS, type Domain,
+  MAX_ENTITY_NAME,
+} from "@mydon/shared";
 
 export class CreateEntityDto {
   @IsIn([...DOMAINS], { message: "domain должен быть одним из: " + DOMAINS.join(", ") })
@@ -21,7 +23,7 @@ export class CreateEntityDto {
 
   @IsString()
   @IsNotEmpty()
-  @MaxLength(512)
+  @MaxLength(MAX_ENTITY_NAME)
   name!: string;
 
   /** Ссылка на источник: ИНН, id в VHM24 и т.п. Служит ключом при сведении справочников. */
@@ -49,7 +51,7 @@ export class UpdateEntityDto {
   @IsOptional()
   @IsString()
   @IsNotEmpty()
-  @MaxLength(512)
+  @MaxLength(MAX_ENTITY_NAME)
   name?: string;
 
   @IsOptional()

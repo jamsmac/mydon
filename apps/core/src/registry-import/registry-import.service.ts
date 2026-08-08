@@ -8,7 +8,9 @@ import {
   moneyFlow,
   org,
 } from "@mydon/db";
-import { MONEY_CATEGORIES } from "@mydon/shared";
+import { MONEY_CATEGORIES,
+  entityNameProblem,
+} from "@mydon/shared";
 import { and, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { DB, type Db } from "../db/db.module";
@@ -822,14 +824,20 @@ export class RegistryImportService {
     source: string,
     actorRef: string,
   ): Promise<ImportCount> {
-    const clean = rows.filter(
-      (c) => (c.name ?? "").trim().length >= 2 && INN_RE.test((c.inn ?? "").trim()),
-    );
-    if (clean.length < rows.length) {
+    // Имя проверяем и СВЕРХУ. Раньше был только нижний предел, и 04.08.2026
+    // сюда прошла карточка, у которой в имени лежала склейка строк накладной
+    // от нескольких контрагентов сразу — 1223 знака. Из такой склейки
+    // настоящее имя не восстановить, поэтому её надо ловить на входе.
+    const плохие = rows
+      .map((c) => ({ c, беда: entityNameProblem(c.name) ?? (INN_RE.test((c.inn ?? "").trim()) ? null : "кривой ИНН") }))
+      .filter((x) => x.беда !== null);
+    if (плохие.length > 0) {
+      const примеры = плохие.slice(0, 3).map((x) => `«${(x.c.name ?? "").trim().slice(0, 40)}…» — ${x.беда}`);
       throw new BadRequestException(
-        `Контрагенты без имени или с кривым ИНН: ${rows.length - clean.length} строк — почини сид`,
+        `Контрагенты не прошли проверку: ${плохие.length} строк — почини сид. ${примеры.join("; ")}`,
       );
     }
+    const clean = rows;
     const inns = clean.map((c) => c.inn.trim());
     const existing = await this.db
       .select({ ref: entity.externalRef })
@@ -875,6 +883,18 @@ export class RegistryImportService {
     source: string,
     actorRef: string,
   ): Promise<ImportCount> {
+    // Тот же вход, та же беда: у счёта СФ 2025-48 имя оказалось длиной 1246
+    // знаков — заголовок счёта и следом весь список позиций нескольких
+    // контрагентов. Проверяем до вставки, а не после.
+    const кривые = rows
+      .map((r) => ({ r, беда: entityNameProblem(r.name) }))
+      .filter((x) => x.беда !== null);
+    if (кривые.length > 0) {
+      const примеры = кривые.slice(0, 3).map((x) => `«${(x.r.name ?? "").trim().slice(0, 40)}…» — ${x.беда}`);
+      throw new BadRequestException(
+        `Счета не прошли проверку: ${кривые.length} строк — почини сид. ${примеры.join("; ")}`,
+      );
+    }
     const refs = rows.map((r) => r.ref);
     const existing = await this.db
       .select({ ref: entity.externalRef })
