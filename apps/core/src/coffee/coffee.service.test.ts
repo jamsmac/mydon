@@ -8,6 +8,7 @@ import {
   coffeeContainerTare,
   coffeeIngredient,
   entity,
+  machineCard,
   machinePlacement,
   coffeeProduct,
   coffeeRefill,
@@ -41,6 +42,8 @@ function coffeeDb(tables: {
   returns?: unknown[];
   /** История размещений аппарат↔точка (открытые = endDate null). */
   placements?: unknown[];
+  /** Карточки автоматов: вид и состояние. Нужны автопривязке — в ремонт не ставим. */
+  machineCards?: unknown[];
 }) {
   const inserts: { table: string; values: unknown }[] = [];
   const updates: { table: string; values: unknown }[] = [];
@@ -63,6 +66,7 @@ function coffeeDb(tables: {
     if (t === coffeeWashSchedule) return tables.washSchedule ?? [];
     if (t === coffeeContainerReturn) return tables.returns ?? [];
     if (t === machinePlacement) return tables.placements ?? [];
+    if (t === machineCard) return tables.machineCards ?? [];
     return [];
   };
   const nameOf = (t: unknown): string => {
@@ -79,6 +83,7 @@ function coffeeDb(tables: {
     if (t === coffeeWashSchedule) return "coffee_wash_schedule";
     if (t === coffeeContainerReturn) return "coffee_container_return";
     if (t === machinePlacement) return "machine_placement";
+    if (t === machineCard) return "machine_card";
     if (t === auditLog) return "audit_log";
     return "unknown";
   };
@@ -781,35 +786,84 @@ describe("CoffeeService: привязка точек к автоматам ре�
     assert.equal((opened.values as Record<string, unknown>).locationId, "loc-1");
   });
 
-  it("autoLinkLocations — два автомата на одном адресе → неоднозначно, НЕ привязывается", async () => {
-    const registry = [
-      { id: "m1", type: "machine", name: "Автомат A", externalRef: "1", attrs: { точка: "American Hospital" } },
-      { id: "m2", type: "machine", name: "Автомат B", externalRef: "2", attrs: { точка: "American Hospital" } },
-    ];
-    const { db, updates } = coffeeDb({ locations: [loc()], registry });
-    const svc = new CoffeeService(db);
-    const res = await svc.autoLinkLocations();
-    assert.equal(res.linked, 0);
-    assert.deepEqual(res.ambiguous, ["American Hospital"]);
-    assert.equal(updates.length, 0);
-  });
-
-  it("autoLinkLocations — уже привязанная точка не перетирается", async () => {
+  it("autoLinkLocations — одно имя у двух мест → неоднозначно, НЕ привязывается", async () => {
+    // Неоднозначность теперь на стороне МЕСТ: аппарат один, а точек с таким
+    // именем две — какая из них, машина решать не вправе.
     const registry = [
       { id: "m1", type: "machine", name: "Автомат A", externalRef: "1", attrs: { точка: "American Hospital" } },
     ];
-    const { db, updates } = coffeeDb({ locations: [loc()], registry, placements: [{ id: "p0", locationId: "loc-1", entityId: "m-old", endDate: null }] });
+    const { db, inserts } = coffeeDb({
+      locations: [loc(), loc({ id: "loc-2" })],
+      registry,
+    });
     const svc = new CoffeeService(db);
     const res = await svc.autoLinkLocations();
     assert.equal(res.linked, 0);
-    assert.equal(updates.length, 0);
+    assert.deepEqual(res.ambiguous, ["Автомат A"]);
+    assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 0);
   });
 
-  it("autoLinkLocations — нет кандидатов → в unmatched, без выдумывания", async () => {
-    const { db, inserts } = coffeeDb({ locations: [loc({ name: "Grand clinic" })], registry: [] });
+  it("autoLinkLocations — аппарат, который уже где-то стоит, не трогаем", async () => {
+    // Ручную расстановку не перетираем. Раньше защита была «место занято» — и
+    // она же навсегда запрещала поставить на точку второй аппарат.
+    const registry = [
+      { id: "m1", type: "machine", name: "Автомат A", externalRef: "1", attrs: { точка: "American Hospital" } },
+    ];
+    const { db, inserts } = coffeeDb({
+      locations: [loc()],
+      registry,
+      placements: [{ id: "p0", locationId: "loc-1", entityId: "m1", endDate: null }],
+    });
     const svc = new CoffeeService(db);
     const res = await svc.autoLinkLocations();
-    assert.deepEqual(res.unmatched, ["Grand clinic"]);
+    assert.equal(res.linked, 0);
+    assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 0);
+  });
+
+  it("autoLinkLocations — на занятое место второй аппарат ВСТАЁТ", async () => {
+    // То, ради чего обход и развернули: снек-автомат стоит на той же точке, что
+    // кофейный, и раньше не привязывался никогда — место считалось занятым.
+    const registry = [
+      { id: "снек", type: "machine", name: "American Hospital · снек", externalRef: "2", attrs: {} },
+    ];
+    const { db, inserts } = coffeeDb({
+      locations: [loc()],
+      registry,
+      placements: [{ id: "p0", locationId: "loc-1", entityId: "кофе", endDate: null }],
+    });
+    const svc = new CoffeeService(db);
+    const res = await svc.autoLinkLocations();
+    assert.equal(res.linked, 1, "уточнитель «· снек» не должен мешать");
+    const opened = inserts.find((i) => i.table === "machine_placement")!;
+    assert.equal((opened.values as Record<string, unknown>).entityId, "снек");
+    assert.equal((opened.values as Record<string, unknown>).locationId, "loc-1");
+  });
+
+  it("autoLinkLocations — автомат не в эксплуатации на точку не встаёт", async () => {
+    // Иначе автопривязка «вернула» бы в строй автомат из ремонта за спиной у
+    // владельца — и на точке продаж оказалось бы то, чего там нет.
+    const registry = [
+      { id: "m1", type: "machine", name: "American Hospital", externalRef: "1", attrs: {} },
+    ];
+    const { db, inserts } = coffeeDb({
+      locations: [loc()],
+      registry,
+      machineCards: [{ entityId: "m1", status: "repair" }],
+    });
+    const svc = new CoffeeService(db);
+    const res = await svc.autoLinkLocations();
+    assert.equal(res.linked, 0);
+    assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 0);
+  });
+
+  it("autoLinkLocations — нет совпадений → аппарат в unmatched, без выдумывания", async () => {
+    const registry = [
+      { id: "m1", type: "machine", name: "Снек (без точки)", externalRef: "1", attrs: {} },
+    ];
+    const { db, inserts } = coffeeDb({ locations: [loc({ name: "Grand clinic" })], registry });
+    const svc = new CoffeeService(db);
+    const res = await svc.autoLinkLocations();
+    assert.deepEqual(res.unmatched, ["Снек (без точки)"]);
     assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 0, "выдумывать привязку нельзя");
   });
 });
