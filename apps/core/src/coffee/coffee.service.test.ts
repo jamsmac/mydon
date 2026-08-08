@@ -7,15 +7,14 @@ import {
   coffeeContainerReturn,
   coffeeContainerTare,
   coffeeIngredient,
-  coffeeLocation,
-  coffeeMachinePlacement,
+  entity,
+  machinePlacement,
   coffeeProduct,
   coffeeRefill,
   coffeeSale,
   coffeeStock,
   coffeeWashLog,
   coffeeWashSchedule,
-  entity,
 } from "@mydon/db";
 import { CoffeeService } from "./coffee.service";
 
@@ -48,7 +47,10 @@ function coffeeDb(tables: {
   const deletes: { table: string }[] = [];
 
   const tableOf = (t: unknown): unknown[] => {
-    if (t === coffeeLocation) return tables.locations ?? [];
+    // Места и автоматы — одна таблица `entity` (миграция 0049). Заглушка не
+    // исполняет where(type), поэтому отдаёт объединение: тесты передают либо
+    // места, либо карточки, и пересечения в одном сценарии не бывает.
+    if (t === entity) return [...(tables.locations ?? []), ...(tables.registry ?? [])];
     if (t === coffeeBunkerConfig) return tables.bunkerConfig ?? [];
     if (t === coffeeIngredient) return tables.ingredients ?? [];
     if (t === coffeeContainerTare) return tables.tare ?? [];
@@ -59,13 +61,12 @@ function coffeeDb(tables: {
     if (t === coffeeWashLog) return tables.washLog ?? [];
     if (t === coffeeStock) return tables.stock ?? [];
     if (t === coffeeWashSchedule) return tables.washSchedule ?? [];
-    if (t === entity) return tables.registry ?? [];
     if (t === coffeeContainerReturn) return tables.returns ?? [];
-    if (t === coffeeMachinePlacement) return tables.placements ?? [];
+    if (t === machinePlacement) return tables.placements ?? [];
     return [];
   };
   const nameOf = (t: unknown): string => {
-    if (t === coffeeLocation) return "coffee_location";
+    if (t === entity) return "entity";
     if (t === coffeeBunkerConfig) return "coffee_bunker_config";
     if (t === coffeeIngredient) return "coffee_ingredient";
     if (t === coffeeContainerTare) return "coffee_container_tare";
@@ -76,17 +77,74 @@ function coffeeDb(tables: {
     if (t === coffeeProduct) return "coffee_product";
     if (t === coffeeStock) return "coffee_stock";
     if (t === coffeeWashSchedule) return "coffee_wash_schedule";
-    if (t === entity) return "entity";
     if (t === coffeeContainerReturn) return "coffee_container_return";
-    if (t === coffeeMachinePlacement) return "coffee_machine_placement";
+    if (t === machinePlacement) return "machine_placement";
     if (t === auditLog) return "audit_log";
     return "unknown";
   };
 
+  /**
+   * Значения, подставленные в условие: `eq(entity.id, "loc-1")` даёт ["loc-1"].
+   *
+   * Нужны, потому что места и автоматы теперь ОДНА таблица (миграция 0049), и
+   * без разбора условия заглушка отдавала бы поиску автомата первую строку —
+   * ею оказывалось место, и сервис честно ругался «это не автомат».
+   */
+  const условиеЗначения = (cond: unknown): string[] => {
+    // Обход РЕКУРСИВНЫЙ. У составного условия `and(eq(...), eq(...))` наверху
+    // лежат не параметры, а вложенные SQL-объекты, и плоский перебор возвращал
+    // пустой список — фильтр молча выключался именно там, где он и нужен.
+    const out: string[] = [];
+    const обойти = (узел: unknown, глубина: number): void => {
+      if (узел == null || глубина > 8) return;
+      const v = (узел as { value?: unknown }).value;
+      if (typeof v === "string") out.push(v);
+      else if (Array.isArray(v)) for (const x of v) if (typeof x === "string") out.push(x);
+      for (const c of (узел as { queryChunks?: unknown[] }).queryChunks ?? []) обойти(c, глубина + 1);
+    };
+    обойти(cond, 0);
+    return out;
+  };
+
   const selectChain = (t: unknown) => {
-    const rows = tableOf(t);
+    let rows = tableOf(t);
     const chain = {
-      where: () => chain,
+      // Фильтруем ТОЛЬКО выборки из `entity` — и только потому, что места и
+      // автоматы стали одной таблицей (миграция 0049). Для остальных таблиц
+      // заглушка ведёт себя как раньше: она не эмулирует SQL и не должна.
+      //
+      // Попытка фильтровать всё подряд разваливалась дважды: строгий фильтр
+      // резал выборки по isActive и по точке, а нестрогий возвращал полный
+      // список там, где совпадений нет — и «доказывал» поведение, которого в
+      // SQL быть не может.
+      where: (cond?: unknown) => {
+        const значения = условиеЗначения(cond);
+        if (значения.length === 0) return chain;
+        // Размещения: условие всегда конъюнкция «место И аппарат», и различить
+        // их надо ДО фильтра — иначе проверка «этот аппарат уже стоит здесь»
+        // поймает чужое размещение той же точки и молча выйдет, не открыв
+        // период. По значению столбец не угадать (оба — uuid), но фикстура
+        // знает, какие id заведены автоматами, а какие местами.
+        if (t === machinePlacement) {
+          const автоматы = new Set((tables.registry ?? []).map((r) => (r as { id?: string }).id));
+          const места = new Set((tables.locations ?? []).map((r) => (r as { id?: string }).id));
+          const поАппарату = значения.filter((v) => автоматы.has(v));
+          const поМесту = значения.filter((v) => места.has(v));
+          rows = rows.filter((r) => {
+            const row = r as { entityId?: string; locationId?: string };
+            const аппаратПодходит = поАппарату.length === 0 || поАппарату.includes(row.entityId ?? "");
+            const местоПодходит = поМесту.length === 0 || поМесту.includes(row.locationId ?? "");
+            return аппаратПодходит && местоПодходит;
+          });
+          return chain;
+        }
+        if (t !== entity) return chain;
+        rows = rows.filter((r) => {
+          const row = r as { id?: string; type?: string };
+          return значения.includes(row.id ?? "") || значения.includes(row.type ?? "");
+        });
+        return chain;
+      },
       orderBy: () => chain,
       limit: () => Promise.resolve(rows),
       innerJoin: () => chain,
@@ -110,9 +168,12 @@ function coffeeDb(tables: {
     }),
     update: (t: unknown) => ({
       set: (v: unknown) => ({
-        where: async () => {
+        // where() и awaitable, и с .returning(): снятие аппарата с места
+        // считает, сколько размещений закрыло.
+        where: () => {
           updates.push({ table: nameOf(t), values: v });
-          return undefined;
+          const rows = [{ id: "pl-1" }];
+          return Object.assign(Promise.resolve(undefined), { returning: async () => rows });
         },
       }),
     }),
@@ -297,8 +358,8 @@ describe("CoffeeService: сверка по всем точкам сразу (rec
   const ingredients = [{ id: "ing-coffee", name: "Кофе" }];
   const products = [{ id: "prod-americano", name: "Американо", recipe: [{ ingredientId: "ing-coffee", quantity: 18, unit: "г" }] }];
   const locations = [
-    { id: "loc-1", name: "AH", sortOrder: 0, isActive: true },
-    { id: "loc-2", name: "Grand clinic", sortOrder: 1, isActive: true },
+    { id: "loc-1", name: "AH", type: "location", attrs: {} },
+    { id: "loc-2", name: "Grand clinic", type: "location", attrs: {} },
   ];
 
   it("группирует сверку по точкам, точки без данных в периоде не попадают в ответ", async () => {
@@ -508,7 +569,7 @@ describe("CoffeeService: склад ингредиентов (ingestCoffeeStock/
 
 describe("CoffeeService: расписание мойки (washSchedule*)", () => {
   const DAY = 86_400_000;
-  const locations = [{ id: "loc-1", name: "AH", sortOrder: 0, isActive: true }];
+  const locations = [{ id: "loc-1", name: "AH", type: "location", attrs: {} }];
 
   it("setWashSchedule — без хотя бы одной частоты бросает ошибку", async () => {
     const { db } = coffeeDb({});
@@ -636,11 +697,9 @@ describe("CoffeeService: привязка точек к автоматам ре�
   const loc = (over: Record<string, unknown> = {}) => ({
     id: "loc-1",
     name: "American Hospital",
-    isActive: true,
-    entityId: null,
-    machineName: null,
-    machineRef: null,
-    sortOrder: 0,
+    // Место — карточка реестра: тип обязателен, его проверяет linkLocation.
+    type: "location",
+    attrs: {},
     ...over,
   });
 
@@ -656,19 +715,41 @@ describe("CoffeeService: привязка точек к автоматам ре�
     await assert.rejects(svc.linkLocation("loc-1", "ent-1"));
   });
 
-  it("linkLocation — валидная привязка пишет entityId; null снимает связь", async () => {
-    const { db, updates } = coffeeDb({
+  it("linkLocation ставит аппарат на место записью размещения", async () => {
+    // «Текущий аппарат места» больше не колонка: аппаратов может быть
+    // несколько, и состав считается из открытых размещений.
+    const { db, inserts } = coffeeDb({
       locations: [loc()],
       registry: [{ id: "ent-1", type: "machine", name: "Кофемашина AH" }],
     });
     const svc = new CoffeeService(db);
     await svc.linkLocation("loc-1", "ent-1");
-    await svc.linkLocation("loc-1", null);
-    // Привязка теперь ведёт ещё и историю размещений — смотрим только кэш точки.
-    const locUpdates = updates.filter((u) => u.table === "coffee_location");
-    assert.equal(locUpdates.length, 2);
-    assert.equal((locUpdates[0]!.values as Record<string, unknown>).entityId, "ent-1");
-    assert.equal((locUpdates[1]!.values as Record<string, unknown>).entityId, null);
+    const размещения = inserts.filter((i) => i.table === "machine_placement");
+    assert.equal(размещения.length, 1);
+    assert.equal((размещения[0]!.values as Record<string, unknown>).entityId, "ent-1");
+  });
+
+  it("linkLocation с null отвергается — непонятно, какой аппарат снимать", async () => {
+    // Пока место держало один аппарат, null означал «отвязать». С несколькими
+    // аппаратами вопрос «какой снять» остаётся без ответа, и молча снять
+    // первый попавшийся — худшее, что можно сделать.
+    const { db } = coffeeDb({
+      locations: [loc()],
+      registry: [{ id: "ent-1", type: "machine", name: "Кофемашина AH" }],
+    });
+    const svc = new CoffeeService(db);
+    await assert.rejects(svc.linkLocation("loc-1", null), /какой снять/);
+  });
+
+  it("unlinkMachine снимает именно свой аппарат, соседей не трогает", async () => {
+    const { db, updates } = coffeeDb({
+      locations: [loc()],
+      registry: [{ id: "ent-1", type: "machine", name: "Кофемашина AH" }],
+    });
+    const svc = new CoffeeService(db);
+    await svc.unlinkMachine("ent-1");
+    const закрытия = updates.filter((u) => u.table === "machine_placement");
+    assert.equal(закрытия.length, 1, "закрывается одно размещение — того аппарата, что сняли");
   });
 
   it("machineCandidates — отдаёт только осмысленный адрес точки (пустая строка → null)", async () => {
@@ -687,14 +768,17 @@ describe("CoffeeService: привязка точек к автоматам ре�
     const registry = [
       { id: "m1", type: "machine", name: "Кофемашина №1", externalRef: "101", attrs: { точка: "AMERICAN  hospital" } },
     ];
-    const { db, updates } = coffeeDb({ locations: [loc()], registry });
+    const { db, inserts } = coffeeDb({ locations: [loc()], registry });
     const svc = new CoffeeService(db);
     const res = await svc.autoLinkLocations();
     assert.equal(res.linked, 1);
     assert.deepEqual(res.ambiguous, []);
     assert.deepEqual(res.unmatched, []);
-    const locUpdate = updates.find((u) => u.table === "coffee_location")!;
-    assert.equal((locUpdate.values as Record<string, unknown>).entityId, "m1");
+    // Привязка теперь пишется размещением, а не колонкой у места: «текущий
+    // аппарат точки» невыразим, когда аппаратов может быть несколько.
+    const opened = inserts.find((i) => i.table === "machine_placement")!;
+    assert.equal((opened.values as Record<string, unknown>).entityId, "m1");
+    assert.equal((opened.values as Record<string, unknown>).locationId, "loc-1");
   });
 
   it("autoLinkLocations — два автомата на одном адресе → неоднозначно, НЕ привязывается", async () => {
@@ -714,7 +798,7 @@ describe("CoffeeService: привязка точек к автоматам ре�
     const registry = [
       { id: "m1", type: "machine", name: "Автомат A", externalRef: "1", attrs: { точка: "American Hospital" } },
     ];
-    const { db, updates } = coffeeDb({ locations: [loc({ entityId: "m-old" })], registry });
+    const { db, updates } = coffeeDb({ locations: [loc()], registry, placements: [{ id: "p0", locationId: "loc-1", entityId: "m-old", endDate: null }] });
     const svc = new CoffeeService(db);
     const res = await svc.autoLinkLocations();
     assert.equal(res.linked, 0);
@@ -722,16 +806,16 @@ describe("CoffeeService: привязка точек к автоматам ре�
   });
 
   it("autoLinkLocations — нет кандидатов → в unmatched, без выдумывания", async () => {
-    const { db, updates } = coffeeDb({ locations: [loc({ name: "Grand clinic" })], registry: [] });
+    const { db, inserts } = coffeeDb({ locations: [loc({ name: "Grand clinic" })], registry: [] });
     const svc = new CoffeeService(db);
     const res = await svc.autoLinkLocations();
     assert.deepEqual(res.unmatched, ["Grand clinic"]);
-    assert.equal(updates.length, 0);
+    assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 0, "выдумывать привязку нельзя");
   });
 });
 
 describe("CoffeeService: история размещений (аппарат ↔ точка с периодами)", () => {
-  const loc = () => ({ id: "loc-1", name: "AH", isActive: true, entityId: "ent-old", machineName: null, machineRef: null, sortOrder: 0 });
+  const loc = () => ({ id: "loc-1", name: "AH", type: "location", attrs: {} });
   const machine = (id: string) => ({ id, type: "machine", name: `Автомат ${id}` });
 
   it("перестановка аппарата закрывает открытое размещение и открывает новое", async () => {
@@ -743,15 +827,16 @@ describe("CoffeeService: история размещений (аппарат ↔
     const svc = new CoffeeService(db);
     await svc.linkLocation("loc-1", "ent-new");
 
-    // Старые периоды закрыты сегодняшним днём (точки и нового аппарата).
-    const closes = updates.filter((u) => u.table === "coffee_machine_placement");
-    assert.ok(closes.length >= 1, "открытое размещение точки закрывается");
+    // Закрывается размещение САМОГО АППАРАТА — он уезжает сюда откуда-то ещё.
+    // Соседей по новому месту не трогаем: раньше закрывались все размещения
+    // точки, и второй автомат молча выселял первого.
+    const closes = updates.filter((u) => u.table === "machine_placement");
     for (const c of closes) {
       assert.match(String((c.values as Record<string, unknown>).endDate), /^\d{4}-\d{2}-\d{2}$/);
     }
 
     // Новое размещение открыто с сегодняшней даты.
-    const opened = inserts.find((i) => i.table === "coffee_machine_placement")!;
+    const opened = inserts.find((i) => i.table === "machine_placement")!;
     const row = opened.values as Record<string, unknown>;
     assert.equal(row.locationId, "loc-1");
     assert.equal(row.entityId, "ent-new");
@@ -766,19 +851,19 @@ describe("CoffeeService: история размещений (аппарат ↔
     });
     const svc = new CoffeeService(db);
     await svc.linkLocation("loc-1", "ent-old");
-    assert.equal(inserts.filter((i) => i.table === "coffee_machine_placement").length, 0);
-    assert.equal(updates.filter((u) => u.table === "coffee_machine_placement").length, 0, "история не трогается");
+    assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 0);
+    assert.equal(updates.filter((u) => u.table === "machine_placement").length, 0, "история не трогается");
   });
 
-  it("снятие связи (null) закрывает размещение, ничего не открывая", async () => {
+  it("снятие аппарата закрывает размещение, ничего не открывая", async () => {
     const { db, inserts, updates } = coffeeDb({
       locations: [loc()],
       placements: [{ id: "p1", locationId: "loc-1", entityId: "ent-old", endDate: null }],
     });
     const svc = new CoffeeService(db);
-    await svc.linkLocation("loc-1", null);
-    assert.equal(inserts.filter((i) => i.table === "coffee_machine_placement").length, 0);
-    assert.equal(updates.filter((u) => u.table === "coffee_machine_placement").length, 1);
+    await svc.unlinkMachine("ent-old");
+    assert.equal(inserts.filter((i) => i.table === "machine_placement").length, 0);
+    assert.equal(updates.filter((u) => u.table === "machine_placement").length, 1);
   });
 
   it("placements() отдаёт историю с именами точки и аппарата", async () => {
@@ -800,7 +885,7 @@ describe("CoffeeService: правка точек и журнала из пане
     const svc = new CoffeeService(db);
     await assert.rejects(svc.createLocation(" x "));
     await svc.createLocation("  Новая точка  ");
-    const loc = inserts.find((i) => i.table === "coffee_location")!;
+    const loc = inserts.find((i) => i.table === "entity")!;
     assert.equal((loc.values as Record<string, unknown>).name, "Новая точка", "имя триммится");
     const audit = inserts.find((i) => i.table === "audit_log")!;
     assert.equal((audit.values as Record<string, unknown>).action, "coffee.location.create");
@@ -814,7 +899,7 @@ describe("CoffeeService: правка точек и журнала из пане
     await svc.updateLocation("loc-1", {});
     assert.equal(updates.length, 0, "нечего менять — не трогаем базу");
     await svc.updateLocation("loc-1", { name: "Новое имя", isActive: false });
-    assert.equal(updates.filter((u) => u.table === "coffee_location").length, 1);
+    assert.equal(updates.filter((u) => u.table === "entity").length, 1);
     const audit = inserts.find((i) => i.table === "audit_log")!.values as Record<string, Record<string, unknown>>;
     assert.equal(audit.before!.name, "Старое имя");
     assert.equal(audit.after!.name, "Новое имя");

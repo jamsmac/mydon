@@ -45,6 +45,16 @@ export class SetMachineStatusDto {
 
   @IsOptional() @IsString() @MaxLength(128)
   actor?: string;
+
+  /**
+   * Куда автомат уехал: склад, мастерская, точка продаж.
+   *
+   * Необязательно — уход из эксплуатации закрывает старое размещение в любом
+   * случае, а место указывают, когда его знают. Пустое место честнее
+   * выдуманного: «снят с точки, где именно — не записано».
+   */
+  @IsOptional() @IsUUID()
+  placeId?: string;
 }
 
 /** Вид автомата — поле карточки, а не догадка по косвенным признакам. */
@@ -160,7 +170,7 @@ export class EntitiesController {
 
   @Patch(":id/machine-status")
   setMachineStatus(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetMachineStatusDto) {
-    return this.entities.setMachineStatus(id, dto.status, dto.actor ?? "owner", dto.note);
+    return this.entities.setMachineStatus(id, dto.status, dto.actor ?? "owner", dto.note, dto.placeId);
   }
 
   @Patch(":id/machine-kind")

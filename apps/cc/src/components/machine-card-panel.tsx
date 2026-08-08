@@ -8,6 +8,7 @@ import {
   MACHINE_STATUS_LABELS,
   machineIsOperational,
   machineStatusLabel,
+  placeTypeLabel,
   type MachineKind,
   type MachineStatus,
 } from "@mydon/shared";
@@ -31,6 +32,7 @@ export function MachineCardPanel({
   statusNote,
   statusChangedAt,
   updatedBy,
+  places = [],
 }: {
   id: string;
   kind: string | null;
@@ -38,8 +40,11 @@ export function MachineCardPanel({
   statusNote: string | null;
   statusChangedAt: string | null;
   updatedBy: string | null;
+  /** Куда можно поставить автомат: точки продаж, склады, мастерские. */
+  places?: { id: string; name: string; type: string }[];
 }) {
   const [note, setNote] = useState(statusNote ?? "");
+  const [placeId, setPlaceId] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, start] = useTransition();
 
@@ -51,10 +56,16 @@ export function MachineCardPanel({
 
   const применить = (next: MachineStatus) =>
     start(async () => {
-      const res = await setMachineStatus(id, next, note.trim() || undefined);
+      const res = await setMachineStatus(id, next, note.trim() || undefined, placeId || undefined);
+      const место = places.find((p) => p.id === placeId);
       setMsg(
         res.ok
-          ? { ok: true, text: `Состояние: ${machineStatusLabel(next).toLowerCase()}` }
+          ? {
+              ok: true,
+              text:
+                `Состояние: ${machineStatusLabel(next).toLowerCase()}` +
+                (место ? ` · ${место.name}` : ""),
+            }
           : { ok: false, text: res.error ?? "Не сохранилось" },
       );
     });
@@ -121,6 +132,26 @@ export function MachineCardPanel({
       </div>
 
       <div className="form" style={{ marginTop: 12 }}>
+        {places.length > 0 && (
+          <label>
+            Куда ставим
+            <select value={placeId} onChange={(e) => setPlaceId(e.target.value)} disabled={pending}>
+              {/*
+                Пусто — не «никуда», а «не записано». Уход из эксплуатации
+                снимает автомат с точки в любом случае: «в ремонте» и «стоит на
+                точке продаж» разом не бывает. Место указывают, когда знают —
+                мастерская, свой склад, слово владельца: «места ремонта могут
+                быть разные».
+              */}
+              <option value="">— место не указывать —</option>
+              {places.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} · {placeTypeLabel(p.type).toLowerCase()}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           Причина / примечание
           <input

@@ -4,7 +4,6 @@ import {
   auditLog,
   coffeeConsumable,
   coffeeContainerReturn,
-  coffeeLocation,
   coffeeRefill,
   entity,
   event,
@@ -301,7 +300,12 @@ export class ApprovalsService {
     const consumables = Array.isArray(imp.consumables) ? imp.consumables.slice(0, 2000) : [];
     if (records.length === 0 && returns.length === 0 && consumables.length === 0) return;
 
-    const locations = await tx.select({ id: coffeeLocation.id, name: coffeeLocation.name }).from(coffeeLocation);
+    // Точки — карточки реестра типа `location` (миграция 0049 влила справочник
+    // в entity, сохранив идентификаторы).
+    const locations = await tx
+      .select({ id: entity.id, name: entity.name })
+      .from(entity)
+      .where(eq(entity.type, "location"));
     const validLocationIds = new Set(locations.map((l) => l.id));
     const idByName = new Map(locations.map((l) => [l.name.toLowerCase().trim(), l.id]));
 
@@ -314,7 +318,10 @@ export class ApprovalsService {
     for (const n of newLocations) {
       const name = typeof n === "string" ? n.trim().slice(0, 128) : "";
       if (name.length < 2 || idByName.has(name.toLowerCase())) continue;
-      const [createdLoc] = await tx.insert(coffeeLocation).values({ name }).returning({ id: coffeeLocation.id });
+      const [createdLoc] = await tx
+        .insert(entity)
+        .values({ type: "location", name, createdFrom: "coffee-import" })
+        .returning({ id: entity.id });
       idByName.set(name.toLowerCase(), createdLoc.id);
       validLocationIds.add(createdLoc.id);
       locationsCreated += 1;

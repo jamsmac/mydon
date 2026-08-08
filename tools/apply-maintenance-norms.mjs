@@ -59,7 +59,13 @@ async function main() {
   // и применяет), здесь только предпросмотр: показать разные числа для кофе
   // и снека честнее, чем одно общее, за которым не видно, что кому достанется.
   const locations = await get("/coffee/locations");
-  const isCoffee = new Set(locations.map((l) => l.entityId).filter(Boolean));
+  // Берём ВСЕ аппараты точки, а не первый. Поле `entityId` осталось от времён,
+  // когда на точке стоял ровно один автомат; теперь их может быть несколько
+  // (слово владельца), и по `entityId` второй кофейный автомат тихо уехал бы
+  // в «прочие» — то есть остался бы без мойки миксера и фильтра воды.
+  const isCoffee = new Set(
+    locations.flatMap((l) => (l.machines ?? []).map((m) => m.entityId).concat(l.entityId ?? [])).filter(Boolean),
+  );
   const NORMS = {
     coffee: [
       ["cleaning", "mixer"],

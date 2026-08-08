@@ -205,7 +205,9 @@ export class LinkLocationDto {
   @IsUUID()
   locationId!: string;
 
-  // null — снять привязку; UUID — привязать к карточке автомата.
+  // Какой аппарат ставим на место. Снятие — отдельным маршрутом
+  // `DELETE machine-link/:entityId`: на месте может стоять несколько аппаратов,
+  // и «снять» без указания какого именно — не операция, а угадывание.
   @IsOptional() @IsUUID()
   entityId?: string | null;
 }
@@ -278,6 +280,18 @@ export class CoffeeController {
   @Put("location-link")
   linkLocation(@Body() dto: LinkLocationDto) {
     return this.coffee.linkLocation(dto.locationId, dto.entityId ?? null);
+  }
+
+  /**
+   * Снять аппарат с места — закрыть его открытый период размещения.
+   *
+   * Адресуется АППАРАТОМ, а не местом: у места аппаратов может быть несколько
+   * (слово владельца — «в одной точке может стоять как разные аппараты, так и
+   * несколько одинаковых»), и «снять с точки» без имени аппарата двусмысленно.
+   */
+  @Delete("machine-link/:entityId")
+  unlinkMachine(@Param("entityId", ParseUUIDPipe) entityId: string) {
+    return this.coffee.unlinkMachine(entityId);
   }
 
   @Post("location-link/auto")

@@ -138,10 +138,15 @@ export interface CoffeeLocation {
   id: string;
   name: string;
   isActive: boolean;
-  /** Карточка автомата в реестре. null — точка не привязана. */
+  /**
+   * ПЕРВЫЙ аппарат на месте — оставлен ради экранов, которые знают про один.
+   * Полный состав — в `machines`: на точке может стоять несколько аппаратов.
+   */
   entityId: string | null;
   machineName: string | null;
   machineRef: string | null;
+  /** Все аппараты, стоящие здесь сейчас (открытый период размещения). */
+  machines: { entityId: string; name: string; ref: string | null }[];
 }
 
 /** Автомат реестра — кандидат привязки кофе-точки. */
@@ -1654,11 +1659,11 @@ export const core = {
       actor: "owner",
       ...(note !== undefined ? { note } : {}),
     }),
-  setMachineStatus: (entityId: string, status: string, note?: string) =>
+  setMachineStatus: (entityId: string, status: string, note?: string, placeId?: string) =>
     send<MachineCard>(`/entities/${entityId}/machine-status`, "PATCH", {
       status,
-      actor: "owner",
       ...(note !== undefined ? { note } : {}),
+      ...(placeId !== undefined ? { placeId } : {}),
     }),
 
   // ── Вендинг: автоматы и дефицит ──
@@ -1715,6 +1720,9 @@ export const core = {
   ingestCoffeeStock: (input: { countedAt?: string; items: { ingredientId: string; quantity: number }[] }) =>
     send<{ items: number; adjustments: unknown[] }>("/coffee/stock", "POST", input),
   coffeeMachineCandidates: () => get<CoffeeMachineCandidate[]>("/coffee/machines"),
+  /** Снять аппарат с места. Адресуется аппаратом: мест с двумя аппаратами хватает. */
+  unlinkCoffeeMachine: (entityId: string) =>
+    send<{ ok: true }>(`/coffee/machine-link/${entityId}`, "DELETE"),
   createCoffeeLocation: (name: string) => send<{ id: string }>("/coffee/locations", "POST", { name }),
   updateCoffeeLocation: (id: string, patch: { name?: string; isActive?: boolean }) =>
     send<{ ok: true }>(`/coffee/locations/${id}`, "PUT", patch),

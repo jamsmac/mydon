@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { coffeeConsumable, coffeeContainerReturn, coffeeLocation, coffeeRefill, entity, org, vendingPurchaseOrder } from "@mydon/db";
+import {
+  coffeeConsumable,
+  coffeeContainerReturn,
+  entity,
+  coffeeRefill,
+  org,
+  vendingPurchaseOrder,
+} from "@mydon/db";
 import { ApprovalsService } from "./approvals.service";
 
 type Row = Record<string, unknown>;
@@ -248,7 +255,11 @@ describe("Одобренный исторический импорт кофе-б
       select: () => ({
         from: (table: unknown) => {
           // Сервис читает и id, и name (резолв исторических точек по имени).
-          if (table === coffeeLocation) return Promise.resolve(opts.locations ?? [{ id: "loc-1", name: "AH" }]);
+          // Места теперь карточки реестра, поэтому выборка идёт с where(type).
+          if (table === entity) {
+            const rows = opts.locations ?? [{ id: "loc-1", name: "AH" }];
+            return Object.assign(Promise.resolve(rows), { where: () => Promise.resolve(rows) });
+          }
           if (table === coffeeContainerReturn) return { where: () => withLimit(opts.existingReturns ?? []) };
           return { where: () => withLimit(opts.existingRefills ?? []) };
         },
@@ -266,7 +277,7 @@ describe("Одобренный исторический импорт кофе-б
           if (table === coffeeRefill) inserted.push(...rows);
           if (table === coffeeContainerReturn) insertedReturns.push(...rows);
           if (table === coffeeConsumable) upsertedConsumables.push(...rows);
-          if (table === coffeeLocation) insertedLocations.push(...rows);
+          if (table === entity) insertedLocations.push(...rows);
           return Object.assign(Promise.resolve(undefined), {
             onConflictDoUpdate: async () => undefined,
             returning: async () => [{ id: `loc-new-${insertedLocations.length}` }],

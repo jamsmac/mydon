@@ -98,6 +98,99 @@ const ЗАПИСЬ = [
   },
 ];
 
+/**
+ * Срез Б: место — обычная карточка реестра, аппаратов на нём может быть несколько.
+ *
+ * Ради этого сценария дымовой прогон и нужен: `linkLocation` — это
+ * `and(eq(место), eq(аппарат), isNull(конец))` плюс join размещений с
+ * карточками. Заглушка БД в юнит-тестах таких запросов не исполняет, она лишь
+ * возвращает заготовленный ответ — и уже дважды зеленела на SQL, который
+ * Postgres отвергал.
+ */
+async function проверитьМеста() {
+  const создать = async (type, name) => {
+    const r = await fetch(`${BASE}/entities`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+      body: JSON.stringify({ domain: "vendhub", type, name }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const текст = await r.text();
+    if (!r.ok) throw new Error(`создание ${type} «${name}» → ${r.status}: ${текст.slice(0, 200)}`);
+    return JSON.parse(текст).id;
+  };
+  const поставить = async (locationId, entityId) => {
+    const r = await fetch(`${BASE}/coffee/location-link`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+      body: JSON.stringify({ locationId, entityId }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!r.ok) throw new Error(`привязка → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  };
+  const мест = async () => {
+    const r = await fetch(`${BASE}/coffee/locations`, { signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) throw new Error(`/coffee/locations → ${r.status}`);
+    return JSON.parse(await r.text());
+  };
+
+  const place = await создать("location", "Дымовая точка");
+  const m1 = await создать("machine", "Дымовой автомат 1");
+  const m2 = await создать("machine", "Дымовой автомат 2");
+
+  await поставить(place, m1);
+  await поставить(place, m2);
+  const после = (await мест()).find((l) => l.id === place);
+  if (!после) throw new Error("созданное место не вернулось в /coffee/locations");
+  if (после.machines.length !== 2) {
+    throw new Error(`на месте ожидали 2 аппарата, вернулось ${после.machines.length}`);
+  }
+
+  // Повтор той же привязки период-дубль не открывает.
+  await поставить(place, m1);
+  const повтор = (await мест()).find((l) => l.id === place);
+  if (повтор.machines.length !== 2) {
+    throw new Error(`повторная привязка размножила размещения: ${повтор.machines.length}`);
+  }
+
+  // Снятие адресуется аппаратом — соседа по месту не трогает.
+  const r = await fetch(`${BASE}/coffee/machine-link/${m1}`, {
+    method: "DELETE",
+    headers: { "x-service-token": TOKEN },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!r.ok) throw new Error(`снятие → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const итог = (await мест()).find((l) => l.id === place);
+  if (итог.machines.length !== 1 || итог.machines[0].entityId !== m2) {
+    throw new Error(`после снятия ожидали ровно второй аппарат, получили ${JSON.stringify(итог.machines)}`);
+  }
+
+  // Уход в ремонт с указанием мастерской. Тот же класс сырого SQL: закрытие
+  // открытого периода по `and(eq(аппарат), isNull(конец))` плюс вставка нового.
+  const shop = await создать("workshop", "Дымовая мастерская");
+  const статус = await fetch(`${BASE}/entities/${m2}/machine-status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+    body: JSON.stringify({ status: "repair", placeId: shop, note: "дымовой прогон" }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!статус.ok) throw new Error(`ремонт → ${статус.status}: ${(await статус.text()).slice(0, 200)}`);
+  const пусто = (await мест()).find((l) => l.id === place);
+  if (пусто.machines.length !== 0) {
+    throw new Error(`уехавший в ремонт всё ещё числится на точке: ${JSON.stringify(пусто.machines)}`);
+  }
+
+  // «На складе» требует склада — противоречие должно отвергаться сервером,
+  // а не только формой.
+  const мимо = await fetch(`${BASE}/entities/${m2}/machine-status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+    body: JSON.stringify({ status: "warehouse", placeId: place }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (мимо.ok) throw new Error("«на складе» на точке продаж прошло, а должно было быть отвергнуто");
+}
+
 async function ждатьЗдоровье(proc) {
   const дедлайн = Date.now() + СТАРТ_ТАЙМАУТ_МС;
   while (Date.now() < дедлайн) {
@@ -173,6 +266,13 @@ try {
 
   for (const path of ЧТЕНИЕ) await проверитьЧтение(path);
   for (const шаг of ЗАПИСЬ) await проверитьЗапись(шаг);
+
+  try {
+    await проверитьМеста();
+    console.log("  ok  сценарий: место реестра, два аппарата на нём, снятие одного");
+  } catch (e) {
+    провалы.push(`места: ${e.message}`);
+  }
 } catch (e) {
   провалы.push(`старт: ${e.message}`);
 } finally {
@@ -189,4 +289,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 1 сценарий.`);

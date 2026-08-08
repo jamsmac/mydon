@@ -38,10 +38,22 @@ describe("Точки и бункеры кофе-вендинга (референ
 });
 
 describe("seedCoffeeLocations/seedCoffeeBunkerIngredients/seedCoffeeContainerTare — идемпотентность", () => {
+  /**
+   * Точка — карточка реестра (миграция 0049), поэтому сид сперва ищет
+   * направление vendhub, а потом уже существующие места. Две выборки подряд:
+   * первая отдаёт направление, вторая — имена.
+   */
   function locationsDb(existing: { name: string }[]) {
     const inserted: unknown[] = [];
+    let вызов = 0;
+    const цепочка = (rows: unknown[]) => {
+      const p = Promise.resolve(rows);
+      return { where: () => ({ limit: () => p, then: p.then.bind(p) }), then: p.then.bind(p) };
+    };
     const db = {
-      select: () => ({ from: async () => existing }),
+      select: () => ({
+        from: () => (вызов++ === 0 ? цепочка([{ id: "org-vendhub" }]) : цепочка(existing)),
+      }),
       insert: () => ({ values: (v: unknown[]) => { inserted.push(...v); return Promise.resolve(undefined); } }),
     } as never;
     return { db, inserted };

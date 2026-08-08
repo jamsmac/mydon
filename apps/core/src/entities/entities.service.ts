@@ -5,6 +5,7 @@ import {
   entityDraft,
   geoPoint,
   machineCard,
+  machinePlacement,
   maintenancePlan,
   org,
   task,
@@ -18,8 +19,10 @@ import {
   machineIsOperational,
   type MachineStatus,
   coordFromAttrs,
+  isPlaceType,
   isUnit,
   MACHINE_KINDS,
+  placeTypeLabel,
   parseRecipe,
   recipeCost,
   type Domain,
@@ -27,7 +30,7 @@ import {
   type MachineKind,
   type Unit,
 } from "@mydon/shared";
-import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import type { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
@@ -707,6 +710,7 @@ export class EntitiesService {
     status: MachineStatus,
     actorRef = "owner",
     note?: string,
+    placeId?: string,
   ): Promise<MachineCardRow> {
     if (!(MACHINE_STATUSES as readonly string[]).includes(status)) {
       throw new BadRequestException(`Неизвестное состояние автомата: ${status}`);
@@ -795,6 +799,55 @@ export class EntitiesService {
         tasksCancelled = cancelled.length;
       }
 
+      // Где автомат теперь стоит.
+      //
+      // Уход из эксплуатации ЗАКРЫВАЕТ размещение всегда: «в ремонте» и
+      // «стоит на точке продаж» — взаимоисключающие утверждения, и оставить
+      // старое размещение значило бы показывать владельцу автомат там, где
+      // его нет. Куда он уехал — отдельный вопрос: место указывают, если
+      // знают (склад, мастерская — слово владельца: «места ремонта могут быть
+      // разные»). Не указали — период просто закрыт, без выдуманного адреса.
+      let movedTo: string | null = null;
+      if (changed && !machineIsOperational(status)) {
+        await tx
+          .update(machinePlacement)
+          .set({ endDate: todayTashkent() })
+          .where(and(eq(machinePlacement.entityId, entityId), isNull(machinePlacement.endDate)));
+      }
+      if (placeId !== undefined) {
+        const [place] = await tx
+          .select({ id: entity.id, type: entity.type, name: entity.name })
+          .from(entity)
+          .where(eq(entity.id, placeId))
+          .limit(1);
+        if (!place) throw new NotFoundException(`Место ${placeId} не найдено`);
+        if (!isPlaceType(place.type)) {
+          throw new BadRequestException(`Поставить автомат можно только на место, а это «${place.type}»`);
+        }
+        // Сверяем состояние с видом места только там, где состояние ПРЯМО
+        // называет вид: «в эксплуатации» — это точка продаж, «на складе» —
+        // склад. Для ремонта не сверяем ничего: чинят и в мастерской, и на
+        // складе, и прямо на точке.
+        if (status === "in_service" && place.type !== "location") {
+          throw new BadRequestException(
+            `В эксплуатации автомат стоит на точке продаж, а «${place.name}» — это ${placeTypeLabel(place.type).toLowerCase()}`,
+          );
+        }
+        if (status === "warehouse" && place.type !== "warehouse") {
+          throw new BadRequestException(
+            `Состояние «на складе» требует склада, а «${place.name}» — это ${placeTypeLabel(place.type).toLowerCase()}`,
+          );
+        }
+        await tx
+          .update(machinePlacement)
+          .set({ endDate: todayTashkent() })
+          .where(and(eq(machinePlacement.entityId, entityId), isNull(machinePlacement.endDate)));
+        await tx
+          .insert(machinePlacement)
+          .values({ locationId: placeId, entityId, startDate: todayTashkent() });
+        movedTo = place.name;
+      }
+
       await tx.insert(auditLog).values({
         actorKind: actorKindOf(actorRef),
         actorRef,
@@ -804,7 +857,7 @@ export class EntitiesService {
           changed && status === "in_service" ? "machine.status_restored" : "machine.status_changed",
         target: entityId,
         before: before ?? null,
-        after: { ...after, anchorsReset, tasksCancelled },
+        after: { ...after, anchorsReset, tasksCancelled, movedTo },
       });
       return after;
     });

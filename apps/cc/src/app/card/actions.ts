@@ -431,9 +431,11 @@ export async function setMachineStatus(
   id: string,
   status: string,
   note?: string,
+  /** Куда автомат уехал: склад, мастерская, точка. Пусто — место не записано. */
+  placeId?: string,
 ): Promise<ActionResult> {
   try {
-    await core.setMachineStatus(id, status, note);
+    await core.setMachineStatus(id, status, note, placeId);
   } catch (err) {
     return fail(err);
   }

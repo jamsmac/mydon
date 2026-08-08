@@ -111,8 +111,14 @@ export async function VendingPanel({ machines }: { machines: Entity[] }) {
   const bunkersByEntity = new Map<string, CoffeeFillStatusRow[]>();
   try {
     const [coffeeLocations, fillStatus] = await Promise.all([core.coffeeLocations(), core.coffeeFillStatus()]);
+    // Только места, где стоит РОВНО ОДИН аппарат. Уровни бункеров хранятся по
+    // месту, а показываются на карточке аппарата: пока аппарат один — это одно
+    // и то же. Если их два, чьи это бункеры — неизвестно, и подписать их
+    // первым попавшимся значило бы показать владельцу выдумку.
     const locationByEntity = new Map(
-      coffeeLocations.filter((l) => l.entityId !== null).map((l) => [l.entityId!, l.id]),
+      coffeeLocations
+        .filter((l) => (l.machines ?? []).length === 1)
+        .map((l) => [l.machines[0]!.entityId, l.id] as const),
     );
     for (const [entityId, locationId] of locationByEntity) {
       const rows = fillStatus.filter((r) => r.locationId === locationId);
