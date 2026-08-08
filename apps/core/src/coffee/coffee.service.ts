@@ -16,6 +16,7 @@ import {
   coffeeWashLog,
   coffeeWashSchedule,
   entity,
+  machineCard,
   org,} from "@mydon/db";
 import {
   buildLocationSummary,
@@ -25,7 +26,6 @@ import {
   fillStatus,
   matchReturnsToRefills,
   netWeight,
-  normalizeSourceKey,
   reconcileConsumption,
   type ContainerConsumptionRow,
   type ContainerFillEvent,
@@ -33,7 +33,10 @@ import {
   type LatestRefillRow,
   type ReconcileResult,
   type RecipeLine,
-  isPlaceType,} from "@mydon/shared";
+  isPlaceType,
+  machineIsOperational,
+  placeNameKeys,
+} from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 
 /**
@@ -519,38 +522,70 @@ export class CoffeeService {
    * (неоднозначность не угадывается). Уже привязанные точки не трогаются.
    */
   async autoLinkLocations(): Promise<{ linked: number; ambiguous: string[]; unmatched: string[] }> {
-    const [locations, machines] = await Promise.all([this.locations(), this.machineCandidates()]);
+    const [places, machines] = await Promise.all([this.locations(), this.machineCandidates()]);
 
-    const candidatesByKey = new Map<string, string[]>();
-    const add = (key: string, entityId: string) => {
-      const list = candidatesByKey.get(key) ?? [];
-      if (!list.includes(entityId)) list.push(entityId);
-      candidatesByKey.set(key, list);
-    };
-    for (const m of machines) {
-      if (m.point) add(normalizeSourceKey(m.point), m.entityId);
-      add(normalizeSourceKey(m.name), m.entityId);
+    // Обход идёт от АППАРАТОВ, а не от мест.
+    //
+    // Раньше перебирались места, а занятые пропускались. Пока на точке стоял
+    // один аппарат, это защищало ручную расстановку; после решения владельца
+    // («в одной точке может стоять несколько, в том числе одинаковых») то же
+    // условие НАВСЕГДА запрещало добавить второй — а снек-автоматы стоят ровно
+    // там же, где кофейные, и потому не привязывались никогда.
+    //
+    // Аппарат без открытого размещения — это честное «где стоит, неизвестно».
+    // Поставить его туда, что написано в его имени, ничего не перетирает.
+    const местаПоКлючу = new Map<string, string[]>();
+    for (const p of places) {
+      for (const ключ of placeNameKeys(p.name)) {
+        const list = местаПоКлючу.get(ключ) ?? [];
+        if (!list.includes(p.id)) list.push(p.id);
+        местаПоКлючу.set(ключ, list);
+      }
     }
+
+    const ужеСтоят = new Set(places.flatMap((p) => p.machines.map((m) => m.entityId)));
+    // Состояние аппарата решает, можно ли его вообще ставить на точку продаж.
+    // Автомат в ремонте или на складе туда не встаёт — иначе автопривязка
+    // «вернула» бы его в эксплуатацию за спиной у владельца.
+    const состояния = new Map(
+      (
+        await this.db
+          .select({ entityId: machineCard.entityId, status: machineCard.status })
+          .from(machineCard)
+      ).map((r) => [r.entityId, r.status]),
+    );
 
     let linked = 0;
     const ambiguous: string[] = [];
     const unmatched: string[] = [];
-    for (const loc of locations) {
-      // Место уже занято — ручную расстановку не перетираем. Проверяем ВЕСЬ
-      // состав, а не «текущий аппарат»: аппаратов на месте может быть несколько.
-      if (loc.machines.length > 0) continue;
-      const found = candidatesByKey.get(normalizeSourceKey(loc.name)) ?? [];
-      if (found.length === 1) {
-        await this.linkLocation(loc.id, found[0]!);
+    for (const m of machines) {
+      if (ужеСтоят.has(m.entityId)) continue;
+      if (!machineIsOperational(состояния.get(m.entityId) ?? null)) continue;
+
+      // Ключи по убыванию точности: сперва «точка» из карточки, потом имя
+      // целиком, потом имя без уточнителя. Первый сработавший и берём.
+      const ключи = [...placeNameKeys(m.point), ...placeNameKeys(m.name)];
+      let найдено: string[] = [];
+      for (const ключ of ключи) {
+        const кандидаты = местаПоКлючу.get(ключ) ?? [];
+        if (кандидаты.length > 0) {
+          найдено = кандидаты;
+          break;
+        }
+      }
+
+      if (найдено.length === 1) {
+        await this.linkLocation(найдено[0]!, m.entityId);
         linked += 1;
-      } else if (found.length > 1) {
-        ambiguous.push(loc.name);
+      } else if (найдено.length > 1) {
+        ambiguous.push(m.name);
       } else {
-        unmatched.push(loc.name);
+        unmatched.push(m.name);
       }
     }
     return { linked, ambiguous, unmatched };
   }
+
 
   // ── Точки: правка из панели (слово владельца: всё редактируется легко) ──
 

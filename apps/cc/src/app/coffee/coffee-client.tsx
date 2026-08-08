@@ -982,7 +982,8 @@ function LocationLinkSection({ locations, machines }: { locations: CoffeeLocatio
   return (
     <>
       <p className="hint">
-        Привязано {linked} из {locations.length}. Связь даёт точке серийник и координаты карточки автомата.{" "}
+        Занято мест: {linked} из {locations.length}. На одном месте может стоять несколько
+        аппаратов — автопривязка ставит те, у которых места ещё нет, по их названию.{" "}
         {machines.length === 0 && "В реестре пока нет карточек автоматов — они появляются из сбора/выгрузок ПО."}
       </p>
       {machines.length > 0 && (

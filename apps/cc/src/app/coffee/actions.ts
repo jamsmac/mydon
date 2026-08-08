@@ -226,9 +226,12 @@ export async function autoLinkCoffeeLocations(): Promise<ActionResult> {
   try {
     const res = await core.autoLinkCoffeeLocations();
     revalidatePath("/domain/vendhub");
-    const parts = [`привязано: ${res.linked}`];
-    if (res.ambiguous.length > 0) parts.push(`неоднозначно: ${res.ambiguous.join(", ")}`);
-    if (res.unmatched.length > 0) parts.push(`не найдено: ${res.unmatched.join(", ")}`);
+    // В списках теперь имена АППАРАТОВ: обход идёт от них, а не от точек.
+    // Раньше подпись «не найдено: <точка>» после разворота указывала бы не на
+    // то — владелец искал бы проблему в месте, а она в карточке автомата.
+    const parts = [`поставлено аппаратов: ${res.linked}`];
+    if (res.ambiguous.length > 0) parts.push(`несколько подходящих мест: ${res.ambiguous.join(", ")}`);
+    if (res.unmatched.length > 0) parts.push(`место не найдено: ${res.unmatched.join(", ")}`);
     return { ok: true, message: parts.join(" · ") };
   } catch (err) {
     return { ok: false, message: detailOf(err) };
