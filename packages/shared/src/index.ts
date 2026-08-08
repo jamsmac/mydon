@@ -78,6 +78,7 @@ export * from "./catalog-kinds";
 /** Вид места: точка продаж / склад / мастерская. */
 export * from "./place-kinds";
 export * from "./place-name";
+export * from "./entity-name";
 
 /** Состояние автомата: в эксплуатации / склад / ремонт. */
 export * from "./machine-status";

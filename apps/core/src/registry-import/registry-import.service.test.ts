@@ -109,8 +109,31 @@ describe("импорт реестра из книги владельца", () =>
     const { db } = stubDb([ORG]);
     const s = new RegistryImportService(db);
     await assert.rejects(
-      () => s.importGloberent({ contractors: [{ name: "X", inn: "12345" }] }),
-      /кривым ИНН/,
+      () => s.importGloberent({ contractors: [{ name: "Ромашка", inn: "12345" }] }),
+      /кривой ИНН/,
+    );
+  });
+
+  it("контрагент, у которого в имени целая накладная, не заводится", async () => {
+    // 04.08.2026 такая карточка прошла: имя проверялось только снизу, и в поле
+    // легла склейка строк от НЕСКОЛЬКИХ контрагентов — 1223 знака. Настоящее
+    // имя из неё не восстановить, значит ловить надо на входе.
+    const склейка = "EAST-WEST INVEST 302512057 Шины камерные, ROADBUSTER 1350000 ".repeat(30);
+    const { db } = stubDb([ORG]);
+    const s = new RegistryImportService(db);
+    await assert.rejects(
+      () => s.importGloberent({ contractors: [{ name: склейка, inn: "302512057" }] }),
+      /строка документа/,
+    );
+  });
+
+  it("счёт, у которого в имени целая накладная, не заводится", async () => {
+    const склейка = "СФ №48 от 2025-04-04 — EAST-WEST INVEST 302512057 Шины камерные ".repeat(25);
+    const { db } = stubDb([ORG]);
+    const s = new RegistryImportService(db);
+    await assert.rejects(
+      () => s.importGloberent({ invoices: [{ ref: "СФ 2025-48", name: склейка, attrs: {} }] }),
+      /строка документа/,
     );
   });
 
