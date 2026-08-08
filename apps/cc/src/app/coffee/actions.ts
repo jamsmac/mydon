@@ -210,6 +210,17 @@ export async function linkCoffeeLocation(locationId: string, entityId: string | 
   }
 }
 
+/** Снять аппарат с места (закрыть его период размещения). */
+export async function unlinkCoffeeMachine(entityId: string): Promise<ActionResult> {
+  try {
+    await core.unlinkCoffeeMachine(entityId);
+    revalidatePath("/domain/vendhub");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: detailOf(err) };
+  }
+}
+
 /** Автопривязка точек по названию — только однозначные совпадения. */
 export async function autoLinkCoffeeLocations(): Promise<ActionResult> {
   try {

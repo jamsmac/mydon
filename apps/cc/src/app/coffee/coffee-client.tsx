@@ -29,6 +29,7 @@ import {
   updateCoffeeLocation,
   ingestCoffeeStock,
   linkCoffeeLocation,
+  unlinkCoffeeMachine,
   recordCoffeeConsumable,
   removeBunkerIngredient,
   removeCoffeeWashSchedule,
@@ -1003,34 +1004,69 @@ function LocationLinkSection({ locations, machines }: { locations: CoffeeLocatio
         <thead>
           <tr>
             <th>Точка</th>
-            <th>Автомат в реестре</th>
+            <th>Аппараты на месте</th>
           </tr>
         </thead>
         <tbody>
-          {locations.map((l) => (
-            <tr key={l.id}>
-              <td>{l.name}</td>
-              <td>
-                <select
-                  disabled={pending || machines.length === 0}
-                  value={l.entityId ?? ""}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    start(async () => {
-                      await linkCoffeeLocation(l.id, v === "" ? null : v);
-                    });
-                  }}
-                >
-                  <option value="">— не привязана —</option>
-                  {machines.map((m) => (
-                    <option key={m.entityId} value={m.entityId}>
-                      {machineLabel(m)}
-                    </option>
-                  ))}
-                </select>
-              </td>
-            </tr>
-          ))}
+          {locations.map((l) => {
+            const стоят = l.machines ?? [];
+            const занятые = new Set(стоят.map((m) => m.entityId));
+            return (
+              <tr key={l.id}>
+                <td>{l.name}</td>
+                <td>
+                  {стоят.length === 0 ? (
+                    <span className="hint">— пусто —</span>
+                  ) : (
+                    <div className="chips" style={{ marginBottom: 6 }}>
+                      {стоят.map((m) => (
+                        <span key={m.entityId} className="chip">
+                          {m.name}
+                          {m.ref ? ` · ${m.ref}` : ""}
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            style={{ marginLeft: 6 }}
+                            disabled={pending}
+                            title="Снять аппарат с места"
+                            onClick={() =>
+                              start(async () => {
+                                const res = await unlinkCoffeeMachine(m.entityId);
+                                if (!res.ok) setNote(res.message ?? "Не удалось снять аппарат");
+                              })
+                            }
+                          >
+                            снять
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <select
+                    disabled={pending || machines.length === 0}
+                    value=""
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "") return;
+                      start(async () => {
+                        const res = await linkCoffeeLocation(l.id, v);
+                        if (!res.ok) setNote(res.message ?? "Не удалось поставить аппарат");
+                      });
+                    }}
+                  >
+                    <option value="">+ поставить аппарат…</option>
+                    {machines
+                      .filter((m) => !занятые.has(m.entityId))
+                      .map((m) => (
+                        <option key={m.entityId} value={m.entityId}>
+                          {machineLabel(m)}
+                        </option>
+                      ))}
+                  </select>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </>

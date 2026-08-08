@@ -24,7 +24,7 @@ import { RecipeEditor, type IngredientOption } from "../../../components/recipe-
 import { PlanogramEditor } from "../../../components/planogram-editor";
 import { MachineCardPanel } from "../../../components/machine-card-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
-import { parsePlanogram } from "@mydon/shared";
+import { PLACE_TYPES, parsePlanogram } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
 import { WarehouseStockView } from "../../../components/warehouse-stock";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
@@ -69,11 +69,30 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // Кофе-размещения: на каких кофе-точках этот аппарат работал (история с
   // периодами, ведёт привязка в Кофе-бункерах). Дополнение — ошибка не роняет.
   let coffeePlacements: CoffeePlacementRow[] = [];
+  // Места, куда автомат можно поставить: точки продаж, склады, мастерские.
+  // Нужны при смене состояния — «в ремонте» без адреса теряет автомат из виду.
+  let places: { id: string; name: string; type: string }[] = [];
   if (entity.type === "machine") {
     try {
       coffeePlacements = (await core.coffeePlacements()).filter((p) => p.entityId === entity.id);
     } catch {
       coffeePlacements = [];
+    }
+    // Направление у карточки может быть не проставлено — тогда списка мест
+    // просто не будет, а выбор скроется. Молча подставить «vendhub» нельзя:
+    // это показало бы чужие склады как свои.
+    const domain = entity.domain;
+    if (domain) {
+      try {
+        const списки = await Promise.all(
+          PLACE_TYPES.map(async (t) =>
+            (await core.entitiesOfType(domain, t)).map((e) => ({ id: e.id, name: e.name, type: t })),
+          ),
+        );
+        places = списки.flat().sort((a, b) => a.name.localeCompare(b.name, "ru"));
+      } catch {
+        places = [];
+      }
     }
   }
 
@@ -301,6 +320,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           statusNote={machineCard?.statusNote ?? null}
           statusChangedAt={machineCard?.statusChangedAt ?? null}
           updatedBy={machineCard?.updatedBy ?? null}
+          places={places}
         />
       )}
 

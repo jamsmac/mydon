@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { entity, machineCard, machinePlacement, maintenancePlan, task } from "@mydon/db";
 import { EntitiesService, nameMatches } from "./entities.service";
 
 /** Достаёт подставляемые значения из SQL-выражения Drizzle. */
@@ -339,18 +340,34 @@ function statusDb(opts: {
   entityRow?: Record<string, unknown>;
   before?: Record<string, unknown>;
   plans?: Record<string, unknown>[];
+  /** Место, куда переставляют автомат (ответ на выборку по placeId). */
+  place?: Record<string, unknown>;
 }) {
   const inserts: { values: Record<string, unknown>; conflictSet?: Record<string, unknown> }[] = [];
-  const updates: { patch: Record<string, unknown> }[] = [];
-  const queue: Record<string, unknown>[][] = [
-    opts.entityRow ? [opts.entityRow] : [],
-    opts.before ? [opts.before] : [],
-    opts.plans ?? [],
-  ];
+  // Пишем таблицу, а не только патч: у смены состояния теперь два разных
+  // update (отмена задач и закрытие размещения), и «сколько всего update»
+  // перестало быть проверкой хоть чего-нибудь.
+  const updates: { table: string; patch: Record<string, unknown> }[] = [];
+  const имяТаблицы = (t: unknown): string =>
+    t === task ? "task" : t === machinePlacement ? "machine_placement" : t === maintenancePlan ? "maintenance_plan" : "?";
+  // Ответы разложены ПО ТАБЛИЦАМ, а не в общую очередь по порядку вызовов.
+  // Очередь ломалась от любой ветки: запрос планов идёт только при возврате в
+  // строй, и при уходе в ремонт третьим по счёту оказывался уже запрос места —
+  // тест получал чужой ответ и «доказывал» то, чего не проверял.
+  const пулы = new Map<unknown, Record<string, unknown>[][]>([
+    // Две выборки из entity подряд: сперва карточка автомата, потом место.
+    [entity, [opts.entityRow ? [opts.entityRow] : [], opts.place ? [opts.place] : []]],
+    [machineCard, [opts.before ? [opts.before] : []]],
+    [maintenancePlan, [opts.plans ?? []]],
+  ]);
   const selectChain = () => {
-    const rows = async () => queue.shift() ?? [];
+    let table: unknown = null;
+    const rows = async () => пулы.get(table)?.shift() ?? [];
     const chain: Record<string, unknown> = {};
-    chain.from = () => chain;
+    chain.from = (t: unknown) => {
+      table = t;
+      return chain;
+    };
     chain.where = () => chain;
     chain.limit = rows;
     chain.then = (res: (v: unknown) => unknown) => rows().then(res);
@@ -375,9 +392,9 @@ function statusDb(opts: {
         });
       },
     }),
-    update: () => ({
+    update: (t: unknown) => ({
       set: (patch: Record<string, unknown>) => {
-        updates.push({ patch });
+        updates.push({ table: имяТаблицы(t), patch });
         const rows = [{ id: "t-1" }];
         const done = {
           returning: async () => rows,
@@ -445,8 +462,99 @@ describe("Состояние автомата", () => {
     });
     const s = new EntitiesService(db, auditStub());
     await s.setMachineStatus("e1", "warehouse", "owner");
-    assert.equal(updates.length, 1);
-    assert.equal(updates[0]!.patch.status, "cancelled");
+    const отменены = updates.filter((u) => u.table === "task");
+    assert.equal(отменены.length, 1);
+    assert.equal(отменены[0]!.patch.status, "cancelled");
+  });
+
+  it("уход из эксплуатации снимает автомат с точки, даже если куда — не сказали", async () => {
+    // «В ремонте» и «стоит на точке продаж» — взаимоисключающие утверждения.
+    // Оставить открытое размещение значило бы показывать автомат там, где его
+    // нет; выдумать новое место — врать точнее. Поэтому период закрывается, а
+    // нового не открывается.
+    const { db, updates } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "in_service" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineStatus("e1", "repair", "owner");
+    const снятия = updates.filter((u) => u.table === "machine_placement");
+    assert.equal(снятия.length, 1, "размещение должно закрыться");
+    assert.match(String(снятия[0]!.patch.endDate), /^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("указали мастерскую — автомат переставлен туда", async () => {
+    // Слово владельца: «места ремонта могут быть разные — как наш склад, так и
+    // мастерская». Поэтому место спрашивают, а не выводят из состояния.
+    const { db, inserts, updates } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "in_service" },
+      place: { id: "w1", type: "workshop", name: "Мастерская на Чиланзаре" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineStatus("e1", "repair", "owner", undefined, "w1");
+    const открыто = inserts.find((i) => i.values.locationId === "w1");
+    assert.ok(открыто, "должно открыться размещение в мастерской");
+    assert.equal(открыто.values.entityId, "e1");
+    assert.match(String(открыто.values.startDate), /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(
+      updates.some((u) => u.table === "machine_placement" && u.patch.endDate),
+      "старое размещение должно закрыться",
+    );
+  });
+
+  it("ремонт разрешён на любом месте — и на складе, и на точке", async () => {
+    // Чинят и в мастерской, и на складе, и прямо на точке. Сверять состояние с
+    // видом места здесь не с чем, и запрет был бы выдумкой про чужую работу.
+    const { db, inserts } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "in_service" },
+      place: { id: "l1", type: "location", name: "Olma office" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await s.setMachineStatus("e1", "repair", "owner", undefined, "l1");
+    assert.ok(inserts.find((i) => i.values.locationId === "l1"));
+  });
+
+  it("«на складе» требует склада — точка продаж отвергается", async () => {
+    // Здесь состояние ПРЯМО называет вид места, и расхождение — не нюанс, а
+    // противоречие: «на складе» и «стоит на точке продаж» разом не бывает.
+    const { db } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "in_service" },
+      place: { id: "l1", type: "location", name: "Olma office" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await assert.rejects(
+      () => s.setMachineStatus("e1", "warehouse", "owner", undefined, "l1"),
+      /требует склада/,
+    );
+  });
+
+  it("в эксплуатацию — только на точку продаж", async () => {
+    const { db } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "repair" },
+      place: { id: "w1", type: "workshop", name: "Мастерская" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await assert.rejects(
+      () => s.setMachineStatus("e1", "in_service", "owner", undefined, "w1"),
+      /стоит на точке продаж/,
+    );
+  });
+
+  it("поставить автомат на не-место нельзя", async () => {
+    const { db } = statusDb({
+      entityRow: МАШИНА,
+      before: { entityId: "e1", status: "in_service" },
+      place: { id: "c1", type: "contractor", name: "ООО Ромашка" },
+    });
+    const s = new EntitiesService(db, auditStub());
+    await assert.rejects(
+      () => s.setMachineStatus("e1", "repair", "owner", undefined, "c1"),
+      /только на место/,
+    );
   });
 
   it("возврат в строй — отдельное событие журнала", async () => {

@@ -91,51 +91,58 @@ function coffeeDb(tables: {
    * ею оказывалось место, и сервис честно ругался «это не автомат».
    */
   const условиеЗначения = (cond: unknown): string[] => {
-    const chunks = (cond as { queryChunks?: unknown[] })?.queryChunks ?? [];
+    // Обход РЕКУРСИВНЫЙ. У составного условия `and(eq(...), eq(...))` наверху
+    // лежат не параметры, а вложенные SQL-объекты, и плоский перебор возвращал
+    // пустой список — фильтр молча выключался именно там, где он и нужен.
     const out: string[] = [];
-    for (const c of chunks) {
-      const v = (c as { value?: unknown })?.value;
+    const обойти = (узел: unknown, глубина: number): void => {
+      if (узел == null || глубина > 8) return;
+      const v = (узел as { value?: unknown }).value;
       if (typeof v === "string") out.push(v);
       else if (Array.isArray(v)) for (const x of v) if (typeof x === "string") out.push(x);
-    }
+      for (const c of (узел as { queryChunks?: unknown[] }).queryChunks ?? []) обойти(c, глубина + 1);
+    };
+    обойти(cond, 0);
     return out;
   };
 
   const selectChain = (t: unknown) => {
     let rows = tableOf(t);
     const chain = {
+      // Фильтруем ТОЛЬКО выборки из `entity` — и только потому, что места и
+      // автоматы стали одной таблицей (миграция 0049). Для остальных таблиц
+      // заглушка ведёт себя как раньше: она не эмулирует SQL и не должна.
+      //
+      // Попытка фильтровать всё подряд разваливалась дважды: строгий фильтр
+      // резал выборки по isActive и по точке, а нестрогий возвращал полный
+      // список там, где совпадений нет — и «доказывал» поведение, которого в
+      // SQL быть не может.
       where: (cond?: unknown) => {
-        // Фильтруем по id, только если условие про id и совпадение нашлось:
-        // иначе поведение прежнее — заглушка не исполняет SQL.
         const значения = условиеЗначения(cond);
-        if (значения.length > 0) {
-          const поId = rows.filter((r) => значения.includes((r as { id?: string }).id ?? ""));
-          if (поId.length > 0) {
-            rows = поId;
-          } else {
-            // Не id — возможно, тип карточки: `where(eq(entity.type,'location'))`.
-            // Без этого выборка мест отдавала бы и автоматы, раз таблица общая.
-            const поТипу = rows.filter((r) => значения.includes((r as { type?: string }).type ?? ""));
-            if (поТипу.length > 0) {
-              rows = поТипу;
-            } else {
-              // Размещения ищут по паре «место + аппарат»: без этого проверка
-              // «уже стоит здесь» видела бы чужое размещение и молча выходила.
-              // Пара «место + аппарат» сопоставляется по И, а не по ИЛИ: SQL
-              // требует совпадения обоих, и «или» давало ложное «уже стоит
-              // здесь» на чужом размещении той же точки.
-              const поПаре = rows.filter((r) => {
-                const row = r as { entityId?: string; locationId?: string };
-                const поля = [row.entityId, row.locationId].filter(
-                  (v): v is string => typeof v === "string",
-                );
-                if (поля.length === 0) return false;
-                return поля.every((v) => значения.includes(v));
-              });
-              if (поПаре.length > 0) rows = поПаре;
-            }
-          }
+        if (значения.length === 0) return chain;
+        // Размещения: условие всегда конъюнкция «место И аппарат», и различить
+        // их надо ДО фильтра — иначе проверка «этот аппарат уже стоит здесь»
+        // поймает чужое размещение той же точки и молча выйдет, не открыв
+        // период. По значению столбец не угадать (оба — uuid), но фикстура
+        // знает, какие id заведены автоматами, а какие местами.
+        if (t === machinePlacement) {
+          const автоматы = new Set((tables.registry ?? []).map((r) => (r as { id?: string }).id));
+          const места = new Set((tables.locations ?? []).map((r) => (r as { id?: string }).id));
+          const поАппарату = значения.filter((v) => автоматы.has(v));
+          const поМесту = значения.filter((v) => места.has(v));
+          rows = rows.filter((r) => {
+            const row = r as { entityId?: string; locationId?: string };
+            const аппаратПодходит = поАппарату.length === 0 || поАппарату.includes(row.entityId ?? "");
+            const местоПодходит = поМесту.length === 0 || поМесту.includes(row.locationId ?? "");
+            return аппаратПодходит && местоПодходит;
+          });
+          return chain;
         }
+        if (t !== entity) return chain;
+        rows = rows.filter((r) => {
+          const row = r as { id?: string; type?: string };
+          return значения.includes(row.id ?? "") || значения.includes(row.type ?? "");
+        });
         return chain;
       },
       orderBy: () => chain,

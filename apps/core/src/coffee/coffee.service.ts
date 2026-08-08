@@ -1318,7 +1318,12 @@ export class CoffeeService {
         })())
       : (await this.db.insert(coffeeWashSchedule).values(values).returning({ id: coffeeWashSchedule.id }))[0]!.id;
 
-    const [loc] = await this.db.select({ name: place.name }).from(place).where(eq(place.id, input.locationId));
+    // Псевдоним нужен только там, где место и автомат в ОДНОМ запросе.
+    // Здесь таблица одна — берём entity напрямую.
+    const [loc] = await this.db
+      .select({ name: entity.name })
+      .from(entity)
+      .where(eq(entity.id, input.locationId));
     return { id, locationName: loc?.name ?? input.locationId, ...values };
   }
 
