@@ -74,6 +74,43 @@ jobs:
           node packages/db/dist/seed.js
           node tools/smoke-core.mjs
 
+      # Дымовой прогон ПАНЕЛИ: страницы должны отдаваться, а не падать в 500.
+      #
+      # `next build` страницы с `force-dynamic` не отрисовывает — только
+      # компилирует, поэтому целый класс ошибок сборка не видит. 08.08.2026 так
+      # ушла на прод `/places`: Leaflet трогает `window` при вычислении модуля,
+      # а `"use client"` серверный рендер не отменяет. Типы тут тоже бессильны —
+      # как и с несуществующими CSS-классами до этого.
+      #
+      # Core поднимается прямо в шаге: панель без него отдаёт экран «Core
+      # недоступен» с кодом 200, и проверка стала бы бессмысленной.
+      - name: Smoke (панель отдаёт страницы)
+        # Предел жёсткий: шаг уже дважды висел, а висящий шаг жжёт минуты
+        # задания молча и выглядит как «ещё идёт», а не как провал.
+        timeout-minutes: 8
+        env:
+          DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
+          SERVICE_TOKEN: smoke-token
+          CORE_API_URL: http://127.0.0.1:3099
+        run: |
+          # Вывод фонового Core уводим в файл и закрываем ему stdin.
+          # Иначе шаг не завершится НИКОГДА: GitHub Actions ждёт закрытия
+          # трубы лога, а фоновый процесс держит её открытой — команда уже
+          # отработала, а шаг висит до таймаута задания.
+          PORT=3099 node apps/core/dist/main.js >/tmp/core-smoke.log 2>&1 </dev/null &
+          CORE_PID=$!
+          trap 'kill $CORE_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            curl -sf --max-time 2 http://127.0.0.1:3099/health >/dev/null && break
+            sleep 1
+          done
+          if ! curl -sf --max-time 5 http://127.0.0.1:3099/health >/dev/null; then
+            echo "Core не поднялся, последние строки лога:"
+            tail -30 /tmp/core-smoke.log
+            exit 1
+          fi
+          node tools/smoke-panel.mjs
+
       # Миграции против НАСТОЯЩЕГО постгреса. Юнит-тесты этого класса ошибок
       # не ловят в принципе: SQL проверяет только сервер. Так три дня прожила
       # 0042 с `coalesce(part_kind::text,'')` — `drizzle-kit push` на пустой

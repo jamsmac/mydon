@@ -3,8 +3,17 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { PLACE_TYPES, PLACE_TYPE_HINTS, PLACE_TYPE_LABELS, type PlaceType } from "@mydon/shared";
+import dynamic from "next/dynamic";
 import { createEntity } from "../app/card/actions";
-import { MapPicker } from "./map-picker";
+
+// Leaflet трогает window — только на клиенте, как и карта автоматов рядом.
+// `"use client"` серверный рендер не отменяет, а страница объявлена
+// force-dynamic — поэтому сборка её не отрисовывала и падало лишь на живом
+// запросе.
+const MapPicker = dynamic(() => import("./map-picker").then((m) => m.MapPicker), {
+  ssr: false,
+  loading: () => <p className="hint">Карта загружается…</p>,
+});
 
 /**
  * Заведение места: имя, вид, точка на карте.
