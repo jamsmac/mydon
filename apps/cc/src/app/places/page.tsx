@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { PLACE_TYPES, PLACE_TYPE_HINTS, PLACE_TYPE_LABELS, placeTypeLabel } from "@mydon/shared";
-import { core, CoreUnavailable, type Entity } from "../../lib/core";
+import { core, CoreUnavailable, type CoffeePlacementRow, type Entity } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
 import { NewPlaceForm } from "../../components/place-new";
 
@@ -20,6 +20,9 @@ export const dynamic = "force-dynamic";
  */
 export default async function PlacesPage() {
   let byType: { type: string; rows: Entity[] }[] = [];
+  // Кто где стоит СЕЙЧАС. Одним запросом на все виды мест: `placements` не
+  // фильтрует по типу, поэтому склады и мастерские попадают наравне с точками.
+  let стоятНаМесте = new Map<string, CoffeePlacementRow[]>();
   try {
     const списки = await Promise.all(
       PLACE_TYPES.map(async (t) => ({ type: t, rows: await core.entitiesOfType("vendhub", t) })),
@@ -28,10 +31,22 @@ export default async function PlacesPage() {
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
+  try {
+    const открытые = (await core.coffeePlacements()).filter((p) => p.endDate === null);
+    const карта = new Map<string, CoffeePlacementRow[]>();
+    for (const p of открытые) карта.set(p.locationId, [...(карта.get(p.locationId) ?? []), p]);
+    стоятНаМесте = карта;
+  } catch {
+    // Состав места — дополнение: без него список мест всё равно нужен.
+  }
 
   const всего = byType.reduce((n, g) => n + g.rows.length, 0);
   const сКоординатами = byType.reduce(
     (n, g) => n + g.rows.filter((r) => r.geo != null).length,
+    0,
+  );
+  const занятых = byType.reduce(
+    (n, g) => n + g.rows.filter((r) => (стоятНаМесте.get(r.id)?.length ?? 0) > 0).length,
     0,
   );
 
@@ -42,7 +57,7 @@ export default async function PlacesPage() {
         <p>
           {всего === 0
             ? "Мест пока нет. Заведите склад, мастерскую и точки продаж — автоматы будут стоять на них."
-            : `Мест ${всего} · с координатами ${сКоординатами}`}
+            : `Мест ${всего} · занято ${занятых} · с координатами ${сКоординатами}`}
         </p>
       </div>
 
@@ -73,6 +88,7 @@ export default async function PlacesPage() {
               <thead>
                 <tr>
                   <th>Название</th>
+                  <th>Аппараты</th>
                   <th>Адрес</th>
                   <th>Координаты</th>
                   <th>Утверждено</th>
@@ -83,6 +99,18 @@ export default async function PlacesPage() {
                   <tr key={r.id}>
                     <td>
                       <Link href={`/card/${r.id}`}>{r.name}</Link>
+                    </td>
+                    <td>
+                      {(стоятНаМесте.get(r.id) ?? []).length === 0 ? (
+                        <span className="hint">— пусто —</span>
+                      ) : (
+                        (стоятНаМесте.get(r.id) ?? []).map((p, i) => (
+                          <span key={p.id}>
+                            {i > 0 ? " · " : ""}
+                            <Link href={`/card/${p.entityId}`}>{p.machineName}</Link>
+                          </span>
+                        ))
+                      )}
                     </td>
                     <td>{r.geo?.address ?? "—"}</td>
                     <td>

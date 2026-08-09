@@ -268,30 +268,46 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         </div>
       )}
 
-      {coffeePlacements.length > 0 && (
-        <div className="sect" id="coffee-placements" data-toc="Кофе-точки">
+      {isMachine && (
+        <div className="sect" id="placements" data-toc="Где стоит">
           <div className="sect-h">
-            <h3 className="h2">Кофе-точки</h3>
-            <span className="chip b">периодов: {coffeePlacements.length}</span>
+            <h3 className="h2">Где стоит</h3>
+            {coffeePlacements.length > 0 && (
+              <span className="chip b">периодов: {coffeePlacements.length}</span>
+            )}
           </div>
-          <div className="rows">
-            {coffeePlacements.map((p) => (
-              <div className="row" key={p.id}>
-                <div className="t">
-                  <b>{p.locationName}</b>
-                  <small>
-                    {p.startDate ?? "с неизвестной даты"} — {p.endDate ?? "сейчас"}
-                    {p.note ? ` · ${p.note}` : ""}
-                  </small>
+          {coffeePlacements.length === 0 ? (
+            /*
+              Пустой раздел показываем НАРОЧНО. Раньше он просто исчезал, и
+              аппарат без места выглядел так же, как аппарат на месте, — а это
+              разные вещи: во втором случае мы знаем, где он, в первом нет.
+            */
+            <div className="empty">
+              <b>Место не записано</b>
+              Неизвестно, где этот аппарат. Поставьте его на место в разделе «Автомат»
+              (склад, мастерская или точка продаж) — тогда он появится на карте и в отчётах по точке.
+            </div>
+          ) : (
+            <div className="rows">
+              {coffeePlacements.map((p) => (
+                <div className="row" key={p.id}>
+                  <div className="t">
+                    <b>{p.locationName}</b>
+                    <small>
+                      {p.startDate ?? "с неизвестной даты"} — {p.endDate ?? "сейчас"}
+                      {p.note ? ` · ${p.note}` : ""}
+                    </small>
+                  </div>
+                  <span className={`pill ${p.endDate === null ? "ok" : ""}`}>
+                    {p.endDate === null ? "стоит сейчас" : "история"}
+                  </span>
                 </div>
-                <span className={`pill ${p.endDate === null ? "ok" : ""}`}>
-                  {p.endDate === null ? "стоит сейчас" : "история"}
-                </span>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
           <p className="hint" style={{ marginTop: 8 }}>
-            Из привязок кофе-бункеров: перестановка аппарата закрывает период и открывает новый.
+            Место — карточка реестра: точка продаж, склад или мастерская. Перестановка
+            закрывает период и открывает новый, поэтому видно, где аппарат стоял раньше.
           </p>
         </div>
       )}
