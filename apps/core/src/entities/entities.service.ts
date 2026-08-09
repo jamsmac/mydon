@@ -29,6 +29,8 @@ import {
   type IngredientPrice,
   type MachineKind,
   type Unit,
+  DEFAULT_FIND_LIMIT,
+  MAX_FIND_LIMIT,
 } from "@mydon/shared";
 import { and, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -455,7 +457,7 @@ export class EntitiesService {
       .leftJoin(org, eq(org.id, entity.orgId))
       .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(entity.createdAt))
-      .limit(500);
+      .limit(Math.min(filter.limit ?? DEFAULT_FIND_LIMIT, MAX_FIND_LIMIT));
     const geos = await this.geoFor(rows.map((r) => r.id));
     return rows.map((r) => ({ ...r, geo: geos.get(r.id) ?? null }));
   }

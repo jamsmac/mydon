@@ -1,14 +1,19 @@
+import { Type } from "class-transformer";
 import {
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsObject,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
+  Min,
 } from "class-validator";
 import { DOMAINS, type Domain,
   MAX_ENTITY_NAME,
+  MAX_FIND_LIMIT,
 } from "@mydon/shared";
 
 export class CreateEntityDto {
@@ -81,4 +86,19 @@ export class FindEntitiesDto {
   @IsOptional()
   @IsUUID()
   id?: string;
+
+  /**
+   * Сколько карточек вернуть. По умолчанию 500 — сколько и было.
+   *
+   * ЗАЧЕМ ПАРАМЕТР. Предел был зашит числом, и выборка молча обрезалась: в
+   * реестре 1156 карточек, из них 704 счёта, а проверка реестра видела первые
+   * 500 и печатала «расхождений не найдено». Усечение, о котором никто не
+   * знает, читается как «всё чисто» — худший вид ответа.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_FIND_LIMIT)
+  limit?: number;
 }

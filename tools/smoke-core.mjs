@@ -47,6 +47,18 @@ const ЧТЕНИЕ = [
   "/tasks",
   "/people",
   "/approvals",
+  // Предел выборки — параметр, а не зашитое число. Раньше он был зашит, и
+  // выборка обрезалась молча: проверка реестра видела первые 500 карточек из
+  // 1156 и печатала «расхождений не найдено». Заглушка БД `.limit()` не
+  // исполняет, поэтому проверить это можно только против живого Postgres.
+  {
+    path: "/entities?limit=1",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ)) throw new Error("ожидали массив карточек");
+      if (ответ.length > 1) throw new Error(`limit=1 вернул ${ответ.length} карточек`);
+    },
+  },
+  { path: "/entities?limit=999999", ждёмОтказ: true },
 ];
 
 /**
@@ -208,12 +220,29 @@ async function ждатьЗдоровье(proc) {
 
 const провалы = [];
 
-async function проверитьЧтение(path) {
+async function проверитьЧтение(шаг) {
+  const path = typeof шаг === "string" ? шаг : шаг.path;
   const r = await fetch(BASE + path, { signal: AbortSignal.timeout(20_000) });
   const текст = await r.text();
+  // Некоторые пути обязаны ОТКАЗАТЬ: предел выше максимума — не «поправим
+  // молча», а ошибка ввода. Молчаливая поправка вернула бы 5000 там, где
+  // просили миллион, и вызывающий решил бы, что видит всё.
+  if (typeof шаг !== "string" && шаг.ждёмОтказ) {
+    if (r.ok) провалы.push(`GET ${path} → ${r.status}, а ожидали отказ`);
+    else console.log(`  ok  GET ${path} — отвергнут, как и надо`);
+    return;
+  }
   if (!r.ok) {
     провалы.push(`GET ${path} → ${r.status}: ${текст.slice(0, 300)}`);
     return;
+  }
+  if (typeof шаг !== "string" && шаг.проверить) {
+    try {
+      шаг.проверить(JSON.parse(текст));
+    } catch (e) {
+      провалы.push(`GET ${path}: ${e.message}`);
+      return;
+    }
   }
   console.log(`  ok  GET ${path}`);
 }
