@@ -26,4 +26,33 @@ describe("overlayEnv: тумблеры системы поверх окруже�
     overlayEnv(env, [{ key: "AGENTS_SCHEDULES_PAUSED", value: "1", source: "env" }]);
     assert.equal(env.AGENTS_SCHEDULES_PAUSED, "1", "вернулись к env, а не застряли на значении базы");
   });
+
+  it("дефолт Core не затирает наш .env: тумблера нет у Core, но есть у нас", () => {
+    // Тот самый случай с прода: AGENTS_SCHEDULES_PAUSED раздаётся контейнеру
+    // агентов, а у Core его нет — Core отвечает fallback "1" как "default".
+    // Раньше это молча гасило расписания при явно заданном владельцем нуле.
+    const env: Record<string, string | undefined> = { AGENTS_SCHEDULES_PAUSED: "0" };
+    const fromDb = overlayEnv(env, [
+      { key: "AGENTS_SCHEDULES_PAUSED", value: "1", source: "default" },
+    ]);
+    assert.equal(env.AGENTS_SCHEDULES_PAUSED, "0", "наш .env устоял против чужого дефолта");
+    assert.equal(fromDb, 0, "владелец ничего не задавал");
+  });
+
+  it("сброс записи из базы возвращает к нашему .env, а не к дефолту Core", () => {
+    const env: Record<string, string | undefined> = { AGENTS_SCHEDULES_PAUSED: "0" };
+    overlayEnv(env, [{ key: "AGENTS_SCHEDULES_PAUSED", value: "1", source: "db" }]);
+    assert.equal(env.AGENTS_SCHEDULES_PAUSED, "1", "владелец поставил паузу из панели");
+    // Убрал запись из базы → Core снова отвечает своим дефолтом.
+    overlayEnv(env, [{ key: "AGENTS_SCHEDULES_PAUSED", value: "1", source: "default" }]);
+    assert.equal(env.AGENTS_SCHEDULES_PAUSED, "0", "вернулись к исходному .env контейнера");
+  });
+
+  it("ключа не было у нас — берём значение Core", () => {
+    const env: Record<string, string | undefined> = {};
+    overlayEnv(env, [{ key: "LLM_PROVIDER", value: "", source: "default" }]);
+    assert.equal(env.LLM_PROVIDER, "", "пусто = путь спит");
+    overlayEnv(env, [{ key: "LLM_PROVIDER", value: "claude-cli", source: "db" }]);
+    assert.equal(env.LLM_PROVIDER, "claude-cli", "владелец включил мозг из панели");
+  });
 });
