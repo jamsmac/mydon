@@ -57,6 +57,10 @@ function stubCore(over: Record<string, unknown> = {}) {
       calls.push(`photo:${String(i.ownerType)}:${String(i.ownerId)}:${String(i.stage)}`);
       return { id: "a1", url: "/x" };
     },
+    setMachineStatus: async (entityId: string, status: string, actor: string) => {
+      calls.push(`status:${entityId}:${status}:${actor}`);
+      return {};
+    },
     ...over,
   } as never;
   return { core, calls };
@@ -377,5 +381,70 @@ describe("Пикер объекта", () => {
     const deps = { core, conversations };
     const r = await startPartReplace(1, ME, deps);
     assert.ok(r.keyboard, "выбор должен остаться возможным");
+  });
+});
+
+describe("Заявка о поломке предлагает перевести автомат в ремонт", () => {
+  it("после заявки появляется кнопка перевода, но не срабатывает сама", async () => {
+    // Перевод — ПРЕДЛОЖЕНИЕ, а не следствие заявки: отказ купюроприёмника не
+    // значит, что автомат не работает — он продолжает продавать за монеты.
+    const { core, calls } = stubCore();
+    const conversations = new Conversations();
+    const deps = { core, conversations };
+
+    await startProblem(1, ME, deps);
+    await onObjectPicked(1, MACHINE, deps);
+    await handleProblemCallback(1, { kind: "symptom", symptom: "dead" }, ME, deps);
+    const итог = await handleProblemCallback(1, { kind: "urgency", urgency: "1" }, ME, deps);
+
+    assert.ok(calls.some((c: string) => c.startsWith("task:")), "заявка должна быть создана");
+    assert.ok(!calls.some((c: string) => c.startsWith("status:")), "состояние само меняться не должно");
+
+    const кнопки = JSON.stringify(итог.message!.keyboard);
+    assert.match(кнопки, new RegExp(`pr:rep:${MACHINE}`), "кнопка перевода обязана быть");
+    assert.match(кнопки, /ph:ok/, "фото остаётся первой кнопкой");
+  });
+
+  it("нажатие переводит автомат в ремонт от имени сотрудника", async () => {
+    const { core, calls } = stubCore();
+    const conversations = new Conversations();
+    const res = await handleProblemCallback(1, { kind: "repair", entityId: MACHINE }, ME, {
+      core,
+      conversations,
+    });
+    assert.ok(calls.includes(`status:${MACHINE}:repair:person:${ME.id}`));
+    assert.match(res.message!.text, /в ремонте/i);
+    assert.match(res.message!.text, /закрыт/i, "последствие надо назвать");
+  });
+
+  it("кнопка работает и когда мастер уже завершился", async () => {
+    // Она висит под готовым сообщением: проверка живого разговора отвечала бы
+    // «начни заново» на действие, которому разговор не нужен.
+    const { core, calls } = stubCore();
+    const res = await handleProblemCallback(1, { kind: "repair", entityId: MACHINE }, ME, {
+      core,
+      conversations: new Conversations(),
+    });
+    assert.ok(calls.some((c: string) => c.startsWith("status:")));
+    assert.doesNotMatch(res.message!.text, /начни заново/i);
+  });
+
+  it("отказ Core не выдаётся за успех", async () => {
+    const { core } = stubCore({
+      setMachineStatus: async () => {
+        throw new Error("Core недоступен");
+      },
+    });
+    const res = await handleProblemCallback(1, { kind: "repair", entityId: MACHINE }, ME, {
+      core,
+      conversations: new Conversations(),
+    });
+    assert.match(res.message!.text, /Не смог/);
+    assert.match(res.message!.text, /Заявка при этом создана/);
+  });
+
+  it("разбор кнопки перевода узнаёт только валидный uuid", () => {
+    assert.deepEqual(parseProblemCallback(`pr:rep:${MACHINE}`), { kind: "repair", entityId: MACHINE });
+    assert.equal(parseProblemCallback("pr:rep:не-uuid"), null);
   });
 });
