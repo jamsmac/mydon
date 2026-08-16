@@ -530,12 +530,15 @@ export async function handleStaffCallback(
     };
   }
 
-  // Кнопки заливки кофейного бункера (cf:loc/pos/cancel).
+  // Кнопки заливки кофейного бункера (cf:loc/pos/n/cancel).
   const coffeeRefill = parseCoffeeRefillCallback(data);
   if (coffeeRefill) {
     const res = await handleCoffeeRefillCallback(chatId, coffeeRefill, person, deps);
     return {
       answer: res.answer,
+      // `edit` — набор цифр: перерисовываем то же сообщение. Иначе вес из
+      // четырёх нажатий оставил бы в чате четыре сообщения подряд.
+      ...(res.edit ? { edit: { text: res.edit.text, ...(res.edit.keyboard ? { keyboard: res.edit.keyboard } : {}) } } : {}),
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
     };
   }

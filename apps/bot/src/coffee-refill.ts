@@ -1,6 +1,13 @@
 import { TZ } from "@mydon/shared";
 import type { CoreClient, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
+import {
+  applyPress,
+  numpadKeyboard,
+  numpadText,
+  parseNumpadCallback,
+  type NumpadPress,
+} from "./numpad";
 import type { StaffReply } from "./staff";
 
 /**
@@ -8,6 +15,11 @@ import type { StaffReply } from "./staff";
  * точки и вносит вес на месте, как со складом (staff-inventory.ts) — тот же
  * приём, короткий поток на бегу:
  *   точка → позиция бункера (1–8) → вес → упаковки → набор (необязательно).
+ *
+ * Числа набираются кнопками (numpad.ts) и правятся на месте: сообщение
+ * перерисовывается на каждое нажатие, поэтому весь мастер живёт в ОДНОМ
+ * сообщении, а не в ленте из десяти. Текстовый ввод сохранён — привычка писать
+ * «1234» руками работает как раньше.
  *
  * Дата не спрашивается — берётся «сегодня» по проектному часовому поясу
  * (TZ=Asia/Tashkent, контейнер уже в нём живёт, как и весь остальной учёт):
@@ -72,6 +84,7 @@ function positionKeyboard(config: { position: number; ingredientName: string }[]
 export type CoffeeRefillCallback =
   | { kind: "location"; id: string }
   | { kind: "position"; position: number }
+  | { kind: "num"; press: NumpadPress }
   | { kind: "cancel" };
 
 export function parseCoffeeRefillCallback(data: string): CoffeeRefillCallback | null {
@@ -80,7 +93,33 @@ export function parseCoffeeRefillCallback(data: string): CoffeeRefillCallback | 
   if (loc) return { kind: "location", id: loc[1] };
   const pos = /^cf:pos:([1-8])$/.exec(data);
   if (pos) return { kind: "position", position: Number(pos[1]) };
+  const press = parseNumpadCallback("cf", data);
+  if (press) return { kind: "num", press };
   return null;
+}
+
+// ── Шаги ввода чисел: один вид и для кнопок, и после текстового ответа ───────
+
+/** Вес обязателен — «пропустить» на нём нет: молча потерянный вес хуже вопроса. */
+function weightStep(position: number, draft = ""): StaffReply {
+  return {
+    text: numpadText(`Бункер ${position}. Сколько весит после засыпки?`, draft, "г"),
+    keyboard: numpadKeyboard("cf"),
+  };
+}
+
+function packagesStep(draft = ""): StaffReply {
+  return {
+    text: numpadText("Сколько упаковок ушло на засыпку?", draft, "уп."),
+    keyboard: numpadKeyboard("cf", { skip: true }),
+  };
+}
+
+function containerStep(draft = ""): StaffReply {
+  return {
+    text: numpadText("Какой набор (номер контейнера 1–27)?", draft),
+    keyboard: numpadKeyboard("cf", { skip: true }),
+  };
 }
 
 export type CoffeeWashCallback =
@@ -133,9 +172,9 @@ async function positionStep(deps: CoffeeDeps, locationName: string, prefix: "cf"
 export async function handleCoffeeRefillCallback(
   chatId: number,
   cb: CoffeeRefillCallback,
-  _person: PersonRow,
+  person: PersonRow,
   deps: CoffeeDeps,
-): Promise<{ answer: string; message?: StaffReply }> {
+): Promise<{ answer: string; message?: StaffReply; edit?: StaffReply }> {
   if (cb.kind === "cancel") {
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Заливку отменил." } };
@@ -154,9 +193,67 @@ export async function handleCoffeeRefillCallback(
     return { answer: loc.name, message: await positionStep(deps, loc.name, "cf") };
   }
 
-  // cb.kind === "position" — просим вес.
-  deps.conversations.advance(chatId, "weight", { position: cb.position });
-  return { answer: `Бункер ${cb.position}`, message: { text: `Бункер ${cb.position}. Сколько весит после засыпки, грамм?` } };
+  if (cb.kind === "position") {
+    deps.conversations.advance(chatId, "weight", { position: cb.position, draft: "" });
+    return { answer: `Бункер ${cb.position}`, message: weightStep(cb.position) };
+  }
+
+  return numpadPress(chatId, cb.press, conv.step, String(conv.data.draft ?? ""), person, deps);
+}
+
+/**
+ * Нажатие цифровой клавиатуры. Цифра и «⌫» перерисовывают ТО ЖЕ сообщение —
+ * иначе набор четырёхзначного веса оставил бы в чате четыре сообщения подряд.
+ * Переход на следующий шаг тоже перерисовка: мастер живёт одним сообщением.
+ */
+async function numpadPress(
+  chatId: number,
+  press: NumpadPress,
+  step: string,
+  draft: string,
+  person: PersonRow,
+  deps: CoffeeDeps,
+): Promise<{ answer: string; message?: StaffReply; edit?: StaffReply }> {
+  const position = Number(deps.conversations.get(chatId)?.data.position ?? 0);
+
+  if (press.kind === "digit" || press.kind === "erase") {
+    const next = applyPress(draft, press);
+    deps.conversations.advance(chatId, step, { draft: next });
+    const view =
+      step === "weight" ? weightStep(position, next) : step === "packages" ? packagesStep(next) : containerStep(next);
+    // Тот же текст Telegram редактировать откажется («message is not modified»),
+    // поэтому пустое нажатие («⌫» на пустом наборе) не выдаём за изменение.
+    if (next === draft) return { answer: "Пусто" };
+    return { answer: next === "" ? "—" : next, edit: view };
+  }
+
+  if (step === "weight") {
+    if (press.kind === "skip") return { answer: "Вес обязателен" };
+    const weight = parseAmount(draft);
+    if (weight === null || weight <= 0) return { answer: "Сначала набери вес" };
+    deps.conversations.advance(chatId, "packages", { filledWeight: weight, draft: "" });
+    return { answer: `${weight} г`, edit: packagesStep() };
+  }
+
+  if (step === "packages") {
+    const packageCount = press.kind === "skip" ? 1 : Math.round(parseAmount(draft) ?? NaN);
+    if (!Number.isFinite(packageCount) || packageCount < 1) return { answer: "Набери число или «пропустить»" };
+    deps.conversations.advance(chatId, "container", { packageCount, draft: "" });
+    return { answer: `${packageCount} уп.`, edit: containerStep() };
+  }
+
+  if (step === "container") {
+    let containerNumber: number | undefined;
+    if (press.kind !== "skip") {
+      const n = Math.round(parseAmount(draft) ?? NaN);
+      if (!Number.isFinite(n) || n < 1 || n > 27) return { answer: "Набор — число 1–27" };
+      containerNumber = n;
+    }
+    const done = await saveRefill(chatId, containerNumber, person, deps);
+    return { answer: "Записал", edit: done };
+  }
+
+  return { answer: "Не сейчас" };
 }
 
 /** Ввод веса — текстовый шаг визарда. */
@@ -165,8 +262,8 @@ export async function handleCoffeeRefillWeight(chatId: number, text: string, dep
   if (conv?.flow !== "coffee-refill" || conv.step !== "weight") return { text: coffeeRefillStepHint("") };
   const weight = parseAmount(text);
   if (weight === null) return { text: "Не понял число. Напиши вес в граммах, например 1200." };
-  deps.conversations.advance(chatId, "packages", { filledWeight: weight });
-  return { text: "Сколько упаковок ушло на засыпку? Число, или «-», если не считал." };
+  deps.conversations.advance(chatId, "packages", { filledWeight: weight, draft: "" });
+  return packagesStep();
 }
 
 /** Ввод числа упаковок. */
@@ -177,8 +274,8 @@ export async function handleCoffeeRefillPackages(chatId: number, text: string, d
   if (!Number.isFinite(packageCount) || packageCount < 1) {
     return { text: "Не понял число упаковок. Напиши целое число (например 2) или «-»." };
   }
-  deps.conversations.advance(chatId, "container", { packageCount });
-  return { text: "Какой набор (номер контейнера 1–27)? Число, или «-», если не знаешь." };
+  deps.conversations.advance(chatId, "container", { packageCount, draft: "" });
+  return containerStep();
 }
 
 /** Ввод номера набора (контейнера) — последний шаг, сохраняет заливку. */
@@ -199,6 +296,22 @@ export async function handleCoffeeRefillContainer(
     }
     containerNumber = n;
   }
+  return saveRefill(chatId, containerNumber, person, deps);
+}
+
+/**
+ * Сохранение заливки — общий конец для обоих способов ввода. Кнопки и текст
+ * обязаны писать ОДНО И ТО ЖЕ: разъехавшись, они дали бы две записи с разными
+ * полями и «зависит от того, как вносил» в отчётах.
+ */
+async function saveRefill(
+  chatId: number,
+  containerNumber: number | undefined,
+  person: PersonRow,
+  deps: CoffeeDeps,
+): Promise<StaffReply> {
+  const conv = deps.conversations.get(chatId);
+  if (conv?.flow !== "coffee-refill") return { text: coffeeRefillStepHint("") };
 
   const locationId = String(conv.data.locationId ?? "");
   const locationName = String(conv.data.locationName ?? "");

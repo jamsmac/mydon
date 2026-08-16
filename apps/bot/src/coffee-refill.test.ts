@@ -226,3 +226,112 @@ describe("Мойка бункера: точка → позиция → гото�
     assert.equal(conversations.get(1), null);
   });
 });
+
+describe("Заливка кнопками: цифровая клавиатура", () => {
+  /** Пройти мастер до шага веса — общее начало для проверок набора. */
+  async function toWeightStep() {
+    const { core, calls } = stubCore();
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    await startCoffeeRefill(1, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    const r = await handleCoffeeRefillCallback(1, { kind: "position", position: 1 }, ME, deps);
+    return { deps, conversations, calls, weightScreen: r };
+  }
+
+  /** Нажать подряд несколько кнопок клавиатуры. */
+  async function type(deps: never, digits: string) {
+    let last;
+    for (const d of digits) {
+      last = await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "digit", digit: d } }, ME, deps);
+    }
+    return last;
+  }
+
+  it("после выбора бункера сразу даёт клавиатуру, а не просит писать текстом", async () => {
+    const { weightScreen } = await toWeightStep();
+    const kb = JSON.stringify(weightScreen.message?.keyboard);
+    assert.ok(kb.includes("cf:n:1"), "цифры на месте");
+    assert.ok(kb.includes("cf:n:ok"), "«готово» на месте");
+    assert.ok(!kb.includes("cf:n:skip"), "вес пропустить нельзя");
+  });
+
+  it("набор перерисовывает то же сообщение, а не шлёт новое на каждую цифру", async () => {
+    const { deps } = await toWeightStep();
+    const r = await type(deps, "1234");
+    assert.ok(r?.edit, "перерисовка");
+    assert.equal(r?.message, undefined, "нового сообщения нет");
+    assert.ok(r?.edit?.text.includes("1234 г"));
+  });
+
+  it("«⌫» стирает по цифре, на пустом наборе не пытается перерисовать тем же текстом", async () => {
+    const { deps } = await toWeightStep();
+    await type(deps, "12");
+    const back = await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "erase" } }, ME, deps);
+    assert.ok(back.edit?.text.includes("Набрано: 1"));
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "erase" } }, ME, deps);
+    const empty = await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "erase" } }, ME, deps);
+    assert.equal(empty.edit, undefined, "Telegram отвергает правку тем же текстом — не шлём её");
+  });
+
+  it("«готово» на пустом весе не пропускает дальше: молча потерянный вес хуже вопроса", async () => {
+    const { deps, conversations } = await toWeightStep();
+    const r = await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    assert.equal(r.edit, undefined);
+    assert.equal(conversations.get(1)?.step, "weight", "остались на шаге веса");
+  });
+
+  it("весь мастер кнопками пишет ту же запись, что и текстом", async () => {
+    const { deps, calls } = await toWeightStep();
+    await type(deps, "1234");
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    await type(deps, "2");
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    await type(deps, "27");
+    const fin = await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+
+    const call = calls[0] as { kind: string; input: Record<string, unknown> };
+    assert.equal(call.kind, "refill");
+    assert.equal(call.input.filledWeight, 1234);
+    assert.equal(call.input.packageCount, 2);
+    assert.equal(call.input.containerNumber, 27);
+    assert.equal(call.input.createdBy, `person:${ME.id}`);
+    assert.ok(fin.edit?.text.startsWith("✅ Записал"));
+  });
+
+  it("«пропустить» на наборе сохраняет заливку без номера контейнера", async () => {
+    const { deps, calls } = await toWeightStep();
+    await type(deps, "900");
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "skip" } }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "skip" } }, ME, deps);
+
+    const call = calls[0] as { input: Record<string, unknown> };
+    assert.equal(call.input.filledWeight, 900);
+    assert.equal(call.input.packageCount, 1, "пропуск упаковок = одна");
+    assert.equal(call.input.containerNumber, undefined);
+  });
+
+  it("набор вне 1–27 не проходит — то же правило, что у текстового ввода", async () => {
+    const { deps, calls } = await toWeightStep();
+    await type(deps, "900");
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "skip" } }, ME, deps);
+    await type(deps, "99");
+    const r = await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    assert.equal(r.edit, undefined, "не сохранили");
+    assert.equal(calls.length, 0);
+  });
+
+  it("текстовый ввод продолжает работать и ведёт на клавиатуру следующего шага", async () => {
+    const { deps, calls } = await toWeightStep();
+    const afterWeight = await handleCoffeeRefillWeight(1, "1500", deps);
+    assert.ok(JSON.stringify(afterWeight.keyboard).includes("cf:n:skip"), "упаковки можно пропустить");
+    const afterPkg = await handleCoffeeRefillPackages(1, "-", deps);
+    assert.ok(JSON.stringify(afterPkg.keyboard).includes("cf:n:"), "на наборе тоже клавиатура");
+    await handleCoffeeRefillContainer(1, "5", ME, deps);
+    const call = calls[0] as { input: Record<string, unknown> };
+    assert.equal(call.input.filledWeight, 1500);
+    assert.equal(call.input.containerNumber, 5);
+  });
+});
