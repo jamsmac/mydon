@@ -578,3 +578,41 @@ describe("Защита от дублей и упаковки по граммам
     assert.doesNotMatch(fin.edit!.text, /по весу/);
   });
 });
+
+describe("Позиция с несколькими ингредиентами", () => {
+  async function walkPos3(cfg: unknown[]) {
+    const { core } = stubCore({ coffeeBunkerConfig: async () => cfg });
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    const D = async (s: string) => {
+      for (const d of s) await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "digit", digit: d } }, ME, deps);
+    };
+    const OK = () => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    const SKIP = () => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "skip" } }, ME, deps);
+    await startCoffeeRefill(1, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "position", position: 7 }, ME, deps);
+    await D("7");
+    await OK();
+    await SKIP();
+    await D("1600");
+    return OK();
+  }
+
+  it("расфасовка одинаковая — считаем, хотя ингредиент неизвестен", async () => {
+    // Позиция 3 у владельца: лимонный чай и матча, обе пачки по 1000 г.
+    const fin = await walkPos3([
+      { position: 7, ingredientId: "a", ingredientName: "Лимонный чай", packageWeight: 1000 },
+      { position: 7, ingredientId: "b", ingredientName: "Матча", packageWeight: 1000 },
+    ]);
+    assert.match(fin.edit!.text, /≈ 1 упаковка по весу/, "ответ не зависит от того, что засыпали");
+  });
+
+  it("расфасовка разная — молчим, а не выбираем наугад", async () => {
+    const fin = await walkPos3([
+      { position: 7, ingredientId: "a", ingredientName: "Чай", packageWeight: 1000 },
+      { position: 7, ingredientId: "b", ingredientName: "Сахар", packageWeight: 2000 },
+    ]);
+    assert.doesNotMatch(fin.edit!.text, /по весу/, "уверенное «1 упаковка» было бы враньём для второго");
+  });
+});

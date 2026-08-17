@@ -477,9 +477,17 @@ async function packagesFor(position: number, netGrams: number, deps: CoffeeDeps)
   try {
     const config = await deps.core.coffeeBunkerConfig();
     const here = config.filter((c) => c.position === position && (c.packageWeight ?? 0) > 0);
-    if (here.length !== 1) return null;
+    if (here.length === 0) return null;
+
+    // На позиции может стоять несколько ингредиентов (позиция 3 держит и
+    // лимонный чай, и матчу — техник заправляет то, что есть на складе).
+    // Если расфасовка у них ОДИНАКОВАЯ, ответ не зависит от того, что именно
+    // засыпали, и молчать незачем. Разная — молчим: показать «1 упаковка»,
+    // когда для второго ингредиента это две, значит соврать уверенным тоном.
     const per = here[0].packageWeight ?? 0;
     const label = here[0].packageLabel ?? "упаковки";
+    const sameForAll = here.every((c) => (c.packageWeight ?? 0) === per && (c.packageLabel ?? "упаковки") === label);
+    if (!sameForAll) return null;
     // Штуки — целые: полстика не бывает. Пачки — с десятой долей: половина и
     // полторы пачки это ровно то, что происходит на точке.
     const raw = netGrams / per;
