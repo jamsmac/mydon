@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Conversations } from "./conversation";
+import { handleStaffMessage } from "./staff";
 import type { PersonRow } from "./core-client";
 import {
   handleCoffeeConsumableCallback,
@@ -192,5 +193,39 @@ describe("Расходники (вода/стаканчики/крышки) в �
     assert.equal(calls.length, 0);
     assert.match(reply.text, /Не понял число/);
     assert.ok(conversations.get(555), "визард не сброшен — можно повторить ввод");
+  });
+});
+
+describe("Расходники ЧЕРЕЗ ДИСПЕТЧЕР (регрессия, которую тесты не ловили)", () => {
+  // Прежние тесты звали handleCoffeeConsumableCounts напрямую и были зелёными,
+  // пока в боте текстовый ввод был мёртв: диспетчер ждал шаг "counts", которого
+  // после перехода на ввод по одному числу не существует. Проверяем путь,
+  // которым идёт настоящее сообщение.
+  it("одно число текстом на шаге «вода» принимается и ведёт к стаканчикам", async () => {
+    const { core } = stubCore();
+    const conversations = new Conversations();
+    conversations.start(555, "coffee-consumable", "water", { locationId: LOC, locationName: "AH", draft: "" });
+    const { reply } = await handleStaffMessage(555, "2", ME, { core, conversations } as never);
+    assert.match(reply.text, /Стакан/i, "шаг продвинулся, а не повторил вопрос");
+    assert.equal(conversations.get(555)?.step, "cups");
+  });
+
+  it("три числа одной строкой доходят до проверки — как обещано в коммите", async () => {
+    const { core, calls } = stubCore();
+    const conversations = new Conversations();
+    conversations.start(555, "coffee-consumable", "water", { locationId: LOC, locationName: "AH", draft: "" });
+    const { reply } = await handleStaffMessage(555, "2 100 50", ME, { core, conversations } as never);
+    assert.match(reply.text, /проверь/i);
+    assert.match(reply.text, /Стаканчики: 100/);
+    assert.equal(calls.length, 0, "запись только после подтверждения");
+  });
+
+  it("мусор на шаге — внятный отказ, а не тот же вопрос по кругу", async () => {
+    const { core } = stubCore();
+    const conversations = new Conversations();
+    conversations.start(555, "coffee-consumable", "cups", { locationId: LOC, locationName: "AH", draft: "" });
+    const { reply } = await handleStaffMessage(555, "много", ME, { core, conversations } as never);
+    assert.match(reply.text, /Не понял число/);
+    assert.equal(conversations.get(555)?.step, "cups", "шаг не потерян");
   });
 });

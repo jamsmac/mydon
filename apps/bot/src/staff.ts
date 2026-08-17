@@ -286,7 +286,11 @@ export async function handleStaffMessage(
     return { reply: { text: `«${pressed.label}» тебе сейчас недоступно. Скажи владельцу.` } };
   }
   if (pressed) {
-    const dropped = deps.conversations.get(chatId) !== null;
+    // Меню точки — не «недописанный мастер»: обход это законченная запись плюс
+    // предложение продолжить. Пугать «прошлое не дописано» после КАЖДОЙ
+    // успешной заливки значит приучить не читать предупреждение вовсе.
+    const prev = deps.conversations.get(chatId);
+    const dropped = prev !== null && prev.flow !== "coffee-visit";
     deps.conversations.clear(chatId);
     const started = await startMenuItem(pressed, chatId, person, deps);
     if (dropped) {
@@ -353,7 +357,13 @@ export async function handleStaffMessage(
     return { reply: { text: taskDoneStepHint(conv.step) } };
   }
   if (conv?.flow === "coffee-consumable") {
-    if (conv.step === "counts" && clean.length > 0 && !clean.startsWith("/")) {
+    // Шаги — water/cups/lids/confirm. Раньше здесь стояло "counts": шаг из
+    // прежней версии, которого после перехода на ввод по одному числу не
+    // существует. Условие не совпадало никогда, и текстовый ввод расходников
+    // молча умер — бот отвечал тем же вопросом по кругу. Тесты этого не
+    // поймали, потому что зовут обработчик напрямую, мимо диспетчера.
+    const numericStep = conv.step === "water" || conv.step === "cups" || conv.step === "lids";
+    if ((numericStep || conv.step === "confirm") && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: await handleCoffeeConsumableCounts(chatId, clean, person, deps) };
     }
     return { reply: { text: coffeeConsumableStepHint(conv.step) } };
