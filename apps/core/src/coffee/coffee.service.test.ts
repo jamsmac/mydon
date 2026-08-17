@@ -224,12 +224,14 @@ describe("CoffeeService: настройки — ингредиенты по по
 });
 
 describe("CoffeeService: ввод данных — заливка бункера", () => {
-  it("submitRefill — дефолты: packageCount=1, необязательные поля null", async () => {
+  it("submitRefill — упаковки не подставляются единицей: не спрашивали значит NULL", async () => {
     const { db, inserts } = coffeeDb({});
     const svc = new CoffeeService(db);
     await svc.submitRefill({ locationId: "loc-1", position: 1, filledWeight: 1200, enteredDate: "2026-08-03" });
     const row = inserts.find((i) => i.table === "coffee_refill")!.values as Record<string, unknown>;
-    assert.equal(row.packageCount, 1);
+    // Учёт идёт в граммах (миграция 0050). Единица по умолчанию делала
+    // «не спрашивали» неотличимым от «ровно одна пачка» — 1116 таких строк.
+    assert.equal(row.packageCount, null);
     assert.equal(row.containerNumber, null);
     assert.equal(row.measuredBefore, null);
     assert.equal(row.filledWeight, 1200);

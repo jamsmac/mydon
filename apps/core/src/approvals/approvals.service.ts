@@ -396,7 +396,7 @@ export class ApprovalsService {
         });
       }
       if (valid.length > 0) {
-        const refillKey = (v: { locationId: string; position: number; enteredDate: string; filledWeight: number; packageCount: number }) =>
+        const refillKey = (v: { locationId: string; position: number; enteredDate: string; filledWeight: number; packageCount: number | null }) =>
           `${v.locationId}|${v.position}|${v.enteredDate}|${v.filledWeight}|${v.packageCount}`;
         const dates = valid.map((v) => v.enteredDate).sort();
         const existing = await tx

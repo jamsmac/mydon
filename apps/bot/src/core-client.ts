@@ -782,12 +782,26 @@ export class CoreClient {
 
   /** Позиция бункера 1–8 → допустимые ингредиенты (для подсказки технику при выборе). */
   coffeeBunkerConfig(): Promise<
-    { position: number; ingredientId: string; ingredientName: string }[]
+    { position: number; ingredientId: string; ingredientName: string; packageWeight?: number | null }[]
   > {
     return this.request("/coffee/bunker-config");
   }
 
   /** Занести заливку бункера («Ввод данных»). */
+  /** Последние заливки — по ним ловим повтор того же бункера в тот же день. */
+  recentRefills(limit = 60): Promise<
+    {
+      id: string;
+      locationId: string;
+      position: number;
+      containerNumber: number | null;
+      filledWeight: number;
+      enteredDate: string;
+    }[]
+  > {
+    return this.request(`/coffee/refill/recent?limit=${limit}`);
+  }
+
   /** Калибровка тары: вес пустого набора на позиции. Без неё чистый вес не посчитать. */
   coffeeTare(): Promise<{ containerNumber: number; position: number; tareWeight: number | null }[]> {
     return this.request("/coffee/tare");
@@ -800,7 +814,7 @@ export class CoreClient {
     ingredientId?: string;
     filledWeight: number;
     measuredBefore?: number;
-    packageCount?: number;
+    packageCount?: number | null;
     enteredDate: string;
     createdBy?: string;
   }): Promise<{ id: string }> {

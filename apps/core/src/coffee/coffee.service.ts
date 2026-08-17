@@ -216,7 +216,7 @@ export interface RefillRow {
   ingredientId: string | null;
   filledWeight: number;
   measuredBefore: number | null;
-  packageCount: number;
+  packageCount: number | null;
   enteredDate: string;
   createdBy: string | null;
   createdAt: string;
@@ -773,7 +773,7 @@ export class CoffeeService {
         kind: "refill",
         id: r.id,
         at: new Date(r.at).toISOString(),
-        text: `заливка ${r.enteredDate} · ${r.locationName} · бункер ${r.position}${container} · ${r.filledWeight}г · ${r.packageCount} уп.`,
+        text: `заливка ${r.enteredDate} · ${r.locationName} · бункер ${r.position}${container} · ${r.filledWeight}г${r.packageCount == null ? "" : ` · ${r.packageCount} уп.`}`,
       });
     }
     for (const r of returns) {
@@ -808,6 +808,7 @@ export class CoffeeService {
         ingredientId: coffeeIngredient.id,
         ingredientName: coffeeIngredient.name,
         purchasePrice: coffeeIngredient.purchasePrice,
+        packageWeight: coffeeIngredient.packageWeight,
         targetFillWeight: coffeeBunkerConfig.targetFillWeight,
       })
       .from(coffeeBunkerConfig)
@@ -905,7 +906,7 @@ export class CoffeeService {
         ingredientId: input.ingredientId ?? null,
         filledWeight: input.filledWeight,
         measuredBefore: input.measuredBefore ?? null,
-        packageCount: input.packageCount ?? 1,
+        packageCount: input.packageCount ?? null,
         enteredDate: input.enteredDate,
         createdBy: input.createdBy ?? null,
       })

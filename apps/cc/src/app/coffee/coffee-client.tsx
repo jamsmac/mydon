@@ -264,7 +264,7 @@ function EntryTab({
                 </small>
               </div>
               <span className="pill">
-                {r.filledWeight}г · {r.packageCount} уп.
+                {r.filledWeight}г{r.packageCount == null ? "" : ` · ${r.packageCount} уп.`}
               </span>
             </div>
           ))}
@@ -342,7 +342,7 @@ function JournalTab({
                 </small>
               </div>
               <span className="pill">
-                {r.filledWeight}г · {r.packageCount} уп.
+                {r.filledWeight}г{r.packageCount == null ? "" : ` · ${r.packageCount} уп.`}
               </span>
               <button
                 type="button"
