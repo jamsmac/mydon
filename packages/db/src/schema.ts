@@ -1544,6 +1544,21 @@ export const coffeeIngredient = pgTable("coffee_ingredient", {
   unit: text("unit").default("g").notNull(),
   /** Закупочная цена за единицу `unit` (обычно за грамм), сум. Пусто — себестоимость расхода не считается (§ reconcile). */
   purchasePrice: numeric("purchase_price", { precision: 10, scale: 4 }),
+  /**
+   * Вес одной упаковки в граммах. Пусто — упаковки не считаем и не показываем.
+   *
+   * Учёт ведётся в граммах: техник сыплет сколько нужно, иногда половину пачки,
+   * иногда полторы, и спрашивать «сколько упаковок» значило заставлять его
+   * округлять на глаз, а потом принимать это округление за факт. Зная вес
+   * пачки, упаковки считает программа — из тех же граммов, что уже взвешены.
+   */
+  packageWeight: integer("package_weight"),
+  /**
+   * Как называть единицу расфасовки: «упаковки» по умолчанию, «шт» для
+   * стиков. MacCoffee идёт стиками по 20 г, и назвать стик упаковкой значит
+   * показать «0,05 упаковки» там, где человек видит 50 стиков.
+   */
+  packageLabel: text("package_label"),
   createdAt: createdAt(),
 });
 
@@ -1622,7 +1637,14 @@ export const coffeeRefill = pgTable(
     ingredientId: uuid("ingredient_id").references(() => coffeeIngredient.id),
     filledWeight: integer("filled_weight").notNull(),
     measuredBefore: integer("measured_before"),
-    packageCount: integer("package_count").default(1).notNull(),
+    /**
+     * Сколько упаковок ушло. NULL — не спрашивали (учёт идёт в граммах).
+     *
+     * Раньше поле было notNull с умолчанием 1, и «не спрашивали» было
+     * неотличимо от «ровно одна пачка»: 1116 строк с единицей, из них
+     * настоящих единиц никто назвать не может.
+     */
+    packageCount: integer("package_count"),
     /** «Дата» из формы — календарная дата обхода, без времени. */
     enteredDate: date("entered_date").notNull(),
     createdBy: text("created_by"),

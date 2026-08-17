@@ -86,6 +86,8 @@ export type CoffeeRefillCallback =
   | { kind: "location"; id: string }
   | { kind: "position"; position: number }
   | { kind: "num"; press: NumpadPress }
+  | { kind: "dupSkip" }
+  | { kind: "dupWrite" }
   | { kind: "cancel" };
 
 export function parseCoffeeRefillCallback(data: string): CoffeeRefillCallback | null {
@@ -94,6 +96,8 @@ export function parseCoffeeRefillCallback(data: string): CoffeeRefillCallback | 
   if (loc) return { kind: "location", id: loc[1] };
   const pos = /^cf:pos:([1-8])$/.exec(data);
   if (pos) return { kind: "position", position: Number(pos[1]) };
+  if (data === "cf:dup:skip") return { kind: "dupSkip" };
+  if (data === "cf:dup:write") return { kind: "dupWrite" };
   const press = parseNumpadCallback("cf", data);
   if (press) return { kind: "num", press };
   return null;
@@ -139,13 +143,6 @@ function weightStep(position: number, draft = ""): StaffReply {
   };
 }
 
-function packagesStep(draft = ""): StaffReply {
-  return {
-    text: numpadText("Сколько упаковок ушло на засыпку?", draft, "уп."),
-    keyboard: numpadKeyboard("cf", { skip: true }),
-  };
-}
-
 export type CoffeeWashCallback =
   | { kind: "location"; id: string }
   | { kind: "position"; position: number }
@@ -172,8 +169,8 @@ export function coffeeRefillStepHint(step: string): string {
       return "Сколько весил бункер ДО досыпки, с остатком? Число, или «-» если пустой.";
     case "weight":
       return "Напиши вес ПОСЛЕ засыпки, с бункером, граммы (например 1600). «отмена» — бросить.";
-    case "packages":
-      return "Сколько упаковок ушло? Число, или «-», если не считал (тогда запишем 1).";
+    case "dup":
+      return "Такая запись уже есть — ответь кнопкой: повтор или вторая заливка.";
     default:
       return "Продолжай по кнопкам.";
   }
@@ -219,6 +216,27 @@ export async function handleCoffeeRefillCallback(
     return { answer: loc.name, message: await positionStep(deps, loc.name, "cf") };
   }
 
+  if (cb.kind === "dupSkip") {
+    // Повтор: ничего не пишем, но и обход не роняем — человек стоит у машины.
+    const visit: VisitState = {
+      locationId: String(conv.data.locationId ?? ""),
+      locationName: String(conv.data.locationName ?? ""),
+      refills: typeof conv.data.refills === "number" ? conv.data.refills : 0,
+      consumables: conv.data.consumables === true,
+    };
+    deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
+    return {
+      answer: "Не записал",
+      edit: { text: "🔁 Понял, это повтор — второй раз не записал.", keyboard: visitKeyboard(visit) },
+    };
+  }
+
+  if (cb.kind === "dupWrite") {
+    deps.conversations.advance(chatId, "weight", { dupConfirmed: true });
+    const done = await saveRefill(chatId, person, deps);
+    return { answer: "Записал", edit: done };
+  }
+
   if (cb.kind === "position") {
     deps.conversations.advance(chatId, "container", { position: cb.position, draft: "" });
     return { answer: `Бункер ${cb.position}`, message: containerStep(cb.position) };
@@ -246,13 +264,7 @@ async function numpadPress(
     const next = applyPress(draft, press);
     deps.conversations.advance(chatId, step, { draft: next });
     const view =
-      step === "container"
-        ? containerStep(position, next)
-        : step === "before"
-          ? beforeStep(next)
-          : step === "weight"
-            ? weightStep(position, next)
-            : packagesStep(next);
+      step === "container" ? containerStep(position, next) : step === "before" ? beforeStep(next) : weightStep(position, next);
     // Тот же текст Telegram редактировать откажется («message is not modified»),
     // поэтому пустое нажатие («⌫» на пустом наборе) не выдаём за изменение.
     if (next === draft) return { answer: "Пусто" };
@@ -288,16 +300,13 @@ async function numpadPress(
     if (press.kind === "skip") return { answer: "Вес обязателен" };
     const weight = parseAmount(draft);
     if (weight === null || weight <= 0) return { answer: "Сначала набери вес" };
-    deps.conversations.advance(chatId, "packages", { filledWeight: weight, draft: "" });
-    return { answer: `${weight} г`, edit: packagesStep() };
-  }
-
-  if (step === "packages") {
-    const packageCount = press.kind === "skip" ? 1 : Math.round(parseAmount(draft) ?? NaN);
-    if (!Number.isFinite(packageCount) || packageCount < 1) return { answer: "Набери число или «пропустить»" };
-    deps.conversations.advance(chatId, "packages", { packageCount, draft: "" });
+    deps.conversations.advance(chatId, "weight", { filledWeight: weight, draft: "" });
     const done = await saveRefill(chatId, person, deps);
     return { answer: "Записал", edit: done };
+  }
+
+  if (step === "dup") {
+    return { answer: "Ответь кнопкой: повтор или вторая заливка" };
   }
 
   return { answer: "Не сейчас" };
@@ -338,30 +347,20 @@ export async function handleCoffeeRefillBefore(chatId: number, text: string, dep
   return weightStep(Number(conv.data.position));
 }
 
-/** Ввод веса после засыпки. */
-export async function handleCoffeeRefillWeight(chatId: number, text: string, deps: CoffeeDeps): Promise<StaffReply> {
-  const conv = deps.conversations.get(chatId);
-  if (conv?.flow !== "coffee-refill" || conv.step !== "weight") return { text: coffeeRefillStepHint("") };
-  const weight = parseAmount(text);
-  if (weight === null) return { text: "Не понял число. Напиши вес в граммах, например 1200." };
-  deps.conversations.advance(chatId, "packages", { filledWeight: weight, draft: "" });
-  return packagesStep();
-}
-
-/** Ввод числа упаковок — последний шаг, сохраняет заливку. */
-export async function handleCoffeeRefillPackages(
+/** Ввод веса после засыпки — последний шаг, сохраняет заливку. */
+export async function handleCoffeeRefillWeight(
   chatId: number,
   text: string,
   deps: CoffeeDeps,
   person?: PersonRow,
 ): Promise<StaffReply> {
   const conv = deps.conversations.get(chatId);
-  if (conv?.flow !== "coffee-refill" || conv.step !== "packages") return { text: coffeeRefillStepHint("") };
-  const packageCount = isSkip(text) ? 1 : Math.round(parseAmount(text) ?? NaN);
-  if (!Number.isFinite(packageCount) || packageCount < 1) {
-    return { text: "Не понял число упаковок. Напиши целое число (например 2) или «-»." };
+  if (conv?.flow !== "coffee-refill" || conv.step !== "weight") return { text: coffeeRefillStepHint("") };
+  const weight = parseAmount(text);
+  if (weight === null || weight <= 0) {
+    return { text: "Не понял число. Напиши вес в граммах, например 1600." };
   }
-  deps.conversations.advance(chatId, "packages", { packageCount, draft: "" });
+  deps.conversations.advance(chatId, "weight", { filledWeight: weight, draft: "" });
   if (!person) return { text: coffeeRefillStepHint("") };
   return saveRefill(chatId, person, deps);
 }
@@ -379,13 +378,38 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
   const locationName = String(conv.data.locationName ?? "");
   const position = Number(conv.data.position);
   const filledWeight = Number(conv.data.filledWeight);
-  const packageCount = Number(conv.data.packageCount);
   const containerNumber = typeof conv.data.containerNumber === "number" ? conv.data.containerNumber : null;
   const measuredBefore = typeof conv.data.measuredBefore === "number" ? conv.data.measuredBefore : null;
 
   if (!locationId || !Number.isFinite(position) || !Number.isFinite(filledWeight)) {
     deps.conversations.clear(chatId);
     return { text: "Данные заливки потерялись — начни заново: «бункер»." };
+  }
+
+  // Защита от повтора. Сегодня в базе две пары записей, совпадающих ДО ГРАММА
+  // (та же точка, тот же бункер, тот же набор, тот же вес, час спустя). Два
+  // разных взвешивания так не совпадают — это повторный ввод: человек не понял,
+  // что запись прошла, и внёс заново. Спрашиваем, а не решаем за него: вторая
+  // заливка того же бункера за день бывает, просто не с точностью до грамма.
+  if (conv.data.dupConfirmed !== true) {
+    const twin = await findTwin({ locationId, position, containerNumber, filledWeight }, deps);
+    if (twin) {
+      deps.conversations.advance(chatId, "dup", {});
+      return {
+        text: [
+          `⚠️ Такая же запись уже есть за сегодня:`,
+          `бункер ${position}${containerNumber === null ? "" : `, набор ${containerNumber}`}, ${filledWeight} г.`,
+          "",
+          "Это повтор или ты залил бункер второй раз?",
+        ].join("\n"),
+        keyboard: {
+          inline_keyboard: [
+            [{ text: "🔁 Это повтор — не записывать", callback_data: "cf:dup:skip" }],
+            [{ text: "✅ Вторая заливка — записать", callback_data: "cf:dup:write" }],
+          ],
+        },
+      };
+    }
   }
 
   // Разговор стираем ПОСЛЕ успешной записи, а не до.
@@ -409,21 +433,20 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
       ...(containerNumber !== null ? { containerNumber } : {}),
       ...(measuredBefore !== null ? { measuredBefore } : {}),
       filledWeight,
-      packageCount,
       enteredDate: todayIso(),
       createdBy: `person:${person.id}`,
     });
   } catch {
     // Возвращаем черновик упаковок: без него повторное «Готово» упрётся в
     // «набери число» — набор-то очищен переходом на шаг.
-    deps.conversations.advance(chatId, "packages", { draft: String(packageCount) });
+    deps.conversations.advance(chatId, "weight", { draft: String(filledWeight) });
     return {
       text: [
         "⚠️ Не записал — сервер не ответил.",
         `Всё набранное цело: бункер ${position}, ${filledWeight} г${containerNumber === null ? "" : `, набор ${containerNumber}`}.`,
         "Нажми «✅ Готово» ещё раз через минуту — заново вводить не надо.",
       ].join("\n"),
-      keyboard: packagesStep(String(packageCount)).keyboard,
+      keyboard: weightStep(position, String(filledWeight)).keyboard,
     };
   }
   deps.conversations.clear(chatId);
@@ -440,10 +463,77 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
   deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
 
   const summary = await refillSummary(
-    { locationName, position, containerNumber, measuredBefore, filledWeight, packageCount },
+    { locationName, position, containerNumber, measuredBefore, filledWeight },
     deps,
   );
   return { text: summary, keyboard: visitKeyboard(visit) };
+}
+
+/**
+ * Сколько это упаковок — по весу пачки ингредиента. Дробь оставляем: «1,5» это
+ * и есть правда про полторы пачки, а округление до двух её потеряет.
+ */
+async function packagesFor(position: number, netGrams: number, deps: CoffeeDeps): Promise<string | null> {
+  try {
+    const config = await deps.core.coffeeBunkerConfig();
+    const here = config.filter((c) => c.position === position && (c.packageWeight ?? 0) > 0);
+    if (here.length !== 1) return null;
+    const per = here[0].packageWeight ?? 0;
+    const label = here[0].packageLabel ?? "упаковки";
+    // Штуки — целые: полстика не бывает. Пачки — с десятой долей: половина и
+    // полторы пачки это ровно то, что происходит на точке.
+    const raw = netGrams / per;
+    const value = label === "шт" ? Math.round(raw) : Math.round(raw * 10) / 10;
+    if (value <= 0) return null;
+    return `${String(value).replace(".", ",")} ${plural(value, label)}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Склонение единицы: «1 упаковка», «2 упаковки», «5 упаковок», «1,5 упаковки».
+ *
+ * Без этого выходило «≈ 1 упаковки» — мелочь, по которой сразу видно, что
+ * текст писала программа, а не человек. Полевой инструмент читают на бегу, и
+ * доверие к нему складывается из таких мелочей. Своя подпись («шт») не
+ * склоняется вовсе.
+ */
+function plural(value: number, label: string): string {
+  if (label !== "упаковки") return label;
+  if (!Number.isInteger(value)) return "упаковки"; // 1,5 упаковки
+  const n = Math.abs(value) % 100;
+  if (n >= 11 && n <= 14) return "упаковок";
+  const last = n % 10;
+  if (last === 1) return "упаковка";
+  if (last >= 2 && last <= 4) return "упаковки";
+  return "упаковок";
+}
+
+/**
+ * Такая же заливка уже есть сегодня? Сверяем точку, позицию, набор и вес: два
+ * разных взвешивания не совпадают до грамма.
+ */
+async function findTwin(
+  r: { locationId: string; position: number; containerNumber: number | null; filledWeight: number },
+  deps: CoffeeDeps,
+): Promise<boolean> {
+  try {
+    const today = todayIso();
+    const recent = await deps.core.recentRefills(60);
+    return recent.some(
+      (x) =>
+        x.enteredDate === today &&
+        x.locationId === r.locationId &&
+        x.position === r.position &&
+        x.filledWeight === r.filledWeight &&
+        (x.containerNumber ?? null) === r.containerNumber,
+    );
+  } catch {
+    // Не смогли проверить — записываем. Потерять заливку из-за недоступной
+    // проверки хуже, чем пропустить дубль: дубль виден и правится, потеря нет.
+    return false;
+  }
 }
 
 /**
@@ -478,7 +568,6 @@ async function refillSummary(
     containerNumber: number | null;
     measuredBefore: number | null;
     filledWeight: number;
-    packageCount: number;
   },
   deps: CoffeeDeps,
 ): Promise<string> {
@@ -528,7 +617,11 @@ async function refillSummary(
     }
     lines.push(`Вес с бункером ${r.filledWeight} г − тара набора ${r.containerNumber} (${tare} г)`);
   }
-  lines.push(`Упаковок: ${r.packageCount}`);
+  // Упаковки СЧИТАЕМ, а не спрашиваем: техник сыплет и половину пачки, и
+  // полторы, и просить его округлить значило бы записывать округление как факт.
+  // Вес пачки не задан — строки просто нет: выдуманное число хуже отсутствия.
+  const packs = net !== null && net > 0 ? await packagesFor(r.position, net, deps) : null;
+  if (packs !== null) lines.push(`≈ ${packs} по весу`);
   return lines.join("\n");
 }
 

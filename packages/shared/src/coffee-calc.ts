@@ -110,12 +110,13 @@ export function reconcileConsumption(
 export interface LatestRefillRow {
   locationName: string;
   position: number;
-  packageCount: number;
+  /** NULL — упаковки не спрашивали: учёт идёт в граммах (миграция 0050). */
+  packageCount: number | null;
   filledWeight: number;
 }
 
 export interface BunkerCell {
-  packageCount: number;
+  packageCount: number | null;
   weight: number;
 }
 

@@ -29,7 +29,6 @@ import {
   handleCoffeeRefillBefore,
   handleCoffeeRefillCallback,
   handleCoffeeRefillContainer,
-  handleCoffeeRefillPackages,
   handleCoffeeRefillWeight,
   handleCoffeeWashCallback,
   parseCoffeeRefillCallback,
@@ -324,8 +323,7 @@ export async function handleStaffMessage(
     if (clean.length > 0 && !clean.startsWith("/")) {
       if (conv.step === "container") return { reply: await handleCoffeeRefillContainer(chatId, clean, person, deps) };
       if (conv.step === "before") return { reply: await handleCoffeeRefillBefore(chatId, clean, deps) };
-      if (conv.step === "weight") return { reply: await handleCoffeeRefillWeight(chatId, clean, deps) };
-      if (conv.step === "packages") return { reply: await handleCoffeeRefillPackages(chatId, clean, deps, person) };
+      if (conv.step === "weight") return { reply: await handleCoffeeRefillWeight(chatId, clean, deps, person) };
     }
     return { reply: { text: coffeeRefillStepHint(conv.step) } };
   }
