@@ -537,6 +537,32 @@ describe("Защита от дублей и упаковки по граммам
     assert.equal(calls.length, 1);
   });
 
+  it("стики считаются штуками и целыми: полстика не бывает", async () => {
+    const { fin } = await walk({
+      coffeeBunkerConfig: async () => [
+        { position: 7, ingredientId: "ing-2", ingredientName: "MacCoffee", packageWeight: 20, packageLabel: "шт" },
+      ],
+    });
+    // 1000 г чистого при стике 20 г = 50 штук.
+    assert.match(fin.edit!.text, /≈ 50 шт по весу/);
+    assert.doesNotMatch(fin.edit!.text, /упаковк/);
+  });
+
+  it("склоняет единицу: 1 упаковка, 2 упаковки, 5 упаковок", async () => {
+    for (const [per, want] of [
+      [1000, /≈ 1 упаковка по весу/],
+      [500, /≈ 2 упаковки по весу/],
+      [200, /≈ 5 упаковок по весу/],
+    ] as const) {
+      const { fin } = await walk({
+        coffeeBunkerConfig: async () => [
+          { position: 7, ingredientId: "ing-2", ingredientName: "Кофе", packageWeight: per },
+        ],
+      });
+      assert.match(fin.edit!.text, want, `вес пачки ${per}`);
+    }
+  });
+
   it("упаковки считаются из граммов и показываются дробью", async () => {
     const { fin } = await walk({
       coffeeBunkerConfig: async () => [
@@ -549,6 +575,6 @@ describe("Защита от дублей и упаковки по граммам
 
   it("вес пачки не задан — строки про упаковки нет вовсе", async () => {
     const { fin } = await walk();
-    assert.doesNotMatch(fin.edit!.text, /упаковки по весу/);
+    assert.doesNotMatch(fin.edit!.text, /по весу/);
   });
 });

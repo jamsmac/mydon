@@ -809,6 +809,7 @@ export class CoffeeService {
         ingredientName: coffeeIngredient.name,
         purchasePrice: coffeeIngredient.purchasePrice,
         packageWeight: coffeeIngredient.packageWeight,
+        packageLabel: coffeeIngredient.packageLabel,
         targetFillWeight: coffeeBunkerConfig.targetFillWeight,
       })
       .from(coffeeBunkerConfig)

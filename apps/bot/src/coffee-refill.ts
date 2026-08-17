@@ -479,11 +479,35 @@ async function packagesFor(position: number, netGrams: number, deps: CoffeeDeps)
     const here = config.filter((c) => c.position === position && (c.packageWeight ?? 0) > 0);
     if (here.length !== 1) return null;
     const per = here[0].packageWeight ?? 0;
-    const packs = Math.round((netGrams / per) * 10) / 10;
-    return packs > 0 ? String(packs).replace(".", ",") : null;
+    const label = here[0].packageLabel ?? "упаковки";
+    // Штуки — целые: полстика не бывает. Пачки — с десятой долей: половина и
+    // полторы пачки это ровно то, что происходит на точке.
+    const raw = netGrams / per;
+    const value = label === "шт" ? Math.round(raw) : Math.round(raw * 10) / 10;
+    if (value <= 0) return null;
+    return `${String(value).replace(".", ",")} ${plural(value, label)}`;
   } catch {
     return null;
   }
+}
+
+/**
+ * Склонение единицы: «1 упаковка», «2 упаковки», «5 упаковок», «1,5 упаковки».
+ *
+ * Без этого выходило «≈ 1 упаковки» — мелочь, по которой сразу видно, что
+ * текст писала программа, а не человек. Полевой инструмент читают на бегу, и
+ * доверие к нему складывается из таких мелочей. Своя подпись («шт») не
+ * склоняется вовсе.
+ */
+function plural(value: number, label: string): string {
+  if (label !== "упаковки") return label;
+  if (!Number.isInteger(value)) return "упаковки"; // 1,5 упаковки
+  const n = Math.abs(value) % 100;
+  if (n >= 11 && n <= 14) return "упаковок";
+  const last = n % 10;
+  if (last === 1) return "упаковка";
+  if (last >= 2 && last <= 4) return "упаковки";
+  return "упаковок";
 }
 
 /**
@@ -597,7 +621,7 @@ async function refillSummary(
   // полторы, и просить его округлить значило бы записывать округление как факт.
   // Вес пачки не задан — строки просто нет: выдуманное число хуже отсутствия.
   const packs = net !== null && net > 0 ? await packagesFor(r.position, net, deps) : null;
-  if (packs !== null) lines.push(`≈ ${packs} упаковки по весу`);
+  if (packs !== null) lines.push(`≈ ${packs} по весу`);
   return lines.join("\n");
 }
 

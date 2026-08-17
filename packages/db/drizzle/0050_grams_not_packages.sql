@@ -21,3 +21,18 @@ ALTER TABLE "coffee_refill" ALTER COLUMN "package_count" DROP NOT NULL;
 ALTER TABLE "coffee_refill" ALTER COLUMN "package_count" DROP DEFAULT;
 --> statement-breakpoint
 ALTER TABLE "coffee_ingredient" ADD COLUMN "package_weight" integer;
+--> statement-breakpoint
+ALTER TABLE "coffee_ingredient" ADD COLUMN "package_label" text;
+--> statement-breakpoint
+-- Расфасовка со слов владельца (17.08.2026): кофе и чай по 1000 г, сухое
+-- молоко по 500 г, MacCoffee стиками по 20 г (в закупочной пачке их 1000, но
+-- бункер заправляют стиками, поэтому единица здесь стик, а не коробка).
+--
+-- Матча и сахар намеренно оставлены пустыми: владелец их не назвал, а
+-- подставить «наверное тоже 1000» значит показать технику уверенное число,
+-- которого никто не подтверждал.
+UPDATE "coffee_ingredient" SET "package_weight" = 1000 WHERE "name" IN ('Кофе', 'Ягодный чай', 'Лимонный чай', 'Шоколад');
+--> statement-breakpoint
+UPDATE "coffee_ingredient" SET "package_weight" = 500 WHERE "name" = 'Сухое молоко';
+--> statement-breakpoint
+UPDATE "coffee_ingredient" SET "package_weight" = 20, "package_label" = 'шт' WHERE "name" = 'MacCoffee';

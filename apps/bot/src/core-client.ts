@@ -782,7 +782,13 @@ export class CoreClient {
 
   /** Позиция бункера 1–8 → допустимые ингредиенты (для подсказки технику при выборе). */
   coffeeBunkerConfig(): Promise<
-    { position: number; ingredientId: string; ingredientName: string; packageWeight?: number | null }[]
+    {
+      position: number;
+      ingredientId: string;
+      ingredientName: string;
+      packageWeight?: number | null;
+      packageLabel?: string | null;
+    }[]
   > {
     return this.request("/coffee/bunker-config");
   }

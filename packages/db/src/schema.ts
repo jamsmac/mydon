@@ -1553,6 +1553,12 @@ export const coffeeIngredient = pgTable("coffee_ingredient", {
    * пачки, упаковки считает программа — из тех же граммов, что уже взвешены.
    */
   packageWeight: integer("package_weight"),
+  /**
+   * Как называть единицу расфасовки: «упаковки» по умолчанию, «шт» для
+   * стиков. MacCoffee идёт стиками по 20 г, и назвать стик упаковкой значит
+   * показать «0,05 упаковки» там, где человек видит 50 стиков.
+   */
+  packageLabel: text("package_label"),
   createdAt: createdAt(),
 });
 
