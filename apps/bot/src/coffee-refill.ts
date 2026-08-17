@@ -382,22 +382,51 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
   const packageCount = Number(conv.data.packageCount);
   const containerNumber = typeof conv.data.containerNumber === "number" ? conv.data.containerNumber : null;
   const measuredBefore = typeof conv.data.measuredBefore === "number" ? conv.data.measuredBefore : null;
-  deps.conversations.clear(chatId);
 
   if (!locationId || !Number.isFinite(position) || !Number.isFinite(filledWeight)) {
+    deps.conversations.clear(chatId);
     return { text: "Данные заливки потерялись — начни заново: «бункер»." };
   }
 
-  await deps.core.submitCoffeeRefill({
-    locationId,
-    position,
-    ...(containerNumber !== null ? { containerNumber } : {}),
-    ...(measuredBefore !== null ? { measuredBefore } : {}),
-    filledWeight,
-    packageCount,
-    enteredDate: todayIso(),
-    createdBy: `person:${person.id}`,
-  });
+  // Разговор стираем ПОСЛЕ успешной записи, а не до.
+  //
+  // Раньше clear() стоял выше вызова Core. Отвалилась сеть (таймаут 10 с, без
+  // ретраев) — пять введённых чисел исчезали вместе с разговором: техник у
+  // автомата видел исчезающий тост, а на текстовом пути вообще тишину, и
+  // уходил с точки, ничего не записав. Теперь ввод переживает сбой, и «Готово»
+  // можно нажать повторно, ничего не набирая заново.
+  // Ингредиент — из конфига бункеров по позиции. Без него сверка «ожидали
+  // против налили» читает 0 из 1150 строк и молчит по каждой. Позиция с ДВУМЯ
+  // ингредиентами (в конфиге такая есть) остаётся пустой: угаданное списание
+  // хуже отсутствующего — его никто не перепроверит.
+  const ingredientId = await ingredientForPosition(position, deps);
+
+  try {
+    await deps.core.submitCoffeeRefill({
+      locationId,
+      position,
+      ...(ingredientId !== null ? { ingredientId } : {}),
+      ...(containerNumber !== null ? { containerNumber } : {}),
+      ...(measuredBefore !== null ? { measuredBefore } : {}),
+      filledWeight,
+      packageCount,
+      enteredDate: todayIso(),
+      createdBy: `person:${person.id}`,
+    });
+  } catch {
+    // Возвращаем черновик упаковок: без него повторное «Готово» упрётся в
+    // «набери число» — набор-то очищен переходом на шаг.
+    deps.conversations.advance(chatId, "packages", { draft: String(packageCount) });
+    return {
+      text: [
+        "⚠️ Не записал — сервер не ответил.",
+        `Всё набранное цело: бункер ${position}, ${filledWeight} г${containerNumber === null ? "" : `, набор ${containerNumber}`}.`,
+        "Нажми «✅ Готово» ещё раз через минуту — заново вводить не надо.",
+      ].join("\n"),
+      keyboard: packagesStep(String(packageCount)).keyboard,
+    };
+  }
+  deps.conversations.clear(chatId);
 
   // Обход продолжается: точка остаётся выбранной, дальше — ещё бункер,
   // расходники или «завершить». Заново называть ту же точку не нужно.
@@ -415,6 +444,20 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
     deps,
   );
   return { text: summary, keyboard: visitKeyboard(visit) };
+}
+
+/**
+ * Ингредиент позиции. Однозначен — возвращаем; двусмыслен или неизвестен — null.
+ * Сеть отвалилась — тоже null: заливку из-за справочника терять нельзя.
+ */
+async function ingredientForPosition(position: number, deps: CoffeeDeps): Promise<string | null> {
+  try {
+    const config = await deps.core.coffeeBunkerConfig();
+    const here = config.filter((c) => c.position === position && c.ingredientId);
+    return here.length === 1 ? (here[0].ingredientId ?? null) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -461,10 +504,27 @@ async function refillSummary(
         ? "⚠️ Набор не назван — чистый вес не посчитать."
         : `⚠️ Тара набора ${r.containerNumber} не откалибрована — чистый вес не посчитать.`,
     );
+  } else if (net <= 0) {
+    // Ингредиента не может быть ноль или меньше: значит взвесили не то, не тот
+    // набор или промахнулись разрядом. Назвать такое «чистым весом» и велеть
+    // вносить в автомат — прямая команда испортить остаток в системе. В базе
+    // проекта таких строк уже 63 (худшая даёт −639 г), так что случай не
+    // выдуманный. Запись оставляем — факт взвешивания был, врать о нём нельзя.
+    lines.push(`⚠️ Не сходится: вес с бункером ${r.filledWeight} г, а пустой набор ${r.containerNumber} весит ${tare} г.`);
+    lines.push("В систему автомата ЭТО НЕ ВНОСИ. Проверь номер набора и перевесь.");
+    lines.push("Ошибся — жми «↩️ Ошибся — исправить».");
   } else {
     lines.push(`☕ Чистый ингредиент: ${net} г — это и вноси в систему автомата`);
     if (netBefore !== null && r.measuredBefore !== null) {
-      lines.push(`Было ${netBefore} г → стало ${net} г (досыпали ${net - netBefore} г)`);
+      const added = net - netBefore;
+      // Досыпали меньше нуля — физически невозможно: либо «до» и «после»
+      // переставлены местами, либо из бункера отсыпали. Показать «-600» как
+      // обычную цифру значило бы узаконить ошибку в отчётах.
+      lines.push(
+        added >= 0
+          ? `Было ${netBefore} г → стало ${net} г (досыпали ${added} г)`
+          : `⚠️ Было ${netBefore} г, стало ${net} г — стало МЕНЬШЕ. Проверь, не перепутал ли замеры.`,
+      );
     }
     lines.push(`Вес с бункером ${r.filledWeight} г − тара набора ${r.containerNumber} (${tare} г)`);
   }

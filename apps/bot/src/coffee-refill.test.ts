@@ -377,3 +377,109 @@ describe("Заливка кнопками: цифровая клавиатура
     assert.match(fin.text, /Чистый ингредиент: 1000 г/);
   });
 });
+
+describe("Заливка: отказы и невозможные числа (найдено аудитом)", () => {
+  async function toPackages(over: Record<string, unknown> = {}) {
+    const { core, calls } = stubCore(over);
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    await startCoffeeRefill(1, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "position", position: 7 }, ME, deps);
+    return { deps, conversations, calls };
+  }
+  const type = async (deps: never, s: string) => {
+    for (const d of s) await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "digit", digit: d } }, ME, deps);
+  };
+  const ok = (deps: never) => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+  const skip = (deps: never) => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "skip" } }, ME, deps);
+
+  it("сервер не ответил — набранное не теряется, повторное «Готово» дописывает", async () => {
+    let fail = true;
+    const { deps, conversations, calls } = await toPackages({
+      submitCoffeeRefill: async (input: Record<string, unknown>) => {
+        if (fail) throw new Error("ECONNRESET");
+        calls.push({ kind: "refill", input });
+        return { id: "r1" };
+      },
+    });
+    await type(deps, "7");
+    await ok(deps);
+    await skip(deps);
+    await type(deps, "1600");
+    await ok(deps);
+    await type(deps, "2");
+    const failed = await ok(deps);
+
+    assert.match(failed.edit!.text, /Не записал/, "человеку сказано, что записи нет");
+    assert.match(failed.edit!.text, /1600 г/, "введённое показано, чтобы было видно — оно цело");
+    assert.ok(conversations.get(1), "разговор жив, заново набирать не надо");
+
+    fail = false;
+    const retried = await ok(deps);
+    assert.equal(calls.length, 1, "со второго раза записалось");
+    assert.match(retried.edit!.text, /✅ Записал/);
+  });
+
+  it("брутто меньше тары — не диктует отрицательный остаток, а велит перевесить", async () => {
+    const { deps } = await toPackages();
+    await type(deps, "7");
+    await ok(deps);
+    await skip(deps);
+    await type(deps, "10"); // 10 г при таре 600 — промах разрядом
+    await ok(deps);
+    const fin = await skip(deps);
+
+    assert.doesNotMatch(fin.edit!.text, /Чистый ингредиент/, "нельзя называть это чистым весом");
+    assert.doesNotMatch(fin.edit!.text, /-\d+ г — это и вноси/);
+    assert.match(fin.edit!.text, /Не сходится/);
+    assert.match(fin.edit!.text, /НЕ ВНОСИ/);
+  });
+
+  it("стало меньше, чем было — не печатает отрицательную досыпку как факт", async () => {
+    const { deps } = await toPackages();
+    await type(deps, "7");
+    await ok(deps);
+    await type(deps, "1600"); // было
+    await ok(deps);
+    await type(deps, "1000"); // стало — меньше
+    await ok(deps);
+    const fin = await skip(deps);
+    assert.doesNotMatch(fin.edit!.text, /досыпали -/);
+    assert.match(fin.edit!.text, /стало МЕНЬШЕ/);
+  });
+
+  it("ингредиент позиции пишется в запись — иначе сверка расхода слепа", async () => {
+    const { deps, calls } = await toPackages();
+    await type(deps, "7");
+    await ok(deps);
+    await skip(deps);
+    await type(deps, "1600");
+    await ok(deps);
+    await skip(deps);
+    const call = calls[0] as { input: Record<string, unknown> };
+    assert.equal(call.input.ingredientId, "ing-2", "позиция 7 = Кофе из конфига");
+  });
+
+  it("две записи конфига на одну позицию — ингредиент не угадываем", async () => {
+    const { core, calls } = stubCore({
+      coffeeBunkerConfig: async () => [
+        { position: 7, ingredientId: "ing-a", ingredientName: "Лимонный чай" },
+        { position: 7, ingredientId: "ing-b", ingredientName: "Матча" },
+      ],
+    });
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    await startCoffeeRefill(1, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "position", position: 7 }, ME, deps);
+    await type(deps, "7");
+    await ok(deps);
+    await skip(deps);
+    await type(deps, "1600");
+    await ok(deps);
+    await skip(deps);
+    const call = calls[0] as { input: Record<string, unknown> };
+    assert.ok(!("ingredientId" in call.input), "угаданное списание хуже отсутствующего");
+  });
+});
