@@ -27,6 +27,7 @@ import {
   startStaffAdd,
 } from "./staff-add";
 import { handleAfterPhoto } from "./field-work";
+import { asStaffMode } from "./as-staff";
 import { InvalidTokenError, TelegramApi, TelegramError, type TgUpdate } from "./telegram";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
@@ -125,6 +126,8 @@ async function main(): Promise<void> {
   // ── Сотрудники: свой узкий режим (только свои задачи) ──────────────────────
   const conversations = new Conversations();
   const staffDeps = { core: deps.core, conversations };
+  /** Чаты владельцев, временно смотрящих на бота глазами сотрудника. */
+  const asStaff = new Set<number>();
   setInterval(() => conversations.sweep(), 10 * 60_000).unref();
 
   /** Кто написал: сотрудник или посторонний. Ошибка Core = «неизвестен». */
@@ -572,7 +575,33 @@ async function main(): Promise<void> {
           await routeStaffPhoto(u.message.chat.id, u.message.photo);
         } else if (u.message?.text) {
           const chatId = u.message.chat.id;
-          if (isAllowed(chatId, allowlist)) {
+
+          // «Побыть сотрудником»: владелец видит бота глазами полевого.
+          //
+          // Иначе проверить полевой поток нельзя вовсе — владелец идёт своей
+          // веткой (сводки, согласования), и меню сотрудника ему не
+          // показывается. Заводить второй аккаунт в Telegram ради проверки
+          // того, что сам же и раздаёшь, — плохой обмен.
+          //
+          // Кнопки визарда и так проваливаются в ветку сотрудника, не хватало
+          // только текста: нажатие кнопки меню — это обычное сообщение.
+          //
+          // Режим живёт в памяти процесса: после выката бот перезапускается и
+          // владелец снова владелец. Для проверки это правильное поведение —
+          // забыть выйти нельзя.
+          if (isAllowed(chatId, allowlist) && asStaffMode(chatId, u.message.text, asStaff)) {
+            await tg.sendMessage(
+              chatId,
+              asStaff.has(chatId)
+                ? "Ты в режиме сотрудника — бот отвечает так, как увидят полевые. Обратно: «я владелец»."
+                : "Вернул режим владельца.",
+              asStaff.has(chatId) ? undefined : { remove_keyboard: true },
+            );
+            if (asStaff.has(chatId)) await routeStaffMessage(chatId, "/start", u.message.from?.username);
+            continue;
+          }
+
+          if (isAllowed(chatId, allowlist) && !asStaff.has(chatId)) {
             // Подключение сотрудника — мутация с состоянием, ловим до общего
             // обработчика: иначе «подключить» ушло бы в разбор намерений.
             if (isStaffAddTrigger(u.message.text)) {
