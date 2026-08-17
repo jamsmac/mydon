@@ -1,5 +1,7 @@
 import { parseContainerReturnMessage } from "@mydon/shared";
-import { todayIso } from "./coffee-refill";
+import { visitKeyboard } from "./coffee-visit";
+import { applyPress, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
+import { parseAmount, todayIso } from "./coffee-refill";
 import type { CoreClient, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import type { StaffReply } from "./staff";
@@ -68,25 +70,83 @@ export async function recordContainerReturns(
   return { text: lines.join("\n") };
 }
 
-// ── Расходники: «вода» → точка → «вода стаканы крышки» одним сообщением ─────
+// ── Расходники: по одному числу, клавиатурой, с проверкой перед записью ─────
+
+/**
+ * Раньше три числа вводились одной строкой «2 100 100». На складе это работало,
+ * на обходе — нет: порядок надо помнить, а ошибку видно только в ответе бота,
+ * когда запись уже ушла. Теперь каждое число спрашивается отдельно и крупными
+ * кнопками, а перед записью показывается всё вместе — с возможностью поправить
+ * любое одно, не набирая заново остальные два.
+ */
 
 /** Слова, которыми начинают ввод расходников. */
 export function isCoffeeConsumableTrigger(text: string): boolean {
   return /^(вода|стаканчик|стаканы|крышк|расходник)/i.test(text.trim());
 }
 
-export type CoffeeConsumableCallback = { kind: "location"; id: string } | { kind: "cancel" };
+/** Поля в фиксированном порядке — он же порядок вопросов и строк в сводке. */
+export const CONSUMABLE_FIELDS = [
+  { key: "water", label: "Вода", unit: "бут." },
+  { key: "cups", label: "Стаканчики", unit: "шт." },
+  { key: "lids", label: "Крышки", unit: "шт." },
+] as const;
+
+export type ConsumableField = (typeof CONSUMABLE_FIELDS)[number]["key"];
+
+export type CoffeeConsumableCallback =
+  | { kind: "location"; id: string }
+  | { kind: "num"; press: NumpadPress }
+  | { kind: "save" }
+  | { kind: "fix"; field: ConsumableField }
+  | { kind: "cancel" };
 
 export function parseCoffeeConsumableCallback(data: string): CoffeeConsumableCallback | null {
   if (data === "cc:cancel") return { kind: "cancel" };
+  if (data === "cc:save") return { kind: "save" };
+  const fix = /^cc:fix:(water|cups|lids)$/.exec(data);
+  if (fix) return { kind: "fix", field: fix[1] as ConsumableField };
   const loc = /^cc:loc:([0-9a-f-]{36})$/.exec(data);
-  return loc ? { kind: "location", id: loc[1] } : null;
+  if (loc) return { kind: "location", id: loc[1] };
+  const press = parseNumpadCallback("cc", data);
+  if (press) return { kind: "num", press };
+  return null;
 }
 
 export function coffeeConsumableStepHint(step: string): string {
-  return step === "location"
-    ? "Выбери точку кнопкой."
-    : "Напиши три числа: вода, стаканчики, крышки — например «2 100 100». «отмена» — бросить.";
+  const field = CONSUMABLE_FIELDS.find((f) => f.key === step);
+  if (field) return `${field.label}: сколько? Число, или «-» если не привозил.`;
+  return step === "confirm"
+    ? "Проверь и жми «Сохранить», или поправь нужную строку кнопкой."
+    : "Выбери точку кнопкой.";
+}
+
+/** Экран одного числа. «Пропустить» = ноль: не привозил — тоже факт. */
+function countStep(field: ConsumableField, draft: string): StaffReply {
+  const f = CONSUMABLE_FIELDS.find((x) => x.key === field)!;
+  return {
+    text: numpadText(`${f.label}: сколько привёз?\n(не привозил — «пропустить»)`, draft, f.unit),
+    keyboard: numpadKeyboard("cc", { skip: true }),
+  };
+}
+
+/**
+ * Сводка перед записью. Правится любая одна строка — остальные две при этом
+ * сохраняются: переписывать всё из-за одной опечатки люди не станут, они
+ * просто отправят с ошибкой.
+ */
+function confirmStep(locationName: string, counts: Record<ConsumableField, number>): StaffReply {
+  const lines = CONSUMABLE_FIELDS.map((f) => `${f.label}: ${counts[f.key]} ${f.unit}`);
+  return {
+    text: [`«${locationName}» — проверь:`, "", ...lines, "", "Запись за сегодня перезапишется."].join("\n"),
+    keyboard: {
+      inline_keyboard: [
+        [{ text: "✅ Сохранить", callback_data: "cc:save" }],
+        CONSUMABLE_FIELDS.map((f) => ({ text: `✏️ ${f.label}`, callback_data: `cc:fix:${f.key}` })),
+        [{ text: "✖️ Отмена", callback_data: "cc:cancel" }],
+      ],
+    },
+  };
 }
 
 /** Начать ввод расходников: выбрать точку. */
@@ -108,11 +168,27 @@ export async function startCoffeeConsumable(chatId: number, deps: CoffeeReturnsD
   };
 }
 
+/** Расходники на точке, которая уже выбрана в обходе — без повторного выбора. */
+export function continueVisitConsumable(
+  chatId: number,
+  visit: { locationId: string; locationName: string; refills: number },
+  deps: CoffeeReturnsDeps,
+): StaffReply {
+  deps.conversations.start(chatId, "coffee-consumable", "water", {
+    locationId: visit.locationId,
+    locationName: visit.locationName,
+    refills: visit.refills,
+    draft: "",
+  });
+  return countStep("water", "");
+}
+
 export async function handleCoffeeConsumableCallback(
   chatId: number,
   cb: CoffeeConsumableCallback,
+  person: PersonRow,
   deps: CoffeeReturnsDeps,
-): Promise<{ answer: string; message?: StaffReply }> {
+): Promise<{ answer: string; message?: StaffReply; edit?: StaffReply }> {
   if (cb.kind === "cancel") {
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Ввод расходников отменил." } };
@@ -121,50 +197,118 @@ export async function handleCoffeeConsumableCallback(
   if (conv?.flow !== "coffee-consumable") {
     return { answer: "Визард истёк", message: { text: "Ввод прервался. Начни заново: «вода»." } };
   }
-  const locations = await deps.core.coffeeLocations();
-  const loc = locations.find((l) => l.id === cb.id);
-  if (!loc) return { answer: "Точка не найдена", message: { text: "Этой точки уже нет — начни заново." } };
-  deps.conversations.advance(chatId, "counts", { locationId: loc.id, locationName: loc.name });
+
+  if (cb.kind === "location") {
+    const locations = await deps.core.coffeeLocations();
+    const loc = locations.find((l) => l.id === cb.id);
+    if (!loc) return { answer: "Точка не найдена", message: { text: "Этой точки уже нет — начни заново." } };
+    deps.conversations.advance(chatId, "water", { locationId: loc.id, locationName: loc.name, draft: "" });
+    return { answer: loc.name, message: countStep("water", "") };
+  }
+
+  const locationName = String(conv.data.locationName ?? "");
+
+  if (cb.kind === "fix") {
+    // Пришли из проверки — значит и вернуться надо в проверку, а не идти
+    // дальше по цепочке: человек правит одну строку, а не вводит всё заново.
+    deps.conversations.advance(chatId, cb.field, { draft: "", fixing: true });
+    return { answer: "Поправь", edit: countStep(cb.field, "") };
+  }
+
+  if (cb.kind === "save") {
+    const counts = countsOf(conv.data);
+    const locationId = String(conv.data.locationId ?? "");
+    const refills = typeof conv.data.refills === "number" ? conv.data.refills : 0;
+    if (!locationId) return { answer: "Данные потерялись", message: { text: "Начни заново: «вода»." } };
+    await deps.core.recordCoffeeConsumable({
+      locationId,
+      loggedDate: todayIso(),
+      ...counts,
+      createdBy: `person:${person.id}`,
+    });
+    const visit = { locationId, locationName, refills, consumables: true };
+    deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
+    const lines = CONSUMABLE_FIELDS.map((f) => `${f.label}: ${counts[f.key]} ${f.unit}`);
+    return {
+      answer: "Записал",
+      edit: {
+        text: [`✅ Расходники записаны: «${locationName}»`, ...lines].join("\n"),
+        keyboard: visitKeyboard(visit),
+      },
+    };
+  }
+
+  // cb.kind === "num" — набор числа для текущего поля.
+  const field = CONSUMABLE_FIELDS.find((f) => f.key === conv.step)?.key;
+  if (!field) return { answer: "Не сейчас" };
+  const draft = String(conv.data.draft ?? "");
+
+  if (cb.press.kind === "digit" || cb.press.kind === "erase") {
+    const next = applyPress(draft, cb.press);
+    if (next === draft) return { answer: "Пусто" };
+    deps.conversations.advance(chatId, field, { draft: next });
+    return { answer: next === "" ? "—" : next, edit: countStep(field, next) };
+  }
+
+  const value = cb.press.kind === "skip" ? 0 : Math.round(parseAmount(draft) ?? NaN);
+  if (!Number.isFinite(value) || value < 0) return { answer: "Набери число или «пропустить»" };
+
+  const idx = CONSUMABLE_FIELDS.findIndex((f) => f.key === field);
+  const nextField = conv.data.fixing === true ? undefined : CONSUMABLE_FIELDS[idx + 1];
+  if (nextField) {
+    deps.conversations.advance(chatId, nextField.key, { [field]: value, draft: "" });
+    return { answer: `${value}`, edit: countStep(nextField.key, "") };
+  }
+
+  const updated = deps.conversations.advance(chatId, "confirm", { [field]: value, draft: "", fixing: false });
+  return { answer: `${value}`, edit: confirmStep(locationName, countsOf(updated?.data ?? {})) };
+}
+
+/** Числа из разговора: незаданное поле — ноль, а не «неизвестно». */
+function countsOf(data: Record<string, unknown>): Record<ConsumableField, number> {
   return {
-    answer: loc.name,
-    message: { text: `«${loc.name}». Сколько принёс: вода, стаканчики, крышки — три числа, например «2 100 100».` },
+    water: typeof data.water === "number" ? data.water : 0,
+    cups: typeof data.cups === "number" ? data.cups : 0,
+    lids: typeof data.lids === "number" ? data.lids : 0,
   };
 }
 
-/** Три числа: вода, стаканчики, крышки. Порядок фиксированный — как в таблице группы. */
+/** Три числа одной строкой — прежний способ, его не отнимаем. */
 export function parseConsumableCounts(text: string): { water: number; cups: number; lids: number } | null {
   const m = /^(\d{1,4})\s+(\d{1,4})\s+(\d{1,4})$/.exec(text.trim());
   if (!m) return null;
   return { water: Number(m[1]), cups: Number(m[2]), lids: Number(m[3]) };
 }
 
-/** Последний шаг: три числа → upsert за сегодня. */
+/** Текстовый ввод на любом шаге: одно число — текущее поле, три числа — все сразу. */
 export async function handleCoffeeConsumableCounts(
   chatId: number,
   text: string,
-  person: PersonRow,
+  _person: PersonRow,
   deps: CoffeeReturnsDeps,
 ): Promise<StaffReply> {
   const conv = deps.conversations.get(chatId);
-  if (conv?.flow !== "coffee-consumable" || conv.step !== "counts") {
-    return { text: coffeeConsumableStepHint("") };
-  }
-  const counts = parseConsumableCounts(text);
-  if (!counts) {
-    return { text: "Не понял. Три числа через пробел: вода, стаканчики, крышки — например «2 100 100»." };
-  }
-  const locationId = String(conv.data.locationId ?? "");
+  if (conv?.flow !== "coffee-consumable") return { text: coffeeConsumableStepHint("") };
   const locationName = String(conv.data.locationName ?? "");
-  deps.conversations.clear(chatId);
-  if (!locationId) return { text: "Данные потерялись — начни заново: «вода»." };
 
-  await deps.core.recordCoffeeConsumable({
-    locationId,
-    loggedDate: todayIso(),
-    ...counts,
-    createdBy: `person:${person.id}`,
-  });
-  return {
-    text: `✅ Записал: «${locationName}» — вода ${counts.water}, стаканчики ${counts.cups}, крышки ${counts.lids}. Повторная отправка за сегодня перезапишет.`,
-  };
+  const triple = parseConsumableCounts(text);
+  if (triple) {
+    deps.conversations.advance(chatId, "confirm", { ...triple, draft: "" });
+    return confirmStep(locationName, triple);
+  }
+
+  const field = CONSUMABLE_FIELDS.find((f) => f.key === conv.step)?.key;
+  if (!field) return { text: coffeeConsumableStepHint(conv.step) };
+  const value = /^[-—]$/.test(text.trim()) ? 0 : Math.round(parseAmount(text) ?? NaN);
+  if (!Number.isFinite(value) || value < 0) {
+    return { text: "Не понял число. Напиши количество, или «-» если не привозил." };
+  }
+  const idx = CONSUMABLE_FIELDS.findIndex((f) => f.key === field);
+  const nextField = conv.data.fixing === true ? undefined : CONSUMABLE_FIELDS[idx + 1];
+  if (nextField) {
+    deps.conversations.advance(chatId, nextField.key, { [field]: value, draft: "" });
+    return countStep(nextField.key, "");
+  }
+  const updated = deps.conversations.advance(chatId, "confirm", { [field]: value, draft: "", fixing: false });
+  return confirmStep(locationName, countsOf(updated?.data ?? {}));
 }

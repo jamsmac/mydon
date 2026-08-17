@@ -1,0 +1,91 @@
+import type { StaffReply } from "./staff";
+
+/**
+ * Обход точки: точка выбирается ОДИН раз, дальше на ней делают всё подряд.
+ *
+ * Раньше каждый мастер начинался с выбора точки. На обходе это значило: залил
+ * бункер 1 — выбери точку; залил бункер 2 — выбери ту же точку; внёс воду —
+ * выбери её же в третий раз. Из девяти точек в списке промахнуться легко, и
+ * тогда заливка уезжает на чужую машину. Одна и та же точка, названная трижды,
+ * — это не аккуратность, а три возможности ошибиться вместо одной.
+ *
+ * Поэтому после каждой записи мастер возвращает не «конец», а меню точки:
+ * ещё бункер, расходники, завершить. Точка живёт в разговоре до «завершить».
+ */
+
+export interface VisitState {
+  locationId: string;
+  locationName: string;
+  /** Сколько бункеров залито за этот обход — для сводки в конце. */
+  refills: number;
+  /** Внесены ли расходники: повторный заход перезапишет, и об этом стоит сказать. */
+  consumables: boolean;
+}
+
+export type VisitCallback =
+  | { kind: "more" }
+  | { kind: "consumables" }
+  | { kind: "finish" }
+  | { kind: "next" };
+
+export function parseVisitCallback(data: string): VisitCallback | null {
+  switch (data) {
+    case "cv:more":
+      return { kind: "more" };
+    case "cv:cons":
+      return { kind: "consumables" };
+    case "cv:done":
+      return { kind: "finish" };
+    case "cv:next":
+      return { kind: "next" };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Меню точки. «Ещё бункер» первым: на обходе это самое частое действие, восемь
+ * позиций на машину против одного ввода расходников.
+ */
+export function visitKeyboard(state: VisitState): NonNullable<StaffReply["keyboard"]> {
+  return {
+    inline_keyboard: [
+      [{ text: "➕ Ещё бункер", callback_data: "cv:more" }],
+      [
+        {
+          text: state.consumables ? "💧 Расходники (внесены)" : "💧 Расходники",
+          callback_data: "cv:cons",
+        },
+      ],
+      [{ text: "🏁 Завершить точку", callback_data: "cv:done" }],
+    ],
+  };
+}
+
+/** Что сделано на точке — читается перед уходом с неё, пока можно вернуться. */
+export function visitSummary(state: VisitState): string {
+  const parts: string[] = [];
+  parts.push(state.refills === 0 ? "бункеры не заливал" : `залито бункеров: ${state.refills}`);
+  parts.push(state.consumables ? "расходники внесены" : "расходники не вносил");
+  return `🏁 «${state.locationName}» — ${parts.join(", ")}.`;
+}
+
+/** Клавиатура после ухода с точки: сразу взять следующую, не набирая слово заново. */
+export function nextLocationKeyboard(): NonNullable<StaffReply["keyboard"]> {
+  return {
+    inline_keyboard: [[{ text: "➡️ Следующая точка", callback_data: "cv:next" }]],
+  };
+}
+
+/** Достать состояние обхода из данных разговора. Неполное — обход не считается начатым. */
+export function visitOf(data: Record<string, unknown>): VisitState | null {
+  const locationId = typeof data.locationId === "string" ? data.locationId : "";
+  const locationName = typeof data.locationName === "string" ? data.locationName : "";
+  if (!locationId || !locationName) return null;
+  return {
+    locationId,
+    locationName,
+    refills: typeof data.refills === "number" ? data.refills : 0,
+    consumables: data.consumables === true,
+  };
+}
