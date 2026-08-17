@@ -1,5 +1,5 @@
 import { parseContainerReturnMessage } from "@mydon/shared";
-import { visitFromFlow, visitKeyboard } from "./coffee-visit";
+import { visitFromFlow, visitKeyboard, type VisitState } from "./coffee-visit";
 import { applyPress, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
 import { parseAmount, todayIso } from "./coffee-refill";
 import type { CoreClient, PersonRow } from "./core-client";
@@ -169,15 +169,16 @@ export async function startCoffeeConsumable(chatId: number, deps: CoffeeReturnsD
 }
 
 /** Расходники на точке, которая уже выбрана в обходе — без повторного выбора. */
-export function continueVisitConsumable(
-  chatId: number,
-  visit: { locationId: string; locationName: string; refills: number },
-  deps: CoffeeReturnsDeps,
-): StaffReply {
+export function continueVisitConsumable(chatId: number, visit: VisitState, deps: CoffeeReturnsDeps): StaffReply {
   deps.conversations.start(chatId, "coffee-consumable", "water", {
     locationId: visit.locationId,
     locationName: visit.locationName,
     refills: visit.refills,
+    // Флаг «расходники уже внесены» обязан пережить повторный заход: без него
+    // кнопка теряла «(внесены)», сводка врала «не вносил», и человек вносил
+    // второй раз — а запись это upsert, тихо переписывающий первую.
+    consumables: visit.consumables,
+    started: visit.started,
     draft: "",
   });
   return countStep("water", "");
@@ -215,17 +216,25 @@ export async function handleCoffeeConsumableCallback(
 
   const conv = current;
   if (conv?.flow !== "coffee-consumable") {
-    const visit = visitFromFlow(conv);
-    if (visit) {
-      return {
-        answer: "Уже записано",
-        message: {
-          text: `Эти расходники уже сохранены. Ты на точке «${visit.locationName}».`,
-          keyboard: visitKeyboard(visit),
-        },
-      };
+    // «Уже сохранены» — только из меню точки, куда переводит именно запись.
+    // Из другого мастера сюда попадает и брошенный без записи ввод, и врать
+    // про него «сохранены» значит оставить точку без расходников за день.
+    if (conv?.flow === "coffee-visit") {
+      const visit = visitFromFlow(conv);
+      if (visit && visit.consumables) {
+        return {
+          answer: "Уже записано",
+          message: {
+            text: `Эти расходники уже сохранены. Ты на точке «${visit.locationName}».`,
+            keyboard: visitKeyboard(visit),
+          },
+        };
+      }
     }
-    return { answer: "Визард истёк", message: { text: "Ввод прервался. Начни заново: «вода»." } };
+    if (conv === null) {
+      return { answer: "Визард истёк", message: { text: "Ввод прервался. Начни заново: «вода»." } };
+    }
+    return { answer: "Кнопка устарела", message: { text: "Этот экран уже неактуален. Продолжай там, где остановился." } };
   }
 
   if (cb.kind === "location") {
@@ -256,7 +265,7 @@ export async function handleCoffeeConsumableCallback(
       ...counts,
       createdBy: `person:${person.id}`,
     });
-    const visit = { locationId, locationName, refills, consumables: true };
+    const visit: VisitState = { locationId, locationName, refills, consumables: true, started: true };
     deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
     const lines = CONSUMABLE_FIELDS.map((f) => `${f.label}: ${counts[f.key]} ${f.unit}`);
     return {

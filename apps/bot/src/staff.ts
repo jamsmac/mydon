@@ -1,7 +1,7 @@
 import { can, dueLabel, TZ } from "@mydon/shared";
 import type { CoreClient, PersonRow, TaskRow } from "./core-client";
 import type { Conversations } from "./conversation";
-import { nextLocationKeyboard, parseVisitCallback, visitFromFlow, visitOf, visitSummary } from "./coffee-visit";
+import { nextLocationKeyboard, parseVisitCallback, visitFromFlow, visitSummary } from "./coffee-visit";
 import {
   handleRegisterCallback,
   handleRegisterName,
@@ -278,6 +278,12 @@ export async function handleStaffMessage(
   // запереть его внутри. Бросаем начатое и говорим об этом вслух — молча
   // потерянный мастер выглядит как потерянные данные.
   const pressed = matchMenuLabel(clean);
+  if (pressed && !pressed.ready) {
+    // Кнопка с уже розданной клавиатуры: пункт убрали, а кнопка осталась.
+    // Отвечаем ДО каких-либо действий с беседой — раньше нажатие сначала
+    // гасило начатое (обход, отчёт) и лишь потом говорило «не готово».
+    return { reply: { text: `«${pressed.label}» пока не готово — скоро включим.` } };
+  }
   if (pressed && !can(person.roles, pressed.perm)) {
     // Кнопка могла остаться на экране от прежнего набора ролей: клавиатура
     // живёт в чате, пока её не заменят. Отказ должен быть внятным, а не
@@ -296,10 +302,19 @@ export async function handleStaffMessage(
     // точки, ради устранения которого обход и делался.
     const visit = visitFromFlow(prev);
     if (visit && (pressed.id === "cons" || pressed.id === "refill")) {
+      // Продолжаем обход на той же точке. Но если человек был ПОСРЕДИ ввода
+      // (набранный вес, замер, вода) — сказать об этом обязательно: молча
+      // выброшенные цифры выглядят как сохранённые.
+      const midStep = prev !== null && prev.flow !== "coffee-visit" && prev.step !== "position" && prev.step !== "menu";
       const reply =
         pressed.id === "cons"
           ? continueVisitConsumable(chatId, visit, deps)
           : await continueVisitRefill(chatId, visit, deps);
+      if (midStep) {
+        reply.text = `Прошлый ввод не дописан — бросил.
+
+${reply.text}`;
+      }
       return { reply };
     }
 
@@ -598,16 +613,19 @@ export async function handleStaffCallback(
   const visitCb = parseVisitCallback(data);
   if (visitCb) {
     const conv = deps.conversations.get(chatId);
-    const visit = conv?.flow === "coffee-visit" ? visitOf(conv.data) : null;
+    // Обход жив и внутри его мастеров: человек мог нажать кнопку меню точки,
+    // не закончив подшаг заливки/расходников. Это кнопки ТЕКУЩЕГО обхода, и
+    // отвергать их как устаревшие значило бы отказывать в законном действии
+    // и советовать «отмену», которая всё уносит.
+    const visit = visitFromFlow(conv);
 
     // Кнопки обхода живут в чате вечно, а слот беседы один. Нажатие старой
-    // кнопки во время ДРУГОГО мастера раньше молча стирало его: недописанный
-    // отчёт по задаче исчезал без единого слова. Отказываем, а не затираем —
-    // человек сам решит, что бросать.
-    if (conv !== null && visit === null && conv.flow !== "coffee-visit") {
+    // кнопки во время НЕ-кофейного мастера молча стирало его: недописанный
+    // отчёт по задаче исчезал без единого слова. Отказываем, а не затираем.
+    if (conv !== null && visit === null) {
       return {
         answer: "Кнопка устарела",
-        message: "Эта кнопка от прошлого обхода. Сейчас у тебя не дописано другое — доделай или напиши «отмена».",
+        message: "Эта кнопка от прошлого обхода. Сейчас у тебя не дописано другое — сначала доделай его.",
       };
     }
 

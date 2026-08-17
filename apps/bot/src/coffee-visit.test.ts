@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { nextLocationKeyboard, parseVisitCallback, visitKeyboard, visitOf, visitSummary } from "./coffee-visit";
 
-const VISIT = { locationId: "loc-1", locationName: "Olma office", refills: 2, consumables: false };
+const VISIT = { locationId: "loc-1", locationName: "Olma office", refills: 2, consumables: false, started: true };
 
 describe("Обход точки", () => {
   it("разбирает свои кнопки", () => {
@@ -42,6 +42,7 @@ describe("Обход точки", () => {
       locationName: "Y",
       refills: 0,
       consumables: false,
+      started: false,
     });
   });
 });

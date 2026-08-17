@@ -208,9 +208,10 @@ export async function handleCoffeeRefillCallback(
     if (current !== null && current.flow !== "coffee-refill") {
       return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
     }
-    // Бросаем заливку, но НЕ обход: точка выбрана, бункеры записаны, и
-    // возвращать человека к выбору точки заново значит отнимать то, ради чего
-    // обход и заводился.
+    // Бросаем заливку, но НЕ обход — если обход НАЧАЛСЯ (на точке уже есть
+    // записи). Мастер, открытый напрямую из меню, обходом не является:
+    // «Отмена» в нём ведёт к выбору точки, иначе человек, промахнувшийся
+    // точкой, оказался бы заперт на ней без кнопки выбора другой.
     const visit = visitFromFlow(current);
     if (visit) {
       deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
@@ -225,18 +226,29 @@ export async function handleCoffeeRefillCallback(
 
   const conv = current;
   if (conv?.flow !== "coffee-refill") {
-    // Частый случай — двойное нажатие «✅ Готово» по медленной сети: первое
-    // уже записало заливку и перевело беседу в меню точки. Говорить «начни
-    // заново» поверх «✅ Записал» значит толкать человека на второй ввод того
-    // же самого — ровно на тот дубль, от которого мы защищаемся.
-    const visit = visitFromFlow(conv);
-    if (visit) {
-      return {
-        answer: "Уже записано",
-        message: { text: `Эта заливка уже сохранена. Ты на точке «${visit.locationName}».`, keyboard: visitKeyboard(visit) },
-      };
+    // Двойное «✅ Готово» по медленной сети: первое нажатие записало заливку и
+    // перевело беседу в МЕНЮ ТОЧКИ. Говорить «начни заново» поверх «✅ Записал»
+    // значит толкать на второй ввод — ровно на тот дубль, от которого мы
+    // защищаемся. Но «уже сохранена» можно говорить ТОЛЬКО из меню точки:
+    // из другого мастера сюда попадает и брошенная без записи заливка
+    // (человек ушёл в расходники нижней кнопкой), и врать «сохранена» про
+    // незаписанное — худшее, что бот может сказать про вес.
+    if (conv?.flow === "coffee-visit") {
+      const visit = visitFromFlow(conv);
+      if (visit) {
+        return {
+          answer: "Уже записано",
+          message: {
+            text: `Эта заливка уже сохранена. Ты на точке «${visit.locationName}».`,
+            keyboard: visitKeyboard(visit),
+          },
+        };
+      }
     }
-    return { answer: "Визард истёк", message: { text: "Заливка прервалась. Начни заново: «бункер»." } };
+    if (conv === null) {
+      return { answer: "Визард истёк", message: { text: "Заливка прервалась. Начни заново: «бункер»." } };
+    }
+    return { answer: "Кнопка устарела", message: { text: "Этот экран уже неактуален. Продолжай там, где остановился." } };
   }
 
   if (cb.kind === "location") {
@@ -254,6 +266,7 @@ export async function handleCoffeeRefillCallback(
       locationName: String(conv.data.locationName ?? ""),
       refills: typeof conv.data.refills === "number" ? conv.data.refills : 0,
       consumables: conv.data.consumables === true,
+      started: conv.data.started === true,
     };
     deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
     return {
@@ -490,6 +503,9 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
     locationName,
     refills,
     consumables: conv.data.consumables === true,
+    // Запись прошла — обход НАЧАЛСЯ. Только этот момент (и cc:save) даёт
+    // право «Отмене» возвращать в меню точки, а не к выбору точки.
+    started: true,
   };
   deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
 
@@ -683,6 +699,7 @@ export async function continueVisitRefill(
     locationName: visit.locationName,
     refills: visit.refills,
     consumables: visit.consumables,
+    started: visit.started,
     draft: "",
   });
   return step;
@@ -707,6 +724,22 @@ export async function handleCoffeeWashCallback(
   deps: CoffeeDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    const current = deps.conversations.get(chatId);
+    // Тот же шаблон, что у заливки: «Отмена» с чужого экрана не гасит текущее
+    // дело, «Отмена» посреди обхода возвращает в меню точки. Мойка была
+    // единственным кофейным мастером со слепым clear — и её старый экран
+    // уносил обход целиком.
+    if (current !== null && current.flow !== "coffee-wash") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
+    const visit = visitFromFlow(current);
+    if (visit) {
+      deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
+      return {
+        answer: "Отменено",
+        message: { text: `Мойку отменил. Ты на точке «${visit.locationName}».`, keyboard: visitKeyboard(visit) },
+      };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Мойку отменил." } };
   }

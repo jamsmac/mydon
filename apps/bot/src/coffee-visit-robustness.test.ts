@@ -161,3 +161,81 @@ describe("Обход: сбой Core не ломает состояние", () =>
     assert.match(retry.message ?? "", /Какой бункер/i, "обход уцелел, клавиатура пришла");
   });
 });
+
+describe("Повторная проверка: дефекты, найденные во второй волне аудита", () => {
+  it("D1: кнопка меню точки работает и ПОСРЕДИ подшага заливки", async () => {
+    const { d } = deps();
+    await toVisitMenu(d);
+    await CB(d, "cv:more");           // подшаг: выбор бункера, flow=coffee-refill
+    const res = await CB(d, "cv:cons"); // кнопка меню точки со старого сообщения
+    assert.doesNotMatch(res.answer, /устарела/i, "это кнопка ТЕКУЩЕГО обхода");
+    assert.match(res.message ?? "", /Вода/i, "расходники начались");
+  });
+
+  it("D3: «уже сохранена» НЕ говорится про брошенную без записи заливку", async () => {
+    const { d, calls } = deps();
+    await toVisitMenu(d);
+    await CB(d, "cv:more");
+    await CB(d, "cf:pos:7");
+    for (const c of "7") await CB(d, "cf:n:" + c); // набрал набор, но не дожал
+    await TX(d, "💧 Расходники");                   // ушёл нижней кнопкой — заливка брошена
+    const stale = await CB(d, "cf:n:ok");            // «Готово» на старом экране заливки
+    assert.doesNotMatch(stale.message ?? "", /уже сохранена/i, "записи не было — врать нельзя");
+    assert.equal(calls.filter((c) => c.kind === "refill").length, 1, "в Core только первая заливка");
+  });
+
+  it("D4: «Отмена» в заливке, начатой ИЗ МЕНЮ (не обход), ведёт к выбору точки", async () => {
+    const { d } = deps();
+    const start = await TX(d, "☕ Заливка бункера");
+    await CB(d, start.keyboard!.inline_keyboard[0][0].callback_data!);
+    const res = await CB(d, "cf:cancel");
+    assert.doesNotMatch(res.message ?? "", /Ты на точке/i, "обхода не было — некуда возвращать");
+    assert.match(res.message ?? "", /отменил/i);
+  });
+
+  it("D5: флаг «расходники внесены» переживает повторный заход в расходники", async () => {
+    const { d } = deps();
+    await toVisitMenu(d);
+    await CB(d, "cv:cons");
+    for (let i = 0; i < 3; i++) await CB(d, "cc:n:skip");
+    await CB(d, "cc:save");            // расходники записаны, consumables=true
+    await CB(d, "cv:cons");            // зашёл снова
+    const back = await CB(d, "cc:cancel"); // и передумал
+    assert.match(JSON.stringify(back.keyboard), /внесены/, "кнопка помнит, что уже внесено");
+  });
+
+  it("D6: подпись скрытой кнопки отвечает «не готово», не трогая обход", async () => {
+    const { d } = deps();
+    await toVisitMenu(d);
+    const res = await TX(d, "📦 Заполнил автомат");
+    assert.match(res.text, /пока не готово/i);
+    const more = await CB(d, "cv:more");
+    assert.match(more.message ?? "", /Какой бункер/i, "обход жив");
+  });
+
+  it("D7: «Отмена» мойки с чужого экрана не гасит обход", async () => {
+    const { d } = deps();
+    await toVisitMenu(d);
+    const stale = await CB(d, "cw:cancel"); // старый экран мойки
+    assert.match(stale.answer, /устарела/i);
+    const more = await CB(d, "cv:more");
+    assert.match(more.message ?? "", /Какой бункер/i, "обход жив");
+  });
+
+  it("D2: уход нижней кнопкой посреди ввода предупреждает о брошенных цифрах", async () => {
+    const { d } = deps();
+    await toVisitMenu(d);
+    await CB(d, "cv:more");
+    await CB(d, "cf:pos:7");
+    for (const c of "16") await CB(d, "cf:n:" + c); // набрал половину веса
+    const res = await TX(d, "💧 Расходники");
+    assert.match(res.text, /не дописан/i, "о выброшенном вводе сказано");
+    assert.match(res.text, /Вода/i, "и расходники начались на той же точке");
+  });
+
+  it("истёкший визард по-прежнему говорит, как начать заново", async () => {
+    const { d } = deps();
+    const res = await CB(d, "cf:pos:7"); // беседы нет вовсе
+    assert.match(res.message ?? "", /Начни заново/i);
+  });
+});
