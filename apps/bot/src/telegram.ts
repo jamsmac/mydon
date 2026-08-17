@@ -45,7 +45,12 @@ export interface ReplyKeyboard {
   input_field_placeholder?: string;
 }
 
-export type AnyKeyboard = InlineKeyboard | ReplyKeyboard;
+/** Снять постоянное меню — им заканчивается режим «побыть сотрудником». */
+export interface RemoveKeyboard {
+  remove_keyboard: true;
+}
+
+export type AnyKeyboard = InlineKeyboard | ReplyKeyboard | RemoveKeyboard;
 
 /** Токен неверен или отозван. Повторять запросы бессмысленно. */
 export class InvalidTokenError extends Error {
