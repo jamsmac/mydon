@@ -24,6 +24,7 @@ import {
 } from "./staff-intake";
 import {
   coffeeRefillStepHint,
+  handleCoffeeRefillBefore,
   handleCoffeeRefillCallback,
   handleCoffeeRefillContainer,
   handleCoffeeRefillPackages,
@@ -314,9 +315,10 @@ export async function handleStaffMessage(
   }
   if (conv?.flow === "coffee-refill") {
     if (clean.length > 0 && !clean.startsWith("/")) {
-      if (conv.step === "weight") return { reply: await handleCoffeeRefillWeight(chatId, clean, deps) };
-      if (conv.step === "packages") return { reply: await handleCoffeeRefillPackages(chatId, clean, deps) };
       if (conv.step === "container") return { reply: await handleCoffeeRefillContainer(chatId, clean, person, deps) };
+      if (conv.step === "before") return { reply: await handleCoffeeRefillBefore(chatId, clean, deps) };
+      if (conv.step === "weight") return { reply: await handleCoffeeRefillWeight(chatId, clean, deps) };
+      if (conv.step === "packages") return { reply: await handleCoffeeRefillPackages(chatId, clean, deps, person) };
     }
     return { reply: { text: coffeeRefillStepHint(conv.step) } };
   }
