@@ -8,7 +8,7 @@ import {
   parseNumpadCallback,
   type NumpadPress,
 } from "./numpad";
-import { visitKeyboard, type VisitState } from "./coffee-visit";
+import { visitFromFlow, visitKeyboard, type VisitState } from "./coffee-visit";
 import type { StaffReply } from "./staff";
 
 /**
@@ -198,14 +198,57 @@ export async function handleCoffeeRefillCallback(
   person: PersonRow,
   deps: CoffeeDeps,
 ): Promise<{ answer: string; message?: StaffReply; edit?: StaffReply }> {
+  const current = deps.conversations.get(chatId);
+
   if (cb.kind === "cancel") {
+    // Кнопка «Отмена» живёт на КАЖДОМ экране заливки, и старые экраны остаются
+    // в чате. Нажатие на устаревший из них не должно гасить то, чем человек
+    // занят сейчас: слот беседы один, и раньше «Отмена» с прошлого экрана
+    // уносила набранные расходники или чужой мастер целиком.
+    if (current !== null && current.flow !== "coffee-refill") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
+    // Бросаем заливку, но НЕ обход — если обход НАЧАЛСЯ (на точке уже есть
+    // записи). Мастер, открытый напрямую из меню, обходом не является:
+    // «Отмена» в нём ведёт к выбору точки, иначе человек, промахнувшийся
+    // точкой, оказался бы заперт на ней без кнопки выбора другой.
+    const visit = visitFromFlow(current);
+    if (visit) {
+      deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
+      return {
+        answer: "Отменено",
+        message: { text: `Заливку отменил. Ты на точке «${visit.locationName}».`, keyboard: visitKeyboard(visit) },
+      };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Заливку отменил." } };
   }
 
-  const conv = deps.conversations.get(chatId);
+  const conv = current;
   if (conv?.flow !== "coffee-refill") {
-    return { answer: "Визард истёк", message: { text: "Заливка прервалась. Начни заново: «бункер»." } };
+    // Двойное «✅ Готово» по медленной сети: первое нажатие записало заливку и
+    // перевело беседу в МЕНЮ ТОЧКИ. Говорить «начни заново» поверх «✅ Записал»
+    // значит толкать на второй ввод — ровно на тот дубль, от которого мы
+    // защищаемся. Но «уже сохранена» можно говорить ТОЛЬКО из меню точки:
+    // из другого мастера сюда попадает и брошенная без записи заливка
+    // (человек ушёл в расходники нижней кнопкой), и врать «сохранена» про
+    // незаписанное — худшее, что бот может сказать про вес.
+    if (conv?.flow === "coffee-visit") {
+      const visit = visitFromFlow(conv);
+      if (visit) {
+        return {
+          answer: "Уже записано",
+          message: {
+            text: `Эта заливка уже сохранена. Ты на точке «${visit.locationName}».`,
+            keyboard: visitKeyboard(visit),
+          },
+        };
+      }
+    }
+    if (conv === null) {
+      return { answer: "Визард истёк", message: { text: "Заливка прервалась. Начни заново: «бункер»." } };
+    }
+    return { answer: "Кнопка устарела", message: { text: "Этот экран уже неактуален. Продолжай там, где остановился." } };
   }
 
   if (cb.kind === "location") {
@@ -223,6 +266,7 @@ export async function handleCoffeeRefillCallback(
       locationName: String(conv.data.locationName ?? ""),
       refills: typeof conv.data.refills === "number" ? conv.data.refills : 0,
       consumables: conv.data.consumables === true,
+      started: conv.data.started === true,
     };
     deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
     return {
@@ -459,6 +503,9 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
     locationName,
     refills,
     consumables: conv.data.consumables === true,
+    // Запись прошла — обход НАЧАЛСЯ. Только этот момент (и cc:save) даёт
+    // право «Отмене» возвращать в меню точки, а не к выбору точки.
+    started: true,
   };
   deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
 
@@ -642,14 +689,20 @@ export async function continueVisitRefill(
   visit: VisitState,
   deps: CoffeeDeps,
 ): Promise<StaffReply> {
+  // Спрашиваем Core ДО подмены беседы. Раньше состояние обхода уже уезжало
+  // внутрь заливки, а следом падал запрос конфига — и повторное нажатие
+  // «Ещё бункер» не находило обхода: человек оставался и без клавиатуры
+  // бункеров, и без меню точки, с четырьмя записанными заливками в никуда.
+  const step = await positionStep(deps, visit.locationName, "cf");
   deps.conversations.start(chatId, "coffee-refill", "position", {
     locationId: visit.locationId,
     locationName: visit.locationName,
     refills: visit.refills,
     consumables: visit.consumables,
+    started: visit.started,
     draft: "",
   });
-  return positionStep(deps, visit.locationName, "cf");
+  return step;
 }
 
 // ── Мойка/обслуживание: короче — точка → бункер (или «вся машина») → готово ──
@@ -671,6 +724,22 @@ export async function handleCoffeeWashCallback(
   deps: CoffeeDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    const current = deps.conversations.get(chatId);
+    // Тот же шаблон, что у заливки: «Отмена» с чужого экрана не гасит текущее
+    // дело, «Отмена» посреди обхода возвращает в меню точки. Мойка была
+    // единственным кофейным мастером со слепым clear — и её старый экран
+    // уносил обход целиком.
+    if (current !== null && current.flow !== "coffee-wash") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
+    const visit = visitFromFlow(current);
+    if (visit) {
+      deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
+      return {
+        answer: "Отменено",
+        message: { text: `Мойку отменил. Ты на точке «${visit.locationName}».`, keyboard: visitKeyboard(visit) },
+      };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Мойку отменил." } };
   }
