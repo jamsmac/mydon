@@ -788,6 +788,11 @@ export class CoreClient {
   }
 
   /** Занести заливку бункера («Ввод данных»). */
+  /** Калибровка тары: вес пустого набора на позиции. Без неё чистый вес не посчитать. */
+  coffeeTare(): Promise<{ containerNumber: number; position: number; tareWeight: number | null }[]> {
+    return this.request("/coffee/tare");
+  }
+
   submitCoffeeRefill(input: {
     locationId: string;
     position: number;
