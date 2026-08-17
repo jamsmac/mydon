@@ -113,7 +113,12 @@ export const STAFF_MENU: readonly MenuItem[] = [
   // Снек/дринк — отдельный пункт от кофейной заливки: там бункеры и вес,
   // здесь слоты и штуки. Один пункт на оба вынудил бы спрашивать «а какой
   // автомат?» до того, как техник вообще выбрал объект.
-  { id: "mrefill", label: "📦 Заполнил автомат", perm: "refill.create", ready: true, match: isRefillTrigger },
+  // ready:false — мастера нет. В staff-refill.ts лежат только заготовки
+  // (клавиатуры, разбор чисел, recordItem), входной точки и обработчика шагов
+  // не существует: startMenuItem падал в default. Кнопка при этом стирала
+  // начатое ПЕРЕД тем как ответить «пока не готово» — обход с выбранной точкой
+  // и счётчиком заливок исчезал ради пункта, который ничего не делает.
+  { id: "mrefill", label: "📦 Заполнил автомат", perm: "refill.create", ready: false, match: isRefillTrigger },
   { id: "cons", label: "💧 Расходники", perm: "coffee.consumable", ready: true, match: isCoffeeConsumableTrigger },
   { id: "coll", label: "📥 Инкассация", perm: "cash.collect", ready: true, match: isCollectTrigger },
   { id: "intake", label: "📦 Приход", perm: "stock.intake", ready: true, match: isIntakeTrigger },
@@ -159,7 +164,12 @@ export function menuKeyboard(roles?: readonly string[] | null): ReplyKeyboard {
  */
 export function matchMenuLabel(text: string): MenuItem | null {
   const t = text.trim();
-  return STAFF_MENU.find((i) => i.label === t) ?? null;
+  // Только готовые пункты — как и `matchTrigger`. Расхождение было дырой:
+  // подпись неготового пункта проходила сюда, попадала в `startMenuItem`,
+  // и тот СНАЧАЛА гасил начатое, а потом отвечал «пока не готово». Клавиатура
+  // живёт в чате, пока её не заменят, поэтому старая кнопка приходит и после
+  // того, как пункт убрали из меню.
+  return STAFF_MENU.find((i) => i.ready && i.label === t) ?? null;
 }
 
 /**

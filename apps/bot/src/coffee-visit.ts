@@ -77,6 +77,23 @@ export function nextLocationKeyboard(): NonNullable<StaffReply["keyboard"]> {
   };
 }
 
+/**
+ * Состояние обхода из ЛЮБОГО кофейного мастера, а не только из меню точки.
+ *
+ * Заливка и расходники носят точку внутри своих данных (`continueVisitRefill`,
+ * `continueVisitConsumable` кладут её туда), поэтому бросив подшаг, вернуться
+ * на точку можно — надо лишь знать, куда возвращаться. Без этого «Отмена» на
+ * экране выбора бункера уносила весь обход: четыре записанные заливки, счётчик
+ * и предложение внести расходники исчезали, потому что слот беседы один.
+ */
+export function visitFromFlow(conv: { flow: string; data: Record<string, unknown> } | null): VisitState | null {
+  if (!conv) return null;
+  if (conv.flow !== "coffee-visit" && conv.flow !== "coffee-refill" && conv.flow !== "coffee-consumable") {
+    return null;
+  }
+  return visitOf(conv.data);
+}
+
 /** Достать состояние обхода из данных разговора. Неполное — обход не считается начатым. */
 export function visitOf(data: Record<string, unknown>): VisitState | null {
   const locationId = typeof data.locationId === "string" ? data.locationId : "";

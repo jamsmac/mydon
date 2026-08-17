@@ -1,7 +1,7 @@
 import { can, dueLabel, TZ } from "@mydon/shared";
 import type { CoreClient, PersonRow, TaskRow } from "./core-client";
 import type { Conversations } from "./conversation";
-import { nextLocationKeyboard, parseVisitCallback, visitOf, visitSummary } from "./coffee-visit";
+import { nextLocationKeyboard, parseVisitCallback, visitFromFlow, visitOf, visitSummary } from "./coffee-visit";
 import {
   handleRegisterCallback,
   handleRegisterName,
@@ -285,10 +285,27 @@ export async function handleStaffMessage(
     return { reply: { text: `«${pressed.label}» тебе сейчас недоступно. Скажи владельцу.` } };
   }
   if (pressed) {
+    const prev = deps.conversations.get(chatId);
+
+    // Идёт обход, и нажата кнопка того же дела — продолжаем на текущей точке.
+    //
+    // На экране два одинаковых «💧 Расходники»: inline в меню точки и та же
+    // надпись в постоянной нижней клавиатуре. Человек жмёт нижнюю — она
+    // привычнее и всегда на виду. Раньше это сбрасывало обход и снова
+    // спрашивало «Расходники какой точки?» — ровно то повторное называние
+    // точки, ради устранения которого обход и делался.
+    const visit = visitFromFlow(prev);
+    if (visit && (pressed.id === "cons" || pressed.id === "refill")) {
+      const reply =
+        pressed.id === "cons"
+          ? continueVisitConsumable(chatId, visit, deps)
+          : await continueVisitRefill(chatId, visit, deps);
+      return { reply };
+    }
+
     // Меню точки — не «недописанный мастер»: обход это законченная запись плюс
     // предложение продолжить. Пугать «прошлое не дописано» после КАЖДОЙ
     // успешной заливки значит приучить не читать предупреждение вовсе.
-    const prev = deps.conversations.get(chatId);
     const dropped = prev !== null && prev.flow !== "coffee-visit";
     deps.conversations.clear(chatId);
     const started = await startMenuItem(pressed, chatId, person, deps);
@@ -582,6 +599,18 @@ export async function handleStaffCallback(
   if (visitCb) {
     const conv = deps.conversations.get(chatId);
     const visit = conv?.flow === "coffee-visit" ? visitOf(conv.data) : null;
+
+    // Кнопки обхода живут в чате вечно, а слот беседы один. Нажатие старой
+    // кнопки во время ДРУГОГО мастера раньше молча стирало его: недописанный
+    // отчёт по задаче исчезал без единого слова. Отказываем, а не затираем —
+    // человек сам решит, что бросать.
+    if (conv !== null && visit === null && conv.flow !== "coffee-visit") {
+      return {
+        answer: "Кнопка устарела",
+        message: "Эта кнопка от прошлого обхода. Сейчас у тебя не дописано другое — доделай или напиши «отмена».",
+      };
+    }
+
     if (visitCb.kind === "next") {
       const started = await startCoffeeRefill(chatId, deps);
       return { answer: "Следующая точка", message: started.text, keyboard: started.keyboard };

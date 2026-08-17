@@ -187,3 +187,23 @@ describe("Урезанный доступ", () => {
     assert.ok(!labels.includes("📥 Инкассация"), "деньги базовым правом не даются");
   });
 });
+
+describe("Пункт без мастера не показывается и не ловится словом", () => {
+  it("«Заполнил автомат» скрыт: мастера нет, а кнопка стирала бы начатое", () => {
+    // В staff-refill.ts лежат только заготовки — входной точки нет,
+    // startMenuItem падал в default. При этом нажатие СНАЧАЛА гасило беседу и
+    // лишь потом отвечало «пока не готово»: обход с выбранной точкой исчезал
+    // ради пункта, который ничего не делает.
+    const labels = menuKeyboard(["operator"]).keyboard.flat().map((b) => b.text);
+    assert.ok(!labels.includes("📦 Заполнил автомат"), "кнопки нет");
+    assert.equal(matchTrigger("заполнил автомат", ["operator"]), null, "и слово не ловится");
+    assert.equal(matchMenuLabel("📦 Заполнил автомат"), null, "и подпись не срабатывает");
+  });
+
+  it("остальные полевые пункты у оператора на месте", () => {
+    const labels = menuKeyboard(["operator"]).keyboard.flat().map((b) => b.text);
+    for (const want of ["☕ Заливка бункера", "💧 Расходники", "🧼 Мойка бункера"]) {
+      assert.ok(labels.includes(want), want);
+    }
+  });
+});

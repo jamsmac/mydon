@@ -570,9 +570,18 @@ async function main(): Promise<void> {
       const updates = await tg.getUpdates();
       for (const u of updates) {
         if (u.message?.photo && u.message.photo.length > 0) {
-          // Фото — только для сотрудника в активном заведении. Владелец шлёт
-          // фото редко и здесь его не обрабатываем (личный режим — текстовый).
-          await routeStaffPhoto(u.message.chat.id, u.message.photo);
+          // Фото — только полевая ветка, и только для тех, кто в ней сейчас.
+          //
+          // Барьер тут был обещан комментарием, но не написан: ветка стояла
+          // первой в цепочке и не проверяла ни allowlist, ни режим. Владелец,
+          // переслав боту накладную или скрин OurVend, попадал в полевой
+          // разбор — а у его карточки бывает задача в работе, и снимок молча
+          // уходил к ней «фото ДО». Текст и кнопки такой барьер имеют, фото
+          // осталось без него.
+          const photoChat = u.message.chat.id;
+          if (!isAllowed(photoChat, allowlist) || asStaff.has(photoChat)) {
+            await routeStaffPhoto(photoChat, u.message.photo);
+          }
         } else if (u.message?.text) {
           const chatId = u.message.chat.id;
 

@@ -1,5 +1,5 @@
 import { parseContainerReturnMessage } from "@mydon/shared";
-import { visitKeyboard } from "./coffee-visit";
+import { visitFromFlow, visitKeyboard } from "./coffee-visit";
 import { applyPress, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
 import { parseAmount, todayIso } from "./coffee-refill";
 import type { CoreClient, PersonRow } from "./core-client";
@@ -189,12 +189,42 @@ export async function handleCoffeeConsumableCallback(
   person: PersonRow,
   deps: CoffeeReturnsDeps,
 ): Promise<{ answer: string; message?: StaffReply; edit?: StaffReply }> {
+  const current = deps.conversations.get(chatId);
+
   if (cb.kind === "cancel") {
+    // Устаревший экран расходников не должен гасить то, чем человек занят
+    // сейчас: слот беседы один на всё.
+    if (current !== null && current.flow !== "coffee-consumable") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
+    // Бросаем расходники, но не обход — точка остаётся выбранной.
+    const visit = visitFromFlow(current);
+    if (visit) {
+      deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
+      return {
+        answer: "Отменено",
+        message: {
+          text: `Расходники отменил. Ты на точке «${visit.locationName}».`,
+          keyboard: visitKeyboard(visit),
+        },
+      };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Ввод расходников отменил." } };
   }
-  const conv = deps.conversations.get(chatId);
+
+  const conv = current;
   if (conv?.flow !== "coffee-consumable") {
+    const visit = visitFromFlow(conv);
+    if (visit) {
+      return {
+        answer: "Уже записано",
+        message: {
+          text: `Эти расходники уже сохранены. Ты на точке «${visit.locationName}».`,
+          keyboard: visitKeyboard(visit),
+        },
+      };
+    }
     return { answer: "Визард истёк", message: { text: "Ввод прервался. Начни заново: «вода»." } };
   }
 
