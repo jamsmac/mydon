@@ -1,6 +1,7 @@
 import { can, dueLabel, TZ } from "@mydon/shared";
 import type { CoreClient, PersonRow, TaskRow } from "./core-client";
 import type { Conversations } from "./conversation";
+import { nextLocationKeyboard, parseVisitCallback, visitOf, visitSummary } from "./coffee-visit";
 import {
   handleRegisterCallback,
   handleRegisterName,
@@ -23,6 +24,7 @@ import {
   startIntake,
 } from "./staff-intake";
 import {
+  continueVisitRefill,
   coffeeRefillStepHint,
   handleCoffeeRefillBefore,
   handleCoffeeRefillCallback,
@@ -42,6 +44,7 @@ import {
   parseCoffeeConsumableCallback,
   recordContainerReturns,
   startCoffeeConsumable,
+  continueVisitConsumable,
   tryParseContainerReturns,
 } from "./coffee-returns";
 import { handleCoffeeFixCallback, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
@@ -555,13 +558,40 @@ export async function handleStaffCallback(
     };
   }
 
-  // Кнопки расходников (cc:loc/cancel).
+  // Кнопки расходников (cc:loc/n/save/fix/cancel).
   const coffeeConsumable = parseCoffeeConsumableCallback(data);
   if (coffeeConsumable) {
-    const res = await handleCoffeeConsumableCallback(chatId, coffeeConsumable, deps);
+    const res = await handleCoffeeConsumableCallback(chatId, coffeeConsumable, person, deps);
     return {
       answer: res.answer,
+      ...(res.edit ? { edit: { text: res.edit.text, ...(res.edit.keyboard ? { keyboard: res.edit.keyboard } : {}) } } : {}),
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
+  // Меню обхода точки (cv:): точка выбрана один раз, дальше делаем на ней всё.
+  const visitCb = parseVisitCallback(data);
+  if (visitCb) {
+    const conv = deps.conversations.get(chatId);
+    const visit = conv?.flow === "coffee-visit" ? visitOf(conv.data) : null;
+    if (visitCb.kind === "next") {
+      const started = await startCoffeeRefill(chatId, deps);
+      return { answer: "Следующая точка", message: started.text, keyboard: started.keyboard };
+    }
+    if (!visit) return { answer: "Обход завершён", message: "Начни заново: «бункер»." };
+    if (visitCb.kind === "more") {
+      const step = await continueVisitRefill(chatId, visit, deps);
+      return { answer: "Ещё бункер", message: step.text, keyboard: step.keyboard };
+    }
+    if (visitCb.kind === "consumables") {
+      const step = continueVisitConsumable(chatId, visit, deps);
+      return { answer: "Расходники", message: step.text, keyboard: step.keyboard };
+    }
+    deps.conversations.clear(chatId);
+    return {
+      answer: "Точка закрыта",
+      message: visitSummary(visit),
+      keyboard: nextLocationKeyboard(),
     };
   }
 

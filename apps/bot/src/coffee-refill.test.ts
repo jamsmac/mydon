@@ -143,8 +143,9 @@ describe("Заливка бункера: полный визард (точка �
     assert.equal(refillCall.input.createdBy, `person:${ME.id}`);
     assert.match(String(refillCall.input.enteredDate), /^\d{4}-\d{2}-\d{2}$/);
 
-    // Визард завершён — повторный текстовый ввод больше не перехватывается им.
-    assert.equal(conversations.get(1), null);
+    // Обход продолжается: точка остаётся выбранной, дальше — меню точки.
+    assert.equal(conversations.get(1)?.flow, "coffee-visit");
+    assert.match(JSON.stringify(done.keyboard), /cv:more/, "предлагаем ещё бункер на той же точке");
   });
 
   it("«-» на упаковках и наборе — упаковки=1, набор не передаётся", async () => {

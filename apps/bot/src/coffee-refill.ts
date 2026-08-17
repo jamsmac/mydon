@@ -8,6 +8,7 @@ import {
   parseNumpadCallback,
   type NumpadPress,
 } from "./numpad";
+import { visitKeyboard, type VisitState } from "./coffee-visit";
 import type { StaffReply } from "./staff";
 
 /**
@@ -398,12 +399,22 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
     createdBy: `person:${person.id}`,
   });
 
-  return {
-    text: await refillSummary(
-      { locationName, position, containerNumber, measuredBefore, filledWeight, packageCount },
-      deps,
-    ),
+  // Обход продолжается: точка остаётся выбранной, дальше — ещё бункер,
+  // расходники или «завершить». Заново называть ту же точку не нужно.
+  const refills = (typeof conv.data.refills === "number" ? conv.data.refills : 0) + 1;
+  const visit: VisitState = {
+    locationId,
+    locationName,
+    refills,
+    consumables: conv.data.consumables === true,
   };
+  deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
+
+  const summary = await refillSummary(
+    { locationName, position, containerNumber, measuredBefore, filledWeight, packageCount },
+    deps,
+  );
+  return { text: summary, keyboard: visitKeyboard(visit) };
 }
 
 /**
@@ -459,6 +470,25 @@ async function refillSummary(
   }
   lines.push(`Упаковок: ${r.packageCount}`);
   return lines.join("\n");
+}
+
+/**
+ * Ещё один бункер на той же точке: сразу к позиции, точку не переспрашиваем.
+ * Ради этого и заведён обход — см. coffee-visit.ts.
+ */
+export async function continueVisitRefill(
+  chatId: number,
+  visit: VisitState,
+  deps: CoffeeDeps,
+): Promise<StaffReply> {
+  deps.conversations.start(chatId, "coffee-refill", "position", {
+    locationId: visit.locationId,
+    locationName: visit.locationName,
+    refills: visit.refills,
+    consumables: visit.consumables,
+    draft: "",
+  });
+  return positionStep(deps, visit.locationName, "cf");
 }
 
 // ── Мойка/обслуживание: короче — точка → бункер (или «вся машина») → готово ──
