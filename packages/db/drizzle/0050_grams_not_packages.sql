@@ -28,11 +28,13 @@ ALTER TABLE "coffee_ingredient" ADD COLUMN "package_label" text;
 -- молоко по 500 г, MacCoffee стиками по 20 г (в закупочной пачке их 1000, но
 -- бункер заправляют стиками, поэтому единица здесь стик, а не коробка).
 --
--- Матча и сахар намеренно оставлены пустыми: владелец их не назвал, а
--- подставить «наверное тоже 1000» значит показать технику уверенное число,
--- которого никто не подтверждал.
+-- Матча намеренно оставлена пустой: владелец её не назвал, а подставить
+-- «наверное тоже 1000» значит показать технику уверенное число, которого
+-- никто не подтверждал.
 UPDATE "coffee_ingredient" SET "package_weight" = 1000 WHERE "name" IN ('Кофе', 'Ягодный чай', 'Лимонный чай', 'Шоколад');
 --> statement-breakpoint
 UPDATE "coffee_ingredient" SET "package_weight" = 500 WHERE "name" = 'Сухое молоко';
+--> statement-breakpoint
+UPDATE "coffee_ingredient" SET "package_weight" = 2000 WHERE "name" = 'Сахар';
 --> statement-breakpoint
 UPDATE "coffee_ingredient" SET "package_weight" = 20, "package_label" = 'шт' WHERE "name" = 'MacCoffee';
