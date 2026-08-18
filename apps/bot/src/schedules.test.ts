@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { Conversations } from "./conversation";
 import type { MaintenanceDueRow } from "./core-client";
 import { parseSchedulesCallback, selectDue } from "./schedules";
 
@@ -90,7 +91,6 @@ describe("Аудит 18.08: карточка вместо мгновенной �
 
   function schedDeps() {
     const logs: Record<string, unknown>[] = [];
-    const { Conversations } = require("./conversation") as typeof import("./conversation");
     const conversations = new Conversations();
     const core = {
       maintenanceDue: async () => [due({ planId: PLAN_ID })],
