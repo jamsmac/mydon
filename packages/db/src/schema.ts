@@ -205,6 +205,11 @@ export const task = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
     /** Когда исполнителю уже напомнили — чтобы не слать одно и то же дважды. */
     remindedAt: timestamp("reminded_at", { withTimezone: true }),
+    /**
+     * Ключ идемпотентности от клиента (бот, заявка о поломке). Ретрай после
+     * таймаута не должен плодить дубль-заявки. NULL у всех остальных путей.
+     */
+    clientKey: text("client_key"),
     createdAt: createdAt(),
   },
   // Главные запросы: «что у этого исполнителя» и «что горит по срокам».
@@ -226,6 +231,7 @@ export const task = pgTable(
     uniqueIndex("task_source_key")
       .on(t.source)
       .where(sql`source ~ ':[0-9]{4}-[0-9]{2}-[0-9]{2}$'`),
+    uniqueIndex("task_client_key").on(t.clientKey),
   ],
 );
 
@@ -1998,11 +2004,19 @@ export const maintenanceLog = pgTable(
     note: text("note"),
     /** Показания счётчика автомата на момент работы, если снимались. */
     counterValue: integer("counter_value"),
+    /**
+     * Ключ идемпотентности от клиента (бот). Повторное нажатие «Готово»
+     * после таймаута не должно давать вторую запись — тот же принцип, что
+     * у vending_refill. NULL у записей владельца из панели: там повтор — это
+     * осознанный второй ввод, а не дрожащая рука на точке.
+     */
+    clientKey: text("client_key"),
     createdBy: text("created_by"),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
+    uniqueIndex("maintenance_log_client_key").on(t.clientKey),
     index("maintenance_log_entity_idx").on(t.entityId, t.performedOn),
     index("maintenance_log_person_idx").on(t.personId, t.performedOn),
     // Под вопрос «когда в последний раз делали это на этом объекте» —

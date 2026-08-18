@@ -17,9 +17,10 @@ import type { StaffReply } from "./staff";
  */
 
 /** Что заводим. Тип карточки реестра — как у machine/product. */
+// «⚙️», не «🔧» — тот занят «Заменой детали» (один эмодзи — один смысл).
 const TYPES = [
-  { key: "ingredient", label: "ингредиент" },
-  { key: "component", label: "запчасть" },
+  { key: "ingredient", label: "🧂 Ингредиент" },
+  { key: "component", label: "⚙️ Запчасть" },
 ] as const;
 
 type RegisterType = (typeof TYPES)[number]["key"];
@@ -46,7 +47,13 @@ export function typeLabel(key: string): string {
 
 /** Кнопки выбора типа. Префикс «r:» — своё пространство, отдельно от t:/c:/ap:. */
 export function typeKeyboard(): NonNullable<StaffReply["keyboard"]> {
-  return { inline_keyboard: [TYPES.map((t) => ({ text: t.label, callback_data: `r:type:${t.key}` }))] };
+  return {
+    inline_keyboard: [
+      TYPES.map((t) => ({ text: t.label, callback_data: `r:type:${t.key}` })),
+      // Первый шаг визарда обязан иметь выход кнопкой — как и все остальные.
+      [{ text: "✖️ Отмена", callback_data: "r:cancel" }],
+    ],
+  };
 }
 
 /** Кнопки под шагом фото: закончить или отменить. */
@@ -72,6 +79,9 @@ export function unitKeyboard(): NonNullable<StaffReply["keyboard"]> {
     if (i % 3 === 0) rows.push([]);
     rows[rows.length - 1].push({ text: u, callback_data: `r:unit:${i}` });
   });
+  // Единственный шаг визарда без «Отмены» был тупиком кнопок: выйти можно
+  // было только словом, о котором подсказка шага не напоминала.
+  rows.push([{ text: "✖️ Отмена", callback_data: "r:cancel" }]);
   return { inline_keyboard: rows };
 }
 
@@ -189,6 +199,13 @@ export async function handleRegisterCallback(
   deps: RegisterDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149: «Отмена» с чужого устаревшего экрана не гасит текущее дело.
+    // Регистрация была единственным мастером без него — и именно ей эта ветка
+    // добавила два новых экрана с r:cancel.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "register") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Заведение отменил." } };
   }

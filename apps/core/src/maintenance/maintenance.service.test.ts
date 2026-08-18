@@ -49,10 +49,14 @@ function stubDb(opts: StubOpts) {
       values: (v: Row) => {
         const row = { id: "m1", createdAt: new Date(), ...v };
         opts.inserted?.push(row);
-        return {
+        const done = {
           returning: async () => [row],
           then: (res: (x: unknown) => unknown) => Promise.resolve([row]).then(res),
         };
+        // Идемпотентность по clientKey (аудит 18.08): заглушка не исполняет
+        // конфликт — «первый раз» всегда вставляется, повтор проверяется
+        // отдельным сценарием через select.
+        return { ...done, onConflictDoNothing: () => done };
       },
     }),
     update: () => ({

@@ -42,14 +42,21 @@ export interface MenuItem {
   match: (text: string) => boolean;
 }
 
-/** «задачи», «дела», «что делать» — вынесено из staff.ts дословно. */
+/**
+ * «задачи», «дела», «что делать» — с якорем ^, как у всех триггеров реестра.
+ *
+ * Без якоря подстрока «дела» ловила «сделал, но нет воды», а «мои» — «помоги»:
+ * самое частое слово полевого отчёта перехватывалось списком задач, и
+ * комментарий не доходил до владельца. «дела» с проверкой хвоста — чтобы
+ * «делаю»/«сделал» не совпадали, а «дела на точке» совпадали.
+ */
 export function isTasksTrigger(text: string): boolean {
-  return /задач|дела|что делать|мои/i.test(text.trim());
+  return /^(задач|дела(?![\p{L}])|что делать|мои задач|мои дела|покажи задач)/iu.test(text.trim());
 }
 
-/** «инкассация», «выручка», «сдать деньги» — вынесено из staff.ts дословно. */
+/** «инкассация», «выручка», «сдать/снял выручку» — с якорем, по образцу остальных. */
 export function isCollectTrigger(text: string): boolean {
-  return /инкасс|выручк|сдать деньги/i.test(text.trim());
+  return /^(инкасс|выручк|сдать (деньги|выручк)|сда[юм] выручк|снял выручк|забрал выручк)/i.test(text.trim());
 }
 
 /**
@@ -61,7 +68,48 @@ export function isCollectTrigger(text: string): boolean {
  * раз нажал впустую — больше не поверит и остальным.
  */
 export const STAFF_MENU: readonly MenuItem[] = [
+  // Ряд 1 — пара ежедневного кофейного обхода: заливка и расходники вместе,
+  // их и связывает coffee-visit. Раньше заливка стояла восьмой, под редкими
+  // «Заменой детали» и «Техосмотром», — вопреки собственному правилу выше.
+  { id: "refill", label: "☕ Заливка бункера", perm: "coffee.refill", ready: true, match: isCoffeeRefillTrigger },
+  { id: "cons", label: "💧 Расходники", perm: "coffee.consumable", ready: true, match: isCoffeeConsumableTrigger },
+  // Ряд 2 — ежедневное: задачи и деньги.
   { id: "tasks", label: "📋 Мои задачи", perm: "tasks.own", ready: true, match: isTasksTrigger },
+  { id: "coll", label: "📥 Инкассация", perm: "cash.collect", ready: true, match: isCollectTrigger },
+  // Ряд 3 — мойки. Две разные чистки, и это не дублирование: у кофейной мойки
+  // ключ «точка + позиция бункера 1..8», у чистки автомата — «автомат + узел».
+  // Своим названием каждая говорит, о чём она, и путать их технику незачем.
+  { id: "wash", label: "🧼 Мойка бункера", perm: "coffee.wash", ready: true, match: isCoffeeWashTrigger },
+  {
+    id: "clean",
+    label: "🧽 Чистка автомата",
+    perm: "coffee.wash",
+    ready: true,
+    match: (t) => /^(чистк|протёр|протер|санобработ)/i.test(t.trim()),
+  },
+  // Ряд 4 — аварийная пара: заявил поломку → заменил деталь.
+  {
+    id: "issue",
+    label: "⚠️ Поломка",
+    perm: "tasks.own",
+    ready: true,
+    match: (t) => /^(поломк|сломал|не работает|авари)/i.test(t.trim()),
+  },
+  {
+    id: "part",
+    label: "🔧 Замена детали",
+    perm: "parts.replace",
+    ready: true,
+    match: (t) => /^(замен|поменял|поставил нов)/i.test(t.trim()),
+  },
+  // Ряд 5 — периодическое.
+  {
+    id: "insp",
+    label: "🛠 Технический осмотр",
+    perm: "maintenance.view",
+    ready: true,
+    match: (t) => /^(техосмотр|технический осмотр|осмотр|поверк)/i.test(t.trim()),
+  },
   {
     id: "sched",
     label: "🗓 Графики",
@@ -77,39 +125,11 @@ export const STAFF_MENU: readonly MenuItem[] = [
     // ловить, не падая.
     match: (t) => /^(график|обслуживани|то(?![\p{L}\p{N}]))/iu.test(t.trim()),
   },
-  {
-    id: "part",
-    label: "🔧 Замена детали",
-    perm: "parts.replace",
-    ready: true,
-    match: (t) => /^(замен|поменял|поставил нов)/i.test(t.trim()),
-  },
-  {
-    id: "insp",
-    label: "🛠 Технический осмотр",
-    perm: "maintenance.view",
-    ready: true,
-    match: (t) => /^(техосмотр|технический осмотр|осмотр|поверк)/i.test(t.trim()),
-  },
-  // Две разные чистки, и это не дублирование: у кофейной мойки ключ
-  // «точка + позиция бункера 1..8», у чистки автомата — «автомат + узел».
-  // Своим названием каждая говорит, о чём она, и путать их технику незачем.
-  { id: "wash", label: "🧼 Мойка бункера", perm: "coffee.wash", ready: true, match: isCoffeeWashTrigger },
-  {
-    id: "clean",
-    label: "🧽 Чистка автомата",
-    perm: "coffee.wash",
-    ready: true,
-    match: (t) => /^(чистк|протёр|протер|санобработ)/i.test(t.trim()),
-  },
-  {
-    id: "issue",
-    label: "⚠️ Поломка",
-    perm: "tasks.own",
-    ready: true,
-    match: (t) => /^(поломк|сломал|не работает|авари)/i.test(t.trim()),
-  },
-  { id: "refill", label: "☕ Заливка бункера", perm: "coffee.refill", ready: true, match: isCoffeeRefillTrigger },
+  // Ряд 6 — склад.
+  { id: "intake", label: "📦 Приход", perm: "stock.intake", ready: true, match: isIntakeTrigger },
+  // «🧮», не «📋»: значок задач уже занят, а оператор сканирует меню по
+  // эмодзи — один символ на два пункта провоцирует промах.
+  { id: "count", label: "🧮 Инвентаризация", perm: "stock.count", ready: true, match: isInventoryTrigger },
   // Снек/дринк — отдельный пункт от кофейной заливки: там бункеры и вес,
   // здесь слоты и штуки. Один пункт на оба вынудил бы спрашивать «а какой
   // автомат?» до того, как техник вообще выбрал объект.
@@ -119,10 +139,7 @@ export const STAFF_MENU: readonly MenuItem[] = [
   // начатое ПЕРЕД тем как ответить «пока не готово» — обход с выбранной точкой
   // и счётчиком заливок исчезал ради пункта, который ничего не делает.
   { id: "mrefill", label: "📦 Заполнил автомат", perm: "refill.create", ready: false, match: isRefillTrigger },
-  { id: "cons", label: "💧 Расходники", perm: "coffee.consumable", ready: true, match: isCoffeeConsumableTrigger },
-  { id: "coll", label: "📥 Инкассация", perm: "cash.collect", ready: true, match: isCollectTrigger },
-  { id: "intake", label: "📦 Приход", perm: "stock.intake", ready: true, match: isIntakeTrigger },
-  { id: "count", label: "📋 Инвентаризация", perm: "stock.count", ready: true, match: isInventoryTrigger },
+  // Ряд 7 — редкое.
   { id: "new", label: "🆕 Новая карточка", perm: "registry.propose", ready: true, match: isRegisterTrigger },
   { id: "fix", label: "↩️ Ошибся — исправить", perm: "tasks.own", ready: true, match: isCoffeeFixTrigger },
 ];

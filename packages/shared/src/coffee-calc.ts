@@ -28,6 +28,10 @@ export function netWeight(filledWeight: number, tareWeight: number | null): numb
  */
 export function consumedSince(prevFilledNet: number | null, measuredBeforeNet: number | null): number | null {
   if (prevFilledNet === null || measuredBeforeNet === null) return null;
+  // Отрицательное нетто — замер меньше тары: опечатка или не тот набор.
+  // Вычитание отрицательного дало бы расход БОЛЬШЕ, чем было в бункере, —
+  // честный ответ «неизвестно», как и для остальных противоречий.
+  if (prevFilledNet < 0 || measuredBeforeNet < 0) return null;
   const delta = prevFilledNet - measuredBeforeNet;
   return delta >= 0 ? delta : null;
 }
@@ -276,8 +280,14 @@ export function matchReturnsToRefills(
     if (picked < 0) continue; // возврат без заливки в истории — расход неизвестен
     consumedFillIdx.set(k, picked + 1);
     const fill = list[picked]!;
+    // Возврат легче тары (returnNet < 0) — опечатка в весе: вычитание
+    // отрицательного дало бы расход больше, чем ингредиента было в наборе.
+    // Противоречие = null, как и «возврат тяжелее заливки» строкой ниже.
     const consumed =
-      fill.netWeight !== null && r.netWeight !== null && fill.netWeight >= r.netWeight
+      fill.netWeight !== null &&
+      r.netWeight !== null &&
+      r.netWeight >= 0 &&
+      fill.netWeight >= r.netWeight
         ? fill.netWeight - r.netWeight
         : null;
     rows.push({

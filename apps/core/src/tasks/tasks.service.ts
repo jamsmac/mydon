@@ -21,6 +21,8 @@ export interface CreateTaskInput {
   createdBy?: string;
   /** По какому объекту работа: автомат, точка, склад. */
   entityId?: string;
+  /** Ключ идемпотентности от клиента: ретрай не даёт дубль-задачу. */
+  clientKey?: string;
 }
 
 /** Сводка по исполнителю — «картина по людям» из контроля задач. */
@@ -67,8 +69,24 @@ export class TasksService {
           priority: input.priority ?? "normal",
           createdBy: input.createdBy ?? actorRef,
           entityId: input.entityId ?? null,
+          clientKey: input.clientKey ?? null,
         })
+        .onConflictDoNothing({ target: task.clientKey })
         .returning();
+
+      // Повтор по clientKey: заявка уже создана первой попыткой — возвращаем
+      // её же, без второй записи в журнал.
+      if (!created) {
+        const [existing] = await tx
+          .select()
+          .from(task)
+          .where(eq(task.clientKey, input.clientKey!))
+          .limit(1);
+        if (!existing) {
+          throw new Error("Повтор заявки ещё сохраняется — попробуй ещё раз");
+        }
+        return existing;
+      }
 
       await tx.insert(auditLog).values({
         actorKind: "system",

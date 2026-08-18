@@ -340,3 +340,174 @@ describe("Время инкассации", () => {
     assert.equal(formatCollectedAt("2026-08-06T19:30:00.000Z"), "07.08.2026 00:30:00");
   });
 });
+
+describe("Права на callback-пути — модель прав больше не косметика", () => {
+  const NOROLE: PersonRow = { ...ME, name: "Без ролей", roles: [] };
+  const MACHINE_ID = "33333333-3333-4333-8333-333333333333";
+
+  it("m:<id> без права отвечает отказом и НЕ стирает активный мастер", async () => {
+    const conversations = new Conversations();
+    const { core, calls } = stubCore({
+      machines: async () => {
+        calls.push("machines");
+        return [{ id: MACHINE_ID, name: "Kaffit-04" }];
+      },
+    });
+    conversations.start(555, "task-done", "report", { taskId: "t1" });
+    const res = await handleStaffCallback(555, "m:coll", NOROLE, { core, conversations } as never);
+    assert.equal(res.answer, "Недоступно");
+    assert.match(res.message ?? "", /недоступно/i);
+    assert.equal(conversations.get(555)?.flow, "task-done", "запрет не стоит человеку начатого отчёта");
+    assert.ok(!calls.includes("machines"), "меню инкассации не открылось");
+  });
+
+  it("c:<machineId> без cash.collect не пишет сбор и не шлёт владельцу", async () => {
+    const { core, calls } = stubCore({
+      createCollection: async () => {
+        calls.push("collect");
+        return { id: "col-1", collectedAt: "2026-08-18T07:00:00+05:00" };
+      },
+    });
+    const res = await handleStaffCallback(555, `c:${MACHINE_ID}`, NOROLE, {
+      core,
+      conversations: new Conversations(),
+    } as never);
+    assert.equal(res.answer, "Недоступно");
+    assert.equal(res.ownerNote, undefined, "ложное «снял выручку» владельцу не уходит");
+    assert.ok(!calls.includes("collect"));
+  });
+
+  it("sc: без maintenance.view не читает графики и не пишет журнал ТО", async () => {
+    const { core, calls } = stubCore({
+      maintenanceDue: async () => {
+        calls.push("due");
+        return [];
+      },
+    });
+    const res = await handleStaffCallback(555, "sc:d:7", NOROLE, {
+      core,
+      conversations: new Conversations(),
+    } as never);
+    assert.equal(res.answer, "Недоступно");
+    assert.ok(!calls.includes("due"), "данные ТО не отданы не той роли");
+  });
+
+  it("cv:next без coffee.refill не открывает заливку", async () => {
+    const { core, calls } = stubCore({
+      coffeeLocations: async () => {
+        calls.push("locations");
+        return [];
+      },
+    });
+    const res = await handleStaffCallback(555, "cv:next", NOROLE, {
+      core,
+      conversations: new Conversations(),
+    } as never);
+    assert.equal(res.answer, "Недоступно");
+    assert.ok(!calls.includes("locations"));
+  });
+
+  it("возвраты текстом без права не пишутся в Core", async () => {
+    const { core, calls } = stubCore({
+      recordContainerReturn: async () => {
+        calls.push("return");
+        return { id: "r1" };
+      },
+    });
+    const { reply } = await handleStaffMessage(555, "1. 026. 1119", NOROLE, {
+      core,
+      conversations: new Conversations(),
+    } as never);
+    assert.match(reply.text, /недоступны/i);
+    assert.ok(!calls.includes("return"));
+  });
+
+  it("полный набор ролей проходит всюду, как раньше", async () => {
+    const { core, calls } = stubCore({
+      createCollection: async () => {
+        calls.push("collect");
+        return { id: "col-1", collectedAt: "2026-08-18T07:00:00+05:00" };
+      },
+    });
+    const res = await handleStaffCallback(555, `c:${MACHINE_ID}`, ME, {
+      core,
+      conversations: new Conversations(),
+    } as never);
+    assert.equal(res.answer, "Сбор записан");
+    assert.ok(res.ownerNote, "владелец узнаёт о сборе");
+    assert.ok(calls.includes("collect"));
+  });
+});
+
+describe("Аудит 18.08: раскладка и честные ошибки", () => {
+  it("карточка согласования: противоположные действия — в разных рядах", async () => {
+    const { approvalKeyboard } = await import("./briefing");
+    const kb = approvalKeyboard("ap-1").inline_keyboard;
+    assert.equal(kb.length >= 3, true, "три ряда, а не один");
+    for (const row of kb.slice(0, 3)) assert.equal(row.length, 1);
+    assert.match(kb[1][0].text, /Уточнить/, "буфер между «Одобрить» и «Отклонить»");
+  });
+
+  it("инкассация: у списка есть «Отмена», и она ничего не пишет", async () => {
+    const { machinesKeyboard } = await import("./staff");
+    const kb = machinesKeyboard([{ id: "33333333-3333-4333-8333-333333333333", name: "Kaffit" }])!;
+    assert.match(JSON.stringify(kb), /c:cancel/);
+    const { core, calls } = stubCore({
+      createCollection: async () => {
+        calls.push("collect");
+        return { id: "c1", collectedAt: "2026-08-18T07:00:00+05:00" };
+      },
+    });
+    const res = await handleStaffCallback(555, "c:cancel", ME, { core, conversations: new Conversations() } as never);
+    assert.equal(res.answer, "Отменено");
+    assert.ok(!calls.includes("collect"));
+  });
+
+  it("claimTask: сетевой сбой не выдаётся за «взял другой»", async () => {
+    const { CoreError } = await import("./core-client");
+    const { core } = stubCore({
+      task: async () => task({ ownerRef: null }),
+      claimTask: async () => {
+        throw new CoreError(500, "/tasks/x/claim", "");
+      },
+    });
+    await assert.rejects(
+      handleStaffCallback(555, `t:${task().id}:claim`, ME, { core, conversations: new Conversations() } as never),
+      /Core ответил 500/,
+      "сбой пробрасывается к честному «попробуй ещё раз», а не превращается в ложь",
+    );
+  });
+
+  it("приход набирается нумпадом от начала до записи", async () => {
+    const { startIntake, handleIntakeCallback } = await import("./staff-intake");
+    const calls: string[] = [];
+    const conversations = new Conversations();
+    const core = {
+      warehouses: async () => [{ id: "44444444-4444-4444-8444-444444444444", name: "Основной", type: "warehouse", externalRef: null, attrs: {} }],
+      ingredients: async () => [{ id: "66666666-6666-4666-8666-666666666666", name: "Зёрна", type: "ingredient", externalRef: null, attrs: {} }],
+      stockBalance: async () => ({
+        warehouseId: "w",
+        warehouseName: "Основной",
+        ingredientId: "i",
+        ingredientName: "Зёрна",
+        baseUnit: "кг",
+        qty: 10,
+        unconvertible: 0,
+      }),
+      addIntake: async (i: Record<string, unknown>) => {
+        calls.push(`intake:${i.qty}`);
+        return { id: "mv-1" };
+      },
+    } as never;
+    const deps = { core, conversations };
+    await startIntake(7, deps);
+    const step = await handleIntakeCallback(7, { kind: "ingredient", id: "66666666-6666-4666-8666-666666666666" }, ME, deps);
+    assert.match(JSON.stringify(step.message!.keyboard), /n:n:5/, "нумпад подключён к приходу");
+    for (const c of "12") {
+      await handleIntakeCallback(7, { kind: "num", press: { kind: "digit", digit: c } }, ME, deps);
+    }
+    const done = await handleIntakeCallback(7, { kind: "num", press: { kind: "done" } }, ME, deps);
+    assert.deepEqual(calls, ["intake:12"]);
+    assert.match(done.edit!.text, /Приход записан/);
+  });
+});

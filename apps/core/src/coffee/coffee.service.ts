@@ -898,13 +898,24 @@ export class CoffeeService {
 
   /** Занести заливку бункера («Сохранить» в «Ввод данных»). */
   async submitRefill(input: SubmitRefillInput): Promise<{ id: string }> {
+    // Ингредиент, не названный клиентом, выводим из конфига бункеров ЗДЕСЬ,
+    // а не в каждом клиенте: бот вывод уже делает, а панель не делала — и её
+    // заливки выпадали из сверки «ожидали против налили» (reconcile пропускает
+    // строки без ingredientId). Только ОДНОЗНАЧНЫЙ: у позиции с двумя
+    // ингредиентами угаданное списание хуже отсутствующего.
+    let ingredientId = input.ingredientId ?? null;
+    if (ingredientId === null) {
+      const config = await this.bunkerConfig();
+      const ids = [...new Set(config.filter((c) => c.position === input.position).map((c) => c.ingredientId))];
+      if (ids.length === 1) ingredientId = ids[0]!;
+    }
     const [row] = await this.db
       .insert(coffeeRefill)
       .values({
         locationId: input.locationId,
         position: input.position,
         containerNumber: input.containerNumber ?? null,
-        ingredientId: input.ingredientId ?? null,
+        ingredientId,
         filledWeight: input.filledWeight,
         measuredBefore: input.measuredBefore ?? null,
         packageCount: input.packageCount ?? null,
@@ -956,7 +967,11 @@ export class CoffeeService {
         })
         .from(coffeeRefill)
         .innerJoin(place, eq(coffeeRefill.locationId, place.id))
-        .orderBy(asc(coffeeRefill.enteredDate)),
+        // Вторичный ключ createdAt: enteredDate — дата без времени, и при двух
+        // заливках одной позиции за день (легальный случай: «Вторая заливка —
+        // записать») порядок строк внутри даты Postgres не гарантирует.
+        // «Последней» обязана быть действительно последняя, а не случайная.
+        .orderBy(asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
     ]);
 
     // Последняя заливка на (locationName, position) — берём по порядку возрастания
@@ -996,7 +1011,11 @@ export class CoffeeService {
         })
         .from(coffeeRefill)
         .innerJoin(place, eq(coffeeRefill.locationId, place.id))
-        .orderBy(asc(coffeeRefill.enteredDate)),
+        // Вторичный ключ createdAt: enteredDate — дата без времени, и при двух
+        // заливках одной позиции за день (легальный случай: «Вторая заливка —
+        // записать») порядок строк внутри даты Postgres не гарантирует.
+        // «Последней» обязана быть действительно последняя, а не случайная.
+        .orderBy(asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
       this.tareByKey(),
       this.bunkerConfig(),
     ]);
@@ -1074,6 +1093,25 @@ export class CoffeeService {
   // могут уточнить позже.
 
   async recordContainerReturn(input: RecordContainerReturnInput): Promise<{ id: string }> {
+    // Дедуп по содержимому: у возвратов нет clientKey — сообщение набирают
+    // руками и после сбоя пересылают ЦЕЛИКОМ, дублируя уже записанные строки.
+    // Та же четвёрка за тот же день — это та же строка, а не второй возврат:
+    // после возврата набор уходит с точки, и второй раз в тот же день с тем
+    // же весом он не возвращается. (У заливок аналог — findTwin в боте.)
+    const [dup] = await this.db
+      .select({ id: coffeeContainerReturn.id })
+      .from(coffeeContainerReturn)
+      .where(
+        and(
+          eq(coffeeContainerReturn.position, input.position),
+          eq(coffeeContainerReturn.containerNumber, input.containerNumber),
+          eq(coffeeContainerReturn.weight, input.weight),
+          eq(coffeeContainerReturn.returnedDate, input.returnedDate),
+        ),
+      )
+      .limit(1);
+    if (dup) return { id: dup.id };
+
     const [row] = await this.db
       .insert(coffeeContainerReturn)
       .values({

@@ -167,6 +167,30 @@ export interface PendingNotifications {
   notifications: { ruleId: string; urgency: string; text: string; eventId: string }[];
 }
 
+/**
+ * Ошибка Core с кодом и телом ответа.
+ *
+ * Раньше любой не-2xx схлопывался в безликую строку: 401 без ключа доступа,
+ * 400 на дробном весе и упавшая сеть выглядели одинаково, и все обработчики
+ * честно, но бесполезно советовали «попробуй позже». Код и тело позволяют
+ * различать «данные не примут никогда» и «временный сбой».
+ */
+export class CoreError extends Error {
+  constructor(
+    readonly status: number,
+    readonly path: string,
+    readonly body: string,
+  ) {
+    super(`Core ответил ${status} на ${path}`);
+    this.name = "CoreError";
+  }
+
+  /** Ошибка в самих данных или доступе: повтор того же запроса не поможет. */
+  get isClientError(): boolean {
+    return this.status >= 400 && this.status < 500;
+  }
+}
+
 /** Тонкий клиент к MYDON Core. Бот не ходит в БД напрямую — только через API. */
 export class CoreClient {
   constructor(
@@ -190,7 +214,8 @@ export class CoreClient {
         },
       });
       if (!res.ok) {
-        throw new Error(`Core ответил ${res.status} на ${path}`);
+        const body = await res.text().catch(() => "");
+        throw new CoreError(res.status, path, body.slice(0, 500));
       }
       return (await res.json()) as T;
     } finally {
@@ -485,6 +510,8 @@ export class CoreClient {
     outcome?: "done" | "partial" | "failed";
     note?: string;
     counterValue?: number;
+    /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+    clientKey?: string;
     createdBy?: string;
   }): Promise<{ id: string }> {
     return this.request("/maintenance/log", { method: "POST", body: JSON.stringify(input) });
@@ -499,6 +526,8 @@ export class CoreClient {
     reason?: string;
     personId?: string;
     note?: string;
+    /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+    clientKey?: string;
     createdBy?: string;
   }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } | null }> {
     return this.request("/maintenance/part-swap", { method: "POST", body: JSON.stringify(input) });
@@ -525,8 +554,13 @@ export class CoreClient {
         body: JSON.stringify({ personId }),
       });
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      // false — ТОЛЬКО настоящий конфликт (Core ответил 409: успел другой).
+      // Сеть и таймаут раньше тоже давали false, и сотруднику говорили
+      // «взял другой»: он уходил, задача оставалась свободной, работа стояла.
+      // Прочие ошибки пробрасываем — выше есть честный «попробуй ещё раз».
+      if (err instanceof CoreError && err.status === 409) return false;
+      throw err;
     }
   }
 
@@ -541,6 +575,18 @@ export class CoreClient {
         body: JSON.stringify({ code, chatId }),
       });
     } catch (err) {
+      // Обещание «Core уже объяснил, что не так» теперь выполняется буквально:
+      // из тела 4xx достаётся message Nest-исключения, а не техническое
+      // «Core ответил 400 на /people/redeem», которое никому не помогает.
+      if (err instanceof CoreError && err.isClientError) {
+        try {
+          const parsed = JSON.parse(err.body) as { message?: string | string[] };
+          const msg = Array.isArray(parsed.message) ? parsed.message[0] : parsed.message;
+          if (msg) return { error: msg };
+        } catch {
+          // тело не JSON — общий текст ниже
+        }
+      }
       return { error: err instanceof Error ? err.message : "Не получилось" };
     }
   }
@@ -603,6 +649,8 @@ export class CoreClient {
     entityId?: string;
     description?: string;
     priority?: "low" | "normal" | "high" | "urgent";
+    /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+    clientKey?: string;
     createdBy?: string;
   }): Promise<TaskRow> {
     return this.request<TaskRow>("/tasks", { method: "POST", body: JSON.stringify(input) });
@@ -839,6 +887,18 @@ export class CoreClient {
   }
 
   /** Возврат набора: строка «позиция. набор. вес» из привычного формата группы. */
+  /**
+   * Последние возвраты наборов — бот отсекает по ним пересланные старые списки.
+   * Путь ЕДИНСТВЕННОГО числа — как у @Get("container-return") в контроллере:
+   * первая версия ходила на несуществующий «container-returns», ловила 404 в
+   * .catch(() => null) — и весь барьер молча не работал.
+   */
+  containerReturns(limit = 300): Promise<
+    { position: number; containerNumber: number; weight: number; returnedDate: string }[]
+  > {
+    return this.request(`/coffee/container-return?limit=${limit}`);
+  }
+
   recordContainerReturn(input: {
     position: number;
     containerNumber: number;

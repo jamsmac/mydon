@@ -21,6 +21,7 @@ import {
 import type { CoreClient, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import { objectName, pickObject } from "./machine-picker";
+import { newRunId } from "./staff-refill";
 import type { StaffReply } from "./staff";
 
 /**
@@ -40,6 +41,22 @@ import type { StaffReply } from "./staff";
 export interface FieldDeps {
   core: CoreClient;
   conversations: Conversations;
+}
+
+/**
+ * Ключ идемпотентности мастера: повтор ТОГО ЖЕ нажатия несёт то же значение.
+ *
+ * Таймаут клиента при успехе на сервере + честный ретрай раньше давали вторую
+ * замену/чистку/заявку (образец решения — refillClientKey у заливок).
+ * В ключ входит и финальный выбор (`last`): если после сбоя человек нажал
+ * ДРУГУЮ кнопку, это другое действие, а не повтор — дедупить его нельзя.
+ */
+function masterClientKey(
+  prefix: string,
+  data: Record<string, unknown>,
+  last: string,
+): { clientKey: string } | Record<string, never> {
+  return typeof data.runId === "string" ? { clientKey: `${prefix}:${data.runId}:${last}` } : {};
 }
 
 /** Флоу мастеров — те же строки, что в Conversations.flow. */
@@ -95,7 +112,7 @@ function reasonKeyboard(): NonNullable<StaffReply["keyboard"]> {
 }
 
 export async function startPartReplace(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
-  deps.conversations.start(chatId, "part-replace", "object");
+  deps.conversations.start(chatId, "part-replace", "object", { runId: newRunId() });
   return pickObject(person, deps, "🔧 Замена детали. На каком автомате?");
 }
 
@@ -131,6 +148,13 @@ export async function handlePartReplaceCallback(
   deps: FieldDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "part-replace") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Замену отменил." } };
   }
@@ -180,6 +204,7 @@ export async function handlePartReplaceCallback(
     ...(newSerial ? { newSerial } : {}),
     reason: cb.reason,
     personId: person.id,
+    ...masterClientKey("pt", conv.data, cb.reason),
     createdBy: `person:${person.id}`,
   });
 
@@ -195,7 +220,7 @@ export async function handlePartReplaceCallback(
       text:
         `✅ Записал замену.\n🏷 ${name}\n🔧 ${PART_LABELS[partKind as PartKind]}` +
         `${newSerial ? `\n🆔 Новый: ${newSerial}` : ""}${oldLine}\n` +
-        `📋 Причина: ${SWAP_REASON_LABELS[cb.reason]}`,
+        `📋 Причина: ${SWAP_REASON_LABELS[cb.reason]}${photoHint()}`,
       keyboard: afterPhotoKeyboard(),
     },
     ...startAfterPhoto(chatId, "maintenance_log", res.log.id, "замене", deps),
@@ -236,7 +261,7 @@ function cleanKeyboard(): NonNullable<StaffReply["keyboard"]> {
 }
 
 export async function startClean(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
-  deps.conversations.start(chatId, "clean", "object");
+  deps.conversations.start(chatId, "clean", "object", { runId: newRunId() });
   return pickObject(person, deps, "🧽 Чистка. На каком автомате?");
 }
 
@@ -247,6 +272,13 @@ export async function handleCleanCallback(
   deps: FieldDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "clean") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Чистку отменил." } };
   }
@@ -269,13 +301,14 @@ export async function handleCleanCallback(
     ...(partKind ? { partKind } : {}),
     personId: person.id,
     outcome: "done",
+    ...masterClientKey("cl", conv.data, isSanitation ? "san" : (partKind ?? "all")),
     createdBy: `person:${person.id}`,
   });
 
   const what = isSanitation ? "Санобработка" : partKind ? PART_LABELS[partKind] : "Автомат целиком";
   return {
     answer: "Записал",
-    message: { text: `✅ Записал чистку.\n🏷 ${name}\n🧽 ${what}`, keyboard: afterPhotoKeyboard() },
+    message: { text: `✅ Записал чистку.\n🏷 ${name}\n🧽 ${what}${photoHint()}`, keyboard: afterPhotoKeyboard() },
     ...startAfterPhoto(chatId, "maintenance_log", log.id, "чистке", deps),
   };
 }
@@ -320,7 +353,7 @@ function resultKeyboard(): NonNullable<StaffReply["keyboard"]> {
 }
 
 export async function startServiceCheck(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
-  deps.conversations.start(chatId, "service-check", "object");
+  deps.conversations.start(chatId, "service-check", "object", { runId: newRunId() });
   return pickObject(person, deps, "🛠 Технический осмотр. Какой автомат?");
 }
 
@@ -331,6 +364,13 @@ export async function handleServiceCheckCallback(
   deps: FieldDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "service-check") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Осмотр отменил." } };
   }
@@ -364,6 +404,7 @@ export async function handleServiceCheckCallback(
     personId: person.id,
     outcome: cb.outcome,
     note: INSPECTION_LABELS[inspection],
+    ...masterClientKey("sv", conv.data, cb.outcome),
     createdBy: `person:${person.id}`,
   });
 
@@ -373,8 +414,9 @@ export async function handleServiceCheckCallback(
     message: {
       text:
         `✅ Записал осмотр.\n🏷 ${name}\n🛠 ${INSPECTION_LABELS[inspection]}\n${verdict}` +
-        (cb.outcome === "failed" ? "\n\nВладелец увидит это в брифинге." : ""),
-      keyboard: afterPhotoKeyboard("Приложи фото акта, если есть"),
+        (cb.outcome === "failed" ? "\n\nВладелец увидит это в брифинге." : "") +
+        photoHint("фото акта"),
+      keyboard: afterPhotoKeyboard(),
     },
     ...startAfterPhoto(chatId, "maintenance_log", log.id, "осмотру", deps),
   };
@@ -433,16 +475,20 @@ function urgencyKeyboard(): NonNullable<StaffReply["keyboard"]> {
  * действию.
  */
 export function problemDoneKeyboard(entityId: string): NonNullable<StaffReply["keyboard"]> {
+  // Подписи короткие: 44-символьное «✅ Готово (приложи фото поломки, если
+  // можешь)» телефон обрезал до противоположного смысла, а «Автомат не
+  // работает — в ремонт» (31) — до 24 знаков без потери сути. Инструкция про
+  // фото — в тексте сообщения (photoHint).
   return {
     inline_keyboard: [
-      [{ text: "✅ Готово (приложи фото поломки, если можешь)", callback_data: "ph:ok" }],
-      [{ text: "🔧 Автомат не работает — в ремонт", callback_data: `pr:rep:${entityId}` }],
+      [{ text: "✅ Готово", callback_data: "ph:ok" }],
+      [{ text: "🔧 Не работает — в ремонт", callback_data: `pr:rep:${entityId}` }],
     ],
   };
 }
 
 export async function startProblem(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
-  deps.conversations.start(chatId, "problem", "object");
+  deps.conversations.start(chatId, "problem", "object", { runId: newRunId() });
   return pickObject(person, deps, "⚠️ Поломка. На каком автомате?");
 }
 
@@ -453,6 +499,13 @@ export async function handleProblemCallback(
   deps: FieldDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "problem") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Заявку отменил." } };
   }
@@ -514,6 +567,7 @@ export async function handleProblemCallback(
     entityId,
     description: `Заявка от ${person.name}. Срочность: ${URGENCY_LABELS[cb.urgency]}`,
     priority: URGENCY_PRIORITY[cb.urgency],
+    ...masterClientKey("pr", conv.data, cb.urgency),
     createdBy: `person:${person.id}`,
   });
 
@@ -522,7 +576,8 @@ export async function handleProblemCallback(
     message: {
       text:
         `✅ Заявка создана.\n🏷 ${name}\n⚠️ ${SYMPTOM_LABELS[symptom]}\n${URGENCY_LABELS[cb.urgency]}\n\n` +
-        "Она в общем списке — кто освободится, тот и возьмёт.",
+        "Она в общем списке — кто освободится, тот и возьмёт." +
+        photoHint("фото поломки"),
       keyboard: problemDoneKeyboard(entityId),
     },
     ...startAfterPhoto(chatId, "task", task.id, "заявке", deps),
@@ -539,8 +594,17 @@ export async function handleProblemCallback(
  * Поэтому это не шаг мастера, а необязательное продолжение: мастер уже
  * отработал, запись в базе, а фото приложится, если получится.
  */
-export function afterPhotoKeyboard(hint = "Приложи фото, если есть"): NonNullable<StaffReply["keyboard"]> {
-  return { inline_keyboard: [[{ text: `✅ Готово (${hint.toLowerCase()})`, callback_data: "ph:ok" }]] };
+export function afterPhotoKeyboard(): NonNullable<StaffReply["keyboard"]> {
+  // Кнопка — только действие. Инструкция «приложи фото…» жила в подписи и
+  // раздувала её до 35–44 символов: телефон обрезал до «✅ Готово (приложи
+  // фото пол…» — читалось как призыв приложить, а нажатие ЗАВЕРШАЛО шаг.
+  // Подсказка теперь в тексте сообщения (photoHint).
+  return { inline_keyboard: [[{ text: "✅ Готово", callback_data: "ph:ok" }]] };
+}
+
+/** Строка-подсказка шага фото — в ТЕКСТ сообщения, не в кнопку. */
+export function photoHint(what = "фото"): string {
+  return `\n\n📷 Приложи ${what}, если есть, — или жми «Готово».`;
 }
 
 function startAfterPhoto(

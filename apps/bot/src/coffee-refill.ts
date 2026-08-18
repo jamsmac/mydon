@@ -1,5 +1,5 @@
 import { netWeight, TZ } from "@mydon/shared";
-import type { CoreClient, PersonRow } from "./core-client";
+import { CoreError, type CoreClient, type PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import {
   applyPress,
@@ -34,7 +34,12 @@ export interface CoffeeDeps {
 
 /** Слова, которыми техник начинает заливку. */
 export function isCoffeeRefillTrigger(text: string): boolean {
-  return /бункер|засыпал|залил.*кофе|кофе.*залил/i.test(text.trim());
+  // С якорем ^: подстрока «бункер» без якоря перехватывала «помыл бункер» и
+  // «почистил бункер» у мойки, как только заливка встала выше в реестре меню.
+  // Правильный победитель не должен зависеть от порядка пунктов.
+  // «залил(?!\s*вод)»: «залил воду» — это расходники точки (19-литровая
+  // бутыль), а не кофейный бункер.
+  return /^(бункер|засыпал|залил(?!\s*вод)|заливка|кофе.*залил)/i.test(text.trim());
 }
 
 /** Слова, которыми техник отмечает мойку/обслуживание. */
@@ -146,10 +151,12 @@ function weightStep(position: number, draft = ""): StaffReply {
 export type CoffeeWashCallback =
   | { kind: "location"; id: string }
   | { kind: "position"; position: number }
+  | { kind: "all" }
   | { kind: "cancel" };
 
 export function parseCoffeeWashCallback(data: string): CoffeeWashCallback | null {
   if (data === "cw:cancel") return { kind: "cancel" };
+  if (data === "cw:pos:all") return { kind: "all" };
   const loc = /^cw:loc:([0-9a-f-]{36})$/.exec(data);
   if (loc) return { kind: "location", id: loc[1] };
   const pos = /^cw:pos:([1-8])$/.exec(data);
@@ -266,7 +273,12 @@ export async function handleCoffeeRefillCallback(
       locationName: String(conv.data.locationName ?? ""),
       refills: typeof conv.data.refills === "number" ? conv.data.refills : 0,
       consumables: conv.data.consumables === true,
-      started: conv.data.started === true,
+      // «Это повтор» означает: двойник УЖЕ в базе — на точке запись есть, и
+      // обход фактически начался, даже если флаг беседы не успел взвестись
+      // (типовой случай: submit прошёл, ответ утонул в таймауте). Раньше тут
+      // копировался started=false, и все кнопки только что показанного меню
+      // отвечали «кнопка от прошлого обхода» — меню рождалось мёртвым.
+      started: true,
     };
     deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
     return {
@@ -421,9 +433,14 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
   const locationId = String(conv.data.locationId ?? "");
   const locationName = String(conv.data.locationName ?? "");
   const position = Number(conv.data.position);
-  const filledWeight = Number(conv.data.filledWeight);
+  // Округление при СОХРАНЕНИИ: текстовый ввод сознательно принимает «1200,5»
+  // (parseAmount — «не мешает принять»), но Core валидирует @IsInt, и дробь
+  // получала 400, который выглядел как «сервер не ответил» с вечным советом
+  // «нажми ещё раз». Полграмма ниже точности безмена — округляем честно.
+  const filledWeight = Math.round(Number(conv.data.filledWeight));
   const containerNumber = typeof conv.data.containerNumber === "number" ? conv.data.containerNumber : null;
-  const measuredBefore = typeof conv.data.measuredBefore === "number" ? conv.data.measuredBefore : null;
+  const measuredBefore =
+    typeof conv.data.measuredBefore === "number" ? Math.round(conv.data.measuredBefore) : null;
 
   if (!locationId || !Number.isFinite(position) || !Number.isFinite(filledWeight)) {
     deps.conversations.clear(chatId);
@@ -480,7 +497,32 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
       enteredDate: todayIso(),
       createdBy: `person:${person.id}`,
     });
-  } catch {
+  } catch (err) {
+    // 401/403 — не «ошибка в данных» и не «попробуй позже»: это ключ доступа.
+    // Совет переввести вес был бы вечным кругом с затиранием черновика.
+    if (err instanceof CoreError && (err.status === 401 || err.status === 403)) {
+      deps.conversations.advance(chatId, "weight", { draft: String(filledWeight) });
+      return {
+        text: [
+          "⚠️ Запись не принята: у бота нет ключа доступа к записи. Скажи владельцу.",
+          `Всё набранное цело: бункер ${position}, ${filledWeight} г${containerNumber === null ? "" : `, набор ${containerNumber}`}.`,
+        ].join("\n"),
+        keyboard: weightStep(position, String(filledWeight)).keyboard,
+      };
+    }
+    // 400/422 — ошибка в самих данных: сервер не примет их и через минуту,
+    // совет «нажми ещё раз» был бы ложью и вечным кругом. Просим поправить.
+    if (err instanceof CoreError && (err.status === 400 || err.status === 422)) {
+      deps.conversations.advance(chatId, "weight", { draft: "" });
+      return {
+        text: [
+          "⚠️ Сервер отказался принять запись — похоже, ошибка в данных.",
+          `Бункер ${position}, ${filledWeight} г${containerNumber === null ? "" : `, набор ${containerNumber}`}.`,
+          "Введи вес заново, целым числом в граммах.",
+        ].join("\n"),
+        keyboard: weightStep(position).keyboard,
+      };
+    }
     // Возвращаем черновик упаковок: без него повторное «Готово» упрётся в
     // «набери число» — набор-то очищен переходом на шаг.
     deps.conversations.advance(chatId, "weight", { draft: String(filledWeight) });
@@ -660,15 +702,24 @@ async function refillSummary(
   } else {
     lines.push(`☕ Чистый ингредиент: ${net} г — это и вноси в систему автомата`);
     if (netBefore !== null && r.measuredBefore !== null) {
-      const added = net - netBefore;
-      // Досыпали меньше нуля — физически невозможно: либо «до» и «после»
-      // переставлены местами, либо из бункера отсыпали. Показать «-600» как
-      // обычную цифру значило бы узаконить ошибку в отчётах.
-      lines.push(
-        added >= 0
-          ? `Было ${netBefore} г → стало ${net} г (досыпали ${added} г)`
-          : `⚠️ Было ${netBefore} г, стало ${net} г — стало МЕНЬШЕ. Проверь, не перепутал ли замеры.`,
-      );
+      if (netBefore < 0) {
+        // Замер «до» меньше тары — так не бывает: не тот набор или опечатка.
+        // Печатать «Было −520 г» как факт значило бы узаконить ошибку, а
+        // «досыпали» вышло бы завышенным ровно на тару.
+        lines.push(
+          `⚠️ Замер «до» (${r.measuredBefore} г) меньше тары набора (${tare} г) — так не бывает. «Было/досыпали» не считаю, проверь замер.`,
+        );
+      } else {
+        const added = net - netBefore;
+        // Досыпали меньше нуля — физически невозможно: либо «до» и «после»
+        // переставлены местами, либо из бункера отсыпали. Показать «-600» как
+        // обычную цифру значило бы узаконить ошибку в отчётах.
+        lines.push(
+          added >= 0
+            ? `Было ${netBefore} г → стало ${net} г (досыпали ${added} г)`
+            : `⚠️ Было ${netBefore} г, стало ${net} г — стало МЕНЬШЕ. Проверь, не перепутал ли замеры.`,
+        );
+      }
     }
     lines.push(`Вес с бункером ${r.filledWeight} г − тара набора ${r.containerNumber} (${tare} г)`);
   }
@@ -754,14 +805,73 @@ export async function handleCoffeeWashCallback(
     const loc = locations.find((l) => l.id === cb.id);
     if (!loc) return { answer: "Точка не найдена", message: { text: "Этой точки уже нет — начни заново." } };
     deps.conversations.advance(chatId, "position", { locationId: loc.id, locationName: loc.name });
-    return { answer: loc.name, message: await positionStep(deps, loc.name, "cw") };
+    const step = await positionStep(deps, loc.name, "cw");
+    // «Вся машина целиком» — первый ряд: после полной мойки это самый частый
+    // случай. Комментарий секции обещал этот путь, но кнопки не было: техник
+    // либо жал восемь раз, либо врал одной позицией, либо уходил в чужой
+    // мастер «Чистка автомата». Только для мойки: у заливки (cf) «вся машина»
+    // не имеет смысла — сыплют в конкретный бункер.
+    step.keyboard = {
+      inline_keyboard: [
+        [{ text: "🧼 Вся машина целиком", callback_data: "cw:pos:all" }],
+        ...(step.keyboard?.inline_keyboard ?? []),
+      ],
+    };
+    return { answer: loc.name, message: step };
   }
 
-  // cb.kind === "position" — сразу сохраняем, шагов больше нет.
   const locationId = String(conv.data.locationId ?? "");
   const locationName = String(conv.data.locationName ?? "");
-  deps.conversations.clear(chatId);
-  if (!locationId) return { answer: "Данные потерялись", message: { text: "Начни заново: «помыл»." } };
+  if (!locationId) {
+    deps.conversations.clear(chatId);
+    return { answer: "Данные потерялись", message: { text: "Начни заново: «помыл»." } };
+  }
+
+  if (cb.kind === "all") {
+    // По одному логу на настроенную позицию (графики мойки по-бункерные) ПЛЮС
+    // общий лог position=null — он закрывает планы «машина целиком». Каждая
+    // запись под своим try: частичный сбой отвечает честным «отметь эти по
+    // одному», а не предлагает ретрай всего цикла с дублями уже записанного.
+    const config = await deps.core.coffeeBunkerConfig();
+    const positions = [...new Set(config.map((c) => c.position))].sort((a, b) => a - b);
+    const failed: number[] = [];
+    let wholeOk = true;
+    try {
+      await deps.core.recordCoffeeWash({ locationId, kind: "wash", note: "вся машина", performedBy: `person:${person.id}` });
+    } catch {
+      wholeOk = false;
+    }
+    for (const position of positions) {
+      try {
+        await deps.core.recordCoffeeWash({
+          locationId,
+          position,
+          kind: "wash",
+          note: "вся машина",
+          performedBy: `person:${person.id}`,
+        });
+      } catch {
+        failed.push(position);
+      }
+    }
+    if (!wholeOk && failed.length === positions.length) {
+      // Не записалось ничего — мастер жив, ту же кнопку можно нажать повторно.
+      return {
+        answer: "Не записал",
+        message: { text: "⚠️ Сервер не ответил — мойка не записана. Нажми «Вся машина» ещё раз через минуту." },
+      };
+    }
+    deps.conversations.clear(chatId);
+    const bunkers =
+      positions.length > 0
+        ? ` (бункеры: ${positions.join(", ")})`
+        : " — настроенных бункеров нет, записана мойка машины целиком";
+    const tail = failed.length > 0 ? `\n⚠️ Не прошли бункеры ${failed.join(", ")} — отметь их по одному.` : "";
+    return {
+      answer: "Записал",
+      message: { text: `✅ Мойка отмечена: «${locationName}», вся машина${bunkers}.${tail}` },
+    };
+  }
 
   await deps.core.recordCoffeeWash({
     locationId,
@@ -769,6 +879,11 @@ export async function handleCoffeeWashCallback(
     kind: "wash",
     performedBy: `person:${person.id}`,
   });
+  // Разговор стираем ПОСЛЕ успешной записи, а не до — тот же принцип, что в
+  // saveRefill: иначе сбой Core оставлял человека с советом «попробуй ещё
+  // раз», который упирался в «Визард истёк», а «начни заново» дублировал
+  // мойку, если сбой был таймаутом при успехе на сервере.
+  deps.conversations.clear(chatId);
   return {
     answer: "Записал",
     message: { text: `✅ Мойка отмечена: «${locationName}», бункер ${cb.position}.` },

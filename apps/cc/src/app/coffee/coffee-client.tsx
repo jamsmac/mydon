@@ -160,7 +160,6 @@ function EntryTab({
   const [position, setPosition] = useState("");
   const [container, setContainer] = useState("");
   const [weight, setWeight] = useState("");
-  const [packages, setPackages] = useState("1");
   const [msg, setMsg] = useState<string | null>(null);
 
   const ingredientsByPosition = useMemo(() => {
@@ -176,19 +175,21 @@ function EntryTab({
     if (!position) return setMsg("Выберите бункер.");
     if (!Number.isFinite(w) || w <= 0) return setMsg("Вес должен быть положительным числом.");
     start(async () => {
+      // Упаковки НЕ отправляем: их считает программа из веса и расфасовки.
+      // Миграция 0050 сняла default 1 именно потому, что «не спрашивали» было
+      // неотличимо от «ровно одна пачка» (1116 отравленных строк) — а форма
+      // продолжала слать ту же фиктивную единицу при нетронутом поле.
       const res = await submitCoffeeRefill({
         locationId,
         position: Number(position),
         ...(container ? { containerNumber: Number(container) } : {}),
         filledWeight: w,
-        packageCount: packages ? Number(packages) : 1,
         enteredDate: date,
       });
       if (res.ok) {
         setMsg("Сохранено ✅");
         setWeight("");
         setContainer("");
-        setPackages("1");
       } else {
         setMsg(res.message ?? "Не удалось сохранить.");
       }
@@ -238,10 +239,6 @@ function EntryTab({
       <label>
         Вес (г)
         <input type="number" min={0} value={weight} onChange={(e) => setWeight(e.target.value)} />
-      </label>
-      <label>
-        Количество упаковок
-        <input type="number" min={1} value={packages} onChange={(e) => setPackages(e.target.value)} />
       </label>
       <button className="btn primary" disabled={pending} onClick={submit}>
         {pending ? "Сохраняю…" : "Сохранить"}

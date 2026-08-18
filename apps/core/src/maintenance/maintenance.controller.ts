@@ -7,6 +7,7 @@ import {
   IsIn,
   IsInt,
   IsISO8601,
+  IsNotEmpty,
   IsOptional,
   IsPositive,
   IsString,
@@ -91,6 +92,10 @@ export class CreateLogDto {
   @IsOptional() @IsInt() @Min(0)
   counterValue?: number;
 
+  /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(128)
+  clientKey?: string;
+
   @IsOptional() @IsString() @MaxLength(128)
   createdBy?: string;
 }
@@ -145,6 +150,10 @@ export class SwapPartDto {
 
   @IsOptional() @IsISO8601({ strict: true })
   performedOn?: string;
+
+  /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(128)
+  clientKey?: string;
 
   @IsOptional() @IsString() @MaxLength(128)
   createdBy?: string;
