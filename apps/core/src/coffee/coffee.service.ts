@@ -4,6 +4,7 @@ import { alias } from "drizzle-orm/pg-core";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
+  coffeeConsumableLog,
   coffeeContainerReturn,
   coffeeContainerTare,
   auditLog,
@@ -1049,30 +1050,62 @@ export class CoffeeService {
 
   /** Занести/поправить расход за день по точке (upsert по (точка, дата)). */
   async recordConsumable(input: ConsumableInput): Promise<{ ok: true }> {
-    await this.db
-      .insert(coffeeConsumable)
-      .values({
-        locationId: input.locationId,
-        loggedDate: input.loggedDate,
-        water: input.water ?? 0,
-        cups: input.cups ?? 0,
-        lids: input.lids ?? 0,
-        createdBy: input.createdBy ?? null,
-      })
-      .onConflictDoUpdate({
-        target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
-        // createdBy обновляется, только когда новый ввод НАЗВАЛ автора:
-        // авторство принадлежит последнему представившемуся (лента действий
-        // не должна приписывать правку тому, кто вносил первым), но правка
-        // из панели без createdBy не затирает автора-сотрудника в NULL.
-        set: {
+    await this.db.transaction(async (tx) => {
+      await tx
+        .insert(coffeeConsumable)
+        .values({
+          locationId: input.locationId,
+          loggedDate: input.loggedDate,
           water: input.water ?? 0,
           cups: input.cups ?? 0,
           lids: input.lids ?? 0,
-          ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-          updatedAt: new Date(),
-        },
-      });
+          createdBy: input.createdBy ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
+          // createdBy обновляется, только когда новый ввод НАЗВАЛ автора:
+          // авторство принадлежит последнему представившемуся, но правка
+          // из панели без createdBy не затирает автора-сотрудника в NULL.
+          set: {
+            water: input.water ?? 0,
+            cups: input.cups ?? 0,
+            lids: input.lids ?? 0,
+            ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+            updatedAt: new Date(),
+          },
+        });
+      // Событие ввода — в append-only журнал: строка выше — состояние дня,
+      // историю и «итоги вчера» по ней не воспроизвести (правка сдвигала
+      // прошлое ленты действий). Честный ретрай того же ввода (те же числа,
+      // тот же автор, та же последняя строка) события не дублирует.
+      const [last] = await tx
+        .select()
+        .from(coffeeConsumableLog)
+        .where(
+          and(
+            eq(coffeeConsumableLog.locationId, input.locationId),
+            eq(coffeeConsumableLog.loggedDate, input.loggedDate),
+          ),
+        )
+        .orderBy(desc(coffeeConsumableLog.createdAt))
+        .limit(1);
+      const sameAsLast =
+        last !== undefined &&
+        last.water === (input.water ?? 0) &&
+        last.cups === (input.cups ?? 0) &&
+        last.lids === (input.lids ?? 0) &&
+        last.createdBy === (input.createdBy ?? null);
+      if (!sameAsLast) {
+        await tx.insert(coffeeConsumableLog).values({
+          locationId: input.locationId,
+          loggedDate: input.loggedDate,
+          water: input.water ?? 0,
+          cups: input.cups ?? 0,
+          lids: input.lids ?? 0,
+          createdBy: input.createdBy ?? null,
+        });
+      }
+    });
     return { ok: true };
   }
 

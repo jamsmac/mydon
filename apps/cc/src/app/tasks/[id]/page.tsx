@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { core, CoreUnavailable, type Person, type Task, type TaskComment } from "../../../lib/core";
+import { core, CoreUnavailable, type Attachment, type Person, type Task, type TaskComment } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
+import { PhotoGallery } from "../../../components/photo-gallery";
 import { TaskDetail } from "../../../components/task-detail";
 import { TaskEdit, type OwnerOption } from "../../../components/task-edit";
 import { dueLabel } from "@mydon/shared";
@@ -15,8 +16,16 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   let ownerName = "—";
   let owners: OwnerOption[] = [];
   let peopleById: Record<string, string> = {};
+  let photos: Attachment[] = [];
   try {
     task = await core.task(id);
+    // Фото-отчёты (до/после/поломка) — сотрудники шлют их из бота, и до сих
+    // пор владелец их в карточке задачи не видел вовсе.
+    try {
+      photos = await core.attachments("task", id);
+    } catch {
+      photos = [];
+    }
     // Переписка не критична для карточки: не загрузилась — не повод падать.
     try {
       comments = await core.taskComments(id);
@@ -67,6 +76,8 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           {task.ownerKind === "agent" ? " · агент" : ""} · {dueLabel(task.due)}
         </p>
       </div>
+
+      {photos.length > 0 && <PhotoGallery attachments={photos} />}
 
       <TaskDetail task={task} comments={comments} peopleById={peopleById} />
       <TaskEdit task={task} owners={owners} />

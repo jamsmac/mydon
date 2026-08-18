@@ -36,6 +36,8 @@ export interface CreateMovementInput {
   supplier?: string | null;
   note?: string | null;
   createdBy?: string | null;
+  /** Ключ идемпотентности от клиента (бот): повтор несёт то же значение. */
+  clientKey?: string | null;
 }
 
 /** Пересчёт: сколько по факту насчитали ингредиента на складе. */
@@ -48,6 +50,8 @@ export interface StocktakeInput {
   unit?: string | null;
   note?: string | null;
   countedBy?: string | null;
+  /** Ключ идемпотентности от клиента (бот): повтор несёт то же значение. */
+  clientKey?: string | null;
 }
 
 type MovementRow = typeof stockMovement.$inferSelect;
@@ -154,9 +158,25 @@ export class StockService implements OnModuleInit {
         supplier: input.supplier ?? null,
         source: "owner",
         note: input.note ?? null,
+        clientKey: input.clientKey ?? null,
         createdBy: input.createdBy ?? "owner",
       })
+      .onConflictDoNothing({ target: stockMovement.clientKey })
       .returning();
+
+    // Повтор по clientKey: движение уже записано первой попыткой — возвращаем
+    // его же, склад не задваивается (тот же принцип, что у vending_refill).
+    if (!row) {
+      const [existing] = await this.db
+        .select()
+        .from(stockMovement)
+        .where(eq(stockMovement.clientKey, input.clientKey!))
+        .limit(1);
+      if (!existing) {
+        throw new BadRequestException("Повтор движения ещё записывается — попробуй ещё раз через минуту");
+      }
+      return existing;
+    }
     return row;
   }
 
@@ -412,9 +432,36 @@ export class StockService implements OnModuleInit {
         unit: base,
         source: "stocktake",
         note: input.note ?? null,
+        clientKey: input.clientKey ?? null,
         createdBy: input.countedBy ?? "owner",
       })
+      .onConflictDoNothing({ target: stockMovement.clientKey })
       .returning();
+
+    // Повтор по clientKey: корректировка уже записана — отдаём ЗАПИСАННОЕ
+    // движение, а не свежепересчитанную дельту (после первой записи остаток
+    // уже сдвинулся, и повторный «стало − было» дал бы ложные числа).
+    if (!row) {
+      const [existing] = await this.db
+        .select()
+        .from(stockMovement)
+        .where(eq(stockMovement.clientKey, input.clientKey!))
+        .limit(1);
+      if (!existing) {
+        throw new BadRequestException("Повтор пересчёта ещё записывается — попробуй ещё раз через минуту");
+      }
+      const recordedDelta = Number(existing.qty);
+      return {
+        changed: true,
+        before: Math.round((actualBase - recordedDelta) * 1000) / 1000,
+        actual: actualBase,
+        delta: recordedDelta,
+        unit: base,
+        ingredientName: pair.ingredientName,
+        warehouseName: pair.warehouseName,
+        movementId: existing.id,
+      };
+    }
 
     return {
       changed: true,

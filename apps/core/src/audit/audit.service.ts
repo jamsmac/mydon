@@ -1,6 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { auditLog } from "@mydon/db";
-import { desc } from "drizzle-orm";
+import { and, desc, eq, gte, like, lt, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 export type ActorKind = "human" | "agent" | "system";
@@ -33,10 +33,35 @@ export class AuditService {
     });
   }
 
-  async list(limit = 50): Promise<(typeof auditLog.$inferSelect)[]> {
+  async list(
+    limit = 50,
+    filter: { offset?: number; actor?: string; action?: string; from?: string; to?: string } = {},
+  ): Promise<(typeof auditLog.$inferSelect)[]> {
     // Границы зажимаем и здесь: контроллер не должен быть единственной защитой
     // от выгрузки всего журнала одним запросом.
     const take = Math.min(Math.max(Number.isFinite(limit) ? Math.trunc(limit) : 50, 1), 500);
-    return this.db.select().from(auditLog).orderBy(desc(auditLog.ts)).limit(take);
+    const conditions: SQL[] = [];
+    // actor — подстрокой: в actorRef живут person:<id>, telegram:<chat>,
+    // agent:<имя>; точного формата у поля нет, и точное равенство промахнётся.
+    // Метасимволы LIKE экранируем: «%» в запросе — литерал, а не «всё».
+    if (filter.actor) {
+      const escaped = filter.actor.replace(/[\\%_]/g, (c) => `\\${c}`);
+      conditions.push(like(auditLog.actorRef, `%${escaped}%`));
+    }
+    if (filter.action) conditions.push(eq(auditLog.action, filter.action));
+    // Даты — дни по Ташкенту (пояс фиксированный +05, без переводов).
+    if (filter.from) conditions.push(gte(auditLog.ts, new Date(`${filter.from}T00:00:00+05:00`)));
+    if (filter.to) {
+      conditions.push(lt(auditLog.ts, new Date(new Date(`${filter.to}T00:00:00+05:00`).getTime() + 86_400_000)));
+    }
+    return this.db
+      .select()
+      .from(auditLog)
+      .where(conditions.length ? and(...conditions) : undefined)
+      // Вторичный ключ id: ts не уникален, и offset-страницы по нему могли
+      // пропускать/дублировать строки на границах.
+      .orderBy(desc(auditLog.ts), desc(auditLog.id))
+      .limit(take)
+      .offset(Math.min(Math.max(filter.offset ?? 0, 0), 100_000));
   }
 }

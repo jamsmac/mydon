@@ -806,7 +806,11 @@ export async function handleStaffCallback(
   if (svCb) return unwrap(await handleServiceCheckCallback(chatId, svCb, person, deps));
 
   const prCb = parseProblemCallback(data);
-  if (prCb) return unwrap(await handleProblemCallback(chatId, prCb, person, deps));
+  if (prCb) {
+    const res = await handleProblemCallback(chatId, prCb, person, deps);
+    // ownerNote — мгновенный пуш владельцу о поломке (как у инкассации).
+    return { ...unwrap(res), ...(res.ownerNote ? { ownerNote: res.ownerNote } : {}) };
+  }
 
   if (parseAfterPhotoCallback(data)) return unwrap(finishAfterPhoto(chatId, deps));
 

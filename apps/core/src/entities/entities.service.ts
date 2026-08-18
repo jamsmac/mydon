@@ -1,13 +1,16 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
+  approval,
   auditLog,
   entity,
   entityDraft,
+  event,
   geoPoint,
   machineCard,
   machinePlacement,
   maintenancePlan,
   org,
+  person,
   task,
 } from "@mydon/db";
 import {
@@ -191,6 +194,13 @@ export class EntitiesService {
       // Утверждённые координаты — в типизированную точку; битую пару из
       // источника не роняем (strict=false), а честно оставляем как есть.
       await syncGeoPoint(tx, id, attrs, false);
+      // Закрыть связанный запрос согласования: решение, принятое в панели,
+      // не должно оставлять «висящий» вопрос в боте — иначе очереди
+      // расходятся, а позднее «Отклонить» из бота противоречило бы факту.
+      await tx
+        .update(approval)
+        .set({ decision: "approved", decidedAt: new Date() })
+        .where(and(eq(approval.decision, "pending"), sql`${approval.payload}->'entityApprove'->>'entityId' = ${id}`));
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef,
@@ -412,6 +422,48 @@ export class EntitiesService {
       // Координаты — числами с проверкой диапазона, в той же транзакции.
       await syncGeoPoint(tx, created.id, (dto.attrs ?? {}) as Record<string, unknown>);
 
+      // Карточка от полевого сотрудника уходит и в очередь СОГЛАСОВАНИЙ:
+      // «согласования» бота и брифинг читают только таблицу approval, и без
+      // этой строки черновик был виден лишь в панели (/inbox) — владелец в
+      // Telegram о нём не узнавал вовсе.
+      // Строгий UUID (8-4-4-4-12): 36 «почти-hex» символов проходили бы в
+      // eq(person.id, …) и роняли транзакцию кастом к uuid.
+      const staffId =
+        /^staff:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(fromSource)?.[1];
+      if (staffId) {
+        const [author] = await tx
+          .select({ name: person.name })
+          .from(person)
+          .where(eq(person.id, staffId));
+        const [req] = await tx
+          .insert(approval)
+          .values({
+            agent: fromSource,
+            action: `Новая карточка: ${created.name} (${created.type})`,
+            tier: "T1",
+            payload: {
+              entityApprove: { entityId: created.id },
+              name: created.name,
+              type: created.type,
+              byName: author?.name ?? null,
+            },
+          })
+          .returning();
+        // action/tier — в payload события: правило rules.ts форматирует
+        // мгновенный пуш именно из них (без них владелец получал «— (—)»).
+        await tx.insert(event).values({
+          source: fromSource,
+          type: "approval.requested",
+          payload: {
+            approvalId: req.id,
+            entityId: created.id,
+            action: `Новая карточка: ${created.name} (${created.type})`,
+            tier: "T1",
+            byName: author?.name ?? null,
+          },
+        });
+      }
+
       await tx.insert(auditLog).values({
         actorKind: "system",
         actorRef,
@@ -503,6 +555,12 @@ export class EntitiesService {
       const [before] = await tx.select().from(entity).where(eq(entity.id, id)).for("update");
       if (!before) throw new NotFoundException(`Сущность ${id} не найдена`);
       await tx.delete(entity).where(eq(entity.id, id));
+      // Удалённая карточка снимает и вопрос согласования — иначе бот отвечал
+      // бы «Одобрено — исполняю» по карточке, которой больше нет.
+      await tx
+        .update(approval)
+        .set({ decision: "rejected", decidedAt: new Date() })
+        .where(and(eq(approval.decision, "pending"), sql`${approval.payload}->'entityApprove'->>'entityId' = ${id}`));
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef,

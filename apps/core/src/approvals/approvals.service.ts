@@ -6,6 +6,7 @@ import {
   coffeeContainerReturn,
   coffeeRefill,
   entity,
+  entityDraft,
   event,
   org,
   vendingPurchaseOrder,
@@ -142,9 +143,51 @@ export class ApprovalsService {
         await this.executeImport(tx, updated, actorRef);
         await this.executePurchaseOrder(tx, updated, actorRef);
         await this.executeCoffeeImport(tx, updated);
+        await this.executeEntityApprove(tx, updated, actorRef);
       }
 
       return updated;
+    });
+  }
+
+  /**
+   * Исполнение одобрения карточки сотрудника: payload.entityApprove.entityId.
+   *
+   * Логика зеркалит EntitiesService.approve (черновики полей применяются,
+   * карточка становится фактом) — в ТОЙ ЖЕ транзакции решения: «одобрил»
+   * значит «карточка утверждена», а не «записано в журнал». Отклонение
+   * карточку не трогает — она остаётся черновиком в панели, где владелец
+   * может удалить её осознанно.
+   */
+  private async executeEntityApprove(tx: Tx, row: ApprovalRow, actorRef: string): Promise<void> {
+    const p = (row.payload ?? {}) as { entityApprove?: { entityId?: string } };
+    const entityId = p.entityApprove?.entityId;
+    if (!entityId) return;
+    const [card] = await tx.select().from(entity).where(eq(entity.id, entityId));
+    // Карточки нет (удалена) или уже утверждена в панели — решение просто
+    // закрывает запрос, ломать транзакцию не из-за чего.
+    if (!card || card.approvedAt !== null) return;
+
+    const attrs = { ...((card.attrs ?? {}) as Record<string, unknown>) };
+    let name = card.name;
+    const drafts = await tx.select().from(entityDraft).where(eq(entityDraft.entityId, entityId));
+    for (const d of drafts) {
+      if (d.field === "название") name = d.value;
+      else attrs[d.field] = d.value;
+    }
+    await tx.delete(entityDraft).where(eq(entityDraft.entityId, entityId));
+    const [updated] = await tx
+      .update(entity)
+      .set({ name, attrs, approvedAt: new Date(), approvedBy: actorRef, updatedAt: new Date() })
+      .where(eq(entity.id, entityId))
+      .returning();
+    await tx.insert(auditLog).values({
+      actorKind: "human",
+      actorRef,
+      action: "entity.approve",
+      target: entityId,
+      before: card,
+      after: updated,
     });
   }
 

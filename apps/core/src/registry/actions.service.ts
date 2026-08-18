@@ -2,7 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { and, eq, gte, inArray, isNotNull, lt } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import {
-  coffeeConsumable,
+  coffeeConsumableLog,
   coffeeContainerReturn,
   coffeeRefill,
   coffeeWashLog,
@@ -29,9 +29,8 @@ import { DB, type Db } from "../db/db.module";
  * FK-полем). Владелец, агенты — не входят; перенесённая история инкассаций
  * (source ≠ realtime) и незакрытые работы обслуживания отфильтрованы.
  *
- * Оговорка про расходники: их строка — СОСТОЯНИЕ дня (upsert по точке+дате),
- * а не журнал; в ленте видна последняя правка строки с её автором, и правка
- * задним числом сдвигает момент. Честный лог вводов — отдельная задача.
+ * Расходники читаются из append-only журнала вводов (0053): каждое событие
+ * несёт своего автора и момент, правка задним числом прошлое не переписывает.
  */
 
 export interface ActionRow {
@@ -140,18 +139,20 @@ export class ActionsService {
         })
         .from(coffeeContainerReturn)
         .where(and(gte(coffeeContainerReturn.createdAt, lo), lt(coffeeContainerReturn.createdAt, hi))),
+      // Append-only журнал вводов (0053): каждое событие с автором и моментом —
+      // правка задним числом больше не переписывает прошлое ленты.
       this.db
         .select({
-          at: coffeeConsumable.updatedAt,
-          by: coffeeConsumable.createdBy,
-          water: coffeeConsumable.water,
-          cups: coffeeConsumable.cups,
-          lids: coffeeConsumable.lids,
+          at: coffeeConsumableLog.createdAt,
+          by: coffeeConsumableLog.createdBy,
+          water: coffeeConsumableLog.water,
+          cups: coffeeConsumableLog.cups,
+          lids: coffeeConsumableLog.lids,
           placeName: place.name,
         })
-        .from(coffeeConsumable)
-        .innerJoin(place, eq(coffeeConsumable.locationId, place.id))
-        .where(and(gte(coffeeConsumable.updatedAt, lo), lt(coffeeConsumable.updatedAt, hi))),
+        .from(coffeeConsumableLog)
+        .innerJoin(place, eq(coffeeConsumableLog.locationId, place.id))
+        .where(and(gte(coffeeConsumableLog.createdAt, lo), lt(coffeeConsumableLog.createdAt, hi))),
       this.db
         .select({
           at: coffeeWashLog.performedAt,
@@ -219,7 +220,7 @@ export class ActionsService {
           ),
         ),
       this.db
-        .select({ at: task.completedAt, ref: task.ownerRef, title: task.title })
+        .select({ at: task.completedAt, ref: task.ownerRef, closedBy: task.closedBy, title: task.title })
         .from(task)
         .where(
           and(
@@ -313,7 +314,14 @@ export class ActionsService {
       );
     }
     for (const r of done) {
-      const pid = r.ref !== null && /^[0-9a-f-]{36}$/.test(r.ref) ? r.ref : null;
+      // closedBy — кто ФАКТИЧЕСКИ закрыл (0054): закрытие владельцем из
+      // панели не приписывается исполнителю. У старых строк closedBy пуст —
+      // честный фолбэк на исполнителя.
+      const pid = r.closedBy
+        ? personIdOf(r.closedBy)
+        : r.ref !== null && /^[0-9a-f-]{36}$/.test(r.ref)
+          ? r.ref
+          : null;
       push(r.at, "task_done", pid, `✅ Закрыл задачу: ${r.title}`);
     }
     for (const r of created) {

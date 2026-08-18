@@ -1,6 +1,7 @@
 import type { CoreClient, EntityRow, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import { applyPress, NUMPAD_MAX_DIGITS, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
+import { newRunId } from "./staff-refill";
 import type { StaffReply } from "./staff";
 
 /**
@@ -91,10 +92,10 @@ export async function startInventory(chatId: number, deps: InventoryDeps): Promi
   }
   // Один склад — не спрашиваем, сразу к ингредиенту.
   if (whs.length === 1) {
-    deps.conversations.start(chatId, "inventory", "ingredient", { warehouseId: whs[0].id, warehouseName: whs[0].name });
+    deps.conversations.start(chatId, "inventory", "ingredient", { warehouseId: whs[0].id, warehouseName: whs[0].name, runId: newRunId() });
     return ingredientStep(chatId, deps, whs[0].name);
   }
-  deps.conversations.start(chatId, "inventory", "warehouse");
+  deps.conversations.start(chatId, "inventory", "warehouse", { runId: newRunId() });
   return { text: "Какой склад считаем?", keyboard: pickKeyboard(whs, "wh") };
 }
 
@@ -255,11 +256,15 @@ async function saveInventoryCount(
     return { text: "Данные пересчёта потерялись — начни заново: «инвентаризация»." };
   }
 
+  // Ключ идемпотентности: повтор того же факта в том же заходе — повтор
+  // нажатия; вторая корректировка «стало − было» при гонке не появляется.
+  const runId = typeof conv?.data.runId === "string" ? conv.data.runId : null;
   const res = await deps.core.stocktake({
     warehouseId,
     ingredientId,
     actual,
     unit: baseUnit || undefined,
+    ...(runId ? { clientKey: `ic:${runId}:${actual}` } : {}),
     countedBy: `person:${person.id}`,
   });
   deps.conversations.clear(chatId);

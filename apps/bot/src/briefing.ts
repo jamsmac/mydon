@@ -180,6 +180,18 @@ export function formatBriefing(
 
 /** Карточка согласования с кнопками (ТЗ FR-3). */
 export function formatApproval(a: ApprovalRow): string {
+  // Карточка от полевого сотрудника — человеческий текст, а не «Агент: staff:<uuid>».
+  const p = (a.payload ?? {}) as { entityApprove?: unknown; name?: string; type?: string; byName?: string | null };
+  if (p.entityApprove) {
+    return [
+      "🆕 Новая карточка от сотрудника",
+      "",
+      `${p.name ?? a.action} (${p.type ?? "?"})`,
+      ...(p.byName ? [`Завёл: ${p.byName}`] : []),
+      "",
+      "Утвердить? Отклонённая останется черновиком в панели.",
+    ].join("\n");
+  }
   return ["✋ Требуется решение", "", a.action, "", `Агент: ${a.agent}`, `Уровень: ${a.tier}`].join(
     "\n",
   );

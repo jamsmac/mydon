@@ -487,6 +487,14 @@ export function problemDoneKeyboard(entityId: string): NonNullable<StaffReply["k
   };
 }
 
+/**
+ * Заявки, о которых владельцу уже сообщили. Идемпотентный replay createTask
+ * (тот же clientKey после таймаута) возвращает ту же задачу — второй пуш о
+ * той же поломке слать нельзя. Память процесса: перезапуск в этом окне даст
+ * максимум один лишний пуш, что лучше пропущенного.
+ */
+const notifiedProblems = new Set<string>();
+
 export async function startProblem(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
   deps.conversations.start(chatId, "problem", "object", { runId: newRunId() });
   return pickObject(person, deps, "⚠️ Поломка. На каком автомате?");
@@ -497,7 +505,7 @@ export async function handleProblemCallback(
   cb: ProblemCallback,
   person: PersonRow,
   deps: FieldDeps,
-): Promise<{ answer: string; message?: StaffReply }> {
+): Promise<{ answer: string; message?: StaffReply; ownerNote?: string }> {
   if (cb.kind === "cancel") {
     // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
     // устаревшего экрана не должна гасить текущее дело — слот беседы один,
@@ -571,6 +579,9 @@ export async function handleProblemCallback(
     createdBy: `person:${person.id}`,
   });
 
+  const firstNotice = !notifiedProblems.has(task.id);
+  notifiedProblems.add(task.id);
+
   return {
     answer: "Заявка создана",
     message: {
@@ -580,6 +591,16 @@ export async function handleProblemCallback(
         photoHint("фото поломки"),
       keyboard: problemDoneKeyboard(entityId),
     },
+    // Владелец узнаёт о поломке СРАЗУ — как об инкассации: раньше заявка
+    // всплывала только просрочкой или строкой брифинга через сутки. Replay
+    // по clientKey возвращает ту же задачу — пуш только при первом разе.
+    ...(firstNotice
+      ? {
+          ownerNote:
+            `⚠️ Поломка: ${name} — ${SYMPTOM_LABELS[symptom]} (${URGENCY_LABELS[cb.urgency]}).\n` +
+            `Заявил: ${person.name}. Заявка в общем списке.`,
+        }
+      : {}),
     ...startAfterPhoto(chatId, "task", task.id, "заявке", deps),
   };
 }

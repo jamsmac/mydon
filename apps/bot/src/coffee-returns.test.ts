@@ -31,6 +31,8 @@ function stubCore(over: Record<string, unknown> = {}) {
     coffeeLocations: async () => [{ id: LOC, name: "American Hospital", isActive: true }],
     // Журнал пуст: гейт «пересланный старый список» по умолчанию не мешает.
     containerReturns: async () => [] as { position: number; containerNumber: number; weight: number; returnedDate: string }[],
+    // Тары нет — все строки «информативные» (пустые бункеры не различаются).
+    coffeeTare: async () => [] as { containerNumber: number; position: number; tareWeight: number | null }[],
     recordContainerReturn: async (input: Record<string, unknown>) => {
       calls.push({ kind: "return", input });
       return { id: `ret-${calls.length}` };
@@ -296,5 +298,45 @@ describe("Пересланный старый список остатков (а�
     assert.ok(parsed);
     await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
     assert.equal(calls.filter((c) => (c as { kind: string }).kind === "return").length, 1);
+  });
+});
+
+describe("Гейт пересланных списков: пустые бункеры не свидетельствуют", () => {
+  const OLDDAY = [
+    { position: 1, containerNumber: 26, weight: 620, returnedDate: "2026-08-10" },
+    { position: 2, containerNumber: 19, weight: 600, returnedDate: "2026-08-10" },
+  ];
+  const TARE = [
+    { containerNumber: 26, position: 1, tareWeight: 620 },
+    { containerNumber: 19, position: 2, tareWeight: 600 },
+  ];
+
+  it("список из одних пустых бункеров с «вчерашними» весами записывается", async () => {
+    // Вес пустого набора равен таре и честно повторяется день ко дню —
+    // совпадение с прошлым здесь не признак пересылки.
+    const { core, calls } = stubCore({
+      containerReturns: async () => OLDDAY,
+      coffeeTare: async () => TARE,
+    });
+    const parsed = tryParseContainerReturns("1. 026. 620\n2. 019. 600");
+    assert.ok(parsed);
+    await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.equal(calls.filter((c) => (c as { kind: string }).kind === "return").length, 2);
+  });
+
+  it("информативные строки со старыми весами по-прежнему отсекаются", async () => {
+    const old = [
+      { position: 1, containerNumber: 26, weight: 1119, returnedDate: "2026-08-10" },
+      { position: 2, containerNumber: 19, weight: 1944, returnedDate: "2026-08-10" },
+    ];
+    const { core, calls } = stubCore({
+      containerReturns: async () => old,
+      coffeeTare: async () => TARE,
+    });
+    const parsed = tryParseContainerReturns("1. 026. 1119\n2. 019. 1944");
+    assert.ok(parsed);
+    const reply = await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.match(reply.text, /уже записанный список/i);
+    assert.equal(calls.filter((c) => (c as { kind: string }).kind === "return").length, 0);
   });
 });
