@@ -1,7 +1,7 @@
 import { can, dueLabel, TZ } from "@mydon/shared";
 import type { CoreClient, PersonRow, TaskRow } from "./core-client";
 import type { Conversations } from "./conversation";
-import { nextLocationKeyboard, parseVisitCallback, visitFromFlow, visitSummary } from "./coffee-visit";
+import { nextLocationKeyboard, parseVisitCallback, visitFromFlow, visitKeyboard, visitSummary } from "./coffee-visit";
 import {
   handleRegisterCallback,
   handleRegisterName,
@@ -53,6 +53,7 @@ import {
   handlePartReplaceCallback,
   handlePartSerial,
   handleProblemCallback,
+  FIELD_FLOWS,
   handleServiceCheckCallback,
   onObjectPicked,
   parseAfterPhotoCallback,
@@ -263,11 +264,27 @@ export async function handleStaffMessage(
 ): Promise<{ reply: StaffReply; tasks?: TaskRow[] }> {
   const clean = text.trim();
 
-  // «Отмена» бросает любой активный визард (заведение) — раньше всего прочего.
+  // «Отмена» бросает активный визард — раньше всего прочего. Но слово обязано
+  // вести себя как кнопка «✖️ Отмена» (#149): посреди начатого обхода
+  // бросается только подшаг, а точка и счётчики остаются — иначе одинаково
+  // подписанные действия имели бы противоположную цену, и набравший слово
+  // (справка сама его предлагает) терял обход молча.
   if (/^(отмена|стоп|cancel)$/i.test(clean)) {
-    if (deps.conversations.get(chatId)) {
+    const active = deps.conversations.get(chatId);
+    if (active) {
+      const visit = visitFromFlow(active);
+      if (visit && active.flow !== "coffee-visit") {
+        deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
+        return {
+          reply: { text: `Отменил. Ты на точке «${visit.locationName}».`, keyboard: visitKeyboard(visit) },
+        };
+      }
       deps.conversations.clear(chatId);
-      return { reply: { text: "Отменил." } };
+      return {
+        reply: {
+          text: visit ? `Отменил. Обход по «${visit.locationName}» закрыт — записанное цело.` : "Отменил.",
+        },
+      };
     }
   }
 
@@ -427,7 +444,33 @@ ${reply.text}`;
 
   // Слово попало в пункт меню — тот же обработчик, что и у кнопки.
   const hit = matchTrigger(clean, person.roles);
-  if (hit) return startMenuItem(hit, chatId, person, deps);
+  if (hit) {
+    // Слово «вода»/«бункер» посреди обхода — то же, что кнопка того же дела:
+    // продолжаем на текущей точке, не спрашивая её заново (D8 из 17.08 —
+    // словесный вход шёл мимо visitFromFlow и терял точку обхода).
+    const visit = visitFromFlow(conv);
+    if (visit && (hit.id === "cons" || hit.id === "refill")) {
+      const reply =
+        hit.id === "cons"
+          ? continueVisitConsumable(chatId, visit, deps)
+          : await continueVisitRefill(chatId, visit, deps);
+      return { reply };
+    }
+    return startMenuItem(hit, chatId, person, deps);
+  }
+
+  // Меню точки: непонятый текст не должен уходить комментарием к чужой задаче
+  // (единственный flow без своей текстовой ветки — хвост 17.08). Человек стоит
+  // на точке и говорит с обходом — подсказываем кнопки, ничего не теряя.
+  const visitMenu = visitFromFlow(conv);
+  if (visitMenu && conv?.flow === "coffee-visit") {
+    return {
+      reply: {
+        text: `Ты на точке «${visitMenu.locationName}». Не понял — жми кнопку: ещё бункер, расходники или «Завершить точку».`,
+        keyboard: visitKeyboard(visitMenu),
+      },
+    };
+  }
 
   // Всё остальное от сотрудника — комментарий к его текущей задаче:
   // проще написать боту, чем звонить владельцу.
@@ -639,6 +682,13 @@ export async function handleStaffCallback(
     // и советовать «отмену», которая всё уносит.
     const visit = visitFromFlow(conv);
 
+    // Двойное нажатие «Следующая точка»: первое уже открыло выбор точки, и
+    // второй тап (медленная сеть, привычный даблтап) раньше натыкался на
+    // барьер ниже с ложным «у тебя не дописано другое».
+    if (visitCb.kind === "next" && conv?.flow === "coffee-refill" && conv.step === "location") {
+      return { answer: "Уже выбираешь точку", message: "Уже выбираешь точку — жми кнопку из списка выше." };
+    }
+
     // Кнопки обхода живут в чате вечно, а слот беседы один. Нажатие старой
     // кнопки во время НЕ-кофейного мастера молча стирало его: недописанный
     // отчёт по задаче исчезал без единого слова. Отказываем, а не затираем.
@@ -648,6 +698,13 @@ export async function handleStaffCallback(
         message: "Эта кнопка от прошлого обхода. Сейчас у тебя не дописано другое — сначала доделай его.",
       };
     }
+
+    // Недописанный ввод подшага (набранный вес, замер, номер набора) кнопки
+    // меню точки бросают ЗАКОННО — но об этом обязательно сказать: молча
+    // выброшенные цифры выглядят как сохранённые (у нижнего меню такое
+    // предупреждение уже есть — staff-путь midStep).
+    const midInput = conv !== null && conv.flow !== "coffee-visit";
+    const droppedNote = midInput ? "Прошлый ввод не дописан — бросил.\n\n" : "";
 
     // Кнопки обхода запускают мастера записи — право проверяется здесь же:
     // кнопка живёт в чате вечно, а роль могли отозвать после её раздачи.
@@ -662,21 +719,34 @@ export async function handleStaffCallback(
 
     if (visitCb.kind === "next") {
       const started = await startCoffeeRefill(chatId, deps);
-      return { answer: "Следующая точка", message: started.text, keyboard: started.keyboard };
+      return { answer: "Следующая точка", message: droppedNote + started.text, keyboard: started.keyboard };
     }
-    if (!visit) return { answer: "Обход завершён", message: "Начни заново: «бункер»." };
+    if (!visit) {
+      // conv === null здесь означает и «завершил», и «истёк по тишине» (TTL
+      // 45 минут) — врать «завершён» во втором случае нельзя: человек решит,
+      // что точка закрыта записью.
+      return { answer: "Обход не найден", message: "Обход завершён или истёк по тишине. Начни заново: «бункер»." };
+    }
     if (visitCb.kind === "more") {
       const step = await continueVisitRefill(chatId, visit, deps);
-      return { answer: "Ещё бункер", message: step.text, keyboard: step.keyboard };
+      // Перерисовываем то же сообщение: меню точки не остаётся в чате ещё
+      // одним вечным экраном с живыми cv:-кнопками.
+      return {
+        answer: "Ещё бункер",
+        edit: { text: droppedNote + step.text, ...(step.keyboard ? { keyboard: step.keyboard } : {}) },
+      };
     }
     if (visitCb.kind === "consumables") {
       const step = continueVisitConsumable(chatId, visit, deps);
-      return { answer: "Расходники", message: step.text, keyboard: step.keyboard };
+      return {
+        answer: "Расходники",
+        edit: { text: droppedNote + step.text, ...(step.keyboard ? { keyboard: step.keyboard } : {}) },
+      };
     }
     deps.conversations.clear(chatId);
     return {
       answer: "Точка закрыта",
-      message: visitSummary(visit),
+      message: droppedNote + visitSummary(visit),
       keyboard: nextLocationKeyboard(),
     };
   }
@@ -685,6 +755,12 @@ export async function handleStaffCallback(
   const picked = parsePickerCallback(data);
   if (picked) {
     if (picked.kind === "cancel") {
+      // Пикер принадлежит полевым мастерам: «Отмена» с чужого устаревшего
+      // экрана не гасит текущее дело — тот же барьер, что у остальных отмен.
+      const current = deps.conversations.get(chatId);
+      if (current !== null && !(FIELD_FLOWS as readonly string[]).includes(current.flow)) {
+        return { answer: "Кнопка устарела", message: "Эта кнопка от прошлого шага — она уже не действует." };
+      }
       deps.conversations.clear(chatId);
       return { answer: "Отменено", message: "Отменил." };
     }
@@ -836,13 +912,24 @@ export async function handleStaffCallback(
   // строку»). Он удалён: мастер делает то же самое и ещё фото, а два
   // параллельных механизма ожидания текста в одном чате рано или поздно
   // разошлись бы — и отчёт уходил бы в тот, который не ждали.
+  // Мастер закрытия занимает единственный слот беседы. Начатый обход или
+  // другой недописанный мастер он бросает — сказать об этом обязательно:
+  // путь через нижнее меню предупреждает, кнопки задач не должны молчать.
+  const prevConv = deps.conversations.get(chatId);
+  const droppedVisit = visitFromFlow(prevConv);
+  const droppedOther = prevConv !== null && droppedVisit === null && prevConv.flow !== "task-done";
   const started = startTaskDone(chatId, task, deps);
+  const dropNote = droppedVisit
+    ? `⚠️ Обход по «${droppedVisit.locationName}» прерван — после задачи начни точку заново.\n\n`
+    : droppedOther
+      ? "Прошлое не дописано — бросил.\n\n"
+      : "";
   return {
     answer: "Напиши, что сделано",
     // Кнопки старой карточки снимаем: пока идёт мастер, нажимать на неё
     // нечего, а повторное «Выполнил» перезапустило бы ввод с нуля.
     edit: { text: `${formatTaskCard(task)}\n\n▶️ Закрываю…` },
-    message: started.text,
+    message: dropNote + started.text,
     ...(started.keyboard ? { keyboard: started.keyboard } : {}),
   };
 }

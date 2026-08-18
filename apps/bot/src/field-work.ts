@@ -148,6 +148,13 @@ export async function handlePartReplaceCallback(
   deps: FieldDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "part-replace") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Замену отменил." } };
   }
@@ -265,6 +272,13 @@ export async function handleCleanCallback(
   deps: FieldDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "clean") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Чистку отменил." } };
   }
@@ -350,6 +364,13 @@ export async function handleServiceCheckCallback(
   deps: FieldDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "service-check") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Осмотр отменил." } };
   }
@@ -473,6 +494,13 @@ export async function handleProblemCallback(
   deps: FieldDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "problem") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Заявку отменил." } };
   }

@@ -113,6 +113,13 @@ export async function handleInventoryCallback(
   deps: InventoryDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
+    // устаревшего экрана не должна гасить текущее дело — слот беседы один,
+    // а кнопки живут в чате вечно.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "inventory") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Инвентаризацию отменил." } };
   }

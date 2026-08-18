@@ -266,7 +266,12 @@ export async function handleCoffeeRefillCallback(
       locationName: String(conv.data.locationName ?? ""),
       refills: typeof conv.data.refills === "number" ? conv.data.refills : 0,
       consumables: conv.data.consumables === true,
-      started: conv.data.started === true,
+      // «Это повтор» означает: двойник УЖЕ в базе — на точке запись есть, и
+      // обход фактически начался, даже если флаг беседы не успел взвестись
+      // (типовой случай: submit прошёл, ответ утонул в таймауте). Раньше тут
+      // копировался started=false, и все кнопки только что показанного меню
+      // отвечали «кнопка от прошлого обхода» — меню рождалось мёртвым.
+      started: true,
     };
     deps.conversations.start(chatId, "coffee-visit", "menu", { ...visit });
     return {
