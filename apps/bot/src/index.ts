@@ -232,6 +232,12 @@ async function main(): Promise<void> {
       }
     } catch (err) {
       console.error("Сообщение сотрудника не обработано:", err);
+      // Молчать нельзя: полевые строки шлют не глядя, и тишину читают как
+      // «записано» — так теряются возвраты и комментарии. Ответ шлём с
+      // собственной страховкой: упадёт и он — хуже уже не станет.
+      await tg
+        .sendMessage(chatId, "⚠️ Сервер не ответил — сообщение не обработано. Отправь его ещё раз через минуту.")
+        .catch(() => undefined);
     }
   }
 
@@ -292,6 +298,12 @@ async function main(): Promise<void> {
       );
     } catch (err) {
       console.error("Фото сотрудника не обработано:", err);
+      // Комментарий выше называет «бот проглотил фото» худшим ответом — так
+      // и не отвечаем им: снимок «до» второй раз не сделать, человек должен
+      // узнать сразу, что фото не приложилось.
+      await tg
+        .sendMessage(chatId, "⚠️ Фото не сохранилось — отправь его ещё раз через минуту.")
+        .catch(() => undefined);
     }
   }
 
@@ -564,185 +576,203 @@ async function main(): Promise<void> {
     })();
   }, notifyEveryMs).unref();
 
+  /**
+   * Один update из пачки.
+   *
+   * Ошибку не выпускаем в цикл опроса: offset сдвигается уже при ПОЛУЧЕНИИ
+   * пачки (telegram.ts), и упавший update — например, answerCallback на
+   * устаревшую кнопку («query is too old») или слишком длинный sendMessage —
+   * иначе уносил бы с собой все необработанные соседние сообщения той же
+   * пачки, включая полевые записи сотрудников. Навсегда: Telegram повторно
+   * их не отдаст.
+   */
+  const processUpdate = async (u: TgUpdate): Promise<void> => {
+    if (u.message?.photo && u.message.photo.length > 0) {
+      // Фото — только полевая ветка, и только для тех, кто в ней сейчас.
+      //
+      // Барьер тут был обещан комментарием, но не написан: ветка стояла
+      // первой в цепочке и не проверяла ни allowlist, ни режим. Владелец,
+      // переслав боту накладную или скрин OurVend, попадал в полевой
+      // разбор — а у его карточки бывает задача в работе, и снимок молча
+      // уходил к ней «фото ДО». Текст и кнопки такой барьер имеют, фото
+      // осталось без него.
+      const photoChat = u.message.chat.id;
+      if (!isAllowed(photoChat, allowlist) || asStaff.has(photoChat)) {
+        await routeStaffPhoto(photoChat, u.message.photo);
+      }
+    } else if (u.message?.text) {
+      const chatId = u.message.chat.id;
+
+      // «Побыть сотрудником»: владелец видит бота глазами полевого.
+      //
+      // Иначе проверить полевой поток нельзя вовсе — владелец идёт своей
+      // веткой (сводки, согласования), и меню сотрудника ему не
+      // показывается. Заводить второй аккаунт в Telegram ради проверки
+      // того, что сам же и раздаёшь, — плохой обмен.
+      //
+      // Кнопки визарда и так проваливаются в ветку сотрудника, не хватало
+      // только текста: нажатие кнопки меню — это обычное сообщение.
+      //
+      // Режим живёт в памяти процесса: после выката бот перезапускается и
+      // владелец снова владелец. Для проверки это правильное поведение —
+      // забыть выйти нельзя.
+      if (isAllowed(chatId, allowlist) && asStaffMode(chatId, u.message.text, asStaff)) {
+        await tg.sendMessage(
+          chatId,
+          asStaff.has(chatId)
+            ? "Ты в режиме сотрудника — бот отвечает так, как увидят полевые. Обратно: «я владелец»."
+            : "Вернул режим владельца.",
+          asStaff.has(chatId) ? undefined : { remove_keyboard: true },
+        );
+        if (asStaff.has(chatId)) await routeStaffMessage(chatId, "/start", u.message.from?.username);
+        return;
+      }
+
+      if (isAllowed(chatId, allowlist) && !asStaff.has(chatId)) {
+        // Подключение сотрудника — мутация с состоянием, ловим до общего
+        // обработчика: иначе «подключить» ушло бы в разбор намерений.
+        if (isStaffAddTrigger(u.message.text)) {
+          try {
+            const r = await startStaffAdd(chatId, staffDeps);
+            await tg.sendMessage(chatId, r.text, r.keyboard);
+          } catch (err) {
+            console.error("Подключение сотрудника не начато:", err);
+            await tg.sendMessage(chatId, "Не удалось прочитать список сотрудников из Core.");
+          }
+          return;
+        }
+        const reply = await handleMessage(chatId, u.message.text, deps);
+        if (reply) {
+          await tg.sendMessage(chatId, reply.text, reply.keyboard);
+          // Файл идёт отдельным сообщением: у документа своя доставка,
+          // и она не должна мешать тексту, если сорвётся.
+          if (reply.document) {
+            try {
+              await tg.sendDocument(chatId, reply.document.filename, reply.document.content);
+            } catch (err) {
+              console.error("Файл не отправлен:", err);
+              await tg.sendMessage(chatId, "Файл получился, но отправить не вышло. Повтори запрос.");
+            }
+          }
+        }
+      } else {
+        // Не владелец — возможно, сотрудник. Ему доступны только свои задачи.
+        await routeStaffMessage(chatId, u.message.text, u.message.from?.username);
+      }
+    } else if (u.callback_query?.data) {
+      const chatId = u.callback_query.message?.chat.id;
+      if (chatId === undefined) return;
+      const data = u.callback_query.data;
+
+      // Режим «побыть сотрудником» отключает владельческую ветку и здесь,
+      // а не только у текста. Иначе фолбэк «эта кнопка устарела» ниже
+      // съедает ЛЮБОЕ незнакомое нажатие вместе с `continue`, и кнопки
+      // визарда (точка, бункер, цифры) до обработчика сотрудника не
+      // доходят вовсе: меню открывается, а нажать в нём нельзя ничего.
+      if (isAllowed(chatId, allowlist) && !asStaff.has(chatId)) {
+        // Кнопки визарда подключения (sa:) — до согласований: у них
+        // разные пространства, но проверить надо раньше фолбэка
+        // «эта кнопка устарела».
+        const sa = parseStaffAddCallback(data);
+        if (sa) {
+          try {
+            const res = await handleStaffAddCallback(chatId, sa, staffDeps, botUsername);
+            await tg.answerCallback(u.callback_query.id, res.answer);
+            if (res.message) await tg.sendMessage(chatId, res.message.text, res.message.keyboard);
+          } catch (err) {
+            console.error("Кнопка подключения не сработала:", err);
+            await tg.answerCallback(u.callback_query.id, "Не получилось, попробуй ещё раз");
+          }
+          return;
+        }
+
+        const parsed = parseApprovalCallback(data);
+        if (!parsed) {
+          // Неизвестная кнопка: молчание оставляет вечный спиннер —
+          // выглядит как «кнопки не работают».
+          await tg.answerCallback(u.callback_query.id, "Эта кнопка устарела");
+          return;
+        }
+        const DECIDED_LABEL = {
+          approved: "✅ Одобрено — исполняю",
+          rejected: "❌ Отклонено",
+          clarify: "❓ Отправлено на уточнение",
+        } as const;
+        try {
+          await deps.core.decide(parsed.id, parsed.decision, `telegram:${chatId}`);
+          await tg.answerCallback(u.callback_query.id, "Решение записано");
+          // Карточка должна показать итог и перестать предлагать кнопки:
+          // иначе кажется, что нажатие не сработало.
+          const msg = u.callback_query.message;
+          if (msg?.message_id !== undefined && typeof msg.text === "string") {
+            try {
+              await tg.editMessage(chatId, msg.message_id, `${msg.text}
+
+${DECIDED_LABEL[parsed.decision]}`);
+            } catch {
+              // Не переписалось (старое сообщение) — решение всё равно записано.
+            }
+          }
+        } catch (err) {
+          console.error("Решение не записано:", err);
+          // Самая частая причина — уже решено (в панели или тут же раньше).
+          const detail = err instanceof Error && err.message.includes("уже закрыт")
+            ? "Уже решено раньше — карточка устарела"
+            : "Не удалось записать решение";
+          await tg.answerCallback(u.callback_query.id, detail);
+        }
+        return;
+      }
+
+      // Кнопка от сотрудника: «Взял» / «Сделал» по своей задаче.
+      const person = await personOf(chatId);
+      if (person === null) return; // постороннему не отвечаем вовсе
+      try {
+        const res = await handleStaffCallback(chatId, data, person, staffDeps);
+        await tg.answerCallback(u.callback_query.id, res.answer);
+        // Перерисовка на месте: карточка задачи должна меняться там же, где
+        // на неё нажали. Не вышло (сообщение старое, текст тот же) — шлём
+        // новым сообщением, иначе нажатие выглядит как «ничего не сделал».
+        if (res.edit) {
+          const msgId = u.callback_query.message?.message_id;
+          let edited = false;
+          if (msgId !== undefined) {
+            try {
+              await tg.editMessage(chatId, msgId, res.edit.text, res.edit.keyboard);
+              edited = true;
+            } catch (err) {
+              console.error("Карточку задачи не переписать:", err);
+            }
+          }
+          if (!edited) await tg.sendMessage(chatId, res.edit.text, res.edit.keyboard);
+        }
+        if (res.message) await tg.sendMessage(chatId, res.message, res.keyboard);
+        // Владелец узнаёт о сборе сразу — деньги в пути, приём ждёт в панели.
+        if (res.ownerNote) {
+          for (const ownerChat of allowlist) {
+            try {
+              await tg.sendMessage(ownerChat, res.ownerNote);
+            } catch (err) {
+              console.error("Владелец не уведомлён об инкассации:", err);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Кнопка задачи не сработала:", err);
+        await tg.answerCallback(u.callback_query.id, "Не получилось, попробуй ещё раз");
+      }
+    }
+  };
+
   // Опрос обновлений
   for (;;) {
     try {
       const updates = await tg.getUpdates();
       for (const u of updates) {
-        if (u.message?.photo && u.message.photo.length > 0) {
-          // Фото — только полевая ветка, и только для тех, кто в ней сейчас.
-          //
-          // Барьер тут был обещан комментарием, но не написан: ветка стояла
-          // первой в цепочке и не проверяла ни allowlist, ни режим. Владелец,
-          // переслав боту накладную или скрин OurVend, попадал в полевой
-          // разбор — а у его карточки бывает задача в работе, и снимок молча
-          // уходил к ней «фото ДО». Текст и кнопки такой барьер имеют, фото
-          // осталось без него.
-          const photoChat = u.message.chat.id;
-          if (!isAllowed(photoChat, allowlist) || asStaff.has(photoChat)) {
-            await routeStaffPhoto(photoChat, u.message.photo);
-          }
-        } else if (u.message?.text) {
-          const chatId = u.message.chat.id;
-
-          // «Побыть сотрудником»: владелец видит бота глазами полевого.
-          //
-          // Иначе проверить полевой поток нельзя вовсе — владелец идёт своей
-          // веткой (сводки, согласования), и меню сотрудника ему не
-          // показывается. Заводить второй аккаунт в Telegram ради проверки
-          // того, что сам же и раздаёшь, — плохой обмен.
-          //
-          // Кнопки визарда и так проваливаются в ветку сотрудника, не хватало
-          // только текста: нажатие кнопки меню — это обычное сообщение.
-          //
-          // Режим живёт в памяти процесса: после выката бот перезапускается и
-          // владелец снова владелец. Для проверки это правильное поведение —
-          // забыть выйти нельзя.
-          if (isAllowed(chatId, allowlist) && asStaffMode(chatId, u.message.text, asStaff)) {
-            await tg.sendMessage(
-              chatId,
-              asStaff.has(chatId)
-                ? "Ты в режиме сотрудника — бот отвечает так, как увидят полевые. Обратно: «я владелец»."
-                : "Вернул режим владельца.",
-              asStaff.has(chatId) ? undefined : { remove_keyboard: true },
-            );
-            if (asStaff.has(chatId)) await routeStaffMessage(chatId, "/start", u.message.from?.username);
-            continue;
-          }
-
-          if (isAllowed(chatId, allowlist) && !asStaff.has(chatId)) {
-            // Подключение сотрудника — мутация с состоянием, ловим до общего
-            // обработчика: иначе «подключить» ушло бы в разбор намерений.
-            if (isStaffAddTrigger(u.message.text)) {
-              try {
-                const r = await startStaffAdd(chatId, staffDeps);
-                await tg.sendMessage(chatId, r.text, r.keyboard);
-              } catch (err) {
-                console.error("Подключение сотрудника не начато:", err);
-                await tg.sendMessage(chatId, "Не удалось прочитать список сотрудников из Core.");
-              }
-              continue;
-            }
-            const reply = await handleMessage(chatId, u.message.text, deps);
-            if (reply) {
-              await tg.sendMessage(chatId, reply.text, reply.keyboard);
-              // Файл идёт отдельным сообщением: у документа своя доставка,
-              // и она не должна мешать тексту, если сорвётся.
-              if (reply.document) {
-                try {
-                  await tg.sendDocument(chatId, reply.document.filename, reply.document.content);
-                } catch (err) {
-                  console.error("Файл не отправлен:", err);
-                  await tg.sendMessage(chatId, "Файл получился, но отправить не вышло. Повтори запрос.");
-                }
-              }
-            }
-          } else {
-            // Не владелец — возможно, сотрудник. Ему доступны только свои задачи.
-            await routeStaffMessage(chatId, u.message.text, u.message.from?.username);
-          }
-        } else if (u.callback_query?.data) {
-          const chatId = u.callback_query.message?.chat.id;
-          if (chatId === undefined) continue;
-          const data = u.callback_query.data;
-
-          // Режим «побыть сотрудником» отключает владельческую ветку и здесь,
-          // а не только у текста. Иначе фолбэк «эта кнопка устарела» ниже
-          // съедает ЛЮБОЕ незнакомое нажатие вместе с `continue`, и кнопки
-          // визарда (точка, бункер, цифры) до обработчика сотрудника не
-          // доходят вовсе: меню открывается, а нажать в нём нельзя ничего.
-          if (isAllowed(chatId, allowlist) && !asStaff.has(chatId)) {
-            // Кнопки визарда подключения (sa:) — до согласований: у них
-            // разные пространства, но проверить надо раньше фолбэка
-            // «эта кнопка устарела».
-            const sa = parseStaffAddCallback(data);
-            if (sa) {
-              try {
-                const res = await handleStaffAddCallback(chatId, sa, staffDeps, botUsername);
-                await tg.answerCallback(u.callback_query.id, res.answer);
-                if (res.message) await tg.sendMessage(chatId, res.message.text, res.message.keyboard);
-              } catch (err) {
-                console.error("Кнопка подключения не сработала:", err);
-                await tg.answerCallback(u.callback_query.id, "Не получилось, попробуй ещё раз");
-              }
-              continue;
-            }
-
-            const parsed = parseApprovalCallback(data);
-            if (!parsed) {
-              // Неизвестная кнопка: молчание оставляет вечный спиннер —
-              // выглядит как «кнопки не работают».
-              await tg.answerCallback(u.callback_query.id, "Эта кнопка устарела");
-              continue;
-            }
-            const DECIDED_LABEL = {
-              approved: "✅ Одобрено — исполняю",
-              rejected: "❌ Отклонено",
-              clarify: "❓ Отправлено на уточнение",
-            } as const;
-            try {
-              await deps.core.decide(parsed.id, parsed.decision, `telegram:${chatId}`);
-              await tg.answerCallback(u.callback_query.id, "Решение записано");
-              // Карточка должна показать итог и перестать предлагать кнопки:
-              // иначе кажется, что нажатие не сработало.
-              const msg = u.callback_query.message;
-              if (msg?.message_id !== undefined && typeof msg.text === "string") {
-                try {
-                  await tg.editMessage(chatId, msg.message_id, `${msg.text}
-
-${DECIDED_LABEL[parsed.decision]}`);
-                } catch {
-                  // Не переписалось (старое сообщение) — решение всё равно записано.
-                }
-              }
-            } catch (err) {
-              console.error("Решение не записано:", err);
-              // Самая частая причина — уже решено (в панели или тут же раньше).
-              const detail = err instanceof Error && err.message.includes("уже закрыт")
-                ? "Уже решено раньше — карточка устарела"
-                : "Не удалось записать решение";
-              await tg.answerCallback(u.callback_query.id, detail);
-            }
-            continue;
-          }
-
-          // Кнопка от сотрудника: «Взял» / «Сделал» по своей задаче.
-          const person = await personOf(chatId);
-          if (person === null) continue; // постороннему не отвечаем вовсе
-          try {
-            const res = await handleStaffCallback(chatId, data, person, staffDeps);
-            await tg.answerCallback(u.callback_query.id, res.answer);
-            // Перерисовка на месте: карточка задачи должна меняться там же, где
-            // на неё нажали. Не вышло (сообщение старое, текст тот же) — шлём
-            // новым сообщением, иначе нажатие выглядит как «ничего не сделал».
-            if (res.edit) {
-              const msgId = u.callback_query.message?.message_id;
-              let edited = false;
-              if (msgId !== undefined) {
-                try {
-                  await tg.editMessage(chatId, msgId, res.edit.text, res.edit.keyboard);
-                  edited = true;
-                } catch (err) {
-                  console.error("Карточку задачи не переписать:", err);
-                }
-              }
-              if (!edited) await tg.sendMessage(chatId, res.edit.text, res.edit.keyboard);
-            }
-            if (res.message) await tg.sendMessage(chatId, res.message, res.keyboard);
-            // Владелец узнаёт о сборе сразу — деньги в пути, приём ждёт в панели.
-            if (res.ownerNote) {
-              for (const ownerChat of allowlist) {
-                try {
-                  await tg.sendMessage(ownerChat, res.ownerNote);
-                } catch (err) {
-                  console.error("Владелец не уведомлён об инкассации:", err);
-                }
-              }
-            }
-          } catch (err) {
-            console.error("Кнопка задачи не сработала:", err);
-            await tg.answerCallback(u.callback_query.id, "Не получилось, попробуй ещё раз");
-          }
+        try {
+          await processUpdate(u);
+        } catch (err) {
+          console.error("Сообщение из пачки не обработано (пачка продолжена):", err);
         }
       }
     } catch (err) {

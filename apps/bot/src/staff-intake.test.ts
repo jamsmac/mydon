@@ -148,3 +148,35 @@ describe("Поток прихода", () => {
     assert.equal(conversations.get(6), null);
   });
 });
+
+describe("Сбой декоративного запроса остатка не превращает успех в молчание", () => {
+  it("addIntake прошёл, stockBalance упал — ответ честный: записано, второй раз не вводить", async () => {
+    // Ответ после успешной записи зависел от ВТОРОГО сетевого вызова: его сбой
+    // глотался, сотрудник не получал ничего и вводил число снова — двойной приход.
+    let balCalls = 0;
+    const { core, calls } = stubCore({
+      stockBalance: async (warehouseId: string, ingredientId: string) => {
+        balCalls += 1;
+        if (balCalls > 1) throw new Error("Core недоступен");
+        return {
+          warehouseId,
+          warehouseName: "Основной",
+          ingredientId,
+          ingredientName: "Зёрна",
+          baseUnit: "кг",
+          qty: 10,
+          unconvertible: 0,
+        };
+      },
+    });
+    const conversations = new Conversations();
+    const deps = { core, conversations };
+    await startIntake(9, deps);
+    await handleIntakeCallback(9, { kind: "ingredient", id: ING }, ME, deps);
+    const reply = await handleIntakeCount(9, "5", ME, deps);
+    assert.match(reply.text, /Приход записан/);
+    assert.match(reply.text, /второй раз не вводи/);
+    assert.equal(calls.filter((c) => c.startsWith("intake:")).length, 1);
+    assert.equal(conversations.get(9), null, "мастер завершён — повторное число не станет вторым приходом");
+  });
+});

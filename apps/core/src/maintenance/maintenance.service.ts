@@ -57,6 +57,8 @@ export interface CreateLogInput {
   outcome?: MaintenanceOutcome;
   note?: string;
   counterValue?: number;
+  /** Ключ идемпотентности от клиента: ретрай не даёт вторую запись. */
+  clientKey?: string;
   createdBy?: string;
 }
 
@@ -73,6 +75,8 @@ export interface SwapPartInput {
   note?: string;
   warrantyUntil?: string;
   performedOn?: string;
+  /** Ключ идемпотентности от клиента: ретрай не даёт вторую замену. */
+  clientKey?: string;
   createdBy?: string;
 }
 
@@ -171,9 +175,22 @@ export class MaintenanceService {
           outcome: input.outcome ?? null,
           note: input.note ?? null,
           counterValue: input.counterValue ?? null,
+          clientKey: input.clientKey ?? null,
           createdBy: input.createdBy ?? "owner",
         })
+        .onConflictDoNothing({ target: maintenanceLog.clientKey })
         .returning();
+
+      // Повтор по clientKey: та же кнопка нажата второй раз после таймаута.
+      // Возвращаем прежнюю запись; якорь и аудит уже отработали в первый раз.
+      if (!row) {
+        const [existing] = await tx
+          .select()
+          .from(maintenanceLog)
+          .where(eq(maintenanceLog.clientKey, input.clientKey!))
+          .limit(1);
+        return existing;
+      }
 
       // Факт может прийти сразу закрытым — так делает бот в «🗓 Графики».
       // Тогда срок обязан сдвинуться здесь же, иначе сообщение сотруднику
@@ -697,9 +714,33 @@ export class MaintenanceService {
           performedOn,
           outcome: "done",
           note: input.note ?? null,
+          clientKey: input.clientKey ?? null,
           createdBy: input.createdBy ?? "owner",
         })
+        .onConflictDoNothing({ target: maintenanceLog.clientKey })
         .returning();
+
+      // Повтор по clientKey: замена уже записана первой попыткой. Собираем
+      // тот же ответ из существующих строк — узлы не трогаем, иначе ретрай
+      // «снимал» бы только что поставленную деталь как прежнюю.
+      if (!log) {
+        const [existing] = await tx
+          .select()
+          .from(maintenanceLog)
+          .where(eq(maintenanceLog.clientKey, input.clientKey!))
+          .limit(1);
+        const [installedBefore] = await tx
+          .select()
+          .from(machinePart)
+          .where(eq(machinePart.installLogId, existing.id))
+          .limit(1);
+        const [removedBefore] = await tx
+          .select()
+          .from(machinePart)
+          .where(eq(machinePart.removeLogId, existing.id))
+          .limit(1);
+        return { log: existing, removed: removedBefore ?? null, installed: installedBefore };
+      }
 
       // Что стояло на этом месте до сих пор.
       const [open] = await tx

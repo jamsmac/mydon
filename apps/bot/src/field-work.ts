@@ -21,6 +21,7 @@ import {
 import type { CoreClient, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import { objectName, pickObject } from "./machine-picker";
+import { newRunId } from "./staff-refill";
 import type { StaffReply } from "./staff";
 
 /**
@@ -40,6 +41,22 @@ import type { StaffReply } from "./staff";
 export interface FieldDeps {
   core: CoreClient;
   conversations: Conversations;
+}
+
+/**
+ * Ключ идемпотентности мастера: повтор ТОГО ЖЕ нажатия несёт то же значение.
+ *
+ * Таймаут клиента при успехе на сервере + честный ретрай раньше давали вторую
+ * замену/чистку/заявку (образец решения — refillClientKey у заливок).
+ * В ключ входит и финальный выбор (`last`): если после сбоя человек нажал
+ * ДРУГУЮ кнопку, это другое действие, а не повтор — дедупить его нельзя.
+ */
+function masterClientKey(
+  prefix: string,
+  data: Record<string, unknown>,
+  last: string,
+): { clientKey: string } | Record<string, never> {
+  return typeof data.runId === "string" ? { clientKey: `${prefix}:${data.runId}:${last}` } : {};
 }
 
 /** Флоу мастеров — те же строки, что в Conversations.flow. */
@@ -95,7 +112,7 @@ function reasonKeyboard(): NonNullable<StaffReply["keyboard"]> {
 }
 
 export async function startPartReplace(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
-  deps.conversations.start(chatId, "part-replace", "object");
+  deps.conversations.start(chatId, "part-replace", "object", { runId: newRunId() });
   return pickObject(person, deps, "🔧 Замена детали. На каком автомате?");
 }
 
@@ -180,6 +197,7 @@ export async function handlePartReplaceCallback(
     ...(newSerial ? { newSerial } : {}),
     reason: cb.reason,
     personId: person.id,
+    ...masterClientKey("pt", conv.data, cb.reason),
     createdBy: `person:${person.id}`,
   });
 
@@ -236,7 +254,7 @@ function cleanKeyboard(): NonNullable<StaffReply["keyboard"]> {
 }
 
 export async function startClean(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
-  deps.conversations.start(chatId, "clean", "object");
+  deps.conversations.start(chatId, "clean", "object", { runId: newRunId() });
   return pickObject(person, deps, "🧽 Чистка. На каком автомате?");
 }
 
@@ -269,6 +287,7 @@ export async function handleCleanCallback(
     ...(partKind ? { partKind } : {}),
     personId: person.id,
     outcome: "done",
+    ...masterClientKey("cl", conv.data, isSanitation ? "san" : (partKind ?? "all")),
     createdBy: `person:${person.id}`,
   });
 
@@ -320,7 +339,7 @@ function resultKeyboard(): NonNullable<StaffReply["keyboard"]> {
 }
 
 export async function startServiceCheck(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
-  deps.conversations.start(chatId, "service-check", "object");
+  deps.conversations.start(chatId, "service-check", "object", { runId: newRunId() });
   return pickObject(person, deps, "🛠 Технический осмотр. Какой автомат?");
 }
 
@@ -364,6 +383,7 @@ export async function handleServiceCheckCallback(
     personId: person.id,
     outcome: cb.outcome,
     note: INSPECTION_LABELS[inspection],
+    ...masterClientKey("sv", conv.data, cb.outcome),
     createdBy: `person:${person.id}`,
   });
 
@@ -442,7 +462,7 @@ export function problemDoneKeyboard(entityId: string): NonNullable<StaffReply["k
 }
 
 export async function startProblem(chatId: number, person: PersonRow, deps: FieldDeps): Promise<StaffReply> {
-  deps.conversations.start(chatId, "problem", "object");
+  deps.conversations.start(chatId, "problem", "object", { runId: newRunId() });
   return pickObject(person, deps, "⚠️ Поломка. На каком автомате?");
 }
 
@@ -514,6 +534,7 @@ export async function handleProblemCallback(
     entityId,
     description: `Заявка от ${person.name}. Срочность: ${URGENCY_LABELS[cb.urgency]}`,
     priority: URGENCY_PRIORITY[cb.urgency],
+    ...masterClientKey("pr", conv.data, cb.urgency),
     createdBy: `person:${person.id}`,
   });
 

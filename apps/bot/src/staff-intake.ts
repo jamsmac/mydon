@@ -179,8 +179,15 @@ export async function handleIntakeCount(
   deps.conversations.clear(chatId);
 
   // Новый остаток — чтобы сотрудник видел итог, а не только «записал».
-  const bal = await deps.core.stockBalance(warehouseId, ingredientId);
-  const now = bal.qty !== null ? ` Стало ${fmtQty(bal.qty)} ${baseUnit}.` : "";
+  // Запрос ДЕКОРАТИВНЫЙ: приход уже в базе, и его сбой не должен превращать
+  // успех в молчание — иначе человек вводил бы число снова и задваивал приход.
+  let now = "";
+  try {
+    const bal = await deps.core.stockBalance(warehouseId, ingredientId);
+    now = bal.qty !== null ? ` Стало ${fmtQty(bal.qty)} ${baseUnit}.` : "";
+  } catch {
+    now = " Остаток показать не смог — но приход уже в базе, второй раз не вводи.";
+  }
   return {
     text: `📦 Приход записан: +${fmtQty(qty)} ${baseUnit} «${ingredientName}».${now} ✅`,
   };

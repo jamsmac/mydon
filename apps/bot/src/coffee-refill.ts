@@ -760,8 +760,10 @@ export async function handleCoffeeWashCallback(
   // cb.kind === "position" — сразу сохраняем, шагов больше нет.
   const locationId = String(conv.data.locationId ?? "");
   const locationName = String(conv.data.locationName ?? "");
-  deps.conversations.clear(chatId);
-  if (!locationId) return { answer: "Данные потерялись", message: { text: "Начни заново: «помыл»." } };
+  if (!locationId) {
+    deps.conversations.clear(chatId);
+    return { answer: "Данные потерялись", message: { text: "Начни заново: «помыл»." } };
+  }
 
   await deps.core.recordCoffeeWash({
     locationId,
@@ -769,6 +771,11 @@ export async function handleCoffeeWashCallback(
     kind: "wash",
     performedBy: `person:${person.id}`,
   });
+  // Разговор стираем ПОСЛЕ успешной записи, а не до — тот же принцип, что в
+  // saveRefill: иначе сбой Core оставлял человека с советом «попробуй ещё
+  // раз», который упирался в «Визард истёк», а «начни заново» дублировал
+  // мойку, если сбой был таймаутом при успехе на сервере.
+  deps.conversations.clear(chatId);
   return {
     answer: "Записал",
     message: { text: `✅ Мойка отмечена: «${locationName}», бункер ${cb.position}.` },

@@ -448,3 +448,72 @@ describe("Заявка о поломке предлагает перевести
     assert.equal(parseProblemCallback("pr:rep:не-uuid"), null);
   });
 });
+
+describe("Идемпотентность полевых мастеров: повтор той же кнопки несёт тот же ключ", () => {
+  it("замена узла: ретрай после сбоя шлёт тот же clientKey, Core дедупит", async () => {
+    const conversations = new Conversations();
+    const keys: string[] = [];
+    let fail = true;
+    const { core } = stubCore({
+      swapPart: async (i: Record<string, unknown>) => {
+        keys.push(String(i.clientKey ?? ""));
+        if (fail) throw new Error("таймаут");
+        return { log: { id: "log-1" }, removed: null };
+      },
+    });
+    const deps = { core, conversations };
+    await startPartReplace(1, ME, deps);
+    await onObjectPicked(1, MACHINE, deps);
+    await handlePartReplaceCallback(1, { kind: "part", part: "grinder" }, ME, deps);
+    await handlePartReplaceCallback(1, { kind: "noSerial" }, ME, deps);
+    await assert.rejects(handlePartReplaceCallback(1, { kind: "reason", reason: "failure" }, ME, deps));
+
+    fail = false;
+    await handlePartReplaceCallback(1, { kind: "reason", reason: "failure" }, ME, deps);
+    assert.equal(keys.length, 2);
+    assert.match(keys[0], /^pt:.+:failure$/);
+    assert.equal(keys[0], keys[1], "повтор ТОГО ЖЕ нажатия — тот же ключ");
+  });
+
+  it("другая кнопка после сбоя — ДРУГОЙ ключ: это другое действие, не повтор", async () => {
+    const conversations = new Conversations();
+    const keys: string[] = [];
+    const { core } = stubCore({
+      createMaintenanceLog: async (i: Record<string, unknown>) => {
+        keys.push(String(i.clientKey ?? ""));
+        return { id: "log-2" };
+      },
+    });
+    const deps = { core, conversations };
+    const { startClean } = await import("./field-work");
+    await startClean(2, ME, deps);
+    await onObjectPicked(2, MACHINE, deps);
+    await handleCleanCallback(2, { kind: "target", part: "mixer" }, ME, deps);
+    // Второй заход мастера — новый runId, санобработка — свой суффикс.
+    await startClean(2, ME, deps);
+    await onObjectPicked(2, MACHINE, deps);
+    await handleCleanCallback(2, { kind: "sanitation" }, ME, deps);
+    assert.equal(keys.length, 2);
+    assert.match(keys[0], /^cl:.+:mixer$/);
+    assert.match(keys[1], /^cl:.+:san$/);
+    assert.notEqual(keys[0].split(":")[1], keys[1].split(":")[1], "runId у заходов разный");
+  });
+
+  it("заявка о поломке уходит с ключом pr:", async () => {
+    const conversations = new Conversations();
+    const keys: string[] = [];
+    const { core } = stubCore({
+      createTask: async (i: Record<string, unknown>) => {
+        keys.push(String(i.clientKey ?? ""));
+        return { id: "task-1" };
+      },
+    });
+    const deps = { core, conversations };
+    await startProblem(3, ME, deps);
+    await onObjectPicked(3, MACHINE, deps);
+    await handleProblemCallback(3, { kind: "symptom", symptom: "dead" }, ME, deps);
+    await handleProblemCallback(3, { kind: "urgency", urgency: "1" }, ME, deps);
+    assert.equal(keys.length, 1);
+    assert.match(keys[0], /^pr:.+:1$/);
+  });
+});

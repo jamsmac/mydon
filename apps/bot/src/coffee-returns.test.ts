@@ -229,3 +229,37 @@ describe("Расходники ЧЕРЕЗ ДИСПЕТЧЕР (регрессия
     assert.equal(conversations.get(555)?.step, "cups", "шаг не потерян");
   });
 });
+
+describe("Сбой посреди возвратов — молчания и потери строк больше нет", () => {
+  it("частичный сбой: сводка говорит «N из M» и перечисляет строки для повтора", async () => {
+    // Раньше исключение на второй строке улетало наверх: первая уже записана,
+    // ответа нет, человек пересылал всё сообщение и дублировал записанное.
+    const { core, calls } = stubCore({
+      recordContainerReturn: async (input: Record<string, unknown>) => {
+        if (input.containerNumber === 19) throw new Error("Core недоступен");
+        calls.push({ kind: "return", input });
+        return { id: "ret-ok" };
+      },
+    });
+    const parsed = tryParseContainerReturns("Кпп остатки\n1. 026. 1119\n2. 019. 1944");
+    assert.ok(parsed);
+    const reply = await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.match(reply.text, /1 из 2/);
+    assert.match(reply.text, /отправь ТОЛЬКО их/i);
+    assert.match(reply.text, /2\. 019\. 1944/, "строка для повтора — в том же формате, каким её набирают");
+    assert.equal(calls.length, 1, "успешная строка записана ровно один раз");
+  });
+
+  it("полный сбой: честное «ни одна строка не записана», а не тишина и не «✅»", async () => {
+    const { core } = stubCore({
+      recordContainerReturn: async () => {
+        throw new Error("Core недоступен");
+      },
+    });
+    const parsed = tryParseContainerReturns("1. 026. 1119\n2. 019. 1944");
+    assert.ok(parsed);
+    const reply = await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.match(reply.text, /ни одна строка не записана/i);
+    assert.doesNotMatch(reply.text, /✅/);
+  });
+});

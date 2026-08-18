@@ -36,6 +36,10 @@ export class CreateTaskDto {
   @IsOptional() @IsString() @MaxLength(128)
   createdBy?: string;
 
+  /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(128)
+  clientKey?: string;
+
   /** По какому объекту работа: автомат, точка, склад. */
   @IsOptional() @IsUUID()
   entityId?: string;
@@ -146,6 +150,7 @@ export class TasksController {
       ...(dto.priority ? { priority: dto.priority } : {}),
       ...(dto.createdBy ? { createdBy: dto.createdBy } : {}),
       ...(dto.entityId ? { entityId: dto.entityId } : {}),
+      ...(dto.clientKey ? { clientKey: dto.clientKey } : {}),
     });
   }
 

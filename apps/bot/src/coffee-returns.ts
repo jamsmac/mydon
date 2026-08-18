@@ -39,7 +39,14 @@ export function tryParseContainerReturns(text: string): ParsedReturns | null {
   return parsed.returns.length > 0 ? parsed : null;
 }
 
-/** Записать все строки возвратов; ответ — сводка, как привыкли видеть в группе. */
+/**
+ * Записать все строки возвратов; ответ — сводка, как привыкли видеть в группе.
+ *
+ * Строки пишутся по одной, и сбой ловится ПО СТРОКЕ: раньше исключение на
+ * третьей строке из пяти улетало наверх целиком — две уже записаны, ответа
+ * нет, человек пересылал всё сообщение и дублировал записанное. Теперь ответ
+ * честный: что записано, а какие строки надо отправить заново.
+ */
 export async function recordContainerReturns(
   parsed: ParsedReturns,
   person: PersonRow,
@@ -47,20 +54,37 @@ export async function recordContainerReturns(
 ): Promise<StaffReply> {
   const returnedDate = todayIso();
   let saved = 0;
+  const failed: string[] = [];
   for (const r of parsed.returns) {
-    await deps.core.recordContainerReturn({
-      position: r.position,
-      containerNumber: r.containerNumber,
-      weight: r.weight,
-      returnedDate,
-      ...(parsed.locationNote ? { locationNote: parsed.locationNote } : {}),
-      createdBy: `person:${person.id}`,
-    });
-    saved += 1;
+    try {
+      await deps.core.recordContainerReturn({
+        position: r.position,
+        containerNumber: r.containerNumber,
+        weight: r.weight,
+        returnedDate,
+        ...(parsed.locationNote ? { locationNote: parsed.locationNote } : {}),
+        createdBy: `person:${person.id}`,
+      });
+      saved += 1;
+    } catch {
+      // Формат строки — тот же, каким её набирают: скопировал и отправил.
+      failed.push(`${r.position}. ${String(r.containerNumber).padStart(3, "0")}. ${r.weight}`);
+    }
   }
 
   const where = parsed.locationNote ? ` (${parsed.locationNote})` : "";
-  const lines = [`✅ Остатки записал: ${saved} наборов${where}.`];
+  const lines: string[] = [];
+  if (failed.length === parsed.returns.length) {
+    lines.push("⚠️ Сервер не ответил — ни одна строка не записана. Отправь сообщение ещё раз через минуту.");
+  } else {
+    lines.push(`✅ Остатки записал: ${saved} из ${parsed.returns.length} наборов${where}.`);
+    if (failed.length > 0) {
+      lines.push(
+        "⚠️ Эти строки не прошли — отправь ТОЛЬКО их ещё раз:",
+        ...failed.map((l) => `  ${l}`),
+      );
+    }
+  }
   if (parsed.rejected.length > 0) {
     lines.push(
       `⚠ Не разобрал ${parsed.rejected.length} строк (числа вне диапазонов):`,
