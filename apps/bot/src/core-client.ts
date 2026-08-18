@@ -14,6 +14,8 @@ export interface ApprovalRow {
   agent: string;
   action: string;
   tier: string;
+  /** Данные запроса: карточка сотрудника несёт entityApprove/name/type/byName. */
+  payload?: Record<string, unknown>;
   decision: string;
   createdAt: string;
 }
@@ -727,6 +729,8 @@ export class CoreClient {
     ingredientId: string;
     qty: number;
     unit: string;
+    /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+    clientKey?: string;
     createdBy?: string;
     unitPrice?: number;
     supplier?: string;
@@ -775,6 +779,8 @@ export class CoreClient {
     actual: number;
     unit?: string;
     countedBy?: string;
+    /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+    clientKey?: string;
     note?: string;
   }): Promise<{
     changed: boolean;

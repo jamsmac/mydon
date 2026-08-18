@@ -203,6 +203,12 @@ export const task = pgTable(
     /** Когда исполнителю сообщили о возврате на доработку — защита от повторов. */
     redoNotifiedAt: timestamp("redo_notified_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    /**
+     * Кто ФАКТИЧЕСКИ закрыл: person:<id> | owner. Исполнитель (ownerRef) и
+     * закрывший — разные вопросы: задачу сотрудника может закрыть владелец
+     * из панели, и лента действий не должна приписывать это сотруднику.
+     */
+    closedBy: text("closed_by"),
     /** Когда исполнителю уже напомнили — чтобы не слать одно и то же дважды. */
     remindedAt: timestamp("reminded_at", { withTimezone: true }),
     /**
@@ -397,10 +403,17 @@ export const stockMovement = pgTable(
     /** id строки в источнике — ключ идемпотентного синка. У ручных пусто. */
     extId: text("ext_id"),
     note: text("note"),
+    /**
+     * Ключ идемпотентности от клиента (бот): таймаут при успехе + честный
+     * повтор не должны давать второй приход/корректировку. NULL у панели и
+     * синка (у синка своя идемпотентность source+extId).
+     */
+    clientKey: text("client_key"),
     createdBy: text("created_by"),
     createdAt: createdAt(),
   },
   (t) => [
+    uniqueIndex("stock_movement_client_key").on(t.clientKey),
     index("stock_movement_ing_idx").on(t.ingredientId, t.dt),
     index("stock_movement_wh_idx").on(t.warehouseId, t.dt),
     // Идемпотентность синка: одна строка источника — одно движение. Ручные
@@ -1760,6 +1773,31 @@ export const coffeeConsumable = pgTable(
 );
 
 /**
+ * Журнал ВВОДОВ расходников — append-only события.
+ *
+ * Строка coffee_consumable — СОСТОЯНИЕ дня (upsert по точке+дате): историю
+ * правок и авторство каждого ввода она держать не может по построению —
+ * правка задним числом переписывала прошлое ленты действий. Лента и «итоги
+ * вчера» читают события отсюда; агрегат дня остаётся в coffee_consumable.
+ */
+export const coffeeConsumableLog = pgTable(
+  "coffee_consumable_log",
+  {
+    id: id(),
+    locationId: uuid("location_id")
+      .references(() => entity.id)
+      .notNull(),
+    loggedDate: date("logged_date").notNull(),
+    water: integer("water").default(0).notNull(),
+    cups: integer("cups").default(0).notNull(),
+    lids: integer("lids").default(0).notNull(),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("coffee_consumable_log_created_idx").on(t.createdAt)],
+);
+
+/**
  * Мойка/обслуживание бункера или машины целиком (`position: null` — вся
  * точка). Событийный журнал фактов; план обслуживания (частота, срок) —
  * отдельная таблица `coffeeWashSchedule` ниже.
@@ -2282,6 +2320,7 @@ export const schema = {
   coffeeRefill,
   coffeeContainerReturn,
   coffeeConsumable,
+  coffeeConsumableLog,
   coffeeWashLog,
   coffeeWashSchedule,
   coffeeProduct,

@@ -497,7 +497,7 @@ export async function handleProblemCallback(
   cb: ProblemCallback,
   person: PersonRow,
   deps: FieldDeps,
-): Promise<{ answer: string; message?: StaffReply }> {
+): Promise<{ answer: string; message?: StaffReply; ownerNote?: string }> {
   if (cb.kind === "cancel") {
     // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
     // устаревшего экрана не должна гасить текущее дело — слот беседы один,
@@ -580,6 +580,11 @@ export async function handleProblemCallback(
         photoHint("фото поломки"),
       keyboard: problemDoneKeyboard(entityId),
     },
+    // Владелец узнаёт о поломке СРАЗУ — как об инкассации: раньше заявка
+    // всплывала только просрочкой или строкой брифинга через сутки.
+    ownerNote:
+      `⚠️ Поломка: ${name} — ${SYMPTOM_LABELS[symptom]} (${URGENCY_LABELS[cb.urgency]}).\n` +
+      `Заявил: ${person.name}. Заявка в общем списке.`,
     ...startAfterPhoto(chatId, "task", task.id, "заявке", deps),
   };
 }

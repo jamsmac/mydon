@@ -1,13 +1,16 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
+  approval,
   auditLog,
   entity,
   entityDraft,
+  event,
   geoPoint,
   machineCard,
   machinePlacement,
   maintenancePlan,
   org,
+  person,
   task,
 } from "@mydon/db";
 import {
@@ -411,6 +414,37 @@ export class EntitiesService {
 
       // Координаты — числами с проверкой диапазона, в той же транзакции.
       await syncGeoPoint(tx, created.id, (dto.attrs ?? {}) as Record<string, unknown>);
+
+      // Карточка от полевого сотрудника уходит и в очередь СОГЛАСОВАНИЙ:
+      // «согласования» бота и брифинг читают только таблицу approval, и без
+      // этой строки черновик был виден лишь в панели (/inbox) — владелец в
+      // Telegram о нём не узнавал вовсе.
+      const staffId = /^staff:([0-9a-f-]{36})$/.exec(fromSource)?.[1];
+      if (staffId) {
+        const [author] = await tx
+          .select({ name: person.name })
+          .from(person)
+          .where(eq(person.id, staffId));
+        const [req] = await tx
+          .insert(approval)
+          .values({
+            agent: fromSource,
+            action: `Новая карточка: ${created.name} (${created.type})`,
+            tier: "T1",
+            payload: {
+              entityApprove: { entityId: created.id },
+              name: created.name,
+              type: created.type,
+              byName: author?.name ?? null,
+            },
+          })
+          .returning();
+        await tx.insert(event).values({
+          source: fromSource,
+          type: "approval.requested",
+          payload: { approvalId: req.id, entityId: created.id },
+        });
+      }
 
       await tx.insert(auditLog).values({
         actorKind: "system",

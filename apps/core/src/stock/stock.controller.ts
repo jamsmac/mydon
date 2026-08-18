@@ -50,6 +50,10 @@ export class CreateMovementDto {
    */
   @IsOptional() @IsString() @MaxLength(128)
   createdBy?: string;
+
+  /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+  @IsOptional() @IsString() @MaxLength(128)
+  clientKey?: string;
 }
 
 /** Пересчёт: фактическое количество ингредиента на складе. */
@@ -71,6 +75,10 @@ export class StocktakeDto {
 
   @IsOptional() @IsString() @MaxLength(128)
   countedBy?: string;
+
+  /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+  @IsOptional() @IsString() @MaxLength(128)
+  clientKey?: string;
 }
 
 /** Склад: движения сырья и остаток на чтении. */

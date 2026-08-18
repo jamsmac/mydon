@@ -168,6 +168,9 @@ export class TasksService {
       const patch: Record<string, unknown> = { status };
       if (status === "done") {
         patch.completedAt = new Date();
+        // Кто фактически закрыл: лента действий не должна приписывать
+        // сотруднику закрытие, сделанное владельцем из панели.
+        patch.closedBy = actorRef;
         if (resultNote !== undefined && resultNote.trim().length > 0) {
           patch.resultNote = resultNote.trim();
         }

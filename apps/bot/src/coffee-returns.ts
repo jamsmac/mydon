@@ -61,8 +61,21 @@ export async function recordContainerReturns(
   // реально повторившийся вес шлётся отдельной строкой). Журнал недоступен —
   // пишем как есть: потерять сегодняшние остатки хуже редкого дубля.
   if (parsed.returns.length >= 2) {
-    const recent = await deps.core.containerReturns(300).catch(() => null);
+    const [recent, tare] = await Promise.all([
+      deps.core.containerReturns(300).catch(() => null),
+      deps.core.coffeeTare().catch(() => null),
+    ]);
     if (recent) {
+      // Пустой бункер весит ровно тару, и этот вес честно повторяется день ко
+      // дню — совпадение с прошлым тут НЕ признак пересылки. Свидетельствуют
+      // только «информативные» строки (вес заметно отличается от тары).
+      const tareByKey = new Map(
+        (tare ?? []).map((t) => [`${t.containerNumber}:${t.position}`, t.tareWeight] as const),
+      );
+      const informative = parsed.returns.filter((r) => {
+        const t = tareByKey.get(`${r.containerNumber}:${r.position}`);
+        return t == null || Math.abs(r.weight - t) > 5;
+      });
       const firstDate = new Map<string, string>();
       for (const r of recent) {
         const k = `${r.position}:${r.containerNumber}:${r.weight}`;
@@ -70,8 +83,8 @@ export async function recordContainerReturns(
         const prev = firstDate.get(k);
         if (prev === undefined || d > prev) firstDate.set(k, d);
       }
-      const dates = parsed.returns.map((r) => firstDate.get(`${r.position}:${r.containerNumber}:${r.weight}`));
-      const allOld = dates.every((d) => d !== undefined && d < returnedDate);
+      const dates = informative.map((r) => firstDate.get(`${r.position}:${r.containerNumber}:${r.weight}`));
+      const allOld = informative.length >= 2 && dates.every((d) => d !== undefined && d < returnedDate);
       if (allOld) {
         return {
           text: [

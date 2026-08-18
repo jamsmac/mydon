@@ -1,6 +1,7 @@
 import type { CoreClient, EntityRow, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import { applyPress, NUMPAD_MAX_DIGITS, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
+import { newRunId } from "./staff-refill";
 import type { StaffReply } from "./staff";
 import { fmtQty, parseQty } from "./staff-inventory";
 
@@ -75,10 +76,10 @@ export async function startIntake(chatId: number, deps: IntakeDeps): Promise<Sta
     return { text: "Складов в реестре пока нет — скажи владельцу." };
   }
   if (whs.length === 1) {
-    deps.conversations.start(chatId, "intake", "ingredient", { warehouseId: whs[0].id, warehouseName: whs[0].name });
+    deps.conversations.start(chatId, "intake", "ingredient", { warehouseId: whs[0].id, warehouseName: whs[0].name, runId: newRunId() });
     return ingredientStep(chatId, deps, whs[0].name);
   }
-  deps.conversations.start(chatId, "intake", "warehouse");
+  deps.conversations.start(chatId, "intake", "warehouse", { runId: newRunId() });
   return { text: "На какой склад пришло?", keyboard: pickKeyboard(whs, "wh") };
 }
 
@@ -237,11 +238,16 @@ async function saveIntakeCount(
     return { text: "Данные прихода потерялись — начни заново: «приход»." };
   }
 
+  // Ключ идемпотентности: повтор ТОГО ЖЕ количества в том же заходе мастера —
+  // повтор нажатия, а не второй приход (образец — masterClientKey полевых
+  // мастеров). Другое количество = другое действие.
+  const runId = typeof conv?.data.runId === "string" ? conv.data.runId : null;
   await deps.core.addIntake({
     warehouseId,
     ingredientId,
     qty,
     unit: baseUnit,
+    ...(runId ? { clientKey: `si:${runId}:${qty}` } : {}),
     createdBy: `person:${person.id}`,
   });
   deps.conversations.clear(chatId);

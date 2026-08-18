@@ -4,6 +4,7 @@ import { alias } from "drizzle-orm/pg-core";
 import {
   coffeeBunkerConfig,
   coffeeConsumable,
+  coffeeConsumableLog,
   coffeeContainerReturn,
   coffeeContainerTare,
   auditLog,
@@ -1049,30 +1050,42 @@ export class CoffeeService {
 
   /** Занести/поправить расход за день по точке (upsert по (точка, дата)). */
   async recordConsumable(input: ConsumableInput): Promise<{ ok: true }> {
-    await this.db
-      .insert(coffeeConsumable)
-      .values({
+    await this.db.transaction(async (tx) => {
+      await tx
+        .insert(coffeeConsumable)
+        .values({
+          locationId: input.locationId,
+          loggedDate: input.loggedDate,
+          water: input.water ?? 0,
+          cups: input.cups ?? 0,
+          lids: input.lids ?? 0,
+          createdBy: input.createdBy ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
+          // createdBy обновляется, только когда новый ввод НАЗВАЛ автора:
+          // авторство принадлежит последнему представившемуся, но правка
+          // из панели без createdBy не затирает автора-сотрудника в NULL.
+          set: {
+            water: input.water ?? 0,
+            cups: input.cups ?? 0,
+            lids: input.lids ?? 0,
+            ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+            updatedAt: new Date(),
+          },
+        });
+      // Событие ввода — в append-only журнал: строка выше — состояние дня,
+      // историю и «итоги вчера» по ней не воспроизвести (правка сдвигала
+      // прошлое ленты действий).
+      await tx.insert(coffeeConsumableLog).values({
         locationId: input.locationId,
         loggedDate: input.loggedDate,
         water: input.water ?? 0,
         cups: input.cups ?? 0,
         lids: input.lids ?? 0,
         createdBy: input.createdBy ?? null,
-      })
-      .onConflictDoUpdate({
-        target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
-        // createdBy обновляется, только когда новый ввод НАЗВАЛ автора:
-        // авторство принадлежит последнему представившемуся (лента действий
-        // не должна приписывать правку тому, кто вносил первым), но правка
-        // из панели без createdBy не затирает автора-сотрудника в NULL.
-        set: {
-          water: input.water ?? 0,
-          cups: input.cups ?? 0,
-          lids: input.lids ?? 0,
-          ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-          updatedAt: new Date(),
-        },
       });
+    });
     return { ok: true };
   }
 
