@@ -182,7 +182,13 @@ export async function handleSchedulesCallback(
   // «Графиков» не должна ни перетирать чужой мастер (start затирал недописанный
   // отчёт), ни подменять ему шаг (advance("list") окирпичивал заливку). Тот же
   // барьер, что поставлен кнопкам обхода в #149.
-  if (conv !== null && conv.flow !== "schedules") {
+  //
+  // Исключения — состояния, которые сама ветка считает НЕ «недописанным
+  // мастером»: меню точки обхода и необязательный шаг фото. Нижняя кнопка
+  // «Графиков» в них легально проходит — inline-путь обязан вести себя так же,
+  // иначе техник получает ложное «у тебя не дописано другое».
+  const droppable = conv === null || conv.flow === "schedules" || conv.flow === "coffee-visit" || conv.flow === "after-photo";
+  if (!droppable) {
     return {
       answer: "Кнопка устарела",
       message: { text: "Эта кнопка от прошлого экрана. Сейчас у тебя не дописано другое — сначала доделай его." },
@@ -205,7 +211,9 @@ export async function handleSchedulesCallback(
 
   if (cb.kind === "page") {
     const horizon = Number(conv?.data.horizon ?? DEFAULT_HORIZON);
-    deps.conversations.advance(chatId, "list", { page: cb.page });
+    // advance — только своему разговору: чужому (например, меню точки) он
+    // подменил бы шаг. Отрисовка от разговора не зависит.
+    if (conv?.flow === "schedules") deps.conversations.advance(chatId, "list", { page: cb.page });
     return { answer: `Стр. ${cb.page + 1}`, message: renderSchedules(rows, horizon, cb.page) };
   }
 

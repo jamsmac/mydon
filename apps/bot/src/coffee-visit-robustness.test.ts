@@ -346,3 +346,38 @@ describe("Аудит 18.08: слот беседы и вечные кнопки",
     assert.match(res.message ?? "", /завершён или истёк/i, "TTL не выдаётся за завершение");
   });
 });
+
+describe("Фиксы финального ревью 18.08", () => {
+  it("устаревшая «Отмена» заведения карточки (r:cancel) не гасит обход", async () => {
+    const { d } = deps();
+    await toVisitMenu(d);
+    const res = await CB(d, "r:cancel");
+    assert.equal(res.answer, "Кнопка устарела");
+    const more = await CB(d, "cv:more");
+    assert.match(more.edit?.text ?? more.message ?? "", /Какой бункер/i, "обход жив");
+  });
+
+  it("«залил воду» посреди обхода — расходники, а не мастер бункера", async () => {
+    const { d } = deps();
+    await toVisitMenu(d);
+    const res = await TX(d, "залил воду");
+    assert.match(res.text, /Вода/i, "ушли в расходники");
+    assert.doesNotMatch(res.text, /Какой бункер/i);
+  });
+
+  it("кнопки «Графиков» на меню точки не пугают ложным «не дописано другое»", async () => {
+    const { d } = deps({ maintenanceDue: async () => [] });
+    await toVisitMenu(d);
+    const { parseSchedulesCallback, handleSchedulesCallback } = await import("./schedules");
+    const res = await handleSchedulesCallback(CHAT, parseSchedulesCallback("sc:d:7")!, ME, d);
+    assert.notEqual(res.answer, "Кнопка устарела", "меню точки — не «недописанный мастер»");
+  });
+
+  it("«Ещё бункер» не стирает сводку заливки: ответ приходит новым сообщением", async () => {
+    const { d } = deps();
+    await toVisitMenu(d);
+    const more = await CB(d, "cv:more");
+    assert.equal(more.edit, undefined, "сводка с «чистый ингредиент N г» остаётся в чате");
+    assert.match(more.message ?? "", /Какой бункер/i);
+  });
+});

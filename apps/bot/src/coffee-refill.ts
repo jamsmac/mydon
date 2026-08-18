@@ -37,7 +37,9 @@ export function isCoffeeRefillTrigger(text: string): boolean {
   // С якорем ^: подстрока «бункер» без якоря перехватывала «помыл бункер» и
   // «почистил бункер» у мойки, как только заливка встала выше в реестре меню.
   // Правильный победитель не должен зависеть от порядка пунктов.
-  return /^(бункер|засыпал|залил|заливка|кофе.*залил)/i.test(text.trim());
+  // «залил(?!\s*вод)»: «залил воду» — это расходники точки (19-литровая
+  // бутыль), а не кофейный бункер.
+  return /^(бункер|засыпал|залил(?!\s*вод)|заливка|кофе.*залил)/i.test(text.trim());
 }
 
 /** Слова, которыми техник отмечает мойку/обслуживание. */
@@ -496,9 +498,21 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
       createdBy: `person:${person.id}`,
     });
   } catch (err) {
-    // 4xx — ошибка в самих данных: сервер не примет их и через минуту, совет
-    // «нажми ещё раз» был бы ложью и вечным кругом. Просим поправить ввод.
-    if (err instanceof CoreError && err.isClientError) {
+    // 401/403 — не «ошибка в данных» и не «попробуй позже»: это ключ доступа.
+    // Совет переввести вес был бы вечным кругом с затиранием черновика.
+    if (err instanceof CoreError && (err.status === 401 || err.status === 403)) {
+      deps.conversations.advance(chatId, "weight", { draft: String(filledWeight) });
+      return {
+        text: [
+          "⚠️ Запись не принята: у бота нет ключа доступа к записи. Скажи владельцу.",
+          `Всё набранное цело: бункер ${position}, ${filledWeight} г${containerNumber === null ? "" : `, набор ${containerNumber}`}.`,
+        ].join("\n"),
+        keyboard: weightStep(position, String(filledWeight)).keyboard,
+      };
+    }
+    // 400/422 — ошибка в самих данных: сервер не примет их и через минуту,
+    // совет «нажми ещё раз» был бы ложью и вечным кругом. Просим поправить.
+    if (err instanceof CoreError && (err.status === 400 || err.status === 422)) {
       deps.conversations.advance(chatId, "weight", { draft: "" });
       return {
         text: [
@@ -814,23 +828,48 @@ export async function handleCoffeeWashCallback(
   }
 
   if (cb.kind === "all") {
-    // По одному логу на каждую настроенную позицию: графики мойки ведутся
-    // по-бункерно, и одна запись «в целом» их не закрыла бы.
+    // По одному логу на настроенную позицию (графики мойки по-бункерные) ПЛЮС
+    // общий лог position=null — он закрывает планы «машина целиком». Каждая
+    // запись под своим try: частичный сбой отвечает честным «отметь эти по
+    // одному», а не предлагает ретрай всего цикла с дублями уже записанного.
     const config = await deps.core.coffeeBunkerConfig();
     const positions = [...new Set(config.map((c) => c.position))].sort((a, b) => a - b);
+    const failed: number[] = [];
+    let wholeOk = true;
+    try {
+      await deps.core.recordCoffeeWash({ locationId, kind: "wash", note: "вся машина", performedBy: `person:${person.id}` });
+    } catch {
+      wholeOk = false;
+    }
     for (const position of positions) {
-      await deps.core.recordCoffeeWash({
-        locationId,
-        position,
-        kind: "wash",
-        note: "вся машина",
-        performedBy: `person:${person.id}`,
-      });
+      try {
+        await deps.core.recordCoffeeWash({
+          locationId,
+          position,
+          kind: "wash",
+          note: "вся машина",
+          performedBy: `person:${person.id}`,
+        });
+      } catch {
+        failed.push(position);
+      }
+    }
+    if (!wholeOk && failed.length === positions.length) {
+      // Не записалось ничего — мастер жив, ту же кнопку можно нажать повторно.
+      return {
+        answer: "Не записал",
+        message: { text: "⚠️ Сервер не ответил — мойка не записана. Нажми «Вся машина» ещё раз через минуту." },
+      };
     }
     deps.conversations.clear(chatId);
+    const bunkers =
+      positions.length > 0
+        ? ` (бункеры: ${positions.join(", ")})`
+        : " — настроенных бункеров нет, записана мойка машины целиком";
+    const tail = failed.length > 0 ? `\n⚠️ Не прошли бункеры ${failed.join(", ")} — отметь их по одному.` : "";
     return {
       answer: "Записал",
-      message: { text: `✅ Мойка отмечена: «${locationName}», вся машина (бункеры: ${positions.join(", ")}).` },
+      message: { text: `✅ Мойка отмечена: «${locationName}», вся машина${bunkers}.${tail}` },
     };
   }
 

@@ -180,3 +180,44 @@ describe("Сбой декоративного запроса остатка не
     assert.equal(conversations.get(9), null, "мастер завершён — повторное число не станет вторым приходом");
   });
 });
+
+describe("Фиксы финального ревью 18.08: нумпад прихода", () => {
+  it("двойной тап «Готово» не пишет второй приход и не советует «начни заново»", async () => {
+    const conversations = new Conversations();
+    let saved = 0;
+    const { core } = stubCore({
+      addIntake: async () => {
+        saved += 1;
+        // Первый тап ещё «в полёте» — второй должен упереться в шаг saving.
+        const second = await handleIntakeCallback(11, { kind: "num", press: { kind: "done" } }, ME, {
+          core,
+          conversations,
+        });
+        assert.equal(second.answer, "Уже записываю…");
+        return { id: "mv-1" };
+      },
+    });
+    const deps = { core, conversations };
+    await startIntake(11, deps);
+    await handleIntakeCallback(11, { kind: "ingredient", id: ING }, ME, deps);
+    await handleIntakeCallback(11, { kind: "num", press: { kind: "digit", digit: "5" } }, ME, deps);
+    const done = await handleIntakeCallback(11, { kind: "num", press: { kind: "done" } }, ME, deps);
+    assert.equal(saved, 1, "движение записано ровно один раз");
+    assert.match(done.edit!.text, /Приход записан/);
+    // Тап по нумпаду с уже устаревшего экрана — без приглашения к повтору.
+    const stale = await handleIntakeCallback(11, { kind: "num", press: { kind: "done" } }, ME, deps);
+    assert.equal(stale.answer, "Экран устарел");
+    assert.doesNotMatch(stale.message?.text ?? "", /^Приход прервался/);
+  });
+
+  it("переполнение набора отвечает по делу, а не «Пусто»", async () => {
+    const conversations = new Conversations();
+    const { core } = stubCore();
+    const deps = { core, conversations };
+    await startIntake(12, deps);
+    await handleIntakeCallback(12, { kind: "ingredient", id: ING }, ME, deps);
+    for (const c of "12345") await handleIntakeCallback(12, { kind: "num", press: { kind: "digit", digit: c } }, ME, deps);
+    const over = await handleIntakeCallback(12, { kind: "num", press: { kind: "digit", digit: "6" } }, ME, deps);
+    assert.match(over.answer, /Не больше 5 цифр/);
+  });
+});

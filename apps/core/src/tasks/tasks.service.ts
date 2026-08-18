@@ -82,6 +82,9 @@ export class TasksService {
           .from(task)
           .where(eq(task.clientKey, input.clientKey!))
           .limit(1);
+        if (!existing) {
+          throw new Error("Повтор заявки ещё сохраняется — попробуй ещё раз");
+        }
         return existing;
       }
 

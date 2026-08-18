@@ -189,6 +189,9 @@ export class MaintenanceService {
           .from(maintenanceLog)
           .where(eq(maintenanceLog.clientKey, input.clientKey!))
           .limit(1);
+        if (!existing) {
+          throw new BadRequestException("Повтор записи ещё сохраняется — нажми ещё раз через минуту");
+        }
         return existing;
       }
 
@@ -729,11 +732,15 @@ export class MaintenanceService {
           .from(maintenanceLog)
           .where(eq(maintenanceLog.clientKey, input.clientKey!))
           .limit(1);
-        const [installedBefore] = await tx
-          .select()
-          .from(machinePart)
-          .where(eq(machinePart.installLogId, existing.id))
-          .limit(1);
+        const [installedBefore] = existing
+          ? await tx.select().from(machinePart).where(eq(machinePart.installLogId, existing.id)).limit(1)
+          : [];
+        // Конфликт по ключу без видимой записи — гонка с ещё не закоммиченной
+        // первой попыткой. Честная ошибка лучше «замены наполовину»: клиент
+        // повторит то же нажатие, и повтор попадёт в готовый replay.
+        if (!existing || !installedBefore) {
+          throw new BadRequestException("Повтор замены ещё записывается — нажми ещё раз через минуту");
+        }
         const [removedBefore] = await tx
           .select()
           .from(machinePart)

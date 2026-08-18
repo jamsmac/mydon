@@ -235,3 +235,21 @@ describe("Аудит 18.08: раскладка постоянного меню",
     assert.equal(isTasksTrigger("мои задачи"), true);
   });
 });
+
+describe("Фиксы финального ревью 18.08: живые фразы операторов", () => {
+  it("инкассация ловит «сдать выручку»/«снял выручку», задачи — «покажи задачи»", async () => {
+    const { isCollectTrigger, isTasksTrigger } = await import("./menu");
+    assert.equal(isCollectTrigger("сдать выручку"), true);
+    assert.equal(isCollectTrigger("снял выручку с автомата"), true);
+    assert.equal(isCollectTrigger("забрал выручку"), true);
+    assert.equal(isTasksTrigger("покажи задачи"), true);
+    assert.equal(isTasksTrigger("мои дела"), true);
+  });
+
+  it("«залил воду» — не заливка бункера", async () => {
+    const { isCoffeeRefillTrigger } = await import("./coffee-refill");
+    assert.equal(isCoffeeRefillTrigger("залил воду"), false);
+    assert.equal(isCoffeeRefillTrigger("залил кофе"), true);
+    assert.equal(isCoffeeRefillTrigger("заливка"), true);
+  });
+});

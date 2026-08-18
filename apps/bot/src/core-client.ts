@@ -887,11 +887,16 @@ export class CoreClient {
   }
 
   /** Возврат набора: строка «позиция. набор. вес» из привычного формата группы. */
-  /** Последние возвраты наборов — бот отсекает по ним пересланные старые списки. */
+  /**
+   * Последние возвраты наборов — бот отсекает по ним пересланные старые списки.
+   * Путь ЕДИНСТВЕННОГО числа — как у @Get("container-return") в контроллере:
+   * первая версия ходила на несуществующий «container-returns», ловила 404 в
+   * .catch(() => null) — и весь барьер молча не работал.
+   */
   containerReturns(limit = 300): Promise<
     { position: number; containerNumber: number; weight: number; returnedDate: string }[]
   > {
-    return this.request(`/coffee/container-returns?limit=${limit}`);
+    return this.request(`/coffee/container-return?limit=${limit}`);
   }
 
   recordContainerReturn(input: {

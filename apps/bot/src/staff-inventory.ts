@@ -1,6 +1,6 @@
 import type { CoreClient, EntityRow, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
-import { applyPress, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
+import { applyPress, NUMPAD_MAX_DIGITS, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
 import type { StaffReply } from "./staff";
 
 /**
@@ -130,21 +130,40 @@ export async function handleInventoryCallback(
 
   const conv = deps.conversations.get(chatId);
   if (conv?.flow !== "inventory") {
+    // Нумпад устаревшего экрана — без совета «начни заново»: после успешной
+    // записи он звучал бы как приглашение к повторной корректировке.
+    if (cb.kind === "num") {
+      return { answer: "Экран устарел", message: { text: "Этот нумпад уже неактуален. Если пересчёт не записан — начни заново: «инвентаризация»." } };
+    }
     return { answer: "Визард истёк", message: { text: "Пересчёт прервался. Начни заново: «инвентаризация»." } };
   }
 
   if (cb.kind === "num") {
-    if (conv.step !== "count") return { answer: "Не сейчас" };
+    if (conv.step !== "count") {
+      // «saving» — идёт запись по первому тапу: второй не должен ни писать,
+      // ни пугать.
+      return { answer: conv.step === "saving" ? "Уже записываю…" : "Не сейчас" };
+    }
     const draft = String(conv.data.draft ?? "");
     if (cb.press.kind === "digit" || cb.press.kind === "erase") {
       const next = applyPress(draft, cb.press);
-      if (next === draft) return { answer: "Пусто" };
+      if (next === draft) {
+        return { answer: cb.press.kind === "digit" ? `Не больше ${NUMPAD_MAX_DIGITS} цифр` : "Пусто" };
+      }
       deps.conversations.advance(chatId, "count", { draft: next });
       return { answer: next === "" ? "—" : next, edit: countScreen(conv.data, next) };
     }
     if (cb.press.kind !== "done") return { answer: "Не сейчас" };
     if (draft === "") return { answer: "Набери число" };
-    return { answer: draft, edit: await saveInventoryCount(chatId, Number(draft), person, deps) };
+    // Двойной тап «Готово»: помечаем «пишу» ДО запроса — повтор увидит шаг
+    // saving и не создаст вторую корректировку.
+    deps.conversations.advance(chatId, "saving", {});
+    try {
+      return { answer: draft, edit: await saveInventoryCount(chatId, Number(draft), person, deps) };
+    } catch (err) {
+      deps.conversations.advance(chatId, "count", { draft });
+      throw err;
+    }
   }
 
   if (cb.kind === "warehouse") {

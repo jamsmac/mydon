@@ -736,21 +736,16 @@ export async function handleStaffCallback(
       // что точка закрыта записью.
       return { answer: "Обход не найден", message: "Обход завершён или истёк по тишине. Начни заново: «бункер»." };
     }
+    // Новым сообщением, а НЕ edit: кнопки меню точки висят и под сводкой
+    // записанной заливки («чистый ингредиент N г — вноси в систему»), и edit
+    // стирал бы эти цифры ровно в момент, когда техник по ним работает.
     if (visitCb.kind === "more") {
       const step = await continueVisitRefill(chatId, visit, deps);
-      // Перерисовываем то же сообщение: меню точки не остаётся в чате ещё
-      // одним вечным экраном с живыми cv:-кнопками.
-      return {
-        answer: "Ещё бункер",
-        edit: { text: droppedNote + step.text, ...(step.keyboard ? { keyboard: step.keyboard } : {}) },
-      };
+      return { answer: "Ещё бункер", message: droppedNote + step.text, keyboard: step.keyboard };
     }
     if (visitCb.kind === "consumables") {
       const step = continueVisitConsumable(chatId, visit, deps);
-      return {
-        answer: "Расходники",
-        edit: { text: droppedNote + step.text, ...(step.keyboard ? { keyboard: step.keyboard } : {}) },
-      };
+      return { answer: "Расходники", message: droppedNote + step.text, keyboard: step.keyboard };
     }
     deps.conversations.clear(chatId);
     return {

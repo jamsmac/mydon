@@ -199,6 +199,13 @@ export async function handleRegisterCallback(
   deps: RegisterDeps,
 ): Promise<{ answer: string; message?: StaffReply }> {
   if (cb.kind === "cancel") {
+    // Барьер #149: «Отмена» с чужого устаревшего экрана не гасит текущее дело.
+    // Регистрация была единственным мастером без него — и именно ей эта ветка
+    // добавила два новых экрана с r:cancel.
+    const current = deps.conversations.get(chatId);
+    if (current !== null && current.flow !== "register") {
+      return { answer: "Кнопка устарела", message: { text: "Эта кнопка от прошлого шага — она уже не действует." } };
+    }
     deps.conversations.clear(chatId);
     return { answer: "Отменено", message: { text: "Заведение отменил." } };
   }
