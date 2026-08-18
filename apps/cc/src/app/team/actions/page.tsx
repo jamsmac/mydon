@@ -37,20 +37,22 @@ export default async function TeamActions({
   const period = PERIODS.find((p) => p.key === params.period) ?? PERIODS[0];
   const person = params.person && /^[0-9a-f-]{36}$/.test(params.person) ? params.person : undefined;
 
-  let rows: ActionRow[];
+  let allRows: ActionRow[];
   let people: Person[];
   try {
-    [rows, people] = await Promise.all([
-      core.actions(period.from(), period.to(), person),
+    // Ленту берём БЕЗ фильтра по человеку: чипы-переключатели строятся из
+    // тех, кто реально действовал в периоде, и не должны схлопываться до
+    // одного выбранного — иначе с человека не переключиться.
+    [allRows, people] = await Promise.all([
+      core.actions(period.from(), period.to()),
       core.people(true).catch(() => [] as Person[]),
     ]);
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
+  const rows = person ? allRows.filter((r) => r.personId === person) : allRows;
 
-  // Кто вообще действовал в периоде — для фильтра-переключателя. При активном
-  // фильтре по человеку список людей берём из справочника, а не из выборки.
-  const activeIds = new Set(rows.map((r) => r.personId));
+  const activeIds = new Set(allRows.map((r) => r.personId));
   const filterPeople = people.filter((p) => activeIds.has(p.id) || p.id === person);
   const href = (over: { period?: string; person?: string | undefined }): string => {
     const q = new URLSearchParams();

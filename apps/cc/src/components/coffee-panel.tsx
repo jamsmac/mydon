@@ -35,6 +35,7 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       containerReturns,
       placements,
       containerConsumption,
+      people,
     ] = await Promise.all([
       core.coffeeLocations(),
       core.coffeeBunkerConfig(),
@@ -53,10 +54,10 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       core.coffeeContainerReturns(300),
       core.coffeePlacements(),
       core.coffeeContainerConsumption(from, to),
+      // Имена сотрудников для подписи журнала: сбой справочника не должен
+      // ронять всю вкладку — просто вернёмся к обезличенному «сотрудник».
+      core.people(true).catch(() => []),
     ]);
-    // Имена сотрудников для подписи журнала: сбой справочника не должен
-    // ронять всю вкладку — просто вернёмся к обезличенному «сотрудник».
-    const people = await core.people(true).catch(() => []);
     const peopleById = Object.fromEntries(people.map((p) => [p.id, p.name]));
     return (
       <CoffeeClient

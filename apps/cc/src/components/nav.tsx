@@ -35,7 +35,12 @@ const SYSTEM = [
 ];
 
 function isActive(pathname: string, href: string): boolean {
-  return pathname === href || pathname.startsWith(href + "/");
+  if (!(pathname === href || pathname.startsWith(href + "/"))) return false;
+  // Побеждает самый длинный совпавший пункт: «/team/actions» не должен
+  // подсвечивать заодно и «Команду» — активной должна быть одна вкладка.
+  return ![...MAIN, ...SYSTEM].some(
+    (i) => i.href.length > href.length && (pathname === i.href || pathname.startsWith(i.href + "/")),
+  );
 }
 
 /** Боковое меню — только на компьютере. */

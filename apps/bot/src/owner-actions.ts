@@ -31,36 +31,58 @@ export function actionsPeriod(text: string, now = new Date()): { from: string; t
 const timeOf = (iso: string): string =>
   new Date(iso).toLocaleTimeString("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 
+const dayOf = (iso: string): string =>
+  new Date(iso).toLocaleDateString("ru-RU", { timeZone: TZ, day: "2-digit", month: "2-digit" });
+
+/** Telegram обрезает сообщение на 4096 — держимся заметно ниже. */
+const TG_BUDGET = 3500;
+
 /** Полный отчёт по людям: время и суть каждого действия, длинное — свёрнуто. */
 export function formatActions(rows: ActionRow[], periodLabel: string): string {
   if (rows.length === 0) {
-    return `За ${periodLabel === "сегодня" ? "сегодня" : periodLabel} действий сотрудников не записано.`;
+    return `Действий сотрудников (${periodLabel}) не записано.`;
   }
+  // Группировка по id, не по имени: тёзки — разные люди.
   const byPerson = new Map<string, ActionRow[]>();
-  for (const r of rows) byPerson.set(r.personName, [...(byPerson.get(r.personName) ?? []), r]);
+  for (const r of rows) byPerson.set(r.personId, [...(byPerson.get(r.personId) ?? []), r]);
+  const multiDay = new Set(rows.map((r) => dayOf(r.ts))).size > 1;
+  const stamp = (a: ActionRow): string => (multiDay ? `${dayOf(a.ts)} ${timeOf(a.ts)}` : timeOf(a.ts));
 
   const lines: string[] = [`📊 Действия сотрудников (${periodLabel}): ${rows.length}`];
   // Самые деятельные — первыми: владелец читает сверху.
-  const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
-  for (const [name, acts] of people) {
-    lines.push("", `👤 ${name} — ${acts.length}:`);
-    // В ленте новое сверху; в отчёте человека — хронологически, как шёл день.
+  const people = [...byPerson.values()].sort((a, b) => b.length - a.length);
+  for (const acts of people) {
+    lines.push("", `👤 ${acts[0].personName} — ${acts.length}:`);
+    // Хронологически, как шёл день; при переполнении показываем СВЕЖИЙ хвост:
+    // «что сделано под конец» полезнее давно прочитанного начала.
     const chrono = [...acts].reverse();
-    const shown = chrono.slice(0, 12);
-    for (const a of shown) lines.push(`  ${timeOf(a.ts)} ${a.label}`);
-    if (chrono.length > shown.length) lines.push(`  … ещё ${chrono.length - shown.length}`);
+    const shown = chrono.slice(-12);
+    if (chrono.length > shown.length) lines.push(`  … ${chrono.length - shown.length} раньше`);
+    for (const a of shown) lines.push(`  ${stamp(a)} ${a.label}`);
   }
-  return lines.join("\n");
+
+  // Бюджет Telegram: режем по границе строки, а не посреди слова, и честно
+  // говорим, где полный список.
+  let text = lines.join("\n");
+  if (text.length > TG_BUDGET) {
+    text = `${text.slice(0, TG_BUDGET).replace(/\n[^\n]*$/, "")}\n\n… показана часть — полный список в панели, раздел «Действия».`;
+  }
+  return text;
 }
 
 /** Однострочная сводка для брифинга: «Вчера: Имя — N, Имя — M». */
 export function summarizeActions(rows: ActionRow[]): string | null {
   if (rows.length === 0) return null;
-  const counts = new Map<string, number>();
-  for (const r of rows) counts.set(r.personName, (counts.get(r.personName) ?? 0) + 1);
-  const parts = [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([name, n]) => `${name} — ${n}`);
+  // Считаем по id (тёзки — разные люди), показываем именем.
+  const counts = new Map<string, { name: string; n: number }>();
+  for (const r of rows) {
+    const cur = counts.get(r.personId) ?? { name: r.personName, n: 0 };
+    cur.n += 1;
+    counts.set(r.personId, cur);
+  }
+  const parts = [...counts.values()]
+    .sort((a, b) => b.n - a.n)
+    .map((c) => `${c.name} — ${c.n}`);
   return `👥 Вчера сделано: ${parts.join(", ")}. Подробно: «итоги вчера».`;
 }
 

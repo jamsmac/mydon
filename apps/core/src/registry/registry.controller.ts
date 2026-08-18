@@ -6,6 +6,11 @@ import { RegistryService } from "./registry.service";
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const UUID = /^[0-9a-f-]{36}$/;
 
+/** Дата + N дней, тем же строковым форматом (для сравнения окон). */
+function nextDays(iso: string, days: number): string {
+  return new Date(new Date(`${iso}T00:00:00Z`).getTime() + days * 86_400_000).toISOString().slice(0, 10);
+}
+
 function asDomain(value: string): Domain {
   if (!(DOMAINS as readonly string[]).includes(value)) {
     throw new BadRequestException(`Неизвестное направление "${value}". Доступны: ${DOMAINS.join(", ")}`);
@@ -41,6 +46,10 @@ export class RegistryController {
     if (!ISO_DAY.test(f) || !ISO_DAY.test(t)) {
       throw new BadRequestException("from/to: даты в формате YYYY-MM-DD");
     }
+    if (f > t) throw new BadRequestException("from позже to — период пуст");
+    // Широкое окно — это уже отчёт, а не лента: фуллсканы доменных таблиц
+    // не должны собирать полугодия по одному запросу.
+    if (nextDays(f, 92) < t) throw new BadRequestException("окно не больше 92 дней");
     if (personId !== undefined && !UUID.test(personId)) {
       throw new BadRequestException("person: uuid сотрудника");
     }
