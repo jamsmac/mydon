@@ -401,6 +401,15 @@ export interface AuditEntry {
   ts: string;
 }
 
+/** Строка ленты действий сотрудников (GET /registry/actions). */
+export interface ActionRow {
+  ts: string;
+  kind: string;
+  label: string;
+  personId: string;
+  personName: string;
+}
+
 export interface Obligations {
   domain: string;
   /** Свод по обязательствам. Валюта обязательна: без неё суммы складывать нельзя. */
@@ -1751,6 +1760,9 @@ export const core = {
   pendingApprovals: () => get<Approval[]>("/approvals/pending"),
   allApprovals: () => get<Approval[]>("/approvals"),
   audit: (limit = 40) => get<AuditEntry[]>(`/audit?limit=${limit}`),
+  /** Лента действий сотрудников: «кто что сделал» за период (даты по Ташкенту). */
+  actions: (from: string, to: string, personId?: string) =>
+    get<ActionRow[]>(`/registry/actions?from=${from}&to=${to}${personId ? `&person=${personId}` : ""}`),
   obligations: (domain: string) => get<Obligations>(`/registry/obligations/${domain}`),
   byType: (domain: string, type: string) => get<Entity[]>(`/registry/${domain}/${type}`),
   search: (q: string, domain?: string) => {

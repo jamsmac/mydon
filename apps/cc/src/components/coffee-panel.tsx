@@ -54,6 +54,10 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       core.coffeePlacements(),
       core.coffeeContainerConsumption(from, to),
     ]);
+    // Имена сотрудников для подписи журнала: сбой справочника не должен
+    // ронять всю вкладку — просто вернёмся к обезличенному «сотрудник».
+    const people = await core.people(true).catch(() => []);
+    const peopleById = Object.fromEntries(people.map((p) => [p.id, p.name]));
     return (
       <CoffeeClient
         locations={locations}
@@ -75,6 +79,7 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
         placements={placements}
         containerConsumption={containerConsumption}
         defaultOwnerRef={defaultOwnerRef}
+        peopleById={peopleById}
       />
     );
   } catch (err) {

@@ -42,6 +42,14 @@ export class CreateMovementDto {
 
   @IsOptional() @IsString() @MaxLength(1000)
   note?: string;
+
+  /**
+   * Кто внёс: person:<id> от бота, отсутствует — владелец из панели.
+   * Раньше DTO поле не принимал, и ЛЮБОЙ приход писался как 'owner' —
+   * кладовщик в ленте действий был невидим.
+   */
+  @IsOptional() @IsString() @MaxLength(128)
+  createdBy?: string;
 }
 
 /** Пересчёт: фактическое количество ингредиента на складе. */

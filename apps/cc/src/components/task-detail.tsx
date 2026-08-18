@@ -20,14 +20,23 @@ const STATUS_LABEL: Record<Task["status"], string> = {
 };
 
 /** Кто написал: «owner» → «ты», «person:<id>» → сотрудник, «agent:<имя>» → агент. */
-function authorLabel(ref: string): string {
+function authorLabel(ref: string, people: Record<string, string>): string {
   if (ref === "owner") return "ты";
   if (ref.startsWith("agent:")) return ref.slice(6);
-  if (ref.startsWith("person:")) return "исполнитель";
+  // Имя вместо обезличенного «исполнитель»: владелец должен видеть, кто пишет.
+  if (ref.startsWith("person:")) return people[ref.slice("person:".length)] ?? "исполнитель";
   return ref;
 }
 
-export function TaskDetail({ task, comments }: { task: Task; comments: TaskComment[] }) {
+export function TaskDetail({
+  task,
+  comments,
+  peopleById = {},
+}: {
+  task: Task;
+  comments: TaskComment[];
+  peopleById?: Record<string, string>;
+}) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [note, setNote] = useState("");
@@ -152,7 +161,7 @@ export function TaskDetail({ task, comments }: { task: Task; comments: TaskComme
             <div className="row" key={c.id}>
               <div className="t">
                 <b>{c.body}</b>
-                <small>{authorLabel(c.authorRef)}</small>
+                <small>{authorLabel(c.authorRef, peopleById)}</small>
               </div>
               <span className="when">{when(c.createdAt)}</span>
             </div>

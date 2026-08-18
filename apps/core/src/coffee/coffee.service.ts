@@ -1061,7 +1061,16 @@ export class CoffeeService {
       })
       .onConflictDoUpdate({
         target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
-        set: { water: input.water ?? 0, cups: input.cups ?? 0, lids: input.lids ?? 0, updatedAt: new Date() },
+        // createdBy тоже обновляем: строка дня переписывается upsert-ом, и
+        // авторство должно принадлежать ПОСЛЕДНЕМУ вводу — иначе лента
+        // действий приписывала бы правку тому, кто вносил первым.
+        set: {
+          water: input.water ?? 0,
+          cups: input.cups ?? 0,
+          lids: input.lids ?? 0,
+          createdBy: input.createdBy ?? null,
+          updatedAt: new Date(),
+        },
       });
     return { ok: true };
   }

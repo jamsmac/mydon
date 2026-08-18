@@ -23,6 +23,7 @@ import {
 } from "./purchase-brief";
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
+import { handleActionsQuery, isActionsQuery } from "./owner-actions";
 import { formatSalesSummary, isSalesQuery } from "./sales-brief";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
 import type { RateLimiter } from "./security/access";
@@ -65,6 +66,7 @@ const HELP = [
   "• «кассы закупа» / «история кассы» — прошлые кассы",
   "• «продажи» / «выручка» — сегодня, вчера, 30 дней",
   "• «расход кофе» — расход по наборам за 30 дней (граммы и себестоимость)",
+  "• «итоги» / «итоги вчера» — кто из сотрудников что сделал, по людям",
   "• «согласования» — очередь на твоё решение",
   "• «найди Olma» — поиск по реестру",
 ].join("\n");
@@ -180,6 +182,18 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка сводки продаж:", err);
       return { text: "Не удалось получить продажи из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Итоги по людям — чтение: «итоги», «итоги вчера», «действия», «кто что
+  // сделал». Раньше владелец видел только тревоги и агрегаты — сделанная
+  // работа сотрудников не показывалась нигде.
+  if (isActionsQuery(text)) {
+    try {
+      return await handleActionsQuery(text, deps.core);
+    } catch (err) {
+      console.error("Ошибка ленты действий:", err);
+      return { text: "Не удалось получить действия из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 

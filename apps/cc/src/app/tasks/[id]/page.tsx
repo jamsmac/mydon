@@ -14,6 +14,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   let comments: TaskComment[] = [];
   let ownerName = "—";
   let owners: OwnerOption[] = [];
+  let peopleById: Record<string, string> = {};
   try {
     task = await core.task(id);
     // Переписка не критична для карточки: не загрузилась — не повод падать.
@@ -30,6 +31,9 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         ...people.map((p) => ({ value: `human:${p.id}`, label: p.name })),
         ...agents.map((a) => ({ value: `agent:${a.name}`, label: `${a.name} · агент` })),
       ];
+      // Имена для подписи переписки: комментарий сотрудника должен носить
+      // имя, а не обезличенное «исполнитель».
+      peopleById = Object.fromEntries(people.map((p) => [p.id, p.name]));
     } catch {
       owners = [];
     }
@@ -59,7 +63,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         </p>
       </div>
 
-      <TaskDetail task={task} comments={comments} />
+      <TaskDetail task={task} comments={comments} peopleById={peopleById} />
       <TaskEdit task={task} owners={owners} />
     </>
   );
