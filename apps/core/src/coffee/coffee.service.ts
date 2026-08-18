@@ -1076,15 +1076,35 @@ export class CoffeeService {
         });
       // Событие ввода — в append-only журнал: строка выше — состояние дня,
       // историю и «итоги вчера» по ней не воспроизвести (правка сдвигала
-      // прошлое ленты действий).
-      await tx.insert(coffeeConsumableLog).values({
-        locationId: input.locationId,
-        loggedDate: input.loggedDate,
-        water: input.water ?? 0,
-        cups: input.cups ?? 0,
-        lids: input.lids ?? 0,
-        createdBy: input.createdBy ?? null,
-      });
+      // прошлое ленты действий). Честный ретрай того же ввода (те же числа,
+      // тот же автор, та же последняя строка) события не дублирует.
+      const [last] = await tx
+        .select()
+        .from(coffeeConsumableLog)
+        .where(
+          and(
+            eq(coffeeConsumableLog.locationId, input.locationId),
+            eq(coffeeConsumableLog.loggedDate, input.loggedDate),
+          ),
+        )
+        .orderBy(desc(coffeeConsumableLog.createdAt))
+        .limit(1);
+      const sameAsLast =
+        last !== undefined &&
+        last.water === (input.water ?? 0) &&
+        last.cups === (input.cups ?? 0) &&
+        last.lids === (input.lids ?? 0) &&
+        last.createdBy === (input.createdBy ?? null);
+      if (!sameAsLast) {
+        await tx.insert(coffeeConsumableLog).values({
+          locationId: input.locationId,
+          loggedDate: input.loggedDate,
+          water: input.water ?? 0,
+          cups: input.cups ?? 0,
+          lids: input.lids ?? 0,
+          createdBy: input.createdBy ?? null,
+        });
+      }
     });
     return { ok: true };
   }

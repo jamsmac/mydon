@@ -57,6 +57,8 @@ describe("Удаление записи", () => {
       select: () => ({ from: () => ({ where: () => ({ for: async () => [row] }) }) }),
       delete: () => ({ where: async () => undefined }),
       insert: () => ({ values: async (v: Record<string, unknown>) => { audit.push(v); } }),
+      // Закрытие связанного approval при удалении (аудит видимости 18.08).
+      update: () => ({ set: () => ({ where: async () => undefined }) }),
     };
     const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
     const s = new EntitiesService(db, { record: async () => undefined } as never);

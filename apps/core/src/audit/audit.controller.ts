@@ -1,5 +1,5 @@
 import { Controller, Get, Query } from "@nestjs/common";
-import { IsInt, IsISO8601, IsOptional, IsString, Matches, Max, MaxLength, Min } from "class-validator";
+import { IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from "class-validator";
 import { Type } from "class-transformer";
 import { AuditService } from "./audit.service";
 
@@ -34,10 +34,12 @@ export class ListAuditDto {
   @IsOptional() @IsString() @Matches(/^[a-z_.]{3,64}$/, { message: "action: код вида task.done" })
   action?: string;
 
-  @IsOptional() @IsISO8601({ strict: true }, { message: "from: дата YYYY-MM-DD" })
+  // Именно Matches, не IsISO8601: тот пропускает полный datetime, а сервис
+  // конкатенирует «T00:00:00+05:00» — получался Invalid Date и 500.
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: "from: дата YYYY-MM-DD" })
   from?: string;
 
-  @IsOptional() @IsISO8601({ strict: true }, { message: "to: дата YYYY-MM-DD" })
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: "to: дата YYYY-MM-DD" })
   to?: string;
 }
 

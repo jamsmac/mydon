@@ -77,12 +77,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         </p>
       </div>
 
-      {photos.length > 0 && (
-        <>
-          <div className="section-title">Фото · {photos.length}</div>
-          <PhotoGallery attachments={photos} />
-        </>
-      )}
+      {photos.length > 0 && <PhotoGallery attachments={photos} />}
 
       <TaskDetail task={task} comments={comments} peopleById={peopleById} />
       <TaskEdit task={task} owners={owners} />

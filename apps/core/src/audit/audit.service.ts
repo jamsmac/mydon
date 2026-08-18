@@ -43,7 +43,11 @@ export class AuditService {
     const conditions: SQL[] = [];
     // actor — подстрокой: в actorRef живут person:<id>, telegram:<chat>,
     // agent:<имя>; точного формата у поля нет, и точное равенство промахнётся.
-    if (filter.actor) conditions.push(like(auditLog.actorRef, `%${filter.actor}%`));
+    // Метасимволы LIKE экранируем: «%» в запросе — литерал, а не «всё».
+    if (filter.actor) {
+      const escaped = filter.actor.replace(/[\\%_]/g, (c) => `\\${c}`);
+      conditions.push(like(auditLog.actorRef, `%${escaped}%`));
+    }
     if (filter.action) conditions.push(eq(auditLog.action, filter.action));
     // Даты — дни по Ташкенту (пояс фиксированный +05, без переводов).
     if (filter.from) conditions.push(gte(auditLog.ts, new Date(`${filter.from}T00:00:00+05:00`)));
@@ -54,7 +58,9 @@ export class AuditService {
       .select()
       .from(auditLog)
       .where(conditions.length ? and(...conditions) : undefined)
-      .orderBy(desc(auditLog.ts))
+      // Вторичный ключ id: ts не уникален, и offset-страницы по нему могли
+      // пропускать/дублировать строки на границах.
+      .orderBy(desc(auditLog.ts), desc(auditLog.id))
       .limit(take)
       .offset(Math.min(Math.max(filter.offset ?? 0, 0), 100_000));
   }

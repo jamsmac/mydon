@@ -421,7 +421,7 @@ export class StockService implements OnModuleInit {
       };
     }
 
-    let [row] = await this.db
+    const [row] = await this.db
       .insert(stockMovement)
       .values({
         kind: "adjustment",
@@ -438,9 +438,9 @@ export class StockService implements OnModuleInit {
       .onConflictDoNothing({ target: stockMovement.clientKey })
       .returning();
 
-    // Повтор по clientKey: корректировка уже записана — отдаём её же, вторая
-    // дельта не появляется (повторный пересчёт «стало − было» дал бы 0 лишь
-    // при мгновенном обновлении остатка, а при гонке — вторую корректировку).
+    // Повтор по clientKey: корректировка уже записана — отдаём ЗАПИСАННОЕ
+    // движение, а не свежепересчитанную дельту (после первой записи остаток
+    // уже сдвинулся, и повторный «стало − было» дал бы ложные числа).
     if (!row) {
       const [existing] = await this.db
         .select()
@@ -450,7 +450,17 @@ export class StockService implements OnModuleInit {
       if (!existing) {
         throw new BadRequestException("Повтор пересчёта ещё записывается — попробуй ещё раз через минуту");
       }
-      row = existing;
+      const recordedDelta = Number(existing.qty);
+      return {
+        changed: true,
+        before: Math.round((actualBase - recordedDelta) * 1000) / 1000,
+        actual: actualBase,
+        delta: recordedDelta,
+        unit: base,
+        ingredientName: pair.ingredientName,
+        warehouseName: pair.warehouseName,
+        movementId: existing.id,
+      };
     }
 
     return {

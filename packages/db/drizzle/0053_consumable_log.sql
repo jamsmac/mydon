@@ -14,3 +14,9 @@ CREATE TABLE "coffee_consumable_log" (
   "created_at" timestamp with time zone DEFAULT now() NOT NULL
 );--> statement-breakpoint
 CREATE INDEX "coffee_consumable_log_created_idx" ON "coffee_consumable_log" ("created_at");
+--> statement-breakpoint
+-- Бэкфилл: расходники, внесённые ДО журнала, не должны исчезнуть из ленты
+-- действий. Момент берём из updated_at строки-состояния — точнее данных нет.
+INSERT INTO "coffee_consumable_log" ("location_id", "logged_date", "water", "cups", "lids", "created_by", "created_at")
+SELECT "location_id", "logged_date", "water", "cups", "lids", "created_by", "updated_at"
+FROM "coffee_consumable";
