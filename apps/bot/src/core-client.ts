@@ -167,6 +167,30 @@ export interface PendingNotifications {
   notifications: { ruleId: string; urgency: string; text: string; eventId: string }[];
 }
 
+/**
+ * Ошибка Core с кодом и телом ответа.
+ *
+ * Раньше любой не-2xx схлопывался в безликую строку: 401 без ключа доступа,
+ * 400 на дробном весе и упавшая сеть выглядели одинаково, и все обработчики
+ * честно, но бесполезно советовали «попробуй позже». Код и тело позволяют
+ * различать «данные не примут никогда» и «временный сбой».
+ */
+export class CoreError extends Error {
+  constructor(
+    readonly status: number,
+    readonly path: string,
+    readonly body: string,
+  ) {
+    super(`Core ответил ${status} на ${path}`);
+    this.name = "CoreError";
+  }
+
+  /** Ошибка в самих данных или доступе: повтор того же запроса не поможет. */
+  get isClientError(): boolean {
+    return this.status >= 400 && this.status < 500;
+  }
+}
+
 /** Тонкий клиент к MYDON Core. Бот не ходит в БД напрямую — только через API. */
 export class CoreClient {
   constructor(
@@ -190,7 +214,8 @@ export class CoreClient {
         },
       });
       if (!res.ok) {
-        throw new Error(`Core ответил ${res.status} на ${path}`);
+        const body = await res.text().catch(() => "");
+        throw new CoreError(res.status, path, body.slice(0, 500));
       }
       return (await res.json()) as T;
     } finally {
@@ -845,6 +870,13 @@ export class CoreClient {
   }
 
   /** Возврат набора: строка «позиция. набор. вес» из привычного формата группы. */
+  /** Последние возвраты наборов — бот отсекает по ним пересланные старые списки. */
+  containerReturns(limit = 300): Promise<
+    { position: number; containerNumber: number; weight: number; returnedDate: string }[]
+  > {
+    return this.request(`/coffee/container-returns?limit=${limit}`);
+  }
+
   recordContainerReturn(input: {
     position: number;
     containerNumber: number;

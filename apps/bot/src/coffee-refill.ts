@@ -1,5 +1,5 @@
 import { netWeight, TZ } from "@mydon/shared";
-import type { CoreClient, PersonRow } from "./core-client";
+import { CoreError, type CoreClient, type PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import {
   applyPress,
@@ -421,9 +421,14 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
   const locationId = String(conv.data.locationId ?? "");
   const locationName = String(conv.data.locationName ?? "");
   const position = Number(conv.data.position);
-  const filledWeight = Number(conv.data.filledWeight);
+  // Округление при СОХРАНЕНИИ: текстовый ввод сознательно принимает «1200,5»
+  // (parseAmount — «не мешает принять»), но Core валидирует @IsInt, и дробь
+  // получала 400, который выглядел как «сервер не ответил» с вечным советом
+  // «нажми ещё раз». Полграмма ниже точности безмена — округляем честно.
+  const filledWeight = Math.round(Number(conv.data.filledWeight));
   const containerNumber = typeof conv.data.containerNumber === "number" ? conv.data.containerNumber : null;
-  const measuredBefore = typeof conv.data.measuredBefore === "number" ? conv.data.measuredBefore : null;
+  const measuredBefore =
+    typeof conv.data.measuredBefore === "number" ? Math.round(conv.data.measuredBefore) : null;
 
   if (!locationId || !Number.isFinite(position) || !Number.isFinite(filledWeight)) {
     deps.conversations.clear(chatId);
@@ -480,7 +485,20 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
       enteredDate: todayIso(),
       createdBy: `person:${person.id}`,
     });
-  } catch {
+  } catch (err) {
+    // 4xx — ошибка в самих данных: сервер не примет их и через минуту, совет
+    // «нажми ещё раз» был бы ложью и вечным кругом. Просим поправить ввод.
+    if (err instanceof CoreError && err.isClientError) {
+      deps.conversations.advance(chatId, "weight", { draft: "" });
+      return {
+        text: [
+          "⚠️ Сервер отказался принять запись — похоже, ошибка в данных.",
+          `Бункер ${position}, ${filledWeight} г${containerNumber === null ? "" : `, набор ${containerNumber}`}.`,
+          "Введи вес заново, целым числом в граммах.",
+        ].join("\n"),
+        keyboard: weightStep(position).keyboard,
+      };
+    }
     // Возвращаем черновик упаковок: без него повторное «Готово» упрётся в
     // «набери число» — набор-то очищен переходом на шаг.
     deps.conversations.advance(chatId, "weight", { draft: String(filledWeight) });
@@ -660,15 +678,24 @@ async function refillSummary(
   } else {
     lines.push(`☕ Чистый ингредиент: ${net} г — это и вноси в систему автомата`);
     if (netBefore !== null && r.measuredBefore !== null) {
-      const added = net - netBefore;
-      // Досыпали меньше нуля — физически невозможно: либо «до» и «после»
-      // переставлены местами, либо из бункера отсыпали. Показать «-600» как
-      // обычную цифру значило бы узаконить ошибку в отчётах.
-      lines.push(
-        added >= 0
-          ? `Было ${netBefore} г → стало ${net} г (досыпали ${added} г)`
-          : `⚠️ Было ${netBefore} г, стало ${net} г — стало МЕНЬШЕ. Проверь, не перепутал ли замеры.`,
-      );
+      if (netBefore < 0) {
+        // Замер «до» меньше тары — так не бывает: не тот набор или опечатка.
+        // Печатать «Было −520 г» как факт значило бы узаконить ошибку, а
+        // «досыпали» вышло бы завышенным ровно на тару.
+        lines.push(
+          `⚠️ Замер «до» (${r.measuredBefore} г) меньше тары набора (${tare} г) — так не бывает. «Было/досыпали» не считаю, проверь замер.`,
+        );
+      } else {
+        const added = net - netBefore;
+        // Досыпали меньше нуля — физически невозможно: либо «до» и «после»
+        // переставлены местами, либо из бункера отсыпали. Показать «-600» как
+        // обычную цифру значило бы узаконить ошибку в отчётах.
+        lines.push(
+          added >= 0
+            ? `Было ${netBefore} г → стало ${net} г (досыпали ${added} г)`
+            : `⚠️ Было ${netBefore} г, стало ${net} г — стало МЕНЬШЕ. Проверь, не перепутал ли замеры.`,
+        );
+      }
     }
     lines.push(`Вес с бункером ${r.filledWeight} г − тара набора ${r.containerNumber} (${tare} г)`);
   }

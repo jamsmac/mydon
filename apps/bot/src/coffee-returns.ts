@@ -53,6 +53,37 @@ export async function recordContainerReturns(
   deps: CoffeeReturnsDeps,
 ): Promise<StaffReply> {
   const returnedDate = todayIso();
+
+  // Пересланный СТАРЫЙ список: все строки (двух и более) уже есть в журнале
+  // за прошлые дни. Записать его сегодняшней датой значит закрыть свежие
+  // заливки устаревшими весами — сверка расхода портится молча. Отклоняем с
+  // понятным выходом; одна строка проходит всегда (это и путь-переопределение:
+  // реально повторившийся вес шлётся отдельной строкой). Журнал недоступен —
+  // пишем как есть: потерять сегодняшние остатки хуже редкого дубля.
+  if (parsed.returns.length >= 2) {
+    const recent = await deps.core.containerReturns(300).catch(() => null);
+    if (recent) {
+      const firstDate = new Map<string, string>();
+      for (const r of recent) {
+        const k = `${r.position}:${r.containerNumber}:${r.weight}`;
+        const d = String(r.returnedDate);
+        const prev = firstDate.get(k);
+        if (prev === undefined || d > prev) firstDate.set(k, d);
+      }
+      const dates = parsed.returns.map((r) => firstDate.get(`${r.position}:${r.containerNumber}:${r.weight}`));
+      const allOld = dates.every((d) => d !== undefined && d < returnedDate);
+      if (allOld) {
+        return {
+          text: [
+            "⚠️ Похоже, это уже записанный список: все строки до единой совпадают с журналом за прошлые дни.",
+            "Повторно не записал — старые веса закрыли бы сегодняшние заливки в сверке.",
+            "Если это НОВЫЕ остатки за сегодня — отправь строки по одной.",
+          ].join("\n"),
+        };
+      }
+    }
+  }
+
   let saved = 0;
   const failed: string[] = [];
   for (const r of parsed.returns) {
@@ -265,7 +296,10 @@ export async function handleCoffeeConsumableCallback(
     const locations = await deps.core.coffeeLocations();
     const loc = locations.find((l) => l.id === cb.id);
     if (!loc) return { answer: "Точка не найдена", message: { text: "Этой точки уже нет — начни заново." } };
-    deps.conversations.advance(chatId, "water", { locationId: loc.id, locationName: loc.name, draft: "" });
+    // fixing сбрасываем явно: устаревшая кнопка точки могла прийти ПОСЛЕ шага
+    // правки, и залипший флаг пропускал бы вопросы про стаканчики и крышки —
+    // за новую точку уходили цифры, названные для старой.
+    deps.conversations.advance(chatId, "water", { locationId: loc.id, locationName: loc.name, draft: "", fixing: false });
     return { answer: loc.name, message: countStep("water", "") };
   }
 

@@ -219,3 +219,30 @@ describe("matchReturnsToRefills — расход по наборам (залив
     assert.equal(rows[0]!.returnDate, "2026-01-17");
   });
 });
+
+describe("Противоречивые веса не завышают расход (аудит 18.08)", () => {
+  it("consumedSince: отрицательное нетто с любой стороны — null, не сложение", () => {
+    // Замер меньше тары: вычитание отрицательного дало бы расход БОЛЬШЕ,
+    // чем физически было в бункере.
+    assert.equal(consumedSince(580, -520), null);
+    assert.equal(consumedSince(-100, 50), null);
+  });
+
+  it("matchReturnsToRefills: возврат легче тары (returnNet < 0) — расход null", () => {
+    const rows = matchReturnsToRefills(
+      [
+        {
+          containerNumber: 27,
+          position: 1,
+          locationId: "loc-1",
+          locationName: "Точка",
+          date: "2026-08-17",
+          netWeight: 580,
+        },
+      ],
+      [{ containerNumber: 27, position: 1, date: "2026-08-18", netWeight: -533 }],
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].consumedGrams, null, "580 − (−533) = 1113 г из бункера с 580 г — так не бывает");
+  });
+});

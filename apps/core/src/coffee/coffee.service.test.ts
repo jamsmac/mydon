@@ -1127,3 +1127,59 @@ describe("CoffeeService: возвраты наборов (recordContainerReturn/
     assert.equal(res.find((r) => r.id === "r2")!.netWeight, null, "тара не заведена — остаток неизвестен, а не 0");
   });
 });
+
+describe("Возвраты наборов: дедуп по содержимому (аудит 18.08)", () => {
+  it("та же четвёрка за тот же день — возвращается прежняя запись, вставки нет", async () => {
+    const { db, inserts } = coffeeDb({
+      returns: [{ id: "ret-1", position: 1, containerNumber: 26, weight: 1119, returnedDate: "2026-08-18" }],
+    });
+    const svc = new CoffeeService(db);
+    const res = await svc.recordContainerReturn({
+      position: 1,
+      containerNumber: 26,
+      weight: 1119,
+      returnedDate: "2026-08-18",
+    });
+    assert.equal(res.id, "ret-1", "пересланное сообщение получает тот же id");
+    assert.ok(!inserts.some((i) => i.table === "coffee_container_return"), "второй строки не появилось");
+  });
+
+  it("журнал пуст — обычная вставка работает", async () => {
+    const { db, inserts } = coffeeDb({ returns: [] });
+    const svc = new CoffeeService(db);
+    await svc.recordContainerReturn({ position: 1, containerNumber: 26, weight: 1119, returnedDate: "2026-08-18" });
+    assert.ok(inserts.some((i) => i.table === "coffee_container_return"));
+  });
+});
+
+describe("submitRefill: вывод ингредиента на сервере (аудит 18.08)", () => {
+  it("клиент не назвал ингредиент, у позиции он один — подставляется из конфига", async () => {
+    // Панель ингредиент не шлёт; без него сверка «ожидали против налили»
+    // пропускает строку. Вывод в одном месте — для бота и панели сразу.
+    const { db, inserts } = coffeeDb({
+      bunkerConfig: [{ position: 7, ingredientId: "ing-7", ingredientName: "Кофе" }],
+      ingredients: [{ id: "ing-7", name: "Кофе" }],
+    });
+    const svc = new CoffeeService(db);
+    await svc.submitRefill({ locationId: "loc-1", position: 7, filledWeight: 1200, enteredDate: "2026-08-18" });
+    const row = inserts.find((i) => i.table === "coffee_refill")!.values as Record<string, unknown>;
+    assert.equal(row.ingredientId, "ing-7");
+  });
+
+  it("у позиции ДВА ингредиента — остаётся NULL: угаданное списание хуже отсутствующего", async () => {
+    const { db, inserts } = coffeeDb({
+      bunkerConfig: [
+        { position: 3, ingredientId: "ing-a", ingredientName: "Лимонный чай" },
+        { position: 3, ingredientId: "ing-b", ingredientName: "Матча" },
+      ],
+      ingredients: [
+        { id: "ing-a", name: "Лимонный чай" },
+        { id: "ing-b", name: "Матча" },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    await svc.submitRefill({ locationId: "loc-1", position: 3, filledWeight: 900, enteredDate: "2026-08-18" });
+    const row = inserts.find((i) => i.table === "coffee_refill")!.values as Record<string, unknown>;
+    assert.equal(row.ingredientId, null);
+  });
+});

@@ -29,6 +29,8 @@ function stubCore(over: Record<string, unknown> = {}) {
   const calls: { kind: string; input: Record<string, unknown> }[] = [];
   const core = {
     coffeeLocations: async () => [{ id: LOC, name: "American Hospital", isActive: true }],
+    // Журнал пуст: гейт «пересланный старый список» по умолчанию не мешает.
+    containerReturns: async () => [] as { position: number; containerNumber: number; weight: number; returnedDate: string }[],
     recordContainerReturn: async (input: Record<string, unknown>) => {
       calls.push({ kind: "return", input });
       return { id: `ret-${calls.length}` };
@@ -261,5 +263,38 @@ describe("Сбой посреди возвратов — молчания и п�
     const reply = await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
     assert.match(reply.text, /ни одна строка не записана/i);
     assert.doesNotMatch(reply.text, /✅/);
+  });
+});
+
+describe("Пересланный старый список остатков (аудит 18.08)", () => {
+  const OLD = [
+    { position: 1, containerNumber: 26, weight: 1119, returnedDate: "2026-08-10" },
+    { position: 2, containerNumber: 19, weight: 1944, returnedDate: "2026-08-10" },
+  ];
+
+  it("все строки совпадают с журналом за прошлые дни — не записываем, объясняем", async () => {
+    const { core, calls } = stubCore({ containerReturns: async () => OLD });
+    const parsed = tryParseContainerReturns("Кпп остатки\n1. 026. 1119\n2. 019. 1944");
+    assert.ok(parsed);
+    const reply = await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.match(reply.text, /уже записанный список/i);
+    assert.match(reply.text, /по одной/i, "выход для честного совпадения назван");
+    assert.equal(calls.filter((c) => (c as { kind: string }).kind === "return").length, 0);
+  });
+
+  it("хотя бы одна строка новая — список записывается целиком", async () => {
+    const { core, calls } = stubCore({ containerReturns: async () => OLD });
+    const parsed = tryParseContainerReturns("Кпп остатки\n1. 026. 1119\n5. 003. 777");
+    assert.ok(parsed);
+    await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.equal(calls.filter((c) => (c as { kind: string }).kind === "return").length, 2);
+  });
+
+  it("одна строка проходит всегда — это и есть путь-переопределение", async () => {
+    const { core, calls } = stubCore({ containerReturns: async () => OLD });
+    const parsed = tryParseContainerReturns("1. 026. 1119");
+    assert.ok(parsed);
+    await recordContainerReturns(parsed, ME, { core, conversations: new Conversations() });
+    assert.equal(calls.filter((c) => (c as { kind: string }).kind === "return").length, 1);
   });
 });

@@ -643,3 +643,48 @@ describe("Мойка: сбой Core не стирает разговор до з
     assert.equal(conversations.get(21), null, "после успешной записи разговор закрыт");
   });
 });
+
+describe("Дробный вес и честные 4xx (аудит 18.08)", () => {
+  it("«1200,5» текстом сохраняется целым числом — Core с @IsInt его принимает", async () => {
+    const { handleCoffeeRefillWeight } = await import("./coffee-refill");
+    const conversations = new Conversations();
+    const { core, calls } = stubCore();
+    const deps = { core, conversations };
+    conversations.start(31, "coffee-refill", "weight", {
+      locationId: LOC,
+      locationName: "American Hospital",
+      position: 7,
+      containerNumber: 7,
+      measuredBefore: null,
+    });
+    await handleCoffeeRefillWeight(31, "1200,5", deps, ME);
+    const refill = calls.find((c) => (c as { kind: string }).kind === "refill") as
+      | { input: Record<string, unknown> }
+      | undefined;
+    assert.ok(refill, "заливка записана");
+    assert.ok(Number.isInteger(refill.input.filledWeight), "вес ушёл целым");
+    assert.equal(refill.input.filledWeight, 1201);
+  });
+
+  it("400 от Core — «ошибка в данных», а не вечное «нажми Готово ещё раз»", async () => {
+    const { handleCoffeeRefillWeight } = await import("./coffee-refill");
+    const { CoreError } = await import("./core-client");
+    const conversations = new Conversations();
+    const { core } = stubCore({
+      submitCoffeeRefill: async () => {
+        throw new CoreError(400, "/coffee/refills", "filledWeight: IsInt");
+      },
+    });
+    const deps = { core, conversations };
+    conversations.start(32, "coffee-refill", "weight", {
+      locationId: LOC,
+      locationName: "American Hospital",
+      position: 7,
+      containerNumber: 7,
+      measuredBefore: null,
+    });
+    const reply = await handleCoffeeRefillWeight(32, "1600", deps, ME);
+    assert.match(reply.text, /ошибка в данных/i);
+    assert.doesNotMatch(reply.text, /ещё раз через минуту/, "совет-ловушка вечного ретрая исчез");
+  });
+});
