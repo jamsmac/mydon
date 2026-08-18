@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { core, CoreUnavailable, type Task, type TaskComment } from "../../../lib/core";
+import { core, CoreUnavailable, type Person, type Task, type TaskComment } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { TaskDetail } from "../../../components/task-detail";
 import { TaskEdit, type OwnerOption } from "../../../components/task-edit";
@@ -14,6 +14,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   let comments: TaskComment[] = [];
   let ownerName = "—";
   let owners: OwnerOption[] = [];
+  let peopleById: Record<string, string> = {};
   try {
     task = await core.task(id);
     // Переписка не критична для карточки: не загрузилась — не повод падать.
@@ -25,11 +26,19 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
     // Списки для переназначения. Не критичны — не загрузились, редактор просто
     // покажет текущего исполнителя.
     try {
-      const [people, agents] = await Promise.all([core.people(), core.agents()]);
+      // Отдельные страховки: сбой агентов не должен лишать переписку имён
+      // людей, а people(true) даёт имена и уволенным авторам старых записей.
+      const [people, agents] = await Promise.all([
+        core.people(true).catch(() => [] as Person[]),
+        core.agents().catch(() => []),
+      ]);
       owners = [
-        ...people.map((p) => ({ value: `human:${p.id}`, label: p.name })),
+        ...people.filter((p) => p.active === "yes").map((p) => ({ value: `human:${p.id}`, label: p.name })),
         ...agents.map((a) => ({ value: `agent:${a.name}`, label: `${a.name} · агент` })),
       ];
+      // Имена для подписи переписки: комментарий сотрудника должен носить
+      // имя, а не обезличенное «исполнитель».
+      peopleById = Object.fromEntries(people.map((p) => [p.id, p.name]));
     } catch {
       owners = [];
     }
@@ -59,7 +68,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         </p>
       </div>
 
-      <TaskDetail task={task} comments={comments} />
+      <TaskDetail task={task} comments={comments} peopleById={peopleById} />
       <TaskEdit task={task} owners={owners} />
     </>
   );

@@ -83,6 +83,8 @@ export function CoffeeClient(props: {
   containerConsumption: CoffeeContainerConsumptionReport;
   /** Первый активный человек VendHub — кому уходит задача из «Сверки». */
   defaultOwnerRef: string | null;
+  /** id → имя: журнал подписывает записи именем сотрудника, а не «сотрудник». */
+  peopleById: Record<string, string>;
 }) {
   const [tab, setTab] = useState<Tab>("entry");
   const alertCount =
@@ -115,7 +117,12 @@ export function CoffeeClient(props: {
         <TableTab summary={props.summary} consumables={props.consumables} locations={props.locations} fillStatus={props.fillStatus} />
       )}
       {tab === "journal" && (
-        <JournalTab locations={props.locations} refills={props.refillJournal} containerReturns={props.containerReturns} />
+        <JournalTab
+          locations={props.locations}
+          refills={props.refillJournal}
+          containerReturns={props.containerReturns}
+          peopleById={props.peopleById}
+        />
       )}
       {tab === "reconcile" && (
         <ReconcileTab
@@ -274,10 +281,11 @@ function EntryTab({
 // ── Вкладка: Журнал — история заливок и возвратов ─────────────────────────
 
 /** Откуда запись: импорт истории, сотрудник через бота, панель. */
-function sourceLabel(createdBy: string | null): string | null {
+function sourceLabel(createdBy: string | null, people: Record<string, string>): string | null {
   if (!createdBy) return null;
   if (createdBy.startsWith("import:")) return "импорт истории";
-  if (createdBy.startsWith("person:")) return "сотрудник";
+  // Имя вместо обезличенного «сотрудник»: владелец должен видеть, КТО внёс.
+  if (createdBy.startsWith("person:")) return people[createdBy.slice("person:".length)] ?? "сотрудник";
   return createdBy;
 }
 
@@ -285,10 +293,12 @@ function JournalTab({
   locations,
   refills,
   containerReturns,
+  peopleById,
 }: {
   locations: CoffeeLocation[];
   refills: CoffeeRefillRow[];
   containerReturns: CoffeeContainerReturnRow[];
+  peopleById: Record<string, string>;
 }) {
   const [locationId, setLocationId] = useState("");
   const [pending, start] = useTransition();
@@ -335,7 +345,7 @@ function JournalTab({
                 <small>
                   бункер {r.position}
                   {r.containerNumber ? ` · набор ${String(r.containerNumber).padStart(3, "0")}` : ""}
-                  {sourceLabel(r.createdBy) ? ` · ${sourceLabel(r.createdBy)}` : ""}
+                  {sourceLabel(r.createdBy, peopleById) ? ` · ${sourceLabel(r.createdBy, peopleById)}` : ""}
                 </small>
               </div>
               <span className="pill">
@@ -375,7 +385,7 @@ function JournalTab({
                 </b>
                 <small>
                   {r.locationNote ? `${r.locationNote} · ` : ""}
-                  {sourceLabel(r.createdBy) ?? ""}
+                  {sourceLabel(r.createdBy, peopleById) ?? ""}
                 </small>
               </div>
               <span className="pill">

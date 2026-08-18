@@ -27,6 +27,7 @@ import {
   startStaffAdd,
 } from "./staff-add";
 import { handleAfterPhoto } from "./field-work";
+import { summarizeActions } from "./owner-actions";
 import { asStaffMode } from "./as-staff";
 import { InvalidTokenError, TelegramApi, TelegramError, type TgUpdate } from "./telegram";
 
@@ -328,7 +329,8 @@ async function main(): Promise<void> {
   const sendOwnerBriefing = async (): Promise<void> => {
     const to = isoDate(new Date());
     const from = isoDate(new Date(Date.now() - 3 * 86_400_000));
-    const [b, approvals, purchase, fillStatus, reconcile, washSchedule, globerent] = await Promise.all([
+    const yesterday = isoDate(new Date(Date.now() - 86_400_000));
+    const [b, approvals, purchase, fillStatus, reconcile, washSchedule, globerent, staffActions] = await Promise.all([
       deps.core.briefing(),
       // Согласования — деградируемый блок: их сбой не должен стоить владельцу
       // всего брифинга. Раньше он был обязательным, и одна ошибка в 07:30
@@ -339,6 +341,9 @@ async function main(): Promise<void> {
       deps.core.coffeeReconcileAll(from, to).catch(() => null),
       deps.core.coffeeWashScheduleStatus().catch(() => null),
       collectGloberentSignals(deps.core),
+      // Сделанное сотрудниками за вчера — деградируемый блок: брифинг был
+      // доской тревог и не показывал работу людей вовсе.
+      deps.core.actions(yesterday, yesterday).catch(() => null),
     ]);
     const coffee =
       fillStatus || reconcile || washSchedule
@@ -348,13 +353,15 @@ async function main(): Promise<void> {
             overdueWash: washSchedule?.filter((r) => r.status === "overdue").length ?? 0,
           }
         : undefined;
-    const text = formatBriefing(
+    const briefingText = formatBriefing(
       b,
       approvals,
       purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
       coffee,
       globerent,
     );
+    const staffLine = staffActions ? summarizeActions(staffActions) : null;
+    const text = staffLine ? `${briefingText}\n\n${staffLine}` : briefingText;
     // Ключ одноразовости ПЕРЕД отправкой — как у дайджеста сотрудников:
     // окно автодеплоя (два живых процесса) не должно слать два брифинга.
     if (!(await deps.core.claimNotification(`briefing:${to}`))) return;

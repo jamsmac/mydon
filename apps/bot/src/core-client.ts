@@ -161,6 +161,15 @@ export interface VendingOrder {
   createdAt: string;
 }
 
+/** Строка ленты действий сотрудников (GET /registry/actions). */
+export interface ActionRow {
+  ts: string;
+  kind: string;
+  label: string;
+  personId: string;
+  personName: string;
+}
+
 export interface PendingNotifications {
   since: string;
   events: number;
@@ -225,6 +234,12 @@ export class CoreClient {
 
   briefing(): Promise<Briefing> {
     return this.request<Briefing>("/registry/briefing");
+  }
+
+  /** Лента действий сотрудников: «кто что сделал» за период (даты по Ташкенту). */
+  actions(from: string, to: string, personId?: string): Promise<ActionRow[]> {
+    const person = personId ? `&person=${personId}` : "";
+    return this.request<ActionRow[]>(`/registry/actions?from=${from}&to=${to}${person}`);
   }
 
   pendingApprovals(): Promise<ApprovalRow[]> {

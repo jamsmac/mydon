@@ -15,6 +15,9 @@ const MAIN = [
   // Один вход вместо двух очередей: решения агентов + карточки на утверждение.
   { href: "/inbox", icon: "dec", label: "Входящие", hot: true },
   { href: "/team", icon: "team", label: "Команда" },
+  // «Действия» — лента «кто из сотрудников что сделал»: прямой ответ на
+  // главный вопрос владельца, раньше размазанный по пяти экранам.
+  { href: "/team/actions", icon: "jour", label: "Действия" },
   { href: "/agents", icon: "agents", label: "Агенты" },
 ];
 // «Автоматы» и «Кофе-бункеры» — теперь вкладки рабочего места VendHub
@@ -32,7 +35,12 @@ const SYSTEM = [
 ];
 
 function isActive(pathname: string, href: string): boolean {
-  return pathname === href || pathname.startsWith(href + "/");
+  if (!(pathname === href || pathname.startsWith(href + "/"))) return false;
+  // Побеждает самый длинный совпавший пункт: «/team/actions» не должен
+  // подсвечивать заодно и «Команду» — активной должна быть одна вкладка.
+  return ![...MAIN, ...SYSTEM].some(
+    (i) => i.href.length > href.length && (pathname === i.href || pathname.startsWith(i.href + "/")),
+  );
 }
 
 /** Боковое меню — только на компьютере. */

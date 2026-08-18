@@ -1061,7 +1061,17 @@ export class CoffeeService {
       })
       .onConflictDoUpdate({
         target: [coffeeConsumable.locationId, coffeeConsumable.loggedDate],
-        set: { water: input.water ?? 0, cups: input.cups ?? 0, lids: input.lids ?? 0, updatedAt: new Date() },
+        // createdBy обновляется, только когда новый ввод НАЗВАЛ автора:
+        // авторство принадлежит последнему представившемуся (лента действий
+        // не должна приписывать правку тому, кто вносил первым), но правка
+        // из панели без createdBy не затирает автора-сотрудника в NULL.
+        set: {
+          water: input.water ?? 0,
+          cups: input.cups ?? 0,
+          lids: input.lids ?? 0,
+          ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+          updatedAt: new Date(),
+        },
       });
     return { ok: true };
   }
