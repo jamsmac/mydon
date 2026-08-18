@@ -404,6 +404,12 @@ ${reply.text}`;
   // детерминированный. Сотрудник шлёт то же сообщение, что раньше в тему.
   const containerReturns = tryParseContainerReturns(clean);
   if (containerReturns) {
+    // Единственная кофейная мутация, стоявшая до всех проверок прав: строку
+    // формата группы мог записать любой подключённый, включая карточку без
+    // ролей. Гейтим тем же правом, что и заливку, — это один контур работы.
+    if (!can(person.roles, "coffee.refill")) {
+      return { reply: { text: "Возвраты наборов тебе сейчас недоступны. Скажи владельцу." } };
+    }
     return { reply: await recordContainerReturns(containerReturns, person, deps) };
   }
 
@@ -446,6 +452,12 @@ async function startMenuItem(
 ): Promise<{ reply: StaffReply; tasks?: TaskRow[] }> {
   if (!item.ready) {
     return { reply: { text: `«${item.label}» пока не готово — скоро включим.` } };
+  }
+  // Последний рубеж для ВСЕХ трёх входов (кнопка, слово, inline-дубль):
+  // входы проверяют право сами, но модель прав не должна зависеть от того,
+  // что ни один из них не забыл — Core ролей не проверяет вовсе.
+  if (!can(person.roles, item.perm)) {
+    return { reply: { text: `«${item.label}» тебе сейчас недоступно. Скажи владельцу.` } };
   }
 
   switch (item.id) {
@@ -536,6 +548,14 @@ export async function handleStaffCallback(
   if (menuHit) {
     const item = menuItemById(menuHit.id);
     if (!item) return { answer: "Кнопка устарела" };
+    // Право и готовность — ДО clear, зеркально текстовому пути: иначе
+    // старые inline-кнопки продолжали пускать после отзыва роли (callback_data
+    // приходит снаружи и подделывается), а сам запрет стоил бы человеку
+    // активного мастера.
+    if (!item.ready) return { answer: "Пока не готово", message: `«${item.label}» пока не готово — скоро включим.` };
+    if (!can(person.roles, item.perm)) {
+      return { answer: "Недоступно", message: `«${item.label}» тебе сейчас недоступно. Скажи владельцу.` };
+    }
     deps.conversations.clear(chatId);
     const started = await startMenuItem(item, chatId, person, deps);
     return {
@@ -629,6 +649,17 @@ export async function handleStaffCallback(
       };
     }
 
+    // Кнопки обхода запускают мастера записи — право проверяется здесь же:
+    // кнопка живёт в чате вечно, а роль могли отозвать после её раздачи.
+    if (visitCb.kind === "next" || visitCb.kind === "more") {
+      if (!can(person.roles, "coffee.refill")) {
+        return { answer: "Недоступно", message: "Заливка тебе сейчас недоступна. Скажи владельцу." };
+      }
+    }
+    if (visitCb.kind === "consumables" && !can(person.roles, "coffee.consumable")) {
+      return { answer: "Недоступно", message: "Расходники тебе сейчас недоступны. Скажи владельцу." };
+    }
+
     if (visitCb.kind === "next") {
       const started = await startCoffeeRefill(chatId, deps);
       return { answer: "Следующая точка", message: started.text, keyboard: started.keyboard };
@@ -672,7 +703,15 @@ export async function handleStaffCallback(
   }
 
   const schedCb = parseSchedulesCallback(data);
-  if (schedCb) return unwrap(await handleSchedulesCallback(chatId, schedCb, person, deps));
+  if (schedCb) {
+    // Раздел читает графики и пишет журнал ТО, а обработчик при пустой беседе
+    // сам перезапрашивает данные из Core — подделанный callback без этой
+    // проверки отдавал бы список работ и запись «сделал» любому сотруднику.
+    if (!can(person.roles, "maintenance.view")) {
+      return { answer: "Недоступно", message: "«🗓 Графики» тебе сейчас недоступно. Скажи владельцу." };
+    }
+    return unwrap(await handleSchedulesCallback(chatId, schedCb, person, deps));
+  }
 
   const partCb = parsePartReplaceCallback(data);
   if (partCb) {
@@ -711,6 +750,12 @@ export async function handleStaffCallback(
   // Кнопка инкассации: фиксируем сбор с точным временем.
   const collect = parseCollectCallback(data);
   if (collect) {
+    // Право — у самой записи, а не только у открытия меню: клавиатура с
+    // автоматами живёт в чате вечно, и после отзыва роли collector старая
+    // кнопка писала бы сбор и слала владельцу ложное «снял выручку».
+    if (!can(person.roles, "cash.collect")) {
+      return { answer: "Недоступно", message: "Инкассация тебе сейчас недоступна. Скажи владельцу." };
+    }
     const created = await deps.core.createCollection(collect.machineId, person.id);
     const when = formatCollectedAt(created.collectedAt);
     return {
