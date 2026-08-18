@@ -220,7 +220,7 @@ export async function handlePartReplaceCallback(
       text:
         `✅ Записал замену.\n🏷 ${name}\n🔧 ${PART_LABELS[partKind as PartKind]}` +
         `${newSerial ? `\n🆔 Новый: ${newSerial}` : ""}${oldLine}\n` +
-        `📋 Причина: ${SWAP_REASON_LABELS[cb.reason]}`,
+        `📋 Причина: ${SWAP_REASON_LABELS[cb.reason]}${photoHint()}`,
       keyboard: afterPhotoKeyboard(),
     },
     ...startAfterPhoto(chatId, "maintenance_log", res.log.id, "замене", deps),
@@ -308,7 +308,7 @@ export async function handleCleanCallback(
   const what = isSanitation ? "Санобработка" : partKind ? PART_LABELS[partKind] : "Автомат целиком";
   return {
     answer: "Записал",
-    message: { text: `✅ Записал чистку.\n🏷 ${name}\n🧽 ${what}`, keyboard: afterPhotoKeyboard() },
+    message: { text: `✅ Записал чистку.\n🏷 ${name}\n🧽 ${what}${photoHint()}`, keyboard: afterPhotoKeyboard() },
     ...startAfterPhoto(chatId, "maintenance_log", log.id, "чистке", deps),
   };
 }
@@ -414,8 +414,9 @@ export async function handleServiceCheckCallback(
     message: {
       text:
         `✅ Записал осмотр.\n🏷 ${name}\n🛠 ${INSPECTION_LABELS[inspection]}\n${verdict}` +
-        (cb.outcome === "failed" ? "\n\nВладелец увидит это в брифинге." : ""),
-      keyboard: afterPhotoKeyboard("Приложи фото акта, если есть"),
+        (cb.outcome === "failed" ? "\n\nВладелец увидит это в брифинге." : "") +
+        photoHint("фото акта"),
+      keyboard: afterPhotoKeyboard(),
     },
     ...startAfterPhoto(chatId, "maintenance_log", log.id, "осмотру", deps),
   };
@@ -474,10 +475,14 @@ function urgencyKeyboard(): NonNullable<StaffReply["keyboard"]> {
  * действию.
  */
 export function problemDoneKeyboard(entityId: string): NonNullable<StaffReply["keyboard"]> {
+  // Подписи короткие: 44-символьное «✅ Готово (приложи фото поломки, если
+  // можешь)» телефон обрезал до противоположного смысла, а «Автомат не
+  // работает — в ремонт» (31) — до 24 знаков без потери сути. Инструкция про
+  // фото — в тексте сообщения (photoHint).
   return {
     inline_keyboard: [
-      [{ text: "✅ Готово (приложи фото поломки, если можешь)", callback_data: "ph:ok" }],
-      [{ text: "🔧 Автомат не работает — в ремонт", callback_data: `pr:rep:${entityId}` }],
+      [{ text: "✅ Готово", callback_data: "ph:ok" }],
+      [{ text: "🔧 Не работает — в ремонт", callback_data: `pr:rep:${entityId}` }],
     ],
   };
 }
@@ -571,7 +576,8 @@ export async function handleProblemCallback(
     message: {
       text:
         `✅ Заявка создана.\n🏷 ${name}\n⚠️ ${SYMPTOM_LABELS[symptom]}\n${URGENCY_LABELS[cb.urgency]}\n\n` +
-        "Она в общем списке — кто освободится, тот и возьмёт.",
+        "Она в общем списке — кто освободится, тот и возьмёт." +
+        photoHint("фото поломки"),
       keyboard: problemDoneKeyboard(entityId),
     },
     ...startAfterPhoto(chatId, "task", task.id, "заявке", deps),
@@ -588,8 +594,17 @@ export async function handleProblemCallback(
  * Поэтому это не шаг мастера, а необязательное продолжение: мастер уже
  * отработал, запись в базе, а фото приложится, если получится.
  */
-export function afterPhotoKeyboard(hint = "Приложи фото, если есть"): NonNullable<StaffReply["keyboard"]> {
-  return { inline_keyboard: [[{ text: `✅ Готово (${hint.toLowerCase()})`, callback_data: "ph:ok" }]] };
+export function afterPhotoKeyboard(): NonNullable<StaffReply["keyboard"]> {
+  // Кнопка — только действие. Инструкция «приложи фото…» жила в подписи и
+  // раздувала её до 35–44 символов: телефон обрезал до «✅ Готово (приложи
+  // фото пол…» — читалось как призыв приложить, а нажатие ЗАВЕРШАЛО шаг.
+  // Подсказка теперь в тексте сообщения (photoHint).
+  return { inline_keyboard: [[{ text: "✅ Готово", callback_data: "ph:ok" }]] };
+}
+
+/** Строка-подсказка шага фото — в ТЕКСТ сообщения, не в кнопку. */
+export function photoHint(what = "фото"): string {
+  return `\n\n📷 Приложи ${what}, если есть, — или жми «Готово».`;
 }
 
 function startAfterPhoto(

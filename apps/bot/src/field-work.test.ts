@@ -273,7 +273,7 @@ describe("Поломка", () => {
     await handleProblemCallback(1, { kind: "symptom", symptom: "bill" }, ME, deps);
     const res = await handleProblemCallback(1, { kind: "urgency", urgency: "1" }, ME, deps);
 
-    assert.match(calls[0], /^task:urgent:Не принимает купюры/);
+    assert.match(calls[0], /^task:urgent:Купюры не берёт/);
     assert.match(calls[0], /owner=-$/, "исполнителя быть не должно");
     assert.ok(
       !calls.some((c) => c.startsWith("log:")),

@@ -130,13 +130,19 @@ async function main(): Promise<void> {
   const asStaff = new Set<number>();
   setInterval(() => conversations.sweep(), 10 * 60_000).unref();
 
-  /** Кто написал: сотрудник или посторонний. Ошибка Core = «неизвестен». */
-  async function personOf(chatId: number): Promise<PersonRow | null> {
+  /**
+   * Кто написал: сотрудник, посторонний или «Core недоступен».
+   *
+   * Три исхода, а не два: раньше сбой Core схлопывался в «посторонний», и
+   * свой сотрудник посреди визарда получал вечный спиннер на кнопке — молча,
+   * как чужак. Отличать «не найден» от «не смог спросить» обязан вызывающий.
+   */
+  async function personOf(chatId: number): Promise<PersonRow | null | "core-down"> {
     try {
       const res = await deps.core.personByChat(String(chatId));
       return "found" in res ? null : res;
     } catch {
-      return null;
+      return "core-down";
     }
   }
 
@@ -204,6 +210,9 @@ async function main(): Promise<void> {
       }
 
       let person = await personOf(chatId);
+      // Core недоступен: привязку всё равно пробуем — она тоже упадёт, и
+      // общий catch ниже честно ответит «сервер не ответил».
+      if (person === "core-down") person = null;
 
       if (person === null) {
         const linked = await deps.core.linkTelegram(String(chatId), username ?? null);
@@ -257,6 +266,14 @@ async function main(): Promise<void> {
   ): Promise<void> {
     try {
       const person = await personOf(chatId);
+      if (person === "core-down") {
+        // Свой это или чужой — не узнать; молчать нельзя: снимок «до» второй
+        // раз не сделать. Постороннему этот редкий ответ ничего не выдаёт.
+        await tg
+          .sendMessage(chatId, "⚠️ Фото не сохранилось — сервер не ответил. Отправь его ещё раз через минуту.")
+          .catch(() => undefined);
+        return;
+      }
       if (person === null) return;
       const largest = photo[photo.length - 1];
       const file = await tg.downloadFile(largest.file_id);
@@ -308,44 +325,71 @@ async function main(): Promise<void> {
   }
 
   // Утренний брифинг 07:30 Asia/Tashkent (FR-6)
+  const sendOwnerBriefing = async (): Promise<void> => {
+    const to = isoDate(new Date());
+    const from = isoDate(new Date(Date.now() - 3 * 86_400_000));
+    const [b, approvals, purchase, fillStatus, reconcile, washSchedule, globerent] = await Promise.all([
+      deps.core.briefing(),
+      // Согласования — деградируемый блок: их сбой не должен стоить владельцу
+      // всего брифинга. Раньше он был обязательным, и одна ошибка в 07:30
+      // оставляла владельца без сводки на сутки.
+      deps.core.pendingApprovals().catch(() => []),
+      deps.core.vendingPurchase().catch(() => null),
+      deps.core.coffeeFillStatus().catch(() => null),
+      deps.core.coffeeReconcileAll(from, to).catch(() => null),
+      deps.core.coffeeWashScheduleStatus().catch(() => null),
+      collectGloberentSignals(deps.core),
+    ]);
+    const coffee =
+      fillStatus || reconcile || washSchedule
+        ? {
+            underfill: fillStatus?.filter((r) => r.status === "underfill").length ?? 0,
+            anomaly: reconcile?.reduce((n, g) => n + g.rows.filter((r) => r.reconcile.status === "anomaly").length, 0) ?? 0,
+            overdueWash: washSchedule?.filter((r) => r.status === "overdue").length ?? 0,
+          }
+        : undefined;
+    const text = formatBriefing(
+      b,
+      approvals,
+      purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
+      coffee,
+      globerent,
+    );
+    // Ключ одноразовости ПЕРЕД отправкой — как у дайджеста сотрудников:
+    // окно автодеплоя (два живых процесса) не должно слать два брифинга.
+    if (!(await deps.core.claimNotification(`briefing:${to}`))) return;
+    for (const chatId of allowlist) {
+      // По-чатно: сбой одного чата не оставляет остальных без брифинга.
+      try {
+        await tg.sendMessage(chatId, text);
+      } catch (err) {
+        console.error("Брифинг не доставлен в чат:", err);
+      }
+    }
+  };
+
+  /**
+   * Попытки с шагом в 5 минут: бот и Core на одном хосте передеплоиваются
+   * автоматически, и совпадение рестарта Core с 07:30 реально. Одна попытка
+   * означала «любой сбой = сутки без брифинга/дайджеста».
+   */
+  const withRetries = async (what: string, fn: () => Promise<void>, tries = 3): Promise<void> => {
+    for (let attempt = 1; attempt <= tries; attempt++) {
+      try {
+        await fn();
+        return;
+      } catch (err) {
+        console.error(`${what} (попытка ${attempt}/${tries}):`, err);
+        if (attempt < tries) await new Promise((r) => setTimeout(r, 5 * 60_000));
+      }
+    }
+  };
+
   const scheduleBriefing = (): void => {
     setTimeout(() => {
       void (async () => {
-        try {
-          const to = isoDate(new Date());
-          const from = isoDate(new Date(Date.now() - 3 * 86_400_000));
-          const [b, approvals, purchase, fillStatus, reconcile, washSchedule, globerent] = await Promise.all([
-            deps.core.briefing(),
-            deps.core.pendingApprovals(),
-            deps.core.vendingPurchase().catch(() => null),
-            deps.core.coffeeFillStatus().catch(() => null),
-            deps.core.coffeeReconcileAll(from, to).catch(() => null),
-            deps.core.coffeeWashScheduleStatus().catch(() => null),
-            collectGloberentSignals(deps.core),
-          ]);
-          const coffee =
-            fillStatus || reconcile || washSchedule
-              ? {
-                  underfill: fillStatus?.filter((r) => r.status === "underfill").length ?? 0,
-                  anomaly: reconcile?.reduce((n, g) => n + g.rows.filter((r) => r.reconcile.status === "anomaly").length, 0) ?? 0,
-                  overdueWash: washSchedule?.filter((r) => r.status === "overdue").length ?? 0,
-                }
-              : undefined;
-          const text = formatBriefing(
-            b,
-            approvals,
-            purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
-            coffee,
-            globerent,
-          );
-          for (const chatId of allowlist) {
-            await tg.sendMessage(chatId, text);
-          }
-        } catch (err) {
-          console.error("Брифинг не отправлен:", err);
-        } finally {
-          scheduleBriefing();
-        }
+        await withRetries("Брифинг не отправлен", sendOwnerBriefing);
+        scheduleBriefing();
       })();
     }, msUntilBriefing());
   };
@@ -390,13 +434,8 @@ async function main(): Promise<void> {
   const scheduleDigest = (): void => {
     setTimeout(() => {
       void (async () => {
-        try {
-          await sendStaffDigest();
-        } catch (err) {
-          console.error("Дайджест сотрудникам не отправлен:", err);
-        } finally {
-          scheduleDigest();
-        }
+        await withRetries("Дайджест сотрудникам не отправлен", sendStaffDigest);
+        scheduleDigest();
       })();
     }, msUntilBriefing(new Date(), 7, 0));
   };
@@ -556,14 +595,20 @@ async function main(): Promise<void> {
         // сбое sendMessage сигнал бы потерялся.
         const delivered: string[] = [];
         for (const { key, text } of items) {
-          try {
-            for (const chatId of allowlist) {
+          // По-чатно: раньше сбой ПЕРВОГО чата не давал ack, и работающие
+          // чаты получали то же срочное уведомление заново каждую минуту —
+          // бесконечные дубли, а чаты после упавшего не получали ничего.
+          // Ack — если дошло хотя бы одному владельцу.
+          let deliveredAny = false;
+          for (const chatId of allowlist) {
+            try {
               await tg.sendMessage(chatId, text);
+              deliveredAny = true;
+            } catch (err) {
+              console.error("Уведомление в чат не доставлено:", err);
             }
-            delivered.push(key);
-          } catch (err) {
-            console.error("Уведомление не доставлено (повторю на следующем опросе):", err);
           }
+          if (deliveredAny) delivered.push(key);
         }
         try {
           await notifier.ack(delivered);
@@ -599,6 +644,12 @@ async function main(): Promise<void> {
       const photoChat = u.message.chat.id;
       if (!isAllowed(photoChat, allowlist) || asStaff.has(photoChat)) {
         await routeStaffPhoto(photoChat, u.message.photo);
+      } else {
+        // Владельцу — не молчание: барьер #149 закрыл утечку фото в полевой
+        // разбор, но вернул прежний симптом «бот проглотил фото».
+        await tg
+          .sendMessage(photoChat, "Фото в режиме владельца не обрабатываю. Для полевых записей включи «я сотрудник».")
+          .catch(() => undefined);
       }
     } else if (u.message?.text) {
       const chatId = u.message.chat.id;
@@ -726,6 +777,13 @@ ${DECIDED_LABEL[parsed.decision]}`);
 
       // Кнопка от сотрудника: «Взял» / «Сделал» по своей задаче.
       const person = await personOf(chatId);
+      if (person === "core-down") {
+        // Сотрудник посреди визарда не должен быть неотличим от постороннего
+        // из-за сетевого сбоя: без ответа кнопка «крутится» до таймаута и
+        // выглядит сломанной.
+        await tg.answerCallback(u.callback_query.id, "Сервер не отвечает — повтори через минуту");
+        return;
+      }
       if (person === null) return; // постороннему не отвечаем вовсе
       try {
         const res = await handleStaffCallback(chatId, data, person, staffDeps);

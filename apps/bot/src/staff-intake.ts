@@ -1,5 +1,6 @@
 import type { CoreClient, EntityRow, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
+import { applyPress, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
 import type { StaffReply } from "./staff";
 import { fmtQty, parseQty } from "./staff-inventory";
 
@@ -38,6 +39,7 @@ function pickKeyboard(items: EntityRow[], kind: "wh" | "ing"): NonNullable<Staff
 export type IntakeCallback =
   | { kind: "warehouse"; id: string }
   | { kind: "ingredient"; id: string }
+  | { kind: "num"; press: NumpadPress }
   | { kind: "cancel" };
 
 /** Строгий разбор нажатия. Данные кнопки приходят снаружи — доверять нельзя. */
@@ -47,6 +49,8 @@ export function parseIntakeCallback(data: string): IntakeCallback | null {
   if (wh) return { kind: "warehouse", id: wh[1] };
   const ing = /^n:ing:([0-9a-f-]{36})$/.exec(data);
   if (ing) return { kind: "ingredient", id: ing[1] };
+  const press = parseNumpadCallback("n", data);
+  if (press) return { kind: "num", press };
   return null;
 }
 
@@ -88,13 +92,13 @@ async function ingredientStep(chatId: number, deps: IntakeDeps, warehouseName: s
   return { text: `Склад «${warehouseName}». Что пришло?${note}`, keyboard: pickKeyboard(ings, "ing") };
 }
 
-/** Нажатие кнопки прихода: склад, ингредиент, отмена. */
+/** Нажатие кнопки прихода: склад, ингредиент, нумпад, отмена. */
 export async function handleIntakeCallback(
   chatId: number,
   cb: IntakeCallback,
-  _person: PersonRow,
+  person: PersonRow,
   deps: IntakeDeps,
-): Promise<{ answer: string; message?: StaffReply }> {
+): Promise<{ answer: string; message?: StaffReply; edit?: StaffReply }> {
   if (cb.kind === "cancel") {
     // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
     // устаревшего экрана не должна гасить текущее дело — слот беседы один,
@@ -110,6 +114,20 @@ export async function handleIntakeCallback(
   const conv = deps.conversations.get(chatId);
   if (conv?.flow !== "intake") {
     return { answer: "Визард истёк", message: { text: "Приход прервался. Начни заново: «приход»." } };
+  }
+
+  if (cb.kind === "num") {
+    if (conv.step !== "count") return { answer: "Не сейчас" };
+    const draft = String(conv.data.draft ?? "");
+    if (cb.press.kind === "digit" || cb.press.kind === "erase") {
+      const next = applyPress(draft, cb.press);
+      if (next === draft) return { answer: "Пусто" };
+      deps.conversations.advance(chatId, "count", { draft: next });
+      return { answer: next === "" ? "—" : next, edit: countScreen(conv.data, next) };
+    }
+    if (cb.press.kind !== "done") return { answer: "Не сейчас" };
+    if (draft === "" || Number(draft) === 0) return { answer: "Набери число" };
+    return { answer: draft, edit: await saveIntakeCount(chatId, Number(draft), person, deps) };
   }
 
   if (cb.kind === "warehouse") {
@@ -135,24 +153,37 @@ export async function handleIntakeCallback(
       },
     };
   }
+  const known = bal.qty ?? 0;
+  // Заголовок шага храним в беседе: нумпад перерисовывает экран на каждом
+  // нажатии, и остаток «по учёту» должен оставаться перед глазами.
+  const header =
+    `«${bal.ingredientName}» на складе «${bal.warehouseName}».\n` +
+    `Сейчас по учёту: ${fmtQty(known)} ${bal.baseUnit}.\n\n` +
+    "Сколько пришло?";
   deps.conversations.advance(chatId, "count", {
     ingredientId: cb.id,
     ingredientName: bal.ingredientName,
     baseUnit: bal.baseUnit,
+    countHeader: header,
+    draft: "",
   });
-  const known = bal.qty ?? 0;
+  // Нумпад — тот же полевой способ ввода, что у заливки: способ ввода числа
+  // не должен зависеть от раздела. Дробные («10.5») по-прежнему текстом.
   return {
     answer: bal.ingredientName,
-    message: {
-      text:
-        `«${bal.ingredientName}» на складе «${bal.warehouseName}».\n` +
-        `Сейчас по учёту: ${fmtQty(known)} ${bal.baseUnit}.\n\n` +
-        `Сколько пришло? Напиши число в ${bal.baseUnit}.`,
-    },
+    message: { text: numpadText(header, "", bal.baseUnit), keyboard: numpadKeyboard("n") },
   };
 }
 
-/** Ввод количества прихода: пишем движение и показываем новый остаток. */
+/** Экран набора числа — перерисовка при каждом нажатии нумпада. */
+function countScreen(data: Record<string, unknown>, draft: string): StaffReply {
+  return {
+    text: numpadText(String(data.countHeader ?? "Сколько пришло?"), draft, String(data.baseUnit ?? "")),
+    keyboard: numpadKeyboard("n"),
+  };
+}
+
+/** Ввод количества прихода текстом: тот же путь, что у нумпада. */
 export async function handleIntakeCount(
   chatId: number,
   text: string,
@@ -167,10 +198,21 @@ export async function handleIntakeCount(
   if (qty === null || qty === 0) {
     return { text: "Не понял число. Напиши, сколько пришло, например 10 или 10.5." };
   }
-  const warehouseId = String(conv.data.warehouseId ?? "");
-  const ingredientId = String(conv.data.ingredientId ?? "");
-  const baseUnit = String(conv.data.baseUnit ?? "");
-  const ingredientName = String(conv.data.ingredientName ?? "ингредиент");
+  return saveIntakeCount(chatId, qty, person, deps);
+}
+
+/** Общий конец для текста и нумпада: движение прихода + новый остаток. */
+async function saveIntakeCount(
+  chatId: number,
+  qty: number,
+  person: PersonRow,
+  deps: IntakeDeps,
+): Promise<StaffReply> {
+  const conv = deps.conversations.get(chatId);
+  const warehouseId = String(conv?.data.warehouseId ?? "");
+  const ingredientId = String(conv?.data.ingredientId ?? "");
+  const baseUnit = String(conv?.data.baseUnit ?? "");
+  const ingredientName = String(conv?.data.ingredientName ?? "ингредиент");
   if (!warehouseId || !ingredientId || !baseUnit) {
     deps.conversations.clear(chatId);
     return { text: "Данные прихода потерялись — начни заново: «приход»." };

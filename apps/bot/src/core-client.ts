@@ -554,8 +554,13 @@ export class CoreClient {
         body: JSON.stringify({ personId }),
       });
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      // false — ТОЛЬКО настоящий конфликт (Core ответил 409: успел другой).
+      // Сеть и таймаут раньше тоже давали false, и сотруднику говорили
+      // «взял другой»: он уходил, задача оставалась свободной, работа стояла.
+      // Прочие ошибки пробрасываем — выше есть честный «попробуй ещё раз».
+      if (err instanceof CoreError && err.status === 409) return false;
+      throw err;
     }
   }
 
@@ -570,6 +575,18 @@ export class CoreClient {
         body: JSON.stringify({ code, chatId }),
       });
     } catch (err) {
+      // Обещание «Core уже объяснил, что не так» теперь выполняется буквально:
+      // из тела 4xx достаётся message Nest-исключения, а не техническое
+      // «Core ответил 400 на /people/redeem», которое никому не помогает.
+      if (err instanceof CoreError && err.isClientError) {
+        try {
+          const parsed = JSON.parse(err.body) as { message?: string | string[] };
+          const msg = Array.isArray(parsed.message) ? parsed.message[0] : parsed.message;
+          if (msg) return { error: msg };
+        } catch {
+          // тело не JSON — общий текст ниже
+        }
+      }
       return { error: err instanceof Error ? err.message : "Не получилось" };
     }
   }

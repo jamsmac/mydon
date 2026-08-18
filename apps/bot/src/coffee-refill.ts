@@ -34,7 +34,10 @@ export interface CoffeeDeps {
 
 /** Слова, которыми техник начинает заливку. */
 export function isCoffeeRefillTrigger(text: string): boolean {
-  return /бункер|засыпал|залил.*кофе|кофе.*залил/i.test(text.trim());
+  // С якорем ^: подстрока «бункер» без якоря перехватывала «помыл бункер» и
+  // «почистил бункер» у мойки, как только заливка встала выше в реестре меню.
+  // Правильный победитель не должен зависеть от порядка пунктов.
+  return /^(бункер|засыпал|залил|заливка|кофе.*залил)/i.test(text.trim());
 }
 
 /** Слова, которыми техник отмечает мойку/обслуживание. */
@@ -146,10 +149,12 @@ function weightStep(position: number, draft = ""): StaffReply {
 export type CoffeeWashCallback =
   | { kind: "location"; id: string }
   | { kind: "position"; position: number }
+  | { kind: "all" }
   | { kind: "cancel" };
 
 export function parseCoffeeWashCallback(data: string): CoffeeWashCallback | null {
   if (data === "cw:cancel") return { kind: "cancel" };
+  if (data === "cw:pos:all") return { kind: "all" };
   const loc = /^cw:loc:([0-9a-f-]{36})$/.exec(data);
   if (loc) return { kind: "location", id: loc[1] };
   const pos = /^cw:pos:([1-8])$/.exec(data);
@@ -786,15 +791,47 @@ export async function handleCoffeeWashCallback(
     const loc = locations.find((l) => l.id === cb.id);
     if (!loc) return { answer: "Точка не найдена", message: { text: "Этой точки уже нет — начни заново." } };
     deps.conversations.advance(chatId, "position", { locationId: loc.id, locationName: loc.name });
-    return { answer: loc.name, message: await positionStep(deps, loc.name, "cw") };
+    const step = await positionStep(deps, loc.name, "cw");
+    // «Вся машина целиком» — первый ряд: после полной мойки это самый частый
+    // случай. Комментарий секции обещал этот путь, но кнопки не было: техник
+    // либо жал восемь раз, либо врал одной позицией, либо уходил в чужой
+    // мастер «Чистка автомата». Только для мойки: у заливки (cf) «вся машина»
+    // не имеет смысла — сыплют в конкретный бункер.
+    step.keyboard = {
+      inline_keyboard: [
+        [{ text: "🧼 Вся машина целиком", callback_data: "cw:pos:all" }],
+        ...(step.keyboard?.inline_keyboard ?? []),
+      ],
+    };
+    return { answer: loc.name, message: step };
   }
 
-  // cb.kind === "position" — сразу сохраняем, шагов больше нет.
   const locationId = String(conv.data.locationId ?? "");
   const locationName = String(conv.data.locationName ?? "");
   if (!locationId) {
     deps.conversations.clear(chatId);
     return { answer: "Данные потерялись", message: { text: "Начни заново: «помыл»." } };
+  }
+
+  if (cb.kind === "all") {
+    // По одному логу на каждую настроенную позицию: графики мойки ведутся
+    // по-бункерно, и одна запись «в целом» их не закрыла бы.
+    const config = await deps.core.coffeeBunkerConfig();
+    const positions = [...new Set(config.map((c) => c.position))].sort((a, b) => a - b);
+    for (const position of positions) {
+      await deps.core.recordCoffeeWash({
+        locationId,
+        position,
+        kind: "wash",
+        note: "вся машина",
+        performedBy: `person:${person.id}`,
+      });
+    }
+    deps.conversations.clear(chatId);
+    return {
+      answer: "Записал",
+      message: { text: `✅ Мойка отмечена: «${locationName}», вся машина (бункеры: ${positions.join(", ")}).` },
+    };
   }
 
   await deps.core.recordCoffeeWash({

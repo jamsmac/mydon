@@ -57,9 +57,11 @@ describe("Разбор кнопок заведения", () => {
     assert.equal(parseRegisterCallback(""), null);
   });
 
-  it("клавиатура единиц кодирует индексы, а не кириллицу", () => {
+  it("клавиатура единиц кодирует индексы, а не кириллицу (+ ряд «Отмена»)", () => {
     const flat = unitKeyboard().inline_keyboard.flat();
-    for (const b of flat) assert.match(b.callback_data, /^r:unit:\d+$/);
+    const units = flat.filter((b) => b.callback_data !== "r:cancel");
+    assert.ok(flat.some((b) => b.callback_data === "r:cancel"), "шаг единиц — не тупик кнопок");
+    for (const b of units) assert.match(b.callback_data, /^r:unit:\d+$/);
     // каждая кнопка разбирается обратно в реальную единицу
     for (const b of flat) assert.ok(parseRegisterCallback(b.callback_data));
   });

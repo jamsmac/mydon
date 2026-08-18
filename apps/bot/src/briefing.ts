@@ -186,13 +186,15 @@ export function formatApproval(a: ApprovalRow): string {
 }
 
 export function approvalKeyboard(id: string) {
+  // Три ряда, а не один: решение необратимо пишется одним нажатием, и
+  // «Одобрить» с «Отклонить» вплотную в ряду из трёх — это промах пальцем
+  // ценой в исполненное действие агента (стандарт проекта из coffee-fix:
+  // противоположные действия — разные ряды). «Уточнить» — буфером между ними.
   return {
     inline_keyboard: [
-      [
-        { text: "✅ Одобрить", callback_data: `ap:approved:${id}` },
-        { text: "❌ Отклонить", callback_data: `ap:rejected:${id}` },
-        { text: "❓ Уточнить", callback_data: `ap:clarify:${id}` },
-      ],
+      [{ text: "✅ Одобрить", callback_data: `ap:approved:${id}` }],
+      [{ text: "❓ Уточнить", callback_data: `ap:clarify:${id}` }],
+      [{ text: "❌ Отклонить", callback_data: `ap:rejected:${id}` }],
     ],
   };
 }

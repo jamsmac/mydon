@@ -210,3 +210,28 @@ describe("Пункт без мастера не показывается и не
     }
   });
 });
+
+describe("Аудит 18.08: раскладка постоянного меню", () => {
+  it("наверху ежедневное: первый ряд — пара обхода, редкое — ниже", async () => {
+    const { STAFF_MENU } = await import("./menu");
+    const visible = STAFF_MENU.filter((i) => i.ready).map((i) => i.id);
+    assert.deepEqual(visible.slice(0, 4), ["refill", "cons", "tasks", "coll"], "ежедневное — первыми двумя рядами");
+    assert.ok(visible.indexOf("part") > visible.indexOf("refill"), "редкая замена — ниже ежедневной заливки");
+    assert.ok(visible.indexOf("insp") > visible.indexOf("wash"), "осмотр — ниже ежедневной мойки");
+  });
+
+  it("эмодзи не дублируются между видимыми пунктами", async () => {
+    const { STAFF_MENU } = await import("./menu");
+    const icons = STAFF_MENU.filter((i) => i.ready).map((i) => [...i.label][0]);
+    assert.equal(new Set(icons).size, icons.length, "один значок — один смысл");
+  });
+
+  it("«сделал, но нет воды» больше не перехватывается списком задач", async () => {
+    const { isTasksTrigger } = await import("./menu");
+    assert.equal(isTasksTrigger("сделал, но нет воды"), false);
+    assert.equal(isTasksTrigger("помоги"), false);
+    assert.equal(isTasksTrigger("задачи"), true);
+    assert.equal(isTasksTrigger("дела на точке"), true);
+    assert.equal(isTasksTrigger("мои задачи"), true);
+  });
+});

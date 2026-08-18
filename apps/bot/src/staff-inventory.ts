@@ -1,5 +1,6 @@
 import type { CoreClient, EntityRow, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
+import { applyPress, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
 import type { StaffReply } from "./staff";
 
 /**
@@ -53,6 +54,7 @@ function pickKeyboard(items: EntityRow[], kind: "wh" | "ing"): NonNullable<Staff
 export type InventoryCallback =
   | { kind: "warehouse"; id: string }
   | { kind: "ingredient"; id: string }
+  | { kind: "num"; press: NumpadPress }
   | { kind: "cancel" };
 
 /** Строгий разбор нажатия. Данные кнопки приходят снаружи — доверять нельзя. */
@@ -62,6 +64,8 @@ export function parseInventoryCallback(data: string): InventoryCallback | null {
   if (wh) return { kind: "warehouse", id: wh[1] };
   const ing = /^i:ing:([0-9a-f-]{36})$/.exec(data);
   if (ing) return { kind: "ingredient", id: ing[1] };
+  const press = parseNumpadCallback("i", data);
+  if (press) return { kind: "num", press };
   return null;
 }
 
@@ -105,13 +109,13 @@ async function ingredientStep(chatId: number, deps: InventoryDeps, warehouseName
   return { text: `Склад «${warehouseName}». Какой ингредиент?${note}`, keyboard: pickKeyboard(ings, "ing") };
 }
 
-/** Нажатие кнопки инвентаризации: склад, ингредиент, отмена. */
+/** Нажатие кнопки инвентаризации: склад, ингредиент, нумпад, отмена. */
 export async function handleInventoryCallback(
   chatId: number,
   cb: InventoryCallback,
-  _person: PersonRow,
+  person: PersonRow,
   deps: InventoryDeps,
-): Promise<{ answer: string; message?: StaffReply }> {
+): Promise<{ answer: string; message?: StaffReply; edit?: StaffReply }> {
   if (cb.kind === "cancel") {
     // Барьер #149, распространённый на некофейные мастера: «Отмена» с чужого
     // устаревшего экрана не должна гасить текущее дело — слот беседы один,
@@ -127,6 +131,20 @@ export async function handleInventoryCallback(
   const conv = deps.conversations.get(chatId);
   if (conv?.flow !== "inventory") {
     return { answer: "Визард истёк", message: { text: "Пересчёт прервался. Начни заново: «инвентаризация»." } };
+  }
+
+  if (cb.kind === "num") {
+    if (conv.step !== "count") return { answer: "Не сейчас" };
+    const draft = String(conv.data.draft ?? "");
+    if (cb.press.kind === "digit" || cb.press.kind === "erase") {
+      const next = applyPress(draft, cb.press);
+      if (next === draft) return { answer: "Пусто" };
+      deps.conversations.advance(chatId, "count", { draft: next });
+      return { answer: next === "" ? "—" : next, edit: countScreen(conv.data, next) };
+    }
+    if (cb.press.kind !== "done") return { answer: "Не сейчас" };
+    if (draft === "") return { answer: "Набери число" };
+    return { answer: draft, edit: await saveInventoryCount(chatId, Number(draft), person, deps) };
   }
 
   if (cb.kind === "warehouse") {
@@ -152,25 +170,39 @@ export async function handleInventoryCallback(
       },
     };
   }
+  const known = bal.qty ?? 0;
+  const warn = bal.unconvertible > 0 ? `\n⚠️ ${bal.unconvertible} движ. в несводимой единице — остаток неполон.` : "";
+  // Заголовок шага храним в беседе: нумпад перерисовывает экран на каждом
+  // нажатии, и остаток «по учёту» должен оставаться перед глазами.
+  const header =
+    `«${bal.ingredientName}» на складе «${bal.warehouseName}».\n` +
+    `Сейчас по учёту: ${fmtQty(known)} ${bal.baseUnit}.${warn}\n\n` +
+    "Сколько по факту?";
   deps.conversations.advance(chatId, "count", {
     ingredientId: cb.id,
     ingredientName: bal.ingredientName,
     baseUnit: bal.baseUnit,
+    countHeader: header,
+    draft: "",
   });
-  const known = bal.qty ?? 0;
-  const warn = bal.unconvertible > 0 ? `\n⚠️ ${bal.unconvertible} движ. в несводимой единице — остаток неполон.` : "";
+  // Нумпад — тот же полевой способ ввода, что у заливки: способ ввода числа
+  // не должен зависеть от раздела. Дробные («10.5») по-прежнему текстом —
+  // текстовый канал не отнимается.
   return {
     answer: bal.ingredientName,
-    message: {
-      text:
-        `«${bal.ingredientName}» на складе «${bal.warehouseName}».\n` +
-        `Сейчас по учёту: ${fmtQty(known)} ${bal.baseUnit}.${warn}\n\n` +
-        `Сколько по факту? Напиши число в ${bal.baseUnit}.`,
-    },
+    message: { text: numpadText(header, "", bal.baseUnit), keyboard: numpadKeyboard("i") },
   };
 }
 
-/** Ввод фактического количества: записываем корректировку и показываем итог. */
+/** Экран набора числа — перерисовка при каждом нажатии нумпада. */
+function countScreen(data: Record<string, unknown>, draft: string): StaffReply {
+  return {
+    text: numpadText(String(data.countHeader ?? "Сколько по факту?"), draft, String(data.baseUnit ?? "")),
+    keyboard: numpadKeyboard("i"),
+  };
+}
+
+/** Ввод фактического количества текстом: тот же путь, что у нумпада. */
 export async function handleInventoryCount(
   chatId: number,
   text: string,
@@ -185,9 +217,20 @@ export async function handleInventoryCount(
   if (actual === null) {
     return { text: "Не понял число. Напиши количество, например 8 или 8.5." };
   }
-  const warehouseId = String(conv.data.warehouseId ?? "");
-  const ingredientId = String(conv.data.ingredientId ?? "");
-  const baseUnit = String(conv.data.baseUnit ?? "");
+  return saveInventoryCount(chatId, actual, person, deps);
+}
+
+/** Общий конец для текста и нумпада: корректировка + итог одним видом. */
+async function saveInventoryCount(
+  chatId: number,
+  actual: number,
+  person: PersonRow,
+  deps: InventoryDeps,
+): Promise<StaffReply> {
+  const conv = deps.conversations.get(chatId);
+  const warehouseId = String(conv?.data.warehouseId ?? "");
+  const ingredientId = String(conv?.data.ingredientId ?? "");
+  const baseUnit = String(conv?.data.baseUnit ?? "");
   if (!warehouseId || !ingredientId) {
     deps.conversations.clear(chatId);
     return { text: "Данные пересчёта потерялись — начни заново: «инвентаризация»." };

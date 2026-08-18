@@ -116,8 +116,10 @@ export function taskKeyboard(task: TaskRow): StaffReply["keyboard"] {
     inline_keyboard: [
       row,
       // Отдельным рядом: «не смогу» — не повседневная кнопка, и стоять
-      // рядом с «Выполнил» ей нельзя.
-      [{ text: "↩️ Не смогу", callback_data: `t:${task.id}:free` }],
+      // рядом с «Выполнил» ей нельзя. «🙅», не «↩️»: тот значок занят
+      // «Ошибся — исправить» (удаление записи) — один символ на два действия
+      // разной цены провоцирует промах при сканировании по эмодзи.
+      [{ text: "🙅 Не смогу", callback_data: `t:${task.id}:free` }],
     ],
   };
 }
@@ -210,10 +212,14 @@ export function formatMyTasks(person: PersonRow, tasks: TaskRow[], free: TaskRow
 
 /** Кнопки выбора автомата для инкассации. Префикс «c:» — отдельное пространство. */
 export function machinesKeyboard(machines: { id: string; name: string }[]): StaffReply["keyboard"] {
+  // «Отмена» обязательна: это был единственный список выбора во всём боте без
+  // выхода кнопкой, при том что любое нажатие по строке сразу пишет сбор.
+  // `c:cancel` не конфликтует с `c:<uuid>` — parseCollectCallback требует uuid.
   return {
-    inline_keyboard: machines
-      .slice(0, 30)
-      .map((m) => [{ text: m.name.slice(0, 40), callback_data: `c:${m.id}` }]),
+    inline_keyboard: [
+      ...machines.slice(0, 30).map((m) => [{ text: m.name.slice(0, 40), callback_data: `c:${m.id}` }]),
+      [{ text: "✖️ Отмена", callback_data: "c:cancel" }],
+    ],
   };
 }
 
@@ -618,22 +624,25 @@ export async function handleStaffCallback(
     };
   }
 
-  // Кнопки инвентаризации (i:wh/ing/cancel).
+  // Кнопки инвентаризации (i:wh/ing/нумпад/cancel).
   const inv = parseInventoryCallback(data);
   if (inv) {
     const res = await handleInventoryCallback(chatId, inv, person, deps);
     return {
       answer: res.answer,
+      // `edit` — набор цифр нумпадом: перерисовываем то же сообщение.
+      ...(res.edit ? { edit: { text: res.edit.text, ...(res.edit.keyboard ? { keyboard: res.edit.keyboard } : {}) } } : {}),
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
     };
   }
 
-  // Кнопки прихода (n:wh/ing/cancel).
+  // Кнопки прихода (n:wh/ing/нумпад/cancel).
   const intake = parseIntakeCallback(data);
   if (intake) {
     const res = await handleIntakeCallback(chatId, intake, person, deps);
     return {
       answer: res.answer,
+      ...(res.edit ? { edit: { text: res.edit.text, ...(res.edit.keyboard ? { keyboard: res.edit.keyboard } : {}) } } : {}),
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
     };
   }
@@ -821,6 +830,11 @@ export async function handleStaffCallback(
   if (coffeeFix) {
     const res = await handleCoffeeFixCallback(coffeeFix, person, deps);
     return { answer: res.answer, ...(res.message ? { message: res.message } : {}) };
+  }
+
+  // Инкассация: «Отмена» просто закрывает список — беседа им не занята.
+  if (data === "c:cancel") {
+    return { answer: "Отменено", message: "Инкассацию отменил." };
   }
 
   // Кнопка инкассации: фиксируем сбор с точным временем.

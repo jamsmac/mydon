@@ -438,3 +438,76 @@ describe("Права на callback-пути — модель прав больш
     assert.ok(calls.includes("collect"));
   });
 });
+
+describe("Аудит 18.08: раскладка и честные ошибки", () => {
+  it("карточка согласования: противоположные действия — в разных рядах", async () => {
+    const { approvalKeyboard } = await import("./briefing");
+    const kb = approvalKeyboard("ap-1").inline_keyboard;
+    assert.equal(kb.length >= 3, true, "три ряда, а не один");
+    for (const row of kb.slice(0, 3)) assert.equal(row.length, 1);
+    assert.match(kb[1][0].text, /Уточнить/, "буфер между «Одобрить» и «Отклонить»");
+  });
+
+  it("инкассация: у списка есть «Отмена», и она ничего не пишет", async () => {
+    const { machinesKeyboard } = await import("./staff");
+    const kb = machinesKeyboard([{ id: "33333333-3333-4333-8333-333333333333", name: "Kaffit" }])!;
+    assert.match(JSON.stringify(kb), /c:cancel/);
+    const { core, calls } = stubCore({
+      createCollection: async () => {
+        calls.push("collect");
+        return { id: "c1", collectedAt: "2026-08-18T07:00:00+05:00" };
+      },
+    });
+    const res = await handleStaffCallback(555, "c:cancel", ME, { core, conversations: new Conversations() } as never);
+    assert.equal(res.answer, "Отменено");
+    assert.ok(!calls.includes("collect"));
+  });
+
+  it("claimTask: сетевой сбой не выдаётся за «взял другой»", async () => {
+    const { CoreError } = await import("./core-client");
+    const { core } = stubCore({
+      task: async () => task({ ownerRef: null }),
+      claimTask: async () => {
+        throw new CoreError(500, "/tasks/x/claim", "");
+      },
+    });
+    await assert.rejects(
+      handleStaffCallback(555, `t:${task().id}:claim`, ME, { core, conversations: new Conversations() } as never),
+      /Core ответил 500/,
+      "сбой пробрасывается к честному «попробуй ещё раз», а не превращается в ложь",
+    );
+  });
+
+  it("приход набирается нумпадом от начала до записи", async () => {
+    const { startIntake, handleIntakeCallback } = await import("./staff-intake");
+    const calls: string[] = [];
+    const conversations = new Conversations();
+    const core = {
+      warehouses: async () => [{ id: "44444444-4444-4444-8444-444444444444", name: "Основной", type: "warehouse", externalRef: null, attrs: {} }],
+      ingredients: async () => [{ id: "66666666-6666-4666-8666-666666666666", name: "Зёрна", type: "ingredient", externalRef: null, attrs: {} }],
+      stockBalance: async () => ({
+        warehouseId: "w",
+        warehouseName: "Основной",
+        ingredientId: "i",
+        ingredientName: "Зёрна",
+        baseUnit: "кг",
+        qty: 10,
+        unconvertible: 0,
+      }),
+      addIntake: async (i: Record<string, unknown>) => {
+        calls.push(`intake:${i.qty}`);
+        return { id: "mv-1" };
+      },
+    } as never;
+    const deps = { core, conversations };
+    await startIntake(7, deps);
+    const step = await handleIntakeCallback(7, { kind: "ingredient", id: "66666666-6666-4666-8666-666666666666" }, ME, deps);
+    assert.match(JSON.stringify(step.message!.keyboard), /n:n:5/, "нумпад подключён к приходу");
+    for (const c of "12") {
+      await handleIntakeCallback(7, { kind: "num", press: { kind: "digit", digit: c } }, ME, deps);
+    }
+    const done = await handleIntakeCallback(7, { kind: "num", press: { kind: "done" } }, ME, deps);
+    assert.deepEqual(calls, ["intake:12"]);
+    assert.match(done.edit!.text, /Приход записан/);
+  });
+});

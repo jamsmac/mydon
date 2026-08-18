@@ -133,7 +133,15 @@ function horizonRow(current: number): { text: string; callback_data: string }[] 
 }
 
 export async function startSchedules(chatId: number, deps: SchedulesDeps): Promise<StaffReply> {
-  const rows = await deps.core.maintenanceDue().catch(() => []);
+  let rows: MaintenanceDueRow[];
+  try {
+    rows = await deps.core.maintenanceDue();
+  } catch {
+    // «Не прочитал» ≠ «пусто»: праздничное «Всё сделано 👌» при недоступном
+    // Core обещало технику отсутствие просрочек, которых бот просто не видел, —
+    // для санобработки это пропуск обязательных работ с уверенным тоном.
+    return { text: "Не смог получить графики — сервер не ответил. Попробуй ещё раз через минуту." };
+  }
   // Горизонт и страница живут в разговоре: гонять их через callback_data
   // вместе с id норматива не поместилось бы в 64 байта.
   deps.conversations.start(chatId, "schedules", "list", { horizon: DEFAULT_HORIZON, page: 0, rows });
@@ -182,7 +190,13 @@ export async function handleSchedulesCallback(
   }
 
   const cached = (conv?.data.rows as MaintenanceDueRow[] | undefined) ?? [];
-  const rows = cached.length > 0 ? cached : await deps.core.maintenanceDue().catch(() => []);
+  const fetched = cached.length > 0 ? cached : await deps.core.maintenanceDue().catch(() => null);
+  if (fetched === null) {
+    // Тот же принцип, что в startSchedules: сбой чтения не притворяется
+    // пустым списком «всё сделано».
+    return { answer: "Сервер не ответил", message: { text: "Не смог получить графики — попробуй ещё раз через минуту." } };
+  }
+  const rows = fetched;
 
   if (cb.kind === "horizon") {
     deps.conversations.start(chatId, "schedules", "list", { horizon: cb.days, page: 0, rows });
