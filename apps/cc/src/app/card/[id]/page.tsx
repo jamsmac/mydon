@@ -661,20 +661,9 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   lat={lat}
                   lng={lng}
                   address={typeof a["адрес"] === "string" ? a["адрес"] : null}
+                  sourceStays={stays ? <StayTimeline stays={stays.stays} /> : undefined}
+                  {...(stays ? { sourceMoves: stays.moves } : {})}
                 />
-                {stays && (
-                  <div className="sect" id="stays">
-                    <div className="sect-h">
-                      <h3 className="h2">Где стоял раньше (по заказам источника)</h3>
-                      {stays.moves > 0 ? (
-                        <span className="chip b">переездов: {stays.moves}</span>
-                      ) : (
-                        <span className="chip">не переезжал</span>
-                      )}
-                    </div>
-                    <StayTimeline stays={stays.stays} />
-                  </div>
-                )}
               </>
             ),
             passport: (
