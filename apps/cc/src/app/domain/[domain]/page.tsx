@@ -31,7 +31,7 @@ import { MiniBars } from "../../../components/mini-bars";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
-import { VendingPanel } from "../../../components/vending-panel";
+import { VendingMachinesPanel, VendingSupplyPanel } from "../../../components/vending-panel";
 import { CoffeePanel } from "../../../components/coffee-panel";
 import {
   ContractorsBook,
@@ -262,7 +262,14 @@ export default async function DomainPage({
     // Живые операционные инструменты VendHub — раньше отдельные пункты сайдбара
     // («Система»), теперь вкладки этого же рабочего места: один адрес
     // направления, а не разрозненные экраны.
-    ...(domain === "vendhub" ? [{ key: "vending", label: "Автоматы" }, { key: "coffee", label: "Кофе-бункеры" }] : []),
+    ...(domain === "vendhub"
+      ? [
+          // «Автоматы» — только список аппаратов; товарная аналитика — в «Пополнении».
+          { key: "vending", label: "Автоматы" },
+          { key: "supply", label: "Пополнение" },
+          { key: "coffee", label: "Кофе-бункеры" },
+        ]
+      : []),
     // Живые контуры GLOBERENT (перенос PROMACH): склад, импорт, финансы, калькулятор.
     ...(domain === "globerent"
       ? [
@@ -421,7 +428,8 @@ export default async function DomainPage({
       )}
 
       {/* ── Живые операционные вкладки VendHub ── */}
-      {activeGroup === "vending" && <VendingPanel machines={machines} />}
+      {activeGroup === "vending" && <VendingMachinesPanel machines={machines} />}
+      {activeGroup === "supply" && <VendingSupplyPanel />}
       {activeGroup === "coffee" && <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />}
 
       {/* ── Финансы GLOBERENT: агинг, к сроку, термометр, кэш-флоу, ввод ── */}
