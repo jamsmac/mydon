@@ -372,6 +372,30 @@ export const stockMovementKindEnum = pgEnum("stock_movement_kind", [
   "adjustment", // корректировка инвентаризации: подписанная дельта «стало − было»
 ]);
 
+/**
+ * Алиас имени продажи: «как товар назван в источнике» → карточка реестра.
+ *
+ * `sale.product` — текст из mydon-stock/Ourvend без FK; часть имён совпадает
+ * с карточками, остальные продажи карточка товара не видит. Привязку делает
+ * владелец (слово владельца — как в vending_alias): автоматическое «похожее
+ * имя» рано или поздно склеит 330ml с 450ml, и цифры продаж соврут.
+ */
+export const productNameAlias = pgTable(
+  "product_name_alias",
+  {
+    id: id(),
+    /** Карточка товара (entity type=product). */
+    entityId: uuid("entity_id")
+      .notNull()
+      .references(() => entity.id, { onDelete: "cascade" }),
+    /** Имя из источника — ровно как в sale.product, уникально во всём словаре. */
+    name: text("name").notNull().unique(),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("product_name_alias_entity_idx").on(t.entityId)],
+);
+
 export const stockMovement = pgTable(
   "stock_movement",
   {
@@ -2319,6 +2343,7 @@ export const schema = {
   // Операционные таблицы VendHub (движения, сырьё, инкассация).
   collection,
   sale,
+  productNameAlias,
   purchase,
   machineStock,
   stockMovement,

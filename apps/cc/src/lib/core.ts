@@ -1459,7 +1459,7 @@ export interface WarehouseStock {
   }[];
 }
 
-/** Продажи одного товара (связь по имени — sale.product текст из источника). */
+/** Продажи одного товара (имя карточки + привязанные алиасы источника). */
 export interface ProductSales {
   total: { qty: number; amount: number };
   machines: {
@@ -1469,6 +1469,16 @@ export interface ProductSales {
     qty: number;
     amount: number;
   }[];
+  /** Привязанные имена источника. Отсутствует у запроса по name. */
+  aliases?: { id: string; name: string }[];
+}
+
+/** Имя продаж без карточки и алиаса — то, что теряется из карточек. */
+export interface UnmatchedSaleName {
+  name: string;
+  qty: number;
+  amount: number;
+  lastDt: string;
 }
 
 /** Расход одного ингредиента за период — списано продажами. */
@@ -1916,9 +1926,18 @@ export const core = {
       configured: boolean;
     }>("/sales/summary"),
   sales: (days = 7, limit = 300) => get<SaleRow[]>(`/sales?days=${days}&limit=${limit}`),
-  /** Продажи одного товара по имени карточки — для карточки товара. */
-  salesByProduct: (name: string, days = 90) =>
-    get<ProductSales>(`/sales/by-product?name=${encodeURIComponent(name)}&days=${days}`),
+  /** Продажи карточки товара: имя + алиасы источника. */
+  salesByProductCard: (entityId: string, days = 90) =>
+    get<ProductSales>(`/sales/by-product?entityId=${entityId}&days=${days}`),
+  /** Имена продаж без карточки и алиаса. */
+  salesUnmatched: (days = 90) => get<UnmatchedSaleName[]>(`/sales/unmatched-names?days=${days}`),
+  addSaleAlias: (name: string, entityId: string) =>
+    send<{ id: string; name: string; entityId: string }>("/sales/alias", "POST", {
+      name,
+      entityId,
+      actor: "owner",
+    }),
+  removeSaleAlias: (id: string) => send<{ ok: boolean }>(`/sales/alias/${id}`, "DELETE"),
   salesDaily: (days = 30) => get<{ dt: string; qty: number; amount: number }[]>(`/sales/daily?days=${days}`),
   salesSilent: (days = 2) =>
     get<{ machineId: string | null; serial: string; name: string | null; lastDt: string }[]>(

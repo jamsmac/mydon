@@ -6,7 +6,8 @@ import {
   PRODUCT_KIND_LABELS,
   resaleGaps,
 } from "@mydon/shared";
-import type { FinanceFlow, GrContract } from "../lib/core";
+import type { FinanceFlow, GrContract, UnmatchedSaleName } from "../lib/core";
+import { SaleAliasBinder } from "./sale-alias-binder";
 
 /**
  * Секции карточек каталога: товар (фискальная готовность · экономика · в каких
@@ -323,9 +324,14 @@ export function ContractorFinance({
 export function ProductSalesSection({
   sales,
   days,
+  entityId,
+  unmatched,
 }: {
   sales: import("../lib/core").ProductSales | null;
   days: number;
+  entityId: string;
+  /** Несвязанные имена продаж — кандидаты на привязку к этой карточке. */
+  unmatched: UnmatchedSaleName[];
 }) {
   return (
     <div className="sect" id="sales" data-toc="Продажи">
@@ -371,6 +377,7 @@ export function ProductSalesSection({
           </div>
         </>
       )}
+      <SaleAliasBinder entityId={entityId} aliases={sales?.aliases ?? []} unmatched={unmatched} />
     </div>
   );
 }

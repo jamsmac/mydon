@@ -220,12 +220,19 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
 
   // Товар: продажи по имени карточки (sale.product — текст, FK нет).
   // Дополнение — ошибка не роняет карточку.
-  let productSales: Awaited<ReturnType<typeof core.salesByProduct>> | null = null;
+  let productSales: Awaited<ReturnType<typeof core.salesByProductCard>> | null = null;
+  let unmatchedSales: Awaited<ReturnType<typeof core.salesUnmatched>> = [];
   if (isProduct) {
     try {
-      productSales = await core.salesByProduct(entity.name, 90);
+      productSales = await core.salesByProductCard(entity.id, 90);
     } catch {
       productSales = null;
+    }
+    // Кандидаты на привязку имени источника — владелец склеивает сам.
+    try {
+      unmatchedSales = await core.salesUnmatched(90);
+    } catch {
+      unmatchedSales = [];
     }
   }
 
@@ -514,7 +521,12 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
             recipeCost={recipe ? { total: recipe.total, unresolved: recipe.unresolved } : null}
           />
           <ProductMachines rows={productMachines} />
-          <ProductSalesSection sales={productSales} days={90} />
+          <ProductSalesSection
+            sales={productSales}
+            days={90}
+            entityId={entity.id}
+            unmatched={unmatchedSales}
+          />
         </>
       )}
 
