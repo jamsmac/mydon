@@ -320,9 +320,9 @@ function JournalTab({
   return (
     <div className="card">
       <label style={{ display: "block", marginBottom: 12 }}>
-        Точка{" "}
+        Локация{" "}
         <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
-          <option value="">все точки</option>
+          <option value="">все локации</option>
           {locations.map((l) => (
             <option key={l.id} value={l.id}>
               {l.name}
@@ -646,7 +646,7 @@ function ReconcileTab({
           <table className="coffee-table">
             <thead>
               <tr>
-                <th>Точка</th>
+                <th>Локация</th>
                 <th>Расход, г</th>
                 <th>Себестоимость, сум</th>
                 <th>Пар</th>
@@ -680,7 +680,7 @@ function ReconcileTab({
         <table className="coffee-table">
           <thead>
             <tr>
-              <th>Точка</th>
+              <th>Локация</th>
               <th>Бункер</th>
               <th>Ингредиент</th>
               <th>Чистый вес, г</th>
@@ -769,7 +769,7 @@ function ReconcileTab({
         <table className="coffee-table">
           <thead>
             <tr>
-              <th>Точка</th>
+              <th>Локация</th>
               <th>Бункер</th>
               <th>Дней с мойки</th>
               <th>Чашек с мойки</th>
@@ -781,7 +781,7 @@ function ReconcileTab({
             {overdueWash.map((r) => (
               <tr key={r.id}>
                 <td>{r.locationName}</td>
-                <td className="num-cell">{r.position ?? "вся точка"}</td>
+                <td className="num-cell">{r.position ?? "вся локация"}</td>
                 <td className="num-cell">{r.daysSinceWash ?? "—"}</td>
                 <td className="num-cell">{r.cupsSinceWash ?? "—"}</td>
                 <td>
@@ -824,10 +824,10 @@ function SettingsTab({
 }) {
   return (
     <>
-      <div className="section-title">Точки</div>
+      <div className="section-title">Локации</div>
       <LocationsEditSection locations={locations} />
 
-      <div className="section-title">Привязка точек к автоматам реестра</div>
+      <div className="section-title">Привязка локаций к автоматам реестра</div>
       <LocationLinkSection locations={locations} machines={machineCandidates} />
 
       <div className="section-title">История размещений</div>
@@ -876,7 +876,7 @@ function LocationsEditSection({ locations }: { locations: CoffeeLocation[] }) {
   return (
     <>
       <p className="hint">
-        Название правится прямо в поле (сохранится само). Ошибочную точку не удаляем, а выключаем — история
+        Название правится прямо в поле (сохранится само). Ошибочную локацию не удаляем, а выключаем — история
         заливок остаётся; выключенная не предлагается при вводе.
       </p>
       {note && <p className="hint">{note}</p>}
@@ -928,13 +928,13 @@ function LocationsEditSection({ locations }: { locations: CoffeeLocation[] }) {
         }}
       >
         <input
-          placeholder="Новая точка — название"
+          placeholder="Новая локация — название"
           value={newName}
           disabled={pending}
           onChange={(e) => setNewName(e.target.value)}
         />
         <button className="tag-add" disabled={pending || newName.trim().length === 0} type="submit">
-          Добавить точку
+          Добавить локацию
         </button>
       </form>
     </>
@@ -1011,7 +1011,7 @@ function LocationLinkSection({ locations, machines }: { locations: CoffeeLocatio
       <table className="coffee-table">
         <thead>
           <tr>
-            <th>Точка</th>
+            <th>Локация</th>
             <th>Аппараты на месте</th>
           </tr>
         </thead>
@@ -1094,7 +1094,7 @@ function WashScheduleSection({ locations, schedules }: { locations: CoffeeLocati
       <table className="coffee-table">
         <thead>
           <tr>
-            <th>Точка</th>
+            <th>Локация</th>
             <th>Бункер</th>
             <th>Частота, дней</th>
             <th>Частота, чашек</th>
@@ -1112,7 +1112,7 @@ function WashScheduleSection({ locations, schedules }: { locations: CoffeeLocati
           {schedules.map((s) => (
             <tr key={s.id}>
               <td>{s.locationName}</td>
-              <td className="num-cell">{s.position ?? "вся точка"}</td>
+              <td className="num-cell">{s.position ?? "вся локация"}</td>
               <td className="num-cell">{s.frequencyDays ?? "—"}</td>
               <td className="num-cell">{s.frequencyCups ?? "—"}</td>
               <td>
@@ -1135,14 +1135,14 @@ function WashScheduleSection({ locations, schedules }: { locations: CoffeeLocati
       {adding ? (
         <div className="coffee-form" style={{ marginTop: 8 }}>
           <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
-            <option value="">Точка…</option>
+            <option value="">Локация…</option>
             {locations.map((l) => (
               <option key={l.id} value={l.id}>
                 {l.name}
               </option>
             ))}
           </select>
-          <input type="number" min={1} max={8} placeholder="Бункер (пусто — вся точка)" value={position} onChange={(e) => setPosition(e.target.value)} />
+          <input type="number" min={1} max={8} placeholder="Бункер (пусто — вся локация)" value={position} onChange={(e) => setPosition(e.target.value)} />
           <input type="number" min={1} placeholder="Частота, дней" value={frequencyDays} onChange={(e) => setFrequencyDays(e.target.value)} />
           <input type="number" min={1} placeholder="Частота, чашек" value={frequencyCups} onChange={(e) => setFrequencyCups(e.target.value)} />
           <button

@@ -73,7 +73,7 @@ export function MachineStaysView({ machines }: { machines: MachineStays[] }) {
         <div className={`tile mini ${moved === 0 ? "zero" : ""}`}>
           <div className="lab">Переезжали</div>
           <div className="v">{moved}</div>
-          <div className="foot"><span className="mk" />меняли точку хотя бы раз</div>
+          <div className="foot"><span className="mk" />меняли локацию хотя бы раз</div>
         </div>
         <div className={`tile mini ${messy > 0 ? "is-hot" : "zero"}`}>
           <div className="lab">Адреса путаются</div>

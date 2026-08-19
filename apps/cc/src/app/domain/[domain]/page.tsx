@@ -773,7 +773,7 @@ export default async function DomainPage({
                   </div>
                 </Link>
                 <Link href={href("coffee")} className="wt">
-                  <div className="wl">Точек в расходе</div>
+                  <div className="wl">Локаций в расходе</div>
                   <div className="wv">{coffeeConsumption !== null ? coffeeConsumption.locations.length : "—"}</div>
                   <div className="wf">за 30 дней<span className="go">→</span></div>
                 </Link>

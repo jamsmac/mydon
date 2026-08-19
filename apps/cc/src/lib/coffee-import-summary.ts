@@ -29,7 +29,7 @@ function dateRange(dates: unknown[]): { from: string | null; to: string | null }
 function topCounts(names: (string | null)[], limit: number): string[] {
   const byName = new Map<string, number>();
   for (const n of names) {
-    const key = n ?? "точка не определена";
+    const key = n ?? "локация не определена";
     byName.set(key, (byName.get(key) ?? 0) + 1);
   }
   return [...byName.entries()]
@@ -58,7 +58,7 @@ export function summarizeCoffeeImport(
   if (Array.isArray(newLocations) && newLocations.length > 0) {
     const names = newLocations.filter((n): n is string => typeof n === "string");
     parts.push({
-      label: "Новые точки (будут созданы)",
+      label: "Новые локации (будут созданы)",
       count: names.length,
       from: null,
       to: null,

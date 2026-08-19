@@ -143,7 +143,7 @@ export function MachineCard360({
     [hasGeo, "Координат нет — не видно на карте", "place"],
     // Содержимое зависит от вида: у кофейного — бункеры точки, у остальных — меню.
     coffee !== null
-      ? [coffee.linked, "Бункеры не привязаны к кофе-точке", "ingredients"]
+      ? [coffee.linked, "Бункеры не привязаны к кофе-локации", "ingredients"]
       : [menuCount > 0, "Меню пусто", "menu"],
     [photosCount > 0, "Нет ни одного фото", "passport"],
     [status !== null, "Состояние не проставлено", "service"],
