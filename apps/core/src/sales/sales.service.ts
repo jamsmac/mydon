@@ -515,6 +515,19 @@ export class SalesService implements OnModuleInit {
     });
   }
 
+  /** Весь словарь алиасов — для резолвинга имён в лентах прихода/остатков. */
+  listAliases(): Promise<{ id: string; name: string; entityId: string }[]> {
+    return this.db
+      .select({
+        id: productNameAlias.id,
+        name: productNameAlias.name,
+        entityId: productNameAlias.entityId,
+      })
+      .from(productNameAlias)
+      .orderBy(productNameAlias.name)
+      .limit(1000);
+  }
+
   /** Отвязать имя. Продажи по нему снова попадут в «несвязанные». */
   async removeAlias(id: string, actor = "owner"): Promise<void> {
     await this.db.transaction(async (tx) => {

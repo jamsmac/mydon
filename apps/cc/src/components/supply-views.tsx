@@ -9,12 +9,43 @@ const day = (iso: string) => {
   return `${d}.${m}.${y.slice(2)}`;
 };
 
+/**
+ * Имя товара из источника → карточка реестра: точное имя карточки или алиас
+ * из словаря продаж (product_name_alias — один словарь на весь товарный
+ * контур). Ошибка резолвинга ленты не ломает: имя остаётся текстом.
+ */
+async function productLinkMap(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  try {
+    const [товары, алиасы] = await Promise.all([
+      core.entitiesOfType("vendhub", "product"),
+      core.salesAliases(),
+    ]);
+    for (const p of товары) map.set(p.name.trim().toLowerCase(), p.id);
+    for (const a of алиасы) map.set(a.name.trim().toLowerCase(), a.entityId);
+  } catch {
+    // ленты живут и без ссылок
+  }
+  return map;
+}
+
+/** Имя — ссылкой на карточку, если карточка или алиас есть; иначе текстом. */
+function productName(name: string, links: Map<string, string>) {
+  const id = links.get(name.trim().toLowerCase());
+  return id ? <Link href={`/card/${id}`}>{name}</Link> : <>{name}</>;
+}
+
 /** Приход товара и сырья — журнал из mydon-stock (этап 2 миграции). */
 export async function PurchasesView() {
   let rows: PurchaseRow[] = [];
   let summary: Awaited<ReturnType<typeof core.supplySummary>> | null = null;
+  let links = new Map<string, string>();
   try {
-    [rows, summary] = await Promise.all([core.purchases(30, 300), core.supplySummary()]);
+    [rows, summary, links] = await Promise.all([
+      core.purchases(30, 300),
+      core.supplySummary(),
+      productLinkMap(),
+    ]);
   } catch {
     return <div className="empty"><b>Приход недоступен</b>Core не ответил — обнови страницу.</div>;
   }
@@ -47,7 +78,7 @@ export async function PurchasesView() {
         {rows.map((r) => (
           <div className="tr" key={r.id}>
             <span className="nm">
-              {r.product}
+              {productName(r.product, links)}
               <span style={{ color: "var(--tx-3)" }}>
                 {" "}· ×{Number(r.qty)}{r.unit ? ` ${r.unit}` : ""}
                 {r.note ? ` · ${r.note}` : ""}
@@ -70,8 +101,13 @@ export async function PurchasesView() {
 export async function MachineStockView() {
   let levels: Awaited<ReturnType<typeof core.machineStockLevels>> = [];
   let summary: Awaited<ReturnType<typeof core.supplySummary>> | null = null;
+  let links = new Map<string, string>();
   try {
-    [levels, summary] = await Promise.all([core.machineStockLevels(), core.supplySummary()]);
+    [levels, summary, links] = await Promise.all([
+      core.machineStockLevels(),
+      core.supplySummary(),
+      productLinkMap(),
+    ]);
   } catch {
     return <div className="empty"><b>Остатки недоступны</b>Core не ответил — обнови страницу.</div>;
   }
@@ -134,7 +170,7 @@ export async function MachineStockView() {
                     <span className="nm">
                       {i.qty === 0 && <span style={{ color: "var(--hot)", marginRight: 7 }}>●</span>}
                       {i.qty > 0 && i.qty <= 2 && <span style={{ color: "var(--tx-2)", marginRight: 7 }}>◐</span>}
-                      {i.product}
+                      {productName(i.product, links)}
                     </span>
                     <span className="cd" />
                     <span className="pr" style={i.qty === 0 ? { color: "var(--hot)" } : undefined}>
