@@ -1225,3 +1225,30 @@ a.rowlink:hover { background: var(--surf-2); }
 .loc-hist-t { font-family: var(--fh); font-size: 15px; font-weight: 700; }
 .loc-hist > summary:hover .loc-hist-t { color: var(--accent); }
 .loc-hist-body { margin-top: 10px; }
+
+/* ── Ингредиенты по бункерам: плитка на позицию ── */
+.bnk-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); }
+.bnk {
+  display: flex; flex-direction: column; gap: 7px;
+  background: var(--surf); border: 1px solid var(--line); border-radius: var(--r); padding: 11px 13px;
+}
+.bnk-empty { border-style: dashed; background: none; }
+.bnk-low { border-color: var(--hot-line); }
+.bnk-head { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.bnk-pos {
+  flex: 0 0 auto; font-size: 11px; font-weight: 700; color: var(--tx-3);
+  background: var(--surf-2); border-radius: 6px; padding: 2px 7px;
+}
+.bnk-name {
+  flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bnk-name a { color: inherit; text-decoration: none; }
+.bnk-name a:hover { color: var(--accent); }
+.bnk-empty .bnk-name { color: var(--tx-3); font-weight: 500; font-style: italic; }
+.bnk-val { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.bnk-val .u { font-size: 11.5px; color: var(--tx-3); font-weight: 500; letter-spacing: 0; }
+.bnk-bar { height: 6px; border-radius: 4px; background: var(--surf-2); overflow: hidden; }
+.bnk-bar i { display: block; height: 100%; border-radius: 4px; background: var(--ok); }
+.bnk-bar i.low { background: var(--hot); }
+.bnk-foot { font-size: 11px; color: var(--tx-3); }
