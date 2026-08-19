@@ -76,28 +76,42 @@ export function EntityEditor({ entity }: { entity: Entity }) {
   if (!editing) {
     return (
       <>
-        <div className="pass">
-          <div className="f">
-            <div className="k">Название</div>
-            <div className="val">{entity.name}</div>
+        {/* Плитки — тот же язык, что список парка и меню: поле видно целиком,
+            клик по любой открывает правку. */}
+        <div className="mc-tiles">
+          <div className="mct mct-wide" onClick={() => setEditing(true)} role="button" tabIndex={0}>
+            <span className="lb">Название</span>
+            <b className="vl">{entity.name}</b>
+            <span className="act">✎</span>
           </div>
-          <div className="f">
-            <div className="k">Номер / код</div>
-            <div className="val mono">{entity.externalRef ?? "—"}</div>
+          <div className="mct" onClick={() => setEditing(true)} role="button" tabIndex={0}>
+            <span className="lb">Номер / код</span>
+            <b className="vl mono">{entity.externalRef ?? "—"}</b>
+            <span className="act">✎</span>
           </div>
-          {attrsAll.map(([key, value]) => (
-            <div className="f" key={key}>
-              <div className="k">{key === "вид" ? "Принцип карточки" : key}</div>
-              <div className={`val ${MONO_KEYS.has(key) ? "mono" : ""}`}>
-                {key === "вид" && typeof value === "string" && value in PRODUCT_KIND_LABELS
-                  ? PRODUCT_KIND_LABELS[value as keyof typeof PRODUCT_KIND_LABELS]
-                  : (key === "цена" || key === "цена покупки" || key === "цена продажи") &&
-                      typeof value === "number"
-                    ? `${Number(value).toLocaleString("ru-RU")} сум`
-                    : String(value ?? "—")}
+          {attrsAll.map(([key, value]) => {
+            const текст =
+              key === "вид" && typeof value === "string" && value in PRODUCT_KIND_LABELS
+                ? PRODUCT_KIND_LABELS[value as keyof typeof PRODUCT_KIND_LABELS]
+                : (key === "цена" || key === "цена покупки" || key === "цена продажи") &&
+                    typeof value === "number"
+                  ? `${Number(value).toLocaleString("ru-RU")} сум`
+                  : String(value ?? "—");
+            const длинное = текст.length > 40;
+            return (
+              <div
+                className={`mct${длинное ? " mct-wide" : ""}`}
+                key={key}
+                onClick={() => setEditing(true)}
+                role="button"
+                tabIndex={0}
+              >
+                <span className="lb">{key === "вид" ? "Принцип карточки" : key}</span>
+                <b className={`vl ${MONO_KEYS.has(key) ? "mono" : ""}`}>{текст}</b>
+                <span className="act">✎</span>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         <div style={{ display: "flex", gap: 9, marginTop: 14, flexWrap: "wrap" }}>
           <button type="button" className="btn pri" onClick={() => setEditing(true)}>

@@ -17,6 +17,7 @@ import {
   type VendingMachine,
 } from "../../../lib/core";
 import { MachineCard360 } from "../../../components/machine-card-360";
+import { LocationPanel } from "../../../components/location-panel";
 import { BunkerLevels } from "../../../components/bunker-levels";
 import {
   MenuEditor,
@@ -648,49 +649,19 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
             ),
             place: (
               <>
-                <div className="sect" id="placements">
-                  <div className="sect-h">
-                    <h3 className="h2">Локация</h3>
-                    {coffeePlacements.length > 0 && (
-                      <span className="chip b">периодов: {coffeePlacements.length}</span>
-                    )}
-                  </div>
-                  {coffeePlacements.length === 0 ? (
-                    <div className="empty">
-                      <b>Локация не записана</b>
-                      Неизвестно, где этот аппарат. Поставьте его на место во вкладке
-                      «Обслуживание» (склад, мастерская или локация продаж) — тогда он появится
-                      на карте и в отчётах по локации.
-                    </div>
-                  ) : (
-                    <div className="rows">
-                      {coffeePlacements.map((p) => (
-                        <div className="row" key={p.id}>
-                          <div className="t">
-                            <b>{p.locationName}</b>
-                            <small>
-                              {p.startDate ?? "с неизвестной даты"} — {p.endDate ?? "сейчас"}
-                              {p.note ? ` · ${p.note}` : ""}
-                            </small>
-                          </div>
-                          <span className={`pill ${p.endDate === null ? "ok" : ""}`}>
-                            {p.endDate === null ? "стоит сейчас" : "история"}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                {mapHref && (
-                  <div className="card" id="geo">
-                    <div className="result-title">На карте</div>
-                    <p>
-                      <a href={mapHref} target="_blank" rel="noreferrer">
-                        Открыть локацию на карте ({String(lat)}, {String(lng)})
-                      </a>
-                    </p>
-                  </div>
-                )}
+                <LocationPanel
+                  machineId={entity.id}
+                  periods={coffeePlacements.map((p) => ({
+                    id: p.id,
+                    locationName: p.locationName,
+                    startDate: p.startDate,
+                    endDate: p.endDate,
+                    note: p.note,
+                  }))}
+                  lat={lat}
+                  lng={lng}
+                  address={typeof a["адрес"] === "string" ? a["адрес"] : null}
+                />
                 {stays && (
                   <div className="sect" id="stays">
                     <div className="sect-h">
