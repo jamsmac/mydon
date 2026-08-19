@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { entity, event, sale } from "@mydon/db";
 import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, strictNumber } from "@mydon/shared";
-import { asc, desc, eq, gte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
 
@@ -304,6 +304,58 @@ export class SalesService implements OnModuleInit {
       );
       return { ...r.row, machineName: r.machineName, point: point ?? null };
     });
+  }
+
+  /**
+   * Продажи одного товара за период — для карточки товара.
+   *
+   * Связь по ИМЕНИ: `sale.product` — текст из источника, FK на карточку нет
+   * (признанный долг складского ТЗ). Точное совпадение имени — честная первая
+   * версия: «не найдено» может означать и «не продаётся», и «в источнике имя
+   * другое», и карточка говорит это словами, а не выдаёт ноль за факт.
+   */
+  async byProduct(
+    name: string,
+    days = 90,
+  ): Promise<{
+    total: { qty: number; amount: number };
+    machines: {
+      machineId: string | null;
+      serial: string;
+      machineName: string | null;
+      qty: number;
+      amount: number;
+    }[];
+  }> {
+    const since = daysAgoLocal(Math.min(Math.max(days, 1), 365));
+    const rows = await this.db
+      .select({
+        machineId: sale.machineId,
+        serial: sale.machineSerial,
+        machineName: entity.name,
+        qty: sql<string>`sum(${sale.qty})`,
+        amount: sql<string>`sum(${sale.amount})`,
+      })
+      .from(sale)
+      .leftJoin(entity, eq(entity.id, sale.machineId))
+      .where(and(eq(sale.product, name), gte(sale.dt, since)))
+      .groupBy(sale.machineId, sale.machineSerial, entity.name)
+      .orderBy(sql`sum(${sale.amount}) desc`);
+
+    const machines = rows.map((r) => ({
+      machineId: r.machineId,
+      serial: r.serial,
+      machineName: r.machineName,
+      qty: Number(r.qty),
+      amount: Number(r.amount),
+    }));
+    return {
+      total: {
+        qty: machines.reduce((s, m) => s + m.qty, 0),
+        amount: machines.reduce((s, m) => s + m.amount, 0),
+      },
+      machines,
+    };
   }
 
   /** Автоматы, молчащие N дней: продажи были раньше, а теперь нет — сигнал связи. */

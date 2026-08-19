@@ -1445,6 +1445,30 @@ export interface WarehouseStock {
     qty: number | null;
     unconvertible: number;
   }[];
+  /** Лента движений склада, свежие сверху, до 100 строк. */
+  movements: {
+    id: string;
+    kind: string;
+    dt: string;
+    ingredientId: string;
+    ingredientName: string;
+    qty: number;
+    unit: string;
+    supplier: string | null;
+    note: string | null;
+  }[];
+}
+
+/** Продажи одного товара (связь по имени — sale.product текст из источника). */
+export interface ProductSales {
+  total: { qty: number; amount: number };
+  machines: {
+    machineId: string | null;
+    serial: string;
+    machineName: string | null;
+    qty: number;
+    amount: number;
+  }[];
 }
 
 /** Расход одного ингредиента за период — списано продажами. */
@@ -1739,7 +1763,10 @@ export const core = {
   coffeeConsumablesSummary: () => get<CoffeeConsumableRow[]>("/coffee/consumables"),
   coffeeContainerReturns: (limit = 200) =>
     get<CoffeeContainerReturnRow[]>(`/coffee/container-return?limit=${limit}`),
-  coffeePlacements: () => get<CoffeePlacementRow[]>("/coffee/placements"),
+  coffeePlacements: (locationId?: string) =>
+    get<CoffeePlacementRow[]>(
+      `/coffee/placements${locationId ? `?locationId=${locationId}` : ""}`,
+    ),
   coffeeContainerConsumption: (from: string, to: string) =>
     get<CoffeeContainerConsumptionReport>(`/coffee/container-consumption?from=${from}&to=${to}`),
   recordCoffeeWash: (input: { locationId: string; position?: number; note?: string; performedBy?: string }) =>
@@ -1889,6 +1916,9 @@ export const core = {
       configured: boolean;
     }>("/sales/summary"),
   sales: (days = 7, limit = 300) => get<SaleRow[]>(`/sales?days=${days}&limit=${limit}`),
+  /** Продажи одного товара по имени карточки — для карточки товара. */
+  salesByProduct: (name: string, days = 90) =>
+    get<ProductSales>(`/sales/by-product?name=${encodeURIComponent(name)}&days=${days}`),
   salesDaily: (days = 30) => get<{ dt: string; qty: number; amount: number }[]>(`/sales/daily?days=${days}`),
   salesSilent: (days = 2) =>
     get<{ machineId: string | null; serial: string; name: string | null; lastDt: string }[]>(

@@ -288,6 +288,26 @@ async function проверитьУзлы() {
   }
 }
 
+/**
+ * Срез Г: продажи по имени товара — карточка товара зовёт /sales/by-product.
+ *
+ * Таблицу `sale` наполняет только синк из mydon-stock (STOCK_DATABASE_URL),
+ * публичного API записи в неё нет — поэтому проверяется ФОРМА ответа и то,
+ * что SQL (eq по тексту + группировка + join имён) исполняется живым
+ * Postgres, а не количество строк.
+ */
+async function проверитьПродажиТовара() {
+  const r = await fetch(`${BASE}/sales/by-product?name=${encodeURIComponent("Smoke A")}&days=365`, {
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!r.ok) throw new Error(`/sales/by-product → ${r.status}`);
+  const данные = JSON.parse(await r.text());
+  if (typeof данные?.total?.qty !== "number" || typeof данные?.total?.amount !== "number") {
+    throw new Error(`нет сводки total: ${JSON.stringify(данные).slice(0, 120)}`);
+  }
+  if (!Array.isArray(данные.machines)) throw new Error("нет разбивки по автоматам");
+}
+
 async function ждатьЗдоровье(proc) {
   const дедлайн = Date.now() + СТАРТ_ТАЙМАУТ_МС;
   while (Date.now() < дедлайн) {
@@ -394,6 +414,13 @@ try {
   } catch (e) {
     провалы.push(`узлы: ${e.message}`);
   }
+
+  try {
+    await проверитьПродажиТовара();
+    console.log("  ok  сценарий: продажи товара по имени карточки");
+  } catch (e) {
+    провалы.push(`продажи товара: ${e.message}`);
+  }
 } catch (e) {
   провалы.push(`старт: ${e.message}`);
 } finally {
@@ -410,4 +437,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 2 сценария.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 3 сценария.`);

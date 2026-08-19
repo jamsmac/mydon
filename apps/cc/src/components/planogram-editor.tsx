@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import type { PlanogramEntry } from "@mydon/shared";
@@ -85,7 +86,14 @@ export function PlanogramEditor({
               {filled.map((l) => (
                 <span className="pslot" key={l.slot}>
                   <span className="pslot-k">{l.slot}</span>
-                  <span className="pslot-n">{nameOf.get(l.productId) ?? "?"}</span>
+                  <span className="pslot-n">
+                    {/* Из раскладки — сразу в карточку товара, а не через поиск. */}
+                    {nameOf.has(l.productId) ? (
+                      <Link href={`/card/${l.productId}`}>{nameOf.get(l.productId)}</Link>
+                    ) : (
+                      "?"
+                    )}
+                  </span>
                 </span>
               ))}
             </div>
