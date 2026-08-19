@@ -67,12 +67,92 @@ function machineKind(e: Entity): "кофе" | "снек" | null {
 }
 
 /**
- * Автоматы — единая вкладка рабочего места VendHub. «Автоматы» и «аппараты» —
- * одно и то же (слово владельца), поэтому здесь И карточки реестра (всегда),
- * И живой дефицит из Ourvend поверх, когда сбор приносил данные. Отдельного
- * листа «Аппараты» в Каталоге больше нет.
+ * «Автоматы» — только список аппаратов (слово владельца): выбрал автомат —
+ * открыл его карточку. Живой дефицит, закуп и «что доложить» переехали на
+ * соседнюю вкладку «Пополнение», чтобы список не тонул в товарной аналитике.
  */
-export async function VendingPanel({ machines }: { machines: Entity[] }) {
+export async function VendingMachinesPanel({ machines }: { machines: Entity[] }) {
+  // Строка «когда собирали» — контекст свежести; её провал список не роняет.
+  let syncLine: string | null = null;
+  try {
+    syncLine = lastSyncLine(await core.vendingSyncRuns());
+  } catch {
+    // список карточек живёт и без журнала сбора
+  }
+
+  // Наглядные бункеры у кофе-машин (слово владельца): карточка автомата,
+  // привязанного к кофе-точке, показывает уровни прямо в списке. Кофе-данные —
+  // дополнение: их провал списка автоматов не роняет.
+  const bunkersByEntity = new Map<string, CoffeeFillStatusRow[]>();
+  try {
+    const [coffeeLocations, fillStatus] = await Promise.all([core.coffeeLocations(), core.coffeeFillStatus()]);
+    // Только места, где стоит РОВНО ОДИН аппарат. Уровни бункеров хранятся по
+    // месту, а показываются на карточке аппарата: пока аппарат один — это одно
+    // и то же. Если их два, чьи это бункеры — неизвестно, и подписать их
+    // первым попавшимся значило бы показать владельцу выдумку.
+    const locationByEntity = new Map(
+      coffeeLocations
+        .filter((l) => (l.machines ?? []).length === 1)
+        .map((l) => [l.machines[0]!.entityId, l.id] as const),
+    );
+    for (const [entityId, locationId] of locationByEntity) {
+      const rows = fillStatus.filter((r) => r.locationId === locationId);
+      if (rows.length > 0) bunkersByEntity.set(entityId, rows);
+    }
+  } catch {
+    // без кофе-данных карточки просто без бункеров
+  }
+
+  const cards = [...machines].sort((a, b) => a.name.localeCompare(b.name, "ru"));
+
+  return (
+    <>
+      <p className="lead">
+        Автоматов в реестре: <b>{cards.length}</b>
+        {syncLine ? ` · ${syncLine.toLowerCase()}` : ""}
+      </p>
+
+      {cards.length === 0 ? (
+        <div className="empty">
+          <b>В реестре пока нет автоматов</b>
+          Добавь карточку кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+        </div>
+      ) : (
+        <div className="rows">
+          {cards.map((e) => {
+            const attrs = e.attrs ?? {};
+            const point = attrs["точка"];
+            const kind = machineKind(e);
+            const bunkers = bunkersByEntity.get(e.id);
+            return (
+              <Link href={`/card/${e.id}`} className="row" key={e.id}>
+                <div className="t">
+                  <b>{e.name}</b>
+                  <small>
+                    {e.externalRef ? `серийник ${e.externalRef}` : "серийник не указан"}
+                    {typeof point === "string" && point !== "" ? ` · ${point}` : ""}
+                  </small>
+                </div>
+                {bunkers && <BunkerLevels rows={bunkers} compact />}
+                <span className={`chip ${kind === "кофе" ? "b" : kind === "снек" ? "g" : ""}`}>
+                  {kind ?? "тип не указан"}
+                </span>
+              </Link>
+            );
+          })}
+        </div>
+      )}
+      <NewEntityForm domain="vendhub" type="machine" label={typeOne("machine")} />
+    </>
+  );
+}
+
+/**
+ * «Пополнение» — живой контур Ourvend поверх реестра: что кончается, что
+ * купить, накладные, дефицит по автоматам и «что доложить». Сюда переехали
+ * товарные секции бывшей вкладки «Автоматы» — сам список аппаратов остался там.
+ */
+export async function VendingSupplyPanel() {
   let ourvendMachines: VendingMachine[] = [];
   let needs: VendingNeed[] = [];
   let syncRuns: VendingSyncRun[] = [];
@@ -105,37 +185,12 @@ export async function VendingPanel({ machines }: { machines: Entity[] }) {
   const sum = (n: number) => n.toLocaleString("ru-RU");
   const syncLine = lastSyncLine(syncRuns);
 
-  // Наглядные бункеры у кофе-машин (слово владельца): карточка автомата,
-  // привязанного к кофе-точке, показывает уровни прямо в списке. Кофе-данные —
-  // дополнение: их провал списка автоматов не роняет.
-  const bunkersByEntity = new Map<string, CoffeeFillStatusRow[]>();
-  try {
-    const [coffeeLocations, fillStatus] = await Promise.all([core.coffeeLocations(), core.coffeeFillStatus()]);
-    // Только места, где стоит РОВНО ОДИН аппарат. Уровни бункеров хранятся по
-    // месту, а показываются на карточке аппарата: пока аппарат один — это одно
-    // и то же. Если их два, чьи это бункеры — неизвестно, и подписать их
-    // первым попавшимся значило бы показать владельцу выдумку.
-    const locationByEntity = new Map(
-      coffeeLocations
-        .filter((l) => (l.machines ?? []).length === 1)
-        .map((l) => [l.machines[0]!.entityId, l.id] as const),
-    );
-    for (const [entityId, locationId] of locationByEntity) {
-      const rows = fillStatus.filter((r) => r.locationId === locationId);
-      if (rows.length > 0) bunkersByEntity.set(entityId, rows);
-    }
-  } catch {
-    // без кофе-данных карточки просто без бункеров
-  }
-
   const ok = ourvendMachines.filter((m) => m.status === "ok");
   const totalDeficit = ok.reduce((a, m) => a + m.deficit, 0);
   const totalCap = ok.reduce((a, m) => a + m.capacity, 0);
   const totalFilled = ok.reduce((a, m) => a + m.filled, 0);
   const fillRate = totalCap > 0 ? Math.round((totalFilled / totalCap) * 100) : 0;
   const hasLive = ourvendMachines.length > 0;
-
-  const cards = [...machines].sort((a, b) => a.name.localeCompare(b.name, "ru"));
 
   return (
     <>
@@ -145,10 +200,7 @@ export async function VendingPanel({ machines }: { machines: Entity[] }) {
           расчёте {ok.length} из {ourvendMachines.length}
         </p>
       ) : (
-        <p className="lead">
-          Автоматов в реестре: <b>{cards.length}</b>
-          {syncLine ? ` · ${syncLine.toLowerCase()}` : " · живой сбор Ourvend ещё не приносил данных"}
-        </p>
+        <p className="lead">Живой сбор Ourvend ещё не приносил данных{syncLine ? ` · ${syncLine.toLowerCase()}` : ""}</p>
       )}
       {hasLive && syncLine && <p className="muted">{syncLine}</p>}
 
@@ -299,42 +351,9 @@ export async function VendingPanel({ machines }: { machines: Entity[] }) {
         </>
       )}
 
-      {/* ── Карточки реестра: те же автоматы, паспортные данные ── */}
-      <div className="section-title">Карточки автоматов{cards.length > 0 ? ` · ${cards.length}` : ""}</div>
-      {cards.length === 0 ? (
-        <div className="empty">
-          <b>В реестре пока нет автоматов</b>
-          Добавь карточку кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
-        </div>
-      ) : (
-        <div className="rows">
-          {cards.map((e) => {
-            const attrs = e.attrs ?? {};
-            const point = attrs["точка"];
-            const kind = machineKind(e);
-            const bunkers = bunkersByEntity.get(e.id);
-            return (
-              <Link href={`/card/${e.id}`} className="row" key={e.id}>
-                <div className="t">
-                  <b>{e.name}</b>
-                  <small>
-                    {e.externalRef ? `серийник ${e.externalRef}` : "серийник не указан"}
-                    {typeof point === "string" && point !== "" ? ` · ${point}` : ""}
-                  </small>
-                </div>
-                {bunkers && <BunkerLevels rows={bunkers} compact />}
-                <span className={`chip ${kind === "кофе" ? "b" : kind === "снек" ? "g" : ""}`}>
-                  {kind ?? "тип не указан"}
-                </span>
-              </Link>
-            );
-          })}
-        </div>
-      )}
-      <NewEntityForm domain="vendhub" type="machine" label={typeOne("machine")} />
       {!hasLive && (
         <p className="hint" style={{ marginTop: 10 }}>
-          Живые остатки и дефицит появятся поверх карточек, когда заработает сбор Ourvend:
+          Живые остатки и дефицит появятся, когда заработает сбор Ourvend:
           задай <code>OURVEND_*</code> в окружении сервера и запусти синк.
         </p>
       )}
