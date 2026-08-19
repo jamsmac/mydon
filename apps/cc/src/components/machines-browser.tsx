@@ -33,6 +33,14 @@ const KIND_EMOJI: Record<string, string> = {
 
 const KIND_FILTERS = ["coffee", "snack", "drink"] as const;
 
+/** Подписи виджетов — про парк, поэтому во множественном числе. */
+const KIND_PLURAL: Record<string, string> = {
+  coffee: "кофейные",
+  snack: "снеки",
+  drink: "напитки",
+  combo: "снек + напитки",
+};
+
 const SORTS = [
   { key: "name", label: "по имени" },
   { key: "point", label: "по точке" },
@@ -85,6 +93,15 @@ export function MachinesBrowser({ items }: { items: MachineListItem[] }) {
   const countKind = (k: string) => items.filter((m) => kindOf(m) === k).length;
   const countStatus = (s: string) => items.filter((m) => m.status === s).length;
   const statusesPresent = ["in_service", "warehouse", "repair"].filter((s) => countStatus(s) > 0);
+
+  // Живой срез парка: средняя заполненность и суммарный дефицит по снекам,
+  // у которых Ourvend приносит данные.
+  const живые = items.filter((m) => m.fillRate !== null);
+  const liveAvg =
+    живые.length > 0
+      ? Math.round(живые.reduce((a, m) => a + (m.fillRate ?? 0), 0) / живые.length)
+      : null;
+  const liveDeficit = живые.reduce((a, m) => a + (m.deficit ?? 0), 0);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -219,31 +236,42 @@ export function MachinesBrowser({ items }: { items: MachineListItem[] }) {
         </div>
       </div>
 
-      <div className="mcm-chips">
+      {/* Виджеты-показатели парка. Они же фильтры: тап по виджету сужает
+          список, активный подсвечен — видно и цифры, и что отфильтровано. */}
+      <div className="mbk-strip">
         <button
           type="button"
-          className={`chip${kind === "all" ? " b" : ""}`}
-          onClick={() => setKind("all")}
+          className={`mbk${kind === "all" && status === "all" ? " on" : ""}`}
+          onClick={() => {
+            setKind("all");
+            setStatus("all");
+          }}
+          title="Весь парк"
         >
-          Все · {items.length}
+          <b>{items.length}</b>
+          <span>автоматов</span>
         </button>
         {KIND_FILTERS.filter((k) => countKind(k) > 0).map((k) => (
           <button
             key={k}
             type="button"
-            className={`chip${kind === k ? " b" : ""}`}
+            className={`mbk${kind === k ? " on" : ""}`}
             onClick={() => setKind(kind === k ? "all" : k)}
           >
-            {KIND_EMOJI[k]} {MACHINE_KIND_LABELS[k as MachineKind]} · {countKind(k)}
+            <b>
+              {KIND_EMOJI[k]} {countKind(k)}
+            </b>
+            <span>{KIND_PLURAL[k] ?? MACHINE_KIND_LABELS[k as MachineKind]}</span>
           </button>
         ))}
         {countKind("other") > 0 && (
           <button
             type="button"
-            className={`chip${kind === "other" ? " b" : ""}`}
+            className={`mbk${kind === "other" ? " on" : ""}`}
             onClick={() => setKind(kind === "other" ? "all" : "other")}
           >
-            ❔ Не размечен · {countKind("other")}
+            <b>❔ {countKind("other")}</b>
+            <span>не размечен</span>
           </button>
         )}
         <span className="mb-sep" />
@@ -251,12 +279,22 @@ export function MachinesBrowser({ items }: { items: MachineListItem[] }) {
           <button
             key={s}
             type="button"
-            className={`chip${status === s ? " b" : ""}`}
+            className={`mbk${status === s ? " on" : ""}${s === "repair" ? " hot" : ""}`}
             onClick={() => setStatus(status === s ? "all" : s)}
           >
-            {machineStatusLabel(s)} · {countStatus(s)}
+            <b>{countStatus(s)}</b>
+            <span>{machineStatusLabel(s).toLowerCase()}</span>
           </button>
         ))}
+        {liveAvg !== null && (
+          <>
+            <span className="mb-sep" />
+            <div className="mbk info" title="Живой срез Ourvend по снекам в расчёте">
+              <b>{liveAvg}%</b>
+              <span>заполнен · −{liveDeficit.toLocaleString("ru-RU")} ед</span>
+            </div>
+          </>
+        )}
       </div>
 
       {filtered.length === 0 ? (

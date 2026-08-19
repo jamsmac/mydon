@@ -1125,3 +1125,37 @@ a.rowlink:hover { background: var(--surf-2); }
 .mb-bar i.crit { background: var(--err); }
 .mb-foot { font-size: 11px; color: var(--tx-3); }
 .mb-bunkers { margin-top: 2px; }
+
+/* ── Виджеты-показатели парка (они же фильтры) ── */
+.mbk-strip {
+  position: sticky; top: var(--tabs-h); z-index: 3;
+  display: flex; gap: 10px; align-items: stretch; overflow-x: auto; scrollbar-width: none;
+  padding: 10px 2px 12px; margin-bottom: 12px;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.mbk {
+  flex: 0 0 auto; min-width: 118px; text-align: left; cursor: pointer;
+  display: flex; flex-direction: column; gap: 3px;
+  background: var(--surf); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 12px 16px; color: inherit; font: inherit;
+}
+.mbk b {
+  font-family: var(--fm); font-variant-numeric: tabular-nums; font-weight: 600;
+  font-size: 26px; line-height: 1.05; letter-spacing: -0.02em; white-space: nowrap;
+}
+.mbk span {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--tx-3); white-space: nowrap;
+}
+.mbk:hover { border-color: var(--accent-line); }
+.mbk.on { border-color: var(--accent); background: var(--accent-soft); }
+.mbk.on span { color: var(--accent); }
+.mbk.hot b { color: var(--hot); }
+.mbk.hot.on { border-color: var(--hot); background: var(--hot-soft); }
+.mbk.hot.on span { color: var(--hot); }
+.mbk.info { cursor: default; border-style: dashed; }
+.mbk.info b { color: var(--ok); }
+@media (max-width: 640px) {
+  .mbk { min-width: 100px; padding: 10px 13px; }
+  .mbk b { font-size: 22px; }
+}
