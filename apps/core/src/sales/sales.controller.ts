@@ -69,6 +69,12 @@ export class SalesController {
     return this.sales.unmatchedNames(Number.isFinite(n) && n > 0 ? Math.min(n, 365) : 90);
   }
 
+  /** Весь словарь алиасов — для резолвинга имён в лентах. Объявлен ВЫШЕ alias/:id. */
+  @Get("aliases")
+  listAliases() {
+    return this.sales.listAliases();
+  }
+
   /** Привязать имя источника к карточке товара (решение владельца). */
   @Post("alias")
   addAlias(@Body() dto: AddAliasDto) {

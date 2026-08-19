@@ -1938,6 +1938,8 @@ export const core = {
       actor: "owner",
     }),
   removeSaleAlias: (id: string) => send<{ ok: boolean }>(`/sales/alias/${id}`, "DELETE"),
+  /** Весь словарь алиасов — для резолвинга имён в лентах прихода/остатков. */
+  salesAliases: () => get<{ id: string; name: string; entityId: string }[]>("/sales/aliases"),
   salesDaily: (days = 30) => get<{ dt: string; qty: number; amount: number }[]>(`/sales/daily?days=${days}`),
   salesSilent: (days = 2) =>
     get<{ machineId: string | null; serial: string; name: string | null; lastDt: string }[]>(

@@ -40,6 +40,7 @@ const ЧТЕНИЕ = [
   "/maintenance/plans?includeInactive=1",
   "/maintenance/log",
   "/maintenance/parts/storage",
+  "/sales/aliases",
   "/vending/machines",
   "/vending/deficit",
   "/vending/sync",
