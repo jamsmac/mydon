@@ -180,19 +180,31 @@ export function LocationPanel({
         )}
       </div>
 
-      {/* История — свёрнута: где стоит сейчас видно в плитках выше, а прошлое
-          нужно редко. В заголовке — счётчик, чтобы не открывать ради нуля. */}
+      {/* История — свёрнута и БЕЗ нашего списка периодов: где стоит сейчас
+          сказано плитками выше, и повтор той же строки читался как дубль.
+          Здесь хронология из заказов источника: где стоял, с какой по какую
+          дату и сколько заказов. Наш учёт периодов показываем только когда
+          источник по этому аппарату молчит — иначе истории не было бы вовсе. */}
       <details className="sect loc-hist" id="periods">
         <summary>
           <span className="loc-hist-t">История</span>
-          <span className="chip">{periods.length}</span>
-          {typeof sourceMoves === "number" && sourceMoves > 0 && (
-            <span className="chip b">переездов по заказам: {sourceMoves}</span>
+          {typeof sourceMoves === "number" && sourceMoves > 0 ? (
+            <span className="chip b">переездов: {sourceMoves}</span>
+          ) : (
+            <span className="chip">{periods.length}</span>
           )}
         </summary>
 
         <div className="loc-hist-body">
-          {periods.length === 0 ? (
+          {sourceStays ? (
+            <>
+              {sourceStays}
+              <p className="hint" style={{ marginTop: 10 }}>
+                Восстановлено из заказов источника: адрес и время есть в каждом заказе.
+                Локация — период, а не одно значение: переставили аппарат — начался новый отрезок.
+              </p>
+            </>
+          ) : periods.length === 0 ? (
             <div className="empty">
               <b>Локация не записана</b>
               Неизвестно, где этот аппарат. Поставьте его на место во вкладке «Обслуживание»
@@ -200,37 +212,28 @@ export function LocationPanel({
               по локации.
             </div>
           ) : (
-            <div className="rows">
-              {periods.map((p) => (
-                <div className="row" key={p.id}>
-                  <div className="t">
-                    <b>{p.locationName}</b>
-                    <small>
-                      {p.startDate ?? "с неизвестной даты"} — {p.endDate ?? "сейчас"}
-                      {p.note ? ` · ${p.note}` : ""}
-                    </small>
+            <>
+              <div className="rows">
+                {periods.map((p) => (
+                  <div className="row" key={p.id}>
+                    <div className="t">
+                      <b>{p.locationName}</b>
+                      <small>
+                        {p.startDate ?? "с неизвестной даты"} — {p.endDate ?? "сейчас"}
+                        {p.note ? ` · ${p.note}` : ""}
+                      </small>
+                    </div>
+                    <span className={`pill ${p.endDate === null ? "ok" : ""}`}>
+                      {p.endDate === null ? "стоит сейчас" : "история"}
+                    </span>
                   </div>
-                  <span className={`pill ${p.endDate === null ? "ok" : ""}`}>
-                    {p.endDate === null ? "стоит сейчас" : "история"}
-                  </span>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+              <p className="hint" style={{ marginTop: 10 }}>
+                По заказам источника истории нет — показан наш учёт перестановок.
+              </p>
+            </>
           )}
-
-          {/* Второй источник той же истории — заказы ПО: не заменяет наш учёт,
-              а объясняет его, когда наши периоды выглядят неполными. */}
-          {sourceStays && (
-            <div style={{ marginTop: 14 }}>
-              <div className="section-title">По заказам источника</div>
-              {sourceStays}
-            </div>
-          )}
-
-          <p className="hint" style={{ marginTop: 10 }}>
-            Локация — карточка реестра: точка продаж, склад или мастерская. Перестановка
-            закрывает период и открывает новый, поэтому видно, где аппарат стоял раньше.
-          </p>
         </div>
       </details>
     </>
