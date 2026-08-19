@@ -19,7 +19,7 @@ import {
   type TnvedRate,
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
-import { groupsFor } from "../../../lib/domain-nav";
+import { groupsFor, isTableBackedLeaf } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
@@ -409,8 +409,7 @@ export default async function DomainPage({
         <div className="subtabs">
           {group.leaves.map((l) => {
             // Инкассация живёт своей таблицей, а не реестром — не затемняем.
-            const LIVE = ["sources", "collection", "sale", "purchase", "machine_stock", "consumption", "customs_rates"];
-            const n = l.type && LIVE.includes(l.type) ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
+            const n = isTableBackedLeaf(l.type) ? -1 : l.type ? (byType[l.type] ?? 0) : 0;
             const isActive = leaf === l;
             return (
               <Link
@@ -837,6 +836,20 @@ export default async function DomainPage({
                 g.leaves
                   .filter((l) => l.type !== null)
                   .map((l) => {
+                    // Лист со своей таблицей (продажи, приход, остатки) счётом
+                    // по реестру не измеряется — ведём на экран, а не пишем
+                    // «появится после сбора» поверх готовых данных.
+                    if (isTableBackedLeaf(l.type)) {
+                      return (
+                        <Link href={href(`${g.key}:${l.type}`)} className="wt" key={`${g.key}:${l.type}`}>
+                          <div className="wl">{l.label}</div>
+                          <div className="wv">·</div>
+                          <div className="wf">
+                            смотреть<span className="go">→</span>
+                          </div>
+                        </Link>
+                      );
+                    }
                     const n = byType[l.type!] ?? 0;
                     return n > 0 ? (
                       <Link href={href(`${g.key}:${l.type}`)} className="wt" key={`${g.key}:${l.type}`}>
