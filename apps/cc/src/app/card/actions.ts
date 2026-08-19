@@ -514,3 +514,25 @@ export async function swapPart(
   revalidatePath("/maintenance");
   return { ok: true };
 }
+
+// ── Алиасы имён продаж (склейка «имя источника → карточка товара») ───────────
+
+export async function bindSaleAlias(entityId: string, name: string): Promise<ActionResult> {
+  try {
+    await core.addSaleAlias(name, entityId);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${entityId}`);
+  return { ok: true };
+}
+
+export async function unbindSaleAlias(entityId: string, aliasId: string): Promise<ActionResult> {
+  try {
+    await core.removeSaleAlias(aliasId);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${entityId}`);
+  return { ok: true };
+}

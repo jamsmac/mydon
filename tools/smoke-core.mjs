@@ -306,6 +306,53 @@ async function проверитьПродажиТовара() {
     throw new Error(`нет сводки total: ${JSON.stringify(данные).slice(0, 120)}`);
   }
   if (!Array.isArray(данные.machines)) throw new Error("нет разбивки по автоматам");
+
+  // Склейка имён: алиас привязывается, чужое имя не перепривязывается, карточка
+  // отдаёт продажи по entityId вместе со списком алиасов.
+  const пост = (path, body) =>
+    fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
+    });
+  const карточка = await пост("/entities", {
+    domain: "vendhub",
+    type: "product",
+    name: `Смоук товар ${Date.now()}`,
+  });
+  if (!карточка.ok) throw new Error(`создание товара → ${карточка.status}`);
+  const товарId = JSON.parse(await карточка.text()).id;
+  const имя = `Smoke Source ${Date.now()}`;
+
+  const привязка = await пост("/sales/alias", { name: имя, entityId: товарId });
+  if (!привязка.ok) throw new Error(`привязка алиаса → ${привязка.status}: ${(await привязка.text()).slice(0, 200)}`);
+
+  const другая = await пост("/entities", {
+    domain: "vendhub",
+    type: "product",
+    name: `Смоук товар Б ${Date.now()}`,
+  });
+  const другойId = JSON.parse(await другая.text()).id;
+  const перехват = await пост("/sales/alias", { name: имя, entityId: другойId });
+  if (перехват.ok) throw new Error("занятый алиас перепривязался молча, а должен был отказать");
+
+  const поКарточке = await fetch(`${BASE}/sales/by-product?entityId=${товарId}&days=90`, {
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!поКарточке.ok) throw new Error(`/sales/by-product?entityId → ${поКарточке.status}`);
+  const пк = JSON.parse(await поКарточке.text());
+  if (!Array.isArray(пк.aliases) || !пк.aliases.some((a) => a.name === имя)) {
+    throw new Error("привязанный алиас не вернулся в ответе карточки");
+  }
+
+  const несвязанные = await fetch(`${BASE}/sales/unmatched-names?days=90`, {
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!несвязанные.ok) throw new Error(`/sales/unmatched-names → ${несвязанные.status}`);
+  if (!Array.isArray(JSON.parse(await несвязанные.text()))) {
+    throw new Error("несвязанные имена — не массив");
+  }
 }
 
 async function ждатьЗдоровье(proc) {
@@ -417,7 +464,7 @@ try {
 
   try {
     await проверитьПродажиТовара();
-    console.log("  ok  сценарий: продажи товара по имени карточки");
+    console.log("  ok  сценарий: продажи товара — имя, алиасы, несвязанные");
   } catch (e) {
     провалы.push(`продажи товара: ${e.message}`);
   }

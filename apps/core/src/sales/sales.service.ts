@@ -1,7 +1,14 @@
-import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
-import { entity, event, sale } from "@mydon/db";
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+} from "@nestjs/common";
+import { auditLog, entity, event, productNameAlias, sale } from "@mydon/db";
 import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, strictNumber } from "@mydon/shared";
-import { and, asc, desc, eq, gte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
 
@@ -356,6 +363,176 @@ export class SalesService implements OnModuleInit {
       },
       machines,
     };
+  }
+
+  /**
+   * Продажи КАРТОЧКИ товара: по её имени плюс привязанным алиасам источника.
+   *
+   * Одна продажа не может засчитаться двум карточкам: имя алиаса уникально
+   * во всём словаре, а имя, совпадающее с другой карточкой, в алиасы не
+   * принимается (см. addAlias).
+   */
+  async byProductCard(
+    entityId: string,
+    days = 90,
+  ): Promise<{
+    total: { qty: number; amount: number };
+    machines: {
+      machineId: string | null;
+      serial: string;
+      machineName: string | null;
+      qty: number;
+      amount: number;
+    }[];
+    aliases: { id: string; name: string }[];
+  }> {
+    const [card] = await this.db.select().from(entity).where(eq(entity.id, entityId)).limit(1);
+    if (!card) throw new NotFoundException("Карточка товара не найдена");
+    const aliases = await this.db
+      .select({ id: productNameAlias.id, name: productNameAlias.name })
+      .from(productNameAlias)
+      .where(eq(productNameAlias.entityId, entityId));
+
+    const names = [card.name, ...aliases.map((a) => a.name)];
+    const since = daysAgoLocal(Math.min(Math.max(days, 1), 365));
+    const rows = await this.db
+      .select({
+        machineId: sale.machineId,
+        serial: sale.machineSerial,
+        machineName: entity.name,
+        qty: sql<string>`sum(${sale.qty})`,
+        amount: sql<string>`sum(${sale.amount})`,
+      })
+      .from(sale)
+      .leftJoin(entity, eq(entity.id, sale.machineId))
+      .where(and(inArray(sale.product, names), gte(sale.dt, since)))
+      .groupBy(sale.machineId, sale.machineSerial, entity.name)
+      .orderBy(sql`sum(${sale.amount}) desc`);
+
+    const machines = rows.map((r) => ({
+      machineId: r.machineId,
+      serial: r.serial,
+      machineName: r.machineName,
+      qty: Number(r.qty),
+      amount: Number(r.amount),
+    }));
+    return {
+      total: {
+        qty: machines.reduce((s, m) => s + m.qty, 0),
+        amount: machines.reduce((s, m) => s + m.amount, 0),
+      },
+      machines,
+      aliases,
+    };
+  }
+
+  /**
+   * Имена продаж, не привязанные ни к одной карточке, — то, что теряется.
+   *
+   * Сортировка по деньгам: владелец привязывает сначала то, что дороже
+   * оставлять невидимым.
+   */
+  async unmatchedNames(days = 90): Promise<
+    { name: string; qty: number; amount: number; lastDt: string }[]
+  > {
+    const since = daysAgoLocal(Math.min(Math.max(days, 1), 365));
+    const rows = await this.db
+      .select({
+        name: sale.product,
+        qty: sql<string>`sum(${sale.qty})`,
+        amount: sql<string>`sum(${sale.amount})`,
+        lastDt: sql<string>`max(${sale.dt})::text`,
+      })
+      .from(sale)
+      .leftJoin(entity, and(eq(entity.name, sale.product), eq(entity.type, "product")))
+      .leftJoin(productNameAlias, eq(productNameAlias.name, sale.product))
+      .where(and(gte(sale.dt, since), isNull(entity.id), isNull(productNameAlias.id)))
+      .groupBy(sale.product)
+      .orderBy(sql`sum(${sale.amount}) desc`)
+      .limit(200);
+    return rows.map((r) => ({
+      name: r.name,
+      qty: Number(r.qty),
+      amount: Number(r.amount),
+      lastDt: r.lastDt,
+    }));
+  }
+
+  /**
+   * Привязать имя источника к карточке — решение владельца, не догадка.
+   *
+   * Два отказа держат цифры честными: имя, совпадающее с другой карточкой,
+   * не принимается (продажа засчиталась бы дважды), занятый алиас не
+   * перепривязывается молча (сначала отвяжи — история решений видна в аудите).
+   */
+  async addAlias(
+    name: string,
+    entityId: string,
+    actor = "owner",
+  ): Promise<{ id: string; name: string; entityId: string }> {
+    const clean = name.trim();
+    if (clean.length === 0) throw new BadRequestException("Пустое имя не привязывается");
+
+    const [card] = await this.db.select().from(entity).where(eq(entity.id, entityId)).limit(1);
+    if (!card) throw new NotFoundException("Карточка товара не найдена");
+    if (card.type !== "product") throw new BadRequestException("Алиасы привязываются только к товарам");
+    const [shadow] = await this.db
+      .select({ id: entity.id })
+      .from(entity)
+      .where(and(eq(entity.name, clean), eq(entity.type, "product")))
+      .limit(1);
+    if (shadow) {
+      throw new BadRequestException(
+        "Это имя уже само является карточкой товара — продажа засчиталась бы дважды",
+      );
+    }
+
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(productNameAlias)
+        .values({ entityId, name: clean, createdBy: actor })
+        .onConflictDoNothing({ target: productNameAlias.name })
+        .returning();
+      if (!row) {
+        const [existing] = await tx
+          .select()
+          .from(productNameAlias)
+          .where(eq(productNameAlias.name, clean))
+          .limit(1);
+        if (existing && existing.entityId === entityId) {
+          return { id: existing.id, name: existing.name, entityId: existing.entityId };
+        }
+        throw new BadRequestException("Имя уже привязано к другой карточке — сначала отвяжи там");
+      }
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: actor,
+        action: "sales.alias_added",
+        target: row.id,
+        after: row,
+      });
+      return { id: row.id, name: row.name, entityId: row.entityId };
+    });
+  }
+
+  /** Отвязать имя. Продажи по нему снова попадут в «несвязанные». */
+  async removeAlias(id: string, actor = "owner"): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(productNameAlias)
+        .where(eq(productNameAlias.id, id))
+        .limit(1);
+      if (!row) throw new NotFoundException("Такой привязки нет");
+      await tx.delete(productNameAlias).where(eq(productNameAlias.id, id));
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: actor,
+        action: "sales.alias_removed",
+        target: id,
+        before: row,
+      });
+    });
   }
 
   /** Автоматы, молчащие N дней: продажи были раньше, а теперь нет — сигнал связи. */

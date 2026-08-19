@@ -82,3 +82,102 @@ describe("Продажи: подготовка строк из mydon-stock", () 
     assert.equal(daysAgoLocal(1, now), todayLocal(now));
   });
 });
+
+// ── Алиасы имён продаж (склейка «имя источника → карточка») ──────────────────
+
+import { SalesService } from "./sales.service";
+
+type Row = Record<string, unknown>;
+
+interface AliasStubOpts {
+  /** Очередь ответов select по порядку вызовов. */
+  selects?: Row[][];
+  /** true — уникальный индекс имени отсёк вставку: алиас уже существует. */
+  insertConflict?: boolean;
+  inserted?: Row[];
+}
+
+/** Заглушка БД под цепочки addAlias/removeAlias — по образцу tasks.test.ts. */
+function aliasStubDb(opts: AliasStubOpts) {
+  const queue = [...(opts.selects ?? [])];
+  const selectChain = () => {
+    let memo: Row[] | null = null;
+    const rows = async () => (memo ??= queue.shift() ?? []);
+    const chain: Record<string, unknown> = {};
+    chain.from = () => chain;
+    chain.where = () => chain;
+    chain.leftJoin = () => chain;
+    chain.groupBy = () => chain;
+    chain.orderBy = () => chain;
+    chain.limit = rows;
+    chain.then = (res: (v: unknown) => unknown) => rows().then(res);
+    return chain;
+  };
+  const tx = {
+    select: selectChain,
+    insert: () => ({
+      values: (v: Row) => {
+        const row = { id: "al-1", ...v };
+        opts.inserted?.push(row);
+        const returning = async () => (opts.insertConflict ? [] : [row]);
+        return {
+          onConflictDoNothing: () => ({ returning }),
+          returning,
+          then: (res: (x: unknown) => unknown) => Promise.resolve([row]).then(res),
+        };
+      },
+    }),
+    delete: () => ({ where: async () => [] }),
+  };
+  return {
+    select: selectChain,
+    transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+  } as never;
+}
+
+const CARD = "66666666-6666-4666-8666-666666666666";
+
+describe("Алиасы имён продаж", () => {
+  it("привязка пишет алиас и след в аудите", async () => {
+    const inserted: Row[] = [];
+    // очередь: карточка найдена (product) → тени-карточки с таким именем нет.
+    const s = new SalesService(aliasStubDb({
+      selects: [[{ id: CARD, type: "product" }], []],
+      inserted,
+    }));
+    const r = await s.addAlias("Moxito Fresh Lime CAN 450ml", CARD);
+    assert.equal(r.name, "Moxito Fresh Lime CAN 450ml");
+    assert.ok(inserted.some((x) => x.action === "sales.alias_added"));
+  });
+
+  it("имя, совпадающее с другой карточкой, не принимается — продажа засчиталась бы дважды", async () => {
+    const s = new SalesService(aliasStubDb({
+      selects: [[{ id: CARD, type: "product" }], [{ id: "другая" }]],
+    }));
+    await assert.rejects(() => s.addAlias("Plus 18 Energy 330ml", CARD), /дважды/);
+  });
+
+  it("занятый алиас не перепривязывается молча", async () => {
+    const s = new SalesService(aliasStubDb({
+      selects: [[{ id: CARD, type: "product" }], [], [{ id: "al-9", entityId: "чужая", name: "X" }]],
+      insertConflict: true,
+    }));
+    await assert.rejects(() => s.addAlias("X", CARD), /другой карточке/);
+  });
+
+  it("повторная привязка того же имени к той же карточке — идемпотентна", async () => {
+    const s = new SalesService(aliasStubDb({
+      selects: [[{ id: CARD, type: "product" }], [], [{ id: "al-9", entityId: CARD, name: "X" }]],
+      insertConflict: true,
+    }));
+    const r = await s.addAlias("X", CARD);
+    assert.equal(r.id, "al-9");
+  });
+
+  it("алиас к не-товару и пустое имя — отказ", async () => {
+    const s1 = new SalesService(aliasStubDb({ selects: [[{ id: CARD, type: "machine" }]] }));
+    await assert.rejects(() => s1.addAlias("X", CARD), /только к товарам/);
+    const s2 = new SalesService(aliasStubDb({}));
+    await assert.rejects(() => s2.addAlias("   ", CARD), /Пустое имя/);
+  });
+});
