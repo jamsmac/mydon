@@ -542,63 +542,52 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           mapHref={mapHref}
           menuCount={menu.length}
           slots={{
-            menu: (
-              <MenuEditor
-                machineId={entity.id}
-                domain={entity.domain ?? null}
-                menu={menu}
-                products={menuProducts}
-                machines={menuSources}
-                history={menuHistory}
-                unlinked={menuUnlinked}
-              />
-            ),
-            content: (
-              <>
-                {machineCard?.kind === "coffee" ? (
-                  <>
-                    <div className="sect" id="bunkers">
-                      <div className="sect-h">
-                        <h3 className="h2">Бункеры</h3>
-                        {coffeeBunkers.some((r) => r.netFillWeight !== null) && (
-                          <span className="chip b">
-                            позиций с заливкой:{" "}
-                            {coffeeBunkers.filter((r) => r.netFillWeight !== null).length}
-                          </span>
-                        )}
-                      </div>
-                      {coffeeBunkers.length === 0 ? (
-                        <div className="empty">
-                          <b>Бункеры не привязаны</b>
-                          Содержимое кофейного — восемь бункеров точки, а не слоты.
-                          Уровни появятся, когда аппарат будет стоять на кофе-точке
-                          с заливками — журнал живёт во вкладке «Кофе-бункеры».
-                        </div>
-                      ) : (
-                        <>
-                          <BunkerLevels rows={coffeeBunkers} />
-                          <p className="hint" style={{ marginTop: 8 }}>
-                            Уровень — чистый вес последней заливки против эталона позиции.
-                            Заливки и возвраты — во вкладке «Кофе-бункеры» рабочего места VendHub.
-                          </p>
-                        </>
-                      )}
-                    </div>
-                    {planogram.length > 0 && (
-                      <PlanogramEditor
-                        entity={{ id: entity.id }}
-                        products={planogramProducts}
-                        planogram={planogram}
-                      />
-                    )}
-                  </>
+            ingredients: (
+              <div className="sect" id="bunkers">
+                <div className="sect-h">
+                  <h3 className="h2">Ингредиенты по бункерам</h3>
+                  {coffeeBunkers.some((r) => r.netFillWeight !== null) && (
+                    <span className="chip b">
+                      позиций с заливкой:{" "}
+                      {coffeeBunkers.filter((r) => r.netFillWeight !== null).length}
+                    </span>
+                  )}
+                </div>
+                {coffeeBunkers.length === 0 ? (
+                  <div className="empty">
+                    <b>Бункеры не привязаны</b>
+                    Ингредиенты кофейного живут в восьми бункерах точки. Уровни появятся,
+                    когда аппарат будет стоять на кофе-точке с заливками — журнал заливок
+                    во вкладке «Кофе-бункеры» рабочего места VendHub.
+                  </div>
                 ) : (
-                  <PlanogramEditor
-                    entity={{ id: entity.id }}
-                    products={planogramProducts}
-                    planogram={planogram}
-                  />
+                  <>
+                    <BunkerLevels rows={coffeeBunkers} />
+                    <p className="hint" style={{ marginTop: 8 }}>
+                      Уровень — чистый вес последней заливки против эталона позиции.
+                      Заливки и возвраты — во вкладке «Кофе-бункеры» рабочего места VendHub.
+                    </p>
+                  </>
                 )}
+              </div>
+            ),
+            menu: (
+              <>
+                <MenuEditor
+                  machineId={entity.id}
+                  domain={entity.domain ?? null}
+                  menu={menu}
+                  products={menuProducts}
+                  machines={menuSources}
+                  history={menuHistory}
+                  unlinked={menuUnlinked}
+                />
+                {/* Расположение по слотам — там же, где ассортимент: что стоит и ГДЕ. */}
+                <PlanogramEditor
+                  entity={{ id: entity.id }}
+                  products={planogramProducts}
+                  planogram={planogram}
+                />
               </>
             ),
             service: (
