@@ -33,12 +33,12 @@ const KIND_EMOJI: Record<string, string> = {
 
 const KIND_FILTERS = ["coffee", "snack", "drink"] as const;
 
-/** Подписи виджетов — про парк, поэтому во множественном числе. */
+/** Подписи виджетов — латиницей, как в именах парка (слово владельца). */
 const KIND_PLURAL: Record<string, string> = {
-  coffee: "кофейные",
-  snack: "снеки",
-  drink: "напитки",
-  combo: "снек + напитки",
+  coffee: "coffee",
+  snack: "snack",
+  drink: "drinks",
+  combo: "snack + drinks",
 };
 
 const SORTS = [

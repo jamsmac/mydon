@@ -18,11 +18,12 @@
 export const MACHINE_KINDS = ["coffee", "snack", "drink", "combo", "other"] as const;
 export type MachineKind = (typeof MACHINE_KINDS)[number];
 
+// Слово владельца (20.08.2026): виды пишем латиницей — coffee и snack.
 export const MACHINE_KIND_LABELS: Record<MachineKind, string> = {
-  coffee: "Кофейный",
-  snack: "Снек",
-  drink: "Напитки",
-  combo: "Снек + напитки",
+  coffee: "Coffee",
+  snack: "Snack",
+  drink: "Drinks",
+  combo: "Snack + Drinks",
   other: "Не размечен",
 };
 
