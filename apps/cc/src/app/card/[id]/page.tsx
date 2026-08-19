@@ -11,6 +11,8 @@ import {
   type RecipeView,
   type IngredientStock,
   type WarehouseStock,
+  type FinanceFlow,
+  type GrContract,
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
 import { PhotoGallery } from "../../../components/photo-gallery";
@@ -25,8 +27,17 @@ import { PlanogramEditor } from "../../../components/planogram-editor";
 import { MachineCardPanel } from "../../../components/machine-card-panel";
 import { MachinePartsPanel } from "../../../components/machine-parts-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
-import { PLACE_TYPES, parsePlanogram } from "@mydon/shared";
+import { PLACE_TYPES, parsePlanogram, parseRecipe } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
+import {
+  ContractorFinance,
+  IngredientUsage,
+  ProductEconomy,
+  ProductFiscal,
+  ProductMachines,
+  type IngredientUsageRow,
+  type ProductMachineRow,
+} from "../../../components/product-card-sections";
 import { WarehouseStockView } from "../../../components/warehouse-stock";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
 import { plural, when } from "../../../lib/format";
@@ -155,6 +166,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   const isIngredient = entity.type === "ingredient";
   let stock: IngredientStock | null = null;
   let warehouses: WarehouseOption[] = [];
+  // «В каких рецептах» — обратный разбор составов товаров направления.
+  let ingredientUsage: IngredientUsageRow[] = [];
   if (isIngredient) {
     try {
       stock = await core.ingredientStock(entity.id);
@@ -166,6 +179,64 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       warehouses = cards.map((c) => ({ id: c.id, name: c.name }));
     } catch {
       warehouses = [];
+    }
+    // Обратная связь «в каких рецептах»: состав лежит в attrs товаров, поэтому
+    // это чтение реестра, а не новый эндпоинт.
+    try {
+      const товары = entity.domain ? await core.entitiesOfType(entity.domain, "product") : [];
+      ingredientUsage = товары.flatMap((p) =>
+        parseRecipe(p.attrs)
+          .filter((l) => l.ingredientId === entity.id)
+          .map((l) => ({ productId: p.id, productName: p.name, quantity: l.quantity, unit: l.unit })),
+      );
+    } catch {
+      ingredientUsage = [];
+    }
+  }
+
+  // Товар: в каких автоматах стоит — обратный разбор раскладок всех автоматов
+  // направления. Данные уже в реестре, эндпоинт не нужен. Дополнение — ошибка
+  // не роняет карточку.
+  const isProduct = entity.type === "product";
+  let productMachines: ProductMachineRow[] = [];
+  if (isProduct && entity.domain) {
+    try {
+      const машины = await core.entitiesOfType(entity.domain, "machine");
+      productMachines = машины.flatMap((m) =>
+        parsePlanogram(m.attrs)
+          .filter((p) => p.productId === entity.id)
+          .map((p) => ({ machineId: m.id, machineName: m.name, slot: p.slot })),
+      );
+    } catch {
+      productMachines = [];
+    }
+  }
+
+  // Контрагент: договоры и платежи из финансового контура. Связь — по имени:
+  // финансовый справочник контрагентов ведётся отдельно от реестра, и id у них
+  // разные. Дополнение — ошибка не роняет карточку.
+  const isContractor = entity.type === "contractor";
+  let contractorContracts: GrContract[] = [];
+  let contractorFlows: FinanceFlow[] = [];
+  if (isContractor && entity.domain) {
+    try {
+      const имя = entity.name.trim().toLowerCase();
+      const [стороны, потоки, договоры] = await Promise.all([
+        core.financeCounterparties(entity.domain),
+        core.financeFlows(entity.domain),
+        core.contracts(entity.domain),
+      ]);
+      const своя = стороны.find((c) => c.name.trim().toLowerCase() === имя) ?? null;
+      contractorFlows = потоки.filter(
+        (f) =>
+          (своя !== null && f.counterpartyId === своя.id) ||
+          f.counterparty?.trim().toLowerCase() === имя ||
+          f.counterpartyEntityName?.trim().toLowerCase() === имя,
+      );
+      contractorContracts = договоры.filter((c) => своя !== null && c.clientId === своя.id);
+    } catch {
+      contractorContracts = [];
+      contractorFlows = [];
     }
   }
 
@@ -251,6 +322,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       <section id="photo" data-toc="Фото">
         <PhotoGallery attachments={photos} />
       </section>
+
+      {isContractor && <ContractorFinance contracts={contractorContracts} flows={contractorFlows} />}
 
       {hasGeo && (
         <div className="card" id="geo" data-toc="Где стоит">
@@ -369,11 +442,24 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         />
       )}
 
+      {isProduct && (
+        <>
+          <ProductFiscal attrs={a} />
+          <ProductEconomy
+            attrs={a}
+            recipeCost={recipe ? { total: recipe.total, unresolved: recipe.unresolved } : null}
+          />
+          <ProductMachines rows={productMachines} />
+        </>
+      )}
+
       {isRecipe && recipe && (
         <section id="recipe" data-toc="Рецепт">
           <RecipeEditor entity={{ id: entity.id }} ingredients={ingredients} recipe={recipe} />
         </section>
       )}
+
+      {isIngredient && <IngredientUsage rows={ingredientUsage} />}
 
       {isIngredient && stock && (
         <section id="stock" data-toc="Склад">
