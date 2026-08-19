@@ -139,7 +139,7 @@ export function MachineCard360({
   const метки: [boolean, string, string][] = [
     [approved, "Карточка не утверждена", "passport"],
     [kind !== null && kind !== "other", "Вид не указан", "service"],
-    [текущая !== null, "Место не записано", "service"],
+    [текущая !== null, "Локация не записана", "service"],
     [hasGeo, "Координат нет — не видно на карте", "place"],
     // Содержимое зависит от вида: у кофейного — бункеры точки, у остальных — меню.
     coffee !== null
@@ -250,7 +250,7 @@ export function MachineCard360({
                       </div>
                       <div className="foot">
                         <span className="mk" />
-                        {coffee.linked ? "бункеров с заливкой" : "точка не привязана"}
+                        {coffee.linked ? "бункеров с заливкой" : "локация не привязана"}
                         <span className="go">→</span>
                       </div>
                     </div>
@@ -295,16 +295,16 @@ export function MachineCard360({
 
                 <div className="mc-grid">
                   <div className="card">
-                    <h3 className="h2">Точка</h3>
+                    <h3 className="h2">Локация</h3>
                     <div className="mc-tiles">
                       <Tile
                         label="Стоит сейчас"
-                        value={точка ?? "место не записано"}
+                        value={точка ?? "локация не записана"}
                         empty={точка === null}
                         wide
                       />
                       {mapHref ? (
-                        <Tile label="Карта" value="открыть точку" href={mapHref} />
+                        <Tile label="Карта" value="открыть локацию" href={mapHref} />
                       ) : (
                         <Tile label="Координаты" value="не указаны" empty />
                       )}
@@ -376,7 +376,7 @@ export function MachineCard360({
           },
           {
             key: "place",
-            label: "Точка",
+            label: "Локация",
             badge: placements.length > 0 ? String(placements.length) : undefined,
             content: slots.place,
           },

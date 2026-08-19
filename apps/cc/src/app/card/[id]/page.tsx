@@ -608,17 +608,17 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
               <>
                 <div className="sect" id="placements">
                   <div className="sect-h">
-                    <h3 className="h2">Где стоит</h3>
+                    <h3 className="h2">Локация</h3>
                     {coffeePlacements.length > 0 && (
                       <span className="chip b">периодов: {coffeePlacements.length}</span>
                     )}
                   </div>
                   {coffeePlacements.length === 0 ? (
                     <div className="empty">
-                      <b>Место не записано</b>
+                      <b>Локация не записана</b>
                       Неизвестно, где этот аппарат. Поставьте его на место во вкладке
                       «Обслуживание» (склад, мастерская или точка продаж) — тогда он появится
-                      на карте и в отчётах по точке.
+                      на карте и в отчётах по локации.
                     </div>
                   ) : (
                     <div className="rows">
@@ -652,7 +652,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                 {stays && (
                   <div className="sect" id="stays">
                     <div className="sect-h">
-                      <h3 className="h2">Где стоял (по заказам источника)</h3>
+                      <h3 className="h2">Где стоял раньше (по заказам источника)</h3>
                       {stays.moves > 0 ? (
                         <span className="chip b">переездов: {stays.moves}</span>
                       ) : (
