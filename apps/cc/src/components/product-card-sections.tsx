@@ -317,3 +317,211 @@ export function ContractorFinance({
     </div>
   );
 }
+
+// ── Товар: продажи (связь по имени) ──────────────────────────────────────────
+
+export function ProductSalesSection({
+  sales,
+  days,
+}: {
+  sales: import("../lib/core").ProductSales | null;
+  days: number;
+}) {
+  return (
+    <div className="sect" id="sales" data-toc="Продажи">
+      <div className="sect-h">
+        <h3 className="h2">Продажи за {days} дней</h3>
+        <span className="chip">{sales?.machines.length ?? 0}</span>
+        <span className="sp" />
+      </div>
+      {sales === null || sales.machines.length === 0 ? (
+        // Связь по ИМЕНИ: sale.product — текст из источника, FK на карточку
+        // нет. «Не найдено» ≠ «не продаётся» — и это сказано словами.
+        <div className="empty">
+          <b>Продаж с таким именем не найдено</b>
+          Продажи связываются по точному имени карточки. Если товар продаётся, но здесь
+          пусто — в источнике (Ourvend) он назван иначе.
+        </div>
+      ) : (
+        <>
+          <div className="tiles">
+            <div className="tile">
+              <span className="lab">Штук</span>
+              <span className="v">{sales.total.qty.toLocaleString("ru-RU")}</span>
+            </div>
+            <div className="tile">
+              <span className="lab">Выручка</span>
+              <span className="v">{сум(Math.round(sales.total.amount))}</span>
+            </div>
+          </div>
+          <div className="rows" style={{ marginTop: 10 }}>
+            {sales.machines.map((m) => (
+              <div className="row" key={m.machineId ?? m.serial}>
+                <div className="t">
+                  {m.machineId ? (
+                    <Link href={`/card/${m.machineId}`}>{m.machineName ?? m.serial}</Link>
+                  ) : (
+                    <span className="mono">{m.serial}</span>
+                  )}
+                </div>
+                <span className="pill">{m.qty.toLocaleString("ru-RU")} шт</span>
+                <span className="pill mono">{сум(Math.round(m.amount))}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Склад: лента движений ────────────────────────────────────────────────────
+
+const ДВИЖЕНИЕ: Record<string, string> = {
+  intake: "приход",
+  consumption: "расход",
+  transfer: "перемещение",
+  adjustment: "инвентаризация",
+};
+
+export function WarehouseMovements({
+  movements,
+}: {
+  movements: import("../lib/core").WarehouseStock["movements"];
+}) {
+  return (
+    <div className="sect" id="moves" data-toc="Движения">
+      <div className="sect-h">
+        <h3 className="h2">Движения склада</h3>
+        <span className="chip">{movements.length}</span>
+        <span className="sp" />
+      </div>
+      {movements.length === 0 ? (
+        <div className="empty">
+          <b>Движений нет</b>
+          Приходы, списания и перемещения по этому складу появятся здесь.
+        </div>
+      ) : (
+        <div className="rows">
+          {movements.map((m) => (
+            <div className="row" key={m.id}>
+              <span className="when">{m.dt}</span>
+              <span className="pill">{ДВИЖЕНИЕ[m.kind] ?? m.kind}</span>
+              <div className="t">
+                <Link href={`/card/${m.ingredientId}`}>{m.ingredientName}</Link>
+                {m.supplier ? ` · ${m.supplier}` : ""}
+                {m.note ? ` — ${m.note}` : ""}
+              </div>
+              <span className="pill mono">
+                {m.qty.toLocaleString("ru-RU", { maximumFractionDigits: 3 })} {m.unit}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Место: аппараты на точке ─────────────────────────────────────────────────
+
+export interface PlacementRow {
+  id: string;
+  entityId: string;
+  machineName: string;
+  machineRef: string | null;
+  startDate: string | null;
+  endDate: string | null;
+}
+
+export function PlacePlacements({ rows }: { rows: PlacementRow[] }) {
+  const сейчас = rows.filter((r) => r.endDate === null);
+  const история = rows.filter((r) => r.endDate !== null);
+  return (
+    <div className="sect" id="placements" data-toc="Аппараты">
+      <div className="sect-h">
+        <h3 className="h2">Аппараты на точке</h3>
+        <span className="chip">{сейчас.length}</span>
+        <span className="sp" />
+      </div>
+      {сейчас.length === 0 && история.length === 0 ? (
+        <div className="empty">
+          <b>Аппаратов не было</b>
+          Привязка аппарата к точке делается с его карточки или из «Кофе-бункеров».
+        </div>
+      ) : (
+        <>
+          <div className="rows">
+            {сейчас.map((r) => (
+              <div className="row" key={r.id}>
+                <div className="t">
+                  <Link href={`/card/${r.entityId}`}>{r.machineName}</Link>
+                  {r.machineRef && <span className="pill mono"> {r.machineRef}</span>}
+                </div>
+                <span className="when">с {r.startDate ?? "неизвестной даты"}</span>
+              </div>
+            ))}
+          </div>
+          {история.length > 0 && (
+            <details style={{ marginTop: 10 }}>
+              <summary className="hint">Стояли раньше · {история.length}</summary>
+              <div className="rows">
+                {история.map((r) => (
+                  <div className="row" key={r.id}>
+                    <div className="t">
+                      <Link href={`/card/${r.entityId}`}>{r.machineName}</Link>
+                    </div>
+                    <span className="when">
+                      {r.startDate ?? "?"} → {r.endDate}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Поставщик: что поставляет ────────────────────────────────────────────────
+
+export interface SupplierProductRow {
+  productId: string;
+  productName: string;
+  purchasePrice: number | null;
+}
+
+export function SupplierProducts({ rows }: { rows: SupplierProductRow[] }) {
+  return (
+    <div className="sect" id="supplies" data-toc="Поставки">
+      <div className="sect-h">
+        <h3 className="h2">Что поставляет</h3>
+        <span className="chip">{rows.length}</span>
+        <span className="sp" />
+      </div>
+      {rows.length === 0 ? (
+        // Поставщик в карточке товара — текстовое поле; связь по имени.
+        <div className="empty">
+          <b>Товары не привязаны</b>
+          У товара поставщик указывается полем «поставщик» — совпадение по имени
+          свяжет его с этой карточкой.
+        </div>
+      ) : (
+        <div className="rows">
+          {rows.map((r) => (
+            <div className="row" key={r.productId}>
+              <div className="t">
+                <Link href={`/card/${r.productId}`}>{r.productName}</Link>
+              </div>
+              <span className="pill mono">
+                {r.purchasePrice !== null ? сум(r.purchasePrice) : "цена покупки не заведена"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

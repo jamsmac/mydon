@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { UNITS, type Unit } from "@mydon/shared";
@@ -95,7 +96,13 @@ export function RecipeEditor({
           {recipe.lines.map((l, i) => (
             <div className="f" key={i}>
               <div className="k">
-                {l.ingredientName ?? "ингредиент удалён"}
+                {/* Имя — ссылка на карточку: из состава к остатку и приходу
+                    ингредиента вёл только поиск, теперь один клик. */}
+                {l.ingredientName ? (
+                  <Link href={`/card/${l.ingredientId}`}>{l.ingredientName}</Link>
+                ) : (
+                  "ингредиент удалён"
+                )}
                 {!l.approved && l.ingredientName ? " (ждёт утверждения)" : ""}
               </div>
               <div className="val">

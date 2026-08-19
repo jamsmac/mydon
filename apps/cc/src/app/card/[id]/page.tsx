@@ -32,11 +32,17 @@ import { StockPanel, type WarehouseOption } from "../../../components/stock-pane
 import {
   ContractorFinance,
   IngredientUsage,
+  PlacePlacements,
   ProductEconomy,
   ProductFiscal,
   ProductMachines,
+  ProductSalesSection,
+  SupplierProducts,
+  WarehouseMovements,
   type IngredientUsageRow,
+  type PlacementRow,
   type ProductMachineRow,
+  type SupplierProductRow,
 } from "../../../components/product-card-sections";
 import { WarehouseStockView } from "../../../components/warehouse-stock";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
@@ -212,6 +218,60 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Товар: продажи по имени карточки (sale.product — текст, FK нет).
+  // Дополнение — ошибка не роняет карточку.
+  let productSales: Awaited<ReturnType<typeof core.salesByProduct>> | null = null;
+  if (isProduct) {
+    try {
+      productSales = await core.salesByProduct(entity.name, 90);
+    } catch {
+      productSales = null;
+    }
+  }
+
+  // Место (точка/склад/мастерская): какие аппараты стоят и стояли.
+  // Дополнение — ошибка не роняет карточку.
+  const isPlace = (PLACE_TYPES as readonly string[]).includes(entity.type);
+  let placements: PlacementRow[] = [];
+  if (isPlace) {
+    try {
+      placements = (await core.coffeePlacements(entity.id)).map((r) => ({
+        id: r.id,
+        entityId: r.entityId,
+        machineName: r.machineName,
+        machineRef: r.machineRef,
+        startDate: r.startDate,
+        endDate: r.endDate,
+      }));
+    } catch {
+      placements = [];
+    }
+  }
+
+  // Поставщик: товары, где он указан полем «поставщик» (связь по имени).
+  // Дополнение — ошибка не роняет карточку.
+  const isSupplier = entity.type === "supplier";
+  let supplierProducts: SupplierProductRow[] = [];
+  if (isSupplier && entity.domain) {
+    try {
+      const имя = entity.name.trim().toLowerCase();
+      const товары = await core.entitiesOfType(entity.domain, "product");
+      supplierProducts = товары
+        .filter((p) => String((p.attrs ?? {})["поставщик"] ?? "").trim().toLowerCase() === имя)
+        .map((p) => {
+          const цена = (p.attrs ?? {})["цена покупки"];
+          const n = typeof цена === "number" ? цена : Number(String(цена ?? "").replace(",", "."));
+          return {
+            productId: p.id,
+            productName: p.name,
+            purchasePrice: Number.isFinite(n) && n > 0 ? n : null,
+          };
+        });
+    } catch {
+      supplierProducts = [];
+    }
+  }
+
   // Контрагент: договоры и платежи из финансового контура. Связь — по имени:
   // финансовый справочник контрагентов ведётся отдельно от реестра, и id у них
   // разные. Дополнение — ошибка не роняет карточку.
@@ -324,6 +384,10 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       </section>
 
       {isContractor && <ContractorFinance contracts={contractorContracts} flows={contractorFlows} />}
+
+      {isPlace && <PlacePlacements rows={placements} />}
+
+      {isSupplier && <SupplierProducts rows={supplierProducts} />}
 
       {hasGeo && (
         <div className="card" id="geo" data-toc="Где стоит">
@@ -450,6 +514,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
             recipeCost={recipe ? { total: recipe.total, unresolved: recipe.unresolved } : null}
           />
           <ProductMachines rows={productMachines} />
+          <ProductSalesSection sales={productSales} days={90} />
         </>
       )}
 
@@ -481,6 +546,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       {isWarehouse && warehouseStock && warehouseStock.items.length > 0 && (
         <StocktakeSession warehouseId={entity.id} items={warehouseStock.items} />
       )}
+
+      {isWarehouse && warehouseStock && <WarehouseMovements movements={warehouseStock.movements} />}
 
       <section id="fields" data-toc="Поля">
         <EntityEditor entity={entity} />

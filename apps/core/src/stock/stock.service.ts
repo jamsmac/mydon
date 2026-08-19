@@ -300,6 +300,18 @@ export class StockService implements OnModuleInit {
       qty: number | null;
       unconvertible: number;
     }[];
+    /** Лента движений склада, свежие сверху, до 100 строк. */
+    movements: {
+      id: string;
+      kind: string;
+      dt: string;
+      ingredientId: string;
+      ingredientName: string;
+      qty: number;
+      unit: string;
+      supplier: string | null;
+      note: string | null;
+    }[];
   }> {
     const wh = await this.cardOfType(warehouseId, "warehouse");
     const rows = await this.movementsOf(
@@ -325,7 +337,20 @@ export class StockService implements OnModuleInit {
       };
     });
 
-    return { warehouseId, warehouseName: wh.name, items };
+    // Лента: движения уже загружены для остатков — доджойниваем только имена.
+    const movements = rows.slice(0, 100).map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      dt: String(r.dt),
+      ingredientId: r.ingredientId,
+      ingredientName: ingById.get(r.ingredientId)?.name ?? "ингредиент",
+      qty: Number(r.qty),
+      unit: r.unit,
+      supplier: r.supplier,
+      note: r.note,
+    }));
+
+    return { warehouseId, warehouseName: wh.name, items, movements };
   }
 
   /**

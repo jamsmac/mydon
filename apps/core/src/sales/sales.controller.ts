@@ -24,6 +24,16 @@ export class SalesController {
     return this.sales.silent(Number.isFinite(n) && n > 0 ? Math.min(n, 30) : 2);
   }
 
+  /** Продажи одного товара (по имени) — для карточки. Объявлен ВЫШЕ @Get(). */
+  @Get("by-product")
+  byProduct(@Query("name") name?: string, @Query("days") days?: string) {
+    const n = Number(days);
+    return this.sales.byProduct(
+      (name ?? "").trim(),
+      Number.isFinite(n) && n > 0 ? Math.min(n, 365) : 90,
+    );
+  }
+
   @Get()
   journal(@Query("days") days?: string, @Query("limit") limit?: string) {
     const d = Number(days);
