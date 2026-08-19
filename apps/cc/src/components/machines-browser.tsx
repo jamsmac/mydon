@@ -43,7 +43,7 @@ const KIND_PLURAL: Record<string, string> = {
 
 const SORTS = [
   { key: "name", label: "по имени" },
-  { key: "point", label: "по точке" },
+  { key: "point", label: "по локации" },
   { key: "fill", label: "по заполненности" },
   { key: "status", label: "по состоянию" },
   { key: "menu", label: "по меню" },
@@ -191,7 +191,7 @@ export function MachinesBrowser({ items }: { items: MachineListItem[] }) {
       <div className="mb-toolbar">
         <input
           className="mb-search"
-          placeholder="Имя, серийник или точка…"
+          placeholder="Имя, серийник или локация…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           aria-label="Поиск по парку"
