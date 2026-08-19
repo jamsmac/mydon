@@ -1015,8 +1015,50 @@ export default async function DomainPage({
         </>
       )}
 
+      {/* ── Рецепты: не отдельный тип, а принцип карточки товара ──
+          Записей entity.type="recipe" не существует — лист годами показывал
+          пустоту. Теперь это фильтр: товары с полем «вид» = «рецепт». */}
+      {group && leaf?.type === "recipe" && (() => {
+        const рецепты = entities
+          .filter((e) => e.type === "product" && (e.attrs ?? {})["вид"] === "рецепт")
+          .sort((a, b) => a.name.localeCompare(b.name, "ru"));
+        return рецепты.length > 0 ? (
+          <>
+            <div className="book">
+              <div className="th">
+                <span>Товар с рецептом</span>
+                <span>Код</span>
+                <span style={{ textAlign: "right" }}>Цена</span>
+              </div>
+              {рецепты.map((e) => {
+                const price = (e.attrs ?? {})["цена"];
+                return (
+                  <Link href={`/card/${e.id}`} className="tr" key={e.id}>
+                    <span className="nm">{e.name}</span>
+                    <span className="cd">{String((e.attrs ?? {})["ИКПУ"] ?? "")}</span>
+                    <span className="pr">
+                      {typeof price === "number"
+                        ? <>{Number(price).toLocaleString("ru-RU")} <span className="u">сум</span></>
+                        : "—"}
+                    </span>
+                  </Link>
+                );
+              })}
+            </div>
+            <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
+              {рецепты.length} товаров с рецептом · состав и себестоимость — на карточке товара
+            </p>
+          </>
+        ) : (
+          <div className="empty">
+            <b>Товаров с рецептом пока нет</b>
+            Рецепт — принцип карточки товара: поле «вид» = «рецепт», состав задаётся на карточке.
+          </div>
+        );
+      })()}
+
       {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates"].includes(leaf.type) && (
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe"].includes(leaf.type) && (
         <>
           {leafItems.length > 0 ? (
             <>

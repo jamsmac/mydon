@@ -30,6 +30,7 @@ import { StocktakeSession } from "../../../components/stocktake-session";
 import { PLACE_TYPES, parsePlanogram, parseRecipe } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
 import {
+  ComponentInstances,
   ContractorFinance,
   IngredientUsage,
   PlacePlacements,
@@ -307,6 +308,24 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Запчасть: экземпляры этой номенклатуры в учёте узлов — по серийнику
+  // (поле «серийник») и модели (поле «модель» или имя карточки).
+  // Дополнение — ошибка не роняет карточку.
+  const isComponent = entity.type === "component";
+  let componentInstances: Awaited<ReturnType<typeof core.partHistory>> = [];
+  if (isComponent) {
+    try {
+      const серийник = typeof a["серийник"] === "string" ? a["серийник"].trim() : "";
+      const модель = typeof a["модель"] === "string" && a["модель"].trim() ? a["модель"].trim() : entity.name;
+      componentInstances = await core.partHistory({
+        ...(серийник ? { serial: серийник } : {}),
+        model: модель,
+      });
+    } catch {
+      componentInstances = [];
+    }
+  }
+
   // Остаток склада: что и сколько лежит.
   const isWarehouse = entity.type === "warehouse";
   let warehouseStock: WarehouseStock | null = null;
@@ -395,6 +414,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       {isPlace && <PlacePlacements rows={placements} />}
 
       {isSupplier && <SupplierProducts rows={supplierProducts} />}
+
+      {isComponent && <ComponentInstances rows={componentInstances} />}
 
       {hasGeo && (
         <div className="card" id="geo" data-toc="Где стоит">
