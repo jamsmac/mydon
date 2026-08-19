@@ -19,6 +19,7 @@ import {
   MaintenanceService,
   type MaintenanceKind,
   type MaintenanceOutcome,
+  type PartOffLocation,
   type PartSwapReason,
 } from "./maintenance.service";
 
@@ -57,8 +58,13 @@ const PART_KINDS = [
   "other",
 ] as const;
 
+// part_install/part_remove в KINDS нарочно НЕТ: эти виды пишутся только
+// эндпоинтами установки/снятия — иначе запись журнала появилась бы без
+// парного периода узла.
 const OUTCOMES = ["done", "partial", "failed"] as const;
 const REASONS = ["failure", "preventive", "upgrade", "warranty", "moved"] as const;
+/** Куда можно снять узел — все места, кроме автомата. */
+const OFF_LOCATIONS = ["warehouse", "washing", "drying", "repair"] as const;
 
 export class CreateLogDto {
   @IsUUID()
@@ -147,6 +153,88 @@ export class SwapPartDto {
 
   @IsOptional() @IsISO8601({ strict: true })
   warrantyUntil?: string;
+
+  @IsOptional() @IsISO8601({ strict: true })
+  performedOn?: string;
+
+  /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(128)
+  clientKey?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  createdBy?: string;
+}
+
+export class InstallPartDto {
+  @IsUUID()
+  machineId!: string;
+
+  @IsIn([...PART_KINDS])
+  partKind!: string;
+
+  @IsOptional() @IsInt() @IsPositive()
+  slot?: number;
+
+  /** Экземпляр со склада — открытый период «вне автомата». */
+  @IsOptional() @IsUUID()
+  partId?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  serialNumber?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  model?: string;
+
+  @IsOptional() @IsISO8601({ strict: true })
+  warrantyUntil?: string;
+
+  @IsOptional() @IsIn([...REASONS])
+  reason?: PartSwapReason;
+
+  @IsOptional() @IsUUID()
+  personId?: string;
+
+  @IsOptional() @IsUUID()
+  taskId?: string;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  note?: string;
+
+  @IsOptional() @IsISO8601({ strict: true })
+  performedOn?: string;
+
+  /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(128)
+  clientKey?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  createdBy?: string;
+}
+
+export class RemovePartDto {
+  @IsUUID()
+  machineId!: string;
+
+  @IsIn([...PART_KINDS])
+  partKind!: string;
+
+  @IsOptional() @IsInt() @IsPositive()
+  slot?: number;
+
+  @IsIn([...OFF_LOCATIONS])
+  toLocation!: PartOffLocation;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  serial?: string;
+
+  @IsOptional() @IsUUID()
+  personId?: string;
+
+  @IsOptional() @IsUUID()
+  taskId?: string;
+
+  @IsOptional() @IsString() @MaxLength(2000)
+  note?: string;
 
   @IsOptional() @IsISO8601({ strict: true })
   performedOn?: string;
@@ -326,6 +414,28 @@ export class MaintenanceController {
   @Post("part-swap")
   swapPart(@Body() dto: SwapPartDto) {
     return this.maintenance.swapPart(dto);
+  }
+
+  @Post("part-install")
+  installPart(@Body() dto: InstallPartDto) {
+    return this.maintenance.installPart(dto);
+  }
+
+  @Post("part-remove")
+  removePart(@Body() dto: RemovePartDto) {
+    return this.maintenance.removePart(dto);
+  }
+
+  /** Узлы вне автоматов: склад, мойка, сушка, ремонт. */
+  @Get("parts/storage")
+  storageParts() {
+    return this.maintenance.storageParts();
+  }
+
+  /** История экземпляра по серийнику — все периоды в обе стороны. */
+  @Get("parts/history")
+  partHistory(@Query("serial") serial: string) {
+    return this.maintenance.partHistory((serial ?? "").trim());
   }
 
   @Get("parts")

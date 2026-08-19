@@ -84,6 +84,8 @@ export const MAINTENANCE_KINDS = [
   "calibration",
   "repair",
   "other",
+  "part_install",
+  "part_remove",
 ] as const;
 
 export type MaintenanceKind = (typeof MAINTENANCE_KINDS)[number];
@@ -97,6 +99,8 @@ export const MAINTENANCE_KIND_LABELS: Record<MaintenanceKind, string> = {
   calibration: "Поверка",
   repair: "Ремонт",
   other: "Другое",
+  part_install: "Установка узла",
+  part_remove: "Снятие узла",
 };
 
 export const MAINTENANCE_OUTCOMES = ["done", "partial", "failed"] as const;
@@ -198,6 +202,26 @@ export const INSPECTION_KIND: Record<InspectionType, MaintenanceKind> = {
   metr: "calibration",
 };
 
+/**
+ * Где узел, когда он не на автомате. `machine` в списках выбора не участвует:
+ * «поставить на автомат» — это отдельная операция установки, а не смена места.
+ */
+export const PART_LOCATIONS = ["machine", "warehouse", "washing", "drying", "repair"] as const;
+export type PartLocation = (typeof PART_LOCATIONS)[number];
+
+export const PART_LOCATION_LABELS: Record<PartLocation, string> = {
+  machine: "На автомате",
+  warehouse: "Склад",
+  washing: "Мойка",
+  drying: "Сушка",
+  repair: "Ремонт",
+};
+
+/** Куда можно СНЯТЬ узел — все места, кроме автомата. */
+export const PART_OFF_LOCATIONS: readonly PartLocation[] = ["washing", "warehouse", "drying", "repair"];
+
 export const partLabel = (k: string): string => PART_LABELS[k as PartKind] ?? k;
 export const maintenanceKindLabel = (k: string): string =>
   MAINTENANCE_KIND_LABELS[k as MaintenanceKind] ?? k;
+export const partLocationLabel = (k: string): string =>
+  PART_LOCATION_LABELS[k as PartLocation] ?? k;

@@ -4,6 +4,7 @@ import {
   maintenanceKindLabel,
   OUTCOME_LABELS,
   partLabel,
+  partLocationLabel,
   type MaintenanceOutcome,
 } from "@mydon/shared";
 import {
@@ -47,6 +48,15 @@ export default async function Maintenance() {
     ]);
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
+  }
+
+  // Узлы вне автоматов: снятые на мойку/в ремонт и запас на складе. Дополнение —
+  // ошибка чтения не роняет сводку.
+  let storage: Awaited<ReturnType<typeof core.machinePartsStorage>> = [];
+  try {
+    storage = await core.machinePartsStorage();
+  } catch {
+    storage = [];
   }
 
   const nameOf = new Map(machines.map((m) => [m.id, m.name]));
@@ -193,6 +203,39 @@ export default async function Maintenance() {
                     <td>{d.idleReason ?? "автомат не в эксплуатации"}</td>
                   </tr>
                 ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {storage.length > 0 && (
+        <section className="group-block">
+          <div className="section-title">
+            Узлы вне автоматов
+            <span className="group-count">{storage.length}</span>
+          </div>
+          {/* Снятый узел не пропал — он лежит здесь, пока его не поставят
+              обратно с карточки автомата (секция «Узлы»). */}
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Узел</th>
+                <th>Серийный №</th>
+                <th>Модель</th>
+                <th>Где</th>
+                <th>С какого дня</th>
+              </tr>
+            </thead>
+            <tbody>
+              {storage.map((p) => (
+                <tr key={p.id}>
+                  <td>{partLabel(p.partKind)}</td>
+                  <td>{p.serialNumber ?? "—"}</td>
+                  <td>{p.model ?? "—"}</td>
+                  <td>{partLocationLabel(p.location)}</td>
+                  <td>{p.installedOn}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </section>

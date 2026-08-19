@@ -23,6 +23,7 @@ import { EntityApproval } from "../../../components/entity-approval";
 import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
 import { PlanogramEditor } from "../../../components/planogram-editor";
 import { MachineCardPanel } from "../../../components/machine-card-panel";
+import { MachinePartsPanel } from "../../../components/machine-parts-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
 import { PLACE_TYPES, parsePlanogram } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
@@ -208,6 +209,22 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Узлы автомата (периоды) + склад свободных узлов для установки.
+  // Дополнение — ошибка не роняет карточку.
+  let machineParts: Awaited<ReturnType<typeof core.machineParts>> = [];
+  let partsStorage: Awaited<ReturnType<typeof core.machinePartsStorage>> = [];
+  if (isMachine) {
+    try {
+      [machineParts, partsStorage] = await Promise.all([
+        core.machineParts(entity.id),
+        core.machinePartsStorage(),
+      ]);
+    } catch {
+      machineParts = [];
+      partsStorage = [];
+    }
+  }
+
   return (
     <>
       <div className="page-head">
@@ -338,6 +355,10 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           updatedBy={machineCard?.updatedBy ?? null}
           places={places}
         />
+      )}
+
+      {isMachine && (
+        <MachinePartsPanel machineId={entity.id} parts={machineParts} storage={partsStorage} />
       )}
 
       {isMachine && (
