@@ -23,10 +23,14 @@ export function StayTimeline({ stays }: { stays: MachineStays["stays"] }) {
       </div>
     );
   }
+  // Свежее сверху: «где стоит сейчас» — первый вопрос к истории, а самая
+  // ранняя стоянка интересна последней. Источник отдаёт хронологию по
+  // возрастанию, поэтому разворачиваем копию, не трогая исходный массив.
   const last = stays.length - 1;
+  const rows = stays.map((s, i) => ({ s, i })).reverse();
   return (
     <div className="stays">
-      {stays.map((s, i) => (
+      {rows.map(({ s, i }) => (
         <div className={`stay ${s.overlaps ? "bad" : ""} ${i === last ? "now" : ""}`} key={`${s.point}-${s.from}`}>
           <div className="stayp">
             {s.point}
@@ -34,9 +38,9 @@ export function StayTimeline({ stays }: { stays: MachineStays["stays"] }) {
             {s.overlaps && <span className="chip h">пересечение</span>}
           </div>
           <div className="stayd mono">
-            {day(s.from)} — {i === last ? "по сей день" : day(s.to)}
+            {day(s.from)} — {i === last ? "сейчас" : day(s.to)}
           </div>
-          <div className="stayn mono">{s.orders.toLocaleString("ru-RU")} заказов</div>
+          <div className="stayn mono">{s.orders.toLocaleString("ru-RU")} зак.</div>
         </div>
       ))}
     </div>
