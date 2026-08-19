@@ -395,7 +395,9 @@ export function MenuEditor({
           <summary>из истории продаж, не в меню · {notInMenu.length}</summary>
           <div className="mcm-hist">
             {notInMenu.map((u) => (
-              <div className="mcm-per" key={u.product}>
+              /* Привязанные — по id карточки; сырые имена источника — своим
+                 пространством ключей, чтобы тёзка карточки не столкнулась. */
+              <div className="mcm-per" key={u.productId ?? `src:${u.product}`}>
                 <b>{u.product}</b>
                 <span className="mono">{u.price !== null ? `${sum(u.price)} сум` : "—"}</span>
                 <span className="mono">{u.orders} зак.</span>

@@ -428,12 +428,21 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       const прежняя = menuHistory[it.productEntityId];
       if (!прежняя || прежняя.orders < info.orders) menuHistory[it.productEntityId] = info;
       if (!вМеню.has(it.productEntityId)) {
-        menuUnlinked.push({
-          product: it.productEntityName ?? it.product,
-          price: it.price,
-          orders: it.orders,
-          productId: it.productEntityId,
-        });
+        // Одна карточка может продаваться под несколькими source-именами —
+        // в списке она ОДНА строка: заказы суммируем, цену берём свежую из
+        // самого продаваемого алиаса.
+        const есть = menuUnlinked.find((u) => u.productId === it.productEntityId);
+        if (есть) {
+          if (it.orders > есть.orders) есть.price = it.price;
+          есть.orders += it.orders;
+        } else {
+          menuUnlinked.push({
+            product: it.productEntityName ?? it.product,
+            price: it.price,
+            orders: it.orders,
+            productId: it.productEntityId,
+          });
+        }
       }
     } else {
       menuUnlinked.push({ product: it.product, price: it.price, orders: it.orders, productId: null });
