@@ -120,8 +120,10 @@ export function MachineCard360({
   menuCount: number;
   /** Контент вкладок: карточка собирает, страница поставляет. */
   slots: {
+    /** Кофейный: бункеры точки. У остальных вкладки нет. */
+    ingredients: ReactNode;
+    /** Товары аппарата и их расположение по слотам. */
     menu: ReactNode;
-    content: ReactNode;
     service: ReactNode;
     place: ReactNode;
     passport: ReactNode;
@@ -139,10 +141,10 @@ export function MachineCard360({
     [kind !== null && kind !== "other", "Вид не указан", "service"],
     [текущая !== null, "Место не записано", "service"],
     [hasGeo, "Координат нет — не видно на карте", "place"],
-    // Содержимое зависит от вида: у кофейного — бункеры точки, у остальных — раскладка.
+    // Содержимое зависит от вида: у кофейного — бункеры точки, у остальных — меню.
     coffee !== null
-      ? [coffee.linked, "Бункеры не привязаны к кофе-точке", "content"]
-      : [planogramCount > 0, "Раскладка пуста", "content"],
+      ? [coffee.linked, "Бункеры не привязаны к кофе-точке", "ingredients"]
+      : [menuCount > 0, "Меню пусто", "menu"],
     [photosCount > 0, "Нет ни одного фото", "passport"],
     [status !== null, "Состояние не проставлено", "service"],
     [entity.externalRef !== null && entity.externalRef !== "", "Серийник не указан", "passport"],
@@ -193,7 +195,7 @@ export function MachineCard360({
               </span>
             )}
             {live && live.status === "ok" && (
-              <span className="chip" data-mc-tab="content" role="button" tabIndex={0}>
+              <span className="chip" data-mc-tab="menu" role="button" tabIndex={0}>
                 заполнен {live.fillRate}% · −{live.deficit.toLocaleString("ru-RU")} ед
               </span>
             )}
@@ -239,29 +241,29 @@ export function MachineCard360({
                       </div>
                     </div>
                   )}
-                  {coffee !== null ? (
-                    <div className="tile" data-mc-tab="content" role="button" tabIndex={0}>
-                      <span className="lab">Бункеры</span>
+                  {coffee !== null && (
+                    <div className="tile" data-mc-tab="ingredients" role="button" tabIndex={0}>
+                      <span className="lab">Ингредиенты</span>
                       <div className="v">
                         {coffee.filled}
                         <span className="u">/8</span>
                       </div>
                       <div className="foot">
                         <span className="mk" />
-                        {coffee.linked ? "с заливкой сейчас" : "точка не привязана"}
+                        {coffee.linked ? "бункеров с заливкой" : "точка не привязана"}
                         <span className="go">→</span>
                       </div>
                     </div>
-                  ) : (
-                    <div className="tile" data-mc-tab="content" role="button" tabIndex={0}>
-                      <span className="lab">Раскладка</span>
-                      <div className="v">{planogramCount}</div>
-                      <div className="foot">
-                        <span className="mk" />
-                        слотов с товаром<span className="go">→</span>
-                      </div>
-                    </div>
                   )}
+                  <div className="tile" data-mc-tab="menu" role="button" tabIndex={0}>
+                    <span className="lab">Меню</span>
+                    <div className="v">{menuCount}</div>
+                    <div className="foot">
+                      <span className="mk" />
+                      {planogramCount > 0 ? `позиций · слотов ${planogramCount}` : "позиций"}
+                      <span className="go">→</span>
+                    </div>
+                  </div>
                   <div className="tile" data-mc-tab="service" role="button" tabIndex={0}>
                     <span className="lab">Узлы</span>
                     <div className="v">{partsCount}</div>
@@ -348,24 +350,23 @@ export function MachineCard360({
               </>
             ),
           },
+          // Ингредиенты — только у кофейного: у него содержимое это бункеры.
+          // У снека содержимого «сырьём» нет — его товары живут в «Меню».
+          ...(coffee !== null
+            ? [
+                {
+                  key: "ingredients",
+                  label: "Ингредиенты",
+                  badge: coffee.filled > 0 ? `${coffee.filled}/8` : undefined,
+                  content: slots.ingredients,
+                },
+              ]
+            : []),
           {
             key: "menu",
             label: "Меню",
             badge: menuCount > 0 ? String(menuCount) : undefined,
             content: slots.menu,
-          },
-          {
-            key: "content",
-            label: "Содержимое",
-            badge:
-              coffee !== null
-                ? coffee.filled > 0
-                  ? `${coffee.filled}/8`
-                  : undefined
-                : planogramCount > 0
-                  ? String(planogramCount)
-                  : undefined,
-            content: slots.content,
           },
           {
             key: "service",
