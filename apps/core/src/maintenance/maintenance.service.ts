@@ -40,7 +40,9 @@ export type MaintenanceKind =
   | "inspection"
   | "calibration"
   | "repair"
-  | "other";
+  | "other"
+  | "part_install"
+  | "part_remove";
 
 export type MaintenanceOutcome = "done" | "partial" | "failed";
 export type PartSwapReason = "failure" | "preventive" | "upgrade" | "warranty" | "moved";
@@ -58,6 +60,42 @@ export interface CreateLogInput {
   note?: string;
   counterValue?: number;
   /** Ключ идемпотентности от клиента: ретрай не даёт вторую запись. */
+  clientKey?: string;
+  createdBy?: string;
+}
+
+export type PartOffLocation = "warehouse" | "washing" | "drying" | "repair";
+
+export interface InstallPartInput {
+  machineId: string;
+  partKind: string;
+  slot?: number;
+  /** Открытый период «узел вне автомата» — если ставим существующий экземпляр. */
+  partId?: string;
+  serialNumber?: string;
+  model?: string;
+  warrantyUntil?: string;
+  reason?: PartSwapReason;
+  personId?: string;
+  taskId?: string;
+  note?: string;
+  performedOn?: string;
+  clientKey?: string;
+  createdBy?: string;
+}
+
+export interface RemovePartInput {
+  machineId: string;
+  partKind: string;
+  slot?: number;
+  /** Куда узел уехал: склад, мойка, сушка или ремонт. */
+  toLocation: PartOffLocation;
+  /** Серийник, переписанный при снятии, — дописывается, если был пуст. */
+  serial?: string;
+  personId?: string;
+  taskId?: string;
+  note?: string;
+  performedOn?: string;
   clientKey?: string;
   createdBy?: string;
 }
@@ -160,8 +198,10 @@ export class MaintenanceService {
    * закрытой. Это не дефект ввода, а реальный случай: техник отметился на
    * точке, а закончил через час.
    */
-  async createLog(input: CreateLogInput): Promise<LogRow> {
-    return this.db.transaction(async (tx) => {
+  async createLog(input: CreateLogInput, outerTx?: Tx): Promise<LogRow> {
+    // Внешняя транзакция — для вызовов из чужого модуля (закрытие задачи ТО):
+    // факт работы и статус задачи должны закоммититься или откатиться вместе.
+    const run = async (tx: Tx): Promise<LogRow> => {
       const [row] = await tx
         .insert(maintenanceLog)
         .values({
@@ -208,7 +248,8 @@ export class MaintenanceService {
         after: row,
       });
       return row;
-    });
+    };
+    return outerTx ? run(outerTx) : this.db.transaction(run);
   }
 
   /**
@@ -806,6 +847,275 @@ export class MaintenanceService {
       });
 
       return { log, removed, installed };
+    });
+  }
+
+  /** Узлы вне автоматов: что лежит на складе, мойке, сушке, в ремонте. */
+  storageParts(): Promise<PartRow[]> {
+    return this.db
+      .select()
+      .from(machinePart)
+      .where(and(isNull(machinePart.machineId), isNull(machinePart.removedOn)))
+      .orderBy(machinePart.partKind, desc(machinePart.installedOn))
+      .limit(200);
+  }
+
+  /**
+   * История экземпляра по серийнику: все периоды — автоматы, мойки, ремонты.
+   *
+   * Серийник — единственная нить, связывающая периоды одного физического
+   * узла: id строки живёт один период, а деталь — годы.
+   */
+  async partHistory(serial: string): Promise<(PartRow & { machineName: string | null })[]> {
+    const rows = await this.db
+      .select()
+      .from(machinePart)
+      .where(eq(machinePart.serialNumber, serial))
+      .orderBy(desc(machinePart.installedOn))
+      .limit(100);
+
+    const machineIds = [...new Set(rows.flatMap((r) => (r.machineId === null ? [] : [r.machineId])))];
+    const names =
+      machineIds.length > 0
+        ? await this.db
+            .select({ id: entity.id, name: entity.name })
+            .from(entity)
+            .where(inArray(entity.id, machineIds))
+        : [];
+    const nameById = new Map(names.map((n) => [n.id, n.name]));
+    return rows.map((r) => ({
+      ...r,
+      machineName: r.machineId !== null ? (nameById.get(r.machineId) ?? null) : null,
+    }));
+  }
+
+  /**
+   * Установка узла: со склада (partId) или новый — открыть период на автомате.
+   *
+   * Занятое место — отказ, а не молчаливая замена: «поставить поверх» и
+   * «заменить» — разные работы, и вторая фиксирует снятие прежнего узла.
+   */
+  async installPart(input: InstallPartInput): Promise<{ log: LogRow; installed: PartRow }> {
+    const performedOn = input.performedOn ?? todayInTz();
+    const slot = input.slot ?? null;
+
+    return this.db.transaction(async (tx) => {
+      const [log] = await tx
+        .insert(maintenanceLog)
+        .values({
+          entityId: input.machineId,
+          kind: "part_install",
+          partKind: input.partKind as LogRow["partKind"],
+          personId: input.personId ?? null,
+          taskId: input.taskId ?? null,
+          performedOn,
+          outcome: "done",
+          note: input.note ?? null,
+          clientKey: input.clientKey ?? null,
+          createdBy: input.createdBy ?? "owner",
+        })
+        .onConflictDoNothing({ target: maintenanceLog.clientKey })
+        .returning();
+
+      // Повтор по clientKey — установка уже записана, собираем прежний ответ.
+      if (!log) {
+        const [existing] = await tx
+          .select()
+          .from(maintenanceLog)
+          .where(eq(maintenanceLog.clientKey, input.clientKey!))
+          .limit(1);
+        const [installedBefore] = existing
+          ? await tx
+              .select()
+              .from(machinePart)
+              .where(and(eq(machinePart.installLogId, existing.id), eq(machinePart.location, "machine")))
+              .limit(1)
+          : [];
+        if (!existing || !installedBefore) {
+          throw new BadRequestException("Повтор установки ещё записывается — нажми ещё раз через минуту");
+        }
+        return { log: existing, installed: installedBefore };
+      }
+
+      // Место должно быть свободно.
+      const [occupied] = await tx
+        .select({ id: machinePart.id })
+        .from(machinePart)
+        .where(
+          and(
+            eq(machinePart.machineId, input.machineId),
+            eq(machinePart.partKind, input.partKind as PartRow["partKind"]),
+            slot === null ? isNull(machinePart.slot) : eq(machinePart.slot, slot),
+            isNull(machinePart.removedOn),
+          ),
+        )
+        .limit(1);
+      if (occupied) {
+        throw new BadRequestException("Место занято — снимите узел или оформите замену");
+      }
+
+      // Экземпляр со склада: закрыть его «лежачий» период и перенести паспорт.
+      let serialNumber = input.serialNumber ?? null;
+      let model = input.model ?? null;
+      let warrantyUntil = input.warrantyUntil ?? null;
+      if (input.partId) {
+        const [stored] = await tx
+          .select()
+          .from(machinePart)
+          .where(eq(machinePart.id, input.partId))
+          .limit(1);
+        if (!stored) throw new NotFoundException("Такого узла на складе нет");
+        if (stored.machineId !== null || stored.removedOn !== null) {
+          throw new BadRequestException("Этот узел не лежит на складе — выбери из списка свободных");
+        }
+        if (stored.partKind !== input.partKind) {
+          throw new BadRequestException("Узел другого вида — установка невозможна");
+        }
+        await tx
+          .update(machinePart)
+          .set({ removedOn: performedOn, removeLogId: log.id })
+          .where(eq(machinePart.id, stored.id));
+        serialNumber = stored.serialNumber ?? serialNumber;
+        model = stored.model ?? model;
+        warrantyUntil = stored.warrantyUntil ?? warrantyUntil;
+      }
+
+      const [installed] = await tx
+        .insert(machinePart)
+        .values({
+          machineId: input.machineId,
+          location: "machine",
+          partKind: input.partKind as PartRow["partKind"],
+          slot,
+          serialNumber,
+          model,
+          installedOn: performedOn,
+          installLogId: log.id,
+          warrantyUntil,
+          reason: input.reason ?? null,
+          note: input.note ?? null,
+          createdBy: input.createdBy ?? "owner",
+        })
+        .returning();
+
+      await tx.insert(auditLog).values({
+        actorKind: input.personId ? "human" : "system",
+        actorRef: input.createdBy ?? "owner",
+        action: "maintenance.part_installed",
+        target: installed.id,
+        after: installed,
+      });
+
+      return { log, installed };
+    });
+  }
+
+  /**
+   * Снятие узла: закрыть период на автомате и открыть период «вне автомата».
+   *
+   * Снятый узел не исчезает из учёта — он лежит на мойке или в ремонте и
+   * вернётся. Терялся бы без второй строки: закрытый период — уже история.
+   */
+  async removePart(input: RemovePartInput): Promise<{ log: LogRow; removed: PartRow; stored: PartRow }> {
+    const performedOn = input.performedOn ?? todayInTz();
+    const slot = input.slot ?? null;
+
+    return this.db.transaction(async (tx) => {
+      const [log] = await tx
+        .insert(maintenanceLog)
+        .values({
+          entityId: input.machineId,
+          kind: "part_remove",
+          partKind: input.partKind as LogRow["partKind"],
+          personId: input.personId ?? null,
+          taskId: input.taskId ?? null,
+          performedOn,
+          outcome: "done",
+          note: input.note ?? null,
+          clientKey: input.clientKey ?? null,
+          createdBy: input.createdBy ?? "owner",
+        })
+        .onConflictDoNothing({ target: maintenanceLog.clientKey })
+        .returning();
+
+      // Повтор по clientKey — снятие уже записано, собираем прежний ответ.
+      if (!log) {
+        const [existing] = await tx
+          .select()
+          .from(maintenanceLog)
+          .where(eq(maintenanceLog.clientKey, input.clientKey!))
+          .limit(1);
+        const [removedBefore] = existing
+          ? await tx.select().from(machinePart).where(eq(machinePart.removeLogId, existing.id)).limit(1)
+          : [];
+        const [storedBefore] = existing
+          ? await tx
+              .select()
+              .from(machinePart)
+              .where(and(eq(machinePart.installLogId, existing.id), isNull(machinePart.machineId)))
+              .limit(1)
+          : [];
+        if (!existing || !removedBefore || !storedBefore) {
+          throw new BadRequestException("Повтор снятия ещё записывается — нажми ещё раз через минуту");
+        }
+        return { log: existing, removed: removedBefore, stored: storedBefore };
+      }
+
+      const [open] = await tx
+        .select()
+        .from(machinePart)
+        .where(
+          and(
+            eq(machinePart.machineId, input.machineId),
+            eq(machinePart.partKind, input.partKind as PartRow["partKind"]),
+            slot === null ? isNull(machinePart.slot) : eq(machinePart.slot, slot),
+            isNull(machinePart.removedOn),
+          ),
+        )
+        .limit(1);
+      if (!open) throw new NotFoundException("На этом месте узел не числится");
+
+      const [removed] = await tx
+        .update(machinePart)
+        .set({
+          removedOn: performedOn,
+          removeLogId: log.id,
+          // Как в swapPart: серийник дописываем, если был пуст, — не затираем.
+          ...(input.serial && !open.serialNumber ? { serialNumber: input.serial } : {}),
+        })
+        .where(eq(machinePart.id, open.id))
+        .returning();
+
+      // Период «вне автомата» открывает та же запись журнала, что закрыла
+      // период на автомате, — по installLogId/removeLogId история читается
+      // в обе стороны без отдельной таблицы связей.
+      const [stored] = await tx
+        .insert(machinePart)
+        .values({
+          machineId: null,
+          location: input.toLocation,
+          partKind: removed.partKind,
+          slot: null,
+          serialNumber: removed.serialNumber,
+          model: removed.model,
+          installedOn: performedOn,
+          installLogId: log.id,
+          warrantyUntil: removed.warrantyUntil,
+          note: input.note ?? null,
+          createdBy: input.createdBy ?? "owner",
+        })
+        .returning();
+
+      await tx.insert(auditLog).values({
+        actorKind: input.personId ? "human" : "system",
+        actorRef: input.createdBy ?? "owner",
+        action: "maintenance.part_removed",
+        target: removed.id,
+        before: removed,
+        after: stored,
+      });
+
+      return { log, removed, stored };
     });
   }
 

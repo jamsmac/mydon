@@ -39,6 +39,7 @@ const ЧТЕНИЕ = [
   "/maintenance/plans",
   "/maintenance/plans?includeInactive=1",
   "/maintenance/log",
+  "/maintenance/parts/storage",
   "/vending/machines",
   "/vending/deficit",
   "/vending/sync",
@@ -203,6 +204,90 @@ async function проверитьМеста() {
   if (мимо.ok) throw new Error("«на складе» на точке продаж прошло, а должно было быть отвергнуто");
 }
 
+/**
+ * Срез В: жизненный цикл узла — установка → занято → снятие в мойку →
+ * возврат со склада → история по серийнику.
+ *
+ * Здесь живёт частичный уникальный индекс `machine_part_open_key`
+ * (`where removed_on is null and machine_id is not null`) и парная вставка
+ * периодов одной транзакцией — ровно тот SQL, который заглушка юнит-тестов
+ * не исполняет.
+ */
+async function проверитьУзлы() {
+  const запрос = async (имя, path, body) => {
+    const r = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const текст = await r.text();
+    return { ok: r.ok, status: r.status, имя, тело: текст, json: r.ok ? JSON.parse(текст) : null };
+  };
+  const чтение = async (path) => {
+    const r = await fetch(`${BASE}${path}`, { signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) throw new Error(`GET ${path} → ${r.status}`);
+    return JSON.parse(await r.text());
+  };
+
+  const созд = await запрос("автомат", "/entities", {
+    domain: "vendhub",
+    type: "machine",
+    name: `Дымовой автомат узлов ${Date.now()}`,
+  });
+  if (!созд.ok) throw new Error(`создание автомата → ${созд.status}: ${созд.тело.slice(0, 200)}`);
+  const m = созд.json.id;
+  const serial = `SMOKE-SN-${Date.now()}`;
+
+  const уст = await запрос("установка", "/maintenance/part-install", {
+    machineId: m,
+    partKind: "grinder",
+    serialNumber: serial,
+  });
+  if (!уст.ok) throw new Error(`установка узла → ${уст.status}: ${уст.тело.slice(0, 200)}`);
+  if (уст.json.installed.location !== "machine") {
+    throw new Error(`установленный узел не «на автомате»: ${уст.json.installed.location}`);
+  }
+
+  const дубль = await запрос("занятое место", "/maintenance/part-install", {
+    machineId: m,
+    partKind: "grinder",
+  });
+  if (дубль.ok) throw new Error("установка на занятое место прошла, а должна была быть отвергнута");
+
+  const снятие = await запрос("снятие", "/maintenance/part-remove", {
+    machineId: m,
+    partKind: "grinder",
+    toLocation: "washing",
+  });
+  if (!снятие.ok) throw new Error(`снятие узла → ${снятие.status}: ${снятие.тело.slice(0, 200)}`);
+  const лежит = снятие.json.stored;
+  if (лежит.machineId !== null || лежит.location !== "washing") {
+    throw new Error(`снятый узел не в мойке: ${JSON.stringify(лежит)}`);
+  }
+
+  const склад = await чтение("/maintenance/parts/storage");
+  if (!склад.some((p) => p.id === лежит.id)) {
+    throw new Error("снятый узел не вернулся в списке «вне автоматов»");
+  }
+
+  const возврат = await запрос("возврат со склада", "/maintenance/part-install", {
+    machineId: m,
+    partKind: "grinder",
+    partId: лежит.id,
+  });
+  if (!возврат.ok) throw new Error(`возврат узла → ${возврат.status}: ${возврат.тело.slice(0, 200)}`);
+  if (возврат.json.installed.serialNumber !== serial) {
+    throw new Error("серийник не унаследовался при возврате со склада");
+  }
+
+  const история = await чтение(`/maintenance/parts/history?serial=${encodeURIComponent(serial)}`);
+  // Три периода: на автомате → в мойке → снова на автомате.
+  if (история.length < 3) {
+    throw new Error(`история по серийнику неполная: ${история.length} периодов, ожидали ≥ 3`);
+  }
+}
+
 async function ждатьЗдоровье(proc) {
   const дедлайн = Date.now() + СТАРТ_ТАЙМАУТ_МС;
   while (Date.now() < дедлайн) {
@@ -302,6 +387,13 @@ try {
   } catch (e) {
     провалы.push(`места: ${e.message}`);
   }
+
+  try {
+    await проверитьУзлы();
+    console.log("  ok  сценарий: узел — установка, занято, мойка, возврат, история по серийнику");
+  } catch (e) {
+    провалы.push(`узлы: ${e.message}`);
+  }
 } catch (e) {
   провалы.push(`старт: ${e.message}`);
 } finally {
@@ -318,4 +410,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 1 сценарий.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 2 сценария.`);

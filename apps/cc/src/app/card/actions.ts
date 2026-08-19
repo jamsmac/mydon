@@ -444,3 +444,73 @@ export async function setMachineStatus(
   revalidatePath("/maintenance");
   return { ok: true };
 }
+
+// ── Узлы автомата: установка · снятие · замена ───────────────────────────────
+//
+// Каждая операция в Core — одна транзакция «запись журнала + периоды узла»;
+// панель лишь называет операцию. clientKey не передаём: повтор из панели —
+// осознанный второй ввод, как и в остальных записях владельца.
+
+export async function installPart(
+  machineId: string,
+  input: {
+    partKind: string;
+    slot?: number;
+    /** Экземпляр со склада/мойки — если ставим уже учтённый узел. */
+    partId?: string;
+    serialNumber?: string;
+    model?: string;
+    note?: string;
+  },
+): Promise<ActionResult> {
+  try {
+    await core.installPart({ machineId, ...input, createdBy: "owner" });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${machineId}`);
+  revalidatePath("/maintenance");
+  return { ok: true };
+}
+
+export async function removePart(
+  machineId: string,
+  input: {
+    partKind: string;
+    slot?: number;
+    /** Куда узел уехал: warehouse | washing | drying | repair. */
+    toLocation: string;
+    note?: string;
+  },
+): Promise<ActionResult> {
+  try {
+    await core.removePart({ machineId, ...input, createdBy: "owner" });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${machineId}`);
+  revalidatePath("/maintenance");
+  return { ok: true };
+}
+
+export async function swapPart(
+  machineId: string,
+  input: {
+    partKind: string;
+    slot?: number;
+    oldSerial?: string;
+    newSerial?: string;
+    model?: string;
+    reason?: string;
+    note?: string;
+  },
+): Promise<ActionResult> {
+  try {
+    await core.swapPart({ machineId, ...input, createdBy: "owner" });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${machineId}`);
+  revalidatePath("/maintenance");
+  return { ok: true };
+}

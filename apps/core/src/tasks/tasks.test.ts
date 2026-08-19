@@ -12,6 +12,12 @@ interface StubOpts {
   insertConflict?: boolean;
   /** Куда складывать вставленные строки — чтобы проверить журнал аудита. */
   inserted?: Row[];
+  /**
+   * Очередь ответов select по порядку вызовов — для сценариев с несколькими
+   * выборками подряд (хук ТО: план → «сегодня уже отмечено?»). Не задана —
+   * работает прежний одиночный selectResult/existing.
+   */
+  selects?: Row[][];
 }
 
 /**
@@ -20,11 +26,16 @@ interface StubOpts {
  * insert().values()[.onConflictDoNothing()].returning() и голый await у вставки.
  */
 function stubDb(opts: StubOpts) {
-  const rowsOf = () => opts.selectResult ?? (opts.existing ? [opts.existing] : []);
+  const queue = opts.selects ? [...opts.selects] : null;
+  const rowsOf = () =>
+    queue ? (queue.shift() ?? []) : (opts.selectResult ?? (opts.existing ? [opts.existing] : []));
 
   // where() и awaitable, и с .limit() — сервис использует оба варианта.
+  // Ответ мемоизируется на цепочку: и await, и .limit() видят ОДИН элемент
+  // очереди, иначе каждая цепочка съедала бы два.
   const whereChain = () => {
-    const result = async () => rowsOf();
+    let memo: Row[] | null = null;
+    const result = async () => (memo ??= rowsOf());
     return Object.assign(result(), { limit: result });
   };
 
@@ -56,22 +67,35 @@ function stubDb(opts: StubOpts) {
   } as never;
 }
 
+/**
+ * MaintenanceService нужен сервису задач только ради хука «закрыл задачу ТО».
+ * В этих тестах source задач не maint:* — хук до createLog не доходит, а если
+ * дойдёт (регресс), заглушка уронит тест громко, а не молча съест вызов.
+ */
+const stubMaintenance = {
+  createLog: async () => {
+    throw new Error("createLog вызван вне сценария ТО — регресс хука");
+  },
+} as never;
+
+const makeTasks = (db: never) => new TasksService(db, stubMaintenance);
+
 describe("Задачи", () => {
   it("создаётся вместе с записью в журнал", async () => {
-    const s = new TasksService(stubDb({}));
+    const s = makeTasks(stubDb({}));
     const t = await s.create({ title: "Снять показания", ownerKind: "human" });
     assert.equal(t.id, "t1");
   });
 
   it("повторное «Готово» не ошибка — возвращает ту же задачу", async () => {
     // UPDATE ничего не вернул (статус уже такой), строка существует
-    const s = new TasksService(stubDb({ existing: { id: "t1", status: "done" } }));
+    const s = makeTasks(stubDb({ existing: { id: "t1", status: "done" } }));
     const t = await s.setStatus("t1", "done");
     assert.equal(t.status, "done");
   });
 
   it("сообщает, что задачи нет", async () => {
-    const s = new TasksService(stubDb({}));
+    const s = makeTasks(stubDb({}));
     await assert.rejects(() => s.setStatus("нет", "done"), /не найдена/);
   });
 
@@ -79,7 +103,7 @@ describe("Задачи", () => {
     // Дубль отсекает БД (частичный уникальный индекс task_source_key), а не
     // предварительный select: два тика монитора в одну секунду проходили
     // проверку оба и создавали две задачи.
-    const s = new TasksService(stubDb({ insertConflict: true }));
+    const s = makeTasks(stubDb({ insertConflict: true }));
     const again = await s.ensureForDay({
       title: "Инвентаризация",
       ownerKind: "human",
@@ -91,7 +115,7 @@ describe("Задачи", () => {
 
   it("в новый день задача заводится заново", async () => {
     const inserted: Row[] = [];
-    const s = new TasksService(stubDb({ inserted }));
+    const s = makeTasks(stubDb({ inserted }));
     const created = await s.ensureForDay({
       title: "Инвентаризация",
       ownerKind: "human",
@@ -108,7 +132,7 @@ describe("Задачи", () => {
 
   it("проигранная гонка не пишет в журнал аудита", async () => {
     const inserted: Row[] = [];
-    await new TasksService(stubDb({ insertConflict: true, inserted })).ensureForDay({
+    await makeTasks(stubDb({ insertConflict: true, inserted })).ensureForDay({
       title: "Инвентаризация",
       ownerKind: "human",
       source: "recurring:inventory",
@@ -122,7 +146,7 @@ describe("Задачи", () => {
 
   it("объект работы сохраняется вместе с задачей", async () => {
     const inserted: Row[] = [];
-    const s = new TasksService(stubDb({ inserted }));
+    const s = makeTasks(stubDb({ inserted }));
     await s.create({
       title: "Помыть миксер",
       ownerKind: "human",
@@ -137,7 +161,7 @@ describe("Общий пул свободных задач", () => {
 
   it("взять свободную задачу — исполнителем становится нажавший", async () => {
     const inserted: Row[] = [];
-    const s = new TasksService(
+    const s = makeTasks(
       stubDb({ updateResult: { id: "t1", ownerRef: PERSON }, inserted }),
     );
     const claimed = await s.claim("t1", PERSON);
@@ -151,12 +175,12 @@ describe("Общий пул свободных задач", () => {
   it("второй нажавший получает null, а не ошибку и не чужую задачу", async () => {
     // UPDATE ... WHERE owner_ref IS NULL не вернул строк: успел другой.
     // Гонку разрешает БД — при двух техниках и одном дайджесте это обычное утро.
-    const s = new TasksService(stubDb({ updateResult: undefined }));
+    const s = makeTasks(stubDb({ updateResult: undefined }));
     assert.equal(await s.claim("t1", PERSON), null);
   });
 
   it("вернуть в пул можно только свою задачу", async () => {
-    const s = new TasksService(stubDb({ existing: { id: "t1", ownerRef: "чужой", status: "todo" } }));
+    const s = makeTasks(stubDb({ existing: { id: "t1", ownerRef: "чужой", status: "todo" } }));
     assert.equal(
       await s.release("t1", PERSON),
       null,
@@ -166,7 +190,7 @@ describe("Общий пул свободных задач", () => {
 
   it("возврат в пул снимает исполнителя и выводит из работы", async () => {
     const inserted: Row[] = [];
-    const s = new TasksService(
+    const s = makeTasks(
       stubDb({
         existing: { id: "t1", ownerRef: PERSON, status: "in_progress" },
         updateResult: { id: "t1", ownerRef: null, status: "todo" },
@@ -180,8 +204,8 @@ describe("Общий пул свободных задач", () => {
   });
 
   it("несуществующую задачу вернуть нельзя — это ошибка, а не отказ", async () => {
-    const s = new TasksService(stubDb({}));
-    await assert.rejects(() => new TasksService(stubDb({})).release("нет", PERSON), /не найдена/);
+    const s = makeTasks(stubDb({}));
+    await assert.rejects(() => makeTasks(stubDb({})).release("нет", PERSON), /не найдена/);
     assert.ok(s);
   });
 });
@@ -202,7 +226,7 @@ describe("Оценка сделанной задачи", () => {
     };
     const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
 
-    const s = new TasksService(db);
+    const s = makeTasks(db);
     const updated = await s.rate("t1", "redo");
     assert.equal(updated.status, "in_progress");
     assert.equal(captured[0].completedAt, null, "время закрытия должно сброситься");
@@ -224,7 +248,7 @@ describe("Оценка сделанной задачи", () => {
     };
     const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
 
-    const s = new TasksService(db);
+    const s = makeTasks(db);
     const updated = await s.rate("t1", "excellent");
     assert.equal(updated.status, "done");
     assert.equal(captured[0].quality, "excellent");
@@ -240,7 +264,7 @@ describe("Оценка сделанной задачи", () => {
     };
     const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
 
-    const s = new TasksService(db);
+    const s = makeTasks(db);
     await assert.rejects(() => s.rate("t1", "excellent"), /только сделанную/);
   });
 });
@@ -268,7 +292,7 @@ describe("Правка полей задачи (edit)", () => {
 
   it("переназначает исполнителя и меняет приоритет — трогает только эти поля", async () => {
     const { db, captured } = editStub({ id: "t1", ownerKind: "human", ownerRef: null, priority: "normal" });
-    const t = await new TasksService(db).edit("t1", {
+    const t = await makeTasks(db).edit("t1", {
       ownerKind: "agent",
       ownerRef: "vendhub-ops",
       priority: "high",
@@ -281,19 +305,19 @@ describe("Правка полей задачи (edit)", () => {
 
   it("пустое описание/исполнитель → снятие (null)", async () => {
     const { db, captured } = editStub({ id: "t1" });
-    await new TasksService(db).edit("t1", { description: "  ", ownerRef: "" });
+    await makeTasks(db).edit("t1", { description: "  ", ownerRef: "" });
     assert.equal(captured[0].description, null);
     assert.equal(captured[0].ownerRef, null);
   });
 
   it("пустой заголовок отклоняется", async () => {
     const { db } = editStub({ id: "t1" });
-    await assert.rejects(() => new TasksService(db).edit("t1", { title: "   " }), /пустым/);
+    await assert.rejects(() => makeTasks(db).edit("t1", { title: "   " }), /пустым/);
   });
 
   it("пустой патч не трогает базу и возвращает задачу", async () => {
     const { db, captured } = editStub({ id: "t1", title: "Как есть" });
-    const t = await new TasksService(db).edit("t1", {});
+    const t = await makeTasks(db).edit("t1", {});
     assert.equal(t.id, "t1");
     assert.equal(captured.length, 0, "нечего менять — не пишем в журнал");
   });
@@ -305,7 +329,7 @@ describe("Правка полей задачи (edit)", () => {
       select: () => ({ from: () => ({ where: async () => [] }) }),
     };
     const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
-    await assert.rejects(() => new TasksService(db).edit("нет", { priority: "high" }), /не найдена/);
+    await assert.rejects(() => makeTasks(db).edit("нет", { priority: "high" }), /не найдена/);
   });
 });
 
@@ -322,31 +346,110 @@ describe("Страховка: автомату вне эксплуатации �
     // Правило соблюдает монитор графиков, но POST /tasks/ensure-day открыт:
     // следующий источник повторяющихся задач обошёл бы его молча.
     const inserted: Row[] = [];
-    const s = new TasksService(stubDb({ selectResult: [{ status: "repair" }], inserted }));
+    const s = makeTasks(stubDb({ selectResult: [{ status: "repair" }], inserted }));
     const res = await s.ensureForDay(общее);
     assert.equal(res, null);
     assert.equal(inserted.length, 0, "ни задачи, ни записи в журнале");
   });
 
   it("автомат на складе — то же самое", async () => {
-    const s = new TasksService(stubDb({ selectResult: [{ status: "warehouse" }] }));
+    const s = makeTasks(stubDb({ selectResult: [{ status: "warehouse" }] }));
     assert.equal(await s.ensureForDay(общее), null);
   });
 
   it("рабочий автомат задачу получает", async () => {
-    const s = new TasksService(stubDb({ selectResult: [{ status: "in_service" }] }));
+    const s = makeTasks(stubDb({ selectResult: [{ status: "in_service" }] }));
     assert.ok(await s.ensureForDay(общее));
   });
 
   it("объект без карточки автомата считается рабочим", async () => {
     // Признак заводился для парка, а не для всего реестра: техника,
     // помещения и договоры не должны молча остаться без задач.
-    const s = new TasksService(stubDb({ selectResult: [] }));
+    const s = makeTasks(stubDb({ selectResult: [] }));
     assert.ok(await s.ensureForDay(общее));
   });
 
   it("задача без объекта проверку не проходит вовсе", async () => {
-    const s = new TasksService(stubDb({}));
+    const s = makeTasks(stubDb({}));
     assert.ok(await s.ensureForDay({ title: "Инвентаризация", ownerKind: "human", dayKey: "2026-08-08" }));
+  });
+});
+
+describe("Хук «закрыл задачу ТО → факт в журнале обслуживания»", () => {
+  const PLAN = "44444444-4444-4444-8444-444444444444";
+  const ENTITY = "55555555-5555-4555-8555-555555555555";
+  const план = { id: PLAN, entityId: ENTITY, kind: "cleaning", partKind: "mixer" };
+
+  /** Maintenance-заглушка, записывающая вызовы createLog. */
+  function maintSpy(calls: Row[]) {
+    return {
+      createLog: async (input: Row, tx: unknown) => {
+        calls.push({ ...input, txPassed: tx !== undefined });
+        return {};
+      },
+    } as never;
+  }
+
+  it("закрытие maint-задачи пишет факт с идемпотентным ключом в той же транзакции", async () => {
+    const calls: Row[] = [];
+    const s = new TasksService(
+      stubDb({
+        updateResult: {
+          id: "t1",
+          status: "done",
+          source: `maint:${PLAN}:2026-08-01`,
+          resultNote: "промыл",
+          entityId: ENTITY,
+        },
+        // очередь: план найден → сегодня ещё не отмечено.
+        selects: [[план], []],
+      }),
+      maintSpy(calls),
+    );
+    await s.setStatus("t1", "done", "person:x", "промыл");
+
+    assert.equal(calls.length, 1, "факт обязан записаться");
+    const call = calls[0]!;
+    assert.equal(call.planId, PLAN);
+    assert.equal(call.kind, "cleaning");
+    assert.equal(call.partKind, "mixer");
+    assert.equal(call.outcome, "done");
+    assert.equal(call.clientKey, "task:t1", "ретрай закрытия не должен дать вторую запись");
+    assert.equal(call.note, "промыл", "отчёт из задачи становится заметкой факта");
+    assert.equal(call.txPassed, true, "факт и статус коммитятся вместе");
+  });
+
+  it("«Сделал» в Графиках уже нажат сегодня — второй записи нет", async () => {
+    const calls: Row[] = [];
+    const s = new TasksService(
+      stubDb({
+        updateResult: { id: "t1", status: "done", source: `maint:${PLAN}:2026-08-01`, resultNote: null },
+        selects: [[план], [{ id: "уже" }]],
+      }),
+      maintSpy(calls),
+    );
+    await s.setStatus("t1", "done");
+    assert.equal(calls.length, 0, "двойной счёт одного факта запрещён");
+  });
+
+  it("план удалён — закрытие задачи не падает и факт не пишется", async () => {
+    const calls: Row[] = [];
+    const s = new TasksService(
+      stubDb({
+        updateResult: { id: "t1", status: "done", source: `maint:${PLAN}:2026-08-01`, resultNote: null },
+        selects: [[]],
+      }),
+      maintSpy(calls),
+    );
+    const t = await s.setStatus("t1", "done");
+    assert.equal(t.status, "done");
+    assert.equal(calls.length, 0);
+  });
+
+  it("обычная задача (source не maint:*) журнал обслуживания не трогает", async () => {
+    // makeTasks с бросающей заглушкой: дойди хук до createLog — тест упал бы.
+    const s = makeTasks(stubDb({ updateResult: { id: "t1", status: "done", source: "manual", resultNote: null } }));
+    const t = await s.setStatus("t1", "done");
+    assert.equal(t.status, "done");
   });
 });

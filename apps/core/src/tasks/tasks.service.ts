@@ -1,8 +1,15 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, machineCard, task, taskComment } from "@mydon/db";
+import { auditLog, machineCard, maintenanceLog, maintenancePlan, task, taskComment } from "@mydon/db";
 import { machineIsOperational, type Domain } from "@mydon/shared";
 import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL, isNull } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { MaintenanceService, todayInTz } from "../maintenance/maintenance.service";
+
+/** Транзакция Drizzle — та же, что даёт `db.transaction(async (tx) => …)`. */
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** Источник авто-задачи ТО: `maint:<planId>:<YYYY-MM-DD>` (maintenance-monitor). */
+const MAINT_SOURCE = /^maint:([0-9a-f][0-9a-f-]{34}[0-9a-f]):\d{4}-\d{2}-\d{2}$/;
 
 type TaskRow = typeof task.$inferSelect;
 type CommentRow = typeof taskComment.$inferSelect;
@@ -51,7 +58,10 @@ export interface WorkloadRow {
  */
 @Injectable()
 export class TasksService {
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    private readonly maintenance: MaintenanceService,
+  ) {}
 
   /** Создание вместе с записью в журнал — одной транзакцией. */
   async create(input: CreateTaskInput, actorRef = "system"): Promise<TaskRow> {
@@ -195,8 +205,70 @@ export class TasksService {
         target: id,
         after: updated,
       });
+
+      // Закрытие авто-задачи ТО — это и есть факт работы: он ложится в журнал
+      // обслуживания и двигает якорь норматива в ТОЙ ЖЕ транзакции. Guard
+      // «статус ещё не такой» выше делает повторное «Готово» безопасным.
+      if (status === "done") {
+        await this.recordMaintenanceFact(tx, updated, actorRef);
+      }
       return updated;
     });
+  }
+
+  /**
+   * Хук «закрыл задачу ТО → запись в журнале обслуживания».
+   *
+   * Раньше цепочка рвалась ровно здесь: monitor заводил задачу по нормативу,
+   * техник закрывал её в боте — а `maintenance_log` оставался пуст и якорь
+   * `dueOn` не двигался, назавтра рождая ту же задачу снова.
+   *
+   * Двойной счёт закрыт с двух сторон: `clientKey = task:<id>` ловит ретраи,
+   * а проверка «по этому нормативу сегодня уже отмечено» — случай, когда
+   * техник успел нажать «Сделал» в «🗓 Графиках» и потом закрыл задачу.
+   */
+  private async recordMaintenanceFact(tx: Tx, updated: TaskRow, actorRef: string): Promise<void> {
+    const m = MAINT_SOURCE.exec(updated.source ?? "");
+    if (!m) return;
+    const planId = m[1]!;
+
+    // План удалён или выключен — закрытие задачи падать не должно.
+    const [plan] = await tx
+      .select()
+      .from(maintenancePlan)
+      .where(eq(maintenancePlan.id, planId))
+      .limit(1);
+    if (!plan) return;
+
+    const today = todayInTz();
+    const [already] = await tx
+      .select({ id: maintenanceLog.id })
+      .from(maintenanceLog)
+      .where(
+        and(
+          eq(maintenanceLog.planId, planId),
+          eq(maintenanceLog.performedOn, today),
+          isNotNull(maintenanceLog.outcome),
+        ),
+      )
+      .limit(1);
+    if (already) return;
+
+    await this.maintenance.createLog(
+      {
+        entityId: plan.entityId,
+        kind: plan.kind,
+        ...(plan.partKind !== null ? { partKind: plan.partKind } : {}),
+        planId,
+        taskId: updated.id,
+        outcome: "done",
+        performedOn: today,
+        ...(updated.resultNote !== null ? { note: updated.resultNote } : {}),
+        clientKey: `task:${updated.id}`,
+        createdBy: actorRef,
+      },
+      tx,
+    );
   }
 
   /**

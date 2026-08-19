@@ -1953,6 +1953,10 @@ export const maintenanceKindEnum = pgEnum("maintenance_kind", [
   "calibration", // поверка, калибровка
   "repair", // ремонт по факту поломки
   "other",
+  // Установка/снятие узла без пары — «привёз со склада» и «увёз в мойку».
+  // Замена остаётся part_replace: это одна работа, а не две.
+  "part_install",
+  "part_remove",
 ]);
 
 /**
@@ -2002,6 +2006,20 @@ export const partSwapReasonEnum = pgEnum("part_swap_reason", [
   "upgrade", // замена на лучшее
   "warranty", // гарантийная замена
   "moved", // переставили на другой автомат
+]);
+
+/**
+ * Где узел, когда он НЕ на автомате. `machine` — единственное значение для
+ * строк с заполненным `machine_id`; остальные описывают открытый период
+ * «лежит вне автомата»: снятый купюроприёмник в ремонте — это узел, который
+ * вернётся, и терять его из учёта нельзя.
+ */
+export const partLocationEnum = pgEnum("part_location", [
+  "machine", // стоит на автомате
+  "warehouse", // на складе
+  "washing", // на мойке
+  "drying", // на сушке
+  "repair", // в ремонте
 ]);
 
 /**
@@ -2083,9 +2101,14 @@ export const machinePart = pgTable(
   "machine_part",
   {
     id: id(),
-    machineId: uuid("machine_id")
-      .references(() => entity.id)
-      .notNull(),
+    /** NULL — открытый период «узел вне автомата» (см. `location`). */
+    machineId: uuid("machine_id").references(() => entity.id),
+    /**
+     * Где узел в этом периоде. Для строк с автоматом всегда `machine`;
+     * снятие узла открывает период с `machine_id = NULL` и местом
+     * склад/мойка/сушка/ремонт — check ниже держит это соответствие.
+     */
+    location: partLocationEnum("location").notNull().default("machine"),
     partKind: partKindEnum("part_kind").notNull(),
     /** Позиция, если узлов одного вида несколько (бункер 1..8). */
     slot: integer("slot"),
@@ -2108,14 +2131,26 @@ export const machinePart = pgTable(
     index("machine_part_machine_idx").on(t.machineId, t.partKind),
     // Одно место — один открытый узел. coalesce обязателен: постгрес считает
     // NULL ≠ NULL, и без него на автомате завелись бы два «текущих»
-    // купюроприёмника без слота, оба открытые.
+    // купюроприёмника без слота, оба открытые. Условие по machine_id тоже:
+    // вне автомата (machine_id NULL) одинаковых узлов сколько угодно —
+    // три бункера на мойке это норма, а не конфликт.
     uniqueIndex("machine_part_open_key")
       .on(t.machineId, t.partKind, sql`coalesce(${t.slot}, 0)`)
-      .where(sql`removed_on is null`),
+      .where(sql`removed_on is null and machine_id is not null`),
+    // «Где сейчас узел A7734120» — поиск по серийнику, без индекса seq scan.
+    index("machine_part_serial_idx")
+      .on(t.serialNumber)
+      .where(sql`serial_number is not null`),
     check("machine_part_slot_positive", sql`${t.slot} is null or ${t.slot} > 0`),
     check(
       "machine_part_dates",
       sql`${t.removedOn} is null or ${t.removedOn} >= ${t.installedOn}`,
+    ),
+    // machine ⟺ на автомате: строка «в мойке, но с автоматом» и «на автомате,
+    // но со складом» — обе бессмыслица, и обе рано или поздно появятся без check.
+    check(
+      "machine_part_location_matches",
+      sql`(${t.machineId} is not null and ${t.location} = 'machine') or (${t.machineId} is null and ${t.location} <> 'machine')`,
     ),
   ],
 );

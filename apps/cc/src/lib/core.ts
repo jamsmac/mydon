@@ -1582,10 +1582,14 @@ export interface MaintenanceLogRow {
   createdAt: string;
 }
 
-/** Узел автомата периодом: removedOn = null — стоит сейчас. */
+/**
+ * Узел периодом: removedOn = null — период открыт. machineId = null — узел
+ * вне автомата (склад/мойка/сушка/ремонт, см. location).
+ */
 export interface MachinePart {
   id: string;
-  machineId: string;
+  machineId: string | null;
+  location: string;
   partKind: string;
   slot: number | null;
   serialNumber: string | null;
@@ -1594,6 +1598,12 @@ export interface MachinePart {
   removedOn: string | null;
   warrantyUntil: string | null;
   reason: string | null;
+  note: string | null;
+}
+
+/** Период истории экземпляра (по серийнику) с именем автомата. */
+export interface PartHistoryRow extends MachinePart {
+  machineName: string | null;
 }
 
 export const core = {
@@ -1630,6 +1640,17 @@ export const core = {
     return get<MaintenanceLogRow[]>(`/maintenance/log${qs ? `?${qs}` : ""}`);
   },
   machineParts: (machineId: string) => get<MachinePart[]>(`/maintenance/parts?machineId=${machineId}`),
+  /** Узлы вне автоматов: склад, мойка, сушка, ремонт. */
+  machinePartsStorage: () => get<MachinePart[]>("/maintenance/parts/storage"),
+  /** История экземпляра по серийнику — все периоды в обе стороны. */
+  partHistory: (serial: string) =>
+    get<PartHistoryRow[]>(`/maintenance/parts/history?serial=${encodeURIComponent(serial)}`),
+  installPart: (input: Record<string, unknown>) =>
+    send<{ installed: MachinePart }>("/maintenance/part-install", "POST", input),
+  removePart: (input: Record<string, unknown>) =>
+    send<{ removed: MachinePart; stored: MachinePart }>("/maintenance/part-remove", "POST", input),
+  swapPart: (input: Record<string, unknown>) =>
+    send<{ installed: MachinePart }>("/maintenance/part-swap", "POST", input),
   upsertMaintenancePlan: (input: Record<string, unknown>) =>
     send<MaintenancePlan>("/maintenance/plans", "POST", input),
 

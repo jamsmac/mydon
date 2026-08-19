@@ -393,6 +393,13 @@
       "when": 1787037769357,
       "tag": "0055_stock_client_key",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1787119726466,
+      "tag": "0056_machine_part_location",
+      "breakpoints": true
     }
   ]
 }

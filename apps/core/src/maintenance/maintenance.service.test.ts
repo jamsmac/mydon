@@ -573,3 +573,99 @@ describe("Якорь срока двигается обоими путями з�
     assert.equal(updated.length, 0);
   });
 });
+
+describe("Установка и снятие узла (периоды вне автомата)", () => {
+  it("установка нового узла: журнал part_install + открытый период на автомате", async () => {
+    const inserted: Row[] = [];
+    // select-очередь: место свободно.
+    const s = new MaintenanceService(stubDb({ selects: [[]], inserted }));
+    const r = await s.installPart({
+      machineId: MACHINE,
+      partKind: "grinder",
+      serialNumber: "SN-77",
+      personId: PERSON,
+    });
+    assert.equal(r.log.kind, "part_install");
+    assert.equal(r.installed.location, "machine");
+    assert.equal(r.installed.serialNumber, "SN-77");
+    assert.ok(inserted.some((x) => x.action === "maintenance.part_installed"));
+  });
+
+  it("занятое место — отказ, а не молчаливая замена", async () => {
+    const s = new MaintenanceService(stubDb({ selects: [[{ id: "busy" }]] }));
+    await assert.rejects(
+      () => s.installPart({ machineId: MACHINE, partKind: "grinder" }),
+      /занято/i,
+    );
+  });
+
+  it("установка со склада закрывает «лежачий» период и наследует паспорт", async () => {
+    const inserted: Row[] = [];
+    const updated: Row[] = [];
+    const склад = {
+      id: "33333333-3333-4333-8333-333333333333",
+      machineId: null,
+      removedOn: null,
+      partKind: "grinder",
+      serialNumber: "SN-01",
+      model: "MK-2",
+      warrantyUntil: "2027-01-01",
+    };
+    // очередь: место свободно → узел со склада найден.
+    const s = new MaintenanceService(stubDb({ selects: [[], [склад]], inserted, updated }));
+    const r = await s.installPart({
+      machineId: MACHINE,
+      partKind: "grinder",
+      partId: склад.id,
+    });
+    assert.equal(updated.length, 1, "период на складе обязан закрыться");
+    assert.ok(updated[0]!.removedOn, "закрытие — это removedOn, а не удаление строки");
+    assert.equal(r.installed.serialNumber, "SN-01", "серийник наследуется со склада");
+    assert.equal(r.installed.model, "MK-2");
+  });
+
+  it("установка чужого вида со склада — отказ", async () => {
+    const склад = { id: "33333333-3333-4333-8333-333333333333", machineId: null, removedOn: null, partKind: "mixer" };
+    const s = new MaintenanceService(stubDb({ selects: [[], [склад]] }));
+    await assert.rejects(
+      () => s.installPart({ machineId: MACHINE, partKind: "grinder", partId: склад.id }),
+      /другого вида/,
+    );
+  });
+
+  it("снятие: период на автомате закрыт, открыт период «в мойке» той же записью журнала", async () => {
+    const inserted: Row[] = [];
+    const updated: Row[] = [];
+    const стоит = {
+      partKind: "hopper",
+      slot: 3,
+      serialNumber: "SN-9",
+      model: null,
+      warrantyUntil: null,
+    };
+    const s = new MaintenanceService(
+      stubDb({ selects: [[{ id: "p1", ...стоит }]], inserted, updated, updateResult: стоит }),
+    );
+    const r = await s.removePart({
+      machineId: MACHINE,
+      partKind: "hopper",
+      slot: 3,
+      toLocation: "washing",
+    });
+    assert.equal(r.log.kind, "part_remove");
+    assert.equal(updated.length, 1, "период на автомате обязан закрыться");
+    assert.equal(r.stored.machineId, null, "снятый узел не исчезает из учёта");
+    assert.equal(r.stored.location, "washing");
+    assert.equal(r.stored.serialNumber, "SN-9", "паспорт переезжает в «лежачий» период");
+    assert.equal(r.stored.installLogId, r.log.id, "оба периода держит одна запись журнала");
+    assert.ok(inserted.some((x) => x.action === "maintenance.part_removed"));
+  });
+
+  it("снимать нечего — честный отказ", async () => {
+    const s = new MaintenanceService(stubDb({ selects: [[]] }));
+    await assert.rejects(
+      () => s.removePart({ machineId: MACHINE, partKind: "hopper", toLocation: "repair" }),
+      /не числится/,
+    );
+  });
+});
