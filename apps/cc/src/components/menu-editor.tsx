@@ -33,8 +33,6 @@ export interface UnlinkedSale {
   productId: string | null;
 }
 
-const CAT_LABEL: Record<number, string> = { 10: "☕ горячий", 11: "🥤 холодный" };
-
 const sum = (n: number) => n.toLocaleString("ru-RU");
 
 /**
@@ -251,13 +249,14 @@ export function MenuEditor({
             const каталожная = p?.price ?? null;
             return (
               <div className="mnu-card" key={l.productId}>
+                {/* Вся плитка ведёт в карточку товара — там история и детали. */}
+                <Link
+                  className="mnu-open"
+                  href={`/card/${l.productId}#menus`}
+                  aria-label={`Открыть карточку «${p?.name ?? "товар"}»`}
+                />
                 <div className="mnu-head">
-                  <span className="mnu-emoji" aria-hidden>
-                    {p?.cat === 10 ? "☕" : p?.cat === 11 ? "🥤" : "❔"}
-                  </span>
-                  <div className="mnu-name">
-                    <Link href={`/card/${l.productId}`}>{p?.name ?? "товар удалён"}</Link>
-                  </div>
+                  <span className="mnu-name">{p?.name ?? "товар удалён"}</span>
                   <button
                     type="button"
                     className="mnu-x"
@@ -270,22 +269,7 @@ export function MenuEditor({
                   </button>
                 </div>
 
-                {/* Главное действие плитки — цена ЭТОГО аппарата. */}
-                <div className="mnu-price">
-                  <input
-                    inputMode="numeric"
-                    placeholder={каталожная !== null ? String(каталожная) : "цена"}
-                    value={l.price ?? ""}
-                    onChange={(e) => {
-                      const v = e.target.value.replace(/\D/g, "");
-                      patch(l.productId, v === "" ? null : Number(v));
-                    }}
-                    aria-label={`Цена «${p?.name ?? ""}» на этом аппарате`}
-                  />
-                  <span className="u">сум</span>
-                </div>
-
-                <div className="mnu-foot">
+                <div className="mnu-row">
                   {/* Тумблер одной кнопкой: меняет категорию КАРТОЧКИ товара. */}
                   <button
                     type="button"
@@ -294,20 +278,31 @@ export function MenuEditor({
                     disabled={pending || !p}
                     title="Переключить горячий/холодный"
                   >
-                    {p?.cat === 10 || p?.cat === 11 ? CAT_LABEL[p.cat] : "не размечен"}
+                    {p?.cat === 10 ? "☕ горячий" : p?.cat === 11 ? "🥤 холодный" : "❔ не размечен"}
                   </button>
-                  <span>
-                    {l.price === null
-                      ? каталожная !== null
-                        ? `по товару · ${sum(каталожная)}`
-                        : "цены нет"
-                      : "своя цена"}
-                    {h?.mismatched ? " · ⚠" : ""}
+                  {/* Цена этого аппарата — правится не уходя со страницы. */}
+                  <span className="mnu-price">
+                    <input
+                      inputMode="numeric"
+                      placeholder={каталожная !== null ? String(каталожная) : "—"}
+                      value={l.price ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value.replace(/\D/g, "");
+                        patch(l.productId, v === "" ? null : Number(v));
+                      }}
+                      aria-label={`Цена «${p?.name ?? ""}» на этом аппарате`}
+                    />
+                    <span className="u">сум</span>
                   </span>
-                  {/* Детали — на карточке товара: история цен, где ещё продаётся. */}
-                  <Link className="go" href={`/card/${l.productId}#menus`} title="История и детали">
-                    детали →
-                  </Link>
+                </div>
+
+                <div className="mnu-note">
+                  {l.price === null
+                    ? каталожная !== null
+                      ? `по товару · ${sum(каталожная)} сум`
+                      : "цена не задана"
+                    : "своя цена аппарата"}
+                  {h?.mismatched ? " · ⚠ заказы по другой" : ""}
                 </div>
               </div>
             );

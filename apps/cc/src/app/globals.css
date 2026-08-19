@@ -1171,34 +1171,38 @@ a.rowlink:hover { background: var(--surf-2); }
 }
 
 
-/* ── Меню автомата плитками: тот же язык, что список парка ── */
-.mnu-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+/* ── Меню автомата плитками: компактно, цена — в строку с товаром ── */
+.mnu-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
 .mnu-card {
-  display: flex; flex-direction: column; gap: 8px; position: relative;
-  background: var(--surf); border: 1px solid var(--line); border-radius: var(--r); padding: 13px 15px;
+  position: relative; display: flex; flex-direction: column; gap: 9px;
+  background: var(--surf); border: 1px solid var(--line); border-radius: var(--r); padding: 11px 13px;
 }
 .mnu-card:hover { border-color: var(--accent-line); }
-.mnu-head { display: flex; gap: 8px; align-items: flex-start; }
-.mnu-emoji { font-size: 17px; line-height: 1.2; flex: 0 0 auto; }
-.mnu-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.25; }
-.mnu-name a { color: inherit; text-decoration: none; }
-.mnu-name a:hover { color: var(--accent); }
+/* Вся плитка ведёт в карточку товара; поля и кнопки лежат выше оверлея. */
+.mnu-open { position: absolute; inset: 0; z-index: 0; border-radius: var(--r); }
+.mnu-card > *:not(.mnu-open) { position: relative; z-index: 1; }
+.mnu-head { display: flex; gap: 7px; align-items: center; min-width: 0; }
+.mnu-name {
+  flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; line-height: 1.25;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .mnu-x {
   flex: 0 0 auto; border: none; background: none; color: var(--tx-3); cursor: pointer;
-  font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 6px;
+  font-size: 12px; line-height: 1; padding: 3px 5px; border-radius: 6px;
 }
 .mnu-x:hover { color: var(--err); background: var(--surf-2); }
-.mnu-price { display: flex; align-items: center; gap: 8px; }
+.mnu-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.mnu-cat { cursor: pointer; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mnu-price {
+  margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 5px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-s); padding: 3px 8px;
+}
+.mnu-price:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .mnu-price input {
-  flex: 1; min-width: 0; font-family: var(--fm); font-variant-numeric: tabular-nums;
-  font-size: 16px; font-weight: 600; padding: 8px 10px;
+  width: 66px; border: none; background: none; padding: 2px 0; text-align: right; color: var(--tx);
+  font-family: var(--fm); font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600;
 }
-.mnu-price .u { font-size: 11.5px; color: var(--tx-3); flex: 0 0 auto; }
-.mnu-foot {
-  display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--tx-3);
-  white-space: nowrap; min-width: 0;
-}
-.mnu-foot > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.mnu-foot .go { flex: 0 0 auto; color: var(--tx-3); text-decoration: none; }
-.mnu-foot .go:hover { color: var(--accent); }
-.mnu-cat { cursor: pointer; }
+.mnu-price input:focus { outline: none; }
+.mnu-price input::placeholder { color: var(--tx-3); font-weight: 500; }
+.mnu-price .u { font-size: 10.5px; color: var(--tx-3); }
+.mnu-note { font-size: 11px; color: var(--tx-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
