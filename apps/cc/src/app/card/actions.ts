@@ -462,6 +462,64 @@ async function writeMenu(
 }
 
 /**
+ * Локация автомата: координаты и адрес.
+ *
+ * Точечная запись, как меню и раскладка: читаем свежую карточку и меняем
+ * ТОЛЬКО эти ключи. Пустое значение удаляет поле — «координат нет» честнее
+ * нуля, который увёл бы автомат на карте в Гвинейский залив. Пара пишется
+ * целиком: одна половина координаты бесполезна. Ключи кириллические — Core
+ * по ним синхронизирует типизированную точку geo_point.
+ */
+export async function saveLocation(
+  id: string,
+  input: { lat: string; lng: string; address: string },
+): Promise<ActionResult> {
+  const число = (v: string): number | null => {
+    const n = Number(String(v).trim().replace(",", "."));
+    return Number.isFinite(n) ? n : null;
+  };
+  const естьОбе = input.lat.trim() !== "" && input.lng.trim() !== "";
+  const lat = число(input.lat);
+  const lng = число(input.lng);
+  if (естьОбе && (lat === null || lng === null)) {
+    return { ok: false, error: "Координаты — два числа, например 41.311081 и 69.240562" };
+  }
+  if (естьОбе && (lat! < -90 || lat! > 90 || lng! < -180 || lng! > 180)) {
+    return { ok: false, error: "Широта от −90 до 90, долгота от −180 до 180" };
+  }
+  if (!естьОбе && (input.lat.trim() !== "" || input.lng.trim() !== "")) {
+    return { ok: false, error: "Нужны обе координаты — одной половины мало" };
+  }
+
+  let entity;
+  try {
+    entity = await core.entity(id);
+  } catch (err) {
+    return fail(err);
+  }
+  const attrs: Record<string, unknown> = { ...(entity.attrs ?? {}) };
+  if (естьОбе) {
+    attrs[PLACE_ATTR.lat] = lat;
+    attrs[PLACE_ATTR.lng] = lng;
+  } else {
+    delete attrs[PLACE_ATTR.lat];
+    delete attrs[PLACE_ATTR.lng];
+  }
+  const адрес = input.address.trim();
+  if (адрес.length > 0) attrs[PLACE_ATTR.address] = адрес;
+  else delete attrs[PLACE_ATTR.address];
+
+  try {
+    await core.updateEntity(id, { name: entity.name, externalRef: entity.externalRef, attrs });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${id}`);
+  return { ok: true };
+}
+
+
+/**
  * Меню автомата: ассортимент с ценой аппарата (null — по товару).
  *
  * `base` — снимок меню, который редактор ПОКАЗЫВАЛ владельцу
