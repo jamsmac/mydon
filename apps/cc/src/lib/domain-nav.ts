@@ -136,6 +136,28 @@ export const PERSONAL_GROUPS: NavGroup[] = [
   },
 ];
 
+/**
+ * Листы, данные которых живут в СВОИХ таблицах, а не карточками реестра:
+ * продажи, инкассация, приход, остатки в автоматах, расход сырья, курсы.
+ *
+ * Считать их по `entity` бессмысленно — счёт всегда нулевой, а экран при этом
+ * полон данных (на 20.08.2026 «Остатки в автоматах» показывали «появится после
+ * сбора» при 2380 строках остатков). Поэтому такие листы не затемняем и не
+ * подписываем счётчиком — ведём на экран.
+ */
+export const TABLE_BACKED_LEAVES = [
+  "sources",
+  "collection",
+  "sale",
+  "purchase",
+  "machine_stock",
+  "consumption",
+  "customs_rates",
+] as const;
+
+export const isTableBackedLeaf = (type: string | null | undefined): boolean =>
+  type !== null && type !== undefined && (TABLE_BACKED_LEAVES as readonly string[]).includes(type);
+
 export function groupsFor(domain: string): NavGroup[] {
   if (domain === "vendhub") return VENDHUB_GROUPS;
   if (domain === "personal") return PERSONAL_GROUPS;
