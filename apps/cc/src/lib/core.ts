@@ -1676,9 +1676,13 @@ export const core = {
   machineParts: (machineId: string) => get<MachinePart[]>(`/maintenance/parts?machineId=${machineId}`),
   /** Узлы вне автоматов: склад, мойка, сушка, ремонт. */
   machinePartsStorage: () => get<MachinePart[]>("/maintenance/parts/storage"),
-  /** История экземпляра по серийнику — все периоды в обе стороны. */
-  partHistory: (serial: string) =>
-    get<PartHistoryRow[]>(`/maintenance/parts/history?serial=${encodeURIComponent(serial)}`),
+  /** История экземпляров по серийнику и/или модели — все периоды в обе стороны. */
+  partHistory: (q: { serial?: string; model?: string }) => {
+    const qs = new URLSearchParams();
+    if (q.serial) qs.set("serial", q.serial);
+    if (q.model) qs.set("model", q.model);
+    return get<PartHistoryRow[]>(`/maintenance/parts/history?${qs.toString()}`);
+  },
   installPart: (input: Record<string, unknown>) =>
     send<{ installed: MachinePart }>("/maintenance/part-install", "POST", input),
   removePart: (input: Record<string, unknown>) =>

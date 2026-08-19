@@ -2,11 +2,12 @@ import Link from "next/link";
 import {
   FISCAL_FIELDS,
   fiscalGaps,
+  partLocationLabel,
   productKind,
   PRODUCT_KIND_LABELS,
   resaleGaps,
 } from "@mydon/shared";
-import type { FinanceFlow, GrContract, UnmatchedSaleName } from "../lib/core";
+import type { FinanceFlow, GrContract, PartHistoryRow as PartHistoryRowT, UnmatchedSaleName } from "../lib/core";
 import { SaleAliasBinder } from "./sale-alias-binder";
 
 /**
@@ -528,6 +529,73 @@ export function SupplierProducts({ rows }: { rows: SupplierProductRow[] }) {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Запчасть: экземпляры на автоматах ────────────────────────────────────────
+
+export function ComponentInstances({ rows }: { rows: PartHistoryRowT[] }) {
+  const сейчас = rows.filter((r) => r.removedOn === null);
+  const история = rows.filter((r) => r.removedOn !== null);
+  return (
+    <div className="sect" id="instances" data-toc="Экземпляры">
+      <div className="sect-h">
+        <h3 className="h2">Экземпляры в учёте</h3>
+        <span className="chip">{сейчас.length}</span>
+        <span className="sp" />
+      </div>
+      {rows.length === 0 ? (
+        // Связь — по серийнику (поле «серийник») и модели (поле «модель» или
+        // имя карточки): появится сама, как только узел этой модели пройдёт
+        // через замену/установку у техника или с карточки автомата.
+        <div className="empty">
+          <b>Экземпляров в учёте нет</b>
+          Учёт экземпляров ведут замены и установки узлов. Совпадение по серийнику
+          или модели свяжет их с этой карточкой автоматически.
+        </div>
+      ) : (
+        <>
+          <div className="rows">
+            {сейчас.map((r) => (
+              <div className="row" key={r.id}>
+                <div className="t">
+                  {r.machineId ? (
+                    <Link href={`/card/${r.machineId}`}>{r.machineName ?? "автомат"}</Link>
+                  ) : (
+                    partLocationLabel(r.location)
+                  )}
+                  {r.serialNumber && <span className="pill mono"> {r.serialNumber}</span>}
+                  {r.slot !== null && <span className="pill">№{r.slot}</span>}
+                </div>
+                <span className="when">с {r.installedOn}</span>
+              </div>
+            ))}
+          </div>
+          {история.length > 0 && (
+            <details style={{ marginTop: 10 }}>
+              <summary className="hint">Прошлые периоды · {история.length}</summary>
+              <div className="rows">
+                {история.map((r) => (
+                  <div className="row" key={r.id}>
+                    <div className="t">
+                      {r.machineId ? (
+                        <Link href={`/card/${r.machineId}`}>{r.machineName ?? "автомат"}</Link>
+                      ) : (
+                        partLocationLabel(r.location)
+                      )}
+                      {r.serialNumber && <span className="pill mono"> {r.serialNumber}</span>}
+                    </div>
+                    <span className="when">
+                      {r.installedOn} → {r.removedOn}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </>
       )}
     </div>
   );

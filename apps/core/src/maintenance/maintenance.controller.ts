@@ -432,10 +432,13 @@ export class MaintenanceController {
     return this.maintenance.storageParts();
   }
 
-  /** История экземпляра по серийнику — все периоды в обе стороны. */
+  /** История экземпляров по серийнику и/или модели — все периоды в обе стороны. */
   @Get("parts/history")
-  partHistory(@Query("serial") serial: string) {
-    return this.maintenance.partHistory((serial ?? "").trim());
+  partHistory(@Query("serial") serial?: string, @Query("model") model?: string) {
+    return this.maintenance.partHistory(
+      (serial ?? "").trim() || undefined,
+      (model ?? "").trim() || undefined,
+    );
   }
 
   @Get("parts")

@@ -861,16 +861,26 @@ export class MaintenanceService {
   }
 
   /**
-   * История экземпляра по серийнику: все периоды — автоматы, мойки, ремонты.
+   * История экземпляров по серийнику и/или модели: все периоды — автоматы,
+   * мойки, ремонты.
    *
-   * Серийник — единственная нить, связывающая периоды одного физического
-   * узла: id строки живёт один период, а деталь — годы.
+   * Серийник — нить одного физического узла: id строки живёт один период, а
+   * деталь — годы. Модель — нить номенклатуры: карточка запчасти видит все
+   * экземпляры своей модели, даже когда серийники не переписаны.
    */
-  async partHistory(serial: string): Promise<(PartRow & { machineName: string | null })[]> {
+  async partHistory(
+    serial?: string,
+    model?: string,
+  ): Promise<(PartRow & { machineName: string | null })[]> {
+    const conditions: SQL[] = [];
+    if (serial) conditions.push(eq(machinePart.serialNumber, serial));
+    if (model) conditions.push(eq(machinePart.model, model));
+    if (conditions.length === 0) return [];
+
     const rows = await this.db
       .select()
       .from(machinePart)
-      .where(eq(machinePart.serialNumber, serial))
+      .where(conditions.length === 1 ? conditions[0] : sql`${conditions[0]} or ${conditions[1]}`)
       .orderBy(desc(machinePart.installedOn))
       .limit(100);
 

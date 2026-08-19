@@ -41,6 +41,7 @@ const ЧТЕНИЕ = [
   "/maintenance/log",
   "/maintenance/parts/storage",
   "/sales/aliases",
+  "/maintenance/parts/history?model=smoke-model",
   "/vending/machines",
   "/vending/deficit",
   "/vending/sync",
