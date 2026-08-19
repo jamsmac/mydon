@@ -244,75 +244,71 @@ export function MenuEditor({
           готовое меню другого автомата кнопкой сверху.
         </div>
       ) : (
-        <div className="rows">
+        <div className="mnu-grid">
           {visible.map((l) => {
             const p = byId.get(l.productId);
             const h = history[l.productId];
             const каталожная = p?.price ?? null;
-            const действующая = l.price ?? каталожная;
             return (
-              <div className="mcm-row" key={l.productId}>
-                <div className="mcm-main">
-                  <div className="t">
-                    <b>
-                      <Link href={`/card/${l.productId}`}>{p?.name ?? "товар удалён"}</Link>
-                    </b>
-                    <small>
-                      {действующая !== null ? `${sum(действующая)} сум` : "цены нет"}
-                      {l.price === null && каталожная !== null ? " · по товару" : ""}
-                      {h?.mismatched ? " · ⚠ заказы по другой цене" : ""}
-                    </small>
+              <div className="mnu-card" key={l.productId}>
+                <div className="mnu-head">
+                  <span className="mnu-emoji" aria-hidden>
+                    {p?.cat === 10 ? "☕" : p?.cat === 11 ? "🥤" : "❔"}
+                  </span>
+                  <div className="mnu-name">
+                    <Link href={`/card/${l.productId}`}>{p?.name ?? "товар удалён"}</Link>
                   </div>
-                  {/* Тумблер одной кнопкой: меняет категорию КАРТОЧКИ товара. */}
                   <button
                     type="button"
-                    className={`chip${p?.cat === 10 ? " h" : p?.cat === 11 ? " g" : ""}`}
-                    onClick={() => toggleCat(l.productId)}
-                    disabled={pending || !p}
-                    title="Переключить горячий/холодный (категория карточки товара)"
+                    className="mnu-x"
+                    onClick={() => remove(l.productId)}
+                    disabled={pending}
+                    aria-label="Убрать из меню"
+                    title="Убрать из меню"
                   >
-                    {p?.cat === 10 || p?.cat === 11 ? CAT_LABEL[p.cat] : "не размечен"}
+                    ✕
                   </button>
+                </div>
+
+                {/* Главное действие плитки — цена ЭТОГО аппарата. */}
+                <div className="mnu-price">
                   <input
-                    className="mcm-price"
                     inputMode="numeric"
-                    placeholder={каталожная !== null ? `по товару (${sum(каталожная)})` : "цена, сум"}
+                    placeholder={каталожная !== null ? String(каталожная) : "цена"}
                     value={l.price ?? ""}
                     onChange={(e) => {
                       const v = e.target.value.replace(/\D/g, "");
                       patch(l.productId, v === "" ? null : Number(v));
                     }}
-                    aria-label="Цена на этом аппарате"
+                    aria-label={`Цена «${p?.name ?? ""}» на этом аппарате`}
                   />
+                  <span className="u">сум</span>
+                </div>
+
+                <div className="mnu-foot">
+                  {/* Тумблер одной кнопкой: меняет категорию КАРТОЧКИ товара. */}
                   <button
                     type="button"
-                    className="btn ghost"
-                    onClick={() => remove(l.productId)}
-                    disabled={pending}
-                    aria-label="Убрать из меню"
+                    className={`chip mnu-cat${p?.cat === 10 ? " h" : p?.cat === 11 ? " g" : ""}`}
+                    onClick={() => toggleCat(l.productId)}
+                    disabled={pending || !p}
+                    title="Переключить горячий/холодный"
                   >
-                    ✕
+                    {p?.cat === 10 || p?.cat === 11 ? CAT_LABEL[p.cat] : "не размечен"}
                   </button>
+                  <span>
+                    {l.price === null
+                      ? каталожная !== null
+                        ? `по товару · ${sum(каталожная)}`
+                        : "цены нет"
+                      : "своя цена"}
+                    {h?.mismatched ? " · ⚠" : ""}
+                  </span>
+                  {/* Детали — на карточке товара: история цен, где ещё продаётся. */}
+                  <Link className="go" href={`/card/${l.productId}#menus`} title="История и детали">
+                    детали →
+                  </Link>
                 </div>
-                {h && h.periods.length > 0 && (
-                  <details className="mcm-det">
-                    <summary>
-                      история цены · {h.periods.length}{" "}
-                      {h.periods.length === 1 ? "период" : "периода(ов)"} · {h.orders} заказов
-                    </summary>
-                    <div className="mcm-hist">
-                      {h.periods.map((per, i) => (
-                        <div className="mcm-per" key={i}>
-                          <b className="mono">{sum(per.price)} сум</b>
-                          <span>
-                            {per.from} — {per.to ?? "сейчас"}
-                          </span>
-                          <span className="mono">{per.orders} зак.</span>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )}
               </div>
             );
           })}

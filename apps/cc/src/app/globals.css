@@ -1031,15 +1031,25 @@ a.rowlink:hover { background: var(--surf-2); }
 .mc-meta b { color: var(--tx-2); font-weight: 600; }
 
 .mc-tabs {
-  display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; position: sticky; top: 0; z-index: 4;
-  background: var(--bg); border-bottom: 1px solid var(--line); margin-bottom: 14px;
+  display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; position: sticky; top: 0; z-index: 4;
+  background: var(--bg); padding: 10px 2px 12px; margin-bottom: 14px; border-bottom: 1px solid var(--line);
 }
+/* Пилюли: вкладку видно как отдельную кнопку, активная — залита акцентом. */
 .mc-tabs button {
-  border: none; background: none; color: var(--tx-2); font: inherit; font-size: 13.5px; font-weight: 600;
-  padding: 10px 13px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surf-2); color: var(--tx-2);
+  font: inherit; font-size: 13.5px; font-weight: 600; padding: 9px 16px; transition: 0.15s;
 }
-.mc-tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
-.mc-tab-badge { margin-left: 6px; font-size: 11px; color: var(--tx-3); font-family: var(--fm); }
+.mc-tabs button:hover { border-color: var(--accent-line); color: var(--tx); }
+.mc-tabs button.on {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+  box-shadow: 0 2px 12px rgba(26, 107, 255, 0.35);
+}
+.mc-tab-badge {
+  font-size: 11px; font-family: var(--fm); font-variant-numeric: tabular-nums; line-height: 1;
+  padding: 3px 7px; border-radius: 999px; background: var(--bg); color: var(--tx-3);
+}
+.mc-tabs button.on .mc-tab-badge { background: rgba(255, 255, 255, 0.22); color: #fff; }
 .mc-panel { display: flex; flex-direction: column; gap: 14px; }
 .mc-panel[hidden] { display: none; }
 .mc-panel .sect { margin-top: 0; }
@@ -1159,3 +1169,36 @@ a.rowlink:hover { background: var(--surf-2); }
   .mbk { min-width: 100px; padding: 10px 13px; }
   .mbk b { font-size: 22px; }
 }
+
+
+/* ── Меню автомата плитками: тот же язык, что список парка ── */
+.mnu-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.mnu-card {
+  display: flex; flex-direction: column; gap: 8px; position: relative;
+  background: var(--surf); border: 1px solid var(--line); border-radius: var(--r); padding: 13px 15px;
+}
+.mnu-card:hover { border-color: var(--accent-line); }
+.mnu-head { display: flex; gap: 8px; align-items: flex-start; }
+.mnu-emoji { font-size: 17px; line-height: 1.2; flex: 0 0 auto; }
+.mnu-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.25; }
+.mnu-name a { color: inherit; text-decoration: none; }
+.mnu-name a:hover { color: var(--accent); }
+.mnu-x {
+  flex: 0 0 auto; border: none; background: none; color: var(--tx-3); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 6px;
+}
+.mnu-x:hover { color: var(--err); background: var(--surf-2); }
+.mnu-price { display: flex; align-items: center; gap: 8px; }
+.mnu-price input {
+  flex: 1; min-width: 0; font-family: var(--fm); font-variant-numeric: tabular-nums;
+  font-size: 16px; font-weight: 600; padding: 8px 10px;
+}
+.mnu-price .u { font-size: 11.5px; color: var(--tx-3); flex: 0 0 auto; }
+.mnu-foot {
+  display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--tx-3);
+  white-space: nowrap; min-width: 0;
+}
+.mnu-foot > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mnu-foot .go { flex: 0 0 auto; color: var(--tx-3); text-decoration: none; }
+.mnu-foot .go:hover { color: var(--accent); }
+.mnu-cat { cursor: pointer; }

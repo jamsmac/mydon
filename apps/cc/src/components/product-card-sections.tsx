@@ -194,6 +194,73 @@ export function ProductMachines({ rows }: { rows: ProductMachineRow[] }) {
   );
 }
 
+/** Строка «этот товар в меню автомата»: цена аппарата и что говорят заказы. */
+export interface ProductMenuRow {
+  machineId: string;
+  machineName: string;
+  /** Цена этого аппарата; null — «по товару» (каталожная). */
+  price: number | null;
+  /** Каталожная цена товара — что действует, когда своей нет. */
+  catalogPrice: number | null;
+  /** Цена из последних заказов источника, если он про этот автомат знает. */
+  soldPrice: number | null;
+  orders: number;
+}
+
+/**
+ * Меню автоматов — обратная сторона вкладки «Меню» карточки аппарата.
+ *
+ * Здесь, на карточке ТОВАРА, живут детали, которые в самом меню только мешали
+ * бы менять цены: где товар продаётся, почём у каждого аппарата и совпадает ли
+ * это с заказами. В меню осталось быстрое действие, здесь — разбор.
+ */
+export function ProductMenus({ rows }: { rows: ProductMenuRow[] }) {
+  const sum = (n: number) => n.toLocaleString("ru-RU");
+  return (
+    <div className="sect" id="menus" data-toc="В меню">
+      <div className="sect-h">
+        <h3 className="h2">В меню автоматов</h3>
+        <span className="chip">{rows.length}</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="empty">
+          <b>Ни в одном меню</b>
+          Товар не выставлен ни на одном аппарате. Меню задаётся на карточке автомата —
+          вкладка «Меню».
+        </div>
+      ) : (
+        <div className="rows">
+          {rows.map((r) => {
+            const действует = r.price ?? r.catalogPrice;
+            const расхождение =
+              r.soldPrice !== null && действует !== null && r.soldPrice !== действует;
+            return (
+              <div className="row" key={r.machineId}>
+                <div className="t">
+                  <b>
+                    <Link href={`/card/${r.machineId}`}>{r.machineName}</Link>
+                  </b>
+                  <small>
+                    {действует !== null ? `${sum(действует)} сум` : "цены нет"}
+                    {r.price === null && r.catalogPrice !== null ? " · по товару" : " · своя цена"}
+                    {r.soldPrice !== null ? ` · в заказах ${sum(r.soldPrice)}` : ""}
+                    {r.orders > 0 ? ` · ${r.orders} зак.` : ""}
+                  </small>
+                </div>
+                {расхождение && <span className="pill">цена разошлась</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <p className="hint" style={{ marginTop: 8 }}>
+        «По товару» — аппарат берёт каталожную цену этой карточки: поменяете здесь — поменяется
+        везде, где своя цена не задана.
+      </p>
+    </div>
+  );
+}
+
 // ── Ингредиент: в каких рецептах используется ────────────────────────────────
 
 export interface IngredientUsageRow {

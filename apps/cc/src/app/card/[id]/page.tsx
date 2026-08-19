@@ -52,12 +52,14 @@ import {
   ProductEconomy,
   ProductFiscal,
   ProductMachines,
+  ProductMenus,
   ProductSalesSection,
   SupplierProducts,
   WarehouseMovements,
   type IngredientUsageRow,
   type PlacementRow,
   type ProductMachineRow,
+  type ProductMenuRow,
   type SupplierProductRow,
 } from "../../../components/product-card-sections";
 import { WarehouseStockView } from "../../../components/warehouse-stock";
@@ -221,6 +223,9 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // не роняет карточку.
   const isProduct = entity.type === "product";
   let productMachines: ProductMachineRow[] = [];
+  // В меню каких автоматов стоит товар и почём у каждого — детали, которые
+  // в самом меню только мешали бы менять цену.
+  let productMenus: ProductMenuRow[] = [];
   if (isProduct && entity.domain) {
     try {
       const машины = await core.entitiesOfType(entity.domain, "machine");
@@ -229,8 +234,45 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           .filter((p) => p.productId === entity.id)
           .map((p) => ({ machineId: m.id, machineName: m.name, slot: p.slot })),
       );
+      const каталожная = (() => {
+        const цена = (v: unknown): number | null => {
+          const n = typeof v === "number" ? v : Number(String(v ?? "").replace(",", "."));
+          return Number.isFinite(n) && n > 0 ? n : null;
+        };
+        return цена(a["цена продажи"]) ?? цена(a["цена"]);
+      })();
+      // Что говорят заказы источника по этому товару — по серийникам автоматов.
+      const продано = new Map<string, { price: number; orders: number }>();
+      try {
+        const срез = await core.rawPrices("gjvending", "order_query");
+        const мой = срез.products.find((p) => p.entityId === entity.id);
+        for (const m of мой?.machines ?? []) {
+          const ключ = normalizeMachineSerial(m.serial);
+          const было = продано.get(ключ);
+          if (!было || было.orders < m.orders) продано.set(ключ, { price: m.price, orders: m.orders });
+        }
+      } catch {
+        // без среза цен строки просто без «в заказах»
+      }
+      productMenus = машины
+        .map((m) => {
+          const строка = parseMenu(m.attrs).find((l) => l.productId === entity.id);
+          if (!строка) return null;
+          const факт = m.externalRef ? продано.get(normalizeMachineSerial(m.externalRef)) : undefined;
+          return {
+            machineId: m.id,
+            machineName: m.name,
+            price: строка.price,
+            catalogPrice: каталожная,
+            soldPrice: факт?.price ?? null,
+            orders: факт?.orders ?? 0,
+          };
+        })
+        .filter((r): r is ProductMenuRow => r !== null)
+        .sort((x, y) => x.machineName.localeCompare(y.machineName, "ru"));
     } catch {
       productMachines = [];
+      productMenus = [];
     }
   }
 
@@ -742,6 +784,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
             attrs={a}
             recipeCost={recipe ? { total: recipe.total, unresolved: recipe.unresolved } : null}
           />
+          <ProductMenus rows={productMenus} />
           <ProductMachines rows={productMachines} />
           <ProductSalesSection
             sales={productSales}
