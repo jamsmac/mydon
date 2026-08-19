@@ -13,7 +13,9 @@ import {
   type WarehouseStock,
   type FinanceFlow,
   type GrContract,
+  type VendingMachine,
 } from "../../../lib/core";
+import { MachineCard360 } from "../../../components/machine-card-360";
 import { CoreDown } from "../../../components/core-down";
 import { PhotoGallery } from "../../../components/photo-gallery";
 import { CardToc } from "../../../components/card-toc";
@@ -27,7 +29,7 @@ import { PlanogramEditor } from "../../../components/planogram-editor";
 import { MachineCardPanel } from "../../../components/machine-card-panel";
 import { MachinePartsPanel } from "../../../components/machine-parts-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
-import { PLACE_TYPES, parsePlanogram, parseRecipe } from "@mydon/shared";
+import { PLACE_TYPES, normalizeMachineSerial, parsePlanogram, parseRecipe } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
 import {
   ComponentInstances,
@@ -382,6 +384,167 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Живой срез Ourvend (заполненность/дефицит) по серийнику — если сбор его
+  // приносил. Серийники живут в двух форматах (с «c» и без), сверяем канон.
+  let liveVending: VendingMachine | null = null;
+  if (isMachine && entity.externalRef) {
+    try {
+      const ключ = normalizeMachineSerial(entity.externalRef);
+      liveVending =
+        (await core.vendingMachines()).find((m) => normalizeMachineSerial(m.serial) === ключ) ?? null;
+    } catch {
+      liveVending = null;
+    }
+  }
+
+  // Карточка автомата — своя вёрстка (образец «Карточка 360»): hero-шапка,
+  // KPI и вкладки-виджеты. Остальные типы живут в общей плоской карточке ниже.
+  if (isMachine) {
+    const mapHref = hasGeo ? `https://maps.google.com/?q=${String(lat)},${String(lng)}` : null;
+    return (
+      <>
+        <div className="page-head">
+          <Link
+            href={entity.domain ? `/domain/${entity.domain}?tab=vending` : "/registry"}
+            className="back"
+          >
+            ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}
+          </Link>
+        </div>
+        <MachineCard360
+          entity={entity}
+          kind={machineCard?.kind ?? null}
+          status={machineCard?.status ?? null}
+          statusNote={machineCard?.statusNote ?? null}
+          updatedBy={machineCard?.updatedBy ?? null}
+          placements={coffeePlacements}
+          live={liveVending}
+          planogramCount={planogram.length}
+          partsCount={machineParts.filter((p) => p.removedOn === null).length}
+          pricesCount={prices.length}
+          photosCount={photos.length}
+          hasGeo={hasGeo}
+          mapHref={mapHref}
+          slots={{
+            content: (
+              <>
+                <PlanogramEditor
+                  entity={{ id: entity.id }}
+                  products={planogramProducts}
+                  planogram={planogram}
+                />
+                {prices.length > 0 && (
+                  <div className="sect" id="prices">
+                    <div className="sect-h">
+                      <h3 className="h2">Чем торгует и почём</h3>
+                      <span className="chip b">
+                        {prices.length} {plural(prices.length, "товар", "товара", "товаров")}
+                      </span>
+                    </div>
+                    <MachinePricesView items={prices} />
+                    <p className="hint" style={{ marginTop: 8 }}>
+                      Цена восстановлена из заказов и, как точка, является периодом: пока её
+                      не поменяли, она держится.
+                    </p>
+                  </div>
+                )}
+              </>
+            ),
+            service: (
+              <>
+                <MachineCardPanel
+                  id={entity.id}
+                  kind={machineCard?.kind ?? null}
+                  status={machineCard?.status ?? null}
+                  statusNote={machineCard?.statusNote ?? null}
+                  statusChangedAt={machineCard?.statusChangedAt ?? null}
+                  updatedBy={machineCard?.updatedBy ?? null}
+                  places={places}
+                />
+                <MachinePartsPanel machineId={entity.id} parts={machineParts} storage={partsStorage} />
+              </>
+            ),
+            place: (
+              <>
+                <div className="sect" id="placements">
+                  <div className="sect-h">
+                    <h3 className="h2">Где стоит</h3>
+                    {coffeePlacements.length > 0 && (
+                      <span className="chip b">периодов: {coffeePlacements.length}</span>
+                    )}
+                  </div>
+                  {coffeePlacements.length === 0 ? (
+                    <div className="empty">
+                      <b>Место не записано</b>
+                      Неизвестно, где этот аппарат. Поставьте его на место во вкладке
+                      «Обслуживание» (склад, мастерская или точка продаж) — тогда он появится
+                      на карте и в отчётах по точке.
+                    </div>
+                  ) : (
+                    <div className="rows">
+                      {coffeePlacements.map((p) => (
+                        <div className="row" key={p.id}>
+                          <div className="t">
+                            <b>{p.locationName}</b>
+                            <small>
+                              {p.startDate ?? "с неизвестной даты"} — {p.endDate ?? "сейчас"}
+                              {p.note ? ` · ${p.note}` : ""}
+                            </small>
+                          </div>
+                          <span className={`pill ${p.endDate === null ? "ok" : ""}`}>
+                            {p.endDate === null ? "стоит сейчас" : "история"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {mapHref && (
+                  <div className="card" id="geo">
+                    <div className="result-title">На карте</div>
+                    <p>
+                      <a href={mapHref} target="_blank" rel="noreferrer">
+                        Открыть точку на карте ({String(lat)}, {String(lng)})
+                      </a>
+                    </p>
+                  </div>
+                )}
+                {stays && (
+                  <div className="sect" id="stays">
+                    <div className="sect-h">
+                      <h3 className="h2">Где стоял (по заказам источника)</h3>
+                      {stays.moves > 0 ? (
+                        <span className="chip b">переездов: {stays.moves}</span>
+                      ) : (
+                        <span className="chip">не переезжал</span>
+                      )}
+                    </div>
+                    <StayTimeline stays={stays.stays} />
+                  </div>
+                )}
+              </>
+            ),
+            passport: (
+              <>
+                <EntityApproval entity={entity} drafts={drafts} />
+                <PhotoGallery attachments={photos} />
+                <section id="fields">
+                  <EntityEditor entity={entity} />
+                </section>
+                <DeleteEntityButton
+                  id={entity.id}
+                  domain={entity.domain ?? null}
+                  type={entity.type}
+                  name={entity.name}
+                />
+              </>
+            ),
+          }}
+        />
+      </>
+    );
+  }
+
   return (
     <>
       <div className="page-head">
@@ -430,108 +593,6 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
             </a>
           </p>
         </div>
-      )}
-
-      {stays && (
-        <div className="sect" id="stays" data-toc="Где стоял">
-          <div className="sect-h">
-            <h3 className="h2">Где стоял</h3>
-            {stays.moves > 0 ? (
-              <span className="chip b">переездов: {stays.moves}</span>
-            ) : (
-              <span className="chip">не переезжал</span>
-            )}
-          </div>
-          <StayTimeline stays={stays.stays} />
-          <p className="hint" style={{ marginTop: 8 }}>
-            Восстановлено из заказов источника: адрес и время есть в каждом.
-            Точка — период, а не одно значение: переставили автомат, начался новый отрезок.
-          </p>
-        </div>
-      )}
-
-      {isMachine && (
-        <div className="sect" id="placements" data-toc="Где стоит">
-          <div className="sect-h">
-            <h3 className="h2">Где стоит</h3>
-            {coffeePlacements.length > 0 && (
-              <span className="chip b">периодов: {coffeePlacements.length}</span>
-            )}
-          </div>
-          {coffeePlacements.length === 0 ? (
-            /*
-              Пустой раздел показываем НАРОЧНО. Раньше он просто исчезал, и
-              аппарат без места выглядел так же, как аппарат на месте, — а это
-              разные вещи: во втором случае мы знаем, где он, в первом нет.
-            */
-            <div className="empty">
-              <b>Место не записано</b>
-              Неизвестно, где этот аппарат. Поставьте его на место в разделе «Автомат»
-              (склад, мастерская или точка продаж) — тогда он появится на карте и в отчётах по точке.
-            </div>
-          ) : (
-            <div className="rows">
-              {coffeePlacements.map((p) => (
-                <div className="row" key={p.id}>
-                  <div className="t">
-                    <b>{p.locationName}</b>
-                    <small>
-                      {p.startDate ?? "с неизвестной даты"} — {p.endDate ?? "сейчас"}
-                      {p.note ? ` · ${p.note}` : ""}
-                    </small>
-                  </div>
-                  <span className={`pill ${p.endDate === null ? "ok" : ""}`}>
-                    {p.endDate === null ? "стоит сейчас" : "история"}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          <p className="hint" style={{ marginTop: 8 }}>
-            Место — карточка реестра: точка продаж, склад или мастерская. Перестановка
-            закрывает период и открывает новый, поэтому видно, где аппарат стоял раньше.
-          </p>
-        </div>
-      )}
-
-      {prices.length > 0 && (
-        <div className="sect" id="prices" data-toc="Цены">
-          <div className="sect-h">
-            <h3 className="h2">Чем торгует и почём</h3>
-            <span className="chip b">
-              {prices.length} {plural(prices.length, "товар", "товара", "товаров")}
-            </span>
-          </div>
-          <MachinePricesView items={prices} />
-          <p className="hint" style={{ marginTop: 8 }}>
-            Цена восстановлена из заказов и, как точка, является периодом: пока её
-            не поменяли, она держится. Сквозной срез — во вкладке «Источники → Цены».
-          </p>
-        </div>
-      )}
-
-      {isMachine && (
-        <MachineCardPanel
-          id={entity.id}
-          kind={machineCard?.kind ?? null}
-          status={machineCard?.status ?? null}
-          statusNote={machineCard?.statusNote ?? null}
-          statusChangedAt={machineCard?.statusChangedAt ?? null}
-          updatedBy={machineCard?.updatedBy ?? null}
-          places={places}
-        />
-      )}
-
-      {isMachine && (
-        <MachinePartsPanel machineId={entity.id} parts={machineParts} storage={partsStorage} />
-      )}
-
-      {isMachine && (
-        <PlanogramEditor
-          entity={{ id: entity.id }}
-          products={planogramProducts}
-          planogram={planogram}
-        />
       )}
 
       {isProduct && (

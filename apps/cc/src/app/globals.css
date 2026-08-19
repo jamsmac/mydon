@@ -1011,3 +1011,62 @@ a.rowlink:hover { background: var(--surf-2); }
 .mb-fill { width: 100%; border-radius: 2px 2px 0 0; background: var(--accent); opacity: 0.65; min-height: 2px; }
 .mb-fill.hot { background: var(--ok); opacity: 0.7; }
 .mb-label { font-size: 9px; color: var(--tx-3); line-height: 1.6; height: 14px; overflow: hidden; white-space: nowrap; }
+
+/* ── Карточка автомата 360 (образец «Карточка 360») ── */
+.mc-hero { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 8px; }
+.mc-ava {
+  width: 52px; height: 52px; flex: 0 0 auto; display: grid; place-items: center; font-size: 26px;
+  background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--r);
+}
+.mc-id { flex: 1; min-width: 0; }
+.mc-id h1 { font-size: 21px; line-height: 1.2; }
+.mc-sub { margin: 3px 0 0; font-size: 13px; color: var(--tx-2); }
+.mc-sub a { color: var(--accent); text-decoration: none; }
+.mc-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.mc-badges .chip[data-mc-tab] { cursor: pointer; }
+.mc-ring { position: relative; width: 52px; height: 52px; flex: 0 0 auto; }
+.mc-ring svg { transform: rotate(-90deg); display: block; }
+.mc-ring b { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; }
+.mc-meta { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--tx-3); margin-bottom: 12px; }
+.mc-meta b { color: var(--tx-2); font-weight: 600; }
+
+.mc-tabs {
+  display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; position: sticky; top: 0; z-index: 4;
+  background: var(--bg); border-bottom: 1px solid var(--line); margin-bottom: 14px;
+}
+.mc-tabs button {
+  border: none; background: none; color: var(--tx-2); font: inherit; font-size: 13.5px; font-weight: 600;
+  padding: 10px 13px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.mc-tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+.mc-tab-badge { margin-left: 6px; font-size: 11px; color: var(--tx-3); font-family: var(--fm); }
+.mc-panel { display: flex; flex-direction: column; gap: 14px; }
+.mc-panel[hidden] { display: none; }
+.mc-panel .sect { margin-top: 0; }
+
+.mc-kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.mc-kpis .tile[data-mc-tab] { cursor: pointer; }
+.mc-kpis .tile[data-mc-tab]:hover { border-color: var(--accent-line); }
+
+.mc-grid { display: grid; gap: 14px; grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 900px) { .mc-grid { grid-template-columns: 1fr; } }
+
+.mc-tiles { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.mct {
+  position: relative; display: block; background: var(--surf-2); border: 1px solid var(--line);
+  border-radius: var(--r-s); padding: 8px 26px 8px 11px; min-height: 52px; color: inherit; text-decoration: none;
+}
+.mct .lb { display: block; font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--tx-3); }
+.mct .vl { display: block; font-size: 13.5px; font-weight: 600; margin-top: 3px; line-height: 1.3; overflow-wrap: anywhere; }
+.mct .act { position: absolute; top: 8px; right: 9px; font-size: 12px; color: var(--tx-3); opacity: 0.4; transition: opacity 0.12s; }
+.mct-link:hover { border-color: var(--accent-line); }
+.mct-link:hover .act { opacity: 1; color: var(--accent); }
+.mct-link .vl { color: var(--accent); }
+.mct-wide { grid-column: span 2; }
+@media (max-width: 520px) { .mct-wide { grid-column: span 1; } }
+.mct-empty { border-style: dashed; background: none; }
+.mct-empty .vl { color: var(--tx-3); font-style: italic; font-weight: 500; }
+
+.mc-attn { cursor: pointer; }
+.mc-attn:hover { border-color: var(--accent-line); }
+.mc-attn:hover .pill { color: var(--accent); }
