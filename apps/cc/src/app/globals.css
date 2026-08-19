@@ -1206,3 +1206,22 @@ a.rowlink:hover { background: var(--surf-2); }
 .mnu-price input::placeholder { color: var(--tx-3); font-weight: 500; }
 .mnu-price .u { font-size: 10.5px; color: var(--tx-3); }
 .mnu-note { font-size: 11px; color: var(--tx-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Второй источник истории стоянок — свёрнут, чтобы не двоить наш учёт. */
+.loc-src { margin-top: 12px; font-size: 12.5px; }
+.loc-src summary { color: var(--tx-3); cursor: pointer; user-select: none; }
+.loc-src summary:hover { color: var(--accent); }
+
+/* История стоянок — один раскрывающийся блок вместо двух списков. */
+.loc-hist > summary {
+  display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none;
+  list-style: none; padding: 4px 0;
+}
+.loc-hist > summary::-webkit-details-marker { display: none; }
+.loc-hist > summary::before {
+  content: "▸"; color: var(--tx-3); font-size: 12px; transition: transform 0.15s;
+}
+.loc-hist[open] > summary::before { transform: rotate(90deg); }
+.loc-hist-t { font-family: var(--fh); font-size: 15px; font-weight: 700; }
+.loc-hist > summary:hover .loc-hist-t { color: var(--accent); }
+.loc-hist-body { margin-top: 10px; }
