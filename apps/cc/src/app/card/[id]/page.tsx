@@ -3,6 +3,7 @@ import {
   core,
   CoreUnavailable,
   type Attachment,
+  type CoffeeFillStatusRow,
   type CoffeePlacementRow,
   type Entity,
   type EntityDraft,
@@ -16,6 +17,7 @@ import {
   type VendingMachine,
 } from "../../../lib/core";
 import { MachineCard360 } from "../../../components/machine-card-360";
+import { BunkerLevels } from "../../../components/bunker-levels";
 import { CoreDown } from "../../../components/core-down";
 import { PhotoGallery } from "../../../components/photo-gallery";
 import { CardToc } from "../../../components/card-toc";
@@ -397,6 +399,20 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Кофейные бункеры: уровни точки, где стоит аппарат. Содержимое кофейного —
+  // это бункеры, а не слоты; раскладка у него показывается только как легаси,
+  // если её кто-то успел заполнить. Дополнение — ошибка не роняет карточку.
+  let coffeeBunkers: CoffeeFillStatusRow[] = [];
+  if (isMachine) {
+    try {
+      const [точки, уровни] = await Promise.all([core.coffeeLocations(), core.coffeeFillStatus()]);
+      const точка = точки.find((l) => (l.machines ?? []).some((m) => m.entityId === entity.id));
+      if (точка) coffeeBunkers = уровни.filter((r) => r.locationId === точка.id);
+    } catch {
+      coffeeBunkers = [];
+    }
+  }
+
   // Карточка автомата — своя вёрстка (образец «Карточка 360»): hero-шапка,
   // KPI и вкладки-виджеты. Остальные типы живут в общей плоской карточке ниже.
   if (isMachine) {
@@ -419,6 +435,14 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           updatedBy={machineCard?.updatedBy ?? null}
           placements={coffeePlacements}
           live={liveVending}
+          coffee={
+            machineCard?.kind === "coffee"
+              ? {
+                  linked: coffeeBunkers.length > 0,
+                  filled: coffeeBunkers.filter((r) => r.netFillWeight !== null).length,
+                }
+              : null
+          }
           planogramCount={planogram.length}
           partsCount={machineParts.filter((p) => p.removedOn === null).length}
           pricesCount={prices.length}
@@ -428,11 +452,50 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           slots={{
             content: (
               <>
-                <PlanogramEditor
-                  entity={{ id: entity.id }}
-                  products={planogramProducts}
-                  planogram={planogram}
-                />
+                {machineCard?.kind === "coffee" ? (
+                  <>
+                    <div className="sect" id="bunkers">
+                      <div className="sect-h">
+                        <h3 className="h2">Бункеры</h3>
+                        {coffeeBunkers.some((r) => r.netFillWeight !== null) && (
+                          <span className="chip b">
+                            позиций с заливкой:{" "}
+                            {coffeeBunkers.filter((r) => r.netFillWeight !== null).length}
+                          </span>
+                        )}
+                      </div>
+                      {coffeeBunkers.length === 0 ? (
+                        <div className="empty">
+                          <b>Бункеры не привязаны</b>
+                          Содержимое кофейного — восемь бункеров точки, а не слоты.
+                          Уровни появятся, когда аппарат будет стоять на кофе-точке
+                          с заливками — журнал живёт во вкладке «Кофе-бункеры».
+                        </div>
+                      ) : (
+                        <>
+                          <BunkerLevels rows={coffeeBunkers} />
+                          <p className="hint" style={{ marginTop: 8 }}>
+                            Уровень — чистый вес последней заливки против эталона позиции.
+                            Заливки и возвраты — во вкладке «Кофе-бункеры» рабочего места VendHub.
+                          </p>
+                        </>
+                      )}
+                    </div>
+                    {planogram.length > 0 && (
+                      <PlanogramEditor
+                        entity={{ id: entity.id }}
+                        products={planogramProducts}
+                        planogram={planogram}
+                      />
+                    )}
+                  </>
+                ) : (
+                  <PlanogramEditor
+                    entity={{ id: entity.id }}
+                    products={planogramProducts}
+                    planogram={planogram}
+                  />
+                )}
                 {prices.length > 0 && (
                   <div className="sect" id="prices">
                     <div className="sect-h">

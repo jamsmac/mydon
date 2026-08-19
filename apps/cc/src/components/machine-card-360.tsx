@@ -90,6 +90,7 @@ export function MachineCard360({
   updatedBy,
   placements,
   live,
+  coffee,
   planogramCount,
   partsCount,
   pricesCount,
@@ -106,6 +107,8 @@ export function MachineCard360({
   placements: CoffeePlacementRow[];
   /** Живой срез Ourvend по этому серийнику — если сбор его приносил. */
   live: VendingMachine | null;
+  /** Кофейный: привязка к кофе-точке и сколько бункеров с заливкой. Не кофе — null. */
+  coffee: { linked: boolean; filled: number } | null;
   planogramCount: number;
   partsCount: number;
   pricesCount: number;
@@ -132,7 +135,10 @@ export function MachineCard360({
     [kind !== null && kind !== "other", "Вид не указан", "service"],
     [текущая !== null, "Место не записано", "service"],
     [hasGeo, "Координат нет — не видно на карте", "place"],
-    [planogramCount > 0, "Раскладка пуста", "content"],
+    // Содержимое зависит от вида: у кофейного — бункеры точки, у остальных — раскладка.
+    coffee !== null
+      ? [coffee.linked, "Бункеры не привязаны к кофе-точке", "content"]
+      : [planogramCount > 0, "Раскладка пуста", "content"],
     [photosCount > 0, "Нет ни одного фото", "passport"],
     [status !== null, "Состояние не проставлено", "service"],
     [entity.externalRef !== null && entity.externalRef !== "", "Серийник не указан", "passport"],
@@ -229,14 +235,29 @@ export function MachineCard360({
                       </div>
                     </div>
                   )}
-                  <div className="tile" data-mc-tab="content" role="button" tabIndex={0}>
-                    <span className="lab">Раскладка</span>
-                    <div className="v">{planogramCount}</div>
-                    <div className="foot">
-                      <span className="mk" />
-                      слотов с товаром<span className="go">→</span>
+                  {coffee !== null ? (
+                    <div className="tile" data-mc-tab="content" role="button" tabIndex={0}>
+                      <span className="lab">Бункеры</span>
+                      <div className="v">
+                        {coffee.filled}
+                        <span className="u">/8</span>
+                      </div>
+                      <div className="foot">
+                        <span className="mk" />
+                        {coffee.linked ? "с заливкой сейчас" : "точка не привязана"}
+                        <span className="go">→</span>
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="tile" data-mc-tab="content" role="button" tabIndex={0}>
+                      <span className="lab">Раскладка</span>
+                      <div className="v">{planogramCount}</div>
+                      <div className="foot">
+                        <span className="mk" />
+                        слотов с товаром<span className="go">→</span>
+                      </div>
+                    </div>
+                  )}
                   <div className="tile" data-mc-tab="service" role="button" tabIndex={0}>
                     <span className="lab">Узлы</span>
                     <div className="v">{partsCount}</div>
@@ -326,7 +347,14 @@ export function MachineCard360({
           {
             key: "content",
             label: "Содержимое",
-            badge: planogramCount > 0 ? String(planogramCount) : undefined,
+            badge:
+              coffee !== null
+                ? coffee.filled > 0
+                  ? `${coffee.filled}/8`
+                  : undefined
+                : planogramCount > 0
+                  ? String(planogramCount)
+                  : undefined,
             content: slots.content,
           },
           {
