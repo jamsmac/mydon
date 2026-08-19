@@ -1,5 +1,5 @@
-import Link from "next/link";
-import { BunkerLevels } from "./bunker-levels";
+import { normalizeMachineSerial, parseMenu } from "@mydon/shared";
+import { MachinesBrowser, type MachineListItem } from "./machines-browser";
 import {
   core,
   CoreUnavailable,
@@ -70,6 +70,7 @@ function machineKind(e: Entity): "кофе" | "снек" | null {
  * «Автоматы» — только список аппаратов (слово владельца): выбрал автомат —
  * открыл его карточку. Живой дефицит, закуп и «что доложить» переехали на
  * соседнюю вкладку «Пополнение», чтобы список не тонул в товарной аналитике.
+ * Поиск, фильтры, сортировка и вид (список/плитки) — в MachinesBrowser.
  */
 export async function VendingMachinesPanel({ machines }: { machines: Entity[] }) {
   // Строка «когда собирали» — контекст свежести; её провал список не роняет.
@@ -78,6 +79,26 @@ export async function VendingMachinesPanel({ machines }: { machines: Entity[] })
     syncLine = lastSyncLine(await core.vendingSyncRuns());
   } catch {
     // список карточек живёт и без журнала сбора
+  }
+
+  // Вид и состояние всего парка одним запросом; провал — фильтры по виду
+  // просто опираются на attrs-категорию.
+  const cardById = new Map<string, { kind: string; status: string; statusNote: string | null }>();
+  try {
+    for (const c of await core.machineCards()) cardById.set(c.entityId, c);
+  } catch {
+    // без карточек вида список остаётся списком
+  }
+
+  // Живая заполненность Ourvend по серийнику — для плиток и сортировки
+  // «кого заправлять». Дополнение: без неё список не падает.
+  const liveBySerial = new Map<string, VendingMachine>();
+  try {
+    for (const m of await core.vendingMachines()) {
+      if (m.status === "ok") liveBySerial.set(normalizeMachineSerial(m.serial), m);
+    }
+  } catch {
+    // живого контура нет — плитки без полосок заполненности
   }
 
   // Наглядные бункеры у кофе-машин (слово владельца): карточка автомата,
@@ -105,6 +126,35 @@ export async function VendingMachinesPanel({ machines }: { machines: Entity[] })
 
   const cards = [...machines].sort((a, b) => a.name.localeCompare(b.name, "ru"));
 
+  const items: MachineListItem[] = cards.map((e) => {
+    const attrs = e.attrs ?? {};
+    const card = cardById.get(e.id);
+    // Канон вида — machine_card; фолбэк — attrs-категория (10 кофе / 11 снек).
+    const kind =
+      card?.kind && card.kind !== "other"
+        ? card.kind
+        : machineKind(e) === "кофе"
+          ? "coffee"
+          : machineKind(e) === "снек"
+            ? "snack"
+            : (card?.kind ?? null);
+    const live = e.externalRef ? liveBySerial.get(normalizeMachineSerial(e.externalRef)) : undefined;
+    const point = attrs["точка"];
+    return {
+      id: e.id,
+      name: e.name,
+      serial: e.externalRef ?? null,
+      point: typeof point === "string" && point !== "" ? point : null,
+      kind,
+      status: card?.status ?? "in_service",
+      statusNote: card?.statusNote ?? null,
+      fillRate: live?.fillRate ?? null,
+      deficit: live?.deficit ?? null,
+      bunkers: bunkersByEntity.get(e.id) ?? null,
+      menuCount: parseMenu(e.attrs).length,
+    };
+  });
+
   return (
     <>
       <p className="lead">
@@ -118,29 +168,7 @@ export async function VendingMachinesPanel({ machines }: { machines: Entity[] })
           Добавь карточку кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
         </div>
       ) : (
-        <div className="rows">
-          {cards.map((e) => {
-            const attrs = e.attrs ?? {};
-            const point = attrs["точка"];
-            const kind = machineKind(e);
-            const bunkers = bunkersByEntity.get(e.id);
-            return (
-              <Link href={`/card/${e.id}`} className="row" key={e.id}>
-                <div className="t">
-                  <b>{e.name}</b>
-                  <small>
-                    {e.externalRef ? `серийник ${e.externalRef}` : "серийник не указан"}
-                    {typeof point === "string" && point !== "" ? ` · ${point}` : ""}
-                  </small>
-                </div>
-                {bunkers && <BunkerLevels rows={bunkers} compact />}
-                <span className={`chip ${kind === "кофе" ? "b" : kind === "снек" ? "g" : ""}`}>
-                  {kind ?? "тип не указан"}
-                </span>
-              </Link>
-            );
-          })}
-        </div>
+        <MachinesBrowser items={items} />
       )}
       <NewEntityForm domain="vendhub" type="machine" label={typeOne("machine")} />
     </>

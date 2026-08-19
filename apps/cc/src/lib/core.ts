@@ -1721,6 +1721,8 @@ export const core = {
     get<MachineCard[]>("/entities/machine-cards/all").then(
       (rows) => rows.find((r) => r.entityId === entityId) ?? null,
     ),
+  /** Виды и состояния всего парка одним запросом — для списка автоматов. */
+  machineCards: () => get<MachineCard[]>("/entities/machine-cards/all"),
   setMachineKind: (entityId: string, kind: string, note?: string) =>
     send<MachineCard>(`/entities/${entityId}/machine-kind`, "PATCH", {
       kind,

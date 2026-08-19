@@ -3,6 +3,7 @@ import {
   core,
   CoreUnavailable,
   type Attachment,
+  type CoffeeFillStatusRow,
   type CoffeePlacementRow,
   type Entity,
   type EntityDraft,
@@ -16,20 +17,32 @@ import {
   type VendingMachine,
 } from "../../../lib/core";
 import { MachineCard360 } from "../../../components/machine-card-360";
+import { BunkerLevels } from "../../../components/bunker-levels";
+import {
+  MenuEditor,
+  type MenuPriceInfo,
+  type MenuProductOption,
+  type UnlinkedSale,
+} from "../../../components/menu-editor";
 import { CoreDown } from "../../../components/core-down";
 import { PhotoGallery } from "../../../components/photo-gallery";
 import { CardToc } from "../../../components/card-toc";
 import { DeleteEntityButton } from "../../../components/entity-delete";
 import { EntityEditor } from "../../../components/entity-editor";
 import { StayTimeline } from "../../../components/machine-stays";
-import { MachinePricesView } from "../../../components/prices-view";
 import { EntityApproval } from "../../../components/entity-approval";
 import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
 import { PlanogramEditor } from "../../../components/planogram-editor";
 import { MachineCardPanel } from "../../../components/machine-card-panel";
 import { MachinePartsPanel } from "../../../components/machine-parts-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
-import { PLACE_TYPES, normalizeMachineSerial, parsePlanogram, parseRecipe } from "@mydon/shared";
+import {
+  PLACE_TYPES,
+  normalizeMachineSerial,
+  parseMenu,
+  parsePlanogram,
+  parseRecipe,
+} from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
 import {
   ComponentInstances,
@@ -49,7 +62,7 @@ import {
 } from "../../../components/product-card-sections";
 import { WarehouseStockView } from "../../../components/warehouse-stock";
 import { DOMAIN_TITLES, typeOne } from "../../../lib/labels";
-import { plural, when } from "../../../lib/format";
+import { when } from "../../../lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -343,6 +356,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // из них расставляется раскладка. Ошибка здесь не роняет карточку.
   const isMachine = entity.type === "machine";
   let planogramProducts: { id: string; name: string; approved: boolean }[] = [];
+  let menuProducts: MenuProductOption[] = [];
   if (isMachine) {
     try {
       const cards = entity.domain ? await core.entitiesOfType(entity.domain, "product") : [];
@@ -351,11 +365,90 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         name: c.name,
         approved: c.approvedAt != null,
       }));
+      // Для меню нужны ещё категория (горячий/холодный) и каталожная цена —
+      // фолбэк, когда у аппарата нет своей (паттерн slot.price ?? product.price).
+      const цена = (v: unknown): number | null => {
+        const n = typeof v === "number" ? v : Number(String(v ?? "").replace(",", "."));
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+      menuProducts = cards
+        .map((c) => {
+          const ca = c.attrs ?? {};
+          const catRaw = Number(ca["категория"]);
+          return {
+            id: c.id,
+            name: c.name,
+            cat: catRaw === 10 || catRaw === 11 ? catRaw : null,
+            // «цена продажи» приоритетнее; нечисловая — падаем на «цена».
+            price: цена(ca["цена продажи"]) ?? цена(ca["цена"]),
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name, "ru"));
     } catch {
       planogramProducts = [];
+      menuProducts = [];
     }
   }
   const planogram = parsePlanogram(entity.attrs);
+  const menu = parseMenu(entity.attrs);
+
+  // Другие автоматы направления — источники готового меню («скопировать как шаблон»).
+  let menuSources: { id: string; name: string }[] = [];
+  if (isMachine && entity.domain) {
+    try {
+      menuSources = (await core.entitiesOfType(entity.domain, "machine"))
+        .filter((m) => m.id !== entity.id && parseMenu(m.attrs).length > 0)
+        .map((m) => ({ id: m.id, name: m.name }))
+        .sort((a, b) => a.name.localeCompare(b.name, "ru"));
+    } catch {
+      menuSources = [];
+    }
+  }
+
+  // История цены по заказам источника — раскрывается в строке меню, а не
+  // вываливается сразу. Привязанные к карточке — по productEntityId (при
+  // нескольких source-именах на одну карточку берём самое продаваемое),
+  // всё, чего нет в меню, уходит в «из истории продаж, не в меню».
+  const menuHistory: Record<string, MenuPriceInfo> = {};
+  const menuUnlinked: UnlinkedSale[] = [];
+  const вМеню = new Set(menu.map((l) => l.productId));
+  for (const it of prices) {
+    const info: MenuPriceInfo = {
+      price: it.price,
+      periods: it.periods.map((p) => ({
+        price: p.price,
+        from: p.from,
+        to: p.to ?? null,
+        orders: p.orders,
+      })),
+      orders: it.orders,
+      mismatched: it.mismatched > 0,
+    };
+    if (it.productEntityId) {
+      const прежняя = menuHistory[it.productEntityId];
+      if (!прежняя || прежняя.orders < info.orders) menuHistory[it.productEntityId] = info;
+      if (!вМеню.has(it.productEntityId)) {
+        // Одна карточка может продаваться под несколькими source-именами —
+        // в списке она ОДНА строка: заказы суммируем, цену берём свежую из
+        // самого продаваемого алиаса.
+        const есть = menuUnlinked.find((u) => u.productId === it.productEntityId);
+        if (есть) {
+          if (it.orders > есть.orders) есть.price = it.price;
+          есть.orders += it.orders;
+        } else {
+          menuUnlinked.push({
+            product: it.productEntityName ?? it.product,
+            price: it.price,
+            orders: it.orders,
+            productId: it.productEntityId,
+          });
+        }
+      }
+    } else {
+      menuUnlinked.push({ product: it.product, price: it.price, orders: it.orders, productId: null });
+    }
+  }
+  menuUnlinked.sort((a, b) => b.orders - a.orders);
 
   // Карточка автомата: вид и состояние. Ошибка чтения не роняет страницу —
   // блок просто не покажется, остальное о карточке важнее.
@@ -397,6 +490,20 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Кофейные бункеры: уровни точки, где стоит аппарат. Содержимое кофейного —
+  // это бункеры, а не слоты; раскладка у него показывается только как легаси,
+  // если её кто-то успел заполнить. Дополнение — ошибка не роняет карточку.
+  let coffeeBunkers: CoffeeFillStatusRow[] = [];
+  if (isMachine) {
+    try {
+      const [точки, уровни] = await Promise.all([core.coffeeLocations(), core.coffeeFillStatus()]);
+      const точка = точки.find((l) => (l.machines ?? []).some((m) => m.entityId === entity.id));
+      if (точка) coffeeBunkers = уровни.filter((r) => r.locationId === точка.id);
+    } catch {
+      coffeeBunkers = [];
+    }
+  }
+
   // Карточка автомата — своя вёрстка (образец «Карточка 360»): hero-шапка,
   // KPI и вкладки-виджеты. Остальные типы живут в общей плоской карточке ниже.
   if (isMachine) {
@@ -419,34 +526,78 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           updatedBy={machineCard?.updatedBy ?? null}
           placements={coffeePlacements}
           live={liveVending}
+          coffee={
+            machineCard?.kind === "coffee"
+              ? {
+                  linked: coffeeBunkers.length > 0,
+                  filled: coffeeBunkers.filter((r) => r.netFillWeight !== null).length,
+                }
+              : null
+          }
           planogramCount={planogram.length}
           partsCount={machineParts.filter((p) => p.removedOn === null).length}
           pricesCount={prices.length}
           photosCount={photos.length}
           hasGeo={hasGeo}
           mapHref={mapHref}
+          menuCount={menu.length}
           slots={{
+            menu: (
+              <MenuEditor
+                machineId={entity.id}
+                domain={entity.domain ?? null}
+                menu={menu}
+                products={menuProducts}
+                machines={menuSources}
+                history={menuHistory}
+                unlinked={menuUnlinked}
+              />
+            ),
             content: (
               <>
-                <PlanogramEditor
-                  entity={{ id: entity.id }}
-                  products={planogramProducts}
-                  planogram={planogram}
-                />
-                {prices.length > 0 && (
-                  <div className="sect" id="prices">
-                    <div className="sect-h">
-                      <h3 className="h2">Чем торгует и почём</h3>
-                      <span className="chip b">
-                        {prices.length} {plural(prices.length, "товар", "товара", "товаров")}
-                      </span>
+                {machineCard?.kind === "coffee" ? (
+                  <>
+                    <div className="sect" id="bunkers">
+                      <div className="sect-h">
+                        <h3 className="h2">Бункеры</h3>
+                        {coffeeBunkers.some((r) => r.netFillWeight !== null) && (
+                          <span className="chip b">
+                            позиций с заливкой:{" "}
+                            {coffeeBunkers.filter((r) => r.netFillWeight !== null).length}
+                          </span>
+                        )}
+                      </div>
+                      {coffeeBunkers.length === 0 ? (
+                        <div className="empty">
+                          <b>Бункеры не привязаны</b>
+                          Содержимое кофейного — восемь бункеров точки, а не слоты.
+                          Уровни появятся, когда аппарат будет стоять на кофе-точке
+                          с заливками — журнал живёт во вкладке «Кофе-бункеры».
+                        </div>
+                      ) : (
+                        <>
+                          <BunkerLevels rows={coffeeBunkers} />
+                          <p className="hint" style={{ marginTop: 8 }}>
+                            Уровень — чистый вес последней заливки против эталона позиции.
+                            Заливки и возвраты — во вкладке «Кофе-бункеры» рабочего места VendHub.
+                          </p>
+                        </>
+                      )}
                     </div>
-                    <MachinePricesView items={prices} />
-                    <p className="hint" style={{ marginTop: 8 }}>
-                      Цена восстановлена из заказов и, как точка, является периодом: пока её
-                      не поменяли, она держится.
-                    </p>
-                  </div>
+                    {planogram.length > 0 && (
+                      <PlanogramEditor
+                        entity={{ id: entity.id }}
+                        products={planogramProducts}
+                        planogram={planogram}
+                      />
+                    )}
+                  </>
+                ) : (
+                  <PlanogramEditor
+                    entity={{ id: entity.id }}
+                    products={planogramProducts}
+                    planogram={planogram}
+                  />
                 )}
               </>
             ),

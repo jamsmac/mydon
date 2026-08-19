@@ -1070,3 +1070,92 @@ a.rowlink:hover { background: var(--surf-2); }
 .mc-attn { cursor: pointer; }
 .mc-attn:hover { border-color: var(--accent-line); }
 .mc-attn:hover .pill { color: var(--accent); }
+
+/* ── Меню автомата (вкладка карточки 360) ── */
+.mcm-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.mcm-chips .chip { cursor: pointer; }
+.mcm-row { background: var(--surf); border: 1px solid var(--line); border-radius: var(--r-s); padding: 10px 12px; }
+.mcm-main { display: flex; gap: 10px; align-items: center; }
+.mcm-main .t { flex: 1; min-width: 0; }
+.mcm-main .t b a { color: inherit; text-decoration: none; }
+.mcm-main .t b a:hover { color: var(--accent); }
+.mcm-main .chip { cursor: pointer; white-space: nowrap; }
+.mcm-price { width: 150px; flex: 0 0 auto; font-family: var(--fm); font-variant-numeric: tabular-nums; }
+.mcm-det { margin-top: 8px; font-size: 12.5px; }
+.mcm-det summary { color: var(--tx-3); cursor: pointer; user-select: none; }
+.mcm-det summary:hover { color: var(--accent); }
+.mcm-hist { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.mcm-per { display: flex; gap: 12px; align-items: baseline; border-top: 1px dashed var(--line); padding-top: 4px; color: var(--tx-2); }
+.mcm-per:first-child { border-top: none; padding-top: 0; }
+.mcm-per b { color: var(--tx); }
+.mcm-per span:nth-child(2) { flex: 1; }
+.mcm-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.mcm-add select { max-width: 340px; }
+.mcm-new { margin-top: 10px; border: 1px dashed var(--line); border-radius: var(--r-s); padding: 12px; }
+@media (max-width: 640px) {
+  .mcm-main { flex-wrap: wrap; }
+  .mcm-price { width: 120px; }
+}
+
+/* ── Браузер парка автоматов: тулбар, плитки ── */
+.mb-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.mb-search { flex: 1 1 240px; min-width: 180px; }
+.mb-seg { display: flex; gap: 2px; background: var(--surf-2); border: 1px solid var(--line); border-radius: var(--r-s); padding: 3px; }
+.mb-seg button {
+  border: none; background: none; color: var(--tx-2); font-size: 15px; line-height: 1;
+  padding: 6px 10px; border-radius: 7px; cursor: pointer;
+}
+.mb-seg button.on { background: var(--surf); color: var(--accent); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); }
+.mb-sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+
+.mb-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+.mb-card {
+  display: flex; flex-direction: column; gap: 6px; background: var(--surf);
+  border: 1px solid var(--line); border-radius: var(--r); padding: 13px 15px;
+  color: inherit; text-decoration: none;
+}
+.mb-card:hover { border-color: var(--accent-line); }
+.mb-head { display: flex; gap: 8px; align-items: center; }
+.mb-emoji { font-size: 18px; flex: 0 0 auto; }
+.mb-name { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-sub { font-size: 11.5px; color: var(--tx-2); }
+.mb-bar { height: 6px; border-radius: 4px; background: var(--surf-2); overflow: hidden; margin-top: 2px; }
+.mb-bar i { display: block; height: 100%; border-radius: 4px; background: var(--ok); }
+.mb-bar i.warn { background: var(--hot); opacity: 0.7; }
+.mb-bar i.crit { background: var(--err); }
+.mb-foot { font-size: 11px; color: var(--tx-3); }
+.mb-bunkers { margin-top: 2px; }
+
+/* ── Виджеты-показатели парка (они же фильтры) ── */
+.mbk-strip {
+  position: sticky; top: var(--tabs-h); z-index: 3;
+  display: flex; gap: 10px; align-items: stretch; overflow-x: auto; scrollbar-width: none;
+  padding: 10px 2px 12px; margin-bottom: 12px;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.mbk {
+  flex: 0 0 auto; min-width: 118px; text-align: left; cursor: pointer;
+  display: flex; flex-direction: column; gap: 3px;
+  background: var(--surf); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 12px 16px; color: inherit; font: inherit;
+}
+.mbk b {
+  font-family: var(--fm); font-variant-numeric: tabular-nums; font-weight: 600;
+  font-size: 26px; line-height: 1.05; letter-spacing: -0.02em; white-space: nowrap;
+}
+.mbk span {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--tx-3); white-space: nowrap;
+}
+.mbk:hover { border-color: var(--accent-line); }
+.mbk.on { border-color: var(--accent); background: var(--accent-soft); }
+.mbk.on span { color: var(--accent); }
+.mbk.hot b { color: var(--hot); }
+.mbk.hot.on { border-color: var(--hot); background: var(--hot-soft); }
+.mbk.hot.on span { color: var(--hot); }
+.mbk.info { cursor: default; border-style: dashed; }
+.mbk.info b { color: var(--ok); }
+@media (max-width: 640px) {
+  .mbk { min-width: 100px; padding: 10px 13px; }
+  .mbk b { font-size: 22px; }
+}
