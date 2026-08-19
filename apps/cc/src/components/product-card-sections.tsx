@@ -515,14 +515,14 @@ export function PlacePlacements({ rows }: { rows: PlacementRow[] }) {
   return (
     <div className="sect" id="placements" data-toc="Аппараты">
       <div className="sect-h">
-        <h3 className="h2">Аппараты на точке</h3>
+        <h3 className="h2">Аппараты на локации</h3>
         <span className="chip">{сейчас.length}</span>
         <span className="sp" />
       </div>
       {сейчас.length === 0 && история.length === 0 ? (
         <div className="empty">
           <b>Аппаратов не было</b>
-          Привязка аппарата к точке делается с его карточки или из «Кофе-бункеров».
+          Привязка аппарата к локации делается с его карточки или из «Кофе-бункеров».
         </div>
       ) : (
         <>

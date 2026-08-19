@@ -598,8 +598,8 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                 {coffeeBunkers.length === 0 ? (
                   <div className="empty">
                     <b>Бункеры не привязаны</b>
-                    Ингредиенты кофейного живут в восьми бункерах точки. Уровни появятся,
-                    когда аппарат будет стоять на кофе-точке с заливками — журнал заливок
+                    Ингредиенты кофейного живут в восьми бункерах локации. Уровни появятся,
+                    когда аппарат будет стоять на кофе-локации с заливками — журнал заливок
                     во вкладке «Кофе-бункеры» рабочего места VendHub.
                   </div>
                 ) : (
@@ -659,7 +659,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                     <div className="empty">
                       <b>Локация не записана</b>
                       Неизвестно, где этот аппарат. Поставьте его на место во вкладке
-                      «Обслуживание» (склад, мастерская или точка продаж) — тогда он появится
+                      «Обслуживание» (склад, мастерская или локация продаж) — тогда он появится
                       на карте и в отчётах по локации.
                     </div>
                   ) : (
@@ -686,7 +686,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                     <div className="result-title">На карте</div>
                     <p>
                       <a href={mapHref} target="_blank" rel="noreferrer">
-                        Открыть точку на карте ({String(lat)}, {String(lng)})
+                        Открыть локацию на карте ({String(lat)}, {String(lng)})
                       </a>
                     </p>
                   </div>
@@ -771,7 +771,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
               target="_blank"
               rel="noreferrer"
             >
-              Открыть точку на карте ({String(lat)}, {String(lng)})
+              Открыть локацию на карте ({String(lat)}, {String(lng)})
             </a>
           </p>
         </div>
