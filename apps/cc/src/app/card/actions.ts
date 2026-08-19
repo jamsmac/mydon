@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { isPlaceType, isUnit, PLACE_ATTR, type RecipeLine } from "@mydon/shared";
+import { isPlaceType, isUnit, parseMenu, PLACE_ATTR, type RecipeLine } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
 
 export interface CreateResult {
@@ -143,6 +143,16 @@ function coerce(value: string): string | number {
  * числами (цена 10000, а не строка «10000») — иначе сломались бы будущие
  * подсчёты. Пустое значение удаляет поле.
  */
+/**
+ * Ключи attrs, которыми управляют СВОИ редакторы (меню, раскладка, рецепт)
+ * или сам Core (истории цен). Паспорт их не правит и не должен возить их
+ * значения через форму: форма открыта долго, и «снимок на момент открытия»
+ * молча откатил бы всё, что за это время сохранили редакторы (тот же класс
+ * бага, что застывшие useState-инициализаторы). Берём их из СВЕЖЕЙ карточки
+ * в момент сохранения.
+ */
+const MANAGED_ATTR_KEYS = ["меню", "раскладка", "состав", "история цен", "история цены покупки"];
+
 export async function saveEntity(id: string, form: FormData): Promise<ActionResult> {
   const name = String(form.get("name") ?? "").trim();
   if (name.length === 0) return { ok: false, error: "Имя не может быть пустым" };
@@ -160,6 +170,19 @@ export async function saveEntity(id: string, form: FormData): Promise<ActionResu
   const newValue = String(form.get("newValue") ?? "").trim();
   if (newKey.length > 0 && newValue.length > 0) {
     attrs[newKey] = coerce(newValue);
+  }
+
+  // Управляемые ключи — из свежей карточки, а не из формы (см. MANAGED_ATTR_KEYS).
+  try {
+    const fresh = await core.entity(id);
+    const freshAttrs = fresh.attrs ?? {};
+    for (const k of MANAGED_ATTR_KEYS) {
+      if (freshAttrs[k] !== undefined) attrs[k] = freshAttrs[k];
+      else delete attrs[k];
+    }
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Карточка не найдена" };
   }
 
   try {
@@ -396,6 +419,175 @@ export async function savePlanogram(id: string, rawLines: unknown): Promise<Acti
   }
   revalidatePath(`/card/${id}`);
   return { ok: true };
+}
+
+/** Почистить сырые строки меню: товар обязателен, цена — число > 0 или null. */
+function cleanMenuLines(rawLines: unknown): { productId: string; price: number | null }[] {
+  const lines: { productId: string; price: number | null }[] = [];
+  const seen = new Set<string>();
+  if (!Array.isArray(rawLines)) return lines;
+  for (const item of rawLines) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    const productId = typeof o.productId === "string" ? o.productId : "";
+    if (productId.length === 0 || seen.has(productId)) continue;
+    seen.add(productId);
+    const n = typeof o.price === "number" ? o.price : Number(String(o.price ?? "").replace(",", "."));
+    lines.push({ productId, price: Number.isFinite(n) && n > 0 ? n : null });
+  }
+  return lines;
+}
+
+/** Записать меню в attrs карточки автомата, не трогая прочие поля. */
+async function writeMenu(
+  id: string,
+  lines: { productId: string; price: number | null }[],
+): Promise<ActionResult> {
+  let entity;
+  try {
+    entity = await core.entity(id);
+  } catch (err) {
+    return fail(err);
+  }
+  const attrs: Record<string, unknown> = { ...(entity.attrs ?? {}) };
+  if (lines.length > 0) attrs["меню"] = JSON.stringify(lines);
+  else delete attrs["меню"];
+  try {
+    await core.updateEntity(id, { name: entity.name, externalRef: entity.externalRef, attrs });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${id}`);
+  return { ok: true };
+}
+
+/**
+ * Меню автомата: ассортимент с ценой аппарата (null — по товару).
+ *
+ * `base` — снимок меню, который редактор ПОКАЗЫВАЛ владельцу
+ * (JSON.stringify(parseMenu(...)) на момент загрузки/последнего сохранения).
+ * Если на сервере уже другое меню — правили из второго окна — сохранение
+ * отклоняется, а не перетирает чужое целым массивом (last-write-wins это
+ * молчаливая порча: удалённые позиции воскресают, чужие цены откатываются).
+ */
+export async function saveMenu(
+  id: string,
+  rawLines: unknown,
+  base?: string,
+): Promise<ActionResult> {
+  if (typeof base === "string") {
+    let entity;
+    try {
+      entity = await core.entity(id);
+    } catch (err) {
+      return fail(err);
+    }
+    if (JSON.stringify(parseMenu(entity.attrs)) !== base) {
+      return {
+        ok: false,
+        error: "Меню изменилось в другом месте — обнови страницу и повтори правку",
+      };
+    }
+  }
+  return writeMenu(id, cleanMenuLines(rawLines));
+}
+
+/**
+ * Скопировать меню с другого автомата — целиком, как шаблон.
+ *
+ * Замена, а не слияние: «скопировать» в устах владельца значит «сделай как
+ * там», и полу-смешанное меню после копии выглядело бы как ошибка.
+ */
+export async function copyMenuFrom(id: string, fromId: string): Promise<ActionResult> {
+  if (id === fromId) return { ok: false, error: "Это тот же автомат" };
+  let source;
+  try {
+    source = await core.entity(fromId);
+  } catch (err) {
+    return fail(err);
+  }
+  const lines = parseMenu(source.attrs);
+  if (lines.length === 0) return { ok: false, error: `У «${source.name}» меню пусто — копировать нечего` };
+  return writeMenu(id, lines);
+}
+
+/**
+ * Горячее/холодное — категория КАРТОЧКИ ТОВАРА (10 кофейные / 11 прохладительные),
+ * а не поле меню: один источник истины, тумблер в меню его переключает.
+ * `machineId` нужен только чтобы обновить открытую карточку автомата.
+ */
+export async function setProductCategory(
+  productId: string,
+  category: 10 | 11,
+  machineId?: string,
+): Promise<ActionResult> {
+  let product;
+  try {
+    product = await core.entity(productId);
+  } catch (err) {
+    return fail(err);
+  }
+  const attrs: Record<string, unknown> = { ...(product.attrs ?? {}), категория: category };
+  try {
+    await core.updateEntity(productId, {
+      name: product.name,
+      externalRef: product.externalRef,
+      attrs,
+    });
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath(`/card/${productId}`);
+  if (machineId) revalidatePath(`/card/${machineId}`);
+  return { ok: true };
+}
+
+/**
+ * Создать товар прямо из меню автомата: карточка появляется В КАТАЛОГЕ
+ * направления (как обычная), и тут же встаёт строкой меню без своей цены —
+ * цена аппарата задаётся отдельно, если она отличается от каталожной.
+ */
+export async function createMenuProduct(
+  domain: string,
+  machineId: string,
+  form: FormData,
+): Promise<CreateResult & { id?: string }> {
+  const name = String(form.get("name") ?? "").trim();
+  if (name.length < 2) return { ok: false, error: "Впиши название" };
+  const attrs: Record<string, unknown> = {};
+  const price = String(form.get("price") ?? "").trim();
+  if (/^\d+$/.test(price)) attrs["цена"] = Number(price);
+  const cat = String(form.get("cat") ?? "").trim();
+  if (cat === "10" || cat === "11") attrs["категория"] = Number(cat);
+
+  // Тёзка уже в каталоге (в т.ч. после «зависшего» ретрая) — не плодим дубль,
+  // а ставим в меню существующую карточку.
+  let product;
+  try {
+    const тёзка = (await core.entitiesOfType(domain, "product")).find(
+      (p) => p.name.trim().toLowerCase() === name.toLowerCase(),
+    );
+    product = тёзка ?? (await core.createEntity({ domain, type: "product", name, attrs }));
+  } catch (err) {
+    const f = fail(err);
+    return { ok: false, error: f.error ?? "Не удалось создать товар" };
+  }
+
+  let machine;
+  try {
+    machine = await core.entity(machineId);
+  } catch (err) {
+    const f = fail(err);
+    return { ok: false, error: f.error ?? "Товар создан, но автомат не найден" };
+  }
+  const текущее = parseMenu(machine.attrs);
+  const lines = текущее.some((l) => l.productId === product.id)
+    ? текущее
+    : [...текущее, { productId: product.id, price: null }];
+  const res = await writeMenu(machineId, lines);
+  if (!res.ok) return { ok: false, error: res.error ?? "Товар создан, но в меню не встал" };
+  revalidatePath(`/domain/${domain}`);
+  return { ok: true, id: product.id };
 }
 
 /**

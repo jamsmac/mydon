@@ -92,6 +92,7 @@ export function MachineCard360({
   live,
   coffee,
   planogramCount,
+  menuCount,
   partsCount,
   pricesCount,
   photosCount,
@@ -115,8 +116,11 @@ export function MachineCard360({
   photosCount: number;
   hasGeo: boolean;
   mapHref: string | null;
+  /** Позиций в меню — бейдж вкладки. */
+  menuCount: number;
   /** Контент вкладок: карточка собирает, страница поставляет. */
   slots: {
+    menu: ReactNode;
     content: ReactNode;
     service: ReactNode;
     place: ReactNode;
@@ -267,7 +271,7 @@ export function MachineCard360({
                     </div>
                   </div>
                   {pricesCount > 0 && (
-                    <div className="tile" data-mc-tab="content" role="button" tabIndex={0}>
+                    <div className="tile" data-mc-tab="menu" role="button" tabIndex={0}>
                       <span className="lab">Прайс</span>
                       <div className="v">{pricesCount}</div>
                       <div className="foot">
@@ -343,6 +347,12 @@ export function MachineCard360({
                 </div>
               </>
             ),
+          },
+          {
+            key: "menu",
+            label: "Меню",
+            badge: menuCount > 0 ? String(menuCount) : undefined,
+            content: slots.menu,
           },
           {
             key: "content",

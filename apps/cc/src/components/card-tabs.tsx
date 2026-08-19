@@ -21,11 +21,16 @@ export function CardTabs({
   const first = items[0]?.key ?? "";
   const [active, setActive] = useState(first);
 
-  // Прямая ссылка вида /card/…#t-passport открывает нужную вкладку.
-  // Пустые зависимости нарочно: хэш читается один раз, на маунте.
+  // Прямая ссылка вида /card/…#t-passport открывает нужную вкладку — и на
+  // маунте, и при смене хэша без перезагрузки (переход по ссылке внутри страницы).
   useEffect(() => {
-    const k = window.location.hash.replace(/^#t-/, "");
-    if (k && items.some((i) => i.key === k)) setActive(k);
+    const apply = () => {
+      const k = window.location.hash.replace(/^#t-/, "");
+      if (k && items.some((i) => i.key === k)) setActive(k);
+    };
+    apply();
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
   }, []);
 
   useEffect(() => {

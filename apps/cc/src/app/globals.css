@@ -1070,3 +1070,29 @@ a.rowlink:hover { background: var(--surf-2); }
 .mc-attn { cursor: pointer; }
 .mc-attn:hover { border-color: var(--accent-line); }
 .mc-attn:hover .pill { color: var(--accent); }
+
+/* ── Меню автомата (вкладка карточки 360) ── */
+.mcm-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.mcm-chips .chip { cursor: pointer; }
+.mcm-row { background: var(--surf); border: 1px solid var(--line); border-radius: var(--r-s); padding: 10px 12px; }
+.mcm-main { display: flex; gap: 10px; align-items: center; }
+.mcm-main .t { flex: 1; min-width: 0; }
+.mcm-main .t b a { color: inherit; text-decoration: none; }
+.mcm-main .t b a:hover { color: var(--accent); }
+.mcm-main .chip { cursor: pointer; white-space: nowrap; }
+.mcm-price { width: 150px; flex: 0 0 auto; font-family: var(--fm); font-variant-numeric: tabular-nums; }
+.mcm-det { margin-top: 8px; font-size: 12.5px; }
+.mcm-det summary { color: var(--tx-3); cursor: pointer; user-select: none; }
+.mcm-det summary:hover { color: var(--accent); }
+.mcm-hist { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.mcm-per { display: flex; gap: 12px; align-items: baseline; border-top: 1px dashed var(--line); padding-top: 4px; color: var(--tx-2); }
+.mcm-per:first-child { border-top: none; padding-top: 0; }
+.mcm-per b { color: var(--tx); }
+.mcm-per span:nth-child(2) { flex: 1; }
+.mcm-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.mcm-add select { max-width: 340px; }
+.mcm-new { margin-top: 10px; border: 1px dashed var(--line); border-radius: var(--r-s); padding: 12px; }
+@media (max-width: 640px) {
+  .mcm-main { flex-wrap: wrap; }
+  .mcm-price { width: 120px; }
+}

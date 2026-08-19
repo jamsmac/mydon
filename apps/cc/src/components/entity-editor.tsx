@@ -24,6 +24,20 @@ const PRODUCT_KEYS = new Set<string>(["вид", ...RESALE_FIELDS, "истори�
 const INGREDIENT_KEYS = new Set<string>(["цена покупки", "единица", "история цены покупки"]);
 
 /**
+ * Ключи со своими редакторами (меню, раскладка, рецепт) и авто-истории Core.
+ * В паспорте их не показываем и через форму не возим: saveEntity берёт их из
+ * свежей карточки в момент сохранения (MANAGED_ATTR_KEYS в actions.ts) —
+ * иначе снимок формы откатывал бы параллельные правки этих редакторов.
+ */
+const MANAGED_KEYS = new Set<string>([
+  "меню",
+  "раскладка",
+  "состав",
+  "история цен",
+  "история цены покупки",
+]);
+
+/**
  * Редактор карточки: как в ПО владельца — поля пополняются и меняются на месте.
  * Пустое значение убирает поле; внизу можно добавить новое.
  */
@@ -52,7 +66,7 @@ export function EntityEditor({ entity }: { entity: Entity }) {
   // цена покупки и единица. Из общего списка их убираем, иначе те же поля
   // появятся дважды.
   const hidden = isProduct ? PRODUCT_KEYS : isIngredient ? INGREDIENT_KEYS : null;
-  const attrs = hidden ? attrsAll.filter(([k]) => !hidden.has(k)) : attrsAll;
+  const attrs = attrsAll.filter(([k]) => !MANAGED_KEYS.has(k) && !(hidden?.has(k) ?? false));
   const [editing, setEditing] = useState(false);
   const initialKind = typeof entity.attrs?.["вид"] === "string" ? String(entity.attrs["вид"]) : "";
   const [kind, setKind] = useState(initialKind);
