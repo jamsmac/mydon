@@ -18,7 +18,7 @@ import {
 } from "../../../lib/core";
 import { MachineCard360 } from "../../../components/machine-card-360";
 import { LocationPanel } from "../../../components/location-panel";
-import { BunkerLevels } from "../../../components/bunker-levels";
+import { BunkerTiles } from "../../../components/bunker-tiles";
 import {
   MenuEditor,
   type MenuPriceInfo,
@@ -605,7 +605,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   </div>
                 ) : (
                   <>
-                    <BunkerLevels rows={coffeeBunkers} />
+                    <BunkerTiles rows={coffeeBunkers} />
                     <p className="hint" style={{ marginTop: 8 }}>
                       Уровень — чистый вес последней заливки против эталона позиции.
                       Заливки и возвраты — во вкладке «Кофе-бункеры» рабочего места VendHub.
