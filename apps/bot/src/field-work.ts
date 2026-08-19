@@ -5,8 +5,11 @@ import {
   INSPECTION_TYPES,
   PART_KINDS,
   PART_LABELS,
+  PART_LOCATION_LABELS,
+  PART_OFF_LOCATIONS,
   PART_SWAP_REASONS,
   SWAP_REASON_LABELS,
+  type PartLocation,
   SYMPTOM_LABELS,
   PROBLEM_SYMPTOMS,
   PROBLEM_URGENCIES,
@@ -66,16 +69,28 @@ export type FieldFlow = (typeof FIELD_FLOWS)[number];
 // ── Замена узла (pt:) ───────────────────────────────────────────────────────
 
 export type PartReplaceCallback =
+  | { kind: "action"; action: "swap" | "remove" | "install" }
   | { kind: "part"; part: PartKind }
   | { kind: "morePartsPage" }
   | { kind: "noSerial" }
   | { kind: "reason"; reason: PartSwapReason }
+  | { kind: "removePick"; part: PartKind; slot: number | null }
+  | { kind: "removeTo"; to: PartLocation }
+  | { kind: "installFrom"; partId: string }
+  | { kind: "installNew" }
+  | { kind: "slot"; slot: number | null }
   | { kind: "cancel" };
 
 export function parsePartReplaceCallback(data: string): PartReplaceCallback | null {
   if (data === "pt:more") return { kind: "morePartsPage" };
   if (data === "pt:s0") return { kind: "noSerial" };
   if (data === "pt:x") return { kind: "cancel" };
+  if (data === "pt:new") return { kind: "installNew" };
+  const action = /^pt:a:(swap|rm|in)$/.exec(data);
+  if (action) {
+    const map = { swap: "swap", rm: "remove", in: "install" } as const;
+    return { kind: "action", action: map[action[1] as "swap" | "rm" | "in"] };
+  }
   const part = /^pt:u:([a-z_]{3,20})$/.exec(data);
   if (part && (PART_KINDS as readonly string[]).includes(part[1])) {
     return { kind: "part", part: part[1] as PartKind };
@@ -83,6 +98,22 @@ export function parsePartReplaceCallback(data: string): PartReplaceCallback | nu
   const reason = /^pt:r:([a-z]{4,10})$/.exec(data);
   if (reason && (PART_SWAP_REASONS as readonly string[]).includes(reason[1])) {
     return { kind: "reason", reason: reason[1] as PartSwapReason };
+  }
+  const rm = /^pt:rm:([a-z_]{3,20}):(\d{1,2})$/.exec(data);
+  if (rm && (PART_KINDS as readonly string[]).includes(rm[1])) {
+    const slot = Number(rm[2]);
+    return { kind: "removePick", part: rm[1] as PartKind, slot: slot > 0 ? slot : null };
+  }
+  const to = /^pt:to:([a-z]{4,12})$/.exec(data);
+  if (to && (PART_OFF_LOCATIONS as readonly string[]).includes(to[1])) {
+    return { kind: "removeTo", to: to[1] as PartLocation };
+  }
+  const from = /^pt:in:([0-9a-f-]{36})$/.exec(data);
+  if (from) return { kind: "installFrom", partId: from[1] };
+  const slot = /^pt:sl:(\d{1,2})$/.exec(data);
+  if (slot) {
+    const n = Number(slot[1]);
+    return { kind: "slot", slot: n > 0 ? n : null };
   }
   return null;
 }
@@ -97,6 +128,40 @@ function partKeyboard(all: boolean): NonNullable<StaffReply["keyboard"]> {
   // Показывать технику 21 кнопку значит заставить его листать там, где нужны
   // три. Редкие узлы — за «ещё».
   if (!all) rows.push([{ text: "⋯ Другой узел", callback_data: "pt:more" }]);
+  rows.push([{ text: "✖️ Отмена", callback_data: "pt:x" }]);
+  return { inline_keyboard: rows };
+}
+
+/** Узлы, которых на автомате несколько, — у них спрашиваем номер места. */
+const MULTI_SLOT: readonly PartKind[] = ["hopper", "mixer", "spiral"];
+
+function actionKeyboard(): NonNullable<StaffReply["keyboard"]> {
+  // Замена — первой: это самый частый случай, ради неё мастер и открывают.
+  return {
+    inline_keyboard: [
+      [{ text: "🔁 Заменить", callback_data: "pt:a:swap" }],
+      [{ text: "⬇️ Снять (увезти)", callback_data: "pt:a:rm" }],
+      [{ text: "⬆️ Поставить", callback_data: "pt:a:in" }],
+      [{ text: "✖️ Отмена", callback_data: "pt:x" }],
+    ],
+  };
+}
+
+function offLocationKeyboard(): NonNullable<StaffReply["keyboard"]> {
+  const rows = PART_OFF_LOCATIONS.map((l) => [
+    { text: PART_LOCATION_LABELS[l], callback_data: `pt:to:${l}` },
+  ]);
+  rows.push([{ text: "✖️ Отмена", callback_data: "pt:x" }]);
+  return { inline_keyboard: rows };
+}
+
+function slotKeyboard(kind: PartKind): NonNullable<StaffReply["keyboard"]> {
+  const rows: { text: string; callback_data: string }[][] = [];
+  if (MULTI_SLOT.includes(kind)) {
+    rows.push([1, 2, 3, 4].map((n) => ({ text: `№${n}`, callback_data: `pt:sl:${n}` })));
+    rows.push([5, 6, 7, 8].map((n) => ({ text: `№${n}`, callback_data: `pt:sl:${n}` })));
+  }
+  rows.push([{ text: "Без номера", callback_data: "pt:sl:0" }]);
   rows.push([{ text: "✖️ Отмена", callback_data: "pt:x" }]);
   return { inline_keyboard: rows };
 }
@@ -120,24 +185,43 @@ export function partReplaceStepHint(step: string): string {
   switch (step) {
     case "object":
       return "Выбери автомат кнопкой.";
+    case "action":
+      return "Выбери действие кнопкой: заменить, снять или поставить.";
     case "part":
+    case "inpart":
       return "Выбери узел кнопкой.";
     case "serial":
       return "Напиши серийный номер нового узла или жми «Не знаю».";
+    case "inserial":
+      return "Напиши серийный номер узла или жми «Не знаю».";
     case "reason":
       return "Выбери причину замены кнопкой.";
+    case "rmpart":
+      return "Выбери, какой узел снял.";
+    case "rmto":
+      return "Выбери, куда увёз узел.";
+    case "insrc":
+      return "Выбери узел со склада или «Новый узел».";
+    case "inslot":
+      return "Выбери номер места кнопкой.";
     default:
       return "Продолжай по кнопкам.";
   }
 }
 
-/** Шаг «серийник»: текст сотрудника. */
+/** Шаг «серийник»: текст сотрудника. Общий для замены и установки. */
 export function handlePartSerial(chatId: number, text: string, deps: FieldDeps): StaffReply {
   const conv = deps.conversations.get(chatId);
-  if (conv?.flow !== "part-replace" || conv.step !== "serial") {
+  if (conv?.flow !== "part-replace" || (conv.step !== "serial" && conv.step !== "inserial")) {
     return { text: "Замена прервалась. Начни заново кнопкой «🔧 Замена детали»." };
   }
-  deps.conversations.advance(chatId, "reason", { newSerial: text.trim().slice(0, 64) });
+  const serial = text.trim().slice(0, 64);
+  if (conv.step === "inserial") {
+    const kind = String(conv.data.partKind ?? "other") as PartKind;
+    deps.conversations.advance(chatId, "inslot", { newSerial: serial });
+    return { text: "Куда встал узел?", keyboard: slotKeyboard(kind) };
+  }
+  deps.conversations.advance(chatId, "reason", { newSerial: serial });
   return { text: "Почему меняли?", keyboard: reasonKeyboard() };
 }
 
@@ -167,7 +251,200 @@ export async function handlePartReplaceCallback(
     return { answer: "Все узлы", message: { text: "Какой узел?", keyboard: partKeyboard(true) } };
   }
 
+  // Развилка после выбора автомата: замена — прежний путь, снятие и установка —
+  // новые. Снятый узел не исчезает из учёта: он уезжает в мойку/ремонт и
+  // возвращается установкой со склада.
+  if (cb.kind === "action") {
+    const entityId = String(conv.data.entityId ?? "");
+    if (cb.action === "swap") {
+      deps.conversations.advance(chatId, "part", {});
+      return { answer: "Замена", message: { text: "Какой узел меняли?", keyboard: partKeyboard(false) } };
+    }
+    if (cb.action === "remove") {
+      const parts = (await deps.core.machineParts(entityId)).filter((p) => p.removedOn === null);
+      if (parts.length === 0) {
+        deps.conversations.clear(chatId);
+        return {
+          answer: "Узлов нет",
+          message: {
+            text:
+              "На этом автомате узлы в реестре не заведены — снимать нечего.\n" +
+              "Если узел ставили без записи, оформи «Заменить»: она заведёт учёт.",
+          },
+        };
+      }
+      const rows = parts.slice(0, 12).map((p) => [
+        {
+          text:
+            PART_LABELS[p.partKind as PartKind] +
+            (p.slot !== null ? ` №${p.slot}` : "") +
+            (p.serialNumber ? ` · ${p.serialNumber.slice(-8)}` : ""),
+          callback_data: `pt:rm:${p.partKind}:${p.slot ?? 0}`,
+        },
+      ]);
+      rows.push([{ text: "✖️ Отмена", callback_data: "pt:x" }]);
+      deps.conversations.advance(chatId, "rmpart", {});
+      return { answer: "Снятие", message: { text: "Какой узел снял?", keyboard: { inline_keyboard: rows } } };
+    }
+    // install
+    const storage = await deps.core.storageParts();
+    const map: Record<string, string> = {};
+    const rows = storage.slice(0, 8).map((p) => {
+      map[p.id] = p.partKind;
+      return [
+        {
+          text:
+            PART_LABELS[p.partKind as PartKind] +
+            (p.serialNumber ? ` · ${p.serialNumber.slice(-8)}` : "") +
+            ` · ${PART_LOCATION_LABELS[p.location as PartLocation] ?? p.location}`,
+          callback_data: `pt:in:${p.id}`,
+        },
+      ];
+    });
+    rows.push([{ text: "🆕 Новый узел", callback_data: "pt:new" }]);
+    rows.push([{ text: "✖️ Отмена", callback_data: "pt:x" }]);
+    deps.conversations.advance(chatId, "insrc", { storage: map });
+    return {
+      answer: "Установка",
+      message: {
+        text: storage.length > 0 ? "Что ставишь? Учтённые узлы — со склада и мойки:" : "Что ставишь?",
+        keyboard: { inline_keyboard: rows },
+      },
+    };
+  }
+
+  if (cb.kind === "removePick") {
+    deps.conversations.advance(chatId, "rmto", { partKind: cb.part, slot: cb.slot });
+    return {
+      answer: PART_LABELS[cb.part],
+      message: { text: `${PART_LABELS[cb.part]}. Куда увёз?`, keyboard: offLocationKeyboard() },
+    };
+  }
+
+  if (cb.kind === "removeTo") {
+    const entityId = String(conv.data.entityId ?? "");
+    const partKind = String(conv.data.partKind ?? "");
+    if (!entityId || !partKind) {
+      deps.conversations.clear(chatId);
+      return { answer: "Данные потерялись", message: { text: "Что-то потерялось — начни заново." } };
+    }
+    const slot = typeof conv.data.slot === "number" ? conv.data.slot : undefined;
+    const name = String(conv.data.entityName ?? "автомат");
+    let res: Awaited<ReturnType<CoreClient["removePart"]>>;
+    try {
+      res = await deps.core.removePart({
+        machineId: entityId,
+        partKind,
+        ...(slot !== undefined ? { slot } : {}),
+        toLocation: cb.to,
+        personId: person.id,
+        ...masterClientKey("pt", conv.data, `rm-${cb.to}`),
+        createdBy: `person:${person.id}`,
+      });
+    } catch (e) {
+      deps.conversations.clear(chatId);
+      return {
+        answer: "Не вышло",
+        message: { text: `Не смог записать снятие: ${e instanceof Error ? e.message : "ошибка"}. Начни заново.` },
+      };
+    }
+    return {
+      answer: "Снятие записано",
+      message: {
+        text:
+          `✅ Записал снятие.\n🏷 ${name}\n🔧 ${PART_LABELS[partKind as PartKind]}` +
+          `${slot !== undefined ? ` №${slot}` : ""}` +
+          `${res.removed.serialNumber ? `\n🆔 ${res.removed.serialNumber}` : ""}` +
+          `\n📍 Узел теперь: ${PART_LOCATION_LABELS[cb.to].toLowerCase()} — он числится там и вернётся установкой.` +
+          photoHint(),
+        keyboard: afterPhotoKeyboard(),
+      },
+      ...startAfterPhoto(chatId, "maintenance_log", res.log.id, "снятию", deps),
+    };
+  }
+
+  if (cb.kind === "installFrom") {
+    const map = (conv.data.storage ?? {}) as Record<string, string>;
+    const kind = map[cb.partId];
+    if (!kind) {
+      deps.conversations.clear(chatId);
+      return { answer: "Кнопка устарела", message: { text: "Список склада устарел — начни заново." } };
+    }
+    deps.conversations.advance(chatId, "inslot", { partId: cb.partId, partKind: kind });
+    return {
+      answer: PART_LABELS[kind as PartKind],
+      message: { text: "Куда встал узел?", keyboard: slotKeyboard(kind as PartKind) },
+    };
+  }
+
+  if (cb.kind === "installNew") {
+    deps.conversations.advance(chatId, "inpart", {});
+    return { answer: "Новый узел", message: { text: "Какой узел ставишь?", keyboard: partKeyboard(false) } };
+  }
+
+  if (cb.kind === "slot") {
+    const entityId = String(conv.data.entityId ?? "");
+    const partKind = String(conv.data.partKind ?? "");
+    if (!entityId || !partKind) {
+      deps.conversations.clear(chatId);
+      return { answer: "Данные потерялись", message: { text: "Что-то потерялось — начни заново." } };
+    }
+    const name = String(conv.data.entityName ?? "автомат");
+    const partId = typeof conv.data.partId === "string" ? conv.data.partId : undefined;
+    const newSerial = typeof conv.data.newSerial === "string" ? conv.data.newSerial : undefined;
+    let res: Awaited<ReturnType<CoreClient["installPart"]>>;
+    try {
+      res = await deps.core.installPart({
+        machineId: entityId,
+        partKind,
+        ...(cb.slot !== null ? { slot: cb.slot } : {}),
+        ...(partId ? { partId } : {}),
+        ...(newSerial ? { serialNumber: newSerial } : {}),
+        personId: person.id,
+        ...masterClientKey("pt", conv.data, `in-${cb.slot ?? 0}`),
+        createdBy: `person:${person.id}`,
+      });
+    } catch (e) {
+      deps.conversations.clear(chatId);
+      return {
+        answer: "Не вышло",
+        // Самая частая причина — место занято: там уже числится узел, и
+        // правильная операция — «Заменить», она снимет прежний.
+        message: { text: `Не смог записать установку: ${e instanceof Error ? e.message : "ошибка"}. Начни заново.` },
+      };
+    }
+    return {
+      answer: "Установка записана",
+      message: {
+        text:
+          `✅ Записал установку.\n🏷 ${name}\n🔧 ${PART_LABELS[partKind as PartKind]}` +
+          `${cb.slot !== null ? ` №${cb.slot}` : ""}` +
+          `${res.installed.serialNumber ? `\n🆔 ${res.installed.serialNumber}` : ""}` +
+          photoHint(),
+        keyboard: afterPhotoKeyboard(),
+      },
+      ...startAfterPhoto(chatId, "maintenance_log", res.log.id, "установке", deps),
+    };
+  }
+
   if (cb.kind === "part") {
+    // Одна клавиатура узлов на два пути: замена спрашивает серийник и причину,
+    // установка — серийник и место. Ветка определяется шагом беседы.
+    if (conv.step === "inpart") {
+      deps.conversations.advance(chatId, "inserial", { partKind: cb.part });
+      return {
+        answer: PART_LABELS[cb.part],
+        message: {
+          text: `${PART_LABELS[cb.part]}. Серийный номер узла?`,
+          keyboard: {
+            inline_keyboard: [
+              [{ text: "Не знаю / нет номера", callback_data: "pt:s0" }],
+              [{ text: "✖️ Отмена", callback_data: "pt:x" }],
+            ],
+          },
+        },
+      };
+    }
     deps.conversations.advance(chatId, "serial", { partKind: cb.part });
     return {
       answer: PART_LABELS[cb.part],
@@ -184,6 +461,11 @@ export async function handlePartReplaceCallback(
   }
 
   if (cb.kind === "noSerial") {
+    if (conv.step === "inserial") {
+      const kind = String(conv.data.partKind ?? "other") as PartKind;
+      deps.conversations.advance(chatId, "inslot", { newSerial: null });
+      return { answer: "Без номера", message: { text: "Куда встал узел?", keyboard: slotKeyboard(kind) } };
+    }
     deps.conversations.advance(chatId, "reason", { newSerial: null });
     return { answer: "Без номера", message: { text: "Почему меняли?", keyboard: reasonKeyboard() } };
   }
@@ -697,8 +979,8 @@ export async function onObjectPicked(
 
   switch (conv.flow) {
     case "part-replace":
-      deps.conversations.advance(chatId, "part", { entityId, entityName: name });
-      return { text: `${name}. Какой узел меняли?`, keyboard: partKeyboard(false) };
+      deps.conversations.advance(chatId, "action", { entityId, entityName: name });
+      return { text: `${name}. Что делаем с узлом?`, keyboard: actionKeyboard() };
     case "clean":
       deps.conversations.advance(chatId, "target", { entityId, entityName: name });
       return { text: `${name}. Что чистили?`, keyboard: cleanKeyboard() };

@@ -550,6 +550,51 @@ export class CoreClient {
     return this.request("/maintenance/part-swap", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** Узлы автомата: открытые периоды первыми, затем история. */
+  machineParts(machineId: string): Promise<
+    { id: string; partKind: string; slot: number | null; serialNumber: string | null; removedOn: string | null }[]
+  > {
+    return this.request(`/maintenance/parts?machineId=${machineId}`);
+  }
+
+  /** Узлы вне автоматов: склад, мойка, сушка, ремонт. */
+  storageParts(): Promise<
+    { id: string; partKind: string; serialNumber: string | null; location: string }[]
+  > {
+    return this.request("/maintenance/parts/storage");
+  }
+
+  /** Установка узла: со склада (partId) или новый. */
+  installPart(input: {
+    machineId: string;
+    partKind: string;
+    slot?: number;
+    partId?: string;
+    serialNumber?: string;
+    personId?: string;
+    note?: string;
+    /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+    clientKey?: string;
+    createdBy?: string;
+  }): Promise<{ log: { id: string }; installed: { serialNumber: string | null } }> {
+    return this.request("/maintenance/part-install", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /** Снятие узла: период на автомате закрывается, узел уезжает в мойку/ремонт. */
+  removePart(input: {
+    machineId: string;
+    partKind: string;
+    slot?: number;
+    toLocation: string;
+    personId?: string;
+    note?: string;
+    /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
+    clientKey?: string;
+    createdBy?: string;
+  }): Promise<{ log: { id: string }; removed: { serialNumber: string | null } }> {
+    return this.request("/maintenance/part-remove", { method: "POST", body: JSON.stringify(input) });
+  }
+
   /** Что подходит к сроку. Статус считается на чтении, нигде не хранится. */
   maintenanceDue(): Promise<MaintenanceDueRow[]> {
     return this.request("/maintenance/due");
