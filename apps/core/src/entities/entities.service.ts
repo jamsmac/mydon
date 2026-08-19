@@ -532,6 +532,12 @@ export class EntitiesService {
         name: entity.name,
         externalRef: entity.externalRef,
         attrs: entity.attrs,
+        // Утверждение и провенанс — как в списочном чтении: карточка судит
+        // «факт или ждёт слова» именно по этим полям, и их отсутствие здесь
+        // рисовало «ждёт утверждения» на всех утверждённых карточках.
+        approvedAt: entity.approvedAt,
+        approvedBy: entity.approvedBy,
+        createdFrom: entity.createdFrom,
         createdAt: entity.createdAt,
         updatedAt: entity.updatedAt,
         domain: org.code,
