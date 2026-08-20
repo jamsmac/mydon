@@ -463,8 +463,11 @@ export default async function DomainPage({
   const parkInService = (machineCards ?? []).filter((m) => (m.status || "in_service") === "in_service");
   const parkWarehouse = (machineCards ?? []).filter((m) => m.status === "warehouse");
   const parkRepair = (machineCards ?? []).filter((m) => m.status === "repair");
+  // Явный подсчёт по виду, а не вычитанием: kind === "other"/"drink"/"combo"/
+  // не размечен молча утекал бы в «снек» и врал про состав парка.
   const parkInServiceCoffee = parkInService.filter((m) => m.kind === "coffee").length;
-  const parkInServiceSnack = parkInService.length - parkInServiceCoffee;
+  const parkInServiceSnack = parkInService.filter((m) => m.kind === "snack").length;
+  const parkInServiceOther = parkInService.length - parkInServiceCoffee - parkInServiceSnack;
   const cupsPerMachine =
     coffeeOrders !== null
       ? Math.round(coffeeOrders.всего.чашек / Math.max(1, coffeeOrders.поАвтоматам.length))
@@ -810,190 +813,80 @@ export default async function DomainPage({
             </div>
           )}
 
-          {/* ── Контур: кофе-автоматы. Выручка кофе кратно больше снековой, но
-                 до разбора заказов в факт панель её не показывала вовсе. ── */}
-          {domain === "vendhub" && coffeeOrders !== null && coffeeOrders.всего.чашек > 0 && (
-            <div className="sect">
-              <div className="sect-h">
-                <h3 className="h2">Кофе-автоматы</h3>
-                {coffeeOrdersStatus?.последний && (
-                  <span className="chip g">данные по {when(coffeeOrdersStatus.последний)}</span>
-                )}
-                {coffeeOrders.неВыдано > 0 && (
-                  <span className="chip h">не выдано · {coffeeOrders.неВыдано}</span>
-                )}
-              </div>
-              <div className="wgrid">
-                <div className="wt">
-                  <div className="wl">Выручка за 30 дней</div>
-                  <div className="wv">{Math.round(coffeeOrders.всего.выручка).toLocaleString("ru-RU")}</div>
-                  <div className="wf">сум · оплаченные заказы</div>
-                </div>
-                <div className="wt">
-                  <div className="wl">Чашек за 30 дней</div>
-                  <div className="wv">{coffeeOrders.всего.чашек.toLocaleString("ru-RU")}</div>
-                  <div className="wf">
-                    без тестовых и бесплатных выдач
-                    {coffeeOrders.vip.чашек > 0 &&
-                      ` · в т.ч. VIP ${coffeeOrders.vip.чашек} шт`}
-                  </div>
-                </div>
-                <div className="wt">
-                  <div className="wl">Средний чек</div>
-                  <div className="wv">{coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU")}</div>
-                  <div className="wf">сум за чашку</div>
-                </div>
-                <div className="wt">
-                  <div className="wl">Автоматов торговало</div>
-                  <div className="wv">{coffeeOrders.поАвтоматам.length}</div>
-                  <div className="wf">
-                    {coffeeOrders.поАвтоматам.length > 0
-                      ? `лучший: ${coffeeOrders.поАвтоматам[0].машина}`
-                      : "нет продаж"}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ── Контур: снек-автоматы — свои цифры (быстрые действия — выше, в
-                 «Быстрые действия») ── */}
+          {/* ── Контуры: кофе и снек — сжато до 2+2 виджетов по канвасу
+                 (design/dashboard-redesign/Main.dc.html). Полные цифры и
+                 быстрые действия контуров — на вкладке «Обслуживание» и в
+                 «Отчётах», overview даёт только пульс. ── */}
           {domain === "vendhub" && (
             <div className="sect">
-              <div className="sect-h">
-                <h3 className="h2">Снек-автоматы</h3>
-                {salesSummary?.lastSaleDt && <span className="chip g">живые · OurVend</span>}
-                {snackTasks > 0 && <span className="chip">задач · {snackTasks}</span>}
-              </div>
-              {salesSummary && salesSummary.lastSaleDt ? (
-                <div className="wgrid">
-                  <Link href={href("reports:sale")} className="wt">
-                    <div className="wl">Выручка сегодня</div>
-                    <div className="wv">{Number(salesSummary.today.amount).toLocaleString("ru-RU")}</div>
-                    <div className="wf">вчера: {Number(salesSummary.yesterday.amount).toLocaleString("ru-RU")} сум<span className="go">→</span></div>
-                  </Link>
-                  <Link href={href("reports:sale")} className="wt">
-                    <div className="wl">Продано сегодня</div>
-                    <div className="wv">{Number(salesSummary.today.qty).toLocaleString("ru-RU")}</div>
-                    <div className="wf">вчера: {Number(salesSummary.yesterday.qty).toLocaleString("ru-RU")}<span className="go">→</span></div>
-                  </Link>
-                  <Link href={href("reports:sale")} className="wt">
-                    <div className="wl">За 30 дней</div>
-                    <div className="wv">{Number(salesSummary.days30.amount).toLocaleString("ru-RU")}</div>
-                    <div className="wf">сум · журнал продаж<span className="go">→</span></div>
-                  </Link>
-                  <div className="wt off">
-                    <div className="wl">Оплаты Payme · Click · Uzum</div>
-                    <div className="wv">—</div>
-                    <div className="wf">этап 3 плана миграции</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 18 }}>
+                <div>
+                  <div className="sect-h">
+                    <h3 className="h2">Кофе</h3>
+                    {coffeeOrders !== null && coffeeOrders.неВыдано > 0 && (
+                      <span className="chip h">не выдано · {coffeeOrders.неВыдано}</span>
+                    )}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+                    <Link href={href("service")} className={`wt ${coffeeOrders ? "" : "off"}`}>
+                      <div className="wl">Чашек · 30 дней</div>
+                      <div className="wv">{coffeeOrders ? coffeeOrders.всего.чашек.toLocaleString("ru-RU") : "—"}</div>
+                      <div className="wf">
+                        {coffeeOrders ? `чек ${coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU")} сум` : "нет данных"}
+                        <span className="go">→</span>
+                      </div>
+                    </Link>
+                    <Link
+                      href={href("service")}
+                      className={`wt ${coffeeOrders && coffeeOrders.поАвтоматам.length > 0 ? "" : "off"}`}
+                    >
+                      <div className="wl">Лучший автомат</div>
+                      <div className="wv">{coffeeOrders?.поАвтоматам[0]?.машина ?? "—"}</div>
+                      <div className="wf">
+                        {coffeeOrders && coffeeOrders.поАвтоматам.length > 0
+                          ? `${coffeeOrders.поАвтоматам[0].чашек.toLocaleString("ru-RU")} чашек за 30 дней`
+                          : "нет продаж"}
+                        <span className="go">→</span>
+                      </div>
+                    </Link>
                   </div>
                 </div>
-              ) : (
-                <div className="wgrid">
-                  {["Выручка сегодня", "Продажи сегодня", "За 30 дней", "Оплаты"].map((l) => (
-                    <div className="wt off" key={l}>
-                      <div className="wl">{l}</div>
-                      <div className="wv">—</div>
-                      <div className="wf">синк продаж включается на сервере</div>
-                    </div>
-                  ))}
+                <div>
+                  <div className="sect-h">
+                    <h3 className="h2">Снек</h3>
+                    {salesSummary?.lastSaleDt && <span className="chip g">живые · OurVend</span>}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+                    <Link href={href("reports:sale")} className={`wt ${salesSummary ? "" : "off"}`}>
+                      <div className="wl">Продано вчера</div>
+                      <div className="wv">
+                        {salesSummary ? `${Number(salesSummary.yesterday.qty).toLocaleString("ru-RU")} шт` : "—"}
+                      </div>
+                      <div className="wf">
+                        {salesSummary ? `${Number(salesSummary.yesterday.amount).toLocaleString("ru-RU")} сум` : "нет данных"}
+                        <span className="go">→</span>
+                      </div>
+                    </Link>
+                    <Link
+                      href={href("settings:machine_stock")}
+                      className={`wt ${supplySummary ? "" : "off"} ${
+                        supplySummary && supplySummary.emptyPositions > 0 ? "is-hot" : ""
+                      }`}
+                    >
+                      <div className="wl">Пустые позиции</div>
+                      <div className="wv">{supplySummary ? supplySummary.emptyPositions : "—"}</div>
+                      <div className="wf">
+                        {supplySummary
+                          ? supplySummary.emptyPositions > 0
+                            ? "спирали закончились — везти пополнение"
+                            : "пусто нет"
+                          : "нет данных"}
+                        <span className="go">→</span>
+                      </div>
+                    </Link>
+                  </div>
                 </div>
-              )}
-              {salesDaily !== null && salesDaily.length > 1 && (
-                <>
-                  <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>Выручка по дням · 30 дней:</p>
-                  <MiniBars
-                    bars={salesDaily.map((d) => ({
-                      label: d.dt.slice(8),
-                      value: d.amount,
-                      title: `${d.dt}: ${Math.round(d.amount).toLocaleString("ru-RU")} сум · ${d.qty} шт`,
-                    }))}
-                  />
-                </>
-              )}
-            </div>
-          )}
-
-          {domain === "vendhub" && collSummary && (
-            <div className="sect">
-              <div className="sect-h">
-                <h3 className="h2">Инкассация</h3>
-                {collSummary.pending > 0 && <span className="chip h">ждут приёма · {collSummary.pending}</span>}
               </div>
-              <div className="tiles" style={{ marginBottom: 10 }}>
-                <Link
-                  href={href("service")}
-                  className={`tile ${collSummary.pending > 0 ? "is-hot" : "zero"}`}
-                >
-                  <div className="lab">Ждут приёма</div>
-                  <div className="v">{collSummary.pending}</div>
-                  <div className="foot"><span className="mk" />
-                    {collSummary.pending > 0 ? "пересчитай и прими" : "всё принято"}
-                    <span className="go">→</span>
-                  </div>
-                </Link>
-                <Link href={href("service")} className={`tile ${collSummary.receivedSum === 0 ? "zero" : ""}`}>
-                  <div className="lab">Наличные · 30 дней</div>
-                  <div className="v">{Number(collSummary.receivedSum).toLocaleString("ru-RU")} <span className="u">сум</span></div>
-                  <div className="foot"><span className="mk" />принято инкассаций: {collSummary.receivedCount}<span className="go">→</span></div>
-                </Link>
-              </div>
-              <p className="hint">
-                Оператор пишет боту «инкассация» и выбирает автомат — сбор появляется здесь сам.
-              </p>
-            </div>
-          )}
-
-          {/* ── Контур: кофе-бункеры — свои цифры и свои быстрые действия ── */}
-          {domain === "vendhub" && (coffeeAlerts !== null || coffeeConsumption !== null) && (
-            <div className="sect">
-              <div className="sect-h">
-                <h3 className="h2">Кофе-бункеры</h3>
-                {coffeeAlerts !== null && coffeeAlerts > 0 && <span className="chip h">внимание · {coffeeAlerts}</span>}
-                {coffeeTasks > 0 && <span className="chip">задач · {coffeeTasks}</span>}
-              </div>
-              <div className="wgrid">
-                <Link href={href("service")} className="wt">
-                  <div className="wl">Сигналы (недолив · мойка)</div>
-                  <div className="wv">{coffeeAlerts ?? "—"}</div>
-                  <div className="wf">{coffeeAlerts === 0 ? "спокойно" : "смотреть сверку"}<span className="go">→</span></div>
-                </Link>
-                <Link href={href("service")} className="wt">
-                  <div className="wl">Расход · 30 дней</div>
-                  <div className="wv">
-                    {coffeeConsumption !== null ? `${(coffeeConsumption.totalGrams / 1000).toFixed(1)} кг` : "—"}
-                  </div>
-                  <div className="wf">
-                    {coffeeConsumption !== null && coffeeConsumption.totalCost !== null
-                      ? `${Math.round(coffeeConsumption.totalCost).toLocaleString("ru-RU")} сум`
-                      : "по возвратам наборов"}
-                    <span className="go">→</span>
-                  </div>
-                </Link>
-                <Link href={href("service")} className="wt">
-                  <div className="wl">Локаций в расходе</div>
-                  <div className="wv">{coffeeConsumption !== null ? coffeeConsumption.locations.length : "—"}</div>
-                  <div className="wf">за 30 дней<span className="go">→</span></div>
-                </Link>
-              </div>
-              {coffeeWeeklyBars.length > 1 && (
-                <>
-                  <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>Расход по неделям (кг, по возвратам):</p>
-                  <MiniBars bars={coffeeWeeklyBars} hot />
-                </>
-              )}
-              <div style={{ marginTop: 12 }}>
-                <QuickActions
-                  domain={domain}
-                  actions={["Чистка кофемолок", "Заливка бункеров"]}
-                  defaultOwnerRef={defaultOwner?.id ?? null}
-                />
-              </div>
-              {defaultOwner && (
-                <p className="hint" style={{ marginTop: 6 }}>
-                  Быстрое действие ставит задачу исполнителю: {defaultOwner.name}. Поменять можно в карточке задачи.
-                </p>
-              )}
             </div>
           )}
 
@@ -1050,7 +943,9 @@ export default async function DomainPage({
                   <div className="wl">В работе</div>
                   <div className="wv">{machineCards ? parkInService.length : "—"}</div>
                   <div className="wf">
-                    {machineCards ? `${parkInServiceCoffee} кофе · ${parkInServiceSnack} снек` : "нет данных"}
+                    {machineCards
+                      ? `${parkInServiceCoffee} кофе · ${parkInServiceSnack} снек${parkInServiceOther > 0 ? ` · ${parkInServiceOther} другое` : ""}`
+                      : "нет данных"}
                     <span className="go">→</span>
                   </div>
                 </Link>
