@@ -1938,6 +1938,12 @@ export const core = {
     get<{ pending: number; receivedCount: number; receivedSum: number; days: number }>(
       `/collections/summary?days=${days}`,
     ),
+  /** Оценка наличных, накопленных в автоматах с последней инкассации по каждому. */
+  cashEstimate: () =>
+    get<{
+      всего: number;
+      поАвтоматам: { machineId: string; имя: string | null; сумма: number; с: string | null }[];
+    }>("/collections/cash-estimate"),
   receiveCollection: (id: string, amount: number) =>
     send<CollectionRow>(`/collections/${id}/receive`, "POST", { amount, manager: "owner" }),
   cancelCollection: (id: string) =>
@@ -1957,6 +1963,7 @@ export const core = {
       поМесяцам: { месяц: string; чашек: number; выручка: number }[];
       поАвтоматам: { машина: string; чашек: number; выручка: number }[];
       поТоварам: { товар: string; чашек: number; выручка: number }[];
+      поДням: { день: string; чашек: number; выручка: number }[];
     }>(`/coffee/orders/summary${from ? `?from=${from}${to ? `&to=${to}` : ""}` : ""}`),
   coffeeOrdersStatus: () =>
     get<{ всего: number; вВыручке: number; первый: string | null; последний: string | null }>(

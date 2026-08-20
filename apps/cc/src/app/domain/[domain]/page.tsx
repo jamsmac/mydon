@@ -196,20 +196,30 @@ export default async function DomainPage({
   let coffeeAlerts: number | null = null;
   let coffeeConsumption: Awaited<ReturnType<typeof core.coffeeContainerConsumption>> | null = null;
   let salesDaily: Awaited<ReturnType<typeof core.salesDaily>> | null = null;
+  // Плитки «Предприятие»/«Парк» на дашборде: деньги в автоматах, пустые
+  // спирали, карточки парка. Новые эндпоинты core (эта ветка ещё не выкачена
+  // на прод-ядро) — провал (в т.ч. 404) не роняет дашборд, плитка покажет «—».
+  let cashEstimate: Awaited<ReturnType<typeof core.cashEstimate>> | null = null;
+  let vendingDeficit: Awaited<ReturnType<typeof core.vendingDeficit>> | null = null;
+  let machineCards: Awaited<ReturnType<typeof core.machineCards>> | null = null;
   if (domain === "vendhub" && isOverview) {
     const isoDate = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
     const fromDate = new Date();
     fromDate.setDate(fromDate.getDate() - 30);
     let coffeeFill: Awaited<ReturnType<typeof core.coffeeFillStatus>> | null = null;
     let coffeeWash: Awaited<ReturnType<typeof core.coffeeWashScheduleStatus>> | null = null;
-    [salesSummary, supplySummary, coffeeFill, coffeeWash, coffeeConsumption, salesDaily] = await Promise.all([
-      core.salesSummary().catch(() => null),
-      core.supplySummary().catch(() => null),
-      core.coffeeFillStatus().catch(() => null),
-      core.coffeeWashScheduleStatus().catch(() => null),
-      core.coffeeContainerConsumption(isoDate(fromDate), isoDate(new Date())).catch(() => null),
-      core.salesDaily(30).catch(() => null),
-    ]);
+    [salesSummary, supplySummary, coffeeFill, coffeeWash, coffeeConsumption, salesDaily, cashEstimate, vendingDeficit, machineCards] =
+      await Promise.all([
+        core.salesSummary().catch(() => null),
+        core.supplySummary().catch(() => null),
+        core.coffeeFillStatus().catch(() => null),
+        core.coffeeWashScheduleStatus().catch(() => null),
+        core.coffeeContainerConsumption(isoDate(fromDate), isoDate(new Date())).catch(() => null),
+        core.salesDaily(30).catch(() => null),
+        core.cashEstimate().catch(() => null),
+        core.vendingDeficit().catch(() => null),
+        core.machineCards().catch(() => null),
+      ]);
     if (coffeeFill !== null || coffeeWash !== null) {
       coffeeAlerts =
         (coffeeFill ?? []).filter((r) => r.status === "underfill").length +
@@ -426,6 +436,48 @@ export default async function DomainPage({
     activeTab && activeGroup !== "overview" ? activeTab.label.replace(/\s+\d+$/, "") : null;
   const routeSlug = activeGroup === "overview" ? "" : activeGroup;
   const routePath = `/${domain}${routeSlug ? `/${routeSlug}` : ""}${activeLeaf ? `/${activeLeaf}` : ""}`;
+
+  // ── Дашборд VendHub: производные для секций «Предприятие»/«Парк»/«Деньги и
+  //    партнёры»/«График» (перекомпоновка overview). Всё best-effort: любой
+  //    источник может быть null (провал запроса или эндпоинт ещё не на проде) —
+  //    плитка тогда показывает «—», а не роняет остальные секции.
+  const coffeeRevenue30 = coffeeOrders?.всего.выручка ?? null;
+  const snackRevenue30 = salesSummary?.days30.amount ?? null;
+  const hasRevenue30 = coffeeRevenue30 !== null || snackRevenue30 !== null;
+  const revenue30 = (coffeeRevenue30 ?? 0) + (snackRevenue30 ?? 0);
+  const deficitCount = vendingDeficit?.length ?? 0;
+  const notIssuedCount = coffeeOrders?.неВыдано ?? 0;
+  const attentionTotal = deficitCount + notIssuedCount + openTasks.length;
+
+  const contractorTurnover = (e: Entity): number | null => {
+    const v = (e.attrs ?? {})["оборот по реестру"];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+  const topContractor = contractorsLoaded
+    ? [...contractors]
+        .filter((e) => contractorTurnover(e) !== null)
+        .sort((a, b) => (contractorTurnover(b) as number) - (contractorTurnover(a) as number))[0] ?? null
+    : null;
+  const coffeeTopProducts = coffeeOrders?.поТоварам ?? [];
+
+  const parkInService = (machineCards ?? []).filter((m) => (m.status || "in_service") === "in_service");
+  const parkWarehouse = (machineCards ?? []).filter((m) => m.status === "warehouse");
+  const parkRepair = (machineCards ?? []).filter((m) => m.status === "repair");
+  const parkInServiceCoffee = parkInService.filter((m) => m.kind === "coffee").length;
+  const parkInServiceSnack = parkInService.length - parkInServiceCoffee;
+  const cupsPerMachine =
+    coffeeOrders !== null
+      ? Math.round(coffeeOrders.всего.чашек / Math.max(1, coffeeOrders.поАвтоматам.length))
+      : null;
+
+  // График «Выручка по дням»: снек (salesDaily) + кофе (coffeeOrders.поДням) —
+  // единый ряд по дате, суммируем в один Map; день без продаж одного контура
+  // просто не добавляет к сумме (эквивалент 0), а не роняет весь ряд.
+  const revenueByDayMap = new Map<string, number>();
+  for (const d of salesDaily ?? []) revenueByDayMap.set(d.dt, (revenueByDayMap.get(d.dt) ?? 0) + Number(d.amount));
+  for (const d of coffeeOrders?.поДням ?? [])
+    revenueByDayMap.set(d.день, (revenueByDayMap.get(d.день) ?? 0) + Number(d.выручка));
+  const revenueByDay = [...revenueByDayMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 
   return (
     <>
@@ -705,69 +757,56 @@ export default async function DomainPage({
             </div>
           )}
 
-          {domain === "vendhub" && machines.length > 0 && (
+          {/* ── Предприятие: сводка на уровне направления, а не одного контура ── */}
+          {domain === "vendhub" && (
             <div className="sect">
-              <div className="sect-h">
-                <h3 className="h2">Автоматы на карте</h3>
-                <span className="chip b">кофе ×{coffeeMachines}</span>
-                {snackMachines > 0 && <span className="chip g">снеки ×{snackMachines}</span>}
-                {unknownMachines > 0 && (
-                  <span className="chip">тип не указан ×{unknownMachines}</span>
-                )}
-              </div>
-              <MapPanel machines={machines} />
-              {(unknownMachines > 0 || noCoords.length > 0) && (
-                <p className="hint" style={{ marginTop: 8 }}>
-                  Данные неполные:{" "}
-                  {unknownMachines > 0 && <>у {unknownMachines} автоматов не указан тип. </>}
-                  {noCoords.length > 0 && (
-                    <>
-                      без координат на карте нет:{" "}
-                      {noCoords.slice(0, 3).map((e, i) => (
-                        <span key={e.id}>
-                          {i > 0 && ", "}
-                          <Link href={`/card/${e.id}`} style={{ color: "var(--accent)" }}>
-                            {e.name}
-                          </Link>
-                        </span>
-                      ))}
-                      {noCoords.length > 3 && ` и ещё ${noCoords.length - 3}`}.{" "}
-                    </>
-                  )}
-                  Тип и точка подтягиваются из учёта склада сами; остальное можно
-                  дозаполнить в карточке.
-                </p>
-              )}
-            </div>
-          )}
-
-          {domain === "vendhub" && collSummary && (
-            <div className="sect">
-              <div className="sect-h">
-                <h3 className="h2">Инкассация</h3>
-                {collSummary.pending > 0 && <span className="chip h">ждут приёма · {collSummary.pending}</span>}
-              </div>
-              <div className="tiles" style={{ marginBottom: 10 }}>
-                <Link
-                  href={href("service")}
-                  className={`tile ${collSummary.pending > 0 ? "is-hot" : "zero"}`}
-                >
-                  <div className="lab">Ждут приёма</div>
-                  <div className="v">{collSummary.pending}</div>
-                  <div className="foot"><span className="mk" />
-                    {collSummary.pending > 0 ? "пересчитай и прими" : "всё принято"}
+              <div className="sect-h"><h3 className="h2">Предприятие</h3></div>
+              <div className="wgrid">
+                <div className={`wt ${hasRevenue30 ? "" : "off"}`}>
+                  <div className="wl">Выручка · 30 дней</div>
+                  <div className="wv">{hasRevenue30 ? Math.round(revenue30).toLocaleString("ru-RU") : "—"}</div>
+                  <div className="wf">
+                    {hasRevenue30
+                      ? `кофе ${((coffeeRevenue30 ?? 0) / 1_000_000).toFixed(1)} + снек ${((snackRevenue30 ?? 0) / 1_000_000).toFixed(1)} млн`
+                      : "нет данных"}
+                  </div>
+                </div>
+                <div className={`wt ${coffeeOrders ? "" : "off"}`}>
+                  <div className="wl">Средний чек кофе</div>
+                  <div className="wv">{coffeeOrders ? coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU") : "—"}</div>
+                  <div className="wf">сум за чашку · маржа — в отчёте «Себестоимость»</div>
+                </div>
+                <div className={`wt ${cashEstimate ? "" : "off"}`}>
+                  <div className="wl">Деньги в автоматах ≈</div>
+                  <div className="wv">{cashEstimate ? Math.round(cashEstimate.всего).toLocaleString("ru-RU") : "—"}</div>
+                  <div className="wf">
+                    наличные с последней инкассации · в день сбора возможно пересечение со сданным
+                  </div>
+                </div>
+                <Link href={href("service")} className={`wt ${attentionTotal > 0 ? "is-hot" : ""}`}>
+                  <div className="wl">Требует внимания</div>
+                  <div className="wv">{attentionTotal}</div>
+                  <div className="wf">
+                    пусто {deficitCount} · не выдано {notIssuedCount} · задачи {openTasks.length}
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("service")} className={`tile ${collSummary.receivedSum === 0 ? "zero" : ""}`}>
-                  <div className="lab">Наличные · 30 дней</div>
-                  <div className="v">{Number(collSummary.receivedSum).toLocaleString("ru-RU")} <span className="u">сум</span></div>
-                  <div className="foot"><span className="mk" />принято инкассаций: {collSummary.receivedCount}<span className="go">→</span></div>
-                </Link>
               </div>
-              <p className="hint">
-                Оператор пишет боту «инкассация» и выбирает автомат — сбор появляется здесь сам.
-              </p>
+            </div>
+          )}
+
+          {/* ── Быстрые действия: подняты из подвала контуров — под цифрами предприятия ── */}
+          {domain === "vendhub" && (
+            <div className="sect">
+              <div className="sect-h"><h3 className="h2">Быстрые действия</h3></div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-start" }}>
+                <QuickActions
+                  domain={domain}
+                  actions={["Пополнение автоматов", "Инкассация", "Ремонт / выезд"]}
+                  defaultOwnerRef={defaultOwner?.id ?? null}
+                />
+                <Link href={href("tasks")} className="btn sm">+ Задача</Link>
+              </div>
             </div>
           )}
 
@@ -817,7 +856,8 @@ export default async function DomainPage({
             </div>
           )}
 
-          {/* ── Контур: снек-автоматы — свои цифры и свои быстрые действия ── */}
+          {/* ── Контур: снек-автоматы — свои цифры (быстрые действия — выше, в
+                 «Быстрые действия») ── */}
           {domain === "vendhub" && (
             <div className="sect">
               <div className="sect-h">
@@ -871,13 +911,36 @@ export default async function DomainPage({
                   />
                 </>
               )}
-              <div style={{ marginTop: 12 }}>
-                <QuickActions
-                  domain={domain}
-                  actions={["Пополнение автоматов", "Инкассация", "Ремонт / выезд"]}
-                  defaultOwnerRef={defaultOwner?.id ?? null}
-                />
+            </div>
+          )}
+
+          {domain === "vendhub" && collSummary && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Инкассация</h3>
+                {collSummary.pending > 0 && <span className="chip h">ждут приёма · {collSummary.pending}</span>}
               </div>
+              <div className="tiles" style={{ marginBottom: 10 }}>
+                <Link
+                  href={href("service")}
+                  className={`tile ${collSummary.pending > 0 ? "is-hot" : "zero"}`}
+                >
+                  <div className="lab">Ждут приёма</div>
+                  <div className="v">{collSummary.pending}</div>
+                  <div className="foot"><span className="mk" />
+                    {collSummary.pending > 0 ? "пересчитай и прими" : "всё принято"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("service")} className={`tile ${collSummary.receivedSum === 0 ? "zero" : ""}`}>
+                  <div className="lab">Наличные · 30 дней</div>
+                  <div className="v">{Number(collSummary.receivedSum).toLocaleString("ru-RU")} <span className="u">сум</span></div>
+                  <div className="foot"><span className="mk" />принято инкассаций: {collSummary.receivedCount}<span className="go">→</span></div>
+                </Link>
+              </div>
+              <p className="hint">
+                Оператор пишет боту «инкассация» и выбирает автомат — сбор появляется здесь сам.
+              </p>
             </div>
           )}
 
@@ -931,6 +994,97 @@ export default async function DomainPage({
                   Быстрое действие ставит задачу исполнителю: {defaultOwner.name}. Поменять можно в карточке задачи.
                 </p>
               )}
+            </div>
+          )}
+
+          {/* ── Деньги и партнёры: закупки, поставщики, инкассация, топ товара ── */}
+          {domain === "vendhub" && (
+            <div className="sect">
+              <div className="sect-h"><h3 className="h2">Деньги и партнёры</h3></div>
+              <div className="wgrid">
+                <Link href={href("settings:purchase")} className={`wt ${supplySummary ? "" : "off"}`}>
+                  <div className="wl">Закупки · 30 дней</div>
+                  <div className="wv">
+                    {supplySummary ? Math.round(supplySummary.purchases30.total).toLocaleString("ru-RU") : "—"}
+                  </div>
+                  <div className="wf">по журналу прихода<span className="go">→</span></div>
+                </Link>
+                <Link href={href("settings:contractor")} className={`wt ${contractorsLoaded ? "" : "off"}`}>
+                  <div className="wl">Поставщики</div>
+                  <div className="wv">{contractorsLoaded ? contractors.length : "—"}</div>
+                  <div className="wf">
+                    {topContractor ? `крупнейший: ${topContractor.name}` : "нет данных по обороту"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("service")} className={`wt ${collSummary ? "" : "off"}`}>
+                  <div className="wl">Инкассация · 30 дней</div>
+                  <div className="wv">
+                    {collSummary ? Number(collSummary.receivedSum).toLocaleString("ru-RU") : "—"}
+                  </div>
+                  <div className="wf">
+                    принято инкассаций: {collSummary ? collSummary.receivedCount : "—"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("service")} className={`wt ${coffeeTopProducts.length > 0 ? "" : "off"}`}>
+                  <div className="wl">Топ товара</div>
+                  <div className="wv">{coffeeTopProducts[0]?.товар ?? "—"}</div>
+                  <div className="wf">
+                    {coffeeTopProducts.length > 1
+                      ? coffeeTopProducts.slice(1, 3).map((p) => p.товар).join(" · ")
+                      : "нет данных"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+              </div>
+            </div>
+          )}
+
+          {/* ── Парк: где стоят автоматы и как работают ── */}
+          {domain === "vendhub" && (
+            <div className="sect">
+              <div className="sect-h"><h3 className="h2">Парк</h3></div>
+              <div className="wgrid">
+                <Link href={href("settings:machine")} className={`wt ${machineCards ? "" : "off"}`}>
+                  <div className="wl">В работе</div>
+                  <div className="wv">{machineCards ? parkInService.length : "—"}</div>
+                  <div className="wf">
+                    {machineCards ? `${parkInServiceCoffee} кофе · ${parkInServiceSnack} снек` : "нет данных"}
+                    <span className="go">→</span>
+                  </div>
+                </Link>
+                <Link href={href("settings:machine")} className={`wt ${machineCards ? "" : "off"}`}>
+                  <div className="wl">На складе</div>
+                  <div className="wv">{machineCards ? parkWarehouse.length : "—"}</div>
+                  <div className="wf">простаивают<span className="go">→</span></div>
+                </Link>
+                <Link href={href("settings:machine")} className={`wt ${machineCards ? "" : "off"}`}>
+                  <div className="wl">В ремонте</div>
+                  <div className="wv">{machineCards ? parkRepair.length : "—"}</div>
+                  <div className="wf">не в строю<span className="go">→</span></div>
+                </Link>
+                <Link href={href("settings:machine")} className={`wt ${cupsPerMachine !== null ? "" : "off"}`}>
+                  <div className="wl">Выработка · чаш/авт</div>
+                  <div className="wv">{cupsPerMachine ?? "—"}</div>
+                  <div className="wf">30 дней<span className="go">→</span></div>
+                </Link>
+              </div>
+            </div>
+          )}
+
+          {/* ── График: выручка по дням, кофе + снек одним рядом ── */}
+          {domain === "vendhub" && revenueByDay.length > 1 && (
+            <div className="sect">
+              <div className="sect-h"><h3 className="h2">Выручка по дням</h3></div>
+              <p className="hint" style={{ marginBottom: 0 }}>Кофе + снек · 30 дней:</p>
+              <MiniBars
+                bars={revenueByDay.map(([dt, amount]) => ({
+                  label: dt.slice(8),
+                  value: amount,
+                  title: `${dt}: ${Math.round(amount).toLocaleString("ru-RU")} сум`,
+                }))}
+              />
             </div>
           )}
 
@@ -1004,6 +1158,46 @@ export default async function DomainPage({
             </div>
           )}
           </div>
+
+          {/* ── Карта: свёрнута по умолчанию, в самом конце обзора (по образцу
+                 «Истории» в location-panel.tsx) ── */}
+          {domain === "vendhub" && machines.length > 0 && (
+            <details className="sect loc-hist">
+              <summary>
+                <span className="loc-hist-t">Автоматы на карте</span>
+                <span className="chip b">кофе ×{coffeeMachines}</span>
+                {snackMachines > 0 && <span className="chip g">снеки ×{snackMachines}</span>}
+                {unknownMachines > 0 && (
+                  <span className="chip">тип не указан ×{unknownMachines}</span>
+                )}
+              </summary>
+              <div className="loc-hist-body">
+                <MapPanel machines={machines} />
+                {(unknownMachines > 0 || noCoords.length > 0) && (
+                  <p className="hint" style={{ marginTop: 8 }}>
+                    Данные неполные:{" "}
+                    {unknownMachines > 0 && <>у {unknownMachines} автоматов не указан тип. </>}
+                    {noCoords.length > 0 && (
+                      <>
+                        без координат на карте нет:{" "}
+                        {noCoords.slice(0, 3).map((e, i) => (
+                          <span key={e.id}>
+                            {i > 0 && ", "}
+                            <Link href={`/card/${e.id}`} style={{ color: "var(--accent)" }}>
+                              {e.name}
+                            </Link>
+                          </span>
+                        ))}
+                        {noCoords.length > 3 && ` и ещё ${noCoords.length - 3}`}.{" "}
+                      </>
+                    )}
+                    Тип и точка подтягиваются из учёта склада сами; остальное можно
+                    дозаполнить в карточке.
+                  </p>
+                )}
+              </div>
+            </details>
+          )}
         </>
       )}
 
