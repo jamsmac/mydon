@@ -85,6 +85,10 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
 
+  // У VendHub бывший каталог переехал в «Настройки» (восьмёрка владельца,
+  // 20.08.2026); у остальных направлений группа каталога — по-прежнему "catalog".
+  const catalogGroupKey = entity.domain === "vendhub" ? "settings" : "catalog";
+
   // История стоянок и цен нужна только автоматам и только если она вообще
   // собрана. Ошибка здесь не должна ронять карточку: это дополнение, а не её суть.
   let stays: MachineStays | null = null;
@@ -561,7 +565,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       <>
         <div className="page-head">
           <Link
-            href={entity.domain ? `/domain/${entity.domain}?tab=catalog:product` : "/registry"}
+            href={entity.domain ? `/domain/${entity.domain}?tab=${catalogGroupKey}:product` : "/registry"}
             className="back"
           >
             ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}
@@ -636,7 +640,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       <>
         <div className="page-head">
           <Link
-            href={entity.domain ? `/domain/${entity.domain}?tab=catalog:contractor` : "/registry"}
+            href={entity.domain ? `/domain/${entity.domain}?tab=${catalogGroupKey}:contractor` : "/registry"}
             className="back"
           >
             ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}
@@ -679,7 +683,11 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       <>
         <div className="page-head">
           <Link
-            href={entity.domain ? `/domain/${entity.domain}?tab=vending` : "/registry"}
+            href={
+              entity.domain
+                ? `/domain/${entity.domain}?tab=${entity.domain === "vendhub" ? "settings:machine" : "vending"}`
+                : "/registry"
+            }
             className="back"
           >
             ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}
@@ -815,7 +823,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     <>
       <div className="page-head">
         <Link
-          href={entity.domain ? `/domain/${entity.domain}?tab=catalog:${entity.type}` : "/registry"}
+          href={entity.domain ? `/domain/${entity.domain}?tab=${catalogGroupKey}:${entity.type}` : "/registry"}
           className="back"
         >
           ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}

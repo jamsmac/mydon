@@ -27,7 +27,10 @@ export function DeleteEntityButton({
     start(async () => {
       const res = await deleteEntity(id, domain);
       if (res.ok) {
-        router.push(domain ? `/domain/${domain}?tab=catalog:${type}` : "/registry");
+        // У VendHub бывший каталог переехал в «Настройки» (восьмёрка владельца);
+        // у остальных направлений группа каталога — по-прежнему "catalog".
+        const catalogGroupKey = domain === "vendhub" ? "settings" : "catalog";
+        router.push(domain ? `/domain/${domain}?tab=${catalogGroupKey}:${type}` : "/registry");
         router.refresh();
       } else {
         setError(res.error ?? "Не удалось удалить");

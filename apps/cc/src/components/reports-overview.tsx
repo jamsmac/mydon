@@ -132,7 +132,7 @@ export async function ReportsOverview({ base }: { base: string }) {
                   </span>
                   <span className="sp" />
                   <span className="rlinks">
-                    <Link href={`${base}?tab=catalog:machine_stock`}>Остатки</Link>
+                    <Link href={`${base}?tab=settings:machine_stock`}>Остатки</Link>
                   </span>
                 </div>
               </div>
@@ -158,7 +158,7 @@ export async function ReportsOverview({ base }: { base: string }) {
                   </span>
                   <span className="sp" />
                   <span className="rlinks">
-                    <Link href={`${base}?tab=collect`}>Инкассация</Link>
+                    <Link href={`${base}?tab=reports:collection`}>Инкассация</Link>
                   </span>
                 </div>
               </div>
