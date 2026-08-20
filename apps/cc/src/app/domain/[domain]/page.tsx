@@ -94,6 +94,7 @@ export default async function DomainPage({
   let people: Person[] = [];
   let tasks: Task[] = [];
   let contractors: Entity[] = [];
+  let contractorsLoaded = false;
   try {
     entities = await core.entitiesOf(domain);
     try {
@@ -107,6 +108,7 @@ export default async function DomainPage({
       // куда попал при выгрузке документов. Берём всех и отбираем по признаку
       // направления — тем же, что считает цифру на подвкладке.
       contractors = (await core.contractorsAll()).filter((e) => contractorInDirection(e, domain));
+      contractorsLoaded = true;
     } catch {
       // реестр контрагентов — не повод ронять страницу направления
     }
@@ -223,8 +225,10 @@ export default async function DomainPage({
     return acc;
   }, {});
   // Контрагенты считаются по своему признаку направления, а не по организации:
-  // иначе цифра на подвкладке разошлась бы со списком под ней.
-  byType["contractor"] = contractors.length;
+  // иначе цифра на подвкладке разошлась бы со списком под ней. Цифру
+  // перезаписываем ТОЛЬКО когда реестр действительно прочитан: провал запроса
+  // не должен превращать 226 контрагентов GLOBERENT в ноль на вкладке.
+  if (contractorsLoaded) byType["contractor"] = contractors.length;
 
   // GLOBERENT: раскладка договоров по срокам — тот же 14-дневный горизонт и то же
   // строковое сравнение дат, что в брифинге Core, чтобы панель и бот сходились в цифре.
@@ -315,9 +319,10 @@ export default async function DomainPage({
     group?.leaves[0];
   const leafItems =
     group && leaf?.type
-      ? (leaf.type === "contractor" ? contractors : entities.filter((e) => e.type === leaf.type)).sort((a, b) =>
-          a.name.localeCompare(b.name, "ru"),
-        )
+      ? (leaf.type === "contractor" && contractorsLoaded
+          ? contractors
+          : entities.filter((e) => e.type === leaf.type)
+        ).sort((a, b) => a.name.localeCompare(b.name, "ru"))
       : [];
 
   // Справочник растаможки (ставки ТН ВЭД + БРВ) — живые таблицы Core, не реестр.

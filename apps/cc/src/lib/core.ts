@@ -1850,8 +1850,12 @@ export const core = {
    * поставщик VendHub может лежать в организации GLOBERENT, куда попал при
    * выгрузке документов. Отбор по направлению делает `contractorInDirection`
    * на стороне панели: организация — где карточка родилась, тег — где работает.
+   *
+   * Предел взят потолком Core (MAX_FIND_LIMIT), а не умолчанием в 500: сейчас
+   * контрагентов 233, и на умолчании список начал бы молча обрезаться задолго
+   * до того, как это кто-нибудь заметит.
    */
-  contractorsAll: () => get<Entity[]>(`/entities?type=contractor&limit=500`),
+  contractorsAll: () => get<Entity[]>(`/entities?type=contractor&limit=5000`),
   entity: (id: string) => get<Entity>(`/entities/${id}`),
   createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
   /** Вложения записи (фото номенклатуры, чеки) — для галереи карточки. */
