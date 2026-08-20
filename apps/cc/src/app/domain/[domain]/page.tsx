@@ -165,6 +165,8 @@ export default async function DomainPage({
   // Ленивая загрузка (Фаза 2): сводки продаж и склада — только для плиток
   // дашборда. На других вкладках vendhub их не тянем.
   let salesSummary: Awaited<ReturnType<typeof core.salesSummary>> | null = null;
+  let coffeeOrders: Awaited<ReturnType<typeof core.coffeeOrdersSummary>> | null = null;
+  let coffeeOrdersStatus: Awaited<ReturnType<typeof core.coffeeOrdersStatus>> | null = null;
   let supplySummary: Awaited<ReturnType<typeof core.supplySummary>> | null = null;
   // Кофе-бункеры на дашборде: алерты и расход за 30 дней. Провал любого
   // запроса не роняет дашборд — секция просто не показывается.
@@ -220,6 +222,15 @@ export default async function DomainPage({
         title: `неделя с ${k}: ${(grams / 1000).toFixed(1)} кг`,
       }));
   })();
+  if (domain === "vendhub") {
+    // Тридцать дней — тот же горизонт, что у снек-сводки рядом, иначе две
+    // цифры на одном экране сравнивать было бы не с чем.
+    const с = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    [coffeeOrders, coffeeOrdersStatus] = await Promise.all([
+      core.coffeeOrdersSummary(с).catch(() => null),
+      core.coffeeOrdersStatus().catch(() => null),
+    ]);
+  }
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.type] = (acc[e.type] ?? 0) + 1;
     return acc;
@@ -701,6 +712,48 @@ export default async function DomainPage({
               <p className="hint">
                 Оператор пишет боту «инкассация» и выбирает автомат — сбор появляется здесь сам.
               </p>
+            </div>
+          )}
+
+          {/* ── Контур: кофе-автоматы. Выручка кофе кратно больше снековой, но
+                 до разбора заказов в факт панель её не показывала вовсе. ── */}
+          {domain === "vendhub" && coffeeOrders !== null && coffeeOrders.всего.чашек > 0 && (
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Кофе-автоматы</h3>
+                {coffeeOrdersStatus?.последний && (
+                  <span className="chip g">данные по {when(coffeeOrdersStatus.последний)}</span>
+                )}
+                {coffeeOrders.неВыдано > 0 && (
+                  <span className="chip h">не выдано · {coffeeOrders.неВыдано}</span>
+                )}
+              </div>
+              <div className="wgrid">
+                <div className="wt">
+                  <div className="wl">Выручка за 30 дней</div>
+                  <div className="wv">{Math.round(coffeeOrders.всего.выручка).toLocaleString("ru-RU")}</div>
+                  <div className="wf">сум · оплаченные заказы</div>
+                </div>
+                <div className="wt">
+                  <div className="wl">Чашек за 30 дней</div>
+                  <div className="wv">{coffeeOrders.всего.чашек.toLocaleString("ru-RU")}</div>
+                  <div className="wf">без тестовых выдач и vip</div>
+                </div>
+                <div className="wt">
+                  <div className="wl">Средний чек</div>
+                  <div className="wv">{coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU")}</div>
+                  <div className="wf">сум за чашку</div>
+                </div>
+                <div className="wt">
+                  <div className="wl">Автоматов торговало</div>
+                  <div className="wv">{coffeeOrders.поАвтоматам.length}</div>
+                  <div className="wf">
+                    {coffeeOrders.поАвтоматам.length > 0
+                      ? `лучший: ${coffeeOrders.поАвтоматам[0].машина}`
+                      : "нет продаж"}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 

@@ -19,6 +19,55 @@ import {
 import { Type } from "class-transformer";
 import { UNITS, type Unit } from "@mydon/shared";
 import { CoffeeService } from "./coffee.service";
+import { CoffeeOrdersService } from "./coffee-orders.service";
+
+/** Одна проданная чашка из выгрузки панели производителя. */
+export class CoffeeOrderRowDto {
+  @IsString() @IsNotEmpty() @MaxLength(128)
+  extId!: string;
+
+  @IsISO8601()
+  ts!: string;
+
+  @IsOptional() @IsISO8601()
+  brewedAt?: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  machineSerial!: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  address?: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(256)
+  goodsName!: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  flavourName?: string;
+
+  @IsOptional() @IsNumber()
+  amount?: number;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  paymentStatus?: string;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  brewStatus?: string;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  orderResource?: string;
+}
+
+export class IngestCoffeeOrdersDto {
+  @IsOptional() @IsString() @MaxLength(64)
+  source?: string;
+
+  /**
+   * Предел пачки — тот же, что у сырого слоя: выгрузка приходит десятками
+   * тысяч строк и заливается кусками, а не одним запросом.
+   */
+  @IsArray() @ArrayMaxSize(5000) @ValidateNested({ each: true }) @Type(() => CoffeeOrderRowDto)
+  rows!: CoffeeOrderRowDto[];
+}
 
 export class CreateLocationDto {
   @IsString() @IsNotEmpty() @MaxLength(128)
@@ -251,7 +300,10 @@ export class IngestCoffeeStockDto {
 /** Кофе-бункеры: точки, тара, ежедневная заливка, расходники, мойка, сверка расхода. */
 @Controller("coffee")
 export class CoffeeController {
-  constructor(private readonly coffee: CoffeeService) {}
+  constructor(
+    private readonly coffee: CoffeeService,
+    private readonly orders: CoffeeOrdersService,
+  ) {}
 
   @Get("locations")
   locations() {
@@ -477,6 +529,24 @@ export class CoffeeController {
   @Get("reconcile")
   reconcileAll(@Query("from") from: string, @Query("to") to: string) {
     return this.coffee.reconcileAllLocations(from, to);
+  }
+
+
+  // ── Проданные чашки: факт из панели производителя ──────────────────────
+
+  @Post("orders")
+  ingestOrders(@Body() dto: IngestCoffeeOrdersDto) {
+    return this.orders.ingest(dto.source ?? "gjvending", dto.rows);
+  }
+
+  @Get("orders/status")
+  ordersStatus() {
+    return this.orders.status();
+  }
+
+  @Get("orders/summary")
+  ordersSummary(@Query("from") from?: string, @Query("to") to?: string) {
+    return this.orders.summary(from, to);
   }
 
   // ── Склад ─────────────────────────────────────────────────────────────

@@ -1942,6 +1942,25 @@ export const core = {
     send<CollectionRow>(`/collections/${id}/receive`, "POST", { amount, manager: "owner" }),
   cancelCollection: (id: string) =>
     send<CollectionRow>(`/collections/${id}/cancel`, "POST", { manager: "owner" }),
+  /**
+   * Проданные чашки кофе — факт из панели производителя.
+   *
+   * Отдельно от `salesSummary`: тот отвечает за снек из OurVend и суточный
+   * агрегат, а здесь каждый заказ со временем. До этого выручка кофе в панели
+   * не показывалась вовсе, хотя она в разы больше снековой.
+   */
+  coffeeOrdersSummary: (from?: string, to?: string) =>
+    get<{
+      всего: { чашек: number; выручка: number; среднийЧек: number };
+      неВыдано: number;
+      поМесяцам: { месяц: string; чашек: number; выручка: number }[];
+      поАвтоматам: { машина: string; чашек: number; выручка: number }[];
+      поТоварам: { товар: string; чашек: number; выручка: number }[];
+    }>(`/coffee/orders/summary${from ? `?from=${from}${to ? `&to=${to}` : ""}` : ""}`),
+  coffeeOrdersStatus: () =>
+    get<{ всего: number; вВыручке: number; первый: string | null; последний: string | null }>(
+      "/coffee/orders/status",
+    ),
   salesSummary: () =>
     get<{
       today: { qty: number; amount: number };

@@ -407,6 +407,13 @@
       "when": 1787127084231,
       "tag": "0057_product_name_alias",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1787225248963,
+      "tag": "0058_coffee_order",
+      "breakpoints": true
     }
   ]
 }
