@@ -1952,6 +1952,7 @@ export const core = {
   coffeeOrdersSummary: (from?: string, to?: string) =>
     get<{
       всего: { чашек: number; выручка: number; среднийЧек: number };
+      vip: { чашек: number; выручка: number };
       неВыдано: number;
       поМесяцам: { месяц: string; чашек: number; выручка: number }[];
       поАвтоматам: { машина: string; чашек: number; выручка: number }[];

@@ -58,14 +58,21 @@ export class CoffeeOrderRowDto {
 }
 
 export class IngestCoffeeOrdersDto {
-  @IsOptional() @IsString() @MaxLength(64)
+  /**
+   * Источник зажат списком: он входит в ключ уникальности (source, ext_id),
+   * и свободная строка означала бы, что та же выгрузка под другим именем
+   * молча задваивает каждый заказ — и выручку вместе с ним.
+   */
+  @IsOptional() @IsIn(["gjvending"])
   source?: string;
 
   /**
-   * Предел пачки — тот же, что у сырого слоя: выгрузка приходит десятками
-   * тысяч строк и заливается кусками, а не одним запросом.
+   * Предел пачки согласован с лимитом тела запроса (1 МБ в main.ts):
+   * строка заказа весит ~330 байт, две тысячи — около 0,7 МБ с запасом.
+   * Пять тысяч, как у сырого слоя, физически не проходили — контракт
+   * обещал то, на что сервер отвечал 413.
    */
-  @IsArray() @ArrayMaxSize(5000) @ValidateNested({ each: true }) @Type(() => CoffeeOrderRowDto)
+  @IsArray() @ArrayMaxSize(2000) @ValidateNested({ each: true }) @Type(() => CoffeeOrderRowDto)
   rows!: CoffeeOrderRowDto[];
 }
 

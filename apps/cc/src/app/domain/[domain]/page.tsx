@@ -223,9 +223,12 @@ export default async function DomainPage({
       }));
   })();
   if (domain === "vendhub") {
-    // Тридцать дней — тот же горизонт, что у снек-сводки рядом, иначе две
-    // цифры на одном экране сравнивать было бы не с чем.
-    const с = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    // Тридцать календарных суток по Ташкенту, а не 720 часов от «сейчас»:
+    // скользящее окно смещало бы границу внутрь чужого дня, и утренняя
+    // сводка расходилась бы с вечерней без единой новой продажи.
+    const с = new Date(Date.now() - 30 * 24 * 3600 * 1000).toLocaleDateString("en-CA", {
+      timeZone: "Asia/Tashkent",
+    });
     [coffeeOrders, coffeeOrdersStatus] = await Promise.all([
       core.coffeeOrdersSummary(с).catch(() => null),
       core.coffeeOrdersStatus().catch(() => null),
@@ -737,7 +740,11 @@ export default async function DomainPage({
                 <div className="wt">
                   <div className="wl">Чашек за 30 дней</div>
                   <div className="wv">{coffeeOrders.всего.чашек.toLocaleString("ru-RU")}</div>
-                  <div className="wf">без тестовых выдач и vip</div>
+                  <div className="wf">
+                    без тестовых и бесплатных выдач
+                    {coffeeOrders.vip.чашек > 0 &&
+                      ` · в т.ч. VIP ${coffeeOrders.vip.чашек} шт`}
+                  </div>
                 </div>
                 <div className="wt">
                   <div className="wl">Средний чек</div>

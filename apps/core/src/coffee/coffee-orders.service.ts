@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { coffeeOrder, entity } from "@mydon/db";
 import { machineSerialKeys, normalizeMachineSerial, orderIsCountable, orderIsDelivered } from "@mydon/shared";
@@ -40,6 +40,8 @@ export interface IngestResult {
   вВыручке: number;
   безАвтомата: number;
   битыхСтрок: number;
+  /** Повторы одного заказа внутри запроса, схлопнутые перед записью. */
+  дублейВПачке: number;
 }
 
 @Injectable()
@@ -62,6 +64,7 @@ export class CoffeeOrdersService {
       вВыручке: 0,
       безАвтомата: 0,
       битыхСтрок: 0,
+      дублейВПачке: 0,
     };
     if (rows.length === 0) return итог;
 
@@ -84,12 +87,12 @@ export class CoffeeOrdersService {
         continue;
       }
       const brewed = r.brewedAt ? new Date(r.brewedAt) : null;
-      const считается = orderIsCountable(r);
+      // Сумма считается ДО правила: нулевая цена — признак бесплатной выдачи,
+      // и правило обязано её видеть.
+      const сумма = Number(r.amount ?? 0);
+      const считается = orderIsCountable({ ...r, amount: сумма });
       const ключ = String(r.machineSerial).trim().toLowerCase();
       const machineId = поСерийнику.get(ключ) ?? поСерийнику.get(normalizeMachineSerial(ключ)) ?? null;
-      if (machineId === null) итог.безАвтомата += 1;
-      if (считается) итог.вВыручке += 1;
-      const сумма = Number(r.amount ?? 0);
       значения.push({
         extId: r.extId,
         source,
@@ -108,15 +111,30 @@ export class CoffeeOrdersService {
       });
     }
 
+    // Один заказ может лежать в выгрузке несколькими одинаковыми строками —
+    // в живом снимке заказ vip1760347… повторён четыре раза подряд. Два
+    // одинаковых ключа В ОДНОМ операторе INSERT Postgres не принимает
+    // («cannot affect row a second time»), поэтому схлопываем до пачек:
+    // побеждает последняя строка — ровно как вёл бы себя onConflictDoUpdate.
+    const поКлючу = new Map<string, (typeof coffeeOrder.$inferInsert)>();
+    for (const v of значения) поКлючу.set(v.extId, v);
+    const уникальные = [...поКлючу.values()];
+    итог.дублейВПачке = значения.length - уникальные.length;
+    for (const v of уникальные) {
+      if (v.machineId === null) итог.безАвтомата += 1;
+      if (v.countable) итог.вВыручке += 1;
+    }
+
     const ПАЧКА = 500;
-    for (let i = 0; i < значения.length; i += ПАЧКА) {
-      const кусок = значения.slice(i, i + ПАЧКА);
+    for (let i = 0; i < уникальные.length; i += ПАЧКА) {
+      const кусок = уникальные.slice(i, i + ПАЧКА);
       const записано = await this.db
         .insert(coffeeOrder)
         .values(кусок)
         .onConflictDoUpdate({
           target: [coffeeOrder.source, coffeeOrder.extId],
           set: {
+            amount: sql`excluded.amount`,
             paymentStatus: sql`excluded.payment_status`,
             brewStatus: sql`excluded.brew_status`,
             orderResource: sql`excluded.order_resource`,
@@ -138,14 +156,26 @@ export class CoffeeOrdersService {
   async summary(from?: string, to?: string): Promise<{
     период: { from: string | null; to: string | null };
     всего: { чашек: number; выручка: number; среднийЧек: number };
+    /** Доля VIP-карт внутри «всего» — владелец решает, служебные они или клиентские. */
+    vip: { чашек: number; выручка: number };
     неВыдано: number;
     поМесяцам: { месяц: string; чашек: number; выручка: number }[];
     поАвтоматам: { машина: string; чашек: number; выручка: number }[];
     поТоварам: { товар: string; чашек: number; выручка: number }[];
   }> {
     const усл = [eq(coffeeOrder.countable, true)];
-    if (from) усл.push(gte(coffeeOrder.ts, new Date(from)));
-    if (to) усл.push(lte(coffeeOrder.ts, new Date(to)));
+    // Голая дата «2026-08-01» — календарный день по Ташкенту, а не полночь UTC:
+    // new Date() на такой строке дал бы мгновение на пять часов раньше, и в
+    // сводку заезжал бы хвост чужих суток. Невалидная строка — ошибка запроса,
+    // а не «фильтр молча исчез» и не 500 из недр драйвера.
+    const мгновение = (v: string, конецСуток: boolean): Date => {
+      const голаяДата = /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
+      const d = new Date(голаяДата ? `${v.trim()}T${конецСуток ? "23:59:59.999" : "00:00:00"}+05:00` : v);
+      if (Number.isNaN(d.getTime())) throw new BadRequestException(`Дата не разобрана: «${v}»`);
+      return d;
+    };
+    if (from) усл.push(gte(coffeeOrder.ts, мгновение(from, false)));
+    if (to) усл.push(lte(coffeeOrder.ts, мгновение(to, true)));
     const где = and(...усл);
 
     const [всего] = await this.db
@@ -156,21 +186,33 @@ export class CoffeeOrdersService {
       .from(coffeeOrder)
       .where(где);
 
+    // VIP отдельной строкой: 70% vip-выручки дают три кочующие карты, и
+    // владелец должен видеть эту долю на экране, а не искать её в константах.
+    const [vip] = await this.db
+      .select({
+        чашек: sql<number>`count(*) filter (where lower(${coffeeOrder.orderResource}) = 'vip')::int`,
+        выручка: sql<number>`coalesce(sum(${coffeeOrder.amount}) filter (where lower(${coffeeOrder.orderResource}) = 'vip'), 0)::float8`,
+      })
+      .from(coffeeOrder)
+      .where(где);
+
     const [{ неВыдано }] = await this.db
       .select({ неВыдано: sql<number>`count(*)::int` })
       .from(coffeeOrder)
-      .where(and(где, sql`${coffeeOrder.brewStatus} is not null and ${coffeeOrder.brewStatus} not in ('2','Delivered','Delivery confirmed')`));
+      .where(and(где, sql`${coffeeOrder.brewStatus} is not null and ${coffeeOrder.brewStatus} not in ('2','10','Delivered','Delivery confirmed')`));
 
     const поМесяцам = await this.db
       .select({
-        месяц: sql<string>`to_char(${coffeeOrder.ts}, 'YYYY-MM')`,
+        // Месяц считается по Ташкенту, а не по UTC: заказ в 02:00 первого числа —
+        // это 21:00 предыдущих суток по UTC, и он уехал бы в прошлый месяц.
+        месяц: sql<string>`to_char(${coffeeOrder.ts} at time zone 'Asia/Tashkent', 'YYYY-MM')`,
         чашек: sql<number>`count(*)::int`,
         выручка: sql<number>`coalesce(sum(${coffeeOrder.amount}), 0)::float8`,
       })
       .from(coffeeOrder)
       .where(где)
-      .groupBy(sql`1`)
-      .orderBy(sql`1`);
+      .groupBy(sql`to_char(${coffeeOrder.ts} at time zone 'Asia/Tashkent', 'YYYY-MM')`)
+      .orderBy(sql`to_char(${coffeeOrder.ts} at time zone 'Asia/Tashkent', 'YYYY-MM')`);
 
     const поАвтоматам = await this.db
       .select({
@@ -200,6 +242,7 @@ export class CoffeeOrdersService {
     return {
       период: { from: from ?? null, to: to ?? null },
       всего: { чашек, выручка, среднийЧек: чашек > 0 ? Math.round(выручка / чашек) : 0 },
+      vip: { чашек: Number(vip?.чашек ?? 0), выручка: Number(vip?.выручка ?? 0) },
       неВыдано: Number(неВыдано ?? 0),
       поМесяцам,
       поАвтоматам,
