@@ -68,6 +68,7 @@ export * from "./vending-calc";
 export * from "./coffee-calc";
 export * from "./coffee-order";
 export * from "./cash-estimate";
+export * from "./service-feed";
 export * from "./consumption";
 export * from "./intake-sync";
 export * from "./numguard";
