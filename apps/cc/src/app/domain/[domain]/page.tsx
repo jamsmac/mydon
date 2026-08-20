@@ -487,7 +487,7 @@ export default async function DomainPage({
       )}
 
       {/* ── Обслуживание: временная сборка старых операционных панелей (до PR3) ── */}
-      {activeGroup === "service" && (
+      {domain === "vendhub" && activeGroup === "service" && (
         <>
           <div className="sect">
             <div className="sect-h"><h3 className="h2">Кофе-бункеры</h3></div>
@@ -505,14 +505,14 @@ export default async function DomainPage({
       )}
 
       {/* ── SMM / CRM: деятельность объявлена в структуре, подключение — отдельным этапом ── */}
-      {activeGroup === "smm" && (
+      {domain === "vendhub" && activeGroup === "smm" && (
         <div className="empty">
           <b>SMM — продвижение</b>
           Вебсайт, Instagram, TikTok и другие каналы направления. Деятельность объявлена
           в структуре; подключение — отдельным этапом со своей спекой.
         </div>
       )}
-      {activeGroup === "crm" && (
+      {domain === "vendhub" && activeGroup === "crm" && (
         <div className="empty">
           <b>CRM — звонки и обращения</b>
           Приём обращений, анализ звонков. Деятельность объявлена в структуре;
@@ -1261,8 +1261,9 @@ export default async function DomainPage({
       {/* ── HR (VendHub) / Команда направления (остальные направления) ──
           У VendHub вкладка «Команда» переехала под «HR» (восьмёрка владельца);
           у остальных направлений состав вкладок не меняется — они всё ещё
-          приходят сюда ключом "team", поэтому рендерим оба ключа одним блоком. */}
-      {(activeGroup === "hr" || activeGroup === "team") && (
+          приходят сюда ключом "team", поэтому рендерим оба ключа одним блоком.
+          "hr" гейтится доменом: вне VendHub этот ключ недостижим (ревью). */}
+      {((domain === "vendhub" && activeGroup === "hr") || activeGroup === "team") && (
         <>
           {activeGroup === "hr" && (
             <p className="hint" style={{ marginBottom: 12 }}>
