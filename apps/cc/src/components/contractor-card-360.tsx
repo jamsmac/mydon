@@ -3,6 +3,7 @@ import { CONTRACTOR_ROLE_LABELS, contractorDirections, type ContractorRole } fro
 import type { Entity } from "../lib/core";
 import { CardTabs } from "./card-tabs";
 import { when } from "../lib/format";
+import { DOMAIN_TITLES } from "../lib/labels";
 
 const sum = (n: number) => n.toLocaleString("ru-RU");
 
@@ -95,7 +96,7 @@ export function ContractorCard360({
             ))}
             {направления.map((d) => (
               <span className="chip" key={d}>
-                {d}
+                {DOMAIN_TITLES[d] ?? d}
               </span>
             ))}
             {!approved && (

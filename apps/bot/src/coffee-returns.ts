@@ -1,7 +1,7 @@
 import { parseContainerReturnMessage } from "@mydon/shared";
 import { visitFromFlow, visitKeyboard, type VisitState } from "./coffee-visit";
 import { applyPress, numpadKeyboard, numpadText, parseNumpadCallback, type NumpadPress } from "./numpad";
-import { parseAmount, todayIso } from "./coffee-refill";
+import { orderLocations, parseAmount, todayIso } from "./coffee-refill";
 import type { CoreClient, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import type { StaffReply } from "./staff";
@@ -222,10 +222,7 @@ function confirmStep(locationName: string, counts: Record<ConsumableField, numbe
 /** Начать ввод расходников: выбрать точку. */
 export async function startCoffeeConsumable(chatId: number, deps: CoffeeReturnsDeps): Promise<StaffReply> {
   const locations = await deps.core.coffeeLocations();
-  // Точка попадает в список, только если на ней стоит рабочий аппарат:
-  // `isActive` — ручной флаг владельца, `operational` — состояние техники.
-  // Аппарат увезли на склад или в ремонт — заливать там нечего.
-  const active = locations.filter((l) => l.isActive && l.operational);
+  const active = orderLocations(locations);
   if (active.length === 0) {
     return { text: "Точек с кофемашинами в реестре пока нет — скажи владельцу." };
   }

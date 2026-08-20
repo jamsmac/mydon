@@ -65,6 +65,27 @@ function isSkip(text: string): boolean {
   return /^[-—]$/.test(text.trim());
 }
 
+/**
+ * Порядок точек в выборе: сначала те, где стоит аппарат в эксплуатации,
+ * следом остальные — с пометкой.
+ *
+ * ПОЧЕМУ НЕ ПРЯЧЕМ. `operational` считается по ОТКРЫТЫМ размещениям, а уход
+ * аппарата в ремонт размещение закрывает — причём делает это сам бот кнопкой
+ * «Поломка». Возврат в строй размещение обратно не открывает, поэтому
+ * спрятанная точка не вернулась бы в список никогда: оператор в том же визите
+ * не смог бы записать по ней ни расходники, ни заливку. Порядок и пометка
+ * убирают такие точки с глаз, ничего не делая недостижимым.
+ */
+export function orderLocations(
+  locations: { id: string; name: string; isActive: boolean; operational: boolean }[],
+): { id: string; name: string }[] {
+  const активные = locations.filter((l) => l.isActive);
+  return [
+    ...активные.filter((l) => l.operational).map((l) => ({ id: l.id, name: l.name })),
+    ...активные.filter((l) => !l.operational).map((l) => ({ id: l.id, name: `${l.name} · нет аппарата` })),
+  ];
+}
+
 function locationKeyboard(locations: { id: string; name: string }[], prefix: "cf" | "cw"): NonNullable<StaffReply["keyboard"]> {
   return {
     inline_keyboard: [
@@ -186,10 +207,7 @@ export function coffeeRefillStepHint(step: string): string {
 /** Начать заливку: выбрать точку. */
 export async function startCoffeeRefill(chatId: number, deps: CoffeeDeps): Promise<StaffReply> {
   const locations = await deps.core.coffeeLocations();
-  // Точка попадает в список, только если на ней стоит рабочий аппарат:
-  // `isActive` — ручной флаг владельца, `operational` — состояние техники.
-  // Аппарат увезли на склад или в ремонт — заливать там нечего.
-  const active = locations.filter((l) => l.isActive && l.operational);
+  const active = orderLocations(locations);
   if (active.length === 0) {
     return { text: "Точек с кофемашинами в реестре пока нет — скажи владельцу." };
   }
@@ -763,10 +781,7 @@ export async function continueVisitRefill(
 
 export async function startCoffeeWash(chatId: number, deps: CoffeeDeps): Promise<StaffReply> {
   const locations = await deps.core.coffeeLocations();
-  // Точка попадает в список, только если на ней стоит рабочий аппарат:
-  // `isActive` — ручной флаг владельца, `operational` — состояние техники.
-  // Аппарат увезли на склад или в ремонт — заливать там нечего.
-  const active = locations.filter((l) => l.isActive && l.operational);
+  const active = orderLocations(locations);
   if (active.length === 0) {
     return { text: "Точек с кофемашинами в реестре пока нет — скажи владельцу." };
   }

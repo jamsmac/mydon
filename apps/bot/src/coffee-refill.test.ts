@@ -96,21 +96,30 @@ describe("Триггеры и разбор ввода — кофе-бункер�
 });
 
 describe("Список точек для заливки", () => {
-  it("точка без рабочего аппарата не предлагается: заливать там нечего", async () => {
+  it("точка без рабочего аппарата уходит вниз с пометкой, но остаётся достижимой", async () => {
     const СКЛАД = "55555555-5555-4555-8555-555555555555";
     const { core } = stubCore({
       coffeeLocations: async () => [
-        { id: LOC, name: "American Hospital", isActive: true, operational: true },
-        // Аппарат увезли на склад — размещение закрылось, точка осталась.
+        // Аппарат увезли — размещение закрылось, точка осталась. Идёт первой,
+        // чтобы проверить именно перестановку, а не исходный порядок.
         { id: СКЛАД, name: "кардиология кпп", isActive: true, operational: false },
+        { id: LOC, name: "American Hospital", isActive: true, operational: true },
       ],
     });
     const deps = { core, conversations: new Conversations() };
 
     const start = await startCoffeeRefill(1, deps);
-    const кнопки = start.keyboard!.inline_keyboard.flat().map((b) => b.callback_data);
-    assert.ok(кнопки.includes(`cf:loc:${LOC}`), "рабочая точка должна остаться");
-    assert.ok(!кнопки.includes(`cf:loc:${СКЛАД}`), "точка без рабочего аппарата не должна предлагаться");
+    const строки = start.keyboard!.inline_keyboard.flat();
+    const кнопки = строки.map((b) => b.callback_data);
+    // Прятать нельзя: ремонт закрывает размещение, а возврат в строй его не
+    // открывает — спрятанная точка не вернулась бы в список никогда.
+    assert.ok(кнопки.includes(`cf:loc:${СКЛАД}`), "точка обязана остаться достижимой");
+    assert.ok(
+      кнопки.indexOf(`cf:loc:${LOC}`) < кнопки.indexOf(`cf:loc:${СКЛАД}`),
+      "рабочая точка должна стоять выше",
+    );
+    const метка = строки.find((b) => b.callback_data === `cf:loc:${СКЛАД}`)!.text;
+    assert.match(метка, /нет аппарата/, "нерабочая точка должна быть помечена");
   });
 
   it("ручной флаг «выключена» по-прежнему убирает точку, даже с рабочим аппаратом", async () => {

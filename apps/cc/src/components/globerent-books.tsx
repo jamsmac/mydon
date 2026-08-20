@@ -104,10 +104,12 @@ function оборотОф(e: Entity): number | null {
 }
 
 export function ContractorsBook({ items }: { items: Entity[] }) {
-  // Список сортируется по обороту, когда он известен: поставщик на 60 млн и
-  // поставщик на 500 тысяч — разные собеседники, и порядок должен об этом
-  // говорить. Без оборота (весь реестр GLOBERENT) остаётся алфавит.
-  const сОборотом = items.some((e) => оборотОф(e) !== null);
+  // Список сортируется по закупкам, когда они известны У ВСЕХ: поставщик на
+  // 60 млн и поставщик на полмиллиона — разные собеседники, и порядок должен
+  // об этом говорить. Именно `every`, а не `some`: в реестре GLOBERENT сумма
+  // есть у шести карточек из 226, и одной хватило бы, чтобы переименовать
+  // колонку у всех, а 220 строк показали бы в ней дату под шапкой «сумма».
+  const сОборотом = items.length > 0 && items.every((e) => оборотОф(e) !== null);
   const rows = сОборотом
     ? [...items].sort((a, b) => (оборотОф(b) ?? -1) - (оборотОф(a) ?? -1))
     : items;
@@ -118,17 +120,24 @@ export function ContractorsBook({ items }: { items: Entity[] }) {
         <div className="th">
           <span>Название</span>
           <span>ИНН</span>
-          <span style={{ textAlign: "right" }}>{сОборотом ? "Оборот, сум" : "Обновлено"}</span>
+          {/* «Закупки», а не «Оборот»: это сумма НАШИХ закупок у поставщика,
+              и в контексте GLOBERENT «оборот» читался бы как оборот по нему. */}
+          <span style={{ textAlign: "right" }}>{сОборотом ? "Закупки, сум" : "Обновлено"}</span>
         </div>
         {rows.map((e) => {
           const оборот = оборотОф(e);
           const роли = Array.isArray((e.attrs ?? {})["roles"]) ? ((e.attrs ?? {})["roles"] as string[]) : [];
           return (
             <Link href={`/card/${e.id}`} className="tr" key={e.id}>
-              <span className="nm">
-                {e.name}
+              {/* Чип вынесен из обрезаемого потока: у `.book .nm` стоит
+                  ellipsis, и роль пропадала вместе с хвостом длинного имени.
+                  Имя сжимается, чип держит свою ширину. */}
+              <span className="nm" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {e.name}
+                </span>
                 {роли.map((r) => (
-                  <span className="chip" key={r} style={{ marginLeft: 6 }}>
+                  <span className="chip" key={r} style={{ flex: "0 0 auto" }}>
                     {CONTRACTOR_ROLE_LABELS[r as ContractorRole] ?? r}
                   </span>
                 ))}
