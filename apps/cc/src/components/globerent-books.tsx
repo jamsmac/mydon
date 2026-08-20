@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CONTRACTOR_ROLE_LABELS, type ContractorRole } from "@mydon/shared";
 import type { Entity } from "../lib/core";
 import { when } from "../lib/format";
 import {
@@ -96,22 +97,49 @@ export function InvoicesBook({ items }: { items: Entity[] }) {
 }
 
 /** Контрагенты: ИНН — ключ сведения тёзок из разных систем, показываем всегда. */
+/** Оборот по книге закупок владельца — есть только у тех, кого свели с реестром. */
+function оборотОф(e: Entity): number | null {
+  const v = (e.attrs ?? {})["оборот по реестру"];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
 export function ContractorsBook({ items }: { items: Entity[] }) {
+  // Список сортируется по обороту, когда он известен: поставщик на 60 млн и
+  // поставщик на 500 тысяч — разные собеседники, и порядок должен об этом
+  // говорить. Без оборота (весь реестр GLOBERENT) остаётся алфавит.
+  const сОборотом = items.some((e) => оборотОф(e) !== null);
+  const rows = сОборотом
+    ? [...items].sort((a, b) => (оборотОф(b) ?? -1) - (оборотОф(a) ?? -1))
+    : items;
+
   return (
     <div>
       <div className="book">
         <div className="th">
           <span>Название</span>
           <span>ИНН</span>
-          <span style={{ textAlign: "right" }}>Обновлено</span>
+          <span style={{ textAlign: "right" }}>{сОборотом ? "Оборот, сум" : "Обновлено"}</span>
         </div>
-        {items.map((e) => (
-          <Link href={`/card/${e.id}`} className="tr" key={e.id}>
-            <span className="nm">{e.name}</span>
-            <span className="cd">{contractorInn(e) ?? "—"}</span>
-            <span className="pr">{when(e.updatedAt)}</span>
-          </Link>
-        ))}
+        {rows.map((e) => {
+          const оборот = оборотОф(e);
+          const роли = Array.isArray((e.attrs ?? {})["roles"]) ? ((e.attrs ?? {})["roles"] as string[]) : [];
+          return (
+            <Link href={`/card/${e.id}`} className="tr" key={e.id}>
+              <span className="nm">
+                {e.name}
+                {роли.map((r) => (
+                  <span className="chip" key={r} style={{ marginLeft: 6 }}>
+                    {CONTRACTOR_ROLE_LABELS[r as ContractorRole] ?? r}
+                  </span>
+                ))}
+              </span>
+              <span className="cd">{contractorInn(e) ?? "—"}</span>
+              <span className="pr">
+                {оборот !== null ? оборот.toLocaleString("ru-RU") : when(e.updatedAt)}
+              </span>
+            </Link>
+          );
+        })}
       </div>
       <CountFoot n={items.length} />
     </div>

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { DOMAINS, DOMAIN_LABELS, dueLabel, type Domain } from "@mydon/shared";
+import { DOMAINS, DOMAIN_LABELS, contractorInDirection, dueLabel, type Domain } from "@mydon/shared";
 import {
   core,
   CoreUnavailable,
@@ -93,12 +93,22 @@ export default async function DomainPage({
   let entities: Entity[];
   let people: Person[] = [];
   let tasks: Task[] = [];
+  let contractors: Entity[] = [];
   try {
     entities = await core.entitiesOf(domain);
     try {
       [people, tasks] = await Promise.all([core.people(), core.tasks({ domain })]);
     } catch {
       // команда и задачи — не повод ронять страницу направления
+    }
+    try {
+      // Контрагенты живут одной карточкой на юрлицо и потому не помещаются в
+      // выборку по организации: поставщик VendHub может лежать в GLOBERENT,
+      // куда попал при выгрузке документов. Берём всех и отбираем по признаку
+      // направления — тем же, что считает цифру на подвкладке.
+      contractors = (await core.contractorsAll()).filter((e) => contractorInDirection(e, domain));
+    } catch {
+      // реестр контрагентов — не повод ронять страницу направления
     }
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
@@ -212,6 +222,9 @@ export default async function DomainPage({
     acc[e.type] = (acc[e.type] ?? 0) + 1;
     return acc;
   }, {});
+  // Контрагенты считаются по своему признаку направления, а не по организации:
+  // иначе цифра на подвкладке разошлась бы со списком под ней.
+  byType["contractor"] = contractors.length;
 
   // GLOBERENT: раскладка договоров по срокам — тот же 14-дневный горизонт и то же
   // строковое сравнение дат, что в брифинге Core, чтобы панель и бот сходились в цифре.
@@ -301,7 +314,11 @@ export default async function DomainPage({
     group?.leaves.find((l) => l.type === "collection") ??
     group?.leaves[0];
   const leafItems =
-    group && leaf?.type ? entities.filter((e) => e.type === leaf.type).sort((a, b) => a.name.localeCompare(b.name, "ru")) : [];
+    group && leaf?.type
+      ? (leaf.type === "contractor" ? contractors : entities.filter((e) => e.type === leaf.type)).sort((a, b) =>
+          a.name.localeCompare(b.name, "ru"),
+        )
+      : [];
 
   // Справочник растаможки (ставки ТН ВЭД + БРВ) — живые таблицы Core, не реестр.
   let tnved: TnvedRate[] = [];

@@ -33,6 +33,7 @@ import { DeleteEntityButton } from "../../../components/entity-delete";
 import { EntityEditor } from "../../../components/entity-editor";
 import { StayTimeline } from "../../../components/machine-stays";
 import { EntityApproval } from "../../../components/entity-approval";
+import { ContractorCard360, ContractorSupplies } from "../../../components/contractor-card-360";
 import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
 import { PlanogramEditor } from "../../../components/planogram-editor";
 import { MachineCardPanel } from "../../../components/machine-card-panel";
@@ -611,6 +612,48 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
                   attrs={a}
                   recipeCost={recipe ? { total: recipe.total, unresolved: recipe.unresolved } : null}
                 />
+                <section id="fields">
+                  <EntityEditor entity={entity} />
+                </section>
+                <DeleteEntityButton
+                  id={entity.id}
+                  domain={entity.domain ?? null}
+                  type={entity.type}
+                  name={entity.name}
+                />
+              </>
+            ),
+          }}
+        />
+      </>
+    );
+  }
+
+  // Карточка контрагента — та же «360»: поставщик не строка справочника, а
+  // собеседник с историей закупок, документами и деньгами.
+  if (isContractor) {
+    return (
+      <>
+        <div className="page-head">
+          <Link
+            href={entity.domain ? `/domain/${entity.domain}?tab=catalog:contractor` : "/registry"}
+            className="back"
+          >
+            ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}
+          </Link>
+        </div>
+        <ContractorCard360
+          entity={entity}
+          documentsCount={photos.length}
+          contractsCount={contractorContracts.length}
+          flowsCount={contractorFlows.length}
+          slots={{
+            supplies: <ContractorSupplies entity={entity} />,
+            money: <ContractorFinance contracts={contractorContracts} flows={contractorFlows} />,
+            passport: (
+              <>
+                <EntityApproval entity={entity} drafts={drafts} />
+                <PhotoGallery attachments={photos} />
                 <section id="fields">
                   <EntityEditor entity={entity} />
                 </section>

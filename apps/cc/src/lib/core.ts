@@ -1843,6 +1843,15 @@ export const core = {
   entitiesOf: (domain: string) => get<Entity[]>(`/entities?domain=${domain}`),
   entitiesOfType: (domain: string, type: string) =>
     get<Entity[]>(`/entities?domain=${domain}&type=${encodeURIComponent(type)}`),
+  /**
+   * Все контрагенты, без привязки к направлению.
+   *
+   * Одно юрлицо — одна карточка (ИНН уникален во всём реестре), поэтому
+   * поставщик VendHub может лежать в организации GLOBERENT, куда попал при
+   * выгрузке документов. Отбор по направлению делает `contractorInDirection`
+   * на стороне панели: организация — где карточка родилась, тег — где работает.
+   */
+  contractorsAll: () => get<Entity[]>(`/entities?type=contractor&limit=500`),
   entity: (id: string) => get<Entity>(`/entities/${id}`),
   createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
   /** Вложения записи (фото номенклатуры, чеки) — для галереи карточки. */
