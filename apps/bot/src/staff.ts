@@ -524,9 +524,11 @@ async function startMenuItem(
       };
     }
     case "coll": {
-      const machines = await deps.core.machines();
+      // Только работающие: с аппарата на складе или в ремонте денег не собрать,
+      // а в списке он занимал место наравне с теми, куда инкассатор реально едет.
+      const machines = await deps.core.machines("vendhub", { operationalOnly: true });
       if (machines.length === 0) {
-        return { reply: { text: "Автоматов в реестре пока нет — скажи владельцу." } };
+        return { reply: { text: "Работающих автоматов нет — все на складе или в ремонте." } };
       }
       return {
         reply: {
