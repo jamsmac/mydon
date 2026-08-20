@@ -189,12 +189,7 @@ export default async function DomainPage({
   // дашборда. На других вкладках vendhub их не тянем.
   let salesSummary: Awaited<ReturnType<typeof core.salesSummary>> | null = null;
   let coffeeOrders: Awaited<ReturnType<typeof core.coffeeOrdersSummary>> | null = null;
-  let coffeeOrdersStatus: Awaited<ReturnType<typeof core.coffeeOrdersStatus>> | null = null;
   let supplySummary: Awaited<ReturnType<typeof core.supplySummary>> | null = null;
-  // Кофе-бункеры на дашборде: алерты и расход за 30 дней. Провал любого
-  // запроса не роняет дашборд — секция просто не показывается.
-  let coffeeAlerts: number | null = null;
-  let coffeeConsumption: Awaited<ReturnType<typeof core.coffeeContainerConsumption>> | null = null;
   let salesDaily: Awaited<ReturnType<typeof core.salesDaily>> | null = null;
   // Плитки «Предприятие»/«Парк» на дашборде: деньги в автоматах, пустые
   // спирали, карточки парка. Новые эндпоинты core (эта ветка ещё не выкачена
@@ -203,28 +198,14 @@ export default async function DomainPage({
   let vendingDeficit: Awaited<ReturnType<typeof core.vendingDeficit>> | null = null;
   let machineCards: Awaited<ReturnType<typeof core.machineCards>> | null = null;
   if (domain === "vendhub" && isOverview) {
-    const isoDate = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
-    const fromDate = new Date();
-    fromDate.setDate(fromDate.getDate() - 30);
-    let coffeeFill: Awaited<ReturnType<typeof core.coffeeFillStatus>> | null = null;
-    let coffeeWash: Awaited<ReturnType<typeof core.coffeeWashScheduleStatus>> | null = null;
-    [salesSummary, supplySummary, coffeeFill, coffeeWash, coffeeConsumption, salesDaily, cashEstimate, vendingDeficit, machineCards] =
-      await Promise.all([
-        core.salesSummary().catch(() => null),
-        core.supplySummary().catch(() => null),
-        core.coffeeFillStatus().catch(() => null),
-        core.coffeeWashScheduleStatus().catch(() => null),
-        core.coffeeContainerConsumption(isoDate(fromDate), isoDate(new Date())).catch(() => null),
-        core.salesDaily(30).catch(() => null),
-        core.cashEstimate().catch(() => null),
-        core.vendingDeficit().catch(() => null),
-        core.machineCards().catch(() => null),
-      ]);
-    if (coffeeFill !== null || coffeeWash !== null) {
-      coffeeAlerts =
-        (coffeeFill ?? []).filter((r) => r.status === "underfill").length +
-        (coffeeWash ?? []).filter((r) => r.status === "overdue").length;
-    }
+    [salesSummary, supplySummary, salesDaily, cashEstimate, vendingDeficit, machineCards] = await Promise.all([
+      core.salesSummary().catch(() => null),
+      core.supplySummary().catch(() => null),
+      core.salesDaily(30).catch(() => null),
+      core.cashEstimate().catch(() => null),
+      core.vendingDeficit().catch(() => null),
+      core.machineCards().catch(() => null),
+    ]);
   }
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
   // Задачи по контурам (слово владельца: смотреть и вместе, и по отдельности).
@@ -234,27 +215,6 @@ export default async function DomainPage({
   const coffeeTasks = openTasks.filter(isCoffeeTask).length;
   const snackTasks = openTasks.filter((t) => !isCoffeeTask(t) && /пополнен|инкасс|закуп|автомат|снек/i.test(t.title)).length;
 
-  // Расход кофе по неделям (для мини-графика): пары группируются по понедельнику
-  // недели даты возврата. Пары без посчитанного расхода в график не попадают.
-  const coffeeWeeklyBars = (() => {
-    if (coffeeConsumption === null) return [];
-    const byWeek = new Map<string, number>();
-    for (const r of coffeeConsumption.rows) {
-      if (r.consumedGrams === null) continue;
-      const d = new Date(`${r.returnDate}T00:00:00`);
-      const monday = new Date(d);
-      monday.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-      const key = monday.toLocaleDateString("en-CA");
-      byWeek.set(key, (byWeek.get(key) ?? 0) + r.consumedGrams);
-    }
-    return [...byWeek.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([k, grams]) => ({
-        label: `${k.slice(8)}.${k.slice(5, 7)}`,
-        value: grams,
-        title: `неделя с ${k}: ${(grams / 1000).toFixed(1)} кг`,
-      }));
-  })();
   if (domain === "vendhub") {
     // Тридцать календарных суток по Ташкенту, а не 720 часов от «сейчас»:
     // скользящее окно смещало бы границу внутрь чужого дня, и утренняя
@@ -262,10 +222,10 @@ export default async function DomainPage({
     const с = new Date(Date.now() - 30 * 24 * 3600 * 1000).toLocaleDateString("en-CA", {
       timeZone: "Asia/Tashkent",
     });
-    [coffeeOrders, coffeeOrdersStatus] = await Promise.all([
-      core.coffeeOrdersSummary(с).catch(() => null),
-      core.coffeeOrdersStatus().catch(() => null),
-    ]);
+    // coffeeOrdersStatus (статус синка) читался только снятой секцией
+    // «Кофе-автоматы» и нигде больше не используется — запрос убран вместе
+    // с переменной, а не просто перестал захватываться.
+    coffeeOrders = await core.coffeeOrdersSummary(с).catch(() => null);
   }
   const byType = entities.reduce<Record<string, number>>((acc, e) => {
     acc[e.type] = (acc[e.type] ?? 0) + 1;
