@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, collection, entity, person } from "@mydon/db";
+import { auditLog, coffeeOrder, collection, entity, person, sale } from "@mydon/db";
+import { cashInMachines } from "@mydon/shared";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
@@ -159,5 +160,32 @@ export class CollectionsService {
       receivedSum: Number(row?.receivedSum ?? 0),
       days,
     };
+  }
+
+  /** Оценка наличных в автоматах: продажи cash после последней ПРИНЯТОЙ инкассации. */
+  async cashEstimate(): Promise<{ всего: number; поАвтоматам: { machineId: string; имя: string | null; сумма: number; с: string | null }[] }> {
+    const принятые = await this.db
+      .select({ machineId: collection.machineId, receivedAt: collection.receivedAt })
+      .from(collection)
+      .where(sql`${collection.receivedAt} is not null`);
+    const кофе = await this.db
+      .select({ machineId: coffeeOrder.machineId, ts: coffeeOrder.ts, amount: coffeeOrder.amount, res: coffeeOrder.orderResource })
+      .from(coffeeOrder)
+      .where(and(eq(coffeeOrder.countable, true), sql`${coffeeOrder.machineId} is not null`));
+    const снек = await this.db
+      .select({ machineId: sale.machineId, dt: sale.dt, amount: sale.amount })
+      .from(sale)
+      .where(sql`${sale.machineId} is not null`);
+    const cashRes = new Set(["cash", "cash0", "cash payment", "credit"]);
+    const продажи = [
+      ...кофе.map((r) => ({ machineId: r.machineId as string, ts: (r.ts as Date).toISOString(), amount: Number(r.amount), cash: cashRes.has(String(r.res ?? "").toLowerCase()) })),
+      // Снек: платёжного канала в источнике нет — считаем наличными и честно
+      // помечаем «≈» на витрине.
+      ...снек.map((r) => ({ machineId: r.machineId as string, ts: `${r.dt}T23:59:59+05:00`, amount: Number(r.amount), cash: true })),
+    ];
+    const метки = принятые.map((c) => ({ machineId: c.machineId, receivedAt: (c.receivedAt as Date).toISOString() }));
+    const итог = cashInMachines(продажи, метки);
+    const имена = new Map((await this.db.select({ id: entity.id, name: entity.name }).from(entity)).map((e) => [e.id, e.name]));
+    return { всего: Math.round(итог.total), поАвтоматам: итог.perMachine.map((m) => ({ machineId: m.machineId, имя: имена.get(m.machineId) ?? null, сумма: Math.round(m.amount), с: m.since })) };
   }
 }

@@ -43,6 +43,17 @@ export class CollectionsController {
     return this.collections.summary(Number.isFinite(n) && n > 0 ? Math.min(n, 365) : 30);
   }
 
+  /**
+   * Оценка наличных в автоматах прямо сейчас.
+   *
+   * Стоит ВЫШЕ маршрута `:id` — иначе «cash-estimate» ушло бы в него как в
+   * идентификатор и вернуло бы ошибку разбора.
+   */
+  @Get("cash-estimate")
+  cashEstimate() {
+    return this.collections.cashEstimate();
+  }
+
   @Get()
   list(
     @Query("status") status?: string,

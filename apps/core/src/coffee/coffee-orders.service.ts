@@ -160,6 +160,7 @@ export class CoffeeOrdersService {
     vip: { чашек: number; выручка: number };
     неВыдано: number;
     поМесяцам: { месяц: string; чашек: number; выручка: number }[];
+    поДням: { день: string; чашек: number; выручка: number }[];
     поАвтоматам: { машина: string; чашек: number; выручка: number }[];
     поТоварам: { товар: string; чашек: number; выручка: number }[];
   }> {
@@ -214,6 +215,17 @@ export class CoffeeOrdersService {
       .groupBy(sql`to_char(${coffeeOrder.ts} at time zone 'Asia/Tashkent', 'YYYY-MM')`)
       .orderBy(sql`to_char(${coffeeOrder.ts} at time zone 'Asia/Tashkent', 'YYYY-MM')`);
 
+    const поДням = await this.db
+      .select({
+        день: sql<string>`to_char(${coffeeOrder.ts} at time zone 'Asia/Tashkent', 'YYYY-MM-DD')`,
+        чашек: sql<number>`count(*)::int`,
+        выручка: sql<number>`coalesce(sum(${coffeeOrder.amount}), 0)::float8`,
+      })
+      .from(coffeeOrder)
+      .where(где)
+      .groupBy(sql`to_char(${coffeeOrder.ts} at time zone 'Asia/Tashkent', 'YYYY-MM-DD')`)
+      .orderBy(sql`to_char(${coffeeOrder.ts} at time zone 'Asia/Tashkent', 'YYYY-MM-DD')`);
+
     const поАвтоматам = await this.db
       .select({
         машина: sql<string>`coalesce(${entity.name}, ${coffeeOrder.machineSerial})`,
@@ -245,6 +257,7 @@ export class CoffeeOrdersService {
       vip: { чашек: Number(vip?.чашек ?? 0), выручка: Number(vip?.выручка ?? 0) },
       неВыдано: Number(неВыдано ?? 0),
       поМесяцам,
+      поДням,
       поАвтоматам,
       поТоварам,
     };
