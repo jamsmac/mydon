@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { DOMAINS, DOMAIN_LABELS, contractorInDirection, dueLabel, type Domain } from "@mydon/shared";
 import {
   core,
@@ -31,7 +31,7 @@ import { MiniBars } from "../../../components/mini-bars";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
-import { VendingMachinesPanel, VendingSupplyPanel } from "../../../components/vending-panel";
+import { VendingSupplyPanel } from "../../../components/vending-panel";
 import { CoffeePanel } from "../../../components/coffee-panel";
 import {
   ContractorsBook,
@@ -85,6 +85,29 @@ export default async function DomainPage({
   const groups = groupsFor(domain);
   const active = tab ?? "overview";
   const [activeGroup, activeLeaf] = active.includes(":") ? active.split(":") : [active, null];
+
+  // Старые адреса вкладок живут в закладках и в сообщениях бота — они обязаны
+  // приводить в новые места, а не в пустую вкладку.
+  const TAB_REDIRECTS: Record<string, string> = {
+    vending: "settings:machine",
+    supply: "service",
+    coffee: "service",
+    collect: "service",
+    team: "hr",
+    catalog: "settings",
+    reference: "settings",
+  };
+  const redirectBase = TAB_REDIRECTS[activeGroup];
+  if (redirectBase && domain === "vendhub") {
+    // catalog/reference были группами с подвкладками — сохраняем лист при
+    // переезде в settings; остальные (vending/supply/…) были плоскими
+    // операционными вкладками, у них листа не было.
+    const redirectTo =
+      (activeGroup === "catalog" || activeGroup === "reference") && activeLeaf
+        ? `settings:${activeLeaf}`
+        : redirectBase;
+    redirect(`/domain/${domain}?tab=${redirectTo}`);
+  }
 
   const isOverview = activeGroup === "overview";
 
@@ -288,38 +311,39 @@ export default async function DomainPage({
   const href = (t: string) => `/domain/${domain}?tab=${encodeURIComponent(t)}`;
 
   // ── верхний ряд вкладок ────────────────────────────────────────────────────
-  const topTabs = [
-    { key: "overview", label: "Дашборд" },
-    // Живые операционные инструменты VendHub — раньше отдельные пункты сайдбара
-    // («Система»), теперь вкладки этого же рабочего места: один адрес
-    // направления, а не разрозненные экраны.
-    ...(domain === "vendhub"
-      ? [
-          // «Автоматы» — только список аппаратов; товарная аналитика — в «Пополнении».
-          { key: "vending", label: "Автоматы" },
-          { key: "supply", label: "Пополнение" },
-          { key: "coffee", label: "Кофе-бункеры" },
+  const teamLabel = `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}`;
+  const tasksLabel = `Задачи${openTasks.length > 0 ? ` ${openTasks.length}` : ""}`;
+  const topTabs =
+    domain === "vendhub"
+      ? // Восьмёрка владельца (слово владельца, 20.08.2026) — порядок задан явно,
+        // не через groups-порядок (settings/reports там идут иначе). «Задачи» и
+        // подписи «Отчёты»/«Настройки» переиспользуют существующие ключи —
+        // только переставлены, не задублированы.
+        [
+          { key: "overview", label: "Дашборд" },
+          { key: "service", label: "Обслуживание" },
+          { key: "tasks", label: tasksLabel },
+          { key: "reports", label: groups.find((g) => g.key === "reports")?.label ?? "Отчёты" },
+          { key: "smm", label: "SMM" },
+          { key: "crm", label: "CRM" },
+          { key: "hr", label: `HR${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
+          { key: "settings", label: groups.find((g) => g.key === "settings")?.label ?? "Настройки" },
         ]
-      : []),
-    // Живые контуры GLOBERENT (перенос PROMACH): склад, импорт, финансы, калькулятор.
-    ...(domain === "globerent"
-      ? [
-          { key: "units", label: "Склад" },
-          { key: "imports", label: "Импорт" },
-          { key: "finance", label: "Финансы" },
-          { key: "calc", label: "Калькулятор" },
-        ]
-      : []),
-    ...groups.map((g) => ({ key: g.key, label: g.label })),
-    // Инкассация — ежедневная операция, ей место в верхнем ряду (слово владельца).
-    ...(domain === "vendhub"
-      ? [
-          { key: "collect", label: `Инкассация${(collSummary?.pending ?? 0) > 0 ? ` ${collSummary!.pending}` : ""}` },
-        ]
-      : []),
-    { key: "team", label: `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
-    { key: "tasks", label: `Задачи${openTasks.length > 0 ? ` ${openTasks.length}` : ""}` },
-  ];
+      : [
+          { key: "overview", label: "Дашборд" },
+          // Живые контуры GLOBERENT (перенос PROMACH): склад, импорт, финансы, калькулятор.
+          ...(domain === "globerent"
+            ? [
+                { key: "units", label: "Склад" },
+                { key: "imports", label: "Импорт" },
+                { key: "finance", label: "Финансы" },
+                { key: "calc", label: "Калькулятор" },
+              ]
+            : []),
+          ...groups.map((g) => ({ key: g.key, label: g.label })),
+          { key: "team", label: teamLabel },
+          { key: "tasks", label: tasksLabel },
+        ];
 
   const group = groups.find((g) => g.key === activeGroup);
   // Внутри группы по умолчанию открыта первая подвкладка с данными.
@@ -462,10 +486,39 @@ export default async function DomainPage({
         </div>
       )}
 
-      {/* ── Живые операционные вкладки VendHub ── */}
-      {activeGroup === "vending" && <VendingMachinesPanel machines={machines} />}
-      {activeGroup === "supply" && <VendingSupplyPanel />}
-      {activeGroup === "coffee" && <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />}
+      {/* ── Обслуживание: временная сборка старых операционных панелей (до PR3) ── */}
+      {domain === "vendhub" && activeGroup === "service" && (
+        <>
+          <div className="sect">
+            <div className="sect-h"><h3 className="h2">Кофе-бункеры</h3></div>
+            <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />
+          </div>
+          <div className="sect">
+            <div className="sect-h"><h3 className="h2">Пополнение снека</h3></div>
+            <VendingSupplyPanel />
+          </div>
+          <div className="sect">
+            <div className="sect-h"><h3 className="h2">Инкассация</h3></div>
+            <CollectionsView />
+          </div>
+        </>
+      )}
+
+      {/* ── SMM / CRM: деятельность объявлена в структуре, подключение — отдельным этапом ── */}
+      {domain === "vendhub" && activeGroup === "smm" && (
+        <div className="empty">
+          <b>SMM — продвижение</b>
+          Вебсайт, Instagram, TikTok и другие каналы направления. Деятельность объявлена
+          в структуре; подключение — отдельным этапом со своей спекой.
+        </div>
+      )}
+      {domain === "vendhub" && activeGroup === "crm" && (
+        <div className="empty">
+          <b>CRM — звонки и обращения</b>
+          Приём обращений, анализ звонков. Деятельность объявлена в структуре;
+          подключение — отдельным этапом.
+        </div>
+      )}
 
       {/* ── Финансы GLOBERENT: агинг, к сроку, термометр, кэш-флоу, ввод ── */}
       {isFinanceTab &&
@@ -646,7 +699,7 @@ export default async function DomainPage({
             <div className="notice" style={{ marginTop: 16 }}>
               <b>В автоматах пусто: {supplySummary.emptyPositions} позиций</b>
               Спирали закончились — пора везти пополнение.{" "}
-              <Link href={href("catalog:machine_stock")} style={{ color: "var(--hot)", fontWeight: 600 }}>
+              <Link href={href("settings:machine_stock")} style={{ color: "var(--hot)", fontWeight: 600 }}>
                 Смотреть остатки →
               </Link>
             </div>
@@ -696,7 +749,7 @@ export default async function DomainPage({
               </div>
               <div className="tiles" style={{ marginBottom: 10 }}>
                 <Link
-                  href={href("collect")}
+                  href={href("service")}
                   className={`tile ${collSummary.pending > 0 ? "is-hot" : "zero"}`}
                 >
                   <div className="lab">Ждут приёма</div>
@@ -706,7 +759,7 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("collect")} className={`tile ${collSummary.receivedSum === 0 ? "zero" : ""}`}>
+                <Link href={href("service")} className={`tile ${collSummary.receivedSum === 0 ? "zero" : ""}`}>
                   <div className="lab">Наличные · 30 дней</div>
                   <div className="v">{Number(collSummary.receivedSum).toLocaleString("ru-RU")} <span className="u">сум</span></div>
                   <div className="foot"><span className="mk" />принято инкассаций: {collSummary.receivedCount}<span className="go">→</span></div>
@@ -837,12 +890,12 @@ export default async function DomainPage({
                 {coffeeTasks > 0 && <span className="chip">задач · {coffeeTasks}</span>}
               </div>
               <div className="wgrid">
-                <Link href={href("coffee")} className="wt">
+                <Link href={href("service")} className="wt">
                   <div className="wl">Сигналы (недолив · мойка)</div>
                   <div className="wv">{coffeeAlerts ?? "—"}</div>
                   <div className="wf">{coffeeAlerts === 0 ? "спокойно" : "смотреть сверку"}<span className="go">→</span></div>
                 </Link>
-                <Link href={href("coffee")} className="wt">
+                <Link href={href("service")} className="wt">
                   <div className="wl">Расход · 30 дней</div>
                   <div className="wv">
                     {coffeeConsumption !== null ? `${(coffeeConsumption.totalGrams / 1000).toFixed(1)} кг` : "—"}
@@ -854,7 +907,7 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("coffee")} className="wt">
+                <Link href={href("service")} className="wt">
                   <div className="wl">Локаций в расходе</div>
                   <div className="wv">{coffeeConsumption !== null ? coffeeConsumption.locations.length : "—"}</div>
                   <div className="wf">за 30 дней<span className="go">→</span></div>
@@ -962,8 +1015,8 @@ export default async function DomainPage({
           <ReportsOverview base={`/domain/${domain}`} />
         ))}
 
-      {/* ── Инкассация: живой экран VendCash (верхняя вкладка и подвкладка отчётов) ── */}
-      {(activeGroup === "collect" || (group && leaf?.type === "collection")) && <CollectionsView />}
+      {/* ── Инкассация: живой экран VendCash (подвкладка отчётов; операционная копия — во «Обслуживании») ── */}
+      {group && leaf?.type === "collection" && <CollectionsView />}
 
       {/* ── Журнал продаж: живые данные из mydon-stock (этап 1 миграции) ── */}
       {group && leaf?.type === "sale" && <SalesView />}
@@ -1205,27 +1258,39 @@ export default async function DomainPage({
         </div>
       )}
 
-      {/* ── Команда направления ── */}
-      {activeGroup === "team" &&
-        (ourPeople.length === 0 ? (
-          <div className="empty">
-            <b>В этом направлении пока никого</b>
-            Назначь сотруднику направление в его карточке — он появится здесь.
-          </div>
-        ) : (
-          <div>
-            {ourPeople.map((p) => (
-              <Link href={`/team/${p.id}`} className="prow" key={p.id}>
-                <span className="av2">{p.name.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}</span>
-                <div className="pb">
-                  <div className="pn">{p.name}</div>
-                  <div className="pr2">{p.role ?? "роль не указана"}</div>
-                </div>
-                {p.tgChatId ? <span className="tag-tg">в Telegram</span> : <span className="chip">не подключён</span>}
-              </Link>
-            ))}
-          </div>
-        ))}
+      {/* ── HR (VendHub) / Команда направления (остальные направления) ──
+          У VendHub вкладка «Команда» переехала под «HR» (восьмёрка владельца);
+          у остальных направлений состав вкладок не меняется — они всё ещё
+          приходят сюда ключом "team", поэтому рендерим оба ключа одним блоком.
+          "hr" гейтится доменом: вне VendHub этот ключ недостижим (ревью). */}
+      {((domain === "vendhub" && activeGroup === "hr") || activeGroup === "team") && (
+        <>
+          {activeGroup === "hr" && (
+            <p className="hint" style={{ marginBottom: 12 }}>
+              HR — люди и оценка работы. Оценка объёмов — следующим этапом.
+            </p>
+          )}
+          {ourPeople.length === 0 ? (
+            <div className="empty">
+              <b>В этом направлении пока никого</b>
+              Назначь сотруднику направление в его карточке — он появится здесь.
+            </div>
+          ) : (
+            <div>
+              {ourPeople.map((p) => (
+                <Link href={`/team/${p.id}`} className="prow" key={p.id}>
+                  <span className="av2">{p.name.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}</span>
+                  <div className="pb">
+                    <div className="pn">{p.name}</div>
+                    <div className="pr2">{p.role ?? "роль не указана"}</div>
+                  </div>
+                  {p.tgChatId ? <span className="tag-tg">в Telegram</span> : <span className="chip">не подключён</span>}
+                </Link>
+              ))}
+            </div>
+          )}
+        </>
+      )}
 
       {/* ── Задачи направления ── */}
       {activeGroup === "tasks" &&
