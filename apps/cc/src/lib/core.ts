@@ -135,8 +135,9 @@ export interface VendingSyncRun {
 /**
  * Заливка снек/дринк-автомата: ПОСТРОЧНАЯ запись (один слот). У журнала нет
  * готовой группировки «точка → позиции → веса» — это склеивает вкладка
- * «Обслуживание» по (machineSerial, performedAt с точностью до минуты),
- * см. `service-tab.tsx` (Task 9, ревью Task 8).
+ * «Обслуживание» по (machineSerial, performedAt) по разрыву 15 минут между
+ * соседними строками, а не по минуте, см. `service-tab.tsx` (Task 9, ревью
+ * Task 8, ревью Task 9 находка 1).
  */
 export interface VendingRefillRow {
   id: string;
@@ -1993,10 +1994,6 @@ export const core = {
       поТоварам: { товар: string; чашек: number; выручка: number }[];
       поДням: { день: string; чашек: number; выручка: number }[];
     }>(`/coffee/orders/summary${from ? `?from=${from}${to ? `&to=${to}` : ""}` : ""}`),
-  coffeeOrdersStatus: () =>
-    get<{ всего: number; вВыручке: number; первый: string | null; последний: string | null }>(
-      "/coffee/orders/status",
-    ),
   salesSummary: () =>
     get<{
       today: { qty: number; amount: number };
