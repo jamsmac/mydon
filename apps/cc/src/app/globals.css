@@ -296,6 +296,10 @@ a.wt:hover .wf .go, a.wt:hover .wv { color: var(--accent); }
 .wt.off { border-style: dashed; }
 .wt.off .wl, .wt.off .wv { color: var(--tx-3); }
 .wt.off .wv { font-size: 20px; }
+.wt.is-hot { border-color: var(--hot-line); }
+.wt.is-hot::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--hot); }
+.wt.is-hot .wv { color: var(--hot); }
+.wt.is-hot .wf { color: var(--hot); border-top-color: var(--hot-line); }
 
 /* таблица-книга */
 .book { background: var(--surf); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
