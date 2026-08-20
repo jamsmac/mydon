@@ -268,7 +268,10 @@ export default async function DomainPage({
     const tasksOverdueRows = await core.tasksOverdue().catch(() => null);
     const overdueCount =
       tasksOverdueRows === null ? null : tasksOverdueRows.filter((t) => t.domain === "vendhub").length;
-    const unassignedCount = openTasks.filter((t) => t.ownerRef === null).length;
+    // ownerRef === "" тоже "свободная" — исторические записи до нормализации
+    // "" → null на создании (tasks.service.ts) могли осесть в базе пустой
+    // строкой, а не null.
+    const unassignedCount = openTasks.filter((t) => t.ownerRef === null || t.ownerRef.trim() === "").length;
     // «За неделю» — та же скользящая граница (сейчас минус 168 часов), что
     // и doneLast7d на сервере (tasks.service.ts), а не календарный день:
     // окно в 7×24 часа не зависит от часового пояса подсчёта.

@@ -66,13 +66,17 @@ export class TasksService {
   /** Создание вместе с записью в журнал — одной транзакцией. */
   async create(input: CreateTaskInput, actorRef = "system"): Promise<TaskRow> {
     return this.db.transaction(async (tx) => {
+      // Пустая строка от клиента (нет активного человека под рукой) не должна
+      // осесть в базе как «занятая» задача — те же правила, что у PATCH
+      // (setStatus/edit, см. ниже): "" нормализуется в null.
+      const ownerRef = (input.ownerRef ?? "").trim();
       const [created] = await tx
         .insert(task)
         .values({
           title: input.title,
           description: input.description ?? null,
           ownerKind: input.ownerKind,
-          ownerRef: input.ownerRef ?? null,
+          ownerRef: ownerRef.length > 0 ? ownerRef : null,
           domain: input.domain ?? null,
           due: input.due ?? null,
           source: input.source ?? null,
@@ -364,13 +368,16 @@ export class TasksService {
     // Было select-then-insert: два тика монитора в одну секунду проходили
     // проверку оба и создавали две задачи на один день. Ставку делает БД —
     // частичный уникальный индекс task_source_key (миграция 0040).
+    // ownerRef: та же нормализация "" → null, что в create() и PATCH — пустая
+    // строка от клиента не должна осесть «занятой» задачей.
+    const ownerRef = (input.ownerRef ?? "").trim();
     const [created] = await this.db
       .insert(task)
       .values({
         title: input.title,
         description: input.description ?? null,
         ownerKind: input.ownerKind,
-        ownerRef: input.ownerRef ?? null,
+        ownerRef: ownerRef.length > 0 ? ownerRef : null,
         domain: input.domain ?? null,
         due: input.due ?? null,
         source,
