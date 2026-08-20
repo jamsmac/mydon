@@ -77,6 +77,9 @@ function shortRuDate(iso: string): string {
     .replace(/\.$/, "");
 }
 
+/** Потолок `GET /coffee/refill/recent` (coffee.controller.ts): выше сервер не отдаёт. */
+const COFFEE_REFILL_LIMIT = 200;
+
 /**
  * Рабочее место направления — как в ПО владельца (VHM24) и его command-center:
  * Дашборд первым, дальше группы-вкладки с подвкладками (Каталог → Товары,
@@ -454,7 +457,12 @@ export default async function DomainPage({
     let refillRows: Awaited<ReturnType<typeof core.vendingRefillList>> | null = null;
     let collRows: Awaited<ReturnType<typeof core.collections>> | null = null;
     [recentRefills, bunkerConfig, fillStatus, serviceDeficit, refillRows, collRows] = await Promise.all([
-      core.recentCoffeeRefills(50).catch(() => null),
+      // Лимит 200 — потолок эндпоинта (coffee.controller.ts: Math.min(Math.max(limit,1),200)).
+      // Одна и та же выборка кормит и счётчик «сегодня», и ленту — ленту резать
+      // отдельно не нужно, mergeServiceFeed сам ограничивает итог 50 строками
+      // (Task 9 ревью, находка 2: на лимите 50 «сегодня» молча недосчитывало
+      // дни с активной заливкой более чем на 50 бункеров).
+      core.recentCoffeeRefills(COFFEE_REFILL_LIMIT).catch(() => null),
       core.coffeeBunkerConfig().catch(() => null),
       core.coffeeFillStatus().catch(() => null),
       core.vendingDeficit().catch(() => null),
@@ -470,6 +478,11 @@ export default async function DomainPage({
         : recentRefills.filter(
             (r) => new Date(r.createdAt).toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" }) === todayKey,
           ).length;
+    // Пришло ровно столько строк, сколько разрешает эндпоинт, — значит за
+    // сегодня могло быть больше, чем видно в этой выборке (более старые
+    // заливки сегодняшнего дня уже могли не поместиться). Честная оговорка
+    // вместо тихого недосчёта (Task 9 ревью, находка 2).
+    const filledTodayCapped = recentRefills !== null && recentRefills.length === COFFEE_REFILL_LIMIT;
 
     // «Точек ждёт визита» — уникальные точки со status="underfill". Пустой
     // ответ ИЛИ ответ, где ни для одной точки эталон не задан (весь список —
@@ -497,7 +510,12 @@ export default async function DomainPage({
       {
         label: "Залито сегодня",
         value: filledToday === null ? "—" : `${filledToday} ${plural(filledToday, "бункер", "бункера", "бункеров")}`,
-        foot: recentRefills === null ? "нет данных" : "заливок кофе-бункеров сегодня",
+        foot:
+          recentRefills === null
+            ? "нет данных"
+            : filledTodayCapped
+              ? `за сегодня, до ${COFFEE_REFILL_LIMIT} записей`
+              : "заливок кофе-бункеров сегодня",
       },
       {
         label: "Точек ждёт визита",
@@ -534,10 +552,10 @@ export default async function DomainPage({
     );
 
     // Снек → лента: /vending/refills отдаёт построчные записи по слоту, без
-    // группировки и без имени автомата — склеиваем сами по (серийник,
-    // performedAt с точностью до минуты) и резолвим имя по реестру
-    // (Task 8 ревью, пункт 3). Серийник приходит в форме Ourvend, карточка
-    // может хранить другую форму (mydon-stock) — сверяем через machineSerialKeys.
+    // группировки и без имени автомата — склеиваем сами в визиты (см. ниже)
+    // и резолвим имя по реестру (Task 8 ревью, пункт 3). Серийник приходит
+    // в форме Ourvend, карточка может хранить другую форму (mydon-stock) —
+    // сверяем через machineSerialKeys.
     const machineNameBySerial = new Map<string, string>();
     for (const m of machines) {
       for (const key of machineSerialKeys(m.externalRef)) machineNameBySerial.set(key, m.name);
@@ -549,31 +567,42 @@ export default async function DomainPage({
       }
       return null;
     };
-    const minuteBucket = (iso: string) => {
-      const d = new Date(iso);
-      return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}-${d.getUTCHours()}-${d.getUTCMinutes()}`;
-    };
-    const vendingGroups = new Map<
-      string,
-      { machineSerial: string; createdAt: string; positions: number; units: number; createdBy: string | null }
-    >();
+    // Склейка по разрыву, а не по минутным корзинам: реальный визард в поле
+    // (точка → спирали подряд → количества) идёт МИНУТАМИ, и жёсткая минутная
+    // корзина рвёт один визит на несколько строк ленты, как только ответ
+    // техника растягивается дольше 60 секунд — performedAt на каждую строку
+    // ставит сервер в момент своего ответа, а не момент начала визита
+    // (Task 9 ревью, находка 1). Правило: строки одного автомата, отсортированные
+    // по performedAt, — один визит, пока разрыв между СОСЕДНИМИ строками
+    // не превышает 15 минут; больший разрыв — новый визит. ts визита —
+    // performedAt первой строки визита.
+    const VISIT_GAP_MS = 15 * 60_000;
+    const rowsByMachine = new Map<string, NonNullable<typeof refillRows>>();
     for (const row of refillRows ?? []) {
-      const key = `${row.machineSerial}::${minuteBucket(row.performedAt)}`;
-      const g = vendingGroups.get(key);
-      if (g) {
-        g.positions += 1;
-        g.units += row.qty;
-      } else {
-        vendingGroups.set(key, {
-          machineSerial: row.machineSerial,
-          createdAt: row.performedAt,
-          positions: 1,
-          units: row.qty,
-          createdBy: row.createdBy,
-        });
+      const list = rowsByMachine.get(row.machineSerial);
+      if (list) list.push(row);
+      else rowsByMachine.set(row.machineSerial, [row]);
+    }
+    const vendingVisits: { machineSerial: string; createdAt: string; positions: number; units: number; createdBy: string | null }[] = [];
+    for (const [serial, rows] of rowsByMachine) {
+      const sorted = [...rows].sort(
+        (a, b) => new Date(a.performedAt).getTime() - new Date(b.performedAt).getTime(),
+      );
+      let current: (typeof vendingVisits)[number] | null = null;
+      let lastTs = 0;
+      for (const row of sorted) {
+        const ts = new Date(row.performedAt).getTime();
+        if (current && ts - lastTs <= VISIT_GAP_MS) {
+          current.positions += 1;
+          current.units += row.qty;
+        } else {
+          current = { machineSerial: serial, createdAt: row.performedAt, positions: 1, units: row.qty, createdBy: row.createdBy };
+          vendingVisits.push(current);
+        }
+        lastTs = ts;
       }
     }
-    const snackFeedItems = [...vendingGroups.values()].map((g) =>
+    const snackFeedItems = vendingVisits.map((g) =>
       vendingRefillToFeed({
         machineName: resolveMachineName(g.machineSerial),
         createdAt: g.createdAt,
