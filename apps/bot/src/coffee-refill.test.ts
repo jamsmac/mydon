@@ -32,7 +32,7 @@ const LOC = "44444444-4444-4444-8444-444444444444";
 function stubCore(over: Record<string, unknown> = {}) {
   const calls: unknown[] = [];
   const core = {
-    coffeeLocations: async () => [{ id: LOC, name: "American Hospital", isActive: true }],
+    coffeeLocations: async () => [{ id: LOC, name: "American Hospital", isActive: true, operational: true }],
     coffeeBunkerConfig: async () => [
       { position: 1, ingredientId: "ing-1", ingredientName: "Сухое молоко" },
       { position: 7, ingredientId: "ing-2", ingredientName: "Кофе" },
@@ -92,6 +92,37 @@ describe("Триггеры и разбор ввода — кофе-бункер�
     assert.deepEqual(parseCoffeeWashCallback(`cw:loc:${LOC}`), { kind: "location", id: LOC });
     assert.deepEqual(parseCoffeeWashCallback("cw:pos:1"), { kind: "position", position: 1 });
     assert.equal(parseCoffeeWashCallback(`cf:loc:${LOC}`), null, "чужое пространство cf: не парсим");
+  });
+});
+
+describe("Список точек для заливки", () => {
+  it("точка без рабочего аппарата не предлагается: заливать там нечего", async () => {
+    const СКЛАД = "55555555-5555-4555-8555-555555555555";
+    const { core } = stubCore({
+      coffeeLocations: async () => [
+        { id: LOC, name: "American Hospital", isActive: true, operational: true },
+        // Аппарат увезли на склад — размещение закрылось, точка осталась.
+        { id: СКЛАД, name: "кардиология кпп", isActive: true, operational: false },
+      ],
+    });
+    const deps = { core, conversations: new Conversations() };
+
+    const start = await startCoffeeRefill(1, deps);
+    const кнопки = start.keyboard!.inline_keyboard.flat().map((b) => b.callback_data);
+    assert.ok(кнопки.includes(`cf:loc:${LOC}`), "рабочая точка должна остаться");
+    assert.ok(!кнопки.includes(`cf:loc:${СКЛАД}`), "точка без рабочего аппарата не должна предлагаться");
+  });
+
+  it("ручной флаг «выключена» по-прежнему убирает точку, даже с рабочим аппаратом", async () => {
+    const { core } = stubCore({
+      coffeeLocations: async () => [
+        { id: LOC, name: "American Hospital", isActive: false, operational: true },
+      ],
+    });
+    const deps = { core, conversations: new Conversations() };
+
+    const start = await startCoffeeRefill(1, deps);
+    assert.match(start.text, /нет|пуст/i);
   });
 });
 

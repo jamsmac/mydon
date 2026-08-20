@@ -28,7 +28,7 @@ const LOC = "44444444-4444-4444-8444-444444444444";
 function stubCore(over: Record<string, unknown> = {}) {
   const calls: { kind: string; input: Record<string, unknown> }[] = [];
   const core = {
-    coffeeLocations: async () => [{ id: LOC, name: "American Hospital", isActive: true }],
+    coffeeLocations: async () => [{ id: LOC, name: "American Hospital", isActive: true, operational: true }],
     // Журнал пуст: гейт «пересланный старый список» по умолчанию не мешает.
     containerReturns: async () => [] as { position: number; containerNumber: number; weight: number; returnedDate: string }[],
     // Тары нет — все строки «информативные» (пустые бункеры не различаются).

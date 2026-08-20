@@ -486,8 +486,19 @@ export class CoreClient {
   }
 
   /** Автоматы направления — для клавиатуры инкассации. */
-  machines(domain = "vendhub"): Promise<{ id: string; name: string }[]> {
-    return this.request<{ id: string; name: string }[]>(`/entities?domain=${domain}&type=machine`);
+  /**
+   * Автоматы для выбора объекта в полевых мастерах.
+   *
+   * По умолчанию — только те, что в эксплуатации: оператор ездит по точкам, а
+   * не по складу, и десять аппаратов на складе и в ремонте в его списке были
+   * лишними. Весь парк (`operationalOnly: false`) нужен там, где объектом может
+   * быть и нерабочий аппарат — например, при возврате со склада.
+   */
+  machines(domain = "vendhub", opts: { operationalOnly?: boolean } = {}): Promise<{ id: string; name: string }[]> {
+    const only = opts.operationalOnly ?? true;
+    return this.request<{ id: string; name: string }[]>(
+      `/entities?domain=${domain}&type=machine${only ? "&operational=1" : ""}`,
+    );
   }
 
   /** Оператор зафиксировал сбор денег с автомата. */
@@ -890,7 +901,7 @@ export class CoreClient {
   // ── Кофе-бункеры: ручные кофемашины, ежедневная заливка/мойка ────────────
 
   /** Точки с кофемашинами. */
-  coffeeLocations(): Promise<{ id: string; name: string; isActive: boolean }[]> {
+  coffeeLocations(): Promise<{ id: string; name: string; isActive: boolean; operational: boolean }[]> {
     return this.request("/coffee/locations");
   }
 

@@ -222,7 +222,10 @@ function confirmStep(locationName: string, counts: Record<ConsumableField, numbe
 /** Начать ввод расходников: выбрать точку. */
 export async function startCoffeeConsumable(chatId: number, deps: CoffeeReturnsDeps): Promise<StaffReply> {
   const locations = await deps.core.coffeeLocations();
-  const active = locations.filter((l) => l.isActive);
+  // Точка попадает в список, только если на ней стоит рабочий аппарат:
+  // `isActive` — ручной флаг владельца, `operational` — состояние техники.
+  // Аппарат увезли на склад или в ремонт — заливать там нечего.
+  const active = locations.filter((l) => l.isActive && l.operational);
   if (active.length === 0) {
     return { text: "Точек с кофемашинами в реестре пока нет — скажи владельцу." };
   }

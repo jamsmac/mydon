@@ -485,6 +485,15 @@ export class EntitiesService {
     if (filter.domain) conditions.push(eq(entity.orgId, await this.orgIdByDomain(filter.domain)));
     if (filter.type) conditions.push(eq(entity.type, filter.type));
     if (filter.q) conditions.push(nameMatches(filter.q));
+    // Только автоматы в строю. Условие повторяет `machineIsOperational`: пустая
+    // карточка считается рабочей, поэтому сравнивается coalesce, а не status —
+    // иначе аппарат без карточки молча выпал бы из списка вместо того, чтобы
+    // считаться рабочим по умолчанию.
+    if (filter.operational === "1" || filter.operational === "true") {
+      conditions.push(
+        sql`not exists (select 1 from ${machineCard} where ${machineCard.entityId} = ${entity.id} and ${machineCard.status} <> 'in_service')`,
+      );
+    }
 
     // Домен добавляется к каждой строке: реестр показывается по направлениям,
     // и без этого поля клиенту пришлось бы угадывать, чьё это.
