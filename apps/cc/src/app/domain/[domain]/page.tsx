@@ -734,13 +734,19 @@ export default async function DomainPage({
     : null;
   const coffeeTopProducts = coffeeOrders?.поТоварам ?? [];
 
-  const parkInService = (machineCards ?? []).filter((m) => (m.status || "in_service") === "in_service");
-  const parkWarehouse = (machineCards ?? []).filter((m) => m.status === "warehouse");
-  const parkRepair = (machineCards ?? []).filter((m) => m.status === "repair");
+  // Парк считается по СУЩНОСТЯМ автоматов, а статус берётся из карточки;
+  // автомат без карточки — «в работе» (карточка фиксирует отклонение).
+  // Тот же источник и то же правило использует отбор ?status= на листе
+  // «Автоматы» (ниже), иначе цифра на плитке и список по клику расходятся.
+  const cardByEntity = new Map((machineCards ?? []).map((c) => [c.entityId, c]));
+  const parkStatusOf = (entityId: string): string => cardByEntity.get(entityId)?.status || "in_service";
+  const parkInService = machines.filter((e) => parkStatusOf(e.id) === "in_service");
+  const parkWarehouse = machines.filter((e) => parkStatusOf(e.id) === "warehouse");
+  const parkRepair = machines.filter((e) => parkStatusOf(e.id) === "repair");
   // Явный подсчёт по виду, а не вычитанием: kind === "other"/"drink"/"combo"/
   // не размечен молча утекал бы в «снек» и врал про состав парка.
-  const parkInServiceCoffee = parkInService.filter((m) => m.kind === "coffee").length;
-  const parkInServiceSnack = parkInService.filter((m) => m.kind === "snack").length;
+  const parkInServiceCoffee = parkInService.filter((e) => cardByEntity.get(e.id)?.kind === "coffee").length;
+  const parkInServiceSnack = parkInService.filter((e) => cardByEntity.get(e.id)?.kind === "snack").length;
   const parkInServiceOther = parkInService.length - parkInServiceCoffee - parkInServiceSnack;
   const cupsPerMachine =
     coffeeOrders !== null
@@ -1663,11 +1669,8 @@ export default async function DomainPage({
           внутри получает уже отфильтрованные карточки. */}
       {group && leaf?.type === "machine" && domain === "vendhub" && (() => {
         const statusFilter = isMachineStatus(sp.status) ? sp.status : null;
-        const statusByEntity = new Map((machineCards ?? []).map((c) => [c.entityId, c.status || "in_service"]));
         const filteredMachines =
-          statusFilter === null
-            ? machines
-            : machines.filter((e) => (statusByEntity.get(e.id) ?? "in_service") === statusFilter);
+          statusFilter === null ? machines : machines.filter((e) => parkStatusOf(e.id) === statusFilter);
         return (
           <>
             {statusFilter !== null && (
