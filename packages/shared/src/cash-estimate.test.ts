@@ -25,12 +25,30 @@ describe("Деньги в автоматах", () => {
   });
   it("несколько инкассаций — берётся последняя", () => {
     const r = cashInMachines(
-      [{ machineId: "m1", ts: "2026-08-10T00:00:00+05:00", amount: 7000, cash: true }],
+      [
+        { machineId: "m1", ts: "2026-08-07T00:00:00+05:00", amount: 3000, cash: true },
+        { machineId: "m1", ts: "2026-08-10T00:00:00+05:00", amount: 7000, cash: true },
+      ],
       [
         { machineId: "m1", receivedAt: "2026-08-01T00:00:00+05:00" },
         { machineId: "m1", receivedAt: "2026-08-09T00:00:00+05:00" },
       ],
     );
     assert.equal(r.total, 7000);
+    assert.equal(r.perMachine[0].since, "2026-08-09T00:00:00+05:00");
+  });
+  it("смешанные часовые пояса: Z и +05:00, продажа раньше инкассации", () => {
+    const r = cashInMachines(
+      [{ machineId: "m1", ts: "2026-08-01T09:00:00+05:00", amount: 5000, cash: true }],
+      [{ machineId: "m1", receivedAt: "2026-08-01T05:00:00Z" }],
+    );
+    assert.equal(r.total, 0);
+  });
+  it("граница равенства времени: продажа в момент инкассации исключена", () => {
+    const r = cashInMachines(
+      [{ machineId: "m1", ts: "2026-08-05T00:00:00+05:00", amount: 5000, cash: true }],
+      [{ machineId: "m1", receivedAt: "2026-08-05T00:00:00+05:00" }],
+    );
+    assert.equal(r.total, 0);
   });
 });

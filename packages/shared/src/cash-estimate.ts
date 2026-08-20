@@ -33,20 +33,24 @@ export function cashInMachines(
   sales: readonly CashSale[],
   received: readonly ReceivedCollection[],
 ): { total: number; perMachine: MachineCash[] } {
-  const посл = new Map<string, string>();
+  const посл = new Map<string, { ts: number; receivedAt: string }>();
   for (const c of received) {
-    const прежняя = посл.get(c.machineId);
-    if (!прежняя || c.receivedAt > прежняя) посл.set(c.machineId, c.receivedAt);
+    const новое_время = new Date(c.receivedAt).getTime();
+    const прежний = посл.get(c.machineId);
+    if (!прежний || новое_время > прежний.ts) посл.set(c.machineId, { ts: новое_время, receivedAt: c.receivedAt });
   }
   const сумма = new Map<string, number>();
   for (const s of sales) {
     if (!s.cash) continue;
-    const с = посл.get(s.machineId);
-    if (с && s.ts <= с) continue;
+    const последний_сбор = посл.get(s.machineId);
+    if (последний_сбор && new Date(s.ts).getTime() <= последний_сбор.ts) continue;
     сумма.set(s.machineId, (сумма.get(s.machineId) ?? 0) + s.amount);
   }
   const perMachine = [...сумма.entries()]
-    .map(([machineId, amount]) => ({ machineId, amount, since: посл.get(machineId) ?? null }))
+    .map(([machineId, amount]) => {
+      const последний = посл.get(machineId);
+      return { machineId, amount, since: последний?.receivedAt ?? null };
+    })
     .sort((a, b) => b.amount - a.amount);
   return { total: perMachine.reduce((t, m) => t + m.amount, 0), perMachine };
 }
