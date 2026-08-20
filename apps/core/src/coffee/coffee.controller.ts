@@ -19,6 +19,62 @@ import {
 import { Type } from "class-transformer";
 import { UNITS, type Unit } from "@mydon/shared";
 import { CoffeeService } from "./coffee.service";
+import { CoffeeOrdersService } from "./coffee-orders.service";
+
+/** Одна проданная чашка из выгрузки панели производителя. */
+export class CoffeeOrderRowDto {
+  @IsString() @IsNotEmpty() @MaxLength(128)
+  extId!: string;
+
+  @IsISO8601()
+  ts!: string;
+
+  @IsOptional() @IsISO8601()
+  brewedAt?: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(64)
+  machineSerial!: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  address?: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(256)
+  goodsName!: string;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  flavourName?: string;
+
+  @IsOptional() @IsNumber()
+  amount?: number;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  paymentStatus?: string;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  brewStatus?: string;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  orderResource?: string;
+}
+
+export class IngestCoffeeOrdersDto {
+  /**
+   * Источник зажат списком: он входит в ключ уникальности (source, ext_id),
+   * и свободная строка означала бы, что та же выгрузка под другим именем
+   * молча задваивает каждый заказ — и выручку вместе с ним.
+   */
+  @IsOptional() @IsIn(["gjvending"])
+  source?: string;
+
+  /**
+   * Предел пачки согласован с лимитом тела запроса (1 МБ в main.ts):
+   * строка заказа весит ~330 байт, две тысячи — около 0,7 МБ с запасом.
+   * Пять тысяч, как у сырого слоя, физически не проходили — контракт
+   * обещал то, на что сервер отвечал 413.
+   */
+  @IsArray() @ArrayMaxSize(2000) @ValidateNested({ each: true }) @Type(() => CoffeeOrderRowDto)
+  rows!: CoffeeOrderRowDto[];
+}
 
 export class CreateLocationDto {
   @IsString() @IsNotEmpty() @MaxLength(128)
@@ -251,7 +307,10 @@ export class IngestCoffeeStockDto {
 /** Кофе-бункеры: точки, тара, ежедневная заливка, расходники, мойка, сверка расхода. */
 @Controller("coffee")
 export class CoffeeController {
-  constructor(private readonly coffee: CoffeeService) {}
+  constructor(
+    private readonly coffee: CoffeeService,
+    private readonly orders: CoffeeOrdersService,
+  ) {}
 
   @Get("locations")
   locations() {
@@ -477,6 +536,24 @@ export class CoffeeController {
   @Get("reconcile")
   reconcileAll(@Query("from") from: string, @Query("to") to: string) {
     return this.coffee.reconcileAllLocations(from, to);
+  }
+
+
+  // ── Проданные чашки: факт из панели производителя ──────────────────────
+
+  @Post("orders")
+  ingestOrders(@Body() dto: IngestCoffeeOrdersDto) {
+    return this.orders.ingest(dto.source ?? "gjvending", dto.rows);
+  }
+
+  @Get("orders/status")
+  ordersStatus() {
+    return this.orders.status();
+  }
+
+  @Get("orders/summary")
+  ordersSummary(@Query("from") from?: string, @Query("to") to?: string) {
+    return this.orders.summary(from, to);
   }
 
   // ── Склад ─────────────────────────────────────────────────────────────

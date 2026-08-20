@@ -1933,6 +1933,72 @@ export const coffeeSale = pgTable(
 );
 
 /**
+ * Проданная чашка — ФАКТ из панели производителя (gjvending), одна строка на
+ * заказ.
+ *
+ * ЗАЧЕМ ОТДЕЛЬНАЯ ТАБЛИЦА, А НЕ `sale`. `sale` — суточный агрегат из OurVend
+ * по снек-автоматам: (день, серийник, товар, количество, сумма). Кофейные
+ * автоматы стоят в другой системе и отдают КАЖДЫЙ заказ со временем варки,
+ * вкусом и статусом выдачи. Сложить их в суточный агрегат значит выбросить
+ * ровно то, ради чего они нужны: время (расход по периоду работы бункера) и
+ * различие «оплачено» против «выдано».
+ *
+ * ЗАЧЕМ НЕ ОСТАВИТЬ В СЫРОМ СЛОЕ. `raw_row` — распечатка источника, она честна,
+ * но неудобна: колонки строками, статусы по-английски, тестовые выдачи вперемешку
+ * с продажами. До этой таблицы выручка кофе не участвовала в аналитике вовсе —
+ * панель показывала снек (9,5 млн/мес) и молчала про кофе (~40 млн/мес).
+ *
+ * ЧТО СЧИТАТЬ ПРОДАЖЕЙ. Только `paymentStatus='paid'` И `orderResource` не
+ * тестовая выдача и не vip: в выгрузке 1746 тестовых и 393 vip на 23 285 строк —
+ * девять процентов, которые иначе осели бы в выручке. Отказ выдачи
+ * (`brewStatus`) продажу не отменяет — деньги взяты; но сырьё по такому заказу
+ * не израсходовано, поэтому для расхода нужен именно `brewStatus`, а не оплата.
+ */
+export const coffeeOrder = pgTable(
+  "coffee_order",
+  {
+    id: id(),
+    /** Номер заказа у источника — ключ идемпотентности повторного импорта. */
+    extId: text("ext_id").notNull(),
+    source: text("source").default("gjvending").notNull(),
+    /** Время создания заказа. В источнике оно местное (Asia/Tashkent). */
+    ts: timestamp("ts", { withTimezone: true }).notNull(),
+    brewedAt: timestamp("brewed_at", { withTimezone: true }),
+    /** Серийник автомата как в источнике — ключ сопоставления с реестром. */
+    machineSerial: text("machine_serial").notNull(),
+    /** Карточка автомата, если серийник узнан. NULL — не сопоставлен. */
+    machineId: uuid("machine_id").references(() => entity.id),
+    /** Адрес из источника: у кофе-панели он же имя точки. */
+    address: text("address"),
+    goodsName: text("goods_name").notNull(),
+    flavourName: text("flavour_name"),
+    /** Карточка товара, если имя узнано (через product_name_alias). */
+    productId: uuid("product_id").references(() => entity.id),
+    amount: numeric("amount", { precision: 15, scale: 2 }).default("0").notNull(),
+    currency: text("currency").default("UZS").notNull(),
+    /** Как в источнике: Paid / Refunded. */
+    paymentStatus: text("payment_status"),
+    /** Как в источнике: Delivered / Delivery failure / Not delivered … */
+    brewStatus: text("brew_status"),
+    /** Как в источнике: Cash payment / Custom payment / vip / тестовая выдача. */
+    orderResource: text("order_resource"),
+    /**
+     * Строка идёт в выручку и в расход сырья. Считается на записи, а не на
+     * чтении: правило «что считать продажей» должно жить в одном месте, иначе
+     * дашборд и отчёт по расходу разойдутся в цифрах.
+     */
+    countable: boolean("countable").default(true).notNull(),
+    importedAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("coffee_order_src_key").on(t.source, t.extId),
+    index("coffee_order_ts_idx").on(t.ts),
+    index("coffee_order_machine_idx").on(t.machineId, t.ts),
+    index("coffee_order_countable_idx").on(t.countable, t.ts),
+  ],
+);
+
+/**
  * Остаток центрального склада кофе-ингредиентов, грамм (тот же приём, что
  * `vending_stock`, — своя таблица, а не общий `entity`/`stock_movement`:
  * движки не сливают базы, а объём и природа расхода тут иные — граммы из
@@ -2385,6 +2451,7 @@ export const schema = {
   coffeeWashSchedule,
   coffeeProduct,
   coffeeSale,
+  coffeeOrder,
   coffeeStock,
   // Обслуживание: журнал работ и узлы автоматов.
   maintenanceLog,
