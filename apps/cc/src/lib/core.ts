@@ -1681,6 +1681,8 @@ export const core = {
   },
   task: (id: string) => get<Task>(`/tasks/${id}`),
   taskComments: (id: string) => get<TaskComment[]>(`/tasks/${id}/comments`),
+  /** Просроченное по всей организации (эндпоинт без фильтра домена — режем на клиенте). */
+  tasksOverdue: () => get<Task[]>("/tasks/overdue"),
   workload: () => get<Workload[]>("/tasks/workload"),
   createTask: (input: Record<string, unknown>) => send<Task>("/tasks", "POST", input),
   rateTask: (id: string, quality: "excellent" | "accepted" | "redo") =>

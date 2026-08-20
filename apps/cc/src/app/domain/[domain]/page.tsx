@@ -81,6 +81,26 @@ function shortRuDate(iso: string): string {
 const COFFEE_REFILL_LIMIT = 200;
 
 /**
+ * Чип источника задачи (Task 10) — по значению `Task.source`, единственному
+ * полю происхождения в типе (`createdFrom`/`origin` в нём нет). Реальные
+ * значения из кода-создателя задач и живых данных: `null`/`"owner"` —
+ * владелец (ручное создание в CC и заявки «Поломка» из бота — источник у
+ * обеих не отличить друг от друга по этому полю, отсюда общая метка);
+ * `maint:<planId>` и `recurring:*` — график (ТО-план/повторяющаяся); `maintenance-monitor` /
+ * `coffee-monitor` / `coffee-alert` — из «Обслуживания» (авто-задачи по
+ * недоливу/лёгким бункерам). Прочее — сырое значение как есть, а не молчание
+ * (лучше показать код источника, чем выдумать несуществующую категорию).
+ */
+function taskSourceLabel(source: string | null): string {
+  if (source === null || source === "owner") return "владелец";
+  if (source.startsWith("maint:") || source.startsWith("recurring:")) return "график";
+  if (source === "maintenance-monitor" || source === "coffee-monitor" || source === "coffee-alert") {
+    return "обслуживание";
+  }
+  return source;
+}
+
+/**
  * Рабочее место направления — как в ПО владельца (VHM24) и его command-center:
  * Дашборд первым, дальше группы-вкладки с подвкладками (Каталог → Товары,
  * Аппараты…; Справочники; Отчёты) плюс Команда и Задачи. Структура групп
@@ -237,6 +257,43 @@ export default async function DomainPage({
   const isCoffeeTask = (t: Task) => /кофе|бункер|мойк|кофемолк|заливк/i.test(t.title);
   const coffeeTasks = openTasks.filter(isCoffeeTask).length;
   const snackTasks = openTasks.filter((t) => !isCoffeeTask(t) && /пополнен|инкасс|закуп|автомат|снек/i.test(t.title)).length;
+
+  // ── Задачи: мини-KPI вкладки TASKS (Task 10) — стиль как у ACTIVITY (.wgrid/.wt),
+  // только vendhub и только на самой вкладке (лишний запрос overdue на других
+  // вкладках/направлениях ни к чему). "Просрочено" тянет /tasks/overdue —
+  // эндпоинт общий по организации (без фильтра домена), поэтому пересекаем
+  // с доменом на клиенте, как и остальные best-effort блоки этой страницы.
+  let taskKpi: { label: string; value: string; hot?: boolean }[] = [];
+  if (domain === "vendhub" && activeGroup === "tasks") {
+    const tasksOverdueRows = await core.tasksOverdue().catch(() => null);
+    const overdueCount =
+      tasksOverdueRows === null ? null : tasksOverdueRows.filter((t) => t.domain === "vendhub").length;
+    const unassignedCount = openTasks.filter((t) => t.ownerRef === null).length;
+    // «За неделю» — та же скользящая граница (сейчас минус 168 часов), что
+    // и doneLast7d на сервере (tasks.service.ts), а не календарный день:
+    // окно в 7×24 часа не зависит от часового пояса подсчёта.
+    const weekAgoMs = Date.now() - 7 * 24 * 3600_000;
+    // completedAt — единственное поле-дата закрытия у Task (updatedAt в типе
+    // нет); status "done" + completedAt в окне — тот же признак, что у
+    // серверного doneLast7d, поэтому цифра не выдумана, а согласована с ним.
+    const closedThisWeek = tasks.filter(
+      (t) => t.status === "done" && t.completedAt !== null && new Date(t.completedAt).getTime() >= weekAgoMs,
+    ).length;
+    taskKpi = [
+      { label: "Открыто", value: String(openTasks.length) },
+      {
+        label: "Просрочено",
+        value: overdueCount === null ? "—" : String(overdueCount),
+        hot: (overdueCount ?? 0) > 0,
+      },
+      {
+        label: "Свободных (без исполнителя)",
+        value: String(unassignedCount),
+        hot: unassignedCount > 0,
+      },
+      { label: "Закрыто за неделю", value: String(closedThisWeek) },
+    ];
+  }
 
   if (domain === "vendhub") {
     // Тридцать календарных суток по Ташкенту, а не 720 часов от «сейчас»:
@@ -1590,25 +1647,44 @@ export default async function DomainPage({
       )}
 
       {/* ── Задачи направления ── */}
-      {activeGroup === "tasks" &&
-        (openTasks.length === 0 ? (
-          <div className="empty">
-            <b>Открытых задач нет</b>
-            Задачи с этим направлением появятся здесь.
-          </div>
-        ) : (
-          <div>
-            {openTasks.map((t) => {
-              const late = t.due !== null && new Date(t.due).getTime() < Date.now();
-              return (
-                <Link href={`/tasks/${t.id}`} className={`trow ${late ? "hot" : ""}`} key={t.id}>
-                  <div className="tb"><div className="tt">{t.title}</div></div>
-                  <span className={`due ${late ? "hot" : ""}`}>{dueLabel(t.due)}</span>
-                </Link>
-              );
-            })}
-          </div>
-        ))}
+      {activeGroup === "tasks" && (
+        <>
+          {domain === "vendhub" && taskKpi.length > 0 && (
+            <div className="wgrid" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))", marginBottom: 14 }}>
+              {taskKpi.map((t) => (
+                <div key={t.label} className={`wt ${t.hot ? "is-hot" : ""}`}>
+                  <div className="wl">{t.label}</div>
+                  <div className="wv">{t.value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {openTasks.length === 0 ? (
+            <div className="empty">
+              <b>Открытых задач нет</b>
+              Задачи с этим направлением появятся здесь.
+            </div>
+          ) : (
+            <div>
+              {openTasks.map((t) => {
+                const late = t.due !== null && new Date(t.due).getTime() < Date.now();
+                const sourceLabel = taskSourceLabel(t.source);
+                // Синий вариант — только для автоматических источников (график/
+                // обслуживание): «владелец» — нейтральный чип, не подсвечивать
+                // ручной ввод как будто это автоматика.
+                const isAutoSource = sourceLabel !== "владелец";
+                return (
+                  <Link href={`/tasks/${t.id}`} className={`trow ${late ? "hot" : ""}`} key={t.id}>
+                    <div className="tb"><div className="tt">{t.title}</div></div>
+                    <span className={`chip ${isAutoSource ? "b" : ""}`}>{sourceLabel}</span>
+                    <span className={`due ${late ? "hot" : ""}`}>{dueLabel(t.due)}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
     </>
   );
 }
