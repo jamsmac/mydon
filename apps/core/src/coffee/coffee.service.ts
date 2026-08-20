@@ -71,6 +71,17 @@ export interface LocationRow {
   machineRef: string | null;
   /** Все аппараты, стоящие на месте сейчас. Их может быть несколько. */
   machines: { entityId: string; name: string; ref: string | null }[];
+  /**
+   * На месте стоит хотя бы один аппарат в эксплуатации.
+   *
+   * ЗАЧЕМ ОТДЕЛЬНО ОТ `isActive`. `isActive` — ручной флаг владельца
+   * («выключена» в attrs), а это — следствие состояния техники: аппарат увезли
+   * на склад или в ремонт, размещение закрылось, и заливать на точке нечего.
+   * Десять мест сейчас стоят вообще без аппарата, и оператор видел их в списке
+   * наравне с рабочими. Место без аппарата рабочим не считается: заливать там
+   * физически нечего.
+   */
+  operational: boolean;
 }
 
 /** Кто удаляет запись журнала и чьи записи ему можно трогать. */
@@ -363,6 +374,14 @@ export class CoffeeService {
       поМесту.set(r.locationId, list);
     }
 
+    // Состояние техники читается одним запросом на весь парк: мест два десятка,
+    // и спрашивать карточку на каждое — тот же ответ ценой N запросов.
+    const состояния = new Map(
+      (await this.db.select({ entityId: machineCard.entityId, status: machineCard.status }).from(machineCard)).map(
+        (r) => [r.entityId, r.status] as const,
+      ),
+    );
+
     return places
       .map((p) => {
         const attrs = (p.attrs ?? {}) as Record<string, unknown>;
@@ -372,6 +391,7 @@ export class CoffeeService {
           id: p.id,
           name: p.name,
           isActive: attrs["выключена"] !== true,
+          operational: машины.some((m) => machineIsOperational(состояния.get(m.entityId) ?? null)),
           sortOrder: typeof attrs["порядок"] === "number" ? (attrs["порядок"] as number) : 0,
           // Поля в единственном числе оставлены ради совместимости панели и
           // бота: они читают «аппарат на точке». Полный состав — в `machines`.

@@ -53,6 +53,37 @@ export const CONTRACTOR_ROLE_LABELS: Record<ContractorRole, string> = {
 export const CLIENT_TYPES = ["legal", "individual"] as const;
 export type ClientType = (typeof CLIENT_TYPES)[number];
 
+/**
+ * В каких направлениях бизнеса используется контрагент — ключ в `attrs`.
+ *
+ * ЗАЧЕМ ОТДЕЛЬНО ОТ `entity.orgId`. Одно юрлицо — одна карточка: ИНН уникален
+ * во всём реестре (`ux_entity_contractor_inn`), и второй карточки на ту же
+ * компанию просто не завести. Но поставщик кофе одновременно нужен VendHub, а
+ * попал в реестр при выгрузке документов GLOBERENT — организация говорит, где
+ * карточка родилась, а этот тег — где она работает. Шесть из тринадцати
+ * поставщиков VendHub уже лежали так.
+ */
+export const CONTRACTOR_DIRECTIONS_KEY = "направления";
+
+/** Направления контрагента из attrs — пустой список, если тег не проставлен. */
+export function contractorDirections(attrs: Record<string, unknown> | null | undefined): string[] {
+  const raw = (attrs ?? {})[CONTRACTOR_DIRECTIONS_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((d): d is string => typeof d === "string" && d.trim() !== "");
+}
+
+/**
+ * Карточка относится к направлению: либо она в нём заведена, либо помечена
+ * тегом. Проверка одна на список и на счётчик подвкладки, чтобы цифра на
+ * вкладке и содержимое списка не разошлись.
+ */
+export function contractorInDirection(
+  e: { domain?: string | null; attrs?: Record<string, unknown> | null },
+  domain: string,
+): boolean {
+  return e.domain === domain || contractorDirections(e.attrs).includes(domain);
+}
+
 /** Источники лида — справочник формы клиента (донор: фронт-константа). */
 export const LEAD_SOURCES = [
   "Сайт",

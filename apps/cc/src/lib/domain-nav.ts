@@ -29,6 +29,9 @@ export const VENDHUB_GROUPS: NavGroup[] = [
       // их единое место — верхняя вкладка «Автоматы» (карточки + живой дефицит).
       { label: "Компоненты", type: "component" },
       { label: "Ингредиенты", type: "ingredient" },
+      // Контрагенты в «Каталоге», как в GLOBERENT: поставщик — не строка
+      // справочника, а карточка с историей закупок, ценами и документами.
+      { label: "Контрагенты", type: "contractor" },
       { label: "Рецепты", type: "recipe" },
       { label: "Расходники (тара)", type: "consumable" },
       { label: "Склады", type: "warehouse" },
@@ -45,7 +48,10 @@ export const VENDHUB_GROUPS: NavGroup[] = [
       { label: "ИКПУ", type: "ikpu" },
       { label: "Упаковка", type: "package" },
       { label: "Штрих-коды", type: "barcode" },
-      { label: "Поставщики", type: "supplier" },
+      // «Поставщики» (плоский type=supplier) убраны: карточек этого типа не
+      // существовало ни одной, метки для него в labels.ts тоже не было — лист
+      // показывал сырой код. Поставщик теперь contractor с ролью «поставщик»:
+      // одно юрлицо — одна карточка, ИНН уникален на уровне БД.
     ],
   },
   {

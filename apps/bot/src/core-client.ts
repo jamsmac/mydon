@@ -486,8 +486,19 @@ export class CoreClient {
   }
 
   /** Автоматы направления — для клавиатуры инкассации. */
-  machines(domain = "vendhub"): Promise<{ id: string; name: string }[]> {
-    return this.request<{ id: string; name: string }[]>(`/entities?domain=${domain}&type=machine`);
+  /**
+   * Автоматы реестра. По умолчанию — ВЕСЬ парк.
+   *
+   * ЗАЧЕМ НЕ ФИЛЬТРОВАТЬ ПО УМОЛЧАНИЮ. Замена детали, техосмотр и чистка чаще
+   * всего и делаются с аппаратом, который стоит в ремонте или на складе:
+   * убрать его из выбора значило бы отнять у техника ровно те объекты, ради
+   * которых он мастер и открыл. Фильтр включается там, где нерабочий аппарат
+   * бессмыслен по сути операции, — например, инкассация: денег в нём нет.
+   */
+  machines(domain = "vendhub", opts: { operationalOnly?: boolean } = {}): Promise<{ id: string; name: string }[]> {
+    return this.request<{ id: string; name: string }[]>(
+      `/entities?domain=${domain}&type=machine${opts.operationalOnly ? "&operational=1" : ""}`,
+    );
   }
 
   /** Оператор зафиксировал сбор денег с автомата. */
@@ -890,7 +901,7 @@ export class CoreClient {
   // ── Кофе-бункеры: ручные кофемашины, ежедневная заливка/мойка ────────────
 
   /** Точки с кофемашинами. */
-  coffeeLocations(): Promise<{ id: string; name: string; isActive: boolean }[]> {
+  coffeeLocations(): Promise<{ id: string; name: string; isActive: boolean; operational: boolean }[]> {
     return this.request("/coffee/locations");
   }
 

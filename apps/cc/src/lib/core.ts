@@ -147,6 +147,12 @@ export interface CoffeeLocation {
   machineRef: string | null;
   /** Все аппараты, стоящие здесь сейчас (открытый период размещения). */
   machines: { entityId: string; name: string; ref: string | null }[];
+  /**
+   * На месте стоит хотя бы один аппарат в эксплуатации. Следствие состояния
+   * техники, в отличие от ручного `isActive`: аппарат увезли на склад или в
+   * ремонт — заливать на точке нечего, и в списке оператора её быть не должно.
+   */
+  operational: boolean;
 }
 
 /** Автомат реестра — кандидат привязки кофе-точки. */
@@ -1837,6 +1843,19 @@ export const core = {
   entitiesOf: (domain: string) => get<Entity[]>(`/entities?domain=${domain}`),
   entitiesOfType: (domain: string, type: string) =>
     get<Entity[]>(`/entities?domain=${domain}&type=${encodeURIComponent(type)}`),
+  /**
+   * Все контрагенты, без привязки к направлению.
+   *
+   * Одно юрлицо — одна карточка (ИНН уникален во всём реестре), поэтому
+   * поставщик VendHub может лежать в организации GLOBERENT, куда попал при
+   * выгрузке документов. Отбор по направлению делает `contractorInDirection`
+   * на стороне панели: организация — где карточка родилась, тег — где работает.
+   *
+   * Предел взят потолком Core (MAX_FIND_LIMIT), а не умолчанием в 500: сейчас
+   * контрагентов 233, и на умолчании список начал бы молча обрезаться задолго
+   * до того, как это кто-нибудь заметит.
+   */
+  contractorsAll: () => get<Entity[]>(`/entities?type=contractor&limit=5000`),
   entity: (id: string) => get<Entity>(`/entities/${id}`),
   createEntity: (input: Record<string, unknown>) => send<Entity>("/entities", "POST", input),
   /** Вложения записи (фото номенклатуры, чеки) — для галереи карточки. */

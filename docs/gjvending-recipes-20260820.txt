@@ -1,16 +1,42 @@
-# товар | рецептура (граммы/мл/сек) | цены | шаблоны | вкусы
-Cappuccino|x1=42,x4=19,x7=51,cs1=50,cs3=19,soak_water=13,soak_time=20,xm_water=76|20000/25000|7098,5876,5992,7099,7136|Капучино с сахаром
-Cappuccino|x1=42,x7=51,cs1=75,soak_water=13,soak_time=20,xm_water=76|20000/25000|7098,5876,5992,7099,7136|Капучино с ванильным/карамельным/кокосовым сиропом
-Cappuccino|x1=42,x7=51,cs1=65,soak_water=13,soak_time=20,xm_water=76|20000/25000|7098,5876,5992,7099,7136|Капучино без сахара
-Hot Chocolate|x5=54,cs4=85|20000|7098,5876|Горячий шоколад
-Americano|x4=16,x7=65,cs3=45,soak_water=13,soak_time=20,xm_water=92|20000/25000|7098,5876,5992,7099,7136|Американо с сахаром
-Americano|x7=57,cs3=50,soak_water=13,soak_time=20,xm_water=76|20000/25000|7098,5876,5992,7099,7136|Американо с ванильным/карамельным сиропом + без сахара
-Moco|x1=27,x5=23,x7=43,cs1=37,cs3=7,cs4=23,soak_water=13,soak_time=20,xm_water=60|20000/25000/30000|7098,5876,5992,7099,7136|Моко без сахара
-Latte|x1=50,x7=43,cs1=70,soak_water=13,soak_time=20,xm_water=70|20000/25000|7098,5876,5992,7099,7136|Латте с ванильным/карамельным/кокосовым сиропом + без сахара
-Latte|x1=50,x4=19,x7=43,cs1=58,cs3=19,soak_water=13,soak_time=20,xm_water=70|20000/25000|7098,5876,5992,7099,7136|Латте с сахаром
-Flat White|x1=42,x4=16,x7=57,cs1=42,cs3=16,soak_water=13,soak_time=20,xm_water=76|20000/25000/30000|7098,5876,5992,7099,7136|Flat white с сахаром
-Flat White|x1=42,x7=57,cs1=50,soak_water=13,soak_time=20,xm_water=76|20000/25000/30000|7098,5876,5992,7099,7136|Flat white без сахара
-Ice|ice_num=50|10000|все|Лёд полный стакан
-Ice|ice_num=38|10000|все|Лёд половина стакана
-Ice|ice_num=25|10000|все|Лёд 1/3 стакана
-Espresso|x4=10,x7=65,cs3=10,soak_water=13,soak_time=20,xm_water=60|20000/25000|все|Эспрессо с сахаром
+# Рецептуры напитков из ПО gjvending (снято 20.08.2026, только чтение)
+# формат: товар | состав | цены по шаблонам | вкус
+# x1 молоко · x4 сахар · x5 шоколад · x7 кофе (г); cs1..cs4 наполнение (мл);
+# soak_water/soak_time предсмачивание (мл/с); xm_water вода заваривания (мл); ice_num лёд (г)
+Cappuccino|x1=42,x4=19,x7=51,cs1=50,cs3=19,soak_water=13,soak_time=20,xm_water=76|25000|Капучино с сахаром
+Cappuccino|x1=42,x7=51,cs1=75,soak_water=13,soak_time=20,xm_water=76|25000/20000|Капучино с ванильным сиропом
+Cappuccino|x1=42,x7=51,cs1=75,soak_water=13,soak_time=20,xm_water=76|25000/20000|Капучино с карамельным сиропом
+Cappuccino|x1=42,x7=51,cs1=75,soak_water=13,soak_time=20,xm_water=76|25000/20000|Капучино с кокосовым сиропом
+Cappuccino|x1=42,x7=51,cs1=65,soak_water=13,soak_time=20,xm_water=76|25000/20000|Капучино без сахара
+Hot Chocolate|x5=54,cs4=85|20000|Горячий шоколад
+Americano|x4=16,x7=65,cs3=45,soak_water=13,soak_time=20,xm_water=92|25000|Американо с сахаром
+Americano|x7=57,cs3=50,soak_water=13,soak_time=20,xm_water=76|25000/20000|Американо с ванильным сиропом
+Americano|x7=57,cs3=50,soak_water=13,soak_time=20,xm_water=76|25000/20000|Американо с карамельным сиропом
+Americano|x7=57,cs3=50,soak_water=13,soak_time=20,xm_water=76|25000/20000|Американо без сахара
+Moco|x1=27,x5=23,x7=43,cs1=37,cs3=7,cs4=23,soak_water=13,soak_time=20,xm_water=60|25000|Моко без сахара
+Latte|x1=50,x7=43,cs1=70,soak_water=13,soak_time=20,xm_water=70|25000/20000|Латте с ванильным/карамельным/кокосовым сиропом, без сахара
+Latte|x1=50,x4=19,x7=43,cs1=58,cs3=19,soak_water=13,soak_time=20,xm_water=70|25000|Латте с сахаром
+Flat White|x1=42,x4=16,x7=57,cs1=42,cs3=16,soak_water=13,soak_time=20,xm_water=76|25000|Flat white с сахаром
+Flat White|x1=42,x7=57,cs1=50,soak_water=13,soak_time=20,xm_water=76|25000/20000/30000|Flat white без сахара
+Ice|ice_num=50|10000|Лёд полный стакан
+Ice|ice_num=38|10000|Лёд половина стакана
+Ice|ice_num=25|10000|Лёд 1/3 стакана
+Espresso|x4=10,x7=65,cs3=10,soak_water=13,soak_time=20,xm_water=60|25000|Эспрессо с сахаром
+Espresso|x7=65,soak_water=13,soak_time=20,xm_water=92|25000|Эспрессо без сахара
+WildFruit Tea|x2=27,cs2=75|15000|Горячий чай
+MacCoffee 3in1|x6=51,cs4=75|15000|MacCoffee с сахаром
+Cocoa|x1=39,x5=48,cs1=39,cs4=48|20000|Какао без сахара
+Ice WildFruit Tea|x2=38,cs2=40,ice_num=60|15000|Ice tea
+Ice Latte|x1=42,x7=43,cs1=42,soak_water=13,soak_time=20,xm_water=70,ice_num=65|25000|ICE latte с ванильным/карамельным/кокосовым сиропом
+Ice Latte|x1=42,x7=43,cs1=42,soak_water=13,soak_time=20,xm_water=70,ice_num=65|25000|ICE latte без сахара
+Ice Cappuccino|x1=42,x7=51,cs1=42,soak_water=13,soak_time=20,xm_water=70,ice_num=45|25000|ICE Cappuccino все вкусы
+Ice Americano|x7=57,cs3=16,soak_water=13,soak_time=20,xm_water=76,ice_num=50|25000/20000|ICE Americano с ванильным/карамельным/кокосовым сиропом
+# ── варианты в других шаблонах (Matcha new / KIUT Matcha New / Matcha test) ──
+Hot Chocolate|x5=63,cs4=75|20000|Горячий шоколад (вариант)
+Americano|x7=57,cs3=25,soak_water=13,soak_time=20,xm_water=76|25000|Американо без сахара (вариант)
+Espresso|x7=48,soak_water=13,soak_time=20,xm_water=92|25000|Эспрессо без сахара (вариант)
+WildFruit Tea|x2=27,cs2=105|15000|Горячий чай (вариант)
+Ice Latte|x1=36,x7=43,cs1=39,soak_water=13,soak_time=20,xm_water=50,ice_num=55|25000|ICE latte (вариант)
+Ice Matcha Latte|x1=42,x3=23,cs1=43,cs2=24,ice_num=45|25000/20000/30000|Ice Matcha Latte
+Matcha Latte|x1=52,x3=18,cs1=69,cs2=33|25000|Matcha latte
+Lemon Tea|x3=36,cs2=105|15000|Горячий чай (лимонный)
+Ice Lemon Tea|x3=45,cs2=45,ice_num=60|15000|Ice tea (лимонный)

@@ -32,7 +32,7 @@ const LOC = "44444444-4444-4444-8444-444444444444";
 function stubCore(over: Record<string, unknown> = {}) {
   const calls: unknown[] = [];
   const core = {
-    coffeeLocations: async () => [{ id: LOC, name: "American Hospital", isActive: true }],
+    coffeeLocations: async () => [{ id: LOC, name: "American Hospital", isActive: true, operational: true }],
     coffeeBunkerConfig: async () => [
       { position: 1, ingredientId: "ing-1", ingredientName: "Сухое молоко" },
       { position: 7, ingredientId: "ing-2", ingredientName: "Кофе" },
@@ -92,6 +92,46 @@ describe("Триггеры и разбор ввода — кофе-бункер�
     assert.deepEqual(parseCoffeeWashCallback(`cw:loc:${LOC}`), { kind: "location", id: LOC });
     assert.deepEqual(parseCoffeeWashCallback("cw:pos:1"), { kind: "position", position: 1 });
     assert.equal(parseCoffeeWashCallback(`cf:loc:${LOC}`), null, "чужое пространство cf: не парсим");
+  });
+});
+
+describe("Список точек для заливки", () => {
+  it("точка без рабочего аппарата уходит вниз с пометкой, но остаётся достижимой", async () => {
+    const СКЛАД = "55555555-5555-4555-8555-555555555555";
+    const { core } = stubCore({
+      coffeeLocations: async () => [
+        // Аппарат увезли — размещение закрылось, точка осталась. Идёт первой,
+        // чтобы проверить именно перестановку, а не исходный порядок.
+        { id: СКЛАД, name: "кардиология кпп", isActive: true, operational: false },
+        { id: LOC, name: "American Hospital", isActive: true, operational: true },
+      ],
+    });
+    const deps = { core, conversations: new Conversations() };
+
+    const start = await startCoffeeRefill(1, deps);
+    const строки = start.keyboard!.inline_keyboard.flat();
+    const кнопки = строки.map((b) => b.callback_data);
+    // Прятать нельзя: ремонт закрывает размещение, а возврат в строй его не
+    // открывает — спрятанная точка не вернулась бы в список никогда.
+    assert.ok(кнопки.includes(`cf:loc:${СКЛАД}`), "точка обязана остаться достижимой");
+    assert.ok(
+      кнопки.indexOf(`cf:loc:${LOC}`) < кнопки.indexOf(`cf:loc:${СКЛАД}`),
+      "рабочая точка должна стоять выше",
+    );
+    const метка = строки.find((b) => b.callback_data === `cf:loc:${СКЛАД}`)!.text;
+    assert.match(метка, /нет аппарата/, "нерабочая точка должна быть помечена");
+  });
+
+  it("ручной флаг «выключена» по-прежнему убирает точку, даже с рабочим аппаратом", async () => {
+    const { core } = stubCore({
+      coffeeLocations: async () => [
+        { id: LOC, name: "American Hospital", isActive: false, operational: true },
+      ],
+    });
+    const deps = { core, conversations: new Conversations() };
+
+    const start = await startCoffeeRefill(1, deps);
+    assert.match(start.text, /нет|пуст/i);
   });
 });
 
