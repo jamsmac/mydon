@@ -65,7 +65,12 @@ export function ServiceTab({
   referenceHref: string;
 }) {
   const [filter, setFilter] = useState<ServiceFeedKind | "all">("all");
-  const rows = filter === "all" ? feed : feed.filter((i) => i.kind === filter);
+  // C2: фильтр по виду смотрит на ВСЮ ленту (mergeServiceFeed без лимита
+  // отдаёт всё), а до 50 строк режем уже после фильтра — иначе «деньги»
+  // видел бы только то, что уцелело в первых 50 общих записей.
+  const filtered = filter === "all" ? feed : feed.filter((i) => i.kind === filter);
+  const FEED_SHOW_LIMIT = 50;
+  const rows = filtered.slice(0, FEED_SHOW_LIMIT);
 
   return (
     <div className="sect">
@@ -130,16 +135,21 @@ export function ServiceTab({
             ))}
           </div>
         )}
+        {filtered.length > FEED_SHOW_LIMIT && (
+          <p className="hint" style={{ marginTop: 8 }}>
+            показаны {FEED_SHOW_LIMIT} из {filtered.length}
+          </p>
+        )}
       </div>
 
       <div className="notice">
-        <b>Задачи ↔ Обслуживание:</b> подготовка бункеров и «точек ждёт визита» рождают задачи
-        оператору; выполненная заливка сама закрывает задачу — двойного ввода нет.
+        <b>Задачи ↔ Обслуживание:</b> задачи по обслуживанию (пустые спирали, лёгкие бункеры) система
+        начнёт ставить сама следующим этапом; пока задачи заводятся вручную и из поломок в боте.
       </div>
 
       <p className="hint">
-        Нумерация бункеров (1–8 × ингредиент) и наборов (1–27, тара) — в{" "}
-        <Link href={referenceHref}>Справочниках</Link>, здесь только выбор из них.
+        Нумерация бункеров (1–8 × ингредиент) и наборов — в{" "}
+        <Link href={referenceHref}>настройках кофе-панели</Link> ниже.
       </p>
     </div>
   );

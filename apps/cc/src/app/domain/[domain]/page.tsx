@@ -7,8 +7,11 @@ import {
   coffeeRefillToFeed,
   collectionToFeed,
   dueLabel,
+  isMachineStatus,
   machineSerialKeys,
+  machineStatusLabel,
   mergeServiceFeed,
+  resolveActor,
   vendingRefillToFeed,
   type Domain,
   type ServiceFeedItem,
@@ -44,7 +47,7 @@ import { MiniBars } from "../../../components/mini-bars";
 import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
-import { VendingSupplyPanel } from "../../../components/vending-panel";
+import { VendingMachinesPanel, VendingSupplyPanel } from "../../../components/vending-panel";
 import { CoffeePanel } from "../../../components/coffee-panel";
 import { ServiceTab, type ServiceAction, type ServiceKpiTile } from "../../../components/service-tab";
 import {
@@ -250,14 +253,12 @@ export default async function DomainPage({
       core.vendingDeficit().catch(() => null),
       core.machineCards().catch(() => null),
     ]);
+  } else if (domain === "vendhub" && activeGroup === "settings" && activeLeaf === "machine" && sp.status) {
+    // Панель «Автоматы» (C1) отдаёт уже отфильтрованный по ?status= список —
+    // карточки вида нужны здесь же, а не только на дашборде.
+    machineCards = await core.machineCards().catch(() => null);
   }
   const openTasks = tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
-  // Задачи по контурам (слово владельца: смотреть и вместе, и по отдельности).
-  // Эвристика по заголовку — задачи создаются с говорящими названиями
-  // («Чистка кофемолок», «Пополнение автоматов»), точного тега контура нет.
-  const isCoffeeTask = (t: Task) => /кофе|бункер|мойк|кофемолк|заливк/i.test(t.title);
-  const coffeeTasks = openTasks.filter(isCoffeeTask).length;
-  const snackTasks = openTasks.filter((t) => !isCoffeeTask(t) && /пополнен|инкасс|закуп|автомат|снек/i.test(t.title)).length;
 
   // ── Задачи: мини-KPI вкладки TASKS (Task 10) — стиль как у ACTIVITY (.wgrid/.wt),
   // только vendhub и только на самой вкладке (лишний запрос overdue на других
@@ -362,7 +363,10 @@ export default async function DomainPage({
   const owedToUs = obligations.totals.filter((t) => t.direction === "in" && isOpenObligation(t));
   const owedByUs = obligations.totals.filter((t) => t.direction === "out" && isOpenObligation(t));
 
-  const href = (t: string) => `/domain/${domain}?tab=${encodeURIComponent(t)}`;
+  // `status` — доп. фильтр парка (C1: плитки «Парк» → settings:machine&status=…),
+  // добавляется ПОСЛЕ tab, не заменяя его.
+  const href = (t: string, status?: string) =>
+    `/domain/${domain}?tab=${encodeURIComponent(t)}${status ? `&status=${encodeURIComponent(status)}` : ""}`;
 
   // ── верхний ряд вкладок ────────────────────────────────────────────────────
   const teamLabel = `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}`;
@@ -608,7 +612,9 @@ export default async function DomainPage({
         ingredientName: r.ingredientId ? (ingredientNameById.get(r.ingredientId) ?? null) : null,
         filledWeight: r.filledWeight,
         createdAt: r.createdAt,
-        createdBy: r.createdBy,
+        // `createdBy` в журнале — сырая ссылка (`person:<uuid>`/`import:*`/`bot`),
+        // не имя (I1 ревью) — разворачиваем в читаемое имя сотрудника.
+        createdBy: resolveActor(r.createdBy, people),
       }),
     );
 
@@ -669,7 +675,7 @@ export default async function DomainPage({
         createdAt: g.createdAt,
         positions: g.positions,
         units: g.units,
-        createdBy: g.createdBy,
+        createdBy: resolveActor(g.createdBy, people),
       }),
     );
 
@@ -685,7 +691,9 @@ export default async function DomainPage({
           machineName: c.machineName,
           collectedAt: c.collectedAt,
           amount: c.amount === null ? null : Number(c.amount),
-          operatorName: c.operatorName,
+          // Уже имя из SQL-джойна на person (collections.service.ts) — resolveActor
+          // здесь страховка на случай сырой ссылки, а не основной путь.
+          operatorName: resolveActor(c.operatorName, people),
         }),
       );
 
@@ -711,6 +719,9 @@ export default async function DomainPage({
   const deficitCount = vendingDeficit?.length ?? 0;
   const notIssuedCount = coffeeOrders?.неВыдано ?? 0;
   const attentionTotal = deficitCount + notIssuedCount + openTasks.length;
+  // I3: сколько автоматов ни разу не инкассировались — оценка «Деньги в
+  // автоматах» по ним идёт за всю историю, а не с последнего сбора.
+  const cashNoCollectionCount = cashEstimate?.поАвтоматам.filter((m) => m.с === null).length ?? 0;
 
   const contractorTurnover = (e: Entity): number | null => {
     const v = (e.attrs ?? {})["оборот по реестру"];
@@ -811,7 +822,9 @@ export default async function DomainPage({
             kpi={serviceKpi}
             feed={serviceFeed}
             actions={SERVICE_ACTIONS}
-            referenceHref={href("settings:package")}
+            // I5: нумерация бункеров и наборов настраивается в CoffeePanel —
+            // он ниже на этой же вкладке (#coffee), а не в «Настройках».
+            referenceHref="#coffee"
           />
           <div className="sect" id="coffee" data-toc="Кофе">
             <div className="sect-h"><h3 className="h2">Кофе-бункеры</h3></div>
@@ -865,35 +878,40 @@ export default async function DomainPage({
       {/* ── Дашборд ── */}
       {activeGroup === "overview" && (
         <>
-          <div className="tiles">
-            <div className={`tile ${hasMoney(owedToUs) ? "" : "zero"}`}>
-              <div className="lab">Должны нам</div>
-              <div className="v">{moneyByCurrency(owedToUs)}</div>
-              <div className="foot"><span className="mk" />{hasMoney(owedToUs) ? "по реестру обязательств" : "нет открытых счетов"}</div>
-            </div>
-            <div className={`tile ${hasMoney(owedByUs) ? "" : "zero"}`}>
-              <div className="lab">Должны мы</div>
-              <div className="v">{moneyByCurrency(owedByUs)}</div>
-              <div className="foot"><span className="mk" />{hasMoney(owedByUs) ? "поставщики и аренда" : "нет открытых счетов"}</div>
-            </div>
-            <div className={`tile ${obligations.overdueTotal > 0 ? "is-hot" : "zero"}`}>
-              <div className="lab">Просрочено</div>
-              <div className="v">{obligations.overdueTotal}</div>
-              <div className="foot"><span className="mk" />{obligations.overdueTotal > 0 ? "требует твоего решения" : "просрочек нет"}</div>
-            </div>
-            <Link href={href("tasks")} className={`tile ${openTasks.length === 0 ? "zero" : ""}`}>
-              <div className="lab">Открытых задач</div>
-              <div className="v">{openTasks.length}</div>
-              <div className="foot"><span className="mk" />
-                {openTasks.length === 0
-                  ? "задач нет"
-                  : domain === "vendhub" && (coffeeTasks > 0 || snackTasks > 0)
-                    ? `кофе ${coffeeTasks} · снек ${snackTasks} · прочее ${openTasks.length - coffeeTasks - snackTasks}`
-                    : "по направлению"}
-                <span className="go">→</span>
+          {/* I4 (ревью 20.08.2026): у VendHub этот легаси-ряд обязательств
+              дублирует «Предприятие»/«Требует внимания» ниже и живую строку
+              открытых задач в шапке — оставлен только для остальных направлений
+              (GLOBERENT и т.д.), где своей сводки по обязательствам ещё нет. */}
+          {domain !== "vendhub" && (
+            <div className="tiles">
+              <div className={`tile ${hasMoney(owedToUs) ? "" : "zero"}`}>
+                <div className="lab">Должны нам</div>
+                <div className="v">{moneyByCurrency(owedToUs)}</div>
+                <div className="foot"><span className="mk" />{hasMoney(owedToUs) ? "по реестру обязательств" : "нет открытых счетов"}</div>
               </div>
-            </Link>
-          </div>
+              <div className={`tile ${hasMoney(owedByUs) ? "" : "zero"}`}>
+                <div className="lab">Должны мы</div>
+                <div className="v">{moneyByCurrency(owedByUs)}</div>
+                <div className="foot"><span className="mk" />{hasMoney(owedByUs) ? "поставщики и аренда" : "нет открытых счетов"}</div>
+              </div>
+              <div className={`tile ${obligations.overdueTotal > 0 ? "is-hot" : "zero"}`}>
+                <div className="lab">Просрочено</div>
+                <div className="v">{obligations.overdueTotal}</div>
+                <div className="foot"><span className="mk" />{obligations.overdueTotal > 0 ? "требует твоего решения" : "просрочек нет"}</div>
+              </div>
+              <Link href={href("tasks")} className={`tile ${openTasks.length === 0 ? "zero" : ""}`}>
+                <div className="lab">Открытых задач</div>
+                <div className="v">{openTasks.length}</div>
+                <div className="foot"><span className="mk" />
+                  {/* Этот легаси-ряд у VendHub не рендерится (I4) — разбивку
+                      кофе/снек показывать здесь уже некому, у остальных
+                      направлений признака контура нет. */}
+                  {openTasks.length === 0 ? "задач нет" : "по направлению"}
+                  <span className="go">→</span>
+                </div>
+              </Link>
+            </div>
+          )}
 
           {/* ── Контур GLOBERENT: договоры и парк — тревога №1 владельца это сроки ── */}
           {grContracts !== null && entities.length > 0 && (
@@ -1019,15 +1037,10 @@ export default async function DomainPage({
             </div>
           )}
 
-          {domain === "vendhub" && supplySummary && supplySummary.emptyPositions > 0 && (
-            <div className="notice" style={{ marginTop: 16 }}>
-              <b>В автоматах пусто: {supplySummary.emptyPositions} позиций</b>
-              Спирали закончились — пора везти пополнение.{" "}
-              <Link href={href("settings:machine_stock")} style={{ color: "var(--hot)", fontWeight: 600 }}>
-                Смотреть остатки →
-              </Link>
-            </div>
-          )}
+          {/* I4 (ревью 20.08.2026): тревога «В автоматах пусто» снята — её
+              покрывают плитка «Требует внимания» (пусто {deficitCount}) и
+              «Пустые позиции» в блоке «Снек» ниже; дублировать её отдельным
+              баннером незачем. */}
 
           {/* ── Предприятие: сводка на уровне направления, а не одного контура ── */}
           {domain === "vendhub" && (
@@ -1048,13 +1061,40 @@ export default async function DomainPage({
                   <div className="wv">{coffeeOrders ? coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU") : "—"}</div>
                   <div className="wf">сум за чашку · маржа — в отчёте «Себестоимость»</div>
                 </div>
-                <div className={`wt ${cashEstimate ? "" : "off"}`}>
-                  <div className="wl">Деньги в автоматах ≈</div>
-                  <div className="wv">{cashEstimate ? Math.round(cashEstimate.всего).toLocaleString("ru-RU") : "—"}</div>
-                  <div className="wf">
-                    наличные с последней инкассации · в день сбора возможно пересечение со сданным
-                  </div>
-                </div>
+                {/* I3: плитка = вопрос («сколько?»), клик = ответ (details — по
+                    автомату). Период — с последней ПРИНЯТОЙ инкассации; для
+                    автоматов без единой инкассации оценка идёт за всю историю
+                    продаж (честно посчитано, а не отсутствие данных). */}
+                <details className={`wt cash-estimate ${cashEstimate ? "" : "off"}`}>
+                  <summary>
+                    <div className="wl">Деньги в автоматах ≈</div>
+                    <div className="wv">{cashEstimate ? Math.round(cashEstimate.всего).toLocaleString("ru-RU") : "—"}</div>
+                    <div className="wf">
+                      {cashEstimate
+                        ? `с последней принятой инкассации по каждому автомату${
+                            cashNoCollectionCount > 0
+                              ? `; у ${cashNoCollectionCount} без инкассаций — за всю историю`
+                              : ""
+                          }`
+                        : "нет данных"}
+                    </div>
+                  </summary>
+                  {cashEstimate && cashEstimate.поАвтоматам.length > 0 && (
+                    <div className="rows" style={{ marginTop: 10 }}>
+                      {[...cashEstimate.поАвтоматам]
+                        .sort((a, b) => b.сумма - a.сумма)
+                        .map((m) => (
+                          <div className="row" key={m.machineId}>
+                            <div className="t">
+                              <b>{m.имя ?? "—"}</b>
+                              <small>{m.с === null ? "за всю историю" : `с ${shortRuDate(m.с)}`}</small>
+                            </div>
+                            <span className="pill">{m.сумма.toLocaleString("ru-RU")} сум</span>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </details>
                 <Link href={href("service")} className={`wt ${attentionTotal > 0 ? "is-hot" : ""}`}>
                   <div className="wl">Требует внимания</div>
                   <div className="wv">{attentionTotal}</div>
@@ -1208,7 +1248,7 @@ export default async function DomainPage({
             <div className="sect">
               <div className="sect-h"><h3 className="h2">Парк</h3></div>
               <div className="wgrid">
-                <Link href={href("settings:machine")} className={`wt ${machineCards ? "" : "off"}`}>
+                <Link href={href("settings:machine", "in_service")} className={`wt ${machineCards ? "" : "off"}`}>
                   <div className="wl">В работе</div>
                   <div className="wv">{machineCards ? parkInService.length : "—"}</div>
                   <div className="wf">
@@ -1218,12 +1258,12 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("settings:machine")} className={`wt ${machineCards ? "" : "off"}`}>
+                <Link href={href("settings:machine", "warehouse")} className={`wt ${machineCards ? "" : "off"}`}>
                   <div className="wl">На складе</div>
                   <div className="wv">{machineCards ? parkWarehouse.length : "—"}</div>
                   <div className="wf">простаивают<span className="go">→</span></div>
                 </Link>
-                <Link href={href("settings:machine")} className={`wt ${machineCards ? "" : "off"}`}>
+                <Link href={href("settings:machine", "repair")} className={`wt ${machineCards ? "" : "off"}`}>
                   <div className="wl">В ремонте</div>
                   <div className="wv">{machineCards ? parkRepair.length : "—"}</div>
                   <div className="wf">не в строю<span className="go">→</span></div>
@@ -1277,51 +1317,57 @@ export default async function DomainPage({
             </>
           )}
 
-          <div className="sect"><div className="sect-h"><h3 className="h2">Что заведено</h3></div>
-          {entities.length === 0 ? (
-            <div className="empty">
-              <b>Пока пусто</b>
-              Данные собираются со страниц ПО и попадают сюда после твоего «Одобрить».
-            </div>
-          ) : (
-            <div className="wgrid">
-              {groups.flatMap((g) =>
-                g.leaves
-                  .filter((l) => l.type !== null)
-                  .map((l) => {
-                    // Лист со своей таблицей (продажи, приход, остатки) счётом
-                    // по реестру не измеряется — ведём на экран, а не пишем
-                    // «появится после сбора» поверх готовых данных.
-                    if (isTableBackedLeaf(l.type)) {
-                      return (
+          {/* I4 (ревью 20.08.2026): у VendHub «Что заведено» дублирует SETTINGS
+              (тот же реестр по типам, тот же счётчик) — оставлено только для
+              остальных направлений, у которых своей навигации по разделам
+              с живым счётчиком ещё нет. */}
+          {domain !== "vendhub" && (
+            <div className="sect"><div className="sect-h"><h3 className="h2">Что заведено</h3></div>
+            {entities.length === 0 ? (
+              <div className="empty">
+                <b>Пока пусто</b>
+                Данные собираются со страниц ПО и попадают сюда после твоего «Одобрить».
+              </div>
+            ) : (
+              <div className="wgrid">
+                {groups.flatMap((g) =>
+                  g.leaves
+                    .filter((l) => l.type !== null)
+                    .map((l) => {
+                      // Лист со своей таблицей (продажи, приход, остатки) счётом
+                      // по реестру не измеряется — ведём на экран, а не пишем
+                      // «появится после сбора» поверх готовых данных.
+                      if (isTableBackedLeaf(l.type)) {
+                        return (
+                          <Link href={href(`${g.key}:${l.type}`)} className="wt" key={`${g.key}:${l.type}`}>
+                            <div className="wl">{l.label}</div>
+                            <div className="wv">·</div>
+                            <div className="wf">
+                              смотреть<span className="go">→</span>
+                            </div>
+                          </Link>
+                        );
+                      }
+                      const n = byType[l.type!] ?? 0;
+                      return n > 0 ? (
                         <Link href={href(`${g.key}:${l.type}`)} className="wt" key={`${g.key}:${l.type}`}>
                           <div className="wl">{l.label}</div>
-                          <div className="wv">·</div>
-                          <div className="wf">
-                            смотреть<span className="go">→</span>
-                          </div>
+                          <div className="wv">{n}</div>
+                          <div className="wf">записей<span className="go">→</span></div>
                         </Link>
+                      ) : (
+                        <div className="wt off" key={`${g.key}:${l.type}`}>
+                          <div className="wl">{l.label}</div>
+                          <div className="wv">—</div>
+                          <div className="wf">появится после сбора</div>
+                        </div>
                       );
-                    }
-                    const n = byType[l.type!] ?? 0;
-                    return n > 0 ? (
-                      <Link href={href(`${g.key}:${l.type}`)} className="wt" key={`${g.key}:${l.type}`}>
-                        <div className="wl">{l.label}</div>
-                        <div className="wv">{n}</div>
-                        <div className="wf">записей<span className="go">→</span></div>
-                      </Link>
-                    ) : (
-                      <div className="wt off" key={`${g.key}:${l.type}`}>
-                        <div className="wl">{l.label}</div>
-                        <div className="wv">—</div>
-                        <div className="wf">появится после сбора</div>
-                      </div>
-                    );
-                  }),
-              )}
+                    }),
+                )}
+              </div>
+            )}
             </div>
           )}
-          </div>
 
           {/* ── Карта: свёрнута по умолчанию, в самом конце обзора (по образцу
                  «Истории» в location-panel.tsx) ── */}
@@ -1609,13 +1655,39 @@ export default async function DomainPage({
         );
       })()}
 
+      {/* ── Автоматы (vendhub, C1): полноценная панель парка, а не
+          generic-книга «имя/код/номер» — так было до ревью (осиротевший
+          VendingMachinesPanel, см. git show 8640e30^ для прежней вкладки
+          `vending`). ?status=in_service|warehouse|repair (кликом с плиток
+          «Парк» на дашборде) сужает список ДО панели — MachinesBrowser
+          внутри получает уже отфильтрованные карточки. */}
+      {group && leaf?.type === "machine" && domain === "vendhub" && (() => {
+        const statusFilter = isMachineStatus(sp.status) ? sp.status : null;
+        const statusByEntity = new Map((machineCards ?? []).map((c) => [c.entityId, c.status || "in_service"]));
+        const filteredMachines =
+          statusFilter === null
+            ? machines
+            : machines.filter((e) => (statusByEntity.get(e.id) ?? "in_service") === statusFilter);
+        return (
+          <>
+            {statusFilter !== null && (
+              <p className="hint" style={{ marginBottom: 10 }}>
+                Показаны только «{machineStatusLabel(statusFilter)}» ({filteredMachines.length}) ·{" "}
+                <Link href={href("settings:machine")}>сбросить фильтр</Link>
+              </p>
+            )}
+            <VendingMachinesPanel machines={filteredMachines} />
+          </>
+        );
+      })()}
+
       {/* ── Группа: записи выбранной подвкладки ── Единый образец листа (§4):
           KPI сверху («Всего записей», «Не утверждено»), поиск по ?q= —
           сервером, тем же приёмом, что у ProductsBook (подстрока имени,
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
