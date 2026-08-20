@@ -323,13 +323,38 @@ export default async function DomainPage({
   // ── верхний ряд вкладок ────────────────────────────────────────────────────
   const teamLabel = `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}`;
   const tasksLabel = `Задачи${openTasks.length > 0 ? ` ${openTasks.length}` : ""}`;
+  // Подписи вкладок VendHub латиницей (слово владельца, 20.08.2026; контент внутри вкладок остаётся русским)
+  const VENDHUB_TAB_LABELS: Record<string, string> = {
+    overview: "DASHBOARD",
+    service: "ACTIVITY",
+    tasks: "TASKS",
+    reports: "REPORTS",
+    smm: "SMM",
+    crm: "CRM",
+    hr: "HR",
+    settings: "SETTINGS",
+  };
+
+  const applyVendHubLabels = (tabs: Array<{ key: string; label: string }>) => {
+    return tabs.map((tab) => {
+      const newLabel = VENDHUB_TAB_LABELS[tab.key];
+      if (!newLabel) return tab;
+      // Сохраняем счётчик (число в конце подписи), если оно есть
+      const counterMatch = tab.label.match(/\s(\d+)$/);
+      return {
+        ...tab,
+        label: counterMatch ? `${newLabel} ${counterMatch[1]}` : newLabel,
+      };
+    });
+  };
+
   const topTabs =
     domain === "vendhub"
       ? // Восьмёрка владельца (слово владельца, 20.08.2026) — порядок задан явно,
         // не через groups-порядок (settings/reports там идут иначе). «Задачи» и
         // подписи «Отчёты»/«Настройки» переиспользуют существующие ключи —
-        // только переставлены, не задублированы.
-        [
+        // только переставлены, не задублированы. Подписи переопределяются в VENDHUB_TAB_LABELS.
+        applyVendHubLabels([
           { key: "overview", label: "Дашборд" },
           { key: "service", label: "Обслуживание" },
           { key: "tasks", label: tasksLabel },
@@ -338,7 +363,7 @@ export default async function DomainPage({
           { key: "crm", label: "CRM" },
           { key: "hr", label: `HR${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
           { key: "settings", label: groups.find((g) => g.key === "settings")?.label ?? "Настройки" },
-        ]
+        ])
       : [
           { key: "overview", label: "Дашборд" },
           // Живые контуры GLOBERENT (перенос PROMACH): склад, импорт, финансы, калькулятор.
