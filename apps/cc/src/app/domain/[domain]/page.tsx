@@ -36,7 +36,8 @@ import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
 import { ConsumptionView } from "../../../components/consumption-view";
-import { ProductsBook } from "../../../components/products-book";
+import { ProductsBook, isIncomplete } from "../../../components/products-book";
+import { ListShell } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MapPanel } from "../../../components/map-panel";
 import { MiniBars } from "../../../components/mini-bars";
@@ -1385,19 +1386,31 @@ export default async function DomainPage({
       {group && leaf?.type === "purchase" && <PurchasesView />}
       {group && leaf?.type === "machine_stock" && <MachineStockView />}
 
-      {/* ── Товары: журнал как в ПО владельца — поиск, категории, незаполненные ── */}
-      {group && leaf?.type === "product" && (
-        <>
-          <ProductsBook
-            items={leafItems}
-            q={q ?? ""}
-            cat={cat ?? ""}
-            inc={inc === "1"}
-            hrefBase={`/domain/${domain}`}
-          />
-          <NewEntityForm domain={domain} type="product" label={typeOne("product")} />
-        </>
-      )}
+      {/* ── Товары: журнал как в ПО владельца — поиск, категории, незаполненные ──
+          Единый образец листа (§4): KPI сверху, «+ Запись» — в строке
+          действия. Поиск и подвкладки категорий остаются внутри ProductsBook —
+          у него уже есть своя GET-форма, второй ListShell не рисует. */}
+      {group && leaf?.type === "product" && (() => {
+        const incompleteCount = leafItems.filter(isIncomplete).length;
+        return (
+          <ListShell
+            kpi={[
+              { label: "Всего", value: String(leafItems.length) },
+              { label: "Незаполненные", value: String(incompleteCount), hot: incompleteCount > 0 },
+            ]}
+            action={<NewEntityForm domain={domain} type="product" label={typeOne("product")} />}
+            searchQ={q ?? ""}
+          >
+            <ProductsBook
+              items={leafItems}
+              q={q ?? ""}
+              cat={cat ?? ""}
+              inc={inc === "1"}
+              hrefBase={`/domain/${domain}`}
+            />
+          </ListShell>
+        );
+      })()}
 
       {/* ── Склад техники: конвейер 17 статусов (перенос PROMACH) ── */}
       {domain === "globerent" && activeGroup === "units" && (
@@ -1501,19 +1514,35 @@ export default async function DomainPage({
           <NewEntityForm domain={domain} type="invoice" label={typeOne("invoice")} />
         </>
       )}
-      {group && leaf?.type === "contractor" && (
-        <>
-          {leafItems.length > 0 ? (
-            <ContractorsBook items={leafItems} />
-          ) : (
-            <div className="empty">
-              <b>Контрагентов пока нет</b>
-              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
-            </div>
-          )}
-          <NewEntityForm domain={domain} type="contractor" label={typeOne("contractor")} />
-        </>
-      )}
+      {group && leaf?.type === "contractor" && (() => {
+        // «Оборот суммарно» — только если поле известно хоть у одной карточки
+        // листа (иначе плитка спорила бы с ContractorsBook, где та же сумма
+        // не показывается вовсе — см. `оборотОф` в globerent-books.tsx).
+        const turnoverValues = leafItems
+          .map((e) => (e.attrs ?? {})["оборот по реестру"])
+          .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+        const kpi = [{ label: "Всего", value: String(leafItems.length) }];
+        if (turnoverValues.length > 0) {
+          const sum = turnoverValues.reduce((a, b) => a + b, 0);
+          kpi.push({ label: "Оборот суммарно", value: `${sum.toLocaleString("ru-RU")} сум` });
+        }
+        return (
+          <ListShell
+            kpi={kpi}
+            action={<NewEntityForm domain={domain} type="contractor" label={typeOne("contractor")} />}
+            searchQ=""
+          >
+            {leafItems.length > 0 ? (
+              <ContractorsBook items={leafItems} />
+            ) : (
+              <div className="empty">
+                <b>Контрагентов пока нет</b>
+                Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+              </div>
+            )}
+          </ListShell>
+        );
+      })()}
       {group && leaf?.type === "equipment" && (
         <>
           {leafItems.length > 0 ? (
@@ -1570,44 +1599,73 @@ export default async function DomainPage({
         );
       })()}
 
-      {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe"].includes(leaf.type) && (
-        <>
-          {leafItems.length > 0 ? (
-            <>
-              <div className="book">
-                <div className="th">
-                  <span>Название</span>
-                  <span>Код</span>
-                  <span style={{ textAlign: "right" }}>{leaf.type === "product" ? "Цена" : "Номер"}</span>
+      {/* ── Группа: записи выбранной подвкладки ── Единый образец листа (§4):
+          KPI сверху («Всего записей», «Не утверждено»), поиск по ?q= —
+          сервером, тем же приёмом, что у ProductsBook (подстрока имени,
+          регистронезависимо), форму рисует сам ListShell — у generic-книги
+          своей нет. Действует не только на VendHub: под этот рендер попадают
+          и generic-листы GLOBERENT (например «Таможенные посты»). */}
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe"].includes(leaf.type) && (() => {
+        const genericQuery = (q ?? "").trim().toLowerCase();
+        const shownItems = genericQuery
+          ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
+          : leafItems;
+        const notApproved = leafItems.filter((e) => e.approvedAt == null).length;
+        return (
+          <ListShell
+            kpi={[
+              { label: "Всего записей", value: String(leafItems.length) },
+              { label: "Не утверждено", value: String(notApproved), hot: notApproved > 0 },
+            ]}
+            action={<NewEntityForm domain={domain} type={leaf.type} label={typeOne(leaf.type)} />}
+            searchQ={q ?? ""}
+            searchHrefBase={`/domain/${domain}`}
+            searchTab={active}
+          >
+            {shownItems.length > 0 ? (
+              <>
+                <div className="book">
+                  <div className="th">
+                    <span>Название</span>
+                    <span>Код</span>
+                    <span style={{ textAlign: "right" }}>{leaf.type === "product" ? "Цена" : "Номер"}</span>
+                  </div>
+                  {shownItems.map((e) => {
+                    const price = (e.attrs ?? {})["цена"];
+                    return (
+                      <Link href={`/card/${e.id}`} className="tr" key={e.id}>
+                        <span className="nm">{e.name}</span>
+                        <span className="cd">{String((e.attrs ?? {})["ИКПУ"] ?? (e.attrs ?? {})["код"] ?? "")}</span>
+                        <span className="pr">
+                          {typeof price === "number"
+                            ? <>{Number(price).toLocaleString("ru-RU")} <span className="u">сум</span></>
+                            : (e.externalRef ?? "—")}
+                        </span>
+                      </Link>
+                    );
+                  })}
                 </div>
-                {leafItems.map((e) => {
-                  const price = (e.attrs ?? {})["цена"];
-                  return (
-                    <Link href={`/card/${e.id}`} className="tr" key={e.id}>
-                      <span className="nm">{e.name}</span>
-                      <span className="cd">{String((e.attrs ?? {})["ИКПУ"] ?? (e.attrs ?? {})["код"] ?? "")}</span>
-                      <span className="pr">
-                        {typeof price === "number"
-                          ? <>{Number(price).toLocaleString("ru-RU")} <span className="u">сум</span></>
-                          : (e.externalRef ?? "—")}
-                      </span>
-                    </Link>
-                  );
-                })}
+                <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
+                  {shownItems.length === leafItems.length
+                    ? `${leafItems.length} записей`
+                    : `${shownItems.length} из ${leafItems.length} записей`}
+                </p>
+              </>
+            ) : leafItems.length === 0 ? (
+              <div className="empty">
+                <b>{leaf.label}: данных пока нет</b>
+                Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО,
+                соберу всё разом.
               </div>
-              <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>{leafItems.length} записей</p>
-            </>
-          ) : (
-            <div className="empty">
-              <b>{leaf.label}: данных пока нет</b>
-              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО,
-              соберу всё разом.
-            </div>
-          )}
-          <NewEntityForm domain={domain} type={leaf.type} label={typeOne(leaf.type)} />
-        </>
-      )}
+            ) : (
+              <div className="empty">
+                <b>Ничего не нашлось</b>
+                Поменяй запрос или сними фильтр.
+              </div>
+            )}
+          </ListShell>
+        );
+      })()}
       {group && !leaf?.type && (
         <div className="empty">
           <b>{leaf?.label}: данных пока нет</b>
