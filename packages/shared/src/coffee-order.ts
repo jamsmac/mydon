@@ -67,3 +67,21 @@ export function orderIsCountable(o: CoffeeOrderSource): boolean {
   const сумма = Number(o.amount ?? 0);
   return orderIsPaid(o) && Number.isFinite(сумма) && сумма > 0 && !NEVER_SALE_RESOURCES.has(norm(o.orderResource));
 }
+
+/**
+ * Канал оплаты — физические наличные, а не безнал/карта (ревью I3: единое
+ * правило вместо литерального `Set` в `collections.service.ts`).
+ *
+ * `cash`, `cash0` (бесплатная выдача тем же каналом) и `credit` (продажа в
+ * долг — деньги ФИЗИЧЕСКИ не берутся, но по учётной логике «Деньги в
+ * автоматах» это тоже не снятые наличные) — наличные. `vip` — платёжная
+ * карта (см. `coffee-order.ts` выше: 2693 из 2704 оплачены на полную цену),
+ * `userDefined`/«Custom payment» — безналичный канал устройства. Ни тот, ни
+ * другой наличными не являются — их сумма не лежит физически в автомате и не
+ * ждёт инкассации.
+ */
+const CASH_RESOURCES = new Set(["cash", "cash0", "cash payment", "credit"]);
+
+export function orderIsCash(o: CoffeeOrderSource): boolean {
+  return CASH_RESOURCES.has(norm(o.orderResource));
+}

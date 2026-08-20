@@ -28,12 +28,42 @@ export interface ServiceFeedItem {
   кто: string | null;
 }
 
-/** Сливает готовые ленты источников, сортирует по `ts` убыв., режет по лимиту (умолчание 50). */
-export function mergeServiceFeed(items: readonly ServiceFeedItem[][], limit = 50): ServiceFeedItem[] {
-  return items
-    .flat()
-    .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
-    .slice(0, limit);
+/**
+ * Сливает готовые ленты источников, сортирует по `ts` убыв.
+ *
+ * `limit` не имеет значения по умолчанию: без него отдаётся ВСЯ отсортированная
+ * лента. Раньше здесь стоял неявный `= 50`, и страница резала историю до
+ * вызова фильтра «деньги»/«снек»/«кофе» на service-tab — фильтр по виду видел
+ * уже обрезанные 50 строк вместо всех, а «инкассации» в ленте почти не
+ * попадали (ревью C2). Резать до 50 для показа — дело потребителя (см.
+ * `.slice(0, 50)` в `service-tab.tsx` уже ПОСЛЕ фильтра по виду).
+ */
+export function mergeServiceFeed(items: readonly ServiceFeedItem[][], limit?: number): ServiceFeedItem[] {
+  const merged = items.flat().sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
+  return limit === undefined ? merged : merged.slice(0, limit);
+}
+
+/**
+ * Раскрывает служебную ссылку на автора (`createdBy`/`operatorName`) в
+ * читаемое имя для ленты (ревью I1).
+ *
+ * `person:<uuid>` — ищем сотрудника в списке `people`; не нашли — `null`
+ * (лучше молчание, чем сырой UUID в интерфейсе). `import:*` — массовая
+ * историческая загрузка, а не человек. `bot` — заявка пришла из Telegram без
+ * привязки к конкретному оператору (см. `collections.controller.ts`).
+ * Остальное (уже разрешённое имя, `owner`, логин) — как есть.
+ */
+export function resolveActor(raw: string | null, people: readonly { id: string; name: string }[]): string | null {
+  if (raw === null) return null;
+  const val = raw.trim();
+  if (val === "") return null;
+  if (val.startsWith("person:")) {
+    const id = val.slice("person:".length);
+    return people.find((p) => p.id === id)?.name ?? null;
+  }
+  if (val.startsWith("import:")) return "импорт";
+  if (val === "bot") return "бот";
+  return val;
 }
 
 /** Заправка кофейного бункера → строка ленты. */

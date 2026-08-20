@@ -4,6 +4,7 @@ import {
   mergeServiceFeed,
   coffeeRefillToFeed,
   collectionToFeed,
+  resolveActor,
   vendingRefillToFeed,
   type ServiceFeedItem,
 } from "./service-feed";
@@ -38,7 +39,7 @@ describe("Лента полевых событий обслуживания", ()
       assert.equal(r[1].место, "A");
     });
 
-    it("без явного лимита режет по умолчанию до 50", () => {
+    it("без явного лимита возвращает всё, отсортированное (C2: фильтр на service-tab не должен видеть уже обрезанную ленту)", () => {
       const items: ServiceFeedItem[] = Array.from({ length: 60 }, (_, i) => ({
         kind: "coffee" as const,
         ts: new Date(2026, 7, 1, 0, i).toISOString(),
@@ -47,7 +48,10 @@ describe("Лента полевых событий обслуживания", ()
         кто: null,
       }));
       const r = mergeServiceFeed([items]);
-      assert.equal(r.length, 50);
+      assert.equal(r.length, 60);
+      // Порядок сохраняется убывающим по времени и без лимита.
+      assert.equal(r[0].место, "M59");
+      assert.equal(r[59].место, "M0");
     });
 
     it("уважает переданный лимит", () => {
@@ -148,6 +152,41 @@ describe("Лента полевых событий обслуживания", ()
       });
       assert.equal(item.место, "—");
       assert.equal(item.кто, null);
+    });
+  });
+
+  describe("resolveActor", () => {
+    const people = [
+      { id: "p1", name: "Азиз" },
+      { id: "p2", name: "Рустам" },
+    ];
+
+    it("person:<uuid> — имя из people по id", () => {
+      assert.equal(resolveActor("person:p1", people), "Азиз");
+      assert.equal(resolveActor("person:p2", people), "Рустам");
+    });
+
+    it("person:<uuid>, которого нет в people — null, а не сырой UUID", () => {
+      assert.equal(resolveActor("person:ghost", people), null);
+    });
+
+    it("import:* — «импорт»", () => {
+      assert.equal(resolveActor("import:telegram-history", people), "импорт");
+    });
+
+    it("bot — «бот»", () => {
+      assert.equal(resolveActor("bot", people), "бот");
+    });
+
+    it("остальное — как есть (уже разрешённое имя, owner, логин)", () => {
+      assert.equal(resolveActor("owner", people), "owner");
+      assert.equal(resolveActor("Рустам", people), "Рустам");
+    });
+
+    it("null и пустая строка — null", () => {
+      assert.equal(resolveActor(null, people), null);
+      assert.equal(resolveActor("", people), null);
+      assert.equal(resolveActor("   ", people), null);
     });
   });
 });
