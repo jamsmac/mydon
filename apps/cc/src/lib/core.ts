@@ -132,6 +132,30 @@ export interface VendingSyncRun {
   durationMs: number | null;
 }
 
+/**
+ * Заливка снек/дринк-автомата: ПОСТРОЧНАЯ запись (один слот). У журнала нет
+ * готовой группировки «точка → позиции → веса» — это склеивает вкладка
+ * «Обслуживание» по (machineSerial, performedAt с точностью до минуты),
+ * см. `service-tab.tsx` (Task 9, ревью Task 8).
+ */
+export interface VendingRefillRow {
+  id: string;
+  machineId: string | null;
+  machineSerial: string;
+  coilId: string | null;
+  productId: string | null;
+  productName: string;
+  qty: number;
+  personId: string | null;
+  taskId: string | null;
+  performedAt: string;
+  clientKey: string;
+  source: string;
+  note: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 // ── Кофе-бункеры: ручные кофемашины, ежедневная заливка/мойка ────────────
 
 export interface CoffeeLocation {
@@ -1749,6 +1773,8 @@ export const core = {
   vendingPurchase: () => get<VendingPurchase>("/vending/purchase"),
   vendingOrders: () => get<VendingOrder[]>("/vending/orders"),
   vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
+  /** Журнал заливок построчно (по слоту) — источник ленты «Обслуживание» (снек). */
+  vendingRefillList: (limit = 100) => get<VendingRefillRow[]>(`/vending/refills?limit=${limit}`),
 
   // ── Кофе-бункеры: ручные кофемашины ──
   coffeeLocations: () => get<CoffeeLocation[]>("/coffee/locations"),

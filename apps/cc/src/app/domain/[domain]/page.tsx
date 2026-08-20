@@ -1,6 +1,18 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { DOMAINS, DOMAIN_LABELS, contractorInDirection, dueLabel, type Domain } from "@mydon/shared";
+import {
+  DOMAINS,
+  DOMAIN_LABELS,
+  contractorInDirection,
+  coffeeRefillToFeed,
+  collectionToFeed,
+  dueLabel,
+  machineSerialKeys,
+  mergeServiceFeed,
+  vendingRefillToFeed,
+  type Domain,
+  type ServiceFeedItem,
+} from "@mydon/shared";
 import {
   core,
   CoreUnavailable,
@@ -33,6 +45,7 @@ import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingSupplyPanel } from "../../../components/vending-panel";
 import { CoffeePanel } from "../../../components/coffee-panel";
+import { ServiceTab, type ServiceAction, type ServiceKpiTile } from "../../../components/service-tab";
 import {
   ContractorsBook,
   ContractsBook,
@@ -55,6 +68,13 @@ export const dynamic = "force-dynamic";
 
 function isDomain(v: string): v is Domain {
   return (DOMAINS as readonly string[]).includes(v);
+}
+
+/** «24 июн» по Ташкенту — для KPI «Деньги не сняты с …» (без точки после месяца). */
+function shortRuDate(iso: string): string {
+  return new Date(iso)
+    .toLocaleDateString("ru-RU", { timeZone: "Asia/Tashkent", day: "numeric", month: "short" })
+    .replace(/\.$/, "");
 }
 
 /**
@@ -414,6 +434,174 @@ export default async function DomainPage({
     ]);
   }
 
+  // ── ACTIVITY (Обслуживание) целиком: мини-KPI + единая лента полевых
+  // событий трёх источников (mergeServiceFeed + адаптеры, Task 8). Каждый
+  // источник — свой Promise, провал одного (в т.ч. эндпоинтов, которых ещё
+  // может не быть на проде) не роняет вкладку и не обнуляет чужие KPI/ленту —
+  // правило best-effort, как у остальных ленивых блоков этой страницы.
+  let serviceKpi: ServiceKpiTile[] = [];
+  let serviceFeed: ServiceFeedItem[] = [];
+  const SERVICE_ACTIONS: ServiceAction[] = [
+    { icon: "☕", title: "Пополнить кофе-точку", subtitle: "точка → бункеры подряд → веса · как в боте", href: "#coffee" },
+    { icon: "🍫", title: "Пополнить снек-точку", subtitle: "точка → спирали → количества", href: "#snack" },
+    { icon: "💵", title: "Инкассация", subtitle: "автомат → сумма · весь парк, не только рабочие", href: "#cash" },
+  ];
+  if (domain === "vendhub" && activeGroup === "service") {
+    let recentRefills: Awaited<ReturnType<typeof core.recentCoffeeRefills>> | null = null;
+    let bunkerConfig: Awaited<ReturnType<typeof core.coffeeBunkerConfig>> | null = null;
+    let fillStatus: Awaited<ReturnType<typeof core.coffeeFillStatus>> | null = null;
+    let serviceDeficit: Awaited<ReturnType<typeof core.vendingDeficit>> | null = null;
+    let refillRows: Awaited<ReturnType<typeof core.vendingRefillList>> | null = null;
+    let collRows: Awaited<ReturnType<typeof core.collections>> | null = null;
+    [recentRefills, bunkerConfig, fillStatus, serviceDeficit, refillRows, collRows] = await Promise.all([
+      core.recentCoffeeRefills(50).catch(() => null),
+      core.coffeeBunkerConfig().catch(() => null),
+      core.coffeeFillStatus().catch(() => null),
+      core.vendingDeficit().catch(() => null),
+      core.vendingRefillList(100).catch(() => null),
+      core.collections({ days: "365" }).catch(() => null),
+    ]);
+
+    // «Залито сегодня» — заливки кофе-бункеров, день createdAt по Ташкенту
+    // совпадает с сегодняшним (тот же todayKey, что у GLOBERENT ниже).
+    const filledToday =
+      recentRefills === null
+        ? null
+        : recentRefills.filter(
+            (r) => new Date(r.createdAt).toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" }) === todayKey,
+          ).length;
+
+    // «Точек ждёт визита» — уникальные точки со status="underfill". Пустой
+    // ответ ИЛИ ответ, где ни для одной точки эталон не задан (весь список —
+    // status="unknown"), — это не «недолива нет нигде», а «нечего сравнивать»:
+    // плитка тогда показывает «—», а не обманчивый ноль.
+    const hasAnyTarget = fillStatus !== null && fillStatus.some((r) => r.status !== "unknown");
+    const underfillLocations = fillStatus === null || !hasAnyTarget
+      ? null
+      : new Set(fillStatus.filter((r) => r.status === "underfill").map((r) => r.locationId)).size;
+    const waitingVisitsFoot =
+      fillStatus === null ? "нет данных" : !hasAnyTarget ? "эталоны не заданы" : "уникальных точек с недоливом";
+
+    const emptySpirals = serviceDeficit === null ? null : serviceDeficit.length;
+
+    // «Деньги не сняты» — максимум receivedAt по принятым инкассациям за год;
+    // источник пустой (но живой) — «ни разу», источник недоступен — «—».
+    const lastReceivedAt = (collRows ?? []).reduce<string | null>((max, c) => {
+      if (c.status !== "received" || !c.receivedAt) return max;
+      return max === null || new Date(c.receivedAt).getTime() > new Date(max).getTime() ? c.receivedAt : max;
+    }, null);
+    const moneyValue =
+      collRows === null ? "—" : lastReceivedAt === null ? "ни разу" : `с ${shortRuDate(lastReceivedAt)}`;
+
+    serviceKpi = [
+      {
+        label: "Залито сегодня",
+        value: filledToday === null ? "—" : `${filledToday} ${plural(filledToday, "бункер", "бункера", "бункеров")}`,
+        foot: recentRefills === null ? "нет данных" : "заливок кофе-бункеров сегодня",
+      },
+      {
+        label: "Точек ждёт визита",
+        value: underfillLocations === null ? "—" : String(underfillLocations),
+        hot: (underfillLocations ?? 0) > 0,
+        foot: waitingVisitsFoot,
+      },
+      {
+        label: "Снек: пустые спирали",
+        value: emptySpirals === null ? "—" : String(emptySpirals),
+        hot: (emptySpirals ?? 0) > 0,
+        foot: serviceDeficit === null ? "нет данных" : "товаров нет ни в одном автомате",
+      },
+      {
+        label: "Деньги не сняты",
+        value: moneyValue,
+        foot: collRows === null ? "нет данных" : "дата последней принятой инкассации по парку",
+      },
+    ];
+
+    // Кофе → лента: имя ингредиента в строке заливки не хранится (только
+    // ingredientId) — резолвим по конфигу бункеров (Task 8 ревью, пункт 1).
+    const ingredientNameById = new Map<string, string>();
+    for (const b of bunkerConfig ?? []) ingredientNameById.set(b.ingredientId, b.ingredientName);
+    const coffeeFeedItems = (recentRefills ?? []).map((r) =>
+      coffeeRefillToFeed({
+        locationName: r.locationName,
+        position: r.position,
+        ingredientName: r.ingredientId ? (ingredientNameById.get(r.ingredientId) ?? null) : null,
+        filledWeight: r.filledWeight,
+        createdAt: r.createdAt,
+        createdBy: r.createdBy,
+      }),
+    );
+
+    // Снек → лента: /vending/refills отдаёт построчные записи по слоту, без
+    // группировки и без имени автомата — склеиваем сами по (серийник,
+    // performedAt с точностью до минуты) и резолвим имя по реестру
+    // (Task 8 ревью, пункт 3). Серийник приходит в форме Ourvend, карточка
+    // может хранить другую форму (mydon-stock) — сверяем через machineSerialKeys.
+    const machineNameBySerial = new Map<string, string>();
+    for (const m of machines) {
+      for (const key of machineSerialKeys(m.externalRef)) machineNameBySerial.set(key, m.name);
+    }
+    const resolveMachineName = (serial: string): string | null => {
+      for (const key of machineSerialKeys(serial)) {
+        const name = machineNameBySerial.get(key);
+        if (name) return name;
+      }
+      return null;
+    };
+    const minuteBucket = (iso: string) => {
+      const d = new Date(iso);
+      return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}-${d.getUTCHours()}-${d.getUTCMinutes()}`;
+    };
+    const vendingGroups = new Map<
+      string,
+      { machineSerial: string; createdAt: string; positions: number; units: number; createdBy: string | null }
+    >();
+    for (const row of refillRows ?? []) {
+      const key = `${row.machineSerial}::${minuteBucket(row.performedAt)}`;
+      const g = vendingGroups.get(key);
+      if (g) {
+        g.positions += 1;
+        g.units += row.qty;
+      } else {
+        vendingGroups.set(key, {
+          machineSerial: row.machineSerial,
+          createdAt: row.performedAt,
+          positions: 1,
+          units: row.qty,
+          createdBy: row.createdBy,
+        });
+      }
+    }
+    const snackFeedItems = [...vendingGroups.values()].map((g) =>
+      vendingRefillToFeed({
+        machineName: resolveMachineName(g.machineSerial),
+        createdAt: g.createdAt,
+        positions: g.positions,
+        units: g.units,
+        createdBy: g.createdBy,
+      }),
+    );
+
+    // Деньги → лента: та же выборка, что и KPI — приняли (с суммой) и ждут
+    // приёма (amount ещё null) идут в общую хронологию; отменённые сборы
+    // (ошибочная фиксация) в ленту не идут — иначе адаптер подпишет их «сумма
+    // не введена», как будто сбор ещё ждёт приёма (Task 8 ревью, пункт 2:
+    // amount строкой decimal, приводим к числу перед адаптером).
+    const cashFeedItems = (collRows ?? [])
+      .filter((c) => c.status !== "cancelled")
+      .map((c) =>
+        collectionToFeed({
+          machineName: c.machineName,
+          collectedAt: c.collectedAt,
+          amount: c.amount === null ? null : Number(c.amount),
+          operatorName: c.operatorName,
+        }),
+      );
+
+    serviceFeed = mergeServiceFeed([coffeeFeedItems, snackFeedItems, cashFeedItems]);
+  }
+
   // Хлебные крошки и чип маршрута (расположение из обложки): где я и как это
   // адресуется. Счётчик из подписи вкладки для крошки убираем — «Задачи 6» → «Задачи».
   const activeTab = topTabs.find((t) => t.key === activeGroup);
@@ -526,18 +714,24 @@ export default async function DomainPage({
         </div>
       )}
 
-      {/* ── Обслуживание: временная сборка старых операционных панелей (до PR3) ── */}
+      {/* ── ACTIVITY: KPI + действия + единая лента (Task 9), формы ввода ниже под якорями ── */}
       {domain === "vendhub" && activeGroup === "service" && (
         <>
-          <div className="sect">
+          <ServiceTab
+            kpi={serviceKpi}
+            feed={serviceFeed}
+            actions={SERVICE_ACTIONS}
+            referenceHref={href("settings:package")}
+          />
+          <div className="sect" id="coffee" data-toc="Кофе">
             <div className="sect-h"><h3 className="h2">Кофе-бункеры</h3></div>
             <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />
           </div>
-          <div className="sect">
+          <div className="sect" id="snack" data-toc="Снек">
             <div className="sect-h"><h3 className="h2">Пополнение снека</h3></div>
             <VendingSupplyPanel />
           </div>
-          <div className="sect">
+          <div className="sect" id="cash" data-toc="Инкассация">
             <div className="sect-h"><h3 className="h2">Инкассация</h3></div>
             <CollectionsView />
           </div>
