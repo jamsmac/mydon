@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, coffeeOrder, collection, entity, person, sale } from "@mydon/db";
-import { cashInMachines } from "@mydon/shared";
+import { cashInMachines, orderIsCash } from "@mydon/shared";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
@@ -194,9 +194,8 @@ export class CollectionsService {
       this.db.select({ id: entity.id, name: entity.name }).from(entity),
     ]);
 
-    const cashRes = new Set(["cash", "cash0", "cash payment", "credit"]);
     const продажи = [
-      ...кофе.map((r) => ({ machineId: r.machineId as string, ts: (r.ts as Date).toISOString(), amount: Number(r.amount), cash: cashRes.has(String(r.res ?? "").toLowerCase()) })),
+      ...кофе.map((r) => ({ machineId: r.machineId as string, ts: (r.ts as Date).toISOString(), amount: Number(r.amount), cash: orderIsCash({ orderResource: r.res }) })),
       // Снек: платёжного канала в источнике нет — считаем наличными и честно
       // помечаем «≈» на витрине.
       // Тайминг тоже компромисс, не оплошность: у снека есть только дата

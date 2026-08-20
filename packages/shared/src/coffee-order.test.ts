@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { orderIsCountable, orderIsDelivered, orderIsPaid } from "./coffee-order";
+import { orderIsCash, orderIsCountable, orderIsDelivered, orderIsPaid } from "./coffee-order";
 
 describe("Что считать продажей кофе", () => {
   it("оба словаря источника читаются одинаково", () => {
@@ -67,5 +67,35 @@ describe("Что считать продажей кофе", () => {
     assert.ok(!orderIsPaid({}));
     assert.ok(!orderIsCountable({ orderResource: "cash", amount: 15000 }));
     assert.ok(!orderIsCountable({ paymentStatus: "paid", orderResource: "cash" }), "без суммы продажи нет");
+  });
+});
+
+describe("orderIsCash — наличный канал (ревью I3)", () => {
+  it("cash, cash0, cash payment, credit — наличные, регистронезависимо", () => {
+    assert.ok(orderIsCash({ orderResource: "cash" }));
+    assert.ok(orderIsCash({ orderResource: "cash0" }));
+    assert.ok(orderIsCash({ orderResource: "cash payment" }));
+    assert.ok(orderIsCash({ orderResource: "Cash payment" }));
+    assert.ok(orderIsCash({ orderResource: "credit" }));
+    assert.ok(orderIsCash({ orderResource: "CASH" }));
+    assert.ok(orderIsCash({ orderResource: "Cash0" }));
+    assert.ok(orderIsCash({ orderResource: "CREDIT" }));
+  });
+
+  it("vip — платёжная карта, НЕ наличные", () => {
+    assert.ok(!orderIsCash({ orderResource: "vip" }));
+    assert.ok(!orderIsCash({ orderResource: "VIP" }));
+  });
+
+  it("userDefined / Custom payment — безнал, НЕ наличные", () => {
+    assert.ok(!orderIsCash({ orderResource: "userDefined" }));
+    assert.ok(!orderIsCash({ orderResource: "Custom payment" }));
+  });
+
+  it("прочие/пустые каналы — не наличные", () => {
+    assert.ok(!orderIsCash({ orderResource: "testShipment" }));
+    assert.ok(!orderIsCash({ orderResource: "send" }));
+    assert.ok(!orderIsCash({}));
+    assert.ok(!orderIsCash({ orderResource: null }));
   });
 });
