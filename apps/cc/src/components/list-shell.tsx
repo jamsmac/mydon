@@ -6,6 +6,11 @@ export interface ListShellKpi {
   value: string;
   /** Подсветить как «требует внимания» (не утверждено/незаполнено и т.п.). */
   hot?: boolean;
+  /**
+   * Подпись под значением — честно раскрывает частичность цифры (например
+   * «по 6 из 226 карточек»), когда сумма/счёт посчитаны не по всему листу.
+   */
+  foot?: string;
 }
 
 /**
@@ -54,6 +59,7 @@ export function ListShell({
           <div key={t.label} className={`tile mini ${t.hot ? "is-hot" : ""}`}>
             <div className="lab">{t.label}</div>
             <div className="v">{t.value}</div>
+            {t.foot && <div className="foot">{t.foot}</div>}
           </div>
         ))}
       </div>

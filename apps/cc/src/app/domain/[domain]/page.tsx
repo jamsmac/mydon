@@ -37,7 +37,7 @@ import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
 import { ConsumptionView } from "../../../components/consumption-view";
 import { ProductsBook, isIncomplete } from "../../../components/products-book";
-import { ListShell } from "../../../components/list-shell";
+import { ListShell, type ListShellKpi } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MapPanel } from "../../../components/map-panel";
 import { MiniBars } from "../../../components/mini-bars";
@@ -1518,13 +1518,23 @@ export default async function DomainPage({
         // «Оборот суммарно» — только если поле известно хоть у одной карточки
         // листа (иначе плитка спорила бы с ContractorsBook, где та же сумма
         // не показывается вовсе — см. `оборотОф` в globerent-books.tsx).
+        // Сумма реальна и когда поле известно не у всех (GLOBERENT: 6 из 226),
+        // поэтому не прячем плитку по правилу `every` — это лишило бы итога
+        // любой список, где хоть у одной карточки нет оборота. Вместо этого
+        // фут честно называет охват: «по N из M карточек», когда N < M.
         const turnoverValues = leafItems
           .map((e) => (e.attrs ?? {})["оборот по реестру"])
           .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-        const kpi = [{ label: "Всего", value: String(leafItems.length) }];
-        if (turnoverValues.length > 0) {
+        const withTurnover = turnoverValues.length;
+        const total = leafItems.length;
+        const kpi: ListShellKpi[] = [{ label: "Всего", value: String(total) }];
+        if (withTurnover > 0) {
           const sum = turnoverValues.reduce((a, b) => a + b, 0);
-          kpi.push({ label: "Оборот суммарно", value: `${sum.toLocaleString("ru-RU")} сум` });
+          kpi.push({
+            label: "Оборот суммарно",
+            value: `${sum.toLocaleString("ru-RU")} сум`,
+            ...(withTurnover < total ? { foot: `по ${withTurnover} из ${total} карточек` } : {}),
+          });
         }
         return (
           <ListShell
