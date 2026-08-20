@@ -1,6 +1,18 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { DOMAINS, DOMAIN_LABELS, contractorInDirection, dueLabel, type Domain } from "@mydon/shared";
+import {
+  DOMAINS,
+  DOMAIN_LABELS,
+  contractorInDirection,
+  coffeeRefillToFeed,
+  collectionToFeed,
+  dueLabel,
+  machineSerialKeys,
+  mergeServiceFeed,
+  vendingRefillToFeed,
+  type Domain,
+  type ServiceFeedItem,
+} from "@mydon/shared";
 import {
   core,
   CoreUnavailable,
@@ -24,7 +36,8 @@ import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
 import { ConsumptionView } from "../../../components/consumption-view";
-import { ProductsBook } from "../../../components/products-book";
+import { ProductsBook, isIncomplete } from "../../../components/products-book";
+import { ListShell, type ListShellKpi } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MapPanel } from "../../../components/map-panel";
 import { MiniBars } from "../../../components/mini-bars";
@@ -33,6 +46,7 @@ import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingSupplyPanel } from "../../../components/vending-panel";
 import { CoffeePanel } from "../../../components/coffee-panel";
+import { ServiceTab, type ServiceAction, type ServiceKpiTile } from "../../../components/service-tab";
 import {
   ContractorsBook,
   ContractsBook,
@@ -55,6 +69,36 @@ export const dynamic = "force-dynamic";
 
 function isDomain(v: string): v is Domain {
   return (DOMAINS as readonly string[]).includes(v);
+}
+
+/** «24 июн» по Ташкенту — для KPI «Деньги не сняты с …» (без точки после месяца). */
+function shortRuDate(iso: string): string {
+  return new Date(iso)
+    .toLocaleDateString("ru-RU", { timeZone: "Asia/Tashkent", day: "numeric", month: "short" })
+    .replace(/\.$/, "");
+}
+
+/** Потолок `GET /coffee/refill/recent` (coffee.controller.ts): выше сервер не отдаёт. */
+const COFFEE_REFILL_LIMIT = 200;
+
+/**
+ * Чип источника задачи (Task 10) — по значению `Task.source`, единственному
+ * полю происхождения в типе (`createdFrom`/`origin` в нём нет). Реальные
+ * значения из кода-создателя задач и живых данных: `null`/`"owner"` —
+ * владелец (ручное создание в CC и заявки «Поломка» из бота — источник у
+ * обеих не отличить друг от друга по этому полю, отсюда общая метка);
+ * `maint:<planId>` и `recurring:*` — график (ТО-план/повторяющаяся); `maintenance-monitor` /
+ * `coffee-monitor` / `coffee-alert` — из «Обслуживания» (авто-задачи по
+ * недоливу/лёгким бункерам). Прочее — сырое значение как есть, а не молчание
+ * (лучше показать код источника, чем выдумать несуществующую категорию).
+ */
+function taskSourceLabel(source: string | null): string {
+  if (source === null || source === "owner") return "владелец";
+  if (source.startsWith("maint:") || source.startsWith("recurring:")) return "график";
+  if (source === "maintenance-monitor" || source === "coffee-monitor" || source === "coffee-alert") {
+    return "обслуживание";
+  }
+  return source;
 }
 
 /**
@@ -214,6 +258,46 @@ export default async function DomainPage({
   const isCoffeeTask = (t: Task) => /кофе|бункер|мойк|кофемолк|заливк/i.test(t.title);
   const coffeeTasks = openTasks.filter(isCoffeeTask).length;
   const snackTasks = openTasks.filter((t) => !isCoffeeTask(t) && /пополнен|инкасс|закуп|автомат|снек/i.test(t.title)).length;
+
+  // ── Задачи: мини-KPI вкладки TASKS (Task 10) — стиль как у ACTIVITY (.wgrid/.wt),
+  // только vendhub и только на самой вкладке (лишний запрос overdue на других
+  // вкладках/направлениях ни к чему). "Просрочено" тянет /tasks/overdue —
+  // эндпоинт общий по организации (без фильтра домена), поэтому пересекаем
+  // с доменом на клиенте, как и остальные best-effort блоки этой страницы.
+  let taskKpi: { label: string; value: string; hot?: boolean }[] = [];
+  if (domain === "vendhub" && activeGroup === "tasks") {
+    const tasksOverdueRows = await core.tasksOverdue().catch(() => null);
+    const overdueCount =
+      tasksOverdueRows === null ? null : tasksOverdueRows.filter((t) => t.domain === "vendhub").length;
+    // ownerRef === "" тоже "свободная" — исторические записи до нормализации
+    // "" → null на создании (tasks.service.ts) могли осесть в базе пустой
+    // строкой, а не null.
+    const unassignedCount = openTasks.filter((t) => t.ownerRef === null || t.ownerRef.trim() === "").length;
+    // «За неделю» — та же скользящая граница (сейчас минус 168 часов), что
+    // и doneLast7d на сервере (tasks.service.ts), а не календарный день:
+    // окно в 7×24 часа не зависит от часового пояса подсчёта.
+    const weekAgoMs = Date.now() - 7 * 24 * 3600_000;
+    // completedAt — единственное поле-дата закрытия у Task (updatedAt в типе
+    // нет); status "done" + completedAt в окне — тот же признак, что у
+    // серверного doneLast7d, поэтому цифра не выдумана, а согласована с ним.
+    const closedThisWeek = tasks.filter(
+      (t) => t.status === "done" && t.completedAt !== null && new Date(t.completedAt).getTime() >= weekAgoMs,
+    ).length;
+    taskKpi = [
+      { label: "Открыто", value: String(openTasks.length) },
+      {
+        label: "Просрочено",
+        value: overdueCount === null ? "—" : String(overdueCount),
+        hot: (overdueCount ?? 0) > 0,
+      },
+      {
+        label: "Свободных (без исполнителя)",
+        value: String(unassignedCount),
+        hot: unassignedCount > 0,
+      },
+      { label: "Закрыто за неделю", value: String(closedThisWeek) },
+    ];
+  }
 
   if (domain === "vendhub") {
     // Тридцать календарных суток по Ташкенту, а не 720 часов от «сейчас»:
@@ -414,6 +498,200 @@ export default async function DomainPage({
     ]);
   }
 
+  // ── ACTIVITY (Обслуживание) целиком: мини-KPI + единая лента полевых
+  // событий трёх источников (mergeServiceFeed + адаптеры, Task 8). Каждый
+  // источник — свой Promise, провал одного (в т.ч. эндпоинтов, которых ещё
+  // может не быть на проде) не роняет вкладку и не обнуляет чужие KPI/ленту —
+  // правило best-effort, как у остальных ленивых блоков этой страницы.
+  let serviceKpi: ServiceKpiTile[] = [];
+  let serviceFeed: ServiceFeedItem[] = [];
+  const SERVICE_ACTIONS: ServiceAction[] = [
+    { icon: "☕", title: "Пополнить кофе-точку", subtitle: "точка → бункеры подряд → веса · как в боте", href: "#coffee" },
+    { icon: "🍫", title: "Пополнить снек-точку", subtitle: "точка → спирали → количества", href: "#snack" },
+    { icon: "💵", title: "Инкассация", subtitle: "автомат → сумма · весь парк, не только рабочие", href: "#cash" },
+  ];
+  if (domain === "vendhub" && activeGroup === "service") {
+    let recentRefills: Awaited<ReturnType<typeof core.recentCoffeeRefills>> | null = null;
+    let bunkerConfig: Awaited<ReturnType<typeof core.coffeeBunkerConfig>> | null = null;
+    let fillStatus: Awaited<ReturnType<typeof core.coffeeFillStatus>> | null = null;
+    let serviceDeficit: Awaited<ReturnType<typeof core.vendingDeficit>> | null = null;
+    let refillRows: Awaited<ReturnType<typeof core.vendingRefillList>> | null = null;
+    let collRows: Awaited<ReturnType<typeof core.collections>> | null = null;
+    [recentRefills, bunkerConfig, fillStatus, serviceDeficit, refillRows, collRows] = await Promise.all([
+      // Лимит 200 — потолок эндпоинта (coffee.controller.ts: Math.min(Math.max(limit,1),200)).
+      // Одна и та же выборка кормит и счётчик «сегодня», и ленту — ленту резать
+      // отдельно не нужно, mergeServiceFeed сам ограничивает итог 50 строками
+      // (Task 9 ревью, находка 2: на лимите 50 «сегодня» молча недосчитывало
+      // дни с активной заливкой более чем на 50 бункеров).
+      core.recentCoffeeRefills(COFFEE_REFILL_LIMIT).catch(() => null),
+      core.coffeeBunkerConfig().catch(() => null),
+      core.coffeeFillStatus().catch(() => null),
+      core.vendingDeficit().catch(() => null),
+      core.vendingRefillList(100).catch(() => null),
+      core.collections({ days: "365" }).catch(() => null),
+    ]);
+
+    // «Залито сегодня» — заливки кофе-бункеров, день createdAt по Ташкенту
+    // совпадает с сегодняшним (тот же todayKey, что у GLOBERENT ниже).
+    const filledToday =
+      recentRefills === null
+        ? null
+        : recentRefills.filter(
+            (r) => new Date(r.createdAt).toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" }) === todayKey,
+          ).length;
+    // Пришло ровно столько строк, сколько разрешает эндпоинт, — значит за
+    // сегодня могло быть больше, чем видно в этой выборке (более старые
+    // заливки сегодняшнего дня уже могли не поместиться). Честная оговорка
+    // вместо тихого недосчёта (Task 9 ревью, находка 2).
+    const filledTodayCapped = recentRefills !== null && recentRefills.length === COFFEE_REFILL_LIMIT;
+
+    // «Точек ждёт визита» — уникальные точки со status="underfill". Пустой
+    // ответ ИЛИ ответ, где ни для одной точки эталон не задан (весь список —
+    // status="unknown"), — это не «недолива нет нигде», а «нечего сравнивать»:
+    // плитка тогда показывает «—», а не обманчивый ноль.
+    const hasAnyTarget = fillStatus !== null && fillStatus.some((r) => r.status !== "unknown");
+    const underfillLocations = fillStatus === null || !hasAnyTarget
+      ? null
+      : new Set(fillStatus.filter((r) => r.status === "underfill").map((r) => r.locationId)).size;
+    const waitingVisitsFoot =
+      fillStatus === null ? "нет данных" : !hasAnyTarget ? "эталоны не заданы" : "уникальных точек с недоливом";
+
+    const emptySpirals = serviceDeficit === null ? null : serviceDeficit.length;
+
+    // «Деньги не сняты» — максимум receivedAt по принятым инкассациям за год;
+    // источник пустой (но живой) — «ни разу», источник недоступен — «—».
+    const lastReceivedAt = (collRows ?? []).reduce<string | null>((max, c) => {
+      if (c.status !== "received" || !c.receivedAt) return max;
+      return max === null || new Date(c.receivedAt).getTime() > new Date(max).getTime() ? c.receivedAt : max;
+    }, null);
+    const moneyValue =
+      collRows === null ? "—" : lastReceivedAt === null ? "ни разу" : `с ${shortRuDate(lastReceivedAt)}`;
+
+    serviceKpi = [
+      {
+        label: "Залито сегодня",
+        value: filledToday === null ? "—" : `${filledToday} ${plural(filledToday, "бункер", "бункера", "бункеров")}`,
+        foot:
+          recentRefills === null
+            ? "нет данных"
+            : filledTodayCapped
+              ? `за сегодня, до ${COFFEE_REFILL_LIMIT} записей`
+              : "заливок кофе-бункеров сегодня",
+      },
+      {
+        label: "Точек ждёт визита",
+        value: underfillLocations === null ? "—" : String(underfillLocations),
+        hot: (underfillLocations ?? 0) > 0,
+        foot: waitingVisitsFoot,
+      },
+      {
+        label: "Снек: пустые спирали",
+        value: emptySpirals === null ? "—" : String(emptySpirals),
+        hot: (emptySpirals ?? 0) > 0,
+        foot: serviceDeficit === null ? "нет данных" : "товаров нет ни в одном автомате",
+      },
+      {
+        label: "Деньги не сняты",
+        value: moneyValue,
+        foot: collRows === null ? "нет данных" : "дата последней принятой инкассации по парку",
+      },
+    ];
+
+    // Кофе → лента: имя ингредиента в строке заливки не хранится (только
+    // ingredientId) — резолвим по конфигу бункеров (Task 8 ревью, пункт 1).
+    const ingredientNameById = new Map<string, string>();
+    for (const b of bunkerConfig ?? []) ingredientNameById.set(b.ingredientId, b.ingredientName);
+    const coffeeFeedItems = (recentRefills ?? []).map((r) =>
+      coffeeRefillToFeed({
+        locationName: r.locationName,
+        position: r.position,
+        ingredientName: r.ingredientId ? (ingredientNameById.get(r.ingredientId) ?? null) : null,
+        filledWeight: r.filledWeight,
+        createdAt: r.createdAt,
+        createdBy: r.createdBy,
+      }),
+    );
+
+    // Снек → лента: /vending/refills отдаёт построчные записи по слоту, без
+    // группировки и без имени автомата — склеиваем сами в визиты (см. ниже)
+    // и резолвим имя по реестру (Task 8 ревью, пункт 3). Серийник приходит
+    // в форме Ourvend, карточка может хранить другую форму (mydon-stock) —
+    // сверяем через machineSerialKeys.
+    const machineNameBySerial = new Map<string, string>();
+    for (const m of machines) {
+      for (const key of machineSerialKeys(m.externalRef)) machineNameBySerial.set(key, m.name);
+    }
+    const resolveMachineName = (serial: string): string | null => {
+      for (const key of machineSerialKeys(serial)) {
+        const name = machineNameBySerial.get(key);
+        if (name) return name;
+      }
+      return null;
+    };
+    // Склейка по разрыву, а не по минутным корзинам: реальный визард в поле
+    // (точка → спирали подряд → количества) идёт МИНУТАМИ, и жёсткая минутная
+    // корзина рвёт один визит на несколько строк ленты, как только ответ
+    // техника растягивается дольше 60 секунд — performedAt на каждую строку
+    // ставит сервер в момент своего ответа, а не момент начала визита
+    // (Task 9 ревью, находка 1). Правило: строки одного автомата, отсортированные
+    // по performedAt, — один визит, пока разрыв между СОСЕДНИМИ строками
+    // не превышает 15 минут; больший разрыв — новый визит. ts визита —
+    // performedAt первой строки визита.
+    const VISIT_GAP_MS = 15 * 60_000;
+    const rowsByMachine = new Map<string, NonNullable<typeof refillRows>>();
+    for (const row of refillRows ?? []) {
+      const list = rowsByMachine.get(row.machineSerial);
+      if (list) list.push(row);
+      else rowsByMachine.set(row.machineSerial, [row]);
+    }
+    const vendingVisits: { machineSerial: string; createdAt: string; positions: number; units: number; createdBy: string | null }[] = [];
+    for (const [serial, rows] of rowsByMachine) {
+      const sorted = [...rows].sort(
+        (a, b) => new Date(a.performedAt).getTime() - new Date(b.performedAt).getTime(),
+      );
+      let current: (typeof vendingVisits)[number] | null = null;
+      let lastTs = 0;
+      for (const row of sorted) {
+        const ts = new Date(row.performedAt).getTime();
+        if (current && ts - lastTs <= VISIT_GAP_MS) {
+          current.positions += 1;
+          current.units += row.qty;
+        } else {
+          current = { machineSerial: serial, createdAt: row.performedAt, positions: 1, units: row.qty, createdBy: row.createdBy };
+          vendingVisits.push(current);
+        }
+        lastTs = ts;
+      }
+    }
+    const snackFeedItems = vendingVisits.map((g) =>
+      vendingRefillToFeed({
+        machineName: resolveMachineName(g.machineSerial),
+        createdAt: g.createdAt,
+        positions: g.positions,
+        units: g.units,
+        createdBy: g.createdBy,
+      }),
+    );
+
+    // Деньги → лента: та же выборка, что и KPI — приняли (с суммой) и ждут
+    // приёма (amount ещё null) идут в общую хронологию; отменённые сборы
+    // (ошибочная фиксация) в ленту не идут — иначе адаптер подпишет их «сумма
+    // не введена», как будто сбор ещё ждёт приёма (Task 8 ревью, пункт 2:
+    // amount строкой decimal, приводим к числу перед адаптером).
+    const cashFeedItems = (collRows ?? [])
+      .filter((c) => c.status !== "cancelled")
+      .map((c) =>
+        collectionToFeed({
+          machineName: c.machineName,
+          collectedAt: c.collectedAt,
+          amount: c.amount === null ? null : Number(c.amount),
+          operatorName: c.operatorName,
+        }),
+      );
+
+    serviceFeed = mergeServiceFeed([coffeeFeedItems, snackFeedItems, cashFeedItems]);
+  }
+
   // Хлебные крошки и чип маршрута (расположение из обложки): где я и как это
   // адресуется. Счётчик из подписи вкладки для крошки убираем — «Задачи 6» → «Задачи».
   const activeTab = topTabs.find((t) => t.key === activeGroup);
@@ -526,18 +804,24 @@ export default async function DomainPage({
         </div>
       )}
 
-      {/* ── Обслуживание: временная сборка старых операционных панелей (до PR3) ── */}
+      {/* ── ACTIVITY: KPI + действия + единая лента (Task 9), формы ввода ниже под якорями ── */}
       {domain === "vendhub" && activeGroup === "service" && (
         <>
-          <div className="sect">
+          <ServiceTab
+            kpi={serviceKpi}
+            feed={serviceFeed}
+            actions={SERVICE_ACTIONS}
+            referenceHref={href("settings:package")}
+          />
+          <div className="sect" id="coffee" data-toc="Кофе">
             <div className="sect-h"><h3 className="h2">Кофе-бункеры</h3></div>
             <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />
           </div>
-          <div className="sect">
+          <div className="sect" id="snack" data-toc="Снек">
             <div className="sect-h"><h3 className="h2">Пополнение снека</h3></div>
             <VendingSupplyPanel />
           </div>
-          <div className="sect">
+          <div className="sect" id="cash" data-toc="Инкассация">
             <div className="sect-h"><h3 className="h2">Инкассация</h3></div>
             <CollectionsView />
           </div>
@@ -1102,19 +1386,31 @@ export default async function DomainPage({
       {group && leaf?.type === "purchase" && <PurchasesView />}
       {group && leaf?.type === "machine_stock" && <MachineStockView />}
 
-      {/* ── Товары: журнал как в ПО владельца — поиск, категории, незаполненные ── */}
-      {group && leaf?.type === "product" && (
-        <>
-          <ProductsBook
-            items={leafItems}
-            q={q ?? ""}
-            cat={cat ?? ""}
-            inc={inc === "1"}
-            hrefBase={`/domain/${domain}`}
-          />
-          <NewEntityForm domain={domain} type="product" label={typeOne("product")} />
-        </>
-      )}
+      {/* ── Товары: журнал как в ПО владельца — поиск, категории, незаполненные ──
+          Единый образец листа (§4): KPI сверху, «+ Запись» — в строке
+          действия. Поиск и подвкладки категорий остаются внутри ProductsBook —
+          у него уже есть своя GET-форма, второй ListShell не рисует. */}
+      {group && leaf?.type === "product" && (() => {
+        const incompleteCount = leafItems.filter(isIncomplete).length;
+        return (
+          <ListShell
+            kpi={[
+              { label: "Всего", value: String(leafItems.length) },
+              { label: "Незаполненные", value: String(incompleteCount), hot: incompleteCount > 0 },
+            ]}
+            action={<NewEntityForm domain={domain} type="product" label={typeOne("product")} />}
+            searchQ={q ?? ""}
+          >
+            <ProductsBook
+              items={leafItems}
+              q={q ?? ""}
+              cat={cat ?? ""}
+              inc={inc === "1"}
+              hrefBase={`/domain/${domain}`}
+            />
+          </ListShell>
+        );
+      })()}
 
       {/* ── Склад техники: конвейер 17 статусов (перенос PROMACH) ── */}
       {domain === "globerent" && activeGroup === "units" && (
@@ -1218,19 +1514,45 @@ export default async function DomainPage({
           <NewEntityForm domain={domain} type="invoice" label={typeOne("invoice")} />
         </>
       )}
-      {group && leaf?.type === "contractor" && (
-        <>
-          {leafItems.length > 0 ? (
-            <ContractorsBook items={leafItems} />
-          ) : (
-            <div className="empty">
-              <b>Контрагентов пока нет</b>
-              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
-            </div>
-          )}
-          <NewEntityForm domain={domain} type="contractor" label={typeOne("contractor")} />
-        </>
-      )}
+      {group && leaf?.type === "contractor" && (() => {
+        // «Оборот суммарно» — только если поле известно хоть у одной карточки
+        // листа (иначе плитка спорила бы с ContractorsBook, где та же сумма
+        // не показывается вовсе — см. `оборотОф` в globerent-books.tsx).
+        // Сумма реальна и когда поле известно не у всех (GLOBERENT: 6 из 226),
+        // поэтому не прячем плитку по правилу `every` — это лишило бы итога
+        // любой список, где хоть у одной карточки нет оборота. Вместо этого
+        // фут честно называет охват: «по N из M карточек», когда N < M.
+        const turnoverValues = leafItems
+          .map((e) => (e.attrs ?? {})["оборот по реестру"])
+          .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+        const withTurnover = turnoverValues.length;
+        const total = leafItems.length;
+        const kpi: ListShellKpi[] = [{ label: "Всего", value: String(total) }];
+        if (withTurnover > 0) {
+          const sum = turnoverValues.reduce((a, b) => a + b, 0);
+          kpi.push({
+            label: "Оборот суммарно",
+            value: `${sum.toLocaleString("ru-RU")} сум`,
+            ...(withTurnover < total ? { foot: `по ${withTurnover} из ${total} карточек` } : {}),
+          });
+        }
+        return (
+          <ListShell
+            kpi={kpi}
+            action={<NewEntityForm domain={domain} type="contractor" label={typeOne("contractor")} />}
+            searchQ=""
+          >
+            {leafItems.length > 0 ? (
+              <ContractorsBook items={leafItems} />
+            ) : (
+              <div className="empty">
+                <b>Контрагентов пока нет</b>
+                Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+              </div>
+            )}
+          </ListShell>
+        );
+      })()}
       {group && leaf?.type === "equipment" && (
         <>
           {leafItems.length > 0 ? (
@@ -1287,44 +1609,73 @@ export default async function DomainPage({
         );
       })()}
 
-      {/* ── Группа: записи выбранной подвкладки ── */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe"].includes(leaf.type) && (
-        <>
-          {leafItems.length > 0 ? (
-            <>
-              <div className="book">
-                <div className="th">
-                  <span>Название</span>
-                  <span>Код</span>
-                  <span style={{ textAlign: "right" }}>{leaf.type === "product" ? "Цена" : "Номер"}</span>
+      {/* ── Группа: записи выбранной подвкладки ── Единый образец листа (§4):
+          KPI сверху («Всего записей», «Не утверждено»), поиск по ?q= —
+          сервером, тем же приёмом, что у ProductsBook (подстрока имени,
+          регистронезависимо), форму рисует сам ListShell — у generic-книги
+          своей нет. Действует не только на VendHub: под этот рендер попадают
+          и generic-листы GLOBERENT (например «Таможенные посты»). */}
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe"].includes(leaf.type) && (() => {
+        const genericQuery = (q ?? "").trim().toLowerCase();
+        const shownItems = genericQuery
+          ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
+          : leafItems;
+        const notApproved = leafItems.filter((e) => e.approvedAt == null).length;
+        return (
+          <ListShell
+            kpi={[
+              { label: "Всего записей", value: String(leafItems.length) },
+              { label: "Не утверждено", value: String(notApproved), hot: notApproved > 0 },
+            ]}
+            action={<NewEntityForm domain={domain} type={leaf.type} label={typeOne(leaf.type)} />}
+            searchQ={q ?? ""}
+            searchHrefBase={`/domain/${domain}`}
+            searchTab={active}
+          >
+            {shownItems.length > 0 ? (
+              <>
+                <div className="book">
+                  <div className="th">
+                    <span>Название</span>
+                    <span>Код</span>
+                    <span style={{ textAlign: "right" }}>{leaf.type === "product" ? "Цена" : "Номер"}</span>
+                  </div>
+                  {shownItems.map((e) => {
+                    const price = (e.attrs ?? {})["цена"];
+                    return (
+                      <Link href={`/card/${e.id}`} className="tr" key={e.id}>
+                        <span className="nm">{e.name}</span>
+                        <span className="cd">{String((e.attrs ?? {})["ИКПУ"] ?? (e.attrs ?? {})["код"] ?? "")}</span>
+                        <span className="pr">
+                          {typeof price === "number"
+                            ? <>{Number(price).toLocaleString("ru-RU")} <span className="u">сум</span></>
+                            : (e.externalRef ?? "—")}
+                        </span>
+                      </Link>
+                    );
+                  })}
                 </div>
-                {leafItems.map((e) => {
-                  const price = (e.attrs ?? {})["цена"];
-                  return (
-                    <Link href={`/card/${e.id}`} className="tr" key={e.id}>
-                      <span className="nm">{e.name}</span>
-                      <span className="cd">{String((e.attrs ?? {})["ИКПУ"] ?? (e.attrs ?? {})["код"] ?? "")}</span>
-                      <span className="pr">
-                        {typeof price === "number"
-                          ? <>{Number(price).toLocaleString("ru-RU")} <span className="u">сум</span></>
-                          : (e.externalRef ?? "—")}
-                      </span>
-                    </Link>
-                  );
-                })}
+                <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
+                  {shownItems.length === leafItems.length
+                    ? `${leafItems.length} записей`
+                    : `${shownItems.length} из ${leafItems.length} записей`}
+                </p>
+              </>
+            ) : leafItems.length === 0 ? (
+              <div className="empty">
+                <b>{leaf.label}: данных пока нет</b>
+                Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО,
+                соберу всё разом.
               </div>
-              <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>{leafItems.length} записей</p>
-            </>
-          ) : (
-            <div className="empty">
-              <b>{leaf.label}: данных пока нет</b>
-              Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО,
-              соберу всё разом.
-            </div>
-          )}
-          <NewEntityForm domain={domain} type={leaf.type} label={typeOne(leaf.type)} />
-        </>
-      )}
+            ) : (
+              <div className="empty">
+                <b>Ничего не нашлось</b>
+                Поменяй запрос или сними фильтр.
+              </div>
+            )}
+          </ListShell>
+        );
+      })()}
       {group && !leaf?.type && (
         <div className="empty">
           <b>{leaf?.label}: данных пока нет</b>
@@ -1367,25 +1718,44 @@ export default async function DomainPage({
       )}
 
       {/* ── Задачи направления ── */}
-      {activeGroup === "tasks" &&
-        (openTasks.length === 0 ? (
-          <div className="empty">
-            <b>Открытых задач нет</b>
-            Задачи с этим направлением появятся здесь.
-          </div>
-        ) : (
-          <div>
-            {openTasks.map((t) => {
-              const late = t.due !== null && new Date(t.due).getTime() < Date.now();
-              return (
-                <Link href={`/tasks/${t.id}`} className={`trow ${late ? "hot" : ""}`} key={t.id}>
-                  <div className="tb"><div className="tt">{t.title}</div></div>
-                  <span className={`due ${late ? "hot" : ""}`}>{dueLabel(t.due)}</span>
-                </Link>
-              );
-            })}
-          </div>
-        ))}
+      {activeGroup === "tasks" && (
+        <>
+          {domain === "vendhub" && taskKpi.length > 0 && (
+            <div className="wgrid" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))", marginBottom: 14 }}>
+              {taskKpi.map((t) => (
+                <div key={t.label} className={`wt ${t.hot ? "is-hot" : ""}`}>
+                  <div className="wl">{t.label}</div>
+                  <div className="wv">{t.value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {openTasks.length === 0 ? (
+            <div className="empty">
+              <b>Открытых задач нет</b>
+              Задачи с этим направлением появятся здесь.
+            </div>
+          ) : (
+            <div>
+              {openTasks.map((t) => {
+                const late = t.due !== null && new Date(t.due).getTime() < Date.now();
+                const sourceLabel = taskSourceLabel(t.source);
+                // Синий вариант — только для автоматических источников (график/
+                // обслуживание): «владелец» — нейтральный чип, не подсвечивать
+                // ручной ввод как будто это автоматика.
+                const isAutoSource = sourceLabel !== "владелец";
+                return (
+                  <Link href={`/tasks/${t.id}`} className={`trow ${late ? "hot" : ""}`} key={t.id}>
+                    <div className="tb"><div className="tt">{t.title}</div></div>
+                    <span className={`chip ${isAutoSource ? "b" : ""}`}>{sourceLabel}</span>
+                    <span className={`due ${late ? "hot" : ""}`}>{dueLabel(t.due)}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
     </>
   );
 }
