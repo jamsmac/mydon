@@ -17,6 +17,7 @@ import {
   type VendingMachine,
 } from "../../../lib/core";
 import { MachineCard360 } from "../../../components/machine-card-360";
+import { ProductCard360 } from "../../../components/product-card-360";
 import { LocationPanel } from "../../../components/location-panel";
 import { BunkerTiles } from "../../../components/bunker-tiles";
 import {
@@ -545,6 +546,86 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     } catch {
       coffeeBunkers = [];
     }
+  }
+
+  // Карточка товара — своя вёрстка 360: разделы как у автомата, плюс рецепты.
+  // Рецептов у товара может быть НЕСКОЛЬКО одновременно (по вкусам), у каждого
+  // своя себестоимость — слово владельца 20.08.2026.
+  if (isProduct) {
+    const цена = (v: unknown): number | null => {
+      const n = typeof v === "number" ? v : Number(String(v ?? "").replace(",", "."));
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    return (
+      <>
+        <div className="page-head">
+          <Link
+            href={entity.domain ? `/domain/${entity.domain}?tab=catalog:product` : "/registry"}
+            className="back"
+          >
+            ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}
+          </Link>
+        </div>
+        <ProductCard360
+          entity={entity}
+          price={цена(a["цена продажи"]) ?? цена(a["цена"])}
+          purchasePrice={цена(a["цена покупки"])}
+          recipeCost={recipe ? recipe.total : null}
+          recipeLines={recipe ? recipe.lines.length : 0}
+          menusCount={productMenus.length}
+          slotsCount={productMachines.length}
+          salesCount={productSales ? productSales.total.qty : null}
+          photosCount={photos.length}
+          isRecipe={isRecipe}
+          slots={{
+            recipe:
+              isRecipe && recipe ? (
+                <RecipeEditor entity={{ id: entity.id }} ingredients={ingredients} recipe={recipe} />
+              ) : (
+                <div className="empty">
+                  <b>Рецепта нет</b>
+                  Это товар перепродажи — он приходит готовым. Рецепт нужен напиткам,
+                  которые аппарат готовит из ингредиентов.
+                </div>
+              ),
+            menus: (
+              <>
+                <ProductMenus rows={productMenus} />
+                <ProductMachines rows={productMachines} />
+              </>
+            ),
+            sales: (
+              <ProductSalesSection
+                sales={productSales}
+                days={90}
+                entityId={entity.id}
+                unmatched={unmatchedSales}
+              />
+            ),
+            passport: (
+              <>
+                <EntityApproval entity={entity} drafts={drafts} />
+                <PhotoGallery attachments={photos} />
+                <ProductFiscal attrs={a} />
+                <ProductEconomy
+                  attrs={a}
+                  recipeCost={recipe ? { total: recipe.total, unresolved: recipe.unresolved } : null}
+                />
+                <section id="fields">
+                  <EntityEditor entity={entity} />
+                </section>
+                <DeleteEntityButton
+                  id={entity.id}
+                  domain={entity.domain ?? null}
+                  type={entity.type}
+                  name={entity.name}
+                />
+              </>
+            ),
+          }}
+        />
+      </>
+    );
   }
 
   // Карточка автомата — своя вёрстка (образец «Карточка 360»): hero-шапка,
