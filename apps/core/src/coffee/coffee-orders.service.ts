@@ -1,7 +1,15 @@
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { coffeeOrder, entity } from "@mydon/db";
-import { machineSerialKeys, normalizeMachineSerial, orderIsCountable, orderIsDelivered } from "@mydon/shared";
+import {
+  machineSerialKeys,
+  normalizeMachineSerial,
+  orderIsCountable,
+  orderIsDelivered,
+  tashkentDayEnd,
+  tashkentDayStart,
+  tashkentInstant,
+} from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 
 /**
@@ -81,12 +89,14 @@ export class CoffeeOrdersService {
 
     const значения: (typeof coffeeOrder.$inferInsert)[] = [];
     for (const r of rows) {
-      const ts = new Date(r.ts);
-      if (!r.extId || !r.machineSerial || !r.goodsName || Number.isNaN(ts.getTime())) {
+      // Строка без зоны — ташкентские настенные часы, а НЕ часы процесса:
+      // `tashkentInstant` зашивает зону в код, а не полагается на `TZ` окружения.
+      const ts = tashkentInstant(r.ts);
+      if (!r.extId || !r.machineSerial || !r.goodsName || !ts) {
         итог.битыхСтрок += 1;
         continue;
       }
-      const brewed = r.brewedAt ? new Date(r.brewedAt) : null;
+      const brewed = r.brewedAt ? tashkentInstant(r.brewedAt) : null;
       // Сумма считается ДО правила: нулевая цена — признак бесплатной выдачи,
       // и правило обязано её видеть.
       const сумма = Number(r.amount ?? 0);
@@ -97,7 +107,7 @@ export class CoffeeOrdersService {
         extId: r.extId,
         source,
         ts,
-        brewedAt: brewed && !Number.isNaN(brewed.getTime()) ? brewed : null,
+        brewedAt: brewed,
         machineSerial: String(r.machineSerial).trim(),
         machineId,
         address: r.address ?? null,
@@ -166,13 +176,15 @@ export class CoffeeOrdersService {
   }> {
     const усл = [eq(coffeeOrder.countable, true)];
     // Голая дата «2026-08-01» — календарный день по Ташкенту, а не полночь UTC:
-    // new Date() на такой строке дал бы мгновение на пять часов раньше, и в
-    // сводку заезжал бы хвост чужих суток. Невалидная строка — ошибка запроса,
-    // а не «фильтр молча исчез» и не 500 из недр драйвера.
+    // голый new Date() на такой строке дал бы мгновение на пять часов раньше,
+    // и в сводку заезжал бы хвост чужих суток. Та же дыра — на строке со
+    // временем без зоны: её смысл иначе задавал бы TZ процесса, а не код
+    // (R-K8). Невалидная строка — ошибка запроса, а не «фильтр молча исчез»
+    // и не 500 из недр драйвера.
     const мгновение = (v: string, конецСуток: boolean): Date => {
       const голаяДата = /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
-      const d = new Date(голаяДата ? `${v.trim()}T${конецСуток ? "23:59:59.999" : "00:00:00"}+05:00` : v);
-      if (Number.isNaN(d.getTime())) throw new BadRequestException(`Дата не разобрана: «${v}»`);
+      const d = голаяДата ? (конецСуток ? tashkentDayEnd(v) : tashkentDayStart(v)) : tashkentInstant(v);
+      if (!d) throw new BadRequestException(`Дата не разобрана: «${v}»`);
       return d;
     };
     if (from) усл.push(gte(coffeeOrder.ts, мгновение(from, false)));
