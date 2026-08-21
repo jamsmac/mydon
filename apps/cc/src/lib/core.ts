@@ -643,6 +643,25 @@ export interface CashReconcileReport {
   note: string;
 }
 
+/**
+ * Строка реестра пробелов (срез К, задача 5): чего нельзя посчитать сейчас.
+ * Поля английские (R-K10) — модуль новый, соседей вроде `collections` с
+ * русскими ключами у него нет. Считается на чтении (R-K4): пустой список —
+ * хорошая новость, а не ошибка.
+ */
+export interface Gap {
+  /** Что именно нельзя посчитать. */
+  topic: string;
+  /** За какой период — если пробел привязан ко времени. */
+  period: { from: string; to: string } | null;
+  /** Каких данных не хватает — человеческим языком. */
+  missing: string;
+  /** Сколько стоит пробел, если это выразимо деньгами или штуками. */
+  scale: string | null;
+  /** Что сделать, чтобы закрылся. */
+  action: string;
+}
+
 // ── Склад техники GLOBERENT (перенос warehouse_vehicles PROMACH) ──
 
 export interface UnitReserveRow {
@@ -2398,6 +2417,12 @@ export const core = {
   /** Сверка кассы за период (R-K6): изъято по системе против сдано в банк (символ 0200), помесячно + разрывы. */
   cashReconcile: (from: string, to: string) =>
     get<CashReconcileReport>(`/finance/cash-reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+  /**
+   * Реестр пробелов (срез К, задача 5): что нельзя посчитать прямо сейчас,
+   * вычисляется на каждом чтении (R-K4) — пустой массив здесь означает, что
+   * всё, что можно посчитать, посчитано, а не что запрос сломан.
+   */
+  gaps: () => get<Gap[]>("/gaps"),
 
   // ── Источники (сырой слой) ──
   rawSources: () => get<{ sources: RawSourceState[] }>("/raw/sources"),
