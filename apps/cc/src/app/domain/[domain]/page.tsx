@@ -449,6 +449,16 @@ export default async function DomainPage({
         ).sort((a, b) => a.name.localeCompare(b.name, "ru"))
       : [];
 
+  // Ингредиенты (settings): бункерный конфиг — источник моста `entityId`
+  // (миграция 0059) для KPI «Связано с бункерами». null — эндпоинт недоступен
+  // (честное «нет данных»), не «связей нет». Пустой массив/entityId=null у всех
+  // строк (миграция ещё не на проде) — это НЕ провал запроса, а нормальный
+  // текущий ответ Core: KPI обязан посчитать 0, а не подменить его прочерком.
+  let bunkerConfig: CoffeeBunkerIngredient[] | null = null;
+  if (group && leaf?.type === "ingredient") {
+    bunkerConfig = await core.coffeeBunkerConfig().catch(() => null);
+  }
+
   // Справочник растаможки (ставки ТН ВЭД + БРВ) — живые таблицы Core, не реестр.
   let tnved: TnvedRate[] = [];
   let brv: BrvValue[] = [];
@@ -1467,6 +1477,97 @@ export default async function DomainPage({
         );
       })()}
 
+      {/* ── Ингредиенты: сырьё для рецептов кофе/снеков — цена (карточка) и
+          мост к бункерному реестру (миграция 0059, срез B). Единый образец
+          листа (§4): KPI сверху, поиск ?q= серверный (как у generic-ветки
+          ниже — у ингредиентов своей формы поиска нет), карточки-ссылки на
+          карточку 360 (Task 5). «Связано с бункерами» считает entity.id
+          среди НЕNULL entityId бункерного конфига — честный 0, когда мост ещё
+          не выкачен на прод (все entityId в ответе тогда null), а не выдумка. */}
+      {group && leaf?.type === "ingredient" && (() => {
+        const ingredientQuery = (q ?? "").trim().toLowerCase();
+        const shownIngredients = ingredientQuery
+          ? leafItems.filter((e) => e.name.toLowerCase().includes(ingredientQuery))
+          : leafItems;
+        const withPrice = leafItems.filter((e) => cardPrice(e.attrs) !== null).length;
+        const linkedIds = new Set(
+          (bunkerConfig ?? []).filter((b) => b.entityId !== null).map((b) => b.entityId as string),
+        );
+        const linkedCount = bunkerConfig === null ? null : leafItems.filter((e) => linkedIds.has(e.id)).length;
+        const kpi: ListShellKpi[] = [
+          { label: "Всего", value: String(leafItems.length) },
+          {
+            label: "С ценой",
+            value: String(withPrice),
+            foot: leafItems.length > 0 ? `из ${leafItems.length} карточек` : undefined,
+          },
+          {
+            label: "Связано с бункерами",
+            value: linkedCount === null ? "—" : String(linkedCount),
+            foot: bunkerConfig === null ? "нет данных" : "мост entityId · миграция 0059",
+          },
+        ];
+        return (
+          <ListShell
+            kpi={kpi}
+            action={<NewEntityForm domain={domain} type="ingredient" label={typeOne("ingredient")} />}
+            searchQ={q ?? ""}
+            searchHrefBase={`/domain/${domain}`}
+            searchTab={active}
+          >
+            {shownIngredients.length > 0 ? (
+              <>
+                <div className="book">
+                  <div className="th">
+                    <span>Ингредиент</span>
+                    <span>Цена в карточке</span>
+                    <span style={{ textAlign: "right" }}>Сум/г</span>
+                  </div>
+                  {shownIngredients.map((e) => {
+                    const price = cardPrice(e.attrs);
+                    const perGram = pricePerGram(e.attrs);
+                    const linked = linkedIds.has(e.id);
+                    return (
+                      <Link href={`/card/${e.id}`} className="tr" key={e.id}>
+                        <span className="nm">
+                          {e.name}
+                          {linked && (
+                            <span className="chip g" style={{ marginLeft: 8 }}>
+                              бункер
+                            </span>
+                          )}
+                        </span>
+                        <span className="cd">
+                          {price ? `${price.price.toLocaleString("ru-RU")} сум/${price.unit}` : "—"}
+                        </span>
+                        <span className="pr">
+                          {perGram !== null ? `${perGram.toLocaleString("ru-RU")} сум/г` : "—"}
+                        </span>
+                      </Link>
+                    );
+                  })}
+                </div>
+                <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
+                  {shownIngredients.length === leafItems.length
+                    ? `${leafItems.length} карточек`
+                    : `${shownIngredients.length} из ${leafItems.length} карточек`}
+                </p>
+              </>
+            ) : leafItems.length === 0 ? (
+              <div className="empty">
+                <b>Ингредиентов пока нет</b>
+                Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+              </div>
+            ) : (
+              <div className="empty">
+                <b>Ничего не нашлось</b>
+                Поменяй запрос или сними фильтр.
+              </div>
+            )}
+          </ListShell>
+        );
+      })()}
+
       {/* ── Склад техники: конвейер 17 статусов (перенос PROMACH) ── */}
       {domain === "globerent" && activeGroup === "units" && (
         <UnitsPanel units={units} summary={unitsSummary} clients={unitClients} />
@@ -1693,7 +1794,7 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
