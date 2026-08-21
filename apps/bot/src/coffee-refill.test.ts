@@ -764,6 +764,25 @@ describe("Двойная позиция: оператор выбирает ин�
     assert.equal(conversations.get(1)?.data.ingredientId ?? null, null, "выбор прошлой точки не переносится");
   });
 
+  it("мойка не расщепляет кнопку — ингредиент ей не нужен", async () => {
+    // Мойке всё равно, что в бункере: две одинаковые по смыслу кнопки на один
+    // физический бункер заставили бы техника на бегу гадать, какую жать.
+    const cfg = [
+      { position: 3, ingredientId: "чай", ingredientName: "Лимонный чай", packageWeight: 1000 },
+      { position: 3, ingredientId: МАТЧА, ingredientName: "Матча", packageWeight: 500 },
+    ];
+    const { core } = stubCore({ coffeeBunkerConfig: async () => cfg });
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    await startCoffeeWash(31, deps);
+    const шаг = await handleCoffeeWashCallback(31, { kind: "location", id: LOC }, ME, deps);
+    const кнопки = (шаг.message?.keyboard?.inline_keyboard ?? []).flat();
+    const третьи = кнопки.filter((b) => b.callback_data.startsWith("cw:pos:3"));
+    assert.equal(третьи.length, 1, "у мойки одна кнопка на позицию 3");
+    assert.equal(третьи[0]!.callback_data, "cw:pos:3", "без хвоста с ингредиентом");
+    assert.match(третьи[0]!.text, /Лимонный чай\/Матча/, "оба имени в одной подписи");
+  });
+
   it("однозначная позиция по-прежнему не требует выбора", async () => {
     const cfg = [{ position: 7, ingredientId: "кофе", ingredientName: "Кофе", packageWeight: 1000 }];
     let записано: Record<string, unknown> | null = null;
