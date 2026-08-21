@@ -183,7 +183,10 @@ function clusterJournalHoles(holes: readonly RawJournalHole[]): JournalHoleClust
 export function journalHoleGaps(intervals: readonly ИнтервалСверки[]): Gap[] {
   const holes = intervals
     .filter((iv) => iv.статус === "пробел в журнале")
-    .map((iv): RawJournalHole => ({ machineId: iv.machineId, from: iv.с.slice(0, 10), to: iv.по.slice(0, 10), expected: iv.ожидалось, collected: iv.изъято }));
+    // "пробел в журнале" и "ждёт приёма" взаимоисключающие статусы (см.
+    // CollectionsService.reconcile) — изъято здесь никогда не null, `?? 0`
+    // только защищает типы, а не реальный случай.
+    .map((iv): RawJournalHole => ({ machineId: iv.machineId, from: iv.с.slice(0, 10), to: iv.по.slice(0, 10), expected: iv.ожидалось, collected: iv.изъято ?? 0 }));
   if (holes.length === 0) return [];
   return clusterJournalHoles(holes).map((c) => ({
     topic: "инкассации: дыра в журнале",

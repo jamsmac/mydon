@@ -268,6 +268,106 @@ describe("FinanceService.importBankStatement — импорт выписки с 
   });
 });
 
+/**
+ * Преобразует имя колонки БД (snake_case) в ключ строки стаба (camelCase) —
+ * та же схема именования, что в packages/db.
+ */
+function toCamel(dbName: string): string {
+  return dbName.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+}
+
+type CondPart =
+  | { kind: "col"; name: string }
+  | { kind: "param"; value: unknown }
+  | { kind: "op"; text: string }
+  | { kind: "sql"; node: unknown };
+
+/**
+ * Оценивает drizzle-orm SQL-условие (`eq`/`ne`/`gte`/`lte`, объединённые
+ * `and()`) НА ОДНОЙ строке стаба — достаточно для условий, которые реально
+ * строит `FinanceService.cashReconcile` (не общий SQL-движок). В отличие от
+ * `conditionValues` выше (плоский список значений — годится только для
+ * поиска по extId), разбирает дерево `queryChunks` РЕКУРСИВНО и проверяет
+ * настоящее условие (колонка + оператор + значение на каждой строке), а не
+ * просто «встречается ли значение где-то в дереве». Ревью среза К («ОБЩЕЕ»):
+ * старый стаб этого блока подменял `.where()` целиком и не проверял фильтры
+ * вовсе — не отличил бы «фильтр есть» от «фильтра нет».
+ */
+function evalDrizzleCondition(node: unknown, row: Row): boolean {
+  if (node == null || typeof node !== "object") return true;
+  const chunks = (node as { queryChunks?: unknown[] }).queryChunks;
+  if (!Array.isArray(chunks)) return true;
+
+  const parts: CondPart[] = [];
+  for (const c of chunks) {
+    const ctor = (c as { constructor?: { name?: string } })?.constructor?.name;
+    if (ctor === "StringChunk") {
+      const raw = (c as { value: unknown }).value;
+      const text = (Array.isArray(raw) ? raw.join("") : String(raw ?? "")).trim();
+      if (text && text !== "(" && text !== ")") parts.push({ kind: "op", text });
+    } else if (ctor === "Param") {
+      parts.push({ kind: "param", value: (c as { value: unknown }).value });
+    } else if ((c as { table?: unknown }).table && (c as { name?: unknown }).name) {
+      parts.push({ kind: "col", name: toCamel((c as { name: string }).name) });
+    } else if (Array.isArray((c as { queryChunks?: unknown[] }).queryChunks)) {
+      parts.push({ kind: "sql", node: c });
+    }
+  }
+
+  const sqlParts = parts.filter((p): p is Extract<CondPart, { kind: "sql" }> => p.kind === "sql");
+  if (parts.some((p) => p.kind === "op" && p.text === "and")) {
+    return sqlParts.every((p) => evalDrizzleCondition(p.node, row));
+  }
+  if (parts.some((p) => p.kind === "op" && p.text === "or")) {
+    return sqlParts.some((p) => evalDrizzleCondition(p.node, row));
+  }
+  if (sqlParts.length === 1 && parts.every((p) => p.kind === "sql")) {
+    return evalDrizzleCondition(sqlParts[0]!.node, row); // одиночная обёртка and()/скобки
+  }
+
+  const col = parts.find((p): p is Extract<CondPart, { kind: "col" }> => p.kind === "col");
+  const op = parts.find((p): p is Extract<CondPart, { kind: "op" }> => p.kind === "op");
+  if (!col || !op) return true; // не похоже на предикат сравнения — не мешаем
+
+  const paramPart = parts.find((p): p is Extract<CondPart, { kind: "param" }> => p.kind === "param");
+  const norm = (v: unknown): unknown => (v instanceof Date ? v.getTime() : v);
+  const rowValue = norm(row[col.name]);
+  const paramValue = norm(paramPart?.value);
+
+  switch (op.text) {
+    case "is not null":
+      return row[col.name] !== null && row[col.name] !== undefined;
+    case "is null":
+      return row[col.name] === null || row[col.name] === undefined;
+    case "=":
+      return rowValue === paramValue;
+    case "<>":
+      return rowValue !== paramValue;
+    case ">=":
+      return (rowValue as number) >= (paramValue as number);
+    case "<=":
+      return (rowValue as number) <= (paramValue as number);
+    default:
+      return true;
+  }
+}
+
+/** Стаб БД для cashReconcile — `.where()` РЕАЛЬНО фильтрует по условию (см. evalDrizzleCondition), не подменяется целиком. */
+function reconcileDb(seed: { collections?: Row[]; moneyFlows?: Row[] }) {
+  const tables = new Map<unknown, Row[]>([
+    [collection, seed.collections ?? []],
+    [moneyFlow, seed.moneyFlows ?? []],
+  ]);
+  const db = {
+    select: (_cols?: unknown) => ({
+      from: (t: unknown) => ({
+        where: (cond?: unknown) => Promise.resolve((tables.get(t) ?? []).filter((r) => evalDrizzleCondition(cond, r))),
+      }),
+    }),
+  } as never;
+  return db;
+}
+
 describe("FinanceService.cashReconcile — изъято по системе vs сдано в банк (R-K6, срез К, задача 4)", () => {
   it("некорректный формат периода — отбивается до похода в базу", async () => {
     const svc = new FinanceService(db);
@@ -280,23 +380,64 @@ describe("FinanceService.cashReconcile — изъято по системе vs �
   });
 
   it("период без единой инкассации — hasWithdrawn: false, а не 0, сходящийся молча", async () => {
-    const db = {
-      select: (_cols?: unknown) => ({
-        from: (t: unknown) => ({
-          where: () =>
-            Promise.resolve(
-              t === collection
-                ? []
-                : [{ date: new Date("2026-06-12T00:00:00+05:00"), amount: "9000000" }],
-            ),
-        }),
+    const svc = new FinanceService(
+      reconcileDb({
+        collections: [],
+        moneyFlows: [{ date: new Date("2026-06-12T00:00:00+05:00"), amount: "9000000", cashSymbol: "0200", status: "actual" }],
       }),
-    } as never;
-    const svc = new FinanceService(db);
+    );
     const report = await svc.cashReconcile("2026-06-01", "2026-06-30");
     assert.equal(report.hasWithdrawn, false);
     assert.equal(report.hasDeposited, true);
     assert.equal(report.deposited, 9000000);
     assert.equal(report.periods[0]!.status, "noWithdrawn");
+  });
+
+  it("НАСТОЯЩЕЕ условие: отменённая инкассация — не идёт в изъято (ne(status,'cancelled') реально проверяется на строке)", async () => {
+    const svc = new FinanceService(
+      reconcileDb({
+        collections: [
+          { machineId: "m1", collectedAt: new Date("2026-06-05T10:00:00+05:00"), amount: "100000", status: "received" },
+          { machineId: "m1", collectedAt: new Date("2026-06-06T10:00:00+05:00"), amount: "999999", status: "cancelled" },
+        ],
+      }),
+    );
+    const report = await svc.cashReconcile("2026-06-01", "2026-06-30");
+    assert.equal(report.withdrawn, 100000, "отменённая инкассация не должна попасть в сумму");
+    assert.equal(report.withdrawnCount, 1);
+  });
+
+  it("НАСТОЯЩЕЕ условие: инкассация вне [from, to] по collectedAt — не попадает (gte/lte реально проверяются)", async () => {
+    const svc = new FinanceService(
+      reconcileDb({
+        collections: [
+          { machineId: "m1", collectedAt: new Date("2026-05-31T10:00:00+05:00"), amount: "1", status: "received" },
+          { machineId: "m1", collectedAt: new Date("2026-06-15T10:00:00+05:00"), amount: "100000", status: "received" },
+          { machineId: "m1", collectedAt: new Date("2026-07-01T10:00:00+05:00"), amount: "1", status: "received" },
+        ],
+      }),
+    );
+    const report = await svc.cashReconcile("2026-06-01", "2026-06-30");
+    assert.equal(report.withdrawn, 100000);
+    assert.equal(report.withdrawnCount, 1);
+  });
+
+  it("ждущая приёма инкассация (amount=null) БОЛЬШЕ НЕ отфильтровывается запросом — доходит до математики как «ждёт приёма», не как «инкассаций не было» (фикс 1.2, симптом 3)", async () => {
+    const svc = new FinanceService(
+      reconcileDb({
+        collections: [
+          { machineId: "m1", collectedAt: new Date("2026-06-05T10:00:00+05:00"), amount: null, status: "collected" },
+        ],
+        moneyFlows: [{ date: new Date("2026-06-12T00:00:00+05:00"), amount: "9000000", cashSymbol: "0200", status: "actual" }],
+      }),
+    );
+    const report = await svc.cashReconcile("2026-06-01", "2026-06-30");
+    // ДО фикса запрос отбивал строку с amount=null (`amount is not null`), и
+    // месяц читался бы как noWithdrawn («инкассаций нет вовсе») — теперь это
+    // pendingReceipt: инкассация БЫЛА, просто сумма ещё не введена.
+    assert.equal(report.periods[0]!.status, "pendingReceipt");
+    assert.equal(report.periods[0]!.withdrawnPending, 1);
+    assert.equal(report.withdrawnPendingCount, 1);
+    assert.equal(report.hasWithdrawn, true, "хоть одна инкассация в периоде БЫЛА — это не «данных нет»");
   });
 });

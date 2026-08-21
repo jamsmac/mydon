@@ -292,6 +292,71 @@ describe("Сверка по автоматам (R-K11)", () => {
   });
 });
 
+describe("Сверка: состояние «ждёт приёма» не читается как недостача (ревью 1.2)", () => {
+  it("intervals: инкассация, ЗАКРЫВАЮЩАЯ период, ещё не принята (amount=null) — изъято/разница/доля null, статус «ждёт приёма», а не изъято 0/разница -ожидалось", async () => {
+    const at = (d: string) => new Date(`${d}T10:00:00+05:00`);
+    const db = stubReconcile({
+      entities: [{ id: "m1", name: "Автомат 1" }],
+      intervals: [
+        { id: "ivPending", machineId: "m1", prev: at("2026-04-01"), collectedAt: at("2026-04-05"), amount: null, expected: "40000" },
+      ],
+    });
+    const s = new CollectionsService(db);
+    const r = await s.reconcile("2026-04-01", "2026-04-30");
+
+    const iv = r.intervals.find((i) => i.id === "ivPending")!;
+    // ДО фикса: Number(null) === 0 → изъято 0, разница -40000, доля -100% —
+    // ложное обвинение в недостаче в штатном окне 2–7 дней между сбором и приёмом.
+    assert.equal(iv.изъято, null, "сумма ещё не известна — не 0");
+    assert.equal(iv.разница, null, "делить не на что, раз само изъятое неизвестно");
+    assert.equal(iv.доля, null);
+    assert.equal(iv.статус, "ждёт приёма");
+    assert.equal(iv.ожидалось, 40000, "ожидание всё равно посчитано — не пропадает вместе с изъятым");
+  });
+
+  it("rows: у автомата ВСЕ сборы периода ждут приёма — инкассаций считается верно (2, не 0), статус «ждёт приёма», а не «инкассаций нет вовсе»", async () => {
+    const at = (d: string) => new Date(`${d}T10:00:00+05:00`);
+    const db = stubReconcile({
+      collections: [
+        { machineId: "m1", collectedAt: at("2026-04-10"), receivedAt: null, amount: null },
+        { machineId: "m1", collectedAt: at("2026-04-20"), receivedAt: null, amount: null },
+      ],
+      coffeeOrders: [{ machineId: "m1", ts: at("2026-04-05"), amount: "70000", res: "cash" }],
+      entities: [{ id: "m1", name: "Автомат 1" }],
+    });
+    const s = new CollectionsService(db);
+    const r = await s.reconcile("2026-04-01", "2026-04-30");
+
+    const row = r.rows.find((x) => x.machineId === "m1")!;
+    assert.equal(row.выручка, 70000);
+    assert.equal(row.изъято, 0, "сумма пока неизвестна — 0, но статус объясняет почему, это не недостача");
+    assert.equal(row.инкассаций, 2, "ДО фикса continue пропускал amount=null и давал 0 — ложное «инкассаций нет вовсе»");
+    assert.equal(row.статус, "ждёт приёма");
+    assert.equal(r.итог.автоматов, 0, "«ждёт приёма» — вне итога, как и другие небычные статусы");
+    assert.equal(r.внеИтога.автоматов, 1);
+  });
+
+  it("rows: смесь принятых и ждущих приёма в одном окне — изъято считает ТОЛЬКО принятое, инкассаций — оба, статус «обычный»", async () => {
+    const at = (d: string) => new Date(`${d}T10:00:00+05:00`);
+    const db = stubReconcile({
+      collections: [
+        { machineId: "m1", collectedAt: at("2026-04-05"), receivedAt: at("2026-04-08"), amount: "60000" },
+        { machineId: "m1", collectedAt: at("2026-04-20"), receivedAt: null, amount: null },
+      ],
+      coffeeOrders: [{ machineId: "m1", ts: at("2026-04-03"), amount: "60000", res: "cash" }],
+      entities: [{ id: "m1", name: "Автомат 1" }],
+    });
+    const s = new CollectionsService(db);
+    const r = await s.reconcile("2026-04-01", "2026-04-30");
+
+    const row = r.rows.find((x) => x.machineId === "m1")!;
+    assert.equal(row.изъято, 60000, "ждущая приёма инкассация не считается нулём внутри суммы принятых");
+    assert.equal(row.инкассаций, 2, "оба сбора периода посчитаны, даже если один ещё не принят");
+    assert.equal(row.статус, "обычный", "есть хотя бы один ПРИНЯТЫЙ сбор — это не «всё ждёт приёма»");
+    assert.equal(r.итог.автоматов, 1, "обычная строка — в итоге");
+  });
+});
+
 describe("Сверка: итог не искажается пробелом ввода (фикс — 3 снек-автомата, 17 061 000)", () => {
   it("автомат с выручкой и нулём инкассаций исключён из итога, но виден во внеИтога", async () => {
     // Ровно ситуация с прода: American Hospital · snack — продажи есть,

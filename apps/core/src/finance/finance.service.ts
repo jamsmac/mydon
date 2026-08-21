@@ -519,6 +519,14 @@ export class FinanceService {
    * `cashSymbol = '0200'`, по дате операции). Математика — чистая функция
    * `cashReconcile` (`finance.math.ts`): периоды помесячно, разрыв — там, где
    * ровно ОДНА сторона пуста (факт 9 плана среза К).
+   *
+   * `amount is not null` здесь БЫЛ фильтром запроса — и это ровно тот баг из
+   * ревью 1.2 (симптом 3): месяц, где инкассации ЕСТЬ, но ВСЕ ещё «ждут
+   * приёма» (сумма не введена), терял их из выборки целиком и кодировался как
+   * `noWithdrawn` («инкассаций нет вовсе») на здоровой системе. Фильтр снят —
+   * инкассации с `amount = null` идут в `cashReconcileMath` как есть (`amount:
+   * null`), а различать «не собирали» от «собрали, но не приняли» — забота
+   * чистой функции (см. `CashMovement`/`pendingReceipt`).
    */
   async cashReconcile(from: string, to: string): Promise<CashReconcileReport> {
     if (!FinanceService.ДАТА_RE.test(from) || !FinanceService.ДАТА_RE.test(to)) {
@@ -537,7 +545,6 @@ export class FinanceService {
         .where(
           and(
             ne(collection.status, "cancelled"),
-            sql`${collection.amount} is not null`,
             gte(collection.collectedAt, fromTs),
             lte(collection.collectedAt, toTs),
           ),
@@ -549,7 +556,7 @@ export class FinanceService {
     ]);
 
     return cashReconcileMath(
-      collections.map((c) => ({ date: c.collectedAt, amount: Number(c.amount) })),
+      collections.map((c) => ({ date: c.collectedAt, amount: c.amount !== null ? Number(c.amount) : null })),
       deposits.map((d) => ({ date: d.date, amount: Number(d.amount) })),
       from,
       to,

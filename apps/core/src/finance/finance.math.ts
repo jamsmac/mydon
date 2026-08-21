@@ -313,10 +313,16 @@ export function byMonth(rows: FlowForMath[], tz: string, months = 12): MonthCash
 
 /* ── Сверка кассы: изъято по системе vs сдано в банк (срез К, задача 4, R-K6) ── */
 
-/** Одно денежное событие для сверки: сумма и дата, откуда бы она ни пришла. */
+/**
+ * Одно денежное событие для сверки: сумма и дата, откуда бы она ни пришла.
+ * `amount: null` — сумма ещё НЕ ИЗВЕСТНА (инкассация «ждёт приёма», этап 2 не
+ * пройден): штатное окно 2–7 дней между сбором и приёмом, а не 0 изъятых
+ * денег. Депозиты банка такого состояния не знают (в выписке сумма есть
+ * всегда) — null здесь имеет смысл только для изъятий/инкассаций.
+ */
 export interface CashMovement {
   date: string | Date;
-  amount: number;
+  amount: number | null;
 }
 
 /**
@@ -327,8 +333,12 @@ export interface CashMovement {
 export interface CashReconcilePeriod {
   /** YYYY-MM. */
   period: string;
+  /** Сумма ТОЛЬКО известных (принятых) изъятий — ждущие приёма в неё не входят. */
   withdrawn: number;
+  /** Число ПРИНЯТЫХ инкассаций месяца — ждущие приёма не входят (см. `withdrawnPending`). */
   withdrawnCount: number;
+  /** Инкассаций месяца, ждущих приёма (сумма ещё не известна) — не входят ни в `withdrawn`, ни в `withdrawnCount`. */
+  withdrawnPending: number;
   deposited: number;
   depositedCount: number;
   /** `deposited − withdrawn`. */
@@ -337,16 +347,24 @@ export interface CashReconcilePeriod {
    * `ok` — данные есть с обеих сторон; `empty` — операций не было ни с одной
    * (тихий месяц, а не разрыв); `noWithdrawn`/`noDeposit` — ровно ОДНА сторона
    * пуста — это и есть разрыв (факт 9 плана среза К), стоящий внимания.
+   * `pendingReceipt` — заменяет `noWithdrawn`, когда `withdrawnCount = 0`
+   * только потому, что ВСЕ инкассации месяца ждут приёма: отсутствие суммы —
+   * не отсутствие инкассации (срез К, ревью 1.2, симптом 3), поэтому в `gaps`
+   * такой месяц не попадает.
    */
-  status: "ok" | "empty" | "noWithdrawn" | "noDeposit";
+  status: "ok" | "empty" | "noWithdrawn" | "noDeposit" | "pendingReceipt";
 }
 
 export interface CashReconcileReport {
   from: string;
   to: string;
+  /** Сумма ТОЛЬКО известных (принятых) изъятий за весь период. */
   withdrawn: number;
+  /** Число ПРИНЯТЫХ инкассаций за период — ждущие приёма считаются отдельно в `withdrawnPendingCount`. */
   withdrawnCount: number;
-  /** `false` — за весь период не было ни одной инкассации: `withdrawn: 0` тогда — не факт сходимости, а отсутствие данных. */
+  /** Инкассаций за весь период, ждущих приёма (сумма неизвестна) — не входят в `withdrawn`/`withdrawnCount`. */
+  withdrawnPendingCount: number;
+  /** `false` — за весь период не было ни одной инкассации (ни принятой, ни ждущей): `withdrawn: 0` тогда — не факт сходимости, а отсутствие данных. */
   hasWithdrawn: boolean;
   deposited: number;
   depositedCount: number;
@@ -429,13 +447,23 @@ export function cashReconcile(
   const w = withdrawals.filter((x) => inRange(x.date));
   const dep = deposits.filter((x) => inRange(x.date));
 
-  const byMonth = (rows: readonly CashMovement[]): Map<string, { sum: number; count: number }> => {
-    const map = new Map<string, { sum: number; count: number }>();
+  /**
+   * `amount: null` (ждёт приёма) считается ОТДЕЛЬНО от известной суммы:
+   * попадание в `pendingCount`, а не молчаливый вклад нуля в `sum`/`count` —
+   * иначе месяц, где инкассации ЕСТЬ, но все ждут приёма, читался бы как
+   * «инкассаций не было вовсе» (срез К, ревью 1.2, симптом 3).
+   */
+  const byMonth = (rows: readonly CashMovement[]): Map<string, { sum: number; count: number; pendingCount: number }> => {
+    const map = new Map<string, { sum: number; count: number; pendingCount: number }>();
     for (const x of rows) {
       const month = dayKey(x.date, tz).slice(0, 7);
-      const e = map.get(month) ?? { sum: 0, count: 0 };
-      e.sum += x.amount;
-      e.count += 1;
+      const e = map.get(month) ?? { sum: 0, count: 0, pendingCount: 0 };
+      if (x.amount === null) {
+        e.pendingCount += 1;
+      } else {
+        e.sum += x.amount;
+        e.count += 1;
+      }
       map.set(month, e);
     }
     return map;
@@ -444,20 +472,23 @@ export function cashReconcile(
   const depByMonth = byMonth(dep);
 
   const periods: CashReconcilePeriod[] = monthRange(from, to).map((month) => {
-    const wm = wByMonth.get(month) ?? { sum: 0, count: 0 };
-    const dm = depByMonth.get(month) ?? { sum: 0, count: 0 };
+    const wm = wByMonth.get(month) ?? { sum: 0, count: 0, pendingCount: 0 };
+    const dm = depByMonth.get(month) ?? { sum: 0, count: 0, pendingCount: 0 };
     const status: CashReconcilePeriod["status"] =
-      wm.count === 0 && dm.count === 0
-        ? "empty"
-        : wm.count === 0
-          ? "noWithdrawn"
-          : dm.count === 0
-            ? "noDeposit"
-            : "ok";
+      wm.count === 0 && wm.pendingCount > 0
+        ? "pendingReceipt"
+        : wm.count === 0 && dm.count === 0
+          ? "empty"
+          : wm.count === 0
+            ? "noWithdrawn"
+            : dm.count === 0
+              ? "noDeposit"
+              : "ok";
     return {
       period: month,
       withdrawn: Math.round(wm.sum),
       withdrawnCount: wm.count,
+      withdrawnPending: wm.pendingCount,
       deposited: Math.round(dm.sum),
       depositedCount: dm.count,
       diff: Math.round(dm.sum - wm.sum),
@@ -465,14 +496,16 @@ export function cashReconcile(
     };
   });
 
-  const withdrawn = Math.round(w.reduce((s, x) => s + x.amount, 0));
-  const deposited = Math.round(dep.reduce((s, x) => s + x.amount, 0));
+  const wKnown = w.filter((x): x is { date: string | Date; amount: number } => x.amount !== null);
+  const withdrawn = Math.round(wKnown.reduce((s, x) => s + x.amount, 0));
+  const deposited = Math.round(dep.reduce((s, x) => s + (x.amount ?? 0), 0));
 
   return {
     from,
     to,
     withdrawn,
-    withdrawnCount: w.length,
+    withdrawnCount: wKnown.length,
+    withdrawnPendingCount: w.length - wKnown.length,
     hasWithdrawn: w.length > 0,
     deposited,
     depositedCount: dep.length,

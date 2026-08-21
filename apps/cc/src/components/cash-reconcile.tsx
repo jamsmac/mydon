@@ -20,12 +20,14 @@ const ROW_STATUS_LABEL: Record<ReconcileRow["статус"], string> = {
   обычный: "обычный",
   "инкассаций нет вовсе": "инкассаций нет вовсе — пробел ввода, не недостача",
   "выручки нет": "выручки нет — пробел данных о продажах",
+  "ждёт приёма": "все сборы периода ждут приёма — сумма ещё не введена, не недостача",
 };
 
 /** Статус периода между сборами (R-K11) — «пробел в журнале» доказан на 14 живых окнах (факт 11), это дисциплина ввода, не воровство. */
 const INTERVAL_STATUS_LABEL: Record<ReconcileInterval["статус"], string> = {
   обычный: "обычный",
   "пробел в журнале": "пробел в журнале — сборы шли, в систему не внесли",
+  "ждёт приёма": "ждёт приёма — сумма сбора ещё не введена (этап 2 не пройден)",
 };
 
 /** Статус календарного месяца сверки с банком (R-K6) — признак ДАННЫХ, не разница. */
@@ -34,6 +36,7 @@ const PERIOD_STATUS_LABEL: Record<CashReconcilePeriod["status"], string> = {
   empty: "тихий месяц — операций не было",
   noWithdrawn: "банк принял взнос, инкассаций в системе нет",
   noDeposit: "инкассации есть, взноса в банке не видно",
+  pendingReceipt: "инкассации есть, все ждут приёма — сумма ещё не введена",
 };
 
 function fmtMonth(period: string): string {
@@ -273,11 +276,11 @@ export function CashReconcile({
                           {iv.дней} {plural(Math.round(iv.дней), "день", "дня", "дней")}
                         </span>
                         <span>ожидалось {money(iv.ожидалось)}</span>
-                        <span>изъято {money(iv.изъято)}</span>
+                        <span>изъято {iv.изъято === null ? "ждёт приёма" : money(iv.изъято)}</span>
                         {!isNormal && <span className="chip b">{INTERVAL_STATUS_LABEL[iv.статус]}</span>}
                       </div>
                     </div>
-                    <span className="due">{money(iv.разница)}</span>
+                    <span className="due">{iv.разница === null ? "—" : money(iv.разница)}</span>
                   </div>
                 );
               })}
@@ -307,6 +310,8 @@ export function CashReconcile({
               <div className="foot">
                 <span className="mk" />
                 {cash.withdrawnCount} {plural(cash.withdrawnCount, "запись", "записи", "записей")}
+                {cash.withdrawnPendingCount > 0 &&
+                  ` · ещё ${cash.withdrawnPendingCount} ${plural(cash.withdrawnPendingCount, "ждёт", "ждут", "ждут")} приёма`}
               </div>
             </div>
             <div className={`tile ${!cash.hasDeposited ? "zero" : ""}`}>
@@ -329,7 +334,8 @@ export function CashReconcile({
                   <div className="tt">{fmtMonth(p.period)}</div>
                   <div className="tm">
                     <span>
-                      изъято {money(p.withdrawn)} ({p.withdrawnCount})
+                      изъято {money(p.withdrawn)} ({p.withdrawnCount}
+                      {p.withdrawnPending > 0 ? `, ждут приёма: ${p.withdrawnPending}` : ""})
                     </span>
                     <span>
                       сдано {money(p.deposited)} ({p.depositedCount})

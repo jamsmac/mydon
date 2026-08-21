@@ -402,4 +402,61 @@ describe("cashReconcile — изъято по системе vs сдано в б
     assert.equal(r.diff, -20000);
     assert.equal(r.periods.length, 2);
   });
+
+  describe("amount: null — «ждёт приёма» не равно 0 (срез К, ревью 1.2, симптом 3)", () => {
+    it("месяц, где ВСЕ инкассации ждут приёма — статус pendingReceipt, а не noWithdrawn, и не попадает в gaps", () => {
+      const r = cashReconcile(
+        [
+          { date: "2026-06-05T10:00:00+05:00", amount: null },
+          { date: "2026-06-20T10:00:00+05:00", amount: null },
+        ],
+        [{ date: "2026-06-12T10:00:00+05:00", amount: 90000 }],
+        "2026-06-01",
+        "2026-06-30",
+        TZ,
+      );
+      assert.equal(r.withdrawn, 0, "сумма пока неизвестна — не 0-как-недостача, а «неизвестно»");
+      assert.equal(r.withdrawnCount, 0);
+      assert.equal(r.hasWithdrawn, true, "инкассации БЫЛИ — это не «данных нет вовсе»");
+      assert.equal(r.withdrawnPendingCount, 2);
+      assert.equal(r.periods[0]!.status, "pendingReceipt");
+      assert.equal(r.periods[0]!.withdrawnPending, 2);
+      assert.deepEqual(r.gaps, [], "pendingReceipt — не разрыв, недостачи здесь не ищем");
+    });
+
+    it("месяц со смесью принятых и ждущих — withdrawn считает только принятые, статус ok при наличии обеих сторон", () => {
+      const r = cashReconcile(
+        [
+          { date: "2026-06-05T10:00:00+05:00", amount: 100000 },
+          { date: "2026-06-20T10:00:00+05:00", amount: null },
+        ],
+        [{ date: "2026-06-12T10:00:00+05:00", amount: 90000 }],
+        "2026-06-01",
+        "2026-06-30",
+        TZ,
+      );
+      assert.equal(r.withdrawn, 100000, "ждущая приёма инкассация не входит в сумму, но и не занижает её нулём молча");
+      assert.equal(r.withdrawnCount, 1);
+      assert.equal(r.withdrawnPendingCount, 1);
+      assert.equal(r.periods[0]!.status, "ok", "есть и принятая инкассация, и взнос — разрыва нет");
+      assert.equal(r.periods[0]!.withdrawnPending, 1);
+    });
+
+    it("КЛЮЧЕВОЙ ТЕСТ: без фикса amount=null давал бы Number(null)=0 — withdrawn остался бы 0 даже после приёма суммы", () => {
+      // Наивная (сломанная) реализация: withdrawn = w.reduce((s,x) => s + x.amount, 0)
+      // на CashMovement.amount: number — Number(null) не участвует явно, но
+      // TypeScript такой ввод даже не пропустил бы; здесь фиксируем ПОВЕДЕНИЕ,
+      // которое и есть контракт: null не участвует в сумме и не путается с 0.
+      const rWithPending = cashReconcile([{ date: "2026-06-05", amount: null }], [], "2026-06-01", "2026-06-30", TZ);
+      const rEmpty = cashReconcile([], [], "2026-06-01", "2026-06-30", TZ);
+      assert.equal(rWithPending.withdrawn, rEmpty.withdrawn, "оба withdrawn=0 численно...");
+      assert.notEqual(
+        rWithPending.periods[0]!.status,
+        rEmpty.periods[0]!.status,
+        "...но статус ОБЯЗАН различаться: pendingReceipt (инкассация была) ≠ empty (не было вовсе)",
+      );
+      assert.equal(rEmpty.periods[0]!.status, "empty");
+      assert.equal(rWithPending.periods[0]!.status, "pendingReceipt");
+    });
+  });
 });
