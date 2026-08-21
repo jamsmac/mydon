@@ -134,12 +134,18 @@ const BASIS_LABEL: Record<NonNullable<Suggestion["basis"]>, string> = {
   keyword: "ключевое слово",
 };
 
-/** Судьба строки при импорте — тем же порядком проверок, что и `StockService.importBatches` (Task 3): сперва карточка, потом дата. Так числа предпросмотра и настоящего отчёта ядра совпадают буквально. */
-type RowFate = "badQty" | "unmatched" | "noDate" | "ready";
-
-function qtyUsable(row: RegisterRow): boolean {
-  return row.qty !== null && row.qty > 0 && row.unit !== null && row.unit.trim().length > 0;
-}
+/**
+ * Судьба строки при импорте — тем же порядком проверок, что и
+ * `StockService.importBatches` (Task 3): сперва карточка, потом дата. Так
+ * числа предпросмотра совпадают буквально с настоящим отчётом ядра.
+ *
+ * Количество и единицу измерения здесь НЕ проверяем: это забота ядра
+ * (`prepareBatch`) построчно — плохая строка (нулевое количество, пустая или
+ * незнакомая единица) уйдёт в `rejected` С ПРИЧИНОЙ, а не потеряется молча в
+ * отдельном клиентском ведре. Дублировать эту проверку на витрине значило бы
+ * держать два места, которые могут разойтись.
+ */
+type RowFate = "unmatched" | "noDate" | "ready";
 
 function confirmedIngredientId(row: RegisterRow, decisions: Record<string, Decision>): string | null {
   const d = decisions[groupKey(row)];
@@ -147,7 +153,6 @@ function confirmedIngredientId(row: RegisterRow, decisions: Record<string, Decis
 }
 
 function classify(row: RegisterRow, decisions: Record<string, Decision>): RowFate {
-  if (!qtyUsable(row)) return "badQty";
   if (!confirmedIngredientId(row, decisions)) return "unmatched";
   if (!row.receivedOn) return "noDate";
   return "ready";
@@ -157,31 +162,33 @@ function sumRows(rows: RegisterRow[]): number {
   return rows.reduce((n, r) => n + (r.costGross ?? 0), 0);
 }
 
-/** Строки → вход `POST /stock/batches/import`. `badQty`-строки не отправляются вовсе (Core отклонил бы весь пакет, а не одну строку). */
+/**
+ * Строки → вход `POST /stock/batches/import`. Отправляются ВСЕ строки без
+ * исключения — количество/единица без значения превращаются в 0/"", и если
+ * строка всё же дойдёт до проверки на складе (карточка подтверждена, дата
+ * есть), `prepareBatch` отклонит именно её с понятной причиной, а не всю
+ * пачку: DTO этой строки больше не требует "количество > 0" на входе
+ * (fix(core) «одна плохая строка не должна ронять весь импорт», уже в ветке).
+ */
 function buildItems(
   rows: RegisterRow[],
   decisions: Record<string, Decision>,
   warehouseId: string,
 ): ImportBatchItem[] {
-  const items: ImportBatchItem[] = [];
-  for (const row of rows) {
-    if (!qtyUsable(row)) continue;
-    items.push({
-      fileRow: row.fileRow,
-      ingredientId: confirmedIngredientId(row, decisions),
-      warehouseId,
-      qtyReceived: row.qty as number,
-      unit: row.unit as string,
-      receivedOn: row.receivedOn,
-      supplier: row.supplier.trim().length > 0 ? row.supplier : null,
-      invoiceNo: row.invoiceNo,
-      invoiceDate: row.invoiceDate,
-      unitPriceGross: row.priceGross,
-      note: row.note,
-      name: row.name,
-    });
-  }
-  return items;
+  return rows.map((row) => ({
+    fileRow: row.fileRow,
+    ingredientId: confirmedIngredientId(row, decisions),
+    warehouseId,
+    qtyReceived: row.qty ?? 0,
+    unit: row.unit ?? "",
+    receivedOn: row.receivedOn,
+    supplier: row.supplier.trim().length > 0 ? row.supplier : null,
+    invoiceNo: row.invoiceNo,
+    invoiceDate: row.invoiceDate,
+    unitPriceGross: row.priceGross,
+    note: row.note,
+    name: row.name,
+  }));
 }
 
 function downloadReport(report: ImportBatchesReport, fileLabel: string): void {
@@ -340,7 +347,6 @@ export function RegisterImport({
   //    (сперва карточка, потом дата), чтобы совпасть с настоящим отчётом ядра.
   const totalSum = sumRows(rows);
   const fates = rows.map((r) => classify(r, decisions));
-  const badQtyRows = rows.filter((_, i) => fates[i] === "badQty");
   const unmatchedRows = rows.filter((_, i) => fates[i] === "unmatched");
   const noDateRows = rows.filter((_, i) => fates[i] === "noDate");
   const readyRows = rows.filter((_, i) => fates[i] === "ready");
@@ -488,14 +494,6 @@ export function RegisterImport({
               </div>
             </div>
           </div>
-          {badQtyRows.length > 0 && (
-            <p className="hint" style={{ marginBottom: 12 }}>
-              Без количества или единицы измерения: {badQtyRows.length} — эти строки не
-              отправляются на импорт вовсе (строка{badQtyRows.length > 1 ? "и" : ""}{" "}
-              {badQtyRows.map((r) => r.fileRow).join(", ")}).
-            </p>
-          )}
-
           <div className="sect-h">
             <h3 className="h2" style={{ fontSize: 14 }}>
               Сопоставление имён с карточками сырья
