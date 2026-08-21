@@ -1,19 +1,24 @@
 import Link from "next/link";
-import type { ExpiryFlag, ExpiryReport, ExpiryReportRow } from "../lib/core";
+import type { ExpiryFlag, ExpiryReport, ExpiryReportRow, StockBatchRow } from "../lib/core";
 import { ListShell, type ListShellKpi } from "./list-shell";
 import { daysBetween, fmtDay } from "../lib/globerent";
 import { plural } from "../lib/format";
 
 /** Порядок и подписи показателей — дословно по брифу (§ Your Job, шаг 1). */
 const FLAG_ORDER: readonly ExpiryFlag[] = ["expired", "expiring", "ok", "none"];
-const FLAG_LABELS: Record<ExpiryFlag, string> = {
+/**
+ * Подписи флага срока — общий словарь для этого листа и карточки ингредиента
+ * (Task 6, `ingredient-card-360.tsx`): один и тот же флаг не должен называться
+ * по-разному в двух местах CC, поэтому обе подписи экспортированы отсюда.
+ */
+export const FLAG_LABELS: Record<ExpiryFlag, string> = {
   expired: "Просрочено",
   expiring: "Истекает < 14 дней",
   ok: "В порядке",
   none: "Без срока",
 };
 /** Цвет плашки флага на строке — тот же набор `chip.b/.g/.h`, что и везде в CC. */
-const FLAG_CHIP_CLASS: Record<ExpiryFlag, string> = {
+export const FLAG_CHIP_CLASS: Record<ExpiryFlag, string> = {
   expired: "chip h",
   expiring: "chip b",
   ok: "chip g",
@@ -30,8 +35,13 @@ function isExpiryFlag(v: string | undefined): v is ExpiryFlag {
  * текст. Дней при `flag==="expired"` может неожиданно оказаться 0 (границы
  * суток vs `now` с временем на сервере) — текст на этот случай не противоречит
  * флагу ни в одну, ни в другую сторону.
+ *
+ * Параметр типизирован как `StockBatchRow` (а не `ExpiryReportRow`), чтобы
+ * карточка ингредиента (Task 6) могла звать эту же функцию для голых партий
+ * без `fefoOrder` — слово «истекает через N дней» не должно расходиться между
+ * листом и карточкой.
  */
-function rowDueLabel(row: ExpiryReportRow, asOf: string): { text: string; hot: boolean } {
+export function rowDueLabel(row: StockBatchRow, asOf: string): { text: string; hot: boolean } {
   if (row.expiry === null) return { text: "без срока", hot: false };
   const days = daysBetween(asOf, row.expiry);
   if (days === null) return { text: `дата непонятна: ${row.expiry}`, hot: false };

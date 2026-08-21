@@ -12,6 +12,7 @@ import {
   type MachineStays,
   type RecipeView,
   type IngredientStock,
+  type StockBatchRow,
   type WarehouseStock,
   type FinanceFlow,
   type GrContract,
@@ -36,6 +37,7 @@ import { StayTimeline } from "../../../components/machine-stays";
 import { EntityApproval } from "../../../components/entity-approval";
 import { ContractorCard360, ContractorSupplies } from "../../../components/contractor-card-360";
 import {
+  IngredientBatches,
   IngredientBunkers,
   IngredientCard360,
   IngredientPurchases,
@@ -230,11 +232,22 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // этого он не нужен ни одной карточке (тот же довод, что и в entity-editor.tsx
   // про <datalist> в форме).
   let supplierId: string | null = null;
+  // Партии этого сырья (Task 6): null — Core не ответил на /stock/batches
+  // (на проде на момент написания ядро ещё на 430bb14, эндпоинта там нет —
+  // это ОЖИДАЕМАЯ причина null, не баг). Пустой массив — партий действительно
+  // нет, две разные вещи, секция карточки их не путает.
+  let batches: StockBatchRow[] | null = null;
   if (isIngredient) {
     try {
       stock = await core.ingredientStock(entity.id);
     } catch {
       stock = null;
+    }
+    try {
+      const { rows } = await core.stockBatches({ ingredientId: entity.id });
+      batches = rows;
+    } catch {
+      batches = null;
     }
     try {
       const cards = entity.domain ? await core.entitiesOfType(entity.domain, "warehouse") : [];
@@ -771,10 +784,12 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           bunkerNameMatch={bunkerNameMatch}
           supplierId={supplierId}
           photosCount={photos.length}
+          batches={batches}
           slots={{
             usage: <IngredientUsageSection rows={ingredientUsage360} />,
             bunkers: <IngredientBunkers rows={bunkerRows} nameMatch={bunkerNameMatch} />,
             purchases: <IngredientPurchases entity={entity} />,
+            batches: <IngredientBatches rows={batches} />,
             stock: stock ? (
               <StockPanel
                 ingredientId={entity.id}
