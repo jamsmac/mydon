@@ -70,6 +70,12 @@ export const VENDHUB_GROUPS: NavGroup[] = [
       // Task 5: партии сырья/товара — своя таблица (stock_batch), не entity —
       // как «Инкассация» выше и остальные TABLE_BACKED_LEAVES ниже.
       { label: "Сроки годности", type: "expiry" },
+      // Срез К, задача 6: автомат → касса → счёт (R-K9) — сверка по автоматам
+      // (R-K11) и сверка изъято/сдано в банк (R-K6) на одном листе.
+      { label: "Сверка кассы", type: "cash_reconcile" },
+      // Срез К, задача 6: реестр пробелов (Task 5) — что нельзя посчитать
+      // сейчас, почему и что сделать; вычисляется на каждом чтении (R-K4).
+      { label: "Пробелы", type: "gaps" },
       { label: "Себестоимость", type: null },
     ],
   },
@@ -171,6 +177,10 @@ export const TABLE_BACKED_LEAVES = [
   "customs_rates",
   // Партии (Task 5): stock_batch, не entity — счёт по byType всегда был бы 0.
   "expiry",
+  // Срез К, задача 6: сверка кассы и реестр пробелов считаются на чтении
+  // (собственные эндпоинты), не entity — счёт по byType всегда был бы 0.
+  "cash_reconcile",
+  "gaps",
 ] as const;
 
 export const isTableBackedLeaf = (type: string | null | undefined): boolean =>
