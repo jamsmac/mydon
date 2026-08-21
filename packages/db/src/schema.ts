@@ -396,6 +396,64 @@ export const productNameAlias = pgTable(
   (t) => [index("product_name_alias_entity_idx").on(t.entityId)],
 );
 
+// ── stock_batch: партия сырья/товара (WAREHOUSE_SPEC §4.3 + документ прихода Р3/Р4) ──
+//
+// Остаток партии — леджером (сумма движений с этим batch_id), а не
+// денормализованным полем: так уже устроен stock_movement, и рассинхрона не
+// бывает. Партия без кода (batchCode = NULL) — законна: не у каждой поставки
+// есть номер партии от поставщика.
+export const stockBatch = pgTable(
+  "stock_batch",
+  {
+    id: id(),
+    /** Карточка сырья/товара: entity(type='ingredient'|'product'). */
+    ingredientId: uuid("ingredient_id").references(() => entity.id).notNull(),
+    /** Куда принято: entity(type='warehouse'). */
+    warehouseId: uuid("warehouse_id").references(() => entity.id).notNull(),
+    /** Код партии поставщика. Пусто — партия без кода, это законно. */
+    batchCode: text("batch_code"),
+    /** Срок годности партии. Пусто — считается из «срок годности, дней» карточки. */
+    expiryDate: date("expiry_date"),
+    /** Дата производства, если известна: от неё считается срок при пустом expiryDate. */
+    manufactureDate: date("manufacture_date"),
+    receivedOn: date("received_on").notNull(),
+    qtyReceived: numeric("qty_received", { precision: 14, scale: 3 }).notNull(),
+    unit: text("unit").notNull(),
+    /** Когда вскрыли пачку. Отдельной таблицы не заводим: пачка вскрывается один раз. */
+    openedOn: date("opened_on"),
+    openedBy: uuid("opened_by").references(() => person.id),
+    personId: uuid("person_id").references(() => person.id),
+    // ── Документ прихода (Р3/Р4): партия обязана помнить, почём её взяли ──
+    /** Поставщик ссылкой, а не именем (R-C4): у документа есть ИНН. */
+    supplierId: uuid("supplier_id").references(() => entity.id),
+    invoiceNo: text("invoice_no"),
+    invoiceDate: date("invoice_date"),
+    /** ИКПУ позиции документа — устойчивый ключ каталога, надёжнее названия. */
+    ikpu: text("ikpu"),
+    /** Цена за `unit` без НДС, ставка и цена с НДС (R-C5). */
+    unitPriceNet: numeric("unit_price_net", { precision: 14, scale: 4 }),
+    vatRate: numeric("vat_rate", { precision: 5, scale: 2 }),
+    unitPriceGross: numeric("unit_price_gross", { precision: 14, scale: 4 }),
+    /** Снимок на момент прихода: правка карточки не должна дорожать прошлую партию. */
+    baseUnitSnapshot: text("base_unit_snapshot"),
+    packageWeightSnapshot: integer("package_weight_snapshot"),
+    /** Откуда партия: 'manual' | 'didox' | 'excel' | 'receipt'. */
+    source: text("source").default("manual").notNull(),
+    /** Ключ идемпотентности источника: у Didox — идентификатор документа + № строки. */
+    extId: text("ext_id"),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("stock_batch_expiry_idx").on(t.expiryDate).where(sql`expiry_date is not null`),
+    index("stock_batch_open_idx").on(t.openedOn).where(sql`opened_on is not null`),
+    uniqueIndex("stock_batch_code_key")
+      .on(t.ingredientId, t.batchCode)
+      .where(sql`batch_code is not null`),
+    uniqueIndex("stock_batch_ext_key").on(t.source, t.extId).where(sql`ext_id is not null`),
+  ],
+);
+
 export const stockMovement = pgTable(
   "stock_movement",
   {
@@ -411,6 +469,13 @@ export const stockMovement = pgTable(
       .references(() => entity.id),
     /** Встречный склад (для перемещения) — куда легло. Пусто у прихода/расхода. */
     counterpartyId: uuid("counterparty_id").references(() => entity.id),
+    /**
+     * Партия, к которой относится движение. Nullable: приход без партии
+     * остаётся законным — иначе сломался бы существующий синк снабжения
+     * (у него партий нет вовсе) и уже записанный снимок остатка владельца
+     * (движения `adjustment` без партии: кофе 43 кг, сухое молоко 26 кг и т.д.).
+     */
+    batchId: uuid("batch_id").references(() => stockBatch.id),
     dt: date("dt").notNull(),
     /** Количество в `unit`, всегда положительное. Знак задаёт вид движения. */
     qty: numeric("qty", { precision: 14, scale: 3 }).notNull(),
@@ -2441,6 +2506,7 @@ export const schema = {
   productNameAlias,
   purchase,
   machineStock,
+  stockBatch,
   stockMovement,
   // Сырой слой источников.
   rawSnapshot,
