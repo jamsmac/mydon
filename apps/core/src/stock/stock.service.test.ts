@@ -348,6 +348,33 @@ describe("StockService: createBatch — приход партии заводит
     assert.equal(movementInsert!.values.batchId, batchInsert!.values.id);
   });
 
+  it("повтор по clientKey возвращает ТУ ЖЕ партию, а не ошибку", async () => {
+    // Клиент повторяет запрос, когда не дождался ответа по таймауту, — а запись
+    // при этом прошла. Ответить ошибкой значит подтолкнуть оператора нажать ещё
+    // раз с НОВЫМ ключом, и вот тогда партия действительно задвоится.
+    const { db, inserts } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const первый = await svc.createBatch({
+      ingredientId: "ing-coffee",
+      warehouseId: "wh-main",
+      qtyReceived: 12.5,
+      unit: "кг",
+      receivedOn: "2026-08-21",
+      clientKey: "intake-2026-08-21-coffee",
+    });
+    const повтор = await svc.createBatch({
+      ingredientId: "ing-coffee",
+      warehouseId: "wh-main",
+      qtyReceived: 12.5,
+      unit: "кг",
+      receivedOn: "2026-08-21",
+      clientKey: "intake-2026-08-21-coffee",
+    });
+    assert.equal(повтор.id, первый.id, "та же партия, а не новая");
+    assert.equal(повтор.remaining, первый.remaining, "и остаток тот же");
+    assert.equal(inserts.filter((i) => i.table === "stock_batch").length, 1, "второй партии не завелось");
+  });
+
   it("количество ≤ 0 отклоняется", async () => {
     const { db } = stockDb({ entities: [кофе, склад] });
     const svc = new StockService(db);

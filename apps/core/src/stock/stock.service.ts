@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@ne
 import { BadRequestException } from "@nestjs/common";
 import { entity, person, purchase, rawLink, sale, stockBatch, stockMovement } from "@mydon/db";
 import {
+  TZ,
   allocateFEFO,
   consumptionReport,
   convertQty,
@@ -37,6 +38,18 @@ function isExpiryFlag(v: string): v is ExpiryFlag {
   return v === "expired" || v === "expiring" || v === "ok" || v === "none";
 }
 
+/**
+ * Сегодняшняя дата ПО ТАШКЕНТУ, а не по UTC.
+ *
+ * `new Date().toISOString()` даёт день по Гринвичу: с полуночи до пяти утра по
+ * Ташкенту это ВЧЕРА. Приход, заведённый ночной сменой, получал бы вчерашнюю
+ * дату, а срок годности — на сутки короче. Правило проекта — Asia/Tashkent
+ * везде; `en-CA` даёт ровно формат YYYY-MM-DD.
+ */
+function todayTashkent(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: TZ });
+}
+
 /** Строка партии для списков/отчёта: остаток и срок уже посчитаны. */
 export interface BatchRow {
   id: string;
@@ -57,6 +70,15 @@ export interface BatchRow {
   openedOn: string | null;
   supplierId: string | null;
   supplierName: string | null;
+  /**
+   * Имя поставщика, как его ввёл человек, — даже если карточка не нашлась.
+   *
+   * Без него «поставщика не вводили» и «ввели, но имя не совпало с реестром»
+   * выглядят на экране одинаково: пустое место. Первое — норма, второе —
+   * опечатка, которую надо поправить; молча копить такие расхождения значит
+   * терять историю закупок по этому поставщику.
+   */
+  supplierRaw: string | null;
   invoiceNo: string | null;
   invoiceDate: string | null;
   note: string | null;
@@ -909,6 +931,19 @@ export class StockService implements OnModuleInit {
       .groupBy(stockMovement.batchId);
     const consumedMap = new Map(consumedRows.map((r) => [r.batchId as string, Number(r.sum) || 0]));
 
+    // Сырое имя поставщика живёт на приходном движении партии: на самой партии
+    // хранится только ссылка (R-C4). Достаём его, чтобы показать введённое имя,
+    // когда карточка не нашлась.
+    const intakeRows = await this.db
+      .select({ batchId: stockMovement.batchId, supplier: stockMovement.supplier })
+      .from(stockMovement)
+      .where(and(eq(stockMovement.kind, "intake"), inArray(stockMovement.batchId, batchIds)));
+    const supplierRawMap = new Map<string, string>();
+    for (const r of intakeRows) {
+      const t = (r.supplier ?? "").trim();
+      if (r.batchId && t !== "" && !supplierRawMap.has(r.batchId)) supplierRawMap.set(r.batchId, t);
+    }
+
     const idPool = [
       ...rows.map((r) => r.ingredientId),
       ...rows.map((r) => r.warehouseId),
@@ -953,6 +988,7 @@ export class StockService implements OnModuleInit {
         openedOn: b.openedOn ? String(b.openedOn) : null,
         supplierId: b.supplierId,
         supplierName: b.supplierId ? (cardById.get(b.supplierId)?.name ?? null) : null,
+        supplierRaw: supplierRawMap.get(b.id) ?? null,
         invoiceNo: b.invoiceNo,
         invoiceDate: b.invoiceDate ? String(b.invoiceDate) : null,
         note: b.note,
@@ -983,6 +1019,26 @@ export class StockService implements OnModuleInit {
     }
     if (input.personId) await this.personExists(input.personId);
 
+    // Повтор по clientKey отбиваем ДО первой записи. Иначе новая партия уже
+    // вставлена в транзакцию, и вернуть чужую строку значит закоммитить сироту:
+    // партию без приходного движения, которая всплывёт в остатках ниоткуда.
+    if (input.clientKey) {
+      const [already] = await this.db
+        .select({ batchId: stockMovement.batchId })
+        .from(stockMovement)
+        .where(eq(stockMovement.clientKey, input.clientKey))
+        .limit(1);
+      if (already?.batchId) {
+        const [row] = await this.computeBatchRows({ ids: [already.batchId] });
+        if (row) return row;
+      }
+      if (already) {
+        throw new BadRequestException(
+          "Этот ключ идемпотентности уже занят приходом без партии — повторите с другим ключом",
+        );
+      }
+    }
+
     const supplierId = await this.matchSupplier(input.supplier);
 
     // Цена с НДС: доверяем явно переданной; иначе считаем из цены без НДС и
@@ -994,7 +1050,7 @@ export class StockService implements OnModuleInit {
           ? input.unitPriceNet * (1 + input.vatRate / 100)
           : null;
 
-    const receivedOn = input.receivedOn ?? new Date().toISOString().slice(0, 10);
+    const receivedOn = input.receivedOn ?? todayTashkent();
     // Снимок веса упаковки: правка карточки не должна дорожать/удешевлять уже
     // принятую партию. Колонка целая (package_weight_snapshot) — округляем;
     // запрет на Math.trunc/parseInt из глобальных правил про КОЛИЧЕСТВА сюда
@@ -1056,20 +1112,21 @@ export class StockService implements OnModuleInit {
         .returning();
 
       if (!movement) {
-        // Повтор по clientKey (тот же приём, что в createMovement): движение
-        // уже записано первой попыткой. Партию по новой не заводим — вся
-        // транзакция откатится (throw), а клиент получит понятную ошибку и
-        // сам повторит запрос без риска задвоить партию.
+        // Повтор по clientKey — УСПЕХ, а не ошибка (тот же контракт, что у
+        // createMovement выше). Приход уже записан первой попыткой; возвращаем
+        // ту же партию, к которой он привязан.
+        //
+        // Почему не ошибка. Клиент повторяет запрос ровно тогда, когда не
+        // дождался ответа по таймауту — и запись при этом прошла. Ответить
+        // ошибкой на успевший запрос значит подтолкнуть оператора нажать ещё
+        // раз, уже с НОВЫМ ключом, и вот тогда партия действительно задвоится.
+        // Идемпотентность обязана вести себя одинаково во всём складе.
+        // Сюда попадаем только гонкой: проверка выше ключ не нашла, а между ней
+        // и вставкой запись успел сделать параллельный запрос. Бросаем — вся
+        // транзакция откатывается, сироты не остаётся, клиент повторит и уже на
+        // проверке выше получит ту же партию.
         if (input.clientKey) {
-          const [existing] = await tx
-            .select({ id: stockMovement.id })
-            .from(stockMovement)
-            .where(eq(stockMovement.clientKey, input.clientKey));
-          if (existing) {
-            throw new BadRequestException(
-              "Партия с таким же приходом уже заведена (повтор по clientKey) — обновите список",
-            );
-          }
+          throw new BadRequestException("Повтор прихода ещё записывается — попробуй ещё раз через минуту");
         }
         throw new BadRequestException("Не удалось записать движение прихода партии");
       }
@@ -1149,7 +1206,7 @@ export class StockService implements OnModuleInit {
       .sort(compareBatchRow);
 
     return {
-      asOf: new Date().toISOString().slice(0, 10),
+      asOf: todayTashkent(),
       thresholdDays: DEFAULT_EXPIRING_DAYS,
       counts,
       rows: result,
@@ -1165,7 +1222,7 @@ export class StockService implements OnModuleInit {
     if (!existing) throw new NotFoundException("Партия не найдена");
     if (input.openedBy) await this.personExists(input.openedBy);
 
-    const openedOn = input.openedOn ?? new Date().toISOString().slice(0, 10);
+    const openedOn = input.openedOn ?? todayTashkent();
     await this.db
       .update(stockBatch)
       .set({ openedOn, openedBy: input.openedBy ?? null })
