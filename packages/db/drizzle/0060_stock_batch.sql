@@ -90,8 +90,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "stock_batch_expiry_idx" ON "stock_batch" USING btree ("expiry_date") WHERE expiry_date is not null;--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "stock_batch_open_idx" ON "stock_batch" USING btree ("opened_on") WHERE opened_on is not null;--> statement-breakpoint
 
--- Код партии уникален в рамках карточки, но только когда задан (партия без
--- кода — законна, R-C7). Идемпотентность источника — по source+ext_id, тоже
--- только когда ext_id задан (у ручного ввода его нет).
+-- Код партии уникален в рамках карточки, но только когда задан: партия без
+-- кода законна (инвариант WAREHOUSE_SPEC §4.3, а не решение этого среза).
+-- Идемпотентность источника — по source+ext_id, тоже только когда ext_id
+-- задан: у ручного ввода его нет.
 CREATE UNIQUE INDEX IF NOT EXISTS "stock_batch_code_key" ON "stock_batch" USING btree ("ingredient_id","batch_code") WHERE batch_code is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "stock_batch_ext_key" ON "stock_batch" USING btree ("source","ext_id") WHERE ext_id is not null;
