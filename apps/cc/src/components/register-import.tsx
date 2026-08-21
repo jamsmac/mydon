@@ -504,6 +504,13 @@ export function RegisterImport({
               </button>
             )}
           </div>
+          {/* Честно предупреждаем, где живут решения: они не в Core, и молчать
+              об этом значит дать владельцу разметить 59 имён, сменить браузер и
+              обнаружить пустой экран. */}
+          <p className="hint" style={{ marginTop: -4 }}>
+            Решения сохраняются в этом браузере, а не на сервере: с другого устройства
+            сопоставление придётся подтвердить заново.
+          </p>
           <div className="maplist">
             {groups.map((g) => {
               const d = decisions[g.key] ?? { ingredientId: g.suggestion.cardId, status: "suggested" as const };
