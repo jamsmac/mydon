@@ -59,7 +59,8 @@ export function IngredientCard360({
 }: {
   entity: Entity;
   usage: IngredientUsageRow[];
-  bunkerCount: number;
+  /** Сколько позиций бункера ссылается на эту карточку. null — реестр не ответил. */
+  bunkerCount: number | null;
   /** В бункерном реестре есть позиция с тем же именем, но мост (`entityId`) на неё не проставлен. */
   bunkerNameMatch: boolean;
   /** Карточка контрагента, чьё имя совпало с полем «поставщик». null — не совпало или поставщик не указан. */
@@ -109,7 +110,7 @@ export function IngredientCard360({
           </p>
           <div className="mc-badges">
             {price && <span className="chip b">{price.unit}</span>}
-            {bunkerCount > 0 && (
+            {bunkerCount !== null && bunkerCount > 0 && (
               <span className="chip g" data-mc-tab="bunkers" role="button" tabIndex={0}>
                 бункер{bunkerCount > 1 ? ` × ${bunkerCount}` : ""}
               </span>
@@ -215,14 +216,16 @@ export function IngredientCard360({
                   </div>
                   <div className="tile" data-mc-tab="bunkers" role="button" tabIndex={0}>
                     <span className="lab">Бункеры</span>
-                    <div className="v">{bunkerCount}</div>
+                    <div className="v">{bunkerCount ?? "—"}</div>
                     <div className="foot">
                       <span className="mk" />
-                      {bunkerCount > 0
-                        ? "позиций заливки"
-                        : bunkerNameMatch
-                          ? "мост не проставлен"
-                          : "не бункерный"}
+                      {bunkerCount === null
+                        ? "не удалось проверить"
+                        : bunkerCount > 0
+                          ? "позиций заливки"
+                          : bunkerNameMatch
+                            ? "мост не проставлен"
+                            : "не бункерный"}
                       <span className="go">→</span>
                     </div>
                   </div>
@@ -265,7 +268,7 @@ export function IngredientCard360({
           {
             key: "bunkers",
             label: "Бункеры",
-            badge: bunkerCount > 0 ? String(bunkerCount) : undefined,
+            badge: bunkerCount !== null && bunkerCount > 0 ? String(bunkerCount) : undefined,
             content: slots.bunkers,
           },
           {
@@ -330,7 +333,8 @@ export function IngredientBunkers({
   rows,
   nameMatch,
 }: {
-  rows: CoffeeBunkerIngredient[];
+  /** null — бункерный реестр не ответил; это НЕ то же самое, что пустой список. */
+  rows: CoffeeBunkerIngredient[] | null;
   /** Позиция с тем же именем есть в бункерном реестре, но мост на эту карточку не проставлен. */
   nameMatch: boolean;
 }) {
@@ -338,10 +342,16 @@ export function IngredientBunkers({
     <div className="sect" id="bunkers">
       <div className="sect-h">
         <h3 className="h2">Бункеры</h3>
-        <span className="chip">{rows.length}</span>
+        <span className="chip">{rows === null ? "—" : rows.length}</span>
         <span className="sp" />
       </div>
-      {rows.length === 0 ? (
+      {rows === null ? (
+        <div className="empty">
+          <b>Не удалось проверить</b>
+          Бункерный реестр не ответил — обнови страницу. Это не значит, что карточка не
+          бункерная: ответа просто нет.
+        </div>
+      ) : rows.length === 0 ? (
         <div className="empty">
           <b>{nameMatch ? "Карточка не связана с бункерным реестром" : "Не бункерный ингредиент"}</b>
           {nameMatch

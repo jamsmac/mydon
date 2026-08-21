@@ -217,7 +217,11 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // Бункеры: позиции бункерного реестра, куда эта карточка подставлена через
   // мост `coffee_ingredient.entityId` (срез B, миграция 0059 — на момент
   // написания ещё не на проде: до выкатки список будет пуст у всех карточек).
-  let bunkerRows: CoffeeBunkerIngredient[] = [];
+  // null — бункерный реестр не ответил. Отличать от пустого массива
+  // обязательно: пустой массив значит «карточка не бункерная», и показать это
+  // вместо «не смогли проверить» — соврать владельцу ровно там, где он пришёл
+  // проверять, сработал ли мост.
+  let bunkerRows: CoffeeBunkerIngredient[] | null = null;
   // Позиция с тем же именем в бункерном реестре есть, но мост не проставлен —
   // отличаем от «эта карточка вообще не бункерная» (например, тара).
   let bunkerNameMatch = false;
@@ -278,7 +282,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         (row) => row.ingredientName.trim().toLowerCase() === entity.name.trim().toLowerCase(),
       );
     } catch {
-      bunkerRows = [];
+      bunkerRows = null;
       bunkerNameMatch = false;
     }
     // Сравнение имён — через нормализацию (`matchContractorByName`), а не
@@ -763,7 +767,7 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
         <IngredientCard360
           entity={entity}
           usage={ingredientUsage360}
-          bunkerCount={bunkerRows.length}
+          bunkerCount={bunkerRows === null ? null : bunkerRows.length}
           bunkerNameMatch={bunkerNameMatch}
           supplierId={supplierId}
           photosCount={photos.length}
