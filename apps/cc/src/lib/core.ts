@@ -1529,6 +1529,11 @@ export interface StockBatchRow {
   supplierRaw: string | null;
   invoiceNo: string | null;
   invoiceDate: string | null;
+  /**
+   * Цена за единицу с НДС (срез D, Task 5) — как ввели в приходе, ручном или
+   * импорте реестра. null — цену не вводили; не путать с ценой 0.
+   */
+  unitPriceGross: number | null;
   note: string | null;
   source: string;
 }

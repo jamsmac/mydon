@@ -81,6 +81,12 @@ export interface BatchRow {
   supplierRaw: string | null;
   invoiceNo: string | null;
   invoiceDate: string | null;
+  /**
+   * Цена за единицу с НДС (карточка ингредиента/контрагента, срез D, Task 5) —
+   * то, что ввели в приходе (ручном или импорте реестра). null — цену не
+   * вводили; отличать от 0, который выглядел бы как «бесплатно».
+   */
+  unitPriceGross: number | null;
   note: string | null;
   source: string;
 }
@@ -1056,6 +1062,7 @@ export class StockService implements OnModuleInit {
         supplierRaw: supplierRawMap.get(b.id) ?? null,
         invoiceNo: b.invoiceNo,
         invoiceDate: b.invoiceDate ? String(b.invoiceDate) : null,
+        unitPriceGross: b.unitPriceGross != null ? Number(b.unitPriceGross) : null,
         note: b.note,
         source: b.source,
       };

@@ -237,6 +237,13 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   // это ОЖИДАЕМАЯ причина null, не баг). Пустой массив — партий действительно
   // нет, две разные вещи, секция карточки их не путает.
   let batches: StockBatchRow[] | null = null;
+  // Хотя бы одна партия существует ГДЕ УГОДНО в системе (срез D, Task 5) —
+  // отличает «реестр закупок ещё не загружен вовсе» от «у этого сырья закупок
+  // не было» (то и другое — пустой массив у ЭТОЙ карточки, но разная правда).
+  // Список читаем один раз без фильтра и фильтруем на месте: у /stock/batches
+  // нет фильтра по ingredientId+«есть ли вообще что-то», а масштаб реестра —
+  // десятки строк, не тысячи, второй запрос того же не стоит.
+  let historyImported = false;
   if (isIngredient) {
     try {
       stock = await core.ingredientStock(entity.id);
@@ -244,8 +251,9 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       stock = null;
     }
     try {
-      const { rows } = await core.stockBatches({ ingredientId: entity.id });
-      batches = rows;
+      const { rows } = await core.stockBatches({});
+      batches = rows.filter((r) => r.ingredientId === entity.id);
+      historyImported = rows.length > 0;
     } catch {
       batches = null;
     }
@@ -457,6 +465,24 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
     } catch {
       contractorContracts = [];
       contractorFlows = [];
+    }
+  }
+
+  // Контрагент: партии, где он — поставщик (срез D, Task 5). null — Core не
+  // ответил на /stock/batches; пустой массив — партий с этим поставщиком
+  // действительно нет. У /stock/batches нет фильтра по supplierId — читаем
+  // список целиком (масштаб реестра — десятки строк) и фильтруем на месте;
+  // `contractorHistoryImported` — та же честная развилка, что и у ингредиента:
+  // «реестр закупок ещё не загружен вовсе» ≠ «у него закупок не было».
+  let contractorBatches: StockBatchRow[] | null = null;
+  let contractorHistoryImported = false;
+  if (isContractor) {
+    try {
+      const { rows } = await core.stockBatches({});
+      contractorBatches = rows.filter((r) => r.supplierId === entity.id);
+      contractorHistoryImported = rows.length > 0;
+    } catch {
+      contractorBatches = null;
     }
   }
 
@@ -739,8 +765,15 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           documentsCount={photos.length}
           contractsCount={contractorContracts.length}
           flowsCount={contractorFlows.length}
+          batches={contractorBatches}
           slots={{
-            supplies: <ContractorSupplies entity={entity} />,
+            supplies: (
+              <ContractorSupplies
+                entity={entity}
+                batches={contractorBatches}
+                historyImported={contractorHistoryImported}
+              />
+            ),
             money: <ContractorFinance contracts={contractorContracts} flows={contractorFlows} />,
             passport: (
               <>
@@ -788,7 +821,9 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           slots={{
             usage: <IngredientUsageSection rows={ingredientUsage360} />,
             bunkers: <IngredientBunkers rows={bunkerRows} nameMatch={bunkerNameMatch} />,
-            purchases: <IngredientPurchases entity={entity} />,
+            purchases: (
+              <IngredientPurchases entity={entity} batches={batches} historyImported={historyImported} />
+            ),
             batches: <IngredientBatches rows={batches} />,
             stock: stock ? (
               <StockPanel
