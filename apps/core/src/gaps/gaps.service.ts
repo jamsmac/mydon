@@ -411,35 +411,60 @@ export function billReconciliationGap(reportDefs: readonly { sourceCode: string;
  * банковской выписки (срез К, задача 4) кладёт запись без `domain`, если счёт
  * общий на всю компанию — и тогда наличные итоги по конкретному направлению
  * её не видят вовсе.
+ *
+ * ДВА ФИКСА (ревью среза К, 1.3):
+ *  - `source==='bank'` — раньше выборка шла по ВСЕЙ `money_flow`, и ручные
+ *    записи (`source='manual'`) с пустым `domain` (обычное дело — владелец
+ *    решает привязку позже) попадали в этот пробел ИМПОРТА ВЫПИСКИ, хотя к
+ *    импорту отношения не имеют. Пробел — только про импорт, отбор — только
+ *    строки оттуда.
+ *  - `direction` учитывается явно — раньше приход и расход складывались в
+ *    ОДНО число, не равное ни приходу, ни расходу, ни сальдо (сложить кредит
+ *    и дебет напрямую нельзя, это же правило у детектора 3
+ *    `bankFlowsWithoutDomainGap`-соседа `journalHoleGaps`). Теперь считаются
+ *    и показываются раздельно, а `scale` — честное сальдо (приход − расход).
  */
 export function bankFlowsWithoutDomainGap(
-  flows: readonly { domain: string | null; amount: string; currency: string; amountUzs: string | null; status: string }[],
+  flows: readonly {
+    domain: string | null;
+    direction: "in" | "out";
+    source: string;
+    amount: string;
+    currency: string;
+    amountUzs: string | null;
+    status: string;
+  }[],
 ): Gap[] {
-  const unassigned = flows.filter((f) => f.domain === null && f.status !== "cancelled");
+  const unassigned = flows.filter((f) => f.source === "bank" && f.domain === null && f.status !== "cancelled");
   if (unassigned.length === 0) return [];
-  let sumUzs = 0;
+  let inUzs = 0;
+  let outUzs = 0;
   let unconverted = 0;
   for (const f of unassigned) {
     const amount = Number(f.amount);
     if (!Number.isFinite(amount)) continue;
+    let uzs: number | null = null;
     if (f.currency === "UZS") {
-      sumUzs += amount;
+      uzs = amount;
+    } else {
+      const amountUzs = f.amountUzs != null ? Number(f.amountUzs) : null;
+      if (amountUzs !== null && Number.isFinite(amountUzs)) uzs = amountUzs;
+    }
+    if (uzs === null) {
+      unconverted += 1;
       continue;
     }
-    const amountUzs = f.amountUzs != null ? Number(f.amountUzs) : null;
-    if (amountUzs !== null && Number.isFinite(amountUzs)) {
-      sumUzs += amountUzs;
-      continue;
-    }
-    unconverted += 1;
+    if (f.direction === "in") inUzs += uzs;
+    else outUzs += uzs;
   }
+  const netUzs = inUzs - outUzs;
   const note = unconverted > 0 ? ` (ещё ${unconverted} записей без курса, в сумму не вошли)` : "";
   return [
     {
       topic: "банковские записи без направления",
       period: null,
-      missing: `${unassigned.length} записей банковской выписки на ${formatSum(sumUzs)} не привязаны ни к одному направлению — счёт общий, наличные итоги по направлению их не видят${note}`,
-      scale: formatSum(sumUzs),
+      missing: `${unassigned.length} записей банковской выписки без направления: приход ${formatSum(inUzs)}, расход ${formatSum(outUzs)} (сальдо ${formatSum(netUzs)}) — счёт общий, наличные итоги по направлению их не видят${note}`,
+      scale: formatSum(netUzs),
       action: "привязать записи к направлению вручную (Панель → Финансы) либо сузить импорт выписки, если появятся отдельные счета по направлениям",
     },
   ];
@@ -500,7 +525,17 @@ export class GapsService {
           .select({ id: coffeeIngredient.id, name: coffeeIngredient.name, purchasePrice: coffeeIngredient.purchasePrice, packageWeight: coffeeIngredient.packageWeight, cardAttrs: entity.attrs })
           .from(coffeeIngredient)
           .leftJoin(entity, eq(coffeeIngredient.entityId, entity.id)),
-        this.db.select({ domain: moneyFlow.domain, amount: moneyFlow.amount, currency: moneyFlow.currency, amountUzs: moneyFlow.amountUzs, status: moneyFlow.status }).from(moneyFlow),
+        this.db
+          .select({
+            domain: moneyFlow.domain,
+            direction: moneyFlow.direction,
+            source: moneyFlow.source,
+            amount: moneyFlow.amount,
+            currency: moneyFlow.currency,
+            amountUzs: moneyFlow.amountUzs,
+            status: moneyFlow.status,
+          })
+          .from(moneyFlow),
         this.db
           .select({ sourceCode: rawReportDef.sourceCode, code: rawReportDef.code, title: rawReportDef.title, ru: rawReportDef.ru })
           .from(rawReportDef)

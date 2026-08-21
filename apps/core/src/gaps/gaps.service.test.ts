@@ -406,10 +406,10 @@ describe("Реестр пробелов — сверка купюр по авт�
 describe("Реестр пробелов — банковские записи без направления", () => {
   it("записи с domain=null суммируются, отменённые и привязанные не считаются", () => {
     const gaps = bankFlowsWithoutDomainGap([
-      { domain: null, amount: "1000000", currency: "UZS", amountUzs: null, status: "actual" },
-      { domain: null, amount: "500000", currency: "UZS", amountUzs: null, status: "actual" },
-      { domain: null, amount: "999999", currency: "UZS", amountUzs: null, status: "cancelled" },
-      { domain: "vendhub", amount: "777", currency: "UZS", amountUzs: null, status: "actual" },
+      { domain: null, direction: "in", source: "bank", amount: "1000000", currency: "UZS", amountUzs: null, status: "actual" },
+      { domain: null, direction: "in", source: "bank", amount: "500000", currency: "UZS", amountUzs: null, status: "actual" },
+      { domain: null, direction: "in", source: "bank", amount: "999999", currency: "UZS", amountUzs: null, status: "cancelled" },
+      { domain: "vendhub", direction: "in", source: "bank", amount: "777", currency: "UZS", amountUzs: null, status: "actual" },
     ]);
     assert.equal(gaps.length, 1);
     assert.match(gaps[0].missing, /2 записей/);
@@ -418,16 +418,48 @@ describe("Реестр пробелов — банковские записи б
 
   it("все записи привязаны к направлению — пусто", () => {
     assert.deepEqual(
-      bankFlowsWithoutDomainGap([{ domain: "vendhub", amount: "1000", currency: "UZS", amountUzs: null, status: "actual" }]),
+      bankFlowsWithoutDomainGap([
+        { domain: "vendhub", direction: "in", source: "bank", amount: "1000", currency: "UZS", amountUzs: null, status: "actual" },
+      ]),
       [],
     );
   });
 
   it("КЛЮЧЕВОЙ ТЕСТ: запись привязали к направлению — гэп исчезает", () => {
-    const было = bankFlowsWithoutDomainGap([{ domain: null, amount: "1000000", currency: "UZS", amountUzs: null, status: "actual" }]);
+    const было = bankFlowsWithoutDomainGap([
+      { domain: null, direction: "in", source: "bank", amount: "1000000", currency: "UZS", amountUzs: null, status: "actual" },
+    ]);
     assert.equal(было.length, 1);
-    const стало = bankFlowsWithoutDomainGap([{ domain: "vendhub", amount: "1000000", currency: "UZS", amountUzs: null, status: "actual" }]);
+    const стало = bankFlowsWithoutDomainGap([
+      { domain: "vendhub", direction: "in", source: "bank", amount: "1000000", currency: "UZS", amountUzs: null, status: "actual" },
+    ]);
     assert.deepEqual(стало, []);
+  });
+
+  it("ФИКС 1.3: ручная запись (source='manual') с пустым domain — не пробел импорта выписки, счёт не идёт", () => {
+    // Ручные записи без domain — обычное дело (владелец решает привязку
+    // позже), а не симптом импорта. Раньше выборка шла по ВСЕЙ money_flow —
+    // такая строка ложно попадала в «банковские записи без направления».
+    assert.deepEqual(
+      bankFlowsWithoutDomainGap([
+        { domain: null, direction: "in", source: "manual", amount: "1000000", currency: "UZS", amountUzs: null, status: "actual" },
+      ]),
+      [],
+    );
+  });
+
+  it("ФИКС 1.3: приход и расход считаются РАЗДЕЛЬНО — сумма не смешивает дебет с кредитом", () => {
+    const gaps = bankFlowsWithoutDomainGap([
+      { domain: null, direction: "in", source: "bank", amount: "1000000", currency: "UZS", amountUzs: null, status: "actual" },
+      { domain: null, direction: "out", source: "bank", amount: "300000", currency: "UZS", amountUzs: null, status: "actual" },
+    ]);
+    assert.equal(gaps.length, 1);
+    assert.match(gaps[0].missing, /приход 1 000 000/);
+    assert.match(gaps[0].missing, /расход 300 000/);
+    // Сальдо (700 000) — единственное число, которое честно называет "сколько
+    // денег без направления"; голая сумма 1 300 000 не равна ни приходу, ни
+    // расходу, ни сальдо (ровно баг из ревью 1.3).
+    assert.match(gaps[0].scale ?? "", /700 000/);
   });
 });
 
@@ -494,7 +526,7 @@ describe("GapsService.list() — сборка реестра", () => {
       [stockBatchTable, [{ receivedOn: TODAY, expiryDate: "2027-01-01", manufactureDate: null, invoiceDate: TODAY }]],
       [purchaseTable, [{ dt: TODAY }]],
       [coffeeIngredientTable, [{ id: "ing1", name: "Кофе", purchasePrice: null, packageWeight: null, cardAttrs: { "цена покупки": 260000, "единица": "кг" } }]],
-      [moneyFlowTable, [{ domain: "vendhub", amount: "1000", currency: "UZS", amountUzs: null, status: "actual" }]],
+      [moneyFlowTable, [{ domain: "vendhub", direction: "in", source: "bank", amount: "1000", currency: "UZS", amountUzs: null, status: "actual" }]],
       [rawReportDefTable, [{ sourceCode: "ourvend", code: "banknotes", title: "Купюры", ru: "Купюры" }]],
       [saleTable, [{ n: 0 }]],
     ]);
@@ -515,7 +547,7 @@ describe("GapsService.list() — сборка реестра", () => {
       [stockBatchTable, [{ receivedOn: TODAY, expiryDate: null, manufactureDate: null, invoiceDate: null }]],
       [purchaseTable, [{ dt: null }]],
       [coffeeIngredientTable, [{ id: "ing1", name: "Стакан", purchasePrice: null, packageWeight: null, cardAttrs: null }]],
-      [moneyFlowTable, [{ domain: null, amount: "500000", currency: "UZS", amountUzs: null, status: "actual" }]],
+      [moneyFlowTable, [{ domain: null, direction: "in", source: "bank", amount: "500000", currency: "UZS", amountUzs: null, status: "actual" }]],
       [rawReportDefTable, []],
       [saleTable, [{ n: 968 }]],
     ]);
