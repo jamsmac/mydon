@@ -74,6 +74,10 @@ export function StockPanel({
   const [invoiceDate, setInvoiceDate] = useState("");
   const [unitPriceNet, setUnitPriceNet] = useState("");
   const [vatRate, setVatRate] = useState("");
+  // Ключ идемпотентности этой заполненной формы: один на попытку записи, новый
+  // после успеха. Двойной клик, обогнавший блокировку кнопки, иначе завёл бы
+  // две партии — остаток вырос бы вдвое.
+  const [batchKey, setBatchKey] = useState(() => crypto.randomUUID());
 
   const noWarehouses = warehouses.length === 0;
 
@@ -101,6 +105,7 @@ export function StockPanel({
             invoiceDate: invoiceDate.trim() || undefined,
             unitPriceNet: netNum ?? undefined,
             vatRate: vatNum ?? undefined,
+            clientKey: batchKey,
           })
         : await addIntake(ingredientId, {
             warehouseId: wh,
@@ -124,6 +129,7 @@ export function StockPanel({
         setInvoiceDate("");
         setUnitPriceNet("");
         setVatRate("");
+        setBatchKey(crypto.randomUUID());
         router.refresh();
       }
     });

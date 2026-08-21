@@ -274,6 +274,17 @@ export async function addIntakeBatch(
     unitPriceNet?: number;
     vatRate?: number;
     note?: string;
+    /**
+     * Ключ идемпотентности одной заполненной формы (R-C: партия дороже движения).
+     *
+     * У обычного прихода ключ сознательно не передаётся — повтор из панели там
+     * считается осознанным вторым вводом. С партией иначе: двойной клик,
+     * обогнавший блокировку кнопки, завёл бы ДВЕ партии с двумя приходами, и
+     * остаток вырос бы вдвое. Ключ живёт, пока открыт блок «Партия», и
+     * обновляется после успешной записи — значит повтор той же формы вернёт ту
+     * же партию, а следующий приход заведёт новую.
+     */
+    clientKey?: string;
   },
 ): Promise<ActionResult> {
   if (!input.warehouseId) return { ok: false, error: "Выбери склад" };
@@ -295,6 +306,7 @@ export async function addIntakeBatch(
       unitPriceNet: input.unitPriceNet,
       vatRate: input.vatRate,
       note: input.note,
+      clientKey: input.clientKey,
     });
   } catch (err) {
     if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
