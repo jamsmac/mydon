@@ -552,7 +552,18 @@ export class FinanceService {
       this.db
         .select({ date: moneyFlow.date, amount: moneyFlow.amount })
         .from(moneyFlow)
-        .where(and(eq(moneyFlow.cashSymbol, "0200"), gte(moneyFlow.date, fromTs), lte(moneyFlow.date, toTs))),
+        .where(
+          and(
+            eq(moneyFlow.cashSymbol, "0200"),
+            // Отменённый взнос (cancelFlow) обещает уйти из сводов — без этого
+            // фильтра он ВСЁ РАВНО складывался в `deposited` (соседняя ветка
+            // выше уже исключает отменённые инкассации, а эта — нет; ревью
+            // среза К, 1.4).
+            ne(moneyFlow.status, "cancelled"),
+            gte(moneyFlow.date, fromTs),
+            lte(moneyFlow.date, toTs),
+          ),
+        ),
     ]);
 
     return cashReconcileMath(

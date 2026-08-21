@@ -440,4 +440,18 @@ describe("FinanceService.cashReconcile — изъято по системе vs �
     assert.equal(report.withdrawnPendingCount, 1);
     assert.equal(report.hasWithdrawn, true, "хоть одна инкассация в периоде БЫЛА — это не «данных нет»");
   });
+
+  it("НАСТОЯЩЕЕ условие: отменённый взнос 0200 — не идёт в сдано (фикс 1.4, симметрично отменённым инкассациям)", async () => {
+    const svc = new FinanceService(
+      reconcileDb({
+        moneyFlows: [
+          { date: new Date("2026-06-10T00:00:00+05:00"), amount: "5000000", cashSymbol: "0200", status: "actual" },
+          { date: new Date("2026-06-11T00:00:00+05:00"), amount: "9999999", cashSymbol: "0200", status: "cancelled" },
+        ],
+      }),
+    );
+    const report = await svc.cashReconcile("2026-06-01", "2026-06-30");
+    assert.equal(report.deposited, 5000000, "отменённый взнос не должен попасть в сумму сданного");
+    assert.equal(report.depositedCount, 1);
+  });
 });
