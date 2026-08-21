@@ -161,12 +161,16 @@ export function parseRegisterRows(
   table: { columns: string[]; rows: string[][] },
   today: string,
   /**
-   * Сколько строк файла лежит ВЫШЕ первой строки `rows`. У живого реестра это 2:
-   * строка-титул «OOO VENDHUB» и строка заголовков. Нужен, чтобы `fileRow`
-   * совпадал с номером строки в файле — из него строится ключ идемпотентности,
-   * и человек, читая отчёт о загрузке, должен найти строку глазами.
+   * Номер строки ФАЙЛА, которому соответствует `rows[0]`.
+   *
+   * Считать смещениями оказалось легко ошибиться, поэтому спрашиваем прямо.
+   * У живого реестра `parseXlsx` забирает в заголовок первую строку книги —
+   * титул «OOO VENDHUB», — значит `rows[0]` это вторая строка файла, и сюда
+   * надо передать 2. Тогда первая товарная строка получит `fileRow` 3, как её
+   * и видит человек в Excel. Из `fileRow` строится ключ идемпотентности, и по
+   * нему же владелец ищет проблемную позицию глазами.
    */
-  headerOffset = 0,
+  firstRowNumber = 1,
 ): RegisterRow[] {
   const out: RegisterRow[] = [];
 
@@ -221,7 +225,7 @@ export function parseRegisterRows(
     }
 
     out.push({
-      fileRow: index + 1 + headerOffset,
+      fileRow: index + firstRowNumber,
       group,
       year,
       supplier: supplier ?? "",

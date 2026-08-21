@@ -64,6 +64,7 @@ export * from "./recipe";
 export * from "./ingredient-price";
 // Разбор реестра закупок владельца в нормализованные записи (срез D, задача 1).
 export * from "./purchase-register";
+export * from "./batch-import";
 export * from "./stock";
 export * from "./planogram";
 export * from "./menu";
