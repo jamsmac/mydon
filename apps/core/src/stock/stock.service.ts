@@ -1442,7 +1442,13 @@ export class StockService implements OnModuleInit {
     counts: Record<ExpiryFlag, number>;
     rows: ExpiryRow[];
   }> {
-    const rows = await this.computeBatchRows({});
+    // Только партии, в которых что-то ОСТАЛОСЬ. Израсходованная партия не может
+    // испортиться: показывать её среди сроков — значит звать разбираться с тем,
+    // чего на полке нет. Особенно заметно после импорта истории: он заводит
+    // партии прошлого года и тут же закрывает их расходом (R-D1), и без этого
+    // отбора экран сроков сразу после загрузки наполнился бы десятками
+    // «просроченных» позиций, которых физически не существует.
+    const rows = (await this.computeBatchRows({})).filter((r) => r.remaining > 0);
     const counts: Record<ExpiryFlag, number> = { expired: 0, expiring: 0, ok: 0, none: 0 };
     for (const r of rows) counts[r.flag] += 1;
 

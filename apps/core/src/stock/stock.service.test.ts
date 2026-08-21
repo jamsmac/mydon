@@ -471,6 +471,28 @@ describe("StockService: GET /stock/batches — фильтр по флагу", ()
   });
 });
 
+describe("StockService: израсходованная партия не попадает в сроки годности", () => {
+  it("партия с нулевым остатком не считается и не показывается", async () => {
+    // Импорт истории заводит партию прошлого года и тут же закрывает её
+    // расходом: на полке её нет. Показать такую среди сроков значит позвать
+    // разбираться с несуществующим товаром — а после загрузки реестра таких
+    // партий сразу десятки.
+    const просрочена = { id: "b1", ingredientId: "ing-coffee", warehouseId: "wh-main", batchCode: null, expiryDate: "2025-01-01", manufactureDate: null, receivedOn: "2024-12-01", qtyReceived: "10.000", unit: "кг", openedOn: null, openedBy: null, personId: null, supplierId: null, invoiceNo: null, invoiceDate: null, note: null, source: "excel" };
+    const { db } = stockDb({
+      entities: [кофе, склад],
+      batches: [просрочена],
+      movements: [
+        { id: "m1", kind: "intake", ingredientId: "ing-coffee", warehouseId: "wh-main", batchId: "b1", qty: "10.000", unit: "кг", dt: "2024-12-01" },
+        { id: "m2", kind: "consumption", ingredientId: "ing-coffee", warehouseId: "wh-main", batchId: "b1", qty: "10.000", unit: "кг", dt: "2026-08-21" },
+      ],
+    });
+    const svc = new StockService(db);
+    const отчёт = await svc.expiryReport();
+    assert.equal(отчёт.rows.length, 0, "израсходованной партии в сроках нет");
+    assert.equal(отчёт.counts.expired, 0, "и в счётчике «просрочено» её тоже нет");
+  });
+});
+
 describe("StockService: GET /stock/expiry — счётчики и порядок FEFO", () => {
   it("считает партии по флагам и определяет очередь FEFO внутри группы ингредиент×склад", async () => {
     // b1 истекает раньше (2026-09-01), b2 позже (2026-12-01) — b1 должен уйти первым.
