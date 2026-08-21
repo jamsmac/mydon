@@ -31,12 +31,28 @@ function условиеЗначения(cond: unknown): string[] {
   return out;
 }
 
-/** Строка подходит под условие: совпал id, type (entity) или clientKey (movement). */
+/**
+ * Строка подходит под условие: совпал id, type (entity), clientKey/ingredientId
+ * (movement) или extId (batch — идемпотентность массового импорта, срез D
+ * задача 3). ingredientId понадобился для `ingredientStock`/`consumption` —
+ * без него `movementsOf(eq(stockMovement.ingredientId, id))` фильтровал ленту
+ * в пустоту (id движения не совпадает ни с чем), и остаток молча считался
+ * нулевым — баг стаба, не сервиса: он просто не был замечен раньше, потому
+ * что старые тесты `ingredientStock` не звали.
+ *
+ * extId и ingredientId — приближённо: реальный запрос extId фильтрует ПАРОЙ
+ * (source, extId), стаб же просто проверяет, что значение строки затесалось
+ * среди значений условия (см. docstring `условиеЗначения` выше) — фикстур с
+ * совпадающим extId у разных source или коллизией id/ingredientId в тестах
+ * нет, так что приближение не даёт ложных совпадений.
+ */
 function rowMatches(row: Row, values: string[]): boolean {
   if (values.length === 0) return true;
   if (values.includes(row.id as string)) return true;
   if ("type" in row && values.includes(row.type as string)) return true;
   if ("clientKey" in row && row.clientKey != null && values.includes(row.clientKey as string)) return true;
+  if ("extId" in row && row.extId != null && values.includes(row.extId as string)) return true;
+  if ("ingredientId" in row && values.includes(row.ingredientId as string)) return true;
   return false;
 }
 
@@ -476,5 +492,283 @@ describe("StockService: GET /stock/expiry — счётчики и порядок
     const res = await svc.expiryReport();
     assert.deepEqual(res.rows, []);
     assert.deepEqual(res.counts, { expired: 0, expiring: 0, ok: 0, none: 0 });
+  });
+});
+
+describe("StockService: createBatch — повтор по (source, extId), R-D1 закрытие расходом", () => {
+  it("повтор по (source, extId) возвращает ТУ ЖЕ партию, вторая не заводится", async () => {
+    // Тот же принцип, что и у clientKey: у stock_batch есть уникальный индекс
+    // stock_batch_ext_key на (source, ext_id), но раньше сервис его не
+    // проверял — повтор падал сырой ошибкой Postgres (факт 9 брифа).
+    const { db, inserts } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const первый = await svc.createBatch({
+      ingredientId: "ing-coffee",
+      warehouseId: "wh-main",
+      qtyReceived: 43,
+      unit: "кг",
+      receivedOn: "2025-05-17",
+      source: "purchase-register",
+      extId: "register:12",
+    });
+    const повтор = await svc.createBatch({
+      ingredientId: "ing-coffee",
+      warehouseId: "wh-main",
+      qtyReceived: 43,
+      unit: "кг",
+      receivedOn: "2025-05-17",
+      source: "purchase-register",
+      extId: "register:12",
+    });
+    assert.equal(повтор.id, первый.id, "та же партия, а не новая");
+    assert.equal(
+      inserts.filter((i) => i.table === "stock_batch").length,
+      1,
+      "второй партии не завелось",
+    );
+  });
+
+  it("closeOn закрывает партию расходом: remaining партии — 0, баланс ингредиента не изменился (R-D1)", async () => {
+    // Ruling R-D1: импорт истории закупок БЕЗ закрытия расходом задвоил бы
+    // остаток (кофе стал бы ~293 кг вместо реальных 43 на живом складе).
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const before = await svc.ingredientStock("ing-coffee");
+    assert.equal(before.total, 0, "движений ещё нет — остаток нулевой");
+
+    const batch = await svc.createBatch({
+      ingredientId: "ing-coffee",
+      warehouseId: "wh-main",
+      qtyReceived: 43,
+      unit: "кг",
+      receivedOn: "2025-05-17",
+      source: "purchase-register",
+      extId: "register:12",
+      closeOn: "2026-08-01",
+    });
+    assert.equal(batch.qtyReceived, 43, "приход партии записан как есть");
+    assert.equal(batch.remaining, 0, "партия закрыта расходом — остаток партии обнулён");
+
+    const after = await svc.ingredientStock("ing-coffee");
+    assert.equal(after.total, 0, "приход (+43) и закрывающий расход (−43) гасят друг друга — итог 0");
+    assert.equal(
+      after.total,
+      before.total,
+      "приход и закрывающий расход гасят друг друга — баланс ингредиента не изменился",
+    );
+  });
+
+  it("без closeOn партия остаётся открытой — обычный приход, поведение не изменилось", async () => {
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const batch = await svc.createBatch({
+      ingredientId: "ing-coffee",
+      warehouseId: "wh-main",
+      qtyReceived: 12,
+      unit: "кг",
+      receivedOn: "2025-05-17",
+    });
+    assert.equal(batch.remaining, 12, "без closeOn — партия открыта, остаток равен приходу");
+    const stock = await svc.ingredientStock("ing-coffee");
+    assert.equal(stock.total, 12);
+  });
+});
+
+describe("StockService: importBatches — массовый импорт с предпросмотром (срез D, задача 3)", () => {
+  it("создаёт партии по валидным строкам и считает отчёт", async () => {
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const res = await svc.importBatches({
+      source: "purchase-register",
+      items: [
+        {
+          fileRow: 3,
+          ingredientId: "ing-coffee",
+          warehouseId: "wh-main",
+          qtyReceived: 10,
+          unit: "кг",
+          receivedOn: "2025-05-17",
+        },
+        {
+          fileRow: 4,
+          ingredientId: "ing-coffee",
+          warehouseId: "wh-main",
+          qtyReceived: 5,
+          unit: "кг",
+          receivedOn: "2025-06-01",
+        },
+      ],
+    });
+    assert.equal(res.dryRun, false);
+    assert.equal(res.created, 2);
+    assert.equal(res.skippedRepeat, 0);
+    assert.deepEqual(res.noDate, []);
+    assert.deepEqual(res.unmatched, []);
+    assert.deepEqual(res.rejected, []);
+    const batches = await svc.listBatches({});
+    assert.equal(batches.rows.length, 2);
+  });
+
+  it("повтор по (source, extId): второй прогон той же строки — пропущено, партия не задвоена", async () => {
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const item = {
+      fileRow: 3,
+      ingredientId: "ing-coffee",
+      warehouseId: "wh-main",
+      qtyReceived: 10,
+      unit: "кг",
+      receivedOn: "2025-05-17",
+    };
+    const первый = await svc.importBatches({ source: "purchase-register", items: [item] });
+    assert.equal(первый.created, 1);
+    const второй = await svc.importBatches({ source: "purchase-register", items: [item] });
+    assert.equal(второй.created, 0);
+    assert.equal(второй.skippedRepeat, 1);
+    const batches = await svc.listBatches({});
+    assert.equal(batches.rows.length, 1, "партия не задвоилась повторным импортом того же файла");
+  });
+
+  it("closeOn у импорта закрывает партии расходом: баланс ингредиента не меняется", async () => {
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    await svc.importBatches({
+      source: "purchase-register",
+      closeOn: "2026-08-01",
+      items: [
+        {
+          fileRow: 3,
+          ingredientId: "ing-coffee",
+          warehouseId: "wh-main",
+          qtyReceived: 43,
+          unit: "кг",
+          receivedOn: "2025-05-17",
+        },
+      ],
+    });
+    const stock = await svc.ingredientStock("ing-coffee");
+    assert.equal(stock.total, 0, "приход и закрывающий расход гасят друг друга");
+    const batches = await svc.listBatches({});
+    assert.equal(batches.rows[0]!.remaining, 0);
+  });
+
+  it("dryRun ничего не пишет, но отчёт совпадает с настоящим прогоном (R-D7)", async () => {
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const items = [
+      {
+        fileRow: 3,
+        ingredientId: "ing-coffee",
+        warehouseId: "wh-main",
+        qtyReceived: 10,
+        unit: "кг",
+        receivedOn: "2025-05-17",
+      },
+    ];
+    const preview = await svc.importBatches({ source: "purchase-register", dryRun: true, items });
+    assert.equal(preview.dryRun, true);
+    assert.equal(preview.created, 1);
+    assert.equal(preview.skippedRepeat, 0);
+    const afterPreview = await svc.listBatches({});
+    assert.equal(afterPreview.rows.length, 0, "dryRun ничего не записал");
+
+    const real = await svc.importBatches({ source: "purchase-register", items });
+    assert.equal(real.dryRun, false);
+    assert.equal(real.created, preview.created, "отчёт dryRun совпадает с настоящим прогоном");
+    assert.equal(real.skippedRepeat, preview.skippedRepeat);
+    const afterReal = await svc.listBatches({});
+    assert.equal(afterReal.rows.length, 1, "а настоящий прогон партию всё же завёл");
+  });
+
+  it("строка без receivedOn не создаёт партию и уходит в «без даты»", async () => {
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const res = await svc.importBatches({
+      source: "purchase-register",
+      items: [
+        {
+          fileRow: 5,
+          ingredientId: "ing-coffee",
+          warehouseId: "wh-main",
+          qtyReceived: 2,
+          unit: "кг",
+          receivedOn: null,
+          name: "Молоко без даты",
+        },
+      ],
+    });
+    assert.equal(res.created, 0);
+    assert.deepEqual(res.noDate, [{ fileRow: 5, name: "Молоко без даты" }]);
+    const batches = await svc.listBatches({});
+    assert.equal(batches.rows.length, 0, "строка без даты не создала партию");
+  });
+
+  it("строка без сопоставленной карточки уходит в «не сопоставлено»", async () => {
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const res = await svc.importBatches({
+      source: "purchase-register",
+      items: [
+        {
+          fileRow: 6,
+          ingredientId: null,
+          warehouseId: "wh-main",
+          qtyReceived: 2,
+          unit: "кг",
+          receivedOn: "2025-05-17",
+          name: "Loramon вода",
+        },
+      ],
+    });
+    assert.equal(res.created, 0);
+    assert.deepEqual(res.unmatched, [{ fileRow: 6, name: "Loramon вода" }]);
+  });
+
+  it("товарная карточка (не ingredient, R-D2) отклоняется с причиной — импорт продолжается для остальных строк", async () => {
+    const товар = { id: "prod-snack", type: "product", name: "Сникерс", attrs: {} };
+    const { db } = stockDb({ entities: [кофе, склад, товар] });
+    const svc = new StockService(db);
+    const res = await svc.importBatches({
+      source: "purchase-register",
+      items: [
+        {
+          fileRow: 7,
+          ingredientId: "prod-snack",
+          warehouseId: "wh-main",
+          qtyReceived: 3,
+          unit: "шт",
+          receivedOn: "2025-05-17",
+          name: "Сникерс",
+        },
+        {
+          fileRow: 8,
+          ingredientId: "ing-coffee",
+          warehouseId: "wh-main",
+          qtyReceived: 4,
+          unit: "кг",
+          receivedOn: "2025-05-18",
+        },
+      ],
+    });
+    assert.equal(res.created, 1, "вторая строка всё же создала партию — падение первой не роняет пачку");
+    assert.equal(res.rejected.length, 1);
+    assert.equal(res.rejected[0]!.fileRow, 7);
+    assert.ok(res.rejected[0]!.reason.length > 0, "причина отклонения не пуста");
+    const batches = await svc.listBatches({});
+    assert.equal(batches.rows.length, 1);
+  });
+
+  it("пачка больше 500 строк отклоняется", async () => {
+    const { db } = stockDb({ entities: [кофе, склад] });
+    const svc = new StockService(db);
+    const items = Array.from({ length: 501 }, (_, i) => ({
+      fileRow: i + 1,
+      ingredientId: "ing-coffee",
+      warehouseId: "wh-main",
+      qtyReceived: 1,
+      unit: "кг",
+      receivedOn: "2025-05-17",
+    }));
+    await assert.rejects(svc.importBatches({ source: "purchase-register", items }));
   });
 });

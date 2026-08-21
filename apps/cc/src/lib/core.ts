@@ -1547,6 +1547,55 @@ export interface ExpiryReport {
   rows: ExpiryReportRow[];
 }
 
+/**
+ * Одна строка массового импорта партий (срез D, задача 3): вход для
+ * `POST /stock/batches/import`. Сопоставление карточки — забота витрины
+ * (Task 2 `suggestCard`): сюда идёт уже готовый `ingredientId`, а строка без
+ * подтверждённого сопоставления несёт `ingredientId: null`.
+ */
+export interface ImportBatchItem {
+  /** Номер строки в исходном файле — для отчёта и (по умолчанию) ключа идемпотентности. */
+  fileRow: number;
+  /** Карточка сырья, подтверждённая на витрине; null — не сопоставлена (уйдёт в unmatched). */
+  ingredientId: string | null;
+  warehouseId: string;
+  qtyReceived: number;
+  unit: string;
+  /** Дата прихода (R-D3); null — строка без даты (уйдёт в noDate, партия не создаётся). */
+  receivedOn: string | null;
+  supplier?: string | null;
+  invoiceNo?: string | null;
+  invoiceDate?: string | null;
+  unitPriceGross?: number | null;
+  note?: string | null;
+  /** Имя строки — только для отчёта, если она не создаст партию. */
+  name?: string | null;
+  /** Ключ идемпотентности строки в паре с `source`; по умолчанию — String(fileRow) на сервере. */
+  extId?: string | null;
+}
+
+/** Строка отчёта импорта без записи (без даты / не сопоставлена). */
+export interface ImportBatchIssue {
+  fileRow: number;
+  name: string | null;
+}
+
+/** Строка отчёта импорта, отклонённая с причиной (R-D2 и другие ошибки валидации). */
+export interface ImportBatchRejection extends ImportBatchIssue {
+  reason: string;
+}
+
+/** Отчёт массового импорта партий — одинаковый и в dryRun, и в настоящем прогоне (R-D7). */
+export interface ImportBatchesReport {
+  dryRun: boolean;
+  created: number;
+  /** Пропущено как повтор — партия с этим (source, extId) уже существует. */
+  skippedRepeat: number;
+  noDate: ImportBatchIssue[];
+  unmatched: ImportBatchIssue[];
+  rejected: ImportBatchRejection[];
+}
+
 /** Продажи одного товара (имя карточки + привязанные алиасы источника). */
 export interface ProductSales {
   total: { qty: number; amount: number };
@@ -2016,6 +2065,14 @@ export const core = {
   /** Отметить вскрытие партии. */
   openBatch: (id: string, input: Record<string, unknown> = {}) =>
     send<StockBatchRow>(`/stock/batch/${id}/open`, "POST", input),
+  /**
+   * Массовый импорт партий с предпросмотром (срез D, задача 3). До 500 строк;
+   * `dryRun: true` ничего не пишет и возвращает тот же отчёт, что настоящий
+   * прогон (R-D7). `closeOn` — дата инвентаризации: партии закрываются
+   * расходом того же объёма, остаток ингредиента не задваивается (R-D1).
+   */
+  importBatches: (input: { source: string; dryRun?: boolean; closeOn?: string | null; items: ImportBatchItem[] }) =>
+    send<ImportBatchesReport>("/stock/batches/import", "POST", input),
   pendingEntities: () =>
     get<{ cards: Entity[]; fields: (EntityDraft & { entityName: string; entityType: string })[] }>(
       "/entities/pending",
