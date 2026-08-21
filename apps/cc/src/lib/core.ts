@@ -1,4 +1,5 @@
 import "server-only";
+import type { DenominationCounts } from "@mydon/shared";
 
 /**
  * Клиент MYDON Core для оболочки.
@@ -571,6 +572,105 @@ export interface FinanceCounterparty {
   inn: string | null;
 }
 
+/**
+ * Одна строка массового импорта банковской выписки (срез К, задача 4): вход
+ * для `POST /finance/bank-statement`. Разбор строки — `parseBankStatement`
+ * (`@mydon/shared`); сюда приходит уже готовый результат.
+ */
+export interface ImportBankStatementItem {
+  /** Дата операции, ISO YYYY-MM-DD. */
+  date: string;
+  debit: number | null;
+  credit: number | null;
+  purpose?: string | null;
+  /** Кассовый символ банка («0200» — взнос наличной выручки). */
+  cashSymbol?: string | null;
+  docNo?: string | null;
+  /** Ключ идемпотентности — номер документа + дата (из разбора). */
+  extId: string;
+  fileRow?: number;
+}
+
+/** Строка отчёта импорта выписки, отклонённая с причиной. */
+export interface ImportBankStatementRejection {
+  extId: string;
+  fileRow?: number;
+  reason: string;
+}
+
+/** Отчёт массового импорта выписки — одинаковый и в dryRun, и в настоящем прогоне (R-D7). */
+export interface ImportBankStatementReport {
+  dryRun: boolean;
+  created: number;
+  /** Пропущено как повтор — запись с этим (source='bank', extId) уже существует. */
+  skippedRepeat: number;
+  rejected: ImportBankStatementRejection[];
+}
+
+/**
+ * Один календарный месяц сверки кассы (R-K6). `status` — признак ДАННЫХ, не
+ * разница: «одна сторона пуста» (`noWithdrawn`/`noDeposit`) — разрыв, стоящий
+ * внимания; `empty` (обе пусты) — тихий месяц, а не недостача.
+ */
+export interface CashReconcilePeriod {
+  /** YYYY-MM. */
+  period: string;
+  /** Сумма ТОЛЬКО известных (принятых) изъятий — ждущие приёма в неё не входят. */
+  withdrawn: number;
+  /** Число ПРИНЯТЫХ инкассаций месяца — ждущие приёма считаются отдельно в `withdrawnPending`. */
+  withdrawnCount: number;
+  /** Инкассаций месяца, ждущих приёма (сумма ещё не известна) — не входят ни в `withdrawn`, ни в `withdrawnCount`. */
+  withdrawnPending: number;
+  deposited: number;
+  depositedCount: number;
+  diff: number;
+  /** `pendingReceipt` — все инкассации месяца ждут приёма: не `noWithdrawn` (отсутствие суммы — не отсутствие инкассации). */
+  status: "ok" | "empty" | "noWithdrawn" | "noDeposit" | "pendingReceipt";
+}
+
+/** Сверка кассы за период (R-K6): изъято по системе (инкассации) против сдано в банк (символ 0200). */
+export interface CashReconcileReport {
+  from: string;
+  to: string;
+  /** Сумма ТОЛЬКО известных (принятых) изъятий. */
+  withdrawn: number;
+  /** Число ПРИНЯТЫХ инкассаций — ждущие приёма считаются отдельно в `withdrawnPendingCount`. */
+  withdrawnCount: number;
+  /** Инкассаций за весь период, ждущих приёма — не входят в `withdrawn`/`withdrawnCount`. */
+  withdrawnPendingCount: number;
+  /** false — за весь период не было ни одной инкассации (ни принятой, ни ждущей): `withdrawn: 0` тогда не сходимость, а отсутствие данных. */
+  hasWithdrawn: boolean;
+  deposited: number;
+  depositedCount: number;
+  hasDeposited: boolean;
+  diff: number;
+  /** Помесячно на весь запрошенный диапазон, включая месяцы без операций. */
+  periods: CashReconcilePeriod[];
+  /** Только периоды, где ровно ОДНА сторона пуста — то, что стоит смотреть в первую очередь. */
+  gaps: CashReconcilePeriod[];
+  /** Лаг изъятие→банк (2–7 дней) даёт ложные расхождения на границе месяцев — витрина обязана показать это предупреждение, а не молчать. */
+  note: string;
+}
+
+/**
+ * Строка реестра пробелов (срез К, задача 5): чего нельзя посчитать сейчас.
+ * Поля английские (R-K10) — модуль новый, соседей вроде `collections` с
+ * русскими ключами у него нет. Считается на чтении (R-K4): пустой список —
+ * хорошая новость, а не ошибка.
+ */
+export interface Gap {
+  /** Что именно нельзя посчитать. */
+  topic: string;
+  /** За какой период — если пробел привязан ко времени. */
+  period: { from: string; to: string } | null;
+  /** Каких данных не хватает — человеческим языком. */
+  missing: string;
+  /** Сколько стоит пробел, если это выразимо деньгами или штуками. */
+  scale: string | null;
+  /** Что сделать, чтобы закрылся. */
+  action: string;
+}
+
 // ── Склад техники GLOBERENT (перенос warehouse_vehicles PROMACH) ──
 
 export interface UnitReserveRow {
@@ -927,6 +1027,64 @@ export interface CollectionRow {
   status: "collected" | "received" | "cancelled";
   source: string;
   notes: string | null;
+}
+
+/** Сверка (R-K11): итог по автомату за весь запрошенный период. */
+export interface ReconcileRow {
+  machineId: string;
+  имя: string | null;
+  выручка: number;
+  изъято: number;
+  разница: number;
+  доля: number | null;
+  инкассаций: number;
+  медианныйИнтервалДней: number | null;
+  медианныйЛагДней: number | null;
+  /** «Инкассаций нет вовсе» / «выручки нет» / «ждёт приёма» — пробел данных, не недостача; не входит в `итог`. */
+  статус: "обычный" | "инкассаций нет вовсе" | "выручки нет" | "ждёт приёма";
+}
+
+/** Сверка (R-K11): один период между двумя соседними инкассациями на автомате. */
+export interface ReconcileInterval {
+  id: string;
+  machineId: string;
+  имя: string | null;
+  с: string;
+  по: string;
+  дней: number;
+  ожидалось: number;
+  /** null — закрывающая период инкассация ещё «ждёт приёма» (сумма не введена), а не изъято 0. */
+  изъято: number | null;
+  /** null — как и `изъято`: делить не на что, раз само изъятое неизвестно. */
+  разница: number | null;
+  /** Доля расхождения от ожидаемого, % (изъято меньше ожидаемого — отрицательная). null, если ожидание было нулевым (делить не на что) либо изъятое ещё не известно. */
+  доля: number | null;
+  статус: "обычный" | "пробел в журнале" | "ждёт приёма";
+}
+
+/** Агрегат сверки — только по строкам со статусом «обычный» (правило считать сходимость живёт в Core, не на витрине). */
+export interface ReconcileTotal {
+  выручка: number;
+  изъято: number;
+  разница: number;
+  доля: number | null;
+  автоматов: number;
+}
+
+/** Что исключено из `итог` и почему — видно числом, а не молчанием. */
+export interface ReconcileExcluded {
+  автоматов: number;
+  выручка: number;
+}
+
+export interface ReconcileResult {
+  from: string;
+  to: string;
+  rows: ReconcileRow[];
+  intervals: ReconcileInterval[];
+  первыхИсключено: number;
+  итог: ReconcileTotal;
+  внеИтога: ReconcileExcluded;
 }
 
 export interface Workload {
@@ -2112,10 +2270,18 @@ export const core = {
       всего: number;
       поАвтоматам: { machineId: string; имя: string | null; сумма: number; с: string | null }[];
     }>("/collections/cash-estimate"),
-  receiveCollection: (id: string, amount: number) =>
-    send<CollectionRow>(`/collections/${id}/receive`, "POST", { amount, manager: "owner" }),
+  /** Приём инкассации. `denominations` необязательна — сумма купюр должна совпасть с `amount`, иначе Core отказывает с обеими цифрами. */
+  receiveCollection: (id: string, amount: number, denominations?: DenominationCounts) =>
+    send<CollectionRow>(`/collections/${id}/receive`, "POST", {
+      amount,
+      manager: "owner",
+      ...(denominations ? { denominations } : {}),
+    }),
   cancelCollection: (id: string) =>
     send<CollectionRow>(`/collections/${id}/cancel`, "POST", { manager: "owner" }),
+  /** Сверка по автоматам за период: наличная выручка против изъятого (R-K11). */
+  reconcileCollections: (from: string, to: string) =>
+    get<ReconcileResult>(`/collections/reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   /**
    * Проданные чашки кофе — факт из панели производителя.
    *
@@ -2254,6 +2420,22 @@ export const core = {
   payFinanceFlow: (id: string, rate?: number) =>
     send<FinanceFlow>(`/finance/flows/${id}/pay`, "PATCH", rate !== undefined ? { rate } : {}),
   cancelFinanceFlow: (id: string) => send<FinanceFlow>(`/finance/flows/${id}/cancel`, "PATCH", {}),
+  /**
+   * Массовый импорт банковской выписки с предпросмотром (срез К, задача 4).
+   * `dryRun: true` ничего не пишет и возвращает тот же отчёт, что настоящий
+   * прогон (R-D7 среза D). Пишет в money_flow с source='bank'.
+   */
+  importBankStatement: (input: { dryRun?: boolean; items: ImportBankStatementItem[] }) =>
+    send<ImportBankStatementReport>("/finance/bank-statement", "POST", input),
+  /** Сверка кассы за период (R-K6): изъято по системе против сдано в банк (символ 0200), помесячно + разрывы. */
+  cashReconcile: (from: string, to: string) =>
+    get<CashReconcileReport>(`/finance/cash-reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+  /**
+   * Реестр пробелов (срез К, задача 5): что нельзя посчитать прямо сейчас,
+   * вычисляется на каждом чтении (R-K4) — пустой массив здесь означает, что
+   * всё, что можно посчитать, посчитано, а не что запрос сломан.
+   */
+  gaps: () => get<Gap[]>("/gaps"),
 
   // ── Источники (сырой слой) ──
   rawSources: () => get<{ sources: RawSourceState[] }>("/raw/sources"),

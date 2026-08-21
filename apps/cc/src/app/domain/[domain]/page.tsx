@@ -22,18 +22,21 @@ import {
   core,
   CoreUnavailable,
   type BrvValue,
+  type CashReconcileReport,
   type CoffeeBunkerIngredient,
   type Entity,
   type ExpiryReport,
   type FinanceCounterparty,
   type FinanceFlow,
   type FinanceSummary,
+  type Gap,
   type GrContract,
   type GrImport,
   type GrPreorder,
   type GrUnit,
   type Obligations,
   type Person,
+  type ReconcileResult,
   type Task,
   type TnvedRate,
 } from "../../../lib/core";
@@ -45,6 +48,8 @@ import { SalesView } from "../../../components/sales-view";
 import { ConsumptionView } from "../../../components/consumption-view";
 import { ProductsBook, isIncomplete } from "../../../components/products-book";
 import { ExpiryBook } from "../../../components/expiry-book";
+import { CashReconcile } from "../../../components/cash-reconcile";
+import { GapsBook } from "../../../components/gaps-book";
 import { ListShell, type ListShellKpi } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { RegisterImport } from "../../../components/register-import";
@@ -496,6 +501,39 @@ export default async function DomainPage({
   let expiryReport: ExpiryReport | null = null;
   if (group && leaf?.type === "expiry") {
     expiryReport = await core.expiryReport().catch(() => null);
+  }
+
+  // Сверка кассы (срез К, задача 6; R-K9 + R-K11): период задаётся ?from=&to=
+  // формой на самом листе, по умолчанию — вся известная история (инкассации
+  // идут с 26.05.2025, факт 11) до сегодня. `isDefaultPeriod` отличает «за всю
+  // историю данных нет» от «в выбранном окне пусто» — иначе оба выглядели бы
+  // одинаково (тот же урок, что дают три честных состояния ниже). Оба ответа
+  // ядра запрашиваются независимо и могут отсутствовать порознь (R-K9: два
+  // разных эндпоинта) — .catch(() => null) на каждом отдельно, а не общий try.
+  const CASH_RECONCILE_DEFAULT_FROM = "2025-01-01";
+  const ISO_DAY_EXACT = /^\d{4}-\d{2}-\d{2}$/;
+  let reconcileFrom = CASH_RECONCILE_DEFAULT_FROM;
+  let reconcileTo = todayKey;
+  let reconcileResult: ReconcileResult | null = null;
+  let cashReport: CashReconcileReport | null = null;
+  const isDefaultPeriod =
+    !(sp.from && ISO_DAY_EXACT.test(sp.from)) && !(sp.to && ISO_DAY_EXACT.test(sp.to));
+  if (group && leaf?.type === "cash_reconcile") {
+    if (sp.from && ISO_DAY_EXACT.test(sp.from)) reconcileFrom = sp.from;
+    if (sp.to && ISO_DAY_EXACT.test(sp.to)) reconcileTo = sp.to;
+    if (reconcileFrom > reconcileTo) [reconcileFrom, reconcileTo] = [reconcileTo, reconcileFrom];
+    [reconcileResult, cashReport] = await Promise.all([
+      core.reconcileCollections(reconcileFrom, reconcileTo).catch(() => null),
+      core.cashReconcile(reconcileFrom, reconcileTo).catch(() => null),
+    ]);
+  }
+
+  // Реестр пробелов (срез К, задача 6, шаг 3): вычисляется на каждом чтении
+  // (R-K4) — пустой массив здесь означает «всё, что можно посчитать, посчитано»,
+  // а не что запрос сломан (null — именно провал запроса).
+  let gapsResult: Gap[] | null = null;
+  if (group && leaf?.type === "gaps") {
+    gapsResult = await core.gaps().catch(() => null);
   }
 
   // Справочник растаможки (ставки ТН ВЭД + БРВ) — живые таблицы Core, не реестр.
@@ -1510,6 +1548,29 @@ export default async function DomainPage({
         />
       )}
 
+      {/* ── Сверка кассы (срез К, задача 6; R-K9 + R-K11): автомат → касса → счёт,
+          три секции, период + поиск по автомату, три честных пустых состояния ── */}
+      {group && leaf?.type === "cash_reconcile" && (
+        <CashReconcile
+          reconcile={reconcileResult}
+          cash={cashReport}
+          hrefBase={`/domain/${domain}`}
+          tab={active}
+          from={reconcileFrom}
+          to={reconcileTo}
+          defaultFrom={CASH_RECONCILE_DEFAULT_FROM}
+          defaultTo={todayKey}
+          isDefaultPeriod={isDefaultPeriod}
+          q={q ?? ""}
+        />
+      )}
+
+      {/* ── Пробелы (срез К, задача 6, шаг 3): что нельзя посчитать, почему, что
+          сделать — пустой список это хорошая новость, а не ошибка ── */}
+      {group && leaf?.type === "gaps" && (
+        <GapsBook gaps={gapsResult} hrefBase={`/domain/${domain}`} tab={active} q={q ?? ""} />
+      )}
+
       {/* ── Товары: журнал как в ПО владельца — поиск, категории, незаполненные ──
           Единый образец листа (§4): KPI сверху, «+ Запись» — в строке
           действия. Поиск и подвкладки категорий остаются внутри ProductsBook —
@@ -1853,7 +1914,7 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))

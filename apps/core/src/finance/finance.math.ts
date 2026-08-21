@@ -311,6 +311,212 @@ export function byMonth(rows: FlowForMath[], tz: string, months = 12): MonthCash
     .slice(-months);
 }
 
+/* ── Сверка кассы: изъято по системе vs сдано в банк (срез К, задача 4, R-K6) ── */
+
+/**
+ * Одно денежное событие для сверки: сумма и дата, откуда бы она ни пришла.
+ * `amount: null` — сумма ещё НЕ ИЗВЕСТНА (инкассация «ждёт приёма», этап 2 не
+ * пройден): штатное окно 2–7 дней между сбором и приёмом, а не 0 изъятых
+ * денег. Депозиты банка такого состояния не знают (в выписке сумма есть
+ * всегда) — null здесь имеет смысл только для изъятий/инкассаций.
+ */
+export interface CashMovement {
+  date: string | Date;
+  amount: number | null;
+}
+
+/**
+ * Один календарный месяц окна сверки. `status` — не разница, а признак ДАННЫХ:
+ * «пусто» с одной стороны — это не «недостача 100%», а «нечего сравнивать»
+ * (тот же принцип, что у `статус` строки в `CollectionsService.reconcile`).
+ */
+export interface CashReconcilePeriod {
+  /** YYYY-MM. */
+  period: string;
+  /** Сумма ТОЛЬКО известных (принятых) изъятий — ждущие приёма в неё не входят. */
+  withdrawn: number;
+  /** Число ПРИНЯТЫХ инкассаций месяца — ждущие приёма не входят (см. `withdrawnPending`). */
+  withdrawnCount: number;
+  /** Инкассаций месяца, ждущих приёма (сумма ещё не известна) — не входят ни в `withdrawn`, ни в `withdrawnCount`. */
+  withdrawnPending: number;
+  deposited: number;
+  depositedCount: number;
+  /** `deposited − withdrawn`. */
+  diff: number;
+  /**
+   * `ok` — данные есть с обеих сторон; `empty` — операций не было ни с одной
+   * (тихий месяц, а не разрыв); `noWithdrawn`/`noDeposit` — ровно ОДНА сторона
+   * пуста — это и есть разрыв (факт 9 плана среза К), стоящий внимания.
+   * `pendingReceipt` — заменяет `noWithdrawn`, когда `withdrawnCount = 0`
+   * только потому, что ВСЕ инкассации месяца ждут приёма: отсутствие суммы —
+   * не отсутствие инкассации (срез К, ревью 1.2, симптом 3), поэтому в `gaps`
+   * такой месяц не попадает.
+   */
+  status: "ok" | "empty" | "noWithdrawn" | "noDeposit" | "pendingReceipt";
+}
+
+export interface CashReconcileReport {
+  from: string;
+  to: string;
+  /** Сумма ТОЛЬКО известных (принятых) изъятий за весь период. */
+  withdrawn: number;
+  /** Число ПРИНЯТЫХ инкассаций за период — ждущие приёма считаются отдельно в `withdrawnPendingCount`. */
+  withdrawnCount: number;
+  /** Инкассаций за весь период, ждущих приёма (сумма неизвестна) — не входят в `withdrawn`/`withdrawnCount`. */
+  withdrawnPendingCount: number;
+  /** `false` — за весь период не было ни одной инкассации (ни принятой, ни ждущей): `withdrawn: 0` тогда — не факт сходимости, а отсутствие данных. */
+  hasWithdrawn: boolean;
+  deposited: number;
+  depositedCount: number;
+  /** `false` — за весь период банк не показал ни одного взноса `0200`. */
+  hasDeposited: boolean;
+  diff: number;
+  /** Помесячная раскладка на весь запрошенный диапазон, включая месяцы без единой операции. */
+  periods: CashReconcilePeriod[];
+  /** Только периоды, где ровно ОДНА сторона пуста (не обе) — то, что стоит смотреть в первую очередь. */
+  gaps: CashReconcilePeriod[];
+  /**
+   * Явное предупреждение о лаге между изъятием и зачислением ({@link
+   * CASH_RECONCILE_LAG_NOTE}) — молчащая витрина хуже неточной: без него
+   * расхождение на границе двух месяцев читалось бы как недостача.
+   */
+  note: string;
+}
+
+/**
+ * Между сбором денег из автомата (`collectedAt`) и появлением взноса в банке
+ * лаг **2–7 дней** (замерено в сверке по автоматам, срез К, задача 3:
+ * `медианныйЛагДней` в `CollectionsService.reconcile`). При ПОМЕСЯЧНОЙ
+ * группировке это значит: деньги, изъятые в последние дни месяца, банк
+ * покажет уже в следующем — месяц изъятия недосчитается, следующий получит
+ * лишнее. Разница НА ГРАНИЦЕ двух соседних месяцев может быть этим лагом,
+ * а не недостачей — прежде чем искать пропажу, сравнить несколько месяцев
+ * подряд, а не один.
+ */
+export const CASH_RECONCILE_LAG_NOTE =
+  "Между изъятием из автомата (сбор) и появлением взноса в банке — лаг 2–7 дней " +
+  "(замерено в сверке по автоматам, задача 3). Деньги, изъятые в конце месяца, банк " +
+  "покажет уже в следующем: расхождение НА ГРАНИЦЕ двух соседних месяцев может быть " +
+  "этим лагом, а не недостачей — сравнивайте несколько месяцев подряд, а не один.";
+
+/** Месяцы `YYYY-MM` от `from` до `to` включительно (обе даты `YYYY-MM-DD`). */
+function monthRange(from: string, to: string): string[] {
+  let y = Number(from.slice(0, 4));
+  let m = Number(from.slice(5, 7));
+  const yTo = Number(to.slice(0, 4));
+  const mTo = Number(to.slice(5, 7));
+  const out: string[] = [];
+  // Защита от бесконечного цикла на мусорном вводе — сервис уже проверил формат
+  // и `from <= to`, но чистая функция не должна зависать даже на чужой ошибке.
+  let guard = 0;
+  while ((y < yTo || (y === yTo && m <= mTo)) && guard < 1200) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+    guard += 1;
+  }
+  return out;
+}
+
+/**
+ * Сверка кассы за период (R-K6): изъято по системе (инкассации) против сдано
+ * в банк (взносы с кассовым символом `0200`) — АГРЕГАТНО по месяцам, а не
+ * построчно: у 43 взносов и сотен инкассаций нет общего ключа операции,
+ * банк видит суммарный взнос, система — сборы по автоматам.
+ *
+ * `periods` перечисляет КАЖДЫЙ месяц диапазона, даже без единой операции —
+ * иначе «нет данных» и «сошлось в ноль» выглядели бы одинаково. `gaps` —
+ * только те месяцы, где ровно одна сторона пуста: это и есть разрыв, который
+ * стоит объяснять (пропуск инкассации в систему или задержка сдачи в банк),
+ * а не «в этом месяце просто было тихо» (обе стороны пусты — `empty`).
+ */
+export function cashReconcile(
+  withdrawals: readonly CashMovement[],
+  deposits: readonly CashMovement[],
+  from: string,
+  to: string,
+  tz: string,
+): CashReconcileReport {
+  const inRange = (d: string | Date): boolean => {
+    const key = dayKey(d, tz);
+    return key >= from && key <= to;
+  };
+  const w = withdrawals.filter((x) => inRange(x.date));
+  const dep = deposits.filter((x) => inRange(x.date));
+
+  /**
+   * `amount: null` (ждёт приёма) считается ОТДЕЛЬНО от известной суммы:
+   * попадание в `pendingCount`, а не молчаливый вклад нуля в `sum`/`count` —
+   * иначе месяц, где инкассации ЕСТЬ, но все ждут приёма, читался бы как
+   * «инкассаций не было вовсе» (срез К, ревью 1.2, симптом 3).
+   */
+  const byMonth = (rows: readonly CashMovement[]): Map<string, { sum: number; count: number; pendingCount: number }> => {
+    const map = new Map<string, { sum: number; count: number; pendingCount: number }>();
+    for (const x of rows) {
+      const month = dayKey(x.date, tz).slice(0, 7);
+      const e = map.get(month) ?? { sum: 0, count: 0, pendingCount: 0 };
+      if (x.amount === null) {
+        e.pendingCount += 1;
+      } else {
+        e.sum += x.amount;
+        e.count += 1;
+      }
+      map.set(month, e);
+    }
+    return map;
+  };
+  const wByMonth = byMonth(w);
+  const depByMonth = byMonth(dep);
+
+  const periods: CashReconcilePeriod[] = monthRange(from, to).map((month) => {
+    const wm = wByMonth.get(month) ?? { sum: 0, count: 0, pendingCount: 0 };
+    const dm = depByMonth.get(month) ?? { sum: 0, count: 0, pendingCount: 0 };
+    const status: CashReconcilePeriod["status"] =
+      wm.count === 0 && wm.pendingCount > 0
+        ? "pendingReceipt"
+        : wm.count === 0 && dm.count === 0
+          ? "empty"
+          : wm.count === 0
+            ? "noWithdrawn"
+            : dm.count === 0
+              ? "noDeposit"
+              : "ok";
+    return {
+      period: month,
+      withdrawn: Math.round(wm.sum),
+      withdrawnCount: wm.count,
+      withdrawnPending: wm.pendingCount,
+      deposited: Math.round(dm.sum),
+      depositedCount: dm.count,
+      diff: Math.round(dm.sum - wm.sum),
+      status,
+    };
+  });
+
+  const wKnown = w.filter((x): x is { date: string | Date; amount: number } => x.amount !== null);
+  const withdrawn = Math.round(wKnown.reduce((s, x) => s + x.amount, 0));
+  const deposited = Math.round(dep.reduce((s, x) => s + (x.amount ?? 0), 0));
+
+  return {
+    from,
+    to,
+    withdrawn,
+    withdrawnCount: wKnown.length,
+    withdrawnPendingCount: w.length - wKnown.length,
+    hasWithdrawn: w.length > 0,
+    deposited,
+    depositedCount: dep.length,
+    hasDeposited: dep.length > 0,
+    diff: deposited - withdrawn,
+    periods,
+    gaps: periods.filter((p) => p.status === "noWithdrawn" || p.status === "noDeposit"),
+    note: CASH_RECONCILE_LAG_NOTE,
+  };
+}
+
 /* ── Автокурс ЦБ РУз (cbu.uz) ────────────────────────────────────────────── */
 
 /** Валюты, которые тянутся из ЦБ автоматически — словарь формы курса панели. */

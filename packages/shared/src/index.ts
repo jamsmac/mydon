@@ -115,3 +115,13 @@ export * from "./actor";
 /** Партии сырья: расход по FEFO и срок годности (перенос из mydon_1, срез C). */
 export * from "./fefo";
 export * from "./expiry";
+
+/** Касса и инкассация: номиналы сума и сверка набора купюр (срез K, задача 1). */
+export * from "./denominations";
+export * from "./bank-statement";
+
+/**
+ * Время источника (R-K8): разбор явный, по коду, а не по `TZ` процесса
+ * (срез K, задача 7).
+ */
+export * from "./tashkent-time";

@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   aging,
   byMonth,
+  CASH_RECONCILE_LAG_NOTE,
+  cashReconcile,
   concentration,
   daysBetween,
   dueSoon,
@@ -292,5 +294,169 @@ describe("fxRefreshPlan — автокурс ЦБ РУз (ручной ввод 
     );
     assert.deepEqual(plan.inserts, []);
     assert.equal(plan.skipped.length, 2);
+  });
+});
+
+describe("cashReconcile — изъято по системе vs сдано в банк (R-K6)", () => {
+  const TZ = "Asia/Tashkent";
+
+  it("месяц с операциями по обеим сторонам — статус ok, разница deposited − withdrawn", () => {
+    const r = cashReconcile(
+      [{ date: "2026-06-05T10:00:00+05:00", amount: 100000 }],
+      [{ date: "2026-06-12T10:00:00+05:00", amount: 90000 }],
+      "2026-06-01",
+      "2026-06-30",
+      TZ,
+    );
+    assert.equal(r.withdrawn, 100000);
+    assert.equal(r.deposited, 90000);
+    assert.equal(r.diff, -10000);
+    assert.equal(r.periods.length, 1);
+    assert.equal(r.periods[0]!.status, "ok");
+    assert.deepEqual(r.gaps, []);
+  });
+
+  it("отчёт ВСЕГДА несёт предупреждение о лаге изъятие→банк — молчащая витрина хуже неточной", () => {
+    const r = cashReconcile([], [], "2026-06-01", "2026-06-30", TZ);
+    assert.equal(r.note, CASH_RECONCILE_LAG_NOTE);
+    assert.match(r.note, /лаг 2–7 дней/);
+    assert.match(r.note, /границ/i, "предупреждение обязано называть именно границу месяцев, а не общий лаг");
+  });
+
+  it("период без инкассаций отдаёт признак «нет данных», а не ноль — сумма при этом ноль", () => {
+    const r = cashReconcile(
+      [],
+      [{ date: "2026-06-12T10:00:00+05:00", amount: 90000 }],
+      "2026-06-01",
+      "2026-06-30",
+      TZ,
+    );
+    assert.equal(r.withdrawn, 0);
+    assert.equal(r.hasWithdrawn, false, "нет ни одной инкассации за период — это факт «нет данных», не «собрали ноль»");
+    assert.equal(r.hasDeposited, true);
+    assert.equal(r.periods[0]!.status, "noWithdrawn");
+    assert.equal(r.gaps.length, 1);
+    assert.equal(r.gaps[0]!.period, "2026-06");
+  });
+
+  it("обе стороны пусты в месяце — статус empty, а НЕ в gaps (тихий месяц ≠ разрыв)", () => {
+    const r = cashReconcile(
+      [{ date: "2026-05-05", amount: 50000 }],
+      [{ date: "2026-05-05", amount: 50000 }],
+      "2026-05-01",
+      "2026-07-31",
+      TZ,
+    );
+    assert.equal(r.periods.length, 3, "май-июнь-июль перечислены все, даже пустые");
+    const june = r.periods.find((p) => p.period === "2026-06")!;
+    const july = r.periods.find((p) => p.period === "2026-07")!;
+    assert.equal(june.status, "empty");
+    assert.equal(july.status, "empty");
+    assert.ok(!r.gaps.some((g) => g.period === "2026-06" || g.period === "2026-07"), "тихий месяц не считается разрывом");
+  });
+
+  it("сдано без изъятия — noDeposit наоборот тоже разрыв", () => {
+    const r = cashReconcile(
+      [{ date: "2026-06-05", amount: 100000 }],
+      [],
+      "2026-06-01",
+      "2026-06-30",
+      TZ,
+    );
+    assert.equal(r.periods[0]!.status, "noDeposit");
+    assert.equal(r.gaps.length, 1);
+  });
+
+  it("операции за пределами [from, to] в сумму не попадают", () => {
+    const r = cashReconcile(
+      [
+        { date: "2026-05-31T23:00:00+05:00", amount: 1 },
+        { date: "2026-06-15", amount: 100000 },
+        { date: "2026-07-01T00:00:00+05:00", amount: 1 },
+      ],
+      [],
+      "2026-06-01",
+      "2026-06-30",
+      TZ,
+    );
+    assert.equal(r.withdrawn, 100000);
+    assert.equal(r.withdrawnCount, 1);
+  });
+
+  it("итог за несколько месяцев — сумма по всем операциям диапазона, не только по одному месяцу", () => {
+    const r = cashReconcile(
+      [
+        { date: "2026-06-05", amount: 100000 },
+        { date: "2026-07-05", amount: 200000 },
+      ],
+      [
+        { date: "2026-06-12", amount: 90000 },
+        { date: "2026-07-12", amount: 190000 },
+      ],
+      "2026-06-01",
+      "2026-07-31",
+      TZ,
+    );
+    assert.equal(r.withdrawn, 300000);
+    assert.equal(r.deposited, 280000);
+    assert.equal(r.diff, -20000);
+    assert.equal(r.periods.length, 2);
+  });
+
+  describe("amount: null — «ждёт приёма» не равно 0 (срез К, ревью 1.2, симптом 3)", () => {
+    it("месяц, где ВСЕ инкассации ждут приёма — статус pendingReceipt, а не noWithdrawn, и не попадает в gaps", () => {
+      const r = cashReconcile(
+        [
+          { date: "2026-06-05T10:00:00+05:00", amount: null },
+          { date: "2026-06-20T10:00:00+05:00", amount: null },
+        ],
+        [{ date: "2026-06-12T10:00:00+05:00", amount: 90000 }],
+        "2026-06-01",
+        "2026-06-30",
+        TZ,
+      );
+      assert.equal(r.withdrawn, 0, "сумма пока неизвестна — не 0-как-недостача, а «неизвестно»");
+      assert.equal(r.withdrawnCount, 0);
+      assert.equal(r.hasWithdrawn, true, "инкассации БЫЛИ — это не «данных нет вовсе»");
+      assert.equal(r.withdrawnPendingCount, 2);
+      assert.equal(r.periods[0]!.status, "pendingReceipt");
+      assert.equal(r.periods[0]!.withdrawnPending, 2);
+      assert.deepEqual(r.gaps, [], "pendingReceipt — не разрыв, недостачи здесь не ищем");
+    });
+
+    it("месяц со смесью принятых и ждущих — withdrawn считает только принятые, статус ok при наличии обеих сторон", () => {
+      const r = cashReconcile(
+        [
+          { date: "2026-06-05T10:00:00+05:00", amount: 100000 },
+          { date: "2026-06-20T10:00:00+05:00", amount: null },
+        ],
+        [{ date: "2026-06-12T10:00:00+05:00", amount: 90000 }],
+        "2026-06-01",
+        "2026-06-30",
+        TZ,
+      );
+      assert.equal(r.withdrawn, 100000, "ждущая приёма инкассация не входит в сумму, но и не занижает её нулём молча");
+      assert.equal(r.withdrawnCount, 1);
+      assert.equal(r.withdrawnPendingCount, 1);
+      assert.equal(r.periods[0]!.status, "ok", "есть и принятая инкассация, и взнос — разрыва нет");
+      assert.equal(r.periods[0]!.withdrawnPending, 1);
+    });
+
+    it("КЛЮЧЕВОЙ ТЕСТ: без фикса amount=null давал бы Number(null)=0 — withdrawn остался бы 0 даже после приёма суммы", () => {
+      // Наивная (сломанная) реализация: withdrawn = w.reduce((s,x) => s + x.amount, 0)
+      // на CashMovement.amount: number — Number(null) не участвует явно, но
+      // TypeScript такой ввод даже не пропустил бы; здесь фиксируем ПОВЕДЕНИЕ,
+      // которое и есть контракт: null не участвует в сумме и не путается с 0.
+      const rWithPending = cashReconcile([{ date: "2026-06-05", amount: null }], [], "2026-06-01", "2026-06-30", TZ);
+      const rEmpty = cashReconcile([], [], "2026-06-01", "2026-06-30", TZ);
+      assert.equal(rWithPending.withdrawn, rEmpty.withdrawn, "оба withdrawn=0 численно...");
+      assert.notEqual(
+        rWithPending.periods[0]!.status,
+        rEmpty.periods[0]!.status,
+        "...но статус ОБЯЗАН различаться: pendingReceipt (инкассация была) ≠ empty (не было вовсе)",
+      );
+      assert.equal(rEmpty.periods[0]!.status, "empty");
+      assert.equal(rWithPending.periods[0]!.status, "pendingReceipt");
+    });
   });
 });
