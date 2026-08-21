@@ -171,7 +171,18 @@ export class ImportBatchItemDto {
   @IsUUID()
   warehouseId!: string;
 
-  @IsNumber() @IsPositive()
+  /**
+   * Количество. Проверку «больше нуля» здесь СОЗНАТЕЛЬНО не ставим — в отличие
+   * от формы одиночного прихода выше.
+   *
+   * `ValidationPipe` отбивает запрос ЦЕЛИКОМ до входа в контроллер: одна строка
+   * реестра с нулевым количеством отвергла бы все 135 и вернула невнятный
+   * объект ошибок вместо построчного отчёта. Смысл импорта ровно обратный —
+   * плохая строка обязана попасть в отчёт с причиной, а остальные загрузиться.
+   * Семантику проверяет сервис построчно («Количество партии должно быть
+   * больше нуля»), DTO следит только за типом.
+   */
+  @IsNumber()
   qtyReceived!: number;
 
   @IsString() @MaxLength(16)
@@ -190,7 +201,9 @@ export class ImportBatchItemDto {
   @IsOptional() @IsString() @MaxLength(10)
   invoiceDate?: string | null;
 
-  @IsOptional() @IsNumber() @Min(0)
+  /** Цена с НДС. `@Min(0)` тут нет по той же причине, что и у количества: минус
+   *  должен отвергнуть СТРОКУ, а не весь импорт. Знак проверяет сервис. */
+  @IsOptional() @IsNumber()
   unitPriceGross?: number | null;
 
   @IsOptional() @IsString() @MaxLength(1000)

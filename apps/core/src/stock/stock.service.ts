@@ -1091,6 +1091,20 @@ export class StockService implements OnModuleInit {
       }
   > {
     if (!(input.qtyReceived > 0)) throw new BadRequestException("Количество партии должно быть больше нуля");
+    // Знак цены проверяем здесь, а не в DTO: при массовом импорте одна строка с
+    // минусом иначе отвергла бы всю пачку. Отрицательная цена — опечатка ввода,
+    // то же правило, что в ingredient-price.ts.
+    for (const [что, цена] of [
+      ["без НДС", input.unitPriceNet],
+      ["с НДС", input.unitPriceGross],
+    ] as const) {
+      if (цена != null && цена < 0) {
+        throw new BadRequestException(`Цена ${что} не может быть отрицательной — похоже на опечатку`);
+      }
+    }
+    if (input.vatRate != null && input.vatRate < 0) {
+      throw new BadRequestException("Ставка НДС не может быть отрицательной");
+    }
     if (!isUnit(input.unit)) throw new BadRequestException(`Единица «${input.unit}» неизвестна`);
     const unit: Unit = input.unit;
 
