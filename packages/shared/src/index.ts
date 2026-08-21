@@ -115,3 +115,6 @@ export * from "./actor";
 /** Партии сырья: расход по FEFO и срок годности (перенос из mydon_1, срез C). */
 export * from "./fefo";
 export * from "./expiry";
+
+/** Касса и инкассация: номиналы сума и сверка набора купюр (срез K, задача 1). */
+export * from "./denominations";
