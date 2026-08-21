@@ -50,6 +50,7 @@ import { StocktakeSession } from "../../../components/stocktake-session";
 import {
   PLACE_TYPES,
   cardPrice,
+  matchContractorByName,
   normalizeMachineSerial,
   parseMenu,
   parsePlanogram,
@@ -280,11 +281,15 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
       bunkerRows = [];
       bunkerNameMatch = false;
     }
-    const поставщикИмя = typeof a["поставщик"] === "string" ? a["поставщик"].trim().toLowerCase() : "";
-    if (поставщикИмя) {
+    // Сравнение имён — через нормализацию (`matchContractorByName`), а не
+    // побуквенно: владелец пишет «AURATRADE 18», Didox отдаёт `"AURATRADE 18"
+    // MCHJ`. Побуквенно из восьми живых поставщиков сходился ровно один, и
+    // поле «поставщик» выглядело заполненным, но никуда не вело.
+    const поставщикИмя = typeof a["поставщик"] === "string" ? a["поставщик"] : "";
+    if (поставщикИмя.trim() !== "") {
       try {
         const контрагенты = await core.contractorsAll();
-        supplierId = контрагенты.find((c) => c.name.trim().toLowerCase() === поставщикИмя)?.id ?? null;
+        supplierId = matchContractorByName(поставщикИмя, контрагенты)?.id ?? null;
       } catch {
         supplierId = null;
       }

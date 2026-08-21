@@ -68,6 +68,7 @@ export * from "./menu";
 export * from "./vending-calc";
 export * from "./coffee-calc";
 export * from "./coffee-order";
+export * from "./contractor-name";
 export * from "./cash-estimate";
 export * from "./service-feed";
 export * from "./consumption";
