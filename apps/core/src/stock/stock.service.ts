@@ -1,16 +1,26 @@
 import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { BadRequestException } from "@nestjs/common";
-import { entity, purchase, rawLink, sale, stockMovement } from "@mydon/db";
+import { entity, person, purchase, rawLink, sale, stockBatch, stockMovement } from "@mydon/db";
 import {
+  allocateFEFO,
   consumptionReport,
   convertQty,
+  DEFAULT_EXPIRING_DAYS,
+  effectiveExpiry,
+  expiryFlag,
+  FLAG_ORDER,
   isUnit,
+  matchContractorByName,
   normalizeSourceKey,
   parseRecipe,
   planPurchaseIntake,
   productKind,
   recipeCost,
   stockBalance,
+  strictNumber,
+  type ContractorRef,
+  type ExpiryFlag,
+  type FefoBatch,
   type IngredientPrice,
   type PurchaseInput,
   type RecipeLine,
@@ -22,6 +32,79 @@ import {
 import { Cron } from "croner";
 import { and, desc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+
+function isExpiryFlag(v: string): v is ExpiryFlag {
+  return v === "expired" || v === "expiring" || v === "ok" || v === "none";
+}
+
+/** Строка партии для списков/отчёта: остаток и срок уже посчитаны. */
+export interface BatchRow {
+  id: string;
+  ingredientId: string;
+  ingredientName: string;
+  warehouseId: string;
+  warehouseName: string;
+  batchCode: string | null;
+  receivedOn: string;
+  qtyReceived: number;
+  unit: string;
+  /** Остаток партии = qtyReceived минус сумма расходных (consumption) движений с этим batchId. Леджер, не поле. */
+  remaining: number;
+  /** Эффективный срок годности (ISO-дата) или null — ни даты, ни норматива карточки нет. */
+  expiry: string | null;
+  flag: ExpiryFlag;
+  opened: boolean;
+  openedOn: string | null;
+  supplierId: string | null;
+  supplierName: string | null;
+  invoiceNo: string | null;
+  invoiceDate: string | null;
+  note: string | null;
+  source: string;
+}
+
+/** Строка отчёта о сроках: партия плюс её место в очереди FEFO. */
+export interface ExpiryRow extends BatchRow {
+  /** Порядковый номер, каким партия уйдёт следующей по FEFO среди партий того же ингредиента и склада. null — остаток исчерпан. */
+  fefoOrder: number | null;
+}
+
+/** Сортировка партий/отчёта: сначала просроченное (FLAG_ORDER), затем ближе срок, затем новее приход. */
+function compareBatchRow(a: BatchRow, b: BatchRow): number {
+  const fo = FLAG_ORDER[a.flag] - FLAG_ORDER[b.flag];
+  if (fo !== 0) return fo;
+  const ea = a.expiry ? new Date(a.expiry).getTime() : Infinity;
+  const eb = b.expiry ? new Date(b.expiry).getTime() : Infinity;
+  if (ea !== eb) return ea - eb;
+  return b.receivedOn.localeCompare(a.receivedOn);
+}
+
+/** Заявка на новую партию прихода: карточка §4.3 плюс документ Р3/Р4. */
+export interface CreateBatchInput {
+  ingredientId: string;
+  warehouseId: string;
+  qtyReceived: number;
+  unit: string;
+  receivedOn?: string | null;
+  batchCode?: string | null;
+  expiryDate?: string | null;
+  manufactureDate?: string | null;
+  personId?: string | null;
+  /** Имя поставщика как в карточке — разрешается в supplierId через matchContractorByName (R-C4). */
+  supplier?: string | null;
+  invoiceNo?: string | null;
+  invoiceDate?: string | null;
+  ikpu?: string | null;
+  unitPriceNet?: number | null;
+  vatRate?: number | null;
+  unitPriceGross?: number | null;
+  note?: string | null;
+  source?: string | null;
+  extId?: string | null;
+  createdBy?: string | null;
+  /** Ключ идемпотентности связанного движения прихода — тот же приём, что у createMovement. */
+  clientKey?: string | null;
+}
 
 /** Заявка на движение склада. */
 export interface CreateMovementInput {
@@ -38,6 +121,13 @@ export interface CreateMovementInput {
   createdBy?: string | null;
   /** Ключ идемпотентности от клиента (бот): повтор несёт то же значение. */
   clientKey?: string | null;
+  /**
+   * Партия, к которой относится движение. НЕ часть публичного контракта
+   * `POST /stock/movement` (контроллер это поле не принимает и не может
+   * задать) — заполняется только сервисом партий (createBatch) при создании
+   * приходного движения вместе с новой партией.
+   */
+  batchId?: string | null;
 }
 
 /** Пересчёт: сколько по факту насчитали ингредиента на складе. */
@@ -150,6 +240,7 @@ export class StockService implements OnModuleInit {
         ingredientId: input.ingredientId,
         warehouseId: input.warehouseId,
         counterpartyId: input.kind === "transfer" ? input.counterpartyId : null,
+        batchId: input.batchId ?? null,
         dt: input.dt ?? new Date().toISOString().slice(0, 10),
         qty: String(input.qty),
         unit: input.unit,
@@ -757,5 +848,331 @@ export class StockService implements OnModuleInit {
       badUnit: plan.badUnit.length,
       noWarehouse: null,
     };
+  }
+
+  /** Сотрудник существует — иначе FK партии/вскрытия упал бы сырой ошибкой БД. */
+  private async personExists(id: string): Promise<void> {
+    const [row] = await this.db.select({ id: person.id }).from(person).where(eq(person.id, id));
+    if (!row) throw new NotFoundException(`Сотрудник ${id} не найден`);
+  }
+
+  /**
+   * Сопоставить имя поставщика (свободный текст с карточки/формы прихода) с
+   * карточкой контрагента (R-C4). Не нашлось ИЛИ нашлось больше одной —
+   * `null`, без выдумок (см. `matchContractorByName`).
+   */
+  private async matchSupplier(name: string | null | undefined): Promise<string | null> {
+    const raw = typeof name === "string" ? name.trim() : "";
+    if (raw === "") return null;
+    const contractors: ContractorRef[] = await this.db
+      .select({ id: entity.id, name: entity.name })
+      .from(entity)
+      .where(eq(entity.type, "contractor"));
+    return matchContractorByName(raw, contractors)?.id ?? null;
+  }
+
+  /**
+   * Партии с посчитанным остатком и сроком годности.
+   *
+   * Остаток — леджером: `qty_received` минус сумма `consumption`-движений с
+   * этим `batch_id` (шаг 1 брифа); никакого денормализованного поля. Этот
+   * срез не подключает автосписание к движениям (R-C2 — на чтение), поэтому
+   * сегодня таких движений нет ни одного и остаток партии всегда равен
+   * `qtyReceived` — запрос уже готов на будущее, когда появится расход.
+   *
+   * Срок — `effectiveExpiry`: явная `expiry_date` партии, иначе
+   * `manufacture_date ?? received_on` плюс норматив карточки
+   * `attrs["срок годности, дней"]`; нет и норматива — флаг `none`.
+   *
+   * Фильтр по `ingredientId`/`warehouseId`/`ids` — точное совпадение в JS
+   * после полной выборки (партий у одного заведения — десятки-сотни, не
+   * тысячи; так дешевле, чем городить динамическое `where` под каждую
+   * комбинацию опциональных фильтров).
+   */
+  private async computeBatchRows(filter: {
+    ingredientId?: string;
+    warehouseId?: string;
+    ids?: string[];
+  }): Promise<BatchRow[]> {
+    if (filter.ids && filter.ids.length === 0) return [];
+    let rows = await this.db.select().from(stockBatch);
+    if (filter.ids) rows = rows.filter((r) => filter.ids!.includes(r.id));
+    if (filter.ingredientId) rows = rows.filter((r) => r.ingredientId === filter.ingredientId);
+    if (filter.warehouseId) rows = rows.filter((r) => r.warehouseId === filter.warehouseId);
+    if (rows.length === 0) return [];
+
+    const batchIds = rows.map((r) => r.id);
+    const consumedRows = await this.db
+      .select({ batchId: stockMovement.batchId, sum: sql<string>`sum(${stockMovement.qty})` })
+      .from(stockMovement)
+      .where(and(eq(stockMovement.kind, "consumption"), inArray(stockMovement.batchId, batchIds)))
+      .groupBy(stockMovement.batchId);
+    const consumedMap = new Map(consumedRows.map((r) => [r.batchId as string, Number(r.sum) || 0]));
+
+    const idPool = [
+      ...rows.map((r) => r.ingredientId),
+      ...rows.map((r) => r.warehouseId),
+      ...rows.map((r) => r.supplierId).filter((x): x is string => x != null),
+    ];
+    const cardIds = [...new Set(idPool)];
+    const cards = cardIds.length === 0 ? [] : await this.db.select().from(entity).where(inArray(entity.id, cardIds));
+    const cardById = new Map(cards.map((c) => [c.id, c]));
+
+    const now = new Date();
+    return rows.map((b) => {
+      const ingCard = cardById.get(b.ingredientId);
+      const shelfLifeDays = strictNumber(
+        (ingCard?.attrs as Record<string, unknown> | undefined)?.["срок годности, дней"],
+      );
+      const expiry = effectiveExpiry(
+        {
+          expiryAt: b.expiryDate ? new Date(String(b.expiryDate)) : null,
+          manufactureAt: b.manufactureDate ? new Date(String(b.manufactureDate)) : null,
+          receivedAt: new Date(String(b.receivedOn)),
+        },
+        shelfLifeDays,
+      );
+      const flag = expiryFlag(expiry, now);
+      // Округляем до точности хранения (scale 3 у qty_received), как и в
+      // stocktake — иначе вычитание копит хвосты вида 4.999999999999998.
+      const remaining = Math.round((Number(b.qtyReceived) - (consumedMap.get(b.id) ?? 0)) * 1000) / 1000;
+      return {
+        id: b.id,
+        ingredientId: b.ingredientId,
+        ingredientName: ingCard?.name ?? "ингредиент",
+        warehouseId: b.warehouseId,
+        warehouseName: cardById.get(b.warehouseId)?.name ?? "склад",
+        batchCode: b.batchCode,
+        receivedOn: String(b.receivedOn),
+        qtyReceived: Number(b.qtyReceived),
+        unit: b.unit,
+        remaining,
+        expiry: expiry ? expiry.toISOString().slice(0, 10) : null,
+        flag,
+        opened: b.openedOn != null,
+        openedOn: b.openedOn ? String(b.openedOn) : null,
+        supplierId: b.supplierId,
+        supplierName: b.supplierId ? (cardById.get(b.supplierId)?.name ?? null) : null,
+        invoiceNo: b.invoiceNo,
+        invoiceDate: b.invoiceDate ? String(b.invoiceDate) : null,
+        note: b.note,
+        source: b.source,
+      };
+    });
+  }
+
+  /**
+   * Завести партию прихода (§4.3 + документ Р3/Р4) и связанное приходное
+   * движение склада в одной транзакции: `stock_batch.qty_received` без
+   * движения не отразилось бы в остатке ингредиента/склада (тот считается
+   * ИСКЛЮЧИТЕЛЬНО из `stock_movement` — формула `stockBalance` не тронута),
+   * а движение без партии — уже существующий, законный случай (снимок
+   * владельца, синк снабжения), который эта партия не должна задваивать.
+   */
+  async createBatch(input: CreateBatchInput): Promise<BatchRow> {
+    if (!(input.qtyReceived > 0)) throw new BadRequestException("Количество партии должно быть больше нуля");
+    if (!isUnit(input.unit)) throw new BadRequestException(`Единица «${input.unit}» неизвестна`);
+    const unit: Unit = input.unit;
+
+    const ing = await this.cardOfType(input.ingredientId, "ingredient");
+    await this.cardOfType(input.warehouseId, "warehouse");
+    const attrs = (ing.attrs ?? {}) as Record<string, unknown>;
+    const base = this.baseUnitOf(attrs);
+    if (base && unit !== base && convertQty(input.qtyReceived, unit, base) === null) {
+      throw new BadRequestException(`«${unit}» не перевести в базовую единицу ингредиента «${base}»`);
+    }
+    if (input.personId) await this.personExists(input.personId);
+
+    const supplierId = await this.matchSupplier(input.supplier);
+
+    // Цена с НДС: доверяем явно переданной; иначе считаем из цены без НДС и
+    // ставки, если обе даны — придумывать ставку 0% по умолчанию нельзя.
+    const unitPriceGross =
+      input.unitPriceGross != null
+        ? input.unitPriceGross
+        : input.unitPriceNet != null && input.vatRate != null
+          ? input.unitPriceNet * (1 + input.vatRate / 100)
+          : null;
+
+    const receivedOn = input.receivedOn ?? new Date().toISOString().slice(0, 10);
+    // Снимок веса упаковки: правка карточки не должна дорожать/удешевлять уже
+    // принятую партию. Колонка целая (package_weight_snapshot) — округляем;
+    // запрет на Math.trunc/parseInt из глобальных правил про КОЛИЧЕСТВА сюда
+    // не относится: это справочный вес упаковки карточки, а не остаток склада.
+    const packageWeightRaw = strictNumber(attrs["вес упаковки, г"]);
+    const packageWeightSnapshot = packageWeightRaw != null ? Math.round(packageWeightRaw) : null;
+
+    const created = await this.db.transaction(async (tx) => {
+      const [batch] = await tx
+        .insert(stockBatch)
+        .values({
+          ingredientId: input.ingredientId,
+          warehouseId: input.warehouseId,
+          batchCode: input.batchCode ?? null,
+          expiryDate: input.expiryDate ?? null,
+          manufactureDate: input.manufactureDate ?? null,
+          receivedOn,
+          qtyReceived: String(input.qtyReceived),
+          unit,
+          openedOn: null,
+          openedBy: null,
+          personId: input.personId ?? null,
+          supplierId,
+          invoiceNo: input.invoiceNo ?? null,
+          invoiceDate: input.invoiceDate ?? null,
+          ikpu: input.ikpu ?? null,
+          unitPriceNet: input.unitPriceNet != null ? String(input.unitPriceNet) : null,
+          vatRate: input.vatRate != null ? String(input.vatRate) : null,
+          unitPriceGross: unitPriceGross != null ? String(unitPriceGross) : null,
+          baseUnitSnapshot: base,
+          packageWeightSnapshot,
+          source: input.source ?? "manual",
+          extId: input.extId ?? null,
+          note: input.note ?? null,
+        })
+        .returning();
+      if (!batch) throw new BadRequestException("Не удалось завести партию");
+
+      const total = unitPriceGross != null ? String(unitPriceGross * input.qtyReceived) : null;
+      const [movement] = await tx
+        .insert(stockMovement)
+        .values({
+          kind: "intake",
+          ingredientId: input.ingredientId,
+          warehouseId: input.warehouseId,
+          batchId: batch.id,
+          dt: receivedOn,
+          qty: String(input.qtyReceived),
+          unit,
+          unitPrice: unitPriceGross != null ? String(unitPriceGross) : null,
+          total,
+          supplier: input.supplier ?? null,
+          source: "owner",
+          note: input.note ?? null,
+          clientKey: input.clientKey ?? null,
+          createdBy: input.createdBy ?? "owner",
+        })
+        .onConflictDoNothing({ target: stockMovement.clientKey })
+        .returning();
+
+      if (!movement) {
+        // Повтор по clientKey (тот же приём, что в createMovement): движение
+        // уже записано первой попыткой. Партию по новой не заводим — вся
+        // транзакция откатится (throw), а клиент получит понятную ошибку и
+        // сам повторит запрос без риска задвоить партию.
+        if (input.clientKey) {
+          const [existing] = await tx
+            .select({ id: stockMovement.id })
+            .from(stockMovement)
+            .where(eq(stockMovement.clientKey, input.clientKey));
+          if (existing) {
+            throw new BadRequestException(
+              "Партия с таким же приходом уже заведена (повтор по clientKey) — обновите список",
+            );
+          }
+        }
+        throw new BadRequestException("Не удалось записать движение прихода партии");
+      }
+
+      return batch;
+    });
+
+    const [row] = await this.computeBatchRows({ ids: [created.id] });
+    if (!row) throw new NotFoundException("Партия заведена, но не нашлась при чтении — повторите запрос");
+    return row;
+  }
+
+  /** Список партий с остатком и флагом срока; необязательные фильтры. */
+  async listBatches(filter: {
+    ingredientId?: string;
+    warehouseId?: string;
+    flag?: string;
+  }): Promise<{ rows: BatchRow[] }> {
+    let flag: ExpiryFlag | undefined;
+    if (filter.flag !== undefined && filter.flag !== "") {
+      if (!isExpiryFlag(filter.flag)) throw new BadRequestException(`Флаг «${filter.flag}» неизвестен`);
+      flag = filter.flag;
+    }
+    let rows = await this.computeBatchRows({ ingredientId: filter.ingredientId, warehouseId: filter.warehouseId });
+    if (flag) rows = rows.filter((r) => r.flag === flag);
+    rows = [...rows].sort(compareBatchRow);
+    return { rows };
+  }
+
+  /**
+   * Отчёт по срокам годности: просрочено / истекает < 14 дней / в порядке /
+   * без срока, плюс порядок расхода по FEFO — какая партия ушла бы первой
+   * (шаг 4 брифа, R-C2). FEFO считается ГРУППОЙ «ингредиент × склад»:
+   * списание физически идёт с конкретного склада, партии с другого склада в
+   * очередь не подмешиваются. `allocateFEFO` зовётся с `need`, РОВНО равным
+   * сумме остатков группы, — тогда легла раскладка целиком покрывает все
+   * партии группы в порядке FEFO без хвоста, и порядковый номер леги = место
+   * партии в очереди списания. Это ЧТЕНИЕ (R-C2): движений это не создаёт.
+   */
+  async expiryReport(): Promise<{
+    asOf: string;
+    thresholdDays: number;
+    counts: Record<ExpiryFlag, number>;
+    rows: ExpiryRow[];
+  }> {
+    const rows = await this.computeBatchRows({});
+    const counts: Record<ExpiryFlag, number> = { expired: 0, expiring: 0, ok: 0, none: 0 };
+    for (const r of rows) counts[r.flag] += 1;
+
+    const groups = new Map<string, BatchRow[]>();
+    for (const r of rows) {
+      const key = `${r.ingredientId}::${r.warehouseId}`;
+      const arr = groups.get(key);
+      if (arr) arr.push(r);
+      else groups.set(key, [r]);
+    }
+    const orderByBatch = new Map<string, number>();
+    for (const group of groups.values()) {
+      const fefoBatches: FefoBatch[] = group
+        .filter((r) => r.remaining > 0)
+        .map((r) => ({
+          batchId: r.id,
+          remaining: r.remaining,
+          expiryAt: r.expiry ? new Date(r.expiry) : null,
+          receivedAt: new Date(r.receivedOn),
+        }));
+      const need = fefoBatches.reduce((s, b) => s + b.remaining, 0);
+      if (need <= 0) continue;
+      const legs = allocateFEFO(need, fefoBatches);
+      legs.forEach((leg, i) => {
+        if (leg.batchId) orderByBatch.set(leg.batchId, i + 1);
+      });
+    }
+
+    const result: ExpiryRow[] = rows
+      .map((r) => ({ ...r, fefoOrder: orderByBatch.get(r.id) ?? null }))
+      .sort(compareBatchRow);
+
+    return {
+      asOf: new Date().toISOString().slice(0, 10),
+      thresholdDays: DEFAULT_EXPIRING_DAYS,
+      counts,
+      rows: result,
+    };
+  }
+
+  /** Отметить вскрытие партии: `opened_on` (по умолчанию сегодня) и `opened_by`. */
+  async openBatch(
+    id: string,
+    input: { openedOn?: string | null; openedBy?: string | null },
+  ): Promise<BatchRow> {
+    const [existing] = await this.db.select({ id: stockBatch.id }).from(stockBatch).where(eq(stockBatch.id, id));
+    if (!existing) throw new NotFoundException("Партия не найдена");
+    if (input.openedBy) await this.personExists(input.openedBy);
+
+    const openedOn = input.openedOn ?? new Date().toISOString().slice(0, 10);
+    await this.db
+      .update(stockBatch)
+      .set({ openedOn, openedBy: input.openedBy ?? null })
+      .where(eq(stockBatch.id, id));
+
+    const [row] = await this.computeBatchRows({ ids: [id] });
+    if (!row) throw new NotFoundException("Партия не найдена");
+    return row;
   }
 }

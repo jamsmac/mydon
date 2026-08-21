@@ -1498,6 +1498,49 @@ export interface WarehouseStock {
   }[];
 }
 
+/** Флаг срока годности партии: просрочено / истекает / в порядке / срока нет. */
+export type ExpiryFlag = "expired" | "expiring" | "ok" | "none";
+
+/** Партия сырья/товара с посчитанным остатком (леджер) и сроком годности. */
+export interface StockBatchRow {
+  id: string;
+  ingredientId: string;
+  ingredientName: string;
+  warehouseId: string;
+  warehouseName: string;
+  batchCode: string | null;
+  receivedOn: string;
+  qtyReceived: number;
+  unit: string;
+  /** Остаток партии: qtyReceived минус сумма расходных движений с этим batchId. */
+  remaining: number;
+  /** Эффективный срок годности (ISO-дата) — явный или из норматива карточки. null — не посчитан. */
+  expiry: string | null;
+  flag: ExpiryFlag;
+  opened: boolean;
+  openedOn: string | null;
+  supplierId: string | null;
+  supplierName: string | null;
+  invoiceNo: string | null;
+  invoiceDate: string | null;
+  note: string | null;
+  source: string;
+}
+
+/** Строка отчёта о сроках: партия плюс её место в очереди FEFO (какая уйдёт следующей). */
+export interface ExpiryReportRow extends StockBatchRow {
+  /** Порядковый номер в очереди списания среди партий того же ингредиента и склада. null — остаток исчерпан. */
+  fefoOrder: number | null;
+}
+
+/** Отчёт «Сроки годности»: просрочено / истекает < 14 дней / в порядке / без срока. */
+export interface ExpiryReport {
+  asOf: string;
+  thresholdDays: number;
+  counts: Record<ExpiryFlag, number>;
+  rows: ExpiryReportRow[];
+}
+
 /** Продажи одного товара (имя карточки + привязанные алиасы источника). */
 export interface ProductSales {
   total: { qty: number; amount: number };
@@ -1950,6 +1993,23 @@ export const core = {
       badUnit: number;
       noWarehouse: "нет" | "неоднозначно" | null;
     }>("/stock/sync-intake", "POST", {}),
+  /** Завести партию прихода (§4.3 + документ Р3/Р4) и связанное приходное движение. */
+  createBatch: (input: Record<string, unknown>) => send<StockBatchRow>("/stock/batch", "POST", input),
+  /** Список партий с остатком (леджер) и флагом срока; фильтры необязательны. */
+  stockBatches: (params: { ingredientId?: string; warehouseId?: string; flag?: string } = {}) => {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== "")) as Record<
+        string,
+        string
+      >,
+    ).toString();
+    return get<{ rows: StockBatchRow[] }>(`/stock/batches${qs ? `?${qs}` : ""}`);
+  },
+  /** Отчёт «Сроки годности»: просрочено/истекает/в порядке/без срока + очередь FEFO. */
+  expiryReport: () => get<ExpiryReport>("/stock/expiry"),
+  /** Отметить вскрытие партии. */
+  openBatch: (id: string, input: Record<string, unknown> = {}) =>
+    send<StockBatchRow>(`/stock/batch/${id}/open`, "POST", input),
   pendingEntities: () =>
     get<{ cards: Entity[]; fields: (EntityDraft & { entityName: string; entityType: string })[] }>(
       "/entities/pending",
