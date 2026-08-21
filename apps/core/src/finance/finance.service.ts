@@ -439,7 +439,13 @@ export class FinanceService {
     actorRef = "owner",
   ): Promise<ImportBankStatementReport> {
     if (input.items.length > 3000) {
-      throw new BadRequestException("Пачка не может быть больше 3000 строк за раз");
+      // Называем фактическое число строк — тот самый «человеческий язык»
+      // из брифа. Этот отказ проверяется УЖЕ ПОСЛЕ того, как тело запроса
+      // прошло лимит байт (main.ts) — там своё сообщение, там строк ещё не
+      // знаем: JSON на тот момент не разобран.
+      throw new BadRequestException(
+        `Пачка не может быть больше 3000 строк за раз (пришло ${input.items.length})`,
+      );
     }
     const dryRun = input.dryRun === true;
 

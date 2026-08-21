@@ -254,7 +254,7 @@ describe("FinanceService.importBankStatement — импорт выписки с 
     assert.equal(moneyFlowRows.length, 0, "но ничего не пишет");
   });
 
-  it("более 3000 строк за раз — отбивается до обработки", async () => {
+  it("более 3000 строк за раз — отбивается до обработки, сообщение называет ФАКТИЧЕСКОЕ число строк", async () => {
     const svc = new FinanceService(db);
     const items = Array.from({ length: 3001 }, (_, i) => ({
       date: "2026-06-01",
@@ -262,7 +262,9 @@ describe("FinanceService.importBankStatement — импорт выписки с 
       credit: 1,
       extId: `x${i}`,
     }));
-    await assert.rejects(() => svc.importBankStatement({ items }), /3000 строк/);
+    // Человеческий язык — не только «нельзя», но и «сколько пришло»: владелец
+    // должен сразу увидеть, что реально прислал, не считая строки сам.
+    await assert.rejects(() => svc.importBankStatement({ items }), /3000 строк.*3001/);
   });
 });
 

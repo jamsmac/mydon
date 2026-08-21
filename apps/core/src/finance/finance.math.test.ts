@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   aging,
   byMonth,
+  CASH_RECONCILE_LAG_NOTE,
   cashReconcile,
   concentration,
   daysBetween,
@@ -313,6 +314,13 @@ describe("cashReconcile — изъято по системе vs сдано в б
     assert.equal(r.periods.length, 1);
     assert.equal(r.periods[0]!.status, "ok");
     assert.deepEqual(r.gaps, []);
+  });
+
+  it("отчёт ВСЕГДА несёт предупреждение о лаге изъятие→банк — молчащая витрина хуже неточной", () => {
+    const r = cashReconcile([], [], "2026-06-01", "2026-06-30", TZ);
+    assert.equal(r.note, CASH_RECONCILE_LAG_NOTE);
+    assert.match(r.note, /лаг 2–7 дней/);
+    assert.match(r.note, /границ/i, "предупреждение обязано называть именно границу месяцев, а не общий лаг");
   });
 
   it("период без инкассаций отдаёт признак «нет данных», а не ноль — сумма при этом ноль", () => {

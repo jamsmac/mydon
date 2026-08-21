@@ -639,6 +639,8 @@ export interface CashReconcileReport {
   periods: CashReconcilePeriod[];
   /** Только периоды, где ровно ОДНА сторона пуста — то, что стоит смотреть в первую очередь. */
   gaps: CashReconcilePeriod[];
+  /** Лаг изъятие→банк (2–7 дней) даёт ложные расхождения на границе месяцев — витрина обязана показать это предупреждение, а не молчать. */
+  note: string;
 }
 
 // ── Склад техники GLOBERENT (перенос warehouse_vehicles PROMACH) ──
