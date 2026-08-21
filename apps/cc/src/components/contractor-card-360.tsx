@@ -273,7 +273,14 @@ export function ContractorSupplies({
   const легаси = позиции.length > 0;
 
   const счетов = batches !== null ? new Set(batches.map((b) => b.invoiceNo).filter((n): n is string => n !== null)).size : 0;
-  const сумма = batches !== null ? batches.reduce((acc, b) => acc + (b.unitPriceGross !== null ? b.unitPriceGross * b.qtyReceived : 0), 0) : 0;
+  // Сумму считаем только по партиям с ценой и ОТДЕЛЬНО считаем, скольких цен не
+  // хватило. Без этого итог по поставщику, у которого цены не проставлены, читался
+  // бы как «на сумму 0 сум» — то есть «ему не платили». Это то же правило, что
+  // применено к отдельной партии («цена не указана»), просто в агрегате его
+  // легко потерять.
+  const сЦеной = batches !== null ? batches.filter((b) => b.unitPriceGross !== null) : [];
+  const безЦены = batches !== null ? batches.length - сЦеной.length : 0;
+  const сумма = сЦеной.reduce((acc, b) => acc + b.unitPriceGross! * b.qtyReceived, 0);
 
   return (
     <div className="sect">
@@ -376,7 +383,15 @@ export function ContractorSupplies({
             </div>
             <p className="hint" style={{ marginTop: 10 }}>
               Итого {plural(batches.length, "партия", "партии", "партий")}: {batches.length}
-              {счетов > 0 ? ` · ${плюральСчёт(счетов)}` : ""} на сумму {sum(Math.round(сумма))} сум (с НДС).
+              {счетов > 0 ? ` · ${плюральСчёт(счетов)}` : ""}
+              {сЦеной.length === 0
+                ? " — сумму не посчитать: ни у одной партии не проставлена цена."
+                : ` на сумму ${sum(Math.round(сумма))} сум (с НДС)`}
+              {сЦеной.length > 0 && безЦены > 0
+                ? ` — по ${плюральПартий(сЦеной.length)} из ${batches.length}: у остальных цена не указана.`
+                : сЦеной.length > 0
+                  ? "."
+                  : ""}
             </p>
           </>
         )}
@@ -388,4 +403,9 @@ export function ContractorSupplies({
 /** «1 счёт» / «2 счёта» / «5 счетов» — то же согласование, что у `plural`, но своё слово. */
 function плюральСчёт(n: number): string {
   return `${n} ${plural(n, "счёт", "счёта", "счетов")}`;
+}
+
+/** «1 партии» / «5 партиям» — для оговорки «посчитано по N из M». */
+function плюральПартий(n: number): string {
+  return `${n} ${plural(n, "партии", "партиям", "партиям")}`;
 }
