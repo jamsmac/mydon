@@ -5,9 +5,13 @@ import { useState, useTransition } from "react";
 import { PRODUCT_KINDS, PRODUCT_KIND_LABELS, RESALE_FIELDS, UNITS } from "@mydon/shared";
 import { saveEntity } from "../app/card/actions";
 import type { Entity } from "../lib/core";
+import { plural } from "../lib/format";
 import { MONO_KEYS } from "../lib/labels";
 
 const mono = { fontFamily: "'IBM Plex Mono', ui-monospace, monospace" } as const;
+
+/** Расфасовка ингредиента — три ходовых варианта, но поле остаётся строкой. */
+const PACKAGING_UNITS = ["пакет", "шт", "мешок"] as const;
 
 /**
  * Поля карточки товара, которыми управляет отдельный блок «Товар»: принцип
@@ -17,11 +21,21 @@ const mono = { fontFamily: "'IBM Plex Mono', ui-monospace, monospace" } as const
 const PRODUCT_KEYS = new Set<string>(["вид", ...RESALE_FIELDS, "история цены покупки"]);
 
 /**
- * Поля карточки ингредиента, которыми управляет блок «Ингредиент»: цена покупки,
- * её единица и авто-история цены. Убираем их из общего списка attrs, чтобы не
- * задвоить. Состав ингредиенту не нужен — он сам сырьё, а не рецепт.
+ * Поля карточки ингредиента, которыми управляет блок «Ингредиент»: цена
+ * покупки и её единица, паспортные поля (поставщик, срок годности, вес
+ * упаковки, единица расфасовки) и авто-история цены. Убираем их из общего
+ * списка attrs, чтобы не задвоить. Состав ингредиенту не нужен — он сам
+ * сырьё, а не рецепт.
  */
-const INGREDIENT_KEYS = new Set<string>(["цена покупки", "единица", "история цены покупки"]);
+const INGREDIENT_KEYS = new Set<string>([
+  "цена покупки",
+  "единица",
+  "история цены покупки",
+  "поставщик",
+  "срок годности, дней",
+  "вес упаковки, г",
+  "единица расфасовки",
+]);
 
 /**
  * Ключи со своими редакторами (меню, раскладка, рецепт) и авто-истории Core.
@@ -110,7 +124,11 @@ export function EntityEditor({ entity }: { entity: Entity }) {
                 : (key === "цена" || key === "цена покупки" || key === "цена продажи") &&
                     typeof value === "number"
                   ? `${Number(value).toLocaleString("ru-RU")} сум`
-                  : String(value ?? "—");
+                  : // Массив объектов (managed-ключи вроде «закупки сахара») String()
+                    // расплющил бы в «[object Object],…» — считаем записи вместо этого.
+                    Array.isArray(value)
+                    ? `${value.length} ${plural(value.length, "запись", "записи", "записей")}`
+                    : String(value ?? "—");
             const длинное = текст.length > 40;
             return (
               <div
@@ -217,6 +235,49 @@ export function EntityEditor({ entity }: { entity: Entity }) {
             <small className="hint">
               За что цена: 80&nbsp;000 сум за «кг». В рецепте количество переведём в эту единицу.
             </small>
+          </label>
+          <label>
+            <span>Поставщик</span>
+            {/*
+              Список контрагентов (<datalist>) сюда не тянем: карточка ингредиента
+              рендерится в общей плоской ветке страницы (apps/cc/src/app/card/[id]/page.tsx),
+              где список контрагентов ещё не загружается — добавить его значило бы
+              завести отдельный запрос core.contractorsAll() на КАЖДЫЙ просмотр
+              карточки ингредиента. Обычное текстовое поле дешевле.
+            */}
+            <input
+              name="attr:поставщик"
+              defaultValue={String(entity.attrs?.["поставщик"] ?? "")}
+            />
+          </label>
+          <label>
+            <span>Срок годности, дней</span>
+            <input
+              name="attr:срок годности, дней"
+              defaultValue={String(entity.attrs?.["срок годности, дней"] ?? "")}
+              inputMode="numeric"
+            />
+          </label>
+          <label>
+            <span>Вес упаковки, г</span>
+            <input
+              name="attr:вес упаковки, г"
+              defaultValue={String(entity.attrs?.["вес упаковки, г"] ?? "")}
+              inputMode="numeric"
+            />
+          </label>
+          <label>
+            <span>Единица расфасовки</span>
+            <input
+              name="attr:единица расфасовки"
+              defaultValue={String(entity.attrs?.["единица расфасовки"] ?? "")}
+              list="packaging-unit-options"
+            />
+            <datalist id="packaging-unit-options">
+              {PACKAGING_UNITS.map((u) => (
+                <option value={u} key={u} />
+              ))}
+            </datalist>
           </label>
           {typeof buyHistory === "string" && buyHistory.length > 0 && (
             <>
