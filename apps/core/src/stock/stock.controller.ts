@@ -8,6 +8,7 @@ import {
   IsNumber,
   IsOptional,
   IsPositive,
+  Matches,
   IsString,
   IsUUID,
   Min,
@@ -230,8 +231,15 @@ export class ImportBatchesDto {
   @IsOptional() @IsBoolean()
   dryRun?: boolean;
 
-  /** Дата инвентаризации: партии импорта закрываются расходом на эту дату (R-D1). */
-  @IsOptional() @IsString() @MaxLength(10)
+  /**
+   * Дата инвентаризации: партии импорта закрываются расходом на эту дату (R-D1).
+   *
+   * Формат проверяется строго. Пустая строка проходила бы `@IsString()`, а
+   * дальше `if (input.closeOn)` считает её ложью — закрытие молча выключилось бы
+   * для ВСЕХ строк прогона, и остаток задвоился бы при внешне успешном отчёте.
+   * Не закрывать — это `null`, а не «пусто».
+   */
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: "closeOn: дата в формате ГГГГ-ММ-ДД или null" })
   closeOn?: string | null;
 
   @IsArray() @ArrayMaxSize(500) @ValidateNested({ each: true }) @Type(() => ImportBatchItemDto)

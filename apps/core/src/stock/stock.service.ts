@@ -185,6 +185,16 @@ export interface ImportBatchRejection extends ImportBatchIssue {
 export interface ImportBatchesReport {
   dryRun: boolean;
   created: number;
+  /**
+   * Сколько партий закрыто расходом (R-D1) и на какую дату.
+   *
+   * В отчёте отдельными полями, а не «подразумевается»: закрытие можно выключить
+   * одним пустым полем даты, и без этих двух чисел прогон без закрытия выглядел
+   * бы ровно так же, как правильный, — а остаток при этом задвоился бы.
+   * `closed: 0` при `created > 0` означает «партии открыты», и это видно сразу.
+   */
+  closed: number;
+  closeOn: string | null;
   /** Пропущено как повтор — партия с этим (source, extId) уже существует. */
   skippedRepeat: number;
   noDate: ImportBatchIssue[];
@@ -1340,7 +1350,14 @@ export class StockService implements OnModuleInit {
     }
     const dryRun = input.dryRun === true;
 
+    // Пустая строка — не дата. `if (input.closeOn)` считает её ложью, и закрытие
+    // партий молча выключилось бы для всего прогона: остаток задвоился бы, а
+    // отчёт выглядел бы точно так же, как при верной дате. Приводим к null явно
+    // и говорим в отчёте, закрывали мы партии или нет.
+    const closeOn = typeof input.closeOn === "string" && input.closeOn.trim() !== "" ? input.closeOn.trim() : null;
+
     let created = 0;
+    let closed = 0;
     let skippedRepeat = 0;
     const noDate: ImportBatchIssue[] = [];
     const unmatched: ImportBatchIssue[] = [];
@@ -1371,7 +1388,7 @@ export class StockService implements OnModuleInit {
         note: item.note ?? null,
         source: input.source,
         extId: item.extId ?? String(item.fileRow),
-        closeOn: input.closeOn ?? null,
+        closeOn,
         createdBy: "import",
       };
 
@@ -1383,12 +1400,13 @@ export class StockService implements OnModuleInit {
         }
         if (!dryRun) await this.writeBatch(batchInput, prep);
         created += 1;
+        if (closeOn !== null) closed += 1;
       } catch (e) {
         rejected.push({ fileRow: item.fileRow, name, reason: e instanceof Error ? e.message : String(e) });
       }
     }
 
-    return { dryRun, created, skippedRepeat, noDate, unmatched, rejected };
+    return { dryRun, created, closed, closeOn, skippedRepeat, noDate, unmatched, rejected };
   }
 
   /** Список партий с остатком и флагом срока; необязательные фильтры. */

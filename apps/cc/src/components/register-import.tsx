@@ -170,13 +170,46 @@ function sumRows(rows: RegisterRow[]): number {
  * пачку: DTO этой строки больше не требует "количество > 0" на входе
  * (fix(core) «одна плохая строка не должна ронять весь импорт», уже в ветке).
  */
+/**
+ * Ключ повтора строки реестра — по СОДЕРЖИМОМУ, а не по позиции в файле.
+ *
+ * Ядро по умолчанию берёт номер строки, и для одноразовой загрузки этого хватило
+ * бы. Но владельцу предстоит править сам файл: 47 строк пришли без даты прихода,
+ * и он будет проставлять их вручную. Любая вставка или удаление строки сдвигает
+ * номера всех строк ниже — при повторной загрузке они выглядели бы новыми, и уже
+ * загруженные закупки завелись бы второй раз, задвоив историю цен, а при
+ * выключенном закрытии — и остаток.
+ *
+ * Строка закупки опознаётся счётом, наименованием и количеством. Если в одном
+ * счёте две одинаковые строки (тот же товар, то же количество), они различаются
+ * порядковым номером среди таких же — иначе законный дубль схлопнулся бы в одну.
+ * Счёта нет — вместо него дата прихода: она у строки уже проверена.
+ */
+function buildExtIds(rows: RegisterRow[]): Map<number, string> {
+  const счётчик = new Map<string, number>();
+  const out = new Map<number, string>();
+  for (const row of rows) {
+    const основа = [
+      row.invoiceNo ?? row.receivedOn ?? "без-документа",
+      normalizeSourceKey(row.name),
+      row.qty ?? 0,
+    ].join("::");
+    const n = (счётчик.get(основа) ?? 0) + 1;
+    счётчик.set(основа, n);
+    out.set(row.fileRow, n === 1 ? основа : `${основа}::${n}`);
+  }
+  return out;
+}
+
 function buildItems(
   rows: RegisterRow[],
   decisions: Record<string, Decision>,
   warehouseId: string,
 ): ImportBatchItem[] {
+  const extIds = buildExtIds(rows);
   return rows.map((row) => ({
     fileRow: row.fileRow,
+    extId: extIds.get(row.fileRow) ?? String(row.fileRow),
     ingredientId: confirmedIngredientId(row, decisions),
     warehouseId,
     qtyReceived: row.qty ?? 0,
@@ -198,6 +231,11 @@ function downloadReport(report: ImportBatchesReport, fileLabel: string): void {
   lines.push(report.dryRun ? "(предпросмотр, ничего не записано)" : "(настоящая запись)");
   lines.push("");
   lines.push(`Создано партий: ${report.created}`);
+  lines.push(
+    report.closed > 0
+      ? `Закрыто расходом: ${report.closed} на ${report.closeOn} — остаток не изменился`
+      : `Закрыто расходом: 0 — партии ОТКРЫТЫ, остаток вырос`,
+  );
   lines.push(`Пропущено как повтор (уже были): ${report.skippedRepeat}`);
   lines.push("");
   lines.push(`Без даты прихода — ${report.noDate.length}:`);
@@ -246,6 +284,10 @@ export function RegisterImport({
   const [groups, setGroups] = useState<NameGroup[]>([]);
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
 
+  // Закрытие включено, а даты нет — отправлять нельзя: ядро приняло бы пустую
+  // строку как «не закрывать», партии остались бы открытыми и остаток задвоился,
+  // причём отчёт выглядел бы успешным. Лучше не дать нажать.
+  const закрытиеБезДаты = (): boolean => closeEnabled && closeOnDate.trim() === "";
   const карточки = ingredientCards ?? [];
   const склады = warehouses ?? [];
   const ядроМолчит = ingredientCards === null || warehouses === null;
@@ -368,7 +410,7 @@ export function RegisterImport({
     const res = await runRegisterImport({
       source: IMPORT_SOURCE,
       dryRun: true,
-      closeOn: closeEnabled ? closeOnDate : null,
+      closeOn: closeEnabled ? closeOnDate.trim() || null : null,
       items,
     });
     setDryPending(false);
@@ -385,7 +427,7 @@ export function RegisterImport({
     const res = await runRegisterImport({
       source: IMPORT_SOURCE,
       dryRun: false,
-      closeOn: closeEnabled ? closeOnDate : null,
+      closeOn: closeEnabled ? closeOnDate.trim() || null : null,
       items,
     });
     setWritePending(false);
@@ -691,17 +733,24 @@ export function RegisterImport({
             </p>
           )}
 
+          {закрытиеБезДаты() && (
+            <p className="hint" style={{ color: "var(--hot)" }}>
+              Закрытие включено, но дата не указана — импорт заблокирован. Пустая дата означала
+              бы «не закрывать», партии остались бы открытыми и остаток задвоился бы, а отчёт
+              выглядел бы успешным.
+            </p>
+          )}
           <div className="form-actions" style={{ marginTop: 14 }}>
             <button type="button" className="btn ghost" onClick={() => setPhase("review")}>
               Назад к сопоставлению
             </button>
-            <button type="button" className="btn" disabled={dryPending || !warehouseId} onClick={() => void runDryRun()}>
+            <button type="button" className="btn" disabled={dryPending || !warehouseId || закрытиеБезДаты()} onClick={() => void runDryRun()}>
               {dryPending ? "Проверяю…" : "Показать предпросмотр ядра (dry-run)"}
             </button>
             <button
               type="button"
               className="btn primary"
-              disabled={writePending || !warehouseId || readyRows.length === 0}
+              disabled={writePending || !warehouseId || readyRows.length === 0 || закрытиеБезДаты()}
               onClick={() => void runWrite()}
             >
               {writePending ? "Записываю…" : "Импортировать по-настоящему"}
@@ -740,6 +789,21 @@ export function RegisterImport({
               <div className="lab">Создано партий</div>
               <div className="v">{finalReport.created}</div>
               <div className="foot"><span className="mk" />на склад {склады.find((w) => w.id === warehouseId)?.name ?? warehouseId}</div>
+            </div>
+            {/* Закрытие — не деталь, а условие, при котором остаток не задвоится.
+                Прогон без закрытия внешне неотличим от правильного, поэтому
+                показываем его отдельной плиткой и красим, когда партии открыты. */}
+            <div className={`tile ${finalReport.created > 0 && finalReport.closed === 0 ? "is-hot" : ""}`}>
+              <div className="lab">Закрыто расходом</div>
+              <div className="v">{finalReport.closed}</div>
+              <div className="foot">
+                <span className="mk" />
+                {finalReport.closed > 0
+                  ? `на ${finalReport.closeOn} — остаток не изменился`
+                  : finalReport.created > 0
+                    ? "партии ОТКРЫТЫ: остаток вырос на это количество"
+                    : "закрывать было нечего"}
+              </div>
             </div>
             <div className="tile">
               <div className="lab">Пропущено (повтор)</div>

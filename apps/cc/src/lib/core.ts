@@ -1594,6 +1594,9 @@ export interface ImportBatchRejection extends ImportBatchIssue {
 export interface ImportBatchesReport {
   dryRun: boolean;
   created: number;
+  /** Сколько партий закрыто расходом (R-D1) и на какую дату — `closed: 0` при `created > 0` значит «партии открыты, остаток вырастет». */
+  closed: number;
+  closeOn: string | null;
   /** Пропущено как повтор — партия с этим (source, extId) уже существует. */
   skippedRepeat: number;
   noDate: ImportBatchIssue[];

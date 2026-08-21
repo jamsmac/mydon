@@ -52,3 +52,37 @@ describe("ImportBatchesDto: одна плохая строка не должна
     assert.ok(errors.length > 0, "нечисло в количестве — это ошибка формата, а не данных");
   });
 });
+
+describe("ImportBatchesDto: пустая дата закрытия не должна проходить", () => {
+  const строка = {
+    fileRow: 14,
+    ingredientId: "efc7d1d1-708d-436d-8d9a-36e80c594f6b",
+    warehouseId: "21b3966c-c33e-44b2-9257-55ac3440bf9f",
+    qtyReceived: 50,
+    unit: "кг",
+    receivedOn: "2025-05-13",
+  };
+
+  it("closeOn=\"\" отвергается на входе", async () => {
+    // Пустая строка проходила @IsString(), а дальше `if (input.closeOn)` считает
+    // её ложью: закрытие молча выключалось бы для ВСЕГО прогона, остаток
+    // задваивался, а отчёт выглядел точно так же, как при верной дате.
+    const dto = plainToInstance(ImportBatchesDto, { source: "excel", closeOn: "", items: [строка] });
+    const errors = await validate(dto);
+    assert.ok(errors.length > 0, "пустая дата — это не «не закрывать», а ошибка ввода");
+  });
+
+  it("null — законное «не закрывать», дата в формате — законная дата", async () => {
+    for (const closeOn of [null, undefined, "2026-08-21"]) {
+      const dto = plainToInstance(ImportBatchesDto, { source: "excel", closeOn, items: [строка] });
+      assert.deepEqual(await validate(dto), [], `closeOn=${String(closeOn)} должен проходить`);
+    }
+  });
+
+  it("мусор вместо даты отвергается", async () => {
+    for (const closeOn of ["21.08.2026", "2026-8-1", "вчера"]) {
+      const dto = plainToInstance(ImportBatchesDto, { source: "excel", closeOn, items: [строка] });
+      assert.ok((await validate(dto)).length > 0, `closeOn=${closeOn} не дата`);
+    }
+  });
+});
