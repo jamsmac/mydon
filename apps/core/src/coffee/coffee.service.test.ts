@@ -143,6 +143,20 @@ function coffeeDb(tables: {
           });
           return chain;
         }
+        // coffee_ingredient: мост-гвардия (addBunkerIngredient → freeIngredientCardId)
+        // ищет ингредиент и по имени, и по entityId — оба в одном столбце-агностичном
+        // WHERE стаб бы не различил, поэтому фильтр по id/name/entityId сразу.
+        if (t === coffeeIngredient) {
+          rows = rows.filter((r) => {
+            const row = r as { id?: string; name?: string; entityId?: string | null };
+            return (
+              значения.includes(row.id ?? "") ||
+              значения.includes(row.name ?? "") ||
+              (row.entityId != null && значения.includes(row.entityId))
+            );
+          });
+          return chain;
+        }
         if (t !== entity) return chain;
         rows = rows.filter((r) => {
           const row = r as { id?: string; type?: string };
@@ -220,6 +234,42 @@ describe("CoffeeService: настройки — ингредиенты по по
     await svc.removeBunkerIngredient(3, "ing-1");
     assert.equal(deletes.length, 1);
     assert.equal(deletes[0]!.table, "coffee_bunker_config");
+  });
+
+  it("новый ингредиент — свободная карточка реестра с тем же именем связывается мостом", async () => {
+    const { db, inserts } = coffeeDb({
+      ingredients: [],
+      registry: [{ id: "ent-matcha", type: "ingredient", name: "Матча" }],
+    });
+    const svc = new CoffeeService(db);
+    await svc.addBunkerIngredient(3, "Матча");
+    const ingredientInsert = inserts.find((i) => i.table === "coffee_ingredient")!;
+    assert.equal((ingredientInsert.values as Record<string, unknown>).entityId, "ent-matcha");
+  });
+
+  it("новый ингредиент — карточки с таким именем нет — заводит без entityId, не падает", async () => {
+    const { db, inserts } = coffeeDb({ ingredients: [], registry: [] });
+    const svc = new CoffeeService(db);
+    const res = await svc.addBunkerIngredient(3, "Матча");
+    assert.ok(res.ingredientId);
+    const ingredientInsert = inserts.find((i) => i.table === "coffee_ingredient")!;
+    assert.equal((ingredientInsert.values as Record<string, unknown>).entityId, null);
+  });
+
+  it("новый ингредиент — карточка уже занята ДРУГОЙ строкой реестра — не роняет запрос, entityId не проставляет", async () => {
+    // Риск гвардии: `ux_coffee_ingredient_entity` разрешает не больше одной
+    // строки coffee_ingredient на карточку. Здесь карточка "Матча" уже
+    // привязана к другой (переименованной) строке — повторная привязка
+    // нарушила бы уникальный индекс и должна быть пропущена, а не уронить 500.
+    const { db, inserts } = coffeeDb({
+      ingredients: [{ id: "ing-old", name: "Матча (старое)", entityId: "ent-matcha" }],
+      registry: [{ id: "ent-matcha", type: "ingredient", name: "Матча" }],
+    });
+    const svc = new CoffeeService(db);
+    const res = await svc.addBunkerIngredient(3, "Матча");
+    assert.ok(res.ingredientId, "запрос должен успешно завершиться, а не упасть");
+    const ingredientInsert = inserts.find((i) => i.table === "coffee_ingredient")!;
+    assert.equal((ingredientInsert.values as Record<string, unknown>).entityId, null, "занятую карточку повторно не связываем");
   });
 });
 
@@ -358,6 +408,23 @@ describe("CoffeeService: сверка факт/ожидание (reconcileLocati
     assert.equal(noPrice.costActual, null, "цена не заведена — себестоимость неизвестна, а не 0");
     assert.equal(noPrice.costExpected, null);
   });
+
+  it("цена приходит из карточки моста — приоритет над purchase_price в себестоимости", async () => {
+    const refills = [
+      { id: "r1", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: null, enteredDate: "2026-08-01" },
+      { id: "r2", position: 7, containerNumber: 1, ingredientId: "ing-coffee", filledWeight: 1200, measuredBefore: 850, enteredDate: "2026-08-02" },
+    ];
+    const products = [{ id: "prod-americano", name: "Американо", recipe: [{ ingredientId: "ing-coffee", quantity: 18, unit: "г" }] }];
+    const sales = [{ locationId: "loc-1", productId: "prod-americano", loggedDate: "2026-08-02", quantity: 20 }];
+    // purchase_price = 0.5 сум/г — если бы победил его, себестоимость была бы в 520 раз меньше.
+    const bridged = [{ id: "ing-coffee", name: "Кофе", purchasePrice: "0.5000", cardAttrs: { "цена покупки": 260000, "единица": "кг" } }];
+    const { db } = coffeeDb({ refills, sales, products, ingredients: bridged, tare });
+    const res = (await new CoffeeService(db).reconcileLocation("loc-1", "2026-08-01", "2026-08-02")).find(
+      (r) => r.ingredientId === "ing-coffee",
+    )!;
+    assert.equal(res.costActual, 350 * 260);
+    assert.equal(res.costExpected, 360 * 260);
+  });
 });
 
 describe("CoffeeService: сверка по всем точкам сразу (reconcileAllLocations)", () => {
@@ -453,6 +520,70 @@ describe("CoffeeService: настройки — цена ингредиента"
     assert.equal(rows[0]!.purchasePrice, 80);
     assert.equal(typeof rows[0]!.purchasePrice, "number");
   });
+
+  it("bunkerConfig — цена приходит из карточки моста, приоритет над purchase_price", async () => {
+    const { db } = coffeeDb({
+      bunkerConfig: [
+        {
+          position: 7,
+          ingredientId: "ing-coffee",
+          ingredientName: "Кофе",
+          purchasePrice: "0.5000", // запасной путь — не должен победить карточку
+          entityId: "ent-coffee",
+          cardAttrs: { "цена покупки": 260000, "единица": "кг" },
+        },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    const rows = await svc.bunkerConfig();
+    assert.equal(rows[0]!.purchasePrice, 260);
+    assert.equal(rows[0]!.priceSource, "карточка");
+    assert.equal(rows[0]!.entityId, "ent-coffee");
+  });
+
+  it("bunkerConfig — карточки нет — запасной путь purchase_price, priceSource «реестр»", async () => {
+    const { db } = coffeeDb({
+      bunkerConfig: [
+        { position: 7, ingredientId: "ing-coffee", ingredientName: "Кофе", purchasePrice: "80.0000", entityId: null, cardAttrs: null },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    const rows = await svc.bunkerConfig();
+    assert.equal(rows[0]!.purchasePrice, 80);
+    assert.equal(rows[0]!.priceSource, "реестр");
+    assert.equal(rows[0]!.entityId, null);
+  });
+
+  it("bunkerConfig — ни карточки, ни purchase_price — null, priceSource null (не 0)", async () => {
+    const { db } = coffeeDb({
+      bunkerConfig: [
+        { position: 7, ingredientId: "ing-coffee", ingredientName: "Кофе", purchasePrice: null, entityId: null, cardAttrs: null },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    const rows = await svc.bunkerConfig();
+    assert.equal(rows[0]!.purchasePrice, null);
+    assert.equal(rows[0]!.priceSource, null);
+  });
+
+  it("bunkerConfig — карточка привязана, но без цены/единицы веса (стакан, шт) — падает на реестр", async () => {
+    const { db } = coffeeDb({
+      bunkerConfig: [
+        {
+          position: 8,
+          ingredientId: "ing-cup",
+          ingredientName: "Стакан+крышка",
+          purchasePrice: "3.6",
+          entityId: "ent-cup",
+          cardAttrs: { "цена покупки": 3600, "единица": "шт" },
+        },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    const rows = await svc.bunkerConfig();
+    assert.equal(rows[0]!.purchasePrice, 3.6);
+    assert.equal(rows[0]!.priceSource, "реестр");
+  });
 });
 
 describe("CoffeeService: недолив заливки (targetFillWeight/fillStatusByLocation)", () => {
@@ -521,6 +652,17 @@ describe("CoffeeService: склад ингредиентов (ingestCoffeeStock/
     assert.equal(a.delta, -200);
     assert.equal(a.value, 100); // 200 г × 0.5 сум/г
     assert.equal(a.noPrice, false);
+  });
+
+  it("недостача оценена по цене карточки моста, если она есть — приоритет над purchase_price", async () => {
+    const stock = [{ ingredientId: "ing-1", quantity: 5000, countedAt: new Date("2026-08-01T00:00:00Z") }];
+    // purchase_price = 0.5 — если бы победил его, value было бы 100, а не 52000.
+    const ingredients = [{ id: "ing-1", name: "Кофе", purchasePrice: "0.5000", cardAttrs: { "цена покупки": 260000, "единица": "кг" } }];
+    const { db } = coffeeDb({ stock, ingredients });
+    const svc = new CoffeeService(db);
+    const res = await svc.ingestCoffeeStock([{ ingredientId: "ing-1", quantity: 4800 }], "2026-08-02T00:00:00Z");
+    assert.equal(res.adjustments[0]!.value, 200 * 260);
+    assert.equal(res.adjustments[0]!.noPrice, false);
   });
 
   it("без цены у ингредиента — value 0, noPrice=true, но расхождение видно (unknown ≠ zero)", async () => {
