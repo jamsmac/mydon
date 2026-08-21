@@ -16,10 +16,25 @@ function asDomain(value: string): Domain {
  * следит только за ТИПОМ — семантику («есть ли оборот») проверяет сервис
  * построчно (урок среза D: одна кривая строка не должна ронять пачку из
  * тысяч; здесь их до 2440 в живом файле).
+ *
+ * ⚠️ ДТО обязано объявлять ВСЕ поля, которые реально отдаёт `parseBankStatement`
+ * (`@mydon/shared`, `BankStatementRow` — 13 полей), а не только те, что
+ * использует `importBankStatement`. `main.ts` ставит `forbidNonWhitelisted:
+ * true` — лишнее поле в теле отбивает ВЕСЬ запрос 400, а не эту одну строку
+ * (ревью среза К, 1.5: раньше здесь было объявлено только 8 из 13 полей —
+ * `account`/`name`/`docType`/`branch`/`inn` роняли импорт целиком, 0 строк из
+ * 2440 живого файла). Проверено тестом через настоящий `ValidationPipe` с
+ * теми же опциями, что в `main.ts` (`finance.controller.test.ts`).
  */
 export class ImportBankStatementItemDto {
   @IsString() @MaxLength(10)
   date!: string;
+
+  @IsString() @MaxLength(64)
+  account!: string;
+
+  @IsString() @MaxLength(255)
+  name!: string;
 
   @IsOptional() @IsNumber()
   debit?: number | null;
@@ -35,6 +50,15 @@ export class ImportBankStatementItemDto {
 
   @IsOptional() @IsString() @MaxLength(64)
   docNo?: string | null;
+
+  @IsString() @MaxLength(64)
+  docType!: string;
+
+  @IsString() @MaxLength(255)
+  branch!: string;
+
+  @IsString() @MaxLength(32)
+  inn!: string;
 
   @IsString() @MaxLength(128)
   extId!: string;
