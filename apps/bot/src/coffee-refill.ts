@@ -110,6 +110,10 @@ function positionKeyboard(
   config: { position: number; ingredientName: string; ingredientId?: string | null }[],
   prefix: "cf" | "cw",
 ): NonNullable<StaffReply["keyboard"]> {
+  // Расщепляем кнопку только у ЗАЛИВКИ: мойке ингредиент не нужен, и две
+  // одинаковые по смыслу кнопки на один физический бункер заставили бы техника
+  // на бегу гадать, какую жать.
+  const делимПоИнгредиентам = prefix === "cf";
   const byPos = new Map<number, { name: string; id?: string | null }[]>();
   for (const c of config) {
     byPos.set(c.position, [...(byPos.get(c.position) ?? []), { name: c.ingredientName, id: c.ingredientId }]);
@@ -123,6 +127,12 @@ function positionKeyboard(
     }
     if (here.length === 1) {
       rows.push([{ text: `${pos} · ${here[0]!.name}`.slice(0, 60), callback_data: `${prefix}:pos:${pos}` }]);
+      continue;
+    }
+    if (!делимПоИнгредиентам) {
+      rows.push([
+        { text: `${pos} · ${here.map((i) => i.name).join("/")}`.slice(0, 60), callback_data: `${prefix}:pos:${pos}` },
+      ]);
       continue;
     }
     // Двусмысленная позиция: выбор ингредиента прямо в кнопке.
@@ -311,7 +321,9 @@ export async function handleCoffeeRefillCallback(
     const locations = await deps.core.coffeeLocations();
     const loc = locations.find((l) => l.id === cb.id);
     if (!loc) return { answer: "Точка не найдена", message: { text: "Этой точки уже нет — начни заново." } };
-    deps.conversations.advance(chatId, "position", { locationId: loc.id, locationName: loc.name });
+    // Сменил точку — прежний выбор ингредиента недействителен: он относился к
+    // бункеру другой машины (см. пояснение у обработчика позиции).
+    deps.conversations.advance(chatId, "position", { locationId: loc.id, locationName: loc.name, ingredientId: null });
     return { answer: loc.name, message: await positionStep(deps, loc.name, "cf") };
   }
 
@@ -343,10 +355,17 @@ export async function handleCoffeeRefillCallback(
   }
 
   if (cb.kind === "position") {
+    // `advance` СЛИВАЕТ данные, а не заменяет: если написать ingredientId только
+    // когда он пришёл, выбор прилипнет. Оператор жмёт «3 · Матча», понимает, что
+    // ошибся бункером, и тем же ещё висящим экраном жмёт «7 · Кофе» — суффикса у
+    // однозначной кнопки нет, старое значение остаётся, и заливка кофе молча
+    // спишется на матчу. Записанный НЕ ТОТ ингредиент хуже прежнего молчания,
+    // ради устранения которого всё и делалось. Поэтому пишем всегда — значение
+    // или null.
     deps.conversations.advance(chatId, "container", {
       position: cb.position,
       draft: "",
-      ...(cb.ingredientId ? { ingredientId: cb.ingredientId } : {}),
+      ingredientId: cb.ingredientId ?? null,
     });
     return { answer: `Бункер ${cb.position}`, message: containerStep(cb.position) };
   }
