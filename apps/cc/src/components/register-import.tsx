@@ -228,8 +228,11 @@ export function RegisterImport({
   ingredientCards,
   warehouses,
 }: {
-  ingredientCards: CardRef[];
-  warehouses: WarehouseOption[];
+  /** null — карточки прочитать не удалось. Это НЕ «карточек нет»: без них
+   *  предложений не будет, и сказать «нет» значит соврать. */
+  ingredientCards: CardRef[] | null;
+  /** null — склады прочитать не удалось; см. выше. */
+  warehouses: WarehouseOption[] | null;
 }) {
   const [phase, setPhase] = useState<Phase>("pick");
   const [fileName, setFileName] = useState<string | null>(null);
@@ -243,7 +246,10 @@ export function RegisterImport({
   const [groups, setGroups] = useState<NameGroup[]>([]);
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
 
-  const [warehouseId, setWarehouseId] = useState(warehouses.length === 1 ? warehouses[0]!.id : "");
+  const карточки = ingredientCards ?? [];
+  const склады = warehouses ?? [];
+  const ядроМолчит = ingredientCards === null || warehouses === null;
+  const [warehouseId, setWarehouseId] = useState(склады.length === 1 ? склады[0]!.id : "");
   const [closeEnabled, setCloseEnabled] = useState(true);
   const [closeOnDate, setCloseOnDate] = useState(() => new Date().toLocaleDateString("en-CA", { timeZone: TZ }));
 
@@ -260,7 +266,7 @@ export function RegisterImport({
     if (Object.keys(decisions).length > 0) saveStoredDecisions(decisions);
   }, [decisions]);
 
-  const cardNameById = new Map(ingredientCards.map((c) => [c.id, c.name]));
+  const cardNameById = new Map(карточки.map((c) => [c.id, c.name]));
 
   async function runParse(bytes: Uint8Array, sheetName: string | undefined): Promise<void> {
     setParsing(true);
@@ -283,7 +289,7 @@ export function RegisterImport({
         setPickError("В листе не нашлось ни одной товарной строки — проверь, тот ли это лист и файл.");
         return;
       }
-      const built = buildGroups(parsed, ingredientCards);
+      const built = buildGroups(parsed, карточки);
       setRows(parsed);
       setGroups(built);
       setDecisions(initialDecisions(built, loadStoredDecisions()));
@@ -335,7 +341,7 @@ export function RegisterImport({
     setPickError(null);
     setRows([]);
     setGroups([]);
-    setWarehouseId(warehouses.length === 1 ? warehouses[0]!.id : "");
+    setWarehouseId(склады.length === 1 ? склады[0]!.id : "");
     setDryReport(null);
     setDryError(null);
     setFinalReport(null);
@@ -406,6 +412,22 @@ export function RegisterImport({
         <h3 className="h2">Импорт закупок из реестра</h3>
         <span className="chip">{stepLabel}</span>
       </div>
+
+      {/* Ядро не ответило на чтение справочников. Промолчать нельзя: экран
+          покажет ноль предложений по всем именам и пустой список складов, и
+          владелец решит, что карточек нет, — вместо того чтобы обновить
+          страницу. */}
+      {ядроМолчит && (
+        <p className="hint" style={{ color: "var(--hot)" }}>
+          {ingredientCards === null && warehouses === null
+            ? "Не удалось прочитать карточки сырья и склады — ядро не ответило."
+            : ingredientCards === null
+              ? "Не удалось прочитать карточки сырья — ядро не ответило."
+              : "Не удалось прочитать склады — ядро не ответило."}{" "}
+          Это не значит, что их нет: обнови страницу, иначе разметка имён и выбор склада
+          будут сделаны вслепую.
+        </p>
+      )}
 
       {/* ── Шаг 1: файл ── */}
       {phase === "pick" && (
@@ -563,7 +585,7 @@ export function RegisterImport({
                     <option value="" disabled>
                       выбрать карточку…
                     </option>
-                    {ingredientCards.map((c) => (
+                    {карточки.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
@@ -592,7 +614,7 @@ export function RegisterImport({
               <button
                 type="button"
                 className="btn primary"
-                disabled={warehouses.length === 0}
+                disabled={склады.length === 0}
                 onClick={() => setPhase("confirm")}
               >
                 Далее: подтверждение и запись
@@ -633,7 +655,7 @@ export function RegisterImport({
                 <option value="" disabled>
                   — выбери склад —
                 </option>
-                {warehouses.map((w) => (
+                {склады.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}
                   </option>
@@ -651,12 +673,17 @@ export function RegisterImport({
               </label>
             )}
           </div>
-          {warehouses.length === 0 && (
+          {warehouses === null ? (
+            <p className="hint" style={{ color: "var(--hot)" }}>
+              Не удалось прочитать список складов — ядро не ответило. Это не значит, что складов
+              нет: обнови страницу, прежде чем заводить новый.
+            </p>
+          ) : склады.length === 0 ? (
             <p className="hint">
               Складов пока нет — заведи карточку с типом «склад» на вкладке «Склады», прежде чем
               импортировать.
             </p>
-          )}
+          ) : null}
           {!closeEnabled && (
             <p className="hint" style={{ color: "var(--hot)" }}>
               Без закрытия остаток по этим позициям задвоится, если это старая история, а не
@@ -712,7 +739,7 @@ export function RegisterImport({
             <div className="tile">
               <div className="lab">Создано партий</div>
               <div className="v">{finalReport.created}</div>
-              <div className="foot"><span className="mk" />на склад {warehouses.find((w) => w.id === warehouseId)?.name ?? warehouseId}</div>
+              <div className="foot"><span className="mk" />на склад {склады.find((w) => w.id === warehouseId)?.name ?? warehouseId}</div>
             </div>
             <div className="tile">
               <div className="lab">Пропущено (повтор)</div>

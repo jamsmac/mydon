@@ -472,15 +472,19 @@ export default async function DomainPage({
   }
 
   // Импорт закупок (Task 4): карточки сырья — вход `suggestCard` (Task 2);
-  // склады — куда заводится приход. Оба чтения best-effort: провал одного не
-  // должен ронять весь мастер импорта, только сузить его (пустой список карточек
-  // означает «предложений не будет», а не «экран недоступен»).
-  let importIngredientCards: Entity[] = [];
-  let importWarehouses: Entity[] = [];
+  // склады — куда заводится приход.
+  //
+  // null — «не удалось прочитать», и это НЕ то же самое, что пустой список.
+  // Подменить одно другим значит сказать владельцу «складов нет» в момент, когда
+  // ядро просто не ответило: он заведёт дубль-склад, а все 59 имён останутся без
+  // предложений якобы потому, что карточек нет. Тот же урок уже оплачен дважды —
+  // в срезах B и C витрины чинили отдельными коммитами ровно за эту подмену.
+  let importIngredientCards: Entity[] | null = null;
+  let importWarehouses: Entity[] | null = null;
   if (domain === "vendhub" && group && leaf?.type === "purchase_import") {
     [importIngredientCards, importWarehouses] = await Promise.all([
-      core.entitiesOfType(domain, "ingredient").catch(() => [] as Entity[]),
-      core.entitiesOfType(domain, "warehouse").catch(() => [] as Entity[]),
+      core.entitiesOfType(domain, "ingredient").catch(() => null),
+      core.entitiesOfType(domain, "warehouse").catch(() => null),
     ]);
   }
 
@@ -1489,8 +1493,8 @@ export default async function DomainPage({
       {/* ── Импорт закупок (Task 4): файл → предпросмотр и сопоставление имён → запись ── */}
       {domain === "vendhub" && group && leaf?.type === "purchase_import" && (
         <RegisterImport
-          ingredientCards={importIngredientCards.map((e) => ({ id: e.id, name: e.name, type: e.type, attrs: e.attrs }))}
-          warehouses={importWarehouses.map((e) => ({ id: e.id, name: e.name }))}
+          ingredientCards={importIngredientCards?.map((e) => ({ id: e.id, name: e.name, type: e.type, attrs: e.attrs })) ?? null}
+          warehouses={importWarehouses?.map((e) => ({ id: e.id, name: e.name })) ?? null}
         />
       )}
 
