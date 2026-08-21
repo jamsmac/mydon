@@ -1521,6 +1521,12 @@ export interface StockBatchRow {
   openedOn: string | null;
   supplierId: string | null;
   supplierName: string | null;
+  /**
+   * Имя поставщика, как его ввёл человек, — даже если карточка не нашлась
+   * (см. `BatchRow.supplierRaw` в `apps/core/src/stock/stock.service.ts`).
+   * Без него «не вводили» и «ввели с опечаткой» на экране не отличить.
+   */
+  supplierRaw: string | null;
   invoiceNo: string | null;
   invoiceDate: string | null;
   note: string | null;

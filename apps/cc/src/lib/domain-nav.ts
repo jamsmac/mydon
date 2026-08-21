@@ -60,7 +60,9 @@ export const VENDHUB_GROUPS: NavGroup[] = [
       { label: "Журнал продаж", type: "sale" },
       { label: "Расход сырья", type: "consumption" },
       { label: "Инкассация", type: "collection" },
-      { label: "Сроки годности", type: null },
+      // Task 5: партии сырья/товара — своя таблица (stock_batch), не entity —
+      // как «Инкассация» выше и остальные TABLE_BACKED_LEAVES ниже.
+      { label: "Сроки годности", type: "expiry" },
       { label: "Себестоимость", type: null },
     ],
   },
@@ -156,6 +158,8 @@ export const TABLE_BACKED_LEAVES = [
   "machine_stock",
   "consumption",
   "customs_rates",
+  // Партии (Task 5): stock_batch, не entity — счёт по byType всегда был бы 0.
+  "expiry",
 ] as const;
 
 export const isTableBackedLeaf = (type: string | null | undefined): boolean =>

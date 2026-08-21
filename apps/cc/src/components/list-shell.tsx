@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
 
 /** Одна плитка мини-KPI строки листа. */
@@ -11,6 +12,12 @@ export interface ListShellKpi {
    * «по 6 из 226 карточек»), когда сумма/счёт посчитаны не по всему листу.
    */
   foot?: string;
+  /**
+   * «Плитка = вопрос, клик = ответ» (как плитки «Парк» на дашборде): задан —
+   * плитка рисуется ссылкой и сужает список тем же фильтром. Не задан —
+   * обычная неинтерактивная плитка (не всё в счётчиках листа кликабельно).
+   */
+  href?: string;
 }
 
 /**
@@ -55,13 +62,24 @@ export function ListShell({
         className="tiles"
         style={{ gridTemplateColumns: `repeat(${kpi.length}, minmax(0, 1fr))`, marginBottom: 14 }}
       >
-        {kpi.map((t) => (
-          <div key={t.label} className={`tile mini ${t.hot ? "is-hot" : ""}`}>
-            <div className="lab">{t.label}</div>
-            <div className="v">{t.value}</div>
-            {t.foot && <div className="foot">{t.foot}</div>}
-          </div>
-        ))}
+        {kpi.map((t) => {
+          const body = (
+            <>
+              <div className="lab">{t.label}</div>
+              <div className="v">{t.value}</div>
+              {t.foot && <div className="foot">{t.foot}</div>}
+            </>
+          );
+          return t.href ? (
+            <Link key={t.label} href={t.href} className={`tile mini ${t.hot ? "is-hot" : ""}`}>
+              {body}
+            </Link>
+          ) : (
+            <div key={t.label} className={`tile mini ${t.hot ? "is-hot" : ""}`}>
+              {body}
+            </div>
+          );
+        })}
       </div>
 
       {(action ?? searchHrefBase) && (
