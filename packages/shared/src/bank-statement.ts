@@ -1,0 +1,194 @@
+/**
+ * Разбор выписки банка (счёт компании) — срез К, задача 4.
+ *
+ * Чистая функция поверх `parseXlsx` (`packages/shared/src/xlsx.ts`), тем же
+ * приёмом, что и `purchase-register.ts` для реестра закупок среза D: сюда
+ * приходит уже разобранная таблица `{ columns, rows }`, а не сырые байты.
+ *
+ * ЛОВУШКИ ФОРМАТА (все проверены на живом файле 22.08.2026,
+ * `AccReferenceReport20260821223037.xlsx`, разбор `parseXlsx`):
+ *
+ * 1. ⚠️ **`columns` из `parseXlsx` — МУСОР.** Первая строка файла — заголовок
+ *    справки («Выписка по счёту…»), не шапка таблицы. Настоящие имена колонок
+ *    лежат в `rows[1]` (третья строка исходного файла: строка 0 — заголовок
+ *    справки, строка 2 — служебная строка счёта). Индексы ищутся ПО ИМЕНИ
+ *    внутри `rows[1]`, а не хардкодятся позициями — так же, как реестр закупок
+ *    хардкодит позиции ТОЛЬКО там, где заголовка нет вовсе; здесь заголовок
+ *    есть, значит используем его.
+ * 2. Дата — `дд.мм.гг`, год ДВУЗНАЧНЫЙ (`12.06.25`), а не четырёхзначный.
+ *    Век фиксирован `20xx` — отчёт целиком лежит в 2025–2026 годах.
+ * 3. ⚠️ **Числа — в научной записи** (строка итога: `1.57328068051E9`).
+ *    `Number(...)` читает её верно; ЛЮБАЯ чистка строки регуляркой вида
+ *    `replace(/[^\d.-]/g, "")` съедает `E` и превращает 1,57 млрд в 1,57 —
+ *    ошибка в миллиард раз, и она молчаливая. Регулярная чистка чисел
+ *    ЗАПРЕЩЕНА: только `Number()` + `Number.isFinite`.
+ * 4. Строка-итог («Итого оборот за период:») даты не несёт — фильтр по
+ *    формату даты отбрасывает её сам, без отдельной проверки на текст
+ *    «Итого». Тем же фильтром отбрасываются заголовок справки, шапка и
+ *    служебная строка счёта — ни у одной из них нет даты документа.
+ * 5. Кассовый символ `0200` помечает взнос наличной выручки в банк. Пустой
+ *    символ — норма (у большинства строк символа нет вовсе), а не пробел.
+ */
+
+import type { XlsxSheet } from "./xlsx";
+
+/** Одна строка выписки — дата, суммы по дебету/кредиту, назначение, кассовый символ, ИНН, номер документа. */
+export interface BankStatementRow {
+  /** Дата документа, ISO `YYYY-MM-DD` (из `дд.мм.гг`, век зафиксирован `20xx`). */
+  date: string;
+  /** Номер счёта — из выписки; в тестовых фикстурах подставляется заведомо поддельный. */
+  account: string;
+  name: string;
+  docNo: string;
+  docType: string;
+  branch: string;
+  /** Оборот дебет — `null`, если ячейка пуста или не число. */
+  debit: number | null;
+  /** Оборот кредит — `null`, если ячейка пуста или не число. */
+  credit: number | null;
+  purpose: string;
+  /** Кассовый символ банка («0200» — взнос наличной выручки). `null` — символа нет (норма у большинства строк). */
+  cashSymbol: string | null;
+  inn: string;
+  /** Позиция строки в `table.rows` (0-based) — для отчёта и отладки, не хранится. */
+  fileRow: number;
+  /**
+   * Ключ идемпотентности — номер документа плюс дата. Совпадение внутри ОДНОГО
+   * файла (тот же номер документа в тот же день) не схлопывается молча:
+   * счётчик добавляет суффикс `::2`, `::3`… у второй и последующих строк, иначе
+   * законный повтор потерялся бы как «дубликат» при импорте.
+   */
+  extId: string;
+}
+
+/** Настоящие имена колонок выписки — искать ПО ИМЕНИ в `rows[1]`, не хардкодить позиции. */
+const HEADER_NAMES = [
+  "Дата документа",
+  "Счёт",
+  "Наименование",
+  "Номер документа",
+  "Тип документа",
+  "Филиал",
+  "Оборот Дебет",
+  "Оборот кредит",
+  "Назначение платежа",
+  "Кассовый символ",
+  "ИНН",
+] as const;
+
+type HeaderName = (typeof HEADER_NAMES)[number];
+
+/** Строка шапки таблицы выписки — вторая строка `rows` (см. ловушка №1 выше). */
+const HEADER_ROW_INDEX = 1;
+
+const STATEMENT_DATE_RE = /^(\d{2})\.(\d{2})\.(\d{2})$/;
+
+/**
+ * Дата документа выписки → ISO `YYYY-MM-DD`. Формат — `дд.мм.гг`, век `20xx`
+ * (ловушка №2). `null` — не дата (шапка, служебная строка, строка-итог) —
+ * этим и отсекаются нетранзакционные строки, без отдельной проверки на текст.
+ */
+function parseStatementDate(raw: string): string | null {
+  const m = STATEMENT_DATE_RE.exec(raw.trim());
+  if (!m) return null;
+  const [, dd, mm, yy] = m;
+  const year = 2000 + Number(yy);
+  const month = Number(mm);
+  const day = Number(dd);
+  // Проверка настоящей календарной даты (31.02 и подобное — не дата), а не
+  // просто формата: JS Date сам нормализует «31.02» в март, что дало бы
+  // правдоподобную, но неверную дату.
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) return null;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${year}-${pad(month)}-${pad(day)}`;
+}
+
+/**
+ * Число ячейки выписки — включая научную запись (ловушка №3). НИКАКОЙ чистки
+ * строки регуляркой: `Number()` понимает `1.57328068051E9` сам, а чистка
+ * убила бы экспоненту и дала ошибку в миллиард раз молча.
+ */
+function parseStatementAmount(raw: string): number | null {
+  const s = raw.trim();
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function cellAt(row: readonly string[], i: number): string {
+  const v = row[i];
+  return v === undefined ? "" : v;
+}
+
+/** Индекс каждого имени колонки внутри строки шапки. Не найдено — формат отчёта сменился, разбор останавливается явной ошибкой, а не тихим сдвигом колонок. */
+function resolveColumns(header: readonly string[]): Record<HeaderName, number> {
+  const out = {} as Record<HeaderName, number>;
+  for (const name of HEADER_NAMES) {
+    const i = header.findIndex((c) => c.trim() === name);
+    if (i < 0) {
+      throw new Error(
+        `В выписке не найдена колонка «${name}» в строке шапки (rows[${HEADER_ROW_INDEX}]) — формат отчёта, похоже, изменился.`,
+      );
+    }
+    out[name] = i;
+  }
+  return out;
+}
+
+/**
+ * Разобрать выписку банка в строки {@link BankStatementRow}.
+ *
+ * `table` — уже прочитанная `parseXlsx` таблица (`{ columns, rows }` из
+ * {@link XlsxSheet}; `columns` не используется — см. ловушку №1).
+ *
+ * Строка без валидной даты документа (шапка справки, служебная строка счёта,
+ * строка-итог «Итого оборот за период:») пропускается целиком — фильтр по
+ * формату даты отсекает её сам (ловушка №4).
+ */
+export function parseBankStatement(table: Pick<XlsxSheet, "columns" | "rows">): BankStatementRow[] {
+  const header = table.rows[HEADER_ROW_INDEX];
+  if (!header) {
+    throw new Error(
+      `В выписке меньше ${HEADER_ROW_INDEX + 1} строк после заголовка справки — не похоже на банковскую выписку.`,
+    );
+  }
+  const col = resolveColumns(header);
+
+  const seen = new Map<string, number>();
+  const out: BankStatementRow[] = [];
+
+  table.rows.forEach((row, fileRow) => {
+    const date = parseStatementDate(cellAt(row, col["Дата документа"]));
+    if (date === null) return; // не операция — заголовок/шапка/служебная строка/итог (ловушка №4)
+
+    const docNo = cellAt(row, col["Номер документа"]).trim();
+    const base = `${docNo || "без-номера"}::${date}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    const extId = n === 1 ? base : `${base}::${n}`;
+
+    const cashSymbolRaw = cellAt(row, col["Кассовый символ"]).trim();
+
+    out.push({
+      date,
+      account: cellAt(row, col["Счёт"]).trim(),
+      name: cellAt(row, col["Наименование"]).trim(),
+      docNo,
+      docType: cellAt(row, col["Тип документа"]).trim(),
+      branch: cellAt(row, col["Филиал"]).trim(),
+      debit: parseStatementAmount(cellAt(row, col["Оборот Дебет"])),
+      credit: parseStatementAmount(cellAt(row, col["Оборот кредит"])),
+      purpose: cellAt(row, col["Назначение платежа"]).trim(),
+      cashSymbol: cashSymbolRaw === "" ? null : cashSymbolRaw,
+      inn: cellAt(row, col["ИНН"]).trim(),
+      fileRow,
+      extId,
+    });
+  });
+
+  return out;
+}
+
+/** Кассовый символ взноса наличной выручки в банк (R-K3/R-K6). */
+export const CASH_DEPOSIT_SYMBOL = "0200";

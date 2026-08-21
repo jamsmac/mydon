@@ -572,6 +572,75 @@ export interface FinanceCounterparty {
   inn: string | null;
 }
 
+/**
+ * Одна строка массового импорта банковской выписки (срез К, задача 4): вход
+ * для `POST /finance/bank-statement`. Разбор строки — `parseBankStatement`
+ * (`@mydon/shared`); сюда приходит уже готовый результат.
+ */
+export interface ImportBankStatementItem {
+  /** Дата операции, ISO YYYY-MM-DD. */
+  date: string;
+  debit: number | null;
+  credit: number | null;
+  purpose?: string | null;
+  /** Кассовый символ банка («0200» — взнос наличной выручки). */
+  cashSymbol?: string | null;
+  docNo?: string | null;
+  /** Ключ идемпотентности — номер документа + дата (из разбора). */
+  extId: string;
+  fileRow?: number;
+}
+
+/** Строка отчёта импорта выписки, отклонённая с причиной. */
+export interface ImportBankStatementRejection {
+  extId: string;
+  fileRow?: number;
+  reason: string;
+}
+
+/** Отчёт массового импорта выписки — одинаковый и в dryRun, и в настоящем прогоне (R-D7). */
+export interface ImportBankStatementReport {
+  dryRun: boolean;
+  created: number;
+  /** Пропущено как повтор — запись с этим (source='bank', extId) уже существует. */
+  skippedRepeat: number;
+  rejected: ImportBankStatementRejection[];
+}
+
+/**
+ * Один календарный месяц сверки кассы (R-K6). `status` — признак ДАННЫХ, не
+ * разница: «одна сторона пуста» (`noWithdrawn`/`noDeposit`) — разрыв, стоящий
+ * внимания; `empty` (обе пусты) — тихий месяц, а не недостача.
+ */
+export interface CashReconcilePeriod {
+  /** YYYY-MM. */
+  period: string;
+  withdrawn: number;
+  withdrawnCount: number;
+  deposited: number;
+  depositedCount: number;
+  diff: number;
+  status: "ok" | "empty" | "noWithdrawn" | "noDeposit";
+}
+
+/** Сверка кассы за период (R-K6): изъято по системе (инкассации) против сдано в банк (символ 0200). */
+export interface CashReconcileReport {
+  from: string;
+  to: string;
+  withdrawn: number;
+  withdrawnCount: number;
+  /** false — за весь период не было ни одной инкассации: `withdrawn: 0` тогда не сходимость, а отсутствие данных. */
+  hasWithdrawn: boolean;
+  deposited: number;
+  depositedCount: number;
+  hasDeposited: boolean;
+  diff: number;
+  /** Помесячно на весь запрошенный диапазон, включая месяцы без операций. */
+  periods: CashReconcilePeriod[];
+  /** Только периоды, где ровно ОДНА сторона пуста — то, что стоит смотреть в первую очередь. */
+  gaps: CashReconcilePeriod[];
+}
+
 // ── Склад техники GLOBERENT (перенос warehouse_vehicles PROMACH) ──
 
 export interface UnitReserveRow {
@@ -2317,6 +2386,16 @@ export const core = {
   payFinanceFlow: (id: string, rate?: number) =>
     send<FinanceFlow>(`/finance/flows/${id}/pay`, "PATCH", rate !== undefined ? { rate } : {}),
   cancelFinanceFlow: (id: string) => send<FinanceFlow>(`/finance/flows/${id}/cancel`, "PATCH", {}),
+  /**
+   * Массовый импорт банковской выписки с предпросмотром (срез К, задача 4).
+   * `dryRun: true` ничего не пишет и возвращает тот же отчёт, что настоящий
+   * прогон (R-D7 среза D). Пишет в money_flow с source='bank'.
+   */
+  importBankStatement: (input: { dryRun?: boolean; items: ImportBankStatementItem[] }) =>
+    send<ImportBankStatementReport>("/finance/bank-statement", "POST", input),
+  /** Сверка кассы за период (R-K6): изъято по системе против сдано в банк (символ 0200), помесячно + разрывы. */
+  cashReconcile: (from: string, to: string) =>
+    get<CashReconcileReport>(`/finance/cash-reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
 
   // ── Источники (сырой слой) ──
   rawSources: () => get<{ sources: RawSourceState[] }>("/raw/sources"),

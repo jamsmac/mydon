@@ -1,5 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Put, Query } from "@nestjs/common";
 import { DOMAINS, type Domain } from "@mydon/shared";
+import { Type } from "class-transformer";
+import { ArrayMaxSize, IsArray, IsBoolean, IsNumber, IsOptional, IsString, MaxLength, ValidateNested } from "class-validator";
 import { FinanceService, type CreateFlowInput } from "./finance.service";
 
 function asDomain(value: string): Domain {
@@ -7,6 +9,47 @@ function asDomain(value: string): Domain {
     throw new BadRequestException(`Неизвестное направление "${value}". Доступны: ${DOMAINS.join(", ")}`);
   }
   return value as Domain;
+}
+
+/**
+ * Одна строка массового импорта банковской выписки (срез К, задача 4). ДТО
+ * следит только за ТИПОМ — семантику («есть ли оборот») проверяет сервис
+ * построчно (урок среза D: одна кривая строка не должна ронять пачку из
+ * тысяч; здесь их до 2440 в живом файле).
+ */
+export class ImportBankStatementItemDto {
+  @IsString() @MaxLength(10)
+  date!: string;
+
+  @IsOptional() @IsNumber()
+  debit?: number | null;
+
+  @IsOptional() @IsNumber()
+  credit?: number | null;
+
+  @IsOptional() @IsString() @MaxLength(1000)
+  purpose?: string | null;
+
+  @IsOptional() @IsString() @MaxLength(16)
+  cashSymbol?: string | null;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  docNo?: string | null;
+
+  @IsString() @MaxLength(128)
+  extId!: string;
+
+  @IsOptional()
+  fileRow?: number;
+}
+
+/** Массовый импорт банковской выписки с предпросмотром — тот же контракт `dryRun`, что у импорта закупок (срез D). */
+export class ImportBankStatementDto {
+  @IsOptional() @IsBoolean()
+  dryRun?: boolean;
+
+  @IsArray() @ArrayMaxSize(3000) @ValidateNested({ each: true }) @Type(() => ImportBankStatementItemDto)
+  items!: ImportBankStatementItemDto[];
 }
 
 /**
@@ -114,5 +157,25 @@ export class FinanceController {
   @Patch("flows/:id/cancel")
   cancel(@Param("id") id: string, @Body() body: { actorRef?: string }) {
     return this.finance.cancelFlow(id, body.actorRef ?? "owner");
+  }
+
+  /**
+   * Массовый импорт банковской выписки с предпросмотром (срез К, задача 4):
+   * `dryRun` ничего не пишет и возвращает тот же отчёт, что настоящий прогон
+   * (R-D7 среза D). Строки — уже разобранные `parseBankStatement` (`@mydon/shared`).
+   */
+  @Post("bank-statement")
+  importBankStatement(@Body() dto: ImportBankStatementDto, @Query("actorRef") actorRef?: string) {
+    return this.finance.importBankStatement(dto, actorRef ?? "owner");
+  }
+
+  /**
+   * Сверка кассы за период (R-K6): изъято по системе (инкассации) против
+   * сдано в банк (взносы с кассовым символом `0200`), помесячно, с отдельным
+   * списком периодов, где ровно одна сторона пуста.
+   */
+  @Get("cash-reconcile")
+  cashReconcile(@Query("from") from?: string, @Query("to") to?: string) {
+    return this.finance.cashReconcile(from ?? "", to ?? "");
   }
 }

@@ -118,3 +118,4 @@ export * from "./expiry";
 
 /** Касса и инкассация: номиналы сума и сверка набора купюр (срез K, задача 1). */
 export * from "./denominations";
+export * from "./bank-statement";

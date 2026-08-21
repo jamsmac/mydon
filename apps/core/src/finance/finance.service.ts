@@ -1,18 +1,20 @@
 import { BadGatewayException, BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { cbu } from "@mydon/connectors";
-import { auditLog, entity, fxRate, moneyFlow, org } from "@mydon/db";
+import { auditLog, collection, entity, fxRate, moneyFlow, org } from "@mydon/db";
 import { MONEY_CATEGORIES, TZ, type Domain } from "@mydon/shared";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import {
   aging,
   byMonth,
+  cashReconcile as cashReconcileMath,
   concentration,
   dayKey,
   dueSoon,
   fxRefreshPlan,
   uzsEquivalent,
   type AgingReport,
+  type CashReconcileReport,
   type ConcentrationReport,
   type FlowForMath,
   type FxRefreshSkip,
@@ -33,7 +35,14 @@ const CURRENCY_RE = /^[A-Z]{3}$/;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface CreateFlowInput {
-  domain: Domain;
+  /**
+   * Направление бизнеса. Необязательно (срез К, задача 4): импорт банковской
+   * выписки покрывает счёт компании целиком, а не один домен — навязывать ему
+   * домен значило бы выдумывать привязку, которой нет. Не задан — запись
+   * ложится без домена и без orgId (обе колонки в БД nullable); все СУЩЕСТВУЮЩИЕ
+   * вызовы domain передают всегда, и для них ничего не меняется.
+   */
+  domain?: Domain;
   direction: "in" | "out";
   /** planned — обязательство (долг/счёт), actual — свершившийся платёж. */
   status: "planned" | "actual";
@@ -54,6 +63,23 @@ export interface CreateFlowInput {
   dueDate?: string;
   /** Единица техники: из привязанных записей считается её себестоимость. */
   unitId?: string;
+  /**
+   * Откуда операция: click | payme | uzum | bank | cash | manual (факт 4 плана
+   * среза К). Не задан — как и раньше, `'manual'`: поведение существующих
+   * вызовов не меняется.
+   */
+  source?: string;
+  /**
+   * Идентификатор операции у источника — идемпотентность массового импорта
+   * (уникальный индекс `money_flow_source_ext_key` на паре `(source, extId)`).
+   * Задан и запись с таким `(source, extId)` уже есть — `createFlow` вернёт
+   * СУЩЕСТВУЮЩУЮ строку, а не создаст дубль и не упадёт на ограничении БД.
+   */
+  extId?: string | null;
+  /** Связь с инкассацией: наличные из автомата → сдача в банк. */
+  collectionId?: string | null;
+  /** Кассовый символ банка («0200» — взнос наличной выручки). */
+  cashSymbol?: string | null;
 }
 
 /** Строка списка: с именем контрагента из реестра — панель не делает лишних запросов. */
@@ -61,6 +87,45 @@ export interface FlowListRow extends FlowRow {
   counterpartyEntityName: string | null;
   /** Эквивалент в сумах (null — курса нет). */
   uzs: number | null;
+}
+
+/**
+ * Одна строка массового импорта банковской выписки (срез К, задача 4): вход
+ * для `POST /finance/bank-statement`. Разбор строки (дата, дебет/кредит,
+ * назначение, кассовый символ, `extId`) — забота `parseBankStatement`
+ * (`@mydon/shared`), сюда приходит уже готовый результат.
+ */
+export interface ImportBankStatementItem {
+  /** Дата операции, ISO YYYY-MM-DD (уже проверенная разбором). */
+  date: string;
+  /** Оборот дебет — null/не задан, если по этой строке дебета нет. */
+  debit?: number | null;
+  /** Оборот кредит — null/не задан, если по этой строке кредита нет. */
+  credit?: number | null;
+  purpose?: string | null;
+  /** Кассовый символ банка («0200» — взнос наличной выручки). */
+  cashSymbol?: string | null;
+  docNo?: string | null;
+  /** Ключ идемпотентности — номер документа + дата (из разбора). */
+  extId: string;
+  /** Номер строки в исходном файле — только для отчёта об отклонении. */
+  fileRow?: number;
+}
+
+/** Строка отчёта импорта, отклонённая с причиной (та же граница ДТО/сервис, что в срезе D). */
+export interface ImportBankStatementRejection {
+  extId: string;
+  fileRow?: number;
+  reason: string;
+}
+
+/** Отчёт массового импорта выписки — одинаковый и в dryRun, и в настоящем прогоне (R-D7). */
+export interface ImportBankStatementReport {
+  dryRun: boolean;
+  created: number;
+  /** Пропущено как повтор — запись с этим (source='bank', extId) уже существует. */
+  skippedRepeat: number;
+  rejected: ImportBankStatementRejection[];
 }
 
 export interface FxCurrent {
@@ -212,8 +277,29 @@ export class FinanceService {
     };
   }
 
-  /** Завести обязательство или платёж. Курс не задан — подставляется действующий. */
-  async createFlow(input: CreateFlowInput, actorRef = "owner"): Promise<FlowRow> {
+  /**
+   * Проверки и идемпотентность записи ДО первой записи — общая для одиночного
+   * `createFlow` и массового `importBankStatement` (тот же принцип, что у
+   * `StockService.prepareBatch`/`importBatches`, срез D): `dryRun` обязан
+   * видеть ТОЧНО то же основание, по которому настоящий прогон решит
+   * «уже была» / «создать», не дублируя проверки в двух местах.
+   *
+   * Идемпотентность — по `(source, extId)` (уникальный индекс
+   * `money_flow_source_ext_key`, факт 4 плана среза К): не задан `extId` —
+   * поведение НЕ МЕНЯЕТСЯ для всех существующих вызовов (проверка просто не
+   * выполняется, до базы за ней не ходим).
+   */
+  private async prepareFlow(input: CreateFlowInput): Promise<
+    | { kind: "existing"; row: FlowRow }
+    | {
+        kind: "new";
+        orgId: string | null;
+        currency: string;
+        source: string;
+        rate: number | null;
+        amountUzs: number | null;
+      }
+  > {
     const currency = (input.currency ?? "UZS").toUpperCase().trim();
     if (!CURRENCY_RE.test(currency)) {
       throw new BadRequestException("Валюта — трёхбуквенный код: UZS, USD, CNY…");
@@ -236,7 +322,9 @@ export class FinanceService {
     if (input.rate !== undefined && (!Number.isFinite(input.rate) || input.rate <= 0)) {
       throw new BadRequestException("Курс — положительное число");
     }
-    const orgId = await this.orgId(input.domain);
+    // domain не задан (импорт без привязки к направлению) — orgId остаётся
+    // null, а не падает NotFoundException за несуществующий "домен undefined".
+    const orgId = input.domain !== undefined ? await this.orgId(input.domain) : null;
 
     if (input.counterpartyId !== undefined) {
       const [cp] = await this.db
@@ -245,6 +333,16 @@ export class FinanceService {
         .where(eq(entity.id, input.counterpartyId))
         .limit(1);
       if (!cp) throw new NotFoundException("Контрагент не найден в реестре");
+    }
+
+    const source = input.source ?? "manual";
+    if (input.extId) {
+      const [already] = await this.db
+        .select()
+        .from(moneyFlow)
+        .where(and(eq(moneyFlow.source, source), eq(moneyFlow.extId, input.extId)))
+        .limit(1);
+      if (already) return { kind: "existing", row: already };
     }
 
     // Курс на дату операции фиксируется В ЗАПИСИ (PROMACH, миграция 083):
@@ -257,22 +355,34 @@ export class FinanceService {
     }
     const amountUzs = currency === "UZS" ? null : rate !== null ? input.amount * rate : null;
 
+    return { kind: "new", orgId, currency, source, rate, amountUzs };
+  }
+
+  /** Записать проверенную (prepareFlow → "new") заявку — вставка и след в auditLog. */
+  private async writeFlow(
+    input: CreateFlowInput,
+    prep: Extract<Awaited<ReturnType<FinanceService["prepareFlow"]>>, { kind: "new" }>,
+    actorRef: string,
+  ): Promise<FlowRow> {
     return this.db.transaction(async (tx) => {
       const [created] = await tx
         .insert(moneyFlow)
         .values({
-          orgId,
-          domain: input.domain,
+          orgId: prep.orgId,
+          domain: input.domain ?? null,
           direction: input.direction,
           amount: String(input.amount),
-          currency,
-          source: "manual",
+          currency: prep.currency,
+          source: prep.source,
+          extId: input.extId ?? null,
           purpose: input.purpose ?? null,
+          collectionId: input.collectionId ?? null,
+          cashSymbol: input.cashSymbol ?? null,
           category: input.category ?? null,
           method: input.method ?? null,
           isOfficial: input.isOfficial ?? input.method !== "cash",
-          rate: rate !== null ? String(rate) : null,
-          amountUzs: amountUzs !== null ? String(amountUzs) : null,
+          rate: prep.rate !== null ? String(prep.rate) : null,
+          amountUzs: prep.amountUzs !== null ? String(prep.amountUzs) : null,
           counterpartyId: input.counterpartyId ?? null,
           counterparty: input.counterparty ?? null,
           docNo: input.docNo ?? null,
@@ -292,6 +402,153 @@ export class FinanceService {
       });
       return created;
     });
+  }
+
+  /**
+   * Завести обязательство или платёж. Курс не задан — подставляется
+   * действующий. `extId` задан и запись с таким `(source, extId)` уже есть —
+   * возвращается СУЩЕСТВУЮЩАЯ строка (идемпотентность массового импорта,
+   * факт 4 плана среза К); для вызовов без `extId` (весь остальной код
+   * сегодня) поведение не меняется ни на шаг.
+   */
+  async createFlow(input: CreateFlowInput, actorRef = "owner"): Promise<FlowRow> {
+    const prep = await this.prepareFlow(input);
+    if (prep.kind === "existing") return prep.row;
+    return this.writeFlow(input, prep, actorRef);
+  }
+
+  /**
+   * Массовый импорт банковской выписки (срез К, задача 4, R-K3): строки уже
+   * разобраны `parseBankStatement` (`@mydon/shared`) на стороне вызывающего —
+   * сюда приходят конкретные приход/расход, а не сырые ячейки. `dryRun` не
+   * пишет ничего и отдаёт тот же отчёт, что настоящий прогон (принцип R-D7
+   * среза D).
+   *
+   * ДВЕ ловушки, о которые уже спотыкался этот проект (срез D):
+   *  - DTO проверяет только ТИП, не семантику — одна кривая строка не должна
+   *    ронять пачку из тысяч (2440 строк живой выписки). Построчный `try`
+   *    ниже — это и есть граница: `rejected` копит причины, остальные строки
+   *    проходят.
+   *  - Идемпотентность — ДО вставки (через `prepareFlow`/`(source, extId)`),
+   *    а не через отлов ошибки уникального индекса ПОСЛЕ: иначе повторный
+   *    импорт того же файла удвоил бы аудит-лог наполовину написанными
+   *    транзакциями.
+   */
+  async importBankStatement(
+    input: { dryRun?: boolean; items: ImportBankStatementItem[] },
+    actorRef = "owner",
+  ): Promise<ImportBankStatementReport> {
+    if (input.items.length > 3000) {
+      throw new BadRequestException("Пачка не может быть больше 3000 строк за раз");
+    }
+    const dryRun = input.dryRun === true;
+
+    let created = 0;
+    let skippedRepeat = 0;
+    const rejected: ImportBankStatementRejection[] = [];
+
+    for (const item of input.items) {
+      // Семантика («что считать оборотом строки») — забота сервиса, не DTO
+      // (тот же урок, что и в срезе D): дебет и кредит одновременно пустые —
+      // строка без движения денег, отклоняем с причиной, а не молча пропускаем.
+      let direction: "in" | "out";
+      let amount: number;
+      // `!= null` — не только против `null`, но и против `undefined` (DTO
+      // помечает оба поля необязательными: контроллер их не подставляет).
+      if (item.credit != null && item.credit > 0) {
+        direction = "in";
+        amount = item.credit;
+      } else if (item.debit != null && item.debit > 0) {
+        direction = "out";
+        amount = item.debit;
+      } else {
+        rejected.push({
+          extId: item.extId,
+          fileRow: item.fileRow,
+          reason: "нет оборота ни по дебету, ни по кредиту — строку не с чем сопоставить",
+        });
+        continue;
+      }
+
+      const flowInput: CreateFlowInput = {
+        direction,
+        status: "actual",
+        amount,
+        currency: "UZS",
+        source: "bank",
+        extId: item.extId,
+        cashSymbol: item.cashSymbol ?? null,
+        purpose: item.purpose ?? undefined,
+        docNo: item.docNo ?? undefined,
+        date: item.date,
+      };
+
+      try {
+        const prep = await this.prepareFlow(flowInput);
+        if (prep.kind === "existing") {
+          skippedRepeat += 1;
+          continue;
+        }
+        if (!dryRun) await this.writeFlow(flowInput, prep, actorRef);
+        created += 1;
+      } catch (e) {
+        rejected.push({
+          extId: item.extId,
+          fileRow: item.fileRow,
+          reason: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    return { dryRun, created, skippedRepeat, rejected };
+  }
+
+  private static readonly ДАТА_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  /**
+   * Сверка кассы за период (R-K6, шаг 3 задачи 4): изъято по системе
+   * (инкассации, `collection.status <> 'cancelled'`, по `collectedAt` —
+   * деньги покидают автомат в момент сбора, тот же выбор, что в
+   * `CollectionsService.reconcile`) против сдано в банк (`money_flow` с
+   * `cashSymbol = '0200'`, по дате операции). Математика — чистая функция
+   * `cashReconcile` (`finance.math.ts`): периоды помесячно, разрыв — там, где
+   * ровно ОДНА сторона пуста (факт 9 плана среза К).
+   */
+  async cashReconcile(from: string, to: string): Promise<CashReconcileReport> {
+    if (!FinanceService.ДАТА_RE.test(from) || !FinanceService.ДАТА_RE.test(to)) {
+      throw new BadRequestException("Период задаётся датами вида ГГГГ-ММ-ДД: ?from=2026-06-01&to=2026-08-21");
+    }
+    if (from > to) {
+      throw new BadRequestException(`Начало периода (${from}) позже конца (${to})`);
+    }
+    const fromTs = new Date(`${from}T00:00:00+05:00`);
+    const toTs = new Date(`${to}T23:59:59.999+05:00`);
+
+    const [collections, deposits] = await Promise.all([
+      this.db
+        .select({ collectedAt: collection.collectedAt, amount: collection.amount })
+        .from(collection)
+        .where(
+          and(
+            ne(collection.status, "cancelled"),
+            sql`${collection.amount} is not null`,
+            gte(collection.collectedAt, fromTs),
+            lte(collection.collectedAt, toTs),
+          ),
+        ),
+      this.db
+        .select({ date: moneyFlow.date, amount: moneyFlow.amount })
+        .from(moneyFlow)
+        .where(and(eq(moneyFlow.cashSymbol, "0200"), gte(moneyFlow.date, fromTs), lte(moneyFlow.date, toTs))),
+    ]);
+
+    return cashReconcileMath(
+      collections.map((c) => ({ date: c.collectedAt, amount: Number(c.amount) })),
+      deposits.map((d) => ({ date: d.date, amount: Number(d.amount) })),
+      from,
+      to,
+      TZ,
+    );
   }
 
   /** Отметить обязательство оплаченным: план становится фактом, след — в журнале. */

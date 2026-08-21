@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   aging,
   byMonth,
+  cashReconcile,
   concentration,
   daysBetween,
   dueSoon,
@@ -292,5 +293,105 @@ describe("fxRefreshPlan — автокурс ЦБ РУз (ручной ввод 
     );
     assert.deepEqual(plan.inserts, []);
     assert.equal(plan.skipped.length, 2);
+  });
+});
+
+describe("cashReconcile — изъято по системе vs сдано в банк (R-K6)", () => {
+  const TZ = "Asia/Tashkent";
+
+  it("месяц с операциями по обеим сторонам — статус ok, разница deposited − withdrawn", () => {
+    const r = cashReconcile(
+      [{ date: "2026-06-05T10:00:00+05:00", amount: 100000 }],
+      [{ date: "2026-06-12T10:00:00+05:00", amount: 90000 }],
+      "2026-06-01",
+      "2026-06-30",
+      TZ,
+    );
+    assert.equal(r.withdrawn, 100000);
+    assert.equal(r.deposited, 90000);
+    assert.equal(r.diff, -10000);
+    assert.equal(r.periods.length, 1);
+    assert.equal(r.periods[0]!.status, "ok");
+    assert.deepEqual(r.gaps, []);
+  });
+
+  it("период без инкассаций отдаёт признак «нет данных», а не ноль — сумма при этом ноль", () => {
+    const r = cashReconcile(
+      [],
+      [{ date: "2026-06-12T10:00:00+05:00", amount: 90000 }],
+      "2026-06-01",
+      "2026-06-30",
+      TZ,
+    );
+    assert.equal(r.withdrawn, 0);
+    assert.equal(r.hasWithdrawn, false, "нет ни одной инкассации за период — это факт «нет данных», не «собрали ноль»");
+    assert.equal(r.hasDeposited, true);
+    assert.equal(r.periods[0]!.status, "noWithdrawn");
+    assert.equal(r.gaps.length, 1);
+    assert.equal(r.gaps[0]!.period, "2026-06");
+  });
+
+  it("обе стороны пусты в месяце — статус empty, а НЕ в gaps (тихий месяц ≠ разрыв)", () => {
+    const r = cashReconcile(
+      [{ date: "2026-05-05", amount: 50000 }],
+      [{ date: "2026-05-05", amount: 50000 }],
+      "2026-05-01",
+      "2026-07-31",
+      TZ,
+    );
+    assert.equal(r.periods.length, 3, "май-июнь-июль перечислены все, даже пустые");
+    const june = r.periods.find((p) => p.period === "2026-06")!;
+    const july = r.periods.find((p) => p.period === "2026-07")!;
+    assert.equal(june.status, "empty");
+    assert.equal(july.status, "empty");
+    assert.ok(!r.gaps.some((g) => g.period === "2026-06" || g.period === "2026-07"), "тихий месяц не считается разрывом");
+  });
+
+  it("сдано без изъятия — noDeposit наоборот тоже разрыв", () => {
+    const r = cashReconcile(
+      [{ date: "2026-06-05", amount: 100000 }],
+      [],
+      "2026-06-01",
+      "2026-06-30",
+      TZ,
+    );
+    assert.equal(r.periods[0]!.status, "noDeposit");
+    assert.equal(r.gaps.length, 1);
+  });
+
+  it("операции за пределами [from, to] в сумму не попадают", () => {
+    const r = cashReconcile(
+      [
+        { date: "2026-05-31T23:00:00+05:00", amount: 1 },
+        { date: "2026-06-15", amount: 100000 },
+        { date: "2026-07-01T00:00:00+05:00", amount: 1 },
+      ],
+      [],
+      "2026-06-01",
+      "2026-06-30",
+      TZ,
+    );
+    assert.equal(r.withdrawn, 100000);
+    assert.equal(r.withdrawnCount, 1);
+  });
+
+  it("итог за несколько месяцев — сумма по всем операциям диапазона, не только по одному месяцу", () => {
+    const r = cashReconcile(
+      [
+        { date: "2026-06-05", amount: 100000 },
+        { date: "2026-07-05", amount: 200000 },
+      ],
+      [
+        { date: "2026-06-12", amount: 90000 },
+        { date: "2026-07-12", amount: 190000 },
+      ],
+      "2026-06-01",
+      "2026-07-31",
+      TZ,
+    );
+    assert.equal(r.withdrawn, 300000);
+    assert.equal(r.deposited, 280000);
+    assert.equal(r.diff, -20000);
+    assert.equal(r.periods.length, 2);
   });
 });
