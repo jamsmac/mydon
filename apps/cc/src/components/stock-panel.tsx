@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { UNITS } from "@mydon/shared";
-import { addIntake, removeMovement } from "../app/card/actions";
+import { addIntake, addIntakeBatch, removeMovement } from "../app/card/actions";
 import type { IngredientStock } from "../lib/core";
 
 /** Склад, куда можно завести приход. */
@@ -20,6 +20,18 @@ const KIND_LABEL: Record<string, string> = {
 
 const num = (n: number) => n.toLocaleString("ru-RU", { maximumFractionDigits: 3 });
 const sum = (n: number) => `${Math.round(n).toLocaleString("ru-RU")} сум`;
+
+/**
+ * Число из ввода: «1,5», «10 600», «12» — запятая и пробелы разряда (обычный,
+ * неразрывный, узкий) читаются как один и тот же разделитель. Пусто/мусор →
+ * null — количество НЕЛЬЗЯ округлять до целого через parseInt.
+ */
+function parseNum(raw: string): number | null {
+  const t = raw.trim().replace(/[\s\u00A0\u202F]/g, "").replace(",", ".");
+  if (t.length === 0) return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
 
 /**
  * Склад ингредиента: остаток по складам и приход.
@@ -51,24 +63,67 @@ export function StockPanel({
   const [dt, setDt] = useState("");
   const [supplier, setSupplier] = useState("");
 
+  // Партия (§4.3 + документ Р3/Р4) — свёрнута по умолчанию, чтобы не утяжелять
+  // быстрый приход. Все поля необязательны: приход без партии остаётся
+  // возможен, если блок не раскрывать (submit тогда идёт через addIntake).
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchCode, setBatchCode] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
+  const [manufactureDate, setManufactureDate] = useState("");
+  const [invoiceNo, setInvoiceNo] = useState("");
+  const [invoiceDate, setInvoiceDate] = useState("");
+  const [unitPriceNet, setUnitPriceNet] = useState("");
+  const [vatRate, setVatRate] = useState("");
+
   const noWarehouses = warehouses.length === 0;
+
+  // Цена с НДС на глазах — та же формула, что применит Core
+  // (unitPriceNet × (1 + ставка/100)); показываем, а не сохраняем молча,
+  // чтобы владелец сверил с карточкой, где цена уже с НДС.
+  const netNum = parseNum(unitPriceNet);
+  const vatNum = parseNum(vatRate);
+  const grossPreview = netNum !== null && vatNum !== null ? netNum * (1 + vatNum / 100) : null;
 
   function submit() {
     start(async () => {
-      const res = await addIntake(ingredientId, {
-        warehouseId: wh,
-        qty: Number(qty),
-        unit,
-        unitPrice: price.trim() ? Number(price) : undefined,
-        dt: dt.trim() || undefined,
-        supplier: supplier.trim() || undefined,
-      });
+      const qtyNum = parseNum(qty) ?? NaN;
+      const res = batchOpen
+        ? await addIntakeBatch(ingredientId, {
+            warehouseId: wh,
+            qty: qtyNum,
+            unit,
+            dt: dt.trim() || undefined,
+            supplier: supplier.trim() || undefined,
+            batchCode: batchCode.trim() || undefined,
+            expiryDate: expiryDate.trim() || undefined,
+            manufactureDate: manufactureDate.trim() || undefined,
+            invoiceNo: invoiceNo.trim() || undefined,
+            invoiceDate: invoiceDate.trim() || undefined,
+            unitPriceNet: netNum ?? undefined,
+            vatRate: vatNum ?? undefined,
+          })
+        : await addIntake(ingredientId, {
+            warehouseId: wh,
+            qty: qtyNum,
+            unit,
+            unitPrice: parseNum(price) ?? undefined,
+            dt: dt.trim() || undefined,
+            supplier: supplier.trim() || undefined,
+          });
       setMsg(res.ok ? { ok: true, text: "Приход заведён" } : { ok: false, text: res.error ?? "Ошибка" });
       if (res.ok) {
         setOpen(false);
         setQty("");
         setPrice("");
         setSupplier("");
+        setBatchOpen(false);
+        setBatchCode("");
+        setExpiryDate("");
+        setManufactureDate("");
+        setInvoiceNo("");
+        setInvoiceDate("");
+        setUnitPriceNet("");
+        setVatRate("");
         router.refresh();
       }
     });
@@ -154,20 +209,87 @@ export function StockPanel({
               </select>
             </label>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <label style={{ flex: 1 }}>
-              <span>Цена за единицу</span>
-              <input value={price} inputMode="numeric" onChange={(e) => setPrice(e.target.value)} placeholder="80000" />
-            </label>
-            <label style={{ flex: 1 }}>
-              <span>Дата</span>
+          {!batchOpen ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <label style={{ flex: 1 }}>
+                <span>Цена за единицу</span>
+                <input value={price} inputMode="decimal" onChange={(e) => setPrice(e.target.value)} placeholder="80000" />
+              </label>
+              <label style={{ flex: 1 }}>
+                <span>Дата</span>
+                <input value={dt} type="date" onChange={(e) => setDt(e.target.value)} />
+              </label>
+            </div>
+          ) : (
+            <label>
+              <span>Дата прихода</span>
               <input value={dt} type="date" onChange={(e) => setDt(e.target.value)} />
             </label>
-          </div>
+          )}
           <label>
             <span>Поставщик</span>
             <input value={supplier} onChange={(e) => setSupplier(e.target.value)} placeholder="необязательно" />
           </label>
+
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => setBatchOpen((v) => !v)}
+            aria-expanded={batchOpen}
+            style={{ alignSelf: "flex-start" }}
+          >
+            {batchOpen ? "▾ Партия" : "▸ Партия (срок, документ, цена)"}
+          </button>
+
+          {batchOpen && (
+            <div className="pass" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <label style={{ flex: 1 }}>
+                  <span>Код партии</span>
+                  <input value={batchCode} onChange={(e) => setBatchCode(e.target.value)} placeholder="необязательно" />
+                </label>
+                <label style={{ flex: 1 }}>
+                  <span>Срок годности</span>
+                  <input value={expiryDate} type="date" onChange={(e) => setExpiryDate(e.target.value)} />
+                </label>
+                <label style={{ flex: 1 }}>
+                  <span>Дата производства</span>
+                  <input value={manufactureDate} type="date" onChange={(e) => setManufactureDate(e.target.value)} />
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <label style={{ flex: 1 }}>
+                  <span>№ счёта-фактуры</span>
+                  <input value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} placeholder="необязательно" />
+                </label>
+                <label style={{ flex: 1 }}>
+                  <span>Дата счёта-фактуры</span>
+                  <input value={invoiceDate} type="date" onChange={(e) => setInvoiceDate(e.target.value)} />
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <label style={{ flex: 1 }}>
+                  <span>Цена без НДС</span>
+                  <input
+                    value={unitPriceNet}
+                    inputMode="decimal"
+                    onChange={(e) => setUnitPriceNet(e.target.value)}
+                    placeholder="162500"
+                  />
+                </label>
+                <label style={{ flex: 1 }}>
+                  <span>Ставка НДС, %</span>
+                  <input value={vatRate} inputMode="decimal" onChange={(e) => setVatRate(e.target.value)} placeholder="12" />
+                </label>
+              </div>
+              <p className="hint" style={{ margin: 0 }}>
+                {grossPreview !== null
+                  ? `С НДС за единицу: ${sum(grossPreview)}${unit ? `/${unit}` : ""} — сверь с ценой в карточке.`
+                  : "Впиши цену без НДС и ставку — посчитаю цену с НДС для сверки с карточкой."}
+              </p>
+            </div>
+          )}
+
           <div className="form-actions">
             <button type="button" className="btn primary" onClick={submit} disabled={pending}>
               {pending ? "Завожу…" : "Завести приход"}
