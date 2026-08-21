@@ -132,23 +132,51 @@ describe("parseBankStatement — реальные ловушки формата 
     );
   });
 
-  it("ключ идемпотентности extId — номер документа плюс дата; коллизия внутри файла разруливается счётчиком", () => {
+  it("ключ идемпотентности extId — счёт+docNo+дата+содержимое строки; коллизия ПОЛНОСТЬЮ одинаковых строк разруливается счётчиком", () => {
     const rows = parseBankStatement(
       table([
         TITLE_ROW,
         HEADER_ROW,
         ACCOUNT_ROW,
         dataRow({ docNo: "3009296", date: "12.06.25" }),
-        dataRow({ docNo: "3009296", date: "12.06.25" }), // тот же номер документа и дата — законный повтор в файле
+        dataRow({ docNo: "3009296", date: "12.06.25" }), // тот же номер документа, дата и всё содержимое — законный повтор в файле
       ]),
     );
-    assert.equal(rows[0]!.extId, "3009296::2025-06-12");
-    assert.equal(rows[1]!.extId, "3009296::2025-06-12::2", "вторая строка с тем же ключом получает суффикс, а не схлопывается молча");
+    assert.ok(rows[0]!.extId.startsWith(`${FAKE_ACCOUNT}::3009296::2025-06-12::`), "счёт, docNo и дата — часть ключа");
+    assert.equal(rows[1]!.extId, `${rows[0]!.extId}::2`, "вторая полностью одинаковая строка получает суффикс счётчика, а не схлопывается молча");
+    assert.notEqual(rows[0]!.extId, rows[1]!.extId);
+  });
+
+  it("две строки, отличающиеся ТОЛЬКО счётом, — разные ключи (без этого ревью нашло 30 совпадений GLOBERENT/VENDHUB)", () => {
+    const rowA = dataRow({ docNo: "500", date: "12.06.25", credit: "1000000" });
+    const rowB = [...rowA];
+    const accountIdx = HEADER_ROW.indexOf("Счёт");
+    rowB[accountIdx] = "10208000900000000099"; // другой счёт компании — остальное совпадает один-в-один
+
+    const rows = parseBankStatement(table([TITLE_ROW, HEADER_ROW, ACCOUNT_ROW, rowA, rowB]));
+    assert.equal(rows.length, 2);
+    assert.notEqual(
+      rows[0]!.extId,
+      rows[1]!.extId,
+      "разные счета компании с тем же docNo/датой — разные ключи, иначе импорт второй выписки молча теряет строки как «повтор»",
+    );
+  });
+
+  it("порядок строк в выгрузке не меняет набор уже присвоенных ключей (старый ключ по позиции ломался при перестановке)", () => {
+    const rowA = dataRow({ docNo: "1", date: "12.06.25", credit: "1000000" });
+    const rowB = dataRow({ docNo: "2", date: "13.06.25", credit: "2000000" });
+    const forward = parseBankStatement(table([TITLE_ROW, HEADER_ROW, ACCOUNT_ROW, rowA, rowB]));
+    const reversed = parseBankStatement(table([TITLE_ROW, HEADER_ROW, ACCOUNT_ROW, rowB, rowA]));
+    assert.deepEqual(
+      new Set(forward.map((r) => r.extId)),
+      new Set(reversed.map((r) => r.extId)),
+      "ключ строится по содержимому строки, а не по позиции в файле — переэкспорт с другим порядком строк обязан дать те же ключи",
+    );
   });
 
   it("номер документа пуст — extId строится без него, а не падает", () => {
     const rows = parseBankStatement(table([TITLE_ROW, HEADER_ROW, ACCOUNT_ROW, dataRow({ docNo: "" })]));
-    assert.equal(rows[0]!.extId, "без-номера::2025-06-12");
+    assert.ok(rows[0]!.extId.startsWith(`${FAKE_ACCOUNT}::без-номера::2025-06-12::`));
   });
 
   it("шапка с другим порядком колонок читается верно — по имени, не по позиции", () => {

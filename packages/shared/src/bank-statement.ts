@@ -53,10 +53,22 @@ export interface BankStatementRow {
   /** Позиция строки в `table.rows` (0-based) — для отчёта и отладки, не хранится. */
   fileRow: number;
   /**
-   * Ключ идемпотентности — номер документа плюс дата. Совпадение внутри ОДНОГО
-   * файла (тот же номер документа в тот же день) не схлопывается молча:
-   * счётчик добавляет суффикс `::2`, `::3`… у второй и последующих строк, иначе
-   * законный повтор потерялся бы как «дубликат» при импорте.
+   * Ключ идемпотентности — счёт + номер документа + дата + суммы + назначение
+   * (НЕ позиция строки в файле). Номера документа и даты одних НЕДОСТАТОЧНО:
+   * ревью среза К (1.1) нашло 30 совпадающих (docNo, date) между выпиской
+   * GLOBERENT и выпиской VENDHUB — разные счета компании, один и тот же номер
+   * документа в один день. Без счёта в ключе вторая выписка молча потеряла бы
+   * эти 30 строк как «повтор» (`skippedRepeat`), а формула ключа УЖЕ лежала бы
+   * в импортированных данных (дедуп идёт по `(source, extId)`, удаления
+   * записи у `/finance/flows` нет — поменять формулу без дублей после первой
+   * же выписки нельзя). Содержимое строки (суммы, назначение) — тоже часть
+   * ключа: без него две ЗАКОННО разные строки с тем же счётом/докNo/датой
+   * схлопнулись бы, а различал бы их только счётчик ПОЗИЦИИ — плохой
+   * разрыв ничьей: перестановка строк в переэкспорте сдвинула бы уже
+   * импортированные ключи. Счётчик ниже (`::2`, `::3`…) разруливает ТОЛЬКО
+   * строки, полностью одинаковые по всем этим полям (законный повтор) — для
+   * них порядок внутри пары взаимозаменяем, и набор ключей от перестановки не
+   * меняется.
    */
   extId: string;
 }
@@ -162,8 +174,18 @@ export function parseBankStatement(table: Pick<XlsxSheet, "columns" | "rows">): 
     const date = parseStatementDate(cellAt(row, col["Дата документа"]));
     if (date === null) return; // не операция — заголовок/шапка/служебная строка/итог (ловушка №4)
 
+    const account = cellAt(row, col["Счёт"]).trim();
     const docNo = cellAt(row, col["Номер документа"]).trim();
-    const base = `${docNo || "без-номера"}::${date}`;
+    const debit = parseStatementAmount(cellAt(row, col["Оборот Дебет"]));
+    const credit = parseStatementAmount(cellAt(row, col["Оборот кредит"]));
+    const purpose = cellAt(row, col["Назначение платежа"]).trim();
+
+    // Ключ идемпотентности — счёт + docNo + дата + суммы + назначение, НЕ
+    // позиция строки в файле (см. JSDoc `extId` выше). Счётчик разруливает
+    // только строки, полностью одинаковые по этим полям.
+    const base = [account || "без-счёта", docNo || "без-номера", date, debit ?? "", credit ?? "", purpose].join(
+      "::",
+    );
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     const extId = n === 1 ? base : `${base}::${n}`;
@@ -172,14 +194,14 @@ export function parseBankStatement(table: Pick<XlsxSheet, "columns" | "rows">): 
 
     out.push({
       date,
-      account: cellAt(row, col["Счёт"]).trim(),
+      account,
       name: cellAt(row, col["Наименование"]).trim(),
       docNo,
       docType: cellAt(row, col["Тип документа"]).trim(),
       branch: cellAt(row, col["Филиал"]).trim(),
-      debit: parseStatementAmount(cellAt(row, col["Оборот Дебет"])),
-      credit: parseStatementAmount(cellAt(row, col["Оборот кредит"])),
-      purpose: cellAt(row, col["Назначение платежа"]).trim(),
+      debit,
+      credit,
+      purpose,
       cashSymbol: cashSymbolRaw === "" ? null : cashSymbolRaw,
       inn: cellAt(row, col["ИНН"]).trim(),
       fileRow,
