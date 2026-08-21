@@ -941,6 +941,8 @@ export interface ReconcileRow {
   инкассаций: number;
   медианныйИнтервалДней: number | null;
   медианныйЛагДней: number | null;
+  /** «Инкассаций нет вовсе» / «выручки нет» — пробел данных, не недостача; не входит в `итог`. */
+  статус: "обычный" | "инкассаций нет вовсе" | "выручки нет";
 }
 
 /** Сверка (R-K11): один период между двумя соседними инкассациями на автомате. */
@@ -957,12 +959,29 @@ export interface ReconcileInterval {
   статус: "обычный" | "пробел в журнале";
 }
 
+/** Агрегат сверки — только по строкам со статусом «обычный» (правило считать сходимость живёт в Core, не на витрине). */
+export interface ReconcileTotal {
+  выручка: number;
+  изъято: number;
+  разница: number;
+  доля: number | null;
+  автоматов: number;
+}
+
+/** Что исключено из `итог` и почему — видно числом, а не молчанием. */
+export interface ReconcileExcluded {
+  автоматов: number;
+  выручка: number;
+}
+
 export interface ReconcileResult {
   from: string;
   to: string;
   rows: ReconcileRow[];
   intervals: ReconcileInterval[];
   первыхИсключено: number;
+  итог: ReconcileTotal;
+  внеИтога: ReconcileExcluded;
 }
 
 export interface Workload {
