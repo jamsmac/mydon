@@ -81,6 +81,12 @@ export interface BatchRow {
   supplierRaw: string | null;
   invoiceNo: string | null;
   invoiceDate: string | null;
+  /**
+   * Цена за единицу с НДС (карточка ингредиента/контрагента, срез D, Task 5) —
+   * то, что ввели в приходе (ручном или импорте реестра). null — цену не
+   * вводили; отличать от 0, который выглядел бы как «бесплатно».
+   */
+  unitPriceGross: number | null;
   note: string | null;
   source: string;
 }
@@ -126,6 +132,74 @@ export interface CreateBatchInput {
   createdBy?: string | null;
   /** Ключ идемпотентности связанного движения прихода — тот же приём, что у createMovement. */
   clientKey?: string | null;
+  /**
+   * Дата инвентаризации, до которой партия считается израсходованной (R-D1,
+   * срез D). Задан — вместе с приходом пишется расходное (`consumption`)
+   * движение того же объёма с этим же `batchId` и датой `closeOn`: партия
+   * закрывается, остаток ингредиента не двоится историческим импортом.
+   * Не задан — партия остаётся открытой, обычный приход (поведение не
+   * меняется для всех существующих вызовов).
+   */
+  closeOn?: string | null;
+}
+
+/**
+ * Одна строка массового импорта партий (срез D, задача 3): вход для
+ * `POST /stock/batches/import`. Сопоставление карточки — забота витрины
+ * (Task 2 `suggestCard`), сюда приходит уже готовый `ingredientId` либо
+ * `null` (строка не сопоставлена).
+ */
+export interface ImportBatchItem {
+  /** Номер строки в исходном файле — для отчёта владельцу и (по умолчанию) ключа идемпотентности. */
+  fileRow: number;
+  /** Карточка сырья, подтверждённая на витрине; отсутствует/`null` — не сопоставлена, строка уходит в `unmatched`. */
+  ingredientId?: string | null;
+  warehouseId: string;
+  qtyReceived: number;
+  unit: string;
+  /** Дата прихода (R-D3); отсутствует/`null` — строка уходит в `noDate`, партия не создаётся. */
+  receivedOn?: string | null;
+  supplier?: string | null;
+  invoiceNo?: string | null;
+  invoiceDate?: string | null;
+  unitPriceGross?: number | null;
+  note?: string | null;
+  /** Имя строки — только для отчёта (noDate/unmatched/rejected), не сохраняется. */
+  name?: string | null;
+  /** Ключ идемпотентности строки в паре с `source`; по умолчанию — `String(fileRow)`. */
+  extId?: string | null;
+}
+
+/** Строка отчёта импорта без записи (без даты / не сопоставлена). */
+export interface ImportBatchIssue {
+  fileRow: number;
+  name: string | null;
+}
+
+/** Строка отчёта импорта, отклонённая с причиной (R-D2 и другие ошибки валидации). */
+export interface ImportBatchRejection extends ImportBatchIssue {
+  reason: string;
+}
+
+/** Отчёт массового импорта — одинаковый и в `dryRun`, и в настоящем прогоне (R-D7). */
+export interface ImportBatchesReport {
+  dryRun: boolean;
+  created: number;
+  /**
+   * Сколько партий закрыто расходом (R-D1) и на какую дату.
+   *
+   * В отчёте отдельными полями, а не «подразумевается»: закрытие можно выключить
+   * одним пустым полем даты, и без этих двух чисел прогон без закрытия выглядел
+   * бы ровно так же, как правильный, — а остаток при этом задвоился бы.
+   * `closed: 0` при `created > 0` означает «партии открыты», и это видно сразу.
+   */
+  closed: number;
+  closeOn: string | null;
+  /** Пропущено как повтор — партия с этим (source, extId) уже существует. */
+  skippedRepeat: number;
+  noDate: ImportBatchIssue[];
+  unmatched: ImportBatchIssue[];
+  rejected: ImportBatchRejection[];
 }
 
 /** Заявка на движение склада. */
@@ -998,6 +1072,7 @@ export class StockService implements OnModuleInit {
         supplierRaw: supplierRawMap.get(b.id) ?? null,
         invoiceNo: b.invoiceNo,
         invoiceDate: b.invoiceDate ? String(b.invoiceDate) : null,
+        unitPriceGross: b.unitPriceGross != null ? Number(b.unitPriceGross) : null,
         note: b.note,
         source: b.source,
       };
@@ -1005,15 +1080,48 @@ export class StockService implements OnModuleInit {
   }
 
   /**
-   * Завести партию прихода (§4.3 + документ Р3/Р4) и связанное приходное
-   * движение склада в одной транзакции: `stock_batch.qty_received` без
-   * движения не отразилось бы в остатке ингредиента/склада (тот считается
-   * ИСКЛЮЧИТЕЛЬНО из `stock_movement` — формула `stockBalance` не тронута),
-   * а движение без партии — уже существующий, законный случай (снимок
-   * владельца, синк снабжения), который эта партия не должна задваивать.
+   * Проверки и обе идемпотентности партии — ДО первой записи (шаг 1 брифа
+   * среза D). Общая для одиночного `createBatch` и массового `importBatches`,
+   * чтобы `dryRun` (R-D7) видел ТОЧНО то же самое основание, по которому
+   * настоящий прогон решит «уже была» / «создать» / «отклонить», не
+   * дублируя логику в двух местах.
+   *
+   * Идемпотентность здесь двойная:
+   *  - `clientKey` — приём от бота/панели (повтор нажатия при таймауте);
+   *  - `(source, extId)` — приём массового импорта (факт 9 брифа: у
+   *    `stock_batch` есть уникальный индекс `stock_batch_ext_key` на паре,
+   *    но сервис его раньше не проверял, и повтор падал сырой ошибкой
+   *    Postgres). Обе — до вставки: вернуть чужую строку ПОСЛЕ неё оставило
+   *    бы партию-сироту (эта ошибка уже ловилась в срезе C).
    */
-  async createBatch(input: CreateBatchInput): Promise<BatchRow> {
+  private async prepareBatch(input: CreateBatchInput): Promise<
+    | { kind: "existing"; row: BatchRow }
+    | {
+        kind: "new";
+        unit: Unit;
+        base: Unit | null;
+        source: string;
+        supplierId: string | null;
+        unitPriceGross: number | null;
+        receivedOn: string;
+        packageWeightSnapshot: number | null;
+      }
+  > {
     if (!(input.qtyReceived > 0)) throw new BadRequestException("Количество партии должно быть больше нуля");
+    // Знак цены проверяем здесь, а не в DTO: при массовом импорте одна строка с
+    // минусом иначе отвергла бы всю пачку. Отрицательная цена — опечатка ввода,
+    // то же правило, что в ingredient-price.ts.
+    for (const [что, цена] of [
+      ["без НДС", input.unitPriceNet],
+      ["с НДС", input.unitPriceGross],
+    ] as const) {
+      if (цена != null && цена < 0) {
+        throw new BadRequestException(`Цена ${что} не может быть отрицательной — похоже на опечатку`);
+      }
+    }
+    if (input.vatRate != null && input.vatRate < 0) {
+      throw new BadRequestException("Ставка НДС не может быть отрицательной");
+    }
     if (!isUnit(input.unit)) throw new BadRequestException(`Единица «${input.unit}» неизвестна`);
     const unit: Unit = input.unit;
 
@@ -1026,6 +1134,8 @@ export class StockService implements OnModuleInit {
     }
     if (input.personId) await this.personExists(input.personId);
 
+    const source = input.source ?? "manual";
+
     // Повтор по clientKey отбиваем ДО первой записи. Иначе новая партия уже
     // вставлена в транзакцию, и вернуть чужую строку значит закоммитить сироту:
     // партию без приходного движения, которая всплывёт в остатках ниоткуда.
@@ -1037,12 +1147,25 @@ export class StockService implements OnModuleInit {
         .limit(1);
       if (already?.batchId) {
         const [row] = await this.computeBatchRows({ ids: [already.batchId] });
-        if (row) return row;
+        if (row) return { kind: "existing", row };
       }
       if (already) {
         throw new BadRequestException(
           "Этот ключ идемпотентности уже занят приходом без партии — повторите с другим ключом",
         );
+      }
+    }
+
+    // Повтор по (source, extId) — идемпотентность массового импорта.
+    if (input.extId) {
+      const [already] = await this.db
+        .select({ id: stockBatch.id })
+        .from(stockBatch)
+        .where(and(eq(stockBatch.source, source), eq(stockBatch.extId, input.extId)))
+        .limit(1);
+      if (already) {
+        const [row] = await this.computeBatchRows({ ids: [already.id] });
+        if (row) return { kind: "existing", row };
       }
     }
 
@@ -1064,6 +1187,20 @@ export class StockService implements OnModuleInit {
     // не относится: это справочный вес упаковки карточки, а не остаток склада.
     const packageWeightRaw = strictNumber(attrs["вес упаковки, г"]);
     const packageWeightSnapshot = packageWeightRaw != null ? Math.round(packageWeightRaw) : null;
+
+    return { kind: "new", unit, base, source, supplierId, unitPriceGross, receivedOn, packageWeightSnapshot };
+  }
+
+  /**
+   * Записать партию, приходное движение и (R-D1) закрывающий расход —
+   * ровно то, что делал раньше `createBatch` целиком. Вызывается только
+   * когда {@link prepareBatch} сказал `"new"` — то есть НИКОГДА в `dryRun`.
+   */
+  private async writeBatch(
+    input: CreateBatchInput,
+    prep: Extract<Awaited<ReturnType<StockService["prepareBatch"]>>, { kind: "new" }>,
+  ): Promise<BatchRow> {
+    const { unit, base, source, supplierId, unitPriceGross, receivedOn, packageWeightSnapshot } = prep;
 
     const created = await this.db.transaction(async (tx) => {
       const [batch] = await tx
@@ -1089,7 +1226,7 @@ export class StockService implements OnModuleInit {
           unitPriceGross: unitPriceGross != null ? String(unitPriceGross) : null,
           baseUnitSnapshot: base,
           packageWeightSnapshot,
-          source: input.source ?? "manual",
+          source,
           extId: input.extId ?? null,
           note: input.note ?? null,
         })
@@ -1138,12 +1275,138 @@ export class StockService implements OnModuleInit {
         throw new BadRequestException("Не удалось записать движение прихода партии");
       }
 
+      // R-D1: закрытие исторической партии расходом. Импорт партии БЕЗ этого
+      // задвоил бы остаток (кофе стал бы ~293 кг вместо 43 на живом складе) —
+      // расходное движение того же объёма, с тем же batchId, гасит приход в
+      // `stockBalance` (kind=consumption вычитает вне зависимости от batchId)
+      // и одновременно обнуляет `remaining` партии в `computeBatchRows`
+      // (qtyReceived минус сумма consumption-движений с этим batchId).
+      if (input.closeOn) {
+        await tx
+          .insert(stockMovement)
+          .values({
+            kind: "consumption",
+            ingredientId: input.ingredientId,
+            warehouseId: input.warehouseId,
+            batchId: batch.id,
+            dt: input.closeOn,
+            qty: String(input.qtyReceived),
+            unit,
+            source: "owner",
+            note: `израсходовано до инвентаризации ${input.closeOn}, точная дата неизвестна`,
+            createdBy: "import",
+          })
+          .returning();
+      }
+
       return batch;
     });
 
     const [row] = await this.computeBatchRows({ ids: [created.id] });
     if (!row) throw new NotFoundException("Партия заведена, но не нашлась при чтении — повторите запрос");
     return row;
+  }
+
+  /**
+   * Завести партию прихода (§4.3 + документ Р3/Р4) и связанное приходное
+   * движение склада в одной транзакции: `stock_batch.qty_received` без
+   * движения не отразилось бы в остатке ингредиента/склада (тот считается
+   * ИСКЛЮЧИТЕЛЬНО из `stock_movement` — формула `stockBalance` не тронута),
+   * а движение без партии — уже существующий, законный случай (снимок
+   * владельца, синк снабжения), который эта партия не должна задваивать.
+   */
+  async createBatch(input: CreateBatchInput): Promise<BatchRow> {
+    const prep = await this.prepareBatch(input);
+    if (prep.kind === "existing") return prep.row;
+    return this.writeBatch(input, prep);
+  }
+
+  /**
+   * Массовый импорт партий с предпросмотром (срез D, задача 3). До 500 строк
+   * за раз (проверено и в `ImportBatchesDto`, здесь — второй рубеж на случай
+   * прямого вызова сервиса).
+   *
+   * Каждая строка несёт готовый `ingredientId` (сопоставление уже сделано на
+   * витрине, Task 2 `suggestCard`) — сервис карточки не подбирает и не
+   * гадает. `ingredientId: null` — строка не сопоставлена (`unmatched`, а не
+   * ошибка); `receivedOn: null` — даты нет (`noDate`, R-D3); карточка не типа
+   * `ingredient` — тип `cardOfType` бросит исключение, строка уходит в
+   * `rejected` с причиной, а импорт продолжается для остальных строк (R-D2):
+   * каждая строка обёрнута в свой `try/catch`, одна упавшая не роняет пачку.
+   *
+   * `dryRun` (R-D7): классификация каждой строки (`existing`/`new` из
+   * {@link prepareBatch}, ошибки валидации) идёт ОДИНАКОВО что в предпросмотре,
+   * что в настоящем прогоне — отличается только то, что `writeBatch` в dryRun
+   * НЕ вызывается вовсе. Поэтому отчёт совпадает буквально, а не «похож».
+   */
+  async importBatches(input: {
+    source: string;
+    dryRun?: boolean;
+    closeOn?: string | null;
+    items: ImportBatchItem[];
+  }): Promise<ImportBatchesReport> {
+    if (input.items.length > 500) {
+      throw new BadRequestException("Пачка не может быть больше 500 строк за раз");
+    }
+    const dryRun = input.dryRun === true;
+
+    // Пустая строка — не дата. `if (input.closeOn)` считает её ложью, и закрытие
+    // партий молча выключилось бы для всего прогона: остаток задвоился бы, а
+    // отчёт выглядел бы точно так же, как при верной дате. Приводим к null явно
+    // и говорим в отчёте, закрывали мы партии или нет.
+    const closeOn = typeof input.closeOn === "string" && input.closeOn.trim() !== "" ? input.closeOn.trim() : null;
+
+    let created = 0;
+    let closed = 0;
+    let skippedRepeat = 0;
+    const noDate: ImportBatchIssue[] = [];
+    const unmatched: ImportBatchIssue[] = [];
+    const rejected: ImportBatchRejection[] = [];
+
+    for (const item of input.items) {
+      const name = item.name ?? null;
+
+      if (!item.ingredientId) {
+        unmatched.push({ fileRow: item.fileRow, name });
+        continue;
+      }
+      if (!item.receivedOn) {
+        noDate.push({ fileRow: item.fileRow, name });
+        continue;
+      }
+
+      const batchInput: CreateBatchInput = {
+        ingredientId: item.ingredientId,
+        warehouseId: item.warehouseId,
+        qtyReceived: item.qtyReceived,
+        unit: item.unit,
+        receivedOn: item.receivedOn,
+        supplier: item.supplier ?? null,
+        invoiceNo: item.invoiceNo ?? null,
+        invoiceDate: item.invoiceDate ?? null,
+        unitPriceGross: item.unitPriceGross ?? null,
+        note: item.note ?? null,
+        source: input.source,
+        extId: item.extId ?? String(item.fileRow),
+        closeOn,
+        createdBy: "import",
+      };
+
+      try {
+        const prep = await this.prepareBatch(batchInput);
+        if (prep.kind === "existing") {
+          skippedRepeat += 1;
+          continue;
+        }
+        if (!dryRun) await this.writeBatch(batchInput, prep);
+        created += 1;
+        if (closeOn !== null) closed += 1;
+      } catch (e) {
+        rejected.push({ fileRow: item.fileRow, name, reason: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    return { dryRun, created, closed, closeOn, skippedRepeat, noDate, unmatched, rejected };
   }
 
   /** Список партий с остатком и флагом срока; необязательные фильтры. */
@@ -1179,7 +1442,13 @@ export class StockService implements OnModuleInit {
     counts: Record<ExpiryFlag, number>;
     rows: ExpiryRow[];
   }> {
-    const rows = await this.computeBatchRows({});
+    // Только партии, в которых что-то ОСТАЛОСЬ. Израсходованная партия не может
+    // испортиться: показывать её среди сроков — значит звать разбираться с тем,
+    // чего на полке нет. Особенно заметно после импорта истории: он заводит
+    // партии прошлого года и тут же закрывает их расходом (R-D1), и без этого
+    // отбора экран сроков сразу после загрузки наполнился бы десятками
+    // «просроченных» позиций, которых физически не существует.
+    const rows = (await this.computeBatchRows({})).filter((r) => r.remaining > 0);
     const counts: Record<ExpiryFlag, number> = { expired: 0, expiring: 0, ok: 0, none: 0 };
     for (const r of rows) counts[r.flag] += 1;
 

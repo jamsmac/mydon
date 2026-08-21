@@ -1,14 +1,21 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
 import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
   IsIn,
+  IsInt,
   IsNumber,
   IsOptional,
   IsPositive,
+  Matches,
   IsString,
   IsUUID,
   Min,
   MaxLength,
+  ValidateNested,
 } from "class-validator";
+import { Type } from "class-transformer";
 import { StockService } from "./stock.service";
 
 /** Заявка на движение склада. Приход — с ценой; расход/перемещение — позже. */
@@ -153,6 +160,92 @@ export class CreateBatchDto {
   clientKey?: string;
 }
 
+/** Одна строка массового импорта партий (срез D, задача 3). */
+export class ImportBatchItemDto {
+  @IsInt() @Min(1)
+  fileRow!: number;
+
+  /** Карточка сырья, подтверждённая на витрине (Task 2); null — строка не сопоставлена. */
+  @IsOptional() @IsUUID()
+  ingredientId?: string | null;
+
+  @IsUUID()
+  warehouseId!: string;
+
+  /**
+   * Количество. Проверку «больше нуля» здесь СОЗНАТЕЛЬНО не ставим — в отличие
+   * от формы одиночного прихода выше.
+   *
+   * `ValidationPipe` отбивает запрос ЦЕЛИКОМ до входа в контроллер: одна строка
+   * реестра с нулевым количеством отвергла бы все 135 и вернула невнятный
+   * объект ошибок вместо построчного отчёта. Смысл импорта ровно обратный —
+   * плохая строка обязана попасть в отчёт с причиной, а остальные загрузиться.
+   * Семантику проверяет сервис построчно («Количество партии должно быть
+   * больше нуля»), DTO следит только за типом.
+   */
+  @IsNumber()
+  qtyReceived!: number;
+
+  @IsString() @MaxLength(16)
+  unit!: string;
+
+  /** Дата прихода (R-D3); null — строка без даты, в отчёт, не в партию. */
+  @IsOptional() @IsString() @MaxLength(10)
+  receivedOn?: string | null;
+
+  @IsOptional() @IsString() @MaxLength(256)
+  supplier?: string | null;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  invoiceNo?: string | null;
+
+  @IsOptional() @IsString() @MaxLength(10)
+  invoiceDate?: string | null;
+
+  /** Цена с НДС. `@Min(0)` тут нет по той же причине, что и у количества: минус
+   *  должен отвергнуть СТРОКУ, а не весь импорт. Знак проверяет сервис. */
+  @IsOptional() @IsNumber()
+  unitPriceGross?: number | null;
+
+  @IsOptional() @IsString() @MaxLength(1000)
+  note?: string | null;
+
+  /** Имя строки — только для отчёта, если она не создаст партию. */
+  @IsOptional() @IsString() @MaxLength(256)
+  name?: string | null;
+
+  /** Ключ идемпотентности строки в паре с `source` тела запроса; по умолчанию — String(fileRow). */
+  @IsOptional() @IsString() @MaxLength(128)
+  extId?: string | null;
+}
+
+/**
+ * Массовый импорт партий с предпросмотром (срез D, задача 3). До 500 строк —
+ * см. `ArrayMaxSize`.
+ */
+export class ImportBatchesDto {
+  @IsString() @MaxLength(32)
+  source!: string;
+
+  /** Ничего не пишет, возвращает тот же отчёт, что настоящий прогон (R-D7). */
+  @IsOptional() @IsBoolean()
+  dryRun?: boolean;
+
+  /**
+   * Дата инвентаризации: партии импорта закрываются расходом на эту дату (R-D1).
+   *
+   * Формат проверяется строго. Пустая строка проходила бы `@IsString()`, а
+   * дальше `if (input.closeOn)` считает её ложью — закрытие молча выключилось бы
+   * для ВСЕХ строк прогона, и остаток задвоился бы при внешне успешном отчёте.
+   * Не закрывать — это `null`, а не «пусто».
+   */
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: "closeOn: дата в формате ГГГГ-ММ-ДД или null" })
+  closeOn?: string | null;
+
+  @IsArray() @ArrayMaxSize(500) @ValidateNested({ each: true }) @Type(() => ImportBatchItemDto)
+  items!: ImportBatchItemDto[];
+}
+
 /** Отметить вскрытие партии. */
 export class OpenBatchDto {
   @IsOptional() @IsString() @MaxLength(10)
@@ -198,6 +291,15 @@ export class StockController {
   @Get("expiry")
   expiry() {
     return this.stock.expiryReport();
+  }
+
+  /**
+   * Массовый импорт партий с предпросмотром (срез D, задача 3): `dryRun`
+   * ничего не пишет и возвращает тот же отчёт, что настоящий прогон (R-D7).
+   */
+  @Post("batches/import")
+  importBatches(@Body() dto: ImportBatchesDto) {
+    return this.stock.importBatches(dto);
   }
 
   /** Отметить вскрытие партии. */

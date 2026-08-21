@@ -47,6 +47,7 @@ import { ProductsBook, isIncomplete } from "../../../components/products-book";
 import { ExpiryBook } from "../../../components/expiry-book";
 import { ListShell, type ListShellKpi } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
+import { RegisterImport } from "../../../components/register-import";
 import { MapPanel } from "../../../components/map-panel";
 import { MiniBars } from "../../../components/mini-bars";
 import { QuickActions } from "../../../components/quick-actions";
@@ -468,6 +469,23 @@ export default async function DomainPage({
   let bunkerConfig: CoffeeBunkerIngredient[] | null = null;
   if (group && leaf?.type === "ingredient") {
     bunkerConfig = await core.coffeeBunkerConfig().catch(() => null);
+  }
+
+  // Импорт закупок (Task 4): карточки сырья — вход `suggestCard` (Task 2);
+  // склады — куда заводится приход.
+  //
+  // null — «не удалось прочитать», и это НЕ то же самое, что пустой список.
+  // Подменить одно другим значит сказать владельцу «складов нет» в момент, когда
+  // ядро просто не ответило: он заведёт дубль-склад, а все 59 имён останутся без
+  // предложений якобы потому, что карточек нет. Тот же урок уже оплачен дважды —
+  // в срезах B и C витрины чинили отдельными коммитами ровно за эту подмену.
+  let importIngredientCards: Entity[] | null = null;
+  let importWarehouses: Entity[] | null = null;
+  if (domain === "vendhub" && group && leaf?.type === "purchase_import") {
+    [importIngredientCards, importWarehouses] = await Promise.all([
+      core.entitiesOfType(domain, "ingredient").catch(() => null),
+      core.entitiesOfType(domain, "warehouse").catch(() => null),
+    ]);
   }
 
   // Сроки годности (Task 5): партии — своя таблица, не реестр. Прод-ядро на
@@ -1472,6 +1490,14 @@ export default async function DomainPage({
       {group && leaf?.type === "purchase" && <PurchasesView />}
       {group && leaf?.type === "machine_stock" && <MachineStockView />}
 
+      {/* ── Импорт закупок (Task 4): файл → предпросмотр и сопоставление имён → запись ── */}
+      {domain === "vendhub" && group && leaf?.type === "purchase_import" && (
+        <RegisterImport
+          ingredientCards={importIngredientCards?.map((e) => ({ id: e.id, name: e.name, type: e.type, attrs: e.attrs })) ?? null}
+          warehouses={importWarehouses?.map((e) => ({ id: e.id, name: e.name })) ?? null}
+        />
+      )}
+
       {/* ── Сроки годности (Task 5): партии — счётчики по флагам, плитка =
           фильтр (?flag=), поиск ?q=, три честных пустых состояния ── */}
       {group && leaf?.type === "expiry" && (
@@ -1827,7 +1853,7 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))

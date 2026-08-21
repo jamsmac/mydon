@@ -124,7 +124,10 @@ export function IngredientCard360({
   const поставщик = строка(a["поставщик"]);
   const срокГодности = число(a["срок годности, дней"]);
   const весУпаковки = число(a["вес упаковки, г"]);
-  const покупок = Array.isArray(a["закупки сахара"]) ? (a["закупки сахара"] as unknown[]).length : 0;
+  // Бейдж вкладки «Закупки»: розничные чеки (легаси, только «Сахар») плюс
+  // партии из реестра (срез D) — обе витрины теперь живут в одной вкладке.
+  const покупок =
+    (Array.isArray(a["закупки сахара"]) ? (a["закупки сахара"] as unknown[]).length : 0) + (batches?.length ?? 0);
   // «Сегодня» по Ташкенту (тот же приём, что `todayKey` в domain/page.tsx) —
   // только для текста «через N дней»: сам флаг уже посчитан Core на своём `now`.
   const сегодня = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
@@ -520,60 +523,186 @@ export function IngredientBatches({ rows }: { rows: StockBatchRow[] | null }) {
 }
 
 /**
- * Закупки: авто-история цены (`"история цены покупки"`, ведётся Core при
- * смене цены) и розничные чеки — сегодня только массив `"закупки сахара"` на
- * карточке «Сахар» (R-B7: ключ не переименован). Другие карточки такого
- * массива не заводили — секция честно пустая, а не выдумывает записи.
+ * Как менялась цена за единицу с НДС по партиям — список с направлением
+ * изменения (▲/▼ и %), а не график: на трёх-пяти точках SVG-график либо лжёт
+ * масштабом (одна и та же партия то плоская линия, то острый пик — в
+ * зависимости от диапазона осей), либо требует отдельной библиотеки, которой в
+ * CC нет ни у одной карточки. Текстовый ряд честен на любом количестве точек
+ * и продолжает стиль остальных карточек (строки, не диаграммы). Партии без
+ * цены (`unitPriceGross === null`) в тренд не входят — фантомную цену не
+ * рисуем; если после этого точек меньше двух, тренд не показываем вовсе.
  */
-export function IngredientPurchases({ entity }: { entity: Entity }) {
+function PurchasePriceTrend({ batches }: { batches: StockBatchRow[] }) {
+  const priced = [...batches]
+    .filter((b): b is StockBatchRow & { unitPriceGross: number } => b.unitPriceGross !== null)
+    .sort((a, b) => a.receivedOn.localeCompare(b.receivedOn));
+  if (priced.length < 2) return null;
+
+  return (
+    <p className="hint" style={{ marginTop: 10 }}>
+      <b>Как менялась цена за единицу (с НДС): </b>
+      {priced.map((b, i) => {
+        const prev = i > 0 ? priced[i - 1]!.unitPriceGross : null;
+        const delta = prev !== null && prev !== 0 ? Math.round(((b.unitPriceGross - prev) / prev) * 100) : null;
+        return (
+          <span key={b.id}>
+            {i > 0 && " → "}
+            {sum(Math.round(b.unitPriceGross))}
+            {delta !== null && delta !== 0 && (
+              <span style={{ color: delta > 0 ? "var(--err)" : "var(--ok)" }}>
+                {" "}
+                ({delta > 0 ? "+" : ""}
+                {delta}%)
+              </span>
+            )}
+          </span>
+        );
+      })}
+    </p>
+  );
+}
+
+/**
+ * Закупки: две независимые витрины, склеенные в один раздел.
+ *
+ * 1) Легаси-снимок — `"история цены покупки"` (текст, ведёт Core при смене
+ *    цены) и розничные чеки `"закупки сахара"` (только карточка «Сахар»,
+ *    R-B7: ключ не переименован). Он не связан с партиями — показывается,
+ *    если есть, независимо от них.
+ * 2) История из партий (срез D, Task 5): дата, поставщик, счёт-фактура,
+ *    количество, цена за единицу с НДС и сумма — на основе того же массива
+ *    `batches`, что и вкладка «Партии» этой карточки. Три честных пустых
+ *    состояния (см. `historyImported`), по одному тексту на причину — урок
+ *    срезов B и C: подмена одного другим уже дважды чинилась постфактум.
+ */
+export function IngredientPurchases({
+  entity,
+  batches,
+  historyImported,
+}: {
+  entity: Entity;
+  /** Партии этого сырья — тот же массив, что и во вкладке «Партии». null — Core
+   * не ответил на /stock/batches; это НЕ значит, что закупок не было. */
+  batches: StockBatchRow[] | null;
+  /**
+   * Хотя бы одна партия существует ГДЕ УГОДНО в системе (не только у этого
+   * сырья) — отличает «реестр закупок ещё не загружен вовсе» (везде пусто) от
+   * «у этого сырья закупок не было» (реестр загружен, но не сюда).
+   */
+  historyImported: boolean;
+}) {
   const a = entity.attrs ?? {};
   const история = строка(a["история цены покупки"]);
   const закупки = Array.isArray(a["закупки сахара"]) ? (a["закупки сахара"] as unknown[]) : [];
-
-  if (история === null && закупки.length === 0) {
-    return (
-      <div className="empty">
-        <b>Закупки не зафиксированы</b>
-        История цены и розничные чеки появятся здесь, когда владелец занесёт их в карточку.
-      </div>
-    );
-  }
+  const легаси = история !== null || закупки.length > 0;
 
   return (
     <div className="sect" id="purchases">
       <div className="sect-h">
         <h3 className="h2">Закупки</h3>
-        {закупки.length > 0 && <span className="chip b">чеков: {закупки.length}</span>}
+        {batches !== null && batches.length > 0 && <span className="chip b">партий: {batches.length}</span>}
+        {закупки.length > 0 && <span className="chip">чеков: {закупки.length}</span>}
         <span className="sp" />
       </div>
-      {закупки.length > 0 && (
-        <div className="rows">
-          {закупки.map((raw, i) => {
-            const row = (raw ?? {}) as Record<string, unknown>;
-            const дата = строка(row["дата"]);
-            const магазин = строка(row["магазин"]) ?? строка(row["поставщик"]);
-            const ценаЗаКг = число(row["цена за кг"]);
-            const чек = строка(row["чек"]);
-            return (
-              <div className="row" key={`${дата ?? "запись"}-${i}`}>
-                <div className="t">
-                  <b>{дата ?? "дата не указана"}</b>
-                  {магазин && <small>{магазин}</small>}
-                  {чек && <small>{чек}</small>}
-                </div>
-                <span className="pill">
-                  {ценаЗаКг !== null ? `${sum(ценаЗаКг)} сум/кг` : "цена не указана"}
-                </span>
-              </div>
-            );
-          })}
-        </div>
+
+      {легаси && (
+        <>
+          {закупки.length > 0 && (
+            <div className="rows">
+              {закупки.map((raw, i) => {
+                const row = (raw ?? {}) as Record<string, unknown>;
+                const дата = строка(row["дата"]);
+                const магазин = строка(row["магазин"]) ?? строка(row["поставщик"]);
+                const ценаЗаКг = число(row["цена за кг"]);
+                const чек = строка(row["чек"]);
+                return (
+                  <div className="row" key={`${дата ?? "запись"}-${i}`}>
+                    <div className="t">
+                      <b>{дата ?? "дата не указана"}</b>
+                      {магазин && <small>{магазин}</small>}
+                      {чек && <small>{чек}</small>}
+                    </div>
+                    <span className="pill">
+                      {ценаЗаКг !== null ? `${sum(ценаЗаКг)} сум/кг` : "цена не указана"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {история && (
+            <p className="hint" style={{ marginTop: 10, whiteSpace: "pre-line" }}>
+              История цены покупки: {история}
+            </p>
+          )}
+        </>
       )}
-      {история && (
-        <p className="hint" style={{ marginTop: 10, whiteSpace: "pre-line" }}>
-          История цены покупки: {история}
-        </p>
-      )}
+
+      <div style={легаси ? { marginTop: 18 } : undefined}>
+        {легаси && <h3 className="h2">Из партий (счета-фактуры)</h3>}
+        {batches === null ? (
+          // Пустое состояние 1/3: ядро не ответило — не «закупок не было».
+          <div className="empty">
+            <b>Не удалось проверить</b>
+            Core не ответил на запрос партий (/stock/batches) — обнови страницу. Это не значит,
+            что закупок не было: ответа просто нет.
+          </div>
+        ) : batches.length === 0 ? (
+          historyImported ? (
+            // Пустое состояние 2/3: реестр загружен, но это сырьё в нём не встретилось.
+            <div className="empty">
+              <b>Закупок не было</b>
+              Среди импортированных партий нет ни одной с этим сырьём.
+            </div>
+          ) : (
+            // Пустое состояние 3/3: реестр закупок ещё не загружен вовсе (честный
+            // факт прода на 21.08.2026 — партий нет ни у одной карточки).
+            <div className="empty">
+              <b>История закупок ещё не импортирована</b>
+              Реестр закупок владельца в систему пока не загружен — партии со счетами-фактурами
+              появятся здесь после импорта.
+            </div>
+          )
+        ) : (
+          <>
+            <div className="rows">
+              {[...batches]
+                .sort((x, y) => y.receivedOn.localeCompare(x.receivedOn))
+                .map((b) => {
+                  const цена = b.unitPriceGross;
+                  const итого = цена !== null ? цена * b.qtyReceived : null;
+                  return (
+                    <div className="row" key={b.id}>
+                      <div className="t">
+                        <b>{fmtDay(b.receivedOn)}</b>
+                        <small>
+                          {b.supplierId ? (
+                            <Link href={`/card/${b.supplierId}`}>{b.supplierName ?? "без имени в карточке"}</Link>
+                          ) : b.supplierRaw ? (
+                            `«${b.supplierRaw}» — не совпало с реестром`
+                          ) : (
+                            "поставщик не указан"
+                          )}
+                        </small>
+                        <small>
+                          {b.invoiceNo
+                            ? `счёт-фактура № ${b.invoiceNo}${b.invoiceDate ? ` от ${fmtDay(b.invoiceDate)}` : ""}`
+                            : "документ не указан"}
+                        </small>
+                      </div>
+                      <span className="pill">
+                        {sum(b.qtyReceived)} {b.unit}
+                      </span>
+                      <span className="pill">{цена !== null ? `${sum(Math.round(цена))} сум/${b.unit}` : "цена не указана"}</span>
+                      <span className="pill b">{итого !== null ? `${sum(Math.round(итого))} сум` : "—"}</span>
+                    </div>
+                  );
+                })}
+            </div>
+            {batches.length > 2 && <PurchasePriceTrend batches={batches} />}
+          </>
+        )}
+      </div>
     </div>
   );
 }
