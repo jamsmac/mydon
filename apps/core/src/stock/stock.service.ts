@@ -1098,11 +1098,15 @@ export class StockService implements OnModuleInit {
     | { kind: "existing"; row: BatchRow }
     | {
         kind: "new";
+        /** Единица, в которой партия ляжет в базу: базовая, если штуки перевели по весу упаковки. */
         unit: Unit;
         base: Unit | null;
         source: string;
         supplierId: string | null;
+        /** Цена за `unit` — уже пересчитанная, если количество переводили из штук. */
         unitPriceGross: number | null;
+        /** Количество в `unit` — переведённое, а не как пришло. */
+        qtyReceived: number;
         receivedOn: string;
         packageWeightSnapshot: number | null;
       }
@@ -1129,7 +1133,40 @@ export class StockService implements OnModuleInit {
     await this.cardOfType(input.warehouseId, "warehouse");
     const attrs = (ing.attrs ?? {}) as Record<string, unknown>;
     const base = this.baseUnitOf(attrs);
-    if (base && unit !== base && convertQty(input.qtyReceived, unit, base) === null) {
+
+    // Штуки в вес — по весу упаковки с карточки.
+    //
+    // Реестр закупок считает ПАЧКАМИ («MacCoffee 3 в 1, 1000 шт»), а карточка —
+    // граммами: `convertQty` между этими размерностями коэффициента не знает и
+    // честно возвращает null. Но вес пачки владелец в карточку уже вписал, и
+    // тогда перевод — арифметика, а не догадка. Проверка сходится на живых
+    // данных: 1000 шт × 20 г × 80 сум/г = ровно 1 600 000, как в реестре.
+    //
+    // Переводим И количество, И цену: цена в реестре — за пачку, а хранить её
+    // надо за грамм, иначе сумма партии вырастет во столько раз, сколько граммов
+    // в пачке. Если веса пачки на карточке нет — не выдумываем его, а падаем с
+    // прежним понятным сообщением: пусть владелец впишет вес.
+    const packageWeightRaw = strictNumber(attrs["вес упаковки, г"]);
+    let qtyReceived = input.qtyReceived;
+    let unitForBatch: Unit = unit;
+    let priceScale = 1;
+    if (base && unit !== base && unit === "шт" && convertQty(1, "г", base) !== null) {
+      if (packageWeightRaw == null || !(packageWeightRaw > 0)) {
+        throw new BadRequestException(
+          `«шт» не перевести в «${base}»: у карточки «${ing.name}» не указан вес упаковки, г`,
+        );
+      }
+      const вГраммах = input.qtyReceived * packageWeightRaw;
+      const переведено = convertQty(вГраммах, "г", base);
+      if (переведено === null) {
+        throw new BadRequestException(`«шт» не перевести в базовую единицу ингредиента «${base}»`);
+      }
+      qtyReceived = переведено;
+      unitForBatch = base;
+      // Цена была за пачку; за единицу базовой размерности она во столько же раз
+      // меньше, во сколько пачка больше единицы.
+      priceScale = переведено / input.qtyReceived;
+    } else if (base && unit !== base && convertQty(input.qtyReceived, unit, base) === null) {
       throw new BadRequestException(`«${unit}» не перевести в базовую единицу ингредиента «${base}»`);
     }
     if (input.personId) await this.personExists(input.personId);
@@ -1180,15 +1217,26 @@ export class StockService implements OnModuleInit {
           ? input.unitPriceNet * (1 + input.vatRate / 100)
           : null;
 
+    const unitPriceForBatch = unitPriceGross != null && priceScale !== 1 ? unitPriceGross / priceScale : unitPriceGross;
+
     const receivedOn = input.receivedOn ?? todayTashkent();
     // Снимок веса упаковки: правка карточки не должна дорожать/удешевлять уже
     // принятую партию. Колонка целая (package_weight_snapshot) — округляем;
     // запрет на Math.trunc/parseInt из глобальных правил про КОЛИЧЕСТВА сюда
     // не относится: это справочный вес упаковки карточки, а не остаток склада.
-    const packageWeightRaw = strictNumber(attrs["вес упаковки, г"]);
     const packageWeightSnapshot = packageWeightRaw != null ? Math.round(packageWeightRaw) : null;
 
-    return { kind: "new", unit, base, source, supplierId, unitPriceGross, receivedOn, packageWeightSnapshot };
+    return {
+      kind: "new",
+      unit: unitForBatch,
+      base,
+      source,
+      supplierId,
+      unitPriceGross: unitPriceForBatch,
+      qtyReceived,
+      receivedOn,
+      packageWeightSnapshot,
+    };
   }
 
   /**
@@ -1200,7 +1248,7 @@ export class StockService implements OnModuleInit {
     input: CreateBatchInput,
     prep: Extract<Awaited<ReturnType<StockService["prepareBatch"]>>, { kind: "new" }>,
   ): Promise<BatchRow> {
-    const { unit, base, source, supplierId, unitPriceGross, receivedOn, packageWeightSnapshot } = prep;
+    const { unit, base, source, supplierId, unitPriceGross, receivedOn, packageWeightSnapshot, qtyReceived } = prep;
 
     const created = await this.db.transaction(async (tx) => {
       const [batch] = await tx
@@ -1212,7 +1260,7 @@ export class StockService implements OnModuleInit {
           expiryDate: input.expiryDate ?? null,
           manufactureDate: input.manufactureDate ?? null,
           receivedOn,
-          qtyReceived: String(input.qtyReceived),
+          qtyReceived: String(qtyReceived),
           unit,
           openedOn: null,
           openedBy: null,
@@ -1233,7 +1281,7 @@ export class StockService implements OnModuleInit {
         .returning();
       if (!batch) throw new BadRequestException("Не удалось завести партию");
 
-      const total = unitPriceGross != null ? String(unitPriceGross * input.qtyReceived) : null;
+      const total = unitPriceGross != null ? String(unitPriceGross * qtyReceived) : null;
       const [movement] = await tx
         .insert(stockMovement)
         .values({
@@ -1242,7 +1290,7 @@ export class StockService implements OnModuleInit {
           warehouseId: input.warehouseId,
           batchId: batch.id,
           dt: receivedOn,
-          qty: String(input.qtyReceived),
+          qty: String(qtyReceived), // переведённое: рядом лежит `unit`, и число обязано быть в нём
           unit,
           unitPrice: unitPriceGross != null ? String(unitPriceGross) : null,
           total,
@@ -1290,7 +1338,7 @@ export class StockService implements OnModuleInit {
             warehouseId: input.warehouseId,
             batchId: batch.id,
             dt: input.closeOn,
-            qty: String(input.qtyReceived),
+            qty: String(qtyReceived), // переведённое: рядом лежит `unit`, и число обязано быть в нём
             unit,
             source: "owner",
             note: `израсходовано до инвентаризации ${input.closeOn}, точная дата неизвестна`,
