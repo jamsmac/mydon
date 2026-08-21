@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
-import { IsIn, IsISO8601, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min } from "class-validator";
+import { IsIn, IsISO8601, IsNumber, IsObject, IsOptional, IsString, IsUUID, MaxLength, Min } from "class-validator";
 import { CollectionsService } from "./collections.service";
 
 export class CreateCollectionDto {
@@ -25,6 +25,19 @@ export class ReceiveCollectionDto {
 
   @IsOptional() @IsString() @MaxLength(128)
   manager?: string;
+
+  /**
+   * Разбивка по купюрам: номинал сум → количество. Необязательна — 386
+   * исторических приёмов её не знают, и это законно.
+   *
+   * DTO проверяет только ТИП (объект), а не то, что номиналы существуют,
+   * количества целые и неотрицательные, и что их сумма сошлась с `amount` —
+   * это семантика, и её место в сервисе (parseDenominations), с отказом,
+   * называющим обе цифры. Иначе одна плохая строка отбивает приём целиком,
+   * как уже было с @IsPositive() в срезе D.
+   */
+  @IsOptional() @IsObject()
+  denominations?: Record<string, string | number>;
 }
 
 /** Инкассация автоматов: фиксация сбора, приём с суммой, отчёты. */
@@ -54,6 +67,19 @@ export class CollectionsController {
     return this.collections.cashEstimate();
   }
 
+  /**
+   * Сверка по автоматам за период (R-K11): `rows` — итог по автомату за всё
+   * окно, `intervals` — построчно по каждой инкассации за всю историю.
+   * Даты — обязательные `ГГГГ-ММ-ДД`; отсутствие или неверный формат отбивает
+   * сервис понятным сообщением, а не тихим NaN.
+   *
+   * Стоит выше `:id` по той же причине, что и cash-estimate.
+   */
+  @Get("reconcile")
+  reconcile(@Query("from") from?: string, @Query("to") to?: string) {
+    return this.collections.reconcile(from ?? "", to ?? "");
+  }
+
   @Get()
   list(
     @Query("status") status?: string,
@@ -72,7 +98,7 @@ export class CollectionsController {
 
   @Post(":id/receive")
   receive(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ReceiveCollectionDto) {
-    return this.collections.receive(id, dto.amount, dto.manager ?? "owner");
+    return this.collections.receive(id, dto.amount, dto.manager ?? "owner", dto.denominations);
   }
 
   @Post(":id/cancel")

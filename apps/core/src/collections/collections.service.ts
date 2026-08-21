@@ -1,12 +1,57 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { auditLog, coffeeOrder, collection, entity, person, sale } from "@mydon/db";
-import { cashInMachines, orderIsCash } from "@mydon/shared";
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { cashInMachines, orderIsCash, parseDenominations, type DenominationCounts } from "@mydon/shared";
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 type CollectionRow = typeof collection.$inferSelect;
 
 type РезультатОценки = { всего: number; поАвтоматам: { machineId: string; имя: string | null; сумма: number; с: string | null }[] };
+
+/** Строка сверки: итог по автомату за весь запрошенный период (R-K11). */
+export interface РезультатСверкиСтрока {
+  machineId: string;
+  имя: string | null;
+  выручка: number;
+  изъято: number;
+  разница: number;
+  /** Доля расхождения от выручки, % (изъято меньше выручки — отрицательная). null, если выручки не было. */
+  доля: number | null;
+  инкассаций: number;
+  медианныйИнтервалДней: number | null;
+  медианныйЛагДней: number | null;
+}
+
+/** Один период между двумя соседними инкассациями на одном автомате (R-K11). */
+export interface ИнтервалСверки {
+  id: string;
+  machineId: string;
+  имя: string | null;
+  с: string;
+  по: string;
+  дней: number;
+  ожидалось: number;
+  изъято: number;
+  разница: number;
+  /** «Пробел в журнале» — период длиннее удвоенной медианы для ЭТОГО автомата: не недостача, а дисциплина ввода. */
+  статус: "обычный" | "пробел в журнале";
+}
+
+export interface РезультатСверки {
+  from: string;
+  to: string;
+  rows: РезультатСверкиСтрока[];
+  intervals: ИнтервалСверки[];
+  /** Сколько первых инкассаций автоматов не вошли ни в один интервал — у них нет известного начала периода. */
+  первыхИсключено: number;
+}
+
+/** Медиана числового набора. Пустой набор обрабатывает вызывающий — здесь не определена. */
+function медиана(значения: number[]): number {
+  const s = [...значения].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid];
+}
 
 export interface CreateCollectionInput {
   machineId: string;
@@ -64,11 +109,39 @@ export class CollectionsService {
     });
   }
 
-  /** Этап 2: менеджер принял и пересчитал. Сумма обязательна. */
-  async receive(id: string, amount: number, managerRef = "owner"): Promise<CollectionRow> {
+  /**
+   * Этап 2: менеджер принял и пересчитал. Сумма обязательна, разбивка по
+   * купюрам — нет (386 исторических приёмов её не знают, и это законно).
+   *
+   * Если разбивку передали, её сумма ОБЯЗАНА совпасть с `amount` — сверка
+   * живёт в ядре, а не только на форме, потому что форму можно обойти.
+   * DTO проверяет только тип входа (объект); номиналы, отрицательные и
+   * дробные количества, и само совпадение сумм — семантика, и её место
+   * здесь, с отказом, который называет ОБЕ цифры и разницу (см. срез D,
+   * где @IsPositive() на DTO отбивал весь запрос из-за одной плохой строки).
+   */
+  async receive(
+    id: string,
+    amount: number,
+    managerRef = "owner",
+    denominationsInput?: Record<string, unknown>,
+  ): Promise<CollectionRow> {
     if (!Number.isFinite(amount) || amount < 0) {
       throw new BadRequestException("Сумма должна быть числом не меньше нуля");
     }
+
+    let denominations: DenominationCounts | null = null;
+    if (denominationsInput != null) {
+      const parsed = parseDenominations(denominationsInput);
+      if ("error" in parsed) throw new BadRequestException(parsed.error);
+      if (parsed.total !== amount) {
+        throw new BadRequestException(
+          `Сумма купюр не сошлась с заявленной: по купюрам ${parsed.total}, заявлено ${amount}, разница ${parsed.total - amount}`,
+        );
+      }
+      denominations = parsed.counts;
+    }
+
     return this.db.transaction(async (tx) => {
       const [row] = await tx.select().from(collection).where(eq(collection.id, id)).for("update");
       if (!row) throw new NotFoundException(`Инкассация ${id} не найдена`);
@@ -77,7 +150,7 @@ export class CollectionsService {
       }
       const [updated] = await tx
         .update(collection)
-        .set({ status: "received", amount: String(amount), receivedAt: new Date(), managerRef })
+        .set({ status: "received", amount: String(amount), receivedAt: new Date(), managerRef, denominations })
         .where(eq(collection.id, id))
         .returning();
 
@@ -215,5 +288,180 @@ export class CollectionsService {
     };
     this.кэшОценки = { до: Date.now() + 60_000, данные };
     return данные;
+  }
+
+  private static readonly ДАТА_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  /**
+   * Сверка по автоматам за период (R-K11). Владелец просил ДВА разреза, не
+   * один: агрегат за окно усредняет и прячет провалы — именно построчный
+   * разбор вскрыл дыру в журнале инкассаций (см. факт 11 плана среза К).
+   *
+   * `rows` — итог по автомату ВНУТРИ [from, to]: выручка (наличные заказы
+   * кофе, то же правило orderIsCash, что у cashEstimate, плюс снек — он весь
+   * наличный, т.к. канала оплаты в источнике нет вовсе), изъято по системе,
+   * разница, доля, число инкассаций и медианные интервал/лаг ЭТОГО автомата
+   * (по всей его истории — дисциплина сборов не свойство окна, которое
+   * запросили).
+   *
+   * `intervals` — построчно по КАЖДОЙ инкассации за ВСЮ историю (не только
+   * за запрошенный период: длина периода между сборами — свойство самой
+   * инкассации). Запрос перенесён с прода дословно (донор VendCash,
+   * sales.service.ts:583): первая инкассация автомата не имеет предыдущей
+   * границы и выброшена (`prev IS NOT NULL`), границы строго `>`/`<=`, чтобы
+   * заказ в момент сбора не попал в два периода, сопоставление — по
+   * machine_id. Период длиннее удвоенной медианы ЭТОГО автомата помечается
+   * «пробел в журнале», а не голым минусом: это дисциплина ввода, а не
+   * недостача (проверено на проде: 14 таких окон дают −92,6% просто потому,
+   * что инкассации туда не заносили).
+   */
+  async reconcile(from: string, to: string): Promise<РезультатСверки> {
+    if (!CollectionsService.ДАТА_RE.test(from) || !CollectionsService.ДАТА_RE.test(to)) {
+      throw new BadRequestException("Период задаётся датами вида ГГГГ-ММ-ДД: ?from=2026-03-01&to=2026-06-24");
+    }
+    if (from > to) {
+      throw new BadRequestException(`Начало периода (${from}) позже конца (${to})`);
+    }
+    const fromTs = new Date(`${from}T00:00:00+05:00`);
+    const toTs = new Date(`${to}T23:59:59.999+05:00`);
+
+    const [коллекции, кофе, снек, имена, интервалыRaw] = await Promise.all([
+      // Полная история, не только период: первая-инкассация-на-автомате,
+      // медианный интервал и лаг — свойства всей истории автомата.
+      this.db
+        .select({ machineId: collection.machineId, collectedAt: collection.collectedAt, receivedAt: collection.receivedAt, amount: collection.amount })
+        .from(collection)
+        .where(sql`${collection.status} <> 'cancelled'`),
+      this.db
+        .select({ machineId: coffeeOrder.machineId, ts: coffeeOrder.ts, amount: coffeeOrder.amount, res: coffeeOrder.orderResource })
+        .from(coffeeOrder)
+        .where(and(eq(coffeeOrder.countable, true), sql`${coffeeOrder.machineId} is not null`, gte(coffeeOrder.ts, fromTs), lte(coffeeOrder.ts, toTs))),
+      this.db
+        .select({ machineId: sale.machineId, dt: sale.dt, amount: sale.amount })
+        .from(sale)
+        .where(and(sql`${sale.machineId} is not null`, gte(sale.dt, from), lte(sale.dt, to))),
+      this.db.select({ id: entity.id, name: entity.name }).from(entity),
+      this.db.execute(sql`
+        WITH pairs AS (
+          SELECT c.id, c.machine_id, c.amount::numeric amt, c.collected_at,
+                 LAG(c.collected_at) OVER (
+                   PARTITION BY c.machine_id ORDER BY c.collected_at
+                 ) prev
+          FROM collection c WHERE c.status <> 'cancelled'
+        )
+        SELECT p.id, p.machine_id "machineId", p.prev, p.collected_at "collectedAt", p.amt "amount",
+               COALESCE(SUM(o.amount::numeric), 0) expected
+        FROM pairs p
+        LEFT JOIN coffee_order o
+          ON o.machine_id = p.machine_id AND o.countable
+         AND lower(o.order_resource) IN ('cash','cash0','cash payment','credit')
+         AND o.ts > p.prev AND o.ts <= p.collected_at
+        WHERE p.prev IS NOT NULL
+        GROUP BY 1,2,3,4,5
+      `),
+    ]);
+
+    const имёнаМап = new Map(имена.map((e) => [e.id, e.name]));
+
+    // --- intervals: построчно, кроме первой инкассации на каждом автомате ---
+    const интервалыRows = интервалыRaw as unknown as Array<{
+      id: string;
+      machineId: string;
+      prev: Date | string;
+      collectedAt: Date | string;
+      amount: string | number;
+      expected: string | number;
+    }>;
+
+    const длительностиПоАвтомату = new Map<string, number[]>();
+    const сырыеИнтервалы = интервалыRows.map((r) => {
+      const с = new Date(r.prev);
+      const по = new Date(r.collectedAt);
+      const дней = (по.getTime() - с.getTime()) / 86_400_000;
+      const список = длительностиПоАвтомату.get(r.machineId) ?? [];
+      список.push(дней);
+      длительностиПоАвтомату.set(r.machineId, список);
+      return { ...r, с, по, дней };
+    });
+
+    const intervals: ИнтервалСверки[] = сырыеИнтервалы.map((r) => {
+      const медианаАвтомата = медиана(длительностиПоАвтомату.get(r.machineId) ?? [r.дней]);
+      const изъято = Number(r.amount);
+      const ожидалось = Number(r.expected);
+      return {
+        id: r.id,
+        machineId: r.machineId,
+        имя: имёнаМап.get(r.machineId) ?? null,
+        с: r.с.toISOString(),
+        по: r.по.toISOString(),
+        дней: Math.round(r.дней * 100) / 100,
+        ожидалось: Math.round(ожидалось),
+        изъято: Math.round(изъято),
+        разница: Math.round(изъято - ожидалось),
+        статус: r.дней > 2 * медианаАвтомата ? "пробел в журнале" : "обычный",
+      };
+    });
+
+    // Первая инкассация КАЖДОГО автомата не входит ни в один период — у неё
+    // нет известного начала, и приписывать ей «всё с начала времён» нечестно
+    // (см. WHERE prev IS NOT NULL выше). Считается словами, а не молча.
+    const первыхИсключено = new Set(коллекции.map((c) => c.machineId)).size;
+
+    // --- rows: по автомату за окно [from, to] ---
+    const лагПоАвтомату = new Map<string, number[]>();
+    for (const c of коллекции) {
+      if (!c.receivedAt) continue;
+      const лагДней = (new Date(c.receivedAt).getTime() - new Date(c.collectedAt).getTime()) / 86_400_000;
+      const список = лагПоАвтомату.get(c.machineId) ?? [];
+      список.push(лагДней);
+      лагПоАвтомату.set(c.machineId, список);
+    }
+
+    const выручкаПоАвтомату = new Map<string, number>();
+    for (const o of кофе) {
+      if (!orderIsCash({ orderResource: o.res })) continue;
+      const machineId = o.machineId as string;
+      выручкаПоАвтомату.set(machineId, (выручкаПоАвтомату.get(machineId) ?? 0) + Number(o.amount));
+    }
+    for (const s of снек) {
+      const machineId = s.machineId as string;
+      выручкаПоАвтомату.set(machineId, (выручкаПоАвтомату.get(machineId) ?? 0) + Number(s.amount));
+    }
+
+    const изъятоПоАвтомату = new Map<string, { сумма: number; штук: number }>();
+    for (const c of коллекции) {
+      const collectedAt = new Date(c.collectedAt);
+      if (collectedAt < fromTs || collectedAt > toTs) continue;
+      if (c.amount == null) continue; // ждёт приёма — суммы ещё нет
+      const запись = изъятоПоАвтомату.get(c.machineId) ?? { сумма: 0, штук: 0 };
+      запись.сумма += Number(c.amount);
+      запись.штук += 1;
+      изъятоПоАвтомату.set(c.machineId, запись);
+    }
+
+    const machineIds = new Set([...выручкаПоАвтомату.keys(), ...изъятоПоАвтомату.keys()]);
+    const rows: РезультатСверкиСтрока[] = [...machineIds]
+      .map((machineId) => {
+        const выручка = Math.round(выручкаПоАвтомату.get(machineId) ?? 0);
+        const запись = изъятоПоАвтомату.get(machineId);
+        const изъято = Math.round(запись?.сумма ?? 0);
+        const разница = изъято - выручка;
+        const интервалы = длительностиПоАвтомату.get(machineId);
+        const лаги = лагПоАвтомату.get(machineId);
+        return {
+          machineId,
+          имя: имёнаМап.get(machineId) ?? null,
+          выручка,
+          изъято,
+          разница,
+          доля: выручка > 0 ? Math.round((разница / выручка) * 10000) / 100 : null,
+          инкассаций: запись?.штук ?? 0,
+          медианныйИнтервалДней: интервалы && интервалы.length ? Math.round(медиана(интервалы) * 100) / 100 : null,
+          медианныйЛагДней: лаги && лаги.length ? Math.round(медиана(лаги) * 100) / 100 : null,
+        };
+      })
+      .sort((a, b) => b.выручка - a.выручка);
+
+    return { from, to, rows, intervals, первыхИсключено };
   }
 }

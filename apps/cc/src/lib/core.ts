@@ -1,4 +1,5 @@
 import "server-only";
+import type { DenominationCounts } from "@mydon/shared";
 
 /**
  * Клиент MYDON Core для оболочки.
@@ -927,6 +928,41 @@ export interface CollectionRow {
   status: "collected" | "received" | "cancelled";
   source: string;
   notes: string | null;
+}
+
+/** Сверка (R-K11): итог по автомату за весь запрошенный период. */
+export interface ReconcileRow {
+  machineId: string;
+  имя: string | null;
+  выручка: number;
+  изъято: number;
+  разница: number;
+  доля: number | null;
+  инкассаций: number;
+  медианныйИнтервалДней: number | null;
+  медианныйЛагДней: number | null;
+}
+
+/** Сверка (R-K11): один период между двумя соседними инкассациями на автомате. */
+export interface ReconcileInterval {
+  id: string;
+  machineId: string;
+  имя: string | null;
+  с: string;
+  по: string;
+  дней: number;
+  ожидалось: number;
+  изъято: number;
+  разница: number;
+  статус: "обычный" | "пробел в журнале";
+}
+
+export interface ReconcileResult {
+  from: string;
+  to: string;
+  rows: ReconcileRow[];
+  intervals: ReconcileInterval[];
+  первыхИсключено: number;
 }
 
 export interface Workload {
@@ -2112,10 +2148,18 @@ export const core = {
       всего: number;
       поАвтоматам: { machineId: string; имя: string | null; сумма: number; с: string | null }[];
     }>("/collections/cash-estimate"),
-  receiveCollection: (id: string, amount: number) =>
-    send<CollectionRow>(`/collections/${id}/receive`, "POST", { amount, manager: "owner" }),
+  /** Приём инкассации. `denominations` необязательна — сумма купюр должна совпасть с `amount`, иначе Core отказывает с обеими цифрами. */
+  receiveCollection: (id: string, amount: number, denominations?: DenominationCounts) =>
+    send<CollectionRow>(`/collections/${id}/receive`, "POST", {
+      amount,
+      manager: "owner",
+      ...(denominations ? { denominations } : {}),
+    }),
   cancelCollection: (id: string) =>
     send<CollectionRow>(`/collections/${id}/cancel`, "POST", { manager: "owner" }),
+  /** Сверка по автоматам за период: наличная выручка против изъятого (R-K11). */
+  reconcileCollections: (from: string, to: string) =>
+    get<ReconcileResult>(`/collections/reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   /**
    * Проданные чашки кофе — факт из панели производителя.
    *
