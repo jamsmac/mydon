@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { cardPrice, pricePerGram } from "./ingredient-price";
+import { cardPrice, pricePerGram, resolveIngredientPrice } from "./ingredient-price";
 
 describe("Цена ингредиента из карточки", () => {
   it("кг переводится в граммы", () => {
@@ -30,5 +30,32 @@ describe("Цена ингредиента из карточки", () => {
 
   it("цена из строки с пробелами читается (карточки заводились руками)", () => {
     assert.equal(pricePerGram({ "цена покупки": "260 000", "единица": "кг" }), 260);
+  });
+});
+
+describe("resolveIngredientPrice — выбор цены: карточка приоритетнее реестра", () => {
+  it("карточка даёт цену — источник «карточка», реестр не смотрим вовсе", () => {
+    const r = resolveIngredientPrice({ "цена покупки": 260000, "единица": "кг" }, 999);
+    assert.equal(r.pricePerGram, 260);
+    assert.equal(r.source, "карточка");
+  });
+
+  it("карточки нет — запасной путь: purchase_price реестра, источник «реестр»", () => {
+    const r = resolveIngredientPrice(null, 80);
+    assert.equal(r.pricePerGram, 80);
+    assert.equal(r.source, "реестр");
+  });
+
+  it("карточка привязана, но без цены/единицы веса — тоже падаем на реестр", () => {
+    // Стакан+крышка: карточка есть, но «шт» не переводится в цену за грамм.
+    const r = resolveIngredientPrice({ "цена покупки": 3600, "единица": "шт" }, 80);
+    assert.equal(r.pricePerGram, 80);
+    assert.equal(r.source, "реестр");
+  });
+
+  it("ни карточки, ни реестра — null, а не 0, source null", () => {
+    const r = resolveIngredientPrice(null, null);
+    assert.equal(r.pricePerGram, null);
+    assert.equal(r.source, null);
   });
 });

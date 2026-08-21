@@ -75,3 +75,32 @@ export function pricePerGram(attrs: Record<string, unknown> | null | undefined):
       return null;
   }
 }
+
+/** Откуда взята итоговая цена ингредиента — витрина обязана показать источник, а не молчать о нём. */
+export type IngredientPriceSource = "карточка" | "реестр" | null;
+
+/** Итоговая цена ингредиента за грамм плюс её источник. */
+export interface ResolvedIngredientPrice {
+  /** Сум за грамм. null — ни карточка, ни запасной путь цены не дали. */
+  pricePerGram: number | null;
+  source: IngredientPriceSource;
+}
+
+/**
+ * Выбор цены ингредиента для себестоимости расхода: сначала карточка
+ * `entity(type='ingredient')` (мост `coffee_ingredient.entity_id`, миграция
+ * 0059) — цену вводит человек туда; карточки нет, карточка не привязана, или
+ * в ней нет цены/единицы веса (`pricePerGram` вернул null) — запасной путь:
+ * `coffee_ingredient.purchase_price` (сум/г), переданный сюда явно. У всех
+ * 8 живых строк на момент написания он NULL, но поле остаётся годным для
+ * ингредиента без карточки в реестре.
+ */
+export function resolveIngredientPrice(
+  cardAttrs: Record<string, unknown> | null | undefined,
+  fallbackPricePerGram: number | null,
+): ResolvedIngredientPrice {
+  const fromCard = pricePerGram(cardAttrs);
+  if (fromCard !== null) return { pricePerGram: fromCard, source: "карточка" };
+  if (fallbackPricePerGram !== null) return { pricePerGram: fallbackPricePerGram, source: "реестр" };
+  return { pricePerGram: null, source: null };
+}
