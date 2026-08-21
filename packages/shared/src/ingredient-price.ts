@@ -42,6 +42,19 @@ function toNumber(v: unknown): number | null {
 }
 
 /**
+ * Цена не бывает отрицательной. Минус в карточке — опечатка ввода («-100»
+ * вместо «100»), и пропустить её значило бы посчитать отрицательную
+ * себестоимость: чашка «зарабатывала» бы на сырье. Возвращаем «цены нет» —
+ * это видно на карточке и чинится правкой поля, а не расходится по отчётам.
+ *
+ * Ноль — НАСТОЯЩАЯ цена и проходит: бывает бесплатное сырьё (образец,
+ * бонус поставщика), и подменять его на «данных нет» нельзя.
+ */
+function isUsablePrice(n: number): boolean {
+  return n >= 0;
+}
+
+/**
  * Цена и единица как в карточке — для витрин, где важна исходная единица.
  * null — цены или единицы нет, либо единица не из справочника `UNITS`: без
  * единицы цифра цены сама по себе бессмысленна (100 000 за кг и за грамм —
@@ -51,7 +64,7 @@ export function cardPrice(attrs: Record<string, unknown> | null | undefined): In
   if (!attrs) return null;
   const price = toNumber(attrs["цена покупки"]);
   const unit = attrs["единица"];
-  if (price === null || !isUnit(unit)) return null;
+  if (price === null || !isUsablePrice(price) || !isUnit(unit)) return null;
   return { price, unit };
 }
 
