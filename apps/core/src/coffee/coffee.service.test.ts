@@ -541,6 +541,45 @@ describe("CoffeeService: настройки — цена ингредиента"
     assert.equal(rows[0]!.entityId, "ent-coffee");
   });
 
+  it("bunkerConfig — вес упаковки берётся с карточки, а не из реестра", async () => {
+    // Живой случай: у матчи в реестре бункеров стояло 1000 г, а пачка на деле
+    // 500 (фото упаковки OSNOVA Matcha Latte и снимок остатков владельца:
+    // «3 пач (0,5)» = 1,5 кг). Бот считает пачки по этому полю и показывал
+    // оператору вдвое меньше пачек, чем он держит в руках.
+    const { db } = coffeeDb({
+      bunkerConfig: [
+        {
+          position: 3,
+          ingredientId: "ing-matcha",
+          ingredientName: "Матча",
+          packageWeight: 1000, // ошибочное значение реестра
+          entityId: "ent-matcha",
+          cardAttrs: { "единица": "кг", "вес упаковки, г": 500 },
+        },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    const rows = await svc.bunkerConfig();
+    assert.equal(rows[0]!.packageWeight, 500, "карточка сильнее реестра");
+  });
+
+  it("bunkerConfig — веса на карточке нет — остаётся значение реестра", async () => {
+    const { db } = coffeeDb({
+      bunkerConfig: [
+        {
+          position: 7,
+          ingredientId: "ing-coffee",
+          ingredientName: "Кофе",
+          packageWeight: 1000,
+          entityId: "ent-coffee",
+          cardAttrs: { "единица": "кг" },
+        },
+      ],
+    });
+    const svc = new CoffeeService(db);
+    assert.equal((await svc.bunkerConfig())[0]!.packageWeight, 1000);
+  });
+
   it("bunkerConfig — карточки нет — запасной путь purchase_price, priceSource «реестр»", async () => {
     const { db } = coffeeDb({
       bunkerConfig: [

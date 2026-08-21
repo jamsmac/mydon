@@ -1290,7 +1290,7 @@ export class StockService implements OnModuleInit {
           warehouseId: input.warehouseId,
           batchId: batch.id,
           dt: receivedOn,
-          qty: String(input.qtyReceived),
+          qty: String(qtyReceived), // переведённое: рядом лежит `unit`, и число обязано быть в нём
           unit,
           unitPrice: unitPriceGross != null ? String(unitPriceGross) : null,
           total,
@@ -1338,7 +1338,7 @@ export class StockService implements OnModuleInit {
             warehouseId: input.warehouseId,
             batchId: batch.id,
             dt: input.closeOn,
-            qty: String(input.qtyReceived),
+            qty: String(qtyReceived), // переведённое: рядом лежит `unit`, и число обязано быть в нём
             unit,
             source: "owner",
             note: `израсходовано до инвентаризации ${input.closeOn}, точная дата неизвестна`,

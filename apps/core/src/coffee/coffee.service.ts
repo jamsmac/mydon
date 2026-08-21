@@ -29,6 +29,7 @@ import {
   netWeight,
   reconcileConsumption,
   resolveIngredientPrice,
+  strictNumber,
   type ContainerConsumptionRow,
   type ContainerFillEvent,
   type ContainerReturnEvent,
@@ -162,6 +163,16 @@ export interface BunkerIngredientRow {
   entityId: string | null;
   /** Откуда взята `purchasePrice`. null — цены нет вовсе, витрина не должна выдумывать источник. */
   priceSource: IngredientPriceSource;
+  /**
+   * Вес одной упаковки, г — по нему бот считает пачки при заливке.
+   *
+   * Берётся с карточки (`attrs["вес упаковки, г"]`), реестр бункеров —
+   * запасной путь: расхождение уже стоило ошибки в поле (у матчи реестр
+   * говорил 1000 г при пачке 500). null — вес неизвестен, пачки не считаем.
+   */
+  packageWeight: number | null;
+  /** Как называть единицу расфасовки: «упаковки» по умолчанию, «шт» для стиков. */
+  packageLabel: string | null;
   /** Эталонный чистый вес заливки, г. null — не задан, недолив не проверяется. */
   targetFillWeight: number | null;
 }
@@ -861,12 +872,19 @@ export class CoffeeService {
     return rows.map((r) => {
       const fallback = r.purchasePrice != null ? Number(r.purchasePrice) : null;
       const resolved = resolveIngredientPrice(r.cardAttrs as Record<string, unknown> | null, fallback);
+      // Вес упаковки — с карточки, как и цена: реестр бункеров хранит его как
+      // запасной путь. Расхождение уже стоило ошибки в поле: у матчи в реестре
+      // стояло 1000 г, а пачка на деле 500 (фото упаковки OSNOVA Matcha Latte
+      // 500 г), и бот показывал оператору вдвое меньше пачек, чем он держит в
+      // руках. Один источник правды — карточка.
+      const весКарточки = strictNumber((r.cardAttrs as Record<string, unknown> | null)?.["вес упаковки, г"]);
+      const packageWeight = весКарточки != null && весКарточки > 0 ? Math.round(весКарточки) : r.packageWeight;
       return {
         position: r.position,
         ingredientId: r.ingredientId,
         ingredientName: r.ingredientName,
         purchasePrice: resolved.pricePerGram,
-        packageWeight: r.packageWeight,
+        packageWeight,
         packageLabel: r.packageLabel,
         targetFillWeight: r.targetFillWeight,
         entityId: r.entityId ?? null,

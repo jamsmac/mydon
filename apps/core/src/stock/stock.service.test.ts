@@ -496,6 +496,30 @@ describe("StockService: штуки переводятся в вес по упа�
     assert.equal(Number(m.values.total), 1600000, "сумма партии совпадает с реестром");
   });
 
+  it("движение несёт ПЕРЕВЕДЁННОЕ количество, а закрытая партия обнуляется", async () => {
+    // Ловушка, пропущенная первой версией правки: количество перевели для
+    // партии и для суммы, а в самих движениях осталось число пачек под меткой
+    // «г». Тогда остаток партии = 20 000 − 1000 = 19 000 вместо нуля, партия
+    // «повисает», а будущий приход в штуках занижает остаток ингредиента в
+    // двадцать раз. Проверяем именно qty движений, а не только total.
+    const { db, inserts } = stockDb({ entities: [макоффи, склад] });
+    const svc = new StockService(db);
+    await svc.createBatch({
+      ingredientId: "ing-mac", warehouseId: "wh-main",
+      qtyReceived: 1000, unit: "шт", unitPriceGross: 1600,
+      receivedOn: "2025-06-10", closeOn: "2026-08-21",
+    });
+    const движения = inserts.filter((i) => i.table === "stock_movement");
+    assert.equal(движения.length, 2, "приход и закрывающий расход");
+    for (const m of движения) {
+      assert.equal(Number(m.values.qty), 20000, `${m.values.kind}: количество в граммах`);
+      assert.equal(m.values.unit, "г");
+    }
+    // Приход и расход равны — значит партия закрыта, а остаток склада не вырос.
+    const [приход, расход] = движения;
+    assert.equal(Number(приход!.values.qty), Number(расход!.values.qty));
+  });
+
   it("веса упаковки нет — не выдумываем, а объясняем", async () => {
     const безВеса = { ...макоффи, id: "ing-x", name: "Матча", attrs: { "единица": "кг" } };
     const { db } = stockDb({ entities: [безВеса, склад] });
