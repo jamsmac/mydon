@@ -95,14 +95,41 @@ function locationKeyboard(locations: { id: string; name: string }[], prefix: "cf
   };
 }
 
-function positionKeyboard(config: { position: number; ingredientName: string }[], prefix: "cf" | "cw"): NonNullable<StaffReply["keyboard"]> {
-  const byPos = new Map<number, string[]>();
-  for (const c of config) byPos.set(c.position, [...(byPos.get(c.position) ?? []), c.ingredientName]);
+/**
+ * Клавиатура бункеров. У позиции с ДВУМЯ ингредиентами — по кнопке на каждый.
+ *
+ * Раньше такая позиция была одной кнопкой «3 · Лимонный чай/Матча», и заливка
+ * записывалась без ингредиента: угадывать нельзя, а спросить было негде. За год
+ * так накопилось 55 заливок на 54,2 кг, не привязанных ни к чему, — сверка
+ * «норма против факта» по матче и лимонному чаю стала невозможна в принципе.
+ *
+ * Отдельная кнопка на ингредиент не добавляет шагов: оператор так же делает
+ * одно нажатие, только теперь оно однозначно.
+ */
+function positionKeyboard(
+  config: { position: number; ingredientName: string; ingredientId?: string | null }[],
+  prefix: "cf" | "cw",
+): NonNullable<StaffReply["keyboard"]> {
+  const byPos = new Map<number, { name: string; id?: string | null }[]>();
+  for (const c of config) {
+    byPos.set(c.position, [...(byPos.get(c.position) ?? []), { name: c.ingredientName, id: c.ingredientId }]);
+  }
   const rows: { text: string; callback_data: string }[][] = [];
   for (let pos = 1; pos <= 8; pos++) {
-    const names = byPos.get(pos);
-    const label = names && names.length > 0 ? `${pos} · ${names.join("/")}` : `${pos} · пусто`;
-    rows.push([{ text: label.slice(0, 60), callback_data: `${prefix}:pos:${pos}` }]);
+    const here = byPos.get(pos) ?? [];
+    if (here.length === 0) {
+      rows.push([{ text: `${pos} · пусто`, callback_data: `${prefix}:pos:${pos}` }]);
+      continue;
+    }
+    if (here.length === 1) {
+      rows.push([{ text: `${pos} · ${here[0]!.name}`.slice(0, 60), callback_data: `${prefix}:pos:${pos}` }]);
+      continue;
+    }
+    // Двусмысленная позиция: выбор ингредиента прямо в кнопке.
+    for (const it of here) {
+      const data = it.id ? `${prefix}:pos:${pos}:${it.id}` : `${prefix}:pos:${pos}`;
+      rows.push([{ text: `${pos} · ${it.name}`.slice(0, 60), callback_data: data }]);
+    }
   }
   rows.push([{ text: "✖️ Отмена", callback_data: `${prefix}:cancel` }]);
   return { inline_keyboard: rows };
@@ -110,7 +137,7 @@ function positionKeyboard(config: { position: number; ingredientName: string }[]
 
 export type CoffeeRefillCallback =
   | { kind: "location"; id: string }
-  | { kind: "position"; position: number }
+  | { kind: "position"; position: number; ingredientId?: string }
   | { kind: "num"; press: NumpadPress }
   | { kind: "dupSkip" }
   | { kind: "dupWrite" }
@@ -120,8 +147,9 @@ export function parseCoffeeRefillCallback(data: string): CoffeeRefillCallback | 
   if (data === "cf:cancel") return { kind: "cancel" };
   const loc = /^cf:loc:([0-9a-f-]{36})$/.exec(data);
   if (loc) return { kind: "location", id: loc[1] };
-  const pos = /^cf:pos:([1-8])$/.exec(data);
-  if (pos) return { kind: "position", position: Number(pos[1]) };
+  // Хвост с ингредиентом — только у двусмысленной позиции (см. positionKeyboard).
+  const pos = /^cf:pos:([1-8])(?::([0-9a-f-]{36}))?$/.exec(data);
+  if (pos) return pos[2] ? { kind: "position", position: Number(pos[1]), ingredientId: pos[2] } : { kind: "position", position: Number(pos[1]) };
   if (data === "cf:dup:skip") return { kind: "dupSkip" };
   if (data === "cf:dup:write") return { kind: "dupWrite" };
   const press = parseNumpadCallback("cf", data);
@@ -171,7 +199,7 @@ function weightStep(position: number, draft = ""): StaffReply {
 
 export type CoffeeWashCallback =
   | { kind: "location"; id: string }
-  | { kind: "position"; position: number }
+  | { kind: "position"; position: number; ingredientId?: string }
   | { kind: "all" }
   | { kind: "cancel" };
 
@@ -180,8 +208,8 @@ export function parseCoffeeWashCallback(data: string): CoffeeWashCallback | null
   if (data === "cw:pos:all") return { kind: "all" };
   const loc = /^cw:loc:([0-9a-f-]{36})$/.exec(data);
   if (loc) return { kind: "location", id: loc[1] };
-  const pos = /^cw:pos:([1-8])$/.exec(data);
-  if (pos) return { kind: "position", position: Number(pos[1]) };
+  const pos = /^cw:pos:([1-8])(?::([0-9a-f-]{36}))?$/.exec(data);
+  if (pos) return pos[2] ? { kind: "position", position: Number(pos[1]), ingredientId: pos[2] } : { kind: "position", position: Number(pos[1]) };
   return null;
 }
 
@@ -315,7 +343,11 @@ export async function handleCoffeeRefillCallback(
   }
 
   if (cb.kind === "position") {
-    deps.conversations.advance(chatId, "container", { position: cb.position, draft: "" });
+    deps.conversations.advance(chatId, "container", {
+      position: cb.position,
+      draft: "",
+      ...(cb.ingredientId ? { ingredientId: cb.ingredientId } : {}),
+    });
     return { answer: `Бункер ${cb.position}`, message: containerStep(cb.position) };
   }
 
@@ -501,11 +533,15 @@ async function saveRefill(chatId: number, person: PersonRow, deps: CoffeeDeps): 
   // автомата видел исчезающий тост, а на текстовом пути вообще тишину, и
   // уходил с точки, ничего не записав. Теперь ввод переживает сбой, и «Готово»
   // можно нажать повторно, ничего не набирая заново.
-  // Ингредиент — из конфига бункеров по позиции. Без него сверка «ожидали
-  // против налили» читает 0 из 1150 строк и молчит по каждой. Позиция с ДВУМЯ
-  // ингредиентами (в конфиге такая есть) остаётся пустой: угаданное списание
-  // хуже отсутствующего — его никто не перепроверит.
-  const ingredientId = await ingredientForPosition(position, deps);
+  // Ингредиент: сперва выбор оператора (у двусмысленной позиции он жмёт кнопку
+  // с конкретным именем), иначе — однозначный из конфига по позиции.
+  //
+  // Без ингредиента сверка «ожидали против налили» молчит по строке. Раньше
+  // позиция с двумя ингредиентами всегда оставалась пустой — угадывать нельзя,
+  // а спросить было негде; за год так набралось 55 заливок на 54,2 кг ни к чему
+  // не привязанного сырья.
+  const выбран = typeof conv.data.ingredientId === "string" ? conv.data.ingredientId : null;
+  const ingredientId = выбран ?? (await ingredientForPosition(position, deps));
 
   try {
     await deps.core.submitCoffeeRefill({
