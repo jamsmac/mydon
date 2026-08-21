@@ -157,7 +157,17 @@ function plausiblePayDate(raw: string, today: string): string | null {
  * это либо строка-остаток (только сумма оплаты), либо пустая строка-заглушка
  * в хвосте листа, а не товарная позиция.
  */
-export function parseRegisterRows(table: { columns: string[]; rows: string[][] }, today: string): RegisterRow[] {
+export function parseRegisterRows(
+  table: { columns: string[]; rows: string[][] },
+  today: string,
+  /**
+   * Сколько строк файла лежит ВЫШЕ первой строки `rows`. У живого реестра это 2:
+   * строка-титул «OOO VENDHUB» и строка заголовков. Нужен, чтобы `fileRow`
+   * совпадал с номером строки в файле — из него строится ключ идемпотентности,
+   * и человек, читая отчёт о загрузке, должен найти строку глазами.
+   */
+  headerOffset = 0,
+): RegisterRow[] {
   const out: RegisterRow[] = [];
 
   // Протяжка вниз — раздельно для каждой из четырёх колонок (ловушка №1).
@@ -185,6 +195,16 @@ export function parseRegisterRows(table: { columns: string[]; rows: string[][] }
     const name = cellOrNull(row, COL.name);
     if (name === null) return; // не товарная строка — пропускаем, но протяжка выше уже учла её значения
 
+    // У товарной строки есть количество ИЛИ стоимость. Без этого признака
+    // строка заголовков («Наименование товара» в колонке имени) прошла бы как
+    // запись: 136 записей вместо 135, 14 поставщиков вместо 13 — проверено на
+    // живом файле. `parseXlsx` принимает за заголовок первую строку книги, а в
+    // реестре первая строка — титул «OOO VENDHUB», поэтому настоящий заголовок
+    // приходит уже как данные.
+    const hasQty = parseAmount(rawCell(row, COL.qty)) !== null;
+    const hasCost = parseAmount(rawCell(row, COL.costGross)) !== null;
+    if (!hasQty && !hasCost) return;
+
     const invoiceRaw = cellOrNull(row, COL.invoice);
     const { no: invoiceNo, date: invoiceDate } = invoiceRaw !== null ? parseInvoiceText(invoiceRaw) : { no: null, date: null };
 
@@ -201,7 +221,7 @@ export function parseRegisterRows(table: { columns: string[]; rows: string[][] }
     }
 
     out.push({
-      fileRow: index + 1,
+      fileRow: index + 1 + headerOffset,
       group,
       year,
       supplier: supplier ?? "",
