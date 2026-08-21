@@ -979,6 +979,12 @@ a.rowlink:hover { background: var(--surf-2); }
   color: var(--tx-2); padding: 2px 5px; font-size: 12px; font-family: inherit;
 }
 .tag-price:focus { outline: none; border-color: var(--accent-line); color: var(--tx); }
+/* Цена, пришедшая из карточки, — только для чтения: правка здесь не сохранится
+   (карточка перебьёт поле реестра). Пунктир говорит это до клика. */
+.tag-price:read-only { border-style: dashed; opacity: 0.75; cursor: not-allowed; }
+.tag-src { font-size: 11px; color: var(--tx-3); text-decoration: none; border-bottom: 1px dotted var(--tx-3); }
+.tag-src:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.tag-warn { font-size: 11px; color: var(--warn, var(--err)); border: 1px solid currentColor; border-radius: 5px; padding: 0 4px; }
 .tag-add {
   background: var(--surf); border: 1px dashed var(--line); color: var(--tx-2); border-radius: 8px;
   padding: 6px 12px; font-size: 13px; cursor: pointer;

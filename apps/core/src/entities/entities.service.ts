@@ -21,9 +21,9 @@ import {
   TZ,
   machineIsOperational,
   type MachineStatus,
+  cardPrice,
   coordFromAttrs,
   isPlaceType,
-  isUnit,
   MACHINE_KINDS,
   placeTypeLabel,
   parseRecipe,
@@ -31,7 +31,6 @@ import {
   type Domain,
   type IngredientPrice,
   type MachineKind,
-  type Unit,
   DEFAULT_FIND_LIMIT,
   MAX_FIND_LIMIT,
 } from "@mydon/shared";
@@ -713,18 +712,15 @@ export class EntitiesService {
         : await this.db.select().from(entity).where(inArray(entity.id, ids));
     const byId = new Map(ings.map((i) => [i.id, i]));
 
+    // Цену из карточки достаёт `cardPrice` из @mydon/shared — та же функция,
+    // что зовёт витрина. Свой разбор здесь расходился с ней на живых данных:
+    // цена «260 000» (пробел, как её вводили руками) читалась в интерфейсе и
+    // давала null в ядре — один товар показывал себестоимость на карточке и
+    // «цены нет» в отчёте, и понять, какая цифра верна, было нечем.
     const priceOf = (id: string): IngredientPrice => {
       const ing = byId.get(id);
-      const a = (ing?.attrs ?? {}) as Record<string, unknown>;
-      const raw = a["цена покупки"];
-      const price =
-        typeof raw === "number" && Number.isFinite(raw) && raw > 0
-          ? raw
-          : typeof raw === "string" && raw.trim().length > 0 && Number.isFinite(Number(raw))
-            ? Number(raw)
-            : null;
-      const unit = isUnit(a["единица"]) ? (a["единица"] as Unit) : null;
-      return { price, unit };
+      const cp = cardPrice((ing?.attrs ?? {}) as Record<string, unknown>);
+      return cp === null ? { price: null, unit: null } : { price: cp.price, unit: cp.unit };
     };
 
     const costed = recipeCost(lines, priceOf);

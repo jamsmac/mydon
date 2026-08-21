@@ -28,9 +28,11 @@ import {
   matchReturnsToRefills,
   netWeight,
   reconcileConsumption,
+  resolveIngredientPrice,
   type ContainerConsumptionRow,
   type ContainerFillEvent,
   type ContainerReturnEvent,
+  type IngredientPriceSource,
   type LatestRefillRow,
   type ReconcileResult,
   type RecipeLine,
@@ -150,8 +152,16 @@ export interface BunkerIngredientRow {
   position: number;
   ingredientId: string;
   ingredientName: string;
-  /** Закупочная цена за грамм, сум. null — не заведена, себестоимость расхода не считается. */
+  /**
+   * Цена за грамм, сум — карточка `entity(type='ingredient')` через мост
+   * `entityId`, запасной путь `coffee_ingredient.purchase_price`. null — ни
+   * то, ни другое цены не дало, себестоимость расхода не считается.
+   */
   purchasePrice: number | null;
+  /** Карточка ингредиента в реестре (мост). null — ингредиент с реестром не связан. */
+  entityId: string | null;
+  /** Откуда взята `purchasePrice`. null — цены нет вовсе, витрина не должна выдумывать источник. */
+  priceSource: IngredientPriceSource;
   /** Эталонный чистый вес заливки, г. null — не задан, недолив не проверяется. */
   targetFillWeight: number | null;
 }
@@ -204,7 +214,8 @@ interface ReconcileSaleRow {
 interface ReconcileIngredientRow {
   id: string;
   name: string;
-  purchasePrice: string | null;
+  /** Уже разрешённая цена за грамм (карточка → запасной путь), см. `priceableIngredients()`. */
+  purchasePrice: number | null;
 }
 
 export interface SubmitRefillInput {
@@ -821,7 +832,15 @@ export class CoffeeService {
 
   // ── Настройки: ингредиенты по позициям бункера ────────────────────────
 
-  /** Позиция 1–8 → допустимые ингредиенты (список тегов, не 1:1 — см. schema.ts). */
+  /**
+   * Позиция 1–8 → допустимые ингредиенты (список тегов, не 1:1 — см. schema.ts).
+   *
+   * Цена — сквозь мост: карточка `entity(type='ingredient')` через
+   * `coffeeIngredient.entityId` (левый джойн — мост не обязателен),
+   * `resolveIngredientPrice()` (единая точка выбора, `@mydon/shared`) даёт
+   * ей приоритет над запасным `purchase_price`. `priceSource` говорит
+   * витрине, откуда цифра, чтобы она не выдумывала источник сама.
+   */
   async bunkerConfig(): Promise<BunkerIngredientRow[]> {
     const rows = await this.db
       .select({
@@ -832,14 +851,37 @@ export class CoffeeService {
         packageWeight: coffeeIngredient.packageWeight,
         packageLabel: coffeeIngredient.packageLabel,
         targetFillWeight: coffeeBunkerConfig.targetFillWeight,
+        entityId: coffeeIngredient.entityId,
+        cardAttrs: entity.attrs,
       })
       .from(coffeeBunkerConfig)
       .innerJoin(coffeeIngredient, eq(coffeeBunkerConfig.ingredientId, coffeeIngredient.id))
+      .leftJoin(entity, eq(coffeeIngredient.entityId, entity.id))
       .orderBy(asc(coffeeBunkerConfig.position));
-    return rows.map((r) => ({ ...r, purchasePrice: r.purchasePrice != null ? Number(r.purchasePrice) : null }));
+    return rows.map((r) => {
+      const fallback = r.purchasePrice != null ? Number(r.purchasePrice) : null;
+      const resolved = resolveIngredientPrice(r.cardAttrs as Record<string, unknown> | null, fallback);
+      return {
+        position: r.position,
+        ingredientId: r.ingredientId,
+        ingredientName: r.ingredientName,
+        purchasePrice: resolved.pricePerGram,
+        packageWeight: r.packageWeight,
+        packageLabel: r.packageLabel,
+        targetFillWeight: r.targetFillWeight,
+        entityId: r.entityId ?? null,
+        priceSource: resolved.source,
+      };
+    });
   }
 
-  /** Проставить/поправить закупочную цену ингредиента (сум за грамм) — для себестоимости расхода. */
+  /**
+   * Проставить/поправить закупочную цену ингредиента (сум за грамм) — запасной
+   * путь для себестоимости расхода. Основной источник цены — карточка
+   * `entity(type='ingredient')` через мост `entityId` (см. `bunkerConfig()`
+   * и `resolveIngredientPrice()` в `@mydon/shared`); это поле смотрят только
+   * когда карточки нет, она не привязана, или в ней нет цены/единицы веса.
+   */
   async setIngredientPrice(ingredientId: string, purchasePrice: number): Promise<{ ok: true }> {
     await this.db.update(coffeeIngredient).set({ purchasePrice: purchasePrice.toString() }).where(eq(coffeeIngredient.id, ingredientId));
     return { ok: true };
@@ -854,13 +896,20 @@ export class CoffeeService {
     return { ok: true };
   }
 
-  /** Добавить ингредиент в позицию («+ Добавить» в Настройках). Заводит ингредиент, если его ещё нет. */
+  /**
+   * Добавить ингредиент в позицию («+ Добавить» в Настройках). Заводит
+   * ингредиент, если его ещё нет — и мостит новую строку на карточку
+   * `entity(type='ingredient')` с тем же именем, если такая свободна
+   * (см. `freeIngredientCardId()`). Карточку не создаём: реестр заполняет
+   * человек, а не бот.
+   */
   async addBunkerIngredient(position: number, ingredientName: string): Promise<{ ingredientId: string }> {
     const name = ingredientName.trim();
     const existing = await this.db.select({ id: coffeeIngredient.id }).from(coffeeIngredient).where(eq(coffeeIngredient.name, name));
     let ingredientId = existing[0]?.id;
     if (!ingredientId) {
-      const inserted = await this.db.insert(coffeeIngredient).values({ name }).returning({ id: coffeeIngredient.id });
+      const entityId = await this.freeIngredientCardId(name);
+      const inserted = await this.db.insert(coffeeIngredient).values({ name, entityId }).returning({ id: coffeeIngredient.id });
       ingredientId = inserted[0]!.id;
     }
     await this.db
@@ -868,6 +917,31 @@ export class CoffeeService {
       .values({ position, ingredientId })
       .onConflictDoNothing({ target: [coffeeBunkerConfig.position, coffeeBunkerConfig.ingredientId] });
     return { ingredientId };
+  }
+
+  /**
+   * Карточка `entity(type='ingredient')` с точным именем — кандидат на мост
+   * с новой строкой `coffee_ingredient`. `entity` не имеет колонки мягкого
+   * удаления (в схеме такой нет), поэтому фильтр только по типу и имени.
+   *
+   * ГВАРДИЯ. Карточку, уже привязанную к ДРУГОЙ строке реестра, не отдаём:
+   * `ux_coffee_ingredient_entity` — частичный уникальный индекс, разрешает
+   * не больше одной строки `coffee_ingredient` на карточку. Повторная
+   * привязка нарушила бы его и уронила бы запрос 500-й — вместо этого
+   * ингредиент заводится без `entityId` (запасной путь цены остаётся
+   * рабочим). Проверка идёт по значению, а не через WHERE на entityId — так
+   * гвардия не зависит от того, умеет ли конкретная БД/стаб фильтровать этот
+   * столбец.
+   */
+  private async freeIngredientCardId(name: string): Promise<string | null> {
+    const [card] = await this.db
+      .select({ id: entity.id })
+      .from(entity)
+      .where(and(eq(entity.type, "ingredient"), eq(entity.name, name)));
+    if (!card) return null;
+    const bound = await this.db.select({ entityId: coffeeIngredient.entityId }).from(coffeeIngredient);
+    const taken = bound.some((r) => r.entityId === card.id);
+    return taken ? null : card.id;
   }
 
   /**
@@ -1513,9 +1587,11 @@ export class CoffeeService {
    * без пары «продажи+рецепт» и «две заливки подряд одного ингредиента» по
    * позиции сверка для неё не строится (status: "unknown"), а не подделывается.
    *
-   * Себестоимость (`costActual`/`costExpected`) — грамм × `coffee_ingredient.
-   * purchasePrice` (сум за грамм). Цена не заведена — `null`, а не 0: непосчитанную
-   * себестоимость нельзя выдавать за нулевую (тот же принцип, что у `recipeCost()`).
+   * Себестоимость (`costActual`/`costExpected`) — грамм × цена ингредиента за
+   * грамм, сначала карточка через мост, запасной путь `coffee_ingredient.
+   * purchasePrice` (см. `priceableIngredients()`). Цена не заведена нигде —
+   * `null`, а не 0: непосчитанную себестоимость нельзя выдавать за нулевую
+   * (тот же принцип, что у `recipeCost()`).
    */
   async reconcileLocation(locationId: string, fromDate: string, toDate: string): Promise<ReconcileRow[]> {
     const [refills, salesRows, products, ingredients, tareByKey, containerActuals] = await Promise.all([
@@ -1526,11 +1602,33 @@ export class CoffeeService {
         .orderBy(asc(coffeeRefill.position), asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
       this.db.select().from(coffeeSale).where(eq(coffeeSale.locationId, locationId)),
       this.products(),
-      this.db.select().from(coffeeIngredient),
+      this.priceableIngredients(),
       this.tareByKey(),
       this.containerActualsByLocation(fromDate, toDate),
     ]);
     return this.reconcileRows(refills, salesRows, products, ingredients, tareByKey, fromDate, toDate, containerActuals.get(locationId));
+  }
+
+  /**
+   * Ингредиенты с уже разрешённой ценой за грамм: карточка `entity(type=
+   * 'ingredient')` через мост `entityId` (левый джойн — мост не обязателен),
+   * иначе `purchase_price` (`resolveIngredientPrice()`, `@mydon/shared` —
+   * та же точка выбора, что и в `bunkerConfig()`, себестоимость расхода и
+   * витрина карточки обязаны сходиться в цифрах).
+   */
+  private async priceableIngredients(): Promise<ReconcileIngredientRow[]> {
+    const rows = await this.db
+      .select({ id: coffeeIngredient.id, name: coffeeIngredient.name, purchasePrice: coffeeIngredient.purchasePrice, cardAttrs: entity.attrs })
+      .from(coffeeIngredient)
+      .leftJoin(entity, eq(coffeeIngredient.entityId, entity.id));
+    return rows.map((r) => {
+      const fallback = r.purchasePrice != null ? Number(r.purchasePrice) : null;
+      return {
+        id: r.id,
+        name: r.name,
+        purchasePrice: resolveIngredientPrice(r.cardAttrs as Record<string, unknown> | null, fallback).pricePerGram,
+      };
+    });
   }
 
   /**
@@ -1612,7 +1710,7 @@ export class CoffeeService {
         .orderBy(asc(coffeeRefill.position), asc(coffeeRefill.enteredDate), asc(coffeeRefill.createdAt)),
       this.db.select().from(coffeeSale),
       this.products(),
-      this.db.select().from(coffeeIngredient),
+      this.priceableIngredients(),
       this.tareByKey(),
       this.locations(),
       this.containerActualsByLocation(fromDate, toDate),
@@ -1684,10 +1782,9 @@ export class CoffeeService {
       actualByIngredient.set(ingredientId, grams);
     }
 
-    // Цена за грамм — по canonical-ингредиенту; нет цены → null (не 0).
-    const priceByIngredient = new Map(
-      ingredients.map((i) => [i.id, i.purchasePrice != null ? Number(i.purchasePrice) : null]),
-    );
+    // Цена за грамм — по canonical-ингредиенту, уже разрешена в priceableIngredients()
+    // (карточка → запасной путь); нет цены нигде → null (не 0).
+    const priceByIngredient = new Map(ingredients.map((i) => [i.id, i.purchasePrice]));
 
     // Ожидаемый расход: продажи периода × состав товара. priceOf отдаёт ту же
     // цену за грамм — consumptionReport() сам считает себестоимость строки.
@@ -1738,13 +1835,23 @@ export class CoffeeService {
     const adjustments: CoffeeStockAdjustment[] = [];
 
     await this.db.transaction(async (tx) => {
-      const [existingRows, ingredients] = await Promise.all([
+      const [existingRows, ingredientRows] = await Promise.all([
         tx.select().from(coffeeStock),
-        tx.select().from(coffeeIngredient),
+        tx
+          .select({ id: coffeeIngredient.id, name: coffeeIngredient.name, purchasePrice: coffeeIngredient.purchasePrice, cardAttrs: entity.attrs })
+          .from(coffeeIngredient)
+          .leftJoin(entity, eq(coffeeIngredient.entityId, entity.id)),
       ]);
       const beforeById = new Map(existingRows.map((r) => [r.ingredientId, { quantity: r.quantity, countedAt: r.countedAt }]));
-      const nameById = new Map(ingredients.map((i) => [i.id, i.name]));
-      const priceById = new Map(ingredients.map((i) => [i.id, i.purchasePrice != null ? Number(i.purchasePrice) : null]));
+      const nameById = new Map(ingredientRows.map((i) => [i.id, i.name]));
+      // Цена — сначала карточка через мост, запасной путь purchase_price (та же
+      // точка выбора, что и в bunkerConfig()/priceableIngredients()).
+      const priceById = new Map(
+        ingredientRows.map((i) => {
+          const fallback = i.purchasePrice != null ? Number(i.purchasePrice) : null;
+          return [i.id, resolveIngredientPrice(i.cardAttrs as Record<string, unknown> | null, fallback).pricePerGram];
+        }),
+      );
 
       for (const item of items) {
         const prior = beforeById.get(item.ingredientId);

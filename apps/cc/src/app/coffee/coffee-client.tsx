@@ -1246,19 +1246,36 @@ function BunkerIngredients({ position, items }: { position: number; items: Coffe
       <div className="bunker-ing-h">Бункер {position}</div>
       <div className="tags">
         {items.length === 0 && !adding && <span className="muted">Пусто</span>}
-        {items.map((it) => (
+        {items.map((it) => {
+          // Цена из карточки побеждает поле реестра (см. resolveIngredientPrice).
+          // Значит правка здесь у связанной строки молча откатится при следующей
+          // загрузке — поле показываем только для чтения и отправляем на карточку,
+          // где правка действительно сохранится.
+          const изКарточки = it.priceSource === "карточка";
+          return (
           <span className="tag" key={it.ingredientId}>
             {it.ingredientName}
+            {it.entityId === null && (
+              <span className="tag-warn" title="У этой строки бункерного реестра нет карточки ингредиента: цена и срок годности берутся из старого поля, а не из реестра карточек">
+                нет карточки
+              </span>
+            )}
             <input
               type="number"
               min={0}
               step="0.01"
               className="tag-price"
-              disabled={pending}
+              disabled={pending || изКарточки}
+              readOnly={изКарточки}
               defaultValue={it.purchasePrice ?? ""}
               placeholder="цена/г"
-              title="Закупочная цена за грамм, сум — для себестоимости расхода"
+              title={
+                изКарточки
+                  ? "Цена приходит из карточки ингредиента — там её и меняют. Правка здесь не сохранится: карточка перебьёт её при следующей загрузке."
+                  : "Закупочная цена за грамм, сум — для себестоимости расхода"
+              }
               onBlur={(e) => {
+                if (изКарточки) return;
                 const v = e.target.value.trim();
                 if (v === "") return;
                 const price = Number(v);
@@ -1268,6 +1285,11 @@ function BunkerIngredients({ position, items }: { position: number; items: Coffe
                 });
               }}
             />
+            {изКарточки && it.entityId !== null && (
+              <a className="tag-src" href={`/card/${it.entityId}`} title="Открыть карточку ингредиента — цена меняется там">
+                из карточки
+              </a>
+            )}
             <input
               type="number"
               min={0}
@@ -1298,7 +1320,8 @@ function BunkerIngredients({ position, items }: { position: number; items: Coffe
               ×
             </button>
           </span>
-        ))}
+          );
+        })}
         {adding ? (
           <span className="tag-add-form">
             <input

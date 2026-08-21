@@ -192,8 +192,16 @@ export interface CoffeeBunkerIngredient {
   position: number;
   ingredientId: string;
   ingredientName: string;
-  /** Закупочная цена за грамм, сум. null — не заведена, себестоимость расхода не считается. */
+  /**
+   * Цена за грамм, сум — сначала карточка ингредиента через мост, запасной
+   * путь `purchase_price`. null — ни то, ни другое цены не дало, себестоимость
+   * расхода не считается.
+   */
   purchasePrice: number | null;
+  /** Карточка ингредиента в реестре (мост). null — ингредиент с реестром не связан. */
+  entityId: string | null;
+  /** Откуда взята `purchasePrice`. null — цены нет вовсе. */
+  priceSource: "карточка" | "реестр" | null;
   /** Эталонный чистый вес заливки, г. null — не задан, недолив не проверяется. */
   targetFillWeight: number | null;
 }
