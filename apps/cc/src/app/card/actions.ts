@@ -250,6 +250,72 @@ export async function addIntake(
   return { ok: true };
 }
 
+/**
+ * Приход ингредиента вместе с партией (§4.3 + документ Р3/Р4): один вызов
+ * Core одной транзакцией заводит и `stock_batch`, и связанное движение
+ * прихода — в отличие от {@link addIntake} здесь нет отдельного шага
+ * «завести движение». Поля документа (код партии, срок, поставщик, счёт-
+ * фактура, цена) необязательны — только склад/количество/единица обязательны,
+ * как и в обычном приходе.
+ */
+export async function addIntakeBatch(
+  ingredientId: string,
+  input: {
+    warehouseId: string;
+    qty: number;
+    unit: string;
+    dt?: string;
+    supplier?: string;
+    batchCode?: string;
+    expiryDate?: string;
+    manufactureDate?: string;
+    invoiceNo?: string;
+    invoiceDate?: string;
+    unitPriceNet?: number;
+    vatRate?: number;
+    note?: string;
+    /**
+     * Ключ идемпотентности одной заполненной формы (R-C: партия дороже движения).
+     *
+     * У обычного прихода ключ сознательно не передаётся — повтор из панели там
+     * считается осознанным вторым вводом. С партией иначе: двойной клик,
+     * обогнавший блокировку кнопки, завёл бы ДВЕ партии с двумя приходами, и
+     * остаток вырос бы вдвое. Ключ живёт, пока открыт блок «Партия», и
+     * обновляется после успешной записи — значит повтор той же формы вернёт ту
+     * же партию, а следующий приход заведёт новую.
+     */
+    clientKey?: string;
+  },
+): Promise<ActionResult> {
+  if (!input.warehouseId) return { ok: false, error: "Выбери склад" };
+  if (!(input.qty > 0)) return { ok: false, error: "Количество должно быть больше нуля" };
+  if (!input.unit) return { ok: false, error: "Выбери единицу" };
+  try {
+    await core.createBatch({
+      ingredientId,
+      warehouseId: input.warehouseId,
+      qtyReceived: input.qty,
+      unit: input.unit,
+      receivedOn: input.dt,
+      supplier: input.supplier,
+      batchCode: input.batchCode,
+      expiryDate: input.expiryDate,
+      manufactureDate: input.manufactureDate,
+      invoiceNo: input.invoiceNo,
+      invoiceDate: input.invoiceDate,
+      unitPriceNet: input.unitPriceNet,
+      vatRate: input.vatRate,
+      note: input.note,
+      clientKey: input.clientKey,
+    });
+  } catch (err) {
+    if (err instanceof CoreUnavailable) return { ok: false, error: err.detail };
+    return { ok: false, error: err instanceof Error ? err.message : "Не удалось завести приход с партией" };
+  }
+  revalidatePath(`/card/${ingredientId}`);
+  return { ok: true };
+}
+
 export interface SyncIntakeResult {
   ok: boolean;
   error?: string;

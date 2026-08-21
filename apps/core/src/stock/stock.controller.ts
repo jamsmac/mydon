@@ -81,6 +81,87 @@ export class StocktakeDto {
   clientKey?: string;
 }
 
+/**
+ * Завести партию прихода (§4.3 + документ Р3/Р4). Все поля документа
+ * необязательны: приход без партии остаётся возможен, а партия без кода —
+ * тоже законна (не у каждой поставки есть номер партии от поставщика).
+ */
+export class CreateBatchDto {
+  @IsUUID()
+  ingredientId!: string;
+
+  @IsUUID()
+  warehouseId!: string;
+
+  @IsNumber() @IsPositive()
+  qtyReceived!: number;
+
+  @IsString() @MaxLength(16)
+  unit!: string;
+
+  @IsOptional() @IsString() @MaxLength(10)
+  receivedOn?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  batchCode?: string;
+
+  @IsOptional() @IsString() @MaxLength(10)
+  expiryDate?: string;
+
+  @IsOptional() @IsString() @MaxLength(10)
+  manufactureDate?: string;
+
+  @IsOptional() @IsUUID()
+  personId?: string;
+
+  /** Имя поставщика как на карточке — сервер сам разрешит его в контрагента (R-C4). */
+  @IsOptional() @IsString() @MaxLength(256)
+  supplier?: string;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  invoiceNo?: string;
+
+  @IsOptional() @IsString() @MaxLength(10)
+  invoiceDate?: string;
+
+  @IsOptional() @IsString() @MaxLength(64)
+  ikpu?: string;
+
+  @IsOptional() @IsNumber() @Min(0)
+  unitPriceNet?: number;
+
+  @IsOptional() @IsNumber() @Min(0)
+  vatRate?: number;
+
+  @IsOptional() @IsNumber() @Min(0)
+  unitPriceGross?: number;
+
+  @IsOptional() @IsString() @MaxLength(1000)
+  note?: string;
+
+  @IsOptional() @IsString() @MaxLength(16)
+  source?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  extId?: string;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  createdBy?: string;
+
+  /** Ключ идемпотентности связанного движения прихода — тот же приём, что у CreateMovementDto. */
+  @IsOptional() @IsString() @MaxLength(128)
+  clientKey?: string;
+}
+
+/** Отметить вскрытие партии. */
+export class OpenBatchDto {
+  @IsOptional() @IsString() @MaxLength(10)
+  openedOn?: string;
+
+  @IsOptional() @IsUUID()
+  openedBy?: string;
+}
+
 /** Склад: движения сырья и остаток на чтении. */
 @Controller("stock")
 export class StockController {
@@ -95,6 +176,34 @@ export class StockController {
   async remove(@Param("id", ParseUUIDPipe) id: string) {
     await this.stock.removeMovement(id);
     return { ok: true };
+  }
+
+  /** Завести партию прихода (и связанное приходное движение — см. StockService.createBatch). */
+  @Post("batch")
+  createBatch(@Body() dto: CreateBatchDto) {
+    return this.stock.createBatch(dto);
+  }
+
+  /** Список партий с остатком (леджер) и флагом срока; фильтры необязательны. */
+  @Get("batches")
+  batches(
+    @Query("ingredientId") ingredientId?: string,
+    @Query("warehouseId") warehouseId?: string,
+    @Query("flag") flag?: string,
+  ) {
+    return this.stock.listBatches({ ingredientId, warehouseId, flag });
+  }
+
+  /** Отчёт по срокам годности: просрочено/истекает/в порядке/без срока + порядок FEFO. */
+  @Get("expiry")
+  expiry() {
+    return this.stock.expiryReport();
+  }
+
+  /** Отметить вскрытие партии. */
+  @Post("batch/:id/open")
+  openBatch(@Param("id", ParseUUIDPipe) id: string, @Body() dto: OpenBatchDto) {
+    return this.stock.openBatch(id, dto);
   }
 
   /** Остаток ингредиента: сводный, по складам и лента движений. */

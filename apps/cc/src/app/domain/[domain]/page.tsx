@@ -24,6 +24,7 @@ import {
   type BrvValue,
   type CoffeeBunkerIngredient,
   type Entity,
+  type ExpiryReport,
   type FinanceCounterparty,
   type FinanceFlow,
   type FinanceSummary,
@@ -43,6 +44,7 @@ import { CollectionsView } from "../../../components/collections-view";
 import { SalesView } from "../../../components/sales-view";
 import { ConsumptionView } from "../../../components/consumption-view";
 import { ProductsBook, isIncomplete } from "../../../components/products-book";
+import { ExpiryBook } from "../../../components/expiry-book";
 import { ListShell, type ListShellKpi } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
 import { MapPanel } from "../../../components/map-panel";
@@ -433,8 +435,17 @@ export default async function DomainPage({
 
   const group = groups.find((g) => g.key === activeGroup);
   // Внутри группы по умолчанию открыта первая подвкладка с данными.
+  //
+  // R-C8 (фикс дефолта «Отчётов»): `activeLeaf` — `null`, когда в адресе нет
+  // `group:leaf` (просто `?tab=reports`). Первая строка ниже ТРЕБУЕТ
+  // `l.type !== null`, иначе `l.type === activeLeaf` находила первую же
+  // заглушку с `type: null` (была «Сроки годности», следом «Себестоимость») —
+  // экран приземлялся на пустышку вместо явного дефолта «По источникам»,
+  // подставляя порядок массива вместо решения. Явный `?tab=reports:expiry`
+  // при этом продолжает работать: activeLeaf тогда строка `"expiry"`, и лист
+  // находится этой же веткой.
   const leaf =
-    group?.leaves.find((l) => l.type === activeLeaf) ??
+    group?.leaves.find((l) => l.type !== null && l.type === activeLeaf) ??
     // Витрина по источникам — вид отчётов по умолчанию (там, где она есть).
     group?.leaves.find((l) => l.type === "sources") ??
     group?.leaves.find((l) => l.type !== null && (byType[l.type] ?? 0) > 0) ??
@@ -457,6 +468,16 @@ export default async function DomainPage({
   let bunkerConfig: CoffeeBunkerIngredient[] | null = null;
   if (group && leaf?.type === "ingredient") {
     bunkerConfig = await core.coffeeBunkerConfig().catch(() => null);
+  }
+
+  // Сроки годности (Task 5): партии — своя таблица, не реестр. Прод-ядро на
+  // момент этого среза ещё старой версии (без `/stock/*` партий) — провал
+  // запроса (в т.ч. 404) не должен читаться как «просрочки нет»: report
+  // остаётся `null`, лист обязан честно сказать «не удалось проверить»
+  // (ExpiryBook), а не показать нулевые счётчики.
+  let expiryReport: ExpiryReport | null = null;
+  if (group && leaf?.type === "expiry") {
+    expiryReport = await core.expiryReport().catch(() => null);
   }
 
   // Справочник растаможки (ставки ТН ВЭД + БРВ) — живые таблицы Core, не реестр.
@@ -1451,6 +1472,18 @@ export default async function DomainPage({
       {group && leaf?.type === "purchase" && <PurchasesView />}
       {group && leaf?.type === "machine_stock" && <MachineStockView />}
 
+      {/* ── Сроки годности (Task 5): партии — счётчики по флагам, плитка =
+          фильтр (?flag=), поиск ?q=, три честных пустых состояния ── */}
+      {group && leaf?.type === "expiry" && (
+        <ExpiryBook
+          report={expiryReport}
+          hrefBase={`/domain/${domain}`}
+          tab={active}
+          q={q ?? ""}
+          flag={sp.flag}
+        />
+      )}
+
       {/* ── Товары: журнал как в ПО владельца — поиск, категории, незаполненные ──
           Единый образец листа (§4): KPI сверху, «+ Запись» — в строке
           действия. Поиск и подвкладки категорий остаются внутри ProductsBook —
@@ -1794,7 +1827,7 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))

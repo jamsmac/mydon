@@ -108,3 +108,7 @@ export * from "./globerent/preorder-status";
 
 /** Кто совершил действие: вид актора выводится из ссылки, а не задаётся руками. */
 export * from "./actor";
+
+/** Партии сырья: расход по FEFO и срок годности (перенос из mydon_1, срез C). */
+export * from "./fefo";
+export * from "./expiry";
