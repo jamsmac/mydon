@@ -428,6 +428,13 @@
       "when": 1787304774912,
       "tag": "0060_stock_batch",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1787340072135,
+      "tag": "0061_cash_reconcile",
+      "breakpoints": true
     }
   ]
 }

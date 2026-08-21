@@ -268,6 +268,12 @@ export const collection = pgTable(
     status: collectionStatusEnum("status").default("collected").notNull(),
     source: collectionSourceEnum("source").default("realtime").notNull(),
     notes: text("notes"),
+    /**
+     * Разбивка суммы по купюрам — приходит только при приёме, и только если
+     * её вводили. Из 386 живых инкассаций у 266 исторических записей
+     * разбивки нет и не будет — это законно, а не пробел в данных.
+     */
+    denominations: jsonb("denominations"),
     createdAt: createdAt(),
   },
   (t) => [
@@ -809,6 +815,12 @@ export const moneyFlow = pgTable(
     purpose: text("purpose"),
     /** Связь с инкассацией: наличные из автомата → сдача в банк. */
     collectionId: uuid("collection_id").references(() => collection.id),
+    /**
+     * Кассовый символ банка — признак вида операции для нал.-безнал. учёта.
+     * Взносы наличной выручки помечаются `0200`. Пусто у всех операций, где
+     * банк символ не присваивает (безнал, ручные записи и т.д.) — это законно.
+     */
+    cashSymbol: text("cash_symbol"),
     date: timestamp("date", { withTimezone: true }).notNull(),
     status: text("status").default("actual").notNull(), // planned | actual | overdue
     // ── Модель платежа — перенос из PROMACH (warehouse_payments + финзаписи
