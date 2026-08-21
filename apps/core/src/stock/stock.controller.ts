@@ -127,13 +127,13 @@ export class CreateBatchDto {
   @IsOptional() @IsString() @MaxLength(64)
   ikpu?: string;
 
-  @IsOptional() @IsNumber()
+  @IsOptional() @IsNumber() @Min(0)
   unitPriceNet?: number;
 
   @IsOptional() @IsNumber() @Min(0)
   vatRate?: number;
 
-  @IsOptional() @IsNumber()
+  @IsOptional() @IsNumber() @Min(0)
   unitPriceGross?: number;
 
   @IsOptional() @IsString() @MaxLength(1000)

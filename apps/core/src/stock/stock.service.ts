@@ -953,7 +953,14 @@ export class StockService implements OnModuleInit {
     const cards = cardIds.length === 0 ? [] : await this.db.select().from(entity).where(inArray(entity.id, cardIds));
     const cardById = new Map(cards.map((c) => [c.id, c]));
 
-    const now = new Date();
+    // Сравниваем СУТКИ, а не моменты. Postgres-тип `date` приходит строкой
+    // «2026-08-21», а `new Date("2026-08-21")` — это UTC-полночь, то есть 05:00
+    // по Ташкенту. Сравнивать её с реальным «сейчас» значит объявлять партию
+    // просроченной с пяти утра дня, в который она ещё годна: чип краснеет, а
+    // счётчик «Просрочено» врёт целые сутки. Берём ташкентскую дату и якорим её
+    // в ту же UTC-полночь — тогда обе стороны сравнения суточные, и разница
+    // считается в целых днях.
+    const now = new Date(`${todayTashkent()}T00:00:00Z`);
     return rows.map((b) => {
       const ingCard = cardById.get(b.ingredientId);
       const shelfLifeDays = strictNumber(
@@ -1218,14 +1225,27 @@ export class StockService implements OnModuleInit {
     id: string,
     input: { openedOn?: string | null; openedBy?: string | null },
   ): Promise<BatchRow> {
-    const [existing] = await this.db.select({ id: stockBatch.id }).from(stockBatch).where(eq(stockBatch.id, id));
+    const [existing] = await this.db
+      .select({ id: stockBatch.id, openedOn: stockBatch.openedOn, openedBy: stockBatch.openedBy })
+      .from(stockBatch)
+      .where(eq(stockBatch.id, id));
     if (!existing) throw new NotFoundException("Партия не найдена");
     if (input.openedBy) await this.personExists(input.openedBy);
+
+    // Пачку вскрывают ОДИН раз (инвариант §4.3). Повторный вызов — это второе
+    // нажатие, а не второе вскрытие: возвращаем как есть, не переписывая дату
+    // сегодняшним днём. И `openedBy` не затираем в null, если его не передали —
+    // иначе повтор стёр бы уже записанного человека.
+    if (existing.openedOn != null) {
+      const [row] = await this.computeBatchRows({ ids: [id] });
+      if (!row) throw new NotFoundException("Партия не найдена");
+      return row;
+    }
 
     const openedOn = input.openedOn ?? todayTashkent();
     await this.db
       .update(stockBatch)
-      .set({ openedOn, openedBy: input.openedBy ?? null })
+      .set({ openedOn, openedBy: input.openedBy ?? existing.openedBy ?? null })
       .where(eq(stockBatch.id, id));
 
     const [row] = await this.computeBatchRows({ ids: [id] });

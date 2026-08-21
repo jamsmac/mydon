@@ -235,9 +235,18 @@ describe("StockService: срок годности партии", () => {
     const res = await svc.listBatches({});
     // manufactureDate 2026-08-20 + 5 дней = 2026-08-25.
     assert.equal(res.rows[0]!.expiry, "2026-08-25");
-    // Порог по умолчанию — 14 дней: дата в прошлом (уже наступила к 2026-08-21+) даёт expired/expiring в
-    // зависимости от системных часов теста; проверяем стабильно вычислимую часть — саму дату среза.
-    assert.ok(["expired", "expiring", "ok"].includes(res.rows[0]!.flag));
+    // Флаг считается от ТАШКЕНТСКИХ суток, а не от абсолютного момента, поэтому
+    // он стабилен внутри дня и его можно проверять точно. Прежний assert
+    // допускал сразу три значения «в зависимости от системных часов» — и ровно
+    // этим замаскировал баг границы суток: партия со сроком «сегодня» краснела
+    // с пяти утра. Ослабленный assert не ловит того, ради чего написан.
+    const дней = Math.round(
+      (new Date("2026-08-25T00:00:00Z").getTime() -
+        new Date(`${new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" })}T00:00:00Z`).getTime()) /
+        86400000,
+    );
+    const ожидание = дней < 0 ? "expired" : дней <= 14 ? "expiring" : "ok";
+    assert.equal(res.rows[0]!.flag, ожидание, `срок 2026-08-25 — это ${дней} дн. от ташкентского сегодня`);
   });
 
   it("явная expiryDate партии побеждает норматив карточки", async () => {
@@ -268,6 +277,29 @@ describe("StockService: срок годности партии", () => {
   });
 });
 
+describe("StockService: флаг срока — по ташкентским суткам", () => {
+  it("партия со сроком СЕГОДНЯ ещё не просрочена", async () => {
+    // Дата из postgres приходит строкой, а `new Date("2026-08-21")` — это
+    // UTC-полночь, то есть 05:00 по Ташкенту. Сравнение с реальным «сейчас»
+    // краснило бы чип с пяти утра дня, в который партия ещё годна.
+    const сегодня = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    const batch = { id: "b1", ingredientId: "ing-coffee", warehouseId: "wh-main", batchCode: null, expiryDate: сегодня, manufactureDate: null, receivedOn: "2026-08-01", qtyReceived: "5.000", unit: "кг", openedOn: null, openedBy: null, personId: null, supplierId: null, invoiceNo: null, invoiceDate: null, note: null, source: "manual" };
+    const { db } = stockDb({ entities: [кофе, склад], batches: [batch] });
+    const svc = new StockService(db);
+    const res = await svc.listBatches({});
+    assert.equal(res.rows[0]!.flag, "expiring", "последний день годности — ещё не «Просрочено»");
+  });
+
+  it("вчерашний срок — просрочено", async () => {
+    const вчера = new Date(Date.now() - 86400000).toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    const batch = { id: "b1", ingredientId: "ing-coffee", warehouseId: "wh-main", batchCode: null, expiryDate: вчера, manufactureDate: null, receivedOn: "2026-08-01", qtyReceived: "5.000", unit: "кг", openedOn: null, openedBy: null, personId: null, supplierId: null, invoiceNo: null, invoiceDate: null, note: null, source: "manual" };
+    const { db } = stockDb({ entities: [кофе, склад], batches: [batch] });
+    const svc = new StockService(db);
+    const res = await svc.listBatches({});
+    assert.equal(res.rows[0]!.flag, "expired");
+  });
+});
+
 describe("StockService: вскрытие партии (openBatch)", () => {
   it("отмечает openedOn/openedBy, opened становится true", async () => {
     const batch = { id: "b1", ingredientId: "ing-coffee", warehouseId: "wh-main", batchCode: null, expiryDate: null, manufactureDate: null, receivedOn: "2026-08-01", qtyReceived: "5.000", unit: "кг", openedOn: null, openedBy: null, personId: null, supplierId: null, invoiceNo: null, invoiceDate: null, note: null, source: "manual" };
@@ -276,6 +308,19 @@ describe("StockService: вскрытие партии (openBatch)", () => {
     const res = await svc.openBatch("b1", { openedOn: "2026-08-21", openedBy: "per-1" });
     assert.equal(res.opened, true);
     assert.equal(res.openedOn, "2026-08-21");
+  });
+
+  it("повторное вскрытие не переписывает дату и не стирает человека", async () => {
+    // Пачку вскрывают один раз (§4.3). Второе нажатие — это второе нажатие, а
+    // не второе вскрытие: иначе дата уехала бы на сегодня, а openedBy обнулился
+    // бы у уже записанного человека.
+    const batch = { id: "b1", ingredientId: "ing-coffee", warehouseId: "wh-main", batchCode: null, expiryDate: null, manufactureDate: null, receivedOn: "2026-08-01", qtyReceived: "5.000", unit: "кг", openedOn: "2026-08-10", openedBy: "per-1", personId: null, supplierId: null, invoiceNo: null, invoiceDate: null, note: null, source: "manual" };
+    const { db } = stockDb({ entities: [кофе, склад], persons: [сотрудник], batches: [batch] });
+    const svc = new StockService(db);
+    const res = await svc.openBatch("b1", {});
+    assert.equal(res.openedOn, "2026-08-10", "дата вскрытия осталась прежней");
+    assert.equal(res.opened, true);
+    assert.equal(batch.openedBy, "per-1", "человек не стёрт");
   });
 
   it("неизвестная партия — 404, не молчаливый успех", async () => {

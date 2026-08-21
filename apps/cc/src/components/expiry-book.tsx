@@ -69,7 +69,7 @@ export function rowDueLabel(row: StockBatchRow, asOf: string): { text: string; h
  */
 function supplierText(row: ExpiryReportRow): string | null {
   if (row.supplierId !== null) return row.supplierName ?? "поставщик без имени в карточке";
-  if (row.supplierRaw !== null) return `«${row.supplierRaw}» — не сопоставлен с карточкой`;
+  if (row.supplierRaw !== null) return `«${row.supplierRaw}» — не совпало с реестром`;
   return null;
 }
 
@@ -174,7 +174,7 @@ export function ExpiryBook({
           <b>Партии ещё не заводились</b>
           Приход с партией появился только что — старый остаток (кофе, сухое молоко, матча и
           другое сырьё) заведён снимком без привязки к партии. Заведи первый приход с партией
-          во вкладке «Приход» — тогда здесь появятся сроки.
+          во вкладке «Остаток» карточки ингредиента — тогда здесь появятся сроки.
         </div>
       ) : shownRows.length === 0 ? (
         // Пустое состояние 3/3: фильтр/поиск ничего не нашёл — партии есть.
