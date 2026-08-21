@@ -35,9 +35,13 @@ const КАРТОЧКИ: CardRef[] = [
   { id: "ing-milk", name: "Сухое молоко", type: "ingredient", attrs: { "поставщик": "AURATRADE 18" } },
   { id: "ing-maccoffee", name: "MacCoffee", type: "ingredient", attrs: { "поставщик": "REGISTON HOLDING" } },
   { id: "ing-matcha", name: "Матча", type: "ingredient", attrs: { "поставщик": "DENIZ RETAIL" } },
-  { id: "ing-choco", name: "Шоколад", type: "ingredient" },
-  { id: "ing-berry", name: "Ягодный чай", type: "ingredient" },
-  { id: "ing-lemon", name: "Лимонный чай", type: "ingredient" },
+  // Шоколад и оба чая тоже несут поставщика — NEXT ARTIFICIAL SOLUTIONS
+  // (проверено на живых карточках 21.08.2026). Именно поэтому ключевое слово
+  // у них засчитывается: слово плюс свой поставщик — сильное свидетельство,
+  // а слово в отрыве от поставщика уводило бы сироп «Ягодный» в ягодный чай.
+  { id: "ing-choco", name: "Шоколад", type: "ingredient", attrs: { "поставщик": "NEXT ARTIFICIAL SOLUTIONS" } },
+  { id: "ing-berry", name: "Ягодный чай", type: "ingredient", attrs: { "поставщик": "NEXT ARTIFICIAL SOLUTIONS" } },
+  { id: "ing-lemon", name: "Лимонный чай", type: "ingredient", attrs: { "поставщик": "NEXT ARTIFICIAL SOLUTIONS" } },
   { id: "ing-sugar", name: "Сахар", type: "ingredient" },
   { id: "ing-cup", name: "Стакан+крышка", type: "ingredient" },
 ];
@@ -110,6 +114,20 @@ describe("Предложение карточки по строке реестр
     const s = suggestCard(шоколад, КАРТОЧКИ, ДЕВЯТЬ_СТРОК_NEXT);
     assert.equal(s.basis, "keyword");
     assert.match(s.reason, /Шоколад/);
+  });
+
+  it("чужой поставщик — слово не засчитывается", () => {
+    // Три живых случая, где слово уводило предложение не туда: владелец
+    // переиспользует прилагательные в разных категориях. Общий признак —
+    // поставщик строки не тот, что записан в карточке.
+    const сироп = row({ name: 'Сироп "Ягодный" 1л', supplier: "TULYAGANOV DMITRIY GROUP" });
+    const банка = row({ name: "LAIMON FRESH Ягодный алюминиевая банка 0 33 л", supplier: "BIZNES-AZIYA" });
+    const lipton = row({ name: 'Чай Lipton зеленый HF "Лимон" 0,5л.', supplier: "INTERNATIONAL BEVERAGES TASHKENT" });
+    for (const [что, строка] of [["сироп", сироп], ["банка", банка], ["Lipton", lipton]] as const) {
+      const s = suggestCard(строка, КАРТОЧКИ, [строка]);
+      assert.equal(s.cardId, null, `${что}: предложения быть не должно`);
+      assert.equal(s.basis, null);
+    }
   });
 
   it("топпинг NEXT ARTIFICIAL SOLUTIONS — карточки нет, честное отсутствие", () => {

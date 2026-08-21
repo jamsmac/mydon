@@ -12,7 +12,7 @@
  *   1. точное совпадение нормализованных имён;
  *   2. поставщик с единственным наименованием в реестре, сверенный с тем же
  *      поставщиком на карточке;
- *   3. ключевое слово из имени карточки, встреченное в имени строки ОДНОЗНАЧНО
+ *   3. ключевое слово У СВОЕГО ПОСТАВЩИКА из имени карточки, встреченное в имени строки ОДНОЗНАЧНО
  *      (сигнал ровно одной карточки среди всех).
  * Ни одно не сработало — `cardId: null`, и это честный ответ, а не неудача.
  *
@@ -188,6 +188,21 @@ function suggestByKeyword(row: RegisterRow, cards: readonly CardRef[]): Suggesti
   const rowWords = significantWords(row.name);
   if (rowWords.length === 0) return null;
 
+  // Ключевое слово само по себе — слабое свидетельство: владелец переиспользует
+  // одни и те же прилагательные в разных категориях. На живом реестре слово
+  // «ягодный» встретилось у сиропа TULYAGANOV и у банки LAIMON FRESH, а «лимон»
+  // — у чая Lipton: все три ушли бы не на ту карточку. Общий признак ошибки —
+  // поставщик строки НЕ тот, что записан в карточке. Поэтому слово засчитываем
+  // только у своего поставщика; на живых данных это снимает все три ложных
+  // предложения и не теряет ни одного верного.
+  const supplierKey = normalizeContractorName(row.supplier);
+  if (supplierKey === "") return null;
+  const свои = cards.filter(
+    (c) => normalizeContractorName(String(c.attrs?.["поставщик"] ?? "")) === supplierKey,
+  );
+  if (свои.length === 0) return null;
+  cards = свои;
+
   const distinctive = distinctiveKeywordsByCard(cards);
   const hits: { card: CardRef; cardWord: string; rowWord: string }[] = [];
 
@@ -206,8 +221,8 @@ function suggestByKeyword(row: RegisterRow, cards: readonly CardRef[]): Suggesti
   const { card, cardWord, rowWord } = hits[0]!;
   const reason =
     cardWord === rowWord
-      ? `В имени строки встречается слово «${cardWord}» из названия карточки «${card.name}», и оно однозначно указывает на неё среди всех карточек сырья.`
-      : `В имени строки слово «${rowWord}» соответствует слову «${cardWord}» из названия карточки «${card.name}», и это совпадение однозначно среди всех карточек сырья.`;
+      ? `У этого поставщика в карточках числится «${card.name}», и в имени строки встречается слово «${cardWord}» из её названия — среди карточек того же поставщика совпадение единственное.`
+      : `У этого поставщика в карточках числится «${card.name}», и слово «${rowWord}» в имени строки отвечает слову «${cardWord}» из её названия — среди карточек того же поставщика совпадение единственное.`;
   return { cardId: card.id, basis: "keyword", reason };
 }
 
