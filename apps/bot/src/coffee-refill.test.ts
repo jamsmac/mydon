@@ -657,6 +657,161 @@ describe("Позиция с несколькими ингредиентами", 
   });
 });
 
+describe("Двойная позиция: оператор выбирает ингредиент кнопкой", () => {
+  const МАТЧА = "113d4b1c-ecad-4737-96dd-1c49b7dfa407";
+
+  it("callback с ингредиентом разбирается, без него — как раньше", () => {
+    assert.deepEqual(parseCoffeeRefillCallback(`cf:pos:3:${МАТЧА}`), {
+      kind: "position",
+      position: 3,
+      ingredientId: МАТЧА,
+    });
+    assert.deepEqual(parseCoffeeRefillCallback("cf:pos:3"), { kind: "position", position: 3 });
+    assert.equal(parseCoffeeRefillCallback("cf:pos:3:не-uuid"), null, "мусор в хвосте — не колбэк");
+  });
+
+  it("выбор оператора попадает в запись, а не теряется", async () => {
+    // Ровно случай владельца: на позиции 3 стоят лимонный чай и матча, и за год
+    // все 55 заливок туда записались БЕЗ ингредиента — сверка по ним невозможна.
+    const cfg = [
+      { position: 3, ingredientId: "чай", ingredientName: "Лимонный чай", packageWeight: 1000 },
+      { position: 3, ingredientId: МАТЧА, ingredientName: "Матча", packageWeight: 500 },
+    ];
+    let записано: Record<string, unknown> | null = null;
+    const { core } = stubCore({
+      coffeeBunkerConfig: async () => cfg,
+      submitCoffeeRefill: async (r: Record<string, unknown>) => {
+        записано = r;
+        return { ok: true };
+      },
+    });
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    const D = async (s: string) => {
+      for (const d of s) await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "digit", digit: d } }, ME, deps);
+    };
+    const OK = () => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    const SKIP = () => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "skip" } }, ME, deps);
+
+    await startCoffeeRefill(1, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "position", position: 3, ingredientId: МАТЧА }, ME, deps);
+    await D("7");
+    await OK();
+    await SKIP();
+    await D("1600");
+    await OK();
+
+    assert.ok(записано, "заливка записана");
+    assert.equal((записано as Record<string, unknown>).ingredientId, МАТЧА, "именно матча, а не пусто");
+    assert.equal((записано as Record<string, unknown>).position, 3);
+  });
+
+  it("исправил бункер после выбора — прежний ингредиент не прилипает", async () => {
+    // Оператор жмёт «3 · Матча», понимает, что ошибся бункером, и тем же ещё
+    // висящим экраном жмёт «7 · Кофе». Разговор СЛИВАЕТ данные, поэтому без
+    // явного сброса матча осталась бы в состоянии и кофе списался бы на неё.
+    // Записанный не тот ингредиент хуже прежнего молчания.
+    const cfg = [
+      { position: 3, ingredientId: "чай", ingredientName: "Лимонный чай", packageWeight: 1000 },
+      { position: 3, ingredientId: МАТЧА, ingredientName: "Матча", packageWeight: 500 },
+      { position: 7, ingredientId: "кофе", ingredientName: "Кофе", packageWeight: 1000 },
+    ];
+    let записано: Record<string, unknown> | null = null;
+    const { core } = stubCore({
+      coffeeBunkerConfig: async () => cfg,
+      submitCoffeeRefill: async (r: Record<string, unknown>) => {
+        записано = r;
+        return { ok: true };
+      },
+    });
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    const D = async (s: string) => {
+      for (const d of s) await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "digit", digit: d } }, ME, deps);
+    };
+    const OK = () => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    const SKIP = () => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "skip" } }, ME, deps);
+
+    await startCoffeeRefill(1, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "position", position: 3, ingredientId: МАТЧА }, ME, deps);
+    // передумал — тот же экран, другая позиция, у неё суффикса нет
+    await handleCoffeeRefillCallback(1, { kind: "position", position: 7 }, ME, deps);
+    await D("7");
+    await OK();
+    await SKIP();
+    await D("1600");
+    await OK();
+
+    const r = записано as unknown as Record<string, unknown>;
+    assert.equal(r.position, 7);
+    assert.equal(r.ingredientId, "кофе", "кофе, а НЕ прилипшая матча");
+  });
+
+  it("сменил точку — выбор ингредиента сбрасывается", async () => {
+    const cfg = [
+      { position: 3, ingredientId: "чай", ingredientName: "Лимонный чай", packageWeight: 1000 },
+      { position: 3, ingredientId: МАТЧА, ingredientName: "Матча", packageWeight: 500 },
+    ];
+    const { core } = stubCore({ coffeeBunkerConfig: async () => cfg });
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    await startCoffeeRefill(1, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "position", position: 3, ingredientId: МАТЧА }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    assert.equal(conversations.get(1)?.data.ingredientId ?? null, null, "выбор прошлой точки не переносится");
+  });
+
+  it("мойка не расщепляет кнопку — ингредиент ей не нужен", async () => {
+    // Мойке всё равно, что в бункере: две одинаковые по смыслу кнопки на один
+    // физический бункер заставили бы техника на бегу гадать, какую жать.
+    const cfg = [
+      { position: 3, ingredientId: "чай", ingredientName: "Лимонный чай", packageWeight: 1000 },
+      { position: 3, ingredientId: МАТЧА, ingredientName: "Матча", packageWeight: 500 },
+    ];
+    const { core } = stubCore({ coffeeBunkerConfig: async () => cfg });
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    await startCoffeeWash(31, deps);
+    const шаг = await handleCoffeeWashCallback(31, { kind: "location", id: LOC }, ME, deps);
+    const кнопки = (шаг.message?.keyboard?.inline_keyboard ?? []).flat();
+    const третьи = кнопки.filter((b) => b.callback_data.startsWith("cw:pos:3"));
+    assert.equal(третьи.length, 1, "у мойки одна кнопка на позицию 3");
+    assert.equal(третьи[0]!.callback_data, "cw:pos:3", "без хвоста с ингредиентом");
+    assert.match(третьи[0]!.text, /Лимонный чай\/Матча/, "оба имени в одной подписи");
+  });
+
+  it("однозначная позиция по-прежнему не требует выбора", async () => {
+    const cfg = [{ position: 7, ingredientId: "кофе", ingredientName: "Кофе", packageWeight: 1000 }];
+    let записано: Record<string, unknown> | null = null;
+    const { core } = stubCore({
+      coffeeBunkerConfig: async () => cfg,
+      submitCoffeeRefill: async (r: Record<string, unknown>) => {
+        записано = r;
+        return { ok: true };
+      },
+    });
+    const conversations = new Conversations();
+    const deps = { core, conversations } as never;
+    const D = async (s: string) => {
+      for (const d of s) await handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "digit", digit: d } }, ME, deps);
+    };
+    const OK = () => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "done" } }, ME, deps);
+    const SKIP = () => handleCoffeeRefillCallback(1, { kind: "num", press: { kind: "skip" } }, ME, deps);
+    await startCoffeeRefill(1, deps);
+    await handleCoffeeRefillCallback(1, { kind: "location", id: LOC }, ME, deps);
+    await handleCoffeeRefillCallback(1, { kind: "position", position: 7 }, ME, deps);
+    await D("7");
+    await OK();
+    await SKIP();
+    await D("1600");
+    await OK();
+    assert.equal((записано as unknown as Record<string, unknown>).ingredientId, "кофе", "определился сам");
+  });
+});
+
 describe("Мойка: сбой Core не стирает разговор до записи", () => {
   it("падение записи оставляет мастер живым — повтор той же кнопки записывает", async () => {
     // Раньше clear стоял ДО recordCoffeeWash: после сбоя совет «попробуй ещё
