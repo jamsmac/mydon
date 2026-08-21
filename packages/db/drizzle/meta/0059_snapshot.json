@@ -989,7 +989,24 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "ux_coffee_ingredient_entity": {
+          "name": "ux_coffee_ingredient_entity",
+          "columns": [
+            {
+              "expression": "entity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "entity_id is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "coffee_ingredient_entity_id_entity_id_fk": {
           "name": "coffee_ingredient_entity_id_entity_id_fk",

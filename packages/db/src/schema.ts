@@ -1618,7 +1618,15 @@ export const coffeeIngredient = pgTable("coffee_ingredient", {
    */
   entityId: uuid("entity_id").references(() => entity.id),
   createdAt: createdAt(),
-});
+}, (t) => [
+  // Одна карточка — не больше одной строки бункерного реестра. Частичный:
+  // несвязанных строк (entity_id is null) может быть сколько угодно.
+  // Зеркалит индекс из 0059; расхождение схемы и SQL приводит к тому, что
+  // следующая генерация миграции попыталась бы создать его заново.
+  uniqueIndex("ux_coffee_ingredient_entity")
+    .on(t.entityId)
+    .where(sql`entity_id is not null`),
+]);
 
 /**
  * Какие ингредиенты вообще заливаются в позицию бункера 1–8 — ОДНА
