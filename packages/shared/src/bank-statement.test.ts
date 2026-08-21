@@ -174,6 +174,24 @@ describe("parseBankStatement — реальные ловушки формата 
     );
   });
 
+  it("регистр и лишние пробелы в назначении не меняют ключ — переэкспорт той же операции не создаёт дубль", () => {
+    const purposeIdx = HEADER_ROW.indexOf("Назначение платежа");
+    const rowA = dataRow({ docNo: "700", date: "12.06.25", credit: "9000000" });
+    rowA[purposeIdx] = "Наличные деньги в оборотной кассе";
+    const rowB = [...rowA];
+    // Тот же платёж в повторной выгрузке банка: двойной пробел и другой регистр.
+    rowB[purposeIdx] = "НАЛИЧНЫЕ  деньги в оборотной   кассе";
+
+    const a = parseBankStatement(table([TITLE_ROW, HEADER_ROW, ACCOUNT_ROW, rowA]));
+    const b = parseBankStatement(table([TITLE_ROW, HEADER_ROW, ACCOUNT_ROW, rowB]));
+    assert.equal(
+      a[0]!.extId,
+      b[0]!.extId,
+      "ключ ЗАПЕКАЕТСЯ В ДАННЫЕ: удаления записей нет, и разъехавшийся на пробеле ключ создал бы молчаливый дубль, который потом уже не разгрести",
+    );
+    assert.equal(a[0]!.purpose, "Наличные деньги в оборотной кассе", "причёсывается ТОЛЬКО ключ — само назначение хранится как в банке");
+  });
+
   it("номер документа пуст — extId строится без него, а не падает", () => {
     const rows = parseBankStatement(table([TITLE_ROW, HEADER_ROW, ACCOUNT_ROW, dataRow({ docNo: "" })]));
     assert.ok(rows[0]!.extId.startsWith(`${FAKE_ACCOUNT}::без-номера::2025-06-12::`));
