@@ -3,6 +3,7 @@ import {
   core,
   CoreUnavailable,
   type Attachment,
+  type CoffeeBunkerIngredient,
   type CoffeeFillStatusRow,
   type CoffeePlacementRow,
   type Entity,
@@ -34,6 +35,13 @@ import { EntityEditor } from "../../../components/entity-editor";
 import { StayTimeline } from "../../../components/machine-stays";
 import { EntityApproval } from "../../../components/entity-approval";
 import { ContractorCard360, ContractorSupplies } from "../../../components/contractor-card-360";
+import {
+  IngredientBunkers,
+  IngredientCard360,
+  IngredientPurchases,
+  IngredientUsageSection,
+  type IngredientUsageRow as Ingredient360UsageRow,
+} from "../../../components/ingredient-card-360";
 import { RecipeEditor, type IngredientOption } from "../../../components/recipe-editor";
 import { PlanogramEditor } from "../../../components/planogram-editor";
 import { MachineCardPanel } from "../../../components/machine-card-panel";
@@ -41,10 +49,12 @@ import { MachinePartsPanel } from "../../../components/machine-parts-panel";
 import { StocktakeSession } from "../../../components/stocktake-session";
 import {
   PLACE_TYPES,
+  cardPrice,
   normalizeMachineSerial,
   parseMenu,
   parsePlanogram,
   parseRecipe,
+  recipeCost,
 } from "@mydon/shared";
 import { StockPanel, type WarehouseOption } from "../../../components/stock-panel";
 import {
@@ -199,6 +209,22 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
   let warehouses: WarehouseOption[] = [];
   // «В каких рецептах» — обратный разбор составов товаров направления.
   let ingredientUsage: IngredientUsageRow[] = [];
+  // Карточка 360 (Task 5, срез B): та же обратная связь, но с долей строки в
+  // себестоимости товара — нужны цены ВСЕХ ингредиентов рецепта, не только
+  // этой карточки, поэтому берём цены отдельно, но одним запросом списком.
+  let ingredientUsage360: Ingredient360UsageRow[] = [];
+  // Бункеры: позиции бункерного реестра, куда эта карточка подставлена через
+  // мост `coffee_ingredient.entityId` (срез B, миграция 0059 — на момент
+  // написания ещё не на проде: до выкатки список будет пуст у всех карточек).
+  let bunkerRows: CoffeeBunkerIngredient[] = [];
+  // Позиция с тем же именем в бункерном реестре есть, но мост не проставлен —
+  // отличаем от «эта карточка вообще не бункерная» (например, тара).
+  let bunkerNameMatch = false;
+  // Поставщик — ссылка на карточку контрагента, если имя совпало (R-B5: поле
+  // остаётся плоской строкой). Запрос — только когда поставщик указан: без
+  // этого он не нужен ни одной карточке (тот же довод, что и в entity-editor.tsx
+  // про <datalist> в форме).
+  let supplierId: string | null = null;
   if (isIngredient) {
     try {
       stock = await core.ingredientStock(entity.id);
@@ -220,8 +246,48 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           .filter((l) => l.ingredientId === entity.id)
           .map((l) => ({ productId: p.id, productName: p.name, quantity: l.quantity, unit: l.unit })),
       );
+      const ингредиенты = entity.domain ? await core.entitiesOfType(entity.domain, "ingredient") : [];
+      const priceOf = (id: string) => {
+        const cp = cardPrice(ингредиенты.find((c) => c.id === id)?.attrs);
+        return { price: cp?.price ?? null, unit: cp?.unit ?? null };
+      };
+      ingredientUsage360 = товары.reduce<Ingredient360UsageRow[]>((acc, p) => {
+        const lines = parseRecipe(p.attrs);
+        if (!lines.some((l) => l.ingredientId === entity.id)) return acc;
+        const costed = recipeCost(lines, priceOf);
+        const line = costed.lines.find((l) => l.line.ingredientId === entity.id);
+        const share = line && line.cost !== null && costed.total > 0 ? line.cost / costed.total : null;
+        acc.push({
+          productId: p.id,
+          productName: p.name,
+          quantity: line?.line.quantity ?? 0,
+          unit: line?.line.unit ?? "",
+          costShare: share,
+        });
+        return acc;
+      }, []);
     } catch {
       ingredientUsage = [];
+      ingredientUsage360 = [];
+    }
+    try {
+      const конфиг = await core.coffeeBunkerConfig();
+      bunkerRows = конфиг.filter((row) => row.entityId === entity.id);
+      bunkerNameMatch = конфиг.some(
+        (row) => row.ingredientName.trim().toLowerCase() === entity.name.trim().toLowerCase(),
+      );
+    } catch {
+      bunkerRows = [];
+      bunkerNameMatch = false;
+    }
+    const поставщикИмя = typeof a["поставщик"] === "string" ? a["поставщик"].trim().toLowerCase() : "";
+    if (поставщикИмя) {
+      try {
+        const контрагенты = await core.contractorsAll();
+        supplierId = контрагенты.find((c) => c.name.trim().toLowerCase() === поставщикИмя)?.id ?? null;
+      } catch {
+        supplierId = null;
+      }
     }
   }
 
@@ -654,6 +720,65 @@ export default async function EntityCard({ params }: { params: Promise<{ id: str
           slots={{
             supplies: <ContractorSupplies entity={entity} />,
             money: <ContractorFinance contracts={contractorContracts} flows={contractorFlows} />,
+            passport: (
+              <>
+                <EntityApproval entity={entity} drafts={drafts} />
+                <PhotoGallery attachments={photos} />
+                <section id="fields">
+                  <EntityEditor entity={entity} />
+                </section>
+                <DeleteEntityButton
+                  id={entity.id}
+                  domain={entity.domain ?? null}
+                  type={entity.type}
+                  name={entity.name}
+                />
+              </>
+            ),
+          }}
+        />
+      </>
+    );
+  }
+
+  // Карточка ингредиента — та же «360»: обзор с ценой за грамм и поставщиком,
+  // где используется (обратный разбор составов), бункеры (мост срез B) и
+  // закупки (розничные чеки — сегодня только на карточке «Сахар»).
+  if (isIngredient) {
+    return (
+      <>
+        <div className="page-head">
+          <Link
+            href={entity.domain ? `/domain/${entity.domain}?tab=${catalogGroupKey}:ingredient` : "/registry"}
+            className="back"
+          >
+            ← {entity.domain ? DOMAIN_TITLES[entity.domain] ?? entity.domain : "Реестр"}
+          </Link>
+        </div>
+        <IngredientCard360
+          entity={entity}
+          usage={ingredientUsage360}
+          bunkerCount={bunkerRows.length}
+          bunkerNameMatch={bunkerNameMatch}
+          supplierId={supplierId}
+          photosCount={photos.length}
+          slots={{
+            usage: <IngredientUsageSection rows={ingredientUsage360} />,
+            bunkers: <IngredientBunkers rows={bunkerRows} nameMatch={bunkerNameMatch} />,
+            purchases: <IngredientPurchases entity={entity} />,
+            stock: stock ? (
+              <StockPanel
+                ingredientId={entity.id}
+                baseUnitHint={stock.baseUnit}
+                stock={stock}
+                warehouses={warehouses}
+              />
+            ) : (
+              <div className="empty">
+                <b>Остаток недоступен</b>
+                Склад ингредиента не ответил — попробуй обновить страницу.
+              </div>
+            ),
             passport: (
               <>
                 <EntityApproval entity={entity} drafts={drafts} />
