@@ -439,46 +439,36 @@ export default async function DomainPage({
   const teamLabel = `Команда${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}`;
   const tasksLabel = `Задачи${openTasks.length > 0 ? ` ${openTasks.length}` : ""}`;
   // Подписи вкладок VendHub латиницей (слово владельца, 20.08.2026; контент внутри вкладок остаётся русским)
-  const VENDHUB_TAB_LABELS: Record<string, string> = {
-    overview: "DASHBOARD",
-    service: "ACTIVITY",
-    tasks: "TASKS",
-    reports: "REPORTS",
-    smm: "SMM",
-    crm: "CRM",
-    hr: "HR",
-    settings: "SETTINGS",
-  };
-
-  const applyVendHubLabels = (tabs: Array<{ key: string; label: string }>) => {
-    return tabs.map((tab) => {
-      const newLabel = VENDHUB_TAB_LABELS[tab.key];
-      if (!newLabel) return tab;
-      // Сохраняем счётчик (число в конце подписи), если оно есть
-      const counterMatch = tab.label.match(/\s(\d+)$/);
-      return {
-        ...tab,
-        label: counterMatch ? `${newLabel} ${counterMatch[1]}` : newLabel,
-      };
-    });
-  };
-
   const topTabs =
     domain === "vendhub"
-      ? // Восьмёрка владельца (слово владельца, 20.08.2026) — порядок задан явно,
-        // не через groups-порядок (settings/reports там идут иначе). «Задачи» и
-        // подписи «Отчёты»/«Настройки» переиспользуют существующие ключи —
-        // только переставлены, не задублированы. Подписи переопределяются в VENDHUB_TAB_LABELS.
-        applyVendHubLabels([
-          { key: "overview", label: "Дашборд" },
-          { key: "service", label: "Обслуживание" },
+      ? // Порядок задан явно, не порядком групп (settings/reports там идут иначе).
+        //
+        // ПОДПИСИ РУССКИЕ (решение 22.08.2026, отменяет латиницу от 20.08).
+        // У отменяемого решения не было записанного обоснования нигде — ни в
+        // спеке, ни в плане, ни в теле PR, ни в транскриптах; решение без
+        // причины пересматривается дёшево. Весь остальной интерфейс русский, а
+        // отделить верхний ряд от содержимого можно начертанием и трекингом, а
+        // не сменой алфавита. Причина этого решения записана —
+        // docs/decisions/2026-08-22-navigaciya-i-gamma.md.
+        //
+        // ЗОНЫ РЯДА: вход · деятельности (растут) · разрезы (не растут) ·
+        // система. «Номенклатура» — разрез, а не настройка: каталог это данные
+        // бизнеса, а не параметры системы, и лежал он в «Настройках» лишь
+        // потому, что не нашлось другой полки. Ключ `settings` при этом
+        // СОХРАНЁН за ней намеренно: на него завязаны семь плиток дашборда,
+        // кнопка «назад» карточки 360 и плитки реестра — смена ключа
+        // потребовала бы редиректов там, где сегодня всё работает само.
+        [
+          { key: "overview", label: "Сегодня" },
+          { key: "service", label: "Полевая работа" },
+          { key: "smm", label: "Продвижение" },
+          { key: "crm", label: "Клиенты" },
+          { key: "hr", label: `Люди${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
           { key: "tasks", label: tasksLabel },
           { key: "reports", label: groups.find((g) => g.key === "reports")?.label ?? "Отчёты" },
-          { key: "smm", label: "SMM" },
-          { key: "crm", label: "CRM" },
-          { key: "hr", label: `HR${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
-          { key: "settings", label: groups.find((g) => g.key === "settings")?.label ?? "Настройки" },
-        ])
+          { key: "settings", label: groups.find((g) => g.key === "settings")?.label ?? "Номенклатура" },
+          { key: "system", label: "⚙ Настройки" },
+        ]
       : [
           { key: "overview", label: "Дашборд" },
           // Живые контуры GLOBERENT (перенос PROMACH): склад, импорт, финансы, калькулятор.
@@ -1013,6 +1003,35 @@ export default async function DomainPage({
       )}
 
       {/* ── SMM / CRM: деятельность объявлена в структуре, подключение — отдельным этапом ── */}
+      {/* ── Настройки направления: только система ────────────────────────
+          Каталог отсюда ушёл разрезом «Номенклатура» (решение Р-1), и здесь
+          остаётся то, что настройками действительно является. Своих экранов
+          у этих вещей пока нет — вкладка честно ведёт туда, где они живут
+          сегодня, а не притворяется готовой. */}
+      {domain === "vendhub" && activeGroup === "system" && (
+        <div className="card" style={{ maxWidth: 720 }}>
+          <div className="h2">Настройки направления</div>
+          <p className="hint" style={{ marginTop: 8 }}>
+            Здесь будут параметры самого направления: доступы, интеграции с источниками,
+            реквизиты. Пока части этого живут на своих экранах — ссылки ниже ведут прямо туда.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
+            <Link className="btn sm" href="/team">
+              Люди и доступы — команда направления
+            </Link>
+            <Link className="btn sm" href={href("reports:sources")} scroll={false}>
+              Источники данных — свежесть выгрузок и срезы
+            </Link>
+            <Link className="btn sm" href={href("settings:own_company")} scroll={false}>
+              Профиль — реквизиты и параметры
+            </Link>
+          </div>
+          <p className="hint" style={{ marginTop: 14 }}>
+            Реестры — автоматы, товары, ингредиенты, контрагенты, склады и справочники — теперь
+            в «Номенклатуре»: это данные бизнеса, а не параметры системы.
+          </p>
+        </div>
+      )}
       {domain === "vendhub" && activeGroup === "smm" && (
         <div className="empty">
           <b>SMM — продвижение</b>
