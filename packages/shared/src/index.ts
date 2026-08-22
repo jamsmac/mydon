@@ -62,6 +62,19 @@ export * from "./xlsx";
 export * from "./combine";
 export * from "./recipe";
 export * from "./ingredient-price";
+/**
+ * Норма расхода сырья из состава карточки (срез F «норма-факт», задача 1).
+ * Экспорт адресный: `RecipeLine`/`parseRecipe` уже заняты в `./recipe`
+ * (себестоимость: поля ingredientId/quantity, тихий `[]` на пустом составе) —
+ * здесь другие поля (ingredient/qty) и другая семантика ошибки (пусто =
+ * «рецепт неизвестен», а не 0), поэтому наружу — под другими именами, чтобы
+ * не столкнуться с уже используемыми в apps/core и apps/cc.
+ */
+export {
+  type RecipeLine as NormRecipeLine,
+  parseRecipe as parseNormRecipe,
+  normFor,
+} from "./norm";
 // Разбор реестра закупок владельца в нормализованные записи (срез D, задача 1).
 export * from "./purchase-register";
 export * from "./batch-import";
