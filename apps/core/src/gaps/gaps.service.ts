@@ -1,16 +1,20 @@
 import { Inject, Injectable } from "@nestjs/common";
 import {
+  coffeeBunkerConfig,
+  coffeeContainerTare,
   coffeeIngredient,
   coffeeRefill,
   collection,
   entity,
+  machinePlacement,
   moneyFlow,
   purchase,
   rawReportDef,
   sale,
   stockBatch,
+  stockMovement,
 } from "@mydon/db";
-import { resolveIngredientPrice, strictNumber, TZ } from "@mydon/shared";
+import { netWeight, parseRecipe, productKind, resolveIngredientPrice, strictNumber, TZ } from "@mydon/shared";
 import { eq, ne, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { appConfig } from "../config";
@@ -491,6 +495,310 @@ export function healthTimezoneGap(actualTz: string, expectedTz: string): Gap[] {
   ];
 }
 
+/* ── Детектор 15: заливки — замер «до досыпки» не делают ─────────────────── */
+
+/**
+ * Срез F, задача 4 (факт 7 плана): бот спрашивает вес бункера ДО досыпки
+ * (`coffee-refill.ts::beforeStep`), но кнопка «пропустить» есть, и ей
+ * пользуются буквально всегда — на проде 22.08.2026 `measured_before` пуст у
+ * **0 из 1153** заливок. Без него расход между заливками виден только по
+ * числу упаковок (`consumedSince()` в `coffee-calc.ts` — грубее, чем по весу).
+ */
+export function refillMeasuredBeforeMissingGap(refills: readonly { measuredBefore: number | null }[]): Gap[] {
+  if (refills.length === 0) return [];
+  const missing = refills.filter((r) => r.measuredBefore === null).length;
+  if (missing === 0) return [];
+  return [
+    {
+      topic: "заливки: замер «до досыпки» не делают",
+      period: null,
+      missing: `${missing} из ${refills.length} заливок без замера «до досыпки» — расход между заливками виден только по числу упаковок, не по весу`,
+      scale: `${missing} из ${refills.length} заливок`,
+      action:
+        "весить бункер перед досыпкой и указывать «сколько было» в форме — шаг в боте уже есть, но с кнопкой «пропустить», которой пока пользуются всегда",
+    },
+  ];
+}
+
+/* ── Детекторы 16–17: тара позиций 4 и 3 не откалибрована ────────────────── */
+
+/**
+ * ЛОВУШКА (см. бриф задачи 4): проверка тары в `bunkerPeriod()` (срез F,
+ * задача 2) идёт РАНЬШЕ проверки однозначности ингредиента — пара позиции 3
+ * с «возврат тяжелее заливки» падает в корзину «тара не откалибрована», а не
+ * «позиция неоднозначна», и настоящая причина (два ингредиента в одном
+ * бункере) становится невидимой. Поэтому тару считаем ЗДЕСЬ отдельно и по
+ * КАЖДОЙ позиции своей строкой — иначе владелец никогда не увидит, что у
+ * позиции 3 та же болезнь, что и у позиции 4.
+ *
+ * Считается по СЫРОЙ заливке (без пары с возвратом): нетто = вес заливки
+ * минус тара набора (`netWeight()`, тот же приём, что и в
+ * `norm-fact.service.ts`). Заливки без известной тары (набор не откалиброван
+ * вовсе) в знаменатель не входят — это другой, отдельный пробел, а не этот.
+ *
+ * ПРОВЕРЕНО НА ПРОДЕ 22.08.2026: позиция 4 (сахар) — 42 из 90 заливок с
+ * известной тарой дают нетто ≤ 0, медиана нетто 14 г (факт 8 плана — совпало
+ * день в день). Позиция 3 (лимонный чай/матча) — 13 из 58, медиана 370 г:
+ * дефект того же рода, слабее выражен, но реален и не должен потеряться за
+ * позицией 4.
+ */
+export function bunkerTareNetNonPositiveGap(
+  position: number,
+  refills: readonly { position: number; containerNumber: number | null; filledWeight: number }[],
+  tareByKey: ReadonlyMap<string, number>,
+): Gap[] {
+  const nets: number[] = [];
+  for (const r of refills) {
+    if (r.position !== position || r.containerNumber === null) continue;
+    const net = netWeight(r.filledWeight, tareByKey.get(`${r.containerNumber}:${position}`) ?? null);
+    if (net !== null) nets.push(net);
+  }
+  if (nets.length === 0) return [];
+  const nonPositive = nets.filter((n) => n <= 0).length;
+  if (nonPositive === 0) return [];
+  const sorted = [...nets].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  return [
+    {
+      topic: `тара бункера: позиция ${position} не откалибрована`,
+      period: null,
+      missing: `${nonPositive} из ${nets.length} заливок позиции ${position} с известной тарой дают нетто ≤ 0 (медиана нетто ${Math.round(median)} г) — тара физического набора замерена неверно`,
+      scale: `${nonPositive} заливок`,
+      action: `перекалибровать тару контейнеров позиции ${position} в Настройках`,
+    },
+  ];
+}
+
+/* ── Детектор 18: бункеры — позиция не сконфигурирована ──────────────────── */
+
+/**
+ * Факт 9 плана (часть 2): позиция 8 встречается в реальных заливках, но ни
+ * одного ингредиента для неё в `coffee_bunker_config` не заведено — расход
+ * по ней восстановить нечем в принципе (не «ингредиент не указан в этой
+ * заливке», а «системе неоткуда узнать, какой ингредиент там вообще может
+ * быть»). Проверено на проде 22.08.2026: позиция 8 — 4 заливки, конфигурации
+ * нет вовсе.
+ */
+export function unconfiguredBunkerPositionGap(
+  usedPositions: readonly number[],
+  configuredPositions: ReadonlySet<number>,
+): Gap[] {
+  const missing = [...new Set(usedPositions)].filter((p) => !configuredPositions.has(p)).sort((a, b) => a - b);
+  if (missing.length === 0) return [];
+  return [
+    {
+      topic: "бункеры: позиция не сконфигурирована",
+      period: null,
+      missing: `позици${missing.length === 1 ? "я" : "и"} ${missing.join(", ")} встреча${missing.length === 1 ? "ется" : "ются"} в заливках, но ни одного ингредиента для неё в coffee_bunker_config не задано`,
+      scale: `${missing.length} позици${missing.length === 1 ? "я" : "и"}`,
+      action: "добавить строку в «Настройки → Бункеры» для этой позиции: какой ингредиент в неё заливают",
+    },
+  ];
+}
+
+/* ── Детектор 19: бункеры — недолив не проверяется ───────────────────────── */
+
+/** Число бункерных позиций на автомате — жёстко зашито схемой (`coffee_bunker_config_position_range`, 1..8). */
+const BUNKER_POSITIONS = 8;
+
+/**
+ * Факт 10 плана: `target_fill_weight` не задан ни у одного из 8 бункеров —
+ * `fillStatus()` (coffee-calc.ts) отдаёт «unknown» вместо «недолив», и
+ * недостаточная заливка не ловится нигде. Проверено на проде 22.08.2026:
+ * ни у одной из 7 сконфигурированных позиций эталон не задан, восьмая не
+ * сконфигурирована вовсе (см. детектор 18) — итог тот же: 0 из 8.
+ */
+export function targetFillWeightMissingGap(configs: readonly { position: number; targetFillWeight: number | null }[]): Gap[] {
+  const withTarget = new Set(configs.filter((c) => c.targetFillWeight !== null).map((c) => c.position)).size;
+  const missing = BUNKER_POSITIONS - withTarget;
+  if (missing <= 0) return [];
+  return [
+    {
+      topic: "бункеры: недолив не проверяется",
+      period: null,
+      missing: `target_fill_weight (эталонный чистый вес заливки) не задан ни у ${missing} из ${BUNKER_POSITIONS} бункерных позиций — недолив заливки не ловится ни на одной`,
+      scale: `${missing} из ${BUNKER_POSITIONS} позиций`,
+      action: "указать «эталонный вес заливки, г» для каждой позиции в «Настройки → Бункеры»",
+    },
+  ];
+}
+
+/* ── Детектор 20: заливки — телеграм-импорт архива застыл ─────────────────── */
+
+/** Метка `coffee_refill.created_by`, которой архивный импорт помечает свои строки (`approvals.service.ts::executeCoffeeImport`). */
+const TELEGRAM_IMPORT_MARKER = "import:telegram-history";
+
+/** Тот же порядок величины тишины, что и у инкассаций (`COLLECTION_SILENCE_DAYS`). */
+const TELEGRAM_IMPORT_SILENCE_DAYS = 14;
+
+/**
+ * Факт 13 плана (часть 1): разбор телеграм-переписки (`tools/import-telegram-
+ * coffee.mjs`, заявки `executeCoffeeImport`) обрывается на конкретной дате, а
+ * живой ввод через бота продолжается — то есть источник «архив» замолчал, а
+ * не система в целом. Проверено на проде 22.08.2026: последняя заливка с
+ * пометкой `import:telegram-history` — 03.08.2026, последняя заливка вообще
+ * (включая ручной ввод) — 17.08.2026 (совпало день в день с фактом плана).
+ *
+ * Нет ни одной строки с этой пометкой вовсе (система без архивного импорта) —
+ * не гэп этого детектора: нечему стынуть.
+ */
+export function telegramImportStalledGap(
+  refills: readonly { createdBy: string | null; enteredDate: string }[],
+  today: string,
+): Gap[] {
+  const importDates = refills.filter((r) => r.createdBy === TELEGRAM_IMPORT_MARKER).map((r) => r.enteredDate);
+  if (importDates.length === 0) return [];
+  const lastImport = [...importDates].sort().at(-1)!;
+  const days = daysBetween(lastImport, today) ?? 0;
+  if (days <= TELEGRAM_IMPORT_SILENCE_DAYS) return [];
+  const lastAny = [...refills.map((r) => r.enteredDate)].sort().at(-1) ?? lastImport;
+  return [
+    {
+      topic: "заливки: телеграм-импорт архива застыл",
+      period: { from: lastImport, to: today },
+      missing: `последняя заливка из телеграм-архива — ${lastImport} (${days} дней без новых строк оттуда); живой ввод продолжается — последняя заливка вообще ${lastAny}`,
+      scale: null,
+      action: "разобрать очередной экспорт переписки tools/import-telegram-coffee.mjs, когда он появится — действие владельца",
+    },
+  ];
+}
+
+/* ── Детектор 21: закупки сырья — тишина ──────────────────────────────────── */
+
+/**
+ * Партии сырья закупаются реже, чем собираются инкассации (крупная партия
+ * держит склад неделями) — порог тишины взят на порядок больше
+ * `COLLECTION_SILENCE_DAYS`, чтобы не поднимать ложную тревогу на здоровой
+ * системе между обычными закупками.
+ */
+const STOCK_INTAKE_SILENCE_DAYS = 45;
+
+/**
+ * Факт 13 плана (часть 2): приход сырья (`stock_movement.kind='intake'`)
+ * обрывается на конкретной дате. Проверено на проде 22.08.2026: последний
+ * приход — 08.01.2026 (Шоколад), 226+ дней тишины на день проверки —
+ * совпало день в день с фактом плана (закупки по `purchase`, мирроr
+ * mydon-stock со снеком, здесь ни при чём: сырьё кофе заводится отдельно
+ * через `stock_movement`, см. `stock.service.ts`).
+ */
+export function stockIntakeSilenceGap(intakeDates: readonly string[], today: string): Gap[] {
+  if (intakeDates.length === 0) return [];
+  const lastDay = [...intakeDates].sort().at(-1)!;
+  const days = daysBetween(lastDay, today) ?? 0;
+  if (days <= STOCK_INTAKE_SILENCE_DAYS) return [];
+  return [
+    {
+      topic: "закупки сырья: тишина",
+      period: { from: lastDay, to: today },
+      missing: `последний приход сырья на склад ${lastDay}, ${days} дней без новой закупки`,
+      scale: null,
+      action: "внести в mydon-stock/партии свежие закупки сырья, если они были, либо подтвердить, что расход пока идёт по старым остаткам",
+    },
+  ];
+}
+
+/* ── Детектор 22: закупки сырья — у ингредиента их нет вовсе ──────────────── */
+
+/**
+ * Факт 13 плана (часть 3): у сахара нет ни одной строки прихода вовсе, хотя
+ * его заливают регулярно (позиция 4). Область — ТОЛЬКО ингредиенты, реально
+ * заведённые в бункерах (`coffee_bunker_config`): «Стакан+крышка» — тоже
+ * `entity type='ingredient'`, но не бункерный, а расходник со своим учётом
+ * (`coffee_consumable*`), и требовать у него приход тем же путём дало бы
+ * ложный пробел на здоровой системе. Проверено на проде 22.08.2026: из 8
+ * бункерных ингредиентов приход есть у 7, нет только у сахара.
+ */
+export function ingredientsWithoutPurchaseGap(
+  bunkerIngredients: readonly { id: string; name: string }[],
+  intakeIngredientIds: ReadonlySet<string>,
+): Gap[] {
+  const missing = bunkerIngredients.filter((i) => !intakeIngredientIds.has(i.id));
+  if (missing.length === 0) return [];
+  return [
+    {
+      topic: "закупки сырья: у ингредиента нет ни одной закупки",
+      period: null,
+      missing: `${missing.length} из ${bunkerIngredients.length} бункерных ингредиентов ни разу не приходовались складом — ${missing.map((m) => m.name).join(", ")}`,
+      scale: `${missing.length} ингредиентов`,
+      action: "внести приход этого сырья в mydon-stock/партии, если закупки были, либо завести первую партию",
+    },
+  ];
+}
+
+/* ── Детектор 23: заливки — точка без размещения автомата ─────────────────── */
+
+/**
+ * Факт 14 плана: на точке заливают бункер, а автомат на ней никогда не
+ * размещался (`machine_placement`) — продажи к ней не привязать (мост
+ * «автомат → точка», задача 3), норма для неё всегда «нет данных», и разница
+ * никогда не станет видимой, сколько бы ни ввели заливок.
+ *
+ * ЧИСЛА РАЗВЕДКИ УСТАРЕЛИ ЗА ЧАС РАБОТЫ ВЛАДЕЛЬЦА (см. бриф задачи 4: «Детек-
+ * тор, который на сегодняшних данных даёт не то число, СЛОМАН»): план фикси-
+ * ровал 4 точки на 36 кг (кардиология 1 корпус, Soliq Yashnobod, Parus F1,
+ * Parus F4). Проверено на проде 22.08.2026: у Parus F4 уже есть размещение
+ * (заведено 05.08.2026) — гэп для неё закрылся сам, как и задуман весь этот
+ * реестр. Живых точек без размещения на сегодня — **3**, суммарно **52,3 кг**:
+ * Soliq Yashnobod (25 354 г), Parus F1 (23 563 г), кардиология 1 корпус
+ * (3 359 г).
+ */
+export function locationsWithoutMachinePlacementGap(
+  refills: readonly { locationId: string; filledWeight: number }[],
+  placedLocationIds: ReadonlySet<string>,
+  locationNameById: ReadonlyMap<string, string>,
+): Gap[] {
+  const byLocation = new Map<string, number>();
+  for (const r of refills) {
+    if (placedLocationIds.has(r.locationId)) continue;
+    byLocation.set(r.locationId, (byLocation.get(r.locationId) ?? 0) + r.filledWeight);
+  }
+  if (byLocation.size === 0) return [];
+  const names = [...byLocation.keys()].map((id) => locationNameById.get(id) ?? id);
+  const totalG = [...byLocation.values()].reduce((s, v) => s + v, 0);
+  const kg = Math.round((totalG / 1000) * 10) / 10;
+  return [
+    {
+      topic: "заливки: точка без размещения автомата",
+      period: null,
+      missing: `${byLocation.size} точек с заливками бункера, но без единого размещения автомата за всю историю — продажи к ним не привязать, норма всегда «нет данных»: ${names.join(", ")}, суммарно ${kg.toLocaleString("ru-RU")} кг`,
+      scale: `${kg.toLocaleString("ru-RU")} кг`,
+      action: "завести размещение автомата на этой точке (Панель → машина → точка) — тогда чашки станут видны и сверка нормы заработает",
+    },
+  ];
+}
+
+/* ── Детектор 24: карточка-рецепт без состава ─────────────────────────────── */
+
+/**
+ * Найдено при задаче 1 (срез F): `recipe.ts::parseRecipe` на пустом составе
+ * тихо отдаёт `[]`, из-за чего `stock.service.ts` пишет «себестоимость 0 сум»
+ * вместо «неизвестна», а `entities.service.ts::recipeOf` теряет разницу между
+ * «рецепт стоит 0» и «рецепт не задан». Защита `noRecipe` в `stock.service.ts`
+ * ловит только «карточка не того вида» (`productKind !== "рецепт"`) — карточку
+ * ВИДА «рецепт» с пустым составом она пропускает молча.
+ *
+ * ПРОВЕРЕНО НА ПРОДЕ 22.08.2026: все 19 карточек вида «рецепт» состав имеют —
+ * критерий сегодня **0 строк**. Дефект спит, но проснётся на первой карточке,
+ * заведённой без состава (обычное промежуточное состояние ввода), и этот
+ * детектор — единственное, что заметит момент пробуждения.
+ */
+export function recipeCardsWithoutCompositionGap(
+  cards: readonly { id: string; name: string; type: string; attrs: Record<string, unknown> | null }[],
+): Gap[] {
+  const missing = cards.filter((c) => c.type === "product" && productKind(c.attrs) === "рецепт" && parseRecipe(c.attrs).length === 0);
+  if (missing.length === 0) return [];
+  return [
+    {
+      topic: "карточка-рецепт без состава",
+      period: null,
+      missing: `${missing.length} карточек товара с принципом «рецепт», но пустым составом — себестоимость по ним посчитается как «0 сум» вместо «неизвестна»: ${missing.map((m) => m.name).join(", ")}`,
+      scale: `${missing.length} карточек`,
+      action: "заполнить «состав» на карточке товара (редактор рецепта)",
+    },
+  ];
+}
+
 /* ── Сборка реестра ───────────────────────────────────────────────────────── */
 
 @Injectable()
@@ -509,41 +817,97 @@ export class GapsService {
   async list(): Promise<Gap[]> {
     const today = dayKey(new Date(), TZ);
 
-    const [collectedAtRows, reconcile, cash, refillRows, batchRows, purchaseRows, ingredientRows, moneyFlowRows, billReportRows, saleCountRows] =
-      await Promise.all([
-        this.db.select({ collectedAt: collection.collectedAt }).from(collection).where(ne(collection.status, "cancelled")),
-        this.collections.reconcile(EPOCH_FROM, today),
-        this.finance.cashReconcile(EPOCH_FROM, today),
-        this.db
-          .select({ ingredientId: coffeeRefill.ingredientId, filledWeight: coffeeRefill.filledWeight, enteredDate: coffeeRefill.enteredDate, packageCount: coffeeRefill.packageCount })
-          .from(coffeeRefill),
-        this.db
-          .select({ receivedOn: stockBatch.receivedOn, expiryDate: stockBatch.expiryDate, manufactureDate: stockBatch.manufactureDate, invoiceDate: stockBatch.invoiceDate })
-          .from(stockBatch),
-        this.db.select({ dt: purchase.dt }).from(purchase),
-        this.db
-          .select({ id: coffeeIngredient.id, name: coffeeIngredient.name, purchasePrice: coffeeIngredient.purchasePrice, packageWeight: coffeeIngredient.packageWeight, cardAttrs: entity.attrs })
-          .from(coffeeIngredient)
-          .leftJoin(entity, eq(coffeeIngredient.entityId, entity.id)),
-        this.db
-          .select({
-            domain: moneyFlow.domain,
-            direction: moneyFlow.direction,
-            source: moneyFlow.source,
-            amount: moneyFlow.amount,
-            currency: moneyFlow.currency,
-            amountUzs: moneyFlow.amountUzs,
-            status: moneyFlow.status,
-          })
-          .from(moneyFlow),
-        this.db
-          .select({ sourceCode: rawReportDef.sourceCode, code: rawReportDef.code, title: rawReportDef.title, ru: rawReportDef.ru })
-          .from(rawReportDef)
-          .where(eq(rawReportDef.sourceCode, "ourvend")),
-        this.db.select({ n: sql<number>`count(*)` }).from(sale),
-      ]);
+    const [
+      collectedAtRows,
+      reconcile,
+      cash,
+      refillRows,
+      batchRows,
+      purchaseRows,
+      ingredientRows,
+      moneyFlowRows,
+      billReportRows,
+      saleCountRows,
+      tareRows,
+      bunkerConfigRows,
+      placementRows,
+      intakeRows,
+      productCardRows,
+      locationRows,
+    ] = await Promise.all([
+      this.db.select({ collectedAt: collection.collectedAt }).from(collection).where(ne(collection.status, "cancelled")),
+      this.collections.reconcile(EPOCH_FROM, today),
+      this.finance.cashReconcile(EPOCH_FROM, today),
+      this.db
+        .select({
+          ingredientId: coffeeRefill.ingredientId,
+          filledWeight: coffeeRefill.filledWeight,
+          enteredDate: coffeeRefill.enteredDate,
+          packageCount: coffeeRefill.packageCount,
+          position: coffeeRefill.position,
+          containerNumber: coffeeRefill.containerNumber,
+          locationId: coffeeRefill.locationId,
+          measuredBefore: coffeeRefill.measuredBefore,
+          createdBy: coffeeRefill.createdBy,
+        })
+        .from(coffeeRefill),
+      this.db
+        .select({ receivedOn: stockBatch.receivedOn, expiryDate: stockBatch.expiryDate, manufactureDate: stockBatch.manufactureDate, invoiceDate: stockBatch.invoiceDate })
+        .from(stockBatch),
+      this.db.select({ dt: purchase.dt }).from(purchase),
+      this.db
+        .select({
+          id: coffeeIngredient.id,
+          name: coffeeIngredient.name,
+          entityId: coffeeIngredient.entityId,
+          purchasePrice: coffeeIngredient.purchasePrice,
+          packageWeight: coffeeIngredient.packageWeight,
+          cardAttrs: entity.attrs,
+        })
+        .from(coffeeIngredient)
+        .leftJoin(entity, eq(coffeeIngredient.entityId, entity.id)),
+      this.db
+        .select({
+          domain: moneyFlow.domain,
+          direction: moneyFlow.direction,
+          source: moneyFlow.source,
+          amount: moneyFlow.amount,
+          currency: moneyFlow.currency,
+          amountUzs: moneyFlow.amountUzs,
+          status: moneyFlow.status,
+        })
+        .from(moneyFlow),
+      this.db
+        .select({ sourceCode: rawReportDef.sourceCode, code: rawReportDef.code, title: rawReportDef.title, ru: rawReportDef.ru })
+        .from(rawReportDef)
+        .where(eq(rawReportDef.sourceCode, "ourvend")),
+      this.db.select({ n: sql<number>`count(*)` }).from(sale),
+      this.db.select({ containerNumber: coffeeContainerTare.containerNumber, position: coffeeContainerTare.position, tareWeight: coffeeContainerTare.tareWeight }).from(coffeeContainerTare),
+      this.db.select({ position: coffeeBunkerConfig.position, ingredientId: coffeeBunkerConfig.ingredientId, targetFillWeight: coffeeBunkerConfig.targetFillWeight }).from(coffeeBunkerConfig),
+      this.db.select({ locationId: machinePlacement.locationId }).from(machinePlacement),
+      this.db.select({ ingredientId: stockMovement.ingredientId, dt: stockMovement.dt }).from(stockMovement).where(eq(stockMovement.kind, "intake")),
+      this.db.select({ id: entity.id, name: entity.name, type: entity.type, attrs: entity.attrs }).from(entity).where(eq(entity.type, "product")),
+      this.db.select({ id: entity.id, name: entity.name }).from(entity).where(eq(entity.type, "location")),
+    ]);
 
     const ingredients = ingredientRows.map((r) => ({ ...r, cardAttrs: (r.cardAttrs ?? null) as Record<string, unknown> | null }));
+
+    const tareByKey = new Map<string, number>();
+    for (const t of tareRows) if (t.tareWeight !== null) tareByKey.set(`${t.containerNumber}:${t.position}`, t.tareWeight);
+
+    const configuredPositions = new Set(bunkerConfigRows.map((c) => c.position));
+    const usedPositions = [...new Set(refillRows.map((r) => r.position))];
+
+    const bunkerIngredientIds = new Set(bunkerConfigRows.map((c) => c.ingredientId));
+    const bunkerIngredients = ingredients
+      .filter((i) => bunkerIngredientIds.has(i.id) && i.entityId !== null)
+      .map((i) => ({ id: i.entityId as string, name: i.name }));
+    const intakeIngredientIds = new Set(intakeRows.map((r) => r.ingredientId));
+
+    const placedLocationIds = new Set(placementRows.map((p) => p.locationId));
+    const locationNames = new Map(locationRows.map((l) => [l.id, l.name]));
+
+    const productCards = productCardRows.map((r) => ({ ...r, attrs: (r.attrs ?? null) as Record<string, unknown> | null }));
 
     return [
       ...collectionSilenceGap(
@@ -563,6 +927,16 @@ export class GapsService {
       ...billReconciliationGap(billReportRows),
       ...bankFlowsWithoutDomainGap(moneyFlowRows),
       ...healthTimezoneGap(appConfig.tz, TZ),
+      ...refillMeasuredBeforeMissingGap(refillRows),
+      ...bunkerTareNetNonPositiveGap(4, refillRows, tareByKey),
+      ...bunkerTareNetNonPositiveGap(3, refillRows, tareByKey),
+      ...unconfiguredBunkerPositionGap(usedPositions, configuredPositions),
+      ...targetFillWeightMissingGap(bunkerConfigRows),
+      ...telegramImportStalledGap(refillRows, today),
+      ...stockIntakeSilenceGap(intakeRows.map((r) => r.dt), today),
+      ...ingredientsWithoutPurchaseGap(bunkerIngredients, intakeIngredientIds),
+      ...locationsWithoutMachinePlacementGap(refillRows, placedLocationIds, locationNames),
+      ...recipeCardsWithoutCompositionGap(productCards),
     ];
   }
 }
