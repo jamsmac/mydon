@@ -280,4 +280,39 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(c.норма, null);
     assert.equal(c.разница, null);
   });
+
+  it("ревью 1.1: чашка без опознанного товара или без разобранного состава не даёт норму 0 — период уходит в «рецепт неизвестен»", async () => {
+    // ДО фикса: обе неопознанные чашки добавляли к норме 0 и молча
+    // протаскивали период в «полный» с заниженной нормой (220 нормы вместо
+    // фактических ожиданий) — ровно тот подлог, от которого защищает срез.
+    const cardNoRecipe = { id: "card-no-recipe", type: "product", name: "Латте без рецепта", attrs: {} };
+    const refills = [{ position: 1, containerNumber: 100, enteredDate: "2026-09-01", filledWeight: 600, locationId: "loc-1", ingredientId: null }];
+    const returns = [{ position: 1, containerNumber: 100, weight: 100, returnedDate: "2026-09-15" }];
+    const tare = [{ containerNumber: 100, position: 1, tareWeight: 100 }];
+    const bunkerConfig = [{ position: 1, ingredientId: "ing-1" }];
+    const orders = [
+      order("2026-09-05"), // «Капучино» — известный рецепт, вносит 20г
+      order("2026-09-06", { goodsName: "Марсианский эспрессо" }), // товар не опознан ни картой, ни алиасом
+      order("2026-09-07", { goodsName: "Латте без рецепта" }), // товар опознан, но у карточки нет «состава»
+    ];
+
+    const db = normFactDb({
+      refills, returns, tare, bunkerConfig,
+      ingredients: [ingredient],
+      placements: [placement],
+      orders,
+      entities: [loc, machine, coffeeCard, cardNoRecipe],
+      aliases: [],
+    });
+    const s = new NormFactService(db);
+    const report = await s.report("2026-09-01", "2026-09-15");
+
+    assert.equal(report.periods.length, 1);
+    const p = report.periods[0]!;
+    assert.equal(p.чашек, 3);
+    assert.equal(p.чашекБезНормы, 2, "2 из 3 чашек не дали вклада в норму");
+    assert.equal(p.норма, 20, "норма — сырое диагностическое число (вклад только известной чашки), не итог для сверки");
+    assert.equal(p.полнота, "рецепт неизвестен", "не «полный» с заниженной нормой");
+    assert.equal(p.разница, null);
+  });
 });

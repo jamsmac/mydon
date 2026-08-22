@@ -221,6 +221,16 @@ export class NormFactService {
    * если за интервал не выдано ни одной чашки (не с чем сверять — «нормы
    * нет», а не «норма ноль»: см. `bunkerPeriod()` R-F2 и норма.test.ts,
    * фикстура «нет нормы за интервал» тоже парная с `чашек: 0`).
+   *
+   * ЧАШЕК БЕЗ НОРМЫ (ревью 1.1): чашка увеличивает `чашек` независимо от
+   * исхода, но в `норма` идёт вклад ТОЛЬКО если товар опознан и состав
+   * разобран. Раньше чашка без опознанного товара/состава добавляла к
+   * `норма` ровно ноль и «протаскивала» период в `полный` с заниженной
+   * нормой — тот же подлог «рецепт неизвестен → норма 0», от которого
+   * защищает весь срез, только внутри него самого. Теперь такая чашка
+   * считается в `чашекБезНормы`, и `bunkerPeriod()` переводит период в
+   * отдельную причину «рецепт неизвестен» (см. `bunker-period.ts`), а не
+   * молча оставляет в «полном».
    */
   private normaFor(
     cupsByLocation: ReadonlyMap<string, ЧашкаТочки[]>,
@@ -229,20 +239,27 @@ export class NormFactService {
     entityIngredientId: string,
     from: string,
     to: string,
-  ): { чашек: number; норма: number | null } {
+  ): { чашек: number; норма: number | null; чашекБезНормы: number } {
     const rows = cupsByLocation.get(locationId) ?? [];
     let чашек = 0;
     let норма = 0;
+    let чашекБезНормы = 0;
     for (const r of rows) {
       if (r.date < from || r.date > to) continue;
       чашек++;
-      if (!r.productId) continue; // имя не опознано — этот товар просто не даёт вклада
+      if (!r.productId) {
+        чашекБезНормы++; // имя не опознано — норма для этой чашки неизвестна, а не ноль
+        continue;
+      }
       const lines = recipeLinesByProduct.get(r.productId);
-      if (!lines) continue; // рецепт не задан/не разобран — тот же принцип
+      if (!lines) {
+        чашекБезНормы++; // рецепт не задан/не разобран — тот же принцип
+        continue;
+      }
       const line = normFor(lines, 1).get(entityIngredientId);
       if (line) норма += line.qty;
     }
-    return { чашек, норма: чашек === 0 ? null : норма };
+    return { чашек, норма: чашек === 0 ? null : норма, чашекБезНормы };
   }
 
   /**
@@ -390,10 +407,12 @@ export class NormFactService {
 
       let чашек = 0;
       let норма: number | null = null;
+      let чашекБезНормы = 0;
       if (размещена && однозначна && entityIngredientId) {
         const результат = this.normaFor(cupsByLocation, recipeLinesByProduct, p.locationId, entityIngredientId, p.fillDate, p.returnDate);
         чашек = результат.чашек;
         норма = результат.норма;
+        чашекБезНормы = результат.чашекБезНормы;
 
         // Координатор, разбор после первой сдачи задачи: `чашек === 0` само
         // по себе НЕ значит «нет данных» — если и `факт` тоже около нуля
@@ -419,6 +438,7 @@ export class NormFactService {
         возвращено: p.returnNet,
         норма,
         чашек,
+        чашекБезНормы,
       });
       return {
         ...period,
