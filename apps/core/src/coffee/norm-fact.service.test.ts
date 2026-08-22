@@ -220,4 +220,64 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(p.чашек, 1);
     assert.equal(p.норма, 15); // разобрали JSON-строку состава и нашли товар по алиасу
   });
+
+  it("период без единой чашки: явный расход — «нормы нет», шум весов — «полный» с нормой 0", async () => {
+    // Ни одного заказа за август 2026 на этой точке нет вовсе — все три
+    // периода ниже честно получают чашек: 0. Различает их только факт.
+    const refills = [
+      // A: реальный расход без единой продажи — ровно тот отказ, ради
+      // которого сделан весь срез. факт = (500-100) - (150-100) = 350.
+      { position: 1, containerNumber: 20, enteredDate: "2026-07-01", filledWeight: 500, locationId: "loc-1", ingredientId: null },
+      // B: на границе порога шума весов (10 г) — ещё «полный».
+      // факт = (500-100) - (490-100) = 10.
+      { position: 1, containerNumber: 21, enteredDate: "2026-08-01", filledWeight: 500, locationId: "loc-1", ingredientId: null },
+      // C: на 1 г за порогом — уже «нормы нет», а не «почти полный».
+      // факт = (500-100) - (489-100) = 11.
+      { position: 1, containerNumber: 22, enteredDate: "2026-08-10", filledWeight: 500, locationId: "loc-1", ingredientId: null },
+    ];
+    const returns = [
+      { position: 1, containerNumber: 20, weight: 150, returnedDate: "2026-07-10" },
+      { position: 1, containerNumber: 21, weight: 490, returnedDate: "2026-08-05" },
+      { position: 1, containerNumber: 22, weight: 489, returnedDate: "2026-08-15" },
+    ];
+    const tare = [
+      { containerNumber: 20, position: 1, tareWeight: 100 },
+      { containerNumber: 21, position: 1, tareWeight: 100 },
+      { containerNumber: 22, position: 1, tareWeight: 100 },
+    ];
+    const bunkerConfig = [{ position: 1, ingredientId: "ing-1" }];
+
+    const db = normFactDb({
+      refills, returns, tare, bunkerConfig,
+      ingredients: [ingredient],
+      placements: [placement],
+      orders: [], // ни одной чашки за весь период — по всем трём точкам
+      entities: [loc, machine, coffeeCard],
+      aliases: [],
+    });
+    const s = new NormFactService(db);
+    const report = await s.report("2026-07-01", "2026-08-31");
+
+    assert.equal(report.periods.length, 3);
+    const a = report.periods.find((p) => p.to === "2026-07-10")!;
+    assert.equal(a.чашек, 0);
+    assert.equal(a.факт, 350);
+    assert.equal(a.полнота, "нормы нет", "расход есть, продаж не видно вовсе — это пробел, а не подтверждённый ноль");
+    assert.equal(a.норма, null);
+    assert.equal(a.разница, null);
+
+    const b = report.periods.find((p) => p.to === "2026-08-05")!;
+    assert.equal(b.чашек, 0);
+    assert.equal(b.факт, 10);
+    assert.equal(b.полнота, "полный", "факт в пределах шума весов (10г) — обе стороны честно нулевые");
+    assert.equal(b.норма, 0);
+    assert.equal(b.разница, 10);
+
+    const c = report.periods.find((p) => p.to === "2026-08-15")!;
+    assert.equal(c.чашек, 0);
+    assert.equal(c.факт, 11);
+    assert.equal(c.полнота, "нормы нет", "на 1г за порогом шума — уже не «честный ноль»");
+    assert.equal(c.норма, null);
+    assert.equal(c.разница, null);
+  });
 });
