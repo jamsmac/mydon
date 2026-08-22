@@ -68,7 +68,8 @@ export function CoffeeClient(props: {
   consumables: CoffeeConsumableRow[];
   stockLevels: CoffeeStockLevelRow[];
   fillStatus: CoffeeFillStatusRow[];
-  reconcile: CoffeeLocationReconcileGroup[];
+  /** `null` — сверку не удалось посчитать (см. `coffee-panel.tsx`), а НЕ «расхождений нет». */
+  reconcile: CoffeeLocationReconcileGroup[] | null;
   reconcileFrom: string;
   reconcileTo: string;
   washScheduleStatus: CoffeeWashScheduleStatusRow[];
@@ -607,7 +608,7 @@ export function ReconcileTab({
   defaultOwnerRef,
 }: {
   fillStatus: CoffeeFillStatusRow[];
-  reconcile: CoffeeLocationReconcileGroup[];
+  reconcile: CoffeeLocationReconcileGroup[] | null;
   from: string;
   to: string;
   washScheduleStatus: CoffeeWashScheduleStatusRow[];
@@ -615,7 +616,7 @@ export function ReconcileTab({
   defaultOwnerRef: string | null;
 }) {
   const underfills = fillStatus.filter((r) => r.status === "underfill");
-  const anomalyGroups = reconcile
+  const anomalyGroups = (reconcile ?? [])
     .map((g) => ({ ...g, rows: g.rows.filter((r) => r.reconcile.status === "anomaly") }))
     .filter((g) => g.rows.length > 0);
   const overdueWash = washScheduleStatus.filter((r) => r.status === "overdue");
@@ -711,7 +712,12 @@ export function ReconcileTab({
       <div className="section-title">
         Расхождение факт/ожидание за период {from} — {to}
       </div>
-      {anomalyGroups.length === 0 ? (
+      {reconcile === null ? (
+        <p className="muted">
+          Сверку не удалось посчитать — ядро не ответило. Это не значит «расхождений нет»:
+          обнови страницу.
+        </p>
+      ) : anomalyGroups.length === 0 ? (
         <p className="muted">Расхождений сверх порога не найдено.</p>
       ) : (
         anomalyGroups.map((g) => (

@@ -45,7 +45,12 @@ export async function CoffeePanel({ defaultOwnerRef }: { defaultOwnerRef: string
       core.coffeeConsumablesSummary(),
       core.coffeeStockLevels(),
       core.coffeeFillStatus(),
-      core.coffeeReconcileAll(from, to),
+      // Самый тяжёлый запрос панели: сверка считается по ВСЕМ точкам за
+      // период. Провал не должен ронять кофейный лист — это рабочий экран
+      // оператора, и заливку он вводит именно здесь. `null` вместо пустого
+      // массива намеренно: пустой означал бы «расхождений нет», а мы не
+      // знаем — их просто не посчитали (урок проекта: заглушка врёт).
+      core.coffeeReconcileAll(from, to).catch(() => null),
       core.coffeeWashScheduleStatus(),
       core.coffeeWashSchedules(),
       core.coffeeMachineCandidates(),
