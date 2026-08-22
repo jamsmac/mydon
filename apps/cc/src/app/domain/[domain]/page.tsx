@@ -157,7 +157,48 @@ export default async function DomainPage({
     catalog: "settings",
     reference: "settings",
   };
+  /**
+   * Редиректы уровня ЛИСТА — `"группа:лист"` → новый адрес.
+   *
+   * Групповая карта выше знает только группу и переносит лист ДОСЛОВНО
+   * (`catalog:X` → `settings:X`). Пока листья не двигались, этого хватало.
+   * Как только лист переезжает или сливается, дословный перенос приводит
+   * «успешно» в никуда: группа найдена, листа в ней нет, и фолбэк молча
+   * открывает соседний экран.
+   *
+   * Значение — либо новый `группа:лист[&параметры]`, либо ПУТЬ (начинается с
+   * `/`): часть сущностей живёт не во вкладках, а на сквозных экранах.
+   */
+  const LEAF_REDIRECTS: Record<string, string> = {
+    // Типы `location` (адреса точек) и `workshop` (мастерские) не имеют листа
+    // ни в одной группе — они живут на сквозном экране «Места». Эти адреса
+    // битые НЕ с этой перестройки, а уже сегодня: `/registry` строит на них
+    // ссылку, и клик по плитке «location» открывает список товаров.
+    "settings:location": "/places",
+    "catalog:location": "/places",
+    "settings:workshop": "/places",
+    "catalog:workshop": "/places",
+  };
+
   const redirectBase = TAB_REDIRECTS[activeGroup];
+  if (domain === "vendhub") {
+    // Сначала листовая карта: она точнее групповой и должна победить.
+    // Прогоняем и исходный адрес, и результат групповой подстановки —
+    // `?tab=reference:classifier` обязан доехать до нового места, а не
+    // остановиться на промежуточном `settings:classifier`.
+    const candidates = [active];
+    if (redirectBase && activeLeaf && (activeGroup === "catalog" || activeGroup === "reference")) {
+      candidates.push(`settings:${activeLeaf}`);
+    }
+    for (const candidate of candidates) {
+      const target = LEAF_REDIRECTS[candidate];
+      if (!target) continue;
+      if (target.startsWith("/")) redirect(target);
+      const forwardedLeaf = new URLSearchParams(sp);
+      forwardedLeaf.set("tab", target);
+      redirect(`/domain/${domain}?${forwardedLeaf.toString()}`);
+    }
+  }
   if (redirectBase && domain === "vendhub") {
     // catalog/reference были группами с подвкладками — сохраняем лист при
     // переезде в settings; остальные (vending/supply/…) были плоскими
@@ -465,13 +506,16 @@ export default async function DomainPage({
   // подставляя порядок массива вместо решения. Явный `?tab=reports:expiry`
   // при этом продолжает работать: activeLeaf тогда строка `"expiry"`, и лист
   // находится этой же веткой.
+  //
+  // ДЕФОЛТ ГРУППЫ ЗАДАН ЯВНО (`NavGroup.defaultLeaf`), а не вычисляется по
+  // данным. Прежняя цепочка последним звеном искала «первый лист с ненулевым
+  // счётчиком» — то есть точку входа в группу выбирали ДАННЫЕ: «Настройки»
+  // никогда не открывались на «Профиле» (0 карточек), всегда на «Товарах», и
+  // порядок листьев в меню не значил ничего. Достаточно было завести первую
+  // запись в пустом листе, чтобы вход в группу молча переехал.
   const leaf =
     group?.leaves.find((l) => l.type !== null && l.type === activeLeaf) ??
-    // Витрина по источникам — вид отчётов по умолчанию (там, где она есть).
-    group?.leaves.find((l) => l.type === "sources") ??
-    group?.leaves.find((l) => l.type !== null && (byType[l.type] ?? 0) > 0) ??
-    // Иначе первый живой отчёт — Инкассация.
-    group?.leaves.find((l) => l.type === "collection") ??
+    group?.leaves.find((l) => l.type !== null && l.type === group.defaultLeaf) ??
     group?.leaves[0];
   const leafItems =
     group && leaf?.type
@@ -1958,13 +2002,47 @@ export default async function DomainPage({
         );
       })()}
 
+      {/* ── Себестоимость: честная заглушка ──────────────────────────────
+          Отчёта ещё нет, и это записанное обещание владельцу: решением
+          20.08.2026 валовая маржа снята с плитки дашборда ИМЕННО в этот
+          отчёт. Поэтому лист не удаляем, а показываем прямо, чего не хватает
+          и что это даст — «пустой экран всегда говорит, что сделать»
+          (правило 29.07.2026). Раньше клик сюда молча открывал «По
+          источникам»: у листа не было типа, адрес строился по подписи, и
+          резолвер его не находил. */}
+      {group && leaf?.type === "cost" && (
+        <div className="card">
+          <div className="h2">Себестоимость</div>
+          <p className="hint" style={{ marginTop: 8 }}>
+            Отчёт считается из закупочных цен по составам карточек. Сейчас он не построен: цена
+            ингредиента берётся только через единый расчёт, а часть карточек ещё без состава —
+            результат был бы занижен молча, а не пуст.
+          </p>
+          <p className="hint" style={{ marginTop: 8 }}>
+            Что закроет пробел: заполнить состав у карточек-рецептов и цены закупки у ингредиентов.
+            Что уже посчитано — в «Расходе сырья» и «Норме и факте».
+          </p>
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <Link className="btn sm" href={href("reports:consumption")} scroll={false}>
+              Расход сырья
+            </Link>
+            <Link className="btn sm" href={href("reports:norm_fact")} scroll={false}>
+              Норма и факт
+            </Link>
+            <Link className="btn sm" href={href("reports:gaps")} scroll={false}>
+              Пробелы
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* ── Группа: записи выбранной подвкладки ── Единый образец листа (§4):
           KPI сверху («Всего записей», «Не утверждено»), поиск по ?q= —
           сервером, тем же приёмом, что у ProductsBook (подстрока имени,
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact", "cost"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))

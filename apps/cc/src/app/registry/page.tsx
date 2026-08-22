@@ -28,9 +28,26 @@ const TYPE_LABELS: Record<string, string> = {
 };
 const typeLabel = (t: string): string => TYPE_LABELS[t] ?? t;
 
-/** Группа вкладок направления, где живёт тип: у GLOBERENT договоры — в «Документах». */
-const groupKeyFor = (domain: string, type: string): string =>
-  groupsFor(domain).find((g) => g.leaves.some((l) => l.type === type))?.key ?? "catalog";
+/**
+ * Куда ведёт плитка реестра. Не всякий тип живёт во вкладке направления:
+ * адреса точек (`location`) и мастерские (`workshop`) показываются на
+ * сквозном экране «Места» и листа не имеют нигде.
+ *
+ * Раньше здесь стоял фолбэк `?? "catalog"`, и для таких типов строился адрес
+ * `?tab=catalog:location` → редирект в `settings:location` → листа нет →
+ * фолбэк открывал соседний экран. То есть клик по плитке «location · 29»
+ * молча показывал список ТОВАРОВ. Отказ выглядел как рабочая страница.
+ */
+const PLACE_TYPES_WITHOUT_LEAF = new Set(["location", "workshop"]);
+
+const hrefForType = (domain: string, type: string): string => {
+  if (PLACE_TYPES_WITHOUT_LEAF.has(type)) return "/places";
+  const group = groupsFor(domain).find((g) => g.leaves.some((l) => l.type === type))?.key;
+  // Группы нет вовсе — вести некуда. Отправляем на дашборд направления, а не
+  // на выдуманный `catalog`, которого у VendHub не существует с 20.08.2026.
+  if (!group) return `/domain/${domain}`;
+  return `/domain/${domain}?tab=${group}:${encodeURIComponent(type)}`;
+};
 
 /**
  * Реестр по направлениям (ТЗ FR-5).
@@ -115,7 +132,7 @@ export default async function Registry({
                 <div className="wgrid">
                   {rows.map((r) => (
                     <Link
-                      href={`/domain/${d}?tab=${groupKeyFor(d, r.type)}:${encodeURIComponent(r.type)}`}
+                      href={hrefForType(d, r.type)}
                       className="wt"
                       key={`${d}:${r.type}`}
                     >
