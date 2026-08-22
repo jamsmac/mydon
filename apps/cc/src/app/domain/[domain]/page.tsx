@@ -139,7 +139,7 @@ export default async function DomainPage({
     const v = Array.isArray(value) ? value[0] : value;
     if (typeof v === "string") sp[key] = v;
   }
-  const { tab, q, cat, inc } = sp;
+  const { tab, q, cat, inc, vid } = sp;
   if (!isDomain(domain)) notFound();
 
   const groups = groupsFor(domain);
@@ -179,6 +179,14 @@ export default async function DomainPage({
     // Переезды листьев «Полевой работы».
     "reports:collection": "service:collection",
     "settings:purchase": "reports:purchase",
+    // Слияния: лист превратился в чип или в раздел хаба, адрес ведёт туда же.
+    "settings:recipe": "settings:product&vid=рецепт",
+    "settings:consumable": "settings:ingredient",
+    "settings:classifier": "settings:refs",
+    "settings:vat": "settings:refs",
+    "settings:ikpu": "settings:refs",
+    "settings:package": "settings:refs",
+    "settings:barcode": "settings:refs",
     // Мастер стал кнопкой внутри «Прихода» — старая закладка приводит туда же.
     "settings:purchase_import": "reports:purchase",
     "settings:machine_stock": "service:machine_stock",
@@ -202,8 +210,16 @@ export default async function DomainPage({
       const target = LEAF_REDIRECTS[candidate];
       if (!target) continue;
       if (target.startsWith("/")) redirect(target);
+      // Цель может нести собственные параметры (`settings:product&vid=рецепт`):
+      // лист превратился в чип, и чтобы старый адрес привёл к тому же набору
+      // записей, фильтр надо доставить вместе с ним. Кладём их РАЗОБРАННЫМИ,
+      // иначе весь хвост уехал бы внутрь значения `tab`.
+      const amp = target.indexOf("&");
+      const targetTab = amp === -1 ? target : target.slice(0, amp);
+      const targetQuery = amp === -1 ? "" : target.slice(amp + 1);
       const forwardedLeaf = new URLSearchParams(sp);
-      forwardedLeaf.set("tab", target);
+      forwardedLeaf.set("tab", targetTab);
+      for (const [k, v] of new URLSearchParams(targetQuery)) forwardedLeaf.set(k, v);
       redirect(`/domain/${domain}?${forwardedLeaf.toString()}`);
     }
   }
@@ -551,6 +567,32 @@ export default async function DomainPage({
       core.entitiesOfType(domain, "ingredient").catch(() => null),
       core.entitiesOfType(domain, "warehouse").catch(() => null),
     ]);
+  }
+
+  // Хаб «Справочники»: пять фискальных типов на одном листе. Все пятеро
+  // крошечные (62 записи суммарно), поэтому грузим разом и показываем
+  // целиком — вложенная навигация ради двух записей НДС была бы дороже, чем
+  // сами данные.
+  // `one` — подпись кнопки в единственном числе. Задана здесь явно, потому
+  // что в общем словаре подписей этих типов нет, и кнопка показывала СЫРОЙ
+  // КОД БАЗЫ: «+ vat», «+ ikpu», «+ package», «+ barcode», «+ classifier».
+  // Ровно тот дефект, из-за которого раньше удалили целый лист «Поставщики».
+  const REFS_TYPES: { type: string; label: string; one: string }[] = [
+    { type: "classifier", label: "Классификатор", one: "классификатор" },
+    { type: "vat", label: "НДС", one: "ставку НДС" },
+    { type: "ikpu", label: "ИКПУ", one: "код ИКПУ" },
+    { type: "package", label: "Упаковка", one: "упаковку" },
+    { type: "barcode", label: "Штрих-коды", one: "штрих-код" },
+  ];
+  let refsItems: Record<string, Entity[]> | null = null;
+  if (domain === "vendhub" && group && leaf?.type === "refs") {
+    const loaded = await Promise.all(
+      REFS_TYPES.map((r) => core.entitiesOfType(domain, r.type).catch(() => null)),
+    );
+    refsItems = {};
+    REFS_TYPES.forEach((r, i) => {
+      refsItems![r.type] = loaded[i] ?? [];
+    });
   }
 
   // Сроки годности (Task 5): партии — своя таблица, не реестр. Прод-ядро на
@@ -1733,6 +1775,7 @@ export default async function DomainPage({
               q={q ?? ""}
               cat={cat ?? ""}
               inc={inc === "1"}
+              vid={vid ?? ""}
               hrefBase={`/domain/${domain}`}
               tab={active}
             />
@@ -1989,44 +2032,7 @@ export default async function DomainPage({
       {/* ── Рецепты: не отдельный тип, а принцип карточки товара ──
           Записей entity.type="recipe" не существует — лист годами показывал
           пустоту. Теперь это фильтр: товары с полем «вид» = «рецепт». */}
-      {group && leaf?.type === "recipe" && (() => {
-        const рецепты = entities
-          .filter((e) => e.type === "product" && (e.attrs ?? {})["вид"] === "рецепт")
-          .sort((a, b) => a.name.localeCompare(b.name, "ru"));
-        return рецепты.length > 0 ? (
-          <>
-            <div className="book">
-              <div className="th">
-                <span>Товар с рецептом</span>
-                <span>Код</span>
-                <span style={{ textAlign: "right" }}>Цена</span>
-              </div>
-              {рецепты.map((e) => {
-                const price = (e.attrs ?? {})["цена"];
-                return (
-                  <Link href={`/card/${e.id}`} className="tr" key={e.id}>
-                    <span className="nm">{e.name}</span>
-                    <span className="cd">{String((e.attrs ?? {})["ИКПУ"] ?? "")}</span>
-                    <span className="pr">
-                      {typeof price === "number"
-                        ? <>{Number(price).toLocaleString("ru-RU")} <span className="u">сум</span></>
-                        : "—"}
-                    </span>
-                  </Link>
-                );
-              })}
-            </div>
-            <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
-              {рецепты.length} товаров с рецептом · состав и себестоимость — на карточке товара
-            </p>
-          </>
-        ) : (
-          <div className="empty">
-            <b>Товаров с рецептом пока нет</b>
-            Рецепт — принцип карточки товара: поле «вид» = «рецепт», состав задаётся на карточке.
-          </div>
-        );
-      })()}
+
 
       {/* ── Автоматы (vendhub, C1): полноценная панель парка, а не
           generic-книга «имя/код/номер» — так было до ревью (осиротевший
@@ -2050,6 +2056,48 @@ export default async function DomainPage({
           </>
         );
       })()}
+
+      {/* ── Справочники: хаб пяти фискальных ────────────────────────────
+          Пять слотов верхнего уровня на 62 записи, которых не касались ни
+          разу за 25 дней журнала, — и это рядом с «Товарами» (71 карточка).
+          Теперь один лист: всё видно сразу, без вложенной навигации ради
+          двух записей НДС. */}
+      {domain === "vendhub" && group && leaf?.type === "refs" && (
+        <>
+          <p className="hint" style={{ marginBottom: 14 }}>
+            Фискальные справочники направления. Коды ИКПУ, упаковки и штрих-кодов дублируются в
+            карточках товаров — если значения разошлись, верным считается то, что в карточке.
+          </p>
+          {REFS_TYPES.map((r) => {
+            const items = refsItems?.[r.type] ?? [];
+            return (
+              <div className="sect" key={r.type}>
+                <div className="sect-h">
+                  <h3 className="h2">
+                    {r.label} <span className="n">×{items.length}</span>
+                  </h3>
+                  <NewEntityForm domain={domain} type={r.type} label={r.one} />
+                </div>
+                {items.length === 0 ? (
+                  <div className="empty">
+                    <b>Записей нет</b>
+                    Заведи первую — она понадобится при выставлении документов.
+                  </div>
+                ) : (
+                  <div className="book">
+                    {items.map((e) => (
+                      <Link className="tr" href={`/card/${e.id}`} key={e.id}>
+                        <span className="nm">{e.name}</span>
+                        <span className="cd mono">{String((e.attrs ?? {})["код"] ?? "")}</span>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </>
+      )}
 
       {/* ── Себестоимость: честная заглушка ──────────────────────────────
           Отчёта ещё нет, и это записанное обещание владельцу: решением
@@ -2091,7 +2139,7 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact", "cost", "feed", "coffee", "snack"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact", "cost", "feed", "coffee", "snack", "refs"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))

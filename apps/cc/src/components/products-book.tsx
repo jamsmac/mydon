@@ -28,6 +28,7 @@ export function ProductsBook({
   q,
   cat,
   inc,
+  vid,
   hrefBase,
   tab,
 }: {
@@ -35,6 +36,17 @@ export function ProductsBook({
   q: string;
   cat: string;
   inc: boolean;
+  /**
+   * Фильтр по признаку `attrs["вид"]` — сейчас единственное значение
+   * «рецепт».
+   *
+   * ЗАЧЕМ ЭТО ЧИП, А НЕ ЛИСТ. Карточек типа `recipe` не существует НИ ОДНОЙ:
+   * бывший лист «Рецепты» рендерил товары с `attrs["вид"] === "рецепт"`, то
+   * есть был фильтром, притворявшимся типом. Счётчик при этом брался по
+   * пустому типу — и подвкладка стояла серой при девятнадцати живых
+   * позициях: владелец видел «пусто», открывал, а там девятнадцать.
+   */
+  vid: string;
   hrefBase: string;
   /**
    * Текущий `?tab=` — сохраняется в ссылках чипов и скрытым полем формы, тот
@@ -55,6 +67,7 @@ export function ProductsBook({
     coffee: items.filter((e) => Number((e.attrs ?? {})["категория"]) === 10).length,
     cold: items.filter((e) => Number((e.attrs ?? {})["категория"]) === 11).length,
     inc: items.filter(isIncomplete).length,
+    recipe: items.filter((e) => (e.attrs ?? {})["вид"] === "рецепт").length,
   };
 
   let shown = items;
@@ -63,6 +76,7 @@ export function ProductsBook({
     shown = shown.filter((e) => String(Number((e.attrs ?? {})["категория"])) === cat);
   }
   if (inc) shown = shown.filter(isIncomplete);
+  if (vid) shown = shown.filter((e) => String((e.attrs ?? {})["вид"] ?? "") === vid);
 
   const link = (params: Record<string, string>) => {
     const p = new URLSearchParams({ tab, ...(query ? { q } : {}), ...params });
@@ -74,6 +88,7 @@ export function ProductsBook({
       <form className="search" action={hrefBase} method="get">
         <input type="hidden" name="tab" value={tab} />
         {cat && <input type="hidden" name="cat" value={cat} />}
+        {vid && <input type="hidden" name="vid" value={vid} />}
         <input
           type="search"
           name="q"
@@ -87,7 +102,7 @@ export function ProductsBook({
       </form>
 
       <div className="subtabs" style={{ marginBottom: 12 }}>
-        <Link href={link({})} className={`subtab ${!cat && !inc ? "active" : ""}`}>
+        <Link href={link({})} className={`subtab ${!cat && !inc && !vid ? "active" : ""}`}>
           Все <span className="n">×{counts.all}</span>
         </Link>
         <Link href={link({ cat: "10" })} className={`subtab ${cat === "10" ? "active" : ""}`}>
@@ -97,6 +112,9 @@ export function ProductsBook({
         <Link href={link({ cat: "11" })} className={`subtab ${cat === "11" ? "active" : ""}`}>
           <span style={{ color: CAT[11].color }}>●</span> {CAT[11].label}
           <span className="n">×{counts.cold}</span>
+        </Link>
+        <Link href={link({ vid: "рецепт" })} className={`subtab ${vid === "рецепт" ? "active" : ""}`}>
+          рецепты <span className="n">×{counts.recipe}</span>
         </Link>
         <Link
           href={link({ inc: "1" })}
