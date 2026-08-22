@@ -315,4 +315,35 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(p.полнота, "рецепт неизвестен", "не «полный» с заниженной нормой");
     assert.equal(p.разница, null);
   });
+
+  it("ревью 1.2: единица состава, отличная от «г», не конвертируется молча в граммы", async () => {
+    // Состав хранит 0.02 «кг» (= 20г). Молчаливая трактовка qty как граммов
+    // (баг ДО фикса) дала бы норму 0.02г — почти весь факт превратился бы в
+    // перерасход. После фикса чашка с чужой единицей не даёт вклада вовсе.
+    const cardKg = { id: "card-kg", type: "product", name: "Латте в кг", attrs: { "состав": JSON.stringify([{ ingredientId: "ing-entity-coffee", quantity: 0.02, unit: "кг" }]) } };
+    const refills = [{ position: 1, containerNumber: 101, enteredDate: "2026-10-01", filledWeight: 600, locationId: "loc-1", ingredientId: null }];
+    const returns = [{ position: 1, containerNumber: 101, weight: 100, returnedDate: "2026-10-15" }];
+    const tare = [{ containerNumber: 101, position: 1, tareWeight: 100 }];
+    const bunkerConfig = [{ position: 1, ingredientId: "ing-1" }];
+    const orders = [order("2026-10-05", { goodsName: "Латте в кг" })];
+
+    const db = normFactDb({
+      refills, returns, tare, bunkerConfig,
+      ingredients: [ingredient],
+      placements: [placement],
+      orders,
+      entities: [loc, machine, cardKg],
+      aliases: [],
+    });
+    const s = new NormFactService(db);
+    const report = await s.report("2026-10-01", "2026-10-15");
+
+    assert.equal(report.periods.length, 1);
+    const p = report.periods[0]!;
+    assert.equal(p.чашек, 1);
+    assert.equal(p.чашекБезНормы, 1);
+    assert.equal(p.норма, 0, "единица «кг» не пересчитана в граммы молча — вклада нет вовсе, а не 0.02");
+    assert.equal(p.полнота, "рецепт неизвестен");
+    assert.equal(p.разница, null);
+  });
 });
