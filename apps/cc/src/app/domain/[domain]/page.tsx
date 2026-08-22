@@ -166,7 +166,20 @@ export default async function DomainPage({
       (activeGroup === "catalog" || activeGroup === "reference") && activeLeaf
         ? `settings:${activeLeaf}`
         : redirectBase;
-    redirect(`/domain/${domain}?tab=${redirectTo}`);
+    // Переносим ВСЕ остальные параметры, а не только `tab`. Раньше адрес
+    // пересобирался из одного `tab`, и редирект молча съедал `q`, `cat`,
+    // `inc`, `status`, `from`, `to`, `src`, `rep`, `view`, `f0..fN` — то есть
+    // ровно то, ради чего по ссылке и шли. Отказ был невидимым: ошибки нет,
+    // страница открывается, просто фильтр не применён и список показывает всё.
+    // Список параметров намеренно НЕ перечисляем поимённо: каждый следующий
+    // экран заводит свои, и такой список протух бы молча — переносим всё, кроме
+    // самого `tab`, который заменяем.
+    // Идём по `sp`, а не по сырым `searchParams`: он уже сплющен в
+    // `Record<string, string>` выше, и ровно его читают все потребители ниже.
+    // Переносить больше, чем страница умеет прочитать, смысла нет.
+    const forwarded = new URLSearchParams(sp);
+    forwarded.set("tab", redirectTo);
+    redirect(`/domain/${domain}?${forwarded.toString()}`);
   }
 
   const isOverview = activeGroup === "overview";
@@ -1628,6 +1641,7 @@ export default async function DomainPage({
               cat={cat ?? ""}
               inc={inc === "1"}
               hrefBase={`/domain/${domain}`}
+              tab={active}
             />
           </ListShell>
         );

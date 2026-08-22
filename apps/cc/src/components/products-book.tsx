@@ -29,12 +29,25 @@ export function ProductsBook({
   cat,
   inc,
   hrefBase,
+  tab,
 }: {
   items: Entity[];
   q: string;
   cat: string;
   inc: boolean;
   hrefBase: string;
+  /**
+   * Текущий `?tab=` — сохраняется в ссылках чипов и скрытым полем формы, тот
+   * же приём, что у `expiry-book`/`cash-reconcile`/`gaps-book`.
+   *
+   * Раньше здесь стояла КОНСТАНТА `"catalog:product"` — ключ группы, которой
+   * не существует с 20.08.2026. Каждый клик по чипу и каждый поиск уходили на
+   * `?tab=catalog:product&cat=…&q=…`, проходили через редирект `catalog →
+   * settings` (page.tsx), а тот пересобирал адрес ИЗ ОДНОГО `tab` и терял
+   * `cat`/`q`/`inc`. Итог: фильтры и поиск по товарам на проде не работали
+   * вовсе, и молча — список просто показывал всё, без всякой ошибки.
+   */
+  tab: string;
 }) {
   const query = q.trim().toLowerCase();
   const counts = {
@@ -52,14 +65,14 @@ export function ProductsBook({
   if (inc) shown = shown.filter(isIncomplete);
 
   const link = (params: Record<string, string>) => {
-    const p = new URLSearchParams({ tab: "catalog:product", ...(query ? { q } : {}), ...params });
+    const p = new URLSearchParams({ tab, ...(query ? { q } : {}), ...params });
     return `${hrefBase}?${p.toString()}`;
   };
 
   return (
     <>
       <form className="search" action={hrefBase} method="get">
-        <input type="hidden" name="tab" value="catalog:product" />
+        <input type="hidden" name="tab" value={tab} />
         {cat && <input type="hidden" name="cat" value={cat} />}
         <input
           type="search"
