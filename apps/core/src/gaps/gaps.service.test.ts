@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   coffeeBunkerConfig as coffeeBunkerConfigTable,
-  coffeeContainerTare as coffeeContainerTareTable,
   coffeeIngredient as coffeeIngredientTable,
   coffeeRefill as coffeeRefillTable,
   collection as collectionTable,
