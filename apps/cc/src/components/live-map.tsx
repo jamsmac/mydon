@@ -44,11 +44,11 @@ export default function LiveMap({ machines }: { machines: Entity[] }) {
       center={center}
       zoom={12}
       scrollWheelZoom
-      style={{ height: 420, width: "100%", borderRadius: 12, background: "#0A1628" }}
+      style={{ height: 420, width: "100%", borderRadius: 12, background: "#f4f4ee" }}
     >
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
         subdomains="abcd"
         maxZoom={20}
       />
@@ -69,12 +69,12 @@ export default function LiveMap({ machines }: { machines: Entity[] }) {
           <Popup>
             <div style={{ fontWeight: 700, marginBottom: 2 }}>{p.name}</div>
             {p.address && (
-              <div style={{ color: "#8494A8", fontSize: 12, marginBottom: 6 }}>{p.address}</div>
+              <div style={{ color: "#4a554a", fontSize: 12, marginBottom: 6 }}>{p.address}</div>
             )}
             <div style={{ fontSize: 12, marginBottom: 6 }}>
               {p.kind === "coffee" ? "☕ кофе" : p.kind === "snack" ? "🥤 снеки и напитки" : "тип не указан"}
             </div>
-            <Link href={`/card/${p.id}`} style={{ color: "#5B9BFF", fontWeight: 600 }}>
+            <Link href={`/card/${p.id}`} style={{ color: "#b8480f", fontWeight: 600 }}>
               Открыть карточку →
             </Link>
           </Popup>

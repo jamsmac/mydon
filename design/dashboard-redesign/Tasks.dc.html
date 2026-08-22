@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Manrope:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0a1628; color: #e8ecf2; font-family: "Manrope", system-ui, sans-serif; font-size: 15px; -webkit-font-smoothing: antialiased; }
+    a { color: #e8ecf2; } a:hover { color: #1a6bff; }
+  </style>
+</helmet>
+<div style="width: 1080px; background: #0a1628; padding: 24px 26px 30px; display: flex; flex-direction: column; gap: 20px">
+
+  <div style="display: flex; align-items: baseline; gap: 12px">
+    <h2 style="font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800">Задачи</h2>
+    <div style="font-size: 13px; color: #8494a8">вторая вкладка: день начинается с «что делать»</div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px">
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px">
+      <div style="font-size: 11.5px; color: #8494a8">Открыто</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600">3</div>
+    </div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px">
+      <div style="font-size: 11.5px; color: #8494a8">Просрочено</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600; color: #2bd9a0">0</div>
+    </div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px">
+      <div style="font-size: 11.5px; color: #8494a8">Свободных (без исполнителя)</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600; color: #ff6b1a">1</div>
+    </div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px">
+      <div style="font-size: 11.5px; color: #8494a8">Закрыто за неделю</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600">12</div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 10px">
+    <div style="background: rgba(26,107,255,0.14); border: 1px solid rgba(26,107,255,0.42); color: #1a6bff; border-radius: 10px; padding: 10px 16px; font-weight: 700; font-size: 13.5px">+ Задача</div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 10px 16px; font-weight: 600; font-size: 13.5px; color: #8494a8">фильтр: все · мои · свободные · по точке</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 6px">
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid rgba(255,107,26,0.45); border-radius: 10px; padding: 12px 14px; display: flex; align-items: center; gap: 12px">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid rgba(255,107,26,0.45); color: #ff6b1a">свободная</span>
+      <span style="font-size: 13.5px"><b>кпп кардиология</b> · забрать выключенный аппарат на склад</span>
+      <span style="margin-left: auto; font-size: 12px; color: #5a6b80">с 19 авг</span>
+      <span style="font-size: 12px; color: #1a6bff; font-weight: 700">взять &#8594;</span>
+    </div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 12px 14px; display: flex; align-items: center; gap: 12px">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid rgba(26,107,255,0.42); color: #1a6bff">из обслуживания</span>
+      <span style="font-size: 13.5px"><b>KIUT Общежитие</b> · пополнить бункеры 4 и 7 — вес ниже эталона</span>
+      <span style="margin-left: auto; font-size: 12px; color: #5a6b80">Володя</span>
+      <span style="font-size: 12px; color: #8494a8">в работе</span>
+    </div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 12px 14px; display: flex; align-items: center; gap: 12px">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid #1e3350; color: #8494a8">ремонт</span>
+      <span style="font-size: 13.5px"><b>SKLAD 8C</b> · заменить экран (разбит)</span>
+      <span style="margin-left: auto; font-size: 12px; color: #5a6b80">Рустам</span>
+      <span style="font-size: 12px; color: #8494a8">в работе</span>
+    </div>
+  </div>
+
+  <div style="background: rgba(43,217,160,0.06); border: 1px solid rgba(43,217,160,0.35); border-radius: 12px; padding: 13px 16px; font-size: 13px; color: #8494a8">
+    <span style="color: #2bd9a0; font-weight: 700">Откуда берутся задачи:</span>
+    рукой владельца · из «Поломки» в боте · из графиков ТО · <b style="color:#e8ecf2">новое:</b> из «Обслуживания» — пустые спирали и лёгкие бункеры сами становятся задачами оператору, а выполненная заливка сама их закрывает.
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1080,"height":720}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

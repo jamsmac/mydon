@@ -36,7 +36,7 @@ export function MachineMap({ machines }: { machines: Entity[] }) {
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
         <defs>
           <pattern id="mgrid" width="35" height="35" patternUnits="userSpaceOnUse">
-            <path d="M35 0H0V35" fill="none" stroke="#1E3350" strokeWidth="0.5" opacity="0.5" />
+            <path d="M35 0H0V35" fill="none" stroke="#dce0d7" strokeWidth="0.5" opacity="0.5" />
           </pattern>
         </defs>
         <rect width={W} height={H} rx="8" fill="url(#mgrid)" />
@@ -57,7 +57,7 @@ export function MachineMap({ machines }: { machines: Entity[] }) {
                 x={x(p.lng) + 11}
                 y={y(p.lat) + 4}
                 fontSize="10.5"
-                fill="#8494A8"
+                fill="#4a554a"
                 fontFamily="var(--fu)"
               >
                 {p.name.length > 22 ? `${p.name.slice(0, 21)}…` : p.name}

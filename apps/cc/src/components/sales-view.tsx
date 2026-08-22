@@ -127,7 +127,7 @@ export async function SalesView() {
                 <td className="dash">—</td>
                 <td>
                   {r.machineId ? (
-                    <Link href={`/card/${r.machineId}`} style={{ color: "var(--accent-tx, #5B9BFF)" }}>
+                    <Link href={`/card/${r.machineId}`} style={{ color: "var(--accent-tx, #b8480f)" }}>
                       {r.machineName ?? r.machineSerial}
                     </Link>
                   ) : (

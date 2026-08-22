@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
-import { IBM_Plex_Mono, Manrope, Syne } from "next/font/google";
+import { Golos_Text, IBM_Plex_Mono } from "next/font/google";
 import { core } from "../lib/core";
 import { Sidebar, TabBar } from "../components/nav";
 import { FloatingChat } from "../components/floating-chat";
@@ -11,12 +11,17 @@ import "./globals.css";
 
 // Шрифты фирменные (ТЗ). next/font забирает их на сборке и раздаёт со своего
 // сервера — в рантайме наружу не ходим, панель работает и без интернета.
-const syne = Syne({
-  subsets: ["latin"],
-  weight: ["700", "800"],
+// Golos Text вместо Syne + Manrope. Syne подключался ТОЛЬКО с латиницей, а на
+// нём висели ВСЕ заголовки — и в них русский текст. То есть кириллические
+// заголовки уже сейчас рендерились не Syne, а системным запасным шрифтом:
+// дефект был виден глазом как «типографика какая-то не такая», но не читался
+// как ошибка. Golos Text — русская гарнитура, кириллица у неё родная.
+const golosDisplay = Golos_Text({
+  subsets: ["latin", "cyrillic"],
+  weight: ["600", "700"],
   variable: "--font-display",
 });
-const manrope = Manrope({
+const golosBody = Golos_Text({
   subsets: ["latin", "cyrillic"],
   weight: ["400", "500", "600"],
   variable: "--font-body",
@@ -33,7 +38,12 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0A1628",
+  // Цвет строки браузера следует теме, а не зашит тёмным: раньше на светлой
+  // панели телефон продолжал рисовать тёмно-синюю шапку.
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f4f4ee" },
+    { media: "(prefers-color-scheme: dark)", color: "#111712" },
+  ],
   width: "device-width",
   initialScale: 1,
 };
@@ -68,7 +78,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   const inbox = pending + queue;
 
   return (
-    <html lang="ru" className={`${syne.variable} ${manrope.variable} ${mono.variable}`}>
+    <html lang="ru" className={`${golosDisplay.variable} ${golosBody.variable} ${mono.variable}`}>
       <body>
         <Background />
         <div className="app">

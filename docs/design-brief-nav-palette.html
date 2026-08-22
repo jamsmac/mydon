@@ -1,0 +1,636 @@
+<title>Навигация и гамма VendHub</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Manrope:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+:root{
+  --ground:#F5F7F0; --surf:#FFFFFF; --surf-2:#FAFBF6;
+  --line:#E3E8D9; --line-strong:#82916F;
+  --tx:#161D14; --tx-2:#5C6657; --tx-3:#6B7566;
+  --hot:#FF6B1A; --hot-text:#C2410C; --hot-soft:rgba(255,107,26,.10);
+  --ok:#84CC16; --ok-text:#527D0E; --ok-soft:rgba(132,204,22,.13);
+  --err:#D92038; --err-soft:rgba(217,32,56,.09);
+  --accent:#1D5ED8;
+  --fd:"Unbounded","Manrope",system-ui,sans-serif;
+  --fb:"Manrope",system-ui,-apple-system,sans-serif;
+  --fm:"IBM Plex Mono",ui-monospace,"SF Mono",monospace;
+  --shadow:0 1px 2px rgba(22,29,20,.05),0 8px 24px -16px rgba(22,29,20,.22);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#12150E; --surf:#1A1F14; --surf-2:#20261A;
+    --line:#2C3324; --line-strong:#6B7A5B;
+    --tx:#EDF1E4; --tx-2:#A8B39A; --tx-3:#8B9680;
+    --hot:#FF7A2E; --hot-text:#FFA061; --hot-soft:rgba(255,122,46,.13);
+    --ok:#A3E635; --ok-text:#B6EF5E; --ok-soft:rgba(163,230,53,.13);
+    --err:#F4576D; --err-soft:rgba(244,87,109,.12);
+    --accent:#7FA9F5;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#12150E; --surf:#1A1F14; --surf-2:#20261A;
+  --line:#2C3324; --line-strong:#6B7A5B;
+  --tx:#EDF1E4; --tx-2:#A8B39A; --tx-3:#8B9680;
+  --hot:#FF7A2E; --hot-text:#FFA061; --hot-soft:rgba(255,122,46,.13);
+  --ok:#A3E635; --ok-text:#B6EF5E; --ok-soft:rgba(163,230,53,.13);
+  --err:#F4576D; --err-soft:rgba(244,87,109,.12);
+  --accent:#7FA9F5;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -16px rgba(0,0,0,.8);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--tx);
+  font-family:var(--fb); font-size:16px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px; margin:0 auto; padding:0 24px 96px;
+  display:grid; grid-template-columns:minmax(0,1fr); gap:0}
+@media(min-width:1040px){
+  .wrap{grid-template-columns:212px minmax(0,1fr); gap:52px; align-items:start}
+}
+
+/* ── шапка ─────────────────────────────── */
+header.top{grid-column:1/-1; padding:64px 0 40px; border-bottom:1px solid var(--line)}
+.eyebrow{font-family:var(--fm); font-size:12px; letter-spacing:.10em; text-transform:uppercase;
+  color:var(--hot-text); margin:0 0 18px}
+h1{font-family:var(--fd); font-weight:700; font-size:clamp(30px,5.4vw,50px); line-height:1.06;
+  letter-spacing:-.02em; margin:0 0 20px; text-wrap:balance; max-width:16ch}
+.lede{font-size:19px; line-height:1.55; color:var(--tx-2); max-width:60ch; margin:0 0 26px}
+.meta{display:flex; flex-wrap:wrap; gap:8px}
+.mchip{font-family:var(--fm); font-size:12px; padding:5px 11px; border-radius:999px;
+  border:1px solid var(--line); background:var(--surf); color:var(--tx-2)}
+.mchip.on{background:var(--hot); border-color:var(--hot); color:#161D14; font-weight:500}
+
+/* ── боковой указатель ─────────────────── */
+nav.rail{display:none}
+@media(min-width:1040px){
+  nav.rail{display:block; position:sticky; top:28px; padding-top:44px}
+  nav.rail ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1px}
+  nav.rail a{display:flex; gap:9px; padding:5px 9px; border-radius:7px; text-decoration:none;
+    color:var(--tx-2); font-size:13.5px; line-height:1.35; border-left:2px solid transparent}
+  nav.rail a:hover{background:var(--surf); color:var(--tx); border-left-color:var(--hot)}
+  nav.rail .n{font-family:var(--fm); font-size:11.5px; color:var(--tx-3); flex:0 0 14px; padding-top:2px}
+}
+
+main{min-width:0; padding-top:44px}
+section{margin:0 0 60px; scroll-margin-top:24px}
+h2{font-family:var(--fd); font-weight:700; font-size:clamp(21px,2.9vw,29px); line-height:1.16;
+  letter-spacing:-.015em; margin:0 0 8px; text-wrap:balance;
+  display:flex; align-items:baseline; gap:13px}
+h2 .num{font-family:var(--fm); font-weight:400; font-size:13px; color:var(--hot-text); flex:0 0 auto}
+h3{font-family:var(--fb); font-weight:700; font-size:17px; letter-spacing:-.005em;
+  margin:34px 0 10px; color:var(--tx)}
+h4{font-family:var(--fm); font-weight:500; font-size:12px; letter-spacing:.07em;
+  text-transform:uppercase; color:var(--tx-3); margin:26px 0 10px}
+p{margin:0 0 15px; max-width:68ch}
+ul{margin:0 0 15px; padding-left:20px; max-width:68ch}
+li{margin:0 0 7px}
+strong{font-weight:700}
+code{font-family:var(--fm); font-size:.865em; background:var(--surf-2);
+  border:1px solid var(--line); border-radius:5px; padding:1px 5px; color:var(--tx-2)}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--hot); outline-offset:2px; border-radius:4px}
+
+.sub{color:var(--tx-2); font-size:15px; max-width:68ch; margin:0 0 22px}
+
+/* ── карточки и полоски ────────────────── */
+.card{background:var(--surf); border:1px solid var(--line); border-radius:12px;
+  padding:18px 20px; margin:0 0 14px; box-shadow:var(--shadow)}
+.card>:last-child{margin-bottom:0}
+
+/* тревога = ПОЛОСКА, не заливка — правило, которое бриф и предлагает */
+.flag{background:var(--surf); border:1px solid var(--line); border-left:3px solid var(--hot);
+  border-radius:0 10px 10px 0; padding:15px 18px; margin:0 0 11px}
+.flag .k{font-family:var(--fm); font-size:12px; font-weight:500; color:var(--hot-text);
+  letter-spacing:.04em; display:block; margin-bottom:5px}
+.flag p{margin:0; max-width:none; font-size:15.2px; line-height:1.55}
+.flag+.flag{margin-top:-1px}
+
+.note{background:var(--ok-soft); border:1px solid var(--line); border-left:3px solid var(--ok);
+  border-radius:0 10px 10px 0; padding:15px 18px; margin:0 0 16px}
+.note p{margin:0; max-width:none}
+.alarm{background:var(--err-soft); border:1px solid var(--line); border-left:3px solid var(--err);
+  border-radius:0 10px 10px 0; padding:15px 18px; margin:0 0 16px}
+.alarm p{margin:0; max-width:none}
+
+/* ── таблицы ───────────────────────────── */
+.scroll{overflow-x:auto; margin:0 0 18px; border:1px solid var(--line);
+  border-radius:11px; background:var(--surf)}
+table{border-collapse:collapse; width:100%; font-size:14.6px; min-width:460px}
+th{text-align:left; font-family:var(--fm); font-weight:500; font-size:11.5px;
+  letter-spacing:.06em; text-transform:uppercase; color:var(--tx-3);
+  padding:11px 15px; border-bottom:1px solid var(--line); white-space:nowrap; background:var(--surf-2)}
+td{padding:11px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5}
+tr:last-child td{border-bottom:0}
+td.num,th.num{font-family:var(--fm); font-variant-numeric:tabular-nums; text-align:right; white-space:nowrap}
+.ok-t{color:var(--ok-text); font-weight:600}
+.hot-t{color:var(--hot-text); font-weight:600}
+.err-t{color:var(--err); font-weight:600}
+
+/* ── дерево вкладок ────────────────────── */
+pre.tree{font-family:var(--fm); font-size:13px; line-height:1.75; background:var(--surf);
+  border:1px solid var(--line); border-radius:11px; padding:18px 20px;
+  overflow-x:auto; margin:0 0 18px; color:var(--tx-2)}
+pre.tree b{color:var(--hot-text); font-weight:500}
+
+/* ── образцы цвета (литералы намеренно) ── */
+.swatches{display:grid; gap:10px; margin:0 0 20px;
+  grid-template-columns:repeat(auto-fill,minmax(178px,1fr))}
+.sw{border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--surf)}
+.sw .chip{height:56px; display:flex; align-items:flex-end; justify-content:flex-end; padding:7px 9px}
+.sw .chip span{font-family:var(--fm); font-size:10.5px; font-weight:500}
+.sw .body{padding:9px 11px 11px}
+.sw .role{font-size:13px; font-weight:600; line-height:1.3}
+.sw .tok{font-family:var(--fm); font-size:11px; color:var(--tx-3); margin-top:2px}
+.sw .cr{font-family:var(--fm); font-size:11px; margin-top:5px; font-variant-numeric:tabular-nums}
+
+/* ── демонстрация «белый против чернил» ── */
+.demo{display:grid; gap:13px; grid-template-columns:1fr; margin:0 0 8px}
+@media(min-width:620px){.demo{grid-template-columns:1fr 1fr}}
+.demo-cell{border:1px solid var(--line); border-radius:11px; padding:20px; background:var(--surf); text-align:center}
+.btn{display:inline-block; font-family:var(--fb); font-weight:700; font-size:16px;
+  padding:12px 26px; border-radius:9px; border:0; background:#FF6B1A}
+.btn.white{color:#FFFFFF}
+.btn.ink{color:#161D14}
+.verdict{margin-top:13px; font-family:var(--fm); font-size:12.5px; font-variant-numeric:tabular-nums}
+.verdict.bad{color:var(--err)}
+.verdict.good{color:var(--ok-text)}
+
+footer{grid-column:1/-1; border-top:1px solid var(--line); padding-top:22px; margin-top:20px;
+  font-size:13.5px; color:var(--tx-3); font-family:var(--fm)}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">Бриф дизайну · 22.08.2026</p>
+  <h1>Навигация и гамма VendHub</h1>
+  <p class="lede">Рабочее место выросло срезами и разошлось с тем, как по нему ходят. Семнадцать чипов в одну строку без полосы прокрутки, ежедневный парк на полке со справочниками, разовый мастер в постоянном слоте. Плюс запрос владельца: светлее фон, оранжевый оставить.</p>
+  <div class="meta">
+    <span class="mchip on">26 листьев → 22</span>
+    <span class="mchip">ряд 17 → 9</span>
+    <span class="mchip">3 варианта · 3 судьи</span>
+    <span class="mchip">прод, commit 33b6f22</span>
+  </div>
+</header>
+
+<nav class="rail" aria-label="Разделы">
+  <ol>
+    <li><a href="#s0"><span class="n">00</span>Что нужно</a></li>
+    <li><a href="#s1"><span class="n">01</span>Продукт</a></li>
+    <li><a href="#s2"><span class="n">02</span>Диагноз</a></li>
+    <li><a href="#s3"><span class="n">03</span>Реестр решений</a></li>
+    <li><a href="#s4"><span class="n">04</span>Как получено</a></li>
+    <li><a href="#s5"><span class="n">05</span>Структура</a></li>
+    <li><a href="#s6"><span class="n">06</span>Цвет</a></li>
+    <li><a href="#s7"><span class="n">07</span>Границы</a></li>
+    <li><a href="#s8"><span class="n">08</span>Инвентарь</a></li>
+    <li><a href="#s9"><span class="n">09</span>Канвас</a></li>
+    <li><a href="#s10"><span class="n">10</span>Что отдать</a></li>
+    <li><a href="#s11"><span class="n">11</span>Измерено</a></li>
+    <li><a href="#s12"><span class="n">12</span>Файлы</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="s0">
+  <h2><span class="num">00</span>Что от вас нужно</h2>
+  <p>Переработать информационную архитектуру рабочего места и цветовую систему. Два запроса владельца, дословно:</p>
+  <div class="card">
+    <p>«мне почему-то не нравится текущее расположение вкладок и то что в setting засунули всё кашей»</p>
+    <p style="margin-top:10px">«цветовую гамму тоже светлее надо сделать… фон я имею в виду… цвета оранжевые мне нравятся… салатовый может какой-нибудь современный цвет выбери на фон»</p>
+  </div>
+  <p>Это <strong>не задача на перекраску</strong>. Ниже — диагноз с доказательствами, история уже принятых решений (их нельзя молча переигрывать), структура, прошедшая три судейских взгляда, и посчитанная палитра.</p>
+  <p>Ключевое ограничение жанра: вы отдаёте не картинку, а <strong>набор токенов и решения</strong>. Раздел&nbsp;10 перечисляет, что именно — без этого работа не собирается за один заход.</p>
+  <div class="note"><p>Страница, которую вы читаете, набрана в предлагаемой палитре. Полоски слева у диагностических пунктов — демонстрация правила из §6: тревога это <strong>полоска</strong>, бренд — <strong>заливка</strong>.</p></div>
+</section>
+
+<section id="s1">
+  <h2><span class="num">01</span>Что это за продукт</h2>
+  <p>Панель управления вендинговым бизнесом в Ташкенте: кофейные и снековые автоматы, операторы в поле, владелец в телефоне и ноутбуке.</p>
+  <ul>
+    <li>Next.js App Router (<code>apps/cc</code>), NestJS + Drizzle/Postgres, Telegram-бот. Монорепо Turborepo + pnpm.</li>
+    <li><strong>Вся визуальная система — в одном файле:</strong> <code>globals.css</code>, 1264 строки, 769 правил, 434 класса. Tailwind нет, CSS-in-JS нет.</li>
+    <li><strong>Вся страница направления — в одном файле:</strong> <code>page.tsx</code>, 2096 строк.</li>
+    <li>Интерфейс русский. Верхние вкладки — латиницей заглавными.</li>
+  </ul>
+  <h4>Реальный масштаб данных, 22.08.2026</h4>
+  <div class="scroll"><table>
+    <tr><th>Сущность</th><th class="num">Записей</th><th>Примечание</th></tr>
+    <tr><td>Товары</td><td class="num">71</td><td>из них 19 с признаком «рецепт»</td></tr>
+    <tr><td>Автоматы</td><td class="num">31</td><td>в работе 21 · склад 6 · ремонт 4</td></tr>
+    <tr><td>Локации</td><td class="num">29</td><td class="err-t">листа не имеют вовсе</td></tr>
+    <tr><td>Узлы и запчасти</td><td class="num">150</td><td>на 25 автоматах, витрина при этом пуста</td></tr>
+    <tr><td>Ингредиенты</td><td class="num">9</td><td>самый свежий справочник</td></tr>
+    <tr><td>Контрагенты</td><td class="num">7</td><td>13 по тегу</td></tr>
+    <tr><td>Склады</td><td class="num">3</td><td></td></tr>
+    <tr><td>Людей в направлении</td><td class="num">4</td><td></td></tr>
+  </table></div>
+  <p>Это малый бизнес, а не корпорация — интерфейс не должен выглядеть как ERP.</p>
+</section>
+
+<section id="s2">
+  <h2><span class="num">02</span>Диагноз: что сломано</h2>
+
+  <h3>Счёт не сходится ни у кого</h3>
+  <div class="scroll"><table>
+    <tr><th>Считалось</th><th>На самом деле</th></tr>
+    <tr><td>«в Настройках 18 листьев»</td><td class="hot-t">17</td></tr>
+    <tr><td>«в Отчётах 10»</td><td class="hot-t">9</td></tr>
+    <tr><td>всего</td><td class="hot-t">26</td></tr>
+  </table></div>
+  <p><strong>То, что точное число листьев в «Настройках» не может назвать никто, — само по себе диагноз.</strong> Ряд длиннее, чем помещается в память.</p>
+
+  <h3>Десять дефектов раскладки</h3>
+
+  <div class="flag"><span class="k">Д-1 · второй уровень</span><p>Ряд подвкладок есть ровно у <strong>двух вкладок из восьми</strong>. У DASHBOARD, ACTIVITY, TASKS, SMM, CRM, HR второго уровня нет вовсе. При этом ACTIVITY — самая длинная страница продукта: три полноразмерные панели-формы подряд. Навигации внутри неё нет, только скролл.</p></div>
+
+  <div class="flag"><span class="k">Д-2 · лента, а не структура</span><p><code>overflow-x:auto; flex-wrap:nowrap; scrollbar-width:none</code>. Семнадцать чипов в одну строку, без переноса и <strong>без видимой полосы прокрутки</strong>. Цена доступа к листу — не клик, а «прокрути и найди».</p></div>
+
+  <div class="flag"><span class="k">Д-3 · третий ряд вкладок</span><p>Внутри ACTIVITY спрятан собственный ряд «Ввод данных · Таблица · Журнал · <strong>Настройки</strong>», а под ним семь разделов. Это <strong>второе, независимое место настроек в продукте</strong> — и ссылка «нумерация бункеров» из шапки ведёт именно туда, вопреки утверждённой спеке.</p></div>
+
+  <div class="flag"><span class="k">Д-4 · приземление решают данные</span><p>Фолбэк: совпадающий тип → <code>sources</code> → <strong>первый лист с ненулевым счётчиком</strong> → … Поскольку «Профиль» пуст, вкладка «Настройки» <strong>никогда не открывается на своём первом листе</strong>. Порядок листьев в меню не значит ничего.</p></div>
+
+  <div class="flag"><span class="k">Д-5 · «Себестоимость» врёт</span><p>У листа нет типа, резолв его не находит, фолбэк молча отдаёт «По источникам». Клик приводит не туда, куда написано, а сам чип нарисован серым.</p></div>
+
+  <div class="flag"><span class="k">Д-6 · редирект теряет параметры — живой баг</span><p>Редирект пересобирает адрес из одного ключа. Список товаров при этом строит поиск и чипы со старым ключом. <strong>Поиск и фильтры по товарам сегодня не работают</strong> — каждый клик по «Кофе»/«Вода» приземляет в неотфильтрованный список.</p></div>
+
+  <div class="flag"><span class="k">Д-7 · дубли поверхностей</span><p>Инкассация — секцией в ACTIVITY и листом в REPORTS. Склады — листом и на «Местах». Парк — в «Настройках», на «Обслуживании» и плитками дашборда. Люди — в HR и на «Команде». Задачи — в TASKS и на «Задачах».</p></div>
+
+  <div class="flag"><span class="k">Д-8 · с телефона не попасть</span><p>Сайдбар скрыт до 900px, в нижнюю панель попадают только 6 сквозных пунктов <strong>без единого направления</strong>. Остаются прямой адрес, ⌘K и ссылка из бота.</p></div>
+
+  <div class="flag"><span class="k">Д-9 · половина ряда неразличима</span><p>9 из 17 листьев рендерятся одной универсальной веткой — одинаковая таблица «Название · Код · Номер» с показателями «Всего / Не утверждено».</p></div>
+
+  <div class="flag"><span class="k">Д-10 · кнопки показывают код базы</span><p>В словаре подписей нет половины типов, поэтому на проде висят кнопки <strong>«+ vat», «+ ikpu», «+ package», «+ barcode», «+ classifier», «+ consumable»</strong>. Ровно тот дефект, из-за которого раньше удалили целый лист «Поставщики».</p></div>
+
+  <h3>Почему «Настройки» стали кашей — три причины</h3>
+  <div class="card">
+    <p><strong>1. Это не спроектированная вкладка, а механическая склейка трёх бывших.</strong> Шов виден в карте редиректов: бывшая оперативная вкладка «Автоматы» + бывший «Каталог» (10 листьев) + бывшие «Справочники» (5). Их слили в плоский массив и досыпали Профиль, Автоматы и Импорт закупок. <strong>Критерий попадания стал отрицательным:</strong> не дашборд, не обслуживание, не отчёт, не задачи → значит настройки.</p>
+  </div>
+  <div class="card">
+    <p><strong>2. Единственное записанное правило тянет туда всё подряд.</strong> Дословно из кода: «Кладём в „Настройки“, а не в „Отчёты“: это не витрина данных, а административное действие». Правило различает «витрину» и «действие», но <strong>не различает частоту</strong>. По нему одинаково законно падают ежедневный парк и мастер, нужный раз в жизни.</p>
+  </div>
+  <div class="card">
+    <p><strong>3. Утверждённая владельцем группировка просто не была построена.</strong> Канвас 20.08 делил вкладку на три блока — Профиль | Каталог | Справочники. В код уехал плоский список.</p>
+  </div>
+
+  <h3>Кто именно сидит не на своём месте</h3>
+  <div class="scroll"><table>
+    <tr><th>Лист</th><th>Класс</th><th>Признак, что место не то</th></tr>
+    <tr><td><strong>Автоматы</strong></td><td class="hot-t">оперативный</td><td>113 правок за 25 дней, из них 14 — <strong>от оператора из Telegram</strong>. Четыре плитки дашборда ведут сюда. Панель парка при переезде уже один раз осиротела и была возвращена отдельной правкой.</td></tr>
+    <tr><td><strong>Остатки в автоматах</strong></td><td class="hot-t">оперативный</td><td>Снапшот <strong>сегодняшний</strong>, 102 строки. Отвечает «куда везти пополнение» — и стоит на полке со справочниками.</td></tr>
+    <tr><td><strong>Приход</strong></td><td class="hot-t">отчёт</td><td>320 строк за год, брат-близнец «Расход сырья» стоит в «Отчётах». <strong>Плюс живой дефект:</strong> компонент жёстко просит окно 30 дней, поэтому лист <strong>показывает «Прихода нет»</strong> при 320 живых строках и прячет единственную кнопку.</td></tr>
+    <tr><td><strong>Импорт закупок</strong></td><td class="hot-t">разовый</td><td>Мастер на 842 строки. Отработал <strong>один раз</strong>. Специально внесён в список «не гасить», чтобы чип не тускнел — система подсвечивает то, что нужно раз в жизни.</td></tr>
+    <tr><td><strong>Профиль</strong></td><td>мёртвый</td><td>0 карточек, тип <strong>не читает ни один потребитель</strong>. Стоит первым и из-за Д-4 не открывается никогда.</td></tr>
+    <tr><td><strong>Компоненты</strong></td><td>мёртвый</td><td>0 карточек — <strong>при 150 живых узлах на 25 автоматах</strong>. Контур работает, витрина пуста.</td></tr>
+    <tr><td><strong>Расходники (тара)</strong></td><td>мёртвый</td><td>0 карточек, тип <strong>не встречается в коде нигде</strong>, кроме строки навигации.</td></tr>
+    <tr><td><strong>Рецепты</strong></td><td class="ok-t">живой, показан мёртвым</td><td>Карточек типа 0, лист рендерит <strong>19</strong> товаров с признаком. Счётчик берётся по пустому типу → чип серый. Владелец видит «пусто», открывает — там 19 позиций.</td></tr>
+    <tr><td><strong>ИКПУ · Упаковка · Штрих-коды</strong></td><td>тени</td><td>Совпадение кодов с полями карточки товара <strong>27/29, 27/27, 18/18</strong>. Ни одного факта сверх карточки. Но имена <strong>уже разошлись</strong>: 1/20, 5/19, 13/19 — справочник-тень начал врать.</td></tr>
+    <tr><td><strong>Классификатор · НДС</strong></td><td>тени</td><td>По две записи каждый — и слот верхнего уровня наравне с «Товарами» (71).</td></tr>
+  </table></div>
+  <div class="alarm"><p><strong>Бездомная сущность.</strong> Тип «локация» — 29 записей — не имеет листа нигде. Плитка из «Реестра» ведёт на несуществующий адрес → фолбэк. <strong>Клик по «location: 29» открывает список товаров.</strong></p></div>
+</section>
+
+<section id="s3">
+  <h2><span class="num">03</span>Что мы хотели раньше</h2>
+  <p class="sub">Записанные решения владельца. Переигрывать их можно, молча — нельзя.</p>
+  <div class="scroll"><table>
+    <tr><th class="num">Дата</th><th>Решение</th><th>Статус</th></tr>
+    <tr><td class="num">29.07</td><td><code>#FF6B1A</code> — <strong>строго только</strong> «требует решения владельца» и просрочки. «Увидел оранжевое — надо нажать»</td><td class="err-t">конфликт с 22.08 → §6</td></tr>
+    <tr><td class="num">29.07</td><td>«Пустой экран всегда говорит, что сделать»</td><td class="ok-t">действует</td></tr>
+    <tr><td class="num">01.08</td><td>Не глубже двух уровней вкладок в поле зрения</td><td class="ok-t">действует</td></tr>
+    <tr><td class="num">20.08</td><td>Восьмёрка: Дашборд · Обслуживание · Задачи · Отчёты · SMM · CRM · HR · Настройки</td><td class="hot-t">поправка в §5</td></tr>
+    <tr><td class="num">20.08</td><td>Верхние вкладки латиницей заглавными; контент по-русски</td><td class="ok-t">действует</td></tr>
+    <tr><td class="num">20.08</td><td><strong>Верхняя вкладка = деятельность.</strong> Будущие: Продвижение, ФХД, Продажи, HR, CRM, Агенты</td><td class="ok-t">главный принцип роста</td></tr>
+    <tr><td class="num">20.08</td><td>Задачи и Отчёты — не деятельности, а <strong>сквозные разрезы</strong></td><td class="ok-t">действует</td></tr>
+    <tr><td class="num">20.08</td><td>Реестр аппаратов внутри Настроек; «Парк» отдельной вкладкой — отменён</td><td class="hot-t">поправка в §5</td></tr>
+    <tr><td class="num">20.08</td><td>Образец листа «как Автоматы»: показатели → поиск и чипы → плитки → карточка 360</td><td class="ok-t">действует</td></tr>
+    <tr><td class="num">20.08</td><td>Правило дашборда: <strong>плитка = вопрос владельца, клик = подробный ответ</strong></td><td class="ok-t">действует</td></tr>
+    <tr><td class="num">20.08</td><td>SMM и CRM показываются сразу пустыми: «прятать значило бы объявлять структуру дважды»</td><td class="ok-t">действует</td></tr>
+  </table></div>
+  <p><strong>Отменено и отложено — не воскрешать по незнанию:</strong> «Парк» верхней вкладкой · «Активы» супер-разделом · автоэмиссия задач из остатков · наполнение старого контура сверки.</p>
+  <p><strong>Действующее правило предметной области:</strong> «Аппарат = точка». Не плодить дубль-справочники мест.</p>
+</section>
+
+<section id="s4">
+  <h2><span class="num">04</span>Как получена рекомендация</h2>
+  <p>Три независимых архитектора предложили перекомпоновку тремя линзами — <strong>частота использования</strong>, <strong>модель предметной области</strong>, <strong>рост деятельностей</strong>. Три судьи оценили их с позиций владельца, оператора и того, кто будет это поддерживать два года.</p>
+  <div class="scroll"><table>
+    <tr><th>Вариант</th><th class="num">Владелец</th><th class="num">Оператор</th><th class="num">Архитектор</th><th class="num">Сумма</th></tr>
+    <tr><td><strong>Модель предметной области</strong></td><td class="num">8</td><td class="num">8</td><td class="num">7</td><td class="num ok-t">23</td></tr>
+    <tr><td>Рост деятельностей</td><td class="num">7</td><td class="num">7</td><td class="num">8</td><td class="num">22</td></tr>
+    <tr><td>Частота использования</td><td class="num">6</td><td class="num">6</td><td class="num">6</td><td class="num">18</td></tr>
+  </table></div>
+  <p>Ниже победитель, доработанный теми частями проигравших, которые судьи потребовали перенести.</p>
+</section>
+
+<section id="s5">
+  <h2><span class="num">05</span>Рекомендуемая структура</h2>
+
+  <h3>Три правила — вынести в макет текстом</h3>
+  <div class="card"><p><strong>1.</strong> Вкладка = деятельность. Разрез = отдельная вкладка. Справочник = не деятельность.</p></div>
+  <div class="card"><p><strong>2.</strong> Размещение решает не «витрина или действие», а <strong>частота + свежесть данных</strong>. Ежедневное и сегодняшнее — в оперативный контур. Таблица за период — в отчёты. Номенклатура — в каталог.</p></div>
+  <div class="card"><p><strong>3.</strong> Годовое имеет право дорожать. Ежедневное — нет.</p></div>
+
+  <h3>Верхний ряд — по-прежнему 8 вкладок, ключи не меняются</h3>
+  <pre class="tree">DASHBOARD ‖ ACTIVITY · SMM · CRM · HR ‖ TASKS · REPORTS · <b>CATALOG</b>        ⚙
+   вход       ЗОНА ДЕЯТЕЛЬНОСТЕЙ          ЗОНА РАЗРЕЗОВ         служебный вход
+                  (растёт)              (не растёт никогда)    (вне ряда, справа)</pre>
+  <p>Меняется <strong>одна подпись</strong>: SETTINGS → CATALOG. Внутренний ключ остаётся.</p>
+  <div class="note"><p><strong>Почему это и есть главный инженерный ход.</strong> Подпись задаётся тем же словарём, которым <code>service</code> уже подписан как ACTIVITY. Ключ не трогается — значит <strong>семь плиток дашборда</strong>, <strong>кнопка «назад» карточки 360</strong>, спец-ветка предзагрузки и плитки «Реестра» продолжают работать <strong>без единого нового редиректа</strong>. При сломанном механизме редиректа (Д-6) каждый сэкономленный редирект — снятый риск приземлить человека не туда.</p></div>
+  <p><strong>⚙ прижат вправо, вне ряда, значком</strong> — ровно так его рисовал утверждённый канвас. Когда появятся настоящие настройки направления (интеграции, доступы, ключи источников), лист вырастает в свою группу — ряд при этом не двигается.</p>
+
+  <h3>ACTIVITY — 5 листьев, впервые получает второй уровень</h3>
+  <div class="scroll"><table>
+    <tr><th>Лист</th><th>Откуда</th></tr>
+    <tr><td><strong>Лента</strong> <em>(по умолчанию)</em></td><td>сегодняшняя вкладка: 4 показателя → 3 действия → единая история с фильтром «все · кофе · снек · деньги»</td></tr>
+    <tr><td><strong>Кофе</strong></td><td>якорь → лист. Внутри секция «Бункеры и нормы» — единственный адрес правки привязки ингредиентов и весов тары</td></tr>
+    <tr><td><strong>Снек</strong></td><td>якорь → лист</td></tr>
+    <tr><td><strong>Инкассация</strong></td><td class="hot-t">← переезд из REPORTS, снимается дубль Д-7</td></tr>
+    <tr><td><strong>Остатки в автоматах</strong></td><td class="hot-t">← переезд из «Настроек»: снапшот сегодняшний, обязан стоять рядом с формой пополнения</td></tr>
+  </table></div>
+  <p><strong>Второе место настроек расформировывается</strong> по принадлежности: бункеры и тара → ACTIVITY → Кофе · история размещений и расписание мойки → карточка автомата 360 · склад ингредиентов → CATALOG → Склады · локации → сквозной экран «Места». <strong>Собственный ряд вкладок кофе-панели снимается — третьего ряда в продукте больше нет.</strong></p>
+
+  <h3>REPORTS — 9 листьев в четырёх подписанных кластерах</h3>
+  <div class="scroll"><table>
+    <tr><th>Кластер</th><th>Листья</th></tr>
+    <tr><td>Данные и источники</td><td>По источникам · Пробелы</td></tr>
+    <tr><td>Продажи</td><td>Журнал продаж · Себестоимость <em>(заглушка «в работе» + фикс резолва)</em></td></tr>
+    <tr><td>Сырьё и товар</td><td>Расход сырья · Норма и факт · Сроки годности</td></tr>
+    <tr><td>Деньги и закуп</td><td><span class="hot-t">Приход</span> <em>(← переезд; внутри кнопка «Импорт истории закупок»)</em> · Сверка кассы</td></tr>
+  </table></div>
+
+  <h3>CATALOG — 8 листьев</h3>
+  <div class="scroll"><table>
+    <tr><th class="num">#</th><th>Лист</th><th>Что внутри</th></tr>
+    <tr><td class="num">1</td><td><strong>Автоматы</strong> <em>(по умолчанию)</em></td><td>31 карточка. <strong>Эталон листа.</strong> Чипы: в работе 21 · склад 6 · ремонт 4 · Coffee 25 / Snack 5 / Drinks 1</td></tr>
+    <tr><td class="num">2</td><td><strong>Товары</strong></td><td>71. Чипы: все · по категории · <strong>рецепты · 19</strong> · перепродажа · 34 · незаполненные</td></tr>
+    <tr><td class="num">3</td><td><strong>Ингредиенты</strong></td><td>9. Чипы: все · с ценой · привязаны к бункерам · <strong>тара</strong></td></tr>
+    <tr><td class="num">4</td><td><strong>Контрагенты</strong></td><td>7/13. ⚠️ включить поиск — сейчас отключён</td></tr>
+    <tr><td class="num">5</td><td><strong>Узлы и запчасти</strong></td><td>наполняется из живого журнала: 150 установок на 25 автоматах</td></tr>
+    <tr><td class="num">6</td><td><strong>Склады</strong></td><td>3 + склад ингредиентов из кофе-панели</td></tr>
+    <tr><td class="num">7</td><td><strong>Справочники</strong></td><td>хаб: Классификатор 2 · НДС 2 · ИКПУ 20 · Упаковка 19 · Штрих-коды 19 · Нумерация бункеров</td></tr>
+    <tr><td class="num">8</td><td><strong>Профиль и настройки направления</strong></td><td>сюда ведёт ⚙</td></tr>
+  </table></div>
+
+  <h3>Слияния — с обоснованием</h3>
+  <div class="scroll"><table>
+    <tr><th>Что</th><th>Куда</th><th>Почему</th></tr>
+    <tr><td>«Рецепты»</td><td>чип «рецепты · 19» на «Товарах»</td><td>карточек типа 0; лист рендерит товары с признаком — это <strong>фильтр, а не тип</strong></td></tr>
+    <tr><td>«Расходники (тара)»</td><td>чип «тара» на «Ингредиентах»</td><td>0 карточек, тип не встречается в коде нигде</td></tr>
+    <tr><td>5 фискальных справочников</td><td>один лист «Справочники» с чипами</td><td>62 записи, 0 правок за 25 дней, три из пяти — тень полей карточки товара. Побочно уходят шесть кнопок «+ vat», «+ ikpu», …</td></tr>
+    <tr><td>«Импорт закупок»</td><td>кнопка внутри листа «Приход»</td><td>отработал один раз. 842 строки кода не выбрасываются — меняется масштаб входа</td></tr>
+  </table></div>
+  <p><strong>Итог: 22 листа вместо 26, максимальная длина ряда 9 вместо 17.</strong> Горизонтальная прокрутка перестаёт быть охотой.</p>
+  <p><strong>Сознательно НЕ делаем:</strong> не удаляем «Себестоимость» — два судьи из трёх: это записанное обещание владельцу, валовая маржа снята с дашборда именно в этот отчёт, удаление читается как отказ. Не заводим лист «Локации» и не сливаем Склады с Локациями — правило «Аппарат = точка».</p>
+
+  <h3>Приёмочный тест — леджер маршрутов</h3>
+  <p>Вы защищаете раскладку не словами «стало красивее», а таблицей. <strong>Правило приёмки: ни один ежедневный или еженедельный маршрут не дорожает; дорожать имеют право только годовые.</strong></p>
+  <div class="scroll"><table>
+    <tr><th>Маршрут</th><th class="num">Было</th><th class="num">Стало</th></tr>
+    <tr><td>Выручка за 30 дней</td><td class="num">1</td><td class="num">1</td></tr>
+    <tr><td>Обслужить кофе-точку</td><td class="num">2 <em>+скролл</em></td><td class="num">2</td></tr>
+    <tr><td>Куда везти пополнение</td><td class="num">2 <em>в «Настройках»</em></td><td class="num">2 <em>рядом с формой</em></td></tr>
+    <tr><td>Поправить рецепт</td><td class="num">4 <em>лист врёт</em></td><td class="num ok-t">3</td></tr>
+    <tr><td>Сколько в ремонте</td><td class="num">1</td><td class="num">1</td></tr>
+    <tr><td>Проверить пробелы</td><td class="num">2 <em>+охота</em></td><td class="num">2</td></tr>
+    <tr><td>Завести ставку НДС <em>(годовое)</em></td><td class="num">2</td><td class="num hot-t">3</td></tr>
+    <tr><td>Импорт закупок <em>(раз в жизни)</em></td><td class="num">2</td><td class="num hot-t">3</td></tr>
+  </table></div>
+
+  <h3>Развилки про каталог НЕТ — утверждённая канва уже содержит решение</h3>
+  <div class="note">
+    <p>Первая редакция этого брифа предлагала переименовать SETTINGS в CATALOG и называла это поправкой к решению владельца от 20.08. <strong>Это была ошибка анализа.</strong> Артборд «Вкладки: финальная структура» из утверждённой канвы прямо задаёт и восьмую вкладку значком — <code>⚙ SETTINGS</code>, — и её внутреннее устройство: <strong>три блока «Профиль | Каталог | Прочее»</strong>, где Каталог перечислен поимённо: товары · ингредиенты · контрагенты · запчасти · автоматы · склады · справочники.</p>
+    <p style="margin-top:10px">То есть «каша» — не провал дизайна и не следствие решения владельца. <strong>Утверждённый дизайн содержал ровно ту группировку, которой не хватает, а в код она уехала плоским списком из семнадцати чипов.</strong> Ничего переигрывать не нужно: нужно построить то, что уже утверждено 20.08.</p>
+  </div>
+  <p>Это снимает и вопрос про значок: <code>⚙</code> у восьмой вкладки нарисован на самой канве, он не выдумка. И подтверждает латиницу — она написана на артборде словами «вкладки латиницей».</p>
+  <div class="scroll"><table>
+    <tr><th>Что казалось развилкой</th><th>Что на самом деле</th></tr>
+    <tr><td>Поднять каталог на верхний уровень или оставить внутри Настроек</td><td class="ok-t">Канва 20.08: внутри Настроек, блоком «Каталог» рядом с «Профилем» и «Прочим»</td></tr>
+    <tr><td>Значок ⚙ вне ряда — новая идея?</td><td class="ok-t">Нарисован на утверждённом артборде</td></tr>
+    <tr><td>Латиница верхних вкладок</td><td class="ok-t">Написана на артборде явно; прототип 22.08 снял её молча — вот это и есть настоящая развилка</td></tr>
+  </table></div>
+  <p><strong>Единственная оставшаяся развилка — порядок вкладок.</strong> Владелец продиктовал дословный порядок 20.08; зонирование ряда на «деятельности» и «разрезы» его переставляет. Запасной вариант — оставить порядок, а зоны обозначить разделителем и отступом.</p>
+
+  <h3>Две отвергнутые альтернативы — чтобы вы не изобретали их заново</h3>
+  <div class="card">
+    <p><strong>«Рост» — 22 балла, лучший у архитектора.</strong> Девять вкладок, CATALOG и SETTINGS обе на верхнем уровне, Склады и Локации сливаются в лист «Места».</p>
+    <p style="margin-top:9px; color:var(--tx-2)"><em>Не выбран:</em> 9 вкладок сегодня и до 12 при объявленных деятельностях — на телефоне прокручиваемый ряд над прокручиваемым; самая дорогая миграция при сломанном редиректе; лист «Места» сталкивается с правилом «Аппарат = точка»; бункеры посажены в настройки, тогда как бункер принадлежит автомату.</p>
+  </div>
+  <div class="card">
+    <p><strong>«Частота» — 18 баллов.</strong> CATALOG вкладкой, ⚙ вне ряда, ACTIVITY не трогается вовсе.</p>
+    <p style="margin-top:9px; color:var(--tx-2)"><em>Не выбран:</em> платит девятым слотом и не покупает ни правила роста, ни сокращения рядов — REPORTS раздувается до 11 листьев; справочный слой остаётся размазан по четырём поверхностям; ежедневные остатки уезжают в отчёты; второе место настроек не тронуто. Вариант сам признаёт: ни один ежедневный маршрут не подешевел.</p>
+  </div>
+</section>
+
+<section id="s6">
+  <h2><span class="num">06</span>Цвет: конфликт, арифметика, палитра</h2>
+
+  <h3>Конфликт, который нужно вынести владельцу на подпись</h3>
+  <div class="alarm">
+    <p><strong>Правило 29.07.2026, дословно:</strong> «<code>#FF6B1A</code> — СТРОГО только для „требует решения владельца“ и просрочек. Больше нигде. Увидел оранжевое — надо нажать.»</p>
+    <p style="margin-top:9px"><strong>Запрос 22.08.2026:</strong> «цвета оранжевые мне нравятся» → оранжевый сделать главным.</p>
+    <p style="margin-top:9px"><strong>Эти два решения несовместимы буквально.</strong> Сегодня оранжевый работает как единственная семантика тревоги — последовательно, в <strong>44 местах</strong>. Молча усилить его — значит разрушить единственный работающий сигнал.</p>
+  </div>
+  <p><strong>Решение предлагается такое: развести бренд и тревогу не оттенком, а ФОРМОЙ.</strong></p>
+  <div class="scroll"><table>
+    <tr><th>Роль</th><th>Форма применения</th><th>Где</th></tr>
+    <tr><td><strong>Бренд и главное действие</strong></td><td class="hot-t">сплошная заливка</td><td>активная вкладка, основная кнопка, логотип, активный чип</td></tr>
+    <tr><td><strong>Тревога</strong></td><td class="hot-t">полоска 2px + мягкая подложка + точка</td><td>те же 44 места, никогда сплошной заливкой</td></tr>
+  </table></div>
+  <p>Бренд — всегда заливка объекта, на который смотрят постоянно. Тревога — всегда полоска у объекта, который появляется редко. Оранжевый становится первым, что видно на экране, а «увидел оранжевую полоску — надо нажать» продолжает работать. <strong>Но снятие правила 29.07 в его буквальной формулировке — решение владельца, не ваше.</strong></p>
+
+  <h3>Арифметика инверсии — контринтуитивная и важная</h3>
+  <p>На тёмном фоне оранжевый громче синего (6,36 против 3,96) — он и «кричит». <strong>На светлом всё переворачивается:</strong> оранжевый падает до 2,85:1 (как текст нечитаем), синий растёт до 4,57:1.</p>
+  <div class="alarm"><p>То есть <strong>простая замена фона на светлый сделает оранжевый ТИШЕ, а синий ГРОМЧЕ</strong> — ровно наоборот тому, чего хочет владелец.</p></div>
+  <p>Выход найден и посчитан: <strong>проблема не в оранжевом, а в том, что на нём пишут.</strong></p>
+  <div class="demo">
+    <div class="demo-cell">
+      <button class="btn white" type="button">Записать заливку</button>
+      <div class="verdict bad">белый на #FF6B1A → 2,85:1 · провал</div>
+    </div>
+    <div class="demo-cell">
+      <button class="btn ink" type="button">Записать заливку</button>
+      <div class="verdict good">#161D14 на #FF6B1A → 6,04:1 · проходит</div>
+    </div>
+  </div>
+  <p style="margin-top:14px">Любимый владельцем оранжевый остаётся <strong>ровно тем же</strong>, если убрать с него белый текст.</p>
+
+  <h3>Палитра — решение от 22.08, всё проверено расчётом</h3>
+  <p class="sub">Основа — палитра прототипа Claude Design (тёплый холст с оливковой нотой, оранжевый как лицо продукта, лайм для «нормы»). Три её токена порог контраста не проходили и заменены — они помечены. Образцы нарисованы литеральными значениями: это специмены, а не тема страницы.</p>
+
+  <h4>Поверхности и линии</h4>
+  <div class="swatches">
+    <div class="sw"><div class="chip" style="background:#F4F4EE"><span style="color:#172019">#F4F4EE</span></div><div class="body"><div class="role">Холст</div><div class="tok">--vh-canvas</div><div class="cr ok-t">чернила 15,13:1</div></div></div>
+    <div class="sw"><div class="chip" style="background:#FFFFFF;border-bottom:1px solid #DCE0D7"><span style="color:#172019">#FFFFFF</span></div><div class="body"><div class="role">Карточка</div><div class="tok">--vh-surface</div><div class="cr" style="color:var(--tx-3)">—</div></div></div>
+    <div class="sw"><div class="chip" style="background:#DCE0D7"><span style="color:#172019">#DCE0D7</span></div><div class="body"><div class="role">Разделители</div><div class="tok">--vh-border</div><div class="cr" style="color:var(--tx-3)">не текст</div></div></div>
+    <div class="sw"><div class="chip" style="background:#7C8B7A"><span style="color:#FFFFFF">#7C8B7A</span></div><div class="body"><div class="role">Границы контролов</div><div class="tok">--vh-border-strong <strong>замена</strong></div><div class="cr ok-t">3,26:1</div></div></div>
+  </div>
+
+  <h4>Текст — три уровня, все проходят 4,5:1</h4>
+  <div class="swatches">
+    <div class="sw"><div class="chip" style="background:#172019"><span style="color:#F4F4EE">#172019</span></div><div class="body"><div class="role">Основной</div><div class="tok">--vh-ink</div><div class="cr ok-t">15,13:1</div></div></div>
+    <div class="sw"><div class="chip" style="background:#4A554A"><span style="color:#FFFFFF">#4A554A</span></div><div class="body"><div class="role">Вторичный</div><div class="tok">--vh-muted</div><div class="cr ok-t">7,07:1</div></div></div>
+    <div class="sw"><div class="chip" style="background:#667066"><span style="color:#FFFFFF">#667066</span></div><div class="body"><div class="role">Третичный</div><div class="tok">--vh-faint <strong>замена</strong></div><div class="cr ok-t">4,67:1</div></div></div>
+  </div>
+
+  <h4>Оранжевый — две глубины, роли разведены формой</h4>
+  <div class="swatches">
+    <div class="sw"><div class="chip" style="background:#FF6B1A"><span style="color:#172019">#FF6B1A</span></div><div class="body"><div class="role">Бренд · только заливка</div><div class="tok">--vh-brand</div><div class="cr ok-t">чернила 5,86:1</div></div></div>
+    <div class="sw"><div class="chip" style="background:#B8480F"><span style="color:#FFFFFF">#B8480F</span></div><div class="body"><div class="role">Текст, иконки, полоска</div><div class="tok">--vh-brand-ink</div><div class="cr ok-t">4,79 / белый 5,29</div></div></div>
+    <div class="sw"><div class="chip" style="background:#FFF0E7"><span style="color:#172019">#FFF0E7</span></div><div class="body"><div class="role">Подложка тревоги</div><div class="tok">--vh-brand-soft</div><div class="cr" style="color:var(--tx-3)">не текст</div></div></div>
+  </div>
+
+  <h4>Состояния</h4>
+  <div class="swatches">
+    <div class="sw"><div class="chip" style="background:#627719"><span style="color:#FFFFFF">#627719</span></div><div class="body"><div class="role">Норма · текстом</div><div class="tok">--vh-lime</div><div class="cr ok-t">4,56:1</div></div></div>
+    <div class="sw"><div class="chip" style="background:#A8CC2A"><span style="color:#172019">#A8CC2A</span></div><div class="body"><div class="role">Норма · заливкой</div><div class="tok">--vh-lime-fill</div><div class="cr ok-t">чернила 9,02:1</div></div></div>
+    <div class="sw"><div class="chip" style="background:#275E58"><span style="color:#FFFFFF">#275E58</span></div><div class="body"><div class="role">Служебное</div><div class="tok">--vh-teal</div><div class="cr ok-t">6,73:1</div></div></div>
+    <div class="sw"><div class="chip" style="background:#B43C45"><span style="color:#FFFFFF">#B43C45</span></div><div class="body"><div class="role">Ошибка</div><div class="tok">--vh-danger</div><div class="cr ok-t">5,18 / белый 5,72</div></div></div>
+  </div>
+
+  <h4>Три решения, на которых держится набор</h4>
+  <ul>
+    <li><strong>У оранжевого две глубины, и роли разводит форма.</strong> Яркий <code>#FF6B1A</code> — только сплошная заливка с тёмными чернилами поверх: активная вкладка, основная кнопка, логотип. Глубокий <code>#B8480F</code> — всё, что тоньше: текст, иконки, полоска тревоги. Так оранжевый становится лицом продукта и при этом сохраняет твоё правило от 29.07 «увидел оранжевое — надо нажать».</li>
+    <li><strong>Белого текста на ярком оранжевом нет вообще.</strong> Белый на <code>#FF6B1A</code> — 2,85:1, провал. Тёмные чернила на нём же — 5,86:1.</li>
+    <li><strong>Три уровня текста, а не четыре.</strong> На светлом холсте три серых, которые все проходят 4,5:1, визуально сходятся в один. Уровни раздвинуты по контрасту (15 → 7 → 4,7), а четвёртый различается размером и начертанием, а не ещё более светлым серым.</li>
+  </ul>
+
+  <div class="note"><p>Готовый набор для вставки в проект — <code>docs/design-tokens-vendhub.css</code>: обе темы, каждый токен с замером в комментарии, плюс три класса-образца, чтобы правило «форма разводит роли» не потерялось при внедрении.</p></div>
+
+  <h3>Масштаб работы по цвету — измерен</h3>
+  <div class="scroll"><table>
+    <tr><th>Что</th><th class="num">Сколько</th></tr>
+    <tr><td>CSS-файлов в проекте</td><td class="num ok-t">1</td></tr>
+    <tr><td>Классов, уже сидящих на токенах</td><td class="num ok-t">434</td></tr>
+    <tr><td>Строк с захардкоженным цветом <strong>вне</strong> токенов</td><td class="num hot-t">54 + 25</td></tr>
+    <tr><td>Поддержка светлой темы</td><td class="num err-t">НЕТ</td></tr>
+    <tr><td>Переменных используется, но нигде не объявлено</td><td class="num err-t">4</td></tr>
+  </table></div>
+  <p>Четыре необъявленные переменные держатся на запасных значениях и <strong>на светлой теме останутся тёмными</strong>. Одна из них — вообще без запасного значения, то есть её стиль не работает уже сейчас.</p>
+  <p><strong>Что не «поменять hex», а переделать механику:</strong> режим наложения фона-канваса (на светлом не работает вовсе) · шкала теней (6 мест) · плотность оверлеев (3 места) · тайлы карты (тёмные → светлые) · цвет темы браузера · <code>color-scheme</code>.</p>
+  <p><strong>Оценка: работа одного дня для разработчика</strong> — при условии, что вы отдадите готовый набор токенов и решения, а не только картинку.</p>
+
+  <h3>Две находки по типографике</h3>
+  <div class="flag"><span class="k">Шрифт заголовков без кириллицы</span><p>Syne подключён <strong>только с латиницей</strong>, а на нём висят все заголовки — и в них русский текст. То есть кириллические заголовки сейчас рендерятся не Syne, а системным запасным шрифтом. Возможно, это и есть часть недовольства типографикой. Лечится добавлением набора.</p></div>
+  <div class="flag"><span class="k">Семантика, которую усиление оранжевого сделает заметнее</span><p>Нейтральная информационная плашка «Задачи ↔ Обслуживание», нарисованная на канвасе зелёной, в коде рендерится <strong>оранжевой тревожной</strong>. Сноска выглядит как предупреждение.</p></div>
+  <p>Все числовые значения в продукте — моноширинные с табличными цифрами. Это хорошо, сохраните.</p>
+</section>
+
+<section id="s7">
+  <h2><span class="num">07</span>Границы: что ломать нельзя</h2>
+  <ul>
+    <li><strong>Внутренние ключи вкладок не переименовываются.</strong> Меняются подписи и место в дереве.</li>
+    <li><strong>Старые адреса обязаны редиректить.</strong> Ссылки из Telegram-бота и закладки не должны умирать.</li>
+    <li><strong>Редирект обязан переносить параметры</strong> — сегодня он их выбрасывает, и это уже живой баг. Починка — <strong>отдельным первым шагом</strong>, до любой новой карты редиректов, иначе дефект размножится.</li>
+    <li><strong>Пять новых листьев ACTIVITY внести в список «не гасить»</strong> — иначе все пять погаснут серыми с нулевым счётчиком, тот же дефект, что сегодня гасит «Рецепты».</li>
+    <li><strong>Дефолт каждой группы задать явно</strong>, а не фолбэком «первый непустой лист».</li>
+    <li><strong>Перенос строки в ряду подвкладок меняет высоту липкой шапки</strong> — на неё завязаны липкие панели ниже, нужен пересчёт.</li>
+    <li><strong>Образец листа «как Автоматы»</strong> — четыре яруса: показатели → действие и поиск → чипы → плитки записей.</li>
+    <li><strong>Не воскрешать отменённое:</strong> «Парк» верхней вкладкой, «Активы» супер-разделом, автоэмиссию задач.</li>
+    <li><strong>«Аппарат = точка»</strong> — не плодить дубль-справочники мест.</li>
+  </ul>
+</section>
+
+<section id="s8">
+  <h2><span class="num">08</span>Инвентарь экранов</h2>
+  <p><strong>Верхние вкладки (8):</strong> DASHBOARD <em>(живая, 6 секций)</em> · ACTIVITY <em>(живая, лента + 3 панели-формы)</em> · TASKS · REPORTS · SMM <em>(пустая заглушка)</em> · CRM <em>(пустая заглушка)</em> · HR <em>(полуживая: 4 человека)</em> · CATALOG.</p>
+  <p><strong>Листья:</strong> 22 после перекомпоновки. У каждого — образец «как Автоматы» плюс пустое состояние по правилу владельца: <strong>«пустой экран всегда говорит, что сделать»</strong>. Сегодня плитка без данных рисуется пунктирной рамкой — состояния, которого канвас не рисовал вовсе, а на дашборде оно встречается часто.</p>
+
+  <h3>Карточки 360 — канвас их не рисовал, вам рисовать первыми</h3>
+  <div class="scroll"><table>
+    <tr><th>Карточка</th><th>Вкладки</th></tr>
+    <tr><td>Автомат</td><td>Обзор · Ингредиенты · Меню · Обслуживание · Локация · Паспорт</td></tr>
+    <tr><td>Товар</td><td>Обзор · Рецепт · Где продаётся · Продажи · Паспорт</td></tr>
+    <tr><td>Ингредиент</td><td>Обзор · Где используется · Бункеры · Закупки · Партии · Остаток · Паспорт</td></tr>
+    <tr><td>Контрагент</td><td>Обзор · Закупки · Документы и деньги · Паспорт</td></tr>
+  </table></div>
+  <p>Эталон: hero-шапка (аватар по виду, имя, серийник моноширинным, точка, бейджи) + <strong>кольцо полноты карточки по 8 признакам</strong> + плитки показателей (клик открывает вкладку) + блок «Требует внимания».</p>
+
+  <p><strong>Сквозные экраны — конкуренты вкладок, границу нужно понимать:</strong> «Обслуживание» по всему парку <em>(имя совпадает с бывшим названием ACTIVITY, содержимое другое)</em> · «Места» (29 локаций + 3 склада) · «Реестр» · «Журнал» · «Действия» · «Команда» · «Задачи» · «Входящие» · «Агенты».</p>
+
+  <div class="alarm"><p><strong>Самый глубокий маршрут продукта.</strong> «Отчёты → По источникам» разворачивает внутри себя ещё четыре ряда навигации: режимы → плитки источников (7) → отчёты источника → виды среза (8). Итого <strong>пять рядов навигации на одном экране</strong>. Живых данных при этом только в двух отчётах из тринадцати. Ни один из трёх вариантов структуры этот маршрут не улучшает — после наведения порядка в остальном он станет заметнее.</p></div>
+
+  <h3>Мобильный вид — пункт брифа №1, а не приложение</h3>
+  <div class="flag"><span class="k">Ни одного артборда</span><p>Канвас описывает только ширины 1080–1280.</p></div>
+  <div class="flag"><span class="k">В рабочее место с телефона не попасть кликом</span><p>Ни одной ссылки на направление в мобильной навигации.</p></div>
+  <div class="flag"><span class="k">Инлайн-стили перебивают адаптив</span><p>Секция «Контуры» жёстко в 2 колонки, ряды показателей — в 4, тогда как сетка даёт 2 до 900px. На телефоне получается 4 плитки в строку.</p></div>
+  <div class="flag"><span class="k">17 чипов в ленте на телефоне никто не измерял</span><p>Поведение горизонтальной ленты на реальном экране не проверялось ни разу.</p></div>
+  <p>Иначе вы нарисуете дерево, до которого владелец с телефона не дотянется.</p>
+</section>
+
+<section id="s9">
+  <h2><span class="num">09</span>Канвас 20.08 — основа, но не копировать буквально</h2>
+  <p>Утверждённый канвас лежит в <code>design/dashboard-redesign/</code> (5 артбордов + <code>canvas.json</code>; папка <strong>не в git</strong>). Продукт от него уже разошёлся:</p>
+  <div class="scroll"><table>
+    <tr><th>Место</th><th>Канвас</th><th>Код</th></tr>
+    <tr><td>Плитка №2</td><td>«Валовая маржа 55%»</td><td>«Средний чек»</td></tr>
+    <tr><td>«Деньги в автоматах»</td><td>обычная плитка</td><td class="err-t">раскрывающийся блок, правил для него в CSS нет вообще → браузерный треугольник, число не выровнено, в отличие от трёх соседних</td></tr>
+    <tr><td>Чип свежести «данные по 20 авг, 16:12»</td><td>есть</td><td>отсутствует</td></tr>
+    <tr><td>Быстрые действия</td><td>4 таблетки, первая акцентная</td><td>все нейтральные, и они <strong>создают задачу</strong>, а не открывают форму</td></tr>
+    <tr><td>Заголовки контуров</td><td>«Кофе · 20 точек»</td><td>просто «Кофе»</td></tr>
+    <tr><td>График</td><td>карточка с рамкой, 120px</td><td>без карточки, трек 46px</td></tr>
+    <tr><td>Шапка</td><td><code>VendHub</code> 34px</td><td>крошки + чип адреса + заголовок 22px</td></tr>
+    <tr><td>Задачи</td><td>«+ Задача», фильтры, «взять →»</td><td class="err-t">ничего этого нет</td></tr>
+  </table></div>
+</section>
+
+<section id="s10">
+  <h2><span class="num">10</span>Что вы обязаны отдать</h2>
+  <div class="scroll"><table>
+    <tr><th class="num">#</th><th>Артефакт</th></tr>
+    <tr><td class="num">1</td><td><strong>Два набора одних и тех же 22 имён токенов</strong> — светлый и тёмный. <strong>Имена не менять:</strong> 434 класса уже на них сидят.</td></tr>
+    <tr><td class="num">2</td><td><strong>Четыре новых токена</strong>, без которых светлая тема не собирается: <code>--field</code>, <code>--line-soft</code>, <code>--hot-text</code>, <code>--brand</code>.</td></tr>
+    <tr><td class="num">3</td><td><strong>Доузаконить недостающие:</strong> <code>--ok-soft</code>/<code>--ok-line</code>, <code>--err-soft</code>/<code>--err-line</code>, и объявить наконец <code>--tx-1</code>, <code>--accent-tx</code>, <code>--warn</code>.</td></tr>
+    <tr><td class="num">4</td><td><strong>Решение по фону-канвасу</strong> — архитектурная развилка, режим наложения на светлом не работает.</td></tr>
+    <tr><td class="num">5</td><td><strong>Новая шкала теней</strong> (6 мест) и <strong>новая плотность оверлеев</strong> (3 места).</td></tr>
+    <tr><td class="num">6</td><td>Решение по трём цветам вне палитры и по доменным цветам видов техники.</td></tr>
+    <tr><td class="num">7</td><td><strong>Кириллический набор для шрифта заголовков.</strong></td></tr>
+    <tr><td class="num">8</td><td><strong>Леджер маршрутов</strong> — как приёмочный тест раскладки.</td></tr>
+    <tr><td class="num">9</td><td><strong>Мобильные артборды</strong> — их не существует ни одного.</td></tr>
+    <tr><td class="num">10</td><td><strong>Карточка 360</strong> — канвас её не рисовал.</td></tr>
+  </table></div>
+</section>
+
+<section id="s11">
+  <h2><span class="num">11</span>Что измерено, а что предположение</h2>
+  <div class="note"><p><strong>Измерено — можно опираться:</strong> состав и число листьев, порядок вкладок, карта редиректов, цепочка фолбэков, все токены, 54 строки захардкоженного CSS и 25 вхождений в TS/TSX, отсутствие темизации. Числа записей — сняты с прода 22.08.2026 через API ядра. Частота правок — из журнала аудита, 3519 записей, окно 28.07 → 22.08. Контрасты — посчитаны математически.</p></div>
+  <p><strong>Предположения — не принимайте за измерение:</strong></p>
+  <div class="flag"><span class="k">1 · частота открытий не измерена ничем</span><p>Продуктовой аналитики в проекте нет. Классы «живой / мёртвый / оперативный» выведены из частоты <strong>записей</strong> и свежести данных. Для «Автоматов» и «Товаров» это надёжно (сотни правок). <strong>Для «Отчётов» ненадёжно</strong> — отчёт читают, а не пишут, следа он не оставляет. <strong>Вес REPORTS может быть недооценён.</strong></p></div>
+  <div class="flag"><span class="k">2 · журнал начинается 28.07.2026</span><p>Активность до этой даты невидима. «Справочники не правились» строго означает «не правились за 25 дней наблюдения».</p></div>
+  <div class="flag"><span class="k">3 · в браузер никто не заходил</span><p>Все выводы о рендере — из кода, все числа — через API. Как выглядят 17 чипов в ленте, не наблюдалось.</p></div>
+  <div class="flag"><span class="k">4 · мобильный вид не измерялся вообще</span><p>Выводы из кода, не с устройства.</p></div>
+  <div class="flag"><span class="k">5 · контрасты посчитаны, а не сняты с экрана</span><p>Поведение на промежуточных фонах не мерилось.</p></div>
+  <div class="flag"><span class="k">6 · причина латиницы нигде не зафиксирована</span><p>Проверены спека, план, коммит, тело PR, локальные транскрипты. Обоснования нет нигде. <strong>Стоит записать, пока редизайн его не зацементировал.</strong></p></div>
+  <div class="flag"><span class="k">7 · гипотеза о типографике</span><p>Шрифт заголовков без кириллицы → русские заголовки идут запасным. Владелец про шрифты ничего не говорил.</p></div>
+  <div class="flag"><span class="k">8 · слабый шов рекомендации, названный честно</span><p>Дубли устраняются <strong>не полностью</strong>. Склады остаются и листом, и на «Местах»; парк — и в CATALOG, и на «Обслуживании», и плитками дашборда. Это сознательное решение (разные вопросы — разные входы), но <strong>владелец вправе назвать это той же кашей.</strong> Разводится подписями, не структурой.</p></div>
+</section>
+
+<section id="s12">
+  <h2><span class="num">12</span>Ключевые файлы</h2>
+  <div class="scroll"><table>
+    <tr><th>Файл</th><th>Что там</th></tr>
+    <tr><td><code>apps/cc/src/app/domain/[domain]/page.tsx</code></td><td>2096 строк, вся страница направления</td></tr>
+    <tr><td><code>apps/cc/src/lib/domain-nav.ts</code></td><td>дерево листьев</td></tr>
+    <tr><td><code>apps/cc/src/app/globals.css</code></td><td>1264 строки, <strong>вся</strong> визуальная система</td></tr>
+    <tr><td><code>apps/cc/src/app/layout.tsx</code></td><td>шрифты, цвет темы браузера, логотип</td></tr>
+    <tr><td><code>apps/cc/src/components/list-shell.tsx</code></td><td>недоделанный образец листа</td></tr>
+    <tr><td><code>apps/cc/src/components/nav.tsx</code></td><td>сайдбар и мобильная панель</td></tr>
+    <tr><td><code>apps/cc/src/app/coffee/coffee-client.tsx</code></td><td>второе место настроек</td></tr>
+    <tr><td><code>design/dashboard-redesign/</code></td><td>5 артбордов + canvas.json <em>(не в git)</em></td></tr>
+    <tr><td><code>docs/superpowers/specs/2026-08-20-…-design.md</code></td><td>утверждённая спека</td></tr>
+    <tr><td><code>docs/UI_REVISION_BRIEF.md</code></td><td>принципы навигации, 01.08.2026</td></tr>
+    <tr><td><code>docs/DESIGN_BRIEF_CLAUDE_DESIGN.md</code></td><td>правила цвета 29.07 и 30.07</td></tr>
+  </table></div>
+</section>
+
+</main>
+
+<footer>MYDON Command Center · направление VendHub · бриф от 22.08.2026 · фактура проверена на проде, commit 33b6f22</footer>
+
+</div>
