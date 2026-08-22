@@ -124,7 +124,11 @@ describe("NormFactService.report — сборка периодов бункер�
     const ingredients = [ingredient, { id: "ing-a", name: "Лимонный чай", entityId: "ing-entity-a" }, { id: "ing-b", name: "Матча", entityId: "ing-entity-b" }];
 
     const orders = [
-      // Сценарий 1: 10 выданных чашек капучино в интервале — норма 20г × 10 = 200г.
+      // Сценарий 1: даты 01..09 + повтор 01 (i=0 и i=9 оба дают "01"). "01" —
+      // день заливки этого же периода (p.from) — полуоткрытый интервал
+      // (from, to] (ревью 1.3) обязан его ИСКЛЮЧИТЬ, иначе он задвоился бы с
+      // предыдущим периодом на той же точке. Итог по норме считается ниже
+      // от 9 чашек (02..09 + одна из двух "01" вычеркнута), а не от 10.
       ...Array.from({ length: 10 }, (_, i) => order(`2026-01-0${(i % 9) + 1}`)),
       // Расхождение orderIsDelivered/countable (R-F5): 2 строки, обе внутри окна.
       order("2026-01-05", { delivered: true, countable: false }),
@@ -152,12 +156,16 @@ describe("NormFactService.report — сборка периодов бункер�
     const p1 = report.periods.find((p) => p.to === "2026-01-10")!;
     assert.equal(p1.полнота, "полный");
     assert.equal(p1.факт, 350); // (600-100) - (250-100)
-    // 10 «плановых» чашек + 1 выданная-но-неучтённая-в-выручке (delivered:true,
+    // 10 «плановых» дат (01..09 + повторная "01") минус 1 чашка "01" — день
+    // заливки ЭТОГО периода, полуоткрытый интервал (from, to] его исключает
+    // (ревью 1.3) — плюс 1 выданная-но-неучтённая-в-выручке (delivered:true,
     // countable:false — та же строка, что считается в расхождении R-F5 ниже):
     // сырьё списывается по orderIsDelivered, поэтому она тоже входит в норму.
-    assert.equal(p1.чашек, 11);
-    assert.equal(p1.норма, 220);
-    assert.equal(p1.разница, 130);
+    // Итого 10 - 1 + 1 = 9 чашек, ни одна без нормы (все — «Капучино»).
+    assert.equal(p1.чашек, 9);
+    assert.equal(p1.чашекБезНормы, 0);
+    assert.equal(p1.норма, 180);
+    assert.equal(p1.разница, 170);
 
     const p2 = report.periods.find((p) => p.to === "2026-02-05")!;
     assert.equal(p2.полнота, "тара не откалибрована");
@@ -178,7 +186,7 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(p5.разница, null);
 
     // Итог — ТОЛЬКО по «полному» периоду (R-F2): единственный вклад — p1.
-    assert.deepEqual(report.итог, { факт: 350, норма: 220, разница: 130, периодов: 1 });
+    assert.deepEqual(report.итог, { факт: 350, норма: 180, разница: 170, периодов: 1 });
 
     // внеИтога — 4 периода, разбивка по причине без потерь (4 = 1+1+1+1).
     assert.equal(report.внеИтога.периодов, 4);
@@ -345,5 +353,43 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(p.норма, 0, "единица «кг» не пересчитана в граммы молча — вклада нет вовсе, а не 0.02");
     assert.equal(p.полнота, "рецепт неизвестен");
     assert.equal(p.разница, null);
+  });
+
+  it("ревью 1.3: день визита (возврат одного набора = заливка следующего) не задваивается между периодами", async () => {
+    // Смена бункеров в один визит: набор 200 возвращают и в тот же день
+    // 2026-11-10 заливают набор 201. Полуоткрытый интервал (from, to]
+    // обязан отдать чашку этого дня ТОЛЬКО закрывающемуся периоду (200).
+    const refills = [
+      { position: 1, containerNumber: 200, enteredDate: "2026-11-01", filledWeight: 600, locationId: "loc-1", ingredientId: null },
+      { position: 1, containerNumber: 201, enteredDate: "2026-11-10", filledWeight: 600, locationId: "loc-1", ingredientId: null },
+    ];
+    const returns = [
+      { position: 1, containerNumber: 200, weight: 100, returnedDate: "2026-11-10" },
+      { position: 1, containerNumber: 201, weight: 200, returnedDate: "2026-11-20" },
+    ];
+    const tare = [
+      { containerNumber: 200, position: 1, tareWeight: 100 },
+      { containerNumber: 201, position: 1, tareWeight: 100 },
+    ];
+    const bunkerConfig = [{ position: 1, ingredientId: "ing-1" }];
+    // Одна-единственная чашка — ровно в день визита.
+    const orders = [order("2026-11-10")];
+
+    const db = normFactDb({
+      refills, returns, tare, bunkerConfig,
+      ingredients: [ingredient],
+      placements: [placement],
+      orders,
+      entities: [loc, machine, coffeeCard],
+      aliases: [],
+    });
+    const s = new NormFactService(db);
+    const report = await s.report("2026-11-01", "2026-11-20");
+
+    const periodX = report.periods.find((p) => p.to === "2026-11-10")!; // закрывающийся (набор 200)
+    const periodY = report.periods.find((p) => p.to === "2026-11-20")!; // следующий (набор 201)
+    assert.equal(periodX.чашек, 1, "день возврата (to) — периоду принадлежит");
+    assert.equal(periodY.чашек, 0, "тот же день как start (from) следующего периода — исключён, не задвоен");
+    assert.equal(periodX.чашек + periodY.чашек, 1, "чашка учтена ровно один раз на всю историю, а не дважды");
   });
 });
