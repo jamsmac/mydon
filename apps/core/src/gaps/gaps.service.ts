@@ -599,27 +599,52 @@ export function unconfiguredBunkerPositionGap(
 
 /* ── Детектор 19: бункеры — недолив не проверяется ───────────────────────── */
 
-/** Число бункерных позиций на автомате — жёстко зашито схемой (`coffee_bunker_config_position_range`, 1..8). */
-const BUNKER_POSITIONS = 8;
-
 /**
- * Факт 10 плана: `target_fill_weight` не задан ни у одного из 8 бункеров —
- * `fillStatus()` (coffee-calc.ts) отдаёт «unknown» вместо «недолив», и
- * недостаточная заливка не ловится нигде. Проверено на проде 22.08.2026:
- * ни у одной из 7 сконфигурированных позиций эталон не задан, восьмая не
- * сконфигурирована вовсе (см. детектор 18) — итог тот же: 0 из 8.
+ * Факт 10 плана: `target_fill_weight` (эталонный чистый вес заливки) не задан
+ * ни у одного бункера — `fillStatus()` (`coffee-calc.ts`) отдаёт «unknown»
+ * вместо «недолив», и недостаточная заливка не ловится нигде.
+ *
+ * СЧИТАЕТСЯ ПО СТРОКАМ КОНФИГУРАЦИИ, А НЕ ПО ПОЗИЦИЯМ (ревью). Потребитель
+ * ключуется ПАРОЙ `${position}:${ingredientId}` (`coffee.service.ts`,
+ * `targetByKey`), поэтому позиции с двумя ингредиентами (позиция 3 — лимонный
+ * чай и матча, факт 9 плана) нужны ДВА эталона. Счёт по различным позициям
+ * гасил вторую строку: у матчи недолив остался бы «unknown», а реестр показал
+ * бы позицию закрытой.
+ *
+ * ЗНАМЕНАТЕЛЬ — ТОЖЕ ИЗ КОНФИГУРАЦИИ (ревью). Раньше здесь стояла константа 8
+ * («столько позиций разрешает схема»), а сконфигурировано семь — из-за чего
+ * `8 − 7 = 1` оставался навсегда и пробел не закрылся бы, даже когда владелец
+ * заполнит все эталоны. Это прямое нарушение R-K4: пробел обязан исчезать,
+ * когда данные появились. Несконфигурированные позиции — забота детектора 18,
+ * а не этого.
  */
 export function targetFillWeightMissingGap(configs: readonly { position: number; targetFillWeight: number | null }[]): Gap[] {
-  const withTarget = new Set(configs.filter((c) => c.targetFillWeight !== null).map((c) => c.position)).size;
-  const missing = BUNKER_POSITIONS - withTarget;
-  if (missing <= 0) return [];
+  if (configs.length === 0) {
+    // Конфигурации нет вовсе — недолив не ловится нигде, и это отдельный факт,
+    // а не частный случай «у N из M не задан эталон»: знаменателя тут просто
+    // не существует. Гасить строку нельзя (интеграционный тест сборки реестра
+    // ловит ровно это), но и выдумывать знаменатель из схемы — та самая
+    // незакрываемая константа, от которой уходим.
+    return [
+      {
+        topic: "бункеры: недолив не проверяется",
+        period: null,
+        missing: "бункеры не сконфигурированы ни одним ингредиентом — эталонному весу заливки не к чему привязаться, недолив не ловится нигде",
+        scale: null,
+        action: "завести конфигурацию бункеров («Настройки → Бункеры») и указать «эталонный вес заливки, г»",
+      },
+    ];
+  }
+  const missing = configs.filter((c) => c.targetFillWeight === null).length;
+  if (missing === 0) return [];
+  const хвост = missing === configs.length ? " — недолив заливки не ловится ни на одной" : "";
   return [
     {
       topic: "бункеры: недолив не проверяется",
       period: null,
-      missing: `target_fill_weight (эталонный чистый вес заливки) не задан ни у ${missing} из ${BUNKER_POSITIONS} бункерных позиций — недолив заливки не ловится ни на одной`,
-      scale: `${missing} из ${BUNKER_POSITIONS} позиций`,
-      action: "указать «эталонный вес заливки, г» для каждой позиции в «Настройки → Бункеры»",
+      missing: `target_fill_weight (эталонный чистый вес заливки) не задан у ${missing} из ${configs.length} настроенных бункеров${хвост}`,
+      scale: `${missing} из ${configs.length} бункеров`,
+      action: "указать «эталонный вес заливки, г» для каждого бункера в «Настройки → Бункеры»",
     },
   ];
 }
@@ -712,16 +737,32 @@ export function stockIntakeSilenceGap(intakeDates: readonly string[], today: str
 export function ingredientsWithoutPurchaseGap(
   bunkerIngredients: readonly { id: string; name: string }[],
   intakeIngredientIds: ReadonlySet<string>,
+  /**
+   * Ревью: бункерные ингредиенты БЕЗ карточки реестра (`entity_id IS NULL` —
+   * схема это разрешает, такие заводятся через «+ Добавить»). Приход к ним не
+   * привязать в принципе, поэтому в основной список они не идут — но и молча
+   * выпадать из знаменателя не должны: раньше «8 бункерных ингредиентов»
+   * незаметно превращалось в «7», и владелец считал бы, что проверены все.
+   * Сегодня дефект спит (все привязаны), просыпается на первом же ингредиенте
+   * без карточки.
+   */
+  безКарточки: readonly string[] = [],
 ): Gap[] {
   const missing = bunkerIngredients.filter((i) => !intakeIngredientIds.has(i.id));
-  if (missing.length === 0) return [];
+  if (missing.length === 0 && безКарточки.length === 0) return [];
+  const всего = bunkerIngredients.length + безКарточки.length;
+  const хвост =
+    безКарточки.length > 0
+      ? `; ещё у ${безКарточки.length} нет карточки реестра, приход к ним не привязать вовсе — ${безКарточки.join(", ")}`
+      : "";
+  const головаNames = missing.length > 0 ? ` — ${missing.map((m) => m.name).join(", ")}` : "";
   return [
     {
       topic: "закупки сырья: у ингредиента нет ни одной закупки",
       period: null,
-      missing: `${missing.length} из ${bunkerIngredients.length} бункерных ингредиентов ни разу не приходовались складом — ${missing.map((m) => m.name).join(", ")}`,
-      scale: `${missing.length} ингредиентов`,
-      action: "внести приход этого сырья в mydon-stock/партии, если закупки были, либо завести первую партию",
+      missing: `${missing.length} из ${всего} бункерных ингредиентов ни разу не приходовались складом${головаNames}${хвост}`,
+      scale: `${missing.length + безКарточки.length} ингредиентов`,
+      action: "внести приход этого сырья в mydon-stock/партии, если закупки были, либо завести первую партию; ингредиенту без карточки — сначала завести карточку",
     },
   ];
 }
@@ -734,34 +775,62 @@ export function ingredientsWithoutPurchaseGap(
  * «автомат → точка», задача 3), норма для неё всегда «нет данных», и разница
  * никогда не станет видимой, сколько бы ни ввели заливок.
  *
- * ЧИСЛА РАЗВЕДКИ УСТАРЕЛИ ЗА ЧАС РАБОТЫ ВЛАДЕЛЬЦА (см. бриф задачи 4: «Детек-
- * тор, который на сегодняшних данных даёт не то число, СЛОМАН»): план фикси-
- * ровал 4 точки на 36 кг (кардиология 1 корпус, Soliq Yashnobod, Parus F1,
- * Parus F4). Проверено на проде 22.08.2026: у Parus F4 уже есть размещение
- * (заведено 05.08.2026) — гэп для неё закрылся сам, как и задуман весь этот
- * реестр. Живых точек без размещения на сегодня — **3**, суммарно **52,3 кг**:
- * Soliq Yashnobod (25 354 г), Parus F1 (23 563 г), кардиология 1 корпус
- * (3 359 г).
+ * ВЕС СЧИТАЕТСЯ ПО НЕТТО (ревью, блокер Б3). `filledWeight` — вес БРУТТО,
+ * вместе с тарой набора; весь остальной код, включая соседний детектор тары
+ * выше, зовёт `netWeight()`. Складывая брутто, детектор объявлял сырья
+ * примерно вдвое больше, чем его было: у точки «кардиология 1 корпус» две
+ * заливки 1691 г и 1668 г дают 3359 г брутто, но при таре 609 г и 640 г —
+ * всего 2110 г сырья, то есть тара съедала 37% числа.
+ *
+ * Заливки, у которых тара неизвестна (набор не откалиброван или номера набора
+ * нет вовсе), в сумму НЕ входят — нетто по ним посчитать нечем, а подставлять
+ * туда брутто значило бы выдавать тару за сырьё. Но и молчать о них нельзя,
+ * иначе знаменатель тихо съедет: они показываются отдельным числом.
+ *
+ * ПРО ЧИСЛА В ЭТОМ КОММЕНТАРИИ. Здесь раньше стояло «3 точки, 52,3 кг» с
+ * объяснением, что расхождение с планом (4 точки, 36 кг) вызвано закрытием
+ * Parus F4. Объяснение было неверным арифметически — закрытие точки не может
+ * УВЕЛИЧИТЬ сумму — и держалось в коде с пометкой «проверено на проде».
+ * Настоящая причина расхождения — брутто против нетто. Проверяемые числа
+ * живут в тестах, а не в комментарии: комментарий с числом протухает молча.
  */
 export function locationsWithoutMachinePlacementGap(
-  refills: readonly { locationId: string; filledWeight: number }[],
+  refills: readonly { locationId: string; containerNumber: number | null; position: number; filledWeight: number }[],
   placedLocationIds: ReadonlySet<string>,
   locationNameById: ReadonlyMap<string, string>,
+  tareByKey: ReadonlyMap<string, number>,
 ): Gap[] {
   const byLocation = new Map<string, number>();
+  let безТары = 0;
   for (const r of refills) {
     if (placedLocationIds.has(r.locationId)) continue;
-    byLocation.set(r.locationId, (byLocation.get(r.locationId) ?? 0) + r.filledWeight);
+    const net =
+      r.containerNumber === null
+        ? null
+        : netWeight(r.filledWeight, tareByKey.get(`${r.containerNumber}:${r.position}`) ?? null);
+    if (net === null) {
+      безТары++;
+      // Точку всё равно засчитываем: пробел размещения от калибровки тары не
+      // зависит — иначе точка с одними неоткалиброванными наборами исчезла бы
+      // из реестра совсем.
+      if (!byLocation.has(r.locationId)) byLocation.set(r.locationId, 0);
+      continue;
+    }
+    byLocation.set(r.locationId, (byLocation.get(r.locationId) ?? 0) + net);
   }
   if (byLocation.size === 0) return [];
   const names = [...byLocation.keys()].map((id) => locationNameById.get(id) ?? id);
   const totalG = [...byLocation.values()].reduce((s, v) => s + v, 0);
   const kg = Math.round((totalG / 1000) * 10) / 10;
+  // Форма «заливок с неизвестной тарой: N» верна при любом N — склонять
+  // числительное здесь нечем (общего хелпера в ядре нет), а «1 заливок» на
+  // витрине читается как небрежность.
+  const хвост = безТары > 0 ? ` (заливок с неизвестной тарой: ${безТары} — нетто по ним не посчитать, в сумму не вошли)` : "";
   return [
     {
       topic: "заливки: точка без размещения автомата",
       period: null,
-      missing: `${byLocation.size} точек с заливками бункера, но без единого размещения автомата за всю историю — продажи к ним не привязать, норма всегда «нет данных»: ${names.join(", ")}, суммарно ${kg.toLocaleString("ru-RU")} кг`,
+      missing: `${byLocation.size} точек с заливками бункера, но без единого размещения автомата за всю историю — продажи к ним не привязать, норма всегда «нет данных»: ${names.join(", ")}, суммарно ${kg.toLocaleString("ru-RU")} кг нетто${хвост}`,
       scale: `${kg.toLocaleString("ru-RU")} кг`,
       action: "завести размещение автомата на этой точке (Панель → машина → точка) — тогда чашки станут видны и сверка нормы заработает",
     },
@@ -902,6 +971,11 @@ export class GapsService {
     const bunkerIngredients = ingredients
       .filter((i) => bunkerIngredientIds.has(i.id) && i.entityId !== null)
       .map((i) => ({ id: i.entityId as string, name: i.name }));
+    // Ревью: без карточки реестра приход не привязать в принципе — такие идут
+    // отдельным хвостом, а не исчезают из знаменателя (см. детектор 22).
+    const bunkerIngredientsBezKartochki = ingredients
+      .filter((i) => bunkerIngredientIds.has(i.id) && i.entityId === null)
+      .map((i) => i.name);
     const intakeIngredientIds = new Set(intakeRows.map((r) => r.ingredientId));
 
     const placedLocationIds = new Set(placementRows.map((p) => p.locationId));
@@ -928,14 +1002,17 @@ export class GapsService {
       ...bankFlowsWithoutDomainGap(moneyFlowRows),
       ...healthTimezoneGap(appConfig.tz, TZ),
       ...refillMeasuredBeforeMissingGap(refillRows),
-      ...bunkerTareNetNonPositiveGap(4, refillRows, tareByKey),
-      ...bunkerTareNetNonPositiveGap(3, refillRows, tareByKey),
+      // Ревью: позиции 3 и 4 были зашиты литералами — ровно те две, что болели
+      // на день написания детектора. Третья сломанная позиция появилась бы
+      // молча. `usedPositions` посчитан строкой выше, детектор сам возвращает
+      // пусто там, где нетто везде положительное, — перечислять руками нечего.
+      ...[...usedPositions].sort((a, b) => a - b).flatMap((position) => bunkerTareNetNonPositiveGap(position, refillRows, tareByKey)),
       ...unconfiguredBunkerPositionGap(usedPositions, configuredPositions),
       ...targetFillWeightMissingGap(bunkerConfigRows),
       ...telegramImportStalledGap(refillRows, today),
       ...stockIntakeSilenceGap(intakeRows.map((r) => r.dt), today),
-      ...ingredientsWithoutPurchaseGap(bunkerIngredients, intakeIngredientIds),
-      ...locationsWithoutMachinePlacementGap(refillRows, placedLocationIds, locationNames),
+      ...ingredientsWithoutPurchaseGap(bunkerIngredients, intakeIngredientIds, bunkerIngredientsBezKartochki),
+      ...locationsWithoutMachinePlacementGap(refillRows, placedLocationIds, locationNames, tareByKey),
       ...recipeCardsWithoutCompositionGap(productCards),
     ];
   }

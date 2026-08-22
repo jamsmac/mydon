@@ -586,27 +586,42 @@ describe("Реестр пробелов — бункеры: позиция не 
 /* ── Детектор 19: бункеры — недолив не проверяется ────────────────────────── */
 
 describe("Реестр пробелов — бункеры: недолив не проверяется (target_fill_weight)", () => {
-  it("0 из 8 (проверено на проде: 7 сконфигурированных позиций без цели + позиция 8 не сконфигурирована вовсе)", () => {
+  it("считает СТРОКИ конфигурации, а не позиции: у позиции 3 два ингредиента — два эталона", () => {
+    // Прод 22.08.2026: 8 строк конфигурации на 7 позициях (позиция 3 — лимонный
+    // чай и матча). Потребитель ключуется парой `позиция:ингредиент`, поэтому
+    // знаменатель — строки. Счёт по различным позициям дал бы 7 и спрятал матчу.
     const configs = [1, 2, 3, 3, 4, 5, 6, 7].map((position) => ({ position, targetFillWeight: null }));
     const gaps = targetFillWeightMissingGap(configs);
     assert.equal(gaps.length, 1);
     assert.match(gaps[0].missing, /8 из 8/);
+    assert.match(gaps[0].missing, /не ловится ни на одной/);
   });
 
-  it("часть позиций получила цель — число падает, гэп не пропадает", () => {
+  it("часть бункеров получила цель — число падает, гэп не пропадает", () => {
     const gaps = targetFillWeightMissingGap([
       { position: 1, targetFillWeight: 500 },
       { position: 2, targetFillWeight: null },
     ]);
     assert.equal(gaps.length, 1);
-    assert.match(gaps[0].missing, /7 из 8/);
+    assert.match(gaps[0].missing, /1 из 2/);
+    assert.doesNotMatch(gaps[0].missing, /ни на одной/, "часть бункеров уже проверяется — хвост неуместен");
   });
 
-  it("КЛЮЧЕВОЙ ТЕСТ: все 8 позиций получили цель — гэп исчезает", () => {
-    const было = targetFillWeightMissingGap([{ position: 1, targetFillWeight: null }]);
-    assert.equal(было.length, 1);
-    const стало = targetFillWeightMissingGap(Array.from({ length: 8 }, (_, i) => ({ position: i + 1, targetFillWeight: 500 })));
-    assert.deepEqual(стало, []);
+  it("КЛЮЧЕВОЙ ТЕСТ: все настроенные бункеры получили цель — гэп ИСЧЕЗАЕТ (R-K4)", () => {
+    // Прежний знаменатель был константой 8 («столько разрешает схема»), а
+    // настроено семь позиций — `8 − 7 = 1` оставался навсегда, и пробел не
+    // закрылся бы никогда, сколько бы владелец ни заполнял. Это и чинит ревью.
+    const configs = [1, 2, 3, 3, 4, 5, 6, 7].map((position) => ({ position, targetFillWeight: null }));
+    assert.equal(targetFillWeightMissingGap(configs).length, 1);
+    const заполнено = configs.map((c) => ({ ...c, targetFillWeight: 500 }));
+    assert.deepEqual(targetFillWeightMissingGap(заполнено), [], "заполнили — пробел обязан исчезнуть сам");
+  });
+
+  it("конфигурации нет вовсе — пробел остаётся, но без выдуманного знаменателя", () => {
+    const gaps = targetFillWeightMissingGap([]);
+    assert.equal(gaps.length, 1, "недолив не ловится нигде — молчать об этом нельзя");
+    assert.equal(gaps[0].scale, null, "знаменателя не существует — выдумывать его из схемы и значило бы держать незакрываемый пробел");
+    assert.match(gaps[0].missing, /не сконфигурированы/);
   });
 });
 
@@ -708,46 +723,109 @@ describe("Реестр пробелов — закупки сырья: у инг
   });
 });
 
+describe("Реестр пробелов — закупки сырья: ингредиент без карточки реестра", () => {
+  it("ингредиент без карточки не выпадает из знаменателя молча", () => {
+    const gaps = ingredientsWithoutPurchaseGap(
+      [{ id: "ent-1", name: "Кофе" }, { id: "ent-2", name: "Сахар" }],
+      new Set(["ent-1"]),
+      ["Матча"],
+    );
+    assert.equal(gaps.length, 1);
+    assert.match(gaps[0].missing, /1 из 3/, "знаменатель обязан включать ингредиент без карточки");
+    assert.match(gaps[0].missing, /Сахар/);
+    assert.match(gaps[0].missing, /нет карточки реестра/);
+    assert.match(gaps[0].missing, /Матча/);
+  });
+
+  it("все с карточками и все приходовались — пусто", () => {
+    assert.deepEqual(ingredientsWithoutPurchaseGap([{ id: "ent-1", name: "Кофе" }], new Set(["ent-1"]), []), []);
+  });
+
+  it("приходов нет ни у кого, карточки у всех — прежнее поведение не изменилось", () => {
+    const gaps = ingredientsWithoutPurchaseGap([{ id: "ent-1", name: "Кофе" }], new Set(), []);
+    assert.equal(gaps.length, 1);
+    assert.match(gaps[0].missing, /1 из 1/);
+    assert.doesNotMatch(gaps[0].missing, /нет карточки/);
+  });
+});
+
 /* ── Детектор 23: заливки — точка без размещения автомата ─────────────────── */
 
 describe("Реестр пробелов — заливки: точка без размещения автомата", () => {
-  it("3 точки, 52,3 кг (проверено на проде 22.08.2026 — Parus F4 из разведки уже закрылась сама)", () => {
+  /**
+   * Ревью, блокер Б3. `filledWeight` — вес БРУТТО, вместе с тарой набора;
+   * весь остальной код (включая соседний детектор тары) считает через
+   * `netWeight()`. Складывая брутто, детектор объявлял сырья примерно вдвое
+   * больше, чем его было.
+   *
+   * Числа проверены на проде 22.08.2026 по точке «кардиология 1 корпус»:
+   * две заливки 1691 г и 1668 г — это 3359 г брутто (ровно то число, что
+   * стояло в прежней версии), но тара наборов 609 г и 640 г, значит сырья
+   * 1082 + 1028 = 2110 г. Тара съедала 37% объявленного.
+   */
+  it("сумма считается по НЕТТО, а не по брутто (кардиология: 2110 г, а не 3359 г)", () => {
     const refills = [
-      { locationId: "soliq", filledWeight: 25354 },
-      { locationId: "parusF1", filledWeight: 23563 },
-      { locationId: "kardio", filledWeight: 3359 },
-      { locationId: "placed", filledWeight: 999 },
+      { locationId: "kardio", containerNumber: 10, position: 1, filledWeight: 1691 },
+      { locationId: "kardio", containerNumber: 11, position: 1, filledWeight: 1668 },
+      { locationId: "soliq", containerNumber: 12, position: 1, filledWeight: 5000 },
+      { locationId: "placed", containerNumber: 13, position: 1, filledWeight: 999 },
     ];
-    const placed = new Set(["placed"]);
+    const tare = new Map([["10:1", 609], ["11:1", 640], ["12:1", 600], ["13:1", 100]]);
     const names = new Map([
-      ["soliq", "Soliq Yashnobod"],
-      ["parusF1", "Parus F1"],
       ["kardio", "кардиология 1 корпус"],
+      ["soliq", "Soliq Yashnobod"],
       ["placed", "Точка с размещением"],
     ]);
-    const gaps = locationsWithoutMachinePlacementGap(refills, placed, names);
+    const gaps = locationsWithoutMachinePlacementGap(refills, new Set(["placed"]), names, tare);
     assert.equal(gaps.length, 1);
-    assert.match(gaps[0].missing, /3 точек/);
-    assert.match(gaps[0].missing, /52,3 кг/);
-    assert.match(gaps[0].missing, /Soliq Yashnobod/);
+    assert.match(gaps[0].missing, /2 точек/);
+    // 2110 (кардиология, нетто) + 4400 (Soliq, нетто) = 6510 г = 6,5 кг.
+    assert.match(gaps[0].missing, /6,5 кг/);
+    assert.doesNotMatch(gaps[0].missing, /9,4 кг/, "9,4 кг — это сумма брутто, ровно та ошибка, что чинит блокер");
+    assert.match(gaps[0].missing, /кардиология 1 корпус/);
+  });
+
+  it("заливки с неизвестной тарой не молчат: в сумму не входят, но названы числом", () => {
+    const refills = [
+      { locationId: "kardio", containerNumber: 10, position: 1, filledWeight: 1691 },
+      // Набор 99 никогда не калибровался — нетто посчитать НЕЧЕМ. Прежде его
+      // брутто просто прибавлялось к сумме, выдавая тару за сырьё.
+      { locationId: "kardio", containerNumber: 99, position: 1, filledWeight: 1000 },
+      { locationId: "kardio", containerNumber: null, position: 1, filledWeight: 500 },
+    ];
+    const tare = new Map([["10:1", 609]]);
+    const names = new Map([["kardio", "кардиология 1 корпус"]]);
+    const gaps = locationsWithoutMachinePlacementGap(refills, new Set(), names, tare);
+    assert.equal(gaps.length, 1);
+    assert.match(gaps[0].missing, /1,1 кг/, "в сумму идут только 1082 г нетто откалиброванного набора");
+    assert.match(gaps[0].missing, /заливок с неизвестной тарой: 2/, "две заливки без известной тары обязаны быть видны отдельно");
   });
 
   it("у всех точек есть размещение — пусто", () => {
-    assert.deepEqual(locationsWithoutMachinePlacementGap([{ locationId: "a", filledWeight: 100 }], new Set(["a"]), new Map()), []);
+    assert.deepEqual(
+      locationsWithoutMachinePlacementGap(
+        [{ locationId: "a", containerNumber: 1, position: 1, filledWeight: 100 }],
+        new Set(["a"]),
+        new Map(),
+        new Map([["1:1", 10]]),
+      ),
+      [],
+    );
   });
 
   it("КЛЮЧЕВОЙ ТЕСТ: точке завели размещение — она выпадает из списка (Parus F4 после 05.08.2026)", () => {
     const refills = [
-      { locationId: "parusF4", filledWeight: 1000 },
-      { locationId: "soliq", filledWeight: 25354 },
+      { locationId: "parusF4", containerNumber: 20, position: 1, filledWeight: 1000 },
+      { locationId: "soliq", containerNumber: 21, position: 1, filledWeight: 5000 },
     ];
+    const tare = new Map([["20:1", 100], ["21:1", 600]]);
     const names = new Map([
       ["parusF4", "Parus F4"],
       ["soliq", "Soliq Yashnobod"],
     ]);
-    const было = locationsWithoutMachinePlacementGap(refills, new Set(), names);
+    const было = locationsWithoutMachinePlacementGap(refills, new Set(), names, tare);
     assert.match(было[0].missing, /Parus F4/);
-    const стало = locationsWithoutMachinePlacementGap(refills, new Set(["parusF4"]), names);
+    const стало = locationsWithoutMachinePlacementGap(refills, new Set(["parusF4"]), names, tare);
     assert.doesNotMatch(стало[0].missing, /Parus F4/);
     assert.match(стало[0].missing, /Soliq Yashnobod/);
   });
