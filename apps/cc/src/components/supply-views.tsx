@@ -42,24 +42,32 @@ export async function PurchasesView() {
   let links = new Map<string, string>();
   try {
     [rows, summary, links] = await Promise.all([
-      core.purchases(30, 300),
+      // ОКНО ГОД, А НЕ 30 ДНЕЙ. Приход заводится нерегулярно: на проде 320
+      // строк за год и НИ ОДНОЙ за последние 30 дней. Лист показывал «Прихода
+      // за 30 дней нет» при полном журнале — и это не всё: ранний выход ниже
+      // прятал вместе с пустотой единственную кнопку листа, синхронизацию с
+      // mydon-stock. То есть экран сообщал «пусто» и одновременно убирал
+      // единственный способ это исправить.
+      core.purchases(365, 500),
       core.supplySummary(),
       productLinkMap(),
     ]);
   } catch {
     return <div className="empty"><b>Приход недоступен</b>Core не ответил — обнови страницу.</div>;
   }
-  if (rows.length === 0) {
-    return (
-      <div className="empty">
-        <b>Прихода за 30 дней нет</b>
-        Записи появятся из учёта склада (mydon-stock) сами.
-      </div>
-    );
-  }
   return (
     <>
+      {/* Кнопка синхронизации ВСЕГДА выше пустого состояния: раньше ранний
+          выход при нуле строк убирал её вместе с таблицей — «пусто» и нечем
+          починить одновременно. Пустой экран обязан говорить, что сделать. */}
       <SyncIntakeButton />
+      {rows.length === 0 && (
+        <div className="empty">
+          <b>Прихода за год нет</b>
+          Записи приходят из учёта склада (mydon-stock). Если закупки были — нажми
+          «Синхронизировать», иначе заведи первую партию.
+        </div>
+      )}
       {summary && (
         <div className="tiles" style={{ marginBottom: 14 }}>
           <div className="tile">
@@ -69,6 +77,7 @@ export async function PurchasesView() {
           </div>
         </div>
       )}
+      {rows.length > 0 && (
       <div className="book">
         <div className="th">
           <span>Товар</span>
@@ -90,9 +99,12 @@ export async function PurchasesView() {
           </div>
         ))}
       </div>
-      <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
-        {rows.length} партий за 30 дней · из учёта склада, обновляется каждые 10 минут
-      </p>
+      )}
+      {rows.length > 0 && (
+        <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
+          {rows.length} партий за год · из учёта склада, обновляется каждые 10 минут
+        </p>
+      )}
     </>
   );
 }

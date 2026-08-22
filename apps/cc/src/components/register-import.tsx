@@ -54,7 +54,11 @@ interface Decision {
  * заход НА ЭТОМ УСТРОЙСТВЕ, но не синхронизируется между браузерами и не
  * виден в API. Явный компромисс — см. отчёт задачи.
  */
-const STORAGE_KEY = "mydon.registerImport.decisions.v1";
+// Версия ключа поднята вместе с переездом мастера внутрь листа «Приход».
+// Решения прошлого разбора лежат в localStorage браузера владельца; на старом
+// ключе мастер открылся бы с НЕЗАКОНЧЕННЫМ разбором прошлого файла как с
+// текущим — и это выглядело бы не ошибкой, а «он что-то помнит».
+const STORAGE_KEY = "mydon.registerImport.decisions.v2";
 
 function loadStoredDecisions(): Record<string, Decision> {
   if (typeof window === "undefined") return {};

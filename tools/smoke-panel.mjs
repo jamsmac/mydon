@@ -59,6 +59,9 @@ const СТРАНИЦЫ = [
   { path: "/domain/vendhub?tab=service:snack", должно: "Снек" },
   { path: "/domain/vendhub?tab=service:collection", должно: "Инкассация" },
   { path: "/domain/vendhub?tab=service:machine_stock", должно: "Остатки" },
+  // «Приход» переехал в отчёты; мастер импорта стал кнопкой внутри него.
+  // Проверяем и то, что лист открывается, и то, что мастер на месте.
+  { path: "/domain/vendhub?tab=reports:purchase", должно: "Импорт истории закупок" },
 ];
 
 const провалы = [];
