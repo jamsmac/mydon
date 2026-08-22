@@ -90,18 +90,18 @@ export function MapPicker({
             center={центр}
             zoom={точкаЕсть ? 16 : 11}
             scrollWheelZoom
-            style={{ height: 320, width: "100%", borderRadius: 12, background: "#0A1628" }}
+            style={{ height: 320, width: "100%", borderRadius: 12, background: "#f4f4ee" }}
           >
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-              url="https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+              url="https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             />
             <ЛовительКлика onPick={onChange} />
             {точкаЕсть && (
               <CircleMarker
                 center={[la, ln]}
                 radius={9}
-                pathOptions={{ color: "#F0883E", fillColor: "#F0883E", fillOpacity: 0.85, weight: 2 }}
+                pathOptions={{ color: "#ff6b1a", fillColor: "#ff6b1a", fillOpacity: 0.85, weight: 2 }}
               />
             )}
           </MapContainer>

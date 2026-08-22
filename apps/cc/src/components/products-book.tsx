@@ -11,8 +11,8 @@ import type { Entity } from "../lib/core";
  */
 
 const CAT = {
-  10: { label: "Кофейные", color: "#1A6BFF" },
-  11: { label: "Прохладительные", color: "#2BD9A0" },
+  10: { label: "Кофейные", color: "#b8480f" },
+  11: { label: "Прохладительные", color: "#627719" },
 } as const;
 
 export function isIncomplete(e: Entity): boolean {
