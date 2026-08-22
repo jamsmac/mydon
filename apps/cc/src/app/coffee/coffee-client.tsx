@@ -87,10 +87,6 @@ export function CoffeeClient(props: {
   peopleById: Record<string, string>;
 }) {
   const [tab, setTab] = useState<Tab>("entry");
-  const alertCount =
-    props.fillStatus.filter((r) => r.status === "underfill").length +
-    props.reconcile.reduce((n, g) => n + g.rows.filter((r) => r.reconcile.status === "anomaly").length, 0) +
-    props.washScheduleStatus.filter((r) => r.status === "overdue").length;
   return (
     <>
       <div className="coffee-tabs">
@@ -103,9 +99,13 @@ export function CoffeeClient(props: {
         <button className={tab === "journal" ? "on" : ""} onClick={() => setTab("journal")}>
           Журнал
         </button>
-        <button className={tab === "reconcile" ? "on" : ""} onClick={() => setTab("reconcile")}>
-          Сверка{alertCount > 0 ? ` (${alertCount})` : ""}
-        </button>
+        {/* «Сверка» снята из навигации (срез F, задача 5, шаг 5): она читала
+            ожидание из coffee_sale × coffee_product — обе таблицы пусты, все
+            её строки всегда показывали «нет данных». Вместо неё — «Норма и
+            факт» на листе Отчётов (`norm-fact-book.tsx`), считающий честно по
+            периодам бункера. `ReconcileTab` и данные под неё (`reconcile`,
+            `containerConsumption`, `washScheduleStatus` в пропсах ниже) не
+            удалены — решение, чинить ли старый механизм, за владельцем. */}
         <button className={tab === "settings" ? "on" : ""} onClick={() => setTab("settings")}>
           Настройки
         </button>
@@ -122,17 +122,6 @@ export function CoffeeClient(props: {
           refills={props.refillJournal}
           containerReturns={props.containerReturns}
           peopleById={props.peopleById}
-        />
-      )}
-      {tab === "reconcile" && (
-        <ReconcileTab
-          fillStatus={props.fillStatus}
-          reconcile={props.reconcile}
-          from={props.reconcileFrom}
-          to={props.reconcileTo}
-          washScheduleStatus={props.washScheduleStatus}
-          containerConsumption={props.containerConsumption}
-          defaultOwnerRef={props.defaultOwnerRef}
         />
       )}
       {tab === "settings" && (
@@ -602,7 +591,13 @@ function AlertTaskButton({ title, description, ownerRef }: { title: string; desc
   );
 }
 
-function ReconcileTab({
+/**
+ * Больше нигде в этом файле не рендерится (снята с навигации, см. комментарий
+ * у кнопок вкладок выше) — оставлена `export`, чтобы линт не считал функцию
+ * мёртвой и чтобы код был виден и вызываем, если владелец решит её вернуть
+ * или почитать состав старой логики сверки.
+ */
+export function ReconcileTab({
   fillStatus,
   reconcile,
   from,
