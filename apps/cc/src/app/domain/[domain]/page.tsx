@@ -150,9 +150,11 @@ export default async function DomainPage({
   // приводить в новые места, а не в пустую вкладку.
   const TAB_REDIRECTS: Record<string, string> = {
     vending: "settings:machine",
-    supply: "service",
-    coffee: "service",
-    collect: "service",
+    // Уточнены до листьев: раньше все три вели в верх простыни, и человек
+    // всё равно искал нужную панель скроллом.
+    supply: "service:snack",
+    coffee: "service:coffee",
+    collect: "service:collection",
     team: "hr",
     catalog: "settings",
     reference: "settings",
@@ -174,6 +176,9 @@ export default async function DomainPage({
     // ни в одной группе — они живут на сквозном экране «Места». Эти адреса
     // битые НЕ с этой перестройки, а уже сегодня: `/registry` строит на них
     // ссылку, и клик по плитке «location» открывает список товаров.
+    // Переезды листьев «Полевой работы».
+    "reports:collection": "service:collection",
+    "settings:machine_stock": "service:machine_stock",
     "settings:location": "/places",
     "catalog:location": "/places",
     "settings:workshop": "/places",
@@ -665,9 +670,12 @@ export default async function DomainPage({
   let serviceKpi: ServiceKpiTile[] = [];
   let serviceFeed: ServiceFeedItem[] = [];
   const SERVICE_ACTIONS: ServiceAction[] = [
-    { icon: "☕", title: "Пополнить кофе-точку", subtitle: "точка → бункеры подряд → веса · как в боте", href: "#coffee" },
-    { icon: "🍫", title: "Пополнить снек-точку", subtitle: "точка → спирали → количества", href: "#snack" },
-    { icon: "💵", title: "Инкассация", subtitle: "автомат → сумма · весь парк, не только рабочие", href: "#cash" },
+    // Адреса листьев, а не якоря на секции ниже: у «Полевой работы» появился
+    // второй уровень, и три панели больше не лежат простынёй на одной
+    // странице. Якорь вёл бы в пустоту — секции с таким id больше нет.
+    { icon: "☕", title: "Пополнить кофе-точку", subtitle: "точка → бункеры подряд → веса · как в боте", href: href("service:coffee") },
+    { icon: "🍫", title: "Пополнить снек-точку", subtitle: "точка → спирали → количества", href: href("service:snack") },
+    { icon: "💵", title: "Инкассация", subtitle: "автомат → сумма · весь парк, не только рабочие", href: href("service:collection") },
   ];
   if (domain === "vendhub" && activeGroup === "service") {
     let recentRefills: Awaited<ReturnType<typeof core.recentCoffeeRefills>> | null = null;
@@ -977,29 +985,27 @@ export default async function DomainPage({
       )}
 
       {/* ── ACTIVITY: KPI + действия + единая лента (Task 9), формы ввода ниже под якорями ── */}
-      {domain === "vendhub" && activeGroup === "service" && (
-        <>
-          <ServiceTab
-            kpi={serviceKpi}
-            feed={serviceFeed}
-            actions={SERVICE_ACTIONS}
-            // I5: нумерация бункеров и наборов настраивается в CoffeePanel —
-            // он ниже на этой же вкладке (#coffee), а не в «Настройках».
-            referenceHref="#coffee"
-          />
-          <div className="sect" id="coffee" data-toc="Кофе">
-            <div className="sect-h"><h3 className="h2">Кофе-бункеры</h3></div>
-            <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />
-          </div>
-          <div className="sect" id="snack" data-toc="Снек">
-            <div className="sect-h"><h3 className="h2">Пополнение снека</h3></div>
-            <VendingSupplyPanel />
-          </div>
-          <div className="sect" id="cash" data-toc="Инкассация">
-            <div className="sect-h"><h3 className="h2">Инкассация</h3></div>
-            <CollectionsView />
-          </div>
-        </>
+      {/* ── Полевая работа: раньше три полноразмерные панели-формы лежали
+          простынёй на одной вкладке, и навигации внутри не было вовсе —
+          только скролл. Это была самая длинная страница продукта. Теперь у
+          каждой свой лист; «Инкассация» и «Остатки» рендерятся общими
+          ветками листьев ниже (они же снимают прежний дубль инкассации,
+          которая жила и секцией здесь, и листом в отчётах). */}
+      {domain === "vendhub" && activeGroup === "service" && leaf?.type === "feed" && (
+        <ServiceTab
+          kpi={serviceKpi}
+          feed={serviceFeed}
+          actions={SERVICE_ACTIONS}
+          // Нумерация бункеров и наборов правится в кофе-панели — теперь это
+          // отдельный лист, а не секция ниже по странице.
+          referenceHref={href("service:coffee")}
+        />
+      )}
+      {domain === "vendhub" && activeGroup === "service" && leaf?.type === "coffee" && (
+        <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />
+      )}
+      {domain === "vendhub" && activeGroup === "service" && leaf?.type === "snack" && (
+        <VendingSupplyPanel />
       )}
 
       {/* ── SMM / CRM: деятельность объявлена в структуре, подключение — отдельным этапом ── */}
@@ -1285,7 +1291,7 @@ export default async function DomainPage({
                     </div>
                   )}
                 </details>
-                <Link href={href("service")} className={`wt ${attentionTotal > 0 ? "is-hot" : ""}`}>
+                <Link href={href("service:feed")} className={`wt ${attentionTotal > 0 ? "is-hot" : ""}`}>
                   <div className="wl">Требует внимания</div>
                   <div className="wv">{attentionTotal}</div>
                   <div className="wf">
@@ -1327,7 +1333,7 @@ export default async function DomainPage({
                     )}
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                    <Link href={href("service")} className={`wt ${coffeeOrders ? "" : "off"}`}>
+                    <Link href={href("service:coffee")} className={`wt ${coffeeOrders ? "" : "off"}`}>
                       <div className="wl">Чашек · 30 дней</div>
                       <div className="wv">{coffeeOrders ? coffeeOrders.всего.чашек.toLocaleString("ru-RU") : "—"}</div>
                       <div className="wf">
@@ -1336,7 +1342,7 @@ export default async function DomainPage({
                       </div>
                     </Link>
                     <Link
-                      href={href("service")}
+                      href={href("service:coffee")}
                       className={`wt ${coffeeOrders && coffeeOrders.поАвтоматам.length > 0 ? "" : "off"}`}
                     >
                       <div className="wl">Лучший автомат</div>
@@ -1409,7 +1415,7 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("service")} className={`wt ${collSummary ? "" : "off"}`}>
+                <Link href={href("service:collection")} className={`wt ${collSummary ? "" : "off"}`}>
                   <div className="wl">Инкассация · 30 дней</div>
                   <div className="wv">
                     {collSummary ? Number(collSummary.receivedSum).toLocaleString("ru-RU") : "—"}
@@ -1419,7 +1425,7 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("service")} className={`wt ${coffeeTopProducts.length > 0 ? "" : "off"}`}>
+                <Link href={href("service:coffee")} className={`wt ${coffeeTopProducts.length > 0 ? "" : "off"}`}>
                   <div className="wl">Топ товара</div>
                   <div className="wv">{coffeeTopProducts[0]?.товар ?? "—"}</div>
                   <div className="wf">
@@ -2061,7 +2067,7 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact", "cost"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact", "cost", "feed", "coffee", "snack"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
