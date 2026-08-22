@@ -178,6 +178,9 @@ export default async function DomainPage({
     // ссылку, и клик по плитке «location» открывает список товаров.
     // Переезды листьев «Полевой работы».
     "reports:collection": "service:collection",
+    "settings:purchase": "reports:purchase",
+    // Мастер стал кнопкой внутри «Прихода» — старая закладка приводит туда же.
+    "settings:purchase_import": "reports:purchase",
     "settings:machine_stock": "service:machine_stock",
     "settings:location": "/places",
     "catalog:location": "/places",
@@ -540,7 +543,10 @@ export default async function DomainPage({
   // в срезах B и C витрины чинили отдельными коммитами ровно за эту подмену.
   let importIngredientCards: Entity[] | null = null;
   let importWarehouses: Entity[] | null = null;
-  if (domain === "vendhub" && group && leaf?.type === "purchase_import") {
+  // Мастер импорта живёт внутри листа «Приход», поэтому и данные для него
+  // грузим на этом листе. Иначе мастер скажет «складов нет» — не потому, что
+  // их нет, а потому что их не спросили.
+  if (domain === "vendhub" && group && leaf?.type === "purchase") {
     [importIngredientCards, importWarehouses] = await Promise.all([
       core.entitiesOfType(domain, "ingredient").catch(() => null),
       core.entitiesOfType(domain, "warehouse").catch(() => null),
@@ -1400,7 +1406,7 @@ export default async function DomainPage({
             <div className="sect">
               <div className="sect-h"><h3 className="h2">Деньги и партнёры</h3></div>
               <div className="wgrid">
-                <Link href={href("settings:purchase")} className={`wt ${supplySummary ? "" : "off"}`}>
+                <Link href={href("reports:purchase")} className={`wt ${supplySummary ? "" : "off"}`}>
                   <div className="wl">Закупки · 30 дней</div>
                   <div className="wv">
                     {supplySummary ? Math.round(supplySummary.purchases30.total).toLocaleString("ru-RU") : "—"}
@@ -1625,17 +1631,35 @@ export default async function DomainPage({
       {group && leaf?.type === "consumption" && <ConsumptionView />}
 
       {/* ── Приход и остатки: живые данные mydon-stock (этап 2 миграции) ── */}
-      {group && leaf?.type === "purchase" && <PurchasesView />}
+      {group && leaf?.type === "purchase" && (
+        <>
+          <PurchasesView />
+          {/* Мастер разового переноса истории закупок. Раньше это был
+              отдельный лист верхнего уровня, специально внесённый в список
+              «не гасить», чтобы чип не тускнел, — то есть система
+              принудительно подсвечивала то, что нужно раз в жизни. Он
+              отработал один раз: 35 партий, все израсходованы. Код никуда не
+              делся, изменился масштаб входа. */}
+          {domain === "vendhub" && (
+            <details className="sect" style={{ marginTop: 18 }}>
+              <summary className="h2" style={{ cursor: "pointer" }}>
+                Импорт истории закупок
+              </summary>
+              <p className="hint" style={{ margin: "8px 0 12px" }}>
+                Разовый перенос: файл → предпросмотр с предложением карточек → запись. Обычный
+                приход приходит сюда сам из учёта склада.
+              </p>
+              <RegisterImport
+                ingredientCards={importIngredientCards?.map((e) => ({ id: e.id, name: e.name, type: e.type, attrs: e.attrs })) ?? null}
+                warehouses={importWarehouses?.map((e) => ({ id: e.id, name: e.name })) ?? null}
+              />
+            </details>
+          )}
+        </>
+      )}
       {group && leaf?.type === "machine_stock" && <MachineStockView />}
 
       {/* ── Импорт закупок (Task 4): файл → предпросмотр и сопоставление имён → запись ── */}
-      {domain === "vendhub" && group && leaf?.type === "purchase_import" && (
-        <RegisterImport
-          ingredientCards={importIngredientCards?.map((e) => ({ id: e.id, name: e.name, type: e.type, attrs: e.attrs })) ?? null}
-          warehouses={importWarehouses?.map((e) => ({ id: e.id, name: e.name })) ?? null}
-        />
-      )}
-
       {/* ── Сроки годности (Task 5): партии — счётчики по флагам, плитка =
           фильтр (?flag=), поиск ?q=, три честных пустых состояния ── */}
       {group && leaf?.type === "expiry" && (
@@ -2067,7 +2091,7 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact", "cost", "feed", "coffee", "snack"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact", "cost", "feed", "coffee", "snack"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
