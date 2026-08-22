@@ -342,6 +342,58 @@ export interface CoffeeContainerConsumptionReport {
   totalCost: number | null;
 }
 
+/**
+ * Норма против факта по периодам бункера (срез F). `полнота` — шкала
+ * доверия (см. `bunkerPeriod()` в `@mydon/shared`): `разница` заполнена
+ * ТОЛЬКО при `полнота === "полный"`, иначе `null` — это не баг экрана, а
+ * главное правило среза (R-F2), уже решённое в ядре.
+ *
+ * `полнота` здесь ýже, чем `Coverage` в ядре: `NormFactService` строит
+ * `тараОткалибрована` из калибровки тары (`fillNet`/`returnNet` не `null`),
+ * поэтому `залито`/`возвращено` у него никогда не `null`, когда флаг `true` —
+ * причины «нет заливки»/«нет возврата» этим конкретным эндпоинтом физически
+ * не выдаются (ревью 1.4). Полный список — в `bunkerPeriod()`, если завести
+ * второго вызывающего с другой сборкой входа.
+ *
+ * «Нет тары» раньше называлось «нет размещения» и врало: к `machine_placement`
+ * та проверка не относилась никогда. Настоящая проверка размещения — отдельное
+ * состояние «размещение неполно» (ревью, блокер Б2).
+ */
+export interface NormFactPeriodRow {
+  machineId: string;
+  locationName: string | null;
+  position: number;
+  ingredientId: string | null;
+  ingredientName: string | null;
+  from: string;
+  to: string;
+  залито: number;
+  возвращено: number;
+  факт: number;
+  норма: number | null;
+  чашек: number;
+  /** Из `чашек` — сколько не дали вклада в `норма` (ревью 1.1/1.2): товар не опознан, состав не разобран, или единица — не граммы. */
+  чашекБезНормы: number;
+  полнота: "полный" | "позиция неоднозначна" | "тара не откалибрована" | "нет тары" | "размещение неполно" | "рецепт неизвестен" | "нормы нет";
+  разница: number | null;
+}
+
+export interface NormFactReport {
+  from: string;
+  to: string;
+  periods: NormFactPeriodRow[];
+  итог: { факт: number; норма: number; разница: number; периодов: number };
+  внеИтога: {
+    периодов: number;
+    причины: { причина: NormFactPeriodRow["полнота"]; периодов: number }[];
+    /** Заливки/возвраты без пары — за всю историю, знаменатель «периодов» сам неполон (ревью 1.4). */
+    непарныхЗаливок: number;
+    непарныхВозвратов: number;
+  };
+  /** Расхождение `orderIsDelivered` (расход сырья) против `countable` (выручка) за окно — R-F5, видно числом. */
+  расхождениеDeliveredCountable: number;
+}
+
 /** Период размещения аппарата на точке. endDate=null — стоит сейчас. */
 export interface CoffeePlacementRow {
   id: string;
@@ -2092,6 +2144,8 @@ export const core = {
     ),
   coffeeContainerConsumption: (from: string, to: string) =>
     get<CoffeeContainerConsumptionReport>(`/coffee/container-consumption?from=${from}&to=${to}`),
+  coffeeNormFact: (from: string, to: string) =>
+    get<NormFactReport>(`/coffee/norm-fact?from=${from}&to=${to}`),
   recordCoffeeWash: (input: { locationId: string; position?: number; note?: string; performedBy?: string }) =>
     send<{ id: string }>("/coffee/wash", "POST", input),
   coffeeWashHistory: (locationId?: string, limit = 50) =>

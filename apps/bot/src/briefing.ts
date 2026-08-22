@@ -147,7 +147,11 @@ export function formatBriefing(
     if (coffee.underfill > 0) parts.push(`недолив ${coffee.underfill}`);
     if (coffee.anomaly > 0) parts.push(`расхождение ${coffee.anomaly}`);
     if (coffee.overdueWash > 0) parts.push(`мойка просрочена ${coffee.overdueWash}`);
-    lines.push("", `☕ Кофе-бункеры: ${parts.join(", ")} — вкладка «Сверка».`);
+    // Срез F снял мёртвую вкладку «Сверка» (она строилась на двух пустых
+    // таблицах и всегда показывала «неизвестно»). Брифинг уходит владельцу
+    // каждое утро в 07:30 — адрес в нём обязан существовать, иначе указание
+    // «посмотри там» превращается в тупик.
+    lines.push("", `☕ Кофе-бункеры: ${parts.join(", ")} — вкладка «Норма и факт».`);
   }
 
   if (

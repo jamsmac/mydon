@@ -62,6 +62,18 @@ export * from "./xlsx";
 export * from "./combine";
 export * from "./recipe";
 export * from "./ingredient-price";
+/**
+ * Норма расхода сырья из состава карточки (срез F «норма-факт», задача 1).
+ * Имена (`NormRecipeLine`, `parseNormRecipe`) намеренно не совпадают с
+ * `RecipeLine`/`parseRecipe` из `./recipe` — разное поведение на пустом
+ * составе (там `[]`, здесь `{ error }`), см. шапку `norm.ts`.
+ */
+export * from "./norm";
+/**
+ * Периоды бункера и шкала полноты (срез F «норма-факт», задача 2): полнота —
+ * несущая конструкция, разница считается только при полноте «полный».
+ */
+export * from "./bunker-period";
 // Разбор реестра закупок владельца в нормализованные записи (срез D, задача 1).
 export * from "./purchase-register";
 export * from "./batch-import";

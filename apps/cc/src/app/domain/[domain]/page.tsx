@@ -34,6 +34,7 @@ import {
   type GrImport,
   type GrPreorder,
   type GrUnit,
+  type NormFactReport,
   type Obligations,
   type Person,
   type ReconcileResult,
@@ -49,6 +50,7 @@ import { ConsumptionView } from "../../../components/consumption-view";
 import { ProductsBook, isIncomplete } from "../../../components/products-book";
 import { ExpiryBook } from "../../../components/expiry-book";
 import { CashReconcile } from "../../../components/cash-reconcile";
+import { NormFactBook } from "../../../components/norm-fact-book";
 import { GapsBook } from "../../../components/gaps-book";
 import { ListShell, type ListShellKpi } from "../../../components/list-shell";
 import { MachineStockView, PurchasesView } from "../../../components/supply-views";
@@ -539,6 +541,22 @@ export default async function DomainPage({
       core.reconcileCollections(reconcileFrom, reconcileTo).catch(() => null),
       core.cashReconcile(reconcileFrom, reconcileTo).catch(() => null),
     ]);
+  }
+
+  // Норма и факт по бункерам (срез F, задача 5): период задаётся ?from=&to=
+  // формой на листе — тот же приём умолчания «вся известная история», что и
+  // у «Сверки кассы» выше (`isDefaultPeriod` — тот же флаг: он просто отвечает
+  // «были ли from/to в адресе», не привязан к конкретному листу, поэтому
+  // безопасно переиспользуется норма-фактом ровно так же, как сверкой кассы).
+  const NORM_FACT_DEFAULT_FROM = "2025-01-01";
+  let normFactFrom = NORM_FACT_DEFAULT_FROM;
+  let normFactTo = todayKey;
+  let normFactReport: NormFactReport | null = null;
+  if (group && leaf?.type === "norm_fact") {
+    if (sp.from && ISO_DAY_EXACT.test(sp.from)) normFactFrom = sp.from;
+    if (sp.to && ISO_DAY_EXACT.test(sp.to)) normFactTo = sp.to;
+    if (normFactFrom > normFactTo) [normFactFrom, normFactTo] = [normFactTo, normFactFrom];
+    normFactReport = await core.coffeeNormFact(normFactFrom, normFactTo).catch(() => null);
   }
 
   // Реестр пробелов (срез К, задача 6, шаг 3): вычисляется на каждом чтении
@@ -1578,6 +1596,24 @@ export default async function DomainPage({
         />
       )}
 
+      {/* ── Норма и факт (срез F, задача 5): периоды бункера, итог ТОЛЬКО из
+          ядра (по полным периодам), неполные — отдельным блоком по причинам,
+          без порогов и красного (R-F3) — заменяет старую «Сверку» кофе-
+          бункеров (снята из навигации в coffee-client.tsx, шаг 5 брифа) ── */}
+      {group && leaf?.type === "norm_fact" && (
+        <NormFactBook
+          report={normFactReport}
+          hrefBase={`/domain/${domain}`}
+          tab={active}
+          from={normFactFrom}
+          to={normFactTo}
+          defaultFrom={NORM_FACT_DEFAULT_FROM}
+          defaultTo={todayKey}
+          isDefaultPeriod={isDefaultPeriod}
+          q={q ?? ""}
+        />
+      )}
+
       {/* ── Пробелы (срез К, задача 6, шаг 3): что нельзя посчитать, почему, что
           сделать — пустой список это хорошая новость, а не ошибка ── */}
       {group && leaf?.type === "gaps" && (
@@ -1928,7 +1964,7 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps"].includes(leaf.type) && (() => {
+      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "purchase_import", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact"].includes(leaf.type) && (() => {
         const genericQuery = (q ?? "").trim().toLowerCase();
         const shownItems = genericQuery
           ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
