@@ -46,7 +46,19 @@ export interface NormFactReport {
   to: string;
   periods: NormFactPeriod[];
   итог: NormFactTotal;
-  внеИтога: { периодов: number; причины: NormFactExcludedGroup[] };
+  внеИтога: {
+    периодов: number;
+    причины: NormFactExcludedGroup[];
+    /**
+     * Ревью 1.4: заливки/возвраты, для которых `matchRefillsToReturns()` не
+     * нашла пары — за всю историю, не только за окно `[from, to]` (у
+     * одиночной записи нет интервала, который можно обрезать окном).
+     * Знаменатель «N периодов» на витрине сам неполон — эти два числа
+     * обязаны быть видны, а не тонуть молча.
+     */
+    непарныхЗаливок: number;
+    непарныхВозвратов: number;
+  };
   /**
    * Сырьё тратится на ВЫДАННЫЙ напиток (`orderIsDelivered`, R-F5), а в базе
    * материализован `countable` («годится в выручку») — другое правило.
@@ -418,6 +430,16 @@ export class NormFactService {
     // ── Пары заливка → возврат → периоды бункера ────────────────────────
     const pairs = this.matchRefillsToReturns(refillRows, returnRows, tareByKey);
 
+    // Ревью 1.4: знаменатель полноты («885 пар» на витрине) сам неполон —
+    // 268 заливок и 195 возвратов (на живых данных) не входят ни в одну пару
+    // и раньше не были видны нигде. `matchRefillsToReturns()` использует
+    // каждую заливку и каждый возврат не более одного раза (см. её шапку),
+    // поэтому «непарных» — ровно разница между сырым числом строк журнала и
+    // числом пар, за ВСЮ историю (у одиночной непарной записи нет своего
+    // интервала, который можно было бы обрезать окном `[from, to]`).
+    const непарныхЗаливок = refillRows.length - pairs.length;
+    const непарныхВозвратов = returnRows.length - pairs.length;
+
     const periods: NormFactPeriod[] = pairs.map((p) => {
       const { ingredientId, однозначна } = this.resolveIngredient(p.position, p.ingredientIdRaw, candidatesByPosition);
       const размещена = p.fillNet !== null && p.returnNet !== null;
@@ -490,6 +512,8 @@ export class NormFactService {
       внеИтога: {
         периодов: внеИтогаRows.length,
         причины: [...причины.entries()].map(([причина, периодов]) => ({ причина: причина as Exclude<Coverage, "полный">, периодов })),
+        непарныхЗаливок,
+        непарныхВозвратов,
       },
       расхождениеDeliveredCountable,
     };

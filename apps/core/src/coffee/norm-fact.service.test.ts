@@ -196,6 +196,11 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(причины.get("нет размещения"), 1);
     assert.equal(причины.get("нормы нет"), 1);
 
+    // Ревью 1.4: в этой фикстуре у каждой заливки есть ровно один возврат —
+    // непарных нет (отдельная фикстура ниже проверяет обратное).
+    assert.equal(report.внеИтога.непарныхЗаливок, 0);
+    assert.equal(report.внеИтога.непарныхВозвратов, 0);
+
     // R-F5: 2 несовпадения delivered/countable внутри окна — видно числом.
     assert.equal(report.расхождениеDeliveredCountable, 2);
   });
@@ -391,5 +396,38 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(periodX.чашек, 1, "день возврата (to) — периоду принадлежит");
     assert.equal(periodY.чашек, 0, "тот же день как start (from) следующего периода — исключён, не задвоен");
     assert.equal(periodX.чашек + periodY.чашек, 1, "чашка учтена ровно один раз на всю историю, а не дважды");
+  });
+
+  it("ревью 1.4: непарные заливки и возвраты видны числом, а не пропадают", async () => {
+    // 300↔300 — нормальная пара. 301 залит, но никогда не возвращён (нет
+    // строки возврата вовсе). 302 возвращён, но заливки для него в журнале
+    // нет вовсе (например, начало истории). Обе ситуации раньше не были
+    // видны нигде — ни строкой, ни счётчиком.
+    const refills = [
+      { position: 1, containerNumber: 300, enteredDate: "2026-12-01", filledWeight: 600, locationId: "loc-1", ingredientId: null },
+      { position: 1, containerNumber: 301, enteredDate: "2026-12-01", filledWeight: 400, locationId: "loc-1", ingredientId: null },
+    ];
+    const returns = [
+      { position: 1, containerNumber: 300, weight: 200, returnedDate: "2026-12-10" },
+      { position: 1, containerNumber: 302, weight: 300, returnedDate: "2026-12-05" },
+    ];
+    const tare = [{ containerNumber: 300, position: 1, tareWeight: 100 }];
+    const bunkerConfig = [{ position: 1, ingredientId: "ing-1" }];
+
+    const db = normFactDb({
+      refills, returns, tare, bunkerConfig,
+      ingredients: [ingredient],
+      placements: [placement],
+      orders: [],
+      entities: [loc, machine],
+      aliases: [],
+    });
+    const s = new NormFactService(db);
+    const report = await s.report("2026-12-01", "2026-12-31");
+
+    // Только пара 300↔300 строит период — 301 и 302 без пары не участвуют.
+    assert.equal(report.periods.length, 1);
+    assert.equal(report.внеИтога.непарныхЗаливок, 1, "заливка 301 без возврата — видна числом");
+    assert.equal(report.внеИтога.непарныхВозвратов, 1, "возврат 302 без заливки — виден числом");
   });
 });
