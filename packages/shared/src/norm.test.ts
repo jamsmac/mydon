@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { normFor, parseRecipe, type RecipeLine } from "./norm";
+import { normFor, parseNormRecipe, type NormRecipeLine } from "./norm";
 
 describe("Норма расхода из состава карточки (срез F, задача 1)", () => {
   it("состав переводится в норму на партию чашек", () => {
-    const r = parseRecipe([{ ingredient: "Кофе", qty: 8, unit: "г" }]) as RecipeLine[];
+    const r = parseNormRecipe([{ ingredient: "Кофе", qty: 8, unit: "г" }]) as NormRecipeLine[];
     const n = normFor(r, 100);
     assert.deepEqual(n.get("Кофе"), { qty: 800, unit: "г" });
   });
@@ -16,11 +16,11 @@ describe("Норма расхода из состава карточки (сре
   });
 
   it("пустой состав — не норма ноль, а признак отсутствия рецепта", () => {
-    const r = parseRecipe(null);
+    const r = parseNormRecipe(null);
     assert.ok("error" in r, "нет состава — это «не знаем», а не «ноль граммов»");
   });
 
   it("отрицательное количество в составе — ошибка ввода", () => {
-    assert.ok("error" in parseRecipe([{ ingredient: "Кофе", qty: -8, unit: "г" }]));
+    assert.ok("error" in parseNormRecipe([{ ingredient: "Кофе", qty: -8, unit: "г" }]));
   });
 });
