@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Manrope:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0a1628; color: #e8ecf2; font-family: "Manrope", system-ui, sans-serif; font-size: 15px; -webkit-font-smoothing: antialiased; }
+    a { color: #e8ecf2; } a:hover { color: #1a6bff; }
+  </style>
+</helmet>
+<div style="width: 1080px; background: #0a1628; padding: 24px 26px 30px; display: flex; flex-direction: column; gap: 20px">
+
+  <div style="display: flex; align-items: baseline; gap: 12px">
+    <h2 style="font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800">Обслуживание</h2>
+    <div style="font-size: 13px; color: #8494a8">пополнение · бункеры · инкассация — одна вкладка</div>
+  </div>
+
+  <!-- Мини-KPI вкладки -->
+  <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px">
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px">
+      <div style="font-size: 11.5px; color: #8494a8">Залито сегодня</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600">3 бункера</div>
+    </div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px">
+      <div style="font-size: 11.5px; color: #8494a8">Точек ждёт визита</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600; color: #ff6b1a">5</div>
+    </div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px">
+      <div style="font-size: 11.5px; color: #8494a8">Снек: пустые спирали</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600; color: #ff6b1a">4</div>
+    </div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 12px 13px; display: flex; flex-direction: column; gap: 6px">
+      <div style="font-size: 11.5px; color: #8494a8">Деньги не сняты</div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600">с 24 июн</div>
+    </div>
+  </div>
+
+  <!-- Быстрый старт: тип выбирает форму -->
+  <div style="display: flex; gap: 10px">
+    <div style="flex: 1; background: rgba(26,107,255,0.14); border: 1px solid rgba(26,107,255,0.42); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+      <div style="font-weight: 700; color: #1a6bff; font-size: 15px">&#9749; Пополнить кофе-точку</div>
+      <div style="font-size: 12px; color: #8494a8">точка &#8594; бункеры подряд &#8594; веса · как в боте</div>
+    </div>
+    <div style="flex: 1; background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+      <div style="font-weight: 700; font-size: 15px">&#127850; Пополнить снек-точку</div>
+      <div style="font-size: 12px; color: #8494a8">точка &#8594; спирали &#8594; количества</div>
+    </div>
+    <div style="flex: 1; background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+      <div style="font-weight: 700; font-size: 15px">&#128181; Инкассация</div>
+      <div style="font-size: 12px; color: #8494a8">автомат &#8594; сумма · весь парк, не только рабочие</div>
+    </div>
+  </div>
+
+  <!-- История: одна лента всех полевых событий -->
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <div style="display: flex; align-items: center; gap: 10px">
+      <h3 style="font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700">История — что и когда было</h3>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid #1e3350; color: #8494a8">фильтр: все · кофе · снек · деньги</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 11px 14px; display: flex; align-items: center; gap: 12px">
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5a6b80; width: 88px">сегодня 09:52</span>
+        <span style="font-size: 13.5px"><b>KIUT Общежитие</b> · бункер 7 · Кофе · залито 1 628 г</span>
+        <span style="margin-left: auto; font-size: 12px; color: #8494a8">Володя</span>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 11px 14px; display: flex; align-items: center; gap: 12px">
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5a6b80; width: 88px">сегодня 09:41</span>
+        <span style="font-size: 13.5px"><b>KIUT Общежитие</b> · бункер 3 · Матча · залито 1 677 г</span>
+        <span style="margin-left: auto; font-size: 12px; color: #8494a8">Володя</span>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 11px 14px; display: flex; align-items: center; gap: 12px">
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5a6b80; width: 88px">вчера 17:03</span>
+        <span style="font-size: 13.5px"><b>Olma Администрация · snack</b> · спирали A1&#8211;A6 · 46 шт</span>
+        <span style="margin-left: auto; font-size: 12px; color: #8494a8">Рустам</span>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid rgba(255,107,26,0.45); border-radius: 10px; padding: 11px 14px; display: flex; align-items: center; gap: 12px">
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #5a6b80; width: 88px">24 июн</span>
+        <span style="font-size: 13.5px; color: #ff6b1a"><b>SKLAD 1C</b> · инкассация 412 000 сум — последняя по парку</span>
+        <span style="margin-left: auto; font-size: 12px; color: #8494a8">Рустам</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Связь с задачами -->
+  <div style="background: rgba(43,217,160,0.06); border: 1px solid rgba(43,217,160,0.35); border-radius: 12px; padding: 13px 16px; font-size: 13px; color: #8494a8; display: flex; gap: 10px; align-items: center">
+    <span style="color: #2bd9a0; font-weight: 700">Задачи &#8596; Обслуживание:</span>
+    подготовка бункеров и «точек ждёт визита» рождают задачи оператору; выполненная заливка сама закрывает задачу — двойного ввода нет.
+  </div>
+
+  <!-- Справочник нумерации -->
+  <div style="background: rgba(21,38,64,0.86); border: 1px dashed #1e3350; border-radius: 12px; padding: 13px 16px; font-size: 13px; color: #8494a8">
+    Нумерация бункеров (1&#8211;8 &#215; ингредиент) и наборов (1&#8211;27, тара) — в <b style="color:#e8ecf2">Каталог &#8594; Справочники</b>, здесь только выбор из них.
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1080,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

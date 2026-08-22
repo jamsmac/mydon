@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Manrope:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0a1628; color: #e8ecf2; font-family: "Manrope", system-ui, sans-serif; font-size: 15px; -webkit-font-smoothing: antialiased; }
+    a { color: #e8ecf2; } a:hover { color: #1a6bff; }
+  </style>
+</helmet>
+<div style="width: 1080px; background: #0a1628; padding: 24px 26px 30px; display: flex; flex-direction: column; gap: 26px">
+
+  <h2 style="font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800">Вкладки направления: было &#8594; финальная структура</h2>
+
+  <div style="display: flex; flex-direction: column; gap: 8px">
+    <div style="font-size: 12px; color: #5a6b80; letter-spacing: 0.06em; text-transform: uppercase; font-family: 'IBM Plex Mono', monospace">Сейчас · 10 вкладок, операции разорваны на три</div>
+    <div style="display: flex; gap: 6px; flex-wrap: wrap">
+      <span style="border: 1px solid #1a6bff; background: #1a6bff; color: #fff; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; font-weight: 600">Дашборд</span>
+      <span style="border: 1px solid #1e3350; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #8494a8">Автоматы</span>
+      <span style="border: 1px dashed rgba(255,107,26,0.45); border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #ff6b1a">Пополнение</span>
+      <span style="border: 1px dashed rgba(255,107,26,0.45); border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #ff6b1a">Кофе-бункеры</span>
+      <span style="border: 1px solid #1e3350; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #8494a8">Каталог</span>
+      <span style="border: 1px solid #1e3350; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #8494a8">Справочники</span>
+      <span style="border: 1px solid #1e3350; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #8494a8">Отчёты</span>
+      <span style="border: 1px dashed rgba(255,107,26,0.45); border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #ff6b1a">Инкассация</span>
+      <span style="border: 1px solid #1e3350; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #8494a8">Команда 4</span>
+      <span style="border: 1px solid #1e3350; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #8494a8">Задачи 3</span>
+    </div>
+    <div style="font-size: 12px; color: #ff6b1a">оранжевым — три вкладки одной операции «обслужить точку»</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 8px">
+    <div style="font-size: 12px; color: #5a6b80; letter-spacing: 0.06em; text-transform: uppercase; font-family: 'IBM Plex Mono', monospace">Финальная структура владельца · вкладки латиницей · вкладка = деятельность</div>
+    <div style="display: flex; gap: 6px; flex-wrap: wrap">
+      <span style="border: 1px solid #1a6bff; background: #1a6bff; color: #fff; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; font-weight: 600">DASHBOARD</span>
+      <span style="border: 1px solid rgba(43,217,160,0.4); background: rgba(43,217,160,0.1); border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #2bd9a0; font-weight: 600">ACTIVITY</span>
+      <span style="border: 1px solid rgba(43,217,160,0.4); background: rgba(43,217,160,0.1); border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #2bd9a0; font-weight: 600">TASKS 3</span>
+      <span style="border: 1px solid #1e3350; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #8494a8">REPORTS</span>
+      <span style="border: 1px dashed rgba(26,107,255,0.42); border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #1a6bff">SMM</span>
+      <span style="border: 1px dashed rgba(26,107,255,0.42); border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #1a6bff">CRM</span>
+      <span style="border: 1px dashed rgba(26,107,255,0.42); border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #1a6bff">HR</span>
+      <span style="border: 1px solid #1e3350; border-radius: 999px; padding: 8px 15px; font-size: 13.5px; color: #8494a8">&#9881; SETTINGS</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: #8494a8">
+      <div><b style="color:#e8ecf2">ACTIVITY</b> (бывш. «Обслуживание») — вторым: ежедневная полевая работа ближе всего к дашборду. Пополнение + бункеры + инкассация внутри.</div>
+      <div><b style="color:#e8ecf2">Задачи</b> — третьим, сквозной разрез по всем деятельностям.</div>
+      <div><b style="color:#e8ecf2">SMM · CRM · HR</b> — посадочные места деятельностей (пунктир): продвижение (сайт, Instagram, TikTok), звонки и обращения, люди и оценка работы. HR сразу наполняется «Командой».</div>
+      <div><b style="color:#e8ecf2">Настройки</b> — профиль направления + Каталог (товары, ингредиенты, контрагенты, запчасти, АВТОМАТЫ, склады, справочники, нумерация бункеров) + прочие настройки.</div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 8px">
+    <div style="font-size: 12px; color: #5a6b80; letter-spacing: 0.06em; text-transform: uppercase; font-family: 'IBM Plex Mono', monospace">Настройки изнутри</div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 14px 16px; display: flex; gap: 10px">
+      <div style="flex: 1; background: rgba(21,38,64,0.86); border: 1px solid #1e3350; border-radius: 10px; padding: 11px 13px">
+        <div style="font-weight: 700; font-size: 13px; margin-bottom: 4px">Профиль</div>
+        <div style="font-size: 11.5px; color: #8494a8">реквизиты и параметры направления</div>
+      </div>
+      <div style="flex: 2.2; background: rgba(21,38,64,0.86); border: 1px solid rgba(26,107,255,0.42); border-radius: 10px; padding: 11px 13px">
+        <div style="font-weight: 700; font-size: 13px; margin-bottom: 4px; color: #1a6bff">Каталог</div>
+        <div style="font-size: 11.5px; color: #8494a8">товары · ингредиенты · контрагенты · запчасти · <b style="color:#e8ecf2">автоматы</b> · склады · справочники (ИКПУ, НДС, упаковка, штрих-коды, нумерация бункеров и наборов)</div>
+      </div>
+      <div style="flex: 1; background: rgba(21,38,64,0.86); border: 1px solid #1e3350; border-radius: 10px; padding: 11px 13px">
+        <div style="font-weight: 700; font-size: 13px; margin-bottom: 4px">Прочее</div>
+        <div style="font-size: 11.5px; color: #8494a8">настройки направления</div>
+      </div>
+    </div>
+    <div style="font-size: 12px; color: #8494a8">Реестр аппаратов живёт в Каталоге; оперативный взгляд на парк — на дашборде и в Обслуживании по клику. «Команда» отдельно исчезает — она первое наполнение HR.</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 8px">
+    <div style="font-size: 12px; color: #5a6b80; letter-spacing: 0.06em; text-transform: uppercase; font-family: 'IBM Plex Mono', monospace">Шаблон любой вкладки-листа: цифры &#8594; действия &#8594; данные</div>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px">
+      <div style="display: flex; gap: 8px">
+        <div style="flex: 1; background: rgba(21,38,64,0.86); border: 1px solid #1e3350; border-radius: 10px; padding: 9px 12px; font-size: 12px; color: #8494a8">мини-KPI по теме вкладки</div>
+        <div style="flex: 1; background: rgba(21,38,64,0.86); border: 1px solid #1e3350; border-radius: 10px; padding: 9px 12px; font-size: 12px; color: #8494a8">мини-KPI</div>
+        <div style="flex: 1; background: rgba(21,38,64,0.86); border: 1px solid #1e3350; border-radius: 10px; padding: 9px 12px; font-size: 12px; color: #8494a8">мини-KPI</div>
+      </div>
+      <div style="display: flex; gap: 8px">
+        <div style="background: rgba(26,107,255,0.14); border: 1px solid rgba(26,107,255,0.42); color: #1a6bff; border-radius: 10px; padding: 8px 14px; font-size: 12.5px; font-weight: 700">+ быстрое действие по теме</div>
+        <div style="background: rgba(21,38,64,0.86); border: 1px solid #1e3350; border-radius: 10px; padding: 8px 14px; font-size: 12.5px; color: #8494a8">+ второе</div>
+      </div>
+      <div style="background: rgba(21,38,64,0.86); border: 1px solid #1e3350; border-radius: 10px; padding: 12px; font-size: 12px; color: #5a6b80">плитки записей / история — как в карточках 360</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1080,"height":880}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

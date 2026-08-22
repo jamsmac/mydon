@@ -1,0 +1,214 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Manrope:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+  <style>
+    body { margin: 0; background: #0a1628; color: #e8ecf2; font-family: "Manrope", system-ui, sans-serif; font-size: 15px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+    a { color: #e8ecf2; } a:hover { color: #1a6bff; }
+  </style>
+</helmet>
+<div style="width: 1280px; background: #0a1628; padding: 22px 26px 30px; display: flex; flex-direction: column; gap: 24px">
+
+  <div style="display: flex; align-items: baseline; gap: 12px">
+    <div style="font-family: 'Syne', sans-serif; font-weight: 800; font-size: 34px; letter-spacing: -0.01em">VendHub</div>
+    <div style="font-size: 13px; color: #8494a8">212 записей в реестре · открытых задач: 3</div>
+  </div>
+
+  <!-- 1. Показатели ПРЕДПРИЯТИЯ: одна строка ответа «как дела» -->
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <div style="display: flex; align-items: center; gap: 10px">
+      <h3 style="font-family: 'Syne', sans-serif; font-size: 17px; font-weight: 700">Предприятие</h3>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid rgba(43,217,160,0.4); color: #2bd9a0; background: rgba(43,217,160,0.1)">данные по 20 авг, 16:12</span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px">
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid rgba(26,107,255,0.42); border-radius: 12px; padding: 15px 16px 13px; min-height: 126px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">Выручка · 30 дней</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin-top: auto">54,2 млн</div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">кофе 44,7 + снек 9,5<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 15px 16px 13px; min-height: 126px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">Валовая маржа</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600; margin-top: auto">55%</div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">кофе 59% · снек 28%<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 15px 16px 13px; min-height: 126px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">Деньги в автоматах</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600; margin-top: auto">&#8776; 3,1 млн</div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">наличные с последней инкассации<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid rgba(255,107,26,0.45); border-radius: 12px; padding: 15px 16px 13px; min-height: 126px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600; color: #ff6b1a">Требует внимания</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600; margin-top: auto; color: #ff6b1a">11</div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">пусто 4 · не выдано 4 · задачи 3<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Быстрые действия — СРАЗУ под показателями, не в подвале -->
+  <div style="display: flex; gap: 10px">
+    <div style="display: flex; align-items: center; gap: 8px; background: rgba(26,107,255,0.14); border: 1px solid rgba(26,107,255,0.42); color: #1a6bff; border-radius: 10px; padding: 11px 18px; font-weight: 700; font-size: 14px">+ Пополнение</div>
+    <div style="display: flex; align-items: center; gap: 8px; background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 11px 18px; font-weight: 600; font-size: 14px">+ Инкассация</div>
+    <div style="display: flex; align-items: center; gap: 8px; background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 11px 18px; font-weight: 600; font-size: 14px">+ Ремонт / выезд</div>
+    <div style="display: flex; align-items: center; gap: 8px; background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 10px; padding: 11px 18px; font-weight: 600; font-size: 14px">+ Задача</div>
+    <div style="margin-left: auto; display: flex; align-items: center; font-size: 12px; color: #5a6b80">действия — на расстоянии одного клика от цифр</div>
+  </div>
+
+  <!-- 3. Контуры: кофе и снек своими рядами, глубже — по клику -->
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px">
+    <div style="display: flex; flex-direction: column; gap: 10px">
+      <div style="display: flex; align-items: center; gap: 10px">
+        <h3 style="font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700">Кофе · 20 точек</h3>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid rgba(255,107,26,0.45); color: #ff6b1a; background: rgba(255,107,26,0.12)">не выдано · 4</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px">
+        <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 13px 14px 12px; min-height: 104px; display: flex; flex-direction: column">
+          <div style="font-size: 12.5px; font-weight: 600">Чашек · 30 дней</div>
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; margin-top: auto">2 259</div>
+          <div style="margin-top: 7px; padding-top: 7px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">чек 19 803 сум<span style="margin-left: auto">&#8594;</span></div>
+        </div>
+        <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 13px 14px 12px; min-height: 104px; display: flex; flex-direction: column">
+          <div style="font-size: 12.5px; font-weight: 600">Лучший автомат</div>
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 17px; font-weight: 600; margin-top: auto">American hospital</div>
+          <div style="margin-top: 7px; padding-top: 7px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">2 569 чашек за 30 дней<span style="margin-left: auto">&#8594;</span></div>
+        </div>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px">
+      <div style="display: flex; align-items: center; gap: 10px">
+        <h3 style="font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700">Снек · 2 точки</h3>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid rgba(43,217,160,0.4); color: #2bd9a0; background: rgba(43,217,160,0.1)">живые · OurVend</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px">
+        <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 13px 14px 12px; min-height: 104px; display: flex; flex-direction: column">
+          <div style="font-size: 12.5px; font-weight: 600">Продано вчера</div>
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; margin-top: auto">38 шт</div>
+          <div style="margin-top: 7px; padding-top: 7px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">354 000 сум<span style="margin-left: auto">&#8594;</span></div>
+        </div>
+        <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 13px 14px 12px; min-height: 104px; display: flex; flex-direction: column">
+          <div style="font-size: 12.5px; font-weight: 600">Пустые позиции</div>
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; margin-top: auto; color: #ff6b1a">4</div>
+          <div style="margin-top: 7px; padding-top: 7px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">спирали закончились — везти пополнение<span style="margin-left: auto">&#8594;</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Деньги и партнёры: потоки, поставщики, продажи — новое -->
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <h3 style="font-family: 'Syne', sans-serif; font-size: 17px; font-weight: 700">Деньги и партнёры</h3>
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px">
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 15px 16px 13px; min-height: 126px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">Закупки · 30 дней</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600; margin-top: auto">18,4 млн</div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">сырьё и товар, с НДС<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 15px 16px 13px; min-height: 126px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">Поставщики</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600; margin-top: auto">13</div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">крупнейший: KMS 59,8 млн/год<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 15px 16px 13px; min-height: 126px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">Инкассация · 30 дней</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600; margin-top: auto">0</div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">последний сбор: 24 июн<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 15px 16px 13px; min-height: 126px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">Топ товара · 30 дней</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 17px; font-weight: 600; margin-top: auto">Cappuccino</div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">затем MacCoffee 3in1, Ice WildFruit<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Парк: состояние техники, каждая плитка кликается в отбор реестра -->
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <h3 style="font-family: 'Syne', sans-serif; font-size: 17px; font-weight: 700">Парк</h3>
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px">
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 13px 14px 12px; min-height: 104px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">В работе</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; margin-top: auto; color: #2bd9a0">21</div>
+        <div style="margin-top: 7px; padding-top: 7px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">19 кофе · 2 снек<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 13px 14px 12px; min-height: 104px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">На складе</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; margin-top: auto">7</div>
+        <div style="margin-top: 7px; padding-top: 7px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">ждут локации<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 13px 14px 12px; min-height: 104px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">В ремонте</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; margin-top: auto; color: #ff6b1a">3</div>
+        <div style="margin-top: 7px; padding-top: 7px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">2 экрана · 1 напитки<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+      <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 13px 14px 12px; min-height: 104px; display: flex; flex-direction: column">
+        <div style="font-size: 12.5px; font-weight: 600">Выработка · чаш/авт</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; margin-top: auto">98</div>
+        <div style="margin-top: 7px; padding-top: 7px; border-top: 1px solid #1e3350; font-size: 11px; color: #5a6b80; display: flex; gap: 6px">30 дней · тренд вниз<span style="margin-left: auto">&#8594;</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. График выручки: единая линия, кофе + снек -->
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <h3 style="font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700">Выручка по дням · 30 дней · оба контура</h3>
+    <div style="background: rgba(15,30,51,0.84); border: 1px solid #1e3350; border-radius: 12px; padding: 16px; display: flex; align-items: flex-end; gap: 5px; height: 120px">
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:62%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:48%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:71%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:56%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:38%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:64%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:80%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:52%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:44%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:69%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:58%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:35%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:73%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:66%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:51%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:59%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:47%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:76%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:63%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:41%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:68%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:55%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:72%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:49%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:61%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:78%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:54%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:43%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:67%; border-radius:3px 3px 0 0"></div>
+      <div style="flex:1; background:#1a6bff; opacity:.85; height:70%; border-radius:3px 3px 0 0"></div>
+    </div>
+  </div>
+
+  <!-- 7. Карта — В САМОМ НИЗУ, свёрнута: зум не перехватывает прокрутку -->
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <div style="display: flex; align-items: center; gap: 10px">
+      <h3 style="font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700">Автоматы на карте</h3>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid #1e3350; color: #8494a8">развернуть &#8595;</span>
+    </div>
+    <div style="background: rgba(21,38,64,0.86); border: 1px dashed #1e3350; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; gap: 14px; color: #8494a8; font-size: 13px">
+      <span style="display:inline-flex; width:10px; height:10px; border-radius:50%; background:#1a6bff"></span>кофе 20
+      <span style="display:inline-flex; width:10px; height:10px; border-radius:50%; background:#2bd9a0"></span>снек 2
+      <span style="margin-left:auto; font-size:12px; color:#5a6b80">карта раскрывается по клику — не перехватывает колесо при прокрутке страницы</span>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1280,"height":1560}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

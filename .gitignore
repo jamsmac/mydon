@@ -31,3 +31,9 @@ pnpm-debug.log*
 # drizzle: миграции КОММИТЯТСЯ (source of truth схемы),
 # игнорируем только служебный кэш drizzle-kit
 .drizzle/
+
+# Опубликованная оболочка канвы Claude Design (2,3 МБ) — артборды рядом в
+# .dc.html читаются и правятся, оболочка пересобирается из них.
+design/dashboard-redesign/vendhub-dashboard-redesign.html
+# Прототипы, отданные на просмотр: черновики, а не часть панели.
+apps/cc/public/prototypes/
