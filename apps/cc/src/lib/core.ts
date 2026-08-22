@@ -342,6 +342,39 @@ export interface CoffeeContainerConsumptionReport {
   totalCost: number | null;
 }
 
+/**
+ * Норма против факта по периодам бункера (срез F). `полнота` — шкала
+ * доверия (см. `bunkerPeriod()` в `@mydon/shared`): `разница` заполнена
+ * ТОЛЬКО при `полнота === "полный"`, иначе `null` — это не баг экрана, а
+ * главное правило среза (R-F2), уже решённое в ядре.
+ */
+export interface NormFactPeriodRow {
+  machineId: string;
+  locationName: string | null;
+  position: number;
+  ingredientId: string | null;
+  ingredientName: string | null;
+  from: string;
+  to: string;
+  залито: number;
+  возвращено: number;
+  факт: number;
+  норма: number | null;
+  чашек: number;
+  полнота: "полный" | "нет возврата" | "нет заливки" | "позиция неоднозначна" | "тара не откалибрована" | "нет размещения" | "нормы нет";
+  разница: number | null;
+}
+
+export interface NormFactReport {
+  from: string;
+  to: string;
+  periods: NormFactPeriodRow[];
+  итог: { факт: number; норма: number; разница: number; периодов: number };
+  внеИтога: { периодов: number; причины: { причина: NormFactPeriodRow["полнота"]; периодов: number }[] };
+  /** Расхождение `orderIsDelivered` (расход сырья) против `countable` (выручка) за окно — R-F5, видно числом. */
+  расхождениеDeliveredCountable: number;
+}
+
 /** Период размещения аппарата на точке. endDate=null — стоит сейчас. */
 export interface CoffeePlacementRow {
   id: string;
@@ -2092,6 +2125,8 @@ export const core = {
     ),
   coffeeContainerConsumption: (from: string, to: string) =>
     get<CoffeeContainerConsumptionReport>(`/coffee/container-consumption?from=${from}&to=${to}`),
+  coffeeNormFact: (from: string, to: string) =>
+    get<NormFactReport>(`/coffee/norm-fact?from=${from}&to=${to}`),
   recordCoffeeWash: (input: { locationId: string; position?: number; note?: string; performedBy?: string }) =>
     send<{ id: string }>("/coffee/wash", "POST", input),
   coffeeWashHistory: (locationId?: string, limit = 50) =>
