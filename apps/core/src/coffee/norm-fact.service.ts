@@ -188,11 +188,32 @@ export class NormFactService {
       const k = key(r.containerNumber, r.position);
       const list = fillsByKey.get(k) ?? [];
       const from = consumedFillIdx.get(k) ?? 0;
+      // Ревью, блокер Б1: при НИЧЬЕЙ ПО ДАТЕ возврат обязан закрывать заливку
+      // СТРОГО РАНЬШЕ себя, а не сегодняшнюю. `enteredDate`/`returnedDate` —
+      // календарные даты без времени, а замена набора за один визит (снял
+      // отработанный, поставил заправленный) даёт возврату и следующей заливке
+      // ОДИН день. Прежний отбор «последняя заливка с датой <= даты возврата»
+      // брал в этой ничьей сегодняшнюю: получался период [день, день] с
+      // расходом «нетто свежего минус нетто отработанного», а настоящая
+      // заливка помечалась потреблённой заодно — её период не строился, и
+      // следующему возврату уже не с чем было спариться. На живых данных так
+      // выходило 108 пар нулевой длины из 885 (соседние значения 2, 5, 12, 30
+      // — то есть ничья, а не разброс), и 59 из 500 возвратов окна выпадали.
       let picked = -1;
+      let тотЖеДень = -1;
       for (let i = from; i < list.length; i++) {
-        if (list[i]!.date <= r.date) picked = i;
-        else break;
+        const d = list[i]!.date;
+        if (d < r.date) {
+          picked = i; // список отсортирован по дате — держим САМУЮ ПОЗДНЮЮ из строго ранних
+          continue;
+        }
+        // Дальше даты только не меньше: строго ранних больше не будет.
+        if (d === r.date) тотЖеДень = i;
+        break;
       }
+      // Заливки строго раньше нет — тогда единственный кандидат это заливка
+      // того же дня (первый цикл набора: залили и в тот же день сняли).
+      if (picked < 0) picked = тотЖеДень;
       if (picked < 0) continue; // возврат без заливки в истории — период не построить
       consumedFillIdx.set(k, picked + 1);
       const fill = list[picked]!;
@@ -401,6 +422,30 @@ export class NormFactService {
     const placementCovers = (p: { startDate: string | null; endDate: string | null }, date: string): boolean =>
       (p.startDate === null || p.startDate <= date) && (p.endDate === null || p.endDate >= date);
 
+    // Размещения, сгруппированные ПО ТОЧКЕ — для проверки R-F2 «размещение
+    // автомата есть» (ревью, блокер Б2). Периоды бункера живут в координатах
+    // точки, а не автомата, поэтому обратный индекс здесь необходим.
+    const placementsByLocation = new Map<string, { startDate: string | null; endDate: string | null }[]>();
+    for (const p of placementRows) {
+      const list = placementsByLocation.get(p.locationId) ?? [];
+      list.push({ startDate: p.startDate ? String(p.startDate) : null, endDate: p.endDate ? String(p.endDate) : null });
+      placementsByLocation.set(p.locationId, list);
+    }
+    /**
+     * Покрыт ли ВЕСЬ интервал периода размещением какого-нибудь автомата на
+     * этой точке. Требуем ОДНО размещение на оба конца, а не объединение
+     * нескольких: разрыв в середине означал бы, что часть чашек интервала всё
+     * равно выброшена, а склейка двух соседних размещений это спрячет.
+     *
+     * Проверяется по `from` включительно, хотя чашки считаются полуоткрыто
+     * `(from, to]`: размещение, начавшееся ровно в день заливки, формально
+     * покрывает все засчитанные чашки, и такой период мы всё же пометим
+     * неполным. Ошибка сознательно смещена в сторону «нет данных» — R-F2
+     * велит молчать там, где не уверены, а не обвинять.
+     */
+    const placementSpans = (locationId: string, from: string, to: string): boolean =>
+      (placementsByLocation.get(locationId) ?? []).some((p) => placementCovers(p, from) && placementCovers(p, to));
+
     const cupsByLocation = new Map<string, ЧашкаТочки[]>();
     let расхождениеDeliveredCountable = 0;
     for (const o of orderRows) {
@@ -442,13 +487,17 @@ export class NormFactService {
 
     const periods: NormFactPeriod[] = pairs.map((p) => {
       const { ingredientId, однозначна } = this.resolveIngredient(p.position, p.ingredientIdRaw, candidatesByPosition);
-      const размещена = p.fillNet !== null && p.returnNet !== null;
+      const тараОткалибрована = p.fillNet !== null && p.returnNet !== null;
+      // R-F2, блокер Б2: интервал обязан быть покрыт размещением целиком —
+      // иначе часть чашек выброшена ещё при сборке `cupsByLocation` и норма
+      // занижена молча.
+      const размещениеПолно = placementSpans(p.locationId, p.fillDate, p.returnDate);
       const entityIngredientId = ingredientId ? ingredientEntityId.get(ingredientId) ?? null : null;
 
       let чашек = 0;
       let норма: number | null = null;
       let чашекБезНормы = 0;
-      if (размещена && однозначна && entityIngredientId) {
+      if (тараОткалибрована && однозначна && размещениеПолно && entityIngredientId) {
         const результат = this.normaFor(cupsByLocation, recipeLinesByProduct, p.locationId, entityIngredientId, p.fillDate, p.returnDate);
         чашек = результат.чашек;
         норма = результат.норма;
@@ -472,8 +521,9 @@ export class NormFactService {
         ingredientId,
         from: p.fillDate,
         to: p.returnDate,
-        размещена,
+        тараОткалибрована,
         однозначна,
+        размещениеПолно,
         залито: p.fillNet,
         возвращено: p.returnNet,
         норма,

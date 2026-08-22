@@ -177,7 +177,7 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(p3.разница, null);
 
     const p4 = report.periods.find((p) => p.to === "2026-04-05")!;
-    assert.equal(p4.полнота, "нет размещения");
+    assert.equal(p4.полнота, "нет тары");
     assert.equal(p4.разница, null);
 
     const p5 = report.periods.find((p) => p.to === "2026-05-10")!;
@@ -193,7 +193,7 @@ describe("NormFactService.report — сборка периодов бункер�
     const причины = new Map(report.внеИтога.причины.map((c) => [c.причина, c.периодов]));
     assert.equal(причины.get("тара не откалибрована"), 1);
     assert.equal(причины.get("позиция неоднозначна"), 1);
-    assert.equal(причины.get("нет размещения"), 1);
+    assert.equal(причины.get("нет тары"), 1);
     assert.equal(причины.get("нормы нет"), 1);
 
     // Ревью 1.4: в этой фикстуре у каждой заливки есть ровно один возврат —
@@ -429,5 +429,141 @@ describe("NormFactService.report — сборка периодов бункер�
     assert.equal(report.periods.length, 1);
     assert.equal(report.внеИтога.непарныхЗаливок, 1, "заливка 301 без возврата — видна числом");
     assert.equal(report.внеИтога.непарныхВозвратов, 1, "возврат 302 без заливки — виден числом");
+  });
+  /**
+   * Ревью, блокер Б1. Замена бункера за один визит — штатный процесс: снятый
+   * набор возвращают и в тот же день ставят заправленный. `enteredDate` и
+   * `returnedDate` — календарные даты без времени, поэтому у возврата и у
+   * СЛЕДУЮЩЕЙ заливки одна и та же дата, и ничья тут структурная, а не
+   * случайная (на живых данных 108 пар из 885 имели нулевую длину).
+   *
+   * Отбор «последняя заливка с датой <= даты возврата» брал в этой ничьей
+   * ЗАЛИВКУ ТОГО ЖЕ ДНЯ. Получался период [день, день] с абсурдным расходом
+   * (нетто свежего набора минус нетто отработанного), а настоящая заливка при
+   * этом помечалась потреблённой заодно — её период не строился вовсе, и
+   * следующему возврату уже не с чем было спариться. Один визит рушил две
+   * пары и подставлял третью, фантомную.
+   */
+  it("замена набора в один визит: возврат закрывает прежнюю заливку, а не сегодняшнюю", async () => {
+    const refills = [
+      { position: 1, containerNumber: 1, enteredDate: "2026-01-01", filledWeight: 700, locationId: "loc-1", ingredientId: null },
+      // Тот же день, что и первый возврат: оператор снял отработанный набор и поставил заправленный.
+      { position: 1, containerNumber: 1, enteredDate: "2026-01-15", filledWeight: 700, locationId: "loc-1", ingredientId: null },
+    ];
+    const returns = [
+      { position: 1, containerNumber: 1, weight: 200, returnedDate: "2026-01-15" },
+      { position: 1, containerNumber: 1, weight: 250, returnedDate: "2026-01-25" },
+    ];
+    const tare = [{ containerNumber: 1, position: 1, tareWeight: 100 }];
+    const bunkerConfig = [{ position: 1, ingredientId: "ing-1" }];
+
+    const db = normFactDb({
+      refills, returns, tare, bunkerConfig,
+      ingredients: [ingredient],
+      placements: [placement],
+      orders: [],
+      entities: [loc, machine],
+      aliases: [],
+    });
+    const s = new NormFactService(db);
+    const report = await s.report("2026-01-01", "2026-01-31");
+
+    assert.equal(report.periods.length, 2, "две заливки и два возврата дают ДВА периода, а не один");
+    assert.equal(report.внеИтога.непарныхЗаливок, 0);
+    assert.equal(report.внеИтога.непарныхВозвратов, 0);
+
+    const первый = report.periods.find((p) => p.to === "2026-01-15")!;
+    assert.equal(первый.from, "2026-01-01", "возврат 15-го закрывает заливку 1-го, а не заливку 15-го");
+    assert.equal(первый.факт, 500, "(700-100) - (200-100)");
+
+    const второй = report.periods.find((p) => p.to === "2026-01-25")!;
+    assert.equal(второй.from, "2026-01-15", "заливка 15-го осталась свободной и закрылась возвратом 25-го");
+    assert.equal(второй.факт, 450, "(700-100) - (250-100)");
+
+    assert.ok(
+      !report.periods.some((p) => p.from === p.to),
+      "периода нулевой длины быть не должно — это и есть фантом, который ловит блокер",
+    );
+  });
+  /**
+   * Ревью, блокер Б2. Условие R-F2 «размещение автомата есть» не проверялось
+   * НИ ОДНОЙ строкой. Чашка автомата, у которого на её дату нет покрывающего
+   * `machine_placement`, молча выбрасывалась при сборке `cupsByLocation` — она
+   * не попадала ни в `чашек`, ни в `чашекБезНормы`, то есть исчезала бесследно.
+   *
+   * Полностью непокрытый период это ещё переживал: чашек выходило 0, и ветка
+   * «нормы нет» его ловила. Опасен ЧАСТИЧНО покрытый: половина чашек интервала
+   * выпадает, норма считается по оставшимся — заниженная, но НЕ `null`, —
+   * и период получает «полный» с разницей, которой нет. Ровно ложное обвинение
+   * в перерасходе, от которого защищает весь срез.
+   *
+   * Вход штатный, а не выдуманный: `linkMachine()` ставит `startDate` = день
+   * привязки, поэтому у каждого аппарата вся история ДО привязки остаётся
+   * непокрытой (на проде так и случилось с Parus F4, привязанной 05.08.2026).
+   */
+  it("период, чей интервал шире размещения автомата, не может быть «полным»", async () => {
+    const refills = [
+      { position: 1, containerNumber: 1, enteredDate: "2026-01-01", filledWeight: 700, locationId: "loc-1", ingredientId: null },
+    ];
+    const returns = [{ position: 1, containerNumber: 1, weight: 200, returnedDate: "2026-01-20" }];
+    const tare = [{ containerNumber: 1, position: 1, tareWeight: 100 }];
+    const bunkerConfig = [{ position: 1, ingredientId: "ing-1" }];
+    // Автомат привязан к точке только с 10-го — первые девять дней интервала
+    // бункера продажами не покрыты вовсе.
+    const позднееРазмещение = { entityId: "machine-1", locationId: "loc-1", startDate: "2026-01-10", endDate: null };
+    const orders = Array.from({ length: 19 }, (_, i) => order(`2026-01-${String(i + 2).padStart(2, "0")}`));
+
+    const db = normFactDb({
+      refills, returns, tare, bunkerConfig,
+      ingredients: [ingredient],
+      placements: [позднееРазмещение],
+      orders,
+      entities: [loc, machine, coffeeCard],
+      aliases: [],
+    });
+    const s = new NormFactService(db);
+    const report = await s.report("2026-01-01", "2026-01-31");
+
+    assert.equal(report.periods.length, 1);
+    const период = report.periods[0]!;
+    assert.equal(
+      период.полнота,
+      "размещение неполно",
+      "часть интервала без размещения — норма заведомо занижена, вердикта быть не может",
+    );
+    assert.equal(период.разница, null, "разницы нет там, где половина чашек интервала невидима");
+    assert.equal(report.итог.периодов, 0, "в итог такой период не идёт");
+    assert.ok(
+      report.внеИтога.причины.some((c) => c.причина === "размещение неполно" && c.периодов === 1),
+      "причина обязана быть названа отдельной строкой, а не растворяться",
+    );
+  });
+
+  it("размещение покрывает интервал целиком — период считается как обычно", async () => {
+    const refills = [
+      { position: 1, containerNumber: 1, enteredDate: "2026-01-01", filledWeight: 700, locationId: "loc-1", ingredientId: null },
+    ];
+    const returns = [{ position: 1, containerNumber: 1, weight: 200, returnedDate: "2026-01-20" }];
+    const tare = [{ containerNumber: 1, position: 1, tareWeight: 100 }];
+    const bunkerConfig = [{ position: 1, ingredientId: "ing-1" }];
+    const orders = Array.from({ length: 19 }, (_, i) => order(`2026-01-${String(i + 2).padStart(2, "0")}`));
+
+    const db = normFactDb({
+      refills, returns, tare, bunkerConfig,
+      ingredients: [ingredient],
+      placements: [placement], // с 2025-12-01, бессрочно — интервал покрыт
+      orders,
+      entities: [loc, machine, coffeeCard],
+      aliases: [],
+    });
+    const s = new NormFactService(db);
+    const report = await s.report("2026-01-01", "2026-01-31");
+
+    const период = report.periods[0]!;
+    assert.equal(период.полнота, "полный");
+    assert.equal(период.чашек, 19);
+    assert.equal(период.норма, 380); // 19 чашек × 20 г
+    assert.equal(период.факт, 500); // (700-100) - (200-100)
+    assert.equal(период.разница, 120);
   });
 });
