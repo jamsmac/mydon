@@ -4,6 +4,7 @@ import { CoreDown } from "../../components/core-down";
 import { ApprovalCard } from "../../components/approval-card";
 import { coffeeImportDetails, stripPayload } from "../../lib/approval-details";
 import { when } from "../../lib/format";
+import { DOMAIN_LABELS } from "@mydon/shared";
 
 export const dynamic = "force-dynamic";
 
@@ -78,6 +79,32 @@ export default async function Main() {
           <span className="due hot">открыть</span>
         </Link>
       )}
+
+      {/* ── Направления ─────────────────────────────────────────────────
+          ЕДИНСТВЕННЫЙ ВХОД В РАБОЧИЕ МЕСТА С ТЕЛЕФОНА. Сайдбар скрыт ниже
+          900 px, а в нижнюю панель попадают только сквозные пункты — ни
+          одного направления. То есть в /domain/vendhub с телефона нельзя
+          было попасть НИ ОДНИМ КЛИКОМ: оставались прямой адрес, ⌘K и ссылка
+          из чата. Владелец открывает панель утром именно с телефона.
+
+          На широком экране блок тоже не лишний: он дублирует сайдбар, но
+          отвечает на вопрос «куда идти» на самом входе, а не сбоку. */}
+      <div className="sect" style={{ marginBottom: 16 }}>
+        <div className="sect-h">
+          <h3 className="h2">Направления</h3>
+        </div>
+        <div className="wgrid">
+          {(["vendhub", "globerent", "personal"] as const).map((d) => (
+            <Link href={`/domain/${d}`} className="wt" key={d}>
+              <div className="wl">{DOMAIN_LABELS[d]}</div>
+              <div className="wv" style={{ fontSize: 15 }}>
+                рабочее место
+                <span className="go" style={{ marginLeft: 6 }}>→</span>
+              </div>
+            </Link>
+          ))}
+        </div>
+      </div>
 
       <div className="tiles">
         {list.map((a) => (

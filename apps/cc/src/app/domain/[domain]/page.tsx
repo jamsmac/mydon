@@ -1372,7 +1372,7 @@ export default async function DomainPage({
                  «Отчётах», overview даёт только пульс. ── */}
           {domain === "vendhub" && (
             <div className="sect">
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 18 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 18 }}>
                 <div>
                   <div className="sect-h">
                     <h3 className="h2">Кофе</h3>
@@ -1380,7 +1380,7 @@ export default async function DomainPage({
                       <span className="chip h">не выдано · {coffeeOrders.неВыдано}</span>
                     )}
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
                     <Link href={href("service:coffee")} className={`wt ${coffeeOrders ? "" : "off"}`}>
                       <div className="wl">Чашек · 30 дней</div>
                       <div className="wv">{coffeeOrders ? coffeeOrders.всего.чашек.toLocaleString("ru-RU") : "—"}</div>
@@ -1409,7 +1409,7 @@ export default async function DomainPage({
                     <h3 className="h2">Снек</h3>
                     {salesSummary?.lastSaleDt && <span className="chip g">живые · OurVend</span>}
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
                     <Link href={href("reports:sale")} className={`wt ${salesSummary ? "" : "off"}`}>
                       <div className="wl">Продано вчера</div>
                       <div className="wv">
@@ -2245,7 +2245,7 @@ export default async function DomainPage({
       {activeGroup === "tasks" && (
         <>
           {domain === "vendhub" && taskKpi.length > 0 && (
-            <div className="wgrid" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))", marginBottom: 14 }}>
+            <div className="wgrid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 14 }}>
               {taskKpi.map((t) => (
                 <div key={t.label} className={`wt ${t.hot ? "is-hot" : ""}`}>
                   <div className="wl">{t.label}</div>

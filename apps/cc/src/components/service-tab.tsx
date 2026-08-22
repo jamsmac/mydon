@@ -74,7 +74,9 @@ export function ServiceTab({
 
   return (
     <div className="sect">
-      <div className="wgrid" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+      {/* Инлайн-стиль бьёт медиавыражения сетки — на телефоне это давало четыре
+          плитки показателей в строку. `auto-fit` решает по ширине, а не по числу. */}
+      <div className="wgrid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
         {kpi.map((t) => (
           <div key={t.label} className={`wt ${t.hot ? "is-hot" : ""}`}>
             <div className="wl">{t.label}</div>
