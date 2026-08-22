@@ -358,12 +358,29 @@ export class ApprovalsService {
     // сводке согласования. Идемпотентно по имени (без учёта регистра).
     let locationsCreated = 0;
     const newLocations = Array.isArray(imp.newLocations) ? imp.newLocations.slice(0, 50) : [];
+    // Организация направления нужна КАЖДОЙ созданной точке (см. комментарий у
+    // insert ниже). Кофе-импорт принадлежит vendhub — других направлений он
+    // не касается. Читаем один раз до цикла, а не на каждой строке.
+    const [vendhubOrg] = newLocations.length
+      ? await tx.select({ id: org.id }).from(org).where(eq(org.code, "vendhub"))
+      : [];
+    // `null` здесь недостижим на рабочей установке: без строки org=vendhub
+    // упал бы и весь остальной путь направления (см. `orgIdByDomain`).
+    // Бросать исключение внутри транзакции согласования из-за проблемы уровня
+    // установки хуже, чем довести импорт до конца.
+    const vendhubOrgId = vendhubOrg?.id ?? null;
     for (const n of newLocations) {
       const name = typeof n === "string" ? n.trim().slice(0, 128) : "";
       if (name.length < 2 || idByName.has(name.toLowerCase())) continue;
       const [createdLoc] = await tx
         .insert(entity)
-        .values({ type: "location", name, createdFrom: "coffee-import" })
+        // `org_id` ОБЯЗАТЕЛЕН, хотя схема его и не требует: выдача
+        // `entities.service.ts::find()` фильтрует `where org_id = <орг
+        // направления>`, поэтому запись без него не даёт ошибки — она просто
+        // не попадает в списки. Ни «Места», ни «Реестр» такую точку не
+        // покажут, и отказ выглядит как «её не заводили». Уже созданные
+        // подбирает миграция 0062.
+        .values({ type: "location", name, createdFrom: "coffee-import", orgId: vendhubOrgId })
         .returning({ id: entity.id });
       idByName.set(name.toLowerCase(), createdLoc.id);
       validLocationIds.add(createdLoc.id);
