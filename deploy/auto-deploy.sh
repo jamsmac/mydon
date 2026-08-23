@@ -115,6 +115,7 @@ git clean -fd -e '.env*' # вся .env-семья (.env, .env.local, ...) — к
 # раннего выхода для data/docs-only commit и до любых миграций.
 install -d -o root -g root -m 700 /opt/backups
 install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
+install -o root -g root -m 700 deploy/guards/b2_offsite.sh /opt/backups/b2_offsite.sh
 install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
 
 # 2б. Изменились только данные и документы — контейнеры уже видят новые файлы

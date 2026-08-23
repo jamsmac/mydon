@@ -125,6 +125,7 @@ EOF
   # останется только в git и никогда не попадёт в фактическое расписание.
   install -d -o root -g root -m 700 /opt/backups
   install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
+  install -o root -g root -m 700 deploy/guards/b2_offsite.sh /opt/backups/b2_offsite.sh
   install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
   echo '  cron-скрипты backup/restore синхронизированы'
 "

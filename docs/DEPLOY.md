@@ -178,9 +178,10 @@ systemctl stop mydon-autodeploy.timer       # временно выключит�
 Бэкапы перед миграциями: `/opt/backups/mydon-autodeploy/pre_*.sql.gz` (последние 10).
 
 После обновления git-копии auto-deploy также устанавливает актуальные
-`deploy/guards/backup_extra.sh` и `deploy/restore_test_mydon.sh` в
-`/opt/backups`. Cron запускает именно эти стабильные пути, поэтому без данного
-шага исправления backup/restore оставались бы только в рабочей копии репозитория.
+`deploy/guards/backup_extra.sh`, `deploy/guards/b2_offsite.sh` и
+`deploy/restore_test_mydon.sh` в `/opt/backups`. Cron запускает именно эти
+стабильные пути, поэтому без данного шага исправления backup/restore оставались
+бы только в рабочей копии репозитория.
 
 Ручной `deploy/deploy.sh` на время работы останавливает timer auto-deploy, ждёт
 завершения уже начатого service и возвращает timer через `EXIT`-trap. Это

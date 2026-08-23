@@ -1,18 +1,20 @@
 # Бэкапы MYDON/OS
 
 Состояние на 2026-08-24. Фронт Ф8 отмечал две дыры: восстановление ни разу
-не проверялось, и часть данных не покрыта. Обе закрыты и повторно проверены
-после production deploy `c458187`.
+не проверялось, и часть данных не покрыта. Обе закрыты и повторно проверены.
+Telegram работает как первый offsite; код второго канала Backblaze B2 добавлен,
+но канал считается активным только после реального upload/download drill.
 
 ## Что и когда
 
 | Что | Когда | Куда | Скрипт |
 |---|---|---|---|
 | База `mydon-stock` (склад VendHub) | 22:00 ежедневно | `/opt/backups` (60 дней) + Telegram | `/opt/mydon-stock/backup_offsite.sh` |
-| База MYDON (новая) | 22:15 ежедневно | `/opt/backups/extra` (30 дней) | `/opt/backups/backup_extra.sh` |
-| Код `command-center` | 22:15 ежедневно | `/opt/backups/extra` | там же |
-| Файлы `.env` (секреты, права 600) | 22:15 ежедневно | `/opt/backups/extra` | там же |
-| **Проверка восстановления** | пн 03:30 еженедельно | `/opt/backups/restore_test.log` | `/opt/mydon-stock/restore_test.sh` |
+| База MYDON (новая) | 22:15 ежедневно | локально + Telegram + B2 после активации | `/opt/backups/backup_extra.sh` |
+| Код `command-center` | 22:15 ежедневно | локально + Telegram + B2 после активации | там же |
+| Файлы `.env` (секреты, права 600) | 22:15 ежедневно | локально + Telegram + B2 после активации | там же |
+| Проверка склада | пн 03:30 еженедельно | `/opt/backups/restore_test.log` | `/opt/mydon-stock/restore_test.sh` |
+| **Проверка MYDON** | пн 03:45 еженедельно | `/opt/backups/restore_test_mydon.log` | `/opt/backups/restore_test_mydon.sh` |
 
 ## Почему добавили именно это
 
@@ -60,25 +62,26 @@
 - Временная БД и скачанный файл удалены после проверки; production-БД не менялась.
 
 Deploy и auto-deploy теперь каждый раз устанавливают актуальные
-`backup_extra.sh` и `restore_test_mydon.sh` в `/opt/backups`: именно эти пути
-вызывает cron. Это исключает прежний рассинхрон, когда в git уже лежал
-исправленный fail-closed скрипт, а расписание продолжало запускать старую копию.
+`backup_extra.sh`, `b2_offsite.sh` и `restore_test_mydon.sh` в `/opt/backups`:
+именно эти пути вызывает cron. Это исключает прежний рассинхрон, когда в git
+уже лежал исправленный fail-closed скрипт, а расписание продолжало запускать
+старую копию.
 
 ## Offsite: что уходит за пределы машины (с 07.08.2026)
 
 До этой даты наружу уходила ТОЛЬКО база склада — 44 КБ. Главная база MYDON
-(4,2 МБ) и код `command-center` (1 МБ) лежали на том же диске, что и сама
+и код `command-center` лежали на том же диске, что и сама
 база. Локальная копия защищает от «уронил таблицу», но не от потери машины —
 а ровно от неё бэкап и нужен.
 
-| Что | Размер | Куда | Шифрование |
-|---|---|---|---|
-| База склада `mydon-stock` | 44 КБ | Telegram | нет |
-| **База MYDON** | 4,2 МБ | Telegram | нет |
-| **Код `command-center`** | 1,0 МБ | Telegram | нет |
-| **Секреты (`.env`)** | 1,6 КБ | Telegram | **AES-256, обязательно** |
+| Что | Размер 24.08.2026 | Telegram | Backblaze B2 |
+|---|---:|---|---|
+| База склада `mydon-stock` | 44 КБ | без шифрования | не входит в этот скрипт |
+| **База MYDON** | 9,3 МБ | без шифрования | **rclone crypt, обязательно** |
+| **Код `command-center`** | 1,0 МБ | без шифрования | **rclone crypt, обязательно** |
+| **Секреты (`.env`)** | 1,6 КБ | **AES-256, обязательно** | **rclone crypt, обязательно** |
 
-Суточный объём — 5,4 МБ. Лимит Bot API — 50 МБ на файл; скрипт предупреждает
+Суточный объём — около 10,3 МБ. Лимит Bot API — 50 МБ на файл; скрипт предупреждает
 на 45 МБ, то есть заранее, а не в день, когда копия перестанет уходить.
 
 ### Почему секреты только зашифрованными
@@ -102,26 +105,62 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
   -in env-files_ДАТА.tar.gz.enc -out env-files.tar.gz
 ```
 
-## Что осталось незакрытым
+## Второй offsite: Backblaze B2
 
-**Второй offsite (Hetzner Storage Box) не настроен.** SSH-ключ `/root/.ssh/storagebox`
-на сервере есть, но переменная `STORAGE_BOX=` в `/opt/mydon-stock/.env` не заполнена —
-шаг молча пропускается (так задумано в скрипте).
+`deploy/guards/b2_offsite.sh` загружает три архива в private B2 bucket через
+`rclone`. Перед загрузкой **каждый** файл проходит через `rclone crypt`:
+XSalsa20 шифрует содержимое, Poly1305 аутентифицирует каждый блок, scrypt
+выводит ключ из `BACKUP_ENC_PASSPHRASE`; имена файлов и каталогов также
+зашифрованы. Успех подтверждается `rclone cryptcheck` против checksum B2 без
+полного обратного скачивания.
 
-Telegram остаётся единственным внешним хранилищем. Это лучше, чем ничего, но
-это один канал и один провайдер: пропажа аккаунта означает пропажу всех
-внешних копий разом. Storage Box закрыл бы это вторым независимым адресом.
+Ключ передаётся rclone только через environment-based config и не попадает в
+argv. Helper не удаляет удалённые файлы: срок хранения задаёт lifecycle bucket.
+Пустая конфигурация означает «ещё не активирован»; если заполнена только часть
+переменных или upload/проверка размера не прошли, весь backup получает exit 1
+и отправляет тревогу.
 
-Чтобы включить, нужен адрес бокса:
+### Активация B2
 
+1. Создать private bucket в европейском регионе Backblaze.
+2. Задать lifecycle: скрывать объекты старше 90 дней и удалять скрытые через
+   1 день. При текущем объёме 90 суток занимают меньше 1 ГБ из бесплатных 10 ГБ.
+3. Создать отдельный application key только для этого bucket. Production нужны
+   `listAllBucketNames`, `listFiles`, `readFiles` и `writeFiles`; `deleteFiles`
+   не давать. Чтение нужно для nonce, который проверяет `cryptcheck`.
+4. Сохранить отдельный read key и `BACKUP_ENC_PASSPHRASE` вне production,
+   например в менеджере паролей. Без пароля зашифрованный offsite бесполезен.
+5. На сервере запустить интерактивно:
+
+```bash
+cd /opt/mydon-app
+./deploy/setup-b2-offsite.sh
+/opt/backups/backup_extra.sh
 ```
-# в /opt/mydon-stock/.env
-STORAGE_BOX=uXXXXXX@uXXXXXX.your-storagebox.de
-```
 
-Ключ уже на месте; host-key бокса нужно запинить в `/root/.ssh/known_hosts_storagebox`
-(скрипт использует `StrictHostKeyChecking=yes` — по каналу идут полные дампы,
-доверие при первом подключении здесь недопустимо).
+Установщик ставит Debian-пакет `rclone`, устанавливает helper и скрыто
+запрашивает bucket, Application Key ID и Application Key. Секрет не печатается.
+
+Фактическая активация закончена только после четырёх проверок: три строки
+`OK B2 offsite`, успешный `cryptcheck`, скачивание объекта **отдельным recovery
+key** и восстановление расшифрованного SQL в изолированную БД.
+
+Официальные справки: [B2 pricing](https://www.backblaze.com/cloud-storage/pricing),
+[application keys](https://www.backblaze.com/docs/en/cloud-storage-application-keys),
+[lifecycle rules](https://www.backblaze.com/docs/cloud-storage-configure-and-manage-lifecycle-rules),
+[rclone B2](https://rclone.org/b2/).
+
+### Восстановление из B2
+
+На отдельной recovery-машине настроить B2 remote с read-only key, затем поверх
+него crypt remote с тем же `BACKUP_ENC_PASSPHRASE`. Crypt remote сам проверит
+Poly1305 и вернёт исходный `.gz`:
+
+```bash
+rclone config
+rclone copy restore-crypt:ДАТА/ .
+gunzip -t mydon-app_ДАТА.sql.gz
+```
 
 ## Восстановление вручную
 

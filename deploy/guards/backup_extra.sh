@@ -149,7 +149,29 @@ else
     FAILED=1
 fi
 
-# --- 5. Чистка старого ---
+# --- 5. ВТОРОЙ OFFSITE: Backblaze B2, всё с клиентским шифрованием ---
+#
+# B2 не заменяет Telegram. Это независимая копия у другого провайдера. Helper
+# возвращает 3, пока bucket и ограниченный application key ещё не настроены;
+# частичная конфигурация или ошибка загрузки уже считаются отказом backup.
+B2_HELPER=/opt/backups/b2_offsite.sh
+if [ -x "$B2_HELPER" ]; then
+    "$B2_HELPER" "$DATE" \
+        "$DEST/mydon-app_${DATE}.sql.gz" \
+        "$DEST/command-center_${DATE}.tar.gz" \
+        "$DEST/env-files_${DATE}.tar.gz"
+    B2_STATUS=$?
+    case "$B2_STATUS" in
+        0) log "OK второй offsite -> Backblaze B2" ;;
+        3) log "INFO второй offsite B2 ещё не настроен" ;;
+        *) log "FAIL второй offsite Backblaze B2"; FAILED=1 ;;
+    esac
+else
+    log "FAIL второй offsite: $B2_HELPER не установлен"
+    FAILED=1
+fi
+
+# --- 6. Чистка старого ---
 find "$DEST" -name '*.gz' -mtime +${KEEP_DAYS} -delete 2>/dev/null
 find "$DEST" -name '*.enc' -delete 2>/dev/null
 
