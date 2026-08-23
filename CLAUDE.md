@@ -5,6 +5,7 @@
 > Основание архитектуры — аудит в `~/Developer/mydon-audit/` (11 фронтов + ARCHITECTURE.html).
 
 ## Что это
+
 MYDON — единый инструмент управления всеми направлениями владельца.
 Один продукт, один интерфейс, разные движки под капотом.
 
@@ -12,15 +13,18 @@ MYDON — единый инструмент управления всеми на
 **Принцип:** одна оболочка — много движков. Отдельный движок — да, отдельный интерфейс — нет.
 
 ## Направления (домены)
+
 - **GLOBERENT** — дистрибуция погрузчиков HELI (`/globerent`)
 - **VendHub** — сеть кофейных автоматов, движок VHM24 отдельный, UI в оболочке (`/vendhub`)
 - **Личный контур** — недвижимость, транспорт, накопления (`/personal`, только владелец)
 - **MYDON** — Command Center, агенты (`/mydon`)
 
 ## Стек (целевой, зафиксирован в ТЗ)
-TypeScript (strict) · NestJS · Next.js · PostgreSQL · Drizzle · tRPC · Turborepo · pnpm
+
+TypeScript (strict) · NestJS · Next.js · PostgreSQL · Drizzle · REST/class-validator · Turborepo · pnpm
 
 ## Структура
+
 ```
 mydon/
 ├── apps/
@@ -36,10 +40,12 @@ mydon/
 ```
 
 ## Схема MYDON Core (packages/db)
+
 org · project · entity · person · task · approval · event · document · money_flow · note · audit_log
 Принцип: сначала реестр, потом дашборд. Дашборд без данных — картинка.
 
 ## Правила разработки
+
 - **TypeScript strict**, без `any`.
 - **Часовой пояс Asia/Tashkent** везде, включая cron.
 - **Язык:** русский в UI, английский в коде.
@@ -50,10 +56,12 @@ org · project · entity · person · task · approval · event · document · m
 - **Базы движков не сливать:** общая оболочка — да, общая БД для всего — нет. VHM24 держит свою схему.
 
 ## Инфраструктура
+
 Hetzner (4 vCPU / 7.6 ГБ / 38 ГБ, диск ~70%) + Tailscale. Fly.io выводится.
 Внешний watchdog обязателен (монитор на другом провайдере).
 
 ## Доноры кода (только чтение)
+
 - Оболочка (auth/RBAC/дизайн-система): `~/Projects/VendHub-OS/VendHub-OS`
 - Command Center + агенты (прототип): `~/Developer/mydon_1`, `~/Developer/mydon-agent-os`
 - VendHub-движок: `~/Projects/VendHub/VendHubManager/VHM24`

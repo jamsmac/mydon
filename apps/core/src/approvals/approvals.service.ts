@@ -142,7 +142,7 @@ export class ApprovalsService {
       if (decision === "approved") {
         await this.executeImport(tx, updated, actorRef);
         await this.executePurchaseOrder(tx, updated, actorRef);
-        await this.executeCoffeeImport(tx, updated);
+        await this.executeCoffeeImport(tx, updated, actorRef);
         await this.executeEntityApprove(tx, updated, actorRef);
       }
 
@@ -200,8 +200,7 @@ export class ApprovalsService {
    */
   private async executeImport(tx: Tx, row: ApprovalRow, actorRef: string): Promise<void> {
     const imp = (row.payload as { import?: unknown } | null)?.import as
-      | { domain?: unknown; type?: unknown; records?: unknown }
-      | undefined;
+      { domain?: unknown; type?: unknown; records?: unknown } | undefined;
     if (!imp || typeof imp !== "object") return;
 
     const domain = typeof imp.domain === "string" ? imp.domain : "";
@@ -209,7 +208,11 @@ export class ApprovalsService {
     const records = Array.isArray(imp.records) ? imp.records.slice(0, 500) : [];
     if (!DOMAINS.includes(domain as Domain) || type.length === 0 || records.length === 0) return;
 
-    const [orgRow] = await tx.select().from(org).where(eq(org.code, domain as Domain)).limit(1);
+    const [orgRow] = await tx
+      .select()
+      .from(org)
+      .where(eq(org.code, domain as Domain))
+      .limit(1);
     if (!orgRow) return;
 
     let created = 0;
@@ -221,9 +224,10 @@ export class ApprovalsService {
 
       // Идентичность записи — внешний номер (серийник, ИНН), если он есть:
       // две машины могут стоять в одной точке с одинаковым названием.
-      const ref = typeof rec.externalRef === "string" && rec.externalRef.length > 0
-        ? rec.externalRef.slice(0, 256)
-        : null;
+      const ref =
+        typeof rec.externalRef === "string" && rec.externalRef.length > 0
+          ? rec.externalRef.slice(0, 256)
+          : null;
       const [existing] = await tx
         .select({ id: entity.id })
         .from(entity)
@@ -251,6 +255,9 @@ export class ApprovalsService {
             rec.attrs !== null && typeof rec.attrs === "object"
               ? (rec.attrs as Record<string, unknown>)
               : {},
+          approvedAt: new Date(),
+          approvedBy: actorRef,
+          createdFrom: `approval:${row.agent}`,
         })
         .returning();
       created += 1;
@@ -281,15 +288,24 @@ export class ApprovalsService {
    */
   private async executePurchaseOrder(tx: Tx, row: ApprovalRow, actorRef: string): Promise<void> {
     const po = (row.payload as { purchaseOrder?: unknown } | null)?.purchaseOrder as
-      | { positions?: unknown; totalBuy?: unknown; totalOrder?: unknown; costExact?: unknown; costRounded?: unknown; createdBy?: unknown }
+      | {
+          positions?: unknown;
+          totalBuy?: unknown;
+          totalOrder?: unknown;
+          costExact?: unknown;
+          costRounded?: unknown;
+          createdBy?: unknown;
+        }
       | undefined;
     if (!po || typeof po !== "object") return;
 
     const positions = Array.isArray(po.positions) ? po.positions : [];
     if (positions.length === 0) return;
 
-    const int = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0);
-    const money = (v: unknown): string => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "0");
+    const int = (v: unknown): number =>
+      typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0;
+    const money = (v: unknown): string =>
+      typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "0";
 
     const [order] = await tx
       .insert(vendingPurchaseOrder)
@@ -307,7 +323,12 @@ export class ApprovalsService {
     await tx.insert(event).values({
       source: "owner",
       type: "vending.purchase_order.created",
-      payload: { approvalId: row.id, orderId: order.id, positions: positions.length, costRounded: money(po.costRounded) },
+      payload: {
+        approvalId: row.id,
+        orderId: order.id,
+        positions: positions.length,
+        costRounded: money(po.costRounded),
+      },
     });
     await tx.insert(auditLog).values({
       actorKind: "human",
@@ -333,7 +354,7 @@ export class ApprovalsService {
    * одобрение или ретрай импорта безопасны. Кривой payload — не ошибка
    * решения: одобрение остаётся, импорт пропускается.
    */
-  private async executeCoffeeImport(tx: Tx, row: ApprovalRow): Promise<void> {
+  private async executeCoffeeImport(tx: Tx, row: ApprovalRow, actorRef: string): Promise<void> {
     const imp = (row.payload as { coffeeImport?: unknown } | null)?.coffeeImport as
       | { records?: unknown; returns?: unknown; consumables?: unknown; newLocations?: unknown }
       | undefined;
@@ -380,7 +401,14 @@ export class ApprovalsService {
         // не попадает в списки. Ни «Места», ни «Реестр» такую точку не
         // покажут, и отказ выглядит как «её не заводили». Уже созданные
         // подбирает миграция 0062.
-        .values({ type: "location", name, createdFrom: "coffee-import", orgId: vendhubOrgId })
+        .values({
+          type: "location",
+          name,
+          createdFrom: "coffee-import",
+          orgId: vendhubOrgId,
+          approvedAt: new Date(),
+          approvedBy: actorRef,
+        })
         .returning({ id: entity.id });
       idByName.set(name.toLowerCase(), createdLoc.id);
       validLocationIds.add(createdLoc.id);
@@ -388,8 +416,12 @@ export class ApprovalsService {
     }
 
     // Точка записи: либо существующий id, либо имя (для исторических точек).
-    const resolveLocation = (rec: { locationId?: unknown; locationName?: unknown }): string | null => {
-      if (typeof rec.locationId === "string" && validLocationIds.has(rec.locationId)) return rec.locationId;
+    const resolveLocation = (rec: {
+      locationId?: unknown;
+      locationName?: unknown;
+    }): string | null => {
+      if (typeof rec.locationId === "string" && validLocationIds.has(rec.locationId))
+        return rec.locationId;
       if (typeof rec.locationName === "string") {
         return idByName.get(rec.locationName.toLowerCase().trim()) ?? null;
       }
@@ -433,7 +465,8 @@ export class ApprovalsService {
         };
         const locationId = resolveLocation(rec) ?? "";
         const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
-        const filledWeight = typeof rec.filledWeight === "number" ? Math.trunc(rec.filledWeight) : NaN;
+        const filledWeight =
+          typeof rec.filledWeight === "number" ? Math.trunc(rec.filledWeight) : NaN;
         const enteredDate = typeof rec.enteredDate === "string" ? rec.enteredDate.slice(0, 10) : "";
         const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(enteredDate);
         if (locationId === "" || position < 1 || position > 8 || !(filledWeight > 0) || !dateOk) {
@@ -444,20 +477,32 @@ export class ApprovalsService {
           locationId,
           position,
           containerNumber:
-            typeof rec.containerNumber === "number" && rec.containerNumber >= 1 && rec.containerNumber <= 27
+            typeof rec.containerNumber === "number" &&
+            rec.containerNumber >= 1 &&
+            rec.containerNumber <= 27
               ? Math.trunc(rec.containerNumber)
               : null,
           filledWeight,
           measuredBefore:
-            typeof rec.measuredBefore === "number" && rec.measuredBefore >= 0 ? Math.trunc(rec.measuredBefore) : null,
-          packageCount: typeof rec.packageCount === "number" && rec.packageCount >= 1 ? Math.trunc(rec.packageCount) : 1,
+            typeof rec.measuredBefore === "number" && rec.measuredBefore >= 0
+              ? Math.trunc(rec.measuredBefore)
+              : null,
+          packageCount:
+            typeof rec.packageCount === "number" && rec.packageCount >= 1
+              ? Math.trunc(rec.packageCount)
+              : 1,
           enteredDate,
           createdBy: "import:telegram-history",
         });
       }
       if (valid.length > 0) {
-        const refillKey = (v: { locationId: string; position: number; enteredDate: string; filledWeight: number; packageCount: number | null }) =>
-          `${v.locationId}|${v.position}|${v.enteredDate}|${v.filledWeight}|${v.packageCount}`;
+        const refillKey = (v: {
+          locationId: string;
+          position: number;
+          enteredDate: string;
+          filledWeight: number;
+          packageCount: number | null;
+        }) => `${v.locationId}|${v.position}|${v.enteredDate}|${v.filledWeight}|${v.packageCount}`;
         const dates = valid.map((v) => v.enteredDate).sort();
         const existing = await tx
           .select({
@@ -468,7 +513,12 @@ export class ApprovalsService {
             packageCount: coffeeRefill.packageCount,
           })
           .from(coffeeRefill)
-          .where(and(gte(coffeeRefill.enteredDate, dates[0]), lte(coffeeRefill.enteredDate, dates[dates.length - 1])));
+          .where(
+            and(
+              gte(coffeeRefill.enteredDate, dates[0]),
+              lte(coffeeRefill.enteredDate, dates[dates.length - 1]),
+            ),
+          );
         const seen = new Set(existing.map(refillKey));
         const fresh: typeof valid = [];
         for (const v of valid) {
@@ -506,11 +556,21 @@ export class ApprovalsService {
           locationNote?: unknown;
         };
         const position = typeof rec.position === "number" ? Math.trunc(rec.position) : NaN;
-        const containerNumber = typeof rec.containerNumber === "number" ? Math.trunc(rec.containerNumber) : NaN;
+        const containerNumber =
+          typeof rec.containerNumber === "number" ? Math.trunc(rec.containerNumber) : NaN;
         const weight = typeof rec.weight === "number" ? Math.trunc(rec.weight) : NaN;
-        const returnedDate = typeof rec.returnedDate === "string" ? rec.returnedDate.slice(0, 10) : "";
+        const returnedDate =
+          typeof rec.returnedDate === "string" ? rec.returnedDate.slice(0, 10) : "";
         const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(returnedDate);
-        if (position < 1 || position > 8 || containerNumber < 1 || containerNumber > 27 || !(weight >= 0) || weight > 10000 || !dateOk) {
+        if (
+          position < 1 ||
+          position > 8 ||
+          containerNumber < 1 ||
+          containerNumber > 27 ||
+          !(weight >= 0) ||
+          weight > 10000 ||
+          !dateOk
+        ) {
           returnsSkipped += 1;
           continue;
         }
@@ -527,8 +587,12 @@ export class ApprovalsService {
         });
       }
       if (valid.length > 0) {
-        const returnKey = (v: { position: number; containerNumber: number; returnedDate: string; weight: number }) =>
-          `${v.position}|${v.containerNumber}|${v.returnedDate}|${v.weight}`;
+        const returnKey = (v: {
+          position: number;
+          containerNumber: number;
+          returnedDate: string;
+          weight: number;
+        }) => `${v.position}|${v.containerNumber}|${v.returnedDate}|${v.weight}`;
         const dates = valid.map((v) => v.returnedDate).sort();
         const existing = await tx
           .select({
@@ -539,7 +603,10 @@ export class ApprovalsService {
           })
           .from(coffeeContainerReturn)
           .where(
-            and(gte(coffeeContainerReturn.returnedDate, dates[0]), lte(coffeeContainerReturn.returnedDate, dates[dates.length - 1])),
+            and(
+              gte(coffeeContainerReturn.returnedDate, dates[0]),
+              lte(coffeeContainerReturn.returnedDate, dates[dates.length - 1]),
+            ),
           );
         const seen = new Set(existing.map(returnKey));
         const fresh: typeof valid = [];
@@ -566,9 +633,26 @@ export class ApprovalsService {
       // Дедуп внутри payload по (точка, дата) — побеждает последняя строка:
       // два конфликта на одну строку в одном multi-row INSERT Postgres
       // отвергает («cannot affect row a second time»).
-      const byKey = new Map<string, { locationId: string; loggedDate: string; water: number; cups: number; lids: number; createdBy: string }>();
+      const byKey = new Map<
+        string,
+        {
+          locationId: string;
+          loggedDate: string;
+          water: number;
+          cups: number;
+          lids: number;
+          createdBy: string;
+        }
+      >();
       for (const c of consumables) {
-        const rec = c as { locationId?: unknown; locationName?: unknown; loggedDate?: unknown; water?: unknown; cups?: unknown; lids?: unknown };
+        const rec = c as {
+          locationId?: unknown;
+          locationName?: unknown;
+          loggedDate?: unknown;
+          water?: unknown;
+          cups?: unknown;
+          lids?: unknown;
+        };
         const locationId = resolveLocation(rec) ?? "";
         const loggedDate = typeof rec.loggedDate === "string" ? rec.loggedDate.slice(0, 10) : "";
         const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(loggedDate);
@@ -605,7 +689,16 @@ export class ApprovalsService {
     await tx.insert(event).values({
       source: "owner",
       type: "coffee.import.executed",
-      payload: { approvalId: row.id, created, skipped, returnsCreated, returnsSkipped, consumablesUpserted, consumablesSkipped, locationsCreated },
+      payload: {
+        approvalId: row.id,
+        created,
+        skipped,
+        returnsCreated,
+        returnsSkipped,
+        consumablesUpserted,
+        consumablesSkipped,
+        locationsCreated,
+      },
     });
   }
 }

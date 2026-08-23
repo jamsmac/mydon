@@ -37,4 +37,13 @@ export const appConfig = {
   get tz(): string {
     return Intl.DateTimeFormat().resolvedOptions().timeZone;
   },
+  /** Путь на том же файловом слое, нехватка места на котором должна портить health. */
+  get healthStoragePath(): string {
+    return process.env.HEALTH_STORAGE_PATH?.trim() || "/";
+  },
+  /** Ниже этого остатка запись БД/вложений и Docker-сборки уже ненадёжна. */
+  get healthMinStorageMb(): number {
+    const parsed = Number(process.env.HEALTH_MIN_STORAGE_MB ?? "1024");
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 1024;
+  },
 };

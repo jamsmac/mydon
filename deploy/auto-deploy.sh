@@ -95,7 +95,10 @@ if [ -z "$DATA_ONLY" ] && docker ps --format '{{.Names}}' | grep -qx mydon-db; t
     exit 1
   fi
   # держим последние 10 бэкапов
-  ls -1t "$BACKUP_DIR"/pre_*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
+  mapfile -t backups < <(printf '%s\n' "$BACKUP_DIR"/pre_*.sql.gz | sort -r)
+  for ((i = 10; i < ${#backups[@]}; i++)); do
+    rm -f -- "${backups[$i]}"
+  done
 fi
 
 # 2. Обновляем код до origin/main. git reset --hard НЕ удаляет untracked —
@@ -117,7 +120,8 @@ fi
 #    продолжает отвечать, пока не пройдут миграции и health-check ниже.
 # Коммит попадает в образ, чтобы /health отвечал, ЧТО РАБОТАЕТ, а не что лежит
 # в каталоге. Экспорт нужен здесь: compose подставляет ${GIT_SHA} из окружения.
-export GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+export GIT_SHA
 "${COMPOSE[@]}" build
 
 # 4. Миграции схемы — одноразовым контейнером из НОВОГО образа, ДО
@@ -134,6 +138,10 @@ export GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 #    из-за этого три дня не разворачивался, а в журнале было только «ОШИБКА
 #    (строка 128)». Свой скрипт печатает сообщение постгреса и сам запрос.
 "${COMPOSE[@]}" run --rm --name mydon-core-migrate mydon-core node packages/db/dist/migrate.js
+
+# 4а. Структурный сид идемпотентен и заводит только направления. Он должен
+#     пройти до переключения: новый код не должен стартовать без нового org.
+"${COMPOSE[@]}" run --rm --name mydon-core-seed mydon-core node packages/db/dist/seed.js
 
 # 5. Переключаем контейнеры на собранный образ.
 "${COMPOSE[@]}" up -d

@@ -312,16 +312,22 @@ export async function importFile(
           (probe.ragged > 0 ? `, строк с неровным числом ячеек: ${probe.ragged}` : "");
       }
     } catch (err) {
-      return { ok: false, error: `Excel-файл не прочитался: ${err instanceof Error ? err.message : String(err)}` };
+      return {
+        ok: false,
+        error: `Excel-файл не прочитался: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
     if (columns.length === 0) return { ok: false, error: "В Excel-файле нет заголовков" };
-    if (rows.length === 0) return { ok: false, error: "В Excel-файле одни заголовки, ни одной строки" };
+    if (rows.length === 0)
+      return { ok: false, error: "В Excel-файле одни заголовки, ни одной строки" };
   } else {
     const { text, encoding } = decodeUpload(bytes);
     const chosen = String(form.get("delimiter") ?? "");
     const parsed = parseDelimited(
       text,
-      (DELIMITERS as readonly string[]).includes(chosen) ? (chosen as (typeof DELIMITERS)[number]) : undefined,
+      (DELIMITERS as readonly string[]).includes(chosen)
+        ? (chosen as (typeof DELIMITERS)[number])
+        : undefined,
     );
     if (parsed.columns.length === 0) {
       return { ok: false, error: `Файл прочитан как ${encoding}, но заголовков в нём нет` };
@@ -351,8 +357,10 @@ export async function importFile(
         fetchedAt,
         columns,
         rows: rows.slice(i, i + CHUNK),
+        rowsTotal: rows.length,
         offset: i,
         append: i > 0,
+        complete: i + CHUNK >= rows.length,
         periodFrom: str("periodFrom"),
         periodTo: str("periodTo"),
         account: str("account"),

@@ -58,7 +58,9 @@ async function bootstrap(): Promise<void> {
     const isPayloadTooLarge =
       withStatus !== null &&
       typeof withStatus === "object" &&
-      (withStatus.status === 413 || withStatus.statusCode === 413 || withStatus.type === "entity.too.large");
+      (withStatus.status === 413 ||
+        withStatus.statusCode === 413 ||
+        withStatus.type === "entity.too.large");
     if (!isPayloadTooLarge) {
       next(err);
       return;
@@ -71,6 +73,8 @@ async function bootstrap(): Promise<void> {
       error: "Payload Too Large",
     });
   });
+
+  app.enableShutdownHooks();
 
   await app.listen(appConfig.port);
   console.log(`MYDON Core слушает :${appConfig.port} (TZ=${appConfig.tz})`);

@@ -1,4 +1,10 @@
-import { BadGatewayException, BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadGatewayException,
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { cbu } from "@mydon/connectors";
 import { auditLog, collection, entity, fxRate, moneyFlow, org } from "@mydon/db";
 import { MONEY_CATEGORIES, TZ, type Domain } from "@mydon/shared";
@@ -23,6 +29,9 @@ import {
 
 type FlowRow = typeof moneyFlow.$inferSelect;
 type FxRow = typeof fxRate.$inferSelect;
+/** Транзакция Core, в которую другие доменные сервисы могут включить деньги. */
+export type FinanceTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+type FinanceExecutor = Db | FinanceTx;
 
 /**
  * Категории — ЕДИНЫЙ словарь MONEY_CATEGORIES из packages/shared: у донора
@@ -161,8 +170,8 @@ export interface FinanceSummary {
 export class FinanceService {
   constructor(@Inject(DB) private readonly db: Db) {}
 
-  private async orgId(domain: Domain): Promise<string> {
-    const [row] = await this.db.select({ id: org.id }).from(org).where(eq(org.code, domain));
+  private async orgId(domain: Domain, db: FinanceExecutor = this.db): Promise<string> {
+    const [row] = await db.select({ id: org.id }).from(org).where(eq(org.code, domain));
     if (!row) {
       throw new NotFoundException(`Направление "${domain}" не заведено. Выполните pnpm db:seed.`);
     }
@@ -171,11 +180,12 @@ export class FinanceService {
 
   /** Действующий курс каждой валюты — последняя запись истории. */
   async fxCurrent(): Promise<FxCurrent[]> {
-    const rows = await this.db
-      .select()
-      .from(fxRate)
-      .orderBy(desc(fxRate.createdAt))
-      .limit(200);
+    return this.fxCurrentFrom(this.db);
+  }
+
+  /** Та же выборка курса внутри внешней транзакции. */
+  private async fxCurrentFrom(db: FinanceExecutor): Promise<FxCurrent[]> {
+    const rows = await db.select().from(fxRate).orderBy(desc(fxRate.createdAt)).limit(200);
     const latest = new Map<string, FxRow>();
     for (const r of rows) {
       if (!latest.has(r.currency)) latest.set(r.currency, r);
@@ -194,7 +204,10 @@ export class FinanceService {
    * Задать курс вручную (PROMACH: manual override — у нас основной путь).
    * История не переписывается: каждая установка — новая строка.
    */
-  async setFx(input: { currency: string; rate: number; note?: string }, actorRef = "owner"): Promise<FxCurrent[]> {
+  async setFx(
+    input: { currency: string; rate: number; note?: string },
+    actorRef = "owner",
+  ): Promise<FxCurrent[]> {
     const currency = (input.currency ?? "").toUpperCase().trim();
     if (!CURRENCY_RE.test(currency)) {
       throw new BadRequestException("Валюта — трёхбуквенный код: USD, CNY, EUR…");
@@ -289,7 +302,10 @@ export class FinanceService {
    * поведение НЕ МЕНЯЕТСЯ для всех существующих вызовов (проверка просто не
    * выполняется, до базы за ней не ходим).
    */
-  private async prepareFlow(input: CreateFlowInput): Promise<
+  private async prepareFlow(
+    input: CreateFlowInput,
+    db: FinanceExecutor = this.db,
+  ): Promise<
     | { kind: "existing"; row: FlowRow }
     | {
         kind: "new";
@@ -310,7 +326,10 @@ export class FinanceService {
     if (input.status !== "planned" && input.status !== "actual") {
       throw new BadRequestException("Статус — planned (обязательство) или actual (платёж)");
     }
-    if (input.category !== undefined && !(FLOW_CATEGORIES as readonly string[]).includes(input.category)) {
+    if (
+      input.category !== undefined &&
+      !(FLOW_CATEGORIES as readonly string[]).includes(input.category)
+    ) {
       throw new BadRequestException(`Категория — одна из: ${FLOW_CATEGORIES.join(", ")}`);
     }
     if (input.method !== undefined && !(METHODS as readonly string[]).includes(input.method)) {
@@ -324,10 +343,10 @@ export class FinanceService {
     }
     // domain не задан (импорт без привязки к направлению) — orgId остаётся
     // null, а не падает NotFoundException за несуществующий "домен undefined".
-    const orgId = input.domain !== undefined ? await this.orgId(input.domain) : null;
+    const orgId = input.domain !== undefined ? await this.orgId(input.domain, db) : null;
 
     if (input.counterpartyId !== undefined) {
-      const [cp] = await this.db
+      const [cp] = await db
         .select({ id: entity.id })
         .from(entity)
         .where(eq(entity.id, input.counterpartyId))
@@ -337,7 +356,7 @@ export class FinanceService {
 
     const source = input.source ?? "manual";
     if (input.extId) {
-      const [already] = await this.db
+      const [already] = await db
         .select()
         .from(moneyFlow)
         .where(and(eq(moneyFlow.source, source), eq(moneyFlow.extId, input.extId)))
@@ -349,7 +368,7 @@ export class FinanceService {
     // исторические суммы не плавают при смене действующего курса.
     let rate: number | null = input.rate ?? null;
     if (rate === null && currency !== "UZS") {
-      const current = await this.fxCurrent();
+      const current = await this.fxCurrentFrom(db);
       const found = current.find((r) => r.currency === currency);
       if (found) rate = Number(found.rate);
     }
@@ -363,8 +382,9 @@ export class FinanceService {
     input: CreateFlowInput,
     prep: Extract<Awaited<ReturnType<FinanceService["prepareFlow"]>>, { kind: "new" }>,
     actorRef: string,
+    outerTx?: FinanceTx,
   ): Promise<FlowRow> {
-    return this.db.transaction(async (tx) => {
+    const write = async (tx: FinanceTx): Promise<FlowRow> => {
       const [created] = await tx
         .insert(moneyFlow)
         .values({
@@ -401,7 +421,8 @@ export class FinanceService {
         after: created,
       });
       return created;
-    });
+    };
+    return outerTx ? write(outerTx) : this.db.transaction(write);
   }
 
   /**
@@ -415,6 +436,21 @@ export class FinanceService {
     const prep = await this.prepareFlow(input);
     if (prep.kind === "existing") return prep.row;
     return this.writeFlow(input, prep, actorRef);
+  }
+
+  /**
+   * Создать деньги внутри транзакции вызывающего домена.
+   * Договор/импорт и его обязательства либо появляются вместе, либо вместе
+   * откатываются — успешная карточка без графика больше невозможна.
+   */
+  async createFlowInTransaction(
+    tx: FinanceTx,
+    input: CreateFlowInput,
+    actorRef = "owner",
+  ): Promise<FlowRow> {
+    const prep = await this.prepareFlow(input, tx);
+    if (prep.kind === "existing") return prep.row;
+    return this.writeFlow(input, prep, actorRef, tx);
   }
 
   /**
@@ -530,7 +566,9 @@ export class FinanceService {
    */
   async cashReconcile(from: string, to: string): Promise<CashReconcileReport> {
     if (!FinanceService.ДАТА_RE.test(from) || !FinanceService.ДАТА_RE.test(to)) {
-      throw new BadRequestException("Период задаётся датами вида ГГГГ-ММ-ДД: ?from=2026-06-01&to=2026-08-21");
+      throw new BadRequestException(
+        "Период задаётся датами вида ГГГГ-ММ-ДД: ?from=2026-06-01&to=2026-08-21",
+      );
     }
     if (from > to) {
       throw new BadRequestException(`Начало периода (${from}) позже конца (${to})`);
@@ -567,7 +605,10 @@ export class FinanceService {
     ]);
 
     return cashReconcileMath(
-      collections.map((c) => ({ date: c.collectedAt, amount: c.amount !== null ? Number(c.amount) : null })),
+      collections.map((c) => ({
+        date: c.collectedAt,
+        amount: c.amount !== null ? Number(c.amount) : null,
+      })),
       deposits.map((d) => ({ date: d.date, amount: Number(d.amount) })),
       from,
       to,
@@ -577,44 +618,57 @@ export class FinanceService {
 
   /** Отметить обязательство оплаченным: план становится фактом, след — в журнале. */
   async markPaid(id: string, opts: { rate?: number } = {}, actorRef = "owner"): Promise<FlowRow> {
+    this.validatePaidOptions(opts);
+    return this.db.transaction((tx) => this.markPaidInTransaction(tx, id, opts, actorRef));
+  }
+
+  /** Закрыть обязательство внутри транзакции вызывающего доменного сервиса. */
+  async markPaidInTransaction(
+    tx: FinanceTx,
+    id: string,
+    opts: { rate?: number } = {},
+    actorRef = "owner",
+  ): Promise<FlowRow> {
+    this.validatePaidOptions(opts);
+    const [row] = await tx.select().from(moneyFlow).where(eq(moneyFlow.id, id)).for("update");
+    if (!row) throw new NotFoundException("Запись не найдена");
+    if (row.status !== "planned") {
+      throw new BadRequestException(`Запись уже закрыта (${row.status})`);
+    }
+    const rate = opts.rate !== undefined ? opts.rate : row.rate !== null ? Number(row.rate) : null;
+    const amountUzs =
+      row.currency === "UZS"
+        ? null
+        : rate !== null
+          ? Number(row.amount) * rate
+          : row.amountUzs !== null
+            ? Number(row.amountUzs)
+            : null;
+    const [updated] = await tx
+      .update(moneyFlow)
+      .set({
+        status: "actual",
+        paidAt: new Date(),
+        rate: rate !== null ? String(rate) : null,
+        amountUzs: amountUzs !== null ? String(amountUzs) : null,
+      })
+      .where(eq(moneyFlow.id, id))
+      .returning();
+    await tx.insert(auditLog).values({
+      actorKind: "human",
+      actorRef,
+      action: "finance.flow_paid",
+      target: id,
+      before: row,
+      after: updated,
+    });
+    return updated;
+  }
+
+  private validatePaidOptions(opts: { rate?: number }): void {
     if (opts.rate !== undefined && (!Number.isFinite(opts.rate) || opts.rate <= 0)) {
       throw new BadRequestException("Курс — положительное число");
     }
-    return this.db.transaction(async (tx) => {
-      const [row] = await tx.select().from(moneyFlow).where(eq(moneyFlow.id, id)).for("update");
-      if (!row) throw new NotFoundException("Запись не найдена");
-      if (row.status !== "planned") {
-        throw new BadRequestException(`Запись уже закрыта (${row.status})`);
-      }
-      const rate = opts.rate !== undefined ? opts.rate : row.rate !== null ? Number(row.rate) : null;
-      const amountUzs =
-        row.currency === "UZS"
-          ? null
-          : rate !== null
-            ? Number(row.amount) * rate
-            : row.amountUzs !== null
-              ? Number(row.amountUzs)
-              : null;
-      const [updated] = await tx
-        .update(moneyFlow)
-        .set({
-          status: "actual",
-          paidAt: new Date(),
-          rate: rate !== null ? String(rate) : null,
-          amountUzs: amountUzs !== null ? String(amountUzs) : null,
-        })
-        .where(eq(moneyFlow.id, id))
-        .returning();
-      await tx.insert(auditLog).values({
-        actorKind: "human",
-        actorRef,
-        action: "finance.flow_paid",
-        target: id,
-        before: row,
-        after: updated,
-      });
-      return updated;
-    });
   }
 
   /** Отмена ошибочной записи. Строка остаётся — из сводов уходит. */
@@ -645,7 +699,11 @@ export class FinanceService {
   /** Лента записей направления с именами контрагентов. */
   async flows(
     domain: Domain,
-    opts: { status?: "planned" | "actual" | "cancelled"; direction?: "in" | "out"; limit?: number } = {},
+    opts: {
+      status?: "planned" | "actual" | "cancelled";
+      direction?: "in" | "out";
+      limit?: number;
+    } = {},
   ): Promise<FlowListRow[]> {
     const orgId = await this.orgId(domain);
     const conditions = [eq(moneyFlow.orgId, orgId)];
@@ -699,7 +757,11 @@ export class FinanceService {
       date: r.flow.date,
       counterpartyKey: r.flow.counterpartyId ?? r.flow.counterparty,
       counterpartyName: r.counterpartyEntityName ?? r.flow.counterparty,
-      row: { ...r.flow, counterpartyEntityName: r.counterpartyEntityName, uzs: uzsEquivalent(r.flow) },
+      row: {
+        ...r.flow,
+        counterpartyEntityName: r.counterpartyEntityName,
+        uzs: uzsEquivalent(r.flow),
+      },
     }));
 
     const soonIn = dueSoon(forMath, "in", today, 7);
@@ -721,12 +783,19 @@ export class FinanceService {
   }
 
   /** Контрагенты направления — кандидаты привязки записи. */
-  async counterpartyCandidates(domain: Domain): Promise<{ id: string; name: string; inn: string | null }[]> {
+  async counterpartyCandidates(
+    domain: Domain,
+  ): Promise<{ id: string; name: string; inn: string | null }[]> {
     const orgId = await this.orgId(domain);
     const rows = await this.db
       .select({ id: entity.id, name: entity.name, inn: entity.externalRef })
       .from(entity)
-      .where(and(eq(entity.orgId, orgId), inArray(entity.type, ["contractor", "counterparty", "supplier"])))
+      .where(
+        and(
+          eq(entity.orgId, orgId),
+          inArray(entity.type, ["contractor", "counterparty", "supplier"]),
+        ),
+      )
       .orderBy(entity.name)
       .limit(500);
     return rows;

@@ -62,7 +62,11 @@ import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingMachinesPanel, VendingSupplyPanel } from "../../../components/vending-panel";
 import { CoffeePanel } from "../../../components/coffee-panel";
-import { ServiceTab, type ServiceAction, type ServiceKpiTile } from "../../../components/service-tab";
+import {
+  ServiceTab,
+  type ServiceAction,
+  type ServiceKpiTile,
+} from "../../../components/service-tab";
 import {
   ContractorsBook,
   ContractsBook,
@@ -85,6 +89,10 @@ export const dynamic = "force-dynamic";
 
 function isDomain(v: string): v is Domain {
   return (DOMAINS as readonly string[]).includes(v);
+}
+
+function coreErrorDetail(err: unknown): string {
+  return err instanceof CoreUnavailable ? err.detail : String(err);
 }
 
 /** «24 июн» по Ташкенту — для KPI «Деньги не сняты с …» (без точки после месяца). */
@@ -111,7 +119,11 @@ const COFFEE_REFILL_LIMIT = 200;
 function taskSourceLabel(source: string | null): string {
   if (source === null || source === "owner") return "владелец";
   if (source.startsWith("maint:") || source.startsWith("recurring:")) return "график";
-  if (source === "maintenance-monitor" || source === "coffee-monitor" || source === "coffee-alert") {
+  if (
+    source === "maintenance-monitor" ||
+    source === "coffee-monitor" ||
+    source === "coffee-alert"
+  ) {
     return "обслуживание";
   }
   return source;
@@ -310,7 +322,8 @@ export default async function DomainPage({
     return !a["широта"] || !a["долгота"];
   });
   const snackMachines = machines.length - coffeeMachines - unknownMachines;
-  const defaultOwner = ourPeople.find((p) => p.active === "yes" && p.tgChatId) ?? ourPeople[0] ?? null;
+  const defaultOwner =
+    ourPeople.find((p) => p.active === "yes" && p.tgChatId) ?? ourPeople[0] ?? null;
 
   // Инкассация нужна и МЕТКЕ вкладки (счётчик «ждут приёма»), поэтому тянется
   // всегда для vendhub — это один дешёвый запрос.
@@ -336,15 +349,21 @@ export default async function DomainPage({
   let vendingDeficit: Awaited<ReturnType<typeof core.vendingDeficit>> | null = null;
   let machineCards: Awaited<ReturnType<typeof core.machineCards>> | null = null;
   if (domain === "vendhub" && isOverview) {
-    [salesSummary, supplySummary, salesDaily, cashEstimate, vendingDeficit, machineCards] = await Promise.all([
-      core.salesSummary().catch(() => null),
-      core.supplySummary().catch(() => null),
-      core.salesDaily(30).catch(() => null),
-      core.cashEstimate().catch(() => null),
-      core.vendingDeficit().catch(() => null),
-      core.machineCards().catch(() => null),
-    ]);
-  } else if (domain === "vendhub" && activeGroup === "settings" && activeLeaf === "machine" && sp.status) {
+    [salesSummary, supplySummary, salesDaily, cashEstimate, vendingDeficit, machineCards] =
+      await Promise.all([
+        core.salesSummary().catch(() => null),
+        core.supplySummary().catch(() => null),
+        core.salesDaily(30).catch(() => null),
+        core.cashEstimate().catch(() => null),
+        core.vendingDeficit().catch(() => null),
+        core.machineCards().catch(() => null),
+      ]);
+  } else if (
+    domain === "vendhub" &&
+    activeGroup === "settings" &&
+    activeLeaf === "machine" &&
+    sp.status
+  ) {
     // Панель «Автоматы» (C1) отдаёт уже отфильтрованный по ?status= список —
     // карточки вида нужны здесь же, а не только на дашборде.
     machineCards = await core.machineCards().catch(() => null);
@@ -360,11 +379,15 @@ export default async function DomainPage({
   if (domain === "vendhub" && activeGroup === "tasks") {
     const tasksOverdueRows = await core.tasksOverdue().catch(() => null);
     const overdueCount =
-      tasksOverdueRows === null ? null : tasksOverdueRows.filter((t) => t.domain === "vendhub").length;
+      tasksOverdueRows === null
+        ? null
+        : tasksOverdueRows.filter((t) => t.domain === "vendhub").length;
     // ownerRef === "" тоже "свободная" — исторические записи до нормализации
     // "" → null на создании (tasks.service.ts) могли осесть в базе пустой
     // строкой, а не null.
-    const unassignedCount = openTasks.filter((t) => t.ownerRef === null || t.ownerRef.trim() === "").length;
+    const unassignedCount = openTasks.filter(
+      (t) => t.ownerRef === null || t.ownerRef.trim() === "",
+    ).length;
     // «За неделю» — та же скользящая граница (сейчас минус 168 часов), что
     // и doneLast7d на сервере (tasks.service.ts), а не календарный день:
     // окно в 7×24 часа не зависит от часового пояса подсчёта.
@@ -373,7 +396,10 @@ export default async function DomainPage({
     // нет); status "done" + completedAt в окне — тот же признак, что у
     // серверного doneLast7d, поэтому цифра не выдумана, а согласована с ним.
     const closedThisWeek = tasks.filter(
-      (t) => t.status === "done" && t.completedAt !== null && new Date(t.completedAt).getTime() >= weekAgoMs,
+      (t) =>
+        t.status === "done" &&
+        t.completedAt !== null &&
+        new Date(t.completedAt).getTime() >= weekAgoMs,
     ).length;
     taskKpi = [
       { label: "Открыто", value: String(openTasks.length) },
@@ -450,7 +476,8 @@ export default async function DomainPage({
 
   // «Должны» — только открытые обязательства: оплаченное (actual) и отменённое
   // долгом не является (ловилось при переносе финконтура PROMACH).
-  const isOpenObligation = (t: { status: string }) => t.status !== "actual" && t.status !== "cancelled";
+  const isOpenObligation = (t: { status: string }) =>
+    t.status !== "actual" && t.status !== "cancelled";
   const owedToUs = obligations.totals.filter((t) => t.direction === "in" && isOpenObligation(t));
   const owedByUs = obligations.totals.filter((t) => t.direction === "out" && isOpenObligation(t));
 
@@ -490,7 +517,10 @@ export default async function DomainPage({
           { key: "hr", label: `Люди${ourPeople.length > 0 ? ` ${ourPeople.length}` : ""}` },
           { key: "tasks", label: tasksLabel },
           { key: "reports", label: groups.find((g) => g.key === "reports")?.label ?? "Отчёты" },
-          { key: "settings", label: groups.find((g) => g.key === "settings")?.label ?? "Номенклатура" },
+          {
+            key: "settings",
+            label: groups.find((g) => g.key === "settings")?.label ?? "Номенклатура",
+          },
           { key: "system", label: "⚙ Настройки" },
         ]
       : [
@@ -657,57 +687,79 @@ export default async function DomainPage({
   // Справочник растаможки (ставки ТН ВЭД + БРВ) — живые таблицы Core, не реестр.
   let tnved: TnvedRate[] = [];
   let brv: BrvValue[] = [];
+  let customsLoadError: string | null = null;
   if (group && leaf?.type === "customs_rates") {
-    [tnved, brv] = await Promise.all([
-      core.tnvedRates().catch(() => [] as TnvedRate[]),
-      core.brvValues().catch(() => [] as BrvValue[]),
-    ]);
+    try {
+      [tnved, brv] = await Promise.all([core.tnvedRates(), core.brvValues()]);
+    } catch (err) {
+      customsLoadError = coreErrorDetail(err);
+    }
   }
 
   // Живые UZS-договоры (перенос PROMACH) — поверх собранных карточек реестра.
   let liveContracts: GrContract[] = [];
   let contractClients: FinanceCounterparty[] = [];
+  let contractsLoadError: string | null = null;
   if (domain === "globerent" && group && leaf?.type === "contract") {
-    [liveContracts, contractClients] = await Promise.all([
-      core.contracts(domain).catch(() => [] as GrContract[]),
-      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
-    ]);
+    try {
+      [liveContracts, contractClients] = await Promise.all([
+        core.contracts(domain),
+        core.financeCounterparties(domain),
+      ]);
+    } catch (err) {
+      contractsLoadError = coreErrorDetail(err);
+    }
   }
 
   // Калькулятор цены: ставки, БРВ и курс — входы движка (сам расчёт в браузере).
   let calcRates: TnvedRate[] = [];
   let calcBrv: BrvValue[] = [];
   let calcFx: Awaited<ReturnType<typeof core.fxRates>> = [];
+  let calcLoadError: string | null = null;
   if (domain === "globerent" && activeGroup === "calc") {
-    [calcRates, calcBrv, calcFx] = await Promise.all([
-      core.tnvedRates().catch(() => [] as TnvedRate[]),
-      core.brvValues().catch(() => [] as BrvValue[]),
-      core.fxRates().catch(() => []),
-    ]);
+    try {
+      [calcRates, calcBrv, calcFx] = await Promise.all([
+        core.tnvedRates(),
+        core.brvValues(),
+        core.fxRates(),
+      ]);
+    } catch (err) {
+      calcLoadError = coreErrorDetail(err);
+    }
   }
 
   // Склад техники: конвейер единиц (перенос warehouse_vehicles PROMACH).
   let units: GrUnit[] = [];
   let unitsSummary: { key: string; label: string; n: number }[] = [];
   let unitClients: FinanceCounterparty[] = [];
+  let unitsLoadError: string | null = null;
   if (domain === "globerent" && activeGroup === "units") {
-    [units, unitsSummary, unitClients] = await Promise.all([
-      core.units(domain).catch(() => [] as GrUnit[]),
-      core.unitsSummary(domain).catch(() => []),
-      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
-    ]);
+    try {
+      [units, unitsSummary, unitClients] = await Promise.all([
+        core.units(domain),
+        core.unitsSummary(domain),
+        core.financeCounterparties(domain),
+      ]);
+    } catch (err) {
+      unitsLoadError = coreErrorDetail(err);
+    }
   }
 
   // Импортные контракты и предзаказы (перенос PROMACH).
   let importsList: GrImport[] = [];
   let importSuppliers: FinanceCounterparty[] = [];
   let preorders: GrPreorder[] = [];
+  let importsLoadError: string | null = null;
   if (domain === "globerent" && activeGroup === "imports") {
-    [importsList, importSuppliers, preorders] = await Promise.all([
-      core.imports(domain).catch(() => [] as GrImport[]),
-      core.financeCounterparties(domain).catch(() => [] as FinanceCounterparty[]),
-      core.preorders(domain).catch(() => [] as GrPreorder[]),
-    ]);
+    try {
+      [importsList, importSuppliers, preorders] = await Promise.all([
+        core.imports(domain),
+        core.financeCounterparties(domain),
+        core.preorders(domain),
+      ]);
+    } catch (err) {
+      importsLoadError = coreErrorDetail(err);
+    }
   }
 
   // ── ACTIVITY (Обслуживание) целиком: мини-KPI + единая лента полевых
@@ -721,9 +773,24 @@ export default async function DomainPage({
     // Адреса листьев, а не якоря на секции ниже: у «Полевой работы» появился
     // второй уровень, и три панели больше не лежат простынёй на одной
     // странице. Якорь вёл бы в пустоту — секции с таким id больше нет.
-    { icon: "☕", title: "Пополнить кофе-точку", subtitle: "точка → бункеры подряд → веса · как в боте", href: href("service:coffee") },
-    { icon: "🍫", title: "Пополнить снек-точку", subtitle: "точка → спирали → количества", href: href("service:snack") },
-    { icon: "💵", title: "Инкассация", subtitle: "автомат → сумма · весь парк, не только рабочие", href: href("service:collection") },
+    {
+      icon: "☕",
+      title: "Пополнить кофе-точку",
+      subtitle: "точка → бункеры подряд → веса · как в боте",
+      href: href("service:coffee"),
+    },
+    {
+      icon: "🍫",
+      title: "Пополнить снек-точку",
+      subtitle: "точка → спирали → количества",
+      href: href("service:snack"),
+    },
+    {
+      icon: "💵",
+      title: "Инкассация",
+      subtitle: "автомат → сумма · весь парк, не только рабочие",
+      href: href("service:collection"),
+    },
   ];
   if (domain === "vendhub" && activeGroup === "service") {
     let recentRefills: Awaited<ReturnType<typeof core.recentCoffeeRefills>> | null = null;
@@ -732,19 +799,20 @@ export default async function DomainPage({
     let serviceDeficit: Awaited<ReturnType<typeof core.vendingDeficit>> | null = null;
     let refillRows: Awaited<ReturnType<typeof core.vendingRefillList>> | null = null;
     let collRows: Awaited<ReturnType<typeof core.collections>> | null = null;
-    [recentRefills, bunkerConfig, fillStatus, serviceDeficit, refillRows, collRows] = await Promise.all([
-      // Лимит 200 — потолок эндпоинта (coffee.controller.ts: Math.min(Math.max(limit,1),200)).
-      // Одна и та же выборка кормит и счётчик «сегодня», и ленту — ленту резать
-      // отдельно не нужно, mergeServiceFeed сам ограничивает итог 50 строками
-      // (Task 9 ревью, находка 2: на лимите 50 «сегодня» молча недосчитывало
-      // дни с активной заливкой более чем на 50 бункеров).
-      core.recentCoffeeRefills(COFFEE_REFILL_LIMIT).catch(() => null),
-      core.coffeeBunkerConfig().catch(() => null),
-      core.coffeeFillStatus().catch(() => null),
-      core.vendingDeficit().catch(() => null),
-      core.vendingRefillList(100).catch(() => null),
-      core.collections({ days: "365" }).catch(() => null),
-    ]);
+    [recentRefills, bunkerConfig, fillStatus, serviceDeficit, refillRows, collRows] =
+      await Promise.all([
+        // Лимит 200 — потолок эндпоинта (coffee.controller.ts: Math.min(Math.max(limit,1),200)).
+        // Одна и та же выборка кормит и счётчик «сегодня», и ленту — ленту резать
+        // отдельно не нужно, mergeServiceFeed сам ограничивает итог 50 строками
+        // (Task 9 ревью, находка 2: на лимите 50 «сегодня» молча недосчитывало
+        // дни с активной заливкой более чем на 50 бункеров).
+        core.recentCoffeeRefills(COFFEE_REFILL_LIMIT).catch(() => null),
+        core.coffeeBunkerConfig().catch(() => null),
+        core.coffeeFillStatus().catch(() => null),
+        core.vendingDeficit().catch(() => null),
+        core.vendingRefillList(100).catch(() => null),
+        core.collections({ days: "365" }).catch(() => null),
+      ]);
 
     // «Залито сегодня» — заливки кофе-бункеров, день createdAt по Ташкенту
     // совпадает с сегодняшним (тот же todayKey, что у GLOBERENT ниже).
@@ -752,24 +820,32 @@ export default async function DomainPage({
       recentRefills === null
         ? null
         : recentRefills.filter(
-            (r) => new Date(r.createdAt).toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" }) === todayKey,
+            (r) =>
+              new Date(r.createdAt).toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" }) ===
+              todayKey,
           ).length;
     // Пришло ровно столько строк, сколько разрешает эндпоинт, — значит за
     // сегодня могло быть больше, чем видно в этой выборке (более старые
     // заливки сегодняшнего дня уже могли не поместиться). Честная оговорка
     // вместо тихого недосчёта (Task 9 ревью, находка 2).
-    const filledTodayCapped = recentRefills !== null && recentRefills.length === COFFEE_REFILL_LIMIT;
+    const filledTodayCapped =
+      recentRefills !== null && recentRefills.length === COFFEE_REFILL_LIMIT;
 
     // «Точек ждёт визита» — уникальные точки со status="underfill". Пустой
     // ответ ИЛИ ответ, где ни для одной точки эталон не задан (весь список —
     // status="unknown"), — это не «недолива нет нигде», а «нечего сравнивать»:
     // плитка тогда показывает «—», а не обманчивый ноль.
     const hasAnyTarget = fillStatus !== null && fillStatus.some((r) => r.status !== "unknown");
-    const underfillLocations = fillStatus === null || !hasAnyTarget
-      ? null
-      : new Set(fillStatus.filter((r) => r.status === "underfill").map((r) => r.locationId)).size;
+    const underfillLocations =
+      fillStatus === null || !hasAnyTarget
+        ? null
+        : new Set(fillStatus.filter((r) => r.status === "underfill").map((r) => r.locationId)).size;
     const waitingVisitsFoot =
-      fillStatus === null ? "нет данных" : !hasAnyTarget ? "эталоны не заданы" : "уникальных точек с недоливом";
+      fillStatus === null
+        ? "нет данных"
+        : !hasAnyTarget
+          ? "эталоны не заданы"
+          : "уникальных точек с недоливом";
 
     const emptySpirals = serviceDeficit === null ? null : serviceDeficit.length;
 
@@ -777,15 +853,24 @@ export default async function DomainPage({
     // источник пустой (но живой) — «ни разу», источник недоступен — «—».
     const lastReceivedAt = (collRows ?? []).reduce<string | null>((max, c) => {
       if (c.status !== "received" || !c.receivedAt) return max;
-      return max === null || new Date(c.receivedAt).getTime() > new Date(max).getTime() ? c.receivedAt : max;
+      return max === null || new Date(c.receivedAt).getTime() > new Date(max).getTime()
+        ? c.receivedAt
+        : max;
     }, null);
     const moneyValue =
-      collRows === null ? "—" : lastReceivedAt === null ? "ни разу" : `с ${shortRuDate(lastReceivedAt)}`;
+      collRows === null
+        ? "—"
+        : lastReceivedAt === null
+          ? "ни разу"
+          : `с ${shortRuDate(lastReceivedAt)}`;
 
     serviceKpi = [
       {
         label: "Залито сегодня",
-        value: filledToday === null ? "—" : `${filledToday} ${plural(filledToday, "бункер", "бункера", "бункеров")}`,
+        value:
+          filledToday === null
+            ? "—"
+            : `${filledToday} ${plural(filledToday, "бункер", "бункера", "бункеров")}`,
         foot:
           recentRefills === null
             ? "нет данных"
@@ -861,7 +946,13 @@ export default async function DomainPage({
       if (list) list.push(row);
       else rowsByMachine.set(row.machineSerial, [row]);
     }
-    const vendingVisits: { machineSerial: string; createdAt: string; positions: number; units: number; createdBy: string | null }[] = [];
+    const vendingVisits: {
+      machineSerial: string;
+      createdAt: string;
+      positions: number;
+      units: number;
+      createdBy: string | null;
+    }[] = [];
     for (const [serial, rows] of rowsByMachine) {
       const sorted = [...rows].sort(
         (a, b) => new Date(a.performedAt).getTime() - new Date(b.performedAt).getTime(),
@@ -874,7 +965,13 @@ export default async function DomainPage({
           current.positions += 1;
           current.units += row.qty;
         } else {
-          current = { machineSerial: serial, createdAt: row.performedAt, positions: 1, units: row.qty, createdBy: row.createdBy };
+          current = {
+            machineSerial: serial,
+            createdAt: row.performedAt,
+            positions: 1,
+            units: row.qty,
+            createdBy: row.createdBy,
+          };
           vendingVisits.push(current);
         }
         lastTs = ts;
@@ -939,9 +1036,10 @@ export default async function DomainPage({
     return typeof v === "number" && Number.isFinite(v) ? v : null;
   };
   const topContractor = contractorsLoaded
-    ? [...contractors]
+    ? ([...contractors]
         .filter((e) => contractorTurnover(e) !== null)
-        .sort((a, b) => (contractorTurnover(b) as number) - (contractorTurnover(a) as number))[0] ?? null
+        .sort((a, b) => (contractorTurnover(b) as number) - (contractorTurnover(a) as number))[0] ??
+      null)
     : null;
   const coffeeTopProducts = coffeeOrders?.поТоварам ?? [];
 
@@ -950,14 +1048,19 @@ export default async function DomainPage({
   // Тот же источник и то же правило использует отбор ?status= на листе
   // «Автоматы» (ниже), иначе цифра на плитке и список по клику расходятся.
   const cardByEntity = new Map((machineCards ?? []).map((c) => [c.entityId, c]));
-  const parkStatusOf = (entityId: string): string => cardByEntity.get(entityId)?.status || "in_service";
+  const parkStatusOf = (entityId: string): string =>
+    cardByEntity.get(entityId)?.status || "in_service";
   const parkInService = machines.filter((e) => parkStatusOf(e.id) === "in_service");
   const parkWarehouse = machines.filter((e) => parkStatusOf(e.id) === "warehouse");
   const parkRepair = machines.filter((e) => parkStatusOf(e.id) === "repair");
   // Явный подсчёт по виду, а не вычитанием: kind === "other"/"drink"/"combo"/
   // не размечен молча утекал бы в «снек» и врал про состав парка.
-  const parkInServiceCoffee = parkInService.filter((e) => cardByEntity.get(e.id)?.kind === "coffee").length;
-  const parkInServiceSnack = parkInService.filter((e) => cardByEntity.get(e.id)?.kind === "snack").length;
+  const parkInServiceCoffee = parkInService.filter(
+    (e) => cardByEntity.get(e.id)?.kind === "coffee",
+  ).length;
+  const parkInServiceSnack = parkInService.filter(
+    (e) => cardByEntity.get(e.id)?.kind === "snack",
+  ).length;
   const parkInServiceOther = parkInService.length - parkInServiceCoffee - parkInServiceSnack;
   const cupsPerMachine =
     coffeeOrders !== null
@@ -968,7 +1071,8 @@ export default async function DomainPage({
   // единый ряд по дате, суммируем в один Map; день без продаж одного контура
   // просто не добавляет к сумме (эквивалент 0), а не роняет весь ряд.
   const revenueByDayMap = new Map<string, number>();
-  for (const d of salesDaily ?? []) revenueByDayMap.set(d.dt, (revenueByDayMap.get(d.dt) ?? 0) + Number(d.amount));
+  for (const d of salesDaily ?? [])
+    revenueByDayMap.set(d.dt, (revenueByDayMap.get(d.dt) ?? 0) + Number(d.amount));
   for (const d of coffeeOrders?.поДням ?? [])
     revenueByDayMap.set(d.день, (revenueByDayMap.get(d.день) ?? 0) + Number(d.выручка));
   const revenueByDay = [...revenueByDayMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
@@ -986,7 +1090,9 @@ export default async function DomainPage({
               <span className="cur">{crumbLabel}</span>
             </>
           )}
-          <span className="route" title="Адрес раздела">{routePath}</span>
+          <span className="route" title="Адрес раздела">
+            {routePath}
+          </span>
         </nav>
         <h1 className="h1">{DOMAIN_LABELS[domain]}</h1>
         <p className="lead">
@@ -1066,8 +1172,8 @@ export default async function DomainPage({
         <div className="card" style={{ maxWidth: 720 }}>
           <div className="h2">Настройки направления</div>
           <p className="hint" style={{ marginTop: 8 }}>
-            Здесь будут параметры самого направления: доступы, интеграции с источниками,
-            реквизиты. Пока части этого живут на своих экранах — ссылки ниже ведут прямо туда.
+            Здесь будут параметры самого направления: доступы, интеграции с источниками, реквизиты.
+            Пока части этого живут на своих экранах — ссылки ниже ведут прямо туда.
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
             <Link className="btn sm" href="/team">
@@ -1081,23 +1187,23 @@ export default async function DomainPage({
             </Link>
           </div>
           <p className="hint" style={{ marginTop: 14 }}>
-            Реестры — автоматы, товары, ингредиенты, контрагенты, склады и справочники — теперь
-            в «Номенклатуре»: это данные бизнеса, а не параметры системы.
+            Реестры — автоматы, товары, ингредиенты, контрагенты, склады и справочники — теперь в
+            «Номенклатуре»: это данные бизнеса, а не параметры системы.
           </p>
         </div>
       )}
       {domain === "vendhub" && activeGroup === "smm" && (
         <div className="empty">
           <b>SMM — продвижение</b>
-          Вебсайт, Instagram, TikTok и другие каналы направления. Деятельность объявлена
-          в структуре; подключение — отдельным этапом со своей спекой.
+          Вебсайт, Instagram, TikTok и другие каналы направления. Деятельность объявлена в
+          структуре; подключение — отдельным этапом со своей спекой.
         </div>
       )}
       {domain === "vendhub" && activeGroup === "crm" && (
         <div className="empty">
           <b>CRM — звонки и обращения</b>
-          Приём обращений, анализ звонков. Деятельность объявлена в структуре;
-          подключение — отдельным этапом.
+          Приём обращений, анализ звонков. Деятельность объявлена в структуре; подключение —
+          отдельным этапом.
         </div>
       )}
 
@@ -1114,8 +1220,8 @@ export default async function DomainPage({
         ) : (
           <div className="empty">
             <b>Финансовый свод недоступен</b>
-            Core не ответил на запрос финансов. Обнови страницу; если повторяется —
-            проверь, что Core обновлён до версии с финансовым контуром.
+            Core не ответил на запрос финансов. Обнови страницу; если повторяется — проверь, что
+            Core обновлён до версии с финансовым контуром.
           </div>
         ))}
 
@@ -1131,22 +1237,32 @@ export default async function DomainPage({
               <div className={`tile ${hasMoney(owedToUs) ? "" : "zero"}`}>
                 <div className="lab">Должны нам</div>
                 <div className="v">{moneyByCurrency(owedToUs)}</div>
-                <div className="foot"><span className="mk" />{hasMoney(owedToUs) ? "по реестру обязательств" : "нет открытых счетов"}</div>
+                <div className="foot">
+                  <span className="mk" />
+                  {hasMoney(owedToUs) ? "по реестру обязательств" : "нет открытых счетов"}
+                </div>
               </div>
               <div className={`tile ${hasMoney(owedByUs) ? "" : "zero"}`}>
                 <div className="lab">Должны мы</div>
                 <div className="v">{moneyByCurrency(owedByUs)}</div>
-                <div className="foot"><span className="mk" />{hasMoney(owedByUs) ? "поставщики и аренда" : "нет открытых счетов"}</div>
+                <div className="foot">
+                  <span className="mk" />
+                  {hasMoney(owedByUs) ? "поставщики и аренда" : "нет открытых счетов"}
+                </div>
               </div>
               <div className={`tile ${obligations.overdueTotal > 0 ? "is-hot" : "zero"}`}>
                 <div className="lab">Просрочено</div>
                 <div className="v">{obligations.overdueTotal}</div>
-                <div className="foot"><span className="mk" />{obligations.overdueTotal > 0 ? "требует твоего решения" : "просрочек нет"}</div>
+                <div className="foot">
+                  <span className="mk" />
+                  {obligations.overdueTotal > 0 ? "требует твоего решения" : "просрочек нет"}
+                </div>
               </div>
               <Link href={href("tasks")} className={`tile ${openTasks.length === 0 ? "zero" : ""}`}>
                 <div className="lab">Открытых задач</div>
                 <div className="v">{openTasks.length}</div>
-                <div className="foot"><span className="mk" />
+                <div className="foot">
+                  <span className="mk" />
                   {/* Этот легаси-ряд у VendHub не рендерится (I4) — разбивку
                       кофе/снек показывать здесь уже некому, у остальных
                       направлений признака контура нет. */}
@@ -1191,12 +1307,16 @@ export default async function DomainPage({
                 <Link href={href("catalog:contractor")} className="wt">
                   <div className="wl">Контрагенты</div>
                   <div className="wv">{byType["contractor"] ?? 0}</div>
-                  <div className="wf">ключ сведения — ИНН<span className="go">→</span></div>
+                  <div className="wf">
+                    ключ сведения — ИНН<span className="go">→</span>
+                  </div>
                 </Link>
                 <Link href={href("catalog:equipment")} className="wt">
                   <div className="wl">Техника HELI</div>
                   <div className="wv">{byType["equipment"] ?? 0}</div>
-                  <div className="wf">единиц в каталоге<span className="go">→</span></div>
+                  <div className="wf">
+                    единиц в каталоге<span className="go">→</span>
+                  </div>
                 </Link>
               </div>
               {grContracts.dueSoon.length > 0 && (
@@ -1213,7 +1333,11 @@ export default async function DomainPage({
                     );
                   })}
                   {grContracts.dueSoon.length > 8 && (
-                    <Link href={href("docs:contract")} className="navlink" style={{ justifyContent: "center" }}>
+                    <Link
+                      href={href("docs:contract")}
+                      className="navlink"
+                      style={{ justifyContent: "center" }}
+                    >
                       Все на исходе — {grContracts.dueSoon.length}
                     </Link>
                   )}
@@ -1222,8 +1346,8 @@ export default async function DomainPage({
               {grContracts.badDate > 0 && (
                 <div className="warn" style={{ marginTop: 10 }}>
                   <b>Договоры с непонятной датой: {grContracts.badDate}</b>
-                  Срок окончания не разобрать — в «на исходе» они не попали. Открой карточку
-                  и поправь дату, иначе срок пройдёт незамеченным.
+                  Срок окончания не разобрать — в «на исходе» они не попали. Открой карточку и
+                  поправь дату, иначе срок пройдёт незамеченным.
                 </div>
               )}
               <div style={{ marginTop: 12 }}>
@@ -1265,7 +1389,9 @@ export default async function DomainPage({
                 >
                   <div className="wl">К сроку ≤ 7 дней · мы</div>
                   <div className="wv">{finSummary.dueSoonOut.length}</div>
-                  <div className="wf">свои платежи<span className="go">→</span></div>
+                  <div className="wf">
+                    свои платежи<span className="go">→</span>
+                  </div>
                 </Link>
                 <Link href={href("finance")} className="wt">
                   <div className="wl">Открытая дебиторка</div>
@@ -1289,11 +1415,15 @@ export default async function DomainPage({
           {/* ── Предприятие: сводка на уровне направления, а не одного контура ── */}
           {domain === "vendhub" && (
             <div className="sect">
-              <div className="sect-h"><h3 className="h2">Предприятие</h3></div>
+              <div className="sect-h">
+                <h3 className="h2">Предприятие</h3>
+              </div>
               <div className="wgrid">
                 <div className={`wt ${hasRevenue30 ? "" : "off"}`}>
                   <div className="wl">Выручка · 30 дней</div>
-                  <div className="wv">{hasRevenue30 ? Math.round(revenue30).toLocaleString("ru-RU") : "—"}</div>
+                  <div className="wv">
+                    {hasRevenue30 ? Math.round(revenue30).toLocaleString("ru-RU") : "—"}
+                  </div>
                   <div className="wf">
                     {hasRevenue30
                       ? `кофе ${((coffeeRevenue30 ?? 0) / 1_000_000).toFixed(1)} + снек ${((snackRevenue30 ?? 0) / 1_000_000).toFixed(1)} млн`
@@ -1302,7 +1432,9 @@ export default async function DomainPage({
                 </div>
                 <div className={`wt ${coffeeOrders ? "" : "off"}`}>
                   <div className="wl">Средний чек кофе</div>
-                  <div className="wv">{coffeeOrders ? coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU") : "—"}</div>
+                  <div className="wv">
+                    {coffeeOrders ? coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU") : "—"}
+                  </div>
                   <div className="wf">сум за чашку · маржа — в отчёте «Себестоимость»</div>
                 </div>
                 {/* I3: плитка = вопрос («сколько?»), клик = ответ (details — по
@@ -1312,7 +1444,9 @@ export default async function DomainPage({
                 <details className={`wt cash-estimate ${cashEstimate ? "" : "off"}`}>
                   <summary>
                     <div className="wl">Деньги в автоматах ≈</div>
-                    <div className="wv">{cashEstimate ? Math.round(cashEstimate.всего).toLocaleString("ru-RU") : "—"}</div>
+                    <div className="wv">
+                      {cashEstimate ? Math.round(cashEstimate.всего).toLocaleString("ru-RU") : "—"}
+                    </div>
                     <div className="wf">
                       {cashEstimate
                         ? `с последней принятой инкассации по каждому автомату${
@@ -1331,7 +1465,9 @@ export default async function DomainPage({
                           <div className="row" key={m.machineId}>
                             <div className="t">
                               <b>{m.имя ?? "—"}</b>
-                              <small>{m.с === null ? "за всю историю" : `с ${shortRuDate(m.с)}`}</small>
+                              <small>
+                                {m.с === null ? "за всю историю" : `с ${shortRuDate(m.с)}`}
+                              </small>
                             </div>
                             <span className="pill">{m.сумма.toLocaleString("ru-RU")} сум</span>
                           </div>
@@ -1339,7 +1475,10 @@ export default async function DomainPage({
                     </div>
                   )}
                 </details>
-                <Link href={href("service:feed")} className={`wt ${attentionTotal > 0 ? "is-hot" : ""}`}>
+                <Link
+                  href={href("service:feed")}
+                  className={`wt ${attentionTotal > 0 ? "is-hot" : ""}`}
+                >
                   <div className="wl">Требует внимания</div>
                   <div className="wv">{attentionTotal}</div>
                   <div className="wf">
@@ -1354,14 +1493,18 @@ export default async function DomainPage({
           {/* ── Быстрые действия: подняты из подвала контуров — под цифрами предприятия ── */}
           {domain === "vendhub" && (
             <div className="sect">
-              <div className="sect-h"><h3 className="h2">Быстрые действия</h3></div>
+              <div className="sect-h">
+                <h3 className="h2">Быстрые действия</h3>
+              </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-start" }}>
                 <QuickActions
                   domain={domain}
                   actions={["Пополнение автоматов", "Инкассация", "Ремонт / выезд"]}
                   defaultOwnerRef={defaultOwner?.id ?? null}
                 />
-                <Link href={href("tasks")} className="btn sm">+ Задача</Link>
+                <Link href={href("tasks")} className="btn sm">
+                  + Задача
+                </Link>
               </div>
             </div>
           )}
@@ -1372,7 +1515,13 @@ export default async function DomainPage({
                  «Отчётах», overview даёт только пульс. ── */}
           {domain === "vendhub" && (
             <div className="sect">
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 18 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                  gap: 18,
+                }}
+              >
                 <div>
                   <div className="sect-h">
                     <h3 className="h2">Кофе</h3>
@@ -1380,12 +1529,25 @@ export default async function DomainPage({
                       <span className="chip h">не выдано · {coffeeOrders.неВыдано}</span>
                     )}
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
-                    <Link href={href("service:coffee")} className={`wt ${coffeeOrders ? "" : "off"}`}>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+                      gap: 10,
+                    }}
+                  >
+                    <Link
+                      href={href("service:coffee")}
+                      className={`wt ${coffeeOrders ? "" : "off"}`}
+                    >
                       <div className="wl">Чашек · 30 дней</div>
-                      <div className="wv">{coffeeOrders ? coffeeOrders.всего.чашек.toLocaleString("ru-RU") : "—"}</div>
+                      <div className="wv">
+                        {coffeeOrders ? coffeeOrders.всего.чашек.toLocaleString("ru-RU") : "—"}
+                      </div>
                       <div className="wf">
-                        {coffeeOrders ? `чек ${coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU")} сум` : "нет данных"}
+                        {coffeeOrders
+                          ? `чек ${coffeeOrders.всего.среднийЧек.toLocaleString("ru-RU")} сум`
+                          : "нет данных"}
                         <span className="go">→</span>
                       </div>
                     </Link>
@@ -1409,14 +1571,24 @@ export default async function DomainPage({
                     <h3 className="h2">Снек</h3>
                     {salesSummary?.lastSaleDt && <span className="chip g">живые · OurVend</span>}
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+                      gap: 10,
+                    }}
+                  >
                     <Link href={href("reports:sale")} className={`wt ${salesSummary ? "" : "off"}`}>
                       <div className="wl">Продано вчера</div>
                       <div className="wv">
-                        {salesSummary ? `${Number(salesSummary.yesterday.qty).toLocaleString("ru-RU")} шт` : "—"}
+                        {salesSummary
+                          ? `${Number(salesSummary.yesterday.qty).toLocaleString("ru-RU")} шт`
+                          : "—"}
                       </div>
                       <div className="wf">
-                        {salesSummary ? `${Number(salesSummary.yesterday.amount).toLocaleString("ru-RU")} сум` : "нет данных"}
+                        {salesSummary
+                          ? `${Number(salesSummary.yesterday.amount).toLocaleString("ru-RU")} сум`
+                          : "нет данных"}
                         <span className="go">→</span>
                       </div>
                     </Link>
@@ -1446,16 +1618,28 @@ export default async function DomainPage({
           {/* ── Деньги и партнёры: закупки, поставщики, инкассация, топ товара ── */}
           {domain === "vendhub" && (
             <div className="sect">
-              <div className="sect-h"><h3 className="h2">Деньги и партнёры</h3></div>
+              <div className="sect-h">
+                <h3 className="h2">Деньги и партнёры</h3>
+              </div>
               <div className="wgrid">
-                <Link href={href("reports:purchase")} className={`wt ${supplySummary ? "" : "off"}`}>
+                <Link
+                  href={href("reports:purchase")}
+                  className={`wt ${supplySummary ? "" : "off"}`}
+                >
                   <div className="wl">Закупки · 30 дней</div>
                   <div className="wv">
-                    {supplySummary ? Math.round(supplySummary.purchases30.total).toLocaleString("ru-RU") : "—"}
+                    {supplySummary
+                      ? Math.round(supplySummary.purchases30.total).toLocaleString("ru-RU")
+                      : "—"}
                   </div>
-                  <div className="wf">по журналу прихода<span className="go">→</span></div>
+                  <div className="wf">
+                    по журналу прихода<span className="go">→</span>
+                  </div>
                 </Link>
-                <Link href={href("settings:contractor")} className={`wt ${contractorsLoaded ? "" : "off"}`}>
+                <Link
+                  href={href("settings:contractor")}
+                  className={`wt ${contractorsLoaded ? "" : "off"}`}
+                >
                   <div className="wl">Поставщики</div>
                   <div className="wv">{contractorsLoaded ? contractors.length : "—"}</div>
                   <div className="wf">
@@ -1463,7 +1647,10 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("service:collection")} className={`wt ${collSummary ? "" : "off"}`}>
+                <Link
+                  href={href("service:collection")}
+                  className={`wt ${collSummary ? "" : "off"}`}
+                >
                   <div className="wl">Инкассация · 30 дней</div>
                   <div className="wv">
                     {collSummary ? Number(collSummary.receivedSum).toLocaleString("ru-RU") : "—"}
@@ -1473,12 +1660,18 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("service:coffee")} className={`wt ${coffeeTopProducts.length > 0 ? "" : "off"}`}>
+                <Link
+                  href={href("service:coffee")}
+                  className={`wt ${coffeeTopProducts.length > 0 ? "" : "off"}`}
+                >
                   <div className="wl">Топ товара</div>
                   <div className="wv">{coffeeTopProducts[0]?.товар ?? "—"}</div>
                   <div className="wf">
                     {coffeeTopProducts.length > 1
-                      ? coffeeTopProducts.slice(1, 3).map((p) => p.товар).join(" · ")
+                      ? coffeeTopProducts
+                          .slice(1, 3)
+                          .map((p) => p.товар)
+                          .join(" · ")
                       : "нет данных"}
                     <span className="go">→</span>
                   </div>
@@ -1490,9 +1683,14 @@ export default async function DomainPage({
           {/* ── Парк: где стоят автоматы и как работают ── */}
           {domain === "vendhub" && (
             <div className="sect">
-              <div className="sect-h"><h3 className="h2">Парк</h3></div>
+              <div className="sect-h">
+                <h3 className="h2">Парк</h3>
+              </div>
               <div className="wgrid">
-                <Link href={href("settings:machine", "in_service")} className={`wt ${machineCards ? "" : "off"}`}>
+                <Link
+                  href={href("settings:machine", "in_service")}
+                  className={`wt ${machineCards ? "" : "off"}`}
+                >
                   <div className="wl">В работе</div>
                   <div className="wv">{machineCards ? parkInService.length : "—"}</div>
                   <div className="wf">
@@ -1502,20 +1700,35 @@ export default async function DomainPage({
                     <span className="go">→</span>
                   </div>
                 </Link>
-                <Link href={href("settings:machine", "warehouse")} className={`wt ${machineCards ? "" : "off"}`}>
+                <Link
+                  href={href("settings:machine", "warehouse")}
+                  className={`wt ${machineCards ? "" : "off"}`}
+                >
                   <div className="wl">На складе</div>
                   <div className="wv">{machineCards ? parkWarehouse.length : "—"}</div>
-                  <div className="wf">простаивают<span className="go">→</span></div>
+                  <div className="wf">
+                    простаивают<span className="go">→</span>
+                  </div>
                 </Link>
-                <Link href={href("settings:machine", "repair")} className={`wt ${machineCards ? "" : "off"}`}>
+                <Link
+                  href={href("settings:machine", "repair")}
+                  className={`wt ${machineCards ? "" : "off"}`}
+                >
                   <div className="wl">В ремонте</div>
                   <div className="wv">{machineCards ? parkRepair.length : "—"}</div>
-                  <div className="wf">не в строю<span className="go">→</span></div>
+                  <div className="wf">
+                    не в строю<span className="go">→</span>
+                  </div>
                 </Link>
-                <Link href={href("settings:machine")} className={`wt ${cupsPerMachine !== null ? "" : "off"}`}>
+                <Link
+                  href={href("settings:machine")}
+                  className={`wt ${cupsPerMachine !== null ? "" : "off"}`}
+                >
                   <div className="wl">Выработка · чаш/авт</div>
                   <div className="wv">{cupsPerMachine ?? "—"}</div>
-                  <div className="wf">30 дней<span className="go">→</span></div>
+                  <div className="wf">
+                    30 дней<span className="go">→</span>
+                  </div>
                 </Link>
               </div>
             </div>
@@ -1524,8 +1737,12 @@ export default async function DomainPage({
           {/* ── График: выручка по дням, кофе + снек одним рядом ── */}
           {domain === "vendhub" && revenueByDay.length > 1 && (
             <div className="sect">
-              <div className="sect-h"><h3 className="h2">Выручка по дням</h3></div>
-              <p className="hint" style={{ marginBottom: 0 }}>Кофе + снек · 30 дней:</p>
+              <div className="sect-h">
+                <h3 className="h2">Выручка по дням</h3>
+              </div>
+              <p className="hint" style={{ marginBottom: 0 }}>
+                Кофе + снек · 30 дней:
+              </p>
               <MiniBars
                 bars={revenueByDay.map(([dt, amount]) => ({
                   label: dt.slice(8),
@@ -1539,7 +1756,10 @@ export default async function DomainPage({
           {obligations.overdue.length > 0 && (
             <>
               <div className="section-title">
-                Просрочено{obligations.overdueTotal > 20 ? ` — показаны 20 из ${obligations.overdueTotal}` : ""}
+                Просрочено
+                {obligations.overdueTotal > 20
+                  ? ` — показаны 20 из ${obligations.overdueTotal}`
+                  : ""}
               </div>
               <div className="rows">
                 {obligations.overdue.slice(0, 20).map((o) => (
@@ -1554,8 +1774,8 @@ export default async function DomainPage({
               </div>
               {obligations.overdueTruncated && (
                 <p className="hint">
-                  Всего просрочек: {obligations.overdueTotal}. Список показывает первые 200 по дате —
-                  разберись со старшими, остальные подтянутся.
+                  Всего просрочек: {obligations.overdueTotal}. Список показывает первые 200 по дате
+                  — разберись со старшими, остальные подтянутся.
                 </p>
               )}
             </>
@@ -1566,50 +1786,63 @@ export default async function DomainPage({
               остальных направлений, у которых своей навигации по разделам
               с живым счётчиком ещё нет. */}
           {domain !== "vendhub" && (
-            <div className="sect"><div className="sect-h"><h3 className="h2">Что заведено</h3></div>
-            {entities.length === 0 ? (
-              <div className="empty">
-                <b>Пока пусто</b>
-                Данные собираются со страниц ПО и попадают сюда после твоего «Одобрить».
+            <div className="sect">
+              <div className="sect-h">
+                <h3 className="h2">Что заведено</h3>
               </div>
-            ) : (
-              <div className="wgrid">
-                {groups.flatMap((g) =>
-                  g.leaves
-                    .filter((l) => l.type !== null)
-                    .map((l) => {
-                      // Лист со своей таблицей (продажи, приход, остатки) счётом
-                      // по реестру не измеряется — ведём на экран, а не пишем
-                      // «появится после сбора» поверх готовых данных.
-                      if (isTableBackedLeaf(l.type)) {
-                        return (
-                          <Link href={href(`${g.key}:${l.type}`)} className="wt" key={`${g.key}:${l.type}`}>
+              {entities.length === 0 ? (
+                <div className="empty">
+                  <b>Пока пусто</b>
+                  Данные собираются со страниц ПО и попадают сюда после твоего «Одобрить».
+                </div>
+              ) : (
+                <div className="wgrid">
+                  {groups.flatMap((g) =>
+                    g.leaves
+                      .filter((l) => l.type !== null)
+                      .map((l) => {
+                        // Лист со своей таблицей (продажи, приход, остатки) счётом
+                        // по реестру не измеряется — ведём на экран, а не пишем
+                        // «появится после сбора» поверх готовых данных.
+                        if (isTableBackedLeaf(l.type)) {
+                          return (
+                            <Link
+                              href={href(`${g.key}:${l.type}`)}
+                              className="wt"
+                              key={`${g.key}:${l.type}`}
+                            >
+                              <div className="wl">{l.label}</div>
+                              <div className="wv">·</div>
+                              <div className="wf">
+                                смотреть<span className="go">→</span>
+                              </div>
+                            </Link>
+                          );
+                        }
+                        const n = byType[l.type!] ?? 0;
+                        return n > 0 ? (
+                          <Link
+                            href={href(`${g.key}:${l.type}`)}
+                            className="wt"
+                            key={`${g.key}:${l.type}`}
+                          >
                             <div className="wl">{l.label}</div>
-                            <div className="wv">·</div>
+                            <div className="wv">{n}</div>
                             <div className="wf">
-                              смотреть<span className="go">→</span>
+                              записей<span className="go">→</span>
                             </div>
                           </Link>
+                        ) : (
+                          <div className="wt off" key={`${g.key}:${l.type}`}>
+                            <div className="wl">{l.label}</div>
+                            <div className="wv">—</div>
+                            <div className="wf">появится после сбора</div>
+                          </div>
                         );
-                      }
-                      const n = byType[l.type!] ?? 0;
-                      return n > 0 ? (
-                        <Link href={href(`${g.key}:${l.type}`)} className="wt" key={`${g.key}:${l.type}`}>
-                          <div className="wl">{l.label}</div>
-                          <div className="wv">{n}</div>
-                          <div className="wf">записей<span className="go">→</span></div>
-                        </Link>
-                      ) : (
-                        <div className="wt off" key={`${g.key}:${l.type}`}>
-                          <div className="wl">{l.label}</div>
-                          <div className="wv">—</div>
-                          <div className="wf">появится после сбора</div>
-                        </div>
-                      );
-                    }),
-                )}
-              </div>
-            )}
+                      }),
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -1645,8 +1878,8 @@ export default async function DomainPage({
                         {noCoords.length > 3 && ` и ещё ${noCoords.length - 3}`}.{" "}
                       </>
                     )}
-                    Тип и точка подтягиваются из учёта склада сами; остальное можно
-                    дозаполнить в карточке.
+                    Тип и точка подтягиваются из учёта склада сами; остальное можно дозаполнить в
+                    карточке.
                   </p>
                 )}
               </div>
@@ -1656,7 +1889,8 @@ export default async function DomainPage({
       )}
 
       {/* ── Отчёты → По источникам: витрина; вход в детальный срез — драйв по params ── */}
-      {group && leaf?.type === "sources" &&
+      {group &&
+        leaf?.type === "sources" &&
         (sp.src || sp.rep || sp.view || sp.mode || sp.ra || sp.rb ? (
           <SourcesView base={`/domain/${domain}`} sp={sp} />
         ) : (
@@ -1692,7 +1926,14 @@ export default async function DomainPage({
                 приход приходит сюда сам из учёта склада.
               </p>
               <RegisterImport
-                ingredientCards={importIngredientCards?.map((e) => ({ id: e.id, name: e.name, type: e.type, attrs: e.attrs })) ?? null}
+                ingredientCards={
+                  importIngredientCards?.map((e) => ({
+                    id: e.id,
+                    name: e.name,
+                    type: e.type,
+                    attrs: e.attrs,
+                  })) ?? null
+                }
                 warehouses={importWarehouses?.map((e) => ({ id: e.id, name: e.name })) ?? null}
               />
             </details>
@@ -1759,29 +2000,35 @@ export default async function DomainPage({
           Единый образец листа (§4): KPI сверху, «+ Запись» — в строке
           действия. Поиск и подвкладки категорий остаются внутри ProductsBook —
           у него уже есть своя GET-форма, второй ListShell не рисует. */}
-      {group && leaf?.type === "product" && (() => {
-        const incompleteCount = leafItems.filter(isIncomplete).length;
-        return (
-          <ListShell
-            kpi={[
-              { label: "Всего", value: String(leafItems.length) },
-              { label: "Незаполненные", value: String(incompleteCount), hot: incompleteCount > 0 },
-            ]}
-            action={<NewEntityForm domain={domain} type="product" label={typeOne("product")} />}
-            searchQ={q ?? ""}
-          >
-            <ProductsBook
-              items={leafItems}
-              q={q ?? ""}
-              cat={cat ?? ""}
-              inc={inc === "1"}
-              vid={vid ?? ""}
-              hrefBase={`/domain/${domain}`}
-              tab={active}
-            />
-          </ListShell>
-        );
-      })()}
+      {group &&
+        leaf?.type === "product" &&
+        (() => {
+          const incompleteCount = leafItems.filter(isIncomplete).length;
+          return (
+            <ListShell
+              kpi={[
+                { label: "Всего", value: String(leafItems.length) },
+                {
+                  label: "Незаполненные",
+                  value: String(incompleteCount),
+                  hot: incompleteCount > 0,
+                },
+              ]}
+              action={<NewEntityForm domain={domain} type="product" label={typeOne("product")} />}
+              searchQ={q ?? ""}
+            >
+              <ProductsBook
+                items={leafItems}
+                q={q ?? ""}
+                cat={cat ?? ""}
+                inc={inc === "1"}
+                vid={vid ?? ""}
+                hrefBase={`/domain/${domain}`}
+                tab={active}
+              />
+            </ListShell>
+          );
+        })()}
 
       {/* ── Ингредиенты: сырьё для рецептов кофе/снеков — цена (карточка) и
           мост к бункерному реестру (миграция 0059, срез B). Единый образец
@@ -1790,112 +2037,137 @@ export default async function DomainPage({
           карточку 360 (Task 5). «Связано с бункерами» считает entity.id
           среди НЕNULL entityId бункерного конфига — честный 0, когда мост ещё
           не выкачен на прод (все entityId в ответе тогда null), а не выдумка. */}
-      {group && leaf?.type === "ingredient" && (() => {
-        const ingredientQuery = (q ?? "").trim().toLowerCase();
-        const shownIngredients = ingredientQuery
-          ? leafItems.filter((e) => e.name.toLowerCase().includes(ingredientQuery))
-          : leafItems;
-        const withPrice = leafItems.filter((e) => cardPrice(e.attrs) !== null).length;
-        const linkedIds = new Set(
-          (bunkerConfig ?? []).filter((b) => b.entityId !== null).map((b) => b.entityId as string),
-        );
-        const linkedCount = bunkerConfig === null ? null : leafItems.filter((e) => linkedIds.has(e.id)).length;
-        const kpi: ListShellKpi[] = [
-          { label: "Всего", value: String(leafItems.length) },
-          {
-            label: "С ценой",
-            value: String(withPrice),
-            foot: leafItems.length > 0 ? `из ${leafItems.length} карточек` : undefined,
-          },
-          {
-            label: "Связано с бункерами",
-            value: linkedCount === null ? "—" : String(linkedCount),
-            foot: bunkerConfig === null ? "нет данных" : "мост entityId · миграция 0059",
-          },
-        ];
-        return (
-          <ListShell
-            kpi={kpi}
-            action={<NewEntityForm domain={domain} type="ingredient" label={typeOne("ingredient")} />}
-            searchQ={q ?? ""}
-            searchHrefBase={`/domain/${domain}`}
-            searchTab={active}
-          >
-            {shownIngredients.length > 0 ? (
-              <>
-                <div className="book">
-                  <div className="th">
-                    <span>Ингредиент</span>
-                    <span>Цена в карточке</span>
-                    <span style={{ textAlign: "right" }}>Сум/г</span>
+      {group &&
+        leaf?.type === "ingredient" &&
+        (() => {
+          const ingredientQuery = (q ?? "").trim().toLowerCase();
+          const shownIngredients = ingredientQuery
+            ? leafItems.filter((e) => e.name.toLowerCase().includes(ingredientQuery))
+            : leafItems;
+          const withPrice = leafItems.filter((e) => cardPrice(e.attrs) !== null).length;
+          const linkedIds = new Set(
+            (bunkerConfig ?? [])
+              .filter((b) => b.entityId !== null)
+              .map((b) => b.entityId as string),
+          );
+          const linkedCount =
+            bunkerConfig === null ? null : leafItems.filter((e) => linkedIds.has(e.id)).length;
+          const kpi: ListShellKpi[] = [
+            { label: "Всего", value: String(leafItems.length) },
+            {
+              label: "С ценой",
+              value: String(withPrice),
+              foot: leafItems.length > 0 ? `из ${leafItems.length} карточек` : undefined,
+            },
+            {
+              label: "Связано с бункерами",
+              value: linkedCount === null ? "—" : String(linkedCount),
+              foot: bunkerConfig === null ? "нет данных" : "мост entityId · миграция 0059",
+            },
+          ];
+          return (
+            <ListShell
+              kpi={kpi}
+              action={
+                <NewEntityForm domain={domain} type="ingredient" label={typeOne("ingredient")} />
+              }
+              searchQ={q ?? ""}
+              searchHrefBase={`/domain/${domain}`}
+              searchTab={active}
+            >
+              {shownIngredients.length > 0 ? (
+                <>
+                  <div className="book">
+                    <div className="th">
+                      <span>Ингредиент</span>
+                      <span>Цена в карточке</span>
+                      <span style={{ textAlign: "right" }}>Сум/г</span>
+                    </div>
+                    {shownIngredients.map((e) => {
+                      const price = cardPrice(e.attrs);
+                      const perGram = pricePerGram(e.attrs);
+                      const linked = linkedIds.has(e.id);
+                      return (
+                        <Link href={`/card/${e.id}`} className="tr" key={e.id}>
+                          <span className="nm">
+                            {e.name}
+                            {linked && (
+                              <span className="chip g" style={{ marginLeft: 8 }}>
+                                бункер
+                              </span>
+                            )}
+                          </span>
+                          <span className="cd">
+                            {price
+                              ? `${price.price.toLocaleString("ru-RU")} сум/${price.unit}`
+                              : "—"}
+                          </span>
+                          <span className="pr">
+                            {perGram !== null ? `${perGram.toLocaleString("ru-RU")} сум/г` : "—"}
+                          </span>
+                        </Link>
+                      );
+                    })}
                   </div>
-                  {shownIngredients.map((e) => {
-                    const price = cardPrice(e.attrs);
-                    const perGram = pricePerGram(e.attrs);
-                    const linked = linkedIds.has(e.id);
-                    return (
-                      <Link href={`/card/${e.id}`} className="tr" key={e.id}>
-                        <span className="nm">
-                          {e.name}
-                          {linked && (
-                            <span className="chip g" style={{ marginLeft: 8 }}>
-                              бункер
-                            </span>
-                          )}
-                        </span>
-                        <span className="cd">
-                          {price ? `${price.price.toLocaleString("ru-RU")} сум/${price.unit}` : "—"}
-                        </span>
-                        <span className="pr">
-                          {perGram !== null ? `${perGram.toLocaleString("ru-RU")} сум/г` : "—"}
-                        </span>
-                      </Link>
-                    );
-                  })}
+                  <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
+                    {shownIngredients.length === leafItems.length
+                      ? `${leafItems.length} карточек`
+                      : `${shownIngredients.length} из ${leafItems.length} карточек`}
+                  </p>
+                </>
+              ) : leafItems.length === 0 ? (
+                <div className="empty">
+                  <b>Ингредиентов пока нет</b>
+                  Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
                 </div>
-                <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
-                  {shownIngredients.length === leafItems.length
-                    ? `${leafItems.length} карточек`
-                    : `${shownIngredients.length} из ${leafItems.length} карточек`}
-                </p>
-              </>
-            ) : leafItems.length === 0 ? (
-              <div className="empty">
-                <b>Ингредиентов пока нет</b>
-                Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
-              </div>
-            ) : (
-              <div className="empty">
-                <b>Ничего не нашлось</b>
-                Поменяй запрос или сними фильтр.
-              </div>
-            )}
-          </ListShell>
-        );
-      })()}
+              ) : (
+                <div className="empty">
+                  <b>Ничего не нашлось</b>
+                  Поменяй запрос или сними фильтр.
+                </div>
+              )}
+            </ListShell>
+          );
+        })()}
 
       {/* ── Склад техники: конвейер 17 статусов (перенос PROMACH) ── */}
-      {domain === "globerent" && activeGroup === "units" && (
-        <UnitsPanel units={units} summary={unitsSummary} clients={unitClients} />
-      )}
+      {domain === "globerent" &&
+        activeGroup === "units" &&
+        (unitsLoadError ? (
+          <CoreDown detail={`Склад техники: ${unitsLoadError}`} />
+        ) : (
+          <UnitsPanel units={units} summary={unitsSummary} clients={unitClients} />
+        ))}
 
       {/* ── Импортные контракты: завод → таможня → склад (перенос PROMACH) ── */}
-      {domain === "globerent" && activeGroup === "imports" && (
-        <>
-          <PreordersSection preorders={preorders} clients={importSuppliers} />
-          <ImportsPanel imports={importsList} suppliers={importSuppliers} />
-        </>
-      )}
+      {domain === "globerent" &&
+        activeGroup === "imports" &&
+        (importsLoadError ? (
+          <CoreDown detail={`Импортные контракты: ${importsLoadError}`} />
+        ) : (
+          <>
+            <PreordersSection preorders={preorders} clients={importSuppliers} />
+            <ImportsPanel imports={importsList} suppliers={importSuppliers} />
+          </>
+        ))}
 
       {/* ── Калькулятор цены HELI: движок PROMACH, расчёт в браузере ── */}
-      {domain === "globerent" && activeGroup === "calc" && (
-        <CalcPanel rates={calcRates} brv={calcBrv} fx={calcFx} />
-      )}
+      {domain === "globerent" &&
+        activeGroup === "calc" &&
+        (calcLoadError ? (
+          <CoreDown detail={`Калькулятор цены: ${calcLoadError}`} />
+        ) : (
+          <CalcPanel rates={calcRates} brv={calcBrv} fx={calcFx} />
+        ))}
 
       {/* ── Справочник растаможки: живые ставки ТН ВЭД + БРВ (перенос PROMACH) ── */}
-      {group && leaf?.type === "customs_rates" && (
-        <CustomsRatesPanel domain={domain} rates={tnved} brv={brv} />
-      )}
+      {group &&
+        leaf?.type === "customs_rates" &&
+        (customsLoadError ? (
+          <CoreDown detail={`Справочник растаможки: ${customsLoadError}`} />
+        ) : (
+          <CustomsRatesPanel domain={domain} rates={tnved} brv={brv} />
+        ))}
 
       {/* ── Модели каталога: колонки техники подходят и моделям ── */}
       {group && leaf?.type === "equipment_model" && (
@@ -1908,7 +2180,11 @@ export default async function DomainPage({
               Заведи модели HELI (CPD30, CPCD50…) — на них ссылаются техника, КП и расчёты.
             </div>
           )}
-          <NewEntityForm domain={domain} type="equipment_model" label={typeOne("equipment_model")} />
+          <NewEntityForm
+            domain={domain}
+            type="equipment_model"
+            label={typeOne("equipment_model")}
+          />
         </>
       )}
 
@@ -1916,35 +2192,50 @@ export default async function DomainPage({
       {group && leaf?.type === "contract" && (
         <>
           {/* Живой контур продаж GLOBERENT: договор → график → оплата → акты. */}
-          {domain === "globerent" && (
-            <div className="sect" style={{ marginTop: 0 }}>
-              <div className="sect-h">
-                <h3 className="h2">Договоры купли-продажи</h3>
-                {liveContracts.length > 0 && <span className="chip">{liveContracts.length}</span>}
-              </div>
-              {liveContracts.map((c) => {
-                const total = Number(c.totalWithVat);
-                const paidPct = total > 0 ? Math.min(100, Math.round((c.paidUzs / total) * 100)) : 0;
-                const hot = c.status === "active" && paidPct < 100;
-                return (
-                  <Link href={`/contracts/${c.id}`} className={`trow ${hot ? "hot" : ""}`} key={c.id}>
-                    <div className="tb">
-                      <div className="tt">№ {c.contractNo}/ОП · {c.clientName ?? (c.buyer["name"] ?? "покупатель не указан")}</div>
-                      <div className="tm">
-                        {new Intl.NumberFormat("ru-RU").format(total)} сум ·{" "}
-                        {c.status === "cancelled" ? "отменён" : c.status === "closed" ? "закрыт" : `оплачено ${paidPct}%`}
-                        {c.actsCount > 0 ? ` · актов ${c.actsCount}` : ""}
+          {domain === "globerent" &&
+            (contractsLoadError ? (
+              <CoreDown detail={`Договоры купли-продажи: ${contractsLoadError}`} />
+            ) : (
+              <div className="sect" style={{ marginTop: 0 }}>
+                <div className="sect-h">
+                  <h3 className="h2">Договоры купли-продажи</h3>
+                  {liveContracts.length > 0 && <span className="chip">{liveContracts.length}</span>}
+                </div>
+                {liveContracts.map((c) => {
+                  const total = Number(c.totalWithVat);
+                  const paidPct =
+                    total > 0 ? Math.min(100, Math.round((c.paidUzs / total) * 100)) : 0;
+                  const hot = c.status === "active" && paidPct < 100;
+                  return (
+                    <Link
+                      href={`/contracts/${c.id}`}
+                      className={`trow ${hot ? "hot" : ""}`}
+                      key={c.id}
+                    >
+                      <div className="tb">
+                        <div className="tt">
+                          № {c.contractNo}/ОП ·{" "}
+                          {c.clientName ?? c.buyer["name"] ?? "покупатель не указан"}
+                        </div>
+                        <div className="tm">
+                          {new Intl.NumberFormat("ru-RU").format(total)} сум ·{" "}
+                          {c.status === "cancelled"
+                            ? "отменён"
+                            : c.status === "closed"
+                              ? "закрыт"
+                              : `оплачено ${paidPct}%`}
+                          {c.actsCount > 0 ? ` · актов ${c.actsCount}` : ""}
+                        </div>
                       </div>
-                    </div>
-                    <span className={`due ${hot ? "hot" : ""}`}>{fmtDay(c.contractDate)}</span>
-                  </Link>
-                );
-              })}
-              <div style={{ marginTop: 10 }}>
-                <NewContractForm clients={contractClients} />
+                      <span className={`due ${hot ? "hot" : ""}`}>{fmtDay(c.contractDate)}</span>
+                    </Link>
+                  );
+                })}
+                <div style={{ marginTop: 10 }}>
+                  <NewContractForm clients={contractClients} />
+                </div>
               </div>
-            </div>
-          )}
+            ))}
           {leafItems.length > 0 && (
             <div className="sect">
               <div className="sect-h">
@@ -1976,45 +2267,49 @@ export default async function DomainPage({
           <NewEntityForm domain={domain} type="invoice" label={typeOne("invoice")} />
         </>
       )}
-      {group && leaf?.type === "contractor" && (() => {
-        // «Оборот суммарно» — только если поле известно хоть у одной карточки
-        // листа (иначе плитка спорила бы с ContractorsBook, где та же сумма
-        // не показывается вовсе — см. `оборотОф` в globerent-books.tsx).
-        // Сумма реальна и когда поле известно не у всех (GLOBERENT: 6 из 226),
-        // поэтому не прячем плитку по правилу `every` — это лишило бы итога
-        // любой список, где хоть у одной карточки нет оборота. Вместо этого
-        // фут честно называет охват: «по N из M карточек», когда N < M.
-        const turnoverValues = leafItems
-          .map((e) => (e.attrs ?? {})["оборот по реестру"])
-          .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-        const withTurnover = turnoverValues.length;
-        const total = leafItems.length;
-        const kpi: ListShellKpi[] = [{ label: "Всего", value: String(total) }];
-        if (withTurnover > 0) {
-          const sum = turnoverValues.reduce((a, b) => a + b, 0);
-          kpi.push({
-            label: "Оборот суммарно",
-            value: `${sum.toLocaleString("ru-RU")} сум`,
-            ...(withTurnover < total ? { foot: `по ${withTurnover} из ${total} карточек` } : {}),
-          });
-        }
-        return (
-          <ListShell
-            kpi={kpi}
-            action={<NewEntityForm domain={domain} type="contractor" label={typeOne("contractor")} />}
-            searchQ=""
-          >
-            {leafItems.length > 0 ? (
-              <ContractorsBook items={leafItems} />
-            ) : (
-              <div className="empty">
-                <b>Контрагентов пока нет</b>
-                Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
-              </div>
-            )}
-          </ListShell>
-        );
-      })()}
+      {group &&
+        leaf?.type === "contractor" &&
+        (() => {
+          // «Оборот суммарно» — только если поле известно хоть у одной карточки
+          // листа (иначе плитка спорила бы с ContractorsBook, где та же сумма
+          // не показывается вовсе — см. `оборотОф` в globerent-books.tsx).
+          // Сумма реальна и когда поле известно не у всех (GLOBERENT: 6 из 226),
+          // поэтому не прячем плитку по правилу `every` — это лишило бы итога
+          // любой список, где хоть у одной карточки нет оборота. Вместо этого
+          // фут честно называет охват: «по N из M карточек», когда N < M.
+          const turnoverValues = leafItems
+            .map((e) => (e.attrs ?? {})["оборот по реестру"])
+            .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+          const withTurnover = turnoverValues.length;
+          const total = leafItems.length;
+          const kpi: ListShellKpi[] = [{ label: "Всего", value: String(total) }];
+          if (withTurnover > 0) {
+            const sum = turnoverValues.reduce((a, b) => a + b, 0);
+            kpi.push({
+              label: "Оборот суммарно",
+              value: `${sum.toLocaleString("ru-RU")} сум`,
+              ...(withTurnover < total ? { foot: `по ${withTurnover} из ${total} карточек` } : {}),
+            });
+          }
+          return (
+            <ListShell
+              kpi={kpi}
+              action={
+                <NewEntityForm domain={domain} type="contractor" label={typeOne("contractor")} />
+              }
+              searchQ=""
+            >
+              {leafItems.length > 0 ? (
+                <ContractorsBook items={leafItems} />
+              ) : (
+                <div className="empty">
+                  <b>Контрагентов пока нет</b>
+                  Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
+                </div>
+              )}
+            </ListShell>
+          );
+        })()}
       {group && leaf?.type === "equipment" && (
         <>
           {leafItems.length > 0 ? (
@@ -2033,29 +2328,33 @@ export default async function DomainPage({
           Записей entity.type="recipe" не существует — лист годами показывал
           пустоту. Теперь это фильтр: товары с полем «вид» = «рецепт». */}
 
-
       {/* ── Автоматы (vendhub, C1): полноценная панель парка, а не
           generic-книга «имя/код/номер» — так было до ревью (осиротевший
           VendingMachinesPanel, см. git show 8640e30^ для прежней вкладки
           `vending`). ?status=in_service|warehouse|repair (кликом с плиток
           «Парк» на дашборде) сужает список ДО панели — MachinesBrowser
           внутри получает уже отфильтрованные карточки. */}
-      {group && leaf?.type === "machine" && domain === "vendhub" && (() => {
-        const statusFilter = isMachineStatus(sp.status) ? sp.status : null;
-        const filteredMachines =
-          statusFilter === null ? machines : machines.filter((e) => parkStatusOf(e.id) === statusFilter);
-        return (
-          <>
-            {statusFilter !== null && (
-              <p className="hint" style={{ marginBottom: 10 }}>
-                Показаны только «{machineStatusLabel(statusFilter)}» ({filteredMachines.length}) ·{" "}
-                <Link href={href("settings:machine")}>сбросить фильтр</Link>
-              </p>
-            )}
-            <VendingMachinesPanel machines={filteredMachines} />
-          </>
-        );
-      })()}
+      {group &&
+        leaf?.type === "machine" &&
+        domain === "vendhub" &&
+        (() => {
+          const statusFilter = isMachineStatus(sp.status) ? sp.status : null;
+          const filteredMachines =
+            statusFilter === null
+              ? machines
+              : machines.filter((e) => parkStatusOf(e.id) === statusFilter);
+          return (
+            <>
+              {statusFilter !== null && (
+                <p className="hint" style={{ marginBottom: 10 }}>
+                  Показаны только «{machineStatusLabel(statusFilter)}» ({filteredMachines.length}) ·{" "}
+                  <Link href={href("settings:machine")}>сбросить фильтр</Link>
+                </p>
+              )}
+              <VendingMachinesPanel machines={filteredMachines} />
+            </>
+          );
+        })()}
 
       {/* ── Справочники: хаб пяти фискальных ────────────────────────────
           Пять слотов верхнего уровня на 62 записи, которых не касались ни
@@ -2139,67 +2438,104 @@ export default async function DomainPage({
           регистронезависимо), форму рисует сам ListShell — у generic-книги
           своей нет. Действует не только на VendHub: под этот рендер попадают
           и generic-листы GLOBERENT (например «Таможенные посты»). */}
-      {group && leaf?.type && !["sources", "collection", "sale", "product", "ingredient", "purchase", "machine_stock", "consumption", "contract", "invoice", "contractor", "equipment", "equipment_model", "customs_rates", "recipe", "machine", "expiry", "cash_reconcile", "gaps", "norm_fact", "cost", "feed", "coffee", "snack", "refs"].includes(leaf.type) && (() => {
-        const genericQuery = (q ?? "").trim().toLowerCase();
-        const shownItems = genericQuery
-          ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
-          : leafItems;
-        const notApproved = leafItems.filter((e) => e.approvedAt == null).length;
-        return (
-          <ListShell
-            kpi={[
-              { label: "Всего записей", value: String(leafItems.length) },
-              { label: "Не утверждено", value: String(notApproved), hot: notApproved > 0 },
-            ]}
-            action={<NewEntityForm domain={domain} type={leaf.type} label={typeOne(leaf.type)} />}
-            searchQ={q ?? ""}
-            searchHrefBase={`/domain/${domain}`}
-            searchTab={active}
-          >
-            {shownItems.length > 0 ? (
-              <>
-                <div className="book">
-                  <div className="th">
-                    <span>Название</span>
-                    <span>Код</span>
-                    <span style={{ textAlign: "right" }}>{leaf.type === "product" ? "Цена" : "Номер"}</span>
+      {group &&
+        leaf?.type &&
+        ![
+          "sources",
+          "collection",
+          "sale",
+          "product",
+          "ingredient",
+          "purchase",
+          "machine_stock",
+          "consumption",
+          "contract",
+          "invoice",
+          "contractor",
+          "equipment",
+          "equipment_model",
+          "customs_rates",
+          "recipe",
+          "machine",
+          "expiry",
+          "cash_reconcile",
+          "gaps",
+          "norm_fact",
+          "cost",
+          "feed",
+          "coffee",
+          "snack",
+          "refs",
+        ].includes(leaf.type) &&
+        (() => {
+          const genericQuery = (q ?? "").trim().toLowerCase();
+          const shownItems = genericQuery
+            ? leafItems.filter((e) => e.name.toLowerCase().includes(genericQuery))
+            : leafItems;
+          const notApproved = leafItems.filter((e) => e.approvedAt == null).length;
+          return (
+            <ListShell
+              kpi={[
+                { label: "Всего записей", value: String(leafItems.length) },
+                { label: "Не утверждено", value: String(notApproved), hot: notApproved > 0 },
+              ]}
+              action={<NewEntityForm domain={domain} type={leaf.type} label={typeOne(leaf.type)} />}
+              searchQ={q ?? ""}
+              searchHrefBase={`/domain/${domain}`}
+              searchTab={active}
+            >
+              {shownItems.length > 0 ? (
+                <>
+                  <div className="book">
+                    <div className="th">
+                      <span>Название</span>
+                      <span>Код</span>
+                      <span style={{ textAlign: "right" }}>
+                        {leaf.type === "product" ? "Цена" : "Номер"}
+                      </span>
+                    </div>
+                    {shownItems.map((e) => {
+                      const price = (e.attrs ?? {})["цена"];
+                      return (
+                        <Link href={`/card/${e.id}`} className="tr" key={e.id}>
+                          <span className="nm">{e.name}</span>
+                          <span className="cd">
+                            {String((e.attrs ?? {})["ИКПУ"] ?? (e.attrs ?? {})["код"] ?? "")}
+                          </span>
+                          <span className="pr">
+                            {typeof price === "number" ? (
+                              <>
+                                {Number(price).toLocaleString("ru-RU")}{" "}
+                                <span className="u">сум</span>
+                              </>
+                            ) : (
+                              (e.externalRef ?? "—")
+                            )}
+                          </span>
+                        </Link>
+                      );
+                    })}
                   </div>
-                  {shownItems.map((e) => {
-                    const price = (e.attrs ?? {})["цена"];
-                    return (
-                      <Link href={`/card/${e.id}`} className="tr" key={e.id}>
-                        <span className="nm">{e.name}</span>
-                        <span className="cd">{String((e.attrs ?? {})["ИКПУ"] ?? (e.attrs ?? {})["код"] ?? "")}</span>
-                        <span className="pr">
-                          {typeof price === "number"
-                            ? <>{Number(price).toLocaleString("ru-RU")} <span className="u">сум</span></>
-                            : (e.externalRef ?? "—")}
-                        </span>
-                      </Link>
-                    );
-                  })}
+                  <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
+                    {shownItems.length === leafItems.length
+                      ? `${leafItems.length} записей`
+                      : `${shownItems.length} из ${leafItems.length} записей`}
+                  </p>
+                </>
+              ) : leafItems.length === 0 ? (
+                <div className="empty">
+                  <b>{leaf.label}: данных пока нет</b>
+                  Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО, соберу всё разом.
                 </div>
-                <p style={{ fontSize: 12, color: "var(--tx-3)", marginTop: 10 }}>
-                  {shownItems.length === leafItems.length
-                    ? `${leafItems.length} записей`
-                    : `${shownItems.length} из ${leafItems.length} записей`}
-                </p>
-              </>
-            ) : leafItems.length === 0 ? (
-              <div className="empty">
-                <b>{leaf.label}: данных пока нет</b>
-                Добавь запись кнопкой ниже — или пришли сохранённую страницу ПО,
-                соберу всё разом.
-              </div>
-            ) : (
-              <div className="empty">
-                <b>Ничего не нашлось</b>
-                Поменяй запрос или сними фильтр.
-              </div>
-            )}
-          </ListShell>
-        );
-      })()}
+              ) : (
+                <div className="empty">
+                  <b>Ничего не нашлось</b>
+                  Поменяй запрос или сними фильтр.
+                </div>
+              )}
+            </ListShell>
+          );
+        })()}
       {group && !leaf?.type && (
         <div className="empty">
           <b>{leaf?.label}: данных пока нет</b>
@@ -2228,12 +2564,23 @@ export default async function DomainPage({
             <div>
               {ourPeople.map((p) => (
                 <Link href={`/team/${p.id}`} className="prow" key={p.id}>
-                  <span className="av2">{p.name.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}</span>
+                  <span className="av2">
+                    {p.name
+                      .split(" ")
+                      .map((w) => w[0])
+                      .slice(0, 2)
+                      .join("")
+                      .toUpperCase()}
+                  </span>
                   <div className="pb">
                     <div className="pn">{p.name}</div>
                     <div className="pr2">{p.role ?? "роль не указана"}</div>
                   </div>
-                  {p.tgChatId ? <span className="tag-tg">в Telegram</span> : <span className="chip">не подключён</span>}
+                  {p.tgChatId ? (
+                    <span className="tag-tg">в Telegram</span>
+                  ) : (
+                    <span className="chip">не подключён</span>
+                  )}
                 </Link>
               ))}
             </div>
@@ -2245,7 +2592,13 @@ export default async function DomainPage({
       {activeGroup === "tasks" && (
         <>
           {domain === "vendhub" && taskKpi.length > 0 && (
-            <div className="wgrid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 14 }}>
+            <div
+              className="wgrid"
+              style={{
+                gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                marginBottom: 14,
+              }}
+            >
               {taskKpi.map((t) => (
                 <div key={t.label} className={`wt ${t.hot ? "is-hot" : ""}`}>
                   <div className="wl">{t.label}</div>
@@ -2270,7 +2623,9 @@ export default async function DomainPage({
                 const isAutoSource = sourceLabel !== "владелец";
                 return (
                   <Link href={`/tasks/${t.id}`} className={`trow ${late ? "hot" : ""}`} key={t.id}>
-                    <div className="tb"><div className="tt">{t.title}</div></div>
+                    <div className="tb">
+                      <div className="tt">{t.title}</div>
+                    </div>
                     <span className={`chip ${isAutoSource ? "b" : ""}`}>{sourceLabel}</span>
                     <span className={`due ${late ? "hot" : ""}`}>{dueLabel(t.due)}</span>
                   </Link>

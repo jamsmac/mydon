@@ -31,104 +31,156 @@ import { Public } from "../common/public.decorator";
 import { MAX_EXPORT, RawService, normalizeRowsQuery, toCsv } from "./raw.service";
 
 export class RawImportDto {
-  @IsString() @IsNotEmpty() @MaxLength(64)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
   source!: string;
 
-  @IsString() @IsNotEmpty() @MaxLength(64)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
   report!: string;
 
   @IsISO8601()
   fetchedAt!: string;
 
-  @IsOptional() @IsISO8601()
+  @IsOptional()
+  @IsISO8601()
   periodFrom?: string;
 
-  @IsOptional() @IsISO8601()
+  @IsOptional()
+  @IsISO8601()
   periodTo?: string;
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   account?: string;
 
-  @IsOptional() @IsInt() @Min(0)
+  @IsOptional()
+  @IsInt()
+  @Min(0)
   rowsTotal?: number;
 
-  @IsOptional() @IsArray() @ArrayMaxSize(512) @IsString({ each: true })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(512)
+  @IsString({ each: true })
   columns?: string[];
 
   /** Строки как пришли: массив массивов строк. Порядок — порядок источника. */
-  @IsArray() @ArrayMaxSize(5000)
+  @IsArray()
+  @ArrayMaxSize(5000)
   rows!: string[][];
 
-  @IsOptional() @IsString() @MaxLength(1000)
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
   note?: string;
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   importedBy?: string;
 
-  @IsOptional() @IsBoolean()
+  @IsOptional()
+  @IsBoolean()
   append?: boolean;
 
+  /** Последняя пачка: после неё снимок можно публиковать в отчёты. */
+  @IsOptional()
+  @IsBoolean()
+  complete?: boolean;
+
   /** Номер первой строки пачки в исходной выгрузке — чтобы повтор лёг на место. */
-  @IsOptional() @IsInt() @Min(0)
+  @IsOptional()
+  @IsInt()
+  @Min(0)
   offset?: number;
 }
 
 export class RawLinkDto {
-  @IsString() @IsNotEmpty() @MaxLength(64)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
   source!: string;
 
   @IsIn(RAW_LINK_KINDS)
   kind!: RawLinkKind;
 
   /** Значение так, как оно написано в источнике. */
-  @IsString() @IsNotEmpty() @MaxLength(512)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(512)
   label!: string;
 
   /** Карточка реестра. Пусто — осознанное «карточка не нужна». */
-  @IsOptional() @IsUUID()
+  @IsOptional()
+  @IsUUID()
   entityId?: string;
 
-  @IsOptional() @IsString() @MaxLength(1000)
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
   note?: string;
 }
 
-
 export class RawSourceDefDto {
   /** Код системы: латиница, цифры, подчёркивание. Попадает в адрес и в базу. */
-  @IsString() @IsNotEmpty() @MaxLength(64)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
   code!: string;
 
-  @IsString() @IsNotEmpty() @MaxLength(128)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
   title!: string;
 
-  @IsOptional() @IsString() @MaxLength(256)
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
   subtitle?: string;
 
   /** Адрес кабинета. Пусто — честное «ещё не записан». */
-  @IsOptional() @IsString() @MaxLength(512)
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
   url?: string;
 
-  @IsOptional() @IsBoolean()
+  @IsOptional()
+  @IsBoolean()
   archived?: boolean;
 }
 
 export class RawReportDefDto {
-  @IsString() @IsNotEmpty() @MaxLength(64)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
   source!: string;
 
-  @IsString() @IsNotEmpty() @MaxLength(64)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
   code!: string;
 
-  @IsString() @IsNotEmpty() @MaxLength(128)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
   title!: string;
 
-  @IsOptional() @IsString() @MaxLength(256)
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
   ru?: string;
 
-  @IsOptional() @IsString() @MaxLength(256)
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
   path?: string;
 
-  @IsOptional() @IsBoolean()
+  @IsOptional()
+  @IsBoolean()
   archived?: boolean;
 }
 
@@ -393,9 +445,7 @@ export class RawController {
   import(@Param("key") key: string, @Body() dto: RawImportDto) {
     const expected = process.env.INGEST_KEY ?? "";
     if (!expected) {
-      throw new ServiceUnavailableException(
-        "Приём выгрузок выключен: INGEST_KEY не задан в .env",
-      );
+      throw new ServiceUnavailableException("Приём выгрузок выключен: INGEST_KEY не задан в .env");
     }
     if (!secretEquals(key, expected)) {
       throw new UnauthorizedException("Неверный ключ приёма");

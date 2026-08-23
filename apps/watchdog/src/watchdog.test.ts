@@ -43,6 +43,46 @@ describe("Состояние сторожа", () => {
 });
 
 describe("Проверка доступности", () => {
+  it("status=ok считается успехом", async (t) => {
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async () =>
+        new Response(JSON.stringify({ status: "ok", dbOk: true, tzOk: true }), { status: 200 }),
+    );
+
+    const res = await checkOnce("https://example.test/health");
+    t.mock.restoreAll();
+    assert.equal(res.ok, true);
+  });
+
+  it("HTTP 200 со status=degraded считается отказом", async (t) => {
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async () =>
+        new Response(JSON.stringify({ status: "degraded", dbOk: false }), { status: 200 }),
+    );
+
+    const res = await checkOnce("https://example.test/health");
+    t.mock.restoreAll();
+    assert.equal(res.ok, false);
+    assert.match(res.reason ?? "", /degraded/);
+  });
+
+  it("HTTP 200 с HTML вместо health JSON считается отказом", async (t) => {
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async () => new Response("<html>proxy</html>", { status: 200 }),
+    );
+
+    const res = await checkOnce("https://example.test/health");
+    t.mock.restoreAll();
+    assert.equal(res.ok, false);
+    assert.match(res.reason ?? "", /не JSON/);
+  });
+
   it("недостижимый адрес — это отказ, а не исключение", async () => {
     const res = await checkOnce("http://127.0.0.1:1/health", 2000);
     assert.equal(res.ok, false);

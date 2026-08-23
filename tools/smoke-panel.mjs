@@ -21,9 +21,27 @@
  * Запуск: CORE_API_URL=… node tools/smoke-panel.mjs
  */
 import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const PORT = process.env.SMOKE_PANEL_PORT ?? "3098";
+async function свободныйПорт() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : null;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (port === null) reject(new Error("Не удалось выбрать свободный порт панели"));
+        else resolve(String(port));
+      });
+    });
+  });
+}
+
+const PORT = process.env.SMOKE_PANEL_PORT ?? (await свободныйПорт());
 const BASE = `http://127.0.0.1:${PORT}`;
 const СТАРТ_ТАЙМАУТ_МС = 90_000;
 

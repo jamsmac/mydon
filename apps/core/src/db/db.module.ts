@@ -1,4 +1,4 @@
-import { Global, Module } from "@nestjs/common";
+import { Global, Inject, Module, type OnApplicationShutdown } from "@nestjs/common";
 import { createDb, type Database } from "@mydon/db";
 import { appConfig } from "../config";
 
@@ -17,4 +17,13 @@ export type Db = Database;
   ],
   exports: [DB],
 })
-export class DbModule {}
+export class DbModule implements OnApplicationShutdown {
+  constructor(@Inject(DB) private readonly db: Db) {}
+
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    console.log(
+      `[DbModule] Closing PostgreSQL connection pool (signal: ${signal ?? "unknown"})...`,
+    );
+    await this.db.$client.end();
+  }
+}

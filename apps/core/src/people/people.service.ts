@@ -24,6 +24,16 @@ export function normalizeUsername(raw: string | null | undefined): string | null
 }
 
 /**
+ * Аварийная привязка по @username включается только явным значением `1`.
+ * Отсутствующая переменная обязана означать безопасный режим: штатный вход
+ * сотрудника идёт по одноразовому приглашению, а username в Telegram может
+ * освободиться и перейти другому человеку.
+ */
+export function usernameLinkEnabled(raw: string | undefined): boolean {
+  return raw === "1";
+}
+
+/**
  * Сотрудники (ТЗ §7 person).
  *
  * Задачи людям доходят через Telegram — значит нужны две разные вещи:
@@ -87,7 +97,11 @@ export class PeopleService {
     });
   }
 
-  async update(id: string, patch: Partial<UpsertPersonInput>, actorRef = "owner"): Promise<PersonRow> {
+  async update(
+    id: string,
+    patch: Partial<UpsertPersonInput>,
+    actorRef = "owner",
+  ): Promise<PersonRow> {
     const before = await this.byId(id);
     const values: Record<string, unknown> = {};
     if (patch.name !== undefined) values.name = patch.name;
@@ -118,15 +132,15 @@ export class PeopleService {
    * ВНИМАНИЕ: привязка по @username — дыра. Ник в Telegram освобождается
    * после смены, и любой, кто его займёт, получит карточку сотрудника со
    * всеми задачами. Штатный путь подключения теперь — одноразовое
-   * приглашение (`InvitesService`), а этот остаётся аварийным и выключается
-   * тумблером `STAFF_LINK_BY_USERNAME=0`.
+   * приглашение (`InvitesService`), а этот остаётся аварийным и включается
+   * только явным тумблером `STAFF_LINK_BY_USERNAME=1`.
    *
    * Повторный /start уже привязанного не ломает связь — поиск по chat_id
    * работает всегда, независимо от тумблера.
    */
   async linkTelegram(chatId: string, username: string | null): Promise<PersonRow | null> {
     // Выключено — ищем только по уже привязанному chat_id.
-    const byUsernameAllowed = (process.env.STAFF_LINK_BY_USERNAME ?? "1") !== "0";
+    const byUsernameAllowed = usernameLinkEnabled(process.env.STAFF_LINK_BY_USERNAME);
     const uname = byUsernameAllowed ? normalizeUsername(username) : null;
     const [found] = await this.db
       .select()

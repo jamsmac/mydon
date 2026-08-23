@@ -14,6 +14,25 @@ export async function checkOnce(url: string, timeoutMs = 10_000): Promise<CheckR
     const res = await fetch(url, { signal: controller.signal });
     const ms = Date.now() - started;
     if (!res.ok) return { ok: false, status: res.status, ms, reason: `HTTP ${res.status}` };
+
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, status: res.status, ms, reason: "health вернул не JSON" };
+    }
+    if (body === null || typeof body !== "object") {
+      return { ok: false, status: res.status, ms, reason: "health вернул неверный объект" };
+    }
+
+    const health = body as Record<string, unknown>;
+    if (health.status !== "ok") {
+      const status = typeof health.status === "string" ? health.status : "неизвестен";
+      return { ok: false, status: res.status, ms, reason: `health status=${status}` };
+    }
+    if (health.dbOk === false || health.tzOk === false) {
+      return { ok: false, status: res.status, ms, reason: "health-компонент не готов" };
+    }
     return { ok: true, status: res.status, ms };
   } catch (err) {
     return {

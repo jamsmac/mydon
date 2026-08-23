@@ -23,9 +23,27 @@
  * Запуск: DATABASE_URL=… SERVICE_TOKEN=… node tools/smoke-core.mjs
  */
 import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const PORT = process.env.SMOKE_PORT ?? "3099";
+async function свободныйПорт() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : null;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (port === null) reject(new Error("Не удалось выбрать свободный порт"));
+        else resolve(String(port));
+      });
+    });
+  });
+}
+
+const PORT = process.env.SMOKE_PORT ?? (await свободныйПорт());
 const BASE = `http://127.0.0.1:${PORT}`;
 const TOKEN = process.env.SERVICE_TOKEN ?? "smoke-token";
 const СТАРТ_ТАЙМАУТ_МС = 60_000;
@@ -50,6 +68,15 @@ const ЧТЕНИЕ = [
   "/tasks",
   "/people",
   "/approvals",
+  {
+    path: "/registry/briefing",
+    проверить: (ответ) => {
+      for (const key of ["overdueMoney", "idleMachines", "pendingApprovals", "overdueTasks"]) {
+        if (typeof ответ?.[key] !== "number") throw new Error(`briefing.${key} — не число`);
+      }
+      if (ответ?.tz !== "Asia/Tashkent") throw new Error(`briefing.tz=${ответ?.tz}`);
+    },
+  },
   // Предел выборки — параметр, а не зашитое число. Раньше он был зашит, и
   // выборка обрезалась молча: проверка реестра видела первые 500 карточек из
   // 1156 и печатала «расхождений не найдено». Заглушка БД `.limit()` не
@@ -92,7 +119,10 @@ const ЗАПИСЬ = [
     path: "/vending/ingest",
     body: {
       machines: [
-        { serial: "SMOKE-0001", slots: [{ coilId: "1", product: "Smoke A", capacity: 5, quantity: 3 }] },
+        {
+          serial: "SMOKE-0001",
+          slots: [{ coilId: "1", product: "Smoke A", capacity: 5, quantity: 3 }],
+        },
       ],
     },
     проверить: (ответ) => {
@@ -177,7 +207,9 @@ async function проверитьМеста() {
   if (!r.ok) throw new Error(`снятие → ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const итог = (await мест()).find((l) => l.id === place);
   if (итог.machines.length !== 1 || итог.machines[0].entityId !== m2) {
-    throw new Error(`после снятия ожидали ровно второй аппарат, получили ${JSON.stringify(итог.machines)}`);
+    throw new Error(
+      `после снятия ожидали ровно второй аппарат, получили ${JSON.stringify(итог.machines)}`,
+    );
   }
 
   // Уход в ремонт с указанием мастерской. Тот же класс сырого SQL: закрытие
@@ -189,10 +221,13 @@ async function проверитьМеста() {
     body: JSON.stringify({ status: "repair", placeId: shop, note: "дымовой прогон" }),
     signal: AbortSignal.timeout(20_000),
   });
-  if (!статус.ok) throw new Error(`ремонт → ${статус.status}: ${(await статус.text()).slice(0, 200)}`);
+  if (!статус.ok)
+    throw new Error(`ремонт → ${статус.status}: ${(await статус.text()).slice(0, 200)}`);
   const пусто = (await мест()).find((l) => l.id === place);
   if (пусто.machines.length !== 0) {
-    throw new Error(`уехавший в ремонт всё ещё числится на точке: ${JSON.stringify(пусто.machines)}`);
+    throw new Error(
+      `уехавший в ремонт всё ещё числится на точке: ${JSON.stringify(пусто.machines)}`,
+    );
   }
 
   // «На складе» требует склада — противоречие должно отвергаться сервером,
@@ -278,7 +313,8 @@ async function проверитьУзлы() {
     partKind: "grinder",
     partId: лежит.id,
   });
-  if (!возврат.ok) throw new Error(`возврат узла → ${возврат.status}: ${возврат.тело.slice(0, 200)}`);
+  if (!возврат.ok)
+    throw new Error(`возврат узла → ${возврат.status}: ${возврат.тело.slice(0, 200)}`);
   if (возврат.json.installed.serialNumber !== serial) {
     throw new Error("серийник не унаследовался при возврате со склада");
   }
@@ -328,7 +364,10 @@ async function проверитьПродажиТовара() {
   const имя = `Smoke Source ${Date.now()}`;
 
   const привязка = await пост("/sales/alias", { name: имя, entityId: товарId });
-  if (!привязка.ok) throw new Error(`привязка алиаса → ${привязка.status}: ${(await привязка.text()).slice(0, 200)}`);
+  if (!привязка.ok)
+    throw new Error(
+      `привязка алиаса → ${привязка.status}: ${(await привязка.text()).slice(0, 200)}`,
+    );
 
   const другая = await пост("/entities", {
     domain: "vendhub",
@@ -355,6 +394,281 @@ async function проверитьПродажиТовара() {
   if (!Array.isArray(JSON.parse(await несвязанные.text()))) {
     throw new Error("несвязанные имена — не массив");
   }
+}
+
+async function jsonRequest(method, path, body, auth = true) {
+  const headers = { "Content-Type": "application/json" };
+  if (auth) headers["x-service-token"] = TOKEN;
+  const r = await fetch(`${BASE}${path}`, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const text = await r.text();
+  let json = null;
+  if (text.length > 0) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error(`${method} ${path} вернул не JSON: ${text.slice(0, 160)}`);
+    }
+  }
+  return { r, text, json };
+}
+
+/** Согласование должно атомарно создать уже утверждённую карточку. */
+async function проверитьСогласование() {
+  const marker = `SMOKE-APPROVAL-${Date.now()}`;
+  const requested = await jsonRequest("POST", "/approvals", {
+    agent: "smoke-agent",
+    action: "smoke.registry-import",
+    tier: "T1",
+    payload: {
+      import: {
+        domain: "personal",
+        type: "smoke_approval",
+        records: [{ name: marker, externalRef: marker }],
+      },
+    },
+  });
+  if (!requested.r.ok)
+    throw new Error(`запрос → ${requested.r.status}: ${requested.text.slice(0, 200)}`);
+
+  const decided = await jsonRequest("POST", `/approvals/${requested.json.id}/decide`, {
+    decision: "approved",
+    actor: "owner",
+  });
+  if (!decided.r.ok)
+    throw new Error(`решение → ${decided.r.status}: ${decided.text.slice(0, 200)}`);
+
+  const list = await jsonRequest("GET", "/entities?domain=personal&type=smoke_approval&limit=50");
+  if (!list.r.ok || !Array.isArray(list.json))
+    throw new Error("исполненный импорт не читается из реестра");
+  const card = list.json.find((row) => row.externalRef === marker);
+  if (!card) throw new Error("одобрение не материализовало карточку");
+  if (card.approvedAt === null || card.approvedBy !== "owner") {
+    throw new Error(`карточка после одобрения осталась черновиком: ${JSON.stringify(card)}`);
+  }
+
+  const repeated = await jsonRequest("POST", `/approvals/${requested.json.id}/decide`, {
+    decision: "approved",
+  });
+  if (repeated.r.ok) throw new Error("повторное решение прошло, хотя запрос уже закрыт");
+}
+
+/** Два этапа инкассации и защита от повторного приёма на живом SQL. */
+async function проверитьИнкассацию() {
+  const machine = await jsonRequest("POST", "/entities", {
+    domain: "vendhub",
+    type: "machine",
+    name: `Дымовой автомат инкассации ${Date.now()}`,
+  });
+  if (!machine.r.ok)
+    throw new Error(`автомат → ${machine.r.status}: ${machine.text.slice(0, 200)}`);
+
+  const collected = await jsonRequest("POST", "/collections", {
+    machineId: machine.json.id,
+    source: "realtime",
+    notes: "smoke",
+  });
+  if (!collected.r.ok || collected.json.status !== "collected") {
+    throw new Error(`сбор → ${collected.r.status}: ${collected.text.slice(0, 200)}`);
+  }
+
+  const received = await jsonRequest("POST", `/collections/${collected.json.id}/receive`, {
+    amount: 30_000,
+    manager: "smoke-owner",
+    denominations: { 10000: 3 },
+  });
+  if (
+    !received.r.ok ||
+    received.json.status !== "received" ||
+    Number(received.json.amount) !== 30_000
+  ) {
+    throw new Error(`приём → ${received.r.status}: ${received.text.slice(0, 200)}`);
+  }
+
+  const repeated = await jsonRequest("POST", `/collections/${collected.json.id}/receive`, {
+    amount: 30_000,
+  });
+  if (repeated.r.ok) throw new Error("повторный приём закрытой инкассации прошёл");
+}
+
+/** Договоры и импортные обязательства должны материализоваться атомарно. */
+async function проверитьФинансовыеТранзакции() {
+  const marker = String(Date.now());
+  const contract = await jsonRequest("POST", "/contracts", {
+    domain: "globerent",
+    contractNo: `SMOKE-${marker}`,
+    contractDate: "2026-08-23",
+    items: [{ name: "Smoke equipment", qty: 1, price: 1000 }],
+    payType: "100",
+    docParams: { payDays: 5 },
+  });
+  if (!contract.r.ok) {
+    throw new Error(`договор → ${contract.r.status}: ${contract.text.slice(0, 200)}`);
+  }
+
+  const contractBefore = await jsonRequest("GET", `/contracts/${contract.json.id}`);
+  if (!contractBefore.r.ok || contractBefore.json.planned?.length !== 1) {
+    throw new Error(`график договора не создан: ${contractBefore.text.slice(0, 200)}`);
+  }
+  const total = Number(contract.json.totalWithVat);
+  const payment = await jsonRequest("POST", `/contracts/${contract.json.id}/payments`, {
+    amount: total,
+    currency: "UZS",
+    docNo: `SMOKE-PAY-${marker}`,
+  });
+  if (!payment.r.ok) {
+    throw new Error(`платёж договора → ${payment.r.status}: ${payment.text.slice(0, 200)}`);
+  }
+  const contractAfter = await jsonRequest("GET", `/contracts/${contract.json.id}`);
+  if (
+    !contractAfter.r.ok ||
+    contractAfter.json.payments?.length !== 1 ||
+    contractAfter.json.planned?.length !== 0 ||
+    Number(contractAfter.json.paidUzs) !== total
+  ) {
+    throw new Error(`платёж не закрыл график договора: ${contractAfter.text.slice(0, 240)}`);
+  }
+
+  const imported = await jsonRequest("POST", "/imports", {
+    domain: "globerent",
+    contractNo: `SMOKE-IMPORT-${marker}`,
+    contractDate: "2026-08-23",
+    currency: "USD",
+    items: [{ name: "Smoke import unit", qty: 1, price: 100 }],
+    prepaymentAmount: 40,
+    prepaymentDueDate: "2026-08-24",
+    balanceAmount: 60,
+    balanceDueDate: "2026-09-01",
+  });
+  if (!imported.r.ok) {
+    throw new Error(`импортный контракт → ${imported.r.status}: ${imported.text.slice(0, 200)}`);
+  }
+  const signed = await jsonRequest("PATCH", `/imports/${imported.json.id}/sign`, {});
+  if (!signed.r.ok || signed.json.status !== "in_progress" || signed.json.unitsTotal !== 1) {
+    throw new Error(`подписание импорта → ${signed.r.status}: ${signed.text.slice(0, 240)}`);
+  }
+  const paid = await jsonRequest("PATCH", `/imports/${imported.json.id}/paid/prepayment`, {});
+  if (!paid.r.ok || paid.json.prepaymentPaidAt === null) {
+    throw new Error(`оплата импорта → ${paid.r.status}: ${paid.text.slice(0, 200)}`);
+  }
+  const paidAgain = await jsonRequest("PATCH", `/imports/${imported.json.id}/paid/prepayment`, {});
+  if (paidAgain.r.ok) throw new Error("повторная оплата импортного контракта прошла");
+}
+
+/** Незаконченные пачки raw не видны, последняя публикует снимок ровно один раз. */
+async function проверитьПакетныйRaw() {
+  const fetchedAt = new Date().toISOString();
+  const path = "/raw/import/smoke-ingest";
+  const base = {
+    source: "gjvending",
+    report: "order_query",
+    fetchedAt,
+    columns: ["id", "value"],
+    rowsTotal: 3,
+    importedBy: "smoke",
+  };
+
+  const premature = await jsonRequest(
+    "POST",
+    path,
+    {
+      ...base,
+      rows: [
+        ["1", "a"],
+        ["2", "b"],
+      ],
+      offset: 0,
+      append: false,
+      complete: true,
+    },
+    false,
+  );
+  if (premature.r.ok) throw new Error("неполная последняя пачка была принята");
+
+  const first = await jsonRequest(
+    "POST",
+    path,
+    {
+      ...base,
+      rows: [
+        ["1", "a"],
+        ["2", "b"],
+      ],
+      offset: 0,
+      append: false,
+      complete: false,
+    },
+    false,
+  );
+  if (!first.r.ok) throw new Error(`первая пачка → ${first.r.status}: ${first.text.slice(0, 200)}`);
+
+  const hidden = await jsonRequest("GET", "/raw/report/gjvending/order_query");
+  if (!hidden.r.ok || hidden.json.snapshot?.id === first.json.snapshotId) {
+    throw new Error("промежуточный снимок стал виден отчётам");
+  }
+
+  const final = await jsonRequest(
+    "POST",
+    path,
+    { ...base, rows: [["3", "c"]], offset: 2, append: true, complete: true },
+    false,
+  );
+  if (!final.r.ok || final.json.total !== 3) {
+    throw new Error(`последняя пачка → ${final.r.status}: ${final.text.slice(0, 200)}`);
+  }
+
+  const published = await jsonRequest("GET", "/raw/report/gjvending/order_query");
+  if (!published.r.ok || published.json.snapshot?.rows !== 3) {
+    throw new Error(`готовый снимок не опубликован: ${published.text.slice(0, 200)}`);
+  }
+
+  // Повторная пакетная запись к уже готовому снимку снова скрывает его до
+  // complete=true. Иначе отчёт увидит смесь старого и нового содержимого.
+  const reopened = await jsonRequest(
+    "POST",
+    path,
+    { ...base, rows: [["2", "b2"]], offset: 1, append: true, complete: false },
+    false,
+  );
+  if (!reopened.r.ok) {
+    throw new Error(
+      `повторная промежуточная пачка → ${reopened.r.status}: ${reopened.text.slice(0, 200)}`,
+    );
+  }
+  const hiddenAgain = await jsonRequest("GET", "/raw/report/gjvending/order_query");
+  if (!hiddenAgain.r.ok || hiddenAgain.json.snapshot?.id === final.json.snapshotId) {
+    throw new Error("повторно открытый снимок остался виден отчётам");
+  }
+
+  const republished = await jsonRequest(
+    "POST",
+    path,
+    { ...base, rows: [["3", "c"]], offset: 2, append: true, complete: true },
+    false,
+  );
+  if (!republished.r.ok || republished.json.total !== 3) {
+    throw new Error(
+      `повторная публикация → ${republished.r.status}: ${republished.text.slice(0, 200)}`,
+    );
+  }
+  const visibleAgain = await jsonRequest("GET", "/raw/report/gjvending/order_query");
+  if (!visibleAgain.r.ok || visibleAgain.json.snapshot?.id !== republished.json.snapshotId) {
+    throw new Error("повторно завершённый снимок не вернулся в отчёты");
+  }
+}
+
+/** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
+async function проверитьRateLimit() {
+  for (let i = 0; i < 70; i += 1) {
+    const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(5000) });
+    if (r.status === 429) return;
+    if (!r.ok) throw new Error(`/health неожиданно вернул ${r.status}`);
+  }
+  throw new Error("после 70 быстрых запросов Core ни разу не вернул 429");
 }
 
 async function ждатьЗдоровье(proc) {
@@ -430,7 +744,14 @@ async function проверитьЗапись(шаг) {
 // стартуют сразу, не дожидаясь расписания. В CI переменной обычно нет, но
 // «обычно нет» — не гарантия: прогон полез бы в чужую базу и стал бы зависеть
 // от её доступности. Дымовой тест обязан проверять НАШ код, а не связность.
-const env = { ...process.env, PORT, SERVICE_TOKEN: TOKEN, NODE_ENV: "test" };
+const env = {
+  ...process.env,
+  PORT,
+  SERVICE_TOKEN: TOKEN,
+  INGEST_KEY: "smoke-ingest",
+  HEALTH_MIN_STORAGE_MB: "0",
+  NODE_ENV: "test",
+};
 delete env.STOCK_DATABASE_URL;
 delete env.OURVEND_ACCOUNT;
 delete env.OURVEND_PASSWORD;
@@ -470,6 +791,41 @@ try {
   } catch (e) {
     провалы.push(`продажи товара: ${e.message}`);
   }
+
+  try {
+    await проверитьСогласование();
+    console.log("  ok  сценарий: согласование → исполнение → утверждённая карточка");
+  } catch (e) {
+    провалы.push(`согласование: ${e.message}`);
+  }
+
+  try {
+    await проверитьИнкассацию();
+    console.log("  ok  сценарий: инкассация → приём → защита от повтора");
+  } catch (e) {
+    провалы.push(`инкассация: ${e.message}`);
+  }
+
+  try {
+    await проверитьФинансовыеТранзакции();
+    console.log("  ok  сценарий: договор/импорт → обязательства → оплата");
+  } catch (e) {
+    провалы.push(`финансовые транзакции: ${e.message}`);
+  }
+
+  try {
+    await проверитьПакетныйRaw();
+    console.log("  ok  сценарий: пакетный raw скрыт до последней полной пачки");
+  } catch (e) {
+    провалы.push(`пакетный raw: ${e.message}`);
+  }
+
+  try {
+    await проверитьRateLimit();
+    console.log("  ok  сценарий: глобальный rate limit отвечает 429");
+  } catch (e) {
+    провалы.push(`rate limit: ${e.message}`);
+  }
 } catch (e) {
   провалы.push(`старт: ${e.message}`);
 } finally {
@@ -486,4 +842,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 3 сценария.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 8 сценариев.`);

@@ -20,13 +20,27 @@ ENV_FILE="/etc/mydon-heartbeat.env"
 : "${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID не задан}"
 : "${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN не задан}"
 
+# Свежий heartbeat означает, что отвечает именно приложение с живой БД, а не
+# только shell/systemd на хосте. Иначе Core мог неделями отдавать degraded, а
+# сторож продолжал видеть свежую отметку и считать контур здоровым.
+HEALTH_URL="${HEARTBEAT_HEALTH_URL:-http://127.0.0.1:3001/health}"
+health="$(curl -fsS --max-time 10 "$HEALTH_URL")" || {
+  echo "health MYDON недоступен: $HEALTH_URL" >&2
+  exit 1
+}
+health_status="$(printf '%s' "$health" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))' 2>/dev/null || true)"
+if [ "$health_status" != "ok" ]; then
+  echo "health MYDON не ok: ${health_status:-ответ не разобран}" >&2
+  exit 1
+fi
+
 # Короткий статус: какие контейнеры живы. Диагноз в тревоге ценнее голого «жив».
 containers="$(docker ps --format '{{.Names}}:{{.Status}}' 2>/dev/null | head -12 | tr '\n' ';' || true)"
 disk_avail="$(df -BG --output=avail / | tail -1 | tr -dc '0-9' || echo '?')"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-payload="$(printf '{"ts":"%s","host":"mydon-os","disk_avail_gb":"%s","containers":"%s"}' \
-  "$ts" "$disk_avail" "$containers")"
+payload="$(printf '{"ts":"%s","host":"mydon-os","health":"%s","disk_avail_gb":"%s","containers":"%s"}' \
+  "$ts" "$health_status" "$disk_avail" "$containers")"
 
 # PATCH gist: содержимое файла heartbeat.json заменяется целиком.
 body="$(printf '{"files":{"heartbeat.json":{"content":%s}}}' "$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")"

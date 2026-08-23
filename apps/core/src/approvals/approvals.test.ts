@@ -84,7 +84,11 @@ describe("ApprovalsService.decide", () => {
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     const created = await service.request({ agent: "test", action: "действие", tier: "T3" });
     assert.equal(created.id, "new-1");
-    assert.equal(inserts.length, 3, "должны быть запрос, событие и запись журнала — все в одной транзакции");
+    assert.equal(
+      inserts.length,
+      3,
+      "должны быть запрос, событие и запись журнала — все в одной транзакции",
+    );
   });
 });
 
@@ -98,15 +102,15 @@ describe("Одобренный импорт данных → карточки в
       select: () => ({
         from: (table: unknown) => ({
           where: () =>
-            withLimit(
-              table === org ? [{ id: "org-1", code: "globerent" }] : entityLookup,
-            ),
+            withLimit(table === org ? [{ id: "org-1", code: "globerent" }] : entityLookup),
         }),
       }),
       update: () => ({
         set: () => ({
           where: () => ({
-            returning: async () => [{ id: "a1", decision: "approved", payload }],
+            returning: async () => [
+              { id: "a1", agent: "test-agent", decision: "approved", payload },
+            ],
           }),
         }),
       }),
@@ -130,7 +134,11 @@ describe("Одобренный импорт данных → карточки в
       import: {
         domain: "globerent",
         type: "contractor",
-        records: [{ name: "Olma Cafe", externalRef: "ИНН 123" }, { name: "  " }, { name: "Chinor" }],
+        records: [
+          { name: "Olma Cafe", externalRef: "ИНН 123" },
+          { name: "  " },
+          { name: "Chinor" },
+        ],
       },
     });
     const service = new ApprovalsService(db, noopAudit, noopEvents);
@@ -138,6 +146,12 @@ describe("Одобренный импорт данных → карточки в
     assert.equal(inserted.length, 2, "должны появиться две карточки: пустое имя — мимо");
     assert.equal(inserted[0].name, "Olma Cafe");
     assert.equal(inserted[0].externalRef, "ИНН 123");
+    assert.ok(
+      inserted[0].approvedAt instanceof Date,
+      "решение владельца сразу утверждает карточку",
+    );
+    assert.equal(inserted[0].approvedBy, "owner");
+    assert.equal(inserted[0].createdFrom, "approval:test-agent");
   });
 
   it("дубль по имени и типу внутри направления не плодится", async () => {
@@ -190,7 +204,11 @@ describe("Одобренная заявка закупа → накладная 
       select: () => ({ from: () => ({ where: async () => [] }) }),
       update: () => ({
         set: () => ({
-          where: () => ({ returning: async () => [{ id: "a1", decision: "approved", payload }] }),
+          where: () => ({
+            returning: async () => [
+              { id: "a1", agent: "test-agent", decision: "approved", payload },
+            ],
+          }),
         }),
       }),
       insert: (table: unknown) => ({
@@ -202,7 +220,9 @@ describe("Одобренная заявка закупа → накладная 
         },
       }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
     return { db, orders };
   }
 
@@ -250,7 +270,8 @@ describe("Одобренный исторический импорт кофе-б
     const insertedReturns: Row[] = [];
     const upsertedConsumables: Row[] = [];
     const insertedLocations: Row[] = [];
-    const withLimit = (rows: Row[]) => Object.assign(Promise.resolve(rows), { limit: async () => rows });
+    const withLimit = (rows: Row[]) =>
+      Object.assign(Promise.resolve(rows), { limit: async () => rows });
     const tx = {
       select: () => ({
         from: (table: unknown) => {
@@ -260,13 +281,18 @@ describe("Одобренный исторический импорт кофе-б
             const rows = opts.locations ?? [{ id: "loc-1", name: "AH" }];
             return Object.assign(Promise.resolve(rows), { where: () => Promise.resolve(rows) });
           }
-          if (table === coffeeContainerReturn) return { where: () => withLimit(opts.existingReturns ?? []) };
+          if (table === coffeeContainerReturn)
+            return { where: () => withLimit(opts.existingReturns ?? []) };
           return { where: () => withLimit(opts.existingRefills ?? []) };
         },
       }),
       update: () => ({
         set: () => ({
-          where: () => ({ returning: async () => [{ id: "a1", decision: "approved", payload }] }),
+          where: () => ({
+            returning: async () => [
+              { id: "a1", agent: "test-agent", decision: "approved", payload },
+            ],
+          }),
         }),
       }),
       insert: (table: unknown) => ({
@@ -285,11 +311,18 @@ describe("Одобренный исторический импорт кофе-б
         },
       }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
     return { db, inserted, insertedReturns, upsertedConsumables, insertedLocations };
   }
 
-  const validRecord = { locationId: "loc-1", position: 7, filledWeight: 1200, enteredDate: "2026-07-01" };
+  const validRecord = {
+    locationId: "loc-1",
+    position: 7,
+    filledWeight: 1200,
+    enteredDate: "2026-07-01",
+  };
 
   it("«одобрить» заносит валидные записи как coffee_refill с меткой источника", async () => {
     const { db, inserted } = coffeeImportStub({ coffeeImport: { records: [validRecord] } });
@@ -333,7 +366,17 @@ describe("Одобренный исторический импорт кофе-б
     const { db, inserted } = coffeeImportStub(
       { coffeeImport: { records: [validRecord] } },
       // Дедуп теперь сверяет составной ключ по колонкам, а не наличие строки.
-      { existingRefills: [{ locationId: "loc-1", position: 7, enteredDate: "2026-07-01", filledWeight: 1200, packageCount: 1 }] },
+      {
+        existingRefills: [
+          {
+            locationId: "loc-1",
+            position: 7,
+            enteredDate: "2026-07-01",
+            filledWeight: 1200,
+            packageCount: 1,
+          },
+        ],
+      },
     );
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     await service.decide("a1", "approved", "owner");
@@ -401,7 +444,11 @@ describe("Одобренный исторический импорт кофе-б
   it("точно такой же возврат уже есть — не дублируется", async () => {
     const { db, insertedReturns } = coffeeImportStub(
       { coffeeImport: { returns: [validReturn] } },
-      { existingReturns: [{ position: 1, containerNumber: 27, returnedDate: "2026-07-30", weight: 787 }] },
+      {
+        existingReturns: [
+          { position: 1, containerNumber: 27, returnedDate: "2026-07-30", weight: 787 },
+        ],
+      },
     );
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     await service.decide("a1", "approved", "owner");
@@ -442,13 +489,22 @@ describe("Одобренный исторический импорт кофе-б
     const { db, inserted, insertedLocations } = coffeeImportStub({
       coffeeImport: {
         newLocations: ["кардиология 1 корпус"],
-        records: [{ locationName: "Кардиология 1 корпус", position: 3, filledWeight: 1145, enteredDate: "2025-12-10" }],
+        records: [
+          {
+            locationName: "Кардиология 1 корпус",
+            position: 3,
+            filledWeight: 1145,
+            enteredDate: "2025-12-10",
+          },
+        ],
       },
     });
     const service = new ApprovalsService(db, noopAudit, noopEvents);
     await service.decide("a1", "approved", "owner");
     assert.equal(insertedLocations.length, 1);
     assert.equal(insertedLocations[0].name, "кардиология 1 корпус");
+    assert.ok(insertedLocations[0].approvedAt instanceof Date);
+    assert.equal(insertedLocations[0].approvedBy, "owner");
     assert.equal(inserted.length, 1);
     // Имя резолвится без учёта регистра — на id только что созданной точки.
     assert.equal(inserted[0].locationId, "loc-new-1");
@@ -458,7 +514,9 @@ describe("Одобренный исторический импорт кофе-б
     const { db, inserted, insertedLocations } = coffeeImportStub({
       coffeeImport: {
         newLocations: ["ah"],
-        records: [{ locationName: "ah", position: 1, filledWeight: 900, enteredDate: "2025-12-11" }],
+        records: [
+          { locationName: "ah", position: 1, filledWeight: 900, enteredDate: "2025-12-11" },
+        ],
       },
     });
     const service = new ApprovalsService(db, noopAudit, noopEvents);
@@ -470,7 +528,14 @@ describe("Одобренный исторический импорт кофе-б
   it("locationName вне списка newLocations — строка пропускается, точка не создаётся", async () => {
     const { db, inserted, insertedLocations } = coffeeImportStub({
       coffeeImport: {
-        records: [{ locationName: "выдуманная точка", position: 2, filledWeight: 800, enteredDate: "2025-12-12" }],
+        records: [
+          {
+            locationName: "выдуманная точка",
+            position: 2,
+            filledWeight: 800,
+            enteredDate: "2025-12-12",
+          },
+        ],
       },
     });
     const service = new ApprovalsService(db, noopAudit, noopEvents);
@@ -483,7 +548,9 @@ describe("Одобренный исторический импорт кофе-б
     const { db, upsertedConsumables, insertedLocations } = coffeeImportStub({
       coffeeImport: {
         newLocations: ["Soliq Yashnobod"],
-        consumables: [{ locationName: "soliq yashnobod", loggedDate: "2025-12-12", water: 2, cups: 1, lids: 1 }],
+        consumables: [
+          { locationName: "soliq yashnobod", loggedDate: "2025-12-12", water: 2, cups: 1, lids: 1 },
+        ],
       },
     });
     const service = new ApprovalsService(db, noopAudit, noopEvents);

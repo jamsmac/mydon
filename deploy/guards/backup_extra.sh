@@ -35,7 +35,8 @@ if docker ps --format '{{.Names}}' | grep -qx mydon-db; then
     else rm -f "$F.tmp"; log "FAIL база MYDON: дамп повреждён или оборван"; FAILED=1; fi
   else rm -f "$F.tmp"; log "FAIL база MYDON: pg_dump не отработал"; FAILED=1; fi
 else
-  log "SKIP база MYDON: контейнер mydon-db не запущен"
+  log "FAIL база MYDON: контейнер mydon-db не запущен"
+  FAILED=1
 fi
 
 # --- 2. Код, которого нет в git ---
@@ -46,14 +47,23 @@ if [ -d /opt/mydon-command-center ]; then
       mydon-command-center 2>/dev/null; then
     mv "$F.tmp" "$F"; log "OK command-center -> $(du -h "$F" | cut -f1)"
   else rm -f "$F.tmp"; log "FAIL command-center"; FAILED=1; fi
+else
+  log "FAIL command-center: каталог /opt/mydon-command-center не найден"
+  FAILED=1
 fi
 
 # --- 3. Секреты отдельно, с ограниченными правами ---
 F="$DEST/env-files_${DATE}.tar.gz"
-if tar -czf "$F.tmp" \
-     $(find /opt -maxdepth 2 -name '.env' -not -path '*/node_modules/*' 2>/dev/null) 2>/dev/null; then
+ENV_FILES=()
+while IFS= read -r -d '' env_file; do
+  ENV_FILES+=("$env_file")
+done < <(find /opt -maxdepth 2 -name '.env' -not -path '*/node_modules/*' -print0 2>/dev/null)
+if [ "${#ENV_FILES[@]}" -eq 0 ]; then
+  log "FAIL .env-файлы: ни одного файла не найдено"
+  FAILED=1
+elif tar -czf "$F.tmp" "${ENV_FILES[@]}" 2>/dev/null; then
   mv "$F.tmp" "$F"; chmod 600 "$F"; log "OK .env-файлы -> $(du -h "$F" | cut -f1)"
-else rm -f "$F.tmp"; log "SKIP .env-файлы"; fi
+else rm -f "$F.tmp"; log "FAIL .env-файлы"; FAILED=1; fi
 
 # --- 4. OFFSITE: копия за пределы этой машины ---
 #
@@ -130,11 +140,13 @@ if [ -n "${BOT_TOKEN:-}" ] && [ -n "${CHAT_ID:-}" ]; then
                 FAILED=1
             fi
         else
-            log "SKIP offsite секреты: BACKUP_ENC_PASSPHRASE не задан — открытым текстом не отправляем"
+            log "FAIL offsite секреты: BACKUP_ENC_PASSPHRASE не задан — открытым текстом не отправляем"
+            FAILED=1
         fi
     fi
 else
-    log "SKIP offsite: BOT_TOKEN/TG_BACKUP_CHAT_ID не заданы"
+    log "FAIL offsite: BOT_TOKEN/TG_BACKUP_CHAT_ID не заданы"
+    FAILED=1
 fi
 
 # --- 5. Чистка старого ---
@@ -155,4 +167,3 @@ else
     to_mydon "$(printf '{"type":"infra.backup_ok","source":"backup_extra","payload":{"what":"база MYDON + command-center","size":"%s"}}' "$(du -sh "$DEST" | cut -f1)")" || true
 fi
 exit $FAILED
-

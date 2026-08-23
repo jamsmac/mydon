@@ -55,7 +55,11 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       .filter(([, v]) => is(v, Table))
       .filter(([, v]) => !registered.has(v))
       .map(([name]) => name);
-    assert.deepEqual(missing, [], `таблицы экспортированы, но не внесены в schema: ${missing.join(", ")}`);
+    assert.deepEqual(
+      missing,
+      [],
+      `таблицы экспортированы, но не внесены в schema: ${missing.join(", ")}`,
+    );
   });
 
   it("настройки агентов переживают обновление системы", () => {
@@ -72,23 +76,39 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     // Ради вместимости и заводилась таблица: machine_stock её не хранит.
     assert.ok(slot.includes("capacity"), "вместимость слота — без неё дефицит не посчитать");
     assert.ok(slot.includes("quantity"), "остаток слота");
-    assert.ok(slot.includes("machineSerial") && slot.includes("coilId"), "ключ слота: автомат + пружина");
+    assert.ok(
+      slot.includes("machineSerial") && slot.includes("coilId"),
+      "ключ слота: автомат + пружина",
+    );
     const prod = Object.keys(schema.vendingProduct as unknown as Record<string, unknown>);
-    assert.ok(prod.includes("purchasePrice") && prod.includes("packSize"), "прайс и кратность — в базе, не в коде");
+    assert.ok(
+      prod.includes("purchasePrice") && prod.includes("packSize"),
+      "прайс и кратность — в базе, не в коде",
+    );
   });
 
   it("у ключевых таблиц есть обязательные поля", () => {
     const cols = (t: unknown) => Object.keys(t as Record<string, unknown>);
 
-    assert.ok(cols(schema.entity).includes("externalRef"), "entity.externalRef — ключ сведения справочника");
+    assert.ok(
+      cols(schema.entity).includes("externalRef"),
+      "entity.externalRef — ключ сведения справочника",
+    );
     assert.ok(cols(schema.entity).includes("attrs"));
     assert.ok(cols(schema.approval).includes("tier"));
     assert.ok(cols(schema.approval).includes("decision"));
     assert.ok(cols(schema.moneyFlow).includes("currency"), "без валюты суммы складывать нельзя");
     assert.ok(cols(schema.moneyFlow).includes("direction"));
-    assert.ok(cols(schema.auditLog).includes("actorKind"), "журнал должен различать человека и агента");
+    assert.ok(
+      cols(schema.auditLog).includes("actorKind"),
+      "журнал должен различать человека и агента",
+    );
     assert.ok(cols(schema.auditLog).includes("before"));
     assert.ok(cols(schema.auditLog).includes("after"));
+    assert.ok(
+      cols(schema.rawSnapshot).includes("completedAt"),
+      "незавершённая пакетная выгрузка не должна попадать в отчёты",
+    );
   });
 });
 
@@ -111,6 +131,8 @@ describe("Перечисления схемы и словари @mydon/shared �
 
   it("умолчание состояния существует в перечислении", () => {
     // Умолчание прописано и в колонке (DEFAULT 'in_service'), и в коде.
-    assert.ok((mod.machineStatusEnum.enumValues as readonly string[]).includes(DEFAULT_MACHINE_STATUS));
+    assert.ok(
+      (mod.machineStatusEnum.enumValues as readonly string[]).includes(DEFAULT_MACHINE_STATUS),
+    );
   });
 });

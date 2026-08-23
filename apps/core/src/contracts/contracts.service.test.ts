@@ -54,7 +54,10 @@ describe("ContractsService.setStatus — матрица переходов", () 
   ];
   for (const [from, to, ok] of cases) {
     it(`${from} → ${to}: ${ok ? "разрешён" : "запрещён"}`, async () => {
-      const s = service({ existing: { id: "c1", status: from }, updated: { id: "c1", status: to } });
+      const s = service({
+        existing: { id: "c1", status: from },
+        updated: { id: "c1", status: to },
+      });
       if (ok) {
         const r = await s.setStatus("c1", to);
         assert.equal(r.status, to);
@@ -81,15 +84,54 @@ describe("ContractsService.addPayment — guard'ы по статусу", () => {
     const s = service({ existing: { id: "c1", status: "cancelled" } });
     await assert.rejects(() => s.addPayment("c1", { amount: 100 }), /отменён/);
   });
+
+  it("сбой записи денег откатывает операцию целиком", async () => {
+    let committed = false;
+    let selectCall = 0;
+    const contractChain = {
+      from: () => contractChain,
+      where: () => contractChain,
+      for: async () => [
+        {
+          id: "c1",
+          status: "active",
+          domain: "globerent",
+          contractNo: "1",
+          clientId: null,
+          totalWithVat: "100",
+        },
+      ],
+    };
+    const paidChain = {
+      from: () => paidChain,
+      where: async () => [{ paid: "0" }],
+    };
+    const tx = {
+      select: () => (++selectCall === 1 ? contractChain : paidChain),
+    };
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => {
+        const result = await cb(tx);
+        committed = true;
+        return result;
+      },
+    } as never;
+    const finance = {
+      createFlowInTransaction: async () => {
+        throw new Error("finance down");
+      },
+    } as never;
+    const s = new ContractsService(db, noopEvents, finance);
+
+    await assert.rejects(() => s.addPayment("c1", { amount: 100 }), /finance down/);
+    assert.equal(committed, false);
+  });
 });
 
 describe("ContractsService.addAct — guard'ы", () => {
   it("акт по отменённому договору — отказ", async () => {
     const s = service({ existing: { id: "c1", status: "cancelled" } });
-    await assert.rejects(
-      () => s.addAct("c1", { actNo: "1", actDate: "2026-08-04" }),
-      /отменён/,
-    );
+    await assert.rejects(() => s.addAct("c1", { actNo: "1", actDate: "2026-08-04" }), /отменён/);
   });
   it("акт без номера или с кривой датой — отказ до базы", async () => {
     const s = service({});
@@ -129,5 +171,57 @@ describe("ContractsService.create — валидация до базы", () => {
       () => s.create({ ...base, payType: "credit" as never }),
       /100 \| partial \| install \| post/,
     );
+  });
+
+  it("сбой графика откатывает создание договора, а не возвращает ложный успех", async () => {
+    let committed = false;
+    const outerChain = {
+      from: () => outerChain,
+      where: async () => [{ id: "org1" }],
+    };
+    const duplicateChain = {
+      from: () => duplicateChain,
+      where: () => duplicateChain,
+      limit: async () => [],
+    };
+    const contract = {
+      id: "c1",
+      orgId: "org1",
+      domain: "globerent",
+      contractNo: "77",
+      contractDate: "2026-08-04",
+      totalWithVat: "112",
+      payType: "100",
+      docParams: {},
+      clientId: null,
+      agentId: null,
+      agentCommissionAmount: null,
+      agentCommissionCurrency: null,
+    };
+    const tx = {
+      select: () => duplicateChain,
+      insert: () => ({ values: () => ({ returning: async () => [contract] }) }),
+      update: () => ({ set: () => ({ where: async () => undefined }) }),
+    };
+    const db = {
+      select: () => outerChain,
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => {
+        const result = await cb(tx);
+        committed = true;
+        return result;
+      },
+    } as never;
+    const finance = {
+      createFlowInTransaction: async () => {
+        throw new Error("finance down");
+      },
+    } as never;
+    const s = new ContractsService(db, noopEvents, finance);
+
+    await assert.rejects(
+      () => s.create({ ...base, contractNo: "77", payType: "100" }),
+      /finance down/,
+    );
+    assert.equal(committed, false);
   });
 });

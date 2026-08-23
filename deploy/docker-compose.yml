@@ -53,8 +53,11 @@ services:
       INVITE_PEPPER: ${INVITE_PEPPER:-}
       # Аварийная привязка сотрудника по @username. Ник в Telegram
       # освобождается после смены, и занявший его получит чужую карточку —
-      # штатный путь это одноразовое приглашение. "0" выключает совсем.
-      STAFF_LINK_BY_USERNAME: ${STAFF_LINK_BY_USERNAME:-1}
+      # штатный путь это одноразовое приглашение. По умолчанию выключено;
+      # "1" разрешают только временно для аварийной первичной привязки.
+      STAFF_LINK_BY_USERNAME: ${STAFF_LINK_BY_USERNAME:-0}
+      HEALTH_STORAGE_PATH: ${HEALTH_STORAGE_PATH:-/}
+      HEALTH_MIN_STORAGE_MB: ${HEALTH_MIN_STORAGE_MB:-1024}
       # Память: индекс прошлых разговоров. Готовится отдельно и только читается.
       # Пусто → поиск по разговорам выключен, заметки работают как обычно.
       HISTORY_DB_PATH: ${HISTORY_DB_PATH:-}

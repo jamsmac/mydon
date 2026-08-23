@@ -26,7 +26,7 @@ import {
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
-import { FinanceService } from "../finance/finance.service";
+import { FinanceService, type FinanceTx } from "../finance/finance.service";
 
 type ImportRow = typeof grImportContract.$inferSelect;
 type UnitRow = typeof globerentUnit.$inferSelect;
@@ -67,7 +67,14 @@ export interface ImportDetail extends ImportListRow {
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Массовые ГТД-переходы контракта: действия из единой матрицы склада. */
-const BULK_ACTIONS = ["mark-ready-to-ship", "mark-in-transit", "mark-at-border", "mark-customs-im74", "mark-customs-im40", "mark-delivered"] as const;
+const BULK_ACTIONS = [
+  "mark-ready-to-ship",
+  "mark-in-transit",
+  "mark-at-border",
+  "mark-customs-im74",
+  "mark-customs-im40",
+  "mark-delivered",
+] as const;
 
 /**
  * Импортные контракты GLOBERENT — перенос import_contracts PROMACH,
@@ -138,7 +145,8 @@ export class ImportsService {
   }
 
   async create(input: CreateImportInput, actorRef = "owner"): Promise<ImportRow> {
-    if ((input.contractNo ?? "").trim() === "") throw new BadRequestException("Впиши номер контракта");
+    if ((input.contractNo ?? "").trim() === "")
+      throw new BadRequestException("Впиши номер контракта");
     if (!ISO_DAY.test(input.contractDate ?? "")) {
       throw new BadRequestException("Дата контракта — в формате ГГГГ-ММ-ДД");
     }
@@ -156,7 +164,8 @@ export class ImportsService {
     // CHECK донора: предоплата + баланс ≤ итог (+0.01 допуск на округление).
     const prepay = input.prepaymentAmount ?? 0;
     const balance = input.balanceAmount ?? 0;
-    if (prepay < 0 || balance < 0) throw new BadRequestException("Суммы графика не могут быть отрицательными");
+    if (prepay < 0 || balance < 0)
+      throw new BadRequestException("Суммы графика не могут быть отрицательными");
     if (prepay + balance > total + 0.01) {
       throw new BadRequestException(
         `График (${prepay + balance}) больше суммы контракта (${total}) — проверь цифры`,
@@ -211,7 +220,8 @@ export class ImportsService {
           items: items as unknown as Record<string, unknown>[],
           purpose: input.purpose ?? "for_stock",
           saleContractId: input.saleContractId ?? null,
-          prepaymentAmount: input.prepaymentAmount !== undefined ? String(input.prepaymentAmount) : null,
+          prepaymentAmount:
+            input.prepaymentAmount !== undefined ? String(input.prepaymentAmount) : null,
           prepaymentDueDate: input.prepaymentDueDate ?? null,
           balanceAmount: input.balanceAmount !== undefined ? String(input.balanceAmount) : null,
           balanceDueDate: input.balanceDueDate ?? null,
@@ -237,7 +247,11 @@ export class ImportsService {
    */
   async sign(id: string, actorRef = "owner"): Promise<ImportDetail> {
     const row = await this.db.transaction(async (tx) => {
-      const [c] = await tx.select().from(grImportContract).where(eq(grImportContract.id, id)).for("update");
+      const [c] = await tx
+        .select()
+        .from(grImportContract)
+        .where(eq(grImportContract.id, id))
+        .for("update");
       if (!c) throw new NotFoundException("Импортный контракт не найден");
       if (c.status !== "draft") {
         throw new ConflictException(`Контракт уже подписан (${c.status})`);
@@ -278,6 +292,12 @@ export class ImportsService {
           }
         }
       }
+
+      // График оплат — часть подписания. Если хотя бы одно обязательство не
+      // создалось, откатываем и статус, и материализованные единицы: повторное
+      // подписание останется возможным и не даст частичного финансового факта.
+      await this.createPaymentPlan(updated, actorRef, tx);
+
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef,
@@ -288,14 +308,6 @@ export class ImportsService {
       });
       return updated;
     });
-
-    // График оплат заводу → planned money_flow (агинг и «к сроку» видят сразу).
-    // Провал не роняет подписание — обязательства можно завести руками.
-    try {
-      await this.createPaymentPlan(row, actorRef);
-    } catch {
-      // след — в отсутствии planned-строк
-    }
     await this.events.record({
       source: "imports",
       type: "import.signed",
@@ -304,10 +316,11 @@ export class ImportsService {
     return this.detail(id);
   }
 
-  private async createPaymentPlan(row: ImportRow, actorRef: string): Promise<void> {
+  private async createPaymentPlan(row: ImportRow, actorRef: string, tx: FinanceTx): Promise<void> {
     const mk = async (amount: string | null, due: string | null, label: string): Promise<void> => {
       if (amount === null || Number(amount) <= 0) return;
-      const created = await this.finance.createFlow(
+      const created = await this.finance.createFlowInTransaction(
+        tx,
         {
           domain: row.domain,
           direction: "out",
@@ -321,7 +334,7 @@ export class ImportsService {
         },
         actorRef,
       );
-      await this.db
+      await tx
         .update(moneyFlow)
         .set({ importContractId: row.id })
         .where(eq(moneyFlow.id, created.id));
@@ -334,12 +347,20 @@ export class ImportsService {
    * Отметить оплату по графику: закрывает соответствующую planned-запись
    * (если есть) и ставит флаг на контракте. kind: prepayment | balance.
    */
-  async markPaid(id: string, kind: "prepayment" | "balance", actorRef = "owner"): Promise<ImportRow> {
+  async markPaid(
+    id: string,
+    kind: "prepayment" | "balance",
+    actorRef = "owner",
+  ): Promise<ImportRow> {
     if (kind !== "prepayment" && kind !== "balance") {
       throw new BadRequestException("kind: prepayment | balance");
     }
     const row = await this.db.transaction(async (tx) => {
-      const [c] = await tx.select().from(grImportContract).where(eq(grImportContract.id, id)).for("update");
+      const [c] = await tx
+        .select()
+        .from(grImportContract)
+        .where(eq(grImportContract.id, id))
+        .for("update");
       if (!c) throw new NotFoundException("Импортный контракт не найден");
       const already = kind === "prepayment" ? c.prepaymentPaidAt : c.balancePaidAt;
       if (already !== null) throw new ConflictException("Эта оплата уже отмечена");
@@ -347,11 +368,34 @@ export class ImportsService {
         .update(grImportContract)
         .set(
           kind === "prepayment"
-            ? { prepaymentPaidAt: new Date(), lifecycleStatus: c.lifecycleStatus === "signed" ? "paying" : c.lifecycleStatus, updatedAt: new Date() }
+            ? {
+                prepaymentPaidAt: new Date(),
+                lifecycleStatus: c.lifecycleStatus === "signed" ? "paying" : c.lifecycleStatus,
+                updatedAt: new Date(),
+              }
             : { balancePaidAt: new Date(), updatedAt: new Date() },
         )
         .where(eq(grImportContract.id, id))
         .returning();
+
+      // Флаг контракта и закрытие planned-обязательства — один факт. Если
+      // финансовая запись не обновилась, отметка оплаты тоже откатывается.
+      const [planned] = await tx
+        .select()
+        .from(moneyFlow)
+        .where(
+          and(
+            eq(moneyFlow.importContractId, id),
+            eq(moneyFlow.status, "planned"),
+            eq(moneyFlow.direction, "out"),
+            sql`${moneyFlow.purpose} like ${kind === "prepayment" ? "предоплата%" : "балансовый%"}`,
+          ),
+        )
+        .limit(1);
+      if (planned) {
+        await this.finance.markPaidInTransaction(tx, planned.id, {}, actorRef);
+      }
+
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef,
@@ -360,26 +404,6 @@ export class ImportsService {
       });
       return updated;
     });
-    // Закрыть planned-обязательство этим же фактом (если оно есть и открыто).
-    const [planned] = await this.db
-      .select()
-      .from(moneyFlow)
-      .where(
-        and(
-          eq(moneyFlow.importContractId, id),
-          eq(moneyFlow.status, "planned"),
-          eq(moneyFlow.direction, "out"),
-          sql`${moneyFlow.purpose} like ${kind === "prepayment" ? "предоплата%" : "балансовый%"}`,
-        ),
-      )
-      .limit(1);
-    if (planned) {
-      try {
-        await this.finance.markPaid(planned.id, {}, actorRef);
-      } catch {
-        // обязательство закроют руками во вкладке «Финансы»
-      }
-    }
     return row;
   }
 
@@ -399,30 +423,40 @@ export class ImportsService {
     }
     const t = UNIT_TRANSITIONS[action];
     if (t === undefined) throw new BadRequestException("Неизвестное действие");
-    if ((action === "mark-customs-im74" || action === "mark-customs-im40")) {
-      if ((extra.declarationNumber ?? "").trim() === "") throw new BadRequestException("Укажи номер ГТД");
-      if (!ISO_DAY.test(extra.declarationDate ?? "")) throw new BadRequestException("Дата ГТД — ГГГГ-ММ-ДД");
+    if (action === "mark-customs-im74" || action === "mark-customs-im40") {
+      if ((extra.declarationNumber ?? "").trim() === "")
+        throw new BadRequestException("Укажи номер ГТД");
+      if (!ISO_DAY.test(extra.declarationDate ?? ""))
+        throw new BadRequestException("Дата ГТД — ГГГГ-ММ-ДД");
     }
     if (action === "mark-in-transit" && (extra.transportCompany ?? "").trim() === "") {
       throw new BadRequestException("Укажи перевозчика");
     }
 
     const result = await this.db.transaction(async (tx) => {
-      const [c] = await tx.select().from(grImportContract).where(eq(grImportContract.id, id)).for("update");
+      const [c] = await tx
+        .select()
+        .from(grImportContract)
+        .where(eq(grImportContract.id, id))
+        .for("update");
       if (!c) throw new NotFoundException("Импортный контракт не найден");
       const units = await tx
         .select({ id: globerentUnit.id, status: globerentUnit.status })
         .from(globerentUnit)
         .where(eq(globerentUnit.importContractId, id));
       const eligible = units.filter((u) => (t.from as readonly string[]).includes(u.status));
-      const activeCount = units.filter((u) => u.status !== "CANCELLED" && u.status !== "ARCHIVED").length;
+      const activeCount = units.filter(
+        (u) => u.status !== "CANCELLED" && u.status !== "ARCHIVED",
+      ).length;
       if (eligible.length > 0) {
         await tx
           .update(globerentUnit)
           .set({
             status: t.to,
             updatedAt: new Date(),
-            ...(action === "mark-in-transit" ? { transportCompany: extra.transportCompany?.trim() } : {}),
+            ...(action === "mark-in-transit"
+              ? { transportCompany: extra.transportCompany?.trim() }
+              : {}),
             ...(action === "mark-customs-im74" || action === "mark-customs-im40"
               ? {
                   declarationType: action === "mark-customs-im74" ? "IM74" : "IM40",
@@ -430,7 +464,9 @@ export class ImportsService {
                   declarationDate: extra.declarationDate,
                 }
               : {}),
-            ...(action === "mark-delivered" ? { arrivalDate: sql`coalesce(arrival_date, current_date)` } : {}),
+            ...(action === "mark-delivered"
+              ? { arrivalDate: sql`coalesce(arrival_date, current_date)` }
+              : {}),
           })
           .where(
             and(
@@ -468,7 +504,11 @@ export class ImportsService {
    * оплаченность — в сумовом эквиваленте (антибаг донора).
    */
   async recomputeLifecycle(id: string): Promise<string> {
-    const [c] = await this.db.select().from(grImportContract).where(eq(grImportContract.id, id)).limit(1);
+    const [c] = await this.db
+      .select()
+      .from(grImportContract)
+      .where(eq(grImportContract.id, id))
+      .limit(1);
     if (!c) throw new NotFoundException("Импортный контракт не найден");
     const units = await this.db
       .select()
@@ -481,7 +521,9 @@ export class ImportsService {
 
     // Финальные фазы: все единицы в актах и с договором; договоры оплачены.
     if (active.length > 0) {
-      const contractIds = [...new Set(active.map((u) => u.contractId).filter((v): v is string => v !== null))];
+      const contractIds = [
+        ...new Set(active.map((u) => u.contractId).filter((v): v is string => v !== null)),
+      ];
       if (contractIds.length > 0) {
         const acts = await this.db
           .select({ itemRefs: contractAct.itemRefs, contractId: contractAct.contractId })
@@ -505,7 +547,9 @@ export class ImportsService {
           })
           .from(grContract)
           .where(inArray(grContract.id, contractIds));
-        const allPaid = sales.every((s2) => Number(s2.total) > 0 && Number(s2.paid) >= Number(s2.total));
+        const allPaid = sales.every(
+          (s2) => Number(s2.total) > 0 && Number(s2.paid) >= Number(s2.total),
+        );
         const fin = finalLifecycle({
           activeUnits: active.map((u) => ({
             inHandoverAct: actedUnitIds.has(u.id),
@@ -534,7 +578,11 @@ export class ImportsService {
   /** Отмена: запрещена при активных единицах (донор: has_linked_entities). */
   async cancel(id: string, actorRef = "owner"): Promise<ImportRow> {
     return this.db.transaction(async (tx) => {
-      const [c] = await tx.select().from(grImportContract).where(eq(grImportContract.id, id)).for("update");
+      const [c] = await tx
+        .select()
+        .from(grImportContract)
+        .where(eq(grImportContract.id, id))
+        .for("update");
       if (!c) throw new NotFoundException("Импортный контракт не найден");
       if (c.status === "cancelled") throw new ConflictException("Контракт уже отменён");
       const [linked] = await tx

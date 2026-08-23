@@ -17,7 +17,9 @@ function stubDb(opts: { existing?: Row }) {
   };
   const tx = {
     select: () => chain,
-    update: () => ({ set: () => ({ where: () => ({ returning: async () => [{ ...opts.existing }] }) }) }),
+    update: () => ({
+      set: () => ({ where: () => ({ returning: async () => [{ ...opts.existing }] }) }),
+    }),
     insert: () => ({ values: () => ({ returning: async () => [{}] }) }),
   };
   return {
@@ -29,10 +31,15 @@ function stubDb(opts: { existing?: Row }) {
 }
 
 const noopEvents = { record: async () => undefined } as never;
-const noopFinance = { createFlow: async () => ({ id: "f1" }), markPaid: async () => ({}) } as never;
+const noopFinance = {
+  createFlow: async () => ({ id: "f1" }),
+  createFlowInTransaction: async () => ({ id: "f1" }),
+  markPaid: async () => ({}),
+  markPaidInTransaction: async () => ({}),
+} as never;
 
-function service(opts: { existing?: Row }): ImportsService {
-  return new ImportsService(stubDb(opts), noopEvents, noopFinance);
+function service(opts: { existing?: Row }, finance = noopFinance): ImportsService {
+  return new ImportsService(stubDb(opts), noopEvents, finance);
 }
 
 describe("ImportsService.create — валидация до базы", () => {
@@ -60,13 +67,22 @@ describe("ImportsService.create — валидация до базы", () => {
     // 2 × 15000 = 30000; график 30000.005 — в допуске, отказ придёт не от сумм.
     const s = service({});
     await assert.rejects(
-      () => s.create({ ...base, prepaymentAmount: 15000.005, balanceAmount: 15000, prepaymentDueDate: "кривая" }),
+      () =>
+        s.create({
+          ...base,
+          prepaymentAmount: 15000.005,
+          balanceAmount: 15000,
+          prepaymentDueDate: "кривая",
+        }),
       /ГГГГ-ММ-ДД/,
     );
   });
   it("контракт под договор продажи без ссылки на договор — отказ (CHECK донора)", async () => {
     const s = service({});
-    await assert.rejects(() => s.create({ ...base, purpose: "for_sum_contract" }), /укажи сам договор/);
+    await assert.rejects(
+      () => s.create({ ...base, purpose: "for_sum_contract" }),
+      /укажи сам договор/,
+    );
   });
 });
 
@@ -75,14 +91,95 @@ describe("ImportsService.sign — статусный guard", () => {
     const s = service({ existing: { id: "i1", status: "in_progress" } });
     await assert.rejects(() => s.sign("i1"), /уже подписан/);
   });
+
+  it("сбой обязательства откатывает подписание вместо частичного успеха", async () => {
+    const finance = {
+      createFlowInTransaction: async () => {
+        throw new Error("finance down");
+      },
+    } as never;
+    const s = service(
+      {
+        existing: {
+          id: "i1",
+          status: "draft",
+          lifecycleStatus: "signed",
+          orgId: "org1",
+          domain: "globerent",
+          contractNo: "HL-1",
+          currency: "USD",
+          items: [],
+          prepaymentAmount: "100",
+          prepaymentDueDate: "2026-08-10",
+          balanceAmount: null,
+          balanceDueDate: null,
+        },
+      },
+      finance,
+    );
+    await assert.rejects(() => s.sign("i1"), /finance down/);
+  });
 });
 
 describe("ImportsService.markPaid — идемпотентность оплат графика", () => {
   it("повторная отметка предоплаты — отказ", async () => {
     const s = service({
-      existing: { id: "i1", status: "in_progress", prepaymentPaidAt: new Date(), balancePaidAt: null },
+      existing: {
+        id: "i1",
+        status: "in_progress",
+        prepaymentPaidAt: new Date(),
+        balancePaidAt: null,
+      },
     });
     await assert.rejects(() => s.markPaid("i1", "prepayment"), /уже отмечена/);
+  });
+
+  it("сбой закрытия обязательства откатывает флаг оплаты контракта", async () => {
+    let committed = false;
+    let selectCall = 0;
+    const contractChain = {
+      from: () => contractChain,
+      where: () => contractChain,
+      for: async () => [
+        {
+          id: "i1",
+          status: "in_progress",
+          lifecycleStatus: "signed",
+          prepaymentPaidAt: null,
+          balancePaidAt: null,
+        },
+      ],
+    };
+    const plannedChain = {
+      from: () => plannedChain,
+      where: () => plannedChain,
+      limit: async () => [{ id: "flow-1", status: "planned" }],
+    };
+    const tx = {
+      select: () => (++selectCall === 1 ? contractChain : plannedChain),
+      update: () => ({
+        set: () => ({
+          where: () => ({ returning: async () => [{ id: "i1", prepaymentPaidAt: new Date() }] }),
+        }),
+      }),
+      insert: () => ({ values: async () => undefined }),
+    };
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => {
+        const result = await cb(tx);
+        committed = true;
+        return result;
+      },
+    } as never;
+    const finance = {
+      markPaidInTransaction: async () => {
+        throw new Error("finance down");
+      },
+    } as never;
+    const s = new ImportsService(db, noopEvents, finance);
+
+    await assert.rejects(() => s.markPaid("i1", "prepayment"), /finance down/);
+    assert.equal(committed, false);
   });
 });
 

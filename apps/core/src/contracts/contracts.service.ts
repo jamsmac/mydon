@@ -14,10 +14,10 @@ import {
   type ContractItem,
   type Domain,
 } from "@mydon/shared";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
-import { FinanceService } from "../finance/finance.service";
+import { FinanceService, type FinanceTx } from "../finance/finance.service";
 import {
   renderContractDocx,
   type ContractDocxInput,
@@ -161,7 +161,10 @@ export class ContractsService {
       .orderBy(desc(contractAct.actDate));
     const paidUzs = flows
       .filter((f) => f.direction === "in" && f.status === "actual")
-      .reduce((s, f) => s + (f.currency === "UZS" ? Number(f.amount) : Number(f.amountUzs ?? 0)), 0);
+      .reduce(
+        (s, f) => s + (f.currency === "UZS" ? Number(f.amount) : Number(f.amountUzs ?? 0)),
+        0,
+      );
     const actual = flows.filter((f) => f.status === "actual" && f.direction === "in");
     return {
       ...row.contract,
@@ -217,7 +220,12 @@ export class ContractsService {
       buyer = {
         name: client.name,
         inn: client.externalRef ?? undefined,
-        director: s(a["director"]) ?? s((a["contacts"] as Record<string, { fullName?: string }> | undefined)?.["director"]?.fullName),
+        director:
+          s(a["director"]) ??
+          s(
+            (a["contacts"] as Record<string, { fullName?: string }> | undefined)?.["director"]
+              ?.fullName,
+          ),
         address: s(a["address"]),
         account: s(a["account"]),
         bank: s(a["bank"]),
@@ -225,12 +233,15 @@ export class ContractsService {
         oked: s(a["oked"]),
         nds: s(a["nds_code"]),
         phone: s(a["phone"]),
-        ...Object.fromEntries(Object.entries(input.buyer ?? {}).filter(([, v]) => v !== undefined && v !== "")),
+        ...Object.fromEntries(
+          Object.entries(input.buyer ?? {}).filter(([, v]) => v !== undefined && v !== ""),
+        ),
       };
     }
 
     const totals = contractTotals(items);
-    if (totals.totalWithVat <= 0) throw new BadRequestException("Сумма договора должна быть больше нуля");
+    if (totals.totalWithVat <= 0)
+      throw new BadRequestException("Сумма договора должна быть больше нуля");
 
     const created = await this.db.transaction(async (tx) => {
       // Автономер: max по числовым номерам направления + 1, под блокировкой транзакции.
@@ -277,6 +288,32 @@ export class ContractsService {
         })
         .returning();
 
+      // График и комиссия — часть самого договора, а не best-effort хвост.
+      // Любой отказ откатывает транзакцию целиком: агинг не увидит договор
+      // без обязательств, а пользователь не получит ложный успех.
+      await this.createPlannedSchedule(row, actorRef, tx);
+
+      if (row.agentId !== null && row.agentCommissionAmount !== null) {
+        const commission = await this.finance.createFlowInTransaction(
+          tx,
+          {
+            domain: input.domain,
+            direction: "out",
+            status: "planned",
+            amount: Number(row.agentCommissionAmount),
+            currency: row.agentCommissionCurrency ?? "UZS",
+            category: "commission",
+            counterpartyId: row.agentId,
+            purpose: `комиссия агента по договору № ${row.contractNo}/ОП`,
+          },
+          actorRef,
+        );
+        await tx
+          .update(moneyFlow)
+          .set({ contractId: row.id })
+          .where(eq(moneyFlow.id, commission.id));
+      }
+
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef,
@@ -287,46 +324,6 @@ export class ContractsService {
       return row;
     });
 
-    // График оплат → planned money_flow со сроками: договор сразу виден
-    // агингу и «к сроку ≤ 7 дней». Провал генерации не роняет договор.
-    try {
-      await this.createPlannedSchedule(created, actorRef);
-    } catch {
-      // след останется в отсутствии planned-строк; владелец заведёт руками
-    }
-
-    // Комиссия агента — обязательство наружу: у донора комиссия только
-    // записывалась и нигде не жила дальше, здесь она сразу в агинге.
-    if (created.agentId !== null && created.agentCommissionAmount !== null) {
-      try {
-        await this.finance.createFlow(
-          {
-            domain: input.domain,
-            direction: "out",
-            status: "planned",
-            amount: Number(created.agentCommissionAmount),
-            currency: created.agentCommissionCurrency ?? "UZS",
-            category: "commission",
-            counterpartyId: created.agentId,
-            purpose: `комиссия агента по договору № ${created.contractNo}/ОП`,
-          },
-          actorRef,
-        );
-        await this.db
-          .update(moneyFlow)
-          .set({ contractId: created.id })
-          .where(
-            and(
-              eq(moneyFlow.counterpartyId, created.agentId),
-              eq(moneyFlow.category, "commission"),
-              sql`${moneyFlow.contractId} is null`,
-            ),
-          );
-      } catch {
-        // комиссию можно завести руками во вкладке «Финансы»
-      }
-    }
-
     await this.events.record({
       source: "contracts",
       type: "contract.created",
@@ -336,7 +333,11 @@ export class ContractsService {
   }
 
   /** planned-строки графика: 100% — один срок, транши — по дням, рассрочка — помесячно. */
-  private async createPlannedSchedule(row: ContractRow, actorRef: string): Promise<void> {
+  private async createPlannedSchedule(
+    row: ContractRow,
+    actorRef: string,
+    tx: FinanceTx,
+  ): Promise<void> {
     const p = (row.docParams ?? {}) as Record<string, unknown>;
     const total = Number(row.totalWithVat);
     const base = new Date(`${row.contractDate}T00:00:00`);
@@ -347,7 +348,8 @@ export class ContractsService {
       return dayKey(d);
     };
     const mk = async (amount: number, dueDate: string, purpose: string): Promise<void> => {
-      const created = await this.finance.createFlow(
+      const created = await this.finance.createFlowInTransaction(
+        tx,
         {
           domain: row.domain,
           direction: "in",
@@ -361,16 +363,17 @@ export class ContractsService {
         },
         actorRef,
       );
-      await this.db
-        .update(moneyFlow)
-        .set({ contractId: row.id })
-        .where(eq(moneyFlow.id, created.id));
+      await tx.update(moneyFlow).set({ contractId: row.id }).where(eq(moneyFlow.id, created.id));
     };
 
     const no = `№ ${row.contractNo}/ОП`;
     if (row.payType === "100") {
       const payDays = Number(p["payDays"] ?? 0);
-      await mk(total, addDays(Number.isFinite(payDays) ? payDays : 0), `оплата 100% по договору ${no}`);
+      await mk(
+        total,
+        addDays(Number.isFinite(payDays) ? payDays : 0),
+        `оплата 100% по договору ${no}`,
+      );
       return;
     }
     if (row.payType === "partial") {
@@ -392,10 +395,15 @@ export class ContractsService {
       const months = Number(p["installMonths"] ?? 0);
       if (!Number.isFinite(months) || months <= 0) return;
       const prepayPct = Number(p["prepayPct"] ?? 0);
-      const firstRaw = typeof p["installFirstDate"] === "string" ? p["installFirstDate"] : row.contractDate;
+      const firstRaw =
+        typeof p["installFirstDate"] === "string" ? p["installFirstDate"] : row.contractDate;
       const first = ISO_DAY.test(firstRaw) ? new Date(`${firstRaw}T00:00:00`) : base;
       if (prepayPct > 0) {
-        await mk(trancheAmount(total, prepayPct), row.contractDate, `предоплата ${prepayPct}% по договору ${no}`);
+        await mk(
+          trancheAmount(total, prepayPct),
+          row.contractDate,
+          `предоплата ${prepayPct}% по договору ${no}`,
+        );
       }
       const schedule = installmentSchedule({
         totalWithVat: total,
@@ -452,50 +460,114 @@ export class ContractsService {
     input: { amount: number; currency?: string; docNo?: string; date?: string; rate?: number },
     actorRef = "owner",
   ): Promise<FlowRow> {
-    const [row] = await this.db.select().from(grContract).where(eq(grContract.id, id)).limit(1);
-    if (!row) throw new NotFoundException("Договор не найден");
-    if (row.status === "cancelled") {
-      throw new ConflictException("Договор отменён — платежи по нему не принимаются");
-    }
-    const before = await this.paidUzs(id);
-
-    const created = await this.finance.createFlow(
-      {
-        domain: row.domain,
-        direction: "in",
-        status: "actual",
-        amount: input.amount,
-        currency: input.currency,
-        category: "sale",
-        rate: input.rate,
-        counterpartyId: row.clientId ?? undefined,
-        docNo: input.docNo,
-        purpose: `оплата по договору № ${row.contractNo}/ОП`,
-        date: input.date,
-      },
-      actorRef,
-    );
-    await this.db.update(moneyFlow).set({ contractId: id }).where(eq(moneyFlow.id, created.id));
+    const payment = await this.db.transaction(async (tx) => {
+      const [row] = await tx.select().from(grContract).where(eq(grContract.id, id)).for("update");
+      if (!row) throw new NotFoundException("Договор не найден");
+      if (row.status === "cancelled") {
+        throw new ConflictException("Договор отменён — платежи по нему не принимаются");
+      }
+      const before = await this.paidUzs(id, tx);
+      const created = await this.finance.createFlowInTransaction(
+        tx,
+        {
+          domain: row.domain,
+          direction: "in",
+          status: "actual",
+          amount: input.amount,
+          currency: input.currency,
+          category: "sale",
+          rate: input.rate,
+          counterpartyId: row.clientId ?? undefined,
+          docNo: input.docNo,
+          purpose: `оплата по договору № ${row.contractNo}/ОП`,
+          date: input.date,
+        },
+        actorRef,
+      );
+      await tx.update(moneyFlow).set({ contractId: id }).where(eq(moneyFlow.id, created.id));
+      const after = await this.paidUzs(id, tx);
+      await this.settleCoveredSchedule(id, after, actorRef, tx);
+      return { created, row, before, after };
+    });
 
     // Полная оплата — ровно одно событие: было < total, стало ≥ total.
-    const total = Number(row.totalWithVat);
-    const after = await this.paidUzs(id);
-    if (total > 0 && before < total && after >= total) {
+    const total = Number(payment.row.totalWithVat);
+    if (total > 0 && payment.before < total && payment.after >= total) {
       await this.events.record({
         source: "contracts",
         type: "contract.paid_in_full",
-        payload: { contractId: id, contractNo: row.contractNo, paidUzs: after, totalWithVat: total },
+        payload: {
+          contractId: id,
+          contractNo: payment.row.contractNo,
+          paidUzs: payment.after,
+          totalWithVat: total,
+        },
       });
     }
-    return created;
+    return payment.created;
   }
 
-  private async paidUzs(id: string): Promise<number> {
-    const [r] = await this.db
+  private async paidUzs(id: string, db: Db | FinanceTx = this.db): Promise<number> {
+    const [r] = await db
       .select({ paid: PAID_UZS_SQL })
       .from(moneyFlow)
       .where(eq(moneyFlow.contractId, id));
     return Number(r?.paid ?? 0);
+  }
+
+  /**
+   * Фактические платежи последовательно закрывают покрытые строки графика.
+   * Сами planned-строки остаются в истории как cancelled, но перестают
+   * считаться открытой дебиторкой; actual-платёж остаётся единственным фактом.
+   */
+  private async settleCoveredSchedule(
+    contractId: string,
+    paidUzs: number,
+    actorRef: string,
+    tx: FinanceTx,
+  ): Promise<void> {
+    const schedule = await tx
+      .select({
+        id: moneyFlow.id,
+        amount: moneyFlow.amount,
+        status: moneyFlow.status,
+        paidAt: moneyFlow.paidAt,
+      })
+      .from(moneyFlow)
+      .where(
+        and(
+          eq(moneyFlow.contractId, contractId),
+          eq(moneyFlow.direction, "in"),
+          inArray(moneyFlow.status, ["planned", "cancelled"]),
+        ),
+      )
+      .orderBy(asc(moneyFlow.dueDate), asc(moneyFlow.date));
+
+    const alreadySettled = schedule
+      .filter((flow) => flow.status === "cancelled" && flow.paidAt !== null)
+      .reduce((sum, flow) => sum + Number(flow.amount), 0);
+    let available = Math.max(0, paidUzs - alreadySettled);
+    const settled: string[] = [];
+    for (const flow of schedule) {
+      if (flow.status !== "planned") continue;
+      const amount = Number(flow.amount);
+      if (!Number.isFinite(amount) || amount <= 0 || available + 0.01 < amount) break;
+      settled.push(flow.id);
+      available -= amount;
+    }
+    if (settled.length === 0) return;
+
+    await tx
+      .update(moneyFlow)
+      .set({ status: "cancelled", paidAt: new Date() })
+      .where(inArray(moneyFlow.id, settled));
+    await tx.insert(auditLog).values({
+      actorKind: "human",
+      actorRef,
+      action: "contract.schedule_settled",
+      target: contractId,
+      after: { flowIds: settled, paidUzs },
+    });
   }
 
   /**

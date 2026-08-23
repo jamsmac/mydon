@@ -143,14 +143,17 @@ export const person = pgTable("person", {
   orgId: uuid("org_id").references(() => org.id),
   name: text("name").notNull(),
   role: text("role"),
-    /**
-     * Роли сотрудника. Массив, а не одно значение: двое в поле делают всю
-     * работу, и «оператор ИЛИ техник» описало бы их неверно.
-     *
-     * Старая колонка `role` (свободный текст) остаётся: она нигде не читалась
-     * ботом и служит подсказкой владельцу при расстановке ролей.
-     */
-    roles: text("roles").array().default(sql`'{}'::text[]`).notNull(),
+  /**
+   * Роли сотрудника. Массив, а не одно значение: двое в поле делают всю
+   * работу, и «оператор ИЛИ техник» описало бы их неверно.
+   *
+   * Старая колонка `role` (свободный текст) остаётся: она нигде не читалась
+   * ботом и служит подсказкой владельцу при расстановке ролей.
+   */
+  roles: text("roles")
+    .array()
+    .default(sql`'{}'::text[]`)
+    .notNull(),
   /** Направление, куда нанят: сотрудник живёт внутри GLOBERENT/VendHub, а не отдельно. */
   domain: domainEnum("domain"),
   email: text("email"),
@@ -244,14 +247,24 @@ export const task = pgTable(
 // ── collection: инкассация автоматов (перенос VendCash внутрь MYDON) ──
 // Двухэтапный процесс из спецификации VendCash: оператор фиксирует сбор
 // (время до секунды), менеджер принимает и вводит сумму.
-export const collectionStatusEnum = pgEnum("collection_status", ["collected", "received", "cancelled"]);
-export const collectionSourceEnum = pgEnum("collection_source", ["realtime", "manual_history", "import"]);
+export const collectionStatusEnum = pgEnum("collection_status", [
+  "collected",
+  "received",
+  "cancelled",
+]);
+export const collectionSourceEnum = pgEnum("collection_source", [
+  "realtime",
+  "manual_history",
+  "import",
+]);
 export const collection = pgTable(
   "collection",
   {
     id: id(),
     /** Автомат — запись реестра (entity типа machine). */
-    machineId: uuid("machine_id").references(() => entity.id).notNull(),
+    machineId: uuid("machine_id")
+      .references(() => entity.id)
+      .notNull(),
     /** Кто собрал. Пусто у перенесённой истории без оператора. */
     operatorId: uuid("operator_id").references(() => person.id),
     /** Кто принял и пересчитал: "owner" или person:<id>. */
@@ -338,10 +351,7 @@ export const purchase = pgTable(
     source: text("source").default("stock").notNull(),
     importedAt: createdAt(),
   },
-  (t) => [
-    uniqueIndex("purchase_src_key").on(t.source, t.extId),
-    index("purchase_dt_idx").on(t.dt),
-  ],
+  (t) => [uniqueIndex("purchase_src_key").on(t.source, t.extId), index("purchase_dt_idx").on(t.dt)],
 );
 
 // ── machine_stock: остатки внутри автоматов (снапшоты OurVend по дням) ──
@@ -414,9 +424,13 @@ export const stockBatch = pgTable(
   {
     id: id(),
     /** Карточка сырья/товара: entity(type='ingredient'|'product'). */
-    ingredientId: uuid("ingredient_id").references(() => entity.id).notNull(),
+    ingredientId: uuid("ingredient_id")
+      .references(() => entity.id)
+      .notNull(),
     /** Куда принято: entity(type='warehouse'). */
-    warehouseId: uuid("warehouse_id").references(() => entity.id).notNull(),
+    warehouseId: uuid("warehouse_id")
+      .references(() => entity.id)
+      .notNull(),
     /** Код партии поставщика. Пусто — партия без кода, это законно. */
     batchCode: text("batch_code"),
     /** Срок годности партии. Пусто — считается из «срок годности, дней» карточки. */
@@ -452,12 +466,18 @@ export const stockBatch = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    index("stock_batch_expiry_idx").on(t.expiryDate).where(sql`expiry_date is not null`),
-    index("stock_batch_open_idx").on(t.openedOn).where(sql`opened_on is not null`),
+    index("stock_batch_expiry_idx")
+      .on(t.expiryDate)
+      .where(sql`expiry_date is not null`),
+    index("stock_batch_open_idx")
+      .on(t.openedOn)
+      .where(sql`opened_on is not null`),
     uniqueIndex("stock_batch_code_key")
       .on(t.ingredientId, t.batchCode)
       .where(sql`batch_code is not null`),
-    uniqueIndex("stock_batch_ext_key").on(t.source, t.extId).where(sql`ext_id is not null`),
+    uniqueIndex("stock_batch_ext_key")
+      .on(t.source, t.extId)
+      .where(sql`ext_id is not null`),
   ],
 );
 
@@ -549,6 +569,12 @@ export const rawSnapshot = pgTable(
     /** Кто принёс: owner | agent:<имя> | ingest. */
     importedBy: text("imported_by"),
     note: text("note"),
+    /**
+     * Когда снимок целиком принят и его можно читать в отчётах.
+     * NULL означает незавершённую пакетную загрузку: строки уже лежат для
+     * безопасного повтора, но аналитика их ещё не считает фактом.
+     */
+    completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -1119,13 +1145,17 @@ export const tnvedRate = pgTable(
     /** Импортная пошлина, доля (0.05 = 5%). */
     importDutyRate: numeric("import_duty_rate", { precision: 7, scale: 4 }).default("0").notNull(),
     /** Сбор за таможенное оформление, доля (стандарт 0.002 = 0.2%). */
-    customsFeeRate: numeric("customs_fee_rate", { precision: 7, scale: 4 }).default("0.002").notNull(),
+    customsFeeRate: numeric("customs_fee_rate", { precision: 7, scale: 4 })
+      .default("0.002")
+      .notNull(),
     exciseRate: numeric("excise_rate", { precision: 7, scale: 4 }).default("0").notNull(),
     vatRate: numeric("vat_rate", { precision: 7, scale: 4 }).default("0.12").notNull(),
     /** Утильсбор: сколько БРВ (0 — не облагается). */
     utilizationBrvCount: integer("utilization_brv_count").default(0).notNull(),
     /** Доп. пошлина за см³ двигателя, USD (3.36 у тягачей; 0 у погрузчиков). */
-    extraDutyPerCcUsd: numeric("extra_duty_per_cc_usd", { precision: 10, scale: 4 }).default("0").notNull(),
+    extraDutyPerCcUsd: numeric("extra_duty_per_cc_usd", { precision: 10, scale: 4 })
+      .default("0")
+      .notNull(),
     /** gibdd — авто, gostechnadzor — спецтехника (влияет на регистрацию). */
     registrationType: text("registration_type").default("gostechnadzor").notNull(),
     /** Дефолт сертификации: нал / безнал (может быть пусто). */
@@ -1275,10 +1305,24 @@ export const systemConfig = pgTable("system_config", {
 // алиасы имён вендора. Числа Ourvend приходят строками — в базе храним числами.
 
 export const vendingCategoryEnum = pgEnum("vending_category", ["drink", "snack", "other"]);
-export const vendingAliasSourceEnum = pgEnum("vending_alias_source", ["ourvend", "warehouse", "manual"]);
-export const vendingSyncStatusEnum = pgEnum("vending_sync_status", ["running", "success", "partial", "failed"]);
+export const vendingAliasSourceEnum = pgEnum("vending_alias_source", [
+  "ourvend",
+  "warehouse",
+  "manual",
+]);
+export const vendingSyncStatusEnum = pgEnum("vending_sync_status", [
+  "running",
+  "success",
+  "partial",
+  "failed",
+]);
 /** Жизненный цикл накладной закупа: одобрена → заказана → принята | отменена. */
-export const vendingOrderStatusEnum = pgEnum("vending_order_status", ["approved", "ordered", "received", "cancelled"]);
+export const vendingOrderStatusEnum = pgEnum("vending_order_status", [
+  "approved",
+  "ordered",
+  "received",
+  "cancelled",
+]);
 
 /** Справочник товаров вендинга: прайс и кратность (Приложение А ТЗ). */
 export const vendingProduct = pgTable("vending_product", {
@@ -1634,7 +1678,12 @@ export const vendingSyncRun = pgTable("vending_sync_run", {
 // заливке = filledWeight − тара(набор, позиция). Без тары зачёт возможен
 // только по факту (сырой вес) — coffee-calc.ts требует тару явно, не гадает.
 
-export const coffeeWashEventKindEnum = pgEnum("coffee_wash_event_kind", ["wash", "clean", "replace", "service"]);
+export const coffeeWashEventKindEnum = pgEnum("coffee_wash_event_kind", [
+  "wash",
+  "clean",
+  "replace",
+  "service",
+]);
 
 /**
  * Точка (адрес), где стоит кофемашина.
@@ -1659,58 +1708,62 @@ export const coffeeWashEventKindEnum = pgEnum("coffee_wash_event_kind", ["wash",
  */
 
 /** Ингредиент бункера (молоко, кофе, сахар, чай…) — canonical-имя, без алиасов (список закрытый, 8 позиций). */
-export const coffeeIngredient = pgTable("coffee_ingredient", {
-  id: id(),
-  name: text("name").notNull().unique(),
-  unit: text("unit").default("g").notNull(),
-  /** Закупочная цена за единицу `unit` (обычно за грамм), сум. Пусто — себестоимость расхода не считается (§ reconcile). */
-  purchasePrice: numeric("purchase_price", { precision: 10, scale: 4 }),
-  /**
-   * Вес одной упаковки в граммах. Пусто — упаковки не считаем и не показываем.
-   *
-   * Учёт ведётся в граммах: техник сыплет сколько нужно, иногда половину пачки,
-   * иногда полторы, и спрашивать «сколько упаковок» значило заставлять его
-   * округлять на глаз, а потом принимать это округление за факт. Зная вес
-   * пачки, упаковки считает программа — из тех же граммов, что уже взвешены.
-   */
-  packageWeight: integer("package_weight"),
-  /**
-   * Как называть единицу расфасовки: «упаковки» по умолчанию, «шт» для
-   * стиков. MacCoffee идёт стиками по 20 г, и назвать стик упаковкой значит
-   * показать «0,05 упаковки» там, где человек видит 50 стиков.
-   */
-  packageLabel: text("package_label"),
-  /**
-   * Мост в реестр карточек: `entity(type='ingredient')`.
-   *
-   * ЗАЧЕМ. Рецепты товаров уже ссылаются на карточку ингредиента
-   * (`entity(product).attrs["состав"].ingredientId` = entity.id), а бункерный
-   * контур — на строку этой таблицы. Пока связь держалась на совпадении имени,
-   * цена из карточки не доходила до расчёта расхода: у всех 8 строк
-   * `purchase_price` пуст. Колонка делает связь внешним ключом.
-   *
-   * Пусто — законно: значит карточки для этого ингредиента ещё нет, и цена
-   * берётся из `purchase_price` (старый путь). Слияние таблиц сознательно НЕ
-   * делаем: автодеплой применяет миграции без отката, и упавшая миграция
-   * вешает выкатку молча и навсегда.
-   */
-  entityId: uuid("entity_id").references(() => entity.id),
-  createdAt: createdAt(),
-}, (t) => [
-  // Одна карточка — не больше одной строки бункерного реестра. Частичный:
-  // несвязанных строк (entity_id is null) может быть сколько угодно.
-  //
-  // Бэкфилл в 0059 создаёт индекс ДО присвоения и всё равно не падает — но
-  // держится это на `name.unique()` выше: двум строкам не достаться одной
-  // карточке, потому что двух строк с одним именем не бывает. Снимете
-  // уникальность имени — сначала перенесите бэкфилл вперёд индекса, иначе
-  // миграция упадёт дублем ключа и повесит автодеплой.
-  // Зеркалит индекс из 0059; расхождение схемы и SQL приводит к тому, что
-  // следующая генерация миграции попыталась бы создать его заново.
-  uniqueIndex("ux_coffee_ingredient_entity")
-    .on(t.entityId)
-    .where(sql`entity_id is not null`),
-]);
+export const coffeeIngredient = pgTable(
+  "coffee_ingredient",
+  {
+    id: id(),
+    name: text("name").notNull().unique(),
+    unit: text("unit").default("g").notNull(),
+    /** Закупочная цена за единицу `unit` (обычно за грамм), сум. Пусто — себестоимость расхода не считается (§ reconcile). */
+    purchasePrice: numeric("purchase_price", { precision: 10, scale: 4 }),
+    /**
+     * Вес одной упаковки в граммах. Пусто — упаковки не считаем и не показываем.
+     *
+     * Учёт ведётся в граммах: техник сыплет сколько нужно, иногда половину пачки,
+     * иногда полторы, и спрашивать «сколько упаковок» значило заставлять его
+     * округлять на глаз, а потом принимать это округление за факт. Зная вес
+     * пачки, упаковки считает программа — из тех же граммов, что уже взвешены.
+     */
+    packageWeight: integer("package_weight"),
+    /**
+     * Как называть единицу расфасовки: «упаковки» по умолчанию, «шт» для
+     * стиков. MacCoffee идёт стиками по 20 г, и назвать стик упаковкой значит
+     * показать «0,05 упаковки» там, где человек видит 50 стиков.
+     */
+    packageLabel: text("package_label"),
+    /**
+     * Мост в реестр карточек: `entity(type='ingredient')`.
+     *
+     * ЗАЧЕМ. Рецепты товаров уже ссылаются на карточку ингредиента
+     * (`entity(product).attrs["состав"].ingredientId` = entity.id), а бункерный
+     * контур — на строку этой таблицы. Пока связь держалась на совпадении имени,
+     * цена из карточки не доходила до расчёта расхода: у всех 8 строк
+     * `purchase_price` пуст. Колонка делает связь внешним ключом.
+     *
+     * Пусто — законно: значит карточки для этого ингредиента ещё нет, и цена
+     * берётся из `purchase_price` (старый путь). Слияние таблиц сознательно НЕ
+     * делаем: автодеплой применяет миграции без отката, и упавшая миграция
+     * вешает выкатку молча и навсегда.
+     */
+    entityId: uuid("entity_id").references(() => entity.id),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Одна карточка — не больше одной строки бункерного реестра. Частичный:
+    // несвязанных строк (entity_id is null) может быть сколько угодно.
+    //
+    // Бэкфилл в 0059 создаёт индекс ДО присвоения и всё равно не падает — но
+    // держится это на `name.unique()` выше: двум строкам не достаться одной
+    // карточке, потому что двух строк с одним именем не бывает. Снимете
+    // уникальность имени — сначала перенесите бэкфилл вперёд индекса, иначе
+    // миграция упадёт дублем ключа и повесит автодеплой.
+    // Зеркалит индекс из 0059; расхождение схемы и SQL приводит к тому, что
+    // следующая генерация миграции попыталась бы создать его заново.
+    uniqueIndex("ux_coffee_ingredient_entity")
+      .on(t.entityId)
+      .where(sql`entity_id is not null`),
+  ],
+);
 
 /**
  * Какие ингредиенты вообще заливаются в позицию бункера 1–8 — ОДНА
@@ -1803,7 +1856,10 @@ export const coffeeRefill = pgTable(
   (t) => [
     index("coffee_refill_location_position_idx").on(t.locationId, t.position, t.enteredDate),
     check("coffee_refill_position_range", sql`${t.position} between 1 and 8`),
-    check("coffee_refill_container_range", sql`${t.containerNumber} is null or ${t.containerNumber} between 1 and 27`),
+    check(
+      "coffee_refill_container_range",
+      sql`${t.containerNumber} is null or ${t.containerNumber} between 1 and 27`,
+    ),
   ],
 );
 
@@ -1948,7 +2004,10 @@ export const coffeeWashLog = pgTable(
   },
   (t) => [
     index("coffee_wash_log_location_idx").on(t.locationId, t.performedAt),
-    check("coffee_wash_log_position_range", sql`${t.position} is null or ${t.position} between 1 and 8`),
+    check(
+      "coffee_wash_log_position_range",
+      sql`${t.position} is null or ${t.position} between 1 and 8`,
+    ),
   ],
 );
 
@@ -1977,7 +2036,10 @@ export const coffeeWashSchedule = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    check("coffee_wash_schedule_position_range", sql`${t.position} is null or ${t.position} between 1 and 8`),
+    check(
+      "coffee_wash_schedule_position_range",
+      sql`${t.position} is null or ${t.position} between 1 and 8`,
+    ),
     check(
       "coffee_wash_schedule_frequency_set",
       sql`${t.frequencyDays} is not null or ${t.frequencyCups} is not null`,
@@ -2036,7 +2098,13 @@ export const coffeeSale = pgTable(
     createdBy: text("created_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [uniqueIndex("coffee_sale_location_product_date_key").on(t.locationId, t.productId, t.loggedDate)],
+  (t) => [
+    uniqueIndex("coffee_sale_location_product_date_key").on(
+      t.locationId,
+      t.productId,
+      t.loggedDate,
+    ),
+  ],
 );
 
 /**
@@ -2283,7 +2351,10 @@ export const maintenanceLog = pgTable(
     index("maintenance_log_plan_done_idx")
       .on(t.planId, t.performedOn)
       .where(sql`outcome is not null`),
-    check("maintenance_log_counter_nonneg", sql`${t.counterValue} is null or ${t.counterValue} >= 0`),
+    check(
+      "maintenance_log_counter_nonneg",
+      sql`${t.counterValue} is null or ${t.counterValue} >= 0`,
+    ),
   ],
 );
 
@@ -2339,10 +2410,7 @@ export const machinePart = pgTable(
       .on(t.serialNumber)
       .where(sql`serial_number is not null`),
     check("machine_part_slot_positive", sql`${t.slot} is null or ${t.slot} > 0`),
-    check(
-      "machine_part_dates",
-      sql`${t.removedOn} is null or ${t.removedOn} >= ${t.installedOn}`,
-    ),
+    check("machine_part_dates", sql`${t.removedOn} is null or ${t.removedOn} >= ${t.installedOn}`),
     // machine ⟺ на автомате: строка «в мойке, но с автоматом» и «на автомате,
     // но со складом» — обе бессмыслица, и обе рано или поздно появятся без check.
     check(
@@ -2373,7 +2441,10 @@ export const staffInvite = pgTable(
     /** sha256(перец + код). Перец живёт в окружении, в БД его нет. */
     codeHash: text("code_hash").notNull(),
     /** Роли, которые получит сотрудник при подключении. */
-    roles: text("roles").array().default(sql`'{}'::text[]`).notNull(),
+    roles: text("roles")
+      .array()
+      .default(sql`'{}'::text[]`)
+      .notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     usedAt: timestamp("used_at", { withTimezone: true }),
     /** chat_id, которым приглашение погашено, — для разбора инцидентов. */
@@ -2448,7 +2519,9 @@ export const maintenancePlan = pgTable(
   (t) => [
     // Основной запрос монитора: что подходит к сроку. Только активные —
     // выключенный норматив не должен занимать место в индексе.
-    index("maintenance_plan_due_idx").on(t.dueOn).where(sql`is_active`),
+    index("maintenance_plan_due_idx")
+      .on(t.dueOn)
+      .where(sql`is_active`),
     index("maintenance_plan_entity_idx").on(t.entityId),
     // Один норматив на «объект + вид работ + узел». Дубль означал бы две
     // разные даты для одной обязанности и вечный спор, какая правильная.

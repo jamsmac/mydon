@@ -122,6 +122,14 @@ jobs:
           DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
         run: pnpm --filter @mydon/db db:migrate
 
+      # Чистая цепочка выше не доказывает переход существующей базы. Этот шаг
+      # поднимает отдельную БД на 0061, кладёт граничные данные и дважды гоняет
+      # текущий мигратор: сначала upgrade, затем обязательный no-op.
+      - name: Migration upgrade (0061 to 0062)
+        env:
+          DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
+        run: node packages/db/dist/migration-0062.integration.js
+
       # Раньше continue-on-error:true молча прятал 5 high-уязвимостей —
       # шаг всегда зеленел, даже когда pnpm audit падал кодом 1 (найдено
       # внешним аудитом, P1). Теперь high/critical реально блокируют CI;

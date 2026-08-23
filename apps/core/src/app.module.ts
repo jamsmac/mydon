@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
+import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { ServiceTokenGuard } from "./common/service-token.guard";
 import { AgentsModule } from "./agents/agents.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
@@ -37,6 +38,10 @@ import { VerificationModule } from "./verification/verification.module";
 
 @Module({
   imports: [
+    ThrottlerModule.forRoot([
+      { name: "burst", ttl: 10_000, limit: 60 },
+      { name: "sustained", ttl: 60_000, limit: 600 },
+    ]),
     DbModule,
     AgentsModule,
     AttachmentsModule,
@@ -71,6 +76,9 @@ import { VerificationModule } from "./verification/verification.module";
     VerificationModule,
   ],
   controllers: [HealthController],
-  providers: [{ provide: APP_GUARD, useClass: ServiceTokenGuard }],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: ServiceTokenGuard },
+  ],
 })
 export class AppModule {}

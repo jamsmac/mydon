@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { entity, rawLink, rawReportDef, rawRow, rawSnapshot, rawSourceDef, sale } from "@mydon/db";
 import {
   FISCAL_FIELDS,
@@ -36,7 +36,7 @@ import {
   type RawOrder,
   type CombinedSales,
 } from "@mydon/shared";
-import { and, asc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gte, isNotNull, lte, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
 
@@ -604,6 +604,12 @@ export interface RawImportInput {
   /** Дописать строки к уже начатому снимку (выгрузка приходит частями). */
   append?: boolean;
   /**
+   * `false` — пачка промежуточная, снимок нельзя показывать отчётам;
+   * `true` — последняя пачка. Не задано — прежний одноразовый импорт,
+   * который считается завершённым одним запросом.
+   */
+  complete?: boolean;
+  /**
    * Номер первой строки пачки в исходной выгрузке (с нуля).
    *
    * Нужен, чтобы повтор пачки после обрыва связи лёг на то же место, а не
@@ -612,6 +618,23 @@ export interface RawImportInput {
    * молча выкинуло бы то, что источник действительно отдал.
    */
   offset?: number;
+}
+
+/**
+ * Можно ли публиковать принятую пачку как законченный снимок.
+ * Строгую сверку числа строк включаем только для нового явного протокола
+ * `complete: true`: старые импортёры иногда честно присылают лишь доступную
+ * часть при `rowsTotal` больше фактического снимка.
+ */
+export function snapshotCanPublish(
+  input: Pick<RawImportInput, "complete" | "rowsTotal">,
+  storedRows: number,
+): boolean {
+  if (input.complete === false) return false;
+  if (input.complete === true && input.rowsTotal !== undefined) {
+    return storedRows === input.rowsTotal;
+  }
+  return true;
 }
 
 /**
@@ -687,7 +710,14 @@ export class RawService {
         byCode.get(r.sourceCode) ??
         // Отчёт заведён у системы, которая целиком описана в коде: правки по
         // самой системе нет, но отчёт всё равно должен попасть в справочник.
-        ({ code: r.sourceCode, title: "", subtitle: "", url: "", archived: false, reports: [] } satisfies RawSourceOverride);
+        ({
+          code: r.sourceCode,
+          title: "",
+          subtitle: "",
+          url: "",
+          archived: false,
+          reports: [],
+        } satisfies RawSourceOverride);
       own.reports.push({
         code: r.code,
         title: r.title,
@@ -849,7 +879,8 @@ export class RawService {
         rowsTotal: rawSnapshot.rowsTotal,
         columns: rawSnapshot.columns,
       })
-      .from(rawSnapshot);
+      .from(rawSnapshot)
+      .where(isNotNull(rawSnapshot.completedAt));
 
     const counts = await this.db
       .select({ snapshotId: rawRow.snapshotId, n: sql<number>`count(*)` })
@@ -910,7 +941,11 @@ export class RawService {
       .select()
       .from(rawSnapshot)
       .where(
-        and(eq(rawSnapshot.sourceCode, sourceCode), eq(rawSnapshot.reportCode, reportCode)),
+        and(
+          eq(rawSnapshot.sourceCode, sourceCode),
+          eq(rawSnapshot.reportCode, reportCode),
+          isNotNull(rawSnapshot.completedAt),
+        ),
       )
       .orderBy(sql`${rawSnapshot.fetchedAt} desc`)
       .limit(1);
@@ -1074,7 +1109,8 @@ export class RawService {
       if (m.ref) byMachineSerial.set(normalizeSourceKey(m.ref), { id: m.id, name: m.name });
     }
     const byProductName = new Map<string, { id: string; name: string }>();
-    for (const p of products) byProductName.set(normalizeSourceKey(p.name), { id: p.id, name: p.name });
+    for (const p of products)
+      byProductName.set(normalizeSourceKey(p.name), { id: p.id, name: p.name });
     const byPoint = pointIndex(machines);
 
     const linkByKey = new Map(links.map((l) => [`${l.kind}::${l.externalKey}`, l]));
@@ -1124,7 +1160,11 @@ export class RawService {
       }
 
       const auto =
-        step.kind === "machine" ? byMachineSerial : step.kind === "product" ? byProductName : byPoint;
+        step.kind === "machine"
+          ? byMachineSerial
+          : step.kind === "product"
+            ? byProductName
+            : byPoint;
       const raw = await this.distinctValues(snapshot.id, idx);
 
       // Разные написания одного значения схлопываем: владельцу разбирать один раз.
@@ -1195,8 +1235,17 @@ export class RawService {
     const input = await this.reconInputs(aSource, aReport, bSource, bReport);
     if (!input) {
       return {
-        totalA: 0, totalB: 0, matched: 0, conflicts: [], onlyA: [], onlyB: [],
-        onlyACount: 0, onlyBCount: 0, duplicatesA: [], duplicatesB: [], fields: [],
+        totalA: 0,
+        totalB: 0,
+        matched: 0,
+        conflicts: [],
+        onlyA: [],
+        onlyB: [],
+        onlyACount: 0,
+        onlyBCount: 0,
+        duplicatesA: [],
+        duplicatesB: [],
+        fields: [],
         ...(await this.reconMeta(aSource, aReport, bSource, bReport)),
       };
     }
@@ -1227,8 +1276,17 @@ export class RawService {
     const input = await this.reconInputs(aSource, aReport, bSource, bReport);
     if (!input) {
       return {
-        totalA: 0, totalB: 0, union: 0, both: 0, onlyA: 0, onlyB: 0,
-        conflicts: 0, duplicated: 0, page: query.page, size: query.size, orders: [],
+        totalA: 0,
+        totalB: 0,
+        union: 0,
+        both: 0,
+        onlyA: 0,
+        onlyB: 0,
+        conflicts: 0,
+        duplicated: 0,
+        page: query.page,
+        size: query.size,
+        orders: [],
         ourvend: reconcileOurVend([], []),
         ...(await this.reconMeta(aSource, aReport, bSource, bReport)),
       };
@@ -1236,7 +1294,13 @@ export class RawService {
     // daily — свёртка ВСЕГО союза до «день+автомат+товар»; сюда OurVend и
     // приходит третьей дневной дорожкой. Из ответа клиенту daily убираем: ему
     // нужен итог сверки (ourvend), а не сами корзины.
-    const { daily, ...journal } = unify(input.rowsA, input.rowsB, input.fields, query.page, query.size);
+    const { daily, ...journal } = unify(
+      input.rowsA,
+      input.rowsB,
+      input.fields,
+      query.page,
+      query.size,
+    );
     const ourvend = await this.ourvendReconciliation(daily);
     return { ...journal, ...input.meta, ourvend };
   }
@@ -1449,7 +1513,11 @@ export class RawService {
     if (keyA < 0 || keyB < 0) return null;
 
     // Берём роли, общие для обоих отчётов, кроме самого ключа.
-    const COMPARABLE: { role: keyof RawColumnRoles; label: string; compare: ReconField["compare"] }[] = [
+    const COMPARABLE: {
+      role: keyof RawColumnRoles;
+      label: string;
+      compare: ReconField["compare"];
+    }[] = [
       { role: "machine", label: "Автомат", compare: "key" },
       { role: "product", label: "Товар", compare: "key" },
       { role: "amount", label: "Сумма", compare: "number" },
@@ -1543,7 +1611,10 @@ export class RawService {
         .map((x) => [normalizeSourceKey(x.ref!), { id: x.id, name: x.name }]),
     );
 
-    const grouped = new Map<string, { point: string; from: string; to: string; orders: number }[]>();
+    const grouped = new Map<
+      string,
+      { point: string; from: string; to: string; orders: number }[]
+    >();
     for (const r of rows) {
       if (r.serial.trim().length === 0 || r.point.trim().length === 0) continue;
       const list = grouped.get(r.serial) ?? [];
@@ -1592,7 +1663,8 @@ export class RawService {
     if (mIdx < 0 || pIdx < 0 || aIdx < 0 || tIdx < 0) return { rows: [], unreadable: 0 };
     const kIdx = roleColumnIndex(snapshot.columns, roles, "kind");
 
-    const cell = (idx: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
+    const cell = (idx: number) =>
+      sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
     const serial = cell(mIdx);
     const product = cell(pIdx);
     const ts = cell(tIdx);
@@ -1657,7 +1729,10 @@ export class RawService {
         .select({ id: entity.id, name: entity.name, ref: entity.externalRef })
         .from(entity)
         .where(eq(entity.type, "machine")),
-      this.db.select({ id: entity.id, name: entity.name }).from(entity).where(eq(entity.type, "product")),
+      this.db
+        .select({ id: entity.id, name: entity.name })
+        .from(entity)
+        .where(eq(entity.type, "product")),
       this.db.select().from(rawLink).where(eq(rawLink.sourceCode, sourceCode)),
     ]);
     const bySerial = new Map<string, { id: string; name: string }>();
@@ -1744,10 +1819,12 @@ export class RawService {
   ): Promise<MachineProductPrice[]> {
     const { items } = await this.priceTimelines(sourceCode, reportCode);
     const wanted = normalizeSourceKey(serial);
-    return items
-      .filter((i) => normalizeSourceKey(i.serial) === wanted)
-      // Сначала то, чем торгуют сейчас и чаще: остальное — хвост истории.
-      .sort((a, b) => b.orders - a.orders || a.product.localeCompare(b.product, "ru"));
+    return (
+      items
+        .filter((i) => normalizeSourceKey(i.serial) === wanted)
+        // Сначала то, чем торгуют сейчас и чаще: остальное — хвост истории.
+        .sort((a, b) => b.orders - a.orders || a.product.localeCompare(b.product, "ru"))
+    );
   }
 
   /**
@@ -1781,11 +1858,18 @@ export class RawService {
       );
       const reference = referencePrice(active.map((i) => i.price!));
       const since =
-        reference === null ? null : referenceSince(active.map((i) => i.periods), reference);
+        reference === null
+          ? null
+          : referenceSince(
+              active.map((i) => i.periods),
+              reference,
+            );
 
       const machines: ProductPriceMachine[] = list.map((i) => {
-        const isActive = activeAfter === null || (i.lastOrderAt !== null && i.lastOrderAt >= activeAfter);
-        const gap = reference !== null && isActive && i.price! < reference ? reference - i.price! : 0;
+        const isActive =
+          activeAfter === null || (i.lastOrderAt !== null && i.lastOrderAt >= activeAfter);
+        const gap =
+          reference !== null && isActive && i.price! < reference ? reference - i.price! : 0;
         // Недобор считается только с того момента, как эталон стал ценой
         // большинства: до него отставания не было.
         const ordersSince =
@@ -1849,11 +1933,7 @@ export class RawService {
    * итоги, сверка идёт по тройке «день + автомат + товар», и так и написано:
    * выдавать дневное сравнение за построчное нельзя.
    */
-  async journal(
-    sourceCode: string,
-    reportCode: string,
-    query: RawRowsQuery,
-  ): Promise<Journal> {
+  async journal(sourceCode: string, reportCode: string, query: RawRowsQuery): Promise<Journal> {
     const report = await this.report(sourceCode, reportCode);
     const src = await this.source(sourceCode);
     const empty: Journal = {
@@ -1870,7 +1950,8 @@ export class RawService {
     const snapshot = await this.latestSnapshot(sourceCode, reportCode);
     if (!snapshot) return empty;
 
-    const at = (role: keyof RawColumnRoles) => roleColumnIndex(snapshot.columns, report.roles, role);
+    const at = (role: keyof RawColumnRoles) =>
+      roleColumnIndex(snapshot.columns, report.roles, role);
     const idx = {
       machine: at("machine"),
       product: at("product"),
@@ -1906,9 +1987,7 @@ export class RawService {
     const fulfilDict = dicts.find((d) => d.role === "fulfilment");
 
     const staysBySerial = new Map(stays.map((m) => [normalizeSourceKey(m.serial), m]));
-    const priceByKey = new Map(
-      timelines.items.map((i) => [timelineKey(i.serial, i.product), i]),
-    );
+    const priceByKey = new Map(timelines.items.map((i) => [timelineKey(i.serial, i.product), i]));
     const productCards = await this.db
       .select({ id: entity.id, name: entity.name, attrs: entity.attrs })
       .from(entity)
@@ -1924,7 +2003,9 @@ export class RawService {
     for (const r of canCross ? rows : []) {
       const day = cell(r, idx.ts).slice(0, 10);
       if (day.length !== 10) continue;
-      triples.add(`${day}|${normalizeSourceKey(cell(r, idx.machine))}|${normalizeSourceKey(cell(r, idx.product))}`);
+      triples.add(
+        `${day}|${normalizeSourceKey(cell(r, idx.machine))}|${normalizeSourceKey(cell(r, idx.product))}`,
+      );
     }
     const days = [...new Set([...triples].map((t) => t.split("|")[0]))].sort();
     const otherByTriple = new Map<string, { qty: number; amount: number; source: string }>();
@@ -1947,7 +2028,11 @@ export class RawService {
           seen.qty += Number(o.qty);
           seen.amount += Number(o.amount);
         } else {
-          otherByTriple.set(key, { qty: Number(o.qty), amount: Number(o.amount), source: o.source });
+          otherByTriple.set(key, {
+            qty: Number(o.qty),
+            amount: Number(o.amount),
+            source: o.source,
+          });
         }
       }
     }
@@ -2176,12 +2261,36 @@ export class RawService {
             fields: sourceFields,
           },
           ...(decoded.length > 0
-            ? [{ title: "Как называет панель", origin: "source" as const, subtitle: "расшифровки источника", fields: decoded }]
+            ? [
+                {
+                  title: "Как называет панель",
+                  origin: "source" as const,
+                  subtitle: "расшифровки источника",
+                  fields: decoded,
+                },
+              ]
             : []),
-          { title: "Реестр MYDON", origin: "registry" as const, subtitle: "сопоставленные карточки", fields: registry },
-          { title: "Разбор", origin: "derived" as const, subtitle: "наш вывод поверх сырья", fields: derived },
+          {
+            title: "Реестр MYDON",
+            origin: "registry" as const,
+            subtitle: "сопоставленные карточки",
+            fields: registry,
+          },
+          {
+            title: "Разбор",
+            origin: "derived" as const,
+            subtitle: "наш вывод поверх сырья",
+            fields: derived,
+          },
           ...(cross.length > 0
-            ? [{ title: "Сверка с другими источниками", origin: "cross" as const, subtitle: "дневные итоги", fields: cross }]
+            ? [
+                {
+                  title: "Сверка с другими источниками",
+                  origin: "cross" as const,
+                  subtitle: "дневные итоги",
+                  fields: cross,
+                },
+              ]
             : []),
         ],
       };
@@ -2236,7 +2345,8 @@ export class RawService {
     if (cIdx < 0 || aIdx < 0 || tIdx < 0) return empty;
     const mIdx = roleColumnIndex(snapshot.columns, report.roles, "machine");
 
-    const cell = (idx: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
+    const cell = (idx: number) =>
+      sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
     const code = cell(cIdx);
     const ts = cell(tIdx);
     const amount = cell(aIdx);
@@ -2405,20 +2515,35 @@ export class RawService {
     const report = await this.report(sourceCode, reportCode);
     const snapshot = await this.latestSnapshot(sourceCode, reportCode);
     if (!snapshot) {
-      return { products: [], revenue: 0, blockedRevenue: 0, noCard: 0, incomplete: 0, lastOrderAt: null };
+      return {
+        products: [],
+        revenue: 0,
+        blockedRevenue: 0,
+        noCard: 0,
+        incomplete: 0,
+        lastOrderAt: null,
+      };
     }
 
     const pIdx = roleColumnIndex(snapshot.columns, report.roles, "product");
     const aIdx = roleColumnIndex(snapshot.columns, report.roles, "amount");
     const tIdx = roleColumnIndex(snapshot.columns, report.roles, "ts");
     if (pIdx < 0 || aIdx < 0 || tIdx < 0) {
-      return { products: [], revenue: 0, blockedRevenue: 0, noCard: 0, incomplete: 0, lastOrderAt: null };
+      return {
+        products: [],
+        revenue: 0,
+        blockedRevenue: 0,
+        noCard: 0,
+        incomplete: 0,
+        lastOrderAt: null,
+      };
     }
     const fIdx = roleColumnIndex(snapshot.columns, report.roles, "flavour");
     const kIdx = roleColumnIndex(snapshot.columns, report.roles, "kind");
     const cIdx = roleColumnIndex(snapshot.columns, report.roles, "productCode");
 
-    const cell = (idx: number) => sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
+    const cell = (idx: number) =>
+      sql<string>`coalesce(${rawRow.cells}->>${sql.raw(String(idx))}, '')`;
     const product = cell(pIdx);
     const ts = cell(tIdx);
     const amount = cell(aIdx);
@@ -2624,7 +2749,9 @@ export class RawService {
    * заменяет строки, а не плодит дубли. Части большой выгрузки шлются с
    * `append: true` — тело запроса ограничено мегабайтом, и делить её нормально.
    */
-  async import(input: RawImportInput): Promise<{ snapshotId: string; rows: number; total: number }> {
+  async import(
+    input: RawImportInput,
+  ): Promise<{ snapshotId: string; rows: number; total: number }> {
     // Отчёт обязан быть в действующем справочнике: принимать выгрузку под
     // незнакомым кодом нельзя — её потом не с чем связать.
     if (!(await this.source(input.source))) {
@@ -2635,18 +2762,6 @@ export class RawService {
     if (Number.isNaN(fetchedAt.getTime())) {
       throw new NotFoundException("Время съёма выгрузки нечитаемо");
     }
-
-    const [existing] = await this.db
-      .select({ id: rawSnapshot.id })
-      .from(rawSnapshot)
-      .where(
-        and(
-          eq(rawSnapshot.sourceCode, input.source),
-          eq(rawSnapshot.reportCode, input.report),
-          eq(rawSnapshot.fetchedAt, fetchedAt),
-        ),
-      )
-      .limit(1);
 
     const meta = {
       sourceCode: input.source,
@@ -2661,68 +2776,109 @@ export class RawService {
       importedBy: input.importedBy ?? "owner",
     };
 
-    let snapshotId: string;
-    if (existing) {
-      snapshotId = existing.id;
-      if (!input.append) {
-        // Полная перезаливка снимка: старые строки уходят вместе с ним.
-        await this.db.delete(rawRow).where(eq(rawRow.snapshotId, snapshotId));
-        await this.db.update(rawSnapshot).set(meta).where(eq(rawSnapshot.id, snapshotId));
-      }
-    } else {
-      const [created] = await this.db.insert(rawSnapshot).values(meta).returning({ id: rawSnapshot.id });
-      snapshotId = created.id;
-    }
+    const result = await this.db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select({ id: rawSnapshot.id })
+        .from(rawSnapshot)
+        .where(
+          and(
+            eq(rawSnapshot.sourceCode, input.source),
+            eq(rawSnapshot.reportCode, input.report),
+            eq(rawSnapshot.fetchedAt, fetchedAt),
+          ),
+        )
+        .limit(1);
 
-    // Позиция первой строки пачки. Отправитель называет её сам — тогда повтор
-    // пачки после обрыва ляжет на своё место. Не назвал — считаем от того, что
-    // уже лежит (порядок источника сохраняется в любом случае).
-    let start: number;
-    if (typeof input.offset === "number" && Number.isInteger(input.offset) && input.offset >= 0) {
-      start = input.offset;
-    } else {
-      const [{ n: already }] = await this.db
+      let snapshotId: string;
+      if (existing) {
+        snapshotId = existing.id;
+        if (!input.append) {
+          // Полная перезаливка снимка атомарна: читатель до COMMIT видит
+          // прежний законченный снимок, а после — новый целиком либо ничего.
+          await tx.delete(rawRow).where(eq(rawRow.snapshotId, snapshotId));
+        }
+        // Любая новая пачка снова закрывает снимок для читателей. Это важно и
+        // для append к уже завершённому снимку: до финальной пачки отчёты не
+        // должны увидеть смесь старых и новых строк.
+        await tx
+          .update(rawSnapshot)
+          .set({ ...meta, completedAt: null })
+          .where(eq(rawSnapshot.id, snapshotId));
+      } else {
+        const [created] = await tx
+          .insert(rawSnapshot)
+          .values({ ...meta, completedAt: null })
+          .returning({ id: rawSnapshot.id });
+        snapshotId = created.id;
+      }
+
+      // Позиция первой строки пачки. Отправитель называет её сам — тогда
+      // повтор после обрыва ложится на своё место, а не добавляется хвостом.
+      let start: number;
+      if (typeof input.offset === "number" && Number.isInteger(input.offset) && input.offset >= 0) {
+        start = input.offset;
+      } else {
+        const [{ n: already }] = await tx
+          .select({ n: sql<number>`count(*)` })
+          .from(rawRow)
+          .where(eq(rawRow.snapshotId, snapshotId));
+        start = Number(already);
+      }
+
+      const values = input.rows.map((cells, i) => ({
+        snapshotId,
+        idx: start + i + 1,
+        cells: cells.map((c) => (c === null || c === undefined ? "" : String(c))),
+      }));
+      for (let i = 0; i < values.length; i += 500) {
+        await tx
+          .insert(rawRow)
+          .values(values.slice(i, i + 500))
+          .onConflictDoUpdate({
+            target: [rawRow.snapshotId, rawRow.idx],
+            set: { cells: sql`excluded.cells` },
+          });
+      }
+
+      const [{ n }] = await tx
         .select({ n: sql<number>`count(*)` })
         .from(rawRow)
         .where(eq(rawRow.snapshotId, snapshotId));
-      start = Number(already);
-    }
+      const total = Number(n);
+      const publish = snapshotCanPublish(input, total);
 
-    const values = input.rows.map((cells, i) => ({
-      snapshotId,
-      idx: start + i + 1,
-      cells: cells.map((c) => (c === null || c === undefined ? "" : String(c))),
-    }));
-    for (let i = 0; i < values.length; i += 500) {
-      // Конфликт по (снимок, номер строки) — это повтор той же пачки.
-      // Перезаписываем: свежая отправка вернее прежней попытки.
-      await this.db
-        .insert(rawRow)
-        .values(values.slice(i, i + 500))
-        .onConflictDoUpdate({
-          target: [rawRow.snapshotId, rawRow.idx],
-          set: { cells: sql`excluded.cells` },
-        });
-    }
+      if (input.complete === true && !publish) {
+        throw new BadRequestException(
+          `Снимок не завершён: ожидалось ${input.rowsTotal ?? "?"} строк, принято ${total}`,
+        );
+      }
+      if (publish) {
+        await tx
+          .update(rawSnapshot)
+          .set({ completedAt: new Date() })
+          .where(eq(rawSnapshot.id, snapshotId));
+      }
 
-    const [{ n: total }] = await this.db
-      .select({ n: sql<number>`count(*)` })
-      .from(rawRow)
-      .where(eq(rawRow.snapshotId, snapshotId));
-
-    await this.events.record({
-      source: `raw:${input.source}`,
-      type: "raw.snapshot.imported",
-      payload: {
-        source: input.source,
-        report: input.report,
-        rows: values.length,
-        append: input.append === true,
-      },
-      occurredAt: fetchedAt,
+      return { snapshotId, rows: values.length, total, published: publish };
     });
 
-    return { snapshotId, rows: values.length, total: Number(total) };
+    // Событие означает именно готовый для чтения снимок, а не принятую
+    // промежуточную пачку. Старые одноразовые импортёры публикуются как раньше.
+    if (result.published) {
+      await this.events.record({
+        source: `raw:${input.source}`,
+        type: "raw.snapshot.imported",
+        payload: {
+          source: input.source,
+          report: input.report,
+          rows: result.total,
+          append: input.append === true,
+        },
+        occurredAt: fetchedAt,
+      });
+    }
+
+    return { snapshotId: result.snapshotId, rows: result.rows, total: result.total };
   }
 
   /**
@@ -2736,11 +2892,22 @@ export class RawService {
   async columnDrift(
     sourceCode: string,
     reportCode: string,
-  ): Promise<{ prevFetchedAt: string; added: string[]; removed: string[]; reordered: boolean } | null> {
+  ): Promise<{
+    prevFetchedAt: string;
+    added: string[];
+    removed: string[];
+    reordered: boolean;
+  } | null> {
     const rows = await this.db
       .select({ fetchedAt: rawSnapshot.fetchedAt, columns: rawSnapshot.columns })
       .from(rawSnapshot)
-      .where(and(eq(rawSnapshot.sourceCode, sourceCode), eq(rawSnapshot.reportCode, reportCode)))
+      .where(
+        and(
+          eq(rawSnapshot.sourceCode, sourceCode),
+          eq(rawSnapshot.reportCode, reportCode),
+          isNotNull(rawSnapshot.completedAt),
+        ),
+      )
       .orderBy(sql`${rawSnapshot.fetchedAt} desc`)
       .limit(2);
     if (rows.length < 2) return null;
@@ -3106,7 +3273,10 @@ export function findLookalikes(
   // 2. Общий вкус — с числами, по которым видно, двойник это или подмена кнопки.
   const ordersOf = new Map(products.map((p) => [normalizeSourceKey(p.name), p.orders]));
   const revenueOf = new Map(products.map((p) => [normalizeSourceKey(p.name), p.revenue]));
-  const byFlavour = new Map<string, { label: string; users: { product: string; orders: number }[] }>();
+  const byFlavour = new Map<
+    string,
+    { label: string; users: { product: string; orders: number }[] }
+  >();
   for (const f of flavours) {
     if (f.flavour.trim().length === 0 || f.product.trim().length === 0) continue;
     const k = normalizeSourceKey(f.flavour);
@@ -3180,8 +3350,6 @@ export function compareColumns(
   // Перестановка считается только когда состав тот же: иначе о ней сообщать
   // бессмысленно — владельцу важнее, что колонка появилась или пропала.
   const reordered =
-    added.length === 0 &&
-    removed.length === 0 &&
-    prevKeys.some((c, i) => c !== nextKeys[i]);
+    added.length === 0 && removed.length === 0 && prevKeys.some((c, i) => c !== nextKeys[i]);
   return { added, removed, reordered };
 }

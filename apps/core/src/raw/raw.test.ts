@@ -14,12 +14,28 @@ import {
   priceAt,
   referencePrice,
   referenceSince,
+  snapshotCanPublish,
   tightKey,
   timelineKey,
   toCsv,
   worstState,
 } from "./raw.service";
 import { fiscalGaps } from "@mydon/shared";
+
+describe("Сырой слой: публикация пакетного снимка", () => {
+  it("промежуточная пачка никогда не становится фактом для отчётов", () => {
+    assert.equal(snapshotCanPublish({ complete: false, rowsTotal: 1200 }, 500), false);
+  });
+
+  it("последняя пачка публикуется только при полном числе строк", () => {
+    assert.equal(snapshotCanPublish({ complete: true, rowsTotal: 1200 }, 1000), false);
+    assert.equal(snapshotCanPublish({ complete: true, rowsTotal: 1200 }, 1200), true);
+  });
+
+  it("старый одноразовый импорт остаётся совместимым", () => {
+    assert.equal(snapshotCanPublish({ rowsTotal: 5000 }, 1000), true);
+  });
+});
 
 describe("Сырой слой: разбор параметров страницы", () => {
   it("номера колонок и страниц берутся только целыми и положительными", () => {
@@ -56,10 +72,13 @@ describe("Сырой слой: разбор параметров страниц�
 describe("Сырой слой: фильтры по колонкам", () => {
   it("читаются только ключи вида f<число>, остальное игнорируется", () => {
     const f = parseColumnFilters({ f0: "cash", f12: "paid", q: "поиск", foo: "bar", fx: "1" });
-    assert.deepEqual([...f.entries()], [
-      [0, { value: "cash", exact: false }],
-      [12, { value: "paid", exact: false }],
-    ]);
+    assert.deepEqual(
+      [...f.entries()],
+      [
+        [0, { value: "cash", exact: false }],
+        [12, { value: "paid", exact: false }],
+      ],
+    );
   });
 
   it("пустой фильтр не считается фильтром", () => {
@@ -134,7 +153,12 @@ describe("Сырой слой: дрейф состава колонок", () => 
 });
 
 describe("История стоянок: переезд или путаница", () => {
-  const stay = (point: string, from: string, to: string, orders = 1) => ({ point, from, to, orders });
+  const stay = (point: string, from: string, to: string, orders = 1) => ({
+    point,
+    from,
+    to,
+    orders,
+  });
 
   it("отрезки упорядочиваются по времени, а не по тому, как легли в базу", () => {
     const r = markOverlaps([
@@ -142,7 +166,10 @@ describe("История стоянок: переезд или путаница"
       stay("宁波乐仝", "2024-05-21 15:05:51", "2024-10-11 14:06:17"),
       stay("hamid alimjan", "2024-10-11 16:13:29", "2025-05-21 17:31:29"),
     ]);
-    assert.deepEqual(r.map((x) => x.point), ["宁波乐仝", "hamid alimjan", "4 корпус"]);
+    assert.deepEqual(
+      r.map((x) => x.point),
+      ["宁波乐仝", "hamid alimjan", "4 корпус"],
+    );
   });
 
   it("переезд в тот же день пересечением не считается", () => {
@@ -152,7 +179,10 @@ describe("История стоянок: переезд или путаница"
       stay("宁波乐仝", "2024-05-21 15:05:51", "2024-10-11 14:06:17"),
       stay("hamid alimjan", "2024-10-11 16:13:29", "2025-05-21 17:31:29"),
     ]);
-    assert.deepEqual(r.map((x) => x.overlaps), [false, false]);
+    assert.deepEqual(
+      r.map((x) => x.overlaps),
+      [false, false],
+    );
   });
 
   it("пересечение помечается у обоих отрезков", () => {
@@ -160,7 +190,10 @@ describe("История стоянок: переезд или путаница"
       stay("A", "2025-01-01 10:00:00", "2025-06-01 10:00:00"),
       stay("B", "2025-03-01 10:00:00", "2025-09-01 10:00:00"),
     ]);
-    assert.deepEqual(r.map((x) => x.overlaps), [true, true]);
+    assert.deepEqual(
+      r.map((x) => x.overlaps),
+      [true, true],
+    );
   });
 
   it("единственная точка — переездов не было", () => {
@@ -176,8 +209,14 @@ describe("История стоянок: переезд или путаница"
       stay("B", "2024-10-11 16:13:29", "2024-12-01 10:00:00"),
       stay("A", "2024-10-11 09:00:00", "2024-10-11 14:06:17"),
     ]);
-    assert.deepEqual(r.map((x) => x.point), ["A", "B"]);
-    assert.deepEqual(r.map((x) => x.overlaps), [false, false]);
+    assert.deepEqual(
+      r.map((x) => x.point),
+      ["A", "B"],
+    );
+    assert.deepEqual(
+      r.map((x) => x.overlaps),
+      [false, false],
+    );
   });
 });
 
@@ -210,7 +249,10 @@ describe("Цены: отрезок, а не поле", () => {
       bucket("2026-05", 15000, "01 08:00:00", "31 20:00:00", 210),
       bucket("2026-06", 20000, "01 08:00:00", "30 20:00:00", 190),
     ]);
-    assert.deepEqual(periods.map((p) => p.price), [15000, 20000]);
+    assert.deepEqual(
+      periods.map((p) => p.price),
+      [15000, 20000],
+    );
     assert.equal(periods[1].from, "2026-06-01 08:00:00");
   });
 
@@ -221,7 +263,10 @@ describe("Цены: отрезок, а не поле", () => {
       bucket("2026-06", 15000, "01 08:00:00", "14 19:00:00", 120),
       bucket("2026-06", 20000, "15 09:12:00", "30 20:00:00", 140),
     ]);
-    assert.deepEqual(periods.map((p) => p.price), [15000, 20000]);
+    assert.deepEqual(
+      periods.map((p) => p.price),
+      [15000, 20000],
+    );
     assert.equal(periods[1].from, "2026-06-15 09:12:00");
     assert.equal(mismatched, 0);
   });
@@ -260,7 +305,10 @@ describe("Цены: отрезок, а не поле", () => {
       bucket("2026-05", 20000, "10 12:00:00", "11 12:00:00", 2),
       bucket("2026-06", 25000, "01 08:00:00", "30 20:00:00", 280),
     ]);
-    assert.deepEqual(periods.map((p) => p.price), [15000, 20000, 25000]);
+    assert.deepEqual(
+      periods.map((p) => p.price),
+      [15000, 20000, 25000],
+    );
   });
 
   it("цена вернулась к прежней — это два отрезка, а не один", () => {
@@ -269,7 +317,10 @@ describe("Цены: отрезок, а не поле", () => {
       bucket("2026-05", 20000, "01 08:00:00", "31 20:00:00", 100),
       bucket("2026-06", 15000, "01 08:00:00", "30 20:00:00", 100),
     ]);
-    assert.deepEqual(periods.map((p) => p.price), [15000, 20000, 15000]);
+    assert.deepEqual(
+      periods.map((p) => p.price),
+      [15000, 20000, 15000],
+    );
     assert.equal(periods[2].from, "2026-06-01 08:00:00");
   });
 
@@ -278,7 +329,10 @@ describe("Цены: отрезок, а не поле", () => {
       bucket("2026-06", 20000, "01 08:00:00", "30 20:00:00", 190),
       bucket("2026-05", 15000, "01 08:00:00", "31 20:00:00", 210),
     ]);
-    assert.deepEqual(periods.map((p) => p.price), [15000, 20000]);
+    assert.deepEqual(
+      periods.map((p) => p.price),
+      [15000, 20000],
+    );
   });
 
   it("пусто — не ноль, а отсутствие отрезков", () => {
@@ -325,8 +379,14 @@ describe("Цены: с какого момента считать недобор
     // В марте большинства ещё нет: один против двух. Оно складывается только в
     // апреле, и лишь с этого момента третий автомат становится отставшим.
     const timelines = [
-      line([15000, "2026-01-01 08:00:00", "2026-02-28 20:00:00"], [20000, "2026-03-01 09:00:00", END]),
-      line([15000, "2026-01-01 08:00:00", "2026-03-31 20:00:00"], [20000, "2026-04-01 09:00:00", END]),
+      line(
+        [15000, "2026-01-01 08:00:00", "2026-02-28 20:00:00"],
+        [20000, "2026-03-01 09:00:00", END],
+      ),
+      line(
+        [15000, "2026-01-01 08:00:00", "2026-03-31 20:00:00"],
+        [20000, "2026-04-01 09:00:00", END],
+      ),
       line([15000, "2026-01-01 08:00:00", END]),
     ];
     assert.equal(referenceSince(timelines, 20000), "2026-04-01 09:00:00");
@@ -334,7 +394,10 @@ describe("Цены: с какого момента считать недобор
 
   it("большинство не сложилось — требовать недобор не за что", () => {
     const timelines = [
-      line([15000, "2026-01-01 08:00:00", "2026-02-28 20:00:00"], [20000, "2026-03-01 09:00:00", END]),
+      line(
+        [15000, "2026-01-01 08:00:00", "2026-02-28 20:00:00"],
+        [20000, "2026-03-01 09:00:00", END],
+      ),
       line([15000, "2026-01-01 08:00:00", END]),
     ];
     assert.equal(referenceSince(timelines, 20000), null, "один против одного — не большинство");
@@ -369,7 +432,8 @@ describe("Цены: молчащий автомат — не отставший"
 
 describe("Товары: без чего не собирается чек", () => {
   const full = { ИКПУ: "02201001001000000", упаковка: "стакан 0.2", НДС: "12%" };
-  const of = (attrs: Record<string, unknown>) => fiscalGaps(attrs).map((g) => `${g.field}:${g.flaw}`);
+  const of = (attrs: Record<string, unknown>) =>
+    fiscalGaps(attrs).map((g) => `${g.field}:${g.flaw}`);
 
   it("заполненная карточка не требует ничего", () => {
     assert.deepEqual(fiscalGaps(full), []);
@@ -395,7 +459,10 @@ describe("Товары: без чего не собирается чек", () =>
     // (IKPU_CODE_REGEX): ровно 17 цифр. Своего мы не выдумываем — чек
     // принимает касса.
     const g = fiscalGaps({ ...full, ИКПУ: "0220100" });
-    assert.deepEqual(g.map((x) => x.flaw), ["неверно"]);
+    assert.deepEqual(
+      g.map((x) => x.flaw),
+      ["неверно"],
+    );
     assert.match(g[0].why, /17 цифр, а тут 7/);
   });
 
@@ -525,7 +592,11 @@ describe("Цены: касание хвостами — не примесь", ()
       b(15000, "2026-06-01 08:00:00", "2026-06-20 12:00:00", 501),
       b(18000, "2026-06-16 09:00:00", "2026-06-30 20:00:00", 400),
     ]);
-    assert.deepEqual(periods.map((p) => p.price), [15000, 18000], "цену подняли");
+    assert.deepEqual(
+      periods.map((p) => p.price),
+      [15000, 18000],
+      "цену подняли",
+    );
     assert.equal(periods[1].orders, 400, "заказы новой цены не потеряны");
     assert.equal(mismatched, 0);
   });
@@ -536,7 +607,10 @@ describe("Цены: касание хвостами — не примесь", ()
       b(18000, "2026-06-16 09:00:00", "2026-06-30 20:00:00", 400),
       b(18000, "2026-07-01 08:00:00", "2026-07-31 20:00:00", 800),
     ]);
-    assert.deepEqual(periods.map((p) => p.price), [15000, 18000]);
+    assert.deepEqual(
+      periods.map((p) => p.price),
+      [15000, 18000],
+    );
     assert.equal(periods[0].orders, 300, "старая цена сохранила свои заказы");
     assert.equal(periods[0].from, "2026-06-01 08:00:00");
   });
@@ -573,9 +647,7 @@ describe("Цены: касание хвостами — не примесь", ()
 });
 
 describe("Цены: последняя известная цена держится после последнего заказа", () => {
-  const t = [
-    { price: 15000, from: "2026-06-01 08:00:00", to: "2026-07-25 20:00:00", orders: 100 },
-  ];
+  const t = [{ price: 15000, from: "2026-06-01 08:00:00", to: "2026-07-25 20:00:00", orders: 100 }];
 
   it("после последнего заказа цена не исчезает", () => {
     // Дефект, найденный разбором: цена «кончалась» вместе с последним заказом,
@@ -676,8 +748,20 @@ describe("Цены: одна цена в месяце — одно ведро", 
     // и та же цена. Без склейки второе ведро уходило в примесь, и треть заказов
     // пропадала из счёта.
     const { periods, mismatched } = buildPricePeriods([
-      { month: "2026-06", price: 20000, from: "2026-06-01 08:00:00", to: "2026-06-30 20:00:00", orders: 20 },
-      { month: "2026-06", price: 20000, from: "2026-06-01 09:00:00", to: "2026-06-30 21:00:00", orders: 10 },
+      {
+        month: "2026-06",
+        price: 20000,
+        from: "2026-06-01 08:00:00",
+        to: "2026-06-30 20:00:00",
+        orders: 20,
+      },
+      {
+        month: "2026-06",
+        price: 20000,
+        from: "2026-06-01 09:00:00",
+        to: "2026-06-30 21:00:00",
+        orders: 10,
+      },
     ]);
     assert.equal(periods.length, 1);
     assert.equal(periods[0].orders, 30, "заказы обоих написаний в счёте");
@@ -688,10 +772,14 @@ describe("Цены: одна цена в месяце — одно ведро", 
 });
 
 describe("Журнал: строка красится по худшему, что в ней есть", () => {
-  const f = (state: string) => ({ state }) as { state: Parameters<typeof worstState>[0][number]["state"] };
+  const f = (state: string) =>
+    ({ state }) as { state: Parameters<typeof worstState>[0][number]["state"] };
 
   it("расхождение важнее всего остального", () => {
-    assert.equal(worstState([f("source"), f("matched"), f("mismatch"), f("unchecked")]), "mismatch");
+    assert.equal(
+      worstState([f("source"), f("matched"), f("mismatch"), f("unchecked")]),
+      "mismatch",
+    );
   });
 
   it("отсутствие данных важнее «не сверено»", () => {
@@ -707,7 +795,6 @@ describe("Журнал: строка красится по худшему, чт�
     assert.equal(worstState([f("source")]), "source");
   });
 });
-
 
 describe("pointIndex — подсказка сопоставления по адресу точки", () => {
   const авт = (id: string, name: string, точка?: string) => ({
@@ -752,7 +839,11 @@ describe("pointIndex — подсказка сопоставления по ад
   });
 
   it("пустые и отсутствующие адреса пропускаются, а не спорят", () => {
-    const idx = pointIndex([авт("a", "без точки"), авт("b", "пусто", "   "), авт("c", "есть", "Olma office")]);
+    const idx = pointIndex([
+      авт("a", "без точки"),
+      авт("b", "пусто", "   "),
+      авт("c", "есть", "Olma office"),
+    ]);
     assert.equal(idx.size, 1);
     assert.equal(idx.get("olma office")?.id, "c");
   });
