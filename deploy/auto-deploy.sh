@@ -154,6 +154,25 @@ export GIT_SHA
 # 5. Переключаем контейнеры на собранный образ.
 "${COMPOSE[@]}" up -d
 
+# Interrupted Compose replacement can leave a healthy service under a
+# temporary name such as <id>_mydon-core. Compose still resolves exec by
+# labels, but cron/guards deliberately address the fixed production names.
+# Repair only the affected service, then require the exact name and state.
+for service in mydon-db mydon-core mydon-bot mydon-agents mydon-cc; do
+  state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' "$service" 2>/dev/null || true)"
+  if [ "$state" != "/$service|running" ]; then
+    log "восстанавливаю production-имя $service (было: ${state:-нет контейнера})"
+    "${COMPOSE[@]}" up -d --no-deps --force-recreate "$service"
+  fi
+done
+for service in mydon-db mydon-core mydon-bot mydon-agents mydon-cc; do
+  state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' "$service" 2>/dev/null || true)"
+  if [ "$state" != "/$service|running" ]; then
+    log "ОШИБКА: контейнер $service не запущен под точным production-именем (${state:-не найден})"
+    exit 1
+  fi
+done
+
 # 6. Проверка здоровья Core. Провал — деплой считается неуспешным (ненулевой
 #    код завершения), а не тихим предупреждением: раньше systemd показывал
 #    "успешный" запуск таймера даже при нездоровом приложении, и это некому

@@ -163,6 +163,25 @@ ssh "$HOST" "
   set -e
   cd '$REMOTE_DIR'
   docker compose -f deploy/docker-compose.yml --env-file .env up -d
+  # Interrupted Compose replacement can leave a healthy service under a
+  # temporary name such as <id>_mydon-core. Compose still resolves exec by
+  # labels, but cron/guards deliberately address the fixed production names.
+  # Repair only the affected service, then require the exact name and state.
+  for service in mydon-db mydon-core mydon-bot mydon-agents mydon-cc; do
+    state=\$(docker inspect -f '{{.Name}}|{{.State.Status}}' \"\$service\" 2>/dev/null || true)
+    if [ \"\$state\" != \"/\$service|running\" ]; then
+      echo \"  восстанавливаю production-имя \$service (было: \${state:-нет контейнера})\"
+      docker compose -f deploy/docker-compose.yml --env-file .env \
+        up -d --no-deps --force-recreate \"\$service\"
+    fi
+  done
+  for service in mydon-db mydon-core mydon-bot mydon-agents mydon-cc; do
+    state=\$(docker inspect -f '{{.Name}}|{{.State.Status}}' \"\$service\" 2>/dev/null || true)
+    [ \"\$state\" = \"/\$service|running\" ] || {
+      echo \"Контейнер \$service не запущен под точным production-именем (\${state:-не найден})\" >&2
+      exit 1
+    }
+  done
   health_ok=''
   for attempt in \$(seq 1 30); do
     if docker compose -f deploy/docker-compose.yml --env-file .env exec -T mydon-core \
