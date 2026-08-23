@@ -78,10 +78,10 @@ read -r -p "Application Key ID: " key_id
 read -r -s -p "Application Key (ввод скрыт): " app_key
 printf '\n'
 
-[ -n "$bucket" ] && [ -n "$key_id" ] && [ -n "$app_key" ] || {
+if [ -z "$bucket" ] || [ -z "$key_id" ] || [ -z "$app_key" ]; then
   echo "Bucket и оба значения application key обязательны." >&2
   exit 1
-}
+fi
 case "$bucket" in
   *[!A-Za-z0-9-]*) echo "Недопустимое имя bucket." >&2; exit 1 ;;
 esac
