@@ -53,6 +53,7 @@ git fetch --quiet origin main
 LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse origin/main)"
 [ "$LOCAL" = "$REMOTE" ] && exit 0   # ничего нового
+DEPLOY_ID="${REMOTE:0:12}-$$"
 
 log "новый main $REMOTE (было $LOCAL) — начинаю деплой"
 
@@ -109,7 +110,14 @@ fi
 git reset --hard "$REMOTE"
 git clean -fd -e '.env*' # вся .env-семья (.env, .env.local, ...) — как в .gitignore
 
-# 2а. Изменились только данные и документы — контейнеры уже видят новые файлы
+# 2а. Cron обращается к стабильным путям в /opt/backups, поэтому одного
+# обновления git-копии недостаточно. Синхронизируем исполняемые версии до
+# раннего выхода для data/docs-only commit и до любых миграций.
+install -d -o root -g root -m 700 /opt/backups
+install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
+install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
+
+# 2б. Изменились только данные и документы — контейнеры уже видят новые файлы
 #     через том, пересобирать и перезапускать нечего.
 if [ -n "$DATA_ONLY" ]; then
   log "деплой ok: $REMOTE (только данные/документы — сборка и рестарт не нужны)"
@@ -137,11 +145,11 @@ export GIT_SHA
 #    ничего (спиннер затирает строку, исключение теряется). Полевой контур
 #    из-за этого три дня не разворачивался, а в журнале было только «ОШИБКА
 #    (строка 128)». Свой скрипт печатает сообщение постгреса и сам запрос.
-"${COMPOSE[@]}" run --rm --name mydon-core-migrate mydon-core node packages/db/dist/migrate.js
+"${COMPOSE[@]}" run --rm --name "mydon-core-migrate-$DEPLOY_ID" mydon-core node packages/db/dist/migrate.js
 
 # 4а. Структурный сид идемпотентен и заводит только направления. Он должен
 #     пройти до переключения: новый код не должен стартовать без нового org.
-"${COMPOSE[@]}" run --rm --name mydon-core-seed mydon-core node packages/db/dist/seed.js
+"${COMPOSE[@]}" run --rm --name "mydon-core-seed-$DEPLOY_ID" mydon-core node packages/db/dist/seed.js
 
 # 5. Переключаем контейнеры на собранный образ.
 "${COMPOSE[@]}" up -d

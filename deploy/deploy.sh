@@ -17,8 +17,17 @@ GIT_SHA="$(git -C "$LOCAL_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unk
 if [ -n "$(git -C "$LOCAL_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
   GIT_SHA="${GIT_SHA}-dirty"
 fi
+DEPLOY_ID="${GIT_SHA//[^a-zA-Z0-9_.-]/-}-$$"
+AUTODEPLOY_TIMER_WAS_ACTIVE=0
 
 say() { printf "\n\033[1;34m▸ %s\033[0m\n" "$1"; }
+resume_autodeploy() {
+  if [ "$AUTODEPLOY_TIMER_WAS_ACTIVE" -eq 1 ]; then
+    ssh "$HOST" 'systemctl start mydon-autodeploy.timer' >/dev/null 2>&1 ||
+      printf 'ВНИМАНИЕ: не удалось снова запустить mydon-autodeploy.timer\n' >&2
+  fi
+}
+trap resume_autodeploy EXIT
 
 say "1/8 Проверка связи и предпосылок"
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" '
@@ -34,6 +43,26 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" '
   done
 '
 
+# Manual deploy и systemd auto-deploy используют один Docker daemon и один
+# тег mydon:latest. Одновременная сборка уже приводила к конфликту одноразовых
+# migration-контейнеров. На время ручного прогона останавливаем только таймер;
+# уже начатую service не убиваем, а ждём её честного завершения. EXIT-trap
+# вернёт таймер даже при ошибке ниже.
+if ssh "$HOST" 'systemctl is-active --quiet mydon-autodeploy.timer'; then
+  AUTODEPLOY_TIMER_WAS_ACTIVE=1
+  say "Пауза auto-deploy на время ручного прогона"
+  ssh "$HOST" 'systemctl stop mydon-autodeploy.timer'
+fi
+ssh "$HOST" '
+  set -e
+  for _ in $(seq 1 900); do
+    systemctl is-active --quiet mydon-autodeploy.service || exit 0
+    sleep 1
+  done
+  echo "auto-deploy не завершился за 15 минут" >&2
+  exit 1
+'
+
 say "2/8 Копирование кода (без node_modules, dist, .git)"
 # --delete НЕ используем осознанно: он удаляет в приёмнике всё, чего нет в источнике.
 rsync -az \
@@ -41,7 +70,7 @@ rsync -az \
   --exclude .git --exclude '.env' --exclude '*.tsbuildinfo' \
   "$LOCAL_DIR/" "$HOST:$REMOTE_DIR/"
 
-say "3/8 Настройка окружения на сервере (секреты генерируются ТАМ)"
+say "3/8 Настройка окружения и cron-скриптов на сервере"
 ssh "$HOST" "
   set -e
   cd '$REMOTE_DIR'
@@ -91,6 +120,13 @@ EOF
       echo '  .env уже есть — дописан недостающий INVITE_PEPPER'
     fi
   fi
+  # Cron запускает стабильные копии из /opt/backups, а не файлы рабочей
+  # директории. Обновляем их каждым deploy, иначе исправление backup/restore
+  # останется только в git и никогда не попадёт в фактическое расписание.
+  install -d -o root -g root -m 700 /opt/backups
+  install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
+  install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
+  echo '  cron-скрипты backup/restore синхронизированы'
 "
 
 say "4/8 Сборка нового образа и запуск PostgreSQL"
@@ -110,7 +146,7 @@ say "5/8 Применение схемы БД новым образом"
 ssh "$HOST" "
   set -e
   cd '$REMOTE_DIR'
-  docker compose -f deploy/docker-compose.yml --env-file .env run --rm --name mydon-core-migrate mydon-core \
+  docker compose -f deploy/docker-compose.yml --env-file .env run --rm --name 'mydon-core-migrate-$DEPLOY_ID' mydon-core \
     node packages/db/dist/migrate.js
 "
 
@@ -118,7 +154,7 @@ say "6/8 Структурный сид (только 5 направлений, �
 ssh "$HOST" "
   set -e
   cd '$REMOTE_DIR'
-  docker compose -f deploy/docker-compose.yml --env-file .env run --rm --name mydon-core-seed mydon-core \
+  docker compose -f deploy/docker-compose.yml --env-file .env run --rm --name 'mydon-core-seed-$DEPLOY_ID' mydon-core \
     node packages/db/dist/seed.js
 "
 
