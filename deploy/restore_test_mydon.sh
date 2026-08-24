@@ -112,9 +112,12 @@ if [ "$ready" -ne 1 ]; then
 fi
 say "2. Изолированный PostgreSQL 17 готов (network=none, data=tmpfs)"
 
+RESTORE_LOG="$TMP_DIR/restore.log"
 if ! gunzip -c "$DUMP" | "$DOCKER_BIN" exec -i "$RESTORE_CONTAINER" \
-  psql -U mydon -d restore -v ON_ERROR_STOP=1 --single-transaction >/dev/null 2>&1; then
+  psql -U mydon -d restore -v ON_ERROR_STOP=1 --single-transaction \
+  >/dev/null 2>"$RESTORE_LOG"; then
   say "ПРОВАЛ: psql не смог восстановить дамп целиком"
+  tail -30 "$RESTORE_LOG" >&2 || true
   exit 1
 fi
 say "3. Дамп развёрнут атомарно"

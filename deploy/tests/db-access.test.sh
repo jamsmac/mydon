@@ -22,6 +22,7 @@ printf 'DATABASE_MODE=local\n' > "$LOCAL_ENV"
 run_helper "$LOCAL_ENV" dump > "$TMP/output"
 grep -q 'dump complete' "$TMP/output"
 grep -q 'exec -i mydon-db pg_dump' "$TMP/docker.args"
+grep -q -- '--schema=public --schema=drizzle' "$TMP/docker.args"
 run_helper "$LOCAL_ENV" ping | grep -qx 1
 
 MISSING_ENV="$TMP/missing.env"
@@ -53,6 +54,8 @@ run_helper "$EXTERNAL_ENV" dump > "$TMP/output"
 grep -q 'dump complete' "$TMP/output"
 grep -q 'run --rm --network host' "$TMP/docker.args"
 grep -q 'postgres:17-alpine pg_dump' "$TMP/docker.args"
+grep -q -- '--schema=public --schema=drizzle' "$TMP/docker.args"
+grep -q -- '--exclude-extension=\*' "$TMP/docker.args"
 if grep -q 'external-secret' "$TMP/docker.args"; then
   printf 'database secret leaked to docker argv\n' >&2
   exit 1

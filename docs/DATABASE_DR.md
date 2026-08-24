@@ -44,6 +44,8 @@ Helper принимает только `sslmode=require`, `verify-ca` или `ve
 
 - Deploy применяет migration/seed к `DATABASE_URL` до переключения сервисов.
 - Pre-deploy и ночной backup снимают активную БД через `db_access.sh`.
+- Dump ограничен MYDON-схемами `public` и `drizzle` и не включает extensions
+  или глобальные event triggers провайдера; все app tables/data входят полностью.
 - Ночной backup измеряет размер. При `>=400 МБ` весь job становится красным,
   но уже созданный дамп всё равно отправляется в оба offsite.
 - По понедельникам дамп реально разворачивается в PostgreSQL 17 с

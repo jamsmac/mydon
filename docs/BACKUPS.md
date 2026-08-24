@@ -218,5 +218,9 @@ tar -xzf /opt/backups/extra/command-center_ГГГГ-ММ-ДД.tar.gz -C /opt
 Активную managed-БД и порядок переключения восстанавливает runbook
 [`DATABASE_DR.md`](DATABASE_DR.md). Обычный backup обращается к активной БД
 через `/opt/backups/db_access.sh`: пароль передаётся временным `pgpass`, TLS
-обязателен, а credentials не попадают в argv. Ежедневно также проверяется
+обязателен, а credentials не попадают в argv. Для managed-БД определения
+provider-specific extensions исключаются из dump, чтобы он восстанавливался
+на стандартном PostgreSQL 17. Dump ограничен схемами приложения `public` и
+`drizzle`, поэтому глобальные event triggers провайдера в него тоже не входят.
+Ежедневно также проверяется
 `pg_database_size`; production-порог задаёт `DATABASE_SIZE_WARN_MB`.

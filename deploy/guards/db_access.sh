@@ -118,6 +118,7 @@ case "$MODE" in
       dump)
         exec "$DOCKER_BIN" exec -i "$LOCAL_CONTAINER" pg_dump \
           --clean --if-exists --no-owner --no-privileges \
+          --schema=public --schema=drizzle \
           -U "$LOCAL_USER" "$LOCAL_DATABASE"
         ;;
       query)
@@ -137,7 +138,12 @@ case "$MODE" in
     prepare_external
     case "$COMMAND" in
       dump)
+        # Scope the backup to MYDON-owned schemas. Managed providers also have
+        # global event triggers and extensions that stock PostgreSQL cannot
+        # restore, while all 70 app tables live in public and migration history
+        # lives in drizzle.
         external_client pg_dump --clean --if-exists --no-owner --no-privileges \
+          --schema=public --schema=drizzle --exclude-extension='*' \
           --host "$DB_HOST" --port "$DB_PORT" --username "$DB_USER" "$DB_NAME"
         ;;
       query)
