@@ -1099,17 +1099,27 @@ export class VendingService {
         // executePurchaseOrder) — price перепроверяем так же строго, как
         // qty. 0 и мусор = «цены нет», НЕ ноль сум.
         const unitPrice = typeof pos.price === "number" && Number.isFinite(pos.price) && pos.price > 0 ? pos.price : null;
-        purchaseRows.push({
-          extId: `${order.id}:${key}`,
-          dt: dtToday,
-          product,
-          unit: "шт",
-          qty: String(qty),
-          unitPrice: unitPrice === null ? null : unitPrice.toFixed(2),
-          total: unitPrice === null ? null : (qty * unitPrice).toFixed(2),
-          note: `накладная ${order.id.slice(0, 8)}, принял ${receivedBy}`,
-          source: "vending-order",
-        });
+        // Дубликат канона в positions (возможен только при ручной правке
+        // jsonb) дал бы два одинаковых extId в одном INSERT — ON CONFLICT DO
+        // NOTHING молча выкинул бы второй. Сливаем в одну строку заранее.
+        const twin = purchaseRows.find((r) => r.extId === `${order.id}:${key}`);
+        if (twin) {
+          const mergedQty = Number(twin.qty) + qty;
+          twin.qty = String(mergedQty);
+          if (twin.unitPrice != null) twin.total = (mergedQty * Number(twin.unitPrice)).toFixed(2);
+        } else {
+          purchaseRows.push({
+            extId: `${order.id}:${key}`,
+            dt: dtToday,
+            product,
+            unit: "шт",
+            qty: String(qty),
+            unitPrice: unitPrice === null ? null : unitPrice.toFixed(2),
+            total: unitPrice === null ? null : (qty * unitPrice).toFixed(2),
+            note: `накладная ${order.id.slice(0, 8)}, принял ${receivedBy}`,
+            source: "vending-order",
+          });
+        }
         const requested = distributedByCanonical.get(key);
         if (requested !== undefined) consumedDistribution.add(key);
         // Не больше заказанного — опечатка владельца не должна увести склад в минус.
