@@ -195,11 +195,18 @@ export interface PurchaseItem {
   perMachine: Record<string, number>;
   need: number;
   stock: number;
-  /** Закроется складом: min(stock, need). */
+  /**
+   * Закроется складом: min(stock, need). СОВМЕСТИМОСТЬ, а не раздача: сколько
+   * реально уедет со склада в автоматы, говорит `fromStock` (зависит от
+   * политики раздачи), и при purchase-first он меньше `covered`.
+   */
   covered: number;
   /** Надо купить: max(0, need − stock). */
   buy: number;
-  /** Останется на складе: max(0, stock − need). */
+  /**
+   * Останется на складе: max(0, stock − need). СОВМЕСТИМОСТЬ, а не раздача:
+   * фактический остаток после похода — `stockAfter`.
+   */
   surplus: number;
   pack: number;
   /** Заказать с округлением до упаковки (или = buy, если round=false). */
@@ -241,6 +248,7 @@ export interface PurchaseSummary {
   /** Политика раздачи, применённая к этому расчёту. */
   allocation: AllocationPolicy;
   totalNeed: number;
+  /** Σ covered — совместимость (см. `PurchaseItem.covered`), не раздача. */
   totalCovered: number;
   totalBuy: number;
   totalOrder: number;
@@ -248,8 +256,15 @@ export interface PurchaseSummary {
   costExact: number;
   /** С округлением до упаковок: Σ order × price. */
   costRounded: number;
-  /** Переплата за округление: costRounded − costExact. */
+  /** Переплата за округление/фикс сверх нехватки: max(0, costRounded − costExact). */
   overpay: number;
+  /**
+   * Недобор деньгами: max(0, costExact − costRounded). Бывает при
+   * фикс-количестве МЕНЬШЕ нехватки — купим меньше, чем нужно, и часть слотов
+   * останется пустой. Это решение владельца, а не ошибка, но молчать о нём
+   * нельзя: «переплата −260 000» выглядела как экономия.
+   */
+  shortfallCost: number;
   /** «Закуп по прайсу» (§8.1): полный дефицит по прайсу, без склада и округления. */
   costByPriceFull: number;
   totalFromPurchase: number;
@@ -322,7 +337,11 @@ export function computePurchase(
     const stock = row.stock;
     const covered = Math.min(stock, need);
     const surplus = Math.max(0, stock - need);
-    const pack = price?.pack ?? rule?.pack ?? 1;
+    // Кратность НИКОГДА не 0: `pack_size` в базе — обычный integer, и строка с
+    // нулём (правка мимо CHECK, старый импорт) дала бы ceil(buy/0)×0 = NaN, а
+    // NaN×цена — NaN в сумме закупа, то есть молча испорченный бюджет. Порог 1
+    // означает «без упаковки, поштучно» — безопасный смысл по умолчанию.
+    const pack = Math.max(1, price?.pack ?? rule?.pack ?? 1);
     const unit = price?.price ?? 0;
     const noSales = row.sold7 <= 0;
 
@@ -389,12 +408,17 @@ export function computePurchase(
     totalUnfilled += unfilled;
     totalToStock += toStock;
 
-    if (item.noPrice) noPrice.push(row.product);
-
     if (excluded) {
       excludedByRule.push(item);
       continue;
     }
+
+    // «Без цены» — список НА РАЗБОР владельцу: чего не хватает в бюджете.
+    // Исключённый из закупки товар в бюджет не входит по решению владельца, и
+    // его отсутствующая цена ничего не меняет — строка была бы шумом, который
+    // владелец не может закрыть (цена ему не нужна). Поэтому пометка ставится
+    // ПОСЛЕ ветки excluded (A3/UX#22).
+    if (item.noPrice) noPrice.push(row.product);
 
     // Полный дефицит по прайсу — по всем позициям с ценой, что реально закупаются (§8.1).
     if (!item.noPrice) costByPriceFull += need * unit;
@@ -430,7 +454,13 @@ export function computePurchase(
     totalOrder,
     costExact,
     costRounded,
-    overpay: costRounded - costExact,
+    // Переплата и недобор — ДВА РАЗНЫХ числа, а не одно со знаком. Фикс
+    // меньше нехватки (Snickers: нехватка 100, фикс 48) делает costRounded
+    // МЕНЬШЕ costExact, и прежняя разность уходила в минус: «переплата
+    // −260 000 сум» читается как экономия, хотя на деле это недокупленный
+    // товар. Минус в переплате гасим, а недобор показываем отдельно.
+    overpay: Math.max(0, costRounded - costExact),
+    shortfallCost: Math.max(0, costExact - costRounded),
     costByPriceFull,
     totalFromPurchase,
     totalFromStock,

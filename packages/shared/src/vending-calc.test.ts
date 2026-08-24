@@ -404,6 +404,52 @@ describe("Вендинг: политика раздачи и правила то
     assert.equal(i.fromPurchase, 7);
   });
 
+  it("фикс МЕНЬШЕ нехватки: переплаты нет, недобор виден отдельным числом (ревью безопасности)", () => {
+    // Snickers: нехватка 100, склад 0, фикс 48 → купим 48×7000 = 336 000, а по
+    // нехватке нужно было 700 000. Разность отрицательная, и раньше она уезжала
+    // в `overpay` как «переплата −364 000» — экономия там, где недокуп.
+    const rules = new Map([["Snickers", { fixedQty: 48 }]]);
+    const s = computePurchase([row("Snickers", 100, 0)], prices, { rules });
+    assert.equal(s.items[0]!.order, 48);
+    assert.equal(s.costExact, 700_000);
+    assert.equal(s.costRounded, 336_000);
+    assert.equal(s.overpay, 0);
+    assert.equal(s.shortfallCost, 364_000);
+    assert.equal(s.items[0]!.unfilled, 52);
+  });
+
+  it("обычный закуп: недобора нет, переплата на месте", () => {
+    const s = computePurchase([row("Fanta", 20, 5)], prices);
+    assert.ok(s.overpay > 0);
+    assert.equal(s.shortfallCost, 0);
+  });
+
+  it("битая кратность (pack 0) не даёт NaN в сумме: считаем поштучно", () => {
+    // `pack_size` — обычный integer; ноль от старого импорта давал ceil(x/0)×0
+    // = NaN и молча портил весь бюджет закупа.
+    const битый = new Map<string, PriceEntry>([["Fanta", { price: 5167, pack: 0 }]]);
+    const s = computePurchase([row("Fanta", 7, 0)], битый);
+    const i = s.items[0]!;
+    assert.equal(i.pack, 1);
+    assert.equal(i.order, 7);
+    assert.equal(i.costRounded, 7 * 5167);
+    assert.ok(Number.isFinite(s.costRounded));
+  });
+
+  it("исключённый товар без цены не шумит в «на разбор» (A3/UX#22)", () => {
+    // Цена нужна для бюджета; товар, который владелец решил не покупать, в
+    // бюджет не входит — просить для него цену не за чем.
+    const rules = new Map([["Загадка", { excluded: true }]]);
+    const s = computePurchase([{ product: "Загадка", perMachine: { olma: 5 }, need: 5, stock: 2, sold7: 4 }], new Map(), {
+      rules,
+    });
+    assert.deepEqual(s.noPrice, []);
+    assert.equal(s.excludedByRule[0]!.noPrice, true);
+    // Не исключённый — по-прежнему на разбор.
+    const обычный = computePurchase([{ product: "Загадка", perMachine: { olma: 5 }, need: 5, stock: 0, sold7: 4 }], new Map());
+    assert.deepEqual(обычный.noPrice, ["Загадка"]);
+  });
+
   it("инварианты: fromPurchase + fromStock + unfilled = need; stockAfter ≥ 0", () => {
     const rules = new Map([["Qurt", { excluded: true }], ["Snickers", { fixedQty: 3 }]]);
     const s = computePurchase(

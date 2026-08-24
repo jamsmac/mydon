@@ -1,3 +1,4 @@
+import { normalizeMachineSerial } from "./machine-serial";
 import { hasProduct, MAX_CAPACITY, slotDeficit, slotValid, type PurchaseItem, type Slot } from "./vending-calc";
 
 /**
@@ -15,19 +16,67 @@ export function coilOrder(a: string, b: string): number {
   return a.localeCompare(b, "ru");
 }
 
+/**
+ * Разбор настройки маршрута против списка автоматов плана.
+ *
+ * Серийник сравнивается ПО КАНОНУ с обеих сторон (`normalizeMachineSerial`):
+ * реестр и рукописные заметки владельца пишут снековые серийники с приставкой
+ * («c2508160376»), Ourvend — без неё, и точное равенство молча роняло бы
+ * настройку в «мусор» — маршрут вставал по имени, а владелец видел свой
+ * порядок в настройках и не понимал, почему бот ведёт иначе.
+ *
+ * Возвращается серийник АВТОМАТА (как он записан в слотах), а не строка
+ * настройки: дальше по нему ищут `perMachine`, и чужая форма записи не нашла
+ * бы ничего.
+ */
+function parseRouteSetting(
+  setting: string,
+  machines: { serial: string; name: string }[],
+): { first: string[]; firstSet: Set<string>; unknown: string[] } {
+  const byCanon = new Map<string, string>();
+  for (const m of machines) {
+    const canon = normalizeMachineSerial(m.serial);
+    if (!byCanon.has(canon)) byCanon.set(canon, m.serial);
+  }
+  const firstSet = new Set<string>();
+  const first: string[] = [];
+  const unknown: string[] = [];
+  for (const raw of setting.split(",")) {
+    const token = raw.trim();
+    if (token === "") continue;
+    const serial = byCanon.get(normalizeMachineSerial(token));
+    if (serial === undefined) {
+      if (!unknown.includes(token)) unknown.push(token);
+      continue;
+    }
+    if (firstSet.has(serial)) continue;
+    firstSet.add(serial);
+    first.push(serial);
+  }
+  return { first, firstSet, unknown };
+}
+
 /** Порядок обхода: серийники из настройки первыми (в их порядке, без повторов), остальные — по имени. */
 export function routeOrderFrom(setting: string, machines: { serial: string; name: string }[]): string[] {
-  const known = new Set(machines.map((m) => m.serial));
-  const seenFirst = new Set<string>();
-  const first: string[] = [];
-  for (const raw of setting.split(",")) {
-    const s = raw.trim();
-    if (s === "" || !known.has(s) || seenFirst.has(s)) continue;
-    seenFirst.add(s);
-    first.push(s);
-  }
-  const rest = machines.filter((m) => !seenFirst.has(m.serial)).sort((a, b) => a.name.localeCompare(b.name, "ru")).map((m) => m.serial);
+  const { first, firstSet } = parseRouteSetting(setting, machines);
+  const rest = machines.filter((m) => !firstSet.has(m.serial)).sort((a, b) => a.name.localeCompare(b.name, "ru")).map((m) => m.serial);
   return [...first, ...rest];
+}
+
+/**
+ * Что не так с настройкой маршрута: серийники, которых нет среди автоматов
+ * плана, и признак «порядок вообще задан».
+ *
+ * Нужны плану отдельно от самого порядка: опечатка в настройке иначе
+ * выглядит как «маршрут просто по имени» — молчаливое игнорирование правки
+ * владельца (A4/UX#16).
+ */
+export function routeIssuesFrom(
+  setting: string,
+  machines: { serial: string; name: string }[],
+): { unknown: string[]; configured: boolean } {
+  const { first, unknown } = parseRouteSetting(setting, machines);
+  return { unknown, configured: first.length > 0 };
 }
 
 export interface ProductAllocation { need: number; fromPurchase: number; fromStock: number; unfilled: number }

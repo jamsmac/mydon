@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { PurchaseItem, Slot } from "./vending-calc";
-import { allocateByRoute, allocateBySlots, coilOrder, routeOrderFrom } from "./vending-plan";
+import { allocateByRoute, allocateBySlots, coilOrder, routeIssuesFrom, routeOrderFrom } from "./vending-plan";
 
 const item = (o: Partial<PurchaseItem> & { product: string; perMachine: Record<string, number> }): PurchaseItem => ({
   need: Object.values(o.perMachine).reduce((a, b) => a + b, 0),
@@ -21,6 +21,23 @@ describe("План закупа: порядок слотов и маршрут",
   });
   it("routeOrderFrom: повтор серийника в настройке схлопывается в одно вхождение", () => {
     assert.deepEqual(routeOrderFrom("A, A", [{ serial: "A", name: "x" }]), ["A"]);
+  });
+  it("routeOrderFrom: форма серийника с «c» сходится со слотами без неё (и наоборот)", () => {
+    // Реестр и заметки владельца пишут снековый серийник «c2508160376»,
+    // Ourvend присылает «2508160376». Точное равенство роняло настройку в
+    // «мусор»: маршрут молча вставал по имени.
+    const ms = [{ serial: "2508160376", name: "Olma" }, { serial: "2508160359", name: "American Hospital" }];
+    assert.deepEqual(routeOrderFrom("c2508160376", ms), ["2508160376", "2508160359"]);
+    const сПриставкой = [{ serial: "c2508160376", name: "Olma" }, { serial: "2508160359", name: "American Hospital" }];
+    // Возвращается серийник АВТОМАТА (по нему ищут perMachine), а не строка настройки.
+    assert.deepEqual(routeOrderFrom("2508160376", сПриставкой), ["c2508160376", "2508160359"]);
+  });
+  it("routeIssuesFrom: нераспознанные серийники настройки видны, признак «порядок задан» честный", () => {
+    const ms = [{ serial: "2508160376", name: "Olma" }];
+    assert.deepEqual(routeIssuesFrom("c2508160376, 9999999999", ms), { unknown: ["9999999999"], configured: true });
+    assert.deepEqual(routeIssuesFrom("", ms), { unknown: [], configured: false });
+    // Настройка есть, но ни один серийник не узнан — порядок НЕ задан.
+    assert.deepEqual(routeIssuesFrom("9999999999", ms), { unknown: ["9999999999"], configured: false });
   });
 });
 
