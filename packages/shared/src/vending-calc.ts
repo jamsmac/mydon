@@ -50,7 +50,7 @@ export function slotValid(s: Slot, maxCapacity = MAX_CAPACITY): boolean {
   return s.capacity > 0 && s.capacity <= maxCapacity;
 }
 
-const hasProduct = (s: Slot): boolean => typeof s.product === "string" && s.product.trim().length > 0;
+export const hasProduct = (s: Slot): boolean => typeof s.product === "string" && s.product.trim().length > 0;
 
 /**
  * Статус планограммы автомата. `no_slots` — ни один слот не назначен;
