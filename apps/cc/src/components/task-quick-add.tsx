@@ -41,7 +41,13 @@ export function QuickAdd({
   }
 
   return (
-    <form action={onSubmit} className="quickadd">
+    <form
+      className="quickadd"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       <input
         id="qa-title"
         name="title"
@@ -77,7 +83,12 @@ export function QuickAdd({
           )}
         </select>
 
-        <input name="due" className="qa-due" placeholder="Когда? завтра, пн, 25.08" autoComplete="off" />
+        <input
+          name="due"
+          className="qa-due"
+          placeholder="Когда? завтра, пн, 25.08"
+          autoComplete="off"
+        />
 
         <button
           type="button"
