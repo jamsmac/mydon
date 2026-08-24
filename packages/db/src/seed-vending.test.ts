@@ -22,6 +22,9 @@ describe("Прайс вендинга (Приложение А)", () => {
   it("кратность по правилу 02.08.2026: напитки 12, снеки 10", () => {
     assert.equal(packOf("drink"), 12);
     assert.equal(packOf("snack"), 10);
+    // Тот же источник кратности спрашивает overlay правил (строка «нетронута»),
+    // а категория в vending_product шире категорий прайса.
+    assert.equal(packOf("other"), 10);
   });
 
   it("совпадает с контрольным примером по ключевым позициям", () => {
@@ -183,7 +186,7 @@ describe("seedVendingRules: правки владельца сильнее си�
   type Row = {
     id: string;
     name: string;
-    category: string;
+    category: "drink" | "snack" | "other";
     packSize: number;
     excludedFromPurchase: boolean;
     fixedPurchaseQty: number | null;
@@ -203,7 +206,7 @@ describe("seedVendingRules: правки владельца сильнее си�
     } as never;
     return { db, updated };
   }
-  const нетронутый = (name: string, category: string): Row => ({
+  const нетронутый = (name: string, category: Row["category"]): Row => ({
     id: name,
     name,
     category,

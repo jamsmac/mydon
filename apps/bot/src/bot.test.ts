@@ -325,7 +325,12 @@ describe("Бот: правила закупа и план — путь до Core
     const core = {
       ...({} as HandlerDeps["core"]),
       setVendingProductRules: async () => {
-        throw new CoreError(400, "/vending/product-rules", "packSize must not be greater than 1000");
+        // Ровно то, что отдаёт Nest: причина внутри JSON вместе со служебными полями.
+        throw new CoreError(
+          400,
+          "/vending/product-rules",
+          '{"message":["packSize must not be greater than 1000"],"error":"Bad Request","statusCode":400}',
+        );
       },
     } as unknown as HandlerDeps["core"];
     const reply = await handleMessage(111, "блок TUC 6", {
@@ -334,7 +339,24 @@ describe("Бот: правила закупа и план — путь до Core
       limiter: new RateLimiter(),
     });
     assert.match(reply?.text ?? "", /Core отверг запрос: packSize must not be greater than 1000/);
+    // Служебный шум протокола владельцу не показываем.
+    assert.doesNotMatch(reply?.text ?? "", /statusCode|Bad Request|[{}[\]]/);
     assert.doesNotMatch(reply?.text ?? "", /попробуй ещё раз чуть позже/i);
+  });
+
+  it("400 с телом не-JSON (прокси, HTML) — показываем как есть, обрезав", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      setVendingProductRules: async () => {
+        throw new CoreError(400, "/vending/product-rules", "<html>413 Request Entity Too Large</html>");
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "блок TUC 6", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /413 Request Entity Too Large/);
   });
 
   it("5xx и сеть — прежний ответ «попробуй позже» (повтор реально помогает)", async () => {

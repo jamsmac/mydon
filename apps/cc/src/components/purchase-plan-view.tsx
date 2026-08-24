@@ -53,9 +53,11 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
   const need = load + summary.totalUnfilled;
   // Со склада берут не только закупаемые позиции: убранные правилом и «без
   // продаж» тоже едут в автоматы тем, что уже лежит на полке.
-  const fromStock = [...summary.items, ...summary.excludedByRule, ...summary.excludedNoSales].filter(
-    (i) => i.fromStock > 0,
-  );
+  const fromStock = [...summary.items, ...summary.excludedByRule, ...summary.excludedNoSales]
+    .filter((i) => i.fromStock > 0)
+    // Куда уйдёт складской товар — считаем ОДИН раз на позицию: в разметке это
+    // был обход всех автоматов и всех их слотов дважды на строку.
+    .map((i) => ({ item: i, where: stockByMachine(machines, i.product) }));
   // «Порядок — по имени» надо объяснить: настройка есть, но её не видно с
   // этого листа, и владелец не знает, что маршрут вообще настраивается (UX#16).
   const маршрутСломан = warnings.some((w) => w.code === "route_unknown_serial");
@@ -188,13 +190,13 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
         <>
           <div className="section-title">Собрать со склада</div>
           <div className="rows">
-            {fromStock.map((i) => (
+            {fromStock.map(({ item: i, where }) => (
               <div className="row" key={i.product}>
                 <div className="t">
                   <b>{i.product}</b>
                   <small>
                     сейчас {n(i.stock)} · после {n(i.stockAfter)}
-                    {stockByMachine(machines, i.product) && <> · по автоматам {stockByMachine(machines, i.product)}</>}
+                    {where && <> · по автоматам {where}</>}
                   </small>
                 </div>
                 <span className="pill">взять {n(i.fromStock)} ед</span>

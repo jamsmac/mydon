@@ -23,8 +23,15 @@ export interface PriceItem {
   price: number;
 }
 
-/** Кратность по категории: напитки 12, снеки 10. */
-export const packOf = (c: VendingCat): number => (c === "drink" ? 12 : 10);
+/**
+ * Кратность по категории: напитки 12, снеки 10.
+ *
+ * Принимает и «прочее» (категория `vending_product` шире, чем категории
+ * прайса): это ЕДИНСТВЕННЫЙ источник кратности по умолчанию — и для сида цен,
+ * и для проверки «строку правил ещё никто не трогал». Вторая копия правила
+ * молча пометила бы все строки тронутыми в день, когда дефолт поменяют.
+ */
+export const packOf = (c: VendingCat | "other"): number => (c === "drink" ? 12 : 10);
 
 /**
  * Прайс вендинга.
@@ -312,17 +319,19 @@ export const VENDING_PURCHASE_RULES: PurchaseRuleItem[] = [
   { product: "Cheers Сметана и зелень 70gr", packSize: 5 },
 ];
 
-/** Кратность по умолчанию для строки прайса — та же, что ставит сид цен. */
-const defaultPackFor = (category: string): number => (category === "drink" ? 12 : 10);
-
 /**
  * Строка правил ещё «нетронута»: ни одно из трёх полей не отличается от того,
  * что ставит сид цен. Тронутую строку правит владелец — из бота («блок …»,
  * «фикс …», «не закупать …») или из панели, и наложить на неё правило из кода
  * значит откатить его решение молча, на ближайшем прогоне сида.
  */
-function untouchedRules(row: { category: string; packSize: number; excludedFromPurchase: boolean; fixedPurchaseQty: number | null }): boolean {
-  return row.excludedFromPurchase === false && row.fixedPurchaseQty === null && row.packSize === defaultPackFor(row.category);
+function untouchedRules(row: {
+  category: VendingCat | "other";
+  packSize: number;
+  excludedFromPurchase: boolean;
+  fixedPurchaseQty: number | null;
+}): boolean {
+  return row.excludedFromPurchase === false && row.fixedPurchaseQty === null && row.packSize === packOf(row.category);
 }
 
 /**

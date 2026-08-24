@@ -92,6 +92,32 @@ const HELP = [
  * Порядок проверок важен: сначала доступ, потом частота, и только затем смысл —
  * чтобы чужой чат не мог ни нагрузить бота, ни узнать что-либо о данных.
  */
+/**
+ * Причина отказа Core словами, а не куском протокола.
+ *
+ * Nest отдаёт 400 телом `{"message":["packSize must not be greater than 1000"],
+ * "error":"Bad Request","statusCode":400}`. Владельцу нужна только `message`:
+ * остальное — служебный шум, из-за которого настоящая причина теряется в
+ * фигурных скобках. Не-JSON (прокси, HTML-страница ошибки) показываем как
+ * есть, обрезав: пустой ответ лучше честной заглушки.
+ */
+function coreReason(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed === "object" && parsed !== null && "message" in parsed) {
+      const m = (parsed as { message: unknown }).message;
+      if (typeof m === "string" && m.trim() !== "") return m.trim();
+      if (Array.isArray(m)) {
+        const строки = m.filter((x): x is string => typeof x === "string" && x.trim() !== "");
+        if (строки.length > 0) return строки.join("; ");
+      }
+    }
+  } catch {
+    // Не JSON — ниже покажем тело как есть.
+  }
+  return body.slice(0, 200) || "нет подробностей";
+}
+
 export async function handleMessage(
   chatId: number,
   text: string,
@@ -173,7 +199,7 @@ export async function handleMessage(
       // и «попробуй позже» отправляло владельца ждать впустую. Показываем
       // формат и то, что именно не принял Core.
       if (err instanceof CoreError && err.status === 400) {
-        return { text: `${ruleCommandHint(text)}\n\nCore отверг запрос: ${err.body || "нет подробностей"}` };
+        return { text: `${ruleCommandHint(text)}\n\nCore отверг запрос: ${coreReason(err.body)}` };
       }
       return { text: "Не удалось записать правило в MYDON Core. Попробуй ещё раз чуть позже." };
     }

@@ -1825,6 +1825,22 @@ describe("Вендинг Core: план закупа (П5a)", () => {
     assert.match(plan.warnings.find((w) => w.code === "sales_partial")!.message, /1 автоматов из 2/);
   });
 
+  it("порог свежести продаж — в миллисекундах: 2 дн. 1 ч уже несвежие, 1 день — нет", async () => {
+    // Округление до целых суток ПЕРЕД сравнением теряло почти день: батч
+    // возрастом 2 дн. 23 ч молчал, хотя порог — 2 суток.
+    const батч = (мс: number): SaleRow[] => [
+      { machineSerial: "2508160359", productName: "Fanta", quantity: 7, capturedAt: new Date(Date.now() - мс) },
+      { machineSerial: "2508160376", productName: "Fanta", quantity: 3, capturedAt: new Date(Date.now() - мс) },
+    ];
+    const несвежий = await new VendingService(
+      planDb({ slots, entities, cards, products, sales: батч(2 * 86_400_000 + 3_600_000) }),
+    ).plan();
+    assert.match(несвежий.warnings.find((w) => w.code === "sales_stale")!.message, /Продажи собраны 2 дн\. назад/);
+
+    const свежий = await new VendingService(planDb({ slots, entities, cards, products, sales: батч(86_400_000) })).plan();
+    assert.ok(!свежий.warnings.some((w) => w.code === "sales_stale"));
+  });
+
   it("продажи собраны сегодня по всем автоматам — предупреждений о продажах нет", async () => {
     const сегодня: SaleRow[] = [
       { machineSerial: "2508160359", productName: "Fanta", quantity: 7, capturedAt: new Date() },

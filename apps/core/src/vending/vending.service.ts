@@ -1295,8 +1295,12 @@ export class VendingService {
         message: "Продажи ни разу не собирались — «нет продаж» стоит у всех позиций и закуп по ним не считается",
       });
     } else {
-      const дней = Math.floor((Date.now() - ctx.sales.capturedAt.getTime()) / 86_400_000);
-      if (дней > SALES_STALE_DAYS) {
+      // Порог — в миллисекундах, как у склада: округление до целых суток
+      // ПЕРЕД сравнением теряло почти день (батч 2 дн. 23 ч считался свежим).
+      // Показываем при этом целые сутки — «2,96 дн. назад» человек не читает.
+      const возраст = Date.now() - ctx.sales.capturedAt.getTime();
+      if (возраст > SALES_STALE_DAYS * 86_400_000) {
+        const дней = Math.floor(возраст / 86_400_000);
         warnings.push({ code: "sales_stale", message: `Продажи собраны ${дней} дн. назад — «нет продаж» может быть ложным` });
       }
       if (ctx.sales.machinesInBatch < ctx.sales.okMachines) {
