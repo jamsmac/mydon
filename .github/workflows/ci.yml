@@ -146,7 +146,8 @@ jobs:
           shellcheck deploy/guards/db_access.sh deploy/guards/b2_offsite.sh \
             deploy/guards/backup_extra.sh deploy/restore_test_mydon.sh \
             deploy/deploy.sh deploy/auto-deploy.sh deploy/setup-b2-offsite.sh \
-            deploy/b2-recovery-drill-macos.sh deploy/standby-drill.sh \
+            deploy/b2-recovery-drill-macos.sh deploy/standby-lib.sh \
+            deploy/standby-drill.sh \
             deploy/standby-promote.sh deploy/standby-stop.sh \
             deploy/tests/fake-rclone.sh deploy/tests/fake-docker-db.sh \
             deploy/tests/b2-offsite.test.sh deploy/tests/db-access.test.sh \

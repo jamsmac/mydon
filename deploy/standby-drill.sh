@@ -9,25 +9,31 @@ CORE_PORT="${STANDBY_CORE_PORT:-3101}"
 PANEL_PORT="${STANDBY_PANEL_PORT:-3102}"
 
 fail() { printf 'FAIL standby drill: %s\n' "$*" >&2; exit 1; }
-file_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+# shellcheck source=deploy/standby-lib.sh
+. "$ROOT/deploy/standby-lib.sh"
 
 command -v docker >/dev/null 2>&1 || fail "docker не установлен"
 command -v tailscale >/dev/null 2>&1 || fail "tailscale не установлен"
 command -v curl >/dev/null 2>&1 || fail "curl не установлен"
-[ -f "$ENV_FILE" ] || fail "не найден $ENV_FILE"
-[ "$(file_mode "$ENV_FILE")" = 600 ] || fail "$ENV_FILE должен иметь права 600"
-ENV_FILE=$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")
+ENV_FILE=$(require_env_file "$ENV_FILE")
+# Напоминание на РЕПЕТИЦИИ, а не посреди аварии: promote требует этот ключ.
+if [ -z "$(env_file_value "$ENV_FILE" HEARTBEAT_GIST_ID)" ]; then
+  printf 'ВНИМАНИЕ: в env-файле нет HEARTBEAT_GIST_ID — promote ОТКАЖЕТ без него (гейт живости primary). Добавьте заранее из /etc/mydon-heartbeat.env primary (docs/DATABASE_DR.md, «Standby env»).\n' >&2
+fi
 
-export STANDBY_ENV_FILE="$ENV_FILE"
 export STANDBY_CORE_PORT="$CORE_PORT"
 export STANDBY_PANEL_PORT="$PANEL_PORT"
 export STANDBY_PANEL_BIND="${STANDBY_PANEL_BIND:-$(tailscale ip -4 | head -1)}"
-GIT_SHA=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || printf unknown)
-export GIT_SHA
 [ -n "$STANDBY_PANEL_BIND" ] || fail "не найден Tailscale IPv4"
-COMPOSE=(docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE")
+attachments_init
+GIT_SHA=$(repo_git_sha "$ROOT")
+export GIT_SHA
+compose_init "$COMPOSE_FILE" "$ENV_FILE"
 
-if docker ps --format '{{.Names}}' | grep -Eq '^mydon-standby-(bot|agents)$'; then
+# Захват отдельным присваиванием: fail() внутри пайпа убил бы только сабшелл,
+# и упавший docker снова читался бы как «контейнеров нет».
+ps_names=$(docker_ps_names)
+if printf '%s\n' "$ps_names" | grep -Eq '^mydon-standby-(bot|agents)$'; then
   fail "standby workers уже запущены; drill не будет их останавливать"
 fi
 cleanup() {
@@ -38,27 +44,24 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [ "${STANDBY_SKIP_BUILD:-0}" != 1 ]; then
+  [ "$GIT_SHA" != unknown ] ||
+    fail "репозиторий без git HEAD: образ будет непроверяемого возраста"
   "${COMPOSE[@]}" build core
 fi
+# И при пропуске сборки, и после неё drill сертифицирует ровно тот код, что в
+# образе: раньше STANDBY_SKIP_BUILD=1 штамповал текущий HEAD репозитория, хотя
+# контейнеры гоняли старый образ — а рассинхрон вскрывался только sha-гейтом
+# promote посреди настоящей аварии, требуя многоминутный rebuild с сетью.
+require_image_matches_repo "$ROOT" mydon:standby
+IMAGE_SHA=$(image_git_sha mydon:standby)
+
 "${COMPOSE[@]}" up -d core cc
-
-health=""
-for _ in $(seq 1 60); do
-  health=$(curl -sf --max-time 5 "http://127.0.0.1:${CORE_PORT}/health" || true)
-  if printf '%s' "$health" | grep -q '"status":"ok"'; then break; fi
-  sleep 2
-done
-printf '%s' "$health" | grep -q '"status":"ok"' || fail "Core standby не стал healthy"
-printf '%s' "$health" | grep -q '"dbOk":true' || fail "Core standby не видит managed DB"
-
-panel_status=000
-for _ in $(seq 1 60); do
-  panel_status=$(curl -sS -L -o /dev/null -w '%{http_code}' --max-time 10 \
-    "http://${STANDBY_PANEL_BIND}:${PANEL_PORT}/" || true)
-  [ "$panel_status" = 200 ] && break
-  sleep 2
-done
-[ "$panel_status" = 200 ] || fail "CC standby не вернул HTTP 200"
+wait_core_health "$CORE_PORT"
+wait_panel_200 "http://${STANDBY_PANEL_BIND}:${PANEL_PORT}/"
+# Дрилл обязан проверить и путь ЗАПИСИ: /health и HTTP 200 панели зелёные и
+# с пустым SERVICE_TOKEN, но после promote такой standby не примет ни одной
+# операции (мутации fail-closed 401).
+require_service_token_works "$CORE_PORT" "$ENV_FILE"
 
 cleanup
 trap - EXIT
@@ -70,7 +73,8 @@ for container in mydon-standby-core mydon-standby-cc; do
     *) fail "$container завершён с неожиданным кодом $exit_code" ;;
   esac
 done
-running=$(docker ps --format '{{.Names}}' | grep -Ec '^mydon-standby-' || true)
+ps_names=$(docker_ps_names)
+running=$(printf '%s\n' "$ps_names" | grep -Ec '^mydon-standby-' || true)
 [ "$running" -eq 0 ] || fail "standby-контейнеры остались запущены после drill"
 printf 'STANDBY_DRILL_OK commit=%s panel=http://%s:%s workers=stopped\n' \
-  "$GIT_SHA" "$STANDBY_PANEL_BIND" "$PANEL_PORT"
+  "$IMAGE_SHA" "$STANDBY_PANEL_BIND" "$PANEL_PORT"

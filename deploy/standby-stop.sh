@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# Stop only cold-standby containers; images, env and volumes remain prepared.
+# Stop only cold-standby containers; images, env and host data remain prepared.
+#
+# Аварийный рубильник split-brain: НИКАКИХ предусловий кроме docker.
+# Прежний путь через docker compose требовал полный env-файл (интерполяция
+# ${VAR:?} отказывалась даже останавливать контейнеры) — выключатель не должен
+# зависеть от полноты секретов.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-ENV_FILE="${1:-${STANDBY_ENV_FILE:-$HOME/.config/mydon/standby-production.env}}"
-file_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+fail() { printf 'FAIL standby stop: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=deploy/standby-lib.sh
+. "$ROOT/deploy/standby-lib.sh"
 
-command -v docker >/dev/null 2>&1 || { printf 'docker не установлен\n' >&2; exit 1; }
-[ -f "$ENV_FILE" ] || { printf 'не найден %s\n' "$ENV_FILE" >&2; exit 1; }
-[ "$(file_mode "$ENV_FILE")" = 600 ] || {
-  printf '%s должен иметь права 600\n' "$ENV_FILE" >&2
-  exit 1
-}
-ENV_FILE=$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")
-export STANDBY_ENV_FILE="$ENV_FILE"
-docker compose -f "$ROOT/deploy/docker-compose.standby.yml" --env-file "$ENV_FILE" \
-  --profile workers stop agents bot cc core
+command -v docker >/dev/null 2>&1 || fail "docker не установлен"
+ps_names=$(docker_ps_names)
+to_stop=$(printf '%s\n' "$ps_names" | grep -E '^mydon-standby-(agents|bot|cc|core)$' || true)
+if [ -n "$to_stop" ]; then
+  printf '%s\n' "$to_stop" | xargs docker stop
+fi
 printf 'STANDBY_STOPPED\n'
+STANDBY_ATTACHMENTS_DIR="${STANDBY_ATTACHMENTS_DIR:-$HOME/.local/state/mydon-standby/attachments}"
+if [ -n "$(ls -A "$STANDBY_ATTACHMENTS_DIR" 2>/dev/null)" ]; then
+  printf 'НАПОМИНАНИЕ: в %s есть вложения, загруженные за время аварии — перенесите их на primary в /opt/mydon-data/attachments (docs/DATABASE_DR.md).\n' \
+    "$STANDBY_ATTACHMENTS_DIR"
+fi

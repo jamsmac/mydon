@@ -2,10 +2,37 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-COMPOSE="$ROOT/deploy/docker-compose.standby.yml"
+COMPOSE_YML="$ROOT/deploy/docker-compose.standby.yml"
 PRODUCTION_COMPOSE="$ROOT/deploy/docker-compose.yml"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+
+# Изоляция от окружения запуска: docker compose даёт OS-переменным приоритет
+# над --env-file, поэтому экспортированный в шелле DATABASE_URL делал negative-
+# проверки ложными, а оставшийся после реального promote
+# STANDBY_CONFIRM_PRODUCTION_DOWN=YES заставлял «тест» исполнять НАСТОЯЩИЙ
+# promote-путь против фейкового URL БД.
+run_clean() {
+  env -u DATABASE_URL -u DATABASE_ADMIN_URL -u SERVICE_TOKEN -u POSTGRES_PASSWORD \
+    -u B2_APPLICATION_KEY -u BACKUP_ENC_PASSPHRASE \
+    -u STANDBY_CONFIRM_PRODUCTION_DOWN -u STANDBY_START_WORKERS \
+    -u STANDBY_ALLOW_SPLIT_BRAIN -u STANDBY_ALLOW_UNKNOWN_SHA -u STANDBY_SKIP_BUILD \
+    -u STANDBY_ENV_FILE -u GIT_SHA \
+    -u COMPOSE_PROFILES -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_ENV_FILES "$@"
+}
+
+# ── file_mode работает на этой ОС (GNU stat читал BSD-флаги как имя файла,
+#    и проверка прав 600 вечно падала на корректном файле — ловится ТУТ,
+#    потому что CI гоняет этот тест на Linux, а владелец — на macOS).
+fail() { printf 'standby-lib self-check failed: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=deploy/standby-lib.sh
+. "$ROOT/deploy/standby-lib.sh"
+probe="$TMP/mode-probe"
+touch "$probe"
+chmod 600 "$probe"
+[ "$(file_mode "$probe")" = 600 ] || fail "file_mode вернул '$(file_mode "$probe")' вместо 600"
+chmod 644 "$probe"
+[ "$(file_mode "$probe")" = 644 ] || fail "file_mode вернул '$(file_mode "$probe")' вместо 644"
 
 ENV_FILE="$TMP/standby.env"
 printf '%s\n' \
@@ -17,10 +44,12 @@ printf '%s\n' \
   'BACKUP_ENC_PASSPHRASE=backup-secret' \
   > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+ATT_DIR="$TMP/attachments"
+mkdir -p "$ATT_DIR"
 
 rendered=$(
-  STANDBY_PANEL_BIND=127.0.0.1 \
-    docker compose -f "$COMPOSE" --env-file "$ENV_FILE" config
+  STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+    run_clean docker compose -f "$COMPOSE_YML" --env-file "$ENV_FILE" config
 )
 printf '%s' "$rendered" | grep -q 'runtime-secret'
 printf '%s' "$rendered" | grep -q 'service-secret'
@@ -32,8 +61,8 @@ for forbidden in admin-secret local-db-secret b2-secret backup-secret; do
 done
 
 rendered_json=$(
-  STANDBY_PANEL_BIND=127.0.0.1 \
-    docker compose -f "$COMPOSE" --env-file "$ENV_FILE" --profile workers \
+  STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+    run_clean docker compose -f "$COMPOSE_YML" --env-file "$ENV_FILE" --profile workers \
       config --format json
 )
 printf '%s' "$rendered_json" | node -e '
@@ -48,7 +77,7 @@ printf '%s' "$rendered_json" | node -e '
 
 production_json=$(
   PANEL_BIND=127.0.0.1 \
-    docker compose -f "$PRODUCTION_COMPOSE" --env-file "$ENV_FILE" \
+    run_clean docker compose -f "$PRODUCTION_COMPOSE" --env-file "$ENV_FILE" \
       config --format json
 )
 printf '%s' "$production_json" | node -e '
@@ -61,32 +90,87 @@ printf '%s' "$production_json" | node -e '
   }
 '
 
+# ── Паритет env-КЛЮЧЕЙ standby ↔ production. Блоки скопированы руками, и
+#    новая переменная, добавленная только в production compose, молча не
+#    доехала бы до standby — ровно тот класс дрейфа, что уже давал инцидент
+#    с OURVEND-переменными (см. комментарий в docker-compose.yml).
+printf '%s\n---SPLIT---\n%s' "$rendered_json" "$production_json" | node -e '
+  const fs = require("node:fs");
+  const [standbyRaw, prodRaw] = fs.readFileSync(0, "utf8").split("\n---SPLIT---\n");
+  const standby = JSON.parse(standbyRaw).services;
+  const prod = JSON.parse(prodRaw).services;
+  const pairs = [["core", "mydon-core"], ["cc", "mydon-cc"], ["bot", "mydon-bot"], ["agents", "mydon-agents"]];
+  // Осознанные расхождения перечислять ЗДЕСЬ (ключ + причина), не молча:
+  const allowedProdOnly = { core: [], cc: [], bot: [], agents: [] };
+  const allowedStandbyOnly = { core: [], cc: [], bot: [], agents: [] };
+  for (const [s, p] of pairs) {
+    const sKeys = new Set(Object.keys(standby[s].environment ?? {}));
+    const pKeys = new Set(Object.keys(prod[p].environment ?? {}));
+    const prodOnly = [...pKeys].filter(k => !sKeys.has(k) && !allowedProdOnly[s].includes(k));
+    const standbyOnly = [...sKeys].filter(k => !pKeys.has(k) && !allowedStandbyOnly[s].includes(k));
+    if (prodOnly.length || standbyOnly.length) {
+      throw new Error(
+        "env drift " + s + "/" + p + ": только в production=[" + prodOnly +
+          "] только в standby=[" + standbyOnly + "]"
+      );
+    }
+  }
+'
+
 default_services=$(
-  STANDBY_PANEL_BIND=127.0.0.1 \
-    docker compose -f "$COMPOSE" --env-file "$ENV_FILE" config --services | sort
+  STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+    run_clean docker compose -f "$COMPOSE_YML" --env-file "$ENV_FILE" config --services | sort
 )
 [ "$default_services" = $'cc\ncore' ]
 worker_services=$(
-  STANDBY_PANEL_BIND=127.0.0.1 \
-    docker compose -f "$COMPOSE" --env-file "$ENV_FILE" --profile workers \
+  STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+    run_clean docker compose -f "$COMPOSE_YML" --env-file "$ENV_FILE" --profile workers \
       config --services | sort
 )
 [ "$worker_services" = $'agents\nbot\ncc\ncore' ]
 
 MISSING_ENV="$TMP/missing.env"
 printf 'SERVICE_TOKEN=still-not-enough\n' > "$MISSING_ENV"
-if STANDBY_PANEL_BIND=127.0.0.1 \
-  docker compose -f "$COMPOSE" --env-file "$MISSING_ENV" config --quiet \
+if STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+  run_clean docker compose -f "$COMPOSE_YML" --env-file "$MISSING_ENV" config --quiet \
   >"$TMP/missing.out" 2>&1; then
   printf 'standby accepted a missing DATABASE_URL\n' >&2
   exit 1
 fi
 grep -q 'DATABASE_URL is required' "$TMP/missing.out"
 
-if "$ROOT/deploy/standby-promote.sh" "$ENV_FILE" >"$TMP/promote.out" 2>&1; then
+NO_TOKEN_ENV="$TMP/no-token.env"
+printf 'DATABASE_URL=postgresql://runtime-user:runtime-secret@db.example.test/postgres\n' > "$NO_TOKEN_ENV"
+if STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+  run_clean docker compose -f "$COMPOSE_YML" --env-file "$NO_TOKEN_ENV" config --quiet \
+  >"$TMP/no-token.out" 2>&1; then
+  printf 'standby accepted an empty SERVICE_TOKEN (read-only control plane)\n' >&2
+  exit 1
+fi
+grep -q 'SERVICE_TOKEN is required' "$TMP/no-token.out"
+
+if run_clean "$ROOT/deploy/standby-promote.sh" "$ENV_FILE" >"$TMP/promote.out" 2>&1; then
   printf 'standby promotion accepted missing operator confirmation\n' >&2
   exit 1
 fi
 grep -q 'STANDBY_CONFIRM_PRODUCTION_DOWN=YES' "$TMP/promote.out"
+
+# Даже С подтверждением promote на неподготовленной машине обязан отказать
+# (нет tailscale/env-файла/образа — что именно, зависит от машины), а не
+# дойти до docker compose up. Подтверждение доставляем ВНУТРИ run_clean:
+# префиксное присваивание перед вызовом функции стёрлось бы её же `env -u`,
+# и тест вакуумно проверял бы тот же первый гейт, что и предыдущий.
+if run_clean env STANDBY_CONFIRM_PRODUCTION_DOWN=YES \
+  "$ROOT/deploy/standby-promote.sh" "$TMP/definitely-missing.env" \
+  >"$TMP/promote2.out" 2>&1; then
+  printf 'standby promotion ran on an unprovisioned machine\n' >&2
+  exit 1
+fi
+grep -q 'FAIL standby promotion' "$TMP/promote2.out"
+# Доказательство, что первый гейт ПРОЙДЕН и отказ случился на пред-проверках:
+if grep -q 'нужно STANDBY_CONFIRM_PRODUCTION_DOWN=YES' "$TMP/promote2.out"; then
+  printf 'confirmation did not reach promote — negative test is vacuous\n' >&2
+  exit 1
+fi
 
 printf 'standby-compose tests: ok\n'
