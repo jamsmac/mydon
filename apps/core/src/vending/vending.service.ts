@@ -301,9 +301,10 @@ export interface SubmitPurchaseResult {
 }
 
 /**
- * Склад считается устаревшим для плана, если инвентаризация старше стольких
- * дней (спека П5a §6). Смысл — не «дата некрасивая», а «числа плана врут»:
- * закуп вычитает из потребности остаток, которого на полке может уже не быть.
+ * Склад считается устаревшим для плана, если САМАЯ СТАРАЯ строка остатка
+ * старше стольких дней (спека П5a §6). Смысл — не «дата некрасивая», а «числа
+ * плана врут»: закуп вычитает из потребности остаток, которого на полке может
+ * уже не быть.
  */
 export const STOCK_STALE_DAYS = 3;
 
@@ -981,7 +982,13 @@ export class VendingService {
     for (const e of ents) {
       if (e.type !== "machine" || !e.externalRef) continue;
       const serial = normalizeMachineSerial(e.externalRef);
-      if (!nameBySerial.has(serial)) nameBySerial.set(serial, e.name);
+      // Дубль карточки по одному серийнику — первая выигрывает ЦЕЛИКОМ, и имя,
+      // и состояние (та же конвенция, что в `machineIdBySerial`). Врозь это уже
+      // опасно: имя брали у первой, а состояние — у последней, и забытая
+      // карточка-дубль со «списан» молча убирала живой автомат из закупа,
+      // где предупреждений не видно.
+      if (nameBySerial.has(serial)) continue;
+      nameBySerial.set(serial, e.name);
       const status = statusById.get(e.id) ?? "in_service";
       if (status !== "in_service") notInService.set(serial, { name: e.name, status });
     }
@@ -1118,16 +1125,27 @@ export class VendingService {
       slots: allocateBySlots(slotsBySerial.get(a.serial) ?? [], a),
     }));
 
+    // `asOf` — «когда последний раз считали хоть что-то» (для показа).
     const asOf = ctx.stockRows.reduce<Date | null>((acc, r) => (!acc || r.countedAt > acc ? r.countedAt : acc), null);
-    const stale = asOf === null || Date.now() - asOf.getTime() > STOCK_STALE_DAYS * 86_400_000;
+    // А ДАВНОСТЬ — по самой старой строке с остатком. Инвентаризация почти
+    // всегда частичная (`ingestStock` перезаписывает только присланные товары),
+    // и один пересчитанный сегодня товар не делает свежим весь склад, который
+    // план вычитает из потребности. Нулевые строки на план не влияют — их не
+    // смотрим, иначе давно обнулённый товар держал бы предупреждение вечно.
+    const oldestUsed = ctx.stockRows.reduce<Date | null>(
+      (acc, r) => (r.quantity <= 0 ? acc : !acc || r.countedAt < acc ? r.countedAt : acc),
+      null,
+    );
+    const stale = asOf === null || (oldestUsed !== null && Date.now() - oldestUsed.getTime() > STOCK_STALE_DAYS * 86_400_000);
     const totalBefore = ctx.stockRows.reduce((a, r) => a + r.quantity, 0);
 
     const warnings: PlanWarning[] = [];
     if (stale) {
       warnings.push({
         code: "stock_stale",
-        message: asOf
-          ? `Склад инвентаризирован ${asOf.toLocaleDateString("ru-RU", { timeZone: TZ })} — обнови: «склад …»`
+        // Называем САМУЮ СТАРУЮ дату: именно она объясняет, чему верить нельзя.
+        message: oldestUsed
+          ? `Часть склада инвентаризирована ${oldestUsed.toLocaleDateString("ru-RU", { timeZone: TZ })} — обнови: «склад …»`
           : "Склад не инвентаризирован — план считает склад пустым",
       });
     }

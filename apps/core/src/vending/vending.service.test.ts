@@ -1585,13 +1585,73 @@ describe("Вендинг Core: план закупа (П5a)", () => {
     assert.ok(plan.warnings.some((w) => w.code === "stock_stale"));
   });
 
-  it("без настройки маршрут — по имени автомата", async () => {
-    const db = planDb({ slots, entities, cards, products, sales });
-    const plan = await new VendingService(db).plan();
-    assert.deepEqual(plan.machines.map((m) => m.name), ["American Hospital", "Olma"]);
+  it("частичная инвентаризация: одна свежая строка не делает свежим весь склад", async () => {
+    // `ingestStock` перезаписывает только присланные товары, поэтому частичный
+    // пересчёт — норма. Давность обязана считаться по самой старой строке.
+    const свежая = new Date();
+    const старая = new Date(Date.now() - 5 * 86_400_000);
+    const частично = planDb({
+      slots,
+      entities,
+      cards,
+      products,
+      sales,
+      stock: [
+        { productName: "Fanta", quantity: 2, countedAt: свежая },
+        { productName: "Cola", quantity: 3, countedAt: старая },
+      ],
+    });
+    const план = await new VendingService(частично).plan();
+    assert.equal(план.stock.stale, true);
+    assert.ok(план.warnings.some((w) => w.code === "stock_stale"));
+    // Показываем при этом последнюю дату пересчёта — «когда считали хоть что-то».
+    assert.equal(план.stock.asOf, свежая.toISOString());
+
+    const всёСвежее = planDb({
+      slots,
+      entities,
+      cards,
+      products,
+      sales,
+      stock: [
+        { productName: "Fanta", quantity: 2, countedAt: свежая },
+        { productName: "Cola", quantity: 3, countedAt: свежая },
+      ],
+    });
+    const второй = await new VendingService(всёСвежее).plan();
+    assert.equal(второй.stock.stale, false);
+    assert.ok(!второй.warnings.some((w) => w.code === "stock_stale"));
   });
 
-  it("исключённый товар уходит в excludedByRule, фикс — в order", async () => {
+  it("дубль карточки по серийнику не гасит живой автомат", async () => {
+    // Забытая вторая карточка с тем же серийником и статусом «на складе» не
+    // должна молча убирать автомат из закупа: первая карточка выигрывает
+    // целиком — и имя, и состояние.
+    const сДублем: Ent[] = [...entities, { id: "m-ah-dubl", name: "American Hospital (старая карточка)", externalRef: "c2508160359", type: "machine" }];
+    const карточки: Card[] = [...cards, { entityId: "m-ah-dubl", status: "warehouse" }];
+    const db = planDb({ slots, entities: сДублем, cards: карточки, products, sales });
+    const plan = await new VendingService(db).plan();
+    assert.ok(plan.machines.some((m) => m.serial === "2508160359"), "живой автомат остался в плане");
+    assert.equal(plan.machines.find((m) => m.serial === "2508160359")!.name, "American Hospital");
+    assert.ok(!plan.warnings.some((w) => w.message.includes("American Hospital")), "дубль не должен давать machine_skipped");
+  });
+
+  it("без настройки маршрут — по имени автомата", async () => {
+    // Маршрут резолвится «база → env → дефолт», поэтому выставленная в
+    // окружении переменная покрасила бы тест в красный без единой правки кода.
+    const было = process.env.VENDING_ROUTE_ORDER;
+    delete process.env.VENDING_ROUTE_ORDER;
+    try {
+      const db = planDb({ slots, entities, cards, products, sales });
+      const plan = await new VendingService(db).plan();
+      assert.deepEqual(plan.machines.map((m) => m.name), ["American Hospital", "Olma"]);
+    } finally {
+      if (было === undefined) delete process.env.VENDING_ROUTE_ORDER;
+      else process.env.VENDING_ROUTE_ORDER = было;
+    }
+  });
+
+  it("исключённый товар уходит в excludedByRule и не попадает в items", async () => {
     const prods: ProdRow[] = [
       { id: "p1", name: "Fanta", purchasePrice: "5167", packSize: 12, excludedFromPurchase: true, fixedPurchaseQty: null },
     ];
@@ -1599,6 +1659,21 @@ describe("Вендинг Core: план закупа (П5a)", () => {
     const plan = await new VendingService(db).plan();
     assert.equal(plan.summary.items.length, 0);
     assert.equal(plan.summary.excludedByRule[0]!.product, "Fanta");
+  });
+
+  it("фикс-количество товара уходит в order как есть, без округления до блока", async () => {
+    // Правило владельца («СуперКонтик 50»): закупаем ровно фикс, а не кратное
+    // блоку. Проверяем весь путь колонка → rulesByName → computePurchase.
+    const сФиксом: ProdRow[] = [
+      { id: "p1", name: "Fanta", purchasePrice: "5167", packSize: 12, excludedFromPurchase: false, fixedPurchaseQty: 50 },
+    ];
+    const db = planDb({ slots, entities, cards, products: сФиксом, sales });
+    const plan = await new VendingService(db).plan();
+    const позиция = plan.summary.items[0]!;
+    assert.equal(позиция.fixedQty, 50);
+    assert.equal(позиция.order, 50); // не 60 = ceil(6/12)×12
+    assert.equal(позиция.fromPurchase, 6); // в автоматы — по потребности
+    assert.equal(plan.stock.back, 44); // остальное закупа уезжает на склад
   });
 });
 
