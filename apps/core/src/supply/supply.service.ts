@@ -5,12 +5,12 @@ import {
   type OnApplicationShutdown,
   OnModuleInit,
 } from "@nestjs/common";
-import { entity, event, machineStock, purchase } from "@mydon/db";
-import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, strictNumber } from "@mydon/shared";
+import { entity, event, machineStock, ourvendStockSnapshot, purchase } from "@mydon/db";
+import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, strictNumber } from "@mydon/shared";
 import { desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
-import { todayLocal } from "../sales/sales.service";
+import { accountingSource, todayLocal } from "../sales/sales.service";
 
 type PurchaseRow = typeof purchase.$inferSelect;
 
@@ -107,7 +107,8 @@ export function buildStockUpserts(
   const quarantined: QuarantinedSupply[] = [];
   for (const r of rows) {
     if (!(r.machine_serial && r.ourvend_name && r.dt)) continue;
-    const machineSerial = String(r.machine_serial).toLowerCase();
+    // Канон в ключе — по той же причине, что в buildUpserts (см. sales.service).
+    const machineSerial = normalizeMachineSerial(String(r.machine_serial));
     const product = String(r.ourvend_name).slice(0, 512);
     const qty = strictNumber(r.qty);
     if (qty === null) {
@@ -166,7 +167,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
   constructor(@Inject(DB) private readonly db: Db) {}
 
   onModuleInit(): void {
-    if (!process.env.STOCK_DATABASE_URL) {
+    if (!process.env.STOCK_DATABASE_URL && accountingSource() !== "own") {
       this.log.log("STOCK_DATABASE_URL не задан — синк снабжения выключен.");
       return;
     }
@@ -187,33 +188,57 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
 
   async sync(): Promise<{ purchases: number; stock: number }> {
     const url = process.env.STOCK_DATABASE_URL;
-    if (!url) return { purchases: 0, stock: 0 };
+    const ownStock = accountingSource() === "own";
+    if (!url && !ownStock) return { purchases: 0, stock: 0 };
 
+    // Подключение к БД mydon-stock нужно только пока жив stock-источник:
+    // приход (purchases, до среза П3) и — при source=stock — остатки.
     const { default: postgres } = await import("postgres");
-    const stock = postgres(url, { prepare: false, max: 1, connect_timeout: 10 });
+    const stock = url ? postgres(url, { prepare: false, max: 1, connect_timeout: 10 }) : null;
     try {
       // Приход: имя товара и единица разворачиваются сразу — у нас плоская строка.
       const [{ np }] = await this.db.select({ np: sql<number>`count(*)` }).from(purchase);
-      const pRows = (await (Number(np) === 0
-        ? stock`
-            select p.id, p.dt::text, pr.name as product, pr.unit, p.qty, p.unit_price, p.total,
-                   p.note, p.expiry_date::text
-            from purchases p join products pr on pr.id = p.product_id`
-        : stock`
-            select p.id, p.dt::text, pr.name as product, pr.unit, p.qty, p.unit_price, p.total,
-                   p.note, p.expiry_date::text
-            from purchases p join products pr on pr.id = p.product_id
-            where p.created_at > now() - interval '3 days'`)) as unknown as StockPurchaseRow[];
+      const pRows = stock
+        ? ((await (Number(np) === 0
+            ? stock`
+                select p.id, p.dt::text, pr.name as product, pr.unit, p.qty, p.unit_price, p.total,
+                       p.note, p.expiry_date::text
+                from purchases p join products pr on pr.id = p.product_id`
+            : stock`
+                select p.id, p.dt::text, pr.name as product, pr.unit, p.qty, p.unit_price, p.total,
+                       p.note, p.expiry_date::text
+                from purchases p join products pr on pr.id = p.product_id
+                where p.created_at > now() - interval '3 days'`)) as unknown as StockPurchaseRow[])
+        : [];
 
       const [{ ns }] = await this.db.select({ ns: sql<number>`count(*)` }).from(machineStock);
-      const sRows = (await (Number(ns) === 0
-        ? stock`
-            select dt::text, machine_serial, ourvend_name, qty, fetched_at
-            from ourvend_machine_stock`
-        : stock`
-            select dt::text, machine_serial, ourvend_name, qty, fetched_at
-            from ourvend_machine_stock
-            where fetched_at > now() - interval '3 days'`)) as unknown as StockLevelRow[];
+      const firstStockRun = Number(ns) === 0;
+      let sRows: StockLevelRow[];
+      if (ownStock) {
+        sRows = (await this.db
+          .select({
+            dt: sql<string>`${ourvendStockSnapshot.dt}::text`,
+            machine_serial: ourvendStockSnapshot.machineSerial,
+            ourvend_name: ourvendStockSnapshot.product,
+            qty: ourvendStockSnapshot.qty,
+            fetched_at: ourvendStockSnapshot.fetchedAt,
+          })
+          .from(ourvendStockSnapshot)
+          .where(
+            firstStockRun ? sql`true` : sql`${ourvendStockSnapshot.fetchedAt} > now() - interval '3 days'`,
+          )) as unknown as StockLevelRow[];
+      } else if (stock) {
+        sRows = (await (firstStockRun
+          ? stock`
+              select dt::text, machine_serial, ourvend_name, qty, fetched_at
+              from ourvend_machine_stock`
+          : stock`
+              select dt::text, machine_serial, ourvend_name, qty, fetched_at
+              from ourvend_machine_stock
+              where fetched_at > now() - interval '3 days'`)) as unknown as StockLevelRow[];
+      } else {
+        sRows = [];
+      }
 
       const machines = await this.db
         .select({ id: entity.id, ref: entity.externalRef })
@@ -273,10 +298,12 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
       // Дозаполнение карточек автоматов из источника: тип (кофе/снеки) и точка.
       // Ревизия 2026-07-30: у 11 из 26 автоматов тип был не указан — панель
       // честно писала «не указан», но пустоту надо закрывать, а не только
-      // показывать. Заполняем лишь пустые поля.
-      const stockMachines = (await stock`
-        select serial, name, kind, location from machines where serial is not null
-      `) as unknown as StockMachineRow[];
+      // показывать. Заполняем лишь пустые поля. Живёт, пока жив stock (до П8).
+      const stockMachines = stock
+        ? ((await stock`
+            select serial, name, kind, location from machines where serial is not null
+          `) as unknown as StockMachineRow[])
+        : [];
       const bySerial = new Map(
         stockMachines
           .filter((m) => m.serial)
@@ -327,7 +354,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
       this.log.log(`Снабжение: приход ${pValues.length}, остатки ${sValues.length}.`);
       return { purchases: pValues.length, stock: sValues.length };
     } finally {
-      await stock.end({ timeout: 5 });
+      if (stock) await stock.end({ timeout: 5 });
     }
   }
 

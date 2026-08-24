@@ -96,11 +96,16 @@ async function main(): Promise<void> {
       { org: null, approved: false, by: null },
     );
 
+    // «No-op» проверяется снимком до/после, а не зашитым числом миграций:
+    // хардкод ломался бы каждой новой миграцией (сломался на 0063/0064).
+    const [before] = await testDb<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
+    `;
     await migrate(drizzle(testDb), { migrationsFolder });
     const [journal] = await testDb<{ count: number }[]>`
       SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
     `;
-    assert.equal(journal?.count, 63, "повторный запуск должен быть no-op");
+    assert.equal(journal?.count, before?.count, "повторный запуск должен быть no-op");
     console.log("Migration 0061 -> 0062: upgrade, backfill and repeat run are valid.");
   } finally {
     await testDb?.end({ timeout: 5 });

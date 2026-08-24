@@ -12,7 +12,8 @@
 # Cron: 0 6 * * * /opt/mydon-stock/disk_guard.sh  (11:00 по Ташкенту)
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-cd /opt/mydon-stock
+# cd в /opt/mydon-stock больше не нужен: прежний код читал .env склада из
+# cwd, теперь все пути абсолютные (П1 плана поглощения).
 
 USED=$(df -P / | awk 'NR==2 {print $5+0}')
 
@@ -32,9 +33,15 @@ if [ -n "${INGEST_KEY}" ]; then
 fi
 
 # Запасной путь: MYDON не ответил, а диск уже в красной зоне — говорим напрямую.
+# П1 плана поглощения: канал больше не зависит от бота склада — та же лесенка,
+# что в backup_extra.sh: свои TG_BACKUP_* → аварийный бот сторожа.
 if [ "$sent_to_mydon" -eq 0 ] && [ "$USED" -ge 85 ]; then
-    BOT_TOKEN=$(grep '^BOT_TOKEN=' .env | cut -d= -f2-)
-    CHAT_ID=$(grep '^TG_BACKUP_CHAT_ID=' .env | cut -d= -f2-)
+    BOT_TOKEN=$(grep '^TG_BACKUP_BOT_TOKEN=' "$MYDON_ENV" 2>/dev/null | tail -1 | cut -d= -f2-)
+    CHAT_ID=$(grep '^TG_BACKUP_CHAT_ID=' "$MYDON_ENV" 2>/dev/null | tail -1 | cut -d= -f2-)
+    if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+        BOT_TOKEN=$(grep '^WATCHDOG_BOT_TOKEN=' /etc/mydon-heartbeat.env 2>/dev/null | tail -1 | cut -d= -f2-)
+        CHAT_ID=$(grep '^WATCHDOG_CHAT_IDS=' /etc/mydon-heartbeat.env 2>/dev/null | tail -1 | cut -d= -f2- | cut -d, -f1 | tr -d '[:space:]')
+    fi
     curl -sf -m 30 -F chat_id="${CHAT_ID}" \
          -F text="🚨 Диск Hetzner заполнен на ${USED}%. (MYDON не ответил — сообщение напрямую.) Смотри: docker system df, /opt/backups." \
          -K- <<< "url = \"https://api.telegram.org/bot${BOT_TOKEN}/sendMessage\"" > /dev/null

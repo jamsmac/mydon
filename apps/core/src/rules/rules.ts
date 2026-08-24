@@ -250,6 +250,25 @@ export const RULES: Rule[] = [
     format: (c) => `✅ Автодеплой восстановился: ${str(c.payload.commit, "?")} задеплоен.`,
   },
   {
+    // Гейт П2 поглощения: ежедневный вердикт сверки собственного снапшота
+    // OurVend со stock-дорожкой. 7 зелёных подряд = можно переключать источник.
+    id: "ourvend.parity",
+    eventType: "ourvend.parity",
+    urgency: "briefing",
+    format: (c) =>
+      c.payload.ok === true
+        ? `✅ Паритет OurVend: сходится (пар ${str(c.payload.сверено_пар, "?")})`
+        : `⚠️ Паритет OurVend: расхождений ${str(c.payload.расхождений, "?")} из ${str(c.payload.сверено_пар, "?")} пар — переключать источник рано`,
+  },
+  {
+    // Мусорные числа в снапшоте не вливаются нулём — но и молчать о них нельзя.
+    id: "ourvend.snapshot_quarantine",
+    eventType: "ourvend.snapshot_quarantine",
+    urgency: "immediate",
+    format: (c) =>
+      `⚠️ Снапшот OurVend: ${str(c.payload.count, "?")} строк с нечисловыми значениями отложено в карантин`,
+  },
+  {
     // Дамп больше лимита Bot API (50 МБ): бэкап сделан, но offsite-копии НЕТ.
     // Это не «успех с оговоркой», а дыра в защите — говорим немедленно.
     id: "infra.backup_oversize",

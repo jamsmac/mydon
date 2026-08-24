@@ -22,7 +22,18 @@ describe("Продажи: подготовка строк из mydon-stock", () 
     ];
     const [v] = buildUpserts(rows, map).values;
     assert.equal(v.machineId, null);
-    assert.equal(v.machineSerial, "c2508160376");
+    // Канон в КЛЮЧЕ записи: «C…» и голая форма не должны плодить двойников
+    // при переключении источника (миграция 0064 привела историю).
+    assert.equal(v.machineSerial, "2508160376");
+  });
+
+  it("обе формы серийника дают ОДИН ключ записи — двойников при cutover нет", () => {
+    const rows: StockSaleRow[] = [
+      { dt: "2026-07-28", machine_serial: "c2508160376", ourvend_name: "Вода", qty: 1, amount: 3000, fetched_at: new Date() },
+      { dt: "2026-07-28", machine_serial: "2508160376", ourvend_name: "Вода", qty: 2, amount: 6000, fetched_at: new Date() },
+    ];
+    const { values } = buildUpserts(rows, map);
+    assert.equal(values[0].machineSerial, values[1].machineSerial);
   });
 
   it("битые строки (пустой серийник или товар) отбрасываются", () => {

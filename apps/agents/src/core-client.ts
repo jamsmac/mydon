@@ -344,6 +344,32 @@ export class AgentsCoreClient {
     });
   }
 
+  // ── Учётный снапшот OurVend (П2 плана поглощения mydon-stock) ─────────────
+
+  /** Докуда дотянулся собственный снапшот (вотермарки помашинные). */
+  ourvendSnapshotStatus(): Promise<{
+    lastSaleDt: string | null;
+    lastStockDt: string | null;
+    perMachineSale: { machineSerial: string; last: string }[];
+  }> {
+    return this.request<{
+      lastSaleDt: string | null;
+      lastStockDt: string | null;
+      perMachineSale: { machineSerial: string; last: string }[];
+    }>("/ourvend/status");
+  }
+
+  /** Отдать пачку дней продаж и/или снимков остатков (перезапись днями). */
+  pushOurvendSnapshot(payload: {
+    sales?: { dt: string; machineSerial: string; rows: { product: string; qty: number; amount: number }[] }[];
+    stock?: { dt: string; machineSerial: string; rows: { product: string; qty: number }[] }[];
+  }): Promise<{ saleDays: number; saleRows: number; stockDays: number; stockRows: number; quarantined: number }> {
+    return this.request<{ saleDays: number; saleRows: number; stockDays: number; stockRows: number; quarantined: number }>(
+      "/ourvend/snapshot",
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
   health(): Promise<{ status: string }> {
     return this.request<{ status: string }>("/health");
   }

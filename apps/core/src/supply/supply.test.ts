@@ -39,8 +39,13 @@ describe("Снабжение: подготовка строк источника
     assert.equal(quarantined[1].field, "unit_price");
   });
 
-  it("остатки: серийник к нижнему регистру, известный — привязан к автомату", () => {
-    const map = new Map([["c2508160376", "ent-1"]]);
+  it("остатки: серийник к канону (обе формы в карте — machineSerialKeys), известный — привязан", () => {
+    // Прод-карта строится machineSerialKeys — в ней ОБЕ формы; после канона в
+    // ключе решает голая.
+    const map = new Map([
+      ["c2508160376", "ent-1"],
+      ["2508160376", "ent-1"],
+    ]);
     const [a, b] = buildStockUpserts(
       [
         { dt: "2026-07-28", machine_serial: "C2508160376", ourvend_name: "Вода", qty: 0, fetched_at: new Date() },
@@ -49,6 +54,7 @@ describe("Снабжение: подготовка строк источника
       map,
     ).values;
     assert.equal(a.machineId, "ent-1");
+    assert.equal(a.machineSerial, "2508160376", "ключ записи — канон, не сырая форма");
     assert.equal(a.qty, "0");
     assert.equal(b.machineId, null);
   });
