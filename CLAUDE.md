@@ -54,6 +54,15 @@ org · project · entity · person · task · approval · event · document · m
   из доноров (VendHub-OS для оболочки, mydon_1 для Command Center), чинить импорты — не генерировать заново.
 - **Ничего не удалять** в проектах-донорах.
 - **Базы движков не сливать:** общая оболочка — да, общая БД для всего — нет. VHM24 держит свою схему.
+- **Мутирующие формы CC** (apps/cc) — принятая конвенция (решение 24.08.2026,
+  миграция Codex принята осознанно): `onSubmit` + `event.preventDefault()` +
+  `new FormData(event.currentTarget)` → вызов server action в
+  `startTransition`; при `res.ok` — сброс ошибки и `router.refresh()`, при
+  отказе — `setError(res.message)`, **поля сохраняют ввод**. НЕ возвращаться
+  к `<form action={fn}>`: React 19 сбрасывает неуправляемые поля после
+  экшена — ошибка Core теряла бы весь ввод длинных форм. Эталон —
+  `components/customs-rates.tsx`; тесты обязаны проверять сохранение ввода
+  при ошибке (см. customs-rates.test.tsx).
 
 ## Инфраструктура
 
