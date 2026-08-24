@@ -26,6 +26,19 @@ describe("config-spec: белый список тумблеров", () => {
     assert.equal(validateConfig("LLM_PROVIDER", "claude-cli"), null);
     assert.match(validateConfig("LLM_PROVIDER", "gpt") ?? "", /допустимо/);
   });
+
+  it("маршрут вендинга: серийники через запятую, без «c» и без букв (A7)", () => {
+    // Форма без приставки — канон `docs/DATA_SOURCES.md`. Приставку «c»
+    // отвергаем на вводе, чтобы владелец увидел отказ сразу, а не искал потом,
+    // почему маршрут «не применился».
+    assert.equal(validateConfig("VENDING_ROUTE_ORDER", "2508160376, 2508160359"), null);
+    assert.equal(validateConfig("VENDING_ROUTE_ORDER", "2508160376"), null);
+    assert.match(validateConfig("VENDING_ROUTE_ORDER", "c2508160376") ?? "", /серийники/);
+    assert.match(validateConfig("VENDING_ROUTE_ORDER", "abc") ?? "", /серийники/);
+    assert.match(validateConfig("VENDING_ROUTE_ORDER", "2508160376,,2508160359") ?? "", /серийники/);
+    // Пусто — сброс настройки (порядок по имени), это допустимо всегда.
+    assert.equal(validateConfig("VENDING_ROUTE_ORDER", ""), null);
+  });
 });
 
 describe("resolveEffective: приоритет база > env > дефолт", () => {

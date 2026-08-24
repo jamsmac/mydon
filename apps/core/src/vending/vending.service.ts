@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
 import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import {
+  approval,
   auditLog,
   entity,
   event,
@@ -28,11 +29,13 @@ import {
   computePurchaseCash,
   machineDeficit,
   machineSerialKeys,
+  machineStatusLabel,
   needByProduct,
   normalizeMachineSerial,
   normalizeProductName,
   planogramStatus,
   priceDeviationPct,
+  routeIssuesFrom,
   routeOrderFrom,
   runoutForecast,
   slotValid,
@@ -308,6 +311,14 @@ export interface SubmitPurchaseResult {
  */
 export const STOCK_STALE_DAYS = 3;
 
+/**
+ * Продажи считаются несвежими для плана, если самый свежий собранный батч
+ * старше стольких суток. Смысл тот же, что у склада: «нет продаж» выбрасывает
+ * позицию из закупа целиком (§5.5), и если продажи просто давно не собирали,
+ * это решение принято на пустом месте.
+ */
+export const SALES_STALE_DAYS = 2;
+
 /** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
 export interface PlanMachine {
   serial: string;
@@ -323,7 +334,19 @@ export interface PlanMachine {
 
 /** Предупреждение плана: то, из-за чего числам можно верить не полностью. */
 export interface PlanWarning {
-  code: "stock_stale" | "machine_skipped" | "no_price" | "unknown_product";
+  code:
+    | "stock_stale"
+    /** Строки склада, которых нет в прайсе: в расчёт не вошли (C2). */
+    | "stock_unknown_product"
+    | "machine_skipped"
+    | "no_price"
+    | "unknown_product"
+    /** Самый свежий батч продаж старше SALES_STALE_DAYS — «нет продаж» может врать (I3). */
+    | "sales_stale"
+    /** В батче продаж автоматов меньше, чем в расчёте (I3). */
+    | "sales_partial"
+    /** В настройке маршрута есть серийники, которых нет среди автоматов (A4/UX#16). */
+    | "route_unknown_serial";
   message: string;
 }
 
@@ -341,9 +364,17 @@ export interface PurchasePlan {
     back: number;
     totalAfter: number;
     stale: boolean;
+    /**
+     * Штуки на складе, которые в расчёт НЕ вошли: строки без карточки прайса
+     * (их имя не резолвится ни в товар, ни в алиас). В `totalBefore` не
+     * входят — иначе «станет N» не сходилось бы с арифметикой плана.
+     */
+    unmatched: number;
   };
   summary: PurchaseSummary;
   machines: PlanMachine[];
+  /** Порядок обхода задан настройкой (а не по имени автомата). */
+  routeConfigured: boolean;
   warnings: PlanWarning[];
 }
 
@@ -377,6 +408,17 @@ export interface SetRulesResult {
   after?: Partial<VendingProductRow>;
 }
 
+/** Строка прайса вендинга, как её читает `loadProductIndex`. */
+interface ProductIndexRow {
+  id: string;
+  name: string;
+  category: "drink" | "snack" | "other";
+  purchasePrice: string | null;
+  packSize: number;
+  excludedFromPurchase: boolean;
+  fixedPurchaseQty: number | null;
+}
+
 /** Остаток склада строкой: имя, штуки и когда считали. */
 interface StockRow {
   product: string;
@@ -396,9 +438,14 @@ interface PurchaseContext {
   nameBySerial: Map<string, string>;
   /** Автоматы со слотами, которые точно не в строю — их дефицит в закуп не идёт. */
   skipped: { serial: string; name: string; status: string }[];
+  /** Строки склада, чьё имя резолвится в товар прайса (имя — уже канон). */
   stockRows: StockRow[];
+  /** Строки склада без карточки прайса: в расчёт не вошли, но молчать о них нельзя. */
+  unmatchedStock: StockRow[];
   /** Канон-имена из слотов с дефицитом, которых нет в прайсе вендинга. */
   unknownProducts: string[];
+  /** Свежесть и полнота батча продаж — от них зависит смысл «нет продаж». */
+  sales: { capturedAt: Date | null; machinesInBatch: number; okMachines: number };
 }
 
 @Injectable()
@@ -704,17 +751,24 @@ export class VendingService {
    * приводится к канону через алиасы — иначе не сойдётся с потребностью
    * (`needByProduct`) и остатком склада, которые уже в каноне.
    */
-  private async latestSold7(okSerials: Set<string>, aliasByKey: Map<string, string>): Promise<Map<string, number>> {
+  private async latestSold7(
+    okSerials: Set<string>,
+    aliasByKey: Map<string, string>,
+  ): Promise<{ byProduct: Map<string, number>; capturedAt: Date | null; serials: Set<string> }> {
     const saleRows = await this.db.select().from(productSale);
     const latest = saleRows.reduce((max, r) => Math.max(max, r.capturedAt.getTime()), 0);
-    const out = new Map<string, number>();
+    const byProduct = new Map<string, number>();
+    // Серийники батча нужны плану: «нет продаж» по автомату, которого в батче
+    // вовсе не было, — это не «не продаётся», а «не собрали» (I3).
+    const serials = new Set<string>();
     for (const r of saleRows) {
       if (r.capturedAt.getTime() !== latest) continue;
       if (!okSerials.has(r.machineSerial)) continue;
+      serials.add(r.machineSerial);
       const name = this.resolveProduct(r.productName, aliasByKey);
-      out.set(name, (out.get(name) ?? 0) + r.quantity);
+      byProduct.set(name, (byProduct.get(name) ?? 0) + r.quantity);
     }
-    return out;
+    return { byProduct, capturedAt: latest > 0 ? new Date(latest) : null, serials };
   }
 
   /** Серийники ok-автоматов из готовой карты слотов. */
@@ -745,7 +799,7 @@ export class VendingService {
       }
     }
 
-    const soldByProduct = await this.latestSold7(okSerials, aliasByKey);
+    const { byProduct: soldByProduct } = await this.latestSold7(okSerials, aliasByKey);
 
     // Прогнозируем то, что сейчас загружено в автоматы.
     const input: RunoutInput[] = [...inByProduct.entries()].map(([product, inMachines]) => ({
@@ -776,6 +830,8 @@ export class VendingService {
     priceByName: Map<string, number>;
     packByName: Map<string, number>;
     rulesByName: Map<string, ProductRule>;
+    /** Строки прайса как есть — чтобы искать карточку по канону имени без второго запроса. */
+    productRows: ProductIndexRow[];
   }> {
     const [aliases, products] = await Promise.all([
       this.db.select().from(vendingAlias),
@@ -807,7 +863,21 @@ export class VendingService {
       packByName.set(p.name, p.packSize);
       rulesByName.set(p.name, { excluded: p.excludedFromPurchase, fixedQty: p.fixedPurchaseQty, pack: p.packSize });
     }
-    return { aliasByKey, priceByName, packByName, rulesByName };
+    return { aliasByKey, priceByName, packByName, rulesByName, productRows: products };
+  }
+
+  /**
+   * Карточка прайса по имени — по НОРМАЛИЗОВАННОМУ ключу, среди уже
+   * загруженных строк.
+   *
+   * `lower(name) = lower(canon)` в SQL промахивался мимо ровно тех имён, ради
+   * которых заведён `normalizeProductName`: «Red  Bull» с двумя пробелами,
+   * «ё» вместо «е», хвостовой пробел из копипасты. Владелец получал «товар не
+   * найден» на товар, который в прайсе есть.
+   */
+  private findProductRow(canon: string, rows: ProductIndexRow[]): ProductIndexRow | undefined {
+    const key = normalizeProductName(canon);
+    return rows.find((p) => normalizeProductName(p.name) === key);
   }
 
   /**
@@ -971,9 +1041,13 @@ export class VendingService {
     nameBySerial: Map<string, string>;
   }> {
     const [ents, cards] = await Promise.all([
-      // Без .where(): тип фильтруем в JS, чтобы выборка оставалась одной
-      // простой строкой и для стабов тестов (from() как thenable без where).
-      this.db.select({ id: entity.id, name: entity.name, externalRef: entity.externalRef, type: entity.type }).from(entity),
+      // Фильтр по типу — В ЗАПРОСЕ (индекс `entity_org_type_idx`): реестр
+      // держит все карточки направлений, и тянуть их целиком ради 26 автоматов
+      // на каждый /vending/plan значит платить за чужие строки.
+      this.db
+        .select({ id: entity.id, name: entity.name, externalRef: entity.externalRef, type: entity.type })
+        .from(entity)
+        .where(eq(entity.type, "machine")),
       this.db.select({ entityId: machineCard.entityId, status: machineCard.status }).from(machineCard),
     ]);
     const statusById = new Map(cards.map((c) => [c.entityId, c.status]));
@@ -1039,9 +1113,23 @@ export class VendingService {
       .filter(([serial]) => okSerials.has(serial))
       .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, aliasByKey) }));
     const needs = needByProduct(ok);
-    const soldByProduct = await this.latestSold7(okSerials, aliasByKey);
-    const stockRows = await this.stockRows();
-    const stockByProduct = new Map(stockRows.map((r) => [r.product, r.quantity]));
+    const sold = await this.latestSold7(okSerials, aliasByKey);
+    const soldByProduct = sold.byProduct;
+
+    // Склад: имя строки приводим к канону тем же способом, что и слоты, и
+    // делим строки на «есть карточка прайса» и «нет». Осиротевшая строка в
+    // расчёт не идёт вовсе: у неё нет ни цены, ни кратности, ни правил, а
+    // вычесть её из потребности значит молча поверить имени, которого система
+    // не знает. Такие штуки план показывает отдельно (C2).
+    const allStockRows = await this.stockRows();
+    const stockRows: StockRow[] = [];
+    const unmatchedStock: StockRow[] = [];
+    for (const r of allStockRows) {
+      const canon = this.resolveProduct(r.product, aliasByKey);
+      (rulesByName.has(canon) ? stockRows : unmatchedStock).push({ ...r, product: canon });
+    }
+    const stockByProduct = new Map<string, number>();
+    for (const r of stockRows) stockByProduct.set(r.product, (stockByProduct.get(r.product) ?? 0) + r.quantity);
 
     // Прайс: только позиции с ценой попадают в карту — иначе калькулятор
     // пометит noPrice и выведет их на разбор менеджеру (§5.5).
@@ -1071,7 +1159,16 @@ export class VendingService {
     const nameBySerial = new Map(
       ok.map((m) => [m.machineId, nameByCanon.get(normalizeMachineSerial(m.machineId)) ?? m.machineId] as const),
     );
-    return { summary, ok, nameBySerial, skipped, stockRows, unknownProducts };
+    return {
+      summary,
+      ok,
+      nameBySerial,
+      skipped,
+      stockRows,
+      unmatchedStock,
+      unknownProducts,
+      sales: { capturedAt: sold.capturedAt, machinesInBatch: sold.serials.size, okMachines: okSerials.size },
+    };
   }
 
   /**
@@ -1108,7 +1205,9 @@ export class VendingService {
     const ctx = await this.purchaseContext();
     const s = ctx.summary;
     const machines = ctx.ok.map((m) => ({ serial: m.machineId, name: ctx.nameBySerial.get(m.machineId) ?? m.machineId }));
-    const route = routeOrderFrom(await this.routeSetting(), machines);
+    const setting = await this.routeSetting();
+    const route = routeOrderFrom(setting, machines);
+    const routeIssues = routeIssuesFrom(setting, machines);
     // Раздаём ВСЕ позиции с потребностью, включая «не закупать»: покупки по
     // ним нет, но склад в автоматы всё равно уезжает.
     const allItems = [...s.items, ...s.excludedByRule, ...s.excludedNoSales];
@@ -1127,34 +1226,92 @@ export class VendingService {
 
     // `asOf` — «когда последний раз считали хоть что-то» (для показа).
     const asOf = ctx.stockRows.reduce<Date | null>((acc, r) => (!acc || r.countedAt > acc ? r.countedAt : acc), null);
-    // А ДАВНОСТЬ — по самой старой строке с остатком. Инвентаризация почти
-    // всегда частичная (`ingestStock` перезаписывает только присланные товары),
-    // и один пересчитанный сегодня товар не делает свежим весь склад, который
-    // план вычитает из потребности. Нулевые строки на план не влияют — их не
-    // смотрим, иначе давно обнулённый товар держал бы предупреждение вечно.
-    const oldestUsed = ctx.stockRows.reduce<Date | null>(
-      (acc, r) => (r.quantity <= 0 ? acc : !acc || r.countedAt < acc ? r.countedAt : acc),
-      null,
+
+    // А ДАВНОСТЬ — по строкам, которые план РЕАЛЬНО использует: остаток
+    // товара, который сейчас уезжает в автоматы (`fromStock > 0`). Прежняя
+    // проверка «по самой старой строке с остатком» горела почти всегда:
+    // на складе десятки позиций, и одна забытая банка держала предупреждение
+    // вечно — предупреждение, которое горит всегда, не читают. Если план не
+    // берёт со склада ничего, смотрим все ненулевые строки (как раньше):
+    // молчать в этом случае не на чем.
+    const usedProducts = new Set(
+      [...s.items, ...s.excludedByRule, ...s.excludedNoSales].filter((i) => i.fromStock > 0).map((i) => i.product),
     );
-    const stale = asOf === null || (oldestUsed !== null && Date.now() - oldestUsed.getTime() > STOCK_STALE_DAYS * 86_400_000);
+    const usedRows = ctx.stockRows.filter((r) => usedProducts.has(r.product));
+    const watched = usedRows.length > 0 ? usedRows : ctx.stockRows.filter((r) => r.quantity > 0);
+    const staleRows = watched
+      .filter((r) => Date.now() - r.countedAt.getTime() > STOCK_STALE_DAYS * 86_400_000)
+      .sort((a, b) => a.countedAt.getTime() - b.countedAt.getTime());
+    const stale = asOf === null || staleRows.length > 0;
     const totalBefore = ctx.stockRows.reduce((a, r) => a + r.quantity, 0);
 
     const warnings: PlanWarning[] = [];
     if (stale) {
+      const имена = staleRows.slice(0, 5).map((r) => r.product);
+      const ещё = staleRows.length > имена.length ? ` и ещё ${staleRows.length - имена.length}` : "";
       warnings.push({
         code: "stock_stale",
-        // Называем САМУЮ СТАРУЮ дату: именно она объясняет, чему верить нельзя.
-        message: oldestUsed
-          ? `Часть склада инвентаризирована ${oldestUsed.toLocaleDateString("ru-RU", { timeZone: TZ })} — обнови: «склад …»`
-          : "Склад не инвентаризирован — план считает склад пустым",
+        message:
+          asOf === null
+            ? "Склад ни разу не считали — план считает его пустым и покупает весь дефицит. " +
+              "Обнови в боте: «склад Montella 24, Fanta 12»"
+            : `Склад: ${staleRows.length} поз. старше ${STOCK_STALE_DAYS} дней (${имена.join(", ")}${ещё}) — ` +
+              `обнови в боте: «склад ${имена[0] ?? "Montella"} 24»`,
       });
     }
-    for (const m of ctx.skipped) warnings.push({ code: "machine_skipped", message: `${m.name} (${m.serial}) не в строю: ${m.status}` });
-    if (s.noPrice.length) warnings.push({ code: "no_price", message: `Без цены — вне бюджета: ${s.noPrice.join(", ")}` });
+    if (ctx.unmatchedStock.length) {
+      // Строка склада без карточки прайса в расчёт не вошла: её остаток не
+      // вычитается из потребности, и владелец купит второй раз то, что лежит.
+      const шт = ctx.unmatchedStock.reduce((a, r) => a + r.quantity, 0);
+      warnings.push({
+        code: "stock_unknown_product",
+        message:
+          `На складе есть строки без карточки прайса (в расчёт не вошли, ${шт} шт): ` +
+          `${ctx.unmatchedStock.map((r) => r.product).join(", ")} — переименуй в боте: «склад <канон> N»`,
+      });
+    }
+    for (const m of ctx.skipped) {
+      warnings.push({ code: "machine_skipped", message: `${m.name} (${m.serial}) не в строю: ${machineStatusLabel(m.status)}` });
+    }
+    if (s.noPrice.length) {
+      warnings.push({
+        code: "no_price",
+        message: `Без цены (в сумму закупа не вошли): ${s.noPrice.join(", ")} — задай: «цена <товар> <сум за штуку>»`,
+      });
+    }
     if (ctx.unknownProducts.length) {
       warnings.push({
         code: "unknown_product",
-        message: `Нет в прайсе вендинга (нужна карточка или алиас): ${ctx.unknownProducts.join(", ")}`,
+        message:
+          `Нет в прайсе вендинга: ${ctx.unknownProducts.join(", ")} — цена и блок не применятся, ` +
+          "в сумму не войдут (карточку заводит администратор)",
+      });
+    }
+    // Продажи: «нет продаж» выбрасывает позицию из закупа целиком, поэтому
+    // несвежий или неполный батч меняет смысл половины плана (I3).
+    if (ctx.sales.capturedAt === null) {
+      warnings.push({
+        code: "sales_stale",
+        message: "Продажи ни разу не собирались — «нет продаж» стоит у всех позиций и закуп по ним не считается",
+      });
+    } else {
+      const дней = Math.floor((Date.now() - ctx.sales.capturedAt.getTime()) / 86_400_000);
+      if (дней > SALES_STALE_DAYS) {
+        warnings.push({ code: "sales_stale", message: `Продажи собраны ${дней} дн. назад — «нет продаж» может быть ложным` });
+      }
+      if (ctx.sales.machinesInBatch < ctx.sales.okMachines) {
+        warnings.push({
+          code: "sales_partial",
+          message:
+            `В батче продаж ${ctx.sales.machinesInBatch} автоматов из ${ctx.sales.okMachines} — ` +
+            "по остальным «нет продаж» ложное",
+        });
+      }
+    }
+    if (routeIssues.unknown.length) {
+      warnings.push({
+        code: "route_unknown_serial",
+        message: `В настройке маршрута нет таких автоматов: ${routeIssues.unknown.join(", ")} — порядок взят по имени`,
       });
     }
 
@@ -1167,9 +1324,11 @@ export class VendingService {
         back: s.totalToStock,
         totalAfter: totalBefore - s.totalFromStock + s.totalToStock,
         stale,
+        unmatched: ctx.unmatchedStock.reduce((a, r) => a + r.quantity, 0),
       },
       summary: s,
       machines: planMachines,
+      routeConfigured: routeIssues.configured,
       warnings,
     };
   }
@@ -1210,19 +1369,26 @@ export class VendingService {
     const name = rawProduct.trim();
     if (!name) return { ok: false, reason: "not_found" };
 
-    const { aliasByKey } = await this.loadProductIndex();
+    const { aliasByKey, productRows } = await this.loadProductIndex();
     const canon = this.resolveProduct(name, aliasByKey);
-    const [row] = await this.db
-      .select({
-        id: vendingProduct.id,
-        name: vendingProduct.name,
-        packSize: vendingProduct.packSize,
-        excludedFromPurchase: vendingProduct.excludedFromPurchase,
-        fixedPurchaseQty: vendingProduct.fixedPurchaseQty,
-      })
-      .from(vendingProduct)
-      .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
-      .limit(1);
+    // Сначала — среди уже загруженных строк по нормализованному ключу
+    // («блок Red  Bull CAN 0,25 6» с двумя пробелами); SQL по lower() остаётся
+    // запасным путём: он ловит имя, которого нет в загруженном срезе.
+    const row =
+      this.findProductRow(canon, productRows) ??
+      (
+        await this.db
+          .select({
+            id: vendingProduct.id,
+            name: vendingProduct.name,
+            packSize: vendingProduct.packSize,
+            excludedFromPurchase: vendingProduct.excludedFromPurchase,
+            fixedPurchaseQty: vendingProduct.fixedPurchaseQty,
+          })
+          .from(vendingProduct)
+          .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
+          .limit(1)
+      )[0];
     if (!row) return { ok: false, reason: "not_found", product: canon };
 
     const before: Partial<VendingProductRow> = {
@@ -1244,8 +1410,9 @@ export class VendingService {
 
     await this.db.transaction(async (tx) => {
       await tx.update(vendingProduct).set(set).where(eq(vendingProduct.id, row.id));
-      // Правило владельца меняет будущие закупы — след обязателен: событие
-      // читает лента «Действия», аудит держит «кто и когда».
+      // Правило владельца меняет будущие закупы — след обязателен: событие —
+      // история изменений (лента «Действия» его не читает), аудит держит
+      // «кто и когда».
       await tx.insert(event).values({
         source: "owner",
         type: "vending.product_rules_changed",
@@ -1275,6 +1442,28 @@ export class VendingService {
    */
   async submitPurchase(createdBy = "system"): Promise<SubmitPurchaseResult> {
     if (!this.approvals) throw new Error("ApprovalsService не подключён — отправка закупа недоступна");
+
+    // Вторая заявка поверх нерешённой — почти всегда двойное нажатие (кнопка в
+    // панели и «оформить закуп» в боте отправляют одно и то же). Владелец
+    // увидел бы в очереди два одинаковых закупа, одобрил оба и получил две
+    // накладные на один поход. Гейт по НЕРЕШЁННЫМ (decision='pending')
+    // заявкам агента «vending» со снимком закупа в payload.
+    const pendingRows = await this.db
+      .select({ payload: approval.payload })
+      .from(approval)
+      .where(and(eq(approval.agent, "vending"), eq(approval.decision, "pending")));
+    const хвост = pendingRows.some(
+      (r) => typeof r.payload === "object" && r.payload !== null && "purchaseOrder" in (r.payload as object),
+    );
+    if (хвост) {
+      return {
+        submitted: false,
+        positions: 0,
+        costRounded: 0,
+        reason: "Заявка на закуп уже ждёт решения — открой «согласования».",
+      };
+    }
+
     const s = await this.purchase();
     if (s.items.length === 0) {
       return { submitted: false, positions: 0, costRounded: 0, reason: "Закупать нечего — заявка не нужна." };
@@ -1298,9 +1487,14 @@ export class VendingService {
     }));
 
     const sum = Math.round(s.costRounded).toLocaleString("ru-RU");
+    // Штуки в заголовке заявки — не украшение: владелец решает по кнопке в
+    // Telegram, где виден только `action`, и «3 поз. на 84 000» не отвечало на
+    // вопрос «сколько это привезут». Позиции без цены оговариваем прямо:
+    // сумма по ним не посчитана, реальный чек будет больше.
+    const безЦены = s.noPrice.length > 0 ? ` (у ${s.noPrice.length} поз. нет цены — реальная сумма выше)` : "";
     const created = await this.approvals.request({
       agent: "vending",
-      action: `Закуп вендинга: ${s.items.length} поз., ~${sum} сум`,
+      action: `Закуп вендинга: ${s.items.length} поз., ${s.totalOrder} ед, ~${sum} сум${безЦены}`,
       tier: "T2", // движение денег — не автономная операция
       payload: {
         purchaseOrder: {
@@ -1616,13 +1810,19 @@ export class VendingService {
     const name = rawProduct.trim();
     if (!name || !Number.isFinite(price) || price <= 0) return { ok: false, reason: "not_found" };
 
-    const { aliasByKey } = await this.loadProductIndex();
+    const { aliasByKey, productRows } = await this.loadProductIndex();
     const canon = this.resolveProduct(name, aliasByKey);
-    const [row] = await this.db
-      .select({ id: vendingProduct.id, name: vendingProduct.name, purchasePrice: vendingProduct.purchasePrice })
-      .from(vendingProduct)
-      .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
-      .limit(1);
+    // Как и в правилах: канон ищем по нормализованному ключу среди загруженных
+    // строк, SQL по lower() — запасной путь.
+    const row =
+      this.findProductRow(canon, productRows) ??
+      (
+        await this.db
+          .select({ id: vendingProduct.id, name: vendingProduct.name, purchasePrice: vendingProduct.purchasePrice })
+          .from(vendingProduct)
+          .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
+          .limit(1)
+      )[0];
     if (!row) return { ok: false, reason: "not_found", product: canon };
 
     const oldPrice = row.purchasePrice === null ? null : Number(row.purchasePrice);
@@ -1641,8 +1841,8 @@ export class VendingService {
     await this.db.transaction(async (tx) => {
       await tx.update(vendingProduct).set({ purchasePrice: price.toFixed(2) }).where(eq(vendingProduct.id, row.id));
       // История цены — событием: у vending_product нет структурной истории
-      // (appendPriceHistory покрывает только entity-карточки), а событие
-      // читает и лента «Действия».
+      // (appendPriceHistory покрывает только entity-карточки). Событие —
+      // история изменений (лента «Действия» его не читает).
       await tx.insert(event).values({
         source: "owner",
         type: "vending.price_changed",
