@@ -232,6 +232,47 @@ export const VENDING_ALIASES: AliasItem[] = [
   { alias: "Cheers", product: "Cheers Сметана и зелень 70gr" },
   { alias: "Oreo 4шт", product: "Oreo x4 38gr" },
   { alias: "Суперконтик", product: "СуперКонтик Шоколадный вкус 100gr" },
+
+  // ── Имена со СКЛАДА прода (сверка остатков 24.08.2026) ──
+  // Без них строки склада осиротели: план не видел остаток и покупал заново
+  // (на сверке — 295 190 сум лишнего закупа).
+  { alias: "MOXITO FRESH LIMON CAN 0.5", product: "Moxito Fresh CAN 0,5" },
+  { alias: "Coca-Cola Zero CAN 0.25", product: "Coca-Cola ZeroS CAN 0.25" },
+  { alias: "O'zbegim Tea 0.45", product: "Ozbegim Tea Mango Moychechak 450ml" },
+  // «Red Bull» с пробелом: ровно так владелец пишет в подсказке бота
+  // («блок RedBull 6») и в заметках закупа — без алиаса команда правил и ввод
+  // склада промахивались мимо карточки.
+  { alias: "Red Bull", product: "Red Bull CAN 0,25" },
+];
+
+/**
+ * Цены прайса, разошедшиеся с закупочными ценами донора (`procurement-rules.json`
+ * владельца, 24.08.2026).
+ *
+ * Сид цены НЕ ПРАВИТ — правит только команда «цена <товар> <сум>» с гейтом ±20%
+ * (П3a, R-P5a-2): у прайса и у донора разные основания (фискальный каталог
+ * против реального чека базара), и молча переписать одно другим значит
+ * потерять то, что владелец уже подтвердил. Поэтому расхождения печатаются
+ * списком «на разбор» — решает владелец, одной командой на позицию.
+ */
+export interface PriceDiffItem {
+  product: string;
+  /** Цена в прайсе сида (фискальный каталог). */
+  seed: number;
+  /** Цена донора (закупочный лист владельца 24.08.2026). */
+  donor: number;
+}
+
+export const DONOR_PRICE_DIFFS: PriceDiffItem[] = [
+  { product: "FuseTea Tea Fuse Mango-Cham", seed: 6084, donor: 8500 },
+  { product: "Pepsi CAN 0,25", seed: 5000, donor: 5990 },
+  { product: "Borjomi Mineral Water CAN 0,33", seed: 9000, donor: 10500 },
+  { product: "Plus 18 CAN 0,45", seed: 9990, donor: 8750 },
+  { product: "Flash Up Energy CAN 0,45", seed: 9167, donor: 8500 },
+  { product: "Coca-Cola ZeroS CAN 0.25", seed: 4999.16, donor: 5416.67 },
+  { product: "Coca-Cola Classic CAN 0,25", seed: 4999.16, donor: 5166.67 },
+  { product: "Fanta C CAN 0,25", seed: 5000, donor: 5166.67 },
+  { product: "Red Bull CAN 0,25", seed: 16500, donor: 16000 },
 ];
 
 /** Правило закупа товара — перенос procurement-rules.json владельца (24.08.2026). */
@@ -271,27 +312,58 @@ export const VENDING_PURCHASE_RULES: PurchaseRuleItem[] = [
   { product: "Cheers Сметана и зелень 70gr", packSize: 5 },
 ];
 
+/** Кратность по умолчанию для строки прайса — та же, что ставит сид цен. */
+const defaultPackFor = (category: string): number => (category === "drink" ? 12 : 10);
+
 /**
- * Наложить правила закупа на существующие строки `vending_product`. Идемпотентно:
- * задаёт ровно те поля, что перечислены в правиле; товар не найден — в `unknown`.
+ * Строка правил ещё «нетронута»: ни одно из трёх полей не отличается от того,
+ * что ставит сид цен. Тронутую строку правит владелец — из бота («блок …»,
+ * «фикс …», «не закупать …») или из панели, и наложить на неё правило из кода
+ * значит откатить его решение молча, на ближайшем прогоне сида.
  */
-export async function seedVendingRules(db: ReturnType<typeof createDb>): Promise<{ applied: number; unknown: string[] }> {
-  const products = await db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct);
-  const idByName = new Map(products.map((p) => [p.name, p.id]));
+function untouchedRules(row: { category: string; packSize: number; excludedFromPurchase: boolean; fixedPurchaseQty: number | null }): boolean {
+  return row.excludedFromPurchase === false && row.fixedPurchaseQty === null && row.packSize === defaultPackFor(row.category);
+}
+
+/**
+ * Наложить правила закупа на существующие строки `vending_product`.
+ *
+ * Идемпотентно и ОДНОСТОРОННЕ: правило накладывается только на нетронутую
+ * строку. Повторный прогон сида не трогает то, что владелец уже поменял —
+ * иначе выкатка тихо возвращала бы «блок 12» товару, которому владелец
+ * вчера поставил 6 (M5/A9). Тронутые строки возвращаются в `skipped` и
+ * печатаются: пропуск обязан быть видимым.
+ */
+export async function seedVendingRules(
+  db: ReturnType<typeof createDb>,
+): Promise<{ applied: number; unknown: string[]; skipped: string[] }> {
+  const products = await db
+    .select({
+      id: vendingProduct.id,
+      name: vendingProduct.name,
+      category: vendingProduct.category,
+      packSize: vendingProduct.packSize,
+      excludedFromPurchase: vendingProduct.excludedFromPurchase,
+      fixedPurchaseQty: vendingProduct.fixedPurchaseQty,
+    })
+    .from(vendingProduct);
+  const rowByName = new Map(products.map((p) => [p.name, p]));
   const unknown: string[] = [];
+  const skipped: string[] = [];
   let applied = 0;
   for (const r of VENDING_PURCHASE_RULES) {
-    const id = idByName.get(r.product);
-    if (!id) { unknown.push(r.product); continue; }
+    const row = rowByName.get(r.product);
+    if (!row) { unknown.push(r.product); continue; }
+    if (!untouchedRules(row)) { skipped.push(r.product); continue; }
     await db.update(vendingProduct).set({
       ...(r.excludedFromPurchase !== undefined ? { excludedFromPurchase: r.excludedFromPurchase } : {}),
       ...(r.fixedPurchaseQty !== undefined ? { fixedPurchaseQty: r.fixedPurchaseQty } : {}),
       ...(r.packSize !== undefined ? { packSize: r.packSize } : {}),
       updatedAt: new Date(),
-    }).where(eq(vendingProduct.id, id));
+    }).where(eq(vendingProduct.id, row.id));
     applied += 1;
   }
-  return { applied, unknown };
+  return { applied, unknown, skipped };
 }
 
 /**
@@ -354,8 +426,8 @@ export async function seedVendingAliases(
   const stockNames = new Set(stockRows.map((r) => r.productName));
 
   const rows: { productId: string; alias: string; source: "warehouse" }[] = [];
+  const renames: { from: string; to: string }[] = [];
   let noProduct = 0;
-  let stockRenamed = 0;
   for (const a of VENDING_ALIASES) {
     if (have.has(a.alias)) continue;
     const productId = idByName.get(a.product);
@@ -367,14 +439,25 @@ export async function seedVendingAliases(
 
     const stale = stockByKey.get(normalizeProductName(a.alias));
     if (stale && stale.productName !== a.product && !stockNames.has(a.product)) {
-      await db.update(vendingStock).set({ productName: a.product }).where(eq(vendingStock.productName, stale.productName));
+      renames.push({ from: stale.productName, to: a.product });
       stockNames.delete(stale.productName);
       stockNames.add(a.product);
-      stockRenamed += 1;
     }
   }
-  if (rows.length > 0) await db.insert(vendingAlias).values(rows);
-  return { seeded: rows.length, skipped: VENDING_ALIASES.length - rows.length - noProduct, noProduct, stockRenamed };
+
+  // Алиасы и перенос склада — ОДНОЙ транзакцией: по отдельности обрыв между
+  // ними оставлял базу в состоянии «строка склада уже переименована на канон,
+  // а алиаса на старое имя нет» (или наоборот). Первое молча теряет связь со
+  // старым вводом, второе — оставляет две строки на один товар.
+  if (rows.length > 0 || renames.length > 0) {
+    await db.transaction(async (tx) => {
+      for (const r of renames) {
+        await tx.update(vendingStock).set({ productName: r.to }).where(eq(vendingStock.productName, r.from));
+      }
+      if (rows.length > 0) await tx.insert(vendingAlias).values(rows);
+    });
+  }
+  return { seeded: rows.length, skipped: VENDING_ALIASES.length - rows.length - noProduct, noProduct, stockRenamed: renames.length };
 }
 
 async function main(): Promise<void> {
@@ -392,7 +475,21 @@ async function main(): Promise<void> {
       ` (всего ${VENDING_ALIASES.length}).`,
   );
   const rules = await seedVendingRules(db);
-  console.log(`Правила закупа: наложено ${rules.applied}` + (rules.unknown.length ? `, не найдено: ${rules.unknown.join(", ")}` : "") + ".");
+  console.log(
+    `Правила закупа: наложено ${rules.applied}` +
+      (rules.skipped.length ? `, пропущено (правил владельца не трогаем): ${rules.skipped.join(", ")}` : "") +
+      (rules.unknown.length ? `, не найдено: ${rules.unknown.join(", ")}` : "") +
+      ".",
+  );
+
+  // Расхождения прайса с закупочным листом владельца — НА РАЗБОР, не автоправка:
+  // цену меняет только команда «цена» с гейтом ±20% (R-P5a-2).
+  if (DONOR_PRICE_DIFFS.length > 0) {
+    console.log("На разбор владельцу (команда «цена <товар> <сум>»):");
+    for (const d of DONOR_PRICE_DIFFS) {
+      console.log(`  · ${d.product}: в прайсе ${d.seed}, у донора ${d.donor}`);
+    }
+  }
 }
 
 if (require.main === module) {
