@@ -16,6 +16,10 @@ Docker есть, Node на хосте НЕ установлен — поэтом
 
 ```
 POSTGRES_PASSWORD=<длинный пароль>
+DATABASE_MODE=local
+DATABASE_URL=postgresql://mydon:<тот-же-пароль>@mydon-db:5432/mydon
+DATABASE_ADMIN_URL=
+DATABASE_SIZE_WARN_MB=400
 TELEGRAM_BOT_TOKEN=<токен бота>
 TELEGRAM_ALLOWED_CHAT_IDS=<твой chat_id>
 INGEST_KEY=<случайный ключ для приёма внешних событий>
@@ -36,6 +40,12 @@ AGENTS_SCHEDULES_PAUSED=1
 Мозг, память и бюджет агентов включаются отдельными тумблерами `.env` —
 их карта и сценарии в `docs/AGENTS_ACTIVATION.md`. Все они уже прокинуты в
 контейнер `mydon-agents` (`deploy/docker-compose.yml`) и по умолчанию спят.
+
+Для managed PostgreSQL используется `DATABASE_MODE=external`. `DATABASE_URL`
+должен вести через session pooler и используется только Core; прямой TLS URL
+кладётся в `DATABASE_ADMIN_URL` и доступен только host-level backup/restore
+helper. URL и пароли не передаются аргументами команд. Актуальная схема,
+переключение и откат описаны в [`DATABASE_DR.md`](DATABASE_DR.md).
 
 ## Мозг помощника: подписка Claude или API-ключ
 
@@ -178,7 +188,8 @@ systemctl stop mydon-autodeploy.timer       # временно выключит�
 Бэкапы перед миграциями: `/opt/backups/mydon-autodeploy/pre_*.sql.gz` (последние 10).
 
 После обновления git-копии auto-deploy также устанавливает актуальные
-`deploy/guards/backup_extra.sh`, `deploy/guards/b2_offsite.sh` и
+`deploy/guards/db_access.sh`, `deploy/guards/backup_extra.sh`,
+`deploy/guards/b2_offsite.sh` и
 `deploy/restore_test_mydon.sh` в `/opt/backups`. Cron запускает именно эти
 стабильные пути, поэтому без данного шага исправления backup/restore оставались
 бы только в рабочей копии репозитория.

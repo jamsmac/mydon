@@ -51,15 +51,8 @@ case "$app_key" in
 esac
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/mydon-b2-recovery.XXXXXX")
-TESTDB="mydon_b2_restore_$(date +%s)_$$"
-DB_CREATED=0
 cleanup() {
   unset key_id app_key passphrase obscured
-  if [ "$DB_CREATED" -eq 1 ]; then
-    ssh -o BatchMode=yes "$PRODUCTION_HOST" \
-      "docker exec mydon-db dropdb -U mydon --if-exists --force '$TESTDB'" \
-      >/dev/null 2>&1 || true
-  fi
   rm -rf -- "$WORK"
 }
 trap cleanup EXIT
@@ -132,44 +125,21 @@ REMOTE
 log "SHA-256: downloaded bytes exactly match production originals"
 log "$local_manifest"
 
-ssh -o BatchMode=yes "$PRODUCTION_HOST" \
-  "docker exec mydon-db createdb -U mydon '$TESTDB'" \
-  >/dev/null || fail "не удалось создать временную БД"
-DB_CREATED=1
-gzip -dc "$WORK/download/mydon-app_${DATE}.sql.gz" |
-  ssh -o BatchMode=yes "$PRODUCTION_HOST" \
-    "docker exec -i mydon-db psql -U mydon -d '$TESTDB' -v ON_ERROR_STOP=1 --single-transaction" \
-    >/dev/null || fail "SQL не восстановился атомарно"
-log "Database restore: SQL applied atomically to $TESTDB"
-
-if ! ssh -o BatchMode=yes "$PRODUCTION_HOST" bash -s -- "$TESTDB" <<'REMOTE'
+if ! cat "$WORK/download/mydon-app_${DATE}.sql.gz" | \
+  ssh -o BatchMode=yes "$PRODUCTION_HOST" '
 set -euo pipefail
-testdb=$1
-q() { docker exec mydon-db psql -U mydon -d "$1" -tAc "$2" 2>/dev/null | tr -d ' '; }
-for table in entity collection sale purchase machine_stock person task audit_log; do
-  live=$(q mydon "select count(*) from $table")
-  restored=$(q "$testdb" "select count(*) from $table")
-  [ -n "$live" ] && [ -n "$restored" ]
-  if [ "$restored" -eq 0 ] && [ "$live" -gt 0 ]; then exit 31; fi
-  printf '  %-16s live=%s restored=%s\n' "$table" "$live" "$restored"
-done
-live_sum=$(q mydon "select coalesce(sum(amount),0)::bigint from collection where status='received'")
-restored_sum=$(q "$testdb" "select coalesce(sum(amount),0)::bigint from collection where status='received'")
-[ -n "$live_sum" ] && [ -n "$restored_sum" ]
-if [ "$restored_sum" -eq 0 ] && [ "$live_sum" -gt 0 ]; then exit 32; fi
-printf '  collection_sum   live=%s restored=%s\n' "$live_sum" "$restored_sum"
-REMOTE
-then
-  fail "содержимое восстановленной БД не прошло сверку"
+tmp=$(mktemp --suffix=.sql.gz /opt/backups/.mydon-b2-recovery.XXXXXX)
+cleanup() { rm -f -- "$tmp"; }
+trap cleanup EXIT
+trap "exit 130" INT
+trap "exit 143" TERM
+cat > "$tmp"
+chmod 600 "$tmp"
+gunzip -t "$tmp"
+RESTORE_DUMP_PATH="$tmp" RESTORE_DUMP_MAX_AGE_HOURS=24 \
+  /opt/backups/restore_test_mydon.sh
+'; then
+  fail "скачанный из B2 SQL не прошёл изолированное восстановление"
 fi
-
-ssh -o BatchMode=yes "$PRODUCTION_HOST" \
-  "docker exec mydon-db dropdb -U mydon --if-exists --force '$TESTDB'" \
-  >/dev/null || fail "не удалось удалить временную БД"
-DB_CREATED=0
-leftover=$(ssh -o BatchMode=yes "$PRODUCTION_HOST" \
-  "docker exec mydon-db psql -U mydon -d postgres -tAc \"select count(*) from pg_database where datname='$TESTDB'\"") ||
-  fail "не удалось проверить удаление временной БД"
-[ "$leftover" -eq 0 ] || fail "временная БД осталась после dropdb"
-log "Database restore: comparison OK, temporary database removed"
+log "Database restore: comparison OK, isolated container removed"
 log "RECOVERY_DRILL_OK date=$DATE bucket=$bucket"

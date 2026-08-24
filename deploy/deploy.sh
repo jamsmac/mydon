@@ -90,7 +90,10 @@ TZ=Asia/Tashkent
 POSTGRES_USER=mydon
 POSTGRES_PASSWORD=\$POSTGRES_PASSWORD
 POSTGRES_DB=mydon
+DATABASE_MODE=local
 DATABASE_URL=postgresql://mydon:\$POSTGRES_PASSWORD@mydon-db:5432/mydon
+DATABASE_ADMIN_URL=
+DATABASE_SIZE_WARN_MB=400
 INGEST_KEY=\$INGEST_KEY
 SERVICE_TOKEN=\$SERVICE_TOKEN
 INVITE_PEPPER=\$INVITE_PEPPER
@@ -124,13 +127,14 @@ EOF
   # директории. Обновляем их каждым deploy, иначе исправление backup/restore
   # останется только в git и никогда не попадёт в фактическое расписание.
   install -d -o root -g root -m 700 /opt/backups
+  install -o root -g root -m 700 deploy/guards/db_access.sh /opt/backups/db_access.sh
   install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
   install -o root -g root -m 700 deploy/guards/b2_offsite.sh /opt/backups/b2_offsite.sh
   install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
   echo '  cron-скрипты backup/restore синхронизированы'
 "
 
-say "4/8 Сборка нового образа и запуск PostgreSQL"
+say "4/8 Сборка нового образа и запуск rollback PostgreSQL"
 # Старый контур продолжает отвечать во время сборки. На первой установке
 # поднимается только БД: новый Core нельзя запускать до новой схемы.
 ssh "$HOST" "

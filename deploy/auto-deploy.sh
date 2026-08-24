@@ -36,6 +36,7 @@ trap 'rm -f "$AUTODEPLOY_COPY"' EXIT
 APP_DIR="/opt/mydon-app"
 BACKUP_DIR="/opt/backups/mydon-autodeploy"
 KEY="/root/.ssh/mydon_deploy"
+DB_HELPER="/opt/backups/db_access.sh"
 COMPOSE=(docker compose -f deploy/docker-compose.yml --env-file .env)
 
 export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
@@ -82,13 +83,14 @@ fi
 # 1. Бэкап базы ДО обновления кода и миграций. Для коммита «только данные»
 #    схема не меняется и код не переключается — дампу неоткуда пострадать.
 mkdir -p "$BACKUP_DIR"
-if [ -z "$DATA_ONLY" ] && docker ps --format '{{.Names}}' | grep -qx mydon-db; then
+if [ -z "$DATA_ONLY" ]; then
   stamp="$(date '+%Y%m%d_%H%M%S')"
   # ВАЖНО: без -t. TTY подмешивает CR в бинарный поток дампа и портит его —
   # архив создаётся «успешно», но не восстанавливается. -i держит STDIN без TTY.
   # Целостность gzip сразу проверяем: битый бэкап хуже отсутствующего.
   dump="$BACKUP_DIR/pre_${stamp}.sql.gz"
-  if docker exec -i mydon-db pg_dump -U mydon mydon | gzip > "$dump" && gunzip -t "$dump"; then
+  if [ -x "$DB_HELPER" ] && "$DB_HELPER" dump | gzip > "$dump" &&
+      gunzip -t "$dump" && gunzip -c "$dump" | tail -10 | grep -q 'dump complete'; then
     log "бэкап базы: $dump"
   else
     log "ВНИМАНИЕ: бэкап базы не удался или повреждён — деплой останавливаю"
@@ -114,6 +116,7 @@ git clean -fd -e '.env*' # вся .env-семья (.env, .env.local, ...) — к
 # обновления git-копии недостаточно. Синхронизируем исполняемые версии до
 # раннего выхода для data/docs-only commit и до любых миграций.
 install -d -o root -g root -m 700 /opt/backups
+install -o root -g root -m 700 deploy/guards/db_access.sh /opt/backups/db_access.sh
 install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
 install -o root -g root -m 700 deploy/guards/b2_offsite.sh /opt/backups/b2_offsite.sh
 install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh

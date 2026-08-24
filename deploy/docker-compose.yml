@@ -5,6 +5,9 @@
 # Запуск:  docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
 
 services:
+  # Локальная rollback/recovery БД. В production Core может использовать
+  # внешний managed PostgreSQL через DATABASE_URL, но этот контейнер сохраняем
+  # для быстрого отката и изолированных восстановлений.
   mydon-db:
     image: postgres:16-alpine
     container_name: mydon-db
@@ -39,7 +42,7 @@ services:
       NODE_ENV: production
       TZ: Asia/Tashkent
       PORT: 3001
-      DATABASE_URL: postgresql://${POSTGRES_USER:-mydon}:${POSTGRES_PASSWORD}@mydon-db:5432/${POSTGRES_DB:-mydon}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL обязателен}
       INGEST_KEY: ${INGEST_KEY:-}
       # Внутренний токен доступа к мутациям Core. Один и тот же у Core и клиентов
       # (панель/бот/агенты). Пусто → ВСЕ мутации отклоняются 401 (fail-closed),

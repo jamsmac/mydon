@@ -28,8 +28,10 @@ Telegram и Backblaze B2 работают как два независимых o
 
 ## Как устроена проверка восстановления
 
-Создаёт **временную** базу, восстанавливает в неё последний дамп, сверяет и удаляет.
-Боевую базу не трогает.
+Создаёт отдельный PostgreSQL 17 в одноразовом Docker-контейнере, отключает ему
+сеть и размещает data directory в `tmpfs`. Последний дамп восстанавливается
+атомарно, ключевые данные сверяются с активной БД, после чего контейнер и весь
+`tmpfs` удаляются. Ни managed production, ни локальная recovery-БД не меняются.
 
 Сверка разделена намеренно:
 
@@ -72,7 +74,7 @@ Telegram и Backblaze B2 работают как два независимых o
 - SQL из B2 атомарно восстановлен во временную БД: `8/8` таблиц и сумма
   инкассаций совпали. После drill проверено, что временных БД осталось `0`.
 
-Deploy и auto-deploy теперь каждый раз устанавливают актуальные
+Deploy и auto-deploy теперь каждый раз устанавливают актуальные `db_access.sh`,
 `backup_extra.sh`, `b2_offsite.sh` и `restore_test_mydon.sh` в `/opt/backups`:
 именно эти пути вызывает cron. Это исключает прежний рассинхрон, когда в git
 уже лежал исправленный fail-closed скрипт, а расписание продолжало запускать
@@ -182,7 +184,8 @@ cd /opt/mydon-app
 
 На этом Mac полный тест выполняется одной командой. Скрипт читает recovery-файл,
 не выводит секреты, проверяет шифрование сырых объектов, скачивает все три
-архива, сравнивает их SHA-256 с production и разворачивает SQL во временную БД:
+архива, сравнивает их SHA-256 с production и разворачивает SQL в отдельном
+PostgreSQL 17 без сети:
 
 ```bash
 cd /Users/js/Developer/mydon
@@ -190,7 +193,7 @@ cd /Users/js/Developer/mydon
 ```
 
 Без аргумента скрипт берёт текущую дату production. После завершения локальные
-файлы и временная БД удаляются через trap. Для ручного получения значений
+файлы и одноразовый контейнер удаляются через trap. Для ручного получения значений
 recovery key используются поля `applicationKeyId` и `applicationKey` файла
 `/Users/js/.config/mydon/b2-recovery.json`; не выводить их в логи или чат.
 
@@ -201,7 +204,7 @@ recovery key используются поля `applicationKeyId` и `applicatio
 gunzip -c /opt/backups/mydon_ГГГГ-ММ-ДД.sql.gz \
   | docker exec -i mydon-stock-db-1 psql -U mydon -v ON_ERROR_STOP=1 --single-transaction mydon
 
-# база MYDON
+# база MYDON в локальную recovery-БД; сначала остановить все writers
 gunzip -c /opt/backups/extra/mydon-app_ГГГГ-ММ-ДД.sql.gz \
   | docker exec -i mydon-db psql -U mydon -v ON_ERROR_STOP=1 --single-transaction mydon
 
@@ -211,3 +214,9 @@ tar -xzf /opt/backups/extra/command-center_ГГГГ-ММ-ДД.tar.gz -C /opt
 
 Обрати внимание: `docker exec -i`, а **не** `-t`. Флаг `-t` выделяет терминал
 и портит поток данных — дамп восстановится битым.
+
+Активную managed-БД и порядок переключения восстанавливает runbook
+[`DATABASE_DR.md`](DATABASE_DR.md). Обычный backup обращается к активной БД
+через `/opt/backups/db_access.sh`: пароль передаётся временным `pgpass`, TLS
+обязателен, а credentials не попадают в argv. Ежедневно также проверяется
+`pg_database_size`; production-порог задаёт `DATABASE_SIZE_WARN_MB`.

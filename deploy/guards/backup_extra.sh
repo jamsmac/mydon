@@ -1,6 +1,6 @@
 #!/bin/bash
 # Бэкап того, что НЕ покрывал ночной скрипт mydon-stock:
-#   1. база нового MYDON (mydon-db)
+#   1. активная база MYDON (локальная или managed PostgreSQL)
 #   2. код command-center — он БЕЗ git и существует только на этом сервере
 #   3. .env-файлы (в отдельном архиве с правами 600 — там секреты)
 #
@@ -11,6 +11,8 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 DEST=/opt/backups/extra
 DATE=$(date -d '+5 hours' +%F)   # дата по Ташкенту
 KEEP_DAYS=30
+DB_HELPER=${DB_HELPER:-/opt/backups/db_access.sh}
+DB_ENV_FILE=${DB_ENV_FILE:-/opt/mydon-app/.env}
 mkdir -p "$DEST"
 FAILED=0
 
@@ -24,19 +26,42 @@ to_mydon() {  # событие в Core; при недоступности — а
 }
 
 
-# --- 1. База нового MYDON ---
-if docker ps --format '{{.Names}}' | grep -qx mydon-db; then
-  F="$DEST/mydon-app_${DATE}.sql.gz"
-  if docker exec -i mydon-db pg_dump --clean --if-exists -U mydon mydon 2>/dev/null | gzip > "$F.tmp"; then
-    # Проверяем и целостность архива, и что pg_dump дошёл до конца.
-    # tail -6, а не -3: PostgreSQL 16 печатает после маркера ещё строку \unrestrict.
-    if gunzip -t "$F.tmp" 2>/dev/null && gunzip -c "$F.tmp" | tail -6 | grep -q "dump complete"; then
-      mv "$F.tmp" "$F"; log "OK база MYDON -> $(du -h "$F" | cut -f1)"
-    else rm -f "$F.tmp"; log "FAIL база MYDON: дамп повреждён или оборван"; FAILED=1; fi
-  else rm -f "$F.tmp"; log "FAIL база MYDON: pg_dump не отработал"; FAILED=1; fi
-else
-  log "FAIL база MYDON: контейнер mydon-db не запущен"
+# --- 1. Активная база MYDON ---
+F="$DEST/mydon-app_${DATE}.sql.gz"
+if [ ! -x "$DB_HELPER" ]; then
+  log "FAIL база MYDON: helper $DB_HELPER не установлен"
   FAILED=1
+elif "$DB_HELPER" dump | gzip > "$F.tmp"; then
+  # Проверяем и gzip, и финальный маркер pg_dump. Новые версии PostgreSQL могут
+  # печатать после маркера служебный \unrestrict, поэтому смотрим хвост шире.
+  if gunzip -t "$F.tmp" 2>/dev/null && gunzip -c "$F.tmp" | tail -10 | grep -q "dump complete"; then
+    mv "$F.tmp" "$F"; log "OK база MYDON -> $(du -h "$F" | cut -f1)"
+  else rm -f "$F.tmp"; log "FAIL база MYDON: дамп повреждён или оборван"; FAILED=1; fi
+else
+  rm -f "$F.tmp"; log "FAIL база MYDON: pg_dump не отработал"; FAILED=1
+fi
+
+# Managed plans have a hard database-size ceiling. Check it after the dump so
+# a capacity warning never prevents the offsite copy itself from being made.
+DB_SIZE_WARN_MB=$(grep '^DATABASE_SIZE_WARN_MB=' "$DB_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-)
+DB_SIZE_WARN_MB=${DB_SIZE_WARN_MB:-0}
+if ! [[ "$DB_SIZE_WARN_MB" =~ ^[0-9]+$ ]]; then
+  log "FAIL база MYDON: DATABASE_SIZE_WARN_MB должен быть целым числом"
+  FAILED=1
+elif [ "$DB_SIZE_WARN_MB" -gt 0 ] && [ -x "$DB_HELPER" ]; then
+  DB_SIZE_BYTES=$("$DB_HELPER" query 'select pg_database_size(current_database())' 2>/dev/null | tr -d '[:space:]')
+  if [[ "$DB_SIZE_BYTES" =~ ^[0-9]+$ ]]; then
+    DB_SIZE_MB=$(( (DB_SIZE_BYTES + 1048575) / 1048576 ))
+    if [ "$DB_SIZE_MB" -ge "$DB_SIZE_WARN_MB" ]; then
+      log "FAIL база MYDON: размер ${DB_SIZE_MB} МБ достиг порога ${DB_SIZE_WARN_MB} МБ"
+      FAILED=1
+    else
+      log "OK ёмкость БД: ${DB_SIZE_MB} МБ из порога ${DB_SIZE_WARN_MB} МБ"
+    fi
+  else
+    log "FAIL база MYDON: не удалось измерить размер"
+    FAILED=1
+  fi
 fi
 
 # --- 2. Код, которого нет в git ---
