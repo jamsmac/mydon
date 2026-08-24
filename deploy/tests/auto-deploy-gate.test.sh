@@ -33,11 +33,11 @@ run() {
   AUTODEPLOY_DB_HELPER="$TMP/no-such-helper" \
   AUTODEPLOY_LOCK_FILE="$TMP/autodeploy.lock" \
   AUTODEPLOY_RETRY_COOLDOWN_SEC=600 \
-  AUTODEPLOY_STOCK_ENV="$TMP/no-such-stock.env" \
+  AUTODEPLOY_ALERT_ENV="$TMP/no-such-alert.env" \
     bash "$ROOT/deploy/auto-deploy.sh"
 }
-# AUTODEPLOY_STOCK_ENV указывает в пустоту НАМЕРЕННО: без этого прогон теста
-# на сервере (или машине с /opt/mydon-stock/.env) слал бы НАСТОЯЩИЕ
+# AUTODEPLOY_ALERT_ENV указывает в пустоту НАМЕРЕННО: без этого прогон теста
+# на сервере (с настоящим /etc/mydon-heartbeat.env) слал бы НАСТОЯЩИЕ
 # Telegram-алерты о сбоях фикстуры.
 
 # 1. Успешно задеплоенный HEAD == origin/main → тихий выход без единой строки.

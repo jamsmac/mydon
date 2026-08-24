@@ -11,7 +11,8 @@ set -uo pipefail
 
 APP_DIR="${AUTODEPLOY_APP_DIR:-/opt/mydon-app}"
 BACKUP_DIR="${AUTODEPLOY_BACKUP_DIR:-/opt/backups/mydon-autodeploy}"
-STOCK_ENV="${AUTODEPLOY_STOCK_ENV:-/opt/mydon-stock/.env}"
+# Фолбэк — аварийный бот сторожа (см. комментарий в auto-deploy.sh).
+ALERT_ENV="${AUTODEPLOY_ALERT_ENV:-/etc/mydon-heartbeat.env}"
 
 log() { echo "$(date '+%F %T') deploy-alert: $*"; }
 
@@ -42,13 +43,21 @@ if [ -n "$ingest_key" ] &&
   log "алерт ушёл в Core"
   exit 0
 fi
-BT=$(grep '^BOT_TOKEN=' "$STOCK_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-CI=$(grep '^TG_BACKUP_CHAT_ID=' "$STOCK_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-if [ -n "$BT" ] && [ -n "$CI" ]; then
-  tg_resp=$(curl -sS -m 30 -F chat_id="$CI" -F text="$msg" \
-    -K- <<< "url = \"https://api.telegram.org/bot${BT}/sendMessage\"" 2>/dev/null || true)
-  if printf '%s' "$tg_resp" | grep -q '"ok":true'; then
-    log "алерт ушёл в Telegram"
+BT=$(grep '^WATCHDOG_BOT_TOKEN=' "$ALERT_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+CHATS=$(grep '^WATCHDOG_CHAT_IDS=' "$ALERT_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+if [ -n "$BT" ] && [ -n "$CHATS" ]; then
+  delivered=""
+  for chat in ${CHATS//,/ }; do
+    chat=$(printf '%s' "$chat" | tr -d '[:space:]')
+    [ -n "$chat" ] || continue
+    tg_resp=$(curl -sS -m 30 -F chat_id="$chat" -F text="$msg" \
+      -K- <<< "url = \"https://api.telegram.org/bot${BT}/sendMessage\"" 2>/dev/null || true)
+    if printf '%s' "$tg_resp" | grep -q '"ok":true'; then
+      delivered=1
+    fi
+  done
+  if [ -n "$delivered" ]; then
+    log "алерт ушёл в Telegram (аварийный бот сторожа)"
     exit 0
   fi
 fi

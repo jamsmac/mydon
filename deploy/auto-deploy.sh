@@ -50,7 +50,10 @@ RETRY_COOLDOWN="${AUTODEPLOY_RETRY_COOLDOWN_SEC:-600}"
 # Повтор алерта при затяжном сбое: «один на sha навсегда» превращал
 # многодневную поломку в единственное сообщение недельной давности.
 REALERT_SEC="${AUTODEPLOY_REALERT_SEC:-21600}"
-STOCK_ENV="${AUTODEPLOY_STOCK_ENV:-/opt/mydon-stock/.env}"
+# Фолбэк-канал тревог — выделенный аварийный бот сторожа (тот же, что у
+# watchdog-liveness), а НЕ бот склада из /opt/mydon-stock: тащить алерты
+# деплоя через чужой проект — связь, которая молча умрёт при его переезде.
+ALERT_ENV="${AUTODEPLOY_ALERT_ENV:-/etc/mydon-heartbeat.env}"
 OK_MARKER="$BACKUP_DIR/.last-ok-sha"
 FAIL_SHA_F="$BACKUP_DIR/.fail-sha"
 FAIL_AT_F="$BACKUP_DIR/.fail-at"          # время ПОСЛЕДНЕГО сбоя — от него кулдаун
@@ -78,19 +81,27 @@ notify_deploy_failed() {
       >/dev/null 2>&1; then
     return 0
   fi
-  BT="$(grep '^BOT_TOKEN=' "$STOCK_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-  CI="$(grep '^TG_BACKUP_CHAT_ID=' "$STOCK_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-  if [ -n "$BT" ] && [ -n "$CI" ]; then
-    # Telegram отвечает 200 и на {"ok":false,...} — доставку подтверждает
-    # только поле ok (тот же урок, что в watchdog-liveness.sh).
-    tg_resp="$(curl -sS -m 30 -F chat_id="$CI" \
-      -F text="❌ Автодеплой MYDON упал на $1. Ретраи автоматические. journalctl -u mydon-autodeploy.service" \
-      -K- <<< "url = \"https://api.telegram.org/bot${BT}/sendMessage\"" 2>/dev/null || true)"
-    if printf '%s' "$tg_resp" | grep -q '"ok":true'; then
+  BT="$(grep '^WATCHDOG_BOT_TOKEN=' "$ALERT_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  CHATS="$(grep '^WATCHDOG_CHAT_IDS=' "$ALERT_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  if [ -n "$BT" ] && [ -n "$CHATS" ]; then
+    delivered=""
+    for chat in ${CHATS//,/ }; do
+      chat="$(printf '%s' "$chat" | tr -d '[:space:]')"
+      [ -n "$chat" ] || continue
+      # Telegram отвечает 200 и на {"ok":false,...} — доставку подтверждает
+      # только поле ok (тот же урок, что в watchdog-liveness.sh).
+      tg_resp="$(curl -sS -m 30 -F chat_id="$chat" \
+        -F text="❌ Автодеплой MYDON упал на $1. Ретраи автоматические. journalctl -u mydon-autodeploy.service" \
+        -K- <<< "url = \"https://api.telegram.org/bot${BT}/sendMessage\"" 2>/dev/null || true)"
+      if printf '%s' "$tg_resp" | grep -q '"ok":true'; then
+        delivered=1
+      fi
+    done
+    if [ -n "$delivered" ]; then
       return 0
     fi
   fi
-  log "алерт о сбое деплоя НЕ доставлен (нет INGEST_KEY/бот-токена или сеть) — только журнал"
+  log "алерт о сбое деплоя НЕ доставлен (нет INGEST_KEY/аварийного бота или сеть) — только журнал"
   return 1
 }
 
