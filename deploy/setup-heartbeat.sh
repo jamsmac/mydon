@@ -39,6 +39,9 @@ cp deploy/systemd/mydon-watchdog-liveness.timer   /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now mydon-heartbeat.timer
 systemctl enable --now mydon-watchdog-liveness.timer
+# enable --now для уже включённого таймера — no-op: новые интервалы из
+# .timer-файлов без рестарта не применяются до перезагрузки.
+systemctl restart mydon-heartbeat.timer mydon-watchdog-liveness.timer
 
 echo "▸ Пробная отправка heartbeat:"
 ./deploy/heartbeat.sh

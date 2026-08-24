@@ -9,8 +9,13 @@ case "${1:-}" in
       printf '%s\n' '-- PostgreSQL database dump complete' '\unrestrict test'
     elif printf '%s\n' "$*" | grep -q 'select 1'; then
       printf '1\n'
-    else
+    elif printf '%s\n' "$*" | grep -q 'select 42'; then
+      # Ответ только на ТОЧНЫЙ запрос теста: «42 на любой SQL» маскировал бы
+      # искажение передачи аргумента (обрезанный/испорченный квотингом SQL).
       printf '42\n'
+    else
+      printf 'fake-docker: неожиданный SQL: %s\n' "$*" >&2
+      exit 8
     fi
     ;;
   run)
@@ -27,8 +32,11 @@ case "${1:-}" in
       printf '%s\n' '-- PostgreSQL database dump complete' '\unrestrict test'
     elif printf '%s\n' "$*" | grep -q 'select 1'; then
       printf '1\n'
-    else
+    elif printf '%s\n' "$*" | grep -q 'select 42'; then
       printf '42\n'
+    else
+      printf 'fake-docker: неожиданный SQL: %s\n' "$*" >&2
+      exit 8
     fi
     ;;
   *)

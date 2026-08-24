@@ -24,7 +24,20 @@ if [ ! -f "$KEY" ]; then
   cat "$KEY.pub"
   echo "──────────────────────────────────────────────────────────────────"
 fi
-export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+# Пин официальных SSH-ключей github.com (api.github.com/meta) вместо TOFU:
+# accept-new при чистом known_hosts доверял бы любому DNS/BGP-перехвату,
+# а всё из origin/main исполняется от root каждые 30 секунд.
+install -d -m 700 /root/.ssh
+if curl -sf --max-time 20 https://api.github.com/meta |
+  python3 -c 'import json,sys
+for k in json.load(sys.stdin)["ssh_keys"]:
+    print("github.com " + k)' >> /root/.ssh/known_hosts 2>/dev/null; then
+  sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts
+  echo "▸ Ключи github.com запинованы в known_hosts"
+else
+  echo "⚠ Не удалось получить ключи github.com — первый fetch провалится, пока их не добавят" >&2
+fi
+export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
 
 # 2. Git-трекинг main в /opt/mydon-app.
 cd "$APP_DIR"

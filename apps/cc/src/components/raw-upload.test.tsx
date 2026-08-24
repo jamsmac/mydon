@@ -42,7 +42,12 @@ describe("RawUpload", () => {
       file.name,
     );
 
+    // fireEvent.submit ОСОЗНАННО: клик по кнопке в jsdom блокируется
+    // валидацией required-полей, заполненных программно (проверено), и
+    // сабмит не происходит. Слепое пятно (кнопка type="button"/disabled
+    // не уронит тест) принято и задокументировано.
     const submit = screen.getByRole("button", { name: "Загрузить" });
+    expect(submit).toHaveAttribute("type", "submit");
     fireEvent.submit(submit.closest("form") as HTMLFormElement);
 
     expect(await screen.findByText("INGEST_KEY не настроен")).toBeVisible();
@@ -66,13 +71,19 @@ describe("RawUpload", () => {
     render(<RawUpload source="ourvend" report="orders" reportTitle="Заказы" path="Экспорт" />);
     await openAndFill();
 
+    // fireEvent.submit ОСОЗНАННО: клик по кнопке в jsdom блокируется
+    // валидацией required-полей, заполненных программно (проверено), и
+    // сабмит не происходит. Слепое пятно (кнопка type="button"/disabled
+    // не уронит тест) принято и задокументировано.
     const submit = screen.getByRole("button", { name: "Загрузить" });
+    expect(submit).toHaveAttribute("type", "submit");
     fireEvent.submit(submit.closest("form") as HTMLFormElement);
     expect(await screen.findByLabelText("Лист книги Excel")).toBeVisible();
     expect(screen.getByText("Выбери лист")).toBeVisible();
 
     await userEvent.selectOptions(screen.getByLabelText("Лист книги Excel"), "Остатки");
     const repeat = screen.getByRole("button", { name: "Импортировать выбранное" });
+    expect(repeat).toHaveAttribute("type", "submit");
     fireEvent.submit(repeat.closest("form") as HTMLFormElement);
 
     await waitFor(() => expect(mocks.importFile).toHaveBeenCalledTimes(2));

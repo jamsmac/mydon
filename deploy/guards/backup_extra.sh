@@ -7,9 +7,14 @@
 # Работающий скрипт /opt/mydon-stock/backup_offsite.sh намеренно НЕ трогаем.
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Дампы не должны рождаться 644 под cron-umask root: защита прав была
+# однослойной (только 700 на родителе /opt/backups).
+umask 077
 
 DEST=/opt/backups/extra
-DATE=$(date -d '+5 hours' +%F)   # дата по Ташкенту
+# Явный TZ вместо date -d '+5 hours': та формула верна лишь пока системный
+# TZ хоста — UTC (ловушка на 5 часов из VendCash).
+DATE=$(TZ=Asia/Tashkent date +%F)   # дата по Ташкенту
 KEEP_DAYS=30
 DB_HELPER=${DB_HELPER:-/opt/backups/db_access.sh}
 DB_ENV_FILE=${DB_ENV_FILE:-/opt/mydon-app/.env}
@@ -172,7 +177,10 @@ if [ -n "${BOT_TOKEN:-}" ] && [ -n "${CHAT_ID:-}" ]; then
                openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
                        -in "$ENV_SRC" -out "$ENC" -pass stdin 2>/dev/null; then
                 chmod 600 "$ENC"
-                offsite "$ENC" "секреты (зашифровано)"
+                # CBC без MAC не защищает целостность — контрольная сумма в
+                # подписи даёт сверку перед восстановлением из Telegram.
+                ENC_SUM=$(sha256sum "$ENC" | cut -d' ' -f1)
+                offsite "$ENC" "секреты (зашифровано, sha256 $ENC_SUM)"
                 rm -f "$ENC"
             else
                 log "FAIL offsite секреты: не удалось зашифровать"
