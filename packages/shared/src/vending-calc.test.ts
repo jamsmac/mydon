@@ -298,3 +298,123 @@ describe("Гейт цены закупа (П3): priceDeviationPct", () => {
     assert.equal(PRICE_SPIKE_PCT, 20);
   });
 });
+
+// ── §4.1 (спека П5a): политика раздачи и правила товара ─────────────────────
+
+describe("Вендинг: политика раздачи и правила товара (П5a, донор vending-ops)", () => {
+  const prices = new Map<string, PriceEntry>([
+    ["Fanta", { price: 5167, pack: 12 }],
+    ["Snickers", { price: 7000, pack: 10 }],
+    ["Qurt", { price: 6800, pack: 10 }],
+    ["Montella", { price: 2090, pack: 12 }],
+  ]);
+  const row = (product: string, need: number, stock: number, sold7 = 5): PurchaseRow => ({
+    product, perMachine: { olma: need }, need, stock, sold7,
+  });
+
+  it("purchase-first (по умолчанию): новая упаковка идёт в автоматы первой, склад не трогается", () => {
+    const s = computePurchase([row("Fanta", 20, 5)], prices);
+    const i = s.items[0]!;
+    assert.equal(s.allocation, "purchase-first");
+    assert.equal(i.buy, 15);
+    assert.equal(i.order, 24);
+    assert.equal(i.fromPurchase, 20);
+    assert.equal(i.fromStock, 0);
+    assert.equal(i.toStock, 4);
+    assert.equal(i.stockAfter, 9);
+    assert.equal(i.unfilled, 0);
+    // прежние поля не меняются (Приложение Г)
+    assert.equal(i.covered, 5);
+    assert.equal(i.surplus, 0);
+    assert.equal(i.extra, 9);
+  });
+
+  it("warehouse-first (совместимость): склад закрывает потребность первым", () => {
+    const s = computePurchase([row("Fanta", 20, 5)], prices, { allocation: "warehouse-first" });
+    const i = s.items[0]!;
+    assert.equal(i.fromStock, 5);
+    assert.equal(i.fromPurchase, 15);
+    assert.equal(i.toStock, 9);
+    assert.equal(i.stockAfter, 9);
+  });
+
+  it("фикс-количество: при дефиците покупаем ровно фикс, без округления; излишек на склад", () => {
+    const rules = new Map([["Snickers", { fixedQty: 48 }]]);
+    const s = computePurchase([row("Snickers", 10, 0)], prices, { rules });
+    const i = s.items[0]!;
+    assert.equal(i.fixedQty, 48);
+    assert.equal(i.buy, 10);
+    assert.equal(i.order, 48);
+    assert.equal(i.fromPurchase, 10);
+    assert.equal(i.toStock, 38);
+    assert.equal(i.stockAfter, 38);
+    assert.equal(i.costRounded, 48 * 7000);
+  });
+
+  it("фикс меньше дефицита: остаток честно «пусто», extra не уходит в минус", () => {
+    const rules = new Map([["Snickers", { fixedQty: 5 }]]);
+    const s = computePurchase([row("Snickers", 12, 2)], prices, { rules });
+    const i = s.items[0]!;
+    assert.equal(i.order, 5);
+    assert.equal(i.fromPurchase, 5);
+    assert.equal(i.fromStock, 2);
+    assert.equal(i.unfilled, 5);
+    assert.equal(i.extra, 0);
+  });
+
+  it("фикс не срабатывает без дефицита (склад закрывает)", () => {
+    const rules = new Map([["Snickers", { fixedQty: 48 }]]);
+    const s = computePurchase([row("Snickers", 10, 15)], prices, { rules });
+    assert.equal(s.items[0]!.order, 0);
+    assert.equal(s.items[0]!.fromStock, 10);
+  });
+
+  it("исключён из закупки: не покупаем, грузим со склада что есть, остальное пусто; вне денег", () => {
+    const rules = new Map([["Qurt", { excluded: true }]]);
+    const s = computePurchase([row("Qurt", 8, 5)], prices, { rules });
+    assert.equal(s.items.length, 0);
+    assert.equal(s.excludedByRule.length, 1);
+    const i = s.excludedByRule[0]!;
+    assert.equal(i.excluded, true);
+    assert.equal(i.order, 0);
+    assert.equal(i.fromStock, 5);
+    assert.equal(i.unfilled, 3);
+    assert.equal(s.costRounded, 0);
+    assert.equal(s.totalFromStock, 5);
+    assert.equal(s.totalUnfilled, 3);
+  });
+
+  it("нет продаж: не покупаем, но склад грузим; штуки в итогах раздачи, денег нет", () => {
+    const s = computePurchase([row("Montella", 6, 4, 0)], prices);
+    const i = s.excludedNoSales[0]!;
+    assert.equal(i.fromPurchase, 0);
+    assert.equal(i.fromStock, 4);
+    assert.equal(i.unfilled, 2);
+    assert.equal(s.totalFromStock, 4);
+    assert.equal(s.totalBuy, 0);
+  });
+
+  it("блок без цены берётся из правил; цена — нет (noPrice)", () => {
+    const rules = new Map([["TUC", { pack: 5 }]]);
+    const s = computePurchase([row("TUC", 7, 0)], prices, { rules });
+    const i = s.items[0]!;
+    assert.equal(i.pack, 5);
+    assert.equal(i.order, 10);
+    assert.equal(i.noPrice, true);
+    assert.equal(i.fromPurchase, 7);
+  });
+
+  it("инварианты: fromPurchase + fromStock + unfilled = need; stockAfter ≥ 0", () => {
+    const rules = new Map([["Qurt", { excluded: true }], ["Snickers", { fixedQty: 3 }]]);
+    const s = computePurchase(
+      [row("Fanta", 20, 5), row("Snickers", 12, 2), row("Qurt", 8, 5), row("Montella", 6, 4, 0)],
+      prices,
+      { rules },
+    );
+    for (const i of [...s.items, ...s.excludedByRule, ...s.excludedNoSales]) {
+      assert.equal(i.fromPurchase + i.fromStock + i.unfilled, i.need, i.product);
+      assert.ok(i.stockAfter >= 0, i.product);
+    }
+    assert.equal(s.totalFromPurchase + s.totalFromStock + s.totalUnfilled, 46);
+  });
+});

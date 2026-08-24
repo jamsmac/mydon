@@ -181,6 +181,15 @@ export interface PurchaseRow {
   sold7: number;
 }
 
+export type AllocationPolicy = "purchase-first" | "warehouse-first";
+
+/** Правила закупа товара (vending_product): исключён / фикс-количество / блок без цены (П5a). */
+export interface ProductRule {
+  excluded?: boolean;
+  fixedQty?: number | null;
+  pack?: number;
+}
+
 export interface PurchaseItem {
   product: string;
   perMachine: Record<string, number>;
@@ -204,6 +213,20 @@ export interface PurchaseItem {
   noPrice: boolean;
   /** Дефицит есть, но продаж за 7 дней нет — «не закупать». */
   noSales: boolean;
+  /** В автоматы из закупа (новая упаковка). */
+  fromPurchase: number;
+  /** В автоматы со склада. */
+  fromStock: number;
+  /** Не заполнится. */
+  unfilled: number;
+  /** Излишек закупки → на склад: order − fromPurchase. */
+  toStock: number;
+  /** Склад после: stock − fromStock + toStock. */
+  stockAfter: number;
+  /** Правило «убрано из закупки». */
+  excluded: boolean;
+  /** Фикс-количество, если задано. */
+  fixedQty: number | null;
 }
 
 export interface PurchaseSummary {
@@ -211,8 +234,12 @@ export interface PurchaseSummary {
   items: PurchaseItem[];
   /** «Не закупать — нет продаж»: показываются отдельно, в итоги НЕ входят. */
   excludedNoSales: PurchaseItem[];
+  /** «Убрано из закупки» правилом товара — в деньги не входит, в раздачу входит. */
+  excludedByRule: PurchaseItem[];
   /** Товары без цены в прайсе — на разбор менеджеру. */
   noPrice: string[];
+  /** Политика раздачи, применённая к этому расчёту. */
+  allocation: AllocationPolicy;
   totalNeed: number;
   totalCovered: number;
   totalBuy: number;
@@ -225,6 +252,10 @@ export interface PurchaseSummary {
   overpay: number;
   /** «Закуп по прайсу» (§8.1): полный дефицит по прайсу, без склада и округления. */
   costByPriceFull: number;
+  totalFromPurchase: number;
+  totalFromStock: number;
+  totalUnfilled: number;
+  totalToStock: number;
 }
 
 export interface PurchaseOptions {
@@ -233,6 +264,10 @@ export interface PurchaseOptions {
   /** Включать позиции без продаж в закуп и итоги. По умолчанию нет (§5.5). */
   includeNoSales?: boolean;
   maxCapacity?: number;
+  /** Политика раздачи (R-P5a-1). По умолчанию purchase-first. */
+  allocation?: AllocationPolicy;
+  /** Правила по канону имени; товар без записи — обычный. */
+  rules?: Map<string, ProductRule>;
 }
 
 /**
@@ -240,6 +275,14 @@ export interface PurchaseOptions {
  * Показывает ОБЕ суммы и переплату — это управленческое решение, а не деталь.
  * Позиции без цены исключаются из денег; позиции без продаж по умолчанию
  * выносятся в отдельную группу и в итоги не входят (переключается опцией).
+ *
+ * Раздача (П5a, §4.1): дополнительно считает, сколько уйдёт в автоматы из
+ * новой упаковки (`fromPurchase`) и сколько — со склада (`fromStock`);
+ * порядок раздачи задаёт `allocation` (по умолчанию purchase-first —
+ * новая упаковка расходуется первой, склад не трогается лишний раз).
+ * Правила товара (`rules`) могут исключить товар из закупки целиком
+ * (`excluded`) или зафиксировать количество закупки при дефиците
+ * (`fixedQty`, без округления до упаковки).
  */
 export function computePurchase(
   input: PurchaseRow[],
@@ -248,9 +291,12 @@ export function computePurchase(
 ): PurchaseSummary {
   const round = opts.round ?? true;
   const includeNoSales = opts.includeNoSales ?? false;
+  const allocation = opts.allocation ?? "purchase-first";
+  const rules = opts.rules ?? new Map<string, ProductRule>();
 
   const items: PurchaseItem[] = [];
   const excludedNoSales: PurchaseItem[] = [];
+  const excludedByRule: PurchaseItem[] = [];
   const noPrice: string[] = [];
 
   let totalNeed = 0;
@@ -260,19 +306,56 @@ export function computePurchase(
   let costExact = 0;
   let costRounded = 0;
   let costByPriceFull = 0;
+  let totalFromPurchase = 0;
+  let totalFromStock = 0;
+  let totalUnfilled = 0;
+  let totalToStock = 0;
 
   for (const row of input) {
     const need = row.need ?? Object.values(row.perMachine).reduce((a, b) => a + b, 0);
     if (need <= 0) continue;
 
     const price = prices.get(row.product);
+    const rule = rules.get(row.product);
+    const excluded = rule?.excluded === true;
+    const fixedQty = typeof rule?.fixedQty === "number" && rule.fixedQty > 0 ? rule.fixedQty : null;
     const stock = row.stock;
     const covered = Math.min(stock, need);
-    const buy = Math.max(0, need - stock);
     const surplus = Math.max(0, stock - need);
-    const pack = price?.pack ?? 1;
-    const order = !round ? buy : buy === 0 ? 0 : Math.ceil(buy / pack) * pack;
+    const pack = price?.pack ?? rule?.pack ?? 1;
     const unit = price?.price ?? 0;
+    const noSales = row.sold7 <= 0;
+
+    // Сколько купить: исключённые товары — ничего; иначе обычный дефицит.
+    // Фикс-количество задаёт заказ (не сам дефицит) — покупаем ровно фикс,
+    // без округления до упаковки.
+    const shortage = Math.max(0, need - stock);
+    const buy = excluded ? 0 : shortage;
+    const order =
+      excluded || buy === 0
+        ? 0
+        : fixedQty !== null
+          ? fixedQty
+          : !round
+            ? buy
+            : Math.ceil(buy / pack) * pack;
+
+    // Раздача (R-P5a-1): «нет продаж» и «исключён» ничего не покупают, но в
+    // автоматы грузится то, что уже есть на складе.
+    const purchasable = !excluded && (includeNoSales || !noSales);
+    const orderForLoad = purchasable ? order : 0;
+    let fromPurchase: number;
+    let fromStock: number;
+    if (allocation === "purchase-first") {
+      fromPurchase = Math.min(need, orderForLoad);
+      fromStock = Math.min(stock, need - fromPurchase);
+    } else {
+      fromStock = Math.min(stock, need);
+      fromPurchase = Math.min(orderForLoad, need - fromStock);
+    }
+    const unfilled = need - fromPurchase - fromStock;
+    const toStock = orderForLoad - fromPurchase;
+    const stockAfter = stock - fromStock + toStock;
 
     const item: PurchaseItem = {
       product: row.product,
@@ -284,17 +367,36 @@ export function computePurchase(
       surplus,
       pack,
       order,
-      extra: order - buy,
+      extra: Math.max(0, order - buy),
       price: unit,
       costExact: buy * unit,
       costRounded: order * unit,
       noPrice: price === undefined,
-      noSales: row.sold7 <= 0,
+      noSales,
+      fromPurchase,
+      fromStock,
+      unfilled,
+      toStock,
+      stockAfter,
+      excluded,
+      fixedQty,
     };
+
+    // totalFrom*/totalUnfilled/totalToStock — по ВСЕМ позициям раздачи
+    // (items + excludedByRule + excludedNoSales), это штуки, не деньги.
+    totalFromPurchase += fromPurchase;
+    totalFromStock += fromStock;
+    totalUnfilled += unfilled;
+    totalToStock += toStock;
 
     if (item.noPrice) noPrice.push(row.product);
 
-    // Полный дефицит по прайсу — по всем позициям с ценой (§8.1).
+    if (excluded) {
+      excludedByRule.push(item);
+      continue;
+    }
+
+    // Полный дефицит по прайсу — по всем позициям с ценой, что реально закупаются (§8.1).
     if (!item.noPrice) costByPriceFull += need * unit;
 
     // Позиции без продаж по умолчанию не входят в итоги (но остаются видимыми).
@@ -319,7 +421,9 @@ export function computePurchase(
   return {
     items,
     excludedNoSales,
+    excludedByRule,
     noPrice,
+    allocation,
     totalNeed,
     totalCovered,
     totalBuy,
@@ -328,6 +432,10 @@ export function computePurchase(
     costRounded,
     overpay: costRounded - costExact,
     costByPriceFull,
+    totalFromPurchase,
+    totalFromStock,
+    totalUnfilled,
+    totalToStock,
   };
 }
 
