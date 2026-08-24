@@ -19,6 +19,9 @@ describe("План закупа: порядок слотов и маршрут",
     assert.deepEqual(routeOrderFrom("2508160376, 9999", ms), ["2508160376", "2508160359", "1"]);
     assert.deepEqual(routeOrderFrom("", ms), ["2508160359", "2508160376", "1"]);
   });
+  it("routeOrderFrom: повтор серийника в настройке схлопывается в одно вхождение", () => {
+    assert.deepEqual(routeOrderFrom("A, A", [{ serial: "A", name: "x" }]), ["A"]);
+  });
 });
 
 describe("План закупа: раздача по автоматам", () => {
@@ -36,6 +39,14 @@ describe("План закупа: раздача по автоматам", () => 
     assert.equal(olma!.byProduct.X!.fromPurchase, 2);
     assert.equal(ah!.byProduct.X, undefined);
     assert.equal(ah!.need, 0);
+  });
+  it("повтор серийника в маршруте не задваивает суммы: ['A','A'] = ['A']", () => {
+    const fanta = item({ product: "Fanta", perMachine: { A: 10 }, fromPurchase: 6, fromStock: 3, unfilled: 1 });
+    const single = allocateByRoute([fanta], ["A"]);
+    const dup = allocateByRoute([fanta], ["A", "A"]);
+    assert.deepEqual(dup, single);
+    assert.equal(dup.length, 1);
+    assert.deepEqual(dup[0]!.byProduct.Fanta, { need: 10, fromPurchase: 6, fromStock: 3, unfilled: 1 });
   });
 });
 
@@ -57,5 +68,17 @@ describe("План закупа: раздача по слотам", () => {
     const alloc = { serial: "olma", byProduct: { Fanta: { need: 10, fromPurchase: 10, fromStock: 0, unfilled: 0 } }, need: 10, fromPurchase: 10, fromStock: 0, unfilled: 0 };
     const rows = allocateBySlots(slots, alloc);
     assert.equal(rows.reduce((a, r) => a + r.fromPurchase, 0), 10);
+  });
+  it("слот с пробельным product пропускается (hasProduct, не просто truthy-проверка)", () => {
+    const withBlank: Slot[] = [...slots, { coilId: "4", product: "  ", capacity: 5, quantity: 0 }];
+    const alloc = { serial: "olma", byProduct: { Fanta: { need: 10, fromPurchase: 4, fromStock: 3, unfilled: 3 } }, need: 10, fromPurchase: 4, fromStock: 3, unfilled: 3 };
+    const rows = allocateBySlots(withBlank, alloc);
+    assert.equal(rows.some((r) => r.coilId === "4"), false);
+  });
+  it("слот с товаром вне alloc.byProduct: дефицит есть, а раздачи нет — весь need в unfilled", () => {
+    const localSlots: Slot[] = [{ coilId: "7", product: "TUC", capacity: 5, quantity: 2 }];
+    const alloc = { serial: "olma", byProduct: { Fanta: { need: 5, fromPurchase: 5, fromStock: 0, unfilled: 0 } }, need: 5, fromPurchase: 5, fromStock: 0, unfilled: 0 };
+    const rows = allocateBySlots(localSlots, alloc);
+    assert.deepEqual(rows, [{ coilId: "7", product: "TUC", quantity: 2, capacity: 5, need: 3, fromPurchase: 0, fromStock: 0, unfilled: 3 }]);
   });
 });
