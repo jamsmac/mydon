@@ -108,7 +108,9 @@ export function ImportContractActions({
         <form
           className="form"
           style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginTop: 8 }}
-          action={(form: FormData) => {
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
             const extra: Record<string, string> = {};
             for (const key of ["transportCompany", "declarationNumber", "declarationDate"]) {
               const v = String(form.get(key) ?? "").trim();

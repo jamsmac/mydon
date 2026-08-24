@@ -35,6 +35,7 @@ export function PersonEditor({ person }: { person: Person }) {
             start(async () => {
               const res = await setPersonActive(person.id, !active);
               if (res.ok) router.refresh();
+              else setMsg({ kind: "err", text: res.error ?? "Ошибка" });
             })
           }
           disabled={pending}
@@ -50,7 +51,13 @@ export function PersonEditor({ person }: { person: Person }) {
         </p>
       )}
 
-      <form action={onSave} className="form">
+      <form
+        className="form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave(new FormData(event.currentTarget));
+        }}
+      >
         <label>
           <span>Имя</span>
           <input name="name" defaultValue={person.name} />

@@ -45,7 +45,14 @@ export function NewEntityForm({
   }
 
   return (
-    <form action={onSubmit} className="form card" style={{ marginTop: 10 }}>
+    <form
+      className="form card"
+      style={{ marginTop: 10 }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       <label>
         <span>Название</span>
         <input name="name" autoFocus />

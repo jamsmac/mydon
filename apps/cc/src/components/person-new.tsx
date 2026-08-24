@@ -33,7 +33,13 @@ export function NewPersonForm() {
   }
 
   return (
-    <form action={onSubmit} className="form card">
+    <form
+      className="form card"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       <label>
         <span>Имя</span>
         <input name="name" placeholder="Рустам" autoFocus />

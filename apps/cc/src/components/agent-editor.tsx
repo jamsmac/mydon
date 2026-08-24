@@ -63,7 +63,13 @@ export function AgentEditor({ agent }: { agent: AgentCard }) {
         </button>
       </div>
 
-      <form action={onSave} className="form">
+      <form
+        className="form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave(new FormData(event.currentTarget));
+        }}
+      >
         <label>
           <span>Направление</span>
           <select name="business" defaultValue={agent.business}>

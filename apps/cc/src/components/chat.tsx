@@ -26,8 +26,15 @@ export function Chat() {
     setMsgs((m) => [...m, { who: "you", text: q }]);
     setInput("");
     startTransition(async () => {
-      const reply = await ask(q);
-      setMsgs((m) => [...m, { who: "mydon", text: reply.text, approvalId: reply.approvalId }]);
+      try {
+        const reply = await ask(q);
+        setMsgs((m) => [...m, { who: "mydon", text: reply.text, approvalId: reply.approvalId }]);
+      } catch {
+        setMsgs((m) => [
+          ...m,
+          { who: "mydon", text: "Помощник не ответил — попробуй ещё раз." },
+        ]);
+      }
       requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: "smooth" }));
     });
   }

@@ -35,7 +35,14 @@ function TnvedForm({ domain, initial, onDone }: { domain: string; initial?: Tnve
     share === undefined ? "" : String(Number(share) * 100);
 
   return (
-    <form action={onSubmit} className="form card" style={{ marginTop: 10 }}>
+    <form
+      className="form card"
+      style={{ marginTop: 10 }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       {initial && <input type="hidden" name="id" value={initial.id} />}
       <label>
         <span>Код ТН ВЭД</span>
@@ -110,22 +117,31 @@ export function CustomsRatesPanel({
   const [editing, setEditing] = useState<string | null>(null); // id | "new" | null
   const [pending, start] = useTransition();
   const [brvMsg, setBrvMsg] = useState<string | null>(null);
+  const [rateMsg, setRateMsg] = useState<string | null>(null);
 
   const currentBrv = brv[0] ?? null;
 
   function removeRate(id: string) {
     if (!window.confirm("Убрать ставку из работы? Строка останется в истории.")) return;
     start(async () => {
-      await deactivateTnvedRate(domain, id);
-      router.refresh();
+      const res = await deactivateTnvedRate(domain, id);
+      if (res.ok) {
+        setRateMsg(null);
+        router.refresh();
+      } else {
+        setRateMsg(res.message ?? "Не получилось");
+      }
     });
   }
 
-  function onBrvSubmit(form: FormData) {
+  function onBrvSubmit(form: FormData, formElement: HTMLFormElement) {
     start(async () => {
       const res = await setBrvValue(domain, form);
       setBrvMsg(res.ok ? "БРВ записана" : (res.message ?? "Не получилось"));
-      if (res.ok) router.refresh();
+      if (res.ok) {
+        formElement.reset();
+        router.refresh();
+      }
     });
   }
 
@@ -139,7 +155,14 @@ export function CustomsRatesPanel({
             <span className="chip b">{nfmt(currentBrv.valueUzs)} сум · с {currentBrv.validFrom}</span>
           )}
         </div>
-        <form action={onBrvSubmit} className="form" style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <form
+          className="form"
+          style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            onBrvSubmit(new FormData(event.currentTarget), event.currentTarget);
+          }}
+        >
           <label style={{ margin: 0 }}>
             <span>Сумов</span>
             <input name="valueUzs" inputMode="numeric" placeholder="412000" />
@@ -214,6 +237,7 @@ export function CustomsRatesPanel({
             onDone={() => setEditing(null)}
           />
         )}
+        {rateMsg && <p className="err-text">{rateMsg}</p>}
         <p className="hint" style={{ marginTop: 8 }}>
           Проценты вводятся процентами (5 = 5%). Ставки — основа расчёта растаможки:
           пошлина и сбор от таможенной базы, НДС сверху, утиль в БРВ, доп. пошлина за см³ двигателя.

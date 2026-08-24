@@ -85,7 +85,9 @@ export function ImportsPanel({
         <form
           className="form card"
           style={{ marginTop: 10 }}
-          action={(form: FormData) => {
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
             form.set("items", JSON.stringify(parsed));
             start(async () => {
               const res = await createImport(form);

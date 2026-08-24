@@ -97,7 +97,9 @@ export function PreordersSection({
             <form
               className="form"
               style={{ width: "100%", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginTop: 8 }}
-              action={(form: FormData) => {
+              onSubmit={(event) => {
+                event.preventDefault();
+                const form = new FormData(event.currentTarget);
                 const extra: Record<string, string> = {
                   contractRef: String(form.get("contractRef") ?? "").trim(),
                 };
@@ -129,7 +131,10 @@ export function PreordersSection({
         <form
           className="form card"
           style={{ marginTop: 8 }}
-          action={(form: FormData) => run(() => createPreorder(form))}
+          onSubmit={(event) => {
+            event.preventDefault();
+            run(() => createPreorder(new FormData(event.currentTarget)));
+          }}
         >
           <label>
             <span>Что заказываем</span>

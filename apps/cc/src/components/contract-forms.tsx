@@ -67,7 +67,14 @@ export function NewContractForm({ clients }: { clients: FinanceCounterparty[] })
     setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
 
   return (
-    <form action={onSubmit} className="form card" style={{ marginTop: 10 }}>
+    <form
+      className="form card"
+      style={{ marginTop: 10 }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       <label>
         <span>Номер — пусто, чтобы взять следующий по порядку</span>
         <input name="contractNo" inputMode="numeric" placeholder="авто" />
@@ -248,16 +255,26 @@ export function ContractPaymentForm({ id }: { id: string }) {
   const [pending, start] = useTransition();
   const [msg, setMsg] = useState<string | null>(null);
 
-  function onSubmit(form: FormData) {
+  function onSubmit(form: FormData, formElement: HTMLFormElement) {
     start(async () => {
       const res = await addContractPayment(id, form);
       setMsg(res.ok ? "Платёж записан" : (res.message ?? "Не получилось"));
-      if (res.ok) router.refresh();
+      if (res.ok) {
+        formElement.reset();
+        router.refresh();
+      }
     });
   }
 
   return (
-    <form action={onSubmit} className="form" style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+    <form
+      className="form"
+      style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget), event.currentTarget);
+      }}
+    >
       <label style={{ margin: 0 }}>
         <span>Сумма</span>
         <input name="amount" inputMode="decimal" placeholder="50 000 000" />
@@ -309,7 +326,14 @@ export function ContractActForm({ id }: { id: string }) {
     );
   }
   return (
-    <form action={onSubmit} className="form card" style={{ marginTop: 8 }}>
+    <form
+      className="form card"
+      style={{ marginTop: 8 }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       <label>
         <span>Номер акта</span>
         <input name="actNo" autoFocus />

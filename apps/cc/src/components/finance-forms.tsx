@@ -63,7 +63,14 @@ export function NewFlowForm({
   const knownRate = fx.find((r) => r.currency === currency)?.rate ?? null;
 
   return (
-    <form action={onSubmit} className="form card" style={{ marginTop: 10 }}>
+    <form
+      className="form card"
+      style={{ marginTop: 10 }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       <label>
         <span>Что заводим</span>
         <select name="status" defaultValue="planned">
@@ -221,16 +228,26 @@ export function FxForm({ domain }: { domain: string }) {
   const [pending, start] = useTransition();
   const [msg, setMsg] = useState<string | null>(null);
 
-  function onSubmit(form: FormData) {
+  function onSubmit(form: FormData, formElement: HTMLFormElement) {
     start(async () => {
       const res = await setFxRate(domain, form);
       setMsg(res.ok ? "Курс записан" : (res.message ?? "Не получилось"));
-      if (res.ok) router.refresh();
+      if (res.ok) {
+        formElement.reset();
+        router.refresh();
+      }
     });
   }
 
   return (
-    <form action={onSubmit} className="form" style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+    <form
+      className="form"
+      style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget), event.currentTarget);
+      }}
+    >
       <label style={{ margin: 0 }}>
         <span>Валюта</span>
         <select name="currency" defaultValue="USD">

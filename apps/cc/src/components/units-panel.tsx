@@ -157,7 +157,9 @@ function UnitRow({ unit, clients }: { unit: GrUnit; clients: FinanceCounterparty
         <form
           className="form"
           style={{ width: "100%", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginTop: 8 }}
-          action={(form: FormData) => {
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
             const extra: Record<string, string> = {};
             for (const key of ["transportCompany", "declarationNumber", "declarationDate"]) {
               const v = String(form.get(key) ?? "").trim();
@@ -192,7 +194,10 @@ function UnitRow({ unit, clients }: { unit: GrUnit; clients: FinanceCounterparty
         <form
           className="form"
           style={{ width: "100%", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginTop: 8 }}
-          action={(form: FormData) => run(() => reserveUnit(unit.id, form))}
+          onSubmit={(event) => {
+            event.preventDefault();
+            run(() => reserveUnit(unit.id, new FormData(event.currentTarget)));
+          }}
         >
           <label style={{ margin: 0 }}>
             <span>Держим до</span>
@@ -276,7 +281,9 @@ export function UnitsPanel({
         <form
           className="form card"
           style={{ marginTop: 10 }}
-          action={(form: FormData) =>
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
             start(async () => {
               const res = await createUnit(form);
               setError(res.ok ? null : (res.message ?? "Не получилось"));
@@ -284,8 +291,8 @@ export function UnitsPanel({
                 setOpenNew(false);
                 router.refresh();
               }
-            })
-          }
+            });
+          }}
         >
           <label>
             <span>Название (модель, комплектация)</span>

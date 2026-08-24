@@ -31,7 +31,13 @@ export function NewAgentForm() {
   }
 
   return (
-    <form action={onSubmit} className="form card">
+    <form
+      className="form card"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       <label>
         <span>Имя (машинное)</span>
         <input name="name" placeholder="globerent-ops" autoFocus />

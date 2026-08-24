@@ -355,7 +355,13 @@ export function MenuEditor({
 
       {/* Товара нет в каталоге — создаётся здесь и появляется В КАТАЛОГЕ. */}
       {showNew && domain !== null && (
-        <form className="form mcm-new" action={createNew}>
+        <form
+          className="form mcm-new"
+          onSubmit={(event) => {
+            event.preventDefault();
+            createNew(new FormData(event.currentTarget));
+          }}
+        >
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
             <label style={{ flex: "1 1 220px" }}>
               <span>Название</span>

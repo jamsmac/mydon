@@ -156,7 +156,13 @@ export function EntityEditor({ entity }: { entity: Entity }) {
   }
 
   return (
-    <form action={onSave} className="form card">
+    <form
+      className="form card"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave(new FormData(event.currentTarget));
+      }}
+    >
       <label>
         <span>Название</span>
         <input name="name" defaultValue={entity.name} />

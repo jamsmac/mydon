@@ -63,7 +63,13 @@ export function NewPlaceForm({ domain = "vendhub" }: { domain?: string }) {
   }
 
   return (
-    <form action={onSubmit} className="form">
+    <form
+      className="form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(new FormData(event.currentTarget));
+      }}
+    >
       <p className="eyebrow">Вид места</p>
       <div className="chips" style={{ marginBottom: 4 }}>
         {PLACE_TYPES.map((t) => (
