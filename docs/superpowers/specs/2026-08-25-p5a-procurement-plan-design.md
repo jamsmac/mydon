@@ -70,8 +70,17 @@ Nesquick, Velona, Kinder Bueno, Lays, Flint); `fixedPurchaseQty` СуперКо�
 `packSize` RedBull 6, Flash Up 6, Plus 18 6, Ozbegim 6, Lays 5, Nesquick 5, Flint 5, TUC 5,
 Cheers 5 (остальные — правило 12/10 сида). Overlay идемпотентен и **не трогает цены** (цена —
 только команда «цена», П3a); расхождения прайса сида с ценами донора выводятся в лог сида как
-«на разбор» (например, Fuse Tea 6084 vs 8500, Pepsi 5000 vs 5990, Plus 18 9990 vs 8750 — решает владелец командой «цена»). Добавляем алиасы Ourvend-имён слотов, которых нет в
-сиде (сверка по проду задачей плана).
+«на разбор» (константа `DONOR_PRICE_DIFFS`, 9 позиций: Fuse Tea 6084 vs 8500, Pepsi 5000 vs
+5990, Plus 18 9990 vs 8750 и др. — решает владелец командой «цена»). Overlay ОДНОСТОРОННИЙ:
+правило накладывается только на строку, которую владелец ещё не менял (`excluded_from_purchase
+= false`, `fixed_purchase_qty IS NULL`, `pack_size` = дефолт категории); тронутые печатаются как
+пропущенные.
+
+Алиасы имён добавляются ПО ФАКТУ СВЕРКИ, а не наперёд: сверка прода 24.08 дала четыре имени со
+склада (`MOXITO FRESH LIMON CAN 0.5`, `Coca-Cola Zero CAN 0.25`, `O'zbegim Tea 0.45`,
+`Red Bull` с пробелом) — без них строка склада осиротела и план покупал заново то, что лежит на
+полке. Тот же источник — коды `unknown_product` и `stock_unknown_product` из плана: что они
+называют, то и становится алиасом (или карточкой).
 
 Запуск на проде — **один раз вручную** после мержа: `compose run --rm mydon-core node
 packages/db/dist/seed-vending.js` (в автодеплой не включаем: сид переименовывает строки склада
@@ -134,15 +143,21 @@ stockAfter   = stock − fromStock + toStock
 ## 5. Интерфейсы
 
 **Core** (`apps/core/src/vending`):
-- `GET /vending/plan` → `PurchasePlan { generatedAt, stockAsOf, allocation, summary
-  (PurchaseSummary+новые итоги), route: [{step, action, perMachine, total}], machines: [{serial,
+- `GET /vending/plan` → `PurchasePlan { generatedAt, stock: {asOf, totalBefore, use, back,
+  totalAfter, stale, unmatched}, summary (PurchaseSummary+новые итоги), machines: [{serial,
   name, routeIndex, need, fromPurchase, fromStock, unfilled, slots: [{coilId, product, quantity,
-  capacity, need, fromPurchase, fromStock, unfilled}]}], excludedByRule, warnings }`.
+  capacity, need, fromPurchase, fromStock, unfilled}]}], routeConfigured, warnings }`.
+  Отдельного `route[]` в ответе НЕТ: шаги похода — производная от `machines[]` (они уже в
+  порядке маршрута) и склада, и представления собирают её сами. Два источника одного порядка
+  разъезжались бы молча.
 - `GET /vending/purchase` — тот же расчёт, ответ дополнен новыми полями (аддитивно).
 - `POST /vending/product-rules` DTO `{ product: string; packSize?: 1..1000;
-  excludedFromPurchase?: boolean; fixedPurchaseQty?: 1..100000 | null }` → транзакция:
-  update + event `vending.product_rules_changed` + audit `vending.product.set_rules`.
-  Товар резолвится через алиасы; не найден → 404 с подсказкой ближайших имён (как «цена»).
+  excludedFromPurchase?: boolean; fixedPurchaseQty?: 0..100000 }` (`0` = снять фикс, в базе
+  NULL; отдельной команды «сними фикс» не заводим) → транзакция: update + event
+  `vending.product_rules_changed` + audit `vending.product.set_rules`. Товар резолвится через
+  алиасы и по нормализованному ключу имени; не найден → **200** `{ok:false,
+  reason:"not_found", product}` — как у «цены»: это ответ на вопрос, а не сбой протокола,
+  и бот показывает его словами.
 - `GET /vending/products` → список `vending_product` с правилами (для редактора CC).
 - Фильтр `in_service` — в `purchase()`/`plan()` через `machineIdBySerial` + `machine_card`.
 - `VENDING_ROUTE_ORDER` в `config-spec.ts`.
@@ -170,12 +185,36 @@ stockAfter   = stock − fromStock + toStock
   сохранение ввода при отказе Core).
 
 ## 6. Ошибки и пробелы (видимы, не молчат)
-- Склад старше 3 дней → warning в плане, бейдж в CC, строка в боте «⚠️ склад на 20.08 — обнови: „склад …“».
-- Позиция без цены → `noPrice` (как было) — в бюджет не входит, но в раздачу входит (штуки не зависят от цены).
-- Автомат не `in_service` → пропущен, перечислен в `warnings`.
-- Имя слота без карточки → считается по имени слота (как сейчас), попадает в `noPrice`.
-- `fixedQty < shortage` → `unfilled > 0`, показывается «пусто» в слотах — это решение владельца, не ошибка.
-- Core недоступен → бот «Не удалось …», CC `CoreDown`.
+
+Предупреждение обязано говорить, ЧТО СДЕЛАТЬ, и не гореть постоянно: то, что горит всегда,
+не читают. Отсюда тексты (`PlanWarning.code` → сообщение):
+
+- `stock_stale` — давность считается по строкам, которые план РЕАЛЬНО использует (`fromStock >
+  0`); если план склад не трогает — по всем ненулевым строкам. Текст: «Склад: N поз. старше 3
+  дней (X, Y) — обнови в боте: „склад X 24“»; склада не было ни разу — «Склад ни разу не
+  считали — план считает его пустым и покупает весь дефицит. Обнови в боте: „склад Montella 24,
+  Fanta 12“».
+- `stock_unknown_product` — строка склада, имя которой не резолвится в товар прайса: в расчёт
+  НЕ входит (ни цены, ни блока, ни правил), штуки видны в `stock.unmatched`. Текст: «На складе
+  есть строки без карточки прайса (в расчёт не вошли, N шт): … — переименуй в боте: „склад
+  <канон> N“».
+- `no_price` — «Без цены (в сумму закупа не вошли): … — задай: „цена <товар> <сум за штуку>“».
+  В раздачу такие позиции входят (штуки не зависят от цены), кратность берётся из блока товара.
+- `unknown_product` — «Нет в прайсе вендинга: … — цена и блок не применятся, в сумму не войдут
+  (карточку заводит администратор)».
+- `machine_skipped` — автомат не `in_service`: «Имя (серийник) не в строю: На складе» (состояние
+  словами, `machineStatusLabel`, а не машинным `warehouse`).
+- `sales_stale` / `sales_partial` — «нет продаж» выбрасывает позицию из закупа целиком, поэтому
+  несвежий (> 2 суток) или неполный батч меняет смысл половины плана: «Продажи собраны N дн.
+  назад — „нет продаж“ может быть ложным» / «В батче продаж M автоматов из K — по остальным
+  „нет продаж“ ложное».
+- `route_unknown_serial` — «В настройке маршрута нет таких автоматов: … — порядок взят по
+  имени». Серийники сравниваются по канону с обеих сторон (`normalizeMachineSerial`), так что
+  форма с «c» настройку не роняет.
+- `fixedQty < shortage` → `unfilled > 0` и `summary.shortfallCost` (недобор деньгами) —
+  решение владельца, не ошибка; переплата при этом ноль, а не отрицательная.
+- Core недоступен → бот «Не удалось …», CC `CoreDown`. 400 от Core в командах правил — формат
+  и текст отказа, а не «попробуй позже»: повтор той же команды не поможет никогда.
 
 ## 7. Тесты
 - shared: примеры донора числом — need 20 / stock 5 / pack 12 → order 24, fromPurchase 20, fromStock 0, toStock 4, stockAfter 9; Snickers need 10 / stock 0 / fixed 48 → order 48, toStock 38; excluded need 8 / stock 5 → fromStock 5, unfilled 3; warehouse-first даёт прежние `covered`; инварианты; маршрут: первый автомат забирает закуп; слоты: порядок coilId, «пусто» в хвосте. Контрольный пример Приложения Г — без изменений.
