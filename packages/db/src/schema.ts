@@ -2635,6 +2635,9 @@ export const schema = {
   productNameAlias,
   purchase,
   machineStock,
+  // Собственный учётный снапшот OurVend (П2 поглощения mydon-stock).
+  ourvendSaleSnapshot,
+  ourvendStockSnapshot,
   stockBatch,
   stockMovement,
   // Сырой слой источников.
