@@ -145,7 +145,9 @@ jobs:
           bash -n deploy/guards/*.sh deploy/*.sh deploy/tests/*.sh
           shellcheck deploy/guards/db_access.sh deploy/guards/b2_offsite.sh \
             deploy/guards/backup_extra.sh deploy/restore_test_mydon.sh \
+            deploy/guards/disk_guard.sh deploy/guards/healthz_guard.sh \
             deploy/deploy.sh deploy/auto-deploy.sh deploy/setup-b2-offsite.sh \
+            deploy/setup-guards.sh \
             deploy/b2-recovery-drill-macos.sh deploy/standby-lib.sh \
             deploy/standby-drill.sh \
             deploy/standby-promote.sh deploy/standby-stop.sh \
@@ -153,9 +155,13 @@ jobs:
             deploy/tests/b2-offsite.test.sh deploy/tests/db-access.test.sh \
             deploy/tests/standby-compose.test.sh \
             deploy/watchdog-liveness.sh deploy/deploy-failure-alert.sh \
-            deploy/tests/auto-deploy-gate.test.sh deploy/tests/watchdog-liveness.test.sh
+            deploy/tests/auto-deploy-gate.test.sh deploy/tests/watchdog-liveness.test.sh \
+            deploy/tests/fake-crontab.sh deploy/tests/setup-guards.test.sh \
+            deploy/tests/guards-env.test.sh
           bash deploy/tests/db-access.test.sh
           bash deploy/tests/b2-offsite.test.sh
           bash deploy/tests/standby-compose.test.sh
           bash deploy/tests/auto-deploy-gate.test.sh
           bash deploy/tests/watchdog-liveness.test.sh
+          bash deploy/tests/setup-guards.test.sh
+          bash deploy/tests/guards-env.test.sh

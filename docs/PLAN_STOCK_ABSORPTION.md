@@ -13,15 +13,21 @@ file:line).
 
 ## 0. Инвентарь живых связей (что предстоит разорвать)
 
-| # | Связь | Где |
-|---|---|---|
-| 1 | Учётный поток: core читает БД stock read-only — `ourvend_sales`→`sale`, `purchases`→`purchase`, `ourvend_machine_stock`→`machine_stock`, `machines`→карточки | `sales.service.ts:116`, `supply.service.ts:188`; выключатель `STOCK_DATABASE_URL` |
-| 2 | Docker-сеть `mydon-stock_default` (транспорт для №1, создаётся compose-проектом stock) | `deploy/docker-compose.yml:215` |
-| 3 | Оффсайт-бэкап БД **mydon** уходит через Telegram-бота **stock** (`BOT_TOKEN`/`TG_BACKUP_CHAT_ID` из `/opt/mydon-stock/.env`) | `deploy/guards/backup_extra.sh:114,208` |
-| 4 | Guards-скрипты mydon (backup_offsite/healthz_guard/disk_guard) исполняются по cron **из /opt/mydon-stock** | `deploy/guards/*`, cron хоста |
-| 5 | Словарь серийников: stock — источник формы `c…`, mydon — единственное место сопоставления | `packages/shared/src/machine-serial.ts` |
+| # | Связь | Где | Состояние |
+|---|---|---|---|
+| 1 | Учётный поток: core читает БД stock read-only — `ourvend_sales`→`sale`, `purchases`→`purchase`, `ourvend_machine_stock`→`machine_stock`, `machines`→карточки | `sales.service.ts:116`, `supply.service.ts:188`; выключатель `STOCK_DATABASE_URL` | |
+| 2 | Docker-сеть `mydon-stock_default` (транспорт для №1, создаётся compose-проектом stock) | `deploy/docker-compose.yml:215` | |
+| 3 | Оффсайт-бэкап БД **mydon** уходит через Telegram-бота **stock** (`BOT_TOKEN`/`TG_BACKUP_CHAT_ID` из `/opt/mydon-stock/.env`) | `deploy/guards/backup_extra.sh:114,208` | ✅ снята (П1) |
+| 4 | Guards-скрипты mydon (healthz_guard/disk_guard) исполняются по cron **из /opt/mydon-stock** | `deploy/guards/*`, cron хоста | ✅ код готов (П8.2) |
+| 5 | Словарь серийников: stock — источник формы `c…`, mydon — единственное место сопоставления | `packages/shared/src/machine-serial.ts` | |
 
 Приложение stock само в mydon не ходит вообще; обратных вызовов нет.
+
+**Связь №4 — уточнение по факту.** `backup_offsite.sh` в этой строке лишний:
+он дампит базу СКЛАДА через его же `docker compose` и шлёт её ботом склада —
+это бэкап склада, а не mydon, и он уходит вместе со складом (как и парный
+`restore_test.sh`). Сторожами mydon в `/opt/mydon-stock` жили только
+`disk_guard.sh` и `healthz_guard.sh`.
 
 ## Срезы
 
@@ -184,11 +190,35 @@ packages/db/dist/seed-vending.js`, автодеплой его не запуск
    `sales`, `ourvend_sales` (учесть `OURVEND_EPOCH=2026-01-01` и
    намеренные дубли `archive/`);
 2. переселение guards-скриптов и бэкапа склада с путей `/opt/mydon-stock`
-   на пути mydon (cron хоста!);
+   на пути mydon (cron хоста!) — **код готов**, см. П8.2 ниже;
 3. вывод панели :8080 и бота @mydonvendbot;
 4. заморозка БД stock как архива (volume не удалять — правило отката);
 5. чистка: `STOCK_DATABASE_URL`, `external`-сеть, упоминания в докладах
    `/gaps`, `docs/DATA_SOURCES.md §891` (канон продаж — на свой снапшот).
+
+#### П8.2 — сторожа переехали на пути mydon (код готов)
+
+Вынесено вперёд из П8: связь №4 не требовала замены функциональности и держала
+сторожей заложниками чужого каталога. Хостовая копия `disk_guard.sh` отстала от
+git на месяц именно поэтому — деплой mydon в `/opt/mydon-stock` не заглядывает.
+
+Сделано в репозитории:
+
+- `deploy/guards/disk_guard.sh` и `deploy/guards/healthz_guard.sh` берут ключи
+  ТОЛЬКО из окружения mydon (`/opt/mydon-app/.env` → `/etc/mydon-heartbeat.env`),
+  бота склада больше не читают и без конфигурации выходят ненулём с причиной в
+  `/opt/backups/backup.log`;
+- `deploy.sh` и `auto-deploy.sh` ставят обоих сторожей в `/opt/backups` тем же
+  механизмом, что `backup_extra.sh` — то есть каждым деплоем;
+- `deploy/setup-guards.sh` — идемпотентный установщик cron с `--dry-run`,
+  бэкапом прежнего crontab и отказом указывать расписание в пустоту;
+- тесты `deploy/tests/setup-guards.test.sh` и `deploy/tests/guards-env.test.sh`
+  в шаге CI «Operations scripts».
+
+Остаётся ручным шагом ПОСЛЕ мержа (cron деплой не трогает и трогать не должен):
+`/opt/mydon-app/deploy/setup-guards.sh --dry-run`, затем без флага. Строки
+склада (`backup_offsite.sh`, `restore_test.sh`) установщик не трогает — они
+уходят в П8 вместе с базой склада.
 
 ## Не в этом плане (заметки)
 - Старый Prisma-проект (снек-контур S0–S8: партии товаров, реордер,

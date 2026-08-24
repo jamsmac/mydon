@@ -192,10 +192,18 @@ systemctl stop mydon-autodeploy.timer       # временно выключит�
 
 После обновления git-копии auto-deploy также устанавливает актуальные
 `deploy/guards/db_access.sh`, `deploy/guards/backup_extra.sh`,
-`deploy/guards/b2_offsite.sh` и
+`deploy/guards/b2_offsite.sh`, `deploy/guards/disk_guard.sh`,
+`deploy/guards/healthz_guard.sh` и
 `deploy/restore_test_mydon.sh` в `/opt/backups`. Cron запускает именно эти
 стабильные пути, поэтому без данного шага исправления backup/restore оставались
 бы только в рабочей копии репозитория.
+
+Сторожа диска и здоровья попали в этот список позже остальных (П8.2 плана
+поглощения): их хостовые копии лежали в `/opt/mydon-stock/`, куда деплой mydon
+не заглядывает, и `disk_guard.sh` на сервере отстал от git на месяц. Сам cron
+деплой не трогает никогда — расписание переводится разово установщиком
+`deploy/setup-guards.sh` (`--dry-run` показывает diff crontab). Пути, ключи и
+откат — в [`BACKUPS.md`](BACKUPS.md), раздел «Сторожа mydon: пути, cron, env».
 
 Ручной `deploy/deploy.sh` на время работы останавливает timer auto-deploy, ждёт
 завершения уже начатого service и возвращает timer через `EXIT`-trap. Это

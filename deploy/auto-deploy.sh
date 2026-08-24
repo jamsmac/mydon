@@ -284,6 +284,12 @@ install -o root -g root -m 700 deploy/guards/db_access.sh /opt/backups/db_access
 install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
 install -o root -g root -m 700 deploy/guards/b2_offsite.sh /opt/backups/b2_offsite.sh
 install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
+# Сторожа диска и здоровья (П8.2 плана поглощения): раньше их хостовые копии
+# лежали в /opt/mydon-stock и обновлялись руками — одна отстала от git на месяц.
+# Теперь они обновляются каждым деплоем, как остальные cron-скрипты. Перевод
+# самого расписания на эти пути — разовый deploy/setup-guards.sh.
+install -o root -g root -m 700 deploy/guards/disk_guard.sh /opt/backups/disk_guard.sh
+install -o root -g root -m 700 deploy/guards/healthz_guard.sh /opt/backups/healthz_guard.sh
 # Корневой сертификат Supabase для verify-full в admin-пути (#205): без него
 # db_access.sh с sslmode=verify-* падал бы — cert ставил только ручной
 # deploy.sh, а прод обновляется автодеплоем.

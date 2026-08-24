@@ -9,12 +9,61 @@ Telegram и Backblaze B2 работают как два независимых o
 
 | Что | Когда | Куда | Скрипт |
 |---|---|---|---|
-| База `mydon-stock` (склад VendHub) | 22:00 ежедневно | `/opt/backups` (60 дней) + Telegram | `/opt/mydon-stock/backup_offsite.sh` |
+| База `mydon-stock` (склад VendHub) | 22:00 ежедневно | `/opt/backups` (60 дней) + Telegram | `/opt/mydon-stock/backup_offsite.sh` (скрипт склада) |
 | База MYDON (новая) | 22:15 ежедневно | локально + Telegram + Backblaze B2 | `/opt/backups/backup_extra.sh` |
 | Код `command-center` | 22:15 ежедневно | локально + Telegram + Backblaze B2 | там же |
 | Файлы `.env` (секреты, права 600) | 22:15 ежедневно | локально + Telegram + Backblaze B2 | там же |
-| Проверка склада | пн 03:30 еженедельно | `/opt/backups/restore_test.log` | `/opt/mydon-stock/restore_test.sh` |
+| Проверка склада | пн 03:30 еженедельно | `/opt/backups/restore_test.log` | `/opt/mydon-stock/restore_test.sh` (скрипт склада) |
 | **Проверка MYDON** | пн 03:45 еженедельно | `/opt/backups/restore_test_mydon.log` | `/opt/backups/restore_test_mydon.sh` |
+
+## Сторожа mydon: пути, cron, env
+
+Сторожа живут там же, где бэкапы, — в `/opt/backups`, и обновляются каждым
+деплоем (`deploy.sh` и `auto-deploy.sh` ставят их вместе с `backup_extra.sh`).
+Версии под контролем версий — в `deploy/guards/` (см. `deploy/guards/README.md`).
+
+| Сторож | Cron | Путь | Что делает |
+|---|---|---|---|
+| `disk_guard.sh` | `0 6 * * *` (11:00 Ташкент) | `/opt/backups/disk_guard.sh` | заполнение диска: событие `infra.disk` в Core, пороги — в правилах |
+| `healthz_guard.sh` | `*/5 * * * *` | `/opt/backups/healthz_guard.sh` | `/healthz` наблюдаемой панели, тревога на 2-м провале и отбой |
+| `backup_extra.sh` | `15 22 * * *` | `/opt/backups/backup_extra.sh` | база MYDON + command-center + `.env`, три offsite-канала |
+| `restore_test_mydon.sh` | `45 3 * * 1` | `/opt/backups/restore_test_mydon.sh` | проверка восстановления |
+
+**Ключи — только из окружения mydon.** Лесенка одна на все три скрипта:
+`INGEST_KEY` из `/opt/mydon-app/.env` (событие в Core) → `TG_BACKUP_BOT_TOKEN` и
+`TG_BACKUP_CHAT_ID` оттуда же (свой аварийный канал) → `WATCHDOG_BOT_TOKEN` и
+`WATCHDOG_CHAT_IDS` из `/etc/mydon-heartbeat.env` (аварийный бот сторожа —
+работает, но шумно). Нет ни того, ни другого — сторож пишет причину в
+`/opt/backups/backup.log` и выходит ненулём, а не «успешно молчит»; проверка
+делается ДО измерения диска и до первой проверки здоровья. Если тревогу не
+принял ни Core, ни Telegram, это тоже уходит строкой в журнал — иначе владелец
+ждал бы отбоя, которого никто не отправлял.
+
+`healthz_guard.sh` наблюдает панель склада, пока она жива (П8), и берёт её
+адрес из `WEB_PORT` в `.env` склада. Это адрес, а не секрет, и единственная
+оставшаяся у сторожей ссылка на каталог склада; чтобы снять и её, задайте
+`HEALTHZ_TARGET=host:port` в `/opt/mydon-app/.env` — он имеет приоритет.
+Не заданы оба — сторож пишет «цель не задана» и выходит ненулём: константы по
+умолчанию у него нет намеренно, `127.0.0.1:8080` при пустой конфигурации давал
+бы не тишину, а ложную тревогу каждые 5 минут (панель слушает Tailscale-адрес).
+
+**Что осталось складу.** `/opt/mydon-stock/backup_offsite.sh` (22:00) дампит
+базу СКЛАДА через его же `docker compose` и шлёт ботом склада; парная ему
+`/opt/mydon-stock/restore_test.sh` (пн 03:30) проверяет это восстановление.
+Переселять их на пути mydon нечего — они обращаются к каталогу склада за
+compose-проектом и `.env`, и уходят вместе с ним в П8 плана поглощения.
+
+**Перевод расписания** (разово, после мержа; деплой cron не трогает):
+
+```bash
+/opt/mydon-app/deploy/setup-guards.sh --dry-run   # показать diff crontab
+/opt/mydon-app/deploy/setup-guards.sh             # применить
+```
+
+Установщик идемпотентен, меняет только строки сторожей mydon (расписание
+сохраняется), кладёт прежний crontab в `/opt/backups/crontab_pre_guards_<дата>`
+и отказывается указывать cron на путь, где нет исполняемого файла. Откат —
+`crontab /opt/backups/crontab_pre_guards_<дата>`.
 
 ## Почему добавили именно это
 
@@ -75,7 +124,8 @@ Telegram и Backblaze B2 работают как два независимых o
   инкассаций совпали. После drill проверено, что временных БД осталось `0`.
 
 Deploy и auto-deploy теперь каждый раз устанавливают актуальные `db_access.sh`,
-`backup_extra.sh`, `b2_offsite.sh` и `restore_test_mydon.sh` в `/opt/backups`:
+`backup_extra.sh`, `b2_offsite.sh`, `disk_guard.sh`, `healthz_guard.sh` и
+`restore_test_mydon.sh` в `/opt/backups`:
 именно эти пути вызывает cron. Это исключает прежний рассинхрон, когда в git
 уже лежал исправленный fail-closed скрипт, а расписание продолжало запускать
 старую копию.
