@@ -124,9 +124,78 @@ STANDBY_CONFIRM_PRODUCTION_DOWN=YES STANDBY_START_WORKERS=1 \
 ./deploy/standby-stop.sh
 ```
 
-Promotion дополнительно проверяет production CC через Tailscale и отказывается,
-если тот отвечает HTTP 200. Обход `STANDBY_ALLOW_SPLIT_BRAIN=1` оставлен только
-для случая отказа самой проверки при отдельно доказанной остановке primary.
+### Standby env (`~/.config/mydon/standby-production.env`)
+
+Все три скрипта требуют этот файл с правами `600`. Источник значений — тот же
+зашифрованный B2/Telegram-архив production `.env` (см. «Отказ compute-хоста»,
+шаг 3): распаковать и перенести НУЖНОЕ ПОДМНОЖЕСТВО ключей, не весь файл.
+
+Обязательные ключи: `DATABASE_URL` (session pooler, `sslmode=require`),
+`SERVICE_TOKEN` (без него после promote вся панель read-only — мутации 401;
+значение — без кавычек и бэкслешей), `HEARTBEAT_GIST_ID` — по нему promote
+проверяет живость primary независимо от tailnet и БЕЗ него отказывает
+(обход — `STANDBY_ALLOW_SPLIT_BRAIN=1`). Источник значения —
+`/etc/mydon-heartbeat.env` на primary: скопируйте его при ПОДГОТОВКЕ
+standby-env, не во время аварии (drill напоминает об этом заранее).
+Для профиля workers: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`.
+Рекомендуемые: `INGEST_KEY`, `INVITE_PEPPER`, `TELEGRAM_BOT_USERNAME`,
+LLM/Notion/OURVEND-ключи — по мере надобности их функций.
+
+Требования к standby-машине: Docker Engine ≥ 25 (Docker Desktop ≥ 4.27) и
+Compose ≥ 2.20.2 — иначе `start_interval` в healthcheck игнорируется или
+отвергается; плюс `python3` для проверки heartbeat. Значения из env-файла
+всегда побеждают переменные окружения шелла: скрипты сами вычищают из
+окружения каждый ключ, определённый в файле (экспортированный в шелле
+DATABASE_URL не подменит боевой).
+
+НЕ переносить: `DATABASE_ADMIN_URL`, `POSTGRES_PASSWORD`,
+`B2_APPLICATION_KEY`, `BACKUP_ENC_PASSPHRASE` — админ-доступ и бэкап-секреты
+не нужны контейнерам standby, и тест `standby-compose.test.sh` проверяет, что
+они не утекают в конфигурацию.
+
+Если primary пересоздан на новом Tailscale-IP, обновить `PRIMARY_PANEL_URL`
+(переменной окружения при запуске promote): проверка по мёртвому адресу вечно
+отвечает 000 и ничего не доказывает.
+
+### Что и как проверяется
+
+Promotion отказывается при ЛЮБОМ доказательстве жизни primary: CC отвечает по
+Tailscale, или heartbeat-gist (пишется каждые 2 минуты) свежее 10 минут.
+Heartbeat-проверка ОБЯЗАТЕЛЬНА: без `HEARTBEAT_GIST_ID` (или при недоступном
+gist / отсутствующем python3) promote отказывает, потому что «curl 000 на
+tailnet-адрес» сам по себе ничего не доказывает. Протухший heartbeat
+доказывает лишь нездоровье Core ≥ 10 минут: бот и агенты переживают смерть
+Core, поэтому при живом доступе к primary (ssh, консоль Hetzner) сначала
+остановить контейнеры там. Обход `STANDBY_ALLOW_SPLIT_BRAIN=1` оставлен
+только для случая отказа самих проверок при отдельно доказанной остановке
+primary.
+
+Перед стартом workers promote проверяет токен бота через `getMe` (с ретраями
+на транзиентные сбои сети), а после старта до 60 секунд ждёт в логах бота
+отметку о запуске, срезая логи по времени старта текущего контейнера
+(маркеры «БОТ НЕ ЗАПУСТИЛСЯ», «режим скелета», пустой allowlist, повторные
+ошибки опроса валят promote): контейнер с мёртвым токеном остаётся Running,
+и проверка одного лишь состояния контейнера сертифицировала бы мёртвый
+failover. Drill и promote также проверяют мутационный путь Core
+аутентифицированным запросом — `/health` зелёный и при пустом
+`SERVICE_TOKEN`, когда все записи отбиваются 401. Гейт свежести образа
+отвергает непроверяемый возраст (`unknown`): нужен git-чекаут и образ из
+`standby-drill.sh`. `standby-stop.sh` — аварийный рубильник без предусловий:
+останавливает контейнеры по именам напрямую, не требуя env-файла.
+
+### Вложения при failover
+
+Вложения primary (`/opt/mydon-data/attachments`) на standby НЕ реплицируются:
+S3 не настроен, файлы живут на хосте. После promote старые фото/чеки отвечают
+404 — это ожидаемо. Новые файлы, загруженные за время аварии, копятся в
+`~/.local/state/mydon-standby/attachments` (или `STANDBY_ATTACHMENTS_DIR`);
+при failback перенести их на primary ДО возобновления работы:
+
+```bash
+rsync -av ~/.local/state/mydon-standby/attachments/ \
+  root@<primary-tailscale-ip>:/opt/mydon-data/attachments/
+```
+
 Drill 2026-08-24 подтвердил managed DB (`dbOk=true`), CC HTTP 200 и чистую
 остановку Core/CC. Отдельная проверка профиля workers подтвердила завершение
 Core, CC, Bot и Agents без `SIGKILL`/кода `137`; все Node-сервисы запускаются

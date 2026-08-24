@@ -1,5 +1,6 @@
 # Cold compute standby for a second Tailscale machine.
-# It always uses the managed DATABASE_URL from STANDBY_ENV_FILE and never starts
+# It always uses the managed DATABASE_URL from the env file passed via
+# `docker compose --env-file` (standby-*.sh do this) and never starts
 # Bot/Agents unless the explicit "workers" profile is enabled.
 name: mydon-standby
 
@@ -20,7 +21,9 @@ services:
       PORT: 3001
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       INGEST_KEY: ${INGEST_KEY:-}
-      SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      # Mutations are fail-closed without it: /health would look fine while the
+      # whole control plane rejects every write with 401. Require it up front.
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?SERVICE_TOKEN is required (mutations are fail-closed without it)}
       INVITE_PEPPER: ${INVITE_PEPPER:-}
       STAFF_LINK_BY_USERNAME: ${STAFF_LINK_BY_USERNAME:-0}
       HEALTH_STORAGE_PATH: /
@@ -29,6 +32,7 @@ services:
       # prevent the control plane from starting during a compute disaster.
       STOCK_DATABASE_URL: ""
       HISTORY_DB_PATH: ""
+      HISTORY_MODEL_DIR: ""
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-}
       STORAGE_BUCKET: ${STORAGE_BUCKET:-}
       STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-}
@@ -37,7 +41,12 @@ services:
       STORAGE_FORCE_PATH_STYLE: ${STORAGE_FORCE_PATH_STYLE:-true}
       STORAGE_LOCAL_DIR: /data/attachments
     volumes:
-      - standby-attachments:/data/attachments
+      # Bind-mount, не анонимный том: production отдаёт вложения с хоста
+      # (/opt/mydon-data/attachments), и файлы, загруженные за время аварии,
+      # должны быть видны оператору для rsync на вернувшийся primary.
+      # Старые вложения primary сюда НЕ реплицируются — standby-promote.sh
+      # предупреждает об этом отдельно.
+      - ${STANDBY_ATTACHMENTS_DIR:?STANDBY_ATTACHMENTS_DIR is required (standby-*.sh export it)}:/data/attachments
       - ../data:/app/data:ro
     ports:
       - "127.0.0.1:${STANDBY_CORE_PORT:-3101}:3001"
@@ -47,9 +56,13 @@ services:
         - node
         - -e
         - fetch('http://127.0.0.1:3001/health').then(async r=>{const d=await r.json();process.exit(r.ok&&d.status==='ok'?0:1)}).catch(()=>process.exit(1))
-      interval: 5s
+      # Частые пробы нужны только на старте: start_interval даёт 3s внутри
+      # start_period, а установившийся режим не гоняет node каждые 5 секунд.
+      interval: 30s
       timeout: 5s
-      retries: 12
+      retries: 3
+      start_period: 60s
+      start_interval: 3s
 
   cc:
     image: mydon:standby
@@ -138,6 +151,3 @@ services:
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_PARENT_PAGE_ID: ${NOTION_PARENT_PAGE_ID:-}
     command: ["node", "apps/agents/dist/index.js"]
-
-volumes:
-  standby-attachments:
