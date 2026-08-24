@@ -34,13 +34,29 @@ describe("лист «Правила закупа»", () => {
     expect(form.get("product")).toBe("Snickers 50gr");
     expect(form.get("packSize")).toBe("12");
   });
-  it("успех — refresh и форма закрывается", async () => {
-    mocks.saveVendingProductRules.mockResolvedValue({ ok: true });
+  it("успех — refresh, форма закрывается, в панели видно, что записано (UX#25)", async () => {
+    mocks.saveVendingProductRules.mockResolvedValue({ ok: true, message: "Правило «Twix 50gr» сохранено" });
     const user = userEvent.setup();
     render(<ProductRulesPanel domain="vendhub" products={rows} />);
     await user.click(screen.getByRole("button", { name: "Править Twix 50gr" }));
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
+    expect(await screen.findByText("Правило «Twix 50gr» сохранено")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Сохранить" })).toBeNull();
+  });
+
+  it("форма подписана товаром: видно, что правишь (UX#14)", async () => {
+    const user = userEvent.setup();
+    render(<ProductRulesPanel domain="vendhub" products={rows} />);
+    await user.click(screen.getByRole("button", { name: "Править Snickers 50gr" }));
+    expect(screen.getByText("Правила закупа — Snickers 50gr")).toBeVisible();
+  });
+
+  it("кнопка подписана «Править», имя товара — в aria-label (UX#24)", () => {
+    render(<ProductRulesPanel domain="vendhub" products={rows} />);
+    // Читалка и тесты находят кнопку по товару, глаз видит короткую подпись.
+    expect(screen.getByRole("button", { name: "Править Snickers 50gr" })).toHaveTextContent("Править");
+    expect(screen.getAllByRole("button", { name: /^Править / })).toHaveLength(2);
   });
   it("переключение строки без «Отмена» перемонтирует форму — не сохраняет чужие правки", async () => {
     const user = userEvent.setup();

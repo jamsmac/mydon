@@ -20,7 +20,7 @@ const CATEGORY_LABEL: Record<VendingProductRow["category"], string> = {
   other: "прочее",
 };
 
-function RuleForm({ domain, row, onDone }: { domain: string; row: VendingProductRow; onDone: () => void }) {
+function RuleForm({ domain, row, onDone }: { domain: string; row: VendingProductRow; onDone: (saved?: string | null) => void }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -35,7 +35,9 @@ function RuleForm({ domain, row, onDone }: { domain: string; row: VendingProduct
           const res = await saveVendingProductRules(domain, form);
           if (res.ok) {
             setError(null);
-            onDone();
+            // Что именно записано — строкой в панели: форма закрывается, и без
+            // подтверждения владелец не знает, дошла ли правка (UX#25).
+            onDone(res.message ?? null);
             router.refresh();
           } else {
             setError(res.message ?? "Не получилось");
@@ -43,6 +45,9 @@ function RuleForm({ domain, row, onDone }: { domain: string; row: VendingProduct
         });
       }}
     >
+      {/* Форма открывается под списком, и без заголовка не было видно, какой
+          товар правишь: строка «Править» уже уехала вверх (UX#14). */}
+      <div className="section-title">Правила закупа — {row.name}</div>
       <input type="hidden" name="product" value={row.name} />
       <label>
         <span>Блок, шт</span>
@@ -60,7 +65,7 @@ function RuleForm({ domain, row, onDone }: { domain: string; row: VendingProduct
         <button type="submit" className="btn primary" disabled={pending}>
           {pending ? "…" : "Сохранить"}
         </button>
-        <button type="button" className="btn" onClick={onDone}>
+        <button type="button" className="btn" onClick={() => onDone()}>
           Отмена
         </button>
         {error && <span className="err-text">{error}</span>}
@@ -71,7 +76,12 @@ function RuleForm({ domain, row, onDone }: { domain: string; row: VendingProduct
 
 export function ProductRulesPanel({ domain, products }: { domain: string; products: VendingProductRow[] }) {
   const [editing, setEditing] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
   const editingRow = editing === null ? null : (products.find((p) => p.id === editing) ?? null);
+  const close = (message?: string | null) => {
+    setEditing(null);
+    setSaved(message ?? null);
+  };
 
   return (
     <>
@@ -93,8 +103,11 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
               </div>
               {p.excludedFromPurchase && <span className="pill bad">исключён</span>}
               {p.fixedPurchaseQty !== null && <span className="pill">фикс {n(p.fixedPurchaseQty)}</span>}
-              <button type="button" className="btn sm" onClick={() => setEditing(p.id)}>
-                Править {p.name}
+              {/* Имя товара — в aria-label, а не в подписи: в списке из 48
+                  строк кнопка «Править Snickers 50gr» ломала колонку, но без
+                  имени кнопка неотличима от 47 соседних для читалки (UX#24). */}
+              <button type="button" className="btn sm" aria-label={`Править ${p.name}`} onClick={() => setEditing(p.id)}>
+                Править
               </button>
             </div>
           ))}
@@ -105,8 +118,9 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
         // ПЕРЕМОНТИРОВАТЬ форму: без key React переиспользует смонтированные
         // неуправляемые input'ы и не переприменяет defaultValue/defaultChecked,
         // и правки сохранились бы под чужим именем товара (ревью, находка 1).
-        <RuleForm key={editingRow.id} domain={domain} row={editingRow} onDone={() => setEditing(null)} />
+        <RuleForm key={editingRow.id} domain={domain} row={editingRow} onDone={close} />
       )}
+      {saved && editingRow === null && <p className="ok-text">{saved}</p>}
       <p className="hint" style={{ marginTop: 8 }}>
         Цена — только чтение: правится в боте командой «цена &lt;товар&gt; &lt;сум&gt;».
       </p>

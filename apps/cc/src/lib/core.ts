@@ -125,7 +125,10 @@ export interface VendingPurchase {
   totalOrder: number;
   costExact: number;
   costRounded: number;
+  /** Куплено сверх нехватки: округление до блока + фикс-количества. */
   overpay: number;
+  /** Недобор деньгами: фикс МЕНЬШЕ нехватки — купим не всё, что нужно. */
+  shortfallCost: number;
   /**
    * Итоги раздачи — по ВСЕМ позициям (items + excludedByRule +
    * excludedNoSales): это штуки, а не деньги.
@@ -163,7 +166,19 @@ export interface VendingPlanMachine {
 
 /** Предупреждение плана: то, из-за чего числам можно верить не полностью. */
 export interface VendingPlanWarning {
-  code: "stock_stale" | "machine_skipped" | "no_price" | "unknown_product";
+  code:
+    | "stock_stale"
+    /** Строки склада без карточки прайса — в расчёт не вошли. */
+    | "stock_unknown_product"
+    | "machine_skipped"
+    | "no_price"
+    | "unknown_product"
+    /** Батч продаж несвежий: «нет продаж» может быть ложным. */
+    | "sales_stale"
+    /** В батче продаж автоматов меньше, чем в расчёте. */
+    | "sales_partial"
+    /** В настройке маршрута есть серийники, которых нет среди автоматов. */
+    | "route_unknown_serial";
   message: string;
 }
 
@@ -181,9 +196,13 @@ export interface VendingPlan {
     back: number;
     totalAfter: number;
     stale: boolean;
+    /** Штуки на складе без карточки прайса: в расчёт не вошли. */
+    unmatched: number;
   };
   summary: VendingPurchase;
   machines: VendingPlanMachine[];
+  /** Порядок обхода задан настройкой (а не по имени автомата). */
+  routeConfigured: boolean;
   warnings: VendingPlanWarning[];
 }
 

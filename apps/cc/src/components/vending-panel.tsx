@@ -197,6 +197,7 @@ export async function VendingSupplyPanel() {
     costExact: 0,
     costRounded: 0,
     overpay: 0,
+    shortfallCost: 0,
     totalFromPurchase: 0,
     totalFromStock: 0,
     totalUnfilled: 0,
@@ -290,6 +291,15 @@ export async function VendingSupplyPanel() {
           {purchase.excludedNoSales.length > 0 && (
             <p className="muted">
               Не закупать (нет продаж): {purchase.excludedNoSales.map((i) => i.product).join(", ")}
+            </p>
+          )}
+          {/* Убранные правилом владельца не попадали сюда вовсе: их не видно
+              ни в списке закупа, ни рядом, и «почему этого нет в закупе»
+              оставалось без ответа. */}
+          {purchase.excludedByRule.length > 0 && (
+            <p className="muted">
+              Убрано из закупки (правило товара, грузим только со склада):{" "}
+              {purchase.excludedByRule.map((i) => i.product).join(", ")}
             </p>
           )}
           {purchase.noPrice.length > 0 && (

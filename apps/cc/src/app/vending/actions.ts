@@ -60,7 +60,9 @@ export async function saveVendingProductRules(domain: string, form: FormData): P
     });
     if (!res.ok) return { ok: false, message: `Товар «${product}» не найден` };
     revalidatePath(`/domain/${domain}`);
-    return { ok: true };
+    // Имя из ОТВЕТА Core (канон после алиасов), а не из формы: владелец должен
+    // видеть, под какой карточкой правило записано (UX#25).
+    return { ok: true, message: `Правило «${res.product ?? product}» сохранено` };
   } catch (err) {
     return failure(err);
   }

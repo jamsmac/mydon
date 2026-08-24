@@ -36,8 +36,11 @@ export function SubmitPurchaseButton({ domain }: { domain: string }) {
         });
       }}
     >
-      <button type="submit" className="btn primary" disabled={pending}>
-        {pending ? "…" : "Оформить закуп"}
+      {/* После успеха кнопка гаснет: заявка уже в очереди, и второе нажатие
+          создало бы вторую (Core её отобьёт, но владелец увидел бы отказ на
+          ровном месте) — UX#15. */}
+      <button type="submit" className="btn primary" disabled={pending || done !== null}>
+        {pending ? "…" : done !== null ? "Заявка отправлена" : "Оформить закуп"}
       </button>
       {error && <span className="err-text">{error}</span>}
       {done && <span className="muted">{done}</span>}

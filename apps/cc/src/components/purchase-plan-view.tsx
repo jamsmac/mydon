@@ -2,8 +2,8 @@ import { TZ } from "@mydon/shared";
 import {
   core,
   type VendingPlan,
+  type VendingPlanMachine,
   type VendingPlanSlot,
-  type VendingPurchaseItem,
 } from "../lib/core";
 import { when } from "../lib/format";
 import { SubmitPurchaseButton } from "./purchase-plan-submit";
@@ -20,11 +20,20 @@ function slotSource(s: VendingPlanSlot): string {
   return parts.length > 0 ? parts.join(" · ") : "нечем";
 }
 
-/** Потребность по автоматам именами, а не серийниками: план читает человек в маршруте. */
-function perMachineLine(item: VendingPurchaseItem, names: Map<string, string>): string {
-  return Object.entries(item.perMachine)
-    .map(([serial, qty]) => `${names.get(serial) ?? serial}: ${n(qty)}`)
-    .join(" · ");
+/**
+ * Куда уйдёт ИМЕННО СКЛАДСКОЙ товар: «Olma 3, American Hospital 2».
+ *
+ * `perMachine` — это ПОТРЕБНОСТЬ автомата, а не раздача склада: у позиции,
+ * которую наполовину закрывает закуп, он показывал бы «взять со склада»
+ * втрое больше, чем плану нужно. Считаем по слотам плана, ровно как бот
+ * (`stockByMachine` в purchase-plan.ts) — иначе панель и бот скажут разное.
+ */
+function stockByMachine(machines: VendingPlanMachine[], product: string): string {
+  return machines
+    .map((m) => ({ name: m.name, units: m.slots.filter((sl) => sl.product === product).reduce((sum, sl) => sum + sl.fromStock, 0) }))
+    .filter((x) => x.units > 0)
+    .map((x) => `${x.name} ${n(x.units)}`)
+    .join(", ");
 }
 
 /**
@@ -42,31 +51,49 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
   // Потребность = раздача + то, что не закроется: `need` каждой позиции ровно
   // так и раскладывается, поэтому отдельного итога потребности не нужно.
   const need = load + summary.totalUnfilled;
-  const names = new Map(machines.map((m) => [m.serial, m.name]));
   // Со склада берут не только закупаемые позиции: убранные правилом и «без
   // продаж» тоже едут в автоматы тем, что уже лежит на полке.
   const fromStock = [...summary.items, ...summary.excludedByRule, ...summary.excludedNoSales].filter(
     (i) => i.fromStock > 0,
   );
+  // «Порядок — по имени» надо объяснить: настройка есть, но её не видно с
+  // этого листа, и владелец не знает, что маршрут вообще настраивается (UX#16).
+  const маршрутСломан = warnings.some((w) => w.code === "route_unknown_serial");
 
   return (
     <>
       <p className="lead">
         Загрузить {n(load)} из {n(need)} нужных · со склада {n(summary.totalFromStock)} · купить{" "}
-        <b>{n(summary.totalOrder)}</b> ед ({summary.items.length} поз.) на <b>{n(summary.costRounded)}</b> сум · пусто{" "}
-        {n(summary.totalUnfilled)}
+        <b>{n(summary.totalOrder)}</b> ед ({summary.items.length} поз.)
+        {/* «на 0 сум» читалось как «бесплатно». Ноль здесь значит одно из двух:
+            покупать нечего либо ни у одной позиции нет цены — это разные вещи. */}
+        {summary.costRounded > 0 ? (
+          <>
+            {" "}
+            на <b>{n(summary.costRounded)}</b> сум
+            {summary.noPrice.length > 0 && (
+              <span className="muted"> (без {n(summary.noPrice.length)} поз. без цены — сумма неполная)</span>
+            )}
+          </>
+        ) : (
+          summary.items.length > 0 && <span className="muted"> · сумма не посчитана — ни у одной позиции нет цены</span>
+        )}
+        {summary.totalUnfilled > 0 && <> · не закроется {n(summary.totalUnfilled)}</>}
       </p>
 
       <div className="rows" style={{ marginBottom: 14 }}>
         <div className="row">
           <div className="t">
-            <b>{stock.asOf === null ? "Склад ещё не считали" : `Склад на ${day(stock.asOf)}`}</b>
+            {/* Дата — про ПЕРЕСЧЁТ склада, а не про план: «Склад на 20.08»
+                читалось как «остаток на дату» (UX#5). */}
+            <b>{stock.asOf === null ? "Склад ещё не считали" : `Склад: последний пересчёт ${day(stock.asOf)}`}</b>
             <small>
-              сейчас {n(stock.totalBefore)} · возьмём {n(stock.use)} · вернём {n(stock.back)} · станет{" "}
+              сейчас {n(stock.totalBefore)} · увезём {n(stock.use)} · докупим сверх нужды {n(stock.back)} · станет{" "}
               {n(stock.totalAfter)}
+              {stock.unmatched > 0 && <> · мимо расчёта {n(stock.unmatched)}</>}
             </small>
           </div>
-          {stock.stale && <span className="pill bad">устарел</span>}
+          {stock.stale && <span className="pill bad">часть строк старее 3 дней</span>}
         </div>
         {warnings.map((w, i) => (
           <div className="row" key={`${w.code}:${i}`}>
@@ -89,24 +116,35 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
           Ни один автомат в строю не просит пополнения — или сбор Ourvend ещё не приносил слотов.
         </div>
       ) : (
-        <div className="rows">
-          {machines.map((m) => (
-            <div className="row" key={m.serial}>
-              <span className="pill">{m.routeIndex}</span>
-              <div className="t">
-                <b>{m.name}</b>
-                <small>
-                  {m.serial} · закуп {n(m.fromPurchase)} · склад {n(m.fromStock)} · пусто {n(m.unfilled)}
-                </small>
+        <>
+          <p className="hint">
+            {plan.routeConfigured && !маршрутСломан
+              ? "Порядок задан в настройках («Система» → «Вендинг: маршрут загрузки»)."
+              : "Порядок — по имени автомата. Свой задаётся в «Система» → «Вендинг: маршрут загрузки»: серийники через запятую, без «c»."}
+          </p>
+          <div className="rows">
+            {machines.map((m) => (
+              <div className="row" key={m.serial}>
+                <span className="pill">{m.routeIndex}</span>
+                <div className="t">
+                  <b>{m.name}</b>
+                  <small>
+                    {m.serial} · закуп {n(m.fromPurchase)} · склад {n(m.fromStock)}
+                    {m.unfilled > 0 && <> · пусто {n(m.unfilled)}</>}
+                  </small>
+                </div>
+                <span className="pill">
+                  {n(m.fromPurchase + m.fromStock)} из {n(m.need)} ед
+                </span>
               </div>
-              <span className="pill">
-                {n(m.fromPurchase + m.fromStock)} из {n(m.need)} ед
-              </span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </>
       )}
 
+      {/* Порядок секций — как в боте: купить → собрать со склада → убрано →
+          слоты. Один и тот же поход, и два разных порядка заставляли владельца
+          сверять списки заново (UX#21). */}
       <div className="section-title">Купить</div>
       {summary.items.length === 0 ? (
         <div className="empty">
@@ -114,24 +152,28 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
           Потребность закрывается складом — или всё, чего не хватает, убрано из закупки правилом.
         </div>
       ) : (
-        <div className="rows">
-          {summary.items.map((i) => (
-            <div className="row" key={i.product}>
-              <div className="t">
-                <b>{i.product}</b>
-                <small>
-                  нужно {n(i.need)} · склад {n(i.stock)} · купить {n(i.buy)} · заказ {n(i.order)} · в автоматы{" "}
-                  {n(i.fromPurchase)} · на склад {n(i.toStock)}
-                </small>
+        <>
+          <div className="rows">
+            {summary.items.map((i) => (
+              <div className="row" key={i.product}>
+                <div className="t">
+                  <b>{i.product}</b>
+                  <small>
+                    нужно {n(i.need)} · склад {n(i.stock)} · купить {n(i.buy)} · заказ {n(i.order)} · сразу в автоматы{" "}
+                    {n(i.fromPurchase)} · остальное на склад {n(i.toStock)}
+                  </small>
+                </div>
+                {i.fixedQty !== null && <span className="pill">фикс {n(i.fixedQty)}</span>}
+                {i.noPrice && <span className="pill bad">нет цены</span>}
+                <span className="pill">{i.noPrice ? `${n(i.order)} ед` : `${n(i.costRounded)} сум`}</span>
               </div>
-              {i.fixedQty !== null && <span className="pill">фикс {n(i.fixedQty)}</span>}
-              {i.noPrice && <span className="pill bad">нет цены</span>}
-              <span className="pill">{i.noPrice ? `${n(i.order)} ед` : `${n(i.costRounded)} сум`}</span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+          {/* Кнопки нет, когда закупать нечего: нажатие вернуло бы отказ Core
+              «Закупать нечего», и владелец решал бы, что панель сломана (UX#23). */}
+          <SubmitPurchaseButton domain={domain} />
+        </>
       )}
-      <SubmitPurchaseButton domain={domain} />
 
       {summary.excludedNoSales.length > 0 && (
         <p className="muted">
@@ -140,25 +182,6 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
       )}
       {summary.noPrice.length > 0 && (
         <p className="muted">Без цены в прайсе — на разбор: {summary.noPrice.join(", ")}</p>
-      )}
-
-      {summary.excludedByRule.length > 0 && (
-        <>
-          <div className="section-title">Убрано из закупки</div>
-          <div className="rows">
-            {summary.excludedByRule.map((i) => (
-              <div className="row" key={i.product}>
-                <div className="t">
-                  <b>{i.product}</b>
-                  <small>
-                    нужно {n(i.need)} · со склада {n(i.fromStock)} · пусто {n(i.unfilled)}
-                  </small>
-                </div>
-                <span className="pill">правило товара</span>
-              </div>
-            ))}
-          </div>
-        </>
       )}
 
       {fromStock.length > 0 && (
@@ -170,10 +193,31 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
                 <div className="t">
                   <b>{i.product}</b>
                   <small>
-                    сейчас {n(i.stock)} · после {n(i.stockAfter)} · по автоматам {perMachineLine(i, names)}
+                    сейчас {n(i.stock)} · после {n(i.stockAfter)}
+                    {stockByMachine(machines, i.product) && <> · по автоматам {stockByMachine(machines, i.product)}</>}
                   </small>
                 </div>
                 <span className="pill">взять {n(i.fromStock)} ед</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {summary.excludedByRule.length > 0 && (
+        <>
+          <div className="section-title">Убрано из закупки</div>
+          <div className="rows">
+            {summary.excludedByRule.map((i) => (
+              <div className="row" key={i.product}>
+                <div className="t">
+                  <b>{i.product}</b>
+                  <small>
+                    нужно {n(i.need)} · со склада {n(i.fromStock)}
+                    {i.unfilled > 0 && <> · пусто {n(i.unfilled)}</>}
+                  </small>
+                </div>
+                <span className="pill">правило товара</span>
               </div>
             ))}
           </div>
