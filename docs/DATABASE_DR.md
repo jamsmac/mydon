@@ -137,6 +137,10 @@ STANDBY_CONFIRM_PRODUCTION_DOWN=YES STANDBY_START_WORKERS=1 \
 (обход — `STANDBY_ALLOW_SPLIT_BRAIN=1`). Источник значения —
 `/etc/mydon-heartbeat.env` на primary: скопируйте его при ПОДГОТОВКЕ
 standby-env, не во время аварии (drill напоминает об этом заранее).
+Чтение идёт через raw-эндпоинт гиста (анонимный api.github.com за
+провайдерским CGNAT постоянно упирается в общий лимит 60 запросов/час);
+владелец гиста по умолчанию `jamsmac`, переопределяется ключом
+`HEARTBEAT_GIST_OWNER`.
 Для профиля workers: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`.
 Рекомендуемые: `INGEST_KEY`, `INVITE_PEPPER`, `TELEGRAM_BOT_USERNAME`,
 LLM/Notion/OURVEND-ключи — по мере надобности их функций.

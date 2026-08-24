@@ -164,13 +164,30 @@ heartbeat_age_seconds() {
   # Явная проверка python3: на голом macOS это заглушка xcode-select, чей
   # отказ иначе маскируется под «gist недоступен» с ложной причиной.
   command -v python3 >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-  payload=$(curl -sS --max-time 15 "https://api.github.com/gists/$gist_id" 2>/dev/null || true)
+  hb_owner=$(env_file_value "$1" HEARTBEAT_GIST_OWNER)
+  hb_owner=${hb_owner:-jamsmac}
+  # Raw-эндпоинт ПЕРВЫМ: анонимный api.github.com даёт 60 запросов/час на
+  # ВЕСЬ IP, и за провайдерским CGNAT лимит вечно исчерпан чужими запросами
+  # (реальный 403 с домашней сети 24.08.2026). У raw такого лимита нет.
+  payload=$(curl -sSL --max-time 15 \
+    "https://gist.githubusercontent.com/$hb_owner/$gist_id/raw/heartbeat.json" \
+    2>/dev/null || true)
+  if ! printf '%s' "$payload" | grep -q '"ts"'; then
+    # Фолбэк на API — вдруг raw-CDN сбоит, а лимит на этой сети не исчерпан.
+    api_json=$(curl -sS --max-time 15 "https://api.github.com/gists/$gist_id" 2>/dev/null || true)
+    payload=$(printf '%s' "$api_json" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin)["files"]["heartbeat.json"]["content"])
+except Exception:
+    pass
+' 2>/dev/null || true)
+  fi
   [ -n "$payload" ] || { printf 'unknown'; return 0; }
   age=$(printf '%s' "$payload" | python3 -c '
 import json, sys, datetime
 try:
-    gist = json.load(sys.stdin)
-    hb = json.loads(gist["files"]["heartbeat.json"]["content"])
+    hb = json.load(sys.stdin)
     ts = datetime.datetime.fromisoformat(hb["ts"].replace("Z", "+00:00"))
     now = datetime.datetime.now(datetime.timezone.utc)
     print(int((now - ts).total_seconds()))
