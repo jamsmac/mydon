@@ -81,10 +81,14 @@ export interface VendingRunout {
   daysLeft: number | null;
 }
 
-/** Позиция сводного закупа (§5.5). */
+/** Позиция сводного закупа (§5.5) с раздачей и правилами товара (П5a). */
 export interface VendingPurchaseItem {
   product: string;
+  /** Потребность по автоматам — из чего сложилось `need`. */
+  perMachine: Record<string, number>;
   need: number;
+  /** Остаток склада на момент расчёта. */
+  stock: number;
   buy: number;
   pack: number;
   order: number;
@@ -92,18 +96,145 @@ export interface VendingPurchaseItem {
   costRounded: number;
   noPrice: boolean;
   noSales: boolean;
+  /** В автоматы из новой упаковки. */
+  fromPurchase: number;
+  /** В автоматы со склада. */
+  fromStock: number;
+  /** Не заполнится ничем. */
+  unfilled: number;
+  /** Излишек закупки, который ляжет на склад. */
+  toStock: number;
+  /** Склад после раздачи: stock − fromStock + toStock. */
+  stockAfter: number;
+  /** Правило товара «убрано из закупки». */
+  excluded: boolean;
+  /** Фикс-количество закупки, если задано правилом. */
+  fixedQty: number | null;
 }
 
-/** Сводный закуп: позиции + денежные итоги (§5.4–5.5). */
+/** Сводный закуп: позиции + денежные итоги (§5.4–5.5) + итоги раздачи (П5a). */
 export interface VendingPurchase {
   items: VendingPurchaseItem[];
   excludedNoSales: VendingPurchaseItem[];
+  /** Убраны правилом товара: в деньги не входят, в раздачу входят. */
+  excludedByRule: VendingPurchaseItem[];
   noPrice: string[];
+  /** Порядок раздачи, применённый к расчёту. */
+  allocation: "purchase-first" | "warehouse-first";
   totalBuy: number;
   totalOrder: number;
   costExact: number;
   costRounded: number;
+  /** Куплено сверх нехватки: округление до блока + фикс-количества. */
   overpay: number;
+  /** Недобор деньгами: фикс МЕНЬШЕ нехватки — купим не всё, что нужно. */
+  shortfallCost: number;
+  /**
+   * Итоги раздачи — по ВСЕМ позициям (items + excludedByRule +
+   * excludedNoSales): это штуки, а не деньги.
+   */
+  totalFromPurchase: number;
+  totalFromStock: number;
+  totalUnfilled: number;
+  totalToStock: number;
+}
+
+/** Слот автомата в плане закупа: что стоит, сколько влезет и откуда возьмём (П5a). */
+export interface VendingPlanSlot {
+  coilId: string;
+  product: string;
+  quantity: number;
+  capacity: number;
+  need: number;
+  fromPurchase: number;
+  fromStock: number;
+  unfilled: number;
+}
+
+/** Автомат в плане закупа: место в маршруте обхода и раздача по слотам. */
+export interface VendingPlanMachine {
+  serial: string;
+  name: string;
+  /** Место в маршруте обхода, с 1. */
+  routeIndex: number;
+  need: number;
+  fromPurchase: number;
+  fromStock: number;
+  unfilled: number;
+  slots: VendingPlanSlot[];
+}
+
+/** Предупреждение плана: то, из-за чего числам можно верить не полностью. */
+export interface VendingPlanWarning {
+  code:
+    | "stock_stale"
+    /** Строки склада без карточки прайса — в расчёт не вошли. */
+    | "stock_unknown_product"
+    | "machine_skipped"
+    | "no_price"
+    | "unknown_product"
+    /** Батч продаж несвежий: «нет продаж» может быть ложным. */
+    | "sales_stale"
+    /** В батче продаж автоматов меньше, чем в расчёте. */
+    | "sales_partial"
+    /** В настройке маршрута есть серийники, которых нет среди автоматов. */
+    | "route_unknown_serial";
+  message: string;
+}
+
+/** План закупа «что купить»: закуп + раздача по маршруту и слотам (П5a). */
+export interface VendingPlan {
+  /** Когда посчитан (ISO) — план живёт ровно до следующего сбора. */
+  generatedAt: string;
+  stock: {
+    /** Последняя инвентаризация (ISO) или null, если склада ещё не было. */
+    asOf: string | null;
+    totalBefore: number;
+    /** Уйдёт со склада в автоматы. */
+    use: number;
+    /** Вернётся на склад из закупа (излишек упаковки). */
+    back: number;
+    totalAfter: number;
+    stale: boolean;
+    /** Штуки на складе без карточки прайса: в расчёт не вошли. */
+    unmatched: number;
+  };
+  summary: VendingPurchase;
+  machines: VendingPlanMachine[];
+  /** Порядок обхода задан настройкой (а не по имени автомата). */
+  routeConfigured: boolean;
+  warnings: VendingPlanWarning[];
+}
+
+/** Строка прайса вендинга с правилами закупа — для листа «Правила закупа». */
+export interface VendingProductRow {
+  id: string;
+  name: string;
+  category: "drink" | "snack" | "other";
+  purchasePrice: number | null;
+  packSize: number;
+  isActive: boolean;
+  excludedFromPurchase: boolean;
+  fixedPurchaseQty: number | null;
+}
+
+/** Итог правки правил закупа товара (П5a). */
+export interface VendingRulesResult {
+  ok: boolean;
+  reason?: "not_found";
+  /** Каноническое имя товара (после алиасов). */
+  product?: string;
+}
+
+/** Итог отправки закупа на утверждение владельцу (§5.7). */
+export interface VendingSubmitResult {
+  submitted: boolean;
+  /** id созданной заявки (когда submitted). */
+  approvalId?: string;
+  positions: number;
+  costRounded: number;
+  /** Почему не отправили (когда !submitted). */
+  reason?: string;
 }
 
 /** Накладная закупа (материализована при одобрении заявки, §5.7). */
@@ -2098,6 +2229,24 @@ export const core = {
   vendingDeficit: () => get<VendingNeed[]>("/vending/deficit"),
   vendingForecast: () => get<{ all: VendingRunout[]; critical: VendingRunout[] }>("/vending/forecast"),
   vendingPurchase: () => get<VendingPurchase>("/vending/purchase"),
+  /** План закупа «что купить»: закуп + раздача по маршруту и слотам (П5a). */
+  vendingPlan: () => get<VendingPlan>("/vending/plan"),
+  /** Прайс вендинга с правилами закупа — для листа «Правила закупа». */
+  vendingProducts: () => get<VendingProductRow[]>("/vending/products"),
+  /** Отправить актуальный закуп на утверждение владельцу (та же заявка, что из бота). */
+  submitVendingPurchase: (createdBy: string) =>
+    send<VendingSubmitResult>("/vending/purchase/submit", "POST", { createdBy }),
+  /**
+   * Правила закупа товара: блок / исключён / фикс-количество.
+   * `fixedPurchaseQty: 0` — снять фикс (в базе NULL).
+   */
+  setVendingProductRules: (input: {
+    product: string;
+    packSize?: number;
+    excludedFromPurchase?: boolean;
+    fixedPurchaseQty?: number;
+    actor?: string;
+  }) => send<VendingRulesResult>("/vending/product-rules", "POST", input),
   vendingOrders: () => get<VendingOrder[]>("/vending/orders"),
   vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
   /** Журнал заливок построчно (по слоту) — источник ленты «Обслуживание» (снек). */

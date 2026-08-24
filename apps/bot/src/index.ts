@@ -402,7 +402,13 @@ async function main(): Promise<void> {
     const briefingText = formatBriefing(
       b,
       approvals,
-      purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
+      purchase
+        ? {
+            positions: purchase.items.length,
+            costRounded: purchase.costRounded,
+            fromStock: purchase.totalFromStock,
+          }
+        : undefined,
       coffee,
       globerent,
     );
@@ -758,6 +764,20 @@ async function main(): Promise<void> {
         const reply = await handleMessage(chatId, u.message.text, deps);
         if (reply) {
           await tg.sendMessage(chatId, reply.text, reply.keyboard);
+          // Длинный ответ (план закупа) приходит частями: у Telegram предел на
+          // одно сообщение, а резать список многоточием нельзя — обрезанный
+          // маршрут читается как полный. Единственное место доставки Reply.
+          //
+          // Обрыв на середине молчать не имеет права: недоехавшие части
+          // владелец прочитает как «маршрут кончился» и не довезёт товар.
+          try {
+            for (const part of reply.more ?? []) await tg.sendMessage(chatId, part);
+          } catch (err) {
+            console.error("Части ответа не отправлены:", err);
+            await tg
+              .sendMessage(chatId, "⚠️ Остальные части не дошли — повтори «план закупа».")
+              .catch(() => undefined);
+          }
           // Файл идёт отдельным сообщением: у документа своя доставка,
           // и она не должна мешать тексту, если сорвётся.
           if (reply.document) {

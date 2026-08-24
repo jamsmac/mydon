@@ -7,6 +7,7 @@ import {
   formatBriefing,
   msUntilBriefing,
 } from "./briefing";
+import { CoreError } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { parseIntent } from "./intent";
 import { parseAllowlist, RateLimiter } from "./security/access";
@@ -68,6 +69,13 @@ describe("Брифинг", () => {
   it("строка закупа появляется, когда есть что заказать", () => {
     const text = formatBriefing(base, [], { positions: 3, costRounded: 84000 });
     assert.match(text, /🛒 К закупу: 3 поз\. на ~84\s?000 сум — «оформить закуп»/);
+  });
+
+  it("раздача (П5a): «со склада» в строке закупа, когда склад что-то закрывает", () => {
+    const text = formatBriefing(base, [], { positions: 3, costRounded: 84000, fromStock: 5 });
+    assert.match(text, /🛒 К закупу: 3 поз\. на ~84\s?000 сум · со склада 5 — «оформить закуп»/);
+    // Склад пуст — хвоста нет: «со склада 0» читалось бы как отдельный сигнал.
+    assert.doesNotMatch(formatBriefing(base, [], { positions: 3, costRounded: 84000, fromStock: 0 }), /со склада/);
   });
 
   it("без закупа (0 позиций) строки нет", () => {
@@ -273,6 +281,129 @@ describe("Касса закупа: гейт по префиксу — не пр�
     assert.equal(spies.received, 0, "receiveVendingOrder не должен был вызваться");
     assert.equal(spies.cash, 0);
     assert.match(reply?.text ?? "", /Не понял формат кассы/);
+  });
+});
+
+describe("Бот: правила закупа и план — путь до Core (страж П5a)", () => {
+  type Вызов = { product: string; patch: Record<string, unknown> };
+
+  /** Стаб Core: копит вызовы правил, отдаёт готовый ответ на план. */
+  function deps(calls: Вызов[], plan?: unknown): HandlerDeps {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      setVendingProductRules: async (product: string, patch: Record<string, unknown>) => {
+        calls.push({ product, patch });
+        return { ok: true, product, before: {}, after: {} };
+      },
+      vendingPlan: async () => plan,
+    } as unknown as HandlerDeps["core"];
+    return { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
+  }
+
+  it("вся семья команд доходит до Core ровно тем патчем, который просил владелец", async () => {
+    const calls: Вызов[] = [];
+    const d = deps(calls);
+    await handleMessage(111, "не закупать Twix", d);
+    await handleMessage(111, "закупать Twix", d);
+    await handleMessage(111, "фикс Snickers 48", d);
+    await handleMessage(111, "блок Red Bull 6", d);
+    assert.deepEqual(
+      calls.map((c) => c.patch),
+      [{ excludedFromPurchase: true }, { excludedFromPurchase: false }, { fixedPurchaseQty: 48 }, { packSize: 6 }],
+    );
+    assert.deepEqual(calls.map((c) => c.product), ["Twix", "Twix", "Snickers", "Red Bull"]);
+  });
+
+  it("нераспознанная команда правил в Core не уходит — только подсказка с причиной", async () => {
+    const calls: Вызов[] = [];
+    const reply = await handleMessage(111, "блок TUC 5000", deps(calls));
+    assert.equal(calls.length, 0, "мутации быть не должно");
+    assert.match(reply?.text ?? "", /Блок — от 1 до 1000 штук/);
+  });
+
+  it("400 от Core — формат и причина, а не «попробуй позже» (повтор не поможет)", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      setVendingProductRules: async () => {
+        // Ровно то, что отдаёт Nest: причина внутри JSON вместе со служебными полями.
+        throw new CoreError(
+          400,
+          "/vending/product-rules",
+          '{"message":["packSize must not be greater than 1000"],"error":"Bad Request","statusCode":400}',
+        );
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "блок TUC 6", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /Core отверг запрос: packSize must not be greater than 1000/);
+    // Служебный шум протокола владельцу не показываем.
+    assert.doesNotMatch(reply?.text ?? "", /statusCode|Bad Request|[{}[\]]/);
+    assert.doesNotMatch(reply?.text ?? "", /попробуй ещё раз чуть позже/i);
+  });
+
+  it("400 с телом не-JSON (прокси, HTML) — показываем как есть, обрезав", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      setVendingProductRules: async () => {
+        throw new CoreError(400, "/vending/product-rules", "<html>413 Request Entity Too Large</html>");
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "блок TUC 6", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /413 Request Entity Too Large/);
+  });
+
+  it("5xx и сеть — прежний ответ «попробуй позже» (повтор реально помогает)", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      setVendingProductRules: async () => {
+        throw new CoreError(503, "/vending/product-rules", "");
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "блок TUC 6", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /Попробуй ещё раз чуть позже/);
+  });
+
+  it("«план закупа» отдаёт остальные части в more (иначе владелец получит одну сводку)", async () => {
+    const plan = {
+      generatedAt: "2026-08-25T04:00:00.000Z",
+      stock: { asOf: null, totalBefore: 0, use: 0, back: 0, totalAfter: 0, stale: true, unmatched: 0 },
+      summary: {
+        items: [
+          {
+            product: "Fanta", need: 12, stock: 0, buy: 12, pack: 12, order: 12, price: 5167, costRounded: 62004,
+            noPrice: false, noSales: false, fromPurchase: 12, fromStock: 0, unfilled: 0, toStock: 0, stockAfter: 0,
+            excluded: false, fixedQty: null, perMachine: { "2508160376": 12 },
+          },
+        ],
+        excludedNoSales: [], excludedByRule: [], noPrice: [], allocation: "purchase-first",
+        totalBuy: 12, totalOrder: 12, costExact: 62004, costRounded: 62004, overpay: 0, shortfallCost: 0,
+        totalFromPurchase: 12, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+      },
+      machines: [
+        {
+          serial: "2508160376", name: "Olma", routeIndex: 1, need: 12, fromPurchase: 12, fromStock: 0, unfilled: 0,
+          slots: [{ coilId: "3", product: "Fanta", quantity: 0, capacity: 12, need: 12, fromPurchase: 12, fromStock: 0, unfilled: 0 }],
+        },
+      ],
+      routeConfigured: false,
+      warnings: [],
+    };
+    const reply = await handleMessage(111, "план закупа", deps([], plan));
+    assert.match(reply?.text ?? "", /План закупа/);
+    assert.ok((reply?.more ?? []).length >= 2, "купить и слоты — отдельными сообщениями");
+    assert.ok((reply?.more ?? []).some((p) => /🛒 Купить/.test(p)));
+    assert.ok((reply?.more ?? []).some((p) => /🎰 Olma/.test(p)));
   });
 });
 

@@ -17,7 +17,9 @@ import {
 } from "./purchase-brief";
 
 const item = (o: Partial<VendingPurchaseItem> & { product: string }): VendingPurchaseItem => ({
+  perMachine: {},
   need: 0,
+  stock: 0,
   buy: 0,
   pack: 1,
   order: 0,
@@ -25,18 +27,32 @@ const item = (o: Partial<VendingPurchaseItem> & { product: string }): VendingPur
   costRounded: 0,
   noPrice: false,
   noSales: false,
+  fromPurchase: 0,
+  fromStock: 0,
+  unfilled: 0,
+  toStock: 0,
+  stockAfter: 0,
+  excluded: false,
+  fixedQty: null,
   ...o,
 });
 
 const base = (o: Partial<VendingPurchase> = {}): VendingPurchase => ({
   items: [],
   excludedNoSales: [],
+  excludedByRule: [],
   noPrice: [],
+  allocation: "purchase-first",
   totalBuy: 0,
   totalOrder: 0,
   costExact: 0,
   costRounded: 0,
   overpay: 0,
+  shortfallCost: 0,
+  totalFromPurchase: 0,
+  totalFromStock: 0,
+  totalUnfilled: 0,
+  totalToStock: 0,
   ...o,
 });
 
@@ -61,7 +77,7 @@ describe("Брифинг закупа (Telegram)", () => {
     assert.match(t, /Купить 6 ед/);
     assert.match(t, /с упаковками 24 ед/);
     assert.match(t, /84\s?000 сум/);
-    assert.match(t, /Переплата за упаковки: 40\s?000 сум/);
+    assert.match(t, /Куплено сверх нехватки: 40\s?000 сум \(округление до блока \+ фикс-количества\)/);
     // Топ по costRounded: Montella (60k) раньше Fanta (24k).
     assert.ok(t.indexOf("Montella") < t.indexOf("Fanta"));
     assert.match(t, /Montella — заказать 12 \(нехватка 4\)/);
@@ -80,6 +96,31 @@ describe("Брифинг закупа (Telegram)", () => {
     assert.match(t, /Не закупать \(нет продаж\): Dead/);
     // У позиции без цены сумма не выдумывается.
     assert.match(t, /NoPrice — заказать 3 \(нехватка 3\) · нет цены/);
+  });
+
+  it("раздача (П5a): со склада и пустые слоты — отдельной строкой со ссылкой на план", () => {
+    const p = base({
+      items: [item({ product: "Fanta", buy: 9, order: 12, costRounded: 62004, fromPurchase: 12 })],
+      totalBuy: 9,
+      totalOrder: 12,
+      costRounded: 62004,
+      totalFromPurchase: 12,
+      totalFromStock: 3,
+      totalUnfilled: 2,
+    });
+    const t = formatPurchaseBrief(p);
+    assert.match(t, /В автоматы: из закупа 12 · со склада 3 · пусто 2 — «план закупа»/);
+  });
+
+  it("раздачи нет — лишней строки в брифинге тоже нет", () => {
+    const p = base({
+      items: [item({ product: "Fanta", buy: 9, order: 12, costRounded: 62004, fromPurchase: 12 })],
+      totalBuy: 9,
+      totalOrder: 12,
+      costRounded: 62004,
+      totalFromPurchase: 12,
+    });
+    assert.doesNotMatch(formatPurchaseBrief(p), /В автоматы:/);
   });
 
   it("больше топа — сворачивает хвост в «…и ещё N»", () => {

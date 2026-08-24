@@ -62,6 +62,8 @@ const ЧТЕНИЕ = [
   "/maintenance/parts/history?model=smoke-model",
   "/vending/machines",
   "/vending/deficit",
+  "/vending/plan",
+  "/vending/products",
   "/vending/sync",
   "/coffee/locations",
   "/coffee/placements",
@@ -139,6 +141,17 @@ const ЗАПИСЬ = [
       periodEnd: "2026-08-07T00:00:00.000Z",
       productSales: [{ serial: "SMOKE-0001", product: "Smoke A", quantity: 3 }],
       machineSales: [{ serial: "SMOKE-0001", totalAmount: 15000, totalCount: 3 }],
+    },
+  },
+  {
+    // Ответ 200 с ok:false — штатный отказ сервиса (не 4xx), поэтому проверяем
+    // тело: путь дошёл до базы и вернул решение, а не упал на SQL.
+    имя: "правила товара (не найден → not_found)",
+    path: "/vending/product-rules",
+    body: { product: "Smoke Нет Такого", packSize: 5 },
+    проверить: (о) => {
+      if (о.ok !== false) throw new Error("ожидали not_found");
+      if (о.reason !== "not_found") throw new Error(`reason=${о.reason}`);
     },
   },
 ];

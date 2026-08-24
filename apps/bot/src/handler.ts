@@ -2,7 +2,7 @@ import { answer, type ContextSearch, type LlmResolver } from "@mydon/assistant";
 import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
 import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, collectGloberentSignals, formatApproval, formatBriefing } from "./briefing";
-import type { CoreClient } from "./core-client";
+import { CoreError, type CoreClient } from "./core-client";
 import {
   formatCashAck,
   formatCashSessions,
@@ -25,6 +25,8 @@ import {
   parsePriceCommand,
   parseReceiveDistribution,
 } from "./purchase-brief";
+import { formatRuleResult, isRuleCommand, parseRuleCommand, ruleCommandHint } from "./product-rules";
+import { formatPurchasePlan, isPlanCommand } from "./purchase-plan";
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
 import { handleActionsQuery, isActionsQuery } from "./owner-actions";
@@ -49,6 +51,12 @@ export interface HandlerDeps {
 
 export interface Reply {
   text: string;
+  /**
+   * Продолжение ответа отдельными сообщениями: у Telegram жёсткий предел на
+   * одно сообщение, а план закупа — это маршрут, списки и слоты по автоматам.
+   * Резать его многоточием нельзя: обрезанный список читается как полный.
+   */
+  more?: string[];
   keyboard?: ReturnType<typeof approvalKeyboard>;
   /** Готовый файл: владелец получает его в чат, а не текст для переписывания. */
   document?: { filename: string; content: Buffer; caption?: string };
@@ -61,6 +69,8 @@ const HELP = [
   "• «что просрочено» — обязательства и долги",
   "• «какие автоматы простаивают»",
   "• «что заказать» — сводка к закупу вендинга",
+  "• «план закупа» — маршрут, что купить, что взять со склада, слоты по автоматам",
+  "• «не закупать Twix» / «закупать Twix» / «фикс Snickers 48» / «блок Red Bull 6» — правила закупа товара",
   "• «оформить закуп» — отправить закуп тебе на утверждение",
   "• «накладные» — одобренные закупы",
   "• «принять закуп» — оприходовать накладную на склад",
@@ -82,6 +92,32 @@ const HELP = [
  * Порядок проверок важен: сначала доступ, потом частота, и только затем смысл —
  * чтобы чужой чат не мог ни нагрузить бота, ни узнать что-либо о данных.
  */
+/**
+ * Причина отказа Core словами, а не куском протокола.
+ *
+ * Nest отдаёт 400 телом `{"message":["packSize must not be greater than 1000"],
+ * "error":"Bad Request","statusCode":400}`. Владельцу нужна только `message`:
+ * остальное — служебный шум, из-за которого настоящая причина теряется в
+ * фигурных скобках. Не-JSON (прокси, HTML-страница ошибки) показываем как
+ * есть, обрезав: пустой ответ лучше честной заглушки.
+ */
+function coreReason(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed === "object" && parsed !== null && "message" in parsed) {
+      const m = (parsed as { message: unknown }).message;
+      if (typeof m === "string" && m.trim() !== "") return m.trim();
+      if (Array.isArray(m)) {
+        const строки = m.filter((x): x is string => typeof x === "string" && x.trim() !== "");
+        if (строки.length > 0) return строки.join("; ");
+      }
+    }
+  } catch {
+    // Не JSON — ниже покажем тело как есть.
+  }
+  return body.slice(0, 200) || "нет подробностей";
+}
+
 export async function handleMessage(
   chatId: number,
   text: string,
@@ -135,6 +171,50 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка чтения касс закупа:", err);
       return { text: "Не удалось получить кассы закупа из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Правила закупа товара — мутация: «не закупать Twix», «блок Red Bull 6»
+  // (П5a). До parseIntent и до цены: жёсткие префиксы ни с чем не пересекаются,
+  // а «закупать …» иначе ушло бы в брифинг закупа как слово «закуп».
+  if (isRuleCommand(text)) {
+    const cmd = parseRuleCommand(text);
+    // Причина отказа, а не общая шпаргалка: «блок TUC 5000» и «фикс TUC 0» —
+    // понятные намерения, отвергнутые по разным причинам (UX#27).
+    if (cmd === null) return { text: ruleCommandHint(text) };
+    try {
+      const patch =
+        cmd.kind === "exclude"
+          ? { excludedFromPurchase: true }
+          : cmd.kind === "include"
+            ? { excludedFromPurchase: false }
+            : cmd.kind === "fixed"
+              ? { fixedPurchaseQty: cmd.qty }
+              : { packSize: cmd.qty };
+      const res = await deps.core.setVendingProductRules(cmd.product, patch);
+      return { text: formatRuleResult(cmd, res) };
+    } catch (err) {
+      console.error("Ошибка правки правил закупа:", err);
+      // 400 — отказ по САМИМ ДАННЫМ: повтор той же команды не поможет никогда,
+      // и «попробуй позже» отправляло владельца ждать впустую. Показываем
+      // формат и то, что именно не принял Core.
+      if (err instanceof CoreError && err.status === 400) {
+        return { text: `${ruleCommandHint(text)}\n\nCore отверг запрос: ${coreReason(err.body)}` };
+      }
+      return { text: "Не удалось записать правило в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // План закупа — чтение: «что заказать» отвечает списком покупок, а этот
+  // ответ ведёт по маршруту. Ловим до parseIntent, иначе «план закупа» ушёл бы
+  // в брифинг закупа по слову «закуп».
+  if (isPlanCommand(text)) {
+    try {
+      const [first, ...more] = formatPurchasePlan(await deps.core.vendingPlan());
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка плана закупа:", err);
+      return { text: "Не удалось получить план закупа из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 
@@ -259,7 +339,13 @@ export async function handleMessage(
           text: formatBriefing(
             b,
             approvals,
-            purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
+            purchase
+              ? {
+                  positions: purchase.items.length,
+                  costRounded: purchase.costRounded,
+                  fromStock: purchase.totalFromStock,
+                }
+              : undefined,
             undefined,
             globerent,
           ),
