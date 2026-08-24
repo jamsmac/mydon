@@ -85,7 +85,7 @@ describe("таможенные формы", () => {
 
     await user.click(screen.getByRole("button", { name: "✕" }));
 
-    expect(window.confirm).toHaveBeenCalled();
+    expect(window.confirm).toHaveBeenCalledWith("Убрать ставку из работы? Строка останется в истории.");
     expect(await screen.findByText("Ставка используется")).toBeVisible();
     expect(mocks.deactivateTnvedRate).toHaveBeenCalledWith("globerent", "rate-1");
     expect(mocks.refresh).not.toHaveBeenCalled();

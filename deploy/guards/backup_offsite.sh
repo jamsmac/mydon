@@ -12,6 +12,8 @@
 # Cron: 0 22 * * * (03:00 по Ташкенту)
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Дампы не должны рождаться 644 под cron-umask root.
+umask 077
 cd /opt/mydon-stock
 
 BOT_TOKEN=$(grep '^BOT_TOKEN=' .env | cut -d= -f2-)

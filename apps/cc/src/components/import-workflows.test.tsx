@@ -101,7 +101,7 @@ describe("формы импортных контрактов", () => {
 
     await user.click(screen.getByRole("button", { name: "отменить" }));
 
-    expect(window.confirm).toHaveBeenCalled();
+    expect(window.confirm).toHaveBeenCalledWith("Отменить контракт? Возможно только без активных единиц.");
     expect(mocks.cancelImport).not.toHaveBeenCalled();
   });
 });

@@ -175,6 +175,8 @@ ssh "$HOST" "
   done
   if [ -z \"\$ready\" ]; then
     echo '  БД не отвечает на ping за 30с — деплой остановлен (миграции без бэкапа запрещены)' >&2
+    echo '  конфигурация подключения (без секретов):' >&2
+    /opt/backups/db_access.sh describe >&2 || true
     exit 1
   fi
   journal=\$(/opt/backups/db_access.sh query 'select count(*) from drizzle.__drizzle_migrations' 2>/dev/null | tr -d '[:space:]' || true)
@@ -221,6 +223,20 @@ say "7/8 Переключение сервисов и проверка health"
 ssh "$HOST" "
   set -e
   cd '$REMOTE_DIR'
+  # PANEL_BIND обязан быть localhost или Tailscale (100.64.0.0/10): опечатка
+  # 0.0.0.0 молча опубликовала бы панель в интернет, причём docker-proxy
+  # обходит ufw (ТЗ §6).
+  pb=\$(grep '^PANEL_BIND=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -n \"\$pb\" ]; then
+    case \"\$pb\" in
+      127.0.0.1) ;;
+      100.6[4-9].*|100.7[0-9].*|100.8[0-9].*|100.9[0-9].*|100.1[01][0-9].*|100.12[0-7].*) ;;
+      *)
+        echo \"  PANEL_BIND='\$pb' не localhost и не Tailscale-адрес — деплой остановлен (панель ушла бы в интернет)\" >&2
+        exit 1
+        ;;
+    esac
+  fi
   docker compose -f deploy/docker-compose.yml --env-file .env up -d
   # Interrupted Compose replacement can leave a healthy service under a
   # temporary name such as <id>_mydon-core. Compose still resolves exec by

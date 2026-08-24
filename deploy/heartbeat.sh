@@ -54,12 +54,16 @@ trap 'rm -f "$resp"' EXIT
 # этой проверки скрипт часами печатал "heartbeat отправлен", пока gist молча
 # оставался пустым — сторож в это время без единого сбоя решал, что сервер
 # лежит, хотя сервер был жив и исправно (как ему казалось) отчитывался.
-code="$(curl -sS -o "$resp" -w '%{http_code}' -X PATCH \
+# `|| echo 000` давал «000000»: при сбое curl сам печатает 000 из -w И
+# выходит ненулём (тот же фикс, что в watchdog-liveness.sh).
+if ! code="$(curl -sS -o "$resp" -w '%{http_code}' -X PATCH \
   -H "Authorization: Bearer $HEARTBEAT_GH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   --max-time 20 \
   -d "$body" \
-  "https://api.github.com/gists/$HEARTBEAT_GIST_ID" || echo "000")"
+  "https://api.github.com/gists/$HEARTBEAT_GIST_ID")"; then
+  code=000
+fi
 
 if [ "$code" != "200" ]; then
   echo "heartbeat НЕ отправлен: GitHub ответил HTTP $code" >&2

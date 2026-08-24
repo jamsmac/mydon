@@ -22,7 +22,9 @@ RECOVERY_DIR=$(dirname "$RECOVERY_FILE")
 [ "$(stat -f %Lp "$RECOVERY_DIR")" = 700 ] || fail "$RECOVERY_DIR должен иметь права 700"
 
 if [ -z "$DATE" ]; then
-  DATE=$(ssh -o BatchMode=yes "$PRODUCTION_HOST" 'date -d "+5 hours" +%F') ||
+  # Явный TZ — согласованно с backup_extra.sh (формула '+5 hours' верна
+  # только при системном TZ=UTC на хосте).
+  DATE=$(ssh -o BatchMode=yes "$PRODUCTION_HOST" 'TZ=Asia/Tashkent date +%F') ||
     fail "не удалось определить production-дату"
 fi
 case "$DATE" in

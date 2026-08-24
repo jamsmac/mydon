@@ -62,7 +62,12 @@ ALERTED_F="$BACKUP_DIR/.alerted-sha"
 ALERTED_AT_F="$BACKUP_DIR/.alerted-at"
 COMPOSE=(docker compose -f deploy/docker-compose.yml --env-file .env)
 
-export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+# umask: pre-деплойные дампы и файлы состояния не должны рождаться 644.
+umask 077
+# StrictHostKeyChecking=yes: ключи github.com пинует setup-autodeploy.sh из
+# api.github.com/meta; accept-new доверял бы любому, кто ответил на 22 порт
+# при чистом known_hosts (TOFU при root-исполнении main — лишний риск).
+export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
 
 log() { echo "$(date '+%F %T') $*"; }
 
