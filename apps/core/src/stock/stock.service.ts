@@ -1,4 +1,11 @@
-import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
+import {
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  type OnApplicationShutdown,
+  OnModuleInit,
+} from "@nestjs/common";
 import { BadRequestException } from "@nestjs/common";
 import { entity, person, purchase, rawLink, sale, stockBatch, stockMovement } from "@mydon/db";
 import {
@@ -264,7 +271,7 @@ function readIngredientPrice(attrs: Record<string, unknown>): IngredientPrice {
  * держат.
  */
 @Injectable()
-export class StockService implements OnModuleInit {
+export class StockService implements OnModuleInit, OnApplicationShutdown {
   private readonly log = new Logger(StockService.name);
   private cron: Cron | null = null;
 
@@ -281,6 +288,11 @@ export class StockService implements OnModuleInit {
         this.log.warn(`Синк прихода не удался: ${e instanceof Error ? e.message : String(e)}`),
       );
     });
+  }
+
+  onApplicationShutdown(): void {
+    this.cron?.stop();
+    this.cron = null;
   }
 
   /** Базовая единица ингредиента: та, в которой заведена его цена покупки. */

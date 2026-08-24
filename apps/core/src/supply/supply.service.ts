@@ -1,4 +1,10 @@
-import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import {
+  Inject,
+  Injectable,
+  Logger,
+  type OnApplicationShutdown,
+  OnModuleInit,
+} from "@nestjs/common";
 import { entity, event, machineStock, purchase } from "@mydon/db";
 import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, strictNumber } from "@mydon/shared";
 import { desc, eq, gte, sql } from "drizzle-orm";
@@ -153,7 +159,7 @@ export function fillFromStock(
  * сейчас», нули — пустые спирали, которые пора везти пополнять.
  */
 @Injectable()
-export class SupplyService implements OnModuleInit {
+export class SupplyService implements OnModuleInit, OnApplicationShutdown {
   private readonly log = new Logger(SupplyService.name);
   private cron: Cron | null = null;
 
@@ -172,6 +178,11 @@ export class SupplyService implements OnModuleInit {
     void this.sync().catch((e: unknown) =>
       this.log.warn(`Первый синк снабжения не удался: ${e instanceof Error ? e.message : String(e)}`),
     );
+  }
+
+  onApplicationShutdown(): void {
+    this.cron?.stop();
+    this.cron = null;
   }
 
   async sync(): Promise<{ purchases: number; stock: number }> {

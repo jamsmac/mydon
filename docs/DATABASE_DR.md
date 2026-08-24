@@ -106,7 +106,31 @@ dump. Предыдущий PG16 volume `deploy_mydon-db-data` сохранён �
 
 ## Остаточный риск compute
 
-В текущей tailnet нет второго Linux-хоста: видны только production, Mac и
-телефон. Managed PostgreSQL устраняет единый DB failure domain, но постоянный
-compute failover потребует ещё одной машины. До её появления репозиторий,
-зашифрованный `.env`, внешняя БД и этот runbook дают cold recovery, а не HA.
+В tailnet нет второго Linux-сервера, но Mac владельца используется как
+бесплатный cold-standby. `deploy/docker-compose.standby.yml` не содержит
+PostgreSQL и stock-network: Core подключается к managed primary. Обычный drill
+поднимает только Core+CC, проверяет их и снова останавливает. Bot/Agents входят
+в отдельный профиль `workers` и не могут стартовать от обычного `up`.
+
+```bash
+# Подготовка/проверка без split brain; после успеха контейнеры остановлены.
+./deploy/standby-drill.sh
+
+# Только при подтверждённой недоступности production:
+STANDBY_CONFIRM_PRODUCTION_DOWN=YES STANDBY_START_WORKERS=1 \
+  ./deploy/standby-promote.sh
+
+# После возврата primary сначала остановить standby workers:
+./deploy/standby-stop.sh
+```
+
+Promotion дополнительно проверяет production CC через Tailscale и отказывается,
+если тот отвечает HTTP 200. Обход `STANDBY_ALLOW_SPLIT_BRAIN=1` оставлен только
+для случая отказа самой проверки при отдельно доказанной остановке primary.
+Drill 2026-08-24 подтвердил managed DB (`dbOk=true`), CC HTTP 200 и чистую
+остановку Core/CC. Отдельная проверка профиля workers подтвердила завершение
+Core, CC, Bot и Agents без `SIGKILL`/кода `137`; все Node-сервисы запускаются
+через Docker init и получают `SIGTERM` корректно.
+
+Это даёт бесплатный cold failover, пока Mac включён и подключён к интернету;
+постоянный облачный HA всё ещё требует второй always-on VPS.

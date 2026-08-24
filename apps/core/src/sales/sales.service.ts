@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  type OnApplicationShutdown,
   OnModuleInit,
 } from "@nestjs/common";
 import { auditLog, entity, event, productNameAlias, sale } from "@mydon/db";
@@ -105,7 +106,7 @@ export function daysAgoLocal(days: number, now = new Date()): string {
  * «появится после сбора». Ничего не падает.
  */
 @Injectable()
-export class SalesService implements OnModuleInit {
+export class SalesService implements OnModuleInit, OnApplicationShutdown {
   private readonly log = new Logger(SalesService.name);
   private cron: Cron | null = null;
 
@@ -126,6 +127,11 @@ export class SalesService implements OnModuleInit {
     void this.sync().catch((e: unknown) =>
       this.log.warn(`Первый синк продаж не удался: ${e instanceof Error ? e.message : String(e)}`),
     );
+  }
+
+  onApplicationShutdown(): void {
+    this.cron?.stop();
+    this.cron = null;
   }
 
   /** Забрать свежее из mydon-stock и слить к нам (upsert по дню+автомату+товару). */

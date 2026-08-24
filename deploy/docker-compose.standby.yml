@@ -1,0 +1,143 @@
+# Cold compute standby for a second Tailscale machine.
+# It always uses the managed DATABASE_URL from STANDBY_ENV_FILE and never starts
+# Bot/Agents unless the explicit "workers" profile is enabled.
+name: mydon-standby
+
+services:
+  core:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: mydon:standby
+    container_name: mydon-standby-core
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Tashkent
+      PORT: 3001
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      INGEST_KEY: ${INGEST_KEY:-}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      INVITE_PEPPER: ${INVITE_PEPPER:-}
+      STAFF_LINK_BY_USERNAME: ${STAFF_LINK_BY_USERNAME:-0}
+      HEALTH_STORAGE_PATH: /
+      HEALTH_MIN_STORAGE_MB: ${HEALTH_MIN_STORAGE_MB:-1024}
+      # These data sources live on the primary host. Their absence must not
+      # prevent the control plane from starting during a compute disaster.
+      STOCK_DATABASE_URL: ""
+      HISTORY_DB_PATH: ""
+      STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-}
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-}
+      STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_FORCE_PATH_STYLE: ${STORAGE_FORCE_PATH_STYLE:-true}
+      STORAGE_LOCAL_DIR: /data/attachments
+    volumes:
+      - standby-attachments:/data/attachments
+      - ../data:/app/data:ro
+    ports:
+      - "127.0.0.1:${STANDBY_CORE_PORT:-3101}:3001"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3001/health').then(async r=>{const d=await r.json();process.exit(r.ok&&d.status==='ok'?0:1)}).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  cc:
+    image: mydon:standby
+    container_name: mydon-standby-cc
+    restart: unless-stopped
+    init: true
+    depends_on:
+      core:
+        condition: service_healthy
+    working_dir: /app/apps/cc
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Tashkent
+      PORT: 3002
+      HOSTNAME: 0.0.0.0
+      CORE_API_URL: http://core:3001
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      INGEST_KEY: ${INGEST_KEY:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
+    command: ["node_modules/.bin/next", "start", "-p", "3002"]
+    ports:
+      - "${STANDBY_PANEL_BIND:-127.0.0.1}:${STANDBY_PANEL_PORT:-3102}:3002"
+
+  bot:
+    profiles: ["workers"]
+    image: mydon:standby
+    container_name: mydon-standby-bot
+    restart: unless-stopped
+    init: true
+    depends_on:
+      core:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Tashkent
+      CORE_API_URL: http://core:3001
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
+    command: ["node", "apps/bot/dist/index.js"]
+
+  agents:
+    profiles: ["workers"]
+    image: mydon:standby
+    container_name: mydon-standby-agents
+    restart: unless-stopped
+    init: true
+    depends_on:
+      core:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Tashkent
+      CORE_API_URL: http://core:3001
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      AGENT_AUTONOMY_MAX: ${AGENT_AUTONOMY_MAX:-T0}
+      AGENTS_SCHEDULES_PAUSED: ${AGENTS_SCHEDULES_PAUSED:-1}
+      AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
+      AGENT_TASK_INTERVAL_MS: ${AGENT_TASK_INTERVAL_MS:-60000}
+      MAINTENANCE_MONITOR_CRON: ${MAINTENANCE_MONITOR_CRON:-0 6 * * *}
+      OURVEND_ACCOUNT: ${OURVEND_ACCOUNT:-}
+      OURVEND_PASSWORD: ${OURVEND_PASSWORD:-}
+      OURVEND_GROUP_ID: ${OURVEND_GROUP_ID:-}
+      OURVEND_SYNC_CRON: ${OURVEND_SYNC_CRON:-0 */3 * * *}
+      AGENT_BILLING_MODE: ${AGENT_BILLING_MODE:-subscription}
+      AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
+      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-5}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-}
+      LLM_CLI_CMD: ${LLM_CLI_CMD:-}
+      LLM_CLI_BASE_ARGS: ${LLM_CLI_BASE_ARGS:-}
+      LLM_CLI_PROMPT_VIA: ${LLM_CLI_PROMPT_VIA:-}
+      LLM_CLI_MODEL_FLAG: ${LLM_CLI_MODEL_FLAG:-}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_MODEL: ${EMBED_MODEL:-}
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_PARENT_PAGE_ID: ${NOTION_PARENT_PAGE_ID:-}
+    command: ["node", "apps/agents/dist/index.js"]
+
+volumes:
+  standby-attachments:
