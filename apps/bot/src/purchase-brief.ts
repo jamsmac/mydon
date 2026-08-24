@@ -24,6 +24,15 @@ export function formatPurchaseBrief(p: VendingPurchase): string {
     const money = p.costRounded > 0 ? ` · на ${RU(p.costRounded)} сум` : "";
     lines.push(`Купить ${RU(p.totalBuy)} ед · с упаковками ${RU(p.totalOrder)} ед${money}`);
     if (p.overpay > 0) lines.push(`Переплата за упаковки: ${RU(p.overpay)} сум`);
+    // Раздача (П5a): часть дефицита закрывается складом, часть слотов не
+    // закроется вовсе. Без этой строки «купить N» читалось как «после закупа
+    // всё полно», хотя пустые слоты остаются и их видно только в плане.
+    if (p.totalFromStock > 0 || p.totalUnfilled > 0) {
+      const unfilled = p.totalUnfilled > 0 ? ` · пусто ${RU(p.totalUnfilled)}` : "";
+      lines.push(
+        `В автоматы: из закупа ${RU(p.totalFromPurchase)} · со склада ${RU(p.totalFromStock)}${unfilled} — «план закупа»`,
+      );
+    }
 
     // Топ по стоимости: деньги — главный приоритет владельца при закупе.
     const top = [...p.items].sort((a, b) => b.costRounded - a.costRounded).slice(0, TOP);

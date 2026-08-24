@@ -70,6 +70,13 @@ describe("Брифинг", () => {
     assert.match(text, /🛒 К закупу: 3 поз\. на ~84\s?000 сум — «оформить закуп»/);
   });
 
+  it("раздача (П5a): «со склада» в строке закупа, когда склад что-то закрывает", () => {
+    const text = formatBriefing(base, [], { positions: 3, costRounded: 84000, fromStock: 5 });
+    assert.match(text, /🛒 К закупу: 3 поз\. на ~84\s?000 сум · со склада 5 — «оформить закуп»/);
+    // Склад пуст — хвоста нет: «со склада 0» читалось бы как отдельный сигнал.
+    assert.doesNotMatch(formatBriefing(base, [], { positions: 3, costRounded: 84000, fromStock: 0 }), /со склада/);
+  });
+
   it("без закупа (0 позиций) строки нет", () => {
     assert.doesNotMatch(formatBriefing(base, [], { positions: 0, costRounded: 0 }), /К закупу/);
     assert.doesNotMatch(formatBriefing(base), /К закупу/);

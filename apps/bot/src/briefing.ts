@@ -10,6 +10,12 @@ import type { ApprovalRow, Briefing } from "./core-client";
 export interface BriefingPurchase {
   positions: number;
   costRounded: number;
+  /**
+   * Сколько единиц закроется складом, а не покупкой (П5a). Необязательное:
+   * старые вызовы (и Core до П5a) раздачу не считают, и «0» тогда врал бы про
+   * пустой склад.
+   */
+  fromStock?: number;
 }
 
 /** Сводка кофе-бункеров для брифинга: сколько сигналов каждого рода сейчас открыто. */
@@ -139,7 +145,8 @@ export function formatBriefing(
   if (purchase && purchase.positions > 0) {
     const sum = Math.round(purchase.costRounded).toLocaleString("ru-RU");
     const tail = purchase.costRounded > 0 ? ` на ~${sum} сум` : "";
-    lines.push("", `🛒 К закупу: ${purchase.positions} поз.${tail} — «оформить закуп».`);
+    const stock = purchase.fromStock ? ` · со склада ${purchase.fromStock}` : "";
+    lines.push("", `🛒 К закупу: ${purchase.positions} поз.${tail}${stock} — «оформить закуп».`);
   }
 
   if (coffee && (coffee.underfill > 0 || coffee.anomaly > 0 || coffee.overdueWash > 0)) {

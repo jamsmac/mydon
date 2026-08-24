@@ -25,6 +25,8 @@ import {
   parsePriceCommand,
   parseReceiveDistribution,
 } from "./purchase-brief";
+import { RULE_COMMAND_HINT, formatRuleResult, isRuleCommand, parseRuleCommand } from "./product-rules";
+import { formatPurchasePlan, isPlanCommand } from "./purchase-plan";
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
 import { handleActionsQuery, isActionsQuery } from "./owner-actions";
@@ -49,6 +51,12 @@ export interface HandlerDeps {
 
 export interface Reply {
   text: string;
+  /**
+   * Продолжение ответа отдельными сообщениями: у Telegram жёсткий предел на
+   * одно сообщение, а план закупа — это маршрут, списки и слоты по автоматам.
+   * Резать его многоточием нельзя: обрезанный список читается как полный.
+   */
+  more?: string[];
   keyboard?: ReturnType<typeof approvalKeyboard>;
   /** Готовый файл: владелец получает его в чат, а не текст для переписывания. */
   document?: { filename: string; content: Buffer; caption?: string };
@@ -61,6 +69,8 @@ const HELP = [
   "• «что просрочено» — обязательства и долги",
   "• «какие автоматы простаивают»",
   "• «что заказать» — сводка к закупу вендинга",
+  "• «план закупа» — маршрут, что купить, что взять со склада, слоты по автоматам",
+  "• «не закупать Twix» / «закупать Twix» / «фикс Snickers 48» / «блок Red Bull 6» — правила закупа товара",
   "• «оформить закуп» — отправить закуп тебе на утверждение",
   "• «накладные» — одобренные закупы",
   "• «принять закуп» — оприходовать накладную на склад",
@@ -135,6 +145,42 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка чтения касс закупа:", err);
       return { text: "Не удалось получить кассы закупа из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Правила закупа товара — мутация: «не закупать Twix», «блок Red Bull 6»
+  // (П5a). До parseIntent и до цены: жёсткие префиксы ни с чем не пересекаются,
+  // а «закупать …» иначе ушло бы в брифинг закупа как слово «закуп».
+  if (isRuleCommand(text)) {
+    const cmd = parseRuleCommand(text);
+    if (cmd === null) return { text: RULE_COMMAND_HINT };
+    try {
+      const patch =
+        cmd.kind === "exclude"
+          ? { excludedFromPurchase: true }
+          : cmd.kind === "include"
+            ? { excludedFromPurchase: false }
+            : cmd.kind === "fixed"
+              ? { fixedPurchaseQty: cmd.qty }
+              : { packSize: cmd.qty };
+      const res = await deps.core.setVendingProductRules(cmd.product, patch);
+      return { text: formatRuleResult(cmd, res) };
+    } catch (err) {
+      console.error("Ошибка правки правил закупа:", err);
+      return { text: "Не удалось записать правило в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // План закупа — чтение: «что заказать» отвечает списком покупок, а этот
+  // ответ ведёт по маршруту. Ловим до parseIntent, иначе «план закупа» ушёл бы
+  // в брифинг закупа по слову «закуп».
+  if (isPlanCommand(text)) {
+    try {
+      const [first, ...more] = formatPurchasePlan(await deps.core.vendingPlan());
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка плана закупа:", err);
+      return { text: "Не удалось получить план закупа из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 
@@ -259,7 +305,13 @@ export async function handleMessage(
           text: formatBriefing(
             b,
             approvals,
-            purchase ? { positions: purchase.items.length, costRounded: purchase.costRounded } : undefined,
+            purchase
+              ? {
+                  positions: purchase.items.length,
+                  costRounded: purchase.costRounded,
+                  fromStock: purchase.totalFromStock,
+                }
+              : undefined,
             undefined,
             globerent,
           ),

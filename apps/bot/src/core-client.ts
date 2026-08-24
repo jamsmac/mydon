@@ -126,10 +126,21 @@ export interface VendingCashSession {
   createdAt: string;
 }
 
-/** Позиция сводного закупа (§5.5) — как отдаёт Core GET /vending/purchase. */
+/**
+ * Позиция сводного закупа (§5.5) — как отдаёт Core GET /vending/purchase.
+ *
+ * С П5a строка несёт не только «сколько купить», но и раздачу: сколько уйдёт
+ * в автоматы из новой упаковки, сколько со склада, сколько слотов останется
+ * пустыми и что вернётся на склад. Поля обязательные: Core отдаёт их всегда,
+ * а необязательность здесь молча превратила бы «0» и «нет данных» в одно.
+ */
 export interface VendingPurchaseItem {
   product: string;
+  /** Куда и сколько (серийник автомата → штуки). */
+  perMachine: Record<string, number>;
   need: number;
+  /** Остаток склада по этому товару на момент расчёта. */
+  stock: number;
   buy: number;
   pack: number;
   order: number;
@@ -137,18 +148,103 @@ export interface VendingPurchaseItem {
   costRounded: number;
   noPrice: boolean;
   noSales: boolean;
+  /** В автоматы из закупа (новая упаковка). */
+  fromPurchase: number;
+  /** В автоматы со склада. */
+  fromStock: number;
+  /** Не заполнится. */
+  unfilled: number;
+  /** Излишек закупки → на склад. */
+  toStock: number;
+  /** Склад после раздачи. */
+  stockAfter: number;
+  /** Правило владельца «не закупать». */
+  excluded: boolean;
+  /** Фикс-количество, если задано правилом. */
+  fixedQty: number | null;
 }
 
-/** Сводный закуп: позиции + денежные итоги (§5.4–5.5). */
+/** Политика раздачи закупа (П5a): сначала новая упаковка или сначала склад. */
+export type VendingAllocationPolicy = "purchase-first" | "warehouse-first";
+
+/** Сводный закуп: позиции + денежные итоги + раздача (§5.4–5.5, П5a). */
 export interface VendingPurchase {
   items: VendingPurchaseItem[];
   excludedNoSales: VendingPurchaseItem[];
+  /** «Убрано из закупки» правилом товара — в деньги не входит, в раздачу входит. */
+  excludedByRule: VendingPurchaseItem[];
   noPrice: string[];
+  allocation: VendingAllocationPolicy;
   totalBuy: number;
   totalOrder: number;
   costExact: number;
   costRounded: number;
   overpay: number;
+  totalFromPurchase: number;
+  totalFromStock: number;
+  totalUnfilled: number;
+  totalToStock: number;
+}
+
+/** Слот автомата в плане закупа: что стоит, сколько нужно и откуда возьмём. */
+export interface VendingPlanSlot {
+  coilId: string;
+  product: string;
+  quantity: number;
+  capacity: number;
+  need: number;
+  fromPurchase: number;
+  fromStock: number;
+  unfilled: number;
+}
+
+/** Автомат в плане закупа: место в маршруте, сколько везём и раскладка по слотам. */
+export interface VendingPlanMachine {
+  serial: string;
+  name: string;
+  /** Место в маршруте обхода, с 1. */
+  routeIndex: number;
+  need: number;
+  fromPurchase: number;
+  fromStock: number;
+  unfilled: number;
+  slots: VendingPlanSlot[];
+}
+
+/** Почему числам плана можно верить не полностью. */
+export interface VendingPlanWarning {
+  code: "stock_stale" | "machine_skipped" | "no_price" | "unknown_product";
+  message: string;
+}
+
+/** План закупа «что купить» (GET /vending/plan, П5a): закуп + раздача по маршруту. */
+export interface VendingPlan {
+  /** Когда посчитан (ISO) — план живёт ровно до следующего сбора. */
+  generatedAt: string;
+  stock: {
+    /** Последняя инвентаризация (ISO) или null, если склада ещё не было. */
+    asOf: string | null;
+    totalBefore: number;
+    /** Уйдёт со склада в автоматы. */
+    use: number;
+    /** Вернётся на склад из закупа (излишек упаковки). */
+    back: number;
+    totalAfter: number;
+    stale: boolean;
+  };
+  summary: VendingPurchase;
+  machines: VendingPlanMachine[];
+  warnings: VendingPlanWarning[];
+}
+
+/** Итог правки правил закупа товара (POST /vending/product-rules, П5a). */
+export interface SetRulesResult {
+  ok: boolean;
+  reason?: "not_found";
+  /** Каноническое имя товара (после алиасов). */
+  product?: string;
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
 }
 
 /** Накладная закупа (материализована при одобрении заявки, §5.7). */
@@ -266,6 +362,11 @@ export class CoreClient {
     return this.request<VendingPurchase>("/vending/purchase");
   }
 
+  /** План закупа: маршрут, что купить, что взять со склада, слоты (П5a). */
+  vendingPlan(): Promise<VendingPlan> {
+    return this.request<VendingPlan>("/vending/plan");
+  }
+
   // ── Сигналы GLOBERENT для брифинга (перенос PROMACH) ──
   // Берём ровно те поля, что нужны счётчикам briefing.ts, — не полные типы Core.
 
@@ -368,6 +469,21 @@ export class CoreClient {
     return this.request("/vending/product-price", {
       method: "POST",
       body: JSON.stringify({ product, price, actor: "owner", confirmed }),
+    });
+  }
+
+  /**
+   * Правила закупа товара (П5a): блок упаковки, «не закупать», фикс-количество.
+   * `fixedPurchaseQty: 0` — снять фикс, не «покупать ноль». DTO не принимает
+   * посторонние ключи, поэтому шлём ровно то, что он объявляет.
+   */
+  setVendingProductRules(
+    product: string,
+    patch: { packSize?: number; excludedFromPurchase?: boolean; fixedPurchaseQty?: number },
+  ): Promise<SetRulesResult> {
+    return this.request<SetRulesResult>("/vending/product-rules", {
+      method: "POST",
+      body: JSON.stringify({ product, ...patch, actor: "owner" }),
     });
   }
 
