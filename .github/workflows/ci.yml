@@ -145,5 +145,6 @@ jobs:
           bash -n deploy/guards/*.sh deploy/*.sh deploy/tests/*.sh
           shellcheck deploy/guards/b2_offsite.sh deploy/guards/backup_extra.sh \
             deploy/deploy.sh deploy/auto-deploy.sh deploy/setup-b2-offsite.sh \
+            deploy/b2-recovery-drill-macos.sh \
             deploy/tests/fake-rclone.sh deploy/tests/b2-offsite.test.sh
           bash deploy/tests/b2-offsite.test.sh

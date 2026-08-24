@@ -2,17 +2,17 @@
 
 Состояние на 2026-08-24. Фронт Ф8 отмечал две дыры: восстановление ни разу
 не проверялось, и часть данных не покрыта. Обе закрыты и повторно проверены.
-Telegram работает как первый offsite; код второго канала Backblaze B2 добавлен,
-но канал считается активным только после реального upload/download drill.
+Telegram и Backblaze B2 работают как два независимых offsite-канала; для B2
+выполнен реальный upload/download/restore drill отдельным read-only ключом.
 
 ## Что и когда
 
 | Что | Когда | Куда | Скрипт |
 |---|---|---|---|
 | База `mydon-stock` (склад VendHub) | 22:00 ежедневно | `/opt/backups` (60 дней) + Telegram | `/opt/mydon-stock/backup_offsite.sh` |
-| База MYDON (новая) | 22:15 ежедневно | локально + Telegram + B2 после активации | `/opt/backups/backup_extra.sh` |
-| Код `command-center` | 22:15 ежедневно | локально + Telegram + B2 после активации | там же |
-| Файлы `.env` (секреты, права 600) | 22:15 ежедневно | локально + Telegram + B2 после активации | там же |
+| База MYDON (новая) | 22:15 ежедневно | локально + Telegram + Backblaze B2 | `/opt/backups/backup_extra.sh` |
+| Код `command-center` | 22:15 ежедневно | локально + Telegram + Backblaze B2 | там же |
+| Файлы `.env` (секреты, права 600) | 22:15 ежедневно | локально + Telegram + Backblaze B2 | там же |
 | Проверка склада | пн 03:30 еженедельно | `/opt/backups/restore_test.log` | `/opt/mydon-stock/restore_test.sh` |
 | **Проверка MYDON** | пн 03:45 еженедельно | `/opt/backups/restore_test_mydon.log` | `/opt/backups/restore_test_mydon.sh` |
 
@@ -60,6 +60,17 @@ Telegram работает как первый offsite; код второго к�
 - Контрольная копия скачана обратно через Telegram Bot API и побайтово совпала
   с исходником: SHA-256 `f0565c3a99e4a31f5b612d742b7133d0eb9880044b6ac3e3ee725f66fb1e847e`.
 - Временная БД и скачанный файл удалены после проверки; production-БД не менялась.
+
+### Контрольный B2 drill (2026-08-24)
+
+- Полный `backup_extra.sh` завершился с `exit 0`: три отправки в Telegram и три
+  загрузки в B2 подтверждены; B2 дополнительно прошёл `cryptcheck`.
+- Отдельный read-only recovery key скачал все три объекта с другого компьютера.
+  В сыром bucket нет открытых имён, а каждый объект имеет заголовок `rclone crypt`.
+- SHA-256 скачанных файлов точно совпал с production-оригиналами:
+  `18f723fc...` (БД), `74672423...` (command-center), `4df140b2...` (`.env`).
+- SQL из B2 атомарно восстановлен во временную БД: `8/8` таблиц и сумма
+  инкассаций совпали. После drill проверено, что временных БД осталось `0`.
 
 Deploy и auto-deploy теперь каждый раз устанавливают актуальные
 `backup_extra.sh`, `b2_offsite.sh` и `restore_test_mydon.sh` в `/opt/backups`:
@@ -120,7 +131,24 @@ argv. Helper не удаляет удалённые файлы: срок хра�
 переменных или upload/проверка размера не прошли, весь backup получает exit 1
 и отправляет тревогу.
 
-### Активация B2
+### Фактическая конфигурация B2
+
+- Bucket: `mydon-offsite-8f64f8a8b346`, private, EU Central,
+  server-side encryption включено.
+- Lifecycle: скрыть текущую версию через 90 дней, удалить скрытую через 1 день.
+- Production key ограничен этим bucket и префиксом `mydon/daily/`; разрешены
+  только `listAllBucketNames`, `listBuckets`, `listFiles`, `readFiles`,
+  `writeFiles`, `readBucketEncryption`. Прав `deleteFiles` и управления bucket нет.
+- Recovery key ограничен тем же bucket/prefix и не имеет ни `writeFiles`, ни
+  `deleteFiles`. Он вместе с `BACKUP_ENC_PASSPHRASE` хранится вне production в
+  `/Users/js/.config/mydon/b2-recovery.json` (`600`, каталог `700`). Backblaze
+  показывает secret application key только один раз; при утрате ключ надо
+  пересоздать, а старый отозвать.
+- Production использует совместимый single-bucket key B2 API v3: Debian
+  `rclone 1.60.1` не авторизует multi-bucket key v4. Recovery drill выполнен
+  локальным `rclone 1.75.0`.
+
+### Повторная настройка или ротация
 
 1. Создать private bucket в европейском регионе Backblaze.
 2. Задать lifecycle: скрывать объекты старше 90 дней и удалять скрытые через
@@ -141,9 +169,9 @@ cd /opt/mydon-app
 Установщик ставит Debian-пакет `rclone`, устанавливает helper и скрыто
 запрашивает bucket, Application Key ID и Application Key. Секрет не печатается.
 
-Фактическая активация закончена только после четырёх проверок: три строки
-`OK B2 offsite`, успешный `cryptcheck`, скачивание объекта **отдельным recovery
-key** и восстановление расшифрованного SQL в изолированную БД.
+Ротация закончена только после четырёх проверок: три строки `OK B2 offsite`,
+успешный `cryptcheck`, скачивание объекта **отдельным recovery key** и
+восстановление расшифрованного SQL в изолированную БД.
 
 Официальные справки: [B2 pricing](https://www.backblaze.com/cloud-storage/pricing),
 [application keys](https://www.backblaze.com/docs/en/cloud-storage-application-keys),
@@ -152,15 +180,19 @@ key** и восстановление расшифрованного SQL в из
 
 ### Восстановление из B2
 
-На отдельной recovery-машине настроить B2 remote с read-only key, затем поверх
-него crypt remote с тем же `BACKUP_ENC_PASSPHRASE`. Crypt remote сам проверит
-Poly1305 и вернёт исходный `.gz`:
+На этом Mac полный тест выполняется одной командой. Скрипт читает recovery-файл,
+не выводит секреты, проверяет шифрование сырых объектов, скачивает все три
+архива, сравнивает их SHA-256 с production и разворачивает SQL во временную БД:
 
 ```bash
-rclone config
-rclone copy restore-crypt:ДАТА/ .
-gunzip -t mydon-app_ДАТА.sql.gz
+cd /Users/js/Developer/mydon
+./deploy/b2-recovery-drill-macos.sh 2026-08-24
 ```
+
+Без аргумента скрипт берёт текущую дату production. После завершения локальные
+файлы и временная БД удаляются через trap. Для ручного получения значений
+recovery key используются поля `applicationKeyId` и `applicationKey` файла
+`/Users/js/.config/mydon/b2-recovery.json`; не выводить их в логи или чат.
 
 ## Восстановление вручную
 
