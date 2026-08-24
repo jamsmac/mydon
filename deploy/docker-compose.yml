@@ -73,6 +73,10 @@ services:
       # "stock" (по умолчанию) — чтение БД склада; "own" — собственный снапшот
       # (переключать после 7 зелёных дней GET /ourvend/parity).
       OURVEND_ACCOUNTING_SOURCE: ${OURVEND_ACCOUNTING_SOURCE:-stock}
+      # П5a: маршрут загрузки автоматов для плана закупа (серийники через
+      # запятую). Пусто → по имени автомата. Правится и из панели настроек
+      # (база важнее env).
+      VENDING_ROUTE_ORDER: ${VENDING_ROUTE_ORDER:-}
       # Хранилище файлов: S3/MinIO при заданных ключах, иначе локальный том ниже.
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-}
       STORAGE_BUCKET: ${STORAGE_BUCKET:-}
