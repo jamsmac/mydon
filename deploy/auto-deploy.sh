@@ -96,11 +96,11 @@ notify_deploy_failed() {
 
 notify_deploy_recovered() {
   ingest_key="$(grep '^INGEST_KEY=' "$APP_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-  [ -n "$ingest_key" ] &&
-    curl -sf -m 15 -X POST "http://127.0.0.1:3001/ingest/${ingest_key}" \
-      -H "Content-Type: application/json" \
-      -d "{\"type\":\"infra.deploy_ok\",\"source\":\"auto-deploy\",\"payload\":{\"commit\":\"$1\",\"detail\":\"деплой восстановился после сбоя\"}}" \
-      >/dev/null 2>&1 || true
+  [ -n "$ingest_key" ] || return 0
+  curl -sf -m 15 -X POST "http://127.0.0.1:3001/ingest/${ingest_key}" \
+    -H "Content-Type: application/json" \
+    -d "{\"type\":\"infra.deploy_ok\",\"source\":\"auto-deploy\",\"payload\":{\"commit\":\"$1\",\"detail\":\"деплой восстановился после сбоя\"}}" \
+    >/dev/null 2>&1 || true
 }
 
 # Успех: маркер пишется ПОСЛЕДНИМ действием деплоя — только он делает

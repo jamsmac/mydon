@@ -159,10 +159,10 @@ age="${rest##*|}"
 # alerted_at/сброс down; без доставки state не меняется и следующий
 # 15-минутный тик повторяет попытку.
 send() {
-  [ -n "${WATCHDOG_BOT_TOKEN:-}" ] && [ -n "${WATCHDOG_CHAT_IDS:-}" ] || {
+  if [ -z "${WATCHDOG_BOT_TOKEN:-}" ] || [ -z "${WATCHDOG_CHAT_IDS:-}" ]; then
     echo "WATCHDOG_BOT_TOKEN/WATCHDOG_CHAT_IDS не заданы — тревога только в лог: $1"
     return 0
-  }
+  fi
   local chat resp delivered=1
   IFS=',' read -ra chats <<< "$WATCHDOG_CHAT_IDS"
   for chat in "${chats[@]}"; do
