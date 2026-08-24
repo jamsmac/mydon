@@ -7,8 +7,8 @@ import {
   type OnApplicationShutdown,
   OnModuleInit,
 } from "@nestjs/common";
-import { auditLog, entity, event, productNameAlias, sale } from "@mydon/db";
-import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, strictNumber } from "@mydon/shared";
+import { auditLog, entity, event, ourvendSaleSnapshot, productNameAlias, sale } from "@mydon/db";
+import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, strictNumber } from "@mydon/shared";
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
@@ -50,7 +50,11 @@ export function buildUpserts(
     // осмысленно посадить в карантин.
     if (!(r.machine_serial && r.ourvend_name && r.dt)) continue;
     const dt = String(r.dt).slice(0, 10);
-    const machineSerial = String(r.machine_serial).toLowerCase();
+    // КАНОН в ключе записи, не только в маппинге: серийник входит в уникальный
+    // ключ sale, а источники пишут разные формы («c…» у stock-дорожки, голая у
+    // собственного снапшота) — без канона переключение источника двоило бы
+    // строки. История приведена миграцией 0064.
+    const machineSerial = normalizeMachineSerial(String(r.machine_serial));
     const product = String(r.ourvend_name).slice(0, 512);
     const qty = strictNumber(r.qty);
     const amount = strictNumber(r.amount);
@@ -76,6 +80,16 @@ export function buildUpserts(
     });
   }
   return { values, quarantined };
+}
+
+/**
+ * Источник учётного потока OurVend (П2 плана поглощения):
+ * "stock" — чтение БД mydon-stock (как раньше), "own" — собственный снапшот
+ * (таблица ourvend_sale_snapshot, наполняет агент ourvend:accounting).
+ * Переключение — после 7 зелёных дней паритета (GET /ourvend/parity).
+ */
+export function accountingSource(env: NodeJS.ProcessEnv = process.env): "stock" | "own" {
+  return (env.OURVEND_ACCOUNTING_SOURCE ?? "").trim().toLowerCase() === "own" ? "own" : "stock";
 }
 
 /** Сегодняшняя дата по-ташкентски (в контейнере TZ=Asia/Tashkent). */
@@ -114,9 +128,12 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
 
   onModuleInit(): void {
     const url = process.env.STOCK_DATABASE_URL;
-    if (!url || url.length === 0) {
+    if (accountingSource() === "stock" && (!url || url.length === 0)) {
       this.log.log("STOCK_DATABASE_URL не задан — синк продаж выключен.");
       return;
+    }
+    if (accountingSource() === "own") {
+      this.log.log("Источник продаж: собственный снапшот OurVend (ourvend_sale_snapshot).");
     }
     // Раз в 10 минут + сразу на старте. Ошибка синка не роняет Core.
     this.cron = new Cron("*/10 * * * *", { timezone: "Asia/Tashkent" }, () => {
@@ -134,34 +151,56 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     this.cron = null;
   }
 
-  /** Забрать свежее из mydon-stock и слить к нам (upsert по дню+автомату+товару). */
-  async sync(): Promise<{ upserted: number }> {
-    const url = process.env.STOCK_DATABASE_URL;
-    if (!url) return { upserted: 0 };
+  /**
+   * Прочитать строки источника: свежее за 3 дня, а при пустой своей `sale` —
+   * всё целиком. Источник — либо БД mydon-stock, либо собственный снапшот
+   * (форма строк одинаковая, дальше их не различить — и это цель П2).
+   */
+  private async fetchSourceRows(): Promise<StockSaleRow[] | null> {
+    const [{ n }] = await this.db.select({ n: sql<number>`count(*)` }).from(sale);
+    const firstRun = Number(n) === 0;
 
+    if (accountingSource() === "own") {
+      const rows = await this.db
+        .select({
+          dt: sql<string>`${ourvendSaleSnapshot.dt}::text`,
+          machine_serial: ourvendSaleSnapshot.machineSerial,
+          ourvend_name: ourvendSaleSnapshot.product,
+          qty: ourvendSaleSnapshot.qty,
+          amount: ourvendSaleSnapshot.amount,
+          fetched_at: ourvendSaleSnapshot.fetchedAt,
+        })
+        .from(ourvendSaleSnapshot)
+        .where(firstRun ? sql`true` : sql`${ourvendSaleSnapshot.fetchedAt} > now() - interval '3 days'`);
+      return rows as unknown as StockSaleRow[];
+    }
+
+    const url = process.env.STOCK_DATABASE_URL;
+    if (!url) return null;
     // Отдельное короткоживущее подключение: чужая база не должна держать пул.
     const { default: postgres } = await import("postgres");
     const stock = postgres(url, { prepare: false, max: 1, connect_timeout: 10 });
     try {
       // Свежее: всё, что источник трогал за последние 3 дня — дневные строки
       // дообновляются в течение дня, а перезапись upsert-ом безопасна.
-      const rows = (await stock`
-        select dt::text, machine_serial, ourvend_name, qty, amount, fetched_at
-        from ourvend_sales
-        where fetched_at > now() - interval '3 days'
-      `) as unknown as StockSaleRow[];
+      return (await (firstRun
+        ? stock`
+            select dt::text, machine_serial, ourvend_name, qty, amount, fetched_at
+            from ourvend_sales`
+        : stock`
+            select dt::text, machine_serial, ourvend_name, qty, amount, fetched_at
+            from ourvend_sales
+            where fetched_at > now() - interval '3 days'`)) as unknown as StockSaleRow[];
+    } finally {
+      await stock.end({ timeout: 5 });
+    }
+  }
 
-      // Первый прогон: истории у нас нет — забираем всё целиком.
-      const [{ n }] = await this.db.select({ n: sql<number>`count(*)` }).from(sale);
-      const all =
-        Number(n) === 0
-          ? ((await stock`
-              select dt::text, machine_serial, ourvend_name, qty, amount, fetched_at
-              from ourvend_sales
-            `) as unknown as StockSaleRow[])
-          : rows;
-
-      if (all.length === 0) return { upserted: 0 };
+  /** Забрать свежее из источника и слить к нам (upsert по дню+автомату+товару). */
+  async sync(): Promise<{ upserted: number }> {
+    {
+      const all = await this.fetchSourceRows();
+      if (all === null || all.length === 0) return { upserted: 0 };
 
       const machines = await this.db
         .select({ id: entity.id, ref: entity.externalRef })
@@ -233,12 +272,14 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
       await this.db.insert(event).values({
         source: "sales-sync",
         type: "sales.sync",
-        payload: { upserted, привязано_задним_числом: linkedCount, из: "mydon-stock/ourvend" },
+        payload: {
+          upserted,
+          привязано_задним_числом: linkedCount,
+          из: accountingSource() === "own" ? "ourvend_sale_snapshot (свой)" : "mydon-stock/ourvend",
+        },
       });
       this.log.log(`Продажи синхронизированы: ${upserted} строк.`);
       return { upserted };
-    } finally {
-      await stock.end({ timeout: 5 });
     }
   }
 
@@ -250,7 +291,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     lastSaleDt: string | null;
     configured: boolean;
   }> {
-    const configured = Boolean(process.env.STOCK_DATABASE_URL);
+    const configured = accountingSource() === "own" || Boolean(process.env.STOCK_DATABASE_URL);
     const today = todayLocal();
     const y = new Date();
     y.setDate(y.getDate() - 1);

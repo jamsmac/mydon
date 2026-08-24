@@ -195,6 +195,93 @@ export function sumProductSales(rows: RawProductSale[]): Map<string, number> {
   return m;
 }
 
+// ── Учётный контур (П2 плана поглощения mydon-stock) ────────────────────────
+// Суточный снапшот продаж (SaleSummarize) и утренний снимок остатков из Lot
+// management (/Stock) — перенос боевой логики донора app/ourvend.py.
+
+/** Строка учётного отчёта продаж: товар за период по одному автомату. */
+export interface AccountingSaleRow {
+  product: string;
+  qty: number;
+  amount: number;
+}
+
+/** Строка Lot management: товар и остаток (сырых строк на товар может быть много). */
+export interface RawLotRow {
+  product: string;
+  quantity: number;
+}
+
+/**
+ * §П2: разбор ответа /SaleSummarize/ListJson. Итоговая строка грида
+ * («合计»/«Total», без кода товара) — не данные, отбрасывается.
+ * `records` возвращаем отдельно: вызывающий обязан отказаться, если сервер
+ * заявляет больше строк, чем отдал (лучше упасть, чем молча обрезать).
+ */
+export function parseAccountingSales(json: unknown): { rows: AccountingSaleRow[]; records: number; taken: number } {
+  const o = (json ?? {}) as { rows?: unknown; records?: unknown };
+  const raw = Array.isArray(o.rows) ? o.rows : [];
+  const records = coerceNum(o.records);
+  const rows: AccountingSaleRow[] = [];
+  for (const r of raw) {
+    const row = (r ?? {}) as Record<string, unknown>;
+    const name = typeof row.ProductName === "string" ? row.ProductName.trim() : "";
+    const code = row.PrCode != null ? String(row.PrCode).trim() : "";
+    if (!name || name === "合计" || name === "Total" || !code) continue;
+    rows.push({
+      product: name,
+      qty: Math.trunc(coerceNum(row.colum2)),
+      amount: coerceNum(row.colum1),
+    });
+  }
+  return { rows, records, taken: raw.length };
+}
+
+/** Разбор одной страницы Lot management: сколько сырых строк пришло и наши (MId). */
+export function parseLotPage(json: unknown, machineApiId: string): { all: number; mine: RawLotRow[] } {
+  const o = (json ?? {}) as { rows?: unknown };
+  const raw = Array.isArray(o.rows) ? o.rows : [];
+  const mine: RawLotRow[] = [];
+  for (const r of raw) {
+    const row = (r ?? {}) as Record<string, unknown>;
+    // Сервер может игнорировать фильтр MachineID — чужие строки отбрасываем сами.
+    if (String(row.MId ?? "") !== machineApiId) continue;
+    const product = typeof row.PrName === "string" ? row.PrName.trim() : "";
+    if (!product) continue;
+    mine.push({ product, quantity: coerceNum(row.SiExtantQuantity) });
+  }
+  return { all: raw.length, mine };
+}
+
+function gcd(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) [x, y] = [y, x % y];
+  return x;
+}
+
+/**
+ * Итог по товару из Lot-строк С УЧЁТОМ дублей: сервер может вернуть весь набор
+ * строк k раз (наблюдалось ×1/×2/×3 в разные дни у донора — «Снек»
+ * 398/796/1194). k = НОД числа строк по товарам; сумму делим на k. Если хотя
+ * бы у одного товара строк не кратно k (реальные два слота без дублей) — НОД
+ * станет 1 и деления нет.
+ */
+export function dedupLotAgg(rows: RawLotRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  const sums = new Map<string, number>();
+  for (const r of rows) {
+    counts.set(r.product, (counts.get(r.product) ?? 0) + 1);
+    sums.set(r.product, (sums.get(r.product) ?? 0) + r.quantity);
+  }
+  let k = 0;
+  for (const c of counts.values()) k = gcd(k, c);
+  k = Math.max(k, 1);
+  const out = new Map<string, number>();
+  for (const [name, s] of sums) out.set(name, s / k);
+  return out;
+}
+
 // ── Интерфейс коннектора ────────────────────────────────────────────────────
 
 export interface VendingConnector {
@@ -274,10 +361,16 @@ export class OurvendConnector implements VendingConnector {
     }
   }
 
-  /** POST form-urlencoded с куками, таймаутом и ретраями. */
-  private async post(path: string, body: string, timeoutMs: number): Promise<string> {
+  /**
+   * POST form-urlencoded с куками, таймаутом и ретраями. retriesOverride=0 —
+   * для логина: донор запрещает его ретраить (риск блокировки аккаунта).
+   * Заголовки UA/X-Requested-With — как у донора: часть эндпоинтов кабинета
+   * (/Stock/*) может отличать XHR от «не-браузера».
+   */
+  private async post(path: string, body: string, timeoutMs: number, retriesOverride?: number): Promise<string> {
+    const maxRetries = retriesOverride ?? this.retries;
     let lastErr: unknown;
-    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
@@ -287,6 +380,8 @@ export class OurvendConnector implements VendingConnector {
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
             "Content-Length": String(Buffer.byteLength(body)),
+            "User-Agent": "Mozilla/5.0",
+            "X-Requested-With": "XMLHttpRequest",
             ...(this.cookies.size ? { Cookie: this.cookieHeader() } : {}),
           },
           body,
@@ -297,7 +392,7 @@ export class OurvendConnector implements VendingConnector {
         return text;
       } catch (err) {
         lastErr = err;
-        if (attempt < this.retries) {
+        if (attempt < maxRetries) {
           await new Promise((r) => setTimeout(r, this.retryBaseMs * 2 ** attempt));
           continue;
         }
@@ -324,7 +419,9 @@ export class OurvendConnector implements VendingConnector {
     const body =
       `userAccount=${encodeURIComponent(this.opts.account)}` +
       `&userPwd=${encodeURIComponent(encrypted)}&LoginUrl=Account`;
-    const res = await this.post("/Account/Login", body, this.authTimeout);
+    // Без ретраев: донор явно запрещает повторять логин (после нескольких
+    // неудач OurVend блокирует аккаунт); транспортный сбой честно валит прогон.
+    const res = await this.post("/Account/Login", body, this.authTimeout, 0);
     // Успех: тело начинается с "ok". Иначе — причина в теле, логируем целиком.
     if (!res.trim().toLowerCase().startsWith("ok")) {
       throw new AuthError("Вход в Ourvend не удался", res.slice(0, 300));
@@ -356,5 +453,56 @@ export class OurvendConnector implements VendingConnector {
       `&EndDate=${ourvendDateTime(to)}&boxId=&page=1&rows=50&sidx=MachineID&sord=asc`;
     const text = await this.post("/SaleDetail/MachineListJsoin", body, this.dataTimeout);
     return parseMachineSales(this.parseJson(text, "MachineListJsoin"));
+  }
+
+  // ── Учётный контур (П2): SaleSummarize + Lot management ────────────────────
+
+  /**
+   * Учётные продажи по товарам за период одного автомата (или всего кабинета
+   * при пустом machineApiId). Сервер заявил больше 500 строк → ShapeError:
+   * пагинации у этого отчёта нет, молча обрезать нельзя.
+   */
+  async getAccountingSales(machineApiId: string, from: Date, to: Date): Promise<AccountingSaleRow[]> {
+    const body =
+      `Categories=0&MiGroup=&MachineID=${encodeURIComponent(machineApiId)}&boxId=` +
+      `&StartDate=${ourvendDate(from)}&EndDate=${ourvendDate(to)}` +
+      `&Statistics=0&_search=false&rows=500&page=1&sidx=colum0&sord=asc`;
+    const text = await this.post("/SaleSummarize/ListJson", body, this.dataTimeout);
+    const { rows, records, taken } = parseAccountingSales(this.parseJson(text, "SaleSummarize/ListJson"));
+    if (records > taken) {
+      throw new ShapeError(`SaleSummarize вернул ${records} строк, забрали только ${taken} — нужна пагинация`);
+    }
+    return rows;
+  }
+
+  /** Открыть сессию Lot management — без неё ListJsonUser отвечает пусто. */
+  async openStockSession(): Promise<void> {
+    await this.post("/Stock/getSession", "", this.authTimeout);
+  }
+
+  /**
+   * Остатки слотов автомата из Lot management, все страницы (по 500 строк,
+   * потолок 12 — глубже значит структура ответа сломалась, лучше упасть с
+   * алертом, чем молча записать неполный снимок).
+   */
+  async getLotRows(machineApiId: string): Promise<RawLotRow[]> {
+    const mine: RawLotRow[] = [];
+    for (let page = 1; ; page += 1) {
+      const body =
+        `MiGroup=&MachineID=${encodeURIComponent(machineApiId)}&_search=false` +
+        `&rows=500&page=${page}&sidx=MId&sord=asc`;
+      const text = await this.post("/Stock/ListJsonUser", body, this.dataTimeout);
+      if (!text.trim()) {
+        throw new ShapeError("Lot management вернул пустой ответ — не вызван getSession?");
+      }
+      const parsed = parseLotPage(this.parseJson(text, "Stock/ListJsonUser"), machineApiId);
+      mine.push(...parsed.mine);
+      // Неполная страница СЫРЫХ строк = конец, независимо от семантики records.
+      if (parsed.all < 500) break;
+      if (page >= 12) {
+        throw new ShapeError("Lot management: листинг больше 6000 строк — углубите пагинацию");
+      }
+    }
+    return mine;
   }
 }

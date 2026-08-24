@@ -25,6 +25,7 @@ import { PeopleModule } from "./people/people.module";
 import { PreordersModule } from "./preorders/preorders.module";
 import { RawModule } from "./raw/raw.module";
 import { RegistryModule } from "./registry/registry.module";
+import { OurvendModule } from "./ourvend/ourvend.module";
 import { RegistryImportModule } from "./registry-import/registry-import.module";
 import { RulesModule } from "./rules/rules.module";
 import { SalesModule } from "./sales/sales.module";
@@ -59,6 +60,7 @@ import { VerificationModule } from "./verification/verification.module";
     RegistryModule,
     RegistryImportModule,
     RulesModule,
+    OurvendModule,
     SalesModule,
     StockModule,
     SupplyModule,

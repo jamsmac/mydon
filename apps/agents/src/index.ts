@@ -10,6 +10,7 @@ import { AgentsCoreClient } from "./core-client";
 import { runGloberentMonitor } from "./globerent-monitor";
 import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
 import { autonomyThreshold } from "./policy";
+import { runOurvendAccounting } from "./ourvend-accounting";
 import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
 import { loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
@@ -352,6 +353,36 @@ async function main(): Promise<void> {
     }
   } else if (!vendingConfig) {
     console.log("Сбор вендинга выключен: не заданы OURVEND_ACCOUNT/OURVEND_PASSWORD.");
+  }
+
+  // Учётный снапшот OurVend (ourvend:accounting, П2 поглощения mydon-stock):
+  // суточные продажи с догоном до 14 дней + утренний снимок остатков.
+  // 08:05 — ПОСЛЕ съёма stock (07:50): паритет сверяет одинаковые сутки.
+  // Та же учётка, что у ourvend:sync; "off" выключает явно.
+  const accountingCron = process.env.OURVEND_ACCOUNTING_CRON || "5 8 * * *";
+  if (vendingConfig && accountingCron.toLowerCase() !== "off") {
+    try {
+      new Cron(accountingCron, { timezone: TZ, name: "ourvend:accounting" }, () => {
+        void (async () => {
+          try {
+            const r = await runOurvendAccounting(core, vendingConfig);
+            console.log(
+              `[ourvend:accounting] ${r.status} — автоматов ${r.machinesOk}/${r.machinesTotal}, ` +
+                `дней продаж ${r.saleDays} (строк ${r.saleRows}), остатков ${r.stockRows}, ${r.durationMs} мс` +
+                (r.error ? ` — ${r.error}` : ""),
+            );
+          } catch (err) {
+            console.error("[ourvend:accounting] сбой:", err);
+          }
+        })();
+      });
+      console.log(`Учётный снапшот OurVend (ourvend:accounting) включён: "${accountingCron}" (${TZ}).`);
+    } catch (err) {
+      console.warn(
+        `Расписание учётного снапшота "${accountingCron}" не принято: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
   }
 
   // Мониторинг кофе-бункеров (monitor-coffee-bunkers, T0): не требует внешней

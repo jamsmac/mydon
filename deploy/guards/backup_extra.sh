@@ -111,9 +111,23 @@ else rm -f "$F.tmp"; log "FAIL .env-файлы"; FAILED=1; fi
 # ПОТЕРЯ машины, а не её взлом. Пароля нет — архив просто не уходит, и об
 # этом говорится вслух.
 TG_LIMIT=$((45 * 1024 * 1024))
-BOT_TOKEN=$(grep '^BOT_TOKEN=' /opt/mydon-stock/.env 2>/dev/null | cut -d= -f2-)
-CHAT_ID=$(grep '^TG_BACKUP_CHAT_ID=' /opt/mydon-stock/.env 2>/dev/null | cut -d= -f2-)
-ENC_PASS=$(grep '^BACKUP_ENC_PASSPHRASE=' /opt/mydon-app/.env 2>/dev/null | cut -d= -f2-)
+# П1 плана поглощения (docs/PLAN_STOCK_ABSORPTION.md): оффсайт-канал mydon
+# больше НЕ зависит от бота склада (/opt/mydon-stock/.env). Приоритет:
+#   1) собственные ключи TG_BACKUP_BOT_TOKEN/TG_BACKUP_CHAT_ID в
+#      /opt/mydon-app/.env — владелец выбирает бот и чат сам;
+#   2) фолбэк — аварийный бот сторожа из /etc/mydon-heartbeat.env (дампы
+#      пойдут в тревожный чат — работоспособно, но шумно: задайте ключи №1).
+BOT_TOKEN=$(grep '^TG_BACKUP_BOT_TOKEN=' /opt/mydon-app/.env 2>/dev/null | tail -1 | cut -d= -f2-)
+CHAT_ID=$(grep '^TG_BACKUP_CHAT_ID=' /opt/mydon-app/.env 2>/dev/null | tail -1 | cut -d= -f2-)
+if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+    BOT_TOKEN=$(grep '^WATCHDOG_BOT_TOKEN=' /etc/mydon-heartbeat.env 2>/dev/null | tail -1 | cut -d= -f2-)
+    # WATCHDOG_CHAT_IDS — список через запятую; файлу нужен один чат — первый.
+    CHAT_ID=$(grep '^WATCHDOG_CHAT_IDS=' /etc/mydon-heartbeat.env 2>/dev/null | tail -1 | cut -d= -f2- | cut -d, -f1 | tr -d '[:space:]')
+    if [ -n "${BOT_TOKEN:-}" ] && [ -n "${CHAT_ID:-}" ]; then
+        log "INFO offsite-канал: аварийный бот сторожа (задайте TG_BACKUP_BOT_TOKEN/TG_BACKUP_CHAT_ID в /opt/mydon-app/.env для своего канала)"
+    fi
+fi
+ENC_PASS=$(grep '^BACKUP_ENC_PASSPHRASE=' /opt/mydon-app/.env 2>/dev/null | tail -1 | cut -d= -f2-)
 
 # Токен не попадает в argv (виден в ps): URL уходит через stdin, как в
 # backup_offsite.sh.
@@ -204,11 +218,11 @@ log "итого в $DEST: $(find "$DEST" -name '*.gz' | wc -l) файлов, $(d
 
 # ── итог в MYDON: упавший бэкап не имеет права остаться неуслышанным ──
 if [ "$FAILED" -ne 0 ]; then
+    # Фолбэк-алерт — тем же каналом, что и файлы (уже разрешён выше, без
+    # обращений к /opt/mydon-stock: П1 плана поглощения).
     to_mydon '{"type":"infra.backup_failed","source":"backup_extra","payload":{"what":"база MYDON / command-center","detail":"см. /opt/backups/backup.log"}}' || {
-        BT=$(grep "^BOT_TOKEN=" /opt/mydon-stock/.env | cut -d= -f2-)
-        CI=$(grep "^TG_BACKUP_CHAT_ID=" /opt/mydon-stock/.env | cut -d= -f2-)
-        curl -sf -m 30 -F chat_id="${CI}" -F text="❌ Доп-бэкап (база MYDON / command-center) упал — см. /opt/backups/backup.log" \
-             -K- <<< "url = \"https://api.telegram.org/bot${BT}/sendMessage\"" > /dev/null || true
+        curl -sf -m 30 -F chat_id="${CHAT_ID}" -F text="❌ Доп-бэкап (база MYDON / command-center) упал — см. /opt/backups/backup.log" \
+             -K- <<< "url = \"https://api.telegram.org/bot${BOT_TOKEN}/sendMessage\"" > /dev/null || true
     }
 else
     to_mydon "$(printf '{"type":"infra.backup_ok","source":"backup_extra","payload":{"what":"база MYDON + command-center","size":"%s"}}' "$(du -sh "$DEST" | cut -f1)")" || true

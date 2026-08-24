@@ -442,6 +442,20 @@
       "when": 1787423846950,
       "tag": "0062_smooth_hex",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1787577827976,
+      "tag": "0063_panoramic_eternity",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1787579676508,
+      "tag": "0064_canon_machine_serial",
+      "breakpoints": true
     }
   ]
 }

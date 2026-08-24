@@ -328,6 +328,49 @@ export const sale = pgTable(
   ],
 );
 
+// ── ourvend_sale_snapshot: СОБСТВЕННЫЙ учётный снапшот продаж OurVend ──
+// П2 плана поглощения (docs/PLAN_STOCK_ABSORPTION.md): свой суточный съём
+// кабинета вместо чтения БД mydon-stock. Пишется агентом через
+// POST /vending/accounting-snapshot днями-перезаписью (как у донора). До
+// переключения OURVEND_ACCOUNTING_SOURCE=own таблица — теневая: по ней
+// считается паритет со stock-дорожкой, в `sale` она не попадает.
+export const ourvendSaleSnapshot = pgTable(
+  "ourvend_sale_snapshot",
+  {
+    id: id(),
+    dt: date("dt").notNull(),
+    /** Серийник в форме API OurVend (голые 10 цифр); канон сопоставляет обе формы. */
+    machineSerial: text("machine_serial").notNull(),
+    product: text("product").notNull(),
+    qty: numeric("qty", { precision: 12, scale: 2 }).default("0").notNull(),
+    amount: numeric("amount", { precision: 15, scale: 2 }).default("0").notNull(),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
+    importedAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("ourvend_sale_snap_key").on(t.dt, t.machineSerial, t.product),
+    index("ourvend_sale_snap_dt_idx").on(t.dt),
+  ],
+);
+
+// ── ourvend_stock_snapshot: собственный утренний снимок остатков автоматов ──
+export const ourvendStockSnapshot = pgTable(
+  "ourvend_stock_snapshot",
+  {
+    id: id(),
+    dt: date("dt").notNull(),
+    machineSerial: text("machine_serial").notNull(),
+    product: text("product").notNull(),
+    qty: numeric("qty", { precision: 12, scale: 2 }).default("0").notNull(),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
+    importedAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("ourvend_stock_snap_key").on(t.dt, t.machineSerial, t.product),
+    index("ourvend_stock_snap_dt_idx").on(t.dt),
+  ],
+);
+
 // ── purchase: приход товара/сырья (этап 2: синк из mydon-stock) ──
 export const purchase = pgTable(
   "purchase",

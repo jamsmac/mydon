@@ -7,14 +7,18 @@ import {
   ShapeError,
   buildPem,
   coerceNum,
+  dedupLotAgg,
   ourvendDate,
   ourvendDateTime,
+  parseAccountingSales,
+  parseLotPage,
   parseMachineSales,
   parseMachines,
   parseProductSales,
   parseSlots,
   sumProductSales,
   type FetchLike,
+  type RawLotRow,
 } from "./ourvend";
 
 // ── Чистые парсеры на фикстурах Приложения В ─────────────────────────────────
@@ -217,5 +221,138 @@ describe("Несуществующие слоты вендора", () => {
   it("отсутствие статуса ничего не ломает", () => {
     const json = [[], [{ SiCoilId: "3", SiCapacity: "5", SiExtantQuantity: "1", PrName: "Twix" }]];
     assert.equal(parseSlots(json).length, 1);
+  });
+});
+
+// ── Учётный контур (П2 поглощения mydon-stock) ───────────────────────────────
+
+describe("parseAccountingSales: учётный отчёт SaleSummarize", () => {
+  it("итоговая строка и строки без кода товара отбрасываются", () => {
+    const json = {
+      records: 3,
+      rows: [
+        { ProductName: "Fanta 0.5", PrCode: "F05", colum2: "12", colum1: "144000.00" },
+        { ProductName: "合计", PrCode: "", colum2: "12", colum1: "144000.00" },
+        { ProductName: "Без кода", PrCode: "", colum2: "1", colum1: "1000" },
+      ],
+    };
+    const { rows, records, taken } = parseAccountingSales(json);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].product, "Fanta 0.5");
+    assert.equal(rows[0].qty, 12, "строковое colum2 приводится к целому");
+    assert.equal(rows[0].amount, 144000);
+    assert.equal(records, 3);
+    assert.equal(taken, 3);
+  });
+
+  it("строка Total по-английски тоже итоговая", () => {
+    const json = { records: 1, rows: [{ ProductName: "Total", PrCode: "X", colum2: "5", colum1: "1" }] };
+    assert.equal(parseAccountingSales(json).rows.length, 0);
+  });
+
+  it("пустой/битый ответ не роняет разбор", () => {
+    assert.equal(parseAccountingSales(null).rows.length, 0);
+    assert.equal(parseAccountingSales({}).rows.length, 0);
+  });
+});
+
+describe("dedupLotAgg: НОД-дедуп строк Lot management", () => {
+  it("весь набор пришёл дважды → суммы делятся на 2", () => {
+    const rows: RawLotRow[] = [
+      { product: "Снек", quantity: 10 },
+      { product: "Вода", quantity: 4 },
+      { product: "Снек", quantity: 10 },
+      { product: "Вода", quantity: 4 },
+    ];
+    const agg = dedupLotAgg(rows);
+    assert.equal(agg.get("Снек"), 10);
+    assert.equal(agg.get("Вода"), 4);
+  });
+
+  it("реальные два слота одного товара без дублей — НОД 1, деления нет", () => {
+    const rows: RawLotRow[] = [
+      { product: "Снек", quantity: 6 },
+      { product: "Снек", quantity: 4 },
+      { product: "Вода", quantity: 3 },
+    ];
+    const agg = dedupLotAgg(rows);
+    assert.equal(agg.get("Снек"), 10, "2 строки Снека и 1 Воды → НОД 1");
+    assert.equal(agg.get("Вода"), 3);
+  });
+
+  it("тройное дублирование при двух настоящих слотах: НОД 3", () => {
+    // Товар А — 2 слота × 3 дубля = 6 строк; товар Б — 1 слот × 3 = 3 строки.
+    const rows: RawLotRow[] = Array.from({ length: 3 }, () => [
+      { product: "А", quantity: 5 },
+      { product: "А", quantity: 7 },
+      { product: "Б", quantity: 2 },
+    ]).flat();
+    const agg = dedupLotAgg(rows);
+    assert.equal(agg.get("А"), 12);
+    assert.equal(agg.get("Б"), 2);
+  });
+
+  it("пустой вход — пустой итог", () => {
+    assert.equal(dedupLotAgg([]).size, 0);
+  });
+});
+
+describe("parseLotPage: страница Lot management", () => {
+  it("чужие MId отбрасываются, свои считаются", () => {
+    const json = {
+      rows: [
+        { MId: "2508160376", PrName: "Снек", SiExtantQuantity: "6" },
+        { MId: "9999999999", PrName: "Чужой", SiExtantQuantity: "1" },
+        { MId: "2508160376", PrName: "", SiExtantQuantity: "2" },
+      ],
+    };
+    const { all, mine } = parseLotPage(json, "2508160376");
+    assert.equal(all, 3, "сырые строки считаются ДО фильтра — по ним решается пагинация");
+    assert.equal(mine.length, 1, "пустое имя товара — не данные");
+    assert.equal(mine[0].quantity, 6);
+  });
+});
+
+describe("OurvendConnector: учётные запросы через фейковый fetch", () => {
+  const mkConnector = (handler: (url: string, body: string) => { status?: number; text: string }) => {
+    const fetchImpl: FetchLike = async (url, init) => {
+      const r = handler(url, String(init.body ?? ""));
+      return new Response(r.text, { status: r.status ?? 200 });
+    };
+    return new OurvendConnector({ account: "a", password: "p", fetchImpl, retries: 0, retryBaseMs: 0 });
+  };
+
+  it("SaleSummarize заявил больше строк, чем отдал → ShapeError, не молчаливая обрезка", async () => {
+    const c = mkConnector(() => ({
+      text: JSON.stringify({ records: 501, rows: [{ ProductName: "X", PrCode: "1", colum2: "1", colum1: "1" }] }),
+    }));
+    await assert.rejects(
+      c.getAccountingSales("2508160376", new Date(), new Date()),
+      (e: unknown) => e instanceof ShapeError && /пагинация/.test((e as Error).message),
+    );
+  });
+
+  it("Lot management: пустой ответ = не вызван getSession → ShapeError", async () => {
+    const c = mkConnector(() => ({ text: "" }));
+    await assert.rejects(c.getLotRows("2508160376"), (e: unknown) => e instanceof ShapeError);
+  });
+
+  it("Lot management: страницы собираются до неполной, фильтр MId сквозной", async () => {
+    const full = Array.from({ length: 500 }, (_, i) => ({
+      MId: "2508160376",
+      PrName: `Т${i}`,
+      SiExtantQuantity: "1",
+    }));
+    const partial = [{ MId: "2508160376", PrName: "Хвост", SiExtantQuantity: "2" }];
+    let page = 0;
+    const c = mkConnector((url, body) => {
+      if (!url.includes("ListJsonUser")) return { text: "{}" };
+      page += 1;
+      assert.match(body, new RegExp(`page=${page}(&|$)`));
+      return { text: JSON.stringify({ rows: page === 1 ? full : partial }) };
+    });
+    const rows = await c.getLotRows("2508160376");
+    assert.equal(page, 2, "после неполной страницы запросы прекращаются");
+    assert.equal(rows.length, 501);
   });
 });
