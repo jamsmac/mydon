@@ -4,6 +4,12 @@
 # DATABASE_MODE=local uses the rollback container. DATABASE_MODE=external
 # requires a direct TLS URL for pg_dump and administrative reads. Credentials
 # are passed through a temporary pgpass file, never through process arguments.
+#
+# sslmode=verify-ca/verify-full в DATABASE_ADMIN_URL требуют корневой
+# сертификат: он монтируется в клиентский контейнер из DB_SSL_ROOT_CERT
+# (по умолчанию /opt/backups/supabase-ca.crt, ставится deploy.sh из
+# deploy/certs/). При sslmode=require сертификат не обязателен, но если
+# файл есть — он всё равно пробрасывается (безвредно, готовит переход).
 set -euo pipefail
 umask 077
 
@@ -14,6 +20,7 @@ LOCAL_CONTAINER="${DB_LOCAL_CONTAINER:-mydon-db}"
 LOCAL_USER="${DB_LOCAL_USER:-mydon}"
 LOCAL_DATABASE="${DB_LOCAL_DATABASE:-mydon}"
 TEMP_ROOT="${DB_TEMP_ROOT:-/opt/backups}"
+CA_FILE="${DB_SSL_ROOT_CERT:-/opt/backups/supabase-ca.crt}"
 TMP_DIR=""
 
 fail() { printf 'FAIL database access: %s\n' "$*" >&2; exit 1; }
@@ -96,14 +103,32 @@ PY
   DB_NAME=$(printf '%s' "$metadata" | jq -er .database) || fail "нет database name"
   DB_USER=$(printf '%s' "$metadata" | jq -er .user) || fail "нет database user"
   DB_SSLMODE=$(printf '%s' "$metadata" | jq -er .sslmode) || fail "нет sslmode"
+
+  # verify-ca/verify-full без корневого сертификата дали бы невнятный отказ
+  # libpq уже внутри контейнера — валимся сразу и говорим, какого файла нет.
+  case "$DB_SSLMODE" in
+    verify-ca | verify-full)
+      [ -f "$CA_FILE" ] ||
+        fail "sslmode=$DB_SSLMODE требует корневой сертификат: нет файла $CA_FILE"
+      ;;
+  esac
 }
 
 external_client() {
+  # Сертификат монтируем и при sslmode=require, если файл есть: libpq без
+  # verify-* его не проверяет, зато переход на verify-full сводится к одному
+  # правке .env. ${arr[@]+…} — расширение пустого массива под set -u на
+  # bash 3.2 (macOS-тесты).
+  local ca_args=()
+  if [ -f "$CA_FILE" ]; then
+    ca_args=(--volume "$CA_FILE:/run/secrets/db-ca.crt:ro" --env PGSSLROOTCERT=/run/secrets/db-ca.crt)
+  fi
   "$DOCKER_BIN" run --rm --network host \
     --volume "$TMP_DIR/pgpass:/run/secrets/pgpass:ro" \
     --env PGPASSFILE=/run/secrets/pgpass \
     --env PGCONNECT_TIMEOUT=15 \
     --env "PGSSLMODE=$DB_SSLMODE" \
+    ${ca_args[@]+"${ca_args[@]}"} \
     "$CLIENT_IMAGE" "$@"
 }
 
