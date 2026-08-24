@@ -208,11 +208,15 @@ export function parsePriceCommand(text: string): PriceCommand | null {
   let t = text.trim().replace(/^цена\s*:?\s*/i, "");
   const confirmed = /(^|[\s,])точно(?=$|[\s,.!])/i.test(t);
   if (confirmed) t = t.replace(/(^|[\s,])точно(?=$|[\s,.!])/gi, " ").trim();
-  const m = /^(.+?)[\s:—=-]+(\d[\d\s]*)([кk])?\s*$/i.exec(t);
+  // Число — ОДИН токен: пробелы внутри только как разделители тысяч (группы
+  // ровно по 3). Жадное «\d[\d\s]*» склеивало числовой хвост имени с ценой:
+  // «Cola 330 9000» давало цену 3 309 000 (найдено адверсариал-ревью).
+  // Хвост «сум»/точка — самое естественное написание, не отвергаем.
+  const m = /^(.+?)[\s:—=-]+(\d+(?:[\s\u00a0\u202f]\d{3})*)\s*([кk])?\s*(?:сум\.?|sum|uzs)?\s*[.!]?\s*$/i.exec(t);
   if (!m) return null;
-  const product = m[1].trim();
+  const product = m[1].trim().replace(/[,;:—-]+$/, "").trim();
   if (!product) return null;
-  const digits = m[2].replace(/\s+/g, "");
+  const digits = m[2].replace(/[\s\u00a0\u202f]+/g, "");
   let price = Number(digits);
   if (m[3]) price *= 1000;
   // Потолок — защита от строки штрихкода, принятой за цену: дороже 10 млн сум

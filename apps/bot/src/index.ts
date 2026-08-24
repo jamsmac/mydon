@@ -337,7 +337,9 @@ async function main(): Promise<void> {
     photo: NonNullable<NonNullable<TgUpdate["message"]>["photo"]>,
   ): Promise<void> {
     try {
-      const orders = await deps.core.vendingOrders();
+      // limit 50: свежепринятая накладная обязана попасть в окно выбора,
+      // даже если панель нагенерила десяток заявок позже неё.
+      const orders = await deps.core.vendingOrders(50);
       const target = pickReceiptOrder(orders, new Date());
       if (target === null) {
         await tg.sendMessage(
@@ -695,7 +697,9 @@ async function main(): Promise<void> {
       const photoChat = u.message.chat.id;
       if (!isAllowed(photoChat, allowlist) || asStaff.has(photoChat)) {
         await routeStaffPhoto(photoChat, u.message.photo);
-      } else if (/чек/i.test(u.message.caption ?? "")) {
+      } else if (/(^|[\s,.!:;»")])чек(?=$|[\s,.!:;«("])/i.test(u.message.caption ?? "")) {
+        // Граница слова руками (\b после кириллицы не работает): «чекушка» и
+        // «чек-лист» — не команды прикрепления (найдено адверсариал-ревью).
         // Единственное фото, которое владелец шлёт в своём режиме, — чек с
         // базара (П3). Явная подпись вместо угадывания: без неё скрин OurVend
         // прилип бы к накладной так же молча, как раньше уходил в «фото ДО».

@@ -1086,6 +1086,12 @@ export class VendingService {
       // purchase (source='vending-order', цена — снапшот прайса из позиции).
       // Собираем ДО ветки toWarehouse: закуплено qty целиком, даже если всё
       // роздано по автоматам мимо склада.
+      //
+      // Переходный гейт: пока задан STOCK_DATABASE_URL, тот же физический
+      // закуп приходит зеркалом из mydon-stock (source='stock') — мост при
+      // живом зеркале двоил бы деньги в журнале и сводке снабжения (найдено
+      // адверсариал-ревью П3a). Мост включается в момент гашения синка.
+      const mirrorAlive = Boolean(process.env.STOCK_DATABASE_URL);
       const dtToday = new Date().toLocaleDateString("en-CA", { timeZone: TZ });
       const purchaseRows: (typeof purchase.$inferInsert)[] = [];
       for (const p of positions) {
@@ -1097,33 +1103,44 @@ export class VendingService {
         const key = normalizeProductName(product);
         // Позиции пишутся в jsonb без валидации содержимого (см.
         // executePurchaseOrder) — price перепроверяем так же строго, как
-        // qty. 0 и мусор = «цены нет», НЕ ноль сум.
-        const unitPrice = typeof pos.price === "number" && Number.isFinite(pos.price) && pos.price > 0 ? pos.price : null;
-        // Дубликат канона в positions (возможен только при ручной правке
-        // jsonb) дал бы два одинаковых extId в одном INSERT — ON CONFLICT DO
-        // NOTHING молча выкинул бы второй. Сливаем в одну строку заранее.
-        const twin = purchaseRows.find((r) => r.extId === `${order.id}:${key}`);
-        if (twin) {
-          const mergedQty = Number(twin.qty) + qty;
-          twin.qty = String(mergedQty);
-          if (twin.unitPrice != null) twin.total = (mergedQty * Number(twin.unitPrice)).toFixed(2);
-        } else {
-          purchaseRows.push({
-            extId: `${order.id}:${key}`,
-            dt: dtToday,
-            product,
-            unit: "шт",
-            qty: String(qty),
-            unitPrice: unitPrice === null ? null : unitPrice.toFixed(2),
-            total: unitPrice === null ? null : (qty * unitPrice).toFixed(2),
-            note: `накладная ${order.id.slice(0, 8)}, принял ${receivedBy}`,
-            source: "vending-order",
-          });
+        // qty. 0 и мусор = «цены нет», НЕ ноль сум. Потолки магнитуд — чтобы
+        // кривая ручная правка jsonb не завалила numeric-колонку и с ней всю
+        // приёмку (найдено адверсариал-ревью П3a); qty > потолка не пишем в
+        // журнал вовсе (склад упадёт на своём integer раньше).
+        const rawPrice = typeof pos.price === "number" && Number.isFinite(pos.price) && pos.price > 0 ? pos.price : null;
+        const unitPrice = rawPrice !== null && rawPrice <= 10_000_000 ? rawPrice : null;
+        if (!mirrorAlive && qty <= 1_000_000) {
+          // Дубликат канона в positions (слоты «Кола»/«кола» без алиаса дают
+          // две позиции одного канона) дал бы два одинаковых extId в одном
+          // INSERT — ON CONFLICT DO NOTHING молча выкинул бы второй. Сливаем
+          // в одну строку заранее.
+          const twin = purchaseRows.find((r) => r.extId === `${order.id}:${key}`);
+          if (twin) {
+            const mergedQty = Number(twin.qty) + qty;
+            twin.qty = String(mergedQty);
+            if (twin.unitPrice != null) twin.total = (mergedQty * Number(twin.unitPrice)).toFixed(2);
+          } else {
+            purchaseRows.push({
+              extId: `${order.id}:${key}`,
+              dt: dtToday,
+              product,
+              unit: "шт",
+              qty: String(qty),
+              unitPrice: unitPrice === null ? null : unitPrice.toFixed(2),
+              total: unitPrice === null ? null : (qty * unitPrice).toFixed(2),
+              note: `накладная ${order.id.slice(0, 8)}, принял ${receivedBy}`,
+              source: "vending-order",
+            });
+          }
         }
         const requested = distributedByCanonical.get(key);
         if (requested !== undefined) consumedDistribution.add(key);
         // Не больше заказанного — опечатка владельца не должна увести склад в минус.
         const dist = Math.min(qty, Math.max(0, requested ?? 0));
+        // Остаток распределения списываем: дубль канона в positions иначе
+        // получал бы requested целиком ВТОРОЙ раз — distributedUnits врал бы,
+        // а склад недосчитывался (найдено адверсариал-ревью П3a).
+        if (requested !== undefined) distributedByCanonical.set(key, Math.max(0, requested - dist));
         distributedUnits += dist;
         const toWarehouse = qty - dist;
         if (toWarehouse <= 0) continue;

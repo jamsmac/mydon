@@ -242,6 +242,16 @@ describe("Команда цены (П3): «цена <товар> <число> [�
 
   it("parsePriceCommand: имя товара с цифрой не съедает цену", () => {
     assert.deepEqual(parsePriceCommand("цена 7 Days 8000"), { product: "7 Days", price: 8000, confirmed: false });
+    // Жадный разбор склеивал «330 9000» в цену 3 309 000 — теперь пробел в
+    // числе допустим только как разделитель тысяч (группы ровно по 3)
+    // (найдено адверсариал-ревью).
+    assert.deepEqual(parsePriceCommand("цена Cola 330 9000"), { product: "Cola 330", price: 9000, confirmed: false });
+  });
+
+  it("parsePriceCommand: естественные хвосты — «сум», точка, запятая после имени", () => {
+    assert.deepEqual(parsePriceCommand("цена кола 12000 сум"), { product: "кола", price: 12000, confirmed: false });
+    assert.deepEqual(parsePriceCommand("цена кола 12000."), { product: "кола", price: 12000, confirmed: false });
+    assert.deepEqual(parsePriceCommand("цена кола, точно 12000"), { product: "кола", price: 12000, confirmed: true });
   });
 
   it("parsePriceCommand: мусор → null (подсказка формата, не запись)", () => {

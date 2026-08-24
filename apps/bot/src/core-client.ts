@@ -332,8 +332,8 @@ export class CoreClient {
   }
 
   /** Накладные закупа (материализованы при одобрении, §5.7). */
-  vendingOrders(): Promise<VendingOrder[]> {
-    return this.request<VendingOrder[]>("/vending/orders");
+  vendingOrders(limit?: number): Promise<VendingOrder[]> {
+    return this.request<VendingOrder[]>(limit === undefined ? "/vending/orders" : `/vending/orders?limit=${limit}`);
   }
 
   /**

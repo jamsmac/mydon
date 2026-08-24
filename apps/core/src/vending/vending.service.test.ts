@@ -790,6 +790,59 @@ describe("Вендинг Core: приёмка накладной на склад
     assert.equal(res.recordedPurchases, 0);
     assert.equal(purchases.length, 0);
   });
+
+  it("мост П3 молчит при живом зеркале mydon-stock — иначе журнал двоил бы закуп (найдено адверсариал-ревью)", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 5, price: 12000 }] };
+    const { db, purchases, stockUpserts } = receiveDb(order);
+    process.env.STOCK_DATABASE_URL = "postgresql://stock.example/db";
+    try {
+      const res = await new VendingService(db).receiveOrder();
+      assert.equal(res.received, true, "приёмка работает как раньше");
+      assert.equal(stockUpserts.length, 1, "склад зачисляется как раньше");
+      assert.equal(res.recordedPurchases, 0);
+      assert.equal(purchases.length, 0, "строк vending-order нет, пока закуп зеркалится из stock");
+    } finally {
+      delete process.env.STOCK_DATABASE_URL;
+    }
+  });
+
+  it("мост П3: дубль канона в positions сливается в одну строку, distributed не применяется дважды", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      // Слоты «Кола»/«кола» без алиаса дают две позиции одного канона.
+      positions: [
+        { product: "Кола", order: 10, price: 5000 },
+        { product: "кола", order: 8, price: 5000 },
+      ],
+    };
+    const { db, purchases } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { кола: 8 });
+
+    assert.equal(purchases.length, 1, "один extId — одна строка журнала");
+    assert.equal(purchases[0]!.qty, "18");
+    assert.equal(purchases[0]!.total, "90000.00");
+    assert.equal(res.recordedPurchases, 1);
+    // Раздача 8 списывается ОДИН раз (с первой позиции), не с каждой копии.
+    assert.equal(res.distributedUnits, 8);
+    assert.equal(res.units, 10, "склад получает 18 − 8, а не 18 − 16");
+  });
+
+  it("мост П3: потолки магнитуд — кривая цена уходит в null, гигантское qty не пишется в журнал", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      positions: [
+        { product: "TUC", order: 5, price: 99_000_000_000 },
+        { product: "Flint", order: 2_000_000_000, price: 5000 },
+      ],
+    };
+    const { db, purchases } = receiveDb(order);
+    await new VendingService(db).receiveOrder();
+    const tuc = purchases.find((p) => p.product === "TUC")!;
+    assert.equal(tuc.unitPrice, null, "цена за пределами numeric(15,2)-здравого смысла = «цены нет»");
+    assert.ok(!purchases.some((p) => p.product === "Flint"), "qty за потолком не попадает в журнал");
+  });
 });
 
 describe("Вендинг Core: правка закупочной цены (П3)", () => {

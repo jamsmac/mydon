@@ -887,7 +887,12 @@ export class StockService implements OnModuleInit, OnApplicationShutdown {
       };
     }
 
-    const rows = await this.db.select().from(purchase);
+    // ТОЛЬКО зеркало mydon-stock: с волны П3a в purchase пишет ещё и мост
+    // приёмки накладных (source='vending-order') — вендинг-товар, чьё имя
+    // совпало с карточкой ингредиента («Вода», стаканы), породил бы фантомный
+    // приход сырья, а несовпавшие строки навсегда раздували бы noCard
+    // (найдено адверсариал-ревью П3a).
+    const rows = await this.db.select().from(purchase).where(eq(purchase.source, "stock"));
     // Карточки ингредиентов и связки — сопоставление имени с карточкой.
     const ings = await this.db.select().from(entity).where(eq(entity.type, "ingredient"));
     const ingByName = new Map(ings.map((i) => [normalizeSourceKey(i.name), i]));
