@@ -233,6 +233,23 @@ export const RULES: Rule[] = [
     format: (c) => `🗄 Бэкап готов: ${str(c.payload.what, "база")} (${str(c.payload.size, "—")})`,
   },
   {
+    // Автодеплой шлёт это событие при сбое (deploy/auto-deploy.sh). Без
+    // правила ingest молча клал событие в таблицу, notify считал алерт
+    // доставленным, и владелец не узнавал, что прод застрял на старом коде.
+    id: "infra.deploy_failed",
+    eventType: "infra.deploy_failed",
+    urgency: "immediate",
+    format: (c) =>
+      `❌ Автодеплой упал на ${str(c.payload.commit, "?")}. ${str(c.payload.detail, "")}`.trim(),
+  },
+  {
+    // Отбой после сбоя: владелец, получивший «упал», ждёт «восстановился».
+    id: "infra.deploy_ok",
+    eventType: "infra.deploy_ok",
+    urgency: "immediate",
+    format: (c) => `✅ Автодеплой восстановился: ${str(c.payload.commit, "?")} задеплоен.`,
+  },
+  {
     // Дамп больше лимита Bot API (50 МБ): бэкап сделан, но offsite-копии НЕТ.
     // Это не «успех с оговоркой», а дыра в защите — говорим немедленно.
     id: "infra.backup_oversize",

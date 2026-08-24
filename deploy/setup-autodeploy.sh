@@ -42,10 +42,11 @@ git fetch -q origin
 git reset --hard origin/main
 git branch --set-upstream-to=origin/main main >/dev/null 2>&1 || true
 
-# 3. systemd-таймер.
-chmod +x deploy/auto-deploy.sh
+# 3. systemd-таймер и OnFailure-крюк.
+chmod +x deploy/auto-deploy.sh deploy/deploy-failure-alert.sh
 cp deploy/systemd/mydon-autodeploy.service /etc/systemd/system/
 cp deploy/systemd/mydon-autodeploy.timer   /etc/systemd/system/
+cp deploy/systemd/mydon-deploy-alert.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now mydon-autodeploy.timer
 

@@ -24,7 +24,8 @@
 # См. docs/watchdog.md.
 set -euo pipefail
 
-ENV_FILE="/etc/mydon-heartbeat.env"
+# Переопределение — только для теста deploy/tests/watchdog-liveness.test.sh.
+ENV_FILE="${WATCHDOG_ENV_FILE:-/etc/mydon-heartbeat.env}"
 [ -f "$ENV_FILE" ] || { echo "нет $ENV_FILE — сторож за сторожем не настроен"; exit 1; }
 # shellcheck disable=SC1090
 . "$ENV_FILE"
@@ -57,11 +58,17 @@ mkdir -p "$(dirname "$STATE_FILE")"
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 
-code="$(curl -sS -o "$body" -w '%{http_code}' \
+# `|| echo 000` давал «000000»: при сетевом сбое curl сам печатает 000 из -w
+# И выходит ненулём. Перетираем код при ЛЮБОМ ненулевом выходе curl: transfer,
+# оборвавшийся ПОСЛЕ заголовков (истёк --max-time на теле), печатает 200 при
+# битом теле — это тоже «недоступен», а не валидный ответ.
+if ! code="$(curl -sS -o "$body" -w '%{http_code}' \
   -H "Authorization: Bearer $HEARTBEAT_GH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   --max-time 20 \
-  "https://api.github.com/gists/$HEARTBEAT_GIST_ID" || echo "000")"
+  "https://api.github.com/gists/$HEARTBEAT_GIST_ID")"; then
+  code=000
+fi
 
 # Свой отказ сети — не повод объявлять сторожа мёртвым: снаружи он в этот
 # момент, скорее всего, жив, а вот наш heartbeat перестанет уходить, и
@@ -96,6 +103,7 @@ def parse(ts):
         return None
 
 mark_ts = None
+raw = None
 try:
     with open(body_path, encoding="utf-8") as f:
         files = (json.load(f) or {}).get("files") or {}
@@ -105,23 +113,34 @@ try:
 except Exception:
     pass
 
+# Файл ЕСТЬ, но не разобрался (битый ответ/повреждённый gist): это не
+# «отметки нет ни разу» — иначе один порченый ответ давал бы мгновенный
+# ложный alert с возрастом от древнего since. Пропускаем прогон, state
+# не трогаем: настоящая тишина сторожа догонит через возраст отметки.
+if raw and mark_ts is None:
+    print("skip|watchdog.json не разобрался|0")
+    raise SystemExit
+
 # Отметки нет вовсе — считаем возрастом наше собственное ожидание: так
 # «сторож не отработал ни разу» тоже становится тревогой, а не вечной тишиной.
 age_min = (now - (mark_ts if mark_ts is not None else since)) / 60.0
 alive = age_min <= stale_min
 seen = "отметка" if mark_ts is not None else "отметки нет ни разу, ждём"
 
+# alerted_at здесь НЕ обновляется: раньше отметка ставилась ДО отправки, и
+# сорвавшаяся тревога подавлялась на REMIND_H часов, а recovered терялся
+# навсегда. Теперь доставку подтверждает bash (commit_state) — до неё state
+# оставляет действие «должно случиться», и следующий тик повторяет попытку.
 if alive:
     action = "recovered" if down else "ok"
-    state = {"since": since, "down": False, "alerted_at": 0}
+    if action == "ok":
+        state = {"since": since, "down": False, "alerted_at": 0}
+    else:
+        state = {"since": since, "down": True, "alerted_at": alerted_at}
 else:
     repeat = down and (now - alerted_at) >= remind_h * 3600
     action = "alert" if (not down or repeat) else "quiet"
-    state = {
-        "since": since,
-        "down": True,
-        "alerted_at": now if action == "alert" else alerted_at,
-    }
+    state = {"since": since, "down": True, "alerted_at": alerted_at}
 
 with open(state_path, "w", encoding="utf-8") as f:
     json.dump(state, f)
@@ -135,12 +154,16 @@ rest="${verdict#*|}"
 seen="${rest%%|*}"
 age="${rest##*|}"
 
+# Возврат 0 = сообщение реально доставлено хотя бы в один чат (или каналов
+# нет вовсе — тогда журнал и есть канал). По нему commit_state фиксирует
+# alerted_at/сброс down; без доставки state не меняется и следующий
+# 15-минутный тик повторяет попытку.
 send() {
   [ -n "${WATCHDOG_BOT_TOKEN:-}" ] && [ -n "${WATCHDOG_CHAT_IDS:-}" ] || {
     echo "WATCHDOG_BOT_TOKEN/WATCHDOG_CHAT_IDS не заданы — тревога только в лог: $1"
     return 0
   }
-  local chat resp
+  local chat resp delivered=1
   IFS=',' read -ra chats <<< "$WATCHDOG_CHAT_IDS"
   for chat in "${chats[@]}"; do
     chat="$(echo "$chat" | tr -d '[:space:]')"
@@ -157,13 +180,40 @@ send() {
       echo "тревога не отправлена в $chat: сеть недоступна"
       continue
     }
-    if ! printf '%s' "$resp" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") else 1)' 2>/dev/null; then
+    if printf '%s' "$resp" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") else 1)' 2>/dev/null; then
+      delivered=0
+    else
       echo "тревога не отправлена в $chat: Telegram отклонил — $(printf '%s' "$resp" | head -c 200)"
     fi
   done
+  return "$delivered"
+}
+
+# Фиксация доставленного действия в state — ПОСЛЕ подтверждения Telegram.
+commit_state() {
+  python3 - "$STATE_FILE" "$1" <<'PY'
+import json, sys, time
+path, op = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as f:
+        state = json.load(f)
+except Exception:
+    state = {}
+if op == "alert_sent":
+    state["down"] = True
+    state["alerted_at"] = time.time()
+else:  # recovered_sent
+    state["down"] = False
+    state["alerted_at"] = 0
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(state, f)
+PY
 }
 
 case "$action" in
+  skip)
+    echo "gist отдал нечитаемый watchdog.json — проверку пропускаем, state не трогаем"
+    ;;
   ok)
     echo "ok: сторож отработал ${age} мин назад (порог ${STALE_MIN})"
     ;;
@@ -171,15 +221,23 @@ case "$action" in
     echo "сторож молчит ${age} мин, тревога уже отправлена — напомним через ${REMIND_H} ч"
     ;;
   recovered)
-    send "✅ Внешний сторож снова работает: отметка ${age} мин назад."
-    echo "recovered: сторож снова отработал"
+    if send "✅ Внешний сторож снова работает: отметка ${age} мин назад."; then
+      commit_state recovered_sent
+      echo "recovered: сторож снова отработал"
+    else
+      echo "recovered НЕ доставлен — повторим следующим тиком"
+    fi
     ;;
   alert)
-    send "🚨 Внешний сторож MYDON молчит ${age} мин (порог ${STALE_MIN}, ${seen}).
+    if send "🚨 Внешний сторож MYDON молчит ${age} мин (порог ${STALE_MIN}, ${seen}).
 Сервер жив — это пишет он сам. Некому проверять, если он ляжет.
 Смотри GitHub → Actions → workflow «watchdog»: сломан запуск, отозван токен
-или Actions отключил расписание за неактивность репозитория."
-    echo "alert: сторож молчит ${age} мин"
+или Actions отключил расписание за неактивность репозитория."; then
+      commit_state alert_sent
+      echo "alert: сторож молчит ${age} мин"
+    else
+      echo "тревога НЕ доставлена — повторим следующим тиком"
+    fi
     ;;
   *)
     echo "неожиданный вердикт: $verdict"
