@@ -6,6 +6,9 @@ HELPER="$ROOT/deploy/guards/db_access.sh"
 FAKE_DOCKER="$ROOT/deploy/tests/fake-docker-db.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# Герметичность: дефолтный CA-путь хелпера (/opt/backups/…) может существовать
+# на реальном сервере — тесты не должны зависеть от состояния хоста.
+export DB_SSL_ROOT_CERT="$TMP/no-such-ca.crt"
 
 run_helper() {
   DB_ENV_FILE="$1" \
@@ -64,6 +67,34 @@ grep -q 'db.example.test:5432:postgres:postgres:external-secret' "$TMP/pgpass.co
 [ "$(find "$TMP/staging" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -eq 0 ]
 run_helper "$EXTERNAL_ENV" 'query' 'select 42' | grep -qx 42
 run_helper "$EXTERNAL_ENV" ping | grep -qx 1
+
+# verify-full без CA-файла — отказ сразу, с именем недостающего файла.
+VERIFY_ENV="$TMP/verify.env"
+printf '%s\n' \
+  'DATABASE_MODE=external' \
+  'DATABASE_ADMIN_URL=postgresql://postgres:external-secret@db.example.test:5432/postgres?sslmode=verify-full' \
+  > "$VERIFY_ENV"
+if DB_SSL_ROOT_CERT="$TMP/no-such-ca.crt" run_helper "$VERIFY_ENV" ping > "$TMP/output" 2>&1; then
+  printf 'verify-full without a CA file was accepted\n' >&2
+  exit 1
+fi
+grep -q 'требует корневой сертификат' "$TMP/output"
+
+# verify-full с CA-файлом: сертификат монтируется и попадает в PGSSLROOTCERT.
+printf 'fake-ca\n' > "$TMP/ca.crt"
+: > "$TMP/docker.args"
+DB_SSL_ROOT_CERT="$TMP/ca.crt" run_helper "$VERIFY_ENV" ping | grep -qx 1
+grep -q 'PGSSLMODE=verify-full' "$TMP/docker.args"
+grep -q 'PGSSLROOTCERT=/run/secrets/db-ca.crt' "$TMP/docker.args"
+grep -q "$TMP/ca.crt:/run/secrets/db-ca.crt:ro" "$TMP/docker.args"
+
+# require без CA-файла — работает как раньше, без монтирования сертификата.
+: > "$TMP/docker.args"
+DB_SSL_ROOT_CERT="$TMP/no-such-ca.crt" run_helper "$EXTERNAL_ENV" ping | grep -qx 1
+if grep -q 'PGSSLROOTCERT' "$TMP/docker.args"; then
+  printf 'CA args leaked into a run without a CA file\n' >&2
+  exit 1
+fi
 
 BAD_MODE_ENV="$TMP/bad-mode.env"
 printf 'DATABASE_MODE=surprise\n' > "$BAD_MODE_ENV"

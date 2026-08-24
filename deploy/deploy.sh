@@ -131,6 +131,10 @@ EOF
   install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
   install -o root -g root -m 700 deploy/guards/b2_offsite.sh /opt/backups/b2_offsite.sh
   install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
+  # Корневой сертификат Supabase — для sslmode=verify-full в admin-пути
+  # (db_access.sh монтирует его в клиентский контейнер). Публичный сертификат,
+  # пин сверен по двум независимым сетевым путям 2026-08-24.
+  install -o root -g root -m 644 deploy/certs/supabase-prod-ca-2021.crt /opt/backups/supabase-ca.crt
   echo '  cron-скрипты backup/restore синхронизированы'
 "
 
