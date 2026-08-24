@@ -42,4 +42,18 @@ describe("лист «Правила закупа»", () => {
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
   });
+  it("переключение строки без «Отмена» перемонтирует форму — не сохраняет чужие правки", async () => {
+    const user = userEvent.setup();
+    render(<ProductRulesPanel domain="vendhub" products={rows} />);
+    await user.click(screen.getByRole("button", { name: "Править Snickers 50gr" }));
+    const pack = screen.getByLabelText("Блок, шт");
+    await user.clear(pack);
+    await user.type(pack, "12");
+
+    await user.click(screen.getByRole("button", { name: "Править Twix 50gr" }));
+
+    expect(screen.getByLabelText("Блок, шт")).toHaveValue("10");
+    expect(screen.getByLabelText("Убрать из закупки (грузить только со склада)")).toBeChecked();
+    expect(screen.getByDisplayValue("Twix 50gr")).toBeInTheDocument();
+  });
 });

@@ -100,7 +100,13 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
           ))}
         </div>
       )}
-      {editingRow && <RuleForm domain={domain} row={editingRow} onDone={() => setEditing(null)} />}
+      {editingRow && (
+        // key=id — переключение «Править» на другую строку без «Отмена» должно
+        // ПЕРЕМОНТИРОВАТЬ форму: без key React переиспользует смонтированные
+        // неуправляемые input'ы и не переприменяет defaultValue/defaultChecked,
+        // и правки сохранились бы под чужим именем товара (ревью, находка 1).
+        <RuleForm key={editingRow.id} domain={domain} row={editingRow} onDone={() => setEditing(null)} />
+      )}
       <p className="hint" style={{ marginTop: 8 }}>
         Цена — только чтение: правится в боте командой «цена &lt;товар&gt; &lt;сум&gt;».
       </p>
