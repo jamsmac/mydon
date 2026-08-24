@@ -2,14 +2,18 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { VendingOrder, VendingPurchase, VendingPurchaseItem } from "./core-client";
 import {
+  formatPriceResult,
   formatPurchaseBrief,
   formatPurchaseOrders,
   formatPurchaseSubmitAck,
   formatReceiveOrderAck,
+  isPriceCommand,
   isPurchaseOrdersQuery,
   isPurchaseReceiveCommand,
   isPurchaseSubmitCommand,
+  parsePriceCommand,
   parseReceiveDistribution,
+  pickReceiptOrder,
 } from "./purchase-brief";
 
 const item = (o: Partial<VendingPurchaseItem> & { product: string }): VendingPurchaseItem => ({
@@ -168,6 +172,13 @@ describe("Приёмка накладной: команда и подтверж�
     assert.match(t, /Зачислено на склад: 24 ед\. \(2 поз\.\)/);
     assert.match(t, /что заказать/);
     assert.doesNotMatch(t, /Распределено/); // без distributedUnits — блока нет
+    assert.doesNotMatch(t, /Журнал прихода/); // без recordedPurchases — строки нет
+  });
+
+  it("мост П3 в ack: журнал прихода и подсказка про чек", () => {
+    const t = formatReceiveOrderAck({ received: true, replenished: 2, units: 24, recordedPurchases: 3 });
+    assert.match(t, /Журнал прихода: 3 поз\./);
+    assert.match(t, /подписью «чек»/);
   });
 
   it("нечего принимать — показывает причину", () => {
@@ -207,5 +218,91 @@ describe("Приёмка накладной: команда и подтверж�
     // этот кусок просто не распознаётся, а не превращается в мусорную пару.
     const parsed = parseReceiveDistribution("Принял: по факту вот такая раскладка: Кола 5, Спрайт 3");
     assert.deepEqual(parsed, { Спрайт: 3 });
+  });
+});
+
+describe("Команда цены (П3): «цена <товар> <число> [точно]»", () => {
+  it("isPriceCommand: жёсткий префикс, соседние слова не срабатывают", () => {
+    assert.equal(isPriceCommand("цена TUC 12000"), true);
+    assert.equal(isPriceCommand("  ЦЕНА: кола 9000"), true);
+    assert.equal(isPriceCommand("цена"), true); // разберётся в подсказку формата
+    assert.equal(isPriceCommand("оценка склада"), false);
+    assert.equal(isPriceCommand("цены поднялись"), false);
+    assert.equal(isPriceCommand("какая цена у колы"), false);
+  });
+
+  it("parsePriceCommand: базовый разбор, пробелы в числе, суффикс «к», «точно»", () => {
+    assert.deepEqual(parsePriceCommand("цена TUC 12000"), { product: "TUC", price: 12000, confirmed: false });
+    assert.deepEqual(parsePriceCommand("цена: кола 12 000"), { product: "кола", price: 12000, confirmed: false });
+    assert.deepEqual(parsePriceCommand("цена ред булл 9к"), { product: "ред булл", price: 9000, confirmed: false });
+    assert.deepEqual(parsePriceCommand("цена TUC 15000 точно"), { product: "TUC", price: 15000, confirmed: true });
+    // «точно» в середине — тоже подтверждение (порядок слов не экзамен).
+    assert.deepEqual(parsePriceCommand("цена точно TUC 15000"), { product: "TUC", price: 15000, confirmed: true });
+  });
+
+  it("parsePriceCommand: имя товара с цифрой не съедает цену", () => {
+    assert.deepEqual(parsePriceCommand("цена 7 Days 8000"), { product: "7 Days", price: 8000, confirmed: false });
+  });
+
+  it("parsePriceCommand: мусор → null (подсказка формата, не запись)", () => {
+    assert.equal(parsePriceCommand("цена"), null);
+    assert.equal(parsePriceCommand("цена TUC"), null);
+    assert.equal(parsePriceCommand("цена TUC ноль"), null);
+    assert.equal(parsePriceCommand("цена TUC 4870000000012"), null, "штрихкод — не цена");
+    assert.equal(parsePriceCommand("цена TUC 0"), null);
+  });
+
+  it("formatPriceResult: успех / гейт / не найден", () => {
+    const ok = formatPriceResult({ ok: true, product: "TUC", oldPrice: null, newPrice: 12000 });
+    assert.match(ok, /не была задана/);
+    // ru-RU разделяет тысячи узким неразрывным пробелом (U+202F), не обычным.
+    assert.match(ok, /12[\s\u00a0\u202f]000 сум/);
+
+    const spike = formatPriceResult({
+      ok: false,
+      reason: "spike",
+      product: "TUC",
+      oldPrice: 10000,
+      newPrice: 15000,
+      deviationPct: 50,
+    });
+    assert.match(spike, /на 50%/);
+    assert.match(spike, /«цена TUC 15000 точно»/);
+
+    assert.match(formatPriceResult({ ok: false, reason: "not_found", product: "Чипсы" }), /не найден/);
+  });
+});
+
+describe("Чек к накладной (П3): pickReceiptOrder", () => {
+  const now = new Date("2026-08-24T12:00:00Z");
+  const order = (o: Partial<VendingOrder>): VendingOrder => ({
+    id: "o1",
+    approvalId: "a1",
+    status: "received",
+    positions: 3,
+    totalOrder: 10,
+    costRounded: 100000,
+    createdBy: "owner",
+    createdAt: "2026-08-24T08:00:00Z",
+    receivedAt: "2026-08-24T10:00:00Z",
+    receivedBy: "owner",
+    ...o,
+  });
+
+  it("берёт последнюю принятую за сутки; непринятые и старые — мимо", () => {
+    const fresh = order({ id: "fresh", receivedAt: "2026-08-24T11:00:00Z" });
+    const older = order({ id: "older", receivedAt: "2026-08-24T09:00:00Z" });
+    const stale = order({ id: "stale", receivedAt: "2026-08-22T09:00:00Z" });
+    const open = order({ id: "open", status: "approved", receivedAt: null });
+    assert.equal(pickReceiptOrder([open, older, fresh, stale], now)?.id, "fresh");
+  });
+
+  it("принятая до появления receivedAt (null) не подходит — честный отказ вместо угадывания", () => {
+    assert.equal(pickReceiptOrder([order({ receivedAt: null })], now), null);
+    assert.equal(pickReceiptOrder([], now), null);
+  });
+
+  it("receivedAt из будущего (кривые часы) — не подходит", () => {
+    assert.equal(pickReceiptOrder([order({ receivedAt: "2026-08-25T12:00:00Z" })], now), null);
   });
 });

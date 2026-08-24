@@ -134,10 +134,14 @@ export function formatReceiveOrderAck(res: {
   units: number;
   distributedUnits?: number;
   unmatchedDistribution?: string[];
+  recordedPurchases?: number;
   reason?: string;
 }): string {
   if (!res.received) return res.reason ?? "Непринятых накладных нет.";
   const lines = [`📥 Накладная принята на склад.`, "", `Зачислено на склад: ${res.units} ед. (${res.replenished} поз.)`];
+  if (res.recordedPurchases && res.recordedPurchases > 0) {
+    lines.push(`Журнал прихода: ${res.recordedPurchases} поз. Фото чека — пришли с подписью «чек».`);
+  }
   if (res.distributedUnits && res.distributedUnits > 0) {
     lines.push(`Распределено по автоматам: ${res.distributedUnits} ед.`);
   }
@@ -175,4 +179,91 @@ export function formatPurchaseOrders(orders: VendingOrder[]): string {
   });
   if (orders.length > 10) lines.push(`…и ещё ${orders.length - 10}`);
   return ["📄 Накладные закупа:", "", ...lines].join("\n");
+}
+
+// ── Команда цены: «цена <товар> <число> [точно]» (П3) ────────────────────────
+// Единственный живой путь правки vending_product.purchasePrice: сид существующие
+// строки не трогает, CRUD в панели нет — «⚠️ Без цены — на разбор» из брифинга
+// чинится прямо здесь. Гейт ±20% и подтверждение словом «точно» — процесс,
+// проверенный в mydon-stock (PRICE_SPIKE_PCT), но без FSM: состояние заменяет
+// повтор той же команды.
+
+export interface PriceCommand {
+  product: string;
+  price: number;
+  confirmed: boolean;
+}
+
+/** Начинается со слова «цена» (без \b — он не работает после кириллицы). */
+export function isPriceCommand(text: string): boolean {
+  return /^цена(\s|:|$)/i.test(text.trim());
+}
+
+/**
+ * «цена TUC 12000», «цена: кола 12 000 точно», «цена ред булл 9к».
+ * Число — в конце (пробелы внутри допустимы, «к» = ×1000); всё между «цена»
+ * и числом — имя товара как в карточке/алиасе. null → показать формат.
+ */
+export function parsePriceCommand(text: string): PriceCommand | null {
+  let t = text.trim().replace(/^цена\s*:?\s*/i, "");
+  const confirmed = /(^|[\s,])точно(?=$|[\s,.!])/i.test(t);
+  if (confirmed) t = t.replace(/(^|[\s,])точно(?=$|[\s,.!])/gi, " ").trim();
+  const m = /^(.+?)[\s:—=-]+(\d[\d\s]*)([кk])?\s*$/i.exec(t);
+  if (!m) return null;
+  const product = m[1].trim();
+  if (!product) return null;
+  const digits = m[2].replace(/\s+/g, "");
+  let price = Number(digits);
+  if (m[3]) price *= 1000;
+  // Потолок — защита от строки штрихкода, принятой за цену: дороже 10 млн сум
+  // за единицу в этом бизнесе не бывает.
+  if (!Number.isInteger(price) || price <= 0 || price > 10_000_000) return null;
+  return { product, price, confirmed };
+}
+
+/** Ответ на команду цены — успех, гейт или «не найден». */
+export function formatPriceResult(res: {
+  ok: boolean;
+  product?: string;
+  oldPrice?: number | null;
+  newPrice?: number;
+  deviationPct?: number;
+  reason?: "not_found" | "spike";
+}): string {
+  if (res.ok) {
+    const from = res.oldPrice === null || res.oldPrice === undefined ? "не была задана" : `${RU(res.oldPrice)} сум`;
+    return [
+      `💰 Цена «${res.product}»: ${from} → ${RU(res.newPrice ?? 0)} сум.`,
+      "",
+      "«что заказать» — пересчитать закуп по новой цене.",
+    ].join("\n");
+  }
+  if (res.reason === "spike") {
+    return [
+      `⚠️ Новая цена ${RU(res.newPrice ?? 0)} сум отличается от текущей ${RU(res.oldPrice ?? 0)} сум на ${res.deviationPct}%.`,
+      "",
+      `Если это не опечатка — повтори со словом «точно»: «цена ${res.product} ${res.newPrice} точно».`,
+    ].join("\n");
+  }
+  return `Товар «${res.product ?? "?"}» не найден в прайсе вендинга. Имя должно совпадать с карточкой товара или её алиасом.`;
+}
+
+/** Подсказка формата, когда «цена …» не разобралась. */
+export const PRICE_COMMAND_HINT =
+  "Формат: «цена <товар> <сум за единицу>», например «цена TUC 12000». Подорожание больше 20% — повтори со словом «точно».";
+
+/**
+ * К какой накладной привязать фото чека: последняя принятая, не старше суток.
+ * Ограничение по времени осознанное — чек шлют сразу после «принять закуп»,
+ * а фото недельной давности к случайной накладной привязывать нельзя.
+ */
+export function pickReceiptOrder(orders: VendingOrder[], now: Date): VendingOrder | null {
+  let best: VendingOrder | null = null;
+  for (const o of orders) {
+    if (o.status !== "received" || !o.receivedAt) continue;
+    const at = new Date(o.receivedAt).getTime();
+    if (!Number.isFinite(at) || now.getTime() - at > 24 * 60 * 60 * 1000 || at > now.getTime() + 60_000) continue;
+    if (best === null || at > new Date(best.receivedAt as string).getTime()) best = o;
+  }
+  return best;
 }

@@ -12,13 +12,17 @@ import {
 } from "./cash-intake";
 import { parseIntent } from "./intent";
 import {
+  PRICE_COMMAND_HINT,
+  formatPriceResult,
   formatPurchaseBrief,
   formatPurchaseOrders,
   formatPurchaseSubmitAck,
   formatReceiveOrderAck,
+  isPriceCommand,
   isPurchaseOrdersQuery,
   isPurchaseReceiveCommand,
   isPurchaseSubmitCommand,
+  parsePriceCommand,
   parseReceiveDistribution,
 } from "./purchase-brief";
 import { planReport } from "./reports";
@@ -61,6 +65,8 @@ const HELP = [
   "• «накладные» — одобренные закупы",
   "• «принять закуп» — оприходовать накладную на склад",
   "• «принять закуп: TUC 5, Flint 5» — то же, но с уточнением, сколько сразу в автоматы",
+  "• «цена TUC 12000» — записать закупочную цену товара (скачок >20% — добавь «точно»)",
+  "• фото с подписью «чек» — прикрепить чек к последней принятой накладной",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «касса закупа: получил 2400000, базар 376300» — записать кассу похода на базар",
   "• «кассы закупа» / «история кассы» — прошлые кассы",
@@ -129,6 +135,21 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка чтения касс закупа:", err);
       return { text: "Не удалось получить кассы закупа из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Правка закупочной цены — «цена TUC 12000» (П3). Жёсткий префикс «цена…»
+  // ни с чем не пересекается: продажных цен в командах бота нет. Гейт ±20%
+  // живёт в Core; здесь только разбор и повтор со словом «точно».
+  if (isPriceCommand(text)) {
+    const cmd = parsePriceCommand(text);
+    if (cmd === null) return { text: PRICE_COMMAND_HINT };
+    try {
+      const res = await deps.core.setVendingPrice(cmd.product, cmd.price, cmd.confirmed);
+      return { text: formatPriceResult(res) };
+    } catch (err) {
+      console.error("Ошибка правки цены:", err);
+      return { text: "Не удалось записать цену в MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 

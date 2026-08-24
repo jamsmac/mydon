@@ -166,6 +166,25 @@ export class ReceiveOrderDto {
   distributed?: Record<string, number>;
 }
 
+export class SetProductPriceDto {
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  product!: string;
+
+  /**
+   * Целые сумы: дробной цены за единицу в закупе не бывает, а дробь на
+   * границе API — почти наверняка ошибка разбора команды.
+   */
+  @IsInt() @Min(1)
+  price!: number;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+
+  /** Повторная команда со словом «точно» — пропуск гейта цены. */
+  @IsOptional() @IsIn([true, false])
+  confirmed?: boolean;
+}
+
 export class SyncFinishDto {
   @IsIn(["success", "partial", "failed"])
   status!: "success" | "partial" | "failed";
@@ -285,6 +304,12 @@ export class VendingController {
   @Post("orders/receive")
   receiveOrder(@Body() dto: ReceiveOrderDto) {
     return this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
+  }
+
+  /** Правка закупочной цены товара (гейт ±20% — см. setProductPrice). */
+  @Post("product-price")
+  setProductPrice(@Body() dto: SetProductPriceDto) {
+    return this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
   }
 
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────

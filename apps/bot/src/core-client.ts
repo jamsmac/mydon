@@ -161,6 +161,19 @@ export interface VendingOrder {
   costRounded: number;
   createdBy: string | null;
   createdAt: string;
+  /** Момент приёмки; null у непринятых и у принятых до появления колонки. */
+  receivedAt?: string | null;
+  receivedBy?: string | null;
+}
+
+/** Итог правки закупочной цены (POST /vending/product-price). */
+export interface SetPriceResult {
+  ok: boolean;
+  product?: string;
+  oldPrice?: number | null;
+  newPrice?: number;
+  deviationPct?: number;
+  reason?: "not_found" | "spike";
 }
 
 /** Строка ленты действий сотрудников (GET /registry/actions). */
@@ -338,6 +351,7 @@ export class CoreClient {
     units: number;
     distributedUnits: number;
     unmatchedDistribution: string[];
+    recordedPurchases?: number;
     reason?: string;
   }> {
     return this.request("/vending/orders/receive", {
@@ -346,6 +360,14 @@ export class CoreClient {
         ...(orderId ? { orderId } : {}),
         ...(distributed ? { distributed } : {}),
       }),
+    });
+  }
+
+  /** Правка закупочной цены товара; гейт ±20% снимается confirmed=true. */
+  setVendingPrice(product: string, price: number, confirmed: boolean): Promise<SetPriceResult> {
+    return this.request("/vending/product-price", {
+      method: "POST",
+      body: JSON.stringify({ product, price, actor: "owner", confirmed }),
     });
   }
 
