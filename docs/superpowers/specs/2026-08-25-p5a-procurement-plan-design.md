@@ -1,0 +1,200 @@
+# П5a «Что купить» — закупочный план по снек-автоматам: дизайн
+
+Дата: 2026-08-25. Срез плана поглощения mydon-stock (`docs/PLAN_STOCK_ABSORPTION.md`, П5).
+Ветка `feat/p5a-procurement-plan`. Донор — `~/Developer/vending-ops` (правила владельца,
+собраны с Codex 24.08.2026) и `mydon-stock/app/reports.py` (только для границ).
+
+## 1. Зачем и что уже есть
+
+Владелец 24.08 утром собрал закупочный план руками вне системы: `procurement-rules.json`
+(политика «новая упаковка → в автоматы первой, склад — на остаток, излишек — на склад»,
+маршрут Olma → American Hospital, 11 исключений из закупа, фикс-количества СуперКонтик 50 /
+Snickers 48, размеры блоков, цены за единицу), `warehouse.json` (склад 155 ед. на 21.08),
+`build_plan.py` → HTML-план оператору. Значит потребность реальная, а система её не закрывает.
+
+**В монорепо расчёт закупа уже есть end-to-end** (инвентаризация 25.08, 4 читателя):
+`computePurchase`/`needByProduct` (`packages/shared/src/vending-calc.ts`) →
+`VendingService.purchase()` → `GET /vending/purchase` → бот «что заказать» / «оформить закуп»
+→ approval T2 → `vending_purchase_order` → приёмка (П3a). Панель: вкладка «Снек» секция «Закуп»
+(read-only). П5a **не пишет новый расчёт** — расширяет существующий до уровня донора и
+закрывает дыры данных.
+
+### Установленные факты (прод, read-only, 24.08 19:53 UTC)
+
+| Факт | Значение | Следствие |
+|---|---|---|
+| Снек-автоматы | 5 `machine_card.kind=snack`: American Hospital (…359) и Olma (…376) `in_service`; SKLAD 4S/5S/6S `warehouse` | расчёт обязан фильтровать по статусу — сейчас `purchase()` берёт все ok-планограммы |
+| Ёмкость | `machine_slot.capacity` есть (43 слота/автомат, cap 313; свежесть 3 ч) | потребность = capacity − quantity, как у донора |
+| Нехватка сейчас | Olma 165 ед. (11 пустых слотов), AH 65 | контрольные числа для smoke |
+| `vending_product` / `vending_alias` | **0 строк** — `seed-vending.ts` (48 SKU, прайс Multikassa, блоки 12/10) на проде не запускался | цен и блоков у расчёта нет → всё «без цены»; сид нужно применить |
+| Склад `vending_stock` | 16 строк, 134 ед., `counted_at` 20.08 20:00; у владельца на 21.08 — 21 SKU, 155 ед. | план обязан показывать дату склада и предупреждать о давности; переинвентаризация — существующей командой бота «склад …» |
+| Продажи `sale` | по обоим автоматам с 01.07 по 23.08, имена = Ourvend-слоты | скорость считается; `noSales` (7 дн) остаётся |
+| Накладные / заливки | 0 / 0 | поток «план → заявка → накладная → приёмка» ни разу не прошёл — первый прогон станет smoke |
+| Маршрут, исключения, фикс-количества | нет нигде в БД (`system_config` пуст) | нужны как данные |
+| Синк Ourvend | `vending_sync_run`: 5 failed подряд 24.08 07:00–19:00 UTC (слоты при этом пишутся) | вне среза, отдельная проверка |
+
+## 2. Границы
+
+**Делаем (П5a):**
+1. Политика распределения донора (purchase-first) и правила товара (исключён / фикс-количество) в ядре расчёта.
+2. Раздача по маршруту автоматов и по слотам (меньший `coilId` первым) с источником «закуп / склад / пусто».
+3. Фильтр автоматов: только `machine_card.status = in_service` (kind любой — планограммы есть только у снеков).
+4. Данные: миграция 0066 (2 колонки `vending_product`), правила владельца 24.08 в сиде (идемпотентный overlay), ключ маршрута в `system_config`.
+5. Выход: `GET /vending/plan`; бот «план закупа» (несколько сообщений); лист CC «План закупа» в группе «Отчёты» с кнопкой «Оформить закуп»; правила товара — команды бота и редактор в CC.
+6. Заявка/накладная сохраняют разбивку по автоматам и источникам (jsonb, без миграции).
+
+**Осознанно НЕ делаем (в бэклог с причиной):**
+- Модель «запас склада на N дней» (донор 2, `purchase_recommendations`) — склад в mydon сейчас ручной снимок, не леджер; вторым слоем после П4.
+- Поставщик/лучшая цена за 90 дней, dead_stock, price_changes, маржа по автоматам — П5b/П5c (нужен `purchase` с поставщиком; приходов после 13.07 нет).
+- PNG/HTML-картинки в Telegram — транспорт бота только текст + документ; текста достаточно, план печатается панелью.
+- Нечёткие алиасы по подстроке (`canonical()` донора) — решение схемы: только точные (`vending_alias`).
+- Заливка по слотам как факт (`vending_refill`, staff-refill) — П4.
+- Перенос `warehouse.json` — склад = `vending_stock`.
+
+## 3. Данные
+
+### 3.1 Миграция `0066_purchase_rules.sql` (идемпотентно, `ADD COLUMN IF NOT EXISTS`)
+```
+vending_product.excluded_from_purchase boolean NOT NULL DEFAULT false
+  -- «Убрано из закупки»: дефицит закрываем только складом, не покупаем.
+vending_product.fixed_purchase_qty integer NULL CHECK (fixed_purchase_qty > 0)
+  -- При дефиците покупаем ровно столько, без округления до блока (СуперКонтик 50, Snickers 48).
+```
+`pack_size` уже есть (= «Блок, шт»). Снапшот `meta/0066_snapshot.json` создаём (`db:generate`),
+файл переименовываем, `tag` в `_journal.json` правим. Новых таблиц нет → страж реестра schema не затронут.
+
+### 3.2 Сид — правила владельца как данные (`packages/db/src/seed-vending.ts`)
+Добавляем `VENDING_PURCHASE_RULES` (перенос из `procurement-rules.json` 24.08.2026, канон = имя
+прайса): `excludedFromPurchase` для 11 SKU (Qurt, Twix, Strobar, Ermak Арахис, M and Ms, Barni,
+Nesquick, Velona, Kinder Bueno, Lays, Flint); `fixedPurchaseQty` СуперКонтик 50, Snickers 48;
+`packSize` RedBull 6, Flash Up 6, Plus 18 6, Ozbegim 6, Lays 5, Nesquick 5, Flint 5, TUC 5,
+Cheers 5 (остальные — правило 12/10 сида). Overlay идемпотентен и **не трогает цены** (цена —
+только команда «цена», П3a); расхождения прайса сида с ценами донора выводятся в лог сида как
+«на разбор» (например, Fuse Tea 6084 vs 8500, Pepsi 5000 vs 5990, Plus 18 9990 vs 8750 — решает владелец командой «цена»). Добавляем алиасы Ourvend-имён слотов, которых нет в
+сиде (сверка по проду задачей плана).
+
+Запуск на проде — **один раз вручную** после мержа: `compose run --rm mydon-core node
+packages/db/dist/seed-vending.js` (в автодеплой не включаем: сид переименовывает строки склада
+на канон — это осознанное действие, а не побочный эффект выкатки). Фиксируется в отчёте среза.
+
+### 3.3 Маршрут — `system_config` через `config-spec`
+Ключ `VENDING_ROUTE_ORDER`: серийники через запятую в порядке обхода (`2508160376,2508160359`).
+Пусто → порядок по имени автомата. Валидация: каждый элемент — серийник в канонической форме.
+Редактируется существующей страницей настроек CC (БД-wins), без нового UI.
+
+### 3.4 Заявка и накладная (jsonb, без миграции)
+`submitPurchase` дополняет позицию: `perMachine: {serial: need}`, `fromPurchase`, `fromStock`,
+`unfilled`; `executePurchaseOrder` копирует как есть. Читатели (`orders()`, панель) старые поля
+не теряют.
+
+## 4. Алгоритм (чистые функции, `@mydon/shared`)
+
+### 4.1 `computePurchase` — расширение (обратно совместимо)
+Новые входы: `PriceEntry.excluded?: boolean`, `PriceEntry.fixedQty?: number`;
+`PurchaseOptions.allocation?: "purchase-first" | "warehouse-first"` (по умолчанию
+**purchase-first** — правило владельца 24.08; старые поля `covered`/`surplus` считаются как
+прежде, тесты Приложения Г не меняются).
+
+Для позиции с `need > 0`:
+```
+if excluded:              buy = 0; order = 0
+else shortage = max(0, need − stock)
+     if shortage == 0:    buy = 0; order = 0
+     elif fixedQty:       buy = shortage; order = fixedQty            # без округления
+     else:                buy = shortage; order = round ? ceil(buy/pack)*pack : buy
+# распределение (purchase-first):
+fromPurchase = min(need, order)
+fromStock    = min(stock, need − fromPurchase)
+unfilled     = need − fromPurchase − fromStock        # >0 только у excluded и fixedQty < shortage
+toStock      = order − fromPurchase                   # излишек закупки → на склад
+extra        = max(0, order − buy)                    # переплата за округление; при fixedQty < shortage = 0
+stockAfter   = stock − fromStock + toStock
+# warehouse-first (совместимость): fromStock = min(stock, need); fromPurchase = min(order, need − fromStock)
+```
+Группы результата: `items` (в итогах), `excludedNoSales` (как было), **`excludedByRule`** (новая:
+`excluded=true`, показываем «Убрано из закупки: загрузить со склада X, пусто Y», в деньги не
+входит). Итоги дополняются `totalFromPurchase`, `totalFromStock`, `totalUnfilled`, `totalToStock`,
+`stockBefore`, `stockAfter`. Инварианты (тестами): `fromPurchase + fromStock + unfilled = need`;
+`stockAfter ≥ 0`; при `!excluded && !fixedQty` → `unfilled = 0`; деньги = `order × price`.
+
+### 4.2 `allocateByRoute(items, routeOrder)` → по автоматам
+Для каждого товара и автомата в порядке маршрута: `fromPurchase_m = min(need_m, restPurchase)`,
+затем `fromStock_m = min(need_m − fromPurchase_m, restStock)`, остаток — `unfilled_m`.
+Первый автомат маршрута получает закуп первым (как у донора).
+
+### 4.3 `allocateBySlots(machine, perProductAlloc)` → по слотам
+Слоты с дефицитом по возрастанию `coilId` (числовой порядок, затем строковый): сначала из закупа,
+потом со склада, остаток — «пусто». Итоги автомата: need / fromPurchase / fromStock / unfilled.
+
+### 4.4 `buildPlan(...)` = сводка + маршрут (шаги: 1 склад собрать → 2 базар купить → 3..N
+загрузить автомат по маршруту → N+1 вернуть на склад → остаток склада) + `machines[]` +
+`warnings[]` (склад старше 3 дней, позиции без цены, автоматы не в строю пропущены, имена без
+карточки).
+
+## 5. Интерфейсы
+
+**Core** (`apps/core/src/vending`):
+- `GET /vending/plan` → `PurchasePlan { generatedAt, stockAsOf, allocation, summary
+  (PurchaseSummary+новые итоги), route: [{step, action, perMachine, total}], machines: [{serial,
+  name, routeIndex, need, fromPurchase, fromStock, unfilled, slots: [{coilId, product, quantity,
+  capacity, need, fromPurchase, fromStock, unfilled}]}], excludedByRule, warnings }`.
+- `GET /vending/purchase` — тот же расчёт, ответ дополнен новыми полями (аддитивно).
+- `POST /vending/product-rules` DTO `{ product: string; packSize?: 1..1000;
+  excludedFromPurchase?: boolean; fixedPurchaseQty?: 1..100000 | null }` → транзакция:
+  update + event `vending.product_rules_changed` + audit `vending.product.set_rules`.
+  Товар резолвится через алиасы; не найден → 404 с подсказкой ближайших имён (как «цена»).
+- `GET /vending/products` → список `vending_product` с правилами (для редактора CC).
+- Фильтр `in_service` — в `purchase()`/`plan()` через `machineIdBySerial` + `machine_card`.
+- `VENDING_ROUTE_ORDER` в `config-spec.ts`.
+
+**Бот** (`apps/bot/src`, по образцу «цена»):
+- «план закупа» / «план закупки» / «маршрут закупа» (префикс-команда ДО `parseIntent`) →
+  сообщения: (1) сводка + шаги маршрута, (2) купить (по деньгам, топ-N, «…и ещё»), (3) со склада
+  собрать, (4) по слотам — по одному сообщению на автомат; каждое ≤ 3500 симв.
+- Правила товара: «не закупать <товар>», «закупать <товар>», «фикс <товар> <N>» / «фикс <товар>
+  нет», «блок <товар> <N>». Число — один токен (ловушка «Cola 330 9000»), потолки в парсере и DTO.
+- Строки в HELP; «что заказать» остаётся коротким брифингом, дополняется строкой
+  «со склада N · купить N · пусто N».
+- Утренний брифинг 07:30: строка «🛒 К закупу …» дополняется «· со склада N».
+
+**CC** (`apps/cc`):
+- Лист `reports` → `{ label: "План закупа", type: "buy_plan" }` (+ в `TABLE_BACKED_LEAVES`).
+  Вид `PurchasePlanView` (server component, `core.vendingPlan()`): карточки итогов, таблица
+  маршрута, «Купить» (Товар | Нужно | Склад | Купить | В автоматы | На склад | Сумма), «Убрано из
+  закупки», «Собрать со склада» (Товар | Сейчас | по автоматам | Взять | После), по автомату —
+  «Слоты» (Слот | Товар | Было x/cap | Нужно | План | Источник). Бейдж «Склад на <дата>» +
+  предупреждение о давности. Кнопка «Оформить закуп» — форма по конвенции #208 → server action →
+  `POST /vending/purchase/submit`; результат/ошибка на месте.
+- Лист `settings` → «Правила закупа» (`type: "purchase_rules"`): таблица `vending_product`
+  (имя, категория, цена, блок, исключён, фикс) с формой правки строки (конвенция #208, тест на
+  сохранение ввода при отказе Core).
+
+## 6. Ошибки и пробелы (видимы, не молчат)
+- Склад старше 3 дней → warning в плане, бейдж в CC, строка в боте «⚠️ склад на 20.08 — обнови: „склад …“».
+- Позиция без цены → `noPrice` (как было) — в бюджет не входит, но в раздачу входит (штуки не зависят от цены).
+- Автомат не `in_service` → пропущен, перечислен в `warnings`.
+- Имя слота без карточки → считается по имени слота (как сейчас), попадает в `noPrice`.
+- `fixedQty < shortage` → `unfilled > 0`, показывается «пусто» в слотах — это решение владельца, не ошибка.
+- Core недоступен → бот «Не удалось …», CC `CoreDown`.
+
+## 7. Тесты
+- shared: примеры донора числом — need 20 / stock 5 / pack 12 → order 24, fromPurchase 20, fromStock 0, toStock 4, stockAfter 9; Snickers need 10 / stock 0 / fixed 48 → order 48, toStock 38; excluded need 8 / stock 5 → fromStock 5, unfilled 3; warehouse-first даёт прежние `covered`; инварианты; маршрут: первый автомат забирает закуп; слоты: порядок coilId, «пусто» в хвосте. Контрольный пример Приложения Г — без изменений.
+- core: `plan()` со стабом БД — фильтр `in_service`, маршрут из конфига/по имени, `stockAsOf`/warnings; `setProductRules` — транзакция, event+audit, 404; `submitPurchase` — позиции с разбивкой.
+- bot: парсеры команд (кириллица, число одним токеном, потолки), форматтеры (лимит 3500, разбиение по автоматам).
+- cc: `PurchasePlanView` рендер с фикстурой; форма правил — ввод сохраняется при отказе; кнопка «Оформить закуп» показывает ошибку.
+- smoke-core: `/vending/plan`, `/vending/products`, `POST /vending/product-rules` против живого Postgres.
+
+## 8. Выкатка и проверка
+1. PR → CI → мерж → автодеплой (миграция 0066 в шаге 4).
+2. На проде вручную: `seed-vending.js` (один раз, идемпотентно) → `GET /vending/products` показывает 48 SKU с правилами.
+3. Read-only smoke: `GET /vending/plan` — потребность по автоматам совпадает с `machine_slot` (Olma/AH), склад = `vending_stock`, `stockAsOf` = 20.08; бот «план закупа» — 4+ сообщений; CC лист открывается.
+4. Владельцу: переинвентаризировать склад («склад …»), задать `VENDING_ROUTE_ORDER` в настройках (или оставить по имени), сверить 7 цен «на разбор».
+
+## 9. Рулинги
+- **R-P5a-1** Политика по умолчанию — purchase-first (слово владельца 24.08); warehouse-first остаётся опцией для совместимости чисел.
+- **R-P5a-2** Правила закупа — данные товара, не код: `excluded_from_purchase`, `fixed_purchase_qty`, `pack_size`. Цена — только «цена» (П3a).
+- **R-P5a-3** Маршрут — настройка `VENDING_ROUTE_ORDER`, не колонка: свойство обхода, а не автомата.
+- **R-P5a-4** В расчёт входят только автоматы `in_service`; пропуски видимы в `warnings`.
+- **R-P5a-5** Сид на проде — ручной, один раз, с записью в отчёт; автодеплой данные не переименовывает.
+- **R-P5a-6** Ответы API аддитивны: старые поля и их семантика не меняются.
+- **R-P5a-7** Штуки не зависят от цены: позиции без цены участвуют в раздаче, но не в бюджете.
