@@ -838,14 +838,15 @@ export const STOCK_STALE_DAYS = 3;
  */
 private async machineRegistry(): Promise<{ notInService: Map<string, { name: string; status: string }>; nameBySerial: Map<string, string> }> {
   const [ents, cards] = await Promise.all([
-    this.db.select({ id: entity.id, name: entity.name, externalRef: entity.externalRef }).from(entity).where(eq(entity.type, "machine")),
+    // Без .where(): стабы тестов этого файла отдают `from()` как thenable без where — фильтр типа в JS.
+    this.db.select({ id: entity.id, name: entity.name, externalRef: entity.externalRef, type: entity.type }).from(entity),
     this.db.select({ entityId: machineCard.entityId, status: machineCard.status }).from(machineCard),
   ]);
   const statusById = new Map(cards.map((c) => [c.entityId, c.status]));
   const notInService = new Map<string, { name: string; status: string }>();
   const nameBySerial = new Map<string, string>();
   for (const e of ents) {
-    if (!e.externalRef) continue;
+    if (e.type !== "machine" || !e.externalRef) continue;
     const serial = normalizeMachineSerial(e.externalRef);
     if (!nameBySerial.has(serial)) nameBySerial.set(serial, e.name);
     const status = statusById.get(e.id) ?? "in_service";
