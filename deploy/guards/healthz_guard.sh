@@ -79,7 +79,13 @@ fi
 
 HOSTPORT=$(env_value HEALTHZ_TARGET "$MYDON_ENV")
 [ -n "${HOSTPORT:-}" ] || HOSTPORT=$(env_value WEB_PORT "$STOCK_ENV")
-HOSTPORT=${HOSTPORT:-127.0.0.1:8080}
+# Константы по умолчанию здесь нет намеренно. Прежний фолбэк 127.0.0.1:8080 при
+# пустой конфигурации давал бы не тишину, а ЛОЖНУЮ тревогу каждые 5 минут: на
+# проде панель слушает Tailscale-адрес, и локальный порт не отвечает никогда.
+if [ -z "${HOSTPORT:-}" ]; then
+    log "ОШИБКА: цель не задана (HEALTHZ_TARGET в $MYDON_ENV / WEB_PORT в $STOCK_ENV) — проверять нечего"
+    exit 1
+fi
 
 # Шлёт событие в MYDON. Возвращает 0, если Core принял.
 to_mydon() {  # to_mydon <json>
@@ -107,7 +113,10 @@ if curl -sf -m 10 "http://${HOSTPORT}/healthz" > /dev/null 2>&1; then
     # Отбой шлём только если тревога успела уйти (то есть было >= 2 провалов).
     if [ "${PREV:-0}" -ge 2 ]; then
         json=$(printf '{"type":"infra.service_up","source":"healthz_guard","payload":{"service":"%s","downChecks":%d}}' "$SERVICE" "$PREV")
-        to_mydon "$json" || to_telegram "🟢 ${SERVICE} снова отвечает (был недоступен ${PREV} проверок)."
+        # Оба канала молчат — это само по себе событие: владелец ждёт отбоя и,
+        # не дождавшись, полезет на сервер. Без строки в журнале искать нечего.
+        to_mydon "$json" || to_telegram "🟢 ${SERVICE} снова отвечает (был недоступен ${PREV} проверок)." ||
+            log "ОШИБКА: отбой по ${SERVICE} не ушёл ни в Core, ни в Telegram"
     fi
     exit 0
 fi
@@ -134,6 +143,7 @@ fi
 
 json=$(printf '{"type":"infra.service_down","source":"healthz_guard","payload":{"service":"%s","detail":"%s","fails":%d,"dockerHealth":"%s"}}' \
        "$SERVICE" "$DETAIL" "$FAILS" "$DOCKER_HEALTH")
-to_mydon "$json" || to_telegram "$TEXT"
+to_mydon "$json" || to_telegram "$TEXT" ||
+    log "ОШИБКА: тревога о ${SERVICE} не ушла ни в Core, ни в Telegram"
 
 exit 0

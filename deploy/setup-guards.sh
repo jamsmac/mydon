@@ -40,6 +40,17 @@ done
 
 say() { printf '%s\n' "$*"; }
 
+# Живая строка расписания — не комментарий и действительно строка cron.
+# `# 0 6 * * * /opt/backups/disk_guard.sh` выглядит в `crontab -l` как рабочая
+# и не выполняется никогда; `PATH=/opt/backups/...` — тем более. Оба обязаны
+# считаться отсутствием сторожа, иначе установщик отрапортует успех о тишине.
+scheduled() {  # scheduled <текст crontab> <путь>
+  printf '%s\n' "$1" |
+    grep -v '^[[:space:]]*#' |
+    grep -E '^[[:space:]]*(@[a-z]+|[^[:space:]]+([[:space:]]+[^[:space:]]+){4})[[:space:]]' |
+    grep -qF -- "$2"
+}
+
 # --- 1. Установка исполняемых копий (тот же механизм, что в deploy.sh) ---
 if [ "$DRY_RUN" -eq 0 ]; then
   own=()
@@ -66,13 +77,31 @@ if ! current=$("$CRONTAB_CMD" -l 2>/dev/null); then
 fi
 [ -n "$current" ] || { echo "crontab пуст — ничего не меняю." >&2; exit 1; }
 
-sed_args=()
-for g in "${GUARDS[@]}"; do
-  sed_args+=(-e "s#${OLD_GUARD_DIR}/${g}#${GUARD_DIR}/${g}#g")
-done
-updated=$(printf '%s\n' "$current" | sed "${sed_args[@]}")
+# Замена — подстановкой bash по ФИКСИРОВАННОЙ строке, а не sed: в пути живут
+# точки (метасимвол регулярки), а `#` сломал бы ещё и разделитель s###.
+updated=""
+while IFS= read -r line; do
+  for g in "${GUARDS[@]}"; do
+    line=${line//"${OLD_GUARD_DIR}/${g}"/"${GUARD_DIR}/${g}"}
+  done
+  updated+="$line"$'\n'
+done <<< "$current"
+updated=${updated%$'\n'}
 
 if [ "$current" = "$updated" ]; then
+  # Совпадение значит одно из двух: сторожа уже переехали ИЛИ их в расписании
+  # нет вовсе. Разница принципиальная — во втором случае «менять нечего»
+  # означало бы «сторожей нет, и я доложил об успехе».
+  missing=""
+  for g in "${GUARDS[@]}"; do
+    scheduled "$current" "$GUARD_DIR/$g" || missing="$missing $g"
+  done
+  if [ -n "$missing" ]; then
+    echo "ОШИБКА: в crontab нет живой строки запуска для:${missing}." >&2
+    echo "  Старых путей ${OLD_GUARD_DIR}/… там тоже нет — расписание сторожей потеряно." >&2
+    echo "  Добавьте строки вручную (см. docs/BACKUPS.md, «Сторожа mydon: пути, cron, env»)." >&2
+    exit 1
+  fi
   say "▸ cron уже указывает на пути mydon — менять нечего."
   exit 0
 fi
@@ -104,14 +133,16 @@ say "▸ Прежний crontab сохранён: $backup"
 printf '%s\n' "$updated" | "$CRONTAB_CMD" -
 after=$("$CRONTAB_CMD" -l 2>/dev/null || true)
 for g in "${GUARDS[@]}"; do
-  if printf '%s\n' "$after" | grep -q -- "${OLD_GUARD_DIR}/${g}"; then
+  if scheduled "$after" "${OLD_GUARD_DIR}/${g}"; then
     echo "ОШИБКА: в crontab остался ${OLD_GUARD_DIR}/${g}. Откат: ${CRONTAB_CMD} $backup" >&2
     exit 1
   fi
-  printf '%s\n' "$after" | grep -q -- "${GUARD_DIR}/${g}" ||
-    { echo "ОШИБКА: в crontab нет ${GUARD_DIR}/${g}. Откат: ${CRONTAB_CMD} $backup" >&2; exit 1; }
+  scheduled "$after" "${GUARD_DIR}/${g}" ||
+    { echo "ОШИБКА: в crontab нет живой строки ${GUARD_DIR}/${g}. Откат: ${CRONTAB_CMD} $backup" >&2; exit 1; }
 done
 
 say "▸ Готово. Расписание сторожей mydon:"
-printf '%s\n' "$after" | grep -E "$(IFS='|'; printf '%s' "${GUARDS[*]}")" || true
+for g in "${GUARDS[@]}"; do
+  printf '%s\n' "$after" | grep -v '^[[:space:]]*#' | grep -F -- "${GUARD_DIR}/${g}" || true
+done
 say "▸ Строки склада (backup_offsite.sh, restore_test.sh) не изменялись — они уходят в П8."

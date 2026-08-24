@@ -74,15 +74,63 @@ printf '%s' "$out" | grep -q 'менять нечего' || fail "нет пом�
 backups=("$GUARDS"/crontab_pre_guards_*)
 [ "${#backups[@]}" -eq 1 ] || fail "повторный запуск создал лишний бэкап"
 
-# 6. Пустой crontab НЕ перезаписывается: расписание сервера уже существует, и
-#    молчание `crontab -l` означает «смотрим не туда», а не «можно писать с нуля».
+# 6. Расписание без сторожей — НЕ «менять нечего». Совпадение до и после правки
+#    значит либо «уже переехали», либо «сторожей нет вовсе»; второе обязано быть
+#    ошибкой, иначе установщик рапортует успех о тишине.
+cat > "$CRON" <<CRONTAB
+0 22 * * * $STOCK/backup_offsite.sh >> /opt/backups/backup.log 2>&1
+15 22 * * * /opt/backups/backup_extra.sh >> /opt/backups/backup.log 2>&1
+CRONTAB
+set +e; out=$(run 2>&1); rc=$?; set -e
+[ "$rc" -ne 0 ] || fail "crontab без сторожей обязан останавливать установщик"
+miss=$(printf '%s\n' "$out" | grep 'нет живой строки запуска') || fail "нет причины остановки: $out"
+printf '%s' "$miss" | grep -q 'disk_guard.sh' || fail "не назван недостающий сторож: $miss"
+printf '%s' "$miss" | grep -q 'healthz_guard.sh' || fail "назван не весь список: $miss"
+
+# 6б. Закомментированная строка сторожа — тоже отсутствие сторожа: в `crontab -l`
+#     она выглядит рабочей и не выполняется никогда.
+cat > "$CRON" <<CRONTAB
+0 22 * * * $STOCK/backup_offsite.sh >> /opt/backups/backup.log 2>&1
+# 0 6 * * * $GUARDS/disk_guard.sh >/dev/null 2>&1
+*/5 * * * * $GUARDS/healthz_guard.sh >/dev/null 2>&1
+CRONTAB
+set +e; out=$(run 2>&1); rc=$?; set -e
+[ "$rc" -ne 0 ] || fail "закомментированный сторож засчитан живым"
+miss=$(printf '%s\n' "$out" | grep 'нет живой строки запуска') || fail "нет причины остановки: $out"
+printf '%s' "$miss" | grep -q 'disk_guard.sh' || fail "не назван закомментированный сторож: $miss"
+printf '%s' "$miss" | grep -q 'healthz_guard' && fail "живой сторож попал в список недостающих: $miss"
+
+# 6в. Путь с точками и решёткой заменяется целиком: точки — метасимволы регулярки,
+#     решётка сломала бы разделитель s###, и подстановка молча не сработала бы.
+ODD_OLD="$TMP/o.d#ir"
+mkdir -p "$ODD_OLD"
+cat > "$CRON" <<CRONTAB
+0 6 * * * $ODD_OLD/disk_guard.sh >/dev/null 2>&1
+*/5 * * * * $ODD_OLD/healthz_guard.sh >/dev/null 2>&1
+CRONTAB
+out=$(OLD_GUARD_DIR="$ODD_OLD" GUARD_DIR="$GUARDS" \
+  CRONTAB_CMD="$ROOT/deploy/tests/fake-crontab.sh" FAKE_CRONTAB_FILE="$CRON" \
+  bash "$ROOT/deploy/setup-guards.sh") || fail "apply на пути с точками и # упал: $out"
+grep -q "^0 6 \* \* \* $GUARDS/disk_guard.sh " "$CRON" || fail "путь с # не заменён: $(cat "$CRON")"
+grep -q "$ODD_OLD" "$CRON" && fail "в crontab остался старый путь с #"
+
+# 7. Пустой crontab НЕ перезаписывается: расписание сервера уже существует, и
+#    пустота означает «смотрим не туда», а не «можно писать с нуля».
 : > "$CRON"
 set +e; out=$(run 2>&1); rc=$?; set -e
 [ "$rc" -ne 0 ] || fail "пустой crontab обязан останавливать установщик"
-printf '%s' "$out" | grep -qi 'ничего не меняю' || fail "нет причины остановки: $out"
+printf '%s' "$out" | grep -q 'crontab пуст' || fail "нет причины остановки на пустом crontab: $out"
 [ ! -s "$CRON" ] || fail "установщик записал crontab с нуля"
 
-# 7. Неизвестный аргумент — отказ, а не молчаливый apply.
+# 7б. `crontab -l` вообще не отвечает (у пользователя нет crontab) — другая
+#     причина, другое сообщение, тот же отказ.
+rm -f "$CRON"
+set +e; out=$(run 2>&1); rc=$?; set -e
+[ "$rc" -ne 0 ] || fail "нечитаемый crontab обязан останавливать установщик"
+printf '%s' "$out" | grep -q 'Не удалось прочитать crontab' || fail "нет причины остановки при сбое crontab -l: $out"
+[ ! -e "$CRON" ] || fail "установщик создал crontab с нуля"
+
+# 8. Неизвестный аргумент — отказ, а не молчаливый apply.
 set +e; run --апплай >/dev/null 2>&1; rc=$?; set -e
 [ "$rc" -eq 2 ] || fail "неизвестный аргумент не отклонён (код $rc)"
 
