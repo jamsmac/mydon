@@ -18,6 +18,16 @@ describe("Бот: команды правил закупа товара (П5a)",
     assert.equal(parseRuleCommand("фикс TUC 0"), null);
     assert.equal(parseRuleCommand("закупать"), null);
   });
+  it("отрицательное количество — отказ, а не молчаливое «плюс N»", () => {
+    assert.equal(parseRuleCommand("блок TUC -5"), null);
+    assert.equal(parseRuleCommand("фикс Snickers -48"), null);
+    // Имя с дефисом и числом от этого не страдает.
+    assert.deepEqual(parseRuleCommand("блок Cola-330 12"), { kind: "pack", product: "Cola-330", qty: 12 });
+  });
+  it("пустое имя товара — отказ (подсказка формата, а не 400 из Core)", () => {
+    assert.equal(parseRuleCommand("не закупать «»"), null);
+    assert.equal(parseRuleCommand("закупать «»"), null);
+  });
   it("isRuleCommand не ловит «что закупать» и «закуп»", () => {
     assert.equal(isRuleCommand("что закупать"), false);
     assert.equal(isRuleCommand("закуп"), false);

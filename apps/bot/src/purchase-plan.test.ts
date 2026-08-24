@@ -131,6 +131,21 @@ describe("Бот: команда «план закупа»", () => {
     for (const p of formatPurchasePlan(many)) assert.ok(p.length <= TG_BUDGET, String(p.length));
   });
 
+  it("одна строка длиннее бюджета режется внутри — и ни одно имя не теряется", () => {
+    // Core отдаёт «Без цены — вне бюджета: …» и «Нет в прайсе вендинга: …»
+    // одной строкой на все товары: она приходит в ПЕРВОЕ сообщение, и её
+    // перелив убил бы весь ответ (Telegram 400 на sendMessage).
+    const names = Array.from({ length: 400 }, (_, i) => `Товар с длинным именем ${i}`);
+    const long = {
+      ...plan,
+      warnings: [{ code: "no_price" as const, message: `Без цены — вне бюджета: ${names.join(", ")}` }],
+    };
+    const parts = formatPurchasePlan(long);
+    for (const p of parts) assert.ok(p.length <= TG_BUDGET, String(p.length));
+    const all = parts.join("\n");
+    for (const n of names) assert.ok(all.includes(n), n);
+  });
+
   it("нечего грузить — одно сообщение", () => {
     const empty = { ...plan, summary: { ...plan.summary, items: [], excludedByRule: [], totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0 }, machines: [] };
     assert.equal(formatPurchasePlan(empty).length, 1);

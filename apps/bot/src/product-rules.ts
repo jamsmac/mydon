@@ -34,7 +34,7 @@ export function isRuleCommand(text: string): boolean {
  * склеивало бы числовой хвост имени с количеством: «блок Cola 330 12» дало бы
  * блок 330 012 (тот же разбор, что в parsePriceCommand).
  */
-const NUM = /^(.+?)[\s:—=-]+(\d+(?:[\s\u00a0\u202f]\d{3})*)\s*(?:шт\.?)?\s*[.!]?$/i;
+const NUM = /^(.+?)([\s:—=-]+)(\d+(?:[\s\u00a0\u202f]\d{3})*)\s*(?:шт\.?)?\s*[.!]?$/i;
 
 /** Снятие фикс-количества словом. Голый «0» сюда НЕ входит — см. parseRuleCommand. */
 const FIXED_OFF = /^(.+?)[\s:—=-]+(нет|снять)\s*[.!]?$/i;
@@ -47,10 +47,18 @@ export function parseRuleCommand(text: string): RuleCommand | null {
   const t = text.trim();
 
   // «не закупать X» проверяем первым: иначе «закупать» съело бы хвост отрицания.
+  // Пустое имя после clean («не закупать «»») — отказ, а не запрос в Core:
+  // оттуда вернулось бы 400 и безликое «не удалось записать» вместо подсказки.
   const excluded = /^не\s+закупать\s*:?\s*(.+)$/i.exec(t);
-  if (excluded) return { kind: "exclude", product: clean(excluded[1]) };
+  if (excluded) {
+    const product = clean(excluded[1]);
+    return product ? { kind: "exclude", product } : null;
+  }
   const included = /^закупать\s*:?\s*(.+)$/i.exec(t);
-  if (included) return { kind: "include", product: clean(included[1]) };
+  if (included) {
+    const product = clean(included[1]);
+    return product ? { kind: "include", product } : null;
+  }
 
   const head = /^(фикс|блок)\s*:?\s*(.+)$/i.exec(t);
   if (!head) return null;
@@ -64,7 +72,10 @@ export function parseRuleCommand(text: string): RuleCommand | null {
 
   const n = NUM.exec(rest);
   if (!n) return null;
-  const qty = Number(n[2].replace(/[\s\u00a0\u202f]+/g, ""));
+  // «блок TUC -5»: минус попадал в класс разделителей, и −5 молча становилось
+  // 5 — правило в Core уезжало с чужим числом. Минус вплотную к числу — отказ.
+  if (/-$/.test(n[2])) return null;
+  const qty = Number(n[3].replace(/[\s\u00a0\u202f]+/g, ""));
   const max = kind === "pack" ? MAX_PACK : MAX_FIXED;
   // «фикс TUC 0» — не «снять», а бессмыслица: снятие говорят словом «нет».
   // Числовой ноль здесь чаще опечатка, и молча гасить правило по нему нельзя.

@@ -31,17 +31,51 @@ export function isPlanCommand(text: string): boolean {
   return /^(план|маршрут)\s+(закуп|загруз)/i.test(text.trim());
 }
 
+/** Пометка куска строки, разорванной по бюджету. */
+const WRAP = "… ";
+
+/**
+ * Режет ОДНУ строку, которая не влезает в сообщение целиком. Такие строки
+ * реальны: Core отдаёт «Без цены — вне бюджета: …» и «Нет в прайсе вендинга:
+ * …» одним перечислением на все товары. Рвём по последней запятой (или
+ * пробелу) до предела, чтобы имя товара не разорвалось пополам; сплошное
+ * слово длиннее предела режем по символам — иначе выхода из цикла нет.
+ */
+function splitLine(line: string, room: number): string[] {
+  const out: string[] = [];
+  let rest = line;
+  let limit = room;
+  while (rest.length > limit) {
+    const comma = rest.lastIndexOf(", ", limit - 1);
+    const space = comma > 0 ? comma : rest.lastIndexOf(" ", limit - 1);
+    const cut = space > 0 ? space + 1 : limit;
+    const piece = rest.slice(0, cut).trimEnd();
+    out.push(out.length === 0 ? piece : `${WRAP}${piece}`);
+    rest = rest.slice(cut).trimStart();
+    limit = Math.max(1, room - WRAP.length);
+  }
+  out.push(out.length === 0 ? rest : `${WRAP}${rest}`);
+  return out;
+}
+
 /**
  * Режет список строк на сообщения ≤ TG_BUDGET, каждое со своим заголовком
  * (продолжение помечается явно — иначе второй кусок читается как отдельный
  * непонятный список). Длина считается ровно так, как её даст join("\n").
+ *
+ * Инвариант «каждая часть ≤ TG_BUDGET» держится для ЛЮБОГО входа: строку
+ * длиннее сообщения сначала рвём сами. Иначе она уходила в Telegram целиком,
+ * тот отвечал 400, и владелец не получал ВЕСЬ план, а не одну строку.
  */
 function chunk(title: string, lines: string[]): string[] {
   const cont = `${title} (продолжение)`;
+  // Сколько остаётся строке в пустом сообщении: заголовок + "\n" + "" + "\n".
+  const room = Math.max(1, TG_BUDGET - Math.max(title.length, cont.length) - 2);
+  const flat = lines.flatMap((line) => (line.length > room ? splitLine(line, room) : [line]));
   const out: string[] = [];
   let cur: string[] = [title, ""];
   let len = title.length + 1;
-  for (const line of lines) {
+  for (const line of flat) {
     if (len + line.length + 1 > TG_BUDGET) {
       out.push(cur.join("\n"));
       cur = [cont, ""];
