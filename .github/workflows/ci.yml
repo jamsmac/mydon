@@ -151,7 +151,11 @@ jobs:
             deploy/standby-promote.sh deploy/standby-stop.sh \
             deploy/tests/fake-rclone.sh deploy/tests/fake-docker-db.sh \
             deploy/tests/b2-offsite.test.sh deploy/tests/db-access.test.sh \
-            deploy/tests/standby-compose.test.sh
+            deploy/tests/standby-compose.test.sh \
+            deploy/watchdog-liveness.sh deploy/deploy-failure-alert.sh \
+            deploy/tests/auto-deploy-gate.test.sh deploy/tests/watchdog-liveness.test.sh
           bash deploy/tests/db-access.test.sh
           bash deploy/tests/b2-offsite.test.sh
           bash deploy/tests/standby-compose.test.sh
+          bash deploy/tests/auto-deploy-gate.test.sh
+          bash deploy/tests/watchdog-liveness.test.sh

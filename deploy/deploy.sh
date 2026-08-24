@@ -145,6 +145,60 @@ ssh "$HOST" "
   docker compose -f deploy/docker-compose.yml --env-file .env up -d mydon-db
 "
 
+say "4.5/8 Бэкап активной БД перед миграциями"
+# auto-deploy снимает дамп до миграций всегда; ручной путь его не имел вовсе —
+# после выноса прод-БД на managed провайдера плохая миграция при ручном
+# прогоне оставляла откат только на последний ночной дамп (RPO до 24 ч).
+# Режим решает DATABASE_MODE (как в db_access.sh, НЕ наличие admin-URL:
+# external без DATABASE_ADMIN_URL — это ошибка конфига, а не local). Дамп
+# снимается и в local-режиме (db_access.sh умеет docker exec). Единственный
+# законный пропуск — первая установка, распознаётся по отсутствию журнала
+# миграций: защищать в пустой базе ещё нечего.
+ssh "$HOST" "
+  set -e
+  cd '$REMOTE_DIR'
+  umask 077
+  if [ ! -x /opt/backups/db_access.sh ]; then
+    echo '  ВНИМАНИЕ: db_access.sh ещё не установлен — деплой без pre-migration дампа (первая установка)'
+    exit 0
+  fi
+  mode=\$(grep '^DATABASE_MODE=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  mode=\${mode:-local}
+  if [ \"\$mode\" = external ] && ! grep -q '^DATABASE_ADMIN_URL=.' .env 2>/dev/null; then
+    echo '  DATABASE_MODE=external без DATABASE_ADMIN_URL — мигрировать managed-БД без бэкапа запрещено' >&2
+    exit 1
+  fi
+  ready=''
+  for _ in \$(seq 1 10); do
+    if /opt/backups/db_access.sh ping >/dev/null 2>&1; then ready=1; break; fi
+    sleep 3
+  done
+  if [ -z \"\$ready\" ]; then
+    echo '  БД не отвечает на ping за 30с — деплой остановлен (миграции без бэкапа запрещены)' >&2
+    exit 1
+  fi
+  journal=\$(/opt/backups/db_access.sh query 'select count(*) from drizzle.__drizzle_migrations' 2>/dev/null | tr -d '[:space:]' || true)
+  case \"\$journal\" in
+    '' | *[!0-9]*)
+      echo '  журнала миграций ещё нет — первая установка, дампить нечего'
+      exit 0
+      ;;
+  esac
+  mkdir -p /opt/backups/mydon-autodeploy
+  stamp=\$(date '+%Y%m%d_%H%M%S')
+  # Штамп ПЕРВЫМ: ретеншен auto-deploy сортирует pre_*.sql.gz по имени, и
+  # pre_manual_* (буква > цифры) навсегда вытеснял бы авто-дампы из keep-10.
+  dump=/opt/backups/mydon-autodeploy/pre_\${stamp}_manual.sql.gz
+  if /opt/backups/db_access.sh dump | gzip > \"\$dump\" &&
+      gunzip -t \"\$dump\" && gunzip -c \"\$dump\" | tail -10 | grep -q 'dump complete'; then
+    echo \"  бэкап перед миграциями: \$dump\"
+  else
+    rm -f \"\$dump\"
+    echo '  бэкап перед миграциями не удался или повреждён — деплой остановлен' >&2
+    exit 1
+  fi
+"
+
 say "5/8 Применение схемы БД новым образом"
 # node dist/migrate.js, а не drizzle-kit: последний при отказе SQL молчит и
 # выходит кодом 1 — отладить такой деплой нечем (см. комментарий в auto-deploy.sh).
@@ -212,6 +266,33 @@ ssh "$HOST" "
   echo '  --- диск после сборки ---'
   df -h / | tail -1 | awk '{print \"   занято \"\$3\" из \"\$2\" (\"\$5\")\"}'
 "
+
+say "Синхронизация с автодеплоем"
+# Успешный ручной прогон снимает fail-состояние автодеплоя: иначе после
+# «починки руками» таймер продолжал бы ретраить упавший sha каждые ~10 минут
+# (7-мин сборка + возможный флап контейнеров), причём с подавленным алертом.
+# Маркер успеха пишем ТОЛЬКО для чистого коммита, совпадающего с origin/main
+# на сервере: пометить «задеплоенным» dirty-код значило бы соврать контуру.
+LOCAL_FULL_SHA="$(git -C "$LOCAL_DIR" rev-parse HEAD 2>/dev/null || printf unknown)"
+if [[ "$GIT_SHA" == *-dirty ]] || [ "$LOCAL_FULL_SHA" = unknown ]; then
+  echo "  дерево грязное/без git — маркер автодеплоя не трогаю (следующий пуш в main перезапишет это состояние)"
+else
+  ssh "$HOST" "
+    set -e
+    mkdir -p /opt/backups/mydon-autodeploy
+    rm -f /opt/backups/mydon-autodeploy/.fail-sha /opt/backups/mydon-autodeploy/.fail-at \
+      /opt/backups/mydon-autodeploy/.fail-first-at /opt/backups/mydon-autodeploy/.alerted-sha \
+      /opt/backups/mydon-autodeploy/.alerted-at
+    remote_main=\$(git -C '$REMOTE_DIR' rev-parse origin/main 2>/dev/null || printf none)
+    if [ \"\$remote_main\" = '$LOCAL_FULL_SHA' ]; then
+      printf '%s\n' '$LOCAL_FULL_SHA' > /opt/backups/mydon-autodeploy/.last-ok-sha.tmp
+      mv /opt/backups/mydon-autodeploy/.last-ok-sha.tmp /opt/backups/mydon-autodeploy/.last-ok-sha
+      echo '  маркер успешного деплоя записан — автодеплой не будет передеплоивать этот коммит'
+    else
+      echo '  задеплоенный коммит не совпадает с origin/main на сервере — следующий тик автодеплоя приведёт сервер к origin/main'
+    fi
+  "
+fi
 
 say "Готово"
 echo "Дальше: заполнить TELEGRAM_BOT_TOKEN и TELEGRAM_ALLOWED_CHAT_IDS в $REMOTE_DIR/.env"

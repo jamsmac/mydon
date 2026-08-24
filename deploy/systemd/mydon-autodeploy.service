@@ -3,6 +3,9 @@ Description=MYDON auto-deploy (подтянуть main из GitHub и перес
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+# Ловит и таймаут-kill (Result=timeout), и код выхода — и, в отличие от
+# failed-статуса юнита, не сбрасывается «успешным» следующим тиком.
+OnFailure=mydon-deploy-alert.service
 
 [Service]
 Type=oneshot

@@ -10,6 +10,7 @@ DUMP="${RESTORE_DUMP_PATH:-}"
 MAX_DUMP_AGE_HOURS="${RESTORE_DUMP_MAX_AGE_HOURS:-48}"
 DB_HELPER="${DB_HELPER:-/opt/backups/db_access.sh}"
 DOCKER_BIN="${RESTORE_DOCKER_BIN:-docker}"
+MIG_DIR="${RESTORE_MIGRATIONS_DIR:-/opt/mydon-app/packages/db/drizzle}"
 CLIENT_IMAGE="${DB_CLIENT_IMAGE:-postgres:17-alpine}"
 RESTORE_CONTAINER="mydon-restore-test-$(date +%s)-$$"
 TEMP_ROOT="${RESTORE_TEMP_ROOT:-/opt/backups}"
@@ -39,6 +40,16 @@ q_live() {
 q_restore() {
   "$DOCKER_BIN" exec "$RESTORE_CONTAINER" psql -U mydon -d restore \
     -v ON_ERROR_STOP=1 -Atc "$1" 2>/dev/null | tr -d '[:space:]'
+}
+# Создаёт ли одна из ПОСЛЕДНИХ (live − restored) миграций таблицу $1.
+# Счётчик журнала — лишь прокси «что-то новее дампа»: без проверки по файлам
+# ЛЮБАЯ пост-дамповая миграция (хоть одна колонка) амнистировала бы таблицу,
+# которую дамп на самом деле потерял. Файлы нумерованы и сортируются
+# синхронно с журналом.
+newer_migrations_create_table() {
+  n=$(( live_migrations - restored_migrations ))
+  printf '%s\n' "$MIG_DIR"/*.sql | sort | tail -n "$n" |
+    xargs grep -sl "CREATE TABLE.*\"$1\"" >/dev/null 2>&1
 }
 
 say "=== Проверка восстановления базы MYDON · $(date '+%d.%m.%Y %H:%M') ==="
@@ -123,6 +134,20 @@ fi
 say "3. Дамп развёрнут атомарно"
 
 say "4. Сверка данных (активная база → восстановленная):"
+# Журнал миграций — арбитр для «таблицы нет в дампе». Пустой ответ q_restore
+# раньше означал сразу три разных вещи (новая таблица / дамп потерял таблицу /
+# сбой docker exec) и все три шли в безобидные NEW_TABLES: бэкап, молча
+# потерявший таблицу, проходил weekly-проверку зелёным.
+live_migrations=$(q_live "select count(*) from drizzle.__drizzle_migrations")
+restored_migrations=$(q_restore "select count(*) from drizzle.__drizzle_migrations")
+if ! [[ "$live_migrations" =~ ^[0-9]+$ ]] || ! [[ "$restored_migrations" =~ ^[0-9]+$ ]]; then
+  say "   ПРОВАЛ: журнал миграций не читается (активная: '${live_migrations}', дамп: '${restored_migrations}')"
+  FAILED=1
+  live_migrations=-1
+  restored_migrations=-1
+else
+  say "   миграций: активная $live_migrations, в дампе $restored_migrations"
+fi
 for table in entity collection sale purchase machine_stock person task audit_log; do
   live=$(q_live "select count(*) from $table")
   restored=$(q_restore "select count(*) from $table")
@@ -130,10 +155,28 @@ for table in entity collection sale purchase machine_stock person task audit_log
     say "   ПРОВАЛ $table: таблица не читается в активной базе"
     FAILED=1
   elif [ -z "$restored" ]; then
-    # A migration can add a table after the nightly dump. It will be covered by
-    # the next backup, while all objects present in this dump remain strict.
-    say "   новая $table: в дампе ещё нет, в активной базе $live"
-    NEW_TABLES=$((NEW_TABLES + 1))
+    exists=$(q_restore "select count(*) from information_schema.tables where table_schema='public' and table_name='$table'")
+    if [ "$exists" != "0" ]; then
+      say "   ПРОВАЛ $table: запрос к восстановленной базе не отработал (docker exec/psql)"
+      FAILED=1
+    elif [ "$live_migrations" -lt 0 ]; then
+      say "   ПРОВАЛ $table: отсутствует в дампе, а журнал миграций не читается — происхождение не проверить"
+      FAILED=1
+    elif [ "$live_migrations" -le "$restored_migrations" ]; then
+      say "   ПРОВАЛ $table: отсутствует в дампе при совпадающем журнале миграций — дамп ПОТЕРЯЛ таблицу"
+      FAILED=1
+    elif [ ! -d "$MIG_DIR" ]; then
+      say "   ПРОВАЛ $table: миграции новее дампа, но каталог $MIG_DIR недоступен — происхождение не проверить"
+      FAILED=1
+    elif newer_migrations_create_table "$table"; then
+      # Единственный законный случай «в дампе нет»: таблицу создала миграция,
+      # применённая после снятия дампа — следующий ночной дамп её покроет.
+      say "   новая $table: создана миграцией новее дампа, в активной базе $live"
+      NEW_TABLES=$((NEW_TABLES + 1))
+    else
+      say "   ПРОВАЛ $table: миграции новее дампа её НЕ создают — дамп ПОТЕРЯЛ таблицу"
+      FAILED=1
+    fi
   elif ! [[ "$restored" =~ ^[0-9]+$ ]]; then
     say "   ПРОВАЛ $table: восстановленное значение некорректно"
     FAILED=1

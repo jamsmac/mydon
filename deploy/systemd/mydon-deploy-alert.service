@@ -1,0 +1,7 @@
+[Unit]
+Description=MYDON deploy failure alert (OnFailure-крюк автодеплоя)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mydon-app/deploy/deploy-failure-alert.sh
+TimeoutStartSec=120

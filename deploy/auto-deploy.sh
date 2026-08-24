@@ -8,7 +8,13 @@
 #
 # Безопасность:
 #  • flock — два деплоя разом не пойдут;
-#  • если в main ничего нового — тихо выходим (без пересборки);
+#  • «ничего нового» решает МАРКЕР последнего успешного деплоя, а не HEAD:
+#    git reset двигает HEAD до сборки, и упавший после него деплой был
+#    неотличим от успешного — следующий тик молча выходил, сбрасывал
+#    failed-статус systemd, и сервер навсегда оставался на старом образе;
+#  • упавший коммит ретраится с кулдауном (не каждые 30с — сборка дорогая),
+#    новый пуш в main деплоится сразу; о сбое уходит алерт (Core ingest,
+#    фолбэк Telegram) — один на sha, о восстановлении тоже;
 #  • pg_dump ДО миграций — на случай плохой миграции из будущего PR;
 #  • .env не трогается (untracked, git reset --hard его не удаляет, git clean
 #    его явно исключает) — остальные untracked-файлы подчищаются: иначе на
@@ -30,33 +36,183 @@ if [ -z "${AUTODEPLOY_COPY:-}" ]; then
   cat "$0" > "$self_copy"
   AUTODEPLOY_COPY="$self_copy" exec bash "$self_copy" "$@"
 fi
-# Копия больше не нужна после завершения — убираем и при ошибке тоже.
-trap 'rm -f "$AUTODEPLOY_COPY"' EXIT
 
-APP_DIR="/opt/mydon-app"
-BACKUP_DIR="/opt/backups/mydon-autodeploy"
+# Пути переопределяемы ТОЛЬКО ради тестов (deploy/tests/auto-deploy-gate.test.sh):
+# на сервере переменные не выставляются и действуют боевые значения.
+APP_DIR="${AUTODEPLOY_APP_DIR:-/opt/mydon-app}"
+BACKUP_DIR="${AUTODEPLOY_BACKUP_DIR:-/opt/backups/mydon-autodeploy}"
 KEY="/root/.ssh/mydon_deploy"
-DB_HELPER="/opt/backups/db_access.sh"
+DB_HELPER="${AUTODEPLOY_DB_HELPER:-/opt/backups/db_access.sh}"
+LOCK_FILE="${AUTODEPLOY_LOCK_FILE:-/var/lock/mydon-autodeploy.lock}"
+# Кулдаун ретрая упавшего коммита: сборка стоит ~7 минут CPU, гонять её
+# каждые 30 секунд по кругу нельзя. Новый пуш в main кулдаун не ждёт.
+RETRY_COOLDOWN="${AUTODEPLOY_RETRY_COOLDOWN_SEC:-600}"
+# Повтор алерта при затяжном сбое: «один на sha навсегда» превращал
+# многодневную поломку в единственное сообщение недельной давности.
+REALERT_SEC="${AUTODEPLOY_REALERT_SEC:-21600}"
+# Фолбэк-канал тревог — выделенный аварийный бот сторожа (тот же, что у
+# watchdog-liveness), а НЕ бот склада из /opt/mydon-stock: тащить алерты
+# деплоя через чужой проект — связь, которая молча умрёт при его переезде.
+ALERT_ENV="${AUTODEPLOY_ALERT_ENV:-/etc/mydon-heartbeat.env}"
+OK_MARKER="$BACKUP_DIR/.last-ok-sha"
+FAIL_SHA_F="$BACKUP_DIR/.fail-sha"
+FAIL_AT_F="$BACKUP_DIR/.fail-at"          # время ПОСЛЕДНЕГО сбоя — от него кулдаун
+FAIL_FIRST_F="$BACKUP_DIR/.fail-first-at" # время ПЕРВОГО сбоя серии — окно pre-fetch
+ALERTED_F="$BACKUP_DIR/.alerted-sha"
+ALERTED_AT_F="$BACKUP_DIR/.alerted-at"
 COMPOSE=(docker compose -f deploy/docker-compose.yml --env-file .env)
 
 export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 
 log() { echo "$(date '+%F %T') $*"; }
-trap 'log "ОШИБКА (строка $LINENO). База — в бэкапе $BACKUP_DIR. Деплой прерван."' ERR
+
+# Алерт о сбое: сначала событие в Core (старый контур обычно ещё жив — деплой
+# упал ДО переключения; правило infra.deploy_failed в rules.ts обязано
+# существовать, иначе событие ляжет в таблицу молча), фолбэк — Telegram-бот
+# склада, как в backup_extra.sh. Возврат 0 только при реальной доставке.
+# `|| true` на присваиваниях ОБЯЗАТЕЛЕН: без него отсутствие ключа в .env
+# под pipefail убивало бы скрипт из mark_success прямо на успешном деплое.
+notify_deploy_failed() {
+  ingest_key="$(grep '^INGEST_KEY=' "$APP_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  if [ -n "$ingest_key" ] &&
+    curl -sf -m 15 -X POST "http://127.0.0.1:3001/ingest/${ingest_key}" \
+      -H "Content-Type: application/json" \
+      -d "{\"type\":\"infra.deploy_failed\",\"source\":\"auto-deploy\",\"payload\":{\"commit\":\"$1\",\"detail\":\"ретраи автоматические; journalctl -u mydon-autodeploy.service\"}}" \
+      >/dev/null 2>&1; then
+    return 0
+  fi
+  BT="$(grep '^WATCHDOG_BOT_TOKEN=' "$ALERT_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  CHATS="$(grep '^WATCHDOG_CHAT_IDS=' "$ALERT_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  if [ -n "$BT" ] && [ -n "$CHATS" ]; then
+    delivered=""
+    for chat in ${CHATS//,/ }; do
+      chat="$(printf '%s' "$chat" | tr -d '[:space:]')"
+      [ -n "$chat" ] || continue
+      # Telegram отвечает 200 и на {"ok":false,...} — доставку подтверждает
+      # только поле ok (тот же урок, что в watchdog-liveness.sh).
+      tg_resp="$(curl -sS -m 30 -F chat_id="$chat" \
+        -F text="❌ Автодеплой MYDON упал на $1. Ретраи автоматические. journalctl -u mydon-autodeploy.service" \
+        -K- <<< "url = \"https://api.telegram.org/bot${BT}/sendMessage\"" 2>/dev/null || true)"
+      if printf '%s' "$tg_resp" | grep -q '"ok":true'; then
+        delivered=1
+      fi
+    done
+    if [ -n "$delivered" ]; then
+      return 0
+    fi
+  fi
+  log "алерт о сбое деплоя НЕ доставлен (нет INGEST_KEY/аварийного бота или сеть) — только журнал"
+  return 1
+}
+
+notify_deploy_recovered() {
+  ingest_key="$(grep '^INGEST_KEY=' "$APP_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  [ -n "$ingest_key" ] || return 0
+  curl -sf -m 15 -X POST "http://127.0.0.1:3001/ingest/${ingest_key}" \
+    -H "Content-Type: application/json" \
+    -d "{\"type\":\"infra.deploy_ok\",\"source\":\"auto-deploy\",\"payload\":{\"commit\":\"$1\",\"detail\":\"деплой восстановился после сбоя\"}}" \
+    >/dev/null 2>&1 || true
+}
+
+# Успех: маркер пишется ПОСЛЕДНИМ действием деплоя — только он делает
+# «ничего нового» законным. Файлы сбоя снимаются ДО уведомления: упади
+# notify — состояние уже чистое, и хвосты не переживут успех.
+mark_success() {
+  printf '%s\n' "$REMOTE" > "$OK_MARKER.tmp" && mv "$OK_MARKER.tmp" "$OK_MARKER"
+  was_alerted=""
+  if [ -f "$ALERTED_F" ]; then was_alerted=1; fi
+  rm -f "$FAIL_SHA_F" "$FAIL_AT_F" "$FAIL_FIRST_F" "$ALERTED_F" "$ALERTED_AT_F"
+  if [ -n "$was_alerted" ]; then
+    log "деплой восстановился после сбоя — снимаю тревогу"
+    notify_deploy_recovered "$REMOTE"
+  fi
+}
+
+# Учёт сбоя — на ЛЮБОМ ненулевом выходе, не только на ERR: явные `exit 1`
+# (битый бэкап, нездоровый health) ERR-trap не проходят. Без записи сбоя
+# следующий тик снова счёл бы «ничего нового». 130/143 — операторский
+# Ctrl-C/стоп таймера, не сбой деплоя.
+on_exit() {
+  rc="$1"
+  rm -f "$AUTODEPLOY_COPY"
+  case "$rc" in 0 | 130 | 143) return 0 ;; esac
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || return 0
+  sha="${REMOTE:-pre-fetch}"
+  now="$(date +%s)"
+  prev_sha="$(cat "$FAIL_SHA_F" 2>/dev/null || true)"
+  printf '%s\n' "$sha" > "$FAIL_SHA_F"
+  printf '%s\n' "$now" > "$FAIL_AT_F"
+  # Начало серии сбоев: обновляем только при смене sha — от него считается
+  # окно тишины pre-fetch (единичный блип git fetch при тике каждые 30с —
+  # норма сети, тревога только если fetch падает дольше кулдауна подряд).
+  if [ "$prev_sha" != "$sha" ] || [ ! -f "$FAIL_FIRST_F" ]; then
+    printf '%s\n' "$now" > "$FAIL_FIRST_F"
+  fi
+  first_at="$(cat "$FAIL_FIRST_F" 2>/dev/null || printf '%s' "$now")"
+  want_alert=1
+  if [ "$sha" = pre-fetch ] && [ $(( now - first_at )) -lt "$RETRY_COOLDOWN" ]; then
+    want_alert=0
+  fi
+  # Дедуп: один алерт на sha, но затяжной сбой напоминает раз в REALERT_SEC —
+  # «упал неделю назад» не должно быть последним словом контура.
+  alerted="$(cat "$ALERTED_F" 2>/dev/null || true)"
+  alerted_at="$(cat "$ALERTED_AT_F" 2>/dev/null || printf 0)"
+  if [ "$alerted" = "$sha" ] && [ $(( now - alerted_at )) -lt "$REALERT_SEC" ]; then
+    want_alert=0
+  fi
+  if [ "$want_alert" = 1 ]; then
+    if notify_deploy_failed "$sha"; then
+      printf '%s\n' "$sha" > "$ALERTED_F"
+      printf '%s\n' "$now" > "$ALERTED_AT_F"
+    fi
+  fi
+}
+trap 'on_exit $?' EXIT
+
+dump_note="бэкап на этом прогоне не снимался"
+trap 'log "ОШИБКА (строка $LINENO). ${dump_note}. Деплой прерван."' ERR
 
 cd "$APP_DIR"
 
 # Замок: если деплой уже идёт (долгая сборка) — просто выходим.
-exec 9>/var/lock/mydon-autodeploy.lock
+exec 9>"$LOCK_FILE"
 flock -n 9 || { log "деплой уже идёт — пропускаю тик"; exit 0; }
 
 git fetch --quiet origin main
+# Fetch удался — сбои класса pre-fetch (сеть/ключ до fetch) исцелились:
+# снимаем их учёт, иначе залипший .alerted-sha=pre-fetch навсегда глушил бы
+# алерт о НАСТОЯЩЕЙ будущей поломке fetch (отозванный ключ, DNS).
+if [ "$(cat "$FAIL_SHA_F" 2>/dev/null || true)" = pre-fetch ]; then
+  rm -f "$FAIL_SHA_F" "$FAIL_AT_F" "$FAIL_FIRST_F"
+  if [ "$(cat "$ALERTED_F" 2>/dev/null || true)" = pre-fetch ]; then
+    rm -f "$ALERTED_F" "$ALERTED_AT_F"
+  fi
+fi
 LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse origin/main)"
-[ "$LOCAL" = "$REMOTE" ] && exit 0   # ничего нового
+last_ok="$(cat "$OK_MARKER" 2>/dev/null || true)"
+# «Ничего нового» = origin/main УСПЕШНО задеплоен, а не просто HEAD совпал:
+# HEAD двигается git reset-ом до сборки, и по нему сбой неотличим от успеха.
+[ "$LOCAL" = "$REMOTE" ] && [ "$last_ok" = "$REMOTE" ] && exit 0
+# Кулдаун — по sha УПАВШЕГО коммита, независимо от положения HEAD: сбой до
+# git reset (весь шаг бэкапа) оставляет HEAD старым, и проверка «только при
+# LOCAL==REMOTE» позволяла долбить полный pg_dump каждые 30 секунд.
+fail_sha="$(cat "$FAIL_SHA_F" 2>/dev/null || true)"
+if [ "$REMOTE" = "$fail_sha" ]; then
+  fail_at="$(cat "$FAIL_AT_F" 2>/dev/null || printf 0)"
+  now="$(date +%s)"
+  elapsed=$(( now - fail_at ))
+  if [ "$elapsed" -lt "$RETRY_COOLDOWN" ]; then
+    log "деплой $REMOTE упал ${elapsed}с назад — ретрай через $(( RETRY_COOLDOWN - elapsed ))с"
+    exit 0
+  fi
+  log "повторяю деплой $REMOTE после сбоя (кулдаун ${RETRY_COOLDOWN}с прошёл)"
+elif [ "$LOCAL" = "$REMOTE" ]; then
+  log "маркер успешного деплоя (${last_ok:-нет}) отстал от HEAD — деплою $REMOTE заново"
+else
+  log "новый main $REMOTE (было $LOCAL) — начинаю деплой"
+fi
 DEPLOY_ID="${REMOTE:0:12}-$$"
-
-log "новый main $REMOTE (было $LOCAL) — начинаю деплой"
 
 # 0. Что вообще изменилось. Данные (сиды, выгрузки) приезжают в контейнер
 #    томом, документация в образ не попадает вовсе — для таких коммитов
@@ -92,6 +248,9 @@ if [ -z "$DATA_ONLY" ]; then
   if [ -x "$DB_HELPER" ] && "$DB_HELPER" dump | gzip > "$dump" &&
       gunzip -t "$dump" && gunzip -c "$dump" | tail -10 | grep -q 'dump complete'; then
     log "бэкап базы: $dump"
+    # ERR-trap раньше всегда писал «база — в бэкапе», даже когда дамп не
+    # снимался (ранний сбой, data-only): оператор искал несуществующий файл.
+    dump_note="база — в бэкапе $dump"
   else
     log "ВНИМАНИЕ: бэкап базы не удался или повреждён — деплой останавливаю"
     rm -f "$dump"
@@ -120,10 +279,21 @@ install -o root -g root -m 700 deploy/guards/db_access.sh /opt/backups/db_access
 install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
 install -o root -g root -m 700 deploy/guards/b2_offsite.sh /opt/backups/b2_offsite.sh
 install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
+# Systemd-юниты автодеплоя тоже самообновляются: иначе OnFailure-крюк и любые
+# будущие правки юнитов жили бы только в git и никогда не доехали до сервера.
+for unit in mydon-autodeploy.service mydon-deploy-alert.service; do
+  if [ -f "deploy/systemd/$unit" ] && ! cmp -s "deploy/systemd/$unit" "/etc/systemd/system/$unit"; then
+    install -o root -g root -m 644 "deploy/systemd/$unit" "/etc/systemd/system/$unit"
+    systemctl daemon-reload
+    log "обновлён systemd-юнит $unit"
+  fi
+done
+chmod +x deploy/deploy-failure-alert.sh 2>/dev/null || true
 
 # 2б. Изменились только данные и документы — контейнеры уже видят новые файлы
 #     через том, пересобирать и перезапускать нечего.
 if [ -n "$DATA_ONLY" ]; then
+  mark_success
   log "деплой ok: $REMOTE (только данные/документы — сборка и рестарт не нужны)"
   exit 0
 fi
@@ -197,6 +367,7 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 if [ -n "$health_ok" ]; then
+  mark_success
   log "деплой ok: $REMOTE (health поднялся с попытки $attempt)"
 else
   log "ОШИБКА: health не ok спустя минуту после деплоя $REMOTE — контейнеры уже переключены, нужна ручная проверка"
