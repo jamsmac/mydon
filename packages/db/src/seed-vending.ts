@@ -490,6 +490,11 @@ async function main(): Promise<void> {
       console.log(`  · ${d.product}: в прайсе ${d.seed}, у донора ${d.donor}`);
     }
   }
+
+  // Как в seed.ts/seed-catalog.ts: postgres.js держит соединение открытым, и
+  // без явного выхода `compose run --rm … seed-vending.js` (ручной шаг выкатки,
+  // R-P5a-5) висит после того, как всё уже сделано.
+  process.exit(0);
 }
 
 if (require.main === module) {
