@@ -16,6 +16,16 @@ import type { VendingPlan, VendingPlanMachine, VendingPurchaseItem } from "./cor
 /** Telegram обрезает на 4096 — держимся заметно ниже (как owner-actions.ts). */
 export const TG_BUDGET = 3500;
 
+/**
+ * Сколько сообщений владелец готов принять за один ответ.
+ *
+ * Слоты печатаются по одному сообщению на автомат, и на парке из 26 машин это
+ * 26+ подряд: бот минуту шлёт их в чат, телефон вибрирует, а нужное первое
+ * сообщение уезжает вверх — план перестаёт быть планом. Сверх лимита слоты не
+ * печатаем, а говорим, где их посмотреть целиком.
+ */
+export const MAX_PARTS = 12;
+
 const RU = (n: number): string => Math.round(n).toLocaleString("ru-RU");
 
 const day = (iso: string): string =>
@@ -112,6 +122,23 @@ function stockLine(p: VendingPlan, i: VendingPurchaseItem): string {
   return `• ${i.product} — ${RU(i.fromStock)}${where ? ` (${where})` : ""} · останется ${RU(i.stockAfter)}`;
 }
 
+/**
+ * Строка закупа: сколько взять, почему столько и куда это ляжет.
+ *
+ * «(в автоматы 12, на склад 0)» читалось как «докупим 12 в автоматы», хотя это
+ * РАЗДАЧА уже купленного: сколько встанет в аппараты сегодня, а сколько
+ * доедет до склада. Фикс и нехватка названы прямо — иначе «купить 48» при
+ * нехватке 10 выглядит ошибкой расчёта, а это решение владельца.
+ */
+function buyLine(i: VendingPurchaseItem): string {
+  const почему = i.fixedQty !== null ? ` (фикс ${RU(i.fixedQty)}; нехватка ${RU(i.buy)})` : "";
+  const деньги = i.noPrice ? "нет цены — в сумму не вошло" : `${RU(i.costRounded)} сум`;
+  return (
+    `• ${i.product} — ${RU(i.order)}${почему} — сразу в автоматы ${RU(i.fromPurchase)}, ` +
+    `остальное на склад ${RU(i.toStock)} · ${деньги}`
+  );
+}
+
 /** Строка слота: что стоит сейчас, сколько не хватает и откуда возьмём. */
 function slotLine(sl: VendingPlanMachine["slots"][number]): string {
   const src = [
@@ -128,7 +155,18 @@ function slotLine(sl: VendingPlanMachine["slots"][number]): string {
 export function formatPurchasePlan(p: VendingPlan): string[] {
   const s = p.summary;
   const need = s.totalFromPurchase + s.totalFromStock + s.totalUnfilled;
-  if (need === 0) return ["📋 План закупа: грузить нечего — дефицита у автоматов в расчёте нет."];
+  const заголовок = `📋 План закупа — ${day(p.generatedAt)}`;
+  if (need === 0) {
+    // «Грузить нечего» без предупреждений — самый опасный ответ плана: он
+    // одинаково звучит и когда всё полно, и когда автоматы выпали из расчёта
+    // (не в строю, склад не считали, продажи не собрали). Молчать нельзя.
+    const пусто = ["Грузить нечего — дефицита у автоматов в расчёте нет."];
+    if (p.warnings.length > 0) {
+      пусто.push("", "Но посчитано не всё:");
+      for (const w of p.warnings) пусто.push(`⚠️ ${w.message}`);
+    }
+    return chunk(заголовок, пусто);
+  }
 
   const load = s.totalFromPurchase + s.totalFromStock;
   const money = s.costRounded > 0 ? ` на ${RU(s.costRounded)} сум` : "";
@@ -142,28 +180,31 @@ export function formatPurchasePlan(p: VendingPlan): string[] {
     `Загрузить ${RU(load)} из ${RU(need)} нужных · со склада ${RU(s.totalFromStock)} · ` +
       `купить ${RU(s.totalOrder)} ед (${s.items.length} поз.)${money}${empty}`,
   );
+  // «Пусто» — единственное слово плана, которое ничего не значит без пояснения:
+  // владелец читал его как «пустые слоты в аппарате», а это штуки, которых не
+  // хватит после похода (UX#29).
+  if (s.totalUnfilled > 0) head.push(`пусто ${RU(s.totalUnfilled)} — столько штук не закроется ни закупом, ни складом`);
   head.push("", "Маршрут:");
   for (const m of p.machines) head.push(machineLine(m));
-  const asOf = p.stock.asOf ? ` · инвентаризация ${day(p.stock.asOf)}` : "";
+  // «Вернуть» звучало как возврат поставщику; на деле это излишек упаковки,
+  // который доедет до склада. И дата — про ПЕРЕСЧЁТ склада, а не про план.
+  const asOf = p.stock.asOf ? ` · последний пересчёт ${day(p.stock.asOf)}` : " · склад ещё не считали";
   head.push(
     "",
-    `Склад: ${RU(p.stock.totalBefore)} → ${RU(p.stock.totalAfter)} ` +
-      `(взять ${RU(p.stock.use)}, вернуть ${RU(p.stock.back)})${asOf}`,
+    `Склад: сейчас ${RU(p.stock.totalBefore)} → после похода ${RU(p.stock.totalAfter)} ` +
+      `(увезём ${RU(p.stock.use)}, докупим сверх нужды ${RU(p.stock.back)})${asOf}`,
   );
   for (const w of p.warnings) head.push(`⚠️ ${w.message}`);
-  const parts: string[] = chunk(`📋 План закупа — ${day(p.generatedAt)}`, head);
+  const parts: string[] = chunk(заголовок, head);
 
   // Что купить — по деньгам сверху: это единственный раздел, где владелец
   // тратит, и порядок должен совпадать с ценой ошибки.
   if (s.items.length > 0) {
-    const rows = [...s.items]
-      .sort((a, b) => b.costRounded - a.costRounded)
-      .map(
-        (i) =>
-          `• ${i.product} — ${RU(i.order)} (в автоматы ${RU(i.fromPurchase)}, на склад ${RU(i.toStock)}) · ` +
-          `${i.noPrice ? "нет цены" : `${RU(i.costRounded)} сум`}`,
-      );
+    const rows = [...s.items].sort((a, b) => b.costRounded - a.costRounded).map(buyLine);
     if (s.noPrice.length > 0) rows.push("", `⚠️ Без цены — на разбор: ${s.noPrice.join(", ")}`);
+    // Список без следующего шага заканчивался ничем: владелец прочитал, что
+    // купить, и не знал, чем это оформляется (UX#17).
+    rows.push("", "Готов покупать — напиши «оформить закуп» (уйдёт тебе на утверждение).");
     parts.push(...chunk(`🛒 Купить — ${RU(s.totalOrder)} ед${money}`, rows));
   }
 
@@ -180,19 +221,38 @@ export function formatPurchasePlan(p: VendingPlan): string[] {
   }
 
   if (s.excludedByRule.length > 0) {
+    // Сколько взять со склада уже сказано в 📦 — повторять здесь значит
+    // предлагать взять вдвое больше (UX#31). Здесь важно другое: чего не
+    // хватит, потому что товар не покупаем.
     parts.push(
       ...chunk(
         "🚫 Убрано из закупки — только склад",
-        s.excludedByRule.map((i) => `• ${i.product} — со склада ${RU(i.fromStock)}, пусто ${RU(i.unfilled)}`),
+        s.excludedByRule.map((i) => `• ${i.product}${i.unfilled > 0 ? ` — пусто ${RU(i.unfilled)}` : " — закроется складом целиком"}`),
       ),
     );
   }
 
-  for (const m of p.machines) {
-    if (m.slots.length === 0) continue;
+  // Слоты — последними и с лимитом: на большом парке они одни дают три десятка
+  // сообщений подряд, и первое (что купить) уезжает из видимой части чата.
+  const сСлотами = p.machines.filter((m) => m.slots.length > 0);
+  let напечатано = 0;
+  for (const m of сСлотами) {
     const title = `🎰 ${m.name} — загрузить ${RU(m.fromPurchase + m.fromStock)}` +
       `${m.unfilled > 0 ? ` · пусто ${RU(m.unfilled)}` : ""}`;
-    parts.push(...chunk(title, m.slots.map(slotLine)));
+    const секция = chunk(title, m.slots.map(slotLine));
+    const останется = сСлотами.length - напечатано - 1;
+    if (parts.length + секция.length + (останется > 0 ? 1 : 0) > MAX_PARTS) break;
+    parts.push(...секция);
+    напечатано += 1;
+  }
+  if (напечатано < сСлотами.length) {
+    const хвост = `…ещё ${RU(сСлотами.length - напечатано)} автоматов — на листе «План закупа» в панели.`;
+    const последняя = parts[parts.length - 1];
+    if (parts.length < MAX_PARTS || последняя === undefined || последняя.length + хвост.length + 2 > TG_BUDGET) {
+      parts.push(хвост);
+    } else {
+      parts[parts.length - 1] = `${последняя}\n\n${хвост}`;
+    }
   }
 
   return parts;

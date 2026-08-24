@@ -48,6 +48,7 @@ const base = (o: Partial<VendingPurchase> = {}): VendingPurchase => ({
   costExact: 0,
   costRounded: 0,
   overpay: 0,
+  shortfallCost: 0,
   totalFromPurchase: 0,
   totalFromStock: 0,
   totalUnfilled: 0,
@@ -76,7 +77,7 @@ describe("Брифинг закупа (Telegram)", () => {
     assert.match(t, /Купить 6 ед/);
     assert.match(t, /с упаковками 24 ед/);
     assert.match(t, /84\s?000 сум/);
-    assert.match(t, /Переплата за упаковки: 40\s?000 сум/);
+    assert.match(t, /Куплено сверх нехватки: 40\s?000 сум \(округление до блока \+ фикс-количества\)/);
     // Топ по costRounded: Montella (60k) раньше Fanta (24k).
     assert.ok(t.indexOf("Montella") < t.indexOf("Fanta"));
     assert.match(t, /Montella — заказать 12 \(нехватка 4\)/);

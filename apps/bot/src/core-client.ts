@@ -178,8 +178,11 @@ export interface VendingPurchase {
   totalBuy: number;
   totalOrder: number;
   costExact: number;
-  costRounded: number;
+  /** Куплено сверх нехватки: округление до блока + фикс-количества. */
   overpay: number;
+  costRounded: number;
+  /** Недобор деньгами: фикс МЕНЬШЕ нехватки — купим не всё, что нужно. */
+  shortfallCost: number;
   totalFromPurchase: number;
   totalFromStock: number;
   totalUnfilled: number;
@@ -213,7 +216,15 @@ export interface VendingPlanMachine {
 
 /** Почему числам плана можно верить не полностью. */
 export interface VendingPlanWarning {
-  code: "stock_stale" | "machine_skipped" | "no_price" | "unknown_product";
+  code:
+    | "stock_stale"
+    | "stock_unknown_product"
+    | "machine_skipped"
+    | "no_price"
+    | "unknown_product"
+    | "sales_stale"
+    | "sales_partial"
+    | "route_unknown_serial";
   message: string;
 }
 
@@ -231,10 +242,22 @@ export interface VendingPlan {
     back: number;
     totalAfter: number;
     stale: boolean;
+    /** Штуки на складе без карточки прайса — в расчёт не вошли. */
+    unmatched: number;
   };
   summary: VendingPurchase;
   machines: VendingPlanMachine[];
+  /** Порядок обхода задан настройкой (а не по имени автомата). */
+  routeConfigured: boolean;
   warnings: VendingPlanWarning[];
+}
+
+/** Правила закупа товара «было»/«стало» — как их отдаёт Core. */
+export interface VendingRulesSnapshot {
+  packSize?: number;
+  excludedFromPurchase?: boolean;
+  /** null — фикса нет (обычное округление до блока). */
+  fixedPurchaseQty?: number | null;
 }
 
 /** Итог правки правил закупа товара (POST /vending/product-rules, П5a). */
@@ -243,8 +266,9 @@ export interface SetRulesResult {
   reason?: "not_found";
   /** Каноническое имя товара (после алиасов). */
   product?: string;
-  before?: Record<string, unknown>;
-  after?: Record<string, unknown>;
+  /** Значения ДО правки — бот показывает «было → стало» из ответа Core, а не из команды. */
+  before?: VendingRulesSnapshot;
+  after?: VendingRulesSnapshot;
 }
 
 /** Накладная закупа (материализована при одобрении заявки, §5.7). */

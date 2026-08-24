@@ -2,7 +2,7 @@ import { answer, type ContextSearch, type LlmResolver } from "@mydon/assistant";
 import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
 import { DOMAIN_LABELS } from "@mydon/shared";
 import { approvalKeyboard, collectGloberentSignals, formatApproval, formatBriefing } from "./briefing";
-import type { CoreClient } from "./core-client";
+import { CoreError, type CoreClient } from "./core-client";
 import {
   formatCashAck,
   formatCashSessions,
@@ -25,7 +25,7 @@ import {
   parsePriceCommand,
   parseReceiveDistribution,
 } from "./purchase-brief";
-import { RULE_COMMAND_HINT, formatRuleResult, isRuleCommand, parseRuleCommand } from "./product-rules";
+import { formatRuleResult, isRuleCommand, parseRuleCommand, ruleCommandHint } from "./product-rules";
 import { formatPurchasePlan, isPlanCommand } from "./purchase-plan";
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
@@ -153,7 +153,9 @@ export async function handleMessage(
   // а «закупать …» иначе ушло бы в брифинг закупа как слово «закуп».
   if (isRuleCommand(text)) {
     const cmd = parseRuleCommand(text);
-    if (cmd === null) return { text: RULE_COMMAND_HINT };
+    // Причина отказа, а не общая шпаргалка: «блок TUC 5000» и «фикс TUC 0» —
+    // понятные намерения, отвергнутые по разным причинам (UX#27).
+    if (cmd === null) return { text: ruleCommandHint(text) };
     try {
       const patch =
         cmd.kind === "exclude"
@@ -167,6 +169,12 @@ export async function handleMessage(
       return { text: formatRuleResult(cmd, res) };
     } catch (err) {
       console.error("Ошибка правки правил закупа:", err);
+      // 400 — отказ по САМИМ ДАННЫМ: повтор той же команды не поможет никогда,
+      // и «попробуй позже» отправляло владельца ждать впустую. Показываем
+      // формат и то, что именно не принял Core.
+      if (err instanceof CoreError && err.status === 400) {
+        return { text: `${ruleCommandHint(text)}\n\nCore отверг запрос: ${err.body || "нет подробностей"}` };
+      }
       return { text: "Не удалось записать правило в MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }

@@ -94,12 +94,67 @@ function clean(s: string): string {
     .trim();
 }
 
-/** Ответ на команду правила — что записали и как это проверить. */
+/**
+ * Почему команда правила не разобралась — словами, а не общей подсказкой.
+ *
+ * «Блок TUC 5000» и «фикс TUC 0» — не опечатки в формате, а понятные
+ * намерения, которые парсер отвергает по своим причинам. Одинаковая подсказка
+ * на все случаи заставляла владельца гадать, что именно не так (UX#27).
+ */
+export function ruleCommandHint(text: string): string {
+  const t = text.trim();
+  const head = /^(фикс|блок)\s*:?\s*(.+)$/i.exec(t);
+  if (head) {
+    const kind = head[1].toLowerCase() === "фикс" ? "fixed" : "pack";
+    const rest = head[2].trim();
+    const n = NUM.exec(rest);
+    if (n && /-$/.test(n[2])) return "Количество — положительное число. Минус здесь ничего не значит.";
+    if (n) {
+      const qty = Number(n[3].replace(/[\s\u00a0\u202f]+/g, ""));
+      if (kind === "pack" && (qty < 1 || qty > MAX_PACK)) return `Блок — от 1 до ${MAX_PACK} штук.`;
+      if (kind === "fixed" && qty === 0) return "Чтобы снять фикс, напиши «фикс <товар> нет».";
+      if (kind === "fixed" && qty > MAX_FIXED) return `Фикс-количество — от 1 до ${MAX_FIXED} штук.`;
+      if (!clean(n[1])) return "Не понял, какой товар. Формат: «блок <товар> <N>».";
+    }
+    return kind === "pack"
+      ? "Формат: «блок <товар> <N>», например «блок Red Bull 6»."
+      : "Формат: «фикс <товар> <N>» или «фикс <товар> нет», например «фикс Snickers 48».";
+  }
+  if (/^(не\s+закупать|закупать)/i.test(t)) return "Не понял, какой товар. Формат: «не закупать <товар>».";
+  return RULE_COMMAND_HINT;
+}
+
+/** Значение поля правила словами (для «было → стало»). */
+function ruleValue(kind: RuleCommand["kind"], v: SetRulesResult["before"]): string | null {
+  if (!v) return null;
+  if (kind === "pack") return v.packSize === undefined ? null : `${v.packSize}`;
+  if (kind === "fixed") return v.fixedPurchaseQty === undefined ? null : v.fixedPurchaseQty === null ? "нет" : `${v.fixedPurchaseQty}`;
+  return v.excludedFromPurchase === undefined ? null : v.excludedFromPurchase ? "не закупаем" : "закупаем";
+}
+
+/**
+ * Ответ на команду правила — что записали и как это проверить.
+ *
+ * Показываем «было → стало» из ответа Core, а не то, что просил владелец: он
+ * должен видеть РЕЗУЛЬТАТ записи. Отдельный случай — «ничего не изменилось»:
+ * прежний ответ на повтор команды звучал как успешная правка, и владелец
+ * уходил уверенным, что поменял то, что и так стояло (UX#28).
+ */
 export function formatRuleResult(cmd: RuleCommand, res: SetRulesResult): string {
   if (!res.ok) {
     return `Товар «${res.product ?? cmd.product}» не найден в прайсе вендинга. Имя должно совпадать с карточкой или алиасом.`;
   }
   const name = res.product ?? cmd.product;
+  const было = ruleValue(cmd.kind, res.before);
+  const стало = ruleValue(cmd.kind, res.after);
+  const подпись =
+    cmd.kind === "pack" ? `Блок «${name}»` : cmd.kind === "fixed" ? `Фикс «${name}»` : `Закуп «${name}»`;
+
+  if (было !== null && стало !== null && было === стало) {
+    return `${подпись}: ${стало} — уже было так, ничего не изменилось.\n\n«план закупа» — пересчитать.`;
+  }
+  const переход = было !== null && стало !== null ? `${подпись}: было ${было} → стало ${стало}.` : null;
+
   const what =
     cmd.kind === "exclude"
       ? `«${name}» убран из закупки — грузим только со склада.`
@@ -110,5 +165,5 @@ export function formatRuleResult(cmd: RuleCommand, res: SetRulesResult): string 
             ? `Фикс-количество «${name}» снято — обычное округление до блока.`
             : `«${name}»: при дефиците покупаем ровно ${cmd.qty}.`
           : `Блок «${name}»: ${cmd.qty} шт.`;
-  return `${what}\n\n«план закупа» — пересчитать.`;
+  return [what, ...(переход ? [переход] : []), "", "«план закупа» — пересчитать."].join("\n");
 }
