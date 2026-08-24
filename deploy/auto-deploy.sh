@@ -284,6 +284,12 @@ install -o root -g root -m 700 deploy/guards/db_access.sh /opt/backups/db_access
 install -o root -g root -m 700 deploy/guards/backup_extra.sh /opt/backups/backup_extra.sh
 install -o root -g root -m 700 deploy/guards/b2_offsite.sh /opt/backups/b2_offsite.sh
 install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore_test_mydon.sh
+# Корневой сертификат Supabase для verify-full в admin-пути (#205): без него
+# db_access.sh с sslmode=verify-* падал бы — cert ставил только ручной
+# deploy.sh, а прод обновляется автодеплоем.
+if [ -f deploy/certs/supabase-prod-ca-2021.crt ]; then
+  install -o root -g root -m 644 deploy/certs/supabase-prod-ca-2021.crt /opt/backups/supabase-ca.crt
+fi
 # Systemd-юниты автодеплоя тоже самообновляются: иначе OnFailure-крюк и любые
 # будущие правки юнитов жили бы только в git и никогда не доехали до сервера.
 for unit in mydon-autodeploy.service mydon-deploy-alert.service; do
