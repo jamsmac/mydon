@@ -125,8 +125,7 @@ REMOTE
 log "SHA-256: downloaded bytes exactly match production originals"
 log "$local_manifest"
 
-if ! cat "$WORK/download/mydon-app_${DATE}.sql.gz" | \
-  ssh -o BatchMode=yes "$PRODUCTION_HOST" '
+if ! ssh -o BatchMode=yes "$PRODUCTION_HOST" '
 set -euo pipefail
 tmp=$(mktemp --suffix=.sql.gz /opt/backups/.mydon-b2-recovery.XXXXXX)
 cleanup() { rm -f -- "$tmp"; }
@@ -138,7 +137,7 @@ chmod 600 "$tmp"
 gunzip -t "$tmp"
 RESTORE_DUMP_PATH="$tmp" RESTORE_DUMP_MAX_AGE_HOURS=24 \
   /opt/backups/restore_test_mydon.sh
-'; then
+' < "$WORK/download/mydon-app_${DATE}.sql.gz"; then
   fail "скачанный из B2 SQL не прошёл изолированное восстановление"
 fi
 log "Database restore: comparison OK, isolated container removed"
