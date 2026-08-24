@@ -70,6 +70,9 @@ export const VENDHUB_GROUPS: NavGroup[] = [
     leaves: [
       { label: "Профиль", type: "own_company" },
       { label: "Товары", type: "product" },
+      // Срез П5a: блок / исключение из закупки / фикс-количество по товару
+      // вендинга — правила, а не карточка (сама карточка товара — выше).
+      { label: "Правила закупа", type: "purchase_rules" },
       { label: "Компоненты", type: "component" },
       { label: "Ингредиенты", type: "ingredient" },
       // Контрагенты в «Каталоге», как в GLOBERENT: поставщик — не строка
@@ -243,6 +246,9 @@ export const TABLE_BACKED_LEAVES = [
   // Срез П5a: план закупа считается на чтении (/vending/plan), своих карточек
   // реестра не заводит — счёт по byType всегда был бы 0, и чип бы погас.
   "buy_plan",
+  // Срез П5a: правила закупа — это поля СУЩЕСТВУЮЩЕЙ карточки vending_product
+  // (Task 6), а не отдельный тип entity — счёт по byType был бы 0.
+  "purchase_rules",
 ] as const;
 
 export const isTableBackedLeaf = (type: string | null | undefined): boolean =>

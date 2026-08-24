@@ -62,6 +62,7 @@ import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingMachinesPanel, VendingSupplyPanel } from "../../../components/vending-panel";
 import { PurchasePlanView } from "../../../components/purchase-plan-view";
+import { ProductRulesView } from "../../../components/product-rules-view";
 import { CoffeePanel } from "../../../components/coffee-panel";
 import {
   ServiceTab,
@@ -1948,6 +1949,11 @@ export default async function DomainPage({
           чтобы её числа не разъехались с ботом. ── */}
       {group && leaf?.type === "buy_plan" && <PurchasePlanView domain={domain} />}
 
+      {/* ── Правила закупа (срез П5a): блок / исключение / фикс-количество
+          по товару вендинга — форма поверх прайса (Task 6), своих карточек
+          реестра лист не заводит. ── */}
+      {group && leaf?.type === "purchase_rules" && <ProductRulesView domain={domain} />}
+
       {/* ── Импорт закупок (Task 4): файл → предпросмотр и сопоставление имён → запись ── */}
       {/* ── Сроки годности (Task 5): партии — счётчики по флагам, плитка =
           фильтр (?flag=), поиск ?q=, три честных пустых состояния ── */}
@@ -2467,6 +2473,7 @@ export default async function DomainPage({
           "cash_reconcile",
           "gaps",
           "buy_plan",
+          "purchase_rules",
           "norm_fact",
           "cost",
           "feed",
