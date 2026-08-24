@@ -9,7 +9,7 @@ services:
   # внешний managed PostgreSQL через DATABASE_URL, но этот контейнер сохраняем
   # для быстрого отката и изолированных восстановлений.
   mydon-db:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     container_name: mydon-db
     restart: unless-stopped
     environment:
@@ -18,7 +18,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-mydon}
       TZ: Asia/Tashkent
     volumes:
-      - mydon-db-data:/var/lib/postgresql/data
+      - mydon-db-data-v17:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mydon} -d ${POSTGRES_DB:-mydon}"]
       interval: 10s
@@ -217,4 +217,7 @@ networks:
     name: mydon-stock_default
 
 volumes:
-  mydon-db-data:
+  # Prepared from a verified portable production dump during the PG17 cutover.
+  # The former deploy_mydon-db-data (PG16) volume is retained outside Compose
+  # and must never be removed by an ordinary deploy.
+  mydon-db-data-v17:

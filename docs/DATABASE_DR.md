@@ -11,7 +11,7 @@
 | Primary PostgreSQL 17 | Supabase, Frankfurt | Единственная активная БД приложения |
 | Runtime connection | Supabase session pooler, TLS | `DATABASE_URL` только для Core |
 | Administrative connection | прямой endpoint, TLS | `DATABASE_ADMIN_URL` только для host scripts |
-| Recovery PostgreSQL | `mydon-db` на Hetzner | не реплика; цель восстановления и cutover rollback |
+| Recovery PostgreSQL 17 | `mydon-db` на Hetzner | не реплика; цель восстановления и cutover rollback |
 | Offsite | Telegram + Backblaze B2 | независимые ежедневные дампы и секреты |
 
 Проект Supabase: `MYDON Production`, ref `ftwvgzwpjdxywadkphdq`, регион
@@ -100,6 +100,9 @@ Telegram long polling и расписания должны иметь ровно
 
 Ни один runbook не удаляет старый volume автоматически. Его удаление возможно
 только отдельным решением после нескольких успешных offsite restore drills.
+После cutover подготовлен `deploy_mydon-db-data-v17` из portable production
+dump. Предыдущий PG16 volume `deploy_mydon-db-data` сохранён вне Compose как
+дополнительный исторический snapshot и автоматическим deploy не удаляется.
 
 ## Остаточный риск compute
 
