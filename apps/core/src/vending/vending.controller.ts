@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
@@ -188,6 +188,26 @@ export class SetProductPriceDto {
   confirmed?: boolean;
 }
 
+/** Правила закупа товара (П5a): что владелец решает про закуп, а не про товар. */
+export class SetProductRulesDto {
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  product!: string;
+
+  /** Кратность блока: закупаем упаковками, а не поштучно. */
+  @IsOptional() @IsInt() @Min(1) @Max(1000)
+  packSize?: number;
+
+  @IsOptional() @IsIn([true, false])
+  excludedFromPurchase?: boolean;
+
+  /** 0 — снять фикс-количество. */
+  @IsOptional() @IsInt() @Min(0) @Max(100_000)
+  fixedPurchaseQty?: number;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
 export class SyncFinishDto {
   @IsIn(["success", "partial", "failed"])
   status!: "success" | "partial" | "failed";
@@ -310,6 +330,28 @@ export class VendingController {
   @Post("orders/receive")
   receiveOrder(@Body() dto: ReceiveOrderDto) {
     return this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
+  }
+
+  /** План закупа: раздача по маршруту и слотам (П5a). */
+  @Get("plan")
+  plan() {
+    return this.vending.plan();
+  }
+
+  /** Прайс вендинга с правилами закупа — для редактора панели. */
+  @Get("products")
+  products() {
+    return this.vending.products();
+  }
+
+  /** Правила закупа товара: блок / исключён / фикс-количество (П5a). */
+  @Post("product-rules")
+  setProductRules(@Body() dto: SetProductRulesDto) {
+    const { product, actor, ...patch } = dto;
+    if (patch.packSize === undefined && patch.excludedFromPurchase === undefined && patch.fixedPurchaseQty === undefined) {
+      throw new BadRequestException("нечего менять: укажи packSize, excludedFromPurchase или fixedPurchaseQty");
+    }
+    return this.vending.setProductRules(product, patch, actor);
   }
 
   /** Правка закупочной цены товара (гейт ±20% — см. setProductPrice). */

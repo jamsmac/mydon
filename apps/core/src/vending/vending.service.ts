@@ -1,14 +1,16 @@
-import { Inject, Injectable, Optional } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
 import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import {
   auditLog,
   entity,
   event,
+  machineCard,
   machineSale,
   machineSlot,
   productSale,
   purchase,
   slotSnapshot,
+  systemConfig,
   vendingAlias,
   vendingCashSession,
   vendingProduct,
@@ -20,6 +22,8 @@ import {
   MAX_CAPACITY,
   PRICE_SPIKE_PCT,
   TZ,
+  allocateByRoute,
+  allocateBySlots,
   computePurchase,
   computePurchaseCash,
   machineDeficit,
@@ -29,20 +33,25 @@ import {
   normalizeProductName,
   planogramStatus,
   priceDeviationPct,
+  routeOrderFrom,
   runoutForecast,
   slotValid,
   type CashCategoryInput,
+  type MachineSlots,
   type PlanogramStatus,
   type PriceEntry,
+  type ProductRule,
   type PurchaseCashSession,
   type PurchaseRow,
   type PurchaseSummary,
   type Runout,
   type RunoutInput,
   type Slot,
+  type SlotPlanRow,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { ApprovalsService } from "../approvals/approvals.service";
+import { resolveEffective, specFor } from "../system/config-spec";
 
 /**
  * Вендинг: приём собранных данных и расчёт дефицита (ТЗ Фаза 1).
@@ -289,6 +298,106 @@ export interface SubmitPurchaseResult {
   costRounded: number;
   /** Почему не отправили (когда !submitted). */
   reason?: string;
+}
+
+/**
+ * Склад считается устаревшим для плана, если инвентаризация старше стольких
+ * дней (спека П5a §6). Смысл — не «дата некрасивая», а «числа плана врут»:
+ * закуп вычитает из потребности остаток, которого на полке может уже не быть.
+ */
+export const STOCK_STALE_DAYS = 3;
+
+/** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
+export interface PlanMachine {
+  serial: string;
+  name: string;
+  /** Место в маршруте обхода, с 1. */
+  routeIndex: number;
+  need: number;
+  fromPurchase: number;
+  fromStock: number;
+  unfilled: number;
+  slots: SlotPlanRow[];
+}
+
+/** Предупреждение плана: то, из-за чего числам можно верить не полностью. */
+export interface PlanWarning {
+  code: "stock_stale" | "machine_skipped" | "no_price" | "unknown_product";
+  message: string;
+}
+
+/** План закупа «что купить»: закуп + раздача по маршруту и слотам (П5a). */
+export interface PurchasePlan {
+  /** Когда посчитан (ISO) — план живёт ровно до следующего сбора. */
+  generatedAt: string;
+  stock: {
+    /** Последняя инвентаризация (ISO) или null, если склада ещё не было. */
+    asOf: string | null;
+    totalBefore: number;
+    /** Уйдёт со склада в автоматы. */
+    use: number;
+    /** Вернётся на склад из закупа (излишек упаковки). */
+    back: number;
+    totalAfter: number;
+    stale: boolean;
+  };
+  summary: PurchaseSummary;
+  machines: PlanMachine[];
+  warnings: PlanWarning[];
+}
+
+/** Строка прайса вендинга с правилами закупа — для редактора панели. */
+export interface VendingProductRow {
+  id: string;
+  name: string;
+  category: "drink" | "snack" | "other";
+  purchasePrice: number | null;
+  packSize: number;
+  isActive: boolean;
+  excludedFromPurchase: boolean;
+  fixedPurchaseQty: number | null;
+}
+
+/** Что можно поменять в правилах закупа товара. */
+export interface ProductRulesPatch {
+  packSize?: number;
+  excludedFromPurchase?: boolean;
+  /** 0 — снять фикс-количество (в базе NULL). */
+  fixedPurchaseQty?: number;
+}
+
+/** Итог правки правил закупа товара. */
+export interface SetRulesResult {
+  ok: boolean;
+  reason?: "not_found";
+  /** Каноническое имя товара (после алиасов). */
+  product?: string;
+  before?: Partial<VendingProductRow>;
+  after?: Partial<VendingProductRow>;
+}
+
+/** Остаток склада строкой: имя, штуки и когда считали. */
+interface StockRow {
+  product: string;
+  quantity: number;
+  countedAt: Date;
+}
+
+/**
+ * Общая часть закупа и плана: и `/vending/purchase`, и `/vending/plan` считают
+ * одни и те же числа по одной выборке — иначе панель и бот показали бы разное.
+ */
+interface PurchaseContext {
+  summary: PurchaseSummary;
+  /** Автоматы в строю с ok-планограммой; имена товаров уже в каноне. */
+  ok: MachineSlots[];
+  /** Имя автомата по серийнику слотов; без карточки реестра — сам серийник. */
+  nameBySerial: Map<string, string>;
+  /** Автоматы со слотами, которые точно не в строю — их дефицит в закуп не идёт. */
+  skipped: { serial: string; name: string; status: string }[];
+  stockRows: StockRow[];
+  /** Канон-имена из слотов с дефицитом, которых нет в прайсе вендинга. */
+  unknownProducts: string[];
 }
 
 @Injectable()
@@ -665,6 +774,7 @@ export class VendingService {
     aliasByKey: Map<string, string>;
     priceByName: Map<string, number>;
     packByName: Map<string, number>;
+    rulesByName: Map<string, ProductRule>;
   }> {
     const [aliases, products] = await Promise.all([
       this.db.select().from(vendingAlias),
@@ -672,8 +782,11 @@ export class VendingService {
         .select({
           id: vendingProduct.id,
           name: vendingProduct.name,
+          category: vendingProduct.category,
           purchasePrice: vendingProduct.purchasePrice,
           packSize: vendingProduct.packSize,
+          excludedFromPurchase: vendingProduct.excludedFromPurchase,
+          fixedPurchaseQty: vendingProduct.fixedPurchaseQty,
         })
         .from(vendingProduct),
     ]);
@@ -685,11 +798,15 @@ export class VendingService {
     }
     const priceByName = new Map<string, number>();
     const packByName = new Map<string, number>();
+    // Правила закупа (П5a) — по канону имени: запись есть у КАЖДОГО товара
+    // прайса, поэтому эта же карта отвечает на вопрос «товар вообще заведён?».
+    const rulesByName = new Map<string, ProductRule>();
     for (const p of products) {
       if (p.purchasePrice != null) priceByName.set(p.name, Number(p.purchasePrice));
       packByName.set(p.name, p.packSize);
+      rulesByName.set(p.name, { excluded: p.excludedFromPurchase, fixedQty: p.fixedPurchaseQty, pack: p.packSize });
     }
-    return { aliasByKey, priceByName, packByName };
+    return { aliasByKey, priceByName, packByName, rulesByName };
   }
 
   /**
@@ -830,38 +947,94 @@ export class VendingService {
       .sort((a, b) => a.product.localeCompare(b.product, "ru"));
   }
 
-  /** Остаток склада как карта товар → количество — для расчёта закупа. */
-  private async stockByProduct(): Promise<Map<string, number>> {
+  /**
+   * Остаток склада строками — для расчёта закупа и для отметки «склад
+   * устарел» в плане. Дата пересчёта нужна здесь же: закуп молча вычитает
+   * остаток из потребности, и если ему месяц, план врёт без единого признака.
+   */
+  private async stockRows(): Promise<StockRow[]> {
     const rows = await this.db.select().from(vendingStock);
-    const out = new Map<string, number>();
-    for (const r of rows) out.set(r.productName, r.quantity);
-    return out;
+    return rows.map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt }));
   }
 
   /**
-   * Сводный закуп (§5.4–5.5): потребность ok-автоматов − остаток склада,
-   * округление до упаковок, суммы. Прайс и кратность — из `vending_product`
-   * (не из кода), остаток — из `vending_stock` (инвентаризация). Позиции без
-   * цены и без продаж калькулятор выносит отдельно и в денежные итоги не
-   * включает.
+   * Автоматы, о которых ТОЧНО известно, что они не в строю (machine_card.status
+   * ≠ in_service), и имена по серийнику. Автомат без карточки/без записи в
+   * реестре считается в строю (DEFAULT_MACHINE_STATUS): молчаливое исключение
+   * опаснее лишней строки (R-P5a-4).
    *
-   * Имена слотов приводятся к канону через алиасы ДО расчёта потребности —
-   * иначе один и тот же товар, записанный в разных автоматах разными
-   * Ourvend-именами («Montella», «18+»), уходит в закуп двумя отдельными
-   * позициями вместо одной (склад и продажи уже в каноне — `ingestStock`
-   * и `latestSold7` резолвят его же картой алиасов, иначе позиции просто
-   * не сойдутся друг с другом).
+   * Серийник — канон без «c» (normalizeMachineSerial), как у слотов Ourvend.
    */
-  async purchase(): Promise<PurchaseSummary> {
-    const { aliasByKey, priceByName, packByName } = await this.loadProductIndex();
+  private async machineRegistry(): Promise<{
+    notInService: Map<string, { name: string; status: string }>;
+    nameBySerial: Map<string, string>;
+  }> {
+    const [ents, cards] = await Promise.all([
+      // Без .where(): тип фильтруем в JS, чтобы выборка оставалась одной
+      // простой строкой и для стабов тестов (from() как thenable без where).
+      this.db.select({ id: entity.id, name: entity.name, externalRef: entity.externalRef, type: entity.type }).from(entity),
+      this.db.select({ entityId: machineCard.entityId, status: machineCard.status }).from(machineCard),
+    ]);
+    const statusById = new Map(cards.map((c) => [c.entityId, c.status]));
+    const notInService = new Map<string, { name: string; status: string }>();
+    const nameBySerial = new Map<string, string>();
+    for (const e of ents) {
+      if (e.type !== "machine" || !e.externalRef) continue;
+      const serial = normalizeMachineSerial(e.externalRef);
+      if (!nameBySerial.has(serial)) nameBySerial.set(serial, e.name);
+      const status = statusById.get(e.id) ?? "in_service";
+      if (status !== "in_service") notInService.set(serial, { name: e.name, status });
+    }
+    return { notInService, nameBySerial };
+  }
+
+  /**
+   * Настройка маршрута обхода: база важнее env, env важнее дефолта — тот же
+   * резолвер, что у панели настроек, чтобы правка владельца работала сразу.
+   */
+  private async routeSetting(): Promise<string> {
+    const spec = specFor("VENDING_ROUTE_ORDER");
+    if (!spec) return "";
+    const rows = await this.db.select().from(systemConfig);
+    const map: Record<string, string> = {};
+    for (const r of rows) map[r.key] = r.value;
+    return resolveEffective(spec, map, process.env).value;
+  }
+
+  /**
+   * Общая часть закупа и плана: одна выборка — одни числа (§5.4–5.5, П5a).
+   *
+   * Автоматы не в строю выкидываются ДО расчёта потребности и до продаж:
+   * иначе закуп вёз бы товар на склад-«автомат» и в ремонт, а прогноз считал
+   * бы продажи по другому множеству машин, чем слоты.
+   */
+  private async purchaseContext(): Promise<PurchaseContext> {
+    const { aliasByKey, priceByName, packByName, rulesByName } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
+    const { notInService, nameBySerial: nameByCanon } = await this.machineRegistry();
+
+    // Пропущенные — только те, у кого реально были слоты: остальные в плане
+    // никак не участвовали, и строка про них была бы шумом.
     const okSerials = this.okSerials(byMachine);
+    const skipped: PurchaseContext["skipped"] = [];
+    const skippedSeen = new Set<string>();
+    for (const serial of byMachine.keys()) {
+      const canon = normalizeMachineSerial(serial);
+      const off = notInService.get(canon);
+      if (!off) continue;
+      okSerials.delete(serial);
+      if (skippedSeen.has(canon)) continue;
+      skippedSeen.add(canon);
+      skipped.push({ serial: canon, name: off.name, status: off.status });
+    }
+
     const ok = [...byMachine.entries()]
       .filter(([serial]) => okSerials.has(serial))
       .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, aliasByKey) }));
     const needs = needByProduct(ok);
     const soldByProduct = await this.latestSold7(okSerials, aliasByKey);
-    const stockByProduct = await this.stockByProduct();
+    const stockRows = await this.stockRows();
+    const stockByProduct = new Map(stockRows.map((r) => [r.product, r.quantity]));
 
     // Прайс: только позиции с ценой попадают в карту — иначе калькулятор
     // пометит noPrice и выведет их на разбор менеджеру (§5.5).
@@ -877,7 +1050,199 @@ export class VendingService {
       stock: stockByProduct.get(n.product) ?? 0, // нет строки склада → 0 (закупаем весь дефицит)
       sold7: soldByProduct.get(n.product) ?? 0,
     }));
-    return computePurchase(rows, prices);
+    const summary = computePurchase(rows, prices, { rules: rulesByName });
+
+    // Товар из слота, которого нет в прайсе: ни цены, ни кратности, ни правил —
+    // такому нужна карточка или алиас, молча считать его «обычным» нельзя.
+    const unknownProducts = needs
+      .map((n) => n.product)
+      .filter((name) => !rulesByName.has(name))
+      .sort((a, b) => a.localeCompare(b, "ru"));
+
+    // Имя автомата — по серийнику слотов: реестр хранит канон, Ourvend может
+    // прислать любую форму записи.
+    const nameBySerial = new Map(
+      ok.map((m) => [m.machineId, nameByCanon.get(normalizeMachineSerial(m.machineId)) ?? m.machineId] as const),
+    );
+    return { summary, ok, nameBySerial, skipped, stockRows, unknownProducts };
+  }
+
+  /**
+   * Сводный закуп (§5.4–5.5): потребность автоматов В СТРОЮ − остаток склада,
+   * округление до упаковок, суммы. Прайс, кратность и правила закупа — из
+   * `vending_product` (не из кода), остаток — из `vending_stock`
+   * (инвентаризация). Позиции без цены и без продаж калькулятор выносит
+   * отдельно и в денежные итоги не включает.
+   *
+   * Имена слотов приводятся к канону через алиасы ДО расчёта потребности —
+   * иначе один и тот же товар, записанный в разных автоматах разными
+   * Ourvend-именами («Montella», «18+»), уходит в закуп двумя отдельными
+   * позициями вместо одной (склад и продажи уже в каноне — `ingestStock`
+   * и `latestSold7` резолвят его же картой алиасов, иначе позиции просто
+   * не сойдутся друг с другом).
+   *
+   * Ответ аддитивно расширен раздачей (П5a) — прежние поля на месте.
+   */
+  async purchase(): Promise<PurchaseSummary> {
+    return (await this.purchaseContext()).summary;
+  }
+
+  /**
+   * План закупа «что купить» (П5a): тот же закуп плюс ответ на вопрос «куда
+   * это поедет». Раздача идёт по маршруту обхода (первый автомат маршрута
+   * получает закуп первым) и внутри автомата — по слотам, поэтому владелец
+   * видит не только сумму, но и что реально встанет в аппарат.
+   *
+   * Предупреждения — часть плана, а не украшение: устаревший склад,
+   * пропущенный автомат, товар без цены и товар без карточки меняют смысл
+   * чисел, и молчать о них опаснее, чем показать лишнюю строку.
+   */
+  async plan(): Promise<PurchasePlan> {
+    const ctx = await this.purchaseContext();
+    const s = ctx.summary;
+    const machines = ctx.ok.map((m) => ({ serial: m.machineId, name: ctx.nameBySerial.get(m.machineId) ?? m.machineId }));
+    const route = routeOrderFrom(await this.routeSetting(), machines);
+    // Раздаём ВСЕ позиции с потребностью, включая «не закупать»: покупки по
+    // ним нет, но склад в автоматы всё равно уезжает.
+    const allItems = [...s.items, ...s.excludedByRule, ...s.excludedNoSales];
+    const byMachine = allocateByRoute(allItems, route);
+    const slotsBySerial = new Map(ctx.ok.map((m) => [m.machineId, m.slots]));
+    const planMachines: PlanMachine[] = byMachine.map((a, i) => ({
+      serial: a.serial,
+      name: ctx.nameBySerial.get(a.serial) ?? a.serial,
+      routeIndex: i + 1,
+      need: a.need,
+      fromPurchase: a.fromPurchase,
+      fromStock: a.fromStock,
+      unfilled: a.unfilled,
+      slots: allocateBySlots(slotsBySerial.get(a.serial) ?? [], a),
+    }));
+
+    const asOf = ctx.stockRows.reduce<Date | null>((acc, r) => (!acc || r.countedAt > acc ? r.countedAt : acc), null);
+    const stale = asOf === null || Date.now() - asOf.getTime() > STOCK_STALE_DAYS * 86_400_000;
+    const totalBefore = ctx.stockRows.reduce((a, r) => a + r.quantity, 0);
+
+    const warnings: PlanWarning[] = [];
+    if (stale) {
+      warnings.push({
+        code: "stock_stale",
+        message: asOf
+          ? `Склад инвентаризирован ${asOf.toLocaleDateString("ru-RU", { timeZone: TZ })} — обнови: «склад …»`
+          : "Склад не инвентаризирован — план считает склад пустым",
+      });
+    }
+    for (const m of ctx.skipped) warnings.push({ code: "machine_skipped", message: `${m.name} (${m.serial}) не в строю: ${m.status}` });
+    if (s.noPrice.length) warnings.push({ code: "no_price", message: `Без цены — вне бюджета: ${s.noPrice.join(", ")}` });
+    if (ctx.unknownProducts.length) {
+      warnings.push({
+        code: "unknown_product",
+        message: `Нет в прайсе вендинга (нужна карточка или алиас): ${ctx.unknownProducts.join(", ")}`,
+      });
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      stock: {
+        asOf: asOf?.toISOString() ?? null,
+        totalBefore,
+        use: s.totalFromStock,
+        back: s.totalToStock,
+        totalAfter: totalBefore - s.totalFromStock + s.totalToStock,
+        stale,
+      },
+      summary: s,
+      machines: planMachines,
+      warnings,
+    };
+  }
+
+  /** Прайс вендинга с правилами закупа — для редактора панели. */
+  async products(): Promise<VendingProductRow[]> {
+    const rows = await this.db.select().from(vendingProduct);
+    return rows
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        purchasePrice: p.purchasePrice === null ? null : Number(p.purchasePrice),
+        packSize: p.packSize,
+        isActive: p.isActive,
+        excludedFromPurchase: p.excludedFromPurchase,
+        fixedPurchaseQty: p.fixedPurchaseQty,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  }
+
+  /**
+   * Правила закупа товара: кратность блока, «убрано из закупки»,
+   * фикс-количество (П5a). Это решения ВЛАДЕЛЬЦА о закупе, а не свойства
+   * товара: раньше они жили в голове и в правках закупочного листа руками,
+   * поэтому каждый пересчёт их терял.
+   *
+   * `fixedPurchaseQty: 0` — снять фикс (в базе NULL): отдельная команда
+   * «сними фикс» была бы ещё одним способом сказать то же самое.
+   * Пустой patch — ошибка, а не молчаливое «ок»: это почти наверняка
+   * потерянное поле в форме, а не намерение ничего не менять.
+   */
+  async setProductRules(rawProduct: string, patch: ProductRulesPatch, actor = "owner"): Promise<SetRulesResult> {
+    const touched =
+      patch.packSize !== undefined || patch.excludedFromPurchase !== undefined || patch.fixedPurchaseQty !== undefined;
+    if (!touched) throw new BadRequestException("нечего менять: укажи packSize, excludedFromPurchase или fixedPurchaseQty");
+
+    const name = rawProduct.trim();
+    if (!name) return { ok: false, reason: "not_found" };
+
+    const { aliasByKey } = await this.loadProductIndex();
+    const canon = this.resolveProduct(name, aliasByKey);
+    const [row] = await this.db
+      .select({
+        id: vendingProduct.id,
+        name: vendingProduct.name,
+        packSize: vendingProduct.packSize,
+        excludedFromPurchase: vendingProduct.excludedFromPurchase,
+        fixedPurchaseQty: vendingProduct.fixedPurchaseQty,
+      })
+      .from(vendingProduct)
+      .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
+      .limit(1);
+    if (!row) return { ok: false, reason: "not_found", product: canon };
+
+    const before: Partial<VendingProductRow> = {
+      packSize: row.packSize,
+      excludedFromPurchase: row.excludedFromPurchase,
+      fixedPurchaseQty: row.fixedPurchaseQty,
+    };
+    const set: { packSize?: number; excludedFromPurchase?: boolean; fixedPurchaseQty?: number | null; updatedAt: Date } = {
+      updatedAt: new Date(),
+    };
+    if (patch.packSize !== undefined) set.packSize = patch.packSize;
+    if (patch.excludedFromPurchase !== undefined) set.excludedFromPurchase = patch.excludedFromPurchase;
+    if (patch.fixedPurchaseQty !== undefined) set.fixedPurchaseQty = patch.fixedPurchaseQty === 0 ? null : patch.fixedPurchaseQty;
+    const after: Partial<VendingProductRow> = {
+      packSize: set.packSize ?? before.packSize,
+      excludedFromPurchase: set.excludedFromPurchase ?? before.excludedFromPurchase,
+      fixedPurchaseQty: set.fixedPurchaseQty === undefined ? before.fixedPurchaseQty : set.fixedPurchaseQty,
+    };
+
+    await this.db.transaction(async (tx) => {
+      await tx.update(vendingProduct).set(set).where(eq(vendingProduct.id, row.id));
+      // Правило владельца меняет будущие закупы — след обязателен: событие
+      // читает лента «Действия», аудит держит «кто и когда».
+      await tx.insert(event).values({
+        source: "owner",
+        type: "vending.product_rules_changed",
+        payload: { product: row.name, before, after, actor },
+      });
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: actor,
+        action: "vending.product.set_rules",
+        target: row.id,
+        before,
+        after,
+      });
+    });
+    return { ok: true, product: row.name, before, after };
   }
 
   /**
@@ -906,6 +1271,12 @@ export class VendingService {
       price: i.price,
       costRounded: i.costRounded,
       noPrice: i.noPrice,
+      // Разбивка по автоматам и раздача (П5a): накладная 4b собирается из
+      // снимка заявки без пересчёта, а без этих полей «куда везти» терялось.
+      perMachine: i.perMachine,
+      fromPurchase: i.fromPurchase,
+      fromStock: i.fromStock,
+      unfilled: i.unfilled,
     }));
 
     const sum = Math.round(s.costRounded).toLocaleString("ru-RU");

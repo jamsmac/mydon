@@ -1,12 +1,38 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { entity, event, machineSale, productSale, purchase, vendingAlias, vendingProduct, vendingStock } from "@mydon/db";
+import {
+  entity,
+  event,
+  machineCard,
+  machineSale,
+  productSale,
+  purchase,
+  systemConfig,
+  vendingAlias,
+  vendingProduct,
+  vendingStock,
+} from "@mydon/db";
 import { MAX_SLOTS_PER_MACHINE, VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
 type SaleRow = { machineSerial: string; productName: string; quantity: number; capturedAt: Date };
-type ProdRow = { id?: string; name: string; purchasePrice: string | null; packSize: number };
+type ProdRow = {
+  id?: string;
+  name: string;
+  purchasePrice: string | null;
+  packSize: number;
+  excludedFromPurchase?: boolean;
+  fixedPurchaseQty?: number | null;
+};
 type AliasRow = { productId: string; alias: string };
+
+/**
+ * Таблицы реестра автоматов и настроек: их читает `purchase()` (фильтр «в строю»
+ * и маршрут). Стабы обязаны отдавать по ним ПУСТО, иначе строки слотов
+ * притворятся карточками автоматов. Пустой реестр = автомат без карточки =
+ * в строю, поэтому старые ожидания не меняются.
+ */
+const РЕЕСТР: unknown[] = [entity, machineCard, systemConfig];
 
 /**
  * Стаб БД: machines()/deficitSummary() читают `select().from()`. `deficitSummary()`
@@ -16,7 +42,14 @@ type AliasRow = { productId: string; alias: string };
 function readDb(rows: Row[], aliases: AliasRow[] = [], products: ProdRow[] = []) {
   return {
     select: () => ({
-      from: async (t: unknown) => (t === vendingAlias ? aliases : t === vendingProduct ? products : rows),
+      from: async (t: unknown) =>
+        t === vendingAlias
+          ? aliases
+          : t === vendingProduct
+            ? products
+            : РЕЕСТР.includes(t)
+              ? []
+              : rows,
     }),
   } as never;
 }
@@ -26,7 +59,15 @@ function forecastDb(slots: Row[], sales: SaleRow[], aliases: AliasRow[] = [], pr
   return {
     select: () => ({
       from: async (t: unknown) =>
-        t === productSale ? sales : t === vendingAlias ? aliases : t === vendingProduct ? products : slots,
+        t === productSale
+          ? sales
+          : t === vendingAlias
+            ? aliases
+            : t === vendingProduct
+              ? products
+              : РЕЕСТР.includes(t)
+                ? []
+                : slots,
     }),
   } as never;
 }
@@ -46,7 +87,9 @@ function purchaseDb(slots: Row[], sales: SaleRow[], products: ProdRow[], stock: 
               ? stock
               : t === vendingAlias
                 ? aliases
-                : slots,
+                : РЕЕСТР.includes(t)
+                  ? []
+                  : slots,
     }),
   } as never;
 }
@@ -845,46 +888,54 @@ describe("Вендинг Core: приёмка накладной на склад
   });
 });
 
-describe("Вендинг Core: правка закупочной цены (П3)", () => {
-  type ProductRow = { id: string; name: string; purchasePrice: string | null };
-  /**
-   * Стаб: loadProductIndex() читает alias/product (thenable from), поиск
-   * карточки — where→limit; транзакция копит update и события.
-   */
-  function priceDb(productRow: ProductRow | null, aliases: unknown[] = [], products: unknown[] = []) {
-    const updates: Record<string, unknown>[] = [];
-    const events: Record<string, unknown>[] = [];
-    const audits: Record<string, unknown>[] = [];
-    const tx = {
-      update: () => ({
-        set: (v: Record<string, unknown>) => ({
-          where: async () => {
-            updates.push(v);
-          },
-        }),
-      }),
-      insert: (table: unknown) => ({
-        values: async (v: Record<string, unknown>) => {
-          (table === event ? events : audits).push(v);
+/** Карточка товара в стабе цены/правил: поля правил закупа нужны тесту П5a. */
+type ProductRow = {
+  id: string;
+  name: string;
+  purchasePrice: string | null;
+  packSize?: number;
+  excludedFromPurchase?: boolean;
+  fixedPurchaseQty?: number | null;
+};
+/**
+ * Стаб: loadProductIndex() читает alias/product (thenable from), поиск
+ * карточки — where→limit; транзакция копит update и события.
+ */
+function priceDb(productRow: ProductRow | null, aliases: unknown[] = [], products: unknown[] = []) {
+  const updates: Record<string, unknown>[] = [];
+  const events: Record<string, unknown>[] = [];
+  const audits: Record<string, unknown>[] = [];
+  const tx = {
+    update: () => ({
+      set: (v: Record<string, unknown>) => ({
+        where: async () => {
+          updates.push(v);
         },
       }),
-    };
-    let call = 0;
-    const db = {
-      select: () => ({
-        from: () => {
-          const rows = Promise.resolve(call++ === 0 ? aliases : products);
-          return {
-            where: () => ({ limit: async () => (productRow ? [productRow] : []) }),
-            then: rows.then.bind(rows),
-          };
-        },
-      }),
-      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
-    } as never;
-    return { db, updates, events, audits };
-  }
+    }),
+    insert: (table: unknown) => ({
+      values: async (v: Record<string, unknown>) => {
+        (table === event ? events : audits).push(v);
+      },
+    }),
+  };
+  let call = 0;
+  const db = {
+    select: () => ({
+      from: () => {
+        const rows = Promise.resolve(call++ === 0 ? aliases : products);
+        return {
+          where: () => ({ limit: async () => (productRow ? [productRow] : []) }),
+          then: rows.then.bind(rows),
+        };
+      },
+    }),
+    transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+  } as never;
+  return { db, updates, events, audits };
+}
 
+describe("Вендинг Core: правка закупочной цены (П3)", () => {
   it("первая цена (текущей нет) проходит без гейта и пишет событие с аудитом", async () => {
     const { db, updates, events, audits } = priceDb({ id: "p1", name: "TUC", purchasePrice: null });
     const res = await new VendingService(db).setProductPrice("TUC", 12000, "owner");
@@ -1436,5 +1487,179 @@ describe("Продажи Ourvend знают свой автомат", () => {
     });
     const строка = inserts.find((i) => (i.values as { productName?: string }).productName === "Twix")!;
     assert.equal((строка.values as { machineId: string | null }).machineId, null);
+  });
+});
+
+describe("Вендинг Core: план закупа (П5a)", () => {
+  type Card = { entityId: string; status: string };
+  type Ent = { id: string; name: string; externalRef: string | null; type: string };
+  /** Стаб: слоты, склад, товары, карточки автоматов, настройки — по ссылке на таблицу. */
+  function planDb(o: {
+    slots: Row[];
+    stock?: StockRow[];
+    products?: ProdRow[];
+    aliases?: AliasRow[];
+    cards?: Card[];
+    entities?: Ent[];
+    config?: { key: string; value: string }[];
+    sales?: SaleRow[];
+  }) {
+    return {
+      select: () => ({
+        from: (t: unknown) => {
+          const rows: unknown[] =
+            t === vendingAlias
+              ? (o.aliases ?? [])
+              : t === vendingProduct
+                ? (o.products ?? [])
+                : t === vendingStock
+                  ? (o.stock ?? [])
+                  : t === machineCard
+                    ? (o.cards ?? [])
+                    : t === entity
+                      ? (o.entities ?? [])
+                      : t === systemConfig
+                        ? (o.config ?? [])
+                        : t === productSale
+                          ? (o.sales ?? [])
+                          : o.slots;
+          const p = Promise.resolve(rows);
+          return { where: async () => rows, then: p.then.bind(p) };
+        },
+      }),
+    } as never;
+  }
+  const slots: Row[] = [
+    { machineSerial: "2508160376", coilId: "1", productName: "Fanta", capacity: 5, quantity: 1 },
+    { machineSerial: "2508160359", coilId: "1", productName: "Fanta", capacity: 5, quantity: 3 },
+    { machineSerial: "2508160355", coilId: "1", productName: "Fanta", capacity: 5, quantity: 0 }, // SKLAD 5S — warehouse
+  ];
+  const entities: Ent[] = [
+    { id: "m-olma", name: "Olma", externalRef: "c2508160376", type: "machine" },
+    { id: "m-ah", name: "American Hospital", externalRef: "c2508160359", type: "machine" },
+    { id: "m-sk", name: "SKLAD 5S", externalRef: "c2508160355", type: "machine" },
+  ];
+  const cards: Card[] = [
+    { entityId: "m-olma", status: "in_service" },
+    { entityId: "m-ah", status: "in_service" },
+    { entityId: "m-sk", status: "warehouse" },
+  ];
+  const products: ProdRow[] = [
+    { id: "p1", name: "Fanta", purchasePrice: "5167", packSize: 12, excludedFromPurchase: false, fixedPurchaseQty: null },
+  ];
+  // Продажи обязательны: без них позиция уходит в «не закупать — нет продаж»
+  // (§5.5), закуп по ней не считается и в автоматы грузится только склад.
+  const sales: SaleRow[] = [
+    { machineSerial: "2508160359", productName: "Fanta", quantity: 7, capturedAt: new Date("2026-08-20T00:00:00Z") },
+  ];
+
+  it("автомат не в строю пропущен и виден в warnings; маршрут из настройки; раздача по слотам", async () => {
+    const db = planDb({
+      slots,
+      entities,
+      cards,
+      products,
+      sales,
+      stock: [{ productName: "Fanta", quantity: 2, countedAt: new Date() }],
+      config: [{ key: "VENDING_ROUTE_ORDER", value: "2508160359,2508160376" }],
+    });
+    const plan = await new VendingService(db).plan();
+    assert.deepEqual(plan.machines.map((m) => m.serial), ["2508160359", "2508160376"]);
+    assert.equal(plan.machines[0]!.name, "American Hospital");
+    assert.equal(plan.machines[0]!.routeIndex, 1);
+    assert.ok(plan.warnings.some((w) => w.code === "machine_skipped" && w.message.includes("SKLAD 5S")));
+    // need: AH 2, Olma 4 = 6; stock 2; order 12 → fromPurchase 6, склад не трогаем
+    assert.equal(plan.summary.totalFromPurchase, 6);
+    assert.equal(plan.summary.totalFromStock, 0);
+    assert.equal(plan.machines[0]!.slots[0]!.fromPurchase, 2);
+    assert.equal(plan.stock.totalBefore, 2);
+    assert.equal(plan.stock.totalAfter, 2 + 6);
+    assert.equal(plan.stock.stale, false);
+  });
+
+  it("склад старше 3 дней → warning stock_stale и stock.stale=true", async () => {
+    const old = new Date(Date.now() - 4 * 86_400_000);
+    const db = planDb({ slots, entities, cards, products, sales, stock: [{ productName: "Fanta", quantity: 2, countedAt: old }] });
+    const plan = await new VendingService(db).plan();
+    assert.equal(plan.stock.stale, true);
+    assert.ok(plan.warnings.some((w) => w.code === "stock_stale"));
+  });
+
+  it("без настройки маршрут — по имени автомата", async () => {
+    const db = planDb({ slots, entities, cards, products, sales });
+    const plan = await new VendingService(db).plan();
+    assert.deepEqual(plan.machines.map((m) => m.name), ["American Hospital", "Olma"]);
+  });
+
+  it("исключённый товар уходит в excludedByRule, фикс — в order", async () => {
+    const prods: ProdRow[] = [
+      { id: "p1", name: "Fanta", purchasePrice: "5167", packSize: 12, excludedFromPurchase: true, fixedPurchaseQty: null },
+    ];
+    const db = planDb({ slots, entities, cards, products: prods, sales });
+    const plan = await new VendingService(db).plan();
+    assert.equal(plan.summary.items.length, 0);
+    assert.equal(plan.summary.excludedByRule[0]!.product, "Fanta");
+  });
+});
+
+describe("Вендинг Core: правила товара (П5a)", () => {
+  it("меняет блок/исключение/фикс в транзакции с событием и аудитом; 0 снимает фикс", async () => {
+    const { db, updates, events, audits } = priceDb({
+      id: "p1",
+      name: "TUC",
+      purchasePrice: null,
+      packSize: 10,
+      excludedFromPurchase: false,
+      fixedPurchaseQty: 5,
+    });
+    const res = await new VendingService(db).setProductRules(
+      "TUC",
+      { packSize: 5, excludedFromPurchase: true, fixedPurchaseQty: 0 },
+      "owner",
+    );
+    assert.equal(res.ok, true);
+    assert.deepEqual(updates[0], { packSize: 5, excludedFromPurchase: true, fixedPurchaseQty: null, updatedAt: updates[0]!.updatedAt });
+    assert.equal(events[0]!.type, "vending.product_rules_changed");
+    assert.equal(audits[0]!.action, "vending.product.set_rules");
+  });
+
+  it("товар не найден → not_found", async () => {
+    const { db } = priceDb(null);
+    const res = await new VendingService(db).setProductRules("Нет такого", { packSize: 5 });
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "not_found");
+  });
+});
+
+describe("Вендинг Core: заявка хранит разбивку по автоматам (П5a)", () => {
+  // Тот же стаб, что в describe «отправка закупа на утверждение (§5.7)» выше: purchaseDb + очередь согласований.
+  const t = new Date("2026-08-02T00:00:00Z");
+  const slots: Row[] = [
+    { machineSerial: "AH", coilId: "1", productName: "Montella", capacity: 6, quantity: 2 },
+    { machineSerial: "OL", coilId: "1", productName: "Montella", capacity: 6, quantity: 3 },
+  ];
+  const sales: SaleRow[] = [{ machineSerial: "AH", productName: "Montella", quantity: 14, capturedAt: t }];
+  const products: ProdRow[] = [{ name: "Montella", purchasePrice: "5000.00", packSize: 12 }];
+
+  it("positions содержат perMachine/fromPurchase/fromStock/unfilled", async () => {
+    const requests: { payload?: Record<string, unknown> }[] = [];
+    const svc = {
+      request: async (input: { payload?: Record<string, unknown> }) => {
+        requests.push(input);
+        return { id: "ap-1" };
+      },
+    };
+    const vending = new VendingService(purchaseDb(slots, sales, products), svc as never);
+    await vending.submitPurchase("owner");
+    const po = (requests[0]!.payload as { purchaseOrder: { positions: Record<string, unknown>[] } }).purchaseOrder;
+    const pos = po.positions[0]!;
+    assert.deepEqual(pos.perMachine, { AH: 4, OL: 3 });
+    assert.equal(pos.fromPurchase, 7); // need 7, склад 0, order 12 → в автоматы 7
+    assert.equal(pos.fromStock, 0);
+    assert.equal(pos.unfilled, 0);
+    assert.deepEqual(
+      Object.keys(pos).sort(),
+      ["buy", "costRounded", "fromPurchase", "fromStock", "noPrice", "order", "pack", "perMachine", "price", "product", "unfilled"],
+    );
   });
 });
