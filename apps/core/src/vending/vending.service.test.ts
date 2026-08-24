@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { entity, event, machineSale, productSale, vendingAlias, vendingProduct, vendingStock } from "@mydon/db";
+import { entity, event, machineSale, productSale, purchase, vendingAlias, vendingProduct, vendingStock } from "@mydon/db";
 import { MAX_SLOTS_PER_MACHINE, VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
@@ -510,6 +510,7 @@ describe("Вендинг Core: приёмка накладной на склад
     const stockUpserts: Record<string, unknown>[] = [];
     const updates: Record<string, unknown>[] = [];
     const events: Record<string, unknown>[] = [];
+    const purchases: Record<string, unknown>[] = [];
     const tx = {
       select: () => ({
         from: () => ({
@@ -534,12 +535,16 @@ describe("Вендинг Core: приёмка накладной на склад
         }),
       }),
       insert: (table: unknown) => ({
-        values: (v: Record<string, unknown>) => {
+        values: (v: Record<string, unknown> | Record<string, unknown>[]) => {
           if (table === vendingStock) {
-            stockUpserts.push(v);
+            stockUpserts.push(v as Record<string, unknown>);
             return { onConflictDoUpdate: async () => undefined };
           }
-          if (table === event) events.push(v);
+          if (table === purchase) {
+            purchases.push(...(v as Record<string, unknown>[]));
+            return { onConflictDoNothing: async () => undefined };
+          }
+          if (table === event) events.push(v as Record<string, unknown>);
           return Promise.resolve(undefined);
         },
       }),
@@ -550,7 +555,7 @@ describe("Вендинг Core: приёмка накладной на склад
       select: () => ({ from: async () => (call++ === 0 ? aliases : products) }),
       transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
     } as never;
-    return { db, stockUpserts, updates, events };
+    return { db, stockUpserts, updates, events, purchases };
   }
 
   it("приёмка увеличивает остаток на заказанное и переводит в received", async () => {
@@ -571,7 +576,9 @@ describe("Вендинг Core: приёмка накладной на склад
     assert.equal(res.orderId, "o1");
     assert.equal(res.replenished, 2);
     assert.equal(res.units, 24);
-    assert.deepEqual(updates[0], { status: "received" });
+    assert.equal(updates[0]!.status, "received");
+    assert.ok(updates[0]!.receivedAt instanceof Date);
+    assert.equal(updates[0]!.receivedBy, "owner");
     assert.equal(stockUpserts.length, 2);
     assert.equal(stockUpserts[0]!.productName, "Montella");
     assert.equal(stockUpserts[0]!.quantity, 12);
@@ -728,6 +735,215 @@ describe("Вендинг Core: приёмка накладной на склад
     assert.equal(res.units, 6);
     assert.deepEqual(res.unmatchedDistribution, []);
     assert.equal(stockUpserts[0]!.quantity, 6);
+  });
+
+  it("мост П3: позиции накладной становятся строками журнала прихода", async () => {
+    const order: OrderRow = {
+      id: "abcdef12-0000-0000-0000-000000000000",
+      status: "approved",
+      positions: [
+        { product: "Montella", order: 12, price: 8500 },
+        { product: "Fanta", order: 6 }, // цены нет → unitPrice null, не 0
+        { product: "Zero", order: 4, price: 0 }, // 0 = «цены нет», не ноль сум
+      ],
+    };
+    const { db, purchases, events } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder();
+
+    assert.equal(res.recordedPurchases, 3);
+    assert.equal(purchases.length, 3);
+    const m = purchases.find((p) => p.product === "Montella")!;
+    assert.equal(m.extId, `${order.id}:montella`);
+    assert.equal(m.source, "vending-order");
+    assert.equal(m.qty, "12");
+    assert.equal(m.unitPrice, "8500.00");
+    assert.equal(m.total, "102000.00");
+    assert.match(String(m.dt), /^\d{4}-\d{2}-\d{2}$/);
+    const f = purchases.find((p) => p.product === "Fanta")!;
+    assert.equal(f.unitPrice, null);
+    assert.equal(f.total, null);
+    const z = purchases.find((p) => p.product === "Zero")!;
+    assert.equal(z.unitPrice, null);
+    const payload = events[0]!.payload as { recordedPurchases: number };
+    assert.equal(payload.recordedPurchases, 3);
+  });
+
+  it("мост П3: полностью розданная позиция всё равно попадает в журнал (закуплена целиком)", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      positions: [{ product: "TUC", order: 5, price: 12000 }],
+    };
+    const { db, purchases, stockUpserts } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { TUC: 5 });
+
+    assert.equal(res.units, 0, "весь заказ роздан мимо склада");
+    assert.equal(stockUpserts.length, 0);
+    assert.equal(purchases.length, 1, "журнал фиксирует закуп, а не только приход на склад");
+    assert.equal(purchases[0]!.qty, "5");
+  });
+
+  it("мост П3: пустые позиции не рождают строк журнала", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: " ", order: 5 }] };
+    const { db, purchases } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder();
+    assert.equal(res.recordedPurchases, 0);
+    assert.equal(purchases.length, 0);
+  });
+
+  it("мост П3 молчит при живом зеркале mydon-stock — иначе журнал двоил бы закуп (найдено адверсариал-ревью)", async () => {
+    const order: OrderRow = { id: "o1", status: "approved", positions: [{ product: "TUC", order: 5, price: 12000 }] };
+    const { db, purchases, stockUpserts } = receiveDb(order);
+    process.env.STOCK_DATABASE_URL = "postgresql://stock.example/db";
+    try {
+      const res = await new VendingService(db).receiveOrder();
+      assert.equal(res.received, true, "приёмка работает как раньше");
+      assert.equal(stockUpserts.length, 1, "склад зачисляется как раньше");
+      assert.equal(res.recordedPurchases, 0);
+      assert.equal(purchases.length, 0, "строк vending-order нет, пока закуп зеркалится из stock");
+    } finally {
+      delete process.env.STOCK_DATABASE_URL;
+    }
+  });
+
+  it("мост П3: дубль канона в positions сливается в одну строку, distributed не применяется дважды", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      // Слоты «Кола»/«кола» без алиаса дают две позиции одного канона.
+      positions: [
+        { product: "Кола", order: 10, price: 5000 },
+        { product: "кола", order: 8, price: 5000 },
+      ],
+    };
+    const { db, purchases } = receiveDb(order);
+    const res = await new VendingService(db).receiveOrder(undefined, "owner", { кола: 8 });
+
+    assert.equal(purchases.length, 1, "один extId — одна строка журнала");
+    assert.equal(purchases[0]!.qty, "18");
+    assert.equal(purchases[0]!.total, "90000.00");
+    assert.equal(res.recordedPurchases, 1);
+    // Раздача 8 списывается ОДИН раз (с первой позиции), не с каждой копии.
+    assert.equal(res.distributedUnits, 8);
+    assert.equal(res.units, 10, "склад получает 18 − 8, а не 18 − 16");
+  });
+
+  it("мост П3: потолки магнитуд — кривая цена уходит в null, гигантское qty не пишется в журнал", async () => {
+    const order: OrderRow = {
+      id: "o1",
+      status: "approved",
+      positions: [
+        { product: "TUC", order: 5, price: 99_000_000_000 },
+        { product: "Flint", order: 2_000_000_000, price: 5000 },
+      ],
+    };
+    const { db, purchases } = receiveDb(order);
+    await new VendingService(db).receiveOrder();
+    const tuc = purchases.find((p) => p.product === "TUC")!;
+    assert.equal(tuc.unitPrice, null, "цена за пределами numeric(15,2)-здравого смысла = «цены нет»");
+    assert.ok(!purchases.some((p) => p.product === "Flint"), "qty за потолком не попадает в журнал");
+  });
+});
+
+describe("Вендинг Core: правка закупочной цены (П3)", () => {
+  type ProductRow = { id: string; name: string; purchasePrice: string | null };
+  /**
+   * Стаб: loadProductIndex() читает alias/product (thenable from), поиск
+   * карточки — where→limit; транзакция копит update и события.
+   */
+  function priceDb(productRow: ProductRow | null, aliases: unknown[] = [], products: unknown[] = []) {
+    const updates: Record<string, unknown>[] = [];
+    const events: Record<string, unknown>[] = [];
+    const audits: Record<string, unknown>[] = [];
+    const tx = {
+      update: () => ({
+        set: (v: Record<string, unknown>) => ({
+          where: async () => {
+            updates.push(v);
+          },
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: async (v: Record<string, unknown>) => {
+          (table === event ? events : audits).push(v);
+        },
+      }),
+    };
+    let call = 0;
+    const db = {
+      select: () => ({
+        from: () => {
+          const rows = Promise.resolve(call++ === 0 ? aliases : products);
+          return {
+            where: () => ({ limit: async () => (productRow ? [productRow] : []) }),
+            then: rows.then.bind(rows),
+          };
+        },
+      }),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
+    return { db, updates, events, audits };
+  }
+
+  it("первая цена (текущей нет) проходит без гейта и пишет событие с аудитом", async () => {
+    const { db, updates, events, audits } = priceDb({ id: "p1", name: "TUC", purchasePrice: null });
+    const res = await new VendingService(db).setProductPrice("TUC", 12000, "owner");
+
+    assert.equal(res.ok, true);
+    assert.equal(res.product, "TUC");
+    assert.equal(res.oldPrice, null);
+    assert.equal(updates[0]!.purchasePrice, "12000.00");
+    assert.equal(events[0]!.type, "vending.price_changed");
+    assert.equal(audits[0]!.action, "vending.product.set_price");
+  });
+
+  it("гейт: отклонение больше 20% без подтверждения — отказ, цена не тронута", async () => {
+    const { db, updates } = priceDb({ id: "p1", name: "TUC", purchasePrice: "10000" });
+    const res = await new VendingService(db).setProductPrice("TUC", 15000);
+
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "spike");
+    assert.equal(res.deviationPct, 50);
+    assert.equal(res.oldPrice, 10000);
+    assert.equal(updates.length, 0);
+  });
+
+  it("гейт снимается confirmed=true", async () => {
+    const { db, updates } = priceDb({ id: "p1", name: "TUC", purchasePrice: "10000" });
+    const res = await new VendingService(db).setProductPrice("TUC", 15000, "owner", true);
+    assert.equal(res.ok, true);
+    assert.equal(updates[0]!.purchasePrice, "15000.00");
+  });
+
+  it("в пределах порога — без подтверждения", async () => {
+    const { db } = priceDb({ id: "p1", name: "TUC", purchasePrice: "10000" });
+    const res = await new VendingService(db).setProductPrice("TUC", 11500);
+    assert.equal(res.ok, true);
+  });
+
+  it("алиас резолвится в канон до поиска карточки", async () => {
+    const { db } = priceDb({ id: "p1", name: "TUC", purchasePrice: null }, [{ productId: "p1", alias: "тук" }], [
+      { id: "p1", name: "TUC", purchasePrice: null, packSize: 1 },
+    ]);
+    const res = await new VendingService(db).setProductPrice("тук", 9000);
+    assert.equal(res.ok, true);
+    assert.equal(res.product, "TUC");
+  });
+
+  it("незнакомый товар — not_found, ничего не пишем", async () => {
+    const { db, updates, events } = priceDb(null);
+    const res = await new VendingService(db).setProductPrice("Чипсы новые", 9000);
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "not_found");
+    assert.equal(updates.length, 0);
+    assert.equal(events.length, 0);
+  });
+
+  it("мусорный вход (0, NaN, пустое имя) — отказ до записи", async () => {
+    const { db } = priceDb(null);
+    assert.equal((await new VendingService(db).setProductPrice("TUC", 0)).ok, false);
+    assert.equal((await new VendingService(db).setProductPrice("TUC", Number.NaN)).ok, false);
+    assert.equal((await new VendingService(db).setProductPrice("  ", 100)).ok, false);
   });
 });
 

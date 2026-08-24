@@ -19,6 +19,7 @@ import { Conversations } from "./conversation";
 import { handleStaffCallback, handleStaffMessage, taskKeyboard } from "./staff";
 import { helpText, menuKeyboard } from "./menu";
 import { handleRegisterPhoto } from "./staff-register";
+import { pickReceiptOrder } from "./purchase-brief";
 import { attachBeforePhoto, handleTaskDonePhoto } from "./task-done";
 import {
   handleStaffAddCallback,
@@ -321,6 +322,51 @@ async function main(): Promise<void> {
       // узнать сразу, что фото не приложилось.
       await tg
         .sendMessage(chatId, "⚠️ Фото не сохранилось — отправь его ещё раз через минуту.")
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Фото чека от владельца (П3): подпись «чек» → вложение к последней принятой
+   * накладной (не старше суток — pickReceiptOrder). Доказательная база трат
+   * §5.8 перестаёт держаться на честном слове, стейта нет: правило «сначала
+   * „принять закуп", потом фото» заменяет мастер.
+   */
+  async function routeOwnerReceiptPhoto(
+    chatId: number,
+    photo: NonNullable<NonNullable<TgUpdate["message"]>["photo"]>,
+  ): Promise<void> {
+    try {
+      // limit 50: свежепринятая накладная обязана попасть в окно выбора,
+      // даже если панель нагенерила десяток заявок позже неё.
+      const orders = await deps.core.vendingOrders(50);
+      const target = pickReceiptOrder(orders, new Date());
+      if (target === null) {
+        await tg.sendMessage(
+          chatId,
+          "Не нашёл накладной, принятой за последние сутки, — чек не прикреплён. Сначала «принять закуп», потом фото с подписью «чек».",
+        );
+        return;
+      }
+      const largest = photo[photo.length - 1];
+      const file = await tg.downloadFile(largest.file_id);
+      await deps.core.uploadPhoto({
+        ownerType: "vending_purchase_order",
+        ownerId: target.id,
+        bytes: file.bytes,
+        mime: file.mime,
+        filename: "receipt.jpg",
+        createdBy: "owner",
+      });
+      const when = new Date(target.receivedAt ?? target.createdAt).toLocaleDateString("ru-RU", {
+        day: "2-digit",
+        month: "2-digit",
+      });
+      await tg.sendMessage(chatId, `🧾 Чек прикреплён к накладной от ${when} (${target.positions} поз.).`);
+    } catch (err) {
+      console.error("Чек владельца не обработан:", err);
+      await tg
+        .sendMessage(chatId, "⚠️ Чек не сохранился — отправь фото ещё раз через минуту.")
         .catch(() => undefined);
     }
   }
@@ -651,11 +697,21 @@ async function main(): Promise<void> {
       const photoChat = u.message.chat.id;
       if (!isAllowed(photoChat, allowlist) || asStaff.has(photoChat)) {
         await routeStaffPhoto(photoChat, u.message.photo);
+      } else if (/(^|[\s,.!:;»")])чек(?=$|[\s,.!:;«("])/i.test(u.message.caption ?? "")) {
+        // Граница слова руками (\b после кириллицы не работает): «чекушка» и
+        // «чек-лист» — не команды прикрепления (найдено адверсариал-ревью).
+        // Единственное фото, которое владелец шлёт в своём режиме, — чек с
+        // базара (П3). Явная подпись вместо угадывания: без неё скрин OurVend
+        // прилип бы к накладной так же молча, как раньше уходил в «фото ДО».
+        await routeOwnerReceiptPhoto(photoChat, u.message.photo);
       } else {
         // Владельцу — не молчание: барьер #149 закрыл утечку фото в полевой
         // разбор, но вернул прежний симптом «бот проглотил фото».
         await tg
-          .sendMessage(photoChat, "Фото в режиме владельца не обрабатываю. Для полевых записей включи «я сотрудник».")
+          .sendMessage(
+            photoChat,
+            "Фото в режиме владельца не обрабатываю. Чек закупа — пришли с подписью «чек»; полевые записи — включи «я сотрудник».",
+          )
           .catch(() => undefined);
       }
     } else if (u.message?.text) {

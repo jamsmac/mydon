@@ -1662,6 +1662,13 @@ export const vendingPurchaseOrder = pgTable("vending_purchase_order", {
    */
   distributedUnits: integer("distributed_units"),
   unmatchedDistribution: jsonb("unmatched_distribution").$type<string[]>(),
+  /**
+   * Момент и автор приёмки. NULL у накладных, принятых до появления колонок
+   * (бэкфилла нет — честнее пустота, чем выдуманное время). К последней
+   * принятой за сутки привязывается фото чека из бота.
+   */
+  receivedAt: timestamp("received_at", { withTimezone: true }),
+  receivedBy: text("received_by"),
 });
 
 /**

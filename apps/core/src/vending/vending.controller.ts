@@ -11,6 +11,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
@@ -166,6 +167,27 @@ export class ReceiveOrderDto {
   distributed?: Record<string, number>;
 }
 
+export class SetProductPriceDto {
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  product!: string;
+
+  /**
+   * Целые сумы: дробной цены за единицу в закупе не бывает, а дробь на
+   * границе API — почти наверняка ошибка разбора команды. Потолок — тот же,
+   * что в парсере бота: numeric(10,2) не переживёт больше, а дороже 10 млн
+   * сум за единицу в этом бизнесе не бывает.
+   */
+  @IsInt() @Min(1) @Max(10_000_000)
+  price!: number;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+
+  /** Повторная команда со словом «точно» — пропуск гейта цены. */
+  @IsOptional() @IsIn([true, false])
+  confirmed?: boolean;
+}
+
 export class SyncFinishDto {
   @IsIn(["success", "partial", "failed"])
   status!: "success" | "partial" | "failed";
@@ -277,14 +299,23 @@ export class VendingController {
 
   /** Накладные закупа (материализованы при одобрении заявки). */
   @Get("orders")
-  orders() {
-    return this.vending.orders();
+  orders(@Query("limit") limit?: string) {
+    // Сервис зажимает 1..50; NaN → дефолт. Больший лимит нужен выбору
+    // накладной для чека (pickReceiptOrder), витрины живут на дефолте.
+    const n = limit === undefined ? undefined : Number(limit);
+    return this.vending.orders(n !== undefined && Number.isFinite(n) ? n : undefined);
   }
 
   /** Принять накладную на склад (§5.7): приход += заказанное, статус received. */
   @Post("orders/receive")
   receiveOrder(@Body() dto: ReceiveOrderDto) {
     return this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
+  }
+
+  /** Правка закупочной цены товара (гейт ±20% — см. setProductPrice). */
+  @Post("product-price")
+  setProductPrice(@Body() dto: SetProductPriceDto) {
+    return this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
   }
 
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────

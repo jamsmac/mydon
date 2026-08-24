@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  PRICE_SPIKE_PCT,
   computePurchase,
   computePurchaseCash,
   machineDeficit,
   needByProduct,
   normalizeProductName,
   planogramStatus,
+  priceDeviationPct,
   runoutForecast,
   slotDeficit,
   slotValid,
@@ -274,5 +276,25 @@ describe("Вендинг: касса закупа воспроизводит р�
   it("потрачено больше, чем получено — остаток уходит в минус (не скрываем перерасход)", () => {
     const overspent = computePurchaseCash(100_000, [{ name: "базар", lines: [{ label: "X", amount: 150_000 }] }]);
     assert.equal(overspent.remainder, -50_000);
+  });
+});
+
+describe("Гейт цены закупа (П3): priceDeviationPct", () => {
+  it("формула донора: |Δ|/прежняя × 100, симметрично вверх и вниз", () => {
+    assert.equal(priceDeviationPct(12_000, 10_000), 20);
+    assert.equal(priceDeviationPct(8_000, 10_000), 20);
+    assert.equal(priceDeviationPct(45_000, 4_500), 900); // классическая опечатка донора
+  });
+
+  it("сравнивать не с чем — null (гейт пропускается): нет цены, ноль, отрицательная", () => {
+    assert.equal(priceDeviationPct(12_000, null), null);
+    assert.equal(priceDeviationPct(12_000, undefined), null);
+    assert.equal(priceDeviationPct(12_000, 0), null);
+    assert.equal(priceDeviationPct(12_000, -5), null);
+    assert.equal(priceDeviationPct(Number.NaN, 10_000), null);
+  });
+
+  it("порог PRICE_SPIKE_PCT — донорские 20%", () => {
+    assert.equal(PRICE_SPIKE_PCT, 20);
   });
 });

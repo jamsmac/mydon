@@ -152,6 +152,24 @@ export interface PriceEntry {
   pack: number;
 }
 
+/**
+ * Порог гейта цены, % — выше него правка прайса требует подтверждения.
+ * Значение из проверенного процесса mydon-stock (PRICE_SPIKE_PCT): ловит
+ * опечатку (45000 вместо 4500) и скрытое подорожание поставщика.
+ */
+export const PRICE_SPIKE_PCT = 20;
+
+/**
+ * Отклонение новой цены от прежней, % (всегда ≥0). null — сравнивать не с
+ * чем (прежней цены нет или она не положительная): гейт пропускается, как
+ * у донора.
+ */
+export function priceDeviationPct(next: number, last: number | null | undefined): number | null {
+  if (typeof last !== "number" || !Number.isFinite(last) || last <= 0) return null;
+  if (!Number.isFinite(next)) return null;
+  return Math.abs(((next - last) / last) * 100);
+}
+
 export interface PurchaseRow {
   product: string;
   perMachine: Record<string, number>;

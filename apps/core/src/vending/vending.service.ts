@@ -7,6 +7,7 @@ import {
   machineSale,
   machineSlot,
   productSale,
+  purchase,
   slotSnapshot,
   vendingAlias,
   vendingCashSession,
@@ -17,6 +18,8 @@ import {
 } from "@mydon/db";
 import {
   MAX_CAPACITY,
+  PRICE_SPIKE_PCT,
+  TZ,
   computePurchase,
   computePurchaseCash,
   machineDeficit,
@@ -25,6 +28,7 @@ import {
   normalizeMachineSerial,
   normalizeProductName,
   planogramStatus,
+  priceDeviationPct,
   runoutForecast,
   slotValid,
   type CashCategoryInput,
@@ -222,6 +226,8 @@ export interface PurchaseOrderRow {
   createdAt: string;
   /** Заполнены только после приёмки (§5.7) — до неё null. */
   distributedUnits: number | null;
+  receivedAt: string | null;
+  receivedBy: string | null;
   unmatchedDistribution: string[] | null;
 }
 
@@ -249,8 +255,29 @@ export interface ReceiveOrderResult {
    * показать это владельцу (найдено адверсариал-ревью).
    */
   unmatchedDistribution: string[];
+  /**
+   * Строк записано в журнал прихода (таблица purchase, source='vending-order').
+   * Мост П3: после отключения синка mydon-stock журнал прихода и сводку
+   * снабжения кормят сами накладные.
+   */
+  recordedPurchases?: number;
   /** Почему не приняли (когда !received). */
   reason?: string;
+}
+
+/** Итог правки закупочной цены товара (команда «цена …» из бота/панели). */
+export interface SetPriceResult {
+  ok: boolean;
+  /** Каноническое имя товара (после алиасов). */
+  product?: string;
+  oldPrice?: number | null;
+  newPrice?: number;
+  /**
+   * Гейт цены: отклонение от текущей больше порога — нужна повторная
+   * команда с подтверждением (confirmed=true).
+   */
+  deviationPct?: number;
+  reason?: "not_found" | "spike";
 }
 
 /** Итог отправки закупа на утверждение. */
@@ -920,6 +947,8 @@ export class VendingService {
       createdAt: r.createdAt.toISOString(),
       distributedUnits: r.distributedUnits,
       unmatchedDistribution: (r.unmatchedDistribution as string[] | null) ?? null,
+      receivedAt: r.receivedAt ? r.receivedAt.toISOString() : null,
+      receivedBy: r.receivedBy,
     }));
   }
 
@@ -1031,7 +1060,7 @@ export class VendingService {
       // получит 0 строк из returning() и не тронет склад.
       const [order] = await tx
         .update(vendingPurchaseOrder)
-        .set({ status: "received" })
+        .set({ status: "received", receivedAt: now, receivedBy })
         .where(and(eq(vendingPurchaseOrder.id, existing.id), inArray(vendingPurchaseOrder.status, ["approved", "ordered"])))
         .returning();
 
@@ -1053,17 +1082,65 @@ export class VendingService {
       let units = 0;
       let distributedUnits = 0;
       const consumedDistribution = new Set<string>();
+      // Мост П3 в журнал прихода: каждая позиция накладной становится строкой
+      // purchase (source='vending-order', цена — снапшот прайса из позиции).
+      // Собираем ДО ветки toWarehouse: закуплено qty целиком, даже если всё
+      // роздано по автоматам мимо склада.
+      //
+      // Переходный гейт: пока задан STOCK_DATABASE_URL, тот же физический
+      // закуп приходит зеркалом из mydon-stock (source='stock') — мост при
+      // живом зеркале двоил бы деньги в журнале и сводке снабжения (найдено
+      // адверсариал-ревью П3a). Мост включается в момент гашения синка.
+      const mirrorAlive = Boolean(process.env.STOCK_DATABASE_URL);
+      const dtToday = new Date().toLocaleDateString("en-CA", { timeZone: TZ });
+      const purchaseRows: (typeof purchase.$inferInsert)[] = [];
       for (const p of positions) {
-        const pos = p as { product?: unknown; order?: unknown };
+        const pos = p as { product?: unknown; order?: unknown; price?: unknown };
         const product = typeof pos.product === "string" ? pos.product.trim() : "";
         const qty = typeof pos.order === "number" && Number.isFinite(pos.order) ? Math.trunc(pos.order) : 0;
         if (!product || qty <= 0) continue;
 
         const key = normalizeProductName(product);
+        // Позиции пишутся в jsonb без валидации содержимого (см.
+        // executePurchaseOrder) — price перепроверяем так же строго, как
+        // qty. 0 и мусор = «цены нет», НЕ ноль сум. Потолки магнитуд — чтобы
+        // кривая ручная правка jsonb не завалила numeric-колонку и с ней всю
+        // приёмку (найдено адверсариал-ревью П3a); qty > потолка не пишем в
+        // журнал вовсе (склад упадёт на своём integer раньше).
+        const rawPrice = typeof pos.price === "number" && Number.isFinite(pos.price) && pos.price > 0 ? pos.price : null;
+        const unitPrice = rawPrice !== null && rawPrice <= 10_000_000 ? rawPrice : null;
+        if (!mirrorAlive && qty <= 1_000_000) {
+          // Дубликат канона в positions (слоты «Кола»/«кола» без алиаса дают
+          // две позиции одного канона) дал бы два одинаковых extId в одном
+          // INSERT — ON CONFLICT DO NOTHING молча выкинул бы второй. Сливаем
+          // в одну строку заранее.
+          const twin = purchaseRows.find((r) => r.extId === `${order.id}:${key}`);
+          if (twin) {
+            const mergedQty = Number(twin.qty) + qty;
+            twin.qty = String(mergedQty);
+            if (twin.unitPrice != null) twin.total = (mergedQty * Number(twin.unitPrice)).toFixed(2);
+          } else {
+            purchaseRows.push({
+              extId: `${order.id}:${key}`,
+              dt: dtToday,
+              product,
+              unit: "шт",
+              qty: String(qty),
+              unitPrice: unitPrice === null ? null : unitPrice.toFixed(2),
+              total: unitPrice === null ? null : (qty * unitPrice).toFixed(2),
+              note: `накладная ${order.id.slice(0, 8)}, принял ${receivedBy}`,
+              source: "vending-order",
+            });
+          }
+        }
         const requested = distributedByCanonical.get(key);
         if (requested !== undefined) consumedDistribution.add(key);
         // Не больше заказанного — опечатка владельца не должна увести склад в минус.
         const dist = Math.min(qty, Math.max(0, requested ?? 0));
+        // Остаток распределения списываем: дубль канона в positions иначе
+        // получал бы requested целиком ВТОРОЙ раз — distributedUnits врал бы,
+        // а склад недосчитывался (найдено адверсариал-ревью П3a).
+        if (requested !== undefined) distributedByCanonical.set(key, Math.max(0, requested - dist));
         distributedUnits += dist;
         const toWarehouse = qty - dist;
         if (toWarehouse <= 0) continue;
@@ -1077,6 +1154,14 @@ export class VendingService {
           });
         replenished += 1;
         units += toWarehouse;
+      }
+
+      // Журнал прихода — в той же транзакции, что и переход статуса: приёмка
+      // без следа в purchase невозможна, откат откатывает всё. Конфликт по
+      // (source, extId) законен только при ручной правке журнала — тогда
+      // живая строка важнее моста, не перетираем.
+      if (purchaseRows.length > 0) {
+        await tx.insert(purchase).values(purchaseRows).onConflictDoNothing();
       }
 
       // Запрошенное распределение, которое не совпало ни с одной позицией
@@ -1098,7 +1183,14 @@ export class VendingService {
       await tx.insert(event).values({
         source: "owner",
         type: "vending.purchase_order.received",
-        payload: { orderId: order.id, replenished, units, distributedUnits, unmatchedDistribution },
+        payload: {
+          orderId: order.id,
+          replenished,
+          units,
+          distributedUnits,
+          unmatchedDistribution,
+          recordedPurchases: purchaseRows.length,
+        },
       });
       await tx.insert(auditLog).values({
         actorKind: "human",
@@ -1109,8 +1201,74 @@ export class VendingService {
         after: order,
       });
 
-      return { received: true, orderId: order.id, replenished, units, distributedUnits, unmatchedDistribution };
+      return {
+        received: true,
+        orderId: order.id,
+        replenished,
+        units,
+        distributedUnits,
+        unmatchedDistribution,
+        recordedPurchases: purchaseRows.length,
+      };
     });
+  }
+
+  /**
+   * Правка закупочной цены товара — команда «цена <товар> <число>» из бота.
+   * Единственный «живой» писатель vending_product.purchasePrice (сид не
+   * трогает существующие строки): чинит тупик «⚠️ Без цены — на разбор» из
+   * брифинга закупа прямо из Telegram.
+   *
+   * Гейт цены (процесс mydon-stock): отклонение от текущей > PRICE_SPIKE_PCT
+   * → отказ reason='spike', владелец повторяет команду со словом «точно»
+   * (confirmed=true). Первая цена (текущей нет) проходит без гейта.
+   */
+  async setProductPrice(rawProduct: string, price: number, actor = "owner", confirmed = false): Promise<SetPriceResult> {
+    const name = rawProduct.trim();
+    if (!name || !Number.isFinite(price) || price <= 0) return { ok: false, reason: "not_found" };
+
+    const { aliasByKey } = await this.loadProductIndex();
+    const canon = this.resolveProduct(name, aliasByKey);
+    const [row] = await this.db
+      .select({ id: vendingProduct.id, name: vendingProduct.name, purchasePrice: vendingProduct.purchasePrice })
+      .from(vendingProduct)
+      .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
+      .limit(1);
+    if (!row) return { ok: false, reason: "not_found", product: canon };
+
+    const oldPrice = row.purchasePrice === null ? null : Number(row.purchasePrice);
+    const deviation = priceDeviationPct(price, oldPrice);
+    if (!confirmed && deviation !== null && deviation > PRICE_SPIKE_PCT) {
+      return {
+        ok: false,
+        reason: "spike",
+        product: row.name,
+        oldPrice,
+        newPrice: price,
+        deviationPct: Math.round(deviation),
+      };
+    }
+
+    await this.db.transaction(async (tx) => {
+      await tx.update(vendingProduct).set({ purchasePrice: price.toFixed(2) }).where(eq(vendingProduct.id, row.id));
+      // История цены — событием: у vending_product нет структурной истории
+      // (appendPriceHistory покрывает только entity-карточки), а событие
+      // читает и лента «Действия».
+      await tx.insert(event).values({
+        source: "owner",
+        type: "vending.price_changed",
+        payload: { product: row.name, oldPrice, newPrice: price, actor },
+      });
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: actor,
+        action: "vending.product.set_price",
+        target: row.id,
+        before: { purchasePrice: oldPrice },
+        after: { purchasePrice: price },
+      });
+    });
+    return { ok: true, product: row.name, oldPrice, newPrice: price };
   }
 
   // ── Касса закупа (§5.8) ───────────────────────────────────────────────────
