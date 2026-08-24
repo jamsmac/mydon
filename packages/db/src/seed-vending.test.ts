@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { normalizeProductName } from "@mydon/shared";
 import { vendingAlias, vendingProduct, vendingStock } from "./schema";
-import { VENDING_ALIASES, VENDING_PRICELIST, packOf, seedVendingAliases } from "./seed-vending";
+import {
+  VENDING_ALIASES,
+  VENDING_PRICELIST,
+  VENDING_PURCHASE_RULES,
+  packOf,
+  seedVendingAliases,
+} from "./seed-vending";
 
 describe("Прайс вендинга (Приложение А)", () => {
   it("имена уникальны, цены положительны", () => {
@@ -120,5 +126,25 @@ describe("seedVendingAliases: перенос остатка склада на к
     const res = await seedVendingAliases(db);
     assert.equal(res.stockRenamed, 1);
     assert.equal(stockUpdates.length, 1);
+  });
+});
+
+describe("Сид вендинга: правила закупа владельца (П5a)", () => {
+  const names = new Set(VENDING_PRICELIST.map((p) => p.name));
+  it("каждое правило ссылается на товар прайса", () => {
+    for (const r of VENDING_PURCHASE_RULES) assert.ok(names.has(r.product), r.product);
+  });
+  it("11 исключений, 2 фикс-количества, блоки 6/5 у энергетиков и чипсов (procurement-rules.json 24.08.2026)", () => {
+    assert.equal(VENDING_PURCHASE_RULES.filter((r) => r.excludedFromPurchase).length, 11);
+    assert.deepEqual(
+      VENDING_PURCHASE_RULES.filter((r) => r.fixedPurchaseQty).map((r) => [r.product, r.fixedPurchaseQty]),
+      [["СуперКонтик Шоколадный вкус 100gr", 50], ["Snickers 50gr", 48]],
+    );
+    const pack = (n: string) => VENDING_PURCHASE_RULES.find((r) => r.product === n)?.packSize;
+    assert.equal(pack("Red Bull CAN 0,25"), 6);
+    assert.equal(pack("Lays Рифлёные Сметана и лук 70gr"), 5);
+  });
+  it("каждый алиас ссылается на товар прайса", () => {
+    for (const a of VENDING_ALIASES) assert.ok(names.has(a.product), a.alias);
   });
 });

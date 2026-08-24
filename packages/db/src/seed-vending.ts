@@ -234,6 +234,66 @@ export const VENDING_ALIASES: AliasItem[] = [
   { alias: "Суперконтик", product: "СуперКонтик Шоколадный вкус 100gr" },
 ];
 
+/** Правило закупа товара — перенос procurement-rules.json владельца (24.08.2026). */
+export interface PurchaseRuleItem {
+  product: string;
+  excludedFromPurchase?: boolean;
+  fixedPurchaseQty?: number;
+  packSize?: number;
+}
+
+/**
+ * Правила закупа владельца (vending-ops, 24.08.2026): что не покупать, фикс-количества,
+ * блоки, отличные от правила 12/10. Цены здесь НЕ трогаем — они правятся командой «цена».
+ */
+export const VENDING_PURCHASE_RULES: PurchaseRuleItem[] = [
+  // ── Убрано из закупки (11) ──
+  { product: "Ermak Asl Qurt 7шт 30gr", excludedFromPurchase: true },
+  { product: "Twix 50gr", excludedFromPurchase: true },
+  { product: "Strobar 40gr", excludedFromPurchase: true },
+  { product: "Ermak Арахис с солью 50gr", excludedFromPurchase: true },
+  { product: "M and Ms Шоколадный 40gr", excludedFromPurchase: true },
+  { product: "Barni Шоколадный 30gr", excludedFromPurchase: true },
+  { product: "Nesquick Choco 200ml", excludedFromPurchase: true, packSize: 5 },
+  { product: "Velona Венские вафли с шоколадным вкусом", excludedFromPurchase: true },
+  { product: "Kinder Bueno Chocolate 43gr", excludedFromPurchase: true },
+  { product: "Lays Рифлёные Сметана и лук 70gr", excludedFromPurchase: true, packSize: 5 },
+  { product: "Flint Kabob 100gr", excludedFromPurchase: true, packSize: 5 },
+  // ── Фикс-количества ──
+  { product: "СуперКонтик Шоколадный вкус 100gr", fixedPurchaseQty: 50 },
+  { product: "Snickers 50gr", fixedPurchaseQty: 48 },
+  // ── Блоки, отличные от 12/10 ──
+  { product: "Red Bull CAN 0,25", packSize: 6 },
+  { product: "Flash Up Energy CAN 0,45", packSize: 6 },
+  { product: "Plus 18 CAN 0,45", packSize: 6 },
+  { product: "Ozbegim Tea Mango Moychechak 450ml", packSize: 6 },
+  { product: "TUC Crackers Sour cream and Onion", packSize: 5 },
+  { product: "Cheers Сметана и зелень 70gr", packSize: 5 },
+];
+
+/**
+ * Наложить правила закупа на существующие строки `vending_product`. Идемпотентно:
+ * задаёт ровно те поля, что перечислены в правиле; товар не найден — в `unknown`.
+ */
+export async function seedVendingRules(db: ReturnType<typeof createDb>): Promise<{ applied: number; unknown: string[] }> {
+  const products = await db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct);
+  const idByName = new Map(products.map((p) => [p.name, p.id]));
+  const unknown: string[] = [];
+  let applied = 0;
+  for (const r of VENDING_PURCHASE_RULES) {
+    const id = idByName.get(r.product);
+    if (!id) { unknown.push(r.product); continue; }
+    await db.update(vendingProduct).set({
+      ...(r.excludedFromPurchase !== undefined ? { excludedFromPurchase: r.excludedFromPurchase } : {}),
+      ...(r.fixedPurchaseQty !== undefined ? { fixedPurchaseQty: r.fixedPurchaseQty } : {}),
+      ...(r.packSize !== undefined ? { packSize: r.packSize } : {}),
+      updatedAt: new Date(),
+    }).where(eq(vendingProduct.id, id));
+    applied += 1;
+  }
+  return { applied, unknown };
+}
+
 /**
  * Занести прайс в `vending_product`. Идемпотентно: существующих по имени не
  * трогает (цена владельца важнее прайса из скрипта). Возвращает счётчики.
@@ -331,6 +391,8 @@ async function main(): Promise<void> {
       (al.stockRenamed > 0 ? `, склад перенесён на канон ${al.stockRenamed}` : "") +
       ` (всего ${VENDING_ALIASES.length}).`,
   );
+  const rules = await seedVendingRules(db);
+  console.log(`Правила закупа: наложено ${rules.applied}` + (rules.unknown.length ? `, не найдено: ${rules.unknown.join(", ")}` : "") + ".");
 }
 
 if (require.main === module) {

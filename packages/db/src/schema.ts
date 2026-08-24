@@ -1377,6 +1377,10 @@ export const vendingProduct = pgTable("vending_product", {
   purchasePrice: numeric("purchase_price", { precision: 10, scale: 2 }),
   /** Кратность закупки: напитки 12, снеки 10 (решение владельца 02.08.2026). */
   packSize: integer("pack_size").default(1).notNull(),
+  /** «Убрано из закупки» (П5a): дефицит закрываем только складом, не покупаем. Правило владельца 24.08.2026. */
+  excludedFromPurchase: boolean("excluded_from_purchase").default(false).notNull(),
+  /** Фикс-количество закупа при дефиците, без округления до блока (СуперКонтик 50, Snickers 48). NULL — обычное округление. */
+  fixedPurchaseQty: integer("fixed_purchase_qty"),
   isActive: boolean("is_active").default(true).notNull(),
   createdAt: createdAt(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
