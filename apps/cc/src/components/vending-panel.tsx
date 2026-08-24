@@ -189,12 +189,18 @@ export async function VendingSupplyPanel() {
   let purchase: VendingPurchase = {
     items: [],
     excludedNoSales: [],
+    excludedByRule: [],
     noPrice: [],
+    allocation: "purchase-first",
     totalBuy: 0,
     totalOrder: 0,
     costExact: 0,
     costRounded: 0,
     overpay: 0,
+    totalFromPurchase: 0,
+    totalFromStock: 0,
+    totalUnfilled: 0,
+    totalToStock: 0,
   };
   try {
     let forecast: { critical: VendingRunout[] };

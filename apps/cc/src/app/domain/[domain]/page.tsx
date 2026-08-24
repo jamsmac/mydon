@@ -61,6 +61,7 @@ import { QuickActions } from "../../../components/quick-actions";
 import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingMachinesPanel, VendingSupplyPanel } from "../../../components/vending-panel";
+import { PurchasePlanView } from "../../../components/purchase-plan-view";
 import { CoffeePanel } from "../../../components/coffee-panel";
 import {
   ServiceTab,
@@ -1942,6 +1943,11 @@ export default async function DomainPage({
       )}
       {group && leaf?.type === "machine_stock" && <MachineStockView />}
 
+      {/* ── План закупа (срез П5a): что купить, куда везти и как разложить
+          по слотам. Считает ядро (/vending/plan) — панель только показывает,
+          чтобы её числа не разъехались с ботом. ── */}
+      {group && leaf?.type === "buy_plan" && <PurchasePlanView domain={domain} />}
+
       {/* ── Импорт закупок (Task 4): файл → предпросмотр и сопоставление имён → запись ── */}
       {/* ── Сроки годности (Task 5): партии — счётчики по флагам, плитка =
           фильтр (?flag=), поиск ?q=, три честных пустых состояния ── */}
@@ -2460,6 +2466,7 @@ export default async function DomainPage({
           "expiry",
           "cash_reconcile",
           "gaps",
+          "buy_plan",
           "norm_fact",
           "cost",
           "feed",
