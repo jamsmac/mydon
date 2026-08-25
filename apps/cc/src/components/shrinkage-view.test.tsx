@@ -134,7 +134,10 @@ describe("лист «Усушка»", () => {
         {
           serial: "s2",
           name: "M2",
-          summary: { items: [], lossValue: 0, daysCounted: 0, daysSkipped: 14, threshold: 30_000 },
+          // daysSkipped=0 нарочно: период `пустой` (from/to) — ровно 14 дней,
+          // и текст обязан взять длину периода, а не daysSkipped (N3) — со
+          // старым кодом (`n(m.summary.daysSkipped)`) здесь было бы «все 0».
+          summary: { items: [], lossValue: 0, daysCounted: 0, daysSkipped: 0, threshold: 30_000 },
           refillDays: [],
         },
       ],

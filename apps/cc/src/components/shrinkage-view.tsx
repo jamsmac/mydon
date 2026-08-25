@@ -30,6 +30,21 @@ const день = (iso: string): string => {
   return `${d}.${m}`;
 };
 
+/**
+ * Длина периода в сутках включительно — та же формула, что в Core
+ * (`dates.length` в `shrinkage.service.ts`) и в боте (`periodDays` в
+ * `shrinkage-brief.ts`). `daysSkipped` для этого не годится: дни без снимков
+ * на границах и дни без продаж уходят в `continue` до накопления
+ * `daysSkipped`, поэтому при `daysCounted=0` из-за несобранных снимков
+ * `daysSkipped` может остаться нулём — и карточка сказала бы «все 0 дн.».
+ */
+function периодДней(from: string, to: string): number {
+  const a = Date.parse(`${from}T00:00:00Z`);
+  const b = Date.parse(`${to}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
+  return Math.round((b - a) / 86_400_000) + 1;
+}
+
 const адресЛиста = (domain: string): string =>
   `/domain/${domain}?tab=${encodeURIComponent("reports:shrinkage")}`;
 
@@ -77,6 +92,7 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
   // Ядро складывает предупреждения по автоматам, и одна общая причина
   // приходит столько раз, сколько автоматов её задело.
   const предупреждения = [...new Set(report.warnings.map((w) => w.message))];
+  const днейПериода = периодДней(report.from, report.to);
 
   return (
     <>
@@ -122,8 +138,10 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
           </div>
 
           {m.summary.daysCounted === 0 ? (
-            // Не «Расхождений нет» — это ноль дней, а не ноль потерь.
-            <p className="muted">{`Не считали — все ${n(m.summary.daysSkipped)} дн. периода были заливкой/пропущены`}</p>
+            // Не «Расхождений нет» — это ноль дней, а не ноль потерь. Длина
+            // периода, а не daysSkipped (см. периодДней выше) — тот же выбор,
+            // что у Core (dates.length) и бота (periodDays).
+            <p className="muted">{`Не считали — все ${n(днейПериода || m.summary.daysSkipped)} дн. периода были заливкой/пропущены`}</p>
           ) : m.summary.items.length === 0 ? (
             <p className="muted">Расхождений нет</p>
           ) : (

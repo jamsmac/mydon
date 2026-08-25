@@ -23,7 +23,7 @@
  */
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
-import { eq, isNull } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { normalizeProductName } from "@mydon/shared";
 import { createDb, type Database } from "./index";
 import { machineSlot, vendingAlias, vendingProduct, vendingStock } from "./schema";
@@ -66,6 +66,23 @@ export interface BackfillResult {
   unresolved: string[];
 }
 
+/**
+ * WHERE для UPDATE: то же имя, но ссылка ВСЁ ЕЩЁ пустая.
+ *
+ * Строки выбираются через `isNull(idColumn)`, но без этого же условия в самом
+ * UPDATE под `eq(nameColumn, raw)` попали бы ВСЕ строки с этим именем —
+ * включая уже привязанные (другой автомат, другой `product_id` после смены
+ * алиаса). Вынесена отдельной чистой функцией, чтобы предикат можно было
+ * проверить юнит-тестом без стаба drizzle-цепочки целиком.
+ */
+export function бэкфиллWhere(
+  nameColumn: typeof vendingStock.productName | typeof machineSlot.productName,
+  idColumn: typeof vendingStock.productId | typeof machineSlot.productId,
+  raw: string,
+) {
+  return and(eq(nameColumn, raw), isNull(idColumn));
+}
+
 /** Бэкфилл одной таблицы. Обе устроены одинаково: имя товара + пустой `product_id`. */
 async function backfillTable(
   db: Database,
@@ -92,7 +109,7 @@ async function backfillTable(
     const res = (await db
       .update(table as never)
       .set({ productId: id } as never)
-      .where(eq(nameColumn, raw) as never)
+      .where(бэкфиллWhere(nameColumn, idColumn, raw) as never)
       .returning({ id: idColumn })) as unknown[];
     updated += res.length;
   }

@@ -135,4 +135,6 @@ Constraints, Task 3/4) выше НЕ переписаны построчно р�
 отдельным проходом в конце `detect()`: только по событиям без
 `matched_refill_id`, у которых `window_to < now − MATCH_PAD_MS` (~3 ч), и
 которых ещё нет в ленте (дедуп по `payload.eventId`/`(serial, windowTo)`).
-С записью — `recorded:true` по-прежнему эмитится сразу, без задержки.
+Событие ленты `vending.refill_detected` публикуется только для несопоставленных
+окон старше 3 ч (`recorded:false`); сопоставленные окна события ленты не
+порождают — факт заливки виден в `vending_refill_event.matched_refill_id`.

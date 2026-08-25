@@ -481,7 +481,7 @@ export class VendingController {
    * минуту — это вдвое больше, чем нужно панели: отчёт всё равно живёт в кеше
    * пять минут (`REPORT_CACHE_MS`).
    */
-  @Throttle({ default: { limit: 6, ttl: 60_000 } })
+  @Throttle({ burst: { limit: 6, ttl: 60_000 }, sustained: { limit: 6, ttl: 60_000 } })
   @Get("shrinkage")
   shrinkage(@Query() dto: ShrinkageDto) {
     return this.shrinkageReport.report(dto.days);

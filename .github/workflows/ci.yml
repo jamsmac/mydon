@@ -76,6 +76,10 @@ jobs:
           # `product_id` в слотах и на складе всегда NULL, и сценарий «повторный
           # апсерт не затирает ссылку» (П4) проверял бы null против null.
           node packages/db/dist/seed-vending.js
+          # Разовый бэкфилл product_id (П4, R-FW-4): закрепляет сценарий
+          # «UPDATE трогает только product_id IS NULL» (N2) против настоящего
+          # Postgres, а не заглушки.
+          node packages/db/dist/backfill-product-ids.js
           node tools/smoke-core.mjs
 
       # Дымовой прогон ПАНЕЛИ: страницы должны отдаваться, а не падать в 500.
