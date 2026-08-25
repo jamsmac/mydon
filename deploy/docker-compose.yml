@@ -155,6 +155,10 @@ services:
       OURVEND_PASSWORD: ${OURVEND_PASSWORD:-}
       OURVEND_GROUP_ID: ${OURVEND_GROUP_ID:-}
       OURVEND_SYNC_CRON: ${OURVEND_SYNC_CRON:-0 */3 * * *}
+      # Приём вендинга — одна транзакция Core на сотни строк; обычный таймаут
+      # агентов (10 с) на внешней базе по TLS её не дожидался, и сбор падал
+      # каждые три часа с machines_ok=0 (24.08.2026).
+      CORE_INGEST_TIMEOUT_MS: ${CORE_INGEST_TIMEOUT_MS:-60000}
       # Учётный снапшот OurVend (П2 поглощения): суточные продажи + остатки.
       # 08:05 — после съёма stock (07:50), чтобы паритет сверял одни сутки.
       OURVEND_ACCOUNTING_CRON: ${OURVEND_ACCOUNTING_CRON:-5 8 * * *}

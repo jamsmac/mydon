@@ -278,6 +278,45 @@ describe("ourvend:sync — коллектор вендинга", () => {
     assert.match(String((calls.finishes[0] as { error?: string }).error), /BAD/);
   });
 
+  it("приём слотов оборвался — в отказе видно, СКОЛЬКО его ждали (авария 24.08.2026)", async () => {
+    // «This operation was aborted» без числа не отличить от «Core ответил
+    // ошибкой»: весь диагноз аварии держался на том, что прогон длился 16–20
+    // секунд при таймауте 10, а увидеть это можно было только сопоставив
+    // длительность прогона с исходом. Число должно быть в самом отказе.
+    const { core, calls } = stubCore();
+    core.ingestVendingSlots = async () => {
+      const e = new Error("This operation was aborted");
+      e.name = "AbortError";
+      throw e;
+    };
+    const connector = stubConnector({
+      machines: [{ serial: "AH", alias: "AH" }],
+      slots: { AH: [slot("31", "Montella", 6, 0)] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "failed");
+    assert.match(String(res.error), /^приём слотов \(\d+ мс\): /, `нет времени в отказе: ${res.error}`);
+    assert.match(String(res.error), /This operation was aborted/, "причина не должна теряться");
+    assert.match(String((calls.finishes[0] as { error?: string }).error), /мс/, "то же число — в журнале прогонов");
+  });
+
+  it("приём продаж оборвался — время в тексте, статус honest partial", async () => {
+    const { core } = stubCore();
+    core.ingestVendingSales = async () => {
+      throw new Error("This operation was aborted");
+    };
+    const connector = stubConnector({
+      machines: [{ serial: "AH", alias: "AH" }],
+      slots: { AH: [slot("31", "Montella", 6, 0)] },
+      productSales: { AH: [{ product: "Montella", saleNum: 7 }] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "partial");
+    assert.match(String(res.error), /приём продаж \(\d+ мс\)/, `нет времени в отказе: ${res.error}`);
+  });
+
   it("провал логина → failed, ничего не отдаём в приём", async () => {
     const { core, calls } = stubCore();
     const connector = stubConnector({ machines: [], slots: {}, loginThrows: true });

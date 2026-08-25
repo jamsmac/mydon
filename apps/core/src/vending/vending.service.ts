@@ -96,6 +96,26 @@ export interface IngestPayload {
  */
 export const MAX_SLOTS_PER_MACHINE = 2000;
 
+/**
+ * Потолок одной пачки INSERT.
+ *
+ * Приём слотов пишет строки ПАЧКАМИ, а не по одной: 500 строк × десяток
+ * колонок ≈ пять тысяч параметров — с запасом до предела протокола Postgres
+ * (65535 на запрос), и раздутый автомат (потолок 2000 слотов) в него уже не
+ * влез бы одним запросом.
+ */
+export const INSERT_CHUNK = 500;
+
+/**
+ * Разбить строки на пачки для отдельных INSERT. Пустой список — ни одной
+ * пачки: `values([])` Postgres не примет.
+ */
+function пачками<T>(rows: T[], size = INSERT_CHUNK): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
+  return out;
+}
+
 /** Автомат, пропущенный при приёме, и почему. */
 export interface SkippedMachine {
   serial: string;
@@ -644,6 +664,32 @@ export class VendingService {
       for (const m of accepted) {
         const machineId = bySerial.get(normalizeMachineSerial(m.serial)) ?? null;
         if (machineId !== null) linked += 1;
+        // Строки копятся в памяти и уходят ПАЧКОЙ — по одному запросу на
+        // автомат вместо двух на слот.
+        //
+        // Раньше каждый слот шёл своим INSERT: 210 слотов парка = 420
+        // round-trip'ов. Пока база была рядом, это укладывалось в 9–12 секунд;
+        // после перевода на внешний Postgres по TLS (`verify-full`, 24.08.2026)
+        // цена одного round-trip'а выросла — и приём перестал укладываться в
+        // 10-секундный таймаут клиента агентов. Сбор падал «This operation was
+        // aborted» с `machines_ok=0` КАЖДЫЕ три часа, хотя Core транзакцию
+        // дописывал: снимки в `slot_snapshot` ложились, а продажи и детектор
+        // заливок (они идут после успешного приёма) не выполнялись вовсе.
+        const slotRows: (typeof machineSlot.$inferInsert)[] = [];
+        const snapshotRows: (typeof slotSnapshot.$inferInsert)[] = [];
+        // Один coilId дважды в одной выгрузке цикл переживал молча: сначала
+        // INSERT, потом UPDATE по конфликту. Многострочный INSERT на такое
+        // отвечает «ON CONFLICT DO UPDATE command cannot affect row a second
+        // time» и роняет приём целиком, поэтому схлопываем заранее: побеждает
+        // последняя строка — тот же слот, который остался бы и после цикла.
+        //
+        // Одно отличие есть, и оно в нашу пользу. Схлопнутая строка приходит
+        // на конфликт с тем, что ЛЕЖИТ В БАЗЕ, а не с промежуточной записью
+        // того же приёма: цикл успевал записать первый дубль, и `product_id`
+        // второго сравнивался с ним. Промежуточная строка настоящим
+        // состоянием слота никогда не была, и сохранённая ссылка на карточку
+        // терялась из-за неё на ровном месте.
+        const позицияCoil = new Map<string, number>();
         for (const s of m.slots) {
           const isValid = s.capacity > 0 && s.capacity <= MAX_CAPACITY;
           const product = s.product.trim() || null;
@@ -651,26 +697,52 @@ export class VendingService {
           // ссылка стала бы враньём. Неизвестное имя → NULL, а не «оставим
           // прежнюю» — молча оставленная чужая карточка хуже пустоты.
           const productId = product === null ? null : (productIds(product) ?? null);
+          const row = {
+            machineSerial: m.serial,
+            machineId,
+            coilId: s.coilId,
+            productName: product,
+            productId,
+            capacity: s.capacity,
+            quantity: s.quantity,
+            isValid,
+            syncedAt: capturedAt,
+          };
+          const прежняя = позицияCoil.get(s.coilId);
+          if (прежняя === undefined) {
+            позицияCoil.set(s.coilId, slotRows.length);
+            slotRows.push(row);
+          } else {
+            slotRows[прежняя] = row;
+          }
+          // История дублей не боится (уникального ключа у неё нет) и пишется
+          // как есть — счётчик слотов тоже считает ВСЁ присланное, как раньше.
+          snapshotRows.push({
+            machineSerial: m.serial,
+            coilId: s.coilId,
+            productName: product,
+            capacity: s.capacity,
+            quantity: s.quantity,
+            capturedAt,
+          });
+          slots += 1;
+        }
+        for (const пачка of пачками(slotRows)) {
           await tx
             .insert(machineSlot)
-            .values({
-              machineSerial: m.serial,
-              machineId,
-              coilId: s.coilId,
-              productName: product,
-              productId,
-              capacity: s.capacity,
-              quantity: s.quantity,
-              isValid,
-              syncedAt: capturedAt,
-            })
+            .values(пачка)
             .onConflictDoUpdate({
               target: [machineSlot.machineSerial, machineSlot.coilId],
               // machineId обновляем тоже: карточка автомата могла появиться
               // позже слотов — так же, как это делает backfill в продажах.
+              //
+              // Значения берутся из `excluded.*`, а не из литералов строки:
+              // в многострочной пачке каждый конфликт обязан обновиться СВОИМИ
+              // данными. Для одной строки это ровно то же самое, что было —
+              // `excluded` и есть та строка, которую вставляли.
               set: {
-                machineId,
-                productName: product,
+                machineId: sql`excluded.machine_id`,
+                productName: sql`excluded.product_name`,
                 // Сменился товар в слоте — ссылка идёт за ним, включая NULL
                 // (старая карточка стала бы враньём). Товар тот же — непустую
                 // ссылку пустой не затираем: прайс мог переименовать карточку,
@@ -678,9 +750,11 @@ export class VendingService {
                 productId: sql`case when excluded.product_name is distinct from ${machineSlot.productName}
                     then excluded.product_id
                     else coalesce(excluded.product_id, ${machineSlot.productId}) end`,
-                capacity: s.capacity,
-                quantity: s.quantity,
-                isValid,
+                capacity: sql`excluded.capacity`,
+                quantity: sql`excluded.quantity`,
+                isValid: sql`excluded.is_valid`,
+                // capturedAt один на весь приём, поэтому литерал здесь и
+                // `excluded.synced_at` — одно и то же значение.
                 syncedAt: capturedAt,
               },
               // Опоздавший снимок (capturedAt старше уже сохранённого syncedAt)
@@ -692,15 +766,9 @@ export class VendingService {
               // парсит как часовой пояс (найдено при живом e2e-тесте на коффе-складе).
               where: sql`${machineSlot.syncedAt} <= ${capturedAt.toISOString()}`,
             });
-          await tx.insert(slotSnapshot).values({
-            machineSerial: m.serial,
-            coilId: s.coilId,
-            productName: product,
-            capacity: s.capacity,
-            quantity: s.quantity,
-            capturedAt,
-          });
-          slots += 1;
+        }
+        for (const пачка of пачками(snapshotRows)) {
+          await tx.insert(slotSnapshot).values(пачка);
         }
       }
     });
@@ -831,50 +899,85 @@ export class VendingService {
     // Карта строится по обеим формам написания серийника (см. machineSerialKeys).
     const bySerial = await this.machineIdBySerial();
     await this.db.transaction(async (tx) => {
+      // Пачкой, а не по строке — причина та же, что у приёма слотов: на
+      // внешнем Postgres по TLS round-trip на КАЖДУЮ продажу не укладывался
+      // в таймаут клиента агентов, и окно продаж переставало обновляться.
+      //
+      // Схлопывание по ключу идемпотентности обязательно: в одной пачке два
+      // ряда с одним ключом Postgres не принимает («cannot affect row a second
+      // time»), а цикл такое переживал апдейтом. Побеждает последний — тот же
+      // исход, что и раньше.
+      const productRows: (typeof productSale.$inferInsert)[] = [];
+      const позицияТовара = new Map<string, number>();
       for (const p of payload.productSales) {
+        const row = {
+          machineSerial: p.serial,
+          machineId: bySerial.get(normalizeMachineSerial(p.serial)) ?? null,
+          productName: p.product,
+          periodStart,
+          periodEnd,
+          quantity: p.quantity,
+          capturedAt,
+        };
+        // capturedAt один на весь батч, поэтому ключ — (автомат, товар).
+        const ключ = `${p.serial}\u0000${p.product}`;
+        const прежняя = позицияТовара.get(ключ);
+        if (прежняя === undefined) {
+          позицияТовара.set(ключ, productRows.length);
+          productRows.push(row);
+        } else {
+          productRows[прежняя] = row;
+        }
+      }
+      for (const пачка of пачками(productRows)) {
         await tx
           .insert(productSale)
-          .values({
-            machineSerial: p.serial,
-            machineId: bySerial.get(normalizeMachineSerial(p.serial)) ?? null,
-            productName: p.product,
-            periodStart,
-            periodEnd,
-            quantity: p.quantity,
-            capturedAt,
-          })
+          .values(пачка)
           .onConflictDoUpdate({
             target: [productSale.machineSerial, productSale.productName, productSale.capturedAt],
             // machineId обновляем тоже: карточка автомата могла появиться позже
             // продажи — так же, как это делает приём слотов и backfill в sale.
+            // Значения — из `excluded.*`: в пачке у каждой строки свои.
             set: {
               periodStart,
               periodEnd,
-              quantity: p.quantity,
-              machineId: bySerial.get(normalizeMachineSerial(p.serial)) ?? null,
+              quantity: sql`excluded.quantity`,
+              machineId: sql`excluded.machine_id`,
             },
           });
       }
+      const machineRows: (typeof machineSale.$inferInsert)[] = [];
+      const позицияАвтомата = new Map<string, number>();
       for (const m of payload.machineSales) {
+        const row = {
+          machineSerial: m.serial,
+          machineId: bySerial.get(normalizeMachineSerial(m.serial)) ?? null,
+          periodStart,
+          periodEnd,
+          totalAmount: m.totalAmount.toFixed(2),
+          totalCount: m.totalCount,
+          capturedAt,
+        };
+        const прежняя = позицияАвтомата.get(m.serial);
+        if (прежняя === undefined) {
+          позицияАвтомата.set(m.serial, machineRows.length);
+          machineRows.push(row);
+        } else {
+          machineRows[прежняя] = row;
+        }
+      }
+      for (const пачка of пачками(machineRows)) {
         await tx
           .insert(machineSale)
-          .values({
-            machineSerial: m.serial,
-            machineId: bySerial.get(normalizeMachineSerial(m.serial)) ?? null,
-            periodStart,
-            periodEnd,
-            totalAmount: m.totalAmount.toFixed(2),
-            totalCount: m.totalCount,
-            capturedAt,
-          })
+          .values(пачка)
           .onConflictDoUpdate({
             target: [machineSale.machineSerial, machineSale.capturedAt],
             set: {
               periodStart,
               periodEnd,
-              totalAmount: m.totalAmount.toFixed(2),
-              totalCount: m.totalCount,
-              machineId: bySerial.get(normalizeMachineSerial(m.serial)) ?? null,
+              totalAmount: sql`excluded.total_amount`,
+              totalCount: sql`excluded.total_count`,
+              machineId: sql`excluded.machine_id`,
             },
           });
       }
@@ -1209,6 +1312,7 @@ export class VendingService {
       // а не по товару в цикле: избегаем N+1 и читаем согласованный срез.
       const existingRows = await tx.select().from(vendingStock);
       const beforeByName = new Map(existingRows.map((r) => [r.productName, { quantity: r.quantity, countedAt: r.countedAt }]));
+      const stockRows: (typeof vendingStock.$inferInsert)[] = [];
 
       for (const [product, quantity] of finalByProduct) {
         const prior = beforeByName.get(product);
@@ -1237,14 +1341,21 @@ export class VendingService {
 
         // Имя строки склада — уже канон; резолвер прогоняет его через алиасы
         // повторно, и это безвредно: канон сам себе алиас.
-        const productId = productIds(product);
+        // Строка копится и уходит пачкой ниже — тот же приём, что у приёма
+        // слотов и продаж. Схлопывать нечего: `finalByProduct` — карта, ключи
+        // в ней уникальны по построению.
+        stockRows.push({ productName: product, productId: productIds(product), quantity, countedAt, updatedAt: countedAt });
+      }
+
+      for (const пачка of пачками(stockRows)) {
         await tx
           .insert(vendingStock)
-          .values({ productName: product, productId, quantity, countedAt, updatedAt: countedAt })
+          .values(пачка)
           .onConflictDoUpdate({
             target: [vendingStock.productName],
             set: {
-              quantity,
+              // Из `excluded.*`: в пачке у каждой строки своё количество.
+              quantity: sql`excluded.quantity`,
               // НЕ затирать непустую ссылку пустой: строка склада ключуется
               // ИМЕНЕМ, и если карточку прайса переименовали, резолвер вернёт
               // null — прямая запись обнулила бы ровно ту связь, ради которой

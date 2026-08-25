@@ -124,7 +124,18 @@ function idle(): Promise<never> {
  */
 async function main(): Promise<void> {
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
-  const core = new AgentsCoreClient(coreUrl, 10_000, process.env.SERVICE_TOKEN ?? "");
+  // Приём вендинга (слоты/продажи/детектор заливок) ждём дольше обычного
+  // вызова: это одна транзакция Core на сотни строк. Мусорное значение env
+  // (или ноль) молча вернуло бы 10 секунд — ровно ту поломку, из-за которой
+  // сбор Ourvend падал каждые три часа с 24.08.2026, — поэтому падаем на
+  // дефолт только при непригодном числе.
+  const ingestTimeoutMs = Number(process.env.CORE_INGEST_TIMEOUT_MS);
+  const core = new AgentsCoreClient(
+    coreUrl,
+    10_000,
+    process.env.SERVICE_TOKEN ?? "",
+    Number.isFinite(ingestTimeoutMs) && ingestTimeoutMs > 0 ? ingestTimeoutMs : 60_000,
+  );
 
   // Порог автономии — не const: глобальный тумблер AGENT_AUTONOMY_MAX владелец
   // может менять из панели (оверлей ниже кладёт его в env), и перечитка обновит

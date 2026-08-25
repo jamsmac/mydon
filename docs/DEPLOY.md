@@ -302,6 +302,12 @@ grep -c '^[A-Z_]*=' .env        # столько строк стало — зн�
 grep -q '^OURVEND_ACCOUNT=.' .env || echo 'OURVEND_ACCOUNT=<логин кабинета>' >> .env
 grep -q '^OURVEND_PASSWORD=.' .env || echo 'OURVEND_PASSWORD=<пароль>' >> .env
 grep -q '^OURVEND_SYNC_CRON=' .env || echo 'OURVEND_SYNC_CRON=0 */3 * * *' >> .env
+# Сколько ждать ответа Core на приём (слоты, продажи, детектор заливок,
+# учётный снапшот), мс. По умолчанию 60000; поднимать, если в логе агентов
+# «приём слотов N мс» подполз к этому потолку — парк вырос или база отвечает
+# медленнее. При 10 000 сбор падал каждые три часа «This operation was
+# aborted» с machines_ok=0 (24.08.2026).
+grep -q '^CORE_INGEST_TIMEOUT_MS=' .env || echo 'CORE_INGEST_TIMEOUT_MS=60000' >> .env
 ```
 
 Без учётки сбор молча выключен: `machine_slot` не обновляется, `slot_snapshot`
