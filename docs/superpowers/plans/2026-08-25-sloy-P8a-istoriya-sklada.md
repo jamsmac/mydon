@@ -124,6 +124,10 @@ describe("Ключ сторожа сбора П8a (R-P8a-6)", () => {
 /** Строки донора как их отдаёт SQL: числа приходят строками postgres.js. */
 export interface DonorRefillRow { id: number | string; dt: string; machine_serial: string | null; product: string; qty: string | number }
 export interface DonorStockCountRow { id: number | string; dt: string; product: string; qty: string | number; counted_at: string | Date | null }
+// Волна фиксов (R-FW-P1/P2, см. аддендум ниже) расширяет ОБЕ строки:
+// `ourvend_name: string | null` (второй SELECT-алиас донора — точный резолв
+// имени, если `product` в каталог не попал) и `DonorStockCountRow` дополнительно
+// несёт `location_name: string | null` (JOIN `locations`, для `note`).
 export interface DonorPurchaseRow { id: number | string; dt: string; product: string; qty: string | number; unit_price: string | number | null }
 
 /** Канон имени: точное сопоставление через алиасы и прайс. `null` — канона НЕТ. */
@@ -172,7 +176,7 @@ export function reconcilePurchases(mine: readonly PurchaseFacts[], donor: readon
 - `decodeHtml` — ОДИН проход, `&amp;` заменяется ПОСЛЕДНИМ. Второй проход превратил бы легитимно закодированное `&amp;amp;` в `&`, а порядок «amp первым» дал бы из `&amp;#39;` апостроф там, где его не было. Набор: `&#NN;`/`&#xNN;`, `&quot;`, `&apos;`, `&lt;`, `&gt;`, `&nbsp;`, затем `&amp;`.
 - `canonicalProductName`: декод → снятие `[слит→N]` → `canon(...)`. Снятие пометки — НЕ нечёткое сопоставление: `[слит→23]` не часть имени товара, а служебная приписка панели склада (13 карточек донора). Канона нет → возвращается очищенное сырое имя и `false`.
 - `mapRefill`: серийник — `normalizeMachineSerial` (`C2508160376` → `2508160376`); пустой/NULL серийник → `Unresolved{reason:"no_serial"}` (это 348 «общих» аппаратов); `qty` не число или ≤ 0 → `bad_qty`; `performedAt = tashkentInstant(`${dt}T12:00:00`)!.toISOString()`; `clientKey = `stock:refill:${id}``; `note = "импорт истории mydon-stock"`.
-- `mapStockCount`: служебное имя (после декода и нормализации совпало с `SERVICE_PRODUCT_NAMES`) → `Unresolved{reason:"service_row"}`; `countedAt` донора, если он есть, иначе полдень `dt` — донор писал `counted_at` не всегда, а `NOT NULL` в нашей таблице требует момент, и полночь UTC увела бы строку на предыдущие сутки; `extId = String(id)`.
+- `mapStockCount`: служебное имя (после декода и нормализации совпало с `SERVICE_PRODUCT_NAMES`) → `Unresolved{reason:"service_row"}`; `countedAt` донора, если он есть, иначе полдень `dt` — донор писал `counted_at` не всегда, а `NOT NULL` в нашей таблице требует момент, и полночь UTC увела бы строку на предыдущие сутки; `extId = String(id)`. Волна фиксов (R-FW-P2): «склад» донора — три локации, не одна; для строк из неосновной локации (`Холодильник`, `Oq apparat (склад)`) `note` несёт её имя — `место: <name>` (SELECT джойнит `locations`, `location_name` едет вторым полем в `DonorStockCountRow`, см. интерфейсы Task 2 выше); строки остаются раздельными по `ext_id`, дедупа по естественному ключу как не было, так и нет.
 - Дедупа по естественному ключу НЕТ ни в одной функции: два залива одного товара в один день на один автомат — законная реальность донора (7 групп), и разные `id` дают разные `client_key`. Механическая склейка съела бы намеренные пары `seed_refills_1415.py`.
 - `reconcilePurchases` сравнивает по `String(id)`; `unitPrice` сравнивается с допуском 0.005 (numeric(15,2) против float донора), `qty` — с допуском 0.005; `dt` — по первым 10 символам.
 
@@ -481,7 +485,7 @@ export class SyncStaleService implements OnModuleInit, OnApplicationShutdown {
 Что обязана делать реализация:
 - `ingestStock`: в ТОЙ ЖЕ транзакции, рядом с апсертом `vendingStock`, накапливать строки `vendingStockCount` — но ТОЛЬКО для позиций, которые реально применились. Позиция, отброшенная защитой «входящий пересчёт старше сохранённого» (`continue` в цикле), в историю не попадает: иначе журнал показывал бы пересчёт, который остаток не изменил. `source: "own"`, `dt: tashkentDay(countedAt)`, `qty: String(quantity)`, `extId: null`, `personId: payload.personId ?? null`, `note: actor`. Вставка — `onConflictDoNothing({ target: [source, countedAt, productName], where: sql`${vendingStockCount.source} = 'own'` })` (`where`, не `targetWhere` — см. Task 3 и аддендум спеки): повторный POST того же снимка не плодит вторую строку.
 - `stockCounts(days = 90, product?)`: окно **включая сегодняшние сутки** — `dt >= tashkentDay(now) − (days − 1)`, тем же соглашением, что у отчёта о мёртвом стоке (реализация разошлась с этим черновиком плана на один день: тут было написано `− days`, зафиксировано тестом и комментарием — см. аддендум спеки); фильтр по имени — через канон (`priceIndex().canonOf`), сортировка `dt desc, productName`; потолок 2000 строк, при обрезке — предупреждение `history_capped`. Ноль строк по заданному товару — предупреждение `stock_missing` («истории по этому имени нет»), а не пустой ответ молчанием.
-- `SyncStaleService`: крон `new Cron("*/30 * * * *", { timezone: TZ }, …)` в `onModuleInit`, `stop()` в `onApplicationShutdown` — образец `ShrinkageService:216-229`. Внутри `check`: последний `vendingSyncRun` со `status='success'` (тот же запрос, что в `ourvend-health.service.ts:114-121`), `staleHours(...)` из shared, порог `readIntSetting(this.db, "SYNC_STALE_HOURS", SYNC_STALE_HOURS_FALLBACK, this.logger)`. Условие тревоги: `staleHours === null || staleHours >= threshold` — «успехов не было вовсе» тревожнее, чем «успех был давно», и молчать об этом нельзя. Дедуп — дословно приёмом `сериюОтказовВСобытие` (`vending.service.ts:2870-2876`): `event` по `type` + `gte(occurredAt, tashkentDayStartOf(now))`. Payload: `{ hoursSinceSuccess, lastSuccessAt, lastRunStatus }`.
+- `SyncStaleService`: крон `new Cron("*/30 * * * *", { timezone: TZ }, …)` в `onModuleInit`, `stop()` в `onApplicationShutdown` — образец `ShrinkageService:216-229`. Внутри `check`: последний `vendingSyncRun` со `status IN ('success','partial')` (волна фиксов R-FW-P4: `partial` — данные приехали частично, коллектор жив, и не должен считаться простоем; исходный запрос смотрел только `status='success'`, см. аддендум) — тот же критерий, что и `sync-runs.ts:lastSuccessRunAt()`/`ourvend-health.service.ts:114-121`; `staleHours(...)` из shared, порог `readIntSetting(this.db, "SYNC_STALE_HOURS", SYNC_STALE_HOURS_FALLBACK, this.logger)`. `failedStreak` (соседний детектор `ourvend.sync_failed_streak`, П5b) считает ТОЛЬКО `failed` — эти два критерия не путать: один ловит «сбор стоит», другой — «сбор бежит, но подряд падает». Условие тревоги: `staleHours === null || staleHours >= threshold` — «успехов не было вовсе» тревожнее, чем «успех был давно», и молчать об этом нельзя. Дедуп — дословно приёмом `сериюОтказовВСобытие` (`vending.service.ts:2870-2876`): `event` по `type` + `gte(occurredAt, tashkentDayStartOf(now))`. Payload: `{ hoursSinceSuccess, lastSuccessAt, lastRunStatus }`.
 - `OurvendHealthService`: `staleHours` и `staleThresholdH` в ответе; порог — ещё один пункт в существующий `Promise.all`.
 - Правило в `rules.ts` — рядом с `ourvend.sync_failed_streak` (~стр. 422), `urgency: "immediate"`.
 
@@ -552,7 +556,7 @@ it("застой сбора будит немедленно и называет 
 ```
 - [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → RED.
 - [ ] **Step 3: Реализация.** `staleHours` и два поля `OurvendHealth` — в `vending-reports.ts` (там же, где живёт остальная форма отчёта; третьей копии расчёта быть не должно). `SyncStaleService` — новый файл в `apps/core/src/ourvend/`, провайдер регистрируется в `VendingModule` рядом с `OurvendHealthService`, по той же причине, что описана в шапке модуля (иначе `OurvendModule` и `VendingModule` начали бы импортировать друг друга). Шапка сервиса объясняет, чем он отличается от `ourvend.sync_failed_streak`: streak — «сбор идёт, но подряд падает»; stale — «сбор не бежит вовсе» (контейнер агентов лёг, крон не встал), и `finishSyncRun` в этом случае не зовётся НИКОГДА, то есть streak-детектор физически не сработает. Сервис НЕ зовёт `OurvendHealthService.health()`: там внутри весь сырой SQL паритета, и гонять его каждые 30 минут ради одной даты — плата ни за что, плюс падение паритета погасило бы сторожа.
-- [ ] **Step 4: DTO и роут.** `StockCountsDto` рядом с `ShrinkageDto`: `days?: number` (`@Transform` гасит пустую строку — как в `OurvendHealthDto`, `@IsInt() @Min(1) @Max(365)`), `product?: string` (`@IsString() @MaxLength(512)`). Роут — `@Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } }) @Get("stock-counts")`, `days ?? 90`. `IngestStockDto` получает `@IsOptional() @IsUUID() personId?: string` (панель и бот сегодня его не шлют — тогда NULL; проводка бота — не этот срез).
+- [ ] **Step 4: DTO и роут.** `StockCountsDto` рядом с `ShrinkageDto`: `days?: number` (`@Transform` гасит пустую строку — как в `OurvendHealthDto`, `@IsInt() @Min(1) @Max(730)` — потолок поднят с изначальных 365 волной фиксов, R-FW-P3: начальный остаток донора старше 365 суток от текущей даты и не читался бы никаким клиентом, см. аддендум), `product?: string` (`@IsString() @MaxLength(512)`). Роут — `@Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } }) @Get("stock-counts")`, `days ?? 90`. `IngestStockDto` получает `@IsOptional() @IsUUID() personId?: string` (панель и бот сегодня его не шлют — тогда NULL; проводка бота — не этот срез).
 - [ ] **Step 5: Смоук.** В `ЧТЕНИЕ` (`tools/smoke-core.mjs`, рядом с `/vending/refill-events`): объект с проверкой для `/vending/stock-counts?days=90` (`rows` и `warnings` — массивы) и `/ourvend/health?runs=20` уже есть — дописать в его `проверить`, что `staleThresholdH` — число, а `staleHours` — число или `null` (ключ обязан присутствовать: пропущенный ключ витрина прочтёт как «поле не приехало»). В `ЗАПИСЬ`, в шаг «склад: повторный пересчёт — ссылка на карточку уцелела», в `после` дописать: `GET /vending/stock-counts?product=<P4_ТОВАР>` возвращает ровно ДВЕ строки (два пересчёта подряд), обе `source: "own"` — это проверка того самого частичного уникального индекса против настоящего Postgres.
 - [ ] **Step 6:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → GREEN.
 - [ ] **Step 7:** `git commit -m "feat(core): история пересчётов склада, GET /vending/stock-counts и сторож застоя сбора OurVend (П8a)" -- packages/shared/src/vending-reports.ts packages/shared/src/vending-reports.test.ts apps/core/src/vending apps/core/src/ourvend apps/core/src/rules tools/smoke-core.mjs`
@@ -653,12 +657,12 @@ docker exec mydon-stock-db-1 pg_dump -U mydon mydon | gzip > /opt/backups/stock-
    - заливы: найдено **455**, к записи **107**, пропущено по отсутствию серийника **348**;
    - инвентаризации склада: найдено **460** (SQL уже фильтрует `machine_id IS NULL`), к записи **460**, служебных **0** — «Недостача (Рустам)» у донора живёт в `purchases`, не в `stock_counts` (черновик плана предполагал служебную строку здесь; реализация Task 3 нашла её в другой таблице — см. аддендум спеки);
    - закупки: у нас **342**, у донора **342**, дописать **+0**, `onlyMine` **0**, расхождений **0**;
-   - не разрешено имён — **≤ 14** (список из `inventory-donor.md` §2: Flash/Laimon/Moxito/Lit Energy CAN, Fresh Tag Lemonade, Lipton Lemon Tea, Red Bull CAN 0,355, Royal Pomegranate).
+   - не разрешено имён — **≤ 11 / 15 строк** (после резолва по `ourvend_name`, волна фиксов R-FW-P1 — список из `adversarial-prod-data.md`: Flash Bubble Gum/Mojito/Peach CAN 0.45, Flash CAN 0.45, Fresh Tag Lemonade CAN 0.45, Laimon Berries/Mango CAN 0.33, Lit Energy Blueberry/Mango CAN 0.45, Moxito Mango CAN 0.45, Royal Pomegranate CAN 0.3).
    Числа не сошлись — **не применять**: расхождение значит, что донор изменился после инвентаризации 25.08, и решать это данными, а не флагом.
 4. **`--apply` (ЗАПИСЬ по плану).** Та же команда с `--apply`. Затем **архив (ЗАПИСЬ на ФС хоста)**: `mkdir -p /opt/backups/stock-archive && docker exec mydon-stock-db-1 pg_dump -U mydon mydon | gzip > /opt/backups/stock-archive/$(date +%F).sql.gz`; проверить размер файла (`ls -lh`) — пустой gz значит, что дамп упал, а пайп это скрыл.
 5. **Проверка (чтение):**
    - `GET /vending/refills?limit=200` → **107** записей `source='stock-import'`; `GET /vending/refill-events?days=60` — событий детектора по-прежнему **7**, и все без `matched_refill_id`: матчинга задним числом нет, окна детектора (с 13.08) старше импортированных заливов (по 17.07). Это не ошибка импорта.
-   - `GET /vending/stock-counts?days=400` → **460** строк `source='stock-import'`, самая ранняя `dt = 2025-08-17`.
+   - `GET /vending/stock-counts?days=730` → **460** строк `source='stock-import'` (потолок DTO поднят до 730, R-FW-P3), самая ранняя `dt = 2025-08-17`; строки из локаций «Холодильник»/«Oq apparat (склад)» несут место в `note` (R-FW-P2).
    - `GET /vending/stock-counts?days=1` → пусто до ближайшего пересчёта; после первого пересчёта владельца — **20** строк `source='own'` (столько позиций в `vending_stock`).
    - `GET /ourvend/health` → `staleHours` < 6 и `staleThresholdH` = 6; в боте «сверка» строки «⛔ сбор стоит» нет.
    - `purchase` по-прежнему **342** (`GET /supply/summary` не изменился) — R-P8a-1 соблюдён.
@@ -683,3 +687,40 @@ docker exec mydon-stock-db-1 pg_dump -U mydon mydon | gzip > /opt/backups/stock-
 **Согласованность имён типов между задачами:** `DonorRefillRow`/`DonorStockCountRow`/`DonorPurchaseRow`, `CanonIndex`, `Mapped<T>`/`Unresolved`, `VendingRefillInsert`/`VendingStockCountInsert`, `PurchaseFacts`/`PurchaseDiff`/`PurchaseReconcile` объявлены ровно один раз — в `packages/shared/src/stock-history.ts` (T2), и в T3 только импортируются. `DonorReader`/`ImportSection`/`StockHistoryReport` — форма разового скрипта, а не отчёта, и живут в `packages/db/src/import-stock-history.ts` (T3). `StockCountRow`/`StockCountsReport`, `staleHours()` и новые поля `OurvendHealth` — в `packages/shared/src/vending-reports.ts` (T4), рядом с остальными формами HTTP-ответов; бот и панель их только реэкспортируют (`core-client.ts:8`, `lib/core.ts:319`), своих копий не заводят. Имя `StockLevelRow` уже занято ДВАЖДЫ и по-разному (`vending.service.ts` — строка склада; `supply.service.ts` — строка донора `ourvend_machine_stock`); новый тип назван `StockCountRow`, а не третьим `StockLevelRow`.
 
 **Известные риски исполнения:** (1) `apps/core/src/vending/vending.service.ts` — файл на 3000 строк, T4 правит его в трёх местах; якоря брать по именам методов, а не по номерам строк. (2) Общий worktree с Codex: перед правкой дерева сверять `mtime` чужих файлов и коммитить только своими путями (`git commit -- …`). (3) Донор мог измениться после инвентаризации 25.08 — расхождение чисел в `--dry-run` останавливает выкатку, а не «поправляется флагом». (4) `pnpm -s build` обязателен ПЕРЕД `test` в db/core/bot: наборы гоняются по `dist`, и правка в `packages/shared` без пересборки даст зелёный тест на старом коде.
+
+## Аддендум волны фиксов (R-FW-P1…P4, R-FW-S1…S4, 26.08)
+
+Adversarial-ревью на живом проде (`adversarial-prod-data.md`) и по безопасности
+(`adversarial-security.md`) уточнили четыре интерфейса выше без изменения
+границ среза; полный текст рулингов и их обоснование — в спеке,
+§«Уточнения после adversarial». Здесь — куда именно они бьют по карте файлов
+этого плана:
+
+- **Резолв по `ourvend_name` (R-FW-P1, T2/T3).** `DonorRefillRow`/
+  `DonorStockCountRow` получают второе поле `ourvend_name`; резолв в T3 —
+  `canonicalProductName(name) ?? canonicalProductName(ourvendName)`, оба
+  донорских SELECT (заливы, инвентаризации) отдают `p.ourvend_name`. Без
+  карточки остаются **11 имён / 15 строк** (было 24/243 в первоначальной
+  оценке T2/T3).
+- **Место в `note` (R-FW-P2, T2/T3).** `DonorStockCountRow` получает
+  `location_name`; SELECT инвентаризаций джойнит `locations`; `mapStockCount`
+  пишет имя неосновной локации в `note`. Три локации донора, не одна:
+  основной склад 423 строки, Холодильник 20, Oq apparat (склад) 17.
+- **Потолок окна 730 (R-FW-P3, T4 Step 4).** `StockCountsDto.days`:
+  `@Max(730)` вместо `@Max(365)`, дефолт остаётся 90.
+- **`partial` = успех для сторожа (R-FW-P4, T4).** `SyncStaleService.check`
+  и `sync-runs.ts:lastSuccessRunAt()` считают последним успехом строку со
+  `status IN ('success','partial')`, а не только `'success'`; `failedStreak`
+  (`ourvend.sync_failed_streak`, П5b) не трогается — считает только `failed`.
+- **Заставы безопасности (R-FW-S1…S4, T3).** `tools/smoke-import.mjs`:
+  печатает только `host` подключения (никогда полную строку с паролем);
+  требует `SMOKE_SCRATCH=1` либо scratch-имя базы; фикстура — без боевого
+  IP/пользователя. `import-stock-history.ts`/`stock-history.ts`: застава на
+  диапазон колонки (`qty`) и управляющие символы (`\p{Cc}`) в имени после
+  `decodeHtml` → причина отказа строки, не падение пачки; сверка закупок
+  получает те же проверки годности (`qty`/`dt`/`unit`), что заливы и
+  пересчёты.
+
+Таблица покрытия рулингов выше (R-P8a-1…9) и числа в разделе «Выкатка»
+остаются в силе без изменений — волна фиксов повышает точность резолва и
+диагностику, но не меняет 342/107/460/455/603 и не расширяет запись на прод.
