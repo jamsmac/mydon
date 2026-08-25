@@ -262,7 +262,14 @@ export interface VendingShrinkageMachine {
  * сводить их к одному коду нельзя (тот же перечень, что у ядра).
  */
 export interface VendingShrinkageWarning {
-  code: "snapshots_stale" | "no_sales_day" | "machine_dead" | "sales_unknown_product" | "machine_error";
+  code:
+    | "snapshots_stale"
+    | "no_sales_day"
+    | "machine_dead"
+    | "sales_unknown_product"
+    | "machine_error"
+    /** Автомат в отчёте, но не посчитан ни один день — все дни были заливкой/пропущены. */
+    | "no_counted_days";
   message: string;
 }
 

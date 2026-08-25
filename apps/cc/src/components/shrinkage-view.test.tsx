@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { CoreUnavailable, type VendingShrinkageReport } from "../lib/core";
 import { VENDHUB_GROUPS, isTableBackedLeaf } from "../lib/domain-nav";
-import { ShrinkageAlerts, ShrinkageTables, ShrinkageView } from "./shrinkage-view";
+import { ShrinkageAlerts, ShrinkageAlertsFailed, ShrinkageTables, ShrinkageView } from "./shrinkage-view";
 import { stockFreshnessNote } from "./supply-views";
 
 const mocks = vi.hoisted(() => ({ vendingShrinkage: vi.fn() }));
@@ -60,17 +60,28 @@ const report: VendingShrinkageReport = {
 
 const пустой: VendingShrinkageReport = { from: "2026-08-11", to: "2026-08-24", threshold: 30_000, machines: [], warnings: [] };
 
+/** Автоматы есть, у обоих посчитан весь период, расхождений нет ни у одного. */
+const посчитанныйБезПотерь: VendingShrinkageReport = {
+  from: "2026-08-11",
+  to: "2026-08-24",
+  threshold: 30_000,
+  machines: [
+    { serial: "s1", name: "M1", summary: { items: [], lossValue: 0, daysCounted: 14, daysSkipped: 0, threshold: 30_000 }, refillDays: [] },
+  ],
+  warnings: [],
+};
+
 describe("лист «Усушка»", () => {
   it("по автомату: заголовок с днями, позиции, деньги и итог", () => {
     render(<ShrinkageTables report={report} />);
-    expect(screen.getByText(/Olma · дней посчитано 9, пропущено 5/)).toBeVisible();
+    expect(screen.getByText(/Olma · дней посчитано 9, не в счёт из-за заливки 5/)).toBeVisible();
     expect(screen.getByText("Kinder Bueno")).toBeVisible();
     expect(screen.getByText(/потеря 9 шт/)).toBeVisible();
     // Излишек виден, но в деньги не входит (R-P4-3) — поэтому он в подписи.
     expect(screen.getByText(/излишек 2 шт/)).toBeVisible();
     expect(screen.getByText(/Итого ≈ 139 800 сум/)).toBeVisible();
     // Автомат без потерь не выкидывается: «посчитано, потерь нет» — это ответ.
-    expect(screen.getByText(/American Hospital · дней посчитано 14, пропущено 0/)).toBeVisible();
+    expect(screen.getByText(/American Hospital · дней посчитано 14, не в счёт из-за заливки 0/)).toBeVisible();
   });
 
   it("пилюли: «⚠️ порог» у позиции за порогом, «нет цены» — у позиции без прайса", () => {
@@ -97,15 +108,68 @@ describe("лист «Усушка»", () => {
     expect(screen.getByText(/SKLAD 4S/)).toBeVisible();
   });
 
-  it("пустой отчёт без предупреждений — «Потерь за период нет»", () => {
+  it("автоматов в отчёте нет — «Данных нет», а не «Потерь за период нет» (R-FW-7)", () => {
     render(<ShrinkageTables report={пустой} />);
+    expect(screen.getByText("Данных нет")).toBeVisible();
+    expect(screen.getByText(/Ни одного автомата в отчёте/)).toBeVisible();
+    expect(screen.queryByText("Потерь за период нет")).toBeNull();
+  });
+
+  it("автоматы есть, все посчитаны полностью, потерь нет — «Потерь за период нет»", () => {
+    render(<ShrinkageTables report={посчитанныйБезПотерь} />);
     expect(screen.getByText("Потерь за период нет")).toBeVisible();
   });
 
-  it("потерь нет, но данные неполные — про «потерь нет» молчим", () => {
-    render(<ShrinkageTables report={{ ...пустой, warnings: report.warnings }} />);
+  it("автоматы есть, потерь не насчитано, но данные неполные — про «потерь нет» молчим", () => {
+    render(<ShrinkageTables report={{ ...посчитанныйБезПотерь, warnings: report.warnings }} />);
     expect(screen.queryByText("Потерь за период нет")).toBeNull();
+    expect(screen.getByText("Потерь не насчитано")).toBeVisible();
     expect(screen.getByText(/SKLAD 4S/)).toBeVisible();
+  });
+
+  it("daysCounted=0 у автомата — «не считали», а не «Расхождений нет», и «Потерь нет» не говорим", () => {
+    const недосчитан: VendingShrinkageReport = {
+      ...пустой,
+      machines: [
+        {
+          serial: "s2",
+          name: "M2",
+          summary: { items: [], lossValue: 0, daysCounted: 0, daysSkipped: 14, threshold: 30_000 },
+          refillDays: [],
+        },
+      ],
+    };
+    render(<ShrinkageTables report={недосчитан} />);
+    expect(screen.getByText(/Не считали — все 14 дн\. периода были заливкой\/пропущены/)).toBeVisible();
+    expect(screen.queryByText("Расхождений нет")).toBeNull();
+    expect(screen.queryByText("Потерь за период нет")).toBeNull();
+    expect(screen.getByText("Потерь не насчитано")).toBeVisible();
+  });
+
+  it("суммы без неразрывного пробела (U+00A0) — копипаста и поиск не ломаются", () => {
+    const крупный: VendingShrinkageReport = {
+      ...пустой,
+      machines: [
+        {
+          serial: "s3",
+          name: "M3",
+          summary: {
+            items: [{ product: "Y", lossUnits: 12_345, lossValue: 0, surplusUnits: 0, daysCounted: 9, noPrice: true, alert: false }],
+            lossValue: 0,
+            daysCounted: 9,
+            daysSkipped: 0,
+            threshold: 30_000,
+          },
+          refillDays: [],
+        },
+      ],
+    };
+    render(<ShrinkageTables report={крупный} />);
+    // Только узлы, которые проходят через n() — money() («порог», «Итого»)
+    // U+00A0 не чинит, это вне области этого пункта.
+    for (const el of screen.getAllByText(/12 345 шт/)) {
+      expect(el.textContent).not.toMatch(/\u00a0/);
+    }
   });
 });
 
@@ -127,6 +191,11 @@ describe("лист «Усушка»: поход в ядро", () => {
 });
 
 describe("секция «Усушка за 14 дней» на вкладке «Снек»", () => {
+  it("подсказка под заголовком объясняет термин (U5)", () => {
+    render(<ShrinkageAlerts report={report} domain="vendhub" />);
+    expect(screen.getByText("Расхождение остатков с продажами, без дней заливки.")).toBeVisible();
+  });
+
   it("топ-5 позиций за порогом по убыванию денег и ссылка на лист", () => {
     render(<ShrinkageAlerts report={report} domain="vendhub" />);
     const rows = screen.getAllByText(/шт ≈/);
@@ -140,9 +209,23 @@ describe("секция «Усушка за 14 дней» на вкладке «�
     );
   });
 
-  it("за порогом никого — одна честная строка, а не пустая секция", () => {
-    render(<ShrinkageAlerts report={пустой} domain="vendhub" />);
+  it("за порогом никого, но автоматы посчитаны — одна честная строка, а не пустая секция", () => {
+    render(<ShrinkageAlerts report={посчитанныйБезПотерь} domain="vendhub" />);
     expect(screen.getByText("Порог не превышен")).toBeVisible();
+  });
+
+  it("автоматов в отчёте нет — «Данных нет», а не «Порог не превышен» (R-FW-7)", () => {
+    render(<ShrinkageAlerts report={пустой} domain="vendhub" />);
+    expect(screen.getByText("Данных нет — ни одного автомата в отчёте")).toBeVisible();
+    expect(screen.queryByText("Порог не превышен")).toBeNull();
+  });
+});
+
+describe("секция «Усушка» на «Снек»: сбой подзапроса к ядру", () => {
+  it("«не проверили», а не пропавшая секция (final-review (d))", () => {
+    render(<ShrinkageAlertsFailed />);
+    expect(screen.getByText(/Усушка за 14 дней/)).toBeVisible();
+    expect(screen.getByText("Усушка: не проверили (Core не ответил)")).toBeVisible();
   });
 });
 

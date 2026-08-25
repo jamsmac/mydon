@@ -679,9 +679,11 @@ export default async function DomainPage({
     normFactReport = await core.coffeeNormFact(normFactFrom, normFactTo).catch(() => null);
   }
 
-  // Усушка (П4, R-P4-3): окно задаётся ?days= — 7/14/30 и ничего больше.
-  // Значение из адреса в ядро НЕ передаём как есть: там оно уходит в SQL-окно
-  // по снимкам, и «?days=6000» стоил бы прода прогоном по всей истории.
+  // Усушка (П4, R-P4-3): окно задаётся ?days= из закрытого списка кнопок
+  // листа — 7/14/30. Белый список здесь не защита прода от «?days=6000»:
+  // ядро само зажимает окно `ShrinkageDto` (@Min(1) @Max(60)) и потолком
+  // SHRINK_DAYS_MAX=60 внутри сервиса независимо от cc. Список закрыт просто
+  // потому, что на листе всего три кнопки — четвёртого значения там нет.
   // Сам отчёт тянет лист (как «План закупа»): страница только читает окно.
   const shrinkDays =
     (SHRINKAGE_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 14;

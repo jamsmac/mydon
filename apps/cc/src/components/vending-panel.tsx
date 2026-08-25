@@ -13,7 +13,7 @@ import {
   type VendingShrinkageReport,
   type VendingSyncRun,
 } from "../lib/core";
-import { SHRINKAGE_PANEL_DAYS, ShrinkageAlerts } from "./shrinkage-view";
+import { SHRINKAGE_PANEL_DAYS, ShrinkageAlerts, ShrinkageAlertsFailed } from "./shrinkage-view";
 import { CoreDown } from "./core-down";
 import { NewEntityForm } from "./entity-new";
 import { typeOne } from "../lib/labels";
@@ -210,8 +210,9 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
   // по своим причинам, а вкладка «Снек» нужна для пополнения и обязана
   // открываться без неё. Вместе — потому что последовательным `await` после
   // Promise.all она добавила бы своё время к открытию вкладки целиком.
-  // `null` значит «не спросили»: секцию тогда не рисуем — врать «порог не
-  // превышен» на упавшем запросе нельзя.
+  // `null` значит «ядро не ответило»: секция всё равно рисуется, но честным
+  // «не проверили» (final-review (d)) — молчание здесь читалось бы как
+  // «порог не превышен», а мы даже не спросили.
   const усушка: Promise<VendingShrinkageReport | null> = core
     .vendingShrinkage(SHRINKAGE_PANEL_DAYS)
     .catch(() => null);
@@ -274,7 +275,7 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
         </>
       )}
 
-      {shrinkage && <ShrinkageAlerts report={shrinkage} domain={domain} />}
+      {shrinkage ? <ShrinkageAlerts report={shrinkage} domain={domain} /> : <ShrinkageAlertsFailed />}
 
       {purchase.items.length > 0 && (
         <>

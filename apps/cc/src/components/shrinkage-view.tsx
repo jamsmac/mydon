@@ -14,7 +14,11 @@ export const SHRINKAGE_WINDOWS = [7, 14, 30] as const;
 /** Окно секции на вкладке «Снек»: подпись и запрос обязаны быть одним числом. */
 export const SHRINKAGE_PANEL_DAYS = 14;
 
-const n = (v: number): string => v.toLocaleString("ru-RU");
+// toLocaleString("ru-RU") разделяет тройки разрядов U+00A0 (неразрывный
+// пробел), а не обычным пробелом — копипаста суммы в поиск или сравнение
+// строкой у владельца ломается молча (тот же баг чинит formatAmount в
+// apps/core/src/rules/rules.ts).
+const n = (v: number): string => v.toLocaleString("ru-RU").replace(/\u00a0/g, " ");
 /** Дата периода целиком: отчёт живёт неделями, год в нём не лишний. */
 const дата = (iso: string): string => {
   const [y, m, d] = iso.split("-");
@@ -62,6 +66,12 @@ export function topShrinkAlerts(
  * не потеря, это причина, по которой день из расчёта выкинут.
  */
 export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) {
+  const нетАвтоматов = report.machines.length === 0;
+  // «Потерь нет» — обещание, что все автоматы отчёта были посчитаны все дни
+  // периода. Автомат, у которого daysCounted=0 (все дни ушли в заливку),
+  // в этой сумме — «не считали», а не «ноль потерь»: молчание о нём было бы
+  // тем же враньём, что и пустой отчёт при живом сборе.
+  const всеПосчитаны = !нетАвтоматов && report.machines.every((m) => m.summary.daysCounted > 0);
   const естьПотери = report.machines.some((m) => m.summary.items.length > 0);
   const всего = report.machines.reduce((a, m) => a + m.summary.lossValue, 0);
   // Ядро складывает предупреждения по автоматам, и одна общая причина
@@ -75,16 +85,27 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
         {естьПотери ? ` · всего ≈ ${money(всего)}` : ""}
       </p>
 
-      {/* «Потерь нет» говорим ТОЛЬКО когда отчёт полный. При живых
-          предупреждениях это было бы обещание, которого расчёт не давал:
-          часть дней в него не вошла. */}
-      {!естьПотери && предупреждения.length === 0 && (
+      {/* Ноль автоматов в отчёте — это НЕ «потерь нет»: сбор мог лежать весь
+          период, или все автоматы оказались не в строю. Молчание здесь
+          читалось бы как «сошлось», хотя считать было не по чему. */}
+      {нетАвтоматов && (
+        <div className="empty">
+          <b>Данных нет</b>
+          Ни одного автомата в отчёте.
+        </div>
+      )}
+
+      {/* «Потерь нет» говорим ТОЛЬКО когда отчёт полный: есть автоматы, у
+          КАЖДОГО посчитан хотя бы один день. При живых предупреждениях или
+          автомате с daysCounted=0 это было бы обещание, которого расчёт
+          не давал: часть отчёта в него не вошла. */}
+      {!нетАвтоматов && !естьПотери && всеПосчитаны && предупреждения.length === 0 && (
         <div className="empty">
           <b>Потерь за период нет</b>
           Остатки сошлись с продажами во все дни без заливок.
         </div>
       )}
-      {!естьПотери && предупреждения.length > 0 && (
+      {!нетАвтоматов && !естьПотери && (!всеПосчитаны || предупреждения.length > 0) && (
         <div className="empty">
           <b>Потерь не насчитано</b>
           Но данные неполные — ниже сказано, какие дни и автоматы в расчёт не вошли.
@@ -97,10 +118,13 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
               означают разное, а пропущенные дни объясняют, почему сумма
               меньше ожидаемой. */}
           <div className="section-title">
-            {m.name} · дней посчитано {n(m.summary.daysCounted)}, пропущено {n(m.summary.daysSkipped)}
+            {`${m.name} · дней посчитано ${n(m.summary.daysCounted)}, не в счёт из-за заливки ${n(m.summary.daysSkipped)}`}
           </div>
 
-          {m.summary.items.length === 0 ? (
+          {m.summary.daysCounted === 0 ? (
+            // Не «Расхождений нет» — это ноль дней, а не ноль потерь.
+            <p className="muted">{`Не считали — все ${n(m.summary.daysSkipped)} дн. периода были заливкой/пропущены`}</p>
+          ) : m.summary.items.length === 0 ? (
             <p className="muted">Расхождений нет</p>
           ) : (
             <>
@@ -164,6 +188,15 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
   );
 }
 
+/** Заголовок секции — общий для «есть отчёт» и «Core не ответил» состояний. */
+function заголовокСекции() {
+  return (
+    <div className="section-title">
+      {`Усушка за ${SHRINKAGE_PANEL_DAYS} ${plural(SHRINKAGE_PANEL_DAYS, "день", "дня", "дней")}`}
+    </div>
+  );
+}
+
 /**
  * Секция «Усушка» на вкладке «Снек»: только то, что перешагнуло порог.
  *
@@ -172,12 +205,16 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
  */
 export function ShrinkageAlerts({ report, domain }: { report: VendingShrinkageReport; domain: string }) {
   const top = topShrinkAlerts(report);
+  const нетАвтоматов = report.machines.length === 0;
   return (
     <>
-      <div className="section-title">
-        {`Усушка за ${SHRINKAGE_PANEL_DAYS} ${plural(SHRINKAGE_PANEL_DAYS, "день", "дня", "дней")}`}
-      </div>
-      {top.length === 0 ? (
+      {заголовокСекции()}
+      <p className="hint">Расхождение остатков с продажами, без дней заливки.</p>
+      {нетАвтоматов ? (
+        // Тот же принцип, что и на листе «Усушка»: ноль автоматов в отчёте —
+        // это не «порог не превышен», а «считать было не по чему».
+        <p className="muted">Данных нет — ни одного автомата в отчёте</p>
+      ) : top.length === 0 ? (
         // Молчать нельзя: пропавшая секция означала бы «не считали», а мы
         // считали — и порог никто не перешагнул.
         <p className="muted">Порог не превышен</p>
@@ -195,6 +232,23 @@ export function ShrinkageAlerts({ report, domain }: { report: VendingShrinkageRe
       <p className="hint">
         <Link href={адресЛиста(domain)}>Усушка — весь отчёт</Link>
       </p>
+    </>
+  );
+}
+
+/**
+ * Секция «Усушка» на вкладке «Снек» при сбое подзапроса к ядру.
+ *
+ * Вкладка «Снек» открывается по своему пакету запросов, а усушка тянется
+ * отдельным (см. `vending-panel.tsx`) — сбой одной усушки не должен ронять
+ * всю вкладку. Но молча убирать секцию тоже нельзя: пропавшая секция читалась
+ * бы как «порог не превышен», хотя мы даже не спросили ядро.
+ */
+export function ShrinkageAlertsFailed() {
+  return (
+    <>
+      {заголовокСекции()}
+      <p className="muted">Усушка: не проверили (Core не ответил)</p>
     </>
   );
 }
