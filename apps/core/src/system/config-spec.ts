@@ -142,6 +142,22 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     help: "Первый автомат маршрута получает закуп первым. Пусто — по имени автомата.",
     validate: (v) => (/^\s*\d{6,}(\s*,\s*\d{6,})*\s*$/.test(v) ? null : "серийники (без «c») через запятую, например 2508160376,2508160359"),
   },
+  // ── Вендинг: полевой контур (П4) ──
+  {
+    key: "SHRINK_ALERT_UZS",
+    label: "Вендинг: порог усушки автомата, сум (по позиции за период)",
+    kind: "number",
+    fallback: "30000",
+    help: "Донор mydon-stock: 30 000 сум",
+    validate: nonNegNumber,
+  },
+  {
+    key: "REFILL_DETECT_MIN_UNITS",
+    label: "Вендинг: порог детектора заливки, шт за окно",
+    kind: "number",
+    fallback: "10",
+    validate: nonNegNumber,
+  },
   // ── GLOBERENT: комиссия менеджера — у донора PROMACH жили ТРИ формулы,
   // перенесены все три (packages/shared/globerent/commission.ts); какая
   // действует — решает владелец здесь, а не константа кода. ──

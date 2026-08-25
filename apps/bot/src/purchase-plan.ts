@@ -45,6 +45,30 @@ export function isPlanCommand(text: string): boolean {
 const WRAP = "… ";
 
 /**
+ * Обрезать текст по границе СИМВОЛА, а не по единице UTF-16.
+ *
+ * Эмодзи в имени товара Ourvend («🍫Montella») — суррогатная ПАРА из двух
+ * единиц. `slice` по числу единиц оставляет от неё половину, и Telegram
+ * отвергает всё сообщение целиком (400): владелец не получает не строку, а
+ * весь отчёт — и так каждое утро, пока имя не сменят.
+ *
+ * Длину при этом считаем как считает её Telegram — в единицах UTF-16: перейди
+ * мы на счёт символов, бюджет 3500 перестал бы защищать от предела 4096.
+ * Экспортируется ради брифинга и клавиатур: третьей копии этой резки быть не
+ * должно.
+ */
+export function cutAt(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  let out = "";
+  // Итератор строки идёт по кодовым точкам — пара приходит целиком.
+  for (const ch of text) {
+    if (out.length + ch.length > limit) break;
+    out += ch;
+  }
+  return out;
+}
+
+/**
  * Режет ОДНУ строку, которая не влезает в сообщение целиком. Такие строки
  * реальны: Core отдаёт «Без цены — вне бюджета: …» и «Нет в прайсе вендинга:
  * …» одним перечислением на все товары. Рвём по последней запятой (или
@@ -58,10 +82,14 @@ function splitLine(line: string, room: number): string[] {
   while (rest.length > limit) {
     const comma = rest.lastIndexOf(", ", limit - 1);
     const space = comma > 0 ? comma : rest.lastIndexOf(" ", limit - 1);
-    const cut = space > 0 ? space + 1 : limit;
-    const piece = rest.slice(0, cut).trimEnd();
+    // По запятой и пробелу граница безопасна сама собой; без них режем по
+    // пределу — и вот там пара и рвалась. Пустой кусок возможен лишь в
+    // вырожденном «предел 1, а первый символ — пара»: берём символ целиком,
+    // иначе цикл не сдвинется никогда.
+    const head = space > 0 ? rest.slice(0, space + 1) : cutAt(rest, limit) || [...rest][0] || rest;
+    const piece = head.trimEnd();
     out.push(out.length === 0 ? piece : `${WRAP}${piece}`);
-    rest = rest.slice(cut).trimStart();
+    rest = rest.slice(head.length).trimStart();
     limit = Math.max(1, room - WRAP.length);
   }
   out.push(out.length === 0 ? rest : `${WRAP}${rest}`);
@@ -76,8 +104,12 @@ function splitLine(line: string, room: number): string[] {
  * Инвариант «каждая часть ≤ TG_BUDGET» держится для ЛЮБОГО входа: строку
  * длиннее сообщения сначала рвём сами. Иначе она уходила в Telegram целиком,
  * тот отвечал 400, и владелец не получал ВЕСЬ план, а не одну строку.
+ *
+ * Экспортируется ради усушки (shrinkage-brief.ts): второй такой резчик
+ * разъехался бы с этим по бюджету и по пометке продолжения — а лечится это
+ * всегда после того, как владелец уже не получил половину отчёта.
  */
-function chunk(title: string, lines: string[]): string[] {
+export function chunk(title: string, lines: string[]): string[] {
   const cont = `${title} (продолжение)`;
   // Сколько остаётся строке в пустом сообщении: заголовок + "\n" + "" + "\n".
   const room = Math.max(1, TG_BUDGET - Math.max(title.length, cont.length) - 2);

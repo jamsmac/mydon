@@ -39,6 +39,15 @@ describe("config-spec: белый список тумблеров", () => {
     // Пусто — сброс настройки (порядок по имени), это допустимо всегда.
     assert.equal(validateConfig("VENDING_ROUTE_ORDER", ""), null);
   });
+
+  it("полевой контур (П4): пороги усушки и детектора заливки — неотрицательные числа", () => {
+    assert.equal(validateConfig("SHRINK_ALERT_UZS", "30000"), null);
+    assert.match(validateConfig("SHRINK_ALERT_UZS", "-1") ?? "", /неотрицательное/);
+    assert.match(validateConfig("SHRINK_ALERT_UZS", "abc") ?? "", /неотрицательное/);
+    assert.equal(validateConfig("REFILL_DETECT_MIN_UNITS", "10"), null);
+    assert.match(validateConfig("REFILL_DETECT_MIN_UNITS", "-1") ?? "", /неотрицательное/);
+    assert.match(validateConfig("REFILL_DETECT_MIN_UNITS", "abc") ?? "", /неотрицательное/);
+  });
 });
 
 describe("resolveEffective: приоритет база > env > дефолт", () => {

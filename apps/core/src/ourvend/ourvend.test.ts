@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { computeParity, type ParityDayRow } from "./ourvend-parity.service";
+import {
+  computeParity,
+  computeStockParity,
+  OurvendParityService,
+  type ParityDayRow,
+  type ParityStockRow,
+} from "./ourvend-parity.service";
 import { buildSnapshotRows, rewriteKeys, type SnapshotDay } from "./ourvend-snapshot.service";
 
 describe("Снапшот OurVend: построчная проверка присланных дней", () => {
@@ -121,5 +127,200 @@ describe("Паритет собственного снапшота со stock-д
     const own = [row("2026-08-23", "m1", 12, 144000.001)];
     const stock = [row("2026-08-23", "m1", 12, 144000)];
     assert.equal(computeParity(own, stock).mismatches.length, 0);
+  });
+});
+
+describe("Паритет ОСТАТКОВ автоматов (гашение связи №1, П4)", () => {
+  const s = (dt: string, serial: string, product: string, qty: number): ParityStockRow => ({
+    dt,
+    serial,
+    product,
+    qty,
+  });
+
+  it("полное совпадение по (день, автомат, товар) — ноль расхождений", () => {
+    const own = [s("2026-08-24", "2508160376", "Fanta", 6), s("2026-08-24", "2508160376", "Twix", 4)];
+    const { checked, mismatches } = computeStockParity(own, [...own]);
+    assert.equal(checked, 2);
+    assert.equal(mismatches.length, 0);
+  });
+
+  it("разошлось количество — в отчёте обе стороны", () => {
+    const own = [s("2026-08-24", "m1", "Fanta", 6)];
+    const stock = [s("2026-08-24", "m1", "Fanta", 5)];
+    const { mismatches } = computeStockParity(own, stock);
+    assert.equal(mismatches.length, 1);
+    assert.equal(mismatches[0].own, 6);
+    assert.equal(mismatches[0].stock, 5);
+    assert.equal(mismatches[0].product, "Fanta");
+  });
+
+  it("позиция есть только у одной стороны — видна, а не теряется", () => {
+    const own = [s("2026-08-24", "m1", "Fanta", 6)];
+    const stock = [s("2026-08-24", "m1", "Twix", 3)];
+    const { mismatches } = computeStockParity(own, stock);
+    assert.equal(mismatches.length, 2);
+    assert.ok(mismatches.some((m) => m.product === "Fanta" && m.stock === 0));
+    assert.ok(mismatches.some((m) => m.product === "Twix" && m.own === 0));
+  });
+
+  it("автомат, которого нет у второй стороны, в сверку не идёт вовсе", () => {
+    // Иначе аппарат, ещё не заведённый в чужой дорожке, красил бы гейт
+    // навсегда — и семь зелёных дней не наступили бы никогда.
+    const own = [s("2026-08-24", "m1", "Fanta", 6), s("2026-08-24", "m2", "Twix", 3)];
+    const stock = [s("2026-08-24", "m1", "Fanta", 6)];
+    const { checked, mismatches } = computeStockParity(own, stock);
+    assert.equal(checked, 1, "считаем только автоматы, которые есть у обеих сторон");
+    assert.equal(mismatches.length, 0);
+  });
+
+  it("разное написание одного товара — не расхождение", () => {
+    const own = [s("2026-08-24", "m1", "Red  Bull", 6)];
+    const stock = [s("2026-08-24", "m1", "red bull", 6)];
+    assert.equal(computeStockParity(own, stock).mismatches.length, 0);
+  });
+});
+
+describe("Вердикт паритета: продажи и остатки вместе", () => {
+  /**
+   * Реестр автоматов для сверки остатков: складские и «в ремонте» из неё
+   * выкидываются явно, тем же источником правды, что у плана закупа.
+   */
+  const реестрБезСклада = () =>
+    ({ machineRegistry: async () => ({ notInService: new Map(), nameBySerial: new Map() }) }) as never;
+  const реестрСоСкладом = (...серийники: string[]) =>
+    ({
+      machineRegistry: async () => ({
+        notInService: new Map(серийники.map((s) => [s, { name: s, status: "warehouse" }])),
+        nameBySerial: new Map(),
+      }),
+    }) as never;
+
+  /** Очередь ответов `db.execute` — ровно в порядке запросов сервиса. */
+  const stubDb = (ответы: unknown[][], written: Record<string, unknown>[] = []) => {
+    const queue = [...ответы];
+    return {
+      db: {
+        execute: () => Promise.resolve(queue.shift() ?? []),
+        insert: () => ({ values: (v: Record<string, unknown>) => Promise.resolve(written.push(v)) }),
+      } as never,
+      written,
+    };
+  };
+
+  const продажиОК = [
+    [{ dt: "2026-08-24", serial: "m1", qty: 12, amount: 144000 }],
+    [{ dt: "2026-08-24", serial: "m1", qty: 12, amount: 144000 }],
+  ];
+
+  it("продажи сошлись, остатки — нет: вердикт красный", async () => {
+    const { db } = stubDb([
+      ...продажиОК,
+      [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }],
+      [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 5 }],
+    ]);
+    const svc = new OurvendParityService(db, реестрБезСклада());
+
+    const p = await svc.parity(7);
+    assert.equal(p.mismatches.length, 0, "продажи чистые");
+    assert.equal(p.stock.mismatches.length, 1);
+    assert.equal(p.stock.checked, 1);
+    assert.equal(p.stock.ok, false);
+    assert.equal(p.ok, false, "переключать источник нельзя, пока расходится хоть одна половина");
+  });
+
+  it("обе половины чистые — вердикт зелёный, и обе попадают в суточное событие", async () => {
+    const written: Record<string, unknown>[] = [];
+    const { db } = stubDb(
+      [
+        ...продажиОК,
+        [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }],
+        [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }],
+      ],
+      written,
+    );
+    const svc = new OurvendParityService(db, реестрБезСклада());
+
+    assert.equal((await svc.parity(7)).ok, true);
+
+    // daily() ходит в базу заново — очередь пополняем ещё одним прогоном.
+    const { db: db2 } = stubDb(
+      [
+        ...продажиОК,
+        [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }],
+        [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }],
+      ],
+      written,
+    );
+    await new OurvendParityService(db2, реестрБезСклада()).daily();
+
+    const payload = written[0]!.payload as Record<string, unknown>;
+    assert.equal(payload.ok, true);
+    assert.ok("остатки_сверено" in payload, "сводка обязана нести обе половины");
+    assert.equal(payload.остатки_расхождений, 0);
+  });
+
+  it("снимков остатков за период нет — гейт НЕ зелёный: сверять было не по чему", async () => {
+    // Отмена рулинга F5 Task 4. Прод показал ровно «заглушка врёт»:
+    // `ourvend_stock_snapshot` держал строки только за СЕГОДНЯ, фильтр
+    // `dt < current_date` выбрасывал их целиком, и половина гейта П4 отдавала
+    // «ok» в прогоне, где не сравнили ни одной строки. Семь таких «зелёных»
+    // дней открыли бы переключение источника учёта.
+    const { db } = stubDb([...продажиОК, [], []]);
+    const p = await new OurvendParityService(db, реестрБезСклада()).parity(7);
+
+    assert.equal(p.stock.checked, 0);
+    assert.equal(p.stock.ok, false, "ноль сверенных пар — не повод разрешать переключение");
+    assert.match(String(p.stock.note), /сверять не по чему/);
+    assert.match(String(p.note), /остатки/, "общая записка обязана объяснить, чего не хватает");
+    assert.equal(p.ok, false);
+  });
+
+  it("складские автоматы в сверку остатков не идут — их мусор гейт не красит", async () => {
+    // SKLAD 4S отдаёт заглушку 199 по всем слотам и в `machine_stock` уже
+    // бывал: вернувшись, он дал бы гейту 34 расхождения из мусора.
+    const { db } = stubDb([
+      ...продажиОК,
+      [
+        { dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 },
+        { dt: "2026-08-24", serial: "sklad4s", product: "Fanta", qty: 199 },
+      ],
+      [
+        { dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 },
+        { dt: "2026-08-24", serial: "sklad4s", product: "Fanta", qty: 7028 },
+      ],
+    ]);
+    const p = await new OurvendParityService(db, реестрСоСкладом("sklad4s")).parity(7);
+
+    assert.equal(p.stock.checked, 1, "сверили только рабочий автомат");
+    assert.deepEqual(p.stock.mismatches, []);
+    assert.equal(p.stock.ok, true);
+  });
+
+  it("строки остатков есть, но общих автоматов нет — это уже проблема, вердикт красный", async () => {
+    const { db } = stubDb([
+      ...продажиОК,
+      [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }],
+      [{ dt: "2026-08-24", serial: "ДРУГОЙ", product: "Fanta", qty: 6 }],
+    ]);
+    const p = await new OurvendParityService(db, реестрБезСклада()).parity(7);
+
+    assert.equal(p.stock.checked, 0);
+    assert.equal(p.stock.ok, false);
+    assert.equal(p.ok, false);
+  });
+
+  it("пустой снапшот продаж не отменяет запись сводки — иначе половина по остаткам теряется", async () => {
+    const written: Record<string, unknown>[] = [];
+    const { db } = stubDb(
+      [[], [], [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }], [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }]],
+      written,
+    );
+    await new OurvendParityService(db, реестрБезСклада()).daily();
+
+    assert.equal(written.length, 1, "событие пишется всегда");
+    const payload = written[0]!.payload as Record<string, unknown>;
+    assert.equal(payload.остатки_сверено, 1);
+    assert.match(String(payload.примечание), /продаж/);
   });
 });

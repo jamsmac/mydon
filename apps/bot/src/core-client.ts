@@ -1,4 +1,4 @@
-import type { Domain } from "@mydon/shared";
+import { normalizeMachineSerial, type Domain } from "@mydon/shared";
 
 export interface Briefing {
   generatedAt: string;
@@ -252,6 +252,80 @@ export interface VendingPlan {
   warnings: VendingPlanWarning[];
 }
 
+/**
+ * Усушка автомата (GET /vending/shrinkage, П4/R-P4-3).
+ *
+ * Типы описаны здесь, а не импортированы из Core: бот ходит в Core по HTTP и
+ * не собирается вместе с ним. Импорт связал бы сборку бота со сборкой сервера
+ * ради четырёх полей — и сломал бы её при любой правке внутренностей Core.
+ */
+export interface ShrinkItem {
+  product: string;
+  /** Недостача за период, штук. */
+  lossUnits: number;
+  /** Она же в деньгах по закупочной цене. */
+  lossValue: number;
+  /** Излишек — в деньги НЕ входит, но виден: это тоже расхождение. */
+  surplusUnits: number;
+  daysCounted: number;
+  /** Цены нет — позиция в сумму не вошла. */
+  noPrice: boolean;
+  /** Перевалила порог: повод разбираться, а не «шум округления». */
+  alert: boolean;
+}
+
+export interface ShrinkSummary {
+  items: ShrinkItem[];
+  lossValue: number;
+  daysCounted: number;
+  /**
+   * Сутки, ИСКЛЮЧЁННЫЕ из расчёта (заливка или пропуск снимка) — не часть
+   * daysCounted, а то, что из него вычли. `daysCounted === 0` значит, что
+   * товар не считался ни дня: «недостач нет» про такой автомат говорить нельзя.
+   */
+  daysSkipped: number;
+  threshold: number;
+}
+
+/** День заливки по снимкам: что увидел детектор и что записал оператор. */
+export interface ShrinkRefillDay {
+  /** YYYY-MM-DD по Ташкенту. */
+  date: string;
+  detectedUnits: number;
+  recordedUnits: number;
+}
+
+export interface ShrinkMachine {
+  /** Серийник в каноне (без приставки «c»). */
+  serial: string;
+  name: string;
+  summary: ShrinkSummary;
+  refillDays: ShrinkRefillDay[];
+}
+
+/** Почему в отчёте чего-то нет. Каждая причина чинится в своём месте. */
+export interface ShrinkWarning {
+  code:
+    | "snapshots_stale"
+    | "no_sales_day"
+    | "machine_dead"
+    | "sales_unknown_product"
+    | "machine_error"
+    /** Ни одних суток не посчитано: всё окно было заливкой или пропуском. */
+    | "no_counted_days";
+  message: string;
+}
+
+export interface ShrinkReport {
+  /** Первый день периода, YYYY-MM-DD. */
+  from: string;
+  /** Последний — ВЧЕРА: у сегодняшних суток нет снимка на конец. */
+  to: string;
+  threshold: number;
+  machines: ShrinkMachine[];
+  warnings: ShrinkWarning[];
+}
+
 /** Правила закупа товара «было»/«стало» — как их отдаёт Core. */
 export interface VendingRulesSnapshot {
   packSize?: number;
@@ -335,6 +409,23 @@ export class CoreError extends Error {
   }
 }
 
+/**
+ * Выбранная карточка — не автомат.
+ *
+ * Отдельный класс, а не пустая строка: «карточка не отдалась» и «карточка не
+ * того рода» чинятся по-разному (первое — позвать владельца, второе — выбрать
+ * другой объект), и мастер обязан сказать оператору, что именно случилось.
+ */
+export class NotAMachineError extends Error {
+  constructor(
+    readonly entityId: string,
+    readonly type: string,
+  ) {
+    super(`Карточка ${entityId} — не автомат (${type})`);
+    this.name = "NotAMachineError";
+  }
+}
+
 /** Тонкий клиент к MYDON Core. Бот не ходит в БД напрямую — только через API. */
 export class CoreClient {
   constructor(
@@ -389,6 +480,14 @@ export class CoreClient {
   /** План закупа: маршрут, что купить, что взять со склада, слоты (П5a). */
   vendingPlan(): Promise<VendingPlan> {
     return this.request<VendingPlan>("/vending/plan");
+  }
+
+  /**
+   * Усушка автоматов за `days` суток (П4). Отдельный запрос, а не часть плана:
+   * план отвечает «что везти», усушка — «куда девается уже привезённое».
+   */
+  vendingShrinkage(days = 14): Promise<ShrinkReport> {
+    return this.request<ShrinkReport>(`/vending/shrinkage?days=${days}`);
   }
 
   // ── Сигналы GLOBERENT для брифинга (перенос PROMACH) ──
@@ -570,6 +669,20 @@ export class CoreClient {
   pendingNotifications(since: Date): Promise<PendingNotifications> {
     return this.request<PendingNotifications>(
       `/rules/pending?immediate=1&since=${encodeURIComponent(since.toISOString())}`,
+    );
+  }
+
+  /**
+   * Всё недоставленное с момента `since`, включая несрочное.
+   *
+   * Срочное бот опрашивает раз в минуту с `immediate=1`, а помеченное
+   * правилами как `briefing` не забирал НИКТО: такие события копились в Core
+   * и не доходили до владельца ни разу. Утренний брифинг — их единственный
+   * канал, поэтому здесь фильтра нет: доставленное Core отсечёт сам.
+   */
+  briefingNotifications(since: Date): Promise<PendingNotifications> {
+    return this.request<PendingNotifications>(
+      `/rules/pending?since=${encodeURIComponent(since.toISOString())}`,
     );
   }
 
@@ -988,6 +1101,29 @@ export class CoreClient {
   /** Товары, стоящие в автомате по зеркалу Ourvend — кнопки мастера заливки. */
   machineProducts(machineSerial: string): Promise<string[]> {
     return this.request(`/vending/machine-products?serial=${encodeURIComponent(machineSerial)}`);
+  }
+
+  /**
+   * Серийник автомата по карточке реестра.
+   *
+   * Мастера выбирают ОБЪЕКТ (карточку с именем), а вендинг живёт серийниками
+   * Ourvend. Канон обязателен: в реестре лежит и «c2508160376», и
+   * «2508160376» — без нормализации половина автоматов не нашла бы ни плана,
+   * ни своих товаров (см. machine-serial.ts).
+   *
+   * Тип карточки проверяем здесь, а не в мастере: `externalRef` есть у складов,
+   * помещений и машин сотрудников тоже, и заливка по чужому коду записалась бы
+   * молча — с автоматом её потом не связать ничем.
+   */
+  async machineSerial(entityId: string): Promise<string> {
+    const row = await this.request<EntityRow>(`/entities/${encodeURIComponent(entityId)}`);
+    if (row.type !== "machine") throw new NotAMachineError(entityId, row.type);
+    return normalizeMachineSerial(row.externalRef);
+  }
+
+  /** Прайс вендинга — для поиска товара по названию, когда его нет в зеркале. */
+  vendingProducts(): Promise<{ id: string; name: string; isActive: boolean }[]> {
+    return this.request("/vending/products");
   }
 
   /** Инвентаризация: записать факт пересчёта — сервер сам считает дельту. */

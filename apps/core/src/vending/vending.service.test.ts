@@ -161,7 +161,7 @@ function writeDb(
   products: unknown[] = [],
   stockRows: unknown[] = [],
   /** Карточки автоматов реестра — для привязки слотов к entity. */
-  machineCards: { id: string; ref: string | null }[] = [],
+  machineCards: { id: string; externalRef: string | null; type?: string }[] = [],
 ) {
   const inserts: { table: string; values: unknown }[] = [];
   // Реальные строки vending_stock всегда имеют countedAt (NOT NULL) — большинство
@@ -171,6 +171,8 @@ function writeDb(
   const stockRowsWithCountedAt = stockRows.map((r) => ({ countedAt: new Date(0), ...(r as object) }));
   /** Слоты, убранные как исчезнувшие: возвращаем то, что задали тестом. */
   const pruneRows: { id: string }[] = [];
+  /** Ветка конфликта: что именно апсерт пишет поверх существующей строки. */
+  const conflicts: { table: string; set: Record<string, unknown> }[] = [];
   /** Заставить уборку упасть — проверяем, что снимок при этом уцелел. */
   let pruneFails = false;
   const failPrune = () => {
@@ -190,7 +192,12 @@ function writeDb(
       values: (v: unknown) => {
         const name = tableName(table);
         inserts.push({ table: name, values: v });
-        return { onConflictDoUpdate: () => Promise.resolve() };
+        return {
+          onConflictDoUpdate: (cfg: { set?: Record<string, unknown> }) => {
+            conflicts.push({ table: name, set: cfg.set ?? {} });
+            return Promise.resolve();
+          },
+        };
       },
     }),
   };
@@ -226,8 +233,29 @@ function writeDb(
     }),
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
-  return { db, inserts, pruneRows, failPrune };
+  return { db, inserts, conflicts, pruneRows, failPrune };
 }
+/**
+ * Текст SQL-фрагмента drizzle.
+ *
+ * Заглушка запросов не ИСПОЛНЯЕТ, поэтому семантику «не затирать непустую
+ * ссылку» здесь можно проверить только по тексту выражения; что оно
+ * действительно так работает в Postgres, проверяет дымовой прогон
+ * (`tools/smoke-core.mjs`, сценарий повторного приёма слотов и склада).
+ */
+function текстSQL(x: unknown): string {
+  const chunks = (x as { queryChunks?: unknown[] }).queryChunks;
+  if (!Array.isArray(chunks)) return "";
+  return chunks
+    .map((c) => {
+      const v = (c as { value?: unknown }).value;
+      if (Array.isArray(v)) return v.join("");
+      const name = (c as { name?: unknown }).name;
+      return typeof name === "string" ? name : "";
+    })
+    .join("");
+}
+
 function tableName(t: unknown): string {
   // Журнал событий узнаём по личности: эвристика по ключам его не различает.
   if (t === event) return "event";
@@ -409,7 +437,7 @@ describe("Вендинг Core: приём продаж — идемпотент�
    * (проверка самого constraint — вне мокового unit-теста, найдено внешним
    * аудитом п.13: нет реальных DB-тестов на конкурентность/ограничения).
    */
-  function ingestSalesDb(machineCards: { id: string; ref: string | null }[] = []) {
+  function ingestSalesDb(machineCards: { id: string; externalRef: string | null; type?: string }[] = []) {
     const calls: { table: "product_sale" | "machine_sale"; values: Record<string, unknown>; target: unknown[] }[] = [];
     const tx = {
       insert: (table: unknown) => ({
@@ -1326,6 +1354,16 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     const stockInserts = inserts.filter((i) => (i.values as { productName?: string }).productName === canonical);
     assert.equal(stockInserts.length, 1);
     assert.equal((stockInserts[0]!.values as { quantity: number }).quantity, 12);
+    // …со ссылкой на карточку прайса: строка склада ключуется именем, и без
+    // ссылки переименование товара рвало связь остатка с прайсом (бэкфилл П4).
+    assert.equal((stockInserts[0]!.values as { productId: string | null }).productId, "p1");
+  });
+
+  it("повторный пересчёт склада не затирает product_id пустым (ветка конфликта)", async () => {
+    const { db, conflicts } = writeDb();
+    await new VendingService(db).ingestStock({ items: [{ product: "Загадка", quantity: 3 }] });
+    const набор = conflicts.find((c) => c.set.quantity !== undefined)!.set;
+    assert.match(текстSQL(набор.productId), /coalesce\(excluded\.product_id/);
   });
 });
 
@@ -1357,7 +1395,7 @@ describe("Вендинг Core: приём слотов", () => {
   it("привязывает слот к карточке, даже если в реестре серийник с приставкой c", async () => {
     // Боевой случай: Ourvend прислал «2508160376», в реестре лежит
     // «c2508160376» (форма из mydon-stock). Раньше machine_id оставался NULL.
-    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", ref: "c2508160376" }]);
+    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", externalRef: "c2508160376" }]);
     const svc = new VendingService(db);
     const res = await svc.ingestSlots({
       machines: [{ serial: "2508160376", slots: [{ coilId: "1", product: "Snickers", capacity: 11, quantity: 8 }] }],
@@ -1369,7 +1407,7 @@ describe("Вендинг Core: приём слотов", () => {
 
   it("код кофемашины на c не путается с серийником Ourvend", async () => {
     // c7a6181f0000 — живой автомат; срезать приставку у него нельзя.
-    const { db, inserts } = writeDb([], [], [], [{ id: "kofe", ref: "c7a6181f0000" }]);
+    const { db, inserts } = writeDb([], [], [], [{ id: "kofe", externalRef: "c7a6181f0000" }]);
     const svc = new VendingService(db);
     const res = await svc.ingestSlots({
       machines: [{ serial: "c7a6181f0000", slots: [{ coilId: "1", product: "x", capacity: 1, quantity: 1 }] }],
@@ -1381,7 +1419,7 @@ describe("Вендинг Core: приём слотов", () => {
 
   it("автомат без карточки в реестре принимается, machine_id остаётся пустым", async () => {
     // 2508160355 и 2508160358 есть в Ourvend, но карточек у них нет.
-    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", ref: "c2508160376" }]);
+    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", externalRef: "c2508160376" }]);
     const svc = new VendingService(db);
     const res = await svc.ingestSlots({
       machines: [{ serial: "2508160355", slots: [{ coilId: "1", product: "", capacity: 0, quantity: 0 }] }],
@@ -1390,6 +1428,45 @@ describe("Вендинг Core: приём слотов", () => {
     assert.equal(res.linked, 0);
     const ms = inserts.find((i) => i.table === "machine_slot")!.values as { machineId: string | null };
     assert.equal(ms.machineId, null);
+  });
+
+  it("проставляет product_id по канону через алиасы (бэкфилл П4)", async () => {
+    // Раньше ссылка была NULL у всех 210 строк: связывало слот с прайсом
+    // только совпадение строк, и переименование товара рвало историю молча.
+    const aliases: AliasRow[] = [{ productId: "p1", alias: "18+" }];
+    const products: ProdRow[] = [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: null, packSize: 1 }];
+    const { db, inserts } = writeDb(aliases, products);
+    const svc = new VendingService(db);
+    await svc.ingestSlots({
+      machines: [{ serial: "AH", slots: [{ coilId: "1", product: "18+", capacity: 6, quantity: 0 }] }],
+    });
+    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { productId: string | null; productName: string | null };
+    assert.equal(ms.productId, "p1");
+    assert.equal(ms.productName, "18+", "имя остаётся сырым — это по-прежнему «что показал автомат»");
+  });
+
+  it("повторный приём того же товара не затирает product_id пустым (ветка конфликта)", async () => {
+    // Прайс мог переименовать карточку, и резолвер вернёт null там, где связь
+    // есть и верна. Прямая запись `product_id = excluded.product_id` обнулила
+    // бы ровно ту ссылку, ради которой бэкфилл и заводился.
+    const { db, conflicts } = writeDb();
+    await new VendingService(db).ingestSlots({
+      machines: [{ serial: "AH", slots: [{ coilId: "1", product: "Загадка", capacity: 6, quantity: 0 }] }],
+    });
+    const набор = conflicts.find((c) => c.table === "machine_slot")!.set;
+    const выражение = текстSQL(набор.productId);
+    assert.match(выражение, /excluded\.product_name is distinct from/, "смена товара в слоте — ссылка идёт за товаром");
+    assert.match(выражение, /coalesce\(excluded\.product_id/, "товар тот же — непустую ссылку не затираем");
+  });
+
+  it("товара нет в прайсе → product_id пустой, снимок всё равно принят", async () => {
+    const { db, inserts } = writeDb();
+    const svc = new VendingService(db);
+    await svc.ingestSlots({
+      machines: [{ serial: "AH", slots: [{ coilId: "1", product: "Загадка", capacity: 6, quantity: 0 }] }],
+    });
+    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { productId: string | null };
+    assert.equal(ms.productId, null);
   });
 
   it("раздутый автомат пропускается, остальные принимаются (а не падает весь приём)", async () => {
@@ -1621,7 +1698,7 @@ describe("Продажи Ourvend знают свой автомат", () => {
   it("привязка идёт по канону серийника: реестр с приставкой, вендор без", async () => {
     // Вопрос «сколько принёс ЭТОТ автомат» отвечался для mydon-stock и не
     // отвечался для Ourvend: product_sale и machine_sale несли только серийник.
-    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", ref: "c2508160376" }]);
+    const { db, inserts } = writeDb([], [], [], [{ id: "ent-1", externalRef: "c2508160376" }]);
     const svc = new VendingService(db);
     await svc.ingestSales({
       periodStart: "2026-08-01T00:00:00.000Z",
@@ -2129,6 +2206,47 @@ describe("Вендинг Core: план закупа (П5a)", () => {
     assert.equal(позиция.order, 50); // не 60 = ceil(6/12)×12
     assert.equal(позиция.fromPurchase, 6); // в автоматы — по потребности
     assert.equal(plan.stock.back, 44); // остальное закупа уезжает на склад
+  });
+
+  it("автомат-заглушка (ёмкости вне диапазона) выброшен из плана и виден в warnings (R-P4-4)", async () => {
+    // SKLAD-заглушки отдают quantity = capacity = 199 по всем пружинам. Раньше
+    // такой автомат просто не появлялся в плане (не проходил калибровку) — молча.
+    const мёртвые: Row[] = Array.from({ length: 10 }, (_, i) => ({
+      machineSerial: "2508160358",
+      coilId: String(i + 1),
+      productName: "Fanta",
+      capacity: 199,
+      quantity: 199,
+    }));
+    const реестр: Ent[] = [...entities, { id: "m-dead", name: "SKLAD 6S", externalRef: "c2508160358", type: "machine" }];
+    const db = planDb({ slots: [...slots, ...мёртвые], entities: реестр, cards, products, sales });
+    const plan = await new VendingService(db).plan();
+
+    assert.ok(!plan.machines.some((m) => m.serial === "2508160358"), "автомат-заглушка не получает раздачу");
+    const w = plan.warnings.find((x) => x.code === "machine_skipped" && x.message.includes("SKLAD 6S"))!;
+    assert.match(w.message, /ёмкости слотов вне диапазона \(заглушка источника\)/);
+    // Причина не подменяется состоянием карточки: автомат числится в строю.
+    assert.ok(!/не в строю/.test(w.message));
+  });
+
+  it("только что заправленный автомат (ВСЕ слоты полны) остаётся в плане", async () => {
+    // Ложное срабатывание прежнего правила «все валидные слоты полны»: у этого
+    // автомата нет ни одного неполного слота, и старое правило выбросило бы его
+    // из плана, продаж и прогноза на часы после заправки. Отдельный серийник —
+    // намеренно: в базовой фикстуре у 2508160359 есть слот 3/5, и он маскировал
+    // бы регрессию.
+    const полный: Row[] = Array.from({ length: 12 }, (_, i) => ({
+      machineSerial: "2508160357",
+      coilId: String(i + 1),
+      productName: "Fanta",
+      capacity: 5,
+      quantity: 5,
+    }));
+    const реестр: Ent[] = [...entities, { id: "m-full", name: "Olma 2", externalRef: "c2508160357", type: "machine" }];
+    const db = planDb({ slots: [...slots, ...полный], entities: реестр, cards, products, sales });
+    const plan = await new VendingService(db).plan();
+    assert.ok(plan.machines.some((m) => m.serial === "2508160357"), "полный автомат — обслуженный, а не мёртвый");
+    assert.ok(!plan.warnings.some((x) => x.code === "machine_skipped" && x.message.includes("Olma 2")));
   });
 });
 

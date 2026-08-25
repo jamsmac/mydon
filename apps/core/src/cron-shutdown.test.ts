@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { SalesService } from "./sales/sales.service";
 import { StockService } from "./stock/stock.service";
 import { SupplyService } from "./supply/supply.service";
+import { ShrinkageService } from "./vending/shrinkage.service";
 
 interface CronOwner {
   cron: { stop(): void } | null;
@@ -14,6 +15,7 @@ describe("Core cron shutdown", () => {
     ["sales", () => new SalesService({} as never)],
     ["supply", () => new SupplyService({} as never)],
     ["stock", () => new StockService({} as never)],
+    ["shrinkage", () => new ShrinkageService({} as never, {} as never)],
   ] as const) {
     it(`останавливает ${name} cron и освобождает event loop`, () => {
       const service = create() as unknown as CronOwner;

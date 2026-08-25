@@ -1,9 +1,10 @@
 import { Inject, Injectable, Logger, type OnApplicationShutdown, OnModuleInit } from "@nestjs/common";
-import { event, ourvendSaleSnapshot, sale } from "@mydon/db";
-import { machineSerialSql } from "@mydon/shared";
+import { event, machineStock, ourvendSaleSnapshot, ourvendStockSnapshot, sale } from "@mydon/db";
+import { machineSerialSql, normalizeProductName } from "@mydon/shared";
 import { sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
+import { VendingService } from "../vending/vending.service";
 
 /**
  * Паритет собственного снапшота OurVend со stock-дорожкой — гейт П2.
@@ -86,12 +87,105 @@ export function computeParity(
   return { checked, mismatches };
 }
 
+/** Остаток автомата строкой: день, автомат, товар, штуки. */
+export interface ParityStockRow {
+  dt: string;
+  serial: string;
+  product: string;
+  qty: number;
+}
+
+export interface ParityStockMismatch {
+  dt: string;
+  serial: string;
+  product: string;
+  own: number;
+  stock: number;
+  reason: string;
+}
+
+/**
+ * Сверка остатков автоматов (гашение связи №1, П4/R-P4-6) — чистое сравнение,
+ * exported для тестов.
+ *
+ * СРАВНИВАЮТСЯ ТОЛЬКО АВТОМАТЫ, КОТОРЫЕ ЕСТЬ У ОБЕИХ СТОРОН. Аппарат,
+ * заведённый у нас и ещё не появившийся в stock-дорожке (или наоборот),
+ * красил бы гейт каждый день — и семь зелёных подряд не наступили бы никогда,
+ * хотя расхождения по существу нет.
+ *
+ * Имя товара сравнивается НОРМАЛИЗОВАННЫМ: стороны пишут «Red  Bull» и
+ * «red bull», и посимвольное сравнение объявило бы расхождением опечатку в
+ * пробеле. Показываем при этом имя как есть — владельцу нужно то написание,
+ * которое он увидит в кабинете.
+ */
+export function computeStockParity(
+  own: ParityStockRow[],
+  stockSide: ParityStockRow[],
+  /**
+   * Серийники не в строю (склад, ремонт) — вон с ОБЕИХ сторон и явно, а не
+   * через пересечение. SKLAD 4S отдаёт заглушку 199 по всем слотам и в
+   * `machine_stock` уже бывал: вернувшись, он дал бы гейту три десятка
+   * расхождений из мусора, и переключение источника учёта не открылось бы
+   * никогда.
+   */
+  notInService: Set<string> = new Set(),
+): { checked: number; mismatches: ParityStockMismatch[] } {
+  own = own.filter((r) => !notInService.has(r.serial));
+  stockSide = stockSide.filter((r) => !notInService.has(r.serial));
+  const общие = new Set(
+    [...new Set(own.map((r) => r.serial))].filter((s) => stockSide.some((r) => r.serial === s)),
+  );
+  const key = (r: ParityStockRow) => `${r.dt}|${r.serial}|${normalizeProductName(r.product)}`;
+  const ourOwn = own.filter((r) => общие.has(r.serial));
+  const ourStock = stockSide.filter((r) => общие.has(r.serial));
+  const stockMap = new Map(ourStock.map((r) => [key(r), r]));
+  const seen = new Set<string>();
+  const mismatches: ParityStockMismatch[] = [];
+  let checked = 0;
+
+  for (const o of ourOwn) {
+    checked += 1;
+    seen.add(key(o));
+    const s = stockMap.get(key(o));
+    if (!s) {
+      mismatches.push({
+        dt: o.dt,
+        serial: o.serial,
+        product: o.product,
+        own: o.qty,
+        stock: 0,
+        reason: "у stock-дорожки нет этой позиции",
+      });
+      continue;
+    }
+    if (Math.abs(o.qty - s.qty) >= 0.01) {
+      mismatches.push({ dt: o.dt, serial: o.serial, product: o.product, own: o.qty, stock: s.qty, reason: "остатки расходятся" });
+    }
+  }
+  for (const s of ourStock) {
+    if (seen.has(key(s))) continue;
+    mismatches.push({
+      dt: s.dt,
+      serial: s.serial,
+      product: s.product,
+      own: 0,
+      stock: s.qty,
+      reason: "в нашем снапшоте нет этой позиции",
+    });
+  }
+  return { checked, mismatches };
+}
+
 @Injectable()
 export class OurvendParityService implements OnModuleInit, OnApplicationShutdown {
   private readonly log = new Logger(OurvendParityService.name);
   private cron: Cron | null = null;
 
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    /** Реестр автоматов — тот же источник правды о «не в строю», что у плана закупа. */
+    private readonly vending: VendingService,
+  ) {}
 
   onModuleInit(): void {
     // Утром, после и снапшота stock (07:50), и нашего (08:05): обе стороны
@@ -120,6 +214,8 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     mismatches: ParityMismatch[];
     ownRows: number;
     note: string | null;
+    /** Вторая половина гейта: остатки автоматов (связь №1, П4). */
+    stock: { days: number; checked: number; ok: boolean; mismatches: ParityStockMismatch[]; note: string | null };
   }> {
     const n = Math.min(Math.max(Math.trunc(days) || 7, 1), 30);
     // Канон серийника — общий SQL-хелпер (@mydon/shared), тот же, что в
@@ -151,23 +247,81 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
       group by 1, 2
     `)) as unknown as ParityDayRow[];
 
+    // ── Вторая половина гейта: остатки автоматов (связь №1, R-P4-6) ──
+    // Сравниваются те же дни и тем же каноном серийника, но ключ на разряд
+    // подробнее: (день, автомат, ТОВАР). Суммы по автомату сошлись бы и при
+    // перепутанных товарах, а после флипа планограмму и закуп мы будем строить
+    // именно по товарам.
+    const ownStockRaw = (await this.db.execute(sql`
+      select dt::text as dt, ${canon("machine_serial")} as serial, product,
+             sum(qty)::float as qty
+      from ${ourvendStockSnapshot}
+      where dt >= (current_date - ${sql.raw(String(n))}::int)
+        and dt < current_date
+      group by 1, 2, 3
+    `)) as unknown as ParityStockRow[];
+    const stockStockRaw = (await this.db.execute(sql`
+      select dt::text as dt, ${canon("machine_serial")} as serial, product,
+             sum(qty)::float as qty
+      from ${machineStock}
+      where dt >= (current_date - ${sql.raw(String(n))}::int)
+        and dt < current_date
+        and dt >= (select min(dt) from ${ourvendStockSnapshot})
+      group by 1, 2, 3
+    `)) as unknown as ParityStockRow[];
+
     const own = ownRaw.map((r) => ({ ...r, qty: Number(r.qty), amount: Number(r.amount) }));
     const stockSide = stockRaw.map((r) => ({ ...r, qty: Number(r.qty), amount: Number(r.amount) }));
     const { checked, mismatches } = computeParity(own, stockSide);
-    const note =
-      own.length === 0
-        ? "собственный снапшот ещё пуст — сверять нечего (агент ещё не отработал?)"
-        : null;
-    return { days: n, checked, ok: mismatches.length === 0 && own.length > 0, mismatches, ownRows: own.length, note };
+
+    const { notInService } = await this.vending.machineRegistry();
+    const ownStock = ownStockRaw.map((r) => ({ ...r, qty: Number(r.qty) }));
+    const stockStock = stockStockRaw.map((r) => ({ ...r, qty: Number(r.qty) }));
+    const остатки = computeStockParity(ownStock, stockStock, new Set(notInService.keys()));
+    // НЕ СВЕРИЛИ НИ ОДНОЙ ПАРЫ — ЭТО НЕ «ОК». Гейт открывает переключение
+    // источника учёта, и «зелёный» без единой сравненной строки — ровно тот
+    // случай «заглушка врёт», ради которого заводили смоук против живого
+    // Postgres: прод держал снимки остатков только за СЕГОДНЯ, фильтр
+    // `dt < current_date` выбрасывал их целиком, и половина гейта отчитывалась
+    // «ok» ни о чём. Цвет теперь красный, а причина сказана словами — чинить
+    // будут сбор остатков, а не паритет продаж.
+    const stockNote =
+      ownStock.length === 0
+        ? "снимков остатков OurVend за период нет — сверять не по чему"
+        : остатки.checked === 0
+          ? "нет автоматов, общих со stock-дорожкой, — сверять не с чем"
+          : null;
+    const stock = {
+      days: n,
+      checked: остатки.checked,
+      ok: остатки.mismatches.length === 0 && остатки.checked > 0,
+      mismatches: остатки.mismatches,
+      note: stockNote,
+    };
+
+    const salesNote =
+      own.length === 0 ? "собственный снапшот продаж ещё пуст — сверять нечего (агент ещё не отработал?)" : null;
+    const note = [salesNote, stockNote && `остатки: ${stockNote}`].filter((x): x is string => Boolean(x)).join("; ") || null;
+    return {
+      days: n,
+      checked,
+      // Вердикт — И по продажам, И по остаткам: флаг переключения один
+      // (`OURVEND_ACCOUNTING_SOURCE`), значит и разрешение на него одно.
+      ok: mismatches.length === 0 && own.length > 0 && stock.ok,
+      mismatches,
+      ownRows: own.length,
+      note,
+      stock,
+    };
   }
 
   /** Ежедневный вердикт — событием: 7 зелёных подряд открывают переключение. */
   async daily(): Promise<void> {
     const p = await this.parity(7);
-    if (p.note) {
-      this.log.log(`Паритет OurVend: ${p.note}`);
-      return;
-    }
+    // Событие пишем ВСЕГДА, даже когда одна половина пуста. Прежний ранний
+    // выход из-за пустого снапшота продаж уносил с собой и половину по
+    // остаткам: в журнале не оставалось ни строки, и «гейт молчит» было не
+    // отличить от «гейт не запускался».
     await this.db.insert(event).values({
       source: "ourvend-accounting",
       type: "ourvend.parity",
@@ -177,8 +331,18 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
         сверено_пар: p.checked,
         расхождений: p.mismatches.length,
         расхождения: p.mismatches.slice(0, 50),
+        // Обе половины гейта в ОДНОЙ сводке: два отдельных события владелец
+        // читал бы как два независимых вердикта, а переключение одно.
+        остатки_сверено: p.stock.checked,
+        остатки_расхождений: p.stock.mismatches.length,
+        остатки_расхождения: p.stock.mismatches.slice(0, 50),
+        примечание: p.note,
       },
     });
-    this.log.log(`Паритет OurVend: ${p.ok ? "ОК" : `расхождений ${p.mismatches.length}`} (пар ${p.checked}).`);
+    this.log.log(
+      `Паритет OurVend: ${p.ok ? "ОК" : "расхождения"} — продажи ${p.mismatches.length} из ${p.checked} пар, ` +
+        `остатки ${p.stock.mismatches.length} из ${p.stock.checked}.` +
+        (p.note ? ` (${p.note})` : ""),
+    );
   }
 }

@@ -65,6 +65,37 @@ const ЧТЕНИЕ = [
   "/vending/plan",
   "/vending/products",
   "/vending/sync",
+  "/vending/refill-events?days=14",
+  {
+    // Сводка снабжения: SQL с коррелированным подзапросом по последним суткам
+    // каждого автомата плюс поле `source` — по нему владелец отличает «считаем
+    // сами» от «читаем чужую базу» (П2/П4 поглощения).
+    path: "/supply/summary",
+    проверить: (ответ) => {
+      if (!["own", "stock"].includes(ответ?.source)) throw new Error(`supply.summary.source=${ответ?.source}`);
+      if (typeof ответ?.emptyPositions !== "number") throw new Error("supply.summary.emptyPositions — не число");
+    },
+  },
+  {
+    // Усушка (П4): весь расчёт идёт по снимкам, продажам и событиям заливок —
+    // четыре выборки, которых заглушка юнит-теста не исполняет.
+    path: "/vending/shrinkage?days=14",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ?.machines)) throw new Error("shrinkage.machines — не массив");
+      if (!Array.isArray(ответ?.warnings)) throw new Error("shrinkage.warnings — не массив");
+      if (typeof ответ?.threshold !== "number") throw new Error("shrinkage.threshold — не число");
+    },
+  },
+  {
+    // Паритет: сырой SQL с канонизацией серийника, теперь в двух половинах
+    // (продажи и остатки). Ровно тот класс запросов, ради которого заведён
+    // этот прогон.
+    path: "/ourvend/parity?days=7",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ?.mismatches)) throw new Error("parity.mismatches — не массив");
+      if (!Array.isArray(ответ?.stock?.mismatches)) throw new Error("parity.stock.mismatches — не массив");
+    },
+  },
   "/coffee/locations",
   "/coffee/placements",
   "/tasks",
@@ -100,6 +131,17 @@ const ЧТЕНИЕ = [
  * Отправляем два слота, потом один: второй вызов ОБЯЗАН выполнить DELETE
  * лишнего, то есть пройти по ветке, которая уронила прод.
  */
+/**
+ * Автомат и окно для сценария детектора заливок (П4). Время берётся ОТ
+ * ТЕКУЩЕГО момента: прогон детектора смотрит на сутки назад, а сам смоук
+ * гоняют и по второму разу на одной базе.
+ */
+const P4_АВТОМАТ = "SMOKE-P4";
+/** Товар из прайса вендинга (seed-vending) — на нём проверяется бэкфилл ссылки. */
+const P4_ТОВАР = "Coca-Cola Classic 0,5";
+const P4_ДО = new Date(Date.now() - 2 * 3_600_000);
+const P4_ПОСЛЕ = new Date(Date.now() - 3_600_000);
+
 const ЗАПИСЬ = [
   {
     имя: "приём слотов (первый снимок)",
@@ -131,6 +173,145 @@ const ЗАПИСЬ = [
       if (ответ.pruned !== 1) {
         throw new Error(`уборка не сработала: pruned=${ответ.pruned}, ожидали 1`);
       }
+    },
+  },
+  // ── Детектор заливок по снимкам (П4) ────────────────────────────────────
+  //
+  // Заглушка БД в юнит-тестах не исполняет ни оконную выборку `slot_snapshot`,
+  // ни `jsonb` со слотами, ни `onConflictDoNothing` по составному уникальному
+  // ключу (serial, window_to) — а именно на этом ключе держится идемпотентность
+  // крона, который бежит по перекрывающемуся окну каждые 3 часа. Поэтому пара
+  // снимков подаётся НАСТОЯЩЕЙ: «до» и «после» с приходом 14 единиц.
+  {
+    имя: "приём слотов П4 (снимок «до»)",
+    path: "/vending/ingest",
+    body: {
+      capturedAt: P4_ДО.toISOString(),
+      machines: [
+        {
+          serial: P4_АВТОМАТ,
+          slots: [
+            { coilId: "1", product: "Smoke P4 A", capacity: 20, quantity: 1 },
+            { coilId: "2", product: "Smoke P4 B", capacity: 20, quantity: 0 },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    имя: "приём слотов П4 (снимок «после»: приход 14 единиц)",
+    path: "/vending/ingest",
+    body: {
+      capturedAt: P4_ПОСЛЕ.toISOString(),
+      machines: [
+        {
+          serial: P4_АВТОМАТ,
+          slots: [
+            { coilId: "1", product: "Smoke P4 A", capacity: 20, quantity: 9 },
+            { coilId: "2", product: "Smoke P4 B", capacity: 20, quantity: 6 },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    имя: "детектор заливок по снимкам (П4)",
+    path: "/vending/refill-events/detect",
+    body: { days: 1 },
+    проверить: (о) => {
+      for (const key of ["machines", "events", "matched"]) {
+        if (typeof о?.[key] !== "number" || о[key] < 0) throw new Error(`detect.${key}=${о?.[key]}`);
+      }
+      if (!Array.isArray(о.skipped)) throw new Error("detect.skipped — не массив");
+      for (const s of о.skipped) {
+        if (!["dead", "uncalibrated", "no_slots"].includes(s?.reason)) throw new Error(`skipped.reason=${s?.reason}`);
+      }
+      if (о.events < 1) throw new Error(`детектор не увидел заливку: events=${о.events}`);
+      if (о.matched !== 0) throw new Error(`записи оператора ещё нет, а matched=${о.matched}`);
+    },
+  },
+  {
+    // Тот самый повтор, ради которого стоит уникальный ключ.
+    имя: "детектор заливок (повтор по тому же окну — дубля нет)",
+    path: "/vending/refill-events/detect",
+    body: { days: 1 },
+    проверить: (о) => {
+      if (о.events !== 0) throw new Error(`повторный прогон записал ${о.events} событий`);
+    },
+  },
+  {
+    имя: "заливка оператора в окне детектора",
+    path: "/vending/refills",
+    body: {
+      machineSerial: P4_АВТОМАТ,
+      productName: "Smoke P4 A",
+      qty: 8,
+      performedAt: new Date(P4_ПОСЛЕ.getTime() - 30 * 60_000).toISOString(),
+      clientKey: `smoke-p4-${P4_ПОСЛЕ.getTime()}`,
+      source: "panel",
+    },
+    проверить: (о) => {
+      if (о?.duplicate !== false) throw new Error("заливка должна записаться впервые");
+    },
+  },
+  {
+    // Оператор дошёл до бота после прогона: событие уже записано, дубля не
+    // будет, и без UPDATE запись осталась бы «заливкой без отчёта» навсегда.
+    имя: "детектор доклеивает запись оператора к событию",
+    path: "/vending/refill-events/detect",
+    body: { days: 1 },
+    проверить: (о) => {
+      if (о.events !== 0) throw new Error(`доклейка не должна плодить события: events=${о.events}`);
+      if (о.matched < 1) throw new Error("запись оператора не сопоставилась с событием");
+    },
+  },
+  // ── Бэкфилл product_id: ветка КОНФЛИКТА (П4) ────────────────────────────
+  //
+  // Оба апсерта пишут `product_id` сырым SQL (`coalesce(excluded.…)` и
+  // `case … is distinct from …`), а заглушка БД в юнит-тестах SQL не исполняет
+  // — она проверяет только ТЕКСТ выражения. Синтаксис и семантику проверяет
+  // этот сценарий: товар из прайса кладётся дважды (повтор → ветка конфликта),
+  // потом слот меняет товар на неизвестный.
+  {
+    имя: "склад: первый пересчёт известного товара (product_id проставлен)",
+    path: "/vending/stock",
+    body: { items: [{ product: P4_ТОВАР, quantity: 5 }] },
+  },
+  {
+    имя: "склад: повторный пересчёт — ссылка на карточку уцелела",
+    path: "/vending/stock",
+    body: { items: [{ product: P4_ТОВАР, quantity: 7 }] },
+    после: async () => {
+      const строки = await читать("/vending/stock");
+      const строка = строки.find((r) => r.product === P4_ТОВАР);
+      if (!строка) throw new Error(`строка склада «${P4_ТОВАР}» не найдена`);
+      if (строка.quantity !== 7) throw new Error(`пересчёт не применился: quantity=${строка.quantity}`);
+      // Строго: прогон обязан идти по базе с прайсом (`seed-vending.js` в
+      // шаге CI). Молчаливое «прайса нет, проверку пропустили» — это способ
+      // однажды перестать проверять и не заметить.
+      if (строка.productId === null) {
+        throw new Error(
+          `product_id обнулился повторным пересчётом (или прайс вендинга не засеян: node packages/db/dist/seed-vending.js)`,
+        );
+      }
+    },
+  },
+  {
+    имя: "приём слотов: смена товара в слоте на неизвестный (ветка конфликта)",
+    path: "/vending/ingest",
+    body: {
+      machines: [
+        {
+          serial: P4_АВТОМАТ,
+          slots: [
+            { coilId: "1", product: "Smoke P4 Загадка", capacity: 20, quantity: 9 },
+            { coilId: "2", product: "Smoke P4 B", capacity: 20, quantity: 6 },
+          ],
+        },
+      ],
+    },
+    проверить: (о) => {
+      if (о.slots !== 2) throw new Error(`ожидали 2 слота, получили ${о.slots}`);
     },
   },
   {
@@ -674,6 +855,109 @@ async function проверитьПакетныйRaw() {
   }
 }
 
+/**
+ * Усушка (П4): отчёт читает снимки ПО АВТОМАТУ, и без снимков на границах
+ * суток этот запрос не исполняется вовсе. Чтение `/vending/shrinkage` в общем
+ * списке доходит до базы, но список автоматов там пуст — то есть половина
+ * нового SQL оставалась бы непроверенной (урок Task 3: смоук зеленел на
+ * `events = 0`, потому что детектор возвращался раньше вставки).
+ *
+ * Отдельный серийник, чтобы не мешать сценарию детектора: тот меряет приход
+ * между двумя снимками часовой давности, а здесь снимки стоят на границах
+ * ВЧЕРАШНИХ суток по Ташкенту.
+ */
+async function проверитьУсушку() {
+  const серийник = "SMOKE-SHRINK";
+  const сдвиг = 5 * 3_600_000; // Ташкент, без перехода на летнее время
+  const сегодня = new Date(Date.now() + сдвиг).toISOString().slice(0, 10);
+  const начало = Date.parse(`${сегодня}T00:00:00.000Z`) - сдвиг;
+  const вчера = начало - 86_400_000;
+
+  const снимок = async (когда, quantity) => {
+    const { r, text } = await jsonRequest("POST", "/vending/ingest", {
+      capturedAt: new Date(когда).toISOString(),
+      machines: [
+        {
+          serial: серийник,
+          slots: [{ coilId: "1", product: "Smoke Shrink", capacity: 20, quantity }],
+        },
+      ],
+    });
+    if (!r.ok) throw new Error(`приём снимка → ${r.status}: ${text.slice(0, 200)}`);
+  };
+
+  await снимок(вчера, 12);
+  await снимок(начало, 5);
+
+  const { r, text, json } = await jsonRequest("GET", "/vending/shrinkage?days=2");
+  if (!r.ok) throw new Error(`отчёт → ${r.status}: ${text.slice(0, 200)}`);
+  const автомат = json.machines.find((m) => String(m.serial).toLowerCase() === серийник.toLowerCase());
+  if (!автомат) throw new Error(`автомата ${серийник} нет в отчёте — выборка снимков по автомату не отработала`);
+  if (!Array.isArray(автомат.refillDays)) throw new Error("refillDays — не массив");
+  // Продажи по дням (`sale`) в смоук-базу положить нечем: их наполняет синк из
+  // чужой БД, которого здесь нет. Значит день ОБЯЗАН быть пропущен с причиной —
+  // молчаливый «ноль усушки» тут был бы худшим из исходов.
+  if (автомат.summary.daysCounted !== 0) throw new Error(`день без продаж посчитан: daysCounted=${автомат.summary.daysCounted}`);
+  if (!json.warnings.some((w) => w.code === "no_sales_day" && w.message.includes(автомат.name))) {
+    throw new Error("нет предупреждения no_sales_day — день пропущен молча");
+  }
+  // «Ни одного посчитанного дня» — отдельная строка: без неё панель и бот
+  // сказали бы «недостач нет» там, где расчёт не дал ничего.
+  if (!json.warnings.some((w) => w.code === "no_counted_days" && w.message.includes(автомат.name))) {
+    throw new Error("нет предупреждения no_counted_days при daysCounted=0");
+  }
+}
+
+/**
+ * Суточные алерты (П4): их SQL — выборка уже написанных событий за сутки и
+ * пакетная вставка — живёт только в кроне, и без ручного роута против
+ * настоящего Postgres не исполнялся бы ни разу.
+ *
+ * Автомат заводится СВОЙ и заведомо пустой: без хотя бы одного события
+ * проверка дедупа не значила бы ничего (ноль и во второй раз ноль).
+ */
+async function проверитьАлертыУсушки() {
+  const серийник = "SMOKE-LOW";
+  const посчитать = async () => {
+    const { r, text, json } = await jsonRequest("GET", `/events/count?type=${encodeURIComponent("machine.low_stock")}`);
+    if (!r.ok) throw new Error(`счётчик событий → ${r.status}: ${text.slice(0, 200)}`);
+    return json.count;
+  };
+
+  const приём = await jsonRequest("POST", "/vending/ingest", {
+    capturedAt: new Date().toISOString(),
+    machines: [
+      {
+        serial: серийник,
+        slots: [
+          { coilId: "1", product: "Smoke Low", capacity: 20, quantity: 0 },
+          { coilId: "2", product: "Smoke Low", capacity: 20, quantity: 1 },
+        ],
+      },
+    ],
+  });
+  if (!приём.r.ok) throw new Error(`приём слотов → ${приём.r.status}: ${приём.text.slice(0, 200)}`);
+
+  const было = await посчитать();
+  const первый = await jsonRequest("POST", "/vending/shrinkage/alerts");
+  if (!первый.r.ok) throw new Error(`прогон алертов → ${первый.r.status}: ${первый.text.slice(0, 200)}`);
+  if (typeof первый.json?.alerts !== "number" || typeof первый.json?.lowStock !== "number") {
+    throw new Error(`ответ прогона без счётчиков: ${первый.text.slice(0, 200)}`);
+  }
+  if (первый.json.lowStock < 1) throw new Error(`пустой автомат не дал алерта: lowStock=${первый.json.lowStock}`);
+  const стало = await посчитать();
+  if (стало !== было + первый.json.lowStock) {
+    throw new Error(`событий записано ${стало - было}, а прогон отчитался о ${первый.json.lowStock}`);
+  }
+
+  // Второй прогон в те же сутки: дедуп читает уже записанные события ИЗ БАЗЫ,
+  // а не из памяти процесса, — именно этот запрос здесь и проверяется.
+  const второй = await jsonRequest("POST", "/vending/shrinkage/alerts");
+  if (!второй.r.ok) throw new Error(`повтор прогона → ${второй.r.status}: ${второй.text.slice(0, 200)}`);
+  if (второй.json.alerts !== 0) throw new Error(`повтор записал ${второй.json.alerts} событий вместо нуля`);
+  if ((await посчитать()) !== стало) throw new Error("повтор прогона задвоил события в базе");
+}
+
 /** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
 async function проверитьRateLimit() {
   for (let i = 0; i < 70; i += 1) {
@@ -728,6 +1012,14 @@ async function проверитьЧтение(шаг) {
   console.log(`  ok  GET ${path}`);
 }
 
+/** Прочитать путь и вернуть разобранный ответ (для проверок последствий). */
+async function читать(path) {
+  const r = await fetch(BASE + path, { signal: AbortSignal.timeout(20_000) });
+  const текст = await r.text();
+  if (!r.ok) throw new Error(`GET ${path} → ${r.status}: ${текст.slice(0, 200)}`);
+  return JSON.parse(текст);
+}
+
 async function проверитьЗапись(шаг) {
   const r = await fetch(BASE + шаг.path, {
     method: "POST",
@@ -745,6 +1037,17 @@ async function проверитьЗапись(шаг) {
       шаг.проверить(JSON.parse(текст));
     } catch (e) {
       провалы.push(`POST ${шаг.path} (${шаг.имя}): ${e.message}`);
+      return;
+    }
+  }
+  // `после` — проверка ПОСЛЕДСТВИЯ записи, а не её ответа: ответ апсерта не
+  // показывает, что стало со строкой в базе, и ровно там живут ошибки вида
+  // «конфликт затёр непустое поле».
+  if (шаг.после) {
+    try {
+      await шаг.после();
+    } catch (e) {
+      провалы.push(`POST ${шаг.path} (${шаг.имя}) — последствие: ${e.message}`);
       return;
     }
   }
@@ -834,6 +1137,20 @@ try {
   }
 
   try {
+    await проверитьУсушку();
+    console.log("  ok  сценарий: усушка — снимки на границах суток, день без продаж пропущен с причиной");
+  } catch (e) {
+    провалы.push(`усушка: ${e.message}`);
+  }
+
+  try {
+    await проверитьАлертыУсушки();
+    console.log("  ok  сценарий: суточные алерты — событие «заканчивается», повтор дубля не даёт");
+  } catch (e) {
+    провалы.push(`алерты усушки: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -855,4 +1172,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 8 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 10 сценариев.`);

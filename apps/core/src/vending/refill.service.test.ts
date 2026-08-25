@@ -163,6 +163,61 @@ describe("Заливка автомата", () => {
     assert.equal(audit.actorRef, `person:${PERSON}`);
   });
 
+  it("факт заливки идёт в ленту событий ТОЙ ЖЕ транзакцией", async () => {
+    // Событие вне транзакции пережило бы откат вставки: лента показала бы
+    // заливку, которой в журнале нет, и склад разошёлся бы с ней навсегда.
+    const inserted: Row[] = [];
+    const s = new RefillService(stubDb({ inserted }), vendingStub);
+    await s.create({
+      // Бот пишет серийник с приставкой, Ourvend присылает голый — в ленте
+      // должен быть ОДИН автомат, а не два написания одного.
+      machineSerial: "c2508160376",
+      productName: "кола",
+      qty: 4,
+      personId: PERSON,
+      clientKey: "k7",
+    });
+
+    const ev = inserted.find((r) => r.type === "vending.refill_recorded");
+    assert.ok(ev, "заливка обязана попасть в ленту");
+    assert.equal(ev.source, "human", "записал человек — не система");
+    assert.deepEqual(ev.payload, {
+      serial: "2508160376",
+      product: "Coca-Cola 0.5",
+      qty: 4,
+      personId: PERSON,
+    });
+  });
+
+  it("заливка без человека помечается системой", async () => {
+    const inserted: Row[] = [];
+    const s = new RefillService(stubDb({ inserted }), vendingStub);
+    await s.create({ machineSerial: "MU-7", productName: "кола", qty: 1, clientKey: "k8" });
+
+    const ev = inserted.find((r) => r.type === "vending.refill_recorded")!;
+    assert.equal(ev.source, "system");
+    assert.equal((ev.payload as Record<string, unknown>).personId, null);
+  });
+
+  it("повтор мастера событие не задваивает", async () => {
+    const inserted: Row[] = [];
+    const s = new RefillService(
+      stubDb({
+        refillInsert: [], // конфликт по client_key
+        selects: [[{ id: "r1", clientKey: "k9", qty: 6 }], [{ quantity: 3 }]],
+        inserted,
+      }),
+      vendingStub,
+    );
+    await s.create({ machineSerial: "MU-7", productName: "кола", qty: 6, clientKey: "k9" });
+
+    assert.equal(
+      inserted.filter((r) => r.type === "vending.refill_recorded").length,
+      0,
+      "второе нажатие «Готово» не должно давать вторую строку в ленте",
+    );
+  });
+
   it("время заливки по умолчанию — сейчас, а не день без часов", async () => {
     const inserted: Row[] = [];
     const s = new RefillService(stubDb({ inserted }), vendingStub);

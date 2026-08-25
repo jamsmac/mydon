@@ -1,6 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
-import { auditLog, machineSlot, vendingRefill, vendingStock } from "@mydon/db";
+import { auditLog, event, machineSlot, vendingRefill, vendingStock } from "@mydon/db";
+import { normalizeMachineSerial } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { VendingService } from "./vending.service";
 
@@ -136,6 +137,25 @@ export class RefillService {
         action: "vending.refill_created",
         target: created.id,
         after: created,
+      });
+
+      // Лента событий (П4). В ТОЙ ЖЕ транзакции: событие снаружи пережило бы
+      // откат вставки, и владелец увидел бы заливку, которой в журнале нет.
+      // Правило уведомления сюда не заводится намеренно — «Действия» читают
+      // таблицу заливок, а будить владельца ночью каждой записью техника
+      // значит научить его выключать уведомления целиком.
+      await tx.insert(event).values({
+        source: input.personId ? "human" : "system",
+        type: "vending.refill_recorded",
+        payload: {
+          // Канон, а не сырое написание: события детектора уже в каноне, и
+          // потребитель, ключующийся по serial, иначе увидел бы два автомата
+          // вместо одного («c2508160376» и «2508160376»).
+          serial: normalizeMachineSerial(created.machineSerial),
+          product: productName,
+          qty: input.qty,
+          personId: input.personId ?? null,
+        },
       });
 
       return { refill: created, stockLeft: stock?.quantity ?? null, duplicate: false };

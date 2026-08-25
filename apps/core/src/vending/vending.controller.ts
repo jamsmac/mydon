@@ -17,7 +17,10 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
+import { Throttle } from "@nestjs/throttler";
+import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
+import { ShrinkageService } from "./shrinkage.service";
 import { VendingService } from "./vending.service";
 
 export class IngestSlotDto {
@@ -271,6 +274,43 @@ export class CreateRefillDto {
 }
 
 /**
+ * Прогон детектора заливок (П4). Дни — окно снимков, по которому ищется приход.
+ *
+ * Потолок 30 суток — граница памяти, а не вкуса: снимки читаются по автомату,
+ * но список автоматов и события окна всё равно живут в процессе, и полугодовой
+ * прогон стоил бы сотен тысяч строк ради нулевого улова. Рабочее окно — 2 дня
+ * (крон после каждого сбора слотов); всё, что глубже, — разовый разбор.
+ */
+export class DetectRefillEventsDto {
+  @IsOptional() @IsInt() @Min(1) @Max(30)
+  days?: number;
+}
+
+/**
+ * Окно отчёта об усушке (П4). Потолок 60 суток — граница памяти: снимки
+ * читаются по автомату, но 60 дней парка это уже полмиллиона строк за прогон.
+ *
+ * `@Type(() => Number)` обязателен: в query всё приходит строкой, а
+ * `ValidationPipe` включён БЕЗ `enableImplicitConversion` — без него
+ * `@IsInt()` отбивал бы любой `?days=`.
+ */
+export class ShrinkageDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(60)
+  days?: number;
+}
+
+/**
+ * Окно журнала детектора. DTO, а не `Number(days)` руками: без границ роут
+ * принимал любое число и надеялся на зажим в сервисе — у соседних чтений
+ * граница стоит на входе, и разнобой рано или поздно кончается тем, что зажим
+ * забудут добавить.
+ */
+export class RefillEventsListDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(30)
+  days?: number;
+}
+
+/**
  * Вендинг: приём собранных данных и просмотр дефицита. Приём (POST) закрыт
  * общим ServiceTokenGuard — данные кладёт коллектор, не кто угодно.
  */
@@ -279,6 +319,8 @@ export class VendingController {
   constructor(
     private readonly vending: VendingService,
     private readonly refills: RefillService,
+    private readonly refillEvents: RefillEventsService,
+    private readonly shrinkageReport: ShrinkageService,
   ) {}
 
   @Post("ingest")
@@ -415,6 +457,55 @@ export class VendingController {
   @Get("machine-products")
   machineProducts(@Query("serial") serial?: string) {
     return this.refills.productsOf(serial ?? "");
+  }
+
+  // ── Детектор заливок по снимкам: заливка = факт снимка (R-P4-2) ───────────
+
+  /**
+   * Прогон детектора — крон агента после каждого сбора слотов (SERVICE_TOKEN).
+   * Идемпотентен: повторный прогон по тому же окну новых событий не даёт.
+   */
+  @Post("refill-events/detect")
+  detectRefillEvents(@Body() dto: DetectRefillEventsDto) {
+    return this.refillEvents.detect(dto.days);
+  }
+
+  /**
+   * Усушка автоматов по дням без заливок (П4, R-P4-3). Чтение открыто: это
+   * отчёт, а не мутация.
+   *
+   * ЛИЧНЫЙ ЛИМИТ, а не общий. GET проходит `ServiceTokenGuard` без токена, а
+   * расчёт тяжёлый: `?days=60` тянет продажи периода в память и делает запрос
+   * снимков на каждый автомат. Общего лимита (60 запросов / 10 с) хватало,
+   * чтобы уложить Core одним циклом `curl` из докер-сети. Шесть запросов в
+   * минуту — это вдвое больше, чем нужно панели: отчёт всё равно живёт в кеше
+   * пять минут (`REPORT_CACHE_MS`).
+   */
+  @Throttle({ burst: { limit: 6, ttl: 60_000 }, sustained: { limit: 6, ttl: 60_000 } })
+  @Get("shrinkage")
+  shrinkage(@Query() dto: ShrinkageDto) {
+    return this.shrinkageReport.report(dto.days);
+  }
+
+  /**
+   * Ручной прогон суточных алертов (усушка за порогом + «заканчивается»).
+   *
+   * Тот же метод, что дёргает крон в 08:35. Роут нужен по двум причинам: без
+   * него весь SQL алертов не исполнялся бы против живого Postgres ни разу
+   * (юнит-заглушка запросы не выполняет), и владелец не мог бы пересчитать
+   * утро после починки данных, не дожидаясь следующих суток. Идемпотентен в
+   * пределах суток — дедуп по (автомат, товар, день). Тела нет: окно алерта
+   * фиксировано неделей, выбирать тут нечего.
+   */
+  @Post("shrinkage/alerts")
+  shrinkageAlerts() {
+    return this.shrinkageReport.alertDaily();
+  }
+
+  /** Журнал событий детектора: что автомат получил и была ли запись оператора. */
+  @Get("refill-events")
+  refillEventsList(@Query() dto: RefillEventsListDto) {
+    return this.refillEvents.list(dto.days);
   }
 
   @Get("refills")

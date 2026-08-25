@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { VendingPlan } from "./core-client";
-import { MAX_PARTS, TG_BUDGET, formatPurchasePlan, isPlanCommand } from "./purchase-plan";
+import { MAX_PARTS, TG_BUDGET, chunk, formatPurchasePlan, isPlanCommand } from "./purchase-plan";
+
+/** Половина суррогатной пары в тексте — Telegram отвергает такое сообщение. */
+const одинокийСуррогат = (s: string): boolean =>
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
 
 /** ru-RU ставит U+202F/U+00A0 в тысячах — сравниваем по обычному пробелу. */
 const norm = (s: string): string => s.replace(/[\u00a0\u202f]/g, " ");
@@ -184,6 +188,30 @@ describe("Бот: команда «план закупа»", () => {
     for (const p of parts) assert.ok(p.length <= TG_BUDGET, String(p.length));
     const all = parts.join("\n");
     for (const n of names) assert.ok(all.includes(n), n);
+  });
+
+  it("эмодзи в имени товара переживает резку длинной строки (S6)", () => {
+    // Строка «Нет в прайсе вендинга: …» приходит одним перечислением на все
+    // товары и режется по бюджету. Разрыв суррогатной пары посреди имени даёт
+    // 400 на ВСЁ сообщение: владелец не получает не строку, а весь план.
+    const names = Array.from({ length: 400 }, (_, i) => `🍫Товар с длинным именем ${i}`);
+    const parts = chunk("🛒 Купить", [`Нет в прайсе вендинга: ${names.join(", ")}`]);
+    for (const p of parts) {
+      assert.ok(!одинокийСуррогат(p), `оборванная пара в части длиной ${p.length}`);
+      assert.ok(p.length <= TG_BUDGET, String(p.length));
+    }
+    const all = parts.join("\n");
+    for (const n of names) assert.ok(all.includes(n), n);
+  });
+
+  it("сплошное слово из эмодзи режется по символам, а не по половинкам", () => {
+    // Пробелов нет — резать приходится по пределу, ровно там, где стоит пара.
+    const parts = chunk("t", ["🍫".repeat(4000)]);
+    for (const p of parts) {
+      assert.ok(!одинокийСуррогат(p), "оборванная пара");
+      assert.ok(p.length <= TG_BUDGET, String(p.length));
+    }
+    assert.equal(parts.join("").match(/🍫/g)?.length, 4000, "ни один символ не потерян");
   });
 
   it("нечего грузить — одно сообщение", () => {

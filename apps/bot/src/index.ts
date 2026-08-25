@@ -9,7 +9,15 @@ import {
 } from "@mydon/assistant";
 import { createDocumentBuilder } from "@mydon/documents";
 import { dueLabel, parseStartPayload, rolesLabel, TZ } from "@mydon/shared";
-import { collectGloberentSignals, formatBriefing, msUntilBriefing } from "./briefing";
+import {
+  BRIEFING_NOTES_WINDOW_MS,
+  collectGloberentSignals,
+  formatBriefing,
+  formatBriefingNotes,
+  msUntilBriefing,
+  notesBudget,
+  notesToAck,
+} from "./briefing";
 import { buildDigest, digestKey } from "./staff-digest";
 import { CoreClient, type PersonRow } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
@@ -376,7 +384,7 @@ async function main(): Promise<void> {
     const to = isoDate(new Date());
     const from = isoDate(new Date(Date.now() - 3 * 86_400_000));
     const yesterday = isoDate(new Date(Date.now() - 86_400_000));
-    const [b, approvals, purchase, fillStatus, reconcile, washSchedule, globerent, staffActions] = await Promise.all([
+    const [b, approvals, purchase, fillStatus, reconcile, washSchedule, globerent, staffActions, ruleNotes] = await Promise.all([
       deps.core.briefing(),
       // Согласования — деградируемый блок: их сбой не должен стоить владельцу
       // всего брифинга. Раньше он был обязательным, и одна ошибка в 07:30
@@ -390,6 +398,13 @@ async function main(): Promise<void> {
       // Сделанное сотрудниками за вчера — деградируемый блок: брифинг был
       // доской тревог и не показывал работу людей вовсе.
       deps.core.actions(yesterday, yesterday).catch(() => null),
+      // Несрочные сигналы правил (усушка за порогом, заливка без записи,
+      // «заканчивается товар»). Поллер берёт только immediate=1, поэтому до
+      // П4 они не доходили до владельца НИ РАЗУ — копились в Core. Окно
+      // недельное (см. BRIEFING_NOTES_WINDOW_MS): повтор отсекает Core по
+      // notification_delivery, а узкое окно теряло бы сигнал после первой же
+      // неудачной отправки.
+      deps.core.briefingNotifications(new Date(Date.now() - BRIEFING_NOTES_WINDOW_MS)).catch(() => null),
     ]);
     const coffee =
       fillStatus || reconcile || washSchedule
@@ -413,17 +428,36 @@ async function main(): Promise<void> {
       globerent,
     );
     const staffLine = staffActions ? summarizeActions(staffActions) : null;
-    const text = staffLine ? `${briefingText}\n\n${staffLine}` : briefingText;
+    const notes = (ruleNotes?.notifications ?? [])
+      .filter((n) => n.urgency === "briefing")
+      .map((n) => ({ key: `${n.eventId}:${n.ruleId}`, text: n.text }));
+    // Бюджет считается по УЖЕ собранным частям: сколько бы ни было сигналов,
+    // сводка и итоги дня уходят целиком, а режется хвост сигналов.
+    const notesBlock = formatBriefingNotes(notes, 12, notesBudget(briefingText, staffLine));
+    const text = [briefingText, notesBlock?.text ?? null, staffLine]
+      .filter((part): part is string => typeof part === "string" && part !== "")
+      .join("\n\n");
     // Ключ одноразовости ПЕРЕД отправкой — как у дайджеста сотрудников:
     // окно автодеплоя (два живых процесса) не должно слать два брифинга.
     if (!(await deps.core.claimNotification(`briefing:${to}`))) return;
+    let доставлен = false;
     for (const chatId of allowlist) {
       // По-чатно: сбой одного чата не оставляет остальных без брифинга.
       try {
         await tg.sendMessage(chatId, text);
+        доставлен = true;
       } catch (err) {
         console.error("Брифинг не доставлен в чат:", err);
       }
+    }
+    // Отметка о доставке — ПОСЛЕ отправки, только если дошло хотя бы одному и
+    // ТОЛЬКО за показанные строки: отмеченное Core не отдаст никогда, поэтому
+    // свёрнутое в «…и ещё N» обязано остаться недоставленным до завтра.
+    const ack = notesToAck(notesBlock, доставлен);
+    if (ack.length > 0) {
+      await deps.core
+        .ackNotifications(ack)
+        .catch((err: unknown) => console.error("Отметку о доставке сигналов не сохранить:", err));
     }
   };
 

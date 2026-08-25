@@ -33,6 +33,13 @@ export interface SyncCoreClient {
     /** Автоматы, у которых не удалась уборка зеркала. Снимок при этом записан. */
     pruneErrors?: { serial: string; error: string }[];
   }>;
+  /** Детектор заливок по снимкам (П4, R-P4-2) — дергается сразу после ingestVendingSlots. */
+  detectRefillEvents(days?: number): Promise<{
+    machines: number;
+    events: number;
+    matched: number;
+    skipped: { serial: string; reason: string }[];
+  }>;
   ingestVendingSales(payload: {
     capturedAt?: string;
     periodStart: string;
@@ -48,6 +55,14 @@ export interface SyncCoreClient {
 
 /** Окно сбора продаж, суток (по умолчанию 7 — под §5.6). */
 const SALES_WINDOW_DAYS = 7;
+/** Окно детектора заливок — `DETECT_DAYS_DEFAULT` Core. Здесь копия числа: у агентов зависимости на core нет. */
+const DETECT_DAYS = 2;
+/**
+ * Потолок текста ошибки прогона: `SyncFinishDto.error` в Core — `@MaxLength(2000)`.
+ * Более длинный текст (десять строк OurVend с сообщениями драйвера) уходит в
+ * 400, а `finish()` ошибку глотает — и запись сбора остаётся «running» навсегда.
+ */
+const MAX_ERROR_CHARS = 2000;
 
 export interface OurvendSyncConfig {
   account: string;
@@ -65,6 +80,12 @@ export interface SyncResult {
   productSales: number;
   durationMs: number;
   error?: string;
+  /**
+   * Итог детектора заливок после успешного приёма слотов. Нет ключа — детектор
+   * не запускался (слоты не собирались вовсе). Ошибка детектора никогда не
+   * роняет сбор — только помечается "failed" и уходит в лог.
+   */
+  detect?: { events: number; matched: number } | "failed";
 }
 
 export interface RunOptions {
@@ -111,7 +132,14 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
 
   const finish = async (result: Omit<SyncResult, "durationMs">): Promise<SyncResult> => {
     const durationMs = now().getTime() - startedAtMs;
-    const full: SyncResult = { ...result, durationMs };
+    // Обрезка здесь, а не у каждого вызова: путей к `finish` пять, и забытый
+    // на одном из них длинный текст стоит открытой навсегда записи сбора
+    // (см. `MAX_ERROR_CHARS`).
+    const full: SyncResult = {
+      ...result,
+      durationMs,
+      ...(result.error ? { error: result.error.slice(0, MAX_ERROR_CHARS) } : {}),
+    };
     try {
       await core.finishVendingSync(id, {
         status: full.status,
@@ -148,6 +176,7 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
   }
 
   let slots = 0;
+  let detect: SyncResult["detect"];
   const skippedNotes: string[] = [];
   if (collected.length > 0) {
     try {
@@ -168,11 +197,28 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
       // Приём не удался — весь собранный проход считаем провалом.
       return finish({ status: "failed", machinesTotal: machines.length, machinesOk: 0, slots: 0, productSales: 0, error: errText(err) });
     }
+
+    // Детектор заливок (П4, R-P4-2): гонится сразу после того, как свежий
+    // снимок слотов лёг в базу — заливка отражается в журнале в тот же цикл
+    // сбора, а не только когда её вручную прогонят из панели. Сбой детектора
+    // не отказ сбора (снимок уже записан) — только лог и пометка в итоге.
+    try {
+      // Окно — `DETECT_DAYS_DEFAULT` Core (2 суток), а не одни. Детектор
+      // идемпотентен по (автомат, конец окна), так что перекрытие не плодит
+      // строк, зато после простоя сбора длиннее суток (24.08 было девять
+      // `failed` подряд) заливки из провала подберутся сами, а не ручным POST.
+      const d = await core.detectRefillEvents(DETECT_DAYS);
+      detect = { events: d.events, matched: d.matched };
+    } catch (err) {
+      console.warn(`[ourvend:sync] детектор заливок не отработал: ${errText(err)}`);
+      detect = "failed";
+    }
   }
 
   // Продажи за окно (§5.6) — второстепенный артефакт: собираем «как получится»
-  // по успешно снятым автоматам. Сбой продаж НЕ меняет статус (он про
-  // планограмму) — лишь дописывается в текст ошибки.
+  // по успешно снятым автоматам. Полный провал продаж (ничего не дошло до
+  // Core) честно опускает статус до partial — планограмма при этом цела;
+  // частичный сбой продаж статус не меняет, лишь дописывается в текст ошибки.
   const saleErrors: string[] = [];
   let productSalesRows = 0;
   const collectedSerials = collected.map((c) => c.serial);
@@ -211,15 +257,41 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
   }
 
   const machinesOk = collected.length;
-  const status: SyncResult["status"] =
-    failures.length === 0 ? "success" : machinesOk > 0 ? "partial" : "failed";
-  const errParts = [
-    ...(failures.length ? [`Автоматы без слотов: ${failures.slice(0, 10).join("; ")}`] : []),
-    ...(skippedNotes.length ? [skippedNotes.slice(0, 10).join("; ")] : []),
-    ...(saleErrors.length ? [saleErrors.slice(0, 10).join("; ")] : []),
-  ];
-  const error = errParts.length ? errParts.join(" | ") : undefined;
-  return finish({ status, machinesTotal: machines.length, machinesOk, slots, productSales: productSalesRows, ...(error ? { error } : {}) });
+  // Продажи «упали» целиком — были ошибки, и ни строки не дошло до Core
+  // (частичный сбой, где что-то всё же собралось, статус не трогает —
+  // он остаётся тем же, что дают одни слоты).
+  const salesFailed = saleErrors.length > 0 && productSalesRows === 0;
+
+  let status: SyncResult["status"];
+  let error: string | undefined;
+  if (failures.length === 0 && machinesOk > 0 && salesFailed) {
+    // Слоты собраны без потерь, а продажи не дошли ни строкой — статус
+    // больше не врёт «success»: владелец должен видеть, что окно продаж
+    // не обновилось, а не догадываться об этом по пустому графику.
+    //
+    // ПРИЧИНА ПАДЕНИЯ СТАТУСА — ПЕРВОЙ. Заметки о пропущенных автоматах
+    // побочные, и, стоя впереди, они прятали «продажи: » в середину строки:
+    // читающий видел статус `partial` и объяснение не про то.
+    status = "partial";
+    error = [`продажи: ${saleErrors.slice(0, 10).join("; ")}`, ...skippedNotes.slice(0, 10)].join(" · ");
+  } else {
+    status = failures.length === 0 ? "success" : machinesOk > 0 ? "partial" : "failed";
+    const errParts = [
+      ...(failures.length ? [`Автоматы без слотов: ${failures.slice(0, 10).join("; ")}`] : []),
+      ...(skippedNotes.length ? [skippedNotes.slice(0, 10).join("; ")] : []),
+      ...(saleErrors.length ? [saleErrors.slice(0, 10).join("; ")] : []),
+    ];
+    error = errParts.length ? errParts.join(" | ") : undefined;
+  }
+  return finish({
+    status,
+    machinesTotal: machines.length,
+    machinesOk,
+    slots,
+    productSales: productSalesRows,
+    ...(error ? { error } : {}),
+    ...(detect !== undefined ? { detect } : {}),
+  });
 }
 
 function errText(err: unknown): string {

@@ -213,6 +213,90 @@ export interface VendingPlan {
   warnings: VendingPlanWarning[];
 }
 
+/** Строка усушки по товару за период (П4, R-P4-3). */
+export interface VendingShrinkageItem {
+  product: string;
+  /** Недостача за период, шт (излишки в неё не зачитываются). */
+  lossUnits: number;
+  /** Недостача в деньгах по `purchase_price`; без цены — 0 (см. `noPrice`). */
+  lossValue: number;
+  /** Излишек за период, шт: виден, но в деньги не входит. */
+  surplusUnits: number;
+  /** По скольким дням позиция посчитана (дни заливок исключены целиком). */
+  daysCounted: number;
+  /** Цены в прайсе нет — сумма по позиции неполная. */
+  noPrice: boolean;
+  /** Потеря за порогом `threshold` — та самая, из-за которой утром приходит алерт. */
+  alert: boolean;
+}
+
+/** День заливки автомата: приход по снимкам против записи оператора. */
+export interface VendingShrinkageRefillDay {
+  /** YYYY-MM-DD по Ташкенту. */
+  date: string;
+  /** Приход по снимкам (детектор заливок). */
+  detectedUnits: number;
+  /** Сколько записал оператор в боте за эти сутки; 0 — не записал вовсе. */
+  recordedUnits: number;
+}
+
+/** Усушка одного автомата за период. */
+export interface VendingShrinkageMachine {
+  /** Серийник в каноне (без приставки «c»). */
+  serial: string;
+  name: string;
+  summary: {
+    items: VendingShrinkageItem[];
+    lossValue: number;
+    daysCounted: number;
+    /** Дни, выкинутые из расчёта (в них была заливка). */
+    daysSkipped: number;
+    threshold: number;
+  };
+  /** Дни заливок: из расчёта усушки выкинуты, но владельцу нужны. */
+  refillDays: VendingShrinkageRefillDay[];
+}
+
+/**
+ * Почему в отчёте чего-то нет. Каждая причина чинится в СВОЁМ месте, поэтому
+ * сводить их к одному коду нельзя (тот же перечень, что у ядра).
+ */
+export interface VendingShrinkageWarning {
+  code:
+    | "snapshots_stale"
+    | "no_sales_day"
+    | "machine_dead"
+    | "sales_unknown_product"
+    | "machine_error"
+    /** Автомат в отчёте, но не посчитан ни один день — все дни были заливкой/пропущены. */
+    | "no_counted_days";
+  message: string;
+}
+
+/** Усушка автоматов по дням без заливок (П4, R-P4-3) — лист «Усушка». */
+export interface VendingShrinkageReport {
+  /** Первый день периода по Ташкенту, YYYY-MM-DD. */
+  from: string;
+  /** Последний день — ВЧЕРА: у сегодняшних суток нет снимка на конец. */
+  to: string;
+  threshold: number;
+  machines: VendingShrinkageMachine[];
+  warnings: VendingShrinkageWarning[];
+}
+
+/** Событие детектора заливок: что автомат получил и была ли запись оператора. */
+export interface VendingRefillEvent {
+  id: string;
+  serial: string;
+  name: string;
+  windowFrom: string;
+  windowTo: string;
+  units: number;
+  slots: { coilId: string; product: string; before: number; after: number; delta: number }[];
+  /** id человеческой записи, если она нашлась; null — заливку никто не записал. */
+  matchedRefillId: string | null;
+}
+
 /** Строка прайса вендинга с правилами закупа — для листа «Правила закупа». */
 export interface VendingProductRow {
   id: string;
@@ -2238,6 +2322,13 @@ export const core = {
   vendingPurchase: () => get<VendingPurchase>("/vending/purchase"),
   /** План закупа «что купить»: закуп + раздача по маршруту и слотам (П5a). */
   vendingPlan: () => get<VendingPlan>("/vending/plan"),
+  /**
+   * Усушка автоматов по дням без заливок (П4). Окно — 7/14/30 суток: ядро
+   * само зажимает значение, поэтому лист может звать его любым из трёх.
+   */
+  vendingShrinkage: (days = 14) => get<VendingShrinkageReport>(`/vending/shrinkage?days=${days}`),
+  /** Журнал детектора заливок: что автомат получил и была ли запись оператора. */
+  vendingRefillEvents: (days = 14) => get<VendingRefillEvent[]>(`/vending/refill-events?days=${days}`),
   /** Прайс вендинга с правилами закупа — для листа «Правила закупа». */
   vendingProducts: () => get<VendingProductRow[]>("/vending/products"),
   /** Отправить актуальный закуп на утверждение владельцу (та же заявка, что из бота). */
@@ -2543,6 +2634,14 @@ export const core = {
       emptyPositions: number;
       lowPositions: number;
       lastStockDt: string | null;
+      /**
+       * Источник учётного потока OurVend на стороне ядра
+       * (`OURVEND_ACCOUNTING_SOURCE`): "stock" — зеркало базы mydon-stock,
+       * "own" — собственный снимок. НЕОБЯЗАТЕЛЬНОЕ: ядро поле пока не отдаёт,
+       * и до этого момента подпись частоты честно говорит про зеркало. Когда
+       * отдаст — подпись переключится сама, без правки панели.
+       */
+      source?: "own" | "stock";
     }>("/supply/summary"),
   purchases: (days = 30, limit = 300) =>
     get<PurchaseRow[]>(`/supply/purchases?days=${days}&limit=${limit}`),

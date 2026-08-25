@@ -27,6 +27,7 @@ import {
 } from "./purchase-brief";
 import { formatRuleResult, isRuleCommand, parseRuleCommand, ruleCommandHint } from "./product-rules";
 import { formatPurchasePlan, isPlanCommand } from "./purchase-plan";
+import { formatShrinkage, isShrinkageQuery, parseShrinkageDays } from "./shrinkage-brief";
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
 import { handleActionsQuery, isActionsQuery } from "./owner-actions";
@@ -70,6 +71,7 @@ const HELP = [
   "• «какие автоматы простаивают»",
   "• «что заказать» — сводка к закупу вендинга",
   "• «план закупа» — маршрут, что купить, что взять со склада, слоты по автоматам",
+  "• «усушка» / «усушка за 30 дней» — недостачи по автоматам за дни без заливок",
   "• «не закупать Twix» / «закупать Twix» / «фикс Snickers 48» / «блок Red Bull 6» — правила закупа товара",
   "• «оформить закуп» — отправить закуп тебе на утверждение",
   "• «накладные» — одобренные закупы",
@@ -215,6 +217,19 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка плана закупа:", err);
       return { text: "Не удалось получить план закупа из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Усушка автоматов — чтение (П4). До parseIntent: «усушка» ни во что другое
+  // не попадает, но правило «жёсткие префиксы ловим раньше общего разбора»
+  // держится для всех команд, иначе очередь начинает зависеть от везения.
+  if (isShrinkageQuery(text)) {
+    try {
+      const [first, ...more] = formatShrinkage(await deps.core.vendingShrinkage(parseShrinkageDays(text)));
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка отчёта об усушке:", err);
+      return { text: "Не удалось получить усушку из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 

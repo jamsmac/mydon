@@ -46,3 +46,25 @@ export function tashkentDayEnd(v: string): Date | null {
   if (!m) return null;
   return toDate(`${m[0]}T23:59:59.999${ЗОНА}`);
 }
+
+/** Смещение Ташкента в миллисекундах: постоянное, перехода на летнее время нет. */
+const СМЕЩЕНИЕ_МС = 5 * 3_600_000;
+
+/**
+ * Момент → ташкентские сутки `YYYY-MM-DD`.
+ *
+ * Живёт здесь, а не у потребителей: суточные отчёты вендинга заводили свою
+ * копию смещения (`TZ_OFFSET_MS` в `shrinkage.service.ts`, убрана в R-FW-11),
+ * и вторая константа зоны в коде — ровно та развилка, на которой донор
+ * VendCash уехал на пять часов.
+ * `toLocaleDateString` здесь не годится: он зависит от набора ICU в рантайме,
+ * а формат нужен сортируемый и байт-в-байт как `date` в базе.
+ */
+export function tashkentDay(at: Date): string {
+  return new Date(at.getTime() + СМЕЩЕНИЕ_МС).toISOString().slice(0, 10);
+}
+
+/** Момент → начало ЕГО ташкентских суток. */
+export function tashkentDayStartOf(at: Date): Date {
+  return tashkentDayStart(tashkentDay(at))!;
+}

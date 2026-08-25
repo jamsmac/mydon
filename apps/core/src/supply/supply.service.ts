@@ -393,12 +393,21 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
     return rows.map((r) => ({ ...r, qty: Number(r.qty) }));
   }
 
-  /** Сводка снабжения для плиток. */
+  /**
+   * Сводка снабжения для плиток.
+   *
+   * `source` — откуда взяты остатки автоматов: `stock` (чтение БД mydon-stock)
+   * или `own` (собственный снапшот). Без него плитка «остатки на такое-то
+   * число» одинаково выглядит в обоих режимах, и после переключения источника
+   * владельцу нечем отличить «мы уже считаем сами» от «мы всё ещё читаем чужую
+   * базу» — а именно этот вопрос он задаёт в дни поглощения.
+   */
   async summary(): Promise<{
     purchases30: { count: number; total: number };
     emptyPositions: number;
     lowPositions: number;
     lastStockDt: string | null;
+    source: ReturnType<typeof accountingSource>;
   }> {
     const d30 = new Date();
     d30.setDate(d30.getDate() - 30);
@@ -423,6 +432,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
       emptyPositions,
       lowPositions,
       lastStockDt,
+      source: accountingSource(),
     };
   }
 }

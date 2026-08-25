@@ -4,13 +4,21 @@ import {
   collectGloberentSignals,
   countStuckDeals,
   countUnpaidContracts,
+  BRIEFING_NOTES_WINDOW_MS,
   formatBriefing,
+  formatBriefingNotes,
+  notesBudget,
+  notesToAck,
   msUntilBriefing,
 } from "./briefing";
 import { CoreError } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { parseIntent } from "./intent";
 import { parseAllowlist, RateLimiter } from "./security/access";
+
+/** Половина суррогатной пары в тексте — Telegram отвергает такое сообщение. */
+const одинокийСуррогат = (s: string): boolean =>
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
 
 describe("Разбор вопросов на русском (FR-4)", () => {
   it("узнаёт брифинг", () => {
@@ -418,5 +426,175 @@ describe("Кнопки согласования", () => {
     assert.equal(parseApprovalCallback("ap:approved"), null);
     assert.equal(parseApprovalCallback("мусор"), null);
     assert.equal(parseApprovalCallback("ap:approved:"), null);
+  });
+});
+
+describe("Усушка автоматов: путь владельца до Core (П4)", () => {
+  const отчёт = {
+    from: "2026-08-11",
+    to: "2026-08-24",
+    threshold: 30_000,
+    machines: [
+      {
+        serial: "2508160376",
+        name: "Olma",
+        summary: {
+          items: [
+            { product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true },
+          ],
+          lossValue: 99_000,
+          daysCounted: 9,
+          daysSkipped: 5,
+          threshold: 30_000,
+        },
+        refillDays: [{ date: "2026-08-18", detectedUnits: 96, recordedUnits: 0 }],
+      },
+    ],
+    warnings: [],
+  };
+
+  function deps(окна: number[], report: unknown = отчёт): HandlerDeps {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingShrinkage: async (days: number) => {
+        окна.push(days);
+        return report;
+      },
+    } as unknown as HandlerDeps["core"];
+    return { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
+  }
+
+  it("«усушка» доходит до Core с окном по умолчанию и отвечает разбором", async () => {
+    const окна: number[] = [];
+    const reply = await handleMessage(111, "усушка", deps(окна));
+    assert.deepEqual(окна, [14]);
+    assert.match(reply?.text ?? "", /Усушка за 14 дн/);
+    assert.match(reply?.text ?? "", /Kinder Bueno −9 шт/);
+  });
+
+  it("окно из фразы уходит в Core как есть", async () => {
+    const окна: number[] = [];
+    await handleMessage(111, "усушка за 30 дней", deps(окна));
+    assert.deepEqual(окна, [30]);
+  });
+
+  it("сбой Core не молчит — владелец знает, что данных нет", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingShrinkage: async () => {
+        throw new CoreError(503, "/vending/shrinkage", "");
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "усушка", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /усушку из MYDON Core/i);
+  });
+
+  it("справка называет «усушку» — иначе отчёт есть, а спросить его никто не догадается", async () => {
+    // Единственный вход в отчёт — слово в чате: не будь его в справке, отчёт
+    // существовал бы только для того, кто читал план разработки.
+    const reply = await handleMessage(111, "ъъъ непонятное", deps([]));
+    assert.match(reply?.text ?? "", /«усушка»/);
+    assert.match(reply?.text ?? "", /усушка за 30 дней/);
+  });
+});
+
+describe("Брифинг: несрочные сигналы правил", () => {
+  it("собирает блок и не повторяет одинаковые строки", () => {
+    const block = formatBriefingNotes([
+      { key: "e1:r1", text: "📉 Усушка Olma: Kinder Bueno −9 шт ≈ 99 000 сум за 14 дн." },
+      { key: "e2:r1", text: "📉 Усушка Olma: Kinder Bueno −9 шт ≈ 99 000 сум за 14 дн." },
+      { key: "e3:r2", text: "🍫 Заливка без записи: Olma +96 шт" },
+    ]);
+    assert.match(block?.text ?? "", /Разобраться сегодня/);
+    assert.equal((block?.text ?? "").match(/Усушка Olma/g)?.length, 1);
+    assert.match(block?.text ?? "", /Заливка без записи/);
+    // Склеенный повтор — это ДРУГОЕ событие с тем же текстом: показали его
+    // содержимое, значит доставили. Не отметь мы его — оно вернулось бы завтра
+    // и снова склеилось, и так навсегда.
+    assert.deepEqual(block?.shownKeys, ["e1:r1", "e2:r1", "e3:r2"]);
+  });
+
+  it("пусто — блока нет вовсе, а не пустой заголовок", () => {
+    assert.equal(formatBriefingNotes([]), null);
+    assert.equal(formatBriefingNotes([{ key: "e:r", text: "  " }]), null);
+  });
+
+  it("непоказанное НЕ считается доставленным (15 в очереди → 12 строк → 12 ключей)", () => {
+    // Отметить всё, а напечатать двенадцать — тихая потеря ровно тех алертов,
+    // ради которых проводка и делалась: в notification_delivery они попадут,
+    // а на глаза владельцу — никогда.
+    const many = Array.from({ length: 15 }, (_, i) => ({ key: `e${i}:r`, text: `сигнал ${i}` }));
+    const block = formatBriefingNotes(many);
+    assert.equal(block?.shownKeys.length, 12);
+    assert.deepEqual(block?.shownKeys.slice(-1), ["e11:r"]);
+    assert.match(block?.text ?? "", /…и ещё 3/);
+    // Три оставшихся ключа не отмечены — придут завтра.
+    for (const k of ["e12:r", "e13:r", "e14:r"]) {
+      assert.ok(!block?.shownKeys.includes(k), k);
+    }
+  });
+
+  it("длинный список обрезается вслух: сводка, которую не дочитывают, не сводка", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ key: `e${i}:r`, text: `сигнал ${i}` }));
+    const block = formatBriefingNotes(many, 5);
+    assert.equal((block?.text ?? "").split("\n").length, 7, "заголовок + 5 строк + хвост");
+    assert.match(block?.text ?? "", /…и ещё 15/);
+    assert.equal(block?.shownKeys.length, 5);
+  });
+
+  it("бюджет длины: блок режется, а не роняет весь брифинг лимитом Telegram", () => {
+    // 4096 — предел одного сообщения. Перевалив его, падает ВСЁ сообщение,
+    // то есть и сводка, и согласования, и сигналы разом.
+    const briefingText = "б".repeat(3000);
+    const staffLine = "с".repeat(200);
+    const many = Array.from({ length: 12 }, (_, i) => ({ key: `e${i}:r`, text: `сигнал ${i} ` + "х".repeat(120) }));
+    const block = formatBriefingNotes(many, 12, notesBudget(briefingText, staffLine));
+    assert.ok(block, "что-то показать всё же удалось");
+    assert.ok(block.shownKeys.length < 12, "влезло не всё");
+    assert.match(block.text, /…и ещё \d+/);
+    const message = [briefingText, block.text, staffLine].join("\n\n");
+    assert.ok(message.length <= 3500, `длина ${message.length}`);
+  });
+
+  it("бюджета не осталось вовсе — блока нет и ничего не отмечено", () => {
+    const block = formatBriefingNotes([{ key: "e:r", text: "сигнал" }], 12, 0);
+    assert.equal(block, null);
+  });
+
+  it("длинная строка правила режется по символам, а не переносится целиком", () => {
+    const block = formatBriefingNotes([{ key: "e:r", text: "📉 " + "я".repeat(400) }]);
+    const line = (block?.text ?? "").split("\n")[1] ?? "";
+    assert.ok(line.length <= 160, `строка длиной ${line.length}`);
+    assert.match(line, /…$/);
+  });
+
+  it("эмодзи на границе обрезки не разрывается пополам (S6)", () => {
+    // Имя товара из Ourvend с эмодзи ровно на 160-м символе оставляло от него
+    // половину суррогатной пары. Telegram отвечает 400 на ВСЁ сообщение —
+    // брифинг переставал доходить каждое утро, а не терял одну строку.
+    const текст = "я".repeat(158) + "🍫" + "я".repeat(50);
+    const block = formatBriefingNotes([{ key: "e:r", text: текст }]);
+    const line = (block?.text ?? "").split("\n")[1] ?? "";
+    assert.ok(!одинокийСуррогат(line), JSON.stringify(line.slice(-5)));
+    assert.ok(line.length <= 160, `строка длиной ${line.length}`);
+  });
+
+  it("не дошло ни в один чат — не отмечаем ничего (сигнал придёт завтра)", () => {
+    const block = formatBriefingNotes([{ key: "e1:r", text: "сигнал" }]);
+    assert.deepEqual(notesToAck(block, false), []);
+    assert.deepEqual(notesToAck(block, true), ["e1:r"]);
+    assert.deepEqual(notesToAck(null, true), []);
+  });
+
+  it("окно ожидания — неделя: одна неудачная отправка не теряет сигнал навсегда", () => {
+    // Ключ одноразовости брифинга уже израсходован, повторной попытки в те же
+    // сутки не будет. При окне в 26 ч вчерашние алерты (они пишутся в 08:35)
+    // в завтрашнюю выборку уже не попадут. Повтора не боимся: Core отсекает
+    // отмеченное в notification_delivery.
+    assert.equal(BRIEFING_NOTES_WINDOW_MS, 7 * 24 * 3_600_000);
   });
 });

@@ -1,4 +1,4 @@
-import type { NotifyUrgency } from "@mydon/shared";
+import { tashkentInstant, TZ, type NotifyUrgency } from "@mydon/shared";
 
 /**
  * Правила уведомлений (ТЗ FR-2): событие → правило → сообщение.
@@ -47,6 +47,20 @@ const num = (v: unknown): number => {
 export function formatAmount(value: unknown, currency = "UZS"): string {
   const n = num(value);
   return `${n.toLocaleString("ru-RU").replace(/\u00A0/g, " ")} ${currency}`;
+}
+
+/**
+ * Час и минута события по Ташкенту. В брифинге важно «когда сегодня», а не
+ * полная дата: UTC из payload владелец читал бы со сдвигом на пять часов и
+ * решил бы, что заливка была ночью.
+ */
+function времяТашкента(value: unknown): string {
+  // Разбор — общим `tashkentInstant`, а не `Date.parse`: строка БЕЗ зоны
+  // («2026-08-24 09:00:00») читается часами ПРОЦЕССА, и в контейнере с TZ=UTC
+  // брифинг уехал бы на пять часов. Донор VendCash на этом уже погорел.
+  const at = tashkentInstant(String(value));
+  if (!at) return "—";
+  return at.toLocaleTimeString("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 }
 
 export const RULES: Rule[] = [
@@ -323,6 +337,31 @@ export const RULES: Rule[] = [
     format: (c) =>
       `☕🟡 Расхождение расхода: ${str(c.payload.location)} — ${str(c.payload.ingredient)}, ` +
       `факт ${num(c.payload.actualGrams)} г против ожидания ${num(c.payload.expectedGrams)} г.`,
+  },
+
+  // ── Снек-автоматы: полевой контур (П4) ────────────────────────────────────
+  {
+    // Усушка за порогом (`SHRINK_ALERT_UZS`, по позиции за период). В брифинг,
+    // не немедленно: недостача за неделю — повод разобраться утром, а не
+    // ночью, и дедуп в `ShrinkageService` даёт её один раз в сутки.
+    id: "vending.shrinkage_alert",
+    eventType: "vending.shrinkage_alert",
+    urgency: "briefing",
+    format: (c) =>
+      `📉 Усушка ${str(c.payload.name)}: ${str(c.payload.product)} −${num(c.payload.lossUnits)} шт ` +
+      `≈ ${formatAmount(c.payload.lossValue, "сум")} за ${num(c.payload.days)} дн.`,
+  },
+  {
+    // Детектор увидел приход, а оператор его не записал. Это НЕ тревога о
+    // воровстве: факт заливки мы всё равно знаем из снимков. Это напоминание
+    // оформить её в боте — иначе склад не спишется и разойдётся с автоматом.
+    id: "vending.refill_detected",
+    eventType: "vending.refill_detected",
+    urgency: "briefing",
+    when: (c) => c.payload.recorded === false,
+    format: (c) =>
+      `🍫 Заливка без записи: ${str(c.payload.name)} +${num(c.payload.units)} шт ${времяТашкента(c.payload.windowTo)} — ` +
+      `оформи в боте «Заполнил автомат»`,
   },
 
   // ── Обслуживание оборудования ─────────────────────────────────────────────
