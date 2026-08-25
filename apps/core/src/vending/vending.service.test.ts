@@ -13,6 +13,7 @@ import {
   vendingProduct,
   vendingStock,
 } from "@mydon/db";
+import { TZ } from "@mydon/shared";
 import { MAX_SLOTS_PER_MACHINE, VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
@@ -26,6 +27,9 @@ type ProdRow = {
   fixedPurchaseQty?: number | null;
 };
 type AliasRow = { productId: string; alias: string };
+/** Карточка реестра автомата и её состояние — фильтр «в строю» у плана, прогноза и сводки. */
+type EntRow = { id: string; name: string; externalRef: string | null; type: string };
+type CardRow = { entityId: string; status: string };
 
 /**
  * Таблицы реестра автоматов и настроек: их читает `purchase()` (фильтр «в строю»
@@ -53,17 +57,43 @@ function таблица(rows: unknown[]) {
  * тоже резолвит алиасы (loadProductIndex()) — по умолчанию пустые, отдельные тесты
  * передают их явно.
  */
-function readDb(rows: Row[], aliases: AliasRow[] = [], products: ProdRow[] = []) {
+function readDb(
+  rows: Row[],
+  aliases: AliasRow[] = [],
+  products: ProdRow[] = [],
+  /** Реестр автоматов: пустой — все в строю (DEFAULT_MACHINE_STATUS). */
+  entities: EntRow[] = [],
+  cards: CardRow[] = [],
+) {
   return {
     select: () => ({
       from: (t: unknown) =>
-        таблица(t === vendingAlias ? aliases : t === vendingProduct ? products : РЕЕСТР.includes(t) ? [] : rows),
+        таблица(
+          t === vendingAlias
+            ? aliases
+            : t === vendingProduct
+              ? products
+              : t === entity
+                ? entities
+                : t === machineCard
+                  ? cards
+                  : РЕЕСТР.includes(t)
+                    ? []
+                    : rows,
+        ),
     }),
   } as never;
 }
 
 /** Стаб БД для прогноза: слоты, продажи, алиасы — различаем по ссылке. */
-function forecastDb(slots: Row[], sales: SaleRow[], aliases: AliasRow[] = [], products: ProdRow[] = []) {
+function forecastDb(
+  slots: Row[],
+  sales: SaleRow[],
+  aliases: AliasRow[] = [],
+  products: ProdRow[] = [],
+  entities: EntRow[] = [],
+  cards: CardRow[] = [],
+) {
   return {
     select: () => ({
       from: (t: unknown) =>
@@ -74,9 +104,13 @@ function forecastDb(slots: Row[], sales: SaleRow[], aliases: AliasRow[] = [], pr
               ? aliases
               : t === vendingProduct
                 ? products
-                : РЕЕСТР.includes(t)
-                  ? []
-                  : slots,
+                : t === entity
+                  ? entities
+                  : t === machineCard
+                    ? cards
+                    : РЕЕСТР.includes(t)
+                      ? []
+                      : slots,
         ),
     }),
   } as never;
@@ -262,6 +296,34 @@ describe("Вендинг Core: дефицит по автоматам (Фаза 
     assert.equal(m.total, 9);
     assert.deepEqual(m.perMachine, { AH: 6, Olma: 3 });
   });
+
+  it("автомат не в строю: в списке остаётся с inService:false, но из сводной потребности выпадает (П5b-3)", async () => {
+    // Список автоматов — зеркало сбора: пропавшая строка читалась бы как «сбор
+    // его потерял». А вот его дефицит никуда не едет, и в сводке потребности
+    // ему делать нечего — закуп и план его уже не видят.
+    const rows = [slot("AH", "31", "Montella", 6, 0), slot("SKLAD", "1", "Montella", 6, 0)];
+    const entities: EntRow[] = [
+      { id: "m-ah", name: "American Hospital", externalRef: "AH", type: "machine" },
+      { id: "m-sk", name: "SKLAD 5S", externalRef: "SKLAD", type: "machine" },
+    ];
+    const cards: CardRow[] = [
+      { entityId: "m-ah", status: "in_service" },
+      { entityId: "m-sk", status: "warehouse" },
+    ];
+    const svc = new VendingService(readDb(rows, [], [], entities, cards));
+
+    const machines = await svc.machines();
+    assert.equal(machines.find((m) => m.serial === "SKLAD")!.inService, false);
+    assert.equal(machines.find((m) => m.serial === "AH")!.inService, true);
+
+    const summary = await svc.deficitSummary();
+    assert.deepEqual(summary.find((s) => s.product === "Montella")!.perMachine, { AH: 6 });
+  });
+
+  it("реестра нет вовсе — все автоматы в строю (DEFAULT_MACHINE_STATUS)", async () => {
+    const machines = await new VendingService(readDb([slot("AH", "31", "Montella", 6, 0)])).machines();
+    assert.equal(machines[0]!.inService, true);
+  });
 });
 
 describe("Вендинг Core: прогноз расхода (§5.6)", () => {
@@ -316,6 +378,26 @@ describe("Вендинг Core: прогноз расхода (§5.6)", () => {
     const canon = all.find((r) => r.product === "Montella Вода минеральная 330ml")!;
     assert.equal(canon.inMachines, 5); // 2+3
     assert.equal(canon.daily, 2); // (7+7)/7
+  });
+
+  it("автомат не в строю в прогноз не входит: его полные слоты не растягивают запас (П5b-3)", async () => {
+    const t = new Date("2026-08-02T00:00:00Z");
+    const slots: Row[] = [
+      { machineSerial: "AH", coilId: "31", productName: "Montella", capacity: 6, quantity: 2 },
+      // Склад-«автомат» с полными слотами: без фильтра остаток был бы 8 и
+      // «хватит на 4 дня» вместо честного «на 1 день».
+      { machineSerial: "SKLAD", coilId: "1", productName: "Montella", capacity: 6, quantity: 6 },
+    ];
+    const sales: SaleRow[] = [{ machineSerial: "AH", productName: "Montella", quantity: 14, capturedAt: t }];
+    const entities: EntRow[] = [
+      { id: "m-ah", name: "American Hospital", externalRef: "AH", type: "machine" },
+      { id: "m-sk", name: "SKLAD 5S", externalRef: "SKLAD", type: "machine" },
+    ];
+    const cards: CardRow[] = [{ entityId: "m-sk", status: "warehouse" }];
+    const { all } = await new VendingService(forecastDb(slots, sales, [], [], entities, cards)).forecast();
+    const montella = all.find((r) => r.product === "Montella")!;
+    assert.equal(montella.inMachines, 2);
+    assert.equal(montella.daysLeft, 1);
   });
 });
 
@@ -563,25 +645,42 @@ describe("Вендинг Core: отправка закупа на утвержд
     await assert.rejects(() => vending.submitPurchase(), /ApprovalsService не подключён/);
   });
 
-  it("заявка уже ждёт решения — второй не создаём (UX#15)", async () => {
+  it("свежая заявка ждёт решения — второй не создаём, в причине дата (UX#15/П5b-4)", async () => {
     // Кнопка в панели и «оформить закуп» в боте отправляют одно и то же:
     // владелец одобрил бы два одинаковых закупа и получил две накладные.
     const { svc, requests } = approvalsStub();
-    const висит = [{ payload: { purchaseOrder: { positions: [], costRounded: 1 } } }];
+    const вчера = new Date(Date.now() - 86_400_000);
+    const висит = [{ payload: { purchaseOrder: { positions: [], costRounded: 1 } }, createdAt: вчера }];
     const vending = new VendingService(purchaseDb(slots, sales, products, [], [], висит), svc);
     const res = await vending.submitPurchase("owner");
     assert.equal(res.submitted, false);
     assert.equal(res.positions, 0);
     assert.equal(res.costRounded, 0);
     assert.match(res.reason ?? "", /уже ждёт решения/);
+    // Без даты «уже ждёт решения» не отличимо от заявки, отправленной минуту
+    // назад: владельцу нечего искать в очереди согласований.
+    const день = вчера.toLocaleDateString("ru-RU", { timeZone: TZ, day: "2-digit", month: "2-digit" });
+    assert.match(res.reason ?? "", new RegExp(`\\(с ${день}\\)`));
     assert.equal(requests.length, 0);
+  });
+
+  it("заявка старше TTL гейт не держит: закуп уходит второй заявкой (П5b-4)", async () => {
+    // Забытая заявка недельной давности — не двойное нажатие, а тишина: закуп
+    // из бота молча отвечал «уже ждёт решения» на СОВСЕМ ДРУГОЙ поход.
+    const { svc, requests } = approvalsStub();
+    const старая = [
+      { payload: { purchaseOrder: { positions: [], costRounded: 1 } }, createdAt: new Date(Date.now() - 4 * 86_400_000) },
+    ];
+    const vending = new VendingService(purchaseDb(slots, sales, products, [], [], старая), svc);
+    assert.equal((await vending.submitPurchase("owner")).submitted, true);
+    assert.equal(requests.length, 1);
   });
 
   it("нерешённая заявка БЕЗ закупа в payload отправке не мешает", async () => {
     // В очереди живут заявки других агентов и другие решения вендинга —
     // гейт обязан смотреть на снимок закупа, а не на сам факт очереди.
     const { svc, requests } = approvalsStub();
-    const чужая = [{ payload: { coffeeRefill: { id: "x" } } }];
+    const чужая = [{ payload: { coffeeRefill: { id: "x" } }, createdAt: new Date() }];
     const vending = new VendingService(purchaseDb(slots, sales, products, [], [], чужая), svc);
     assert.equal((await vending.submitPurchase("owner")).submitted, true);
     assert.equal(requests.length, 1);
@@ -1554,8 +1653,8 @@ describe("Продажи Ourvend знают свой автомат", () => {
 });
 
 describe("Вендинг Core: план закупа (П5a)", () => {
-  type Card = { entityId: string; status: string };
-  type Ent = { id: string; name: string; externalRef: string | null; type: string };
+  type Card = CardRow;
+  type Ent = EntRow;
   /** Стаб: слоты, склад, товары, карточки автоматов, настройки — по ссылке на таблицу. */
   function planDb(o: {
     slots: Row[];
@@ -1822,7 +1921,28 @@ describe("Вендинг Core: план закупа (П5a)", () => {
     ];
     const plan = await new VendingService(planDb({ slots, entities, cards, products, sales: давние })).plan();
     assert.match(plan.warnings.find((w) => w.code === "sales_stale")!.message, /Продажи собраны 5 дн\. назад/);
-    assert.match(plan.warnings.find((w) => w.code === "sales_partial")!.message, /1 автоматов из 2/);
+    // Автомат назван ИМЕНЕМ: «1 автоматов из 2» не говорило, какой из них
+    // искать, и владельцу оставалось сверять серийники вручную (П5b-1).
+    assert.equal(
+      plan.warnings.find((w) => w.code === "sales_partial")!.message,
+      "В свежем батче продаж нет автоматов: Olma — по ним «нет продаж» может быть ложным",
+    );
+  });
+
+  it("автомата без потребности в батче продаж — предупреждения нет (П5b-1)", async () => {
+    // Полный автомат продаж мог и не прислать, и «нет продаж» по нему ничего
+    // не решает: прежнее «в батче меньше, чем в расчёте» горело на ровном месте.
+    const полный: Row[] = slots.map((r) =>
+      r.machineSerial === "2508160376" ? { ...r, quantity: 5 } : r,
+    );
+    const толькоAH: SaleRow[] = [
+      { machineSerial: "2508160359", productName: "Fanta", quantity: 7, capturedAt: new Date() },
+    ];
+    const plan = await new VendingService(
+      planDb({ slots: полный, entities, cards, products, sales: толькоAH }),
+    ).plan();
+    assert.equal(plan.machines.find((m) => m.serial === "2508160376")!.need, 0);
+    assert.ok(!plan.warnings.some((w) => w.code === "sales_partial"));
   });
 
   it("порог свежести продаж — в миллисекундах: 2 дн. 1 ч уже несвежие, 1 день — нет", async () => {
@@ -1906,25 +2026,94 @@ describe("Вендинг Core: план закупа (П5a)", () => {
     }
   });
 
-  it("пропущенный автомат назван состоянием по-человечески (UX#10)", async () => {
-    const plan = await new VendingService(planDb({ slots, entities, cards, products, sales })).plan();
-    const w = plan.warnings.find((x) => x.code === "machine_skipped")!;
-    assert.match(w.message, /SKLAD 5S/);
-    assert.match(w.message, /На складе/, "статус словами владельца, а не машинным warehouse");
+  it("автоматы не в строю — ОДНА строка со всеми именами и состояниями (UX#10/П5b-2)", async () => {
+    // На проде три SKLAD-автомата давали по строке каждый — в каждом плане и
+    // навсегда. Предупреждение, которое горит всегда и втроём, не читают, а
+    // вместе с ним перестают читать соседние.
+    const сЧетвёркой: Row[] = [
+      ...slots,
+      { machineSerial: "2508160354", coilId: "1", productName: "Fanta", capacity: 5, quantity: 0 },
+    ];
+    const ент: Ent[] = [...entities, { id: "m-sk4", name: "SKLAD 4S", externalRef: "c2508160354", type: "machine" }];
+    const крт: Card[] = [...cards, { entityId: "m-sk4", status: "repair" }];
+    const plan = await new VendingService(planDb({ slots: сЧетвёркой, entities: ент, cards: крт, products, sales })).plan();
+    const строки = plan.warnings.filter((w) => w.code === "machine_skipped");
+    assert.equal(строки.length, 1, "одна строка на все пропущенные автоматы");
+    // Порядок — по имени (в слотах 5S идёт раньше 4S), состояние — словами
+    // владельца, а не машинным warehouse/repair.
+    assert.equal(строки[0]!.message, "Не в строю, в план не вошли: SKLAD 4S (В ремонте), SKLAD 5S (На складе)");
   });
 
-  it("тексты «без цены» и «нет в прайсе» говорят, что делать (UX#11/#12)", async () => {
-    const без: Row[] = [...slots, { machineSerial: "2508160376", coilId: "2", productName: "Загадка", capacity: 5, quantity: 0 }];
+  it("тексты «без цены» и «нет в прайсе» говорят, что делать, и не дублируют друг друга (UX#11/#12, П5b-6)", async () => {
+    // «Загадка» — товар БЕЗ карточки, «Qurt» — карточка есть, цены нет. Товар
+    // без карточки попадал в оба списка сразу, и владелец читал про него две
+    // строки подряд с разными советами; «задай цену» по нему невыполнимо —
+    // цену вешать не на что.
+    const без: Row[] = [
+      ...slots,
+      { machineSerial: "2508160376", coilId: "2", productName: "Загадка", capacity: 5, quantity: 0 },
+      { machineSerial: "2508160376", coilId: "3", productName: "Qurt", capacity: 5, quantity: 0 },
+    ];
+    const сQurt: ProdRow[] = [
+      ...products,
+      { id: "p3", name: "Qurt", purchasePrice: null, packSize: 10, excludedFromPurchase: false, fixedPurchaseQty: null },
+    ];
     const продажи: SaleRow[] = [
       ...sales,
       { machineSerial: "2508160359", productName: "Загадка", quantity: 3, capturedAt: new Date("2026-08-20T00:00:00Z") },
+      { machineSerial: "2508160359", productName: "Qurt", quantity: 3, capturedAt: new Date("2026-08-20T00:00:00Z") },
     ];
-    const plan = await new VendingService(planDb({ slots: без, entities, cards, products, sales: продажи })).plan();
-    assert.match(plan.warnings.find((w) => w.code === "no_price")!.message, /в сумму закупа не вошли.*цена <товар> <сум за штуку>/s);
+    const plan = await new VendingService(planDb({ slots: без, entities, cards, products: сQurt, sales: продажи })).plan();
+    const безЦены = plan.warnings.find((w) => w.code === "no_price")!;
+    assert.match(безЦены.message, /в сумму закупа не вошли.*цена <товар> <сум за штуку>/s);
+    assert.match(безЦены.message, /Qurt/);
+    assert.doesNotMatch(безЦены.message, /Загадка/, "товар без карточки живёт в unknown_product, и только там");
     assert.match(
       plan.warnings.find((w) => w.code === "unknown_product")!.message,
       /Нет в прайсе вендинга: Загадка.*карточку заводит администратор/s,
     );
+    // Позиций без цены больше нет вовсе — предупреждения тоже быть не должно.
+    const толькоЗагадка = await new VendingService(
+      planDb({
+        slots: без.filter((r) => r.productName !== "Qurt"),
+        entities,
+        cards,
+        products,
+        sales: продажи,
+      }),
+    ).plan();
+    assert.ok(!толькоЗагадка.warnings.some((w) => w.code === "no_price"));
+  });
+
+  it("строка склада с двойным пробелом резолвится в карточку и вычитается из потребности (П5b-5)", async () => {
+    // `vending_stock` ключуется ИМЕНЕМ, и «Red  Bull» из копипасты объявлялся
+    // осиротевшим при живой карточке «Red Bull»: остаток не вычитался, и
+    // владелец покупал второй раз то, что лежит на складе.
+    const редбул: ProdRow[] = [
+      { id: "p9", name: "Red Bull CAN 0,25", purchasePrice: "12000", packSize: 6, excludedFromPurchase: false, fixedPurchaseQty: null },
+    ];
+    const слоты: Row[] = [
+      { machineSerial: "2508160376", coilId: "1", productName: "Red Bull CAN 0,25", capacity: 5, quantity: 1 },
+    ];
+    const продажи: SaleRow[] = [
+      { machineSerial: "2508160376", productName: "Red Bull CAN 0,25", quantity: 7, capturedAt: new Date() },
+    ];
+    const plan = await new VendingService(
+      planDb({
+        slots: слоты,
+        entities,
+        cards,
+        products: редбул,
+        sales: продажи,
+        stock: [{ productName: "Red  Bull CAN 0,25", quantity: 2, countedAt: new Date() }],
+      }),
+    ).plan();
+    assert.equal(plan.stock.unmatched, 0);
+    assert.equal(plan.stock.totalBefore, 2);
+    assert.ok(!plan.warnings.some((w) => w.code === "stock_unknown_product"));
+    const позиция = plan.summary.items.find((i) => i.product === "Red Bull CAN 0,25")!;
+    assert.equal(позиция.stock, 2); // need 4 − склад 2 = купить 2
+    assert.equal(позиция.buy, 2);
   });
 
   it("фикс-количество товара уходит в order как есть, без округления до блока", async () => {
