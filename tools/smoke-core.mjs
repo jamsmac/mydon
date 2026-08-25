@@ -185,6 +185,29 @@ const ЧТЕНИЕ = [
         throw new Error("неделя без продаж отдала процент маржи — нули выданы за результат");
       }
       if (о?.health?.parity == null) throw new Error("weekly-digest.health.parity — null (сверять нечего ≠ паритета нет)");
+      // Секция, которая не посчиталась, обязана быть НАЗВАНА: сводка больше не
+      // падает в 500 из-за здоровья сбора, и молчаливая пустота вместо секции
+      // читалась бы как «там всё хорошо».
+      if (!Array.isArray(о?.warnings)) throw new Error("weekly-digest.warnings — не массив");
+    },
+  },
+  {
+    // Пустое значение параметра — документированный «дефолт», а не 400:
+    // такую ссылку легче лёгкого собрать руками.
+    path: "/vending/weekly-digest?week=",
+    проверить: (о) => {
+      if (!/^\d{4}-\d{2}$/.test(о?.week)) throw new Error(`weekly-digest?week= → week=${о?.week}`);
+    },
+  },
+  {
+    // Неделя вне рабочего диапазона гасится в предыдущую — как негодный ключ.
+    // Иначе `?week=` даёт полмиллиона годных ключей, каждый из которых
+    // гарантированно мимо кеша (adversarial-security, п. 2).
+    path: "/vending/weekly-digest?week=1990-01",
+    проверить: (о) => {
+      if (о?.week === "1990-01") throw new Error("неделя из 1990-го посчиталась — граница диапазона не действует");
+      if (!/^\d{4}-\d{2}$/.test(о?.week)) throw new Error(`weekly-digest.week=${о?.week}`);
+      if (о.from < "2024-01-01") throw new Error(`окно ${о.from} старше двух лет — нормализация промахнулась`);
     },
   },
   {
@@ -195,6 +218,27 @@ const ЧТЕНИЕ = [
     проверить: (ответ) => {
       if (!Array.isArray(ответ?.mismatches)) throw new Error("parity.mismatches — не массив");
       if (!Array.isArray(ответ?.stock?.mismatches)) throw new Error("parity.stock.mismatches — не массив");
+      if (typeof ответ?.checked !== "number") throw new Error("parity.checked — не число");
+    },
+  },
+  {
+    // Верхняя граница окна сверки: без неё число доезжало до `sql.raw` в
+    // сыром SQL, и запрос читал бы всю историю снимков.
+    path: "/ourvend/parity?days=31",
+    ждёмОтказ: true,
+  },
+  {
+    // Пустое значение — дефолт (7 суток), а не 400.
+    path: "/ourvend/parity?days=",
+    проверить: (ответ) => {
+      if (ответ?.days !== 7) throw new Error(`пустой ?days= дал окно ${ответ?.days}, а не дефолт`);
+    },
+  },
+  {
+    // Пустое значение — дефолт, а не 400 (то же правило, что у `?week=`).
+    path: "/ourvend/health?runs=",
+    проверить: (о) => {
+      if (!Array.isArray(о?.runs)) throw new Error("health.runs — не массив");
     },
   },
   {
@@ -217,6 +261,11 @@ const ЧТЕНИЕ = [
         throw new Error("health.parity.days/mismatches — не числа");
       }
       if (typeof о.parity.stockOk !== "boolean") throw new Error("health.parity.stockOk — не флаг");
+      // Сверенных пар — числом по обеим половинам: «расхождений 0» при
+      // `ok: false` без них читается как «всё плохо, но расхождений нет».
+      for (const ключ of ["checked", "stockChecked"]) {
+        if (typeof о.parity[ключ] !== "number") throw new Error(`health.parity.${ключ} — не число`);
+      }
       if (о.runs.length === 0 && (о.failedStreak !== 0 || о.lastSuccessAt !== null)) {
         throw new Error("прогонов нет, а серия/успех не пусты — журнал прочитан не оттуда");
       }
@@ -474,7 +523,12 @@ const ЗАПИСЬ = [
     проверить: (о) => {
       if (!Array.isArray(о.set)) throw new Error("set — не массив");
       if (!Array.isArray(о.skipped) || о.skipped.length === 0) throw new Error("skipped пуст: пропущенных обязаны назвать");
-      const чужие = о.skipped.filter((s) => s.reason !== "no_sales" && s.reason !== "already_set");
+      // Причин пропуска ЧЕТЫРЕ, и гейт выкатки обязан знать все: `inactive`
+      // (товар снят с продажи) и `no_fact` (продажи есть, а цена из них не
+      // выводится) законны ровно так же, как две первые. Первый снятый товар
+      // в прайсе иначе красил бы CI по чужому поводу.
+      const ПРИЧИНЫ = ["already_set", "no_sales", "no_fact", "inactive"];
+      const чужие = о.skipped.filter((s) => !ПРИЧИНЫ.includes(s.reason));
       if (чужие.length > 0) throw new Error(`неизвестная причина пропуска: ${JSON.stringify(чужие[0])}`);
       if (!о.skipped.some((s) => s.reason === "no_sales")) throw new Error("ждали товары без факта витрины");
     },

@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Post, Query } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
-import { Transform, Type } from "class-transformer";
+import { Transform } from "class-transformer";
 import { IsArray, IsInt, IsOptional, Max, Min } from "class-validator";
 import { OurvendHealthService } from "./ourvend-health.service";
 import { OurvendParityService } from "./ourvend-parity.service";
@@ -28,10 +28,13 @@ export class OurvendSnapshotDto {
  *
  * `@Transform` гасит ПУСТОЕ значение (`?runs=`) в «не задано»: документировано
  * «пусто → дефолт», а `@IsOptional` пустую строку не пропускает и отдал бы 400
- * на ссылку, которую руками собрать легче лёгкого.
+ * на ссылку, которую руками собрать легче лёгкого. Число он приводит САМ,
+ * вместо `@Type(() => Number)`: `@Type` отрабатывает раньше и превращает `""`
+ * в `0`, после чего гасить уже нечего — `@Min(1)` отбивает ноль (поймано
+ * дымовым прогоном, не тестом).
  */
 export class OurvendHealthDto {
-  @IsOptional() @Transform(({ value }) => (value === "" ? undefined : value)) @Type(() => Number) @IsInt() @Min(1) @Max(100)
+  @IsOptional() @Transform(({ value }) => (value === "" || value === undefined ? undefined : Number(value))) @IsInt() @Min(1) @Max(100)
   runs?: number;
 }
 
@@ -42,7 +45,7 @@ export class OurvendHealthDto {
  * учёта живёт на семи днях, месяц — предел осмысленного разбора.
  */
 export class OurvendParityDto {
-  @IsOptional() @Transform(({ value }) => (value === "" ? undefined : value)) @Type(() => Number) @IsInt() @Min(1) @Max(30)
+  @IsOptional() @Transform(({ value }) => (value === "" || value === undefined ? undefined : Number(value))) @IsInt() @Min(1) @Max(30)
   days?: number;
 }
 
