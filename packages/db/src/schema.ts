@@ -1537,6 +1537,66 @@ export const vendingStock = pgTable("vending_stock", {
 });
 
 /**
+ * `vending_stock_count` — ИСТОРИЯ инвентаризаций склада (П8a, R-P8a-3).
+ *
+ * (а) Зачем таблица, если есть `vending_stock`? Та — перезаписная, «одна
+ * строка на товар», текущий баланс. Вопрос «сколько было на складе в июне»
+ * не имел ответа ни в одной таблице mydon: `vending_stock` живёт только
+ * настоящим моментом (`inventory-prod.md` §3: 20 строк, два момента 25.08,
+ * событий `vending.stock.recounted` — всего 2). Эта таблица — леджер: каждая
+ * строка — один пересчёт одной позиции, ничего не перезаписывает.
+ *
+ * (б) Почему ДВА индекса и оба ЧАСТИЧНЫЕ, а не один сплошной UNIQUE. Донор
+ * mydon-stock несёт законные дубли: 5 групп повторов по (dt, место, товар,
+ * qty), включая пары с одинаковым `counted_at` и товаром — это реальность
+ * склада (два независимых пересчёта одной позиции в один момент), а не
+ * ошибка ввода (см. `inventory-donor.md` §2, §4.4). Сплошной
+ * `(source, counted_at, product_name)` отверг бы такие строки при импорте.
+ * Поэтому ключ импорта — `(source, ext_id) WHERE ext_id IS NOT NULL`
+ * (идемпотентность по внешнему id донора), а ключ своих пересчётов —
+ * `(source, counted_at, product_name) WHERE source = 'own'` (идемпотентность
+ * по моменту переучёта); частичность не даёт им мешать друг другу.
+ *
+ * `qty` — `numeric`, а не `integer`: донор хранит дробные остатки склада
+ * (килограммы сырья и т.п.), `integer` тихо срезал бы дробную часть.
+ *
+ * Бэкфилла в миграции нет: разовый перенос 460 донорских строк делает
+ * скрипт T3 (`import-stock-history.ts`), а не SQL — резолв канонического
+ * имени товара это КОД (`vending_alias`/`normalizeProductName`), повторять
+ * его в SQL значило бы завести вторую реализацию того же правила.
+ */
+export const vendingStockCount = pgTable(
+  "vending_stock_count",
+  {
+    id: id(),
+    /** Сутки пересчёта (Asia/Tashkent) — для отчёта по дням, без чтения countedAt. */
+    dt: date("dt").notNull(),
+    /** Каноническое имя товара (как в vending_product / vending_stock). */
+    productName: text("product_name").notNull(),
+    productId: uuid("product_id").references(() => vendingProduct.id),
+    /** Дробный остаток: донор хранит килограммы, не только штуки. */
+    qty: numeric("qty", { precision: 12, scale: 2 }).notNull(),
+    /** Откуда строка: 'stock-import' (разовый перенос истории) | 'own' (свой пересчёт). */
+    source: text("source").notNull(),
+    /** id донорской строки — ключ идемпотентности импорта. NULL у своих строк. */
+    extId: text("ext_id"),
+    /** Момент пересчёта — донорский `counted_at` либо момент своего ввода. */
+    countedAt: timestamp("counted_at", { withTimezone: true }).notNull(),
+    /** Кто считал. NULL законен (импорт, безымянный пересчёт), поле — нет. */
+    personId: uuid("person_id").references(() => person.id),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("vending_stock_count_src_key").on(t.source, t.extId).where(sql`${t.extId} is not null`),
+    uniqueIndex("vending_stock_count_own_key")
+      .on(t.source, t.countedAt, t.productName)
+      .where(sql`${t.source} = 'own'`),
+    index("vending_stock_count_product_dt_idx").on(t.productName, t.dt),
+  ],
+);
+
+/**
  * Вид автомата. Задаётся при заведении карточки, а не выводится из косвенных
  * признаков (WAREHOUSE_SPEC §4.0).
  *
@@ -1648,7 +1708,7 @@ export const vendingRefill = pgTable(
      * ломает законное «залил тот же слот дважды подряд, не влезло сразу».
      */
     clientKey: text("client_key").notNull(),
-    /** Откуда факт: bot | panel. */
+    /** Откуда факт: bot | panel | stock-import (разовый перенос истории mydon-stock, П8a). */
     source: text("source").default("bot").notNull(),
     note: text("note"),
     createdBy: text("created_by"),
@@ -2737,6 +2797,7 @@ export const schema = {
   productSale,
   machineSale,
   vendingStock,
+  vendingStockCount,
   vendingRefill,
   vendingRefillEvent,
   vendingPurchaseOrder,

@@ -177,6 +177,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   runs: [],
   failedStreak: 12,
   lastSuccessAt: "2026-08-24T01:00:00.000Z",
+  staleHours: 27,
+  staleThresholdH: 6,
   slotsLagMin: 42,
   salesLagH: 27,
   productSaleLagH: 27,

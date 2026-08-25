@@ -23,6 +23,8 @@ const НЕДЕЛЯ: WeeklyDigest = {
     runs: [],
     failedStreak: 0,
     lastSuccessAt: null,
+    staleHours: null,
+    staleThresholdH: 6,
     slotsLagMin: null,
     salesLagH: null,
     productSaleLagH: null,

@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ApprovalsModule } from "../approvals/approvals.module";
 import { OurvendHealthService } from "../ourvend/ourvend-health.service";
 import { OurvendParityService } from "../ourvend/ourvend-parity.service";
+import { SyncStaleService } from "../ourvend/sync-stale.service";
 import { AnalyticsService } from "./analytics.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
@@ -20,6 +21,10 @@ import { WeeklyDigestService } from "./weekly-digest.service";
  * лечится только `forwardRef`; в этом репозитории его нет ни разу, и заводить
  * циклическую пару ради двух провайдеров — плохой размен. Оба сервиса про
  * автоматы, поэтому их дом — вендинг, а `OurvendModule` берёт их отсюда.
+ *
+ * По той же причине здесь живёт и сторож застоя сбора (`SyncStaleService`,
+ * П8a): он читает журнал прогонов вендинга и пишет событие — регистрируй его в
+ * `OurvendModule`, и пара модулей снова стала бы циклической.
  */
 @Module({
   imports: [ApprovalsModule],
@@ -32,6 +37,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
     AnalyticsService,
     OurvendParityService,
     OurvendHealthService,
+    SyncStaleService,
     WeeklyDigestService,
   ],
   exports: [
@@ -42,6 +48,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
     AnalyticsService,
     OurvendParityService,
     OurvendHealthService,
+    SyncStaleService,
   ],
 })
 export class VendingModule {}

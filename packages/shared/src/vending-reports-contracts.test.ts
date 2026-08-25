@@ -29,6 +29,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   ],
   failedStreak: 0,
   lastSuccessAt: "2026-08-23T03:07:00.000Z",
+  staleHours: 3.1,
+  staleThresholdH: 6,
   slotsLagMin: 42,
   salesLagH: 3,
   productSaleLagH: 5,
@@ -69,6 +71,8 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "runs",
       "salesLagH",
       "slotsLagMin",
+      "staleHours",
+      "staleThresholdH",
     ]);
     assert.deepEqual(Object.keys(ЗДОРОВЬЕ.parity).sort(), [
       "checked",
@@ -94,6 +98,15 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
   it("лаг допускает null: «снимков нет» — не «0 мин»", () => {
     const пусто: OurvendHealth = { ...ЗДОРОВЬЕ, slotsLagMin: null, salesLagH: null, productSaleLagH: null };
     assert.deepEqual([пусто.slotsLagMin, пусто.salesLagH, пусто.productSaleLagH], [null, null, null]);
+  });
+
+  it("порог застоя едет в ответе рядом с давностью — витрине не нужна своя копия (R-P8a-6)", () => {
+    // Бот и панель рисуют «⛔ сбор стоит» по сравнению ДВУХ полей ответа. Своя
+    // константа порога у каждого читателя разошлась бы с базой в тот же день,
+    // когда владелец подвинет `SYNC_STALE_HOURS` в панели настроек.
+    assert.equal(typeof ЗДОРОВЬЕ.staleThresholdH, "number");
+    const никогда: OurvendHealth = { ...ЗДОРОВЬЕ, lastSuccessAt: null, staleHours: null };
+    assert.equal(никогда.staleHours, null, "«успехов не было вовсе» — не «ноль часов»");
   });
 
   it("недельная сводка: ровно те поля, что читают бот и панель", () => {

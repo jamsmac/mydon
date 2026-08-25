@@ -1,11 +1,12 @@
-import { Inject, Injectable } from "@nestjs/common";
-import { desc, eq } from "drizzle-orm";
+import { Inject, Injectable, Logger } from "@nestjs/common";
+import { desc } from "drizzle-orm";
 import { ourvendSaleSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
-import type { OurvendHealth, OurvendSyncRun } from "@mydon/shared";
+import { staleHours, type OurvendHealth, type OurvendSyncRun } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { ReportCache } from "../vending/report-cache";
 import { failedStreak, STREAK_SCAN_LIMIT } from "../vending/sync-streak";
 import { OurvendParityService } from "./ourvend-parity.service";
+import { lastSuccessRunAt, syncStaleThreshold } from "./sync-runs";
 
 /**
  * Здоровье сбора OurVend (R-P5b-8): прогоны, серия отказов, свежесть снимков,
@@ -57,6 +58,7 @@ const ЧАС = 3_600_000;
 
 @Injectable()
 export class OurvendHealthService {
+  private readonly logger = new Logger(OurvendHealthService.name);
   private readonly кеш = new ReportCache(HEALTH_CACHE_MS);
 
   constructor(
@@ -75,7 +77,7 @@ export class OurvendHealthService {
   }
 
   private async здоровье(n: number, now: Date): Promise<OurvendHealth> {
-    const [прогоны, слоты, продажи, витрина, паритет, последнийУспех] = await Promise.all([
+    const [прогоны, слоты, продажи, витрина, паритет, успех, порог] = await Promise.all([
       this.db
         .select({
           id: vendingSyncRun.id,
@@ -109,28 +111,39 @@ export class OurvendHealthService {
         .orderBy(desc(productSale.capturedAt))
         .limit(1),
       this.parity.parity(PARITY_DAYS),
-      // Последний УСПЕХ — отдельным запросом, а не поиском в показанных
-      // прогонах: 200 почасовых строк это всего ~8 суток, и после недели
-      // молчания поле стало бы `null`, то есть «сбор не запускался никогда».
-      // Разница между «успеха давно не было» и «успехов не было вовсе»
-      // решает, чинить коллектор или заводить его впервые.
-      this.db
-        .select({ startedAt: vendingSyncRun.startedAt, finishedAt: vendingSyncRun.finishedAt })
-        .from(vendingSyncRun)
-        .where(eq(vendingSyncRun.status, "success"))
-        .orderBy(desc(vendingSyncRun.startedAt))
-        .limit(1),
+      lastSuccessRunAt(this.db),
+      // Порог застоя — В ОТВЕТЕ, а не только у сторожа: бот и панель рисуют
+      // «⛔ сбор стоит» сравнением `staleHours >= staleThresholdH`, и своя
+      // константа у каждого разошлась бы с базой в тот же день, когда владелец
+      // подвинет порог в панели настроек (R-P8a-6). Считает его ОДНА функция
+      // на двоих (`syncStaleThreshold`) — иначе витрина показывала бы порог,
+      // по которому сторож не тревожит.
+      syncStaleThreshold(this.db, this.logger),
     ]);
 
     const серия = failedStreak(прогоны);
-    const успех = последнийУспех[0];
+    const успехAt = успех ? успех.toISOString() : null;
 
     return {
       runs: прогоны.slice(0, n).map(строкаПрогона),
       failedStreak: серия.streak,
-      // Успех датируется ЗАВЕРШЕНИЕМ, а не стартом: «последний раз данные
-      // приехали в 03:07», а не «мы начали пробовать в 03:05».
-      lastSuccessAt: успех ? (успех.finishedAt ?? успех.startedAt).toISOString() : null,
+      lastSuccessAt: успехAt,
+      // Один расчёт давности на всех читателей (`staleHours` из shared): своя
+      // формула здесь разошлась бы со сторожем, и витрина показывала бы
+      // «стоит 6 ч» там, где сторож молчит.
+      //
+      // ТОЧНОЕ ПРАВИЛО ОКРУГЛЕНИЯ (П8a fix wave; адверсариал прод-данные №7).
+      // Это поле — округлённое до 0.1 ч число ДЛЯ ПОКАЗА, не для решения:
+      // `SyncStaleService.check()` сравнивает с порогом СЫРЫЕ часы
+      // (`rawStaleHours` в `sync-runs.ts`), а не это значение, — «5 ч 59 м
+      // 49 с» иначе округлились бы до ровно 6.0 и прошли бы порог на 11
+      // секунд раньше настоящей границы. Если когда-нибудь понадобится
+      // сравнение прямо здесь (например, серверный бейдж «⛔ сбор стоит» без
+      // похода к сторожу) — считать `staleHours >= staleThresholdH` НЕЛЬЗЯ:
+      // это то же округлённое-раньше-времени сравнение, только скопированное.
+      // Источник истины по границе — `rawStaleHours`, а не это поле.
+      staleHours: staleHours(успехAt, now),
+      staleThresholdH: порог,
       slotsLagMin: лаг(слоты[0]?.at, now, МИНУТА, 0),
       salesLagH: лаг(продажи[0]?.at, now, ЧАС, 1),
       productSaleLagH: лаг(витрина[0]?.at, now, ЧАС, 1),

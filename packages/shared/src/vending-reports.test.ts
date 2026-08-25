@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   deadStock, isoWeekTashkent, isoWeekFromKey, marginByMachine, previousIsoWeek,
-  priceChanges, priceGap, retailDaily, retailFactByProduct, weekCompare, weightedCost,
+  priceChanges, priceGap, retailDaily, retailFactByProduct, staleHours, weekCompare, weightedCost,
   type SaleRow, type StockPosition,
 } from "./vending-reports";
 
@@ -262,5 +262,30 @@ describe("Недели по Ташкенту и себестоимость ок�
     assert.equal(weightedCost([{ price: 10_000, qty: 3 }, { price: 12_000, qty: 1 }]), 10_500);
     assert.equal(weightedCost([]), null);
     assert.equal(weightedCost([{ price: 0, qty: 5 }]), null);
+  });
+});
+
+describe("Давность успешного сбора (R-P8a-6)", () => {
+  const t = new Date("2026-08-25T13:00:00+05:00");
+
+  it("часы считаются до десятой, назад во времени не уходят", () => {
+    assert.equal(staleHours("2026-08-25T06:00:00+05:00", t), 7);
+    assert.equal(staleHours("2026-08-25T11:30:00+05:00", t), 1.5);
+    // Часы агента впереди базы: «минус два часа с последнего успеха» владелец
+    // прочитал бы как поломку отчёта, а не как расхождение часов.
+    assert.equal(staleHours("2026-08-25T14:00:00+05:00", t), 0);
+  });
+
+  it("успехов не было — null, а не ноль часов", () => {
+    assert.equal(staleHours(null, t), null);
+    // Ноль здесь означал бы «собрали только что», то есть ровно наоборот.
+    assert.notEqual(staleHours(null, t), 0);
+  });
+
+  it("строка без зоны читается ташкентскими часами, а не часами процесса", () => {
+    // Донор VendCash погорел ровно на этом: контейнер с TZ=UTC уводил момент
+    // на пять часов, и «стоит 7 ч» превращалось в «стоит 2 ч».
+    assert.equal(staleHours("2026-08-25 06:00:00", t), 7);
+    assert.equal(staleHours("мусор", t), null);
   });
 });

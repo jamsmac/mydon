@@ -12,8 +12,9 @@
  * ПОЧЕМУ ОТДЕЛЬНЫЙ СКРИПТ, А НЕ МИГРАЦИЯ. Резолв имени — это КОД (нормализация
  * плюс таблица алиасов), а не SQL-выражение: повторять его в миграции значит
  * завести вторую реализацию правила, которая разойдётся с Core на первом же
- * новом алиасе. Здесь используется та же `normalizeProductName` из
- * `@mydon/shared`, что и в `VendingService.productIdResolver`.
+ * новом алиасе. Здесь используется тот же индекс каталога `productIndex` из
+ * `@mydon/shared`, что и у импорта истории склада, с той же
+ * `normalizeProductName`, что и в `VendingService.productIdResolver`.
  *
  * ИДЕМПОТЕНТЕН: трогает только строки с `product_id IS NULL`, повторный прогон
  * обновляет ноль строк. Имена, которым карточки не нашлось, печатаются — это
@@ -24,7 +25,7 @@
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import { and, eq, isNull } from "drizzle-orm";
-import { normalizeProductName } from "@mydon/shared";
+import { productIndex } from "@mydon/shared";
 import { createDb, type Database } from "./index";
 import { machineSlot, vendingAlias, vendingProduct, vendingStock } from "./schema";
 
@@ -33,27 +34,23 @@ import { machineSlot, vendingAlias, vendingProduct, vendingStock } from "./schem
  * алиас (по нормализованному ключу) приводит имя к канону, затем канон ищется
  * в прайсе — тоже по нормализованному ключу. Имя, которому карточки нет, в
  * карту НЕ попадает: NULL и строка в отчёте честнее выдуманной привязки.
+ *
+ * Сам индекс живёт в `@mydon/shared` (`productIndex`): тот же каталог с тем же
+ * решением про алиасы читает импорт истории склада (П8a), только спрашивает у
+ * него не id, а каноническое имя. Две копии сборки разошлись бы на первом же
+ * новом алиасе.
  */
 export function resolveProductIds(
   names: (string | null | undefined)[],
   products: { id: string; name: string }[],
   aliases: { productId: string; alias: string }[],
 ): Map<string, string> {
-  const nameById = new Map(products.map((p) => [p.id, p.name]));
-  const aliasByKey = new Map<string, string>();
-  for (const a of aliases) {
-    const canonical = nameById.get(a.productId);
-    // Алиас на удалённый товар — не повод привязать строку к чему попало.
-    if (canonical) aliasByKey.set(normalizeProductName(a.alias), canonical);
-  }
-  const idByKey = new Map(products.map((p) => [normalizeProductName(p.name), p.id]));
-
+  const индекс = productIndex(products, aliases);
   const out = new Map<string, string>();
   for (const raw of names) {
     if (raw === null || raw === undefined || raw.trim() === "") continue;
     if (out.has(raw)) continue;
-    const canonical = aliasByKey.get(normalizeProductName(raw)) ?? raw;
-    const id = idByKey.get(normalizeProductName(canonical));
+    const id = индекс.id(raw);
     if (id) out.set(raw, id);
   }
   return out;

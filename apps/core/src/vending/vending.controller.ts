@@ -23,7 +23,7 @@ import { AnalyticsService } from "./analytics.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { ShrinkageService } from "./shrinkage.service";
-import { VendingService } from "./vending.service";
+import { STOCK_COUNTS_DAYS_DEFAULT, VendingService } from "./vending.service";
 import { WeeklyDigestService } from "./weekly-digest.service";
 
 export class IngestSlotDto {
@@ -113,6 +113,14 @@ export class IngestStockItemDto {
 export class IngestStockDto {
   @IsOptional() @IsISO8601()
   countedAt?: string;
+
+  /**
+   * Кто считал — карточка сотрудника (П8a). Панель и бот его сегодня НЕ шлют:
+   * тогда в истории `person_id = NULL`, и это честнее выдуманного «владелец».
+   * Проводка бота — отдельный срез.
+   */
+  @IsOptional() @IsUUID()
+  personId?: string;
 
   @IsArray() @ArrayMaxSize(5000) @ValidateNested({ each: true }) @Type(() => IngestStockItemDto)
   items!: IngestStockItemDto[];
@@ -340,6 +348,31 @@ export class ShrinkageDto {
 }
 
 /**
+ * История пересчётов склада (П8a): окно и товар.
+ *
+ * `@Transform` гасит ПУСТУЮ строку (`?days=`) — как у `OurvendHealthDto`: без
+ * него панель, отправившая незаполненное поле фильтра, получала бы 400 вместо
+ * окна по умолчанию.
+ */
+export class StockCountsDto {
+  /**
+   * Потолок 730 суток, не 365 (R-FW-P3, П8a fix wave; адверсариал
+   * прод-данные №3): начальный остаток донора — 2025-08-17, и старая граница
+   * года не пускала бы к 26 самым старым строкам истории вообще ни при каком
+   * значении. Дефолт и фактический зажим окна — в
+   * `VendingService.STOCK_COUNTS_DAYS_MAX`; здесь — только страховка входа
+   * HTTP, оба числа обязаны совпадать.
+   */
+  @IsOptional() @Transform(({ value }) => (value === "" || value === undefined ? undefined : Number(value))) @IsInt() @Min(1) @Max(730)
+  days?: number;
+
+  // 512, а не 255: в истории живут сырые имена донора, которые длиннее канона
+  // прайса, и обрезать вопрос владельца на входе значило бы молча искать не то.
+  @IsOptional() @IsString() @MaxLength(512)
+  product?: string;
+}
+
+/**
  * Окна отчётов аналитики снека (П5b). Границы стоят на ВХОДЕ, а не только в
  * сервисе: `?days=100000` иначе доехал бы до выборки продаж и был бы зажат уже
  * после того, как запрос ушёл в базу.
@@ -544,6 +577,20 @@ export class VendingController {
   @Get("stock")
   stock() {
     return this.vending.stockLevels();
+  }
+
+  /**
+   * История пересчётов склада (R-P8a-3): «сколько было в июне» до этого среза
+   * не отвечал никто — `vending_stock` перезаписной.
+   *
+   * Свой лимит, как у отчётов аналитики: выборка идёт по окну и может достать
+   * до двух тысяч строк, а общего потолка (60/10 с) хватало, чтобы уложить
+   * Core одним циклом `curl` из докер-сети.
+   */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("stock-counts")
+  stockCounts(@Query() dto: StockCountsDto) {
+    return this.vending.stockCounts(dto.days ?? STOCK_COUNTS_DAYS_DEFAULT, dto.product);
   }
 
   // ── Касса закупа (§5.8): получил → статьи → остаток ───────────────────────

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { SyncStaleService } from "./ourvend/sync-stale.service";
 import { SalesService } from "./sales/sales.service";
 import { StockService } from "./stock/stock.service";
 import { SupplyService } from "./supply/supply.service";
@@ -16,6 +17,7 @@ describe("Core cron shutdown", () => {
     ["supply", () => new SupplyService({} as never)],
     ["stock", () => new StockService({} as never)],
     ["shrinkage", () => new ShrinkageService({} as never, {} as never)],
+    ["sync-stale", () => new SyncStaleService({} as never)],
   ] as const) {
     it(`останавливает ${name} cron и освобождает event loop`, () => {
       const service = create() as unknown as CronOwner;

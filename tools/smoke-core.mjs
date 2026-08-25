@@ -80,6 +80,40 @@ const ЧТЕНИЕ = [
   "/vending/sync",
   "/vending/refill-events?days=14",
   {
+    // П8a: история пересчётов склада. Заглушка юнит-теста SQL не исполняет —
+    // здесь проверяется, что окно, сортировка по `counted_at` и потолок строк
+    // доезжают до настоящего Postgres. На засеянной базе истории нет, и это
+    // законный пустой список: `warnings` тогда тоже пуст (предупреждаем только
+    // о ЗАДАННОМ товаре, по которому ничего не нашлось).
+    path: "/vending/stock-counts?days=90",
+    проверить: (о) => {
+      if (!Array.isArray(о?.rows)) throw new Error("stock-counts.rows — не массив");
+      if (!Array.isArray(о?.warnings)) throw new Error("stock-counts.warnings — не массив");
+      if (о?.days !== 90) throw new Error(`stock-counts.days=${о?.days}`);
+    },
+  },
+  {
+    // Пустое значение — окно по умолчанию, а не 400 (то же правило, что у
+    // `?runs=` здоровья сбора: панель шлёт незаполненный фильтр как есть).
+    path: "/vending/stock-counts?days=",
+    проверить: (о) => {
+      if (о?.days !== 90) throw new Error(`пустой ?days= дал окно ${о?.days}, а не дефолт`);
+    },
+  },
+  {
+    // Верхняя граница окна стоит на ВХОДЕ, и это 730 суток, не 365
+    // (R-FW-P3, П8a fix wave; адверсариал прод-данные №3): начальный остаток
+    // донора датирован 2025-08-17, и потолок в год НИКОГДА не показал бы 26
+    // самых старых строк истории. На проде `?days=730` возвращает все 460
+    // строк донора (см. чек-лист выкатки в docs) — здесь, на пустой
+    // засеянной базе, проверяем только то, что окно доезжает до сервиса, а
+    // не режется старой границей.
+    path: "/vending/stock-counts?days=730",
+    проверить: (о) => {
+      if (о?.days !== 730) throw new Error(`stock-counts.days=${о?.days}, ждали 730 (потолок П8a fix wave)`);
+    },
+  },
+  {
     // Сводка снабжения: SQL с коррелированным подзапросом по последним суткам
     // каждого автомата плюс поле `source` — по нему владелец отличает «считаем
     // сами» от «читаем чужую базу» (П2/П4 поглощения).
@@ -255,6 +289,18 @@ const ЧТЕНИЕ = [
       }
       if (о.lastSuccessAt !== null && typeof о.lastSuccessAt !== "string") {
         throw new Error("health.lastSuccessAt — не ISO и не null");
+      }
+      // П8a: давность успеха и порог застоя. Ключи ОБЯЗАНЫ присутствовать —
+      // пропущенный ключ витрина прочтёт как «поле не приехало», а не как
+      // «успехов не было». Порог едет числом, чтобы бот и панель сравнивали с
+      // базой, а не со своей копией константы.
+      if (!("staleHours" in о)) throw new Error("health.staleHours — ключа нет");
+      if (о.staleHours !== null && typeof о.staleHours !== "number") {
+        throw new Error(`health.staleHours=${о.staleHours} — не число и не null`);
+      }
+      if (typeof о.staleThresholdH !== "number") throw new Error("health.staleThresholdH — не число");
+      if (о.lastSuccessAt === null && о.staleHours !== null) {
+        throw new Error("успехов нет, а давность посчиталась — «не было вовсе» ≠ «ноль часов»");
       }
       if (о?.parity == null) throw new Error("health.parity — null (сверять нечего ≠ паритета нет)");
       if (typeof о.parity.days !== "number" || typeof о.parity.mismatches !== "number") {
@@ -469,6 +515,26 @@ const ЗАПИСЬ = [
         throw new Error(
           `product_id обнулился повторным пересчётом (или прайс вендинга не засеян: node packages/db/dist/seed-vending.js)`,
         );
+      }
+      // П8a: два пересчёта подряд — РОВНО две строки истории. Это проверка
+      // того самого частичного уникального индекса (0069) против настоящего
+      // Postgres: `onConflictDoNothing` с предикатом `source = 'own'` в
+      // заглушке юнит-теста не исполняется вовсе, а ошибка в предикате даёт
+      // либо «no unique constraint matching», либо молчаливую потерю строки.
+      const история = await читать(`/vending/stock-counts?product=${encodeURIComponent(P4_ТОВАР)}`);
+      const свои = история.rows.filter((r) => r.product === P4_ТОВАР);
+      if (свои.length < 2) {
+        throw new Error(`история пересчётов «${P4_ТОВАР}»: строк ${свои.length}, ожидали два пересчёта подряд`);
+      }
+      const [первая, вторая] = свои; // ответ отсортирован «свежее сверху»
+      // Количества именно ЭТОГО прогона, а не «сколько всего строк»: смоук
+      // могли пустить и по базе, где история уже есть.
+      if (первая.qty !== 7 || вторая.qty !== 5) {
+        throw new Error(`два свежих пересчёта дали ${первая.qty}/${вторая.qty}, ожидали 7/5`);
+      }
+      if (!(первая.countedAt > вторая.countedAt)) throw new Error("история отдана не «свежее сверху»");
+      if (первая.source !== "own" || вторая.source !== "own") {
+        throw new Error(`свой пересчёт помечен не «own»: ${первая.source}/${вторая.source}`);
       }
     },
   },

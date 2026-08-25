@@ -86,6 +86,13 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       "прайс и кратность — в базе, не в коде",
     );
     assert.ok(prod.includes("salePrice"), "эталон витрины — в базе: без него price_gap не с чем сравнивать (R-P5b-6)");
+
+    const count = Object.keys(schema.vendingStockCount as unknown as Record<string, unknown>);
+    // История склада — предмет П8a: `vending_stock` перезаписной, и до этой
+    // таблицы «сколько было в июне» не отвечало ничто.
+    assert.ok(count.includes("countedAt") && count.includes("dt"), "момент пересчёта и его сутки");
+    assert.ok(count.includes("source") && count.includes("extId"), "источник строки и id донора — ключ идемпотентности импорта");
+    assert.ok(count.includes("personId"), "кто считал: строка без человека законна, но поле обязано быть");
   });
 
   it("у ключевых таблиц есть обязательные поля", () => {

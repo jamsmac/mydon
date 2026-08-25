@@ -80,6 +80,19 @@ jobs:
           # «UPDATE трогает только product_id IS NULL» (N2) против настоящего
           # Postgres, а не заглушки.
           node packages/db/dist/backfill-product-ids.js
+          # Разовый импорт истории склада (П8a, R-P8a-8) против настоящего
+          # Postgres: заглушка drizzle не исполняет `on conflict (source,
+          # ext_id) where ext_id is not null` — предикат ЧАСТИЧНОГО индекса, —
+          # и не доказывает идемпотентность. Шаг заводит фикстурного донора в
+          # схеме `stock_donor` той же базы, гоняет --dry-run и --apply дважды
+          # и убирает за собой. Идёт ДО smoke-core.mjs: тот намеренно гасит
+          # STOCK_DATABASE_URL и о доноре знать не должен.
+          #
+          # SMOKE_SCRATCH=1 — явное согласие на запись (R-FW-S4): прогон пишет в
+          # базу и без этого флага работает только на базе со словом «smoke» в
+          # имени. База CI называется mydon, поэтому согласие даётся здесь — и
+          # ровно на одну команду, а не на весь шаг.
+          SMOKE_SCRATCH=1 node tools/smoke-import.mjs
           node tools/smoke-core.mjs
 
       # Дымовой прогон ПАНЕЛИ: страницы должны отдаваться, а не падать в 500.

@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { and, desc, eq, gte, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
 import {
   approval,
@@ -8,6 +8,7 @@ import {
   machineCard,
   machineSale,
   machineSlot,
+  person,
   productSale,
   purchase,
   sale,
@@ -17,6 +18,7 @@ import {
   vendingProduct,
   vendingPurchaseOrder,
   vendingStock,
+  vendingStockCount,
   vendingSyncRun,
 } from "@mydon/db";
 import {
@@ -45,6 +47,7 @@ import {
   slotValid,
   tashkentDay,
   tashkentDayStartOf,
+  type AnalyticsWarning,
   type CashCategoryInput,
   type MachineSlots,
   type PlanogramStatus,
@@ -60,6 +63,8 @@ import {
   type RunoutInput,
   type Slot,
   type SlotPlanRow,
+  type StockCountRow,
+  type StockCountsReport,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { ApprovalsService } from "../approvals/approvals.service";
@@ -124,6 +129,31 @@ function пачками<T>(rows: T[], size = INSERT_CHUNK): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
   return out;
+}
+
+/** Окно истории склада по умолчанию: квартал — столько владелец помнит сам. */
+export const STOCK_COUNTS_DAYS_DEFAULT = 90;
+/**
+ * Потолок окна: 730 суток, не 365 (R-FW-P3, П8a fix wave; адверсариал
+ * прод-данные №3). Начальный остаток донора датирован 2025-08-17 — на
+ * потолке в год 26 самых старых строк истории не показал бы НИКОГДА, ни при
+ * каком `?days=`: окно с любым `n > 365` всё равно зажималось бы до 365 и
+ * не доезжало до 2025 года. Глубже 730 суток — разовая выгрузка, а не ответ
+ * HTTP.
+ */
+export const STOCK_COUNTS_DAYS_MAX = 730;
+/**
+ * Потолок строк ответа. 52 товара × ежедневный пересчёт за год — это 19 000
+ * строк; отдать их одним JSON значит уложить и панель, и телеграм. Обрезка НЕ
+ * молчаливая: хвост назван предупреждением `history_capped`.
+ */
+export const STOCK_COUNTS_MAX = 2000;
+
+/** Окно истории: мусор и запредельное зажимаются ДО выборки, а не после. */
+function зажатьОкно(days: number): number {
+  const n = Math.trunc(days);
+  if (!Number.isFinite(n) || n <= 0) return STOCK_COUNTS_DAYS_DEFAULT;
+  return Math.min(n, STOCK_COUNTS_DAYS_MAX);
 }
 
 /** Автомат, пропущенный при приёме, и почему. */
@@ -222,6 +252,12 @@ export interface IngestStockItemInput {
 export interface IngestStockPayload {
   /** Момент пересчёта (ISO). Пусто → сейчас. */
   countedAt?: string;
+  /**
+   * Кто считал — карточка сотрудника. Пусто → NULL: панель и бот его сегодня
+   * не шлют, и выдумывать «владелец» за них значило бы записать в историю
+   * ложное авторство (проводка бота — отдельный срез).
+   */
+  personId?: string;
   items: IngestStockItemInput[];
 }
 
@@ -623,6 +659,8 @@ interface PurchaseContext {
 
 @Injectable()
 export class VendingService {
+  private readonly logger = new Logger(VendingService.name);
+
   constructor(
     @Inject(DB) private readonly db: Db,
     @Optional() @Inject(ApprovalsService) private readonly approvals?: ApprovalRequester,
@@ -1404,7 +1442,10 @@ export class VendingService {
    */
   async ingestStock(payload: IngestStockPayload, actor = "owner"): Promise<IngestStockResult> {
     const countedAt = payload.countedAt ? new Date(payload.countedAt) : new Date();
-    const { aliasByKey, priceByName, productRows } = await this.loadProductIndex();
+    const [{ aliasByKey, priceByName, productRows }, personId] = await Promise.all([
+      this.loadProductIndex(),
+      this.известныйСотрудник(payload.personId),
+    ]);
     // Бэкфилл `product_id` (П4, гигиена): строка склада ключуется ИМЕНЕМ, и
     // все 20 строк жили без ссылки на карточку. Переименование товара в
     // справочнике рвало связь остатка с прайсом молча. Резолвер — тот же, что
@@ -1428,6 +1469,11 @@ export class VendingService {
       const existingRows = await tx.select().from(vendingStock);
       const beforeByName = new Map(existingRows.map((r) => [r.productName, { quantity: r.quantity, countedAt: r.countedAt }]));
       const stockRows: (typeof vendingStock.$inferInsert)[] = [];
+      // История пересчётов (R-P8a-3) копится ЗДЕСЬ ЖЕ, в той же транзакции:
+      // `vending_stock` перезаписной, и до этого среза вчерашний остаток не
+      // восстанавливался ниоткуда. Отдельной командой «записать историю»
+      // история не копилась бы — её просто забывали бы звать.
+      const countRows: (typeof vendingStockCount.$inferInsert)[] = [];
 
       for (const [product, quantity] of finalByProduct) {
         const prior = beforeByName.get(product);
@@ -1459,7 +1505,26 @@ export class VendingService {
         // Строка копится и уходит пачкой ниже — тот же приём, что у приёма
         // слотов и продаж. Схлопывать нечего: `finalByProduct` — карта, ключи
         // в ней уникальны по построению.
-        stockRows.push({ productName: product, productId: productIds(product), quantity, countedAt, updatedAt: countedAt });
+        const productId = productIds(product);
+        stockRows.push({ productName: product, productId, quantity, countedAt, updatedAt: countedAt });
+        // Строка истории — на КАЖДУЮ применённую позицию, даже если количество
+        // не изменилось: это счёт, а не правка. «Склад считали 25.08, вышло
+        // 19» ценно само по себе — иначе история показывала бы только те дни,
+        // когда что-то не сошлось. А позиция, отброшенная выше защитой
+        // «пересчёт старше сохранённого», в историю НЕ попадает: она и остаток
+        // не изменила, и журнал показывал бы пересчёт, которого не было.
+        countRows.push({
+          dt: tashkentDay(countedAt),
+          productName: product,
+          productId,
+          // numeric(12,2) — донор хранит килограммы, не только штуки.
+          qty: String(quantity),
+          source: "own",
+          extId: null,
+          countedAt,
+          personId,
+          note: actor,
+        });
       }
 
       for (const пачка of пачками(stockRows)) {
@@ -1488,6 +1553,28 @@ export class VendingService {
           });
       }
 
+      for (const пачка of пачками(countRows)) {
+        await tx
+          .insert(vendingStockCount)
+          .values(пачка)
+          // Что ЭТОТ ключ реально ловит: повторный POST снимка С ТЕМ ЖЕ
+          // `countedAt` (ретрай сети, повтор той же строки импорта). Сегодня
+          // `countedAt` не шлёт НИКТО — ни бот, ни панель, — и Core штампует
+          // `new Date()` на каждый запрос: у двух пересчётов подряд моменты
+          // разные, и это не дубль, а два счёта, каждый со своей строкой. То
+          // есть защита ждёт того дня, когда снимок начнут присылать со своим
+          // моментом; пока она просто ничего не стоит.
+          // Ключ сужен до СВОИХ строк: у импорта истории свой ключ
+          // идемпотентности — (source, ext_id).
+          .onConflictDoNothing({
+            target: [vendingStockCount.source, vendingStockCount.countedAt, vendingStockCount.productName],
+            // Предикат ЧАСТИЧНОГО индекса (0069), а не фильтр строк: без него
+            // Postgres не выведет, о каком именно уникальном индексе речь, и
+            // упадёт с «no unique or exclusion constraint matching».
+            where: sql`${vendingStockCount.source} = 'own'`,
+          });
+      }
+
       if (adjustments.length > 0) {
         await tx.insert(event).values({
           // Тот же actor, что и в auditLog ниже — раньше здесь было жёстко "owner"
@@ -1508,6 +1595,40 @@ export class VendingService {
     return { items: payload.items.length, adjustments };
   }
 
+  /**
+   * UUID сотрудника, ЕСЛИ такая карточка есть; иначе `null`.
+   *
+   * DTO проверяет только форму UUID, а колонка `vending_stock_count.person_id`
+   * — внешний ключ на `person`: валидный, но чужой идентификатор (карточку
+   * удалили, бот прислал id из другой базы) уронил бы ВЕСЬ пересчёт откатом
+   * транзакции. Инвентаризация на 50 позиций не должна пропадать из-за одного
+   * неизвестного автора: имя актора всё равно остаётся в `note`, а `person_id`
+   * честно пустеет. В лог — предупреждение, иначе потеря авторства была бы
+   * молчаливой.
+   *
+   * ПРИНЯТАЯ ГОНКА (R-FW-S7, П8a fix wave; адверсариал безопасность №7, не
+   * фикс). Проверка идёт ДО транзакции `ingestStock`: удаление карточки
+   * сотрудника между этим select и вставкой строк пересчёта вернёт ровно тот
+   * откат всей инвентаризации, от которого этот метод и защищает — окно
+   * гонки миллисекундное (select → insert одного HTTP-запроса), а «удалить
+   * карточку сотрудника ровно между его же диктовкой и записью» требует
+   * второго актора, синхронизированного с точностью до этого окна. Цена
+   * закрытия — `select … for update` внутри общей транзакции, то есть
+   * сериализация каждой инвентаризации ради события, которого на проде не
+   * было ни разу. Решение — не чинить, только назвать (см. также №2 бэклога
+   * `adversarial-security.md`: тот же класс гонки у дедупа сторожа застоя,
+   * `sync-stale.service.ts`).
+   */
+  private async известныйСотрудник(id?: string): Promise<string | null> {
+    if (!id) return null;
+    const [row] = await this.db.select({ id: person.id }).from(person).where(eq(person.id, id)).limit(1);
+    if (!row) {
+      this.logger.warn(`Пересчёт склада: сотрудника ${id} нет в справочнике — пишу person_id = NULL`);
+      return null;
+    }
+    return row.id;
+  }
+
   /** Текущий остаток склада по товарам (для панели/отчётов). */
   async stockLevels(): Promise<StockLevelRow[]> {
     const rows = await this.db.select().from(vendingStock);
@@ -1517,6 +1638,82 @@ export class VendingService {
       // ни панели, ни дымовому прогону.
       .map((r) => ({ product: r.productName, productId: r.productId, quantity: r.quantity, countedAt: r.countedAt.toISOString() }))
       .sort((a, b) => a.product.localeCompare(b.product, "ru"));
+  }
+
+  /**
+   * История пересчётов склада за окно (R-P8a-3, `GET /vending/stock-counts`).
+   *
+   * ЗАЧЕМ ОТДЕЛЬНОЕ ЧТЕНИЕ. `vending_stock` перезаписной: он отвечает «сколько
+   * есть», но на «сколько было в июне» ответить не мог никто — ни отчёт, ни
+   * бот. Историю копит сам `ingestStock`, а разовый перенос из донора
+   * mydon-stock кладёт сюда же строки с `source = 'stock-import'`.
+   *
+   * СОРТИРОВКА `counted_at desc, product_name`: в одни сутки пересчётов может
+   * быть несколько, и «свежее сверху» — это про момент, а не про дату. Второй
+   * ключ обязателен, иначе порядок позиций одного листа отдаёт база.
+   *
+   * `now` — параметр, а не `Date.now()` внутри: прогон, пересекающий полночь
+   * Ташкента, иначе считал бы окно от двух разных дней.
+   */
+  async stockCounts(days = STOCK_COUNTS_DAYS_DEFAULT, product?: string, now = new Date()): Promise<StockCountsReport> {
+    const дни = зажатьОкно(days);
+    // Окно ВКЛЮЧАЕТ сегодняшние сутки: пересчёт, сделанный час назад, — ровно
+    // то, за чем в историю и приходят. Поэтому `− (дни − 1)`, а не `− дни`:
+    // `days=1` обязан означать «сегодня», а не «вчера». Пин на конвенцию —
+    // тест «окно ВКЛЮЧАЕТ сегодняшние сутки» в `vending.service.test.ts`
+    // (final review §3); откат на `− дни` его роняет.
+    const since = tashkentDay(new Date(tashkentDayStartOf(now).getTime() - (дни - 1) * DAY));
+
+    const запрошено = product?.trim() ?? "";
+    // Имя — через тот же канон, что пишет `ingestStock`: иначе владелец,
+    // спросивший «Montella pet 0.33» (как называет товар автомат), получил бы
+    // пустую историю по товару, который считают каждую неделю.
+    const канон = запрошено === "" ? null : (await this.canonResolver())(запрошено);
+
+    const условие = канон === null
+      ? gte(vendingStockCount.dt, since)
+      : and(gte(vendingStockCount.dt, since), eq(vendingStockCount.productName, канон));
+
+    const rows = await this.db
+      .select({
+        dt: vendingStockCount.dt,
+        productName: vendingStockCount.productName,
+        qty: vendingStockCount.qty,
+        source: vendingStockCount.source,
+        countedAt: vendingStockCount.countedAt,
+      })
+      .from(vendingStockCount)
+      .where(условие)
+      // Потолок + 1: по «лишней» строке видно, что окно обрезано, и молчаливой
+      // потери хвоста не будет.
+      .orderBy(desc(vendingStockCount.countedAt), vendingStockCount.productName)
+      .limit(STOCK_COUNTS_MAX + 1);
+
+    const warnings: AnalyticsWarning[] = [];
+    const обрезано = rows.length > STOCK_COUNTS_MAX;
+    const показать = обрезано ? rows.slice(0, STOCK_COUNTS_MAX) : rows;
+    if (обрезано) {
+      warnings.push({
+        code: "history_capped",
+        message: `Показаны первые ${STOCK_COUNTS_MAX} строк истории — сузь окно или задай товар`,
+      });
+    }
+    // Ноль строк ПО ЗАДАННОМУ ТОВАРУ — это ответ «истории по этому имени нет»,
+    // и сказать его надо словами: пустой список молча читается как «склад не
+    // считали», хотя причина обычно в имени. Пустая история без фильтра —
+    // просто «ещё не начинали», предупреждать не о чем.
+    if (канон !== null && показать.length === 0) {
+      warnings.push({ code: "stock_missing", message: `Истории пересчётов по «${запрошено}» за окно нет` });
+    }
+
+    const строки: StockCountRow[] = показать.map((r) => ({
+      dt: r.dt,
+      product: r.productName,
+      qty: Number(r.qty),
+      source: r.source,
+      countedAt: r.countedAt.toISOString(),
+    }));
+    return { days: дни, product: канон, rows: строки, warnings };
   }
 
   /**
