@@ -1,6 +1,6 @@
 import { TZ } from "@mydon/shared";
 import type { ApprovalRow, Briefing } from "./core-client";
-import { TG_BUDGET } from "./purchase-plan";
+import { cutAt, TG_BUDGET } from "./purchase-plan";
 
 /**
  * Утренний брифинг 07:30 Asia/Tashkent (ТЗ FR-6).
@@ -158,9 +158,15 @@ export function notesBudget(briefingText: string, staffLine: string | null): num
   return Math.max(0, TG_BUDGET - briefingText.length - (staffLine?.length ?? 0) - NOTES_SEPARATORS);
 }
 
-/** Длинную строку режем по символам: перенос целиком выбросил бы её из блока. */
+/**
+ * Длинную строку режем по символам: перенос целиком выбросил бы её из блока.
+ *
+ * Именно по СИМВОЛАМ (cutAt), а не по единицам UTF-16: эмодзи из имени товара,
+ * попавший на границу, оставался бы половиной пары — и Telegram отвечал бы 400
+ * на весь брифинг, а не на одну строку.
+ */
 function cutLine(text: string, max = NOTES_LINE_MAX): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
+  return text.length <= max ? text : `${cutAt(text, max - 1).trimEnd()}…`;
 }
 
 /**

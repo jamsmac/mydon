@@ -1,7 +1,8 @@
 import { normalizeMachineSerial, normalizeProductName } from "@mydon/shared";
-import type { CoreClient, PersonRow, VendingPlan } from "./core-client";
+import { NotAMachineError, type CoreClient, type PersonRow, type VendingPlan } from "./core-client";
 import type { Conversations } from "./conversation";
 import { pickObject } from "./machine-picker";
+import { cutAt } from "./purchase-plan";
 import {
   applyPress,
   NUMPAD_MAX_DIGITS,
@@ -68,13 +69,19 @@ export function parseCount(text: string): number | null {
 /**
  * Ключ идемпотентности позиции.
  *
- * Складывается из id обхода (одна штука на весь мастер) и порядкового номера
- * позиции. Двойное нажатие «Готово» на одной позиции даёт тот же ключ — Core
- * вернёт прежнюю запись и не спишет склад дважды. Законная вторая заливка
- * того же слота идёт следующим номером и проходит как новая.
+ * Складывается из id обхода, СЕРИЙНИКА автомата и порядкового номера позиции.
+ * Двойное нажатие «Готово» на одной позиции даёт тот же ключ — Core вернёт
+ * прежнюю запись и не спишет склад дважды. Законная вторая заливка того же
+ * слота идёт следующим номером и проходит как новая.
+ *
+ * Серийник в ключе — не украшение. Без него заливка на ДРУГОЙ автомат тем же
+ * обходом (кнопка пикера из прокрученного вверх чата) выглядела для Core
+ * повтором первой: записи нет, склад не списан, а оператор читал «Загрузил по
+ * плану» и уезжал. Канон обязателен: «c2508160376» и «2508160376» — один
+ * автомат, и повтор по нему обязан ловиться повтором.
  */
-export function refillClientKey(runId: string, index: number): string {
-  return `rf:${runId}:${index}`;
+export function refillClientKey(runId: string, serial: string, index: number): string {
+  return `rf:${runId}:${normalizeMachineSerial(serial)}:${index}`;
 }
 
 /** Идентификатор обхода. Время + случайное: два техника на одном автомате. */
@@ -141,7 +148,9 @@ export function refillStepHint(step: string): string {
 export function productKeyboard(names: string[]): NonNullable<StaffReply["keyboard"]> {
   return {
     inline_keyboard: [
-      ...names.slice(0, 20).map((n, i) => [{ text: n.slice(0, 40), callback_data: `rf:p:${i}` }]),
+      // cutAt, а не slice: имя из Ourvend бывает с эмодзи, и половина
+      // суррогатной пары в подписи кнопки роняет всё сообщение целиком.
+      ...names.slice(0, 20).map((n, i) => [{ text: cutAt(n, 40), callback_data: `rf:p:${i}` }]),
       [{ text: "🔎 Другой товар", callback_data: "rf:other" }],
       [{ text: "✖️ Отмена", callback_data: "rf:cancel" }],
     ],
@@ -158,12 +167,24 @@ export function afterItemKeyboard(): NonNullable<StaffReply["keyboard"]> {
   };
 }
 
-/** Строка итога обхода: что записано и сколько осталось на складе. */
+/**
+ * Строка итога обхода: что записано и сколько осталось на складе.
+ *
+ * Отрицательный остаток объясняем теми же словами, что и живое сообщение после
+ * позиции: итог перечитывают позже и вне контекста, и голое «(на складе −3)»
+ * там читается как ошибка данных, а не как известный факт про пересчёт.
+ */
 export function summaryText(items: { product: string; qty: number; left: number | null }[]): string {
   if (items.length === 0) return "Ничего не записал.";
-  const lines = items.map(
-    (i) => `· ${i.product} — ${i.qty} шт.${i.left === null ? "" : ` (на складе ${i.left})`}`,
-  );
+  const lines = items.map((i) => {
+    const склад =
+      i.left === null
+        ? ""
+        : i.left < 0
+          ? ` (на складе ${i.left} — склад давно не пересчитывали)`
+          : ` (на складе ${i.left})`;
+    return `· ${i.product} — ${i.qty} шт.${склад}`;
+  });
   return [`Записал ${items.length} ${plural(items.length)}:`, ...lines].join("\n");
 }
 
@@ -273,7 +294,7 @@ export async function recordItem(
       productName: product,
       qty,
       personId: person.id,
-      clientKey: refillClientKey(state.runId, state.index),
+      clientKey: refillClientKey(state.runId, state.machineSerial, state.index),
       createdBy: `person:${person.id}`,
     });
     const next: RefillState = {
@@ -288,10 +309,14 @@ export async function recordItem(
         : res.stockLeft < 0
           ? `\nНа складе ${res.stockLeft} — склад давно не пересчитывали.`
           : `\nНа складе осталось ${res.stockLeft}.`;
-    return {
-      state: next,
-      reply: { text: `Записал: ${product} — ${qty} шт.${left}`, keyboard: afterItemKeyboard() },
-    };
+    // «Записал» — утверждение о СПИСАНИИ склада, и при duplicate его не было:
+    // позиция с этим ключом уже лежит в Core, а нажатие пришло вторым. Сказать
+    // «Записал» значит подтвердить движение, которого не случилось, — а
+    // расходится это потом в усушке, через неделю и без следов.
+    const текст = res.duplicate
+      ? `Уже записано ранее: ${product} — ${qty} шт. Повторно не списываю.${left}`
+      : `Записал: ${product} — ${qty} шт.${left}`;
+    return { state: next, reply: { text: текст, keyboard: afterItemKeyboard() } };
   } catch (err) {
     // Позиция не записана, индекс не двигаем: повтор пойдёт тем же ключом,
     // и если запись всё-таки прошла на сервере, дубля не будет.
@@ -301,8 +326,10 @@ export async function recordItem(
     console.error(`[refill] позиция «${product}» не записана:`, err);
     return {
       state,
+      // Знак в начале обязателен: кнопки под сбоем и под успехом одинаковые, и
+      // техник, листающий чат бегло, отличает их только по первому символу.
       reply: {
-        text: `Не смог записать «${product}». Попробуй ещё раз или продолжи — записанное сохранено.`,
+        text: `⚠️ Не смог записать «${product}». Попробуй ещё раз или продолжи — записанное сохранено.`,
         keyboard: afterItemKeyboard(),
       },
     };
@@ -400,7 +427,10 @@ export async function startMachineRefill(
   person: PersonRow,
   deps: RefillDeps,
 ): Promise<StaffReply> {
-  deps.conversations.start(chatId, REFILL_FLOW, "object", { runId: newRunId() });
+  // Без runId: обход начинается не здесь, а на выбранном автомате
+  // (см. onMachinePicked) — иначе кнопка пикера, нажатая через полчаса,
+  // продолжила бы прежний обход чужими ключами.
+  deps.conversations.start(chatId, REFILL_FLOW, "object", {});
   return pickObject(person, deps, "🍫 Заполнил автомат. Какой?");
 }
 
@@ -411,6 +441,12 @@ export async function startMachineRefill(
  * мастер не встаёт, а работает как раньше, по зеркалу Ourvend. План здесь
  * ускоряет, но не является условием записи: техник у открытой двери не должен
  * зависеть от того, посчитался ли сегодня закуп.
+ *
+ * Обход начинается ЗДЕСЬ, а не на шаге выбора: `runId` берётся новый при каждом
+ * выборе автомата. Кнопки пикера живут в чате вечно, и нажатая через полчаса
+ * старая кнопка другого автомата продолжала бы прежний обход — ключи позиций
+ * совпали бы с уже записанными, Core вернул бы повтор, и заливка на второй
+ * автомат пропала бы молча.
  */
 export async function onMachinePicked(
   chatId: number,
@@ -418,9 +454,22 @@ export async function onMachinePicked(
   machineName: string,
   deps: RefillDeps,
 ): Promise<StaffReply> {
-  const conv = deps.conversations.get(chatId);
-  const runId = typeof conv?.data.runId === "string" ? conv.data.runId : newRunId();
-  const { value: serial } = await readSafely("серийник автомата", deps.core.machineSerial(entityId), "");
+  const runId = newRunId();
+  // Три исхода, а не два, поэтому не readSafely: серийник есть, карточка не
+  // того рода, карточка не отдалась. Второе и третье техник чинит по-разному:
+  // выбрать другой объект против позвать владельца.
+  let serial = "";
+  let неАвтомат = false;
+  try {
+    serial = await deps.core.machineSerial(entityId);
+  } catch (err) {
+    неАвтомат = err instanceof NotAMachineError;
+    console.error("[refill] серийник автомата:", err);
+  }
+  if (неАвтомат) {
+    deps.conversations.clear(chatId);
+    return { text: `«${machineName}» — не автомат, заливку записывать некуда. Выбери автомат.` };
+  }
   if (serial === "") {
     // Без серийника заливку писать некуда: Core сшивает её с автоматом именно
     // по нему. Молча предложить товары значило бы собрать ввод в никуда.

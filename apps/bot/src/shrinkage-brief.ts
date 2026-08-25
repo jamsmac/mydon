@@ -13,7 +13,13 @@ import { chunk, MAX_PARTS } from "./purchase-plan";
  * вопрос: не «сколько потеряли», а «почему в эти сутки не считали».
  */
 
-const RU = (n: number): string => Math.round(n).toLocaleString("ru-RU");
+/**
+ * Число разрядами. Неразрывный пробел (U+00A0), который ставит ru-RU, меняем на
+ * обычный: сумму из отчёта копируют и ищут, а с U+00A0 она не находится и не
+ * сходится при сравнении (та же правка, что у formatAmount в правилах Core).
+ */
+const RU = (n: number): string =>
+  Math.round(n).toLocaleString("ru-RU").replace(/[\u00A0\u202F]/g, " ");
 
 /** «2026-08-18» → «18.08». Строкой, а не через Date: даты уже по Ташкенту. */
 const day = (iso: string): string => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
@@ -70,6 +76,15 @@ function itemText(i: ShrinkMachine["summary"]["items"][number]): string {
 
 /** Блок одного автомата: одна строка разбора плюс строка заливок. */
 function machineLines(m: ShrinkMachine, days: number): string[] {
+  // Ни одних посчитанных суток — расчёта НЕ БЫЛО (R-FW-7). Проверка стоит
+  // первой, до «без потерь»: у такого автомата и позиций нет, и он уходил бы в
+  // «без потерь», то есть в утверждение, которого никто не считал. Ровно так
+  // контроль усушки обходится источником, шумящим приходом каждые сутки.
+  if (m.summary.daysCounted === 0) {
+    const всего = days > 0 ? days : m.summary.daysSkipped;
+    return [`• ${m.name}: не считали — все ${всего} дн. периода были заливкой/пропущены`];
+  }
+
   // «Без потерь» — одной строкой: у тихого автомата нечего разбирать, а
   // повторять ему полный заголовок значит утопить в нём те, где потери есть.
   if (m.summary.items.length === 0 && m.refillDays.length === 0) {
@@ -84,7 +99,11 @@ function machineLines(m: ShrinkMachine, days: number): string[] {
   const части: string[] = [];
   части.push(
     `📉 ${m.name}${days > 0 ? ` за ${days} дн` : ""} ` +
-      `(дней посчитано ${m.summary.daysCounted}, с заливкой ${m.summary.daysSkipped}):`,
+      // «не в счёт из-за заливки», а не «с заливкой»: daysSkipped — сутки,
+      // ИСКЛЮЧЁННЫЕ из daysCounted, а не их часть. Та же формулировка стоит на
+      // листе «Усушка» — одно число не должно называться на двух экранах
+      // владельца по-разному.
+      `(дней посчитано ${m.summary.daysCounted}, не в счёт из-за заливки ${m.summary.daysSkipped}):`,
   );
   if (потери.length === 0) {
     части.push(" недостач нет");

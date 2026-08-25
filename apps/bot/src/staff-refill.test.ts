@@ -22,12 +22,16 @@ import {
   type RefillDeps,
   type RefillState,
 } from "./staff-refill";
-import type { CoreClient, PersonRow, VendingPlan } from "./core-client";
+import { NotAMachineError, type CoreClient, type PersonRow, type VendingPlan } from "./core-client";
 import { Conversations } from "./conversation";
 import { handleStaffCallback, handleStaffMessage } from "./staff";
 import { matchTrigger } from "./menu";
 
 const PERSON = { id: "11111111-1111-4111-8111-111111111111", name: "Володя" } as PersonRow;
+
+/** Половина суррогатной пары в тексте — Telegram отвергает такое сообщение. */
+const одинокийСуррогат = (s: string): boolean =>
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
 
 const state = (over: Partial<RefillState> = {}): RefillState => ({
   runId: "run1",
@@ -90,8 +94,11 @@ describe("Заливка автомата: разбор ввода", () => {
 
 describe("Заливка автомата: ключ идемпотентности", () => {
   it("одна позиция — один ключ, разные позиции — разные", () => {
-    assert.equal(refillClientKey("run1", 0), "rf:run1:0");
-    assert.notEqual(refillClientKey("run1", 0), refillClientKey("run1", 1));
+    assert.equal(refillClientKey("run1", "2508160376", 0), "rf:run1:2508160376:0");
+    assert.notEqual(
+      refillClientKey("run1", "2508160376", 0),
+      refillClientKey("run1", "2508160376", 1),
+    );
   });
 
   it("два обхода одного автомата не пересекаются", () => {
@@ -100,7 +107,21 @@ describe("Заливка автомата: ключ идемпотентност
     const a = newRunId(1_700_000_000_000, () => 0.1);
     const b = newRunId(1_700_000_000_000, () => 0.9);
     assert.notEqual(a, b);
-    assert.notEqual(refillClientKey(a, 0), refillClientKey(b, 0));
+    assert.notEqual(refillClientKey(a, "2508160376", 0), refillClientKey(b, "2508160376", 0));
+  });
+
+  it("серийник в ключе: та же позиция на другом автомате — другой ключ (S2)", () => {
+    // Без серийника заливка на второй автомат ловилась бы Core как повтор
+    // первой: записи нет, склад не списан, а бот говорил бы «Загрузил».
+    assert.notEqual(refillClientKey("run1", "2508160376", 0), refillClientKey("run1", "c99", 0));
+  });
+
+  it("обе формы серийника дают один ключ", () => {
+    // «c2508160376» из реестра и «2508160376» из Ourvend — один автомат.
+    assert.equal(
+      refillClientKey("run1", "c2508160376", 0),
+      refillClientKey("run1", "2508160376", 0),
+    );
   });
 });
 
@@ -125,7 +146,7 @@ describe("Заливка автомата: запись позиции", () => {
         productName: "Coca-Cola 0.5",
         qty: 6,
         personId: PERSON.id,
-        clientKey: "rf:run1:0",
+        clientKey: "rf:run1:mu-7:0",
         createdBy: `person:${PERSON.id}`,
       },
     ]);
@@ -141,6 +162,23 @@ describe("Заливка автомата: запись позиции", () => {
     assert.match(res.reply.text, /склад давно не пересчитывали/i);
   });
 
+  it("повтор Core («уже записано») не выдаётся за новую запись (S2)", async () => {
+    // duplicate: true означает, что склад НЕ списан — позиция была записана
+    // раньше. Сказать «Записал» значит подтвердить списание, которого не было:
+    // ровно так пропадала заливка на второй автомат по старой кнопке пикера.
+    const d = deps((async () => ({
+      refill: { id: "r1" },
+      stockLeft: 14,
+      duplicate: true,
+    })) as CoreClient["createRefill"]);
+    const res = await recordItem(state(), 6, PERSON, d);
+    assert.match(res.reply.text, /уже записано/i);
+    assert.match(res.reply.text, /повторно не списываю/i);
+    assert.doesNotMatch(res.reply.text, /^Записал:/);
+    assert.equal(res.state.index, 1, "позиция в Core есть — обход идёт дальше");
+    assert.deepEqual(res.state.items, [{ product: "Coca-Cola 0.5", qty: 6, left: 14 }]);
+  });
+
   it("сбой сети не двигает индекс — повтор пойдёт тем же ключом", async () => {
     // Если запись всё-таки прошла на сервере, повтор тем же ключом вернёт её
     // же и не спишет склад второй раз. Сдвинь мы индекс — получили бы дубль.
@@ -151,6 +189,16 @@ describe("Заливка автомата: запись позиции", () => {
     assert.equal(res.state.index, 0);
     assert.deepEqual(res.state.items, []);
     assert.match(res.reply.text, /записанное сохранено/i);
+  });
+
+  it("сбой видно с первого взгляда, а не по тексту (UX#6)", async () => {
+    // Кнопки под сбоем и под успехом одинаковые: без знака в начале техник,
+    // листающий чат бегло, принимает неудачу за записанную позицию.
+    const d = deps((async () => {
+      throw new Error("ECONNRESET");
+    }) as CoreClient["createRefill"]);
+    const res = await recordItem(state(), 6, PERSON, d);
+    assert.match(res.reply.text, /^⚠️ Не смог записать «Coca-Cola 0\.5»/);
   });
 
   it("после позиции предлагает продолжить обход или закончить", async () => {
@@ -190,12 +238,29 @@ describe("Заливка автомата: тексты", () => {
     assert.match(t, /Snickers — 4 шт\.$/m, "без остатка — без скобок");
   });
 
+  it("минус в итоге объяснён так же, как в живом сообщении (UX#7)", () => {
+    // Итог перечитывают позже и вне контекста: голое «(на складе −3)» там
+    // читается как ошибка данных, а не как известный факт про пересчёт.
+    const t = summaryText([{ product: "Qurt", qty: 5, left: -3 }]);
+    assert.match(t, /Qurt — 5 шт\. \(на складе -3 — склад давно не пересчитывали\)/);
+  });
+
   it("клавиатура товаров ограничена и всегда даёт выход", () => {
     const many = Array.from({ length: 40 }, (_, i) => `Товар ${i}`);
     const kb = productKeyboard(many);
     const last = kb.inline_keyboard.slice(-2).flat().map((b) => b.callback_data);
     assert.deepEqual(last, ["rf:other", "rf:cancel"]);
     assert.equal(kb.inline_keyboard.length, 22, "20 товаров + «другой» + «отмена»");
+  });
+
+  it("эмодзи в имени товара не разрывается пополам (S6)", () => {
+    // Имена приходят из Ourvend, и эмодзи там — суррогатная ПАРА: обрезка по
+    // единицам UTF-16 оставляет от неё половину, а Telegram отвечает 400 на
+    // всё сообщение целиком, не на одну кнопку.
+    const имя = `${"я".repeat(39)}🍫хвост`;
+    const [кнопка] = productKeyboard([имя]).inline_keyboard[0];
+    assert.ok(!одинокийСуррогат(кнопка.text), кнопка.text);
+    assert.ok(кнопка.text.length <= 40, `длина ${кнопка.text.length}`);
   });
 
   it("пустое зеркало не ломает клавиатуру", () => {
@@ -259,16 +324,23 @@ interface WizardOpts {
   plan?: VendingPlan | null;
   products?: string[];
   serial?: string;
+  /** Серийник по карточке — когда в тесте больше одного автомата. */
+  serials?: Record<string, string>;
   priced?: { id: string; name: string; isActive: boolean }[];
   /** Справочники (зеркало и прайс) недоступны — как при лежащем Core. */
   failLookups?: boolean;
+  /** Выбранная карточка — не автомат (склад, помещение, машина сотрудника). */
+  notAMachine?: boolean;
 }
 
 function wizard(opts: WizardOpts = {}) {
   const calls: { productName: string; qty: number; clientKey: string }[] = [];
   let n = 0;
   const core = {
-    machineSerial: async () => opts.serial ?? "2508160376",
+    machineSerial: async (id: string) => {
+      if (opts.notAMachine === true) throw new NotAMachineError(id, "warehouse");
+      return opts.serials?.[id] ?? opts.serial ?? "2508160376";
+    },
     vendingPlan: async () => {
       if (opts.plan === null) throw new Error("Core недоступен");
       return opts.plan ?? PLAN;
@@ -319,7 +391,7 @@ describe("Заливка автомата: чек-лист по плану за�
     assert.deepEqual(кнопки, ["rf:plan", "rf:else", "rf:cancel"]);
   });
 
-  it("«Загрузил по плану» пишет позиции подряд ключами rf:<обход>:0/1", async () => {
+  it("«Загрузил по плану» пишет позиции подряд ключами rf:<обход>:<серийник>:0/1", async () => {
     const { deps, calls } = wizard();
     await startMachineRefill(CHAT, PERSON, deps);
     await onMachinePicked(CHAT, MACHINE_ID, "Olma", deps);
@@ -328,7 +400,7 @@ describe("Заливка автомата: чек-лист по плану за�
       calls.map((c) => [c.productName, c.qty]),
       [["Montella", 8], ["Fanta", 5]],
     );
-    const хвосты = calls.map((c) => c.clientKey.split(":")[2]);
+    const хвосты = calls.map((c) => c.clientKey.split(":")[3]);
     assert.deepEqual(хвосты, ["0", "1"], "порядковый номер позиции — часть ключа");
     const обходы = new Set(calls.map((c) => c.clientKey.split(":")[1]));
     assert.equal(обходы.size, 1, "один обход — один runId");
@@ -348,8 +420,34 @@ describe("Заливка автомата: чек-лист по плану за�
 
     const второй = await press("rf:plan", deps);
     assert.deepEqual(calls.map((c) => c.productName), ["Montella", "Fanta"]);
-    assert.equal(calls[1].clientKey.split(":")[2], "1", "повтор идёт тем же номером — дубля не будет");
+    assert.equal(calls[1].clientKey.split(":")[3], "1", "повтор идёт тем же номером — дубля не будет");
     assert.match(второй.message?.text ?? "", /Записал 2 позиции/);
+  });
+
+  it("старая кнопка пикера посреди обхода: новый обход, а не повтор чужих ключей (S2)", async () => {
+    // Эксплойт из ревью: техник заливает автомат A, прокручивает чат вверх и
+    // жмёт кнопку автомата B. Раньше беседа отдавала ТОТ ЖЕ runId и индекс 0 —
+    // Core ловил ключи как повтор, заливка на B не записывалась, склад не
+    // списывался, а бот отвечал «Загрузил по плану».
+    const B = "44444444-4444-4444-8444-444444444444";
+    const { deps, calls } = wizard({
+      serials: { [MACHINE_ID]: "2508160376", [B]: "2508160377" },
+    });
+    await startMachineRefill(CHAT, PERSON, deps);
+    await onMachinePicked(CHAT, MACHINE_ID, "Olma", deps);
+    await press("rf:plan", deps);
+    assert.equal(calls.length, 2, "две позиции на первом автомате");
+
+    await onMachinePicked(CHAT, B, "Compass", deps);
+    await press("rf:p:0", deps);
+    await handleRefillCount(CHAT, "3", PERSON, deps);
+    assert.equal(calls.length, 3, "позиция второго автомата записана");
+
+    const [обходA] = calls.map((c) => c.clientKey.split(":")[1]);
+    const обходB = calls[2].clientKey.split(":")[1];
+    assert.notEqual(обходB, обходA, "новый автомат — новый обход");
+    assert.equal(calls[2].clientKey.split(":")[2], "2508160377", "серийник в ключе");
+    assert.equal(calls[0].clientKey.split(":")[2], "2508160376");
   });
 
   it("плана по автомату нет — сразу товары автомата и слова об этом", async () => {
@@ -359,6 +457,18 @@ describe("Заливка автомата: чек-лист по плану за�
     assert.match(r.text, /Плана по этому автомату нет\. Выбери товар/);
     const кнопки = r.keyboard?.inline_keyboard.flat().map((b) => b.callback_data);
     assert.deepEqual(кнопки, ["rf:p:0", "rf:p:1", "rf:p:2", "rf:other", "rf:cancel"]);
+  });
+
+  it("карточка не автомата — заливку не открываем и говорим почему (S7)", async () => {
+    // Пикер пропускает только id-подобное, но ТИП карточки не проверял:
+    // по старой кнопке из другого мастера в заливку уезжал бы externalRef
+    // склада или помещения — и заливка легла бы на чужой серийник.
+    const { deps, calls } = wizard({ notAMachine: true });
+    await startMachineRefill(CHAT, PERSON, deps);
+    const r = await onMachinePicked(CHAT, MACHINE_ID, "Склад Ц-1", deps);
+    assert.match(r.text, /не автомат/i);
+    assert.equal(calls.length, 0, "ничего не записано");
+    assert.equal(deps.conversations.get(CHAT), null, "мастер закрыт");
   });
 
   it("план не отдался — так и сказано, а мастер работает по зеркалу", async () => {

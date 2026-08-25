@@ -278,7 +278,11 @@ export interface ShrinkSummary {
   items: ShrinkItem[];
   lossValue: number;
   daysCounted: number;
-  /** Дни с заливкой — из расчёта выкинуты целиком. */
+  /**
+   * Сутки, ИСКЛЮЧЁННЫЕ из расчёта (заливка или пропуск снимка) — не часть
+   * daysCounted, а то, что из него вычли. `daysCounted === 0` значит, что
+   * товар не считался ни дня: «недостач нет» про такой автомат говорить нельзя.
+   */
   daysSkipped: number;
   threshold: number;
 }
@@ -301,7 +305,14 @@ export interface ShrinkMachine {
 
 /** Почему в отчёте чего-то нет. Каждая причина чинится в своём месте. */
 export interface ShrinkWarning {
-  code: "snapshots_stale" | "no_sales_day" | "machine_dead" | "sales_unknown_product" | "machine_error";
+  code:
+    | "snapshots_stale"
+    | "no_sales_day"
+    | "machine_dead"
+    | "sales_unknown_product"
+    | "machine_error"
+    /** Ни одних суток не посчитано: всё окно было заливкой или пропуском. */
+    | "no_counted_days";
   message: string;
 }
 
@@ -395,6 +406,23 @@ export class CoreError extends Error {
   /** Ошибка в самих данных или доступе: повтор того же запроса не поможет. */
   get isClientError(): boolean {
     return this.status >= 400 && this.status < 500;
+  }
+}
+
+/**
+ * Выбранная карточка — не автомат.
+ *
+ * Отдельный класс, а не пустая строка: «карточка не отдалась» и «карточка не
+ * того рода» чинятся по-разному (первое — позвать владельца, второе — выбрать
+ * другой объект), и мастер обязан сказать оператору, что именно случилось.
+ */
+export class NotAMachineError extends Error {
+  constructor(
+    readonly entityId: string,
+    readonly type: string,
+  ) {
+    super(`Карточка ${entityId} — не автомат (${type})`);
+    this.name = "NotAMachineError";
   }
 }
 
@@ -1082,9 +1110,14 @@ export class CoreClient {
    * Ourvend. Канон обязателен: в реестре лежит и «c2508160376», и
    * «2508160376» — без нормализации половина автоматов не нашла бы ни плана,
    * ни своих товаров (см. machine-serial.ts).
+   *
+   * Тип карточки проверяем здесь, а не в мастере: `externalRef` есть у складов,
+   * помещений и машин сотрудников тоже, и заливка по чужому коду записалась бы
+   * молча — с автоматом её потом не связать ничем.
    */
   async machineSerial(entityId: string): Promise<string> {
-    const row = await this.request<EntityRow>(`/entities/${entityId}`);
+    const row = await this.request<EntityRow>(`/entities/${encodeURIComponent(entityId)}`);
+    if (row.type !== "machine") throw new NotAMachineError(entityId, row.type);
     return normalizeMachineSerial(row.externalRef);
   }
 

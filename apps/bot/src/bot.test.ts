@@ -16,6 +16,10 @@ import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handle
 import { parseIntent } from "./intent";
 import { parseAllowlist, RateLimiter } from "./security/access";
 
+/** Половина суррогатной пары в тексте — Telegram отвергает такое сообщение. */
+const одинокийСуррогат = (s: string): boolean =>
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
+
 describe("Разбор вопросов на русском (FR-4)", () => {
   it("узнаёт брифинг", () => {
     assert.equal(parseIntent("брифинг").kind, "briefing");
@@ -488,6 +492,14 @@ describe("Усушка автоматов: путь владельца до Core
     });
     assert.match(reply?.text ?? "", /усушку из MYDON Core/i);
   });
+
+  it("справка называет «усушку» — иначе отчёт есть, а спросить его никто не догадается", async () => {
+    // Единственный вход в отчёт — слово в чате: не будь его в справке, отчёт
+    // существовал бы только для того, кто читал план разработки.
+    const reply = await handleMessage(111, "ъъъ непонятное", deps([]));
+    assert.match(reply?.text ?? "", /«усушка»/);
+    assert.match(reply?.text ?? "", /усушка за 30 дней/);
+  });
 });
 
 describe("Брифинг: несрочные сигналы правил", () => {
@@ -558,6 +570,17 @@ describe("Брифинг: несрочные сигналы правил", () =>
     const line = (block?.text ?? "").split("\n")[1] ?? "";
     assert.ok(line.length <= 160, `строка длиной ${line.length}`);
     assert.match(line, /…$/);
+  });
+
+  it("эмодзи на границе обрезки не разрывается пополам (S6)", () => {
+    // Имя товара из Ourvend с эмодзи ровно на 160-м символе оставляло от него
+    // половину суррогатной пары. Telegram отвечает 400 на ВСЁ сообщение —
+    // брифинг переставал доходить каждое утро, а не терял одну строку.
+    const текст = "я".repeat(158) + "🍫" + "я".repeat(50);
+    const block = formatBriefingNotes([{ key: "e:r", text: текст }]);
+    const line = (block?.text ?? "").split("\n")[1] ?? "";
+    assert.ok(!одинокийСуррогат(line), JSON.stringify(line.slice(-5)));
+    assert.ok(line.length <= 160, `строка длиной ${line.length}`);
   });
 
   it("не дошло ни в один чат — не отмечаем ничего (сигнал придёт завтра)", () => {
