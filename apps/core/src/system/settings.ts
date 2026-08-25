@@ -29,14 +29,19 @@ export async function settingValue(db: Db, key: string): Promise<string> {
  * вместо «10», иначе никогда не узнает, что порог не применился, и будет
  * читать отчёт, посчитанный по другому числу. Пишем предупреждение в лог и
  * работаем по дефолту — отказать целиком тут хуже, чем считать по дефолту.
+ *
+ * НОЛЬ — ЗНАЧЕНИЕ, А НЕ МУСОР. Панель настроек его принимает (`nonNegNumber` в
+ * `config-spec.ts`), и владелец, вписавший `SHRINK_ALERT_UZS = 0`, имеет в виду
+ * ровно «алерт на любую потерю». Раньше код тихо уходил в дефолт 30 000: панель
+ * показывала «сохранено», а отчёт считался по другому числу. Фолбэк остаётся
+ * только на отсутствие значения и на непарсимое; отрицательное для порога
+ * бессмысленно и по-прежнему уходит в лог.
  */
 export async function readIntSetting(db: Db, key: string, fallback: number, logger?: Logger): Promise<number> {
   const raw = (await settingValue(db, key)).trim();
   if (raw === "") return fallback;
   const n = Number(raw.replace(",", "."));
-  // Ноль и отрицательное — тоже мусор для порогов: «ловить всё подряд» никто
-  // не имеет в виду, вписывая 0.
-  if (Number.isFinite(n) && n > 0) return n;
+  if (Number.isFinite(n) && n >= 0) return n;
   (logger ?? new Logger("settings")).warn(`Настройка ${key}=«${raw}» не число — считаю по дефолту ${fallback}`);
   return fallback;
 }

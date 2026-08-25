@@ -17,6 +17,7 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
+import { Throttle } from "@nestjs/throttler";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { ShrinkageService } from "./shrinkage.service";
@@ -299,6 +300,17 @@ export class ShrinkageDto {
 }
 
 /**
+ * Окно журнала детектора. DTO, а не `Number(days)` руками: без границ роут
+ * принимал любое число и надеялся на зажим в сервисе — у соседних чтений
+ * граница стоит на входе, и разнобой рано или поздно кончается тем, что зажим
+ * забудут добавить.
+ */
+export class RefillEventsListDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(30)
+  days?: number;
+}
+
+/**
  * Вендинг: приём собранных данных и просмотр дефицита. Приём (POST) закрыт
  * общим ServiceTokenGuard — данные кладёт коллектор, не кто угодно.
  */
@@ -461,7 +473,15 @@ export class VendingController {
   /**
    * Усушка автоматов по дням без заливок (П4, R-P4-3). Чтение открыто: это
    * отчёт, а не мутация.
+   *
+   * ЛИЧНЫЙ ЛИМИТ, а не общий. GET проходит `ServiceTokenGuard` без токена, а
+   * расчёт тяжёлый: `?days=60` тянет продажи периода в память и делает запрос
+   * снимков на каждый автомат. Общего лимита (60 запросов / 10 с) хватало,
+   * чтобы уложить Core одним циклом `curl` из докер-сети. Шесть запросов в
+   * минуту — это вдвое больше, чем нужно панели: отчёт всё равно живёт в кеше
+   * пять минут (`REPORT_CACHE_MS`).
    */
+  @Throttle({ default: { limit: 6, ttl: 60_000 } })
   @Get("shrinkage")
   shrinkage(@Query() dto: ShrinkageDto) {
     return this.shrinkageReport.report(dto.days);
@@ -484,9 +504,8 @@ export class VendingController {
 
   /** Журнал событий детектора: что автомат получил и была ли запись оператора. */
   @Get("refill-events")
-  refillEventsList(@Query("days") days?: string) {
-    const n = Number(days);
-    return this.refillEvents.list(Number.isFinite(n) && n > 0 ? n : undefined);
+  refillEventsList(@Query() dto: RefillEventsListDto) {
+    return this.refillEvents.list(dto.days);
   }
 
   @Get("refills")

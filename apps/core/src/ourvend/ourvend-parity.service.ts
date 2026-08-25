@@ -4,6 +4,7 @@ import { machineSerialSql, normalizeProductName } from "@mydon/shared";
 import { sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
+import { VendingService } from "../vending/vending.service";
 
 /**
  * Паритет собственного снапшота OurVend со stock-дорожкой — гейт П2.
@@ -120,7 +121,17 @@ export interface ParityStockMismatch {
 export function computeStockParity(
   own: ParityStockRow[],
   stockSide: ParityStockRow[],
+  /**
+   * Серийники не в строю (склад, ремонт) — вон с ОБЕИХ сторон и явно, а не
+   * через пересечение. SKLAD 4S отдаёт заглушку 199 по всем слотам и в
+   * `machine_stock` уже бывал: вернувшись, он дал бы гейту три десятка
+   * расхождений из мусора, и переключение источника учёта не открылось бы
+   * никогда.
+   */
+  notInService: Set<string> = new Set(),
 ): { checked: number; mismatches: ParityStockMismatch[] } {
+  own = own.filter((r) => !notInService.has(r.serial));
+  stockSide = stockSide.filter((r) => !notInService.has(r.serial));
   const общие = new Set(
     [...new Set(own.map((r) => r.serial))].filter((s) => stockSide.some((r) => r.serial === s)),
   );
@@ -170,7 +181,11 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
   private readonly log = new Logger(OurvendParityService.name);
   private cron: Cron | null = null;
 
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    /** Реестр автоматов — тот же источник правды о «не в строю», что у плана закупа. */
+    private readonly vending: VendingService,
+  ) {}
 
   onModuleInit(): void {
     // Утром, после и снапшота stock (07:50), и нашего (08:05): обе стороны
@@ -259,25 +274,27 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     const stockSide = stockRaw.map((r) => ({ ...r, qty: Number(r.qty), amount: Number(r.amount) }));
     const { checked, mismatches } = computeParity(own, stockSide);
 
+    const { notInService } = await this.vending.machineRegistry();
     const ownStock = ownStockRaw.map((r) => ({ ...r, qty: Number(r.qty) }));
     const stockStock = stockStockRaw.map((r) => ({ ...r, qty: Number(r.qty) }));
-    const остатки = computeStockParity(ownStock, stockStock);
-    // НЕЧЕГО СВЕРЯТЬ ≠ РАСХОЖДЕНИЕ. Пока агент не начал снимать остатки,
-    // красный вердикт без единого расхождения в отчёте — это ложная тревога
-    // про паритет продаж, которая ничего не объясняет: гейт по остаткам
-    // просто ещё не запущен, и говорить об этом надо словами, а не цветом.
-    // А вот строки, которые ЕСТЬ, но не пересеклись ни одним автоматом, —
-    // настоящая проблема сопоставления, и она остаётся красной.
+    const остатки = computeStockParity(ownStock, stockStock, new Set(notInService.keys()));
+    // НЕ СВЕРИЛИ НИ ОДНОЙ ПАРЫ — ЭТО НЕ «ОК». Гейт открывает переключение
+    // источника учёта, и «зелёный» без единой сравненной строки — ровно тот
+    // случай «заглушка врёт», ради которого заводили смоук против живого
+    // Postgres: прод держал снимки остатков только за СЕГОДНЯ, фильтр
+    // `dt < current_date` выбрасывал их целиком, и половина гейта отчитывалась
+    // «ok» ни о чём. Цвет теперь красный, а причина сказана словами — чинить
+    // будут сбор остатков, а не паритет продаж.
     const stockNote =
       ownStock.length === 0
-        ? "снимков остатков OurVend за период нет"
+        ? "снимков остатков OurVend за период нет — сверять не по чему"
         : остатки.checked === 0
           ? "нет автоматов, общих со stock-дорожкой, — сверять не с чем"
           : null;
     const stock = {
       days: n,
       checked: остатки.checked,
-      ok: остатки.mismatches.length === 0 && (остатки.checked > 0 || ownStock.length === 0),
+      ok: остатки.mismatches.length === 0 && остатки.checked > 0,
       mismatches: остатки.mismatches,
       note: stockNote,
     };

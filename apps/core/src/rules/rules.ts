@@ -1,4 +1,4 @@
-import { TZ, type NotifyUrgency } from "@mydon/shared";
+import { tashkentInstant, TZ, type NotifyUrgency } from "@mydon/shared";
 
 /**
  * Правила уведомлений (ТЗ FR-2): событие → правило → сообщение.
@@ -55,9 +55,12 @@ export function formatAmount(value: unknown, currency = "UZS"): string {
  * решил бы, что заливка была ночью.
  */
 function времяТашкента(value: unknown): string {
-  const t = Date.parse(String(value));
-  if (!Number.isFinite(t)) return "—";
-  return new Date(t).toLocaleTimeString("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
+  // Разбор — общим `tashkentInstant`, а не `Date.parse`: строка БЕЗ зоны
+  // («2026-08-24 09:00:00») читается часами ПРОЦЕССА, и в контейнере с TZ=UTC
+  // брифинг уехал бы на пять часов. Донор VendCash на этом уже погорел.
+  const at = tashkentInstant(String(value));
+  if (!at) return "—";
+  return at.toLocaleTimeString("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 }
 
 export const RULES: Rule[] = [

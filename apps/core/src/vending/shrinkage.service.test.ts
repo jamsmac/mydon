@@ -13,7 +13,8 @@ import {
   vendingRefill,
   vendingRefillEvent,
 } from "@mydon/db";
-import { ShrinkageService, деньТашкента, началоСутокТашкента } from "./shrinkage.service";
+import { tashkentDay, tashkentDayStartOf } from "@mydon/shared";
+import { ShrinkageService } from "./shrinkage.service";
 import { VendingService } from "./vending.service";
 
 type SnapRow = {
@@ -164,13 +165,21 @@ function shrinkDb(м: Мир) {
     },
   });
 
+  /** Сколько раз сервис ходил в базу — по нему проверяется кеш отчёта. */
+  const счётчик = { select: 0 };
+
   const db = {
-    select: () => ({ from: (t: unknown) => цепочка(t, rowsOf(t)) }),
+    select: () => ({
+      from: (t: unknown) => {
+        счётчик.select += 1;
+        return цепочка(t, rowsOf(t));
+      },
+    }),
     insert,
     transaction: async <T>(cb: (t: { insert: typeof insert }) => Promise<T>): Promise<T> => cb({ insert }),
   } as never;
 
-  return { db, лента };
+  return { db, лента, счётчик };
 }
 
 const ЧАС = 3_600_000;
@@ -184,7 +193,7 @@ const СУТКИ = 86_400_000;
 const СЕЙЧАС = new Date("2026-08-25T07:00:00.000Z");
 
 /** YYYY-MM-DD дня по Ташкенту со сдвигом в сутках от «сегодня». */
-const день = (сдвиг: number): string => деньТашкента(new Date(СЕЙЧАС.getTime() + сдвиг * СУТКИ));
+const день = (сдвиг: number): string => tashkentDay(new Date(СЕЙЧАС.getTime() + сдвиг * СУТКИ));
 
 /** UTC-момент 00:00 Ташкента для даты. */
 const начало = (д: string): Date => new Date(Date.parse(`${д}T00:00:00.000Z`) - 5 * ЧАС);
@@ -235,8 +244,8 @@ const базовыйМир = (): Мир => ({
 });
 
 const сервис = (мир: Мир) => {
-  const { db, лента } = shrinkDb(мир);
-  return { svc: new ShrinkageService(db, new VendingService(db)), лента };
+  const { db, лента, счётчик } = shrinkDb(мир);
+  return { svc: new ShrinkageService(db, new VendingService(db)), лента, счётчик };
 };
 
 describe("Вендинг Core: усушка автомата по дням (П4)", () => {
@@ -416,6 +425,120 @@ describe("Вендинг Core: усушка автомата по дням (П4)
     assert.equal(отчёт.threshold, 20_000);
     assert.equal(отчёт.machines[0]!.summary.items[0]!.alert, true, "22 000 ≥ 20 000");
   });
+
+  it("порог 0 — это «алерт на любую потерю», а не мусор вместо настройки", async () => {
+    // Панель настроек ноль принимает; раньше код молча уходил в дефолт 30 000,
+    // и владелец видел «сохранено», а отчёт считался по другому числу.
+    const мир = базовыйМир();
+    мир.config = [{ key: "SHRINK_ALERT_UZS", value: "0" }];
+    const { svc } = сервис(мир);
+
+    const отчёт = await svc.report(2, СЕЙЧАС);
+    assert.equal(отчёт.threshold, 0);
+    assert.equal(отчёт.machines[0]!.summary.items[0]!.alert, true);
+  });
+
+  it("ни одного посчитанного дня — отдельное предупреждение, а не молчаливый ноль", async () => {
+    // Весь период оказался заливкой: расчёт не дал НИЧЕГО, и «недостач нет»
+    // здесь было бы утверждением, которого он не делал.
+    const мир = базовыйМир();
+    мир.refillEvents = [
+      { machineSerial: OLMA, windowTo: new Date(начало(день(-2)).getTime() + 10 * ЧАС), units: 12 },
+      { machineSerial: OLMA, windowTo: new Date(начало(день(-1)).getTime() + 10 * ЧАС), units: 12 },
+    ];
+    const { svc } = сервис(мир);
+
+    const отчёт = await svc.report(2, СЕЙЧАС);
+    assert.equal(отчёт.machines[0]!.summary.daysCounted, 0);
+    const w = отчёт.warnings.filter((x) => x.code === "no_counted_days");
+    assert.equal(w.length, 1);
+    assert.equal(w[0]!.message, "Olma: не считали — все 2 дн. периода были заливкой/пропущены");
+  });
+
+  it("текст исключения наружу не уходит — только в лог", async () => {
+    // У drizzle ошибка умеет нести текст запроса и параметры, а этот отчёт
+    // читают открытым GET, панелью и телеграмом.
+    const мир = базовыйМир();
+    мир.snapshots = [...СНИМКИ, ...снимок("BROKEN", начало(день(-1)), [["1", "Snickers", 10, 5]])];
+    мир.brokenSerial = "BROKEN";
+    const { svc } = сервис(мир);
+
+    const err = (await svc.report(2, СЕЙЧАС)).warnings.filter((w) => w.code === "machine_error");
+    assert.equal(err.length, 1);
+    assert.equal(err[0]!.message, "BROKEN: ошибка расчёта, см. лог");
+    assert.ok(!err[0]!.message.includes("соединение оборвалось"));
+  });
+
+  it("список пропущенных дней обрезается: строка в полсотни дат нечитаема", async () => {
+    // Окно 60 суток на автомате, у которого сбор начался неделю назад.
+    const мир = базовыйМир();
+    мир.snapshots = СНИМКИ;
+    const { svc } = сервис(мир);
+
+    const stale = (await svc.report(10, СЕЙЧАС)).warnings.filter((w) => w.code === "snapshots_stale");
+    assert.equal(stale.length, 1);
+    assert.ok(stale[0]!.message.includes("и ещё 3"), `нет хвоста «и ещё N»: ${stale[0]!.message}`);
+    assert.equal(stale[0]!.message.split(", ").length, 5, "перечислено ровно пять дат");
+  });
+
+  it("про отсеянный источник не говорим «продажи есть, а слота нет» — ассортимент туда уехал бы целиком", async () => {
+    const мёртвые: [string, string | null, number, number][] = Array.from({ length: 12 }, (_, i) => [
+      String(i + 1),
+      "SKLAD",
+      199,
+      199,
+    ]);
+    const мир = базовыйМир();
+    мир.snapshots = [
+      ...СНИМКИ,
+      ...снимок("SKLAD4S", начало(день(-2)), мёртвые),
+      ...снимок("SKLAD4S", начало(день(-1)), мёртвые),
+    ];
+    мир.sales = [...ПРОДАЖИ, { dt: день(-1), machineSerial: "SKLAD4S", product: "Twix", qty: "3" }];
+    мир.entities = [...РЕЕСТР, { id: "m-sklad", name: "SKLAD 4S", externalRef: "SKLAD4S", type: "machine" }];
+    const { svc } = сервис(мир);
+
+    const w = (await svc.report(2, СЕЙЧАС)).warnings.filter((x) => x.code === "sales_unknown_product");
+    assert.deepEqual(w, [], "автомат уже объявлен нечитаемым строкой machine_dead");
+  });
+
+  it("отчёт кешируется по окну: второй запрос в базу не ходит", async () => {
+    const { svc, счётчик } = сервис(базовыйМир());
+
+    await svc.report(2, СЕЙЧАС);
+    const после = счётчик.select;
+    assert.ok(после > 0);
+
+    await svc.report(2, СЕЙЧАС);
+    assert.equal(счётчик.select, после, "повтор обязан прийти из кеша, иначе открытый GET укладывает Core");
+
+    // Другое окно — другой отчёт, кеш его не подменяет.
+    await svc.report(7, СЕЙЧАС);
+    assert.ok(счётчик.select > после);
+  });
+
+  it("два одновременных запроса одного окна считают отчёт ОДИН раз (single-flight)", async () => {
+    const { svc, счётчик } = сервис(базовыйМир());
+
+    const [a, b] = await Promise.all([svc.report(2, СЕЙЧАС), svc.report(2, СЕЙЧАС)]);
+    assert.deepEqual(a, b);
+    const одиночный = сервис(базовыйМир());
+    await одиночный.svc.report(2, СЕЙЧАС);
+    assert.equal(счётчик.select, одиночный.счётчик.select, "параллельные запросы не должны удваивать выборки");
+  });
+
+  it("прогон алертов сбрасывает кеш: показанный отчёт обязан сходиться с брифингом", async () => {
+    const { svc, счётчик } = сервис(базовыйМир());
+
+    await svc.report(2, СЕЙЧАС);
+    const после = счётчик.select;
+    await svc.alertDaily(СЕЙЧАС);
+    const послеАлертов = счётчик.select;
+
+    await svc.report(2, СЕЙЧАС);
+    assert.ok(счётчик.select > послеАлертов, "кеш обязан быть сброшен прогоном алертов");
+    assert.ok(послеАлертов > после);
+  });
 });
 
 describe("Вендинг Core: суточные алерты усушки и низкого остатка (П4)", () => {
@@ -449,7 +572,7 @@ describe("Вендинг Core: суточные алерты усушки и н�
         source: "system",
         type: "vending.shrinkage_alert",
         payload: { serial: OLMA, product: "Snickers" },
-        occurredAt: new Date(началоСутокТашкента(СЕЙЧАС).getTime() - 2 * ЧАС),
+        occurredAt: new Date(tashkentDayStartOf(СЕЙЧАС).getTime() - 2 * ЧАС),
       },
     ];
     const { svc } = сервис(мир);
@@ -515,5 +638,74 @@ describe("Вендинг Core: суточные алерты усушки и н�
     const итог = await svc.alertDaily(СЕЙЧАС);
     assert.equal(итог.lowStock, 50, "брифинг из полутора сотен строк не читает никто");
     assert.equal(итог.alerts, 50);
+  });
+
+  it("потолок ОБЩИЙ: усушка съедает часть квоты, «заканчивается» получает остаток", async () => {
+    // Раньше потолок стоял только на low_stock, и поток алертов усушки мог
+    // вытеснить из выборки правил деньги, договоры и кофе — а выдавленное не
+    // показывается и не ack-ается, то есть теряется, а не откладывается.
+    const мир = базовыйМир();
+    мир.slots = Array.from({ length: 60 }, (_, i) => слот(OLMA, String(i + 1), `Товар ${i}`, 10, 0));
+    const { svc } = сервис(мир);
+
+    const итог = await svc.alertDaily(СЕЙЧАС);
+    assert.equal(итог.alerts, 50, "потолок один на прогон");
+    assert.equal(итог.lowStock, 49, "одну строку забрала усушка");
+  });
+
+  it("«заканчивается» не повторяется, пока остаток тот же: дедуп шире суток", async () => {
+    const мир: Мир = {
+      entities: РЕЕСТР,
+      slots: [слот(OLMA, "1", "Twix", 20, 1)],
+      events: [
+        {
+          source: "system",
+          type: "machine.low_stock",
+          payload: { machine: "Olma", serial: OLMA, product: "Twix", left: 1 },
+          // Позавчера: суточного дедупа мало — пустая позиция стоит пустой
+          // неделями, и владелец получал бы ту же строку каждое утро.
+          occurredAt: new Date(СЕЙЧАС.getTime() - 2 * СУТКИ),
+        },
+      ],
+    };
+    const { svc } = сервис(мир);
+
+    assert.equal((await svc.alertDaily(СЕЙЧАС)).lowStock, 0);
+  });
+
+  it("остаток изменился — это новость, и она проходит сразу", async () => {
+    const мир: Мир = {
+      entities: РЕЕСТР,
+      slots: [слот(OLMA, "1", "Twix", 20, 1)],
+      events: [
+        {
+          source: "system",
+          type: "machine.low_stock",
+          payload: { machine: "Olma", serial: OLMA, product: "Twix", left: 0 },
+          occurredAt: new Date(СЕЙЧАС.getTime() - 2 * СУТКИ),
+        },
+      ],
+    };
+    const { svc } = сервис(мир);
+
+    assert.equal((await svc.alertDaily(СЕЙЧАС)).lowStock, 1);
+  });
+
+  it("событие старше окна повтора не гасит новое", async () => {
+    const мир: Мир = {
+      entities: РЕЕСТР,
+      slots: [слот(OLMA, "1", "Twix", 20, 1)],
+      events: [
+        {
+          source: "system",
+          type: "machine.low_stock",
+          payload: { machine: "Olma", serial: OLMA, product: "Twix", left: 1 },
+          occurredAt: new Date(СЕЙЧАС.getTime() - 4 * СУТКИ),
+        },
+      ],
+    };
+    const { svc } = сервис(мир);
+
+    assert.equal((await svc.alertDaily(СЕЙЧАС)).lowStock, 1, "четверо суток — уже не «то же самое сообщение»");
   });
 });

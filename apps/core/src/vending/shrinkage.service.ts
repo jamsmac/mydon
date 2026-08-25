@@ -8,6 +8,9 @@ import {
   normalizeProductName,
   shrinkageByDay,
   slotValid,
+  tashkentDay,
+  tashkentDayStart,
+  tashkentDayStartOf,
   TZ,
   type MachineSnapshot,
   type ShrinkDayInput,
@@ -53,17 +56,36 @@ export const LOW_STOCK_MIN_CAPACITY = 5;
  */
 export const LOW_STOCK_FRESH_MS = 24 * 3_600_000;
 /**
- * Потолок событий «заканчивается» за прогон. Брифинг из полутора сотен строк
- * читать не будет никто — а именно столько даст парк, у которого разом
- * опустела планограмма. Обрезка громкая (warn в лог), а не молчаливая.
+ * Потолок событий за ОДИН прогон алертов — усушка и «заканчивается» вместе.
+ * Брифинг из полутора сотен строк читать не будет никто, а именно столько даёт
+ * парк, у которого разом опустела планограмма. Раньше потолок стоял только на
+ * «заканчивается», и поток `vending.shrinkage_alert` (машины × позиции) мог
+ * вытеснить из выборки правил деньги, договоры и кофе — выдавленное не
+ * показывается и не ack-ается, то есть теряется, а не откладывается.
+ * Обрезка громкая (warn в лог), а не молчаливая.
  */
-export const LOW_STOCK_MAX_EVENTS = 50;
+export const ALERT_MAX_EVENTS = 50;
+/**
+ * Окно повтора «заканчивается»: пока остаток по (автомат, товар) не изменился,
+ * событие не повторяется трое суток. Суточного дедупа мало — пустая позиция
+ * держится пустой неделями, и владелец получал бы ту же строку каждое утро,
+ * пока не перестал бы читать брифинг целиком. Изменился `left` — это новость,
+ * и она проходит сразу.
+ */
+export const LOW_STOCK_REPEAT_MS = 3 * 86_400_000;
 
 export const SHRINK_EVENT = "vending.shrinkage_alert";
 export const LOW_STOCK_EVENT = "machine.low_stock";
 
-/** Ташкент без перехода на летнее время: смещение постоянное. */
-const TZ_OFFSET_MS = 5 * 3_600_000;
+/**
+ * Время жизни кеша отчёта. Отчёт считается по СНИМКАМ ЗА ЗАКРЫТЫЕ СУТКИ:
+ * внутри дня он меняется только от догона продаж, поэтому пять минут не
+ * устаревание, а окно склейки повторов. Без кеша один открытый GET
+ * (`?days=60` — полмиллиона строк снимков) укладывал Core, а вкладка «Снек»
+ * дёргает отчёт при каждом рендере.
+ */
+export const REPORT_CACHE_MS = 5 * 60_000;
+
 const DAY_MS = 86_400_000;
 
 export interface ShrinkRefillDay {
@@ -93,6 +115,7 @@ export type ShrinkWarningCode =
   | "snapshots_stale"
   | "no_sales_day"
   | "machine_dead"
+  | "no_counted_days"
   | "sales_unknown_product"
   | "machine_error";
 
@@ -135,11 +158,17 @@ function ключТовара(ctx: ShrinkContext, raw: string): string {
   return ключ;
 }
 
-/** Человеческая причина молчания источника по автомату. */
+/**
+ * Человеческая причина молчания источника по автомату. `not_in_service` сюда
+ * не доходит: автоматы не в строю отсеиваются реестром ДО расчёта (о них
+ * говорит план закупа), но в союзе `SkipReason` он есть — и полнота записи
+ * важнее, чем экономия одной строки.
+ */
 const ПРИЧИНА: Record<SkipReason, string> = {
   dead: "источник отдаёт ёмкости вне диапазона (заглушка)",
   uncalibrated: "ёмкости слотов не откалиброваны",
   no_slots: "в автомате нет назначенных слотов",
+  not_in_service: "автомат не в строю",
 };
 
 /**
@@ -183,6 +212,10 @@ interface ShrinkContext {
 export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(ShrinkageService.name);
   private cron: Cron | null = null;
+  /** Готовый отчёт по ключу окна — см. `REPORT_CACHE_MS`. */
+  private readonly кеш = new Map<string, { at: number; отчёт: ShrinkReport }>();
+  /** Считающийся прямо сейчас отчёт по тому же ключу (single-flight). */
+  private readonly вПолёте = new Map<string, Promise<ShrinkReport>>();
 
   constructor(
     @Inject(DB) private readonly db: Db,
@@ -216,9 +249,43 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
    * `now` — параметр, а не `Date.now()` внутри: прогон, пересекающий полночь
    * Ташкента, иначе считал бы первую половину по одному периоду, а вторую по
    * другому, и тесты флакали бы ровно в этот момент.
+   *
+   * КЕШ И ОДИН РАСЧЁТ НА КЛЮЧ. Роут открыт на чтение, а расчёт тяжёлый (все
+   * продажи периода в память плюс запрос снимков на каждый автомат), поэтому
+   * готовый отчёт живёт `REPORT_CACHE_MS`, а параллельные запросы одного окна
+   * ждут ОДИН расчёт, а не запускают по своему. Ключ — окно И ташкентские
+   * сутки: после полуночи период сдвигается, и вчерашний отчёт под тем же
+   * `days` был бы уже не тем отчётом.
    */
   async report(days = SHRINK_DAYS_DEFAULT, now = new Date()): Promise<ShrinkReport> {
-    return this.построить(days, now, await this.контекст());
+    const окно = зажать(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX);
+    const ключ = `${окно}|${tashkentDay(now)}`;
+
+    const готовое = this.кеш.get(ключ);
+    if (готовое && now.getTime() - готовое.at < REPORT_CACHE_MS) return готовое.отчёт;
+
+    const считается = this.вПолёте.get(ключ);
+    if (считается) return считается;
+
+    const работа = (async () => this.построить(окно, now, await this.контекст()))();
+    this.вПолёте.set(ключ, работа);
+    try {
+      const отчёт = await работа;
+      this.кеш.set(ключ, { at: now.getTime(), отчёт });
+      return отчёт;
+    } finally {
+      this.вПолёте.delete(ключ);
+    }
+  }
+
+  /**
+   * Сбросить кеш отчёта. Зовётся оттуда, где данные заведомо поменялись:
+   * ручной прогон алертов и крон считают отчёт заново и пишут события — отдать
+   * после этого закешированный отчёт значило бы показать владельцу картину, по
+   * которой алерты уже не сходятся.
+   */
+  invalidate(): void {
+    this.кеш.clear();
   }
 
   /** Справочники прогона — одной загрузкой (см. `ShrinkContext`). */
@@ -303,8 +370,8 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       продажиАвтомата.set(canonSerial, набор);
     }
 
-    const приходПоДням = сумма(события, (r) => `${normalizeMachineSerial(r.machineSerial)}|${деньТашкента(r.windowTo)}`, (r) => r.units);
-    const записаноПоДням = сумма(записи, (r) => `${normalizeMachineSerial(r.machineSerial)}|${деньТашкента(r.performedAt)}`, (r) => r.qty);
+    const приходПоДням = сумма(события, (r) => `${normalizeMachineSerial(r.machineSerial)}|${tashkentDay(r.windowTo)}`, (r) => r.units);
+    const записаноПоДням = сумма(записи, (r) => `${normalizeMachineSerial(r.machineSerial)}|${tashkentDay(r.performedAt)}`, (r) => r.qty);
 
     // Серийники сводим к канону ДО чтения снимков: «c2508160376» и
     // «2508160376» — один автомат, и раньше вторая форма молча выбрасывалась
@@ -337,22 +404,32 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
         // Продажи есть, а слота под этот товар в снимках нет ни одного дня:
         // либо товар вынули из автомата, либо имя не сшилось со справочником.
         // Второе — тихая потеря продаж из расчёта, поэтому говорим вслух.
-        const безСлота = [...(продажиАвтомата.get(canon) ?? [])]
-          .filter((k) => !строка.slotKeys.has(k))
-          .map((k) => ctx.display.get(k) ?? имяИзПродаж.get(k) ?? k)
-          .sort((a, b) => a.localeCompare(b, "ru"));
-        if (безСлота.length > 0) {
-          warnings.push({
-            code: "sales_unknown_product",
-            message: `${name}: продажи есть, а слота в снимках нет — ${безСлота.join(", ")}`,
-          });
+        //
+        // Но ТОЛЬКО про автомат, о котором нам вообще есть что сказать. У
+        // отсеянного источника (`no_slots`, заглушка, неоткалиброванные
+        // ёмкости) `slotKeys` пуст по построению, и в предупреждение уехал бы
+        // ВЕСЬ ассортимент его продаж — про автомат, который строкой выше уже
+        // объявлен нечитаемым.
+        if (строка.machine) {
+          const безСлота = [...(продажиАвтомата.get(canon) ?? [])]
+            .filter((k) => !строка.slotKeys.has(k))
+            .map((k) => ctx.display.get(k) ?? имяИзПродаж.get(k) ?? k)
+            .sort((a, b) => a.localeCompare(b, "ru"));
+          if (безСлота.length > 0) {
+            warnings.push({
+              code: "sales_unknown_product",
+              message: `${name}: продажи есть, а слота в снимках нет — ${безСлота.join(", ")}`,
+            });
+          }
         }
       } catch (e: unknown) {
         // Один сломанный автомат не должен уносить ни отчёт, ни утренние
-        // алерты по остальным двадцати пяти.
+        // алерты по остальным двадцати пяти. Наружу — фиксированная фраза:
+        // текст исключения drizzle несёт запрос и параметры, а этот отчёт
+        // читают открытым GET, панелью и телеграмом.
         const текст = e instanceof Error ? e.message : String(e);
         this.logger.warn(`Усушка ${name} (${canon}) не посчиталась: ${текст}`);
-        warnings.push({ code: "machine_error", message: `${name}: ${текст}` });
+        warnings.push({ code: "machine_error", message: `${name}: ошибка расчёта, см. лог` });
       }
     }
 
@@ -438,15 +515,27 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     const items = summary.items.map((i) => ({ ...i, product: ctx.display.get(i.product) ?? i.product }));
 
     // Одна строка на автомат, а не на день: 26 автоматов × 14 дней дали бы
-    // триста предупреждений, среди которых не видно ни одного.
+    // триста предупреждений, среди которых не видно ни одного. Дат в строке —
+    // не больше пяти: окно в 60 суток на автомате без сбора давало строку в
+    // полсотни дат, которую владелец не дочитает и до середины.
     if (староСнимков.length > 0) {
       warnings.push({
         code: "snapshots_stale",
-        message: `${name}: нет снимков у границ суток — пропущены дни ${староСнимков.join(", ")}`,
+        message: `${name}: нет снимков у границ суток — пропущены дни ${перечислить(староСнимков)}`,
       });
     }
     if (безПродаж.length > 0) {
-      warnings.push({ code: "no_sales_day", message: `${name}: нет продаж за ${безПродаж.join(", ")} — дни не считались` });
+      warnings.push({ code: "no_sales_day", message: `${name}: нет продаж за ${перечислить(безПродаж)} — дни не считались` });
+    }
+    // «Ни одного посчитанного дня» — это НЕ «недостач нет». Автомат, у
+    // которого весь период оказался заливкой (или снимками/продажами без
+    // границ), из расчёта выпал целиком, и молчаливый ноль здесь читался бы
+    // как чистый результат — ровно то утверждение, которого расчёт не давал.
+    if (summary.daysCounted === 0) {
+      warnings.push({
+        code: "no_counted_days",
+        message: `${name}: не считали — все ${dates.length} дн. периода были заливкой/пропущены`,
+      });
     }
     return { machine: { serial: canon, name, summary: { ...summary, items }, refillDays }, warnings, slotKeys };
   }
@@ -454,20 +543,37 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
   /**
    * Суточные алерты: усушка за порогом и «заканчивается товар».
    *
-   * ДЕДУП ПО СУТКАМ, а не по факту: усушка за 7 дней держится за порогом всю
-   * неделю, и без него владелец получал бы одну и ту же строку семь утр
-   * подряд, пока не перестал бы читать брифинг целиком.
+   * ДЕДУП. У двух алертов он разный, потому что разные факты.
+   * · Усушка — В ПРЕДЕЛАХ ТАШКЕНТСКИХ СУТОК: крон в 08:35 и ручной прогон из
+   *   панели не задваивают строку. Ежедневный повтор здесь НАМЕРЕННЫЙ: пока
+   *   недостача за скользящую неделю держится за порогом, владелец видит её
+   *   каждое утро — это незакрытая проблема, а не шум.
+   * · «Заканчивается» — по (автомат, товар, `left`) на `LOW_STOCK_REPEAT_MS`:
+   *   пустая позиция стоит пустой неделями, и ежедневный повтор об одном и том
+   *   же нуле как раз шум. Изменился остаток — новость проходит сразу.
    */
   async alertDaily(now = new Date()): Promise<AlertRun> {
     const ctx = await this.контекст();
     const отчёт = await this.построить(ALERT_DAYS, now, ctx);
-    const сутки = началоСутокТашкента(now);
+    // Прогон пересчитал отчёт и написал по нему события: закешированная
+    // прошлая картина после этого разошлась бы с брифингом.
+    this.invalidate();
+    const сутки = tashkentDayStartOf(now);
+    const окноПовтора = new Date(now.getTime() - LOW_STOCK_REPEAT_MS);
 
     const [написанное, поСерийникам] = await Promise.all([
+      // Одним запросом за оба окна — берём БОЛЬШЕЕ (окно повтора «остатка»),
+      // а суточную границу усушки прикладываем в памяти: два запроса к той же
+      // таблице за пересекающиеся окна дороже, чем лишние строки за трое суток.
       this.db
-        .select({ type: event.type, payload: event.payload })
+        .select({ type: event.type, payload: event.payload, occurredAt: event.occurredAt })
         .from(event)
-        .where(and(inArray(event.type, [SHRINK_EVENT, LOW_STOCK_EVENT]), gte(event.occurredAt, сутки))),
+        .where(
+          and(
+            inArray(event.type, [SHRINK_EVENT, LOW_STOCK_EVENT]),
+            gte(event.occurredAt, окноПовтора < сутки ? окноПовтора : сутки),
+          ),
+        ),
       // Планограмма — только СВЕЖАЯ (см. `LOW_STOCK_FRESH_MS`), и той же
       // выборкой, что у плана закупа: две реализации «слоты по автоматам»
       // разошлись бы в правилах валидности.
@@ -477,14 +583,26 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     const занято = new Set<string>();
     for (const e of написанное) {
       const p = (e.payload ?? {}) as Record<string, unknown>;
-      const ключ = e.type === SHRINK_EVENT ? String(p.serial) : String(p.serial ?? p.machine);
-      занято.add(`${e.type}|${ключ}|${String(p.product)}`);
+      if (e.type === SHRINK_EVENT) {
+        if (e.occurredAt.getTime() < сутки.getTime()) continue;
+        занято.add(`${e.type}|${String(p.serial)}|${String(p.product)}`);
+      } else {
+        // Ключ «заканчивается» включает ОСТАТОК: та же позиция с другим
+        // числом — другая новость, и глушить её прошлым событием нельзя.
+        занято.add(`${e.type}|${String(p.serial ?? p.machine)}|${String(p.product)}|${String(p.left)}`);
+      }
     }
 
     const строки: { source: string; type: string; payload: Record<string, unknown> }[] = [];
     let lowStock = 0;
-    const добавить = (type: string, ключ: string, payload: Record<string, unknown>): boolean => {
+    let обрезано = false;
+    /** `null` — потолок прогона исчерпан (обрезка), `false` — дедуп. */
+    const добавить = (type: string, ключ: string, payload: Record<string, unknown>): boolean | null => {
       if (занято.has(ключ)) return false;
+      if (строки.length >= ALERT_MAX_EVENTS) {
+        обрезано = true;
+        return null;
+      }
       занято.add(ключ);
       строки.push({ source: "system", type, payload });
       return true;
@@ -493,6 +611,7 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     for (const m of отчёт.machines) {
       for (const item of m.summary.items) {
         if (!item.alert) continue;
+        if (обрезано) break;
         добавить(SHRINK_EVENT, `${SHRINK_EVENT}|${m.serial}|${item.product}`, {
           serial: m.serial,
           name: m.name,
@@ -502,6 +621,7 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
           days: ALERT_DAYS,
         });
       }
+      if (обрезано) break;
     }
 
     // «Заканчивается» считается по ПЛАНОГРАММЕ (`machine_slot`), а не по
@@ -512,8 +632,8 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       const canon = normalizeMachineSerial(serial);
       поКанону.set(canon, [...(поКанону.get(canon) ?? []), ...список]);
     }
-    let обрезано = false;
     for (const [canon, список] of поКанону) {
+      if (обрезано) break;
       if (ctx.registry.notInService.has(canon)) continue;
       // Тот же судья, что у детектора и у отчёта: заглушка источника и
       // неоткалиброванная планограмма «заканчивается» не значат.
@@ -529,23 +649,27 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
         поТовару.set(ключ, a);
       }
       for (const [ключ, a] of поТовару) {
+        if (обрезано) break;
         if (a.cap < LOW_STOCK_MIN_CAPACITY || a.qty > LOW_STOCK_LEFT) continue;
-        if (lowStock >= LOW_STOCK_MAX_EVENTS) {
-          обрезано = true;
-          break;
-        }
         const product = ctx.display.get(ключ) ?? ключ;
-        // Ключ дедупа — СЕРИЙНИК, а не отображаемое имя: два автомата,
-        // названные одинаково, гасили бы алерты друг друга.
-        if (добавить(LOW_STOCK_EVENT, `${LOW_STOCK_EVENT}|${canon}|${product}`, { machine: name, serial: canon, product, left: a.qty })) {
+        // Ключ дедупа — СЕРИЙНИК и ОСТАТОК, а не отображаемое имя: два
+        // автомата, названные одинаково, гасили бы алерты друг друга, а
+        // изменившийся остаток обязан пройти, не дожидаясь трёх суток.
+        if (
+          добавить(LOW_STOCK_EVENT, `${LOW_STOCK_EVENT}|${canon}|${product}|${a.qty}`, {
+            machine: name,
+            serial: canon,
+            product,
+            left: a.qty,
+          })
+        ) {
           lowStock += 1;
         }
       }
-      if (обрезано) break;
     }
     if (обрезано) {
       this.logger.warn(
-        `«Заканчивается»: обрезано на ${LOW_STOCK_MAX_EVENTS} событиях — планограмма пуста разом по многим автоматам, это сбой сбора, а не расход.`,
+        `Алерты вендинга: обрезано на ${ALERT_MAX_EVENTS} событиях за прогон — столько строк разом даёт сбой сбора, а не расход.`,
       );
     }
 
@@ -598,25 +722,21 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
 
 /** Дни периода по Ташкенту: `days` полных суток, последние — вчерашние. */
 function периодДней(days: number, now: Date): string[] {
-  const сегодня = деньТашкента(now);
+  const сегодня = tashkentDayStartOf(now).getTime();
   const out: string[] = [];
-  for (let i = days; i >= 1; i--) out.push(деньТашкента(new Date(началоСуток(сегодня) - i * DAY_MS)));
+  for (let i = days; i >= 1; i--) out.push(tashkentDay(new Date(сегодня - i * DAY_MS)));
   return out;
 }
 
-/** YYYY-MM-DD суток по Ташкенту для момента. */
-export function деньТашкента(at: Date): string {
-  return new Date(at.getTime() + TZ_OFFSET_MS).toISOString().slice(0, 10);
-}
-
-/** UTC-момент 00:00 Ташкента для даты YYYY-MM-DD. */
-export function началоСуток(date: string): number {
-  return Date.parse(`${date}T00:00:00.000Z`) - TZ_OFFSET_MS;
-}
-
-/** Начало ТЕКУЩИХ суток по Ташкенту — граница дедупа алертов. */
-export function началоСутокТашкента(now: Date): Date {
-  return new Date(началоСуток(деньТашкента(now)));
+/**
+ * UTC-момент 00:00 Ташкента для даты YYYY-MM-DD.
+ *
+ * Тонкая обёртка над `tashkentDayStart` из `@mydon/shared`: даты сюда приходят
+ * только из `периодДней`, то есть заведомо валидные, а второй копии смещения
+ * зоны в коде быть не должно — на ней уехал донор VendCash.
+ */
+function началоСуток(date: string): number {
+  return tashkentDayStart(date)!.getTime();
 }
 
 /**
@@ -635,6 +755,13 @@ function ближайший(снимки: MachineSnapshot[], граница: num
     }
   }
   return дистанция <= SNAPSHOT_STALE_MS ? лучший : null;
+}
+
+/** Дат в предупреждении — не больше пяти, остальное числом: строка на полсотни дат нечитаема. */
+const МАКС_ДАТ = 5;
+function перечислить(даты: string[]): string {
+  if (даты.length <= МАКС_ДАТ) return даты.join(", ");
+  return `${даты.slice(0, МАКС_ДАТ).join(", ")} и ещё ${даты.length - МАКС_ДАТ}`;
 }
 
 function сумма<T>(rows: T[], ключ: (r: T) => string, значение: (r: T) => number): Map<string, number> {

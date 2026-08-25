@@ -1363,6 +1363,13 @@ export class VendingService {
     // разные, и вторая не должна затирать первую (не в строю уже отмечены
     // выше). Гейта по `planogramStatus` здесь нет намеренно: мёртвый автомат
     // НИКОГДА не бывает `ok`, и такое условие не сработало бы ни разу.
+    //
+    // ЧЕСТНО О ПРОДЕ (замер 25.08, вся история `slot_snapshot` — 35 652
+    // строки): под `deadMachine` не подходит НИ ОДИН снимок. Склад-заглушки
+    // SKLAD 5S/6S отдают `capacity = quantity = 199` при ПУСТОМ имени товара,
+    // то есть отсеиваются раньше — как `no_slots`; SKLAD 4S — как
+    // `uncalibrated`. Ветка ниже — защита на будущий источник, который отдаст
+    // товар с ёмкостью вне диапазона, а не описание сегодняшнего поведения.
     const deadSeen = new Set<string>();
     for (const [serial, slots] of byMachine) {
       const canon = normalizeMachineSerial(serial);
@@ -1569,8 +1576,10 @@ export class VendingService {
     }
     const dead = ctx.skipped.filter((m) => m.status === "no_data");
     if (dead.length) {
-      // Заглушки источника (SKLAD 199=199) — отдельной строкой: причина
-      // другая, и лечится не статусом карточки, а данными OurVend.
+      // Заглушки источника (товар с ёмкостью вне диапазона) — отдельной
+      // строкой: причина другая, и лечится не статусом карточки, а данными
+      // OurVend. На сегодняшнем проде эта строка не рендерится: склады
+      // отсеиваются раньше как `no_slots`/`uncalibrated` (см. `purchaseContext`).
       const список = [...dead]
         .sort((a, b) => a.name.localeCompare(b.name, "ru"))
         .map((m) => `${m.name} (${m.serial})`)

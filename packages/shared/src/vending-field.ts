@@ -38,8 +38,13 @@ const usable = (s: SnapshotSlot, max: number): boolean => hasProduct(s) && slotV
 /**
  * Мёртвый автомат (R-P4-4): в слотах есть товар (их ≥ DEAD_MIN_SLOTS), но НИ
  * ОДНА ёмкость не попадает в диапазон — источник отдаёт мусор вместо данных.
- * Подпись с прода: склад-заглушки SKLAD 4S/5S/6S отдают `quantity = capacity =
- * 199` по всем слотам, а 199 больше `MAX_CAPACITY`.
+ *
+ * НА СЕГОДНЯШНЕМ ПРОДЕ ЭТА ВЕТКА НЕ СРАБАТЫВАЕТ НИ РАЗУ (замер 25.08 по всей
+ * истории `slot_snapshot`, 35 652 строки). Склад-заглушки SKLAD 5S/6S отдают
+ * `capacity = quantity = 199`, но с ПУСТЫМ именем товара: `hasProduct` их не
+ * считает, и автомат отсеивается раньше как `no_slots`. SKLAD 4S держит 43
+ * имени и 7 валидных ёмкостей из 43 — это `uncalibrated`. Правило остаётся
+ * защитным: оно ждёт источник, который отдаст ТОВАР с ёмкостью вне диапазона.
  *
  * Полный ЖИВОЙ автомат мёртвым НЕ считается. Прежнее правило («все валидные
  * слоты полны») давало ложное срабатывание ровно на том, ради чего затевался
@@ -114,7 +119,10 @@ export function detectRefills(snapshots: MachineSnapshot[], minUnits: number, ma
         }
       }
       const units = slots.reduce((a, x) => a + x.delta, 0);
-      if (units >= minUnits) out.push({ serial, windowFrom: prev.capturedAt, windowTo: cur.capturedAt, units, slots });
+      // `units > 0` — не тавтология к порогу: порог берётся из настроек, и
+      // `REFILL_DETECT_MIN_UNITS = 0` («ловить любой приход») иначе назвал бы
+      // заливкой КАЖДУЮ пару снимков, включая те, где не приехало ничего.
+      if (units > 0 && units >= minUnits) out.push({ serial, windowFrom: prev.capturedAt, windowTo: cur.capturedAt, units, slots });
     }
   }
   return out;
@@ -155,10 +163,18 @@ export interface ShrinkDayInput {
   refillUnits: number;
 }
 
+/**
+ * Позиция отчёта об усушке. `lossUnits`/`surplusUnits` — НЕТТО за период по
+ * этому товару (R-FW-1): одновременно ненулевыми они не бывают, потому что
+ * дневные знаки внутри товара гасятся до итога.
+ */
 export interface ShrinkItem {
   product: string;
+  /** Чистая недостача за период, шт (≥ 0). */
   lossUnits: number;
+  /** `lossUnits × price`; 0, если цены нет. */
   lossValue: number;
+  /** Чистый излишек за период, шт (≥ 0) — в деньги не входит. */
   surplusUnits: number;
   daysCounted: number;
   noPrice: boolean;
@@ -174,13 +190,30 @@ export interface ShrinkSummary {
 }
 
 /**
- * Усушка автомата по дням БЕЗ заливок (R-P4-3): в дни заливки приход и
- * продажи гасятся внутри 3-часового окна, и сходимость искажается — поэтому
- * день с `refillUnits > 0` исключается целиком (не только по позиции).
- * `expected = startQty − sales`; `loss = expected − endQty` (>0 недостача,
- * <0 излишек — в деньги не входит, но виден). Товар считается в дне, только
- * если он есть и в start, и в end (иначе один снимок не про этот слот, а
- * не «весь товар пропал»). Порог — по позиции за весь период, не по дню.
+ * Усушка автомата по дням БЕЗ заливок (R-P4-3), НЕТТИНГОМ ВНУТРИ ТОВАРА ЗА
+ * ПЕРИОД (R-FW-1).
+ *
+ * В дни заливки приход и продажи гасятся внутри 3-часового окна, и сходимость
+ * искажается — поэтому день с `refillUnits > 0` исключается целиком (не только
+ * по позиции). За каждый посчитанный день по товару берётся
+ * `net_день = startQty − sales − endQty`, и по товару за ПЕРИОД копится
+ * `net = Σ net_день`: `lossUnits = max(0, net)`, `surplusUnits = max(0, −net)`,
+ * `lossValue = lossUnits × price`.
+ *
+ * ПОЧЕМУ ДНЕВНЫЕ ЗНАКИ ГАСЯТСЯ ВНУТРИ ТОВАРА. Продажи Ourvend ложатся в
+ * `sale.dt` со сдвигом ±1 сутки относительно снимков: у одного товара идут
+ * подряд день −3 и день +3. Посуточная сумма показывала это как 29 970 сум
+ * недостачи при нулевом фактическом расхождении — прод-замер 25.08 дал
+ * Σ недостача 30 ед. против Σ излишка 37 ед., то есть убыли нет вовсе, а
+ * верхние строки отчёта стояли в 0,1 % от порога алерта.
+ *
+ * МЕЖДУ ТОВАРАМИ НИЧЕГО НЕ ГАСИТСЯ (R-P4-3 в силе): излишек по одной позиции
+ * не закрывает недостачу по другой — это разные товары и разные деньги, а не
+ * сдвиг даты у одного и того же расхода.
+ *
+ * Товар считается в дне, только если он есть и в start, и в end (иначе один
+ * снимок не про этот слот, а не «весь товар пропал»). Порог — по позиции за
+ * весь период, не по дню.
  */
 export function shrinkageByDay(
   days: ShrinkDayInput[],
@@ -188,7 +221,8 @@ export function shrinkageByDay(
   threshold: number,
   maxCapacity = MAX_CAPACITY,
 ): ShrinkSummary {
-  const acc = new Map<string, ShrinkItem>();
+  /** По товару за период: чистое расхождение (+ недостача, − излишек) и сколько дней его считали. */
+  const acc = new Map<string, { net: number; daysCounted: number; noPrice: boolean }>();
   let daysCounted = 0;
   let daysSkipped = 0;
 
@@ -204,24 +238,32 @@ export function shrinkageByDay(
       const endQty = end.get(product);
       if (endQty === undefined) continue;
       const expected = startQty - (d.sales.get(product) ?? 0);
-      const loss = expected - endQty;
-      const price = prices.get(product);
-      const item =
-        acc.get(product) ?? { product, lossUnits: 0, lossValue: 0, surplusUnits: 0, daysCounted: 0, noPrice: price === undefined, alert: false };
+      const item = acc.get(product) ?? { net: 0, daysCounted: 0, noPrice: prices.get(product) === undefined };
+      item.net += expected - endQty;
       item.daysCounted++;
-      if (loss > 0) {
-        item.lossUnits += loss;
-        item.lossValue += price === undefined ? 0 : loss * price;
-      } else if (loss < 0) {
-        item.surplusUnits += -loss;
-      }
       acc.set(product, item);
     }
   }
 
-  const items = [...acc.values()]
+  const items: ShrinkItem[] = [...acc.entries()]
+    .map(([product, a]) => {
+      const lossUnits = Math.max(0, a.net);
+      const price = prices.get(product);
+      const lossValue = price === undefined ? 0 : lossUnits * price;
+      return {
+        product,
+        lossUnits,
+        lossValue,
+        surplusUnits: Math.max(0, -a.net),
+        daysCounted: a.daysCounted,
+        noPrice: a.noPrice,
+        // `lossUnits > 0` — на случай порога 0 («алерт на любую потерю»):
+        // без него нулевая сумма позиции с ОДНИМ ЛИШЬ ИЗЛИШКОМ прошла бы как
+        // «потеря на 0 сум».
+        alert: lossUnits > 0 && lossValue >= threshold,
+      };
+    })
     .filter((i) => i.lossUnits > 0 || i.surplusUnits > 0)
-    .map((i) => ({ ...i, alert: i.lossValue >= threshold }))
     .sort((a, b) => b.lossValue - a.lossValue);
 
   return { items, lossValue: items.reduce((a, i) => a + i.lossValue, 0), daysCounted, daysSkipped, threshold };

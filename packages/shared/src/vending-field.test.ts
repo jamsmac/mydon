@@ -111,18 +111,73 @@ describe("Полевой контур: усушка по дням без зал�
     assert.equal(s.daysSkipped, 1);
     assert.equal(s.items.length, 0);
   });
-  it("излишек показывается, но в деньги не входит; порог по позиции за период", () => {
+  it("излишек за период показывается, но в деньги не входит; порог по позиции за период", () => {
     const day = (date: string, start: number, end: number) => ({ date, startSlots: [slot("1", "Kinder", start, 11)], endSlots: [slot("1", "Kinder", end, 11)], sales: new Map<string, number>(), refillUnits: 0 });
-    const s = shrinkageByDay([day("2026-08-19", 10, 8), day("2026-08-20", 8, 9), day("2026-08-21", 9, 8)], prices, 30000);
+    // Итог по товару за период отрицательный (−1): это излишек, а не «3 потери
+    // и 4 излишка» — дневные знаки внутри товара гасятся (R-FW-1).
+    const s = shrinkageByDay([day("2026-08-19", 10, 9), day("2026-08-20", 8, 11), day("2026-08-21", 9, 8)], prices, 30000);
     const k = s.items[0]!;
-    assert.equal(k.lossUnits, 3);
+    assert.equal(k.lossUnits, 0);
     assert.equal(k.surplusUnits, 1);
-    assert.equal(k.lossValue, 33000);
+    assert.equal(k.lossValue, 0);
+    assert.equal(k.alert, false);
+    assert.equal(s.lossValue, 0);
+  });
+  it("порог по позиции за период считается по НЕТТО-недостаче", () => {
+    const day = (date: string, start: number, end: number) => ({ date, startSlots: [slot("1", "Kinder", start, 11)], endSlots: [slot("1", "Kinder", end, 11)], sales: new Map<string, number>(), refillUnits: 0 });
+    const s = shrinkageByDay([day("2026-08-19", 10, 8), day("2026-08-20", 8, 7), day("2026-08-21", 9, 8)], prices, 30000);
+    const k = s.items[0]!;
+    assert.equal(k.lossUnits, 4);
+    assert.equal(k.lossValue, 44000);
     assert.equal(k.alert, true);
-    assert.equal(s.lossValue, 33000);
   });
   it("товар без цены — noPrice, деньги 0; товар не в обоих снимках — день по нему пропущен", () => {
     const s = shrinkageByDay([{ date: "2026-08-19", startSlots: [slot("1", "TUC", 5), slot("2", "Kinder", 3)], endSlots: [slot("1", "TUC", 3)], sales: new Map(), refillUnits: 0 }], prices, 30000);
     assert.deepEqual(s.items.map((i) => [i.product, i.lossUnits, i.noPrice]), [["TUC", 2, true]]);
+  });
+});
+
+describe("Полевой контур: неттинг усушки внутри товара за период (R-FW-1)", () => {
+  const prices = new Map([["Kinder", 11000], ["Qurt", 6800]]);
+  const день = (date: string, product: string, start: number, end: number, sales = 0) => ({
+    date,
+    startSlots: [slot("1", product, start, 11)],
+    endSlots: [slot("1", product, end, 11)],
+    sales: new Map<string, number>(sales ? [[product, sales]] : []),
+    refillUnits: 0,
+  });
+
+  it("−3 и +3 по одному товару подряд гасятся: ни потерь, ни излишка", () => {
+    // Прод: Ourvend кладёт 3 продажи в `dt` СЛЕДУЮЩИХ суток, и один товар даёт
+    // день −3 и день +3. До неттинга это показывалось как 29 970 сум убытка.
+    const s = shrinkageByDay([день("2026-08-14", "Kinder", 5, 2), день("2026-08-15", "Kinder", 0, 3)], prices, 30000);
+    assert.deepEqual(s.items, []);
+    assert.equal(s.lossValue, 0);
+    assert.equal(s.daysCounted, 2);
+  });
+
+  it("−5 и +2 по одному товару: остаётся недостача 3, излишка нет", () => {
+    const s = shrinkageByDay([день("2026-08-14", "Kinder", 10, 5), день("2026-08-15", "Kinder", 5, 7)], prices, 30000);
+    const k = s.items.find((i) => i.product === "Kinder")!;
+    assert.equal(k.lossUnits, 3);
+    assert.equal(k.surplusUnits, 0);
+    assert.equal(k.lossValue, 33000);
+    assert.equal(k.daysCounted, 2);
+    assert.equal(s.lossValue, 33000);
+  });
+
+  it("между товарами не гасится: излишек Qurt не закрывает недостачу Kinder (R-P4-3)", () => {
+    const s = shrinkageByDay(
+      [день("2026-08-14", "Kinder", 10, 7), день("2026-08-14", "Qurt", 4, 7)],
+      prices,
+      30000,
+    );
+    const k = s.items.find((i) => i.product === "Kinder")!;
+    const q = s.items.find((i) => i.product === "Qurt")!;
+    assert.equal(k.lossUnits, 3);
+    assert.equal(k.surplusUnits, 0);
+    assert.equal(q.lossUnits, 0);
+    assert.equal(q.surplusUnits, 3);
+    assert.equal(s.lossValue, 33000);
   });
 });
