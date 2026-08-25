@@ -256,12 +256,71 @@ function текстSQL(x: unknown): string {
     .join("");
 }
 
+/**
+ * Строки, которые ушли в таблицу. Приём пишет ПАЧКОЙ (один `values([...])` на
+ * автомат), поэтому `values` — массив, а не одна строка; хелпер разворачивает
+ * и то и другое, чтобы проверки говорили о СТРОКАХ, а не о числе запросов.
+ */
+function строкиТаблицы(inserts: { table: string; values: unknown }[], table: string): Record<string, unknown>[] {
+  return строкиВставок(inserts.filter((i) => i.table === table));
+}
+
+/** То же, но по всем таблицам сразу: у стаба имя таблицы — эвристика. */
+function строкиВставок(inserts: { table: string; values: unknown }[]): Record<string, unknown>[] {
+  return inserts.flatMap((i) => (Array.isArray(i.values) ? i.values : [i.values]) as Record<string, unknown>[]);
+}
+
 function tableName(t: unknown): string {
   // Журнал событий узнаём по личности: эвристика по ключам его не различает.
   if (t === event) return "event";
   // drizzle-таблица знает своё имя; для стаба достаточно эвристики по ключам.
   const keys = Object.keys((t ?? {}) as Record<string, unknown>);
   return keys.includes("capturedAt") && !keys.includes("syncedAt") ? "slot_snapshot" : "machine_slot";
+}
+
+/**
+ * Стаб БД для ingestSales: копит вызовы insert(...).onConflictDoUpdate(...).
+ * Реальный unique-индекс (миграция 0024) эти тесты не проверяют — только то,
+ * что код идёт через upsert с правильным target, а не голый insert
+ * (проверка самого constraint — вне мокового unit-теста, найдено внешним
+ * аудитом п.13: нет реальных DB-тестов на конкурентность/ограничения).
+ *
+ * `values` — массив строк: приём пишет пачкой, один запрос на таблицу.
+ */
+function ingestSalesDb(machineCards: { id: string; externalRef: string | null; type?: string }[] = []) {
+  const calls: {
+    table: "product_sale" | "machine_sale";
+    values: Record<string, unknown> | Record<string, unknown>[];
+    target: unknown[];
+    set: Record<string, unknown>;
+  }[] = [];
+  const tx = {
+    insert: (table: unknown) => ({
+      values: (v: Record<string, unknown> | Record<string, unknown>[]) => ({
+        onConflictDoUpdate: (opts: { target: unknown[]; set: Record<string, unknown> }) => {
+          calls.push({
+            table: table === productSale ? "product_sale" : "machine_sale",
+            values: v,
+            target: opts.target,
+            set: opts.set,
+          });
+          return Promise.resolve(undefined);
+        },
+      }),
+    }),
+  };
+  // Приём продаж теперь читает карточки автоматов, чтобы проставить
+  // machine_id: без этого продажи Ourvend знали только серийник.
+  const db = {
+    select: () => ({
+      from: () => {
+        const rows = Promise.resolve(machineCards);
+        return { where: () => rows, then: rows.then.bind(rows) };
+      },
+    }),
+    transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+  } as never;
+  return { db, calls };
 }
 
 const slot = (machineSerial: string, coilId: string, productName: string | null, capacity: number, quantity: number): Row => ({
@@ -430,39 +489,6 @@ describe("Вендинг Core: прогноз расхода (§5.6)", () => {
 });
 
 describe("Вендинг Core: приём продаж — идемпотентность батча (§5.6)", () => {
-  /**
-   * Стаб БД для ingestSales: копит вызовы insert(...).onConflictDoUpdate(...).
-   * Реальный unique-индекс (миграция 0024) эти тесты не проверяют — только то,
-   * что код идёт через upsert с правильным target, а не голый insert
-   * (проверка самого constraint — вне мокового unit-теста, найдено внешним
-   * аудитом п.13: нет реальных DB-тестов на конкурентность/ограничения).
-   */
-  function ingestSalesDb(machineCards: { id: string; externalRef: string | null; type?: string }[] = []) {
-    const calls: { table: "product_sale" | "machine_sale"; values: Record<string, unknown>; target: unknown[] }[] = [];
-    const tx = {
-      insert: (table: unknown) => ({
-        values: (v: Record<string, unknown>) => ({
-          onConflictDoUpdate: (opts: { target: unknown[]; set: Record<string, unknown> }) => {
-            calls.push({ table: table === productSale ? "product_sale" : "machine_sale", values: v, target: opts.target });
-            return Promise.resolve(undefined);
-          },
-        }),
-      }),
-    };
-    // Приём продаж теперь читает карточки автоматов, чтобы проставить
-    // machine_id: без этого продажи Ourvend знали только серийник.
-    const db = {
-      select: () => ({
-        from: () => {
-          const rows = Promise.resolve(machineCards);
-          return { where: () => rows, then: rows.then.bind(rows) };
-        },
-      }),
-      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
-    } as never;
-    return { db, calls };
-  }
-
   const payload = {
     capturedAt: "2026-08-02T00:00:00Z",
     periodStart: "2026-07-26T00:00:00Z",
@@ -1202,7 +1228,7 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     assert.deepEqual(res, { items: 2, adjustments: [] }); // счётчик по входу, расхождений нет (склад пуст)
     // Записана только валидная позиция.
     assert.equal(inserts.length, 1);
-    const v = inserts[0]!.values as { productName: string; quantity: number };
+    const v = строкиВставок(inserts)[0]! as { productName: string; quantity: number };
     assert.equal(v.productName, "Montella");
     assert.equal(v.quantity, 24);
   });
@@ -1214,7 +1240,7 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     );
     const svc = new VendingService(db);
     await svc.ingestStock({ items: [{ product: "montella", quantity: 7 }] });
-    const v = inserts[0]!.values as { productName: string };
+    const v = строкиВставок(inserts)[0]! as { productName: string };
     assert.equal(v.productName, "Montella Вода минеральная 330ml");
   });
 
@@ -1222,7 +1248,7 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     const { db, inserts } = writeDb([], []);
     const svc = new VendingService(db);
     await svc.ingestStock({ items: [{ product: "Новый Товар", quantity: 3 }] });
-    const v = inserts[0]!.values as { productName: string };
+    const v = строкиВставок(inserts)[0]! as { productName: string };
     assert.equal(v.productName, "Новый Товар");
   });
 
@@ -1247,9 +1273,9 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     assert.equal(a.noPrice, false);
 
     // Расхождение попадает в журнал (событие + audit), не только в ответ метода.
-    const ev = inserts.find((i) => (i.values as { type?: string }).type === "vending.stock.recounted");
+    const ev = строкиВставок(inserts).find((v) => (v as { type?: string }).type === "vending.stock.recounted");
     assert.ok(ev, "должно быть событие о пересчёте");
-    const audit = inserts.find((i) => (i.values as { action?: string }).action === "vending.stock.recount");
+    const audit = строкиВставок(inserts).find((v) => (v as { action?: string }).action === "vending.stock.recount");
     assert.ok(audit, "должна быть запись в журнале действий");
   });
 
@@ -1287,8 +1313,8 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     const { db, inserts } = writeDb([], [], stock);
     const svc = new VendingService(db);
     await svc.ingestStock({ items: [{ product: "Fanta Classic CAN 250ml", quantity: 19 }] }, "manager");
-    const ev = inserts.find((i) => (i.values as { type?: string }).type === "vending.stock.recounted");
-    assert.equal((ev!.values as { source: string }).source, "manager");
+    const ev = строкиВставок(inserts).find((v) => (v as { type?: string }).type === "vending.stock.recounted");
+    assert.equal((ev! as { source: string }).source, "manager");
   });
 
   it("опоздавший пересчёт (countedAt старше уже сохранённого) — не откатывает остаток и не считается расхождением (найдено внешним аудитом, P2)", async () => {
@@ -1351,12 +1377,12 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     assert.equal(a.value, 5 * 2090);
 
     // И записан склад — тоже РОВНО одной строкой на канон (не дважды).
-    const stockInserts = inserts.filter((i) => (i.values as { productName?: string }).productName === canonical);
+    const stockInserts = строкиВставок(inserts).filter((v) => (v as { productName?: string }).productName === canonical);
     assert.equal(stockInserts.length, 1);
-    assert.equal((stockInserts[0]!.values as { quantity: number }).quantity, 12);
+    assert.equal((stockInserts[0]! as { quantity: number }).quantity, 12);
     // …со ссылкой на карточку прайса: строка склада ключуется именем, и без
     // ссылки переименование товара рвало связь остатка с прайсом (бэкфилл П4).
-    assert.equal((stockInserts[0]!.values as { productId: string | null }).productId, "p1");
+    assert.equal((stockInserts[0]! as { productId: string | null }).productId, "p1");
   });
 
   it("повторный пересчёт склада не затирает product_id пустым (ветка конфликта)", async () => {
@@ -1376,9 +1402,9 @@ describe("Вендинг Core: приём слотов", () => {
     });
     assert.deepEqual(res, { machines: 1, slots: 1, linked: 0, pruned: 0, pruneErrors: [], skipped: [] });
     // Один слот → одна строка планограммы + одна строка истории.
-    assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 1);
-    assert.equal(inserts.filter((i) => i.table === "slot_snapshot").length, 1);
-    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { isValid: boolean; productName: string | null };
+    assert.equal(строкиТаблицы(inserts, "machine_slot").length, 1);
+    assert.equal(строкиТаблицы(inserts, "slot_snapshot").length, 1);
+    const ms = строкиТаблицы(inserts, "machine_slot")[0]! as { isValid: boolean; productName: string | null };
     assert.equal(ms.isValid, true); // 0 < 6 ≤ 100
     assert.equal(ms.productName, "Montella");
   });
@@ -1387,7 +1413,7 @@ describe("Вендинг Core: приём слотов", () => {
     const { db, inserts } = writeDb();
     const svc = new VendingService(db);
     await svc.ingestSlots({ machines: [{ serial: "M", slots: [{ coilId: "1", product: "  ", capacity: 0, quantity: 0 }] }] });
-    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { isValid: boolean; productName: string | null };
+    const ms = строкиТаблицы(inserts, "machine_slot")[0]! as { isValid: boolean; productName: string | null };
     assert.equal(ms.productName, null);
     assert.equal(ms.isValid, false);
   });
@@ -1401,7 +1427,7 @@ describe("Вендинг Core: приём слотов", () => {
       machines: [{ serial: "2508160376", slots: [{ coilId: "1", product: "Snickers", capacity: 11, quantity: 8 }] }],
     });
     assert.equal(res.linked, 1);
-    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { machineId: string | null };
+    const ms = строкиТаблицы(inserts, "machine_slot")[0]! as { machineId: string | null };
     assert.equal(ms.machineId, "ent-1");
   });
 
@@ -1413,7 +1439,7 @@ describe("Вендинг Core: приём слотов", () => {
       machines: [{ serial: "c7a6181f0000", slots: [{ coilId: "1", product: "x", capacity: 1, quantity: 1 }] }],
     });
     assert.equal(res.linked, 1);
-    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { machineId: string | null };
+    const ms = строкиТаблицы(inserts, "machine_slot")[0]! as { machineId: string | null };
     assert.equal(ms.machineId, "kofe");
   });
 
@@ -1426,7 +1452,7 @@ describe("Вендинг Core: приём слотов", () => {
     });
     assert.equal(res.machines, 1);
     assert.equal(res.linked, 0);
-    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { machineId: string | null };
+    const ms = строкиТаблицы(inserts, "machine_slot")[0]! as { machineId: string | null };
     assert.equal(ms.machineId, null);
   });
 
@@ -1440,7 +1466,7 @@ describe("Вендинг Core: приём слотов", () => {
     await svc.ingestSlots({
       machines: [{ serial: "AH", slots: [{ coilId: "1", product: "18+", capacity: 6, quantity: 0 }] }],
     });
-    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { productId: string | null; productName: string | null };
+    const ms = строкиТаблицы(inserts, "machine_slot")[0]! as { productId: string | null; productName: string | null };
     assert.equal(ms.productId, "p1");
     assert.equal(ms.productName, "18+", "имя остаётся сырым — это по-прежнему «что показал автомат»");
   });
@@ -1465,7 +1491,7 @@ describe("Вендинг Core: приём слотов", () => {
     await svc.ingestSlots({
       machines: [{ serial: "AH", slots: [{ coilId: "1", product: "Загадка", capacity: 6, quantity: 0 }] }],
     });
-    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { productId: string | null };
+    const ms = строкиТаблицы(inserts, "machine_slot")[0]! as { productId: string | null };
     assert.equal(ms.productId, null);
   });
 
@@ -1491,7 +1517,7 @@ describe("Вендинг Core: приём слотов", () => {
       { serial: "РАЗДУТЫЙ", slots: MAX_SLOTS_PER_MACHINE + 1, reason: "слишком много слотов" },
     ]);
     // Слоты обычного автомата записаны — приём не отменён.
-    assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 1);
+    assert.equal(строкиТаблицы(inserts, "machine_slot").length, 1);
     // И пропуск не растворился: он в журнале событий.
     assert.equal(inserts.filter((i) => i.table === "event").length, 1);
   });
@@ -1512,6 +1538,195 @@ describe("Вендинг Core: приём слотов", () => {
 
   it("потолок выше живого максимума парка (488 слотов у Olma Администрация)", () => {
     assert.ok(MAX_SLOTS_PER_MACHINE > 488, "иначе самый большой автомат парка перестанет приниматься");
+  });
+});
+
+/**
+ * Приём пишет ПАЧКАМИ, а не по строке.
+ *
+ * 24.08.2026 сбор Ourvend стал падать каждые три часа: `This operation was
+ * aborted`, `machines_ok=0`. Приём 210 слотов делал 420 отдельных запросов, и
+ * после перевода базы на внешний Postgres по TLS (`verify-full`) он перестал
+ * укладываться в 10-секундный таймаут клиента агентов. Снимки при этом в базу
+ * ложились — Core дописывал транзакцию уже без слушателя, — а продажи и
+ * детектор заливок (они идут ПОСЛЕ успешного приёма) не выполнялись вовсе.
+ */
+describe("Вендинг Core: приём пишет пачками, а не построчно", () => {
+  it("слоты автомата уходят ОДНИМ insert с массивом строк (и снимки тоже)", async () => {
+    const { db, inserts } = writeDb();
+    const svc = new VendingService(db);
+    const res = await svc.ingestSlots({
+      machines: [
+        {
+          serial: "ПАЧКА",
+          slots: [
+            { coilId: "1", product: "A", capacity: 5, quantity: 1 },
+            { coilId: "2", product: "B", capacity: 5, quantity: 2 },
+            { coilId: "3", product: "C", capacity: 5, quantity: 3 },
+          ],
+        },
+      ],
+    });
+    assert.equal(res.slots, 3);
+    const планограмма = inserts.filter((i) => i.table === "machine_slot");
+    const история = inserts.filter((i) => i.table === "slot_snapshot");
+    assert.equal(планограмма.length, 1, "три слота — один запрос, а не три");
+    assert.equal(история.length, 1);
+    assert.ok(Array.isArray(планограмма[0]!.values), "values() получает массив строк");
+    assert.equal((планограмма[0]!.values as unknown[]).length, 3);
+    assert.equal((история[0]!.values as unknown[]).length, 3);
+    // Содержимое строк не поехало: порядок и значения те же, что присланы.
+    assert.deepEqual(
+      строкиТаблицы(inserts, "machine_slot").map((v) => [v.coilId, v.productName, v.quantity]),
+      [
+        ["1", "A", 1],
+        ["2", "B", 2],
+        ["3", "C", 3],
+      ],
+    );
+  });
+
+  it("каждый автомат — своя пачка (уборка зеркала по-прежнему помашинная)", async () => {
+    const { db, inserts } = writeDb();
+    const svc = new VendingService(db);
+    await svc.ingestSlots({
+      machines: [
+        { serial: "A", slots: [{ coilId: "1", product: "x", capacity: 1, quantity: 1 }] },
+        { serial: "B", slots: [{ coilId: "1", product: "y", capacity: 1, quantity: 1 }] },
+      ],
+    });
+    assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 2);
+  });
+
+  it("ветка конфликта берёт значения из excluded — иначе пачка обновила бы все строки данными одной", async () => {
+    // В многострочном INSERT литерал «capacity этой строки» невозможен: набор
+    // один на весь запрос. Ошибиться здесь значит записать всем слотам
+    // автомата остаток последнего — и это не упало бы ни одним тестом на счёт.
+    const { db, conflicts } = writeDb();
+    await new VendingService(db).ingestSlots({
+      machines: [
+        {
+          serial: "ПАЧКА",
+          slots: [
+            { coilId: "1", product: "A", capacity: 5, quantity: 1 },
+            { coilId: "2", product: "B", capacity: 9, quantity: 7 },
+          ],
+        },
+      ],
+    });
+    const набор = conflicts.find((c) => c.table === "machine_slot")!.set;
+    assert.match(текстSQL(набор.quantity), /excluded\.quantity/);
+    assert.match(текстSQL(набор.capacity), /excluded\.capacity/);
+    assert.match(текстSQL(набор.isValid), /excluded\.is_valid/);
+    assert.match(текстSQL(набор.productName), /excluded\.product_name/);
+    assert.match(текстSQL(набор.machineId), /excluded\.machine_id/);
+    // Семантика ссылки на карточку — прежняя, слово в слово.
+    assert.match(текстSQL(набор.productId), /excluded\.product_name is distinct from/);
+    assert.match(текстSQL(набор.productId), /coalesce\(excluded\.product_id/);
+  });
+
+  it("один coilId дважды в выгрузке — одна строка в пачке, побеждает последняя", async () => {
+    // Цикл такое переживал молча (INSERT, потом UPDATE). Многострочный INSERT
+    // отвечает «ON CONFLICT DO UPDATE command cannot affect row a second time»
+    // и роняет приём ЦЕЛИКОМ — то есть весь сбор.
+    const { db, inserts } = writeDb();
+    const res = await new VendingService(db).ingestSlots({
+      machines: [
+        {
+          serial: "ДУБЛЬ",
+          slots: [
+            { coilId: "1", product: "Старое", capacity: 5, quantity: 1 },
+            { coilId: "1", product: "Новое", capacity: 6, quantity: 4 },
+          ],
+        },
+      ],
+    });
+    const слоты = строкиТаблицы(inserts, "machine_slot");
+    assert.equal(слоты.length, 1, "в одном запросе два ряда с одним ключом Postgres не примет");
+    assert.equal(слоты[0]!.productName, "Новое");
+    assert.equal(слоты[0]!.quantity, 4);
+    // История дублей не боится — там уникального ключа нет, и счётчик считает всё.
+    assert.equal(строкиТаблицы(inserts, "slot_snapshot").length, 2);
+    assert.equal(res.slots, 2);
+  });
+
+  it("продажи тоже пачкой: один запрос на таблицу, массив строк", async () => {
+    const { db, calls } = ingestSalesDb();
+    const res = await new VendingService(db).ingestSales({
+      capturedAt: "2026-08-24T04:00:00Z",
+      periodStart: "2026-08-17T04:00:00Z",
+      periodEnd: "2026-08-24T04:00:00Z",
+      productSales: [
+        { serial: "AH", product: "Montella", quantity: 5 },
+        { serial: "AH", product: "Twix", quantity: 2 },
+        { serial: "Olma", product: "Twix", quantity: 9 },
+      ],
+      machineSales: [
+        { serial: "AH", totalAmount: 100, totalCount: 2 },
+        { serial: "Olma", totalAmount: 200, totalCount: 3 },
+      ],
+    });
+    assert.equal(res.productRows, 3);
+    assert.equal(res.machineRows, 2);
+    const товары = calls.filter((c) => c.table === "product_sale");
+    const автоматы = calls.filter((c) => c.table === "machine_sale");
+    assert.equal(товары.length, 1, "три продажи — один запрос");
+    assert.equal(автоматы.length, 1);
+    assert.equal((товары[0]!.values as unknown[]).length, 3);
+    assert.equal((автоматы[0]!.values as unknown[]).length, 2);
+    // Ключ идемпотентности прежний, значения — из своей строки пачки.
+    assert.deepEqual(товары[0]!.target, [productSale.machineSerial, productSale.productName, productSale.capturedAt]);
+    assert.match(текстSQL(товары[0]!.set.quantity), /excluded\.quantity/);
+    assert.match(текстSQL(автоматы[0]!.set.totalAmount), /excluded\.total_amount/);
+    assert.match(текстSQL(автоматы[0]!.set.totalCount), /excluded\.total_count/);
+  });
+
+  it("одна и та же пара (автомат, товар) дважды в батче — одна строка, побеждает последняя", async () => {
+    // Ключ идемпотентности (автомат, товар, capturedAt) в одной пачке дважды
+    // Postgres не примет; цикл раньше делал апдейт.
+    const { db, calls } = ingestSalesDb();
+    await new VendingService(db).ingestSales({
+      capturedAt: "2026-08-24T04:00:00Z",
+      periodStart: "2026-08-17T04:00:00Z",
+      periodEnd: "2026-08-24T04:00:00Z",
+      productSales: [
+        { serial: "AH", product: "Montella", quantity: 5 },
+        { serial: "AH", product: "Montella", quantity: 8 },
+      ],
+      machineSales: [
+        { serial: "AH", totalAmount: 1, totalCount: 1 },
+        { serial: "AH", totalAmount: 2, totalCount: 2 },
+      ],
+    });
+    const товары = calls.find((c) => c.table === "product_sale")!.values as { quantity: number }[];
+    assert.equal(товары.length, 1);
+    assert.equal(товары[0]!.quantity, 8);
+    const автоматы = calls.find((c) => c.table === "machine_sale")!.values as { totalCount: number }[];
+    assert.equal(автоматы.length, 1);
+    assert.equal(автоматы[0]!.totalCount, 2);
+  });
+
+  it("пустой список продаж не шлёт запрос вовсе (values([]) Postgres не примет)", async () => {
+    const { db, calls } = ingestSalesDb();
+    await new VendingService(db).ingestSales({
+      periodStart: "2026-08-17T04:00:00Z",
+      periodEnd: "2026-08-24T04:00:00Z",
+      productSales: [{ serial: "AH", product: "Montella", quantity: 5 }],
+      machineSales: [],
+    });
+    assert.equal(calls.filter((c) => c.table === "machine_sale").length, 0);
+  });
+
+  it("склад тоже пачкой: две позиции — один запрос", async () => {
+    const { db, inserts } = writeDb();
+    await new VendingService(db).ingestStock({
+      items: [
+        { product: "Montella", quantity: 24 },
+        { product: "Twix", quantity: 12 },
+      ],
+    });
+    assert.equal(inserts.length, 1, "две позиции — один запрос");
+    assert.equal(строкиВставок(inserts).length, 2);
   });
 });
 
@@ -1660,7 +1875,7 @@ describe("Сбой уборки не стоит снимка", () => {
     });
 
     assert.equal(res.slots, 1, "снимок обязан быть записан");
-    assert.equal(inserts.filter((i) => i.table === "machine_slot").length, 1);
+    assert.equal(строкиТаблицы(inserts, "machine_slot").length, 1);
     assert.equal(res.pruned, 0);
     assert.equal(res.pruneErrors.length, 1, "о сбое уборки молчать нельзя");
     assert.equal(res.pruneErrors[0]!.serial, "2508160376");
@@ -1675,7 +1890,7 @@ describe("Сбой уборки не стоит снимка", () => {
     });
     const события = inserts.filter((i) => i.table === "event");
     assert.equal(события.length, 1);
-    assert.equal((события[0]!.values as { type: string }).type, "vending.slots.prune_failed");
+    assert.equal((строкиВставок(события)[0]! as { type: string }).type, "vending.slots.prune_failed");
   });
 
   it("сбой на одном автомате не лишает уборки остальных", async () => {
@@ -1706,10 +1921,10 @@ describe("Продажи Ourvend знают свой автомат", () => {
       productSales: [{ serial: "2508160376", product: "Snickers", quantity: 5 }],
       machineSales: [{ serial: "2508160376", totalAmount: 561000, totalCount: 66 }],
     });
-    const строки = inserts.filter((i) => (i.values as { machineSerial?: string }).machineSerial === "2508160376");
+    const строки = строкиВставок(inserts).filter((v) => (v as { machineSerial?: string }).machineSerial === "2508160376");
     assert.ok(строки.length >= 2, "обе таблицы продаж должны получить строку");
     for (const r of строки) {
-      assert.equal((r.values as { machineId: string | null }).machineId, "ent-1");
+      assert.equal((r as { machineId: string | null }).machineId, "ent-1");
     }
   });
 
@@ -1724,8 +1939,8 @@ describe("Продажи Ourvend знают свой автомат", () => {
       productSales: [{ serial: "2508160355", product: "Twix", quantity: 1 }],
       machineSales: [],
     });
-    const строка = inserts.find((i) => (i.values as { productName?: string }).productName === "Twix")!;
-    assert.equal((строка.values as { machineId: string | null }).machineId, null);
+    const строка = строкиВставок(inserts).find((v) => (v as { productName?: string }).productName === "Twix")!;
+    assert.equal((строка as { machineId: string | null }).machineId, null);
   });
 });
 

@@ -42,11 +42,27 @@ export class AgentsCoreClient {
     private readonly timeoutMs = 10_000,
     /** Внутренний токен Core: агенты пишут события и меняют задачи. */
     private readonly serviceToken = "",
+    /**
+     * Таймаут ПРИЁМА данных — отдельно от обычных запросов.
+     *
+     * Обычный вызов Core отвечает за миллисекунды, и 10 секунд там — здоровая
+     * страховка от зависшего соединения. Приём слотов/продаж — другая работа:
+     * это одна транзакция на сотни строк, и её длительность растёт с парком и
+     * с ценой похода в базу. 24.08.2026 после перевода базы на внешний
+     * Postgres по TLS (`verify-full`) приём перестал укладываться в 10 секунд —
+     * агент рвал соединение («This operation was aborted»), помечал сбор
+     * `failed` с `machines_ok=0` и не запускал ни продажи, ни детектор
+     * заливок, ХОТЯ Core транзакцию дописывал. Три часа спустя всё повторялось.
+     *
+     * Минуты хватает с запасом: приём укладывался в 9–12 секунд ещё до
+     * пакетной записи, а с ней — в единицы секунд.
+     */
+    private readonly ingestTimeoutMs = 60_000,
   ) {}
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+  private async request<T>(path: string, init?: RequestInit, timeoutMs = this.timeoutMs): Promise<T> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${this.baseUrl}${path}`, {
         ...init,
@@ -324,10 +340,12 @@ export class AgentsCoreClient {
       slots: { coilId: string; product: string; capacity: number; quantity: number }[];
     }[];
   }): Promise<{ machines: number; slots: number }> {
-    return this.request<{ machines: number; slots: number }>("/vending/ingest", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    // Длинный таймаут: одна транзакция Core на сотни слотов (см. ingestTimeoutMs).
+    return this.request<{ machines: number; slots: number }>(
+      "/vending/ingest",
+      { method: "POST", body: JSON.stringify(payload) },
+      this.ingestTimeoutMs,
+    );
   }
 
   /**
@@ -350,10 +368,12 @@ export class AgentsCoreClient {
       events: number;
       matched: number;
       skipped: { serial: string; reason: string }[];
-    }>("/vending/refill-events/detect", {
-      method: "POST",
-      body: JSON.stringify({ days }),
-    });
+    }>(
+      "/vending/refill-events/detect",
+      { method: "POST", body: JSON.stringify({ days }) },
+      // Детектор читает окно снимков по всему парку — та же длинная работа.
+      this.ingestTimeoutMs,
+    );
   }
 
   /** Отдать собранные продажи в Core (история для прогноза расхода). */
@@ -364,10 +384,11 @@ export class AgentsCoreClient {
     productSales: { serial: string; product: string; quantity: number }[];
     machineSales: { serial: string; totalAmount: number; totalCount: number }[];
   }): Promise<{ productRows: number; machineRows: number }> {
-    return this.request<{ productRows: number; machineRows: number }>("/vending/ingest-sales", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    return this.request<{ productRows: number; machineRows: number }>(
+      "/vending/ingest-sales",
+      { method: "POST", body: JSON.stringify(payload) },
+      this.ingestTimeoutMs,
+    );
   }
 
   // ── Учётный снапшот OurVend (П2 плана поглощения mydon-stock) ─────────────

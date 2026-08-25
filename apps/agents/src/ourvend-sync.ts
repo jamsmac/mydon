@@ -180,7 +180,13 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
   const skippedNotes: string[] = [];
   if (collected.length > 0) {
     try {
+      // Длительность приёма — в лог отдельной строкой. 24.08.2026 сбор падал
+      // «This operation was aborted» и по журналу нельзя было отличить
+      // «Core не ответил» от «Core отвечал дольше таймаута»: строки о том,
+      // сколько шёл приём, не было ни одной.
+      const t0 = Date.now();
       const res = await core.ingestVendingSlots({ capturedAt, machines: collected });
+      console.log(`[ourvend:sync] приём слотов ${Date.now() - t0} мс — автоматов ${collected.length}, слотов ${res.slots}`);
       slots = res.slots;
       // Автомат, пропущенный приёмом (например, неправдоподобное число
       // слотов), — не отказ сбора, но и не пустяк: его планограмма осталась
@@ -207,7 +213,9 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
       // идемпотентен по (автомат, конец окна), так что перекрытие не плодит
       // строк, зато после простоя сбора длиннее суток (24.08 было девять
       // `failed` подряд) заливки из провала подберутся сами, а не ручным POST.
+      const t0 = Date.now();
       const d = await core.detectRefillEvents(DETECT_DAYS);
+      console.log(`[ourvend:sync] детектор заливок ${Date.now() - t0} мс — заливок ${d.events}`);
       detect = { events: d.events, matched: d.matched };
     } catch (err) {
       console.warn(`[ourvend:sync] детектор заливок не отработал: ${errText(err)}`);
@@ -242,6 +250,7 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
     }
     if (productSales.length > 0 || machineSales.length > 0) {
       try {
+        const t0 = Date.now();
         const res = await core.ingestVendingSales({
           capturedAt,
           periodStart: from.toISOString(),
@@ -249,6 +258,9 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
           productSales,
           machineSales,
         });
+        console.log(
+          `[ourvend:sync] приём продаж ${Date.now() - t0} мс — строк по товарам ${res.productRows}, по автоматам ${res.machineRows}`,
+        );
         productSalesRows = res.productRows;
       } catch (err) {
         saleErrors.push(`приём продаж: ${errText(err)}`);
