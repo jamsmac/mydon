@@ -1,4 +1,4 @@
-import { TZ } from "@mydon/shared";
+import { SALE_PRICE_FACT_DAYS, TZ } from "@mydon/shared";
 import type {
   DeadRow,
   DeadStockReport,
@@ -14,11 +14,12 @@ import type {
   AnalyticsWarning,
   AnalyticsWarningCode,
   BootstrapSalePriceResult,
+  BootstrapSkipReason,
   OurvendHealth,
   SetSalePriceResult,
   WithWarnings,
 } from "./core-client";
-import { parsePriceCommand } from "./purchase-brief";
+import { isNonPositivePrice, parsePriceCommand } from "./purchase-brief";
 import { MAX_PARTS, RU, chunk } from "./purchase-plan";
 
 /**
@@ -62,8 +63,16 @@ export const DEAD_STOCK_DAYS_DEFAULT = 21;
 export const DEAD_STOCK_DAYS_MAX = 180;
 export const PRICE_CHANGES_DAYS_DEFAULT = 30;
 export const PRICE_CHANGES_DAYS_MAX = 180;
-export const PRICE_GAP_DAYS_DEFAULT = 14;
 export const PRICE_GAP_DAYS_MAX = 90;
+/**
+ * Окно факта витрины — ОБЩЕЕ с Core (`SALE_PRICE_FACT_DAYS` в `@mydon/shared`).
+ *
+ * Своей копии (`PRICE_GAP_DAYS_DEFAULT = 14`) здесь больше нет: гейт команды
+ * «цена продажи» считает факт по числу Core, а бриф подписывал окно своим —
+ * разъехавшись, они дали бы «цена принята» на то самое расхождение, которое
+ * отчёт в том же письме называет разрывом.
+ */
+export { SALE_PRICE_FACT_DAYS };
 /**
  * «витрина как факт»: окно то же, что у отчёта, а потолок — СВОЙ.
  * `BootstrapSalePriceDto` допускает 180 суток (в отличие от `PriceGapDto`
@@ -148,6 +157,28 @@ export function parseDays(text: string, fallback: number, max: number): number {
   return Math.min(Math.trunc(n), Math.max(1, max));
 }
 
+/** Окно отчёта и подсказка, если запрошенное окно пришлось урезать. */
+export interface Окно {
+  days: number;
+  /** `null` — окно взято как есть. Иначе строка для владельца. */
+  note: string | null;
+}
+
+/**
+ * Окно из фразы вместе с объяснением, если оно урезано.
+ *
+ * «маржа 91» молча превращалась в 90 — владелец видел отчёт, который не
+ * просил, и не знал об этом. Потолок держит DTO Core (400 на 91), поэтому
+ * зажимать всё равно надо здесь; молчать при этом — нельзя.
+ */
+export function окно(text: string, fallback: number, max: number): Окно {
+  const days = parseDays(text, fallback, max);
+  const m = /за\s+(\d{1,4})\s*(?:дн|сут)/i.exec(text.trim()) ?? /(?:^|\s)(\d{1,4})\s*$/.exec(text.trim());
+  const просили = m ? Number(m[1]) : null;
+  if (просили === null || !Number.isFinite(просили) || просили <= days) return { days, note: null };
+  return { days, note: `Максимум ${RU(max)} дн. — показываю за ${RU(days)}.` };
+}
+
 /**
  * «цена продажи TUC Sour cream 15 000 точно» → товар, сумма, подтверждение.
  *
@@ -157,23 +188,54 @@ export function parseDays(text: string, fallback: number, max: number): number {
  * 15). `null` → показать формат.
  */
 export function parseSalePriceCommand(text: string): { product: string; price: number; confirmed: boolean } | null {
+  const rest = хвостЭталона(text);
+  return rest === null ? null : parsePriceCommand(`цена ${rest}`);
+}
+
+/** Часть фразы после «цена продажи»: `null` — это вообще не та команда. */
+function хвостЭталона(text: string): string | null {
   const t = text.trim();
   if (!isSalePriceCommand(t)) return null;
   const rest = t.replace(/^цена\s+продажи\s*:?\s*/i, "").trim();
-  if (rest === "") return null;
-  return parsePriceCommand(`цена ${rest}`);
+  return rest === "" ? null : rest;
+}
+
+/**
+ * «цена продажи TUC -15000» / «цена продажи TUC 0» — цена названа, но такой
+ * не бывает (S8). Отдельно от «формат не разобрался»: на подсказку формата
+ * владелец ответит той же командой — формат-то у неё верный.
+ */
+export function isNonPositiveSalePrice(text: string): boolean {
+  const rest = хвостЭталона(text);
+  return rest !== null && isNonPositivePrice(`цена ${rest}`);
 }
 
 /** Подсказка формата, когда «цена продажи …» не разобралась. */
 export const SALE_PRICE_HINT =
   "Формат: «цена продажи <товар> <сум за штуку>», например «цена продажи TUC 15000». " +
   "Это ЭТАЛОН витрины, а не закупочная цена (та — «цена TUC 12000»). " +
-  "Если эталон расходится с фактом продаж больше чем на 20% — повтори со словом «точно».";
+  "Если эталон расходится с фактом продаж больше чем на 20 % — повтори со словом «точно».";
 
 // ── Оформление ──────────────────────────────────────────────────────────────
 
-/** Процент с подписью. `null` — процента НЕТ (нулевая выручка), а не «0 %». */
-export const PCT = (p: number | null): string => (p === null ? "— %" : `${p} %`);
+/**
+ * Деньги: число разрядами и ЕДИНИЦА. «выручка 1 234 567» без «сум» владелец
+ * читает как штуки — и первым делом сверяет её со счётчиком автомата.
+ *
+ * Одна функция на весь бот и одно написание с панелью (`amount()` в
+ * `lib/format.ts`): «12 000 сум» здесь и «12 000» там — это про одно число,
+ * но выглядит как про разные.
+ */
+export const сум = (n: number): string => `${RU(n)} сум`;
+
+/**
+ * Процент с подписью. `null` — процента НЕТ (нулевая выручка), а не «0 %».
+ *
+ * Плейсхолдер — голое тире, как в панели (`percent()` в `lib/format.ts`):
+ * «— %» читается как «ноль процентов с опечаткой», а не как «считать не из
+ * чего».
+ */
+export const PCT = (p: number | null): string => (p === null ? "—" : `${p} %`);
 
 /** Процент со знаком: «+20 %», «−20 %». Минус — типографский, как в усушке. */
 export const ЗНАК = (p: number): string => `${p > 0 ? "+" : p < 0 ? "−" : ""}${Math.abs(p)} %`;
@@ -224,7 +286,10 @@ export function сущ(n: number, one: string, few: string, many: string): strin
  * каждому автомату, и списком в три десятка одинаковых строк она вытеснила бы
  * сам отчёт.
  */
-function предупреждения(warnings: AnalyticsWarning[] | undefined, кроме: AnalyticsWarningCode[] = []): string[] {
+export function предупреждения(
+  warnings: AnalyticsWarning[] | undefined,
+  кроме: AnalyticsWarningCode[] = [],
+): string[] {
   if (!warnings || warnings.length === 0) return [];
   const видели = new Set<string>();
   const строки: string[] = [];
@@ -278,17 +343,21 @@ const ПОКРЫТО_ВИТРИНОЙ: AnalyticsWarningCode[] = ["no_reference"]
 /** Строки продаж, выброшенные фильтром «в строю»: названы, а не потеряны (R-P5b-1). */
 function исключённые(r: MarginReport): string[] {
   if (r.excluded.length === 0) return [];
-  const строки = r.excluded.map((e) => `${e.serial} — ${RU(e.qty)} шт на ${RU(e.amount)} сум`);
+  const строки = r.excluded.map((e) => `${e.serial} — ${RU(e.qty)} шт на ${сум(e.amount)}`);
+  // «Не в строю» — не единственная причина: серийника может не быть в реестре
+  // вовсе (склад «продал», новый автомат без карточки). Утверждать про статус
+  // того, чьей карточки нет, значит отправить владельца искать её в списке
+  // выведенных из строя.
   return [
     "",
-    `⚠️ Не в счёт (автомат не в строю, ${r.excluded.length}): ${строки.join(" · ")}`,
+    `⚠️ Не в счёт (карточки автомата нет или он не в строю, ${r.excluded.length}): ${строки.join(" · ")}`,
   ];
 }
 
 function машинаСтрока(m: MarginMachine): string {
   const тревога = m.low ? " ⚠️" : "";
   return (
-    `• ${m.name}: выручка ${RU(m.revenue)}, маржа ${RU(m.margin)} (${PCT(m.pct)})${тревога} · ${RU(m.qty)} шт` +
+    `• ${m.name}: выручка ${сум(m.revenue)}, маржа ${сум(m.margin)} (${PCT(m.pct)})${тревога} · ${RU(m.qty)} шт` +
     (m.unknownUnits > 0 ? ` · без себестоимости ${RU(m.unknownUnits)} шт` : "")
   );
 }
@@ -302,7 +371,7 @@ function машинаСтрока(m: MarginMachine): string {
 export function товарСтрока(p: MarginProduct): string {
   const тревога = p.low ? " ⚠️" : "";
   return (
-    `• ${p.product}: маржа ${RU(p.margin)} (${PCT(p.pct)})${тревога} · ${RU(p.qty)} шт · выручка ${RU(p.revenue)}` +
+    `• ${p.product}: маржа ${сум(p.margin)} (${PCT(p.pct)})${тревога} · ${RU(p.qty)} шт · выручка ${сум(p.revenue)}` +
     (p.unknownUnits > 0 ? ` · без себестоимости ${RU(p.unknownUnits)} шт` : "")
   );
 }
@@ -322,7 +391,7 @@ export function formatMargin(r: MarginReport & WithWarnings): string[] {
   }
 
   const t = r.totals;
-  lines.push(`Итого: выручка ${RU(t.revenue)}, маржа ${RU(t.margin)} (${PCT(t.pct)}) · ${RU(t.qty)} шт`);
+  lines.push(`Итого: выручка ${сум(t.revenue)}, маржа ${сум(t.margin)} (${PCT(t.pct)}) · ${RU(t.qty)} шт`);
   // Строка обязательна при любом unknownUnits: без неё завышение маржи
   // невидимо, а именно оно и есть цена этого отчёта (R-P5b-2).
   if (t.unknownUnits > 0) {
@@ -360,7 +429,7 @@ export function formatMargin(r: MarginReport & WithWarnings): string[] {
 export function мёртваяСтрока(d: DeadRow): string {
   const где = d.machineName ? `${d.machineName} · ` : d.serial ? `${d.serial} · ` : "";
   // «Цены нет» — не «ноль сум»: складывать такие нули как деньги нельзя.
-  const деньги = d.noPrice ? "цена закупки неизвестна" : `≈ ${RU(d.value)} сум`;
+  const деньги = d.noPrice ? "цена закупки неизвестна" : `≈ ${сум(d.value)}`;
   return `• ${где}${d.product} ${RU(d.qty)} шт — ${деньги}`;
 }
 
@@ -396,7 +465,7 @@ export function formatDeadStock(r: DeadStockReport & WithWarnings): string[] {
   }
 
   lines.push(
-    `Склад и автоматы: нет движения ${r.days} дн., ${RU(всего)} поз., оценка ≈ ${RU(r.totalValue)} сум ` +
+    `Склад и автоматы: нет движения ${r.days} дн., ${RU(всего)} поз., оценка ≈ ${сум(r.totalValue)} ` +
       `(считаем с ${день(r.since)}).`,
   );
   if (r.noPriceCount > 0) {
@@ -410,7 +479,7 @@ export function formatDeadStock(r: DeadStockReport & WithWarnings): string[] {
 }
 
 export const изменениеСтрока = (c: PriceChange): string =>
-  `• ${c.product}: ${RU(c.from)} → ${RU(c.to)} (${ЗНАК(c.pct)}) · ${день(c.at)}`;
+  `• ${c.product}: ${RU(c.from)} → ${сум(c.to)} (${ЗНАК(c.pct)}) · ${день(c.at)}`;
 
 function лентаЦен(title: string, rows: PriceChange[], lines: string[]): void {
   if (rows.length === 0) return;
@@ -443,10 +512,10 @@ function разрывСтрока(g: PriceGapRow): string {
   const сторона = g.gap > 0 ? "ниже" : "выше";
   const хвост =
     g.lost > 0
-      ? `недобор ≈ ${RU(g.lost)} сум`
-      : `продали дороже эталона на ≈ ${RU(-g.lost)} сум — проверь эталон`;
+      ? `недобор ≈ ${сум(g.lost)}`
+      : `продали дороже эталона на ≈ ${сум(-g.lost)} — проверь эталон`;
   return (
-    `• ${g.product}: факт ${RU(g.fact)} · эталон ${RU(g.reference)} · ${сторона} на ${Math.abs(g.gapPct)} % · ` +
+    `• ${g.product}: факт ${сум(g.fact)} · эталон ${сум(g.reference)} · ${сторона} на ${Math.abs(g.gapPct)} % · ` +
     `${RU(g.qty)} шт → ${хвост}`
   );
 }
@@ -467,7 +536,7 @@ export function formatPriceGap(r: PriceGapReport & WithWarnings): string[] {
   } else {
     // Сумма — ТОЛЬКО по недобору: «продали дороже» не выручка, которой можно
     // закрыть недобор, а повод перепроверить сам эталон (R-P5b-6).
-    lines.push(`Σ недобор ≈ ${RU(r.lostTotal)} сум по ${недобор.length} поз. за ${r.days} дн.`);
+    lines.push(`Σ недобор ≈ ${сум(r.lostTotal)} по ${недобор.length} поз. за ${r.days} дн.`);
     if (дороже.length > 0) {
       lines.push(`Продаём дороже эталона: ${дороже.length} поз. — в сумму недобора не входят.`);
     }
@@ -497,20 +566,31 @@ export function formatPriceGap(r: PriceGapReport & WithWarnings): string[] {
 /** Ответ на «цена продажи …»: успех, гейт по факту витрины или «не найден». */
 export function formatSalePriceResult(r: SetSalePriceResult): string {
   if (r.ok) {
-    const было = r.oldPrice === null || r.oldPrice === undefined ? "не была задана" : `${RU(r.oldPrice)} сум`;
+    const было = r.oldPrice === null || r.oldPrice === undefined ? "не была задана" : сум(r.oldPrice);
     return [
-      `🏷 Эталон витрины «${r.product}»: ${было} → ${RU(r.newPrice ?? 0)} сум.`,
+      `🏷 Эталон витрины «${r.product}»: ${было} → ${сум(r.newPrice ?? 0)}.`,
       "",
       "«витрина» — посмотреть, где факт продаж разошёлся с эталоном.",
     ].join("\n");
   }
   if (r.reason === "spike") {
-    const факт = r.factPrice === null || r.factPrice === undefined ? "неизвестен" : `${RU(r.factPrice)} сум`;
+    const факт = r.factPrice === null || r.factPrice === undefined ? "неизвестен" : сум(r.factPrice);
     return [
-      `⚠️ Эталон ${RU(r.newPrice ?? 0)} сум отличается от ФАКТА витрины ${факт} на ${r.deviationPct}%.`,
+      `⚠️ Эталон ${сум(r.newPrice ?? 0)} отличается от ФАКТА витрины ${факт} на ${r.deviationPct} %.`,
       "",
-      "Факт — средняя цена продаж за 14 дн. (деньги ÷ штуки), эталон — твоя цена, по которой должно продаваться.",
+      `Факт — средняя цена продаж за ${SALE_PRICE_FACT_DAYS} дн. (деньги ÷ штуки), эталон — твоя цена, ` +
+        "по которой должно продаваться.",
       `Если так и задумано — повтори со словом «точно»: «цена продажи ${r.product} ${r.newPrice} точно».`,
+    ].join("\n");
+  }
+  // Цену отверг сам Core (не число, не положительная): печатаем ЕГО причину.
+  // «Товар не найден» на живой товар с кривой ценой отправил бы владельца
+  // искать несуществующую проблему в прайсе (S9).
+  if (r.reason === "invalid_price") {
+    return [
+      `⚠️ ${r.message ?? "Цена должна быть больше нуля."}`,
+      "",
+      `Назови цену числом: «цена продажи ${r.product ?? "<товар>"} 15000».`,
     ].join("\n");
   }
   return `Товар «${r.product ?? "?"}» не найден в прайсе вендинга. Имя должно совпадать с карточкой товара или её алиасом.`;
@@ -519,27 +599,51 @@ export function formatSalePriceResult(r: SetSalePriceResult): string {
 /** Ответ на «витрина как факт»: что проставили и что пропустили — с причинами. */
 export function formatSalePriceBootstrap(r: BootstrapSalePriceResult): string[] {
   const title = `🏷 Витрина как факт — эталон снек-автоматов (OurVend) по продажам за ${r.days} дн.`;
-  const уже = r.skipped.filter((s) => s.reason === "already_set");
   const безПродаж = r.skipped.filter((s) => s.reason === "no_sales");
   const lines: string[] = [];
 
   if (r.set.length === 0) {
-    lines.push(
-      `Проставлять нечего: эталон уже задан ${уже.length} поз., без продаж за ${r.days} дн. — ${безПродаж.length} поз.`,
-    );
+    lines.push(`Проставлять нечего: ${разбивкаПропуска(r.skipped)}.`);
     return capped(title, lines, "Цены");
   }
 
   lines.push(`Проставлено ${r.set.length} поз. — теперь это ЭТАЛОН, а не факт: дальше он не двигается сам.`);
   lines.push("");
-  for (const s of r.set) lines.push(`• ${s.product} — ${RU(s.price)} сум (по ${RU(s.qty)} шт продаж)`);
+  for (const s of r.set) lines.push(`• ${s.product} — ${сум(s.price)} (по ${RU(s.qty)} шт продаж)`);
   if (r.skipped.length > 0) {
-    lines.push("", `Пропущено ${r.skipped.length}: эталон уже задан ${уже.length}, нет продаж ${безПродаж.length}.`);
+    lines.push("", `Пропущено ${r.skipped.length}: ${разбивкаПропуска(r.skipped)}.`);
     if (безПродаж.length > 0) {
       lines.push(`Без продаж: ${безПродаж.map((s) => s.product).join(", ")} — задай вручную «цена продажи …».`);
     }
   }
   return capped(title, lines, "Цены");
+}
+
+/**
+ * Причины пропуска бутстрапа — ВСЕ и с числами, которые сходятся с итогом.
+ *
+ * «Пропущено 5: эталон уже задан 1, нет продаж 1» — это три потерянных
+ * товара: владелец считает, что эталон им проставлен, и разрыв витрины по ним
+ * не всплывёт никогда (S9). Хвост «прочее» держит арифметику и на причине,
+ * которую Core завёл позже бота.
+ */
+function разбивкаПропуска(skipped: BootstrapSalePriceResult["skipped"]): string {
+  const счёт = (r: BootstrapSkipReason): number => skipped.filter((s) => s.reason === r).length;
+  const части: string[] = [];
+  const названо = [
+    ["already_set", (n: number) => `эталон уже задан ${RU(n)}`],
+    ["no_sales", (n: number) => `нет продаж ${RU(n)}`],
+    ["no_fact", (n: number) => `продажи есть, а цены из них нет ${RU(n)}`],
+    ["inactive", (n: number) => `снят с продажи ${RU(n)}`],
+  ] as const;
+  let учтено = 0;
+  for (const [code, текст] of названо) {
+    const n = счёт(code);
+    учтено += n;
+    if (n > 0) части.push(текст(n));
+  }
+  if (skipped.length - учтено > 0) части.push(`по прочим причинам ${RU(skipped.length - учтено)}`);
+  return части.length === 0 ? "пропущенных нет" : части.join(", ");
 }
 
 /**
@@ -550,9 +654,22 @@ export function formatSalePriceBootstrap(r: BootstrapSalePriceResult): string[] 
  * владельцу «витрина (product_sale) — не число ч» — то есть отчёт о свежести,
  * который сам себя не понял.
  */
+/**
+ * Со скольких часов снимок считается протухшим.
+ *
+ * То же число, что красит пилюлю в панели (`HEALTH_LAG_HOURS` в
+ * `ourvend-health-view.tsx`): сбор ходит раз в 3 часа, и шесть часов — это
+ * ровно два пропущенных прогона. Разойдись пороги — тревога зависела бы от
+ * того, куда владелец смотрит, а не от состояния сбора.
+ */
+const LAG_ALERT_H = 6;
+
+/** Метка протухшего снимка: та же тревога, что красная пилюля в панели (U10). */
+const протух = (часы: number): string => (часы > LAG_ALERT_H ? " ⚠️" : "");
+
 const лагМин = (v: number | null | undefined): string =>
-  v == null ? "снимков нет" : v < 90 ? `${RU(v)} мин` : `${RU(v / 60)} ч`;
-const лагЧ = (v: number | null | undefined): string => (v == null ? "снимков нет" : `${RU(v)} ч`);
+  v == null ? "снимков нет" : v < 90 ? `${RU(v)} мин${протух(v / 60)}` : `${RU(v / 60)} ч${протух(v / 60)}`;
+const лагЧ = (v: number | null | undefined): string => (v == null ? "снимков нет" : `${RU(v)} ч${протух(v)}`);
 
 /**
  * Состояние сбора одной фразой: пусто / серия отказов / отказов нет.
@@ -575,6 +692,16 @@ export function состояниеСбора(h: OurvendHealth): string {
       "сбор стоит, свежих данных нет"
     );
   }
+  // ПОСЛЕДНИЙ ПРОГОН УСПЕШЕН — ЭТО НЕ «ВСЁ ХОРОШО». На проде 25.08 один успех
+  // в 16:00 закрыл собой 12 отказов подряд с 24.08: `failedStreak` обнулился,
+  // и зелёная строка встала над журналом, где упало 12 прогонов из 20.
+  const отказов = h.runs.filter((r) => r.status === "failed").length;
+  if (отказов > 0) {
+    return (
+      `✅ Сейчас собирается, но ${RU(отказов)} ${сущ(отказов, "отказ", "отказа", "отказов")} ` +
+      `среди последних ${RU(h.runs.length)} ${сущ(h.runs.length, "прогона", "прогонов", "прогонов")}`
+    );
+  }
   return "✅ Отказов подряд нет";
 }
 
@@ -589,9 +716,11 @@ export function прогоныСтрока(runs: OurvendHealth["runs"]): string 
 
 /** Свежесть снимков: слоты, продажи, витрина. Отсутствующий лаг — «снимков нет». */
 export function свежестьСтрока(h: OurvendHealth): string {
+  // «product_sale» — имя таблицы кабинета, а не слово владельца. В отчёте, где
+  // всё остальное сказано по-русски, оно читается как ошибка (U5).
   return (
     `Свежесть: слоты — ${лагМин(h.slotsLagMin)} · продажи — ${лагЧ(h.salesLagH)} · ` +
-    `витрина (product_sale) — ${лагЧ(h.productSaleLagH)}`
+    `продажи по товарам (кабинет) — ${лагЧ(h.productSaleLagH)}`
   );
 }
 
@@ -602,11 +731,45 @@ export function свежестьСтрока(h: OurvendHealth): string {
  * двух местах разъехалась бы не по виду, а по смыслу — «✅ сходится» в одном
  * отчёте и «расхождений 3» в другом об одних и тех же сутках.
  */
-export function паритетСтрока(p: OurvendHealth["parity"]): string {
-  return (
-    `Паритет за ${p.days} дн.: ${p.ok ? "✅ сходится" : `❌ расхождений ${RU(p.mismatches)}`} · ` +
-    `остатки ${p.stockOk ? "✅" : "❌"}${p.note ? ` · ${p.note}` : ""}`
-  );
+/**
+ * Паритет: `stockChecked` есть у Core всегда, `checked` (пар продаж) — пока
+ * нет. Читаем его необязательным: появится в общем типе — строка станет
+ * точнее, не появится — работает по заметке Core.
+ */
+type Паритет = OurvendHealth["parity"] & { checked?: number };
+
+export function паритетСтрока(p: Паритет): string {
+  // Вердикт — ПО ПОЛОВИНАМ, а не по общему `ok`. Общий флаг гасит обе
+  // половины разом: на проде 25.08 продажи сходились 1-в-1, а снимков
+  // остатков за закрытые сутки не было вовсе — и строка печатала
+  // «❌ расхождений 0», отчёт, противоречащий сам себе на первом же прогоне.
+  //
+  // НОЛЬ РАСХОЖДЕНИЙ БЕЗ СВЕРКИ — НЕ «СХОДИТСЯ». Если сверять было не с чем,
+  // это говорится словами: зелёная галка над несравнёнными сутками — ровно те
+  // «нули как всё хорошо», которые этот отчёт и должен ловить.
+  const части = (p.note ?? "").split("; ").filter((ч) => ч !== "");
+  const заметкаОстатков = (ч: string): boolean => ч.startsWith("остатки:");
+  const продажНет =
+    p.checked === undefined
+      ? части.some((ч) => !заметкаОстатков(ч) && /продаж/i.test(ч))
+      : p.checked === 0;
+  const продажи = продажНет
+    ? "продажи: сверять нечего"
+    : p.mismatches > 0
+      ? `продажи ❌ расхождений ${RU(p.mismatches)}`
+      : "продажи ✅ сходятся";
+
+  const снимковНет = !p.stockOk && p.stockChecked === 0;
+  const остатки = p.stockOk
+    ? "остатки ✅"
+    : снимковНет
+      ? "остатки: снимков за период нет — сверять не по чему"
+      : "остатки ❌";
+
+  // Причину, уже сказанную своей половиной, не повторяем: тот же текст вторым
+  // разом читается как второй отказ.
+  const хвост = части.filter((ч) => (заметкаОстатков(ч) ? !снимковНет : !продажНет));
+  return `Паритет за ${p.days} дн.: ${продажи} · ${остатки}${хвост.length > 0 ? ` · ${хвост.join("; ")}` : ""}`;
 }
 
 /**
@@ -618,7 +781,7 @@ export function паритетСтрока(p: OurvendHealth["parity"]): string {
  * числа со stock-дорожкой.
  */
 export function formatOurvendHealth(h: OurvendHealth): string[] {
-  const title = "🩺 Сверка снек-автоматов (OurVend): сбор и паритет";
+  const title = "🩺 Здоровье сбора снек-автоматов (OurVend) и паритет";
   const lines: string[] = [`${состояниеСбора(h)}. Последний успех: ${момент(h.lastSuccessAt)}.`];
 
   const прогоны = прогоныСтрока(h.runs);

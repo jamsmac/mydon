@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { VendingOrder, VendingPurchase, VendingPurchaseItem } from "./core-client";
 import {
+  NON_POSITIVE_PRICE_HINT,
   formatPriceResult,
   formatPurchaseBrief,
   formatPurchaseOrders,
@@ -10,6 +11,7 @@ import {
   isPriceCommand,
   isPurchaseOrdersQuery,
   isPurchaseReceiveCommand,
+  isNonPositivePrice,
   isPurchaseSubmitCommand,
   parsePriceCommand,
   parseReceiveDistribution,
@@ -317,7 +319,7 @@ describe("Команда цены (П3): «цена <товар> <число> [�
       newPrice: 15000,
       deviationPct: 50,
     });
-    assert.match(spike, /на 50%/);
+    assert.match(spike, /на 50 %/);
     assert.match(spike, /«цена TUC 15000 точно»/);
 
     assert.match(formatPriceResult({ ok: false, reason: "not_found", product: "Чипсы" }), /не найден/);
@@ -355,5 +357,41 @@ describe("Чек к накладной (П3): pickReceiptOrder", () => {
 
   it("receivedAt из будущего (кривые часы) — не подходит", () => {
     assert.equal(pickReceiptOrder([order({ receivedAt: "2026-08-25T12:00:00Z" })], now), null);
+  });
+});
+
+describe("Минус и ноль в цене (S8)", () => {
+  it("«цена TUC -15000» не превращается в +15000", () => {
+    // Разделитель «[\s:—=-]» съедал знак, и отказ владельца («минус — это
+    // ошибка ввода») уезжал в базу как обычная цена.
+    assert.equal(parsePriceCommand("цена TUC -15000"), null);
+    assert.equal(isNonPositivePrice("цена TUC -15000"), true);
+    assert.equal(isNonPositivePrice("цена TUC −15 000"), true);
+  });
+
+  it("ноль — тоже отказ, и он назван словами", () => {
+    assert.equal(parsePriceCommand("цена TUC 0"), null);
+    assert.equal(isNonPositivePrice("цена TUC 0"), true);
+    assert.match(NON_POSITIVE_PRICE_HINT, /больше нуля/i);
+  });
+
+  it("дефис внутри имени и как разделитель — по-прежнему цена, а не минус", () => {
+    assert.deepEqual(parsePriceCommand("цена TUC-12000"), {
+      product: "TUC",
+      price: 12_000,
+      confirmed: false,
+    });
+    assert.equal(isNonPositivePrice("цена TUC-12000"), false);
+    assert.equal(isNonPositivePrice("цена Coca-Cola 8000"), false);
+    assert.deepEqual(parsePriceCommand("цена Coca-Cola 8000"), {
+      product: "Coca-Cola",
+      price: 8_000,
+      confirmed: false,
+    });
+  });
+
+  it("непонятная фраза — это не «цена ≤ 0»", () => {
+    assert.equal(isNonPositivePrice("цена"), false);
+    assert.equal(isNonPositivePrice("цена TUC"), false);
   });
 });

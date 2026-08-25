@@ -12,7 +12,13 @@ import type {
 import type { AnalyticsWarning, BootstrapSalePriceResult, OurvendHealth } from "./core-client";
 import {
   BOOTSTRAP_DAYS_MAX,
+  MARGIN_DAYS_DEFAULT,
+  MARGIN_DAYS_MAX,
+  PCT,
   SALE_PRICE_HINT,
+  окно,
+  паритетСтрока,
+  состояниеСбора,
   capped,
   сущ,
   товарСтрока,
@@ -186,7 +192,16 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   slotsLagMin: null,
   salesLagH: 5,
   productSaleLagH: 5,
-  parity: { days: 7, ok: false, mismatches: 3, stockOk: false, note: "снимков остатков OurVend за период нет" },
+  // Заметка — в той же форме, что её собирает Core: половина остатков
+  // подписана префиксом «остатки:» (`ourvend-parity.service.ts`).
+  parity: {
+    days: 7,
+    ok: false,
+    mismatches: 3,
+    stockOk: false,
+    stockChecked: 0,
+    note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
+  },
 };
 
 const БУТСТРАП: BootstrapSalePriceResult = {
@@ -254,7 +269,7 @@ describe("Тексты отчётов", () => {
   it("маржа: автоматы по деньгам, штуки без себестоимости названы", () => {
     const [первое] = formatMargin(МАРЖА_ПРОД);
     assert.match(первое!, /Маржа снек-автоматов \(OurVend\) за 30 дн/);
-    assert.match(первое!, /Olma Администрация: выручка 5 882 000, маржа 1 621 385 \(27\.6 %\)/);
+    assert.match(первое!, /Olma Администрация: выручка 5 882 000 сум, маржа 1 621 385 сум \(27\.6 %\)/);
     assert.match(первое!, /4 шт без себестоимости/);
     // Кофе в этом отчёте нет вовсе — ни данными, ни «нет данных» (R-P5b-9).
     assert.ok(!первое!.includes("кофе"));
@@ -277,8 +292,8 @@ describe("Тексты отчётов", () => {
   it("цены: две ленты и знак изменения", () => {
     const t = formatPriceChanges(ЦЕНЫ).join("\n");
     assert.match(t, /Цены снек-автоматов \(OurVend\) за 30 дн/);
-    assert.match(t, /TUC: 10 000 → 12 000 \(\+20 %\)/);
-    assert.match(t, /LaimonFresh: 15 000 → 12 000 \(−20 %\)/);
+    assert.match(t, /TUC: 10 000 → 12 000 сум \(\+20 %\)/);
+    assert.match(t, /LaimonFresh: 15 000 → 12 000 сум \(−20 %\)/);
   });
 
   it("витрина: без эталона — отдельный список, недобор только положительный", () => {
@@ -311,6 +326,18 @@ describe("Тексты отчётов", () => {
       /не была задана/,
     );
     assert.match(formatSalePriceResult({ ok: false, reason: "not_found", product: "Абырвалг" }), /не найден/);
+
+    // S8/S9: цена не прошла проверку Core — печатаем ЕГО причину, а не свою
+    // догадку. «Товар не найден» на живой товар с кривой ценой отправил бы
+    // владельца искать несуществующую проблему в прайсе.
+    const кривая = formatSalePriceResult({
+      ok: false,
+      product: "TUC",
+      reason: "invalid_price",
+      message: "цена должна быть больше нуля",
+    });
+    assert.match(кривая, /цена должна быть больше нуля/);
+    assert.doesNotMatch(кривая, /не найден/);
   });
 
   it("бутстрап витрины: что проставили и что пропустили — с причинами", () => {
@@ -320,11 +347,127 @@ describe("Тексты отчётов", () => {
     assert.match(t, /нет продаж 1/);
   });
 
+  it("бутстрап: пропущенные сходятся по арифметике — все четыре причины (S9)", () => {
+    // «Пропущено 5: эталон уже задан 1, нет продаж 1» на пяти пропущенных —
+    // это потерянные три товара: владелец считает, что эталон им проставлен,
+    // и разрыв витрины по ним не всплывёт никогда.
+    const t = formatSalePriceBootstrap({
+      days: 14,
+      set: [{ product: "TUC Sour cream", price: 15_000, qty: 42 }],
+      skipped: [
+        { product: "Moxito", reason: "already_set" },
+        { product: "Flint", reason: "no_sales" },
+        { product: "Barni", reason: "no_fact" },
+        { product: "Velona", reason: "inactive" },
+        { product: "Oreo", reason: "inactive" },
+      ],
+    }).join("\n");
+    assert.match(t, /Пропущено 5/);
+    assert.match(t, /эталон уже задан 1/);
+    assert.match(t, /нет продаж 1/);
+    assert.match(t, /снят с продажи 2/);
+    // Причина `no_fact` названа своими словами: «продан даром» чинится в
+    // прайсе, а не в сборе продаж.
+    assert.match(t, /без цены 1|цены из них нет 1/);
+  });
+
+  it("бутстрап без единой проставленной цены тоже называет все причины", () => {
+    const t = formatSalePriceBootstrap({
+      days: 14,
+      set: [],
+      skipped: [
+        { product: "Moxito", reason: "already_set" },
+        { product: "Velona", reason: "inactive" },
+      ],
+    }).join("\n");
+    assert.match(t, /эталон уже задан 1/);
+    assert.match(t, /снят с продажи 1/);
+  });
+
   it("здоровье сбора: серия отказов кричит, лаг null — «снимков нет»", () => {
     const t = formatOurvendHealth(ЗДОРОВЬЕ).join("\n");
     assert.match(t, /12 отказов подряд/);
     assert.match(t, /снимков нет/);
     assert.match(t, /Паритет/);
+  });
+
+  it("деньги везде с «сум», процента нет — голое тире (U1–U3, U13)", () => {
+    // Владелец читает с телефона: «маржа 250 000» без единицы — это штуки,
+    // деньги или проценты? Панель для тех же чисел всегда пишет «сум».
+    const маржа = formatMargin(МАРЖА_ПРОД).join("\n");
+    assert.match(маржа, /Итого: выручка 5 882 000 сум, маржа 1 621 385 сум/);
+    const витрина = formatPriceGap(ВИТРИНА).join("\n");
+    assert.match(витрина, /факт [\d\s]+ сум · эталон [\d\s]+ сум/);
+    assert.match(витрина, /недобор ≈ [\d\s]+ сум/);
+    const сток = formatDeadStock(МЁРТВЫЙ_ПРОД).join("\n");
+    assert.match(сток, /≈ [\d\s]+ сум/);
+    // «— %» читается как «ноль процентов с опечаткой»; панель пишет «—».
+    assert.equal(PCT(null), "—");
+    assert.equal(PCT(27.6), "27.6 %");
+  });
+
+  it("свежесть: витрина названа по-людски и протухший снимок помечен (U5, U10)", () => {
+    // «product_sale» — имя таблицы, владелец его не знает; лаг больше 6 ч
+    // панель красит красным, а бот молчал — тревога зависела от того, куда
+    // смотришь.
+    const t = formatOurvendHealth({ ...ЗДОРОВЬЕ, salesLagH: 13 }).join("\n");
+    assert.doesNotMatch(t, /product_sale/);
+    assert.match(t, /продажи по товарам \(кабинет\)/);
+    // 13 ч — больше двух пропущенных прогонов (сбор ходит раз в 3 ч).
+    assert.match(t, /продажи — 13 ч ⚠️/);
+    // 5 ч — в норме, лишней тревоги нет.
+    assert.match(t, /продажи по товарам \(кабинет\) — 5 ч(?! ⚠️)/);
+  });
+
+  it("«сверка» и справка называют раздел одинаково (U15)", () => {
+    assert.match(formatOurvendHealth(ЗДОРОВЬЕ)[0]!, /Здоровье сбора/);
+  });
+
+  it("отказы в окне не прячутся за зелёным заголовком (прод, п.5)", () => {
+    // 25.08 на проде: 12 отказов подряд, потом один успех — `failedStreak: 0`
+    // и «✅ Отказов подряд нет» над журналом, где 12 из 20 прогонов упали.
+    const свежийУспех: OurvendHealth = {
+      ...ЗДОРОВЬЕ,
+      failedStreak: 0,
+      lastSuccessAt: "2026-08-25T16:00:11Z",
+    };
+    const t = состояниеСбора(свежийУспех);
+    assert.match(t, /2 отказа/);
+    assert.doesNotMatch(t, /^✅ Отказов подряд нет$/);
+  });
+
+  it("паритет: «расхождений 0» при пустых снимках — это причина, а не вердикт (прод, п.3)", () => {
+    // Прод 25.08: продажи сходятся 1-в-1, а снимков остатков за закрытые сутки
+    // нет вовсе. Старая строка печатала «❌ расхождений 0 · остатки ❌» —
+    // отчёт, противоречащий сам себе на первом же прогоне.
+    const t = паритетСтрока({
+      days: 7,
+      ok: false,
+      mismatches: 0,
+      stockOk: false,
+      stockChecked: 0,
+      note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
+    });
+    assert.match(t, /продажи ✅/);
+    assert.doesNotMatch(t, /расхождений 0/);
+    assert.match(t, /сверять не по чему/);
+    // Причина сказана ОДИН раз: хвост-заметка не повторяет её слово в слово.
+    assert.equal(t.match(/сверять не по чему/g)?.length, 1);
+  });
+
+  it("паритет: настоящее расхождение остаётся красным", () => {
+    const t = паритетСтрока({ days: 7, ok: false, mismatches: 3, stockOk: true, stockChecked: 14, note: null });
+    assert.match(t, /продажи ❌ расхождений 3/);
+    assert.match(t, /остатки ✅/);
+  });
+
+  it("урезанное окно объясняется, а не срабатывает молча («маржа 91»)", () => {
+    assert.deepEqual(окно("маржа за 91 дней", MARGIN_DAYS_DEFAULT, MARGIN_DAYS_MAX), {
+      days: 90,
+      note: "Максимум 90 дн. — показываю за 90.",
+    });
+    assert.deepEqual(окно("маржа за 7 дней", MARGIN_DAYS_DEFAULT, MARGIN_DAYS_MAX), { days: 7, note: null });
+    assert.deepEqual(окно("маржа", MARGIN_DAYS_DEFAULT, MARGIN_DAYS_MAX), { days: 30, note: null });
   });
 
   it("длинный отчёт режется по бюджету и не теряет заголовок", () => {
@@ -354,7 +497,7 @@ describe("Пустые состояния и предупреждения (ре�
       slotsLagMin: null,
       salesLagH: null,
       productSaleLagH: null,
-      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, note: null },
+      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, stockChecked: 0, note: null },
     }).join("\n");
     assert.match(t, /Прогонов сбора за период нет — здоровье не оценить/);
     assert.ok(!t.includes("✅ Отказов подряд нет"));
@@ -367,7 +510,7 @@ describe("Пустые состояния и предупреждения (ре�
     // который сам себя не понял.
     const { productSaleLagH: _нет, ...без } = ЗДОРОВЬЕ;
     const t = formatOurvendHealth(без as OurvendHealth).join("\n");
-    assert.match(t, /витрина \(product_sale\) — снимков нет/);
+    assert.match(t, /продажи по товарам \(кабинет\) — снимков нет/);
     assert.ok(!t.includes("не число"));
     assert.ok(!t.includes("undefined"));
   });

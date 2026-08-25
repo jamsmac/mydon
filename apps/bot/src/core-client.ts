@@ -1,14 +1,15 @@
 import { normalizeMachineSerial, type Domain } from "@mydon/shared";
 import type {
-  DeadRow,
+  AnalyticsWarning,
+  BootstrapSalePriceResult,
   DeadStockReport,
-  MarginProduct,
   MarginReport,
-  MarginTotals,
-  PriceChange,
+  MonthlyPrice,
+  OurvendHealth,
   PriceChangesReport,
   PriceGapReport,
-  WeekDelta,
+  SetSalePriceResult,
+  WeeklyDigest,
 } from "@mydon/shared";
 
 export interface Briefing {
@@ -382,37 +383,38 @@ export interface SetPriceResult {
 }
 
 /**
- * Формы ответов аналитики снека (П5b), которых ЕЩЁ НЕТ в `@mydon/shared`.
+ * Формы ответов аналитики снека (П5b) — РЕЭКСПОРТ из `@mydon/shared`.
  *
- * `MarginReport`/`DeadStockReport`/`PriceChangesReport`/`PriceGapReport` живут
- * в общем пакете и импортируются оттуда (R-P5b-10) — второй раз их здесь
- * объявлять нельзя. А эти четыре формы объявляются сервисами Core
- * (`SetSalePriceResult`/`BootstrapSalePriceResult` — `vending.service.ts`,
- * `MonthlyPrice` — `analytics.service.ts`, `OurvendHealth`/`WeeklyDigest` —
- * недельная сводка), и бот не может импортировать типы из приложения Core.
- * Поэтому здесь — ровно те поля, что отдаёт HTTP, как уже сделано для
- * `SetPriceResult`. Когда `OurvendHealth`/`WeeklyDigest` появятся в
- * `@mydon/shared`, эти объявления заменяются реэкспортом — формы совпадают
- * поле в поле.
- */
-
-/**
- * Почему в отчёте чего-то нет (`AnalyticsWarning` из `analytics.service.ts`).
+ * Своих объявлений здесь больше нет. Копии этих форм жили в боте и в панели
+ * ровно до тех пор, пока их не было в общем пакете, и расходились они молча:
+ * тип — не проверка на рантайме, разъехавшееся поле видно только по пустой
+ * строке в чате. Теперь форму объявляет тот, кто считает числа
+ * (`vending-reports.ts`), а бот и панель её читают — и `pnpm build` падает на
+ * первом же несовпадении (N4).
  *
- * Код важнее текста: по нему бот решает, не сказал ли он то же самое своей
- * строкой (тогда предупреждение не повторяется), а каждый код чинится в своём
- * месте — продажи чинит синк, остаток автомата чинит сбор, себестоимость
- * чинит прайс, эталон витрины чинит слово владельца.
+ * Реэкспорт, а не прямой импорт из `@mydon/shared` во всех модулях бота:
+ * `core-client` остаётся ЕДИНСТВЕННОЙ дверью к Core — по нему видно, какие
+ * формы бот вообще получает по HTTP.
  */
-export type AnalyticsWarningCode = "no_sales" | "stock_missing" | "unknown_cost" | "no_reference" | "excluded_sales";
-
-export interface AnalyticsWarning {
-  code: AnalyticsWarningCode;
-  message: string;
-}
+export type {
+  AnalyticsWarning,
+  AnalyticsWarningCode,
+  BootstrapSalePriceResult,
+  BootstrapSkipReason,
+  MonthlyPrice,
+  OurvendHealth,
+  OurvendSyncRun,
+  SetSalePriceResult,
+  WeeklyDigest,
+  WeeklyDigestMachine,
+} from "@mydon/shared";
 
 /**
  * Хвост «посчитано не всё» у отчётов аналитики.
+ *
+ * Живёт здесь, а не в общем пакете: `warnings` дописывает HTTP-слой Core
+ * поверх чистого отчёта (`analytics.service.ts`), и в самих расчётах
+ * `vending-reports.ts` этого поля нет.
  *
  * Поле необязательное намеренно: форматтеры зовут и на данных без него
  * (недельная сводка, фикстуры), а отчёт без предупреждений обязан печататься
@@ -420,83 +422,6 @@ export interface AnalyticsWarning {
  */
 export interface WithWarnings {
   warnings?: AnalyticsWarning[];
-}
-
-/** Помесячная динамика цен — только для панели (донор `price_dynamics`). */
-export interface MonthlyPrice {
-  product: string;
-  month: string;
-  retail: number | null;
-  purchase: number | null;
-}
-
-/**
- * Итог правки ЭТАЛОНА витрины (POST /vending/sale-price).
- *
- * Отдельный тип от `SetPriceResult`, хотя поля почти те же: гейт здесь
- * считается от ФАКТА продаж (`factPrice`), а не от прошлой цены. Слить их в
- * один тип значит потерять `factPrice` — единственное, чем ответ гейта
- * объясняет владельцу, почему его цену не приняли.
- */
-export interface SetSalePriceResult {
-  ok: boolean;
-  product?: string;
-  oldPrice?: number | null;
-  newPrice?: number;
-  /** Отклонение от факта витрины (деньги ÷ штуки за 14 дн.), % — при reason="spike". */
-  deviationPct?: number;
-  factPrice?: number | null;
-  reason?: "not_found" | "spike";
-}
-
-/** Итог разового бутстрапа эталона по факту продаж (POST /vending/sale-price/bootstrap). */
-export interface BootstrapSalePriceResult {
-  days: number;
-  set: { product: string; price: number; qty: number }[];
-  skipped: { product: string; reason: "already_set" | "no_sales" }[];
-}
-
-/** Прогон синка OurVend (строка `vending_sync_run`). */
-export interface OurvendSyncRun {
-  id: string;
-  startedAt: string;
-  finishedAt: string | null;
-  status: "running" | "success" | "partial" | "failed";
-  machinesTotal: number;
-  machinesOk: number;
-  durationMs: number | null;
-  error: string | null;
-}
-
-/** Здоровье сбора OurVend (GET /ourvend/health): прогоны, лаги, паритет (R-P5b-8). */
-export interface OurvendHealth {
-  runs: OurvendSyncRun[];
-  failedStreak: number;
-  lastSuccessAt: string | null;
-  /** Возраст самого свежего снимка. `null` — снимков нет вовсе (это НЕ «свежо»). */
-  slotsLagMin: number | null;
-  salesLagH: number | null;
-  productSaleLagH: number | null;
-  parity: { days: number; ok: boolean; mismatches: number; stockOk: boolean; note: string | null };
-}
-
-/** Недельная сводка (GET /vending/weekly-digest): текст собирает бот (R-P5b-7). */
-export interface WeeklyDigest {
-  week: string;
-  from: string;
-  to: string;
-  machines: { serial: string; name: string; qty: number; revenue: number; margin: number; pct: number | null }[];
-  totals: MarginTotals;
-  delta: WeekDelta;
-  previousWeek: string;
-  topProducts: MarginProduct[];
-  worstProducts: MarginProduct[];
-  refills: { events: number; detectedUnits: number; recordedUnits: number };
-  intake: { orders: number; units: number; amount: number };
-  stocktakes: { positions: number; lastCountedAt: string | null };
-  deadStock: { rows: DeadRow[]; totalValue: number };
-  priceChanges: { purchase: PriceChange[]; retail: PriceChange[] };
-  health: OurvendHealth;
 }
 
 /** Строка ленты действий сотрудников (GET /registry/actions). */
@@ -882,6 +807,21 @@ export class CoreClient {
     return this.request<{ acked: number }>("/rules/ack", {
       method: "POST",
       body: JSON.stringify({ keys }),
+    });
+  }
+
+  /**
+   * Событие в общий журнал Core (`POST /events`).
+   *
+   * Нужно там, где отказ виден только боту, а чинить его должен человек:
+   * `console.warn` в контейнере не читает никто (недельная сводка без
+   * получателей молчала именно так). Событие переживёт перезапуск, попадёт в
+   * ленту и может быть подхвачено правилом.
+   */
+  recordEvent(type: string, payload: Record<string, unknown> = {}, source = "system"): Promise<{ id?: string }> {
+    return this.request<{ id?: string }>("/events", {
+      method: "POST",
+      body: JSON.stringify({ source, type, payload }),
     });
   }
 

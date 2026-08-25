@@ -27,6 +27,8 @@ import {
   isPriceCommand,
   isPurchaseOrdersQuery,
   isPurchaseReceiveCommand,
+  NON_POSITIVE_PRICE_HINT,
+  isNonPositivePrice,
   isPurchaseSubmitCommand,
   parsePriceCommand,
   parseReceiveDistribution,
@@ -41,8 +43,8 @@ import {
   MARGIN_DAYS_MAX,
   PRICE_CHANGES_DAYS_DEFAULT,
   PRICE_CHANGES_DAYS_MAX,
-  PRICE_GAP_DAYS_DEFAULT,
   PRICE_GAP_DAYS_MAX,
+  SALE_PRICE_FACT_DAYS,
   SALE_PRICE_HINT,
   formatDeadStock,
   formatMargin,
@@ -56,9 +58,10 @@ import {
   isOurvendCheckQuery,
   isPriceChangesQuery,
   isPriceGapQuery,
+  isNonPositiveSalePrice,
   isSalePriceBootstrapCommand,
   isSalePriceCommand,
-  parseDays,
+  окно,
   parseSalePriceCommand,
 } from "./analytics-brief";
 import { formatShrinkage, isShrinkageQuery, parseShrinkageDays } from "./shrinkage-brief";
@@ -118,13 +121,13 @@ const HELP = [
   "• «накладные» — одобренные закупы",
   "• «принять закуп» — оприходовать накладную на склад",
   "• «принять закуп: TUC 5, Flint 5» — то же, но с уточнением, сколько сразу в автоматы",
-  "• «цена TUC 12000» — записать закупочную цену товара (скачок >20% — добавь «точно»)",
+  "• «цена TUC 12000» — записать закупочную цену товара (скачок больше 20 % — добавь «точно»)",
   "• «маржа» / «маржа за 7 дней» — выручка и маржа снек-автоматов (OurVend)",
-  "• «мёртвый сток» — что не двигалось 21 день (склад и автоматы)",
-  "• «цены» — что изменилось в закупочных и витринных ценах",
-  "• «витрина» — где витрина разошлась с эталоном и сколько недобираем",
-  "• «цена продажи TUC 15000» — записать эталон витрины (>20% от факта — добавь «точно»)",
-  "• «витрина как факт» — разово проставить эталон по факту продаж за 14 дней",
+  "• «мёртвый сток» / «мёртвый сток за 30 дней» — что не двигалось (склад и автоматы)",
+  "• «цены» / «цены за 60 дней» — что изменилось в закупочных и витринных ценах",
+  "• «витрина» / «витрина за 30 дней» — где витрина разошлась с эталоном и сколько недобираем",
+  "• «цена продажи TUC 15000» — записать эталон витрины (больше 20 % от факта — добавь «точно»)",
+  "• «витрина как факт» / «витрина как факт за 30 дней» — разово проставить эталон по факту продаж",
   "• «итоги недели» / «итоги недели 2026-34» — сводка снека за неделю (сама приходит в понедельник)",
   "• «сверка» — здоровье сбора OurVend и паритет",
   "• фото с подписью «чек» — прикрепить чек к последней принятой накладной",
@@ -185,6 +188,14 @@ function отчётНеПришёл(что: string, err: unknown): Reply {
   }
   return { text: `Не удалось получить ${что} из MYDON Core. Попробуй ещё раз чуть позже.` };
 }
+
+/**
+ * Подсказка об урезанном окне — ПЕРЕД отчётом, а не после.
+ *
+ * После заголовка её не прочитают: отчёт длинный, а знать о подмене окна надо
+ * до того, как поверишь числам.
+ */
+const сНоткой = (note: string | null, text: string): string => (note ? `${note}\n\n${text}` : text);
 
 export async function handleMessage(
   chatId: number,
@@ -312,7 +323,10 @@ export async function handleMessage(
   // только по перекошенному закупу.
   if (isSalePriceCommand(text)) {
     const cmd = parseSalePriceCommand(text);
-    if (cmd === null) return { text: SALE_PRICE_HINT };
+    // «цена продажи TUC -15000» — не «формат непонятен»: формат как раз
+    // понятен, не бывает такой цены. Подсказка формата отправила бы владельца
+    // повторять ту же команду (S8).
+    if (cmd === null) return { text: isNonPositiveSalePrice(text) ? NON_POSITIVE_PRICE_HINT : SALE_PRICE_HINT };
     try {
       const res = await deps.core.setVendingSalePrice(cmd.product, cmd.price, cmd.confirmed);
       return { text: formatSalePriceResult(res) };
@@ -331,10 +345,9 @@ export async function handleMessage(
   // обе фразы начинаются с «витрина», и отчёт перехватил бы мутацию.
   if (isSalePriceBootstrapCommand(text)) {
     try {
-      const [first, ...more] = formatSalePriceBootstrap(
-        await deps.core.bootstrapVendingSalePrice(parseDays(text, PRICE_GAP_DAYS_DEFAULT, BOOTSTRAP_DAYS_MAX)),
-      );
-      return { text: first, more };
+      const w = окно(text, SALE_PRICE_FACT_DAYS, BOOTSTRAP_DAYS_MAX);
+      const [first, ...more] = formatSalePriceBootstrap(await deps.core.bootstrapVendingSalePrice(w.days));
+      return { text: сНоткой(w.note, first), more };
     } catch (err) {
       console.error("Ошибка бутстрапа эталона витрины:", err);
       if (err instanceof CoreError && err.status === 400) {
@@ -347,9 +360,9 @@ export async function handleMessage(
   // Витрина против эталона — чтение.
   if (isPriceGapQuery(text)) {
     try {
-      const days = parseDays(text, PRICE_GAP_DAYS_DEFAULT, PRICE_GAP_DAYS_MAX);
-      const [first, ...more] = formatPriceGap(await deps.core.vendingPriceGap(days));
-      return { text: first, more };
+      const w = окно(text, SALE_PRICE_FACT_DAYS, PRICE_GAP_DAYS_MAX);
+      const [first, ...more] = formatPriceGap(await deps.core.vendingPriceGap(w.days));
+      return { text: сНоткой(w.note, first), more };
     } catch (err) {
       console.error("Ошибка отчёта о витрине:", err);
       return отчётНеПришёл("витрину", err);
@@ -359,9 +372,9 @@ export async function handleMessage(
   // Маржа снек-автоматов — чтение.
   if (isMarginQuery(text)) {
     try {
-      const days = parseDays(text, MARGIN_DAYS_DEFAULT, MARGIN_DAYS_MAX);
-      const [first, ...more] = formatMargin(await deps.core.vendingMargin(days));
-      return { text: first, more };
+      const w = окно(text, MARGIN_DAYS_DEFAULT, MARGIN_DAYS_MAX);
+      const [first, ...more] = formatMargin(await deps.core.vendingMargin(w.days));
+      return { text: сНоткой(w.note, first), more };
     } catch (err) {
       console.error("Ошибка отчёта о марже:", err);
       return отчётНеПришёл("маржу", err);
@@ -371,9 +384,9 @@ export async function handleMessage(
   // Мёртвый сток — чтение.
   if (isDeadStockQuery(text)) {
     try {
-      const days = parseDays(text, DEAD_STOCK_DAYS_DEFAULT, DEAD_STOCK_DAYS_MAX);
-      const [first, ...more] = formatDeadStock(await deps.core.vendingDeadStock(days));
-      return { text: first, more };
+      const w = окно(text, DEAD_STOCK_DAYS_DEFAULT, DEAD_STOCK_DAYS_MAX);
+      const [first, ...more] = formatDeadStock(await deps.core.vendingDeadStock(w.days));
+      return { text: сНоткой(w.note, first), more };
     } catch (err) {
       console.error("Ошибка отчёта о мёртвом стоке:", err);
       return отчётНеПришёл("мёртвый сток", err);
@@ -385,9 +398,9 @@ export async function handleMessage(
   // хвост в разборе, а не общий префикс.
   if (isPriceChangesQuery(text)) {
     try {
-      const days = parseDays(text, PRICE_CHANGES_DAYS_DEFAULT, PRICE_CHANGES_DAYS_MAX);
-      const [first, ...more] = formatPriceChanges(await deps.core.vendingPriceChanges(days));
-      return { text: first, more };
+      const w = окно(text, PRICE_CHANGES_DAYS_DEFAULT, PRICE_CHANGES_DAYS_MAX);
+      const [first, ...more] = formatPriceChanges(await deps.core.vendingPriceChanges(w.days));
+      return { text: сНоткой(w.note, first), more };
     } catch (err) {
       console.error("Ошибка отчёта об изменениях цен:", err);
       return отчётНеПришёл("изменения цен", err);
@@ -412,7 +425,7 @@ export async function handleMessage(
   // живёт в Core; здесь только разбор и повтор со словом «точно».
   if (isPriceCommand(text)) {
     const cmd = parsePriceCommand(text);
-    if (cmd === null) return { text: PRICE_COMMAND_HINT };
+    if (cmd === null) return { text: isNonPositivePrice(text) ? NON_POSITIVE_PRICE_HINT : PRICE_COMMAND_HINT };
     try {
       const res = await deps.core.setVendingPrice(cmd.product, cmd.price, cmd.confirmed);
       return { text: formatPriceResult(res) };
