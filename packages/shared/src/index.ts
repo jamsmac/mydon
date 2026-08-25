@@ -83,6 +83,7 @@ export * from "./menu";
 export * from "./vending-calc";
 export * from "./vending-plan";
 export * from "./vending-field";
+export * from "./vending-reports";
 export * from "./coffee-calc";
 export * from "./coffee-order";
 export * from "./contractor-name";
@@ -129,6 +130,9 @@ export * from "./actor";
 /** Партии сырья: расход по FEFO и срок годности (перенос из mydon_1, срез C). */
 export * from "./fefo";
 export * from "./expiry";
+
+/** Календарные сутки без зоны: `YYYY-MM-DD` ↔ номер суток от эпохи. */
+export * from "./calendar-day";
 
 /** Касса и инкассация: номиналы сума и сверка набора купюр (срез K, задача 1). */
 export * from "./denominations";

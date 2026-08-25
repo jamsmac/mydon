@@ -168,4 +168,49 @@ describe("Правила уведомлений (FR-2)", () => {
       / 09:00 /,
     );
   });
+
+  it("серия отказов сбора доставляется немедленно и называет час, с которого мы слепые", () => {
+    const [n] = applyRules(
+      ctx("ourvend.sync_failed_streak", {
+        streak: 12,
+        lastError: "This operation was aborted",
+        // 09:00 Ташкента: владелец не должен читать со сдвигом на пять часов.
+        since: "2026-08-24T09:00:00+05:00",
+      }),
+    );
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /12 раз подряд/);
+    assert.match(n!.text, /24\.08 09:00: /, "серия ≥3 почти всегда начинается не сегодня — без даты тревога выглядит младше, чем есть");
+    assert.match(n!.text, /This operation was aborted/);
+  });
+
+  it("серия, начавшаяся СЕГОДНЯ, даты не печатает — «когда сегодня» читается часами", () => {
+    const сейчас = new Date();
+    const [n] = applyRules(ctx("ourvend.sync_failed_streak", { streak: 3, since: сейчас.toISOString() }));
+    const часы = сейчас.toLocaleTimeString("ru-RU", { timeZone: "Asia/Tashkent", hour: "2-digit", minute: "2-digit" });
+    assert.match(n!.text, new RegExp(`подряд с ${часы}:`));
+  });
+
+  it("чужой текст ошибки обрезается: длинный lastError не сделал бы сигнал недоставляемым НАВСЕГДА", () => {
+    // Сообщение длиннее лимита Telegram (4096) роняет sendMessage, ack не
+    // проставляется — и тревога переотправляется раз в минуту вечно.
+    const [n] = applyRules(
+      ctx("ourvend.sync_failed_streak", { streak: 3, since: "2026-08-24T09:00:00+05:00", lastError: "х".repeat(5000) }),
+    );
+    assert.ok(n!.text.length < 500, `текст правила разросся до ${n!.text.length} символов`);
+    assert.match(n!.text, /х…/);
+  });
+
+  it("счётная форма не пишет «3 раз подряд»", () => {
+    const [n] = applyRules(ctx("ourvend.sync_failed_streak", { streak: 3, since: "2026-08-24T09:00:00+05:00" }));
+    assert.match(n!.text, /3 раза подряд/);
+  });
+
+  it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {
+    const [n] = applyRules(ctx("weekly-digest.no_recipients", { week: "2026-34" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /получателей нет/);
+    assert.match(n!.text, /owner\/manager/);
+    assert.match(n!.text, /неделя 2026-34/);
+  });
 });

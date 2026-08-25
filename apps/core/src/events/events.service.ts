@@ -1,6 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { event } from "@mydon/db";
-import { and, desc, eq, gte, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 
 type EventRow = typeof event.$inferSelect;
@@ -33,9 +33,19 @@ export class EventsService {
     return created;
   }
 
-  async list(filter: { type?: string; since?: Date; limit?: number } = {}): Promise<EventRow[]> {
+  /**
+   * Лента событий под фильтр, свежие сверху.
+   *
+   * `types` — НЕСКОЛЬКО типов сразу, и это не удобство, а требование
+   * правильности: лимит режет выборку ПОСЛЕ сортировки, поэтому шум крона
+   * (2091 `sales.sync` + 2089 `supply.sync` за 14 суток на проде) съедал все
+   * 500 строк и окно «за неделю» превращалось в 37 часов — молча, с виду
+   * здоровым ответом. Фильтр обязан стоять в SQL, до лимита.
+   */
+  async list(filter: { type?: string; types?: readonly string[]; since?: Date; limit?: number } = {}): Promise<EventRow[]> {
     const conditions: SQL[] = [];
     if (filter.type) conditions.push(eq(event.type, filter.type));
+    if (filter.types && filter.types.length > 0) conditions.push(inArray(event.type, [...filter.types]));
     if (filter.since) conditions.push(gte(event.occurredAt, filter.since));
 
     return this.db

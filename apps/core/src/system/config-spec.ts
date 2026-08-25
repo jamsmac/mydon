@@ -36,6 +36,21 @@ const nonNegNumber = (v: string): string | null => {
   return Number.isFinite(n) && n >= 0 ? null : "нужно неотрицательное число (например 5)";
 };
 
+/**
+ * Строго положительное число — для ОКОН, а не для порогов.
+ *
+ * Ноль законен там, где он означает «показывай всё» (порог в процентах или в
+ * сумах). У окна в сутках такого смысла нет и быть не может: `DEAD_STOCK_DAYS=0`
+ * молча уходит в дефолт 21 (`clamp` в `report-cache.ts`), `COST_WINDOW_DAYS=0` —
+ * в единицу (`Math.max(1, …)` в `analytics.service.ts`). Панель при этом
+ * говорит «сохранено», а отчёт считается по ДРУГОМУ числу — ровно тот баг,
+ * который чинил `readIntSetting`.
+ */
+const posNumber = (v: string): string | null => {
+  const n = Number(v.replace(",", "."));
+  return Number.isFinite(n) && n >= 1 ? null : "нужно число от 1 (окно в сутках; ноль не значит «без окна»)";
+};
+
 const urlOrEmpty = (v: string): string | null =>
   /^https?:\/\/\S+$/.test(v) ? null : "нужен URL вида http(s)://host:port";
 
@@ -156,6 +171,47 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     label: "Вендинг: порог детектора заливки, шт за окно",
     kind: "number",
     fallback: "10",
+    validate: nonNegNumber,
+  },
+  // ── Вендинг: аналитика (П5b) ──
+  // Пороги отчётов — решение владельца, а не константа в сервисе (R-P5b-11).
+  // Ноль законен У ПОРОГОВ В ПРОЦЕНТАХ: им владелец говорит «показывай всё», и
+  // это дешевле, чем правка кода ради одного прогона. У ОКОН В СУТКАХ ноль
+  // законным не был никогда — см. `posNumber`.
+  {
+    key: "DEAD_STOCK_DAYS",
+    label: "Вендинг: окно мёртвого стока, дней",
+    kind: "number",
+    fallback: "21",
+    validate: posNumber,
+  },
+  {
+    key: "PRICE_CHANGE_PCT",
+    label: "Вендинг: порог изменения цены, %",
+    kind: "number",
+    fallback: "5",
+    validate: nonNegNumber,
+  },
+  {
+    key: "PRICE_GAP_PCT",
+    label: "Вендинг: порог разрыва витрины с эталоном, %",
+    kind: "number",
+    fallback: "5",
+    validate: nonNegNumber,
+  },
+  {
+    key: "COST_WINDOW_DAYS",
+    label: "Вендинг: окно взвешенной себестоимости, дней",
+    kind: "number",
+    fallback: "90",
+    help: "Донор mydon-stock: 90 дней по принятым накладным",
+    validate: posNumber,
+  },
+  {
+    key: "MARGIN_LOW_PCT",
+    label: "Вендинг: маржа ниже этого % — тревожная",
+    kind: "number",
+    fallback: "15",
     validate: nonNegNumber,
   },
   // ── GLOBERENT: комиссия менеджера — у донора PROMACH жили ТРИ формулы,

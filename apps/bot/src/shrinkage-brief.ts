@@ -1,5 +1,6 @@
+import { parseDays, день } from "./analytics-brief";
 import type { ShrinkMachine, ShrinkReport } from "./core-client";
-import { chunk, MAX_PARTS } from "./purchase-plan";
+import { chunk, MAX_PARTS, RU } from "./purchase-plan";
 
 /**
  * Усушка автоматов в Telegram (П4, R-P4-3): владелец спрашивает «усушка» —
@@ -12,17 +13,6 @@ import { chunk, MAX_PARTS } from "./purchase-plan";
  * Дни заливок идут следом отдельной строкой, потому что отвечают на другой
  * вопрос: не «сколько потеряли», а «почему в эти сутки не считали».
  */
-
-/**
- * Число разрядами. Неразрывный пробел (U+00A0), который ставит ru-RU, меняем на
- * обычный: сумму из отчёта копируют и ищут, а с U+00A0 она не находится и не
- * сходится при сравнении (та же правка, что у formatAmount в правилах Core).
- */
-const RU = (n: number): string =>
-  Math.round(n).toLocaleString("ru-RU").replace(/[\u00A0\u202F]/g, " ");
-
-/** «2026-08-18» → «18.08». Строкой, а не через Date: даты уже по Ташкенту. */
-const day = (iso: string): string => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
 
 /** Сколько позиций показываем по автомату: дальше это уже не сводка. */
 const ITEMS_PER_MACHINE = 8;
@@ -51,13 +41,13 @@ export function isShrinkageQuery(text: string): boolean {
  * Границы держим здесь, а не надеемся на Core: он отвечает 400 на день вне
  * 1..60, а владелец увидел бы «попробуй позже» и стал бы ждать — хотя чинить
  * надо было фразу.
+ *
+ * Разбор — общий `parseDays` (analytics-brief.ts): своя копия того же regex
+ * уже была и начала расходиться — у аналитики она понимала «маржа 30» без
+ * слова «дней», а усушка на ту же фразу молча брала окно по умолчанию.
  */
 export function parseShrinkageDays(text: string, fallback = SHRINK_DAYS_DEFAULT): number {
-  const m = /за\s+(\d{1,4})\s*(дн|сут)/i.exec(text);
-  if (!m) return fallback;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n) || n < 1) return fallback;
-  return Math.min(n, SHRINK_DAYS_MAX);
+  return parseDays(text, fallback, SHRINK_DAYS_MAX);
 }
 
 /** Длина периода в сутках включительно. 0 — если даты не разобрались. */
@@ -124,7 +114,7 @@ function machineLines(m: ShrinkMachine, days: number): string[] {
   if (m.refillDays.length > 0) {
     const дни = m.refillDays
       .slice(0, REFILL_DAYS_SHOWN)
-      .map((d) => `${day(d.date)} +${d.detectedUnits} (записано ${d.recordedUnits})`);
+      .map((d) => `${день(d.date)} +${d.detectedUnits} (записано ${d.recordedUnits})`);
     const хвост = m.refillDays.length > дни.length ? `, …ещё ${m.refillDays.length - дни.length}` : "";
     lines.push(`Заливки по снимкам: ${дни.join(", ")}${хвост}`);
   }
@@ -135,7 +125,7 @@ function machineLines(m: ShrinkMachine, days: number): string[] {
 export function formatShrinkage(r: ShrinkReport): string[] {
   const days = periodDays(r.from, r.to);
   const заголовок =
-    `📉 Усушка${days > 0 ? ` за ${days} дн` : ""} (${day(r.from)} — ${day(r.to)})` +
+    `📉 Усушка${days > 0 ? ` за ${days} дн` : ""} (${день(r.from)} — ${день(r.to)})` +
     ` · порог ${RU(r.threshold)} сум`;
 
   const lines: string[] = [];

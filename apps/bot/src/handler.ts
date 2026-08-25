@@ -1,7 +1,13 @@
 import { answer, type ContextSearch, type LlmResolver } from "@mydon/assistant";
 import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
 import { DOMAIN_LABELS } from "@mydon/shared";
-import { approvalKeyboard, collectGloberentSignals, formatApproval, formatBriefing } from "./briefing";
+import {
+  approvalKeyboard,
+  collectGloberentSignals,
+  formatApproval,
+  formatBriefing,
+  pendingNotes,
+} from "./briefing";
 import { CoreError, type CoreClient } from "./core-client";
 import {
   formatCashAck,
@@ -21,16 +27,54 @@ import {
   isPriceCommand,
   isPurchaseOrdersQuery,
   isPurchaseReceiveCommand,
+  NON_POSITIVE_PRICE_HINT,
+  isNonPositivePrice,
   isPurchaseSubmitCommand,
   parsePriceCommand,
   parseReceiveDistribution,
 } from "./purchase-brief";
 import { formatRuleResult, isRuleCommand, parseRuleCommand, ruleCommandHint } from "./product-rules";
 import { formatPurchasePlan, isPlanCommand } from "./purchase-plan";
+import {
+  BOOTSTRAP_DAYS_MAX,
+  DEAD_STOCK_DAYS_DEFAULT,
+  DEAD_STOCK_DAYS_MAX,
+  MARGIN_DAYS_DEFAULT,
+  MARGIN_DAYS_MAX,
+  PRICE_CHANGES_DAYS_DEFAULT,
+  PRICE_CHANGES_DAYS_MAX,
+  PRICE_GAP_DAYS_MAX,
+  SALE_PRICE_FACT_DAYS,
+  SALE_PRICE_HINT,
+  formatDeadStock,
+  formatMargin,
+  formatOurvendHealth,
+  formatPriceChanges,
+  formatPriceGap,
+  formatSalePriceBootstrap,
+  formatSalePriceResult,
+  isDeadStockQuery,
+  isMarginQuery,
+  isOurvendCheckQuery,
+  isPriceChangesQuery,
+  isPriceGapQuery,
+  isNonPositiveSalePrice,
+  isSalePriceBootstrapCommand,
+  isSalePriceCommand,
+  окно,
+  parseSalePriceCommand,
+} from "./analytics-brief";
 import { formatShrinkage, isShrinkageQuery, parseShrinkageDays } from "./shrinkage-brief";
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
 import { handleActionsQuery, isActionsQuery } from "./owner-actions";
+import {
+  WEEKLY_NOTES_WINDOW_MS,
+  WEEKLY_WEEK_HINT,
+  formatWeeklyDigest,
+  isWeeklyDigestQuery,
+  parseWeekArg,
+} from "./weekly-digest";
 import { formatSalesSummary, isSalesQuery } from "./sales-brief";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
 import type { RateLimiter } from "./security/access";
@@ -77,7 +121,15 @@ const HELP = [
   "• «накладные» — одобренные закупы",
   "• «принять закуп» — оприходовать накладную на склад",
   "• «принять закуп: TUC 5, Flint 5» — то же, но с уточнением, сколько сразу в автоматы",
-  "• «цена TUC 12000» — записать закупочную цену товара (скачок >20% — добавь «точно»)",
+  "• «цена TUC 12000» — записать закупочную цену товара (скачок больше 20 % — добавь «точно»)",
+  "• «маржа» / «маржа за 7 дней» — выручка и маржа снек-автоматов (OurVend)",
+  "• «мёртвый сток» / «мёртвый сток за 30 дней» — что не двигалось (склад и автоматы)",
+  "• «цены» / «цены за 60 дней» — что изменилось в закупочных и витринных ценах",
+  "• «витрина» / «витрина за 30 дней» — где витрина разошлась с эталоном и сколько недобираем",
+  "• «цена продажи TUC 15000» — записать эталон витрины (больше 20 % от факта — добавь «точно»)",
+  "• «витрина как факт» / «витрина как факт за 30 дней» — разово проставить эталон по факту продаж",
+  "• «итоги недели» / «итоги недели 2026-34» — сводка снека за неделю (сама приходит в понедельник)",
+  "• «сверка» — здоровье сбора OurVend и паритет",
   "• фото с подписью «чек» — прикрепить чек к последней принятой накладной",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «касса закупа: получил 2400000, базар 376300» — записать кассу похода на базар",
@@ -119,6 +171,31 @@ function coreReason(body: string): string {
   }
   return body.slice(0, 200) || "нет подробностей";
 }
+
+/**
+ * Сбой отчёта аналитики словами (П5b).
+ *
+ * 400 — отказ по САМИМ ДАННЫМ (окно вне границ DTO, лишний параметр): повтор
+ * той же фразы не поможет никогда, и «попробуй позже» отправлял бы владельца
+ * ждать впустую. Окна бот зажимает сам под границы DTO Core (1..90 маржа и
+ * витрина, 1..180 мёртвый сток и цены), но границы живут в другом
+ * репозитории кода — если они разойдутся, причина обязана быть названа, а не
+ * спрятана за «попробуй позже».
+ */
+function отчётНеПришёл(что: string, err: unknown): Reply {
+  if (err instanceof CoreError && err.status === 400) {
+    return { text: `Core отверг запрос (${что}): ${coreReason(err.body)}` };
+  }
+  return { text: `Не удалось получить ${что} из MYDON Core. Попробуй ещё раз чуть позже.` };
+}
+
+/**
+ * Подсказка об урезанном окне — ПЕРЕД отчётом, а не после.
+ *
+ * После заголовка её не прочитают: отчёт длинный, а знать о подмене окна надо
+ * до того, как поверишь числам.
+ */
+const сНоткой = (note: string | null, text: string): string => (note ? `${note}\n\n${text}` : text);
 
 export async function handleMessage(
   chatId: number,
@@ -233,12 +310,122 @@ export async function handleMessage(
     }
   }
 
+  // ── Аналитика снека (П5b) ──
+  //
+  // Весь блок стоит ДО ветки закупочной цены и до parseIntent, а внутри него
+  // мутации идут раньше отчётов: обе пары фраз («цена продажи …» / «цена …»,
+  // «витрина как факт» / «витрина») перехватываются соседом, если поменять их
+  // местами, — и перехват молчаливый, с записью не туда.
+
+  // Эталон витрины — мутация. СТРОГО до isPriceCommand: существующий
+  // /^цена(\s|:|$)/i ловит и «цена продажи TUC 15000», и правка ушла бы в
+  // ЗАКУПОЧНУЮ цену — другая колонка, другой гейт, и владелец узнал бы об этом
+  // только по перекошенному закупу.
+  if (isSalePriceCommand(text)) {
+    const cmd = parseSalePriceCommand(text);
+    // «цена продажи TUC -15000» — не «формат непонятен»: формат как раз
+    // понятен, не бывает такой цены. Подсказка формата отправила бы владельца
+    // повторять ту же команду (S8).
+    if (cmd === null) return { text: isNonPositiveSalePrice(text) ? NON_POSITIVE_PRICE_HINT : SALE_PRICE_HINT };
+    try {
+      const res = await deps.core.setVendingSalePrice(cmd.product, cmd.price, cmd.confirmed);
+      return { text: formatSalePriceResult(res) };
+    } catch (err) {
+      console.error("Ошибка правки эталона витрины:", err);
+      // 400 — отказ по САМИМ ДАННЫМ: повтор той же команды не поможет никогда
+      // (как у правил закупа).
+      if (err instanceof CoreError && err.status === 400) {
+        return { text: `${SALE_PRICE_HINT}\n\nCore отверг запрос: ${coreReason(err.body)}` };
+      }
+      return { text: "Не удалось записать эталон витрины в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // «витрина как факт» — разовый бутстрап эталона. СТРОГО до isPriceGapQuery:
+  // обе фразы начинаются с «витрина», и отчёт перехватил бы мутацию.
+  if (isSalePriceBootstrapCommand(text)) {
+    try {
+      const w = окно(text, SALE_PRICE_FACT_DAYS, BOOTSTRAP_DAYS_MAX);
+      const [first, ...more] = formatSalePriceBootstrap(await deps.core.bootstrapVendingSalePrice(w.days));
+      return { text: сНоткой(w.note, first), more };
+    } catch (err) {
+      console.error("Ошибка бутстрапа эталона витрины:", err);
+      if (err instanceof CoreError && err.status === 400) {
+        return { text: `Core отверг запрос: ${coreReason(err.body)}` };
+      }
+      return { text: "Не удалось проставить эталон витрины в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Витрина против эталона — чтение.
+  if (isPriceGapQuery(text)) {
+    try {
+      const w = окно(text, SALE_PRICE_FACT_DAYS, PRICE_GAP_DAYS_MAX);
+      const [first, ...more] = formatPriceGap(await deps.core.vendingPriceGap(w.days));
+      return { text: сНоткой(w.note, first), more };
+    } catch (err) {
+      console.error("Ошибка отчёта о витрине:", err);
+      return отчётНеПришёл("витрину", err);
+    }
+  }
+
+  // Маржа снек-автоматов — чтение.
+  if (isMarginQuery(text)) {
+    try {
+      const w = окно(text, MARGIN_DAYS_DEFAULT, MARGIN_DAYS_MAX);
+      const [first, ...more] = formatMargin(await deps.core.vendingMargin(w.days));
+      return { text: сНоткой(w.note, first), more };
+    } catch (err) {
+      console.error("Ошибка отчёта о марже:", err);
+      return отчётНеПришёл("маржу", err);
+    }
+  }
+
+  // Мёртвый сток — чтение.
+  if (isDeadStockQuery(text)) {
+    try {
+      const w = окно(text, DEAD_STOCK_DAYS_DEFAULT, DEAD_STOCK_DAYS_MAX);
+      const [first, ...more] = formatDeadStock(await deps.core.vendingDeadStock(w.days));
+      return { text: сНоткой(w.note, first), more };
+    } catch (err) {
+      console.error("Ошибка отчёта о мёртвом стоке:", err);
+      return отчётНеПришёл("мёртвый сток", err);
+    }
+  }
+
+  // Изменения цен — чтение. «цены» и «цена …» различаются одной буквой и
+  // означают противоположное (отчёт против правки), поэтому у обеих строгий
+  // хвост в разборе, а не общий префикс.
+  if (isPriceChangesQuery(text)) {
+    try {
+      const w = окно(text, PRICE_CHANGES_DAYS_DEFAULT, PRICE_CHANGES_DAYS_MAX);
+      const [first, ...more] = formatPriceChanges(await deps.core.vendingPriceChanges(w.days));
+      return { text: сНоткой(w.note, first), more };
+    } catch (err) {
+      console.error("Ошибка отчёта об изменениях цен:", err);
+      return отчётНеПришёл("изменения цен", err);
+    }
+  }
+
+  // «сверка» — здоровье сбора OurVend и паритет одним ответом (R-P5b-8).
+  // Живого запроса к кабинету OurVend из бота нет: коннектор живёт в агентах
+  // по крону, и делать вид, что «сверка» ходит в кабинет, нельзя.
+  if (isOurvendCheckQuery(text)) {
+    try {
+      const [first, ...more] = formatOurvendHealth(await deps.core.ourvendHealth());
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка сверки OurVend:", err);
+      return отчётНеПришёл("сверку OurVend", err);
+    }
+  }
+
   // Правка закупочной цены — «цена TUC 12000» (П3). Жёсткий префикс «цена…»
   // ни с чем не пересекается: продажных цен в командах бота нет. Гейт ±20%
   // живёт в Core; здесь только разбор и повтор со словом «точно».
   if (isPriceCommand(text)) {
     const cmd = parsePriceCommand(text);
-    if (cmd === null) return { text: PRICE_COMMAND_HINT };
+    if (cmd === null) return { text: isNonPositivePrice(text) ? NON_POSITIVE_PRICE_HINT : PRICE_COMMAND_HINT };
     try {
       const res = await deps.core.setVendingPrice(cmd.product, cmd.price, cmd.confirmed);
       return { text: formatPriceResult(res) };
@@ -298,6 +485,38 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка сводки продаж:", err);
       return { text: "Не удалось получить продажи из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // «итоги недели» — недельная сводка снека по требованию (R-P5b-7). СТРОГО
+  // до isActionsQuery (`^итоги`): иначе фраза уехала бы в ленту действий
+  // сотрудников — молча и с совершенно другим отчётом в ответе.
+  if (isWeeklyDigestQuery(text)) {
+    const arg = parseWeekArg(text);
+    if (!arg.ok) return { text: WEEKLY_WEEK_HINT };
+    try {
+      const [digest, pending] = await Promise.all([
+        deps.core.vendingWeeklyDigest(arg.week),
+        // Сигналы — деградируемый блок: их сбой не должен стоить сводки. Но и
+        // молчать о нём нельзя: недельный канал — единственная доставка
+        // `urgency:"weekly"`, и вечно падающий `/rules/pending` неотличим от
+        // «сигналов нет».
+        deps.core.briefingNotifications(new Date(Date.now() - WEEKLY_NOTES_WINDOW_MS)).catch((err: unknown) => {
+          console.error("Недельные сигналы правил не получены из Core:", err);
+          return null;
+        }),
+      ]);
+      // Отметки о доставке здесь НЕТ намеренно: `ack` необратим, а команду
+      // владелец может повторить хоть десять раз. Пусть сигнал ещё раз придёт
+      // в понедельник — это дешевле, чем потерять его на чтении.
+      const [first, ...more] = formatWeeklyDigest(digest, pendingNotes(pending, "weekly")).parts;
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка недельной сводки:", err);
+      if (err instanceof CoreError && err.status === 400) {
+        return { text: `${WEEKLY_WEEK_HINT}\n\nCore отверг запрос: ${coreReason(err.body)}` };
+      }
+      return { text: "Не удалось получить итоги недели из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 

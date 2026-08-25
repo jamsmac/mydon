@@ -11,17 +11,20 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
   ValidateNested,
 } from "class-validator";
-import { Type } from "class-transformer";
+import { Transform, Type } from "class-transformer";
 import { Throttle } from "@nestjs/throttler";
+import { AnalyticsService } from "./analytics.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { ShrinkageService } from "./shrinkage.service";
 import { VendingService } from "./vending.service";
+import { WeeklyDigestService } from "./weekly-digest.service";
 
 export class IngestSlotDto {
   @IsString() @IsNotEmpty() @MaxLength(16)
@@ -191,6 +194,43 @@ export class SetProductPriceDto {
   confirmed?: boolean;
 }
 
+/**
+ * Эталон витрины (П5b, R-P5b-6) — сколько владелец РЕШИЛ брать за товар.
+ * Не путать с `SetProductPriceDto`: тот про закупочную цену.
+ */
+export class SetSalePriceDto {
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  product!: string;
+
+  /**
+   * Целые сумы: витрина автомата дробей не принимает (монет меньше сума в
+   * обороте нет), а дробь на границе API — почти наверняка ошибка разбора
+   * команды. Потолок тот же, что у закупочной цены.
+   */
+  @IsInt() @Min(1) @Max(10_000_000)
+  price!: number;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+
+  /** Повторная команда со словом «точно» — пропуск гейта по факту витрины. */
+  @IsOptional() @IsIn([true, false])
+  confirmed?: boolean;
+}
+
+/** Разовый бутстрап «витрина как факт» (П5b, R-P5b-6). */
+export class BootstrapSalePriceDto {
+  /**
+   * Окно факта витрины, суток. По умолчанию 14 — столько же, сколько у гейта
+   * и у отчёта «разрыв витрины»; потолок 180 — как у лент изменений цен.
+   */
+  @IsOptional() @IsInt() @Min(1) @Max(180)
+  days?: number;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
 /** Правила закупа товара (П5a): что владелец решает про закуп, а не про товар. */
 export class SetProductRulesDto {
   @IsString() @IsNotEmpty() @MaxLength(255)
@@ -300,6 +340,56 @@ export class ShrinkageDto {
 }
 
 /**
+ * Окна отчётов аналитики снека (П5b). Границы стоят на ВХОДЕ, а не только в
+ * сервисе: `?days=100000` иначе доехал бы до выборки продаж и был бы зажат уже
+ * после того, как запрос ушёл в базу.
+ *
+ * `@Type(() => Number)` обязателен всем четырём: в query всё приходит строкой,
+ * а `ValidationPipe` включён БЕЗ `enableImplicitConversion` — без него
+ * `@IsInt()` отбивал бы любой `?days=`.
+ */
+export class MarginDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(90)
+  days?: number;
+}
+
+/** Мёртвый сток: потолок 180 суток — полгода без движения это уже не «сток», а списание. */
+export class DeadStockDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(180)
+  days?: number;
+}
+
+export class PriceChangesDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(180)
+  days?: number;
+}
+
+/** Разрыв витрины: то же окно, что у гейта команды «цена продажи» (14 суток). */
+export class PriceGapDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(90)
+  days?: number;
+}
+
+/**
+ * Неделя сводки, ключ `IYYY-IW` (`2026-34`). Пусто — предыдущая ISO-неделя.
+ *
+ * Регулярка, а не `@IsInt()` по двум полям: ключ приезжает из бота одной
+ * строкой («итоги недели 2026-34») и таким же уезжает в дедуп доставки —
+ * разбирать и собирать его заново значило бы завести второй формат недели.
+ * Негодная НЕДЕЛЯ (`2026-99`) формой проходит и гасится сервисом в предыдущую:
+ * отчёт — чтение, и владельцу полезнее письмо, чем 400.
+ */
+export class WeeklyDigestDto {
+  // `@Transform` гасит ПУСТОЕ значение (`?week=`) в «не задано»: документировано
+  // «пусто → предыдущая неделя», а `@IsOptional` пустую строку не пропускает и
+  // отдал бы 400 на ссылку, которую руками собрать легче лёгкого.
+  @IsOptional()
+  @Transform(({ value }) => (value === "" ? undefined : value))
+  @Matches(/^\d{4}-\d{2}$/, { message: "week — ключ ISO-недели вида 2026-34" })
+  week?: string;
+}
+
+/**
  * Окно журнала детектора. DTO, а не `Number(days)` руками: без границ роут
  * принимал любое число и надеялся на зажим в сервисе — у соседних чтений
  * граница стоит на входе, и разнобой рано или поздно кончается тем, что зажим
@@ -321,6 +411,8 @@ export class VendingController {
     private readonly refills: RefillService,
     private readonly refillEvents: RefillEventsService,
     private readonly shrinkageReport: ShrinkageService,
+    private readonly analytics: AnalyticsService,
+    private readonly weekly: WeeklyDigestService,
   ) {}
 
   @Post("ingest")
@@ -368,10 +460,20 @@ export class VendingController {
     return this.vending.orders(n !== undefined && Number.isFinite(n) ? n : undefined);
   }
 
-  /** Принять накладную на склад (§5.7): приход += заказанное, статус received. */
+  /**
+   * Принять накладную на склад (§5.7): приход += заказанное, статус received.
+   *
+   * Кеш аналитики сбрасывается ВСЕГДА, а не только при удачной приёмке:
+   * приёмка меняет и остаток склада (мёртвый сток), и взвешенную себестоимость
+   * всей маржи (`costIndex`), и пишет наблюдения цен. Сброс стоит один поход в
+   * базу на следующем чтении, а несброшенный кеш — пять минут отчёта, в
+   * котором только что принятой накладной нет.
+   */
   @Post("orders/receive")
-  receiveOrder(@Body() dto: ReceiveOrderDto) {
-    return this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
+  async receiveOrder(@Body() dto: ReceiveOrderDto) {
+    const итог = await this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
+    this.analytics.invalidateReports();
+    return итог;
   }
 
   /** План закупа: раздача по маршруту и слотам (П5a). */
@@ -396,10 +498,40 @@ export class VendingController {
     return this.vending.setProductRules(product, patch, actor);
   }
 
-  /** Правка закупочной цены товара (гейт ±20% — см. setProductPrice). */
+  /**
+   * Правка закупочной цены товара (гейт ±20% — см. setProductPrice).
+   *
+   * Закупочная цена — второй операнд маржи и оценки мёртвого стока, поэтому
+   * удачная правка сбрасывает кеш аналитики: иначе владелец, поправив цену в
+   * боте, пять минут читал бы маржу по старой.
+   */
   @Post("product-price")
-  setProductPrice(@Body() dto: SetProductPriceDto) {
-    return this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
+  async setProductPrice(@Body() dto: SetProductPriceDto) {
+    const итог = await this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
+    if (итог.ok) this.analytics.invalidateReports();
+    return итог;
+  }
+
+  /**
+   * Эталон витрины товара (гейт ±20% от ФАКТА витрины — см. setSalePrice).
+   *
+   * Удачная правка сбрасывает кеш аналитики: эталон — второй операнд отчёта
+   * «разрыв витрины», и закешированный отчёт показывал бы владельцу разрыв,
+   * которого он только что не стало.
+   */
+  @Post("sale-price")
+  async setSalePrice(@Body() dto: SetSalePriceDto) {
+    const итог = await this.vending.setSalePrice(dto.product, dto.price, dto.actor, dto.confirmed);
+    if (итог.ok) this.analytics.invalidateReports();
+    return итог;
+  }
+
+  /** «Витрина как факт»: разовый бутстрап эталонов по продажам окна. */
+  @Post("sale-price/bootstrap")
+  async bootstrapSalePrice(@Body() dto: BootstrapSalePriceDto) {
+    const итог = await this.vending.bootstrapSalePrice(dto.days, dto.actor);
+    if (итог.set.length > 0) this.analytics.invalidateReports();
+    return итог;
   }
 
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────
@@ -485,6 +617,57 @@ export class VendingController {
   @Get("shrinkage")
   shrinkage(@Query() dto: ShrinkageDto) {
     return this.shrinkageReport.report(dto.days);
+  }
+
+  // ── Аналитика снека (П5b): деньги, мёртвый сток, цены, витрина ────────────
+  //
+  // У каждого GET СВОЙ лимит, а не общий: расчёт тяжёлый (продажи окна в
+  // память плюс остатки и события), и общего потолка (60 запросов / 10 с)
+  // хватало, чтобы уложить Core одним циклом `curl` из докер-сети. Двенадцать
+  // запросов в минуту — вдвое больше, чем нужно панели (у неё три листа), и в
+  // двадцать раз меньше, чем нужно, чтобы Core лёг: отчёт всё равно живёт в
+  // кеше пять минут (`REPORT_CACHE_MS`).
+
+  /** Маржа по проданному за окно: автомат → товар (R-P5b-3). */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("margin")
+  margin(@Query() dto: MarginDto) {
+    return this.analytics.margin(dto.days);
+  }
+
+  /** Мёртвый сток: что не двигалось за окно — склад и автоматы (R-P5b-4). */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("dead-stock")
+  deadStock(@Query() dto: DeadStockDto) {
+    return this.analytics.deadStock(dto.days);
+  }
+
+  /** Изменения цен: закупочные и витринные, плюс помесячная динамика (R-P5b-5). */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("price-changes")
+  priceChanges(@Query() dto: PriceChangesDto) {
+    return this.analytics.priceChanges(dto.days);
+  }
+
+  /** Факт витрины против эталона владельца (R-P5b-6). */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("price-gap")
+  priceGap(@Query() dto: PriceGapDto) {
+    return this.analytics.priceGap(dto.days);
+  }
+
+  /**
+   * Недельная сводка снек-контура одним JSON (R-P5b-7): деньги недели, работа,
+   * мёртвый сток, цены, здоровье сбора. Текст собирает бот, панель показывает
+   * те же числа — второго расчёта нигде нет.
+   *
+   * Лимит тот же, что у остальных отчётов: внутри сводки четыре тяжёлых
+   * расчёта, но все они живут в кеше пять минут.
+   */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("weekly-digest")
+  weeklyDigest(@Query() dto: WeeklyDigestDto) {
+    return this.weekly.digest(dto.week);
   }
 
   /**

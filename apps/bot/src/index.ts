@@ -15,9 +15,12 @@ import {
   formatBriefing,
   formatBriefingNotes,
   msUntilBriefing,
+  msUntilWeekly,
   notesBudget,
   notesToAck,
+  pendingNotes,
 } from "./briefing";
+import { deliverWeeklyDigest } from "./weekly-delivery";
 import { buildDigest, digestKey } from "./staff-digest";
 import { CoreClient, type PersonRow } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
@@ -428,9 +431,7 @@ async function main(): Promise<void> {
       globerent,
     );
     const staffLine = staffActions ? summarizeActions(staffActions) : null;
-    const notes = (ruleNotes?.notifications ?? [])
-      .filter((n) => n.urgency === "briefing")
-      .map((n) => ({ key: `${n.eventId}:${n.ruleId}`, text: n.text }));
+    const notes = pendingNotes(ruleNotes, "briefing");
     // Бюджет считается по УЖЕ собранным частям: сколько бы ни было сигналов,
     // сводка и итоги дня уходят целиком, а режется хвост сигналов.
     const notesBlock = formatBriefingNotes(notes, 12, notesBudget(briefingText, staffLine));
@@ -533,6 +534,44 @@ async function main(): Promise<void> {
     }, msUntilBriefing(new Date(), 7, 0));
   };
   scheduleDigest();
+
+  /**
+   * Недельная сводка снек-контура: понедельник 08:05 Ташкента (R-P5b-7).
+   *
+   * Позже утреннего брифинга (07:30) намеренно: сводка за неделю — это разбор,
+   * а не тревога дня, и она не должна вытеснять брифинг из верха чата.
+   *
+   * Сама рассылка живёт в `weekly-delivery.ts`: каждый её шаг необратим
+   * (занятый ключ, отмеченный сигнал), и проверяться она обязана тестами, а не
+   * понедельником. Здесь остаётся только расписание и связывание с Telegram.
+   */
+  const scheduleWeekly = (): void => {
+    setTimeout(() => {
+      void (async () => {
+        // Core не ответил во все три попытки — ключ недели НЕ занят, сводка
+        // просто не ушла. В следующий понедельник придёт уже новая неделя:
+        // прошлую можно поднять руками командой «итоги недели 2026-34».
+        await withRetries("Недельная сводка не отправлена", async () => {
+          await deliverWeeklyDigest({
+            core: deps.core,
+            send: async (chatId, text) => {
+              await tg.sendMessage(chatId, text);
+            },
+            // Лог и чаты владельца — обязательны: отказ рассылки виден только
+            // здесь, а `console.warn` контейнера не читает никто (прод 25.08:
+            // ролей owner/manager в базе нет ни у кого, и письмо молчало бы).
+            log: {
+              warn: (m) => console.warn(m),
+              error: (m, err) => console.error(m, err),
+            },
+            ownerChats: allowlist,
+          });
+        });
+        scheduleWeekly();
+      })();
+    }, msUntilWeekly());
+  };
+  scheduleWeekly();
 
   setInterval(() => deps.limiter.sweep(), 5 * 60_000).unref();
 

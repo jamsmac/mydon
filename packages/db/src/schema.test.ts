@@ -85,6 +85,7 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       prod.includes("purchasePrice") && prod.includes("packSize"),
       "прайс и кратность — в базе, не в коде",
     );
+    assert.ok(prod.includes("salePrice"), "эталон витрины — в базе: без него price_gap не с чем сравнивать (R-P5b-6)");
   });
 
   it("у ключевых таблиц есть обязательные поля", () => {

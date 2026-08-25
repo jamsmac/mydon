@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import type { VendingProductRow } from "../lib/core";
+import { count } from "../lib/format";
 import { saveVendingProductRules } from "../app/vending/actions";
 
 /**
@@ -10,9 +11,11 @@ import { saveVendingProductRules } from "../app/vending/actions";
  * при дефиците — по каждому товару вендинга. Цена читается из прайса
  * (`vending_product.purchase_price`), но правится ТОЛЬКО в боте: панель не
  * дублирует команду «цена <товар> <сум>», чтобы не завести два источника.
+ *
+ * Эталон витрины (`sale_price`, П5b, R-P5b-6) живёт по тому же правилу и
+ * ПОЭТОМУ показан без формы: единственный писатель — бот («цена продажи
+ * <товар> <сум>»). Форма здесь завела бы второго писателя одного поля.
  */
-
-const n = (v: number): string => v.toLocaleString("ru-RU");
 
 const CATEGORY_LABEL: Record<VendingProductRow["category"], string> = {
   drink: "напиток",
@@ -97,12 +100,15 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
               <div className="t">
                 <b>{p.name}</b>
                 <small>
-                  {CATEGORY_LABEL[p.category]} · {p.purchasePrice === null ? "нет цены" : `${n(p.purchasePrice)} сум`} ·
-                  блок {n(p.packSize)}
+                  {CATEGORY_LABEL[p.category]} · {p.purchasePrice === null ? "нет цены" : `${count(p.purchasePrice)} сум`} ·
+                  блок {count(p.packSize)} ·{" "}
+                  {/* «витрина 0» читалось бы как «продаём бесплатно»: эталона
+                      просто нет, и сравнивать факт не с чем (R-P5b-6). */}
+                  {p.salePrice === null ? "эталон не задан" : `витрина ${count(p.salePrice)} сум`}
                 </small>
               </div>
               {p.excludedFromPurchase && <span className="pill bad">исключён</span>}
-              {p.fixedPurchaseQty !== null && <span className="pill">фикс {n(p.fixedPurchaseQty)}</span>}
+              {p.fixedPurchaseQty !== null && <span className="pill">фикс {count(p.fixedPurchaseQty)}</span>}
               {/* Имя товара — в aria-label, а не в подписи: в списке из 48
                   строк кнопка «Править Snickers 50gr» ломала колонку, но без
                   имени кнопка неотличима от 47 соседних для читалки (UX#24). */}
@@ -123,6 +129,9 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
       {saved && editingRow === null && <p className="ok-text">{saved}</p>}
       <p className="hint" style={{ marginTop: 8 }}>
         Цена — только чтение: правится в боте командой «цена &lt;товар&gt; &lt;сум&gt;».
+      </p>
+      <p className="hint">
+        {"Витрина (эталон) — только чтение: правится в боте командой «цена продажи <товар> <сум>»."}
       </p>
     </>
   );

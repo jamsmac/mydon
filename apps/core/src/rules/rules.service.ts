@@ -3,13 +3,30 @@ import { notificationDelivery } from "@mydon/db";
 import { inArray } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
-import { applyRules, immediateOnly, RULES, type Notification } from "./rules";
+import { applyRules, immediateOnly, RULES, RULE_EVENT_TYPES, type Notification } from "./rules";
 
 export interface PendingNotifications {
   since: string;
+  /** Сколько событий ПОД ПРАВИЛА нашлось в окне (шум крона сюда не входит). */
   events: number;
+  /**
+   * Окно упёрлось в лимит выборки: показано не всё, что случилось.
+   *
+   * Молчать об этом нельзя — обрезанная лента выглядит ровно как полная, и
+   * ровно так на проде «сигналы за 14 суток» тихо превратились в 37 часов.
+   */
+  truncated: boolean;
   notifications: (Notification & { eventId: string; occurredAt: string })[];
 }
+
+/**
+ * Потолок выборки событий под правила.
+ *
+ * Остаётся 500 — но теперь он режет ТОЛЬКО события, на которые есть правила
+ * (`RULE_EVENT_TYPES`), а не всю ленту вперемешку с шумом крона. Упереться в
+ * него по-прежнему можно, и тогда об этом говорит `truncated`.
+ */
+export const PENDING_EVENTS_LIMIT = 500;
 
 @Injectable()
 export class RulesService {
@@ -74,7 +91,11 @@ export class RulesService {
    * перекрываться без риска повторной отправки.
    */
   async pending(since: Date, onlyImmediate = false): Promise<PendingNotifications> {
-    const events = await this.events.list({ since, limit: 500 });
+    // Фильтр по типам стоит В SQL, до лимита: иначе 500 свежайших строк
+    // выбирает шум крона, а события правил остаются за окном (прод: 4315
+    // событий за 14 суток, из них 4180 — `sales.sync`/`supply.sync`).
+    const events = await this.events.list({ since, types: RULE_EVENT_TYPES, limit: PENDING_EVENTS_LIMIT });
+    const truncated = events.length >= PENDING_EVENTS_LIMIT;
     const out: PendingNotifications["notifications"] = [];
 
     for (const e of events) {
@@ -98,12 +119,13 @@ export class RulesService {
         return {
           since: since.toISOString(),
           events: events.length,
+          truncated,
           notifications: out.filter((n) => !delivered.has(this.key(n.eventId, n.ruleId))),
         };
       }
     }
 
-    return { since: since.toISOString(), events: events.length, notifications: out };
+    return { since: since.toISOString(), events: events.length, truncated, notifications: out };
   }
 
   /** Проверка правила на выдуманном событии — без записи в шину. */

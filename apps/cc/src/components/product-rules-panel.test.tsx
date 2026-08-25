@@ -9,8 +9,8 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }
 vi.mock("../app/vending/actions", () => ({ saveVendingProductRules: mocks.saveVendingProductRules, submitVendingPurchase: vi.fn() }));
 
 const rows: VendingProductRow[] = [
-  { id: "p1", name: "Snickers 50gr", category: "snack", purchasePrice: 7000, packSize: 10, isActive: true, excludedFromPurchase: false, fixedPurchaseQty: 48 },
-  { id: "p2", name: "Twix 50gr", category: "snack", purchasePrice: 7000, packSize: 10, isActive: true, excludedFromPurchase: true, fixedPurchaseQty: null },
+  { id: "p1", name: "Snickers 50gr", category: "snack", purchasePrice: 7000, salePrice: 15000, packSize: 10, isActive: true, excludedFromPurchase: false, fixedPurchaseQty: 48 },
+  { id: "p2", name: "Twix 50gr", category: "snack", purchasePrice: 7000, salePrice: null, packSize: 10, isActive: true, excludedFromPurchase: true, fixedPurchaseQty: null },
 ];
 
 describe("лист «Правила закупа»", () => {
@@ -71,5 +71,24 @@ describe("лист «Правила закупа»", () => {
     expect(screen.getByLabelText("Блок, шт")).toHaveValue("10");
     expect(screen.getByLabelText("Убрать из закупки (грузить только со склада)")).toBeChecked();
     expect(screen.getByDisplayValue("Twix 50gr")).toBeInTheDocument();
+  });
+});
+
+describe("Правила закупа: эталон витрины только для чтения", () => {
+  it("показывает эталон и говорит, где он правится", () => {
+    render(<ProductRulesPanel domain="vendhub" products={[rows[0]!]} />);
+    // Эталон — деньги, и «сум» у него такой же обязательный, как у цены
+    // закупки в этой же строке (адверсариал UX #11).
+    expect(screen.getByText(/витрина 15 000 сум/)).toBeVisible();
+    expect(screen.getByText(/цена продажи <товар> <сум>/)).toBeVisible();
+    // Формы правки здесь НЕТ: единственный писатель эталона — бот (R-P5b-6),
+    // тот же принцип, что у закупочной цены.
+    expect(screen.queryByLabelText(/Витрина/)).toBeNull();
+  });
+
+  it("эталона нет — так и сказано, а не «витрина 0»", () => {
+    render(<ProductRulesPanel domain="vendhub" products={[rows[1]!]} />);
+    expect(screen.getByText(/эталон не задан/)).toBeVisible();
+    expect(screen.queryByText(/витрина 0/)).toBeNull();
   });
 });

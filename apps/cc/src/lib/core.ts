@@ -1,5 +1,15 @@
 import "server-only";
-import type { DenominationCounts } from "@mydon/shared";
+import type {
+  AnalyticsWarning,
+  DeadStockReport,
+  DenominationCounts,
+  MarginReport,
+  MonthlyPrice,
+  OurvendHealth,
+  OurvendSyncRun,
+  PriceChangesReport,
+  PriceGapReport,
+} from "@mydon/shared";
 
 /**
  * Клиент MYDON Core для оболочки.
@@ -284,6 +294,49 @@ export interface VendingShrinkageReport {
   warnings: VendingShrinkageWarning[];
 }
 
+/**
+ * Аналитика снек-контура (П5b): формы отчётов живут в `@mydon/shared`
+ * (`vending-reports.ts`, R-P5b-10) — их считает Core, а бот и панель
+ * ИМПОРТИРУЮТ оттуда же. Здесь только реэкспорт: ни одно поле не переписано,
+ * иначе у владельца снова разъехались бы три копии одного числа (урок П5a).
+ *
+ * Финальная волна довела список до конца: `MonthlyPrice`, `OurvendHealth` и
+ * `OurvendSyncRun` жили здесь копиями поле-в-поле (Task 4 положил их в shared
+ * последним), теперь и они реэкспортируются. Своих объявлений форм отчётов в
+ * панели больше НЕТ — расхождение полей ловит компилятор, а не читатель.
+ */
+export type {
+  AnalyticsWarning,
+  AnalyticsWarningCode,
+  DeadRow,
+  DeadStockReport,
+  MarginExcluded,
+  MarginMachine,
+  MarginProduct,
+  MarginReport,
+  MarginTotals,
+  MonthlyPrice,
+  OurvendHealth,
+  OurvendSyncRun,
+  PriceChange,
+  PriceChangesReport,
+  PriceGapReport,
+  PriceGapRow,
+} from "@mydon/shared";
+
+/**
+ * Хвост «посчитано не всё»: Core доклеивает `warnings` ко всем четырём
+ * отчётам аналитики (П5b Task 3), панель показывает их блоком «Посчитано не
+ * всё» — тем же набором фактов, что бот печатает строками.
+ *
+ * Поле НЕобязательное намеренно (как `WithWarnings` в боте): отчёт без
+ * предупреждений — законный ответ, и фикстуры листов, написанные до Task 3,
+ * обязаны рендериться как раньше, а не падать.
+ */
+export interface WithWarnings {
+  warnings?: AnalyticsWarning[];
+}
+
 /** Событие детектора заливок: что автомат получил и была ли запись оператора. */
 export interface VendingRefillEvent {
   id: string;
@@ -303,6 +356,12 @@ export interface VendingProductRow {
   name: string;
   category: "drink" | "snack" | "other";
   purchasePrice: number | null;
+  /**
+   * Эталон витрины — слово владельца о том, почём товар должен продаваться
+   * (`vending_product.sale_price`, R-P5b-6). `null` — эталон не задан, и это
+   * НЕ ноль: сравнивать факт не с чем. Пишет только бот.
+   */
+  salePrice: number | null;
   packSize: number;
   isActive: boolean;
   excludedFromPurchase: boolean;
@@ -343,17 +402,15 @@ export interface VendingOrder {
   unmatchedDistribution: string[] | null;
 }
 
-/** Запуск сбора Ourvend — когда собирали и с каким итогом. */
-export interface VendingSyncRun {
-  id: string;
-  startedAt: string;
-  finishedAt: string | null;
-  status: "running" | "success" | "partial" | "failed";
-  machinesTotal: number;
-  machinesOk: number;
-  error: string | null;
-  durationMs: number | null;
-}
+/**
+ * Запуск сбора Ourvend — когда собирали и с каким итогом.
+ *
+ * Это ТА ЖЕ строка `vending_sync_run`, что отдаёт `/ourvend/health` в
+ * `OurvendHealth.runs`, поэтому здесь алиас общего типа, а не четвёртая копия
+ * восьми полей: `/vending/sync` и здоровье сбора обязаны показывать один
+ * статус одного прогона.
+ */
+export type VendingSyncRun = OurvendSyncRun;
 
 /**
  * Заливка снек/дринк-автомата: ПОСТРОЧНАЯ запись (один слот). У журнала нет
@@ -2327,6 +2384,19 @@ export const core = {
    * само зажимает значение, поэтому лист может звать его любым из трёх.
    */
   vendingShrinkage: (days = 14) => get<VendingShrinkageReport>(`/vending/shrinkage?days=${days}`),
+  /**
+   * Аналитика снек-контура (П5b). Окна зажимает ядро (маржа 1..90, сток 1..90,
+   * цены 1..180) — панель зовёт их значениями своих переключателей.
+   */
+  vendingMargin: (days = 30) => get<MarginReport & WithWarnings>(`/vending/margin?days=${days}`),
+  vendingDeadStock: (days = 21) => get<DeadStockReport & WithWarnings>(`/vending/dead-stock?days=${days}`),
+  /** `monthly` — донорская динамика по месяцам, её просит только панель (R-P5b-5). */
+  vendingPriceChanges: (days = 30) =>
+    get<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings>(`/vending/price-changes?days=${days}`),
+  /** Факт витрины против эталона владельца. Окно — своё, короткое (R-P5b-6). */
+  vendingPriceGap: (days = 14) => get<PriceGapReport & WithWarnings>(`/vending/price-gap?days=${days}`),
+  /** Здоровье сбора OurVend: прогоны, серия отказов, лаги снимков, паритет (R-P5b-8). */
+  ourvendHealth: (runs = 20) => get<OurvendHealth>(`/ourvend/health?runs=${runs}`),
   /** Журнал детектора заливок: что автомат получил и была ли запись оператора. */
   vendingRefillEvents: (days = 14) => get<VendingRefillEvent[]>(`/vending/refill-events?days=${days}`),
   /** Прайс вендинга с правилами закупа — для листа «Правила закупа». */

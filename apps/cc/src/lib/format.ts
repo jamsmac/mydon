@@ -46,6 +46,45 @@ export function hasMoney(rows: readonly { amount: string | number }[]): boolean 
   });
 }
 
+/**
+ * Число с разделителями разрядов и БЕЗ неразрывного пробела.
+ *
+ * `toLocaleString("ru-RU")` разделяет тройки разрядов U+00A0, и скопированная
+ * из панели сумма молча не находится ни поиском по странице, ни в боте (тот же
+ * баг чинит `formatAmount` в apps/core/src/rules/rules.ts и `n` в
+ * shrinkage-view.tsx). Листы отчётов П5b показывают числа, которые владелец
+ * копирует и сверяет, поэтому пробел здесь обычный.
+ */
+export function count(v: number): string {
+  return v.toLocaleString("ru-RU").replace(/\u00a0/g, " ");
+}
+
+/** Сумма («12 300 сум») тем же правилом, что `count`: без U+00A0. */
+export function amount(v: number): string {
+  return money(v).replace(/\u00a0/g, " ");
+}
+
+/**
+ * Процент с одним знаком: «27,6 %». `null` — «—», а не «0 %»: у процента с
+ * нулевой базой нет значения, и ноль читался бы как посчитанный результат.
+ * Минус — типографский (U+2212), как в остальных числах панели.
+ */
+export function percent(v: number | null): string {
+  return v === null ? "—" : `${v.toFixed(1).replace("-", "\u2212").replace(".", ",")} %`;
+}
+
+/** Голые сутки `YYYY-MM-DD` → «25.08.2026»: отчёт живёт неделями, год не лишний. */
+export function day(iso: string): string {
+  const [y, m, d] = iso.split("-");
+  return y && m && d ? `${d}.${m}.${y}` : iso;
+}
+
+/** Месяц `YYYY-MM` → «08.2026». */
+export function month(iso: string): string {
+  const [y, m] = iso.split("-");
+  return y && m ? `${m}.${y}` : iso;
+}
+
 /** Слово в правильном числе: 1 автомат, 2 автомата, 5 автоматов. */
 export function plural(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10;

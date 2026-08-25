@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
-import { and, desc, eq, gte, inArray, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
 import {
   approval,
   auditLog,
@@ -10,6 +10,7 @@ import {
   machineSlot,
   productSale,
   purchase,
+  sale,
   slotSnapshot,
   vendingAlias,
   vendingCashSession,
@@ -19,8 +20,10 @@ import {
   vendingSyncRun,
 } from "@mydon/db";
 import {
+  DAY,
   MAX_CAPACITY,
   PRICE_SPIKE_PCT,
+  SALE_PRICE_FACT_DAYS,
   TZ,
   allocateByRoute,
   allocateBySlots,
@@ -35,10 +38,13 @@ import {
   normalizeProductName,
   planogramStatus,
   priceDeviationPct,
+  retailFactByProduct,
   routeIssuesFrom,
   routeOrderFrom,
   runoutForecast,
   slotValid,
+  tashkentDay,
+  tashkentDayStartOf,
   type CashCategoryInput,
   type MachineSlots,
   type PlanogramStatus,
@@ -46,7 +52,10 @@ import {
   type ProductRule,
   type PurchaseCashSession,
   type PurchaseRow,
+  type BootstrapSalePriceResult,
   type PurchaseSummary,
+  type RetailFact,
+  type SetSalePriceResult,
   type Runout,
   type RunoutInput,
   type Slot,
@@ -55,6 +64,7 @@ import {
 import { DB, type Db } from "../db/db.module";
 import { ApprovalsService } from "../approvals/approvals.service";
 import { settingValue } from "../system/settings";
+import { failedStreak, FAILED_STREAK_ALERT, STREAK_SCAN_LIMIT } from "./sync-streak";
 
 /**
  * Вендинг: приём собранных данных и расчёт дефицита (ТЗ Фаза 1).
@@ -320,6 +330,14 @@ export interface SetPriceResult {
   reason?: "not_found" | "spike";
 }
 
+/**
+ * Формы ответов на правку эталона витрины живут в `@mydon/shared`
+ * (`vending-reports.ts`): их читают трое — Core, бот и панель, — и переписанное
+ * от руки зеркало уже расходилось с оригиналом молча (R-P5b-10). Здесь только
+ * реэкспорт, чтобы вызывающие в Core не тянули пакет отдельной строкой.
+ */
+export type { BootstrapSalePriceResult, SetSalePriceResult };
+
 /** Итог отправки закупа на утверждение. */
 export interface SubmitPurchaseResult {
   submitted: boolean;
@@ -359,6 +377,87 @@ export const SALES_STALE_DAYS = 2;
  * две и решит сам, какая из них про сегодня, — это его решение, а не наше.
  */
 export const PENDING_PURCHASE_TTL_DAYS = 3;
+
+/**
+ * Парк «в строю», собранный ОТ ДАННЫХ (см. `VendingService.inServicePark`).
+ * `ok` — предикат для строк источника, `inService` — «серийник → как показать»,
+ * `notInService` — кто и почему выброшен (об этом отчёты говорят вслух).
+ */
+export interface InServicePark {
+  inService: Map<string, string>;
+  notInService: Map<string, { name: string; status: string }>;
+  ok: (serial: string) => boolean;
+}
+
+/**
+ * Сырые формы серийников автоматов НЕ в строю — чтобы отсечь их прямо в SQL.
+ *
+ * Список отрицательный (кого исключить), а не положительный (кого оставить):
+ * положительный означал бы «нет карточки → мимо отчёта», а это ровно то
+ * правило, от которого уходит `inServicePark`. Формы обе (с приставкой «c» и
+ * без): в базе лежит то, что прислал источник. Регистр не перебираем — SQL
+ * лишь сужает чтение, решает всё равно `InServicePark.ok`.
+ */
+export function notInServiceSerialForms(notInService: Iterable<string>): string[] {
+  const формы: string[] = [];
+  for (const serial of notInService) формы.push(serial, `c${serial}`);
+  return формы;
+}
+
+/**
+ * Окно ФАКТА витрины — общее число `@mydon/shared` (`SALE_PRICE_FACT_DAYS`),
+ * реэкспортом: его же читают отчёт `price_gap` и текст бота, и своей копии в
+ * Core быть не должно (R-P5b-6, R-P5b-10). Почему именно две недели — сказано
+ * над объявлением в shared.
+ */
+export { SALE_PRICE_FACT_DAYS };
+
+/**
+ * Потолок «цены» в позиции накладной, сум за единицу.
+ *
+ * `positions` лежит в jsonb без схемы: туда приезжает то, что собрал план
+ * закупа, и один промах на клавиатуре («1300000» вместо «13000») уводит
+ * себестоимость всей маржи. Десять миллионов за единицу снека — заведомо
+ * мусор, и такая позиция честнее без цены, чем с выдуманной.
+ */
+export const MAX_POSITION_PRICE = 10_000_000;
+
+/** Позиция накладной, уже проверенная: имя, штуки и цена или «цены нет». */
+export interface OrderPosition {
+  product: string;
+  qty: number;
+  /** `null` — цены НЕТ (ноль, мусор, заоблачное число), а не «привезли даром». */
+  price: number | null;
+}
+
+/**
+ * Позиции накладной из jsonb — ОДИН разбор на весь Core.
+ *
+ * Разборов было три (приёмка, себестоимость аналитики, приходы недельной
+ * сводки), и гейт цены у них уже разъехался: сводка принимала любое число
+ * `> 0`, аналитика отсекала `> 10 000 000`. Мусорная позиция попадала в
+ * `intake.amount` письма, но не в себестоимость отчёта — два числа Core об
+ * одной накладной (R-P5b-10).
+ *
+ * `order` — сколько ЗАКАЗАЛИ: та же колонка, по которой приёмка зачисляет
+ * склад, и по ней же считается себестоимость. Позиция без имени или без штук
+ * не зачисляется приёмкой ни на склад, ни в деньги — и здесь пропускается по
+ * той же причине, а не «на всякий случай».
+ */
+export function parseOrderPositions(positions: unknown): OrderPosition[] {
+  const out: OrderPosition[] = [];
+  for (const p of Array.isArray(positions) ? positions : []) {
+    const pos = (p ?? {}) as { product?: unknown; order?: unknown; price?: unknown };
+    const product = typeof pos.product === "string" ? pos.product.trim() : "";
+    const qty = typeof pos.order === "number" && Number.isFinite(pos.order) ? Math.trunc(pos.order) : 0;
+    if (!product || qty <= 0) continue;
+    const raw = pos.price;
+    const price =
+      typeof raw === "number" && Number.isFinite(raw) && raw > 0 && raw <= MAX_POSITION_PRICE ? raw : null;
+    out.push({ product, qty, price });
+  }
+  return out;
+}
 
 /** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
 export interface PlanMachine {
@@ -426,6 +525,8 @@ export interface VendingProductRow {
   name: string;
   category: "drink" | "snack" | "other";
   purchasePrice: number | null;
+  /** Эталон витрины (R-P5b-6): `null` — владелец его ещё не назвал. */
+  salePrice: number | null;
   packSize: number;
   isActive: boolean;
   excludedFromPurchase: boolean;
@@ -456,7 +557,11 @@ interface ProductIndexRow {
   name: string;
   category: "drink" | "snack" | "other";
   purchasePrice: string | null;
+  /** Эталон витрины (П5b) — numeric строкой, как его отдаёт драйвер. */
+  salePrice: string | null;
   packSize: number;
+  /** Снятый с продажи товар: бутстрап эталона его не трогает (П5b). */
+  isActive: boolean;
   excludedFromPurchase: boolean;
   fixedPurchaseQty: number | null;
 }
@@ -1113,7 +1218,7 @@ export class VendingService {
    * строкой мимо расчёта закупа. Цены: нужны, чтобы оценить недостачу/излишек
    * при пересчёте в сумах, а не только в штуках.
    */
-  private async loadProductIndex(): Promise<{
+  async loadProductIndex(): Promise<{
     aliasByKey: Map<string, string>;
     priceByName: Map<string, number>;
     packByName: Map<string, number>;
@@ -1129,7 +1234,9 @@ export class VendingService {
           name: vendingProduct.name,
           category: vendingProduct.category,
           purchasePrice: vendingProduct.purchasePrice,
+          salePrice: vendingProduct.salePrice,
           packSize: vendingProduct.packSize,
+          isActive: vendingProduct.isActive,
           excludedFromPurchase: vendingProduct.excludedFromPurchase,
           fixedPurchaseQty: vendingProduct.fixedPurchaseQty,
         })
@@ -1208,8 +1315,16 @@ export class VendingService {
     return { name, productId: hit?.id ?? null };
   }
 
-  /** Привести имя товара к канону через алиасы; неизвестное — как есть. */
-  private resolveProduct(name: string, aliases: Map<string, string>): string {
+  /**
+   * Привести имя товара к канону через алиасы; неизвестное — как есть.
+   *
+   * Публичен вместе с `loadProductIndex` ради аналитики (П5b): её отчёты берут
+   * из ОДНОГО чтения прайса и алиасы, и закупочную цену, и эталон витрины, а
+   * канон обязан быть ТОТ ЖЕ, что у закупа. Своя копия этих двух строк в
+   * соседнем сервисе рано или поздно разошлась бы с этой — и товар «Moxito
+   * клуб» получил бы вторую строку остатка мимо закупа.
+   */
+  resolveProduct(name: string, aliases: Map<string, string>): string {
     return aliases.get(normalizeProductName(name)) ?? name;
   }
 
@@ -1441,6 +1556,42 @@ export class VendingService {
       if (status !== "in_service") notInService.set(serial, { name: nameBySerial.get(serial) ?? serial, status });
     }
     return { notInService, nameBySerial };
+  }
+
+  /**
+   * Парк «в строю» СРЕДИ ТЕХ АВТОМАТОВ, ЧТО ЕСТЬ В ДАННЫХ (R-P5b-1).
+   *
+   * ОТ ДАННЫХ, А НЕ ОТ РЕЕСТРА. Соблазн собрать множество из `nameBySerial` и
+   * оставить пересечение выглядит эквивалентным, но означает другое правило:
+   * «нет карточки → не в строю». Серийник без карточки — это НОВЫЙ автомат
+   * (или карточка, которую забыли завести), и его деньги молча выпадали бы из
+   * маржи, а остаток — из мёртвого стока. Не в строю бывает только тот, про
+   * кого карточка ПРЯМО ЭТО ГОВОРИТ (`status ≠ in_service`) — та же логика,
+   * что у `inServiceOk` в плане закупа.
+   *
+   * Имя для витрины: из реестра, а если карточки нет — сам серийник. Показать
+   * владельцу пустое имя хуже, чем показать номер.
+   *
+   * `serials` — сырые серийники строк источника (продажи, остатки), канон
+   * наводится здесь: «c2508160376» и «2508160376» — один автомат.
+   */
+  inServicePark(
+    serials: Iterable<string>,
+    registry: { notInService: Map<string, { name: string; status: string }>; nameBySerial: Map<string, string> },
+  ): InServicePark {
+    const inService = new Map<string, string>();
+    const notInService = new Map<string, { name: string; status: string }>();
+    for (const raw of serials) {
+      const canon = normalizeMachineSerial(raw);
+      const снят = registry.notInService.get(canon);
+      if (снят) notInService.set(canon, снят);
+      else inService.set(canon, registry.nameBySerial.get(canon) ?? canon);
+    }
+    return {
+      inService,
+      notInService,
+      ok: (serial: string) => !registry.notInService.has(normalizeMachineSerial(serial)),
+    };
   }
 
   /**
@@ -1785,6 +1936,7 @@ export class VendingService {
         name: p.name,
         category: p.category,
         purchasePrice: p.purchasePrice === null ? null : Number(p.purchasePrice),
+        salePrice: p.salePrice === null ? null : Number(p.salePrice),
         packSize: p.packSize,
         isActive: p.isActive,
         excludedFromPurchase: p.excludedFromPurchase,
@@ -2016,12 +2168,19 @@ export class VendingService {
     receivedBy = "owner",
     distributed?: Record<string, number>,
   ): Promise<ReceiveOrderResult> {
+    // Прайс читаем ВСЕГДА, а не только под `distributed`: с П5b приёмка ещё
+    // и наблюдает цену позиции против карточки (R-P5b-5), а без прайса
+    // «было/стало» в наблюдении сравнивать не с чем.
+    const { aliasByKey, priceByName } = await this.loadProductIndex();
+    /** Закупочная цена карточки по НОРМАЛИЗОВАННОМУ канону — «было» наблюдения. */
+    const ценаКарточки = new Map<string, number>();
+    for (const [имя, цена] of priceByName) ценаКарточки.set(normalizeProductName(имя), цена);
+
     // Ключ — normalizeProductName(канон): сравнение с позицией без учёта
     // регистра/пробелов. display хранит канон как есть — для unmatchedDistribution.
     const distributedByCanonical = new Map<string, number>();
     const distributedDisplay = new Map<string, string>();
     if (distributed && Object.keys(distributed).length > 0) {
-      const { aliasByKey } = await this.loadProductIndex();
       for (const [raw, qty] of Object.entries(distributed)) {
         const name = raw.trim();
         // Не целое неотрицательное число (NaN, дробь, строка, отрицательное) —
@@ -2127,6 +2286,13 @@ export class VendingService {
       const mirrorAlive = Boolean(process.env.STOCK_DATABASE_URL);
       const dtToday = new Date().toLocaleDateString("en-CA", { timeZone: TZ });
       const purchaseRows: (typeof purchase.$inferInsert)[] = [];
+      /**
+       * Наблюдения закупочной цены (R-P5b-5): что за товар РЕАЛЬНО заплатили
+       * по этой накладной. Лента изменений закупочных цен иначе видела бы
+       * только команду «цена …» из бота — то есть моменты, когда владелец
+       * СООБЩИЛ о новой цене, а не когда она изменилась на базаре.
+       */
+      const наблюдения: { product: string; price: number; oldPrice: number | null; orderId: string; receivedAt: string }[] = [];
       for (const p of positions) {
         const pos = p as { product?: unknown; order?: unknown; price?: unknown };
         const product = typeof pos.product === "string" ? pos.product.trim() : "";
@@ -2142,6 +2308,20 @@ export class VendingService {
         // журнал вовсе (склад упадёт на своём integer раньше).
         const rawPrice = typeof pos.price === "number" && Number.isFinite(pos.price) && pos.price > 0 ? pos.price : null;
         const unitPrice = rawPrice !== null && rawPrice <= 10_000_000 ? rawPrice : null;
+        // Позиция без цены наблюдения не даёт: «цены нет» — это не «заплатили
+        // ноль», и нулевая точка в ленте цен была бы обвалом на 100 %.
+        // Собираем ДО веток распределения: позиция, целиком ушедшая в
+        // автоматы мимо склада, оплачена ровно так же, как любая другая.
+        if (unitPrice !== null) {
+          const канон = this.resolveProduct(product, aliasByKey);
+          наблюдения.push({
+            product: канон,
+            price: unitPrice,
+            oldPrice: ценаКарточки.get(normalizeProductName(канон)) ?? null,
+            orderId: order.id,
+            receivedAt: now.toISOString(),
+          });
+        }
         if (!mirrorAlive && qty <= 1_000_000) {
           // Дубликат канона в positions (слоты «Кола»/«кола» без алиаса дают
           // две позиции одного канона) дал бы два одинаковых extId в одном
@@ -2225,6 +2405,18 @@ export class VendingService {
           recordedPurchases: purchaseRows.length,
         },
       });
+
+      // Наблюдения цен — в ТОЙ ЖЕ транзакции, что и сама приёмка: приёмка,
+      // не оставившая следа в ленте цен, — это молча потерянное изменение
+      // закупочной цены, и откат обязан откатывать её вместе с приходом.
+      // Идут ПОСЛЕ события приёмки: в ленте первым обязано стоять само
+      // «накладную приняли», а наблюдения — его последствия.
+      if (наблюдения.length > 0) {
+        await tx.insert(event).values(
+          наблюдения.map((o) => ({ source: "owner", type: "vending.purchase_price_observed", payload: o })),
+        );
+      }
+
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef: receivedBy,
@@ -2310,6 +2502,258 @@ export class VendingService {
     return { ok: true, product: row.name, oldPrice, newPrice: price };
   }
 
+  // ── Эталон витрины (П5b, R-P5b-6) ─────────────────────────────────────────
+  // Витринной цены нет ни в одной таблице источника: `sale` знает ФАКТ
+  // (`amount/qty`), но факт сам себе эталоном быть не может — он и есть то,
+  // что проверяют. Эталон — слово владельца, и живёт он в
+  // `vending_product.sale_price` (миграция 0068).
+
+  /**
+   * ФАКТ витрины по товарам за окно: Σamount / Σqty по КАНОНУ имени.
+   *
+   * Тонкая обёртка: сама формула живёт в `@mydon/shared`
+   * (`retailFactByProduct`) и оттуда же её берёт отчёт «разрыв витрины»
+   * (R-P5b-10). Здесь — только то, чего чистая функция знать не может: какие
+   * строки ей дать.
+   *
+   * ОКНО — последние `days` ПОЛНЫХ ташкентских суток, кончая ВЧЕРА (та же
+   * `окноПоВчера`, что у отчётов аналитики). Сегодняшний день не берём
+   * намеренно: `sale` наполняется суточным съёмом кабинета, и сегодняшняя
+   * строка либо ещё не приехала, либо приехала половиной — цена по половине
+   * дня скакала бы от часа прогона. Верхняя граница задана явно (`lte`), а не
+   * «всё, что новее»: строка с датой из будущего (кривой импорт) иначе
+   * заезжала бы в факт и тихо двигала гейт.
+   *
+   * ГЕЙТ И ОТЧЁТ ОБЯЗАНЫ СОВПАДАТЬ. Если здесь окно или множество автоматов
+   * разойдутся с `AnalyticsService.priceGap`, владелец получит бота, который
+   * не принимает цену, названную правильной в его же отчёте, — и никакого
+   * способа понять, кто из двоих врёт.
+   *
+   * АВТОМАТЫ — только «в строю» (R-P5b-1), тем же правилом, что у отчётов:
+   * серийник должен быть в реестре И его карточка не снята. Прод уже показал
+   * цену этой строки: 09.07.2026 склад-заглушка `2508160360` (SKLAD 4S,
+   * `warehouse`) «продал» 1 шт Moxito Klubnika за 12 000 — такая «продажа»
+   * двигала бы факт витрины наравне с настоящей.
+   */
+  async retailFacts(
+    days = SALE_PRICE_FACT_DAYS,
+    aliasByKey?: Map<string, string>,
+    now = new Date(),
+  ): Promise<Map<string, RetailFact>> {
+    const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
+    const aliases = aliasByKey ?? (await this.loadProductIndex()).aliasByKey;
+    const сегодня = tashkentDayStartOf(now).getTime();
+    const from = tashkentDay(new Date(сегодня - окно * DAY));
+    const to = tashkentDay(new Date(сегодня - DAY));
+
+    const [rows, registry] = await Promise.all([
+      this.db
+        .select({ machineSerial: sale.machineSerial, product: sale.product, qty: sale.qty, amount: sale.amount })
+        .from(sale)
+        .where(and(gte(sale.dt, from), lte(sale.dt, to))),
+      this.machineRegistry(),
+    ]);
+
+    // Парк собирается ОТ СТРОК ПРОДАЖ, а не от реестра: у автомата без
+    // карточки продажи реальные, и выбрасывать их значит занижать факт витрины
+    // (см. `inServicePark`). Мимо факта идут только те, про кого карточка прямо
+    // говорит «не в строю» — на проде это SKLAD 4S, «продавший» 1 шт 09.07.
+    const парк = this.inServicePark(
+      rows.map((r) => r.machineSerial),
+      registry,
+    );
+
+    return retailFactByProduct(
+      rows
+        .filter((r) => парк.ok(r.machineSerial))
+        .map((r) => ({ product: this.resolveProduct(r.product, aliases), qty: Number(r.qty), amount: Number(r.amount) })),
+    );
+  }
+
+  /**
+   * Задать ЭТАЛОН витрины товара — команда «цена продажи <товар> <сум>»
+   * (R-P5b-6). Единственный писатель `vending_product.sale_price` наравне с
+   * бутстрапом ниже.
+   *
+   * Гейт — по ФАКТУ витрины за 14 суток, а НЕ по прошлому эталону (в этом
+   * отличие от `setProductPrice`): прошлый эталон мог быть выставлен наугад
+   * год назад, а факт — то, что автомат берёт с покупателя сегодня. Разошлись
+   * больше чем на PRICE_SPIKE_PCT — владелец повторяет команду со словом
+   * «точно» (confirmed=true). Факта нет (продаж в окне не было) — гейта нет:
+   * первый эталон нового товара сравнивать не с чем, и требовать
+   * подтверждение там значит просить подтвердить пустоту.
+   */
+  async setSalePrice(rawProduct: string, price: number, actor = "owner", confirmed = false): Promise<SetSalePriceResult> {
+    const name = rawProduct.trim();
+    // Причина отказа называется своим именем. «Товар не найден» на цену «0»
+    // отправляло бы владельца искать несуществующую проблему в прайсе — при
+    // том что товар на месте, а неверна ровно цена (`setProductPrice` рядом
+    // сваливает оба случая в `not_found`; чинится отдельной правкой П3).
+    if (!name) return { ok: false, reason: "not_found", message: "не сказано, какому товару ставим эталон витрины" };
+    if (!Number.isFinite(price) || price <= 0) {
+      return { ok: false, reason: "invalid_price", newPrice: price, message: "эталон витрины — положительное число сум" };
+    }
+
+    const { aliasByKey, productRows } = await this.loadProductIndex();
+    const canon = this.resolveProduct(name, aliasByKey);
+    // Как и в закупочной цене: канон ищем по нормализованному ключу среди
+    // загруженных строк, SQL по lower() — запасной путь.
+    const row =
+      this.findProductRow(canon, productRows) ??
+      (
+        await this.db
+          .select({ id: vendingProduct.id, name: vendingProduct.name, salePrice: vendingProduct.salePrice })
+          .from(vendingProduct)
+          .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
+          .limit(1)
+      )[0];
+    if (!row) {
+      return {
+        ok: false,
+        reason: "not_found",
+        product: canon,
+        message: `товара «${canon}» нет в прайсе вендинга — ни карточкой, ни алиасом`,
+      };
+    }
+
+    const oldPrice = row.salePrice === null ? null : Number(row.salePrice);
+    const fact = (await this.retailFacts(SALE_PRICE_FACT_DAYS, aliasByKey)).get(normalizeProductName(row.name));
+    const factPrice = fact ? fact.price : null;
+    const deviation = priceDeviationPct(price, factPrice);
+    if (!confirmed && deviation !== null && deviation > PRICE_SPIKE_PCT) {
+      return {
+        ok: false,
+        reason: "spike",
+        product: row.name,
+        oldPrice,
+        newPrice: price,
+        factPrice,
+        deviationPct: Math.round(deviation),
+        message: `эталон ${price} расходится с фактом витрины ${factPrice} на ${Math.round(deviation)}% — повтори со словом «точно»`,
+      };
+    }
+
+    await this.db.transaction(async (tx) => {
+      await tx.update(vendingProduct).set({ salePrice: price.toFixed(2) }).where(eq(vendingProduct.id, row.id));
+      await tx.insert(event).values({
+        source: "owner",
+        type: "vending.sale_price_changed",
+        payload: { product: row.name, oldPrice, newPrice: price, actor },
+      });
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: actor,
+        action: "vending.product.set_sale_price",
+        target: row.id,
+        before: { salePrice: oldPrice },
+        after: { salePrice: price },
+      });
+    });
+    return { ok: true, product: row.name, oldPrice, newPrice: price, factPrice };
+  }
+
+  /**
+   * Разовый бутстрап «витрина как факт»: проставить эталон тем товарам, у
+   * которых его НЕТ, по факту продаж за окно (R-P5b-6).
+   *
+   * Товар с уже заданным эталоном не трогаем ни при каких условиях — иначе
+   * повторный вызов затирал бы решение владельца сегодняшним фактом, то есть
+   * ровно тем числом, с которым эталон и должен расходиться. Снятый с продажи
+   * товар (`is_active = false`) пропускаем отдельной причиной: эталон ему
+   * ставить незачем, а «нет продаж» на снятый товар звучит как жалоба на
+   * спрос. Товар без продаж в окне пропускаем ИМЕНЕМ, а не молча: молчание
+   * читается как «эталон проставлен», и разрыв витрины по такому товару
+   * никогда бы не всплыл.
+   *
+   * «НЕ ТРОГАЕМ» ПРОВЕРЯЕТ БАЗА, А НЕ ПАМЯТЬ. Прайс читается ДО факта витрины,
+   * а факт — это полное чтение продаж окна: между ними сотни миллисекунд, и в
+   * них умещается команда владельца «цена продажи TUC 15000». Условие
+   * `sale_price is null` стоит в самом `UPDATE`, а `set[]` собирается из
+   * `returning()` — то есть из строк, которые база РЕАЛЬНО обновила. Иначе
+   * бутстрап рапортовал бы «проставлено» о решении владельца, которое он же и
+   * затёр фактом витрины.
+   *
+   * ОДНА КРИВАЯ ЦЕНА НЕ РОНЯЕТ ВЕСЬ ПРОГОН. `CHECK (sale_price > 0)` из
+   * миграции 0068 отвергает ноль, и «бесплатная» продажа (`amount = 0` при
+   * `qty > 0`) без проверки уронила бы транзакцию целиком — вместе с полусотней
+   * законных эталонов. Такой товар уходит в `skipped` причиной `no_fact`.
+   */
+  async bootstrapSalePrice(days = SALE_PRICE_FACT_DAYS, actor = "owner"): Promise<BootstrapSalePriceResult> {
+    const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
+    const { aliasByKey, productRows } = await this.loadProductIndex();
+    const facts = await this.retailFacts(окно, aliasByKey);
+
+    const set: BootstrapSalePriceResult["set"] = [];
+    const skipped: BootstrapSalePriceResult["skipped"] = [];
+    const кандидаты: { id: string; name: string; price: number; qty: number }[] = [];
+    // Обходим прайс в его собственном порядке: `set` и `skipped` — это отчёт о
+    // прогоне, а не витрина. Как их показать (сгруппировать, отсортировать) —
+    // решает тот, кто печатает список владельцу.
+    for (const p of productRows) {
+      if (p.salePrice !== null) {
+        skipped.push({ product: p.name, reason: "already_set" });
+        continue;
+      }
+      if (!p.isActive) {
+        skipped.push({ product: p.name, reason: "inactive" });
+        continue;
+      }
+      const fact = facts.get(normalizeProductName(p.name));
+      if (!fact) {
+        skipped.push({ product: p.name, reason: "no_sales" });
+        continue;
+      }
+      if (!Number.isFinite(fact.price) || fact.price <= 0) {
+        skipped.push({ product: p.name, reason: "no_fact" });
+        continue;
+      }
+      кандидаты.push({ id: p.id, name: p.name, price: fact.price, qty: fact.qty });
+    }
+
+    // Пустой бутстрап транзакцию не открывает: повторный вызов после первого
+    // прогона — норма, и он не должен оставлять следа в журнале.
+    if (кандидаты.length > 0) {
+      await this.db.transaction(async (tx) => {
+        const записанные: typeof кандидаты = [];
+        // UPDATE — по одному на товар (у каждого своя цена), а события и
+        // журнал — ОДНОЙ пачкой. На полусотне товаров раздельные вставки
+        // давали бы полторы сотни round-trip'ов под одной транзакцией,
+        // державшей блокировки строк прайса всё это время.
+        for (const item of кандидаты) {
+          const обновлено = await tx
+            .update(vendingProduct)
+            .set({ salePrice: item.price.toFixed(2) })
+            .where(and(eq(vendingProduct.id, item.id), isNull(vendingProduct.salePrice)))
+            .returning({ id: vendingProduct.id });
+          // Пусто — значит эталон появился между чтением прайса и этой
+          // строкой. Это решение владельца, и оно старше нашего факта.
+          if (обновлено.length === 0) skipped.push({ product: item.name, reason: "already_set" });
+          else записанные.push(item);
+        }
+        if (записанные.length === 0) return;
+        set.push(...записанные.map((item) => ({ product: item.name, price: item.price, qty: item.qty })));
+        await tx.insert(event).values(
+          записанные.map((item) => ({
+            source: "owner",
+            type: "vending.sale_price_changed",
+            payload: { product: item.name, oldPrice: null, newPrice: item.price, actor },
+          })),
+        );
+        await tx.insert(auditLog).values(
+          записанные.map((item) => ({
+            actorKind: "human" as const,
+            actorRef: actor,
+            action: "vending.product.set_sale_price",
+            target: item.id,
+            before: { salePrice: null },
+            after: { salePrice: item.price },
+          })),
+        );
+      });
+    }
+    return { days: окно, set, skipped };
+  }
+
   // ── Касса закупа (§5.8) ───────────────────────────────────────────────────
   // Реальный поход на базар: получил наличные, потратил по статьям, что
   // осталось. Снимок, не леджер — одна запись на один поход. Арифметика строк
@@ -2371,12 +2815,15 @@ export class VendingService {
    * успех: раньше UPDATE без проверки affected rows всегда отдавал `ok: true`,
    * даже когда коллектор передал несуществующий id — ошибка была бы незаметна
    * (найдено внешним аудитом, P2).
+   *
+   * После закрытия отказом считается СЕРИЯ отказов и, если она дошла до
+   * порога, пишется событие тревоги (R-P5b-8) — см. `сериюОтказовВСобытие`.
    */
-  async finishSyncRun(id: string, input: SyncFinishInput): Promise<{ ok: boolean }> {
+  async finishSyncRun(id: string, input: SyncFinishInput, now = new Date()): Promise<{ ok: boolean }> {
     const rows = await this.db
       .update(vendingSyncRun)
       .set({
-        finishedAt: new Date(),
+        finishedAt: now,
         status: input.status,
         machinesTotal: input.machinesTotal,
         machinesOk: input.machinesOk,
@@ -2385,7 +2832,54 @@ export class VendingService {
       })
       .where(eq(vendingSyncRun.id, id))
       .returning({ id: vendingSyncRun.id });
-    return { ok: rows.length > 0 };
+
+    if (rows.length === 0) return { ok: false };
+    // Тревога считается ТОЛЬКО после отказа: успех и частичный сбор серию
+    // рвут, и лишний запрос к журналу в этом случае не нужен.
+    if (input.status === "failed") await this.сериюОтказовВСобытие(now);
+    return { ok: true };
+  }
+
+  /**
+   * Серия отказов сбора → событие `ourvend.sync_failed_streak` (R-P5b-8).
+   *
+   * ЗАЧЕМ ЗДЕСЬ, А НЕ В ОТЧЁТЕ. 25.08.2026 сбор падал с 24-го двенадцать раз
+   * подряд, и не заметил никто: отчёт показывает то, что открыли, а тревога
+   * должна прийти сама. Момент, когда факт отказа СТАНОВИТСЯ известен, — ровно
+   * этот метод.
+   *
+   * ПОРОГ, А НЕ ПЕРВЫЙ ОТКАЗ. Один упавший прогон — обычное дело (сеть, таймаут
+   * кабинета), и будить на нём владельца значит научить его не читать тревоги.
+   * Тревожит третий подряд: к нему сутки данных уже потеряны.
+   *
+   * ДЕДУП — РАЗ В ТАШКЕНТСКИЕ СУТКИ. Коллектор ходит каждый час, и без дедупа
+   * серия из двенадцати отказов дала бы десять одинаковых сообщений подряд.
+   * Ключ — сутки, а не серия: серия растёт с каждым прогоном, и «раз на серию»
+   * означало бы сообщение каждый час.
+   */
+  private async сериюОтказовВСобытие(now: Date): Promise<void> {
+    const прогоны = await this.db
+      .select({ status: vendingSyncRun.status, startedAt: vendingSyncRun.startedAt, error: vendingSyncRun.error })
+      .from(vendingSyncRun)
+      .orderBy(desc(vendingSyncRun.startedAt))
+      .limit(STREAK_SCAN_LIMIT);
+
+    const серия = failedStreak(прогоны);
+    if (серия.streak < FAILED_STREAK_ALERT || серия.since === null) return;
+
+    const сутки = tashkentDayStartOf(now);
+    const [было] = await this.db
+      .select({ id: event.id })
+      .from(event)
+      .where(and(eq(event.type, "ourvend.sync_failed_streak"), gte(event.occurredAt, сутки)))
+      .limit(1);
+    if (было) return;
+
+    await this.db.insert(event).values({
+      source: "system",
+      type: "ourvend.sync_failed_streak",
+      payload: { streak: серия.streak, lastError: серия.lastError, since: серия.since },
+    });
   }
 
   /** Последние запуски сбора (для панели: когда собирали и с каким итогом). */

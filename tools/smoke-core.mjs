@@ -63,7 +63,20 @@ const ЧТЕНИЕ = [
   "/vending/machines",
   "/vending/deficit",
   "/vending/plan",
-  "/vending/products",
+  {
+    // Прайс обязан доносить ЭТАЛОН витрины до клиента (П5b): колонка 0068
+    // новая, и «поле есть в сервисе» ещё не значит «поле доехало до панели».
+    // На засеянной базе эталон не задан — это `null`, а не ноль и не пропуск
+    // ключа: пропущенный ключ панель прочтёт как «эталон не пришёл».
+    path: "/vending/products",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ) || ответ.length === 0) throw new Error("прайс вендинга пуст — засеян ли seed-vending?");
+      for (const p of ответ) {
+        if (!("salePrice" in p)) throw new Error(`у «${p.name}» нет ключа salePrice`);
+        if (p.salePrice !== null && typeof p.salePrice !== "number") throw new Error(`salePrice=${p.salePrice} у «${p.name}»`);
+      }
+    },
+  },
   "/vending/sync",
   "/vending/refill-events?days=14",
   {
@@ -87,6 +100,117 @@ const ЧТЕНИЕ = [
     },
   },
   {
+    // П5b: маржа. Выборка продаж окна по ташкентским суткам плюс себестоимость
+    // из принятых накладных — запросы, которых заглушка юнит-теста не
+    // исполняет. На засеянной базе продаж нет, и отчёт ОБЯЗАН сказать это
+    // словами: нули без предупреждения читались бы как «маржа ноль».
+    path: "/vending/margin?days=30",
+    проверить: (о) => {
+      for (const ключ of ["machines", "products", "unknownProducts", "excluded", "warnings"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`margin.${ключ} — не массив`);
+      }
+      if (typeof о?.totals?.revenue !== "number") throw new Error("margin.totals.revenue — не число");
+      if (typeof о?.lowPct !== "number") throw new Error("margin.lowPct — не число (порог не прочитан из настроек)");
+      if (о.machines.length === 0 && !о.warnings.some((w) => w.code === "no_sales")) {
+        throw new Error("пустая маржа без предупреждения no_sales — нули выданы за результат");
+      }
+    },
+  },
+  {
+    // П5b: мёртвый сток. Три выборки движения (продажи, заливки по снимкам,
+    // принятые накладные) плюс остаток склада и автоматов.
+    path: "/vending/dead-stock?days=21",
+    проверить: (о) => {
+      for (const ключ of ["warehouse", "machines", "warnings"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`dead-stock.${ключ} — не массив`);
+      }
+      if (typeof о?.totalValue !== "number") throw new Error("dead-stock.totalValue — не число");
+      if (typeof о?.since !== "string") throw new Error("dead-stock.since — не дата окна");
+      if (!о.warnings.some((w) => w.code === "no_sales")) {
+        throw new Error("без продаж весь остаток выглядит мёртвым — это обязано быть сказано");
+      }
+    },
+  },
+  {
+    // П5b: изменения цен. Ленты собираются из `event` (два типа) и из продаж;
+    // `monthly` панель просит без флага, поэтому поле обязано быть всегда.
+    path: "/vending/price-changes?days=30",
+    проверить: (о) => {
+      for (const ключ of ["purchase", "retail", "monthly", "warnings"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`price-changes.${ключ} — не массив`);
+      }
+      if (typeof о?.pct !== "number") throw new Error("price-changes.pct — не число");
+    },
+  },
+  {
+    // П5b: разрыв витрины. Факт считает общий пакет из тех же строк продаж,
+    // эталон — `vending_product.sale_price` (миграция 0068).
+    path: "/vending/price-gap?days=14",
+    проверить: (о) => {
+      for (const ключ of ["rows", "noReference", "warnings"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`price-gap.${ключ} — не массив`);
+      }
+      if (typeof о?.lostTotal !== "number") throw new Error("price-gap.lostTotal — не число");
+    },
+  },
+  {
+    // П5b: недельная сводка. Внутри — четыре расчёта (маржа недели, маржа
+    // предыдущей недели, мёртвый сток, цены) плюс четыре недельных агрегата
+    // (заливки, приходы, инвентаризации) и здоровье сбора: заглушка юнит-теста
+    // не исполняет ни одного из этих запросов. На засеянной базе продаж нет —
+    // и сводка ОБЯЗАНА назвать это пустотой, а не нулевой маржой.
+    path: "/vending/weekly-digest",
+    проверить: (о) => {
+      if (!/^\d{4}-\d{2}$/.test(о?.week)) throw new Error(`weekly-digest.week=${о?.week} — не ключ ISO-недели`);
+      if (!/^\d{4}-\d{2}$/.test(о?.previousWeek)) throw new Error("weekly-digest.previousWeek — не ключ ISO-недели");
+      for (const ключ of ["from", "to"]) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(о?.[ключ])) throw new Error(`weekly-digest.${ключ} — не ташкентские сутки`);
+      }
+      if (о.from >= о.to) throw new Error("weekly-digest: понедельник недели не раньше воскресенья");
+      for (const ключ of ["machines", "topProducts", "worstProducts"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`weekly-digest.${ключ} — не массив`);
+      }
+      if (!Array.isArray(о?.deadStock?.rows)) throw new Error("weekly-digest.deadStock.rows — не массив");
+      for (const ключ of ["purchase", "retail"]) {
+        if (!Array.isArray(о?.priceChanges?.[ключ])) throw new Error(`weekly-digest.priceChanges.${ключ} — не массив`);
+      }
+      for (const ключ of ["refills", "intake", "stocktakes"]) {
+        if (typeof о?.[ключ] !== "object" || о[ключ] === null) throw new Error(`weekly-digest.${ключ} — не объект`);
+      }
+      if (о.stocktakes.lastCountedAt !== null && typeof о.stocktakes.lastCountedAt !== "string") {
+        throw new Error("weekly-digest.stocktakes.lastCountedAt — не ISO и не null");
+      }
+      if (typeof о?.delta?.qty !== "number") throw new Error("weekly-digest.delta.qty — не число");
+      if (о.machines.length === 0 && о.totals.pct !== null) {
+        throw new Error("неделя без продаж отдала процент маржи — нули выданы за результат");
+      }
+      if (о?.health?.parity == null) throw new Error("weekly-digest.health.parity — null (сверять нечего ≠ паритета нет)");
+      // Секция, которая не посчиталась, обязана быть НАЗВАНА: сводка больше не
+      // падает в 500 из-за здоровья сбора, и молчаливая пустота вместо секции
+      // читалась бы как «там всё хорошо».
+      if (!Array.isArray(о?.warnings)) throw new Error("weekly-digest.warnings — не массив");
+    },
+  },
+  {
+    // Пустое значение параметра — документированный «дефолт», а не 400:
+    // такую ссылку легче лёгкого собрать руками.
+    path: "/vending/weekly-digest?week=",
+    проверить: (о) => {
+      if (!/^\d{4}-\d{2}$/.test(о?.week)) throw new Error(`weekly-digest?week= → week=${о?.week}`);
+    },
+  },
+  {
+    // Неделя вне рабочего диапазона гасится в предыдущую — как негодный ключ.
+    // Иначе `?week=` даёт полмиллиона годных ключей, каждый из которых
+    // гарантированно мимо кеша (adversarial-security, п. 2).
+    path: "/vending/weekly-digest?week=1990-01",
+    проверить: (о) => {
+      if (о?.week === "1990-01") throw new Error("неделя из 1990-го посчиталась — граница диапазона не действует");
+      if (!/^\d{4}-\d{2}$/.test(о?.week)) throw new Error(`weekly-digest.week=${о?.week}`);
+      if (о.from < "2024-01-01") throw new Error(`окно ${о.from} старше двух лет — нормализация промахнулась`);
+    },
+  },
+  {
     // Паритет: сырой SQL с канонизацией серийника, теперь в двух половинах
     // (продажи и остатки). Ровно тот класс запросов, ради которого заведён
     // этот прогон.
@@ -94,6 +218,58 @@ const ЧТЕНИЕ = [
     проверить: (ответ) => {
       if (!Array.isArray(ответ?.mismatches)) throw new Error("parity.mismatches — не массив");
       if (!Array.isArray(ответ?.stock?.mismatches)) throw new Error("parity.stock.mismatches — не массив");
+      if (typeof ответ?.checked !== "number") throw new Error("parity.checked — не число");
+    },
+  },
+  {
+    // Верхняя граница окна сверки: без неё число доезжало до `sql.raw` в
+    // сыром SQL, и запрос читал бы всю историю снимков.
+    path: "/ourvend/parity?days=31",
+    ждёмОтказ: true,
+  },
+  {
+    // Пустое значение — дефолт (7 суток), а не 400.
+    path: "/ourvend/parity?days=",
+    проверить: (ответ) => {
+      if (ответ?.days !== 7) throw new Error(`пустой ?days= дал окно ${ответ?.days}, а не дефолт`);
+    },
+  },
+  {
+    // Пустое значение — дефолт, а не 400 (то же правило, что у `?week=`).
+    path: "/ourvend/health?runs=",
+    проверить: (о) => {
+      if (!Array.isArray(о?.runs)) throw new Error("health.runs — не массив");
+    },
+  },
+  {
+    // П5b: здоровье сбора. Четыре запроса «последняя строка» по трём таблицам
+    // снимков и журналу прогонов плюс весь SQL паритета. На засеянной базе
+    // снимков нет вовсе — и лаг ОБЯЗАН быть `null`, а не `0`: ноль читался бы
+    // как «только что сняли», то есть ровно наоборот.
+    path: "/ourvend/health?runs=20",
+    проверить: (о) => {
+      if (!Array.isArray(о?.runs)) throw new Error("health.runs — не массив");
+      if (typeof о?.failedStreak !== "number") throw new Error("health.failedStreak — не число");
+      for (const ключ of ["slotsLagMin", "salesLagH", "productSaleLagH"]) {
+        if (о?.[ключ] !== null && typeof о?.[ключ] !== "number") throw new Error(`health.${ключ} — не число и не null`);
+      }
+      if (о.lastSuccessAt !== null && typeof о.lastSuccessAt !== "string") {
+        throw new Error("health.lastSuccessAt — не ISO и не null");
+      }
+      if (о?.parity == null) throw new Error("health.parity — null (сверять нечего ≠ паритета нет)");
+      if (typeof о.parity.days !== "number" || typeof о.parity.mismatches !== "number") {
+        throw new Error("health.parity.days/mismatches — не числа");
+      }
+      if (typeof о.parity.stockOk !== "boolean") throw new Error("health.parity.stockOk — не флаг");
+      // Сверенных пар — числом по обеим половинам: «расхождений 0» при
+      // `ok: false` без них читается как «всё плохо, но расхождений нет».
+      for (const ключ of ["checked", "stockChecked"]) {
+        if (typeof о.parity[ключ] !== "number") throw new Error(`health.parity.${ключ} — не число`);
+      }
+      if (о.runs.length === 0 && (о.failedStreak !== 0 || о.lastSuccessAt !== null)) {
+        throw new Error("прогонов нет, а серия/успех не пусты — журнал прочитан не оттуда");
+      }
+      if (о.runs.length > 20) throw new Error("health.runs длиннее запрошенного — граница ?runs= не действует");
     },
   },
   "/coffee/locations",
@@ -333,6 +509,71 @@ const ЗАПИСЬ = [
     проверить: (о) => {
       if (о.ok !== false) throw new Error("ожидали not_found");
       if (о.reason !== "not_found") throw new Error(`reason=${о.reason}`);
+    },
+  },
+  {
+    // П5b: бутстрап эталонов витрины. На засеянной базе продаж (`sale`) нет —
+    // значит проставить нечего, и весь смысл проверки в том, что путь ДОШЁЛ до
+    // базы: агрегат Σamount/Σqty с окном по ташкентским суткам заглушка не
+    // исполняет, а Postgres — да. Пропущенные обязаны быть НАЗВАНЫ: молчаливый
+    // пустой ответ читался бы как «эталоны проставлены».
+    имя: "витрина как факт: бутстрап эталонов (нет продаж → всех назвали)",
+    path: "/vending/sale-price/bootstrap",
+    body: { days: 14 },
+    проверить: (о) => {
+      if (!Array.isArray(о.set)) throw new Error("set — не массив");
+      if (!Array.isArray(о.skipped) || о.skipped.length === 0) throw new Error("skipped пуст: пропущенных обязаны назвать");
+      // Причин пропуска ЧЕТЫРЕ, и гейт выкатки обязан знать все: `inactive`
+      // (товар снят с продажи) и `no_fact` (продажи есть, а цена из них не
+      // выводится) законны ровно так же, как две первые. Первый снятый товар
+      // в прайсе иначе красил бы CI по чужому поводу.
+      const ПРИЧИНЫ = ["already_set", "no_sales", "no_fact", "inactive"];
+      const чужие = о.skipped.filter((s) => !ПРИЧИНЫ.includes(s.reason));
+      if (чужие.length > 0) throw new Error(`неизвестная причина пропуска: ${JSON.stringify(чужие[0])}`);
+      if (!о.skipped.some((s) => s.reason === "no_sales")) throw new Error("ждали товары без факта витрины");
+    },
+  },
+  {
+    // Прямая установка эталона: гейт сравнивает с ФАКТОМ витрины, а факта на
+    // засеянной базе нет — значит первый эталон проходит без подтверждения.
+    имя: "эталон витрины: прямая установка",
+    path: "/vending/sale-price",
+    body: { product: P4_ТОВАР, price: 15000 },
+    проверить: (о) => {
+      if (о.ok !== true) throw new Error(`ожидали ok, получили ${JSON.stringify(о)}`);
+      if (о.newPrice !== 15000) throw new Error(`newPrice=${о.newPrice}`);
+      if (о.factPrice !== null) throw new Error(`факта витрины на засеянной базе быть не должно: ${о.factPrice}`);
+    },
+    // Ответ записи не показывает, что стало со строкой: проверяем ТЕМ ЖЕ
+    // путём, которым прайс читает панель.
+    после: async () => {
+      const прайс = await читать("/vending/products");
+      const строка = прайс.find((p) => p.name === P4_ТОВАР);
+      if (!строка) throw new Error(`товара «${P4_ТОВАР}» нет в прайсе`);
+      if (строка.salePrice !== 15000) throw new Error(`эталон не доехал до прайса: salePrice=${строка.salePrice}`);
+    },
+  },
+  {
+    // Мусорная цена обязана называться мусорной ценой, а не «товар не найден»:
+    // DTO её и не пропустит (400), и это тоже часть контракта записи.
+    имя: "эталон витрины: цена 0 отвергается на границе (400)",
+    path: "/vending/sale-price",
+    body: { product: P4_ТОВАР, price: 0 },
+    ждёмОтказ: true,
+  },
+  {
+    // Повтор той же командой вдвое дороже. Гейт «точно» сравнивает с ФАКТОМ
+    // витрины, а не с прошлым эталоном (R-P5b-6), и на засеянной базе факта
+    // нет — значит правка обязана пройти, а не быть отбита как «скачок».
+    // Проверяется именно это: молчащий гейт при отсутствии факта — решение,
+    // а не недосмотр (иначе первый эталон нового товара было бы не задать).
+    имя: "эталон витрины: повтор без факта гейтом не отбивается",
+    path: "/vending/sale-price",
+    body: { product: P4_ТОВАР, price: 30000 },
+    проверить: (о) => {
+      if (о.ok !== true) throw new Error(`ожидали ok без факта витрины, получили ${JSON.stringify(о)}`);
+      if (о.oldPrice !== 15000) throw new Error(`oldPrice=${о.oldPrice} — прошлый эталон не прочитан`);
+      if (о.newPrice !== 30000) throw new Error(`newPrice=${о.newPrice}`);
     },
   },
 ];
@@ -959,6 +1200,116 @@ async function проверитьАлертыУсушки() {
 }
 
 /** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
+/**
+ * П5b: приёмка накладной наблюдает закупочную цену позиции
+ * (`vending.purchase_price_observed`, R-P5b-5).
+ *
+ * Заглушка юнит-теста «вставляет» события в массив, поэтому пакетный
+ * `insert(event).values(массив)` ВНУТРИ транзакции приёмки настоящим Postgres
+ * не исполнялся ни разу — а лента изменений закупочных цен стоит именно на
+ * нём. Заодно проверяется главное правило наблюдения: позиция БЕЗ цены его не
+ * даёт (0 и мусор — это «цены нет», а не «заплатили ноль»).
+ *
+ * Путь целиком по HTTP: заявка → согласование (оно и создаёт накладную) →
+ * приёмка → счётчик и тело события.
+ */
+async function проверитьНаблюдениеЦен() {
+  const С_ЦЕНОЙ = P4_ТОВАР; // есть в прайсе (seed-vending) — значит у наблюдения будет «было»
+  const БЕЗ_ЦЕНЫ = "Fanta C 0,5";
+  const ТИП = "vending.purchase_price_observed";
+  const посчитать = async () => {
+    const { r, text, json } = await jsonRequest("GET", `/events/count?type=${encodeURIComponent(ТИП)}`);
+    if (!r.ok) throw new Error(`счётчик наблюдений → ${r.status}: ${text.slice(0, 200)}`);
+    return json.count;
+  };
+  const было = await посчитать();
+
+  const заявка = await jsonRequest("POST", "/approvals", {
+    agent: "smoke",
+    action: "vending.purchase",
+    tier: "T2",
+    payload: {
+      purchaseOrder: {
+        positions: [
+          { product: С_ЦЕНОЙ, order: 12, price: 6500 },
+          { product: БЕЗ_ЦЕНЫ, order: 6 },
+        ],
+        totalBuy: 18,
+        totalOrder: 18,
+        costExact: 78000,
+        costRounded: 78000,
+        createdBy: "smoke",
+      },
+    },
+  });
+  if (!заявка.r.ok) throw new Error(`заявка закупа → ${заявка.r.status}: ${заявка.text.slice(0, 200)}`);
+  const заявкаId = заявка.json?.id;
+  if (!заявкаId) throw new Error(`заявка без id: ${заявка.text.slice(0, 200)}`);
+
+  const решение = await jsonRequest("POST", `/approvals/${заявкаId}/decide`, { decision: "approved", actor: "smoke" });
+  if (!решение.r.ok) throw new Error(`согласование → ${решение.r.status}: ${решение.text.slice(0, 200)}`);
+
+  const накладные = await читать("/vending/orders");
+  const накладная = накладные.find((o) => o.approvalId === заявкаId);
+  if (!накладная) throw new Error("одобренная заявка не породила накладную");
+
+  const приёмка = await jsonRequest("POST", "/vending/orders/receive", { orderId: накладная.id, receivedBy: "smoke" });
+  if (!приёмка.r.ok) throw new Error(`приёмка → ${приёмка.r.status}: ${приёмка.text.slice(0, 200)}`);
+  if (приёмка.json?.received !== true) throw new Error(`приёмка отказала: ${приёмка.text.slice(0, 200)}`);
+
+  const стало = await посчитать();
+  if (стало !== было + 1) {
+    throw new Error(`наблюдений записано ${стало - было}, ждали ровно одно (позиция без цены его не даёт)`);
+  }
+
+  const события = await читать(`/events?type=${encodeURIComponent(ТИП)}`);
+  const наше = события.find((e) => e.payload?.orderId === накладная.id);
+  if (!наше) throw new Error("наблюдение по нашей накладной не найдено");
+  if (наше.payload.product !== С_ЦЕНОЙ) throw new Error(`product=${наше.payload.product}`);
+  if (наше.payload.price !== 6500) throw new Error(`price=${наше.payload.price}`);
+  if (typeof наше.payload.oldPrice !== "number") {
+    throw new Error(`oldPrice не взялся из прайса (значит «было» сравнивать не с чем): ${наше.payload.oldPrice}`);
+  }
+}
+
+/**
+ * П5b: отсечка автоматов НЕ в строю уходит прямо в SQL (`not in (...)`).
+ *
+ * На засеянной базе снятых с работы автоматов нет, поэтому список исключений
+ * пуст и ветка `notInArray` не исполняется вовсе — а именно этот класс
+ * конструкций уже валил прод («op ANY/ALL (array) requires array on right
+ * side»). Сценарий заводит карточку-склад, сбрасывает кеш аналитики записью
+ * эталона (иначе следующий GET вернул бы отчёт, посчитанный ДО появления
+ * склада) и заставляет Postgres выполнить запросы с непустым списком.
+ */
+async function проверитьОтсечкуСклада() {
+  const создание = await jsonRequest("POST", "/entities", {
+    domain: "vendhub",
+    type: "machine",
+    name: "Дымовой склад-заглушка",
+    externalRef: "SMOKE-SKLAD",
+  });
+  if (!создание.r.ok) throw new Error(`карточка склада → ${создание.r.status}: ${создание.text.slice(0, 200)}`);
+  const id = создание.json?.id;
+  if (!id) throw new Error(`карточка без id: ${создание.text.slice(0, 200)}`);
+
+  const статус = await jsonRequest("PATCH", `/entities/${id}/machine-status`, { status: "warehouse", actor: "smoke" });
+  if (!статус.r.ok) throw new Error(`статус карточки → ${статус.r.status}: ${статус.text.slice(0, 200)}`);
+  if (статус.json?.status !== "warehouse") throw new Error(`статус=${статус.json?.status}`);
+
+  // Кеш отчётов живёт пять минут: без сброса GET ниже ответил бы из памяти и
+  // SQL с исключениями так и не выполнился бы (ровно та дыра, ради которой
+  // сценарий и написан).
+  const сброс = await jsonRequest("POST", "/vending/sale-price", { product: P4_ТОВАР, price: 15000, confirmed: true });
+  if (!сброс.r.ok || сброс.json?.ok !== true) throw new Error(`сброс кеша через эталон → ${сброс.text.slice(0, 200)}`);
+
+  for (const путь of ["/vending/price-gap?days=14", "/vending/dead-stock?days=21", "/vending/price-changes?days=30"]) {
+    const { r, text, json } = await jsonRequest("GET", путь);
+    if (!r.ok) throw new Error(`${путь} с непустым списком исключений → ${r.status}: ${text.slice(0, 200)}`);
+    if (!Array.isArray(json?.warnings)) throw new Error(`${путь}: warnings — не массив`);
+  }
+}
+
 async function проверитьRateLimit() {
   for (let i = 0; i < 70; i += 1) {
     const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(5000) });
@@ -1028,6 +1379,13 @@ async function проверитьЗапись(шаг) {
     signal: AbortSignal.timeout(20_000),
   });
   const текст = await r.text();
+  // Запись, которая ОБЯЗАНА быть отвергнута на границе (мусорный ввод): 200 на
+  // неё — не «сервис снисходителен», а дыра в валидации.
+  if (шаг.ждёмОтказ) {
+    if (r.ok) провалы.push(`POST ${шаг.path} (${шаг.имя}) → ${r.status}, а ожидали отказ`);
+    else console.log(`  ok  POST ${шаг.path} — ${шаг.имя}`);
+    return;
+  }
   if (!r.ok) {
     провалы.push(`POST ${шаг.path} (${шаг.имя}) → ${r.status}: ${текст.slice(0, 300)}`);
     return;
@@ -1151,6 +1509,20 @@ try {
   }
 
   try {
+    await проверитьНаблюдениеЦен();
+    console.log("  ok  сценарий: приёмка наблюдает закупочную цену позиции (без цены — наблюдения нет)");
+  } catch (e) {
+    провалы.push(`наблюдение цен: ${e.message}`);
+  }
+
+  try {
+    await проверитьОтсечкуСклада();
+    console.log("  ok  сценарий: автомат не в строю отсекается в SQL (not in), отчёты считаются заново");
+  } catch (e) {
+    провалы.push(`отсечка склада: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -1172,4 +1544,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 10 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 12 сценариев.`);

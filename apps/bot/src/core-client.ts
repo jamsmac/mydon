@@ -1,4 +1,16 @@
 import { normalizeMachineSerial, type Domain } from "@mydon/shared";
+import type {
+  AnalyticsWarning,
+  BootstrapSalePriceResult,
+  DeadStockReport,
+  MarginReport,
+  MonthlyPrice,
+  OurvendHealth,
+  PriceChangesReport,
+  PriceGapReport,
+  SetSalePriceResult,
+  WeeklyDigest,
+} from "@mydon/shared";
 
 export interface Briefing {
   generatedAt: string;
@@ -370,6 +382,48 @@ export interface SetPriceResult {
   reason?: "not_found" | "spike";
 }
 
+/**
+ * Формы ответов аналитики снека (П5b) — РЕЭКСПОРТ из `@mydon/shared`.
+ *
+ * Своих объявлений здесь больше нет. Копии этих форм жили в боте и в панели
+ * ровно до тех пор, пока их не было в общем пакете, и расходились они молча:
+ * тип — не проверка на рантайме, разъехавшееся поле видно только по пустой
+ * строке в чате. Теперь форму объявляет тот, кто считает числа
+ * (`vending-reports.ts`), а бот и панель её читают — и `pnpm build` падает на
+ * первом же несовпадении (N4).
+ *
+ * Реэкспорт, а не прямой импорт из `@mydon/shared` во всех модулях бота:
+ * `core-client` остаётся ЕДИНСТВЕННОЙ дверью к Core — по нему видно, какие
+ * формы бот вообще получает по HTTP.
+ */
+export type {
+  AnalyticsWarning,
+  AnalyticsWarningCode,
+  BootstrapSalePriceResult,
+  BootstrapSkipReason,
+  MonthlyPrice,
+  OurvendHealth,
+  OurvendSyncRun,
+  SetSalePriceResult,
+  WeeklyDigest,
+  WeeklyDigestMachine,
+} from "@mydon/shared";
+
+/**
+ * Хвост «посчитано не всё» у отчётов аналитики.
+ *
+ * Живёт здесь, а не в общем пакете: `warnings` дописывает HTTP-слой Core
+ * поверх чистого отчёта (`analytics.service.ts`), и в самих расчётах
+ * `vending-reports.ts` этого поля нет.
+ *
+ * Поле необязательное намеренно: форматтеры зовут и на данных без него
+ * (недельная сводка, фикстуры), а отчёт без предупреждений обязан печататься
+ * как раньше, а не падать.
+ */
+export interface WithWarnings {
+  warnings?: AnalyticsWarning[];
+}
+
 /** Строка ленты действий сотрудников (GET /registry/actions). */
 export interface ActionRow {
   ts: string;
@@ -488,6 +542,68 @@ export class CoreClient {
    */
   vendingShrinkage(days = 14): Promise<ShrinkReport> {
     return this.request<ShrinkReport>(`/vending/shrinkage?days=${days}`);
+  }
+
+  // ── Аналитика снека (П5b): деньги, мёртвый сток, цены, витрина ──
+  // Каждый отчёт — отдельный запрос: владелец спрашивает их по одному, а
+  // общий «дай всё» гонял бы четыре тяжёлых расчёта ради одной строки в чате.
+  // Окна зажимает бот (analytics-brief.ts): Core отвечает на выход за границы
+  // отказом 400, а владельцу нужен отчёт, а не разбор кода ошибки.
+
+  /** Маржа по проданному: автомат → товар (R-P5b-3). */
+  vendingMargin(days = 30): Promise<MarginReport & WithWarnings> {
+    return this.request<MarginReport & WithWarnings>(`/vending/margin?days=${days}`);
+  }
+
+  /** Мёртвый сток: что не двигалось за окно — склад и автоматы (R-P5b-4). */
+  vendingDeadStock(days = 21): Promise<DeadStockReport & WithWarnings> {
+    return this.request<DeadStockReport & WithWarnings>(`/vending/dead-stock?days=${days}`);
+  }
+
+  /**
+   * Изменения цен: закупочные и витринные (R-P5b-5). `monthly` бот не
+   * показывает — помесячная динамика читается только на листе панели, но
+   * тип ответа один, и врать о нём клиенту незачем.
+   */
+  vendingPriceChanges(days = 30): Promise<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings> {
+    return this.request<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings>(
+      `/vending/price-changes?days=${days}`,
+    );
+  }
+
+  /** Витрина против эталона владельца: где недобираем (R-P5b-6). */
+  vendingPriceGap(days = 14): Promise<PriceGapReport & WithWarnings> {
+    return this.request<PriceGapReport & WithWarnings>(`/vending/price-gap?days=${days}`);
+  }
+
+  /**
+   * Эталон витрины товара (R-P5b-6). Это НЕ закупочная цена
+   * (`setVendingPrice`): другая колонка, другой гейт — отклонение считается от
+   * факта продаж, и снимается словом «точно».
+   */
+  setVendingSalePrice(product: string, price: number, confirmed: boolean): Promise<SetSalePriceResult> {
+    return this.request<SetSalePriceResult>("/vending/sale-price", {
+      method: "POST",
+      body: JSON.stringify({ product, price, actor: "owner", confirmed }),
+    });
+  }
+
+  /** Разовый бутстрап: эталон = факт продаж за окно для товаров без эталона. */
+  bootstrapVendingSalePrice(days = 14): Promise<BootstrapSalePriceResult> {
+    return this.request<BootstrapSalePriceResult>("/vending/sale-price/bootstrap", {
+      method: "POST",
+      body: JSON.stringify({ days }),
+    });
+  }
+
+  /** Недельная сводка (R-P5b-7). Без `week` — предыдущая ISO-неделя по Ташкенту. */
+  vendingWeeklyDigest(week?: string): Promise<WeeklyDigest> {
+    return this.request<WeeklyDigest>(`/vending/weekly-digest${week ? `?week=${encodeURIComponent(week)}` : ""}`);
+  }
+
+  /** Здоровье сбора OurVend: прогоны, серия отказов, лаги, паритет (R-P5b-8). */
+  ourvendHealth(runs = 20): Promise<OurvendHealth> {
+    return this.request<OurvendHealth>(`/ourvend/health?runs=${runs}`);
   }
 
   // ── Сигналы GLOBERENT для брифинга (перенос PROMACH) ──
@@ -691,6 +807,21 @@ export class CoreClient {
     return this.request<{ acked: number }>("/rules/ack", {
       method: "POST",
       body: JSON.stringify({ keys }),
+    });
+  }
+
+  /**
+   * Событие в общий журнал Core (`POST /events`).
+   *
+   * Нужно там, где отказ виден только боту, а чинить его должен человек:
+   * `console.warn` в контейнере не читает никто (недельная сводка без
+   * получателей молчала именно так). Событие переживёт перезапуск, попадёт в
+   * ленту и может быть подхвачено правилом.
+   */
+  recordEvent(type: string, payload: Record<string, unknown> = {}, source = "system"): Promise<{ id?: string }> {
+    return this.request<{ id?: string }>("/events", {
+      method: "POST",
+      body: JSON.stringify({ source, type, payload }),
     });
   }
 
