@@ -5,23 +5,43 @@ import { ourvendConfigFromEnv, runOurvendSync, type SyncCoreClient } from "./our
 
 /** Стаб Core: копит вызовы, чтобы проверить, что и с каким итогом отправлено. */
 function stubCore() {
-  const calls = { starts: 0, ingests: [] as unknown[], sales: [] as unknown[], finishes: [] as unknown[] };
+  const calls = {
+    starts: 0,
+    ingests: [] as unknown[],
+    /** Аргумент `days`, с которым звали детектор (по одному на вызов). */
+    detects: [] as number[],
+    sales: [] as unknown[],
+    finishes: [] as unknown[],
+    /** Порядок реальных вызовов Core — проверить, что детектор идёт СТРОГО после слотов. */
+    order: [] as string[],
+  };
   const core: SyncCoreClient = {
     startVendingSync: async () => {
       calls.starts += 1;
+      calls.order.push("start");
       return { id: "run-1" };
     },
     ingestVendingSlots: async (payload) => {
       calls.ingests.push(payload);
+      calls.order.push("ingest");
       const slots = payload.machines.reduce((a, m) => a + m.slots.length, 0);
       return { machines: payload.machines.length, slots };
     },
+    // Дефолт: детектор молчит (0 событий) — тесты, которым важен только приём
+    // слотов, могут не думать о нём. Тесты про детектор переопределяют поле.
+    detectRefillEvents: async (days) => {
+      calls.detects.push(days ?? -1);
+      calls.order.push("detect");
+      return { machines: 0, events: 0, matched: 0, skipped: [] };
+    },
     ingestVendingSales: async (payload) => {
       calls.sales.push(payload);
+      calls.order.push("sales");
       return { productRows: payload.productSales.length, machineRows: payload.machineSales.length };
     },
     finishVendingSync: async (id, input) => {
       calls.finishes.push({ id, ...input });
+      calls.order.push("finish");
       return { ok: true };
     },
   };
@@ -115,22 +135,71 @@ describe("ourvend:sync — коллектор вендинга", () => {
     assert.equal(payload.periodStart, "2026-07-26T10:00:00.000Z");
   });
 
-  it("сбой продаж не роняет статус (продажи — второстепенны), дописывается в ошибку", async () => {
+  it("продажи упали целиком: слоты собраны, но ни строки продаж — статус honest partial, не success", async () => {
     const { core, calls } = stubCore();
     const connector: VendingConnector = {
       login: async () => {},
       listMachines: async () => [{ serial: "AH", alias: "AH" }],
       getSlots: async () => [slot("31", "Montella", 6, 2)],
       getProductSales: async () => {
-        throw new Error("продажи недоступны");
+        // AbortError — типичная причина обрыва похода за продажами (таймаут).
+        const e = new Error("This operation was aborted");
+        e.name = "AbortError";
+        throw e;
       },
       getMachineSales: async () => [],
     };
     const res = await runOurvendSync(core, CFG, { connector, now: clock });
-    assert.equal(res.status, "success"); // планограмма снята — статус успешен
+    // Планограмма снята полностью, но окно продаж пустое — статус больше не
+    // врёт «success»: владелец должен видеть, что продажи не обновились.
+    assert.equal(res.status, "partial");
+    assert.ok(res.machinesOk > 0);
     assert.equal(res.productSales, 0);
     assert.equal(calls.sales.length, 0);
+    assert.match(String(res.error), /продажи/);
     assert.match(String((calls.finishes[0] as { error?: string }).error), /продажи AH/);
+  });
+
+  it("детектор заливок падает — сбор всё равно success, итог помечен detect: \"failed\"", async () => {
+    const { core, calls } = stubCore();
+    core.detectRefillEvents = async (days) => {
+      calls.detects.push(days ?? -1);
+      calls.order.push("detect");
+      throw new Error("детектор недоступен");
+    };
+    const connector = stubConnector({
+      machines: [{ serial: "AH", alias: "AH" }],
+      slots: { AH: [slot("31", "Montella", 6, 2)] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "success"); // сбой детектора не роняет сбор
+    assert.equal(res.detect, "failed");
+    // Ошибка детектора не отправляется в Core как ошибка сбора продаж/слотов.
+    assert.equal((calls.finishes[0] as { error?: string }).error, undefined);
+    assert.equal((calls.finishes[0] as Record<string, unknown>).detect, undefined);
+  });
+
+  it("детектор заливок отрабатывает после слотов ровно один раз, итог попадает в detect", async () => {
+    const { core, calls } = stubCore();
+    core.detectRefillEvents = async (days) => {
+      calls.detects.push(days ?? -1);
+      calls.order.push("detect");
+      return { machines: 2, events: 3, matched: 2, skipped: [] };
+    };
+    const connector = stubConnector({
+      machines: [{ serial: "AH", alias: "AH" }],
+      slots: { AH: [slot("31", "Montella", 6, 2)] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.deepEqual(res.detect, { events: 3, matched: 2 });
+    assert.equal(calls.detects.length, 1);
+    assert.equal(calls.detects[0], 1); // days=1, как договорено для агента
+    // Детектор должен идти строго после приёма слотов.
+    const ingestAt = calls.order.indexOf("ingest");
+    const detectAt = calls.order.indexOf("detect");
+    assert.ok(ingestAt >= 0 && detectAt > ingestAt);
   });
 
   it("частичный сбой: один автомат без слотов → partial, остальные всё равно в базе", async () => {

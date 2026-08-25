@@ -330,6 +330,28 @@ export class AgentsCoreClient {
     });
   }
 
+  /**
+   * Прогнать детектор заливок по свежим снимкам слотов (П4, R-P4-2). Коллектор
+   * дергает его сразу после успешного ingestVendingSlots — заливка попадает в
+   * журнал в тот же цикл сбора, а не только когда её руками прогонят из панели.
+   */
+  detectRefillEvents(days = 1): Promise<{
+    machines: number;
+    events: number;
+    matched: number;
+    skipped: { serial: string; reason: string }[];
+  }> {
+    return this.request<{
+      machines: number;
+      events: number;
+      matched: number;
+      skipped: { serial: string; reason: string }[];
+    }>("/vending/refill-events/detect", {
+      method: "POST",
+      body: JSON.stringify({ days }),
+    });
+  }
+
   /** Отдать собранные продажи в Core (история для прогноза расхода). */
   ingestVendingSales(payload: {
     capturedAt?: string;
