@@ -25,6 +25,7 @@ import {
 import type { CoreClient, PersonRow, VendingPlan } from "./core-client";
 import { Conversations } from "./conversation";
 import { handleStaffCallback, handleStaffMessage } from "./staff";
+import { matchTrigger } from "./menu";
 
 const PERSON = { id: "11111111-1111-4111-8111-111111111111", name: "Володя" } as PersonRow;
 
@@ -50,6 +51,14 @@ describe("Заливка автомата: разбор ввода", () => {
       assert.ok(isRefillTrigger(t), t);
     }
     assert.ok(!isRefillTrigger("залил кофе"), "кофейная заливка — другой мастер");
+  });
+
+  it("триггер якорится: победитель не зависит от порядка пунктов меню", () => {
+    // Пункт стал живым, и подстрока без якоря делала бы его претендентом на
+    // любую фразу, где слово встретилось в середине, — включая отчёт о мойке.
+    assert.ok(!isRefillTrigger("помыл бункер, потом заполнил автомат"));
+    assert.ok(!isRefillTrigger("сегодня заправил"));
+    assert.equal(matchTrigger("помыл бункер, потом заполнил автомат", ["operator"])?.id, "wash");
   });
 
   it("количество — целые штуки", () => {
@@ -250,6 +259,9 @@ interface WizardOpts {
   plan?: VendingPlan | null;
   products?: string[];
   serial?: string;
+  priced?: { id: string; name: string; isActive: boolean }[];
+  /** Справочники (зеркало и прайс) недоступны — как при лежащем Core. */
+  failLookups?: boolean;
 }
 
 function wizard(opts: WizardOpts = {}) {
@@ -261,11 +273,19 @@ function wizard(opts: WizardOpts = {}) {
       if (opts.plan === null) throw new Error("Core недоступен");
       return opts.plan ?? PLAN;
     },
-    machineProducts: async () => opts.products ?? ["Montella", "Fanta", "Snickers"],
-    vendingProducts: async () => [
-      { id: "p1", name: "Kinder Bueno", isActive: true },
-      { id: "p2", name: "Kinder Delice", isActive: true },
-    ],
+    machineProducts: async () => {
+      if (opts.failLookups === true) throw new Error("Core недоступен");
+      return opts.products ?? ["Montella", "Fanta", "Snickers"];
+    },
+    vendingProducts: async () => {
+      if (opts.failLookups === true) throw new Error("Core недоступен");
+      return (
+        opts.priced ?? [
+          { id: "p1", name: "Kinder Bueno", isActive: true },
+          { id: "p2", name: "Kinder Delice", isActive: true },
+        ]
+      );
+    },
     machines: async () => [{ id: MACHINE_ID, name: "Olma" }],
     recentObjects: async () => [{ id: MACHINE_ID, name: "Olma" }],
     createRefill: async (input: { productName: string; qty: number; clientKey: string }) => {
@@ -322,6 +342,7 @@ describe("Заливка автомата: чек-лист по плану за�
     const res = await press("rf:plan", deps);
     assert.equal(calls.length, 1, "вторая позиция не записана");
     assert.match(res.message?.text ?? "", /Записано 1 из 2/);
+    assert.match(res.message?.text ?? "", /«Fanta»: не записано/, "род названия не угадываем");
     const повтор = res.message?.keyboard?.inline_keyboard.flat().map((b) => b.callback_data);
     assert.ok(повтор?.includes("rf:plan"), "кнопка повтора на месте");
 
@@ -335,16 +356,21 @@ describe("Заливка автомата: чек-лист по плану за�
     const { deps } = wizard({ serial: "9999999999" });
     await startMachineRefill(CHAT, PERSON, deps);
     const r = await onMachinePicked(CHAT, MACHINE_ID, "Olma", deps);
-    assert.match(r.text, /Плана по этому автомату нет — выбери товар/);
+    assert.match(r.text, /Плана по этому автомату нет\. Выбери товар/);
     const кнопки = r.keyboard?.inline_keyboard.flat().map((b) => b.callback_data);
     assert.deepEqual(кнопки, ["rf:p:0", "rf:p:1", "rf:p:2", "rf:other", "rf:cancel"]);
   });
 
-  it("план не отдался — мастер не встаёт, а работает по зеркалу", async () => {
+  it("план не отдался — так и сказано, а мастер работает по зеркалу", async () => {
+    // «Плана по этому автомату нет» — утверждение о ДАННЫХ. Сказать его, когда
+    // Core просто не ответил, значит соврать: оператор решит, что грузить
+    // нечего, и уедет.
     const { deps } = wizard({ plan: null });
     await startMachineRefill(CHAT, PERSON, deps);
     const r = await onMachinePicked(CHAT, MACHINE_ID, "Olma", deps);
-    assert.match(r.text, /выбери товар/i);
+    assert.match(r.text, /план сейчас не отдался/i);
+    assert.doesNotMatch(r.text, /плана по этому автомату нет/i);
+    assert.match(r.text, /выбери товар/i, "записать заливку всё равно можно");
   });
 });
 
@@ -381,6 +407,31 @@ describe("Заливка автомата: правка количества и 
     assert.match(найдено.text, /Нашёл 2/);
     const подписи = найдено.keyboard?.inline_keyboard.flat().map((b) => b.text);
     assert.ok(подписи?.includes("Kinder Bueno"), "товар прайса доступен, хоть его и нет в зеркале");
+  });
+
+  it("снятый с прайса товар в поиск не попадает", async () => {
+    const { deps } = wizard({
+      priced: [
+        { id: "p1", name: "Kinder Bueno", isActive: true },
+        { id: "p2", name: "Kinder Delice", isActive: false },
+      ],
+    });
+    await startMachineRefill(CHAT, PERSON, deps);
+    await onMachinePicked(CHAT, MACHINE_ID, "Olma", deps);
+    await press("rf:else", deps);
+    const найдено = await handleRefillProductText(CHAT, "kinder", deps);
+    assert.match(найдено.text, /Нашёл 1/);
+    const подписи = найдено.keyboard?.inline_keyboard.flat().map((b) => b.text) ?? [];
+    assert.ok(!подписи.includes("Kinder Delice"), "неактивная позиция скрыта");
+  });
+
+  it("справочники не отдались — «не дозвонился», а не «ничего не нашёл»", async () => {
+    const { deps } = wizard({ failLookups: true });
+    await startMachineRefill(CHAT, PERSON, deps);
+    await onMachinePicked(CHAT, MACHINE_ID, "Olma", deps);
+    const найдено = await handleRefillProductText(CHAT, "kinder", deps);
+    assert.match(найдено.text, /не отдался|не дозвонился/i);
+    assert.doesNotMatch(найдено.text, /ничего не нашёл/i);
   });
 
   it("ничего не нашлось — говорим об этом и оставляем прежние кнопки", async () => {
@@ -492,6 +543,20 @@ describe("Заливка автомата: путь через диспетче�
     await handleStaffMessage(CHAT, "🍫 Заполнил автомат", OPERATOR, deps);
     const r = await handleStaffMessage(CHAT, "olm", OPERATOR, deps);
     assert.match(r.reply.text, /Нашёл 1/);
+  });
+
+  it("слово «отмена» ведёт себя как кнопка: записанное названо и сохранено", async () => {
+    // Кнопка говорила «Записано 2 позиции — они сохранены», а слово — сухое
+    // «Отменил.». Одинаково подписанные действия не должны иметь разную цену:
+    // набравший слово (справка сама его предлагает) решил бы, что стёр обход.
+    const { deps, calls } = wizard();
+    await handleStaffMessage(CHAT, "🍫 Заполнил автомат", OPERATOR, deps);
+    await handleStaffCallback(CHAT, `mp:e:${MACHINE_ID}`, OPERATOR, deps);
+    await handleStaffCallback(CHAT, "rf:plan", OPERATOR, deps);
+    assert.equal(calls.length, 2);
+    const r = await handleStaffMessage(CHAT, "отмена", OPERATOR, deps);
+    assert.match(r.reply.text, /записано 2 позиции — они сохранены/i);
+    assert.equal(deps.conversations.get(CHAT), null);
   });
 
   it("«Отмена» пикера не гасит чужой мастер, но закрывает свой", async () => {

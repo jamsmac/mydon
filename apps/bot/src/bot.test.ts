@@ -4,8 +4,11 @@ import {
   collectGloberentSignals,
   countStuckDeals,
   countUnpaidContracts,
+  BRIEFING_NOTES_WINDOW_MS,
   formatBriefing,
   formatBriefingNotes,
+  notesBudget,
+  notesToAck,
   msUntilBriefing,
 } from "./briefing";
 import { CoreError } from "./core-client";
@@ -494,9 +497,13 @@ describe("Брифинг: несрочные сигналы правил", () =>
       { key: "e2:r1", text: "📉 Усушка Olma: Kinder Bueno −9 шт ≈ 99 000 сум за 14 дн." },
       { key: "e3:r2", text: "🍫 Заливка без записи: Olma +96 шт" },
     ]);
-    assert.match(block ?? "", /Разобраться сегодня/);
-    assert.equal((block ?? "").match(/Усушка Olma/g)?.length, 1);
-    assert.match(block ?? "", /Заливка без записи/);
+    assert.match(block?.text ?? "", /Разобраться сегодня/);
+    assert.equal((block?.text ?? "").match(/Усушка Olma/g)?.length, 1);
+    assert.match(block?.text ?? "", /Заливка без записи/);
+    // Склеенный повтор — это ДРУГОЕ событие с тем же текстом: показали его
+    // содержимое, значит доставили. Не отметь мы его — оно вернулось бы завтра
+    // и снова склеилось, и так навсегда.
+    assert.deepEqual(block?.shownKeys, ["e1:r1", "e2:r1", "e3:r2"]);
   });
 
   it("пусто — блока нет вовсе, а не пустой заголовок", () => {
@@ -504,10 +511,67 @@ describe("Брифинг: несрочные сигналы правил", () =>
     assert.equal(formatBriefingNotes([{ key: "e:r", text: "  " }]), null);
   });
 
+  it("непоказанное НЕ считается доставленным (15 в очереди → 12 строк → 12 ключей)", () => {
+    // Отметить всё, а напечатать двенадцать — тихая потеря ровно тех алертов,
+    // ради которых проводка и делалась: в notification_delivery они попадут,
+    // а на глаза владельцу — никогда.
+    const many = Array.from({ length: 15 }, (_, i) => ({ key: `e${i}:r`, text: `сигнал ${i}` }));
+    const block = formatBriefingNotes(many);
+    assert.equal(block?.shownKeys.length, 12);
+    assert.deepEqual(block?.shownKeys.slice(-1), ["e11:r"]);
+    assert.match(block?.text ?? "", /…и ещё 3/);
+    // Три оставшихся ключа не отмечены — придут завтра.
+    for (const k of ["e12:r", "e13:r", "e14:r"]) {
+      assert.ok(!block?.shownKeys.includes(k), k);
+    }
+  });
+
   it("длинный список обрезается вслух: сводка, которую не дочитывают, не сводка", () => {
     const many = Array.from({ length: 20 }, (_, i) => ({ key: `e${i}:r`, text: `сигнал ${i}` }));
-    const block = formatBriefingNotes(many, 5) ?? "";
-    assert.equal(block.split("\n").length, 7, "заголовок + 5 строк + хвост");
-    assert.match(block, /…и ещё 15/);
+    const block = formatBriefingNotes(many, 5);
+    assert.equal((block?.text ?? "").split("\n").length, 7, "заголовок + 5 строк + хвост");
+    assert.match(block?.text ?? "", /…и ещё 15/);
+    assert.equal(block?.shownKeys.length, 5);
+  });
+
+  it("бюджет длины: блок режется, а не роняет весь брифинг лимитом Telegram", () => {
+    // 4096 — предел одного сообщения. Перевалив его, падает ВСЁ сообщение,
+    // то есть и сводка, и согласования, и сигналы разом.
+    const briefingText = "б".repeat(3000);
+    const staffLine = "с".repeat(200);
+    const many = Array.from({ length: 12 }, (_, i) => ({ key: `e${i}:r`, text: `сигнал ${i} ` + "х".repeat(120) }));
+    const block = formatBriefingNotes(many, 12, notesBudget(briefingText, staffLine));
+    assert.ok(block, "что-то показать всё же удалось");
+    assert.ok(block.shownKeys.length < 12, "влезло не всё");
+    assert.match(block.text, /…и ещё \d+/);
+    const message = [briefingText, block.text, staffLine].join("\n\n");
+    assert.ok(message.length <= 3500, `длина ${message.length}`);
+  });
+
+  it("бюджета не осталось вовсе — блока нет и ничего не отмечено", () => {
+    const block = formatBriefingNotes([{ key: "e:r", text: "сигнал" }], 12, 0);
+    assert.equal(block, null);
+  });
+
+  it("длинная строка правила режется по символам, а не переносится целиком", () => {
+    const block = formatBriefingNotes([{ key: "e:r", text: "📉 " + "я".repeat(400) }]);
+    const line = (block?.text ?? "").split("\n")[1] ?? "";
+    assert.ok(line.length <= 160, `строка длиной ${line.length}`);
+    assert.match(line, /…$/);
+  });
+
+  it("не дошло ни в один чат — не отмечаем ничего (сигнал придёт завтра)", () => {
+    const block = formatBriefingNotes([{ key: "e1:r", text: "сигнал" }]);
+    assert.deepEqual(notesToAck(block, false), []);
+    assert.deepEqual(notesToAck(block, true), ["e1:r"]);
+    assert.deepEqual(notesToAck(null, true), []);
+  });
+
+  it("окно ожидания — неделя: одна неудачная отправка не теряет сигнал навсегда", () => {
+    // Ключ одноразовости брифинга уже израсходован, повторной попытки в те же
+    // сутки не будет. При окне в 26 ч вчерашние алерты (они пишутся в 08:35)
+    // в завтрашнюю выборку уже не попадут. Повтора не боимся: Core отсекает
+    // отмеченное в notification_delivery.
+    assert.equal(BRIEFING_NOTES_WINDOW_MS, 7 * 24 * 3_600_000);
   });
 });

@@ -1,5 +1,6 @@
 import { TZ } from "@mydon/shared";
 import type { ApprovalRow, Briefing } from "./core-client";
+import { TG_BUDGET } from "./purchase-plan";
 
 /**
  * Утренний брифинг 07:30 Asia/Tashkent (ТЗ FR-6).
@@ -112,6 +113,57 @@ export interface BriefingNote {
 }
 
 /**
+ * Готовый блок сигналов и ключи ТОЛЬКО показанных строк.
+ *
+ * Ключи возвращаются отдельно, потому что отметка о доставке необратима:
+ * отметив непоказанное, мы теряем его навсегда (Core больше его не отдаст).
+ */
+export interface BriefingNotesBlock {
+  text: string;
+  /** Ключи строк, попавших в сообщение. Остальное остаётся недоставленным. */
+  shownKeys: string[];
+}
+
+/**
+ * Как далеко назад смотрим за несрочными сигналами.
+ *
+ * Неделя, а не сутки: ключ одноразовости брифинга (`briefing:<дата>`) тратится
+ * ДО отправки, и если Telegram отказал во все чаты, второй попытки в эти сутки
+ * не будет. При суточном окне вчерашние алерты (крон усушки пишет их в 08:35)
+ * в завтрашнюю выборку уже не попали бы — сигнал оставался бы в Core
+ * недоставленным вечно. Повтора не боимся: `/rules/pending` отсекает всё, что
+ * лежит в `notification_delivery`, поэтому широкое окно даёт ровно то же, что
+ * узкое, плюс не потерянные сигналы.
+ */
+export const BRIEFING_NOTES_WINDOW_MS = 7 * 24 * 3_600_000;
+
+/** Заголовок блока — он же занимает бюджет, поэтому считается вместе со строками. */
+const NOTES_HEADER = "Разобраться сегодня:";
+/** Предел одной строки: правило с длинным перечислением не должно съесть блок. */
+const NOTES_LINE_MAX = 160;
+/** Место под хвост «…и ещё N» — резервируем, пока остаток не показан. */
+const NOTES_TAIL_ROOM = 16;
+/** Два разделителя «\n\n» между брифингом, блоком и строкой действий. */
+const NOTES_SEPARATORS = 4;
+
+/**
+ * Сколько символов остаётся блоку сигналов в сообщении брифинга.
+ *
+ * Telegram рвёт связь на 4096 символах ОДНОГО сообщения, а `sendMessage` текст
+ * не режет: перевалив предел, падает всё сообщение целиком — и сводка, и
+ * согласования, и сами сигналы. Держимся того же порога, что и остальные
+ * длинные ответы бота (TG_BUDGET), и отдаём блоку только остаток.
+ */
+export function notesBudget(briefingText: string, staffLine: string | null): number {
+  return Math.max(0, TG_BUDGET - briefingText.length - (staffLine?.length ?? 0) - NOTES_SEPARATORS);
+}
+
+/** Длинную строку режем по символам: перенос целиком выбросил бы её из блока. */
+function cutLine(text: string, max = NOTES_LINE_MAX): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
+}
+
+/**
  * Блок несрочных сигналов правил.
  *
  * Правила делят уведомления на срочные («звони сейчас») и брифинговые
@@ -120,21 +172,66 @@ export interface BriefingNote {
  * доходили до владельца ни разу. Утро — их единственный канал.
  *
  * Дедуп по тексту: одно и то же правило срабатывает по каждому автомату, и
- * тридцать одинаковых строк вытеснили бы сам брифинг. Лимит — по той же
- * причине: сводка, которую не дочитывают, не сводка.
+ * тридцать одинаковых строк вытеснили бы сам брифинг. Склеенные события всё
+ * равно считаются показанными — их содержимое на экране; не отметь мы их, они
+ * возвращались бы каждое утро и склеивались снова, вечно.
+ *
+ * Лимит строк и бюджет длины — разные ограничения: первый бережёт внимание
+ * владельца, второй не даёт сообщению превысить предел Telegram. Всё, что не
+ * влезло, сворачивается в «…и ещё N» и остаётся НЕДОСТАВЛЕННЫМ.
  */
-export function formatBriefingNotes(notes: readonly BriefingNote[], limit = 12): string | null {
-  const seen = new Set<string>();
-  const lines: string[] = [];
+export function formatBriefingNotes(
+  notes: readonly BriefingNote[],
+  limit = 12,
+  budget = Number.POSITIVE_INFINITY,
+): BriefingNotesBlock | null {
+  const поТексту = new Map<string, { line: string; keys: string[] }>();
   for (const n of notes) {
-    if (n.text.trim() === "" || seen.has(n.text)) continue;
-    seen.add(n.text);
-    lines.push(n.text);
+    const text = n.text.trim();
+    if (text === "") continue;
+    const прежний = поТексту.get(text);
+    if (прежний) {
+      прежний.keys.push(n.key);
+      continue;
+    }
+    поТексту.set(text, { line: cutLine(text), keys: [n.key] });
   }
+  const все = [...поТексту.values()];
+  if (все.length === 0) return null;
+
+  const lines: string[] = [];
+  const shownKeys: string[] = [];
+  let занято = NOTES_HEADER.length;
+  let i = 0;
+  for (; i < все.length && lines.length < limit; i++) {
+    const надо = все[i].line.length + 1;
+    // Пока остаётся непоказанное, держим место под хвост: иначе последняя
+    // строка вытеснила бы «…и ещё N» за границу бюджета.
+    const резерв = i + 1 < все.length ? NOTES_TAIL_ROOM : 0;
+    if (занято + надо + резерв > budget) break;
+    lines.push(все[i].line);
+    shownKeys.push(...все[i].keys);
+    занято += надо;
+  }
+  // Ни одной строки не влезло — блока нет вовсе: пустой заголовок занял бы
+  // место и при этом ничего не сказал, а ключи остались бы неотмеченными.
   if (lines.length === 0) return null;
-  const shown = lines.slice(0, limit);
-  if (lines.length > shown.length) shown.push(`…и ещё ${lines.length - shown.length}`);
-  return ["Разобраться сегодня:", ...shown].join("\n");
+
+  const остаток = все.length - i;
+  const out = [NOTES_HEADER, ...lines];
+  if (остаток > 0) out.push(`…и ещё ${остаток}`);
+  return { text: out.join("\n"), shownKeys };
+}
+
+/**
+ * Какие ключи отмечать доставленными.
+ *
+ * Ровно показанные и ровно при доставке хотя бы в один чат. Отдельной функцией,
+ * потому что это решение с необратимой ценой: `ack` — единственное место, после
+ * которого Core сигнал больше не отдаст.
+ */
+export function notesToAck(block: BriefingNotesBlock | null, delivered: boolean): string[] {
+  return delivered && block ? block.shownKeys : [];
 }
 
 export function formatBriefing(

@@ -52,6 +52,7 @@ import {
   handleRefillCount,
   handleRefillProductText,
   parseRefillCallback,
+  refillCancelText,
   refillStepHint,
   REFILL_FLOW,
   startMachineRefill,
@@ -293,6 +294,15 @@ export async function handleStaffMessage(
         return {
           reply: { text: `Отменил. Ты на точке «${visit.locationName}».`, keyboard: visitKeyboard(visit) },
         };
+      }
+      // Снек-заливка отвечает СВОИМ текстом отмены: он называет число уже
+      // записанных позиций. Сухое «Отменил.» после трёх записанных заливок
+      // читается как «стёр их» — ровно тот страх, из-за которого техник
+      // потом переспрашивает владельца, дошло ли.
+      if (active.flow === REFILL_FLOW) {
+        const текст = refillCancelText(active.data);
+        deps.conversations.clear(chatId);
+        return { reply: { text: текст } };
       }
       deps.conversations.clear(chatId);
       return {

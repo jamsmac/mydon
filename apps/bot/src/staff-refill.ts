@@ -41,9 +41,17 @@ export interface RefillDeps {
   conversations: Conversations;
 }
 
-/** Слова, которыми сотрудник начинает заливку автомата. */
+/**
+ * Слова, которыми сотрудник начинает заливку автомата.
+ *
+ * С якорем ^, как у соседних мастеров (см. isCoffeeRefillTrigger): пункт стал
+ * живым, и подстрока без якоря делала бы его претендентом на любую фразу, где
+ * слово встретилось в середине, — «помыл бункер, потом заполнил автомат» ушло
+ * бы в заливку, если бы пункт стоял в реестре выше мойки. Правильный
+ * победитель не должен зависеть от порядка пунктов меню.
+ */
 export function isRefillTrigger(text: string): boolean {
-  return /заполнил|заправил|загрузил.*автомат|пополнил/i.test(text.trim());
+  return /^(заполнил|заправил|загрузил.*автомат|пополнил)/i.test(text.trim());
 }
 
 /**
@@ -185,6 +193,16 @@ export interface RefillPlanItem {
   qty: number;
 }
 
+/**
+ * Текст отмены по данным беседы — общий для кнопки «✖️ Отмена» и слова
+ * «отмена». Две формулировки на одно действие означали бы, что набравший
+ * слово (справка сама его предлагает) считает обход стёртым, а нажавший
+ * кнопку — сохранённым.
+ */
+export function refillCancelText(data: Record<string, unknown>): string {
+  return cancelText(readState(data)?.items.length ?? 0);
+}
+
 /** Состояние обхода внутри визарда. */
 export interface RefillState {
   runId: string;
@@ -274,9 +292,13 @@ export async function recordItem(
       state: next,
       reply: { text: `Записал: ${product} — ${qty} шт.${left}`, keyboard: afterItemKeyboard() },
     };
-  } catch {
+  } catch (err) {
     // Позиция не записана, индекс не двигаем: повтор пойдёт тем же ключом,
     // и если запись всё-таки прошла на сервере, дубля не будет.
+    //
+    // Лог обязателен: это единственная мутация мастера, и её сбой не виден
+    // нигде, кроме сообщения одному человеку в поле.
+    console.error(`[refill] позиция «${product}» не записана:`, err);
     return {
       state,
       reply: {
@@ -294,6 +316,23 @@ export async function recordItem(
 // подтвердить готовый чек-лист, а не набирать шесть чисел заново. Ввод руками
 // никуда не делся — он за кнопкой «✏️ Иначе» и нужен ровно тогда, когда факт
 // разошёлся с планом.
+
+/**
+ * Чтение из Core, которое мастеру нельзя ронять, но нельзя и проглатывать.
+ *
+ * Полевой мастер обязан продолжить работу при любом сбое чтения — заливка
+ * записывается другим запросом. Но «не ответил Core» и «в данных пусто» —
+ * РАЗНЫЕ факты, и говорить оператору второе вместо первого значит соврать про
+ * его автомат. Флаг `failed` разводит формулировки, лог оставляет след.
+ */
+async function readSafely<T>(what: string, run: Promise<T>, fallback: T): Promise<{ value: T; failed: boolean }> {
+  try {
+    return { value: await run, failed: false };
+  } catch (err) {
+    console.error(`[refill] ${what}:`, err);
+    return { value: fallback, failed: true };
+  }
+}
 
 /** Клавиатура чек-листа: подтвердить план, изменить или выйти. */
 export function planKeyboard(): NonNullable<StaffReply["keyboard"]> {
@@ -381,7 +420,7 @@ export async function onMachinePicked(
 ): Promise<StaffReply> {
   const conv = deps.conversations.get(chatId);
   const runId = typeof conv?.data.runId === "string" ? conv.data.runId : newRunId();
-  const serial = await deps.core.machineSerial(entityId).catch(() => "");
+  const { value: serial } = await readSafely("серийник автомата", deps.core.machineSerial(entityId), "");
   if (serial === "") {
     // Без серийника заливку писать некуда: Core сшивает её с автоматом именно
     // по нему. Молча предложить товары значило бы собрать ввод в никуда.
@@ -393,7 +432,11 @@ export async function onMachinePicked(
     };
   }
 
-  const plan = await deps.core.vendingPlan().catch(() => null);
+  const { value: plan, failed: planFailed } = await readSafely<VendingPlan | null>(
+    "план закупа",
+    deps.core.vendingPlan(),
+    null,
+  );
   const items = plan === null ? [] : planItemsFor(plan, serial);
   const base: RefillState = {
     runId,
@@ -412,11 +455,17 @@ export async function onMachinePicked(
     return { text: planText(machineName, items), keyboard: planKeyboard() };
   }
 
-  const mirror = await deps.core.machineProducts(serial).catch(() => [] as string[]);
+  const { value: mirror, failed: mirrorFailed } = await readSafely("товары автомата", deps.core.machineProducts(serial), [] as string[]);
   const choices = mergeNames(mirror);
+  // Три разных причины пустого чек-листа — три разных ответа. Одна фраза на
+  // все («плана нет») утверждала бы про данные то, чего мы не знаем.
+  const почему = planFailed
+    ? "План сейчас не отдался — Core не ответил."
+    : "Плана по этому автомату нет.";
+  const зеркало = mirrorFailed ? " Товары автомата тоже не отдались — напиши название словом." : "";
   saveState(chatId, "product", { ...base, choices }, deps);
   return {
-    text: `${machineName}. Плана по этому автомату нет — выбери товар.`,
+    text: `${machineName}. ${почему} Выбери товар.${зеркало}`,
     keyboard: productKeyboard(choices),
   };
 }
@@ -447,7 +496,7 @@ export async function loadByPlan(
         state: stalled,
         reply: {
           text:
-            `Записано ${done} из ${plan.length}. «${item.product}» не прошёл — похоже, связь.\n` +
+            `Записано ${done} из ${plan.length}. «${item.product}»: не записано — похоже, связь.\n` +
             "Нажми «🔁 Дозаписать по плану» позже: записанное не задвоится.",
           keyboard: planRetryKeyboard(),
         },
@@ -478,9 +527,9 @@ export async function handleRefillCallback(
         message: { text: "Эта кнопка от прошлого шага — она уже не действует." },
       };
     }
-    const recorded = current === null ? 0 : (readState(current.data)?.items.length ?? 0);
+    const текст = current === null ? cancelText(0) : refillCancelText(current.data);
     deps.conversations.clear(chatId);
-    return { answer: "Отменено", message: { text: cancelText(recorded) } };
+    return { answer: "Отменено", message: { text: текст } };
   }
 
   const conv = deps.conversations.get(chatId);
@@ -529,23 +578,28 @@ export async function handleRefillCallback(
     case "manual": {
       // К товарам плана добавляем всё, что стоит в автомате: «иначе» чаще
       // всего значит «залил то, чего в плане не было».
-      const mirror = await deps.core.machineProducts(state.machineSerial).catch(() => [] as string[]);
-      const choices = mergeNames([...(state.plan ?? []).map((i) => i.product), ...mirror]);
+      const mirror = await readSafely("товары автомата", deps.core.machineProducts(state.machineSerial), [] as string[]);
+      const choices = mergeNames([...(state.plan ?? []).map((i) => i.product), ...mirror.value]);
       saveState(chatId, "product", { ...state, choices }, deps);
       return {
         answer: "Выбор товара",
-        message: { text: `${state.machineName}. Какой товар?`, keyboard: productKeyboard(choices) },
+        message: {
+          text: `${state.machineName}. Какой товар?${mirror.failed ? "\nСписок автомата не отдался — покажу только плановое, остальное ищи словом." : ""}`,
+          keyboard: productKeyboard(choices),
+        },
       };
     }
 
     case "other": {
-      const mirror = await deps.core.machineProducts(state.machineSerial).catch(() => [] as string[]);
-      const choices = mergeNames(mirror);
+      const mirror = await readSafely("товары автомата", deps.core.machineProducts(state.machineSerial), [] as string[]);
+      const choices = mergeNames(mirror.value);
       saveState(chatId, "product", { ...state, choices }, deps);
       return {
         answer: "Все товары",
         message: {
-          text: `Всё, что стоит в «${state.machineName}». Нет нужного — напиши часть названия, поищу по прайсу.`,
+          text: mirror.failed
+            ? `Список товаров «${state.machineName}» сейчас не отдался. Напиши часть названия — поищу по прайсу.`
+            : `Всё, что стоит в «${state.machineName}». Нет нужного — напиши часть названия, поищу по прайсу.`,
           keyboard: productKeyboard(choices),
         },
       };
@@ -656,17 +710,23 @@ export async function handleRefillProductText(
     return { text: "Слишком коротко — напиши хотя бы две буквы.", keyboard: productKeyboard(state.choices) };
   }
   const [mirror, priced] = await Promise.all([
-    deps.core.machineProducts(state.machineSerial).catch(() => [] as string[]),
-    deps.core.vendingProducts().catch(() => []),
+    readSafely("товары автомата", deps.core.machineProducts(state.machineSerial), [] as string[]),
+    readSafely("прайс вендинга", deps.core.vendingProducts(), [] as { name: string; isActive: boolean }[]),
   ]);
+  // Снятые с прайса позиции в поиск не идут: предложить их значит записать
+  // заливку товара, которого в закупе давно нет.
+  const активные = priced.value.filter((p) => p.isActive).map((p) => p.name);
   const found = mergeNames(
-    [...mirror, ...priced.map((p) => p.name)].filter((n) => normalizeProductName(n).includes(q)),
+    [...mirror.value, ...активные].filter((n) => normalizeProductName(n).includes(q)),
   );
   if (found.length === 0) {
-    return {
-      text: `По «${text.trim()}» ничего не нашёл. Напиши иначе или выбери кнопкой.`,
-      keyboard: productKeyboard(state.choices),
-    };
+    // «Ничего не нашёл» — утверждение о справочнике. Если справочник не
+    // отдался, оператор решит, что товара нет, и не запишет заливку вовсе.
+    const текст =
+      mirror.failed && priced.failed
+        ? `Справочник товаров сейчас не отдался — Core не ответил. Попробуй ещё раз через минуту.`
+        : `По «${text.trim()}» ничего не нашёл. Напиши иначе или выбери кнопкой.`;
+    return { text: текст, keyboard: productKeyboard(state.choices) };
   }
   saveState(chatId, "product", { ...state, choices: found }, deps);
   return { text: `Нашёл ${found.length}:`, keyboard: productKeyboard(found) };
