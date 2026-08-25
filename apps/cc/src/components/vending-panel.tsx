@@ -10,8 +10,10 @@ import {
   type VendingOrder,
   type VendingPurchase,
   type VendingRunout,
+  type VendingShrinkageReport,
   type VendingSyncRun,
 } from "../lib/core";
+import { SHRINKAGE_PANEL_DAYS, ShrinkageAlerts } from "./shrinkage-view";
 import { CoreDown } from "./core-down";
 import { NewEntityForm } from "./entity-new";
 import { typeOne } from "../lib/labels";
@@ -180,7 +182,7 @@ export async function VendingMachinesPanel({ machines }: { machines: Entity[] })
  * купить, накладные, дефицит по автоматам и «что доложить». Сюда переехали
  * товарные секции бывшей вкладки «Автоматы» — сам список аппаратов остался там.
  */
-export async function VendingSupplyPanel() {
+export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: string }) {
   let ourvendMachines: VendingMachine[] = [];
   let needs: VendingNeed[] = [];
   let syncRuns: VendingSyncRun[] = [];
@@ -203,6 +205,17 @@ export async function VendingSupplyPanel() {
     totalUnfilled: 0,
     totalToStock: 0,
   };
+  // Усушка уходит ОТДЕЛЬНЫМ запросом и ВМЕСТЕ с основным пакетом.
+  // Отдельным — потому что она читает снимки и продажи за две недели и падает
+  // по своим причинам, а вкладка «Снек» нужна для пополнения и обязана
+  // открываться без неё. Вместе — потому что последовательным `await` после
+  // Promise.all она добавила бы своё время к открытию вкладки целиком.
+  // `null` значит «не спросили»: секцию тогда не рисуем — врать «порог не
+  // превышен» на упавшем запросе нельзя.
+  const усушка: Promise<VendingShrinkageReport | null> = core
+    .vendingShrinkage(SHRINKAGE_PANEL_DAYS)
+    .catch(() => null);
+
   try {
     let forecast: { critical: VendingRunout[] };
     [ourvendMachines, needs, forecast, purchase, orders, syncRuns] = await Promise.all([
@@ -217,6 +230,7 @@ export async function VendingSupplyPanel() {
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
+  const shrinkage = await усушка;
   const sum = (n: number) => n.toLocaleString("ru-RU");
   const syncLine = lastSyncLine(syncRuns);
 
@@ -259,6 +273,8 @@ export async function VendingSupplyPanel() {
           </div>
         </>
       )}
+
+      {shrinkage && <ShrinkageAlerts report={shrinkage} domain={domain} />}
 
       {purchase.items.length > 0 && (
         <>

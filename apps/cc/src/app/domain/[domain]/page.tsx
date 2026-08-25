@@ -62,6 +62,7 @@ import { SourcesView } from "../../../components/sources-view";
 import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingMachinesPanel, VendingSupplyPanel } from "../../../components/vending-panel";
 import { PurchasePlanView } from "../../../components/purchase-plan-view";
+import { SHRINKAGE_WINDOWS, ShrinkageView } from "../../../components/shrinkage-view";
 import { ProductRulesView } from "../../../components/product-rules-view";
 import { CoffeePanel } from "../../../components/coffee-panel";
 import {
@@ -678,6 +679,13 @@ export default async function DomainPage({
     normFactReport = await core.coffeeNormFact(normFactFrom, normFactTo).catch(() => null);
   }
 
+  // Усушка (П4, R-P4-3): окно задаётся ?days= — 7/14/30 и ничего больше.
+  // Значение из адреса в ядро НЕ передаём как есть: там оно уходит в SQL-окно
+  // по снимкам, и «?days=6000» стоил бы прода прогоном по всей истории.
+  // Сам отчёт тянет лист (как «План закупа»): страница только читает окно.
+  const shrinkDays =
+    (SHRINKAGE_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 14;
+
   // Реестр пробелов (срез К, задача 6, шаг 3): вычисляется на каждом чтении
   // (R-K4) — пустой массив здесь означает «всё, что можно посчитать, посчитано»,
   // а не что запрос сломан (null — именно провал запроса).
@@ -1161,7 +1169,7 @@ export default async function DomainPage({
         <CoffeePanel defaultOwnerRef={defaultOwner?.id ?? null} />
       )}
       {domain === "vendhub" && activeGroup === "service" && leaf?.type === "snack" && (
-        <VendingSupplyPanel />
+        <VendingSupplyPanel domain={domain} />
       )}
 
       {/* ── SMM / CRM: деятельность объявлена в структуре, подключение — отдельным этапом ── */}
@@ -1949,6 +1957,11 @@ export default async function DomainPage({
           чтобы её числа не разъехались с ботом. ── */}
       {group && leaf?.type === "buy_plan" && <PurchasePlanView domain={domain} />}
 
+      {/* ── Усушка (П4, R-P4-3): по дням БЕЗ заливок, порог по позиции за
+          период. Считает ядро (/vending/shrinkage) — лист только показывает,
+          чтобы его числа не разъехались с утренним алертом и ботом. ── */}
+      {group && leaf?.type === "shrinkage" && <ShrinkageView domain={domain} days={shrinkDays} />}
+
       {/* ── Правила закупа (срез П5a): блок / исключение / фикс-количество
           по товару вендинга — форма поверх прайса (Task 6), своих карточек
           реестра лист не заводит. ── */}
@@ -2474,6 +2487,7 @@ export default async function DomainPage({
           "gaps",
           "buy_plan",
           "purchase_rules",
+          "shrinkage",
           "norm_fact",
           "cost",
           "feed",
