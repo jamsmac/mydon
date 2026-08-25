@@ -84,6 +84,11 @@ export * from "./vending-calc";
 export * from "./vending-plan";
 export * from "./vending-field";
 export * from "./vending-reports";
+/**
+ * История склада донора mydon-stock (П8a): заливы, инвентаризации, сверка
+ * закупок. Чистый маппинг — решения «что чем становится» под тестами.
+ */
+export * from "./stock-history";
 export * from "./coffee-calc";
 export * from "./coffee-order";
 export * from "./contractor-name";
