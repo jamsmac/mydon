@@ -205,4 +205,12 @@ describe("Правила уведомлений (FR-2)", () => {
     const [n] = applyRules(ctx("ourvend.sync_failed_streak", { streak: 3, since: "2026-08-24T09:00:00+05:00" }));
     assert.match(n!.text, /3 раза подряд/);
   });
+
+  it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {
+    const [n] = applyRules(ctx("weekly-digest.no_recipients", { week: "2026-34" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /получателей нет/);
+    assert.match(n!.text, /owner\/manager/);
+    assert.match(n!.text, /неделя 2026-34/);
+  });
 });

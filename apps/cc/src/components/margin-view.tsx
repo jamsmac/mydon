@@ -120,7 +120,7 @@ export function MarginTables({ report }: { report: MarginReport & WithWarnings }
               <div className="row" key={e.serial}>
                 <div className="t">
                   <b>{e.serial}</b>
-                  <small>{`${count(e.qty)} шт · ${amount(e.amount)} · автомат «не в строю» — в маржу не вошёл`}</small>
+                  <small>{`${count(e.qty)} шт · ${amount(e.amount)} · карточки автомата нет или он не в строю — в маржу не вошёл`}</small>
                 </div>
               </div>
             ))}

@@ -166,12 +166,53 @@ describe("Здоровье сбора: тексты для владельца", 
 });
 
 /**
- * Боевой первый прогон (adversarial-prod-data.md §3): снимки остатков OurVend
- * есть только за СЕГОДНЯ, окно паритета их отбрасывает — сверять остатки не по
- * чему. Продажи при этом сошлись идеально (14 пар, 0 расхождений), а общий
- * `ok` уже `false` из-за складской половины.
+ * Вердикт паритета читается ПО СВОИМ счётчикам сравненных пар — `checked` для
+ * продаж, `stockChecked` для остатков (N1), а не по общему `ok` и не разбором
+ * текста `note`. Ниже — все комбинации «сходится/сверять нечего/расходится»
+ * по каждой половине; та же логика, что у бота (`паритетСтрока`).
  */
-describe("Здоровье сбора: паритет, когда сверять нечем", () => {
+describe("Здоровье сбора: паритет по числу сверенных пар (checked/stockChecked, N1)", () => {
+  /**
+   * Боевой первый прогон (adversarial-prod-data.md §3): снимки остатков OurVend
+   * есть только за СЕГОДНЯ, окно паритета их отбрасывает — сверять остатки не по
+   * чему. Продажи при этом сошлись идеально (14 пар, 0 расхождений), а общий
+   * `ok` уже `false` из-за складской половины.
+   */
+  const ПРОДАЖИ_ЧИСТЫ_ОСТАТКИ_НЕТ = {
+    ...ЗДОРОВ,
+    parity: {
+      days: 7,
+      ok: false,
+      mismatches: 0,
+      stockOk: false,
+      // 14 пар продаж сравнивались и сошлись, снимков остатков за период — ноль.
+      checked: 14,
+      stockChecked: 0,
+      note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
+    },
+  };
+
+  it("продажи чисты × остатки не сверяли — «сходятся» зелёным, «снимков нет» нейтрально", () => {
+    render(<OurvendHealthCard health={ПРОДАЖИ_ЧИСТЫ_ОСТАТКИ_НЕТ} />);
+    expect(screen.getByText("продажи сходятся")).toBeVisible();
+    expect(screen.getByText("продажи сходятся").className).not.toMatch(/bad/);
+    const остатки = screen.getByText("остатки: снимков за период нет");
+    expect(остатки).toBeVisible();
+    expect(остатки.className).not.toMatch(/bad/);
+    expect(screen.queryByText("остатки расходятся")).toBeNull();
+    expect(document.querySelectorAll(".pill.bad")).toHaveLength(0);
+  });
+
+  it("причина сказана словами в самой строке", () => {
+    render(<OurvendHealthCard health={ПРОДАЖИ_ЧИСТЫ_ОСТАТКИ_НЕТ} />);
+    expect(screen.getByText(/снимков остатков OurVend за период нет/)).toBeVisible();
+  });
+
+  /**
+   * И продажи, и остатки не сравнивались вовсе (`checked: 0, stockChecked: 0`)
+   * — самый пустой снимок паритета. «Сходится» здесь так же ложно, как
+   * «расходится»: сказать нечего, обе пилюли нейтральны (N2).
+   */
   const НЕЧЕМ = {
     ...ЗДОРОВ,
     parity: {
@@ -179,35 +220,53 @@ describe("Здоровье сбора: паритет, когда сверять
       ok: false,
       mismatches: 0,
       stockOk: false,
-      // Ноль сравненных пар — «сверять нечем», а не «сошлось»/«разошлось».
-      checked: 0, stockChecked: 0,
+      // Ноль сравненных пар с обеих сторон — «сверять нечем», а не «сошлось»/«разошлось».
+      checked: 0,
+      stockChecked: 0,
       note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
     },
   };
 
-  it("остатки — нейтральное «снимков за период нет», а не красное «расходятся»", () => {
+  it("продажи не сверяли × остатки не сверяли — обе половины нейтральны", () => {
     render(<OurvendHealthCard health={НЕЧЕМ} />);
+    expect(screen.getByText("продажи: сверять нечего")).toBeVisible();
     const остатки = screen.getByText("остатки: снимков за период нет");
     expect(остатки).toBeVisible();
     expect(остатки.className).not.toMatch(/bad/);
-    expect(screen.queryByText("остатки расходятся")).toBeNull();
-  });
-
-  it("продажи остаются сошедшимися — «0 расхождений» красным не печатаем", () => {
-    render(<OurvendHealthCard health={НЕЧЕМ} />);
-    expect(screen.getByText("продажи сходятся")).toBeVisible();
-    expect(screen.queryByText(/0 расхожден/)).toBeNull();
     expect(document.querySelectorAll(".pill.bad")).toHaveLength(0);
   });
 
-  it("причина сказана словами в самой строке", () => {
-    render(<OurvendHealthCard health={НЕЧЕМ} />);
-    expect(screen.getByText(/снимков остатков OurVend за период нет/)).toBeVisible();
+  it("продажи не сверяли × остатки чисты — «сверять нечего» только у продаж", () => {
+    render(
+      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { ...ЗДОРОВ.parity, checked: 0, ok: false } }} />,
+    );
+    expect(screen.getByText("продажи: сверять нечего")).toBeVisible();
+    expect(screen.getByText("остатки сходятся")).toBeVisible();
+    expect(document.querySelectorAll(".pill.bad")).toHaveLength(0);
   });
 
-  it("половины независимы: продажи разошлись, остатки не сверяли", () => {
-    render(<OurvendHealthCard health={{ ...НЕЧЕМ, parity: { ...НЕЧЕМ.parity, mismatches: 4 } }} />);
-    expect(screen.getByText("4 расхождения").className).toMatch(/bad/);
-    expect(screen.getByText("остатки: снимков за период нет").className).not.toMatch(/bad/);
+  it("продажи чисты × остатки чисты — обе пилюли зелёные", () => {
+    render(<OurvendHealthCard health={ЗДОРОВ} />);
+    expect(screen.getByText("продажи сходятся")).toBeVisible();
+    expect(screen.getByText("остатки сходятся")).toBeVisible();
+    expect(document.querySelectorAll(".pill.bad")).toHaveLength(0);
+  });
+
+  /**
+   * До фикса N1 панель считала вердикт продаж по общему `ok` и разбору
+   * текста `note`: продажи сверены и сошлись, а остатки реально разошлись
+   * (`stockChecked > 0`, `stockOk: false`) — панель гасила ПРОДАЖНУЮ пилюлю
+   * вместе со складской. Бот на этом же payload даёт «продажи ✅ сходятся» —
+   * панель обязана то же самое.
+   */
+  it("продажи чисты × остатки реально разошлись — красная пилюля только у остатков", () => {
+    render(
+      <OurvendHealthCard
+        health={{ ...ЗДОРОВ, parity: { ...ЗДОРОВ.parity, stockOk: false, note: "снапшот моложе окна" } }}
+      />,
+    );
+    expect(screen.getByText("продажи сходятся")).toBeVisible();
+    expect(screen.getByText("продажи сходятся").className).not.toMatch(/bad/);
+    expect(screen.getByText("остатки расходятся").className).toMatch(/bad/);
   });
 });
