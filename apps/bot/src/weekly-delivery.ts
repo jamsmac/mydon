@@ -29,13 +29,14 @@ import {
  * 3. `ack` — ПОСЛЕ отправки и только если сводка дошла хотя бы в один чат.
  */
 
-/** Что доставке нужно от Core — ровно эти пять вызовов, не весь клиент. */
+/** Что доставке нужно от Core — ровно эти шесть вызовов, не весь клиент. */
 export interface WeeklyCore {
   vendingWeeklyDigest(week?: string): Promise<WeeklyDigest>;
   people(): Promise<PersonRow[]>;
   briefingNotifications(since: Date): Promise<PendingNotifications>;
   claimNotification(key: string): Promise<boolean>;
   ackNotifications(keys: string[]): Promise<{ acked: number }>;
+  recordEvent(type: string, payload?: Record<string, unknown>): Promise<unknown>;
 }
 
 /** Куда писать о сбоях. Инъекция — чтобы тест видел молчаливые отказы. */
@@ -49,6 +50,12 @@ export interface WeeklyDeliveryDeps {
   /** Отправка одного сообщения в чат Telegram. */
   send(chatId: number, text: string): Promise<void>;
   log?: WeeklyLog;
+  /**
+   * Чаты владельца (аллоу-лист бота): им уходит строка о том, что сводку
+   * отправить НЕКОМУ. Единственный канал, который не зависит от карточек
+   * сотрудников — а именно карточки и оказываются виноваты.
+   */
+  ownerChats?: Iterable<number>;
 }
 
 export interface WeeklyDeliveryResult {
@@ -109,12 +116,35 @@ export async function deliverWeeklyDigest(deps: WeeklyDeliveryDeps): Promise<Wee
   if (чаты.size === 0) {
     // Молчать нельзя: пустой список получателей выглядит как исправная
     // рассылка, а на деле означает, что роли в карточках не проставлены и
-    // сводку не получает НИКТО.
+    // сводку не получает НИКТО. `console.warn` в контейнере этого не решает —
+    // его никто не читает (проверено на проде 25.08: ролей owner/manager в
+    // базе нет ни одной), поэтому отказ уезжает СОБЫТИЕМ и строкой владельцу.
+    const текст =
+      `📅 Недельная сводка ${digest.week} не ушла: получателей нет. ` +
+      "Проставь роль owner или manager в карточке сотрудника (и Telegram-чат) — тогда письмо придёт.";
     log.warn(`Недельная сводка ${digest.week}: получателей нет — ни у кого нет роли owner/manager с чатом.`);
+    await deps.core
+      .recordEvent("weekly-digest.no_recipients", { week: digest.week })
+      .catch((err: unknown) => log.error("Событие «получателей нет» не записано:", err));
+    for (const chat of deps.ownerChats ?? []) {
+      await deps.send(chat, текст).catch((err: unknown) => log.error(`Владельцу (${chat}) не отправлено:`, err));
+    }
     return итог;
   }
 
   for (const [chat, люди] of чаты) {
+    // Чат Telegram — ЧИСЛО. `tg_chat_id` заполняет привязка, но поле
+    // текстовое: «@vasya» доехал бы до `sendMessage(NaN)`, отказ выглядел бы
+    // как сбой Telegram, а ключ недели был бы уже потрачен.
+    const id = Number(chat);
+    if (!Number.isSafeInteger(id) || id === 0) {
+      итог.skipped += 1;
+      log.warn(
+        `Недельная сводка ${digest.week}: чат «${chat}» не число ` +
+          `(${люди.map((p) => p.name).join(", ")}) — пропуск, ключ не тратим.`,
+      );
+      continue;
+    }
     // Ключи ВСЕХ карточек чата занимаются до отправки (см. шаг 1 и `byChat`).
     // Заняли хоть один — сводка этому чату на этой неделе ещё не уходила.
     let свежий = false;
@@ -122,11 +152,17 @@ export async function deliverWeeklyDigest(deps: WeeklyDeliveryDeps): Promise<Wee
       if (await deps.core.claimNotification(weeklyDigestKey(digest.week, p.id))) свежий = true;
     }
     if (!свежий) {
+      // Молчаливый пропуск неотличим от «сводки не было»: разбирая жалобу «мне
+      // не пришло», по логу надо видеть, что письмо уже уходило (N5).
       итог.skipped += 1;
+      log.warn(
+        `Недельная сводка ${digest.week}: чат ${chat} (${люди.map((p) => p.name).join(", ")}) — ` +
+          "уже доставлено на этой неделе, повтор не шлём.",
+      );
       continue;
     }
     try {
-      for (const часть of parts) await deps.send(Number(chat), часть);
+      for (const часть of parts) await deps.send(id, часть);
       итог.delivered += 1;
     } catch (err) {
       log.error(`Недельная сводка не доставлена (${люди.map((p) => p.name).join(", ")}):`, err);

@@ -557,6 +557,14 @@ async function main(): Promise<void> {
             send: async (chatId, text) => {
               await tg.sendMessage(chatId, text);
             },
+            // Лог и чаты владельца — обязательны: отказ рассылки виден только
+            // здесь, а `console.warn` контейнера не читает никто (прод 25.08:
+            // ролей owner/manager в базе нет ни у кого, и письмо молчало бы).
+            log: {
+              warn: (m) => console.warn(m),
+              error: (m, err) => console.error(m, err),
+            },
+            ownerChats: allowlist,
           });
         });
         scheduleWeekly();

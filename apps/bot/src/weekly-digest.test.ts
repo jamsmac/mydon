@@ -65,8 +65,9 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     slotsLagMin: 42,
     salesLagH: 3,
     productSaleLagH: 5,
-    parity: { days: 7, ok: true, mismatches: 0, stockOk: true, note: null },
+    parity: { days: 7, ok: true, mismatches: 0, stockOk: true, stockChecked: 2, note: null },
   },
+  warnings: [],
 };
 
 /** Неделя без единой продажи: сбор мог просто стоять — это не «маржа ноль». */
@@ -121,11 +122,30 @@ describe("Получатели и дедуп недельной сводки", (
     assert.deepEqual(weeklyRecipients(люди).map((p) => p.id), ["1", "2"]);
   });
 
-  it("роль решает массив roles, а не текстовое role", () => {
-    // Урок бота: `role` — свободный текст-подсказка владельцу, права живут в
-    // `roles`. Считать по нему значило бы раздать сводку по описке в карточке.
+  it("легаси-роль «владелец» тоже получает сводку (прод, п.1)", () => {
+    // РЕШЕНИЕ ИЗМЕНЕНО адверсариалом по боевым данным 25.08.2026: в `roles` на
+    // проде лежат только storekeeper/technician/operator/collector, а владелец
+    // помечен текстовым `role='владелец'`. Прежнее «роль решает только `roles`»
+    // означало ноль получателей и молчащее письмо каждый понедельник.
+    //
+    // Правами это поле по-прежнему не управляет: цена описки здесь — лишний
+    // получатель сводки, а не лишние права в боте.
     const люди = [
-      { id: "6", name: "Подписан текстом", role: "owner", roles: [], tgChatId: "14", active: "yes" },
+      { id: "6", name: "Владелец текстом", role: "владелец", roles: [], tgChatId: "14", active: "yes" },
+      { id: "7", name: "Английский owner", role: "Owner", roles: [], tgChatId: "15", active: "yes" },
+    ] as unknown as PersonRow[];
+    assert.deepEqual(
+      weeklyRecipients(люди).map((p) => p.id),
+      ["6", "7"],
+    );
+  });
+
+  it("чужой текст в role сводку не открывает", () => {
+    // Сверка ТОЧНАЯ, а не по вхождению: «менеджер по закупу» — кладовщик, и
+    // деньги парка ему в чат уходить не должны.
+    const люди = [
+      { id: "8", name: "Снабженец", role: "менеджер по закупу", roles: [], tgChatId: "16", active: "yes" },
+      { id: "9", name: "Оператор", role: "оператор", roles: ["operator"], tgChatId: "17", active: "yes" },
     ] as unknown as PersonRow[];
     assert.deepEqual(weeklyRecipients(люди), []);
   });
@@ -211,7 +231,7 @@ describe("Текст недельной сводки", () => {
     assert.match(t, /Инвентаризации склада: 12 поз/);
     assert.match(t, /Мёртвый сток/);
     assert.match(t, /15 000 → 12 000/); // витринное изменение цены
-    assert.match(t, /Сбор OurVend/);
+    assert.match(t, /Здоровье сбора OurVend/);
   });
 
   it("сигналы urgency=weekly подмешиваются, ключи — только показанных", () => {
@@ -261,7 +281,16 @@ describe("Текст недельной сводки", () => {
         slotsLagMin: null,
         salesLagH: null,
         productSaleLagH: null,
-        parity: { days: 7, ok: false, mismatches: 0, stockOk: false, note: null },
+        parity: {
+          days: 7,
+          ok: false,
+          mismatches: 0,
+          stockOk: false,
+          stockChecked: 0,
+          note:
+            "собственный снапшот продаж ещё пуст — сверять нечего (агент ещё не отработал?); " +
+            "остатки: снимков остатков OurVend за период нет — сверять не по чему",
+        },
       },
     };
     const t = formatWeeklyDigest(мёртвыйСбор, []).parts.join("\n");
@@ -274,7 +303,54 @@ describe("Текст недельной сводки", () => {
     const t = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
     assert.match(t, /Прогоны \(1\): успешных 1 · частичных 0 · с отказом 0/);
     assert.match(t, /Свежесть: слоты — 42 мин · продажи — 3 ч/);
-    assert.match(t, /Паритет за 7 дн\.: ✅ сходится/);
+    assert.match(t, /Паритет за 7 дн\.: продажи ✅ сходятся · остатки ✅/);
+  });
+
+  it("деньги недели — с «сум» в каждой строке (U1–U3)", () => {
+    const t = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
+    assert.match(t, /Итого: выручка 2 157 000 сум · маржа 607 595 сум/);
+    assert.match(t, /Olma Администрация: выручка 1 487 000 сум · маржа 421 310 сум/);
+  });
+
+  it("первой недели без прошлой — одна фраза, а не две подряд (U7)", () => {
+    // «+1 500 000 сум (прошлая неделя в нуле) к прошлой неделе (2026-33)» —
+    // «прошлая неделя» дважды в одной строке.
+    const перваяНеделя: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      delta: {
+        qty: 599,
+        revenue: 2_157_000,
+        margin: 607_595,
+        qtyPct: null,
+        revenuePct: null,
+        marginPct: null,
+      },
+    };
+    const t = formatWeeklyDigest(перваяНеделя, []).parts.join("\n");
+    assert.match(t, /к прошлой неделе \(2026-33, была в нуле\)/);
+    assert.equal(t.match(/прошл/gi)?.length, 1);
+  });
+
+  it("подсказка недели показывает, какие это числа (U12)", () => {
+    assert.match(WEEKLY_WEEK_HINT, /2026-34/);
+    assert.match(WEEKLY_WEEK_HINT, /17[–-]23/);
+  });
+
+  it("раздел здоровья назван так же, как в «сверке» и в панели (U15)", () => {
+    const t = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
+    assert.match(t, /🩺 Здоровье сбора OurVend/);
+  });
+
+  it("недосчитанные секции сводки названы, а не потеряны молча", () => {
+    // Секция деградирует (Core ловит её падение в `warnings`), и письмо обязано
+    // сказать, чего в нём нет: молчаливая дыра читается как «данных нет».
+    const сЗамечанием: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      warnings: [{ code: "no_sales", message: "Здоровье сбора не получено — раздел неполон." }],
+    };
+    const t = formatWeeklyDigest(сЗамечанием, []).parts.join("\n");
+    assert.match(t, /Посчитано не всё:/);
+    assert.match(t, /Здоровье сбора не получено/);
   });
 
   it("пустая неделя: сказано «продаж за неделю нет», а не нули", () => {
@@ -282,7 +358,7 @@ describe("Текст недельной сводки", () => {
     assert.match(parts[0]!, /продаж за неделю нет/);
     // Здоровье сбора обязано остаться: пустая неделя чаще всего означает
     // сломанный сбор, и молчать об этом хуже, чем показать нули.
-    assert.match(parts.join("\n"), /Сбор OurVend/);
+    assert.match(parts.join("\n"), /Здоровье сбора OurVend/);
     assert.doesNotMatch(parts[0]!, /маржа 0 \(0 %\)/);
   });
 });

@@ -26,8 +26,9 @@ const НЕДЕЛЯ: WeeklyDigest = {
     slotsLagMin: null,
     salesLagH: null,
     productSaleLagH: null,
-    parity: { days: 7, ok: false, mismatches: 0, stockOk: false, note: null },
+    parity: { days: 7, ok: false, mismatches: 0, stockOk: false, stockChecked: 0, note: null },
   },
+  warnings: [],
 };
 
 const ЛЮДИ = [
@@ -63,6 +64,10 @@ function стенд(opts: { people?: PersonRow[]; занято?: Set<string>; ч
     ackNotifications: async (keys: string[]) => {
       журнал.push(`ack:${keys.join(",")}`);
       return { acked: keys.length };
+    },
+    recordEvent: async (type: string) => {
+      журнал.push(`event:${type}`);
+      return {};
     },
   };
   const log: WeeklyLog = {
@@ -166,6 +171,60 @@ describe("Доставка недельной сводки (R-P5b-7)", () => {
     assert.equal(итог.delivered, 2);
     assert.equal(итог.acked, 0);
     assert.ok(s.предупреждения.some((m) => /сигналы правил не получены/i.test(m)));
+  });
+
+  it("роль владельца в легаси-поле — тоже получатель (прод, п.1)", async () => {
+    // На проде `roles` содержит только storekeeper/technician/operator/collector,
+    // а владелец помечен текстовым `role='владелец'`. Требовать только `roles`
+    // значило бы не отправить сводку НИКОМУ и узнать об этом никогда.
+    const люди = [
+      { id: "p1", name: "Владелец", role: "владелец", roles: ["collector"], tgChatId: "10", active: "yes" },
+      { id: "p2", name: "Бывший менеджер", role: "менеджер", roles: [], tgChatId: "11", active: "no" },
+    ] as unknown as PersonRow[];
+    const s = стенд({ people: люди });
+    const итог = await deliverWeeklyDigest({ core: s.core, send: s.send, log: s.log });
+    assert.equal(итог.chats, 1);
+    assert.ok(s.журнал.includes("send:10"));
+    // Уволенного легаси-роль не воскрешает.
+    assert.ok(!s.журнал.includes("send:11"));
+  });
+
+  it("получателей нет — событие в Core и строка владельцу, а не только консоль (прод, п.1)", async () => {
+    const s = стенд({ people: [ЛЮДИ[2]!] });
+    const итог = await deliverWeeklyDigest({
+      core: s.core,
+      send: s.send,
+      log: s.log,
+      ownerChats: [777],
+    });
+    assert.equal(итог.chats, 0);
+    assert.ok(s.журнал.includes("event:weekly-digest.no_recipients"));
+    assert.ok(s.журнал.includes("send:777"), "владелец обязан узнать, что сводка не ушла");
+    assert.ok(s.предупреждения.some((m) => /получателей нет/.test(m)));
+  });
+
+  it("ключ занят — говорим «уже доставлено», а не молчим (N5)", async () => {
+    const занято = new Set<string>();
+    const первый = стенд({ занято });
+    await deliverWeeklyDigest({ core: первый.core, send: первый.send, log: первый.log });
+    const второй = стенд({ занято });
+    const итог = await deliverWeeklyDigest({ core: второй.core, send: второй.send, log: второй.log });
+    assert.equal(итог.skipped, 2);
+    assert.ok(второй.предупреждения.some((m) => /уже доставлен/i.test(m)));
+  });
+
+  it("нечисловой чат в карточке — пропуск с предупреждением, а не sendMessage(NaN) (N5)", async () => {
+    const люди = [
+      { id: "p1", name: "Владелец", roles: ["owner"], tgChatId: "@vasya", active: "yes" },
+      { id: "p2", name: "Менеджер", roles: ["manager"], tgChatId: "11", active: "yes" },
+    ] as unknown as PersonRow[];
+    const s = стенд({ people: люди });
+    const итог = await deliverWeeklyDigest({ core: s.core, send: s.send, log: s.log });
+    assert.equal(итог.delivered, 1);
+    assert.ok(!s.журнал.some((c) => c === "send:NaN"));
+    assert.ok(s.предупреждения.some((m) => /@vasya/.test(m)));
+    // Ключ на нечисловой чат не тратим: карточку починят — сводка уйдёт.
+    assert.ok(!s.занято.has("weekly-digest:2026-34:p1"));
   });
 
   it("карточка без чата в группировку не попадает", () => {

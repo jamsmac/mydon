@@ -684,7 +684,7 @@ describe("Аналитика снека: путь владельца до Core (
           slotsLagMin: null,
           salesLagH: null,
           productSaleLagH: null,
-          parity: { days: 7, ok: false, mismatches: 3, stockOk: false, note: null },
+          parity: { days: 7, ok: false, mismatches: 3, stockOk: false, stockChecked: 0, note: null },
         };
       },
     } as unknown as HandlerDeps["core"];
@@ -790,7 +790,7 @@ describe("Аналитика снека: путь владельца до Core (
       slotsLagMin: null,
       salesLagH: null,
       productSaleLagH: null,
-      parity: { days: 7, ok: true, mismatches: 0, stockOk: true, note: null },
+      parity: { days: 7, ok: true, mismatches: 0, stockOk: true, stockChecked: 2, note: null },
     },
   };
 

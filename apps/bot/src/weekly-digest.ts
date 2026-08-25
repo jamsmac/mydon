@@ -9,9 +9,11 @@ import {
   момент,
   мёртваяСтрока,
   паритетСтрока,
+  предупреждения,
   прогоныСтрока,
   свежестьСтрока,
   состояниеСбора,
+  сум,
   сущ,
   товарСтрока,
 } from "./analytics-brief";
@@ -53,6 +55,34 @@ export const WEEKLY_ROLES: readonly StaffRole[] = ["owner", "manager"];
 
 /** То же множество для проверки: `roles` из Core приходит свободными строками. */
 const РОЛИ_РАССЫЛКИ: ReadonlySet<string> = new Set<string>(WEEKLY_ROLES);
+
+/**
+ * Легаси-поле `person.role` — свободный текст, которым владельца пометили ДО
+ * появления массива `roles`.
+ *
+ * Читаем его как запасной ключ рассылки, потому что на проде (25.08.2026) в
+ * `roles` лежат только storekeeper/technician/operator/collector, а владелец
+ * помечен ровно так: `role='владелец'`. Требовать один `roles` значило бы не
+ * отправить понедельничную сводку НИКОМУ — и узнать об этом никогда.
+ *
+ * Правами это поле по-прежнему НЕ управляет (меню и команды смотрят только в
+ * `roles`): здесь оно решает единственный вопрос «кому показать деньги парка»,
+ * и цена описки в нём — лишний получатель сводки, а не лишние права.
+ */
+const ЛЕГАСИ_РОЛИ: ReadonlyMap<string, StaffRole> = new Map([
+  ["владелец", "owner"],
+  ["собственник", "owner"],
+  ["owner", "owner"],
+  ["менеджер", "manager"],
+  ["manager", "manager"],
+]);
+
+/** Роль рассылки у карточки: массив `roles` или легаси-текст `role`. */
+function ролиРассылки(p: PersonRow): boolean {
+  if ((p.roles ?? []).some((r) => РОЛИ_РАССЫЛКИ.has(r))) return true;
+  const легаси = (p.role ?? "").trim().toLowerCase();
+  return легаси !== "" && ЛЕГАСИ_РОЛИ.has(легаси);
+}
 
 /**
  * Как далеко назад смотрим за сигналами `urgency:"weekly"`.
@@ -123,8 +153,8 @@ export function parseWeekArg(text: string): WeekArg {
 
 /** Подсказка, когда неделя во фразе не разобралась. */
 export const WEEKLY_WEEK_HINT =
-  "Укажи неделю как 2026-34 — год и номер ISO-недели, а не дату: «итоги недели 2026-34». " +
-  "Без ключа покажу прошлую неделю.";
+  "Укажи неделю как 2026-34 — год и номер ISO-недели, а не дату: «итоги недели 2026-34» — " +
+  "это 17–23.08.2026. Без ключа покажу прошлую неделю.";
 
 // ── Получатели и дедуп ──────────────────────────────────────────────────────
 
@@ -139,12 +169,7 @@ export const WEEKLY_WEEK_HINT =
  * реестре ради истории, но выручка в чат бывшему сотруднику уходить не должна.
  */
 export function weeklyRecipients(people: readonly PersonRow[]): PersonRow[] {
-  return people.filter(
-    (p) =>
-      p.active === "yes" &&
-      (p.tgChatId ?? "").trim() !== "" &&
-      (p.roles ?? []).some((r) => РОЛИ_РАССЫЛКИ.has(r)),
-  );
+  return people.filter((p) => p.active === "yes" && (p.tgChatId ?? "").trim() !== "" && ролиРассылки(p));
 }
 
 /**
@@ -177,15 +202,21 @@ export interface WeeklyMessage {
 function часть(label: string, abs: number, pct: number | null, unit: string): string {
   if (pct !== null) return `${label} ${ЗНАК(pct)}`;
   if (abs === 0) return `${label} без изменений`;
-  return `${label} ${abs > 0 ? "+" : "−"}${RU(Math.abs(abs))}${unit} (прошлая неделя в нуле)`;
+  // Про пустую базу говорит ОДНА фраза — у ссылки на прошлую неделю (см.
+  // `динамика`). Здесь её повтор давал «прошлая неделя» дважды подряд в одной
+  // строке, а на трёх частях — трижды.
+  return `${label} ${abs > 0 ? "+" : "−"}${RU(Math.abs(abs))}${unit}`;
 }
 
 /** Строка динамики к прошлой неделе. `null` — сравнивать не с чем вовсе. */
 function динамика(d: WeekDelta, previousWeek: string): string | null {
   const пусто = d.qty === 0 && d.revenue === 0 && d.margin === 0;
   if (пусто && d.revenuePct === null) return null;
+  // Процента нет — значит прошлая неделя была в нуле (см. `weekCompare`): это
+  // свойство БАЗЫ, и сказать о нём надо там, где база названа.
+  const база = d.revenuePct === null ? `${previousWeek}, была в нуле` : previousWeek;
   return [
-    `${часть("Выручка:", d.revenue, d.revenuePct, " сум")} к прошлой неделе (${previousWeek})`,
+    `${часть("Выручка:", d.revenue, d.revenuePct, " сум")} к прошлой неделе (${база})`,
     часть("маржа", d.margin, d.marginPct, " сум"),
     часть("штуки", d.qty, d.qtyPct, " шт"),
   ].join(" · ");
@@ -193,7 +224,7 @@ function динамика(d: WeekDelta, previousWeek: string): string | null {
 
 /** Одна строка автомата недели: деньги, маржа, штуки. */
 function машина(m: WeeklyDigest["machines"][number]): string {
-  return `• ${m.name}: выручка ${RU(m.revenue)} · маржа ${RU(m.margin)} (${PCT(m.pct)}) · ${RU(m.qty)} шт`;
+  return `• ${m.name}: выручка ${сум(m.revenue)} · маржа ${сум(m.margin)} (${PCT(m.pct)}) · ${RU(m.qty)} шт`;
 }
 
 /**
@@ -209,7 +240,7 @@ function здоровье(h: OurvendHealth): string[] {
   const прогоны = прогоныСтрока(h.runs);
   return [
     "",
-    `🩺 Сбор OurVend: ${состояниеСбора(h)} · последний успех ${момент(h.lastSuccessAt)}`,
+    `🩺 Здоровье сбора OurVend: ${состояниеСбора(h)} · последний успех ${момент(h.lastSuccessAt)}`,
     ...(прогоны ? [прогоны] : []),
     свежестьСтрока(h),
     паритетСтрока(h.parity),
@@ -237,7 +268,7 @@ function разделы(d: WeeklyDigest): string[] {
     lines.push("Считать нечего — продаж за неделю нет.");
   } else {
     lines.push(
-      `Итого: выручка ${RU(t.revenue)} сум · маржа ${RU(t.margin)} (${PCT(t.pct)}) · ${RU(t.qty)} шт`,
+      `Итого: выручка ${сум(t.revenue)} · маржа ${сум(t.margin)} (${PCT(t.pct)}) · ${RU(t.qty)} шт`,
     );
     if (t.unknownUnits > 0) {
       lines.push(`⚠️ ${RU(t.unknownUnits)} шт без себестоимости — на их выручку маржа завышена`);
@@ -280,7 +311,7 @@ function разделы(d: WeeklyDigest): string[] {
     i.orders === 0
       ? "Приходов за неделю не было."
       : `Приходы: ${RU(i.orders)} ${сущ(i.orders, "накладная", "накладные", "накладных")}, ` +
-        `${RU(i.units)} ед на ${RU(i.amount)} сум`,
+        `${RU(i.units)} ед на ${сум(i.amount)}`,
   );
   const s = d.stocktakes;
   lines.push(
@@ -290,7 +321,7 @@ function разделы(d: WeeklyDigest): string[] {
   );
 
   if (d.deadStock.rows.length > 0) {
-    lines.push("", `🪦 Мёртвый сток — всего ≈ ${RU(d.deadStock.totalValue)} сум, дороже прочих:`);
+    lines.push("", `🪦 Мёртвый сток — всего ≈ ${сум(d.deadStock.totalValue)}, дороже прочих:`);
     for (const row of d.deadStock.rows.slice(0, DEAD_SHOWN)) lines.push(мёртваяСтрока(row));
     if (d.deadStock.rows.length > DEAD_SHOWN) {
       lines.push(
@@ -309,6 +340,9 @@ function разделы(d: WeeklyDigest): string[] {
   }
 
   lines.push(...здоровье(d.health));
+  // Секция могла деградировать (Core ловит её падение и пишет причину в
+  // `warnings`): молчаливая дыра в письме читается как «данных нет».
+  lines.push(...предупреждения(d.warnings));
   return lines;
 }
 
