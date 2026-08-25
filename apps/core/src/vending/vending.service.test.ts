@@ -14,13 +14,17 @@ import {
   vendingAlias,
   vendingProduct,
   vendingStock,
+  vendingStockCount,
 } from "@mydon/db";
-import { TZ } from "@mydon/shared";
+import { tashkentDay, TZ } from "@mydon/shared";
 import {
   INSERT_CHUNK,
   MAX_POSITION_PRICE,
   MAX_SLOTS_PER_MACHINE,
   parseOrderPositions,
+  STOCK_COUNTS_DAYS_DEFAULT,
+  STOCK_COUNTS_DAYS_MAX,
+  STOCK_COUNTS_MAX,
   VendingService,
 } from "./vending.service";
 
@@ -185,6 +189,8 @@ function writeDb(
   const pruneRows: { id: string }[] = [];
   /** Ветка конфликта: что именно апсерт пишет поверх существующей строки. */
   const conflicts: { table: string; set: Record<string, unknown> }[] = [];
+  /** Ветка «конфликт — молча мимо»: по какому ключу история отбивает повтор. */
+  const dedup: { table: string; target: unknown; where: unknown }[] = [];
   /** Заставить уборку упасть — проверяем, что снимок при этом уцелел. */
   let pruneFails = false;
   const failPrune = () => {
@@ -207,6 +213,10 @@ function writeDb(
         return {
           onConflictDoUpdate: (cfg: { set?: Record<string, unknown> }) => {
             conflicts.push({ table: name, set: cfg.set ?? {} });
+            return Promise.resolve();
+          },
+          onConflictDoNothing: (cfg: { target?: unknown; where?: unknown }) => {
+            dedup.push({ table: name, target: cfg.target, where: cfg.where });
             return Promise.resolve();
           },
         };
@@ -245,7 +255,7 @@ function writeDb(
     }),
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
-  return { db, inserts, conflicts, pruneRows, failPrune };
+  return { db, inserts, conflicts, dedup, pruneRows, failPrune };
 }
 /**
  * Текст SQL-фрагмента drizzle, РЕКУРСИВНО по вложенным фрагментам.
@@ -289,6 +299,11 @@ function строкиВставок(inserts: { table: string; values: unknown }[
 function tableName(t: unknown): string {
   // Журнал событий узнаём по личности: эвристика по ключам его не различает.
   if (t === event) return "event";
+  // Склад и его история отличаются друг от друга только набором колонок, и
+  // эвристика ниже свела бы обе к «machine_slot»: проверка «строка истории на
+  // каждую применённую позицию» тогда считала бы вперемешку остаток и историю.
+  if (t === vendingStock) return "vending_stock";
+  if (t === vendingStockCount) return "vending_stock_count";
   // drizzle-таблица знает своё имя; для стаба достаточно эвристики по ключам.
   const keys = Object.keys((t ?? {}) as Record<string, unknown>);
   return keys.includes("capturedAt") && !keys.includes("syncedAt") ? "slot_snapshot" : "machine_slot";
@@ -1243,8 +1258,8 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     });
     assert.deepEqual(res, { items: 2, adjustments: [] }); // счётчик по входу, расхождений нет (склад пуст)
     // Записана только валидная позиция.
-    assert.equal(inserts.length, 1);
-    const v = строкиВставок(inserts)[0]! as { productName: string; quantity: number };
+    assert.equal(строкиТаблицы(inserts, "vending_stock").length, 1);
+    const v = строкиТаблицы(inserts, "vending_stock")[0]! as { productName: string; quantity: number };
     assert.equal(v.productName, "Montella");
     assert.equal(v.quantity, 24);
   });
@@ -1256,7 +1271,7 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     );
     const svc = new VendingService(db);
     await svc.ingestStock({ items: [{ product: "montella", quantity: 7 }] });
-    const v = строкиВставок(inserts)[0]! as { productName: string };
+    const v = строкиТаблицы(inserts, "vending_stock")[0]! as { productName: string };
     assert.equal(v.productName, "Montella Вода минеральная 330ml");
   });
 
@@ -1264,7 +1279,7 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     const { db, inserts } = writeDb([], []);
     const svc = new VendingService(db);
     await svc.ingestStock({ items: [{ product: "Новый Товар", quantity: 3 }] });
-    const v = строкиВставок(inserts)[0]! as { productName: string };
+    const v = строкиТаблицы(inserts, "vending_stock")[0]! as { productName: string };
     assert.equal(v.productName, "Новый Товар");
   });
 
@@ -1346,6 +1361,9 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
 
     assert.deepEqual(res.adjustments, []); // мнимого расхождения по устаревшим данным нет
     assert.equal(inserts.length, 0); // и более новый остаток не перезаписан старым
+    // …и следа в истории тоже нет: пересчёт, который остаток не изменил,
+    // журнал показывать не должен (R-P8a-3).
+    assert.equal(строкиТаблицы(inserts, "vending_stock_count").length, 0);
   });
 
   it("первый ввод по товару (в складе строки ещё не было) — не расхождение", async () => {
@@ -1393,7 +1411,7 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     assert.equal(a.value, 5 * 2090);
 
     // И записан склад — тоже РОВНО одной строкой на канон (не дважды).
-    const stockInserts = строкиВставок(inserts).filter((v) => (v as { productName?: string }).productName === canonical);
+    const stockInserts = строкиТаблицы(inserts, "vending_stock");
     assert.equal(stockInserts.length, 1);
     assert.equal((stockInserts[0]! as { quantity: number }).quantity, 12);
     // …со ссылкой на карточку прайса: строка склада ключуется именем, и без
@@ -1406,6 +1424,243 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     await new VendingService(db).ingestStock({ items: [{ product: "Загадка", quantity: 3 }] });
     const набор = conflicts.find((c) => c.set.quantity !== undefined)!.set;
     assert.match(текстSQL(набор.productId), /coalesce\(excluded\.product_id/);
+  });
+});
+
+/**
+ * История инвентаризаций склада (R-P8a-3): `vending_stock` перезаписной, и до
+ * этого среза вчерашний остаток не восстанавливался ниоткуда. Теперь каждый
+ * пересчёт оставляет строку — история копится сама, без отдельной команды.
+ */
+describe("Вендинг Core: история пересчётов склада (R-P8a-3)", () => {
+  const ПРАЙС = [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: "2090.00" }];
+  const АЛИАСЫ = [{ productId: "p1", alias: "Montella pet 0.33" }];
+
+  it("пересчёт склада пишет строку истории на каждую применённую позицию", async () => {
+    const { db, inserts } = writeDb(АЛИАСЫ, ПРАЙС);
+    await new VendingService(db).ingestStock(
+      { countedAt: "2026-08-25T09:34:00+05:00", items: [{ product: "Montella pet 0.33", quantity: 7 }] },
+      "owner",
+    );
+
+    const строки = строкиТаблицы(inserts, "vending_stock_count");
+    assert.equal(строки.length, 1);
+    const строка = строки[0]! as Record<string, unknown>;
+    assert.deepEqual(
+      [строка.source, строка.dt, строка.qty, строка.extId, строка.note, строка.personId],
+      ["own", "2026-08-25", "7", null, "owner", null],
+    );
+    // Имя — канон (как в складе), ссылка на карточку — тот же резолвер: без
+    // неё история переживёт переименование товара строкой-сиротой.
+    assert.deepEqual([строка.productName, строка.productId], ["Montella Вода минеральная 330ml", "p1"]);
+    assert.equal((строка.countedAt as Date).toISOString(), "2026-08-25T04:34:00.000Z");
+  });
+
+  it("сутки истории — ташкентские: пересчёт в 00:30 по Ташкенту не уезжает во вчера", () => {
+    // 2026-08-24T19:30:00Z — это уже 25.08 00:30 в Ташкенте. UTC-сутки дали бы
+    // «24.08», и ночной пересчёт лёг бы в чужой день (урок донора VendCash).
+    assert.equal(tashkentDay(new Date("2026-08-24T19:30:00.000Z")), "2026-08-25");
+  });
+
+  it("пересчёт «ничего не изменилось» ВСЁ РАВНО оставляет строку истории: это счёт, а не правка", async () => {
+    // Расхождения нет — событие `vending.stock.recounted` не пишется. Но факт
+    // «в этот день склад считали, и вышло 19» ценен сам по себе: без него
+    // история показывала бы только дни, когда что-то не сошлось.
+    const stock = [{ productName: "Sprite 250ml", quantity: 19 }];
+    const { db, inserts } = writeDb([], [], stock);
+    const res = await new VendingService(db).ingestStock({ items: [{ product: "Sprite 250ml", quantity: 19 }] });
+    assert.deepEqual(res.adjustments, []);
+    assert.equal(строкиТаблицы(inserts, "vending_stock_count").length, 1);
+  });
+
+  it("опоздавший пересчёт не оставляет следа в истории: он не изменил и остаток", async () => {
+    const stock = [
+      { productName: "Montella Вода минеральная 330ml", quantity: 54, countedAt: new Date("2026-08-25T10:00:00+05:00") },
+    ];
+    const { db, inserts } = writeDb(АЛИАСЫ, ПРАЙС, stock);
+    await new VendingService(db).ingestStock({
+      countedAt: "2026-08-25T09:00:00+05:00",
+      items: [{ product: "Montella pet 0.33", quantity: 1 }],
+    });
+    assert.equal(строкиТаблицы(inserts, "vending_stock_count").length, 0);
+  });
+
+  it("повтор того же снимка отбивается ключом (source, counted_at, product_name), а не вторым insert", async () => {
+    // Реальный частичный уникальный индекс (0069) проверяет дымовой прогон на
+    // Postgres; заглушка SQL не исполняет — здесь видно только НАМЕРЕНИЕ.
+    const { db, dedup } = writeDb(АЛИАСЫ, ПРАЙС);
+    await new VendingService(db).ingestStock({ items: [{ product: "Montella pet 0.33", quantity: 7 }] });
+    const ключ = dedup.find((d) => d.table === "vending_stock_count");
+    assert.ok(ключ, "история обязана писаться через onConflictDoNothing");
+    assert.deepEqual(
+      (ключ.target as { name: string }[]).map((c) => c.name),
+      ["source", "counted_at", "product_name"],
+    );
+    // Предикат частичного индекса сужает ключ до своих строк: у импорта свой
+    // ключ идемпотентности — (source, ext_id).
+    assert.match(текстSQL(ключ.where), /'own'/);
+  });
+
+  it("пересчёт от имени сотрудника проставляет person_id (импорт и безымянный ввод — NULL)", async () => {
+    const { db, inserts } = writeDb(АЛИАСЫ, ПРАЙС);
+    await new VendingService(db).ingestStock(
+      { personId: "11111111-1111-1111-1111-111111111111", items: [{ product: "Montella pet 0.33", quantity: 7 }] },
+      "bot:operator",
+    );
+    const строка = строкиТаблицы(inserts, "vending_stock_count")[0]! as Record<string, unknown>;
+    assert.equal(строка.personId, "11111111-1111-1111-1111-111111111111");
+  });
+
+  it("два алиаса одного товара в одном листе — одна строка истории, как и один остаток", async () => {
+    const { db, inserts } = writeDb([...АЛИАСЫ, { productId: "p1", alias: "montella zero 0.33" }], ПРАЙС);
+    await new VendingService(db).ingestStock({
+      items: [
+        { product: "Montella pet 0.33", quantity: 10 },
+        { product: "montella zero 0.33", quantity: 12 },
+      ],
+    });
+    const строки = строкиТаблицы(inserts, "vending_stock_count");
+    assert.equal(строки.length, 1);
+    assert.equal((строки[0]! as { qty: string }).qty, "12");
+  });
+});
+
+/**
+ * Чтение истории: `GET /vending/stock-counts` (R-P8a-3). Стаб СОРТИРУЕТ и
+ * РЕЖЕТ по-настоящему — иначе «свежее сверху» и потолок строк проверялись бы
+ * порядком фикстуры, а не кодом сервиса.
+ */
+describe("Вендинг Core: чтение истории склада (R-P8a-3)", () => {
+  type ИсторияRow = { dt: string; productName: string; qty: string; source: string; countedAt: Date };
+
+  const строка = (dt: string, productName: string, qty: number, source = "own"): ИсторияRow => ({
+    dt,
+    productName,
+    qty: qty.toFixed(2),
+    source,
+    countedAt: new Date(`${dt}T09:00:00+05:00`),
+  });
+
+  /** Значения-параметры из условия drizzle — тот же приём, что в стабе здоровья сбора. */
+  function параметры(cond: unknown): string[] {
+    const out: string[] = [];
+    const walk = (n: unknown): void => {
+      if (!n || typeof n !== "object") return;
+      if (Array.isArray(n)) {
+        for (const x of n) walk(x);
+        return;
+      }
+      const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
+      if (Array.isArray(chunks)) {
+        for (const c of chunks) walk(c);
+        return;
+      }
+      const v = (n as { value?: unknown }).value;
+      if (typeof v === "string") out.push(v);
+    };
+    walk(cond);
+    return out;
+  }
+
+  function historyDb(rows: ИсторияRow[], aliases: unknown[] = [], products: unknown[] = []) {
+    const db = {
+      select: () => ({
+        from: (t: unknown) => {
+          if (t !== vendingStockCount) {
+            const r = Promise.resolve(t === vendingAlias ? aliases : t === vendingProduct ? products : []);
+            return { where: () => r, then: r.then.bind(r) };
+          }
+          let текущие = rows;
+          const chain: Record<string, unknown> = {};
+          chain.where = (cond?: unknown) => {
+            const п = параметры(cond);
+            const дата = п.find((v) => /^\d{4}-\d{2}-\d{2}$/.test(v));
+            const имя = п.find((v) => !/^\d{4}-\d{2}-\d{2}$/.test(v));
+            текущие = текущие.filter((r) => (дата === undefined || r.dt >= дата) && (имя === undefined || r.productName === имя));
+            return chain;
+          };
+          chain.orderBy = () => {
+            текущие = [...текущие].sort(
+              (a, b) => b.countedAt.getTime() - a.countedAt.getTime() || a.productName.localeCompare(b.productName, "ru"),
+            );
+            return chain;
+          };
+          chain.limit = async (n: number) => текущие.slice(0, n);
+          return chain;
+        },
+      }),
+    } as never;
+    return db;
+  }
+
+  const СЕЙЧАС = new Date("2026-08-25T13:00:00+05:00");
+
+  it("окно, порядок «свежее сверху» и форма строки", async () => {
+    const db = historyDb([
+      строка("2026-08-25", "Sprite 250ml", 19),
+      строка("2026-08-25", "Montella Вода минеральная 330ml", 7),
+      строка("2026-01-01", "Montella Вода минеральная 330ml", 3, "stock-import"),
+    ]);
+    const о = await new VendingService(db).stockCounts(90, undefined, СЕЙЧАС);
+
+    assert.equal(о.days, 90);
+    assert.equal(о.product, null);
+    assert.deepEqual(о.rows.map((r) => r.product), ["Montella Вода минеральная 330ml", "Sprite 250ml"]);
+    assert.deepEqual(о.rows[0], {
+      dt: "2026-08-25",
+      product: "Montella Вода минеральная 330ml",
+      qty: 7,
+      source: "own",
+      countedAt: "2026-08-25T04:00:00.000Z",
+    });
+    assert.deepEqual(о.warnings, []);
+  });
+
+  it("окно шире — доезжает и импортированное прошлое, `source` его отличает", async () => {
+    const db = historyDb([строка("2026-01-01", "Montella Вода минеральная 330ml", 3, "stock-import")]);
+    const о = await new VendingService(db).stockCounts(365, undefined, СЕЙЧАС);
+    assert.deepEqual(о.rows.map((r) => r.source), ["stock-import"]);
+  });
+
+  it("фильтр по товару — через канон: алиас находит строки, записанные каноном", async () => {
+    const db = historyDb(
+      [строка("2026-08-25", "Montella Вода минеральная 330ml", 7), строка("2026-08-25", "Sprite 250ml", 19)],
+      [{ productId: "p1", alias: "Montella pet 0.33" }],
+      [{ id: "p1", name: "Montella Вода минеральная 330ml" }],
+    );
+    const о = await new VendingService(db).stockCounts(90, "montella pet 0.33", СЕЙЧАС);
+    assert.equal(о.product, "Montella Вода минеральная 330ml");
+    assert.deepEqual(о.rows.map((r) => r.product), ["Montella Вода минеральная 330ml"]);
+  });
+
+  it("по заданному товару истории нет — предупреждение, а не молчаливый пустой ответ", async () => {
+    const db = historyDb([строка("2026-08-25", "Sprite 250ml", 19)]);
+    const о = await new VendingService(db).stockCounts(90, "Никогда Не Считали", СЕЙЧАС);
+    assert.deepEqual(о.rows, []);
+    assert.deepEqual(о.warnings.map((w) => w.code), ["stock_missing"]);
+    assert.match(о.warnings[0]!.message, /Никогда Не Считали/);
+  });
+
+  it("пустая история БЕЗ фильтра предупреждения не даёт: считать ещё не начинали — это не пропажа", async () => {
+    const о = await new VendingService(historyDb([])).stockCounts(90, undefined, СЕЙЧАС);
+    assert.deepEqual([о.rows.length, о.warnings.length], [0, 0]);
+  });
+
+  it("потолок строк: хвост окна показан, обрезка названа словами", async () => {
+    const rows = Array.from({ length: STOCK_COUNTS_MAX + 5 }, (_, i) =>
+      строка("2026-08-25", `Товар ${String(i).padStart(4, "0")}`, i),
+    );
+    const о = await new VendingService(historyDb(rows)).stockCounts(90, undefined, СЕЙЧАС);
+    assert.equal(о.rows.length, STOCK_COUNTS_MAX);
+    assert.deepEqual(о.warnings.map((w) => w.code), ["history_capped"]);
+  });
+
+  it("окно зажимается: мусорные и запредельные дни не доезжают до выборки", async () => {
+    const db = historyDb([строка("2026-08-25", "Sprite 250ml", 19)]);
+    const svc = new VendingService(db);
+    assert.equal((await svc.stockCounts(0, undefined, СЕЙЧАС)).days, STOCK_COUNTS_DAYS_DEFAULT);
+    assert.equal((await svc.stockCounts(100_000, undefined, СЕЙЧАС)).days, STOCK_COUNTS_DAYS_MAX);
+    assert.equal((await svc.stockCounts(Number.NaN, undefined, СЕЙЧАС)).days, STOCK_COUNTS_DAYS_DEFAULT);
   });
 });
 
@@ -1771,7 +2026,7 @@ describe("Вендинг Core: приём пишет пачками, а не п�
     assert.equal(res.machines, 1);
   });
 
-  it("склад тоже пачкой: две позиции — один запрос", async () => {
+  it("склад тоже пачкой: две позиции — один запрос на таблицу", async () => {
     const { db, inserts } = writeDb();
     await new VendingService(db).ingestStock({
       items: [
@@ -1779,8 +2034,11 @@ describe("Вендинг Core: приём пишет пачками, а не п�
         { product: "Twix", quantity: 12 },
       ],
     });
-    assert.equal(inserts.length, 1, "две позиции — один запрос");
-    assert.equal(строкиВставок(inserts).length, 2);
+    // Два запроса ВСЕГО: остаток и история — по одному на таблицу, а не по
+    // одному на позицию.
+    assert.equal(inserts.length, 2, "две позиции — один запрос на таблицу");
+    assert.equal(строкиТаблицы(inserts, "vending_stock").length, 2);
+    assert.equal(строкиТаблицы(inserts, "vending_stock_count").length, 2);
   });
 });
 

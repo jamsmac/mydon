@@ -17,6 +17,7 @@ import {
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { OurvendHealthService } from "../ourvend/ourvend-health.service";
+import { SYNC_STALE_HOURS_FALLBACK } from "../ourvend/sync-stale.service";
 import { AnalyticsService } from "./analytics.service";
 import { parseOrderPositions } from "./vending.service";
 import { ReportCache } from "./report-cache";
@@ -103,6 +104,10 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
   runs: [],
   failedStreak: 0,
   lastSuccessAt: null,
+  // «Успехов не было вовсе», а не «ноль часов»: секция не посчиталась, и
+  // выдать здесь ноль значило бы сказать «собрали только что».
+  staleHours: null,
+  staleThresholdH: SYNC_STALE_HOURS_FALLBACK,
   slotsLagMin: null,
   salesLagH: null,
   productSaleLagH: null,

@@ -30,6 +30,18 @@ describe("Вендинг Core: троттлинг GET /vending/shrinkage (N1)", 
   });
 });
 
+describe("Вендинг Core: троттлинг GET /vending/stock-counts (П8a)", () => {
+  it("свой лимит 12/мин на именованных лимитерах, а не общий потолок", () => {
+    // Выборка идёт по окну и достаёт до двух тысяч строк: под общим потолком
+    // (60 запросов / 10 с) один цикл `curl` из докер-сети укладывал Core.
+    const handler = VendingController.prototype.stockCounts;
+    assert.equal(Reflect.getMetadata(THROTTLER_LIMIT + "burst", handler), 12);
+    assert.equal(Reflect.getMetadata(THROTTLER_LIMIT + "sustained", handler), 12);
+    const keys = Reflect.getMetadataKeys(handler).filter((k): k is string => typeof k === "string");
+    assert.ok(!keys.some((k) => k.endsWith("default")), "под именем default ThrottlerGuard ничего не читает");
+  });
+});
+
 /**
  * Инвалидация кеша аналитики на записях, которые меняют ВТОРОЙ ОПЕРАНД
  * отчётов.

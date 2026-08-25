@@ -206,6 +206,28 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.match(n!.text, /3 раза подряд/);
   });
 
+  it("застой сбора будит немедленно и называет число часов", () => {
+    const [n] = applyRules(
+      ctx("ourvend.sync_stale", {
+        hoursSinceSuccess: 7,
+        lastSuccessAt: "2026-08-25T01:00:00.000Z",
+        lastRunStatus: "failed",
+      }),
+    );
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /Сбор OurVend.*7 ч/);
+    assert.match(n!.text, /failed/);
+  });
+
+  it("застой без единого успеха печатает «не было ни разу», а не «0 ч»", () => {
+    // Ноль часов читается как «только что собрали» — ровно наоборот тому, что
+    // означает пустой журнал успехов.
+    const [n] = applyRules(ctx("ourvend.sync_stale", { hoursSinceSuccess: null, lastSuccessAt: null, lastRunStatus: null }));
+    assert.equal(n!.urgency, "immediate");
+    assert.doesNotMatch(n!.text, /0 ч/);
+    assert.match(n!.text, /НЕ БЫЛО НИ РАЗУ/);
+  });
+
   it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {
     const [n] = applyRules(ctx("weekly-digest.no_recipients", { week: "2026-34" }));
     assert.equal(n!.urgency, "immediate");

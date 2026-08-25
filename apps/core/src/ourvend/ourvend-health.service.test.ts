@@ -232,6 +232,20 @@ describe("Здоровье сбора (R-P5b-8)", () => {
     assert.equal(h.lastSuccessAt, "2026-08-01T00:00:00.000Z", "«успеха давно не было» ≠ «успехов не было вовсе»");
   });
 
+  it("давность успеха и порог застоя едут в ответе (R-P8a-6)", async () => {
+    const h = await сервис({ runs: [УСПЕХ("r1", "2026-08-25T00:00:00Z")] }).health(20, СЕЙЧАС);
+    assert.equal(h.staleHours, 7, "СЕЙЧАС − 00:00Z = 7 ч");
+    // Порог — из настроек (`SYNC_STALE_HOURS`), а не из константы витрины:
+    // бот и панель сравнивают с этим числом, и своя копия у каждого разошлась
+    // бы с базой в день, когда владелец подвинет порог.
+    assert.equal(h.staleThresholdH, 6);
+  });
+
+  it("успехов не было вовсе — staleHours null, а не ноль часов", async () => {
+    const h = await сервис({ runs: [ОТКАЗ("f1", "2026-08-25T06:00:00Z")] }).health(20, СЕЙЧАС);
+    assert.deepEqual([h.lastSuccessAt, h.staleHours], [null, null]);
+  });
+
   it("кеш минуты: повторный запрос в ту же минуту базу не трогает, следующая — трогает", async () => {
     const { db, parity, счётчик } = healthDb({ runs: [УСПЕХ("r1", "2026-08-25T06:00:00Z")] });
     const svc = new OurvendHealthService(db, parity);

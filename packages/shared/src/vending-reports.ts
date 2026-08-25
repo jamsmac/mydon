@@ -1,7 +1,7 @@
 import { dayNumber, isoOfDay } from "./calendar-day";
 import { DAY } from "./expiry";
 import { normalizeMachineSerial } from "./machine-serial";
-import { tashkentDay } from "./tashkent-time";
+import { tashkentDay, tashkentInstant } from "./tashkent-time";
 import { normalizeProductName, priceDeviationPct } from "./vending-calc";
 
 /**
@@ -851,7 +851,9 @@ export type AnalyticsWarningCode =
   | "no_reference"
   | "excluded_sales"
   /** Здоровье сбора не посчиталось — секция письма пуста, а остальное честно. */
-  | "health_unavailable";
+  | "health_unavailable"
+  /** История обрезана потолком строк: показан хвост окна, а не всё окно. */
+  | "history_capped";
 
 export interface AnalyticsWarning {
   code: AnalyticsWarningCode;
@@ -903,6 +905,21 @@ export interface OurvendHealth {
   failedStreak: number;
   /** Завершение последнего успешного прогона. `null` — успехов в журнале нет. */
   lastSuccessAt: string | null;
+  /**
+   * Часов с последнего успеха, до десятой. `null` — успехов НЕ БЫЛО ВОВСЕ, и
+   * это не ноль часов: ноль читается как «только что собрали», то есть ровно
+   * наоборот (то же правило, что у лагов снимков).
+   */
+  staleHours: number | null;
+  /**
+   * Порог застоя из настроек (`SYNC_STALE_HOURS`), часов.
+   *
+   * Едет в ответе, а не живёт копией у каждого читателя: бот и панель рисуют
+   * предупреждение при `staleHours >= staleThresholdH`, и своя константа у
+   * каждого разошлась бы с базой в тот же день, когда владелец подвинет порог
+   * в панели настроек.
+   */
+  staleThresholdH: number;
   /** Возраст последнего снимка слотов, мин. `null` — снимков нет вовсе. */
   slotsLagMin: number | null;
   /** Возраст последнего снимка продаж, ч. `null` — снимков нет вовсе. */
@@ -930,6 +947,58 @@ export interface OurvendHealth {
     stockChecked: number;
     note: string | null;
   };
+}
+
+/**
+ * Часов с последнего успешного прогона сбора (R-P8a-6).
+ *
+ * ОДИН РАСЧЁТ НА ТРЁХ ЧИТАТЕЛЕЙ: отчёт `GET /ourvend/health`, сторож
+ * `SyncStaleService` и витрины бота/панели. Три копии «сколько прошло» — это
+ * три разных ответа на один вопрос: одна округлит до часа, вторая до десятой,
+ * третья забудет зажать отрицательное — и владелец увидит «стоит 6 ч» там, где
+ * сторож молчит.
+ *
+ * `null` — УСПЕХОВ НЕ БЫЛО ВОВСЕ, а не «ноль часов»: ноль означал бы «собрали
+ * только что», то есть ровно противоположное. Отличать это обязаны и витрина
+ * («сбор не заводили»), и сторож (тревожит именно на `null` тоже).
+ *
+ * Отрицательный возраст (успех «из будущего» — часы агента впереди базы)
+ * зажимается в ноль: минус в поле «сколько прошло» читается как ошибка
+ * отчёта, а не как расхождение часов.
+ */
+export function staleHours(lastSuccessAt: string | null, now: Date): number | null {
+  if (!lastSuccessAt) return null;
+  const at = tashkentInstant(lastSuccessAt);
+  if (!at) return null;
+  const мс = Math.max(0, now.getTime() - at.getTime());
+  return Math.round((мс / 3_600_000) * 10) / 10;
+}
+
+/**
+ * Строка истории инвентаризаций склада (R-P8a-3).
+ *
+ * `source` отделяет разовый перенос из донора (`stock-import`) от того, что
+ * система записала сама (`own`): без этого признака владелец не отличит
+ * импортированное прошлое от своего пересчёта, а сверка импорта — свои строки
+ * от чужих.
+ */
+export interface StockCountRow {
+  /** Сутки пересчёта, `YYYY-MM-DD` по Ташкенту. */
+  dt: string;
+  product: string;
+  qty: number;
+  source: string;
+  /** Момент пересчёта (ISO): в одни сутки их может быть несколько. */
+  countedAt: string;
+}
+
+/** Ответ `GET /vending/stock-counts` — история пересчётов склада за окно. */
+export interface StockCountsReport {
+  days: number;
+  /** Фильтр по товару (канон) или `null` — вся история окна. */
+  product: string | null;
+  rows: StockCountRow[];
+  warnings: AnalyticsWarning[];
 }
 
 /**
