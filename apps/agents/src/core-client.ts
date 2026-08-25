@@ -414,6 +414,12 @@ export class AgentsCoreClient {
     return this.request<{ saleDays: number; saleRows: number; stockDays: number; stockRows: number; quarantined: number }>(
       "/ourvend/snapshot",
       { method: "POST", body: JSON.stringify(payload) },
+      // Та же работа и та же база: пачка суток, каждые — с удалением прежних
+      // строк по (день, автомат) и перезаписью. Догон до 14 дней по всему
+      // парку в 10 секунд не обязан укладываться ничуть не больше, чем приём
+      // слотов, — и обрыв здесь так же молча оставил бы учётный поток без
+      // суток, а паритет — без семи зелёных дней.
+      this.ingestTimeoutMs,
     );
   }
 

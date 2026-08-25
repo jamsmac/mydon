@@ -179,14 +179,18 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
   let detect: SyncResult["detect"];
   const skippedNotes: string[] = [];
   if (collected.length > 0) {
+    // Длительность приёма — в лог отдельной строкой И в текст отказа.
+    // 24.08.2026 сбор падал «This operation was aborted», и по журналу нельзя
+    // было отличить «Core не ответил» от «Core отвечал дольше таймаута»: числа,
+    // сколько шёл приём, не было ни одной. Замер живёт ВНЕ try — иначе он
+    // остался бы виден только на удачном исходе, то есть ровно там, где
+    // и без него всё понятно.
+    const t0Слоты = Date.now();
     try {
-      // Длительность приёма — в лог отдельной строкой. 24.08.2026 сбор падал
-      // «This operation was aborted» и по журналу нельзя было отличить
-      // «Core не ответил» от «Core отвечал дольше таймаута»: строки о том,
-      // сколько шёл приём, не было ни одной.
-      const t0 = Date.now();
       const res = await core.ingestVendingSlots({ capturedAt, machines: collected });
-      console.log(`[ourvend:sync] приём слотов ${Date.now() - t0} мс — автоматов ${collected.length}, слотов ${res.slots}`);
+      console.log(
+        `[ourvend:sync] приём слотов ${Date.now() - t0Слоты} мс — автоматов ${collected.length}, слотов ${res.slots}`,
+      );
       slots = res.slots;
       // Автомат, пропущенный приёмом (например, неправдоподобное число
       // слотов), — не отказ сбора, но и не пустяк: его планограмма осталась
@@ -200,25 +204,35 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
         skippedNotes.push(`уборка зеркала ${e.serial} не удалась: ${e.error}`);
       }
     } catch (err) {
-      // Приём не удался — весь собранный проход считаем провалом.
-      return finish({ status: "failed", machinesTotal: machines.length, machinesOk: 0, slots: 0, productSales: 0, error: errText(err) });
+      // Приём не удался — весь собранный проход считаем провалом. Время в
+      // тексте отказа: `vending_sync_run.error` читают из панели, и «оборвался
+      // на 10 001-й миллисекунде» — это другой диагноз, чем «Core ответил 500».
+      const мс = Date.now() - t0Слоты;
+      return finish({
+        status: "failed",
+        machinesTotal: machines.length,
+        machinesOk: 0,
+        slots: 0,
+        productSales: 0,
+        error: `приём слотов (${мс} мс): ${errText(err)}`,
+      });
     }
 
     // Детектор заливок (П4, R-P4-2): гонится сразу после того, как свежий
     // снимок слотов лёг в базу — заливка отражается в журнале в тот же цикл
     // сбора, а не только когда её вручную прогонят из панели. Сбой детектора
     // не отказ сбора (снимок уже записан) — только лог и пометка в итоге.
+    const t0Детектор = Date.now();
     try {
       // Окно — `DETECT_DAYS_DEFAULT` Core (2 суток), а не одни. Детектор
       // идемпотентен по (автомат, конец окна), так что перекрытие не плодит
       // строк, зато после простоя сбора длиннее суток (24.08 было девять
       // `failed` подряд) заливки из провала подберутся сами, а не ручным POST.
-      const t0 = Date.now();
       const d = await core.detectRefillEvents(DETECT_DAYS);
-      console.log(`[ourvend:sync] детектор заливок ${Date.now() - t0} мс — заливок ${d.events}`);
+      console.log(`[ourvend:sync] детектор заливок ${Date.now() - t0Детектор} мс — заливок ${d.events}`);
       detect = { events: d.events, matched: d.matched };
     } catch (err) {
-      console.warn(`[ourvend:sync] детектор заливок не отработал: ${errText(err)}`);
+      console.warn(`[ourvend:sync] детектор заливок не отработал за ${Date.now() - t0Детектор} мс: ${errText(err)}`);
       detect = "failed";
     }
   }
@@ -249,8 +263,8 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
       saleErrors.push(`продажи автоматов: ${errText(err)}`);
     }
     if (productSales.length > 0 || machineSales.length > 0) {
+      const t0Продажи = Date.now();
       try {
-        const t0 = Date.now();
         const res = await core.ingestVendingSales({
           capturedAt,
           periodStart: from.toISOString(),
@@ -259,11 +273,11 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
           machineSales,
         });
         console.log(
-          `[ourvend:sync] приём продаж ${Date.now() - t0} мс — строк по товарам ${res.productRows}, по автоматам ${res.machineRows}`,
+          `[ourvend:sync] приём продаж ${Date.now() - t0Продажи} мс — строк по товарам ${res.productRows}, по автоматам ${res.machineRows}`,
         );
         productSalesRows = res.productRows;
       } catch (err) {
-        saleErrors.push(`приём продаж: ${errText(err)}`);
+        saleErrors.push(`приём продаж (${Date.now() - t0Продажи} мс): ${errText(err)}`);
       }
     }
   }

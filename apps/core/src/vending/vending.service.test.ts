@@ -14,7 +14,7 @@ import {
   vendingStock,
 } from "@mydon/db";
 import { TZ } from "@mydon/shared";
-import { MAX_SLOTS_PER_MACHINE, VendingService } from "./vending.service";
+import { INSERT_CHUNK, MAX_SLOTS_PER_MACHINE, VendingService } from "./vending.service";
 
 type Row = { machineSerial: string; coilId: string; productName: string | null; capacity: number; quantity: number };
 type SaleRow = { machineSerial: string; productName: string; quantity: number; capturedAt: Date };
@@ -1715,6 +1715,44 @@ describe("Вендинг Core: приём пишет пачками, а не п�
       machineSales: [],
     });
     assert.equal(calls.filter((c) => c.table === "machine_sale").length, 0);
+  });
+
+  it("автомат больше пачки режется на части: 503 слота → 500 + 3, порядок цел", async () => {
+    // Потолок пачки не декоративный: у самого крупного автомата парка 488
+    // позиций, и он к нему вплотную. Ошибка в арифметике нарезки потеряла бы
+    // хвост слотов молча — счётчик прогона при этом остался бы правильным.
+    const много = Array.from({ length: INSERT_CHUNK + 3 }, (_, i) => ({
+      coilId: String(i + 1),
+      product: `Товар ${i + 1}`,
+      capacity: 5,
+      quantity: i % 5,
+    }));
+    const { db, inserts } = writeDb();
+    const res = await new VendingService(db).ingestSlots({ machines: [{ serial: "БОЛЬШОЙ", slots: много }] });
+
+    const пачкиСлотов = inserts.filter((i) => i.table === "machine_slot");
+    const пачкиИстории = inserts.filter((i) => i.table === "slot_snapshot");
+    assert.deepEqual(
+      пачкиСлотов.map((i) => (i.values as unknown[]).length),
+      [INSERT_CHUNK, 3],
+      "первая пачка полная, во второй — остаток",
+    );
+    assert.deepEqual(пачкиИстории.map((i) => (i.values as unknown[]).length), [INSERT_CHUNK, 3]);
+
+    // Ни одна строка не потерялась и не переехала: порядок сквозной.
+    const слоты = строкиТаблицы(inserts, "machine_slot");
+    assert.equal(слоты.length, INSERT_CHUNK + 3);
+    assert.deepEqual(
+      слоты.map((v) => v.coilId),
+      много.map((s) => s.coilId),
+    );
+    // Стык пачек — то место, где нарезка врёт чаще всего.
+    assert.equal(слоты[INSERT_CHUNK - 1]!.productName, `Товар ${INSERT_CHUNK}`);
+    assert.equal(слоты[INSERT_CHUNK]!.productName, `Товар ${INSERT_CHUNK + 1}`);
+    assert.equal(строкиТаблицы(inserts, "slot_snapshot").length, INSERT_CHUNK + 3);
+    // Счётчики прогона считают ВЕСЬ вход, а не число запросов.
+    assert.equal(res.slots, INSERT_CHUNK + 3);
+    assert.equal(res.machines, 1);
   });
 
   it("склад тоже пачкой: две позиции — один запрос", async () => {

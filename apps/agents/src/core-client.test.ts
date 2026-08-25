@@ -85,6 +85,23 @@ describe("Клиент агентов к Core: срок ожидания при�
     for (const s of сигналы) assert.equal(s.aborted, true);
   });
 
+  it("учётный снапшот П2 ждёт столько же: та же база, перезапись сутками", async () => {
+    // `/ourvend/snapshot` кладёт пачку суток, и каждые сутки — это удаление
+    // прежних строк по (день, автомат) и запись новых. Догон до 14 дней по
+    // всему парку упирается в ту же базу, что и приём слотов; обрыв здесь
+    // молча оставляет учётный поток без суток, а паритет — без зелёного дня.
+    const { сигналы } = зависшийFetch();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const core = new AgentsCoreClient("http://core");
+    void core.pushOurvendSnapshot({ sales: [] }).catch(() => {});
+    await Promise.resolve();
+    const signal = сигналы[0]!;
+    mock.timers.tick(10_000);
+    assert.equal(signal.aborted, false);
+    mock.timers.tick(50_000);
+    assert.equal(signal.aborted, true);
+  });
+
   it("срок приёма настраивается: конструктор берёт его четвёртым аргументом (CORE_INGEST_TIMEOUT_MS)", async () => {
     // Парк растёт, а вместе с ним и транзакция приёма. Чинить это выкаткой
     // нового образа — плохой план для аварии в три часа ночи.
