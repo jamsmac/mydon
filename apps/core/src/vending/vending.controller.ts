@@ -191,6 +191,43 @@ export class SetProductPriceDto {
   confirmed?: boolean;
 }
 
+/**
+ * Эталон витрины (П5b, R-P5b-6) — сколько владелец РЕШИЛ брать за товар.
+ * Не путать с `SetProductPriceDto`: тот про закупочную цену.
+ */
+export class SetSalePriceDto {
+  @IsString() @IsNotEmpty() @MaxLength(255)
+  product!: string;
+
+  /**
+   * Целые сумы: витрина автомата дробей не принимает (монет меньше сума в
+   * обороте нет), а дробь на границе API — почти наверняка ошибка разбора
+   * команды. Потолок тот же, что у закупочной цены.
+   */
+  @IsInt() @Min(1) @Max(10_000_000)
+  price!: number;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+
+  /** Повторная команда со словом «точно» — пропуск гейта по факту витрины. */
+  @IsOptional() @IsIn([true, false])
+  confirmed?: boolean;
+}
+
+/** Разовый бутстрап «витрина как факт» (П5b, R-P5b-6). */
+export class BootstrapSalePriceDto {
+  /**
+   * Окно факта витрины, суток. По умолчанию 14 — столько же, сколько у гейта
+   * и у отчёта «разрыв витрины»; потолок 180 — как у лент изменений цен.
+   */
+  @IsOptional() @IsInt() @Min(1) @Max(180)
+  days?: number;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
 /** Правила закупа товара (П5a): что владелец решает про закуп, а не про товар. */
 export class SetProductRulesDto {
   @IsString() @IsNotEmpty() @MaxLength(255)
@@ -400,6 +437,18 @@ export class VendingController {
   @Post("product-price")
   setProductPrice(@Body() dto: SetProductPriceDto) {
     return this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
+  }
+
+  /** Эталон витрины товара (гейт ±20% от ФАКТА витрины — см. setSalePrice). */
+  @Post("sale-price")
+  setSalePrice(@Body() dto: SetSalePriceDto) {
+    return this.vending.setSalePrice(dto.product, dto.price, dto.actor, dto.confirmed);
+  }
+
+  /** «Витрина как факт»: разовый бутстрап эталонов по продажам окна. */
+  @Post("sale-price/bootstrap")
+  bootstrapSalePrice(@Body() dto: BootstrapSalePriceDto) {
+    return this.vending.bootstrapSalePrice(dto.days, dto.actor);
   }
 
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────

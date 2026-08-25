@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   approval,
+  auditLog,
   entity,
   event,
   machineCard,
   machineSale,
   productSale,
   purchase,
+  sale,
   systemConfig,
   vendingAlias,
   vendingProduct,
@@ -25,6 +27,8 @@ type ProdRow = {
   packSize: number;
   excludedFromPurchase?: boolean;
   fixedPurchaseQty?: number | null;
+  /** Эталон витрины (П5b): `null` — не задан, строка numeric — задан. */
+  salePrice?: string | null;
 };
 type AliasRow = { productId: string; alias: string };
 /** Карточка реестра автомата и её состояние — фильтр «в строю» у плана, прогноза и сводки. */
@@ -2333,5 +2337,191 @@ describe("Вендинг Core: заявка хранит разбивку по �
       Object.keys(pos).sort(),
       ["buy", "costRounded", "fromPurchase", "fromStock", "noPrice", "order", "pack", "perMachine", "price", "product", "unfilled"],
     );
+  });
+});
+
+// ── Эталон витрины и наблюдение закупочных цен (П5b) ────────────────────────
+
+/** Продажа как её видит `sale`: сутки Ташкента, канон серийника, штуки и сумма. */
+type SaleFactRow = { dt: string; machineSerial: string; product: string; qty: string; amount: string };
+type OrderFactRow = { id: string; status: string; positions: unknown[] };
+/** Снек-автомат Olma — тот же серийник, что в остальных наборах П4/П5. */
+const OLMA = "2508160376";
+
+/**
+ * Стаб БД среза П5b: прайс + продажи + накладная, вставки и апдейты копятся.
+ *
+ * `where()` НЕ фильтрует — заглушка SQL не исполняет: окно 14 суток и
+ * `lower(name)` проверяет дымовой прогон против живого Postgres. Зато событий
+ * и записей журнала здесь ровно столько, сколько их напишет сервис, и это
+ * главное: молчаливая потеря события — та ошибка, ради которой стаб и заведён.
+ */
+function мир(opts: {
+  products?: ProdRow[];
+  sales?: SaleFactRow[];
+  aliases?: AliasRow[];
+  orders?: OrderFactRow[];
+}) {
+  const products = opts.products ?? [];
+  const sales = opts.sales ?? [];
+  const aliases = opts.aliases ?? [];
+  const order = opts.orders?.[0] ?? null;
+  const updates: Record<string, unknown>[] = [];
+  const events: Record<string, unknown>[] = [];
+  const audit: Record<string, unknown>[] = [];
+  const purchases: Record<string, unknown>[] = [];
+  const stockUpserts: Record<string, unknown>[] = [];
+
+  /** Вставка пачкой = столько же строк, сколько отдельными вызовами. */
+  const принять = (table: unknown, v: unknown) => {
+    const rows = (Array.isArray(v) ? v : [v]) as Record<string, unknown>[];
+    if (table === event) events.push(...rows);
+    else if (table === auditLog) audit.push(...rows);
+    else if (table === purchase) purchases.push(...rows);
+    else if (table === vendingStock) stockUpserts.push(...rows);
+  };
+
+  const строки = (t: unknown): unknown[] =>
+    t === vendingAlias ? aliases : t === vendingProduct ? products : t === sale ? sales : [];
+
+  const выборка = (t: unknown) => {
+    const p = Promise.resolve(строки(t));
+    const where = () => {
+      const q = Promise.resolve(строки(t));
+      // limit(1) — запасной путь поиска карточки по lower(name): стаб его не
+      // умеет, и это правильно — канон обязан находиться в загруженном прайсе.
+      return { limit: async () => [], orderBy: () => ({ limit: async () => [] }), then: q.then.bind(q) };
+    };
+    return { where, then: p.then.bind(p) };
+  };
+
+  const tx = {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => (order ? [order] : []),
+          orderBy: () => ({ limit: async () => (order ? [order] : []) }),
+        }),
+      }),
+    }),
+    update: (t: unknown) => ({
+      set: (v: Record<string, unknown>) => ({
+        where: () => {
+          updates.push({ table: t, ...v });
+          const rows = order ? [{ ...order, ...v }] : [];
+          const p = Promise.resolve(rows);
+          return { returning: async () => rows, then: p.then.bind(p) };
+        },
+      }),
+    }),
+    insert: (t: unknown) => ({
+      values: (v: unknown) => {
+        принять(t, v);
+        return {
+          onConflictDoUpdate: async () => undefined,
+          onConflictDoNothing: async () => undefined,
+          then: (res: (x: undefined) => unknown) => Promise.resolve(undefined).then(res),
+        };
+      },
+    }),
+  };
+
+  const db = {
+    select: () => ({ from: (t: unknown) => выборка(t) }),
+    transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+  } as never;
+  return { db, service: new VendingService(db), updates, events, audit, purchases, stockUpserts };
+}
+
+describe("Эталон витрины (R-P5b-6)", () => {
+  it("записывает sale_price, событие и запись в журнал", async () => {
+    const м = мир({ products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null }] });
+    const r = await м.service.setSalePrice("tuc sour cream", 15_000, "owner");
+    assert.deepEqual([r.ok, r.product, r.oldPrice, r.newPrice], [true, "TUC Sour cream", null, 15_000]);
+    assert.equal(м.updates.at(-1)?.salePrice, "15000.00");
+    assert.equal(м.events.at(-1)?.type, "vending.sale_price_changed");
+    assert.equal(м.audit.at(-1)?.action, "vending.product.set_sale_price");
+  });
+
+  it("гейт по ФАКТУ витрины: >20 % от amount/qty требует «точно»", async () => {
+    const м = мир({
+      products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null }],
+      sales: [{ dt: "2026-08-20", machineSerial: OLMA, product: "TUC Sour cream", qty: "4", amount: "60000" }],
+    });
+    const gate = await м.service.setSalePrice("TUC Sour cream", 20_000, "owner");
+    assert.deepEqual([gate.ok, gate.reason, gate.factPrice, gate.deviationPct], [false, "spike", 15_000, 33]);
+    assert.equal(м.updates.length, 0, "отказ гейта не трогает базу");
+    assert.equal((await м.service.setSalePrice("TUC Sour cream", 20_000, "owner", true)).ok, true);
+  });
+
+  it("нет факта витрины — гейт не применяется (первый эталон проходит)", async () => {
+    const м = мир({ products: [{ id: "p1", name: "Новинка", purchasePrice: "1000", packSize: 1, salePrice: null }] });
+    const r = await м.service.setSalePrice("Новинка", 99_000, "owner");
+    assert.deepEqual([r.ok, r.factPrice], [true, null]);
+  });
+
+  it("незнакомый товар и мусорная цена — отказ до записи", async () => {
+    const м = мир({ products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null }] });
+    assert.equal((await м.service.setSalePrice("Чипсы новые", 9_000)).reason, "not_found");
+    assert.equal((await м.service.setSalePrice("TUC Sour cream", 0)).ok, false);
+    assert.equal((await м.service.setSalePrice("  ", 100)).ok, false);
+    assert.equal(м.updates.length, 0);
+    assert.equal(м.events.length, 0);
+  });
+
+  it("бутстрап заполняет только пустые эталоны и называет пропущенных", async () => {
+    const м = мир({
+      products: [
+        { id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null },
+        { id: "p2", name: "Moxito Lime 330ml", purchasePrice: "9800", packSize: 12, salePrice: "12000" },
+        { id: "p3", name: "Новинка", purchasePrice: "1000", packSize: 1, salePrice: null },
+      ],
+      sales: [{ dt: "2026-08-20", machineSerial: OLMA, product: "TUC Sour cream", qty: "4", amount: "60000" }],
+    });
+    const r = await м.service.bootstrapSalePrice(14, "owner");
+    assert.deepEqual(r.set, [{ product: "TUC Sour cream", price: 15_000, qty: 4 }]);
+    assert.deepEqual(r.skipped, [
+      { product: "Moxito Lime 330ml", reason: "already_set" },
+      { product: "Новинка", reason: "no_sales" },
+    ]);
+    assert.equal(r.days, 14);
+    // Ровно один товар записан — ровно одно событие и одна запись журнала.
+    assert.equal(м.updates.length, 1);
+    assert.equal(м.events.filter((e) => e.type === "vending.sale_price_changed").length, 1);
+    assert.equal(м.audit.length, 1);
+  });
+
+  it("бутстрап без товаров без эталона не открывает транзакцию впустую", async () => {
+    const м = мир({ products: [{ id: "p2", name: "Moxito Lime 330ml", purchasePrice: "9800", packSize: 12, salePrice: "12000" }] });
+    const r = await м.service.bootstrapSalePrice(14, "owner");
+    assert.deepEqual(r.set, []);
+    assert.equal(м.events.length, 0);
+  });
+});
+
+describe("Наблюдение закупочной цены при приёмке (R-P5b-5)", () => {
+  it("позиция с ценой, отличной от прайса, пишет vending.purchase_price_observed", async () => {
+    const м = мир({
+      orders: [{ id: "o1", status: "approved", positions: [{ product: "TUC Sour cream", order: 10, price: 11_000 }] }],
+      products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null }],
+    });
+    await м.service.receiveOrder("o1", "owner");
+    const набл = м.events.filter((e) => e.type === "vending.purchase_price_observed") as {
+      payload: Record<string, unknown>;
+    }[];
+    assert.deepEqual(
+      набл.map((e) => e.payload),
+      [{ product: "TUC Sour cream", price: 11_000, oldPrice: 9_000, orderId: "o1", receivedAt: набл[0]!.payload.receivedAt }],
+    );
+    assert.equal(typeof набл[0]!.payload.receivedAt, "string");
+  });
+
+  it("позиция без цены наблюдения не даёт (0 ≠ цена)", async () => {
+    const м = мир({
+      orders: [{ id: "o1", status: "approved", positions: [{ product: "TUC Sour cream", order: 10 }] }],
+      products: [],
+    });
+    await м.service.receiveOrder("o1", "owner");
+    assert.equal(м.events.filter((e) => e.type === "vending.purchase_price_observed").length, 0);
   });
 });

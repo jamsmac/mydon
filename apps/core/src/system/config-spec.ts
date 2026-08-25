@@ -158,6 +158,46 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     fallback: "10",
     validate: nonNegNumber,
   },
+  // ── Вендинг: аналитика (П5b) ──
+  // Пороги отчётов — решение владельца, а не константа в сервисе (R-P5b-11).
+  // Ноль здесь законен: им владелец говорит «показывай всё», и это дешевле,
+  // чем правка кода ради одного прогона.
+  {
+    key: "DEAD_STOCK_DAYS",
+    label: "Вендинг: окно мёртвого стока, дней",
+    kind: "number",
+    fallback: "21",
+    validate: nonNegNumber,
+  },
+  {
+    key: "PRICE_CHANGE_PCT",
+    label: "Вендинг: порог изменения цены, %",
+    kind: "number",
+    fallback: "5",
+    validate: nonNegNumber,
+  },
+  {
+    key: "PRICE_GAP_PCT",
+    label: "Вендинг: порог разрыва витрины с эталоном, %",
+    kind: "number",
+    fallback: "5",
+    validate: nonNegNumber,
+  },
+  {
+    key: "COST_WINDOW_DAYS",
+    label: "Вендинг: окно взвешенной себестоимости, дней",
+    kind: "number",
+    fallback: "90",
+    help: "Донор mydon-stock: 90 дней по принятым накладным",
+    validate: nonNegNumber,
+  },
+  {
+    key: "MARGIN_LOW_PCT",
+    label: "Вендинг: маржа ниже этого % — тревожная",
+    kind: "number",
+    fallback: "15",
+    validate: nonNegNumber,
+  },
   // ── GLOBERENT: комиссия менеджера — у донора PROMACH жили ТРИ формулы,
   // перенесены все три (packages/shared/globerent/commission.ts); какая
   // действует — решает владелец здесь, а не константа кода. ──

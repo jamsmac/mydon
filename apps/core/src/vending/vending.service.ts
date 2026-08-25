@@ -10,6 +10,7 @@ import {
   machineSlot,
   productSale,
   purchase,
+  sale,
   slotSnapshot,
   vendingAlias,
   vendingCashSession,
@@ -39,6 +40,7 @@ import {
   routeOrderFrom,
   runoutForecast,
   slotValid,
+  tashkentDay,
   type CashCategoryInput,
   type MachineSlots,
   type PlanogramStatus,
@@ -300,6 +302,45 @@ export interface SetPriceResult {
   reason?: "not_found" | "spike";
 }
 
+/**
+ * Итог правки ЭТАЛОНА витрины (R-P5b-6).
+ *
+ * Отдельный тип, а не `SetPriceResult`: гейт здесь сравнивает с другим
+ * числом — не с прошлым эталоном, а с ФАКТОМ витрины (`amount/qty` за окно).
+ * Владельцу важно видеть именно факт: «ты ставишь 20 000, а автомат берёт
+ * 15 000» — понятный вопрос, «отклонение 33 %» без базы — нет.
+ */
+export interface SetSalePriceResult {
+  ok: boolean;
+  /** Каноническое имя товара (после алиасов). */
+  product?: string;
+  oldPrice?: number | null;
+  newPrice?: number;
+  /** Отклонение от ФАКТА витрины (amount/qty за 14 дней), % — при reason="spike". */
+  deviationPct?: number;
+  /** Факт витрины за окно, сум за единицу; `null` — продаж в окне не было. */
+  factPrice?: number | null;
+  reason?: "not_found" | "spike";
+}
+
+/** Итог разового бутстрапа эталонов витрины «витрина как факт» (R-P5b-6). */
+export interface BootstrapSalePriceResult {
+  days: number;
+  set: { product: string; price: number; qty: number }[];
+  /**
+   * Кого НЕ тронули и почему. Список обязателен: молчаливый пропуск товара
+   * читается владельцем как «эталон проставлен», и разрыв витрины по нему
+   * никогда бы не всплыл.
+   */
+  skipped: { product: string; reason: "already_set" | "no_sales" }[];
+}
+
+/** Факт витрины по товару за окно: цена (amount/qty) и штуки, из которых она выведена. */
+interface RetailFact {
+  price: number;
+  qty: number;
+}
+
 /** Итог отправки закупа на утверждение. */
 export interface SubmitPurchaseResult {
   submitted: boolean;
@@ -339,6 +380,17 @@ export const SALES_STALE_DAYS = 2;
  * две и решит сам, какая из них про сегодня, — это его решение, а не наше.
  */
 export const PENDING_PURCHASE_TTL_DAYS = 3;
+
+/**
+ * Окно ФАКТА витрины (ташкентских суток) — для гейта эталона и бутстрапа
+ * «витрина как факт» (R-P5b-6).
+ *
+ * Не настройка: это не порог, который владелец крутит, а способ УЗНАТЬ
+ * сегодняшнюю цену автомата. Две недели — компромисс между «поймать
+ * актуальную цену» и «набрать штук, чтобы среднее не било единичной
+ * продажей»; окно отчёта `price_gap` живёт по этому же числу.
+ */
+export const SALE_PRICE_FACT_DAYS = 14;
 
 /** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
 export interface PlanMachine {
@@ -406,6 +458,8 @@ export interface VendingProductRow {
   name: string;
   category: "drink" | "snack" | "other";
   purchasePrice: number | null;
+  /** Эталон витрины (R-P5b-6): `null` — владелец его ещё не назвал. */
+  salePrice: number | null;
   packSize: number;
   isActive: boolean;
   excludedFromPurchase: boolean;
@@ -436,6 +490,8 @@ interface ProductIndexRow {
   name: string;
   category: "drink" | "snack" | "other";
   purchasePrice: string | null;
+  /** Эталон витрины (П5b) — numeric строкой, как его отдаёт драйвер. */
+  salePrice: string | null;
   packSize: number;
   excludedFromPurchase: boolean;
   fixedPurchaseQty: number | null;
@@ -1026,6 +1082,7 @@ export class VendingService {
           name: vendingProduct.name,
           category: vendingProduct.category,
           purchasePrice: vendingProduct.purchasePrice,
+          salePrice: vendingProduct.salePrice,
           packSize: vendingProduct.packSize,
           excludedFromPurchase: vendingProduct.excludedFromPurchase,
           fixedPurchaseQty: vendingProduct.fixedPurchaseQty,
@@ -1674,6 +1731,7 @@ export class VendingService {
         name: p.name,
         category: p.category,
         purchasePrice: p.purchasePrice === null ? null : Number(p.purchasePrice),
+        salePrice: p.salePrice === null ? null : Number(p.salePrice),
         packSize: p.packSize,
         isActive: p.isActive,
         excludedFromPurchase: p.excludedFromPurchase,
@@ -1905,12 +1963,19 @@ export class VendingService {
     receivedBy = "owner",
     distributed?: Record<string, number>,
   ): Promise<ReceiveOrderResult> {
+    // Прайс читаем ВСЕГДА, а не только под `distributed`: с П5b приёмка ещё
+    // и наблюдает цену позиции против карточки (R-P5b-5), а без прайса
+    // «было/стало» в наблюдении сравнивать не с чем.
+    const { aliasByKey, priceByName } = await this.loadProductIndex();
+    /** Закупочная цена карточки по НОРМАЛИЗОВАННОМУ канону — «было» наблюдения. */
+    const ценаКарточки = new Map<string, number>();
+    for (const [имя, цена] of priceByName) ценаКарточки.set(normalizeProductName(имя), цена);
+
     // Ключ — normalizeProductName(канон): сравнение с позицией без учёта
     // регистра/пробелов. display хранит канон как есть — для unmatchedDistribution.
     const distributedByCanonical = new Map<string, number>();
     const distributedDisplay = new Map<string, string>();
     if (distributed && Object.keys(distributed).length > 0) {
-      const { aliasByKey } = await this.loadProductIndex();
       for (const [raw, qty] of Object.entries(distributed)) {
         const name = raw.trim();
         // Не целое неотрицательное число (NaN, дробь, строка, отрицательное) —
@@ -2016,6 +2081,13 @@ export class VendingService {
       const mirrorAlive = Boolean(process.env.STOCK_DATABASE_URL);
       const dtToday = new Date().toLocaleDateString("en-CA", { timeZone: TZ });
       const purchaseRows: (typeof purchase.$inferInsert)[] = [];
+      /**
+       * Наблюдения закупочной цены (R-P5b-5): что за товар РЕАЛЬНО заплатили
+       * по этой накладной. Лента изменений закупочных цен иначе видела бы
+       * только команду «цена …» из бота — то есть моменты, когда владелец
+       * СООБЩИЛ о новой цене, а не когда она изменилась на базаре.
+       */
+      const наблюдения: { product: string; price: number; oldPrice: number | null; orderId: string; receivedAt: string }[] = [];
       for (const p of positions) {
         const pos = p as { product?: unknown; order?: unknown; price?: unknown };
         const product = typeof pos.product === "string" ? pos.product.trim() : "";
@@ -2031,6 +2103,20 @@ export class VendingService {
         // журнал вовсе (склад упадёт на своём integer раньше).
         const rawPrice = typeof pos.price === "number" && Number.isFinite(pos.price) && pos.price > 0 ? pos.price : null;
         const unitPrice = rawPrice !== null && rawPrice <= 10_000_000 ? rawPrice : null;
+        // Позиция без цены наблюдения не даёт: «цены нет» — это не «заплатили
+        // ноль», и нулевая точка в ленте цен была бы обвалом на 100 %.
+        // Собираем ДО веток распределения: позиция, целиком ушедшая в
+        // автоматы мимо склада, оплачена ровно так же, как любая другая.
+        if (unitPrice !== null) {
+          const канон = this.resolveProduct(product, aliasByKey);
+          наблюдения.push({
+            product: канон,
+            price: unitPrice,
+            oldPrice: ценаКарточки.get(normalizeProductName(канон)) ?? null,
+            orderId: order.id,
+            receivedAt: now.toISOString(),
+          });
+        }
         if (!mirrorAlive && qty <= 1_000_000) {
           // Дубликат канона в positions (слоты «Кола»/«кола» без алиаса дают
           // две позиции одного канона) дал бы два одинаковых extId в одном
@@ -2114,6 +2200,18 @@ export class VendingService {
           recordedPurchases: purchaseRows.length,
         },
       });
+
+      // Наблюдения цен — в ТОЙ ЖЕ транзакции, что и сама приёмка: приёмка,
+      // не оставившая следа в ленте цен, — это молча потерянное изменение
+      // закупочной цены, и откат обязан откатывать её вместе с приходом.
+      // Идут ПОСЛЕ события приёмки: в ленте первым обязано стоять само
+      // «накладную приняли», а наблюдения — его последствия.
+      if (наблюдения.length > 0) {
+        await tx.insert(event).values(
+          наблюдения.map((o) => ({ source: "owner", type: "vending.purchase_price_observed", payload: o })),
+        );
+      }
+
       await tx.insert(auditLog).values({
         actorKind: "human",
         actorRef: receivedBy,
@@ -2197,6 +2295,181 @@ export class VendingService {
       });
     });
     return { ok: true, product: row.name, oldPrice, newPrice: price };
+  }
+
+  // ── Эталон витрины (П5b, R-P5b-6) ─────────────────────────────────────────
+  // Витринной цены нет ни в одной таблице источника: `sale` знает ФАКТ
+  // (`amount/qty`), но факт сам себе эталоном быть не может — он и есть то,
+  // что проверяют. Эталон — слово владельца, и живёт он в
+  // `vending_product.sale_price` (миграция 0068).
+
+  /**
+   * ФАКТ витрины по товарам за окно ташкентских суток: Σamount / Σqty,
+   * округление до 1 сум.
+   *
+   * Источник — только `sale` (R-P5b-1): это единственная таблица, где выручка
+   * разложена по суткам и товарам. `product_sale` хранит последний
+   * 7-дневный батч кабинета без разбивки и для цены не годится вовсе.
+   * Ключ карты — НОРМАЛИЗОВАННЫЙ канон имени (алиасы уже применены): в
+   * продажах товар пишется формой кабинета, в прайсе — канонической.
+   * Товар без штук в окне в карту не попадает: «продаж не было» и «цена 0» —
+   * разные вещи, и делить на ноль ради второй мы не будем.
+   */
+  private async retailFacts(days: number, aliasByKey: Map<string, string>): Promise<Map<string, RetailFact>> {
+    const окно = Math.max(1, Math.trunc(days));
+    // Окно включает СЕГОДНЯШНИЕ ташкентские сутки, поэтому шагаем назад на
+    // (окно − 1): 14 суток — это today−13 … today, а не 15 дат.
+    const from = tashkentDay(new Date(Date.now() - (окно - 1) * 86_400_000));
+    const rows = await this.db
+      .select({ product: sale.product, qty: sale.qty, amount: sale.amount })
+      .from(sale)
+      .where(gte(sale.dt, from));
+
+    const сумма = new Map<string, { qty: number; amount: number }>();
+    for (const r of rows) {
+      const qty = Number(r.qty);
+      const amount = Number(r.amount);
+      if (!Number.isFinite(qty) || !Number.isFinite(amount)) continue;
+      const key = normalizeProductName(this.resolveProduct(r.product, aliasByKey));
+      const acc = сумма.get(key) ?? { qty: 0, amount: 0 };
+      acc.qty += qty;
+      acc.amount += amount;
+      сумма.set(key, acc);
+    }
+
+    const facts = new Map<string, RetailFact>();
+    for (const [key, acc] of сумма) {
+      if (acc.qty <= 0) continue;
+      facts.set(key, { price: Math.round(acc.amount / acc.qty), qty: acc.qty });
+    }
+    return facts;
+  }
+
+  /**
+   * Задать ЭТАЛОН витрины товара — команда «цена продажи <товар> <сум>»
+   * (R-P5b-6). Единственный писатель `vending_product.sale_price` наравне с
+   * бутстрапом ниже.
+   *
+   * Гейт — по ФАКТУ витрины за 14 суток, а НЕ по прошлому эталону (в этом
+   * отличие от `setProductPrice`): прошлый эталон мог быть выставлен наугад
+   * год назад, а факт — то, что автомат берёт с покупателя сегодня. Разошлись
+   * больше чем на PRICE_SPIKE_PCT — владелец повторяет команду со словом
+   * «точно» (confirmed=true). Факта нет (продаж в окне не было) — гейта нет:
+   * первый эталон нового товара сравнивать не с чем, и требовать
+   * подтверждение там значит просить подтвердить пустоту.
+   */
+  async setSalePrice(rawProduct: string, price: number, actor = "owner", confirmed = false): Promise<SetSalePriceResult> {
+    const name = rawProduct.trim();
+    if (!name || !Number.isFinite(price) || price <= 0) return { ok: false, reason: "not_found" };
+
+    const { aliasByKey, productRows } = await this.loadProductIndex();
+    const canon = this.resolveProduct(name, aliasByKey);
+    // Как и в закупочной цене: канон ищем по нормализованному ключу среди
+    // загруженных строк, SQL по lower() — запасной путь.
+    const row =
+      this.findProductRow(canon, productRows) ??
+      (
+        await this.db
+          .select({ id: vendingProduct.id, name: vendingProduct.name, salePrice: vendingProduct.salePrice })
+          .from(vendingProduct)
+          .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
+          .limit(1)
+      )[0];
+    if (!row) return { ok: false, reason: "not_found", product: canon };
+
+    const oldPrice = row.salePrice === null ? null : Number(row.salePrice);
+    const fact = (await this.retailFacts(SALE_PRICE_FACT_DAYS, aliasByKey)).get(normalizeProductName(row.name));
+    const factPrice = fact ? fact.price : null;
+    const deviation = priceDeviationPct(price, factPrice);
+    if (!confirmed && deviation !== null && deviation > PRICE_SPIKE_PCT) {
+      return {
+        ok: false,
+        reason: "spike",
+        product: row.name,
+        oldPrice,
+        newPrice: price,
+        factPrice,
+        deviationPct: Math.round(deviation),
+      };
+    }
+
+    await this.db.transaction(async (tx) => {
+      await tx.update(vendingProduct).set({ salePrice: price.toFixed(2) }).where(eq(vendingProduct.id, row.id));
+      await tx.insert(event).values({
+        source: "owner",
+        type: "vending.sale_price_changed",
+        payload: { product: row.name, oldPrice, newPrice: price, actor },
+      });
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: actor,
+        action: "vending.product.set_sale_price",
+        target: row.id,
+        before: { salePrice: oldPrice },
+        after: { salePrice: price },
+      });
+    });
+    return { ok: true, product: row.name, oldPrice, newPrice: price, factPrice };
+  }
+
+  /**
+   * Разовый бутстрап «витрина как факт»: проставить эталон тем товарам, у
+   * которых его НЕТ, по факту продаж за окно (R-P5b-6).
+   *
+   * Товар с уже заданным эталоном не трогаем ни при каких условиях — иначе
+   * повторный вызов затирал бы решение владельца сегодняшним фактом, то есть
+   * ровно тем числом, с которым эталон и должен расходиться. Товар без продаж
+   * в окне пропускаем ИМЕНЕМ, а не молча: молчание читается как «эталон
+   * проставлен», и разрыв витрины по такому товару никогда бы не всплыл.
+   */
+  async bootstrapSalePrice(days = SALE_PRICE_FACT_DAYS, actor = "owner"): Promise<BootstrapSalePriceResult> {
+    const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
+    const { aliasByKey, productRows } = await this.loadProductIndex();
+    const facts = await this.retailFacts(окно, aliasByKey);
+
+    const set: { product: string; price: number; qty: number }[] = [];
+    const skipped: { product: string; reason: "already_set" | "no_sales" }[] = [];
+    const писать: { id: string; name: string; price: number }[] = [];
+    // Обходим прайс в его собственном порядке: `set` и `skipped` — это отчёт о
+    // прогоне, а не витрина. Как их показать (сгруппировать, отсортировать) —
+    // решает тот, кто печатает список владельцу.
+    for (const p of productRows) {
+      if (p.salePrice !== null) {
+        skipped.push({ product: p.name, reason: "already_set" });
+        continue;
+      }
+      const fact = facts.get(normalizeProductName(p.name));
+      if (!fact) {
+        skipped.push({ product: p.name, reason: "no_sales" });
+        continue;
+      }
+      set.push({ product: p.name, price: fact.price, qty: fact.qty });
+      писать.push({ id: p.id, name: p.name, price: fact.price });
+    }
+
+    // Пустой бутстрап транзакцию не открывает: повторный вызов после первого
+    // прогона — норма, и он не должен оставлять следа в журнале.
+    if (писать.length > 0) {
+      await this.db.transaction(async (tx) => {
+        for (const item of писать) {
+          await tx.update(vendingProduct).set({ salePrice: item.price.toFixed(2) }).where(eq(vendingProduct.id, item.id));
+          await tx.insert(event).values({
+            source: "owner",
+            type: "vending.sale_price_changed",
+            payload: { product: item.name, oldPrice: null, newPrice: item.price, actor },
+          });
+          await tx.insert(auditLog).values({
+            actorKind: "human",
+            actorRef: actor,
+            action: "vending.product.set_sale_price",
+            target: item.id,
+            before: { salePrice: null },
+            after: { salePrice: item.price },
+          });
+        }
+      });
+    }
+    return { days: окно, set, skipped };
   }
 
   // ── Касса закупа (§5.8) ───────────────────────────────────────────────────

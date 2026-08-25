@@ -335,6 +335,35 @@ const ЗАПИСЬ = [
       if (о.reason !== "not_found") throw new Error(`reason=${о.reason}`);
     },
   },
+  {
+    // П5b: бутстрап эталонов витрины. На засеянной базе продаж (`sale`) нет —
+    // значит проставить нечего, и весь смысл проверки в том, что путь ДОШЁЛ до
+    // базы: агрегат Σamount/Σqty с окном по ташкентским суткам заглушка не
+    // исполняет, а Postgres — да. Пропущенные обязаны быть НАЗВАНЫ: молчаливый
+    // пустой ответ читался бы как «эталоны проставлены».
+    имя: "витрина как факт: бутстрап эталонов (нет продаж → всех назвали)",
+    path: "/vending/sale-price/bootstrap",
+    body: { days: 14 },
+    проверить: (о) => {
+      if (!Array.isArray(о.set)) throw new Error("set — не массив");
+      if (!Array.isArray(о.skipped) || о.skipped.length === 0) throw new Error("skipped пуст: пропущенных обязаны назвать");
+      const чужие = о.skipped.filter((s) => s.reason !== "no_sales" && s.reason !== "already_set");
+      if (чужие.length > 0) throw new Error(`неизвестная причина пропуска: ${JSON.stringify(чужие[0])}`);
+      if (!о.skipped.some((s) => s.reason === "no_sales")) throw new Error("ждали товары без факта витрины");
+    },
+  },
+  {
+    // Прямая установка эталона: гейт сравнивает с ФАКТОМ витрины, а факта на
+    // засеянной базе нет — значит первый эталон проходит без подтверждения.
+    имя: "эталон витрины: прямая установка",
+    path: "/vending/sale-price",
+    body: { product: P4_ТОВАР, price: 15000 },
+    проверить: (о) => {
+      if (о.ok !== true) throw new Error(`ожидали ok, получили ${JSON.stringify(о)}`);
+      if (о.newPrice !== 15000) throw new Error(`newPrice=${о.newPrice}`);
+      if (о.factPrice !== null) throw new Error(`факта витрины на засеянной базе быть не должно: ${о.factPrice}`);
+    },
+  },
 ];
 
 /**
@@ -959,6 +988,78 @@ async function проверитьАлертыУсушки() {
 }
 
 /** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
+/**
+ * П5b: приёмка накладной наблюдает закупочную цену позиции
+ * (`vending.purchase_price_observed`, R-P5b-5).
+ *
+ * Заглушка юнит-теста «вставляет» события в массив, поэтому пакетный
+ * `insert(event).values(массив)` ВНУТРИ транзакции приёмки настоящим Postgres
+ * не исполнялся ни разу — а лента изменений закупочных цен стоит именно на
+ * нём. Заодно проверяется главное правило наблюдения: позиция БЕЗ цены его не
+ * даёт (0 и мусор — это «цены нет», а не «заплатили ноль»).
+ *
+ * Путь целиком по HTTP: заявка → согласование (оно и создаёт накладную) →
+ * приёмка → счётчик и тело события.
+ */
+async function проверитьНаблюдениеЦен() {
+  const С_ЦЕНОЙ = P4_ТОВАР; // есть в прайсе (seed-vending) — значит у наблюдения будет «было»
+  const БЕЗ_ЦЕНЫ = "Fanta C 0,5";
+  const ТИП = "vending.purchase_price_observed";
+  const посчитать = async () => {
+    const { r, text, json } = await jsonRequest("GET", `/events/count?type=${encodeURIComponent(ТИП)}`);
+    if (!r.ok) throw new Error(`счётчик наблюдений → ${r.status}: ${text.slice(0, 200)}`);
+    return json.count;
+  };
+  const было = await посчитать();
+
+  const заявка = await jsonRequest("POST", "/approvals", {
+    agent: "smoke",
+    action: "vending.purchase",
+    tier: "T2",
+    payload: {
+      purchaseOrder: {
+        positions: [
+          { product: С_ЦЕНОЙ, order: 12, price: 6500 },
+          { product: БЕЗ_ЦЕНЫ, order: 6 },
+        ],
+        totalBuy: 18,
+        totalOrder: 18,
+        costExact: 78000,
+        costRounded: 78000,
+        createdBy: "smoke",
+      },
+    },
+  });
+  if (!заявка.r.ok) throw new Error(`заявка закупа → ${заявка.r.status}: ${заявка.text.slice(0, 200)}`);
+  const заявкаId = заявка.json?.id;
+  if (!заявкаId) throw new Error(`заявка без id: ${заявка.text.slice(0, 200)}`);
+
+  const решение = await jsonRequest("POST", `/approvals/${заявкаId}/decide`, { decision: "approved", actor: "smoke" });
+  if (!решение.r.ok) throw new Error(`согласование → ${решение.r.status}: ${решение.text.slice(0, 200)}`);
+
+  const накладные = await читать("/vending/orders");
+  const накладная = накладные.find((o) => o.approvalId === заявкаId);
+  if (!накладная) throw new Error("одобренная заявка не породила накладную");
+
+  const приёмка = await jsonRequest("POST", "/vending/orders/receive", { orderId: накладная.id, receivedBy: "smoke" });
+  if (!приёмка.r.ok) throw new Error(`приёмка → ${приёмка.r.status}: ${приёмка.text.slice(0, 200)}`);
+  if (приёмка.json?.received !== true) throw new Error(`приёмка отказала: ${приёмка.text.slice(0, 200)}`);
+
+  const стало = await посчитать();
+  if (стало !== было + 1) {
+    throw new Error(`наблюдений записано ${стало - было}, ждали ровно одно (позиция без цены его не даёт)`);
+  }
+
+  const события = await читать(`/events?type=${encodeURIComponent(ТИП)}`);
+  const наше = события.find((e) => e.payload?.orderId === накладная.id);
+  if (!наше) throw new Error("наблюдение по нашей накладной не найдено");
+  if (наше.payload.product !== С_ЦЕНОЙ) throw new Error(`product=${наше.payload.product}`);
+  if (наше.payload.price !== 6500) throw new Error(`price=${наше.payload.price}`);
+  if (typeof наше.payload.oldPrice !== "number") {
+    throw new Error(`oldPrice не взялся из прайса (значит «было» сравнивать не с чем): ${наше.payload.oldPrice}`);
+  }
+}
+
 async function проверитьRateLimit() {
   for (let i = 0; i < 70; i += 1) {
     const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(5000) });
@@ -1151,6 +1252,13 @@ try {
   }
 
   try {
+    await проверитьНаблюдениеЦен();
+    console.log("  ok  сценарий: приёмка наблюдает закупочную цену позиции (без цены — наблюдения нет)");
+  } catch (e) {
+    провалы.push(`наблюдение цен: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -1172,4 +1280,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 10 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 11 сценариев.`);

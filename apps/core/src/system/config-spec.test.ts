@@ -50,6 +50,28 @@ describe("config-spec: белый список тумблеров", () => {
   });
 });
 
+/**
+ * Пороги аналитики снек-контура — настройки владельца, а не константы кода
+ * (R-P5b-11). Ноль здесь — законное значение: «показывай любую маржу» и
+ * «любой разрыв витрины» владелец включает нулём, а не правкой сервиса.
+ */
+describe("Ключи аналитики П5b (R-P5b-11)", () => {
+  for (const [key, fallback] of [
+    ["DEAD_STOCK_DAYS", "21"],
+    ["PRICE_CHANGE_PCT", "5"],
+    ["PRICE_GAP_PCT", "5"],
+    ["COST_WINDOW_DAYS", "90"],
+    ["MARGIN_LOW_PCT", "15"],
+  ] as const) {
+    it(`${key}: в белом списке, дефолт ${fallback}, отрицательное отвергается`, () => {
+      assert.equal(specFor(key)?.fallback, fallback);
+      assert.equal(validateConfig(key, "0"), null); // ноль — значение владельца, не мусор
+      assert.ok(validateConfig(key, "-1"));
+      assert.ok(validateConfig(key, "двадцать"));
+    });
+  }
+});
+
 describe("resolveEffective: приоритет база > env > дефолт", () => {
   const spec = specFor("AGENT_AUTONOMY_MAX")!;
 
