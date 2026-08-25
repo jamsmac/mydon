@@ -10,9 +10,14 @@ import { saveVendingProductRules } from "../app/vending/actions";
  * при дефиците — по каждому товару вендинга. Цена читается из прайса
  * (`vending_product.purchase_price`), но правится ТОЛЬКО в боте: панель не
  * дублирует команду «цена <товар> <сум>», чтобы не завести два источника.
+ *
+ * Эталон витрины (`sale_price`, П5b, R-P5b-6) живёт по тому же правилу и
+ * ПОЭТОМУ показан без формы: единственный писатель — бот («цена продажи
+ * <товар> <сум>»). Форма здесь завела бы второго писателя одного поля.
  */
 
-const n = (v: number): string => v.toLocaleString("ru-RU");
+/** Число без неразрывного пробела: скопированная цена должна находиться поиском. */
+const n = (v: number): string => v.toLocaleString("ru-RU").replace(/\u00a0/g, " ");
 
 const CATEGORY_LABEL: Record<VendingProductRow["category"], string> = {
   drink: "напиток",
@@ -98,7 +103,10 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
                 <b>{p.name}</b>
                 <small>
                   {CATEGORY_LABEL[p.category]} · {p.purchasePrice === null ? "нет цены" : `${n(p.purchasePrice)} сум`} ·
-                  блок {n(p.packSize)}
+                  блок {n(p.packSize)} ·{" "}
+                  {/* «витрина 0» читалось бы как «продаём бесплатно»: эталона
+                      просто нет, и сравнивать факт не с чем (R-P5b-6). */}
+                  {p.salePrice === null ? "эталон не задан" : `витрина ${n(p.salePrice)}`}
                 </small>
               </div>
               {p.excludedFromPurchase && <span className="pill bad">исключён</span>}
@@ -123,6 +131,9 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
       {saved && editingRow === null && <p className="ok-text">{saved}</p>}
       <p className="hint" style={{ marginTop: 8 }}>
         Цена — только чтение: правится в боте командой «цена &lt;товар&gt; &lt;сум&gt;».
+      </p>
+      <p className="hint">
+        {"Витрина (эталон) — только чтение: правится в боте командой «цена продажи <товар> <сум>»."}
       </p>
     </>
   );

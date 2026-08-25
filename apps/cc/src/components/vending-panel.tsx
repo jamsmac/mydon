@@ -14,6 +14,7 @@ import {
   type VendingSyncRun,
 } from "../lib/core";
 import { SHRINKAGE_PANEL_DAYS, ShrinkageAlerts, ShrinkageAlertsFailed } from "./shrinkage-view";
+import { OurvendHealthSection } from "./ourvend-health-view";
 import { CoreDown } from "./core-down";
 import { NewEntityForm } from "./entity-new";
 import { typeOne } from "../lib/labels";
@@ -216,6 +217,10 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
   const усушка: Promise<VendingShrinkageReport | null> = core
     .vendingShrinkage(SHRINKAGE_PANEL_DAYS)
     .catch(() => null);
+  // Здоровье сбора (П5b, R-P5b-8) — по той же причине и тем же способом:
+  // свой запрос, свой отказ, но старт вместе с основным пакетом, иначе
+  // вкладка ждала бы его последовательно. Отказ ловит сама секция.
+  const здоровье = OurvendHealthSection();
 
   try {
     let forecast: { critical: VendingRunout[] };
@@ -276,6 +281,11 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
       )}
 
       {shrinkage ? <ShrinkageAlerts report={shrinkage} domain={domain} /> : <ShrinkageAlertsFailed />}
+
+      {/* Здоровье сбора рядом с усушкой: обе секции про то, можно ли
+          верить числам вкладки. 12 отказов подряд с 24.08 никто не
+          заметил — смотреть было некуда (R-P5b-8). */}
+      {await здоровье}
 
       {purchase.items.length > 0 && (
         <>

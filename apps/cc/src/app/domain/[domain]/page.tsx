@@ -63,6 +63,9 @@ import { ReportsOverview } from "../../../components/reports-overview";
 import { VendingMachinesPanel, VendingSupplyPanel } from "../../../components/vending-panel";
 import { PurchasePlanView } from "../../../components/purchase-plan-view";
 import { SHRINKAGE_WINDOWS, ShrinkageView } from "../../../components/shrinkage-view";
+import { MARGIN_WINDOWS, MarginView } from "../../../components/margin-view";
+import { DEAD_STOCK_WINDOWS, DeadStockView } from "../../../components/dead-stock-view";
+import { PRICE_WINDOWS, VendingPricesView } from "../../../components/vending-prices-view";
 import { ProductRulesView } from "../../../components/product-rules-view";
 import { CoffeePanel } from "../../../components/coffee-panel";
 import {
@@ -687,6 +690,14 @@ export default async function DomainPage({
   // Сам отчёт тянет лист (как «План закупа»): страница только читает окно.
   const shrinkDays =
     (SHRINKAGE_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 14;
+
+  // Аналитика снек-контура (П5b): у каждого листа своё окно и свой набор
+  // кнопок, но приём тот же, что у усушки — страница читает `?days=`, а сам
+  // отчёт тянет лист. Белый список здесь не защита прода (ядро зажимает окно
+  // своим DTO), а просто перечень кнопок листа.
+  const marginDays = (MARGIN_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 30;
+  const deadStockDays = (DEAD_STOCK_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 21;
+  const priceDays = (PRICE_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 30;
 
   // Реестр пробелов (срез К, задача 6, шаг 3): вычисляется на каждом чтении
   // (R-K4) — пустой массив здесь означает «всё, что можно посчитать, посчитано»,
@@ -1964,6 +1975,16 @@ export default async function DomainPage({
           чтобы его числа не разъехались с утренним алертом и ботом. ── */}
       {group && leaf?.type === "shrinkage" && <ShrinkageView domain={domain} days={shrinkDays} />}
 
+      {/* ── Аналитика снек-контура (П5b): маржа по проданному, мёртвый сток и
+          цены (изменения, витрина против эталона, динамика по месяцам).
+          Считает ядро (/vending/margin, /vending/dead-stock,
+          /vending/price-changes + /vending/price-gap) — панель только
+          показывает, чтобы её числа не разъехались с ботом и недельной
+          сводкой. Кофе сюда не входит (R-P5b-9). ── */}
+      {group && leaf?.type === "margin" && <MarginView domain={domain} days={marginDays} />}
+      {group && leaf?.type === "dead_stock" && <DeadStockView domain={domain} days={deadStockDays} />}
+      {group && leaf?.type === "prices" && <VendingPricesView domain={domain} days={priceDays} />}
+
       {/* ── Правила закупа (срез П5a): блок / исключение / фикс-количество
           по товару вендинга — форма поверх прайса (Task 6), своих карточек
           реестра лист не заводит. ── */}
@@ -2490,6 +2511,9 @@ export default async function DomainPage({
           "buy_plan",
           "purchase_rules",
           "shrinkage",
+          "margin",
+          "dead_stock",
+          "prices",
           "norm_fact",
           "cost",
           "feed",

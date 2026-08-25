@@ -1,5 +1,11 @@
 import "server-only";
-import type { DenominationCounts } from "@mydon/shared";
+import type {
+  DeadStockReport,
+  DenominationCounts,
+  MarginReport,
+  PriceChangesReport,
+  PriceGapReport,
+} from "@mydon/shared";
 
 /**
  * Клиент MYDON Core для оболочки.
@@ -284,6 +290,67 @@ export interface VendingShrinkageReport {
   warnings: VendingShrinkageWarning[];
 }
 
+/**
+ * Аналитика снек-контура (П5b): формы отчётов живут в `@mydon/shared`
+ * (`vending-reports.ts`, R-P5b-10) — их считает Core, а бот и панель
+ * ИМПОРТИРУЮТ оттуда же. Здесь только реэкспорт: ни одно поле не переписано,
+ * иначе у владельца снова разъехались бы три копии одного числа (урок П5a).
+ */
+export type {
+  DeadRow,
+  DeadStockReport,
+  MarginExcluded,
+  MarginMachine,
+  MarginProduct,
+  MarginReport,
+  MarginTotals,
+  PriceChange,
+  PriceChangesReport,
+  PriceGapReport,
+  PriceGapRow,
+} from "@mydon/shared";
+
+/**
+ * Средняя цена товара за месяц — донорская «динамика по месяцам», только для
+ * панели (R-P5b-5): в боте её нет, там она не читается.
+ *
+ * ВРЕМЕННО объявлено здесь. Task 1 вынес в `@mydon/shared` формы маржи, стока
+ * и цен, но `MonthlyPrice` и `OurvendHealth` туда не попали. Как только Core
+ * (Task 3/4) отдаст их из shared — заменить на реэкспорт выше, поля НЕ меняя.
+ */
+export interface MonthlyPrice {
+  product: string;
+  /** Месяц, `YYYY-MM`. */
+  month: string;
+  /** Средняя витринная цена месяца (amount/qty). `null` — продаж в месяце не было. */
+  retail: number | null;
+  /** Средняя закупочная цена месяца по принятым накладным. `null` — приходов не было. */
+  purchase: number | null;
+}
+
+/**
+ * Здоровье сбора OurVend (R-P5b-8): прогоны, серия отказов, свежесть снимков и
+ * паритет с учётной дорожкой. Живого запроса к OurVend из панели нет и не
+ * будет — коннектор живёт в агентах по крону, здесь только его следы.
+ *
+ * ВРЕМЕННО объявлено здесь — см. оговорку у `MonthlyPrice`.
+ */
+export interface OurvendHealth {
+  /** Последние прогоны, свежий первым — та же форма, что у `/vending/sync`. */
+  runs: VendingSyncRun[];
+  /** Сколько отказов подряд идёт прямо сейчас. 0 — последний прогон не упал. */
+  failedStreak: number;
+  lastSuccessAt: string | null;
+  /** Возраст последнего снимка слотов в минутах; `null` — снимков НЕТ вовсе (это не «свежо»). */
+  slotsLagMin: number | null;
+  /** Возраст последнего снимка продаж в часах; `null` — снимков нет вовсе. */
+  salesLagH: number | null;
+  /** Возраст снимка `product_sale`: в деньги не идёт (окно 7 дней), но по нему видно, жив ли сбор. */
+  productSaleLagH: number | null;
+  /** Паритет own↔stock за окно: продажи (`ok`/`mismatches`) и остатки (`stockOk`). */
+  parity: { days: number; ok: boolean; mismatches: number; stockOk: boolean; note: string | null };
+}
+
 /** Событие детектора заливок: что автомат получил и была ли запись оператора. */
 export interface VendingRefillEvent {
   id: string;
@@ -303,6 +370,12 @@ export interface VendingProductRow {
   name: string;
   category: "drink" | "snack" | "other";
   purchasePrice: number | null;
+  /**
+   * Эталон витрины — слово владельца о том, почём товар должен продаваться
+   * (`vending_product.sale_price`, R-P5b-6). `null` — эталон не задан, и это
+   * НЕ ноль: сравнивать факт не с чем. Пишет только бот.
+   */
+  salePrice: number | null;
   packSize: number;
   isActive: boolean;
   excludedFromPurchase: boolean;
@@ -2327,6 +2400,19 @@ export const core = {
    * само зажимает значение, поэтому лист может звать его любым из трёх.
    */
   vendingShrinkage: (days = 14) => get<VendingShrinkageReport>(`/vending/shrinkage?days=${days}`),
+  /**
+   * Аналитика снек-контура (П5b). Окна зажимает ядро (маржа 1..90, сток 1..90,
+   * цены 1..180) — панель зовёт их значениями своих переключателей.
+   */
+  vendingMargin: (days = 30) => get<MarginReport>(`/vending/margin?days=${days}`),
+  vendingDeadStock: (days = 21) => get<DeadStockReport>(`/vending/dead-stock?days=${days}`),
+  /** `monthly` — донорская динамика по месяцам, её просит только панель (R-P5b-5). */
+  vendingPriceChanges: (days = 30) =>
+    get<PriceChangesReport & { monthly: MonthlyPrice[] }>(`/vending/price-changes?days=${days}`),
+  /** Факт витрины против эталона владельца. Окно — своё, короткое (R-P5b-6). */
+  vendingPriceGap: (days = 14) => get<PriceGapReport>(`/vending/price-gap?days=${days}`),
+  /** Здоровье сбора OurVend: прогоны, серия отказов, лаги снимков, паритет (R-P5b-8). */
+  ourvendHealth: (runs = 20) => get<OurvendHealth>(`/ourvend/health?runs=${runs}`),
   /** Журнал детектора заливок: что автомат получил и была ли запись оператора. */
   vendingRefillEvents: (days = 14) => get<VendingRefillEvent[]>(`/vending/refill-events?days=${days}`),
   /** Прайс вендинга с правилами закупа — для листа «Правила закупа». */
