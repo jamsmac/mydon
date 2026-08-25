@@ -199,7 +199,7 @@ const ЗДОРОВЬЕ: OurvendHealth = {
     ok: false,
     mismatches: 3,
     stockOk: false,
-    stockChecked: 0,
+    checked: 0, stockChecked: 0,
     note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
   },
 };
@@ -445,7 +445,7 @@ describe("Тексты отчётов", () => {
       ok: false,
       mismatches: 0,
       stockOk: false,
-      stockChecked: 0,
+      checked: 14, stockChecked: 0,
       note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
     });
     assert.match(t, /продажи ✅/);
@@ -456,7 +456,7 @@ describe("Тексты отчётов", () => {
   });
 
   it("паритет: настоящее расхождение остаётся красным", () => {
-    const t = паритетСтрока({ days: 7, ok: false, mismatches: 3, stockOk: true, stockChecked: 14, note: null });
+    const t = паритетСтрока({ days: 7, ok: false, mismatches: 3, stockOk: true, checked: 14, stockChecked: 14, note: null });
     assert.match(t, /продажи ❌ расхождений 3/);
     assert.match(t, /остатки ✅/);
   });
@@ -497,7 +497,7 @@ describe("Пустые состояния и предупреждения (ре�
       slotsLagMin: null,
       salesLagH: null,
       productSaleLagH: null,
-      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, stockChecked: 0, note: null },
+      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: null },
     }).join("\n");
     assert.match(t, /Прогонов сбора за период нет — здоровье не оценить/);
     assert.ok(!t.includes("✅ Отказов подряд нет"));

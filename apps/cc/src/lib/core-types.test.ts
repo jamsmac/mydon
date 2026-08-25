@@ -39,7 +39,7 @@ const здоровьеОбщее: SharedHealth = {
   slotsLagMin: 12,
   salesLagH: 13,
   productSaleLagH: 0.2,
-  parity: { days: 7, ok: false, mismatches: 0, stockOk: false, stockChecked: 0, note: "остатки: снимков остатков OurVend за период нет" },
+  parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: "остатки: снимков остатков OurVend за период нет" },
 };
 
 const месяцОбщий: SharedMonthly = { product: "Kinder Bueno", month: "2026-07", retail: 11_000, purchase: 7_700 };

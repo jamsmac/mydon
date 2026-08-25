@@ -35,7 +35,7 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   slotsLagMin: null,
   salesLagH: 10.7,
   productSaleLagH: 36.8,
-  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, stockChecked: 14, note: null },
+  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, checked: 14, stockChecked: 14, note: null },
 };
 
 const ЗДОРОВ: OurvendHealth = {
@@ -45,7 +45,7 @@ const ЗДОРОВ: OurvendHealth = {
   slotsLagMin: 48,
   salesLagH: 1.2,
   productSaleLagH: 2.4,
-  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, stockChecked: 14, note: null },
+  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, checked: 14, stockChecked: 14, note: null },
 };
 
 describe("Секция «Здоровье сбора»", () => {
@@ -68,7 +68,7 @@ describe("Секция «Здоровье сбора»", () => {
   it("паритет: продажи и остатки — две разные пилюли, расхождение красное", () => {
     render(
       <OurvendHealthCard
-        health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 3, stockOk: false, stockChecked: 14, note: "снапшот моложе окна" } }}
+        health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 3, stockOk: false, checked: 14, stockChecked: 14, note: "снапшот моложе окна" } }}
       />,
     );
     expect(screen.getByText("3 расхождения")).toBeVisible();
@@ -154,12 +154,12 @@ describe("Здоровье сбора: тексты для владельца", 
 
   it("расхождения склоняются числом", () => {
     const { unmount } = render(
-      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 1, stockOk: true, stockChecked: 14, note: null } }} />,
+      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 1, stockOk: true, checked: 14, stockChecked: 14, note: null } }} />,
     );
     expect(screen.getByText("1 расхождение")).toBeVisible();
     unmount();
     render(
-      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 5, stockOk: true, stockChecked: 14, note: null } }} />,
+      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 5, stockOk: true, checked: 14, stockChecked: 14, note: null } }} />,
     );
     expect(screen.getByText("5 расхождений")).toBeVisible();
   });
@@ -180,7 +180,7 @@ describe("Здоровье сбора: паритет, когда сверять
       mismatches: 0,
       stockOk: false,
       // Ноль сравненных пар — «сверять нечем», а не «сошлось»/«разошлось».
-      stockChecked: 0,
+      checked: 0, stockChecked: 0,
       note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
     },
   };

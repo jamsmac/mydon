@@ -26,7 +26,7 @@ const НЕДЕЛЯ: WeeklyDigest = {
     slotsLagMin: null,
     salesLagH: null,
     productSaleLagH: null,
-    parity: { days: 7, ok: false, mismatches: 0, stockOk: false, stockChecked: 0, note: null },
+    parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: null },
   },
   warnings: [],
 };
