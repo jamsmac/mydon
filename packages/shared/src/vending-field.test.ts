@@ -6,16 +6,33 @@ const slot = (coilId: string, product: string | null, quantity: number, capacity
 const at = (iso: string) => new Date(iso);
 
 describe("Полевой контур: мёртвый автомат (R-P4-4)", () => {
-  it("все слоты полны до 199 при ≥10 слотах — мёртв", () => {
+  it("заглушка источника: 199=199 по всем слотам — ни одна ёмкость не в диапазоне, мёртв", () => {
     const slots = Array.from({ length: 12 }, (_, i) => slot(String(i + 1), "X", 199, 199));
-    assert.equal(deadMachine(slots, 200), true);
+    assert.equal(deadMachine(slots), true);
   });
-  it("живой автомат: хотя бы один слот не полон", () => {
-    const slots = [...Array.from({ length: 11 }, (_, i) => slot(String(i + 1), "X", 5)), slot("12", "Y", 3)];
+  it("полный ЖИВОЙ автомат мёртвым не считается", () => {
+    // Только что заправленный автомат на 43 пружины стоит 5/5 по всем слотам.
+    // Прежнее правило «все валидные слоты полны» выбрасывало его из плана и
+    // продаж на несколько часов — ровно тот дефект, ради которого правило
+    // переписано.
+    const slots = Array.from({ length: 43 }, (_, i) => slot(String(i + 1), "X", 5, 5));
     assert.equal(deadMachine(slots), false);
   });
-  it("меньше 10 слотов с товаром — не мёртв, даже если все полны", () => {
-    assert.equal(deadMachine(Array.from({ length: DEAD_MIN_SLOTS - 1 }, (_, i) => slot(String(i), "X", 5))), false);
+  it("часть ёмкостей в диапазоне — не заглушка, а сбитая калибровка", () => {
+    const slots = [
+      ...Array.from({ length: 11 }, (_, i) => slot(String(i + 1), "X", 199, 199)),
+      slot("12", "Y", 3, 5),
+    ];
+    assert.equal(deadMachine(slots), false);
+  });
+  it("меньше 10 слотов с товаром — не мёртв, даже если ёмкости мусорные", () => {
+    assert.equal(
+      deadMachine(Array.from({ length: DEAD_MIN_SLOTS - 1 }, (_, i) => slot(String(i), "X", 199, 199))),
+      false,
+    );
+  });
+  it("пустой автомат (слотов с товаром нет) — не мёртв: судить не о чем", () => {
+    assert.equal(deadMachine(Array.from({ length: 12 }, (_, i) => slot(String(i), null, 0, 0))), false);
   });
 });
 
@@ -35,13 +52,15 @@ describe("Полевой контур: детектор заливок по сн
   });
   it("ниже порога — событий нет", () => { assert.equal(detectRefills(snaps, 10).length, 0); });
   it("мёртвый автомат пропускается; разные автоматы не смешиваются", () => {
-    const dead = Array.from({ length: 12 }, (_, i) => slot(String(i), "X", 199, 199));
+    // Заглушка отдаёт 199=199, и между «снимками» число даже растёт — без
+    // фильтра это выглядело бы заливкой на 588 единиц.
+    const dead = (q: number) => Array.from({ length: 12 }, (_, i) => slot(String(i), "X", q, 199));
     const mixed: MachineSnapshot[] = [
-      { serial: "360", capturedAt: at("2026-08-18T07:00:00Z"), slots: dead },
-      { serial: "360", capturedAt: at("2026-08-18T10:00:00Z"), slots: dead },
+      { serial: "360", capturedAt: at("2026-08-18T07:00:00Z"), slots: dead(150) },
+      { serial: "360", capturedAt: at("2026-08-18T10:00:00Z"), slots: dead(199) },
       ...snaps,
     ];
-    assert.equal(detectRefills(mixed, 5, 200).map((e) => e.serial).join(), "376");
+    assert.equal(detectRefills(mixed, 5).map((e) => e.serial).join(), "376");
   });
   it("слот без товара или с capacity вне 0..MAX не участвует", () => {
     const s: MachineSnapshot[] = [

@@ -27,19 +27,29 @@ export interface MachineSnapshot {
 }
 
 /**
- * Порог «мёртвого» автомата (R-P4-4): склад-заглушки (SKLAD 4S/5S/6S) отдают
- * `quantity = capacity = 199` по ВСЕМ слотам — данных с автомата нет, а не
- * «всё раскуплено». 10 слотов — чтобы маленький настоящий автомат с полной
- * загрузкой не попал под фильтр по случайности.
+ * Порог «мёртвого» автомата (R-P4-4): сколько слотов с товаром должно быть,
+ * чтобы судить об источнике целиком. Пара сбитых ёмкостей на живом автомате —
+ * это калибровка, а не заглушка источника.
  */
 export const DEAD_MIN_SLOTS = 10;
 
 const usable = (s: SnapshotSlot, max: number): boolean => hasProduct(s) && slotValid(s, max);
 
-/** Мёртвый автомат: валидных слотов с товаром ≥ DEAD_MIN_SLOTS и все они полны (quantity ≥ capacity). */
+/**
+ * Мёртвый автомат (R-P4-4): в слотах есть товар (их ≥ DEAD_MIN_SLOTS), но НИ
+ * ОДНА ёмкость не попадает в диапазон — источник отдаёт мусор вместо данных.
+ * Подпись с прода: склад-заглушки SKLAD 4S/5S/6S отдают `quantity = capacity =
+ * 199` по всем слотам, а 199 больше `MAX_CAPACITY`.
+ *
+ * Полный ЖИВОЙ автомат мёртвым НЕ считается. Прежнее правило («все валидные
+ * слоты полны») давало ложное срабатывание ровно на том, ради чего затевался
+ * весь срез: только что заправленный автомат на 43 пружины стоит 5/5 по всем
+ * слотам и на несколько часов выпадал бы из плана, продаж и прогноза — с
+ * предупреждением «нет данных», которое в этом случае враньё.
+ */
 export function deadMachine(slots: SnapshotSlot[], maxCapacity = MAX_CAPACITY): boolean {
-  const live = slots.filter((s) => usable(s, maxCapacity));
-  return live.length >= DEAD_MIN_SLOTS && live.every((s) => s.quantity >= s.capacity);
+  const withProduct = slots.filter(hasProduct);
+  return withProduct.length >= DEAD_MIN_SLOTS && withProduct.every((s) => !slotValid(s, maxCapacity));
 }
 
 export interface RefillEvent {
@@ -68,6 +78,9 @@ const qtyByProduct = (slots: SnapshotSlot[], max: number): Map<string, number> =
  * гасятся только внутри одного окна, если оба произошли между двумя
  * снимками (см. R-P4-3: усушку поэтому считаем по дням без заливок).
  * Мёртвый автомат (по любому из пары снимков) — окно пропускается целиком.
+ * Проверка явная, хотя `usable` и так отсекает слоты заглушки: намерение «по
+ * этому автомату данных нет» должно быть видно в коде, а не выводиться
+ * читателем из фильтра ёмкостей.
  */
 export function detectRefills(snapshots: MachineSnapshot[], minUnits: number, maxCapacity = MAX_CAPACITY): RefillEvent[] {
   const bySerial = new Map<string, MachineSnapshot[]>();

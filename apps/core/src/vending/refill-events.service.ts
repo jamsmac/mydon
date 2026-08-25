@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte } from "drizzle-orm";
 import { event, slotSnapshot, systemConfig, vendingRefill, vendingRefillEvent } from "@mydon/db";
 import {
   deadMachine,
@@ -9,6 +9,7 @@ import {
   planogramStatus,
   type HumanRefill,
   type MachineSnapshot,
+  type RefillEvent,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { resolveEffective, specFor } from "../system/config-spec";
@@ -39,8 +40,12 @@ export interface DetectResult {
   events: number;
   /** Сопоставлено с записью оператора в этом прогоне: новые + доклеенные к старым. */
   matched: number;
-  /** Автоматы без данных: все слоты полны либо планограмма не читается (R-P4-4). */
-  skippedDead: string[];
+  /**
+   * Автоматы, по которым детектор молчит, и почему (R-P4-4): заглушка
+   * источника (ёмкости вне диапазона) и нечитаемая планограмма — разные
+   * поломки, и сводить их к одному списку серийников значит спрятать причину.
+   */
+  skippedDead: { serial: string; reason: string }[];
 }
 
 export interface RefillEventRow {
@@ -95,60 +100,82 @@ export class RefillEventsService {
     const окно = зажать(days, DETECT_DAYS_DEFAULT, DETECT_DAYS_MAX);
     const от = new Date(Date.now() - окно * 86_400_000);
 
-    const [снимки, canonOf, minUnits] = await Promise.all([
-      this.db.select().from(slotSnapshot).where(gte(slotSnapshot.capturedAt, от)),
+    const [серии, canonOf, minUnits] = await Promise.all([
+      // Сначала — только СПИСОК автоматов, попавших в окно. Одним запросом на
+      // весь парк снимки читать нельзя: при потолке окна в 30 суток это
+      // четверть миллиона строк в память разом. Индекс
+      // `slot_snapshot_machine_captured_idx` (machine_serial, captured_at)
+      // обслуживает и эту выборку, и разбор по автомату ниже.
+      this.db
+        .select({ serial: slotSnapshot.machineSerial })
+        .from(slotSnapshot)
+        .where(gte(slotSnapshot.capturedAt, от))
+        .groupBy(slotSnapshot.machineSerial),
       // Карта алиасов читается ОДИН раз на прогон: имён в снимках тысячи, и
       // поход в базу на каждое превратил бы детектор в N+1.
       this.vending.canonResolver(),
       this.minUnits(),
     ]);
 
-    // Снимок = (автомат, момент съёма): строки `slot_snapshot` лежат по слоту.
-    const поМоменту = new Map<string, MachineSnapshot>();
-    for (const r of снимки) {
-      const k = `${r.machineSerial}|${r.capturedAt.getTime()}`;
-      let snap = поМоменту.get(k);
-      if (!snap) {
-        snap = { serial: r.machineSerial, capturedAt: r.capturedAt, slots: [] };
-        поМоменту.set(k, snap);
-      }
-      const имя = r.productName?.trim();
-      snap.slots.push({
-        coilId: r.coilId,
-        // Канон ДО сравнения: один и тот же товар приезжает из Ourvend под
-        // разными именами, и без канона смена написания выглядела бы как
-        // смена товара в слоте — дельта потерялась бы целиком.
-        product: имя ? canonOf(имя) : null,
-        capacity: r.capacity,
-        quantity: r.quantity,
-      });
-    }
-
-    const поАвтомату = new Map<string, MachineSnapshot[]>();
-    for (const snap of поМоменту.values()) {
-      поАвтомату.set(snap.serial, [...(поАвтомату.get(snap.serial) ?? []), snap]);
-    }
-
-    // Мёртвые — вон до расчёта (R-P4-4). «Все слоты полны во всех снимках» и
-    // «планограмма не читается» — это одно и то же «данных с автомата нет»:
-    // SKLAD 4S/5S/6S отдают quantity = capacity = 199 по всем пружинам, и
-    // такой автомат не должен ни давать событий, ни молча исчезать из итога.
-    const skippedDead: string[] = [];
-    const живые: MachineSnapshot[] = [];
+    // Дальше — автомат за автоматом. В памяти живёт снимок ОДНОГО аппарата
+    // (≈40 слотов × 8 съёмов в сутки) и события, которых единицы; выборка по
+    // всему парку сразу и события считались бы так же, но пик памяти рос бы
+    // линейно по размеру парка и глубине окна.
+    const skippedDead: DetectResult["skippedDead"] = [];
+    const события: RefillEvent[] = [];
     let windows = 0;
     let machines = 0;
-    for (const [serial, список] of поАвтомату) {
-      if (список.every((s) => нетДанных(s))) {
-        skippedDead.push(serial);
+
+    for (const { serial } of серии) {
+      const строки = await this.db
+        .select({
+          coilId: slotSnapshot.coilId,
+          productName: slotSnapshot.productName,
+          capacity: slotSnapshot.capacity,
+          quantity: slotSnapshot.quantity,
+          capturedAt: slotSnapshot.capturedAt,
+        })
+        .from(slotSnapshot)
+        .where(and(eq(slotSnapshot.machineSerial, serial), gte(slotSnapshot.capturedAt, от)));
+
+      // Снимок = момент съёма: строки `slot_snapshot` лежат по слоту.
+      const поМоменту = new Map<number, MachineSnapshot>();
+      for (const r of строки) {
+        const t = r.capturedAt.getTime();
+        let snap = поМоменту.get(t);
+        if (!snap) {
+          snap = { serial, capturedAt: r.capturedAt, slots: [] };
+          поМоменту.set(t, snap);
+        }
+        const имя = r.productName?.trim();
+        snap.slots.push({
+          coilId: r.coilId,
+          // Канон ДО сравнения: один и тот же товар приезжает из Ourvend под
+          // разными именами, и без канона смена написания выглядела бы как
+          // смена товара в слоте — дельта потерялась бы целиком.
+          product: имя ? canonOf(имя) : null,
+          capacity: r.capacity,
+          quantity: r.quantity,
+        });
+      }
+      const список = [...поМоменту.values()];
+      if (список.length === 0) continue;
+
+      // Мёртвые — вон до расчёта (R-P4-4). Автомат-заглушка и автомат с
+      // нечитаемой планограммой одинаково не дают детектору сказать ничего, но
+      // причины разные, и владельцу нужна именно причина: «источник врёт» и
+      // «слоты не откалиброваны» чинятся в разных местах.
+      const причина = причинаМолчания(список);
+      if (причина) {
+        skippedDead.push({ serial, reason: причина });
         continue;
       }
       machines += 1;
-      windows += Math.max(0, список.length - 1);
-      живые.push(...список);
+      windows += список.length - 1;
+      события.push(...detectRefills(список, minUnits));
     }
-    skippedDead.sort((a, b) => a.localeCompare(b, "ru"));
+    skippedDead.sort((a, b) => a.serial.localeCompare(b.serial, "ru"));
 
-    const события = detectRefills(живые, minUnits);
     if (события.length === 0) return { machines, windows, events: 0, matched: 0, skippedDead };
 
     const [записи, ужеЕсть, реестр] = await Promise.all([
@@ -283,9 +310,17 @@ export class RefillEventsService {
   }
 }
 
-/** Снимок, по которому детектор не может сказать ничего (см. `skippedDead`). */
-function нетДанных(snap: MachineSnapshot): boolean {
-  return planogramStatus(snap.slots) !== "ok" || deadMachine(snap.slots);
+/**
+ * Почему детектор молчит об автомате — или `null`, если сказать ему есть что.
+ *
+ * Судим по ВСЕМ снимкам окна: один «плохой» съём — это сбой выгрузки, а не
+ * приговор автомату, и выбрасывать из-за него сутки данных нельзя.
+ */
+function причинаМолчания(снимки: MachineSnapshot[]): string | null {
+  if (снимки.some((s) => planogramStatus(s.slots) === "ok" && !deadMachine(s.slots))) return null;
+  if (снимки.every((s) => deadMachine(s.slots))) return "заглушка источника: ёмкости слотов вне диапазона";
+  if (снимки.every((s) => planogramStatus(s.slots) === "no_slots")) return "нет назначенных слотов";
+  return "планограмма не откалибрована: ёмкости слотов не в диапазоне";
 }
 
 function зажать(days: number, дефолт: number, потолок: number): number {

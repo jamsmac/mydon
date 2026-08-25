@@ -63,9 +63,23 @@ function detectDb(м: Мир) {
   const обновления: Partial<EventRow>[] = [];
   let seq = 0;
 
+  /**
+   * Детектор сначала спрашивает СПИСОК автоматов окна, потом читает снимки по
+   * одному автомату (иначе при окне в 30 суток весь парк лёг бы в память
+   * разом). Стаб отвечает по порядку вызовов и циклится, чтобы повторный
+   * `detect()` в том же тесте отработал так же.
+   */
+  const серии = (): string[] => [...new Set((м.snapshots ?? []).map((r) => r.machineSerial))];
+  let снимковЗапросов = 0;
+  const снимкиОтвет = (): unknown[] => {
+    const список = серии();
+    const n = снимковЗапросов++ % (список.length + 1);
+    return n === 0 ? список.map((serial) => ({ serial })) : (м.snapshots ?? []).filter((r) => r.machineSerial === список[n - 1]);
+  };
+
   const rowsOf = (t: unknown): unknown[] =>
     t === slotSnapshot
-      ? (м.snapshots ?? [])
+      ? снимкиОтвет()
       : t === vendingRefill
         ? (м.refills ?? [])
         : t === vendingRefillEvent
@@ -88,6 +102,7 @@ function detectDb(м: Мир) {
     const p = Promise.resolve(rows);
     const chain: Record<string, unknown> = {};
     chain.where = () => chain;
+    chain.groupBy = () => chain;
     chain.orderBy = () => chain;
     chain.limit = async () => rows;
     chain.then = p.then.bind(p);
@@ -211,24 +226,48 @@ describe("Вендинг Core: детектор заливок по снимка
     assert.equal(события.length, 0, "12 единиц при пороге 20 — это не заливка, а докладка пары пружин");
   });
 
-  it("мёртвый автомат (все слоты полны) уходит в skippedDead и событий не даёт", async () => {
-    // SKLAD-заглушка: все слоты полны во всех снимках — это «нет данных с
-    // автомата», а не «никто ничего не купил» (R-P4-4).
+  it("заглушка источника уходит в skippedDead с причиной; полный живой автомат — нет", async () => {
+    // SKLAD-заглушка отдаёт 199=199 по всем пружинам: ёмкость вне диапазона —
+    // это «источник врёт», а не «автомат полон» (R-P4-4).
     const мёртвые: [string, string | null, number, number][] = Array.from({ length: 10 }, (_, i) => [
       String(i + 1),
       "Заглушка",
-      10,
-      10,
+      199,
+      199,
+    ]);
+    // А вот ЖИВОЙ автомат, только что заправленный под завязку: 12 слотов 5/5.
+    // Он обязан остаться в осмотренных — прежнее правило выбрасывало его.
+    const полный: [string, string | null, number, number][] = Array.from({ length: 12 }, (_, i) => [
+      String(i + 1),
+      "Snickers",
+      5,
+      5,
     ]);
     const { svc, события } = сервис({
-      snapshots: [...ЗАЛИВКА, ...снимок("SKLAD", T1, мёртвые), ...снимок("SKLAD", T2, мёртвые)],
+      snapshots: [
+        ...ЗАЛИВКА,
+        ...снимок("SKLAD", T1, мёртвые),
+        ...снимок("SKLAD", T2, мёртвые),
+        ...снимок("FULL", T1, полный),
+        ...снимок("FULL", T2, полный),
+      ],
       entities: РЕЕСТР,
     });
     const res = await svc.detect(2);
-    assert.deepEqual(res.skippedDead, ["SKLAD"]);
-    assert.equal(res.machines, 1, "мёртвый автомат не считается осмотренным");
+    assert.deepEqual(res.skippedDead, [{ serial: "SKLAD", reason: "заглушка источника: ёмкости слотов вне диапазона" }]);
+    assert.equal(res.machines, 2, "заправленный под завязку автомат — осмотрен, а не мёртв");
     assert.equal(res.events, 1);
     assert.ok(!события.some((e) => e.machineSerial === "SKLAD"));
+  });
+
+  it("автомат без назначенных слотов молчит по своей причине", async () => {
+    const пустые: [string, string | null, number, number][] = Array.from({ length: 3 }, (_, i) => [String(i + 1), null, 0, 0]);
+    const { svc } = сервис({
+      snapshots: [...ЗАЛИВКА, ...снимок("ПУСТОЙ", T1, пустые), ...снимок("ПУСТОЙ", T2, пустые)],
+      entities: РЕЕСТР,
+    });
+    const res = await svc.detect(2);
+    assert.deepEqual(res.skippedDead, [{ serial: "ПУСТОЙ", reason: "нет назначенных слотов" }]);
   });
 
   it("запись оператора в окне ±3 ч сопоставляется с событием", async () => {

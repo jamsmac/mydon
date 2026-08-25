@@ -1970,25 +1970,42 @@ describe("Вендинг Core: план закупа (П5a)", () => {
     assert.equal(plan.stock.back, 44); // остальное закупа уезжает на склад
   });
 
-  it("мёртвый автомат (все слоты полны) выброшен из плана и виден в warnings (R-P4-4)", async () => {
-    // SKLAD-заглушки отдают quantity = capacity по всем пружинам. Дефицит у
-    // них нулевой, поэтому раньше они просто не появлялись в плане — молча.
+  it("автомат-заглушка (ёмкости вне диапазона) выброшен из плана и виден в warnings (R-P4-4)", async () => {
+    // SKLAD-заглушки отдают quantity = capacity = 199 по всем пружинам. Раньше
+    // такой автомат просто не появлялся в плане (не проходил калибровку) — молча.
     const мёртвые: Row[] = Array.from({ length: 10 }, (_, i) => ({
       machineSerial: "2508160358",
       coilId: String(i + 1),
       productName: "Fanta",
-      capacity: 5,
-      quantity: 5,
+      capacity: 199,
+      quantity: 199,
     }));
     const реестр: Ent[] = [...entities, { id: "m-dead", name: "SKLAD 6S", externalRef: "c2508160358", type: "machine" }];
     const db = planDb({ slots: [...slots, ...мёртвые], entities: реестр, cards, products, sales });
     const plan = await new VendingService(db).plan();
 
-    assert.ok(!plan.machines.some((m) => m.serial === "2508160358"), "мёртвый автомат не получает раздачу");
+    assert.ok(!plan.machines.some((m) => m.serial === "2508160358"), "автомат-заглушка не получает раздачу");
     const w = plan.warnings.find((x) => x.code === "machine_skipped" && x.message.includes("SKLAD 6S"))!;
-    assert.match(w.message, /нет данных \(все слоты полны\)/);
+    assert.match(w.message, /ёмкости слотов вне диапазона \(заглушка источника\)/);
     // Причина не подменяется состоянием карточки: автомат числится в строю.
     assert.ok(!/не в строю/.test(w.message));
+  });
+
+  it("только что заправленный автомат (все слоты полны) остаётся в плане", async () => {
+    // Ложное срабатывание прежнего правила: 12 полных ВАЛИДНЫХ слотов — это
+    // обслуженный автомат, а не заглушка. Выбрасывать его значит врать про ту
+    // самую машину, к которой только что съездили.
+    const полный: Row[] = Array.from({ length: 12 }, (_, i) => ({
+      machineSerial: "2508160359",
+      coilId: `f${i + 1}`,
+      productName: "Fanta",
+      capacity: 5,
+      quantity: 5,
+    }));
+    const db = planDb({ slots: [...slots, ...полный], entities, cards, products, sales });
+    const plan = await new VendingService(db).plan();
+    assert.ok(plan.machines.some((m) => m.serial === "2508160359"));
+    assert.ok(!plan.warnings.some((x) => x.code === "machine_skipped" && x.message.includes("American Hospital")));
   });
 });
 
