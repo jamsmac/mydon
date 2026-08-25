@@ -484,6 +484,13 @@
       "when": 1787579676512,
       "tag": "0068_sale_price",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1787682305417,
+      "tag": "0069_stock_count",
+      "breakpoints": true
     }
   ]
 }

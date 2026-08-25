@@ -93,6 +93,18 @@ describe("Ключи аналитики П5b (R-P5b-11)", () => {
   }
 });
 
+describe("Ключ сторожа сбора П8a (R-P8a-6)", () => {
+  it("SYNC_STALE_HOURS: дефолт 6, ноль и отрицательное отвергаются", () => {
+    assert.equal(specFor("SYNC_STALE_HOURS")?.fallback, "6");
+    // Ноль здесь не «показывай всё», а «тревога каждые полчаса навсегда»:
+    // окно в часах нулём не выключается (тот же довод, что у posNumber).
+    assert.ok(validateConfig("SYNC_STALE_HOURS", "0"));
+    assert.ok(validateConfig("SYNC_STALE_HOURS", "-1"));
+    assert.ok(validateConfig("SYNC_STALE_HOURS", "шесть"));
+    assert.equal(validateConfig("SYNC_STALE_HOURS", "12"), null);
+  });
+});
+
 describe("resolveEffective: приоритет база > env > дефолт", () => {
   const spec = specFor("AGENT_AUTONOMY_MAX")!;
 

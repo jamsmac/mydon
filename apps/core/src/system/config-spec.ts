@@ -214,6 +214,15 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     fallback: "15",
     validate: nonNegNumber,
   },
+  // ── Вендинг: сторож сбора (П8a, R-P8a-6) ──
+  {
+    key: "SYNC_STALE_HOURS",
+    label: "Вендинг: порог застоя сбора OurVend, часов",
+    kind: "number",
+    fallback: "6",
+    help: "Сбор ходит раз в 3 часа: 6 ч = два пропущенных прогона подряд.",
+    validate: posNumber,
+  },
   // ── GLOBERENT: комиссия менеджера — у донора PROMACH жили ТРИ формулы,
   // перенесены все три (packages/shared/globerent/commission.ts); какая
   // действует — решает владелец здесь, а не константа кода. ──
