@@ -2706,3 +2706,145 @@ describe("Наблюдение закупочной цены при приёмк
     assert.equal(м.events.filter((e) => e.type === "vending.purchase_price_observed").length, 0);
   });
 });
+
+describe("Серия отказов сбора (R-P5b-8)", () => {
+  type RunRow = { id: string; status: "running" | "success" | "partial" | "failed"; startedAt: Date; error: string | null };
+  type EvRow = { type: string; payload: Record<string, unknown>; occurredAt: Date };
+
+  /** Значения-параметры из условия drizzle — стаб обязан фильтровать по тому же, о чём спросили. */
+  const значения = (условие: unknown): unknown[] => {
+    const out: unknown[] = [];
+    const walk = (n: unknown): void => {
+      if (n === null || typeof n !== "object") return;
+      const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
+      if (Array.isArray(chunks)) {
+        for (const c of chunks) walk(c);
+        return;
+      }
+      if ("value" in (n as Record<string, unknown>)) out.push((n as { value: unknown }).value);
+    };
+    walk(условие);
+    return out;
+  };
+
+  /**
+   * Мир журнала сбора: прогоны живут между вызовами, `update` действительно
+   * закрывает свою строку, а записанное событие ВИДНО следующей проверке
+   * дедупа. Стаб, который отдаёт фикстуру как есть, показал бы «дедуп работает»
+   * даже там, где его нет.
+   */
+  function мир(runs: RunRow[], events: EvRow[] = []) {
+    const прогоны = runs.map((r) => ({ ...r }));
+    const журнал = [...events];
+    const db = {
+      update: () => ({
+        set: (v: Record<string, unknown>) => ({
+          where: (условие: unknown) => ({
+            returning: async () => {
+              const id = значения(условие).find((x): x is string => typeof x === "string");
+              const row = прогоны.find((r) => r.id === id);
+              if (!row) return [];
+              row.status = v.status as RunRow["status"];
+              row.error = (v.error as string | null) ?? null;
+              return [{ id: row.id }];
+            },
+          }),
+        }),
+      }),
+      select: () => ({
+        from: (t: unknown) => {
+          if (t === event) {
+            return {
+              where: (условие: unknown) => ({
+                limit: async () => {
+                  const типы = значения(условие).filter((x): x is string => typeof x === "string");
+                  const [с] = значения(условие).filter((x): x is Date => x instanceof Date);
+                  return журнал.filter(
+                    (e) => типы.includes(e.type) && (!с || e.occurredAt.getTime() >= с.getTime()),
+                  );
+                },
+              }),
+            };
+          }
+          return { orderBy: () => ({ limit: async (n: number) => прогоны.slice(0, n) }) };
+        },
+      }),
+      insert: (t: unknown) => ({
+        values: async (v: Record<string, unknown>) => {
+          if (t === event) журнал.push({ ...(v as unknown as EvRow), occurredAt: new Date(СЕЙЧАС) });
+        },
+      }),
+    } as never;
+    return { service: new VendingService(db), events: журнал, прогоны };
+  }
+
+  /** Полдень Ташкента 25.08.2026: и прогоны, и дедуп считаются от него. */
+  const СЕЙЧАС = new Date("2026-08-25T07:00:00.000Z");
+  const ОТКАЗ_ВХОД = { status: "failed" as const, machinesTotal: 5, machinesOk: 0, durationMs: 10_000, error: "This operation was aborted" };
+
+  const прогон = (id: string, status: RunRow["status"], startedAt: string, error: string | null = null): RunRow => ({
+    id,
+    status,
+    startedAt: new Date(startedAt),
+    error,
+  });
+
+  /** Два отказа уже в журнале и открытый третий прогон — состояние прода 25.08. */
+  const ДВА_ОТКАЗА = () => [
+    прогон("run-3", "running", "2026-08-25T06:00:00Z"),
+    прогон("run-2", "failed", "2026-08-25T05:00:00Z", "This operation was aborted"),
+    прогон("run-1", "failed", "2026-08-25T04:00:00Z", "This operation was aborted"),
+  ];
+
+  it("третий отказ подряд даёт событие один раз в сутки", async () => {
+    const м = мир([прогон("run-4", "running", "2026-08-25T07:00:00Z"), ...ДВА_ОТКАЗА()]);
+
+    await м.service.finishSyncRun("run-3", ОТКАЗ_ВХОД, СЕЙЧАС);
+    const тревоги = () => м.events.filter((e) => e.type === "ourvend.sync_failed_streak");
+    assert.equal(тревоги().length, 1);
+    assert.deepEqual(тревоги()[0]!.payload, {
+      streak: 3,
+      lastError: "This operation was aborted",
+      // Начало серии, а не последний отказ: владельцу нужно «с какого часа мы слепые».
+      since: "2026-08-25T04:00:00.000Z",
+    });
+
+    await м.service.finishSyncRun("run-4", ОТКАЗ_ВХОД, СЕЙЧАС);
+    assert.equal(тревоги().length, 1, "четвёртый отказ в те же сутки — не вторая тревога");
+  });
+
+  it("двух отказов мало: порог — третий подряд", async () => {
+    const м = мир([
+      прогон("run-2", "running", "2026-08-25T05:00:00Z"),
+      прогон("run-1", "failed", "2026-08-25T04:00:00Z", "This operation was aborted"),
+    ]);
+    await м.service.finishSyncRun("run-2", ОТКАЗ_ВХОД, СЕЙЧАС);
+    assert.equal(м.events.length, 0, "тревога на втором отказе научила бы владельца не читать тревоги");
+  });
+
+  it("успех события не даёт", async () => {
+    const м = мир(ДВА_ОТКАЗА());
+    await м.service.finishSyncRun(
+      "run-3",
+      { status: "success", machinesTotal: 5, machinesOk: 5, durationMs: 9_900 },
+      СЕЙЧАС,
+    );
+    assert.equal(м.events.length, 0);
+  });
+
+  it("новые сутки — тревога снова проходит", async () => {
+    const вчера = new Date("2026-08-24T07:00:00.000Z");
+    const м = мир(
+      [прогон("run-3", "running", "2026-08-25T06:00:00Z"), ...ДВА_ОТКАЗА().slice(1)],
+      [{ type: "ourvend.sync_failed_streak", payload: { streak: 3 }, occurredAt: вчера }],
+    );
+    await м.service.finishSyncRun("run-3", ОТКАЗ_ВХОД, СЕЙЧАС);
+    assert.equal(м.events.filter((e) => e.type === "ourvend.sync_failed_streak").length, 2);
+  });
+
+  it("неизвестный id — ни записи, ни тревоги", async () => {
+    const м = мир(ДВА_ОТКАЗА());
+    assert.deepEqual(await м.service.finishSyncRun("нет-такого", ОТКАЗ_ВХОД, СЕЙЧАС), { ok: false });
+    assert.equal(м.events.length, 0);
+  });
+});

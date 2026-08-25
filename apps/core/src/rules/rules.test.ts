@@ -168,4 +168,24 @@ describe("Правила уведомлений (FR-2)", () => {
       / 09:00 /,
     );
   });
+
+  it("серия отказов сбора доставляется немедленно и называет час, с которого мы слепые", () => {
+    const [n] = applyRules(
+      ctx("ourvend.sync_failed_streak", {
+        streak: 12,
+        lastError: "This operation was aborted",
+        // 09:00 Ташкента: владелец не должен читать со сдвигом на пять часов.
+        since: "2026-08-24T09:00:00+05:00",
+      }),
+    );
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /12 раз подряд/);
+    assert.match(n!.text, / 09:00: /);
+    assert.match(n!.text, /This operation was aborted/);
+  });
+
+  it("счётная форма не пишет «3 раз подряд»", () => {
+    const [n] = applyRules(ctx("ourvend.sync_failed_streak", { streak: 3, since: "2026-08-24T09:00:00+05:00" }));
+    assert.match(n!.text, /3 раза подряд/);
+  });
 });

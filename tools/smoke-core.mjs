@@ -154,6 +154,40 @@ const ЧТЕНИЕ = [
     },
   },
   {
+    // П5b: недельная сводка. Внутри — четыре расчёта (маржа недели, маржа
+    // предыдущей недели, мёртвый сток, цены) плюс четыре недельных агрегата
+    // (заливки, приходы, инвентаризации) и здоровье сбора: заглушка юнит-теста
+    // не исполняет ни одного из этих запросов. На засеянной базе продаж нет —
+    // и сводка ОБЯЗАНА назвать это пустотой, а не нулевой маржой.
+    path: "/vending/weekly-digest",
+    проверить: (о) => {
+      if (!/^\d{4}-\d{2}$/.test(о?.week)) throw new Error(`weekly-digest.week=${о?.week} — не ключ ISO-недели`);
+      if (!/^\d{4}-\d{2}$/.test(о?.previousWeek)) throw new Error("weekly-digest.previousWeek — не ключ ISO-недели");
+      for (const ключ of ["from", "to"]) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(о?.[ключ])) throw new Error(`weekly-digest.${ключ} — не ташкентские сутки`);
+      }
+      if (о.from >= о.to) throw new Error("weekly-digest: понедельник недели не раньше воскресенья");
+      for (const ключ of ["machines", "topProducts", "worstProducts"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`weekly-digest.${ключ} — не массив`);
+      }
+      if (!Array.isArray(о?.deadStock?.rows)) throw new Error("weekly-digest.deadStock.rows — не массив");
+      for (const ключ of ["purchase", "retail"]) {
+        if (!Array.isArray(о?.priceChanges?.[ключ])) throw new Error(`weekly-digest.priceChanges.${ключ} — не массив`);
+      }
+      for (const ключ of ["refills", "intake", "stocktakes"]) {
+        if (typeof о?.[ключ] !== "object" || о[ключ] === null) throw new Error(`weekly-digest.${ключ} — не объект`);
+      }
+      if (о.stocktakes.lastCountedAt !== null && typeof о.stocktakes.lastCountedAt !== "string") {
+        throw new Error("weekly-digest.stocktakes.lastCountedAt — не ISO и не null");
+      }
+      if (typeof о?.delta?.qty !== "number") throw new Error("weekly-digest.delta.qty — не число");
+      if (о.machines.length === 0 && о.totals.pct !== null) {
+        throw new Error("неделя без продаж отдала процент маржи — нули выданы за результат");
+      }
+      if (о?.health?.parity == null) throw new Error("weekly-digest.health.parity — null (сверять нечего ≠ паритета нет)");
+    },
+  },
+  {
     // Паритет: сырой SQL с канонизацией серийника, теперь в двух половинах
     // (продажи и остатки). Ровно тот класс запросов, ради которого заведён
     // этот прогон.
@@ -161,6 +195,32 @@ const ЧТЕНИЕ = [
     проверить: (ответ) => {
       if (!Array.isArray(ответ?.mismatches)) throw new Error("parity.mismatches — не массив");
       if (!Array.isArray(ответ?.stock?.mismatches)) throw new Error("parity.stock.mismatches — не массив");
+    },
+  },
+  {
+    // П5b: здоровье сбора. Четыре запроса «последняя строка» по трём таблицам
+    // снимков и журналу прогонов плюс весь SQL паритета. На засеянной базе
+    // снимков нет вовсе — и лаг ОБЯЗАН быть `null`, а не `0`: ноль читался бы
+    // как «только что сняли», то есть ровно наоборот.
+    path: "/ourvend/health?runs=20",
+    проверить: (о) => {
+      if (!Array.isArray(о?.runs)) throw new Error("health.runs — не массив");
+      if (typeof о?.failedStreak !== "number") throw new Error("health.failedStreak — не число");
+      for (const ключ of ["slotsLagMin", "salesLagH", "productSaleLagH"]) {
+        if (о?.[ключ] !== null && typeof о?.[ключ] !== "number") throw new Error(`health.${ключ} — не число и не null`);
+      }
+      if (о.lastSuccessAt !== null && typeof о.lastSuccessAt !== "string") {
+        throw new Error("health.lastSuccessAt — не ISO и не null");
+      }
+      if (о?.parity == null) throw new Error("health.parity — null (сверять нечего ≠ паритета нет)");
+      if (typeof о.parity.days !== "number" || typeof о.parity.mismatches !== "number") {
+        throw new Error("health.parity.days/mismatches — не числа");
+      }
+      if (typeof о.parity.stockOk !== "boolean") throw new Error("health.parity.stockOk — не флаг");
+      if (о.runs.length === 0 && (о.failedStreak !== 0 || о.lastSuccessAt !== null)) {
+        throw new Error("прогонов нет, а серия/успех не пусты — журнал прочитан не оттуда");
+      }
+      if (о.runs.length > 20) throw new Error("health.runs длиннее запрошенного — граница ?runs= не действует");
     },
   },
   "/coffee/locations",

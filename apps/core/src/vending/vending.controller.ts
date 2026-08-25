@@ -11,6 +11,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -23,6 +24,7 @@ import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { ShrinkageService } from "./shrinkage.service";
 import { VendingService } from "./vending.service";
+import { WeeklyDigestService } from "./weekly-digest.service";
 
 export class IngestSlotDto {
   @IsString() @IsNotEmpty() @MaxLength(16)
@@ -369,6 +371,20 @@ export class PriceGapDto {
 }
 
 /**
+ * Неделя сводки, ключ `IYYY-IW` (`2026-34`). Пусто — предыдущая ISO-неделя.
+ *
+ * Регулярка, а не `@IsInt()` по двум полям: ключ приезжает из бота одной
+ * строкой («итоги недели 2026-34») и таким же уезжает в дедуп доставки —
+ * разбирать и собирать его заново значило бы завести второй формат недели.
+ * Негодная НЕДЕЛЯ (`2026-99`) формой проходит и гасится сервисом в предыдущую:
+ * отчёт — чтение, и владельцу полезнее письмо, чем 400.
+ */
+export class WeeklyDigestDto {
+  @IsOptional() @Matches(/^\d{4}-\d{2}$/, { message: "week — ключ ISO-недели вида 2026-34" })
+  week?: string;
+}
+
+/**
  * Окно журнала детектора. DTO, а не `Number(days)` руками: без границ роут
  * принимал любое число и надеялся на зажим в сервисе — у соседних чтений
  * граница стоит на входе, и разнобой рано или поздно кончается тем, что зажим
@@ -391,6 +407,7 @@ export class VendingController {
     private readonly refillEvents: RefillEventsService,
     private readonly shrinkageReport: ShrinkageService,
     private readonly analytics: AnalyticsService,
+    private readonly weekly: WeeklyDigestService,
   ) {}
 
   @Post("ingest")
@@ -614,6 +631,20 @@ export class VendingController {
   @Get("price-gap")
   priceGap(@Query() dto: PriceGapDto) {
     return this.analytics.priceGap(dto.days);
+  }
+
+  /**
+   * Недельная сводка снек-контура одним JSON (R-P5b-7): деньги недели, работа,
+   * мёртвый сток, цены, здоровье сбора. Текст собирает бот, панель показывает
+   * те же числа — второго расчёта нигде нет.
+   *
+   * Лимит тот же, что у остальных отчётов: внутри сводки четыре тяжёлых
+   * расчёта, но все они живут в кеше пять минут.
+   */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("weekly-digest")
+  weeklyDigest(@Query() dto: WeeklyDigestDto) {
+    return this.weekly.digest(dto.week);
   }
 
   /**

@@ -61,6 +61,7 @@ import {
 import { DB, type Db } from "../db/db.module";
 import { ApprovalsService } from "../approvals/approvals.service";
 import { settingValue } from "../system/settings";
+import { failedStreak, FAILED_STREAK_ALERT, STREAK_SCAN_LIMIT } from "./sync-streak";
 
 /**
  * Вендинг: приём собранных данных и расчёт дефицита (ТЗ Фаза 1).
@@ -2595,12 +2596,15 @@ export class VendingService {
    * успех: раньше UPDATE без проверки affected rows всегда отдавал `ok: true`,
    * даже когда коллектор передал несуществующий id — ошибка была бы незаметна
    * (найдено внешним аудитом, P2).
+   *
+   * После закрытия отказом считается СЕРИЯ отказов и, если она дошла до
+   * порога, пишется событие тревоги (R-P5b-8) — см. `сериюОтказовВСобытие`.
    */
-  async finishSyncRun(id: string, input: SyncFinishInput): Promise<{ ok: boolean }> {
+  async finishSyncRun(id: string, input: SyncFinishInput, now = new Date()): Promise<{ ok: boolean }> {
     const rows = await this.db
       .update(vendingSyncRun)
       .set({
-        finishedAt: new Date(),
+        finishedAt: now,
         status: input.status,
         machinesTotal: input.machinesTotal,
         machinesOk: input.machinesOk,
@@ -2609,7 +2613,54 @@ export class VendingService {
       })
       .where(eq(vendingSyncRun.id, id))
       .returning({ id: vendingSyncRun.id });
-    return { ok: rows.length > 0 };
+
+    if (rows.length === 0) return { ok: false };
+    // Тревога считается ТОЛЬКО после отказа: успех и частичный сбор серию
+    // рвут, и лишний запрос к журналу в этом случае не нужен.
+    if (input.status === "failed") await this.сериюОтказовВСобытие(now);
+    return { ok: true };
+  }
+
+  /**
+   * Серия отказов сбора → событие `ourvend.sync_failed_streak` (R-P5b-8).
+   *
+   * ЗАЧЕМ ЗДЕСЬ, А НЕ В ОТЧЁТЕ. 25.08.2026 сбор падал с 24-го двенадцать раз
+   * подряд, и не заметил никто: отчёт показывает то, что открыли, а тревога
+   * должна прийти сама. Момент, когда факт отказа СТАНОВИТСЯ известен, — ровно
+   * этот метод.
+   *
+   * ПОРОГ, А НЕ ПЕРВЫЙ ОТКАЗ. Один упавший прогон — обычное дело (сеть, таймаут
+   * кабинета), и будить на нём владельца значит научить его не читать тревоги.
+   * Тревожит третий подряд: к нему сутки данных уже потеряны.
+   *
+   * ДЕДУП — РАЗ В ТАШКЕНТСКИЕ СУТКИ. Коллектор ходит каждый час, и без дедупа
+   * серия из двенадцати отказов дала бы десять одинаковых сообщений подряд.
+   * Ключ — сутки, а не серия: серия растёт с каждым прогоном, и «раз на серию»
+   * означало бы сообщение каждый час.
+   */
+  private async сериюОтказовВСобытие(now: Date): Promise<void> {
+    const прогоны = await this.db
+      .select({ status: vendingSyncRun.status, startedAt: vendingSyncRun.startedAt, error: vendingSyncRun.error })
+      .from(vendingSyncRun)
+      .orderBy(desc(vendingSyncRun.startedAt))
+      .limit(STREAK_SCAN_LIMIT);
+
+    const серия = failedStreak(прогоны);
+    if (серия.streak < FAILED_STREAK_ALERT || серия.since === null) return;
+
+    const сутки = tashkentDayStartOf(now);
+    const [было] = await this.db
+      .select({ id: event.id })
+      .from(event)
+      .where(and(eq(event.type, "ourvend.sync_failed_streak"), gte(event.occurredAt, сутки)))
+      .limit(1);
+    if (было) return;
+
+    await this.db.insert(event).values({
+      source: "system",
+      type: "ourvend.sync_failed_streak",
+      payload: { streak: серия.streak, lastError: серия.lastError, since: серия.since },
+    });
   }
 
   /** Последние запуски сбора (для панели: когда собирали и с каким итогом). */

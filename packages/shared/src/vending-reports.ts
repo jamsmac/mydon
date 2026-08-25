@@ -804,3 +804,129 @@ export function weightedCost(lots: readonly { price: number; qty: number }[]): n
   }
   return qty === 0 ? null : Math.round((sum / qty) * 100) / 100;
 }
+
+// ── Формы ответов Core: сводка, здоровье сбора, предупреждения (R-P5b-10) ────
+//
+// ЗДЕСЬ ТОЛЬКО ТИПЫ, БЕЗ РАСЧЁТА. Эти формы собирают сервисы Core из живой
+// базы — чистой функции им взяться неоткуда. Но объявлены они ЗДЕСЬ, потому
+// что читают их трое: бот (текст письма), панель (листы отчётов) и сам Core.
+// План П5a показал цену альтернативы — одна и та же форма была описана трижды,
+// и третья копия разошлась с первыми двумя молча, на уровне `null` против `0`.
+//
+// ПРАВИЛО ПРАВКИ: поле, которое добавили здесь, обязано появиться у ВСЕХ трёх
+// читателей осознанно. Переименование поля — это ломающее изменение HTTP-API,
+// а не рефакторинг.
+
+/**
+ * Почему в отчёте чего-то нет. Коды не сводятся к одному «нет данных»: каждый
+ * чинится В СВОЁМ МЕСТЕ — продажи чинит синк, остаток автомата чинит сбор,
+ * себестоимость чинит прайс, эталон витрины чинит слово владельца, а строки
+ * не в строю чинит карточка автомата.
+ */
+export type AnalyticsWarningCode = "no_sales" | "stock_missing" | "unknown_cost" | "no_reference" | "excluded_sales";
+
+export interface AnalyticsWarning {
+  code: AnalyticsWarningCode;
+  message: string;
+}
+
+/**
+ * Помесячная динамика цен — донорский `price_dynamics`, его просит ТОЛЬКО
+ * панель (R-P5b-5). `retail` — средняя витринная за месяц (Σamount/Σqty),
+ * `purchase` — средняя из наблюдений закупки. `null` — не «ноль сум», а «в
+ * этом месяце такой цены не наблюдали».
+ */
+export interface MonthlyPrice {
+  product: string;
+  /** Месяц, `YYYY-MM`. */
+  month: string;
+  retail: number | null;
+  purchase: number | null;
+}
+
+/** Прогон сбора OurVend — строка `vending_sync_run` как её видит HTTP. */
+export interface OurvendSyncRun {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: "running" | "success" | "partial" | "failed";
+  machinesTotal: number;
+  machinesOk: number;
+  durationMs: number | null;
+  error: string | null;
+}
+
+/**
+ * Здоровье сбора OurVend (`GET /ourvend/health`, R-P5b-8): прогоны, серия
+ * отказов, свежесть снимков, паритет с учётной дорожкой.
+ *
+ * ЛАГ `null` — ЭТО НЕ НОЛЬ. Ноль минут читается как «только что сняли», а
+ * пустая таблица снимков означает ровно обратное: снимков нет вовсе. Витрины
+ * обязаны печатать «снимков нет», а не «0 мин».
+ *
+ * `parity` — ВСЕГДА объект, даже когда сверять нечего: почему сверка пуста,
+ * говорит `note`, а `null` вместо объекта заставил бы каждого читателя
+ * заводить свою ветку «паритета нет».
+ */
+export interface OurvendHealth {
+  /** Последние прогоны, свежий первым. */
+  runs: OurvendSyncRun[];
+  /** Сколько отказов подряд идёт прямо сейчас. 0 — последний прогон не упал. */
+  failedStreak: number;
+  /** Завершение последнего успешного прогона. `null` — успехов в журнале нет. */
+  lastSuccessAt: string | null;
+  /** Возраст последнего снимка слотов, мин. `null` — снимков нет вовсе. */
+  slotsLagMin: number | null;
+  /** Возраст последнего снимка продаж, ч. `null` — снимков нет вовсе. */
+  salesLagH: number | null;
+  /** Возраст снимка `product_sale`, ч: в деньги не идёт, но по нему видно, жив ли сбор. */
+  productSaleLagH: number | null;
+  parity: { days: number; ok: boolean; mismatches: number; stockOk: boolean; note: string | null };
+}
+
+/** Строка автомата в недельной сводке: только деньги, без разреза по товарам. */
+export interface WeeklyDigestMachine {
+  serial: string;
+  name: string;
+  qty: number;
+  revenue: number;
+  margin: number;
+  pct: number | null;
+}
+
+/**
+ * Недельная сводка снек-контура (`GET /vending/weekly-digest`, R-P5b-7).
+ *
+ * ТРИ ДОГОВОРЁННОСТИ, НА КОТОРЫЕ ОПИРАЕТСЯ БОТ:
+ * 1. `topProducts`/`worstProducts` уже НАРЕЗАНЫ (топ-5 и худшие-3) и не
+ *    пересекаются — бот их не режет и не сортирует;
+ * 2. `deadStock.rows` идут по оценке вниз, `priceChanges` — свежими сверху;
+ * 3. `from`/`to` — голые ташкентские сутки `YYYY-MM-DD`, а `week` — тот самый
+ *    ключ `IYYY-IW`, которым доставка дедуплицирует письмо.
+ */
+export interface WeeklyDigest {
+  /** Ключ ISO-недели `IYYY-IW`, он же ключ дедупа доставки. */
+  week: string;
+  /** Понедельник недели, ташкентские сутки `YYYY-MM-DD`. */
+  from: string;
+  /** Воскресенье недели, ташкентские сутки `YYYY-MM-DD`. */
+  to: string;
+  machines: WeeklyDigestMachine[];
+  totals: MarginTotals;
+  delta: WeekDelta;
+  previousWeek: string;
+  /** Топ-5 товаров по марже. */
+  topProducts: MarginProduct[];
+  /** Худшие-3 по марже, худший первым; с `topProducts` не пересекаются. */
+  worstProducts: MarginProduct[];
+  /** Заливки: событий детектора, единиц по снимкам и единиц, записанных мастером. */
+  refills: { events: number; detectedUnits: number; recordedUnits: number };
+  /** Приходы: принятых накладных, единиц и денег (позиция без цены даёт штуки, но не сумму). */
+  intake: { orders: number; units: number; amount: number };
+  /** Инвентаризации склада недели: позиций и момент последней. */
+  stocktakes: { positions: number; lastCountedAt: string | null };
+  /** Топ-5 мёртвого стока по оценке; `totalValue` — по ВСЕМУ стоку, не по пятёрке. */
+  deadStock: { rows: DeadRow[]; totalValue: number };
+  priceChanges: { purchase: PriceChange[]; retail: PriceChange[] };
+  health: OurvendHealth;
+}
