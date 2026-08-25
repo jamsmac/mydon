@@ -27,6 +27,7 @@ import {
   allocateBySlots,
   computePurchase,
   computePurchaseCash,
+  deadMachine,
   machineDeficit,
   machineSerialKeys,
   machineStatusLabel,
@@ -436,8 +437,12 @@ interface PurchaseContext {
   ok: MachineSlots[];
   /** Имя автомата по серийнику слотов; без карточки реестра — сам серийник. */
   nameBySerial: Map<string, string>;
-  /** Автоматы со слотами, которые точно не в строю — их дефицит в закуп не идёт. */
-  skipped: { serial: string; name: string; status: string }[];
+  /**
+   * Автоматы со слотами, выброшенные из расчёта, и почему. `reason` — готовая
+   * человеческая причина: «не в строю» и «нет данных» это разные вещи, и
+   * сводить их к одному `status` значило бы врать в предупреждении плана.
+   */
+  skipped: { serial: string; name: string; status: string; reason: string }[];
   /** Строки склада, чьё имя резолвится в товар прайса (имя — уже канон). */
   stockRows: StockRow[];
   /** Строки склада без карточки прайса: в расчёт не вошли, но молчать о них нельзя. */
@@ -536,6 +541,13 @@ export class VendingService {
   async ingestSlots(payload: IngestPayload): Promise<IngestSlotsResult> {
     const capturedAt = payload.capturedAt ? new Date(payload.capturedAt) : new Date();
     const bySerial = await this.machineIdBySerial();
+    // Бэкфилл `product_id` (П4, гигиена): `machine_slot` хранит ИМЯ как в
+    // Ourvend, и до сих пор ссылка на карточку прайса была NULL у всех 210
+    // строк. Товар переименуют в справочнике — и вся история слота потеряет
+    // связь с карточкой, потому что связывало её только совпадение строк.
+    // Имя оставляем сырым (это по-прежнему «что показал автомат»), а ссылку
+    // проставляем по канону через алиасы.
+    const productIds = await this.productIdIndex();
     const skipped: SkippedMachine[] = [];
     const accepted = payload.machines.filter((m) => {
       if (m.slots.length <= MAX_SLOTS_PER_MACHINE) return true;
@@ -563,6 +575,10 @@ export class VendingService {
         for (const s of m.slots) {
           const isValid = s.capacity > 0 && s.capacity <= MAX_CAPACITY;
           const product = s.product.trim() || null;
+          // Ссылку ставим и на конфликте: слот мог сменить товар, и старая
+          // ссылка стала бы враньём. Неизвестное имя → NULL, а не «оставим
+          // прежнюю» — молча оставленная чужая карточка хуже пустоты.
+          const productId = product === null ? null : (productIds(product) ?? null);
           await tx
             .insert(machineSlot)
             .values({
@@ -570,6 +586,7 @@ export class VendingService {
               machineId,
               coilId: s.coilId,
               productName: product,
+              productId,
               capacity: s.capacity,
               quantity: s.quantity,
               isValid,
@@ -579,7 +596,7 @@ export class VendingService {
               target: [machineSlot.machineSerial, machineSlot.coilId],
               // machineId обновляем тоже: карточка автомата могла появиться
               // позже слотов — так же, как это делает backfill в продажах.
-              set: { machineId, productName: product, capacity: s.capacity, quantity: s.quantity, isValid, syncedAt: capturedAt },
+              set: { machineId, productName: product, productId, capacity: s.capacity, quantity: s.quantity, isValid, syncedAt: capturedAt },
               // Опоздавший снимок (capturedAt старше уже сохранённого syncedAt)
               // не должен откатывать актуальную планограмму назад (найдено
               // внешним аудитом, P2). slotSnapshot ниже — история, пишется
@@ -771,9 +788,21 @@ export class VendingService {
     return { byProduct, capturedAt: latest > 0 ? new Date(latest) : null, serials };
   }
 
-  /** Серийники ok-автоматов из готовой карты слотов. */
+  /**
+   * Серийники ok-автоматов из готовой карты слотов.
+   *
+   * Мёртвые исключаются наравне с нечитаемой планограммой (R-P4-4): автомат,
+   * у которого ВСЕ слоты полны, — это не «полностью загруженный», а «данных с
+   * него нет». Так ведут себя склады-заглушки SKLAD 4S/5S/6S. Считать по ним
+   * дефицит (он нулевой) и продажи (их нет) значит тихо разбавлять и то, и
+   * другое: прогноз завышается, «нет продаж» становится ложным.
+   */
   private okSerials(byMachine: Map<string, Slot[]>): Set<string> {
-    return new Set([...byMachine.entries()].filter(([, slots]) => planogramStatus(slots) === "ok").map(([serial]) => serial));
+    return new Set(
+      [...byMachine.entries()]
+        .filter(([, slots]) => planogramStatus(slots) === "ok" && !deadMachine(slots))
+        .map(([serial]) => serial),
+    );
   }
 
   /**
@@ -881,6 +910,20 @@ export class VendingService {
   }
 
   /**
+   * Резолвер «сырое имя товара → id карточки прайса» (бэкфилл `product_id`).
+   *
+   * Один поход в базу на весь приём, дальше — по нормализованному ключу в
+   * памяти: приём слотов кладёт сотни строк за раз, и SELECT на каждую был бы
+   * N+1 на горячем пути крона. Неизвестное имя даёт `null` — новый товар не
+   * повод отвергнуть снимок.
+   */
+  private async productIdIndex(): Promise<(raw: string) => string | null> {
+    const { aliasByKey, productRows } = await this.loadProductIndex();
+    const byKey = new Map(productRows.map((p) => [normalizeProductName(p.name), p.id]));
+    return (raw: string) => byKey.get(normalizeProductName(this.resolveProduct(raw, aliasByKey))) ?? null;
+  }
+
+  /**
    * Канон имени товара и его карточка — для тех, кто пишет в `vending_stock`
    * извне этого сервиса (заливка автомата).
    *
@@ -907,6 +950,35 @@ export class VendingService {
     return aliases.get(normalizeProductName(name)) ?? name;
   }
 
+  /**
+   * Готовый резолвер «сырое имя → канон» для служб вендинга вне этого класса
+   * (детектор заливок, П4).
+   *
+   * Отдаём ФУНКЦИЮ, а не карту: карта алиасов читается один раз на прогон, а
+   * приводить к канону надо тысячи имён из снимков — `resolveProductRef` с её
+   * походом в базу на каждое имя дала бы N+1. И, что важнее, канон здесь один
+   * на всю систему: вторая реализация резолвера рано или поздно разошлась бы
+   * с этой, и остаток склада перестал бы сходиться с историей автомата.
+   */
+  async canonResolver(): Promise<(raw: string) => string> {
+    const { aliasByKey } = await this.loadProductIndex();
+    return (raw: string) => this.resolveProduct(raw, aliasByKey);
+  }
+
+  /**
+   * Реестр автоматов для служб вендинга: карточка и имя по серийнику.
+   *
+   * `idBySerial` знает обе формы написания (с приставкой «c» и без — см.
+   * `machineSerialKeys`), `nameBySerial` — по канону. Публично ровно затем,
+   * чтобы детектор заливок брал ТУ ЖЕ привязку, что и приём слотов: две карты
+   * «серийник → карточка» с разными правилами дали бы события, висящие мимо
+   * автомата.
+   */
+  async machineIndex(): Promise<{ idBySerial: Map<string, string>; nameBySerial: Map<string, string> }> {
+    const [idBySerial, registry] = await Promise.all([this.machineIdBySerial(), this.machineRegistry()]);
+    return { idBySerial, nameBySerial: registry.nameBySerial };
+  }
+
   /** Слоты автомата с именем товара, приведённым к канону через алиасы. */
   private resolveSlots(slots: Slot[], aliases: Map<string, string>): Slot[] {
     return slots.map((s) => (s.product ? { ...s, product: this.resolveProduct(s.product, aliases) } : s));
@@ -931,7 +1003,11 @@ export class VendingService {
    */
   async ingestStock(payload: IngestStockPayload, actor = "owner"): Promise<IngestStockResult> {
     const countedAt = payload.countedAt ? new Date(payload.countedAt) : new Date();
-    const { aliasByKey, priceByName } = await this.loadProductIndex();
+    const { aliasByKey, priceByName, productRows } = await this.loadProductIndex();
+    // Бэкфилл `product_id` (П4, гигиена): строка склада ключуется ИМЕНЕМ, и
+    // все 20 строк жили без ссылки на карточку. Переименование товара в
+    // справочнике рвало связь остатка с прайсом молча.
+    const idByKey = new Map(productRows.map((p) => [normalizeProductName(p.name), p.id]));
 
     // Схлопывание по канону — последняя позиция в списке побеждает (владелец
     // поправился по ходу диктовки/списка).
@@ -975,12 +1051,14 @@ export class VendingService {
           });
         }
 
+        // Имя строки склада — уже канон, поэтому ссылка ищется по нему прямо.
+        const productId = idByKey.get(normalizeProductName(product)) ?? null;
         await tx
           .insert(vendingStock)
-          .values({ productName: product, quantity, countedAt, updatedAt: countedAt })
+          .values({ productName: product, productId, quantity, countedAt, updatedAt: countedAt })
           .onConflictDoUpdate({
             target: [vendingStock.productName],
-            set: { quantity, countedAt, updatedAt: countedAt },
+            set: { quantity, productId, countedAt, updatedAt: countedAt },
             // Защита и от конкурентной транзакции с более новым пересчётом,
             // не только от порядка внутри этого вызова.
             // Дата — строкой ISO: сырой sql-фрагмент не знает тип колонки и
@@ -1099,14 +1177,27 @@ export class VendingService {
     const okSerials = this.okSerials(byMachine);
     const skipped: PurchaseContext["skipped"] = [];
     const skippedSeen = new Set<string>();
-    for (const serial of byMachine.keys()) {
+    for (const [serial, slots] of byMachine) {
       const canon = normalizeMachineSerial(serial);
       const off = notInService.get(canon);
-      if (!off) continue;
+      // Мёртвый автомат (все слоты полны) уже выброшен `okSerials`, но молча:
+      // владелец видел бы просто исчезнувшую строку плана. Причина «нет
+      // данных» и «не в строю» — разные, и вторая не должна затирать первую.
+      const dead = !off && planogramStatus(slots) === "ok" && deadMachine(slots);
+      if (!off && !dead) continue;
       okSerials.delete(serial);
       if (skippedSeen.has(canon)) continue;
       skippedSeen.add(canon);
-      skipped.push({ serial: canon, name: off.name, status: off.status });
+      skipped.push(
+        off
+          ? { serial: canon, name: off.name, status: off.status, reason: `не в строю: ${machineStatusLabel(off.status)}` }
+          : {
+              serial: canon,
+              name: nameByCanon.get(canon) ?? canon,
+              status: "no_data",
+              reason: "нет данных (все слоты полны)",
+            },
+      );
     }
 
     const ok = [...byMachine.entries()]
@@ -1271,7 +1362,7 @@ export class VendingService {
       });
     }
     for (const m of ctx.skipped) {
-      warnings.push({ code: "machine_skipped", message: `${m.name} (${m.serial}) не в строю: ${machineStatusLabel(m.status)}` });
+      warnings.push({ code: "machine_skipped", message: `${m.name} (${m.serial}) ${m.reason}` });
     }
     if (s.noPrice.length) {
       warnings.push({

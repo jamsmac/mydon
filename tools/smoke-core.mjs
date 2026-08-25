@@ -65,6 +65,7 @@ const ЧТЕНИЕ = [
   "/vending/plan",
   "/vending/products",
   "/vending/sync",
+  "/vending/refill-events?days=14",
   "/coffee/locations",
   "/coffee/placements",
   "/tasks",
@@ -100,6 +101,15 @@ const ЧТЕНИЕ = [
  * Отправляем два слота, потом один: второй вызов ОБЯЗАН выполнить DELETE
  * лишнего, то есть пройти по ветке, которая уронила прод.
  */
+/**
+ * Автомат и окно для сценария детектора заливок (П4). Время берётся ОТ
+ * ТЕКУЩЕГО момента: прогон детектора смотрит на сутки назад, а сам смоук
+ * гоняют и по второму разу на одной базе.
+ */
+const P4_АВТОМАТ = "SMOKE-P4";
+const P4_ДО = new Date(Date.now() - 2 * 3_600_000);
+const P4_ПОСЛЕ = new Date(Date.now() - 3_600_000);
+
 const ЗАПИСЬ = [
   {
     имя: "приём слотов (первый снимок)",
@@ -131,6 +141,93 @@ const ЗАПИСЬ = [
       if (ответ.pruned !== 1) {
         throw new Error(`уборка не сработала: pruned=${ответ.pruned}, ожидали 1`);
       }
+    },
+  },
+  // ── Детектор заливок по снимкам (П4) ────────────────────────────────────
+  //
+  // Заглушка БД в юнит-тестах не исполняет ни оконную выборку `slot_snapshot`,
+  // ни `jsonb` со слотами, ни `onConflictDoNothing` по составному уникальному
+  // ключу (serial, window_to) — а именно на этом ключе держится идемпотентность
+  // крона, который бежит по перекрывающемуся окну каждые 3 часа. Поэтому пара
+  // снимков подаётся НАСТОЯЩЕЙ: «до» и «после» с приходом 14 единиц.
+  {
+    имя: "приём слотов П4 (снимок «до»)",
+    path: "/vending/ingest",
+    body: {
+      capturedAt: P4_ДО.toISOString(),
+      machines: [
+        {
+          serial: P4_АВТОМАТ,
+          slots: [
+            { coilId: "1", product: "Smoke P4 A", capacity: 20, quantity: 1 },
+            { coilId: "2", product: "Smoke P4 B", capacity: 20, quantity: 0 },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    имя: "приём слотов П4 (снимок «после»: приход 14 единиц)",
+    path: "/vending/ingest",
+    body: {
+      capturedAt: P4_ПОСЛЕ.toISOString(),
+      machines: [
+        {
+          serial: P4_АВТОМАТ,
+          slots: [
+            { coilId: "1", product: "Smoke P4 A", capacity: 20, quantity: 9 },
+            { coilId: "2", product: "Smoke P4 B", capacity: 20, quantity: 6 },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    имя: "детектор заливок по снимкам (П4)",
+    path: "/vending/refill-events/detect",
+    body: { days: 1 },
+    проверить: (о) => {
+      for (const key of ["machines", "windows", "events", "matched"]) {
+        if (typeof о?.[key] !== "number" || о[key] < 0) throw new Error(`detect.${key}=${о?.[key]}`);
+      }
+      if (!Array.isArray(о.skippedDead)) throw new Error("detect.skippedDead — не массив");
+      if (о.events < 1) throw new Error(`детектор не увидел заливку: events=${о.events}`);
+      if (о.matched !== 0) throw new Error(`записи оператора ещё нет, а matched=${о.matched}`);
+    },
+  },
+  {
+    // Тот самый повтор, ради которого стоит уникальный ключ.
+    имя: "детектор заливок (повтор по тому же окну — дубля нет)",
+    path: "/vending/refill-events/detect",
+    body: { days: 1 },
+    проверить: (о) => {
+      if (о.events !== 0) throw new Error(`повторный прогон записал ${о.events} событий`);
+    },
+  },
+  {
+    имя: "заливка оператора в окне детектора",
+    path: "/vending/refills",
+    body: {
+      machineSerial: P4_АВТОМАТ,
+      productName: "Smoke P4 A",
+      qty: 8,
+      performedAt: new Date(P4_ПОСЛЕ.getTime() - 30 * 60_000).toISOString(),
+      clientKey: `smoke-p4-${P4_ПОСЛЕ.getTime()}`,
+      source: "panel",
+    },
+    проверить: (о) => {
+      if (о?.duplicate !== false) throw new Error("заливка должна записаться впервые");
+    },
+  },
+  {
+    // Оператор дошёл до бота после прогона: событие уже записано, дубля не
+    // будет, и без UPDATE запись осталась бы «заливкой без отчёта» навсегда.
+    имя: "детектор доклеивает запись оператора к событию",
+    path: "/vending/refill-events/detect",
+    body: { days: 1 },
+    проверить: (о) => {
+      if (о.events !== 0) throw new Error(`доклейка не должна плодить события: events=${о.events}`);
+      if (о.matched < 1) throw new Error("запись оператора не сопоставилась с событием");
     },
   },
   {

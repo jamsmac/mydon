@@ -1,0 +1,334 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import {
+  entity,
+  event,
+  machineCard,
+  slotSnapshot,
+  systemConfig,
+  vendingAlias,
+  vendingProduct,
+  vendingRefill,
+  vendingRefillEvent,
+} from "@mydon/db";
+import { RefillEventsService } from "./refill-events.service";
+import { VendingService } from "./vending.service";
+
+type SnapRow = {
+  machineSerial: string;
+  coilId: string;
+  productName: string | null;
+  capacity: number;
+  quantity: number;
+  capturedAt: Date;
+};
+type HumanRow = { id: string; machineSerial: string; performedAt: Date; qty: number };
+type EventSlot = { coilId: string; product: string; before: number; after: number; delta: number };
+type EventRow = {
+  id: string;
+  machineSerial: string;
+  machineId: string | null;
+  windowFrom: Date;
+  windowTo: Date;
+  units: number;
+  slots: EventSlot[];
+  matchedRefillId: string | null;
+};
+type Ent = { id: string; name: string; externalRef: string | null; type: string };
+type Card = { entityId: string; status: string };
+type AliasRow = { productId: string; alias: string };
+type ProdRow = { id: string; name: string; purchasePrice: string | null; packSize: number };
+type FeedRow = { source: string; type: string; payload: Record<string, unknown> };
+
+interface Мир {
+  snapshots?: SnapRow[];
+  /** Записи оператора. Массив живой: тест дописывает их МЕЖДУ прогонами. */
+  refills?: HumanRow[];
+  aliases?: AliasRow[];
+  products?: ProdRow[];
+  entities?: Ent[];
+  cards?: Card[];
+  config?: { key: string; value: string }[];
+}
+
+/**
+ * Стаб БД детектора: строки отдаются по ССЫЛКЕ на таблицу (как `planDb` в
+ * vending.service.test.ts), но хранилище событий — живое. Идемпотентность
+ * прогона проверяется настоящим уникальным ключом (serial, window_to), а не
+ * заготовленным ответом: иначе второй прогон зеленел бы на любой реализации.
+ */
+function detectDb(м: Мир) {
+  const события: EventRow[] = [];
+  const лента: FeedRow[] = [];
+  const обновления: Partial<EventRow>[] = [];
+  let seq = 0;
+
+  const rowsOf = (t: unknown): unknown[] =>
+    t === slotSnapshot
+      ? (м.snapshots ?? [])
+      : t === vendingRefill
+        ? (м.refills ?? [])
+        : t === vendingRefillEvent
+          ? события
+          : t === vendingAlias
+            ? (м.aliases ?? [])
+            : t === vendingProduct
+              ? (м.products ?? [])
+              : t === entity
+                ? // machineIdBySerial() читает поле `ref`, machineRegistry() — `externalRef`:
+                  // отдаём оба, чтобы один стаб обслуживал обе выборки.
+                  (м.entities ?? []).map((e) => ({ ...e, ref: e.externalRef }))
+                : t === machineCard
+                  ? (м.cards ?? [])
+                  : t === systemConfig
+                    ? (м.config ?? [])
+                    : [];
+
+  const цепочка = (rows: unknown[]) => {
+    const p = Promise.resolve(rows);
+    const chain: Record<string, unknown> = {};
+    chain.where = () => chain;
+    chain.orderBy = () => chain;
+    chain.limit = async () => rows;
+    chain.then = p.then.bind(p);
+    return chain;
+  };
+
+  const insert = (t: unknown) => ({
+    values: (v: Record<string, unknown>) => {
+      if (t === event) {
+        лента.push(v as unknown as FeedRow);
+        return Promise.resolve();
+      }
+      const строка = v as unknown as Omit<EventRow, "id">;
+      return {
+        onConflictDoNothing: () => ({
+          returning: async () => {
+            const дубль = события.some(
+              (e) => e.machineSerial === строка.machineSerial && e.windowTo.getTime() === строка.windowTo.getTime(),
+            );
+            if (дубль) return [];
+            const созданное: EventRow = { id: `ev${++seq}`, ...строка };
+            события.push(созданное);
+            return [созданное];
+          },
+        }),
+      };
+    },
+  });
+
+  const tx = {
+    insert,
+    update: () => ({
+      set: (patch: Partial<EventRow>) => ({
+        where: async () => {
+          обновления.push(patch);
+          // Применяем к первому несопоставленному: стаб не разбирает SQL-условие,
+          // но хранилище должно оставаться правдой для следующего прогона.
+          const цель = события.find((e) => e.matchedRefillId === null);
+          if (цель && patch.matchedRefillId) цель.matchedRefillId = patch.matchedRefillId;
+        },
+      }),
+    }),
+  };
+
+  const db = {
+    select: () => ({ from: (t: unknown) => цепочка(rowsOf(t)) }),
+    insert,
+    transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+  } as never;
+
+  return { db, события, лента, обновления };
+}
+
+const T1 = new Date("2026-08-20T01:00:00.000Z");
+const T2 = new Date("2026-08-20T04:00:00.000Z");
+
+const снимок = (serial: string, capturedAt: Date, slots: [string, string | null, number, number][]): SnapRow[] =>
+  slots.map(([coilId, productName, capacity, quantity]) => ({
+    machineSerial: serial,
+    coilId,
+    productName,
+    capacity,
+    quantity,
+    capturedAt,
+  }));
+
+/** Olma: два слота, между снимками +8 и +4 = 12 единиц (порог по умолчанию 10). */
+const ЗАЛИВКА: SnapRow[] = [
+  ...снимок("2508160376", T1, [
+    ["1", "Snickers", 10, 2],
+    ["2", "Twix", 10, 1],
+  ]),
+  ...снимок("2508160376", T2, [
+    ["1", "Snickers", 10, 10],
+    ["2", "Twix", 10, 5],
+  ]),
+];
+
+const РЕЕСТР: Ent[] = [{ id: "m-olma", name: "Olma", externalRef: "c2508160376", type: "machine" }];
+
+const сервис = (мир: Мир) => {
+  const { db, события, лента, обновления } = detectDb(мир);
+  return { svc: new RefillEventsService(db, new VendingService(db)), события, лента, обновления };
+};
+
+describe("Вендинг Core: детектор заливок по снимкам (П4)", () => {
+  it("пара снимков с приходом ≥ порога даёт событие; второй прогон дубля не плодит", async () => {
+    const { svc, события } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР });
+
+    const первый = await svc.detect(2);
+    assert.equal(первый.machines, 1);
+    assert.equal(первый.windows, 1);
+    assert.equal(первый.events, 1);
+    assert.equal(первый.matched, 0);
+    assert.deepEqual(первый.skippedDead, []);
+    assert.equal(события.length, 1);
+    assert.equal(события[0]!.units, 12);
+    assert.equal(события[0]!.machineId, "m-olma", "серийник в реестре с приставкой c — привязка обязана сойтись");
+    assert.deepEqual(
+      события[0]!.slots.map((s) => [s.coilId, s.product, s.delta]),
+      [
+        ["1", "Snickers", 8],
+        ["2", "Twix", 4],
+      ],
+    );
+
+    // Крон бежит каждые 3 часа по перекрывающемуся окну — повтор обязан быть пустым.
+    const второй = await svc.detect(2);
+    assert.equal(второй.events, 0);
+    assert.equal(события.length, 1);
+  });
+
+  it("приход ниже порога из настроек событием не становится", async () => {
+    const { svc, события } = сервис({
+      snapshots: ЗАЛИВКА,
+      entities: РЕЕСТР,
+      config: [{ key: "REFILL_DETECT_MIN_UNITS", value: "20" }],
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.events, 0);
+    assert.equal(события.length, 0, "12 единиц при пороге 20 — это не заливка, а докладка пары пружин");
+  });
+
+  it("мёртвый автомат (все слоты полны) уходит в skippedDead и событий не даёт", async () => {
+    // SKLAD-заглушка: все слоты полны во всех снимках — это «нет данных с
+    // автомата», а не «никто ничего не купил» (R-P4-4).
+    const мёртвые: [string, string | null, number, number][] = Array.from({ length: 10 }, (_, i) => [
+      String(i + 1),
+      "Заглушка",
+      10,
+      10,
+    ]);
+    const { svc, события } = сервис({
+      snapshots: [...ЗАЛИВКА, ...снимок("SKLAD", T1, мёртвые), ...снимок("SKLAD", T2, мёртвые)],
+      entities: РЕЕСТР,
+    });
+    const res = await svc.detect(2);
+    assert.deepEqual(res.skippedDead, ["SKLAD"]);
+    assert.equal(res.machines, 1, "мёртвый автомат не считается осмотренным");
+    assert.equal(res.events, 1);
+    assert.ok(!события.some((e) => e.machineSerial === "SKLAD"));
+  });
+
+  it("запись оператора в окне ±3 ч сопоставляется с событием", async () => {
+    const { svc, события, лента } = сервис({
+      snapshots: ЗАЛИВКА,
+      entities: РЕЕСТР,
+      // Серийник записи — с приставкой «c» (так пишет бот), снимок — без неё.
+      refills: [{ id: "r1", machineSerial: "c2508160376", performedAt: new Date("2026-08-20T03:30:00.000Z"), qty: 12 }],
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.events, 1);
+    assert.equal(res.matched, 1);
+    assert.equal(события[0]!.matchedRefillId, "r1");
+    const лог = лента.find((f) => f.type === "vending.refill_detected")!;
+    assert.equal(лог.payload.recorded, true);
+    assert.equal(лог.payload.name, "Olma");
+  });
+
+  it("запись оператора мимо окна не сопоставляется, событие остаётся «без записи»", async () => {
+    const { svc, события, лента } = сервис({
+      snapshots: ЗАЛИВКА,
+      entities: РЕЕСТР,
+      // +8 часов от конца окна — это уже другой выезд.
+      refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date("2026-08-20T12:00:00.000Z"), qty: 12 }],
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.matched, 0);
+    assert.equal(события[0]!.matchedRefillId, null);
+    assert.equal(лента.find((f) => f.type === "vending.refill_detected")!.payload.recorded, false);
+  });
+
+  it("запись оператора, появившаяся ПОСЛЕ прогона, доклеивается на следующем", async () => {
+    const refills: HumanRow[] = [];
+    const { svc, события, обновления } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР, refills });
+    await svc.detect(2);
+    assert.equal(события[0]!.matchedRefillId, null);
+
+    // Оператор дошёл до бота через час — событие уже записано, дубля не будет,
+    // и без доклейки запись осталась бы «заливкой без отчёта» навсегда.
+    refills.push({ id: "r9", machineSerial: "2508160376", performedAt: new Date("2026-08-20T05:00:00.000Z"), qty: 12 });
+    const второй = await svc.detect(2);
+    assert.equal(второй.events, 0);
+    assert.equal(второй.matched, 1);
+    assert.deepEqual(обновления, [{ matchedRefillId: "r9" }]);
+    assert.equal(события[0]!.matchedRefillId, "r9");
+  });
+
+  it("одна запись оператора не подтверждает два соседних окна", async () => {
+    // Заливка на границе снимков попадает в допуск ±3 ч сразу двух окон.
+    const T0 = new Date("2026-08-20T01:00:00.000Z");
+    const снимки = [
+      ...снимок("2508160376", T0, [["1", "Snickers", 40, 0]]),
+      ...снимок("2508160376", T2, [["1", "Snickers", 40, 12]]),
+      ...снимок("2508160376", new Date("2026-08-20T07:00:00.000Z"), [["1", "Snickers", 40, 24]]),
+    ];
+    const { svc, события } = сервис({
+      snapshots: снимки,
+      entities: РЕЕСТР,
+      refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date("2026-08-20T04:30:00.000Z"), qty: 12 }],
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.events, 2);
+    assert.equal(res.matched, 1, "выезд был один — подтверждать им оба окна значит удвоить отчёт");
+    assert.equal(события.filter((e) => e.matchedRefillId === "r1").length, 1);
+  });
+
+  it("имя товара в событии — канон через алиасы", async () => {
+    const снимки = [
+      ...снимок("2508160376", T1, [["1", "18+", 20, 0]]),
+      ...снимок("2508160376", T2, [["1", "Montella", 20, 12]]),
+    ];
+    const { svc, события } = сервис({
+      snapshots: снимки,
+      entities: РЕЕСТР,
+      aliases: [
+        { productId: "p1", alias: "18+" },
+        { productId: "p1", alias: "Montella" },
+      ],
+      products: [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: "5000", packSize: 12 }],
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.events, 1, "два сырых имени одного товара — это НЕ смена товара в слоте");
+    assert.equal(события[0]!.slots[0]!.product, "Montella Вода минеральная 330ml");
+  });
+
+  it("журнал событий отдаёт окно с именем автомата", async () => {
+    const { svc } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР });
+    await svc.detect(2);
+    const список = await svc.list(14);
+    assert.equal(список.length, 1);
+    assert.equal(список[0]!.serial, "2508160376");
+    assert.equal(список[0]!.name, "Olma");
+    assert.equal(список[0]!.units, 12);
+    assert.equal(список[0]!.windowFrom, T1.toISOString());
+    assert.equal(список[0]!.windowTo, T2.toISOString());
+    assert.equal(список[0]!.matchedRefillId, null);
+  });
+
+  it("снимков нет — прогон пустой, а не падение", async () => {
+    const { svc } = сервис({});
+    assert.deepEqual(await svc.detect(2), { machines: 0, windows: 0, events: 0, matched: 0, skippedDead: [] });
+  });
+});

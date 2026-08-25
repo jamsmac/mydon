@@ -1227,6 +1227,9 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     const stockInserts = inserts.filter((i) => (i.values as { productName?: string }).productName === canonical);
     assert.equal(stockInserts.length, 1);
     assert.equal((stockInserts[0]!.values as { quantity: number }).quantity, 12);
+    // …со ссылкой на карточку прайса: строка склада ключуется именем, и без
+    // ссылки переименование товара рвало связь остатка с прайсом (бэкфилл П4).
+    assert.equal((stockInserts[0]!.values as { productId: string | null }).productId, "p1");
   });
 });
 
@@ -1291,6 +1294,31 @@ describe("Вендинг Core: приём слотов", () => {
     assert.equal(res.linked, 0);
     const ms = inserts.find((i) => i.table === "machine_slot")!.values as { machineId: string | null };
     assert.equal(ms.machineId, null);
+  });
+
+  it("проставляет product_id по канону через алиасы (бэкфилл П4)", async () => {
+    // Раньше ссылка была NULL у всех 210 строк: связывало слот с прайсом
+    // только совпадение строк, и переименование товара рвало историю молча.
+    const aliases: AliasRow[] = [{ productId: "p1", alias: "18+" }];
+    const products: ProdRow[] = [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: null, packSize: 1 }];
+    const { db, inserts } = writeDb(aliases, products);
+    const svc = new VendingService(db);
+    await svc.ingestSlots({
+      machines: [{ serial: "AH", slots: [{ coilId: "1", product: "18+", capacity: 6, quantity: 0 }] }],
+    });
+    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { productId: string | null; productName: string | null };
+    assert.equal(ms.productId, "p1");
+    assert.equal(ms.productName, "18+", "имя остаётся сырым — это по-прежнему «что показал автомат»");
+  });
+
+  it("товара нет в прайсе → product_id пустой, снимок всё равно принят", async () => {
+    const { db, inserts } = writeDb();
+    const svc = new VendingService(db);
+    await svc.ingestSlots({
+      machines: [{ serial: "AH", slots: [{ coilId: "1", product: "Загадка", capacity: 6, quantity: 0 }] }],
+    });
+    const ms = inserts.find((i) => i.table === "machine_slot")!.values as { productId: string | null };
+    assert.equal(ms.productId, null);
   });
 
   it("раздутый автомат пропускается, остальные принимаются (а не падает весь приём)", async () => {
@@ -1940,6 +1968,27 @@ describe("Вендинг Core: план закупа (П5a)", () => {
     assert.equal(позиция.order, 50); // не 60 = ceil(6/12)×12
     assert.equal(позиция.fromPurchase, 6); // в автоматы — по потребности
     assert.equal(plan.stock.back, 44); // остальное закупа уезжает на склад
+  });
+
+  it("мёртвый автомат (все слоты полны) выброшен из плана и виден в warnings (R-P4-4)", async () => {
+    // SKLAD-заглушки отдают quantity = capacity по всем пружинам. Дефицит у
+    // них нулевой, поэтому раньше они просто не появлялись в плане — молча.
+    const мёртвые: Row[] = Array.from({ length: 10 }, (_, i) => ({
+      machineSerial: "2508160358",
+      coilId: String(i + 1),
+      productName: "Fanta",
+      capacity: 5,
+      quantity: 5,
+    }));
+    const реестр: Ent[] = [...entities, { id: "m-dead", name: "SKLAD 6S", externalRef: "c2508160358", type: "machine" }];
+    const db = planDb({ slots: [...slots, ...мёртвые], entities: реестр, cards, products, sales });
+    const plan = await new VendingService(db).plan();
+
+    assert.ok(!plan.machines.some((m) => m.serial === "2508160358"), "мёртвый автомат не получает раздачу");
+    const w = plan.warnings.find((x) => x.code === "machine_skipped" && x.message.includes("SKLAD 6S"))!;
+    assert.match(w.message, /нет данных \(все слоты полны\)/);
+    // Причина не подменяется состоянием карточки: автомат числится в строю.
+    assert.ok(!/не в строю/.test(w.message));
   });
 });
 

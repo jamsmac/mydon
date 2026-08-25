@@ -17,6 +17,7 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
+import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { VendingService } from "./vending.service";
 
@@ -271,6 +272,16 @@ export class CreateRefillDto {
 }
 
 /**
+ * Прогон детектора заливок (П4). Дни — окно снимков, по которому ищется
+ * приход. Потолок 30: дальше это уже отчёт, а не детектор, и прогон по
+ * полугоду снимков занял бы память ради нулевого улова.
+ */
+export class DetectRefillEventsDto {
+  @IsOptional() @IsInt() @Min(1) @Max(30)
+  days?: number;
+}
+
+/**
  * Вендинг: приём собранных данных и просмотр дефицита. Приём (POST) закрыт
  * общим ServiceTokenGuard — данные кладёт коллектор, не кто угодно.
  */
@@ -279,6 +290,7 @@ export class VendingController {
   constructor(
     private readonly vending: VendingService,
     private readonly refills: RefillService,
+    private readonly refillEvents: RefillEventsService,
   ) {}
 
   @Post("ingest")
@@ -415,6 +427,24 @@ export class VendingController {
   @Get("machine-products")
   machineProducts(@Query("serial") serial?: string) {
     return this.refills.productsOf(serial ?? "");
+  }
+
+  // ── Детектор заливок по снимкам: заливка = факт снимка (R-P4-2) ───────────
+
+  /**
+   * Прогон детектора — крон агента после каждого сбора слотов (SERVICE_TOKEN).
+   * Идемпотентен: повторный прогон по тому же окну новых событий не даёт.
+   */
+  @Post("refill-events/detect")
+  detectRefillEvents(@Body() dto: DetectRefillEventsDto) {
+    return this.refillEvents.detect(dto.days);
+  }
+
+  /** Журнал событий детектора: что автомат получил и была ли запись оператора. */
+  @Get("refill-events")
+  refillEventsList(@Query("days") days?: string) {
+    const n = Number(days);
+    return this.refillEvents.list(Number.isFinite(n) && n > 0 ? n : undefined);
   }
 
   @Get("refills")
