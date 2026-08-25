@@ -1031,6 +1031,21 @@ export class VendingService {
   }
 
   /**
+   * Канон имён и закупочные цены — ОДНОЙ загрузкой прайса (усушка, П4).
+   *
+   * Отчёту нужно и то, и другое: имена из снимков и продаж приводятся к
+   * канону, а недостача считается в деньгах по `purchase_price`. Два вызова
+   * (`canonResolver` + отдельная выборка цен) читали бы `vending_product` и
+   * `vending_alias` дважды за прогон, а главное — цена и канон обязаны
+   * приехать из ОДНОГО чтения: между двумя владелец успевает переименовать
+   * товар, и позиция отчёта осталась бы без цены.
+   */
+  async priceIndex(): Promise<{ canonOf: (raw: string) => string; priceByName: Map<string, number> }> {
+    const { aliasByKey, priceByName } = await this.loadProductIndex();
+    return { canonOf: (raw: string) => this.resolveProduct(raw, aliasByKey), priceByName };
+  }
+
+  /**
    * Реестр автоматов для служб вендинга: карточка и имя по серийнику.
    *
    * `idBySerial` знает обе формы написания (с приставкой «c» и без — см.
@@ -1191,8 +1206,12 @@ export class VendingService {
    * опаснее лишней строки (R-P5a-4).
    *
    * Серийник — канон без «c» (normalizeMachineSerial), как у слотов Ourvend.
+   *
+   * Публично: тот же фильтр «в строю» применяет отчёт об усушке (П4). Своя
+   * копия этого правила разошлась бы с планом закупа, и автомат в ремонте
+   * тревожил бы владельца недостачей ровно тогда, когда его чинят.
    */
-  private async machineRegistry(): Promise<{
+  async machineRegistry(): Promise<{
     notInService: Map<string, { name: string; status: string }>;
     nameBySerial: Map<string, string>;
   }> {

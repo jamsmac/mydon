@@ -66,6 +66,26 @@ const ЧТЕНИЕ = [
   "/vending/products",
   "/vending/sync",
   "/vending/refill-events?days=14",
+  {
+    // Усушка (П4): весь расчёт идёт по снимкам, продажам и событиям заливок —
+    // четыре выборки, которых заглушка юнит-теста не исполняет.
+    path: "/vending/shrinkage?days=14",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ?.machines)) throw new Error("shrinkage.machines — не массив");
+      if (!Array.isArray(ответ?.warnings)) throw new Error("shrinkage.warnings — не массив");
+      if (typeof ответ?.threshold !== "number") throw new Error("shrinkage.threshold — не число");
+    },
+  },
+  {
+    // Паритет: сырой SQL с канонизацией серийника, теперь в двух половинах
+    // (продажи и остатки). Ровно тот класс запросов, ради которого заведён
+    // этот прогон.
+    path: "/ourvend/parity?days=7",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ?.mismatches)) throw new Error("parity.mismatches — не массив");
+      if (!Array.isArray(ответ?.stock?.mismatches)) throw new Error("parity.stock.mismatches — не массив");
+    },
+  },
   "/coffee/locations",
   "/coffee/placements",
   "/tasks",
@@ -825,6 +845,54 @@ async function проверитьПакетныйRaw() {
   }
 }
 
+/**
+ * Усушка (П4): отчёт читает снимки ПО АВТОМАТУ, и без снимков на границах
+ * суток этот запрос не исполняется вовсе. Чтение `/vending/shrinkage` в общем
+ * списке доходит до базы, но список автоматов там пуст — то есть половина
+ * нового SQL оставалась бы непроверенной (урок Task 3: смоук зеленел на
+ * `events = 0`, потому что детектор возвращался раньше вставки).
+ *
+ * Отдельный серийник, чтобы не мешать сценарию детектора: тот меряет приход
+ * между двумя снимками часовой давности, а здесь снимки стоят на границах
+ * ВЧЕРАШНИХ суток по Ташкенту.
+ */
+async function проверитьУсушку() {
+  const серийник = "SMOKE-SHRINK";
+  const сдвиг = 5 * 3_600_000; // Ташкент, без перехода на летнее время
+  const сегодня = new Date(Date.now() + сдвиг).toISOString().slice(0, 10);
+  const начало = Date.parse(`${сегодня}T00:00:00.000Z`) - сдвиг;
+  const вчера = начало - 86_400_000;
+
+  const снимок = async (когда, quantity) => {
+    const { r, text } = await jsonRequest("POST", "/vending/ingest", {
+      capturedAt: new Date(когда).toISOString(),
+      machines: [
+        {
+          serial: серийник,
+          slots: [{ coilId: "1", product: "Smoke Shrink", capacity: 20, quantity }],
+        },
+      ],
+    });
+    if (!r.ok) throw new Error(`приём снимка → ${r.status}: ${text.slice(0, 200)}`);
+  };
+
+  await снимок(вчера, 12);
+  await снимок(начало, 5);
+
+  const { r, text, json } = await jsonRequest("GET", "/vending/shrinkage?days=2");
+  if (!r.ok) throw new Error(`отчёт → ${r.status}: ${text.slice(0, 200)}`);
+  const автомат = json.machines.find((m) => String(m.serial).toLowerCase() === серийник.toLowerCase());
+  if (!автомат) throw new Error(`автомата ${серийник} нет в отчёте — выборка снимков по автомату не отработала`);
+  if (!Array.isArray(автомат.refillDays)) throw new Error("refillDays — не массив");
+  // Продажи по дням (`sale`) в смоук-базу положить нечем: их наполняет синк из
+  // чужой БД, которого здесь нет. Значит день ОБЯЗАН быть пропущен с причиной —
+  // молчаливый «ноль усушки» тут был бы худшим из исходов.
+  if (автомат.summary.daysCounted !== 0) throw new Error(`день без продаж посчитан: daysCounted=${автомат.summary.daysCounted}`);
+  if (!json.warnings.some((w) => w.code === "no_sales_day" && w.message.includes(автомат.name))) {
+    throw new Error("нет предупреждения no_sales_day — день пропущен молча");
+  }
+}
+
 /** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
 async function проверитьRateLimit() {
   for (let i = 0; i < 70; i += 1) {
@@ -1004,6 +1072,13 @@ try {
   }
 
   try {
+    await проверитьУсушку();
+    console.log("  ok  сценарий: усушка — снимки на границах суток, день без продаж пропущен с причиной");
+  } catch (e) {
+    провалы.push(`усушка: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -1025,4 +1100,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 8 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 9 сценариев.`);

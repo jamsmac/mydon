@@ -1,4 +1,4 @@
-import type { NotifyUrgency } from "@mydon/shared";
+import { TZ, type NotifyUrgency } from "@mydon/shared";
 
 /**
  * Правила уведомлений (ТЗ FR-2): событие → правило → сообщение.
@@ -47,6 +47,17 @@ const num = (v: unknown): number => {
 export function formatAmount(value: unknown, currency = "UZS"): string {
   const n = num(value);
   return `${n.toLocaleString("ru-RU").replace(/\u00A0/g, " ")} ${currency}`;
+}
+
+/**
+ * \u0427\u0430\u0441 \u0438 \u043C\u0438\u043D\u0443\u0442\u0430 \u0441\u043E\u0431\u044B\u0442\u0438\u044F \u043F\u043E \u0422\u0430\u0448\u043A\u0435\u043D\u0442\u0443. \u0412 \u0431\u0440\u0438\u0444\u0438\u043D\u0433\u0435 \u0432\u0430\u0436\u043D\u043E \u00AB\u043A\u043E\u0433\u0434\u0430 \u0441\u0435\u0433\u043E\u0434\u043D\u044F\u00BB, \u0430 \u043D\u0435
+ * \u043F\u043E\u043B\u043D\u0430\u044F \u0434\u0430\u0442\u0430: UTC \u0438\u0437 payload \u0432\u043B\u0430\u0434\u0435\u043B\u0435\u0446 \u0447\u0438\u0442\u0430\u043B \u0431\u044B \u0441\u043E \u0441\u0434\u0432\u0438\u0433\u043E\u043C \u043D\u0430 \u043F\u044F\u0442\u044C \u0447\u0430\u0441\u043E\u0432 \u0438
+ * \u0440\u0435\u0448\u0438\u043B \u0431\u044B, \u0447\u0442\u043E \u0437\u0430\u043B\u0438\u0432\u043A\u0430 \u0431\u044B\u043B\u0430 \u043D\u043E\u0447\u044C\u044E.
+ */
+function \u0432\u0440\u0435\u043C\u044F\u0422\u0430\u0448\u043A\u0435\u043D\u0442\u0430(value: unknown): string {
+  const t = Date.parse(String(value));
+  if (!Number.isFinite(t)) return "\u2014";
+  return new Date(t).toLocaleTimeString("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 }
 
 export const RULES: Rule[] = [
@@ -323,6 +334,31 @@ export const RULES: Rule[] = [
     format: (c) =>
       `☕🟡 Расхождение расхода: ${str(c.payload.location)} — ${str(c.payload.ingredient)}, ` +
       `факт ${num(c.payload.actualGrams)} г против ожидания ${num(c.payload.expectedGrams)} г.`,
+  },
+
+  // ── Снек-автоматы: полевой контур (П4) ────────────────────────────────────
+  {
+    // Усушка за порогом (`SHRINK_ALERT_UZS`, по позиции за период). В брифинг,
+    // не немедленно: недостача за неделю — повод разобраться утром, а не
+    // ночью, и дедуп в `ShrinkageService` даёт её один раз в сутки.
+    id: "vending.shrinkage_alert",
+    eventType: "vending.shrinkage_alert",
+    urgency: "briefing",
+    format: (c) =>
+      `📉 Усушка ${str(c.payload.name)}: ${str(c.payload.product)} −${num(c.payload.lossUnits)} шт ` +
+      `≈ ${formatAmount(c.payload.lossValue, "сум")} за ${num(c.payload.days)} дн.`,
+  },
+  {
+    // Детектор увидел приход, а оператор его не записал. Это НЕ тревога о
+    // воровстве: факт заливки мы всё равно знаем из снимков. Это напоминание
+    // оформить её в боте — иначе склад не спишется и разойдётся с автоматом.
+    id: "vending.refill_detected",
+    eventType: "vending.refill_detected",
+    urgency: "briefing",
+    when: (c) => c.payload.recorded === false,
+    format: (c) =>
+      `🍫 Заливка без записи: ${str(c.payload.name)} +${num(c.payload.units)} шт ${времяТашкента(c.payload.windowTo)} — ` +
+      `оформи в боте «Заполнил автомат»`,
   },
 
   // ── Обслуживание оборудования ─────────────────────────────────────────────

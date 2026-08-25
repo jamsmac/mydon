@@ -19,6 +19,7 @@ import {
 import { Type } from "class-transformer";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
+import { ShrinkageService } from "./shrinkage.service";
 import { VendingService } from "./vending.service";
 
 export class IngestSlotDto {
@@ -285,6 +286,19 @@ export class DetectRefillEventsDto {
 }
 
 /**
+ * Окно отчёта об усушке (П4). Потолок 60 суток — граница памяти: снимки
+ * читаются по автомату, но 60 дней парка это уже полмиллиона строк за прогон.
+ *
+ * `@Type(() => Number)` обязателен: в query всё приходит строкой, а
+ * `ValidationPipe` включён БЕЗ `enableImplicitConversion` — без него
+ * `@IsInt()` отбивал бы любой `?days=`.
+ */
+export class ShrinkageDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(60)
+  days?: number;
+}
+
+/**
  * Вендинг: приём собранных данных и просмотр дефицита. Приём (POST) закрыт
  * общим ServiceTokenGuard — данные кладёт коллектор, не кто угодно.
  */
@@ -294,6 +308,7 @@ export class VendingController {
     private readonly vending: VendingService,
     private readonly refills: RefillService,
     private readonly refillEvents: RefillEventsService,
+    private readonly shrinkageReport: ShrinkageService,
   ) {}
 
   @Post("ingest")
@@ -441,6 +456,15 @@ export class VendingController {
   @Post("refill-events/detect")
   detectRefillEvents(@Body() dto: DetectRefillEventsDto) {
     return this.refillEvents.detect(dto.days);
+  }
+
+  /**
+   * Усушка автоматов по дням без заливок (П4, R-P4-3). Чтение открыто: это
+   * отчёт, а не мутация.
+   */
+  @Get("shrinkage")
+  shrinkage(@Query() dto: ShrinkageDto) {
+    return this.shrinkageReport.report(dto.days);
   }
 
   /** Журнал событий детектора: что автомат получил и была ли запись оператора. */

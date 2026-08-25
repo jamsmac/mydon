@@ -120,4 +120,44 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.equal(watch.length, 1);
     assert.equal(watch[0].urgency, "briefing");
   });
+
+  it("усушка за порогом: товар, штуки и сумма одной строкой брифинга", () => {
+    const notes = applyRules(
+      ctx("vending.shrinkage_alert", {
+        serial: "2508160376",
+        name: "Olma",
+        product: "Kinder Bueno",
+        lossUnits: 9,
+        lossValue: 99000,
+        days: 7,
+      }),
+    );
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].urgency, "briefing");
+    assert.equal(notes[0].text, "📉 Усушка Olma: Kinder Bueno −9 шт ≈ 99 000 сум за 7 дн.");
+  });
+
+  it("заливка без записи зовёт оформить её в боте; подтверждённая — молчит", () => {
+    const payload = {
+      serial: "2508160376",
+      name: "Olma",
+      units: 43,
+      // 04:00 UTC = 09:00 Ташкента: владелец не должен читать со сдвигом.
+      windowTo: "2026-08-24T04:00:00.000Z",
+      recorded: false,
+    };
+    const notes = applyRules(ctx("vending.refill_detected", payload));
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].urgency, "briefing");
+    assert.equal(
+      notes[0].text,
+      "🍫 Заливка без записи: Olma +43 шт 09:00 — оформи в боте «Заполнил автомат»",
+    );
+
+    assert.equal(
+      applyRules(ctx("vending.refill_detected", { ...payload, recorded: true })).length,
+      0,
+      "заливка, которую оператор записал, — не новость",
+    );
+  });
 });
