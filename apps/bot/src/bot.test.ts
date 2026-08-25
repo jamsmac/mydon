@@ -598,3 +598,175 @@ describe("Брифинг: несрочные сигналы правил", () =>
     assert.equal(BRIEFING_NOTES_WINDOW_MS, 7 * 24 * 3_600_000);
   });
 });
+
+describe("Аналитика снека: путь владельца до Core (П5b)", () => {
+  const МАРЖА = {
+    days: 30,
+    from: "2026-07-26",
+    to: "2026-08-24",
+    lowPct: 15,
+    machines: [
+      {
+        serial: "2508160376",
+        name: "Olma Администрация",
+        products: [],
+        qty: 545,
+        revenue: 5_882_000,
+        cogs: 4_260_615,
+        margin: 1_621_385,
+        pct: 27.6,
+        unknownUnits: 0,
+        low: false,
+      },
+    ],
+    products: [],
+    totals: { qty: 545, revenue: 5_882_000, cogs: 4_260_615, margin: 1_621_385, pct: 27.6, unknownUnits: 0 },
+    unknownUnits: 0,
+    unknownProducts: [],
+    excluded: [],
+  };
+
+  /** Стаб Core: считает вызовы каждого метода и с каким окном его позвали. */
+  function deps(вызовы: string[]): HandlerDeps {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingMargin: async (days: number) => {
+        вызовы.push(`margin:${days}`);
+        return МАРЖА;
+      },
+      vendingDeadStock: async (days: number) => {
+        вызовы.push(`dead:${days}`);
+        return { days, since: "2026-08-04", warehouse: [], machines: [], totalValue: 0, noPriceCount: 0 };
+      },
+      vendingPriceChanges: async (days: number) => {
+        вызовы.push(`changes:${days}`);
+        return { days, pct: 5, purchase: [], retail: [], monthly: [] };
+      },
+      vendingPriceGap: async (days: number) => {
+        вызовы.push(`gap:${days}`);
+        return { days, pct: 5, rows: [], noReference: [], lostTotal: 0 };
+      },
+      setVendingSalePrice: async (product: string, price: number, confirmed: boolean) => {
+        вызовы.push(`sale-price:${product}:${price}:${confirmed}`);
+        return { ok: true, product, oldPrice: null, newPrice: price };
+      },
+      setVendingPrice: async (product: string, price: number) => {
+        // Закупочная цена: сюда «цена продажи …» попадать НЕ ДОЛЖНА.
+        вызовы.push(`purchase-price:${product}:${price}`);
+        return { ok: true, product, oldPrice: null, newPrice: price };
+      },
+      bootstrapVendingSalePrice: async (days: number) => {
+        вызовы.push(`bootstrap:${days}`);
+        return { days, set: [{ product: "TUC", price: 15_000, qty: 42 }], skipped: [] };
+      },
+      // Значение по умолчанию повторяет клиент (`ourvendHealth(runs = 20)`):
+      // окно прогонов задаёт он, а не ветка обработчика.
+      ourvendHealth: async (runs = 20) => {
+        вызовы.push(`health:${runs}`);
+        return {
+          runs: [],
+          failedStreak: 12,
+          lastSuccessAt: null,
+          slotsLagMin: null,
+          salesLagH: null,
+          productSaleLagH: null,
+          parity: { days: 7, ok: false, mismatches: 3, stockOk: false, note: null },
+        };
+      },
+    } as unknown as HandlerDeps["core"];
+    return { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
+  }
+
+  it("«цена продажи …» правит ЭТАЛОН витрины, а не закупочную цену", async () => {
+    // Регрессия порядка веток: существующая `/^цена(\s|:|$)/i` ловит и эту
+    // фразу. Стой она раньше — правка ушла бы в закупочную цену: другая
+    // колонка, другой гейт, и заметили бы это только по перекошенному закупу.
+    const вызовы: string[] = [];
+    const reply = await handleMessage(111, "цена продажи TUC 15000", deps(вызовы));
+    assert.deepEqual(вызовы, ["sale-price:TUC:15000:false"]);
+    assert.match(reply?.text ?? "", /Эталон витрины/);
+  });
+
+  it("«цена …» по-прежнему правит закупочную цену", async () => {
+    const вызовы: string[] = [];
+    await handleMessage(111, "цена TUC 12000", deps(вызовы));
+    assert.deepEqual(вызовы, ["purchase-price:TUC:12000"]);
+  });
+
+  it("«витрина как факт» — бутстрап, «витрина» — отчёт", async () => {
+    const вызовы: string[] = [];
+    await handleMessage(111, "витрина как факт", deps(вызовы));
+    await handleMessage(111, "витрина", deps(вызовы));
+    assert.deepEqual(вызовы, ["bootstrap:14", "gap:14"]);
+  });
+
+  it("окна из фразы зажимаются ботом и доходят до Core", async () => {
+    const вызовы: string[] = [];
+    await handleMessage(111, "маржа", deps(вызовы));
+    await handleMessage(111, "маржа за 7 дней", deps(вызовы));
+    await handleMessage(111, "маржа за 900 дней", deps(вызовы));
+    await handleMessage(111, "мёртвый сток", deps(вызовы));
+    await handleMessage(111, "цены", deps(вызовы));
+    await handleMessage(111, "сверка", deps(вызовы));
+    assert.deepEqual(вызовы, ["margin:30", "margin:7", "margin:90", "dead:21", "changes:30", "health:20"]);
+  });
+
+  it("маржа отвечает разбором, а не «понял»", async () => {
+    const reply = await handleMessage(111, "маржа", deps([]));
+    assert.match(reply?.text ?? "", /Маржа снек-автоматов \(OurVend\) за 30 дн/);
+    assert.match(reply?.text ?? "", /Olma Администрация: выручка 5 882 000/);
+  });
+
+  it("«сверка» показывает серию отказов сбора, а не молчит про неё", async () => {
+    const reply = await handleMessage(111, "сверка", deps([]));
+    assert.match(reply?.text ?? "", /12 отказов подряд/);
+  });
+
+  it("сбой Core не молчит — владелец знает, что данных нет", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingMargin: async () => {
+        throw new CoreError(503, "/vending/margin", "");
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "маржа", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /маржу из MYDON Core/i);
+  });
+
+  it("отказ Core по данным объясняется причиной, а не «попробуй позже»", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      setVendingSalePrice: async () => {
+        throw new CoreError(400, "/vending/sale-price", '{"message":["product should not be empty"]}');
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "цена продажи TUC 15000", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /product should not be empty/);
+    assert.doesNotMatch(reply?.text ?? "", /попробуй ещё раз чуть позже/i);
+  });
+
+  it("справка называет все восемь команд — иначе отчёты есть, а спросить их никто не догадается", async () => {
+    const reply = await handleMessage(111, "ъъъ непонятное", deps([]));
+    const help = reply?.text ?? "";
+    for (const фраза of [
+      "«маржа»",
+      "«мёртвый сток»",
+      "«цены»",
+      "«витрина»",
+      "«цена продажи TUC 15000»",
+      "«витрина как факт»",
+      "«итоги недели»",
+      "«сверка»",
+    ]) {
+      assert.ok(help.includes(фраза), `в справке нет ${фраза}`);
+    }
+  });
+});

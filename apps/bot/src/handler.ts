@@ -27,6 +27,33 @@ import {
 } from "./purchase-brief";
 import { formatRuleResult, isRuleCommand, parseRuleCommand, ruleCommandHint } from "./product-rules";
 import { formatPurchasePlan, isPlanCommand } from "./purchase-plan";
+import {
+  DEAD_STOCK_DAYS_DEFAULT,
+  DEAD_STOCK_DAYS_MAX,
+  MARGIN_DAYS_DEFAULT,
+  MARGIN_DAYS_MAX,
+  PRICE_CHANGES_DAYS_DEFAULT,
+  PRICE_CHANGES_DAYS_MAX,
+  PRICE_GAP_DAYS_DEFAULT,
+  PRICE_GAP_DAYS_MAX,
+  SALE_PRICE_HINT,
+  formatDeadStock,
+  formatMargin,
+  formatOurvendHealth,
+  formatPriceChanges,
+  formatPriceGap,
+  formatSalePriceBootstrap,
+  formatSalePriceResult,
+  isDeadStockQuery,
+  isMarginQuery,
+  isOurvendCheckQuery,
+  isPriceChangesQuery,
+  isPriceGapQuery,
+  isSalePriceBootstrapCommand,
+  isSalePriceCommand,
+  parseDays,
+  parseSalePriceCommand,
+} from "./analytics-brief";
 import { formatShrinkage, isShrinkageQuery, parseShrinkageDays } from "./shrinkage-brief";
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
@@ -78,6 +105,14 @@ const HELP = [
   "• «принять закуп» — оприходовать накладную на склад",
   "• «принять закуп: TUC 5, Flint 5» — то же, но с уточнением, сколько сразу в автоматы",
   "• «цена TUC 12000» — записать закупочную цену товара (скачок >20% — добавь «точно»)",
+  "• «маржа» / «маржа за 7 дней» — выручка и маржа снек-автоматов (OurVend)",
+  "• «мёртвый сток» — что не двигалось 21 день (склад и автоматы)",
+  "• «цены» — что изменилось в закупочных и витринных ценах",
+  "• «витрина» — где витрина разошлась с эталоном и сколько недобираем",
+  "• «цена продажи TUC 15000» — записать эталон витрины (>20% от факта — добавь «точно»)",
+  "• «витрина как факт» — разово проставить эталон по факту продаж за 14 дней",
+  "• «итоги недели» — сводка за прошлую неделю",
+  "• «сверка» — здоровье сбора OurVend и паритет",
   "• фото с подписью «чек» — прикрепить чек к последней принятой накладной",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
   "• «касса закупа: получил 2400000, базар 376300» — записать кассу похода на базар",
@@ -230,6 +265,114 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка отчёта об усушке:", err);
       return { text: "Не удалось получить усушку из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // ── Аналитика снека (П5b) ──
+  //
+  // Весь блок стоит ДО ветки закупочной цены и до parseIntent, а внутри него
+  // мутации идут раньше отчётов: обе пары фраз («цена продажи …» / «цена …»,
+  // «витрина как факт» / «витрина») перехватываются соседом, если поменять их
+  // местами, — и перехват молчаливый, с записью не туда.
+
+  // Эталон витрины — мутация. СТРОГО до isPriceCommand: существующий
+  // /^цена(\s|:|$)/i ловит и «цена продажи TUC 15000», и правка ушла бы в
+  // ЗАКУПОЧНУЮ цену — другая колонка, другой гейт, и владелец узнал бы об этом
+  // только по перекошенному закупу.
+  if (isSalePriceCommand(text)) {
+    const cmd = parseSalePriceCommand(text);
+    if (cmd === null) return { text: SALE_PRICE_HINT };
+    try {
+      const res = await deps.core.setVendingSalePrice(cmd.product, cmd.price, cmd.confirmed);
+      return { text: formatSalePriceResult(res) };
+    } catch (err) {
+      console.error("Ошибка правки эталона витрины:", err);
+      // 400 — отказ по САМИМ ДАННЫМ: повтор той же команды не поможет никогда
+      // (как у правил закупа).
+      if (err instanceof CoreError && err.status === 400) {
+        return { text: `${SALE_PRICE_HINT}\n\nCore отверг запрос: ${coreReason(err.body)}` };
+      }
+      return { text: "Не удалось записать эталон витрины в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // «витрина как факт» — разовый бутстрап эталона. СТРОГО до isPriceGapQuery:
+  // обе фразы начинаются с «витрина», и отчёт перехватил бы мутацию.
+  if (isSalePriceBootstrapCommand(text)) {
+    try {
+      const [first, ...more] = formatSalePriceBootstrap(
+        await deps.core.bootstrapVendingSalePrice(parseDays(text, PRICE_GAP_DAYS_DEFAULT, PRICE_GAP_DAYS_MAX)),
+      );
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка бутстрапа эталона витрины:", err);
+      if (err instanceof CoreError && err.status === 400) {
+        return { text: `Core отверг запрос: ${coreReason(err.body)}` };
+      }
+      return { text: "Не удалось проставить эталон витрины в MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Витрина против эталона — чтение.
+  if (isPriceGapQuery(text)) {
+    try {
+      const days = parseDays(text, PRICE_GAP_DAYS_DEFAULT, PRICE_GAP_DAYS_MAX);
+      const [first, ...more] = formatPriceGap(await deps.core.vendingPriceGap(days));
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка отчёта о витрине:", err);
+      return { text: "Не удалось получить витрину из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Маржа снек-автоматов — чтение.
+  if (isMarginQuery(text)) {
+    try {
+      const days = parseDays(text, MARGIN_DAYS_DEFAULT, MARGIN_DAYS_MAX);
+      const [first, ...more] = formatMargin(await deps.core.vendingMargin(days));
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка отчёта о марже:", err);
+      return { text: "Не удалось получить маржу из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Мёртвый сток — чтение.
+  if (isDeadStockQuery(text)) {
+    try {
+      const days = parseDays(text, DEAD_STOCK_DAYS_DEFAULT, DEAD_STOCK_DAYS_MAX);
+      const [first, ...more] = formatDeadStock(await deps.core.vendingDeadStock(days));
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка отчёта о мёртвом стоке:", err);
+      return { text: "Не удалось получить мёртвый сток из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Изменения цен — чтение. «цены» и «цена …» различаются одной буквой и
+  // означают противоположное (отчёт против правки), поэтому у обеих строгий
+  // хвост в разборе, а не общий префикс.
+  if (isPriceChangesQuery(text)) {
+    try {
+      const days = parseDays(text, PRICE_CHANGES_DAYS_DEFAULT, PRICE_CHANGES_DAYS_MAX);
+      const [first, ...more] = formatPriceChanges(await deps.core.vendingPriceChanges(days));
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка отчёта об изменениях цен:", err);
+      return { text: "Не удалось получить изменения цен из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // «сверка» — здоровье сбора OurVend и паритет одним ответом (R-P5b-8).
+  // Живого запроса к кабинету OurVend из бота нет: коннектор живёт в агентах
+  // по крону, и делать вид, что «сверка» ходит в кабинет, нельзя.
+  if (isOurvendCheckQuery(text)) {
+    try {
+      const [first, ...more] = formatOurvendHealth(await deps.core.ourvendHealth());
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка сверки OurVend:", err);
+      return { text: "Не удалось получить сверку OurVend из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 

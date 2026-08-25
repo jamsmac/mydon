@@ -1,4 +1,15 @@
 import { normalizeMachineSerial, type Domain } from "@mydon/shared";
+import type {
+  DeadRow,
+  DeadStockReport,
+  MarginProduct,
+  MarginReport,
+  MarginTotals,
+  PriceChange,
+  PriceChangesReport,
+  PriceGapReport,
+  WeekDelta,
+} from "@mydon/shared";
 
 export interface Briefing {
   generatedAt: string;
@@ -370,6 +381,98 @@ export interface SetPriceResult {
   reason?: "not_found" | "spike";
 }
 
+/**
+ * Формы ответов аналитики снека (П5b), которых ЕЩЁ НЕТ в `@mydon/shared`.
+ *
+ * `MarginReport`/`DeadStockReport`/`PriceChangesReport`/`PriceGapReport` живут
+ * в общем пакете и импортируются оттуда (R-P5b-10) — второй раз их здесь
+ * объявлять нельзя. А эти четыре формы объявляются сервисами Core
+ * (`SetSalePriceResult`/`BootstrapSalePriceResult` — `vending.service.ts`,
+ * `MonthlyPrice` — `analytics.service.ts`, `OurvendHealth`/`WeeklyDigest` —
+ * недельная сводка), и бот не может импортировать типы из приложения Core.
+ * Поэтому здесь — ровно те поля, что отдаёт HTTP, как уже сделано для
+ * `SetPriceResult`. Когда `OurvendHealth`/`WeeklyDigest` появятся в
+ * `@mydon/shared`, эти объявления заменяются реэкспортом — формы совпадают
+ * поле в поле.
+ */
+
+/** Помесячная динамика цен — только для панели (донор `price_dynamics`). */
+export interface MonthlyPrice {
+  product: string;
+  month: string;
+  retail: number | null;
+  purchase: number | null;
+}
+
+/**
+ * Итог правки ЭТАЛОНА витрины (POST /vending/sale-price).
+ *
+ * Отдельный тип от `SetPriceResult`, хотя поля почти те же: гейт здесь
+ * считается от ФАКТА продаж (`factPrice`), а не от прошлой цены. Слить их в
+ * один тип значит потерять `factPrice` — единственное, чем ответ гейта
+ * объясняет владельцу, почему его цену не приняли.
+ */
+export interface SetSalePriceResult {
+  ok: boolean;
+  product?: string;
+  oldPrice?: number | null;
+  newPrice?: number;
+  /** Отклонение от факта витрины (деньги ÷ штуки за 14 дн.), % — при reason="spike". */
+  deviationPct?: number;
+  factPrice?: number | null;
+  reason?: "not_found" | "spike";
+}
+
+/** Итог разового бутстрапа эталона по факту продаж (POST /vending/sale-price/bootstrap). */
+export interface BootstrapSalePriceResult {
+  days: number;
+  set: { product: string; price: number; qty: number }[];
+  skipped: { product: string; reason: "already_set" | "no_sales" }[];
+}
+
+/** Прогон синка OurVend (строка `vending_sync_run`). */
+export interface OurvendSyncRun {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: "running" | "success" | "partial" | "failed";
+  machinesTotal: number;
+  machinesOk: number;
+  durationMs: number | null;
+  error: string | null;
+}
+
+/** Здоровье сбора OurVend (GET /ourvend/health): прогоны, лаги, паритет (R-P5b-8). */
+export interface OurvendHealth {
+  runs: OurvendSyncRun[];
+  failedStreak: number;
+  lastSuccessAt: string | null;
+  /** Возраст самого свежего снимка. `null` — снимков нет вовсе (это НЕ «свежо»). */
+  slotsLagMin: number | null;
+  salesLagH: number | null;
+  productSaleLagH: number | null;
+  parity: { days: number; ok: boolean; mismatches: number; stockOk: boolean; note: string | null };
+}
+
+/** Недельная сводка (GET /vending/weekly-digest): текст собирает бот (R-P5b-7). */
+export interface WeeklyDigest {
+  week: string;
+  from: string;
+  to: string;
+  machines: { serial: string; name: string; qty: number; revenue: number; margin: number; pct: number | null }[];
+  totals: MarginTotals;
+  delta: WeekDelta;
+  previousWeek: string;
+  topProducts: MarginProduct[];
+  worstProducts: MarginProduct[];
+  refills: { events: number; detectedUnits: number; recordedUnits: number };
+  intake: { orders: number; units: number; amount: number };
+  stocktakes: { positions: number; lastCountedAt: string | null };
+  deadStock: { rows: DeadRow[]; totalValue: number };
+  priceChanges: { purchase: PriceChange[]; retail: PriceChange[] };
+  health: OurvendHealth;
+}
+
 /** Строка ленты действий сотрудников (GET /registry/actions). */
 export interface ActionRow {
   ts: string;
@@ -488,6 +591,68 @@ export class CoreClient {
    */
   vendingShrinkage(days = 14): Promise<ShrinkReport> {
     return this.request<ShrinkReport>(`/vending/shrinkage?days=${days}`);
+  }
+
+  // ── Аналитика снека (П5b): деньги, мёртвый сток, цены, витрина ──
+  // Каждый отчёт — отдельный запрос: владелец спрашивает их по одному, а
+  // общий «дай всё» гонял бы четыре тяжёлых расчёта ради одной строки в чате.
+  // Окна зажимает бот (analytics-brief.ts): Core отвечает на выход за границы
+  // отказом 400, а владельцу нужен отчёт, а не разбор кода ошибки.
+
+  /** Маржа по проданному: автомат → товар (R-P5b-3). */
+  vendingMargin(days = 30): Promise<MarginReport> {
+    return this.request<MarginReport>(`/vending/margin?days=${days}`);
+  }
+
+  /** Мёртвый сток: что не двигалось за окно — склад и автоматы (R-P5b-4). */
+  vendingDeadStock(days = 21): Promise<DeadStockReport> {
+    return this.request<DeadStockReport>(`/vending/dead-stock?days=${days}`);
+  }
+
+  /**
+   * Изменения цен: закупочные и витринные (R-P5b-5). `monthly` бот не
+   * показывает — помесячная динамика читается только на листе панели, но
+   * тип ответа один, и врать о нём клиенту незачем.
+   */
+  vendingPriceChanges(days = 30): Promise<PriceChangesReport & { monthly: MonthlyPrice[] }> {
+    return this.request<PriceChangesReport & { monthly: MonthlyPrice[] }>(
+      `/vending/price-changes?days=${days}`,
+    );
+  }
+
+  /** Витрина против эталона владельца: где недобираем (R-P5b-6). */
+  vendingPriceGap(days = 14): Promise<PriceGapReport> {
+    return this.request<PriceGapReport>(`/vending/price-gap?days=${days}`);
+  }
+
+  /**
+   * Эталон витрины товара (R-P5b-6). Это НЕ закупочная цена
+   * (`setVendingPrice`): другая колонка, другой гейт — отклонение считается от
+   * факта продаж, и снимается словом «точно».
+   */
+  setVendingSalePrice(product: string, price: number, confirmed: boolean): Promise<SetSalePriceResult> {
+    return this.request<SetSalePriceResult>("/vending/sale-price", {
+      method: "POST",
+      body: JSON.stringify({ product, price, actor: "owner", confirmed }),
+    });
+  }
+
+  /** Разовый бутстрап: эталон = факт продаж за окно для товаров без эталона. */
+  bootstrapVendingSalePrice(days = 14): Promise<BootstrapSalePriceResult> {
+    return this.request<BootstrapSalePriceResult>("/vending/sale-price/bootstrap", {
+      method: "POST",
+      body: JSON.stringify({ days }),
+    });
+  }
+
+  /** Недельная сводка (R-P5b-7). Без `week` — предыдущая ISO-неделя по Ташкенту. */
+  vendingWeeklyDigest(week?: string): Promise<WeeklyDigest> {
+    return this.request<WeeklyDigest>(`/vending/weekly-digest${week ? `?week=${encodeURIComponent(week)}` : ""}`);
+  }
+
+  /** Здоровье сбора OurVend: прогоны, серия отказов, лаги, паритет (R-P5b-8). */
+  ourvendHealth(runs = 20): Promise<OurvendHealth> {
+    return this.request<OurvendHealth>(`/ourvend/health?runs=${runs}`);
   }
 
   // ── Сигналы GLOBERENT для брифинга (перенос PROMACH) ──
