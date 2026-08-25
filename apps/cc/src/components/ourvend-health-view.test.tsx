@@ -35,7 +35,7 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   slotsLagMin: null,
   salesLagH: 10.7,
   productSaleLagH: 36.8,
-  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, note: null },
+  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, stockChecked: 14, note: null },
 };
 
 const ЗДОРОВ: OurvendHealth = {
@@ -45,7 +45,7 @@ const ЗДОРОВ: OurvendHealth = {
   slotsLagMin: 48,
   salesLagH: 1.2,
   productSaleLagH: 2.4,
-  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, note: null },
+  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, stockChecked: 14, note: null },
 };
 
 describe("Секция «Здоровье сбора»", () => {
@@ -68,10 +68,10 @@ describe("Секция «Здоровье сбора»", () => {
   it("паритет: продажи и остатки — две разные пилюли, расхождение красное", () => {
     render(
       <OurvendHealthCard
-        health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 3, stockOk: false, note: "снапшот моложе окна" } }}
+        health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 3, stockOk: false, stockChecked: 14, note: "снапшот моложе окна" } }}
       />,
     );
-    expect(screen.getByText("3 расхождений")).toBeVisible();
+    expect(screen.getByText("3 расхождения")).toBeVisible();
     expect(screen.getByText("остатки расходятся")).toBeVisible();
     expect(screen.getByText(/снапшот моложе окна/)).toBeVisible();
   });
@@ -110,5 +110,104 @@ describe("Секция «Здоровье сбора»", () => {
     mocks.ourvendHealth.mockResolvedValue(ЗДОРОВЬЕ);
     render(await OurvendHealthSection());
     expect(screen.getByText(/12 отказов подряд/)).toBeVisible();
+  });
+});
+
+describe("Здоровье сбора: три состояния журнала прогонов", () => {
+  it("прогонов нет — «не оценить», а не зелёное «сбоев подряд нет»", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, runs: [], failedStreak: 0, lastSuccessAt: null }} />);
+    // Ноль отказов на пустом журнале — это НЕ «сбор здоров»: сбор просто ни
+    // разу не запускался (та же ❓-развилка, что у бота в состоянииСбора).
+    expect(screen.queryByText("сбоев подряд нет")).toBeNull();
+    expect(screen.getByText("прогонов нет — не оценить")).toBeVisible();
+    expect(screen.getByText("не оценить")).toBeVisible();
+    expect(screen.queryByText("тревога")).toBeNull();
+  });
+
+  it("сбой на границе: 3 отказа — тревога, 2 — ещё нет", () => {
+    const { unmount } = render(<OurvendHealthCard health={{ ...ЗДОРОВ, failedStreak: 3 }} />);
+    expect(screen.getByText("3 отказа подряд").className).toMatch(/bad/);
+    expect(screen.getByText("тревога")).toBeVisible();
+    unmount();
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, failedStreak: 2 }} />);
+    expect(screen.getByText("2 отказа подряд").className).not.toMatch(/bad/);
+    expect(screen.queryByText("тревога")).toBeNull();
+  });
+
+  it("лаг на границе: 6,0 ч — ещё не тревога, 6,1 ч — уже тревога", () => {
+    const { unmount } = render(<OurvendHealthCard health={{ ...ЗДОРОВ, salesLagH: 6 }} />);
+    expect(screen.getByText("6,0 ч").className).not.toMatch(/bad/);
+    expect(screen.queryByText("тревога")).toBeNull();
+    unmount();
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, salesLagH: 6.1 }} />);
+    expect(screen.getByText("6,1 ч").className).toMatch(/bad/);
+    expect(screen.getByText("тревога")).toBeVisible();
+  });
+});
+
+describe("Здоровье сбора: тексты для владельца", () => {
+  it("витрина названа по-человечески, имя таблицы не показывается", () => {
+    render(<OurvendHealthCard health={ЗДОРОВ} />);
+    expect(screen.getByText(/Снимки продаж по товарам \(кабинет\)/)).toBeVisible();
+    expect(screen.queryByText(/product_sale/)).toBeNull();
+  });
+
+  it("расхождения склоняются числом", () => {
+    const { unmount } = render(
+      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 1, stockOk: true, stockChecked: 14, note: null } }} />,
+    );
+    expect(screen.getByText("1 расхождение")).toBeVisible();
+    unmount();
+    render(
+      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 5, stockOk: true, stockChecked: 14, note: null } }} />,
+    );
+    expect(screen.getByText("5 расхождений")).toBeVisible();
+  });
+});
+
+/**
+ * Боевой первый прогон (adversarial-prod-data.md §3): снимки остатков OurVend
+ * есть только за СЕГОДНЯ, окно паритета их отбрасывает — сверять остатки не по
+ * чему. Продажи при этом сошлись идеально (14 пар, 0 расхождений), а общий
+ * `ok` уже `false` из-за складской половины.
+ */
+describe("Здоровье сбора: паритет, когда сверять нечем", () => {
+  const НЕЧЕМ = {
+    ...ЗДОРОВ,
+    parity: {
+      days: 7,
+      ok: false,
+      mismatches: 0,
+      stockOk: false,
+      // Ноль сравненных пар — «сверять нечем», а не «сошлось»/«разошлось».
+      stockChecked: 0,
+      note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
+    },
+  };
+
+  it("остатки — нейтральное «снимков за период нет», а не красное «расходятся»", () => {
+    render(<OurvendHealthCard health={НЕЧЕМ} />);
+    const остатки = screen.getByText("остатки: снимков за период нет");
+    expect(остатки).toBeVisible();
+    expect(остатки.className).not.toMatch(/bad/);
+    expect(screen.queryByText("остатки расходятся")).toBeNull();
+  });
+
+  it("продажи остаются сошедшимися — «0 расхождений» красным не печатаем", () => {
+    render(<OurvendHealthCard health={НЕЧЕМ} />);
+    expect(screen.getByText("продажи сходятся")).toBeVisible();
+    expect(screen.queryByText(/0 расхожден/)).toBeNull();
+    expect(document.querySelectorAll(".pill.bad")).toHaveLength(0);
+  });
+
+  it("причина сказана словами в самой строке", () => {
+    render(<OurvendHealthCard health={НЕЧЕМ} />);
+    expect(screen.getByText(/снимков остатков OurVend за период нет/)).toBeVisible();
+  });
+
+  it("половины независимы: продажи разошлись, остатки не сверяли", () => {
+    render(<OurvendHealthCard health={{ ...НЕЧЕМ, parity: { ...НЕЧЕМ.parity, mismatches: 4 } }} />);
+    expect(screen.getByText("4 расхождения").className).toMatch(/bad/);
+    expect(screen.getByText("остатки: снимков за период нет").className).not.toMatch(/bad/);
   });
 });

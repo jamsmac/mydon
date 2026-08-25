@@ -1,8 +1,12 @@
 import "server-only";
 import type {
+  AnalyticsWarning,
   DeadStockReport,
   DenominationCounts,
   MarginReport,
+  MonthlyPrice,
+  OurvendHealth,
+  OurvendSyncRun,
   PriceChangesReport,
   PriceGapReport,
 } from "@mydon/shared";
@@ -295,8 +299,15 @@ export interface VendingShrinkageReport {
  * (`vending-reports.ts`, R-P5b-10) — их считает Core, а бот и панель
  * ИМПОРТИРУЮТ оттуда же. Здесь только реэкспорт: ни одно поле не переписано,
  * иначе у владельца снова разъехались бы три копии одного числа (урок П5a).
+ *
+ * Финальная волна довела список до конца: `MonthlyPrice`, `OurvendHealth` и
+ * `OurvendSyncRun` жили здесь копиями поле-в-поле (Task 4 положил их в shared
+ * последним), теперь и они реэкспортируются. Своих объявлений форм отчётов в
+ * панели больше НЕТ — расхождение полей ловит компилятор, а не читатель.
  */
 export type {
+  AnalyticsWarning,
+  AnalyticsWarningCode,
   DeadRow,
   DeadStockReport,
   MarginExcluded,
@@ -304,6 +315,9 @@ export type {
   MarginProduct,
   MarginReport,
   MarginTotals,
+  MonthlyPrice,
+  OurvendHealth,
+  OurvendSyncRun,
   PriceChange,
   PriceChangesReport,
   PriceGapReport,
@@ -311,44 +325,16 @@ export type {
 } from "@mydon/shared";
 
 /**
- * Средняя цена товара за месяц — донорская «динамика по месяцам», только для
- * панели (R-P5b-5): в боте её нет, там она не читается.
+ * Хвост «посчитано не всё»: Core доклеивает `warnings` ко всем четырём
+ * отчётам аналитики (П5b Task 3), панель показывает их блоком «Посчитано не
+ * всё» — тем же набором фактов, что бот печатает строками.
  *
- * ВРЕМЕННО объявлено здесь. Task 1 вынес в `@mydon/shared` формы маржи, стока
- * и цен, но `MonthlyPrice` и `OurvendHealth` туда не попали. Как только Core
- * (Task 3/4) отдаст их из shared — заменить на реэкспорт выше, поля НЕ меняя.
+ * Поле НЕобязательное намеренно (как `WithWarnings` в боте): отчёт без
+ * предупреждений — законный ответ, и фикстуры листов, написанные до Task 3,
+ * обязаны рендериться как раньше, а не падать.
  */
-export interface MonthlyPrice {
-  product: string;
-  /** Месяц, `YYYY-MM`. */
-  month: string;
-  /** Средняя витринная цена месяца (amount/qty). `null` — продаж в месяце не было. */
-  retail: number | null;
-  /** Средняя закупочная цена месяца по принятым накладным. `null` — приходов не было. */
-  purchase: number | null;
-}
-
-/**
- * Здоровье сбора OurVend (R-P5b-8): прогоны, серия отказов, свежесть снимков и
- * паритет с учётной дорожкой. Живого запроса к OurVend из панели нет и не
- * будет — коннектор живёт в агентах по крону, здесь только его следы.
- *
- * ВРЕМЕННО объявлено здесь — см. оговорку у `MonthlyPrice`.
- */
-export interface OurvendHealth {
-  /** Последние прогоны, свежий первым — та же форма, что у `/vending/sync`. */
-  runs: VendingSyncRun[];
-  /** Сколько отказов подряд идёт прямо сейчас. 0 — последний прогон не упал. */
-  failedStreak: number;
-  lastSuccessAt: string | null;
-  /** Возраст последнего снимка слотов в минутах; `null` — снимков НЕТ вовсе (это не «свежо»). */
-  slotsLagMin: number | null;
-  /** Возраст последнего снимка продаж в часах; `null` — снимков нет вовсе. */
-  salesLagH: number | null;
-  /** Возраст снимка `product_sale`: в деньги не идёт (окно 7 дней), но по нему видно, жив ли сбор. */
-  productSaleLagH: number | null;
-  /** Паритет own↔stock за окно: продажи (`ok`/`mismatches`) и остатки (`stockOk`). */
-  parity: { days: number; ok: boolean; mismatches: number; stockOk: boolean; note: string | null };
+export interface WithWarnings {
+  warnings?: AnalyticsWarning[];
 }
 
 /** Событие детектора заливок: что автомат получил и была ли запись оператора. */
@@ -416,17 +402,15 @@ export interface VendingOrder {
   unmatchedDistribution: string[] | null;
 }
 
-/** Запуск сбора Ourvend — когда собирали и с каким итогом. */
-export interface VendingSyncRun {
-  id: string;
-  startedAt: string;
-  finishedAt: string | null;
-  status: "running" | "success" | "partial" | "failed";
-  machinesTotal: number;
-  machinesOk: number;
-  error: string | null;
-  durationMs: number | null;
-}
+/**
+ * Запуск сбора Ourvend — когда собирали и с каким итогом.
+ *
+ * Это ТА ЖЕ строка `vending_sync_run`, что отдаёт `/ourvend/health` в
+ * `OurvendHealth.runs`, поэтому здесь алиас общего типа, а не четвёртая копия
+ * восьми полей: `/vending/sync` и здоровье сбора обязаны показывать один
+ * статус одного прогона.
+ */
+export type VendingSyncRun = OurvendSyncRun;
 
 /**
  * Заливка снек/дринк-автомата: ПОСТРОЧНАЯ запись (один слот). У журнала нет
@@ -2404,13 +2388,13 @@ export const core = {
    * Аналитика снек-контура (П5b). Окна зажимает ядро (маржа 1..90, сток 1..90,
    * цены 1..180) — панель зовёт их значениями своих переключателей.
    */
-  vendingMargin: (days = 30) => get<MarginReport>(`/vending/margin?days=${days}`),
-  vendingDeadStock: (days = 21) => get<DeadStockReport>(`/vending/dead-stock?days=${days}`),
+  vendingMargin: (days = 30) => get<MarginReport & WithWarnings>(`/vending/margin?days=${days}`),
+  vendingDeadStock: (days = 21) => get<DeadStockReport & WithWarnings>(`/vending/dead-stock?days=${days}`),
   /** `monthly` — донорская динамика по месяцам, её просит только панель (R-P5b-5). */
   vendingPriceChanges: (days = 30) =>
-    get<PriceChangesReport & { monthly: MonthlyPrice[] }>(`/vending/price-changes?days=${days}`),
+    get<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings>(`/vending/price-changes?days=${days}`),
   /** Факт витрины против эталона владельца. Окно — своё, короткое (R-P5b-6). */
-  vendingPriceGap: (days = 14) => get<PriceGapReport>(`/vending/price-gap?days=${days}`),
+  vendingPriceGap: (days = 14) => get<PriceGapReport & WithWarnings>(`/vending/price-gap?days=${days}`),
   /** Здоровье сбора OurVend: прогоны, серия отказов, лаги снимков, паритет (R-P5b-8). */
   ourvendHealth: (runs = 20) => get<OurvendHealth>(`/ourvend/health?runs=${runs}`),
   /** Журнал детектора заливок: что автомат получил и была ли запись оператора. */

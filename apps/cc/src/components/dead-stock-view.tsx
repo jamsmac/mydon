@@ -1,6 +1,7 @@
-import { core, CoreUnavailable, type DeadRow, type DeadStockReport } from "../lib/core";
+import { core, CoreUnavailable, type DeadRow, type DeadStockReport, type WithWarnings } from "../lib/core";
 import { CoreDown } from "./core-down";
 import { ReportWindow } from "./report-window";
+import { COVERED_BY_DEAD_STOCK, ReportWarnings } from "./report-warnings";
 import { amount, count, day, plural } from "../lib/format";
 
 /** Окна «без движения». Ядро зажимает своё; умолчание — настройка DEAD_STOCK_DAYS. */
@@ -40,7 +41,7 @@ function DeadRowView({ r }: { r: DeadRow }) {
  * бойко продаётся в одном автомате и месяцами стоит в другом; общий флаг
  * спрятал бы вторую позицию.
  */
-export function DeadStockTables({ report }: { report: DeadStockReport }) {
+export function DeadStockTables({ report }: { report: DeadStockReport & WithWarnings }) {
   const строк = report.warehouse.length + report.machines.length;
   const пусто = строк === 0;
 
@@ -91,13 +92,15 @@ export function DeadStockTables({ report }: { report: DeadStockReport }) {
           )}
         </>
       )}
+
+      <ReportWarnings warnings={report.warnings} covered={COVERED_BY_DEAD_STOCK} />
     </>
   );
 }
 
 /** Лист «Мёртвый сток»: один поход в ядро, окно — из адреса (`?days=`). */
 export async function DeadStockView({ domain, days }: { domain: string; days: number }) {
-  let report: DeadStockReport;
+  let report: DeadStockReport & WithWarnings;
   try {
     report = await core.vendingDeadStock(days);
   } catch (err) {

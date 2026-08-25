@@ -102,3 +102,24 @@ describe("навигация: лист «Мёртвый сток»", () => {
     expect(DEAD_STOCK_WINDOWS).toEqual([14, 21, 30]);
   });
 });
+
+describe("Лист «Мёртвый сток»: хвост «Посчитано не всё»", () => {
+  it("причина от ядра показана блоком", () => {
+    render(
+      <DeadStockTables
+        report={{ ...МЁРТВЫЙ_ПРОД, warnings: [{ code: "stock_missing", message: "Остатков автоматов за период нет" }] }}
+      />,
+    );
+    expect(screen.getByText("Посчитано не всё")).toBeVisible();
+    expect(screen.getByText(/Остатков автоматов за период нет/)).toBeVisible();
+  });
+
+  it("позиции без цены лист называет сам — в хвосте это не повторяется", () => {
+    render(
+      <DeadStockTables
+        report={{ ...БЕЗ_ЦЕНЫ, warnings: [{ code: "unknown_cost", message: "1 позиция без цены закупки" }] }}
+      />,
+    );
+    expect(screen.queryByText("Посчитано не всё")).toBeNull();
+  });
+});

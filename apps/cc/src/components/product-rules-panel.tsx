@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import type { VendingProductRow } from "../lib/core";
+import { count } from "../lib/format";
 import { saveVendingProductRules } from "../app/vending/actions";
 
 /**
@@ -15,9 +16,6 @@ import { saveVendingProductRules } from "../app/vending/actions";
  * ПОЭТОМУ показан без формы: единственный писатель — бот («цена продажи
  * <товар> <сум>»). Форма здесь завела бы второго писателя одного поля.
  */
-
-/** Число без неразрывного пробела: скопированная цена должна находиться поиском. */
-const n = (v: number): string => v.toLocaleString("ru-RU").replace(/\u00a0/g, " ");
 
 const CATEGORY_LABEL: Record<VendingProductRow["category"], string> = {
   drink: "напиток",
@@ -102,15 +100,15 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
               <div className="t">
                 <b>{p.name}</b>
                 <small>
-                  {CATEGORY_LABEL[p.category]} · {p.purchasePrice === null ? "нет цены" : `${n(p.purchasePrice)} сум`} ·
-                  блок {n(p.packSize)} ·{" "}
+                  {CATEGORY_LABEL[p.category]} · {p.purchasePrice === null ? "нет цены" : `${count(p.purchasePrice)} сум`} ·
+                  блок {count(p.packSize)} ·{" "}
                   {/* «витрина 0» читалось бы как «продаём бесплатно»: эталона
                       просто нет, и сравнивать факт не с чем (R-P5b-6). */}
-                  {p.salePrice === null ? "эталон не задан" : `витрина ${n(p.salePrice)}`}
+                  {p.salePrice === null ? "эталон не задан" : `витрина ${count(p.salePrice)} сум`}
                 </small>
               </div>
               {p.excludedFromPurchase && <span className="pill bad">исключён</span>}
-              {p.fixedPurchaseQty !== null && <span className="pill">фикс {n(p.fixedPurchaseQty)}</span>}
+              {p.fixedPurchaseQty !== null && <span className="pill">фикс {count(p.fixedPurchaseQty)}</span>}
               {/* Имя товара — в aria-label, а не в подписи: в списке из 48
                   строк кнопка «Править Snickers 50gr» ломала колонку, но без
                   имени кнопка неотличима от 47 соседних для читалки (UX#24). */}

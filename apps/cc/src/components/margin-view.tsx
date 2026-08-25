@@ -1,6 +1,7 @@
-import { core, CoreUnavailable, type MarginProduct, type MarginReport } from "../lib/core";
+import { core, CoreUnavailable, type MarginProduct, type MarginReport, type WithWarnings } from "../lib/core";
 import { CoreDown } from "./core-down";
 import { ReportWindow } from "./report-window";
+import { COVERED_BY_MARGIN, ReportWarnings } from "./report-warnings";
 import { amount, count, day, percent } from "../lib/format";
 
 /** Окна расчёта маржи. Ядро зажимает своё (1..90) независимо от панели. */
@@ -40,7 +41,7 @@ function ProductRow({ p }: { p: MarginProduct }) {
  * Кофе здесь нет и не будет (R-P5b-9): `coffee_sale` пуст, и отчёт честно
  * называет себя «снек-автоматы (OurVend)», а не «нет данных по кофе».
  */
-export function MarginTables({ report }: { report: MarginReport }) {
+export function MarginTables({ report }: { report: MarginReport & WithWarnings }) {
   // Ноль автоматов — это НЕ «маржа ноль». Считать было не по чему: сбор мог
   // лежать весь период, или все автоматы оказались не в строю. Нули в такой
   // ситуации читаются как «всё посчитано и всё по нулям» (R-P5b-7 §7).
@@ -83,7 +84,11 @@ export function MarginTables({ report }: { report: MarginReport }) {
 
       {report.machines.map((m) => (
         <div className="sect" style={{ marginTop: 16 }} key={m.serial}>
-          <h3 className="section-title">{`${m.name} · маржа ${amount(m.margin)} · ${percent(m.pct)}`}</h3>
+          {/* Автомат без карточки в реестре приходит с именем, равным
+              серийнику (`inServicePark`: «номер лучше пустого имени»). Молчать
+              об этом нельзя: деньги в отчёте есть, автомата в справочнике нет,
+              и чинится это заведением карточки, а не отчётом. */}
+          <h3 className="section-title">{`${m.name}${m.name === m.serial ? " · карточки нет" : ""} · маржа ${amount(m.margin)} · ${percent(m.pct)}`}</h3>
           <p className="muted">{`${count(m.qty)} шт · выручка ${amount(m.revenue)} · закуп ${amount(m.cogs)}`}</p>
           <div className="rows">
             {m.products.map((p) => (
@@ -122,6 +127,8 @@ export function MarginTables({ report }: { report: MarginReport }) {
           </div>
         </>
       )}
+
+      <ReportWarnings warnings={report.warnings} covered={COVERED_BY_MARGIN} />
     </>
   );
 }
@@ -134,7 +141,7 @@ export function MarginTables({ report }: { report: MarginReport }) {
  * положиться.
  */
 export async function MarginView({ domain, days }: { domain: string; days: number }) {
-  let report: MarginReport;
+  let report: MarginReport & WithWarnings;
   try {
     report = await core.vendingMargin(days);
   } catch (err) {

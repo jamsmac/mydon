@@ -25,6 +25,52 @@ function LagPill({ hours, fine = false }: { hours: number | null; fine?: boolean
   return <span className={`pill ${hours > HEALTH_LAG_HOURS ? "bad" : ""}`}>{текст}</span>;
 }
 
+/** Вердикт одной половины паритета: что написать на пилюле и красить ли её. */
+interface ПоловинаПаритета {
+  текст: string;
+  bad: boolean;
+}
+
+/**
+ * Паритет — ДВЕ независимые сверки под одним объектом: продажи (own ↔ stock) и
+ * остатки. Общий `parity.ok` — И то, И другое (флаг переключения источника
+ * учёта один, значит и разрешение одно), и печатать его на ПРОДАЖНОЙ пилюле
+ * нельзя: на первом боевом прогоне снимков остатков в окне не было вовсе,
+ * `ok` стал `false` при нуле расхождений продаж — панель сказала бы
+ * «❌ 0 расхождений», строку, противоречащую самой себе
+ * (`adversarial-prod-data.md` §3).
+ *
+ * Складское «сверять нечем» — НЕЙТРАЛЬНО, а не красно: красный зовёт чинить
+ * расхождение, которого нет. Чинить надо сбор остатков, и ровно это говорит
+ * примечание в той же строке.
+ *
+ * «Сверять нечем» узнаём по `stockChecked` — сколько пар остатков вообще
+ * СРАВНИВАЛОСЬ (контракт `OurvendHealth`): ноль пар — не «сошлось» и не
+ * «разошлось», а «не считали». Продажную половину контракт счётчиком не
+ * снабжает, но примечание Core склеено из двух половин, и складская ВСЕГДА
+ * идёт с префиксом «остатки: » (`ourvend-parity.service.ts`) — значит
+ * примечание с этим префиксом говорит только о складе, а продажи сверены.
+ */
+function разборПаритета(p: OurvendHealth["parity"]): { продажи: ПоловинаПаритета; остатки: ПоловинаПаритета } {
+  const остаткиНеСверяли = p.stockChecked === 0;
+  const продажиСверяли = p.note === null || p.note.startsWith("остатки:");
+  const продажи: ПоловинаПаритета =
+    p.mismatches > 0
+      ? {
+          текст: `${count(p.mismatches)} ${plural(p.mismatches, "расхождение", "расхождения", "расхождений")}`,
+          bad: true,
+        }
+      : p.ok || (остаткиНеСверяли && продажиСверяли)
+        ? { текст: "продажи сходятся", bad: false }
+        : { текст: "продажи: сверять нечего", bad: false };
+  const остатки: ПоловинаПаритета = остаткиНеСверяли
+    ? { текст: "остатки: снимков за период нет", bad: false }
+    : p.stockOk
+      ? { текст: "остатки сходятся", bad: false }
+      : { текст: "остатки расходятся", bad: true };
+  return { продажи, остатки };
+}
+
 /**
  * Секция «Здоровье сбора» (П5b, R-P5b-8) на вкладке «Снек».
  *
@@ -39,17 +85,26 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
   // сказано красной пилюлей «снимков нет» в своей строке, и поднимать из-за
   // неё общий флаг на пустой базе (первый день сбора) значило бы кричать.
   const стар = (ч: number | null): boolean => ч !== null && ч > HEALTH_LAG_HOURS;
+  // ПУСТОЙ ЖУРНАЛ — ТРЕТЬЕ СОСТОЯНИЕ, а не «здоров». `failedStreak` равен нулю
+  // просто потому, что сбор ни разу не запускался, и зелёное «сбоев подряд
+  // нет» здесь — те самые «нули как всё хорошо» (§7 спеки). Бот различает
+  // ❓/❌/✅ (`состояниеСбора` в analytics-brief.ts) — панель обязана тоже.
+  const прогоновНет = health.runs.length === 0;
   const тревога =
-    health.failedStreak >= HEALTH_FAILED_STREAK ||
-    стар(слотыЧ) ||
-    стар(health.salesLagH) ||
-    стар(health.productSaleLagH);
+    !прогоновНет &&
+    (health.failedStreak >= HEALTH_FAILED_STREAK ||
+      стар(слотыЧ) ||
+      стар(health.salesLagH) ||
+      стар(health.productSaleLagH));
 
   const успех =
     health.lastSuccessAt === null
       ? "успешных прогонов не было"
       : `последний успех ${when(health.lastSuccessAt)}`;
-  const прогонов = `${count(health.runs.length)} ${plural(health.runs.length, "прогон", "прогона", "прогонов")} в журнале`;
+  const прогонов = прогоновНет
+    ? "журнал прогонов пуст"
+    : `${count(health.runs.length)} ${plural(health.runs.length, "прогон", "прогона", "прогонов")} в журнале`;
+  const паритет = разборПаритета(health.parity);
   // Только упавшие и частичные: идущий прямо сейчас прогон (`running`) —
   // не отказ, а «ещё не знаем».
   const проблемные = health.runs
@@ -65,6 +120,13 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
             тревога
           </span>
         )}
+        {/* Пустой журнал — не тревога и не «всё хорошо»: чип нейтральный,
+            ровно как ❓ у бота. Красным здесь пугать не за что. */}
+        {прогоновНет && (
+          <span className="pill" style={{ marginLeft: 8 }}>
+            не оценить
+          </span>
+        )}
       </div>
       <p className="hint">Сбор OurVend: прогоны, свежесть снимков и паритет с учётной дорожкой.</p>
       <div className="rows">
@@ -74,9 +136,11 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
             <small>{`${прогонов} · ${успех}`}</small>
           </div>
           <span className={`pill ${health.failedStreak >= HEALTH_FAILED_STREAK ? "bad" : ""}`}>
-            {health.failedStreak > 0
-              ? `${count(health.failedStreak)} ${plural(health.failedStreak, "отказ", "отказа", "отказов")} подряд`
-              : "сбоев подряд нет"}
+            {прогоновНет
+              ? "прогонов нет — не оценить"
+              : health.failedStreak > 0
+                ? `${count(health.failedStreak)} ${plural(health.failedStreak, "отказ", "отказа", "отказов")} подряд`
+                : "сбоев подряд нет"}
           </span>
         </div>
 
@@ -101,7 +165,9 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
 
         <div className="row">
           <div className="t">
-            <b>Снимки витрины (product_sale)</b>
+            {/* Имя таблицы владельцу ничего не говорит: он читает отчёт с
+                телефона, а не схему БД (адверсариал UX #5). */}
+            <b>Снимки продаж по товарам (кабинет)</b>
             {/* В деньги этот источник не идёт (скользящее окно 7 дней,
                 суммирование по captured_at завышает ×36, R-P5b-1), но его
                 возраст показывает, жив ли сбор целиком. */}
@@ -117,12 +183,8 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
               {`продажи и остатки за ${count(health.parity.days)} дн.${health.parity.note ? ` · ${health.parity.note}` : ""}`}
             </small>
           </div>
-          <span className={`pill ${health.parity.ok ? "" : "bad"}`}>
-            {health.parity.ok ? "продажи сходятся" : `${count(health.parity.mismatches)} расхождений`}
-          </span>
-          <span className={`pill ${health.parity.stockOk ? "" : "bad"}`}>
-            {health.parity.stockOk ? "остатки сходятся" : "остатки расходятся"}
-          </span>
+          <span className={`pill ${паритет.продажи.bad ? "bad" : ""}`}>{паритет.продажи.текст}</span>
+          <span className={`pill ${паритет.остатки.bad ? "bad" : ""}`}>{паритет.остатки.текст}</span>
         </div>
       </div>
 

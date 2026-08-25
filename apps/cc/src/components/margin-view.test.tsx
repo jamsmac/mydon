@@ -161,3 +161,39 @@ describe("навигация: лист «Маржа»", () => {
     expect(MARGIN_WINDOWS).toEqual([7, 30, 90]);
   });
 });
+
+describe("Лист «Маржа»: хвост «Посчитано не всё» и автомат без карточки", () => {
+  it("причина от ядра, которой в числах не видно, показана блоком", () => {
+    render(
+      <MarginTables
+        report={{
+          ...МАРЖА_ПРОД,
+          warnings: [{ code: "stock_missing", message: "Автомат 2508160376 торговал, а остатка за период нет" }],
+        }}
+      />,
+    );
+    expect(screen.getByText("Посчитано не всё")).toBeVisible();
+    expect(screen.getByText(/торговал, а остатка за период нет/)).toBeVisible();
+  });
+
+  it("то, что лист сказал сам (себестоимость, продажи вне парка), в хвосте не дублируется", () => {
+    render(
+      <MarginTables
+        report={{
+          ...МАРЖА_ПРОД,
+          warnings: [
+            { code: "unknown_cost", message: "12 шт без себестоимости" },
+            { code: "excluded_sales", message: "SKLAD 4S: 1 шт вне парка" },
+          ],
+        }}
+      />,
+    );
+    expect(screen.queryByText("Посчитано не всё")).toBeNull();
+  });
+
+  it("автомат без карточки в реестре назван вслух", () => {
+    const безКарточки = { ...МАРЖА_ПРОД.machines[0]!, serial: "2508160999", name: "2508160999" };
+    render(<MarginTables report={{ ...МАРЖА_ПРОД, machines: [безКарточки] }} />);
+    expect(screen.getByText(/2508160999 · карточки нет · маржа/)).toBeVisible();
+  });
+});

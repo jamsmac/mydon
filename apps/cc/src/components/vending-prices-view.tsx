@@ -5,9 +5,11 @@ import {
   type PriceChange,
   type PriceChangesReport,
   type PriceGapReport,
+  type WithWarnings,
 } from "../lib/core";
 import { CoreDown } from "./core-down";
 import { ReportWindow } from "./report-window";
+import { COVERED_BY_PRICE_GAP, ReportWarnings } from "./report-warnings";
 import { amount, count, day, month, percent, plural } from "../lib/format";
 
 /** Окна ленты изменений. Ядро зажимает своё (1..180). */
@@ -21,10 +23,20 @@ export const PRICE_WINDOWS = [30, 90, 180] as const;
  */
 export const PRICE_GAP_DAYS = 14;
 
+/**
+ * Окно «Динамики по месяцам» — тоже своё, и оно самое длинное из доступных.
+ *
+ * Ядро считает `monthly` ТОЛЬКО по полным календарным месяцам окна: при 30
+ * днях полных месяцев в окне физически нет, и блок был бы вечно пуст. Пустота
+ * читалась бы как «истории цен нет вовсе», хотя история есть, а окно короче
+ * месяца.
+ */
+export const MONTHLY_DAYS = 180;
+
 const TAB = "reports:prices";
 
 /** Отчёт листа: лента изменений плюс донорская динамика по месяцам (R-P5b-5). */
-export type PricesReport = PriceChangesReport & { monthly: MonthlyPrice[] };
+export type PricesReport = PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings;
 
 /** Строка перехода цены: откуда, куда, когда и на сколько процентов. */
 function ChangeRow({ c }: { c: PriceChange }) {
@@ -59,12 +71,22 @@ function Changes({ rows, empty }: { rows: readonly PriceChange[]; empty: string 
  *    (`vending_product.sale_price`). Товары без эталона идут отдельным
  *    списком, а НЕ нулевой строкой: `эталон 0` дал бы разрыв в 100 %.
  * 3. Динамика по месяцам — донорский срез, живёт только в панели: в боте
- *    такая таблица не читается.
+ *    такая таблица не читается. Окно у неё своё (`MONTHLY_DAYS`), и об этом
+ *    сказано подписью: полных месяцев в 30-дневном окне не бывает.
  *
  * `gap === null` — «не спросили/не ответили», и это НЕ «разрывов нет»:
  * пропавшая секция читалась бы как сошедшийся отчёт.
  */
-export function PricesTables({ report, gap }: { report: PricesReport; gap: PriceGapReport | null }) {
+export function PricesTables({
+  report,
+  gap,
+  monthly,
+}: {
+  report: PricesReport;
+  gap: (PriceGapReport & WithWarnings) | null;
+  /** Помесячная динамика своим окном; `null` — «не спросили/не ответили». */
+  monthly: MonthlyPrice[] | null;
+}) {
   return (
     <>
       <p className="lead">
@@ -85,6 +107,12 @@ export function PricesTables({ report, gap }: { report: PricesReport; gap: Price
           <p className="hint">
             {`Факт витрины за ${count(gap.days)} дн. против эталона владельца · порог ${percent(gap.pct)}`}
           </p>
+          {/* Секция живёт на СВОЁМ окне (гейт цены продажи считает факт по
+              тому же числу). Без этой строки нажатая кнопка «90 дн.» сверху
+              выглядела бы как окно всего экрана (адверсариал UX #8). */}
+          <p className="muted">
+            Окно этой секции своё — то же, что у гейта цены продажи: переключатель сверху на неё не влияет.
+          </p>
           {gap.rows.length === 0 ? (
             <p className="muted">Разрывов за порогом нет — витрина держится эталона</p>
           ) : (
@@ -94,7 +122,9 @@ export function PricesTables({ report, gap }: { report: PricesReport; gap: Price
                   <div className="row" key={g.product}>
                     <div className="t">
                       <b>{g.product}</b>
-                      <small>{`факт ${count(g.fact)} · эталон ${count(g.reference)} · ${count(g.qty)} шт · ${percent(g.gapPct)}`}</small>
+                      {/* Факт и эталон — деньги, и «сум» у них такой же обязательный, как
+                          у недобора в этой же строке (адверсариал UX #3). */}
+                      <small>{`факт ${amount(g.fact)} · эталон ${amount(g.reference)} · ${count(g.qty)} шт · ${percent(g.gapPct)}`}</small>
                     </div>
                     {/* Недобор — деньги, которых не собрали. «Продали дороже
                         эталона» деньгами не считаем и против недобора не
@@ -115,51 +145,69 @@ export function PricesTables({ report, gap }: { report: PricesReport; gap: Price
               {`У ${count(gap.noReference.length)} ${plural(gap.noReference.length, "товара", "товаров", "товаров")} эталон не задан — сравнивать не с чем: ${gap.noReference.join(", ")}`}
             </p>
           )}
+          <ReportWarnings warnings={gap.warnings} covered={COVERED_BY_PRICE_GAP} />
         </>
       )}
 
       <div className="section-title">Динамика по месяцам</div>
-      {report.monthly.length === 0 ? (
-        <p className="muted">Помесячной истории пока нет</p>
+      <p className="hint">{`Полные календарные месяцы за ${count(MONTHLY_DAYS)} дн. — своё окно, переключатель сверху на него не влияет`}</p>
+      {monthly === null ? (
+        <p className="muted">Динамику по месяцам не проверили — Core не ответил</p>
+      ) : monthly.length === 0 ? (
+        // Не «истории нет вовсе»: полный месяц — единица счёта этого блока,
+        // и пока их в окне не набралось, считать нечего.
+        <p className="muted">{`Полных месяцев за ${count(MONTHLY_DAYS)} дн. пока нет — помесячную цену считать не по чему`}</p>
       ) : (
         <div className="rows">
-          {report.monthly.map((m) => (
+          {monthly.map((m) => (
             <div className="row" key={`${m.product}|${m.month}`}>
               <div className="t">
                 <b>{m.product}</b>
                 {/* «—» вместо нуля: месяц без продаж или без приходов — это
                     «не считали», а не «цена упала до нуля». */}
                 <small>
-                  {`${month(m.month)} · витрина ${m.retail === null ? "—" : count(m.retail)} · закуп ${m.purchase === null ? "—" : count(m.purchase)}`}
+                  {`${month(m.month)} · витрина ${m.retail === null ? "—" : amount(m.retail)} · закуп ${m.purchase === null ? "—" : amount(m.purchase)}`}
                 </small>
               </div>
             </div>
           ))}
         </div>
       )}
+
+      <ReportWarnings warnings={report.warnings} />
     </>
   );
 }
 
 /**
- * Лист «Цены»: два похода в ядро.
+ * Лист «Цены»: три похода в ядро, у каждого своё окно и своё право упасть.
  *
  * Разрыв с эталоном уходит ОТДЕЛЬНЫМ запросом и ВМЕСТЕ с лентой изменений —
  * тем же приёмом, что усушка на вкладке «Снек»: у него своё окно и свои
  * причины упасть, а лента изменений обязана открыться без него.
+ *
+ * Помесячная динамика — третий запрос, на `MONTHLY_DAYS`: она считается по
+ * ПОЛНЫМ календарным месяцам окна, и на 30 днях приходила бы пустой всегда.
+ * Когда лист и так открыт на 180 днях, второй одинаковый запрос не шлём —
+ * у роута свой троттл, и тратить его на копию ответа незачем.
  */
 export async function VendingPricesView({ domain, days }: { domain: string; days: number }) {
-  const разрыв: Promise<PriceGapReport | null> = core.vendingPriceGap(PRICE_GAP_DAYS).catch(() => null);
+  const разрыв: Promise<(PriceGapReport & WithWarnings) | null> = core
+    .vendingPriceGap(PRICE_GAP_DAYS)
+    .catch(() => null);
+  const помесячно: Promise<PricesReport | null> | null =
+    days === MONTHLY_DAYS ? null : core.vendingPriceChanges(MONTHLY_DAYS).catch(() => null);
   let report: PricesReport;
   try {
     report = await core.vendingPriceChanges(days);
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
+  const свой = помесячно === null ? report : await помесячно;
   return (
     <>
       <ReportWindow domain={domain} tab={TAB} days={days} windows={PRICE_WINDOWS} />
-      <PricesTables report={report} gap={await разрыв} />
+      <PricesTables report={report} gap={await разрыв} monthly={свой === null ? null : свой.monthly} />
     </>
   );
 }
