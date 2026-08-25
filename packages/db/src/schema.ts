@@ -1650,6 +1650,45 @@ export const vendingRefill = pgTable(
 );
 
 /**
+ * Событие детектора по снимкам (П4): детектор сравнивает два соседних снимка
+ * слотов автомата (`slot_snapshot`) и там, где остаток вырос, фиксирует
+ * заливку — без участия оператора. `windowFrom`/`windowTo` — границы окна
+ * сравнения, `slots` — снимок изменений по каждой пружине (что, сколько
+ * было/стало/добавлено), `units` — сумма `delta` по всем позициям окна.
+ *
+ * `unique(serial, window_to)` — идемпотентность прогона: повторный запуск
+ * детектора по тому же автомату и тому же концу окна не плодит дубль события.
+ *
+ * `matchedRefillId` — если в окне ±3 ч нашлась запись оператора
+ * (`vending_refill`), событие считается подтверждённым; NULL — заливка,
+ * которую детектор увидел, а мастер не отчитался (или отчитался мимо окна).
+ */
+export const vendingRefillEvent = pgTable(
+  "vending_refill_event",
+  {
+    id: id(),
+    /** MuMachineID Ourvend — тот же ключ, что у vending_refill.machineSerial. */
+    machineSerial: text("machine_serial").notNull(),
+    /** Карточка автомата, если сопоставлена. */
+    machineId: uuid("machine_id").references(() => entity.id),
+    windowFrom: timestamp("window_from", { withTimezone: true }).notNull(),
+    windowTo: timestamp("window_to", { withTimezone: true }).notNull(),
+    /** Сумма delta по всем позициям окна — сколько единиц залито за прогон. */
+    units: integer("units").notNull(),
+    slots: jsonb("slots")
+      .$type<{ coilId: string; product: string; before: number; after: number; delta: number }[]>()
+      .notNull(),
+    /** Запись оператора, сопоставленная по окну ±3 ч. NULL — заливка без отчёта. */
+    matchedRefillId: uuid("matched_refill_id").references(() => vendingRefill.id),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("vending_refill_event_serial_to").on(t.machineSerial, t.windowTo),
+    index("vending_refill_event_to_idx").on(t.windowTo),
+  ],
+);
+
+/**
  * Накладная закупа (§5.7): материализуется, когда владелец ОДОБРИЛ заявку.
  * Снимок позиций и сумм берётся из payload одобренной заявки — цифры фиксируются
  * на момент решения, а не пересчитываются задним числом. Одна накладная на
@@ -2686,6 +2725,7 @@ export const schema = {
   machineSale,
   vendingStock,
   vendingRefill,
+  vendingRefillEvent,
   vendingPurchaseOrder,
   vendingCashSession,
   vendingUnmatched,
