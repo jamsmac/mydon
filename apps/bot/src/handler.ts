@@ -58,6 +58,14 @@ import { formatShrinkage, isShrinkageQuery, parseShrinkageDays } from "./shrinka
 import { planReport } from "./reports";
 import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
 import { handleActionsQuery, isActionsQuery } from "./owner-actions";
+import {
+  WEEKLY_NOTES_WINDOW_MS,
+  WEEKLY_WEEK_HINT,
+  formatWeeklyDigest,
+  isWeeklyDigestQuery,
+  parseWeekArg,
+  weeklyNotes,
+} from "./weekly-digest";
 import { formatSalesSummary, isSalesQuery } from "./sales-brief";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
 import type { RateLimiter } from "./security/access";
@@ -111,7 +119,7 @@ const HELP = [
   "• «витрина» — где витрина разошлась с эталоном и сколько недобираем",
   "• «цена продажи TUC 15000» — записать эталон витрины (>20% от факта — добавь «точно»)",
   "• «витрина как факт» — разово проставить эталон по факту продаж за 14 дней",
-  "• «итоги недели» — сводка за прошлую неделю",
+  "• «итоги недели» / «итоги недели 2026-34» — сводка снека за неделю (сама приходит в понедельник)",
   "• «сверка» — здоровье сбора OurVend и паритет",
   "• фото с подписью «чек» — прикрепить чек к последней принятой накладной",
   "• «склад Montella 24, Fanta 12» — записать остатки склада",
@@ -441,6 +449,32 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка сводки продаж:", err);
       return { text: "Не удалось получить продажи из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // «итоги недели» — недельная сводка снека по требованию (R-P5b-7). СТРОГО
+  // до isActionsQuery (`^итоги`): иначе фраза уехала бы в ленту действий
+  // сотрудников — молча и с совершенно другим отчётом в ответе.
+  if (isWeeklyDigestQuery(text)) {
+    const arg = parseWeekArg(text);
+    if (!arg.ok) return { text: WEEKLY_WEEK_HINT };
+    try {
+      const [digest, pending] = await Promise.all([
+        deps.core.vendingWeeklyDigest(arg.week),
+        // Сигналы — деградируемый блок: их сбой не должен стоить сводки.
+        deps.core.briefingNotifications(new Date(Date.now() - WEEKLY_NOTES_WINDOW_MS)).catch(() => null),
+      ]);
+      // Отметки о доставке здесь НЕТ намеренно: `ack` необратим, а команду
+      // владелец может повторить хоть десять раз. Пусть сигнал ещё раз придёт
+      // в понедельник — это дешевле, чем потерять его на чтении.
+      const [first, ...more] = formatWeeklyDigest(digest, weeklyNotes(pending)).parts;
+      return { text: first, more };
+    } catch (err) {
+      console.error("Ошибка недельной сводки:", err);
+      if (err instanceof CoreError && err.status === 400) {
+        return { text: `${WEEKLY_WEEK_HINT}\n\nCore отверг запрос: ${coreReason(err.body)}` };
+      }
+      return { text: "Не удалось получить итоги недели из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 

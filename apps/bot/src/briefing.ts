@@ -1,4 +1,4 @@
-import { TZ } from "@mydon/shared";
+import { TZ, tashkentDay } from "@mydon/shared";
 import type { ApprovalRow, Briefing } from "./core-client";
 import { cutAt, TG_BUDGET } from "./purchase-plan";
 
@@ -185,11 +185,19 @@ function cutLine(text: string, max = NOTES_LINE_MAX): string {
  * Лимит строк и бюджет длины — разные ограничения: первый бережёт внимание
  * владельца, второй не даёт сообщению превысить предел Telegram. Всё, что не
  * влезло, сворачивается в «…и ещё N» и остаётся НЕДОСТАВЛЕННЫМ.
+ *
+ * `header` — единственное, чем отличается недельный блок (`urgency:"weekly"`,
+ * R-P5b-7): «разобраться сегодня» в понедельничной сводке за прошлую неделю
+ * звучит про сегодня, а речь о прошедшей неделе. Своей копии функции ради
+ * одной строки заголовка не заводим: разъехавшись, копии разъедутся не по
+ * заголовку, а по бюджету и по тому, какие ключи считаются показанными, —
+ * а цена ошибки здесь необратима (см. `notesToAck`).
  */
 export function formatBriefingNotes(
   notes: readonly BriefingNote[],
   limit = 12,
   budget = Number.POSITIVE_INFINITY,
+  header = NOTES_HEADER,
 ): BriefingNotesBlock | null {
   const поТексту = new Map<string, { line: string; keys: string[] }>();
   for (const n of notes) {
@@ -207,7 +215,7 @@ export function formatBriefingNotes(
 
   const lines: string[] = [];
   const shownKeys: string[] = [];
-  let занято = NOTES_HEADER.length;
+  let занято = header.length;
   let i = 0;
   for (; i < все.length && lines.length < limit; i++) {
     const надо = все[i].line.length + 1;
@@ -224,7 +232,7 @@ export function formatBriefingNotes(
   if (lines.length === 0) return null;
 
   const остаток = все.length - i;
-  const out = [NOTES_HEADER, ...lines];
+  const out = [header, ...lines];
   if (остаток > 0) out.push(`…и ещё ${остаток}`);
   return { text: out.join("\n"), shownKeys };
 }
@@ -375,4 +383,28 @@ export function msUntilBriefing(now: Date = new Date(), hour = 7, minute = 30): 
   const targetSec = hour * 3600 + minute * 60;
   const deltaSec = targetSec > nowSec ? targetSec - nowSec : 24 * 3600 - nowSec + targetSec;
   return deltaSec * 1000;
+}
+
+/**
+ * Сколько миллисекунд до ближайшего `weekday` (1 = понедельник) `hour:minute`
+ * по Ташкенту — расписание недельной сводки (R-P5b-7).
+ *
+ * Считается ПОВЕРХ `msUntilBriefing`, а не вторым разбором времени: время
+ * суток у обоих планировщиков одно и то же, и вторая копия арифметики зоны
+ * разъехалась бы с первой ровно в тот день, когда это заметно (донор VendCash
+ * уехал так на пять часов). Здесь добавляются только сутки до нужного дня
+ * недели: в Ташкенте нет перехода на летнее время, поэтому сутки ровно
+ * 24 часа и целые дни складываются без поправок.
+ *
+ * День недели берём из ташкентских суток момента срабатывания (а не «сегодня»
+ * процесса): в 23:30 воскресенья по Ташкенту ближайшие 08:05 — уже
+ * понедельник, и ждать неделю было бы ошибкой на семь суток.
+ */
+export function msUntilWeekly(now: Date = new Date(), weekday = 1, hour = 8, minute = 5): number {
+  const ms = msUntilBriefing(now, hour, minute);
+  // Сутки срабатывания по Ташкенту → номер дня недели по ISO (Пн = 1, Вс = 7).
+  const day = tashkentDay(new Date(now.getTime() + ms));
+  const iso = ((new Date(`${day}T00:00:00.000Z`).getUTCDay() + 6) % 7) + 1;
+  const ahead = (((weekday - iso) % 7) + 7) % 7;
+  return ms + ahead * 86_400_000;
 }

@@ -158,17 +158,17 @@ export const SALE_PRICE_HINT =
 // ── Оформление ──────────────────────────────────────────────────────────────
 
 /** Процент с подписью. `null` — процента НЕТ (нулевая выручка), а не «0 %». */
-const PCT = (p: number | null): string => (p === null ? "— %" : `${p} %`);
+export const PCT = (p: number | null): string => (p === null ? "— %" : `${p} %`);
 
 /** Процент со знаком: «+20 %», «−20 %». Минус — типографский, как в усушке. */
-const ЗНАК = (p: number): string => `${p > 0 ? "+" : p < 0 ? "−" : ""}${Math.abs(p)} %`;
+export const ЗНАК = (p: number): string => `${p > 0 ? "+" : p < 0 ? "−" : ""}${Math.abs(p)} %`;
 
 /**
  * «2026-08-18» → «18.08». Голые сутки режем строкой (они уже по Ташкенту),
  * а момент времени переводим в Ташкент: `at` закупочных изменений приходит
  * штампом события, витринных — бизнес-днём.
  */
-const день = (iso: string): string => {
+export const день = (iso: string): string => {
   if (/^\d{4}-\d{2}-\d{2}/.test(iso) && iso.length <= 10) return `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "?";
@@ -176,7 +176,7 @@ const день = (iso: string): string => {
 };
 
 /** Момент по Ташкенту: «23.08 08:02». Нечитаемый штамп — «?», а не «Invalid Date». */
-const момент = (iso: string | null): string => {
+export const момент = (iso: string | null): string => {
   if (!iso) return "не было";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "?";
@@ -195,12 +195,16 @@ const момент = (iso: string | null): string => {
  * Сверх лимита отчёт не досылаем, а честно говорим, где он целиком: три
  * десятка сообщений подряд уносят из видимой части чата первое — то самое, где
  * стоит итог (та же причина, что в `formatShrinkage`).
+ *
+ * `max` — для недельной сводки (R-P5b-7): её никто не спрашивал, она приходит
+ * сама в понедельник утром, и двенадцать сообщений подряд в этом случае
+ * читаются как поломка бота, а не как отчёт.
  */
-function capped(title: string, lines: string[], лист: string): string[] {
+export function capped(title: string, lines: string[], лист: string, max = MAX_PARTS): string[] {
   const parts = chunk(title, lines);
-  if (parts.length <= MAX_PARTS) return parts;
-  const kept = parts.slice(0, MAX_PARTS - 1);
-  kept.push(`…показал ${MAX_PARTS - 1} из ${parts.length} частей — остальное на листе «${лист}» в панели.`);
+  if (parts.length <= max) return parts;
+  const kept = parts.slice(0, max - 1);
+  kept.push(`…показал ${max - 1} из ${parts.length} частей — остальное на листе «${лист}» в панели.`);
   return kept;
 }
 
@@ -222,7 +226,7 @@ function машинаСтрока(m: MarginMachine): string {
   );
 }
 
-function товарСтрока(p: MarginProduct): string {
+export function товарСтрока(p: MarginProduct): string {
   const тревога = p.low ? " ⚠️" : "";
   return `• ${p.product}: маржа ${RU(p.margin)} (${PCT(p.pct)})${тревога} · ${RU(p.qty)} шт · выручка ${RU(p.revenue)}`;
 }
@@ -271,7 +275,7 @@ export function formatMargin(r: MarginReport): string[] {
 }
 
 /** Строка мёртвой позиции: где лежит, сколько и на сколько денег. */
-function мёртваяСтрока(d: DeadRow): string {
+export function мёртваяСтрока(d: DeadRow): string {
   const где = d.machineName ? `${d.machineName} · ` : d.serial ? `${d.serial} · ` : "";
   // «Цены нет» — не «ноль сум»: складывать такие нули как деньги нельзя.
   const деньги = d.noPrice ? "цена закупки неизвестна" : `≈ ${RU(d.value)} сум`;
@@ -318,7 +322,7 @@ export function formatDeadStock(r: DeadStockReport): string[] {
   return capped(title, lines, "Мёртвый сток");
 }
 
-const изменениеСтрока = (c: PriceChange): string =>
+export const изменениеСтрока = (c: PriceChange): string =>
   `• ${c.product}: ${RU(c.from)} → ${RU(c.to)} (${ЗНАК(c.pct)}) · ${день(c.at)}`;
 
 function лентаЦен(title: string, rows: PriceChange[], lines: string[]): void {

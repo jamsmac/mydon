@@ -753,6 +753,90 @@ describe("Аналитика снека: путь владельца до Core (
     assert.doesNotMatch(reply?.text ?? "", /попробуй ещё раз чуть позже/i);
   });
 
+  /** Минимальная недельная сводка: обработчику важен путь, а не числа. */
+  const НЕДЕЛЯ = {
+    week: "2026-34",
+    from: "2026-08-17",
+    to: "2026-08-23",
+    previousWeek: "2026-33",
+    machines: [],
+    totals: { qty: 0, revenue: 0, cogs: 0, margin: 0, pct: null, unknownUnits: 0 },
+    delta: { qty: 0, revenue: 0, margin: 0, qtyPct: null, revenuePct: null, marginPct: null },
+    topProducts: [],
+    worstProducts: [],
+    refills: { events: 0, detectedUnits: 0, recordedUnits: 0 },
+    intake: { orders: 0, units: 0, amount: 0 },
+    stocktakes: { positions: 0, lastCountedAt: null },
+    deadStock: { rows: [], totalValue: 0 },
+    priceChanges: { purchase: [], retail: [] },
+    health: {
+      runs: [],
+      failedStreak: 0,
+      lastSuccessAt: null,
+      slotsLagMin: null,
+      salesLagH: null,
+      productSaleLagH: null,
+      parity: { days: 7, ok: true, mismatches: 0, stockOk: true, note: null },
+    },
+  };
+
+  it("«итоги недели» — сводка снека, «итоги» — по-прежнему лента действий (регресс)", async () => {
+    // Порядок веток: `isActionsQuery` ловит любое `^итоги`. Стой сводка после
+    // неё — «итоги недели» молча уехали бы в ленту действий сотрудников, и
+    // владелец получил бы совсем другой отчёт, не заметив подмены.
+    const вызовы: string[] = [];
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingWeeklyDigest: async (week?: string) => {
+        вызовы.push(`weekly:${week ?? "прошлая"}`);
+        return НЕДЕЛЯ;
+      },
+      briefingNotifications: async () => {
+        вызовы.push("pending");
+        return { since: "", events: 0, notifications: [] };
+      },
+      actions: async (from: string, to: string) => {
+        вызовы.push(`actions:${from}:${to}`);
+        return [];
+      },
+    } as unknown as HandlerDeps["core"];
+    const d: HandlerDeps = { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
+
+    const сводка = await handleMessage(111, "итоги недели", d);
+    assert.match(сводка?.text ?? "", /Итоги недели 17\.08 — 23\.08/);
+    const заданная = await handleMessage(111, "итоги недели 2026-34", d);
+    assert.match(заданная?.text ?? "", /Итоги недели/);
+    await handleMessage(111, "итоги", d);
+    await handleMessage(111, "итоги за неделю", d);
+
+    // Порядок и адресат каждой фразы; даты ленты действий считаются от
+    // сегодняшнего дня, поэтому сверяем не их, а куда ушёл запрос.
+    const кому = вызовы.filter((c) => !c.startsWith("pending")).map((c) => c.split(":")[0]);
+    assert.deepEqual(кому, ["weekly", "weekly", "actions", "actions"]);
+    assert.deepEqual(
+      вызовы.filter((c) => c.startsWith("weekly")),
+      ["weekly:прошлая", "weekly:2026-34"],
+    );
+  });
+
+  it("неделя, которой не бывает, чинится фразой, а не ожиданием сервера", async () => {
+    const вызовы: string[] = [];
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingWeeklyDigest: async () => {
+        вызовы.push("weekly");
+        return НЕДЕЛЯ;
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "итоги недели 2025-53", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.deepEqual(вызовы, [], "запрос в Core за несуществующей неделей не уходит");
+    assert.match(reply?.text ?? "", /ключом ISO/);
+  });
+
   it("справка называет все восемь команд — иначе отчёты есть, а спросить их никто не догадается", async () => {
     const reply = await handleMessage(111, "ъъъ непонятное", deps([]));
     const help = reply?.text ?? "";
