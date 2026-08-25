@@ -36,6 +36,8 @@ const здоровьеОбщее: SharedHealth = {
   runs: [прогонОбщий],
   failedStreak: 0,
   lastSuccessAt: "2026-08-25T06:00:11.000Z",
+  staleHours: 0,
+  staleThresholdH: 6,
   slotsLagMin: 12,
   salesLagH: 13,
   productSaleLagH: 0.2,
@@ -59,6 +61,8 @@ describe("Типы панели — реэкспорт из @mydon/shared, а н
       "runs",
       "salesLagH",
       "slotsLagMin",
+      "staleHours",
+      "staleThresholdH",
     ]);
     expect(прогонПанели).toBe(прогон);
   });

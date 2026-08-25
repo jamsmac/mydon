@@ -32,6 +32,9 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   runs: [прогон("failed", "2026-08-25T06:00:00.000Z"), прогон("failed", "2026-08-25T03:00:00.000Z")],
   failedStreak: 12,
   lastSuccessAt: "2026-08-24T03:10:00.000Z",
+  // Сбор стоит больше суток (R-P8a-6) — та же прод-картина 25.08.
+  staleHours: 27,
+  staleThresholdH: 6,
   slotsLagMin: null,
   salesLagH: 10.7,
   productSaleLagH: 36.8,
@@ -42,6 +45,8 @@ const ЗДОРОВ: OurvendHealth = {
   runs: [прогон("success", "2026-08-25T06:00:00.000Z")],
   failedStreak: 0,
   lastSuccessAt: "2026-08-25T06:00:00.000Z",
+  staleHours: 1.2,
+  staleThresholdH: 6,
   slotsLagMin: 48,
   salesLagH: 1.2,
   productSaleLagH: 2.4,
@@ -142,6 +147,36 @@ describe("Здоровье сбора: три состояния журнала 
     render(<OurvendHealthCard health={{ ...ЗДОРОВ, salesLagH: 6.1 }} />);
     expect(screen.getByText("6,1 ч").className).toMatch(/bad/);
     expect(screen.getByText("тревога")).toBeVisible();
+  });
+});
+
+describe("Здоровье сбора: застой сбора (R-P8a-6)", () => {
+  it("застой поднимает общую тревогу секции и пишется отдельной строкой", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВЬЕ, staleHours: 9, staleThresholdH: 6, failedStreak: 0 }} />);
+    expect(screen.getByText("тревога")).toBeInTheDocument();
+    expect(screen.getByText(/сбор стоит 9 ч/)).toBeInTheDocument();
+  });
+
+  it("сбор свежий — бейджа застоя нет", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВЬЕ, staleHours: 1.2, staleThresholdH: 6 }} />);
+    expect(screen.queryByText(/сбор стоит/)).toBeNull();
+  });
+
+  it("успешных прогонов не было ни разу — тоже застой, своим текстом", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, staleHours: null, staleThresholdH: 6 }} />);
+    expect(screen.getByText("тревога")).toBeInTheDocument();
+    expect(screen.getByText("успехов не было")).toBeInTheDocument();
+  });
+
+  it("прогонов нет вовсе — застой не поднимает тревогу и бейджа нет (нейтральное «не оценить»)", () => {
+    render(
+      <OurvendHealthCard
+        health={{ ...ЗДОРОВ, runs: [], failedStreak: 0, lastSuccessAt: null, staleHours: null, staleThresholdH: 6 }}
+      />,
+    );
+    expect(screen.getByText("не оценить")).toBeVisible();
+    expect(screen.queryByText("тревога")).toBeNull();
+    expect(screen.queryByText(/сбор стоит|успехов не было/)).toBeNull();
   });
 });
 

@@ -90,12 +90,19 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
   // нет» здесь — те самые «нули как всё хорошо» (§7 спеки). Бот различает
   // ❓/❌/✅ (`состояниеСбора` в analytics-brief.ts) — панель обязана тоже.
   const прогоновНет = health.runs.length === 0;
+  // Застой самого коллектора (R-P8a-6) — сигнал, независимый от свежести
+  // снимков выше: `staleHours === null` значит «успешных прогонов не было ни
+  // разу» вовсе, тревожнее любого числа часов. Порог — из ответа Core
+  // (`staleThresholdH`, настройка `SYNC_STALE_HOURS`), своей шестёрки здесь
+  // нет: сравни с `HEALTH_LAG_HOURS` выше — тот порог про снимки, не про сбор.
+  const застой = health.staleHours === null || health.staleHours >= health.staleThresholdH;
   const тревога =
     !прогоновНет &&
     (health.failedStreak >= HEALTH_FAILED_STREAK ||
       стар(слотыЧ) ||
       стар(health.salesLagH) ||
-      стар(health.productSaleLagH));
+      стар(health.productSaleLagH) ||
+      застой);
 
   const успех =
     health.lastSuccessAt === null
@@ -130,6 +137,20 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
       </div>
       <p className="hint">Сбор OurVend: прогоны, свежесть снимков и паритет с учётной дорожкой.</p>
       <div className="rows">
+        {/* Пустой журнал остаётся нейтральным «не оценить» (см. `тревога`
+            выше): красную пилюлю застоя показываем только когда есть журнал,
+            по которому можно судить. */}
+        {!прогоновНет && застой && (
+          <div className="row">
+            <div className="t">
+              <b>Сбор данных</b>
+            </div>
+            <span className="pill bad">
+              {health.staleHours === null ? "успехов не было" : `сбор стоит ${count(health.staleHours)} ч`}
+            </span>
+          </div>
+        )}
+
         <div className="row">
           <div className="t">
             <b>Прогоны сбора</b>

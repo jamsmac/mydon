@@ -100,6 +100,8 @@ describe("Формы аналитики приходят из @mydon/shared", ()
       runs: [прогон],
       failedStreak: 0,
       lastSuccessAt: "2026-08-25T16:00:11Z",
+      staleHours: 0,
+      staleThresholdH: 6,
       slotsLagMin: 12,
       salesLagH: 13,
       productSaleLagH: 0.2,

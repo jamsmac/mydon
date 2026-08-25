@@ -62,6 +62,8 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     ],
     failedStreak: 0,
     lastSuccessAt: "2026-08-23T03:07:00Z",
+    staleHours: 0.5,
+    staleThresholdH: 6,
     slotsLagMin: 42,
     salesLagH: 3,
     productSaleLagH: 5,
@@ -278,6 +280,8 @@ describe("Текст недельной сводки", () => {
         runs: [],
         failedStreak: 0,
         lastSuccessAt: null,
+        staleHours: null,
+        staleThresholdH: 6,
         slotsLagMin: null,
         salesLagH: null,
         productSaleLagH: null,
@@ -304,6 +308,17 @@ describe("Текст недельной сводки", () => {
     assert.match(t, /Прогоны \(1\): успешных 1 · частичных 0 · с отказом 0/);
     assert.match(t, /Свежесть: слоты — 42 мин · продажи — 3 ч/);
     assert.match(t, /Паритет за 7 дн\.: продажи ✅ сходятся · остатки ✅/);
+  });
+
+  it("застой сбора (R-P8a-6) — тот же общий форматтер, что у «сверки»", () => {
+    // Своя формулировка здесь разошлась бы с ботом ровно там, где владелец
+    // читает без запроса: письмо приходит само в понедельник утром.
+    const застойШёл: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      health: { ...ДАЙДЖЕСТ_34.health, staleHours: 9, staleThresholdH: 6 },
+    };
+    const t = formatWeeklyDigest(застойШёл, []).parts.join("\n");
+    assert.match(t, /⛔ сбор стоит 9 ч/);
   });
 
   it("деньги недели — с «сум» в каждой строке (U1–U3)", () => {

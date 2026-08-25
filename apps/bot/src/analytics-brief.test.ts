@@ -19,6 +19,7 @@ import {
   окно,
   паритетСтрока,
   состояниеСбора,
+  строкаЗастоя,
   capped,
   сущ,
   товарСтрока,
@@ -188,6 +189,10 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   ],
   failedStreak: 12,
   lastSuccessAt: "2026-08-23T03:02:00Z",
+  // Сбор стоит уже двое суток (R-P8a-6) — независимый сигнал от свежести
+  // снимков ниже: даже если бы слоты приезжали, коллектор всё равно не бежит.
+  staleHours: 48,
+  staleThresholdH: 6,
   // Снимков слотов нет вовсе — это НЕ «свежо», и текст обязан отличать одно от другого.
   slotsLagMin: null,
   salesLagH: 5,
@@ -485,6 +490,31 @@ describe("Тексты отчётов", () => {
   });
 });
 
+describe("«сверка»: застой сбора (R-P8a-6)", () => {
+  const h = (over: Partial<OurvendHealth>): OurvendHealth => ({ ...ЗДОРОВЬЕ, ...over });
+
+  it("за порогом — строка ⛔ с числом часов", () => {
+    assert.match(строкаЗастоя(h({ staleHours: 9, staleThresholdH: 6 }))!, /⛔ сбор стоит 9 ч/);
+  });
+
+  it("ровно на пороге — уже тревога (≥, а не >)", () => {
+    assert.ok(строкаЗастоя(h({ staleHours: 6, staleThresholdH: 6 })));
+  });
+
+  it("в норме — строки нет вовсе, а не «застоя нет»", () => {
+    assert.equal(строкаЗастоя(h({ staleHours: 1.2, staleThresholdH: 6 })), null);
+  });
+
+  it("успехов не было — тревога, и сказано именно это", () => {
+    assert.match(строкаЗастоя(h({ staleHours: null, lastSuccessAt: null }))!, /успешных прогонов не было/);
+  });
+
+  it("строка стоит в ответе «сверки» сразу после состояния сбора", () => {
+    const [первое] = formatOurvendHealth(h({ staleHours: 9 }));
+    assert.match(первое!, /⛔ сбор стоит 9 ч/);
+  });
+});
+
 describe("Пустые состояния и предупреждения (ревью П5b, круг 1)", () => {
   it("здоровье без прогонов не рисует зелёную галку", () => {
     // `failedStreak: 0` при пустом журнале значит «сбор ни разу не
@@ -494,6 +524,10 @@ describe("Пустые состояния и предупреждения (ре�
       runs: [],
       failedStreak: 0,
       lastSuccessAt: null,
+      // Ни одного успеха нет и в собственном поле сторожа — тот же факт, тем
+      // же полем, что и `lastSuccessAt: null` выше.
+      staleHours: null,
+      staleThresholdH: 6,
       slotsLagMin: null,
       salesLagH: null,
       productSaleLagH: null,
