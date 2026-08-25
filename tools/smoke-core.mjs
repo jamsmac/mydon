@@ -87,6 +87,60 @@ const ЧТЕНИЕ = [
     },
   },
   {
+    // П5b: маржа. Выборка продаж окна по ташкентским суткам плюс себестоимость
+    // из принятых накладных — запросы, которых заглушка юнит-теста не
+    // исполняет. На засеянной базе продаж нет, и отчёт ОБЯЗАН сказать это
+    // словами: нули без предупреждения читались бы как «маржа ноль».
+    path: "/vending/margin?days=30",
+    проверить: (о) => {
+      for (const ключ of ["machines", "products", "unknownProducts", "excluded", "warnings"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`margin.${ключ} — не массив`);
+      }
+      if (typeof о?.totals?.revenue !== "number") throw new Error("margin.totals.revenue — не число");
+      if (typeof о?.lowPct !== "number") throw new Error("margin.lowPct — не число (порог не прочитан из настроек)");
+      if (о.machines.length === 0 && !о.warnings.some((w) => w.code === "no_sales")) {
+        throw new Error("пустая маржа без предупреждения no_sales — нули выданы за результат");
+      }
+    },
+  },
+  {
+    // П5b: мёртвый сток. Три выборки движения (продажи, заливки по снимкам,
+    // принятые накладные) плюс остаток склада и автоматов.
+    path: "/vending/dead-stock?days=21",
+    проверить: (о) => {
+      for (const ключ of ["warehouse", "machines", "warnings"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`dead-stock.${ключ} — не массив`);
+      }
+      if (typeof о?.totalValue !== "number") throw new Error("dead-stock.totalValue — не число");
+      if (typeof о?.since !== "string") throw new Error("dead-stock.since — не дата окна");
+      if (!о.warnings.some((w) => w.code === "no_sales")) {
+        throw new Error("без продаж весь остаток выглядит мёртвым — это обязано быть сказано");
+      }
+    },
+  },
+  {
+    // П5b: изменения цен. Ленты собираются из `event` (два типа) и из продаж;
+    // `monthly` панель просит без флага, поэтому поле обязано быть всегда.
+    path: "/vending/price-changes?days=30",
+    проверить: (о) => {
+      for (const ключ of ["purchase", "retail", "monthly", "warnings"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`price-changes.${ключ} — не массив`);
+      }
+      if (typeof о?.pct !== "number") throw new Error("price-changes.pct — не число");
+    },
+  },
+  {
+    // П5b: разрыв витрины. Факт считает общий пакет из тех же строк продаж,
+    // эталон — `vending_product.sale_price` (миграция 0068).
+    path: "/vending/price-gap?days=14",
+    проверить: (о) => {
+      for (const ключ of ["rows", "noReference", "warnings"]) {
+        if (!Array.isArray(о?.[ключ])) throw new Error(`price-gap.${ключ} — не массив`);
+      }
+      if (typeof о?.lostTotal !== "number") throw new Error("price-gap.lostTotal — не число");
+    },
+  },
+  {
     // Паритет: сырой SQL с канонизацией серийника, теперь в двух половинах
     // (продажи и остатки). Ровно тот класс запросов, ради которого заведён
     // этот прогон.
@@ -362,6 +416,21 @@ const ЗАПИСЬ = [
       if (о.ok !== true) throw new Error(`ожидали ok, получили ${JSON.stringify(о)}`);
       if (о.newPrice !== 15000) throw new Error(`newPrice=${о.newPrice}`);
       if (о.factPrice !== null) throw new Error(`факта витрины на засеянной базе быть не должно: ${о.factPrice}`);
+    },
+  },
+  {
+    // Повтор той же командой вдвое дороже. Гейт «точно» сравнивает с ФАКТОМ
+    // витрины, а не с прошлым эталоном (R-P5b-6), и на засеянной базе факта
+    // нет — значит правка обязана пройти, а не быть отбита как «скачок».
+    // Проверяется именно это: молчащий гейт при отсутствии факта — решение,
+    // а не недосмотр (иначе первый эталон нового товара было бы не задать).
+    имя: "эталон витрины: повтор без факта гейтом не отбивается",
+    path: "/vending/sale-price",
+    body: { product: P4_ТОВАР, price: 30000 },
+    проверить: (о) => {
+      if (о.ok !== true) throw new Error(`ожидали ok без факта витрины, получили ${JSON.stringify(о)}`);
+      if (о.oldPrice !== 15000) throw new Error(`oldPrice=${о.oldPrice} — прошлый эталон не прочитан`);
+      if (о.newPrice !== 30000) throw new Error(`newPrice=${о.newPrice}`);
     },
   },
 ];

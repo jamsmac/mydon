@@ -18,6 +18,7 @@ import {
 } from "class-validator";
 import { Type } from "class-transformer";
 import { Throttle } from "@nestjs/throttler";
+import { AnalyticsService } from "./analytics.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { ShrinkageService } from "./shrinkage.service";
@@ -337,6 +338,37 @@ export class ShrinkageDto {
 }
 
 /**
+ * Окна отчётов аналитики снека (П5b). Границы стоят на ВХОДЕ, а не только в
+ * сервисе: `?days=100000` иначе доехал бы до выборки продаж и был бы зажат уже
+ * после того, как запрос ушёл в базу.
+ *
+ * `@Type(() => Number)` обязателен всем четырём: в query всё приходит строкой,
+ * а `ValidationPipe` включён БЕЗ `enableImplicitConversion` — без него
+ * `@IsInt()` отбивал бы любой `?days=`.
+ */
+export class MarginDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(90)
+  days?: number;
+}
+
+/** Мёртвый сток: потолок 180 суток — полгода без движения это уже не «сток», а списание. */
+export class DeadStockDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(180)
+  days?: number;
+}
+
+export class PriceChangesDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(180)
+  days?: number;
+}
+
+/** Разрыв витрины: то же окно, что у гейта команды «цена продажи» (14 суток). */
+export class PriceGapDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(90)
+  days?: number;
+}
+
+/**
  * Окно журнала детектора. DTO, а не `Number(days)` руками: без границ роут
  * принимал любое число и надеялся на зажим в сервисе — у соседних чтений
  * граница стоит на входе, и разнобой рано или поздно кончается тем, что зажим
@@ -358,6 +390,7 @@ export class VendingController {
     private readonly refills: RefillService,
     private readonly refillEvents: RefillEventsService,
     private readonly shrinkageReport: ShrinkageService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   @Post("ingest")
@@ -439,16 +472,26 @@ export class VendingController {
     return this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
   }
 
-  /** Эталон витрины товара (гейт ±20% от ФАКТА витрины — см. setSalePrice). */
+  /**
+   * Эталон витрины товара (гейт ±20% от ФАКТА витрины — см. setSalePrice).
+   *
+   * Удачная правка сбрасывает кеш аналитики: эталон — второй операнд отчёта
+   * «разрыв витрины», и закешированный отчёт показывал бы владельцу разрыв,
+   * которого он только что не стало.
+   */
   @Post("sale-price")
-  setSalePrice(@Body() dto: SetSalePriceDto) {
-    return this.vending.setSalePrice(dto.product, dto.price, dto.actor, dto.confirmed);
+  async setSalePrice(@Body() dto: SetSalePriceDto) {
+    const итог = await this.vending.setSalePrice(dto.product, dto.price, dto.actor, dto.confirmed);
+    if (итог.ok) this.analytics.invalidate();
+    return итог;
   }
 
   /** «Витрина как факт»: разовый бутстрап эталонов по продажам окна. */
   @Post("sale-price/bootstrap")
-  bootstrapSalePrice(@Body() dto: BootstrapSalePriceDto) {
-    return this.vending.bootstrapSalePrice(dto.days, dto.actor);
+  async bootstrapSalePrice(@Body() dto: BootstrapSalePriceDto) {
+    const итог = await this.vending.bootstrapSalePrice(dto.days, dto.actor);
+    if (итог.set.length > 0) this.analytics.invalidate();
+    return итог;
   }
 
   // ── Склад: инвентаризация (POST) и остаток (GET) ──────────────────────────
@@ -534,6 +577,43 @@ export class VendingController {
   @Get("shrinkage")
   shrinkage(@Query() dto: ShrinkageDto) {
     return this.shrinkageReport.report(dto.days);
+  }
+
+  // ── Аналитика снека (П5b): деньги, мёртвый сток, цены, витрина ────────────
+  //
+  // У каждого GET СВОЙ лимит, а не общий: расчёт тяжёлый (продажи окна в
+  // память плюс остатки и события), и общего потолка (60 запросов / 10 с)
+  // хватало, чтобы уложить Core одним циклом `curl` из докер-сети. Двенадцать
+  // запросов в минуту — вдвое больше, чем нужно панели (у неё три листа), и в
+  // двадцать раз меньше, чем нужно, чтобы Core лёг: отчёт всё равно живёт в
+  // кеше пять минут (`REPORT_CACHE_MS`).
+
+  /** Маржа по проданному за окно: автомат → товар (R-P5b-3). */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("margin")
+  margin(@Query() dto: MarginDto) {
+    return this.analytics.margin(dto.days);
+  }
+
+  /** Мёртвый сток: что не двигалось за окно — склад и автоматы (R-P5b-4). */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("dead-stock")
+  deadStock(@Query() dto: DeadStockDto) {
+    return this.analytics.deadStock(dto.days);
+  }
+
+  /** Изменения цен: закупочные и витринные, плюс помесячная динамика (R-P5b-5). */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("price-changes")
+  priceChanges(@Query() dto: PriceChangesDto) {
+    return this.analytics.priceChanges(dto.days);
+  }
+
+  /** Факт витрины против эталона владельца (R-P5b-6). */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Get("price-gap")
+  priceGap(@Query() dto: PriceGapDto) {
+    return this.analytics.priceGap(dto.days);
   }
 
   /**

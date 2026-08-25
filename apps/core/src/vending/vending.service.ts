@@ -1066,7 +1066,7 @@ export class VendingService {
    * строкой мимо расчёта закупа. Цены: нужны, чтобы оценить недостачу/излишек
    * при пересчёте в сумах, а не только в штуках.
    */
-  private async loadProductIndex(): Promise<{
+  async loadProductIndex(): Promise<{
     aliasByKey: Map<string, string>;
     priceByName: Map<string, number>;
     packByName: Map<string, number>;
@@ -1162,8 +1162,16 @@ export class VendingService {
     return { name, productId: hit?.id ?? null };
   }
 
-  /** Привести имя товара к канону через алиасы; неизвестное — как есть. */
-  private resolveProduct(name: string, aliases: Map<string, string>): string {
+  /**
+   * Привести имя товара к канону через алиасы; неизвестное — как есть.
+   *
+   * Публичен вместе с `loadProductIndex` ради аналитики (П5b): её отчёты берут
+   * из ОДНОГО чтения прайса и алиасы, и закупочную цену, и эталон витрины, а
+   * канон обязан быть ТОТ ЖЕ, что у закупа. Своя копия этих двух строк в
+   * соседнем сервисе рано или поздно разошлась бы с этой — и товар «Moxito
+   * клуб» получил бы вторую строку остатка мимо закупа.
+   */
+  resolveProduct(name: string, aliases: Map<string, string>): string {
     return aliases.get(normalizeProductName(name)) ?? name;
   }
 
