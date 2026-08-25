@@ -107,6 +107,8 @@ const ЧТЕНИЕ = [
  * гоняют и по второму разу на одной базе.
  */
 const P4_АВТОМАТ = "SMOKE-P4";
+/** Товар из прайса вендинга (seed-vending) — на нём проверяется бэкфилл ссылки. */
+const P4_ТОВАР = "Coca-Cola Classic 0,5";
 const P4_ДО = new Date(Date.now() - 2 * 3_600_000);
 const P4_ПОСЛЕ = new Date(Date.now() - 3_600_000);
 
@@ -187,10 +189,13 @@ const ЗАПИСЬ = [
     path: "/vending/refill-events/detect",
     body: { days: 1 },
     проверить: (о) => {
-      for (const key of ["machines", "windows", "events", "matched"]) {
+      for (const key of ["machines", "events", "matched"]) {
         if (typeof о?.[key] !== "number" || о[key] < 0) throw new Error(`detect.${key}=${о?.[key]}`);
       }
-      if (!Array.isArray(о.skippedDead)) throw new Error("detect.skippedDead — не массив");
+      if (!Array.isArray(о.skipped)) throw new Error("detect.skipped — не массив");
+      for (const s of о.skipped) {
+        if (!["dead", "uncalibrated", "no_slots"].includes(s?.reason)) throw new Error(`skipped.reason=${s?.reason}`);
+      }
       if (о.events < 1) throw new Error(`детектор не увидел заливку: events=${о.events}`);
       if (о.matched !== 0) throw new Error(`записи оператора ещё нет, а matched=${о.matched}`);
     },
@@ -228,6 +233,55 @@ const ЗАПИСЬ = [
     проверить: (о) => {
       if (о.events !== 0) throw new Error(`доклейка не должна плодить события: events=${о.events}`);
       if (о.matched < 1) throw new Error("запись оператора не сопоставилась с событием");
+    },
+  },
+  // ── Бэкфилл product_id: ветка КОНФЛИКТА (П4) ────────────────────────────
+  //
+  // Оба апсерта пишут `product_id` сырым SQL (`coalesce(excluded.…)` и
+  // `case … is distinct from …`), а заглушка БД в юнит-тестах SQL не исполняет
+  // — она проверяет только ТЕКСТ выражения. Синтаксис и семантику проверяет
+  // этот сценарий: товар из прайса кладётся дважды (повтор → ветка конфликта),
+  // потом слот меняет товар на неизвестный.
+  {
+    имя: "склад: первый пересчёт известного товара (product_id проставлен)",
+    path: "/vending/stock",
+    body: { items: [{ product: P4_ТОВАР, quantity: 5 }] },
+  },
+  {
+    имя: "склад: повторный пересчёт — ссылка на карточку уцелела",
+    path: "/vending/stock",
+    body: { items: [{ product: P4_ТОВАР, quantity: 7 }] },
+    после: async () => {
+      const строки = await читать("/vending/stock");
+      const строка = строки.find((r) => r.product === P4_ТОВАР);
+      if (!строка) throw new Error(`строка склада «${P4_ТОВАР}» не найдена`);
+      if (строка.quantity !== 7) throw new Error(`пересчёт не применился: quantity=${строка.quantity}`);
+      // Строго: прогон обязан идти по базе с прайсом (`seed-vending.js` в
+      // шаге CI). Молчаливое «прайса нет, проверку пропустили» — это способ
+      // однажды перестать проверять и не заметить.
+      if (строка.productId === null) {
+        throw new Error(
+          `product_id обнулился повторным пересчётом (или прайс вендинга не засеян: node packages/db/dist/seed-vending.js)`,
+        );
+      }
+    },
+  },
+  {
+    имя: "приём слотов: смена товара в слоте на неизвестный (ветка конфликта)",
+    path: "/vending/ingest",
+    body: {
+      machines: [
+        {
+          serial: P4_АВТОМАТ,
+          slots: [
+            { coilId: "1", product: "Smoke P4 Загадка", capacity: 20, quantity: 9 },
+            { coilId: "2", product: "Smoke P4 B", capacity: 20, quantity: 6 },
+          ],
+        },
+      ],
+    },
+    проверить: (о) => {
+      if (о.slots !== 2) throw new Error(`ожидали 2 слота, получили ${о.slots}`);
     },
   },
   {
@@ -825,6 +879,14 @@ async function проверитьЧтение(шаг) {
   console.log(`  ok  GET ${path}`);
 }
 
+/** Прочитать путь и вернуть разобранный ответ (для проверок последствий). */
+async function читать(path) {
+  const r = await fetch(BASE + path, { signal: AbortSignal.timeout(20_000) });
+  const текст = await r.text();
+  if (!r.ok) throw new Error(`GET ${path} → ${r.status}: ${текст.slice(0, 200)}`);
+  return JSON.parse(текст);
+}
+
 async function проверитьЗапись(шаг) {
   const r = await fetch(BASE + шаг.path, {
     method: "POST",
@@ -842,6 +904,17 @@ async function проверитьЗапись(шаг) {
       шаг.проверить(JSON.parse(текст));
     } catch (e) {
       провалы.push(`POST ${шаг.path} (${шаг.имя}): ${e.message}`);
+      return;
+    }
+  }
+  // `после` — проверка ПОСЛЕДСТВИЯ записи, а не её ответа: ответ апсерта не
+  // показывает, что стало со строкой в базе, и ровно там живут ошибки вида
+  // «конфликт затёр непустое поле».
+  if (шаг.после) {
+    try {
+      await шаг.после();
+    } catch (e) {
+      провалы.push(`POST ${шаг.path} (${шаг.имя}) — последствие: ${e.message}`);
       return;
     }
   }

@@ -1,6 +1,6 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { and, desc, eq, gte } from "drizzle-orm";
-import { event, slotSnapshot, systemConfig, vendingRefill, vendingRefillEvent } from "@mydon/db";
+import { event, slotSnapshot, vendingRefill, vendingRefillEvent } from "@mydon/db";
 import {
   deadMachine,
   detectRefills,
@@ -12,7 +12,7 @@ import {
   type RefillEvent,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
-import { resolveEffective, specFor } from "../system/config-spec";
+import { readIntSetting } from "../system/settings";
 import { VendingService } from "./vending.service";
 
 /** Окно прогона по умолчанию: крон бежит после каждого сбора слотов (раз в 3 ч). */
@@ -31,21 +31,24 @@ export const MIN_UNITS_FALLBACK = 10;
  */
 export const MATCH_PAD_MS = 3 * 3_600_000;
 
+/**
+ * Почему детектор молчит об автомате. Ровно три значения, без «прочего»:
+ * `dead` — источник отдаёт мусор (ёмкости вне диапазона, подпись SKLAD 199);
+ * `uncalibrated` — ёмкости не откалиброваны, но не поголовно;
+ * `no_slots` — в автомате нет назначенных слотов.
+ * Чинятся они в разных местах, поэтому строкой-катчоллом их сводить нельзя.
+ */
+export type SkipReason = "dead" | "uncalibrated" | "no_slots";
+
 export interface DetectResult {
-  /** Автоматы, о которых снимки что-то говорят (без мёртвых). */
+  /** Автоматы, по которым снимки что-то говорят (без пропущенных). */
   machines: number;
-  /** Пар соседних снимков, рассмотренных детектором. */
-  windows: number;
   /** Новых событий записано (повтор прогона даёт 0). */
   events: number;
   /** Сопоставлено с записью оператора в этом прогоне: новые + доклеенные к старым. */
   matched: number;
-  /**
-   * Автоматы, по которым детектор молчит, и почему (R-P4-4): заглушка
-   * источника (ёмкости вне диапазона) и нечитаемая планограмма — разные
-   * поломки, и сводить их к одному списку серийников значит спрятать причину.
-   */
-  skippedDead: { serial: string; reason: string }[];
+  /** Автоматы, по которым детектор молчит, и почему (R-P4-4). */
+  skipped: { serial: string; reason: SkipReason }[];
 }
 
 export interface RefillEventRow {
@@ -82,6 +85,8 @@ const ключ = (serial: string, windowTo: Date): string => `${normalizeMachine
  */
 @Injectable()
 export class RefillEventsService {
+  private readonly logger = new Logger(RefillEventsService.name);
+
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly vending: VendingService,
@@ -117,13 +122,13 @@ export class RefillEventsService {
       this.minUnits(),
     ]);
 
-    // Дальше — автомат за автоматом. В памяти живёт снимок ОДНОГО аппарата
-    // (≈40 слотов × 8 съёмов в сутки) и события, которых единицы; выборка по
-    // всему парку сразу и события считались бы так же, но пик памяти рос бы
-    // линейно по размеру парка и глубине окна.
-    const skippedDead: DetectResult["skippedDead"] = [];
+    // Дальше — автомат за автоматом, ОДИН ЗАПРОС НА АВТОМАТ. Это осознанный
+    // N+1: при парке ≤ ~30 машин (сегодня 26) три десятка индексных выборок
+    // дешевле, чем пик памяти от четверти миллиона строк одним ответом. Когда
+    // машин станут сотни — переходить на батчи по 10–20 серийников через
+    // `inArray`, а не обратно на «весь парк разом».
+    const skipped: DetectResult["skipped"] = [];
     const события: RefillEvent[] = [];
-    let windows = 0;
     let machines = 0;
 
     for (const { serial } of серии) {
@@ -167,16 +172,15 @@ export class RefillEventsService {
       // «слоты не откалиброваны» чинятся в разных местах.
       const причина = причинаМолчания(список);
       if (причина) {
-        skippedDead.push({ serial, reason: причина });
+        skipped.push({ serial, reason: причина });
         continue;
       }
       machines += 1;
-      windows += список.length - 1;
       события.push(...detectRefills(список, minUnits));
     }
-    skippedDead.sort((a, b) => a.serial.localeCompare(b.serial, "ru"));
+    skipped.sort((a, b) => a.serial.localeCompare(b.serial, "ru"));
 
-    if (события.length === 0) return { machines, windows, events: 0, matched: 0, skippedDead };
+    if (события.length === 0) return { machines, events: 0, matched: 0, skipped };
 
     const [записи, ужеЕсть, реестр] = await Promise.all([
       this.db
@@ -184,7 +188,11 @@ export class RefillEventsService {
         .from(vendingRefill)
         // Запись могла быть сделана до начала окна снимков — на ширину допуска.
         .where(gte(vendingRefill.performedAt, new Date(от.getTime() - MATCH_PAD_MS))),
-      this.db.select().from(vendingRefillEvent).where(gte(vendingRefillEvent.windowTo, от)),
+      // Шире окна снимков РОВНО на допуск сопоставления: запись оператора
+      // ищется с `от − 3ч`, и событие чуть старше `от`, к которому она уже
+      // приклеена, обязано попасть в «занятые». Иначе та же запись подтвердит
+      // второе, новое окно — двойная отметка в отчёте.
+      this.db.select().from(vendingRefillEvent).where(gte(vendingRefillEvent.windowTo, new Date(от.getTime() - MATCH_PAD_MS))),
       this.vending.machineIndex(),
     ]);
 
@@ -265,7 +273,7 @@ export class RefillEventsService {
       }
     });
 
-    return { machines, windows, events: записано, matched, skippedDead };
+    return { machines, events: записано, matched, skipped };
   }
 
   /** Журнал событий детектора за `days` суток, свежие сверху. */
@@ -294,33 +302,29 @@ export class RefillEventsService {
   }
 
   /**
-   * Порог детектора: база важнее env, env важнее дефолта — тот же резолвер,
-   * что у панели настроек, чтобы правка владельца работала сразу.
+   * Порог детектора: база важнее env, env важнее дефолта (общий резолвер
+   * настроек), а непрочитанное значение уходит в лог предупреждением — молча
+   * считать по дефолту значит скрыть от владельца, что его правка не сработала.
    */
-  private async minUnits(): Promise<number> {
-    const spec = specFor("REFILL_DETECT_MIN_UNITS");
-    if (!spec) return MIN_UNITS_FALLBACK;
-    const rows = await this.db.select().from(systemConfig);
-    const map: Record<string, string> = {};
-    for (const r of rows) map[r.key] = r.value;
-    const n = Number(resolveEffective(spec, map, process.env).value.replace(",", "."));
-    // Ноль и мусор — не «ловить всё подряд»: одна проданная и возвращённая
-    // банка стала бы «заливкой» на каждом автомате каждые три часа.
-    return Number.isFinite(n) && n > 0 ? n : MIN_UNITS_FALLBACK;
+  private minUnits(): Promise<number> {
+    return readIntSetting(this.db, "REFILL_DETECT_MIN_UNITS", MIN_UNITS_FALLBACK, this.logger);
   }
 }
 
 /**
  * Почему детектор молчит об автомате — или `null`, если сказать ему есть что.
  *
- * Судим по ВСЕМ снимкам окна: один «плохой» съём — это сбой выгрузки, а не
- * приговор автомату, и выбрасывать из-за него сутки данных нельзя.
+ * Если хоть один снимок окна читается, автомат живой: один «плохой» съём —
+ * это сбой выгрузки, а не приговор, и выбрасывать из-за него сутки данных
+ * нельзя. Если не читается ни один — причину берём по САМОМУ СВЕЖЕМУ снимку:
+ * это текущее состояние аппарата, а не смесь состояний за двое суток.
  */
-function причинаМолчания(снимки: MachineSnapshot[]): string | null {
-  if (снимки.some((s) => planogramStatus(s.slots) === "ok" && !deadMachine(s.slots))) return null;
-  if (снимки.every((s) => deadMachine(s.slots))) return "заглушка источника: ёмкости слотов вне диапазона";
-  if (снимки.every((s) => planogramStatus(s.slots) === "no_slots")) return "нет назначенных слотов";
-  return "планограмма не откалибрована: ёмкости слотов не в диапазоне";
+function причинаМолчания(снимки: MachineSnapshot[]): SkipReason | null {
+  if (снимки.some((s) => planogramStatus(s.slots) === "ok")) return null;
+  const свежий = снимки.reduce((a, b) => (b.capturedAt > a.capturedAt ? b : a));
+  if (deadMachine(свежий.slots)) return "dead";
+  if (planogramStatus(свежий.slots) === "no_slots") return "no_slots";
+  return "uncalibrated";
 }
 
 function зажать(days: number, дефолт: number, потолок: number): number {

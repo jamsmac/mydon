@@ -44,11 +44,31 @@ interface Мир {
   snapshots?: SnapRow[];
   /** Записи оператора. Массив живой: тест дописывает их МЕЖДУ прогонами. */
   refills?: HumanRow[];
+  /** Уже записанные события — «прошлые прогоны». */
+  events?: EventRow[];
   aliases?: AliasRow[];
   products?: ProdRow[];
   entities?: Ent[];
   cards?: Card[];
   config?: { key: string; value: string }[];
+}
+
+/**
+ * Граница окна из условия запроса.
+ *
+ * Стаб обязан отвечать на выборку событий ТЕМ ЖЕ окном, что просит сервис:
+ * ширина этого окна — предмет отдельного теста (запись, приклеенная к событию
+ * чуть старше прогона, не должна подтверждать второе окно). Читаем значение
+ * из `queryChunks` drizzle; если структура изменится — падаем громко, а не
+ * начинаем молча отдавать всё подряд.
+ */
+function границаОкна(условие: unknown): Date {
+  const chunks = (условие as { queryChunks?: unknown[] }).queryChunks ?? [];
+  for (const c of chunks) {
+    const v = (c as { value?: unknown }).value;
+    if (v instanceof Date) return v;
+  }
+  throw new Error("стаб не смог прочитать границу окна из условия — изменилось внутреннее устройство drizzle");
 }
 
 /**
@@ -58,7 +78,7 @@ interface Мир {
  * заготовленным ответом: иначе второй прогон зеленел бы на любой реализации.
  */
 function detectDb(м: Мир) {
-  const события: EventRow[] = [];
+  const события: EventRow[] = [...(м.events ?? [])];
   const лента: FeedRow[] = [];
   const обновления: Partial<EventRow>[] = [];
   let seq = 0;
@@ -82,30 +102,30 @@ function detectDb(м: Мир) {
       ? снимкиОтвет()
       : t === vendingRefill
         ? (м.refills ?? [])
-        : t === vendingRefillEvent
-          ? события
-          : t === vendingAlias
-            ? (м.aliases ?? [])
-            : t === vendingProduct
-              ? (м.products ?? [])
-              : t === entity
-                ? // machineIdBySerial() читает поле `ref`, machineRegistry() — `externalRef`:
-                  // отдаём оба, чтобы один стаб обслуживал обе выборки.
-                  (м.entities ?? []).map((e) => ({ ...e, ref: e.externalRef }))
-                : t === machineCard
-                  ? (м.cards ?? [])
-                  : t === systemConfig
-                    ? (м.config ?? [])
-                    : [];
+        : t === vendingAlias
+          ? (м.aliases ?? [])
+          : t === vendingProduct
+            ? (м.products ?? [])
+            : t === entity
+              ? (м.entities ?? [])
+              : t === machineCard
+                ? (м.cards ?? [])
+                : t === systemConfig
+                  ? (м.config ?? [])
+                  : [];
 
-  const цепочка = (rows: unknown[]) => {
-    const p = Promise.resolve(rows);
+  const цепочка = (rows: unknown[], датоФильтр?: (граница: Date) => unknown[]) => {
     const chain: Record<string, unknown> = {};
-    chain.where = () => chain;
+    let текущие = rows;
+    const p = () => Promise.resolve(текущие);
+    chain.where = (условие: unknown) => {
+      if (датоФильтр) текущие = датоФильтр(границаОкна(условие));
+      return chain;
+    };
     chain.groupBy = () => chain;
     chain.orderBy = () => chain;
-    chain.limit = async () => rows;
-    chain.then = p.then.bind(p);
+    chain.limit = async () => текущие;
+    chain.then = (res: (v: unknown) => unknown) => p().then(res);
     return chain;
   };
 
@@ -148,7 +168,12 @@ function detectDb(м: Мир) {
   };
 
   const db = {
-    select: () => ({ from: (t: unknown) => цепочка(rowsOf(t)) }),
+    select: () => ({
+      from: (t: unknown) =>
+        t === vendingRefillEvent
+          ? цепочка(события, (граница) => события.filter((e) => e.windowTo.getTime() >= граница.getTime()))
+          : цепочка(rowsOf(t)),
+    }),
     insert,
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
@@ -156,8 +181,14 @@ function detectDb(м: Мир) {
   return { db, события, лента, обновления };
 }
 
-const T1 = new Date("2026-08-20T01:00:00.000Z");
-const T2 = new Date("2026-08-20T04:00:00.000Z");
+const ЧАС = 3_600_000;
+/**
+ * Окно фикстуры — от ТЕКУЩЕГО момента: `detect(2)` смотрит на двое суток
+ * назад, и снимки с прибитой датой оказались бы вне окна, как только его
+ * начнут применять по-настоящему (стаб фильтрует события по дате).
+ */
+const T2 = new Date(Date.now() - ЧАС);
+const T1 = new Date(T2.getTime() - 3 * ЧАС);
 
 const снимок = (serial: string, capturedAt: Date, slots: [string, string | null, number, number][]): SnapRow[] =>
   slots.map(([coilId, productName, capacity, quantity]) => ({
@@ -194,10 +225,9 @@ describe("Вендинг Core: детектор заливок по снимка
 
     const первый = await svc.detect(2);
     assert.equal(первый.machines, 1);
-    assert.equal(первый.windows, 1);
     assert.equal(первый.events, 1);
     assert.equal(первый.matched, 0);
-    assert.deepEqual(первый.skippedDead, []);
+    assert.deepEqual(первый.skipped, []);
     assert.equal(события.length, 1);
     assert.equal(события[0]!.units, 12);
     assert.equal(события[0]!.machineId, "m-olma", "серийник в реестре с приставкой c — привязка обязана сойтись");
@@ -226,7 +256,20 @@ describe("Вендинг Core: детектор заливок по снимка
     assert.equal(события.length, 0, "12 единиц при пороге 20 — это не заливка, а докладка пары пружин");
   });
 
-  it("заглушка источника уходит в skippedDead с причиной; полный живой автомат — нет", async () => {
+  it("непрочитанный порог не роняет прогон: считаем по дефолту (в лог — предупреждение)", async () => {
+    // Владелец вписал «десять» словом. Молча считать по дефолту нельзя — но и
+    // отказывать в прогоне не за что: отчёт по дефолту лучше отсутствия отчёта.
+    const { svc, события } = сервис({
+      snapshots: ЗАЛИВКА,
+      entities: РЕЕСТР,
+      config: [{ key: "REFILL_DETECT_MIN_UNITS", value: "десять" }],
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.events, 1);
+    assert.equal(события[0]!.units, 12);
+  });
+
+  it("заглушка источника уходит в skipped с причиной dead; полный живой автомат — нет", async () => {
     // SKLAD-заглушка отдаёт 199=199 по всем пружинам: ёмкость вне диапазона —
     // это «источник врёт», а не «автомат полон» (R-P4-4).
     const мёртвые: [string, string | null, number, number][] = Array.from({ length: 10 }, (_, i) => [
@@ -254,7 +297,7 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
     });
     const res = await svc.detect(2);
-    assert.deepEqual(res.skippedDead, [{ serial: "SKLAD", reason: "заглушка источника: ёмкости слотов вне диапазона" }]);
+    assert.deepEqual(res.skipped, [{ serial: "SKLAD", reason: "dead" }]);
     assert.equal(res.machines, 2, "заправленный под завязку автомат — осмотрен, а не мёртв");
     assert.equal(res.events, 1);
     assert.ok(!события.some((e) => e.machineSerial === "SKLAD"));
@@ -267,7 +310,25 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
     });
     const res = await svc.detect(2);
-    assert.deepEqual(res.skippedDead, [{ serial: "ПУСТОЙ", reason: "нет назначенных слотов" }]);
+    assert.deepEqual(res.skipped, [{ serial: "ПУСТОЙ", reason: "no_slots" }]);
+  });
+
+  it("причина берётся по самому свежему снимку, а не по смеси за двое суток", async () => {
+    const пустые: [string, string | null, number, number][] = Array.from({ length: 3 }, (_, i) => [String(i + 1), null, 0, 0]);
+    const мёртвые: [string, string | null, number, number][] = Array.from({ length: 10 }, (_, i) => [
+      String(i + 1),
+      "Заглушка",
+      199,
+      199,
+    ]);
+    const { svc } = сервис({
+      // Вчера слоты были не назначены, сейчас источник отдаёт мусор — состояние
+      // автомата сегодня «заглушка», а не «нет слотов».
+      snapshots: [...ЗАЛИВКА, ...снимок("СМЕСЬ", T1, пустые), ...снимок("СМЕСЬ", T2, мёртвые)],
+      entities: РЕЕСТР,
+    });
+    const res = await svc.detect(2);
+    assert.deepEqual(res.skipped, [{ serial: "СМЕСЬ", reason: "dead" }]);
   });
 
   it("запись оператора в окне ±3 ч сопоставляется с событием", async () => {
@@ -275,7 +336,7 @@ describe("Вендинг Core: детектор заливок по снимка
       snapshots: ЗАЛИВКА,
       entities: РЕЕСТР,
       // Серийник записи — с приставкой «c» (так пишет бот), снимок — без неё.
-      refills: [{ id: "r1", machineSerial: "c2508160376", performedAt: new Date("2026-08-20T03:30:00.000Z"), qty: 12 }],
+      refills: [{ id: "r1", machineSerial: "c2508160376", performedAt: new Date(T2.getTime() - 30 * 60_000), qty: 12 }],
     });
     const res = await svc.detect(2);
     assert.equal(res.events, 1);
@@ -290,8 +351,8 @@ describe("Вендинг Core: детектор заливок по снимка
     const { svc, события, лента } = сервис({
       snapshots: ЗАЛИВКА,
       entities: РЕЕСТР,
-      // +8 часов от конца окна — это уже другой выезд.
-      refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date("2026-08-20T12:00:00.000Z"), qty: 12 }],
+      // На 4 часа раньше начала окна — это уже другой выезд (допуск 3 ч).
+      refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date(T1.getTime() - 4 * ЧАС), qty: 12 }],
     });
     const res = await svc.detect(2);
     assert.equal(res.matched, 0);
@@ -307,7 +368,7 @@ describe("Вендинг Core: детектор заливок по снимка
 
     // Оператор дошёл до бота через час — событие уже записано, дубля не будет,
     // и без доклейки запись осталась бы «заливкой без отчёта» навсегда.
-    refills.push({ id: "r9", machineSerial: "2508160376", performedAt: new Date("2026-08-20T05:00:00.000Z"), qty: 12 });
+    refills.push({ id: "r9", machineSerial: "2508160376", performedAt: new Date(T2.getTime() + ЧАС), qty: 12 });
     const второй = await svc.detect(2);
     assert.equal(второй.events, 0);
     assert.equal(второй.matched, 1);
@@ -317,21 +378,53 @@ describe("Вендинг Core: детектор заливок по снимка
 
   it("одна запись оператора не подтверждает два соседних окна", async () => {
     // Заливка на границе снимков попадает в допуск ±3 ч сразу двух окон.
-    const T0 = new Date("2026-08-20T01:00:00.000Z");
+    const T0 = new Date(T1.getTime() - 3 * ЧАС);
     const снимки = [
       ...снимок("2508160376", T0, [["1", "Snickers", 40, 0]]),
-      ...снимок("2508160376", T2, [["1", "Snickers", 40, 12]]),
-      ...снимок("2508160376", new Date("2026-08-20T07:00:00.000Z"), [["1", "Snickers", 40, 24]]),
+      ...снимок("2508160376", T1, [["1", "Snickers", 40, 12]]),
+      ...снимок("2508160376", T2, [["1", "Snickers", 40, 24]]),
     ];
     const { svc, события } = сервис({
       snapshots: снимки,
       entities: РЕЕСТР,
-      refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date("2026-08-20T04:30:00.000Z"), qty: 12 }],
+      refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date(T1.getTime() + 30 * 60_000), qty: 12 }],
     });
     const res = await svc.detect(2);
     assert.equal(res.events, 2);
     assert.equal(res.matched, 1, "выезд был один — подтверждать им оба окна значит удвоить отчёт");
     assert.equal(события.filter((e) => e.matchedRefillId === "r1").length, 1);
+  });
+
+  it("запись, приклеенная к событию ЧУТЬ старше окна прогона, второе окно не подтверждает", async () => {
+    // Событие прошлого прогона на час старше границы окна (`от`), а запись
+    // оператора ищется с `от − 3 ч`. Читая уже записанные события ровно по
+    // `от`, детектор не увидел бы, что r1 уже занята, и приклеил бы её второй
+    // раз — двойная отметка «подтверждено» по одному выезду.
+    const now = Date.now();
+    const старое: EventRow = {
+      id: "ev-old",
+      machineSerial: "2508160376",
+      machineId: "m-olma",
+      windowFrom: new Date(now - 52 * ЧАС),
+      windowTo: new Date(now - 49 * ЧАС),
+      units: 15,
+      slots: [],
+      matchedRefillId: "r1",
+    };
+    const снимки = [
+      ...снимок("2508160376", new Date(now - 47 * ЧАС), [["1", "Snickers", 40, 0]]),
+      ...снимок("2508160376", new Date(now - 46 * ЧАС), [["1", "Snickers", 40, 12]]),
+    ];
+    const { svc, события } = сервис({
+      snapshots: снимки,
+      entities: РЕЕСТР,
+      events: [старое],
+      refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date(now - 49.5 * ЧАС), qty: 15 }],
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.events, 1);
+    assert.equal(res.matched, 0, "запись уже подтвердила прошлое событие — второй раз она не считается");
+    assert.equal(события.find((e) => e.id !== "ev-old")!.matchedRefillId, null);
   });
 
   it("имя товара в событии — канон через алиасы", async () => {
@@ -368,6 +461,6 @@ describe("Вендинг Core: детектор заливок по снимка
 
   it("снимков нет — прогон пустой, а не падение", async () => {
     const { svc } = сервис({});
-    assert.deepEqual(await svc.detect(2), { machines: 0, windows: 0, events: 0, matched: 0, skippedDead: [] });
+    assert.deepEqual(await svc.detect(2), { machines: 0, events: 0, matched: 0, skipped: [] });
   });
 });

@@ -11,7 +11,6 @@ import {
   productSale,
   purchase,
   slotSnapshot,
-  systemConfig,
   vendingAlias,
   vendingCashSession,
   vendingProduct,
@@ -55,7 +54,7 @@ import {
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { ApprovalsService } from "../approvals/approvals.service";
-import { resolveEffective, specFor } from "../system/config-spec";
+import { settingValue } from "../system/settings";
 
 /**
  * Вендинг: приём собранных данных и расчёт дефицита (ТЗ Фаза 1).
@@ -193,6 +192,8 @@ export interface IngestStockPayload {
 /** Строка остатка склада для панели/отчётов. */
 export interface StockLevelRow {
   product: string;
+  /** Карточка прайса, если имя строки известно справочнику (бэкфилл П4). */
+  productId: string | null;
   quantity: number;
   countedAt: string;
 }
@@ -420,6 +421,24 @@ interface ProductIndexRow {
   fixedPurchaseQty: number | null;
 }
 
+/** Карточка автомата реестра в том виде, в каком её читают карты серийников. */
+interface MachineEntityRow {
+  id: string;
+  name: string;
+  externalRef: string | null;
+  type: string;
+}
+
+/** Карты реестра автоматов: по любой форме серийника и по канону. */
+export interface MachineIndex {
+  /** Серийник в ЛЮБОЙ форме («c2508160376» и «2508160376») → карточка. */
+  idBySerial: Map<string, string>;
+  /** Канон серийника → имя автомата. */
+  nameBySerial: Map<string, string>;
+  /** Канон серийника → карточка, победившая при дублях (у неё берут и состояние). */
+  firstIdBySerial: Map<string, string>;
+}
+
 /** Остаток склада строкой: имя, штуки и когда считали. */
 interface StockRow {
   product: string;
@@ -469,19 +488,48 @@ export class VendingService {
    * `machineSerialKeys` в `@mydon/shared`).
    */
   private async machineIdBySerial(): Promise<Map<string, string>> {
-    const rows = await this.db
-      .select({ id: entity.id, ref: entity.externalRef })
+    return (await this.machineIndex()).idBySerial;
+  }
+
+  /**
+   * Карточки автоматов реестра — ОДНОЙ выборкой на вызывающего.
+   *
+   * Фильтр по типу в запросе (индекс `entity_org_type_idx`): реестр держит все
+   * карточки направлений, и тянуть их целиком ради 26 автоматов значит платить
+   * за чужие строки.
+   */
+  private async machineRows(): Promise<MachineEntityRow[]> {
+    return this.db
+      .select({ id: entity.id, name: entity.name, externalRef: entity.externalRef, type: entity.type })
       .from(entity)
       .where(eq(entity.type, "machine"));
-    const map = new Map<string, string>();
+  }
+
+  /**
+   * Карты реестра из готовых строк — ОДНО место, где живут договорённости о
+   * дублях, иначе «первая карточка выигрывает» в двух реализациях разойдётся.
+   */
+  private serialMaps(rows: MachineEntityRow[]): MachineIndex {
+    const idBySerial = new Map<string, string>();
+    const nameBySerial = new Map<string, string>();
+    const firstIdBySerial = new Map<string, string>();
     for (const r of rows) {
-      for (const key of machineSerialKeys(r.ref)) {
+      for (const key of machineSerialKeys(r.externalRef)) {
         // Первая карточка выигрывает: дубли по одному серийнику — вопрос к
         // реестру (docs/REGISTRY_CLEANUP.md), молча перезаписывать не надо.
-        if (!map.has(key)) map.set(key, r.id);
+        if (!idBySerial.has(key)) idBySerial.set(key, r.id);
       }
+      if (r.type !== "machine" || !r.externalRef) continue;
+      const canon = normalizeMachineSerial(r.externalRef);
+      // Дубль карточки по одному серийнику — первая выигрывает ЦЕЛИКОМ, и имя,
+      // и состояние. Врозь это уже опасно: имя брали у первой, а состояние — у
+      // последней, и забытая карточка-дубль со «списан» молча убирала живой
+      // автомат из закупа, где предупреждений не видно.
+      if (firstIdBySerial.has(canon)) continue;
+      firstIdBySerial.set(canon, r.id);
+      nameBySerial.set(canon, r.name);
     }
-    return map;
+    return { idBySerial, nameBySerial, firstIdBySerial };
   }
 
   /**
@@ -596,7 +644,21 @@ export class VendingService {
               target: [machineSlot.machineSerial, machineSlot.coilId],
               // machineId обновляем тоже: карточка автомата могла появиться
               // позже слотов — так же, как это делает backfill в продажах.
-              set: { machineId, productName: product, productId, capacity: s.capacity, quantity: s.quantity, isValid, syncedAt: capturedAt },
+              set: {
+                machineId,
+                productName: product,
+                // Сменился товар в слоте — ссылка идёт за ним, включая NULL
+                // (старая карточка стала бы враньём). Товар тот же — непустую
+                // ссылку пустой не затираем: прайс мог переименовать карточку,
+                // и резолвер вернёт null там, где связь есть и верна.
+                productId: sql`case when excluded.product_name is distinct from ${machineSlot.productName}
+                    then excluded.product_id
+                    else coalesce(excluded.product_id, ${machineSlot.productId}) end`,
+                capacity: s.capacity,
+                quantity: s.quantity,
+                isValid,
+                syncedAt: capturedAt,
+              },
               // Опоздавший снимок (capturedAt старше уже сохранённого syncedAt)
               // не должен откатывать актуальную планограмму назад (найдено
               // внешним аудитом, P2). slotSnapshot ниже — история, пишется
@@ -791,19 +853,14 @@ export class VendingService {
   /**
    * Серийники ok-автоматов из готовой карты слотов.
    *
-   * Мёртвые (R-P4-4) названы отдельной проверкой, хотя автомат-заглушка с
-   * ёмкостями вне диапазона и так не проходит `planogramStatus`. Дублирование
-   * здесь намеренное: «данных с автомата нет» — это самостоятельная причина
-   * не считать по нему ни дефицит, ни продажи, и она должна быть видна в
-   * условии, а не выводиться из порога калибровки.
-   *
    * Полный автомат мёртвым НЕ считается: только что заправленный аппарат
    * стоит 5/5 по всем слотам, и выбрасывать его из плана значило бы врать
-   * ровно про ту машину, которую только что обслужили.
+   * ровно про ту машину, которую только что обслужили (R-P4-4).
    */
   private okSerials(byMachine: Map<string, Slot[]>): Set<string> {
     return new Set(
       [...byMachine.entries()]
+        // `!deadMachine` дублирует гейт планограммы (мёртвый ≥10 невалидных слотов никогда не `ok`) — оставлено ради читаемости условия.
         .filter(([, slots]) => planogramStatus(slots) === "ok" && !deadMachine(slots))
         .map(([serial]) => serial),
     );
@@ -921,10 +978,14 @@ export class VendingService {
    * N+1 на горячем пути крона. Неизвестное имя даёт `null` — новый товар не
    * повод отвергнуть снимок.
    */
+  private productIdResolver(index: { aliasByKey: Map<string, string>; productRows: ProductIndexRow[] }): (raw: string) => string | null {
+    const byKey = new Map(index.productRows.map((p) => [normalizeProductName(p.name), p.id]));
+    return (raw: string) => byKey.get(normalizeProductName(this.resolveProduct(raw, index.aliasByKey))) ?? null;
+  }
+
+  /** То же, но когда прайс ещё не загружен вызывающим. */
   private async productIdIndex(): Promise<(raw: string) => string | null> {
-    const { aliasByKey, productRows } = await this.loadProductIndex();
-    const byKey = new Map(productRows.map((p) => [normalizeProductName(p.name), p.id]));
-    return (raw: string) => byKey.get(normalizeProductName(this.resolveProduct(raw, aliasByKey))) ?? null;
+    return this.productIdResolver(await this.loadProductIndex());
   }
 
   /**
@@ -978,9 +1039,8 @@ export class VendingService {
    * «серийник → карточка» с разными правилами дали бы события, висящие мимо
    * автомата.
    */
-  async machineIndex(): Promise<{ idBySerial: Map<string, string>; nameBySerial: Map<string, string> }> {
-    const [idBySerial, registry] = await Promise.all([this.machineIdBySerial(), this.machineRegistry()]);
-    return { idBySerial, nameBySerial: registry.nameBySerial };
+  async machineIndex(): Promise<MachineIndex> {
+    return this.serialMaps(await this.machineRows());
   }
 
   /** Слоты автомата с именем товара, приведённым к канону через алиасы. */
@@ -1010,8 +1070,9 @@ export class VendingService {
     const { aliasByKey, priceByName, productRows } = await this.loadProductIndex();
     // Бэкфилл `product_id` (П4, гигиена): строка склада ключуется ИМЕНЕМ, и
     // все 20 строк жили без ссылки на карточку. Переименование товара в
-    // справочнике рвало связь остатка с прайсом молча.
-    const idByKey = new Map(productRows.map((p) => [normalizeProductName(p.name), p.id]));
+    // справочнике рвало связь остатка с прайсом молча. Резолвер — тот же, что
+    // у приёма слотов: две карты «канон → карточка» разошлись бы.
+    const productIds = this.productIdResolver({ aliasByKey, productRows });
 
     // Схлопывание по канону — последняя позиция в списке побеждает (владелец
     // поправился по ходу диктовки/списка).
@@ -1055,14 +1116,24 @@ export class VendingService {
           });
         }
 
-        // Имя строки склада — уже канон, поэтому ссылка ищется по нему прямо.
-        const productId = idByKey.get(normalizeProductName(product)) ?? null;
+        // Имя строки склада — уже канон; резолвер прогоняет его через алиасы
+        // повторно, и это безвредно: канон сам себе алиас.
+        const productId = productIds(product);
         await tx
           .insert(vendingStock)
           .values({ productName: product, productId, quantity, countedAt, updatedAt: countedAt })
           .onConflictDoUpdate({
             target: [vendingStock.productName],
-            set: { quantity, productId, countedAt, updatedAt: countedAt },
+            set: {
+              quantity,
+              // НЕ затирать непустую ссылку пустой: строка склада ключуется
+              // ИМЕНЕМ, и если карточку прайса переименовали, резолвер вернёт
+              // null — прямая запись обнулила бы ровно ту связь, ради которой
+              // бэкфилл и заводился. Новая ссылка (не null) перекрывает старую.
+              productId: sql`coalesce(excluded.product_id, ${vendingStock.productId})`,
+              countedAt,
+              updatedAt: countedAt,
+            },
             // Защита и от конкурентной транзакции с более новым пересчётом,
             // не только от порядка внутри этого вызова.
             // Дата — строкой ISO: сырой sql-фрагмент не знает тип колонки и
@@ -1096,7 +1167,10 @@ export class VendingService {
   async stockLevels(): Promise<StockLevelRow[]> {
     const rows = await this.db.select().from(vendingStock);
     return rows
-      .map((r) => ({ product: r.productName, quantity: r.quantity, countedAt: r.countedAt.toISOString() }))
+      // `productId` в ответе — не украшение: связь строки склада с карточкой
+      // прайса иначе не видна ниоткуда, и её потерю (бэкфилл П4) нечем поймать
+      // ни панели, ни дымовому прогону.
+      .map((r) => ({ product: r.productName, productId: r.productId, quantity: r.quantity, countedAt: r.countedAt.toISOString() }))
       .sort((a, b) => a.product.localeCompare(b.product, "ru"));
   }
 
@@ -1122,31 +1196,15 @@ export class VendingService {
     notInService: Map<string, { name: string; status: string }>;
     nameBySerial: Map<string, string>;
   }> {
-    const [ents, cards] = await Promise.all([
-      // Фильтр по типу — В ЗАПРОСЕ (индекс `entity_org_type_idx`): реестр
-      // держит все карточки направлений, и тянуть их целиком ради 26 автоматов
-      // на каждый /vending/plan значит платить за чужие строки.
-      this.db
-        .select({ id: entity.id, name: entity.name, externalRef: entity.externalRef, type: entity.type })
-        .from(entity)
-        .where(eq(entity.type, "machine")),
+    const [{ nameBySerial, firstIdBySerial }, cards] = await Promise.all([
+      this.machineIndex(),
       this.db.select({ entityId: machineCard.entityId, status: machineCard.status }).from(machineCard),
     ]);
     const statusById = new Map(cards.map((c) => [c.entityId, c.status]));
     const notInService = new Map<string, { name: string; status: string }>();
-    const nameBySerial = new Map<string, string>();
-    for (const e of ents) {
-      if (e.type !== "machine" || !e.externalRef) continue;
-      const serial = normalizeMachineSerial(e.externalRef);
-      // Дубль карточки по одному серийнику — первая выигрывает ЦЕЛИКОМ, и имя,
-      // и состояние (та же конвенция, что в `machineIdBySerial`). Врозь это уже
-      // опасно: имя брали у первой, а состояние — у последней, и забытая
-      // карточка-дубль со «списан» молча убирала живой автомат из закупа,
-      // где предупреждений не видно.
-      if (nameBySerial.has(serial)) continue;
-      nameBySerial.set(serial, e.name);
-      const status = statusById.get(e.id) ?? "in_service";
-      if (status !== "in_service") notInService.set(serial, { name: e.name, status });
+    for (const [serial, id] of firstIdBySerial) {
+      const status = statusById.get(id) ?? "in_service";
+      if (status !== "in_service") notInService.set(serial, { name: nameBySerial.get(serial) ?? serial, status });
     }
     return { notInService, nameBySerial };
   }
@@ -1156,12 +1214,7 @@ export class VendingService {
    * резолвер, что у панели настроек, чтобы правка владельца работала сразу.
    */
   private async routeSetting(): Promise<string> {
-    const spec = specFor("VENDING_ROUTE_ORDER");
-    if (!spec) return "";
-    const rows = await this.db.select().from(systemConfig);
-    const map: Record<string, string> = {};
-    for (const r of rows) map[r.key] = r.value;
-    return resolveEffective(spec, map, process.env).value;
+    return settingValue(this.db, "VENDING_ROUTE_ORDER");
   }
 
   /**

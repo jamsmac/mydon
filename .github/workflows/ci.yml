@@ -72,6 +72,10 @@ jobs:
         run: |
           pnpm --filter @mydon/db db:migrate
           node packages/db/dist/seed.js
+          # Прайс вендинга — не украшение прогона: без карточек товаров
+          # `product_id` в слотах и на складе всегда NULL, и сценарий «повторный
+          # апсерт не затирает ссылку» (П4) проверял бы null против null.
+          node packages/db/dist/seed-vending.js
           node tools/smoke-core.mjs
 
       # Дымовой прогон ПАНЕЛИ: страницы должны отдаваться, а не падать в 500.
