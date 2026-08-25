@@ -338,8 +338,17 @@ async function main(): Promise<void> {
         void (async () => {
           try {
             const r = await runOurvendSync(core, vendingConfig);
+            // Итог детектора заливок — в ту же строку: без него из журнала
+            // крона не видно, отработал ли он вообще, и «заливок не было» не
+            // отличить от «детектор молчал».
+            const детектор =
+              r.detect === undefined
+                ? ""
+                : r.detect === "failed"
+                  ? ", детектор: сбой"
+                  : `, заливок ${r.detect.events} (подтверждено ${r.detect.matched})`;
             console.log(
-              `[ourvend:sync] ${r.status} — автоматов ${r.machinesOk}/${r.machinesTotal}, слотов ${r.slots}, продаж ${r.productSales}, ${r.durationMs} мс` +
+              `[ourvend:sync] ${r.status} — автоматов ${r.machinesOk}/${r.machinesTotal}, слотов ${r.slots}, продаж ${r.productSales}${детектор}, ${r.durationMs} мс` +
                 (r.error ? ` — ${r.error}` : ""),
             );
           } catch (err) {

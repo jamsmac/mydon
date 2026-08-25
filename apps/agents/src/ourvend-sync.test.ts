@@ -158,6 +158,56 @@ describe("ourvend:sync — коллектор вендинга", () => {
     assert.equal(calls.sales.length, 0);
     assert.match(String(res.error), /продажи/);
     assert.match(String((calls.finishes[0] as { error?: string }).error), /продажи AH/);
+    assert.ok(String(res.error).startsWith("продажи: "), `текст обязан начинаться с причины: ${res.error}`);
+  });
+
+  it("полный провал продаж: «продажи: » впереди, заметки о пропусках — после через « · »", async () => {
+    // Читающий видит СНАЧАЛА причину падения статуса, а уже потом побочные
+    // заметки. Раньше при непустых заметках префикс терялся в середине строки.
+    const { core, calls } = stubCore();
+    core.ingestVendingSlots = async (payload) => {
+      calls.ingests.push(payload);
+      calls.order.push("ingest");
+      return {
+        machines: payload.machines.length,
+        slots: 1,
+        skipped: [{ serial: "AH", reason: "неправдоподобное число слотов", slots: 900 }],
+      };
+    };
+    const connector: VendingConnector = {
+      login: async () => {},
+      listMachines: async () => [{ serial: "AH", alias: "AH" }],
+      getSlots: async () => [slot("31", "Montella", 6, 2)],
+      getProductSales: async () => {
+        throw new Error("таймаут");
+      },
+      getMachineSales: async () => [],
+    };
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "partial");
+    assert.ok(String(res.error).startsWith("продажи: "), `нет префикса причины: ${res.error}`);
+    assert.match(String(res.error), / · автомат AH пропущен/);
+  });
+
+  it("длинная ошибка обрезается до 2000 символов — иначе Core отобьёт итог, и прогон навсегда «running»", async () => {
+    // `SyncFinishDto.error` — @MaxLength(2000). Длинный текст даёт 400, а
+    // `finish()` его глотает: запись сбора остаётся открытой навсегда.
+    const { core, calls } = stubCore();
+    const длинно = "я".repeat(5000);
+    const connector: VendingConnector = {
+      login: async () => {},
+      listMachines: async () => [{ serial: "AH", alias: "AH" }],
+      getSlots: async () => [slot("31", "Montella", 6, 2)],
+      getProductSales: async () => {
+        throw new Error(длинно);
+      },
+      getMachineSales: async () => [],
+    };
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(String(res.error).length, 2000);
+    assert.equal(String((calls.finishes[0] as { error?: string }).error).length, 2000);
   });
 
   it("детектор заливок падает — сбор всё равно success, итог помечен detect: \"failed\"", async () => {
@@ -195,7 +245,10 @@ describe("ourvend:sync — коллектор вендинга", () => {
 
     assert.deepEqual(res.detect, { events: 3, matched: 2 });
     assert.equal(calls.detects.length, 1);
-    assert.equal(calls.detects[0], 1); // days=1, как договорено для агента
+    // Окно детектора — DETECT_DAYS_DEFAULT = 2 суток, а не одни. После
+    // простоя сбора длиннее суток (24.08 было девять `failed` подряд) заливки
+    // из провала при days=1 не подобрались бы никогда — только ручным POST.
+    assert.equal(calls.detects[0], 2);
     // Детектор должен идти строго после приёма слотов.
     const ingestAt = calls.order.indexOf("ingest");
     const detectAt = calls.order.indexOf("detect");

@@ -67,6 +67,16 @@ const ЧТЕНИЕ = [
   "/vending/sync",
   "/vending/refill-events?days=14",
   {
+    // Сводка снабжения: SQL с коррелированным подзапросом по последним суткам
+    // каждого автомата плюс поле `source` — по нему владелец отличает «считаем
+    // сами» от «читаем чужую базу» (П2/П4 поглощения).
+    path: "/supply/summary",
+    проверить: (ответ) => {
+      if (!["own", "stock"].includes(ответ?.source)) throw new Error(`supply.summary.source=${ответ?.source}`);
+      if (typeof ответ?.emptyPositions !== "number") throw new Error("supply.summary.emptyPositions — не число");
+    },
+  },
+  {
     // Усушка (П4): весь расчёт идёт по снимкам, продажам и событиям заливок —
     // четыре выборки, которых заглушка юнит-теста не исполняет.
     path: "/vending/shrinkage?days=14",
@@ -890,6 +900,11 @@ async function проверитьУсушку() {
   if (автомат.summary.daysCounted !== 0) throw new Error(`день без продаж посчитан: daysCounted=${автомат.summary.daysCounted}`);
   if (!json.warnings.some((w) => w.code === "no_sales_day" && w.message.includes(автомат.name))) {
     throw new Error("нет предупреждения no_sales_day — день пропущен молча");
+  }
+  // «Ни одного посчитанного дня» — отдельная строка: без неё панель и бот
+  // сказали бы «недостач нет» там, где расчёт не дал ничего.
+  if (!json.warnings.some((w) => w.code === "no_counted_days" && w.message.includes(автомат.name))) {
+    throw new Error("нет предупреждения no_counted_days при daysCounted=0");
   }
 }
 

@@ -54,21 +54,49 @@ interface Мир {
 }
 
 /**
- * Граница окна из условия запроса.
+ * Границы окна из условия запроса — все даты, в порядке появления.
  *
  * Стаб обязан отвечать на выборку событий ТЕМ ЖЕ окном, что просит сервис:
  * ширина этого окна — предмет отдельного теста (запись, приклеенная к событию
- * чуть старше прогона, не должна подтверждать второе окно). Читаем значение
- * из `queryChunks` drizzle; если структура изменится — падаем громко, а не
- * начинаем молча отдавать всё подряд.
+ * чуть старше прогона, не должна подтверждать второе окно). Читаем значения
+ * из `queryChunks` drizzle РЕКУРСИВНО: у `and(...)` они вложены, и плоский
+ * обход возвращал бы «дат нет» на составном условии. Если структура изменится
+ * — падаем громко, а не начинаем молча отдавать всё подряд.
  */
-function границаОкна(условие: unknown): Date {
-  const chunks = (условие as { queryChunks?: unknown[] }).queryChunks ?? [];
-  for (const c of chunks) {
-    const v = (c as { value?: unknown }).value;
-    if (v instanceof Date) return v;
+function границыОкна(условие: unknown): Date[] {
+  const out: Date[] = [];
+  const walk = (n: unknown): void => {
+    if (n === null || typeof n !== "object") return;
+    const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
+    if (Array.isArray(chunks)) {
+      for (const c of chunks) walk(c);
+      return;
+    }
+    const v = (n as { value?: unknown }).value;
+    if (v instanceof Date) out.push(v);
+  };
+  walk(условие);
+  if (out.length === 0) {
+    throw new Error("стаб не смог прочитать границу окна из условия — изменилось внутреннее устройство drizzle");
   }
-  throw new Error("стаб не смог прочитать границу окна из условия — изменилось внутреннее устройство drizzle");
+  return out;
+}
+
+/** Строковые параметры условия (серийник в разборе по автомату). */
+function строкиИз(условие: unknown): string[] {
+  const out: string[] = [];
+  const walk = (n: unknown): void => {
+    if (n === null || typeof n !== "object") return;
+    const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
+    if (Array.isArray(chunks)) {
+      for (const c of chunks) walk(c);
+      return;
+    }
+    const v = (n as { value?: unknown }).value;
+    if (typeof v === "string") out.push(v);
+  };
+  walk(условие);
+  return out;
 }
 
 /**
@@ -83,56 +111,59 @@ function detectDb(м: Мир) {
   const обновления: Partial<EventRow>[] = [];
   let seq = 0;
 
-  /**
-   * Детектор сначала спрашивает СПИСОК автоматов окна, потом читает снимки по
-   * одному автомату (иначе при окне в 30 суток весь парк лёг бы в память
-   * разом). Стаб отвечает по порядку вызовов и циклится, чтобы повторный
-   * `detect()` в том же тесте отработал так же.
-   */
-  const серии = (): string[] => [...new Set((м.snapshots ?? []).map((r) => r.machineSerial))];
-  let снимковЗапросов = 0;
-  const снимкиОтвет = (): unknown[] => {
-    const список = серии();
-    const n = снимковЗапросов++ % (список.length + 1);
-    return n === 0 ? список.map((serial) => ({ serial })) : (м.snapshots ?? []).filter((r) => r.machineSerial === список[n - 1]);
-  };
-
   const rowsOf = (t: unknown): unknown[] =>
     t === slotSnapshot
-      ? снимкиОтвет()
-      : t === vendingRefill
-        ? (м.refills ?? [])
-        : t === vendingAlias
-          ? (м.aliases ?? [])
-          : t === vendingProduct
-            ? (м.products ?? [])
-            : t === entity
-              ? (м.entities ?? [])
-              : t === machineCard
-                ? (м.cards ?? [])
-                : t === systemConfig
-                  ? (м.config ?? [])
-                  : [];
+      ? (м.snapshots ?? [])
+      : // Лента живая: дедуп публикации читает УЖЕ НАПИСАННЫЕ события, и
+        // заготовленный пустой ответ зеленел бы на любой реализации.
+        t === event
+        ? лента
+        : t === vendingRefill
+          ? (м.refills ?? [])
+          : t === vendingAlias
+            ? (м.aliases ?? [])
+            : t === vendingProduct
+              ? (м.products ?? [])
+              : t === entity
+                ? (м.entities ?? [])
+                : t === machineCard
+                  ? (м.cards ?? [])
+                  : t === systemConfig
+                    ? (м.config ?? [])
+                    : [];
 
-  const цепочка = (rows: unknown[], датоФильтр?: (граница: Date) => unknown[]) => {
+  const цепочка = (rows: unknown[], фильтр?: (условие: unknown) => unknown[]) => {
     const chain: Record<string, unknown> = {};
     let текущие = rows;
-    const p = () => Promise.resolve(текущие);
+    let сгруппировано = false;
+    // Детектор сначала спрашивает СПИСОК автоматов окна (groupBy), потом
+    // читает снимки по одной ФОРМЕ серийника (иначе при окне в 30 суток весь
+    // парк лёг бы в память разом). Стаб различает эти два запроса по условию,
+    // а не по порядку вызовов: порядок зависит от того, сколько автоматов
+    // сервис отсеял реестром, и счётчик вызовов молча разъезжался бы.
+    const ответ = (): unknown[] =>
+      сгруппировано ? [...new Set((текущие as SnapRow[]).map((r) => r.machineSerial))].map((serial) => ({ serial })) : текущие;
+    const p = () => Promise.resolve(ответ());
     chain.where = (условие: unknown) => {
-      if (датоФильтр) текущие = датоФильтр(границаОкна(условие));
+      if (фильтр) текущие = фильтр(условие);
       return chain;
     };
-    chain.groupBy = () => chain;
+    chain.groupBy = () => {
+      сгруппировано = true;
+      return chain;
+    };
     chain.orderBy = () => chain;
-    chain.limit = async () => текущие;
+    chain.limit = async () => ответ();
     chain.then = (res: (v: unknown) => unknown) => p().then(res);
     return chain;
   };
 
   const insert = (t: unknown) => ({
-    values: (v: Record<string, unknown>) => {
+    values: (v: Record<string, unknown> | Record<string, unknown>[]) => {
       if (t === event) {
-        лента.push(v as unknown as FeedRow);
+        // Лента пишется ПАЧКОЙ (отдельный проход публикации), а не по строке
+        // на вставку события журнала.
+        for (const r of Array.isArray(v) ? v : [v]) лента.push(r as unknown as FeedRow);
         return Promise.resolve();
       }
       const строка = v as unknown as Omit<EventRow, "id">;
@@ -171,8 +202,28 @@ function detectDb(м: Мир) {
     select: () => ({
       from: (t: unknown) =>
         t === vendingRefillEvent
-          ? цепочка(события, (граница) => события.filter((e) => e.windowTo.getTime() >= граница.getTime()))
-          : цепочка(rowsOf(t)),
+          ? цепочка(события, (условие) => {
+              // Одна дата — выборка «уже записанного» окна прогона; две даты
+              // (плюс `is null`) — кандидаты на публикацию в ленту: окно
+              // закрылось дольше допуска назад, а записи оператора так и нет.
+              const границы = границыОкна(условие);
+              return границы.length >= 2
+                ? события.filter(
+                    (e) =>
+                      e.windowTo.getTime() >= границы[0]!.getTime() &&
+                      e.windowTo.getTime() <= границы[1]!.getTime() &&
+                      e.matchedRefillId === null,
+                  )
+                : события.filter((e) => e.windowTo.getTime() >= границы[0]!.getTime());
+            })
+          : t === slotSnapshot
+            ? цепочка(м.snapshots ?? [], (условие) => {
+                // Разбор идёт по ОДНОЙ форме серийника за запрос; список
+                // автоматов окна условия по серийнику не несёт.
+                const форма = строкиИз(условие)[0];
+                return форма === undefined ? (м.snapshots ?? []) : (м.snapshots ?? []).filter((r) => r.machineSerial === форма);
+              })
+            : цепочка(rowsOf(t)),
     }),
     insert,
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
@@ -297,10 +348,10 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
     });
     const res = await svc.detect(2);
-    assert.deepEqual(res.skipped, [{ serial: "SKLAD", reason: "dead" }]);
+    assert.deepEqual(res.skipped, [{ serial: "sklad", reason: "dead" }], "серийник в skipped — канон, как и в журнале");
     assert.equal(res.machines, 2, "заправленный под завязку автомат — осмотрен, а не мёртв");
     assert.equal(res.events, 1);
-    assert.ok(!события.some((e) => e.machineSerial === "SKLAD"));
+    assert.ok(!события.some((e) => e.machineSerial === "sklad"));
   });
 
   it("автомат без назначенных слотов молчит по своей причине", async () => {
@@ -310,7 +361,7 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
     });
     const res = await svc.detect(2);
-    assert.deepEqual(res.skipped, [{ serial: "ПУСТОЙ", reason: "no_slots" }]);
+    assert.deepEqual(res.skipped, [{ serial: "пустой", reason: "no_slots" }]);
   });
 
   it("причина берётся по самому свежему снимку, а не по смеси за двое суток", async () => {
@@ -328,7 +379,7 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
     });
     const res = await svc.detect(2);
-    assert.deepEqual(res.skipped, [{ serial: "СМЕСЬ", reason: "dead" }]);
+    assert.deepEqual(res.skipped, [{ serial: "смесь", reason: "dead" }]);
   });
 
   it("запись оператора в окне ±3 ч сопоставляется с событием", async () => {
@@ -342,13 +393,15 @@ describe("Вендинг Core: детектор заливок по снимка
     assert.equal(res.events, 1);
     assert.equal(res.matched, 1);
     assert.equal(события[0]!.matchedRefillId, "r1");
-    const лог = лента.find((f) => f.type === "vending.refill_detected")!;
-    assert.equal(лог.payload.recorded, true);
-    assert.equal(лог.payload.name, "Olma");
+    assert.deepEqual(
+      лента.filter((f) => f.type === "vending.refill_detected"),
+      [],
+      "оператор отчитался — будить владельца «заливкой без записи» не о чем",
+    );
   });
 
   it("запись оператора мимо окна не сопоставляется, событие остаётся «без записи»", async () => {
-    const { svc, события, лента } = сервис({
+    const { svc, события } = сервис({
       snapshots: ЗАЛИВКА,
       entities: РЕЕСТР,
       // На 4 часа раньше начала окна — это уже другой выезд (допуск 3 ч).
@@ -357,7 +410,6 @@ describe("Вендинг Core: детектор заливок по снимка
     const res = await svc.detect(2);
     assert.equal(res.matched, 0);
     assert.equal(события[0]!.matchedRefillId, null);
-    assert.equal(лента.find((f) => f.type === "vending.refill_detected")!.payload.recorded, false);
   });
 
   it("запись оператора, появившаяся ПОСЛЕ прогона, доклеивается на следующем", async () => {
@@ -462,5 +514,85 @@ describe("Вендинг Core: детектор заливок по снимка
   it("снимков нет — прогон пустой, а не падение", async () => {
     const { svc } = сервис({});
     assert.deepEqual(await svc.detect(2), { machines: 0, events: 0, matched: 0, skipped: [] });
+  });
+
+  it("автомат не в строю в детектор не идёт — в skipped с причиной not_in_service", async () => {
+    // Склад-«автомат» приход по снимкам даёт постоянно: это разбор склада, а
+    // не заливка маршрута, и каждые три часа он писал бы владельцу «причины».
+    const { svc, события } = сервис({
+      snapshots: ЗАЛИВКА,
+      entities: РЕЕСТР,
+      cards: [{ entityId: "m-olma", status: "warehouse" }],
+    });
+    const res = await svc.detect(2);
+    assert.deepEqual(res.skipped, [{ serial: "2508160376", reason: "not_in_service" }]);
+    assert.equal(res.machines, 0);
+    assert.equal(события.length, 0);
+  });
+
+  it("две формы серийника — один автомат и ОДНО событие, а не два", async () => {
+    // Уникальный индекс стоит на КОЛОНКЕ, а ключ идемпотентности считается по
+    // канону: пиши мы сырую форму, «c2508160376» и «2508160376» дали бы две
+    // строки на одно окно, и база бы их не поймала.
+    const { svc, события } = сервис({
+      snapshots: [
+        ...снимок("2508160376", T1, [["1", "Snickers", 40, 2]]),
+        ...снимок("c2508160376", T2, [["1", "Snickers", 40, 14]]),
+      ],
+      entities: РЕЕСТР,
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.machines, 1);
+    assert.equal(res.events, 1);
+    assert.equal(события.length, 1);
+    assert.equal(события[0]!.machineSerial, "2508160376", "в журнале — канон");
+    assert.equal(события[0]!.units, 12);
+  });
+});
+
+describe("Вендинг Core: лента «заливка без записи» отдельным проходом (R-FW-9)", () => {
+  /** Окно, закрывшееся `часов` назад: `MATCH_PAD_MS` = 3 ч. */
+  const окноНазад = (часов: number): SnapRow[] => {
+    const конец = new Date(Date.now() - часов * ЧАС);
+    return [
+      ...снимок("2508160376", new Date(конец.getTime() - 3 * ЧАС), [["1", "Snickers", 40, 2]]),
+      ...снимок("2508160376", конец, [["1", "Snickers", 40, 14]]),
+    ];
+  };
+
+  it("свежее окно события ленты не даёт: оператор ещё может дописать заливку", async () => {
+    const { svc, события, лента } = сервис({ snapshots: окноНазад(1), entities: РЕЕСТР });
+    const res = await svc.detect(2);
+    assert.equal(res.events, 1, "в журнал заливка попала сразу");
+    assert.equal(события.length, 1);
+    assert.deepEqual(лента.filter((f) => f.type === "vending.refill_detected"), [], "будить владельца рано — допуск ещё не вышел");
+  });
+
+  it("окно старше допуска и без записи — событие ленты; повтор прогона второго не пишет", async () => {
+    const { svc, лента } = сервис({ snapshots: окноНазад(4), entities: РЕЕСТР });
+    await svc.detect(2);
+    const строки = лента.filter((f) => f.type === "vending.refill_detected");
+    assert.equal(строки.length, 1);
+    assert.equal(строки[0]!.payload.recorded, false);
+    assert.equal(строки[0]!.payload.serial, "2508160376");
+    assert.equal(строки[0]!.payload.name, "Olma");
+    assert.equal(строки[0]!.payload.units, 12);
+    assert.ok(строки[0]!.payload.eventId, "eventId — ключ дедупа публикации");
+
+    await svc.detect(2);
+    assert.equal(лента.filter((f) => f.type === "vending.refill_detected").length, 1, "второй прогон дубля ленты не даёт");
+  });
+
+  it("окно старше допуска, но с записью оператора — ленте сказать нечего", async () => {
+    const снимки = окноНазад(4);
+    const конец = снимки[снимки.length - 1]!.capturedAt;
+    const { svc, лента } = сервис({
+      snapshots: снимки,
+      entities: РЕЕСТР,
+      refills: [{ id: "r1", machineSerial: "c2508160376", performedAt: new Date(конец.getTime() - 30 * 60_000), qty: 12 }],
+    });
+    const res = await svc.detect(2);
+    assert.equal(res.matched, 1);
+    assert.deepEqual(лента.filter((f) => f.type === "vending.refill_detected"), []);
   });
 });

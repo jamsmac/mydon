@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lte } from "drizzle-orm";
 import { event, slotSnapshot, vendingRefill, vendingRefillEvent } from "@mydon/db";
 import {
   deadMachine,
@@ -30,15 +30,22 @@ export const MIN_UNITS_FALLBACK = 10;
  * пишет боту либо перед выездом, либо после — но в пределах того же выезда.
  */
 export const MATCH_PAD_MS = 3 * 3_600_000;
+/** Событие ленты о заливке без записи оператора (правило брифинга). */
+export const REFILL_DETECTED_EVENT = "vending.refill_detected";
 
 /**
- * Почему детектор молчит об автомате. Ровно три значения, без «прочего»:
- * `dead` — источник отдаёт мусор (ёмкости вне диапазона, подпись SKLAD 199);
+ * Почему детектор молчит об автомате. Значения без «прочего»:
+ * `dead` — источник отдаёт ёмкости вне диапазона (РЕЗЕРВ: на текущем проде ни
+ *   один снимок за всю историю под это не подходит — заглушки SKLAD 5S/6S
+ *   отдают пустое имя товара и отсеиваются как `no_slots`, SKLAD 4S — как
+ *   `uncalibrated`; ветка ждёт источник, который отдаст товар с мусорной
+ *   ёмкостью);
  * `uncalibrated` — ёмкости не откалиброваны, но не поголовно;
- * `no_slots` — в автомате нет назначенных слотов.
+ * `no_slots` — в автомате нет назначенных слотов;
+ * `not_in_service` — автомат не в строю по реестру (склад, ремонт).
  * Чинятся они в разных местах, поэтому строкой-катчоллом их сводить нельзя.
  */
-export type SkipReason = "dead" | "uncalibrated" | "no_slots";
+export type SkipReason = "dead" | "uncalibrated" | "no_slots" | "not_in_service";
 
 export interface DetectResult {
   /** Автоматы, по которым снимки что-то говорят (без пропущенных). */
@@ -103,9 +110,10 @@ export class RefillEventsService {
    */
   async detect(days = DETECT_DAYS_DEFAULT): Promise<DetectResult> {
     const окно = зажать(days, DETECT_DAYS_DEFAULT, DETECT_DAYS_MAX);
-    const от = new Date(Date.now() - окно * 86_400_000);
+    const сейчас = new Date();
+    const от = new Date(сейчас.getTime() - окно * 86_400_000);
 
-    const [серии, canonOf, minUnits] = await Promise.all([
+    const [серии, canonOf, minUnits, реестрМашин] = await Promise.all([
       // Сначала — только СПИСОК автоматов, попавших в окно. Одним запросом на
       // весь парк снимки читать нельзя: при потолке окна в 30 суток это
       // четверть миллиона строк в память разом. Индекс
@@ -120,59 +128,82 @@ export class RefillEventsService {
       // поход в базу на каждое превратил бы детектор в N+1.
       this.vending.canonResolver(),
       this.minUnits(),
+      this.vending.machineRegistry(),
     ]);
 
-    // Дальше — автомат за автоматом, ОДИН ЗАПРОС НА АВТОМАТ. Это осознанный
-    // N+1: при парке ≤ ~30 машин (сегодня 26) три десятка индексных выборок
-    // дешевле, чем пик памяти от четверти миллиона строк одним ответом. Когда
-    // машин станут сотни — переходить на батчи по 10–20 серийников через
-    // `inArray`, а не обратно на «весь парк разом».
+    // Серийники сводим к канону ДО чтения снимков — тот же приём, что в отчёте
+    // об усушке: «c2508160376» и «2508160376» это один автомат, и раньше две
+    // формы дали бы два независимых разбора и два события на одно окно
+    // (уникальный индекс стоит на КОЛОНКЕ, а ключ идемпотентности считался по
+    // канону — база их не схлопнула бы).
+    const формыКанона = new Map<string, string[]>();
+    for (const { serial } of серии) {
+      const canon = normalizeMachineSerial(serial);
+      формыКанона.set(canon, [...(формыКанона.get(canon) ?? []), serial]);
+    }
+
+    // Дальше — автомат за автоматом, ОДИН ЗАПРОС НА ФОРМУ СЕРИЙНИКА. Это
+    // осознанный N+1: при парке ≤ ~30 машин (сегодня 26) три десятка индексных
+    // выборок дешевле, чем пик памяти от четверти миллиона строк одним
+    // ответом. Когда машин станут сотни — переходить на батчи по 10–20
+    // серийников через `inArray`, а не обратно на «весь парк разом».
     const skipped: DetectResult["skipped"] = [];
     const события: RefillEvent[] = [];
     let machines = 0;
 
-    for (const { serial } of серии) {
-      const строки = await this.db
-        .select({
-          coilId: slotSnapshot.coilId,
-          productName: slotSnapshot.productName,
-          capacity: slotSnapshot.capacity,
-          quantity: slotSnapshot.quantity,
-          capturedAt: slotSnapshot.capturedAt,
-        })
-        .from(slotSnapshot)
-        .where(and(eq(slotSnapshot.machineSerial, serial), gte(slotSnapshot.capturedAt, от)));
+    for (const [canon, формы] of формыКанона) {
+      // Автомат не в строю детектору не интересен: у склада-«автомата» и
+      // машины в ремонте приход по снимкам — не заливка маршрута, а разбор
+      // склада, и каждые три часа он писал бы владельцу «причины» про SKLAD.
+      if (реестрМашин.notInService.has(canon)) {
+        skipped.push({ serial: canon, reason: "not_in_service" });
+        continue;
+      }
 
-      // Снимок = момент съёма: строки `slot_snapshot` лежат по слоту.
       const поМоменту = new Map<number, MachineSnapshot>();
-      for (const r of строки) {
-        const t = r.capturedAt.getTime();
-        let snap = поМоменту.get(t);
-        if (!snap) {
-          snap = { serial, capturedAt: r.capturedAt, slots: [] };
-          поМоменту.set(t, snap);
+      for (const форма of формы) {
+        const строки = await this.db
+          .select({
+            coilId: slotSnapshot.coilId,
+            productName: slotSnapshot.productName,
+            capacity: slotSnapshot.capacity,
+            quantity: slotSnapshot.quantity,
+            capturedAt: slotSnapshot.capturedAt,
+          })
+          .from(slotSnapshot)
+          .where(and(eq(slotSnapshot.machineSerial, форма), gte(slotSnapshot.capturedAt, от)));
+
+        // Снимок = момент съёма: строки `slot_snapshot` лежат по слоту.
+        for (const r of строки) {
+          const t = r.capturedAt.getTime();
+          let snap = поМоменту.get(t);
+          if (!snap) {
+            snap = { serial: canon, capturedAt: r.capturedAt, slots: [] };
+            поМоменту.set(t, snap);
+          }
+          const имя = r.productName?.trim();
+          snap.slots.push({
+            coilId: r.coilId,
+            // Канон ДО сравнения: один и тот же товар приезжает из Ourvend под
+            // разными именами, и без канона смена написания выглядела бы как
+            // смена товара в слоте — дельта потерялась бы целиком.
+            product: имя ? canonOf(имя) : null,
+            capacity: r.capacity,
+            quantity: r.quantity,
+          });
         }
-        const имя = r.productName?.trim();
-        snap.slots.push({
-          coilId: r.coilId,
-          // Канон ДО сравнения: один и тот же товар приезжает из Ourvend под
-          // разными именами, и без канона смена написания выглядела бы как
-          // смена товара в слоте — дельта потерялась бы целиком.
-          product: имя ? canonOf(имя) : null,
-          capacity: r.capacity,
-          quantity: r.quantity,
-        });
       }
       const список = [...поМоменту.values()];
       if (список.length === 0) continue;
 
-      // Мёртвые — вон до расчёта (R-P4-4). Автомат-заглушка и автомат с
+      // Нечитаемые — вон до расчёта (R-P4-4). Автомат-заглушка и автомат с
       // нечитаемой планограммой одинаково не дают детектору сказать ничего, но
       // причины разные, и владельцу нужна именно причина: «источник врёт» и
-      // «слоты не откалиброваны» чинятся в разных местах.
+      // «слоты не откалиброваны» чинятся в разных местах. На текущем проде
+      // срабатывают `no_slots` и `uncalibrated`; `dead` — резерв, см. `SkipReason`.
       const причина = skipReasonOf(список);
       if (причина) {
-        skipped.push({ serial, reason: причина });
+        skipped.push({ serial: canon, reason: причина });
         continue;
       }
       machines += 1;
@@ -180,6 +211,23 @@ export class RefillEventsService {
     }
     skipped.sort((a, b) => a.serial.localeCompare(b.serial, "ru"));
 
+    const итог = await this.записать(события, от, machines, skipped);
+    // Лента — ОТДЕЛЬНЫМ проходом и по всему окну, а не по событиям этого
+    // прогона (см. `опубликоватьНесопоставленные`).
+    await this.опубликоватьНесопоставленные(от, сейчас, реестрМашин.nameBySerial);
+    return итог;
+  }
+
+  /**
+   * Запись событий детектора в журнал: новые вставляются, к старым доклеивается
+   * запись оператора, если она появилась после первого прохода.
+   */
+  private async записать(
+    события: RefillEvent[],
+    от: Date,
+    machines: number,
+    skipped: DetectResult["skipped"],
+  ): Promise<DetectResult> {
     if (события.length === 0) return { machines, events: 0, matched: 0, skipped };
 
     const [записи, ужеЕсть, реестр] = await Promise.all([
@@ -237,7 +285,11 @@ export class RefillEventsService {
         const [созданное] = await tx
           .insert(vendingRefillEvent)
           .values({
-            machineSerial: ev.serial,
+            // Серийник в журнале — КАНОН. Уникальный индекс стоит на колонке,
+            // а ключ идемпотентности здесь считается по канону: запиши мы
+            // сырую форму, «c2508160376» и «2508160376» дали бы две строки на
+            // одно окно, и база бы их не поймала.
+            machineSerial: canon,
             machineId: реестр.idBySerial.get(canon) ?? null,
             windowFrom: ev.windowFrom,
             windowTo: ev.windowTo,
@@ -257,23 +309,82 @@ export class RefillEventsService {
           занятые.add(человек.id);
           matched += 1;
         }
-        await tx.insert(event).values({
-          source: "system",
-          type: "vending.refill_detected",
-          payload: {
-            serial: canon,
-            name: реестр.nameBySerial.get(canon) ?? canon,
-            units: ev.units,
-            windowTo: ev.windowTo.toISOString(),
-            // `recorded:false` — заливка, которую видел детектор, а мастер не
-            // отчитался. Это строка отчёта, а не алерт: факт мы всё равно знаем.
-            recorded: человек !== null,
-          },
-        });
       }
     });
 
     return { machines, events: записано, matched, skipped };
+  }
+
+  /**
+   * Лента `vending.refill_detected` — ОТДЕЛЬНЫМ проходом по несопоставленным
+   * окнам старше допуска сопоставления (R-FW-9).
+   *
+   * ЗАЧЕМ ТАК. Правило брифинга по этому событию говорит «заливка без записи —
+   * оформи в боте», а ack брифинга необратим. Детектор бежит после каждого
+   * сбора слотов (раз в 3 ч), и техник, дописывающий позицию в подвале уже
+   * после прогона, будил владельца зря: `matched_refill_id` доклеивался к
+   * событию журнала, а строка ленты с `recorded:false` оставалась навсегда.
+   * Публикуя окна старше `MATCH_PAD_MS`, мы утверждаем ФАКТ («записи так и не
+   * появилось»), а не результат гонки.
+   *
+   * Дедуп — по `payload.eventId` (это `vending_refill_event.id`): второй
+   * прогон по тому же окну не должен дать вторую строку ленты. Пара
+   * `(serial, windowTo)` держится как запасной ключ для событий, написанных до
+   * появления `eventId`.
+   */
+  private async опубликоватьНесопоставленные(от: Date, сейчас: Date, имена: Map<string, string>): Promise<number> {
+    const порог = new Date(сейчас.getTime() - MATCH_PAD_MS);
+    const кандидаты = await this.db
+      .select()
+      .from(vendingRefillEvent)
+      .where(
+        and(
+          gte(vendingRefillEvent.windowTo, от),
+          lte(vendingRefillEvent.windowTo, порог),
+          isNull(vendingRefillEvent.matchedRefillId),
+        ),
+      );
+    if (кандидаты.length === 0) return 0;
+
+    // Лента пишется НЕ РАНЬШЕ конца окна, поэтому за границу `от` заглядывать
+    // незачем: событие про окно из этого диапазона не могло быть написано до него.
+    const написанные = await this.db
+      .select({ payload: event.payload })
+      .from(event)
+      .where(and(eq(event.type, REFILL_DETECTED_EVENT), gte(event.occurredAt, от)));
+    const занято = new Set<string>();
+    for (const e of написанные) {
+      const p = (e.payload ?? {}) as Record<string, unknown>;
+      if (p.eventId !== undefined) занято.add(String(p.eventId));
+      if (p.serial !== undefined && p.windowTo !== undefined) занято.add(`${String(p.serial)}|${String(p.windowTo)}`);
+    }
+
+    const строки = кандидаты
+      .filter((r) => {
+        const canon = normalizeMachineSerial(r.machineSerial);
+        return !занято.has(r.id) && !занято.has(`${canon}|${r.windowTo.toISOString()}`);
+      })
+      .map((r) => {
+        const canon = normalizeMachineSerial(r.machineSerial);
+        return {
+          source: "system",
+          type: REFILL_DETECTED_EVENT,
+          payload: {
+            eventId: r.id,
+            serial: canon,
+            name: имена.get(canon) ?? canon,
+            units: r.units,
+            windowTo: r.windowTo.toISOString(),
+            // `recorded:false` — заливка, которую видел детектор, а мастер так
+            // и не отчитался за отведённые три часа. Это строка отчёта, а не
+            // алерт: факт мы всё равно знаем.
+            recorded: false,
+          },
+        };
+      });
+    if (строки.length === 0) return 0;
+    await this.db.insert(event).values(строки);
+    return строки.length;
   }
 
   /** Журнал событий детектора за `days` суток, свежие сверху. */
@@ -291,7 +402,10 @@ export class RefillEventsService {
     ]);
     return строки.map((r) => ({
       id: r.id,
-      serial: r.machineSerial,
+      // Канон и на выдаче: строки, записанные до R-FW-10, лежат в сырой форме,
+      // а отчёт об усушке и панель ключуются каноном — разнобой в одном списке
+      // читался бы как два разных автомата.
+      serial: normalizeMachineSerial(r.machineSerial),
       name: реестр.nameBySerial.get(normalizeMachineSerial(r.machineSerial)) ?? r.machineSerial,
       windowFrom: r.windowFrom.toISOString(),
       windowTo: r.windowTo.toISOString(),

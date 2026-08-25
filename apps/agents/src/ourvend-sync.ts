@@ -55,6 +55,14 @@ export interface SyncCoreClient {
 
 /** Окно сбора продаж, суток (по умолчанию 7 — под §5.6). */
 const SALES_WINDOW_DAYS = 7;
+/** Окно детектора заливок — `DETECT_DAYS_DEFAULT` Core. Здесь копия числа: у агентов зависимости на core нет. */
+const DETECT_DAYS = 2;
+/**
+ * Потолок текста ошибки прогона: `SyncFinishDto.error` в Core — `@MaxLength(2000)`.
+ * Более длинный текст (десять строк OurVend с сообщениями драйвера) уходит в
+ * 400, а `finish()` ошибку глотает — и запись сбора остаётся «running» навсегда.
+ */
+const MAX_ERROR_CHARS = 2000;
 
 export interface OurvendSyncConfig {
   account: string;
@@ -124,7 +132,14 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
 
   const finish = async (result: Omit<SyncResult, "durationMs">): Promise<SyncResult> => {
     const durationMs = now().getTime() - startedAtMs;
-    const full: SyncResult = { ...result, durationMs };
+    // Обрезка здесь, а не у каждого вызова: путей к `finish` пять, и забытый
+    // на одном из них длинный текст стоит открытой навсегда записи сбора
+    // (см. `MAX_ERROR_CHARS`).
+    const full: SyncResult = {
+      ...result,
+      durationMs,
+      ...(result.error ? { error: result.error.slice(0, MAX_ERROR_CHARS) } : {}),
+    };
     try {
       await core.finishVendingSync(id, {
         status: full.status,
@@ -188,7 +203,11 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
     // сбора, а не только когда её вручную прогонят из панели. Сбой детектора
     // не отказ сбора (снимок уже записан) — только лог и пометка в итоге.
     try {
-      const d = await core.detectRefillEvents(1);
+      // Окно — `DETECT_DAYS_DEFAULT` Core (2 суток), а не одни. Детектор
+      // идемпотентен по (автомат, конец окна), так что перекрытие не плодит
+      // строк, зато после простоя сбора длиннее суток (24.08 было девять
+      // `failed` подряд) заливки из провала подберутся сами, а не ручным POST.
+      const d = await core.detectRefillEvents(DETECT_DAYS);
       detect = { events: d.events, matched: d.matched };
     } catch (err) {
       console.warn(`[ourvend:sync] детектор заливок не отработал: ${errText(err)}`);
@@ -249,12 +268,12 @@ export async function runOurvendSync(core: SyncCoreClient, config: OurvendSyncCo
     // Слоты собраны без потерь, а продажи не дошли ни строкой — статус
     // больше не врёт «success»: владелец должен видеть, что окно продаж
     // не обновилось, а не догадываться об этом по пустому графику.
+    //
+    // ПРИЧИНА ПАДЕНИЯ СТАТУСА — ПЕРВОЙ. Заметки о пропущенных автоматах
+    // побочные, и, стоя впереди, они прятали «продажи: » в середину строки:
+    // читающий видел статус `partial` и объяснение не про то.
     status = "partial";
-    const notes = [
-      ...(skippedNotes.length ? [skippedNotes.slice(0, 10).join("; ")] : []),
-      `продажи: ${saleErrors.slice(0, 10).join("; ")}`,
-    ];
-    error = notes.join(" | ");
+    error = [`продажи: ${saleErrors.slice(0, 10).join("; ")}`, ...skippedNotes.slice(0, 10)].join(" · ");
   } else {
     status = failures.length === 0 ? "success" : machinesOk > 0 ? "partial" : "failed";
     const errParts = [

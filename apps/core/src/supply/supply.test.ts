@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildPurchaseUpserts, buildStockUpserts, fillFromStock } from "./supply.service";
+import { buildPurchaseUpserts, buildStockUpserts, fillFromStock, SupplyService } from "./supply.service";
 
 describe("Снабжение: подготовка строк источника", () => {
   it("приход: числа и срок годности переносятся, id источника — ключ", () => {
@@ -92,5 +92,42 @@ describe("Дозаполнение карточек автоматов из ис
     assert.deepEqual(fillFromStock({ категория: 10 }, { kind: "coffee", location: "ТЦ Compass" }), {
       точка: "ТЦ Compass",
     });
+  });
+});
+
+describe("Сводка снабжения: источник остатков виден снаружи", () => {
+  /**
+   * Плитка «остатки на такое-то число» в обоих режимах выглядит одинаково, и
+   * без этого поля владельцу нечем отличить «считаем сами» от «читаем чужую
+   * базу» — а в дни поглощения это его первый вопрос.
+   */
+  const сводка = async (env: Record<string, string | undefined>) => {
+    const было = process.env.OURVEND_ACCOUNTING_SOURCE;
+    for (const [k, v] of Object.entries(env)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try {
+      const db = {
+        select: () => ({
+          from: () => ({
+            where: () => Promise.resolve([{ count: 0, total: "0" }]),
+            leftJoin: () => ({ where: () => ({ orderBy: () => Promise.resolve([]) }) }),
+          }),
+        }),
+      } as never;
+      return await new SupplyService(db).summary();
+    } finally {
+      if (было === undefined) delete process.env.OURVEND_ACCOUNTING_SOURCE;
+      else process.env.OURVEND_ACCOUNTING_SOURCE = было;
+    }
+  };
+
+  it("по умолчанию — stock (чтение БД mydon-stock)", async () => {
+    assert.equal((await сводка({ OURVEND_ACCOUNTING_SOURCE: undefined })).source, "stock");
+  });
+
+  it("после переключения — own (собственный снапшот)", async () => {
+    assert.equal((await сводка({ OURVEND_ACCOUNTING_SOURCE: "own" })).source, "own");
   });
 });
