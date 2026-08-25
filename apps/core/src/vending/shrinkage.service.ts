@@ -20,7 +20,7 @@ import {
 import { DB, type Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
 import { skipReasonOf, type SkipReason } from "./refill-events.service";
-import { ReportCache, зажать, перечислить } from "./report-cache";
+import { ReportCache, clamp, listInline } from "./report-cache";
 import { VendingService } from "./vending.service";
 
 /** Дни отчёта по умолчанию — окно, на котором порог 30 000 сум уже бьёт (донор mydon-stock). */
@@ -247,7 +247,7 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
    * тем же `days` был бы уже не тем отчётом.
    */
   async report(days = SHRINK_DAYS_DEFAULT, now = new Date()): Promise<ShrinkReport> {
-    const окно = зажать(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX);
+    const окно = clamp(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX);
     return this.кеш.get(`${окно}|${tashkentDay(now)}`, async () => this.построить(окно, now, await this.контекст()));
   }
 
@@ -278,7 +278,7 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
   }
 
   private async построить(days: number, now: Date, ctx: ShrinkContext): Promise<ShrinkReport> {
-    const dates = периодДней(зажать(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX), now);
+    const dates = периодДней(clamp(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX), now);
     const from = dates[0]!;
     const to = dates[dates.length - 1]!;
     // Снимки читаем с запасом на допуск: снимок «начала суток» законно стоит
@@ -494,11 +494,11 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     if (староСнимков.length > 0) {
       warnings.push({
         code: "snapshots_stale",
-        message: `${name}: нет снимков у границ суток — пропущены дни ${перечислить(староСнимков)}`,
+        message: `${name}: нет снимков у границ суток — пропущены дни ${listInline(староСнимков)}`,
       });
     }
     if (безПродаж.length > 0) {
-      warnings.push({ code: "no_sales_day", message: `${name}: нет продаж за ${перечислить(безПродаж)} — дни не считались` });
+      warnings.push({ code: "no_sales_day", message: `${name}: нет продаж за ${listInline(безПродаж)} — дни не считались` });
     }
     // «Ни одного посчитанного дня» — это НЕ «недостач нет». Автомат, у
     // которого весь период оказался заливкой (или снимками/продажами без

@@ -42,7 +42,7 @@ describe("Вендинг Core: троттлинг GET /vending/shrinkage (N1)", 
 describe("Вендинг Core: сброс кеша аналитики на правках цен и приёмке (П5b)", () => {
   const контроллер = (vending: Partial<VendingService>) => {
     const сбросов = { count: 0 };
-    const analytics = { invalidate: () => (сбросов.count += 1) } as unknown as AnalyticsService;
+    const analytics = { invalidateReports: () => (сбросов.count += 1) } as unknown as AnalyticsService;
     const c = new VendingController(
       vending as VendingService,
       {} as never,

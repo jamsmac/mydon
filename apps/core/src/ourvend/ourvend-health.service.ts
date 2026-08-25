@@ -1,8 +1,9 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { ourvendSaleSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
 import type { OurvendHealth, OurvendSyncRun } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
+import { ReportCache } from "../vending/report-cache";
 import { failedStreak, STREAK_SCAN_LIMIT } from "../vending/sync-streak";
 import { OurvendParityService } from "./ourvend-parity.service";
 
@@ -25,9 +26,14 @@ import { OurvendParityService } from "./ourvend-parity.service";
  * `null` доезжает до бота и панели как есть, и обе витрины печатают
  * «снимков нет», а не «0 мин».
  *
- * КЕША НЕТ НАМЕРЕННО. Весь смысл отчёта — свежесть; пятиминутный кеш показывал
- * бы лаг пятиминутной давности ровно тогда, когда владелец обновляет страницу,
- * чтобы понять, поднялся ли сбор. От нагрузки защищает троттл на роуте.
+ * КЕШ — МИНУТА, А НЕ ПЯТЬ. Весь смысл отчёта — свежесть, и пятиминутный кеш
+ * показывал бы лаг пятиминутной давности ровно тогда, когда владелец обновляет
+ * страницу, чтобы понять, поднялся ли сбор. Но и без кеша нельзя: внутри —
+ * четыре «последних строки» и ВЕСЬ сырой SQL паритета, а зовут отчёт двое
+ * (`GET /ourvend/health` и недельная сводка) с РАЗНЫМИ счётчиками троттла,
+ * то есть до 24 прогонов паритета в минуту с одного адреса. Сбор ходит раз в
+ * три часа — за минуту здоровье измениться не может, и минута кеша не врёт
+ * ничем, кроме округления лага.
  */
 
 /** Сколько прогонов показываем по умолчанию — ровно столько просят бот и панель. */
@@ -37,11 +43,22 @@ export const HEALTH_RUNS_MAX = 100;
 /** Окно паритета — то же, что у гейта переключения источника учёта (7 зелёных дней). */
 const PARITY_DAYS = 7;
 
+/**
+ * Срок жизни готового отчёта о здоровье — минута (см. шапку модуля).
+ *
+ * Ключ кеша содержит МИНУТУ момента, а не только окно: `now` здесь параметр
+ * (иначе лаг нечем проверить тестом), и ключ без него отдавал бы вызывающему
+ * с другим моментом чужой ответ.
+ */
+export const HEALTH_CACHE_MS = 60_000;
+
 const МИНУТА = 60_000;
 const ЧАС = 3_600_000;
 
 @Injectable()
 export class OurvendHealthService {
+  private readonly кеш = new ReportCache(HEALTH_CACHE_MS);
+
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly parity: OurvendParityService,
@@ -53,7 +70,12 @@ export class OurvendHealthService {
    */
   async health(runs = HEALTH_RUNS_DEFAULT, now = new Date()): Promise<OurvendHealth> {
     const n = зажать(runs);
-    const [прогоны, слоты, продажи, витрина, паритет] = await Promise.all([
+    const минута = Math.floor(now.getTime() / HEALTH_CACHE_MS);
+    return this.кеш.get(`ourvend-health|${n}|${минута}`, () => this.здоровье(n, now));
+  }
+
+  private async здоровье(n: number, now: Date): Promise<OurvendHealth> {
+    const [прогоны, слоты, продажи, витрина, паритет, последнийУспех] = await Promise.all([
       this.db
         .select({
           id: vendingSyncRun.id,
@@ -87,10 +109,21 @@ export class OurvendHealthService {
         .orderBy(desc(productSale.capturedAt))
         .limit(1),
       this.parity.parity(PARITY_DAYS),
+      // Последний УСПЕХ — отдельным запросом, а не поиском в показанных
+      // прогонах: 200 почасовых строк это всего ~8 суток, и после недели
+      // молчания поле стало бы `null`, то есть «сбор не запускался никогда».
+      // Разница между «успеха давно не было» и «успехов не было вовсе»
+      // решает, чинить коллектор или заводить его впервые.
+      this.db
+        .select({ startedAt: vendingSyncRun.startedAt, finishedAt: vendingSyncRun.finishedAt })
+        .from(vendingSyncRun)
+        .where(eq(vendingSyncRun.status, "success"))
+        .orderBy(desc(vendingSyncRun.startedAt))
+        .limit(1),
     ]);
 
     const серия = failedStreak(прогоны);
-    const успех = прогоны.find((r) => r.status === "success");
+    const успех = последнийУспех[0];
 
     return {
       runs: прогоны.slice(0, n).map(строкаПрогона),
@@ -104,6 +137,9 @@ export class OurvendHealthService {
       parity: {
         days: паритет.days,
         ok: паритет.ok,
+        // Сверенных пар ПРОДАЖ — рядом с числом расхождений: без него
+        // «расхождений 0» и «сверять было нечего» выглядят одинаково.
+        checked: паритет.checked,
         mismatches: паритет.mismatches.length,
         stockOk: паритет.stock.ok,
         // СКОЛЬКО ПАР ОСТАТКОВ ВООБЩЕ СРАВНИВАЛОСЬ. Без этого числа

@@ -17,7 +17,7 @@ import {
   Min,
   ValidateNested,
 } from "class-validator";
-import { Type } from "class-transformer";
+import { Transform, Type } from "class-transformer";
 import { Throttle } from "@nestjs/throttler";
 import { AnalyticsService } from "./analytics.service";
 import { RefillEventsService } from "./refill-events.service";
@@ -380,7 +380,12 @@ export class PriceGapDto {
  * отчёт — чтение, и владельцу полезнее письмо, чем 400.
  */
 export class WeeklyDigestDto {
-  @IsOptional() @Matches(/^\d{4}-\d{2}$/, { message: "week — ключ ISO-недели вида 2026-34" })
+  // `@Transform` гасит ПУСТОЕ значение (`?week=`) в «не задано»: документировано
+  // «пусто → предыдущая неделя», а `@IsOptional` пустую строку не пропускает и
+  // отдал бы 400 на ссылку, которую руками собрать легче лёгкого.
+  @IsOptional()
+  @Transform(({ value }) => (value === "" ? undefined : value))
+  @Matches(/^\d{4}-\d{2}$/, { message: "week — ключ ISO-недели вида 2026-34" })
   week?: string;
 }
 
@@ -467,7 +472,7 @@ export class VendingController {
   @Post("orders/receive")
   async receiveOrder(@Body() dto: ReceiveOrderDto) {
     const итог = await this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
-    this.analytics.invalidate();
+    this.analytics.invalidateReports();
     return итог;
   }
 
@@ -503,7 +508,7 @@ export class VendingController {
   @Post("product-price")
   async setProductPrice(@Body() dto: SetProductPriceDto) {
     const итог = await this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
-    if (итог.ok) this.analytics.invalidate();
+    if (итог.ok) this.analytics.invalidateReports();
     return итог;
   }
 
@@ -517,7 +522,7 @@ export class VendingController {
   @Post("sale-price")
   async setSalePrice(@Body() dto: SetSalePriceDto) {
     const итог = await this.vending.setSalePrice(dto.product, dto.price, dto.actor, dto.confirmed);
-    if (итог.ok) this.analytics.invalidate();
+    if (итог.ok) this.analytics.invalidateReports();
     return итог;
   }
 
@@ -525,7 +530,7 @@ export class VendingController {
   @Post("sale-price/bootstrap")
   async bootstrapSalePrice(@Body() dto: BootstrapSalePriceDto) {
     const итог = await this.vending.bootstrapSalePrice(dto.days, dto.actor);
-    if (итог.set.length > 0) this.analytics.invalidate();
+    if (итог.set.length > 0) this.analytics.invalidateReports();
     return итог;
   }
 

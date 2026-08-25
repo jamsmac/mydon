@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Post, Query } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
-import { Type } from "class-transformer";
+import { Transform, Type } from "class-transformer";
 import { IsArray, IsInt, IsOptional, Max, Min } from "class-validator";
 import { OurvendHealthService } from "./ourvend-health.service";
 import { OurvendParityService } from "./ourvend-parity.service";
@@ -25,11 +25,29 @@ export class OurvendSnapshotDto {
  * иначе доехал бы до `limit` в запросе. `@Type(() => Number)` обязателен —
  * в query всё приходит строкой, а `ValidationPipe` включён без
  * `enableImplicitConversion`.
+ *
+ * `@Transform` гасит ПУСТОЕ значение (`?runs=`) в «не задано»: документировано
+ * «пусто → дефолт», а `@IsOptional` пустую строку не пропускает и отдал бы 400
+ * на ссылку, которую руками собрать легче лёгкого.
  */
 export class OurvendHealthDto {
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100)
+  @IsOptional() @Transform(({ value }) => (value === "" ? undefined : value)) @Type(() => Number) @IsInt() @Min(1) @Max(100)
   runs?: number;
 }
+
+/**
+ * Окно сверки учётных дорожек, суток. Потолок 30 — верхняя граница была
+ * НУЖНА: без неё `?days=100000` доезжал до `sql.raw(String(n))` в сыром SQL
+ * паритета, и запрос читал бы всю историю снимков. Гейт переключения источника
+ * учёта живёт на семи днях, месяц — предел осмысленного разбора.
+ */
+export class OurvendParityDto {
+  @IsOptional() @Transform(({ value }) => (value === "" ? undefined : value)) @Type(() => Number) @IsInt() @Min(1) @Max(30)
+  days?: number;
+}
+
+/** Окно сверки по умолчанию — гейт переключения источника учёта (7 зелёных дней). */
+const PARITY_DAYS_DEFAULT = 7;
 
 @Controller("ourvend")
 export class OurvendController {
@@ -52,10 +70,16 @@ export class OurvendController {
     return this.snapshots.status();
   }
 
+  /**
+   * Сверка собственного учётного снапшота с дорожкой mydon-stock.
+   *
+   * Троттл тот же, что у отчётов: внутри — четыре сырых агрегата, и до правки
+   * этот роут был единственным отчётным чтением вообще без лимита.
+   */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
   @Get("parity")
-  parityReport(@Query("days") days?: string) {
-    const n = Number(days);
-    return this.parity.parity(Number.isFinite(n) && n > 0 ? n : 7);
+  parityReport(@Query() dto: OurvendParityDto) {
+    return this.parity.parity(dto.days ?? PARITY_DAYS_DEFAULT);
   }
 
   /**

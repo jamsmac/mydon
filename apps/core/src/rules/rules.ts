@@ -1,4 +1,4 @@
-import { tashkentInstant, TZ, type NotifyUrgency } from "@mydon/shared";
+import { tashkentDay, tashkentInstant, TZ, type NotifyUrgency } from "@mydon/shared";
 
 /**
  * Правила уведомлений (ТЗ FR-2): событие → правило → сообщение.
@@ -62,6 +62,40 @@ function времяТашкента(value: unknown): string {
   if (!at) return "—";
   return at.toLocaleTimeString("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 }
+
+/**
+ * Момент события по Ташкенту С ДАТОЙ, когда он НЕ из сегодняшних суток.
+ *
+ * Сосед `времяТашкента` печатает только часы — и это верно для брифинга «что
+ * было сегодня». Но серия отказов ≥3 при почасовом сборе почти всегда
+ * начинается вчера или раньше: сценарий самой спеки (12 отказов с 24.08,
+ * письмо 25.08) без даты читается как «падает с девяти утра», то есть тревога
+ * выглядит вчетверо младше, чем есть.
+ */
+function моментТашкента(value: unknown): string {
+  const at = tashkentInstant(String(value));
+  if (!at) return "—";
+  const время = at.toLocaleTimeString("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
+  if (tashkentDay(at) === tashkentDay(new Date())) return время;
+  const [, месяц, день] = tashkentDay(at).split("-") as [string, string, string];
+  return `${день}.${месяц} ${время}`;
+}
+
+/**
+ * Потолок длины чужого текста в уведомлении.
+ *
+ * `lastError` приезжает из журнала прогонов, а его пишет коллектор. Сегодня
+ * `SyncFinishDto.error` ограничен 2000 символами и в лимит Telegram (4096)
+ * сообщение укладывается — но запас ровно один: второй писатель
+ * `vending_sync_run.error` даст сообщение длиннее лимита, `sendMessage`
+ * бросит, `ack` не проставится, и тревога будет переотправляться раз в минуту
+ * ВЕЧНО. Триста символов — весь смысл ошибки; хвост стектрейса владельцу не
+ * нужен, он смотрит `/ourvend/health`.
+ */
+const МАКС_ЧУЖОГО_ТЕКСТА = 300;
+
+const обрезать = (текст: string, макс = МАКС_ЧУЖОГО_ТЕКСТА): string =>
+  текст.length <= макс ? текст : `${текст.slice(0, макс)}…`;
 
 /**
  * Счётная форма русского существительного: «3 раза», «12 раз», «21 раз».
@@ -390,8 +424,8 @@ export const RULES: Rule[] = [
     urgency: "immediate",
     format: (c) =>
       `🛑 Сбор OurVend падает ${num(c.payload.streak)} ` +
-      `${счёт(num(c.payload.streak), "раз", "раза", "раз")} подряд с ${времяТашкента(c.payload.since)}: ` +
-      `${str(c.payload.lastError)} — продажи и остатки за эти сутки не приедут`,
+      `${счёт(num(c.payload.streak), "раз", "раза", "раз")} подряд с ${моментТашкента(c.payload.since)}: ` +
+      `${обрезать(str(c.payload.lastError))} — продажи и остатки за эти сутки не приедут`,
   },
 
   // ── Обслуживание оборудования ─────────────────────────────────────────────
@@ -450,6 +484,16 @@ export const RULES: Rule[] = [
 ];
 
 /** Подбирает уведомления под событие. Одно событие может дать несколько. */
+
+/**
+ * Типы событий, на которые вообще заведены правила.
+ *
+ * Нужен ВЫБОРКЕ, а не витрине: `/rules/pending` читает журнал с лимитом, и без
+ * этого фильтра лимит выбирался шумом крона — окно «за 14 суток» на проде
+ * покрывало 37 часов, и никто бы этого не заметил (лента выглядит полной).
+ */
+export const RULE_EVENT_TYPES: string[] = [...new Set(RULES.map((r) => r.eventType))];
+
 export function applyRules(ctx: RuleContext, rules: Rule[] = RULES): Notification[] {
   const out: Notification[] = [];
   for (const rule of rules) {

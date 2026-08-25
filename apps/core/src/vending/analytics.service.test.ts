@@ -17,6 +17,7 @@ import {
 } from "@mydon/db";
 import { tashkentDay } from "@mydon/shared";
 import { AnalyticsService } from "./analytics.service";
+import { ReportCache } from "./report-cache";
 import { SALE_PRICE_FACT_DAYS, VendingService } from "./vending.service";
 
 type SaleRow = { dt: string; machineSerial: string; product: string; qty: string; amount: string };
@@ -386,7 +387,7 @@ describe("Аналитика: себестоимость прогона (R-P5b-2
         },
       ],
     });
-    const { cost, sourceOf, counts } = await s.costIndex(СЕЙЧАС);
+    const { cost, sourceOf } = await s.costIndex(СЕЙЧАС);
 
     assert.equal(cost("Moxito Lime 330ml"), 9000);
     assert.equal(sourceOf("Moxito Lime 330ml"), "orders");
@@ -394,7 +395,6 @@ describe("Аналитика: себестоимость прогона (R-P5b-2
     assert.equal(sourceOf("Lays Сметана-лук"), "price", "признак товарный: одна накладная не переводит на неё весь прайс");
     assert.equal(cost("Товар без цены"), null);
     assert.equal(sourceOf("Товар без цены"), "unknown");
-    assert.deepEqual(counts, { orders: 1, price: 1 });
   });
 
   it("два лота взвешиваются по штукам, а не усредняются по ценам", async () => {
@@ -463,9 +463,14 @@ describe("Аналитика: мёртвый сток (R-P5b-4)", () => {
     assert.equal(r.totalValue, 67_500);
   });
 
-  it("заливка по снимку снимает флаг у ЭТОГО автомата", async () => {
+  it("заливка НЕ снимает флаг с автомата: «доливаем то, что не берут» — и есть мёртвый сток", async () => {
+    // Боевой случай 25.08: Kinder Bueno в American Hospital — 11 шт, последняя
+    // продажа 28.07, слот залит 14.08. Пока заливка считалась движением
+    // автомата, самая дорогая позиция отчёта (121 000 сум, 39 % итога)
+    // исчезала ровно потому, что её долили.
     const s = сервис({
       machineStock: [{ dt: день(0), machineSerial: OLMA, product: "TUC Sour cream", qty: "5" }],
+      products: [товар("p1", "TUC Sour cream", "9000", null)],
       refillEvents: [
         {
           machineSerial: OLMA,
@@ -476,7 +481,29 @@ describe("Аналитика: мёртвый сток (R-P5b-4)", () => {
       entities: ПАРК,
     });
 
-    assert.equal((await s.deadStock(21, СЕЙЧАС)).machines.length, 0);
+    const отчёт = await s.deadStock(21, СЕЙЧАС);
+    assert.deepEqual(
+      отчёт.machines.map((r) => [r.product, r.qty]),
+      [["TUC Sour cream", 5]],
+      "залитая, но не проданная позиция обязана остаться в отчёте",
+    );
+  });
+
+  it("заливка снимает флаг СО СКЛАДА: товар физически уехал с полки", async () => {
+    const s = сервис({
+      stock: [{ productName: "TUC Sour cream", quantity: 40 }],
+      products: [товар("p1", "TUC Sour cream", "9000", null)],
+      refillEvents: [
+        {
+          machineSerial: OLMA,
+          windowTo: момент(день(-5)),
+          slots: [{ product: "TUC Sour cream", delta: 5 }],
+        },
+      ],
+      entities: ПАРК,
+    });
+
+    assert.deepEqual((await s.deadStock(21, СЕЙЧАС)).warehouse, [], "склад отдал товар — это движение");
   });
 
   it("движение: склад — глобально, автомат — по паре (автомат, товар)", async () => {
@@ -711,8 +738,23 @@ describe("Аналитика: цены и витрина (R-P5b-5, R-P5b-6)", ()
     await s.priceGap(14, СЕЙЧАС);
     assert.equal(s.счётчик.select, было);
 
-    s.invalidate();
+    s.invalidateReports();
     await s.priceGap(14, СЕЙЧАС);
-    assert.ok(s.счётчик.select > было, "после invalidate() отчёт обязан пойти в базу заново");
+    assert.ok(s.счётчик.select > было, "после invalidateReports() отчёт обязан пойти в базу заново");
+  });
+
+  it("сброс гасит и присоединённый кеш смежного отчёта — сводка не живёт своей жизнью", async () => {
+    const s = сервис({ sales: ЛАЙМОН, products: [товар("p1", "LaimonFresh Lime 330ml", "9000", null)], entities: ПАРК });
+    const смежный = new ReportCache();
+    s.attachCache(смежный);
+
+    let расчётов = 0;
+    await смежный.get("weekly-digest|2026-34", async () => (расчётов += 1));
+    await смежный.get("weekly-digest|2026-34", async () => (расчётов += 1));
+    assert.equal(расчётов, 1, "кеш смежного отчёта работает");
+
+    s.invalidateReports();
+    await смежный.get("weekly-digest|2026-34", async () => (расчётов += 1));
+    assert.equal(расчётов, 2, "правка данных обязана гасить ОБА кеша, иначе два ответа на один вопрос");
   });
 });

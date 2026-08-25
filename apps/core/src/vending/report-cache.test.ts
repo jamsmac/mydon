@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ReportCache, зажать, перечислить } from "./report-cache";
+import { ReportCache, REPORT_CACHE_MAX_ENTRIES, REPORT_CACHE_MS, clamp, listInline } from "./report-cache";
 
 describe("Кеш отчётов вендинга: один расчёт на ключ", () => {
   it("второй запрос того же ключа расчёт не запускает, другой ключ — запускает", async () => {
@@ -80,20 +80,49 @@ describe("Кеш отчётов вендинга: один расчёт на к�
 
     assert.equal(кеш.size, 1, "ключи чужих суток обязаны уходить, а не копиться");
   });
+
+  it("потолок записей: свежие ключи карту не растят — TTL ограничивает возраст, а не число", async () => {
+    const кеш = new ReportCache();
+    // Ровно эксплойт из ревью безопасности: `?week=` даёт полмиллиона годных
+    // ключей, и каждый — свежая запись в кеше. TTL тут не спасает никак.
+    for (let i = 0; i < REPORT_CACHE_MAX_ENTRIES * 3; i += 1) {
+      await кеш.get(`weekly-digest|неделя-${i}`, async () => i);
+    }
+    assert.equal(кеш.size, REPORT_CACHE_MAX_ENTRIES);
+  });
+
+  it("вытесняется САМЫЙ ДАВНО НЕ СПРОШЕННЫЙ ключ, а не самый старый по вставке", async () => {
+    const кеш = new ReportCache(REPORT_CACHE_MS, 3);
+    let расчётов = 0;
+    const считать = async () => (расчётов += 1);
+
+    await кеш.get("a", считать);
+    await кеш.get("b", считать);
+    // «a» спрашивают снова — он ходовой и уходить не должен, хотя лёг первым.
+    await кеш.get("a", считать);
+    await кеш.get("c", считать);
+    await кеш.get("d", считать); // четвёртый ключ при потолке 3 — кого-то выселит
+    assert.equal(расчётов, 4, "четыре разных ключа — четыре расчёта");
+
+    assert.equal(кеш.size, 3);
+    await кеш.get("a", считать);
+    assert.equal(расчётов, 4, "ходовой ключ остался в кеше");
+    assert.equal(await кеш.get("b", считать), 5, "давно не спрошенный «b» вытеснен и считается заново");
+  });
 });
 
 describe("Кеш отчётов: общие мелочи витрин", () => {
-  it("зажать: мусор и ноль дают дефолт, слишком большое — потолок", () => {
-    assert.equal(зажать(Number.NaN, 30, 90), 30);
-    assert.equal(зажать(0, 30, 90), 30);
-    assert.equal(зажать(-5, 30, 90), 30);
-    assert.equal(зажать(45.9, 30, 90), 45);
-    assert.equal(зажать(5000, 30, 90), 90);
+  it("clamp: мусор и ноль дают дефолт, слишком большое — потолок", () => {
+    assert.equal(clamp(Number.NaN, 30, 90), 30);
+    assert.equal(clamp(0, 30, 90), 30);
+    assert.equal(clamp(-5, 30, 90), 30);
+    assert.equal(clamp(45.9, 30, 90), 45);
+    assert.equal(clamp(5000, 30, 90), 90);
   });
 
-  it("перечислить: пять имён целиком, дальше — числом", () => {
-    assert.equal(перечислить(["а", "б"]), "а, б");
-    assert.equal(перечислить(["а", "б", "в", "г", "д"]), "а, б, в, г, д");
-    assert.equal(перечислить(["а", "б", "в", "г", "д", "е", "ж"]), "а, б, в, г, д и ещё 2");
+  it("listInline: пять имён целиком, дальше — числом", () => {
+    assert.equal(listInline(["а", "б"]), "а, б");
+    assert.equal(listInline(["а", "б", "в", "г", "д"]), "а, б, в, г, д");
+    assert.equal(listInline(["а", "б", "в", "г", "д", "е", "ж"]), "а, б, в, г, д и ещё 2");
   });
 });

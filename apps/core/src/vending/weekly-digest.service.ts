@@ -18,6 +18,7 @@ import {
 import { DB, type Db } from "../db/db.module";
 import { OurvendHealthService } from "../ourvend/ourvend-health.service";
 import { AnalyticsService } from "./analytics.service";
+import { parseOrderPositions } from "./vending.service";
 import { ReportCache } from "./report-cache";
 
 /**
@@ -105,7 +106,7 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
   slotsLagMin: null,
   salesLagH: null,
   productSaleLagH: null,
-  parity: { days: 0, ok: false, mismatches: 0, stockOk: false, stockChecked: 0, note: "здоровье сбора не посчиталось" },
+  parity: { days: 0, ok: false, checked: 0, mismatches: 0, stockOk: false, stockChecked: 0, note: "здоровье сбора не посчиталось" },
 };
 
 @Injectable()
@@ -117,7 +118,13 @@ export class WeeklyDigestService {
     @Inject(DB) private readonly db: Db,
     private readonly analytics: AnalyticsService,
     private readonly health: OurvendHealthService,
-  ) {}
+  ) {
+    // Сводка считает ТЕ ЖЕ числа, что отчёты аналитики, и обязана гаснуть
+    // вместе с ними: иначе правка цены обновляла бы `/vending/margin`, а
+    // `/vending/weekly-digest` до пяти минут отдавал бы прежние — два ответа
+    // Core на один вопрос (R-P5b-10).
+    this.analytics.attachCache(this.кеш);
+  }
 
   /**
    * Сводка недели. Пусто → ПРЕДЫДУЩАЯ ISO-неделя по Ташкенту: письмо уходит
@@ -254,17 +261,14 @@ export class WeeklyDigestService {
     let units = 0;
     let amount = 0;
     for (const н of накладные) {
-      for (const p of Array.isArray(н.positions) ? н.positions : []) {
-        const поз = (p ?? {}) as { order?: unknown; price?: unknown };
-        // `order` — сколько заказали и сколько зачисляет приёмка: та же
-        // колонка, по которой считает себестоимость `AnalyticsService`.
-        const qty = typeof поз.order === "number" && Number.isFinite(поз.order) ? Math.trunc(поз.order) : 0;
-        if (qty <= 0) continue;
-        units += qty;
+      // Разбор — общий `parseOrderPositions`: свой давал ДРУГОЙ гейт цены
+      // (любое число > 0 против потолка в 10 млн у аналитики), и мусорная
+      // позиция попадала в деньги письма, но не в себестоимость отчёта.
+      for (const поз of parseOrderPositions(н.positions)) {
+        units += поз.qty;
         // Позиция без цены прибавляет ШТУКИ, но не деньги: ноль — это «цену не
         // вписали», а не «привезли даром» (R-P5b-2).
-        const price = typeof поз.price === "number" && Number.isFinite(поз.price) && поз.price > 0 ? поз.price : 0;
-        amount += price * qty;
+        amount += (поз.price ?? 0) * поз.qty;
       }
     }
 

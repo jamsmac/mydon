@@ -57,6 +57,27 @@ function healthDb(м: Мир) {
             ? (м.productSales ?? [])
             : [];
 
+  /** Значения-параметры из условия drizzle: стабу надо увидеть `status = 'success'`. */
+  const параметры = (cond: unknown): unknown[] => {
+    const out: unknown[] = [];
+    const walk = (n: unknown): void => {
+      if (!n || typeof n !== "object") return;
+      if (Array.isArray(n)) {
+        for (const x of n) walk(x);
+        return;
+      }
+      const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
+      if (Array.isArray(chunks)) {
+        for (const c of chunks) walk(c);
+        return;
+      }
+      const v = (n as { value?: unknown }).value;
+      if (typeof v === "string" || typeof v === "number") out.push(v);
+    };
+    walk(cond);
+    return out;
+  };
+
   const счётчик = { select: 0 };
   const db = {
     select: () => ({
@@ -64,7 +85,16 @@ function healthDb(м: Мир) {
         счётчик.select += 1;
         let текущие = rowsOf(t);
         const chain: Record<string, unknown> = {};
-        chain.where = () => chain;
+        // `where(eq(status, 'success'))` обязан ФИЛЬТРОВАТЬ: иначе «последний
+        // успех» брался бы из последней строки журнала любого статуса, и
+        // отдельный запрос проверялся бы как несуществующий.
+        chain.where = (cond?: unknown) => {
+          const статусы = параметры(cond).filter((v): v is string => typeof v === "string");
+          if (t === vendingSyncRun && статусы.length > 0) {
+            текущие = (текущие as Прогон[]).filter((r) => статусы.includes(r.status));
+          }
+          return chain;
+        };
         chain.orderBy = () => {
           текущие = [...текущие].sort((a, b) => время(t, b) - время(t, a));
           return chain;
@@ -176,12 +206,43 @@ describe("Здоровье сбора (R-P5b-8)", () => {
       [7, false, 1, false],
     );
     assert.equal(h.parity.note, "остатки: снимков остатков OurVend за период нет");
-    assert.equal(h.parity.stockChecked, 0, "«сверять не по чему» обязано отличаться от «сверили и сошлось»");
+    assert.deepEqual(
+      [h.parity.checked, h.parity.stockChecked],
+      [14, 0],
+      "«сверять не по чему» обязано отличаться от «сверили и сошлось» — числом, а не текстом примечания",
+    );
   });
 
   it("сверенных пар остатков столько же, сколько насчитал паритет", async () => {
     const h = await сервис({}).health(20, СЕЙЧАС);
-    assert.deepEqual([h.parity.stockOk, h.parity.stockChecked], [true, 14]);
+    assert.deepEqual([h.parity.stockOk, h.parity.stockChecked, h.parity.checked], [true, 14, 14]);
+  });
+
+  it("последний успех НЕ теряется за окном показанных прогонов", async () => {
+    // 250 почасовых отказов — это больше, чем читает счёт серии (200 строк).
+    // Успех старше окна обязан найтись отдельным запросом, иначе поле станет
+    // `null`, а бот напечатает «успехов не было», то есть «сбор не заводили».
+    const успех = УСПЕХ("старый", "2026-08-01T00:00:00Z");
+    const отказы = Array.from({ length: 250 }, (_, i) =>
+      ОТКАЗ(`f${i}`, new Date(Date.parse("2026-08-25T06:00:00Z") - i * 3_600_000).toISOString()),
+    );
+    const h = await сервис({ runs: [...отказы, успех] }).health(20, СЕЙЧАС);
+
+    assert.equal(h.failedStreak, 200, "серия считается по окну сканирования STREAK_SCAN_LIMIT");
+    assert.equal(h.lastSuccessAt, "2026-08-01T00:00:00.000Z", "«успеха давно не было» ≠ «успехов не было вовсе»");
+  });
+
+  it("кеш минуты: повторный запрос в ту же минуту базу не трогает, следующая — трогает", async () => {
+    const { db, parity, счётчик } = healthDb({ runs: [УСПЕХ("r1", "2026-08-25T06:00:00Z")] });
+    const svc = new OurvendHealthService(db, parity);
+
+    await svc.health(20, СЕЙЧАС);
+    const было = счётчик.select;
+    await svc.health(20, СЕЙЧАС);
+    assert.equal(счётчик.select, было, "внутри минуты здоровье измениться не может — сбор ходит раз в три часа");
+
+    await svc.health(20, new Date(СЕЙЧАС.getTime() + 61_000));
+    assert.ok(счётчик.select > было, "в следующую минуту отчёт обязан пересчитаться: весь его смысл — свежесть");
   });
 
   it("мусорное число прогонов не роняет запрос и не читает всю таблицу", async () => {

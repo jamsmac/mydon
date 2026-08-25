@@ -180,7 +180,7 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   slotsLagMin: 42,
   salesLagH: 27,
   productSaleLagH: 27,
-  parity: { days: 7, ok: false, mismatches: 3, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
+  parity: { days: 7, ok: false, checked: 14, mismatches: 3, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
 };
 
 const сервис = (м: Мир, здоровьеПадает = false) => {

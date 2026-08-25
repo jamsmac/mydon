@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
-import { and, desc, eq, gte, inArray, lte, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
 import {
   approval,
   auditLog,
@@ -411,6 +411,53 @@ export function notInServiceSerialForms(notInService: Iterable<string>): string[
  * над объявлением в shared.
  */
 export { SALE_PRICE_FACT_DAYS };
+
+/**
+ * Потолок «цены» в позиции накладной, сум за единицу.
+ *
+ * `positions` лежит в jsonb без схемы: туда приезжает то, что собрал план
+ * закупа, и один промах на клавиатуре («1300000» вместо «13000») уводит
+ * себестоимость всей маржи. Десять миллионов за единицу снека — заведомо
+ * мусор, и такая позиция честнее без цены, чем с выдуманной.
+ */
+export const MAX_POSITION_PRICE = 10_000_000;
+
+/** Позиция накладной, уже проверенная: имя, штуки и цена или «цены нет». */
+export interface OrderPosition {
+  product: string;
+  qty: number;
+  /** `null` — цены НЕТ (ноль, мусор, заоблачное число), а не «привезли даром». */
+  price: number | null;
+}
+
+/**
+ * Позиции накладной из jsonb — ОДИН разбор на весь Core.
+ *
+ * Разборов было три (приёмка, себестоимость аналитики, приходы недельной
+ * сводки), и гейт цены у них уже разъехался: сводка принимала любое число
+ * `> 0`, аналитика отсекала `> 10 000 000`. Мусорная позиция попадала в
+ * `intake.amount` письма, но не в себестоимость отчёта — два числа Core об
+ * одной накладной (R-P5b-10).
+ *
+ * `order` — сколько ЗАКАЗАЛИ: та же колонка, по которой приёмка зачисляет
+ * склад, и по ней же считается себестоимость. Позиция без имени или без штук
+ * не зачисляется приёмкой ни на склад, ни в деньги — и здесь пропускается по
+ * той же причине, а не «на всякий случай».
+ */
+export function parseOrderPositions(positions: unknown): OrderPosition[] {
+  const out: OrderPosition[] = [];
+  for (const p of Array.isArray(positions) ? positions : []) {
+    const pos = (p ?? {}) as { product?: unknown; order?: unknown; price?: unknown };
+    const product = typeof pos.product === "string" ? pos.product.trim() : "";
+    const qty = typeof pos.order === "number" && Number.isFinite(pos.order) ? Math.trunc(pos.order) : 0;
+    if (!product || qty <= 0) continue;
+    const raw = pos.price;
+    const price =
+      typeof raw === "number" && Number.isFinite(raw) && raw > 0 && raw <= MAX_POSITION_PRICE ? raw : null;
+    out.push({ product, qty, price });
+  }
+  return out;
+}
 
 /** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
 export interface PlanMachine {
@@ -2617,6 +2664,19 @@ export class VendingService {
    * спрос. Товар без продаж в окне пропускаем ИМЕНЕМ, а не молча: молчание
    * читается как «эталон проставлен», и разрыв витрины по такому товару
    * никогда бы не всплыл.
+   *
+   * «НЕ ТРОГАЕМ» ПРОВЕРЯЕТ БАЗА, А НЕ ПАМЯТЬ. Прайс читается ДО факта витрины,
+   * а факт — это полное чтение продаж окна: между ними сотни миллисекунд, и в
+   * них умещается команда владельца «цена продажи TUC 15000». Условие
+   * `sale_price is null` стоит в самом `UPDATE`, а `set[]` собирается из
+   * `returning()` — то есть из строк, которые база РЕАЛЬНО обновила. Иначе
+   * бутстрап рапортовал бы «проставлено» о решении владельца, которое он же и
+   * затёр фактом витрины.
+   *
+   * ОДНА КРИВАЯ ЦЕНА НЕ РОНЯЕТ ВЕСЬ ПРОГОН. `CHECK (sale_price > 0)` из
+   * миграции 0068 отвергает ноль, и «бесплатная» продажа (`amount = 0` при
+   * `qty > 0`) без проверки уронила бы транзакцию целиком — вместе с полусотней
+   * законных эталонов. Такой товар уходит в `skipped` причиной `no_fact`.
    */
   async bootstrapSalePrice(days = SALE_PRICE_FACT_DAYS, actor = "owner"): Promise<BootstrapSalePriceResult> {
     const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
@@ -2625,7 +2685,7 @@ export class VendingService {
 
     const set: BootstrapSalePriceResult["set"] = [];
     const skipped: BootstrapSalePriceResult["skipped"] = [];
-    const писать: { id: string; name: string; price: number }[] = [];
+    const кандидаты: { id: string; name: string; price: number; qty: number }[] = [];
     // Обходим прайс в его собственном порядке: `set` и `skipped` — это отчёт о
     // прогоне, а не витрина. Как их показать (сгруппировать, отсортировать) —
     // решает тот, кто печатает список владельцу.
@@ -2643,30 +2703,44 @@ export class VendingService {
         skipped.push({ product: p.name, reason: "no_sales" });
         continue;
       }
-      set.push({ product: p.name, price: fact.price, qty: fact.qty });
-      писать.push({ id: p.id, name: p.name, price: fact.price });
+      if (!Number.isFinite(fact.price) || fact.price <= 0) {
+        skipped.push({ product: p.name, reason: "no_fact" });
+        continue;
+      }
+      кандидаты.push({ id: p.id, name: p.name, price: fact.price, qty: fact.qty });
     }
 
     // Пустой бутстрап транзакцию не открывает: повторный вызов после первого
     // прогона — норма, и он не должен оставлять следа в журнале.
-    if (писать.length > 0) {
+    if (кандидаты.length > 0) {
       await this.db.transaction(async (tx) => {
+        const записанные: typeof кандидаты = [];
         // UPDATE — по одному на товар (у каждого своя цена), а события и
         // журнал — ОДНОЙ пачкой. На полусотне товаров раздельные вставки
         // давали бы полторы сотни round-trip'ов под одной транзакцией,
         // державшей блокировки строк прайса всё это время.
-        for (const item of писать) {
-          await tx.update(vendingProduct).set({ salePrice: item.price.toFixed(2) }).where(eq(vendingProduct.id, item.id));
+        for (const item of кандидаты) {
+          const обновлено = await tx
+            .update(vendingProduct)
+            .set({ salePrice: item.price.toFixed(2) })
+            .where(and(eq(vendingProduct.id, item.id), isNull(vendingProduct.salePrice)))
+            .returning({ id: vendingProduct.id });
+          // Пусто — значит эталон появился между чтением прайса и этой
+          // строкой. Это решение владельца, и оно старше нашего факта.
+          if (обновлено.length === 0) skipped.push({ product: item.name, reason: "already_set" });
+          else записанные.push(item);
         }
+        if (записанные.length === 0) return;
+        set.push(...записанные.map((item) => ({ product: item.name, price: item.price, qty: item.qty })));
         await tx.insert(event).values(
-          писать.map((item) => ({
+          записанные.map((item) => ({
             source: "owner",
             type: "vending.sale_price_changed",
             payload: { product: item.name, oldPrice: null, newPrice: item.price, actor },
           })),
         );
         await tx.insert(auditLog).values(
-          писать.map((item) => ({
+          записанные.map((item) => ({
             actorKind: "human" as const,
             actorRef: actor,
             action: "vending.product.set_sale_price",

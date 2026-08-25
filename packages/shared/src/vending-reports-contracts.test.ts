@@ -32,7 +32,7 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   slotsLagMin: 42,
   salesLagH: 3,
   productSaleLagH: 5,
-  parity: { days: 7, ok: true, mismatches: 0, stockOk: true, stockChecked: 24, note: null },
+  parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, note: null },
 };
 
 const СВОДКА: WeeklyDigest = {
@@ -71,6 +71,7 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "slotsLagMin",
     ]);
     assert.deepEqual(Object.keys(ЗДОРОВЬЕ.parity).sort(), [
+      "checked",
       "days",
       "mismatches",
       "note",
@@ -123,10 +124,12 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
   it("паритет без единой сверенной пары говорит это числом, а не «расхождений 0»", () => {
     const пусто: OurvendHealth = {
       ...ЗДОРОВЬЕ,
-      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
+      parity: { days: 7, ok: false, checked: 14, mismatches: 0, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
     };
-    // Ровно боевой случай 25.08: расхождений ноль, а сверять было не по чему.
+    // Ровно боевой случай 25.08: продажи сошлись 14 парами, а остатки сверять
+    // было не по чему — и это ДВА разных числа, а не одно «❌ расхождений 0».
     assert.equal(пусто.parity.mismatches, 0);
+    assert.equal(пусто.parity.checked, 14);
     assert.equal(пусто.parity.stockChecked, 0);
     assert.notEqual(пусто.parity.note, null);
   });

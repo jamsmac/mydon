@@ -36,6 +36,21 @@ const nonNegNumber = (v: string): string | null => {
   return Number.isFinite(n) && n >= 0 ? null : "нужно неотрицательное число (например 5)";
 };
 
+/**
+ * Строго положительное число — для ОКОН, а не для порогов.
+ *
+ * Ноль законен там, где он означает «показывай всё» (порог в процентах или в
+ * сумах). У окна в сутках такого смысла нет и быть не может: `DEAD_STOCK_DAYS=0`
+ * молча уходит в дефолт 21 (`clamp` в `report-cache.ts`), `COST_WINDOW_DAYS=0` —
+ * в единицу (`Math.max(1, …)` в `analytics.service.ts`). Панель при этом
+ * говорит «сохранено», а отчёт считается по ДРУГОМУ числу — ровно тот баг,
+ * который чинил `readIntSetting`.
+ */
+const posNumber = (v: string): string | null => {
+  const n = Number(v.replace(",", "."));
+  return Number.isFinite(n) && n >= 1 ? null : "нужно число от 1 (окно в сутках; ноль не значит «без окна»)";
+};
+
 const urlOrEmpty = (v: string): string | null =>
   /^https?:\/\/\S+$/.test(v) ? null : "нужен URL вида http(s)://host:port";
 
@@ -160,14 +175,15 @@ export const CONFIG_SPECS: ConfigSpec[] = [
   },
   // ── Вендинг: аналитика (П5b) ──
   // Пороги отчётов — решение владельца, а не константа в сервисе (R-P5b-11).
-  // Ноль здесь законен: им владелец говорит «показывай всё», и это дешевле,
-  // чем правка кода ради одного прогона.
+  // Ноль законен У ПОРОГОВ В ПРОЦЕНТАХ: им владелец говорит «показывай всё», и
+  // это дешевле, чем правка кода ради одного прогона. У ОКОН В СУТКАХ ноль
+  // законным не был никогда — см. `posNumber`.
   {
     key: "DEAD_STOCK_DAYS",
     label: "Вендинг: окно мёртвого стока, дней",
     kind: "number",
     fallback: "21",
-    validate: nonNegNumber,
+    validate: posNumber,
   },
   {
     key: "PRICE_CHANGE_PCT",
@@ -189,7 +205,7 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     kind: "number",
     fallback: "90",
     help: "Донор mydon-stock: 90 дней по принятым накладным",
-    validate: nonNegNumber,
+    validate: posNumber,
   },
   {
     key: "MARGIN_LOW_PCT",

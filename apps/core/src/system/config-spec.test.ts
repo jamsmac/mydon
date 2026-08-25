@@ -36,6 +36,24 @@ describe("config-spec: белый список тумблеров", () => {
     assert.match(validateConfig("VENDING_ROUTE_ORDER", "c2508160376") ?? "", /серийники/);
     assert.match(validateConfig("VENDING_ROUTE_ORDER", "abc") ?? "", /серийники/);
     assert.match(validateConfig("VENDING_ROUTE_ORDER", "2508160376,,2508160359") ?? "", /серийники/);
+  });
+
+  it("окна аналитики не принимают ноль, пороги в процентах — принимают", () => {
+    // `DEAD_STOCK_DAYS=0` уходит в дефолт 21 (`clamp`), `COST_WINDOW_DAYS=0` —
+    // в единицу (`Math.max(1, …)`): панель сказала бы «сохранено», а отчёт
+    // посчитался бы по другому числу.
+    assert.match(validateConfig("DEAD_STOCK_DAYS", "0") ?? "", /от 1/);
+    assert.match(validateConfig("COST_WINDOW_DAYS", "0") ?? "", /от 1/);
+    assert.match(validateConfig("DEAD_STOCK_DAYS", "-3") ?? "", /от 1/);
+    assert.equal(validateConfig("DEAD_STOCK_DAYS", "21"), null);
+    assert.equal(validateConfig("COST_WINDOW_DAYS", "90"), null);
+    // Пустое — это сброс к env/дефолту, оно допустимо всегда.
+    assert.equal(validateConfig("DEAD_STOCK_DAYS", ""), null);
+
+    // А вот у порогов в процентах ноль — законное «показывай всё».
+    for (const key of ["PRICE_CHANGE_PCT", "PRICE_GAP_PCT", "MARGIN_LOW_PCT"]) {
+      assert.equal(validateConfig(key, "0"), null, `${key}: ноль обязан приниматься`);
+    }
     // Пусто — сброс настройки (порядок по имени), это допустимо всегда.
     assert.equal(validateConfig("VENDING_ROUTE_ORDER", ""), null);
   });
@@ -52,20 +70,23 @@ describe("config-spec: белый список тумблеров", () => {
 
 /**
  * Пороги аналитики снек-контура — настройки владельца, а не константы кода
- * (R-P5b-11). Ноль здесь — законное значение: «показывай любую маржу» и
- * «любой разрыв витрины» владелец включает нулём, а не правкой сервиса.
+ * (R-P5b-11). Ноль — законное значение У ПОРОГОВ В ПРОЦЕНТАХ: «показывай любую
+ * маржу» и «любой разрыв витрины» владелец включает нулём, а не правкой
+ * сервиса. У ОКОН В СУТКАХ ноль смысла не имеет и молча уходил бы в другое
+ * число (см. `posNumber` в `config-spec.ts`).
  */
 describe("Ключи аналитики П5b (R-P5b-11)", () => {
-  for (const [key, fallback] of [
-    ["DEAD_STOCK_DAYS", "21"],
-    ["PRICE_CHANGE_PCT", "5"],
-    ["PRICE_GAP_PCT", "5"],
-    ["COST_WINDOW_DAYS", "90"],
-    ["MARGIN_LOW_PCT", "15"],
+  for (const [key, fallback, нольЗаконен] of [
+    ["DEAD_STOCK_DAYS", "21", false],
+    ["PRICE_CHANGE_PCT", "5", true],
+    ["PRICE_GAP_PCT", "5", true],
+    ["COST_WINDOW_DAYS", "90", false],
+    ["MARGIN_LOW_PCT", "15", true],
   ] as const) {
     it(`${key}: в белом списке, дефолт ${fallback}, отрицательное отвергается`, () => {
       assert.equal(specFor(key)?.fallback, fallback);
-      assert.equal(validateConfig(key, "0"), null); // ноль — значение владельца, не мусор
+      if (нольЗаконен) assert.equal(validateConfig(key, "0"), null); // ноль — значение владельца, не мусор
+      else assert.ok(validateConfig(key, "0"), "нулевое окно молча уехало бы в другое число");
       assert.ok(validateConfig(key, "-1"));
       assert.ok(validateConfig(key, "двадцать"));
     });
