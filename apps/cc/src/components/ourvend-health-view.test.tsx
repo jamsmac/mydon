@@ -162,6 +162,16 @@ describe("Здоровье сбора: застой сбора (R-P8a-6)", () =>
     expect(screen.queryByText(/сбор стоит/)).toBeNull();
   });
 
+  it("F2: ровно на пороге — уже тревога (≥, а не >)", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВЬЕ, staleHours: 6, staleThresholdH: 6, failedStreak: 0 }} />);
+    expect(screen.getByText(/сбор стоит 6 ч/)).toBeInTheDocument();
+  });
+
+  it("F2: чуть ниже порога — бейджа ещё нет", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВЬЕ, staleHours: 5.9, staleThresholdH: 6, failedStreak: 0 }} />);
+    expect(screen.queryByText(/сбор стоит/)).toBeNull();
+  });
+
   it("успешных прогонов не было ни разу — тоже застой, своим текстом", () => {
     render(<OurvendHealthCard health={{ ...ЗДОРОВ, staleHours: null, staleThresholdH: 6 }} />);
     expect(screen.getByText("тревога")).toBeInTheDocument();

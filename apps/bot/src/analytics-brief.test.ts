@@ -509,9 +509,40 @@ describe("«сверка»: застой сбора (R-P8a-6)", () => {
     assert.match(строкаЗастоя(h({ staleHours: null, lastSuccessAt: null }))!, /успешных прогонов не было/);
   });
 
-  it("строка стоит в ответе «сверки» сразу после состояния сбора", () => {
+  it("строка стоит в ответе «сверки» первой, до состояния сбора", () => {
     const [первое] = formatOurvendHealth(h({ staleHours: 9 }));
     assert.match(первое!, /⛔ сбор стоит 9 ч/);
+  });
+
+  it("F1: failedStreak 0 + застой — «✅ Отказов подряд нет» не печатается", () => {
+    // Крон вообще перестал ЗАПУСКАТЬСЯ (не падает — молчит): последний
+    // ЗАПИСАННЫЙ прогон был успешным, `failedStreak` навсегда 0, а
+    // `staleHours` растёт. Зелёная галка рядом с «⛔ сбор стоит» — ровно та
+    // «нули как всё хорошо», против которой уже есть защита для отказов в
+    // окне (см. тест «отказы в окне не прячутся»), но не было для застоя.
+    const успешныеПрогоны: OurvendHealth["runs"] = [
+      {
+        id: "r1",
+        startedAt: "2026-08-23T03:00:00Z",
+        finishedAt: "2026-08-23T03:02:00Z",
+        status: "success",
+        machinesTotal: 2,
+        machinesOk: 2,
+        durationMs: 120_000,
+        error: null,
+      },
+    ];
+    const молчащийКрон = h({ runs: успешныеПрогоны, failedStreak: 0, staleHours: 9, staleThresholdH: 6 });
+    assert.doesNotMatch(состояниеСбора(молчащийКрон), /^✅ Отказов подряд нет$/);
+    const t = formatOurvendHealth(молчащийКрон).join("\n");
+    assert.match(t, /⛔ сбор стоит 9 ч/);
+    assert.ok(!t.includes("✅ Отказов подряд нет"), "рядом с ⛔ не должно быть противоречащей зелёной галки");
+  });
+
+  it("F1: failedStreak > 0 + застой — оба сигнала видны разом", () => {
+    const t = formatOurvendHealth(h({ staleHours: 9, staleThresholdH: 6 })).join("\n");
+    assert.match(t, /⛔ сбор стоит 9 ч/);
+    assert.match(t, /❌ 12 отказов подряд/);
   });
 });
 
