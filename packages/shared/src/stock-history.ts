@@ -11,17 +11,28 @@ import { normalizeProductName } from "./vending-calc";
  * знает — зависимость односторонняя, поэтому формы вставки объявлены здесь
  * руками, а не выведены из drizzle-схемы.
  *
- * ТРИ РЕШЕНИЯ, КОТОРЫЕ НЕЛЬЗЯ «УПРОСТИТЬ» (инвентаризация донора 25.08):
+ * ЧЕТЫРЕ РЕШЕНИЯ, КОТОРЫЕ НЕЛЬЗЯ «УПРОСТИТЬ» (инвентаризация донора 25.08):
  *
- * 1. СОПОСТАВЛЕНИЕ ИМЁН — ТОЛЬКО ТОЧНОЕ. Каталог донора ≠ канон mydon: 62
- *    карточки, из них 13 помечены `[слит→N]`, два имени лежат HTML-мусором
- *    (`M&amp;Ms`, `O&#39;zbegim`), 14 имён истории вообще не имеют пары в
- *    каталоге OurVend. Соблазн добить их нечётким сравнением здесь не
- *    реализован намеренно: в списке несопоставленных стоят `Moxito Mango CAN
- *    0.45` и `Laimon Mango CAN 0.33` — любое сравнение «по похожести» склеит
- *    330 мл с 450 мл и навсегда испортит историю (`inventory-donor.md` §4.3).
- *    Не разрешилось — едет сырым именем, `product_id` остаётся NULL, строка
- *    попадает в отчёт (R-P8a-7). Ошибка, которую видно, лучше догадки.
+ * 1. СОПОСТАВЛЕНИЕ ИМЁН — ТОЛЬКО ТОЧНОЕ, НО ПО ДВУМ КЛЮЧАМ (R-FW-P1). Каталог
+ *    донора ≠ канон mydon: 62 карточки, из них 13 помечены `[слит→N]`, два
+ *    имени лежат HTML-мусором (`M&amp;Ms`, `O&#39;zbegim`). Одного
+ *    `products.name` мало: по нему не разрешались 24 имени — 243 строки из 567,
+ *    43 % переноса, — хотя мост в каталог у донора есть и он точный:
+ *    `products.ourvend_name` (`inventory-donor.md` §1). Поэтому имя ищется
+ *    дважды: сначала донорское, потом `ourvend_name`. Так 13 имён (228 строк)
+ *    находят карточку алиасом владельца (`Coca Cola CAN 0.25` → `CocaCola
+ *    Classic CAN 250ml` → `Coca-Cola Classic CAN 0,25`), и без карточки
+ *    остаются 11 имён / 15 строк.
+ *
+ *    Нечёткого сравнения нет ни на одном шаге: в остатке стоят `Moxito Mango
+ *    CAN 0.45` и `Laimon Mango CAN 0.33` — сравнение «по похожести» склеило бы
+ *    330 мл с 450 мл и навсегда испортило историю (`inventory-donor.md` §4.3).
+ *    То, что владелец сам свёл `Flash can 0.33` к `Flash Up Energy CAN 0,45`
+ *    (и `Plus 18 can 0.33` так же), — ЕГО решение, записанное алиасом в
+ *    каталоге и действующее в продажах OurVend, а не наша догадка по буквам.
+ *    Не разрешилось — едет сырое ДОНОРСКОЕ имя (владелец видит в панели его, а
+ *    не вендорское написание), `product_id` остаётся NULL, строка попадает в
+ *    отчёт (R-P8a-7). Ошибка, которую видно, лучше догадки.
  *
  * 2. ДЕДУПЫ ПО ЕСТЕСТВЕННОМУ КЛЮЧУ НЕТ. У донора 7 групп заливов и 5 групп
  *    инвентаризаций совпадают по (дата, товар, аппарат, qty). Это не грязь
@@ -38,13 +49,40 @@ import { normalizeProductName } from "./vending-calc";
  *    VendCash (сдвиг −5 ч чинили миграцией). Полдень переживает любой такой
  *    сдвиг, оставаясь в тех же сутках, поэтому момент собирается явно:
  *    `dt 12:00 +05` через `tashkentInstant`, без второй копии смещения.
+ *
+ * 4. НЕГОДНАЯ СТРОКА ОТКАЗЫВАЕТСЯ ПОИМЁННО, А НЕ РОНЯЕТ ПАЧКУ (R-FW-S2). Донор
+ *    — чужая база с чужими заставами: сегодня там CHECK, завтра его правит её
+ *    владелец, и одна строка уронила бы вставку на 500 соседей — на каждом
+ *    повторе. Поэтому здесь проверяется всё, что Postgres встретил бы уже
+ *    внутри пачки: управляющие символы в имени (`&#0;` после `decodeHtml` — это
+ *    настоящий U+0000, а на него ответ `invalid byte sequence for encoding
+ *    "UTF8": 0x00`), qty вне диапазона КОЛОНКИ (`integer` у заливов,
+ *    `numeric(12,2)` у пересчётов) и бесконечность. Причина уезжает в отчёт
+ *    (`control_chars`, `out_of_range`), годные строки ложатся.
  */
 
 // ── Донор: как строки отдаёт SQL ────────────────────────────────────────────
 
-/** Строки донора как их отдаёт SQL: числа приходят строками postgres.js. */
-export interface DonorRefillRow { id: number | string; dt: string; machine_serial: string | null; product: string; qty: string | number }
-export interface DonorStockCountRow { id: number | string; dt: string; product: string; qty: string | number; counted_at: string | Date | null }
+/**
+ * Строки донора как их отдаёт SQL: числа приходят строками postgres.js.
+ *
+ * `ourvend_name` — мост донорской карточки в каталог OurVend, из которого вырос
+ * прайс mydon (R-FW-P1); пусто у 28 карточек из 62. `location_name` — имя места
+ * складской инвентаризации (R-FW-P2): `machine_id is null` у донора значит не
+ * «склад», а одно из трёх мест.
+ *
+ * `product` объявлен допускающим `null` НЕ на всякий случай: карточку тянет
+ * LEFT JOIN, чтобы строка без товара попала в «найдено» и в отчёт, а не
+ * исчезла из счёта молча (`no_product`).
+ */
+export interface DonorRefillRow {
+  id: number | string; dt: string; machine_serial: string | null; product: string | null; qty: string | number;
+  ourvend_name?: string | null;
+}
+export interface DonorStockCountRow {
+  id: number | string; dt: string; product: string | null; qty: string | number; counted_at: string | Date | null;
+  ourvend_name?: string | null; location_name?: string | null;
+}
 /**
  * `unit`/`note`/`total` — ровно те же колонки, что тянет синк снабжения
  * (`supply.service.ts`). Они не участвуют в сверке, но едут в дописываемую
@@ -53,7 +91,7 @@ export interface DonorStockCountRow { id: number | string; dt: string; product: 
  * второй раз у себя незачем.
  */
 export interface DonorPurchaseRow {
-  id: number | string; dt: string; product: string; qty: string | number; unit_price: string | number | null;
+  id: number | string; dt: string; product: string | null; qty: string | number; unit_price: string | number | null;
   unit?: string | null; note?: string | null; total?: string | number | null;
 }
 
@@ -72,17 +110,49 @@ export interface VendingStockCountInsert {
   extId: string; countedAt: string; personId: null; note: string | null;
 }
 
-/** Строка НЕ легла в таблицу — и почему именно, словом. */
-export interface Unresolved { ok: false; reason: "no_serial" | "service_row" | "bad_qty" | "no_date"; extId: string; product: string }
+/**
+ * Строка НЕ легла в таблицу — и почему именно, словом.
+ *
+ * `out_of_range` и `control_chars` — заставы годности донорской строки
+ * (решение 4 в шапке): число вне диапазона колонки и управляющий символ в
+ * имени. `no_product` — строка донора без карточки товара вовсе: `product_name`
+ * у нас `NOT NULL`, и такую строку нечем назвать. `product` здесь всегда
+ * очищен: имя с U+0000 не должно ехать дальше ни в отчёт, ни в jsonb события.
+ */
+export interface Unresolved {
+  ok: false;
+  reason: "no_serial" | "service_row" | "bad_qty" | "no_date" | "out_of_range" | "control_chars" | "no_product";
+  extId: string;
+  product: string;
+}
 /** Строка легла. `rawName` — имя, которому канона нет: едет сырым, `productId` останется NULL (R-P8a-7). */
 export interface Mapped<T> { ok: true; row: T; rawName: string | null }
 
 /** Пометка импорта: по ней видно происхождение строки без похода в `source`. */
 const IMPORT_NOTE = "импорт истории mydon-stock";
 
+/** Потолок имени места в `note`: справочник донора его не ограничивает вовсе. */
+const PLACE_MAX = 200;
+
+/**
+ * Пометка импорта, а у складской инвентаризации — ещё и МЕСТО (R-FW-P2).
+ *
+ * `machine_id is null` у донора — это не «склад» в единственном числе, а три
+ * места: `Склад (основной)` 423 строки, `Холодильник` 20, `Oq apparat (склад)`
+ * 17. На 05.07.2026 четыре пары (дата, товар) лежат в ДВУХ местах с разным qty:
+ * без имени места история показала бы две строки-близнеца «7» и «10», которые
+ * читаются как двойной ввод. Имя едет в `note`, а не в отдельную колонку:
+ * своих мест склада в mydon нет вовсе, и заводить справочник ради разового
+ * импорта значило бы решить за владельца.
+ */
+function importNote(place: string | null | undefined): string {
+  const name = typeof place === "string" ? withoutControlChars(place).trim().slice(0, PLACE_MAX) : "";
+  return name.length === 0 ? IMPORT_NOTE : `${IMPORT_NOTE} · место: ${name}`;
+}
+
 // ── Имена товаров ───────────────────────────────────────────────────────────
 
-/** Именованные энтити панели склада. `&amp;` стоит последним осознанно (см. `decodeHtml`). */
+/** Именованные энтити панели склада: обычный лукап, порядок ключей ни на что не влияет. */
 const NAMED_ENTITIES: Record<string, string> = {
   quot: '"', apos: "'", lt: "<", gt: ">", nbsp: " ", amp: "&",
 };
@@ -105,7 +175,9 @@ const ENTITY = /&(#x[0-9a-fA-F]+|#\d+|quot|apos|lt|gt|nbsp|amp);/g;
 export function decodeHtml(raw: string): string {
   return raw.replace(ENTITY, (match, body: string) => {
     if (body.startsWith("#")) {
-      const hex = body[1] === "x" || body[1] === "X";
+      // Только строчное `#x`: у `ENTITY` нет флага `i`, и `&#X41;` под
+      // альтернативу не попадает вовсе — остаётся текстом, как всё неизвестное.
+      const hex = body[1] === "x";
       const code = Number.parseInt(hex ? body.slice(2) : body.slice(1), hex ? 16 : 10);
       if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return match;
       try {
@@ -116,6 +188,23 @@ export function decodeHtml(raw: string): string {
     }
     return NAMED_ENTITIES[body] ?? match;
   });
+}
+
+/**
+ * Управляющие символы (`\p{Cc}` — C0/C1, включая U+0000).
+ *
+ * `decodeHtml` честно разворачивает `TUC&#0;` в строку с настоящим U+0000, а
+ * Postgres отвечает на этот байт `invalid byte sequence for encoding "UTF8":
+ * 0x00` — и падает ПАЧКА, а не строка. Имя с управляющим символом отказывается
+ * поимённо, а всё, что всё-таки едет дальше (отчёт, jsonb события, `note`),
+ * проходит через `withoutControlChars`.
+ */
+const CONTROL_CHARS = /\p{Cc}/u;
+const CONTROL_CHARS_ALL = /\p{Cc}/gu;
+
+/** Имя без управляющих символов — только такое попадает в отчёты и события. */
+function withoutControlChars(raw: string): string {
+  return raw.replace(CONTROL_CHARS_ALL, "");
 }
 
 /** Донорская пометка слияния карточек: `Pepsi 0,5 [слит→23]` → `Pepsi 0,5`. */
@@ -142,6 +231,35 @@ export function canonicalProductName(raw: string, canon: CanonIndex): [string, b
   const cleaned = stripMergedMarker(decodeHtml(raw));
   const hit = canon(cleaned);
   return hit === null ? [cleaned, false] : [hit, true];
+}
+
+/**
+ * Имя донора → канон mydon по ДВУМ точным ключам (R-FW-P1).
+ *
+ * Донорская карточка знает два имени: своё (`products.name` — как владелец
+ * написал его в панели склада) и `ourvend_name` — мост в каталог OurVend, из
+ * которого вырос прайс mydon. Спрашивать только первое значит потерять 13 имён
+ * (228 строк из 567), у которых мост есть и он ТОЧНЫЙ.
+ *
+ * Порядок ключей не косметика: своё имя — то, что владелец видит и правит, а
+ * `ourvend_name` заполнен у 34 карточек из 62 и приходит от вендора. Поэтому
+ * сначала спрашивают донорское имя, и только если карточки нет — мост.
+ *
+ * Оба поиска точные (решение 1 в шапке). Не нашлось ни по одному — возвращается
+ * очищенное ДОНОРСКОЕ имя: вендорское написание владелец у себя не узнает.
+ */
+export function resolveProductName(
+  raw: string,
+  ourvend: string | null | undefined,
+  canon: CanonIndex,
+): [string, boolean] {
+  const своё = canonicalProductName(raw, canon);
+  if (своё[1]) return своё;
+  if (typeof ourvend === "string" && ourvend.trim().length > 0) {
+    const мост = canonicalProductName(ourvend, canon);
+    if (мост[1]) return мост;
+  }
+  return своё;
 }
 
 /** Карточка прайса и алиас — ровно то, из чего строится индекс каталога. */
@@ -229,6 +347,23 @@ function toNumber(v: string | number | null | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Число, которого в колонке не существует: `Infinity`, `"1e400"`, `-1e999`.
+ *
+ * Для `toNumber` это то же самое `null`, что и «не число», а для отчёта — нет:
+ * «негодный qty» и «не влезает в колонку» — разные разговоры с владельцем.
+ */
+function isInfinite(v: string | number | null | undefined): boolean {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v.trim()) : Number.NaN;
+  return !Number.isFinite(n) && !Number.isNaN(n);
+}
+
+/** `vending_refill.qty` — INTEGER: на 3e9 Postgres отвечает 22003 посреди пачки. */
+const REFILL_QTY_MAX = 2_147_483_647;
+
+/** `vending_stock_count.qty` — `numeric(12,2)`: десять цифр до точки, не больше. */
+const COUNT_QTY_LIMIT = 1e10;
+
 const BARE_DAY = /^\d{4}-\d{2}-\d{2}/;
 
 /** Донорский `dt` (`DATE`) → `YYYY-MM-DD`. Мусор → `null`, строка уйдёт в `no_date`. */
@@ -260,8 +395,12 @@ function noonAt(day: string): string | null {
  */
 export function mapRefill(row: DonorRefillRow, canon: CanonIndex): Mapped<VendingRefillInsert> | Unresolved {
   const extId = String(row.id);
-  const [productName, resolved] = canonicalProductName(row.product, canon);
-  const fail = (reason: Unresolved["reason"]): Unresolved => ({ ok: false, reason, extId, product: productName });
+  const [productName, resolved] = resolveProductName(row.product ?? "", row.ourvend_name, canon);
+  const fail = (reason: Unresolved["reason"]): Unresolved =>
+    ({ ok: false, reason, extId, product: withoutControlChars(productName) });
+
+  if (productName.length === 0) return fail("no_product");
+  if (CONTROL_CHARS.test(productName)) return fail("control_chars");
 
   const machineSerial = normalizeMachineSerial(row.machine_serial);
   if (machineSerial.length === 0) return fail("no_serial");
@@ -274,7 +413,11 @@ export function mapRefill(row: DonorRefillRow, canon: CanonIndex): Mapped<Vendin
   // У донора на `refills.qty` стоит CHECK `qty > 0`, а отрицательные заливы
   // импортом истории пропускались. Ноль здесь — тоже не событие заправки.
   const qty = toNumber(row.qty);
-  if (qty === null || qty <= 0) return fail("bad_qty");
+  if (qty === null) return fail(isInfinite(row.qty) ? "out_of_range" : "bad_qty");
+  if (qty <= 0) return fail("bad_qty");
+  // Дробь ловит скрипт импорта (`fractional_qty`), а это — переполнение
+  // целочисленной колонки: 3e9 «целое», но в `integer` его нет.
+  if (qty > REFILL_QTY_MAX) return fail("out_of_range");
 
   return {
     ok: true,
@@ -305,19 +448,27 @@ function countedInstant(v: string | Date | null): string | null {
  * `qty = 0` — законный результат пересчёта («на складе пусто»), у донора на
  * колонке CHECK `qty >= 0`. Поэтому нулю здесь, в отличие от залива, дорога
  * открыта.
+ *
+ * В `note` уезжает МЕСТО пересчёта (`importNote`): складских мест у донора три,
+ * и без имени места две строки одного дня по одному товару неразличимы.
  */
 export function mapStockCount(row: DonorStockCountRow, canon: CanonIndex): Mapped<VendingStockCountInsert> | Unresolved {
   const extId = String(row.id);
-  const [productName, resolved] = canonicalProductName(row.product, canon);
-  const fail = (reason: Unresolved["reason"]): Unresolved => ({ ok: false, reason, extId, product: productName });
+  const [productName, resolved] = resolveProductName(row.product ?? "", row.ourvend_name, canon);
+  const fail = (reason: Unresolved["reason"]): Unresolved =>
+    ({ ok: false, reason, extId, product: withoutControlChars(productName) });
 
+  if (productName.length === 0) return fail("no_product");
+  if (CONTROL_CHARS.test(productName)) return fail("control_chars");
   if (isServiceProduct(productName)) return fail("service_row");
 
   const dt = toDay(row.dt);
   if (dt === null) return fail("no_date");
 
   const qty = toNumber(row.qty);
-  if (qty === null || qty < 0) return fail("bad_qty");
+  if (qty === null) return fail(isInfinite(row.qty) ? "out_of_range" : "bad_qty");
+  if (qty < 0) return fail("bad_qty");
+  if (qty >= COUNT_QTY_LIMIT) return fail("out_of_range");
 
   const countedAt = countedInstant(row.counted_at) ?? noonAt(dt);
   if (countedAt === null) return fail("no_date");
@@ -325,7 +476,10 @@ export function mapStockCount(row: DonorStockCountRow, canon: CanonIndex): Mappe
   return {
     ok: true,
     rawName: resolved ? null : productName,
-    row: { dt, productName, qty, source: "stock-import", extId, countedAt, personId: null, note: IMPORT_NOTE },
+    row: {
+      dt, productName, qty, source: "stock-import", extId, countedAt, personId: null,
+      note: importNote(row.location_name),
+    },
   };
 }
 
@@ -333,13 +487,30 @@ export function mapStockCount(row: DonorStockCountRow, canon: CanonIndex): Mappe
 
 export interface PurchaseFacts { extId: string; dt: string; product: string; qty: number; unitPrice: number | null }
 export interface PurchaseDiff { extId: string; field: "dt" | "product" | "qty" | "unitPrice"; mine: string | number | null; donor: string | number | null }
+/**
+ * Донорская строка, которую дописать НЕЛЬЗЯ: её негодное значение названо (R-FW-S3).
+ *
+ * `value` — само донорское значение: причина «негодная дата» без самой даты не
+ * даёт владельцу ничего, а гадать по id он не обязан. Управляющие символы из
+ * него вычищены и длина урезана — это строка для отчёта, а не для базы.
+ */
+export interface PurchaseReject { extId: string; reason: "no_date" | "bad_qty" | "bad_price" | "no_product"; value: string }
 export interface PurchaseReconcile {
   /** Есть у донора, нет у нас — ДОПИСАТЬ (R-P8a-1). */
   missing: PurchaseFacts[];
   /** Есть у обоих, числа разошлись — только отчёт, править нельзя. */
   differing: PurchaseDiff[];
-  /** Есть у нас, нет у донора: 39 удалённых id. Не удалять. */
+  /**
+   * Есть у нас, нет у донора. На проде это ПУСТО: 39 «пропавших» id — дыры
+   * НУМЕРАЦИИ донора (max id 381 при 342 строках, удаления до появления
+   * `deletions_log`), а не лишние строки зеркала; множества `ext_id` совпали
+   * построчно (`adversarial-prod-data.md` §10). Появится непустой список —
+   * это разговор с владельцем, а не повод удалять: донор о таких строках уже
+   * ничего не помнит.
+   */
   onlyMine: string[];
+  /** Негодные строки донора: в зеркало не поехали, причина названа (R-FW-S3). */
+  rejected: PurchaseReject[];
 }
 
 /**
@@ -351,6 +522,21 @@ const MONEY_EPS = 0.005;
 const sameNumber = (a: number | null, b: number | null): boolean =>
   a === null || b === null ? a === b : Math.abs(a - b) <= MONEY_EPS;
 
+/** Имя из панели склада: энтити развёрнуты, `[слит→N]` снят, управляющих символов нет. */
+function cleanName(raw: string | null | undefined): string {
+  return withoutControlChars(stripMergedMarker(decodeHtml(typeof raw === "string" ? raw : ""))).trim();
+}
+
+/** Отказ с ЧИТАЕМЫМ значением: без управляющих символов и без простыни на экран. */
+function отказ(extId: string, reason: PurchaseReject["reason"], value: unknown): PurchaseReject {
+  return { extId, reason, value: withoutControlChars(String(value ?? "")).slice(0, 120) };
+}
+
+/** «Цена не задана» — законно; «цена — это буквы» — нет. */
+function priceMissing(v: string | number | null | undefined): boolean {
+  return v === null || v === undefined || (typeof v === "string" && v.trim().length === 0);
+}
+
 /**
  * Разовая сверка зеркала закупок с донором по `ext_id` (R-P8a-1).
  *
@@ -361,9 +547,17 @@ const sameNumber = (a: number | null, b: number | null): boolean =>
  *
  * ЧТО ЭТА ФУНКЦИЯ НЕ ДЕЛАЕТ. Она не удаляет и не правит. `differing` — отчёт:
  * зеркало заполнял другой код, и молча переписать наши числа донорскими
- * значит потерять единственное свидетельство расхождения. `onlyMine` — это в
- * основном 39 id, удалённых у донора до появления `deletions_log`; удалять их
- * у себя нельзя, донор о них уже ничего не помнит.
+ * значит потерять единственное свидетельство расхождения.
+ *
+ * ЧТО ОНА НЕ ПИШЕТ (R-FW-S3). У заливов и пересчётов заставы годности есть, а
+ * у сверки не было вовсе — при том что дописывает она в ЗЕРКАЛО, которое
+ * обязана только дополнять. `toNumber(qty) ?? 0` молча превращал мусор в
+ * настоящий ноль, а негодная дата уезжала в `date NOT NULL` и роняла пачку.
+ * Теперь негодная строка, которой у нас нет, не дописывается вовсе и
+ * называется в `rejected`; та же негодность у строки, которая у нас ЕСТЬ, —
+ * обычное расхождение, и в `differing` едет СЫРОЕ донорское значение, а не
+ * придуманный за донора ноль. На нынешнем доноре ни то ни другое не
+ * воспроизводится (CHECK `qty > 0`, `dt date`) — но это его заставы, не наши.
  *
  * Имена сравниваются очищенными (энтити + `[слит→N]`), потому что зеркало
  * писало сырое донорское написание: иначе весь HTML-мусор панели попал бы в
@@ -376,37 +570,48 @@ export function reconcilePurchases(mine: readonly PurchaseFacts[], donor: readon
 
   const missing: PurchaseFacts[] = [];
   const differing: PurchaseDiff[] = [];
+  const rejected: PurchaseReject[] = [];
 
   for (const d of donor) {
     const extId = String(d.id);
-    const facts: PurchaseFacts = {
-      extId,
-      dt: toDay(d.dt) ?? String(d.dt),
-      product: stripMergedMarker(decodeHtml(d.product)),
-      qty: toNumber(d.qty) ?? 0,
-      unitPrice: toNumber(d.unit_price),
-    };
+    const day = toDay(d.dt);
+    const qty = toNumber(d.qty);
+    const product = cleanName(d.product);
+    const unitPrice = toNumber(d.unit_price);
 
     const ours = byExtId.get(extId);
     if (ours === undefined) {
-      missing.push(facts);
+      // Дописываем ТОЛЬКО годную строку: зеркало сверка дополняет, а не портит.
+      if (product.length === 0) rejected.push(отказ(extId, "no_product", d.product));
+      else if (day === null) rejected.push(отказ(extId, "no_date", d.dt));
+      else if (qty === null || qty <= 0) rejected.push(отказ(extId, "bad_qty", d.qty));
+      else if (unitPrice === null && !priceMissing(d.unit_price)) {
+        rejected.push(отказ(extId, "bad_price", d.unit_price));
+      } else if (day !== null && qty !== null) missing.push({ extId, dt: day, product, qty, unitPrice });
       continue;
     }
 
     const ourDay = toDay(ours.dt) ?? ours.dt;
-    if (ourDay !== facts.dt) differing.push({ extId, field: "dt", mine: ourDay, donor: facts.dt });
+    const donorDay = day ?? String(d.dt);
+    if (ourDay !== donorDay) differing.push({ extId, field: "dt", mine: ourDay, donor: donorDay });
 
-    const ourProduct = stripMergedMarker(decodeHtml(ours.product));
-    if (normalizeProductName(ourProduct) !== normalizeProductName(facts.product)) {
-      differing.push({ extId, field: "product", mine: ourProduct, donor: facts.product });
+    const ourProduct = cleanName(ours.product);
+    if (normalizeProductName(ourProduct) !== normalizeProductName(product)) {
+      differing.push({ extId, field: "product", mine: ourProduct, donor: product });
     }
 
-    if (!sameNumber(ours.qty, facts.qty)) differing.push({ extId, field: "qty", mine: ours.qty, donor: facts.qty });
-    if (!sameNumber(ours.unitPrice, facts.unitPrice)) {
-      differing.push({ extId, field: "unitPrice", mine: ours.unitPrice, donor: facts.unitPrice });
+    // Негодное число донора — расхождение с СЫРЫМ значением: «у донора 0» там,
+    // где у него «н/д», было бы нашей выдумкой в отчёте о его данных.
+    if (qty === null) differing.push({ extId, field: "qty", mine: ours.qty, donor: String(d.qty) });
+    else if (!sameNumber(ours.qty, qty)) differing.push({ extId, field: "qty", mine: ours.qty, donor: qty });
+
+    if (unitPrice === null && !priceMissing(d.unit_price)) {
+      differing.push({ extId, field: "unitPrice", mine: ours.unitPrice, donor: String(d.unit_price) });
+    } else if (!sameNumber(ours.unitPrice, unitPrice)) {
+      differing.push({ extId, field: "unitPrice", mine: ours.unitPrice, donor: unitPrice });
     }
   }
 
   const onlyMine = mine.filter((m) => !donorIds.has(m.extId)).map((m) => m.extId);
-  return { missing, differing, onlyMine };
+  return { missing, differing, onlyMine, rejected };
 }

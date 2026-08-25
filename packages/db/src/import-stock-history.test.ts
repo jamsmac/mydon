@@ -46,8 +46,13 @@ function стенд(
   const конфликты: Record<string, { target: string[]; where: string }> = {};
   const имя = (t: unknown): string => (t as { [k: symbol]: string })[Symbol.for("drizzle:Name")] ?? "";
   const заготовки: Record<string, unknown[]> = {
-    vending_product: [{ id: "p-tuc", name: "TUC Sour cream" }],
-    vending_alias: [],
+    vending_product: [
+      { id: "p-tuc", name: "TUC Sour cream" },
+      { id: "p-cola", name: "Coca-Cola Classic CAN 0,25" },
+    ],
+    // Алиас владельца — тот самый мост, по которому имя донора «Coca Cola CAN
+    // 0.25» находит карточку через `ourvend_name` (R-FW-P1).
+    vending_alias: [{ productId: "p-cola", alias: "CocaCola Classic CAN 250ml" }],
     entity: [{ id: "e-olma", externalRef: "c2508160376" }],
     purchase: [{ extId: "1", dt: "2025-08-18", product: "Pepsi 0,5", qty: "24", unitPrice: "0" }],
     // Счётчики для решения «ставить ли отметку импорта» (R-P8a-5): их читают
@@ -142,6 +147,9 @@ describe("Импорт истории склада (R-P8a-8)", () => {
       unresolved: [],
       skippedNoSerial: 1,
       skippedService: 1,
+      // Причины отказа живут не только в консоли: прогон бывает один раз, и
+      // после него отметка — единственный след импорта в базе.
+      skipped: { refills: { no_serial: 1 }, stockCounts: { service_row: 1 }, purchases: {} },
     });
     assert.equal(отметка.source, "stock-import");
   });
@@ -188,6 +196,10 @@ describe("Импорт истории склада (R-P8a-8)", () => {
     const r = await importStockHistory(db, donor, { apply: true });
     assert.equal(r.refills.written, 0);
     assert.equal(вставлено.event!.length, 1, "след импорта восстановлен");
+    // Нули в восстановленной отметке рассказали бы о переносе ровно ничего:
+    // этот прогон не записал ни строки, а 107 заливов в базе лежат.
+    const payload = (вставлено.event![0] as { payload: Record<string, unknown> }).payload;
+    assert.deepEqual([payload.refills, payload.stockCounts, payload.recovered], [107, 0, true]);
   });
 
   it("отметка не задваивается: она уже есть — второй раз не пишем", async () => {
@@ -233,6 +245,40 @@ describe("Импорт истории склада (R-P8a-8)", () => {
     // колонки из того же SELECT, что тянет синк снабжения, а `total` — из
     // GENERATED-колонки донора, а не посчитанный тут в плавающей точке.
     assert.deepEqual([строка.unit, строка.total, строка.note], ["шт", "48000", "импорт:закупки"]);
+    assert.deepEqual(r.purchases.rejected, []);
+  });
+
+  it("негодная строка донора в зеркало не едет, а называется в отчёте (R-FW-S3)", async () => {
+    // `toNumber(qty) ?? 0` писал бы в зеркало настоящий ноль, а негодная дата
+    // ушла бы в `date NOT NULL` и уронила пачку целиком.
+    const { db, donor, вставлено } = стенд(
+      {
+        purchases: [
+          { id: 5, dt: "позавчера", product: "TUC Sour cream", qty: "6", unit_price: "100" },
+          { id: 6, dt: "2026-07-13", product: "TUC Sour cream", qty: "н/д", unit_price: "100" },
+        ],
+      },
+      { clientKeys: [], extIds: [] },
+    );
+    const r = await importStockHistory(db, donor, { apply: true });
+    assert.deepEqual([r.purchases.toWrite, r.purchases.added], [0, 0]);
+    assert.deepEqual(r.purchases.rejected, [
+      { extId: "5", reason: "no_date", value: "позавчера" },
+      { extId: "6", reason: "bad_qty", value: "н/д" },
+    ]);
+    assert.equal(вставлено.purchase!.length, 0);
+    const текст = formatReport(r);
+    assert.match(текст, /Закупки, которые дописать нельзя \(2\)/);
+    assert.match(текст, /ext_id 5 · негодная дата: «позавчера»/);
+  });
+
+  it("донорская единица измерения обрезается потолком, а не едет в зеркало простынёй", async () => {
+    const { db, donor, вставлено } = стенд(
+      { purchases: [{ id: 7, dt: "2026-07-13", product: "TUC Sour cream", qty: "6", unit_price: "100", unit: "ш".repeat(300) }] },
+      { clientKeys: [], extIds: [] },
+    );
+    await importStockHistory(db, donor, { apply: true });
+    assert.equal((вставлено.purchase![0] as { unit: string }).unit.length, 64);
   });
 
   it("нерешённые имена названы поимённо — это список владельцу, а не ошибка выкатки", async () => {
@@ -285,6 +331,64 @@ describe("Импорт истории склада (R-P8a-8)", () => {
       ["e-olma", "2508160376", "p-tuc"],
       "серийник — канон, карточка найдена по обеим формам, товар — по прайсу",
     );
+  });
+
+  it("имя донора без карточки находит её через ourvend_name (R-FW-P1)", async () => {
+    // 13 имён (228 строк) резолвятся ТОЧНЫМ алиасом владельца; без моста они
+    // уехали бы сырыми, с product_id NULL, и отчёт за месяц их бы не нашёл.
+    const { db, donor, вставлено } = стенд(
+      {
+        stockCounts: [
+          { id: 90, dt: "2026-07-05", product: "Coca Cola CAN 0.25", ourvend_name: "CocaCola Classic CAN 250ml", qty: "7", counted_at: null },
+        ],
+      },
+      { clientKeys: [], extIds: [] },
+    );
+    const r = await importStockHistory(db, donor, { apply: true });
+    const строка = вставлено.vending_stock_count![0] as { productName: string; productId: string | null };
+    assert.deepEqual([строка.productName, строка.productId], ["Coca-Cola Classic CAN 0,25", "p-cola"]);
+    assert.deepEqual(r.unresolved, [], "имя с мостом в список «без карточки» не попадает");
+  });
+
+  it("место складской инвентаризации доезжает до note (R-FW-P2)", async () => {
+    const { db, donor, вставлено } = стенд(
+      {
+        stockCounts: [
+          { ...ПЕРЕСЧЁТ, id: 91, location_name: "Холодильник" },
+          { ...ПЕРЕСЧЁТ, id: 92, location_name: "Склад (основной)" },
+        ],
+      },
+      { clientKeys: [], extIds: [] },
+    );
+    await importStockHistory(db, donor, { apply: true });
+    assert.deepEqual(
+      вставлено.vending_stock_count!.map((x) => (x as { note: string }).note),
+      ["импорт истории mydon-stock · место: Холодильник", "импорт истории mydon-stock · место: Склад (основной)"],
+    );
+  });
+
+  it("враждебная строка донора не роняет пачку, а откладывается с причиной (R-FW-S2)", async () => {
+    // Все три вектора разом: U+0000 в имени (Postgres: invalid byte sequence),
+    // qty за пределом INTEGER (22003) и строка без карточки товара вовсе.
+    const { db, donor, вставлено } = стенд(
+      {
+        refills: [
+          { ...ЗАЛИВ, id: 601, product: "TUC&#0; Sour cream" },
+          { ...ЗАЛИВ, id: 602, qty: "3000000000" },
+          { ...ЗАЛИВ, id: 603, product: null },
+          ЗАЛИВ,
+        ],
+      },
+      { clientKeys: [], extIds: [] },
+    );
+    const r = await importStockHistory(db, donor, { apply: true });
+    assert.deepEqual([r.refills.found, r.refills.toWrite, r.refills.written], [4, 1, 1]);
+    assert.deepEqual(r.refills.reasons, { out_of_range: ["602"], control_chars: ["601"], no_product: ["603"] });
+    assert.equal(вставлено.vending_refill!.length, 1);
+    const текст = formatReport(r);
+    assert.match(текст, /qty не влезает в колонку 1/);
+    assert.match(текст, /управляющие символы в имени 1/);
+    assert.match(текст, /строка донора без карточки товара 1/);
   });
 
   it("отчёт начинается режимом и заканчивается разборной строкой итогов", async () => {

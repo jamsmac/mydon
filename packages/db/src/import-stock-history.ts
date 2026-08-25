@@ -38,6 +38,13 @@
  * ней стоит «записано», и расхождение между ними читается сразу — именно так
  * повторный прогон честно говорит «к записи 107, записано 0, всё уже лежит».
  *
+ * ЧЕГО ЖДАТЬ НА ПРОДЕ (примерка 26.08, `adversarial-prod-data.md`):
+ *   заливы            найдено 455, к записи 107, пропущено 348 (все `no_serial`);
+ *   инвентаризации    найдено 460, к записи 460, служебных 0, место — в `note`;
+ *   закупки           у донора 342, у нас 342, дописать 0, расхождений 0;
+ *   имена без карточки прайса — 11 (15 строк): это остаток ПОСЛЕ моста
+ *   `ourvend_name` (без него было 24 имени и 243 строки, 43 % переноса).
+ *
  * Запуск (шаг выкатки, ДВА прогона — сначала пробный):
  *   node packages/db/dist/import-stock-history.js --dry-run </dev/null
  *   node packages/db/dist/import-stock-history.js --apply   </dev/null
@@ -58,6 +65,7 @@ import {
   type DonorStockCountRow,
   type PurchaseDiff,
   type PurchaseFacts,
+  type PurchaseReject,
   type Unresolved,
 } from "@mydon/shared";
 import { createDb, type Database } from "./index";
@@ -78,8 +86,9 @@ export interface DonorReader {
 /**
  * Причина, по которой строка донора НЕ поехала.
  *
- * Четыре приходят из маппинга (`@mydon/shared`), пятая — наша: колонка
- * `vending_refill.qty` целочисленная, а у донора `NUMERIC`.
+ * Почти все приходят из маппинга (`@mydon/shared`), одна — наша:
+ * `fractional_qty`. Колонка `vending_refill.qty` целочисленная, а у донора
+ * `NUMERIC`, и дробь пришлось бы округлять за владельца.
  */
 export type SkipReason = Unresolved["reason"] | "fractional_qty";
 
@@ -102,7 +111,11 @@ export interface StockHistoryReport {
   apply: boolean;
   refills: ImportSection & { noSerial: number; fractionalQty: string[] };
   stockCounts: ImportSection & { serviceRows: number };
-  purchases: { mine: number; donor: number; toWrite: number; added: number; differing: PurchaseDiff[]; onlyMine: number };
+  purchases: {
+    mine: number; donor: number; toWrite: number; added: number; differing: PurchaseDiff[]; onlyMine: number;
+    /** Строки донора, которые дописывать нельзя: негодные число/дата/товар (R-FW-S3). */
+    rejected: PurchaseReject[];
+  };
   /** Имена без карточки прайса — уезжают в отчёт и в событие (R-P8a-7). */
   unresolved: string[];
 }
@@ -126,6 +139,10 @@ export class ImportWriteFailure extends Error {
 
 /** Пачка вставки — как у синка снабжения: 500 строк за запрос. */
 const BATCH = 500;
+
+/** Потолки полей, которые донор ничем не ограничивает: `unit` — text без CHECK. */
+const UNIT_MAX = 64;
+const NOTE_MAX = 1000;
 
 /** Отметка импорта в журнале и `source` его строк — одно слово на весь срез. */
 const IMPORT_SOURCE = "stock-import";
@@ -266,7 +283,7 @@ export async function importStockHistory(
     // Пусто — законно «цены нет» (158 строк прихода напитков 2025), а не ноль.
     unitPrice: r.unitPrice === null ? null : strictNumber(r.unitPrice),
   }));
-  const { missing, differing, onlyMine } = reconcilePurchases(mine, donorPurchases);
+  const { missing, differing, onlyMine, rejected } = reconcilePurchases(mine, donorPurchases);
   // Дописанная строка обязана быть НЕОТЛИЧИМА от 342 соседей зеркала: те же
   // `unit`, `note` и `total` из донора, что тянет синк снабжения. `total` у
   // донора — GENERATED-колонка (qty*unit_price); считать её второй раз в
@@ -279,11 +296,13 @@ export async function importStockHistory(
       extId: p.extId,
       dt: p.dt,
       product: p.product,
-      unit: d?.unit ? String(d.unit) : null,
+      // Потолок — как у соседнего `note`: колонка `text`, но зеркало закупок не
+      // место для донорской строки на мегабайт. «шт»/«упак» в 64 влезают с запасом.
+      unit: d?.unit ? String(d.unit).slice(0, UNIT_MAX) : null,
       qty: String(p.qty),
       unitPrice: p.unitPrice === null ? null : String(p.unitPrice),
       total: total === null ? null : String(total),
-      note: d?.note ? String(d.note).slice(0, 1000) : null,
+      note: d?.note ? String(d.note).slice(0, NOTE_MAX) : null,
       source: "stock",
     };
   });
@@ -314,6 +333,7 @@ export async function importStockHistory(
       added: 0,
       differing,
       onlyMine: onlyMine.length,
+      rejected,
     },
     unresolved: [...unresolved].sort((a, b) => a.localeCompare(b, "ru")),
   };
@@ -354,18 +374,31 @@ export async function importStockHistory(
         .returning({ id: purchase.id }),
     );
 
-    if (await нуженСлед(db, report.refills.written + report.stockCounts.written + report.purchases.added)) {
+    const след = await нуженСлед(db, report.refills.written + report.stockCounts.written + report.purchases.added);
+    if (след.ставить) {
       await db.insert(event).values([
         {
           source: IMPORT_SOURCE,
           type: IMPORT_EVENT,
           payload: {
-            refills: report.refills.written,
-            stockCounts: report.stockCounts.written,
+            // В восстановительной ветке этот прогон записал НОЛЬ строк, а
+            // отметка — единственный след импорта в БД: нули в ней рассказали
+            // бы о переносе ровно ничего. Поэтому числа берутся из базы.
+            refills: след.восстановление?.refills ?? report.refills.written,
+            stockCounts: след.восстановление?.stockCounts ?? report.stockCounts.written,
             purchasesAdded: report.purchases.added,
             unresolved: report.unresolved,
             skippedNoSerial: report.refills.noSerial,
             skippedService: report.stockCounts.serviceRows,
+            // Все причины отказа числами: `bad_qty`/`no_date`/`out_of_range`/
+            // `control_chars` жили только в консольном отчёте, а прогон бывает
+            // один раз — в базе от них не осталось бы следа.
+            skipped: {
+              refills: счётПричин(report.refills.reasons),
+              stockCounts: счётПричин(report.stockCounts.reasons),
+              purchases: счётОтказовЗакупок(report.purchases.rejected),
+            },
+            ...(след.восстановление ? { recovered: true } : {}),
           },
         },
       ]);
@@ -377,29 +410,46 @@ export async function importStockHistory(
   return report;
 }
 
+/** Решение об отметке и — в восстановительной ветке — числа, которые в ней стоят. */
+interface След {
+  ставить: boolean;
+  /** Строки импорта, УЖЕ лежащие в базе: их и называет восстановленная отметка. */
+  восстановление?: { refills: number; stockCounts: number };
+}
+
 /**
- * Ставить ли отметку `stock.history.imported` (R-P8a-5).
+ * Ставить ли отметку `stock.history.imported` (R-P8a-5) и с какими числами.
  *
- * ДА, если этот прогон что-то записал, — обычный случай.
+ * ДА, если этот прогон что-то записал, — обычный случай, числа берутся из
+ * отчёта прогона.
  *
  * И ТАКЖЕ ДА, если отметки в журнале нет, а строки импорта в базе есть. Это
  * дыра, которую иначе не закрыть ничем, кроме ручного INSERT: процесс умер
  * между последней пачкой и записью события (или упало само событие) — строки
  * лежат, следа нет, и КАЖДЫЙ следующий `--apply` запишет ноль, то есть
  * «записал → ставим отметку» не сработает уже никогда. Проверка §6 выкатки
- * (`count(*) … = 1`) стала бы невыполнимой на ровном месте.
+ * (`count(*) … = 1`) стала бы невыполнимой на ровном месте. В этой ветке числа
+ * прогона — нули, поэтому отметка несёт СЧЁТ СТРОК ИЗ БАЗЫ и признак
+ * `recovered`: иначе единственный след импорта ничего бы не рассказал.
+ *
+ * Дописанные закупки в восстановлении не восстановишь: строка зеркала
+ * `source='stock'` неотличима от той, что положил синк снабжения, — поэтому
+ * `purchasesAdded` в такой отметке честно нулевой. По той же причине прогон,
+ * дописавший ТОЛЬКО закупки и умерший до события, отметки не получит: на проде
+ * ожидается `missing 0`, и практического веса у этого края нет.
  *
  * Отметка при этом не задвоится: как только она есть, первое условие ложно,
  * а второе гасится её же наличием.
  */
-async function нуженСлед(db: Database, всего: number): Promise<boolean> {
-  if (всего > 0) return true;
+async function нуженСлед(db: Database, всего: number): Promise<След> {
+  if (всего > 0) return { ставить: true };
   const [отметок, заливов, пересчётов] = await Promise.all([
     число(db.select({ n: sql<number>`count(*)` }).from(event).where(eq(event.type, IMPORT_EVENT))),
     число(db.select({ n: sql<number>`count(*)` }).from(vendingRefill).where(eq(vendingRefill.source, IMPORT_SOURCE))),
     число(db.select({ n: sql<number>`count(*)` }).from(vendingStockCount).where(eq(vendingStockCount.source, IMPORT_SOURCE))),
   ]);
-  return отметок === 0 && заливов + пересчётов > 0;
+  if (отметок !== 0 || заливов + пересчётов === 0) return { ставить: false };
+  return { ставить: true, восстановление: { refills: заливов, stockCounts: пересчётов } };
 }
 
 // ── Донор через postgres.js ─────────────────────────────────────────────────
@@ -420,21 +470,30 @@ export function sqlDonor(url: string, schema = "public"): { reader: DonorReader;
   const reader: DonorReader = {
     // Только заливы по РЕАЛЬНЫМ аппаратам получают серийник; у виртуальных он
     // NULL, и маппинг отложит их сам (`no_serial`) — фильтровать в SQL нельзя,
-    // иначе отчёт «найдено» соврал бы, скрыв 348 строк из виду.
+    // иначе отчёт «найдено» соврал бы, скрыв 348 строк из виду. По той же
+    // причине карточки тянутся LEFT JOIN'ом: строка без товара или без аппарата
+    // обязана попасть в «найдено» и в отчёт с причиной, а не исчезнуть из счёта
+    // молча. `ourvend_name` — второй ТОЧНЫЙ ключ резолва имени (R-FW-P1).
     refills: async () =>
       (await client`
-        select r.id, r.dt::text as dt, m.serial as machine_serial, p.name as product, r.qty
+        select r.id, r.dt::text as dt, m.serial as machine_serial, p.name as product, p.ourvend_name, r.qty
           from ${client(schema)}.refills r
-          join ${client(schema)}.machines m on m.id = r.machine_id
-          join ${client(schema)}.products p on p.id = r.product_id
+          left join ${client(schema)}.machines m on m.id = r.machine_id
+          left join ${client(schema)}.products p on p.id = r.product_id
          order by r.id`) as unknown as DonorRefillRow[],
     // `machine_id is null` — это СКЛАД (донорский CHECK держит ровно одно из
     // machine_id/location_id). 143 машинные инвентаризации сюда не попадают.
+    //
+    // Мест склада три (`Склад (основной)` 423, `Холодильник` 20, `Oq apparat
+    // (склад)` 17), и без имени места две строки одного дня по одному товару
+    // читались бы как двойной ввод — поэтому `locations` (R-FW-P2).
     stockCounts: async () =>
       (await client`
-        select s.id, s.dt::text as dt, p.name as product, s.qty, s.counted_at
+        select s.id, s.dt::text as dt, p.name as product, p.ourvend_name, s.qty, s.counted_at,
+               l.name as location_name
           from ${client(schema)}.stock_counts s
-          join ${client(schema)}.products p on p.id = s.product_id
+          left join ${client(schema)}.products p on p.id = s.product_id
+          left join ${client(schema)}.locations l on l.id = s.location_id
          where s.machine_id is null
          order by s.id`) as unknown as DonorStockCountRow[],
     // `unit`/`note`/`total` — те же колонки, что у синка снабжения: строка,
@@ -443,7 +502,7 @@ export function sqlDonor(url: string, schema = "public"): { reader: DonorReader;
       (await client`
         select pu.id, pu.dt::text as dt, p.name as product, p.unit, pu.qty, pu.unit_price, pu.total, pu.note
           from ${client(schema)}.purchases pu
-          join ${client(schema)}.products p on p.id = pu.product_id
+          left join ${client(schema)}.products p on p.id = pu.product_id
          order by pu.id`) as unknown as DonorPurchaseRow[],
   };
   return { reader, close: async () => client.end({ timeout: 5 }) };
@@ -458,7 +517,34 @@ const ПРИЧИНЫ: Record<SkipReason, string> = {
   bad_qty: "негодный qty",
   no_date: "негодная дата",
   fractional_qty: "дробный qty (колонка целочисленная)",
+  out_of_range: "qty не влезает в колонку",
+  control_chars: "управляющие символы в имени",
+  no_product: "строка донора без карточки товара",
 };
+
+/** Причины отказа закупок словами — тот же приём, что у заливов и пересчётов. */
+const ПРИЧИНЫ_ЗАКУПОК: Record<PurchaseReject["reason"], string> = {
+  no_date: "негодная дата",
+  bad_qty: "негодный qty",
+  bad_price: "негодная цена",
+  no_product: "строка донора без карточки товара",
+};
+
+/** Причины числами — для jsonb отметки, где список id был бы простынёй. */
+function счётПричин(log: SkipLog): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of Object.keys(ПРИЧИНЫ) as SkipReason[]) {
+    const n = сколько(log, r);
+    if (n > 0) out[r] = n;
+  }
+  return out;
+}
+
+function счётОтказовЗакупок(rejected: readonly PurchaseReject[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of rejected) out[r.reason] = (out[r.reason] ?? 0) + 1;
+  return out;
+}
 
 /** Список в одну строку: не больше 20, остальные — числом. */
 function перечислить(items: readonly string[], предел = 20): string {
@@ -504,7 +590,10 @@ export function formatReport(r: StockHistoryReport): string {
   строки.push(строкаТаблицы("инвентаризации → vending_stock_count", r.stockCounts));
   строки.push(
     `${"закупки → purchase (сверка)".padEnd(38)}${String(r.purchases.donor).padStart(8)}` +
-      `${String(r.purchases.toWrite).padStart(10)}${String(r.purchases.added).padStart(10)}${"—".padStart(11)}  ` +
+      `${String(r.purchases.toWrite).padStart(10)}${String(r.purchases.added).padStart(10)}` +
+      // Прочерк, пока негодных строк нет: у сверки «пропущено» появляется
+      // только тогда, когда донор прислал то, чего дописать нельзя.
+      `${(r.purchases.rejected.length === 0 ? "—" : String(r.purchases.rejected.length)).padStart(11)}  ` +
       `у нас ${r.purchases.mine}, только у нас ${r.purchases.onlyMine}, расхождений ${r.purchases.differing.length}`,
   );
   строки.push("");
@@ -513,6 +602,17 @@ export function formatReport(r: StockHistoryReport): string {
   if (отказы.length > 0) {
     строки.push("Отложенные строки поимённо (кроме «общих» заливов — их 348 и они ожидаемы):");
     строки.push(...отказы);
+  }
+
+  if (r.purchases.rejected.length > 0) {
+    // Негодную строку сверка НЕ дописывает: зеркало она обязана дополнять, а не
+    // портить. Значение печатается рядом с причиной — иначе владельцу нечего
+    // искать у себя в панели (R-FW-S3).
+    строки.push(`Закупки, которые дописать нельзя (${r.purchases.rejected.length}) — в зеркало не поехали:`);
+    for (const x of r.purchases.rejected.slice(0, 20)) {
+      строки.push(`  ext_id ${x.extId} · ${ПРИЧИНЫ_ЗАКУПОК[x.reason]}: «${x.value}»`);
+    }
+    if (r.purchases.rejected.length > 20) строки.push(`  … и ещё ${r.purchases.rejected.length - 20}`);
   }
 
   строки.push(

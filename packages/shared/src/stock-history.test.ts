@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  canonicalProductName, decodeHtml, mapRefill, mapStockCount, reconcilePurchases,
-  stripMergedMarker, type DonorPurchaseRow, type PurchaseFacts,
+  canonicalProductName, decodeHtml, mapRefill, mapStockCount, productIndex, reconcilePurchases,
+  resolveProductName, stripMergedMarker, type DonorPurchaseRow, type PurchaseFacts,
 } from "./stock-history";
 
 /** Прайс mydon: канон знает только то, что реально есть в справочнике. */
@@ -13,6 +13,69 @@ const ПРАЙС = new Map([
   ["tuc sour cream", "TUC Sour cream"],
 ]);
 const canon = (raw: string): string | null => ПРАЙС.get(raw.trim().toLowerCase()) ?? null;
+
+/**
+ * Каталог mydon как он есть: карточка + алиас владельца. Через него и проверяем
+ * мост `ourvend_name` — на настоящем индексе, а не на подставленной функции.
+ */
+const КАТАЛОГ = productIndex(
+  [
+    { id: "p-cola", name: "Coca-Cola Classic CAN 0,25" },
+    { id: "p-tuc", name: "TUC Sour cream" },
+  ],
+  [
+    { productId: "p-cola", alias: "CocaCola Classic CAN 250ml" },
+    { productId: "p-нет", alias: "Карточку удалили" },
+  ],
+);
+
+describe("Индекс каталога: одна сборка на два вопроса (productIndex)", () => {
+  it("канон по имени карточки и по алиасу — с id той же карточки", () => {
+    assert.equal(КАТАЛОГ.canon("TUC Sour cream"), "TUC Sour cream");
+    assert.equal(КАТАЛОГ.canon("CocaCola Classic CAN 250ml"), "Coca-Cola Classic CAN 0,25");
+    assert.equal(КАТАЛОГ.id("CocaCola Classic CAN 250ml"), "p-cola");
+  });
+  it("сопоставление точное, но по той же нормализации, что весь вендинг", () => {
+    assert.equal(КАТАЛОГ.canon("  tuc   sour cream "), "TUC Sour cream");
+    assert.equal(КАТАЛОГ.canon("TUC Sour"), null);
+    assert.equal(КАТАЛОГ.id("TUC Sour"), null);
+  });
+  it("алиас на удалённый товар в индекс не попадает: привязка к чему попало хуже NULL", () => {
+    assert.equal(КАТАЛОГ.canon("Карточку удалили"), null);
+    assert.equal(КАТАЛОГ.id("Карточку удалили"), null);
+  });
+});
+
+describe("Мост ourvend_name: второй ТОЧНЫЙ ключ (R-FW-P1)", () => {
+  it("имени донора карточки нет, а `ourvend_name` ложится на алиас владельца", () => {
+    assert.deepEqual(
+      resolveProductName("Coca Cola CAN 0.25", "CocaCola Classic CAN 250ml", КАТАЛОГ.canon),
+      ["Coca-Cola Classic CAN 0,25", true],
+    );
+  });
+  it("своё имя карточку имеет — мост не спрашивают вовсе", () => {
+    assert.deepEqual(resolveProductName("TUC Sour cream", "CocaCola Classic CAN 250ml", КАТАЛОГ.canon), ["TUC Sour cream", true]);
+  });
+  it("не нашлось ни по одному ключу — едет ДОНОРСКОЕ имя, а не вендорское", () => {
+    assert.deepEqual(resolveProductName("Moxito Mango CAN 0.45", "Moxito Mango 450ml", КАТАЛОГ.canon), ["Moxito Mango CAN 0.45", false]);
+  });
+  it("пустой `ourvend_name` (28 карточек из 62) — не повод искать пустоту в прайсе", () => {
+    assert.deepEqual(resolveProductName("Moxito Mango CAN 0.45", "   ", КАТАЛОГ.canon), ["Moxito Mango CAN 0.45", false]);
+    assert.deepEqual(resolveProductName("Moxito Mango CAN 0.45", null, КАТАЛОГ.canon), ["Moxito Mango CAN 0.45", false]);
+  });
+  it("мост работает и в заливе, и в инвентаризации — привязка к карточке одна", () => {
+    const залив = mapRefill(
+      { id: 1, dt: "2026-07-05", machine_serial: "C2508160376", product: "Coca Cola CAN 0.25", ourvend_name: "CocaCola Classic CAN 250ml", qty: "7" },
+      КАТАЛОГ.canon,
+    );
+    const пересчёт = mapStockCount(
+      { id: 2, dt: "2026-07-05", product: "Coca Cola CAN 0.25", ourvend_name: "CocaCola Classic CAN 250ml", qty: "10", counted_at: null },
+      КАТАЛОГ.canon,
+    );
+    assert.ok(залив.ok && залив.row.productName === "Coca-Cola Classic CAN 0,25" && залив.rawName === null);
+    assert.ok(пересчёт.ok && пересчёт.row.productName === "Coca-Cola Classic CAN 0,25" && пересчёт.rawName === null);
+  });
+});
 
 describe("HTML-мусор панели склада (R-P8a-7)", () => {
   it("энтити декодируются до нормализации", () => {
@@ -69,6 +132,57 @@ describe("Заливы: 107 по живым автоматам, 348 «общих
   });
 });
 
+describe("Заставы годности донорской строки (R-FW-S2)", () => {
+  const залив = (over: Record<string, unknown> = {}) =>
+    mapRefill({ id: 412, dt: "2026-04-22", machine_serial: "C2508160376", product: "TUC Sour cream", qty: "6", ...over }, canon);
+  const пересчёт = (over: Record<string, unknown> = {}) =>
+    mapStockCount({ id: 77, dt: "2026-07-14", product: "TUC Sour cream", qty: "24", counted_at: null, ...over }, canon);
+
+  it("U+0000 в имени — причина, а не «invalid byte sequence» на 500 строк", () => {
+    // `decodeHtml` разворачивает `&#0;` честно; Postgres на этот байт роняет пачку.
+    assert.deepEqual(пересчёт({ product: "TUC&#0; Sour cream" }), {
+      ok: false, reason: "control_chars", extId: "77", product: "TUC Sour cream",
+    });
+    assert.equal((залив({ product: "TUC&#0;" }) as { product: string }).product, "TUC", "имя в отчёте уже очищено");
+  });
+  it("qty за пределом INTEGER — это не «негодный qty», а переполнение колонки", () => {
+    assert.deepEqual(залив({ qty: "3000000000" }), { ok: false, reason: "out_of_range", extId: "412", product: "TUC Sour cream" });
+    assert.ok(залив({ qty: "2147483647" }).ok, "ровно потолок колонки — годится");
+  });
+  it("пересчёт за пределом numeric(12,2) тоже отказывается диапазоном", () => {
+    assert.deepEqual(пересчёт({ qty: "1e10" }), { ok: false, reason: "out_of_range", extId: "77", product: "TUC Sour cream" });
+    assert.ok(пересчёт({ qty: "9999999999.99" }).ok, "ровно потолок колонки — годится");
+  });
+  it("бесконечность отделена от «не числа»: причины разные, обе — отказ", () => {
+    assert.equal((залив({ qty: "1e400" }) as { reason: string }).reason, "out_of_range");
+    assert.equal((залив({ qty: "не число" }) as { reason: string }).reason, "bad_qty");
+    assert.equal((пересчёт({ qty: Number.POSITIVE_INFINITY }) as { reason: string }).reason, "out_of_range");
+  });
+  it("строка донора без карточки товара названа, а не потеряна по дороге", () => {
+    // SELECT тянет товар LEFT JOIN'ом ровно ради этого: `product_name` у нас NOT NULL.
+    assert.deepEqual(пересчёт({ product: null }), { ok: false, reason: "no_product", extId: "77", product: "" });
+    assert.deepEqual(залив({ product: null }), { ok: false, reason: "no_product", extId: "412", product: "" });
+  });
+});
+
+describe("Место складской инвентаризации в note (R-FW-P2)", () => {
+  const пересчёт = (location_name: string | null) =>
+    mapStockCount({ id: 77, dt: "2026-07-05", product: "TUC Sour cream", qty: "7", counted_at: null, location_name }, canon);
+
+  it("три места донора различимы: имя места едет в note", () => {
+    const r = пересчёт("Холодильник");
+    assert.ok(r.ok && r.row.note === "импорт истории mydon-stock · место: Холодильник");
+  });
+  it("места нет — пометка прежняя, лишнего разделителя не появляется", () => {
+    const r = пересчёт(null);
+    assert.ok(r.ok && r.row.note === "импорт истории mydon-stock");
+  });
+  it("две строки одного дня из разных мест читаются как разные, а не как двойной ввод", () => {
+    const основной = пересчёт("Склад (основной)"), холодильник = пересчёт("Oq apparat (склад)");
+    assert.ok(основной.ok && холодильник.ok && основной.row.note !== холодильник.row.note);
+  });
+});
+
 describe("Инвентаризации склада: 460 строк (R-P8a-3, R-P8a-7)", () => {
   it("dt, qty и counted_at донора едут как есть, ключ — ext_id", () => {
     const r = mapStockCount({ id: 77, dt: "2025-08-17", product: "Pepsi 0,5 [слит→23]", qty: "24.00", counted_at: "2025-08-17T09:00:00+05:00" }, canon);
@@ -106,8 +220,41 @@ describe("Сверка закупок по ext_id: дописать, но не �
   it("расхождение названо, но правкой не становится", () => {
     assert.deepEqual(r.differing, [{ extId: "2", field: "qty", mine: 10, donor: 12 }]);
   });
-  it("наши строки без донорского близнеца — 39 удалённых id, их не удаляем", () => {
+  it("наши строки без донорского близнеца названы, но не удаляются", () => {
     assert.deepEqual(r.onlyMine, ["9"]);
+  });
+  it("годные строки донора в отказ не попадают", () => {
+    assert.deepEqual(r.rejected, []);
+  });
+  it("негодная строка донора не дописывается в зеркало, а называется причиной", () => {
+    // Зеркало сверка обязана только ДОПОЛНЯТЬ: `?? 0` записал бы настоящий ноль,
+    // а негодная дата ушла бы в `date NOT NULL` и уронила пачку (R-FW-S3).
+    const r2 = reconcilePurchases([], [
+      { id: 10, dt: "позавчера", product: "TUC Sour cream", qty: "6", unit_price: "1" },
+      { id: 11, dt: "2026-07-13", product: "TUC Sour cream", qty: "н/д", unit_price: "1" },
+      { id: 12, dt: "2026-07-13", product: "TUC Sour cream", qty: "6", unit_price: "бесплатно" },
+      { id: 13, dt: "2026-07-13", product: null, qty: "6", unit_price: "1" },
+    ]);
+    assert.deepEqual(r2.missing, []);
+    assert.deepEqual(r2.rejected, [
+      { extId: "10", reason: "no_date", value: "позавчера" },
+      { extId: "11", reason: "bad_qty", value: "н/д" },
+      { extId: "12", reason: "bad_price", value: "бесплатно" },
+      { extId: "13", reason: "no_product", value: "" },
+    ]);
+  });
+  it("пустая цена — законное «цены нет» (158 строк 2025), а не мусор", () => {
+    const r2 = reconcilePurchases([], [{ id: 14, dt: "2025-08-18", product: "TUC Sour cream", qty: "24", unit_price: null }]);
+    assert.deepEqual([r2.rejected, r2.missing], [[], [{ extId: "14", dt: "2025-08-18", product: "TUC Sour cream", qty: 24, unitPrice: null }]]);
+  });
+  it("мусор в строке, которая у нас ЕСТЬ, — расхождение с СЫРЫМ значением донора", () => {
+    // «у донора 0» там, где у него «н/д», было бы нашей выдумкой в отчёте о его данных.
+    const r2 = reconcilePurchases(
+      [{ extId: "15", dt: "2026-07-13", product: "TUC Sour cream", qty: 6, unitPrice: 100 }],
+      [{ id: 15, dt: "2026-07-13", product: "TUC Sour cream", qty: "н/д", unit_price: "100" }],
+    );
+    assert.deepEqual(r2.differing, [{ extId: "15", field: "qty", mine: 6, donor: "н/д" }]);
+    assert.deepEqual([r2.missing, r2.rejected], [[], []]);
   });
   it("копеечная разница numeric против float расхождением не считается", () => {
     const r2 = reconcilePurchases([{ extId: "1", dt: "2025-08-18", product: "Pepsi 0,5", qty: 24, unitPrice: 2600 }],
