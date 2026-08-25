@@ -45,7 +45,17 @@ import { normalizeProductName } from "./vending-calc";
 /** Строки донора как их отдаёт SQL: числа приходят строками postgres.js. */
 export interface DonorRefillRow { id: number | string; dt: string; machine_serial: string | null; product: string; qty: string | number }
 export interface DonorStockCountRow { id: number | string; dt: string; product: string; qty: string | number; counted_at: string | Date | null }
-export interface DonorPurchaseRow { id: number | string; dt: string; product: string; qty: string | number; unit_price: string | number | null }
+/**
+ * `unit`/`note`/`total` — ровно те же колонки, что тянет синк снабжения
+ * (`supply.service.ts`). Они не участвуют в сверке, но едут в дописываемую
+ * строку: иначе она отличалась бы от 342 соседей зеркала пустой единицей и
+ * посчитанной в JS суммой. `total` у донора — GENERATED-колонка, считать её
+ * второй раз у себя незачем.
+ */
+export interface DonorPurchaseRow {
+  id: number | string; dt: string; product: string; qty: string | number; unit_price: string | number | null;
+  unit?: string | null; note?: string | null; total?: string | number | null;
+}
 
 /** Канон имени: точное сопоставление через алиасы и прайс. `null` — канона НЕТ. */
 export type CanonIndex = (raw: string) => string | null;
@@ -132,6 +142,56 @@ export function canonicalProductName(raw: string, canon: CanonIndex): [string, b
   const cleaned = stripMergedMarker(decodeHtml(raw));
   const hit = canon(cleaned);
   return hit === null ? [cleaned, false] : [hit, true];
+}
+
+/** Карточка прайса и алиас — ровно то, из чего строится индекс каталога. */
+export interface ProductRow { id: string; name: string }
+export interface AliasRow { productId: string; alias: string }
+
+/** Индекс каталога: одна сборка — два ответа. */
+export interface ProductIndex {
+  /** Сырое имя → каноническое ИМЯ прайса. `null` — карточки нет. */
+  canon: CanonIndex;
+  /** Сырое имя → id карточки. `null` — карточки нет. */
+  id: (raw: string) => string | null;
+}
+
+/**
+ * Индекс каталога товаров — ОДНА сборка на оба вопроса, которые к нему задают.
+ *
+ * Вопроса ровно два, и они разные: бэкфиллу привязок нужен `id` карточки, а
+ * импорту истории — каноническое ИМЯ (его кладут в `product_name`, чтобы
+ * отчёт за прошлый месяц не менял содержание, когда товар переименуют).
+ * Раньше это было двумя дословными копиями одной и той же сборки в
+ * `backfill-product-ids.ts` и в скрипте импорта — а сборка тут не тривиальная:
+ * в ней живёт решение «алиас на удалённый товар в карту НЕ попадает» и выбор
+ * нормализации. Копии таких решений расходятся на первом же новом алиасе.
+ *
+ * Сопоставление — только точное, по `normalizeProductName`; нечёткого здесь
+ * нет и быть не должно (см. решение 1 в шапке файла).
+ */
+export function productIndex(products: readonly ProductRow[], aliases: readonly AliasRow[]): ProductIndex {
+  const nameById = new Map(products.map((p) => [p.id, p.name]));
+  const aliasByKey = new Map<string, string>();
+  for (const a of aliases) {
+    const canonical = nameById.get(a.productId);
+    // Алиас на удалённый товар — не повод привязать строку к чему попало.
+    if (canonical) aliasByKey.set(normalizeProductName(a.alias), canonical);
+  }
+  const canonByKey = new Map(products.map((p) => [normalizeProductName(p.name), p.name]));
+  const idByKey = new Map(products.map((p) => [normalizeProductName(p.name), p.id]));
+
+  const canon: CanonIndex = (raw) => {
+    const key = normalizeProductName(raw);
+    return aliasByKey.get(key) ?? canonByKey.get(key) ?? null;
+  };
+  return {
+    canon,
+    id: (raw) => {
+      const c = canon(raw);
+      return c === null ? null : (idByKey.get(normalizeProductName(c)) ?? null);
+    },
+  };
 }
 
 /**

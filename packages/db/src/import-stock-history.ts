@@ -16,7 +16,8 @@
  * ПОЧЕМУ СКРИПТ, А НЕ МИГРАЦИЯ. Резолв имени товара — это КОД (`vending_alias`
  * + `normalizeProductName`), а не SQL-выражение; повторить его в миграции
  * значило бы завести вторую реализацию правила, которая разойдётся с Core на
- * первом же новом алиасе. Ровно та же причина, что у `backfill-product-ids.ts`.
+ * первом же новом алиасе. Ровно та же причина, что у `backfill-product-ids.ts`,
+ * и тот же общий индекс каталога (`productIndex` из `@mydon/shared`).
  *
  * ДОНОР ЧИТАЕТСЯ ТОЛЬКО НА ЧТЕНИЕ. Подключение к `STOCK_DATABASE_URL`
  * открывается с `max: 1` и исполняет исключительно SELECT: чужая база — это
@@ -32,6 +33,11 @@
  * `--apply` записывает ноль строк — и говорит именно «ноль», потому что
  * `written` считается по длине `returning()`, а не по длине входа.
  *
+ * ПРИМЕРКА ПОКАЗЫВАЕТ, ЧТО НАПИШЕТ ЗАПИСЬ. В отчёте есть колонка «к записи»:
+ * в `--dry-run` она и есть ответ на вопрос «что будет», а в `--apply` рядом с
+ * ней стоит «записано», и расхождение между ними читается сразу — именно так
+ * повторный прогон честно говорит «к записи 107, записано 0, всё уже лежит».
+ *
  * Запуск (шаг выкатки, ДВА прогона — сначала пробный):
  *   node packages/db/dist/import-stock-history.js --dry-run </dev/null
  *   node packages/db/dist/import-stock-history.js --apply   </dev/null
@@ -44,15 +50,15 @@ import {
   machineSerialKeys,
   mapRefill,
   mapStockCount,
-  normalizeProductName,
+  productIndex,
   reconcilePurchases,
   strictNumber,
-  type CanonIndex,
   type DonorPurchaseRow,
   type DonorRefillRow,
   type DonorStockCountRow,
   type PurchaseDiff,
   type PurchaseFacts,
+  type Unresolved,
 } from "@mydon/shared";
 import { createDb, type Database } from "./index";
 import { entity, event, purchase, vendingAlias, vendingProduct, vendingRefill, vendingStockCount } from "./schema";
@@ -69,59 +75,72 @@ export interface DonorReader {
   purchases(): Promise<DonorPurchaseRow[]>;
 }
 
+/**
+ * Причина, по которой строка донора НЕ поехала.
+ *
+ * Четыре приходят из маппинга (`@mydon/shared`), пятая — наша: колонка
+ * `vending_refill.qty` целочисленная, а у донора `NUMERIC`.
+ */
+export type SkipReason = Unresolved["reason"] | "fractional_qty";
+
+/** Причина → id донорских строк. Счёт — это длина списка, отдельно его не держим. */
+export type SkipLog = Partial<Record<SkipReason, string[]>>;
+
 export interface ImportSection {
+  /** Сколько строк отдал донор. */
   found: number;
+  /** Сколько строк ГОДНЫ к записи — ответ примерки на «что будет». */
+  toWrite: number;
+  /** Сколько РЕАЛЬНО легло (длина `returning()`), а не сколько отправили. */
   written: number;
   skipped: number;
+  /** Все причины отказа поимённо: «пропущено 348» без причины — не отчёт. */
+  reasons: SkipLog;
 }
 
 export interface StockHistoryReport {
   apply: boolean;
-  /** `fractionalQty` — id заливов с дробным qty: INTEGER у нас, NUMERIC у донора. */
   refills: ImportSection & { noSerial: number; fractionalQty: string[] };
   stockCounts: ImportSection & { serviceRows: number };
-  purchases: { mine: number; donor: number; added: number; differing: PurchaseDiff[]; onlyMine: number };
+  purchases: { mine: number; donor: number; toWrite: number; added: number; differing: PurchaseDiff[]; onlyMine: number };
   /** Имена без карточки прайса — уезжают в отчёт и в событие (R-P8a-7). */
   unresolved: string[];
+}
+
+/**
+ * Запись оборвалась на середине — но отчёт по уже сделанному есть.
+ *
+ * Частичная запись здесь допустима (каждая пачка идемпотентна, повтор дожмёт),
+ * а вот молчание о ней — нет: оператор разового шага выкатки обязан узнать,
+ * сколько строк успело лечь, до того как увидит текст ошибки.
+ */
+export class ImportWriteFailure extends Error {
+  constructor(
+    readonly report: StockHistoryReport,
+    readonly reason: unknown,
+  ) {
+    super(reason instanceof Error ? reason.message : String(reason));
+    this.name = "ImportWriteFailure";
+  }
 }
 
 /** Пачка вставки — как у синка снабжения: 500 строк за запрос. */
 const BATCH = 500;
 
-// ── Канон имени товара ──────────────────────────────────────────────────────
+/** Отметка импорта в журнале и `source` его строк — одно слово на весь срез. */
+const IMPORT_SOURCE = "stock-import";
+const IMPORT_EVENT = "stock.history.imported";
 
-/**
- * Карта канона имени товара — то же правило, что у Core, но с другим ответом.
- *
- * `resolveProductIds` (backfill) отдаёт `id`, а маппингу истории нужно ИМЯ:
- * `vending_refill.product_name` и `vending_stock_count.product_name` хранят
- * канон словами, чтобы отчёт за прошлый месяц не менял содержание, когда
- * товар переименуют. Поэтому здесь строится вторая проекция того же индекса —
- * алиас → канон и канон → id, — а не копия чужого правила: нормализация одна
- * и та же (`normalizeProductName`), и алиас на удалённый товар в карту не
- * попадает так же, как там.
- */
-export function buildCanonIndex(
-  products: readonly { id: string; name: string }[],
-  aliases: readonly { productId: string; alias: string }[],
-): { canon: CanonIndex; idByName: (name: string) => string | null } {
-  const nameById = new Map(products.map((p) => [p.id, p.name]));
-  const aliasByKey = new Map<string, string>();
-  for (const a of aliases) {
-    const canonical = nameById.get(a.productId);
-    // Алиас на удалённый товар — не повод привязать строку к чему попало.
-    if (canonical) aliasByKey.set(normalizeProductName(a.alias), canonical);
-  }
-  const canonByKey = new Map(products.map((p) => [normalizeProductName(p.name), p.name]));
-  const idByKey = new Map(products.map((p) => [normalizeProductName(p.name), p.id]));
+// ── Учёт отказов ────────────────────────────────────────────────────────────
 
-  return {
-    canon: (raw) => {
-      const key = normalizeProductName(raw);
-      return aliasByKey.get(key) ?? canonByKey.get(key) ?? null;
-    },
-    idByName: (name) => idByKey.get(normalizeProductName(name)) ?? null,
-  };
+function отложить(log: SkipLog, reason: SkipReason, extId: string): void {
+  const список = log[reason];
+  if (список) список.push(extId);
+  else log[reason] = [extId];
+}
+
+function сколько(log: SkipLog, reason: SkipReason): number {
+  return log[reason]?.length ?? 0;
 }
 
 /** Карта «серийник → карточка автомата» по ОБЕИМ формам написания (`machineSerialKeys`). */
@@ -149,6 +168,11 @@ async function insertBatched<T>(rows: readonly T[], run: (batch: T[]) => Promise
   return written;
 }
 
+/** `count(*)` одной колонкой: заглушка теста отдаёт то же, что настоящий Postgres. */
+async function число(rows: Promise<{ n: unknown }[]>): Promise<number> {
+  return Number((await rows)[0]?.n ?? 0);
+}
+
 export async function importStockHistory(
   db: Database,
   donor: DonorReader,
@@ -159,7 +183,7 @@ export async function importStockHistory(
     db.select({ productId: vendingAlias.productId, alias: vendingAlias.alias }).from(vendingAlias),
     db.select({ id: entity.id, externalRef: entity.externalRef }).from(entity).where(eq(entity.type, "machine")),
   ]);
-  const { canon, idByName } = buildCanonIndex(products, aliases);
+  const каталог = productIndex(products, aliases);
   const idBySerial = machineIdBySerial(machines);
 
   /** Имена без карточки прайса — общий список на все источники (R-P8a-7). */
@@ -168,19 +192,18 @@ export async function importStockHistory(
   // ── Заливы (R-P8a-2) ──
   const donorRefills = await donor.refills();
   const refillValues: (typeof vendingRefill.$inferInsert)[] = [];
-  const fractionalQty: string[] = [];
-  let noSerial = 0;
+  const refillSkips: SkipLog = {};
   for (const row of donorRefills) {
-    const m = mapRefill(row, canon);
+    const m = mapRefill(row, каталог.canon);
     if (!m.ok) {
-      if (m.reason === "no_serial") noSerial += 1;
+      отложить(refillSkips, m.reason, m.extId);
       continue;
     }
     // `refills.qty` донора — NUMERIC, наша колонка — INTEGER. Дробь, дошедшая
     // до Postgres, уронила бы ПАЧКУ целиком ('6.5'::int4), и разовый шаг
     // выкатки выглядел бы сломанным вместо «одна строка не влезла».
     if (!Number.isInteger(m.row.qty)) {
-      fractionalQty.push(String(row.id));
+      отложить(refillSkips, "fractional_qty", String(row.id));
       continue;
     }
     if (m.rawName !== null) unresolved.add(m.rawName);
@@ -188,7 +211,7 @@ export async function importStockHistory(
       machineId: idBySerial.get(m.row.machineSerial) ?? null,
       machineSerial: m.row.machineSerial,
       coilId: m.row.coilId,
-      productId: idByName(m.row.productName),
+      productId: каталог.id(m.row.productName),
       productName: m.row.productName,
       qty: m.row.qty,
       personId: m.row.personId,
@@ -202,18 +225,18 @@ export async function importStockHistory(
   // ── Инвентаризации склада (R-P8a-3) ──
   const donorCounts = await donor.stockCounts();
   const countValues: (typeof vendingStockCount.$inferInsert)[] = [];
-  let serviceRows = 0;
+  const countSkips: SkipLog = {};
   for (const row of donorCounts) {
-    const m = mapStockCount(row, canon);
+    const m = mapStockCount(row, каталог.canon);
     if (!m.ok) {
-      if (m.reason === "service_row") serviceRows += 1;
+      отложить(countSkips, m.reason, m.extId);
       continue;
     }
     if (m.rawName !== null) unresolved.add(m.rawName);
     countValues.push({
       dt: m.row.dt,
       productName: m.row.productName,
-      productId: idByName(m.row.productName),
+      productId: каталог.id(m.row.productName),
       qty: String(m.row.qty),
       source: m.row.source,
       extId: m.row.extId,
@@ -244,86 +267,139 @@ export async function importStockHistory(
     unitPrice: r.unitPrice === null ? null : strictNumber(r.unitPrice),
   }));
   const { missing, differing, onlyMine } = reconcilePurchases(mine, donorPurchases);
-  const purchaseValues: (typeof purchase.$inferInsert)[] = missing.map((p) => ({
-    extId: p.extId,
-    dt: p.dt,
-    product: p.product,
-    qty: String(p.qty),
-    unitPrice: p.unitPrice === null ? null : String(p.unitPrice),
-    total: p.unitPrice === null ? null : String(p.qty * p.unitPrice),
-    note: "сверка П8a: дописано из mydon-stock",
-    source: "stock",
-  }));
+  // Дописанная строка обязана быть НЕОТЛИЧИМА от 342 соседей зеркала: те же
+  // `unit`, `note` и `total` из донора, что тянет синк снабжения. `total` у
+  // донора — GENERATED-колонка (qty*unit_price); считать её второй раз в
+  // плавающей точке значит завести собственную версию суммы.
+  const donorById = new Map(donorPurchases.map((d) => [String(d.id), d] as const));
+  const purchaseValues: (typeof purchase.$inferInsert)[] = missing.map((p) => {
+    const d = donorById.get(p.extId);
+    const total = strictNumber(d?.total ?? null);
+    return {
+      extId: p.extId,
+      dt: p.dt,
+      product: p.product,
+      unit: d?.unit ? String(d.unit) : null,
+      qty: String(p.qty),
+      unitPrice: p.unitPrice === null ? null : String(p.unitPrice),
+      total: total === null ? null : String(total),
+      note: d?.note ? String(d.note).slice(0, 1000) : null,
+      source: "stock",
+    };
+  });
 
   const report: StockHistoryReport = {
     apply: opts.apply,
     refills: {
       found: donorRefills.length,
+      toWrite: refillValues.length,
       written: 0,
       skipped: donorRefills.length - refillValues.length,
-      noSerial,
-      fractionalQty,
+      reasons: refillSkips,
+      noSerial: сколько(refillSkips, "no_serial"),
+      fractionalQty: refillSkips.fractional_qty ?? [],
     },
     stockCounts: {
       found: donorCounts.length,
+      toWrite: countValues.length,
       written: 0,
       skipped: donorCounts.length - countValues.length,
-      serviceRows,
+      reasons: countSkips,
+      serviceRows: сколько(countSkips, "service_row"),
     },
-    purchases: { mine: mine.length, donor: donorPurchases.length, added: 0, differing, onlyMine: onlyMine.length },
+    purchases: {
+      mine: mine.length,
+      donor: donorPurchases.length,
+      toWrite: purchaseValues.length,
+      added: 0,
+      differing,
+      onlyMine: onlyMine.length,
+    },
     unresolved: [...unresolved].sort((a, b) => a.localeCompare(b, "ru")),
   };
 
   if (!opts.apply) return report;
 
-  // Транзакции на весь перенос нет намеренно: каждая пачка идемпотентна по
-  // уникальному ключу, поэтому оборванный прогон не оставляет состояния,
-  // которое нельзя починить — повтор просто дописывает недостающее. Одна
-  // транзакция на 460 строк добавила бы только длинную блокировку.
-  report.refills.written = await insertBatched(refillValues, (batch) =>
-    db.insert(vendingRefill).values(batch).onConflictDoNothing({ target: vendingRefill.clientKey }).returning({ id: vendingRefill.id }),
-  );
-  report.stockCounts.written = await insertBatched(countValues, (batch) =>
-    db
-      .insert(vendingStockCount)
-      .values(batch)
-      // `where` у `onConflictDoNothing` — это ПРЕДИКАТ ЧАСТИЧНОГО ИНДЕКСА
-      // (drizzle подставляет его сразу после списка колонок), без него
-      // Postgres не выведет `vending_stock_count_src_key` и ответит
-      // «no unique or exclusion constraint matching the ON CONFLICT».
-      .onConflictDoNothing({
-        target: [vendingStockCount.source, vendingStockCount.extId],
-        where: sql`${vendingStockCount.extId} is not null`,
-      })
-      .returning({ id: vendingStockCount.id }),
-  );
-  report.purchases.added = await insertBatched(purchaseValues, (batch) =>
-    db.insert(purchase).values(batch).onConflictDoNothing({ target: [purchase.source, purchase.extId] }).returning({ id: purchase.id }),
-  );
+  try {
+    // Транзакции на весь перенос нет намеренно: каждая пачка идемпотентна по
+    // уникальному ключу, поэтому оборванный прогон не оставляет состояния,
+    // которое нельзя починить — повтор просто дописывает недостающее. Одна
+    // транзакция на 460 строк добавила бы только длинную блокировку.
+    report.refills.written = await insertBatched(refillValues, (batch) =>
+      db
+        .insert(vendingRefill)
+        .values(batch)
+        .onConflictDoNothing({ target: vendingRefill.clientKey })
+        .returning({ id: vendingRefill.id }),
+    );
+    report.stockCounts.written = await insertBatched(countValues, (batch) =>
+      db
+        .insert(vendingStockCount)
+        .values(batch)
+        // `where` у `onConflictDoNothing` — это ПРЕДИКАТ ЧАСТИЧНОГО ИНДЕКСА
+        // (drizzle подставляет его сразу после списка колонок), без него
+        // Postgres не выведет `vending_stock_count_src_key` и ответит
+        // «no unique or exclusion constraint matching the ON CONFLICT».
+        .onConflictDoNothing({
+          target: [vendingStockCount.source, vendingStockCount.extId],
+          where: sql`${vendingStockCount.extId} is not null`,
+        })
+        .returning({ id: vendingStockCount.id }),
+    );
+    report.purchases.added = await insertBatched(purchaseValues, (batch) =>
+      db
+        .insert(purchase)
+        .values(batch)
+        .onConflictDoNothing({ target: [purchase.source, purchase.extId] })
+        .returning({ id: purchase.id }),
+    );
 
-  const всего = report.refills.written + report.stockCounts.written + report.purchases.added;
-  // Отметка ставится на ФАКТ переноса, а не на факт запуска: R-P8a-5 знает
-  // ровно одно событие `stock.history.imported`. Повторный `--apply`, который
-  // ничего не записал, второй отметки не оставляет — иначе журнал наполнялся
-  // бы нулевыми «импортами», и найти настоящий было бы нечем.
-  if (всего > 0) {
-    await db.insert(event).values([
-      {
-        source: "stock-import",
-        type: "stock.history.imported",
-        payload: {
-          refills: report.refills.written,
-          stockCounts: report.stockCounts.written,
-          purchasesAdded: report.purchases.added,
-          unresolved: report.unresolved,
-          skippedNoSerial: report.refills.noSerial,
-          skippedService: report.stockCounts.serviceRows,
+    if (await нуженСлед(db, report.refills.written + report.stockCounts.written + report.purchases.added)) {
+      await db.insert(event).values([
+        {
+          source: IMPORT_SOURCE,
+          type: IMPORT_EVENT,
+          payload: {
+            refills: report.refills.written,
+            stockCounts: report.stockCounts.written,
+            purchasesAdded: report.purchases.added,
+            unresolved: report.unresolved,
+            skippedNoSerial: report.refills.noSerial,
+            skippedService: report.stockCounts.serviceRows,
+          },
         },
-      },
-    ]);
+      ]);
+    }
+  } catch (err) {
+    throw new ImportWriteFailure(report, err);
   }
 
   return report;
+}
+
+/**
+ * Ставить ли отметку `stock.history.imported` (R-P8a-5).
+ *
+ * ДА, если этот прогон что-то записал, — обычный случай.
+ *
+ * И ТАКЖЕ ДА, если отметки в журнале нет, а строки импорта в базе есть. Это
+ * дыра, которую иначе не закрыть ничем, кроме ручного INSERT: процесс умер
+ * между последней пачкой и записью события (или упало само событие) — строки
+ * лежат, следа нет, и КАЖДЫЙ следующий `--apply` запишет ноль, то есть
+ * «записал → ставим отметку» не сработает уже никогда. Проверка §6 выкатки
+ * (`count(*) … = 1`) стала бы невыполнимой на ровном месте.
+ *
+ * Отметка при этом не задвоится: как только она есть, первое условие ложно,
+ * а второе гасится её же наличием.
+ */
+async function нуженСлед(db: Database, всего: number): Promise<boolean> {
+  if (всего > 0) return true;
+  const [отметок, заливов, пересчётов] = await Promise.all([
+    число(db.select({ n: sql<number>`count(*)` }).from(event).where(eq(event.type, IMPORT_EVENT))),
+    число(db.select({ n: sql<number>`count(*)` }).from(vendingRefill).where(eq(vendingRefill.source, IMPORT_SOURCE))),
+    число(db.select({ n: sql<number>`count(*)` }).from(vendingStockCount).where(eq(vendingStockCount.source, IMPORT_SOURCE))),
+  ]);
+  return отметок === 0 && заливов + пересчётов > 0;
 }
 
 // ── Донор через postgres.js ─────────────────────────────────────────────────
@@ -361,9 +437,11 @@ export function sqlDonor(url: string, schema = "public"): { reader: DonorReader;
           join ${client(schema)}.products p on p.id = s.product_id
          where s.machine_id is null
          order by s.id`) as unknown as DonorStockCountRow[],
+    // `unit`/`note`/`total` — те же колонки, что у синка снабжения: строка,
+    // дописанная сверкой, не должна отличаться от соседей зеркала.
     purchases: async () =>
       (await client`
-        select pu.id, pu.dt::text as dt, p.name as product, pu.qty, pu.unit_price
+        select pu.id, pu.dt::text as dt, p.name as product, p.unit, pu.qty, pu.unit_price, pu.total, pu.note
           from ${client(schema)}.purchases pu
           join ${client(schema)}.products p on p.id = pu.product_id
          order by pu.id`) as unknown as DonorPurchaseRow[],
@@ -373,13 +451,40 @@ export function sqlDonor(url: string, schema = "public"): { reader: DonorReader;
 
 // ── Отчёт ───────────────────────────────────────────────────────────────────
 
-/** Список имён в одну строку: не больше 20, остальные — числом. */
+/** Причина отказа словами: «пропущено 348» без объяснения — не отчёт, а загадка. */
+const ПРИЧИНЫ: Record<SkipReason, string> = {
+  no_serial: "без серийника (агрегат, в архив)",
+  service_row: "служебная строка",
+  bad_qty: "негодный qty",
+  no_date: "негодная дата",
+  fractional_qty: "дробный qty (колонка целочисленная)",
+};
+
+/** Список в одну строку: не больше 20, остальные — числом. */
 function перечислить(items: readonly string[], предел = 20): string {
   return items.length <= предел ? items.join(", ") : `${items.slice(0, предел).join(", ")} и ещё ${items.length - предел}`;
 }
 
-function строкаТаблицы(источник: string, s: ImportSection, хвост: string): string {
-  return `${источник.padEnd(38)}${String(s.found).padStart(8)}${String(s.written).padStart(10)}${String(s.skipped).padStart(11)}  ${хвост}`;
+/** Все НЕНУЛЕВЫЕ причины подряд, каждая с id: строка без причины ничего не объясняет. */
+function причины(log: SkipLog): string {
+  const части = (Object.keys(ПРИЧИНЫ) as SkipReason[])
+    .filter((r) => сколько(log, r) > 0)
+    .map((r) => `${ПРИЧИНЫ[r]} ${сколько(log, r)}`);
+  return части.length === 0 ? "—" : части.join(", ");
+}
+
+function строкаТаблицы(источник: string, s: ImportSection): string {
+  return (
+    `${источник.padEnd(38)}${String(s.found).padStart(8)}${String(s.toWrite).padStart(10)}` +
+    `${String(s.written).padStart(10)}${String(s.skipped).padStart(11)}  ${причины(s.reasons)}`
+  );
+}
+
+/** Отложенные строки поимённо — чтобы расхождение не пришлось ловить арифметикой. */
+function отложенные(что: string, log: SkipLog): string[] {
+  return (Object.keys(ПРИЧИНЫ) as SkipReason[])
+    .filter((r) => сколько(log, r) > 0 && r !== "no_serial")
+    .map((r) => `  ${что}, ${ПРИЧИНЫ[r]} (${сколько(log, r)}): id ${перечислить(log[r] ?? [])}`);
 }
 
 export function formatReport(r: StockHistoryReport): string {
@@ -389,24 +494,26 @@ export function formatReport(r: StockHistoryReport): string {
   строки.push(
     r.apply
       ? "Импорт истории склада mydon-stock — РЕЖИМ --apply: строки ЗАПИСАНЫ."
-      : "Импорт истории склада mydon-stock — РЕЖИМ --dry-run: НИЧЕГО не записано, это примерка.",
+      : "Импорт истории склада mydon-stock — РЕЖИМ --dry-run: НИЧЕГО не записано, это примерка. Колонка «к записи» — что сделает --apply.",
   );
   строки.push("");
-  строки.push(`${"источник".padEnd(38)}${"найдено".padStart(8)}${"записано".padStart(10)}${"пропущено".padStart(11)}  почему пропущено`);
   строки.push(
-    строкаТаблицы(
-      "заливы → vending_refill",
-      r.refills,
-      `без серийника ${r.refills.noSerial} (агрегат, в архив)` +
-        (r.refills.fractionalQty.length > 0 ? `, дробный qty ${r.refills.fractionalQty.length}` : ""),
-    ),
+    `${"источник".padEnd(38)}${"найдено".padStart(8)}${"к записи".padStart(10)}${"записано".padStart(10)}${"пропущено".padStart(11)}  почему пропущено`,
   );
-  строки.push(строкаТаблицы("инвентаризации → vending_stock_count", r.stockCounts, `служебных ${r.stockCounts.serviceRows}`));
+  строки.push(строкаТаблицы("заливы → vending_refill", r.refills));
+  строки.push(строкаТаблицы("инвентаризации → vending_stock_count", r.stockCounts));
   строки.push(
-    `${"закупки → purchase (сверка)".padEnd(38)}${String(r.purchases.donor).padStart(8)}${String(r.purchases.added).padStart(10)}${"—".padStart(11)}  ` +
+    `${"закупки → purchase (сверка)".padEnd(38)}${String(r.purchases.donor).padStart(8)}` +
+      `${String(r.purchases.toWrite).padStart(10)}${String(r.purchases.added).padStart(10)}${"—".padStart(11)}  ` +
       `у нас ${r.purchases.mine}, только у нас ${r.purchases.onlyMine}, расхождений ${r.purchases.differing.length}`,
   );
   строки.push("");
+
+  const отказы = [...отложенные("заливы", r.refills.reasons), ...отложенные("инвентаризации", r.stockCounts.reasons)];
+  if (отказы.length > 0) {
+    строки.push("Отложенные строки поимённо (кроме «общих» заливов — их 348 и они ожидаемы):");
+    строки.push(...отказы);
+  }
 
   строки.push(
     r.unresolved.length === 0
@@ -414,12 +521,6 @@ export function formatReport(r: StockHistoryReport): string {
       : `Имена без карточки прайса (${r.unresolved.length}) — строки импортированы с product_id = NULL, это список владельцу:`,
   );
   if (r.unresolved.length > 0) строки.push(`  ${перечислить(r.unresolved)}`);
-
-  if (r.refills.fractionalQty.length > 0) {
-    строки.push(
-      `Заливы с дробным qty (${r.refills.fractionalQty.length}) НЕ импортированы — колонка целочисленная, id: ${перечислить(r.refills.fractionalQty)}`,
-    );
-  }
 
   if (r.purchases.differing.length > 0) {
     // Расхождения НЕ правятся (R-P8a-1): зеркало заполнял другой код, и молча
@@ -433,12 +534,15 @@ export function formatReport(r: StockHistoryReport): string {
 
   строки.push("");
   // Разборная строка: её парсит дымовой прогон и по ней же сверяется выкатка.
+  // `toWrite` рядом с записанным намеренно: на повторе они разойдутся, и это
+  // единственный способ отличить «нечего писать» от «не сумел записать».
   строки.push(
     `ИТОГИ(json): ${JSON.stringify({
       apply: r.apply,
       refills: r.refills.written,
       stockCounts: r.stockCounts.written,
       purchasesAdded: r.purchases.added,
+      toWrite: { refills: r.refills.toWrite, stockCounts: r.stockCounts.toWrite, purchasesAdded: r.purchases.toWrite },
       unresolved: r.unresolved.length,
     })}`,
   );
@@ -470,7 +574,9 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const { reader, close } = sqlDonor(donorUrl, process.env.STOCK_SCHEMA ?? "public");
+  // `||`, а не `??`: пустая строка в переменной — это «не задано», а не схема
+  // с пустым именем, из которой вышло бы `"".refills` и невнятная ошибка.
+  const { reader, close } = sqlDonor(donorUrl, process.env.STOCK_SCHEMA || "public");
   try {
     console.log(formatReport(await importStockHistory(createDb(url), reader, { apply })));
   } finally {
@@ -484,6 +590,9 @@ async function main(): Promise<void> {
 
 if (require.main === module) {
   main().catch((err: unknown) => {
+    // Отчёт по уже сделанному — ПЕРЕД текстом ошибки: частичная запись
+    // допустима, молчание о её размере — нет.
+    if (err instanceof ImportWriteFailure) console.log(formatReport(err.report));
     console.error("Импорт истории склада упал:", err instanceof Error ? err.message : err);
     process.exit(1);
   });

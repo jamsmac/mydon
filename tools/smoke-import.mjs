@@ -15,12 +15,22 @@
  *   · чтение донора из другой схемы (`STOCK_SCHEMA`) — квалификация имён
  *     таблиц живёт в шаблонной строке postgres.js и типами не проверяется.
  *
+ * ЭТОТ ПРОГОН ПИШЕТ В БАЗУ — И ПОТОМУ ОТКАЗЫВАЕТСЯ РАБОТАТЬ НЕ НА SCRATCH.
+ * Рядом, в отчёте выкатки, операторов учат `export DATABASE_URL=…`; один такой
+ * экспорт с боевой строкой — и прогон снёс бы 107 перенесённых заливов, 460
+ * инвентаризаций и единственную отметку R-P8a-5, а в прод завёл фикстурную
+ * схему. Пока донор жив, это лечилось бы повторным `--apply`; после П8
+ * (гашения донора) — уже нет. Поэтому две заставы до первой записи:
+ *   1. хост `DATABASE_URL` обязан быть локальным;
+ *   2. в базе не должно быть НИ ОДНОЙ строки импорта и ни одной его отметки.
+ * И уборка сносит только СВОИ строки — по точным ключам фикстуры и по id
+ * события, которое этот прогон своими глазами увидел появившимся.
+ *
  * ЧТО ДЕЛАЕТ. Заводит в scratch-БД схему `stock_donor` с пятью минимальными
  * таблицами донора и восемью строками — по одной на каждое правило переноса, —
  * гоняет скрипт `--dry-run`, затем `--apply` ДВАЖДЫ и сверяет числа и по
- * отчёту, и запросами к базе. В конце убирает за собой и схему, и свои строки
- * в mydon: следом в CI идёт `smoke-core.mjs`, и чужой приход в его выборках
- * никому не нужен.
+ * отчёту, и запросами к базе. В конце убирает за собой: следом в CI идёт
+ * `smoke-core.mjs`, и чужой приход в его выборках никому не нужен.
  *
  * Запуск локально (scratch-база, НЕ прод):
  *   createdb p8asmoke_t3
@@ -58,8 +68,31 @@ const СЕРИЙНИК_КАНОН = "2508160376";
 /** ext_id закупки, которая У НАС УЖЕ ЕСТЬ: сверка не должна её дублировать. */
 const ЗАКУПКА_БЛИЗНЕЦ = "901";
 
-// `onnotice` глушит болтовню Postgres («drop cascades to 5 other objects»):
-// в логе CI она выглядит как ошибка и прячет настоящие строки прогона.
+/** Ровно те ключи, которые может создать ЭТА фикстура, — по ним и убираем. */
+const СВОИ_ЗАЛИВЫ = ["stock:refill:411", "stock:refill:412"];
+const СВОИ_ПЕРЕСЧЁТЫ = ["77", "78", "79", "80"];
+const СВОИ_ЗАКУПКИ = [ЗАКУПКА_БЛИЗНЕЦ, "902"];
+/** id событий импорта, появившихся ПРИ ЭТОМ прогоне (до него их было 0). */
+const СВОИ_СОБЫТИЯ = new Set();
+
+/** Заводили ли мы фикстуру: не заводили — и убирать нечего. */
+let завёл = false;
+
+/**
+ * Локальный ли хост базы. Ремень поверх подтяжек: даже пустая база на боевом
+ * сервере — не место для прогона, который создаёт схемы и пишет строки.
+ */
+function безопасныйХост(url) {
+  let hostname;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  // Пустой хост — подключение через unix-сокет, то есть та же машина.
+  return ["", "localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname);
+}
+
 const sql = postgres(DATABASE_URL, { prepare: false, max: 1, onnotice: () => {} });
 
 function прогон(флаг) {
@@ -84,17 +117,51 @@ function сверить(что, факт, ожидание) {
   console.log(`  ✓ ${что}: ${b}`);
 }
 
+async function обязанОтказать(что, действие) {
+  const ошибка = await Promise.resolve()
+    .then(действие)
+    .then(() => null, (e) => e);
+  if (!ошибка) throw new Error(`${что}: отказа не было, а он обязателен`);
+  console.log(`  ✓ ${что} → «${ошибка.message}»`);
+}
+
 async function число(запрос) {
   const [row] = await запрос;
   return Number(row.n);
 }
 
+/**
+ * Застава: база обязана быть пустой по части импорта.
+ *
+ * Проверяется РОВНО то, что этот прогон создаёт и потом удаляет: строки
+ * `source='stock-import'` в обеих таблицах и отметки `stock.history.imported`.
+ * Есть хоть одна — это не scratch, а чья-то история, и трогать её нельзя.
+ */
+async function проверитьScratch() {
+  const [заливов, пересчётов, отметок] = await Promise.all([
+    число(sql`select count(*) n from vending_refill where source = 'stock-import'`),
+    число(sql`select count(*) n from vending_stock_count where source = 'stock-import'`),
+    число(sql`select count(*) n from event where type = 'stock.history.imported'`),
+  ]);
+  if (заливов + пересчётов + отметок > 0) {
+    throw new Error(
+      `база уже содержит импорт — смоук только на scratch (заливов ${заливов}, инвентаризаций ${пересчётов}, отметок ${отметок})`,
+    );
+  }
+}
+
+/** id событий импорта, которые видны сейчас, — запоминаем как СВОИ. */
+async function запомнитьСобытия() {
+  for (const r of await sql`select id from event where type = 'stock.history.imported'`) СВОИ_СОБЫТИЯ.add(r.id);
+}
+
 async function завестиДонора() {
   await sql.unsafe(`drop schema if exists ${СХЕМА} cascade`);
   await sql.unsafe(`create schema ${СХЕМА}`);
+  завёл = true;
   // Минимальный слепок донора: только колонки, которые читает импорт.
   await sql.unsafe(`
-    create table ${СХЕМА}.products (id serial primary key, name text not null unique);
+    create table ${СХЕМА}.products (id serial primary key, name text not null unique, unit text not null default 'шт');
     create table ${СХЕМА}.machines (id serial primary key, name text not null unique, serial text);
     create table ${СХЕМА}.refills (
       id serial primary key, dt date not null, machine_id int not null references ${СХЕМА}.machines(id),
@@ -105,7 +172,8 @@ async function завестиДонора() {
       counted_at timestamptz);
     create table ${СХЕМА}.purchases (
       id serial primary key, dt date not null, product_id int not null references ${СХЕМА}.products(id),
-      qty numeric not null check (qty > 0), unit_price numeric not null check (unit_price >= 0));
+      qty numeric not null check (qty > 0), unit_price numeric not null check (unit_price >= 0),
+      total numeric generated always as (qty * unit_price) stored, note text);
   `);
 
   // Имена — как они лежат у донора: с HTML-мусором панели и служебной строкой.
@@ -129,8 +197,9 @@ async function завестиДонора() {
       (80, '2026-08-11', null, 3, 12, null);
 
     -- 6. близнец уже существующей у нас закупки; 7. новая, с HTML-именем.
-    insert into ${СХЕМА}.purchases (id, dt, product_id, qty, unit_price) values
-      (${ЗАКУПКА_БЛИЗНЕЦ}, '2025-08-18', 1, 24, 0), (902, '2026-07-13', 2, 6, 8000);
+    insert into ${СХЕМА}.purchases (id, dt, product_id, qty, unit_price, note) values
+      (${ЗАКУПКА_БЛИЗНЕЦ}, '2025-08-18', 1, 24, 0, 'импорт:vendhub'),
+      (902, '2026-07-13', 2, 6, 8000, 'импорт:закупки');
   `);
 
   // Зеркало закупок «как на проде»: одна из двух донорских строк у нас уже есть.
@@ -140,15 +209,34 @@ async function завестиДонора() {
     on conflict (source, ext_id) do nothing`;
 }
 
+/**
+ * Убираем ТОЛЬКО своё: точные ключи фикстуры и id событий, которые этот прогон
+ * увидел появившимися. `delete … where source='stock-import'` здесь был бы
+ * ровно тем оружием, от которого стоят заставы выше.
+ */
 async function убратьЗаСобой() {
+  if (!завёл) return;
+  // Ещё раз добираем id событий: прогон мог упасть между записью и
+  // `запомнитьСобытия`. Это по-прежнему «только своё» — застава выше доказала,
+  // что до старта событий этого типа в базе не было НИ ОДНОГО.
+  await запомнитьСобытия().catch(() => {});
   await sql.unsafe(`drop schema if exists ${СХЕМА} cascade`);
-  await sql`delete from vending_refill where source = 'stock-import'`;
-  await sql`delete from vending_stock_count where source = 'stock-import'`;
-  await sql`delete from purchase where source = 'stock' and ext_id in (${ЗАКУПКА_БЛИЗНЕЦ}, '902')`;
-  await sql`delete from event where type = 'stock.history.imported'`;
+  await sql`delete from vending_refill where source = 'stock-import' and client_key in ${sql(СВОИ_ЗАЛИВЫ)}`;
+  await sql`delete from vending_stock_count where source = 'stock-import' and ext_id in ${sql(СВОИ_ПЕРЕСЧЁТЫ)}`;
+  await sql`delete from purchase where source = 'stock' and ext_id in ${sql(СВОИ_ЗАКУПКИ)}`;
+  if (СВОИ_СОБЫТИЯ.size > 0) await sql`delete from event where id in ${sql([...СВОИ_СОБЫТИЯ])}`;
 }
 
 try {
+  // ── Заставы до первой записи ──
+  if (!безопасныйХост(DATABASE_URL)) {
+    throw new Error(`DATABASE_URL смотрит не на локальную базу — смоук только на scratch, он ПИШЕТ: ${DATABASE_URL}`);
+  }
+  сверить("хост базы локальный", безопасныйХост(DATABASE_URL), true);
+  сверить("боевой хост был бы отвергнут", безопасныйХост("postgres://mydon:pw@46.62.144.36:5432/mydon"), false);
+  сверить("хост с опечаткой тоже отвергнут", безопасныйХост("не-адрес"), false);
+  await проверитьScratch();
+
   // Канон алиаса `O'zbegim` берём ИЗ БАЗЫ, а не переписываем сюда: смысл
   // проверки в том, что HTML-имя донора доехало до карточки прайса тем же
   // правилом, что у Core, — а не в том, что мы угадали строку сида.
@@ -162,7 +250,11 @@ try {
 
   // ── Примерка: отчёт полный, база нетронута ──
   const примерка = прогон("--dry-run");
-  сверить("--dry-run ничего не записал", [примерка.apply, примерка.refills, примерка.stockCounts, примерка.purchasesAdded], [false, 0, 0, 0]);
+  сверить(
+    "--dry-run ничего не записал, но сказал, ЧТО запишет",
+    [примерка.apply, примерка.refills, примерка.stockCounts, примерка.purchasesAdded, примерка.toWrite],
+    [false, 0, 0, 0, { refills: 1, stockCounts: 2, purchasesAdded: 1 }],
+  );
   сверить(
     "после примерки в базе пусто",
     [
@@ -174,10 +266,12 @@ try {
 
   // ── Перенос ──
   const перенос = прогон("--apply");
+  await запомнитьСобытия();
+  сверить("первый --apply перенёс историю", [перенос.refills, перенос.stockCounts, перенос.purchasesAdded], [1, 2, 1]);
   сверить(
-    "первый --apply перенёс историю",
-    [перенос.refills, перенос.stockCounts, перенос.purchasesAdded],
-    [1, 2, 1],
+    "примерка обещала ровно то, что записала запись",
+    примерка.toWrite,
+    { refills: перенос.refills, stockCounts: перенос.stockCounts, purchasesAdded: перенос.purchasesAdded },
   );
   сверить("список нерешённых имён не зависит от режима", перенос.unresolved, примерка.unresolved);
   сверить(
@@ -200,16 +294,11 @@ try {
     ],
   );
   сверить(
-    "закупки: дописана только отсутствующая, имя донора очищено от HTML, но НЕ канонизировано (зеркало хранит написание источника)",
+    "закупка дописана НЕОТЛИЧИМО от соседей зеркала: unit, note и GENERATED-total донора, имя без HTML и без канонизации",
     await sql`
-      select ext_id, product from purchase
-       where source = 'stock' and ext_id in (${ЗАКУПКА_БЛИЗНЕЦ}, '902') order by ext_id`.then((rows) =>
-      rows.map((r) => [r.ext_id, r.product]),
-    ),
-    [
-      [ЗАКУПКА_БЛИЗНЕЦ, "TUC Sour cream"],
-      ["902", "M&Ms"],
-    ],
+      select ext_id, product, unit, total::text, note from purchase
+       where source = 'stock' and ext_id = '902'`.then((rows) => rows.map((r) => [r.ext_id, r.product, r.unit, r.total, r.note])),
+    [["902", "M&Ms", "шт", "48000.00", "импорт:закупки"]],
   );
   // Отчёт обещает владельцу список имён без карточки — он обязан совпасть с
   // тем, что реально легло с product_id NULL, иначе обещание пустое.
@@ -224,15 +313,29 @@ try {
       ) x`),
   );
 
+  // ── Застава работает и в обратную сторону ──
+  await обязанОтказать("на базе с импортом смоук отказывается работать", проверитьScratch);
+
   // ── Повтор: ноль новых строк и НИ ОДНОЙ лишней отметки в журнале ──
   const повтор = прогон("--apply");
+  await запомнитьСобытия();
   сверить("повторный --apply не записал ничего", [повтор.refills, повтор.stockCounts, повтор.purchasesAdded], [0, 0, 0]);
+  // Заливы и пересчёты остаются «годными к записи» и на повторе: их
+  // идемпотентность держит уникальный ключ на вставке, а не предварительный
+  // взгляд в базу. У закупок наоборот — сверка СМОТРИТ в зеркало, и как только
+  // строка в нём появилась, дописывать больше нечего. Разные механизмы, и
+  // отчёт обязан показывать именно их, а не усреднённое «к записи».
+  сверить(
+    "повтор: заливы и пересчёты всё ещё годны и просто уже лежат, а закупкам дописывать нечего",
+    повтор.toWrite,
+    { refills: 1, stockCounts: 2, purchasesAdded: 0 },
+  );
   сверить(
     "после повтора строк столько же",
     [
       await число(sql`select count(*) n from vending_refill where source = 'stock-import'`),
       await число(sql`select count(*) n from vending_stock_count where source = 'stock-import'`),
-      await число(sql`select count(*) n from purchase where source = 'stock' and ext_id in (${ЗАКУПКА_БЛИЗНЕЦ}, '902')`),
+      await число(sql`select count(*) n from purchase where source = 'stock' and ext_id in ${sql(СВОИ_ЗАКУПКИ)}`),
     ],
     [1, 2, 2],
   );
