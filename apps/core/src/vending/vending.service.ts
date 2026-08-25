@@ -129,6 +129,12 @@ export interface MachineDeficitRow {
   filled: number;
   fillRate: number;
   slots: number;
+  /**
+   * Автомат в строю (нет карточки со статусом ≠ in_service). Дефицит
+   * автомата не в строю в закуп и прогноз не идёт — строка остаётся, чтобы
+   * было видно, что он есть и что его числа никуда не едут.
+   */
+  inService: boolean;
 }
 
 /** Итог запуска сбора, который сообщает коллектор при завершении. */
@@ -321,6 +327,19 @@ export const STOCK_STALE_DAYS = 3;
  */
 export const SALES_STALE_DAYS = 2;
 
+/**
+ * Сколько суток нерешённая заявка на закуп держит гейт двойной отправки.
+ *
+ * Гейт заводился против двойного нажатия (кнопка в панели и «оформить закуп»
+ * в боте отправляют одно и то же), а получился вечный замок: заявку, до
+ * которой у владельца не дошли руки, никто не отменяет, и через неделю закуп
+ * из бота молча отвечает «уже ждёт решения» на СОВСЕМ ДРУГОЙ поход. Двойное
+ * нажатие живёт минуты, забытая заявка — недели; порог разводит эти два
+ * случая. Старая заявка новую больше не блокирует: владелец увидит в очереди
+ * две и решит сам, какая из них про сегодня, — это его решение, а не наше.
+ */
+export const PENDING_PURCHASE_TTL_DAYS = 3;
+
 /** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
 export interface PlanMachine {
   serial: string;
@@ -340,12 +359,13 @@ export interface PlanWarning {
     | "stock_stale"
     /** Строки склада, которых нет в прайсе: в расчёт не вошли (C2). */
     | "stock_unknown_product"
+    /** Автоматы не в строю: одной строкой на все — их дефицит в план не вошёл. */
     | "machine_skipped"
     | "no_price"
     | "unknown_product"
     /** Самый свежий батч продаж старше SALES_STALE_DAYS — «нет продаж» может врать (I3). */
     | "sales_stale"
-    /** В батче продаж автоматов меньше, чем в расчёте (I3). */
+    /** Автомата с потребностью нет в свежем батче продаж — «нет продаж» по нему ложное (I3/П5b-1). */
     | "sales_partial"
     /** В настройке маршрута есть серийники, которых нет среди автоматов (A4/UX#16). */
     | "route_unknown_serial";
@@ -468,8 +488,12 @@ interface PurchaseContext {
   unmatchedStock: StockRow[];
   /** Канон-имена из слотов с дефицитом, которых нет в прайсе вендинга. */
   unknownProducts: string[];
-  /** Свежесть и полнота батча продаж — от них зависит смысл «нет продаж». */
-  sales: { capturedAt: Date | null; machinesInBatch: number; okMachines: number };
+  /**
+   * Свежесть батча продаж и серийники автоматов, которые в него попали — от
+   * них зависит смысл «нет продаж». Серийники, а не счётчик: предупреждение
+   * должно называть автоматы по именам, иначе владельцу нечего искать.
+   */
+  sales: { capturedAt: Date | null; serialsInBatch: Set<string> };
 }
 
 @Injectable()
@@ -734,13 +758,30 @@ export class VendingService {
     return byMachine;
   }
 
-  /** Автоматы с дефицитом, заполненностью и статусом планограммы. */
+  /**
+   * Автоматы с дефицитом, заполненностью и статусом планограммы.
+   *
+   * Список НЕ фильтруется по «в строю», в отличие от закупа и прогноза: это
+   * зеркало сбора Ourvend, и пропавший из него автомат читается как «сбор его
+   * потерял», а не как «он на складе». Вместо фильтра — признак `inService`:
+   * панель показывает строку и объясняет, почему её дефицит никуда не едет.
+   */
   async machines(): Promise<MachineDeficitRow[]> {
     const byMachine = await this.slotsByMachine();
+    const { notInService } = await this.machineRegistry();
     const out: MachineDeficitRow[] = [...byMachine.entries()].map(([serial, slots]) => {
       const status = planogramStatus(slots);
       const d = machineDeficit(slots);
-      return { serial, status, deficit: d.deficit, capacity: d.capacity, filled: d.filled, fillRate: d.fillRate, slots: slots.length };
+      return {
+        serial,
+        status,
+        deficit: d.deficit,
+        capacity: d.capacity,
+        filled: d.filled,
+        fillRate: d.fillRate,
+        slots: slots.length,
+        inService: !notInService.has(normalizeMachineSerial(serial)),
+      };
     });
     // Единое правило сортировки (§8): статус, затем дефицит по убыванию.
     out.sort((a, b) => statusRank(a.status) - statusRank(b.status) || b.deficit - a.deficit);
@@ -748,7 +789,8 @@ export class VendingService {
   }
 
   /**
-   * Сводная потребность по товарам (только ok-автоматы), с разбивкой. Имена
+   * Сводная потребность по товарам (только автоматы В СТРОЮ с ok-планограммой
+   * — то же множество, что у закупа и плана), с разбивкой. Имена
    * слотов приводятся к канону через алиасы — иначе один и тот же товар,
    * записанный в разных автоматах разными Ourvend-именами, ложится двумя
    * отдельными позициями вместо одной (тот же приём, что в `purchase()`).
@@ -756,8 +798,10 @@ export class VendingService {
   async deficitSummary(): Promise<{ product: string; total: number; perMachine: Record<string, number> }[]> {
     const { aliasByKey } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
+    const { notInService } = await this.machineRegistry();
+    const { okSerials } = this.inServiceOk(byMachine, notInService);
     const ok = [...byMachine.entries()]
-      .filter(([, slots]) => planogramStatus(slots) === "ok")
+      .filter(([serial]) => okSerials.has(serial))
       .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, aliasByKey) }));
     const needs = needByProduct(ok);
     needs.sort((a, b) => b.total - a.total);
@@ -882,14 +926,50 @@ export class VendingService {
   }
 
   /**
+   * ok-планограмма МИНУС автоматы, о которых ТОЧНО известно, что они не в
+   * строю, плюс список пропущенных (П5b-3).
+   *
+   * Одно множество автоматов на закуп, план, прогноз и сводную потребность.
+   * Пока фильтр жил только в закупе, прогноз считал остаток и продажи по
+   * складским аппаратам: три SKLAD-автомата с забитыми слотами и нулевыми
+   * продажами растягивали «на сколько хватит» на месяцы, и критичная позиция
+   * не показывалась вовсе. Дефицит того же автомата закуп при этом честно
+   * пропускал — две части системы отвечали на один вопрос по-разному.
+   *
+   * Пропущенные — только те, у кого реально были слоты: остальные в расчёте
+   * никак не участвовали, и строка про них была бы шумом.
+   */
+  private inServiceOk(
+    byMachine: Map<string, Slot[]>,
+    notInService: Map<string, { name: string; status: string }>,
+  ): { okSerials: Set<string>; skipped: { serial: string; name: string; status: string }[] } {
+    const okSerials = this.okSerials(byMachine);
+    const skipped: { serial: string; name: string; status: string }[] = [];
+    const seen = new Set<string>();
+    for (const serial of byMachine.keys()) {
+      const canon = normalizeMachineSerial(serial);
+      const off = notInService.get(canon);
+      if (!off) continue;
+      okSerials.delete(serial);
+      if (seen.has(canon)) continue;
+      seen.add(canon);
+      skipped.push({ serial: canon, name: off.name, status: off.status });
+    }
+    return { okSerials, skipped };
+  }
+
+  /**
    * Прогноз «на сколько хватит» (§5.6). Остаток и продажи считаются по ОДНОМУ
-   * множеству автоматов (только `ok`) — иначе прогноз занижается. Продажи —
-   * из самого свежего собранного батча.
+   * множеству автоматов (в строю и с ok-планограммой — тому же, что у закупа
+   * и плана) — иначе прогноз занижается, а склад-«автомат» с полными слотами
+   * и нулевыми продажами растягивает его на месяцы. Продажи — из самого
+   * свежего собранного батча.
    */
   async forecast(criticalDays = 3): Promise<{ all: Runout[]; critical: Runout[] }> {
     const { aliasByKey } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
-    const okSerials = this.okSerials(byMachine);
+    const { notInService } = await this.machineRegistry();
+    const { okSerials } = this.inServiceOk(byMachine, notInService);
 
     // Остаток в машинах по товару (в каноне через алиасы): Σ quantity валидных
     // назначенных слотов ok-автоматов.
@@ -1272,35 +1352,30 @@ export class VendingService {
     const byMachine = await this.slotsByMachine();
     const { notInService, nameBySerial: nameByCanon } = await this.machineRegistry();
 
-    // Пропущенные — только те, у кого реально были слоты: остальные в плане
-    // никак не участвовали, и строка про них была бы шумом.
-    const okSerials = this.okSerials(byMachine);
-    const skipped: PurchaseContext["skipped"] = [];
-    const skippedSeen = new Set<string>();
+    const { okSerials, skipped: offline } = this.inServiceOk(byMachine, notInService);
+    const skipped: PurchaseContext["skipped"] = offline.map((m) => ({
+      ...m,
+      reason: `не в строю: ${machineStatusLabel(m.status)}`,
+    }));
+    // Автомат-заглушка (ёмкости вне диапазона) выпадает из расчёта и по
+    // `planogramStatus`, и по `deadMachine` — но молча: владелец видел бы
+    // просто исчезнувшую строку плана. Причина «нет данных» и «не в строю» —
+    // разные, и вторая не должна затирать первую (не в строю уже отмечены
+    // выше). Гейта по `planogramStatus` здесь нет намеренно: мёртвый автомат
+    // НИКОГДА не бывает `ok`, и такое условие не сработало бы ни разу.
+    const deadSeen = new Set<string>();
     for (const [serial, slots] of byMachine) {
       const canon = normalizeMachineSerial(serial);
-      const off = notInService.get(canon);
-      // Автомат-заглушка (ёмкости вне диапазона) выпадает из расчёта и по
-      // `planogramStatus`, и по `deadMachine` — но молча: владелец видел бы
-      // просто исчезнувшую строку плана. Причина «нет данных» и «не в строю» —
-      // разные, и вторая не должна затирать первую. Гейта по `planogramStatus`
-      // здесь нет намеренно: мёртвый автомат НИКОГДА не бывает `ok`, и такое
-      // условие не сработало бы ни разу.
-      const dead = !off && deadMachine(slots);
-      if (!off && !dead) continue;
+      if (notInService.has(canon) || !deadMachine(slots)) continue;
       okSerials.delete(serial);
-      if (skippedSeen.has(canon)) continue;
-      skippedSeen.add(canon);
-      skipped.push(
-        off
-          ? { serial: canon, name: off.name, status: off.status, reason: `не в строю: ${machineStatusLabel(off.status)}` }
-          : {
-              serial: canon,
-              name: nameByCanon.get(canon) ?? canon,
-              status: "no_data",
-              reason: "нет данных: ёмкости слотов вне диапазона (заглушка источника)",
-            },
-      );
+      if (deadSeen.has(canon)) continue;
+      deadSeen.add(canon);
+      skipped.push({
+        serial: canon,
+        name: nameByCanon.get(canon) ?? canon,
+        status: "no_data",
+        reason: "нет данных: ёмкости слотов вне диапазона (заглушка источника)",
+      });
     }
 
     const ok = [...byMachine.entries()]
@@ -1318,9 +1393,25 @@ export class VendingService {
     const allStockRows = await this.stockRows();
     const stockRows: StockRow[] = [];
     const unmatchedStock: StockRow[] = [];
+    // Ключ карточки — НОРМАЛИЗОВАННОЕ имя (`findProductRow`/`setProductRules`),
+    // а не точная строка: `vending_stock` ключуется именем, и «Red  Bull» с
+    // двойным пробелом из копипасты объявлялся осиротевшим при живой карточке
+    // «Red Bull». Остаток не вычитался из потребности — владелец покупал
+    // второй раз то, что лежит на складе (П5b-5).
+    const rulesKeyByNorm = new Map<string, string>();
+    for (const name of rulesByName.keys()) {
+      // Дубль нормализованного имени в прайсе — первая карточка выигрывает,
+      // как и везде: молча переехать на вторую хуже, чем остаться на той, по
+      // которой уже считали.
+      if (!rulesKeyByNorm.has(normalizeProductName(name))) rulesKeyByNorm.set(normalizeProductName(name), name);
+    }
     for (const r of allStockRows) {
       const canon = this.resolveProduct(r.product, aliasByKey);
-      (rulesByName.has(canon) ? stockRows : unmatchedStock).push({ ...r, product: canon });
+      const карточка = rulesKeyByNorm.get(normalizeProductName(canon));
+      // Имя строки склада приводим к имени КАРТОЧКИ: потребность, цены и
+      // правила уже в нём, и без этого остаток лёг бы отдельной позицией.
+      if (карточка) stockRows.push({ ...r, product: карточка });
+      else unmatchedStock.push({ ...r, product: canon });
     }
     const stockByProduct = new Map<string, number>();
     for (const r of stockRows) stockByProduct.set(r.product, (stockByProduct.get(r.product) ?? 0) + r.quantity);
@@ -1345,7 +1436,7 @@ export class VendingService {
     // такому нужна карточка или алиас, молча считать его «обычным» нельзя.
     const unknownProducts = needs
       .map((n) => n.product)
-      .filter((name) => !rulesByName.has(name))
+      .filter((name) => !rulesKeyByNorm.has(normalizeProductName(name)))
       .sort((a, b) => a.localeCompare(b, "ru"));
 
     // Имя автомата — по серийнику слотов: реестр хранит канон, Ourvend может
@@ -1361,7 +1452,7 @@ export class VendingService {
       stockRows,
       unmatchedStock,
       unknownProducts,
-      sales: { capturedAt: sold.capturedAt, machinesInBatch: sold.serials.size, okMachines: okSerials.size },
+      sales: { capturedAt: sold.capturedAt, serialsInBatch: sold.serials },
     };
   }
 
@@ -1464,13 +1555,41 @@ export class VendingService {
           `${ctx.unmatchedStock.map((r) => r.product).join(", ")} — переименуй в боте: «склад <канон> N»`,
       });
     }
-    for (const m of ctx.skipped) {
-      warnings.push({ code: "machine_skipped", message: `${m.name} (${m.serial}) ${m.reason}` });
+    const offline = ctx.skipped.filter((m) => m.status !== "no_data");
+    if (offline.length) {
+      // ОДНА строка на все автоматы, а не по строке на каждый: на проде три
+      // SKLAD-автомата давали три предупреждения в каждом плане — навсегда, и
+      // ими залипал весь блок. Предупреждение, которое горит всегда и втроём,
+      // перестаёт читаться, а вместе с ним перестают читаться соседние.
+      const список = [...offline]
+        .sort((a, b) => a.name.localeCompare(b.name, "ru"))
+        .map((m) => `${m.name} (${machineStatusLabel(m.status)})`)
+        .join(", ");
+      warnings.push({ code: "machine_skipped", message: `Не в строю, в план не вошли: ${список}` });
     }
-    if (s.noPrice.length) {
+    const dead = ctx.skipped.filter((m) => m.status === "no_data");
+    if (dead.length) {
+      // Заглушки источника (SKLAD 199=199) — отдельной строкой: причина
+      // другая, и лечится не статусом карточки, а данными OurVend.
+      const список = [...dead]
+        .sort((a, b) => a.name.localeCompare(b.name, "ru"))
+        .map((m) => `${m.name} (${m.serial})`)
+        .join(", ");
+      warnings.push({
+        code: "machine_skipped",
+        message: `Нет данных: ёмкости слотов вне диапазона (заглушка источника), в план не вошли: ${список}`,
+      });
+    }
+    // Товар без карточки прайса попадает и в noPrice (цены нет), и в
+    // unknownProducts — и владелец читал про него две строки подряд с разными
+    // советами. «Задай цену» по товару, которого в прайсе нет, невыполнимо:
+    // цену вешать не на что. Оставляем ему один совет — завести карточку.
+    const безКарточки = new Set(ctx.unknownProducts);
+    const noPrice = s.noPrice.filter((p) => !безКарточки.has(p));
+    if (noPrice.length) {
       warnings.push({
         code: "no_price",
-        message: `Без цены (в сумму закупа не вошли): ${s.noPrice.join(", ")} — задай: «цена <товар> <сум за штуку>»`,
+        message: `Без цены (в сумму закупа не вошли): ${noPrice.join(", ")} — задай: «цена <товар> <сум за штуку>»`,
       });
     }
     if (ctx.unknownProducts.length) {
@@ -1497,12 +1616,18 @@ export class VendingService {
         const дней = Math.floor(возраст / 86_400_000);
         warnings.push({ code: "sales_stale", message: `Продажи собраны ${дней} дн. назад — «нет продаж» может быть ложным` });
       }
-      if (ctx.sales.machinesInBatch < ctx.sales.okMachines) {
+      // Не «в батче меньше автоматов, чем в расчёте»: батч всегда неполон —
+      // автомат, которому нечего пополнять, продаж может и не прислать, и
+      // предупреждение горело на ровном месте. Смысл есть ровно там, где
+      // «нет продаж» реально меняет решение: автомат с потребностью, которого
+      // в свежем батче нет вовсе (П5b-1).
+      const немые = planMachines.filter((m) => m.need > 0 && !ctx.sales.serialsInBatch.has(m.serial));
+      if (немые.length) {
         warnings.push({
           code: "sales_partial",
           message:
-            `В батче продаж ${ctx.sales.machinesInBatch} автоматов из ${ctx.sales.okMachines} — ` +
-            "по остальным «нет продаж» ложное",
+            `В свежем батче продаж нет автоматов: ${немые.map((m) => m.name).join(", ")} — ` +
+            "по ним «нет продаж» может быть ложным",
         });
       }
     }
@@ -1647,18 +1772,25 @@ export class VendingService {
     // накладные на один поход. Гейт по НЕРЕШЁННЫМ (decision='pending')
     // заявкам агента «vending» со снимком закупа в payload.
     const pendingRows = await this.db
-      .select({ payload: approval.payload })
+      .select({ payload: approval.payload, createdAt: approval.createdAt })
       .from(approval)
       .where(and(eq(approval.agent, "vending"), eq(approval.decision, "pending")));
-    const хвост = pendingRows.some(
-      (r) => typeof r.payload === "object" && r.payload !== null && "purchaseOrder" in (r.payload as object),
-    );
+    const порог = Date.now() - PENDING_PURCHASE_TTL_DAYS * 86_400_000;
+    const хвост = pendingRows
+      .filter((r) => typeof r.payload === "object" && r.payload !== null && "purchaseOrder" in (r.payload as object))
+      .filter((r) => r.createdAt.getTime() >= порог)
+      // Самая старая из живых: именно она висит в очереди, и её дату владелец
+      // ищет глазами в «согласованиях».
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())[0];
     if (хвост) {
+      // Дата, а не «висит давно»: заявка без даты не отличима от той, что
+      // отправили секунду назад, — а владелец решает как раз по этому.
+      const с = хвост.createdAt.toLocaleDateString("ru-RU", { timeZone: TZ, day: "2-digit", month: "2-digit" });
       return {
         submitted: false,
         positions: 0,
         costRounded: 0,
-        reason: "Заявка на закуп уже ждёт решения — открой «согласования».",
+        reason: `Заявка на закуп уже ждёт решения (с ${с}) — открой «согласования».`,
       };
     }
 

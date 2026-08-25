@@ -44,6 +44,19 @@ describe("лист «План закупа»", () => {
     expect(screen.getByText("часть строк старее 3 дней")).toBeVisible();
   });
 
+  it("«Убрано из закупки» не повторяет «со склада N» — она уже сказана выше (П5b-7)", () => {
+    // Та же цифра, сказанная дважды, читается как две разные: «со склада 3» в
+    // «Собрать со склада» и «со склада 3» здесь — один и тот же товар. Бот эту
+    // секцию печатает без склада, панель обязана совпадать.
+    const { container } = render(<PurchasePlanTables plan={plan} domain="vendhub" />);
+    const секции = [...container.querySelectorAll(".section-title")];
+    const убрано = секции.find((e) => e.textContent === "Убрано из закупки")!;
+    const строки = убрано.nextElementSibling!;
+    expect(строки.textContent).toContain("нужно 5");
+    expect(строки.textContent).toContain("пусто 2");
+    expect(строки.textContent).not.toContain("со склада");
+  });
+
   it("«Собрать со склада» считает по автоматам раздачу склада, а не потребность (A1)", () => {
     // У Qurt потребность Olma 5, а со склада уедет 3: «Olma 5» отправило бы
     // владельца искать на складе две несуществующие штуки.
