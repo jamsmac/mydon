@@ -131,6 +131,9 @@ export * from "./actor";
 export * from "./fefo";
 export * from "./expiry";
 
+/** Календарные сутки без зоны: `YYYY-MM-DD` ↔ номер суток от эпохи. */
+export * from "./calendar-day";
+
 /** Касса и инкассация: номиналы сума и сверка набора купюр (срез K, задача 1). */
 export * from "./denominations";
 export * from "./bank-statement";

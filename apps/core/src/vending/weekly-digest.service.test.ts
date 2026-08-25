@@ -180,12 +180,17 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   slotsLagMin: 42,
   salesLagH: 27,
   productSaleLagH: 27,
-  parity: { days: 7, ok: false, mismatches: 3, stockOk: false, note: "снимков остатков нет" },
+  parity: { days: 7, ok: false, mismatches: 3, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
 };
 
-const сервис = (м: Мир) => {
+const сервис = (м: Мир, здоровьеПадает = false) => {
   const { db, счётчик } = digestDb(м);
-  const health = { health: async () => м.health ?? ЗДОРОВЬЕ } as unknown as OurvendHealthService;
+  const health = {
+    health: async () => {
+      if (здоровьеПадает) throw new Error("паритет не посчитался");
+      return м.health ?? ЗДОРОВЬЕ;
+    },
+  } as unknown as OurvendHealthService;
   const svc = new WeeklyDigestService(db, new AnalyticsService(db, new VendingService(db)), health);
   return Object.assign(svc, { счётчик });
 };
@@ -401,6 +406,53 @@ describe("Недельная сводка (R-P5b-7)", () => {
       [d.health.parity.days, d.health.parity.mismatches, d.health.parity.stockOk],
       [7, 3, false],
     );
+  });
+
+  it("границы недели: продажи 17.08 и 23.08 внутри, 16.08 и 24.08 снаружи", async () => {
+    // Сдвиг окна на сутки в любую сторону меняет ЧИСЛА — иначе тест зелен и на
+    // сдвинутом окне (именно так граница и уезжает незаметно).
+    const края: SaleRow[] = [
+      { dt: "2026-08-16", machineSerial: OLMA, product: "Moxito Lime 330ml", qty: "1", amount: "12000" },
+      { dt: "2026-08-17", machineSerial: OLMA, product: "Moxito Lime 330ml", qty: "10", amount: "120000" },
+      { dt: "2026-08-23", machineSerial: OLMA, product: "Moxito Lime 330ml", qty: "20", amount: "240000" },
+      { dt: "2026-08-24", machineSerial: OLMA, product: "Moxito Lime 330ml", qty: "100", amount: "1200000" },
+    ];
+    const d = await сервис({ sales: края, products: ПРАЙС, entities: ПАРК }).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual([d.totals.qty, d.totals.revenue], [30, 360_000], "в неделю вошли ровно понедельник и воскресенье");
+  });
+
+  it("неделя из будущего и текущая гасятся в предыдущую — как негодный ключ", async () => {
+    const s = сервис({ sales: НЕДЕЛИ_34_И_33, products: ПРАЙС, entities: ПАРК });
+    // 2026-35 идёт ПРЯМО СЕЙЧАС (пн 24.08), она ещё не прожита.
+    assert.equal((await s.digest("2026-35", СЕЙЧАС)).week, "2026-34");
+    assert.equal((await s.digest("2027-05", СЕЙЧАС)).week, "2026-34");
+  });
+
+  it("неделя старше двух лет гасится в предыдущую, ровно на границе — пропускается", async () => {
+    const s = сервис({ sales: [], products: ПРАЙС, entities: ПАРК });
+    // 104 недели назад от 2026-34 — это 2024-34 (пн 19.08.2024): последняя годная.
+    assert.equal((await s.digest("2024-34", СЕЙЧАС)).week, "2024-34");
+    assert.equal((await s.digest("2024-33", СЕЙЧАС)).week, "2026-34", "105 недель назад — уже вне диапазона");
+    assert.equal((await s.digest("1990-01", СЕЙЧАС)).week, "2026-34");
+  });
+
+  it("здоровье сбора упало — письмо уходит, секция деградирует и говорит об этом", async () => {
+    const d = await сервис({ sales: НЕДЕЛИ_34_И_33, products: ПРАЙС, entities: ПАРК }, true).digest("2026-34", СЕЙЧАС);
+
+    assert.equal(d.totals.qty, 140, "деньги недели посчитаны и от здоровья сбора не зависят");
+    assert.deepEqual(
+      [d.health.runs.length, d.health.failedStreak, d.health.lastSuccessAt, d.health.slotsLagMin],
+      [0, 0, null, null],
+      "заглушка обязана читаться как «оценить нечем», а не как «всё хорошо»",
+    );
+    assert.equal(d.health.parity.stockChecked, 0);
+    assert.deepEqual(d.warnings.map((w) => w.code), ["health_unavailable"]);
+    assert.match(d.warnings[0]!.message, /паритет не посчитался/);
+  });
+
+  it("здоровье посчиталось — предупреждений нет", async () => {
+    const d = await сервис({ sales: НЕДЕЛИ_34_И_33, products: ПРАЙС, entities: ПАРК }).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual(d.warnings, []);
   });
 
   it("кеш: два запроса одной недели — один расчёт", async () => {

@@ -1,15 +1,18 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { and, eq, gte, lt } from "drizzle-orm";
 import { vendingPurchaseOrder, vendingRefill, vendingRefillEvent, vendingStock } from "@mydon/db";
 import {
+  dayNumber,
   isoWeekFromKey,
   isoWeekTashkent,
   previousIsoWeek,
   tashkentDay,
   tashkentDayStart,
   weekCompare,
+  type AnalyticsWarning,
   type DeadRow,
   type IsoWeek,
+  type OurvendHealth,
   type WeeklyDigest,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
@@ -75,8 +78,39 @@ const PRICE_WINDOW_DAYS = 2 * WEEK_DAYS;
 
 const DAY_MS = 86_400_000;
 
+/**
+ * Насколько глубоко в прошлое пускаем `?week=` — два года.
+ *
+ * Ключ недели — единственный параметр отчётов, у которого пространство
+ * значений НЕ ограничено формой (`^\d{4}-\d{2}$` даёт полмиллиона годных
+ * недель против 90–180 значений у соседних `?days=`). Каждый новый ключ — это
+ * гарантированный промах кеша и четыре тяжёлых расчёта под ним, то есть
+ * готовый способ уложить Core одним циклом `curl` мимо пятиминутного кеша, на
+ * который и рассчитан троттл. Продаж старше двух лет в базе нет, поэтому
+ * ограничение ничего не отнимает у владельца.
+ */
+export const WEEK_HISTORY_LIMIT = 104;
+
+/**
+ * Здоровье сбора, которого посчитать не вышло.
+ *
+ * НЕ «всё хорошо» и не ноль: прогонов нет, серии нет, лаги `null` («снимков
+ * нет»), паритет за ноль суток. Витрины уже умеют читать эту форму как «оценить
+ * нечем», а сводка отдельно говорит об этом словами в `warnings`.
+ */
+const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
+  runs: [],
+  failedStreak: 0,
+  lastSuccessAt: null,
+  slotsLagMin: null,
+  salesLagH: null,
+  productSaleLagH: null,
+  parity: { days: 0, ok: false, mismatches: 0, stockOk: false, stockChecked: 0, note: "здоровье сбора не посчиталось" },
+};
+
 @Injectable()
 export class WeeklyDigestService {
+  private readonly logger = new Logger(WeeklyDigestService.name);
   private readonly кеш = new ReportCache();
 
   constructor(
@@ -91,10 +125,11 @@ export class WeeklyDigestService {
    *
    * Негодный ключ (`2026-99`, мусор) не отбивается ошибкой, а падает в ту же
    * предыдущую неделю: сводка — чтение, и владельцу полезнее увидеть письмо,
-   * чем 400 из бота.
+   * чем 400 из бота. ТОЧНО ТАК ЖЕ гасится неделя ВНЕ ДИАПАЗОНА — из будущего,
+   * текущая (она ещё не прожита) и старше `WEEK_HISTORY_LIMIT`: см. границу.
    */
   async digest(week?: string, now = new Date()): Promise<WeeklyDigest> {
-    const неделя = (week ? isoWeekFromKey(week) : null) ?? previousIsoWeek(isoWeekTashkent(now));
+    const неделя = нормализоватьНеделю(week, now);
     return this.кеш.get(`weekly-digest|${неделя.key}|${tashkentDay(now)}`, () => this.сводка(неделя, now));
   }
 
@@ -112,7 +147,7 @@ export class WeeklyDigestService {
       this.analytics.margin(WEEK_DAYS, начало),
       this.analytics.deadStock(undefined, now),
       this.analytics.priceChanges(PRICE_WINDOW_DAYS, конец),
-      this.health.health(undefined, now),
+      this.здоровьеСбора(now),
       this.работаЗаНеделю(начало, конец),
     ]);
 
@@ -147,8 +182,37 @@ export class WeeklyDigestService {
         purchase: цены.purchase.filter((c) => вНеделе(c.at, неделя)),
         retail: цены.retail.filter((c) => вНеделе(c.at, неделя)),
       },
-      health: здоровье,
+      health: здоровье.health,
+      // Предупреждения секций: сегодня единственное — недоступное здоровье
+      // сбора. Числа денег в письме этим не портятся, и молчать о пропавшей
+      // секции нельзя (иначе владелец прочитает «сбор в порядке» из пустоты).
+      warnings: здоровье.warning ? [здоровье.warning] : [],
     };
+  }
+
+  /**
+   * Здоровье сбора, которое не может уронить письмо.
+   *
+   * Раньше `health` стоял в общем `Promise.all` без `catch`: любой отказ его
+   * запросов (внутри — сырой SQL паритета) отдавал 500 на ВСЮ сводку, и
+   * понедельничное письмо не уходило вовсе. Деньги недели при этом посчитаны
+   * и ни от чего в этой секции не зависят — терять их из-за неё нечестно.
+   * Секция деградирует до «оценить нечем», причина едет в `warnings` и в лог.
+   */
+  private async здоровьеСбора(now: Date): Promise<{ health: OurvendHealth; warning: AnalyticsWarning | null }> {
+    try {
+      return { health: await this.health.health(undefined, now), warning: null };
+    } catch (e) {
+      const причина = e instanceof Error ? e.message : String(e);
+      this.logger.error(`Здоровье сбора для недельной сводки не посчиталось: ${причина}`);
+      return {
+        health: ЗДОРОВЬЕ_НЕИЗВЕСТНО,
+        warning: {
+          code: "health_unavailable",
+          message: `Здоровье сбора не посчиталось (${причина}) — деньги недели в письме честные, а про сбор смотри /ourvend/health.`,
+        },
+      };
+    }
   }
 
   /**
@@ -225,6 +289,26 @@ export class WeeklyDigestService {
 }
 
 const число = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : Number(v) || 0);
+
+/**
+ * Ключ недели в рабочих границах: `[предыдущая − WEEK_HISTORY_LIMIT;
+ * предыдущая]`. Всё, что вне, — В ПРЕДЫДУЩУЮ, ровно как негодный ключ.
+ *
+ * Отбивать 400 нельзя по той же причине, по которой не отбивается `2026-99`:
+ * сводка — чтение, и владельцу, промахнувшемуся в цифре, полезнее письмо. Но
+ * и пускать любой ключ дальше нельзя: каждый уникальный ключ — это промах
+ * кеша и четыре тяжёлых расчёта под ним (см. `WEEK_HISTORY_LIMIT`).
+ */
+function нормализоватьНеделю(week: string | undefined, now: Date): IsoWeek {
+  const предыдущая = previousIsoWeek(isoWeekTashkent(now));
+  const запрошенная = week ? isoWeekFromKey(week) : null;
+  if (!запрошенная) return предыдущая;
+  // Сравниваем ПОНЕДЕЛЬНИКАМИ, а не ключами: `2027-01` строкой меньше
+  // `2026-52`, и лексикографическое сравнение пустило бы будущую неделю.
+  const глубина = (dayNumber(предыдущая.from) - dayNumber(запрошенная.from)) / 7;
+  if (глубина < 0 || глубина > WEEK_HISTORY_LIMIT) return предыдущая;
+  return запрошенная;
+}
 
 /** Дата изменения цены попала в неделю. Обе стороны — голые ташкентские сутки. */
 const вНеделе = (at: string, w: IsoWeek): boolean => at.slice(0, 10) >= w.from && at.slice(0, 10) <= w.to;

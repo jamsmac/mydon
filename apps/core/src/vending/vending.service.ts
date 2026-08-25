@@ -23,6 +23,7 @@ import {
   DAY,
   MAX_CAPACITY,
   PRICE_SPIKE_PCT,
+  SALE_PRICE_FACT_DAYS,
   TZ,
   allocateByRoute,
   allocateBySlots,
@@ -51,8 +52,10 @@ import {
   type ProductRule,
   type PurchaseCashSession,
   type PurchaseRow,
+  type BootstrapSalePriceResult,
   type PurchaseSummary,
   type RetailFact,
+  type SetSalePriceResult,
   type Runout,
   type RunoutInput,
   type Slot,
@@ -328,44 +331,12 @@ export interface SetPriceResult {
 }
 
 /**
- * Итог правки ЭТАЛОНА витрины (R-P5b-6).
- *
- * Отдельный тип, а не `SetPriceResult`: гейт здесь сравнивает с другим
- * числом — не с прошлым эталоном, а с ФАКТОМ витрины (`amount/qty` за окно).
- * Владельцу важно видеть именно факт: «ты ставишь 20 000, а автомат берёт
- * 15 000» — понятный вопрос, «отклонение 33 %» без базы — нет.
+ * Формы ответов на правку эталона витрины живут в `@mydon/shared`
+ * (`vending-reports.ts`): их читают трое — Core, бот и панель, — и переписанное
+ * от руки зеркало уже расходилось с оригиналом молча (R-P5b-10). Здесь только
+ * реэкспорт, чтобы вызывающие в Core не тянули пакет отдельной строкой.
  */
-export interface SetSalePriceResult {
-  ok: boolean;
-  /** Каноническое имя товара (после алиасов). */
-  product?: string;
-  oldPrice?: number | null;
-  newPrice?: number;
-  /** Отклонение от ФАКТА витрины (amount/qty за 14 дней), % — при reason="spike". */
-  deviationPct?: number;
-  /** Факт витрины за окно, сум за единицу; `null` — продаж в окне не было. */
-  factPrice?: number | null;
-  /**
-   * `invalid_price` — цена не число/не положительная. Отдельно от
-   * `not_found`: «товар не найден» на живой товар с кривой ценой — ответ,
-   * который отправляет владельца искать несуществующую проблему в прайсе.
-   */
-  reason?: "not_found" | "spike" | "invalid_price";
-  /** Человеческая причина отказа — её и печатает бот, не гадая по коду. */
-  message?: string;
-}
-
-/** Итог разового бутстрапа эталонов витрины «витрина как факт» (R-P5b-6). */
-export interface BootstrapSalePriceResult {
-  days: number;
-  set: { product: string; price: number; qty: number }[];
-  /**
-   * Кого НЕ тронули и почему. Список обязателен: молчаливый пропуск товара
-   * читается владельцем как «эталон проставлен», и разрыв витрины по нему
-   * никогда бы не всплыл.
-   */
-  skipped: { product: string; reason: "already_set" | "no_sales" | "inactive" }[];
-}
+export type { BootstrapSalePriceResult, SetSalePriceResult };
 
 /** Итог отправки закупа на утверждение. */
 export interface SubmitPurchaseResult {
@@ -408,15 +379,6 @@ export const SALES_STALE_DAYS = 2;
 export const PENDING_PURCHASE_TTL_DAYS = 3;
 
 /**
- * Окно ФАКТА витрины (ташкентских суток) — для гейта эталона и бутстрапа
- * «витрина как факт» (R-P5b-6).
- *
- * Не настройка: это не порог, который владелец крутит, а способ УЗНАТЬ
- * сегодняшнюю цену автомата. Две недели — компромисс между «поймать
- * актуальную цену» и «набрать штук, чтобы среднее не било единичной
- * продажей»; окно отчёта `price_gap` живёт по этому же числу.
- */
-/**
  * Парк «в строю», собранный ОТ ДАННЫХ (см. `VendingService.inServicePark`).
  * `ok` — предикат для строк источника, `inService` — «серийник → как показать»,
  * `notInService` — кто и почему выброшен (об этом отчёты говорят вслух).
@@ -442,7 +404,13 @@ export function notInServiceSerialForms(notInService: Iterable<string>): string[
   return формы;
 }
 
-export const SALE_PRICE_FACT_DAYS = 14;
+/**
+ * Окно ФАКТА витрины — общее число `@mydon/shared` (`SALE_PRICE_FACT_DAYS`),
+ * реэкспортом: его же читают отчёт `price_gap` и текст бота, и своей копии в
+ * Core быть не должно (R-P5b-6, R-P5b-10). Почему именно две недели — сказано
+ * над объявлением в shared.
+ */
+export { SALE_PRICE_FACT_DAYS };
 
 /** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
 export interface PlanMachine {

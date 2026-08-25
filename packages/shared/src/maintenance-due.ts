@@ -5,12 +5,16 @@
  * надо уметь проверить тестом на любой день, а не только на сегодняшний.
  * Сегодняшняя дата приходит параметром — так модуль не зависит ни от зоны
  * процесса, ни от `Date.now()`, и не тянет TZ из индекса пакета (это был бы
- * цикл импортов: index → maintenance-due → index).
+ * цикл импортов: index → maintenance-due → index). Соседний `calendar-day`
+ * импортируется НАПРЯМУЮ, а не через индекс, по той же причине: это лист без
+ * своих зависимостей, и цикла он не заводит.
  *
  * Главное правило: СТАТУС НЕ ХРАНИТСЯ. «Пора / просрочено» зависит от текущей
  * даты, и хранимое поле обязательно разъедется с реальностью в тот день, когда
  * крон не отработает. Хранится якорь `dueOn` — плановая дата следующей работы.
  */
+
+import { dayNumber, isoOfDay } from "./calendar-day";
 
 export type DueStatus = "ok" | "soon" | "due" | "overdue" | "unknown";
 
@@ -20,17 +24,6 @@ export interface Periodicity {
   everyMonths?: number | null;
   /** По счётчику: раз в N чашек/продаж. */
   everyCount?: number | null;
-}
-
-/** YYYY-MM-DD → число дней от эпохи. Только дата, без времени и без зоны. */
-function dayNumber(iso: string): number {
-  const [y, m, d] = iso.split("-").map(Number);
-  return Math.floor(Date.UTC(y, m - 1, d) / 86_400_000);
-}
-
-/** Число дней от эпохи → YYYY-MM-DD. */
-function isoOfDay(n: number): string {
-  return new Date(n * 86_400_000).toISOString().slice(0, 10);
 }
 
 /**

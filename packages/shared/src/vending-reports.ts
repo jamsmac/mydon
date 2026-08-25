@@ -1,3 +1,4 @@
+import { dayNumber, isoOfDay } from "./calendar-day";
 import { DAY } from "./expiry";
 import { normalizeMachineSerial } from "./machine-serial";
 import { tashkentDay } from "./tashkent-time";
@@ -546,6 +547,23 @@ export function priceChanges(
 // ── Витрина против эталона (R-P5b-6) ────────────────────────────────────────
 
 /**
+ * Окно ФАКТА витрины (ташкентских суток) — для гейта эталона, бутстрапа
+ * «витрина как факт» и отчёта `price_gap` (R-P5b-6).
+ *
+ * Не настройка: это не порог, который владелец крутит, а способ УЗНАТЬ
+ * сегодняшнюю цену автомата. Две недели — компромисс между «поймать
+ * актуальную цену» и «набрать штук, чтобы среднее не било единичной
+ * продажей».
+ *
+ * ЖИВЁТ ЗДЕСЬ, А НЕ В CORE, потому что читают её ТРОЕ: гейт команды «цена
+ * продажи» и отчёт разрыва витрины в Core и подпись окна в тексте бота. Пока
+ * константа лежала в `apps/core`, бот держал свою копию (`PRICE_GAP_DAYS_DEFAULT
+ * = 14`) — и разъехаться им было нечем помешать: владелец получал бы «цена
+ * принята» на число, которое отчёт в том же письме называет разрывом.
+ */
+export const SALE_PRICE_FACT_DAYS = 14;
+
+/**
  * Минимум, из которого выводится факт витрины. Отдельным типом, а не
  * `SaleRow`: факту не нужны ни сутки, ни автомат — окно и множество автоматов
  * применяет тот, кто читает базу.
@@ -707,20 +725,17 @@ export interface IsoWeek {
 }
 
 // Сутки берём общей константой `DAY` из `expiry.ts` — своей копии 86 400 000
-// в репозитории заводить нельзя. `dayToUtc`/`utcToDay` ниже повторяют приватные
-// `dayNumber`/`isoOfDay` из `maintenance-due.ts`; выносить их в общий модуль —
-// отдельная правка (расширение публичного API пакета), а не хвост этого среза.
+// в репозитории заводить нельзя. Календарная арифметика суток — тоже общая
+// (`calendar-day.ts`): раньше здесь жили близнецы приватных `dayNumber`/
+// `isoOfDay` из `maintenance-due.ts`, и разъехаться им было нечем помешать.
 const WEEK_MS = 7 * DAY;
 const BARE_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const WEEK_KEY = /^(\d{4})-(\d{2})$/;
 
 /** Голые сутки → полночь UTC того же календарного дня (арифметика календаря, не зон). */
-function dayToUtc(day: string): number {
-  const [y, m, d] = day.split("-").map(Number) as [number, number, number];
-  return Date.UTC(y, m - 1, d);
-}
+const dayToUtc = (day: string): number => dayNumber(day) * DAY;
 
-const utcToDay = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+const utcToDay = (ms: number): string => isoOfDay(Math.floor(ms / DAY));
 
 /** Понедельник ISO-недели, содержащей момент (Пн = 0). */
 const mondayOf = (ms: number): number => ms - ((new Date(ms).getUTCDay() + 6) % 7) * DAY;
@@ -823,7 +838,14 @@ export function weightedCost(lots: readonly { price: number; qty: number }[]): n
  * себестоимость чинит прайс, эталон витрины чинит слово владельца, а строки
  * не в строю чинит карточка автомата.
  */
-export type AnalyticsWarningCode = "no_sales" | "stock_missing" | "unknown_cost" | "no_reference" | "excluded_sales";
+export type AnalyticsWarningCode =
+  | "no_sales"
+  | "stock_missing"
+  | "unknown_cost"
+  | "no_reference"
+  | "excluded_sales"
+  /** Здоровье сбора не посчиталось — секция письма пуста, а остальное честно. */
+  | "health_unavailable";
 
 export interface AnalyticsWarning {
   code: AnalyticsWarningCode;
@@ -881,7 +903,65 @@ export interface OurvendHealth {
   salesLagH: number | null;
   /** Возраст снимка `product_sale`, ч: в деньги не идёт, но по нему видно, жив ли сбор. */
   productSaleLagH: number | null;
-  parity: { days: number; ok: boolean; mismatches: number; stockOk: boolean; note: string | null };
+  /**
+   * Сверка с учётной дорожкой. `stockChecked` — сколько пар остатков вообще
+   * СРАВНИВАЛОСЬ: без него `stockOk: false` при `mismatches: 0` читается как
+   * «расхождений ноль, но всё плохо». На проде это первый же случай — снимок
+   * остатков есть только за сегодня, а сверка идёт по закрытым суткам, и
+   * витрина обязана сказать «сверять не по чему», а не «❌ расхождений 0».
+   */
+  parity: { days: number; ok: boolean; mismatches: number; stockOk: boolean; stockChecked: number; note: string | null };
+}
+
+/**
+ * Итог правки ЭТАЛОНА витрины — ответ `POST /vending/sale-price` (R-P5b-6).
+ *
+ * Отдельный тип, а не `SetPriceResult` закупочной цены: гейт здесь сравнивает
+ * с другим числом — не с прошлым эталоном, а с ФАКТОМ витрины (`amount/qty` за
+ * окно). Владельцу важно видеть именно факт: «ты ставишь 20 000, а автомат
+ * берёт 15 000» — понятный вопрос, «отклонение 33 %» без базы — нет.
+ */
+export interface SetSalePriceResult {
+  ok: boolean;
+  /** Каноническое имя товара (после алиасов). */
+  product?: string;
+  oldPrice?: number | null;
+  newPrice?: number;
+  /** Отклонение от ФАКТА витрины (amount/qty за окно), % — при `reason="spike"`. */
+  deviationPct?: number;
+  /** Факт витрины за окно, сум за единицу; `null` — продаж в окне не было. */
+  factPrice?: number | null;
+  /**
+   * `invalid_price` — цена не число/не положительная. Отдельно от
+   * `not_found`: «товар не найден» на живой товар с кривой ценой — ответ,
+   * который отправляет владельца искать несуществующую проблему в прайсе.
+   */
+  reason?: "not_found" | "spike" | "invalid_price";
+  /** Человеческая причина отказа — её и печатает бот, не гадая по коду. */
+  message?: string;
+}
+
+/**
+ * Почему товар пропущен бутстрапом «витрина как факт».
+ *
+ * Четыре причины, а не одна: каждая чинится в СВОЁМ месте. `already_set` —
+ * решение владельца, трогать нельзя; `inactive` — товар снят с продажи;
+ * `no_sales` — в окне не продавался; `no_fact` — продажи есть, а цена из них
+ * не выводится (нулевая сумма при ненулевых штуках). Последнюю нельзя свести к
+ * `no_sales`: «не продавался» и «продан даром» — разные разговоры с прайсом.
+ */
+export type BootstrapSkipReason = "already_set" | "no_sales" | "no_fact" | "inactive";
+
+/** Итог разового бутстрапа эталонов витрины «витрина как факт» (R-P5b-6). */
+export interface BootstrapSalePriceResult {
+  days: number;
+  set: { product: string; price: number; qty: number }[];
+  /**
+   * Кого НЕ тронули и почему. Список обязателен: молчаливый пропуск товара
+   * читается владельцем как «эталон проставлен», и разрыв витрины по нему
+   * никогда бы не всплыл.
+   */
+  skipped: { product: string; reason: BootstrapSkipReason }[];
 }
 
 /** Строка автомата в недельной сводке: только деньги, без разреза по товарам. */
@@ -929,4 +1009,13 @@ export interface WeeklyDigest {
   deadStock: { rows: DeadRow[]; totalValue: number };
   priceChanges: { purchase: PriceChange[]; retail: PriceChange[] };
   health: OurvendHealth;
+  /**
+   * Чего в письме посчитать НЕ вышло. Пустой массив — «посчитано всё».
+   *
+   * Раньше сводка собиралась одним `Promise.all` без единого `catch`: падение
+   * любой секции (например, сырого SQL паритета внутри `health`) роняло весь
+   * ответ в 500, и понедельничное письмо не уходило вовсе. Теперь секция
+   * деградирует, а причина едет сюда — молчаливой потери секции быть не должно.
+   */
+  warnings: AnalyticsWarning[];
 }

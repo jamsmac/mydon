@@ -176,6 +176,12 @@ describe("Здоровье сбора (R-P5b-8)", () => {
       [7, false, 1, false],
     );
     assert.equal(h.parity.note, "остатки: снимков остатков OurVend за период нет");
+    assert.equal(h.parity.stockChecked, 0, "«сверять не по чему» обязано отличаться от «сверили и сошлось»");
+  });
+
+  it("сверенных пар остатков столько же, сколько насчитал паритет", async () => {
+    const h = await сервис({}).health(20, СЕЙЧАС);
+    assert.deepEqual([h.parity.stockOk, h.parity.stockChecked], [true, 14]);
   });
 
   it("мусорное число прогонов не роняет запрос и не читает всю таблицу", async () => {
