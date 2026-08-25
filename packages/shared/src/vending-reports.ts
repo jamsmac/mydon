@@ -545,6 +545,57 @@ export function priceChanges(
 
 // ── Витрина против эталона (R-P5b-6) ────────────────────────────────────────
 
+/**
+ * Минимум, из которого выводится факт витрины. Отдельным типом, а не
+ * `SaleRow`: факту не нужны ни сутки, ни автомат — окно и множество автоматов
+ * применяет тот, кто читает базу.
+ */
+export type RetailFactInput = Pick<SaleRow, "product" | "qty" | "amount">;
+
+/** Факт витрины по товару за окно. */
+export interface RetailFact {
+  /** Первое встреченное написание товара — им отчёт и говорит с владельцем. */
+  product: string;
+  /** Цена витрины за единицу, целые сумы: Σamount / Σqty. */
+  price: number;
+  /** Штуки, из которых цена выведена: одна продажа и сто — разной надёжности. */
+  qty: number;
+}
+
+/**
+ * ФАКТ витрины по товарам: Σamount / Σqty, ключ — КАНОН имени (R-P5b-6).
+ *
+ * Единственное место, где эта формула написана. Её спрашивают двое: отчёт
+ * «разрыв витрины» (ниже) и гейт эталона в Core (`VendingService.retailFacts`).
+ * Второй экземпляр формулы сходился бы с первым только вручную — и разошёлся
+ * бы ровно в тот день, когда одному из двух поправят округление: владелец
+ * увидел бы, что бот не принимает цену, которую его же отчёт называет
+ * правильной (R-P5b-10).
+ *
+ * Строка без штук в расчёт не идёт (делить не на что), и товар, у которого в
+ * окне нет ни одной такой строки, в карту НЕ попадает: «продаж не было» и
+ * «цена ноль» — разные вещи, и вторая обнулила бы разрыв витрины.
+ *
+ * Окно и множество автоматов здесь не применяются: у чистой функции нет
+ * «сейчас» и нет реестра. Отфильтровать строки — работа вызывающего.
+ */
+export function retailFactByProduct(rows: readonly RetailFactInput[]): Map<string, RetailFact> {
+  const acc = new Map<string, { product: string; qty: number; amount: number }>();
+  for (const row of rows) {
+    const qty = num(row.qty);
+    if (qty <= 0) continue;
+    const key = normalizeProductName(row.product);
+    const cell = acc.get(key) ?? { product: row.product, qty: 0, amount: 0 };
+    cell.qty += qty;
+    cell.amount += num(row.amount);
+    acc.set(key, cell);
+  }
+
+  const facts = new Map<string, RetailFact>();
+  for (const [key, cell] of acc) facts.set(key, { product: cell.product, price: money(cell.amount / cell.qty), qty: cell.qty });
+  return facts;
+}
+
 export interface PriceGapRow {
   product: string;
   fact: number;
@@ -576,9 +627,12 @@ export interface PriceGapReport {
  *
  * ПОРЯДОК СТРОК: по `lost` по убыванию — недобор сверху, «продали дороже
  * эталона» в хвосте. Закреплено тестом.
+ *
+ * Факт берётся у `retailFactByProduct` — той же функции, которой считает гейт
+ * эталона в боте: отчёт и гейт обязаны говорить об одном числе.
  */
 export function priceGap(
-  fact: readonly { product: string; qty: number; amount: number }[],
+  fact: readonly RetailFactInput[],
   reference: ReadonlyMap<string, number>,
   pct: number,
   days: number,
@@ -593,36 +647,26 @@ export function priceGap(
     if (Number.isFinite(price) && price > 0) refs.set(normalizeProductName(product), money(price));
   }
 
-  const acc = new Map<string, { product: string; qty: number; amount: number }>();
-  for (const f of fact) {
-    const qty = num(f.qty);
-    if (qty <= 0) continue;
-    const key = normalizeProductName(f.product);
-    const cell = acc.get(key) ?? { product: f.product, qty: 0, amount: 0 };
-    cell.qty += qty;
-    cell.amount += num(f.amount);
-    acc.set(key, cell);
-  }
-
   const rows: PriceGapRow[] = [];
   const noReference: string[] = [];
-  for (const [key, cell] of acc) {
+  // Факт считает `retailFactByProduct` — та же функция, что зовёт гейт эталона
+  // в Core. Своей копии Σamount/Σqty здесь больше нет (R-P5b-10).
+  for (const [key, f] of retailFactByProduct(fact)) {
     const ref = refs.get(key);
     if (ref === undefined) {
-      noReference.push(cell.product);
+      noReference.push(f.product);
       continue;
     }
-    const factPrice = money(cell.amount / cell.qty);
-    const gap = ref - factPrice;
+    const gap = ref - f.price;
     if (Math.abs(gap) / ref <= threshold) continue;
-    const lost = money(gap * cell.qty);
+    const lost = money(gap * f.qty);
     rows.push({
-      product: cell.product,
-      fact: factPrice,
+      product: f.product,
+      fact: f.price,
       reference: ref,
       gap,
       gapPct: pct1(gap, ref)!,
-      qty: cell.qty,
+      qty: f.qty,
       lost,
       action: lost > 0 ? "raise" : "check",
     });

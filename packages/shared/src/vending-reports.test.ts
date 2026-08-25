@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   deadStock, isoWeekTashkent, isoWeekFromKey, marginByMachine, previousIsoWeek,
-  priceChanges, priceGap, retailDaily, weekCompare, weightedCost,
+  priceChanges, priceGap, retailDaily, retailFactByProduct, weekCompare, weightedCost,
   type SaleRow, type StockPosition,
 } from "./vending-reports";
 
@@ -68,9 +68,13 @@ describe("Боевые числа прода (inventory-prod.md §1, §9)", () =
     ["Olma · 31 SKU (агрегат §1)", 4_260_615 / 668],
     ["American Hospital · 34 SKU (агрегат §1)", 2_240_264 / 379],
   ]);
+  // Строки идут В ОБРАТНОМ порядке к ожидаемому (сначала AH с меньшей маржой):
+  // при потерянной сортировке отчёт вернул бы их как есть, и тест «порядок»
+  // ниже покраснел бы. С фикстурой, уже уложенной правильно, он зеленел бы и
+  // без сортировки вовсе — то есть не проверял бы ничего.
   const r = marginByMachine([
-    s(OLMA, "Olma · 31 SKU (агрегат §1)", 668, 5_882_000),
     s(AH, "American Hospital · 34 SKU (агрегат §1)", 379, 3_092_000),
+    s(OLMA, "Olma · 31 SKU (агрегат §1)", 668, 5_882_000),
   ], (p) => закуп.get(p) ?? null, { days: 30, from: "2026-07-27", to: "2026-08-25", inService: парк });
 
   it("маржа 2 473 121 (27.6 %) — то же число, что владелец увидит первым прогоном", () => {
@@ -141,6 +145,23 @@ describe("Изменения цен >5 % (R-P5b-5)", () => {
     assert.deepEqual(priceChanges([], retailDaily(продажи), 5, 30).retail,
       [{ product: "LaimonFresh Lime 330ml", from: 15_000, to: 12_000, pct: -20, at: "2026-07-08" }]);
   });
+  it("порядок: товар, затем сутки — даже когда вход перемешан по обоим", () => {
+    // Вход идёт «поздний день раньше раннего» и «Я раньше А»: обе ступени
+    // сортировки обязаны сработать, иначе `priceChanges` пойдёт по ленте
+    // соседними парами не в ту сторону и назовёт падение ростом.
+    const лента = retailDaily([
+      s(OLMA, "Яблочный сок 1л", 1, 20_000, "2026-07-08"),
+      s(OLMA, "Апельсин 1л", 1, 11_000, "2026-07-09"),
+      s(OLMA, "Яблочный сок 1л", 1, 19_000, "2026-07-07"),
+      s(OLMA, "Апельсин 1л", 1, 10_000, "2026-07-07"),
+    ]);
+    assert.deepEqual(лента.map((x) => [x.product, x.dt, x.price]), [
+      ["Апельсин 1л", "2026-07-07", 10_000],
+      ["Апельсин 1л", "2026-07-09", 11_000],
+      ["Яблочный сок 1л", "2026-07-07", 19_000],
+      ["Яблочный сок 1л", "2026-07-08", 20_000],
+    ]);
+  });
   it("дробное деление: 3 шт на 25 000 → 8 333 (спека §5)", () => {
     assert.deepEqual(retailDaily([s(OLMA, "Cheers Сметана-зелень 70gr", 3, 25_000, "2026-07-07")]),
       [{ product: "Cheers Сметана-зелень 70gr", dt: "2026-07-07", price: 8_333 }]);
@@ -163,10 +184,14 @@ describe("Изменения цен >5 % (R-P5b-5)", () => {
 });
 
 describe("Витрина против эталона (R-P5b-6)", () => {
+  // Вход — В ОБРАТНОМ порядке к ожидаемому выводу: «продали дороже эталона»
+  // (Moxito, lost < 0) стоит ПЕРЕД недобором. Отчёт обязан поднять недобор
+  // наверх сам; фикстура, уже уложенная по `lost`, проверяла бы только то, что
+  // строки не перемешались.
   const r = priceGap([
-    { product: "LaimonFresh Lime 330ml", qty: 20, amount: 240_000 }, // факт 12 000
-    { product: "Moxito Lime 330ml", qty: 5, amount: 60_000 },        // факт 12 000
+    { product: "Moxito Lime 330ml", qty: 5, amount: 60_000 },        // факт 12 000, эталон ниже
     { product: "TUC Sour cream", qty: 4, amount: 60_000 },           // эталона нет
+    { product: "LaimonFresh Lime 330ml", qty: 20, amount: 240_000 }, // факт 12 000, недобор
   ], new Map([["LaimonFresh Lime 330ml", 15_000], ["Moxito Lime 330ml", 11_000]]), 5, 14);
   it("недобор — только по положительным разрывам; без эталона — отдельный список", () => {
     assert.deepEqual(r.rows.map((x) => [x.product, x.gap, x.gapPct, x.lost, x.action]), [
@@ -179,6 +204,40 @@ describe("Витрина против эталона (R-P5b-6)", () => {
     const k = priceGap([{ product: "X", qty: 2, amount: 25_000 }], new Map([["X", 15_000.55]]), 5, 14);
     assert.deepEqual([k.rows[0]!.reference, k.rows[0]!.fact, k.rows[0]!.gap, k.rows[0]!.lost, k.lostTotal],
       [15_001, 12_500, 2_501, 5_002, 5_002]);
+  });
+});
+
+describe("Факт витрины одной функцией (R-P5b-6, R-P5b-10)", () => {
+  it("Σamount/Σqty по канону имени, штуки сохранены, деньги целые", () => {
+    const f = retailFactByProduct([
+      { product: "Moxito Lime 330ml", qty: 2, amount: 24_000 },
+      { product: "MOXITO LIME 330ML", qty: 1, amount: 13_000 }, // то же — другое написание
+      { product: "Cheers Сметана-зелень 70gr", qty: 3, amount: 25_000 }, // 8333.33…
+    ]);
+    assert.deepEqual([...f.keys()], ["moxito lime 330ml", "cheers сметана-зелень 70gr"]);
+    // Первое встреченное написание — им отчёт и говорит с владельцем.
+    assert.deepEqual(f.get("moxito lime 330ml"), { product: "Moxito Lime 330ml", price: 12_333, qty: 3 });
+    assert.equal(f.get("cheers сметана-зелень 70gr")!.price, 8_333);
+  });
+  it("без штук товара в карте нет: «продаж не было» ≠ «цена ноль»", () => {
+    const f = retailFactByProduct([
+      { product: "Возврат", qty: 0, amount: 0 },
+      { product: "Мусор", qty: Number.NaN, amount: 10_000 },
+      { product: "Живой", qty: 1, amount: 9_000 },
+    ]);
+    assert.deepEqual([...f.keys()], ["живой"]);
+  });
+  it("гейт эталона и отчёт «разрыв витрины» считают факт ОДНОЙ функцией", () => {
+    // Ради этого функция и вынесена: два экземпляра Σamount/Σqty сходились бы
+    // только вручную. Здесь одни и те же строки идут в оба пути.
+    const строки = [
+      { product: "TUC Sour cream", qty: 4, amount: 60_000 },
+      { product: "TUC Sour cream", qty: 1, amount: 15_500 },
+    ];
+    const факт = retailFactByProduct(строки).get("tuc sour cream")!;
+    const отчёт = priceGap(строки, new Map([["TUC Sour cream", 20_000]]), 5, 14);
+    assert.equal(факт.price, 15_100);
+    assert.deepEqual([отчёт.rows[0]!.fact, отчёт.rows[0]!.qty], [факт.price, факт.qty]);
   });
 });
 

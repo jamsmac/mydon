@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
-import { and, desc, eq, gte, inArray, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, notInArray, sql } from "drizzle-orm";
 import {
   approval,
   auditLog,
@@ -20,6 +20,7 @@ import {
   vendingSyncRun,
 } from "@mydon/db";
 import {
+  DAY,
   MAX_CAPACITY,
   PRICE_SPIKE_PCT,
   TZ,
@@ -36,11 +37,13 @@ import {
   normalizeProductName,
   planogramStatus,
   priceDeviationPct,
+  retailFactByProduct,
   routeIssuesFrom,
   routeOrderFrom,
   runoutForecast,
   slotValid,
   tashkentDay,
+  tashkentDayStartOf,
   type CashCategoryInput,
   type MachineSlots,
   type PlanogramStatus,
@@ -49,6 +52,7 @@ import {
   type PurchaseCashSession,
   type PurchaseRow,
   type PurchaseSummary,
+  type RetailFact,
   type Runout,
   type RunoutInput,
   type Slot,
@@ -320,7 +324,14 @@ export interface SetSalePriceResult {
   deviationPct?: number;
   /** Факт витрины за окно, сум за единицу; `null` — продаж в окне не было. */
   factPrice?: number | null;
-  reason?: "not_found" | "spike";
+  /**
+   * `invalid_price` — цена не число/не положительная. Отдельно от
+   * `not_found`: «товар не найден» на живой товар с кривой ценой — ответ,
+   * который отправляет владельца искать несуществующую проблему в прайсе.
+   */
+  reason?: "not_found" | "spike" | "invalid_price";
+  /** Человеческая причина отказа — её и печатает бот, не гадая по коду. */
+  message?: string;
 }
 
 /** Итог разового бутстрапа эталонов витрины «витрина как факт» (R-P5b-6). */
@@ -332,13 +343,7 @@ export interface BootstrapSalePriceResult {
    * читается владельцем как «эталон проставлен», и разрыв витрины по нему
    * никогда бы не всплыл.
    */
-  skipped: { product: string; reason: "already_set" | "no_sales" }[];
-}
-
-/** Факт витрины по товару за окно: цена (amount/qty) и штуки, из которых она выведена. */
-interface RetailFact {
-  price: number;
-  qty: number;
+  skipped: { product: string; reason: "already_set" | "no_sales" | "inactive" }[];
 }
 
 /** Итог отправки закупа на утверждение. */
@@ -493,6 +498,8 @@ interface ProductIndexRow {
   /** Эталон витрины (П5b) — numeric строкой, как его отдаёт драйвер. */
   salePrice: string | null;
   packSize: number;
+  /** Снятый с продажи товар: бутстрап эталона его не трогает (П5b). */
+  isActive: boolean;
   excludedFromPurchase: boolean;
   fixedPurchaseQty: number | null;
 }
@@ -1084,6 +1091,7 @@ export class VendingService {
           purchasePrice: vendingProduct.purchasePrice,
           salePrice: vendingProduct.salePrice,
           packSize: vendingProduct.packSize,
+          isActive: vendingProduct.isActive,
           excludedFromPurchase: vendingProduct.excludedFromPurchase,
           fixedPurchaseQty: vendingProduct.fixedPurchaseQty,
         })
@@ -2312,45 +2320,61 @@ export class VendingService {
   // `vending_product.sale_price` (миграция 0068).
 
   /**
-   * ФАКТ витрины по товарам за окно ташкентских суток: Σamount / Σqty,
-   * округление до 1 сум.
+   * ФАКТ витрины по товарам за окно: Σamount / Σqty по КАНОНУ имени.
    *
-   * Источник — только `sale` (R-P5b-1): это единственная таблица, где выручка
-   * разложена по суткам и товарам. `product_sale` хранит последний
-   * 7-дневный батч кабинета без разбивки и для цены не годится вовсе.
-   * Ключ карты — НОРМАЛИЗОВАННЫЙ канон имени (алиасы уже применены): в
-   * продажах товар пишется формой кабинета, в прайсе — канонической.
-   * Товар без штук в окне в карту не попадает: «продаж не было» и «цена 0» —
-   * разные вещи, и делить на ноль ради второй мы не будем.
+   * Тонкая обёртка: сама формула живёт в `@mydon/shared`
+   * (`retailFactByProduct`) и оттуда же её берёт отчёт «разрыв витрины»
+   * (R-P5b-10). Здесь — только то, чего чистая функция знать не может: какие
+   * строки ей дать.
+   *
+   * ОКНО — последние `days` ПОЛНЫХ ташкентских суток, кончая ВЧЕРА (та же
+   * `окноПоВчера`, что у отчётов аналитики). Сегодняшний день не берём
+   * намеренно: `sale` наполняется суточным съёмом кабинета, и сегодняшняя
+   * строка либо ещё не приехала, либо приехала половиной — цена по половине
+   * дня скакала бы от часа прогона. Верхняя граница задана явно (`lte`), а не
+   * «всё, что новее»: строка с датой из будущего (кривой импорт) иначе
+   * заезжала бы в факт и тихо двигала гейт.
+   *
+   * ГЕЙТ И ОТЧЁТ ОБЯЗАНЫ СОВПАДАТЬ. Если здесь окно или множество автоматов
+   * разойдутся с `AnalyticsService.priceGap`, владелец получит бота, который
+   * не принимает цену, названную правильной в его же отчёте, — и никакого
+   * способа понять, кто из двоих врёт.
+   *
+   * АВТОМАТЫ — только «в строю» (R-P5b-1), тем же правилом, что у отчётов:
+   * серийник должен быть в реестре И его карточка не снята. Прод уже показал
+   * цену этой строки: 09.07.2026 склад-заглушка `2508160360` (SKLAD 4S,
+   * `warehouse`) «продал» 1 шт Moxito Klubnika за 12 000 — такая «продажа»
+   * двигала бы факт витрины наравне с настоящей.
    */
-  private async retailFacts(days: number, aliasByKey: Map<string, string>): Promise<Map<string, RetailFact>> {
-    const окно = Math.max(1, Math.trunc(days));
-    // Окно включает СЕГОДНЯШНИЕ ташкентские сутки, поэтому шагаем назад на
-    // (окно − 1): 14 суток — это today−13 … today, а не 15 дат.
-    const from = tashkentDay(new Date(Date.now() - (окно - 1) * 86_400_000));
-    const rows = await this.db
-      .select({ product: sale.product, qty: sale.qty, amount: sale.amount })
-      .from(sale)
-      .where(gte(sale.dt, from));
+  async retailFacts(
+    days = SALE_PRICE_FACT_DAYS,
+    aliasByKey?: Map<string, string>,
+    now = new Date(),
+  ): Promise<Map<string, RetailFact>> {
+    const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
+    const aliases = aliasByKey ?? (await this.loadProductIndex()).aliasByKey;
+    const сегодня = tashkentDayStartOf(now).getTime();
+    const from = tashkentDay(new Date(сегодня - окно * DAY));
+    const to = tashkentDay(new Date(сегодня - DAY));
 
-    const сумма = new Map<string, { qty: number; amount: number }>();
-    for (const r of rows) {
-      const qty = Number(r.qty);
-      const amount = Number(r.amount);
-      if (!Number.isFinite(qty) || !Number.isFinite(amount)) continue;
-      const key = normalizeProductName(this.resolveProduct(r.product, aliasByKey));
-      const acc = сумма.get(key) ?? { qty: 0, amount: 0 };
-      acc.qty += qty;
-      acc.amount += amount;
-      сумма.set(key, acc);
+    const [rows, registry] = await Promise.all([
+      this.db
+        .select({ machineSerial: sale.machineSerial, product: sale.product, qty: sale.qty, amount: sale.amount })
+        .from(sale)
+        .where(and(gte(sale.dt, from), lte(sale.dt, to))),
+      this.machineRegistry(),
+    ]);
+
+    const вСтрою = new Set<string>();
+    for (const serial of registry.nameBySerial.keys()) {
+      if (!registry.notInService.has(serial)) вСтрою.add(serial);
     }
 
-    const facts = new Map<string, RetailFact>();
-    for (const [key, acc] of сумма) {
-      if (acc.qty <= 0) continue;
-      facts.set(key, { price: Math.round(acc.amount / acc.qty), qty: acc.qty });
-    }
-    return facts;
+    return retailFactByProduct(
+      rows
+        .filter((r) => вСтрою.has(normalizeMachineSerial(r.machineSerial)))
+        .map((r) => ({ product: this.resolveProduct(r.product, aliases), qty: Number(r.qty), amount: Number(r.amount) })),
+    );
   }
 
   /**
@@ -2368,7 +2392,14 @@ export class VendingService {
    */
   async setSalePrice(rawProduct: string, price: number, actor = "owner", confirmed = false): Promise<SetSalePriceResult> {
     const name = rawProduct.trim();
-    if (!name || !Number.isFinite(price) || price <= 0) return { ok: false, reason: "not_found" };
+    // Причина отказа называется своим именем. «Товар не найден» на цену «0»
+    // отправляло бы владельца искать несуществующую проблему в прайсе — при
+    // том что товар на месте, а неверна ровно цена (`setProductPrice` рядом
+    // сваливает оба случая в `not_found`; чинится отдельной правкой П3).
+    if (!name) return { ok: false, reason: "not_found", message: "не сказано, какому товару ставим эталон витрины" };
+    if (!Number.isFinite(price) || price <= 0) {
+      return { ok: false, reason: "invalid_price", newPrice: price, message: "эталон витрины — положительное число сум" };
+    }
 
     const { aliasByKey, productRows } = await this.loadProductIndex();
     const canon = this.resolveProduct(name, aliasByKey);
@@ -2383,7 +2414,14 @@ export class VendingService {
           .where(eq(sql`lower(${vendingProduct.name})`, canon.toLowerCase()))
           .limit(1)
       )[0];
-    if (!row) return { ok: false, reason: "not_found", product: canon };
+    if (!row) {
+      return {
+        ok: false,
+        reason: "not_found",
+        product: canon,
+        message: `товара «${canon}» нет в прайсе вендинга — ни карточкой, ни алиасом`,
+      };
+    }
 
     const oldPrice = row.salePrice === null ? null : Number(row.salePrice);
     const fact = (await this.retailFacts(SALE_PRICE_FACT_DAYS, aliasByKey)).get(normalizeProductName(row.name));
@@ -2398,6 +2436,7 @@ export class VendingService {
         newPrice: price,
         factPrice,
         deviationPct: Math.round(deviation),
+        message: `эталон ${price} расходится с фактом витрины ${factPrice} на ${Math.round(deviation)}% — повтори со словом «точно»`,
       };
     }
 
@@ -2426,17 +2465,20 @@ export class VendingService {
    *
    * Товар с уже заданным эталоном не трогаем ни при каких условиях — иначе
    * повторный вызов затирал бы решение владельца сегодняшним фактом, то есть
-   * ровно тем числом, с которым эталон и должен расходиться. Товар без продаж
-   * в окне пропускаем ИМЕНЕМ, а не молча: молчание читается как «эталон
-   * проставлен», и разрыв витрины по такому товару никогда бы не всплыл.
+   * ровно тем числом, с которым эталон и должен расходиться. Снятый с продажи
+   * товар (`is_active = false`) пропускаем отдельной причиной: эталон ему
+   * ставить незачем, а «нет продаж» на снятый товар звучит как жалоба на
+   * спрос. Товар без продаж в окне пропускаем ИМЕНЕМ, а не молча: молчание
+   * читается как «эталон проставлен», и разрыв витрины по такому товару
+   * никогда бы не всплыл.
    */
   async bootstrapSalePrice(days = SALE_PRICE_FACT_DAYS, actor = "owner"): Promise<BootstrapSalePriceResult> {
     const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
     const { aliasByKey, productRows } = await this.loadProductIndex();
     const facts = await this.retailFacts(окно, aliasByKey);
 
-    const set: { product: string; price: number; qty: number }[] = [];
-    const skipped: { product: string; reason: "already_set" | "no_sales" }[] = [];
+    const set: BootstrapSalePriceResult["set"] = [];
+    const skipped: BootstrapSalePriceResult["skipped"] = [];
     const писать: { id: string; name: string; price: number }[] = [];
     // Обходим прайс в его собственном порядке: `set` и `skipped` — это отчёт о
     // прогоне, а не витрина. Как их показать (сгруппировать, отсортировать) —
@@ -2444,6 +2486,10 @@ export class VendingService {
     for (const p of productRows) {
       if (p.salePrice !== null) {
         skipped.push({ product: p.name, reason: "already_set" });
+        continue;
+      }
+      if (!p.isActive) {
+        skipped.push({ product: p.name, reason: "inactive" });
         continue;
       }
       const fact = facts.get(normalizeProductName(p.name));
@@ -2459,22 +2505,30 @@ export class VendingService {
     // прогона — норма, и он не должен оставлять следа в журнале.
     if (писать.length > 0) {
       await this.db.transaction(async (tx) => {
+        // UPDATE — по одному на товар (у каждого своя цена), а события и
+        // журнал — ОДНОЙ пачкой. На полусотне товаров раздельные вставки
+        // давали бы полторы сотни round-trip'ов под одной транзакцией,
+        // державшей блокировки строк прайса всё это время.
         for (const item of писать) {
           await tx.update(vendingProduct).set({ salePrice: item.price.toFixed(2) }).where(eq(vendingProduct.id, item.id));
-          await tx.insert(event).values({
+        }
+        await tx.insert(event).values(
+          писать.map((item) => ({
             source: "owner",
             type: "vending.sale_price_changed",
             payload: { product: item.name, oldPrice: null, newPrice: item.price, actor },
-          });
-          await tx.insert(auditLog).values({
-            actorKind: "human",
+          })),
+        );
+        await tx.insert(auditLog).values(
+          писать.map((item) => ({
+            actorKind: "human" as const,
             actorRef: actor,
             action: "vending.product.set_sale_price",
             target: item.id,
             before: { salePrice: null },
             after: { salePrice: item.price },
-          });
-        }
+          })),
+        );
       });
     }
     return { days: окно, set, skipped };

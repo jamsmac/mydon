@@ -63,7 +63,20 @@ const ЧТЕНИЕ = [
   "/vending/machines",
   "/vending/deficit",
   "/vending/plan",
-  "/vending/products",
+  {
+    // Прайс обязан доносить ЭТАЛОН витрины до клиента (П5b): колонка 0068
+    // новая, и «поле есть в сервисе» ещё не значит «поле доехало до панели».
+    // На засеянной базе эталон не задан — это `null`, а не ноль и не пропуск
+    // ключа: пропущенный ключ панель прочтёт как «эталон не пришёл».
+    path: "/vending/products",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ) || ответ.length === 0) throw new Error("прайс вендинга пуст — засеян ли seed-vending?");
+      for (const p of ответ) {
+        if (!("salePrice" in p)) throw new Error(`у «${p.name}» нет ключа salePrice`);
+        if (p.salePrice !== null && typeof p.salePrice !== "number") throw new Error(`salePrice=${p.salePrice} у «${p.name}»`);
+      }
+    },
+  },
   "/vending/sync",
   "/vending/refill-events?days=14",
   {
@@ -417,6 +430,22 @@ const ЗАПИСЬ = [
       if (о.newPrice !== 15000) throw new Error(`newPrice=${о.newPrice}`);
       if (о.factPrice !== null) throw new Error(`факта витрины на засеянной базе быть не должно: ${о.factPrice}`);
     },
+    // Ответ записи не показывает, что стало со строкой: проверяем ТЕМ ЖЕ
+    // путём, которым прайс читает панель.
+    после: async () => {
+      const прайс = await читать("/vending/products");
+      const строка = прайс.find((p) => p.name === P4_ТОВАР);
+      if (!строка) throw new Error(`товара «${P4_ТОВАР}» нет в прайсе`);
+      if (строка.salePrice !== 15000) throw new Error(`эталон не доехал до прайса: salePrice=${строка.salePrice}`);
+    },
+  },
+  {
+    // Мусорная цена обязана называться мусорной ценой, а не «товар не найден»:
+    // DTO её и не пропустит (400), и это тоже часть контракта записи.
+    имя: "эталон витрины: цена 0 отвергается на границе (400)",
+    path: "/vending/sale-price",
+    body: { product: P4_ТОВАР, price: 0 },
+    ждёмОтказ: true,
   },
   {
     // Повтор той же командой вдвое дороже. Гейт «точно» сравнивает с ФАКТОМ
@@ -1198,6 +1227,13 @@ async function проверитьЗапись(шаг) {
     signal: AbortSignal.timeout(20_000),
   });
   const текст = await r.text();
+  // Запись, которая ОБЯЗАНА быть отвергнута на границе (мусорный ввод): 200 на
+  // неё — не «сервис снисходителен», а дыра в валидации.
+  if (шаг.ждёмОтказ) {
+    if (r.ok) провалы.push(`POST ${шаг.path} (${шаг.имя}) → ${r.status}, а ожидали отказ`);
+    else console.log(`  ok  POST ${шаг.path} — ${шаг.имя}`);
+    return;
+  }
   if (!r.ok) {
     провалы.push(`POST ${шаг.path} (${шаг.имя}) → ${r.status}: ${текст.slice(0, 300)}`);
     return;

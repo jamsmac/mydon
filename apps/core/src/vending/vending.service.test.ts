@@ -29,6 +29,8 @@ type ProdRow = {
   fixedPurchaseQty?: number | null;
   /** Эталон витрины (П5b): `null` — не задан, строка numeric — задан. */
   salePrice?: string | null;
+  /** Снят с продажи (П5b). В базе колонка NOT NULL — стаб П5b подставляет `true`. */
+  isActive?: boolean;
 };
 type AliasRow = { productId: string; alias: string };
 /** Карточка реестра автомата и её состояние — фильтр «в строю» у плана, прогноза и сводки. */
@@ -2361,20 +2363,32 @@ function мир(opts: {
   sales?: SaleFactRow[];
   aliases?: AliasRow[];
   orders?: OrderFactRow[];
+  /** Реестр автоматов: по умолчанию один Olma в строю — иначе продажи некому приписать. */
+  machines?: EntRow[];
+  /** Карточки состояния: пусто — все в строю (DEFAULT_MACHINE_STATUS). */
+  cards?: CardRow[];
 }) {
-  const products = opts.products ?? [];
   const sales = opts.sales ?? [];
   const aliases = opts.aliases ?? [];
   const order = opts.orders?.[0] ?? null;
+  const machines = opts.machines ?? [{ id: "m-olma", name: "Olma Администрация", externalRef: OLMA, type: "machine" }];
+  const cards = opts.cards ?? [];
+  // `is_active` в базе NOT NULL с дефолтом `true`; фикстуры пишут его только
+  // там, где речь про снятый товар.
+  const products = (opts.products ?? []).map((p) => ({ isActive: true, ...p }));
   const updates: Record<string, unknown>[] = [];
   const events: Record<string, unknown>[] = [];
   const audit: Record<string, unknown>[] = [];
   const purchases: Record<string, unknown>[] = [];
   const stockUpserts: Record<string, unknown>[] = [];
 
+  /** Сколько РАЗ звали insert по таблице — им и видно пачку против N вставок. */
+  const вставок = new Map<string, number>();
   /** Вставка пачкой = столько же строк, сколько отдельными вызовами. */
   const принять = (table: unknown, v: unknown) => {
     const rows = (Array.isArray(v) ? v : [v]) as Record<string, unknown>[];
+    const имя = table === event ? "event" : table === auditLog ? "audit" : table === purchase ? "purchase" : "stock";
+    вставок.set(имя, (вставок.get(имя) ?? 0) + 1);
     if (table === event) events.push(...rows);
     else if (table === auditLog) audit.push(...rows);
     else if (table === purchase) purchases.push(...rows);
@@ -2382,11 +2396,25 @@ function мир(opts: {
   };
 
   const строки = (t: unknown): unknown[] =>
-    t === vendingAlias ? aliases : t === vendingProduct ? products : t === sale ? sales : [];
+    t === vendingAlias
+      ? aliases
+      : t === vendingProduct
+        ? products
+        : t === sale
+          ? sales
+          : t === entity
+            ? machines
+            : t === machineCard
+              ? cards
+              : [];
+
+  /** Условие, с которым читались продажи, — им проверяются границы окна. */
+  const условиеПродаж: unknown[] = [];
 
   const выборка = (t: unknown) => {
     const p = Promise.resolve(строки(t));
-    const where = () => {
+    const where = (cond?: unknown) => {
+      if (t === sale) условиеПродаж.push(cond);
       const q = Promise.resolve(строки(t));
       // limit(1) — запасной путь поиска карточки по lower(name): стаб его не
       // умеет, и это правильно — канон обязан находиться в загруженном прайсе.
@@ -2430,17 +2458,97 @@ function мир(opts: {
     select: () => ({ from: (t: unknown) => выборка(t) }),
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
-  return { db, service: new VendingService(db), updates, events, audit, purchases, stockUpserts };
+  /**
+   * То, что после записи сделала бы база: проставить эталон записанным
+   * товарам. Нужно для повторного прогона бутстрапа — без этого «второй раз
+   * ничего не пишем» проверялось бы на мире, где первый прогон как будто не
+   * случился.
+   */
+  const применить = (записанные: readonly { product: string; price: number }[]) => {
+    for (const x of записанные) {
+      const строка = products.find((p) => p.name === x.product);
+      if (строка) строка.salePrice = x.price.toFixed(2);
+    }
+  };
+
+  return {
+    db,
+    service: new VendingService(db),
+    updates,
+    events,
+    audit,
+    purchases,
+    stockUpserts,
+    вставок,
+    применить,
+    /** Границы окна продаж, как их увидел Postgres: `[from, to]`. */
+    окноПродаж: () => параметрыSQL(условиеПродаж.at(-1)),
+  };
+}
+
+/**
+ * Значения параметров drizzle-условия (`and(gte(dt, from), lte(dt, to))`).
+ *
+ * Заглушка `where()` условие не ИСПОЛНЯЕТ, поэтому единственный способ
+ * проверить границы окна в юнит-тесте — прочитать сами параметры. Что
+ * `dt BETWEEN` действительно так работает в Postgres, проверяет дымовой
+ * прогон.
+ */
+function параметрыSQL(x: unknown): unknown[] {
+  const out: unknown[] = [];
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n);
+      return;
+    }
+    const chunks = (node as { queryChunks?: unknown[] }).queryChunks;
+    if (Array.isArray(chunks)) {
+      for (const c of chunks) walk(c);
+      return;
+    }
+    const v = (node as { value?: unknown }).value;
+    if (typeof v === "string" || typeof v === "number") out.push(v);
+  };
+  walk(x);
+  return out;
 }
 
 describe("Эталон витрины (R-P5b-6)", () => {
-  it("записывает sale_price, событие и запись в журнал", async () => {
+  it("окно факта — последние 14 ПОЛНЫХ ташкентских суток, кончая ВЧЕРА", async () => {
+    // То же окно, что у отчётов аналитики (`окноПоВчера`). Разойдись они — и
+    // бот отказывал бы в цене, которую отчёт того же владельца называет
+    // правильной. Сегодняшний день не берём: `sale` наполняется суточным
+    // съёмом, и половина дня давала бы цену, скачущую от часа прогона.
     const м = мир({ products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null }] });
+    await м.service.retailFacts(14, undefined, new Date("2026-08-25T02:00:00Z")); // 07:00 в Ташкенте
+    assert.deepEqual(м.окноПродаж(), ["2026-08-11", "2026-08-24"]);
+
+    // Полчаса после ташкентской полуночи — то же окно, а не «на день меньше».
+    await м.service.retailFacts(14, undefined, new Date("2026-08-24T19:30:00Z"));
+    assert.deepEqual(м.окноПродаж(), ["2026-08-11", "2026-08-24"]);
+  });
+
+  it("записывает sale_price, событие и запись в журнал", async () => {
+    const м = мир({ products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: "12000" }] });
     const r = await м.service.setSalePrice("tuc sour cream", 15_000, "owner");
-    assert.deepEqual([r.ok, r.product, r.oldPrice, r.newPrice], [true, "TUC Sour cream", null, 15_000]);
+    assert.deepEqual([r.ok, r.product, r.oldPrice, r.newPrice], [true, "TUC Sour cream", 12_000, 15_000]);
     assert.equal(м.updates.at(-1)?.salePrice, "15000.00");
+    // Тип события без payload ничего не значит: перепутанные old/new прошли бы
+    // проверку одного лишь типа, а владелец прочёл бы «подорожало» на
+    // подешевевшем товаре.
     assert.equal(м.events.at(-1)?.type, "vending.sale_price_changed");
-    assert.equal(м.audit.at(-1)?.action, "vending.product.set_sale_price");
+    assert.deepEqual(м.events.at(-1)?.payload, {
+      product: "TUC Sour cream",
+      oldPrice: 12_000,
+      newPrice: 15_000,
+      actor: "owner",
+    });
+    const запись = м.audit.at(-1)!;
+    assert.deepEqual(
+      [запись.action, запись.actorKind, запись.actorRef, запись.target, запись.before, запись.after],
+      ["vending.product.set_sale_price", "human", "owner", "p1", { salePrice: 12_000 }, { salePrice: 15_000 }],
+    );
   });
 
   it("гейт по ФАКТУ витрины: >20 % от amount/qty требует «точно»", async () => {
@@ -2460,13 +2568,37 @@ describe("Эталон витрины (R-P5b-6)", () => {
     assert.deepEqual([r.ok, r.factPrice], [true, null]);
   });
 
-  it("незнакомый товар и мусорная цена — отказ до записи", async () => {
+  it("причина отказа названа своим именем: товар / цена", async () => {
     const м = мир({ products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null }] });
     assert.equal((await м.service.setSalePrice("Чипсы новые", 9_000)).reason, "not_found");
-    assert.equal((await м.service.setSalePrice("TUC Sour cream", 0)).ok, false);
-    assert.equal((await м.service.setSalePrice("  ", 100)).ok, false);
+    // Живой товар с кривой ценой — это НЕ «товар не найден»: такой ответ
+    // отправил бы владельца искать несуществующую проблему в прайсе.
+    for (const мусор of [0, -5, Number.NaN]) {
+      const r = await м.service.setSalePrice("TUC Sour cream", мусор);
+      assert.deepEqual([r.ok, r.reason], [false, "invalid_price"], `цена ${мусор}`);
+      assert.match(r.message ?? "", /положительное число/);
+    }
+    assert.equal((await м.service.setSalePrice("  ", 100)).reason, "not_found");
     assert.equal(м.updates.length, 0);
     assert.equal(м.events.length, 0);
+  });
+
+  it("автомат НЕ в строю в факт витрины не идёт (R-P5b-1)", async () => {
+    // Прод, 09.07.2026: склад-заглушка 2508160360 (SKLAD 4S, warehouse)
+    // «продал» 1 шт за 12 000. Такая продажа не витрина, и двигать гейт ей
+    // нечего — а без фильтра она осталась бы единственным фактом товара.
+    const склад = "2508160360";
+    const м = мир({
+      products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null }],
+      sales: [{ dt: "2026-08-20", machineSerial: склад, product: "TUC Sour cream", qty: "4", amount: "60000" }],
+      machines: [
+        { id: "m-olma", name: "Olma Администрация", externalRef: OLMA, type: "machine" },
+        { id: "m-sklad", name: "SKLAD 4S", externalRef: склад, type: "machine" },
+      ],
+      cards: [{ entityId: "m-sklad", status: "warehouse" }],
+    });
+    const r = await м.service.setSalePrice("TUC Sour cream", 20_000, "owner");
+    assert.deepEqual([r.ok, r.factPrice], [true, null], "продажа склада-заглушки факта не создаёт");
   });
 
   it("бутстрап заполняет только пустые эталоны и называет пропущенных", async () => {
@@ -2475,20 +2607,69 @@ describe("Эталон витрины (R-P5b-6)", () => {
         { id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null },
         { id: "p2", name: "Moxito Lime 330ml", purchasePrice: "9800", packSize: 12, salePrice: "12000" },
         { id: "p3", name: "Новинка", purchasePrice: "1000", packSize: 1, salePrice: null },
+        { id: "p4", name: "Снятый с продажи", purchasePrice: "1000", packSize: 1, salePrice: null, isActive: false },
       ],
-      sales: [{ dt: "2026-08-20", machineSerial: OLMA, product: "TUC Sour cream", qty: "4", amount: "60000" }],
+      sales: [
+        { dt: "2026-08-20", machineSerial: OLMA, product: "TUC Sour cream", qty: "4", amount: "60000" },
+        // Продажи снятого товара в окне ЕСТЬ — и всё равно эталон ему не ставим.
+        { dt: "2026-08-20", machineSerial: OLMA, product: "Снятый с продажи", qty: "2", amount: "10000" },
+      ],
     });
     const r = await м.service.bootstrapSalePrice(14, "owner");
     assert.deepEqual(r.set, [{ product: "TUC Sour cream", price: 15_000, qty: 4 }]);
     assert.deepEqual(r.skipped, [
       { product: "Moxito Lime 330ml", reason: "already_set" },
       { product: "Новинка", reason: "no_sales" },
+      { product: "Снятый с продажи", reason: "inactive" },
     ]);
     assert.equal(r.days, 14);
     // Ровно один товар записан — ровно одно событие и одна запись журнала.
     assert.equal(м.updates.length, 1);
     assert.equal(м.events.filter((e) => e.type === "vending.sale_price_changed").length, 1);
-    assert.equal(м.audit.length, 1);
+    assert.deepEqual(м.events.at(-1)?.payload, {
+      product: "TUC Sour cream",
+      oldPrice: null,
+      newPrice: 15_000,
+      actor: "owner",
+    });
+    assert.deepEqual(м.audit.at(-1)?.before, { salePrice: null });
+    assert.deepEqual(м.audit.at(-1)?.after, { salePrice: 15_000 });
+  });
+
+  it("бутстрап пишет события и журнал ОДНОЙ пачкой, а не по вставке на товар", async () => {
+    const м = мир({
+      products: [
+        { id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null },
+        { id: "p2", name: "Moxito Lime 330ml", purchasePrice: "9800", packSize: 12, salePrice: null },
+      ],
+      sales: [
+        { dt: "2026-08-20", machineSerial: OLMA, product: "TUC Sour cream", qty: "4", amount: "60000" },
+        { dt: "2026-08-20", machineSerial: OLMA, product: "Moxito Lime 330ml", qty: "2", amount: "24000" },
+      ],
+    });
+    const r = await м.service.bootstrapSalePrice(14, "owner");
+    assert.equal(r.set.length, 2);
+    // Полсотни товаров прайса иначе дали бы полторы сотни запросов под одной
+    // транзакцией, держащей блокировки строк всё это время.
+    assert.deepEqual([м.вставок.get("event"), м.вставок.get("audit")], [1, 1]);
+    assert.deepEqual([м.events.length, м.audit.length, м.updates.length], [2, 2, 2]);
+  });
+
+  it("повторный бутстрап ничего не пишет: эталон уже слово владельца", async () => {
+    const м = мир({
+      products: [{ id: "p1", name: "TUC Sour cream", purchasePrice: "9000", packSize: 1, salePrice: null }],
+      sales: [{ dt: "2026-08-20", machineSerial: OLMA, product: "TUC Sour cream", qty: "4", amount: "60000" }],
+    });
+    const первый = await м.service.bootstrapSalePrice(14, "owner");
+    assert.equal(первый.set.length, 1);
+    м.применить(первый.set); // то, что после записи сделала бы база
+
+    const второй = await м.service.bootstrapSalePrice(14, "owner");
+    assert.deepEqual(второй.set, []);
+    assert.deepEqual(второй.skipped, [{ product: "TUC Sour cream", reason: "already_set" }]);
+    // Второй прогон не должен ни писать, ни оставлять следа в журнале — даже
+    // при том, что факт витрины за окно у него тот же самый.
+    assert.deepEqual([м.updates.length, м.events.length, м.audit.length], [1, 1, 1]);
   });
 
   it("бутстрап без товаров без эталона не открывает транзакцию впустую", async () => {
