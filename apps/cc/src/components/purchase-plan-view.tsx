@@ -214,8 +214,12 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
               <div className="row" key={i.product}>
                 <div className="t">
                   <b>{i.product}</b>
+                  {/* «со склада N» здесь не повторяем: та же цифра уже стоит
+                      строкой выше, в «Собрать со склада», и вместе с адресами
+                      автоматов. Дважды сказанное число читается как два разных
+                      (бот печатает эту секцию так же). */}
                   <small>
-                    нужно {n(i.need)} · со склада {n(i.fromStock)}
+                    нужно {n(i.need)}
                     {i.unfilled > 0 && <> · пусто {n(i.unfilled)}</>}
                   </small>
                 </div>
