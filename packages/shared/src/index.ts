@@ -82,6 +82,7 @@ export * from "./planogram";
 export * from "./menu";
 export * from "./vending-calc";
 export * from "./vending-plan";
+export * from "./vending-field";
 export * from "./coffee-calc";
 export * from "./coffee-order";
 export * from "./contractor-name";
