@@ -24,7 +24,7 @@ import {
 import type { CoreClient, PersonRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import { objectName, pickObject } from "./machine-picker";
-import { newRunId } from "./staff-refill";
+import { newRunId, onMachinePicked } from "./staff-refill";
 import type { StaffReply } from "./staff";
 
 /**
@@ -62,8 +62,15 @@ function masterClientKey(
   return typeof data.runId === "string" ? { clientKey: `${prefix}:${data.runId}:${last}` } : {};
 }
 
-/** Флоу мастеров — те же строки, что в Conversations.flow. */
-export const FIELD_FLOWS = ["part-replace", "clean", "service-check", "problem"] as const;
+/**
+ * Флоу мастеров — те же строки, что в Conversations.flow.
+ *
+ * «refill» (заливка снек-автомата) живёт в staff-refill.ts, но объект выбирает
+ * тем же пикером — и обязан быть здесь: список гейтит отмену пикера («Отмена»
+ * с чужого экрана не гасит текущее дело). Забыть его значит получить мастер,
+ * который эта кнопка убивает молча.
+ */
+export const FIELD_FLOWS = ["part-replace", "clean", "service-check", "problem", "refill"] as const;
 export type FieldFlow = (typeof FIELD_FLOWS)[number];
 
 // ── Замена узла (pt:) ───────────────────────────────────────────────────────
@@ -990,6 +997,9 @@ export async function onObjectPicked(
     case "problem":
       deps.conversations.advance(chatId, "symptom", { entityId, entityName: name });
       return { text: `${name}. Что случилось?`, keyboard: symptomKeyboard() };
+    case "refill":
+      // Снек-заливка: дальше не вопрос, а готовый чек-лист из плана закупа.
+      return onMachinePicked(chatId, entityId, name, deps);
     default:
       return { text: "Не пойму, к чему это. Начни заново кнопкой из меню." };
   }

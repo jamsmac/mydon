@@ -48,6 +48,15 @@ import {
 } from "./coffee-returns";
 import { handleCoffeeFixCallback, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
 import {
+  handleRefillCallback,
+  handleRefillCount,
+  handleRefillProductText,
+  parseRefillCallback,
+  refillStepHint,
+  REFILL_FLOW,
+  startMachineRefill,
+} from "./staff-refill";
+import {
   finishAfterPhoto,
   handleCleanCallback,
   handlePartReplaceCallback,
@@ -398,6 +407,17 @@ ${reply.text}`;
     }
     return { reply: { text: "Выбери кнопкой." } };
   }
+  if (conv?.flow === REFILL_FLOW) {
+    if (clean.length > 0 && !clean.startsWith("/")) {
+      // Поиск автомата и поиск товара — единственный текст, который мастеру
+      // нужен: количество можно и нумпадом, но текстовый ввод у числа тоже
+      // остаётся (полевой инструмент не меняют «в один день на новый»).
+      if (conv.step === "object") return { reply: await searchObjects(clean, deps) };
+      if (conv.step === "product") return { reply: await handleRefillProductText(chatId, clean, deps) };
+      if (conv.step === "count") return { reply: await handleRefillCount(chatId, clean, person, deps) };
+    }
+    return { reply: { text: refillStepHint(conv.step) } };
+  }
   if (conv?.flow === "after-photo") {
     // Текст на шаге фото — это уже другой разговор. Не держим человека:
     // запись сохранена, фото было необязательным.
@@ -571,6 +591,8 @@ async function startMenuItem(
       return { reply: await startProblem(chatId, person, deps) };
     case "sched":
       return { reply: await startSchedules(chatId, deps) };
+    case "mrefill":
+      return { reply: await startMachineRefill(chatId, person, deps) };
     default:
       // Пункт объявлен ready, но обработчика нет — это ошибка сборки меню,
       // а не сотрудника. Говорим ровно то же, что и про неготовый поток.
@@ -654,6 +676,18 @@ export async function handleStaffCallback(
     const res = await handleIntakeCallback(chatId, intake, person, deps);
     return {
       answer: res.answer,
+      ...(res.edit ? { edit: { text: res.edit.text, ...(res.edit.keyboard ? { keyboard: res.edit.keyboard } : {}) } } : {}),
+      ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    };
+  }
+
+  // Кнопки заливки снек-автомата (rf:plan/else/p/n/more/done/cancel).
+  const machineRefill = parseRefillCallback(data);
+  if (machineRefill) {
+    const res = await handleRefillCallback(chatId, machineRefill, person, deps);
+    return {
+      answer: res.answer,
+      // `edit` — набор количества нумпадом: перерисовываем то же сообщение.
       ...(res.edit ? { edit: { text: res.edit.text, ...(res.edit.keyboard ? { keyboard: res.edit.keyboard } : {}) } } : {}),
       ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
     };

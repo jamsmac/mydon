@@ -104,6 +104,39 @@ export async function collectGloberentSignals(
   };
 }
 
+/** Уведомление правил, дожидающееся утра (urgency: "briefing"). */
+export interface BriefingNote {
+  /** Ключ доставки: `<eventId>:<ruleId>`. Отмечается ПОСЛЕ отправки. */
+  key: string;
+  text: string;
+}
+
+/**
+ * Блок несрочных сигналов правил.
+ *
+ * Правила делят уведомления на срочные («звони сейчас») и брифинговые
+ * («разберись утром»). Срочные бот опрашивает раз в минуту, а брифинговые не
+ * забирал НИКТО: усушка за порогом и заливка без записи копились в Core и не
+ * доходили до владельца ни разу. Утро — их единственный канал.
+ *
+ * Дедуп по тексту: одно и то же правило срабатывает по каждому автомату, и
+ * тридцать одинаковых строк вытеснили бы сам брифинг. Лимит — по той же
+ * причине: сводка, которую не дочитывают, не сводка.
+ */
+export function formatBriefingNotes(notes: readonly BriefingNote[], limit = 12): string | null {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const n of notes) {
+    if (n.text.trim() === "" || seen.has(n.text)) continue;
+    seen.add(n.text);
+    lines.push(n.text);
+  }
+  if (lines.length === 0) return null;
+  const shown = lines.slice(0, limit);
+  if (lines.length > shown.length) shown.push(`…и ещё ${lines.length - shown.length}`);
+  return ["Разобраться сегодня:", ...shown].join("\n");
+}
+
 export function formatBriefing(
   b: Briefing,
   approvals: ApprovalRow[] = [],

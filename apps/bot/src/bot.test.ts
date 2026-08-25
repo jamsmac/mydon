@@ -5,6 +5,7 @@ import {
   countStuckDeals,
   countUnpaidContracts,
   formatBriefing,
+  formatBriefingNotes,
   msUntilBriefing,
 } from "./briefing";
 import { CoreError } from "./core-client";
@@ -418,5 +419,95 @@ describe("Кнопки согласования", () => {
     assert.equal(parseApprovalCallback("ap:approved"), null);
     assert.equal(parseApprovalCallback("мусор"), null);
     assert.equal(parseApprovalCallback("ap:approved:"), null);
+  });
+});
+
+describe("Усушка автоматов: путь владельца до Core (П4)", () => {
+  const отчёт = {
+    from: "2026-08-11",
+    to: "2026-08-24",
+    threshold: 30_000,
+    machines: [
+      {
+        serial: "2508160376",
+        name: "Olma",
+        summary: {
+          items: [
+            { product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true },
+          ],
+          lossValue: 99_000,
+          daysCounted: 9,
+          daysSkipped: 5,
+          threshold: 30_000,
+        },
+        refillDays: [{ date: "2026-08-18", detectedUnits: 96, recordedUnits: 0 }],
+      },
+    ],
+    warnings: [],
+  };
+
+  function deps(окна: number[], report: unknown = отчёт): HandlerDeps {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingShrinkage: async (days: number) => {
+        окна.push(days);
+        return report;
+      },
+    } as unknown as HandlerDeps["core"];
+    return { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
+  }
+
+  it("«усушка» доходит до Core с окном по умолчанию и отвечает разбором", async () => {
+    const окна: number[] = [];
+    const reply = await handleMessage(111, "усушка", deps(окна));
+    assert.deepEqual(окна, [14]);
+    assert.match(reply?.text ?? "", /Усушка за 14 дн/);
+    assert.match(reply?.text ?? "", /Kinder Bueno −9 шт/);
+  });
+
+  it("окно из фразы уходит в Core как есть", async () => {
+    const окна: number[] = [];
+    await handleMessage(111, "усушка за 30 дней", deps(окна));
+    assert.deepEqual(окна, [30]);
+  });
+
+  it("сбой Core не молчит — владелец знает, что данных нет", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingShrinkage: async () => {
+        throw new CoreError(503, "/vending/shrinkage", "");
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "усушка", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /усушку из MYDON Core/i);
+  });
+});
+
+describe("Брифинг: несрочные сигналы правил", () => {
+  it("собирает блок и не повторяет одинаковые строки", () => {
+    const block = formatBriefingNotes([
+      { key: "e1:r1", text: "📉 Усушка Olma: Kinder Bueno −9 шт ≈ 99 000 сум за 14 дн." },
+      { key: "e2:r1", text: "📉 Усушка Olma: Kinder Bueno −9 шт ≈ 99 000 сум за 14 дн." },
+      { key: "e3:r2", text: "🍫 Заливка без записи: Olma +96 шт" },
+    ]);
+    assert.match(block ?? "", /Разобраться сегодня/);
+    assert.equal((block ?? "").match(/Усушка Olma/g)?.length, 1);
+    assert.match(block ?? "", /Заливка без записи/);
+  });
+
+  it("пусто — блока нет вовсе, а не пустой заголовок", () => {
+    assert.equal(formatBriefingNotes([]), null);
+    assert.equal(formatBriefingNotes([{ key: "e:r", text: "  " }]), null);
+  });
+
+  it("длинный список обрезается вслух: сводка, которую не дочитывают, не сводка", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ key: `e${i}:r`, text: `сигнал ${i}` }));
+    const block = formatBriefingNotes(many, 5) ?? "";
+    assert.equal(block.split("\n").length, 7, "заголовок + 5 строк + хвост");
+    assert.match(block, /…и ещё 15/);
   });
 });

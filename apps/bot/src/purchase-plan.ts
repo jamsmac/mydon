@@ -76,8 +76,12 @@ function splitLine(line: string, room: number): string[] {
  * Инвариант «каждая часть ≤ TG_BUDGET» держится для ЛЮБОГО входа: строку
  * длиннее сообщения сначала рвём сами. Иначе она уходила в Telegram целиком,
  * тот отвечал 400, и владелец не получал ВЕСЬ план, а не одну строку.
+ *
+ * Экспортируется ради усушки (shrinkage-brief.ts): второй такой резчик
+ * разъехался бы с этим по бюджету и по пометке продолжения — а лечится это
+ * всегда после того, как владелец уже не получил половину отчёта.
  */
-function chunk(title: string, lines: string[]): string[] {
+export function chunk(title: string, lines: string[]): string[] {
   const cont = `${title} (продолжение)`;
   // Сколько остаётся строке в пустом сообщении: заголовок + "\n" + "" + "\n".
   const room = Math.max(1, TG_BUDGET - Math.max(title.length, cont.length) - 2);
