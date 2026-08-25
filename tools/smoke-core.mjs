@@ -893,6 +893,56 @@ async function проверитьУсушку() {
   }
 }
 
+/**
+ * Суточные алерты (П4): их SQL — выборка уже написанных событий за сутки и
+ * пакетная вставка — живёт только в кроне, и без ручного роута против
+ * настоящего Postgres не исполнялся бы ни разу.
+ *
+ * Автомат заводится СВОЙ и заведомо пустой: без хотя бы одного события
+ * проверка дедупа не значила бы ничего (ноль и во второй раз ноль).
+ */
+async function проверитьАлертыУсушки() {
+  const серийник = "SMOKE-LOW";
+  const посчитать = async () => {
+    const { r, text, json } = await jsonRequest("GET", `/events/count?type=${encodeURIComponent("machine.low_stock")}`);
+    if (!r.ok) throw new Error(`счётчик событий → ${r.status}: ${text.slice(0, 200)}`);
+    return json.count;
+  };
+
+  const приём = await jsonRequest("POST", "/vending/ingest", {
+    capturedAt: new Date().toISOString(),
+    machines: [
+      {
+        serial: серийник,
+        slots: [
+          { coilId: "1", product: "Smoke Low", capacity: 20, quantity: 0 },
+          { coilId: "2", product: "Smoke Low", capacity: 20, quantity: 1 },
+        ],
+      },
+    ],
+  });
+  if (!приём.r.ok) throw new Error(`приём слотов → ${приём.r.status}: ${приём.text.slice(0, 200)}`);
+
+  const было = await посчитать();
+  const первый = await jsonRequest("POST", "/vending/shrinkage/alerts");
+  if (!первый.r.ok) throw new Error(`прогон алертов → ${первый.r.status}: ${первый.text.slice(0, 200)}`);
+  if (typeof первый.json?.alerts !== "number" || typeof первый.json?.lowStock !== "number") {
+    throw new Error(`ответ прогона без счётчиков: ${первый.text.slice(0, 200)}`);
+  }
+  if (первый.json.lowStock < 1) throw new Error(`пустой автомат не дал алерта: lowStock=${первый.json.lowStock}`);
+  const стало = await посчитать();
+  if (стало !== было + первый.json.lowStock) {
+    throw new Error(`событий записано ${стало - было}, а прогон отчитался о ${первый.json.lowStock}`);
+  }
+
+  // Второй прогон в те же сутки: дедуп читает уже записанные события ИЗ БАЗЫ,
+  // а не из памяти процесса, — именно этот запрос здесь и проверяется.
+  const второй = await jsonRequest("POST", "/vending/shrinkage/alerts");
+  if (!второй.r.ok) throw new Error(`повтор прогона → ${второй.r.status}: ${второй.text.slice(0, 200)}`);
+  if (второй.json.alerts !== 0) throw new Error(`повтор записал ${второй.json.alerts} событий вместо нуля`);
+  if ((await посчитать()) !== стало) throw new Error("повтор прогона задвоил события в базе");
+}
+
 /** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
 async function проверитьRateLimit() {
   for (let i = 0; i < 70; i += 1) {
@@ -1079,6 +1129,13 @@ try {
   }
 
   try {
+    await проверитьАлертыУсушки();
+    console.log("  ok  сценарий: суточные алерты — событие «заканчивается», повтор дубля не даёт");
+  } catch (e) {
+    провалы.push(`алерты усушки: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -1100,4 +1157,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 9 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 10 сценариев.`);

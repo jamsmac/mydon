@@ -245,4 +245,44 @@ describe("Вердикт паритета: продажи и остатки вм
     assert.ok("остатки_сверено" in payload, "сводка обязана нести обе половины");
     assert.equal(payload.остатки_расхождений, 0);
   });
+
+  it("снимка остатков за период нет — это не расхождение, а «гейт ещё не запущен»", async () => {
+    // Красный вердикт без единой строки расхождений владелец читает как
+    // «паритет продаж сломался» — и идёт чинить не то.
+    const { db } = stubDb([...продажиОК, [], []]);
+    const p = await new OurvendParityService(db).parity(7);
+
+    assert.equal(p.stock.checked, 0);
+    assert.equal(p.stock.ok, true, "сверять нечего ≠ расходится");
+    assert.match(String(p.stock.note), /снимков остатков/);
+    assert.match(String(p.note), /остатки/, "общая записка обязана объяснить, чего не хватает");
+    assert.equal(p.ok, true);
+  });
+
+  it("строки остатков есть, но общих автоматов нет — это уже проблема, вердикт красный", async () => {
+    const { db } = stubDb([
+      ...продажиОК,
+      [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }],
+      [{ dt: "2026-08-24", serial: "ДРУГОЙ", product: "Fanta", qty: 6 }],
+    ]);
+    const p = await new OurvendParityService(db).parity(7);
+
+    assert.equal(p.stock.checked, 0);
+    assert.equal(p.stock.ok, false);
+    assert.equal(p.ok, false);
+  });
+
+  it("пустой снапшот продаж не отменяет запись сводки — иначе половина по остаткам теряется", async () => {
+    const written: Record<string, unknown>[] = [];
+    const { db } = stubDb(
+      [[], [], [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }], [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }]],
+      written,
+    );
+    await new OurvendParityService(db).daily();
+
+    assert.equal(written.length, 1, "событие пишется всегда");
+    const payload = written[0]!.payload as Record<string, unknown>;
+    assert.equal(payload.остатки_сверено, 1);
+    assert.match(String(payload.примечание), /продаж/);
+  });
 });

@@ -169,7 +169,9 @@ describe("Заливка автомата", () => {
     const inserted: Row[] = [];
     const s = new RefillService(stubDb({ inserted }), vendingStub);
     await s.create({
-      machineSerial: "MU-7",
+      // Бот пишет серийник с приставкой, Ourvend присылает голый — в ленте
+      // должен быть ОДИН автомат, а не два написания одного.
+      machineSerial: "c2508160376",
       productName: "кола",
       qty: 4,
       personId: PERSON,
@@ -180,7 +182,7 @@ describe("Заливка автомата", () => {
     assert.ok(ev, "заливка обязана попасть в ленту");
     assert.equal(ev.source, "human", "записал человек — не система");
     assert.deepEqual(ev.payload, {
-      serial: "MU-7",
+      serial: "2508160376",
       product: "Coca-Cola 0.5",
       qty: 4,
       personId: PERSON,

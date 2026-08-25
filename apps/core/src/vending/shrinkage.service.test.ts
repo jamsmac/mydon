@@ -13,7 +13,7 @@ import {
   vendingRefill,
   vendingRefillEvent,
 } from "@mydon/db";
-import { ShrinkageService } from "./shrinkage.service";
+import { ShrinkageService, деньТашкента, началоСутокТашкента } from "./shrinkage.service";
 import { VendingService } from "./vending.service";
 
 type SnapRow = {
@@ -33,11 +33,12 @@ type SlotRow = {
   productName: string | null;
   capacity: number;
   quantity: number;
+  syncedAt: Date;
 };
 type Ent = { id: string; name: string; externalRef: string | null; type: string };
 type Card = { entityId: string; status: string };
 type ProdRow = { id: string; name: string; purchasePrice: string | null; packSize: number };
-type FeedRow = { source: string; type: string; payload: Record<string, unknown>; occurredAt?: Date };
+type FeedRow = { source: string; type: string; payload: Record<string, unknown>; occurredAt: Date };
 
 interface Мир {
   snapshots?: SnapRow[];
@@ -50,13 +51,15 @@ interface Мир {
   cards?: Card[];
   config?: { key: string; value: string }[];
   events?: FeedRow[];
+  /** Выборка снимков по этому серийнику падает — проверка изоляции сбоя. */
+  brokenSerial?: string;
 }
 
 /**
- * Значения-параметры из условия drizzle: стаб обязан отвечать НА ТОТ ЖЕ
- * серийник, который просит сервис. Снимки читаются по автомату (иначе окно в
- * 60 суток положило бы в память сотни тысяч строк), и стаб, отдающий всё
- * подряд, смешал бы автоматы — мёртвая заглушка попала бы в живой автомат.
+ * Значения-параметры из условия drizzle: стаб обязан отвечать НА ТО ЖЕ окно и
+ * тот же серийник, которые просит сервис. Без этого проверялась бы не
+ * выборка, а её отсутствие: ошибка в границе суток дедупа или в фильтре
+ * свежести планограммы прошла бы зелёной (урок «заглушка врёт»).
  */
 function параметры(условие: unknown): unknown[] {
   const out: unknown[] = [];
@@ -72,6 +75,11 @@ function параметры(условие: unknown): unknown[] {
   walk(условие);
   return out;
 }
+
+const датаИз = (условие: unknown): Date | undefined =>
+  параметры(условие).find((v): v is Date => v instanceof Date);
+const строкиИз = (условие: unknown): string[] =>
+  параметры(условие).filter((v): v is string => typeof v === "string");
 
 function shrinkDb(м: Мир) {
   const лента: FeedRow[] = [...(м.events ?? [])];
@@ -111,8 +119,24 @@ function shrinkDb(м: Мир) {
     const chain: Record<string, unknown> = {};
     chain.where = (условие: unknown) => {
       if (t === slotSnapshot) {
-        const serial = параметры(условие).find((v): v is string => typeof v === "string");
-        if (serial !== undefined) текущие = (текущие as SnapRow[]).filter((r) => r.machineSerial === serial);
+        const serial = строкиИз(условие)[0];
+        if (serial !== undefined) {
+          if (serial === м.brokenSerial) throw new Error("соединение оборвалось");
+          текущие = (текущие as SnapRow[]).filter((r) => r.machineSerial === serial);
+        }
+      }
+      if (t === machineSlot) {
+        // Фильтр свежести планограммы: без него алерт «заканчивается» кричал
+        // бы про автомат, переставший отдавать данные месяц назад.
+        const с = датаИз(условие);
+        if (с) текущие = (текущие as SlotRow[]).filter((r) => r.syncedAt.getTime() >= с.getTime());
+      }
+      if (t === event) {
+        const с = датаИз(условие);
+        const типы = строкиИз(условие);
+        текущие = (текущие as FeedRow[]).filter(
+          (r) => (!с || r.occurredAt.getTime() >= с.getTime()) && (типы.length === 0 || типы.includes(r.type)),
+        );
       }
       return chain;
     };
@@ -128,7 +152,14 @@ function shrinkDb(м: Мир) {
 
   const insert = (t: unknown) => ({
     values: (v: Record<string, unknown> | Record<string, unknown>[]) => {
-      if (t === event) for (const r of Array.isArray(v) ? v : [v]) лента.push(r as unknown as FeedRow);
+      if (t === event) {
+        for (const r of Array.isArray(v) ? v : [v]) {
+          // Время события в базе ставит default — стаб подставляет «сейчас»
+          // теста, иначе окно дедупа проверять было бы нечем.
+          const строка = r as unknown as Omit<FeedRow, "occurredAt"> & { occurredAt?: Date };
+          лента.push({ ...строка, occurredAt: строка.occurredAt ?? СЕЙЧАС });
+        }
+      }
       return Promise.resolve();
     },
   });
@@ -144,14 +175,19 @@ function shrinkDb(м: Мир) {
 
 const ЧАС = 3_600_000;
 const СУТКИ = 86_400_000;
-const СДВИГ = 5 * ЧАС;
 
-/** YYYY-MM-DD дня по Ташкенту со сдвигом в сутках от сегодняшнего. */
-const день = (сдвиг: number): string =>
-  new Date(Date.now() + СДВИГ + сдвиг * СУТКИ).toISOString().slice(0, 10);
+/**
+ * «Сейчас» прибито гвоздями — полдень Ташкента. Прогон, пересекающий полночь,
+ * иначе считал бы первую половину теста по одному периоду, а вторую по
+ * другому (тот же класс флака, что артефакт фикстур детектора).
+ */
+const СЕЙЧАС = new Date("2026-08-25T07:00:00.000Z");
+
+/** YYYY-MM-DD дня по Ташкенту со сдвигом в сутках от «сегодня». */
+const день = (сдвиг: number): string => деньТашкента(new Date(СЕЙЧАС.getTime() + сдвиг * СУТКИ));
 
 /** UTC-момент 00:00 Ташкента для даты. */
-const начало = (д: string): Date => new Date(Date.parse(`${д}T00:00:00.000Z`) - СДВИГ);
+const начало = (д: string): Date => new Date(Date.parse(`${д}T00:00:00.000Z`) - 5 * ЧАС);
 
 const снимок = (serial: string, capturedAt: Date, slots: [string, string | null, number, number][]): SnapRow[] =>
   slots.map(([coilId, productName, capacity, quantity]) => ({
@@ -162,6 +198,15 @@ const снимок = (serial: string, capturedAt: Date, slots: [string, string |
     quantity,
     capturedAt,
   }));
+
+const слот = (serial: string, coilId: string, productName: string, capacity: number, quantity: number, syncedAt = СЕЙЧАС): SlotRow => ({
+  machineSerial: serial,
+  coilId,
+  productName,
+  capacity,
+  quantity,
+  syncedAt,
+});
 
 const OLMA = "2508160376";
 const РЕЕСТР: Ent[] = [{ id: "m-olma", name: "Olma", externalRef: "c2508160376", type: "machine" }];
@@ -197,7 +242,7 @@ const сервис = (мир: Мир) => {
 describe("Вендинг Core: усушка автомата по дням (П4)", () => {
   it("дни без заливки: недостача по позиции считается по закупочной цене и бьёт порог", async () => {
     const { svc } = сервис(базовыйМир());
-    const отчёт = await svc.report(2);
+    const отчёт = await svc.report(2, СЕЙЧАС);
 
     assert.equal(отчёт.from, день(-2));
     assert.equal(отчёт.to, день(-1));
@@ -215,13 +260,77 @@ describe("Вендинг Core: усушка автомата по дням (П4)
     assert.equal(отчёт.warnings.length, 0);
   });
 
+  it("продажи в другом написании сшиваются со слотом, а не превращаются в недостачу", async () => {
+    // Донор-риск: снимок присылает «Snickers», выгрузка продаж — «SNICKERS»,
+    // алиаса на такую пару нет. При посимвольном сравнении продажи дня = 0, и
+    // ВСЯ дневная выручка легла бы в недостачу — молча и с алертом.
+    const мир = базовыйМир();
+    мир.sales = [
+      { dt: день(-2), machineSerial: OLMA, product: "SNICKERS", qty: "4" },
+      { dt: день(-1), machineSerial: `c${OLMA}`, product: " snickers ", qty: "2" },
+    ];
+    const { svc } = сервис(мир);
+
+    const m = (await svc.report(2, СЕЙЧАС)).machines[0]!;
+    assert.deepEqual(
+      m.summary.items.map((i) => [i.product, i.lossUnits]),
+      [["Snickers", 3]],
+      "имя показывается из прайса, а не служебным ключом",
+    );
+  });
+
+  it("продажи по товару, которого нет в слотах, — отдельное предупреждение", async () => {
+    const мир = базовыйМир();
+    мир.sales = [...ПРОДАЖИ, { dt: день(-1), machineSerial: OLMA, product: "Загадка", qty: "3" }];
+    const { svc } = сервис(мир);
+
+    const w = (await svc.report(2, СЕЙЧАС)).warnings.filter((x) => x.code === "sales_unknown_product");
+    assert.equal(w.length, 1);
+    assert.ok(w[0]!.message.includes("Загадка"));
+    assert.ok(w[0]!.message.includes("Olma"));
+  });
+
+  it("две формы серийника — один автомат, а не половина снимков в мусор", async () => {
+    const мир = базовыйМир();
+    мир.snapshots = [
+      ...снимок(OLMA, начало(день(-2)), [["1", "Snickers", 10, 10]]),
+      ...снимок(OLMA, начало(день(-1)), [["1", "Snickers", 10, 4]]),
+      // Тот же автомат, но записанный с приставкой — раньше эта форма молча
+      // выбрасывалась вместе со своим снимком, и день уезжал в snapshots_stale.
+      ...снимок(`c${OLMA}`, начало(день(0)), [["1", "Snickers", 10, 1]]),
+    ];
+    const { svc } = сервис(мир);
+
+    const отчёт = await svc.report(2, СЕЙЧАС);
+    assert.equal(отчёт.machines.length, 1);
+    assert.equal(отчёт.machines[0]!.summary.daysCounted, 2);
+    assert.equal(отчёт.warnings.filter((w) => w.code === "snapshots_stale").length, 0);
+  });
+
+  it("сбой по одному автомату не уносит отчёт по остальным", async () => {
+    const мир = базовыйМир();
+    мир.snapshots = [...СНИМКИ, ...снимок("BROKEN", начало(день(-1)), [["1", "Snickers", 10, 5]])];
+    мир.brokenSerial = "BROKEN";
+    const { svc } = сервис(мир);
+
+    const отчёт = await svc.report(2, СЕЙЧАС);
+    assert.deepEqual(
+      отчёт.machines.map((m) => m.serial),
+      [OLMA],
+      "живой автомат обязан остаться в отчёте",
+    );
+    const err = отчёт.warnings.filter((w) => w.code === "machine_error");
+    assert.equal(err.length, 1);
+    assert.ok(err[0]!.message.includes("BROKEN") || err[0]!.message.includes("соединение оборвалось"));
+  });
+
   it("день с заливкой не считается, но виден строкой «приход по снимку / записано оператором»", async () => {
     const мир = базовыйМир();
     мир.refillEvents = [{ machineSerial: OLMA, windowTo: new Date(начало(день(-1)).getTime() + 10 * ЧАС), units: 12 }];
     мир.refills = [{ machineSerial: `c${OLMA}`, performedAt: new Date(начало(день(-1)).getTime() + 9 * ЧАС), qty: 5 }];
     const { svc } = сервис(мир);
 
-    const m = (await svc.report(2)).machines[0]!;
+    const m = (await svc.report(2, СЕЙЧАС)).machines[0]!;
     assert.equal(m.summary.daysCounted, 1);
     assert.equal(m.summary.daysSkipped, 1);
     assert.deepEqual(
@@ -234,11 +343,10 @@ describe("Вендинг Core: усушка автомата по дням (П4)
 
   it("нет снимка ближе 6 ч к границе суток — день пропущен, предупреждение одной строкой на автомат", async () => {
     const мир = базовыйМир();
-    // Снимка на границе дня −1 нет вовсе: обе границы дальше 6 ч.
     мир.snapshots = СНИМКИ.filter((r) => r.capturedAt.getTime() !== начало(день(-1)).getTime());
     const { svc } = сервис(мир);
 
-    const отчёт = await svc.report(2);
+    const отчёт = await svc.report(2, СЕЙЧАС);
     const stale = отчёт.warnings.filter((w) => w.code === "snapshots_stale");
     assert.equal(stale.length, 1, "одна строка на автомат, а не по строке на день");
     assert.ok(stale[0]!.message.includes("Olma"));
@@ -251,7 +359,7 @@ describe("Вендинг Core: усушка автомата по дням (П4)
     мир.sales = ПРОДАЖИ.filter((r) => r.dt !== день(-1));
     const { svc } = сервис(мир);
 
-    const отчёт = await svc.report(2);
+    const отчёт = await svc.report(2, СЕЙЧАС);
     const w = отчёт.warnings.filter((x) => x.code === "no_sales_day");
     assert.equal(w.length, 1);
     assert.ok(w[0]!.message.includes(день(-1)));
@@ -280,7 +388,7 @@ describe("Вендинг Core: усушка автомата по дням (П4)
     мир.entities = [...РЕЕСТР, { id: "m-sklad", name: "SKLAD 4S", externalRef: "SKLAD4S", type: "machine" }];
     const { svc } = сервис(мир);
 
-    const отчёт = await svc.report(2);
+    const отчёт = await svc.report(2, СЕЙЧАС);
     assert.deepEqual(
       отчёт.machines.map((m) => m.serial),
       [OLMA],
@@ -295,7 +403,7 @@ describe("Вендинг Core: усушка автомата по дням (П4)
     мир.cards = [{ entityId: "m-olma", status: "repair" }];
     const { svc } = сервис(мир);
 
-    assert.deepEqual((await svc.report(2)).machines, []);
+    assert.deepEqual((await svc.report(2, СЕЙЧАС)).machines, []);
   });
 
   it("порог берётся из настроек, а не из константы кода", async () => {
@@ -304,7 +412,7 @@ describe("Вендинг Core: усушка автомата по дням (П4)
     мир.config = [{ key: "SHRINK_ALERT_UZS", value: "20000" }];
     const { svc } = сервис(мир);
 
-    const отчёт = await svc.report(2);
+    const отчёт = await svc.report(2, СЕЙЧАС);
     assert.equal(отчёт.threshold, 20_000);
     assert.equal(отчёт.machines[0]!.summary.items[0]!.alert, true, "22 000 ≥ 20 000");
   });
@@ -314,8 +422,8 @@ describe("Вендинг Core: суточные алерты усушки и н�
   it("позиция за порогом даёт событие; второй прогон за те же сутки дубля не даёт", async () => {
     const { svc, лента } = сервис(базовыйМир());
 
-    const первый = await svc.alertDaily();
-    assert.equal(первый.alerts, 1);
+    const первый = await svc.alertDaily(СЕЙЧАС);
+    assert.deepEqual(первый, { alerts: 1, lowStock: 0 });
     const ev = лента.find((e) => e.type === "vending.shrinkage_alert")!;
     assert.equal(ev.source, "system");
     assert.deepEqual(ev.payload, {
@@ -327,37 +435,85 @@ describe("Вендинг Core: суточные алерты усушки и н�
       days: 7,
     });
 
-    const второй = await svc.alertDaily();
+    const второй = await svc.alertDaily(СЕЙЧАС);
     assert.equal(второй.alerts, 0, "дедуп по (автомат, товар, сутки)");
     assert.equal(лента.filter((e) => e.type === "vending.shrinkage_alert").length, 1);
+  });
+
+  it("вчерашний алерт сегодняшний не гасит — дедуп ограничен сутками по Ташкенту", async () => {
+    // Проверяет ИМЕННО границу окна: если бы дедуп смотрел «всю историю»,
+    // владелец получил бы алерт один раз в жизни и больше никогда.
+    const мир = базовыйМир();
+    мир.events = [
+      {
+        source: "system",
+        type: "vending.shrinkage_alert",
+        payload: { serial: OLMA, product: "Snickers" },
+        occurredAt: new Date(началоСутокТашкента(СЕЙЧАС).getTime() - 2 * ЧАС),
+      },
+    ];
+    const { svc } = сервис(мир);
+
+    assert.equal((await svc.alertDaily(СЕЙЧАС)).alerts, 1, "вчерашнее событие — вне окна дедупа");
   });
 
   it("низкий остаток: Σ штук ≤ 1 при Σ ёмкости ≥ 5 — событие для правила machine.low_stock", async () => {
     const мир: Мир = {
       entities: РЕЕСТР,
       slots: [
-        { machineSerial: OLMA, coilId: "1", productName: "Twix", capacity: 5, quantity: 1 },
-        { machineSerial: OLMA, coilId: "2", productName: "Twix", capacity: 5, quantity: 0 },
-        { machineSerial: OLMA, coilId: "3", productName: "Snickers", capacity: 10, quantity: 7 },
+        слот(OLMA, "1", "Twix", 5, 1),
+        слот(OLMA, "2", "Twix", 5, 0),
+        слот(OLMA, "3", "Snickers", 10, 7),
       ],
     };
     const { svc, лента } = сервис(мир);
 
-    assert.equal((await svc.alertDaily()).alerts, 1);
+    assert.deepEqual(await svc.alertDaily(СЕЙЧАС), { alerts: 1, lowStock: 1 });
     const ev = лента.find((e) => e.type === "machine.low_stock")!;
-    assert.deepEqual(ev.payload, { machine: "Olma", product: "Twix", left: 1 });
+    // `machine` читает правило уведомления, `serial` — ключ дедупа: два
+    // аппарата с одинаковым именем не должны гасить алерты друг друга.
+    assert.deepEqual(ev.payload, { machine: "Olma", serial: OLMA, product: "Twix", left: 1 });
 
-    assert.equal((await svc.alertDaily()).alerts, 0, "дедуп по (автомат, товар, сутки)");
+    assert.equal((await svc.alertDaily(СЕЙЧАС)).alerts, 0, "дедуп по (автомат, товар, сутки)");
   });
 
   it("низкий остаток не срабатывает на мелкой пружине: Σ ёмкости < 5 — это не «заканчивается»", async () => {
-    const мир: Мир = {
-      entities: РЕЕСТР,
-      slots: [{ machineSerial: OLMA, coilId: "1", productName: "Twix", capacity: 4, quantity: 0 }],
-    };
+    const мир: Мир = { entities: РЕЕСТР, slots: [слот(OLMA, "1", "Twix", 4, 0)] };
     const { svc, лента } = сервис(мир);
 
-    assert.equal((await svc.alertDaily()).alerts, 0);
+    assert.equal((await svc.alertDaily(СЕЙЧАС)).alerts, 0);
     assert.equal(лента.length, 0);
+  });
+
+  it("несвежая планограмма алертов не даёт: автомат перестал отдавать данные, а не опустел", async () => {
+    const мир: Мир = {
+      entities: РЕЕСТР,
+      slots: [слот(OLMA, "1", "Twix", 20, 0, new Date(СЕЙЧАС.getTime() - 3 * СУТКИ))],
+    };
+    const { svc } = сервис(мир);
+
+    assert.equal((await svc.alertDaily(СЕЙЧАС)).lowStock, 0);
+  });
+
+  it("мёртвая планограмма (ёмкости вне диапазона) алертов не даёт", async () => {
+    const мир: Мир = {
+      entities: РЕЕСТР,
+      slots: Array.from({ length: 12 }, (_, i) => слот("SKLAD4S", String(i + 1), "SKLAD", 199, 0)),
+    };
+    const { svc } = сервис(мир);
+
+    assert.equal((await svc.alertDaily(СЕЙЧАС)).lowStock, 0);
+  });
+
+  it("поток «заканчивается» обрезается потолком: пустая планограмма — сбой сбора, а не расход", async () => {
+    const мир: Мир = {
+      entities: РЕЕСТР,
+      slots: Array.from({ length: 60 }, (_, i) => слот(OLMA, String(i + 1), `Товар ${i}`, 10, 0)),
+    };
+    const { svc } = сервис(мир);
+
+    const итог = await svc.alertDaily(СЕЙЧАС);
+    assert.equal(итог.lowStock, 50, "брифинг из полутора сотен строк не читает никто");
+    assert.equal(итог.alerts, 50);
   });
 });

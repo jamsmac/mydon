@@ -1,6 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 import { auditLog, event, machineSlot, vendingRefill, vendingStock } from "@mydon/db";
+import { normalizeMachineSerial } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { VendingService } from "./vending.service";
 
@@ -147,7 +148,10 @@ export class RefillService {
         source: input.personId ? "human" : "system",
         type: "vending.refill_recorded",
         payload: {
-          serial: created.machineSerial,
+          // Канон, а не сырое написание: события детектора уже в каноне, и
+          // потребитель, ключующийся по serial, иначе увидел бы два автомата
+          // вместо одного («c2508160376» и «2508160376»).
+          serial: normalizeMachineSerial(created.machineSerial),
           product: productName,
           qty: input.qty,
           personId: input.personId ?? null,

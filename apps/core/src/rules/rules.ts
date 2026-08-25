@@ -50,13 +50,13 @@ export function formatAmount(value: unknown, currency = "UZS"): string {
 }
 
 /**
- * \u0427\u0430\u0441 \u0438 \u043C\u0438\u043D\u0443\u0442\u0430 \u0441\u043E\u0431\u044B\u0442\u0438\u044F \u043F\u043E \u0422\u0430\u0448\u043A\u0435\u043D\u0442\u0443. \u0412 \u0431\u0440\u0438\u0444\u0438\u043D\u0433\u0435 \u0432\u0430\u0436\u043D\u043E \u00AB\u043A\u043E\u0433\u0434\u0430 \u0441\u0435\u0433\u043E\u0434\u043D\u044F\u00BB, \u0430 \u043D\u0435
- * \u043F\u043E\u043B\u043D\u0430\u044F \u0434\u0430\u0442\u0430: UTC \u0438\u0437 payload \u0432\u043B\u0430\u0434\u0435\u043B\u0435\u0446 \u0447\u0438\u0442\u0430\u043B \u0431\u044B \u0441\u043E \u0441\u0434\u0432\u0438\u0433\u043E\u043C \u043D\u0430 \u043F\u044F\u0442\u044C \u0447\u0430\u0441\u043E\u0432 \u0438
- * \u0440\u0435\u0448\u0438\u043B \u0431\u044B, \u0447\u0442\u043E \u0437\u0430\u043B\u0438\u0432\u043A\u0430 \u0431\u044B\u043B\u0430 \u043D\u043E\u0447\u044C\u044E.
+ * Час и минута события по Ташкенту. В брифинге важно «когда сегодня», а не
+ * полная дата: UTC из payload владелец читал бы со сдвигом на пять часов и
+ * решил бы, что заливка была ночью.
  */
-function \u0432\u0440\u0435\u043C\u044F\u0422\u0430\u0448\u043A\u0435\u043D\u0442\u0430(value: unknown): string {
+function времяТашкента(value: unknown): string {
   const t = Date.parse(String(value));
-  if (!Number.isFinite(t)) return "\u2014";
+  if (!Number.isFinite(t)) return "—";
   return new Date(t).toLocaleTimeString("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 }
 

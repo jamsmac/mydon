@@ -1,11 +1,11 @@
 import { Inject, Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
 import { Cron } from "croner";
 import { and, eq, gte, inArray, lte } from "drizzle-orm";
-import { event, machineSlot, sale, slotSnapshot, vendingRefill, vendingRefillEvent } from "@mydon/db";
+import { event, sale, slotSnapshot, vendingRefill, vendingRefillEvent } from "@mydon/db";
 import {
-  deadMachine,
   hasProduct,
   normalizeMachineSerial,
+  normalizeProductName,
   shrinkageByDay,
   slotValid,
   TZ,
@@ -13,7 +13,6 @@ import {
   type ShrinkDayInput,
   type ShrinkSummary,
   type Slot,
-  type SnapshotSlot,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
@@ -45,6 +44,20 @@ export const LOW_STOCK_LEFT = 1;
  * на 4 позиции пустеет каждый день и превратила бы брифинг в шум.
  */
 export const LOW_STOCK_MIN_CAPACITY = 5;
+/**
+ * Свежесть планограммы для алерта «заканчивается». `machine_slot` — таблица
+ * upsert-зеркала: строки автомата, переставшего отдавать данные, лежат в ней
+ * вечно (уборка `pruneVanishedSlots` трогает только машины текущей пачки).
+ * Без этой отсечки такой автомат каждое утро давал бы по событию на КАЖДЫЙ
+ * товар планограммы — вечный «заканчивается» по аппарату, которого нет.
+ */
+export const LOW_STOCK_FRESH_MS = 24 * 3_600_000;
+/**
+ * Потолок событий «заканчивается» за прогон. Брифинг из полутора сотен строк
+ * читать не будет никто — а именно столько даст парк, у которого разом
+ * опустела планограмма. Обрезка громкая (warn в лог), а не молчаливая.
+ */
+export const LOW_STOCK_MAX_EVENTS = 50;
 
 export const SHRINK_EVENT = "vending.shrinkage_alert";
 export const LOW_STOCK_EVENT = "machine.low_stock";
@@ -72,10 +85,16 @@ export interface ShrinkMachine {
 }
 
 /**
- * Почему в отчёте чего-то нет. Ровно три причины, потому что чинятся они в
- * разных местах: снимки (сбор), продажи (синк), автомат (источник).
+ * Почему в отчёте чего-то нет. Каждая причина чинится в СВОЁМ месте, поэтому
+ * сводить их к одному коду нельзя: снимки — сбор, продажи — синк и справочник
+ * имён, автомат — источник, ошибка — код.
  */
-export type ShrinkWarningCode = "snapshots_stale" | "no_sales_day" | "machine_dead";
+export type ShrinkWarningCode =
+  | "snapshots_stale"
+  | "no_sales_day"
+  | "machine_dead"
+  | "sales_unknown_product"
+  | "machine_error";
 
 export interface ShrinkWarning {
   code: ShrinkWarningCode;
@@ -92,6 +111,30 @@ export interface ShrinkReport {
   warnings: ShrinkWarning[];
 }
 
+/** Итог суточного прогона алертов. */
+export interface AlertRun {
+  /** Записано событий всего. */
+  alerts: number;
+  /** Из них «заканчивается товар». */
+  lowStock: number;
+}
+
+/**
+ * Ключ сшивки товара — и заодно запись «как его показывать».
+ *
+ * Ключ нормализованный, потому что снимок присылает «Snickers», продажи —
+ * «SNICKERS», а алиаса на такую пару нет. Отображаемое имя первым занимает
+ * прайс (его правит владелец), дальше — первое встреченное написание из
+ * планограммы или снимка: показать владельцу «red bull» вместо «Red Bull»
+ * значит выдать ему служебный ключ вместо названия товара.
+ */
+function ключТовара(ctx: ShrinkContext, raw: string): string {
+  const имя = ctx.canonOf(raw);
+  const ключ = normalizeProductName(имя);
+  if (!ctx.display.has(ключ)) ctx.display.set(ключ, имя);
+  return ключ;
+}
+
 /** Человеческая причина молчания источника по автомату. */
 const ПРИЧИНА: Record<SkipReason, string> = {
   dead: "источник отдаёт ёмкости вне диапазона (заглушка)",
@@ -100,10 +143,25 @@ const ПРИЧИНА: Record<SkipReason, string> = {
 };
 
 /**
+ * Общий справочник прогона: канон имён, цены и реестр автоматов. Читается ОДИН
+ * раз и передаётся отчёту — утренний прогон считает отчёт и тут же эмиттер
+ * остатка, и второй поход за теми же картами это не только лишние запросы, но
+ * и риск получить два разных ответа в пределах одного прогона.
+ */
+interface ShrinkContext {
+  canonOf: (raw: string) => string;
+  /** Цена по НОРМАЛИЗОВАННОМУ ключу имени. */
+  priceByKey: Map<string, number>;
+  /** Нормализованный ключ → как показывать товар владельцу. */
+  display: Map<string, string>;
+  registry: { notInService: Map<string, { name: string; status: string }>; nameBySerial: Map<string, string> };
+}
+
+/**
  * Усушка автомата по дням (П4, R-P4-3).
  *
  * ЗАЧЕМ. Между «сколько стояло», «сколько продано» и «сколько осталось» на
- * снеке regularly не сходится, и до этого среза расхождение не видел никто:
+ * снеке регулярно не сходится, и до этого среза расхождение не видел никто:
  * ручной инвентаризации автомата нет и не будет (снимок раз в 3 ч точнее
  * пересчёта руками), а продажи и остатки лежали в разных отчётах.
  *
@@ -112,6 +170,11 @@ const ПРИЧИНА: Record<SkipReason, string> = {
  * заливки сходятся ровно в ноль, а дни заливки «шумят» десятками штук.
  * Поэтому день с приходом выкидывается ЦЕЛИКОМ (не по позиции), а владельцу
  * показывается отдельной строкой: «приход N ед по снимку, записано M».
+ *
+ * ПОЧЕМУ ТОВАР СШИВАЕТСЯ ПО НОРМАЛИЗОВАННОМУ КЛЮЧУ. Снимок присылает
+ * «Snickers», продажи — «SNICKERS», а алиаса на такую пару нет: канон
+ * возвращает оба имени как есть, и точное сравнение строк дало бы «продаж 0»
+ * → вся дневная выручка легла бы в недостачу, молча и с алертом.
  *
  * ЧЕГО СЕРВИС НЕ ДЕЛАЕТ: не правит остатки и не списывает склад. Усушка —
  * наблюдение, а не проводка; списывать по ней значит закрепить догадку.
@@ -149,9 +212,33 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
    * Период кончается ВЧЕРА: у сегодняшних суток нет снимка на 24:00, и
    * включать их значило бы каждый день показывать «недостачу», которая на
    * самом деле ещё не проданный товар.
+   *
+   * `now` — параметр, а не `Date.now()` внутри: прогон, пересекающий полночь
+   * Ташкента, иначе считал бы первую половину по одному периоду, а вторую по
+   * другому, и тесты флакали бы ровно в этот момент.
    */
-  async report(days = SHRINK_DAYS_DEFAULT): Promise<ShrinkReport> {
-    const dates = периодДней(зажать(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX));
+  async report(days = SHRINK_DAYS_DEFAULT, now = new Date()): Promise<ShrinkReport> {
+    return this.построить(days, now, await this.контекст());
+  }
+
+  /** Справочники прогона — одной загрузкой (см. `ShrinkContext`). */
+  private async контекст(): Promise<ShrinkContext> {
+    const [{ canonOf, priceByName, names }, registry] = await Promise.all([
+      this.vending.priceIndex(),
+      this.vending.machineRegistry(),
+    ]);
+    const priceByKey = new Map<string, number>();
+    for (const [name, price] of priceByName) priceByKey.set(normalizeProductName(name), price);
+    // Отображаемое имя занимает ПРАЙС: его владелец правит руками, и именно
+    // это написание он ждёт увидеть в отчёте. Имена из снимков подставляются
+    // ниже, только если товара в прайсе нет вовсе.
+    const display = new Map<string, string>();
+    for (const name of names) display.set(normalizeProductName(name), name);
+    return { canonOf, priceByKey, display, registry };
+  }
+
+  private async построить(days: number, now: Date, ctx: ShrinkContext): Promise<ShrinkReport> {
+    const dates = периодДней(зажать(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX), now);
     const from = dates[0]!;
     const to = dates[dates.length - 1]!;
     // Снимки читаем с запасом на допуск: снимок «начала суток» законно стоит
@@ -159,10 +246,8 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     const since = new Date(началоСуток(from) - SNAPSHOT_STALE_MS);
     const периодОт = new Date(началоСуток(from));
 
-    const [threshold, { canonOf, priceByName }, registry, серии, продажи, события, записи] = await Promise.all([
+    const [threshold, серии, продажи, события, записи] = await Promise.all([
       readIntSetting(this.db, "SHRINK_ALERT_UZS", SHRINK_ALERT_FALLBACK, this.logger),
-      this.vending.priceIndex(),
-      this.vending.machineRegistry(),
       // Сначала СПИСОК автоматов окна: снимки по одному автомату читаются
       // ниже, иначе 60 суток парка легли бы в память разом (тот же приём, что
       // в детекторе заливок).
@@ -174,7 +259,7 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       // Продажи — из `sale` (день + автомат + товар): это единственная
       // таблица, где продажи разложены ПО ДНЯМ. `product_sale` хранит
       // последний 7-дневный батч без разбивки по суткам и для усушки не
-      // годится. Источник не фильтруем: писателя у `sale` один
+      // годится. Источник не фильтруем: писатель у `sale` один
       // (`SalesService`), и жёсткое `source = 'ourvend'` тихо обнулило бы
       // продажи в день, когда источник переименуют, — а нулевые продажи
       // выглядят как недостача во весь остаток.
@@ -196,100 +281,174 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
         .where(gte(vendingRefill.performedAt, периодОт)),
     ]);
 
-    // Продажи по (автомат, сутки) → товар в каноне. Отсутствие ключа и пустая
-    // карта — РАЗНЫЕ вещи: первое значит «продажи за день не собраны» (день
-    // не считаем), второе невозможно, потому что ключ рождается из строки.
+    // Продажи по (автомат, сутки) → НОРМАЛИЗОВАННЫЙ ключ товара. Отсутствие
+    // ключа и пустая карта — РАЗНЫЕ вещи: первое значит «продажи за день не
+    // собраны» (день не считаем), второе невозможно, потому что ключ рождается
+    // из строки.
     const продажиПоДням = new Map<string, Map<string, number>>();
+    /** Имя товара из продаж — на случай, если ни прайс, ни снимок его не знают. */
+    const имяИзПродаж = new Map<string, string>();
+    /** Ключи товаров, по которым у автомата были продажи за период. */
+    const продажиАвтомата = new Map<string, Set<string>>();
     for (const r of продажи) {
-      const ключ = `${normalizeMachineSerial(r.machineSerial)}|${r.dt}`;
-      const карта = продажиПоДням.get(ключ) ?? new Map<string, number>();
-      const name = canonOf(r.product);
-      карта.set(name, (карта.get(name) ?? 0) + Number(r.qty));
-      продажиПоДням.set(ключ, карта);
+      const canonSerial = normalizeMachineSerial(r.machineSerial);
+      const имя = ctx.canonOf(r.product);
+      const ключ = normalizeProductName(имя);
+      if (!имяИзПродаж.has(ключ)) имяИзПродаж.set(ключ, имя);
+      const карта = продажиПоДням.get(`${canonSerial}|${r.dt}`) ?? new Map<string, number>();
+      карта.set(ключ, (карта.get(ключ) ?? 0) + Number(r.qty));
+      продажиПоДням.set(`${canonSerial}|${r.dt}`, карта);
+      const набор = продажиАвтомата.get(canonSerial) ?? new Set<string>();
+      набор.add(ключ);
+      продажиАвтомата.set(canonSerial, набор);
     }
 
     const приходПоДням = сумма(события, (r) => `${normalizeMachineSerial(r.machineSerial)}|${деньТашкента(r.windowTo)}`, (r) => r.units);
     const записаноПоДням = сумма(записи, (r) => `${normalizeMachineSerial(r.machineSerial)}|${деньТашкента(r.performedAt)}`, (r) => r.qty);
 
-    const machines: ShrinkMachine[] = [];
-    const warnings: ShrinkWarning[] = [];
-    const учтённые = new Set<string>();
-
+    // Серийники сводим к канону ДО чтения снимков: «c2508160376» и
+    // «2508160376» — один автомат, и раньше вторая форма молча выбрасывалась
+    // вместе со своими снимками — день уезжал в `snapshots_stale` без причины.
+    const формыКанона = new Map<string, string[]>();
     for (const { serial } of серии) {
       const canon = normalizeMachineSerial(serial);
+      формыКанона.set(canon, [...(формыКанона.get(canon) ?? []), serial]);
+    }
+
+    const machines: ShrinkMachine[] = [];
+    const warnings: ShrinkWarning[] = [];
+
+    for (const [canon, формы] of формыКанона) {
       // Автомат не в строю в усушку не идёт: у склада-«автомата» и машины в
       // ремонте расхождение остатка — норма, и тревожить им владельца значит
       // приучить его пролистывать отчёт. Про них говорит план закупа.
-      if (registry.notInService.has(canon)) continue;
-      if (учтённые.has(canon)) continue;
-      учтённые.add(canon);
-      const name = registry.nameBySerial.get(canon) ?? serial;
-
-      const снимки = await this.снимкиАвтомата(serial, since, canonOf);
-      if (снимки.length === 0) continue;
-
-      // Мёртвый автомат — вон, но С ПРИЧИНОЙ. Причины «источник врёт» и
-      // «слоты не откалиброваны» чинятся в разных местах, поэтому текст
-      // предупреждения у них разный, хотя код один: для читателя отчёта это
-      // одно и то же — «по автомату сказать нечего».
-      const причина = skipReasonOf(снимки);
-      if (причина) {
-        warnings.push({ code: "machine_dead", message: `${name}: ${ПРИЧИНА[причина]} — усушка не считается` });
-        continue;
-      }
-
-      const дни: ShrinkDayInput[] = [];
-      const refillDays: ShrinkRefillDay[] = [];
-      const староСнимков: string[] = [];
-      const безПродаж: string[] = [];
-
-      for (const date of dates) {
-        const приход = приходПоДням.get(`${canon}|${date}`) ?? 0;
-        if (приход > 0) {
-          refillDays.push({ date, detectedUnits: приход, recordedUnits: записаноПоДням.get(`${canon}|${date}`) ?? 0 });
-        }
-        const начало = ближайший(снимки, началоСуток(date));
-        const конец = ближайший(снимки, началоСуток(date) + DAY_MS);
-        if (!начало || !конец) {
-          староСнимков.push(date);
-          continue;
-        }
-        const продажиДня = продажиПоДням.get(`${canon}|${date}`);
-        if (!продажиДня && приход === 0) {
-          // Несобранные продажи выглядят как недостача во весь дневной расход —
-          // самый громкий ложный алерт, какой этот отчёт может выдать.
-          безПродаж.push(date);
-          continue;
-        }
-        дни.push({
-          date,
-          startSlots: начало.slots,
-          endSlots: конец.slots,
-          sales: продажиДня ?? new Map<string, number>(),
-          refillUnits: приход,
+      if (ctx.registry.notInService.has(canon)) continue;
+      const name = ctx.registry.nameBySerial.get(canon) ?? формы[0]!;
+      try {
+        const строка = await this.поАвтомату(canon, формы, name, dates, since, ctx, {
+          продажиПоДням,
+          приходПоДням,
+          записаноПоДням,
+          threshold,
         });
-      }
+        if (строка.machine) machines.push(строка.machine);
+        warnings.push(...строка.warnings);
 
-      machines.push({ serial: canon, name, summary: shrinkageByDay(дни, priceByName, threshold), refillDays });
-      // Одна строка на автомат, а не на день: 26 автоматов × 14 дней дали бы
-      // триста предупреждений, среди которых не видно ни одного.
-      if (староСнимков.length > 0) {
-        warnings.push({
-          code: "snapshots_stale",
-          message: `${name}: нет снимков у границ суток — пропущены дни ${староСнимков.join(", ")}`,
-        });
-      }
-      if (безПродаж.length > 0) {
-        warnings.push({
-          code: "no_sales_day",
-          message: `${name}: нет продаж за ${безПродаж.join(", ")} — дни не считались`,
-        });
+        // Продажи есть, а слота под этот товар в снимках нет ни одного дня:
+        // либо товар вынули из автомата, либо имя не сшилось со справочником.
+        // Второе — тихая потеря продаж из расчёта, поэтому говорим вслух.
+        const безСлота = [...(продажиАвтомата.get(canon) ?? [])]
+          .filter((k) => !строка.slotKeys.has(k))
+          .map((k) => ctx.display.get(k) ?? имяИзПродаж.get(k) ?? k)
+          .sort((a, b) => a.localeCompare(b, "ru"));
+        if (безСлота.length > 0) {
+          warnings.push({
+            code: "sales_unknown_product",
+            message: `${name}: продажи есть, а слота в снимках нет — ${безСлота.join(", ")}`,
+          });
+        }
+      } catch (e: unknown) {
+        // Один сломанный автомат не должен уносить ни отчёт, ни утренние
+        // алерты по остальным двадцати пяти.
+        const текст = e instanceof Error ? e.message : String(e);
+        this.logger.warn(`Усушка ${name} (${canon}) не посчиталась: ${текст}`);
+        warnings.push({ code: "machine_error", message: `${name}: ${текст}` });
       }
     }
 
     machines.sort((a, b) => b.summary.lossValue - a.summary.lossValue || a.name.localeCompare(b.name, "ru"));
     warnings.sort((a, b) => a.code.localeCompare(b.code) || a.message.localeCompare(b.message, "ru"));
     return { from, to, threshold, machines, warnings };
+  }
+
+  /** Усушка одного автомата: снимки, дни, предупреждения по этому аппарату. */
+  private async поАвтомату(
+    canon: string,
+    формы: string[],
+    name: string,
+    dates: string[],
+    since: Date,
+    ctx: ShrinkContext,
+    данные: {
+      продажиПоДням: Map<string, Map<string, number>>;
+      приходПоДням: Map<string, number>;
+      записаноПоДням: Map<string, number>;
+      threshold: number;
+    },
+  ): Promise<{ machine: ShrinkMachine | null; warnings: ShrinkWarning[]; slotKeys: Set<string> }> {
+    const warnings: ShrinkWarning[] = [];
+    const slotKeys = new Set<string>();
+
+    const снимки: MachineSnapshot[] = [];
+    for (const форма of формы) снимки.push(...(await this.снимкиАвтомата(форма, since, ctx, slotKeys)));
+    снимки.sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
+    if (снимки.length === 0) {
+      // Серийник только что пришёл из выборки по ЭТОМУ ЖЕ окну — пусто здесь
+      // означает, что снимки удалили между двумя запросами. Молчать нельзя:
+      // автомат просто исчез бы из отчёта.
+      warnings.push({ code: "machine_error", message: `${name}: снимки исчезли между выборками (гонка со сбором)` });
+      return { machine: null, warnings, slotKeys };
+    }
+
+    // Мёртвый автомат — вон, но С ПРИЧИНОЙ. Причины «источник врёт» и
+    // «слоты не откалиброваны» чинятся в разных местах, поэтому текст
+    // предупреждения у них разный, хотя код один: для читателя отчёта это
+    // одно и то же — «по автомату сказать нечего».
+    const причина = skipReasonOf(снимки);
+    if (причина) {
+      warnings.push({ code: "machine_dead", message: `${name}: ${ПРИЧИНА[причина]} — усушка не считается` });
+      return { machine: null, warnings, slotKeys };
+    }
+
+    const дни: ShrinkDayInput[] = [];
+    const refillDays: ShrinkRefillDay[] = [];
+    const староСнимков: string[] = [];
+    const безПродаж: string[] = [];
+
+    for (const date of dates) {
+      const приход = данные.приходПоДням.get(`${canon}|${date}`) ?? 0;
+      if (приход > 0) {
+        refillDays.push({ date, detectedUnits: приход, recordedUnits: данные.записаноПоДням.get(`${canon}|${date}`) ?? 0 });
+      }
+      const начало = ближайший(снимки, началоСуток(date));
+      const конец = ближайший(снимки, началоСуток(date) + DAY_MS);
+      if (!начало || !конец) {
+        староСнимков.push(date);
+        continue;
+      }
+      const продажиДня = данные.продажиПоДням.get(`${canon}|${date}`);
+      if (!продажиДня && приход === 0) {
+        // Несобранные продажи выглядят как недостача во весь дневной расход —
+        // самый громкий ложный алерт, какой этот отчёт может выдать.
+        безПродаж.push(date);
+        continue;
+      }
+      дни.push({
+        date,
+        startSlots: начало.slots,
+        endSlots: конец.slots,
+        sales: продажиДня ?? new Map<string, number>(),
+        refillUnits: приход,
+      });
+    }
+
+    const summary = shrinkageByDay(дни, ctx.priceByKey, данные.threshold);
+    // Наружу товар уходит ЧЕЛОВЕЧЕСКИМ именем: нормализованный ключ («red
+    // bull») нужен только для сшивки, показывать его владельцу нельзя.
+    const items = summary.items.map((i) => ({ ...i, product: ctx.display.get(i.product) ?? i.product }));
+
+    // Одна строка на автомат, а не на день: 26 автоматов × 14 дней дали бы
+    // триста предупреждений, среди которых не видно ни одного.
+    if (староСнимков.length > 0) {
+      warnings.push({
+        code: "snapshots_stale",
+        message: `${name}: нет снимков у границ суток — пропущены дни ${староСнимков.join(", ")}`,
+      });
+    }
+    if (безПродаж.length > 0) {
+      warnings.push({ code: "no_sales_day", message: `${name}: нет продаж за ${безПродаж.join(", ")} — дни не считались` });
+    }
+    return { machine: { serial: canon, name, summary: { ...summary, items }, refillDays }, warnings, slotKeys };
   }
 
   /**
@@ -299,40 +458,36 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
    * неделю, и без него владелец получал бы одну и ту же строку семь утр
    * подряд, пока не перестал бы читать брифинг целиком.
    */
-  async alertDaily(): Promise<{ alerts: number }> {
-    const отчёт = await this.report(ALERT_DAYS);
-    const сутки = new Date(началоСуток(деньТашкента(new Date())));
+  async alertDaily(now = new Date()): Promise<AlertRun> {
+    const ctx = await this.контекст();
+    const отчёт = await this.построить(ALERT_DAYS, now, ctx);
+    const сутки = началоСутокТашкента(now);
 
-    const [написанное, слоты, registry, { canonOf }] = await Promise.all([
+    const [написанное, поСерийникам] = await Promise.all([
       this.db
         .select({ type: event.type, payload: event.payload })
         .from(event)
         .where(and(inArray(event.type, [SHRINK_EVENT, LOW_STOCK_EVENT]), gte(event.occurredAt, сутки))),
-      this.db
-        .select({
-          machineSerial: machineSlot.machineSerial,
-          coilId: machineSlot.coilId,
-          productName: machineSlot.productName,
-          capacity: machineSlot.capacity,
-          quantity: machineSlot.quantity,
-        })
-        .from(machineSlot),
-      this.vending.machineRegistry(),
-      this.vending.priceIndex(),
+      // Планограмма — только СВЕЖАЯ (см. `LOW_STOCK_FRESH_MS`), и той же
+      // выборкой, что у плана закупа: две реализации «слоты по автоматам»
+      // разошлись бы в правилах валидности.
+      this.vending.slotsByMachine(new Date(now.getTime() - LOW_STOCK_FRESH_MS)),
     ]);
 
     const занято = new Set<string>();
     for (const e of написанное) {
       const p = (e.payload ?? {}) as Record<string, unknown>;
-      if (e.type === SHRINK_EVENT) занято.add(`${SHRINK_EVENT}|${String(p.serial)}|${String(p.product)}`);
-      else занято.add(`${LOW_STOCK_EVENT}|${String(p.machine)}|${String(p.product)}`);
+      const ключ = e.type === SHRINK_EVENT ? String(p.serial) : String(p.serial ?? p.machine);
+      занято.add(`${e.type}|${ключ}|${String(p.product)}`);
     }
 
     const строки: { source: string; type: string; payload: Record<string, unknown> }[] = [];
-    const добавить = (type: string, ключ: string, payload: Record<string, unknown>): void => {
-      if (занято.has(ключ)) return;
+    let lowStock = 0;
+    const добавить = (type: string, ключ: string, payload: Record<string, unknown>): boolean => {
+      if (занято.has(ключ)) return false;
       занято.add(ключ);
       строки.push({ source: "system", type, payload });
+      return true;
     };
 
     for (const m of отчёт.machines) {
@@ -352,42 +507,64 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     // «Заканчивается» считается по ПЛАНОГРАММЕ (`machine_slot`), а не по
     // усушке: это разные вопросы. Товар может не усыхать вовсе и при этом
     // кончиться, и наоборот.
-    const поАвтоматам = new Map<string, Slot[]>();
-    for (const r of слоты) {
-      const список = поАвтоматам.get(r.machineSerial) ?? [];
-      список.push({ coilId: r.coilId, product: r.productName, capacity: r.capacity, quantity: r.quantity });
-      поАвтоматам.set(r.machineSerial, список);
-    }
-    for (const [serial, список] of поАвтоматам) {
+    const поКанону = new Map<string, Slot[]>();
+    for (const [serial, список] of поСерийникам) {
       const canon = normalizeMachineSerial(serial);
-      if (registry.notInService.has(canon) || deadMachine(список)) continue;
-      const name = registry.nameBySerial.get(canon) ?? serial;
+      поКанону.set(canon, [...(поКанону.get(canon) ?? []), ...список]);
+    }
+    let обрезано = false;
+    for (const [canon, список] of поКанону) {
+      if (ctx.registry.notInService.has(canon)) continue;
+      // Тот же судья, что у детектора и у отчёта: заглушка источника и
+      // неоткалиброванная планограмма «заканчивается» не значат.
+      if (skipReasonOf([{ serial: canon, capturedAt: now, slots: список }])) continue;
+      const name = ctx.registry.nameBySerial.get(canon) ?? canon;
       const поТовару = new Map<string, { qty: number; cap: number }>();
       for (const s of список) {
         if (!hasProduct(s) || !slotValid(s)) continue;
-        const product = canonOf(s.product!);
-        const a = поТовару.get(product) ?? { qty: 0, cap: 0 };
+        const ключ = ключТовара(ctx, s.product!);
+        const a = поТовару.get(ключ) ?? { qty: 0, cap: 0 };
         a.qty += Math.min(s.quantity, s.capacity);
         a.cap += s.capacity;
-        поТовару.set(product, a);
+        поТовару.set(ключ, a);
       }
-      for (const [product, a] of поТовару) {
+      for (const [ключ, a] of поТовару) {
         if (a.cap < LOW_STOCK_MIN_CAPACITY || a.qty > LOW_STOCK_LEFT) continue;
-        добавить(LOW_STOCK_EVENT, `${LOW_STOCK_EVENT}|${name}|${product}`, { machine: name, product, left: a.qty });
+        if (lowStock >= LOW_STOCK_MAX_EVENTS) {
+          обрезано = true;
+          break;
+        }
+        const product = ctx.display.get(ключ) ?? ключ;
+        // Ключ дедупа — СЕРИЙНИК, а не отображаемое имя: два автомата,
+        // названные одинаково, гасили бы алерты друг друга.
+        if (добавить(LOW_STOCK_EVENT, `${LOW_STOCK_EVENT}|${canon}|${product}`, { machine: name, serial: canon, product, left: a.qty })) {
+          lowStock += 1;
+        }
       }
+      if (обрезано) break;
+    }
+    if (обрезано) {
+      this.logger.warn(
+        `«Заканчивается»: обрезано на ${LOW_STOCK_MAX_EVENTS} событиях — планограмма пуста разом по многим автоматам, это сбой сбора, а не расход.`,
+      );
     }
 
     if (строки.length > 0) await this.db.insert(event).values(строки);
-    return { alerts: строки.length };
+    return { alerts: строки.length, lowStock };
   }
 
   /**
    * Снимки одного автомата за окно, ОДНИМ запросом на автомат (осознанный
-   * N+1 при парке ≤ ~30 машин — см. детектор заливок). Имя товара приводится
-   * к канону ДО расчёта: тот же товар приезжает из Ourvend под разными
-   * именами, и без канона он не сошёлся бы ни с продажами, ни с ценой.
+   * N+1 при парке ≤ ~30 машин — см. детектор заливок). Имя товара уходит в
+   * расчёт НОРМАЛИЗОВАННЫМ ключом (сшивка с продажами), а человеческое
+   * написание попадает в `display`, если товара нет в прайсе.
    */
-  private async снимкиАвтомата(serial: string, since: Date, canonOf: (raw: string) => string): Promise<MachineSnapshot[]> {
+  private async снимкиАвтомата(
+    serial: string,
+    since: Date,
+    ctx: ShrinkContext,
+    slotKeys: Set<string>,
+  ): Promise<MachineSnapshot[]> {
     const строки = await this.db
       .select({
         coilId: slotSnapshot.coilId,
@@ -407,35 +584,39 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
         снимок = { serial, capturedAt: r.capturedAt, slots: [] };
         поМоменту.set(t, снимок);
       }
-      const имя = r.productName?.trim();
-      const слот: SnapshotSlot = {
-        coilId: r.coilId,
-        product: имя ? canonOf(имя) : null,
-        capacity: r.capacity,
-        quantity: r.quantity,
-      };
-      снимок.slots.push(слот);
+      const сырое = r.productName?.trim();
+      let ключ: string | null = null;
+      if (сырое) {
+        ключ = ключТовара(ctx, сырое);
+        slotKeys.add(ключ);
+      }
+      снимок.slots.push({ coilId: r.coilId, product: ключ, capacity: r.capacity, quantity: r.quantity });
     }
     return [...поМоменту.values()].sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
   }
 }
 
 /** Дни периода по Ташкенту: `days` полных суток, последние — вчерашние. */
-function периодДней(days: number): string[] {
-  const сегодня = деньТашкента(new Date());
+function периодДней(days: number, now: Date): string[] {
+  const сегодня = деньТашкента(now);
   const out: string[] = [];
   for (let i = days; i >= 1; i--) out.push(деньТашкента(new Date(началоСуток(сегодня) - i * DAY_MS)));
   return out;
 }
 
 /** YYYY-MM-DD суток по Ташкенту для момента. */
-function деньТашкента(at: Date): string {
+export function деньТашкента(at: Date): string {
   return new Date(at.getTime() + TZ_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 /** UTC-момент 00:00 Ташкента для даты YYYY-MM-DD. */
-function началоСуток(date: string): number {
+export function началоСуток(date: string): number {
   return Date.parse(`${date}T00:00:00.000Z`) - TZ_OFFSET_MS;
+}
+
+/** Начало ТЕКУЩИХ суток по Ташкенту — граница дедупа алертов. */
+export function началоСутокТашкента(now: Date): Date {
+  return new Date(началоСуток(деньТашкента(now)));
 }
 
 /**

@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
-import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, notInArray, sql } from "drizzle-orm";
 import {
   approval,
   auditLog,
@@ -707,9 +707,24 @@ export class VendingService {
     return { machines: accepted.length, slots, linked, pruned, pruneErrors, skipped };
   }
 
-  /** Актуальные слоты, сгруппированные по автомату, в форме ядра расчёта. */
-  private async slotsByMachine(): Promise<Map<string, Slot[]>> {
-    const rows = await this.db.select().from(machineSlot);
+  /**
+   * Актуальные слоты, сгруппированные по автомату, в форме ядра расчёта.
+   *
+   * `freshSince` отсекает зеркало, переставшее обновляться: `machine_slot` —
+   * upsert-таблица, и строки автомата, который перестал отдавать данные,
+   * лежат в ней вечно (уборка `pruneVanishedSlots` трогает только машины
+   * текущей пачки). Плану закупа это безразлично — он и так фильтрует по
+   * статусу, — а вот утренний алерт «заканчивается» без отсечки кричал бы про
+   * аппарат, которого нет (П4). Без параметра поведение прежнее.
+   *
+   * Публично: вторая реализация «слоты по автоматам» разошлась бы с этой в
+   * правилах валидности, и панель с брифингом стали бы считать по-разному.
+   */
+  async slotsByMachine(freshSince?: Date): Promise<Map<string, Slot[]>> {
+    const rows = await this.db
+      .select()
+      .from(machineSlot)
+      .where(freshSince ? gte(machineSlot.syncedAt, freshSince) : undefined);
     const byMachine = new Map<string, Slot[]>();
     for (const r of rows) {
       const list = byMachine.get(r.machineSerial) ?? [];
@@ -1040,9 +1055,18 @@ export class VendingService {
    * приехать из ОДНОГО чтения: между двумя владелец успевает переименовать
    * товар, и позиция отчёта осталась бы без цены.
    */
-  async priceIndex(): Promise<{ canonOf: (raw: string) => string; priceByName: Map<string, number> }> {
-    const { aliasByKey, priceByName } = await this.loadProductIndex();
-    return { canonOf: (raw: string) => this.resolveProduct(raw, aliasByKey), priceByName };
+  async priceIndex(): Promise<{
+    canonOf: (raw: string) => string;
+    priceByName: Map<string, number>;
+    /** Все канонические имена прайса — из них строится, КАК показывать товар. */
+    names: string[];
+  }> {
+    const { aliasByKey, priceByName, productRows } = await this.loadProductIndex();
+    return {
+      canonOf: (raw: string) => this.resolveProduct(raw, aliasByKey),
+      priceByName,
+      names: productRows.map((p) => p.name),
+    };
   }
 
   /**

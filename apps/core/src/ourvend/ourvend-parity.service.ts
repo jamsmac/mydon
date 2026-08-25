@@ -200,7 +200,7 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     ownRows: number;
     note: string | null;
     /** Вторая половина гейта: остатки автоматов (связь №1, П4). */
-    stock: { days: number; checked: number; ok: boolean; mismatches: ParityStockMismatch[] };
+    stock: { days: number; checked: number; ok: boolean; mismatches: ParityStockMismatch[]; note: string | null };
   }> {
     const n = Math.min(Math.max(Math.trunc(days) || 7, 1), 30);
     // Канон серийника — общий SQL-хелпер (@mydon/shared), тот же, что в
@@ -262,20 +262,29 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     const ownStock = ownStockRaw.map((r) => ({ ...r, qty: Number(r.qty) }));
     const stockStock = stockStockRaw.map((r) => ({ ...r, qty: Number(r.qty) }));
     const остатки = computeStockParity(ownStock, stockStock);
+    // НЕЧЕГО СВЕРЯТЬ ≠ РАСХОЖДЕНИЕ. Пока агент не начал снимать остатки,
+    // красный вердикт без единого расхождения в отчёте — это ложная тревога
+    // про паритет продаж, которая ничего не объясняет: гейт по остаткам
+    // просто ещё не запущен, и говорить об этом надо словами, а не цветом.
+    // А вот строки, которые ЕСТЬ, но не пересеклись ни одним автоматом, —
+    // настоящая проблема сопоставления, и она остаётся красной.
+    const stockNote =
+      ownStock.length === 0
+        ? "снимков остатков OurVend за период нет"
+        : остатки.checked === 0
+          ? "нет автоматов, общих со stock-дорожкой, — сверять не с чем"
+          : null;
     const stock = {
       days: n,
       checked: остатки.checked,
-      // Пустая сверка — НЕ «ок»: ноль расхождений при нуле сверенных пар это
-      // «мы ничего не проверили», и зачесть такой день в семь зелёных значит
-      // разрешить флип по молчанию.
-      ok: остатки.mismatches.length === 0 && остатки.checked > 0,
+      ok: остатки.mismatches.length === 0 && (остатки.checked > 0 || ownStock.length === 0),
       mismatches: остатки.mismatches,
+      note: stockNote,
     };
 
-    const note =
-      own.length === 0
-        ? "собственный снапшот ещё пуст — сверять нечего (агент ещё не отработал?)"
-        : null;
+    const salesNote =
+      own.length === 0 ? "собственный снапшот продаж ещё пуст — сверять нечего (агент ещё не отработал?)" : null;
+    const note = [salesNote, stockNote && `остатки: ${stockNote}`].filter((x): x is string => Boolean(x)).join("; ") || null;
     return {
       days: n,
       checked,
@@ -292,10 +301,10 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
   /** Ежедневный вердикт — событием: 7 зелёных подряд открывают переключение. */
   async daily(): Promise<void> {
     const p = await this.parity(7);
-    if (p.note) {
-      this.log.log(`Паритет OurVend: ${p.note}`);
-      return;
-    }
+    // Событие пишем ВСЕГДА, даже когда одна половина пуста. Прежний ранний
+    // выход из-за пустого снапшота продаж уносил с собой и половину по
+    // остаткам: в журнале не оставалось ни строки, и «гейт молчит» было не
+    // отличить от «гейт не запускался».
     await this.db.insert(event).values({
       source: "ourvend-accounting",
       type: "ourvend.parity",
@@ -310,11 +319,13 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
         остатки_сверено: p.stock.checked,
         остатки_расхождений: p.stock.mismatches.length,
         остатки_расхождения: p.stock.mismatches.slice(0, 50),
+        примечание: p.note,
       },
     });
     this.log.log(
       `Паритет OurVend: ${p.ok ? "ОК" : "расхождения"} — продажи ${p.mismatches.length} из ${p.checked} пар, ` +
-        `остатки ${p.stock.mismatches.length} из ${p.stock.checked}.`,
+        `остатки ${p.stock.mismatches.length} из ${p.stock.checked}.` +
+        (p.note ? ` (${p.note})` : ""),
     );
   }
 }
