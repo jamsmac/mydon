@@ -282,13 +282,13 @@ Config-spec: `{ key: "SHRINK_ALERT_UZS", label: "Вендинг: порог ус
 
 **Interfaces:**
 ```ts
-// POST /vending/refill-events/detect  body { days?: 1..30 (default 2) }  → { machines: number; windows: number; events: number; matched: number; skippedDead: string[] }
+// POST /vending/refill-events/detect  body { days?: 1..30 (default 2) }  → { machines: number; events: number; matched: number; skipped: { serial: string; reason: "dead"|"uncalibrated"|"no_slots" }[] }
 // GET  /vending/refill-events?days=14 → { serial, name, windowFrom, windowTo, units, slots, matchedRefillId }[]
 export class RefillEventsService { detect(days = 2): Promise<DetectResult>; list(days = 14): Promise<RefillEventRow[]> }
 ```
 Алгоритм `detect`: читать `slot_snapshot` за `days` (по `captured_at`), сгруппировать по `(machine_serial, captured_at)` → `MachineSnapshot[]` (имена слотов резолвить через алиасы `loadProductIndex` до канона, как `resolveSlots`); `minUnits` = `REFILL_DETECT_MIN_UNITS` через `resolveEffective`; `detectRefills` → upsert `onConflictDoNothing` по `(serial, window_to)`; для новых событий `matchRefill` с `vending_refill` того же автомата ±3ч → `matched_refill_id`; `machine_id` через `machineIdBySerial`; каждое новое событие без записи оператора → `event { source:"system", type:"vending.refill_detected", payload:{serial, name, units, windowTo, recorded:false} }`; с записью → `recorded:true` (событие тоже, для ленты «Действия» в будущем). Возврат счётчиков.
 Бэкфилл: в `ingestSlots` upsert `productId` из индекса (по канону); в `ingestStock` — `productId` строки склада. Мёртвые: `okSerials()` дополнительно `!deadMachine(slots)`; в `plan()` warnings добавить `machine_skipped` с причиной «нет данных (все слоты полны)» для мёртвых.
-Тесты (стабы как в `vending.service.test.ts`): детект даёт событие и второй прогон — 0 новых (конфликт); мёртвый автомат в `skippedDead`; matched по записи ±3ч; `ingestSlots` пишет `productId` для известного имени; `plan()` пропускает мёртвый автомат.
+Тесты (стабы как в `vending.service.test.ts`): детект даёт событие и второй прогон — 0 новых (конфликт); мёртвый автомат в `skipped` (`reason: "dead"`); matched по записи ±3ч; `ingestSlots` пишет `productId` для известного имени; `plan()` пропускает мёртвый автомат.
 Smoke-core: `POST /vending/refill-events/detect` (после сценария приёма слотов) и `GET /vending/refill-events`.
 Commit: `feat(core): детектор заливок по снимкам слотов, бэкфилл product_id, фильтр мёртвых автоматов (П4)`.
 
@@ -300,8 +300,9 @@ Commit: `feat(core): детектор заливок по снимкам сло�
 
 **Interfaces:**
 ```ts
-// GET /vending/shrinkage?days=14 → { from, to, threshold, machines: [{ serial, name, summary: ShrinkSummary, refillDays: [{ date, detectedUnits, recordedUnits }] }], warnings: { code: "snapshots_stale"|"no_sales_day"|"machine_dead"; message }[] }
-export class ShrinkageService { report(days = 14): Promise<ShrinkReport>; alertDaily(): Promise<{ alerts: number }> }
+// GET /vending/shrinkage?days=14 → { from, to, threshold, machines: [{ serial, name, summary: ShrinkSummary, refillDays: [{ date, detectedUnits, recordedUnits }] }], warnings: { code: "snapshots_stale"|"no_sales_day"|"machine_dead"|"sales_unknown_product"|"machine_error"; message }[] }
+// POST /vending/shrinkage/alerts  (ручной триггер, без тела, ServiceTokenGuard — тот же метод, что дёргает крон 08:35) → { alerts: number; lowStock: number }
+export class ShrinkageService { report(days = 14): Promise<ShrinkReport>; alertDaily(): Promise<{ alerts: number; lowStock: number }> }
 ```
 `report`: для каждого автомата в строю и не мёртвого: дни по Ташкенту за период; `startSlots`/`endSlots` = ближайшие снимки к 00:00 и 24:00 дня (из `slot_snapshot`; если ближайший дальше 6 ч — день пропущен с warning `snapshots_stale`); `sales` = `sale` за `dt` по канону (алиасы); `refillUnits` = Σ `vending_refill_event.units` с `window_to` в дне; `prices` из `vending_product` через `loadProductIndex`; `shrinkageByDay` с `SHRINK_ALERT_UZS`. `refillDays` = дни с событиями: `detectedUnits` и `recordedUnits` (Σ `vending_refill.qty` за день).
 `alertDaily` (крон `croner` `35 8 * * *` Asia/Tashkent, `onModuleInit`/`onApplicationShutdown` + `cron-shutdown.test.ts`): отчёт за 7 дней; по каждой позиции с `alert` — `event { type:"vending.shrinkage_alert", payload:{serial, name, product, lossUnits, lossValue, days} }` с дедупом по `(serial, product, day)` (проверка существующего события за сегодня). Эмиттер `machine.low_stock`: там же — по `machine_slot` товар с Σ quantity ≤ 1 при Σ capacity ≥ 5 → `event { type:"machine.low_stock", payload:{machine: name, product, left} }`, дедуп по дню.
@@ -322,7 +323,8 @@ Commit: `fix(agents): синк ставит partial при падении про
 
 ### Task 6: Бот — мастер «Заполнил автомат» по плану, команда «усушка», брифинг
 
-**Files:** Modify `apps/bot/src/staff-refill.ts` (+test), `staff.ts`, `field-work.ts` (FIELD_FLOWS/onObjectPicked для `refill`), `menu.ts` (`ready: true`) + `menu.test.ts`, `core-client.ts` (`vendingPlan` уже есть; добавить `vendingShrinkage(days)`, `vendingStock()` если нужен «на складе N»); Create `apps/bot/src/shrinkage-brief.ts` (+test); Modify `handler.ts` (команда «усушка» до parseIntent, HELP), `briefing.ts`/`index.ts` (строка усушки из событий правил — уже доставляется `rules`, отдельной строки не нужно; проверить, что `urgency:"briefing"` события попадают в утренний брифинг по существующему контуру).
+**Files:** Modify `apps/bot/src/staff-refill.ts` (+test), `staff.ts`, `field-work.ts` (FIELD_FLOWS/onObjectPicked для `refill`), `menu.ts` (`ready: true`) + `menu.test.ts`, `core-client.ts` (`vendingPlan` уже есть; добавить `vendingShrinkage(days)`, `vendingStock()` если нужен «на складе N»); Create `apps/bot/src/shrinkage-brief.ts` (+test); Modify `handler.ts` (команда «усушка» до parseIntent, HELP), `briefing.ts`/`index.ts` (строка усушки из событий правил).
+Расхождение с исходным планом (обнаружено при реализации): `urgency:"briefing"` события НЕ доставлялись владельцу вовсе — поллер срочных ходит с `immediate=1`, а утренний брифинг `/rules/pending` не читал никогда, так что `vending.shrinkage_alert`/`vending.refill_detected` копились в Core без доставки. Добавлена проводка: `formatBriefingNotes` (блок «Разобраться сегодня», дедуп, лимит длины, бюджет символов) + чтение `briefingNotifications()` в утреннем брифинге + `ackNotifications` только по показанным ключам после успешной отправки.
 
 **Мастер (шаги, callback `rf:*`, один слот беседы):**
 1. Вход: `case "mrefill"` в `startMenuItem` → `startMachineRefill(chatId, person, deps)`: `pickObject` (machine-picker, flow `refill`; `FIELD_FLOWS` + `onObjectPicked` case `refill`).
