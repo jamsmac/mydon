@@ -10,10 +10,16 @@ import type {
   PriceGapReport,
   PriceGapRow,
 } from "@mydon/shared";
-import type { BootstrapSalePriceResult, OurvendHealth, SetSalePriceResult } from "./core-client";
+import type {
+  AnalyticsWarning,
+  AnalyticsWarningCode,
+  BootstrapSalePriceResult,
+  OurvendHealth,
+  SetSalePriceResult,
+  WithWarnings,
+} from "./core-client";
 import { parsePriceCommand } from "./purchase-brief";
-import { MAX_PARTS, chunk } from "./purchase-plan";
-import { RU } from "./shrinkage-brief";
+import { MAX_PARTS, RU, chunk } from "./purchase-plan";
 
 /**
  * Аналитика снек-контура в Telegram (П5b): маржа, мёртвый сток, изменения цен,
@@ -46,6 +52,8 @@ const DEAD_ROWS_SHOWN = 40;
 const CHANGES_SHOWN = 20;
 /** Сколько прогонов сбора называем поимённо. */
 const RUNS_SHOWN = 5;
+/** Сколько строк разрыва витрины помещается в отчёт (как у прочих списков). */
+const GAP_ROWS_SHOWN = 30;
 
 /** Окна по умолчанию и потолки Core (DTO): зажимаем здесь, чтобы не ловить 400. */
 export const MARGIN_DAYS_DEFAULT = 30;
@@ -56,6 +64,13 @@ export const PRICE_CHANGES_DAYS_DEFAULT = 30;
 export const PRICE_CHANGES_DAYS_MAX = 180;
 export const PRICE_GAP_DAYS_DEFAULT = 14;
 export const PRICE_GAP_DAYS_MAX = 90;
+/**
+ * «витрина как факт»: окно то же, что у отчёта, а потолок — СВОЙ.
+ * `BootstrapSalePriceDto` допускает 180 суток (в отличие от `PriceGapDto`
+ * с его 90), и общий потолок молча срезал бы «витрина как факт за 120 дней»
+ * до 90 — эталон встал бы не по тому окну, которое просил владелец.
+ */
+export const BOOTSTRAP_DAYS_MAX = 180;
 
 // ── Разбор фраз ─────────────────────────────────────────────────────────────
 
@@ -180,14 +195,46 @@ export const момент = (iso: string | null): string => {
   if (!iso) return "не было";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "?";
-  return d.toLocaleString("ru-RU", {
-    timeZone: TZ,
-    day: "2-digit",
-    month: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  // Запятую между датой и временем убираем: «23.08, 08:02» в строке, где
+  // рядом стоят другие поля через «·», читается как ещё один разделитель.
+  return d
+    .toLocaleString("ru-RU", { timeZone: TZ, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+    .replace(", ", " ");
 };
+
+/** Русское склонение по числу: 1 отказ, 2 отказа, 5 отказов. */
+export function сущ(n: number, one: string, few: string, many: string): string {
+  const a = Math.abs(Math.round(n)) % 100;
+  if (a > 10 && a < 20) return many;
+  const b = a % 10;
+  if (b === 1) return one;
+  if (b >= 2 && b <= 4) return few;
+  return many;
+}
+
+/**
+ * Хвост отчёта: почему посчитано не всё (`warnings` от Core, П5b Task 3).
+ *
+ * Коды, которые отчёт УЖЕ проговорил своими строками, сюда не попадают
+ * (`кроме`): владелец не должен читать одно и то же дважды — сначала в теле
+ * отчёта, потом в предупреждениях. Именно ради этого у предупреждений есть
+ * код, а не только текст.
+ *
+ * Повторы по тексту гасим, как в усушке: одна и та же причина приходит по
+ * каждому автомату, и списком в три десятка одинаковых строк она вытеснила бы
+ * сам отчёт.
+ */
+function предупреждения(warnings: AnalyticsWarning[] | undefined, кроме: AnalyticsWarningCode[] = []): string[] {
+  if (!warnings || warnings.length === 0) return [];
+  const видели = new Set<string>();
+  const строки: string[] = [];
+  for (const w of warnings) {
+    if (кроме.includes(w.code) || видели.has(w.message)) continue;
+    видели.add(w.message);
+    строки.push(`⚠️ ${w.message}`);
+  }
+  return строки.length === 0 ? [] : ["", "Посчитано не всё:", ...строки];
+}
 
 /**
  * Нарезка отчёта на сообщения с потолком частей.
@@ -208,6 +255,17 @@ export function capped(title: string, lines: string[], лист: string, max = M
   return kept;
 }
 
+/**
+ * Что отчёт маржи уже сказал сам: штуки без себестоимости (строка после итога)
+ * и продажи не в строю (строка `исключённые`). Повторять их же в хвосте
+ * предупреждений значит удлинить отчёт, ничего не добавив.
+ */
+const ПОКРЫТО_МАРЖОЙ: AnalyticsWarningCode[] = ["unknown_cost", "excluded_sales"];
+/** Мёртвый сток сам называет позиции без цены закупки (строка после итога). */
+const ПОКРЫТО_СТОКОМ: AnalyticsWarningCode[] = ["unknown_cost"];
+/** Витрина сама печатает список «эталон не задан (N): …». */
+const ПОКРЫТО_ВИТРИНОЙ: AnalyticsWarningCode[] = ["no_reference"];
+
 /** Строки продаж, выброшенные фильтром «в строю»: названы, а не потеряны (R-P5b-1). */
 function исключённые(r: MarginReport): string[] {
   if (r.excluded.length === 0) return [];
@@ -226,13 +284,22 @@ function машинаСтрока(m: MarginMachine): string {
   );
 }
 
+/**
+ * Строка товара. Хвост «без себестоимости N шт» обязателен ровно так же, как у
+ * автомата (R-P5b-2): без него товар, у которого цены закупки нет, печатается
+ * как «маржа 60 000 (100 %)» — лучшая строка списка, хотя затрат по ней просто
+ * не посчитали.
+ */
 export function товарСтрока(p: MarginProduct): string {
   const тревога = p.low ? " ⚠️" : "";
-  return `• ${p.product}: маржа ${RU(p.margin)} (${PCT(p.pct)})${тревога} · ${RU(p.qty)} шт · выручка ${RU(p.revenue)}`;
+  return (
+    `• ${p.product}: маржа ${RU(p.margin)} (${PCT(p.pct)})${тревога} · ${RU(p.qty)} шт · выручка ${RU(p.revenue)}` +
+    (p.unknownUnits > 0 ? ` · без себестоимости ${RU(p.unknownUnits)} шт` : "")
+  );
 }
 
 /** Маржа снек-автоматов сообщениями Telegram. */
-export function formatMargin(r: MarginReport): string[] {
+export function formatMargin(r: MarginReport & WithWarnings): string[] {
   const title = `💰 Маржа снек-автоматов (OurVend) за ${r.days} дн. (${день(r.from)} — ${день(r.to)})`;
   const lines: string[] = [];
 
@@ -241,6 +308,7 @@ export function formatMargin(r: MarginReport): string[] {
   if (r.machines.length === 0 || r.totals.revenue === 0) {
     lines.push(`Считать нечего — продаж за ${r.days} дн. нет.`);
     lines.push(...исключённые(r));
+    lines.push(...предупреждения(r.warnings, ПОКРЫТО_МАРЖОЙ));
     return capped(title, lines, "Маржа");
   }
 
@@ -263,14 +331,19 @@ export function formatMargin(r: MarginReport): string[] {
     for (const p of r.products.slice(0, PRODUCTS_SHOWN)) lines.push(товарСтрока(p));
     // Убыточные и низкомаржинальные — отдельно и с конца списка: в топе их не
     // видно, а решение владельца принимается именно по ним.
-    const слабые = r.products.filter((p) => p.low).slice(-PRODUCTS_SHOWN);
+    // …и только те, что НЕ попали в топ: на коротком каталоге (34 SKU на
+    // проде, а в окне бывает и три) оба списка совпадали строка в строку, и
+    // отчёт печатал один и тот же товар дважды под разными заголовками.
+    const показаны = new Set(r.products.slice(0, PRODUCTS_SHOWN));
+    const слабые = r.products.filter((p) => p.low && !показаны.has(p)).slice(-PRODUCTS_SHOWN);
     if (слабые.length > 0) {
-      lines.push("", `Ниже ${r.lowPct} % или в минус (${слабые.length}):`);
+      lines.push("", `Ниже ${r.lowPct} % или в минус (${слабые.length}, кроме показанных выше):`);
       for (const p of слабые) lines.push(товарСтрока(p));
     }
   }
 
   lines.push(...исключённые(r));
+  lines.push(...предупреждения(r.warnings, ПОКРЫТО_МАРЖОЙ));
   return capped(title, lines, "Маржа");
 }
 
@@ -299,13 +372,17 @@ function мёртвыйРаздел(title: string, rows: DeadRow[], lines: strin
 }
 
 /** Мёртвый сток снек-контура сообщениями Telegram. */
-export function formatDeadStock(r: DeadStockReport): string[] {
+export function formatDeadStock(r: DeadStockReport & WithWarnings): string[] {
   const title = `🪦 Мёртвый сток снек-автоматов (OurVend) за ${r.days} дн.`;
   const всего = r.warehouse.length + r.machines.length;
   const lines: string[] = [];
 
   if (всего === 0) {
+    // «Двигалось всё» — утверждение о ДВИЖЕНИИ, и оно ложно, когда продаж не
+    // приехало вовсе: тогда двигаться было нечему. Разницу называет Core
+    // кодом `no_sales`, и хвост предупреждений тут обязателен.
     lines.push(`Мёртвых позиций нет: за ${r.days} дн. двигалось всё, что лежит на складе и в автоматах.`);
+    lines.push(...предупреждения(r.warnings, ПОКРЫТО_СТОКОМ));
     return capped(title, lines, "Мёртвый сток");
   }
 
@@ -319,6 +396,7 @@ export function formatDeadStock(r: DeadStockReport): string[] {
 
   мёртвыйРаздел("📦 На складе", r.warehouse, lines);
   мёртвыйРаздел("🎰 В автоматах", r.machines, lines);
+  lines.push(...предупреждения(r.warnings, ПОКРЫТО_СТОКОМ));
   return capped(title, lines, "Мёртвый сток");
 }
 
@@ -335,15 +413,19 @@ function лентаЦен(title: string, rows: PriceChange[], lines: string[]): 
 }
 
 /** Изменения цен: закупочные и витринные, свежие сверху. */
-export function formatPriceChanges(r: PriceChangesReport): string[] {
+export function formatPriceChanges(r: PriceChangesReport & WithWarnings): string[] {
   const title = `📈 Цены снек-автоматов (OurVend) за ${r.days} дн. · порог ${r.pct} %`;
   const lines: string[] = [];
   if (r.purchase.length === 0 && r.retail.length === 0) {
+    // «Изменений нет» и «продаж не приехало» — разные новости: витринная лента
+    // строится из продаж, и без них она пуста независимо от цен.
     lines.push(`Заметных изменений цен за ${r.days} дн. нет (порог ${r.pct} %).`);
+    lines.push(...предупреждения(r.warnings));
     return capped(title, lines, "Цены");
   }
   лентаЦен("🛒 Закупочные (что платим)", r.purchase, lines);
   лентаЦен("🏷 Витринные (что берём в автомате)", r.retail, lines);
+  lines.push(...предупреждения(r.warnings));
   return capped(title, lines, "Цены");
 }
 
@@ -361,7 +443,7 @@ function разрывСтрока(g: PriceGapRow): string {
 }
 
 /** Витрина против эталона владельца (R-P5b-6). */
-export function formatPriceGap(r: PriceGapReport): string[] {
+export function formatPriceGap(r: PriceGapReport & WithWarnings): string[] {
   const title = `🏷 Витрина снек-автоматов (OurVend) за ${r.days} дн. · порог ${r.pct} %`;
   const lines: string[] = [];
   const недобор = r.rows.filter((g) => g.lost > 0);
@@ -381,7 +463,13 @@ export function formatPriceGap(r: PriceGapReport): string[] {
       lines.push(`Продаём дороже эталона: ${дороже.length} поз. — в сумму недобора не входят.`);
     }
     lines.push("");
-    for (const g of [...недобор, ...дороже]) lines.push(разрывСтрока(g));
+    const строки = [...недобор, ...дороже];
+    for (const g of строки.slice(0, GAP_ROWS_SHOWN)) lines.push(разрывСтрока(g));
+    if (строки.length > GAP_ROWS_SHOWN) {
+      lines.push(
+        `…и ещё ${RU(строки.length - GAP_ROWS_SHOWN)} поз. — весь список на листе «Цены» в панели.`,
+      );
+    }
   }
 
   // Товары без эталона — отдельным списком: нулевая строка выглядела бы как
@@ -393,6 +481,7 @@ export function formatPriceGap(r: PriceGapReport): string[] {
       "«цена продажи <товар> <сум>» — задать вручную, «витрина как факт» — проставить по факту продаж.",
     );
   }
+  lines.push(...предупреждения(r.warnings, ПОКРЫТО_ВИТРИНОЙ));
   return capped(title, lines, "Цены");
 }
 
@@ -444,10 +533,17 @@ export function formatSalePriceBootstrap(r: BootstrapSalePriceResult): string[] 
   return capped(title, lines, "Цены");
 }
 
-/** Возраст снимка в минутах. `null` — снимков НЕТ вовсе, а это не «свежо». */
-const лагМин = (v: number | null): string =>
-  v === null ? "снимков нет" : v < 90 ? `${RU(v)} мин` : `${RU(v / 60)} ч`;
-const лагЧ = (v: number | null): string => (v === null ? "снимков нет" : `${RU(v)} ч`);
+/**
+ * Возраст снимка. `null` — снимков НЕТ вовсе, а это не «свежо».
+ *
+ * Проверка нестрогая (`== null`) намеренно: поле может не приехать вовсе
+ * (старый Core, форма без `productSaleLagH`), и строгое `=== null` печатало бы
+ * владельцу «витрина (product_sale) — не число ч» — то есть отчёт о свежести,
+ * который сам себя не понял.
+ */
+const лагМин = (v: number | null | undefined): string =>
+  v == null ? "снимков нет" : v < 90 ? `${RU(v)} мин` : `${RU(v / 60)} ч`;
+const лагЧ = (v: number | null | undefined): string => (v == null ? "снимков нет" : `${RU(v)} ч`);
 
 /**
  * «сверка» — здоровье сбора OurVend и паритет одним сообщением (R-P5b-8).
@@ -461,10 +557,18 @@ export function formatOurvendHealth(h: OurvendHealth): string[] {
   const title = "🩺 Сверка снек-автоматов (OurVend): сбор и паритет";
   const lines: string[] = [];
 
-  if (h.failedStreak > 0) {
+  // НИ ОДНОГО ПРОГОНА — ЭТО НЕ «ЗДОРОВ». Зелёная галка над «последний успех:
+  // не было» — ровно те «нули как всё хорошо», против которых §7: серия
+  // отказов равна нулю просто потому, что сбор ни разу не запускался.
+  if (h.runs.length === 0) {
     lines.push(
-      `❌ ${RU(h.failedStreak)} отказов подряд — сбор стоит, свежих данных нет. ` +
-        `Последний успех: ${момент(h.lastSuccessAt)}.`,
+      "❓ Прогонов сбора за период нет — здоровье не оценить: сбор не запускался или журнал прогонов пуст.",
+      `Последний успех: ${момент(h.lastSuccessAt)}.`,
+    );
+  } else if (h.failedStreak > 0) {
+    lines.push(
+      `❌ ${RU(h.failedStreak)} ${сущ(h.failedStreak, "отказ", "отказа", "отказов")} подряд — ` +
+        `сбор стоит, свежих данных нет. Последний успех: ${момент(h.lastSuccessAt)}.`,
     );
   } else {
     lines.push(`✅ Отказов подряд нет. Последний успех: ${момент(h.lastSuccessAt)}.`);
@@ -473,9 +577,11 @@ export function formatOurvendHealth(h: OurvendHealth): string[] {
   const успешных = h.runs.filter((r) => r.status === "success").length;
   const частичных = h.runs.filter((r) => r.status === "partial").length;
   const отказов = h.runs.filter((r) => r.status === "failed").length;
-  lines.push(
-    `Прогоны (${h.runs.length}): успешных ${успешных} · частичных ${частичных} · с отказом ${отказов}`,
-  );
+  if (h.runs.length > 0) {
+    lines.push(
+      `Прогоны (${h.runs.length}): успешных ${успешных} · частичных ${частичных} · с отказом ${отказов}`,
+    );
+  }
   lines.push(
     `Свежесть: слоты — ${лагМин(h.slotsLagMin)} · продажи — ${лагЧ(h.salesLagH)} · ` +
       `витрина (product_sale) — ${лагЧ(h.productSaleLagH)}`,

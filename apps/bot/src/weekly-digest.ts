@@ -8,12 +8,12 @@ import {
   изменениеСтрока,
   момент,
   мёртваяСтрока,
+  сущ,
   товарСтрока,
 } from "./analytics-brief";
 import { formatBriefingNotes, type BriefingNote } from "./briefing";
 import type { OurvendHealth, PendingNotifications, PersonRow, WeeklyDigest } from "./core-client";
-import { TG_BUDGET, chunk } from "./purchase-plan";
-import { RU } from "./shrinkage-brief";
+import { RU, TG_BUDGET, chunk } from "./purchase-plan";
 
 /**
  * Недельная сводка снек-контура: понедельник 08:05 по Ташкенту и команда
@@ -153,16 +153,6 @@ export interface WeeklyMessage {
   parts: string[];
   /** Ключи показанных сигналов. Пусто — отмечать доставленным нечего. */
   shownKeys: string[];
-}
-
-/** Русское склонение по числу: 1 событие, 2 события, 5 событий. */
-function сущ(n: number, one: string, few: string, many: string): string {
-  const a = Math.abs(Math.round(n)) % 100;
-  if (a > 10 && a < 20) return many;
-  const b = a % 10;
-  if (b === 1) return one;
-  if (b >= 2 && b <= 4) return few;
-  return many;
 }
 
 /**

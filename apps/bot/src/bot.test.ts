@@ -664,7 +664,21 @@ describe("Аналитика снека: путь владельца до Core (
       ourvendHealth: async (runs = 20) => {
         вызовы.push(`health:${runs}`);
         return {
-          runs: [],
+          // Прогоны в стабе есть намеренно: серия отказов при ПУСТОМ журнале
+          // прогонов — невозможная пара, и здоровье в этом случае честно
+          // отвечает «оценить не по чему».
+          runs: [
+            {
+              id: "r1",
+              startedAt: "2026-08-25T03:00:00Z",
+              finishedAt: "2026-08-25T03:00:10Z",
+              status: "failed",
+              machinesTotal: 2,
+              machinesOk: 0,
+              durationMs: 10_000,
+              error: "приём слотов прерван по таймауту 10 с",
+            },
+          ],
           failedStreak: 12,
           lastSuccessAt: null,
           slotsLagMin: null,
@@ -835,6 +849,34 @@ describe("Аналитика снека: путь владельца до Core (
     });
     assert.deepEqual(вызовы, [], "запрос в Core за несуществующей неделей не уходит");
     assert.match(reply?.text ?? "", /ключом ISO/);
+  });
+
+  it("окно бутстрапа шире окна отчёта: «витрина как факт за 120 дней» доходит целиком", async () => {
+    // `BootstrapSalePriceDto` допускает 180 суток, `PriceGapDto` — 90. Общий
+    // потолок молча срезал бы окно, и эталон встал бы не по тому периоду,
+    // который просил владелец.
+    const вызовы: string[] = [];
+    await handleMessage(111, "витрина как факт за 120 дней", deps(вызовы));
+    assert.deepEqual(вызовы, ["bootstrap:120"]);
+  });
+
+  it("отказ Core по данным у ОТЧЁТА тоже объясняется причиной, а не «попробуй позже»", async () => {
+    // Окна бот зажимает сам, но границы DTO живут в Core: разойдись они —
+    // «маржа за 90 дней» вечно отвечала бы «попробуй позже», хотя чинить надо
+    // границу, а не ждать.
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingMargin: async () => {
+        throw new CoreError(400, "/vending/margin", '{"message":["days must not be greater than 90"]}');
+      },
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "маржа за 90 дней", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /days must not be greater than 90/);
+    assert.doesNotMatch(reply?.text ?? "", /попробуй ещё раз чуть позже/i);
   });
 
   it("справка называет все восемь команд — иначе отчёты есть, а спросить их никто не догадается", async () => {

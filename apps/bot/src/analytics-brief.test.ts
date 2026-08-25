@@ -9,9 +9,13 @@ import type {
   PriceChangesReport,
   PriceGapReport,
 } from "@mydon/shared";
-import type { BootstrapSalePriceResult, OurvendHealth } from "./core-client";
+import type { AnalyticsWarning, BootstrapSalePriceResult, OurvendHealth } from "./core-client";
 import {
+  BOOTSTRAP_DAYS_MAX,
   SALE_PRICE_HINT,
+  capped,
+  сущ,
+  товарСтрока,
   formatDeadStock,
   formatMargin,
   formatOurvendHealth,
@@ -30,7 +34,7 @@ import {
   parseSalePriceCommand,
 } from "./analytics-brief";
 import { isPriceCommand } from "./purchase-brief";
-import { MAX_PARTS, TG_BUDGET } from "./purchase-plan";
+import { MAX_PARTS, RU, TG_BUDGET } from "./purchase-plan";
 
 // ── Фикстуры прода (25.08.2026): числа взяты из инвентаризации, а не выдуманы ──
 
@@ -335,5 +339,147 @@ describe("Тексты отчётов", () => {
     // строкам.
     assert.match(parts.join("\n"), /нет движения 21 дн\., 2 000 поз\./);
     assert.match(parts[parts.length - 1]!, /…и ещё [\d ]+ поз\. — весь список на листе «Мёртвый сток» в панели\./);
+  });
+});
+
+describe("Пустые состояния и предупреждения (ревью П5b, круг 1)", () => {
+  it("здоровье без прогонов не рисует зелёную галку", () => {
+    // `failedStreak: 0` при пустом журнале значит «сбор ни разу не
+    // запускался», а не «отказов не было»: ✅ над «последний успех: не было»
+    // — ровно те нули как «всё хорошо», против которых §7.
+    const t = formatOurvendHealth({
+      runs: [],
+      failedStreak: 0,
+      lastSuccessAt: null,
+      slotsLagMin: null,
+      salesLagH: null,
+      productSaleLagH: null,
+      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, note: null },
+    }).join("\n");
+    assert.match(t, /Прогонов сбора за период нет — здоровье не оценить/);
+    assert.ok(!t.includes("✅ Отказов подряд нет"));
+    assert.ok(!t.includes("Прогоны (0)"));
+  });
+
+  it("лаг, которого нет в ответе Core, читается как «снимков нет»", () => {
+    // Форма §6 спеки не обещает `productSaleLagH`. Строгое `=== null`
+    // печатало бы «витрина (product_sale) — не число ч» — отчёт о свежести,
+    // который сам себя не понял.
+    const { productSaleLagH: _нет, ...без } = ЗДОРОВЬЕ;
+    const t = formatOurvendHealth(без as OurvendHealth).join("\n");
+    assert.match(t, /витрина \(product_sale\) — снимков нет/);
+    assert.ok(!t.includes("не число"));
+    assert.ok(!t.includes("undefined"));
+  });
+
+  it("склонение отказов: 1 отказ, 3 отказа, 12 отказов", () => {
+    assert.equal(сущ(1, "отказ", "отказа", "отказов"), "отказ");
+    assert.equal(сущ(3, "отказ", "отказа", "отказов"), "отказа");
+    assert.equal(сущ(12, "отказ", "отказа", "отказов"), "отказов");
+    const t = formatOurvendHealth({ ...ЗДОРОВЬЕ, failedStreak: 3 }).join("\n");
+    assert.match(t, /3 отказа подряд/);
+  });
+
+  it("момент без запятой между датой и временем", () => {
+    // В строке, где поля разделены «·», запятая читается как ещё один
+    // разделитель.
+    assert.match(formatOurvendHealth(ЗДОРОВЬЕ).join("\n"), /Последний успех: \d{2}\.\d{2} \d{2}:\d{2}\./);
+  });
+
+  it("товар без себестоимости не читается как 100 % маржи", () => {
+    const строка = товарСтрока({
+      product: "TUC Sour cream",
+      qty: 4,
+      revenue: 60_000,
+      cogs: 0,
+      margin: 60_000,
+      pct: 100,
+      unknownUnits: 4,
+      low: false,
+    });
+    assert.match(строка, /без себестоимости 4 шт/);
+    assert.match(formatMargin(МАРЖА_ПРОД).join("\n"), /TUC Sour cream:.*без себестоимости 4 шт/);
+  });
+
+  it("низкомаржинальные не печатаются дважды: топ и «ниже порога» не пересекаются", () => {
+    const слабые = ТОВАРЫ_OLMA.map((p) => ({ ...p, low: true }));
+    const t = formatMargin({ ...МАРЖА_ПРОД, products: слабые }).join("\n");
+    // Короткий каталог (на проде в окне бывает и три позиции) давал два
+    // одинаковых списка подряд под разными заголовками.
+    assert.equal(t.match(/• Fanta:/g)?.length, 1);
+    assert.ok(!t.includes("Ниже 15 %"), "весь список уже показан в топе");
+  });
+
+  it("отрицательные деньги — типографский минус, как «−9 шт» и «(−20 %)» рядом", () => {
+    assert.equal(RU(-5_000), "−5 000");
+    const убыток = ТОВАРЫ_OLMA.map((p) => ({ ...p, margin: -5_000, revenue: 10_000, cogs: 15_000, pct: -50 }));
+    assert.match(formatMargin({ ...МАРЖА_ПРОД, products: убыток }).join("\n"), /маржа −5 000/);
+  });
+
+  it("«посчитано не всё» приходит хвостом и без повторов", () => {
+    const warnings: AnalyticsWarning[] = [
+      { code: "stock_missing", message: "Остатка на последний день окна нет: Olma (2508160376)." },
+      { code: "stock_missing", message: "Остатка на последний день окна нет: Olma (2508160376)." },
+      { code: "no_sales", message: "Продаж с 2026-08-04 нет — движение определять не по чему." },
+    ];
+    const t = formatDeadStock({ ...МЁРТВЫЙ_ПРОД, warnings }).join("\n");
+    assert.match(t, /Посчитано не всё:/);
+    assert.equal(t.match(/Остатка на последний день окна нет/g)?.length, 1);
+    assert.match(t, /Продаж с 2026-08-04 нет/);
+  });
+
+  it("предупреждение, которое отчёт уже сказал своей строкой, не повторяется", () => {
+    // Ради этого у предупреждений есть КОД, а не только текст: владелец не
+    // должен читать одно и то же дважды — в теле отчёта и в хвосте.
+    const t = formatDeadStock({
+      ...МЁРТВЫЙ_ПРОД,
+      warnings: [{ code: "unknown_cost", message: "Без закупочной цены 1 позиц." }],
+    }).join("\n");
+    assert.match(t, /цена закупки неизвестна/);
+    assert.ok(!t.includes("Без закупочной цены 1 позиц."));
+    assert.ok(!t.includes("Посчитано не всё"));
+  });
+
+  it("пустой мёртвый сток не утверждает «двигалось всё», когда продаж не было", () => {
+    const t = formatDeadStock({
+      days: 21,
+      since: "2026-08-04",
+      warehouse: [],
+      machines: [],
+      totalValue: 0,
+      noPriceCount: 0,
+      warnings: [{ code: "no_sales", message: "Продаж с 2026-08-04 нет — движение определять не по чему." }],
+    }).join("\n");
+    assert.match(t, /Продаж с 2026-08-04 нет/);
+  });
+
+  it("список разрыва витрины тоже имеет потолок", () => {
+    const много = Array.from({ length: 80 }, (_, i) => ({
+      product: `Товар ${i}`,
+      fact: 12_000,
+      reference: 15_000,
+      gap: 3_000,
+      gapPct: 20,
+      qty: 20,
+      lost: 60_000 - i,
+      action: "raise" as const,
+    }));
+    const t = formatPriceGap({ ...ВИТРИНА, rows: много, lostTotal: 4_000_000 }).join("\n");
+    assert.match(t, /…и ещё \d+ поз\. — весь список на листе «Цены» в панели\./);
+  });
+
+  it("сверх потолка частей отчёт говорит, сколько показал и где остальное", () => {
+    // Ветка `capped` за пределом MAX_PARTS достижима только на входе, где
+    // потолков разделов нет (недельная сводка, будущие отчёты): без теста она
+    // тихо ломалась бы при первом же таком применении.
+    const parts = capped("📋 Заголовок", Array.from({ length: 3000 }, (_, i) => `строка отчёта номер ${i}`), "Лист");
+    assert.equal(parts.length, MAX_PARTS);
+    assert.ok(parts.every((ч) => ч.length <= TG_BUDGET));
+    assert.match(parts[parts.length - 1]!, /…показал 11 из \d+ частей — остальное на листе «Лист» в панели\./);
+  });
+
+  it("окно бутстрапа шире окна отчёта — потолок свой (DTO 180)", () => {
+    assert.equal(BOOTSTRAP_DAYS_MAX, 180);
+    assert.equal(parseDays("витрина как факт за 120 дней", 14, BOOTSTRAP_DAYS_MAX), 120);
   });
 });

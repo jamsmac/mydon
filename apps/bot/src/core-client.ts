@@ -396,6 +396,32 @@ export interface SetPriceResult {
  * поле в поле.
  */
 
+/**
+ * Почему в отчёте чего-то нет (`AnalyticsWarning` из `analytics.service.ts`).
+ *
+ * Код важнее текста: по нему бот решает, не сказал ли он то же самое своей
+ * строкой (тогда предупреждение не повторяется), а каждый код чинится в своём
+ * месте — продажи чинит синк, остаток автомата чинит сбор, себестоимость
+ * чинит прайс, эталон витрины чинит слово владельца.
+ */
+export type AnalyticsWarningCode = "no_sales" | "stock_missing" | "unknown_cost" | "no_reference" | "excluded_sales";
+
+export interface AnalyticsWarning {
+  code: AnalyticsWarningCode;
+  message: string;
+}
+
+/**
+ * Хвост «посчитано не всё» у отчётов аналитики.
+ *
+ * Поле необязательное намеренно: форматтеры зовут и на данных без него
+ * (недельная сводка, фикстуры), а отчёт без предупреждений обязан печататься
+ * как раньше, а не падать.
+ */
+export interface WithWarnings {
+  warnings?: AnalyticsWarning[];
+}
+
 /** Помесячная динамика цен — только для панели (донор `price_dynamics`). */
 export interface MonthlyPrice {
   product: string;
@@ -600,13 +626,13 @@ export class CoreClient {
   // отказом 400, а владельцу нужен отчёт, а не разбор кода ошибки.
 
   /** Маржа по проданному: автомат → товар (R-P5b-3). */
-  vendingMargin(days = 30): Promise<MarginReport> {
-    return this.request<MarginReport>(`/vending/margin?days=${days}`);
+  vendingMargin(days = 30): Promise<MarginReport & WithWarnings> {
+    return this.request<MarginReport & WithWarnings>(`/vending/margin?days=${days}`);
   }
 
   /** Мёртвый сток: что не двигалось за окно — склад и автоматы (R-P5b-4). */
-  vendingDeadStock(days = 21): Promise<DeadStockReport> {
-    return this.request<DeadStockReport>(`/vending/dead-stock?days=${days}`);
+  vendingDeadStock(days = 21): Promise<DeadStockReport & WithWarnings> {
+    return this.request<DeadStockReport & WithWarnings>(`/vending/dead-stock?days=${days}`);
   }
 
   /**
@@ -614,15 +640,15 @@ export class CoreClient {
    * показывает — помесячная динамика читается только на листе панели, но
    * тип ответа один, и врать о нём клиенту незачем.
    */
-  vendingPriceChanges(days = 30): Promise<PriceChangesReport & { monthly: MonthlyPrice[] }> {
-    return this.request<PriceChangesReport & { monthly: MonthlyPrice[] }>(
+  vendingPriceChanges(days = 30): Promise<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings> {
+    return this.request<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings>(
       `/vending/price-changes?days=${days}`,
     );
   }
 
   /** Витрина против эталона владельца: где недобираем (R-P5b-6). */
-  vendingPriceGap(days = 14): Promise<PriceGapReport> {
-    return this.request<PriceGapReport>(`/vending/price-gap?days=${days}`);
+  vendingPriceGap(days = 14): Promise<PriceGapReport & WithWarnings> {
+    return this.request<PriceGapReport & WithWarnings>(`/vending/price-gap?days=${days}`);
   }
 
   /**

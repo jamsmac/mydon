@@ -28,6 +28,7 @@ import {
 import { formatRuleResult, isRuleCommand, parseRuleCommand, ruleCommandHint } from "./product-rules";
 import { formatPurchasePlan, isPlanCommand } from "./purchase-plan";
 import {
+  BOOTSTRAP_DAYS_MAX,
   DEAD_STOCK_DAYS_DEFAULT,
   DEAD_STOCK_DAYS_MAX,
   MARGIN_DAYS_DEFAULT,
@@ -161,6 +162,23 @@ function coreReason(body: string): string {
     // Не JSON — ниже покажем тело как есть.
   }
   return body.slice(0, 200) || "нет подробностей";
+}
+
+/**
+ * Сбой отчёта аналитики словами (П5b).
+ *
+ * 400 — отказ по САМИМ ДАННЫМ (окно вне границ DTO, лишний параметр): повтор
+ * той же фразы не поможет никогда, и «попробуй позже» отправлял бы владельца
+ * ждать впустую. Окна бот зажимает сам под границы DTO Core (1..90 маржа и
+ * витрина, 1..180 мёртвый сток и цены), но границы живут в другом
+ * репозитории кода — если они разойдутся, причина обязана быть названа, а не
+ * спрятана за «попробуй позже».
+ */
+function отчётНеПришёл(что: string, err: unknown): Reply {
+  if (err instanceof CoreError && err.status === 400) {
+    return { text: `Core отверг запрос (${что}): ${coreReason(err.body)}` };
+  }
+  return { text: `Не удалось получить ${что} из MYDON Core. Попробуй ещё раз чуть позже.` };
 }
 
 export async function handleMessage(
@@ -309,7 +327,7 @@ export async function handleMessage(
   if (isSalePriceBootstrapCommand(text)) {
     try {
       const [first, ...more] = formatSalePriceBootstrap(
-        await deps.core.bootstrapVendingSalePrice(parseDays(text, PRICE_GAP_DAYS_DEFAULT, PRICE_GAP_DAYS_MAX)),
+        await deps.core.bootstrapVendingSalePrice(parseDays(text, PRICE_GAP_DAYS_DEFAULT, BOOTSTRAP_DAYS_MAX)),
       );
       return { text: first, more };
     } catch (err) {
@@ -329,7 +347,7 @@ export async function handleMessage(
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка отчёта о витрине:", err);
-      return { text: "Не удалось получить витрину из MYDON Core. Попробуй ещё раз чуть позже." };
+      return отчётНеПришёл("витрину", err);
     }
   }
 
@@ -341,7 +359,7 @@ export async function handleMessage(
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка отчёта о марже:", err);
-      return { text: "Не удалось получить маржу из MYDON Core. Попробуй ещё раз чуть позже." };
+      return отчётНеПришёл("маржу", err);
     }
   }
 
@@ -353,7 +371,7 @@ export async function handleMessage(
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка отчёта о мёртвом стоке:", err);
-      return { text: "Не удалось получить мёртвый сток из MYDON Core. Попробуй ещё раз чуть позже." };
+      return отчётНеПришёл("мёртвый сток", err);
     }
   }
 
@@ -367,7 +385,7 @@ export async function handleMessage(
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка отчёта об изменениях цен:", err);
-      return { text: "Не удалось получить изменения цен из MYDON Core. Попробуй ещё раз чуть позже." };
+      return отчётНеПришёл("изменения цен", err);
     }
   }
 
@@ -380,7 +398,7 @@ export async function handleMessage(
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка сверки OurVend:", err);
-      return { text: "Не удалось получить сверку OurVend из MYDON Core. Попробуй ещё раз чуть позже." };
+      return отчётНеПришёл("сверку OurVend", err);
     }
   }
 
