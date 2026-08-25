@@ -1,5 +1,6 @@
 import { TZ, tashkentDay } from "@mydon/shared";
-import type { ApprovalRow, Briefing } from "./core-client";
+import type { NotifyUrgency } from "@mydon/shared";
+import type { ApprovalRow, Briefing, PendingNotifications } from "./core-client";
 import { cutAt, TG_BUDGET } from "./purchase-plan";
 
 /**
@@ -110,6 +111,27 @@ export interface BriefingNote {
   /** Ключ доставки: `<eventId>:<ruleId>`. Отмечается ПОСЛЕ отправки. */
   key: string;
   text: string;
+}
+
+/**
+ * Сигналы правил нужной срочности из `/rules/pending` — в форму блока.
+ *
+ * Одна функция на все каналы доставки (утро — `briefing`, понедельник —
+ * `weekly`), потому что форма ключа `<eventId>:<ruleId>` обязана совпадать с
+ * тем, что ждёт `POST /rules/ack`: вторая копия этой строки рано или поздно
+ * отметит доставленным не то событие, а отметка необратима.
+ *
+ * `/rules/pending` фильтра по срочности не имеет (только `immediate=1`),
+ * поэтому фильтруем на стороне бота — и каждый канал забирает ТОЛЬКО свою
+ * срочность, иначе один съедал бы сигналы другого.
+ */
+export function pendingNotes(
+  pending: PendingNotifications | null,
+  urgency: NotifyUrgency,
+): BriefingNote[] {
+  return (pending?.notifications ?? [])
+    .filter((n) => n.urgency === urgency)
+    .map((n) => ({ key: `${n.eventId}:${n.ruleId}`, text: n.text }));
 }
 
 /**

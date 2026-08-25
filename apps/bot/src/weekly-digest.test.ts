@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { msUntilWeekly } from "./briefing";
+import { msUntilWeekly, pendingNotes } from "./briefing";
 import type { PersonRow, WeeklyDigest } from "./core-client";
 import {
   formatWeeklyDigest,
   isWeeklyDigestQuery,
   parseWeekArg,
+  WEEKLY_WEEK_HINT,
   weeklyDigestKey,
-  weeklyNotes,
   weeklyRecipients,
 } from "./weekly-digest";
 
@@ -148,6 +148,15 @@ describe("Фраза «итоги недели»", () => {
     assert.equal(isWeeklyDigestQuery("итоги вчера"), false);
   });
 
+  it("дата — не неделя: «2026-08-17» отвергается, а не читается как февраль", () => {
+    // Регрессия: поиск ключа КУСКОМ строки брал из даты «2026-08» и молча
+    // показывал февраль вместо августа. Ошибка на полгода, невидимая ни в
+    // одном числе ответа.
+    assert.deepEqual(parseWeekArg("итоги недели 2026-08-17"), { ok: false });
+    assert.deepEqual(parseWeekArg("итоги недели 17.08.2026"), { ok: false });
+    assert.match(WEEKLY_WEEK_HINT, /2026-34/);
+  });
+
   it("неделя из фразы: валидный ключ берём, мусор не молчим", () => {
     assert.deepEqual(parseWeekArg("итоги недели"), { ok: true });
     assert.deepEqual(parseWeekArg("итоги недели 2026-34"), { ok: true, week: "2026-34" });
@@ -157,12 +166,13 @@ describe("Фраза «итоги недели»", () => {
     assert.deepEqual(parseWeekArg("итоги недели 2026-53"), { ok: true, week: "2026-53" });
     assert.deepEqual(parseWeekArg("итоги недели 2025-53"), { ok: false });
     assert.deepEqual(parseWeekArg("итоги недели 2026-99"), { ok: false });
+    assert.deepEqual(parseWeekArg("недельная сводка за 2026-34"), { ok: true, week: "2026-34" });
   });
 });
 
 describe("Сигналы правил недельной срочности", () => {
-  it("берём только urgency=weekly, ключ — событие и правило", () => {
-    const notes = weeklyNotes({
+  it("берём только запрошенную срочность, ключ — событие и правило", () => {
+    const pending = {
       since: "2026-08-11T00:00:00Z",
       events: 3,
       notifications: [
@@ -170,12 +180,15 @@ describe("Сигналы правил недельной срочности", ()
         { ruleId: "shrink", urgency: "briefing", text: "усушка", eventId: "e2" },
         { ruleId: "sync", urgency: "immediate", text: "сбор стоит", eventId: "e3" },
       ],
-    });
-    assert.deepEqual(notes, [{ key: "e1:sales.drop", text: "📉 Продажи ниже плана" }]);
+    };
+    assert.deepEqual(pendingNotes(pending, "weekly"), [{ key: "e1:sales.drop", text: "📉 Продажи ниже плана" }]);
+    // Каждый канал забирает ТОЛЬКО свою срочность: возьми недельный канал
+    // брифинговые сигналы — утренний брифинг их больше не увидит (ack общий).
+    assert.deepEqual(pendingNotes(pending, "briefing"), [{ key: "e2:shrink", text: "усушка" }]);
   });
 
   it("Core не ответил — пусто, а не падение", () => {
-    assert.deepEqual(weeklyNotes(null), []);
+    assert.deepEqual(pendingNotes(null, "weekly"), []);
   });
 });
 
@@ -232,7 +245,36 @@ describe("Текст недельной сводки", () => {
     const { parts, shownKeys } = formatWeeklyDigest(толстая, [{ key: "e1:sales.drop", text: "📉 Продажи ниже плана" }]);
     assert.equal(shownKeys.length, 0);
     assert.ok(parts.length <= 3);
-    assert.match(parts[parts.length - 1]!, /остальное на листе/);
+    assert.match(parts[parts.length - 1]!, /остальное на вкладке «Снек» в панели/);
+  });
+
+  it("пустых прогонов сбора не выдаём за здоровье", () => {
+    // `failedStreak: 0` при пустом журнале значит «сбор ни разу не
+    // запускался». На ПУСТОЙ неделе это опаснее всего: именно стоящий сбор её
+    // обычно и объясняет, а ✅ увело бы владельца искать причину в продажах.
+    const мёртвыйСбор: WeeklyDigest = {
+      ...ПУСТАЯ_НЕДЕЛЯ,
+      health: {
+        runs: [],
+        failedStreak: 0,
+        lastSuccessAt: null,
+        slotsLagMin: null,
+        salesLagH: null,
+        productSaleLagH: null,
+        parity: { days: 7, ok: false, mismatches: 0, stockOk: false, note: null },
+      },
+    };
+    const t = formatWeeklyDigest(мёртвыйСбор, []).parts.join("\n");
+    assert.match(t, /Прогонов сбора за период нет — здоровье не оценить/);
+    assert.ok(!t.includes("✅"), "зелёной галки над пустым журналом быть не должно");
+    assert.ok(!t.includes("Прогоны (0)"));
+  });
+
+  it("здоровье в сводке — счёт прогонов, свежесть и паритет, а не одна строка", () => {
+    const t = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
+    assert.match(t, /Прогоны \(1\): успешных 1 · частичных 0 · с отказом 0/);
+    assert.match(t, /Свежесть: слоты — 42 мин · продажи — 3 ч/);
+    assert.match(t, /Паритет за 7 дн\.: ✅ сходится/);
   });
 
   it("пустая неделя: сказано «продаж за неделю нет», а не нули", () => {

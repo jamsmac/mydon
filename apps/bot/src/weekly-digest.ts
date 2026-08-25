@@ -1,5 +1,5 @@
 import { isoWeekFromKey } from "@mydon/shared";
-import type { WeekDelta } from "@mydon/shared";
+import type { StaffRole, WeekDelta } from "@mydon/shared";
 import {
   PCT,
   ЗНАК,
@@ -8,11 +8,15 @@ import {
   изменениеСтрока,
   момент,
   мёртваяСтрока,
+  паритетСтрока,
+  прогоныСтрока,
+  свежестьСтрока,
+  состояниеСбора,
   сущ,
   товарСтрока,
 } from "./analytics-brief";
 import { formatBriefingNotes, type BriefingNote } from "./briefing";
-import type { OurvendHealth, PendingNotifications, PersonRow, WeeklyDigest } from "./core-client";
+import type { OurvendHealth, PersonRow, WeeklyDigest } from "./core-client";
 import { RU, TG_BUDGET, chunk } from "./purchase-plan";
 
 /**
@@ -38,8 +42,17 @@ import { RU, TG_BUDGET, chunk } from "./purchase-plan";
  *    поэтому раздел здоровья печатается и на пустой неделе тоже.
  */
 
-/** Роли, которым положена недельная сводка. `admin` в MYDON нет — есть `owner`. */
-export const WEEKLY_ROLES: readonly string[] = ["owner", "manager"];
+/**
+ * Роли, которым положена недельная сводка. `admin` в MYDON нет — есть `owner`.
+ *
+ * Тип `StaffRole`, а не `string`: описка в роли скомпилировалась бы и тихо
+ * оставила рассылку без получателей — отказ, который виден только по
+ * `console.warn` в логах, то есть на практике не виден вовсе.
+ */
+export const WEEKLY_ROLES: readonly StaffRole[] = ["owner", "manager"];
+
+/** То же множество для проверки: `roles` из Core приходит свободными строками. */
+const РОЛИ_РАССЫЛКИ: ReadonlySet<string> = new Set<string>(WEEKLY_ROLES);
 
 /**
  * Как далеко назад смотрим за сигналами `urgency:"weekly"`.
@@ -81,24 +94,36 @@ export function isWeeklyDigestQuery(text: string): boolean {
 /** Разбор аргумента недели: `ok:false` — ключ есть, но такой недели не бывает. */
 export type WeekArg = { ok: true; week?: string } | { ok: false };
 
+/** Хвост фразы после команды: то, что владелец считает аргументом. */
+const ХВОСТ = /^(итоги\s+недели|недельн\S*(\s+сводк\S*)?)\s*:?\s*(за\s+)?/i;
+/** Аргумент-неделя целиком: `2026-34`. Ровно вся строка, а не кусок из неё. */
+const КЛЮЧ_НЕДЕЛИ = /^(\d{4})\s*-\s*(\d{1,2})$/;
+
 /**
- * «итоги недели 2026-34» → ключ ISO-недели; без ключа — прошлая неделя.
+ * «итоги недели 2026-34» → ключ ISO-недели; без аргумента — прошлая неделя.
  *
- * Ключ проверяется здесь, а не в Core: 53-я неделя есть не в каждом году (в
- * 2026-м есть, в 2025-м нет), и на `2025-53` Core ответил бы 400 — бот сказал
- * бы «попробуй позже», и владелец ждал бы сервер, хотя чинить надо было
- * фразу. Та же причина, что у `parseDays`.
+ * Аргумент разбирается ЦЕЛИКОМ, а не поиском ключа внутри строки. Поиск
+ * куском принимал «итоги недели 2026-08-17» за неделю `2026-08` и молча
+ * показывал ФЕВРАЛЬ вместо августа: дата и ключ недели выглядят почти
+ * одинаково, а ошибка на полгода не видна ни в одном числе ответа.
+ *
+ * Сам ключ проверяется здесь, а не в Core: 53-я неделя есть не в каждом году
+ * (в 2026-м есть, в 2025-м нет), и на `2025-53` Core ответил бы 400 — бот
+ * сказал бы «попробуй позже», и владелец ждал бы сервер, хотя чинить надо
+ * было фразу. Та же причина, что у `parseDays`.
  */
 export function parseWeekArg(text: string): WeekArg {
-  const m = /(\d{4})\s*-\s*(\d{1,2})(?!\d)/.exec(text.trim());
-  if (!m) return { ok: true };
+  const хвост = text.trim().replace(ХВОСТ, "").trim();
+  if (хвост === "") return { ok: true };
+  const m = КЛЮЧ_НЕДЕЛИ.exec(хвост);
+  if (!m) return { ok: false };
   const key = `${m[1]}-${m[2].padStart(2, "0")}`;
   return isoWeekFromKey(key) ? { ok: true, week: key } : { ok: false };
 }
 
 /** Подсказка, когда неделя во фразе не разобралась. */
 export const WEEKLY_WEEK_HINT =
-  "Неделя задаётся ключом ISO: «итоги недели 2026-34» — год и номер недели. " +
+  "Укажи неделю как 2026-34 — год и номер ISO-недели, а не дату: «итоги недели 2026-34». " +
   "Без ключа покажу прошлую неделю.";
 
 // ── Получатели и дедуп ──────────────────────────────────────────────────────
@@ -118,7 +143,7 @@ export function weeklyRecipients(people: readonly PersonRow[]): PersonRow[] {
     (p) =>
       p.active === "yes" &&
       (p.tgChatId ?? "").trim() !== "" &&
-      (p.roles ?? []).some((r) => WEEKLY_ROLES.includes(r)),
+      (p.roles ?? []).some((r) => РОЛИ_РАССЫЛКИ.has(r)),
   );
 }
 
@@ -131,19 +156,6 @@ export function weeklyRecipients(people: readonly PersonRow[]): PersonRow[] {
  */
 export function weeklyDigestKey(week: string, personId: string): string {
   return `weekly-digest:${week}:${personId}`;
-}
-
-/**
- * Сигналы правил недельной срочности из `/rules/pending`.
- *
- * Общая для планировщика и команды: фильтр по `urgency` и форма ключа
- * (`<eventId>:<ruleId>`) обязаны совпадать — по этому ключу Core отмечает
- * доставку, и вторая копия правила рано или поздно отметила бы не то.
- */
-export function weeklyNotes(pending: PendingNotifications | null): BriefingNote[] {
-  return (pending?.notifications ?? [])
-    .filter((n) => n.urgency === "weekly")
-    .map((n) => ({ key: `${n.eventId}:${n.ruleId}`, text: n.text }));
 }
 
 // ── Текст ───────────────────────────────────────────────────────────────────
@@ -184,18 +196,23 @@ function машина(m: WeeklyDigest["machines"][number]): string {
   return `• ${m.name}: выручка ${RU(m.revenue)} · маржа ${RU(m.margin)} (${PCT(m.pct)}) · ${RU(m.qty)} шт`;
 }
 
-/** Здоровье сбора одной строкой: подробности — по команде «сверка» (R-P5b-8). */
+/**
+ * Здоровье сбора в сводке: состояние, счёт прогонов, свежесть, паритет.
+ *
+ * Все четыре строки — общие форматтеры «сверки» (`analytics-brief.ts`), а не
+ * их пересказ. Своя формулировка разошлась бы с отчётом ровно там, где это
+ * дороже всего: пустой журнал прогонов при `failedStreak: 0` читался бы как
+ * «✅ отказов нет», хотя сбор просто ни разу не запускался, — а пустая неделя
+ * чаще всего именно этим и объясняется.
+ */
 function здоровье(h: OurvendHealth): string[] {
-  const свежесть = h.slotsLagMin === null ? "снимков нет" : `${RU(h.slotsLagMin)} мин`;
-  const состояние =
-    h.failedStreak > 0
-      ? `❌ ${RU(h.failedStreak)} ${сущ(h.failedStreak, "отказ", "отказа", "отказов")} подряд`
-      : "✅ отказов подряд нет";
+  const прогоны = прогоныСтрока(h.runs);
   return [
     "",
-    `🩺 Сбор OurVend: ${состояние} · последний успех ${момент(h.lastSuccessAt)} · слоты ${свежесть}`,
-    `Паритет за ${h.parity.days} дн.: ${h.parity.ok ? "✅ сходится" : `❌ расхождений ${RU(h.parity.mismatches)}`}` +
-      ` · остатки ${h.parity.stockOk ? "✅" : "❌"}${h.parity.note ? ` · ${h.parity.note}` : ""}`,
+    `🩺 Сбор OurVend: ${состояниеСбора(h)} · последний успех ${момент(h.lastSuccessAt)}`,
+    ...(прогоны ? [прогоны] : []),
+    свежестьСтрока(h),
+    паритетСтрока(h.parity),
   ];
 }
 
@@ -319,5 +336,5 @@ export function formatWeeklyDigest(d: WeeklyDigest, notes: readonly BriefingNote
   if (parts.length <= WEEKLY_MAX_PARTS) return { parts, shownKeys: block?.shownKeys ?? [] };
   // Не влезло: печатаем обрезанную сводку и НЕ отмечаем ни одного сигнала —
   // срезан именно их хвост, а отметка необратима.
-  return { parts: capped(title, lines, "Снек", WEEKLY_MAX_PARTS), shownKeys: [] };
+  return { parts: capped(title, lines, "Снек", WEEKLY_MAX_PARTS, "вкладке"), shownKeys: [] };
 }

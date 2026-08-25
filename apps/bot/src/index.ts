@@ -18,14 +18,9 @@ import {
   msUntilWeekly,
   notesBudget,
   notesToAck,
+  pendingNotes,
 } from "./briefing";
-import {
-  WEEKLY_NOTES_WINDOW_MS,
-  formatWeeklyDigest,
-  weeklyDigestKey,
-  weeklyNotes,
-  weeklyRecipients,
-} from "./weekly-digest";
+import { deliverWeeklyDigest } from "./weekly-delivery";
 import { buildDigest, digestKey } from "./staff-digest";
 import { CoreClient, type PersonRow } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
@@ -436,9 +431,7 @@ async function main(): Promise<void> {
       globerent,
     );
     const staffLine = staffActions ? summarizeActions(staffActions) : null;
-    const notes = (ruleNotes?.notifications ?? [])
-      .filter((n) => n.urgency === "briefing")
-      .map((n) => ({ key: `${n.eventId}:${n.ruleId}`, text: n.text }));
+    const notes = pendingNotes(ruleNotes, "briefing");
     // Бюджет считается по УЖЕ собранным частям: сколько бы ни было сигналов,
     // сводка и итоги дня уходят целиком, а режется хвост сигналов.
     const notesBlock = formatBriefingNotes(notes, 12, notesBudget(briefingText, staffLine));
@@ -548,55 +541,24 @@ async function main(): Promise<void> {
    * Позже утреннего брифинга (07:30) намеренно: сводка за неделю — это разбор,
    * а не тревога дня, и она не должна вытеснять брифинг из верха чата.
    *
-   * Получатели — по РОЛЯМ (`owner`/`manager`), а не по allowlist владельца:
-   * недельный разбор адресован и менеджеру, у которого своего чата в allowlist
-   * нет. Ключ доставки занимается ПЕРЕД отправкой и по человеку.
+   * Сама рассылка живёт в `weekly-delivery.ts`: каждый её шаг необратим
+   * (занятый ключ, отмеченный сигнал), и проверяться она обязана тестами, а не
+   * понедельником. Здесь остаётся только расписание и связывание с Telegram.
    */
-  const sendWeeklyDigest = async (): Promise<void> => {
-    const [digest, people, pending] = await Promise.all([
-      deps.core.vendingWeeklyDigest(),
-      deps.core.people(),
-      // Сигналы — деградируемый блок: их сбой не должен стоить всей сводки.
-      deps.core.briefingNotifications(new Date(Date.now() - WEEKLY_NOTES_WINDOW_MS)).catch(() => null),
-    ]);
-    const { parts, shownKeys } = formatWeeklyDigest(digest, weeklyNotes(pending));
-    const recipients = weeklyRecipients(people);
-    if (recipients.length === 0) {
-      // Молчать нельзя: пустой список получателей выглядит как исправная
-      // рассылка, а на деле означает, что роли в карточках не проставлены и
-      // сводку не получает НИКТО.
-      console.warn(`Недельная сводка ${digest.week}: получателей нет — ни у кого нет роли owner/manager с чатом.`);
-      return;
-    }
-    let доставлен = false;
-    for (const p of recipients) {
-      // Ключ занимается ПЕРЕД отправкой и ПО ЧЕЛОВЕКУ: перезапуск бота в
-      // понедельник 08:05:30 не должен слать вторую сводку, а сбой чата одного
-      // получателя не должен лишать сводки остальных.
-      if (!(await deps.core.claimNotification(weeklyDigestKey(digest.week, p.id)))) continue;
-      try {
-        for (const часть of parts) await tg.sendMessage(Number(p.tgChatId), часть);
-        доставлен = true;
-      } catch (err) {
-        console.error(`Недельная сводка не доставлена (${p.name}):`, err);
-      }
-    }
-    // Отметка — ПОСЛЕ отправки и только за показанные строки: отмеченное Core
-    // не отдаст никогда (см. formatWeeklyDigest, правило 2).
-    if (доставлен && shownKeys.length > 0) {
-      await deps.core
-        .ackNotifications(shownKeys)
-        .catch((err: unknown) => console.error("Отметку недельных сигналов не сохранить:", err));
-    }
-  };
-
   const scheduleWeekly = (): void => {
     setTimeout(() => {
       void (async () => {
         // Core не ответил во все три попытки — ключ недели НЕ занят, сводка
         // просто не ушла. В следующий понедельник придёт уже новая неделя:
         // прошлую можно поднять руками командой «итоги недели 2026-34».
-        await withRetries("Недельная сводка не отправлена", sendWeeklyDigest);
+        await withRetries("Недельная сводка не отправлена", async () => {
+          await deliverWeeklyDigest({
+            core: deps.core,
+            send: async (chatId, text) => {
+              await tg.sendMessage(chatId, text);
+            },
+          });
+        });
         scheduleWeekly();
       })();
     }, msUntilWeekly());

@@ -245,13 +245,22 @@ function предупреждения(warnings: AnalyticsWarning[] | undefined, 
  *
  * `max` — для недельной сводки (R-P5b-7): её никто не спрашивал, она приходит
  * сама в понедельник утром, и двенадцать сообщений подряд в этом случае
- * читаются как поломка бота, а не как отчёт.
+ * читаются как поломка бота, а не как отчёт. `вид` — потому что в панели есть
+ * и листы отчётов («Маржа», «Мёртвый сток», «Цены»), и вкладки разделов
+ * («Снек»): отправить владельца на несуществующий лист — тот же обман, что
+ * промолчать об обрезке.
  */
-export function capped(title: string, lines: string[], лист: string, max = MAX_PARTS): string[] {
+export function capped(
+  title: string,
+  lines: string[],
+  лист: string,
+  max = MAX_PARTS,
+  вид: "листе" | "вкладке" = "листе",
+): string[] {
   const parts = chunk(title, lines);
   if (parts.length <= max) return parts;
   const kept = parts.slice(0, max - 1);
-  kept.push(`…показал ${max - 1} из ${parts.length} частей — остальное на листе «${лист}» в панели.`);
+  kept.push(`…показал ${max - 1} из ${parts.length} частей — остальное на ${вид} «${лист}» в панели.`);
   return kept;
 }
 
@@ -546,6 +555,61 @@ const лагМин = (v: number | null | undefined): string =>
 const лагЧ = (v: number | null | undefined): string => (v == null ? "снимков нет" : `${RU(v)} ч`);
 
 /**
+ * Состояние сбора одной фразой: пусто / серия отказов / отказов нет.
+ *
+ * НИ ОДНОГО ПРОГОНА — ЭТО НЕ «ЗДОРОВ». Зелёная галка над «последний успех: не
+ * было» — ровно те «нули как всё хорошо», против которых §7: серия отказов
+ * равна нулю просто потому, что сбор ни разу не запускался.
+ *
+ * Экспортируется ради недельной сводки (R-P5b-7): вторая формулировка того же
+ * состояния разошлась бы с этой ровно на пустых прогонах — там, где ошибка и
+ * стоит дороже всего (пустая неделя чаще всего и означает стоящий сбор).
+ */
+export function состояниеСбора(h: OurvendHealth): string {
+  if (h.runs.length === 0) {
+    return "❓ Прогонов сбора за период нет — здоровье не оценить: сбор не запускался или журнал прогонов пуст";
+  }
+  if (h.failedStreak > 0) {
+    return (
+      `❌ ${RU(h.failedStreak)} ${сущ(h.failedStreak, "отказ", "отказа", "отказов")} подряд — ` +
+      "сбор стоит, свежих данных нет"
+    );
+  }
+  return "✅ Отказов подряд нет";
+}
+
+/** Счёт прогонов. `null` — журнал пуст: «Прогоны (0)» читалось бы как результат. */
+export function прогоныСтрока(runs: OurvendHealth["runs"]): string | null {
+  if (runs.length === 0) return null;
+  const успешных = runs.filter((r) => r.status === "success").length;
+  const частичных = runs.filter((r) => r.status === "partial").length;
+  const отказов = runs.filter((r) => r.status === "failed").length;
+  return `Прогоны (${runs.length}): успешных ${успешных} · частичных ${частичных} · с отказом ${отказов}`;
+}
+
+/** Свежесть снимков: слоты, продажи, витрина. Отсутствующий лаг — «снимков нет». */
+export function свежестьСтрока(h: OurvendHealth): string {
+  return (
+    `Свежесть: слоты — ${лагМин(h.slotsLagMin)} · продажи — ${лагЧ(h.salesLagH)} · ` +
+    `витрина (product_sale) — ${лагЧ(h.productSaleLagH)}`
+  );
+}
+
+/**
+ * Паритет с дорожкой OurVend одной строкой.
+ *
+ * Общая для «сверки» и недельной сводки: посимвольная копия этой строки в
+ * двух местах разъехалась бы не по виду, а по смыслу — «✅ сходится» в одном
+ * отчёте и «расхождений 3» в другом об одних и тех же сутках.
+ */
+export function паритетСтрока(p: OurvendHealth["parity"]): string {
+  return (
+    `Паритет за ${p.days} дн.: ${p.ok ? "✅ сходится" : `❌ расхождений ${RU(p.mismatches)}`} · ` +
+    `остатки ${p.stockOk ? "✅" : "❌"}${p.note ? ` · ${p.note}` : ""}`
+  );
+}
+
+/**
  * «сверка» — здоровье сбора OurVend и паритет одним сообщением (R-P5b-8).
  *
  * Живого запроса к OurVend из бота нет (коннектор живёт в агентах по крону),
@@ -555,43 +619,11 @@ const лагЧ = (v: number | null | undefined): string => (v == null ? "сни�
  */
 export function formatOurvendHealth(h: OurvendHealth): string[] {
   const title = "🩺 Сверка снек-автоматов (OurVend): сбор и паритет";
-  const lines: string[] = [];
+  const lines: string[] = [`${состояниеСбора(h)}. Последний успех: ${момент(h.lastSuccessAt)}.`];
 
-  // НИ ОДНОГО ПРОГОНА — ЭТО НЕ «ЗДОРОВ». Зелёная галка над «последний успех:
-  // не было» — ровно те «нули как всё хорошо», против которых §7: серия
-  // отказов равна нулю просто потому, что сбор ни разу не запускался.
-  if (h.runs.length === 0) {
-    lines.push(
-      "❓ Прогонов сбора за период нет — здоровье не оценить: сбор не запускался или журнал прогонов пуст.",
-      `Последний успех: ${момент(h.lastSuccessAt)}.`,
-    );
-  } else if (h.failedStreak > 0) {
-    lines.push(
-      `❌ ${RU(h.failedStreak)} ${сущ(h.failedStreak, "отказ", "отказа", "отказов")} подряд — ` +
-        `сбор стоит, свежих данных нет. Последний успех: ${момент(h.lastSuccessAt)}.`,
-    );
-  } else {
-    lines.push(`✅ Отказов подряд нет. Последний успех: ${момент(h.lastSuccessAt)}.`);
-  }
-
-  const успешных = h.runs.filter((r) => r.status === "success").length;
-  const частичных = h.runs.filter((r) => r.status === "partial").length;
-  const отказов = h.runs.filter((r) => r.status === "failed").length;
-  if (h.runs.length > 0) {
-    lines.push(
-      `Прогоны (${h.runs.length}): успешных ${успешных} · частичных ${частичных} · с отказом ${отказов}`,
-    );
-  }
-  lines.push(
-    `Свежесть: слоты — ${лагМин(h.slotsLagMin)} · продажи — ${лагЧ(h.salesLagH)} · ` +
-      `витрина (product_sale) — ${лагЧ(h.productSaleLagH)}`,
-  );
-
-  const p = h.parity;
-  lines.push(
-    `Паритет за ${p.days} дн.: ${p.ok ? "✅ сходится" : `❌ расхождений ${RU(p.mismatches)}`} · ` +
-      `остатки ${p.stockOk ? "✅" : "❌"}${p.note ? ` · ${p.note}` : ""}`,
-  );
+  const прогоны = прогоныСтрока(h.runs);
+  if (прогоны) lines.push(прогоны);
+  lines.push(свежестьСтрока(h), паритетСтрока(h.parity));
 
   const проблемные = h.runs.filter((r) => r.status !== "success" && r.error).slice(0, RUNS_SHOWN);
   if (проблемные.length > 0) {

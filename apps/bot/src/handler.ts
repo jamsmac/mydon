@@ -1,7 +1,13 @@
 import { answer, type ContextSearch, type LlmResolver } from "@mydon/assistant";
 import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
 import { DOMAIN_LABELS } from "@mydon/shared";
-import { approvalKeyboard, collectGloberentSignals, formatApproval, formatBriefing } from "./briefing";
+import {
+  approvalKeyboard,
+  collectGloberentSignals,
+  formatApproval,
+  formatBriefing,
+  pendingNotes,
+} from "./briefing";
 import { CoreError, type CoreClient } from "./core-client";
 import {
   formatCashAck,
@@ -65,7 +71,6 @@ import {
   formatWeeklyDigest,
   isWeeklyDigestQuery,
   parseWeekArg,
-  weeklyNotes,
 } from "./weekly-digest";
 import { formatSalesSummary, isSalesQuery } from "./sales-brief";
 import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake";
@@ -479,13 +484,19 @@ export async function handleMessage(
     try {
       const [digest, pending] = await Promise.all([
         deps.core.vendingWeeklyDigest(arg.week),
-        // Сигналы — деградируемый блок: их сбой не должен стоить сводки.
-        deps.core.briefingNotifications(new Date(Date.now() - WEEKLY_NOTES_WINDOW_MS)).catch(() => null),
+        // Сигналы — деградируемый блок: их сбой не должен стоить сводки. Но и
+        // молчать о нём нельзя: недельный канал — единственная доставка
+        // `urgency:"weekly"`, и вечно падающий `/rules/pending` неотличим от
+        // «сигналов нет».
+        deps.core.briefingNotifications(new Date(Date.now() - WEEKLY_NOTES_WINDOW_MS)).catch((err: unknown) => {
+          console.error("Недельные сигналы правил не получены из Core:", err);
+          return null;
+        }),
       ]);
       // Отметки о доставке здесь НЕТ намеренно: `ack` необратим, а команду
       // владелец может повторить хоть десять раз. Пусть сигнал ещё раз придёт
       // в понедельник — это дешевле, чем потерять его на чтении.
-      const [first, ...more] = formatWeeklyDigest(digest, weeklyNotes(pending)).parts;
+      const [first, ...more] = formatWeeklyDigest(digest, pendingNotes(pending, "weekly")).parts;
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка недельной сводки:", err);
