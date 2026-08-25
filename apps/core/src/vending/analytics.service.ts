@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { and, eq, gt, gte, inArray, lte } from "drizzle-orm";
+import { and, eq, gt, gte, inArray, lte, notInArray } from "drizzle-orm";
 import { event, machineStock, sale, vendingPurchaseOrder, vendingRefillEvent, vendingStock } from "@mydon/db";
 import {
   deadStock,
@@ -14,9 +14,11 @@ import {
   tashkentDayStart,
   tashkentDayStartOf,
   weightedCost,
+  type AnalyticsWarning,
   type CostIndex,
   type DeadStockReport,
   type MarginReport,
+  type MonthlyPrice,
   type PriceChangesReport,
   type PriceGapReport,
   type PurchasePriceEvent,
@@ -25,8 +27,8 @@ import {
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
-import { REPORT_CACHE_MS } from "./shrinkage.service";
-import { VendingService } from "./vending.service";
+import { ReportCache, зажать, перечислить } from "./report-cache";
+import { notInServiceSerialForms, SALE_PRICE_FACT_DAYS, VendingService, type InServicePark } from "./vending.service";
 
 /**
  * Аналитика снек-контура (П5b): маржа, мёртвый сток, изменения цен, разрыв
@@ -44,12 +46,14 @@ import { VendingService } from "./vending.service";
  * 1. Деньги — только из `sale` (R-P5b-1). `product_sale`/`machine_sale` — это
  *    скользящее семидневное окно кабинета: сумма по `captured_at` даёт 37 613
  *    штук за 30 дней против честных 1047 в `sale`, то есть завышение в 36 раз.
- *    Ни один отчёт этого модуля их не читает.
+ *    Ни один отчёт этого модуля их не читает, и тест это стережёт.
  *
- * 2. Автоматы — только `machine_card.status = 'in_service'`. На проде склады
- *    SKLAD 4S/5S/6S отдают слоты-заглушки (7 960 «единиц», 45 млн сум остатка),
- *    а один раз SKLAD 4S ещё и «продал» 1 шт Moxito на 12 000 сум. Без фильтра
- *    мёртвый сток врёт на порядки, а витринная цена дня получает выброс.
+ * 2. Автоматы — «в строю ОТ ДАННЫХ» (`VendingService.inServicePark`): мимо
+ *    отчёта идёт только тот, про кого карточка прямо говорит `status ≠
+ *    in_service`. На проде склады SKLAD 4S/5S/6S отдают слоты-заглушки (7 960
+ *    «единиц», 45 млн сум остатка), а один раз SKLAD 4S ещё и «продал» 1 шт
+ *    Moxito на 12 000 сум. Автомат без карточки при этом остаётся в деньгах:
+ *    «карточку не завели» — не то же самое, что «снят со службы».
  *    Выброшенные продажи не теряются молча: маржа называет их в `excluded`,
  *    а предупреждение `excluded_sales` говорит об этом словами.
  *
@@ -79,8 +83,12 @@ export const DEAD_STOCK_DAYS_MAX = 180;
 /** Окно лент изменения цен: пол-года хватает, чтобы увидеть сезонный подъём. */
 export const PRICE_CHANGES_DAYS_DEFAULT = 30;
 export const PRICE_CHANGES_DAYS_MAX = 180;
-/** Окно факта витрины — то же, что у гейта команды «цена продажи» (R-P5b-6). */
-export const PRICE_GAP_DAYS_DEFAULT = 14;
+/**
+ * Окно разрыва витрины — ТО ЖЕ, что у гейта команды «цена продажи»
+ * (`SALE_PRICE_FACT_DAYS`), и своей константы здесь нет намеренно: разъедься
+ * они на сутки, владелец получал бы «цена принята» от бота и строку разрыва в
+ * отчёте про то же самое число (R-P5b-6).
+ */
 export const PRICE_GAP_DAYS_MAX = 90;
 /** Пороги и окна из настроек (R-P5b-11); числа повторяют `config-spec.ts`. */
 export const PRICE_CHANGE_PCT_FALLBACK = 5;
@@ -94,29 +102,21 @@ export const PRICE_EVENT_TYPES = ["vending.price_changed", "vending.purchase_pri
 const DAY_MS = 86_400_000;
 
 /**
- * Почему в отчёте чего-то нет. Коды не сводятся к одному «нет данных»: каждый
- * чинится В СВОЁМ МЕСТЕ — продажи чинит синк, остаток автомата чинит сбор,
- * себестоимость чинит прайс, эталон витрины чинит слово владельца, а строки
- * не в строю чинит карточка автомата.
+ * Откуда взялась себестоимость КОНКРЕТНОГО товара (R-P5b-2): взвешенная по
+ * принятым накладным окна, цена карточки прайса или «цены нет».
+ *
+ * Признак товарный, а не общий на отчёт: одна принятая накладная переключила бы
+ * общий признак в «по накладным» для всех 52 товаров, из которых 51 остался бы
+ * на цене карточки. Поле заведено ровно ради этого вопроса — и соврало бы
+ * ровно в тот момент, когда на него впервые посмотрят.
  */
-export type AnalyticsWarningCode = "no_sales" | "stock_missing" | "unknown_cost" | "no_reference" | "excluded_sales";
+export type CostSource = "orders" | "price" | "unknown";
 
-export interface AnalyticsWarning {
-  code: AnalyticsWarningCode;
-  message: string;
-}
-
-/**
- * Помесячная динамика цен — донорский `price_dynamics`, его просит ТОЛЬКО
- * панель (R-P5b-5). `retail` — средняя витринная за месяц (Σamount/Σqty),
- * `purchase` — средняя из наблюдений закупки. `null` — не «ноль сум», а «в
- * этом месяце такой цены не наблюдали».
- */
-export interface MonthlyPrice {
-  product: string;
-  month: string;
-  retail: number | null;
-  purchase: number | null;
+export interface CostIndexResult {
+  cost: CostIndex;
+  sourceOf: (product: string) => CostSource;
+  /** Сколько товаров прайса стоит на каждой опоре — строка «откуда цифры» для витрины. */
+  counts: { orders: number; price: number };
 }
 
 export type MarginResponse = MarginReport & { warnings: AnalyticsWarning[] };
@@ -124,13 +124,20 @@ export type DeadStockResponse = DeadStockReport & { warnings: AnalyticsWarning[]
 export type PriceChangesResponse = PriceChangesReport & { monthly: MonthlyPrice[]; warnings: AnalyticsWarning[] };
 export type PriceGapResponse = PriceGapReport & { warnings: AnalyticsWarning[] };
 
-/** Строка продаж окна вместе с исходным серийником — до фильтра «в строю». */
+/** Строка продаж окна вместе с каноном серийника — до фильтра «в строю». */
 interface ПродажаБазы extends SaleRow {
   canonSerial: string;
 }
 
+/** Продажи окна и парк, собранный ПО НИМ (см. `inServicePark`). */
+interface ПродажиОкна {
+  строки: ПродажаБазы[];
+  парк: InServicePark;
+}
+
 /**
- * Справочник прогона: канон имён, прайс и парк. Читается ОДИН раз на отчёт.
+ * Справочник прогона: канон имён, прайс и реестр автоматов. Читается ОДИН раз
+ * на отчёт.
  *
  * Два похода за теми же картами — это не только лишние запросы: между ними
  * владелец успевает переименовать товар или снять автомат со службы, и отчёт
@@ -138,21 +145,17 @@ interface ПродажаБазы extends SaleRow {
  */
 interface Справочник {
   canonOf: (raw: string) => string;
-  /** Строки прайса: закупочная цена и эталон витрины уже числами. */
-  products: { name: string; purchasePrice: number | null; salePrice: number | null }[];
-  /** Канон серийника → имя автомата, ТОЛЬКО в строю. */
-  inService: Map<string, string>;
-  /** Канон серийника → имя, для тех, кого фильтр выбросил (объяснить владельцу). */
-  outOfService: Map<string, string>;
+  /** Строки прайса: закупочная цена, эталон витрины и «в продаже ли» уже разобраны. */
+  products: { name: string; purchasePrice: number | null; salePrice: number | null; isActive: boolean }[];
+  registry: { notInService: Map<string, { name: string; status: string }>; nameBySerial: Map<string, string> };
+  /** Сырые формы серийников не в строю — ими выборка сужается прямо в SQL. */
+  notInServiceForms: string[];
 }
 
 @Injectable()
 export class AnalyticsService {
   private readonly logger = new Logger(AnalyticsService.name);
-  /** Готовый отчёт по ключу «отчёт|окно|сутки» — см. `REPORT_CACHE_MS`. */
-  private readonly кеш = new Map<string, { at: number; отчёт: unknown }>();
-  /** Считающийся прямо сейчас отчёт того же ключа (single-flight). */
-  private readonly вПолёте = new Map<string, Promise<unknown>>();
+  private readonly кеш = new ReportCache();
 
   constructor(
     @Inject(DB) private readonly db: Db,
@@ -168,7 +171,7 @@ export class AnalyticsService {
    */
   async margin(days = MARGIN_DAYS_DEFAULT, now = new Date()): Promise<MarginResponse> {
     const окно = окноПоВчера(зажать(days, MARGIN_DAYS_DEFAULT, MARGIN_DAYS_MAX), now);
-    return this.сКешем(`margin|${окно.days}|${tashkentDay(now)}`, now, () => this.маржа(окно, now));
+    return this.кеш.get(`margin|${окно.days}|${tashkentDay(now)}`, () => this.маржа(окно, now));
   }
 
   /**
@@ -182,34 +185,35 @@ export class AnalyticsService {
   async deadStock(days?: number, now = new Date()): Promise<DeadStockResponse> {
     const настройка = await readIntSetting(this.db, "DEAD_STOCK_DAYS", DEAD_STOCK_DAYS_FALLBACK, this.logger);
     const окно = зажать(days ?? настройка, DEAD_STOCK_DAYS_FALLBACK, DEAD_STOCK_DAYS_MAX);
-    return this.сКешем(`dead-stock|${окно}|${tashkentDay(now)}`, now, () => this.мёртвыйСток(окно, now));
+    return this.кеш.get(`dead-stock|${окно}|${tashkentDay(now)}`, () => this.мёртвыйСток(окно, now));
   }
 
   /** Две ленты изменений цен за окно плюс помесячная динамика для панели (R-P5b-5). */
   async priceChanges(days = PRICE_CHANGES_DAYS_DEFAULT, now = new Date()): Promise<PriceChangesResponse> {
     const окно = окноПоВчера(зажать(days, PRICE_CHANGES_DAYS_DEFAULT, PRICE_CHANGES_DAYS_MAX), now);
-    return this.сКешем(`price-changes|${окно.days}|${tashkentDay(now)}`, now, () => this.цены(окно, now));
+    return this.кеш.get(`price-changes|${окно.days}|${tashkentDay(now)}`, () => this.цены(окно, now));
   }
 
   /** Факт витрины против эталона владельца: где недобираем (R-P5b-6). */
-  async priceGap(days = PRICE_GAP_DAYS_DEFAULT, now = new Date()): Promise<PriceGapResponse> {
-    const окно = окноПоВчера(зажать(days, PRICE_GAP_DAYS_DEFAULT, PRICE_GAP_DAYS_MAX), now);
-    return this.сКешем(`price-gap|${окно.days}|${tashkentDay(now)}`, now, () => this.разрывВитрины(окно, now));
+  async priceGap(days = SALE_PRICE_FACT_DAYS, now = new Date()): Promise<PriceGapResponse> {
+    const окно = окноПоВчера(зажать(days, SALE_PRICE_FACT_DAYS, PRICE_GAP_DAYS_MAX), now);
+    return this.кеш.get(`price-gap|${окно.days}|${tashkentDay(now)}`, () => this.разрывВитрины(окно));
   }
 
   /**
    * Индекс себестоимости прогона (R-P5b-2). Публично: тем же индексом считает
    * недельная сводка, и её маржа обязана совпасть с маржой отчёта до сума.
    */
-  async costIndex(now = new Date()): Promise<{ cost: CostIndex; source: "orders" | "price" }> {
+  async costIndex(now = new Date()): Promise<CostIndexResult> {
     return this.костиндекс(await this.справочник(), now);
   }
 
   /**
    * Сбросить кеш отчётов. Зовётся оттуда, где данные заведомо поменялись:
-   * правка эталона витрины и бутстрап меняют второй операнд `price-gap`, и
-   * отдать после этого закешированный отчёт значило бы показать владельцу
-   * разрыв, которого он только что не стало.
+   * правка эталона витрины и бутстрап меняют второй операнд `price-gap`,
+   * правка закупочной цены и приёмка накладной — себестоимость всей маржи и
+   * оценку мёртвого стока. Отдать после этого закешированный отчёт значило бы
+   * показать владельцу картину, которую он только что своими руками изменил.
    */
   invalidate(): void {
     this.кеш.clear();
@@ -219,20 +223,19 @@ export class AnalyticsService {
 
   private async маржа(окно: Окно, now: Date): Promise<MarginResponse> {
     const ctx = await this.справочник();
-    const [продажи, lowPct, { cost }] = await Promise.all([
+    const [{ строки, парк }, lowPct, { cost }] = await Promise.all([
+      // Строки НЕ в строю остаются: `marginByMachine` сама делит их на парк и
+      // `excluded`. Отсечь их в SQL значило бы потерять сумму, которой
+      // владельцу потом не объяснить расхождение с кассой.
       this.продажиОкна(ctx, окно.from, окно.to),
       readIntSetting(this.db, "MARGIN_LOW_PCT", MARGIN_LOW_PCT_FALLBACK, this.logger),
       this.костиндекс(ctx, now),
     ]);
 
-    // В `marginByMachine` едут ВСЕ строки окна, включая чужие серийники: она
-    // сама делит их на парк и `excluded`. Отфильтровать здесь значило бы
-    // потерять сумму, которой владельцу потом не объяснить расхождение с
-    // кассой.
-    const отчёт = marginByMachine(продажи, cost, { ...окно, inService: ctx.inService, lowPct });
+    const отчёт = marginByMachine(строки, cost, { ...окно, inService: парк.inService, lowPct });
 
     const warnings: AnalyticsWarning[] = [];
-    if (продажи.length === 0) warnings.push(нетПродаж(окно));
+    if (строки.length === 0) warnings.push(нетПродаж(окно));
     if (отчёт.unknownProducts.length > 0) {
       warnings.push({
         code: "unknown_cost",
@@ -240,7 +243,8 @@ export class AnalyticsService {
       });
     }
     for (const x of отчёт.excluded) {
-      const имя = ctx.outOfService.get(x.serial) ?? "нет карточки";
+      const снят = парк.notInService.get(x.serial);
+      const имя = снят ? `${снят.name}, ${снят.status}` : "нет карточки";
       warnings.push({
         code: "excluded_sales",
         message: `Продажи автомата ${x.serial} (${имя}) не в строю в маржу не вошли: ${x.qty} шт, ${x.amount} сум.`,
@@ -254,9 +258,9 @@ export class AnalyticsService {
     // Окно мёртвого стока кончается СЕГОДНЯ, а не вчера: товар, проданный
     // сегодня утром, назвать мёртвым нельзя — а именно это и вышло бы, закройся
     // окно движения вчерашним днём.
-    const since = tashkentDay(new Date(tashkentDayStartOf(now).getTime() - (days - 1) * DAY_MS));
-    const сегодня = tashkentDay(now);
-    const начало = tashkentDayStart(since) ?? new Date(tashkentDayStartOf(now).getTime() - (days - 1) * DAY_MS);
+    const сегодня = tashkentDayStartOf(now).getTime();
+    const since = tashkentDay(new Date(сегодня - (days - 1) * DAY_MS));
+    const начало = tashkentDayStart(since) ?? new Date(сегодня - (days - 1) * DAY_MS);
 
     const [склад, остатки, продажи, заливки, накладные, { cost }] = await Promise.all([
       this.db
@@ -271,7 +275,7 @@ export class AnalyticsService {
         .select({ dt: machineStock.dt, machineSerial: machineStock.machineSerial, product: machineStock.product, qty: machineStock.qty })
         .from(machineStock)
         .where(gte(machineStock.dt, since)),
-      this.продажиОкна(ctx, since, сегодня),
+      this.продажиОкна(ctx, since, tashkentDay(now), true),
       this.db
         .select({ machineSerial: vendingRefillEvent.machineSerial, slots: vendingRefillEvent.slots })
         .from(vendingRefillEvent)
@@ -285,8 +289,7 @@ export class AnalyticsService {
     // автомата — пара `serial|товар`: тот же товар бойко идёт в American
     // Hospital и месяцами стоит в Olma (R-P5b-4).
     const moved = new Set<string>();
-    for (const p of продажи) {
-      if (!ctx.inService.has(p.canonSerial)) continue; // «продажа» склада-заглушки движением не считается
+    for (const p of продажи.строки) {
       moved.add(normalizeProductName(p.product));
       moved.add(machineMovementKey(p.canonSerial, p.product));
     }
@@ -300,6 +303,12 @@ export class AnalyticsService {
 
     const warehouse: StockPosition[] = склад.map((r) => ({ product: ctx.canonOf(r.productName), qty: Number(r.quantity) }));
 
+    // Парк остатков — от серийников САМИХ ОСТАТКОВ: автомат без карточки
+    // остаётся в отчёте (см. `inServicePark`), склад-заглушка уходит.
+    const паркОстатков = this.vending.inServicePark(
+      остатки.map((r) => r.machineSerial),
+      ctx.registry,
+    );
     // Последний день КАЖДОГО автомата: у машин разный лаг сбора, и общий
     // «максимум по таблице» выкинул бы из отчёта автомат, чей снимок пришёл на
     // сутки позже.
@@ -313,7 +322,7 @@ export class AnalyticsService {
     const сОстатком = new Set<string>();
     for (const r of остатки) {
       const canon = normalizeMachineSerial(r.machineSerial);
-      const имя = ctx.inService.get(canon);
+      const имя = паркОстатков.inService.get(canon);
       if (имя === undefined || r.dt !== последнийДень.get(canon)) continue;
       сОстатком.add(canon);
       const qty = Number(r.qty);
@@ -324,7 +333,7 @@ export class AnalyticsService {
     const отчёт = deadStock(warehouse, inMachines, moved, cost, days, since);
 
     const warnings: AnalyticsWarning[] = [];
-    if (продажи.length === 0) {
+    if (продажи.строки.length === 0) {
       warnings.push({
         code: "no_sales",
         message: `Продаж с ${since} нет — движение определять не по чему, и весь остаток выглядит мёртвым. Сначала проверь синк продаж.`,
@@ -333,8 +342,10 @@ export class AnalyticsService {
     // Про остаток молчим только там, где о нём нечего сказать: автомат,
     // который в окне торговал, обязан иметь снимок остатка. Автомат без продаж
     // и без остатка — это кофейный парк, которого отчёт не касается (R-P5b-9).
-    const торговали = new Set(продажи.filter((p) => ctx.inService.has(p.canonSerial)).map((p) => p.canonSerial));
-    const безОстатка = [...торговали].filter((s) => !сОстатком.has(s)).map((s) => `${ctx.inService.get(s) ?? s} (${s})`);
+    const торговали = new Set(продажи.строки.map((p) => p.canonSerial));
+    const безОстатка = [...торговали]
+      .filter((s) => !сОстатком.has(s))
+      .map((s) => `${продажи.парк.inService.get(s) ?? s} (${s})`);
     if (безОстатка.length > 0) {
       warnings.push({
         code: "stock_missing",
@@ -354,7 +365,7 @@ export class AnalyticsService {
     const ctx = await this.справочник();
     const начало = tashkentDayStart(окно.from) ?? new Date(tashkentDayStartOf(now).getTime() - окно.days * DAY_MS);
     const [продажи, события, pct] = await Promise.all([
-      this.продажиОкна(ctx, окно.from, окно.to),
+      this.продажиОкна(ctx, окно.from, окно.to, true),
       // У ленты событий верхней границы НЕТ намеренно, хотя витринная кончается
       // вчера: цена, изменённая сегодня утром, — это ровно та новость, за
       // которой владелец и открывает отчёт. Витрина сегодняшний день включить
@@ -367,7 +378,6 @@ export class AnalyticsService {
       readIntSetting(this.db, "PRICE_CHANGE_PCT", PRICE_CHANGE_PCT_FALLBACK, this.logger),
     ]);
 
-    const витрина = продажи.filter((p) => ctx.inService.has(p.canonSerial));
     const наблюдения: PurchasePriceEvent[] = [];
     for (const e of события) {
       const p = (e.payload ?? {}) as { product?: unknown; oldPrice?: unknown; newPrice?: unknown; price?: unknown };
@@ -380,68 +390,90 @@ export class AnalyticsService {
       наблюдения.push({ product: ctx.canonOf(имя), oldPrice: цена(p.oldPrice), newPrice: новая, at: tashkentDay(e.occurredAt) });
     }
 
-    const отчёт = priceChanges(наблюдения, retailDaily(витрина), pct, окно.days);
+    const отчёт = priceChanges(наблюдения, retailDaily(продажи.строки), pct, окно.days);
     const warnings: AnalyticsWarning[] = [];
-    if (витрина.length === 0) warnings.push(нетПродаж(окно));
-    return { ...отчёт, monthly: помесячно(витрина, наблюдения), warnings };
+    if (продажи.строки.length === 0) warnings.push(нетПродаж(окно));
+    return { ...отчёт, monthly: помесячно(продажи.строки, наблюдения, окно), warnings };
   }
 
-  private async разрывВитрины(окно: Окно, _now: Date): Promise<PriceGapResponse> {
+  private async разрывВитрины(окно: Окно): Promise<PriceGapResponse> {
     const ctx = await this.справочник();
     const [продажи, pct] = await Promise.all([
-      this.продажиОкна(ctx, окно.from, окно.to),
+      this.продажиОкна(ctx, окно.from, окно.to, true),
       readIntSetting(this.db, "PRICE_GAP_PCT", PRICE_GAP_PCT_FALLBACK, this.logger),
     ]);
 
-    // Факт витрины считает `priceGap` из тех же строк продаж (Σamount/Σqty):
-    // своей агрегации здесь нет и быть не должно — она уже есть в общем
-    // пакете, а вторая копия разошлась бы с первой на округлении.
-    const факт = продажи.filter((p) => ctx.inService.has(p.canonSerial));
+    // Факт витрины считает `priceGap` из тех же строк продаж — той же функцией
+    // `retailFactByProduct`, которой считает гейт команды «цена продажи».
+    // Своей агрегации Σamount/Σqty здесь нет и быть не должно (R-P5b-10).
     const эталон = new Map<string, number>();
-    for (const p of ctx.products) if (p.salePrice !== null) эталон.set(p.name, p.salePrice);
+    const снятые = new Set<string>();
+    for (const p of ctx.products) {
+      if (p.salePrice !== null) эталон.set(p.name, p.salePrice);
+      if (!p.isActive) снятые.add(normalizeProductName(p.name));
+    }
 
-    const отчёт = priceGap(факт, эталон, pct, окно.days);
+    const отчёт = priceGap(продажи.строки, эталон, pct, окно.days);
+    // Снятый с продажи товар в списке «эталон не задан» — шум: эталон нужен
+    // тому, что продаётся дальше. Товар, которого в прайсе НЕТ вовсе, в списке
+    // остаётся: он продавался, а карточки у него нет — это уже другая проблема,
+    // и прятать её нельзя.
+    const noReference = отчёт.noReference.filter((имя) => !снятые.has(normalizeProductName(имя)));
+
     const warnings: AnalyticsWarning[] = [];
-    if (факт.length === 0) warnings.push(нетПродаж(окно));
-    if (отчёт.noReference.length > 0) {
+    if (продажи.строки.length === 0) warnings.push(нетПродаж(окно));
+    if (noReference.length > 0) {
       warnings.push({
         code: "no_reference",
-        message: `Эталон витрины не задан: ${перечислить(отчёт.noReference)} — сравнивать не с чем, задай «цена продажи <товар> <сум>».`,
+        message: `Эталон витрины не задан: ${перечислить(noReference)} — сравнивать не с чем, задай «цена продажи <товар> <сум>».`,
       });
     }
-    return { ...отчёт, warnings };
+    return { ...отчёт, noReference, warnings };
   }
 
   // ── Общие выборки ──────────────────────────────────────────────────────────
 
   private async справочник(): Promise<Справочник> {
     const [index, registry] = await Promise.all([this.vending.loadProductIndex(), this.vending.machineRegistry()]);
-    const inService = new Map<string, string>();
-    const outOfService = new Map<string, string>();
-    for (const [serial, name] of registry.nameBySerial) {
-      const снят = registry.notInService.get(serial);
-      if (снят) outOfService.set(serial, `${снят.name}, ${снят.status}`);
-      else inService.set(serial, name);
-    }
     return {
       canonOf: (raw: string) => this.vending.resolveProduct(raw, index.aliasByKey),
       products: index.productRows.map((p) => ({
         name: p.name,
         purchasePrice: p.purchasePrice === null ? null : Number(p.purchasePrice),
         salePrice: p.salePrice === null ? null : Number(p.salePrice),
+        isActive: p.isActive,
       })),
-      inService,
-      outOfService,
+      registry,
+      notInServiceForms: notInServiceSerialForms(registry.notInService.keys()),
     };
   }
 
-  /** Продажи окна с каноном имени и серийника. Единственный источник денег (R-P5b-1). */
-  private async продажиОкна(ctx: Справочник, from: string, to: string): Promise<ПродажаБазы[]> {
+  /**
+   * Продажи окна с каноном имени и серийника плюс парк, собранный ПО ЭТИМ
+   * СТРОКАМ. Единственный источник денег (R-P5b-1).
+   *
+   * `толькоВСтрою` сужает выборку прямо в SQL — списком тех, КОГО ИСКЛЮЧИТЬ.
+   * Положительный список («оставить эти серийники») пришлось бы собирать из
+   * реестра, и автомат без карточки молча выпал бы из отчёта. Решает всё равно
+   * `парк.ok`: SQL не знает про регистр и формы написания, он лишь снимает с
+   * чтения заведомо лишние строки склада-заглушки.
+   */
+  private async продажиОкна(ctx: Справочник, from: string, to: string, толькоВСтрою = false): Promise<ПродажиОкна> {
+    const окно = and(gte(sale.dt, from), lte(sale.dt, to));
     const rows = await this.db
       .select({ dt: sale.dt, machineSerial: sale.machineSerial, product: sale.product, qty: sale.qty, amount: sale.amount })
       .from(sale)
-      .where(and(gte(sale.dt, from), lte(sale.dt, to)));
-    return rows.map((r) => ({
+      .where(
+        толькоВСтрою && ctx.notInServiceForms.length > 0
+          ? and(окно, notInArray(sale.machineSerial, ctx.notInServiceForms))
+          : окно,
+      );
+
+    const парк = this.vending.inServicePark(
+      rows.map((r) => r.machineSerial),
+      ctx.registry,
+    );
+    const строки = rows.map((r) => ({
       dt: r.dt,
       serial: r.machineSerial,
       canonSerial: normalizeMachineSerial(r.machineSerial),
@@ -449,6 +481,8 @@ export class AnalyticsService {
       qty: Number(r.qty),
       amount: Number(r.amount),
     }));
+
+    return { строки: толькоВСтрою ? строки.filter((r) => парк.ok(r.serial)) : строки, парк };
   }
 
   /** Позиции накладных, ПРИНЯТЫХ в окне: `{product, qty, price}` уже проверенные. */
@@ -479,11 +513,11 @@ export class AnalyticsService {
    * Себестоимость единицы по канону имени (R-P5b-2): (1) взвешенная по
    * принятым накладным окна, (2) иначе цена карточки, (3) иначе «цены нет».
    *
-   * `source` показывает владельцу, откуда взялась цифра. Сегодня это всегда
-   * `price`: накладных на проде ноль, и молча выдавать цену карточки за
-   * «взвешенную по закупкам» значит обещать историю, которой нет.
+   * `sourceOf` отвечает про КОНКРЕТНЫЙ товар — см. `CostSource`. Сегодня на
+   * проде накладных ноль, и все 52 товара стоят на цене карточки; первая же
+   * принятая накладная переведёт на взвешенную цену ровно свои позиции.
    */
-  private async костиндекс(ctx: Справочник, now: Date): Promise<{ cost: CostIndex; source: "orders" | "price" }> {
+  private async костиндекс(ctx: Справочник, now: Date): Promise<CostIndexResult> {
     const дни = Math.max(1, Math.trunc(await readIntSetting(this.db, "COST_WINDOW_DAYS", COST_WINDOW_DAYS_FALLBACK, this.logger)));
     const since = new Date(tashkentDayStartOf(now).getTime() - (дни - 1) * DAY_MS);
     const позиции = await this.принятыеНакладные(since);
@@ -500,45 +534,27 @@ export class AnalyticsService {
     // Ключи ТОЛЬКО канонические: `CostIndex` в общем пакете спрашивает цену
     // нормализованным ключом, и сырое написание молча уехало бы в
     // `unknownUnits`, тихо подняв маржу.
-    const поКлючу = new Map<string, number>();
+    const поКлючу = new Map<string, { price: number; source: CostSource }>();
     for (const [ключ, набор] of лоты) {
+      // Взвешивание нескольких лотов — работа `weightedCost`: две поставки по
+      // 10 и 100 штук дают не среднее двух цен, а среднее по штукам.
       const взвешенная = weightedCost(набор);
-      if (взвешенная !== null) поКлючу.set(ключ, взвешенная);
+      if (взвешенная !== null) поКлючу.set(ключ, { price: взвешенная, source: "orders" });
     }
-    const source = поКлючу.size > 0 ? "orders" : "price";
+    const orders = поКлючу.size;
     for (const p of ctx.products) {
       const ключ = normalizeProductName(p.name);
-      if (p.purchasePrice !== null && p.purchasePrice > 0 && !поКлючу.has(ключ)) поКлючу.set(ключ, p.purchasePrice);
+      if (p.purchasePrice !== null && p.purchasePrice > 0 && !поКлючу.has(ключ)) {
+        поКлючу.set(ключ, { price: p.purchasePrice, source: "price" });
+      }
     }
 
-    return { cost: (product: string) => поКлючу.get(normalizeProductName(ctx.canonOf(product))) ?? null, source };
-  }
-
-  /**
-   * Кеш и ОДИН расчёт на ключ.
-   *
-   * Роуты открыты на чтение, а расчёт тяжёлый (продажи окна в память плюс
-   * остатки и события), поэтому готовый отчёт живёт `REPORT_CACHE_MS`, а
-   * параллельные запросы одного ключа ждут ОДИН расчёт, а не запускают по
-   * своему. Ключ — отчёт, окно И ташкентские сутки: после полуночи окно
-   * сдвигается, и вчерашний отчёт под тем же `days` был бы уже не тем отчётом.
-   */
-  private async сКешем<T>(ключ: string, now: Date, расчёт: () => Promise<T>): Promise<T> {
-    const готовое = this.кеш.get(ключ);
-    if (готовое && now.getTime() - готовое.at < REPORT_CACHE_MS) return готовое.отчёт as T;
-
-    const считается = this.вПолёте.get(ключ);
-    if (считается) return считается as Promise<T>;
-
-    const работа = расчёт();
-    this.вПолёте.set(ключ, работа);
-    try {
-      const отчёт = await работа;
-      this.кеш.set(ключ, { at: now.getTime(), отчёт });
-      return отчёт;
-    } finally {
-      this.вПолёте.delete(ключ);
-    }
+    const найти = (product: string) => поКлючу.get(normalizeProductName(ctx.canonOf(product)));
+    return {
+      cost: (product: string) => найти(product)?.price ?? null,
+      sourceOf: (product: string) => найти(product)?.source ?? "unknown",
+      counts: { orders, price: поКлючу.size - orders },
+    };
   }
 }
 
@@ -554,12 +570,6 @@ function окноПоВчера(days: number, now: Date): Окно {
   return { days, from: tashkentDay(new Date(сегодня - days * DAY_MS)), to: tashkentDay(new Date(сегодня - DAY_MS)) };
 }
 
-function зажать(days: number, дефолт: number, потолок: number): number {
-  const n = Math.trunc(days);
-  if (!Number.isFinite(n) || n <= 0) return дефолт;
-  return Math.min(n, потолок);
-}
-
 /** Цена из jsonb: `0`, дробь-мусор и заоблачное число — это «цены нет». */
 function цена(v: unknown): number | null {
   if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > 10_000_000) return null;
@@ -571,21 +581,27 @@ const нетПродаж = (окно: Окно): AnalyticsWarning => ({
   message: `Продаж за ${окно.days} дн. (${окно.from} … ${окно.to}) нет — считать нечего.`,
 });
 
-/** Имён в предупреждении — не больше пяти, остальное числом: строка на полсотни имён нечитаема. */
-const МАКС_ИМЁН = 5;
-function перечислить(имена: readonly string[]): string {
-  if (имена.length <= МАКС_ИМЁН) return имена.join(", ");
-  return `${имена.slice(0, МАКС_ИМЁН).join(", ")} и ещё ${имена.length - МАКС_ИМЁН}`;
+/** Последний календарный день месяца `YYYY-MM`. */
+function конецМесяца(month: string): string {
+  const [y, m] = month.split("-").map(Number) as [number, number];
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
 }
 
 /**
  * Помесячная динамика (донорский `price_dynamics`) — считается из ТЕХ ЖЕ строк,
  * что уже прочитаны для лент, без единого лишнего запроса. Панель зовёт
  * `/vending/price-changes` без флагов и ждёт `monthly` в ответе, поэтому поле
- * всегда на месте: пустой массив здесь значил бы «в окне не было цен», а не
- * «не просили посчитать».
+ * всегда на месте.
+ *
+ * В ответ идут ТОЛЬКО ПОЛНЫЕ месяцы окна. Месяц, из которого в окно попали
+ * двадцать дней из тридцати одного, на графике выглядит как провал продаж, а
+ * его средняя цена посчитана по другому объёму, чем у соседей: это не «данные
+ * за месяц», а обрезок. При окне по умолчанию (30 суток) полных месяцев в нём
+ * нет вовсе — и пустой `monthly` здесь честнее двух огрызков; панель, которой
+ * нужна динамика, зовёт отчёт с окном пошире (`?days=180` — пять полных
+ * месяцев).
  */
-function помесячно(продажи: readonly SaleRow[], наблюдения: readonly PurchasePriceEvent[]): MonthlyPrice[] {
+function помесячно(продажи: readonly SaleRow[], наблюдения: readonly PurchasePriceEvent[], окно: Окно): MonthlyPrice[] {
   interface Ячейка {
     product: string;
     month: string;
@@ -594,8 +610,11 @@ function помесячно(продажи: readonly SaleRow[], наблюден
     закупСумма: number;
     закупШтук: number;
   }
+  const полный = (month: string): boolean => `${month}-01` >= окно.from && конецМесяца(month) <= окно.to;
+
   const acc = new Map<string, Ячейка>();
-  const ячейка = (product: string, month: string): Ячейка => {
+  const ячейка = (product: string, month: string): Ячейка | null => {
+    if (!полный(month)) return null;
     const ключ = `${normalizeProductName(product)}|${month}`;
     const был = acc.get(ключ);
     if (был) return был;
@@ -607,11 +626,13 @@ function помесячно(продажи: readonly SaleRow[], наблюден
   for (const p of продажи) {
     if (!Number.isFinite(p.qty) || p.qty <= 0) continue;
     const c = ячейка(p.product, p.dt.slice(0, 7));
+    if (!c) continue;
     c.qty += p.qty;
     c.amount += Number.isFinite(p.amount) ? p.amount : 0;
   }
   for (const e of наблюдения) {
     const c = ячейка(e.product, e.at.slice(0, 7));
+    if (!c) continue;
     c.закупСумма += e.newPrice;
     c.закупШтук += 1;
   }

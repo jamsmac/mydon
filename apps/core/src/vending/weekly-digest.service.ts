@@ -95,7 +95,7 @@ export class WeeklyDigestService {
    */
   async digest(week?: string, now = new Date()): Promise<WeeklyDigest> {
     const неделя = (week ? isoWeekFromKey(week) : null) ?? previousIsoWeek(isoWeekTashkent(now));
-    return this.кеш.get(`weekly-digest|${неделя.key}|${tashkentDay(now)}`, now, () => this.сводка(неделя, now));
+    return this.кеш.get(`weekly-digest|${неделя.key}|${tashkentDay(now)}`, () => this.сводка(неделя, now));
   }
 
   private async сводка(неделя: IsoWeek, now: Date): Promise<WeeklyDigest> {

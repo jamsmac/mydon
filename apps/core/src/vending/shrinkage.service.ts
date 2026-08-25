@@ -20,6 +20,7 @@ import {
 import { DB, type Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
 import { skipReasonOf, type SkipReason } from "./refill-events.service";
+import { ReportCache, зажать, перечислить } from "./report-cache";
 import { VendingService } from "./vending.service";
 
 /** Дни отчёта по умолчанию — окно, на котором порог 30 000 сум уже бьёт (донор mydon-stock). */
@@ -76,15 +77,6 @@ export const LOW_STOCK_REPEAT_MS = 3 * 86_400_000;
 
 export const SHRINK_EVENT = "vending.shrinkage_alert";
 export const LOW_STOCK_EVENT = "machine.low_stock";
-
-/**
- * Время жизни кеша отчёта. Отчёт считается по СНИМКАМ ЗА ЗАКРЫТЫЕ СУТКИ:
- * внутри дня он меняется только от догона продаж, поэтому пять минут не
- * устаревание, а окно склейки повторов. Без кеша один открытый GET
- * (`?days=60` — полмиллиона строк снимков) укладывал Core, а вкладка «Снек»
- * дёргает отчёт при каждом рендере.
- */
-export const REPORT_CACHE_MS = 5 * 60_000;
 
 const DAY_MS = 86_400_000;
 
@@ -212,10 +204,8 @@ interface ShrinkContext {
 export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(ShrinkageService.name);
   private cron: Cron | null = null;
-  /** Готовый отчёт по ключу окна — см. `REPORT_CACHE_MS`. */
-  private readonly кеш = new Map<string, { at: number; отчёт: ShrinkReport }>();
-  /** Считающийся прямо сейчас отчёт по тому же ключу (single-flight). */
-  private readonly вПолёте = new Map<string, Promise<ShrinkReport>>();
+  /** Готовый отчёт по ключу окна плюс single-flight — общий `ReportCache`. */
+  private readonly кеш = new ReportCache();
 
   constructor(
     @Inject(DB) private readonly db: Db,
@@ -250,32 +240,15 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
    * Ташкента, иначе считал бы первую половину по одному периоду, а вторую по
    * другому, и тесты флакали бы ровно в этот момент.
    *
-   * КЕШ И ОДИН РАСЧЁТ НА КЛЮЧ. Роут открыт на чтение, а расчёт тяжёлый (все
-   * продажи периода в память плюс запрос снимков на каждый автомат), поэтому
-   * готовый отчёт живёт `REPORT_CACHE_MS`, а параллельные запросы одного окна
-   * ждут ОДИН расчёт, а не запускают по своему. Ключ — окно И ташкентские
-   * сутки: после полуночи период сдвигается, и вчерашний отчёт под тем же
-   * `days` был бы уже не тем отчётом.
+   * КЕШ И ОДИН РАСЧЁТ НА КЛЮЧ — общий `ReportCache` (тот же, что у аналитики и
+   * недельной сводки). Роут открыт на чтение, а расчёт тяжёлый (все продажи
+   * периода в память плюс запрос снимков на каждый автомат). Ключ — окно И
+   * ташкентские сутки: после полуночи период сдвигается, и вчерашний отчёт под
+   * тем же `days` был бы уже не тем отчётом.
    */
   async report(days = SHRINK_DAYS_DEFAULT, now = new Date()): Promise<ShrinkReport> {
     const окно = зажать(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX);
-    const ключ = `${окно}|${tashkentDay(now)}`;
-
-    const готовое = this.кеш.get(ключ);
-    if (готовое && now.getTime() - готовое.at < REPORT_CACHE_MS) return готовое.отчёт;
-
-    const считается = this.вПолёте.get(ключ);
-    if (считается) return считается;
-
-    const работа = (async () => this.построить(окно, now, await this.контекст()))();
-    this.вПолёте.set(ключ, работа);
-    try {
-      const отчёт = await работа;
-      this.кеш.set(ключ, { at: now.getTime(), отчёт });
-      return отчёт;
-    } finally {
-      this.вПолёте.delete(ключ);
-    }
+    return this.кеш.get(`${окно}|${tashkentDay(now)}`, async () => this.построить(окно, now, await this.контекст()));
   }
 
   /**
@@ -757,13 +730,6 @@ function ближайший(снимки: MachineSnapshot[], граница: num
   return дистанция <= SNAPSHOT_STALE_MS ? лучший : null;
 }
 
-/** Дат в предупреждении — не больше пяти, остальное числом: строка на полсотни дат нечитаема. */
-const МАКС_ДАТ = 5;
-function перечислить(даты: string[]): string {
-  if (даты.length <= МАКС_ДАТ) return даты.join(", ");
-  return `${даты.slice(0, МАКС_ДАТ).join(", ")} и ещё ${даты.length - МАКС_ДАТ}`;
-}
-
 function сумма<T>(rows: T[], ключ: (r: T) => string, значение: (r: T) => number): Map<string, number> {
   const out = new Map<string, number>();
   for (const r of rows) {
@@ -773,8 +739,3 @@ function сумма<T>(rows: T[], ключ: (r: T) => string, значение: 
   return out;
 }
 
-function зажать(days: number, дефолт: number, потолок: number): number {
-  const n = Math.trunc(days);
-  if (!Number.isFinite(n) || n <= 0) return дефолт;
-  return Math.min(n, потолок);
-}

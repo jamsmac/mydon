@@ -455,10 +455,20 @@ export class VendingController {
     return this.vending.orders(n !== undefined && Number.isFinite(n) ? n : undefined);
   }
 
-  /** Принять накладную на склад (§5.7): приход += заказанное, статус received. */
+  /**
+   * Принять накладную на склад (§5.7): приход += заказанное, статус received.
+   *
+   * Кеш аналитики сбрасывается ВСЕГДА, а не только при удачной приёмке:
+   * приёмка меняет и остаток склада (мёртвый сток), и взвешенную себестоимость
+   * всей маржи (`costIndex`), и пишет наблюдения цен. Сброс стоит один поход в
+   * базу на следующем чтении, а несброшенный кеш — пять минут отчёта, в
+   * котором только что принятой накладной нет.
+   */
   @Post("orders/receive")
-  receiveOrder(@Body() dto: ReceiveOrderDto) {
-    return this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
+  async receiveOrder(@Body() dto: ReceiveOrderDto) {
+    const итог = await this.vending.receiveOrder(dto.orderId, dto.receivedBy, dto.distributed);
+    this.analytics.invalidate();
+    return итог;
   }
 
   /** План закупа: раздача по маршруту и слотам (П5a). */
@@ -483,10 +493,18 @@ export class VendingController {
     return this.vending.setProductRules(product, patch, actor);
   }
 
-  /** Правка закупочной цены товара (гейт ±20% — см. setProductPrice). */
+  /**
+   * Правка закупочной цены товара (гейт ±20% — см. setProductPrice).
+   *
+   * Закупочная цена — второй операнд маржи и оценки мёртвого стока, поэтому
+   * удачная правка сбрасывает кеш аналитики: иначе владелец, поправив цену в
+   * боте, пять минут читал бы маржу по старой.
+   */
   @Post("product-price")
-  setProductPrice(@Body() dto: SetProductPriceDto) {
-    return this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
+  async setProductPrice(@Body() dto: SetProductPriceDto) {
+    const итог = await this.vending.setProductPrice(dto.product, dto.price, dto.actor, dto.confirmed);
+    if (итог.ok) this.analytics.invalidate();
+    return итог;
   }
 
   /**

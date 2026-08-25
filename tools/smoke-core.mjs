@@ -1218,6 +1218,44 @@ async function проверитьНаблюдениеЦен() {
   }
 }
 
+/**
+ * П5b: отсечка автоматов НЕ в строю уходит прямо в SQL (`not in (...)`).
+ *
+ * На засеянной базе снятых с работы автоматов нет, поэтому список исключений
+ * пуст и ветка `notInArray` не исполняется вовсе — а именно этот класс
+ * конструкций уже валил прод («op ANY/ALL (array) requires array on right
+ * side»). Сценарий заводит карточку-склад, сбрасывает кеш аналитики записью
+ * эталона (иначе следующий GET вернул бы отчёт, посчитанный ДО появления
+ * склада) и заставляет Postgres выполнить запросы с непустым списком.
+ */
+async function проверитьОтсечкуСклада() {
+  const создание = await jsonRequest("POST", "/entities", {
+    domain: "vendhub",
+    type: "machine",
+    name: "Дымовой склад-заглушка",
+    externalRef: "SMOKE-SKLAD",
+  });
+  if (!создание.r.ok) throw new Error(`карточка склада → ${создание.r.status}: ${создание.text.slice(0, 200)}`);
+  const id = создание.json?.id;
+  if (!id) throw new Error(`карточка без id: ${создание.text.slice(0, 200)}`);
+
+  const статус = await jsonRequest("PATCH", `/entities/${id}/machine-status`, { status: "warehouse", actor: "smoke" });
+  if (!статус.r.ok) throw new Error(`статус карточки → ${статус.r.status}: ${статус.text.slice(0, 200)}`);
+  if (статус.json?.status !== "warehouse") throw new Error(`статус=${статус.json?.status}`);
+
+  // Кеш отчётов живёт пять минут: без сброса GET ниже ответил бы из памяти и
+  // SQL с исключениями так и не выполнился бы (ровно та дыра, ради которой
+  // сценарий и написан).
+  const сброс = await jsonRequest("POST", "/vending/sale-price", { product: P4_ТОВАР, price: 15000, confirmed: true });
+  if (!сброс.r.ok || сброс.json?.ok !== true) throw new Error(`сброс кеша через эталон → ${сброс.text.slice(0, 200)}`);
+
+  for (const путь of ["/vending/price-gap?days=14", "/vending/dead-stock?days=21", "/vending/price-changes?days=30"]) {
+    const { r, text, json } = await jsonRequest("GET", путь);
+    if (!r.ok) throw new Error(`${путь} с непустым списком исключений → ${r.status}: ${text.slice(0, 200)}`);
+    if (!Array.isArray(json?.warnings)) throw new Error(`${путь}: warnings — не массив`);
+  }
+}
+
 async function проверитьRateLimit() {
   for (let i = 0; i < 70; i += 1) {
     const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(5000) });
@@ -1424,6 +1462,13 @@ try {
   }
 
   try {
+    await проверитьОтсечкуСклада();
+    console.log("  ok  сценарий: автомат не в строю отсекается в SQL (not in), отчёты считаются заново");
+  } catch (e) {
+    провалы.push(`отсечка склада: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -1445,4 +1490,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 11 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 12 сценариев.`);

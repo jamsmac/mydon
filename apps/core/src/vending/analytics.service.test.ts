@@ -4,7 +4,9 @@ import {
   entity,
   event,
   machineCard,
+  machineSale,
   machineStock,
+  productSale,
   sale,
   systemConfig,
   vendingAlias,
@@ -15,7 +17,7 @@ import {
 } from "@mydon/db";
 import { tashkentDay } from "@mydon/shared";
 import { AnalyticsService } from "./analytics.service";
-import { VendingService } from "./vending.service";
+import { SALE_PRICE_FACT_DAYS, VendingService } from "./vending.service";
 
 type SaleRow = { dt: string; machineSerial: string; product: string; qty: string; amount: string };
 type MachineStockRow = { dt: string; machineSerial: string; product: string; qty: string };
@@ -33,6 +35,7 @@ type ProdRow = {
   packSize: number;
   excludedFromPurchase: boolean;
   fixedPurchaseQty: number | null;
+  isActive: boolean;
 };
 
 interface Мир {
@@ -56,13 +59,24 @@ interface Мир {
 function параметры(условие: unknown): unknown[] {
   const out: unknown[] = [];
   const walk = (n: unknown): void => {
+    // Массивы обходятся ВНУТРЬ: значения `inArray`/`notInArray` drizzle прячет
+    // списком параметров, и без этого шага отсечка серийников в SQL выглядела
+    // бы отсутствующей — стаб зеленел бы на запросе без неё.
+    if (Array.isArray(n)) {
+      for (const c of n) walk(c);
+      return;
+    }
     if (n === null || typeof n !== "object") return;
     const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
     if (Array.isArray(chunks)) {
       for (const c of chunks) walk(c);
       return;
     }
-    if ("value" in (n as Record<string, unknown>)) out.push((n as { value: unknown }).value);
+    if ("value" in (n as Record<string, unknown>)) {
+      const значение = (n as { value: unknown }).value;
+      walk(значение);
+      out.push(значение);
+    }
   };
   walk(условие);
   return out;
@@ -73,8 +87,18 @@ const строкиИз = (условие: unknown): string[] => параметр
 const числаИз = (условие: unknown): number[] => параметры(условие).filter((v): v is number => typeof v === "number");
 
 function analyticsDb(м: Мир) {
-  const rowsOf = (t: unknown): unknown[] =>
-    t === sale
+  /** Условия, с которыми сервис ходил в `sale` — по ним проверяется окно и отсечка «в строю». */
+  const условияПродаж: string[][] = [];
+
+  const rowsOf = (t: unknown): unknown[] => {
+    // R-P5b-1: скользящие семидневные окна кабинета в деньги не идут НИКОГДА.
+    // Стаб на незнакомую таблицу отдаёт `[]`, поэтому без этой ловушки
+    // добавление `product_sale` в расчёт прошло бы зелёным — а на проде оно
+    // завышает штуки в 36 раз.
+    if (t === productSale || t === machineSale) {
+      throw new Error("аналитика не имеет права читать product_sale/machine_sale (R-P5b-1)");
+    }
+    return t === sale
       ? (м.sales ?? [])
       : t === machineStock
         ? (м.machineStock ?? [])
@@ -97,6 +121,7 @@ function analyticsDb(м: Мир) {
                         : t === systemConfig
                           ? (м.config ?? [])
                           : [];
+  };
 
   const цепочка = (t: unknown, rows: unknown[]) => {
     let текущие = rows;
@@ -105,7 +130,9 @@ function analyticsDb(м: Мир) {
       const строки = строкиИз(условие);
       const дата = датаИз(условие);
       if (t === sale) {
-        // gte(dt, from) [+ lte(dt, to)] — окно отчёта по ташкентским суткам.
+        // gte(dt, from) [+ lte(dt, to)] — окно отчёта по ташкентским суткам,
+        // дальше — сырые формы серийников не в строю (`notInArray`).
+        условияПродаж.push(строки);
         const [от, до] = строки;
         текущие = (текущие as SaleRow[]).filter((r) => (!от || r.dt >= от) && (!до || r.dt <= до));
       }
@@ -155,7 +182,7 @@ function analyticsDb(м: Мир) {
     }),
   } as never;
 
-  return { db, счётчик };
+  return { db, счётчик, условияПродаж };
 }
 
 const СУТКИ = 86_400_000;
@@ -175,7 +202,13 @@ const ПАРК: Ent[] = [
 ];
 const СКЛАД_НЕ_В_СТРОЮ: Card[] = [{ entityId: "e-sklad", status: "warehouse" }];
 
-const товар = (id: string, name: string, purchasePrice: string | null, salePrice: string | null = null): ProdRow => ({
+const товар = (
+  id: string,
+  name: string,
+  purchasePrice: string | null,
+  salePrice: string | null = null,
+  isActive = true,
+): ProdRow => ({
   id,
   name,
   purchasePrice,
@@ -183,6 +216,7 @@ const товар = (id: string, name: string, purchasePrice: string | null, sale
   packSize: 1,
   excludedFromPurchase: false,
   fixedPurchaseQty: null,
+  isActive,
 });
 
 /** Прод-числа: Moxito 12000/9800 (18.3 %), Lays 15000/13000 (13.3 % — ниже порога 15). */
@@ -201,9 +235,9 @@ const ЛАЙМОН: SaleRow[] = [
 ];
 
 const сервис = (мир: Мир) => {
-  const { db, счётчик } = analyticsDb(мир);
+  const { db, счётчик, условияПродаж } = analyticsDb(мир);
   const svc = new AnalyticsService(db, new VendingService(db));
-  return Object.assign(svc, { счётчик });
+  return Object.assign(svc, { счётчик, условияПродаж });
 };
 
 describe("Аналитика: маржа (R-P5b-1, R-P5b-3)", () => {
@@ -253,6 +287,41 @@ describe("Аналитика: маржа (R-P5b-1, R-P5b-3)", () => {
 
     assert.deepEqual([r.from, r.to], [день(-30), день(-1)]);
     assert.equal(r.totals.qty, 14, "99 шт из-за окна попали в отчёт — фильтр по dt не отработал");
+  });
+
+  it("серийник без карточки остаётся в деньгах: «карточку не завели» ≠ «снят со службы»", async () => {
+    const s = сервис({
+      sales: [
+        ...ПРОД_ПРОДАЖИ,
+        { dt: день(-4), machineSerial: "2508160399", product: "Moxito Lime 330ml", qty: "2", amount: "24000" },
+      ],
+      products: ПРАЙС,
+      entities: ПАРК,
+      cards: СКЛАД_НЕ_В_СТРОЮ,
+    });
+    const r = await s.margin(30, СЕЙЧАС);
+
+    assert.deepEqual(r.excluded, [], "новый автомат — не «не в строю»; его выручка не должна пропадать");
+    assert.deepEqual(
+      r.machines.map((m) => [m.serial, m.name]).sort(),
+      [
+        ["2508160359", "American Hospital"],
+        ["2508160376", "Olma Администрация"],
+        ["2508160399", "2508160399"],
+      ].sort(),
+      "имя автомата без карточки — его серийник, а не пустая строка",
+    );
+    assert.equal(r.totals.qty, 16);
+  });
+
+  it("R-P5b-1: деньги не читаются из product_sale/machine_sale", async () => {
+    const s = сервис({ sales: ПРОД_ПРОДАЖИ, products: ПРАЙС, entities: ПАРК });
+    // Стаб бросает на этих таблицах: если расчёт когда-нибудь их коснётся,
+    // тест упадёт здесь, а не на проде завышением штук в 36 раз.
+    await s.margin(30, СЕЙЧАС);
+    await s.deadStock(21, СЕЙЧАС);
+    await s.priceChanges(30, СЕЙЧАС);
+    await s.priceGap(14, СЕЙЧАС);
   });
 
   it("порог низкой маржи берётся из настройки, а не из константы", async () => {
@@ -317,12 +386,40 @@ describe("Аналитика: себестоимость прогона (R-P5b-2
         },
       ],
     });
-    const { cost, source } = await s.costIndex(СЕЙЧАС);
+    const { cost, sourceOf, counts } = await s.costIndex(СЕЙЧАС);
 
-    assert.equal(source, "orders");
     assert.equal(cost("Moxito Lime 330ml"), 9000);
+    assert.equal(sourceOf("Moxito Lime 330ml"), "orders");
     assert.equal(cost("Lays Сметана-лук"), 13_000, "чего нет в накладных — по карточке");
+    assert.equal(sourceOf("Lays Сметана-лук"), "price", "признак товарный: одна накладная не переводит на неё весь прайс");
     assert.equal(cost("Товар без цены"), null);
+    assert.equal(sourceOf("Товар без цены"), "unknown");
+    assert.deepEqual(counts, { orders: 1, price: 1 });
+  });
+
+  it("два лота взвешиваются по штукам, а не усредняются по ценам", async () => {
+    const s = сервис({
+      products: ПРАЙС,
+      entities: ПАРК,
+      orders: [
+        {
+          status: "received",
+          receivedAt: момент(день(-30)),
+          positions: [{ product: "Moxito Lime 330ml", order: 10, price: 10_000 }],
+        },
+        {
+          status: "received",
+          receivedAt: момент(день(-2)),
+          positions: [{ product: "Moxito Lime 330ml", order: 90, price: 20_000 }],
+        },
+      ],
+    });
+    const { cost } = await s.costIndex(СЕЙЧАС);
+
+    // (10×10 000 + 90×20 000) / 100 = 19 000. Среднее двух ЦЕН дало бы 15 000 —
+    // на 4 000 сум с единицы мимо, и это ровно та ошибка, которую прячет
+    // подмена `order` на любое другое поле позиции.
+    assert.equal(cost("Moxito Lime 330ml"), 19_000);
   });
 
   it("накладная старше окна себестоимость не двигает", async () => {
@@ -337,9 +434,9 @@ describe("Аналитика: себестоимость прогона (R-P5b-2
         },
       ],
     });
-    const { cost, source } = await s.costIndex(СЕЙЧАС);
+    const { cost, sourceOf } = await s.costIndex(СЕЙЧАС);
 
-    assert.equal(source, "price");
+    assert.equal(sourceOf("Moxito Lime 330ml"), "price");
     assert.equal(cost("Moxito Lime 330ml"), 9800);
   });
 });
@@ -482,11 +579,9 @@ describe("Аналитика: цены и витрина (R-P5b-5, R-P5b-6)", ()
       r.purchase.map((x) => [x.product, x.from, x.to]),
       [["Montella 330ml", 20_000, 22_000]],
     );
-    const месяц = день(-30).slice(0, 7);
-    assert.ok(
-      r.monthly.some((m) => m.month === месяц && m.product === "LaimonFresh Lime 330ml" && m.retail !== null),
-      "помесячная динамика — то, ради чего панель зовёт этот отчёт",
-    );
+    // Помесячная динамика — отдельный тест ниже: в 30-суточном окне ПОЛНОГО
+    // месяца нет, и обрезок панели не отдаётся.
+    assert.deepEqual(r.monthly, []);
   });
 
   it("наблюдение приёмки — вторая лента закупочных цен", async () => {
@@ -543,6 +638,66 @@ describe("Аналитика: цены и витрина (R-P5b-5, R-P5b-6)", ()
     );
     assert.equal(r.lostTotal, 9_000);
     assert.deepEqual(r.noReference, []);
+  });
+
+  it("окно по умолчанию — то же, что у гейта эталона (SALE_PRICE_FACT_DAYS), и отсечка «в строю» уходит в SQL", async () => {
+    const s = сервис({
+      sales: ЛАЙМОН,
+      products: [товар("p1", "LaimonFresh Lime 330ml", "9000", "15000.00")],
+      entities: ПАРК,
+      cards: СКЛАД_НЕ_В_СТРОЮ,
+    });
+    const r = await s.priceGap(undefined, СЕЙЧАС);
+
+    assert.equal(r.days, SALE_PRICE_FACT_DAYS, "своей константы окна у отчёта быть не должно");
+    const условие = s.условияПродаж.at(-1) ?? [];
+    assert.deepEqual(условие.slice(0, 2), [день(-SALE_PRICE_FACT_DAYS), день(-1)], "окно — N полных суток по вчера");
+    assert.ok(
+      условие.includes(SKLAD) && условие.includes(`c${SKLAD}`),
+      "серийники не в строю обязаны отсекаться прямо в SQL, обеими формами написания",
+    );
+  });
+
+  it("снятый с продажи товар не попадает в «эталон не задан»", async () => {
+    const s = сервис({
+      sales: [
+        ...ЛАЙМОН,
+        { dt: день(-3), machineSerial: OLMA, product: "Старый вкус 0,5", qty: "1", amount: "9000" },
+      ],
+      products: [
+        товар("p1", "LaimonFresh Lime 330ml", "9000", "12000.00"),
+        товар("p2", "Старый вкус 0,5", "5000", null, false),
+      ],
+      entities: ПАРК,
+    });
+    const r = await s.priceGap(14, СЕЙЧАС);
+
+    assert.deepEqual(r.noReference, [], "эталон нужен тому, что продаётся дальше");
+    assert.ok(!r.warnings.some((w) => w.code === "no_reference"));
+  });
+
+  it("товар без карточки в прайсе из «эталон не задан» НЕ прячется", async () => {
+    const s = сервис({
+      sales: [{ dt: день(-3), machineSerial: OLMA, product: "Неизвестный товар", qty: "1", amount: "9000" }],
+      products: [],
+      entities: ПАРК,
+    });
+    const r = await s.priceGap(14, СЕЙЧАС);
+
+    assert.deepEqual(r.noReference, ["Неизвестный товар"]);
+  });
+
+  it("monthly: только ПОЛНЫЕ месяцы окна", async () => {
+    const s = сервис({ sales: ЛАЙМОН, entities: ПАРК });
+    const узкое = await s.priceChanges(30, СЕЙЧАС);
+    assert.deepEqual(узкое.monthly, [], "в 30 сутках до вчера полного месяца нет — обрезок хуже пустоты");
+
+    const широкое = await s.priceChanges(180, СЕЙЧАС);
+    assert.ok(широкое.monthly.length > 0, "полугодовое окно обязано дать полные месяцы");
+    assert.ok(
+      широкое.monthly.every((m) => m.month >= "2026-03" && m.month <= "2026-07"),
+      `в окне 180 суток до ${день(-1)} полные месяцы — с марта по июль: ${JSON.stringify(широкое.monthly)}`,
+    );
   });
 
   it("сброс кеша: после правки эталона отчёт считается заново", async () => {

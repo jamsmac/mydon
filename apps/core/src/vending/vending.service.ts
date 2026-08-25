@@ -396,6 +396,32 @@ export const PENDING_PURCHASE_TTL_DAYS = 3;
  * актуальную цену» и «набрать штук, чтобы среднее не било единичной
  * продажей»; окно отчёта `price_gap` живёт по этому же числу.
  */
+/**
+ * Парк «в строю», собранный ОТ ДАННЫХ (см. `VendingService.inServicePark`).
+ * `ok` — предикат для строк источника, `inService` — «серийник → как показать»,
+ * `notInService` — кто и почему выброшен (об этом отчёты говорят вслух).
+ */
+export interface InServicePark {
+  inService: Map<string, string>;
+  notInService: Map<string, { name: string; status: string }>;
+  ok: (serial: string) => boolean;
+}
+
+/**
+ * Сырые формы серийников автоматов НЕ в строю — чтобы отсечь их прямо в SQL.
+ *
+ * Список отрицательный (кого исключить), а не положительный (кого оставить):
+ * положительный означал бы «нет карточки → мимо отчёта», а это ровно то
+ * правило, от которого уходит `inServicePark`. Формы обе (с приставкой «c» и
+ * без): в базе лежит то, что прислал источник. Регистр не перебираем — SQL
+ * лишь сужает чтение, решает всё равно `InServicePark.ok`.
+ */
+export function notInServiceSerialForms(notInService: Iterable<string>): string[] {
+  const формы: string[] = [];
+  for (const serial of notInService) формы.push(serial, `c${serial}`);
+  return формы;
+}
+
 export const SALE_PRICE_FACT_DAYS = 14;
 
 /** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
@@ -1407,6 +1433,42 @@ export class VendingService {
   }
 
   /**
+   * Парк «в строю» СРЕДИ ТЕХ АВТОМАТОВ, ЧТО ЕСТЬ В ДАННЫХ (R-P5b-1).
+   *
+   * ОТ ДАННЫХ, А НЕ ОТ РЕЕСТРА. Соблазн собрать множество из `nameBySerial` и
+   * оставить пересечение выглядит эквивалентным, но означает другое правило:
+   * «нет карточки → не в строю». Серийник без карточки — это НОВЫЙ автомат
+   * (или карточка, которую забыли завести), и его деньги молча выпадали бы из
+   * маржи, а остаток — из мёртвого стока. Не в строю бывает только тот, про
+   * кого карточка ПРЯМО ЭТО ГОВОРИТ (`status ≠ in_service`) — та же логика,
+   * что у `inServiceOk` в плане закупа.
+   *
+   * Имя для витрины: из реестра, а если карточки нет — сам серийник. Показать
+   * владельцу пустое имя хуже, чем показать номер.
+   *
+   * `serials` — сырые серийники строк источника (продажи, остатки), канон
+   * наводится здесь: «c2508160376» и «2508160376» — один автомат.
+   */
+  inServicePark(
+    serials: Iterable<string>,
+    registry: { notInService: Map<string, { name: string; status: string }>; nameBySerial: Map<string, string> },
+  ): InServicePark {
+    const inService = new Map<string, string>();
+    const notInService = new Map<string, { name: string; status: string }>();
+    for (const raw of serials) {
+      const canon = normalizeMachineSerial(raw);
+      const снят = registry.notInService.get(canon);
+      if (снят) notInService.set(canon, снят);
+      else inService.set(canon, registry.nameBySerial.get(canon) ?? canon);
+    }
+    return {
+      inService,
+      notInService,
+      ok: (serial: string) => !registry.notInService.has(normalizeMachineSerial(serial)),
+    };
+  }
+
+  /**
    * Настройка маршрута обхода: база важнее env, env важнее дефолта — тот же
    * резолвер, что у панели настроек, чтобы правка владельца работала сразу.
    */
@@ -2366,14 +2428,18 @@ export class VendingService {
       this.machineRegistry(),
     ]);
 
-    const вСтрою = new Set<string>();
-    for (const serial of registry.nameBySerial.keys()) {
-      if (!registry.notInService.has(serial)) вСтрою.add(serial);
-    }
+    // Парк собирается ОТ СТРОК ПРОДАЖ, а не от реестра: у автомата без
+    // карточки продажи реальные, и выбрасывать их значит занижать факт витрины
+    // (см. `inServicePark`). Мимо факта идут только те, про кого карточка прямо
+    // говорит «не в строю» — на проде это SKLAD 4S, «продавший» 1 шт 09.07.
+    const парк = this.inServicePark(
+      rows.map((r) => r.machineSerial),
+      registry,
+    );
 
     return retailFactByProduct(
       rows
-        .filter((r) => вСтрою.has(normalizeMachineSerial(r.machineSerial)))
+        .filter((r) => парк.ok(r.machineSerial))
         .map((r) => ({ product: this.resolveProduct(r.product, aliases), qty: Number(r.qty), amount: Number(r.amount) })),
     );
   }
