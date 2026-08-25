@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { and, desc, eq, gte, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
 import {
   approval,
@@ -8,6 +8,7 @@ import {
   machineCard,
   machineSale,
   machineSlot,
+  person,
   productSale,
   purchase,
   sale,
@@ -124,6 +125,12 @@ export const INSERT_CHUNK = 500;
  * Разбить строки на пачки для отдельных INSERT. Пустой список — ни одной
  * пачки: `values([])` Postgres не примет.
  */
+function пачками<T>(rows: T[], size = INSERT_CHUNK): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
+  return out;
+}
+
 /** Окно истории склада по умолчанию: квартал — столько владелец помнит сам. */
 export const STOCK_COUNTS_DAYS_DEFAULT = 90;
 /** Потолок окна: год. Глубже — разовая выгрузка, а не ответ HTTP. */
@@ -140,12 +147,6 @@ function зажатьОкно(days: number): number {
   const n = Math.trunc(days);
   if (!Number.isFinite(n) || n <= 0) return STOCK_COUNTS_DAYS_DEFAULT;
   return Math.min(n, STOCK_COUNTS_DAYS_MAX);
-}
-
-function пачками<T>(rows: T[], size = INSERT_CHUNK): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
-  return out;
 }
 
 /** Автомат, пропущенный при приёме, и почему. */
@@ -651,6 +652,8 @@ interface PurchaseContext {
 
 @Injectable()
 export class VendingService {
+  private readonly logger = new Logger(VendingService.name);
+
   constructor(
     @Inject(DB) private readonly db: Db,
     @Optional() @Inject(ApprovalsService) private readonly approvals?: ApprovalRequester,
@@ -1432,7 +1435,10 @@ export class VendingService {
    */
   async ingestStock(payload: IngestStockPayload, actor = "owner"): Promise<IngestStockResult> {
     const countedAt = payload.countedAt ? new Date(payload.countedAt) : new Date();
-    const { aliasByKey, priceByName, productRows } = await this.loadProductIndex();
+    const [{ aliasByKey, priceByName, productRows }, personId] = await Promise.all([
+      this.loadProductIndex(),
+      this.известныйСотрудник(payload.personId),
+    ]);
     // Бэкфилл `product_id` (П4, гигиена): строка склада ключуется ИМЕНЕМ, и
     // все 20 строк жили без ссылки на карточку. Переименование товара в
     // справочнике рвало связь остатка с прайсом молча. Резолвер — тот же, что
@@ -1509,7 +1515,7 @@ export class VendingService {
           source: "own",
           extId: null,
           countedAt,
-          personId: payload.personId ?? null,
+          personId,
           note: actor,
         });
       }
@@ -1544,9 +1550,15 @@ export class VendingService {
         await tx
           .insert(vendingStockCount)
           .values(пачка)
-          // Повторный POST того же снимка (ретрай сети, двойное нажатие) не
-          // должен плодить вторую строку. Ключ сужен до СВОИХ строк: у импорта
-          // истории свой ключ идемпотентности — (source, ext_id).
+          // Что ЭТОТ ключ реально ловит: повторный POST снимка С ТЕМ ЖЕ
+          // `countedAt` (ретрай сети, повтор той же строки импорта). Сегодня
+          // `countedAt` не шлёт НИКТО — ни бот, ни панель, — и Core штампует
+          // `new Date()` на каждый запрос: у двух пересчётов подряд моменты
+          // разные, и это не дубль, а два счёта, каждый со своей строкой. То
+          // есть защита ждёт того дня, когда снимок начнут присылать со своим
+          // моментом; пока она просто ничего не стоит.
+          // Ключ сужен до СВОИХ строк: у импорта истории свой ключ
+          // идемпотентности — (source, ext_id).
           .onConflictDoNothing({
             target: [vendingStockCount.source, vendingStockCount.countedAt, vendingStockCount.productName],
             // Предикат ЧАСТИЧНОГО индекса (0069), а не фильтр строк: без него
@@ -1574,6 +1586,27 @@ export class VendingService {
     });
 
     return { items: payload.items.length, adjustments };
+  }
+
+  /**
+   * UUID сотрудника, ЕСЛИ такая карточка есть; иначе `null`.
+   *
+   * DTO проверяет только форму UUID, а колонка `vending_stock_count.person_id`
+   * — внешний ключ на `person`: валидный, но чужой идентификатор (карточку
+   * удалили, бот прислал id из другой базы) уронил бы ВЕСЬ пересчёт откатом
+   * транзакции. Инвентаризация на 50 позиций не должна пропадать из-за одного
+   * неизвестного автора: имя актора всё равно остаётся в `note`, а `person_id`
+   * честно пустеет. В лог — предупреждение, иначе потеря авторства была бы
+   * молчаливой.
+   */
+  private async известныйСотрудник(id?: string): Promise<string | null> {
+    if (!id) return null;
+    const [row] = await this.db.select({ id: person.id }).from(person).where(eq(person.id, id)).limit(1);
+    if (!row) {
+      this.logger.warn(`Пересчёт склада: сотрудника ${id} нет в справочнике — пишу person_id = NULL`);
+      return null;
+    }
+    return row.id;
   }
 
   /** Текущий остаток склада по товарам (для панели/отчётов). */

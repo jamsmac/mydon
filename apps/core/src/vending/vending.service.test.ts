@@ -7,6 +7,7 @@ import {
   event,
   machineCard,
   machineSale,
+  person,
   productSale,
   purchase,
   sale,
@@ -178,6 +179,8 @@ function writeDb(
   stockRows: unknown[] = [],
   /** Карточки автоматов реестра — для привязки слотов к entity. */
   machineCards: { id: string; externalRef: string | null; type?: string }[] = [],
+  /** Справочник сотрудников: `person_id` пересчёта — внешний ключ на него. */
+  people: { id: string }[] = [],
 ) {
   const inserts: { table: string; values: unknown }[] = [];
   // Реальные строки vending_stock всегда имеют countedAt (NOT NULL) — большинство
@@ -242,6 +245,16 @@ function writeDb(
           // Thenable + .where(): machineIdBySerial() фильтрует по типу.
           const rows = Promise.resolve(machineCards);
           return { where: () => rows, then: rows.then.bind(rows) };
+        }
+        if (t === person) {
+          // `.where(eq(person.id, ?)).limit(1)` — и стаб ОБЯЗАН фильтровать:
+          // иначе «чужой uuid гасится в NULL» проверялось бы пустой фикстурой.
+          return {
+            where: (cond?: unknown) => {
+              const искомый = параметрыSQL(cond);
+              return { limit: async (n: number) => people.filter((p) => искомый.includes(p.id)).slice(0, n) };
+            },
+          };
         }
         const rows = Promise.resolve(call++ === 0 ? aliases : products);
         return { where: () => rows, then: rows.then.bind(rows) };
@@ -1501,14 +1514,31 @@ describe("Вендинг Core: история пересчётов склада 
     assert.match(текстSQL(ключ.where), /'own'/);
   });
 
+  const СОТРУДНИК = "11111111-1111-1111-1111-111111111111";
+
   it("пересчёт от имени сотрудника проставляет person_id (импорт и безымянный ввод — NULL)", async () => {
-    const { db, inserts } = writeDb(АЛИАСЫ, ПРАЙС);
+    const { db, inserts } = writeDb(АЛИАСЫ, ПРАЙС, [], [], [{ id: СОТРУДНИК }]);
     await new VendingService(db).ingestStock(
-      { personId: "11111111-1111-1111-1111-111111111111", items: [{ product: "Montella pet 0.33", quantity: 7 }] },
+      { personId: СОТРУДНИК, items: [{ product: "Montella pet 0.33", quantity: 7 }] },
       "bot:operator",
     );
     const строка = строкиТаблицы(inserts, "vending_stock_count")[0]! as Record<string, unknown>;
-    assert.equal(строка.personId, "11111111-1111-1111-1111-111111111111");
+    assert.equal(строка.personId, СОТРУДНИК);
+  });
+
+  it("чужой (пусть и валидный) uuid не роняет пересчёт: person_id гасится в NULL", async () => {
+    // DTO проверяет только ФОРМУ uuid, а колонка — внешний ключ на `person`:
+    // карточку удалили или бот прислал id из другой базы — и лист на 50 позиций
+    // пропал бы откатом транзакции целиком. Имя актора остаётся в `note`.
+    const { db, inserts } = writeDb(АЛИАСЫ, ПРАЙС, [], [], [{ id: СОТРУДНИК }]);
+    const res = await new VendingService(db).ingestStock(
+      { personId: "99999999-9999-9999-9999-999999999999", items: [{ product: "Montella pet 0.33", quantity: 7 }] },
+      "bot:operator",
+    );
+    assert.equal(res.items, 1, "пересчёт обязан примениться");
+    const строка = строкиТаблицы(inserts, "vending_stock_count")[0]! as Record<string, unknown>;
+    assert.deepEqual([строка.personId, строка.note], [null, "bot:operator"]);
+    assert.equal(строкиТаблицы(inserts, "vending_stock").length, 1, "и остаток записан");
   });
 
   it("два алиаса одного товара в одном листе — одна строка истории, как и один остаток", async () => {
@@ -1541,27 +1571,6 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
     countedAt: new Date(`${dt}T09:00:00+05:00`),
   });
 
-  /** Значения-параметры из условия drizzle — тот же приём, что в стабе здоровья сбора. */
-  function параметры(cond: unknown): string[] {
-    const out: string[] = [];
-    const walk = (n: unknown): void => {
-      if (!n || typeof n !== "object") return;
-      if (Array.isArray(n)) {
-        for (const x of n) walk(x);
-        return;
-      }
-      const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
-      if (Array.isArray(chunks)) {
-        for (const c of chunks) walk(c);
-        return;
-      }
-      const v = (n as { value?: unknown }).value;
-      if (typeof v === "string") out.push(v);
-    };
-    walk(cond);
-    return out;
-  }
-
   function historyDb(rows: ИсторияRow[], aliases: unknown[] = [], products: unknown[] = []) {
     const db = {
       select: () => ({
@@ -1573,7 +1582,7 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
           let текущие = rows;
           const chain: Record<string, unknown> = {};
           chain.where = (cond?: unknown) => {
-            const п = параметры(cond);
+            const п = параметрыSQL(cond).filter((v): v is string => typeof v === "string");
             const дата = п.find((v) => /^\d{4}-\d{2}-\d{2}$/.test(v));
             const имя = п.find((v) => !/^\d{4}-\d{2}-\d{2}$/.test(v));
             текущие = текущие.filter((r) => (дата === undefined || r.dt >= дата) && (имя === undefined || r.productName === имя));
@@ -3081,6 +3090,10 @@ function мир(opts: {
  * проверить границы окна в юнит-тесте — прочитать сами параметры. Что
  * `dt BETWEEN` действительно так работает в Postgres, проверяет дымовой
  * прогон.
+ *
+ * Ею же ФИЛЬТРУЮТ стабы, которым фильтровать обязательно (справочник
+ * сотрудников, история склада): отдай стаб фикстуру как есть — и «нашли по id»
+ * проверялось бы содержимым фикстуры, а не кодом сервиса.
  */
 function параметрыSQL(x: unknown): unknown[] {
   const out: unknown[] = [];

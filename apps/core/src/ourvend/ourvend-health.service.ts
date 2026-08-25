@@ -3,12 +3,10 @@ import { desc } from "drizzle-orm";
 import { ourvendSaleSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
 import { staleHours, type OurvendHealth, type OurvendSyncRun } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
-import { readIntSetting } from "../system/settings";
 import { ReportCache } from "../vending/report-cache";
 import { failedStreak, STREAK_SCAN_LIMIT } from "../vending/sync-streak";
 import { OurvendParityService } from "./ourvend-parity.service";
-import { lastSuccessRunAt } from "./sync-runs";
-import { SYNC_STALE_HOURS_FALLBACK } from "./sync-stale.service";
+import { lastSuccessRunAt, syncStaleThreshold } from "./sync-runs";
 
 /**
  * Здоровье сбора OurVend (R-P5b-8): прогоны, серия отказов, свежесть снимков,
@@ -117,8 +115,10 @@ export class OurvendHealthService {
       // Порог застоя — В ОТВЕТЕ, а не только у сторожа: бот и панель рисуют
       // «⛔ сбор стоит» сравнением `staleHours >= staleThresholdH`, и своя
       // константа у каждого разошлась бы с базой в тот же день, когда владелец
-      // подвинет порог в панели настроек (R-P8a-6).
-      readIntSetting(this.db, "SYNC_STALE_HOURS", SYNC_STALE_HOURS_FALLBACK, this.logger),
+      // подвинет порог в панели настроек (R-P8a-6). Считает его ОДНА функция
+      // на двоих (`syncStaleThreshold`) — иначе витрина показывала бы порог,
+      // по которому сторож не тревожит.
+      syncStaleThreshold(this.db, this.logger),
     ]);
 
     const серия = failedStreak(прогоны);

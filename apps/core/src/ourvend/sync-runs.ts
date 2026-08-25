@@ -1,11 +1,14 @@
+import type { Logger } from "@nestjs/common";
 import { desc, eq } from "drizzle-orm";
 import { vendingSyncRun } from "@mydon/db";
 import type { OurvendSyncRun } from "@mydon/shared";
 import type { Db } from "../db/db.module";
+import { readIntSetting } from "../system/settings";
 
 /**
- * Два вопроса к журналу прогонов сбора, которые задают ДВОЕ: отчёт о здоровье
- * (`OurvendHealthService`) и сторож застоя (`SyncStaleService`).
+ * Три вопроса о сборе, которые задают ДВОЕ: отчёт о здоровье
+ * (`OurvendHealthService`) и сторож застоя (`SyncStaleService`) — два к журналу
+ * прогонов и один к настройкам.
  *
  * Отдельный модуль, а не метод сервиса, по двум причинам. Первая: сторож не
  * может звать `health()` — внутри отчёта весь сырой SQL паритета, и гонять его
@@ -50,4 +53,29 @@ export async function lastRunStatus(db: Db): Promise<OurvendSyncRun["status"] | 
     .orderBy(desc(vendingSyncRun.startedAt))
     .limit(1);
   return row?.status ?? null;
+}
+
+/** Порог застоя, если настройки нет: сбор ходит раз в 3 ч, 6 ч = два пропуска подряд. */
+export const SYNC_STALE_HOURS_FALLBACK = 6;
+
+/**
+ * Порог застоя сбора, часов — ОДНО число для сторожа и для витрины.
+ *
+ * ПОЧЕМУ ЗДЕСЬ, А НЕ ДВУМЯ ФОРМУЛАМИ. Отчёт отдаёт порог наружу
+ * (`OurvendHealth.staleThresholdH`), и бот с панелью рисуют «⛔ сбор стоит»
+ * сравнением `staleHours >= staleThresholdH`. Пока пол в один час стоял только
+ * у сторожа, `SYNC_STALE_HOURS=0` из env (панель такое отобьёт валидатором,
+ * env — нет) давал вечный бейдж «сбор стоит» при молчащем стороже, а `2.5` —
+ * бейдж по 2.5 ч против тревоги по 2 ч. Витрина обязана показывать ровно то
+ * число, по которому будят владельца.
+ *
+ * ПОЛ В ОДИН ЧАС. `readIntSetting` пропускает ноль как осознанное значение (для
+ * порогов-сумм это «тревожить на любую потерю»), но порог «0 часов» означает
+ * тревогу в КАЖДЫЙ прогон крона — 48 сообщений в сутки при живом сборе.
+ * Дробь усекается: часы здесь считаются целыми, а «2.5» в настройке — это
+ * описка, а не пожелание получать тревогу на середине часа.
+ */
+export async function syncStaleThreshold(db: Db, logger?: Logger): Promise<number> {
+  const настройка = await readIntSetting(db, "SYNC_STALE_HOURS", SYNC_STALE_HOURS_FALLBACK, logger);
+  return Math.max(1, Math.trunc(настройка));
 }

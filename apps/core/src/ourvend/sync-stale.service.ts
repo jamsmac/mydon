@@ -4,11 +4,11 @@ import { and, eq, gte } from "drizzle-orm";
 import { event } from "@mydon/db";
 import { staleHours, tashkentDayStartOf, TZ } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
-import { readIntSetting } from "../system/settings";
-import { lastRunStatus, lastSuccessRunAt } from "./sync-runs";
+import { lastRunStatus, lastSuccessRunAt, syncStaleThreshold } from "./sync-runs";
 
-/** Порог застоя, если настройки нет: сбор ходит раз в 3 ч, 6 ч = два пропуска подряд. */
-export const SYNC_STALE_HOURS_FALLBACK = 6;
+// Порог живёт в `sync-runs.ts` и реэкспортируется отсюда: его читают ДВОЕ
+// (сторож и отчёт), и вторая формула уже расходилась с первой на поле в час.
+export { SYNC_STALE_HOURS_FALLBACK } from "./sync-runs";
 
 /** Тип события сторожа — им же ключуется дедуп «раз в ташкентские сутки». */
 export const SYNC_STALE_EVENT = "ourvend.sync_stale";
@@ -72,17 +72,14 @@ export class SyncStaleService implements OnModuleInit, OnApplicationShutdown {
    * прогона тестов.
    */
   async check(now = new Date()): Promise<{ staleHours: number | null; threshold: number; emitted: boolean }> {
-    const [успех, статус, настройка] = await Promise.all([
+    const [успех, статус, threshold] = await Promise.all([
       lastSuccessRunAt(this.db),
       lastRunStatus(this.db),
-      readIntSetting(this.db, "SYNC_STALE_HOURS", SYNC_STALE_HOURS_FALLBACK, this.logger),
+      // Тот же расчёт порога, что отдаёт наружу отчёт о здоровье: витрина
+      // сравнивает с числом, по которому будят владельца, а не со своим.
+      syncStaleThreshold(this.db, this.logger),
     ]);
 
-    // Пол в один час: `readIntSetting` пропускает ноль как осознанное значение
-    // (для порогов-сумм это «тревожить на любую потерю»), но порог «0 часов»
-    // означал бы тревогу в КАЖДЫЙ прогон крона — то есть 48 сообщений в сутки
-    // при живом сборе.
-    const threshold = Math.max(1, Math.trunc(настройка));
     const успехAt = успех ? успех.toISOString() : null;
     const часы = staleHours(успехAt, now);
 
