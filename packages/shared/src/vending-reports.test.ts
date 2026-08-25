@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   deadStock, isoWeekTashkent, isoWeekFromKey, marginByMachine, previousIsoWeek,
-  priceChanges, priceGap, retailDaily, weekCompare, weightedCost, type SaleRow,
+  priceChanges, priceGap, retailDaily, weekCompare, weightedCost,
+  type SaleRow, type StockPosition,
 } from "./vending-reports";
 
 const OLMA = "2508160376", AH = "2508160359", SKLAD = "2508160360";
@@ -31,6 +32,10 @@ describe("Маржа по проданному (R-P5b-1, R-P5b-3)", () => {
     const ah = r.machines.find((m) => m.serial === AH)!;
     assert.deepEqual([ah.unknownUnits, ah.cogs], [4, 8_000]);
     assert.deepEqual([r.unknownProducts, r.totals.unknownUnits], [["Новинка без цены"], 4]);
+    // Главное в R-P5b-2: 40 000 без цены закупа ОСТАЮТСЯ выручкой. Выброси их —
+    // и сюита без этих двух строк осталась бы зелёной, а деньги бы пропали.
+    assert.equal(ah.revenue, 51_000);
+    assert.equal(r.totals.revenue, 120_000);
   });
   it("низкая и отрицательная маржа помечены; нет продаж — не выдуманный процент", () => {
     const lays = r.products.find((p) => p.product === "Lays Сметана-лук 50gr")!;
@@ -39,6 +44,45 @@ describe("Маржа по проданному (R-P5b-1, R-P5b-3)", () => {
     assert.equal(marginByMachine([s(OLMA, "Lays Сметана-лук 50gr", 1, 12_000)], cost, { days: 1, from: "a", to: "b", inService: парк }).products[0]!.low, true);
     const пусто = marginByMachine([], cost, { days: 30, from: "a", to: "b", inService: парк });
     assert.deepEqual([пусто.machines.length, пусто.totals.pct, пусто.totals.revenue], [0, null, 0]);
+  });
+});
+
+describe("Канон имени товара (R-P5b-2)", () => {
+  it("два написания одного товара — одна строка, одна себестоимость, ноль «без цены»", () => {
+    const r = marginByMachine([
+      s(OLMA, "Moxito Lime 330ml", 2, 24_000),
+      s(AH, "MOXITO LIME 330ML", 3, 36_000), // тот же товар, другое написание
+    ], cost, { days: 30, from: "a", to: "b", inService: парк });
+    assert.equal(r.products.length, 1);
+    assert.deepEqual([r.products[0]!.product, r.products[0]!.qty, r.products[0]!.cogs], ["Moxito Lime 330ml", 5, 49_000]);
+    assert.deepEqual([r.totals.unknownUnits, r.unknownProducts], [0, []]);
+    // и в самом автомате написание тоже одно — витрина не двоится
+    assert.equal(r.machines.find((m) => m.serial === AH)!.products[0]!.product, "Moxito Lime 330ml");
+  });
+});
+
+describe("Боевые числа прода (inventory-prod.md §1, §9)", () => {
+  // Агрегат по автомату прямо из таблицы §1: штуки и выручка — как в проде,
+  // себестоимость единицы = закуп автомата / его штуки.
+  const закуп = new Map([
+    ["Olma · 31 SKU (агрегат §1)", 4_260_615 / 668],
+    ["American Hospital · 34 SKU (агрегат §1)", 2_240_264 / 379],
+  ]);
+  const r = marginByMachine([
+    s(OLMA, "Olma · 31 SKU (агрегат §1)", 668, 5_882_000),
+    s(AH, "American Hospital · 34 SKU (агрегат §1)", 379, 3_092_000),
+  ], (p) => закуп.get(p) ?? null, { days: 30, from: "2026-07-27", to: "2026-08-25", inService: парк });
+
+  it("маржа 2 473 121 (27.6 %) — то же число, что владелец увидит первым прогоном", () => {
+    assert.deepEqual([r.totals.qty, r.totals.revenue, r.totals.cogs, r.totals.margin, r.totals.pct],
+      [1047, 8_974_000, 6_500_879, 2_473_121, 27.6]);
+    assert.deepEqual([r.totals.unknownUnits, r.machines.some((m) => m.low)], [0, false]);
+  });
+  it("порядок: автоматы и товары по марже убыв. — Olma 1 621 385 (27.6 %), AH 851 736 (27.5 %)", () => {
+    assert.deepEqual(r.machines.map((m) => [m.serial, m.margin, m.pct]), [
+      [OLMA, 1_621_385, 27.6], [AH, 851_736, 27.5],
+    ]);
+    assert.deepEqual(r.products.map((x) => x.margin), [1_621_385, 851_736]);
   });
 });
 
@@ -67,6 +111,18 @@ describe("Мёртвый сток 21 день (R-P5b-4)", () => {
     assert.deepEqual(r.warehouse.map((x) => [x.product, x.value, x.noPrice]), [["Без цены", 0, true]]);
     assert.equal(r.noPriceCount, 1);
   });
+  it("порядок: по оценке убыв. — сводка берёт «топ-5» первыми строками", () => {
+    assert.deepEqual(r.machines.map((x) => x.value), [121_000, 67_500, 40_000, 40_000, 22_000]);
+  });
+  it("поля выборки БД в отчёт не утекают: строка собирается явно", () => {
+    const изБД = {
+      product: "TUC Sour cream", qty: 5, serial: OLMA, machineName: "Olma Администрация",
+      productId: 7, countedAt: "2026-08-01T03:00:00Z",
+    } as StockPosition;
+    const r3 = deadStock([], [изБД], new Set<string>(), c, 21, "2026-08-04");
+    assert.deepEqual(Object.keys(r3.machines[0]!).sort(),
+      ["machineName", "noPrice", "product", "qty", "serial", "value"]);
+  });
 });
 
 describe("Изменения цен >5 % (R-P5b-5)", () => {
@@ -84,6 +140,17 @@ describe("Изменения цен >5 % (R-P5b-5)", () => {
   it("ровно одна находка витрины: LaimonFresh 15000→12000 (−20.0 %)", () => {
     assert.deepEqual(priceChanges([], retailDaily(продажи), 5, 30).retail,
       [{ product: "LaimonFresh Lime 330ml", from: 15_000, to: 12_000, pct: -20, at: "2026-07-08" }]);
+  });
+  it("дробное деление: 3 шт на 25 000 → 8 333 (спека §5)", () => {
+    assert.deepEqual(retailDaily([s(OLMA, "Cheers Сметана-зелень 70gr", 3, 25_000, "2026-07-07")]),
+      [{ product: "Cheers Сметана-зелень 70gr", dt: "2026-07-07", price: 8_333 }]);
+  });
+  it("порядок: свежие изменения сверху", () => {
+    const r = priceChanges([
+      { product: "Раньше", oldPrice: 10_000, newPrice: 12_000, at: "2026-08-10" },
+      { product: "Позже", oldPrice: 10_000, newPrice: 12_000, at: "2026-08-12" },
+    ], [], 5, 30);
+    assert.deepEqual(r.purchase.map((x) => x.product), ["Позже", "Раньше"]);
   });
   it("закупочные — из событий; нулевая прошлая цена не даёт +1269 %", () => {
     const r = priceChanges([
@@ -108,6 +175,11 @@ describe("Витрина против эталона (R-P5b-6)", () => {
     ]);
     assert.deepEqual([r.lostTotal, r.noReference], [60_000, ["TUC Sour cream"]]);
   });
+  it("эталон из numeric(12,2): в отчёте все деньги целые, без копеечного хвоста", () => {
+    const k = priceGap([{ product: "X", qty: 2, amount: 25_000 }], new Map([["X", 15_000.55]]), 5, 14);
+    assert.deepEqual([k.rows[0]!.reference, k.rows[0]!.fact, k.rows[0]!.gap, k.rows[0]!.lost, k.lostTotal],
+      [15_001, 12_500, 2_501, 5_002, 5_002]);
+  });
 });
 
 describe("Недели по Ташкенту и себестоимость окна (R-P5b-7, R-P5b-2)", () => {
@@ -124,6 +196,8 @@ describe("Недели по Ташкенту и себестоимость ок�
     assert.deepEqual(weekCompare({ qty: 248, revenue: 2_157_000, margin: 607_595 }, { qty: 285, revenue: 2_600_000, margin: 683_730 }),
       { qty: -37, revenue: -443_000, margin: -76_135, qtyPct: -13, revenuePct: -17, marginPct: -11.1 });
     assert.equal(weekCompare({ qty: 1, revenue: 1, margin: 1 }, { qty: 0, revenue: 0, margin: 0 }).revenuePct, null);
+    // «-0 сум» в JSON отчёта — не число, а дефект округления
+    assert.equal(Object.is(weekCompare({ qty: 0, revenue: 0.4, margin: 0 }, { qty: 0, revenue: 0.8, margin: 0 }).revenue, -0), false);
   });
   it("взвешенная себестоимость: Σ(price×qty)/Σqty; пусто → null (не ноль)", () => {
     assert.equal(weightedCost([{ price: 10_000, qty: 3 }, { price: 12_000, qty: 1 }]), 10_500);

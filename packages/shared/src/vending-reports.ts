@@ -1,6 +1,7 @@
+import { DAY } from "./expiry";
 import { normalizeMachineSerial } from "./machine-serial";
 import { tashkentDay } from "./tashkent-time";
-import { normalizeProductName } from "./vending-calc";
+import { normalizeProductName, priceDeviationPct } from "./vending-calc";
 
 /**
  * Аналитика снек-контура (П5b): маржа, мёртвый сток, изменения цен, разрыв
@@ -52,8 +53,12 @@ function pct1(part: number, whole: number): number | null {
   return v === 0 ? 0 : v; // гасим −0: `deepStrictEqual` отличает его от 0
 }
 
-/** Деньги — целые сумы: складываем точно, округляем один раз на выходе. */
-const money = (v: number): number => (Number.isFinite(v) ? Math.round(v) : 0);
+/**
+ * Деньги — целые сумы: складываем точно, округляем один раз на выходе.
+ * `|| 0` гасит `-0` (`Math.round(-0.4)` даёт именно его): `deepStrictEqual`
+ * отличает `-0` от `0`, а в JSON отчёта владельцу уехало бы «-0 сум».
+ */
+const money = (v: number): number => (Number.isFinite(v) ? Math.round(v) || 0 : 0);
 
 const num = (v: number): number => (Number.isFinite(v) ? v : 0);
 
@@ -69,18 +74,47 @@ export interface SaleRow {
   amount: number;
 }
 
-/** Себестоимость единицы по каноническому имени. `null` — цены НЕТ (0 ≠ известная цена, R-P5b-2). */
+/**
+ * Себестоимость единицы товара. `null` — цены НЕТ (0 ≠ известная цена, R-P5b-2).
+ *
+ * Индекс обязан быть построен ПО КАНОНУ ИМЕНИ (`normalizeProductName`): модуль
+ * спрашивает цену ровно один раз на канонический ключ и передаёт в запрос
+ * первое встреченное написание. «Moxito Lime 330ml» и «MOXITO LIME 330ML» —
+ * один товар и одна себестоимость; без этого второе написание молча уехало бы
+ * в `unknownUnits` и тихо подняло маржу — ровно то, против чего R-P5b-2.
+ */
 export type CostIndex = (product: string) => number | null;
 
-/** Обёртка над `CostIndex`: кеш на вызов и отсев нуля/мусора в «цены нет». */
+/**
+ * Обёртка над `CostIndex`: один запрос на КАНОНИЧЕСКИЙ ключ за вызов отчёта,
+ * плюс отсев нуля и мусора в «цены нет» (R-P5b-2).
+ */
 function costLookup(cost: CostIndex): (product: string) => number | null {
-  const cache = new Map<string, number | null>();
+  const byKey = new Map<string, number | null>();
   return (product) => {
-    if (cache.has(product)) return cache.get(product) ?? null;
-    const raw = cost(product);
+    const key = normalizeProductName(product);
+    if (byKey.has(key)) return byKey.get(key) ?? null;
+    const raw = cost(product); // спрашиваем первым встреченным написанием
     const value = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
-    cache.set(product, value);
+    byKey.set(key, value);
     return value;
+  };
+}
+
+/**
+ * Одно написание товара на весь отчёт: канон → первое встреченное написание.
+ *
+ * Иначе один и тот же товар выглядел бы в разных автоматах по-разному, и
+ * владелец читал бы две строки там, где товар один.
+ */
+function nameRegistry(): (product: string) => string {
+  const seen = new Map<string, string>();
+  return (product) => {
+    const key = normalizeProductName(product);
+    const hit = seen.get(key);
+    if (hit !== undefined) return hit;
+    seen.set(key, product);
+    return product;
   };
 }
 
@@ -189,6 +223,14 @@ const byMargin = <T extends { margin: number }>(a: T, b: T): number => b.margin 
  * склад-заглушка SKLAD 4S «продал» 1 шт Moxito 09.07, а SKLAD 5S/6S отдают
  * 45 млн сум «остатка» из воздуха. Такие строки не молча теряются, а
  * называются отдельно в `excluded` — иначе расхождение с кассой необъяснимо.
+ *
+ * ПОРЯДОК СТРОК — часть контракта, а не оформление: бот режет «топ-5 и
+ * худшие-3 по марже» (R-P5b-7) прямо этим порядком. Автоматы и товары —
+ * по марже по убыванию, при равенстве по имени (серийнику); `excluded` —
+ * по сумме по убыванию. Закреплено тестами.
+ *
+ * `low` сравнивает ОКРУГЛЁННЫЙ `pct` (14.96 → 15.0 → не помечен): флаг обязан
+ * совпадать с числом, которое владелец видит на витрине.
  */
 export function marginByMachine(
   rows: readonly SaleRow[],
@@ -197,6 +239,7 @@ export function marginByMachine(
 ): MarginReport {
   const lowPct = opts.lowPct ?? MARGIN_LOW_PCT_FALLBACK;
   const unitCost = costLookup(cost);
+  const display = nameRegistry();
 
   const park = new Map<string, { serial: string; name: string }>();
   for (const [serial, name] of opts.inService) park.set(normalizeMachineSerial(serial), { serial, name });
@@ -222,7 +265,7 @@ export function marginByMachine(
     machines.set(serial, machine);
 
     const key = normalizeProductName(row.product);
-    const cell = machine.cells.get(key) ?? emptyCell(row.product);
+    const cell = machine.cells.get(key) ?? emptyCell(display(row.product));
     machine.cells.set(key, cell);
 
     const unit = unitCost(cell.product);
@@ -317,6 +360,10 @@ const byValue = (a: DeadRow, b: DeadRow): number =>
  * Без себестоимости позиция остаётся в отчёте с `value = 0` и `noPrice = true`.
  * Это НЕ «ноль сум»: складывать такие нули в `totalValue` как деньги нельзя,
  * поэтому счётчик `noPriceCount` едет рядом с итогом.
+ *
+ * ПОРЯДОК СТРОК: по оценке по убыванию (при равенстве — товар, затем
+ * серийник). Недельная сводка берёт «топ-5 по оценке» (R-P5b-7) первыми пятью
+ * строками, не пересортировывая. Закреплено тестом.
  */
 export function deadStock(
   warehouse: readonly StockPosition[],
@@ -327,6 +374,7 @@ export function deadStock(
   since: string,
 ): DeadStockReport {
   const unitCost = costLookup(cost);
+  const display = nameRegistry();
 
   const collect = (positions: readonly StockPosition[], key: (p: StockPosition) => string): DeadRow[] => {
     const out: DeadRow[] = [];
@@ -334,7 +382,19 @@ export function deadStock(
       const qty = num(p.qty);
       if (qty <= 0 || moved.has(key(p))) continue;
       const unit = unitCost(p.product);
-      out.push({ ...p, qty, value: unit === null ? 0 : money(qty * unit), noPrice: unit === null });
+      // Строка собирается ПОЛЯМИ, а не `...p`: позиция приезжает из выборки БД
+      // со своими `productId`/`countedAt`, и спред утащил бы их в JSON отчёта —
+      // форма ответа перестала бы совпадать с `DeadRow`, который читают бот и
+      // панель (R-P5b-10).
+      const row: DeadRow = {
+        product: display(p.product),
+        qty,
+        value: unit === null ? 0 : money(qty * unit),
+        noPrice: unit === null,
+      };
+      if (p.serial !== undefined) row.serial = p.serial;
+      if (p.machineName !== undefined) row.machineName = p.machineName;
+      out.push(row);
     }
     return out.sort(byValue);
   };
@@ -390,6 +450,9 @@ export interface PriceChangesReport {
  * обоих автоматах одинакова, а средняя по паре автоматов устойчивее к дырке в
  * сборе, чем цена одного. `dt` — уже закрытый ташкентский бизнес-день из
  * `sale`, своей арифметики времени здесь не нужно.
+ *
+ * ПОРЯДОК СТРОК: товар, затем сутки по возрастанию — лента цен читается
+ * слева направо, и `priceChanges` идёт по ней соседними парами.
  */
 export function retailDaily(rows: readonly SaleRow[]): RetailDailyPrice[] {
   const acc = new Map<string, { product: string; dt: string; qty: number; amount: number }>();
@@ -420,6 +483,10 @@ const byRecency = (a: PriceChange, b: PriceChange): number => byText(b.at, a.at)
  * Прошлая цена `≤ 0` — мусор, а не «цена выросла с нуля»: на проде позиция
  * «Недостача (Рустам)» с нулевой прошлой ценой давала в доноре +1269.6 % и
  * возглавляла список изменений. Такие переходы пропускаются.
+ *
+ * ПОРЯДОК СТРОК: свежие сверху (`at` по убыванию, при равенстве — имя товара):
+ * владельцу важно «что поехало сейчас», а не история с начала окна.
+ * Закреплено тестом.
  */
 export function priceChanges(
   purchase: readonly PurchasePriceEvent[],
@@ -427,9 +494,15 @@ export function priceChanges(
   pct: number,
   days: number,
 ): PriceChangesReport {
-  const threshold = num(pct) / 100;
-  const significant = (from: number, to: number): boolean =>
-    from > 0 && Number.isFinite(to) && Math.abs(to - from) / from > threshold;
+  const limit = num(pct);
+  // Отклонение считает `priceDeviationPct` из `vending-calc` — та же функция,
+  // которой Core закрывает гейт правки цены. Второй копии формулы в репозитории
+  // быть не должно, и правило «прежняя цена ≤ 0 → сравнивать не с чем» тоже
+  // живёт там: на проде это позиция «Недостача (Рустам)», дававшая +1269.6 %.
+  const significant = (from: number, to: number): boolean => {
+    const deviation = priceDeviationPct(to, from);
+    return deviation !== null && deviation > limit;
+  };
   const change = (product: string, from: number, to: number, at: string): PriceChange => ({
     product,
     from,
@@ -500,6 +573,9 @@ export interface PriceGapReport {
  * (`action: "check"`), а не прибыль, которую можно зачесть против недобора.
  * Товары без эталона идут отдельным списком, а не нулевой строкой: строка
  * `reference = 0` выглядела бы как «эталон ноль» и дала бы разрыв в 100 %.
+ *
+ * ПОРЯДОК СТРОК: по `lost` по убыванию — недобор сверху, «продали дороже
+ * эталона» в хвосте. Закреплено тестом.
  */
 export function priceGap(
   fact: readonly { product: string; qty: number; amount: number }[],
@@ -510,7 +586,11 @@ export function priceGap(
   const threshold = num(pct) / 100;
   const refs = new Map<string, number>();
   for (const [product, price] of reference) {
-    if (Number.isFinite(price) && price > 0) refs.set(normalizeProductName(product), price);
+    // `money` здесь обязателен: эталон приезжает из `numeric(12,2)`, и без
+    // округления `gap` считался бы разностью с копейками (15000.55 − 12500 =
+    // 2500.5499999999993) — именно это число и напечатали бы владельцу, при
+    // том что `lost` рядом уже округлён. Деньги в отчёте целые все сразу.
+    if (Number.isFinite(price) && price > 0) refs.set(normalizeProductName(product), money(price));
   }
 
   const acc = new Map<string, { product: string; qty: number; amount: number }>();
@@ -582,8 +662,11 @@ export interface IsoWeek {
   to: string;
 }
 
-const DAY_MS = 86_400_000;
-const WEEK_MS = 7 * DAY_MS;
+// Сутки берём общей константой `DAY` из `expiry.ts` — своей копии 86 400 000
+// в репозитории заводить нельзя. `dayToUtc`/`utcToDay` ниже повторяют приватные
+// `dayNumber`/`isoOfDay` из `maintenance-due.ts`; выносить их в общий модуль —
+// отдельная правка (расширение публичного API пакета), а не хвост этого среза.
+const WEEK_MS = 7 * DAY;
 const BARE_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const WEEK_KEY = /^(\d{4})-(\d{2})$/;
 
@@ -596,14 +679,14 @@ function dayToUtc(day: string): number {
 const utcToDay = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
 /** Понедельник ISO-недели, содержащей момент (Пн = 0). */
-const mondayOf = (ms: number): number => ms - ((new Date(ms).getUTCDay() + 6) % 7) * DAY_MS;
+const mondayOf = (ms: number): number => ms - ((new Date(ms).getUTCDay() + 6) % 7) * DAY;
 
 /** Четверг первой ISO-недели года: он же 4 января по определению стандарта. */
-const week1Thursday = (year: number): number => mondayOf(Date.UTC(year, 0, 4)) + 3 * DAY_MS;
+const week1Thursday = (year: number): number => mondayOf(Date.UTC(year, 0, 4)) + 3 * DAY;
 
 function weekOfUtcDay(ms: number): IsoWeek {
   const monday = mondayOf(ms);
-  const thursday = monday + 3 * DAY_MS; // четверг решает, чьей недели день (ISO 8601)
+  const thursday = monday + 3 * DAY; // четверг решает, чьей недели день (ISO 8601)
   const year = new Date(thursday).getUTCFullYear();
   const week = (thursday - week1Thursday(year)) / WEEK_MS + 1;
   return {
@@ -611,7 +694,7 @@ function weekOfUtcDay(ms: number): IsoWeek {
     year,
     week,
     from: utcToDay(monday),
-    to: utcToDay(monday + 6 * DAY_MS),
+    to: utcToDay(monday + 6 * DAY),
   };
 }
 
@@ -636,7 +719,7 @@ export function isoWeekFromKey(key: string): IsoWeek | null {
 
 /** Предыдущая ISO-неделя: считается от границ, а не вычитанием единицы (год не всегда 52 недели). */
 export function previousIsoWeek(w: IsoWeek): IsoWeek {
-  const monday = BARE_DAY.test(w.from) ? dayToUtc(w.from) : week1Thursday(w.year) + (w.week - 1) * WEEK_MS - 3 * DAY_MS;
+  const monday = BARE_DAY.test(w.from) ? dayToUtc(w.from) : week1Thursday(w.year) + (w.week - 1) * WEEK_MS - 3 * DAY;
   return weekOfUtcDay(monday - WEEK_MS);
 }
 
