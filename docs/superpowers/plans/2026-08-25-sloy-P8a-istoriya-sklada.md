@@ -176,7 +176,7 @@ export function reconcilePurchases(mine: readonly PurchaseFacts[], donor: readon
 - `decodeHtml` — ОДИН проход, `&amp;` заменяется ПОСЛЕДНИМ. Второй проход превратил бы легитимно закодированное `&amp;amp;` в `&`, а порядок «amp первым» дал бы из `&amp;#39;` апостроф там, где его не было. Набор: `&#NN;`/`&#xNN;`, `&quot;`, `&apos;`, `&lt;`, `&gt;`, `&nbsp;`, затем `&amp;`.
 - `canonicalProductName`: декод → снятие `[слит→N]` → `canon(...)`. Снятие пометки — НЕ нечёткое сопоставление: `[слит→23]` не часть имени товара, а служебная приписка панели склада (13 карточек донора). Канона нет → возвращается очищенное сырое имя и `false`.
 - `mapRefill`: серийник — `normalizeMachineSerial` (`C2508160376` → `2508160376`); пустой/NULL серийник → `Unresolved{reason:"no_serial"}` (это 348 «общих» аппаратов); `qty` не число или ≤ 0 → `bad_qty`; `performedAt = tashkentInstant(`${dt}T12:00:00`)!.toISOString()`; `clientKey = `stock:refill:${id}``; `note = "импорт истории mydon-stock"`.
-- `mapStockCount`: служебное имя (после декода и нормализации совпало с `SERVICE_PRODUCT_NAMES`) → `Unresolved{reason:"service_row"}`; `countedAt` донора, если он есть, иначе полдень `dt` — донор писал `counted_at` не всегда, а `NOT NULL` в нашей таблице требует момент, и полночь UTC увела бы строку на предыдущие сутки; `extId = String(id)`. Волна фиксов (R-FW-P2): «склад» донора — три локации, не одна; для строк из неосновной локации (`Холодильник`, `Oq apparat (склад)`) `note` несёт её имя — `место: <name>` (SELECT джойнит `locations`, `location_name` едет вторым полем в `DonorStockCountRow`, см. интерфейсы Task 2 выше); строки остаются раздельными по `ext_id`, дедупа по естественному ключу как не было, так и нет.
+- `mapStockCount`: служебное имя (после декода и нормализации совпало с `SERVICE_PRODUCT_NAMES`) → `Unresolved{reason:"service_row"}`; `countedAt` донора, если он есть, иначе полдень `dt` — донор писал `counted_at` не всегда, а `NOT NULL` в нашей таблице требует момент, и полночь UTC увела бы строку на предыдущие сутки; `extId = String(id)`. Волна фиксов (R-FW-P2): «склад» донора — три локации, не одна; для КАЖДОЙ строки с непустым именем локации (включая основной «Склад (основной)», а не только неосновные `Холодильник`/`Oq apparat (склад)`) `note` несёт её имя — `место: <name>` (SELECT джойнит `locations`, `location_name` едет вторым полем в `DonorStockCountRow`, см. интерфейсы Task 2 выше); строки остаются раздельными по `ext_id`, дедупа по естественному ключу как не было, так и нет.
 - Дедупа по естественному ключу НЕТ ни в одной функции: два залива одного товара в один день на один автомат — законная реальность донора (7 групп), и разные `id` дают разные `client_key`. Механическая склейка съела бы намеренные пары `seed_refills_1415.py`.
 - `reconcilePurchases` сравнивает по `String(id)`; `unitPrice` сравнивается с допуском 0.005 (numeric(15,2) против float донора), `qty` — с допуском 0.005; `dt` — по первым 10 символам.
 
@@ -662,7 +662,7 @@ docker exec mydon-stock-db-1 pg_dump -U mydon mydon | gzip > /opt/backups/stock-
 4. **`--apply` (ЗАПИСЬ по плану).** Та же команда с `--apply`. Затем **архив (ЗАПИСЬ на ФС хоста)**: `mkdir -p /opt/backups/stock-archive && docker exec mydon-stock-db-1 pg_dump -U mydon mydon | gzip > /opt/backups/stock-archive/$(date +%F).sql.gz`; проверить размер файла (`ls -lh`) — пустой gz значит, что дамп упал, а пайп это скрыл.
 5. **Проверка (чтение):**
    - `GET /vending/refills?limit=200` → **107** записей `source='stock-import'`; `GET /vending/refill-events?days=60` — событий детектора по-прежнему **7**, и все без `matched_refill_id`: матчинга задним числом нет, окна детектора (с 13.08) старше импортированных заливов (по 17.07). Это не ошибка импорта.
-   - `GET /vending/stock-counts?days=730` → **460** строк `source='stock-import'` (потолок DTO поднят до 730, R-FW-P3), самая ранняя `dt = 2025-08-17`; строки из локаций «Холодильник»/«Oq apparat (склад)» несут место в `note` (R-FW-P2).
+   - `GET /vending/stock-counts?days=730` → **460** строк `source='stock-import'` (потолок DTO поднят до 730, R-FW-P3), самая ранняя `dt = 2025-08-17`; строки ВСЕХ трёх локаций (включая основной склад) несут место в `note` — `место: <name>` (R-FW-P2).
    - `GET /vending/stock-counts?days=1` → пусто до ближайшего пересчёта; после первого пересчёта владельца — **20** строк `source='own'` (столько позиций в `vending_stock`).
    - `GET /ourvend/health` → `staleHours` < 6 и `staleThresholdH` = 6; в боте «сверка» строки «⛔ сбор стоит» нет.
    - `purchase` по-прежнему **342** (`GET /supply/summary` не изменился) — R-P8a-1 соблюдён.
@@ -704,8 +704,9 @@ Adversarial-ревью на живом проде (`adversarial-prod-data.md`) �
   оценке T2/T3).
 - **Место в `note` (R-FW-P2, T2/T3).** `DonorStockCountRow` получает
   `location_name`; SELECT инвентаризаций джойнит `locations`; `mapStockCount`
-  пишет имя неосновной локации в `note`. Три локации донора, не одна:
-  основной склад 423 строки, Холодильник 20, Oq apparat (склад) 17.
+  пишет имя локации в `note` для КАЖДОЙ строки с непустым именем — включая
+  основную («Склад (основной)»), а не только неосновные. Три локации донора,
+  не одна: основной склад 423 строки, Холодильник 20, Oq apparat (склад) 17.
 - **Потолок окна 730 (R-FW-P3, T4 Step 4).** `StockCountsDto.days`:
   `@Max(730)` вместо `@Max(365)`, дефолт остаётся 90.
 - **`partial` = успех для сторожа (R-FW-P4, T4).** `SyncStaleService.check`

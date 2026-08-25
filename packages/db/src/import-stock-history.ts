@@ -60,6 +60,7 @@ import {
   productIndex,
   reconcilePurchases,
   strictNumber,
+  withoutControlChars,
   type DonorPurchaseRow,
   type DonorRefillRow,
   type DonorStockCountRow,
@@ -298,11 +299,15 @@ export async function importStockHistory(
       product: p.product,
       // Потолок — как у соседнего `note`: колонка `text`, но зеркало закупок не
       // место для донорской строки на мегабайт. «шт»/«упак» в 64 влезают с запасом.
-      unit: d?.unit ? String(d.unit).slice(0, UNIT_MAX) : null,
+      // Та же застава, что у имён (`withoutControlChars`, R-FW-N3): свободный
+      // текст донора (`unit`/`note`) чистим ДО обрезки, а не пропускаем сырым —
+      // U+0000 в этих полях иначе роняет Postgres `invalid byte sequence` и
+      // с ним всю пачку, а не одну строку.
+      unit: d?.unit ? withoutControlChars(String(d.unit)).slice(0, UNIT_MAX) : null,
       qty: String(p.qty),
       unitPrice: p.unitPrice === null ? null : String(p.unitPrice),
       total: total === null ? null : String(total),
-      note: d?.note ? String(d.note).slice(0, NOTE_MAX) : null,
+      note: d?.note ? withoutControlChars(String(d.note)).slice(0, NOTE_MAX) : null,
       source: "stock",
     };
   });

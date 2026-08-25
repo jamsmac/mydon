@@ -281,6 +281,30 @@ describe("Импорт истории склада (R-P8a-8)", () => {
     assert.equal((вставлено.purchase![0] as { unit: string }).unit.length, 64);
   });
 
+  it("управляющий символ в unit/note закупки чистится, а не роняет пачку (R-FW-N3)", async () => {
+    // Заставы годности (R-FW-S2) закрыты для имён товара/места и qty, но
+    // `unit`/`note` ехали в зеркало ТОЛЬКО обрезанными по длине — U+0000 в
+    // свободном тексте донора уронил бы всю пачку той же ошибкой Postgres
+    // `invalid byte sequence for encoding "UTF8": 0x00`. Строка должна
+    // ЛЕЧЬ (очищенной), а не отвалиться.
+    const { db, donor, вставлено } = стенд(
+      {
+        purchases: [
+          {
+            id: 8, dt: "2026-07-13", product: "TUC Sour cream", qty: "6", unit_price: "100",
+            unit: "шт\u0000", note: "заметка\u0000 донора",
+          },
+        ],
+      },
+      { clientKeys: [], extIds: [] },
+    );
+    const r = await importStockHistory(db, donor, { apply: true });
+    assert.deepEqual([r.purchases.toWrite, r.purchases.added], [1, 1]);
+    assert.deepEqual(r.purchases.rejected, []);
+    const строка = вставлено.purchase![0] as { unit: string | null; note: string | null };
+    assert.deepEqual([строка.unit, строка.note], ["шт", "заметка донора"]);
+  });
+
   it("нерешённые имена названы поимённо — это список владельцу, а не ошибка выкатки", async () => {
     const { db, donor } = стенд({ refills: [{ ...ЗАЛИВ, product: "Moxito Mango CAN 0.45" }] }, { clientKeys: [], extIds: [] });
     const r = await importStockHistory(db, donor, { apply: false });

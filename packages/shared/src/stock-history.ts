@@ -202,8 +202,12 @@ export function decodeHtml(raw: string): string {
 const CONTROL_CHARS = /\p{Cc}/u;
 const CONTROL_CHARS_ALL = /\p{Cc}/gu;
 
-/** Имя без управляющих символов — только такое попадает в отчёты и события. */
-function withoutControlChars(raw: string): string {
+/**
+ * Строка без управляющих символов — только такая попадает в отчёты, события
+ * и зеркало закупок (`unit`/`note`, R-FW-N3): та же застава, что и у имён
+ * товара/места, применённая к свободному донорскому тексту.
+ */
+export function withoutControlChars(raw: string): string {
   return raw.replace(CONTROL_CHARS_ALL, "");
 }
 
