@@ -1671,6 +1671,40 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
     assert.equal((await svc.stockCounts(100_000, undefined, СЕЙЧАС)).days, STOCK_COUNTS_DAYS_MAX);
     assert.equal((await svc.stockCounts(Number.NaN, undefined, СЕЙЧАС)).days, STOCK_COUNTS_DAYS_DEFAULT);
   });
+
+  it("потолок — 730 суток, не 365 (R-FW-P3): донор начинается 2025-08-17, старая граница года до этой даты не дотягивалась НИКОГДА", async () => {
+    // Закреплено числом, а не только «зажимается до константы»: константа
+    // сама могла бы тихо остаться 365 при правке соседнего теста.
+    assert.equal(STOCK_COUNTS_DAYS_MAX, 730);
+    const db = historyDb([строка("2026-08-25", "Sprite 250ml", 19)]);
+    assert.equal((await new VendingService(db).stockCounts(730, undefined, СЕЙЧАС)).days, 730);
+  });
+
+  it("окно ВКЛЮЧАЕТ сегодняшние сутки (final review §3, minor): days=1 — только сегодня, days=2 — и вчера", async () => {
+    // Пин на конвенцию `since = tashkentDayStartOf(now) − (дни − 1) × сутки`
+    // (`stockCounts`, `− (дни − 1)`, а не `− дни`): пересчёт, сделанный час
+    // назад, — ровно то, за чем в историю и приходят, и «окно в 1 день»
+    // обязано означать «сегодня», а не «вчера». Откат на `− дни` дал бы
+    // `days=1` вчерашние сутки вместо сегодняшних — этот тест обязан упасть.
+    const db = historyDb([
+      строка("2026-08-25", "Sprite 250ml", 19), // сегодня — СЕЙЧАС = 2026-08-25T13:00+05
+      строка("2026-08-24", "Sprite 250ml", 20), // вчера
+      строка("2026-08-23", "Sprite 250ml", 21), // позавчера
+    ]);
+    const однодневное = await new VendingService(db).stockCounts(1, undefined, СЕЙЧАС);
+    assert.deepEqual(
+      однодневное.rows.map((r) => r.dt),
+      ["2026-08-25"],
+      "days=1 обязан включать СЕГОДНЯ, а не только завершённые сутки",
+    );
+
+    const двухдневное = await new VendingService(db).stockCounts(2, undefined, СЕЙЧАС);
+    assert.deepEqual(
+      двухдневное.rows.map((r) => r.dt),
+      ["2026-08-25", "2026-08-24"],
+      "days=2 — сегодня и вчера, позавчера ещё не входит",
+    );
+  });
 });
 
 describe("Вендинг Core: приём слотов", () => {

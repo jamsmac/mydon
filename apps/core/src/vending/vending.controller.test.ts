@@ -1,12 +1,14 @@
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { plainToInstance } from "class-transformer";
+import { validate } from "class-validator";
 // Константа не входит в публичный экспорт пакета (`dist/index.js` её не
 // реэкспортирует) — читаем напрямую из установленной версии, как для этого
 // требует N1: сверено с `node_modules/@nestjs/throttler` (throttler@6.5.0).
 import { THROTTLER_LIMIT } from "@nestjs/throttler/dist/throttler.constants";
 import type { AnalyticsService } from "./analytics.service";
-import { VendingController } from "./vending.controller";
+import { StockCountsDto, VendingController } from "./vending.controller";
 import type { VendingService } from "./vending.service";
 
 describe("Вендинг Core: троттлинг GET /vending/shrinkage (N1)", () => {
@@ -39,6 +41,36 @@ describe("Вендинг Core: троттлинг GET /vending/stock-counts (П8
     assert.equal(Reflect.getMetadata(THROTTLER_LIMIT + "sustained", handler), 12);
     const keys = Reflect.getMetadataKeys(handler).filter((k): k is string => typeof k === "string");
     assert.ok(!keys.some((k) => k.endsWith("default")), "под именем default ThrottlerGuard ничего не читает");
+  });
+});
+
+/**
+ * Потолок `?days=` для истории склада (R-FW-P3, П8a fix wave; адверсариал
+ * прод-данные №3): старая граница 365 никогда не пускала бы к 26 самым
+ * старым строкам истории (донор начинается 2025-08-17) — она подвинута до
+ * 730. `plainToInstance` со строками, как реально приходят из query: без
+ * `@Transform` DTO `IsInt()` отбивал бы даже валидное значение.
+ */
+describe("StockCountsDto: потолок окна — 730 суток, не 365 (R-FW-P3)", () => {
+  it("730 — новая верхняя граница, законна", async () => {
+    const dto = plainToInstance(StockCountsDto, { days: "730" });
+    assert.deepEqual(await validate(dto), []);
+  });
+
+  it("731 — уже за границей, отказ", async () => {
+    const dto = plainToInstance(StockCountsDto, { days: "731" });
+    assert.ok((await validate(dto)).length > 0, "731 суток не должно проходить валидацию");
+  });
+
+  it("365 — старый потолок больше не особая граница, проходит как любое другое значение внутри окна", async () => {
+    const dto = plainToInstance(StockCountsDto, { days: "365" });
+    assert.deepEqual(await validate(dto), []);
+  });
+
+  it("пустая строка по-прежнему гасится в «не задано», а не в 0/NaN", async () => {
+    const dto = plainToInstance(StockCountsDto, { days: "" });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.days, undefined);
   });
 });
 

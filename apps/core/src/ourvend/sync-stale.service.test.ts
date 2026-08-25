@@ -16,6 +16,13 @@ interface Мир {
   /** Что уже лежит в журнале событий (дедуп). */
   уже?: { type: string; occurredAt: Date }[];
   настройки?: Record<string, string>;
+  /**
+   * Прямой список прогонов — когда сценарий не укладывается в «один успех +
+   * один статус последнего» (R-FW-P4): например, серия из НЕСКОЛЬКИХ
+   * `partial` без единого `success` в журнале вовсе. Задан — `lastSuccessAt`
+   * и `lastRunStatus` игнорируются.
+   */
+  runs?: Прогон[];
 }
 
 /** Все значения-параметры из условия drizzle: стабу надо увидеть и статус, и границу суток. */
@@ -52,15 +59,17 @@ function параметры(cond: unknown): unknown[] {
  */
 function стенд(м: Мир) {
   const МОМЕНТ_ПОСЛЕДНЕГО = new Date("2026-08-25T12:00:00+05:00");
-  const прогоны: Прогон[] = [];
-  if (м.lastSuccessAt) {
-    const at = new Date(м.lastSuccessAt);
-    прогоны.push({ startedAt: at, finishedAt: at, status: "success" });
-  }
-  // Прогон ПОЗЖЕ успеха задаётся явно: без него «последний прогон» — это сам
-  // успех, и статус в событии будет «success».
-  if (м.lastRunStatus) {
-    прогоны.push({ startedAt: МОМЕНТ_ПОСЛЕДНЕГО, finishedAt: МОМЕНТ_ПОСЛЕДНЕГО, status: м.lastRunStatus });
+  const прогоны: Прогон[] = м.runs ? [...м.runs] : [];
+  if (!м.runs) {
+    if (м.lastSuccessAt) {
+      const at = new Date(м.lastSuccessAt);
+      прогоны.push({ startedAt: at, finishedAt: at, status: "success" });
+    }
+    // Прогон ПОЗЖЕ успеха задаётся явно: без него «последний прогон» — это сам
+    // успех, и статус в событии будет «success».
+    if (м.lastRunStatus) {
+      прогоны.push({ startedAt: МОМЕНТ_ПОСЛЕДНЕГО, finishedAt: МОМЕНТ_ПОСЛЕДНЕГО, status: м.lastRunStatus });
+    }
   }
 
   const события: Событие[] = (м.уже ?? []).map((e, i) => ({ id: `e${i}`, type: e.type, occurredAt: e.occurredAt }));
@@ -206,6 +215,32 @@ describe("Сторож «нет успешного прогона» (R-P8a-6)", 
     const итог = await svc.check(СЕЙЧАС);
     assert.equal(итог.threshold, 1);
     assert.equal(итог.emitted, false, "полчаса застоя при поле в час — ещё не тревога");
+  });
+
+  it("R-FW-P4: два partial подряд, ни одного success в журнале — застоя нет: коллектор жив, слоты приходят", async () => {
+    // Без фикса `lastSuccessRunAt` видела бы только `status='success'` —
+    // журнал ниже вообще без успехов означал бы `staleHours: null`, а это
+    // тревожнее большого числа (см. шапку сервиса) → немедленная тревога,
+    // хотя данные шли всё это время.
+    const partial = (at: string): Прогон => ({ startedAt: new Date(at), finishedAt: new Date(at), status: "partial" });
+    const { svc, события } = стенд({
+      runs: [partial("2026-08-25T10:00:00+05:00"), partial("2026-08-25T07:00:00+05:00")],
+    });
+    const итог = await svc.check(СЕЙЧАС);
+    assert.deepEqual([итог.emitted, итог.staleHours], [false, 3], "последний partial (10:00) считается «успехом» для давности");
+    assert.equal(события.length, 0);
+  });
+
+  it("R-FW-P4 minor: порог сравнивается с СЫРЫМ часом, не с округлённым — 5 ч 59 м 49 с ещё не 6 (адверсариал прод-данные №7)", async () => {
+    // Округление `staleHours` (0.1 ч) даёт РОВНО 6.0 на этой отметке:
+    // сравнение по округлённому числу решило бы, что порог 6 пройден, на
+    // 11 секунд раньше настоящей границы — авария 24.08.2026 началась ровно
+    // на ней.
+    const { svc, события } = стенд({ lastSuccessAt: "2026-08-25T07:00:11+05:00" });
+    const итог = await svc.check(СЕЙЧАС);
+    assert.equal(итог.emitted, false, "округлённые 6.0 не должны срабатывать раньше настоящих 6 часов");
+    assert.equal(итог.staleHours, 6, "витрина всё равно показывает округлённое число");
+    assert.equal(события.length, 0);
   });
 });
 

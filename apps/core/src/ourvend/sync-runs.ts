@@ -1,7 +1,7 @@
 import type { Logger } from "@nestjs/common";
-import { desc, eq } from "drizzle-orm";
+import { desc, inArray } from "drizzle-orm";
 import { vendingSyncRun } from "@mydon/db";
-import type { OurvendSyncRun } from "@mydon/shared";
+import { tashkentInstant, type OurvendSyncRun } from "@mydon/shared";
 import type { Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
 
@@ -20,7 +20,19 @@ import { readIntSetting } from "../system/settings";
  */
 
 /**
- * Завершение последнего УСПЕШНОГО прогона. `null` — успехов нет ВОВСЕ.
+ * Завершение последнего прогона, который ДОНЁС ДАННЫЕ — статус `success` ИЛИ
+ * `partial`. `null` — таких прогонов нет ВОВСЕ (R-FW-P4, П8a fix wave;
+ * адверсариал прод-данные №4).
+ *
+ * ПОЧЕМУ `partial` СЧИТАЕТСЯ. Частичный сбор — это когда часть автоматов
+ * ответила и слоты приехали: коллектор ЖИВ, просто не все машины откликнулись
+ * за проход. Пока в счёт шёл только `success`, два `partial` подряд (каждый
+ * честно закрывает прогон, но не двигает «последний успех») читались бы
+ * сторожем и отчётом как 6+ часов ПОЛНОГО молчания и будили владельца «⛔ сбор
+ * OurVend стоит», хотя данные шли всё это время. `failedStreak`
+ * (`sync-streak.ts`) эта правка НЕ трогает: там вопрос другой — «сколько
+ * подряд прогонов ЗАВЕРШИЛОСЬ ОТКАЗОМ», и `partial` там как рвал серию
+ * отказов, так и рвёт (данные ведь приехали) — это уже было верно.
  *
  * Отдельным запросом, а не поиском в показанных прогонах: 200 почасовых строк
  * — это всего ~8 суток, и после недели молчания поле стало бы `null`, то есть
@@ -31,7 +43,7 @@ export async function lastSuccessRunAt(db: Db): Promise<Date | null> {
   const [row] = await db
     .select({ startedAt: vendingSyncRun.startedAt, finishedAt: vendingSyncRun.finishedAt })
     .from(vendingSyncRun)
-    .where(eq(vendingSyncRun.status, "success"))
+    .where(inArray(vendingSyncRun.status, ["success", "partial"]))
     .orderBy(desc(vendingSyncRun.startedAt))
     .limit(1);
   // Успех датируется ЗАВЕРШЕНИЕМ, а не стартом: «последний раз данные приехали
@@ -78,4 +90,34 @@ export const SYNC_STALE_HOURS_FALLBACK = 6;
 export async function syncStaleThreshold(db: Db, logger?: Logger): Promise<number> {
   const настройка = await readIntSetting(db, "SYNC_STALE_HOURS", SYNC_STALE_HOURS_FALLBACK, logger);
   return Math.max(1, Math.trunc(настройка));
+}
+
+/**
+ * Часов с последнего успеха, БЕЗ округления — ЧЕТВЁРТЫЙ общий вопрос сторожа
+ * и отчёта, рядом с тремя выше (П8a fix wave; адверсариал прод-данные №7,
+ * minor «округление порога»).
+ *
+ * ТОЧНОЕ ПРАВИЛО: порог сравнивается с СЫРЫМ числом (эта функция) — округление
+ * `staleHours` из `@mydon/shared` (до 0.1 ч) существует ТОЛЬКО для того, что
+ * видит владелец (`OurvendHealth.staleHours`, текст события сторожа,
+ * `hoursSinceSuccess` в его payload). Смешивать эти два числа значит двигать
+ * ГРАНИЦУ: при пороге 6 «5 ч 59 м 49 с» округляются до ровно 6.0, и сравнение
+ * `6.0 < 6` ложно — сторож решил бы, что срок вышел, на 11 секунд раньше
+ * настоящего порога. Авария 24.08.2026 (`adversarial-prod-data.md` №13)
+ * началась ровно на этой границе.
+ *
+ * Функция — не альтернативная формула: та же зона (`tashkentInstant`, а не
+ * часы процесса) и то же зажатие отрицательного возраста в ноль (успех «из
+ * будущего» — расхождение часов агента и базы, не повод рисовать минус),
+ * просто без последнего шага округления `staleHours`. Дублирует шаги
+ * НАМЕРЕННО: тянуть недо-округлённое число из `staleHours` изнутри
+ * `@mydon/shared` невозможно, не разойдясь с ним, а лишний импорт ради одной
+ * строки арифметики того не стоит.
+ */
+export function rawStaleHours(lastSuccessAt: string | null, now: Date): number | null {
+  if (!lastSuccessAt) return null;
+  const at = tashkentInstant(lastSuccessAt);
+  if (!at) return null;
+  const мс = Math.max(0, now.getTime() - at.getTime());
+  return мс / 3_600_000;
 }

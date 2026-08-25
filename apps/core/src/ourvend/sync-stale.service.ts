@@ -4,7 +4,7 @@ import { and, eq, gte } from "drizzle-orm";
 import { event } from "@mydon/db";
 import { staleHours, tashkentDayStartOf, TZ } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
-import { lastRunStatus, lastSuccessRunAt, syncStaleThreshold } from "./sync-runs";
+import { lastRunStatus, lastSuccessRunAt, rawStaleHours, syncStaleThreshold } from "./sync-runs";
 
 // Порог живёт в `sync-runs.ts` и реэкспортируется отсюда: его читают ДВОЕ
 // (сторож и отчёт), и вторая формула уже расходилась с первой на поле в час.
@@ -81,14 +81,34 @@ export class SyncStaleService implements OnModuleInit, OnApplicationShutdown {
     ]);
 
     const успехAt = успех ? успех.toISOString() : null;
+    // ПОКАЗ и РЕШЕНИЕ считаются РАЗНЫМИ числами (П8a fix wave; адверсариал
+    // прод-данные №7, minor «округление порога»). `часы` — округлённое до
+    // 0.1 ч (`staleHours` из `@mydon/shared`) и уходит только в ответ/событие
+    // как то, что видит владелец. Порог сравнивается с `сырыеЧасы` —
+    // `rawStaleHours` из `sync-runs.ts`, БЕЗ округления: «5 ч 59 м 49 с»
+    // округляются до ровно 6.0, и сравнение по округлённому числу решило бы,
+    // что порог 6 пройден, на 11 секунд раньше настоящей границы — авария
+    // 24.08.2026 началась ровно на ней.
     const часы = staleHours(успехAt, now);
+    const сырыеЧасы = rawStaleHours(успехAt, now);
 
     // `null` — успехов не было вовсе, и это тревожнее, чем «успех был давно».
-    if (часы !== null && часы < threshold) return { staleHours: часы, threshold, emitted: false };
+    if (сырыеЧасы !== null && сырыеЧасы < threshold) return { staleHours: часы, threshold, emitted: false };
 
     // Дедуп — раз в ташкентские сутки, тем же приёмом, что у серии отказов
     // (`vending.service.сериюОтказовВСобытие`): крон ходит каждые 30 минут, и
     // без дедупа сутки застоя дали бы 48 одинаковых сообщений подряд.
+    //
+    // ПРИНЯТАЯ ГОНКА (R-FW-S7, П8a fix wave; адверсариал безопасность №7, не
+    // фикс). Дедуп ниже — это select→insert БЕЗ уникального индекса на
+    // `(type, occurredAt::date)`: если бы Core крутился в двух репликах,
+    // синхронный тик `*/30 * * * *` у обеих дал бы «было = false» на одном и
+    // том же прогоне и записал бы два одинаковых события за сутки. Порог
+    // безопасен, потому что владелец держит ОДНУ реплику Core — вторая
+    // появится только с горизонтальным масштабированием, и решать эту гонку
+    // раньше него смысла нет. Цена закрытия — частичный UNIQUE-индекс по
+    // ташкентским суткам либо `select … for update`; см. также аналогичное
+    // принятое окно у `известныйСотрудник` (`vending.service.ts`).
     const сутки = tashkentDayStartOf(now);
     const [было] = await this.db
       .select({ id: event.id })

@@ -355,7 +355,15 @@ export class ShrinkageDto {
  * окна по умолчанию.
  */
 export class StockCountsDto {
-  @IsOptional() @Transform(({ value }) => (value === "" || value === undefined ? undefined : Number(value))) @IsInt() @Min(1) @Max(365)
+  /**
+   * Потолок 730 суток, не 365 (R-FW-P3, П8a fix wave; адверсариал
+   * прод-данные №3): начальный остаток донора — 2025-08-17, и старая граница
+   * года не пускала бы к 26 самым старым строкам истории вообще ни при каком
+   * значении. Дефолт и фактический зажим окна — в
+   * `VendingService.STOCK_COUNTS_DAYS_MAX`; здесь — только страховка входа
+   * HTTP, оба числа обязаны совпадать.
+   */
+  @IsOptional() @Transform(({ value }) => (value === "" || value === undefined ? undefined : Number(value))) @IsInt() @Min(1) @Max(730)
   days?: number;
 
   // 512, а не 255: в истории живут сырые имена донора, которые длиннее канона
