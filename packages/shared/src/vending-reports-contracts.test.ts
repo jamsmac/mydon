@@ -37,7 +37,7 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   productSaleLagH: 5,
   parityStreak: 3,
   cutoverThreshold: 7,
-  parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, note: null },
+  parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, mode: "mirror", note: null },
 };
 
 const СВОДКА: WeeklyDigest = {
@@ -84,6 +84,9 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "checked",
       "days",
       "mismatches",
+      // С ЧЕМ сверялись (R-FW-P3): без режима витрина не отличает «сошлось с
+      // независимой стороной» от «сверять было не с чем» (`retired`).
+      "mode",
       "note",
       "ok",
       "stockChecked",
@@ -167,7 +170,16 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
   it("паритет без единой сверенной пары говорит это числом, а не «расхождений 0»", () => {
     const пусто: OurvendHealth = {
       ...ЗДОРОВЬЕ,
-      parity: { days: 7, ok: false, checked: 14, mismatches: 0, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
+      parity: {
+        days: 7,
+        ok: false,
+        checked: 14,
+        mismatches: 0,
+        stockOk: false,
+        stockChecked: 0,
+        mode: "mirror",
+        note: "снимков остатков нет",
+      },
     };
     // Ровно боевой случай 25.08: продажи сошлись 14 парами, а остатки сверять
     // было не по чему — и это ДВА разных числа, а не одно «❌ расхождений 0».
