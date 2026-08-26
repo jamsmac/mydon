@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { бэкфиллWhere, resolveProductIds } from "./backfill-product-ids";
-import { machineSlot, vendingStock } from "./schema";
+import { BACKFILL_TARGETS, backfillProductIds, бэкфиллWhere, resolveProductIds } from "./backfill-product-ids";
+import { machineSlot, vendingAlias, vendingProduct, vendingRefill, vendingStock, vendingStockCount } from "./schema";
 
 /**
  * Текст SQL-выражения drizzle (та же техника, что в
@@ -77,5 +77,74 @@ describe("Бэкфилл product_id: UPDATE не трогает уже прив�
     const где = бэкфиллWhere(machineSlot.productName, machineSlot.productId, "Snickers");
     const выражение = текстSQL(где);
     assert.match(выражение, /product_id.*is null/);
+  });
+});
+
+/**
+ * Стенд: `select` отдаёт имена по таблице, `update` только СЧИТАЕТ вызовы.
+ * Проверяемое утверждение у `--dry-run` — «резолв прошёл, записи не было», и
+ * доказывает его именно счётчик, а не отсутствие исключения.
+ */
+function стенд(имена: Partial<Record<string, (string | null)[]>>) {
+  const обновления: { таблица: unknown; id: string }[] = [];
+  const db = {
+    select: (_поля?: Record<string, unknown>) => ({
+      from: (t: unknown) => {
+        if (t === vendingProduct) return Promise.resolve(ТОВАРЫ);
+        if (t === vendingAlias) return Promise.resolve(АЛИАСЫ);
+        const ключ =
+          t === vendingStock ? "stock" : t === machineSlot ? "slots" : t === vendingRefill ? "refills" : "stockCounts";
+        const строки = (имена[ключ] ?? []).map((name) => ({ name }));
+        return { where: () => Promise.resolve(строки), then: (r: (v: unknown) => unknown) => Promise.resolve(строки).then(r) };
+      },
+    }),
+    update: (t: unknown) => ({
+      set: (patch: { productId: string }) => ({
+        where: () => ({ returning: async () => { обновления.push({ таблица: t, id: patch.productId }); return [{ id: patch.productId }]; } }),
+      }),
+    }),
+  } as never;
+  return { db, обновления };
+}
+
+describe("Бэкфилл product_id: четыре цели, включая заливки и историю склада (R-H-4)", () => {
+  it("цели — ровно четыре таблицы, и обе новые на месте", () => {
+    assert.deepEqual(
+      BACKFILL_TARGETS.map((t) => t.key),
+      ["stock", "slots", "refills", "stockCounts"],
+    );
+    assert.equal(BACKFILL_TARGETS.find((t) => t.key === "refills")!.table, vendingRefill);
+    assert.equal(BACKFILL_TARGETS.find((t) => t.key === "stockCounts")!.table, vendingStockCount);
+  });
+
+  it("имя заливки и имя строки истории резолвятся тем же правилом, что склад", async () => {
+    // Импорт истории (П8a) назвал владельцу 11 неопознанных имён, но привязать
+    // их после заведения карточек было нечем: бэкфилл обходил обе таблицы.
+    const { db, обновления } = стенд({ refills: ["18+"], stockCounts: ["  COCA-COLA  CLASSIC 0,5 "] });
+    const итог = await backfillProductIds(db);
+    assert.equal(итог.refills.updated, 1);
+    assert.equal(итог.stockCounts.updated, 1);
+    assert.deepEqual(обновления.map((u) => u.id).sort(), ["p-cola", "p-mont"]);
+  });
+
+  it("`--dry-run` резолвит имена и НЕ зовёт update", async () => {
+    const { db, обновления } = стенд({ refills: ["18+"], stockCounts: ["Coca-Cola Classic 0,5"] });
+    const итог = await backfillProductIds(db, { dryRun: true });
+    assert.equal(итог.refills.updated, 1, "примерка обязана посчитать то же, что записала бы");
+    assert.equal(обновления.length, 0, "примерка не пишет ни одной строки");
+  });
+
+  it("имя без карточки остаётся NULL и едет списком, а не выдуманной привязкой", async () => {
+    const { db } = стенд({ stockCounts: ["Загадка", "Coca-Cola Classic 0,5"] });
+    const итог = await backfillProductIds(db);
+    assert.deepEqual(итог.stockCounts.unresolved, ["Загадка"]);
+  });
+
+  it("предикат для новых целей тот же: `product_id IS NULL` на месте", () => {
+    for (const t of BACKFILL_TARGETS) {
+      const выражение = текстSQL(бэкфиллWhere(t.nameColumn, t.idColumn, "Snickers"));
+      assert.match(выражение, /product_id.*is null/, `${t.key}: без этого UPDATE задел бы уже привязанные строки`);
+      assert.match(выражение, /product_name/, `${t.key}: фильтр по имени не пропал`);
+    }
   });
 });

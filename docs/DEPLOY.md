@@ -140,6 +140,25 @@ docker exec mydon-stock-db-1 pg_dump -U mydon mydon | gzip > /opt/backups/stock-
 Детали, ожидаемые числа отчёта и рулинги — `docs/superpowers/specs/2026-08-25-p8a-stock-history-design.md`
 (§6 «Выкатка», аддендумы, включая «Уточнения после adversarial»).
 
+### Разовый бэкфилл `product_id` (П4 → «Хвосты»)
+
+Скрипт идемпотентен (трогает только строки с `product_id IS NULL`) и
+автодеплоем НЕ запускается. Гонять после того, как владелец завёл недостающие
+карточки прайса, — сначала примерка, потом запись:
+
+```bash
+docker exec -i mydon-core node packages/db/dist/backfill-product-ids.js --dry-run </dev/null
+docker exec -i mydon-core node packages/db/dist/backfill-product-ids.js --apply   </dev/null
+```
+
+Целей четыре: `vending_stock`, `machine_slot`, `vending_refill`,
+`vending_stock_count`. Первые две на проде уже прогонялись — по ним ждём 0
+новых привязок; `vending_refill` и `vending_stock_count` привяжутся по тем
+именам, которым карточка уже есть. Имена без карточки остаются `NULL` и
+печатаются списком — это не отказ шага, а список на разбор владельцу.
+`</dev/null` обязателен по той же причине, что и выше: без него остаток
+скрипта уходит в контейнер и шаги после молча не выполняются.
+
 ### Катовер учёта OurVend (П8b)
 
 Переключатель источника `sale`/`machine_stock` (`OURVEND_ACCOUNTING_SOURCE`,
