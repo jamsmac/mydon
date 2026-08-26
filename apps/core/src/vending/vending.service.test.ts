@@ -1561,8 +1561,18 @@ describe("Вендинг Core: история пересчётов склада 
  * порядком фикстуры, а не кодом сервиса.
  */
 describe("Вендинг Core: чтение истории склада (R-P8a-3)", () => {
-  type ИсторияRow = { dt: string; productName: string; qty: string; source: string; countedAt: Date; note: string | null };
+  type ИсторияRow = {
+    /** PK строки: тай-брейкер порядка (R-FW-P2) — 92 строки прода неразличимы без него. */
+    id: string;
+    dt: string;
+    productName: string;
+    qty: string;
+    source: string;
+    countedAt: Date;
+    note: string | null;
+  };
 
+  let seq = 0;
   const строка = (
     dt: string,
     productName: string,
@@ -1570,6 +1580,7 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
     source = "own",
     note: string | null = null,
   ): ИсторияRow => ({
+    id: `sc-${String(++seq).padStart(4, "0")}`,
     dt,
     productName,
     qty: qty.toFixed(2),
@@ -1577,6 +1588,9 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
     countedAt: new Date(`${dt}T09:00:00+05:00`),
     note,
   });
+
+  /** Ключи сортировки, которые сервис отдал drizzle: тест сверяет ИХ, а не догадку стенда. */
+  const порядок: unknown[] = [];
 
   function historyDb(rows: ИсторияRow[], aliases: unknown[] = [], products: unknown[] = []) {
     const db = {
@@ -1595,9 +1609,16 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
             текущие = текущие.filter((r) => (дата === undefined || r.dt >= дата) && (имя === undefined || r.productName === имя));
             return chain;
           };
-          chain.orderBy = () => {
+          chain.orderBy = (...ключи: unknown[]) => {
+            порядок.length = 0;
+            порядок.push(...ключи);
             текущие = [...текущие].sort(
-              (a, b) => b.countedAt.getTime() - a.countedAt.getTime() || a.productName.localeCompare(b.productName, "ru"),
+              (a, b) =>
+                b.countedAt.getTime() - a.countedAt.getTime() ||
+                a.productName.localeCompare(b.productName, "ru") ||
+                // Тот же третий ключ, что в сервисе: без него две неразличимые
+                // строки одного дня/товара отдавала бы база в любом порядке.
+                a.id.localeCompare(b.id),
             );
             return chain;
           };
@@ -1610,6 +1631,23 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
   }
 
   const СЕЙЧАС = new Date("2026-08-25T13:00:00+05:00");
+
+  it("две неразличимые строки одного дня и товара отдаются в одном и том же порядке (R-FW-P2)", async () => {
+    // Прод 26.08: 46 групп (день, товар, место) содержат по ДВЕ строки — это 92
+    // строки, и у 41 пары количества разные (напр. 0 и 30 за 17.07 по одному
+    // товару). Обе сортировочные колонки у пары равны, `ext_id` в ответ не
+    // уезжает — значит порядок отдавала база, и лист не был воспроизводим.
+    const первая = строка("2026-07-17", "Montella Вода минеральная 330ml", 0, "stock-import");
+    const вторая = строка("2026-07-17", "Montella Вода минеральная 330ml", 30, "stock-import");
+    // Фикстура подаётся «наоборот» — порядок обязан задать сервис, а не вход.
+    const о = await new VendingService(historyDb([вторая, первая])).stockCounts(90, undefined, СЕЙЧАС);
+    assert.deepEqual(о.rows.map((r) => r.qty), [0, 30], "тай-брейкер по id обязан дать один и тот же порядок");
+    assert.equal(
+      порядок.at(-1),
+      vendingStockCount.id,
+      "последним ключом сортировки обязан идти PK: без него порядок пары решает Postgres",
+    );
+  });
 
   it("окно, порядок «свежее сверху» и форма строки", async () => {
     const db = historyDb([

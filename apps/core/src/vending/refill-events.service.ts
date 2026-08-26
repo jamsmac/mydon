@@ -78,6 +78,23 @@ export interface RefillEventRow {
   matchedRefillId: string | null;
 }
 
+/**
+ * Ответ `GET /vending/refill-events` — журнал за окно И признак обрезки.
+ *
+ * ОБЪЕКТ, А НЕ МАССИВ (R-FW-S7). `list()` всегда стоял под `limit(LIST_LIMIT)`
+ * и молчал об обрезке, а лист печатал `${rows.length} событий` — то есть на
+ * переполнении говорил ровно «500 событий», и это читалось как посчитанный
+ * итог. Комментарий у константы описывал старое окно («6 автоматов × 14 дней
+ * дают десятки строк»); на 90 сутках при низком `REFILL_DETECT_MIN_UNITS`
+ * пятьсот перестало быть недостижимой цифрой. Соседний лист истории склада
+ * этот же случай называет словами (`history_capped`).
+ */
+export interface RefillEventsList {
+  rows: RefillEventRow[];
+  /** Строк было БОЛЬШЕ потолка чтения (`LIST_LIMIT`) — показаны первые 500. */
+  capped: boolean;
+}
+
 /** Ключ идемпотентности события: тот же, что уникальный индекс в базе. */
 const ключ = (serial: string, windowTo: Date): string => `${normalizeMachineSerial(serial)}|${windowTo.getTime()}`;
 
@@ -121,10 +138,13 @@ export class RefillEventsService {
    *
    * Тот же довод, что у `VendingService.stockCounts` и `ShrinkageService.report`:
    * прогон, пересекающий полночь Ташкента, иначе считает окно от двух разных
-   * дней. Плюс проверяемость: сегодня фикстуры детектора привязаны к стенным
-   * часам, и повторный smoke на той же базе в течение часа роняет два шага —
-   * нестабильный smoke приучают перезапускать, и он же однажды промолчит на
-   * настоящей регрессии. Сигнатура аддитивна, цена правки — ноль.
+   * дней. Измеримый выигрыш параметра — ДЕТЕРМИНИРОВАННЫЕ ФИКСТУРЫ: раньше
+   * окна юнит-тестов считались от стенных часов в момент загрузки файла, и
+   * набор зеленел или краснел в зависимости от часа прогона (ревью T6, minor 2:
+   * контроллер `now` не передаёт, поэтому на HTTP-пути поведение не менялось).
+   * Идемпотентность повторного прогона держит НЕ этот параметр, а уникальный
+   * индекс `(machine_serial, window_to)` плюс `onConflictDoNothing`. Сигнатура
+   * аддитивна, цена правки — ноль.
    */
   async detect(days = DETECT_DAYS_DEFAULT, now = new Date()): Promise<DetectResult> {
     const окно = зажать(days, DETECT_DAYS_DEFAULT, DETECT_DAYS_MAX);
@@ -413,24 +433,31 @@ export class RefillEventsService {
    *
    * Тот же довод, что у `VendingService.stockCounts` и `ShrinkageService.report`:
    * прогон, пересекающий полночь Ташкента, иначе считает окно от двух разных
-   * дней. Плюс проверяемость: сегодня фикстуры детектора привязаны к стенным
-   * часам, и повторный smoke на той же базе в течение часа роняет два шага —
-   * нестабильный smoke приучают перезапускать, и он же однажды промолчит на
-   * настоящей регрессии. Сигнатура аддитивна, цена правки — ноль.
+   * дней. Плюс детерминированность фикстур: раньше они считались от стенных
+   * часов в момент загрузки файла, и набор зеленел или краснел в зависимости
+   * от часа прогона. Сигнатура аддитивна, цена правки — ноль.
+   *
+   * Отдаёт ОБЪЕКТ, а не массив (R-FW-S7): признак обрезки — часть ответа, см.
+   * `RefillEventsList`.
    */
-  async list(days = LIST_DAYS_DEFAULT, now = new Date()): Promise<RefillEventRow[]> {
+  async list(days = LIST_DAYS_DEFAULT, now = new Date()): Promise<RefillEventsList> {
     const окно = зажать(days, LIST_DAYS_DEFAULT, LIST_DAYS_MAX);
     const от = new Date(now.getTime() - окно * 86_400_000);
-    const [строки, реестр] = await Promise.all([
+    const [прочитано, реестр] = await Promise.all([
       this.db
         .select()
         .from(vendingRefillEvent)
         .where(gte(vendingRefillEvent.windowTo, от))
         .orderBy(desc(vendingRefillEvent.windowTo))
-        .limit(LIST_LIMIT),
+        // ПОТОЛОК + 1 (R-FW-S7): по «лишней» строке видно, что список обрезан.
+        // Тем же приёмом называет обрезку история склада (`history_capped`) —
+        // без него лист печатал `500 событий` как ПОСЧИТАННЫЙ итог.
+        .limit(LIST_LIMIT + 1),
       this.vending.machineIndex(),
     ]);
-    return строки.map((r) => ({
+    const capped = прочитано.length > LIST_LIMIT;
+    const строки = capped ? прочитано.slice(0, LIST_LIMIT) : прочитано;
+    const rows = строки.map((r) => ({
       id: r.id,
       // Канон и на выдаче: строки, записанные до R-FW-10, лежат в сырой форме,
       // а отчёт об усушке и панель ключуются каноном — разнобой в одном списке
@@ -443,6 +470,7 @@ export class RefillEventsService {
       slots: r.slots,
       matchedRefillId: r.matchedRefillId,
     }));
+    return { rows, capped };
   }
 
   /**

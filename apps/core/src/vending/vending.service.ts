@@ -1638,7 +1638,16 @@ export class VendingService {
       .where(условие)
       // Потолок + 1: по «лишней» строке видно, что окно обрезано, и молчаливой
       // потери хвоста не будет.
-      .orderBy(desc(vendingStockCount.countedAt), vendingStockCount.productName)
+      //
+      // ТРЕТИЙ КЛЮЧ — PK (R-FW-P2). На проде 46 групп (день, товар, место)
+      // содержат по ДВЕ строки — 92 строки, и у 41 пары количества РАЗНЫЕ
+      // (две инвентаризации донора одного дня, `ext_id` 515 и 585). Обе
+      // прежние сортировочные колонки у такой пары равны, а `ext_id` в ответ
+      // не уезжает — значит порядок между ними отдавал Postgres, и он не
+      // обязан совпадать между двумя чтениями одной и той же страницы. Лист,
+      // который печатает «0 шт» и «30 шт» подряд, обязан хотя бы печатать их
+      // в одном и том же порядке.
+      .orderBy(desc(vendingStockCount.countedAt), vendingStockCount.productName, vendingStockCount.id)
       .limit(STOCK_COUNTS_MAX + 1);
 
     const warnings: AnalyticsWarning[] = [];

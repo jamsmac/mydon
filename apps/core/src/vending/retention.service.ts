@@ -43,6 +43,24 @@ export interface RetentionResult {
   aborted: boolean;
 }
 
+/** Как гонять прогон: примерка или запись, полный список целей или только сработавшие. */
+export interface SweepOptions {
+  /**
+   * Примерка: те же запросы с тем же предикатом, но `count(*)` вместо DELETE.
+   * Событий не пишет — чистки не было, и запись о ней была бы ложью.
+   */
+  dryRun?: boolean;
+  /**
+   * Вернуть ВСЕ цели, включая «удалено 0».
+   *
+   * Крон молчит о нулях намеренно (52 записи ни о чём в году), а ручному
+   * прогону нужен полный ответ: оператор, дёрнувший `POST /system/retention/run`,
+   * спрашивает «что сейчас происходит по каждой таблице», и пустой список
+   * читался бы как «ничего не сработало». На запись событий НЕ влияет.
+   */
+  includeEmpty?: boolean;
+}
+
 interface RetentionTarget {
   table: PgTable;
   name: string;
@@ -146,6 +164,18 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
+   * Сколько строк УДАЛИЛА БЫ пачка — тот же предикат, без DELETE.
+   *
+   * Примерка (`dryRun`) исполняет НАСТОЯЩИЙ запрос с тем же сравнением
+   * `ageCol < граница` (R-FW-S2): весь смысл ручного прогона в том, чтобы
+   * этот SQL хоть раз выполнил живой Postgres, а не заглушка юнит-теста.
+   */
+  private countQuery(t: RetentionTarget, cutoff: Date): SQL {
+    const граница: string | Date = t.cutoffAs === "date" ? tashkentDay(cutoff) : cutoff;
+    return sql`select count(*)::int as n from ${t.table} where ${t.ageCol} < ${граница}`;
+  }
+
+  /**
    * Прогон ретенции. `now` — параметр: границу «N суток назад» иначе нечем
    * проверить тестом.
    *
@@ -159,7 +189,8 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
    * лишнего события за 52 воскресенья в году), а «не смогли удалить» —
    * новость, даже если снести не успели ни строки.
    */
-  async sweep(now = new Date()): Promise<RetentionResult[]> {
+  async sweep(now = new Date(), опции: SweepOptions = {}): Promise<RetentionResult[]> {
+    const { dryRun = false, includeEmpty = false } = опции;
     const snapshotDays = Math.max(
       // ПОЛ 180, А НЕ 90 (R-FW-S8). Самый широкий живой потребитель истории —
       // отчёт о мёртвом стоке (`DEAD_STOCK_DAYS_MAX = 180`), и окно ретенции
@@ -209,7 +240,7 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
 
     // Один общий бюджет на весь прогон, не на таблицу: цель — не держать
     // блокировки дольше одного окна крона суммарно, а не по 60 с на каждую
-    // из четырёх целей.
+    // из пяти целей.
     const deadline = this.clock() + RETENTION_BUDGET_MS;
     const results: RetentionResult[] = [];
 
@@ -226,21 +257,30 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       // журнал уходит ФАКТИЧЕСКИ удалённое число, а `aborted: true` говорит,
       // что список неполон.
       try {
-        for (;;) {
-          if (this.clock() >= deadline) {
-            capped = true;
-            break;
+        if (dryRun) {
+          // Примерка — ОДИН запрос на цель: пачками здесь считать нечего, а
+          // предикат исполняется тот же самый.
+          const res = await this.db.execute(this.countQuery(t, cutoff));
+          const строки = res as unknown as { n?: number | string }[];
+          deleted = Number(строки[0]?.n ?? 0);
+          if (deleted > 0) this.logger.log(`Ретенция ${t.name}: примерка — под срез попадает ${deleted} строк.`);
+        } else {
+          for (;;) {
+            if (this.clock() >= deadline) {
+              capped = true;
+              break;
+            }
+            const res = await this.db.execute(this.batchQuery(t, cutoff));
+            const n = Number((res as unknown as { count?: number }).count ?? 0);
+            deleted += n;
+            // Лог НА КАЖДУЮ ПАЧКУ: чистка идёт часами при первом непустом
+            // прогоне (окно 180 суток копится полгода), и одна строка в конце не
+            // отличает «работает» от «повисло на блокировке».
+            if (n > 0) this.logger.log(`Ретенция ${t.name}: удалено ${n} строк (всего ${deleted}).`);
+            // Пачка меньше лимита (включая 0) — таблица вычищена: следующий
+            // прогон вернул бы 0 и потратил запрос впустую.
+            if (n < RETENTION_BATCH) break;
           }
-          const res = await this.db.execute(this.batchQuery(t, cutoff));
-          const n = Number((res as unknown as { count?: number }).count ?? 0);
-          deleted += n;
-          // Лог НА КАЖДУЮ ПАЧКУ: чистка идёт часами при первом непустом
-          // прогоне (окно 180 суток копится полгода), и одна строка в конце не
-          // отличает «работает» от «повисло на блокировке».
-          if (n > 0) this.logger.log(`Ретенция ${t.name}: удалено ${n} строк (всего ${deleted}).`);
-          // Пачка меньше лимита (включая 0) — таблица вычищена: следующий
-          // прогон вернул бы 0 и потратил запрос впустую.
-          if (n < RETENTION_BATCH) break;
         }
       } catch (e: unknown) {
         aborted = true;
@@ -254,25 +294,34 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
         // же порог `deleted > 0` съедал единственный отказ, о котором в журнале
         // не оставалось ни строки: обрыв на ПЕРВОЙ пачке (блокировка, обрыв
         // соединения) давал `aborted`, ноль удалённых — и только `warn` в логе.
-        if (deleted > 0 || aborted) {
+        // `includeEmpty` расширяет ТОЛЬКО список ответа, не правило события:
+        // ручному прогону нужен полный расклад по пяти целям, журналу — нет.
+        if (deleted > 0 || aborted || includeEmpty) {
           results.push({ table: t.name, deleted, olderThanDays: t.olderThanDays, capped, aborted });
-          try {
-            await this.db.insert(event).values({
-              source: "system",
-              type: RETENTION_EVENT,
-              occurredAt: now,
-              payload: { table: t.name, deleted, olderThanDays: t.olderThanDays, aborted },
-            });
-          } catch (e: unknown) {
-            // Отказ ЗАПИСИ О ЧИСТКЕ не должен выглядеть как отказ чистки:
-            // строки уже удалены, и молчание тут хуже лишней строки лога.
-            this.logger.warn(
-              `Ретенция ${t.name}: событие ${RETENTION_EVENT} не записалось (${deleted} строк уже удалено): ` +
-                `${e instanceof Error ? e.message : String(e)}`,
-            );
+        }
+        // СОБЫТИЕ ТОЛЬКО У НАСТОЯЩЕЙ ЧИСТКИ: примерка ничего не удаляла, и
+        // запись `system.retention` о ней врала бы журналу — тому самому,
+        // который и есть единственное свидетельство чистки.
+        if (!dryRun) {
+          if (deleted > 0 || aborted) {
+            try {
+              await this.db.insert(event).values({
+                source: "system",
+                type: RETENTION_EVENT,
+                occurredAt: now,
+                payload: { table: t.name, deleted, olderThanDays: t.olderThanDays, aborted },
+              });
+            } catch (e: unknown) {
+              // Отказ ЗАПИСИ О ЧИСТКЕ не должен выглядеть как отказ чистки:
+              // строки уже удалены, и молчание тут хуже лишней строки лога.
+              this.logger.warn(
+                `Ретенция ${t.name}: событие ${RETENTION_EVENT} не записалось (${deleted} строк уже удалено): ` +
+                  `${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          } else if (capped) {
+            this.logger.warn(`Ретенция ${t.name}: бюджет исчерпан до первой пачки — доберёт следующее воскресенье.`);
           }
-        } else if (capped) {
-          this.logger.warn(`Ретенция ${t.name}: бюджет исчерпан до первой пачки — доберёт следующее воскресенье.`);
         }
       }
       // Обрыв одной цели не должен уносить остальные: у каждой свой запрос и

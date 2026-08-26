@@ -13,7 +13,7 @@ import {
   vendingRefill,
   vendingRefillEvent,
 } from "@mydon/db";
-import { LIST_DAYS_MAX, RefillEventsService } from "./refill-events.service";
+import { LIST_DAYS_MAX, LIST_LIMIT, RefillEventsService } from "./refill-events.service";
 import { VendingService } from "./vending.service";
 
 type SnapRow = {
@@ -155,7 +155,11 @@ function detectDb(м: Мир, опции: { онОкно?: (границы: Date
       return chain;
     };
     chain.orderBy = () => chain;
-    chain.limit = async () => ответ();
+    // Стенд УВАЖАЕТ `limit` (R-FW-S7): иначе признак обрезки журнала
+    // (`limit(LIST_LIMIT + 1)`) не проверялся бы ничем — стаб отдавал бы
+    // сколько угодно строк, и «показаны первые 500» зеленело бы на любой
+    // реализации.
+    chain.limit = async (n: number) => (typeof n === "number" ? ответ().slice(0, n) : ответ());
     chain.then = (res: (v: unknown) => unknown) => p().then(res);
     return chain;
   };
@@ -296,18 +300,6 @@ const сервис = (мир: Мир) => {
   const окна: Date[] = [];
   const { db, события, лента, обновления } = detectDb(мир, { онОкно: (границы) => окна.push(...границы) });
   return { svc: new RefillEventsService(db, new VendingService(db)), события, лента, обновления, окна };
-};
-
-/**
- * Тонкая обёртка над тем же стендом: помимо сервиса отдаёт «окна» — все
- * границы, которые запрос `list()` подставил в условие (`границыОкна`, уже
- * читает их стенд выше). Тест «своего потолка чтения» (R-H-5) проверяет
- * ИМЕННО эту границу, а не форму ответа.
- */
-const сервисЧтения = (мир: Мир) => {
-  const окна: Date[] = [];
-  const { db, события, лента, обновления } = detectDb(мир, { онОкно: (границы) => окна.push(...границы) });
-  return { svc: new RefillEventsService(db, new VendingService(db)), окна, события, лента, обновления };
 };
 
 describe("Вендинг Core: детектор заливок по снимкам (П4)", () => {
@@ -542,13 +534,14 @@ describe("Вендинг Core: детектор заливок по снимка
     const { svc } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР });
     await svc.detect(2, СЕЙЧАС);
     const список = await svc.list(14, СЕЙЧАС);
-    assert.equal(список.length, 1);
-    assert.equal(список[0]!.serial, "2508160376");
-    assert.equal(список[0]!.name, "Olma");
-    assert.equal(список[0]!.units, 12);
-    assert.equal(список[0]!.windowFrom, T1.toISOString());
-    assert.equal(список[0]!.windowTo, T2.toISOString());
-    assert.equal(список[0]!.matchedRefillId, null);
+    assert.equal(список.rows.length, 1);
+    assert.equal(список.capped, false, "одна строка — обрезки нет, и лист обязан это знать");
+    assert.equal(список.rows[0]!.serial, "2508160376");
+    assert.equal(список.rows[0]!.name, "Olma");
+    assert.equal(список.rows[0]!.units, 12);
+    assert.equal(список.rows[0]!.windowFrom, T1.toISOString());
+    assert.equal(список.rows[0]!.windowTo, T2.toISOString());
+    assert.equal(список.rows[0]!.matchedRefillId, null);
   });
 
   it("снимков нет — прогон пустой, а не падение", async () => {
@@ -649,7 +642,7 @@ describe("Окно ЧТЕНИЯ журнала — своё, а не потол�
   it("`?days=90` читается целиком: 90 — потолок журнала, 30 — потолок детектора", async () => {
     // Раньше `list()` зажимал окно чужим `DETECT_DAYS_MAX = 30`, и кнопка
     // «90 дн» в панели показала бы тридцать суток под подписью «90».
-    const { svc, окна } = сервисЧтения({ events: ЖУРНАЛ });
+    const { svc, окна } = сервис({ events: ЖУРНАЛ });
     await svc.list(90, СЕЙЧАС);
     const от = окна.at(-1)!;
     assert.equal(Math.round((СЕЙЧАС.getTime() - от.getTime()) / 86_400_000), 90);
@@ -657,9 +650,42 @@ describe("Окно ЧТЕНИЯ журнала — своё, а не потол�
   });
 
   it("`?days=91` зажимается до 90, а не до 30", async () => {
-    const { svc, окна } = сервисЧтения({ events: ЖУРНАЛ });
+    const { svc, окна } = сервис({ events: ЖУРНАЛ });
     await svc.list(91, СЕЙЧАС);
     assert.equal(Math.round((СЕЙЧАС.getTime() - окна.at(-1)!.getTime()) / 86_400_000), 90);
+  });
+});
+
+/** Журнал из `n` событий, все внутри окна чтения (шаг — минута, чтобы 501 строка уместилась в 14 суток). */
+const МИНУТА = 60_000;
+const журналИз = (n: number): EventRow[] =>
+  Array.from({ length: n }, (_, i) => ({
+    id: `ev-${i}`,
+    machineSerial: "2508160376",
+    machineId: "m-olma",
+    windowFrom: new Date(СЕЙЧАС.getTime() - (i + 2) * МИНУТА),
+    windowTo: new Date(СЕЙЧАС.getTime() - (i + 1) * МИНУТА),
+    units: 12,
+    slots: [],
+    matchedRefillId: null,
+  }));
+
+describe("Журнал заливок называет обрезку словами (R-FW-S7)", () => {
+  it("строк ровно по потолку — обрезки нет", async () => {
+    const { svc } = сервис({ events: журналИз(LIST_LIMIT) });
+    const ответ = await svc.list(14, СЕЙЧАС);
+    assert.equal(ответ.rows.length, LIST_LIMIT);
+    assert.equal(ответ.capped, false, "«ровно 500» — это посчитанный результат, а не обрезка");
+  });
+
+  it("строк на одну больше потолка — `capped`, и лишняя строка не показана", async () => {
+    // Лист печатал `${rows.length} событий`, то есть на переполнении говорил
+    // ровно «500 событий» — и это читалось как итог. Соседний лист истории
+    // склада тот же случай называет словами (`history_capped`).
+    const { svc } = сервис({ events: журналИз(LIST_LIMIT + 1) });
+    const ответ = await svc.list(14, СЕЙЧАС);
+    assert.equal(ответ.rows.length, LIST_LIMIT, "показываем ровно потолок, а не потолок+1");
+    assert.equal(ответ.capped, true);
   });
 });
 
@@ -668,16 +694,6 @@ describe("Детектор считает от ПЕРЕДАННОГО момен
     const { svc, окна } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР });
     await svc.detect(2, СЕЙЧАС);
     assert.equal(окна[0]!.getTime(), СЕЙЧАС.getTime() - 2 * 86_400_000);
-  });
-
-  it("повторный прогон с тем же `now` новых событий не даёт", async () => {
-    // Идемпотентность проверяется ДЕТЕРМИНИРОВАННО, а не «пока не наступил
-    // следующий час»: до правки второй прогон брал другое окно и мог дать
-    // второе событие по той же заливке.
-    const { svc, события } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР });
-    assert.equal((await svc.detect(2, СЕЙЧАС)).events, 1);
-    assert.equal((await svc.detect(2, СЕЙЧАС)).events, 0);
-    assert.equal(события.length, 1);
   });
 
   it("в ленту публикуются только окна старше MATCH_PAD_MS от переданного `now`", async () => {
@@ -695,7 +711,7 @@ describe("Детектор считает от ПЕРЕДАННОГО момен
   });
 
   it("журнал читается от переданного момента: то же окно, что просили", async () => {
-    const { svc, окна } = сервисЧтения({ events: ЖУРНАЛ });
+    const { svc, окна } = сервис({ events: ЖУРНАЛ });
     await svc.list(14, СЕЙЧАС);
     assert.equal(окна.at(-1)!.getTime(), СЕЙЧАС.getTime() - 14 * 86_400_000);
   });

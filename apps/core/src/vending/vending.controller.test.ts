@@ -8,6 +8,7 @@ import { validate } from "class-validator";
 // требует N1: сверено с `node_modules/@nestjs/throttler` (throttler@6.5.0).
 import { THROTTLER_LIMIT } from "@nestjs/throttler/dist/throttler.constants";
 import type { AnalyticsService } from "./analytics.service";
+import { LIST_DAYS_MAX } from "./refill-events.service";
 import { RefillEventsListDto, StockCountsDto, VendingController } from "./vending.controller";
 import type { VendingService } from "./vending.service";
 
@@ -74,6 +75,19 @@ describe("StockCountsDto: потолок окна — 730 суток, не 365 (
   });
 });
 
+describe("Вендинг Core: троттлинг GET /vending/refill-events (R-FW-S6)", () => {
+  it("свой лимит 12/мин, как у соседних отчётных чтений, а не общий потолок", () => {
+    // Окно этого чтения срез поднял с 30 до 90 суток — цена запроса выросла,
+    // а защита оставалась общей (60 запросов / 10 с), которой хватало, чтобы
+    // уложить Core одним циклом `curl` из докер-сети.
+    const handler = VendingController.prototype.refillEventsList;
+    assert.equal(Reflect.getMetadata(THROTTLER_LIMIT + "burst", handler), 12);
+    assert.equal(Reflect.getMetadata(THROTTLER_LIMIT + "sustained", handler), 12);
+    const keys = Reflect.getMetadataKeys(handler).filter((k): k is string => typeof k === "string");
+    assert.ok(!keys.some((k) => k.endsWith("default")), "под именем default ThrottlerGuard ничего не читает");
+  });
+});
+
 describe("RefillEventsListDto: потолок ЧТЕНИЯ журнала — 90 суток, не 30 (R-H-5)", () => {
   it("90 — законная верхняя граница", async () => {
     assert.deepEqual(await validate(plainToInstance(RefillEventsListDto, { days: "90" })), []);
@@ -85,6 +99,33 @@ describe("RefillEventsListDto: потолок ЧТЕНИЯ журнала — 90
 
   it("30 — больше не особая граница: потолок скана снимков не потолок чтения", async () => {
     assert.deepEqual(await validate(plainToInstance(RefillEventsListDto, { days: "30" })), []);
+  });
+
+  it("потолок DTO пришпилен к `LIST_DAYS_MAX` сервиса, а не к литералу рядом (ревью m6)", () => {
+    // Оба числа стояли на «90» независимо: подъём потолка в сервисе оставил
+    // бы страховку HTTP-входа на 90 молча, и роут отдавал бы не то окно,
+    // которое просили.
+    assert.equal(LIST_DAYS_MAX, 90);
+  });
+
+  it("пустая строка гасится в «не задано», как у StockCountsDto (R-FW-S8)", async () => {
+    // `?days=` — незаполненное поле фильтра. `@Type(() => Number)` превращал
+    // пустую строку в 0, `@Min(1)` его отбивал, и панель получала 400 вместо
+    // окна по умолчанию. Докблок DTO ссылался на `StockCountsDto` как на
+    // образец, но переносил из него только `@Max`.
+    const dto = plainToInstance(RefillEventsListDto, { days: "" });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.days, undefined);
+  });
+});
+
+describe("StockCountsDto: длина `product` совпадает с тем, что режет панель (R-FW-S10)", () => {
+  it("512 символов — законны, 513 — отказ", async () => {
+    // Лист «История склада» шлёт сюда `?q=`, и запрос длиннее границы давал
+    // 400, который панель показывала экраном «ядро недоступно». Граница у
+    // обеих сторон обязана быть одним числом — 512.
+    assert.deepEqual(await validate(plainToInstance(StockCountsDto, { product: "я".repeat(512) })), []);
+    assert.ok((await validate(plainToInstance(StockCountsDto, { product: "я".repeat(513) }))).length > 0);
   });
 });
 

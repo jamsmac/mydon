@@ -13,6 +13,7 @@ import {
   vendingRefill,
   vendingRefillEvent,
   vendingStock,
+  vendingStockCount,
   vendingSyncRun,
 } from "@mydon/db";
 import type { OurvendHealth, ParityDay } from "@mydon/shared";
@@ -20,10 +21,13 @@ import type { OurvendHealthService } from "../ourvend/ourvend-health.service";
 import type { OurvendParityService } from "../ourvend/ourvend-parity.service";
 import { AnalyticsService } from "./analytics.service";
 import { VendingService } from "./vending.service";
+import { WEEK_RUNS_LIMIT } from "../ourvend/sync-runs";
 import { WeeklyDigestService } from "./weekly-digest.service";
 
 type SaleRow = { dt: string; machineSerial: string; product: string; qty: string; amount: string };
 type StockRow = { productName: string; quantity: number; countedAt: Date };
+/** Строка ИСТОРИИ пересчётов: `dt` — голые ташкентские сутки, как в базе. */
+type StockCountRow = { dt: string; countedAt: Date };
 type OrderRow = { status: string; receivedAt: Date | null; positions: unknown[] };
 type RefillEventRow = { machineSerial: string; windowTo: Date; units: number; slots: { product: string; delta: number }[] };
 type RefillRow = { qty: number; performedAt: Date };
@@ -45,6 +49,7 @@ type ProdRow = {
 interface Мир {
   sales?: SaleRow[];
   stock?: StockRow[];
+  stockCounts?: StockCountRow[];
   orders?: OrderRow[];
   refillEvents?: RefillEventRow[];
   refills?: RefillRow[];
@@ -105,6 +110,24 @@ function статусыИз(условие: unknown): string[] {
   return out;
 }
 
+/**
+ * Текст SQL-выражения (`started_at desc`) — стенду нужно НАПРАВЛЕНИЕ сортировки.
+ *
+ * Журнал прогонов читают двумя запросами в РАЗНЫЕ стороны: «свежие сверху» для
+ * недельного блока и «самый ранний» для даты начала журнала (R-FW-P5). Стенд,
+ * который сортирует всегда одинаково, показал бы «первым» не тот прогон, и
+ * тест зеленел бы на сломанном запросе.
+ */
+function текстВыражения(x: unknown): string {
+  if (x === null || typeof x !== "object") return "";
+  const chunks = (x as { queryChunks?: unknown[] }).queryChunks;
+  if (Array.isArray(chunks)) return chunks.map(текстВыражения).join("");
+  const v = (x as { value?: unknown }).value;
+  if (Array.isArray(v)) return v.join("");
+  const name = (x as { name?: unknown }).name;
+  return typeof name === "string" ? name : "";
+}
+
 const датыИз = (условие: unknown): Date[] => параметры(условие).filter((v): v is Date => v instanceof Date);
 const строкиИз = (условие: unknown): string[] => параметры(условие).filter((v): v is string => typeof v === "string");
 const числаИз = (условие: unknown): number[] => параметры(условие).filter((v): v is number => typeof v === "number");
@@ -123,6 +146,7 @@ function digestDb(м: Мир) {
     [sale, () => м.sales ?? []],
     [machineStock, () => []],
     [vendingStock, () => м.stock ?? []],
+    [vendingStockCount, () => м.stockCounts ?? []],
     [vendingPurchaseOrder, () => м.orders ?? []],
     [vendingRefillEvent, () => м.refillEvents ?? []],
     [vendingRefill, () => м.refills ?? []],
@@ -167,6 +191,12 @@ function digestDb(м: Мир) {
           текущие = (текущие as StockRow[]).filter((r) => r.quantity > (порог ?? 0));
         }
       }
+      if (t === vendingStockCount) {
+        // Окно у `dt` — ГОЛЫЕ СУТКИ-строки, а не Date: сравнение `date`-колонки
+        // с `timestamptz` уехало бы на 05:00 Ташкента (урок VendCash).
+        const [от, до] = строки;
+        текущие = (текущие as StockCountRow[]).filter((r) => (!от || r.dt >= от) && (!до || r.dt < до));
+      }
       if (t === vendingPurchaseOrder) {
         текущие = (текущие as OrderRow[]).filter(
           (r) => (строки.length === 0 || строки.includes(r.status)) && вОкне(r.receivedAt, окно),
@@ -183,12 +213,9 @@ function digestDb(м: Мир) {
         // обходом, иначе «последний успех недели» вернул бы последний ЛЮБОЙ
         // прогон, и тест про `null` был бы зелёным на сломанном запросе.
         const статусы = статусыИз(условие);
-        // Свежие сверху — как настоящий `order by started_at desc`: недельный
-        // блок берёт последний успех первой строкой, и стаб, отдающий журнал в
-        // порядке фикстуры, показал бы «последним» самый старый прогон.
-        текущие = (текущие as SyncRunRow[])
-          .filter((r) => (статусы.length === 0 || статусы.includes(r.status)) && вОкне(r.startedAt, окно))
-          .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+        текущие = (текущие as SyncRunRow[]).filter(
+          (r) => (статусы.length === 0 || статусы.includes(r.status)) && вОкне(r.startedAt, окно),
+        );
       }
       if (t === event) {
         текущие = (текущие as EventRow[]).filter(
@@ -201,8 +228,24 @@ function digestDb(м: Мир) {
       return chain;
     };
     chain.groupBy = () => chain;
-    chain.orderBy = () => chain;
-    chain.limit = async () => текущие;
+    chain.orderBy = (...выражения: unknown[]) => {
+      // Направление берём ИЗ ВЫРАЖЕНИЯ, а не «журнал всегда свежими сверху»:
+      // недельный блок читает `desc` (последний успех — первой строкой), а
+      // дата начала журнала — `asc` (самый ранний прогон), и одна фиксированная
+      // сортировка зеленила бы второй запрос на любой реализации.
+      if (t === vendingSyncRun) {
+        const текст = выражения.map(текстВыражения).join(" ");
+        const вниз = !текст.includes("asc");
+        текущие = [...(текущие as SyncRunRow[])].sort((a, b) =>
+          вниз ? b.startedAt.getTime() - a.startedAt.getTime() : a.startedAt.getTime() - b.startedAt.getTime(),
+        );
+      }
+      return chain;
+    };
+    // Стенд УВАЖАЕТ `limit` (ре-ревью T8, D3): без этого признак обрезки
+    // журнала (`WEEK_RUNS_LIMIT + 1`) не проверялся бы ничем — стаб отдавал
+    // бы фикстуру целиком, и `capped` зеленел бы на любой реализации.
+    chain.limit = async (n: number) => (typeof n === "number" ? текущие.slice(0, n) : текущие);
     chain.then = (res: (v: unknown) => unknown) => Promise.resolve(текущие).then(res);
     return chain;
   };
@@ -419,10 +462,12 @@ describe("Недельная сводка (R-P5b-7)", () => {
         },
         { status: "received", receivedAt: момент("2026-08-24"), positions: [{ product: "Lays", order: 10, price: 13000 }] },
       ],
-      stock: [
-        { productName: "Moxito Lime 330ml", quantity: 12, countedAt: момент("2026-08-21") },
-        { productName: "Lays Сметана-лук", quantity: 4, countedAt: момент("2026-08-22") },
-        { productName: "Snickers", quantity: 3, countedAt: момент("2026-08-24") },
+      // Инвентаризации считаются по ИСТОРИИ (R-FW-P4): `vending_stock`
+      // перезаписной и на вопрос «сколько раз считали НА ТОЙ неделе» не отвечает.
+      stockCounts: [
+        { dt: "2026-08-21", countedAt: момент("2026-08-21") },
+        { dt: "2026-08-22", countedAt: момент("2026-08-22") },
+        { dt: "2026-08-24", countedAt: момент("2026-08-24") },
       ],
     }).digest("2026-34", СЕЙЧАС);
 
@@ -430,6 +475,31 @@ describe("Недельная сводка (R-P5b-7)", () => {
     assert.deepEqual(
       [d.stocktakes.positions, d.stocktakes.lastCountedAt],
       [2, момент("2026-08-22").toISOString()],
+    );
+  });
+
+  it("инвентаризации считаются по ИСТОРИИ склада, а не по перезаписной таблице (R-FW-P4)", async () => {
+    // `vending_stock` перезаписной: 20 строк с датой последнего пересчёта. Письмо
+    // о ЛЮБОЙ прошлой неделе говорило по нему «инвентаризаций 0», хотя история
+    // за те недели есть (прод: 460 строк на 20 дат), а число текущей недели
+    // менялось задним числом на следующем пересчёте.
+    const d = await сервис({
+      products: ПРАЙС,
+      entities: ПАРК,
+      // Перезаписная таблица говорит про СЕГОДНЯ — и в неделю 2026-34 не попадает.
+      stock: [{ productName: "Moxito Lime 330ml", quantity: 12, countedAt: момент("2026-08-25") }],
+      stockCounts: [
+        { dt: "2026-08-18", countedAt: момент("2026-08-18") },
+        { dt: "2026-08-22", countedAt: момент("2026-08-22") },
+        // Соседняя неделя — в окно не входит.
+        { dt: "2026-08-24", countedAt: момент("2026-08-24") },
+      ],
+    }).digest("2026-34", СЕЙЧАС);
+
+    assert.deepEqual(
+      [d.stocktakes.positions, d.stocktakes.lastCountedAt],
+      [2, момент("2026-08-22").toISOString()],
+      "строка соседней недели просочилась в окно либо счёт по-прежнему идёт по vending_stock",
     );
   });
 
@@ -650,13 +720,53 @@ describe("Здоровье сбора в письме — за ОТЧЁТНУЮ 
   });
 
   it("прогонов ровно по потолок — capped НЕ взводится и предупреждения нет", async () => {
-    // Граница: «ровно 200» — посчитанный результат, а не обрезанный.
-    const ровно = Array.from({ length: 200 }, (_, i) =>
+    // Граница: «ровно 200» — посчитанный результат, а не обрезанный. Числа
+    // пришпилены к самой константе, а не к литералу рядом: подъём потолка
+    // иначе оставил бы тест зелёным про другое число.
+    const ровно = Array.from({ length: WEEK_RUNS_LIMIT }, (_, i) =>
       прогонСтрокой("success", new Date(Date.UTC(2026, 7, 16, 19, i)).toISOString()),
     );
     const d = await сервис({ ...ДЕНЬГИ_34, runs: ровно }).digest("2026-34", СЕЙЧАС);
-    assert.deepEqual([d.weekHealth.capped, d.weekHealth.runs], [false, 200]);
+    assert.deepEqual([d.weekHealth.capped, d.weekHealth.runs], [false, WEEK_RUNS_LIMIT]);
     assert.deepEqual(d.warnings, []);
+  });
+
+  it("журнал не достаёт до недели: `journalSince` и предупреждение вместо голого нуля (R-FW-P5)", async () => {
+    // Прод: журнал `vending_sync_run` начинается 06.08.2026, а `?week=`
+    // пускает 104 недели назад — любая неделя до этой даты отдавала `runs: 0`
+    // и ни слова о причине. Соседний блок (паритет) ровно этот случай уже
+    // называет словами.
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [прогонСтрокой("success", "2026-08-06T23:08:00+05:00"), прогонСтрокой("success", "2026-08-20T03:05:00+05:00")],
+    }).digest("2026-31", СЕЙЧАС);
+
+    assert.equal(d.weekHealth.week, "2026-31");
+    assert.equal(d.weekHealth.runs, 0);
+    assert.equal(d.weekHealth.journalSince, "2026-08-06", "дата берётся из САМОГО РАННЕГО прогона журнала");
+    assert.ok(
+      d.warnings.some((w) => w.code === "journal_short" && /журнал прогонов начинается с 06\.08\.2026/i.test(w.message)),
+      `предупреждения о начале журнала нет: ${JSON.stringify(d.warnings)}`,
+    );
+  });
+
+  it("неделя ВНУТРИ журнала предупреждения не получает, а дату начала всё равно несёт", async () => {
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [прогонСтрокой("success", "2026-08-06T23:08:00+05:00"), прогонСтрокой("success", "2026-08-20T03:05:00+05:00")],
+    }).digest("2026-34", СЕЙЧАС);
+    assert.equal(d.weekHealth.journalSince, "2026-08-06");
+    assert.equal(
+      d.warnings.some((w) => /журнал прогонов начинается/i.test(w.message)),
+      false,
+      "неделя внутри журнала — предупреждать не о чем",
+    );
+  });
+
+  it("журнал пуст ВОВСЕ — `journalSince` null, а не выдуманная дата", async () => {
+    const d = await сервис({ ...ДЕНЬГИ_34, runs: [] }).digest("2026-34", СЕЙЧАС);
+    assert.equal(d.weekHealth.journalSince, null);
+    assert.equal(d.weekHealth.runs, 0);
   });
 
   it("понедельничное письмо — про ЗАКОНЧЕННУЮ неделю: partialWeek false", async () => {

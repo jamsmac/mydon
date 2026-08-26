@@ -1,5 +1,5 @@
 import type { Logger } from "@nestjs/common";
-import { and, desc, gte, inArray, lt } from "drizzle-orm";
+import { and, asc, desc, gte, inArray, lt } from "drizzle-orm";
 import { ourvendSaleSnapshot, ourvendStockSnapshot, vendingSyncRun } from "@mydon/db";
 import { tashkentInstant, type OurvendSyncRun } from "@mydon/shared";
 import type { Db } from "../db/db.module";
@@ -121,6 +121,30 @@ export async function runsInWindow(
     .orderBy(desc(vendingSyncRun.startedAt))
     .limit(limit);
   return rows.map((r) => ({ status: r.status, startedAt: r.startedAt, error: r.error }));
+}
+
+/**
+ * САМЫЙ РАННИЙ прогон в журнале — начало наблюдения. `null` — журнал пуст.
+ *
+ * ЗАЧЕМ (R-FW-P5). `?week=` пускает 104 недели назад, а журнал на проде
+ * начинается 06.08.2026: всякая неделя до этой даты честно отдаёт `runs: 0`,
+ * `lastDataAt: null` — и без даты начала это читается как «сбор не
+ * запускался», то есть как авария. Тот же довод, которым этот файл
+ * обосновывает отдельный запрос «последнего успеха»: разница между «давно не
+ * было» и «не было ВОВСЕ» решает, чинить коллектор или заводить его впервые —
+ * здесь она же, только про сам журнал.
+ *
+ * БЕЗ ОКНА и с `asc`: вопрос не «что было в этой неделе», а «с какого момента
+ * журнал вообще что-то знает». Запрос индексный (`started_at`), цена — одна
+ * строка.
+ */
+export async function firstRunAt(db: Db): Promise<Date | null> {
+  const [row] = await db
+    .select({ startedAt: vendingSyncRun.startedAt })
+    .from(vendingSyncRun)
+    .orderBy(asc(vendingSyncRun.startedAt))
+    .limit(1);
+  return row?.startedAt ?? null;
 }
 
 /**

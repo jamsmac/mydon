@@ -4,7 +4,7 @@ import { systemConfig } from "@mydon/db";
 import { type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { Db } from "../db/db.module";
-import { RETENTION_BATCH, RETENTION_BUDGET_MS, RetentionService, SYNC_RUN_RETENTION_DAYS } from "./retention.service";
+import { RETENTION_BATCH, RETENTION_BUDGET_MS, RETENTION_EVENT, RetentionService, SYNC_RUN_RETENTION_DAYS } from "./retention.service";
 
 const ДИАЛЕКТ = new PgDialect();
 
@@ -54,6 +54,10 @@ function стенд(опт: {
       if (!t) throw new Error(`стенд: не распознал таблицу в запросе: ${текст}`);
       пачек[t] = (пачек[t] ?? 0) + 1;
       if (опт.ломать?.(t, пачек[t]!)) throw new Error(`стенд: база отказала на пачке ${пачек[t]} таблицы ${t}`);
+      // Примерка (R-FW-S2) спрашивает `count(*)`, а не удаляет: postgres.js
+      // отдаёт на такой запрос МАССИВ СТРОК, и стенд обязан отвечать той же
+      // формой — иначе разбор ответа зеленел бы на подставленном `{ count }`.
+      if (текст.includes("count(*)")) return [{ n: остаток[t] ?? 0 }] as never;
       const есть = остаток[t] ?? 0;
       const пачка = Math.min(есть, RETENTION_BATCH);
       остаток[t] = есть - пачка;
@@ -263,5 +267,40 @@ describe("Ретенция истории склада (R-H-8)", () => {
     const { svc, события } = стенд({ строк: {} });
     assert.deepEqual(await svc.sweep(вс), []);
     assert.equal(события.length, 0);
+  });
+});
+
+describe("Ручной прогон ретенции: примерка и полный расклад (R-FW-S2)", () => {
+  const вс = new Date("2026-09-06T04:10:00+05:00");
+
+  it("`dryRun` НЕ удаляет и НЕ пишет событие, но исполняет тот же предикат", async () => {
+    const { svc, запросы, события } = стенд({ строк: { vending_stock_count: 3, slot_snapshot: 7 } });
+    const итог = await svc.sweep(вс, { dryRun: true });
+
+    assert.equal(итог.find((r) => r.table === "vending_stock_count")!.deleted, 3, "примерка обязана назвать число");
+    assert.equal(события.length, 0, "чистки не было — записи о чистке быть не может");
+    assert.equal(запросы.some((q) => /delete from/i.test(q)), false, "примерка не удаляет ни строки");
+    // Тот же самый предикат по `dt` голыми сутками — ради него роут и заведён.
+    const q = запросы.find((x) => x.includes('"vending_stock_count"'))!;
+    assert.match(q, /"vending_stock_count"\."dt" < \$/);
+    assert.match(q, /"2024-09-06"/, "граница обязана быть строкой YYYY-MM-DD и в примерке тоже");
+  });
+
+  it("`includeEmpty` отдаёт ВСЕ пять целей, включая «удалено 0» — а событий по нулям по-прежнему нет", async () => {
+    const { svc, события } = стенд({ строк: { vending_stock_count: 2 } });
+    const итог = await svc.sweep(вс, { includeEmpty: true });
+    assert.deepEqual(итог.map((r) => r.table).sort(), [
+      "machine_sale", "product_sale", "slot_snapshot", "vending_stock_count", "vending_sync_run",
+    ]);
+    assert.equal(итог.find((r) => r.table === "slot_snapshot")!.deleted, 0);
+    assert.deepEqual(события.map((e) => e.payload.table), ["vending_stock_count"], "журналу нули не нужны");
+  });
+
+  it("настоящий прогон через роут пишет ТЕ ЖЕ события, что крон", async () => {
+    const { svc, события } = стенд({ строк: { vending_stock_count: 4 } });
+    await svc.sweep(вс, { includeEmpty: true });
+    assert.equal(события.length, 1);
+    assert.equal(события[0]!.type, RETENTION_EVENT);
+    assert.deepEqual(события[0]!.payload, { table: "vending_stock_count", deleted: 4, olderThanDays: 730, aborted: false });
   });
 });

@@ -430,7 +430,12 @@ export class WeeklyDigestDto {
  * шире зажима, молча отдаёт не то окно, которое просили (как у `StockCountsDto`).
  */
 export class RefillEventsListDto {
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(90)
+  // `@Transform`, а не `@Type` (R-FW-S8): докблок выше ссылается на
+  // `StockCountsDto` как на образец, а переносил из него только потолок.
+  // `@Type(() => Number)` превращает ПУСТУЮ строку (`?days=` — незаполненное
+  // поле фильтра) в 0, `@Min(1)` его отбивает, и панель получает 400 вместо
+  // окна по умолчанию.
+  @IsOptional() @Transform(({ value }) => (value === "" || value === undefined ? undefined : Number(value))) @IsInt() @Min(1) @Max(90)
   days?: number;
 }
 
@@ -733,7 +738,15 @@ export class VendingController {
     return this.shrinkageReport.alertDaily();
   }
 
-  /** Журнал событий детектора: что автомат получил и была ли запись оператора. */
+  /**
+   * Журнал событий детектора: что автомат получил и была ли запись оператора.
+   *
+   * Свой лимит, как у соседних отчётных чтений (R-FW-S6): срез поднял окно
+   * этого чтения с 30 до 90 суток, то есть цена запроса выросла, а защита
+   * оставалась общей — а общего потолка (60 запросов / 10 с) хватало, чтобы
+   * уложить Core одним циклом `curl` из докер-сети.
+   */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
   @Get("refill-events")
   refillEventsList(@Query() dto: RefillEventsListDto) {
     return this.refillEvents.list(dto.days);

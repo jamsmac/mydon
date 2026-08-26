@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { and, eq, gte, lt } from "drizzle-orm";
-import { vendingPurchaseOrder, vendingRefill, vendingRefillEvent, vendingStock } from "@mydon/db";
+import { vendingPurchaseOrder, vendingRefill, vendingRefillEvent, vendingStockCount } from "@mydon/db";
 import {
   dayNumber,
   isoWeekFromKey,
@@ -26,6 +26,7 @@ import {
   CUTOVER_GREEN_DAYS_FALLBACK,
   SYNC_STALE_HOURS_FALLBACK,
   WEEK_RUNS_LIMIT,
+  firstRunAt,
   lastSuccessRunAt,
   runsInWindow,
 } from "../ourvend/sync-runs";
@@ -150,9 +151,9 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
  * Пара к `ЗДОРОВЬЕ_НЕИЗВЕСТНО`: «не посчитали» ≠ «всё хорошо».
  *
  * Нули здесь читаются вместе с `warnings`: подпись недели остаётся (числа без
- * недели не значат ничего), прогонов ноль, `lastSuccessAt` — `null` («успехов
- * не было ВОВСЕ», а не «ноль часов назад»), дней паритета нет. Причина едет
- * словами в `warnings`, как и у соседа.
+ * недели не значат ничего), прогонов ноль, `lastDataAt` — `null` («данные за
+ * неделю не приезжали ВОВСЕ», а не «ноль часов назад»), дней паритета нет.
+ * Причина едет словами в `warnings`, как и у соседа.
  */
 const НЕДЕЛЯ_НЕИЗВЕСТНА = (week: string, partialWeek: boolean): WeeklyHealth => ({
   week,
@@ -172,7 +173,15 @@ const НЕДЕЛЯ_НЕИЗВЕСТНА = (week: string, partialWeek: boolean): 
   // Потолок чтения не срабатывал — читать не вышло вовсе. `true` здесь
   // утверждало бы про журнал то, чего мы не видели.
   capped: false,
+  // Начало журнала мы тоже НЕ ВИДЕЛИ: дата здесь была бы утверждением о
+  // журнале, который не прочитался.
+  journalSince: null,
 });
+
+/**
+ * Причина отказа человеческим текстом — одна формулировка на три `catch` файла.
+ */
+const причинаОтказа = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
  * Текст предупреждения о неделе, до которой окно счёта серии не достаёт.
@@ -180,11 +189,6 @@ const НЕДЕЛЯ_НЕИЗВЕСТНА = (week: string, partialWeek: boolean): 
  * Молчаливый пустой список читался бы как «сверки не было» — ровно тот ноль,
  * который выдают за результат. Здесь причина названа и сказано, где смотреть.
  */
-/**
- * Причина отказа человеческим текстом — одна формулировка на три `catch` файла.
- */
-const причинаОтказа = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
 const ПАРИТЕТ_ВНЕ_ОКНА =
   `Дни паритета за эту неделю вне окна счёта серии (${PARITY_STREAK_WINDOW} дней) — ` +
   "смотри /ourvend/parity/streak";
@@ -195,6 +199,16 @@ const ПАРИТЕТ_ВНЕ_ОКНА =
  * Молчаливое обрезание здесь читается как посчитанный результат: «отказов 3»
  * за неделю с зациклившимся кроном увело бы владельца от аварии.
  */
+/**
+ * Журнал прогонов НЕ ДОСТАЁТ до отчётной недели.
+ *
+ * `runs: 0` без этой строки читается как «сбор не запускался» — то есть как
+ * авария, которой не было. Дата — голые ташкентские сутки в человеческом
+ * порядке: письмо читают глазами.
+ */
+const ЖУРНАЛ_НЕ_ДОСТАЁТ = (since: string): string =>
+  `Журнал прогонов начинается с ${since.split("-").reverse().join(".")} — за эту неделю данных нет.`;
+
 const ПРОГОНЫ_ОБРЕЗАНЫ =
   `Прогонов за неделю больше потолка чтения (${WEEK_RUNS_LIMIT}) — числа блока посчитаны ` +
   "по самым свежим прогонам окна, весь журнал в /ourvend/health.";
@@ -352,11 +366,14 @@ export class WeeklyDigestService {
     const partialWeek = конец.getTime() > now.getTime();
     try {
       const окно = { from: начало, to: конец };
-      const [прочитано, данные, паритет] = await Promise.all([
+      const [прочитано, данные, началоЖурнала, паритет] = await Promise.all([
         // На ОДИН прогон больше потолка: иначе «ровно 200» и «больше 200»
         // неразличимы, и обрезанный счёт уехал бы в письмо как посчитанный.
         runsInWindow(this.db, окно, WEEK_RUNS_LIMIT + 1),
         lastSuccessRunAt(this.db, окно),
+        // Начало журнала — БЕЗ окна: вопрос «с какого момента журнал вообще
+        // что-то знает», а не «что было в этой неделе» (R-FW-P5).
+        firstRunAt(this.db),
         this.дниПаритета(неделя, now),
       ]);
 
@@ -384,6 +401,18 @@ export class WeeklyDigestService {
         warnings.push({ code: "health_unavailable", message: ПАРИТЕТ_ВНЕ_ОКНА });
       }
       if (capped) warnings.push({ code: "history_capped", message: ПРОГОНЫ_ОБРЕЗАНЫ });
+      // НЕДЕЛЯ ЦЕЛИКОМ РАНЬШЕ ЖУРНАЛА (R-FW-P5): сравнивается КОНЕЦ окна, то
+      // есть предупреждение выдаётся только когда данных не могло быть ни за
+      // один день недели. Неделя, в которую журнал начался (у нас — 2026-W32,
+      // четверг), отдаёт свои настоящие прогоны молча: числа там честные, а
+      // «неполное покрытие» — другой разговор, и он тот же, что у паритета.
+      const journalSince = началоЖурнала ? tashkentDay(началоЖурнала) : null;
+      if (началоЖурнала && journalSince && конец.getTime() <= началоЖурнала.getTime()) {
+        // СВОЙ код, а не `health_unavailable`: тот значит «не посчиталось», а
+        // здесь всё посчиталось — данных за неделю не существует. Читатель
+        // (бот, панель) обязан различать это КОДОМ, а не разбором текста.
+        warnings.push({ code: "journal_short", message: ЖУРНАЛ_НЕ_ДОСТАЁТ(journalSince) });
+      }
 
       return {
         health: {
@@ -403,6 +432,7 @@ export class WeeklyDigestService {
           parityRed: дни.filter((d) => !d.ok).length,
           partialWeek,
           capped,
+          journalSince,
         },
         warnings,
       };
@@ -459,6 +489,18 @@ export class WeeklyDigestService {
    * Окно у всех четырёх одно и полуинтервальное — `[понедельник, следующий
    * понедельник)`: `lte` по концу воскресенья втянул бы полночь понедельника в
    * обе соседние недели, и одна и та же заливка посчиталась бы дважды.
+   *
+   * ИНВЕНТАРИЗАЦИИ — ПО ИСТОРИИ, А НЕ ПО `vending_stock` (R-FW-P4). Таблица
+   * остатков ПЕРЕЗАПИСНАЯ: на проде это 20 строк с датой последнего пересчёта,
+   * то есть письмо о любой прошлой неделе говорило «инвентаризаций 0», хотя
+   * история за те недели есть (460 строк на 20 дат), а число текущей недели
+   * менялось задним числом на следующем пересчёте. `vending_stock_count`
+   * заведена ровно под этот вопрос, и держать в одном письме два разных ответа
+   * на «сколько раз считали склад» нельзя.
+   *
+   * Окно у истории — по `dt` ГОЛЫМИ СУТКАМИ-строками: `date`-колонка против
+   * `timestamptz` уехала бы на 05:00 Ташкента (урок VendCash), тем же приёмом
+   * режет эту таблицу ретенция.
    */
   private async работаЗаНеделю(начало: Date, конец: Date) {
     const [события, записи, накладные, инвентаризации] = await Promise.all([
@@ -481,9 +523,9 @@ export class WeeklyDigestService {
           ),
         ),
       this.db
-        .select({ countedAt: vendingStock.countedAt })
-        .from(vendingStock)
-        .where(and(gte(vendingStock.countedAt, начало), lt(vendingStock.countedAt, конец))),
+        .select({ countedAt: vendingStockCount.countedAt })
+        .from(vendingStockCount)
+        .where(and(gte(vendingStockCount.dt, tashkentDay(начало)), lt(vendingStockCount.dt, tashkentDay(конец)))),
     ]);
 
     let units = 0;
