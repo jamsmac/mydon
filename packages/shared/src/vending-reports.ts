@@ -1044,11 +1044,28 @@ export interface StockCountRow {
   source: string;
   /** Момент пересчёта (ISO): в одни сутки их может быть несколько. */
   countedAt: string;
+  /**
+   * Пометка строки. ЗНАЧИТ РАЗНОЕ У РАЗНЫХ ИСТОЧНИКОВ (R-H-2):
+   * `own` — КТО считал (`ingestStock` пишет сюда actor, `vending.service.ts`),
+   * `stock-import` — МЕСТО донора («2 Холодильник»): правило —
+   * `packages/shared/src/stock-history.ts` (`importNote(row.location_name)`),
+   * запись — `packages/db/src/import-stock-history.ts`.
+   * `null` — пометки нет; выдумывать «Основной склад» нельзя.
+   */
+  note: string | null;
 }
 
 /** Ответ `GET /vending/stock-counts` — история пересчётов склада за окно. */
 export interface StockCountsReport {
   days: number;
+  /**
+   * Первые сутки окна, `YYYY-MM-DD` по Ташкенту — ТО ЖЕ число, по которому
+   * шла выборка (`stockCounts`, `− (дни − 1)`). Едет в ответе, а не считается
+   * витриной: вторая копия правила окна разошлась бы с выборкой на первом же
+   * уточнении, а подписать окно датой самой старой ПОКАЗАННОЙ строки нельзя —
+   * при `history_capped` это прямая ложь.
+   */
+  since: string;
   /** Фильтр по товару (канон) или `null` — вся история окна. */
   product: string | null;
   rows: StockCountRow[];

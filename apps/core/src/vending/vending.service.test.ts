@@ -1561,14 +1561,21 @@ describe("Вендинг Core: история пересчётов склада 
  * порядком фикстуры, а не кодом сервиса.
  */
 describe("Вендинг Core: чтение истории склада (R-P8a-3)", () => {
-  type ИсторияRow = { dt: string; productName: string; qty: string; source: string; countedAt: Date };
+  type ИсторияRow = { dt: string; productName: string; qty: string; source: string; countedAt: Date; note: string | null };
 
-  const строка = (dt: string, productName: string, qty: number, source = "own"): ИсторияRow => ({
+  const строка = (
+    dt: string,
+    productName: string,
+    qty: number,
+    source = "own",
+    note: string | null = null,
+  ): ИсторияRow => ({
     dt,
     productName,
     qty: qty.toFixed(2),
     source,
     countedAt: new Date(`${dt}T09:00:00+05:00`),
+    note,
   });
 
   function historyDb(rows: ИсторияRow[], aliases: unknown[] = [], products: unknown[] = []) {
@@ -1621,8 +1628,35 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
       qty: 7,
       source: "own",
       countedAt: "2026-08-25T04:00:00.000Z",
+      note: null,
     });
     assert.deepEqual(о.warnings, []);
+  });
+
+  it("в строке едет `note` — без него лист не сгруппирует ни по месту, ни по счётчику", async () => {
+    // `note` значит РАЗНОЕ у разных источников (R-H-2): у своей строки это
+    // человек, у импортированной — локация донора. Одно поле, два смысла, и
+    // различает их `source` — поэтому оба обязаны доехать до витрины.
+    const db = historyDb([
+      строка("2026-08-25", "Sprite 250ml", 19, "own", "Рустам"),
+      строка("2026-08-24", "Sprite 250ml", 12, "stock-import", "2 Холодильник"),
+    ]);
+    const о = await new VendingService(db).stockCounts(90, undefined, СЕЙЧАС);
+    assert.deepEqual(
+      о.rows.map((r) => [r.source, r.note]),
+      [["own", "Рустам"], ["stock-import", "2 Холодильник"]],
+    );
+  });
+
+  it("`since` — первые сутки окна, те же, по которым шла выборка", async () => {
+    // Витрина подписывает окно этим числом. Считай его панель сама — в
+    // репозитории появилась бы вторая копия правила `− (дни − 1)` (R-FW-11), и
+    // разошлась бы она молча: подпись на сутки мимо выборки не видна никак.
+    const db = historyDb([строка("2026-08-25", "Sprite 250ml", 19)]);
+    const о = await new VendingService(db).stockCounts(90, undefined, СЕЙЧАС);
+    assert.equal(о.since, "2026-05-28");
+    const однодневное = await new VendingService(historyDb([])).stockCounts(1, undefined, СЕЙЧАС);
+    assert.equal(однодневное.since, "2026-08-25", "days=1 — это «сегодня», а не «вчера»");
   });
 
   it("окно шире — доезжает и импортированное прошлое, `source` его отличает", async () => {

@@ -66,6 +66,7 @@ import { SHRINKAGE_WINDOWS, ShrinkageView } from "../../../components/shrinkage-
 import { MARGIN_WINDOWS, MarginView } from "../../../components/margin-view";
 import { REFILL_EVENT_WINDOWS, RefillEventsView } from "../../../components/refill-events-view";
 import { DEAD_STOCK_WINDOWS, DeadStockView } from "../../../components/dead-stock-view";
+import { STOCK_HISTORY_WINDOWS, StockHistoryView } from "../../../components/stock-history-view";
 import { PRICE_WINDOWS, VendingPricesView } from "../../../components/vending-prices-view";
 import { ProductRulesView } from "../../../components/product-rules-view";
 import { CoffeePanel } from "../../../components/coffee-panel";
@@ -704,6 +705,10 @@ export default async function DomainPage({
   // независимо от списка кнопок здесь.
   const refillEventDays =
     (REFILL_EVENT_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 14;
+  // История склада («Хвосты», R-H-2): тот же приём. Список кнопок совпадает с
+  // окнами, которые ядро отдаёт целиком (потолок `StockCountsDto` @Max(730)).
+  const stockHistoryDays =
+    (STOCK_HISTORY_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 90;
 
   // Реестр пробелов (срез К, задача 6, шаг 3): вычисляется на каждом чтении
   // (R-K4) — пустой массив здесь означает «всё, что можно посчитать, посчитано»,
@@ -1986,6 +1991,11 @@ export default async function DomainPage({
           П4) получает потребителя. ── */}
       {group && leaf?.type === "refill_events" && <RefillEventsView domain={domain} days={refillEventDays} />}
 
+      {/* ── История склада («Хвосты», R-H-2): 460 импортированных инвентаризаций
+          донора плюс каждый свой пересчёт. До этого листа история жила только
+          в ответе `/vending/stock-counts`, то есть в `curl`. ── */}
+      {group && leaf?.type === "stock_history" && <StockHistoryView domain={domain} days={stockHistoryDays} q={q ?? ""} />}
+
       {/* ── Аналитика снек-контура (П5b): маржа по проданному, мёртвый сток и
           цены (изменения, витрина против эталона, динамика по месяцам).
           Считает ядро (/vending/margin, /vending/dead-stock,
@@ -2523,6 +2533,7 @@ export default async function DomainPage({
           "purchase_rules",
           "shrinkage",
           "refill_events",
+          "stock_history",
           "margin",
           "dead_stock",
           "prices",

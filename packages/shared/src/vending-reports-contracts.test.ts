@@ -8,6 +8,8 @@ import type {
   SetSalePriceResult,
   ShrinkReport,
   ShrinkWarningCode,
+  StockCountRow,
+  StockCountsReport,
   WeeklyDigest,
 } from "./vending-reports";
 
@@ -223,6 +225,24 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       ],
     };
     assert.deepEqual(бутстрап.skipped.map((s) => s.reason).sort(), ["already_set", "inactive", "no_fact", "no_sales"]);
+  });
+
+  it("история склада: пометка и первые сутки окна едут в ответе (R-H-2)", () => {
+    const строка: StockCountRow = {
+      dt: "2026-08-25",
+      product: "Sprite 250ml",
+      qty: 19,
+      source: "stock-import",
+      countedAt: "2026-08-25T04:00:00.000Z",
+      note: "2 Холодильник",
+    };
+    const отчёт: StockCountsReport = { days: 90, since: "2026-05-28", product: null, rows: [строка], warnings: [] };
+    assert.deepEqual(Object.keys(строка).sort(), ["countedAt", "dt", "note", "product", "qty", "source"]);
+    assert.deepEqual(Object.keys(отчёт).sort(), ["days", "product", "rows", "since", "warnings"]);
+    // `null` — законная пометка («её нет»), а не пропуск поля: выдумывать
+    // «Основной склад» вместо неё нельзя.
+    const безПометки: StockCountRow = { ...строка, source: "own", note: null };
+    assert.equal(безПометки.note, null);
   });
 
   it("пустая неделя выражается типом: процент null, а не ноль", () => {

@@ -52,3 +52,9 @@ export const COVERED_BY_MARGIN: AnalyticsWarningCode[] = ["unknown_cost", "exclu
 export const COVERED_BY_DEAD_STOCK: AnalyticsWarningCode[] = ["unknown_cost"];
 /** Витрина сама печатает список «эталон не задан (N): …». */
 export const COVERED_BY_PRICE_GAP: AnalyticsWarningCode[] = ["no_reference"];
+/**
+ * История склада сама объясняет пустоту по ЗАДАННОМУ товару своим третьим
+ * состоянием. `history_capped` НЕ покрыт: про обрезку окна лист не говорит
+ * ничего, и молчать о ней нельзя — показан хвост, а не всё окно.
+ */
+export const COVERED_BY_STOCK_HISTORY: AnalyticsWarningCode[] = ["stock_missing"];

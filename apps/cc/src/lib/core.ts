@@ -14,6 +14,7 @@ import type {
   PriceGapReport,
   PurchasePlan as VendingPlan,
   ShrinkReport as VendingShrinkageReport,
+  StockCountsReport,
 } from "@mydon/shared";
 
 /**
@@ -204,6 +205,8 @@ export type {
   ShrinkRefillDay as VendingShrinkageRefillDay,
   ShrinkReport as VendingShrinkageReport,
   ShrinkWarning as VendingShrinkageWarning,
+  StockCountRow,
+  StockCountsReport,
 } from "@mydon/shared";
 
 /**
@@ -2285,6 +2288,11 @@ export const core = {
    */
   vendingMargin: (days = 30) => get<MarginReport & WithWarnings>(`/vending/margin?days=${days}`),
   vendingDeadStock: (days = 21) => get<DeadStockReport & WithWarnings>(`/vending/dead-stock?days=${days}`),
+  /** История пересчётов склада (П8a). Окно зажимает ядро: 1..730, дефолт 90. */
+  vendingStockCounts: (days = 90, product?: string) =>
+    get<StockCountsReport>(
+      `/vending/stock-counts?days=${days}${product ? `&product=${encodeURIComponent(product)}` : ""}`,
+    ),
   /** `monthly` — донорская динамика по месяцам, её просит только панель (R-P5b-5). */
   vendingPriceChanges: (days = 30) =>
     get<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings>(`/vending/price-changes?days=${days}`),

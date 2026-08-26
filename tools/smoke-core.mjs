@@ -104,6 +104,11 @@ const ЧТЕНИЕ = [
       if (!Array.isArray(о?.rows)) throw new Error("stock-counts.rows — не массив");
       if (!Array.isArray(о?.warnings)) throw new Error("stock-counts.warnings — не массив");
       if (о?.days !== 90) throw new Error(`stock-counts.days=${о?.days}`);
+      if (typeof о?.since !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(о.since))
+        throw new Error(`stock-counts.since=${о?.since} — не голые сутки YYYY-MM-DD`);
+      // Ключ `note` обязан ПРИСУТСТВОВАТЬ, даже когда он null: лист группирует
+      // по нему, и его отсутствие — это одна безымянная куча вместо истории.
+      for (const r of о.rows ?? []) if (!("note" in r)) throw new Error("в строке истории склада нет ключа note");
     },
   },
   {

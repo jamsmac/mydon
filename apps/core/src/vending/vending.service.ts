@@ -1632,6 +1632,7 @@ export class VendingService {
         qty: vendingStockCount.qty,
         source: vendingStockCount.source,
         countedAt: vendingStockCount.countedAt,
+        note: vendingStockCount.note,
       })
       .from(vendingStockCount)
       .where(условие)
@@ -1663,8 +1664,11 @@ export class VendingService {
       qty: Number(r.qty),
       source: r.source,
       countedAt: r.countedAt.toISOString(),
+      note: r.note,
     }));
-    return { days: дни, product: канон, rows: строки, warnings };
+    // `since` уезжает в ответ, а не считается витриной: правило окна
+    // (`− (дни − 1)`) живёт в одном месте — здесь, где по нему же идёт выборка.
+    return { days: дни, since, product: канон, rows: строки, warnings };
   }
 
   /**
