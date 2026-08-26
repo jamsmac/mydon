@@ -498,6 +498,13 @@
       "when": 1787682305418,
       "tag": "0070_retention_time_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1787718914660,
+      "tag": "0071_stock_count_retention_idx",
+      "breakpoints": true
     }
   ]
 }

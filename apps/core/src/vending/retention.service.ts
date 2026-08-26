@@ -2,8 +2,8 @@ import { Inject, Injectable, Logger, type OnApplicationShutdown, type OnModuleIn
 import { Cron } from "croner";
 import { sql, type SQL } from "drizzle-orm";
 import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
-import { event, machineSale, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
-import { TZ } from "@mydon/shared";
+import { event, machineSale, productSale, slotSnapshot, vendingStockCount, vendingSyncRun } from "@mydon/db";
+import { TZ, tashkentDay } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
 
@@ -16,6 +16,13 @@ export const SNAPSHOT_RETENTION_DAYS_FALLBACK = 180;
  * панели, поэтому константа кода, а не настройка.
  */
 export const SYNC_RUN_RETENTION_DAYS = 365;
+
+/**
+ * Порог, если `STOCK_COUNT_RETENTION_DAYS` не задан. Дублирует фолбэк
+ * `config-spec.ts` — и там, и здесь он РАВЕН ПОЛУ: ключом историю склада можно
+ * только продлить.
+ */
+export const STOCK_COUNT_RETENTION_DAYS_FALLBACK = 730;
 
 /**
  * Пачка и бюджет времени: чистка не должна держать блокировки дольше одного
@@ -42,6 +49,14 @@ interface RetentionTarget {
   idCol: AnyPgColumn;
   ageCol: AnyPgColumn;
   olderThanDays: number;
+  /**
+   * Тип границы. `"date"` — колонка `date`, и граница уходит ГОЛЫМИ СУТКАМИ
+   * `YYYY-MM-DD`: сравнение `date`-колонки с `timestamptz` Postgres приводит к
+   * UTC-полуночи, то есть к 05:00 по Ташкенту — ровно та ошибка на пять часов,
+   * которой стоил урок VendCash. Умолчание `"timestamp"`: поведение четырёх
+   * существующих целей не меняется ни на байт.
+   */
+  cutoffAs?: "date" | "timestamp";
 }
 
 /**
@@ -65,6 +80,17 @@ interface RetentionTarget {
  * и ретенция по нему стирала бы собственный вход гейта катовера. `raw_row`
  * заморожен с 01.08 и остаётся сырым слоем источников — его чистит только
  * ручная операция, не крон.
+ *
+ * (г) ПЯТАЯ ЦЕЛЬ — ДРУГОЙ ПРИРОДЫ (R-H-8). Четыре первые — телеметрия: снимок
+ * слотов или продажа пересчитаются следующим сбором из кабинета. Пятая,
+ * `vending_stock_count`, — РУЧНОЙ ТРУД ВЛАДЕЛЬЦА: инвентаризацию склада не
+ * восстановит ни один коллектор. Отсюда и свой ключ
+ * (`STOCK_COUNT_RETENTION_DAYS`, не второе имя `SNAPSHOT_RETENTION_DAYS`), и
+ * пол, РАВНЫЙ дефолту: настройкой хранение можно только продлить. Режется цель
+ * по `dt` — по той же колонке, по которой фильтрует читатель
+ * (`VendingService.stockCounts`): по любой другой гарантия «окно ретенции ≥
+ * окна чтения» стала бы приблизительной, и лист «История склада» показал бы
+ * дырку внутри своего окна без объяснения.
  *
  * Крон — воскресенье 04:10 по Ташкенту: сбор в это время не идёт, суточный
  * бэкап (`backup_extra.sh`) уже прошёл, а до утреннего паритета (08:40)
@@ -104,11 +130,15 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
 
   /** Пачка DELETE по подзапросу PK, отсортированному по колонке возраста — старейшие строки первыми. */
   private batchQuery(t: RetentionTarget, cutoff: Date): SQL {
+    // Голые сутки для `date`-колонок (R-H-8). `date < timestamptz` Postgres
+    // приводит к UTC-полуночи = 05:00 Ташкента, и цель резала бы на пять часов
+    // раньше срока — та самая ловушка, которой стоил урок VendCash.
+    const граница: string | Date = t.cutoffAs === "date" ? tashkentDay(cutoff) : cutoff;
     return sql`
       delete from ${t.table}
       where ${t.idCol} in (
         select ${t.idCol} from ${t.table}
-        where ${t.ageCol} < ${cutoff}
+        where ${t.ageCol} < ${граница}
         order by ${t.ageCol}
         limit ${sql.raw(String(RETENTION_BATCH))}
       )
@@ -119,10 +149,11 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
    * Прогон ретенции. `now` — параметр: границу «N суток назад» иначе нечем
    * проверить тестом.
    *
-   * Четыре цели, каждая своей колонкой возраста: `slot_snapshot.captured_at`,
+   * Пять целей, каждая своей колонкой возраста: `slot_snapshot.captured_at`,
    * `product_sale.captured_at`, `machine_sale.captured_at` —
    * `SNAPSHOT_RETENTION_DAYS`; `vending_sync_run.started_at` —
-   * `SYNC_RUN_RETENTION_DAYS`. Таблица попадает в результат и получает событие
+   * `SYNC_RUN_RETENTION_DAYS`; `vending_stock_count.dt` —
+   * `STOCK_COUNT_RETENTION_DAYS`. Таблица попадает в результат и получает событие
    * `system.retention`, когда что-то реально удалено ИЛИ когда чистка
    * оборвалась ошибкой: «удалено 0» — не новость (ни строки в журнале, ни
    * лишнего события за 52 воскресенья в году), а «не смогли удалить» —
@@ -141,6 +172,17 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       ),
     );
 
+    const stockCountDays = Math.max(
+      // ПОЛ 730 = ДЕФОЛТ 730 (R-H-8). Ключ умеет только ПРОДЛИТЬ хранение: 730 —
+      // потолок `?days=` у /vending/stock-counts, и окно ретенции уже него молча
+      // режет данные ПОД уже работающим листом «История склада». Валидатор
+      // панели такое отобьёт, env — нет, поэтому пол стоит и здесь.
+      730,
+      Math.trunc(
+        await readIntSetting(this.db, "STOCK_COUNT_RETENTION_DAYS", STOCK_COUNT_RETENTION_DAYS_FALLBACK, this.logger),
+      ),
+    );
+
     const targets: RetentionTarget[] = [
       { table: slotSnapshot, name: "slot_snapshot", idCol: slotSnapshot.id, ageCol: slotSnapshot.capturedAt, olderThanDays: snapshotDays },
       { table: productSale, name: "product_sale", idCol: productSale.id, ageCol: productSale.capturedAt, olderThanDays: snapshotDays },
@@ -151,6 +193,17 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
         idCol: vendingSyncRun.id,
         ageCol: vendingSyncRun.startedAt,
         olderThanDays: SYNC_RUN_RETENTION_DAYS,
+      },
+      {
+        table: vendingStockCount,
+        name: "vending_stock_count",
+        idCol: vendingStockCount.id,
+        // `dt`, А НЕ `counted_at`: читатель фильтрует именно `dt`
+        // (`vending.service.ts`), и резать по другой колонке значит давать
+        // гарантию «окно ретенции ≥ окна чтения» приблизительно.
+        ageCol: vendingStockCount.dt,
+        olderThanDays: stockCountDays,
+        cutoffAs: "date",
       },
     ];
 

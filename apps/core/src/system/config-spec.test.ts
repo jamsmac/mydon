@@ -155,6 +155,31 @@ describe("Ключи катовера П8b (R-P8b-3, R-P8b-7)", () => {
   });
 });
 
+describe("Ключ ретенции истории склада (R-H-8)", () => {
+  it("дефолт 730 и пол 730: ключом можно только ПРОДЛИТЬ хранение", () => {
+    // 730 — ровно потолок `?days=` у /vending/stock-counts. Лист умеет
+    // запросить два года, и всё, что он умеет запросить, обязано лежать в базе.
+    assert.equal(specFor("STOCK_COUNT_RETENTION_DAYS")?.fallback, "730");
+    assert.equal(validateConfig("STOCK_COUNT_RETENTION_DAYS", "730"), null);
+    assert.equal(validateConfig("STOCK_COUNT_RETENTION_DAYS", "1095"), null);
+    assert.equal(validateConfig("STOCK_COUNT_RETENTION_DAYS", "3650"), null);
+    for (const мало of ["365", "729", "180", "0", "-1"]) {
+      assert.match(
+        validateConfig("STOCK_COUNT_RETENTION_DAYS", мало) ?? "",
+        /не меньше 730/,
+        `${мало}: настройка ниже окна чтения молча режет историю ПОД работающим листом`,
+      );
+    }
+  });
+
+  it("это ОТДЕЛЬНЫЙ ключ, а не второе имя SNAPSHOT_RETENTION_DAYS", () => {
+    // Снимки (180) пересчитываются следующим сбором; инвентаризация склада —
+    // ручной труд владельца, её не восстановить ничем.
+    assert.notEqual(specFor("STOCK_COUNT_RETENTION_DAYS")?.fallback, specFor("SNAPSHOT_RETENTION_DAYS")?.fallback);
+    assert.match(specFor("STOCK_COUNT_RETENTION_DAYS")?.help ?? "", /История склада|Увеличить можно/);
+  });
+});
+
 describe("resolveEffective: приоритет база > env > дефолт", () => {
   const spec = specFor("AGENT_AUTONOMY_MAX")!;
 

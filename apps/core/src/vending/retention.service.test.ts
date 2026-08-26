@@ -43,7 +43,7 @@ function стенд(опт: {
   const события: { type: string; payload: Record<string, unknown> }[] = [];
   const настройки = Object.entries(опт.настройки ?? {}).map(([key, value]) => ({ key, value }));
 
-  const ТАБЛИЦЫ = ["slot_snapshot", "product_sale", "machine_sale", "vending_sync_run"];
+  const ТАБЛИЦЫ = ["slot_snapshot", "product_sale", "machine_sale", "vending_sync_run", "vending_stock_count"];
   const пачек: Record<string, number> = {};
 
   const db = {
@@ -198,5 +198,65 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
     assert.equal(r.capped, true);
     assert.equal(r.deleted, RETENTION_BATCH);
     assert.equal(запросы.filter((q) => q.includes("slot_snapshot")).length, 1);
+  });
+});
+
+describe("Ретенция истории склада (R-H-8)", () => {
+  const вс = new Date("2026-09-06T04:10:00+05:00");
+
+  it("чистит ПЯТЬ таблиц: к четырём добавилась vending_stock_count", async () => {
+    const { svc, запросы } = стенд({
+      строк: { slot_snapshot: 1, product_sale: 1, machine_sale: 1, vending_sync_run: 1, vending_stock_count: 1 },
+    });
+    const итог = await svc.sweep(вс);
+    assert.deepEqual(итог.map((r) => r.table).sort(), [
+      "machine_sale", "product_sale", "slot_snapshot", "vending_stock_count", "vending_sync_run",
+    ]);
+    // `event` и `raw_row` по-прежнему вне ретенции: журнал событий —
+    // доказательная база (из него же считается серия паритета).
+    assert.equal(запросы.filter((q) => /\bevent\b|\braw_row\b/.test(q)).length, 0);
+  });
+
+  it("граница истории склада по умолчанию — 730 суток, а не 180 снимков", async () => {
+    const { svc } = стенд({ строк: { vending_stock_count: 1, slot_snapshot: 1 } });
+    const итог = await svc.sweep(вс);
+    assert.equal(итог.find((r) => r.table === "vending_stock_count")!.olderThanDays, 730);
+    assert.equal(итог.find((r) => r.table === "slot_snapshot")!.olderThanDays, 180);
+  });
+
+  it("пол 730 держится и против env: панель отобьёт 365, окружение — нет, а Math.max — да", async () => {
+    const { svc } = стенд({ строк: { vending_stock_count: 1 }, настройки: { STOCK_COUNT_RETENTION_DAYS: "365" } });
+    assert.equal((await svc.sweep(вс))[0]!.olderThanDays, 730);
+  });
+
+  it("720 суток окно НЕ сужают, 1095 — расширяют: ключ умеет только продлить", async () => {
+    const { svc: узкий } = стенд({ строк: { vending_stock_count: 1 }, настройки: { STOCK_COUNT_RETENTION_DAYS: "720" } });
+    assert.equal((await узкий.sweep(вс))[0]!.olderThanDays, 730);
+    const { svc: широкий } = стенд({ строк: { vending_stock_count: 1 }, настройки: { STOCK_COUNT_RETENTION_DAYS: "1095" } });
+    assert.equal((await широкий.sweep(вс))[0]!.olderThanDays, 1095);
+  });
+
+  it("граница для vending_stock_count уходит ГОЛЫМИ СУТКАМИ, а не моментом", async () => {
+    // `dt` — колонка типа `date`. Сравнение её с `timestamptz` Postgres
+    // приводит к UTC-полуночи, то есть к 05:00 по Ташкенту: строки последних
+    // пяти часов «того» дня срезались бы раньше срока (урок VendCash).
+    const { svc, запросы } = стенд({ строк: { vending_stock_count: 1 } });
+    await svc.sweep(вс);
+    const q = запросы.find((x) => x.includes('"vending_stock_count"'))!;
+    assert.match(q, /"2024-09-06"/, "граница обязана быть строкой YYYY-MM-DD");
+    assert.equal(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(q), false, "момента в параметрах быть не должно");
+    // Четыре старые цели по-прежнему сравниваются МОМЕНТОМ — их поведение не
+    // менялось (`cutoffAs` по умолчанию "timestamp"). Проверяем это на запросе
+    // снимков, который стенд выдаёт в том же прогоне (пустая таблица — всё
+    // равно одна пачка): иначе «голые сутки» уехали бы во все пять целей и
+    // тест бы этого не заметил.
+    const снимки = запросы.find((x) => x.includes('"slot_snapshot"'))!;
+    assert.match(снимки, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, "снимки обязаны резаться моментом, а не сутками");
+  });
+
+  it("удалять нечего — ни события, ни строки в результате: правило П8b новой целью не сломано", async () => {
+    const { svc, события } = стенд({ строк: {} });
+    assert.deepEqual(await svc.sweep(вс), []);
+    assert.equal(события.length, 0);
   });
 });
