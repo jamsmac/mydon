@@ -294,6 +294,7 @@ export type {
   PlanWarning as VendingPlanWarning,
   WeeklyDigest,
   WeeklyDigestMachine,
+  WeeklyHealth,
 } from "@mydon/shared";
 
 /**

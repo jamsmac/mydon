@@ -5,6 +5,8 @@ import {
   dayNumber,
   isoWeekFromKey,
   isoWeekTashkent,
+  parityDaysInWeek,
+  PARITY_STREAK_WINDOW,
   previousIsoWeek,
   tashkentDay,
   tashkentDayStart,
@@ -14,11 +16,19 @@ import {
   type IsoWeek,
   type OurvendHealth,
   type WeeklyDigest,
+  type WeeklyHealth,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { OurvendHealthService } from "../ourvend/ourvend-health.service";
-import { CUTOVER_GREEN_DAYS_FALLBACK, SYNC_STALE_HOURS_FALLBACK } from "../ourvend/sync-runs";
+import { OurvendParityService } from "../ourvend/ourvend-parity.service";
+import {
+  CUTOVER_GREEN_DAYS_FALLBACK,
+  SYNC_STALE_HOURS_FALLBACK,
+  lastSuccessRunAt,
+  runsInWindow,
+} from "../ourvend/sync-runs";
 import { AnalyticsService } from "./analytics.service";
+import { worstFailedStreak } from "./sync-streak";
 import { parseOrderPositions } from "./vending.service";
 import { ReportCache } from "./report-cache";
 
@@ -134,6 +144,37 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
   },
 };
 
+/**
+ * Пара к `ЗДОРОВЬЕ_НЕИЗВЕСТНО`: «не посчитали» ≠ «всё хорошо».
+ *
+ * Нули здесь читаются вместе с `warnings`: подпись недели остаётся (числа без
+ * недели не значат ничего), прогонов ноль, `lastSuccessAt` — `null` («успехов
+ * не было ВОВСЕ», а не «ноль часов назад»), дней паритета нет. Причина едет
+ * словами в `warnings`, как и у соседа.
+ */
+const НЕДЕЛЯ_НЕИЗВЕСТНА = (week: string): WeeklyHealth => ({
+  week,
+  runs: 0,
+  success: 0,
+  partial: 0,
+  failed: 0,
+  worstFailedStreak: 0,
+  lastSuccessAt: null,
+  parityDays: [],
+  parityGreen: 0,
+  parityRed: 0,
+});
+
+/**
+ * Текст предупреждения о неделе, до которой окно счёта серии не достаёт.
+ *
+ * Молчаливый пустой список читался бы как «сверки не было» — ровно тот ноль,
+ * который выдают за результат. Здесь причина названа и сказано, где смотреть.
+ */
+const ПАРИТЕТ_ВНЕ_ОКНА =
+  `Дни паритета за эту неделю вне окна счёта серии (${PARITY_STREAK_WINDOW} дней) — ` +
+  "смотри /ourvend/parity/streak";
+
 @Injectable()
 export class WeeklyDigestService {
   private readonly logger = new Logger(WeeklyDigestService.name);
@@ -143,6 +184,7 @@ export class WeeklyDigestService {
     @Inject(DB) private readonly db: Db,
     private readonly analytics: AnalyticsService,
     private readonly health: OurvendHealthService,
+    private readonly parity: OurvendParityService,
   ) {
     // Сводка считает ТЕ ЖЕ числа, что отчёты аналитики, и обязана гаснуть
     // вместе с ними: иначе правка цены обновляла бы `/vending/margin`, а
@@ -174,12 +216,13 @@ export class WeeklyDigestService {
     const начало = tashkentDayStart(неделя.from)!;
     const конец = new Date(tashkentDayStart(неделя.to)!.getTime() + DAY_MS);
 
-    const [текущая, предыдущая, мёртвый, цены, здоровье, работа] = await Promise.all([
+    const [текущая, предыдущая, мёртвый, цены, здоровье, недельное, работа] = await Promise.all([
       this.analytics.margin(WEEK_DAYS, конец),
       this.analytics.margin(WEEK_DAYS, начало),
       this.analytics.deadStock(undefined, now),
       this.analytics.priceChanges(PRICE_WINDOW_DAYS, конец),
       this.здоровьеСбора(now),
+      this.здоровьеНедели(неделя, начало, конец, now),
       this.работаЗаНеделю(начало, конец),
     ]);
 
@@ -215,10 +258,11 @@ export class WeeklyDigestService {
         retail: цены.retail.filter((c) => вНеделе(c.at, неделя)),
       },
       health: здоровье.health,
-      // Предупреждения секций: сегодня единственное — недоступное здоровье
-      // сбора. Числа денег в письме этим не портятся, и молчать о пропавшей
-      // секции нельзя (иначе владелец прочитает «сбор в порядке» из пустоты).
-      warnings: здоровье.warning ? [здоровье.warning] : [],
+      weekHealth: недельное.health,
+      // Предупреждения ОБЕИХ секций здоровья: они падают независимо, и
+      // потерянная вторая читалась бы как «там всё хорошо». Числа денег в
+      // письме этим не портятся, и молчать о пропавшей секции нельзя.
+      warnings: [здоровье.warning, недельное.warning].filter((w): w is AnalyticsWarning => w !== null),
     };
   }
 
@@ -242,6 +286,77 @@ export class WeeklyDigestService {
         warning: {
           code: "health_unavailable",
           message: `Здоровье сбора не посчиталось (${причина}) — деньги недели в письме честные, а про сбор смотри /ourvend/health.`,
+        },
+      };
+    }
+  }
+
+  /**
+   * Здоровье сбора ЗА ОТЧЁТНУЮ НЕДЕЛЮ (R-H-9) — спутник `здоровьеСбора`, а не
+   * его замена.
+   *
+   * Дефект O7: письмо подписано неделей, а блок здоровья брал числа моментом
+   * отправки. Авария понедельничного утра попадала в письмо о ПРОШЛОЙ неделе,
+   * и владелец искал её в логах не того дня; неделя, на которой сбор стоял
+   * двое суток, выглядела чистой, если к утру он ожил. Оба набора чисел теперь
+   * едут рядом, каждый под своей подписью.
+   *
+   * Окно — те же `начало`/`конец`, что уже вычислила `сводка()`: второй
+   * арифметики недели здесь нет, иначе границы разошлись бы на первом же
+   * уточнении, и деньги считались бы за одну неделю, а прогоны — за другую.
+   *
+   * СВОЙ `catch`, как у соседа: отказ спутника не роняет письмо — деньги
+   * недели от него не зависят.
+   */
+  private async здоровьеНедели(
+    неделя: IsoWeek,
+    начало: Date,
+    конец: Date,
+    now: Date,
+  ): Promise<{ health: WeeklyHealth; warning: AnalyticsWarning | null }> {
+    try {
+      const окно = { from: начало, to: конец };
+      const [прогоны, успех, серия] = await Promise.all([
+        runsInWindow(this.db, окно),
+        lastSuccessRunAt(this.db, окно),
+        this.parity.streak(now),
+      ]);
+      // Второго разбора payload не заводим: поля дня уже разобрал
+      // `parity-streak.ts`, и своя копия правила «что такое зелёный день»
+      // разошлась бы с гейтом катовера.
+      const дни = parityDaysInWeek(серия.days, неделя.from, неделя.to);
+      const сколько = (status: string): number => прогоны.filter((r) => r.status === status).length;
+
+      return {
+        health: {
+          week: неделя.key,
+          runs: прогоны.length,
+          success: сколько("success"),
+          partial: сколько("partial"),
+          failed: сколько("failed"),
+          worstFailedStreak: worstFailedStreak(прогоны),
+          lastSuccessAt: успех ? успех.toISOString() : null,
+          parityDays: дни,
+          parityGreen: дни.filter((d) => d.ok).length,
+          parityRed: дни.filter((d) => !d.ok).length,
+        },
+        // Пусто ПОТОМУ ЧТО не достали, а не потому что сверки не было — это
+        // два разных ответа, и различает их только окно показа серии.
+        warning:
+          дни.length === 0 && внеОкнаСерии(неделя, now)
+            ? { code: "health_unavailable", message: ПАРИТЕТ_ВНЕ_ОКНА }
+            : null,
+      };
+    } catch (e) {
+      const причина = e instanceof Error ? e.message : String(e);
+      this.logger.error(`Здоровье сбора за неделю ${неделя.key} не посчиталось: ${причина}`);
+      return {
+        health: НЕДЕЛЯ_НЕИЗВЕСТНА(неделя.key),
+        warning: {
+          code: "health_unavailable",
+          message:
+            `Здоровье сбора за неделю ${неделя.key} не посчиталось (${причина}) — ` +
+            "деньги недели в письме честные, а про сбор смотри /ourvend/health.",
         },
       };
     }
@@ -337,6 +452,27 @@ function нормализоватьНеделю(week: string | undefined, now: D
   const глубина = (dayNumber(предыдущая.from) - dayNumber(запрошенная.from)) / 7;
   if (глубина < 0 || глубина > WEEK_HISTORY_LIMIT) return предыдущая;
   return запрошенная;
+}
+
+/**
+ * Неделя лежит ГЛУБЖЕ окна показа серии паритета (`PARITY_STREAK_WINDOW`).
+ *
+ * Считается КАЛЕНДАРЁМ, а не по содержимому `days`: список обрезан четырнадцатью
+ * сутками С СОБЫТИЕМ, и судить по нему «достали или нет» значило бы объявлять
+ * вне окна каждую неделю, в которую сверка просто молчала. Понедельничное
+ * письмо (прошлая неделя) всегда внутри; `?week=` глубже двух недель — нет.
+ *
+ * Граница — голые ташкентские сутки, тем же `tashkentDayStart`, что и всё
+ * остальное в файле: вторая арифметика суток здесь дала бы второе правило о
+ * том, где кончается день.
+ */
+function внеОкнаСерии(неделя: IsoWeek, now: Date): boolean {
+  const начало = tashkentDayStart(tashkentDay(now));
+  if (!начало) return false;
+  const самыйСтарый = tashkentDay(new Date(начало.getTime() - (PARITY_STREAK_WINDOW - 1) * DAY_MS));
+  // Сравнивается ВОСКРЕСЕНЬЕ недели: неделя, у которой не достаёт даже конца,
+  // не достаётся вовсе.
+  return неделя.to < самыйСтарый;
 }
 
 /** Дата изменения цены попала в неделю. Обе стороны — голые ташкентские сутки. */

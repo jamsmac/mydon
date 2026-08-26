@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { строкаЗастоя } from "./analytics-brief";
 import { msUntilWeekly, pendingNotes } from "./briefing";
 import type { PersonRow, WeeklyDigest } from "./core-client";
 import {
@@ -72,6 +73,28 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     cutoverThreshold: 7,
     parity: { days: 7, ok: true, mismatches: 0, stockOk: true, checked: 2, stockChecked: 2, mode: "mirror", note: null },
   },
+  // Числа ЗА НЕДЕЛЮ, о которой письмо: сбор ходит раз в 3 ч (8 прогонов в
+  // сутки), на неделе один частичный и один отказ — прод-порядок.
+  weekHealth: {
+    week: "2026-34",
+    runs: 56,
+    success: 54,
+    partial: 1,
+    failed: 1,
+    worstFailedStreak: 1,
+    lastSuccessAt: "2026-08-23T03:07:00Z",
+    parityDays: [
+      { date: "2026-08-23", ok: true, salesChecked: 2, stockChecked: 68, note: null },
+      { date: "2026-08-22", ok: true, salesChecked: 2, stockChecked: 68, note: null },
+      { date: "2026-08-21", ok: false, salesChecked: 2, stockChecked: 0, note: "снимков остатков нет" },
+      { date: "2026-08-20", ok: true, salesChecked: 2, stockChecked: 68, note: null },
+      { date: "2026-08-19", ok: true, salesChecked: 2, stockChecked: 68, note: null },
+      { date: "2026-08-18", ok: false, salesChecked: 0, stockChecked: 0, note: "сверять не по чему" },
+      { date: "2026-08-17", ok: true, salesChecked: 2, stockChecked: 68, note: null },
+    ],
+    parityGreen: 5,
+    parityRed: 2,
+  },
   warnings: [],
 };
 
@@ -92,6 +115,19 @@ const ПУСТАЯ_НЕДЕЛЯ: WeeklyDigest = {
   stocktakes: { positions: 0, lastCountedAt: null },
   deadStock: { rows: [], totalValue: 0 },
   priceChanges: { purchase: [], retail: [] },
+  // Ни одного прогона за неделю — это НЕ «отказов 0»: сбор не запускался.
+  weekHealth: {
+    week: "2026-35",
+    runs: 0,
+    success: 0,
+    partial: 0,
+    failed: 0,
+    worstFailedStreak: 0,
+    lastSuccessAt: null,
+    parityDays: [],
+    parityGreen: 0,
+    parityRed: 0,
+  },
 };
 
 describe("Расписание недельной сводки (R-P5b-7)", () => {
@@ -405,5 +441,41 @@ describe("Текст недельной сводки", () => {
     // сломанный сбор, и молчать об этом хуже, чем показать нули.
     assert.match(parts.join("\n"), /Здоровье сбора OurVend/);
     assert.doesNotMatch(parts[0]!, /маржа 0 \(0 %\)/);
+  });
+});
+
+describe("Блок здоровья: сначала неделя, потом «сейчас» (R-H-9)", () => {
+  it("печатает недельные числа и отдельно строки момента", () => {
+    const текст = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
+    assert.match(текст, /За неделю: прогонов 56 · успешных 54 · частичных 1 · отказов 1 · худшая серия 1/);
+    assert.match(текст, /Паритет недели: 5 зелёных \/ 2 красных/);
+    assert.match(текст, /Сейчас: /, "состояние момента обязано быть ПОДПИСАНО словом «сейчас»");
+  });
+
+  it("числа недели стоят ВЫШЕ чисел момента: письмо подписано неделей", () => {
+    const текст = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
+    assert.ok(текст.indexOf("За неделю: прогонов") < текст.indexOf("Сейчас: "));
+  });
+
+  it("последний успех недели — свой момент, а не общий «последний успех»", () => {
+    const текст = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
+    assert.match(текст, /Последний успех недели: 23\.08 08:07/);
+  });
+
+  it("неделя без прогонов — «сбор не запускался», а не «отказов 0»", () => {
+    const текст = formatWeeklyDigest(ПУСТАЯ_НЕДЕЛЯ, []).parts.join("\n");
+    assert.match(текст, /За неделю прогонов не было — сбор не запускался/);
+    assert.equal(/отказов 0/.test(текст), false, "нули читаются как посчитанный результат");
+  });
+
+  it("дней паритета за неделю нет — строки нет вовсе, а не «0 зелёных / 0 красных»", () => {
+    const текст = formatWeeklyDigest(ПУСТАЯ_НЕДЕЛЯ, []).parts.join("\n");
+    assert.equal(/Паритет недели:/.test(текст), false);
+  });
+
+  it("строка застоя и строка снапшота не изменились: два отчёта об одних числах говорят одно", () => {
+    const h = { ...ДАЙДЖЕСТ_34.health, staleHours: 9, staleThresholdH: 6 };
+    const текст = formatWeeklyDigest({ ...ДАЙДЖЕСТ_34, health: h }, []).parts.join("\n");
+    assert.ok(текст.includes(строкаЗастоя(h)!), "письмо обязано печатать ТОТ ЖЕ форматтер, что «сверка»");
   });
 });

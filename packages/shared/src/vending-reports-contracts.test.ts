@@ -11,6 +11,7 @@ import type {
   StockCountRow,
   StockCountsReport,
   WeeklyDigest,
+  WeeklyHealth,
 } from "./vending-reports";
 
 /**
@@ -50,6 +51,26 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, mode: "mirror", note: null },
 };
 
+/**
+ * Здоровье сбора ЗА ОТЧЁТНУЮ НЕДЕЛЮ — числа недели, а не момента отправки.
+ *
+ * Стоит рядом с `ЗДОРОВЬЕ`, а не вместо него: в одном ответе едут ДВА набора
+ * чисел об одном сборе, и подмена одного другим — это ровно тот дефект,
+ * ради которого поле и заведено (R-H-9).
+ */
+const НЕДЕЛЬНОЕ_ЗДОРОВЬЕ: WeeklyHealth = {
+  week: "2026-34",
+  runs: 56,
+  success: 54,
+  partial: 1,
+  failed: 1,
+  worstFailedStreak: 1,
+  lastSuccessAt: "2026-08-23T03:07:00.000Z",
+  parityDays: [{ date: "2026-08-23", ok: true, salesChecked: 2, stockChecked: 68, note: null }],
+  parityGreen: 1,
+  parityRed: 0,
+};
+
 const СВОДКА: WeeklyDigest = {
   week: "2026-34",
   from: "2026-08-17",
@@ -71,6 +92,7 @@ const СВОДКА: WeeklyDigest = {
     retail: [{ product: "LaimonFresh", from: 15_000, to: 12_000, pct: -20, at: "2026-08-19" }],
   },
   health: ЗДОРОВЬЕ,
+  weekHealth: НЕДЕЛЬНОЕ_ЗДОРОВЬЕ,
   warnings: [],
 };
 
@@ -169,6 +191,9 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "totals",
       "warnings",
       "week",
+      // Здоровье недели — ОТДЕЛЬНОЕ поле рядом с `health`: письмо несёт два
+      // набора чисел об одном сборе, «сейчас» и «за отчётную неделю» (R-H-9).
+      "weekHealth",
       "worstProducts",
     ]);
     assert.deepEqual(Object.keys(СВОДКА.refills).sort(), ["detectedUnits", "events", "recordedUnits"]);
@@ -197,6 +222,44 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.equal(пусто.parity.checked, 14);
     assert.equal(пусто.parity.stockChecked, 0);
     assert.notEqual(пусто.parity.note, null);
+  });
+
+  it("здоровье недели: ровно те поля, что читает бот (R-H-9)", () => {
+    assert.deepEqual(Object.keys(НЕДЕЛЬНОЕ_ЗДОРОВЬЕ).sort(), [
+      "failed",
+      "lastSuccessAt",
+      "parityDays",
+      "parityGreen",
+      "parityRed",
+      "partial",
+      "runs",
+      "success",
+      "week",
+      "worstFailedStreak",
+    ]);
+    // Подпись письма и подпись чисел обязаны совпадать: блок, подписанный
+    // неделей, но посчитанный моментом отправки, — это и есть дефект O7.
+    assert.equal(СВОДКА.weekHealth.week, СВОДКА.week);
+  });
+
+  it("«сейчас» и «за неделю» — ДВА набора чисел в одном ответе, а не один", () => {
+    // `failedStreak` отвечает «падает ли прямо сейчас», `worstFailedStreak` —
+    // «была ли на неделе дыра». Подсунуть недельное число под старым именем
+    // значило бы соврать под подписью, которую читают бот и панель.
+    const авария: WeeklyDigest = {
+      ...СВОДКА,
+      health: { ...ЗДОРОВЬЕ, failedStreak: 2 },
+      weekHealth: { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, failed: 0, worstFailedStreak: 0 },
+    };
+    assert.equal(авария.health.failedStreak, 2);
+    assert.equal(авария.weekHealth.worstFailedStreak, 0);
+  });
+
+  it("успехов в неделе не было ВОВСЕ — `null`, а не ноль часов", () => {
+    const безУспеха: WeeklyHealth = { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, success: 0, failed: 1, lastSuccessAt: null };
+    assert.equal(безУспеха.lastSuccessAt, null);
+    // Прогон был — просто неуспешный: это НЕ «сбор не запускался».
+    assert.equal(безУспеха.runs > 0, true);
   });
 
   it("сводка несёт `warnings`: секция, которая не посчиталась, не исчезает молча", () => {

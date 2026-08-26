@@ -1,8 +1,9 @@
 import type { Logger } from "@nestjs/common";
-import { desc, inArray } from "drizzle-orm";
+import { and, desc, gte, inArray, lt } from "drizzle-orm";
 import { ourvendSaleSnapshot, ourvendStockSnapshot, vendingSyncRun } from "@mydon/db";
 import { tashkentInstant, type OurvendSyncRun } from "@mydon/shared";
 import type { Db } from "../db/db.module";
+import type { SyncRunFacts } from "../vending/sync-streak";
 import { readIntSetting } from "../system/settings";
 
 /**
@@ -20,7 +21,41 @@ import { readIntSetting } from "../system/settings";
  * отчётом на первом же уточнении — например, на том, что успех датируется
  * ЗАВЕРШЕНИЕМ прогона, а не стартом. Тогда витрина говорила бы «последний
  * успех в 03:07», а тревога считала бы часы от 03:05.
+ *
+ * ШЕСТОЙ ВОПРОС — «ЧТО БЫЛО В ЭТОЙ НЕДЕЛЕ» (R-H-9). Недельное письмо
+ * подписано неделей и обязано считать здоровье сбора ЗА НЕЁ, а не за момент
+ * отправки. Своя копия запроса у письма разошлась бы с отчётом ровно на том же
+ * уточнении, что и у сторожа: успех датируется ЗАВЕРШЕНИЕМ прогона. Поэтому
+ * окно приезжает сюда параметром (`RunWindow`), а не заводит рядом второй
+ * запрос к тому же журналу.
  */
+
+/**
+ * Окно прогонов — ПОЛУИНТЕРВАЛ `[from, to)`.
+ *
+ * `lte` по концу воскресенья втянул бы полночь понедельника в ОБЕ соседние
+ * недели, и один и тот же прогон посчитался бы дважды — в письме о прошлой
+ * неделе и в письме о следующей. То же правило, по которому считается вся
+ * остальная работа за неделю (`WeeklyDigestService.работаЗаНеделю`).
+ */
+export interface RunWindow {
+  from: Date;
+  to: Date;
+}
+
+/**
+ * Прогонов больше, чем в неделе бывает, не читаем: 8 прогонов/сут × 7 + запас.
+ *
+ * Потолок нужен не ради скорости, а ради предсказуемости: `?week=` пускает
+ * любую неделю из двух лет, и неделя с зациклившимся кроном не имеет права
+ * вытянуть в память весь журнал.
+ */
+export const WEEK_RUNS_LIMIT = 200;
+
+/** Две границы окна одним местом: полуинтервал объявлен ровно один раз. */
+function границы(window: RunWindow) {
+  return [gte(vendingSyncRun.startedAt, window.from), lt(vendingSyncRun.startedAt, window.to)] as const;
+}
 
 /**
  * Завершение последнего прогона, который ДОНЁС ДАННЫЕ — статус `success` ИЛИ
@@ -41,17 +76,51 @@ import { readIntSetting } from "../system/settings";
  * — это всего ~8 суток, и после недели молчания поле стало бы `null`, то есть
  * «сбор не запускался никогда». Разница между «успеха давно не было» и
  * «успехов не было вовсе» решает, чинить коллектор или заводить его впервые.
+ *
+ * ОКНО НЕОБЯЗАТЕЛЬНОЕ (R-H-9): без него функция ведёт себя ровно как раньше, и
+ * вызывающие, которым нужен «последний успех вообще» (`OurvendHealthService`,
+ * `SyncStaleService`), не правятся ни на байт. С окном отвечает на другой
+ * вопрос — «последний успех ЭТОЙ недели», и `null` там значит «успехов в
+ * неделе не было ВОВСЕ», а не «ноль часов назад».
  */
-export async function lastSuccessRunAt(db: Db): Promise<Date | null> {
+export async function lastSuccessRunAt(db: Db, window?: RunWindow): Promise<Date | null> {
+  const донёсДанные = inArray(vendingSyncRun.status, ["success", "partial"]);
   const [row] = await db
     .select({ startedAt: vendingSyncRun.startedAt, finishedAt: vendingSyncRun.finishedAt })
     .from(vendingSyncRun)
-    .where(inArray(vendingSyncRun.status, ["success", "partial"]))
+    .where(window ? and(донёсДанные, ...границы(window)) : донёсДанные)
     .orderBy(desc(vendingSyncRun.startedAt))
     .limit(1);
   // Успех датируется ЗАВЕРШЕНИЕМ, а не стартом: «последний раз данные приехали
   // в 03:07», а не «мы начали пробовать в 03:05».
   return row ? (row.finishedAt ?? row.startedAt) : null;
+}
+
+/**
+ * Прогоны, НАЧАТЫЕ в окне, свежие сверху (R-H-9).
+ *
+ * Датируются СТАРТОМ, а не завершением, — в отличие от «последнего успеха»
+ * выше, и это не разнобой: прогон принадлежит той неделе, в которую его
+ * запустил крон. Считай мы по `finished_at`, прогон, начатый в 23:50
+ * воскресенья и закрывшийся в 00:03 понедельника, уехал бы в чужую неделю, а
+ * прогон, зависший без `finished_at`, не попал бы ни в одну.
+ */
+export async function runsInWindow(
+  db: Db,
+  window: RunWindow,
+  limit = WEEK_RUNS_LIMIT,
+): Promise<SyncRunFacts[]> {
+  const rows = await db
+    .select({
+      status: vendingSyncRun.status,
+      startedAt: vendingSyncRun.startedAt,
+      error: vendingSyncRun.error,
+    })
+    .from(vendingSyncRun)
+    .where(and(...границы(window)))
+    .orderBy(desc(vendingSyncRun.startedAt))
+    .limit(limit);
+  return rows.map((r) => ({ status: r.status, startedAt: r.startedAt, error: r.error }));
 }
 
 /**

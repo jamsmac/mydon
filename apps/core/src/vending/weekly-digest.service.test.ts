@@ -13,9 +13,11 @@ import {
   vendingRefill,
   vendingRefillEvent,
   vendingStock,
+  vendingSyncRun,
 } from "@mydon/db";
-import type { OurvendHealth } from "@mydon/shared";
+import type { OurvendHealth, ParityDay } from "@mydon/shared";
 import type { OurvendHealthService } from "../ourvend/ourvend-health.service";
+import type { OurvendParityService } from "../ourvend/ourvend-parity.service";
 import { AnalyticsService } from "./analytics.service";
 import { VendingService } from "./vending.service";
 import { WeeklyDigestService } from "./weekly-digest.service";
@@ -25,6 +27,8 @@ type StockRow = { productName: string; quantity: number; countedAt: Date };
 type OrderRow = { status: string; receivedAt: Date | null; positions: unknown[] };
 type RefillEventRow = { machineSerial: string; windowTo: Date; units: number; slots: { product: string; delta: number }[] };
 type RefillRow = { qty: number; performedAt: Date };
+/** Строка журнала прогонов: недельный блок читает её ДВУМЯ запросами (окно и последний успех). */
+type SyncRunRow = { status: string; startedAt: Date; finishedAt: Date | null; error: string | null };
 type EventRow = { type: string; payload: Record<string, unknown>; occurredAt: Date };
 type Ent = { id: string; name: string; externalRef: string | null; type: string };
 type Card = { entityId: string; status: string };
@@ -49,6 +53,10 @@ interface Мир {
   entities?: Ent[];
   cards?: Card[];
   health?: OurvendHealth;
+  runs?: SyncRunRow[];
+  parityDays?: ParityDay[];
+  /** Спутник недельного здоровья падает: письмо обязано уйти всё равно. */
+  неделяПадает?: boolean;
 }
 
 /** Значения-параметры из условия drizzle — стаб обязан отвечать на ТО ЖЕ окно, о котором спросили. */
@@ -62,6 +70,34 @@ function параметры(условие: unknown): unknown[] {
       return;
     }
     if ("value" in (n as Record<string, unknown>)) out.push((n as { value: unknown }).value);
+  };
+  walk(условие);
+  return out;
+}
+
+/**
+ * Строковые значения ВМЕСТЕ с вложенными списками: `inArray` кладёт свои
+ * значения массивом SQL-кусков, и плоский обход их не видит вовсе.
+ *
+ * Отдельной функцией, а не правкой `параметры`: тот обход зашит в четыре
+ * существующих ветки стенда, и расширять его «заодно» значило бы менять их
+ * поведение мимо задачи.
+ */
+function статусыИз(условие: unknown): string[] {
+  const out: string[] = [];
+  const walk = (n: unknown): void => {
+    if (n === null || typeof n !== "object") return;
+    if (Array.isArray(n)) {
+      for (const c of n) walk(c);
+      return;
+    }
+    const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
+    if (Array.isArray(chunks)) {
+      for (const c of chunks) walk(c);
+      return;
+    }
+    const v = (n as { value?: unknown }).value;
+    if (typeof v === "string") out.push(v);
   };
   walk(условие);
   return out;
@@ -81,32 +117,22 @@ const момент = (день: string): Date => new Date(`${день}T07:00:00.
  * недели зелёной (урок «заглушка врёт»).
  */
 function digestDb(м: Мир) {
-  const rowsOf = (t: unknown): unknown[] =>
-    t === sale
-      ? (м.sales ?? [])
-      : t === machineStock
-        ? []
-        : t === vendingStock
-          ? (м.stock ?? [])
-          : t === vendingPurchaseOrder
-            ? (м.orders ?? [])
-            : t === vendingRefillEvent
-              ? (м.refillEvents ?? [])
-              : t === vendingRefill
-                ? (м.refills ?? [])
-                : t === event
-                  ? (м.events ?? [])
-                  : t === vendingProduct
-                    ? (м.products ?? [])
-                    : t === vendingAlias
-                      ? []
-                      : t === entity
-                        ? (м.entities ?? [])
-                        : t === machineCard
-                          ? (м.cards ?? [])
-                          : t === systemConfig
-                            ? []
-                            : [];
+  const фикстуры = new Map<unknown, () => unknown[]>([
+    [sale, () => м.sales ?? []],
+    [machineStock, () => []],
+    [vendingStock, () => м.stock ?? []],
+    [vendingPurchaseOrder, () => м.orders ?? []],
+    [vendingRefillEvent, () => м.refillEvents ?? []],
+    [vendingRefill, () => м.refills ?? []],
+    [vendingSyncRun, () => м.runs ?? []],
+    [event, () => м.events ?? []],
+    [vendingProduct, () => м.products ?? []],
+    [vendingAlias, () => []],
+    [entity, () => м.entities ?? []],
+    [machineCard, () => м.cards ?? []],
+    [systemConfig, () => []],
+  ]);
+  const rowsOf = (t: unknown): unknown[] => фикстуры.get(t)?.() ?? [];
 
   const вОкне = (at: Date | null, окно: Date[]): boolean => {
     if (at === null) return false;
@@ -143,6 +169,18 @@ function digestDb(м: Мир) {
       }
       if (t === vendingRefill) {
         текущие = (текущие as RefillRow[]).filter((r) => вОкне(r.performedAt, окно));
+      }
+      if (t === vendingSyncRun) {
+        // Статусы приходят через `inArray` — их надо доставать глубоким
+        // обходом, иначе «последний успех недели» вернул бы последний ЛЮБОЙ
+        // прогон, и тест про `null` был бы зелёным на сломанном запросе.
+        const статусы = статусыИз(условие);
+        // Свежие сверху — как настоящий `order by started_at desc`: недельный
+        // блок берёт последний успех первой строкой, и стаб, отдающий журнал в
+        // порядке фикстуры, показал бы «последним» самый старый прогон.
+        текущие = (текущие as SyncRunRow[])
+          .filter((r) => (статусы.length === 0 || статусы.includes(r.status)) && вОкне(r.startedAt, окно))
+          .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
       }
       if (t === event) {
         текущие = (текущие as EventRow[]).filter(
@@ -199,9 +237,33 @@ const сервис = (м: Мир, здоровьеПадает = false) => {
       return м.health ?? ЗДОРОВЬЕ;
     },
   } as unknown as OurvendHealthService;
-  const svc = new WeeklyDigestService(db, new AnalyticsService(db, new VendingService(db)), health);
+  const parity = {
+    streak: async () => {
+      if (м.неделяПадает) throw new Error("серия паритета не посчиталась");
+      return {
+        greenDays: 0,
+        threshold: 7,
+        readyForCutover: false,
+        days: м.parityDays ?? [],
+        lastRed: null,
+        since: null,
+      };
+    },
+  } as unknown as OurvendParityService;
+  const svc = new WeeklyDigestService(db, new AnalyticsService(db, new VendingService(db)), health, parity);
   return Object.assign(svc, { счётчик });
 };
+
+/** Прогон сбора как строка журнала: успех датируется завершением, поэтому оно есть. */
+const прогонСтрокой = (status: string, startedAt: string): SyncRunRow => ({
+  status,
+  startedAt: new Date(startedAt),
+  finishedAt: new Date(startedAt),
+  error: null,
+});
+
+const ДЕНЬ_ЗЕЛ = (date: string): ParityDay => ({ date, ok: true, salesChecked: 2, stockChecked: 68, note: null });
+const ДЕНЬ_КРАС = (date: string): ParityDay => ({ date, ok: false, salesChecked: 2, stockChecked: 0, note: "снимков остатков нет" });
 
 /** Вторник 25.08.2026, 12:00 Ташкента: неделя 2026-35 идёт, предыдущая — 2026-34. */
 const СЕЙЧАС = new Date("2026-08-25T07:00:00.000Z");
@@ -472,5 +534,115 @@ describe("Недельная сводка (R-P5b-7)", () => {
     assert.equal(s.счётчик.select, было);
     await s.digest("2026-33", СЕЙЧАС);
     assert.ok(s.счётчик.select > было, "другая неделя — другой расчёт, кеш не должен её подменять");
+  });
+});
+
+
+/** Мир с деньгами недели 2026-34: недельный блок здоровья их портить не должен. */
+const ДЕНЬГИ_34 = { sales: НЕДЕЛИ_34_И_33, products: ПРАЙС, entities: ПАРК };
+
+describe("Здоровье сбора в письме — за ОТЧЁТНУЮ неделю (R-H-9)", () => {
+  it("прогоны считаются по окну [понедельник, следующий понедельник)", async () => {
+    // Полуинтервал: прогон в полночь понедельника СЛЕДУЮЩЕЙ недели в неделю
+    // НЕ входит — иначе он посчитался бы в обеих.
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [
+        прогонСтрокой("success", "2026-08-17T00:00:00+05:00"),
+        прогонСтрокой("failed", "2026-08-23T23:00:00+05:00"),
+        прогонСтрокой("success", "2026-08-24T00:00:00+05:00"),
+      ],
+    }).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual([d.weekHealth.runs, d.weekHealth.success, d.weekHealth.failed], [2, 1, 1]);
+    assert.equal(d.weekHealth.week, "2026-34");
+  });
+
+  it("авария ТЕКУЩЕЙ недели не попадает в письмо о ПРОШЛОЙ — регресс на дефект O7", async () => {
+    // Письмо про 2026-34 уходит в понедельник 35-й. До правки блок здоровья
+    // был подписан неделей, а числа брал моментом отправки, и владелец искал
+    // аварию в логах не того дня.
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [
+        прогонСтрокой("success", "2026-08-20T04:00:00+05:00"),
+        прогонСтрокой("failed", "2026-08-25T04:00:00+05:00"),
+        прогонСтрокой("failed", "2026-08-25T07:00:00+05:00"),
+      ],
+      health: { ...ЗДОРОВЬЕ, failedStreak: 2 },
+    }).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual([d.weekHealth.failed, d.weekHealth.worstFailedStreak], [0, 0]);
+    assert.equal(d.health.failedStreak, 2, "«сейчас» осталось «сейчас» — два разных набора чисел в одном ответе");
+  });
+
+  it("последний успех НЕДЕЛИ, а не вообще: null — успехов в неделе не было ВОВСЕ", async () => {
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [прогонСтрокой("failed", "2026-08-20T04:00:00+05:00")],
+    }).digest("2026-34", СЕЙЧАС);
+    assert.equal(d.weekHealth.lastSuccessAt, null);
+    assert.equal(d.weekHealth.runs, 1, "прогон был — просто неуспешный; это не «сбор не запускался»");
+  });
+
+  it("успех недели датируется ЗАВЕРШЕНИЕМ прогона — тем же правилом, что и «сейчас»", async () => {
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [
+        {
+          status: "success",
+          startedAt: new Date("2026-08-23T03:05:00Z"),
+          finishedAt: new Date("2026-08-23T03:07:00Z"),
+          error: null,
+        },
+      ],
+    }).digest("2026-34", СЕЙЧАС);
+    assert.equal(d.weekHealth.lastSuccessAt, "2026-08-23T03:07:00.000Z");
+  });
+
+  it("прогонов на неделе не было ВОВСЕ — нули и null, а не «всё хорошо»", async () => {
+    const d = await сервис(ДЕНЬГИ_34).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual(
+      [d.weekHealth.runs, d.weekHealth.success, d.weekHealth.partial, d.weekHealth.failed, d.weekHealth.lastSuccessAt],
+      [0, 0, 0, 0, null],
+    );
+  });
+
+  it("дни паритета режутся неделей и считаются зелёными/красными", async () => {
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      parityDays: [ДЕНЬ_ЗЕЛ("2026-08-22"), ДЕНЬ_КРАС("2026-08-21"), ДЕНЬ_ЗЕЛ("2026-08-25")],
+    }).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual(d.weekHealth.parityDays.map((x) => x.date), ["2026-08-22", "2026-08-21"]);
+    assert.deepEqual([d.weekHealth.parityGreen, d.weekHealth.parityRed], [1, 1]);
+  });
+
+  it("неделя вне окна счёта серии: parityDays пуст И в warnings есть health_unavailable", async () => {
+    const d = await сервис({ ...ДЕНЬГИ_34, parityDays: [ДЕНЬ_ЗЕЛ("2026-08-25")] }).digest("2026-28", СЕЙЧАС);
+    assert.deepEqual(d.weekHealth.parityDays, []);
+    assert.ok(
+      d.warnings.some((w) => w.code === "health_unavailable" && /вне окна счёта серии/.test(w.message)),
+      "молчаливый пустой список читается как «сверки не было»",
+    );
+  });
+
+  it("неделя В окне, а дней просто нет — молчим: «сверки не было» скажет здоровье момента", async () => {
+    // Ложное предупреждение на каждой неделе без сверки обесценило бы то
+    // единственное, ради которого оно заведено.
+    const d = await сервис(ДЕНЬГИ_34).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual(d.weekHealth.parityDays, []);
+    assert.deepEqual(d.warnings, []);
+  });
+
+  it("падение недельного здоровья не роняет письмо: деньги недели на месте, причина в warnings", async () => {
+    const d = await сервис({ ...ДЕНЬГИ_34, неделяПадает: true }).digest("2026-34", СЕЙЧАС);
+    assert.ok(d.totals.revenue > 0, "деньги недели от секции здоровья не зависят");
+    assert.deepEqual([d.weekHealth.runs, d.weekHealth.lastSuccessAt], [0, null]);
+    assert.ok(d.warnings.some((w) => w.code === "health_unavailable"));
+    assert.equal(d.weekHealth.week, "2026-34", "подпись недели остаётся даже у несчитанного блока");
+  });
+
+  it("упали ОБЕ секции здоровья — оба предупреждения, а не первое из двух", async () => {
+    const d = await сервис({ ...ДЕНЬГИ_34, неделяПадает: true }, true).digest("2026-34", СЕЙЧАС);
+    assert.equal(d.warnings.length, 2);
+    assert.deepEqual(d.warnings.map((w) => w.code), ["health_unavailable", "health_unavailable"]);
   });
 });

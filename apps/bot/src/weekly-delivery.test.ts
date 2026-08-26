@@ -33,6 +33,20 @@ const НЕДЕЛЯ: WeeklyDigest = {
     cutoverThreshold: 7,
     parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, mode: "mirror", note: null },
   },
+  // Здоровье за отчётную неделю (R-H-9): доставке важны неделя и непустой
+  // текст, поэтому нули — но поле обязательное, и молчаливо его не бывает.
+  weekHealth: {
+    week: "2026-34",
+    runs: 0,
+    success: 0,
+    partial: 0,
+    failed: 0,
+    worstFailedStreak: 0,
+    lastSuccessAt: null,
+    parityDays: [],
+    parityGreen: 0,
+    parityRed: 0,
+  },
   warnings: [],
 };
 

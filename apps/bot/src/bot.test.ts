@@ -799,6 +799,20 @@ describe("Аналитика снека: путь владельца до Core (
       productSaleLagH: null,
       parity: { days: 7, ok: true, mismatches: 0, stockOk: true, stockChecked: 2, mode: "mirror", note: null },
     },
+    // Здоровье за отчётную неделю (R-H-9): без него форматтер сводки печатать
+    // нечего — блок начинается с чисел недели, а не с чисел момента.
+    weekHealth: {
+      week: "2026-34",
+      runs: 0,
+      success: 0,
+      partial: 0,
+      failed: 0,
+      worstFailedStreak: 0,
+      lastSuccessAt: null,
+      parityDays: [],
+      parityGreen: 0,
+      parityRed: 0,
+    },
   };
 
   it("«итоги недели» — сводка снека, «итоги» — по-прежнему лента действий (регресс)", async () => {

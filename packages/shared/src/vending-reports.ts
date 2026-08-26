@@ -1,6 +1,7 @@
 import { dayNumber, isoOfDay } from "./calendar-day";
 import { DAY } from "./expiry";
 import { normalizeMachineSerial } from "./machine-serial";
+import type { ParityDay } from "./parity-streak";
 import { tashkentDay, tashkentInstant } from "./tashkent-time";
 import { normalizeProductName, priceDeviationPct } from "./vending-calc";
 import type { PurchaseSummary } from "./vending-calc";
@@ -1134,6 +1135,38 @@ export interface WeeklyDigestMachine {
 }
 
 /**
+ * Здоровье сбора ЗА ОТЧЁТНУЮ НЕДЕЛЮ (R-H-9) — рядом с `health`, а не вместо.
+ *
+ * `OurvendHealth` отвечает на вопрос «как дела СЕЙЧАС»: `staleHours`,
+ * `snapshotStale` и лаги про момент по построению, а `failedStreak` значит
+ * «сколько подряд падает прямо сейчас». Подсунуть под эти имена недельные
+ * числа — соврать под старой подписью; поэтому неделя едет своим полем.
+ *
+ * Дефект, ради которого поле заведено (O7): письмо подписано неделей, а блок
+ * здоровья брал числа моментом отправки. Авария, отгремевшая в понедельник
+ * утром, попадала в письмо о ПРОШЛОЙ неделе, и владелец искал её в логах не
+ * того дня; а неделя, на которой сбор стоял двое суток, выглядела чистой,
+ * если к утру понедельника он ожил.
+ */
+export interface WeeklyHealth {
+  /** Та же ISO-неделя, что у письма (`IYYY-IW`) — подпись и числа обязаны совпадать. */
+  week: string;
+  /** Прогонов, НАЧАТЫХ в [понедельник, следующий понедельник). */
+  runs: number;
+  success: number;
+  partial: number;
+  failed: number;
+  /** Самая длинная серия отказов ВНУТРИ недели. 0 — отказов не было. */
+  worstFailedStreak: number;
+  /** Последний успех НЕДЕЛИ (ISO). `null` — успехов в неделе не было ВОВСЕ (не «ноль часов»). */
+  lastSuccessAt: string | null;
+  /** Дни паритета недели, свежие сверху. Пустой — см. `warnings` письма. */
+  parityDays: ParityDay[];
+  parityGreen: number;
+  parityRed: number;
+}
+
+/**
  * Недельная сводка снек-контура (`GET /vending/weekly-digest`, R-P5b-7).
  *
  * ТРИ ДОГОВОРЁННОСТИ, НА КОТОРЫЕ ОПИРАЕТСЯ БОТ:
@@ -1167,7 +1200,16 @@ export interface WeeklyDigest {
   /** Топ-5 мёртвого стока по оценке; `totalValue` — по ВСЕМУ стоку, не по пятёрке. */
   deadStock: { rows: DeadRow[]; totalValue: number };
   priceChanges: { purchase: PriceChange[]; retail: PriceChange[] };
+  /** Здоровье сбора СЕЙЧАС, на момент отправки письма. */
   health: OurvendHealth;
+  /**
+   * Здоровье сбора ЗА ТУ НЕДЕЛЮ, которой письмо подписано.
+   *
+   * Рядом с `health`, а не вместо: в одном ответе едут ДВА набора чисел об
+   * одном сборе, и это намеренно. «На неделе была дыра, а сейчас всё хорошо» —
+   * законное состояние, и обе половины этой фразы обязаны быть в письме.
+   */
+  weekHealth: WeeklyHealth;
   /**
    * Чего в письме посчитать НЕ вышло. Пустой массив — «посчитано всё».
    *

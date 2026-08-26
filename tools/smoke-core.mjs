@@ -108,7 +108,19 @@ const ЧТЕНИЕ = [
         throw new Error(`stock-counts.since=${о?.since} — не голые сутки YYYY-MM-DD`);
       // Ключ `note` обязан ПРИСУТСТВОВАТЬ, даже когда он null: лист группирует
       // по нему, и его отсутствие — это одна безымянная куча вместо истории.
-      for (const r of о.rows ?? []) if (!("note" in r)) throw new Error("в строке истории склада нет ключа note");
+      //
+      // На засеянной базе истории здесь ещё нет (чтения идут ДО записей), и
+      // молчаливый `for` по пустому массиву проверял бы ровно ничего. Поэтому
+      // пустой ответ ЗДЕСЬ пропускается ВСЛУХ, а настоящая проверка поля стоит
+      // там, где строки есть по построению — сценарий двух пересчётов подряд.
+      if ((о.rows ?? []).length === 0) {
+        console.log("      (истории склада на засеянной базе нет — note проверяет сценарий двух пересчётов)");
+      } else {
+        for (const r of о.rows) {
+          if (!("note" in r)) throw new Error("в строке истории склада нет ключа note");
+          if (r.note !== null && typeof r.note !== "string") throw new Error(`note=${r.note} — не строка и не null`);
+        }
+      }
     },
   },
   {
@@ -130,6 +142,10 @@ const ЧТЕНИЕ = [
     path: "/vending/stock-counts?days=730",
     проверить: (о) => {
       if (о?.days !== 730) throw new Error(`stock-counts.days=${о?.days}, ждали 730 (потолок П8a fix wave)`);
+      // `since` едет и на границе окна: подпись листа «с ДД.ММ.ГГГГ» берётся
+      // из ответа, и на самом широком окне ей веры должно быть столько же.
+      if (typeof о?.since !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(о.since))
+        throw new Error(`stock-counts?days=730 → since=${о?.since} — не голые сутки YYYY-MM-DD`);
     },
   },
   {
@@ -238,6 +254,18 @@ const ЧТЕНИЕ = [
         throw new Error("неделя без продаж отдала процент маржи — нули выданы за результат");
       }
       if (о?.health?.parity == null) throw new Error("weekly-digest.health.parity — null (сверять нечего ≠ паритета нет)");
+      // Здоровье ЗА ОТЧЁТНУЮ НЕДЕЛЮ (R-H-9) — рядом с «сейчас», а не вместо:
+      // блок, подписанный неделей, но посчитанный моментом отправки, — дефект O7.
+      const w = о?.weekHealth;
+      if (!w) throw new Error("в сводке нет weekHealth — письмо снова говорило бы про момент отправки");
+      if (w.week !== о.week) throw new Error(`weekHealth.week=${w.week}, а письмо про ${о.week}`);
+      for (const k of ["runs", "success", "partial", "failed", "worstFailedStreak", "parityGreen", "parityRed"]) {
+        if (typeof w[k] !== "number") throw new Error(`weekHealth.${k} — не число`);
+      }
+      if (!Array.isArray(w.parityDays)) throw new Error("weekHealth.parityDays — не массив");
+      // `null` — «успехов в неделе не было ВОВСЕ», и это не ноль часов.
+      if (w.lastSuccessAt !== null && typeof w.lastSuccessAt !== "string") throw new Error("weekHealth.lastSuccessAt — не ISO и не null");
+      if (typeof о?.health?.failedStreak !== "number") throw new Error("health «сейчас» пропал из сводки");
       // Секция, которая не посчиталась, обязана быть НАЗВАНА: сводка больше не
       // падает в 500 из-за здоровья сбора, и молчаливая пустота вместо секции
       // читалась бы как «там всё хорошо».
@@ -629,6 +657,13 @@ const ЗАПИСЬ = [
       if (!(первая.countedAt > вторая.countedAt)) throw new Error("история отдана не «свежее сверху»");
       if (первая.source !== "own" || вторая.source !== "own") {
         throw new Error(`свой пересчёт помечен не «own»: ${первая.source}/${вторая.source}`);
+      }
+      // «Хвосты» (R-H-2): у СВОЕЙ строки `note` — это КТО считал. Контроллер
+      // зовёт `ingestStock(dto)` без актора, значит доехать обязано «owner».
+      // Проверка стоит здесь, а не на шаге чтения: там на засеянной базе строк
+      // нет вовсе, и цикл по `rows` не делал бы ни одной итерации.
+      if (первая.note !== "owner" || вторая.note !== "owner") {
+        throw new Error(`note своего пересчёта: ${первая.note}/${вторая.note}, ждали owner/owner`);
       }
     },
   },
