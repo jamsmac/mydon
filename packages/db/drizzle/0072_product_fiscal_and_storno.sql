@@ -35,7 +35,19 @@ ALTER TABLE "vending_product" ADD CONSTRAINT "vending_product_vat_pct_check"
 -- 2. Сторно заправок. qty — ДЕЛЬТА, поэтому противознак; старый CHECK
 --    «qty > 0» его бы отверг. Ослабляем РОВНО на источник 'storno':
 --    обычная заправка на минус по-прежнему невозможна.
-ALTER TABLE "vending_refill" ADD COLUMN IF NOT EXISTS "reverses_id" uuid REFERENCES "vending_refill"("id");--> statement-breakpoint
+--
+--    FK — через DO $$ … EXCEPTION WHEN duplicate_object (паттерн 0060/0067/0069),
+--    имя констрейнта явное и под конвенцию drizzle-снапшота
+--    (<table>_<column>_<reftable>_<refcolumn>_fk): голый REFERENCES отдал бы
+--    Postgres-у дефолтное имя <table>_<column>_fkey, снапшот разошёлся бы с
+--    БД, и следующий db:generate выпустил бы DROP CONSTRAINT на констрейнт,
+--    которого в базе нет.
+ALTER TABLE "vending_refill" ADD COLUMN IF NOT EXISTS "reverses_id" uuid;--> statement-breakpoint
+DO $$ BEGIN
+  ALTER TABLE "vending_refill"
+    ADD CONSTRAINT "vending_refill_reverses_id_vending_refill_id_fk"
+    FOREIGN KEY ("reverses_id") REFERENCES "public"."vending_refill"("id");
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;--> statement-breakpoint
 ALTER TABLE "vending_refill" DROP CONSTRAINT IF EXISTS "vending_refill_qty_positive";--> statement-breakpoint
 ALTER TABLE "vending_refill" ADD CONSTRAINT "vending_refill_qty_positive"
   CHECK (("source" = 'storno' AND "qty" < 0) OR ("source" <> 'storno' AND "qty" > 0));--> statement-breakpoint
@@ -46,12 +58,22 @@ CREATE INDEX IF NOT EXISTS "vending_refill_reverses_idx"
 --    «−19 штук на складе» никто не считал, и записать это значило бы выдумать
 --    факт. Идемпотентность своим частичным уникальным: own_key её не
 --    покрывает (он ограничен source='own').
-ALTER TABLE "vending_stock_count" ADD COLUMN IF NOT EXISTS "reverses_id" uuid REFERENCES "vending_stock_count"("id");--> statement-breakpoint
+ALTER TABLE "vending_stock_count" ADD COLUMN IF NOT EXISTS "reverses_id" uuid;--> statement-breakpoint
+DO $$ BEGIN
+  ALTER TABLE "vending_stock_count"
+    ADD CONSTRAINT "vending_stock_count_reverses_id_vending_stock_count_id_fk"
+    FOREIGN KEY ("reverses_id") REFERENCES "public"."vending_stock_count"("id");
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "vending_stock_count_storno_key"
   ON "vending_stock_count" USING btree ("reverses_id") WHERE "source" = 'storno';--> statement-breakpoint
 
 -- 4. Сторно касс закупа. Колонки source у таблицы не было вовсе.
 ALTER TABLE "vending_cash_session" ADD COLUMN IF NOT EXISTS "source" text DEFAULT 'own' NOT NULL;--> statement-breakpoint
-ALTER TABLE "vending_cash_session" ADD COLUMN IF NOT EXISTS "reverses_id" uuid REFERENCES "vending_cash_session"("id");--> statement-breakpoint
+ALTER TABLE "vending_cash_session" ADD COLUMN IF NOT EXISTS "reverses_id" uuid;--> statement-breakpoint
+DO $$ BEGIN
+  ALTER TABLE "vending_cash_session"
+    ADD CONSTRAINT "vending_cash_session_reverses_id_vending_cash_session_id_fk"
+    FOREIGN KEY ("reverses_id") REFERENCES "public"."vending_cash_session"("id");
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "vending_cash_session_storno_key"
   ON "vending_cash_session" USING btree ("reverses_id") WHERE "source" = 'storno';
