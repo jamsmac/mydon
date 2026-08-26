@@ -55,8 +55,10 @@ interface Мир {
   health?: OurvendHealth;
   runs?: SyncRunRow[];
   parityDays?: ParityDay[];
-  /** Спутник недельного здоровья падает: письмо обязано уйти всё равно. */
-  неделяПадает?: boolean;
+  /** Падает ТОЛЬКО счёт дней паритета — прогоны недели обязаны остаться настоящими. */
+  паритетПадает?: boolean;
+  /** Падает чтение журнала прогонов — вся недельная секция деградирует. */
+  журналПадает?: boolean;
 }
 
 /** Значения-параметры из условия drizzle — стаб обязан отвечать на ТО ЖЕ окно, о котором спросили. */
@@ -124,7 +126,13 @@ function digestDb(м: Мир) {
     [vendingPurchaseOrder, () => м.orders ?? []],
     [vendingRefillEvent, () => м.refillEvents ?? []],
     [vendingRefill, () => м.refills ?? []],
-    [vendingSyncRun, () => м.runs ?? []],
+    [
+      vendingSyncRun,
+      () => {
+        if (м.журналПадает) throw new Error("журнал прогонов недоступен");
+        return м.runs ?? [];
+      },
+    ],
     [event, () => м.events ?? []],
     [vendingProduct, () => м.products ?? []],
     [vendingAlias, () => []],
@@ -239,7 +247,7 @@ const сервис = (м: Мир, здоровьеПадает = false) => {
   } as unknown as OurvendHealthService;
   const parity = {
     streak: async () => {
-      if (м.неделяПадает) throw new Error("серия паритета не посчиталась");
+      if (м.паритетПадает) throw new Error("серия паритета не посчиталась");
       return {
         greenDays: 0,
         threshold: 7,
@@ -574,16 +582,16 @@ describe("Здоровье сбора в письме — за ОТЧЁТНУЮ 
     assert.equal(d.health.failedStreak, 2, "«сейчас» осталось «сейчас» — два разных набора чисел в одном ответе");
   });
 
-  it("последний успех НЕДЕЛИ, а не вообще: null — успехов в неделе не было ВОВСЕ", async () => {
+  it("данные НЕДЕЛИ, а не вообще: null — данные в неделю не приезжали ВОВСЕ", async () => {
     const d = await сервис({
       ...ДЕНЬГИ_34,
       runs: [прогонСтрокой("failed", "2026-08-20T04:00:00+05:00")],
     }).digest("2026-34", СЕЙЧАС);
-    assert.equal(d.weekHealth.lastSuccessAt, null);
+    assert.equal(d.weekHealth.lastDataAt, null);
     assert.equal(d.weekHealth.runs, 1, "прогон был — просто неуспешный; это не «сбор не запускался»");
   });
 
-  it("успех недели датируется ЗАВЕРШЕНИЕМ прогона — тем же правилом, что и «сейчас»", async () => {
+  it("данные датируются ЗАВЕРШЕНИЕМ прогона — тем же правилом, что и «сейчас»", async () => {
     const d = await сервис({
       ...ДЕНЬГИ_34,
       runs: [
@@ -595,15 +603,76 @@ describe("Здоровье сбора в письме — за ОТЧЁТНУЮ 
         },
       ],
     }).digest("2026-34", СЕЙЧАС);
-    assert.equal(d.weekHealth.lastSuccessAt, "2026-08-23T03:07:00.000Z");
+    assert.equal(d.weekHealth.lastDataAt, "2026-08-23T03:07:00.000Z");
+  });
+
+  it("неделя из одних `partial`: успехов 0, а данные всё это время ПРИЕЗЖАЛИ", async () => {
+    // Разряд `success` строгий, `lastDataAt` — «донёс данные». Одно слово на
+    // два смысла дало бы «успешных 0» и «последний успех 23.08» в одном блоке.
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [
+        прогонСтрокой("partial", "2026-08-23T03:05:00+05:00"),
+        прогонСтрокой("partial", "2026-08-21T03:05:00+05:00"),
+      ],
+    }).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual([d.weekHealth.success, d.weekHealth.partial], [0, 2]);
+    assert.equal(d.weekHealth.lastDataAt, "2026-08-22T22:05:00.000Z");
+  });
+
+  it("`runs` — сумма разрядов, зависший прогон назван отдельно", async () => {
+    // «прогонов 4 · успешных 2 · частичных 0 · отказов 1» не сходилось бы, а
+    // незакрытый прогон ПРОШЛОЙ недели — сигнал сам по себе.
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [
+        прогонСтрокой("success", "2026-08-23T03:05:00+05:00"),
+        прогонСтрокой("running", "2026-08-22T03:05:00+05:00"),
+        прогонСтрокой("failed", "2026-08-21T03:05:00+05:00"),
+        прогонСтрокой("success", "2026-08-20T03:05:00+05:00"),
+      ],
+    }).digest("2026-34", СЕЙЧАС);
+    const w = d.weekHealth;
+    assert.deepEqual([w.runs, w.success, w.partial, w.failed, w.running], [4, 2, 0, 1, 1]);
+    assert.equal(w.runs, w.success + w.partial + w.failed + w.running);
+  });
+
+  it("прогонов больше потолка чтения: capped и предупреждение, а не молчаливая обрезка", async () => {
+    // 201 прогон недели: числа блока честно считаются по свежим 200, но
+    // «отказов 3» при зациклившемся кроне обязано быть подписано.
+    const много = Array.from({ length: 201 }, (_, i) =>
+      прогонСтрокой(i < 3 ? "failed" : "success", new Date(Date.UTC(2026, 7, 16, 19, i)).toISOString()),
+    );
+    const d = await сервис({ ...ДЕНЬГИ_34, runs: много }).digest("2026-34", СЕЙЧАС);
+    assert.equal(d.weekHealth.capped, true);
+    assert.equal(d.weekHealth.runs, 200, "в счёт ушёл свежий хвост окна, а не всё, что прочитали");
+    assert.ok(d.warnings.some((w) => w.code === "history_capped" && /потолка чтения/.test(w.message)));
+  });
+
+  it("прогонов ровно по потолок — capped НЕ взводится и предупреждения нет", async () => {
+    // Граница: «ровно 200» — посчитанный результат, а не обрезанный.
+    const ровно = Array.from({ length: 200 }, (_, i) =>
+      прогонСтрокой("success", new Date(Date.UTC(2026, 7, 16, 19, i)).toISOString()),
+    );
+    const d = await сервис({ ...ДЕНЬГИ_34, runs: ровно }).digest("2026-34", СЕЙЧАС);
+    assert.deepEqual([d.weekHealth.capped, d.weekHealth.runs], [false, 200]);
+    assert.deepEqual(d.warnings, []);
+  });
+
+  it("понедельничное письмо — про ЗАКОНЧЕННУЮ неделю: partialWeek false", async () => {
+    // `нормализоватьНеделю` гасит текущую и будущую неделю в предыдущую,
+    // поэтому сегодня флаг взвестись не может. Тест — сторож на случай, если
+    // это когда-нибудь изменят: «отказов 0» за неполную неделю читалось бы
+    // как итог семи суток.
+    const d = await сервис(ДЕНЬГИ_34).digest(undefined, СЕЙЧАС);
+    assert.deepEqual([d.week, d.weekHealth.partialWeek], ["2026-34", false]);
+    assert.equal((await сервис(ДЕНЬГИ_34).digest("2026-35", СЕЙЧАС)).weekHealth.partialWeek, false);
   });
 
   it("прогонов на неделе не было ВОВСЕ — нули и null, а не «всё хорошо»", async () => {
     const d = await сервис(ДЕНЬГИ_34).digest("2026-34", СЕЙЧАС);
-    assert.deepEqual(
-      [d.weekHealth.runs, d.weekHealth.success, d.weekHealth.partial, d.weekHealth.failed, d.weekHealth.lastSuccessAt],
-      [0, 0, 0, 0, null],
-    );
+    const w = d.weekHealth;
+    assert.deepEqual([w.runs, w.success, w.partial, w.failed, w.running, w.lastDataAt], [0, 0, 0, 0, 0, null]);
   });
 
   it("дни паритета режутся неделей и считаются зелёными/красными", async () => {
@@ -632,16 +701,42 @@ describe("Здоровье сбора в письме — за ОТЧЁТНУЮ 
     assert.deepEqual(d.warnings, []);
   });
 
+  it("упал ТОЛЬКО паритет — прогоны недели остаются настоящими (ревью M1)", async () => {
+    // Под общим `catch` отказ скана `event` обнулял бы и прогоны, и письмо
+    // печатало бы «за неделю прогонов не было — сбор не запускался» о неделе,
+    // в которой сбор отработал трижды. Владелец шёл бы чинить рабочий крон.
+    const d = await сервис({
+      ...ДЕНЬГИ_34,
+      runs: [
+        прогонСтрокой("success", "2026-08-20T04:00:00+05:00"),
+        прогонСтрокой("failed", "2026-08-21T04:00:00+05:00"),
+        прогонСтрокой("failed", "2026-08-21T07:00:00+05:00"),
+      ],
+      parityDays: [ДЕНЬ_ЗЕЛ("2026-08-22")],
+      паритетПадает: true,
+    }).digest("2026-34", СЕЙЧАС);
+
+    const w = d.weekHealth;
+    assert.deepEqual([w.runs, w.success, w.failed, w.worstFailedStreak], [3, 1, 2, 2]);
+    assert.equal(w.lastDataAt, "2026-08-19T23:00:00.000Z", "успех недели никуда не делся");
+    assert.deepEqual([w.parityDays, w.parityGreen, w.parityRed], [[], 0, 0], "пропала только сверка");
+    assert.ok(
+      d.warnings.some((x) => x.code === "health_unavailable" && /Дни паритета за неделю 2026-34 не посчитались/.test(x.message)),
+      "причина обязана быть названа и назвать ИМЕННО паритет",
+    );
+  });
+
   it("падение недельного здоровья не роняет письмо: деньги недели на месте, причина в warnings", async () => {
-    const d = await сервис({ ...ДЕНЬГИ_34, неделяПадает: true }).digest("2026-34", СЕЙЧАС);
+    const d = await сервис({ ...ДЕНЬГИ_34, журналПадает: true }).digest("2026-34", СЕЙЧАС);
     assert.ok(d.totals.revenue > 0, "деньги недели от секции здоровья не зависят");
-    assert.deepEqual([d.weekHealth.runs, d.weekHealth.lastSuccessAt], [0, null]);
+    assert.deepEqual([d.weekHealth.runs, d.weekHealth.lastDataAt], [0, null]);
     assert.ok(d.warnings.some((w) => w.code === "health_unavailable"));
     assert.equal(d.weekHealth.week, "2026-34", "подпись недели остаётся даже у несчитанного блока");
+    assert.equal(d.weekHealth.capped, false, "потолок не срабатывал — читать не вышло вовсе");
   });
 
   it("упали ОБЕ секции здоровья — оба предупреждения, а не первое из двух", async () => {
-    const d = await сервис({ ...ДЕНЬГИ_34, неделяПадает: true }, true).digest("2026-34", СЕЙЧАС);
+    const d = await сервис({ ...ДЕНЬГИ_34, журналПадает: true }, true).digest("2026-34", СЕЙЧАС);
     assert.equal(d.warnings.length, 2);
     assert.deepEqual(d.warnings.map((w) => w.code), ["health_unavailable", "health_unavailable"]);
   });

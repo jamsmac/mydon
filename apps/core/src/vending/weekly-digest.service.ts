@@ -15,6 +15,7 @@ import {
   type DeadRow,
   type IsoWeek,
   type OurvendHealth,
+  type ParityDay,
   type WeeklyDigest,
   type WeeklyHealth,
 } from "@mydon/shared";
@@ -24,11 +25,12 @@ import { OurvendParityService } from "../ourvend/ourvend-parity.service";
 import {
   CUTOVER_GREEN_DAYS_FALLBACK,
   SYNC_STALE_HOURS_FALLBACK,
+  WEEK_RUNS_LIMIT,
   lastSuccessRunAt,
   runsInWindow,
 } from "../ourvend/sync-runs";
 import { AnalyticsService } from "./analytics.service";
-import { worstFailedStreak } from "./sync-streak";
+import { worstFailedStreak, type SyncRunFacts } from "./sync-streak";
 import { parseOrderPositions } from "./vending.service";
 import { ReportCache } from "./report-cache";
 
@@ -152,17 +154,24 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
  * не было ВОВСЕ», а не «ноль часов назад»), дней паритета нет. Причина едет
  * словами в `warnings`, как и у соседа.
  */
-const НЕДЕЛЯ_НЕИЗВЕСТНА = (week: string): WeeklyHealth => ({
+const НЕДЕЛЯ_НЕИЗВЕСТНА = (week: string, partialWeek: boolean): WeeklyHealth => ({
   week,
   runs: 0,
   success: 0,
   partial: 0,
   failed: 0,
+  running: 0,
   worstFailedStreak: 0,
-  lastSuccessAt: null,
+  lastDataAt: null,
   parityDays: [],
   parityGreen: 0,
   parityRed: 0,
+  // Считается арифметикой, а не базой, поэтому остаётся правдой и тогда, когда
+  // не посчиталось ВСЁ остальное: «неделя ещё идёт» знать от Postgres не надо.
+  partialWeek,
+  // Потолок чтения не срабатывал — читать не вышло вовсе. `true` здесь
+  // утверждало бы про журнал то, чего мы не видели.
+  capped: false,
 });
 
 /**
@@ -171,9 +180,24 @@ const НЕДЕЛЯ_НЕИЗВЕСТНА = (week: string): WeeklyHealth => ({
  * Молчаливый пустой список читался бы как «сверки не было» — ровно тот ноль,
  * который выдают за результат. Здесь причина названа и сказано, где смотреть.
  */
+/**
+ * Причина отказа человеческим текстом — одна формулировка на три `catch` файла.
+ */
+const причинаОтказа = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 const ПАРИТЕТ_ВНЕ_ОКНА =
   `Дни паритета за эту неделю вне окна счёта серии (${PARITY_STREAK_WINDOW} дней) — ` +
   "смотри /ourvend/parity/streak";
+
+/**
+ * Потолок чтения журнала прогонов сработал — числа посчитаны по свежему хвосту.
+ *
+ * Молчаливое обрезание здесь читается как посчитанный результат: «отказов 3»
+ * за неделю с зациклившимся кроном увело бы владельца от аварии.
+ */
+const ПРОГОНЫ_ОБРЕЗАНЫ =
+  `Прогонов за неделю больше потолка чтения (${WEEK_RUNS_LIMIT}) — числа блока посчитаны ` +
+  "по самым свежим прогонам окна, весь журнал в /ourvend/health.";
 
 @Injectable()
 export class WeeklyDigestService {
@@ -262,7 +286,7 @@ export class WeeklyDigestService {
       // Предупреждения ОБЕИХ секций здоровья: они падают независимо, и
       // потерянная вторая читалась бы как «там всё хорошо». Числа денег в
       // письме этим не портятся, и молчать о пропавшей секции нельзя.
-      warnings: [здоровье.warning, недельное.warning].filter((w): w is AnalyticsWarning => w !== null),
+      warnings: [...(здоровье.warning ? [здоровье.warning] : []), ...недельное.warnings],
     };
   }
 
@@ -279,7 +303,7 @@ export class WeeklyDigestService {
     try {
       return { health: await this.health.health(undefined, now), warning: null };
     } catch (e) {
-      const причина = e instanceof Error ? e.message : String(e);
+      const причина = причинаОтказа(e);
       this.logger.error(`Здоровье сбора для недельной сводки не посчиталось: ${причина}`);
       return {
         health: ЗДОРОВЬЕ_НЕИЗВЕСТНО,
@@ -305,60 +329,124 @@ export class WeeklyDigestService {
    * арифметики недели здесь нет, иначе границы разошлись бы на первом же
    * уточнении, и деньги считались бы за одну неделю, а прогоны — за другую.
    *
-   * СВОЙ `catch`, как у соседа: отказ спутника не роняет письмо — деньги
-   * недели от него не зависят.
+   * КАЖДЫЙ ИСТОЧНИК ПОД СВОИМ `catch`, а не все трое под общим. Прогоны — два
+   * простых индексных запроса, дни паритета — скан общей `event` с разбором
+   * jsonb: падает практически только он. Под общим `catch` его отказ обнулял
+   * бы и прогоны, и письмо печатало бы «за неделю прогонов не было — сбор не
+   * запускался» о неделе, в которой сбор отработал 56 раз. Это тот же дефект,
+   * против которого заведена задача, только с другой стороны: «не посчитали»
+   * превращается не в «всё хорошо», а в утверждение о несуществующем факте, и
+   * владелец идёт чинить крон, который работал. Тем же приёмом гасит паритет и
+   * `OurvendHealthService`.
+   *
+   * Внешний `try` остаётся страховкой на отказ САМОЙ БАЗЫ — при нём письма всё
+   * равно не будет (`analytics.margin` ходит туда же).
    */
   private async здоровьеНедели(
     неделя: IsoWeek,
     начало: Date,
     конец: Date,
     now: Date,
-  ): Promise<{ health: WeeklyHealth; warning: AnalyticsWarning | null }> {
+  ): Promise<{ health: WeeklyHealth; warnings: AnalyticsWarning[] }> {
+    // Считается арифметикой, а не базой: правда и при полном отказе чтения.
+    const partialWeek = конец.getTime() > now.getTime();
     try {
       const окно = { from: начало, to: конец };
-      const [прогоны, успех, серия] = await Promise.all([
-        runsInWindow(this.db, окно),
+      const [прочитано, данные, паритет] = await Promise.all([
+        // На ОДИН прогон больше потолка: иначе «ровно 200» и «больше 200»
+        // неразличимы, и обрезанный счёт уехал бы в письмо как посчитанный.
+        runsInWindow(this.db, окно, WEEK_RUNS_LIMIT + 1),
         lastSuccessRunAt(this.db, окно),
-        this.parity.streak(now),
+        this.дниПаритета(неделя, now),
       ]);
-      // Второго разбора payload не заводим: поля дня уже разобрал
-      // `parity-streak.ts`, и своя копия правила «что такое зелёный день»
-      // разошлась бы с гейтом катовера.
-      const дни = parityDaysInWeek(серия.days, неделя.from, неделя.to);
-      const сколько = (status: string): number => прогоны.filter((r) => r.status === status).length;
+
+      const capped = прочитано.length > WEEK_RUNS_LIMIT;
+      const прогоны = capped ? прочитано.slice(0, WEEK_RUNS_LIMIT) : прочитано;
+      const сколько = (status: SyncRunFacts["status"]): number =>
+        прогоны.filter((r) => r.status === status).length;
+      const success = сколько("success");
+      const partial = сколько("partial");
+      const failed = сколько("failed");
+      const running = сколько("running");
+      const дни = "days" in паритет ? паритет.days : [];
+
+      const warnings: AnalyticsWarning[] = [];
+      if ("failure" in паритет) {
+        warnings.push({
+          code: "health_unavailable",
+          message:
+            `Дни паритета за неделю ${неделя.key} не посчитались (${паритет.failure}) — ` +
+            "прогоны сбора в письме настоящие, а сверку смотри в /ourvend/parity/streak.",
+        });
+      } else if (дни.length === 0 && внеОкнаСерии(неделя, now)) {
+        // Пусто ПОТОМУ ЧТО не достали, а не потому что сверки не было — это
+        // два разных ответа, и различает их только окно показа серии.
+        warnings.push({ code: "health_unavailable", message: ПАРИТЕТ_ВНЕ_ОКНА });
+      }
+      if (capped) warnings.push({ code: "history_capped", message: ПРОГОНЫ_ОБРЕЗАНЫ });
 
       return {
         health: {
           week: неделя.key,
-          runs: прогоны.length,
-          success: сколько("success"),
-          partial: сколько("partial"),
-          failed: сколько("failed"),
+          // СУММОЙ разрядов, а не длиной выборки: строка письма печатает и
+          // итог, и разряды, и «прогонов 57 · успешных 54 · частичных 1 ·
+          // отказов 1» владелец прочитал бы как ошибку отчёта.
+          runs: success + partial + failed + running,
+          success,
+          partial,
+          failed,
+          running,
           worstFailedStreak: worstFailedStreak(прогоны),
-          lastSuccessAt: успех ? успех.toISOString() : null,
+          lastDataAt: данные ? данные.toISOString() : null,
           parityDays: дни,
           parityGreen: дни.filter((d) => d.ok).length,
           parityRed: дни.filter((d) => !d.ok).length,
+          partialWeek,
+          capped,
         },
-        // Пусто ПОТОМУ ЧТО не достали, а не потому что сверки не было — это
-        // два разных ответа, и различает их только окно показа серии.
-        warning:
-          дни.length === 0 && внеОкнаСерии(неделя, now)
-            ? { code: "health_unavailable", message: ПАРИТЕТ_ВНЕ_ОКНА }
-            : null,
+        warnings,
       };
     } catch (e) {
-      const причина = e instanceof Error ? e.message : String(e);
+      const причина = причинаОтказа(e);
       this.logger.error(`Здоровье сбора за неделю ${неделя.key} не посчиталось: ${причина}`);
       return {
-        health: НЕДЕЛЯ_НЕИЗВЕСТНА(неделя.key),
-        warning: {
-          code: "health_unavailable",
-          message:
-            `Здоровье сбора за неделю ${неделя.key} не посчиталось (${причина}) — ` +
-            "деньги недели в письме честные, а про сбор смотри /ourvend/health.",
-        },
+        health: НЕДЕЛЯ_НЕИЗВЕСТНА(неделя.key, partialWeek),
+        warnings: [
+          {
+            code: "health_unavailable",
+            message:
+              `Здоровье сбора за неделю ${неделя.key} не посчиталось (${причина}) — ` +
+              "деньги недели в письме честные, а про сбор смотри /ourvend/health.",
+          },
+        ],
       };
+    }
+  }
+
+  /**
+   * Дни паритета недели ПОД СВОИМ `catch` (ревью T8, M1).
+   *
+   * Отдельным методом, а не `.catch()` инлайном в `Promise.all`: причина
+   * отказа нужна в тексте предупреждения, а мутируемая переменная, которую
+   * пишет колбэк, для компилятора остаётся `null` навсегда. Успех и отказ
+   * различаются формой ответа, а не значением `null`: «дней нет» и «дни не
+   * посчитались» — два разных ответа, и письмо говорит о них разное.
+   *
+   * Второго разбора payload не заводим: поля дня уже разобрал
+   * `parity-streak.ts`, и своя копия правила «что такое зелёный день»
+   * разошлась бы с гейтом катовера.
+   */
+  private async дниПаритета(
+    неделя: IsoWeek,
+    now: Date,
+  ): Promise<{ days: ParityDay[] } | { failure: string }> {
+    try {
+      const серия = await this.parity.streak(now);
+      return { days: parityDaysInWeek(серия.days, неделя.from, неделя.to) };
+    } catch (e) {
+      const причина = причинаОтказа(e);
+      this.logger.error(`Дни паритета недели ${неделя.key} не посчитались: ${причина}`);
+      return { failure: причина };
     }
   }
 
@@ -465,6 +553,15 @@ function нормализоватьНеделю(week: string | undefined, now: D
  * Граница — голые ташкентские сутки, тем же `tashkentDayStart`, что и всё
  * остальное в файле: вторая арифметика суток здесь дала бы второе правило о
  * том, где кончается день.
+ *
+ * ЧАСТИЧНОЕ ПОКРЫТИЕ СОЗНАТЕЛЬНО НЕ СИГНАЛИТСЯ. Сравнивается ВОСКРЕСЕНЬЕ
+ * недели, поэтому неделя, у которой в окно попали, скажем, пять суток из
+ * семи, отдаёт свои пять дней молча. Критерий двоичный намеренно: у окна
+ * показа нет обещания «ровно N суток» (в нём четырнадцать дней С СОБЫТИЕМ, а
+ * не календарных), и предупреждать о недоборе, границу которого мы сами не
+ * знаем, значило бы пугать неточностью там, где числа честные. Для
+ * понедельничного письма — единственного, которое приходит само, — случай
+ * недостижим: прошлая неделя целиком внутри окна.
  */
 function внеОкнаСерии(неделя: IsoWeek, now: Date): boolean {
   const начало = tashkentDayStart(tashkentDay(now));

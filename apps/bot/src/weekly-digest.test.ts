@@ -81,8 +81,9 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     success: 54,
     partial: 1,
     failed: 1,
+    running: 0,
     worstFailedStreak: 1,
-    lastSuccessAt: "2026-08-23T03:07:00Z",
+    lastDataAt: "2026-08-23T03:07:00Z",
     parityDays: [
       { date: "2026-08-23", ok: true, salesChecked: 2, stockChecked: 68, note: null },
       { date: "2026-08-22", ok: true, salesChecked: 2, stockChecked: 68, note: null },
@@ -94,6 +95,8 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     ],
     parityGreen: 5,
     parityRed: 2,
+    partialWeek: false,
+    capped: false,
   },
   warnings: [],
 };
@@ -122,11 +125,14 @@ const ПУСТАЯ_НЕДЕЛЯ: WeeklyDigest = {
     success: 0,
     partial: 0,
     failed: 0,
+    running: 0,
     worstFailedStreak: 0,
-    lastSuccessAt: null,
+    lastDataAt: null,
     parityDays: [],
     parityGreen: 0,
     parityRed: 0,
+    partialWeek: false,
+    capped: false,
   },
 };
 
@@ -447,9 +453,69 @@ describe("Текст недельной сводки", () => {
 describe("Блок здоровья: сначала неделя, потом «сейчас» (R-H-9)", () => {
   it("печатает недельные числа и отдельно строки момента", () => {
     const текст = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
-    assert.match(текст, /За неделю: прогонов 56 · успешных 54 · частичных 1 · отказов 1 · худшая серия 1/);
+    assert.match(
+      текст,
+      /За неделю: прогонов 56 · успешных 54 · частичных 1 · отказов 1 · незакрытых 0 · худшая серия 1/,
+    );
     assert.match(текст, /Паритет недели: 5 зелёных \/ 2 красных/);
     assert.match(текст, /Сейчас: /, "состояние момента обязано быть ПОДПИСАНО словом «сейчас»");
+  });
+
+  it("итог сходится с разрядами: сумма четырёх напечатана рядом с ними", () => {
+    const w = ДАЙДЖЕСТ_34.weekHealth;
+    assert.equal(w.runs, w.success + w.partial + w.failed + w.running);
+    const текст = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
+    assert.match(текст, new RegExp(`прогонов ${w.runs} `));
+  });
+
+  it("склонение по числу: «1 зелёный / 1 красный», а не «1 зелёных»", () => {
+    // Неделя с одним зелёным днём после починки — рядовой случай, и в одном
+    // письме «1 зелёных» встало бы рядом с правильным «1 зелёный дн. подряд».
+    const одинИодин: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, parityGreen: 1, parityRed: 1 },
+    };
+    assert.match(formatWeeklyDigest(одинИодин, []).parts.join("\n"), /Паритет недели: 1 зелёный \/ 1 красный/);
+    const двоеИпятеро: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, parityGreen: 2, parityRed: 5 },
+    };
+    assert.match(formatWeeklyDigest(двоеИпятеро, []).parts.join("\n"), /Паритет недели: 2 зелёных \/ 5 красных/);
+  });
+
+  it("неполная неделя и обрезанный журнал подписаны прямо в строке чисел", () => {
+    // Оговорка ниже чисел читалась бы как новость о сборе, а не как их граница.
+    const идёт: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, partialWeek: true },
+    };
+    assert.match(formatWeeklyDigest(идёт, []).parts.join("\n"), /худшая серия 1 \(неделя ещё идёт\)/);
+    const обрезан: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, capped: true },
+    };
+    assert.match(
+      formatWeeklyDigest(обрезан, []).parts.join("\n"),
+      /худшая серия 1 \(показаны не все прогоны недели\)/,
+    );
+    const оба: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, partialWeek: true, capped: true },
+    };
+    assert.match(
+      formatWeeklyDigest(оба, []).parts.join("\n"),
+      /\(неделя ещё идёт; показаны не все прогоны недели\)/,
+    );
+  });
+
+  it("прогоны были, а данных нет — сказано словами, а не «не было» после двоеточия", () => {
+    const безДанных: WeeklyDigest = {
+      ...ДАЙДЖЕСТ_34,
+      weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, runs: 3, success: 0, partial: 0, failed: 3, lastDataAt: null },
+    };
+    const текст = formatWeeklyDigest(безДанных, []).parts.join("\n");
+    assert.match(текст, /Данные за неделю не приезжали ни разу/);
+    assert.equal(/Данные последний раз приехали/.test(текст), false);
   });
 
   it("числа недели стоят ВЫШЕ чисел момента: письмо подписано неделей", () => {
@@ -457,15 +523,21 @@ describe("Блок здоровья: сначала неделя, потом «�
     assert.ok(текст.indexOf("За неделю: прогонов") < текст.indexOf("Сейчас: "));
   });
 
-  it("последний успех недели — свой момент, а не общий «последний успех»", () => {
+  it("данные недели — свой момент, а не общий «последний успех»", () => {
+    // Слово «успех» в этой строке спорило бы с разрядом «успешных N» выше:
+    // Core датирует её прогоном, ДОНЁСШИМ ДАННЫЕ (`success` ИЛИ `partial`).
     const текст = formatWeeklyDigest(ДАЙДЖЕСТ_34, []).parts.join("\n");
-    assert.match(текст, /Последний успех недели: 23\.08 08:07/);
+    assert.match(текст, /Данные последний раз приехали: 23\.08 08:07/);
+    assert.match(текст, /Сейчас: .* последний успех 23\.08 08:07/);
   });
 
   it("неделя без прогонов — «сбор не запускался», а не «отказов 0»", () => {
     const текст = formatWeeklyDigest(ПУСТАЯ_НЕДЕЛЯ, []).parts.join("\n");
     assert.match(текст, /За неделю прогонов не было — сбор не запускался/);
     assert.equal(/отказов 0/.test(текст), false, "нули читаются как посчитанный результат");
+    // Про данные всё сказано той же строкой — вторая («не приезжали») была бы
+    // повтором в письме, у которого бюджет в три сообщения.
+    assert.equal(/Данные/.test(текст), false);
   });
 
   it("дней паритета за неделю нет — строки нет вовсе, а не «0 зелёных / 0 красных»", () => {

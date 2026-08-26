@@ -807,11 +807,14 @@ describe("Аналитика снека: путь владельца до Core (
       success: 0,
       partial: 0,
       failed: 0,
+      running: 0,
       worstFailedStreak: 0,
-      lastSuccessAt: null,
+      lastDataAt: null,
       parityDays: [],
       parityGreen: 0,
       parityRed: 0,
+      partialWeek: false,
+      capped: false,
     },
   };
 

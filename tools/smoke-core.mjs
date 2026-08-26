@@ -259,12 +259,22 @@ const ЧТЕНИЕ = [
       const w = о?.weekHealth;
       if (!w) throw new Error("в сводке нет weekHealth — письмо снова говорило бы про момент отправки");
       if (w.week !== о.week) throw new Error(`weekHealth.week=${w.week}, а письмо про ${о.week}`);
-      for (const k of ["runs", "success", "partial", "failed", "worstFailedStreak", "parityGreen", "parityRed"]) {
+      const разряды = ["success", "partial", "failed", "running"];
+      for (const k of [...разряды, "runs", "worstFailedStreak", "parityGreen", "parityRed"]) {
         if (typeof w[k] !== "number") throw new Error(`weekHealth.${k} — не число`);
       }
+      // Итог и разряды печатаются в письме ОДНОЙ строкой и обязаны сходиться.
+      const сумма = разряды.reduce((n, k) => n + w[k], 0);
+      if (w.runs !== сумма) throw new Error(`weekHealth.runs=${w.runs}, а сумма разрядов ${сумма}`);
+      for (const k of ["partialWeek", "capped"]) {
+        if (typeof w[k] !== "boolean") throw new Error(`weekHealth.${k} — не флаг`);
+      }
       if (!Array.isArray(w.parityDays)) throw new Error("weekHealth.parityDays — не массив");
-      // `null` — «успехов в неделе не было ВОВСЕ», и это не ноль часов.
-      if (w.lastSuccessAt !== null && typeof w.lastSuccessAt !== "string") throw new Error("weekHealth.lastSuccessAt — не ISO и не null");
+      // `null` — «данные в неделю не приезжали ВОВСЕ», и это не ноль часов.
+      if (w.lastDataAt !== null && typeof w.lastDataAt !== "string") throw new Error("weekHealth.lastDataAt — не ISO и не null");
+      // Понедельничное письмо всегда про ЗАКОНЧЕННУЮ неделю: `?week=` текущей
+      // гасится нормализацией, и взведённый флаг тут значил бы, что она сломана.
+      if (w.partialWeek) throw new Error("weekHealth.partialWeek — сводка отдала неделю, которая ещё идёт");
       if (typeof о?.health?.failedStreak !== "number") throw new Error("health «сейчас» пропал из сводки");
       // Секция, которая не посчиталась, обязана быть НАЗВАНА: сводка больше не
       // падает в 500 из-за здоровья сбора, и молчаливая пустота вместо секции

@@ -64,11 +64,14 @@ const НЕДЕЛЬНОЕ_ЗДОРОВЬЕ: WeeklyHealth = {
   success: 54,
   partial: 1,
   failed: 1,
+  running: 0,
   worstFailedStreak: 1,
-  lastSuccessAt: "2026-08-23T03:07:00.000Z",
+  lastDataAt: "2026-08-23T03:07:00.000Z",
   parityDays: [{ date: "2026-08-23", ok: true, salesChecked: 2, stockChecked: 68, note: null }],
   parityGreen: 1,
   parityRed: 0,
+  partialWeek: false,
+  capped: false,
 };
 
 const СВОДКА: WeeklyDigest = {
@@ -226,12 +229,15 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
 
   it("здоровье недели: ровно те поля, что читает бот (R-H-9)", () => {
     assert.deepEqual(Object.keys(НЕДЕЛЬНОЕ_ЗДОРОВЬЕ).sort(), [
+      "capped",
       "failed",
-      "lastSuccessAt",
+      "lastDataAt",
       "parityDays",
       "parityGreen",
       "parityRed",
       "partial",
+      "partialWeek",
+      "running",
       "runs",
       "success",
       "week",
@@ -242,6 +248,42 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.equal(СВОДКА.weekHealth.week, СВОДКА.week);
   });
 
+  it("`runs` — РОВНО сумма четырёх разрядов: строка письма обязана сходиться", () => {
+    const w = НЕДЕЛЬНОЕ_ЗДОРОВЬЕ;
+    assert.equal(w.runs, w.success + w.partial + w.failed + w.running);
+    // Незакрытый прогон недели виден отдельным числом, а не тонет в разнице
+    // между итогом и тремя разрядами.
+    const завис: WeeklyHealth = { ...w, running: 2, runs: w.success + w.partial + w.failed + 2 };
+    assert.equal(завис.runs - (завис.success + завис.partial + завис.failed), 2);
+  });
+
+  it("«успех» не значит две вещи: `success` — строгий статус, `lastDataAt` — донёсший данные", () => {
+    // Неделя из одних `partial`: строгий разряд успехов ноль, а данные всё
+    // это время приезжали. Под именем `lastSuccessAt` это была бы строка,
+    // спорящая с соседним числом в том же блоке письма.
+    const толькоЧастичные: WeeklyHealth = {
+      ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ,
+      runs: 3,
+      success: 0,
+      partial: 3,
+      failed: 0,
+      running: 0,
+      lastDataAt: "2026-08-23T03:07:00.000Z",
+    };
+    assert.equal(толькоЧастичные.success, 0);
+    assert.notEqual(толькоЧастичные.lastDataAt, null);
+  });
+
+  it("неполная неделя и потолок чтения названы флагами, а не молчанием", () => {
+    const идёт: WeeklyHealth = { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, partialWeek: true };
+    const обрезана: WeeklyHealth = { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, capped: true };
+    assert.equal(идёт.partialWeek, true);
+    assert.equal(обрезана.capped, true);
+    // Два РАЗНЫХ «неполно»: неполна неделя — и неполна выборка прогонов.
+    assert.equal(идёт.capped, false);
+    assert.equal(обрезана.partialWeek, false);
+  });
+
   it("«сейчас» и «за неделю» — ДВА набора чисел в одном ответе, а не один", () => {
     // `failedStreak` отвечает «падает ли прямо сейчас», `worstFailedStreak` —
     // «была ли на неделе дыра». Подсунуть недельное число под старым именем
@@ -249,17 +291,25 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     const авария: WeeklyDigest = {
       ...СВОДКА,
       health: { ...ЗДОРОВЬЕ, failedStreak: 2 },
-      weekHealth: { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, failed: 0, worstFailedStreak: 0 },
+      weekHealth: { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, runs: 55, failed: 0, worstFailedStreak: 0 },
     };
     assert.equal(авария.health.failedStreak, 2);
     assert.equal(авария.weekHealth.worstFailedStreak, 0);
   });
 
-  it("успехов в неделе не было ВОВСЕ — `null`, а не ноль часов", () => {
-    const безУспеха: WeeklyHealth = { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, success: 0, failed: 1, lastSuccessAt: null };
-    assert.equal(безУспеха.lastSuccessAt, null);
+  it("данные за неделю не приезжали ВОВСЕ — `null`, а не ноль часов", () => {
+    const безДанных: WeeklyHealth = {
+      ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ,
+      runs: 1,
+      success: 0,
+      partial: 0,
+      failed: 1,
+      running: 0,
+      lastDataAt: null,
+    };
+    assert.equal(безДанных.lastDataAt, null);
     // Прогон был — просто неуспешный: это НЕ «сбор не запускался».
-    assert.equal(безУспеха.runs > 0, true);
+    assert.equal(безДанных.runs > 0, true);
   });
 
   it("сводка несёт `warnings`: секция, которая не посчиталась, не исчезает молча", () => {
