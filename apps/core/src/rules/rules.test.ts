@@ -243,6 +243,37 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.match(n!.text, /1 день подряд/);
   });
 
+  it("застой учётного снапшота будит немедленно и говорит, что именно встало", () => {
+    const [n] = applyRules(ctx("ourvend.snapshot_stale", { hours: 37, lastFetchedAt: "2026-09-03T19:00:00.000Z" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /37 ч/);
+    // Без «продажи и остатки» тревога читается как «сломался какой-то снимок»:
+    // владельцу нечем понять, что в режиме own это ОСТАНОВКА учёта, а не
+    // пропущенная строка в служебной таблице.
+    assert.match(n!.text, /продажи и остатки/);
+  });
+
+  it("снапшота не было ни разу — «не приходил», а не «0 ч»", () => {
+    const [n] = applyRules(ctx("ourvend.snapshot_stale", { hours: null, lastFetchedAt: null }));
+    assert.equal(n!.urgency, "immediate");
+    assert.doesNotMatch(n!.text, /0 ч/);
+    assert.match(n!.text, /НЕ ПРИХОДИЛ НИ РАЗУ/);
+  });
+
+  it("смена источника учёта доставляется немедленно и называет обе стороны", () => {
+    const [n] = applyRules(ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", actor: "owner" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /stock.*own/);
+    assert.match(n!.text, /owner/);
+  });
+
+  it("смена источника без автора не печатает «null»", () => {
+    // `SystemService.set` кладёт actor = null, когда правку сделали не из
+    // панели (скрипт, миграция): «(null)» в тревоге владелец прочтёт как сбой.
+    const [n] = applyRules(ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", actor: null }));
+    assert.doesNotMatch(n!.text, /null/);
+  });
+
   it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {
     const [n] = applyRules(ctx("weekly-digest.no_recipients", { week: "2026-34" }));
     assert.equal(n!.urgency, "immediate");

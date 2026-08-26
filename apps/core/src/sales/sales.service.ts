@@ -12,6 +12,7 @@ import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, st
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
+import { lastSnapshotAt, snapshotIsStale, snapshotStaleThreshold } from "../ourvend/sync-runs";
 import { accountingSource } from "./accounting-source";
 
 type SaleRow = typeof sale.$inferSelect;
@@ -122,12 +123,17 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
   async onModuleInit(): Promise<void> {
     const source = await accountingSource(this.db);
     const url = process.env.STOCK_DATABASE_URL;
-    if (source === "stock" && (!url || url.length === 0)) {
-      this.log.log("STOCK_DATABASE_URL не задан — синк продаж выключен.");
-      return;
-    }
+    // «Синк продаж выключен» больше не бывает, и прежняя ветка этого условия
+    // была недостижимой: `stock` без `STOCK_DATABASE_URL` невозможен по
+    // определению (`resolveAccountingSource` в такой ситуации отвечает `own`).
+    // Оставь её — и лог обещал бы состояние, в которое код не попадает, а
+    // читатель искал бы «выключенный синк» в проде, где он всегда включён.
     if (source === "own") {
-      this.log.log("Источник продаж: собственный снапшот OurVend (ourvend_sale_snapshot).");
+      this.log.log(
+        url
+          ? "Источник продаж: собственный снапшот OurVend (ourvend_sale_snapshot); зеркало ещё живо, но не читается."
+          : "Источник продаж: собственный снапшот OurVend (ourvend_sale_snapshot); зеркало погашено.",
+      );
     }
     // Раз в 10 минут + сразу на старте. Ошибка синка не роняет Core.
     this.cron = new Cron("*/10 * * * *", { timezone: "Asia/Tashkent" }, () => {
@@ -278,15 +284,41 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
-  /** Сводка для дашборда: сегодня, вчера, 30 дней. */
-  async summary(): Promise<{
+  /**
+   * Сводка для дашборда: сегодня, вчера, 30 дней.
+   *
+   * `now` — параметр, а не `new Date()` внутри: `configured` меряет свежесть
+   * снапшота, и «37 часов назад» иначе нечем проверить тестом.
+   */
+  async summary(now: Date = new Date()): Promise<{
     today: { qty: number; amount: number };
     yesterday: { qty: number; amount: number };
     days30: { qty: number; amount: number };
     lastSaleDt: string | null;
     configured: boolean;
   }> {
-    const configured = (await accountingSource(this.db)) === "own" || Boolean(process.env.STOCK_DATABASE_URL);
+    /**
+     * `configured` — «ИСТОЧНИК ЧИТАЕМ», а не «источник выбран».
+     *
+     * Витрины (`reports-overview.tsx`, `sales-view.tsx`, бот `sales-brief.ts`)
+     * рисуют по нему «появится после сбора». Пока флаг считался как
+     * «`own` ИЛИ есть переменная», он был ТОЖДЕСТВЕННО ИСТИННЫМ: в режиме `own`
+     * первое слагаемое всегда верно, а `stock` без переменной невозможен
+     * (`resolveAccountingSource`). То есть плитка обещала «настроено» и в тот
+     * день, когда агент снапшота лежал третьи сутки, синк честно отдавал
+     * `{ upserted: 0 }` и учёт стоял молча — ровно тот случай, ради которого
+     * флаг и заведён.
+     *
+     * Теперь вопрос задаётся по режиму: у зеркала «читаем» = переменная есть, у
+     * своего снапшота «читаем» = он свежий. Свежесть — той же функцией, что у
+     * сторожа и отчёта (`snapshotIsStale`), иначе плитка гасла бы на своей
+     * границе, а тревога приходила бы на другой.
+     */
+    const источник = await accountingSource(this.db, now);
+    const configured =
+      источник === "own"
+        ? !snapshotIsStale(await lastSnapshotAt(this.db), now, await snapshotStaleThreshold(this.db, this.log))
+        : Boolean(process.env.STOCK_DATABASE_URL);
     const today = todayLocal();
     const y = new Date();
     y.setDate(y.getDate() - 1);

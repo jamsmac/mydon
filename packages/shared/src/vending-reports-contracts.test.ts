@@ -33,6 +33,7 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   staleThresholdH: 6,
   slotsLagMin: 42,
   salesLagH: 3,
+  snapshotStale: false,
   productSaleLagH: 5,
   parityStreak: 3,
   cutoverThreshold: 7,
@@ -75,6 +76,7 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "runs",
       "salesLagH",
       "slotsLagMin",
+      "snapshotStale",
       "staleHours",
       "staleThresholdH",
     ]);
@@ -122,6 +124,19 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.equal(typeof ЗДОРОВЬЕ.staleThresholdH, "number");
     const никогда: OurvendHealth = { ...ЗДОРОВЬЕ, lastSuccessAt: null, staleHours: null };
     assert.equal(никогда.staleHours, null, "«успехов не было вовсе» — не «ноль часов»");
+  });
+
+  it("застой учётного снапшота едет ГОТОВЫМ вердиктом, а не лагом с порогом (R-P8b-5)", () => {
+    // Витрине пришлось бы сравнивать три вещи, а не две: лаг, порог и РЕЖИМ
+    // учёта. В режиме `stock` снапшот теневой — тот же лаг там не значит
+    // ничего, и «⛔ учёт стоит» по лагу с порогом рисовалось бы на ровном
+    // месте. Поэтому здесь булево, а не второй `staleThresholdH`.
+    assert.equal(typeof ЗДОРОВЬЕ.snapshotStale, "boolean");
+    const встал: OurvendHealth = { ...ЗДОРОВЬЕ, salesLagH: 37, snapshotStale: true };
+    assert.equal(встал.snapshotStale, true);
+    // «Не посчиталось» — не «встал»: пустое здоровье обязано давать false.
+    const непосчиталось: OurvendHealth = { ...ЗДОРОВЬЕ, salesLagH: null, snapshotStale: false };
+    assert.equal(непосчиталось.snapshotStale, false);
   });
 
   it("недельная сводка: ровно те поля, что читают бот и панель", () => {

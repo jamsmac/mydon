@@ -1,8 +1,24 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { systemConfig } from "@mydon/db";
+import { entity, machineStock, ourvendStockSnapshot, purchase, systemConfig } from "@mydon/db";
+import type { VendingService } from "../vending/vending.service";
 import { resetAccountingSourceCache } from "../sales/accounting-source";
-import { buildPurchaseUpserts, buildStockUpserts, fillFromStock, SupplyService } from "./supply.service";
+import {
+  buildPurchaseUpserts,
+  buildStockUpserts,
+  fillFromStock,
+  SupplyService,
+  type StockLevelRow,
+} from "./supply.service";
+
+/** Реестр «не в строю» — единственное, что синку снабжения нужно от вендинга. */
+const вендинг = (неВСтрою: string[] = []): VendingService =>
+  ({
+    machineRegistry: async () => ({
+      notInService: new Map(неВСтрою.map((s) => [s, { name: s, status: "warehouse" }])),
+      nameBySerial: new Map<string, string>(),
+    }),
+  }) as unknown as VendingService;
 
 describe("Снабжение: подготовка строк источника", () => {
   it("приход: числа и срок годности переносятся, id источника — ключ", () => {
@@ -127,7 +143,7 @@ describe("Сводка снабжения: источник остатков в�
                 },
         }),
       } as never;
-      return await new SupplyService(db).summary();
+      return await new SupplyService(db, вендинг()).summary();
     } finally {
       for (const [k, v] of Object.entries(было)) {
         if (v === undefined) delete process.env[k];
@@ -157,5 +173,200 @@ describe("Сводка снабжения: источник остатков в�
       (await сводка({ STOCK_DATABASE_URL: undefined, OURVEND_ACCOUNTING_SOURCE: undefined })).source,
       "own",
     );
+  });
+});
+
+// ── Режим own: пишем остатки только по автоматам в строю (R-P8b-4) ───────────
+
+describe("Остатки в режиме own: только автоматы в строю (R-P8b-4)", () => {
+  const снимок = (serial: string, product: string, qty: number): StockLevelRow => ({
+    dt: "2026-08-25",
+    machine_serial: serial,
+    ourvend_name: product,
+    qty,
+    fetched_at: new Date(),
+  });
+
+  it("SKLAD 4S из снапшота в machine_stock не попадает", () => {
+    // Прод: 2508160360 — status='warehouse', в machine_stock последний раз
+    // 18.07, но в ourvend_stock_snapshot приезжает 34 строки/сутки на 7028
+    // «единиц» (заглушка 199). Гейт паритета его выбрасывает, запись — нет.
+    const r = buildStockUpserts(
+      [снимок("2508160376", "TUC Sour cream", 6), снимок("2508160360", "Заглушка", 199)],
+      new Map([["2508160376", "ent-1"]]),
+      new Set(["2508160360"]),
+    );
+    assert.equal(r.values.length, 1);
+    assert.equal(r.values[0]!.machineSerial, "2508160376");
+    assert.equal(r.skippedNotInService, 1);
+    assert.equal(r.quarantined.length, 0, "чужой автомат — не брак данных, в карантин ему нельзя");
+  });
+
+  it("фильтр знает обе формы написания серийника", () => {
+    const r = buildStockUpserts([снимок("C2508160360", "Заглушка", 199)], new Map(), new Set(["2508160360"]));
+    assert.deepEqual([r.values.length, r.skippedNotInService], [0, 1]);
+  });
+
+  it("без множества (режим stock) поведение прежнее — зеркало таких строк не даёт", () => {
+    const r = buildStockUpserts([снимок("2508160360", "Заглушка", 199)], new Map());
+    assert.deepEqual([r.values.length, r.skippedNotInService], [1, 0]);
+  });
+
+  it("пустое множество фильтром не является: не в строю — только тот, про кого сказано", () => {
+    const r = buildStockUpserts([снимок("2508160360", "Заглушка", 199)], new Map(), new Set());
+    assert.deepEqual([r.values.length, r.skippedNotInService], [1, 0]);
+  });
+
+  it("нечисловой qty у автомата НЕ в строю — тоже не карантин: строка чужая целиком", () => {
+    // Порядок проверок важен: сперва «наш ли это автомат», и только потом
+    // «годное ли число». Иначе заглушка складского автомата будила бы
+    // владельца событием supply.quarantine каждые десять минут.
+    const r = buildStockUpserts(
+      [{ dt: "2026-08-25", machine_serial: "2508160360", ourvend_name: "Заглушка", qty: "полно", fetched_at: new Date() }],
+      new Map(),
+      new Set(["2508160360"]),
+    );
+    assert.deepEqual([r.values.length, r.quarantined.length, r.skippedNotInService], [0, 0, 1]);
+  });
+});
+
+// ── Мягкая деградация без STOCK_DATABASE_URL (R-P8b-6) ───────────────────────
+
+interface МирСинка {
+  /** Значение переменной на время прогона. `undefined` — переменная погашена (шаг 3 рунбука). */
+  url?: string | undefined;
+  снапшот?: StockLevelRow[];
+  /** Канон серийников «не в строю» — реестр вендинга. */
+  неВСтрою?: string[];
+  автоматы?: { id: string; ref: string | null; attrs: Record<string, unknown> }[];
+}
+
+/**
+ * Стенд синка снабжения: своя БД — заглушка, донора нет вовсе.
+ *
+ * Считает то, что после гашения переменной обязано быть НУЛЁМ, а не
+ * исключением: обновлений карточек (дозаполнение из донора) и строк,
+ * записанных в приход.
+ */
+function стендСинка(м: МирСинка) {
+  const снапшот = м.снапшот ?? [];
+  const автоматы = м.автоматы ?? [];
+  const счёт = { обновленоКарточек: 0, вставокОстатков: 0, событий: 0 };
+
+  const цепочка = (rows: unknown[]) => {
+    const chain: Record<string, unknown> = {};
+    chain.where = () => chain;
+    chain.leftJoin = () => chain;
+    chain.orderBy = () => chain;
+    chain.limit = async (n: number) => rows.slice(0, n);
+    chain.then = (res: (v: unknown) => unknown) => Promise.resolve(rows).then(res);
+    return chain;
+  };
+
+  const db = {
+    select: () => ({
+      from: (t: unknown) => {
+        if (t === purchase) return цепочка([{ np: 0, count: 0, total: "0" }]);
+        if (t === machineStock) return цепочка([{ ns: 0 }]);
+        if (t === ourvendStockSnapshot) return цепочка(снапшот);
+        if (t === entity) return цепочка(автоматы);
+        return цепочка([]); // systemConfig и всё прочее
+      },
+    }),
+    insert: (t: unknown) => ({
+      values: (v: unknown) => {
+        if (t === machineStock) счёт.вставокОстатков += Array.isArray(v) ? v.length : 1;
+        else счёт.событий += 1;
+        const ok = Promise.resolve([]);
+        return { onConflictDoUpdate: () => ok, onConflictDoNothing: () => ok, then: ok.then.bind(ok) };
+      },
+    }),
+    update: () => ({
+      set: () => ({
+        where: async () => {
+          счёт.обновленоКарточек += 1;
+          return [];
+        },
+      }),
+    }),
+    execute: async () => ({ count: 0 }),
+  } as never;
+
+  return { svc: new SupplyService(db, вендинг(м.неВСтрою ?? [])), счёт };
+}
+
+/** Прогон с подменённым окружением: кеш источника учёта сбрасывается с обеих сторон. */
+async function сОкружением<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const было: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(env)) {
+    было[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  resetAccountingSourceCache();
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(было)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetAccountingSourceCache();
+  }
+}
+
+describe("Синк снабжения без STOCK_DATABASE_URL деградирует молча и без исключений (R-P8b-6)", () => {
+  const строка: StockLevelRow = {
+    dt: "2026-08-25",
+    machine_serial: "2508160376",
+    ourvend_name: "TUC Sour cream",
+    qty: 6,
+    fetched_at: new Date("2026-08-25T03:05:00Z"),
+  };
+
+  it("приход пуст, дозаполнение карточек пропущено, остатки — из своего снапшота", async () => {
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const { svc, счёт } = стендСинка({
+        снапшот: [строка],
+        автоматы: [{ id: "ent-1", ref: "2508160376", attrs: {} }],
+      });
+      const r = await svc.sync();
+      assert.equal(r.purchases, 0, "донора нет — приходу взяться неоткуда");
+      assert.equal(счёт.обновленоКарточек, 0, "дозаполнение entity.attrs без донора должно ПРОПУСКАТЬСЯ, а не падать");
+      assert.equal(r.stock, 1, "остатки при этом продолжают идти — из собственного снапшота");
+      assert.equal(счёт.вставокОстатков, 1);
+    });
+  });
+
+  it("фильтр «в строю» действует и здесь: складской автомат в machine_stock не едет", async () => {
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const { svc } = стендСинка({
+        снапшот: [строка, { ...строка, machine_serial: "2508160360", ourvend_name: "Заглушка", qty: 199 }],
+        неВСтрою: ["2508160360"],
+      });
+      assert.equal((await svc.sync()).stock, 1);
+    });
+  });
+
+  it("снапшота нет вовсе — ноль строк и ни одного исключения", async () => {
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const { svc, счёт } = стендСинка({ снапшот: [] });
+      assert.deepEqual(await svc.sync(), { purchases: 0, stock: 0 });
+      assert.equal(счёт.событий, 0, "пустой прогон не должен писать событие синка");
+    });
+  });
+
+  it("мост П3 включается ровно в момент гашения переменной", async () => {
+    // mirrorAlive = Boolean(STOCK_DATABASE_URL) — обратный гейт: пока
+    // переменная есть, receiveOrder не пишет purchase сам (vending.service.ts),
+    // иначе тот же физический закуп попал бы в журнал дважды — зеркалом и
+    // мостом. Гашение переменной — единственный переключатель, и проверять тут
+    // надо именно ЕГО, а не приёмку целиком.
+    await сОкружением({ STOCK_DATABASE_URL: "postgres://ro@stock/mydon" }, async () => {
+      assert.equal(Boolean(process.env.STOCK_DATABASE_URL), true, "зеркало живо — мост молчит");
+    });
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      assert.equal(Boolean(process.env.STOCK_DATABASE_URL), false, "зеркало погашено — мост пишет приход сам");
+    });
   });
 });

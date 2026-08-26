@@ -181,6 +181,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   staleThresholdH: 6,
   slotsLagMin: 42,
   salesLagH: 27,
+  // Режим `stock` (зеркало ещё живо) — застой снапшота там ничего не значит.
+  snapshotStale: false,
   productSaleLagH: 27,
   // Серия оборвана: сводка недели, в которой сбор падал, не может звать
   // переключать учёт.

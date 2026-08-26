@@ -1,15 +1,17 @@
 import type { Logger } from "@nestjs/common";
 import { desc, inArray } from "drizzle-orm";
-import { vendingSyncRun } from "@mydon/db";
+import { ourvendSaleSnapshot, vendingSyncRun } from "@mydon/db";
 import { tashkentInstant, type OurvendSyncRun } from "@mydon/shared";
 import type { Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
 
 /**
- * Пять вопросов о сборе, которые задают ДВОЕ и БОЛЬШЕ: отчёт о здоровье
- * (`OurvendHealthService`), сторож застоя (`SyncStaleService`) и счётчик серии
- * паритета (`OurvendParityService`) — два к журналу прогонов, один к
- * арифметике давности и два к настройкам (пороги застоя и катовера).
+ * Вопросы о сборе и об учётном снапшоте, которые задают ДВОЕ и БОЛЬШЕ: отчёт о
+ * здоровье (`OurvendHealthService`), сторож застоя (`SyncStaleService`),
+ * счётчик серии паритета (`OurvendParityService`) и синк продаж
+ * (`SalesService`) — два к журналу прогонов, один к последнему снапшоту, два к
+ * арифметике давности и три к настройкам (пороги застоя сбора, катовера и
+ * застоя снапшота).
  *
  * Отдельный модуль, а не метод сервиса, по двум причинам. Первая: сторож не
  * может звать `health()` — внутри отчёта весь сырой SQL паритета, и гонять его
@@ -146,4 +148,62 @@ export const CUTOVER_GREEN_DAYS_FALLBACK = 7;
 export async function cutoverThreshold(db: Db, logger?: Logger): Promise<number> {
   const настройка = await readIntSetting(db, "CUTOVER_GREEN_DAYS", CUTOVER_GREEN_DAYS_FALLBACK, logger);
   return Math.max(1, Math.trunc(настройка));
+}
+
+/** Порог застоя учётного снапшота, если настройки нет: агент снимает кабинет раз в сутки (08:05). */
+export const SNAPSHOT_STALE_HOURS_FALLBACK = 36;
+
+/**
+ * Порог застоя УЧЁТНОГО СНАПШОТА, часов — одно число у сторожа и у витрины
+ * (R-P8b-5), ровно по той же причине, что и `syncStaleThreshold`.
+ *
+ * ЭТО ДРУГОЙ ПОРОГ, А НЕ ВТОРОЕ ИМЯ ТОГО ЖЕ. `SYNC_STALE_HOURS` меряет ПРЯМОЙ
+ * СБОР (слоты, раз в 3 часа), этот — СУТОЧНЫЙ СЪЁМ КАБИНЕТА агентом
+ * `ourvend:accounting` (08:05). Числа расходятся на порядок: шесть часов
+ * молчания коллектора — авария, шесть часов без нового снимка кабинета —
+ * обычное утро. Один порог на двоих будил бы владельца каждый день до обеда.
+ *
+ * ПОЛ В ОДИН ЧАС — как у соседа: `readIntSetting` пропускает ноль как
+ * осознанное значение, но порог «0 часов» означает тревогу в КАЖДЫЙ прогон
+ * крона (48 сообщений в сутки при живом агенте).
+ */
+export async function snapshotStaleThreshold(db: Db, logger?: Logger): Promise<number> {
+  const настройка = await readIntSetting(db, "SNAPSHOT_STALE_HOURS", SNAPSHOT_STALE_HOURS_FALLBACK, logger);
+  return Math.max(1, Math.trunc(настройка));
+}
+
+/**
+ * Момент последнего съёма учётного снапшота. `null` — снимков нет ВОВСЕ.
+ *
+ * Запросом «последняя строка», а не `max(fetched_at)`: и то и другое идёт по
+ * индексу, но строку видно целиком, и заглушка юнит-теста исполняет ровно тот
+ * же путь, что и Postgres (то же правило, что у трёх лагов в отчёте о
+ * здоровье).
+ */
+export async function lastSnapshotAt(db: Db): Promise<Date | null> {
+  const [row] = await db
+    .select({ at: ourvendSaleSnapshot.fetchedAt })
+    .from(ourvendSaleSnapshot)
+    .orderBy(desc(ourvendSaleSnapshot.fetchedAt))
+    .limit(1);
+  return row?.at ?? null;
+}
+
+/**
+ * ВЕРДИКТ «учётный снапшот встал» — ОДНА функция на трёх читателей: сторож
+ * (`SyncStaleService.checkSnapshot`), отчёт (`OurvendHealth.snapshotStale`) и
+ * флаг «источник читаем» (`SalesService.summary().configured`).
+ *
+ * Считает по СЫРЫМ часам (`rawStaleHours`), а не по округлённому `salesLagH`:
+ * «35 ч 59 м 49 с» округляются до ровно 36.0, и сравнение по показанному
+ * числу сдвинуло бы границу на 11 секунд раньше настоящей — авария 24.08.2026
+ * началась ровно на таком сдвиге у соседнего порога.
+ *
+ * `null` (снимков нет вовсе) — ЗАСТОЙ, а не «ноль часов»: пустая таблица
+ * означает, что агент не доехал ни разу, и после флипа учёт стоял бы с нуля.
+ */
+export function snapshotIsStale(lastFetchedAt: Date | string | null | undefined, now: Date, threshold: number): boolean {
+  const at = lastFetchedAt instanceof Date ? lastFetchedAt.toISOString() : (lastFetchedAt ?? null);
+  const сырые = rawStaleHours(at, now);
+  return сырые === null || сырые >= threshold;
 }

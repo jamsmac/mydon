@@ -320,6 +320,12 @@ const ЧТЕНИЕ = [
         if (typeof о[ключ] !== "number") throw new Error(`health.${ключ} — не число`);
       }
       if (о.cutoverThreshold < 1) throw new Error("порог катовера меньше суток — гейт снят опиской в настройке");
+      // П8b: вердикт «учётный снапшот встал» (R-P8b-5). Ключ ОБЯЗАН быть, даже
+      // когда он `false`: витрина отличает «учёт стоит» от «поле не приехало»
+      // только его наличием. На засеянной базе снимков нет вовсе — и в режиме
+      // `own` (без STOCK_DATABASE_URL другого режима не бывает) это `true`:
+      // «снимков нет» тревожнее «снимки старые».
+      if (typeof о.snapshotStale !== "boolean") throw new Error("health.snapshotStale — не булево");
       if (о.lastSuccessAt === null && о.staleHours !== null) {
         throw new Error("успехов нет, а давность посчиталась — «не было вовсе» ≠ «ноль часов»");
       }

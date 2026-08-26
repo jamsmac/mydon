@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ourvendSaleSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
+import { resetAccountingSourceCache } from "../sales/accounting-source";
 import { OurvendHealthService } from "./ourvend-health.service";
 import type { OurvendParityService } from "./ourvend-parity.service";
 
@@ -128,6 +129,9 @@ function healthDb(м: Мир) {
 
 const сервис = (м: Мир) => {
   const { db, parity } = healthDb(м);
+  // Источник учёта кеширует МОДУЛЬ, а не сервис: без сброса набор про режим
+  // `stock` получил бы режим предыдущего теста.
+  resetAccountingSourceCache();
   return new OurvendHealthService(db, parity);
 };
 
@@ -295,5 +299,65 @@ describe("Здоровье сбора (R-P5b-8)", () => {
     assert.equal((await сервис({ runs }).health(0, СЕЙЧАС)).runs.length, 1);
     assert.equal((await сервис({ runs }).health(-5, СЕЙЧАС)).runs.length, 1);
     assert.equal((await сервис({ runs }).health(10_000, СЕЙЧАС)).runs.length, 1);
+  });
+});
+
+// ── Вердикт «учётный снапшот встал» (R-P8b-5) ───────────────────────────────
+
+describe("Свежесть учётного снапшота в отчёте (R-P8b-5)", () => {
+  /** Прогон с подменённым окружением: кеш источника сбрасывается с обеих сторон. */
+  const сОкружением = async <T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> => {
+    const было: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(env)) {
+      было[k] = process.env[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetAccountingSourceCache();
+    try {
+      return await fn();
+    } finally {
+      for (const [k, v] of Object.entries(было)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      resetAccountingSourceCache();
+    }
+  };
+
+  it("режим own, снапшот старше порога — вердикт true рядом с лагом", async () => {
+    const h = await сервис({ sales: [{ at: new Date("2026-08-23T18:00:00Z") }] }).health(20, СЕЙЧАС);
+    assert.deepEqual([h.salesLagH, h.snapshotStale], [37, true]);
+  });
+
+  it("режим own, снапшот свежий — false", async () => {
+    const h = await сервис({ sales: [{ at: new Date("2026-08-25T04:00:00Z") }] }).health(20, СЕЙЧАС);
+    assert.deepEqual([h.salesLagH, h.snapshotStale], [3, false]);
+  });
+
+  it("снимков нет вовсе — вердикт true, хотя лаг null", async () => {
+    // «Снимков нет» тревожнее «снимки старые»: агент не доехал ни разу, и
+    // после флипа учёт стоял бы с нуля — а лаг при этом честно `null`.
+    const h = await сервис({ sales: [] }).health(20, СЕЙЧАС);
+    assert.deepEqual([h.salesLagH, h.snapshotStale], [null, true]);
+  });
+
+  it("режим stock — вердикт false при любом лаге: снапшот там теневой", async () => {
+    await сОкружением(
+      { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+      async () => {
+        const h = await сервис({ sales: [{ at: new Date("2026-01-01T00:00:00Z") }] }).health(20, СЕЙЧАС);
+        assert.equal(h.snapshotStale, false, "в режиме stock застой снапшота не останавливает ничего");
+        assert.ok((h.salesLagH ?? 0) > 1000, "лаг при этом показывается честно");
+      },
+    );
+  });
+
+  it("вердикт считается по СЫРЫМ часам, а не по округлённому показу", async () => {
+    // 35 ч 59 м 49 с округляются до ровно 36.0 — сравнение по показанному
+    // числу сдвинуло бы границу на 11 секунд (авария 24.08.2026).
+    const h = await сервис({ sales: [{ at: new Date("2026-08-23T19:00:11Z") }] }).health(20, СЕЙЧАС);
+    assert.equal(h.salesLagH, 36, "витрина показывает округлённое число");
+    assert.equal(h.snapshotStale, false, "но решение принимается по сырым часам");
   });
 });
