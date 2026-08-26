@@ -48,6 +48,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   productSaleLagH: 5,
   parityStreak: 3,
   cutoverThreshold: 7,
+  parityLastRed: "2026-08-25",
+  parityStreakSince: "2026-08-26",
   parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, mode: "mirror", note: null },
 };
 
@@ -107,7 +109,9 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "failedStreak",
       "lastSuccessAt",
       "parity",
+      "parityLastRed",
       "parityStreak",
+      "parityStreakSince",
       "productSaleLagH",
       "runs",
       "salesLagH",
@@ -149,6 +153,15 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.equal(typeof ЗДОРОВЬЕ.cutoverThreshold, "number");
     const непосчиталось: OurvendHealth = { ...ЗДОРОВЬЕ, parityStreak: 0 };
     assert.equal(непосчиталось.parityStreak < непосчиталось.cutoverThreshold, true, "ноль — не «готовы»");
+  });
+
+  it("дата последнего красного дня и начало серии — поля ЗДОРОВЬЯ, а не второго запроса (R-G-4)", () => {
+    // `null` — законные значения: «красных не было» и «серии нет». Витрина
+    // обязана печатать их словами, а не молчать.
+    const чисто: OurvendHealth = { ...ЗДОРОВЬЕ, parityLastRed: null, parityStreakSince: null };
+    assert.equal(чисто.parityLastRed, null);
+    assert.equal(чисто.parityStreakSince, null);
+    assert.match(ЗДОРОВЬЕ.parityLastRed!, /^\d{4}-\d{2}-\d{2}$/, "голые сутки, а не ISO-момент");
   });
 
   it("лаг допускает null: «снимков нет» — не «0 мин»", () => {

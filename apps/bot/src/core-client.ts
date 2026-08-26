@@ -443,12 +443,12 @@ export class CoreClient {
   }
 
   /**
-   * Серия зелёных дней паритета по дням (R-P8b-2, P4).
+   * Серия зелёных дней паритета ПОФАКТОРНО, по дням (R-P8b-2, R-G-4).
    *
-   * Отдельный роут, а не поле здоровья: `/ourvend/health` несёт СЧЁТ
-   * (`parityStreak`, `cutoverThreshold`), а по дням журнала и по дате
-   * последнего красного дня отвечает только этот — считает он по всему окну
-   * чтения, а не по семидневной витрине паритета.
+   * Роут отвечает `days[]` — пофакторный разбор 14 дней, которого в здоровье
+   * нет и быть не должно. Счёт серии (`parityStreak`, `cutoverThreshold`) и
+   * ОБЕ даты (`parityLastRed`, `parityStreakSince`) едут в `/ourvend/health`
+   * — второй вызов за ними больше не нужен.
    */
   ourvendParityStreak(): Promise<ParityStreak> {
     return this.request<ParityStreak>("/ourvend/parity/streak");

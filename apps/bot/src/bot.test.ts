@@ -687,13 +687,6 @@ describe("Аналитика снека: путь владельца до Core (
           parity: { days: 7, ok: false, mismatches: 3, stockOk: false, stockChecked: 0, mode: "mirror", note: null },
         };
       },
-      // Серия по дням едет ОТДЕЛЬНЫМ роутом (P4): «сверка» зовёт оба, и
-      // список вызовов ниже это фиксирует — молчаливая потеря одного из них
-      // означала бы отчёт без даты последнего красного дня.
-      ourvendParityStreak: async () => {
-        вызовы.push("streak");
-        return { greenDays: 0, threshold: 7, readyForCutover: false, days: [], lastRed: "2026-08-25", since: null };
-      },
     } as unknown as HandlerDeps["core"];
     return { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
   }
@@ -729,7 +722,7 @@ describe("Аналитика снека: путь владельца до Core (
     await handleMessage(111, "мёртвый сток", deps(вызовы));
     await handleMessage(111, "цены", deps(вызовы));
     await handleMessage(111, "сверка", deps(вызовы));
-    assert.deepEqual(вызовы, ["margin:30", "margin:7", "margin:90", "dead:21", "changes:30", "health:20", "streak"]);
+    assert.deepEqual(вызовы, ["margin:30", "margin:7", "margin:90", "dead:21", "changes:30", "health:20"]);
   });
 
   it("маржа отвечает разбором, а не «понял»", async () => {
@@ -741,6 +734,15 @@ describe("Аналитика снека: путь владельца до Core (
   it("«сверка» показывает серию отказов сбора, а не молчит про неё", async () => {
     const reply = await handleMessage(111, "сверка", deps([]));
     assert.match(reply?.text ?? "", /12 отказов подряд/);
+  });
+
+  it("«сверка» ходит в Core ОДИН раз: серия по дням отдельным роутом больше не нужна", async () => {
+    // Раньше отказ `/ourvend/parity/streak` молча отнимал у отчёта строку про
+    // последний красный день. Теперь она едет полем здоровья, и второго
+    // запроса нет — ломаться нечему.
+    const вызовы: string[] = [];
+    await handleMessage(111, "сверка", deps(вызовы));
+    assert.deepEqual(вызовы, ["health:20"], "второй роут из «сверки» убран (R-G-4)");
   });
 
   it("сбой Core не молчит — владелец знает, что данных нет", async () => {
