@@ -37,7 +37,14 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   staleThresholdH: 6,
   slotsLagMin: null,
   salesLagH: 10.7,
+  // Коллектор молчит, но учётный снапшот сам по себе ещё не встал
+  // (R-P8b-5) — это отдельный сигнал, у аварии этой фикстуры своя причина.
+  snapshotStale: false,
   productSaleLagH: 36.8,
+  // Паритет не сходится (расхождений нет, но сверка и та не идёт) — ни
+  // одного зелёного дня подряд (R-P8b-2).
+  parityStreak: 0,
+  cutoverThreshold: 7,
   parity: { days: 14, ok: true, mismatches: 0, stockOk: true, checked: 14, stockChecked: 14, note: null },
 };
 
@@ -49,7 +56,10 @@ const ЗДОРОВ: OurvendHealth = {
   staleThresholdH: 6,
   slotsLagMin: 48,
   salesLagH: 1.2,
+  snapshotStale: false,
   productSaleLagH: 2.4,
+  parityStreak: 3,
+  cutoverThreshold: 7,
   parity: { days: 14, ok: true, mismatches: 0, stockOk: true, checked: 14, stockChecked: 14, note: null },
 };
 
@@ -313,5 +323,30 @@ describe("Здоровье сбора: паритет по числу свере
     expect(screen.getByText("продажи сходятся")).toBeVisible();
     expect(screen.getByText("продажи сходятся").className).not.toMatch(/bad/);
     expect(screen.getByText("остатки расходятся").className).toMatch(/bad/);
+  });
+});
+
+describe("Здоровье сбора: серия зелёных дней и застой учётного снапшота (П8b)", () => {
+  it("серия и порог — отдельной строкой; на пороге зелёная пилюля «можно переключать»", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, parityStreak: 7, cutoverThreshold: 7 }} />);
+    expect(screen.getByText(/7 зелёных дн\. подряд из 7/)).toBeVisible();
+    expect(screen.getByText(/можно переключать/)).toBeVisible();
+  });
+
+  it("серия ниже порога — строка есть, зова переключать нет", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, parityStreak: 3, cutoverThreshold: 7 }} />);
+    expect(screen.getByText(/3 зелёных дн\. подряд из 7/)).toBeVisible();
+    expect(screen.queryByText(/можно переключать/)).toBeNull();
+  });
+
+  it("застой учётного снапшота поднимает общую тревогу секции", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, snapshotStale: true }} />);
+    expect(screen.getByText("тревога")).toBeVisible();
+    expect(screen.getByText(/учётный снапшот не обновляется/)).toBeVisible();
+  });
+
+  it("в режиме stock застоя снапшота нет и красной пилюли тоже", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, snapshotStale: false }} />);
+    expect(screen.queryByText(/учётный снапшот/)).toBeNull();
   });
 });

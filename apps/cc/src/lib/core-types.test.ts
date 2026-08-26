@@ -40,7 +40,10 @@ const здоровьеОбщее: SharedHealth = {
   staleThresholdH: 6,
   slotsLagMin: 12,
   salesLagH: 13,
+  snapshotStale: false,
   productSaleLagH: 0.2,
+  parityStreak: 3,
+  cutoverThreshold: 7,
   parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: "остатки: снимков остатков OurVend за период нет" },
 };
 
@@ -54,13 +57,16 @@ describe("Типы панели — реэкспорт из @mydon/shared, а н
     // `/vending/sync` и `/ourvend/health` показывают ОДНУ строку `vending_sync_run`.
     const прогонПанели: VendingSyncRun = прогонОбщий;
     expect(Object.keys(здоровье).sort()).toEqual([
+      "cutoverThreshold",
       "failedStreak",
       "lastSuccessAt",
       "parity",
+      "parityStreak",
       "productSaleLagH",
       "runs",
       "salesLagH",
       "slotsLagMin",
+      "snapshotStale",
       "staleHours",
       "staleThresholdH",
     ]);

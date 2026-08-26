@@ -20,6 +20,8 @@ import {
   паритетСтрока,
   состояниеСбора,
   строкаЗастоя,
+  строкаСерии,
+  строкаСнапшота,
   capped,
   сущ,
   товарСтрока,
@@ -196,7 +198,13 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   // Снимков слотов нет вовсе — это НЕ «свежо», и текст обязан отличать одно от другого.
   slotsLagMin: null,
   salesLagH: 5,
+  // 5 ч — не застой снапшота (порог `SNAPSHOT_STALE_HOURS` много больше):
+  // авария этой фикстуры — молчащий коллектор, а не вставший учёт (R-P8b-5).
+  snapshotStale: false,
   productSaleLagH: 5,
+  // Расхождения есть — ни одного зелёного дня подряд (R-P8b-2).
+  parityStreak: 0,
+  cutoverThreshold: 7,
   // Заметка — в той же форме, что её собирает Core: половина остатков
   // подписана префиксом «остатки:» (`ourvend-parity.service.ts`).
   parity: {
@@ -579,6 +587,49 @@ describe("«сверка»: застой сбора (R-P8a-6)", () => {
   });
 });
 
+describe("«сверка»: серия зелёных дней (R-P8b-2)", () => {
+  const h = (over: Partial<OurvendHealth>): OurvendHealth => ({ ...ЗДОРОВЬЕ, ...over });
+  it("серия печатается вместе с порогом, а не одним числом", () => {
+    assert.match(строкаСерии(h({ parityStreak: 3, cutoverThreshold: 7 })), /3 зелёных дн\. подряд из 7/);
+  });
+  it("порог взят — сказано, что можно переключать", () => {
+    assert.match(строкаСерии(h({ parityStreak: 7, cutoverThreshold: 7 })), /✅ можно переключать/);
+  });
+  it("серии нет — так и написано, а не «0 зелёных»", () => {
+    // Ноль в этой строке читается как «сегодня не сошлось», а на деле это
+    // может быть «сверок ещё не было ни одной» — разные починки.
+    assert.match(строкаСерии(h({ parityStreak: 0 })), /серии нет/);
+  });
+  it("строка серии стоит сразу под строкой паритета", () => {
+    // `formatOurvendHealth` отдаёт ЧАСТИ телеграм-сообщения (`capped`/`chunk`),
+    // а не строку на элемент массива: короткий отчёт — одна часть с
+    // переносами внутри. Соседство строк проверяем по СТРОКАМ текста, а не по
+    // индексам массива частей.
+    const строки = formatOurvendHealth(h({ parityStreak: 3 })).join("\n").split("\n");
+    const i = строки.findIndex((s) => /Паритет за/.test(s));
+    assert.notEqual(i, -1);
+    assert.match(строки[i + 1]!, /зелёных дн\. подряд/);
+  });
+});
+
+describe("«сверка»: застой учётного снапшота (R-P8b-5)", () => {
+  const h = (over: Partial<OurvendHealth>): OurvendHealth => ({ ...ЗДОРОВЬЕ, ...over });
+  it("флаг поднят — строка ⛔ с давностью снимка", () => {
+    assert.match(строкаСнапшота(h({ snapshotStale: true, salesLagH: 41 }))!, /⛔ учётный снапшот.*41 ч/);
+  });
+  it("флаг снят — строки нет вовсе", () => {
+    assert.equal(строкаСнапшота(h({ snapshotStale: false })), null);
+  });
+  it("строка идёт сразу за строкой застоя сбора: обе про «данные не едут»", () => {
+    // См. комментарий выше: части телеграм-сообщения — не строки, сравниваем
+    // соседние СТРОКИ уже собранного текста.
+    const строки = formatOurvendHealth(h({ staleHours: 9, snapshotStale: true })).join("\n").split("\n");
+    const i = строки.findIndex((s) => /⛔ сбор стоит 9 ч/.test(s));
+    assert.notEqual(i, -1);
+    assert.match(строки[i + 1]!, /⛔ учётный снапшот/);
+  });
+});
+
 describe("Пустые состояния и предупреждения (ревью П5b, круг 1)", () => {
   it("здоровье без прогонов не рисует зелёную галку", () => {
     // `failedStreak: 0` при пустом журнале значит «сбор ни разу не
@@ -594,7 +645,10 @@ describe("Пустые состояния и предупреждения (ре�
       staleThresholdH: 6,
       slotsLagMin: null,
       salesLagH: null,
+      snapshotStale: false,
       productSaleLagH: null,
+      parityStreak: 0,
+      cutoverThreshold: 7,
       parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: null },
     }).join("\n");
     assert.match(t, /Прогонов сбора за период нет — здоровье не оценить/);

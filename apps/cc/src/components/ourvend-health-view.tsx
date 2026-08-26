@@ -102,7 +102,16 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
       стар(слотыЧ) ||
       стар(health.salesLagH) ||
       стар(health.productSaleLagH) ||
-      застой);
+      застой ||
+      // Застой учётного снапшота (R-P8b-5) — ГОТОВЫЙ вердикт Core, а не
+      // ещё один лаг с порогом: в режиме `stock` поле всегда `false`, и
+      // сравнивать `salesLagH` с чем-то самим здесь нельзя (см. комментарий
+      // у `OurvendHealth.snapshotStale` в `@mydon/shared`).
+      health.snapshotStale);
+  // Серия зелёных дней паритета к порогу катовера (R-P8b-2): владельца
+  // интересует «сколько ещё ждать», порог — из ответа Core
+  // (`cutoverThreshold`, настройка `CUTOVER_GREEN_DAYS`), своей семёрки здесь нет.
+  const катоверГотов = health.parityStreak >= health.cutoverThreshold;
 
   const успех =
     health.lastSuccessAt === null
@@ -148,6 +157,19 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
             <span className="pill bad">
               {health.staleHours === null ? "успехов не было" : `сбор стоит ${count(health.staleHours)} ч`}
             </span>
+          </div>
+        )}
+
+        {/* Своей красной строкой рядом с блоком застоя сбора: обе про одно
+            «данные не едут» (R-P8b-5). В режиме `stock` `snapshotStale`
+            всегда `false` — строки нет вовсе, гасить нечего, Core уже решил. */}
+        {health.snapshotStale && (
+          <div className="row">
+            <div className="t">
+              <b>Учётный снапшот</b>
+              <small>продажи и остатки считаются по своей базе — снимок с кабинета OurVend встал</small>
+            </div>
+            <span className="pill bad">учётный снапшот не обновляется</span>
           </div>
         )}
 
@@ -206,6 +228,17 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
           </div>
           <span className={`pill ${паритет.продажи.bad ? "bad" : ""}`}>{паритет.продажи.текст}</span>
           <span className={`pill ${паритет.остатки.bad ? "bad" : ""}`}>{паритет.остатки.текст}</span>
+        </div>
+
+        <div className="row">
+          <div className="t">
+            <b>Серия зелёных дней паритета</b>
+            <small>подряд без расхождений — гейт переключения учёта на свою базу</small>
+          </div>
+          <span className={`pill ${катоверГотов ? "ok" : ""}`}>
+            {`${count(health.parityStreak)} зелёных дн. подряд из ${count(health.cutoverThreshold)}`}
+            {катоверГотов ? " — ✅ можно переключать" : ""}
+          </span>
         </div>
       </div>
 
