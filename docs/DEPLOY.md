@@ -157,16 +157,32 @@ env, кеш чтения ≤ 60 с) — переключается без рес
 |---|---|---|
 | `OURVEND_ACCOUNTING_SOURCE` | `stock` | источник `sale`/`machine_stock`; без `STOCK_DATABASE_URL` действует `own` независимо от значения |
 | `CUTOVER_GREEN_DAYS` | `7` | порог серии зелёных дней паритета для сигнала `ourvend.cutover_ready` |
-| `SNAPSHOT_STALE_HOURS` | `36` | порог сторожа застоя учётного снапшота (`ourvend.snapshot_stale`, только в режиме `own`) |
+| `STOCK_PARITY_TOLERANCE` | `3`, не может быть отрицательной | допуск сверки остатков: зеркало (07:50) и агент (08:05) видят один и тот же живой экран автомата с разницей 15 мин, продажа внутри этого окна — не расхождение, если `stock.qty − own.qty` не превышает порог |
+| `SNAPSHOT_STALE_HOURS` | `36` | порог сторожа застоя учётного снапшота (`ourvend.snapshot_stale`, только в режиме `own`), считается РАЗДЕЛЬНО по `ourvend_sale_snapshot` и `ourvend_stock_snapshot` — застой любой из двух таблиц эмитит событие, текст называет какую |
 | `SNAPSHOT_RETENTION_DAYS` | `180`, панель не примет ниже `90` | окно еженедельной ретенции снимков |
+
+На проде `OURVEND_ACCOUNTING_SOURCE` до первой правки владельца в панели
+показывает `source: "env"`, не `"default"`: `deploy/docker-compose.yml`
+подставляет `OURVEND_ACCOUNTING_SOURCE: ${OURVEND_ACCOUNTING_SOURCE:-stock}`
+— в контейнер всегда попадает непустая переменная окружения, даже если
+её нет в `.env` хоста, и слой `default` конфиг-спеки для этого ключа на
+проде недостижим. `GET /system/config` для этого ключа отдаёт ещё и
+`effective` — действующий источник с учётом фолбэка `own` без
+`STOCK_DATABASE_URL` (панель показывает именно его, не сырое `value`).
 
 `GET /ourvend/health` несёт новые поля `parityStreak`, `cutoverThreshold`,
 `snapshotStale` рядом с прежними `staleHours`/`staleThresholdH` (П8a) —
 разные сторожа отвечают на разные вопросы: «сбор жив?» (П8a) vs «серия
 паритета готова к флипу?» и «учётный снапшот в режиме `own` не протух?»
-(П8b). Отдельного GET на ретенцию нет — конфигурация видна в
-`GET /system/config`, результат каждого прогона — в журнале событий,
-`system.retention {table, deleted, olderThanDays}`.
+(П8b). Туда же входит `parity.mode`: `"mirror"` — источник ещё `stock`;
+`"own-vs-donor"` — источник `own`, но `STOCK_DATABASE_URL` ещё задан, и
+сверка идёт с таблицами донора (`ourvend_sales`/`ourvend_machine_stock`)
+напрямую, а не с `sale`/`machine_stock`; `"retired"` — переменная снята
+(шаг 3 `docs/CUTOVER.md`), зеркала нет, сверять больше не с чем: серия
+не считается и `ourvend.cutover_ready` не эмитится. Отдельного GET на
+ретенцию нет — конфигурация видна в `GET /system/config`, результат
+каждого прогона — в журнале событий, `system.retention {table, deleted,
+olderThanDays}`.
 
 **Ретенция ходит сама, автодеплой её не запускает и не может.** Крон
 внутри Core, воскресенье 04:10 Ташкент (`RetentionService`, тот же паттерн

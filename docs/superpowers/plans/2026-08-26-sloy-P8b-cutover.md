@@ -94,7 +94,7 @@ async summary(): Promise<{ /* … */ source: AccountingSource }>;
 - `SystemService.set`: до записи взять действующее значение ключа из `effective()`; после записи — снова; если ключ = `ACCOUNTING_SOURCE_KEY` и значение изменилось — `resetAccountingSourceCache()` и `insert(event)` с `type: ACCOUNTING_SOURCE_CHANGED_EVENT`, payload `{ from, to, actor: updatedBy ?? null }`. Сравнение по ДЕЙСТВУЮЩЕМУ значению, а не по сырому вводу: сброс тумблера (пустая строка) — это тоже смена, если под ним лежал другой env.
 - Все шесть точек вызова переходят на `await accountingSource(this.db)`; `onModuleInit` в `sales.service.ts` и `supply.service.ts` становятся `async …(): Promise<void>` (Nest их дожидается).
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/system/config-spec.test.ts — новый набор
 describe("Ключи катовера П8b (R-P8b-3, R-P8b-7)", () => {
@@ -202,8 +202,8 @@ it("зеркала нет — own, и это не «настройка не за
   assert.equal((await сводка({ STOCK_DATABASE_URL: undefined })).source, "own");
 });
 ```
-- [ ] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`specFor("OURVEND_ACCOUNTING_SOURCE")` = `undefined`; «Cannot find module ./accounting-source»).
-- [ ] **Step 3: Ключи.** В `CONFIG_SPECS` блок `// ── Вендинг: катовер учёта OurVend (П8b, R-P8b-3/7) ──` сразу после `SYNC_STALE_HOURS`:
+- [x] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`specFor("OURVEND_ACCOUNTING_SOURCE")` = `undefined`; «Cannot find module ./accounting-source»).
+- [x] **Step 3: Ключи.** В `CONFIG_SPECS` блок `// ── Вендинг: катовер учёта OurVend (П8b, R-P8b-3/7) ──` сразу после `SYNC_STALE_HOURS`:
 ```ts
   {
     key: "OURVEND_ACCOUNTING_SOURCE",
@@ -229,10 +229,10 @@ it("зеркала нет — own, и это не «настройка не за
     validate: atLeast(90, "нужно не меньше 90 (окна отчётов доходят до 180 суток)") },
 ```
 Рядом с `posNumber` (`:49`) — новый валидатор `atLeast(min, hint)` с комментарием: пол здесь не про «ноль бессмыслен», а про то, что окно ретенции РЕЖЕТ данные под уже работающими отчётами, и число ниже 90 — это молчаливая потеря истории, а не смелая настройка.
-- [ ] **Step 4: Модуль источника.** `apps/core/src/sales/accounting-source.ts` по интерфейсам выше. Шапка объясняет ТРИ решения: (а) почему ключ, а не env — флип из панели без рестарта, а рестарт `mydon-core` в момент катовера — это ещё и обрыв синка на минуты; (б) почему фолбэк `own` стоит ПЕРВЫМ — без зеркала «stock» означает `fetchSourceRows() → null → {upserted: 0}` (`sales.service.ts:179`) без единого события, то есть тихую остановку учёта; (в) почему кеш — `settingValue` делает `select … from system_config` на КАЖДЫЙ вызов, а зовут его синки продаж (`*/10`) и снабжения (`3-59/10`) плюс два отчёта.
-- [ ] **Step 5: Точки вызова.** Удалить `accountingSource` из `sales.service.ts` (стр. 85–93). В `sales.service.ts`: `async onModuleInit(): Promise<void>` c `const source = await accountingSource(this.db)`; `fetchSourceRows` — то же; событие `sales.sync` (`:278`) и `summary().configured` (`:294`) — через `await`. В `supply.service.ts`: импорт `accountingSource`/`AccountingSource` из `../sales/accounting-source`, `todayLocal` остаётся из `../sales/sales.service`; `async onModuleInit`; `sync()` `:191`; `summary()` — тип поля `AccountingSource` и `source: await accountingSource(this.db)`.
-- [ ] **Step 6: Событие смены.** `SystemService.set` (`system.service.ts:37`) по описанию выше; импорт `event` из `@mydon/db`. Комментарий: почему одно-единственное имя ключа зашито здесь, а не заведён общий механизм «наблюдаемых тумблеров» — событий такого рода в системе ровно одно, и обобщение на одном случае даёт лишний слой без второго потребителя.
-- [ ] **Step 7: Смоук.** В `ЧТЕНИЕ` (`tools/smoke-core.mjs`, рядом с `/sales/aliases`):
+- [x] **Step 4: Модуль источника.** `apps/core/src/sales/accounting-source.ts` по интерфейсам выше. Шапка объясняет ТРИ решения: (а) почему ключ, а не env — флип из панели без рестарта, а рестарт `mydon-core` в момент катовера — это ещё и обрыв синка на минуты; (б) почему фолбэк `own` стоит ПЕРВЫМ — без зеркала «stock» означает `fetchSourceRows() → null → {upserted: 0}` (`sales.service.ts:179`) без единого события, то есть тихую остановку учёта; (в) почему кеш — `settingValue` делает `select … from system_config` на КАЖДЫЙ вызов, а зовут его синки продаж (`*/10`) и снабжения (`3-59/10`) плюс два отчёта.
+- [x] **Step 5: Точки вызова.** Удалить `accountingSource` из `sales.service.ts` (стр. 85–93). В `sales.service.ts`: `async onModuleInit(): Promise<void>` c `const source = await accountingSource(this.db)`; `fetchSourceRows` — то же; событие `sales.sync` (`:278`) и `summary().configured` (`:294`) — через `await`. В `supply.service.ts`: импорт `accountingSource`/`AccountingSource` из `../sales/accounting-source`, `todayLocal` остаётся из `../sales/sales.service`; `async onModuleInit`; `sync()` `:191`; `summary()` — тип поля `AccountingSource` и `source: await accountingSource(this.db)`.
+- [x] **Step 6: Событие смены.** `SystemService.set` (`system.service.ts:37`) по описанию выше; импорт `event` из `@mydon/db`. Комментарий: почему одно-единственное имя ключа зашито здесь, а не заведён общий механизм «наблюдаемых тумблеров» — событий такого рода в системе ровно одно, и обобщение на одном случае даёт лишний слой без второго потребителя.
+- [x] **Step 7: Смоук.** В `ЧТЕНИЕ` (`tools/smoke-core.mjs`, рядом с `/sales/aliases`):
 ```js
   {
     // П8b: тумблеры катовера обязаны доехать до панели «Система» ЧЕРЕЗ HTTP.
@@ -252,8 +252,8 @@ it("зеркала нет — own, и это не «настройка не за
     },
   },
 ```
-- [ ] **Step 8:** `pnpm --filter core build && pnpm --filter core test` → GREEN. Локально: `node tools/smoke-core.mjs` на scratch-БД — в логах Core обязана быть строка «Источник продаж: собственный снапшот» (смоук гасит `STOCK_DATABASE_URL`, значит режим `own` — R-P8b-3 в бою).
-- [ ] **Step 9:** `git commit -m "feat(core): источник учёта OurVend — настройка панели с фолбэком own и событием смены (П8b)" -- apps/core/src/system/config-spec.ts apps/core/src/system/config-spec.test.ts apps/core/src/system/system.service.ts apps/core/src/system/system.service.test.ts apps/core/src/sales/accounting-source.ts apps/core/src/sales/accounting-source.test.ts apps/core/src/sales/sales.service.ts apps/core/src/supply/supply.service.ts apps/core/src/supply/supply.test.ts tools/smoke-core.mjs`
+- [x] **Step 8:** `pnpm --filter core build && pnpm --filter core test` → GREEN. Локально: `node tools/smoke-core.mjs` на scratch-БД — в логах Core обязана быть строка «Источник продаж: собственный снапшот» (смоук гасит `STOCK_DATABASE_URL`, значит режим `own` — R-P8b-3 в бою).
+- [x] **Step 9:** `git commit -m "feat(core): источник учёта OurVend — настройка панели с фолбэком own и событием смены (П8b)" -- apps/core/src/system/config-spec.ts apps/core/src/system/config-spec.test.ts apps/core/src/system/system.service.ts apps/core/src/system/system.service.test.ts apps/core/src/sales/accounting-source.ts apps/core/src/sales/accounting-source.test.ts apps/core/src/sales/sales.service.ts apps/core/src/supply/supply.service.ts apps/core/src/supply/supply.test.ts tools/smoke-core.mjs`
 
 ---
 
@@ -316,7 +316,7 @@ async streak(now?: Date): Promise<ParityStreak>;
 - **Счёт серии.** Курсор = `today`. Нет события за сегодня → курсор сдвигается на вчера (паритет считается в 08:40, и до него «сегодня» законно пусто — иначе серия обнулялась бы каждую ночь). Есть событие за сегодня и оно красное → серия 0. Дальше назад по суткам, пока день зелёный; первый красный ИЛИ пропущенный день останавливает счёт.
 - `since` = самая ранняя дата серии; `readyForCutover = greenDays >= threshold`; `lastRed` — самая свежая незелёная дата среди ВСЕХ поданных событий.
 
-- [ ] **Step 1: Тесты.**
+- [x] **Step 1: Тесты.**
 ```ts
 // packages/shared/src/parity-streak.test.ts
 import assert from "node:assert/strict";
@@ -440,10 +440,10 @@ it("готовность к катоверу будит немедленно и 
   assert.match(n!.text, /OURVEND_ACCOUNTING_SOURCE/);
 });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build` → RED («Cannot find module './parity-streak'»); `pnpm --filter core build && pnpm --filter core test` → RED.
-- [ ] **Step 3: Чистая функция.** `parity-streak.ts` по семантике выше; опора — `tashkentDay` из `./tashkent-time` (второй копии смещения не заводить). Шапка объясняет ДВА решения, которые нельзя «упростить»: (а) почему отсутствующий сегодняшний день не рвёт серию (крон в 08:40 — до него сутки законно пусты, и обнуление каждую ночь сделало бы счётчик бесполезным); (б) почему старая форма события не зелёная (гейт один — `ok` продаж без половины по остаткам открыл бы флип по половине проверки). Экспорт в `index.ts`.
-- [ ] **Step 4: Core.** `cutoverThreshold` в `sync-runs.ts` рядом с `syncStaleThreshold` (тот же `readIntSetting` + `Math.max(1, Math.trunc(...))`, тот же довод: витрина обязана показывать число, по которому будят владельца); шапку модуля дополнить — вопросов теперь не три, а пять. `OurvendParityService.streak(now)`: `select { occurredAt, payload } from event where type = PARITY_EVENT order by occurredAt desc limit PARITY_SCAN_LIMIT` (`60` — 14 дней окна плюс запас на повторные прогоны в одни сутки), `parityStreak(rows, await cutoverThreshold(this.db, this.log), tashkentDay(now))`. `daily(now = new Date())` после вставки `ourvend.parity`: посчитать `streak(now)`; если `readyForCutover`, `await accountingSource(this.db) === "stock"` и за ташкентские сутки события `CUTOVER_READY_EVENT` ещё не было — вставить его с `occurredAt: now` (дедуп дословно приёмом `SyncStaleService.check`, `sync-stale.service.ts:112-118`).
-- [ ] **Step 5: Роут и отчёт.** В `ourvend.controller.ts` после `parityReport` (`:86`):
+- [x] **Step 2:** `pnpm --filter @mydon/shared build` → RED («Cannot find module './parity-streak'»); `pnpm --filter core build && pnpm --filter core test` → RED.
+- [x] **Step 3: Чистая функция.** `parity-streak.ts` по семантике выше; опора — `tashkentDay` из `./tashkent-time` (второй копии смещения не заводить). Шапка объясняет ДВА решения, которые нельзя «упростить»: (а) почему отсутствующий сегодняшний день не рвёт серию (крон в 08:40 — до него сутки законно пусты, и обнуление каждую ночь сделало бы счётчик бесполезным); (б) почему старая форма события не зелёная (гейт один — `ok` продаж без половины по остаткам открыл бы флип по половине проверки). Экспорт в `index.ts`.
+- [x] **Step 4: Core.** `cutoverThreshold` в `sync-runs.ts` рядом с `syncStaleThreshold` (тот же `readIntSetting` + `Math.max(1, Math.trunc(...))`, тот же довод: витрина обязана показывать число, по которому будят владельца); шапку модуля дополнить — вопросов теперь не три, а пять. `OurvendParityService.streak(now)`: `select { occurredAt, payload } from event where type = PARITY_EVENT order by occurredAt desc limit PARITY_SCAN_LIMIT` (`60` — 14 дней окна плюс запас на повторные прогоны в одни сутки), `parityStreak(rows, await cutoverThreshold(this.db, this.log), tashkentDay(now))`. `daily(now = new Date())` после вставки `ourvend.parity`: посчитать `streak(now)`; если `readyForCutover`, `await accountingSource(this.db) === "stock"` и за ташкентские сутки события `CUTOVER_READY_EVENT` ещё не было — вставить его с `occurredAt: now` (дедуп дословно приёмом `SyncStaleService.check`, `sync-stale.service.ts:112-118`).
+- [x] **Step 5: Роут и отчёт.** В `ourvend.controller.ts` после `parityReport` (`:86`):
 ```ts
   /** Серия зелёных дней и сигнал «можно переключать» (R-P8b-2). Тот же троттл, что у отчётов. */
   @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
@@ -453,7 +453,7 @@ it("готовность к катоверу будит немедленно и 
   }
 ```
 В `OurvendHealthService.здоровье` — `this.parity.streak(now)` шестым пунктом `Promise.all` (`:80`), в ответе `parityStreak: серия.greenDays`, `cutoverThreshold: серия.threshold`. `ЗДОРОВЬЕ_НЕИЗВЕСТНО` (`weekly-digest.service.ts:102`) получает `parityStreak: 0` и `cutoverThreshold: CUTOVER_GREEN_DAYS_FALLBACK` — «не посчиталось» здесь тоже не «готовы».
-- [ ] **Step 6: Правило.** В `rules.ts` сразу после правила `ourvend.parity` (`:324`):
+- [x] **Step 6: Правило.** В `rules.ts` сразу после правила `ourvend.parity` (`:324`):
 ```ts
   {
     // Гейт П8b: серия зелёных дней взяла порог. Немедленно и ровно один раз в
@@ -469,7 +469,7 @@ it("готовность к катоверу будит немедленно и 
       `можно переключать учёт на свой снапшот: Система → OURVEND_ACCOUNTING_SOURCE = own`,
   },
 ```
-- [ ] **Step 7: Смоук.** В `ЧТЕНИЕ` рядом с `/ourvend/parity?days=7`:
+- [x] **Step 7: Смоук.** В `ЧТЕНИЕ` рядом с `/ourvend/parity?days=7`:
 ```js
   {
     // П8b: серия считается по журналу событий сырым чтением payload — заглушка
@@ -487,8 +487,8 @@ it("готовность к катоверу будит немедленно и 
   },
 ```
 В существующей проверке `/ourvend/health?runs=20` (`:283`) дописать: `parityStreak` и `cutoverThreshold` — числа, ключи обязаны присутствовать.
-- [ ] **Step 8:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → GREEN; `node tools/smoke-core.mjs`.
-- [ ] **Step 9:** `git commit -m "feat(core,shared): серия зелёных дней паритета, GET /ourvend/parity/streak и сигнал ourvend.cutover_ready (П8b)" -- packages/shared/src/parity-streak.ts packages/shared/src/parity-streak.test.ts packages/shared/src/index.ts packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts apps/core/src/ourvend apps/core/src/rules apps/core/src/vending/weekly-digest.service.ts tools/smoke-core.mjs`
+- [x] **Step 8:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → GREEN; `node tools/smoke-core.mjs`.
+- [x] **Step 9:** `git commit -m "feat(core,shared): серия зелёных дней паритета, GET /ourvend/parity/streak и сигнал ourvend.cutover_ready (П8b)" -- packages/shared/src/parity-streak.ts packages/shared/src/parity-streak.test.ts packages/shared/src/index.ts packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts apps/core/src/ourvend apps/core/src/rules apps/core/src/vending/weekly-digest.service.ts tools/smoke-core.mjs`
 
 ---
 
@@ -531,7 +531,7 @@ export class SyncStaleService {
 - `OurvendHealth.snapshotStale` считается в `OurvendHealthService`: `источник === "own" && (rawStaleHours(снапшотAt, now) === null || rawStaleHours(...) >= порог)`. Округлённый `salesLagH` для сравнения НЕ использовать (правило «показ ≠ решение», `ourvend-health.service.ts:135-144`).
 - Мягкая деградация без `STOCK_DATABASE_URL` (R-P8b-6) — не новый код, а покрытие тестами уже существующего поведения: `SalesService.fetchSourceRows` (`:179`), `SupplyService.sync` (`:192`, `:201`, `:230`), дозаполнение `entity.attrs` (`:302-306`), `mirrorAlive` (`vending.service.ts:2479-2483`).
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/supply/supply.test.ts — новый набор
 describe("Остатки в режиме own: только автоматы в строю (R-P8b-4)", () => {
@@ -636,12 +636,12 @@ it("смена источника учёта доставляется немед
     ["ourvend-parity", () => new OurvendParityService({} as never, {} as never)],
     ["retention", () => new RetentionService({} as never)],
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → RED.
-- [ ] **Step 3: Фильтр «в строю».** `buildStockUpserts` + `sync()` + конструктор `SupplyService(db, vending)` + `SupplyModule.imports`. Комментарий у фильтра: почему отброшенная строка НЕ идёт в карантин (карантин — про нечисловые значения, то есть про брак; складской автомат — законные данные не для этой таблицы), и почему фильтр стоит на ЗАПИСИ, а не на чтении снапшота (снапшот остаётся полным: он же сверяется паритетом и им же живёт кабинетный отчёт).
-- [ ] **Step 4: Сторож снапшота.** `snapshotStaleThreshold` в `sync-runs.ts`; `checkSnapshot` в `SyncStaleService`; крон зовёт обе проверки. Шапка `checkSnapshot` объясняет, чем он отличается от двух соседей: `sync_failed_streak` — «прямой сбор падает», `sync_stale` — «прямой сбор не бежит», `snapshot_stale` — «агент `ourvend:accounting` не приносит СУТОЧНЫЙ снимок кабинета, и в режиме `own` это молча останавливает `sale` и `machine_stock` через фильтр `fetched_at > now() - interval '3 days'` (`sales.service.ts:174`) — без ошибки, без события, с `{upserted: 0}`».
-- [ ] **Step 5: Отчёт и правила.** `OurvendHealth.snapshotStale` (+ `ЗДОРОВЬЕ_НЕИЗВЕСТНО: false` — «не посчитали» не равно «встал»); два правила в `rules.ts` (`ourvend.snapshot_stale` — `immediate`, текст `⛔ Учётный снапшот OurVend не обновлялся N ч — продажи и остатки стоят`; `ourvend.accounting_source_changed` — `immediate`, текст `🔀 Учёт OurVend переключён: {from} → {to} ({actor})`).
-- [ ] **Step 6:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → GREEN. В смоуке дописать к проверке `/ourvend/health?runs=20`: `snapshotStale` — булево, ключ обязателен.
-- [ ] **Step 7:** `git commit -m "feat(core): в режиме own пишем остатки только по автоматам в строю и сторожим свежесть учётного снапшота (П8b)" -- apps/core/src/supply apps/core/src/sales apps/core/src/ourvend apps/core/src/rules apps/core/src/vending/weekly-digest.service.ts apps/core/src/cron-shutdown.test.ts packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts tools/smoke-core.mjs`
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → RED.
+- [x] **Step 3: Фильтр «в строю».** `buildStockUpserts` + `sync()` + конструктор `SupplyService(db, vending)` + `SupplyModule.imports`. Комментарий у фильтра: почему отброшенная строка НЕ идёт в карантин (карантин — про нечисловые значения, то есть про брак; складской автомат — законные данные не для этой таблицы), и почему фильтр стоит на ЗАПИСИ, а не на чтении снапшота (снапшот остаётся полным: он же сверяется паритетом и им же живёт кабинетный отчёт).
+- [x] **Step 4: Сторож снапшота.** `snapshotStaleThreshold` в `sync-runs.ts`; `checkSnapshot` в `SyncStaleService`; крон зовёт обе проверки. Шапка `checkSnapshot` объясняет, чем он отличается от двух соседей: `sync_failed_streak` — «прямой сбор падает», `sync_stale` — «прямой сбор не бежит», `snapshot_stale` — «агент `ourvend:accounting` не приносит СУТОЧНЫЙ снимок кабинета, и в режиме `own` это молча останавливает `sale` и `machine_stock` через фильтр `fetched_at > now() - interval '3 days'` (`sales.service.ts:174`) — без ошибки, без события, с `{upserted: 0}`».
+- [x] **Step 5: Отчёт и правила.** `OurvendHealth.snapshotStale` (+ `ЗДОРОВЬЕ_НЕИЗВЕСТНО: false` — «не посчитали» не равно «встал»); два правила в `rules.ts` (`ourvend.snapshot_stale` — `immediate`, текст `⛔ Учётный снапшот OurVend не обновлялся N ч — продажи и остатки стоят`; `ourvend.accounting_source_changed` — `immediate`, текст `🔀 Учёт OurVend переключён: {from} → {to} ({actor})`).
+- [x] **Step 6:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → GREEN. В смоуке дописать к проверке `/ourvend/health?runs=20`: `snapshotStale` — булево, ключ обязателен.
+- [x] **Step 7:** `git commit -m "feat(core): в режиме own пишем остатки только по автоматам в строю и сторожим свежесть учётного снапшота (П8b)" -- apps/core/src/supply apps/core/src/sales apps/core/src/ourvend apps/core/src/rules apps/core/src/vending/weekly-digest.service.ts apps/core/src/cron-shutdown.test.ts packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts tools/smoke-core.mjs`
 
 ---
 
@@ -675,7 +675,7 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
 - Событие `system.retention` на КАЖДУЮ таблицу, где `deleted > 0`, payload `{ table, deleted, olderThanDays }`. Правила нет — это отметка в журнале, а не сигнал.
 - Отдельного GET нет: конфигурация ретенции видна в `/system/config` (смоук T1), а результат — в журнале событий; заводить роут ради чтения того, что уже читается двумя способами, значит завести третью витрину одного числа.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/vending/retention.service.test.ts
 import assert from "node:assert/strict";
@@ -734,10 +734,10 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED («Cannot find module ./retention.service»).
-- [ ] **Step 3: Реализация.** `retention.service.ts` по описанию выше; провайдер и экспорт в `VendingModule` рядом с `SyncStaleService` (`vending.module.ts:40`, `:51`) — с той же оговоркой в шапке модуля: сервис читает таблицы вендинга и пишет событие. Шапка сервиса объясняет: (а) зачем ретенция нужна вообще при БД в 93 МБ — `slot_snapshot` растёт на 1680 строк/сут (≈230 кБ), диск хоста занят на 68 %, и «не горит» — это не «не понадобится»; (б) почему окно 180, а не 30 — самый широкий живой потребитель истории `DEAD_STOCK_DAYS_MAX = 180` (`analytics.service.ts:89`), дальше `SHRINK_DAYS_MAX = 60`, `DETECT_DAYS_MAX = 30`, и окно ретенции обязано быть НЕ УЖЕ самого широкого отчёта; (в) почему `event` не трогаем — из журнала событий считается серия паритета (T2), и ретенция по нему стирала бы собственный вход гейта катовера.
-- [ ] **Step 4:** `pnpm --filter core build && pnpm --filter core test` → GREEN (включая cron-shutdown для `retention` из T3).
-- [ ] **Step 5:** `git commit -m "feat(core): еженедельная ретенция снимков и журнала прогонов сбора (П8b)" -- apps/core/src/vending/retention.service.ts apps/core/src/vending/retention.service.test.ts apps/core/src/vending/vending.module.ts`
+- [x] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED («Cannot find module ./retention.service»).
+- [x] **Step 3: Реализация.** `retention.service.ts` по описанию выше; провайдер и экспорт в `VendingModule` рядом с `SyncStaleService` (`vending.module.ts:40`, `:51`) — с той же оговоркой в шапке модуля: сервис читает таблицы вендинга и пишет событие. Шапка сервиса объясняет: (а) зачем ретенция нужна вообще при БД в 93 МБ — `slot_snapshot` растёт на 1680 строк/сут (≈230 кБ), диск хоста занят на 68 %, и «не горит» — это не «не понадобится»; (б) почему окно 180, а не 30 — самый широкий живой потребитель истории `DEAD_STOCK_DAYS_MAX = 180` (`analytics.service.ts:89`), дальше `SHRINK_DAYS_MAX = 60`, `DETECT_DAYS_MAX = 30`, и окно ретенции обязано быть НЕ УЖЕ самого широкого отчёта; (в) почему `event` не трогаем — из журнала событий считается серия паритета (T2), и ретенция по нему стирала бы собственный вход гейта катовера.
+- [x] **Step 4:** `pnpm --filter core build && pnpm --filter core test` → GREEN (включая cron-shutdown для `retention` из T3).
+- [x] **Step 5:** `git commit -m "feat(core): еженедельная ретенция снимков и журнала прогонов сбора (П8b)" -- apps/core/src/vending/retention.service.ts apps/core/src/vending/retention.service.test.ts apps/core/src/vending/vending.module.ts`
 
 ---
 
@@ -755,7 +755,7 @@ export function строкаСнапшота(h: OurvendHealth): string | null;
 ```
 Реэкспорта добавлять НЕ нужно: `apps/bot/src/core-client.ts:8,405` и `apps/cc/src/lib/core.ts:8,319` уже реэкспортируют `OurvendHealth` из `@mydon/shared` — новые поля доезжают компилятором, а не правкой зеркала. HELP бота не меняется: «сверка» уже в списке (`handler.ts:132`), строки появляются внутри её ответа. Подсказка `OURVEND_ACCOUNTING_SOURCE` в панели «Система» — это поле `help` спеки из T1: `system-editor.tsx:64` рисует `item.help` для КАЖДОГО тумблера, отдельной вёрстки не нужно.
 
-- [ ] **Step 1: Тесты.**
+- [x] **Step 1: Тесты.**
 ```ts
 // packages/shared/src/vending-reports-contracts.test.ts — фикстура ЗДОРОВЬЕ (:17) дополняется
   parityStreak: 3,
@@ -826,10 +826,10 @@ it("в режиме stock застоя снапшота нет и красной
   expect(screen.queryByText(/учётный снапшот/)).toBeNull();
 });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter bot build && pnpm --filter bot test && pnpm --filter cc test` → RED.
-- [ ] **Step 3: Реализация.** В боте `строкаСерии` живёт рядом с `паритетСтрока` и вставляется в `formatOurvendHealth` СЛЕДУЮЩЕЙ строкой после неё (`:834`): серия — это вывод из паритета, и оторванная от него строка читается как отдельный отчёт. `строкаСнапшота` — рядом со `строкаЗастоя` и вставляется сразу за ней (`:829`): обе отвечают на один вопрос «почему данные не едут», и разнесённые по разным концам сообщения они выглядели бы как две несвязанные аварии. Порог берётся из `h.cutoverThreshold`, своей семёрки в боте нет. В панели: `parityStreak`/`cutoverThreshold` — новая строка `<div className="row">` под строкой «Паритет со складским учётом» (`:200-209`) с пилюлей `ok` при `parityStreak >= cutoverThreshold`; `snapshotStale` добавляется в условие `тревога` (`:99-105`) и своей красной строкой рядом с блоком застоя сбора (`:143-152`). `HEALTH_LAG_HOURS` не трогать — тот порог про снимки слотов, и совпадение чисел случайно (тот же комментарий, что уже стоит у `застой`, `:93-98`).
-- [ ] **Step 4:** `pnpm --filter bot test && pnpm --filter cc test && pnpm --filter cc build` → GREEN.
-- [ ] **Step 5:** `git commit -m "feat(bot,cc): серия зелёных дней паритета и застой учётного снапшота в сверке и в секции здоровья (П8b)" -- apps/bot/src/analytics-brief.ts apps/bot/src/analytics-brief.test.ts apps/cc/src/components/ourvend-health-view.tsx apps/cc/src/components/ourvend-health-view.test.tsx packages/shared/src/vending-reports-contracts.test.ts`
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter bot build && pnpm --filter bot test && pnpm --filter cc test` → RED.
+- [x] **Step 3: Реализация.** В боте `строкаСерии` живёт рядом с `паритетСтрока` и вставляется в `formatOurvendHealth` СЛЕДУЮЩЕЙ строкой после неё (`:834`): серия — это вывод из паритета, и оторванная от него строка читается как отдельный отчёт. `строкаСнапшота` — рядом со `строкаЗастоя` и вставляется сразу за ней (`:829`): обе отвечают на один вопрос «почему данные не едут», и разнесённые по разным концам сообщения они выглядели бы как две несвязанные аварии. Порог берётся из `h.cutoverThreshold`, своей семёрки в боте нет. В панели: `parityStreak`/`cutoverThreshold` — новая строка `<div className="row">` под строкой «Паритет со складским учётом» (`:200-209`) с пилюлей `ok` при `parityStreak >= cutoverThreshold`; `snapshotStale` добавляется в условие `тревога` (`:99-105`) и своей красной строкой рядом с блоком застоя сбора (`:143-152`). `HEALTH_LAG_HOURS` не трогать — тот порог про снимки слотов, и совпадение чисел случайно (тот же комментарий, что уже стоит у `застой`, `:93-98`).
+- [x] **Step 4:** `pnpm --filter bot test && pnpm --filter cc test && pnpm --filter cc build` → GREEN.
+- [x] **Step 5:** `git commit -m "feat(bot,cc): серия зелёных дней паритета и застой учётного снапшота в сверке и в секции здоровья (П8b)" -- apps/bot/src/analytics-brief.ts apps/bot/src/analytics-brief.test.ts apps/cc/src/components/ourvend-health-view.tsx apps/cc/src/components/ourvend-health-view.test.tsx packages/shared/src/vending-reports-contracts.test.ts`
 
 ---
 
@@ -837,20 +837,20 @@ it("в режиме stock застоя снапшота нет и красной
 
 **Files:** Create `docs/CUTOVER.md`; Modify `docs/PLAN_STOCK_ABSORPTION.md` (§П8, пп. 3–5, ~стр. 452–459), `docs/DEPLOY.md` (после раздела «Разовый перенос истории склада (П8a)», ~стр. 97–142), `docs/DATA_SOURCES.md` (абзац «Источником `sale` служит…», ~стр. 891–897), `docs/superpowers/specs/2026-08-26-p8b-cutover-readiness-design.md` (аддендум в конец), `.env.example` (`:123`), `deploy/docker-compose.yml` (`:75`).
 
-- [ ] **Step 1: `docs/CUTOVER.md`.** Рунбук по R-P8b-8; на каждом шаге — команда, ожидаемое число и ОТКАТ.
+- [x] **Step 1: `docs/CUTOVER.md`.** Рунбук по R-P8b-8; на каждом шаге — команда, ожидаемое число и ОТКАТ.
   - **Шаг 0. Дождаться сигнала.** Событие `ourvend.cutover_ready` приходит в Telegram немедленно. Проверить руками: `curl -s $CORE/ourvend/parity/streak | jq '{greenDays, threshold, readyForCutover, lastRed}'` → `readyForCutover: true`. Самая ранняя физически возможная дата — **2026-09-01 08:40** (первая полная сверка 26.08, семь подряд). `lastRed` внутри серии означает, что счётчик врёт — не флипать, разбираться с событием того дня.
   - **Шаг 1. Флип (ЗАПИСЬ).** Панель → «Система» → «Вендинг: источник учёта OurVend» → `own` → Сохранить. Рестарт НЕ НУЖЕН: значение читается настройкой с кешем 60 с. В журнале обязано появиться `ourvend.accounting_source_changed {from:"stock", to:"own"}`. **Откат:** то же поле обратно в `stock` (значение из базы удаляется пустым вводом, тогда действует env).
   - **Шаг 1а. Проверка следующим утром (после 08:40).** `GET /supply/summary` → `source: "own"`. `GET /ourvend/parity/streak` → серия продолжается. Числа `sale` за вчера равны тем, что дало бы зеркало: 264 пары сходились 1:1 на инвентаризации, и `buildUpserts` пишет тот же `source: "ourvend"` и тот же ключ — новых строк быть НЕ ДОЛЖНО, только UPDATE. `machine_stock` за вчера — **68 строк** (2 автомата × 34 позиции), строк по `2508160360` (SKLAD 4S) **ноль**: их отбрасывает фильтр «в строю» (R-P8b-4), и в логе `mydon-core` стоит «Остатки: пропущено 34 строк по автоматам не в строю».
   - **Шаг 2. Три зелёных дня в `own`.** Паритет продолжает считаться (снапшот сверяется с `sale`, которую теперь сам же и наполняет, — сверка становится проверкой идемпотентности, и это нормально). Сторож `ourvend.snapshot_stale` молчит.
   - **Шаг 3. Гашение `STOCK_DATABASE_URL` (ЗАПИСЬ в `.env` хоста).** Убрать строку из `/opt/mydon-app/.env`, `docker compose up -d mydon-core`. Последствия, которые надо УВИДЕТЬ, а не предположить: зеркало закупок остановлено (оно и так заморожено с 29.07 — у всех 342 строк `created_at = 2026-07-15`); мост П3 включился (`mirrorAlive = false` → `receiveOrder` пишет `purchase(source='vending-order')` сам; двойного счёта не будет, `vending_purchase_order` = 0 строк); дозаполнение `entity.attrs` из донора прекращено (реестр 31 карточка заполнен); `GET /ourvend/health` без ошибок, `GET /supply/summary` → `source: "own"` (теперь ещё и по фолбэку). **Откат:** вернуть строку и перезапустить контейнер — донор всё это время жив.
   - **Шаг 4. Дальше — П8 пп. 3–5** (вывод панели :8080 и бота `@mydonvendbot`, заморозка БД донора, чистка сети). **ЧЕГО НЕ ДЕЛАТЬ:** не трогать `external`-сеть `mydon-stock_default` (`docker-compose.yml:215-218`) и не удалять volume донора — это единственный путь отката.
-- [ ] **Step 2: `PLAN_STOCK_ABSORPTION.md` §П8.** Пункт 5 переписать: «`STOCK_DATABASE_URL` гасится ПОСЛЕ флипа, не вместе с ним — это два разных шага (мост П3 и синк прихода переключателя не знают вовсе, `inventory-monorepo.md` §1)». Добавить подпункт «П8b — готовность к катоверу (закрыто 2026-08-2x)»: счётчик серии и сигнал `ourvend.cutover_ready`, переключатель в панели, фильтр «в строю» (+34 фантомных строки/сутки по SKLAD 4S предотвращены), сторож свежести снапшота, ретенция, рунбук `docs/CUTOVER.md`. Отдельной строкой — «сам флип НЕ выполнен: самая ранняя дата 01.09.2026».
-- [ ] **Step 3: `DEPLOY.md`.** Новый раздел «Катовер учёта OurVend (П8b)» после раздела П8a: две строки-указателя — переключатель живёт в панели «Система» и рестарта не требует; последовательность и откаты — в `docs/CUTOVER.md`; ретенция ходит сама по воскресеньям 04:10 и правится ключом `SNAPSHOT_RETENTION_DAYS` (пол 90 суток), автодеплой её не запускает и не может.
-- [ ] **Step 4: `DATA_SOURCES.md` §891.** Абзац «Источником `sale` служит либо синк через mydon-stock (по умолчанию), либо…» переписать: канон — собственный снапшот `ourvend_sale_snapshot`; `OURVEND_ACCOUNTING_SOURCE` теперь настройка панели, а не переменная окружения; без `STOCK_DATABASE_URL` источник `own` по определению; гейт переключения — семь зелёных дней (`GET /ourvend/parity/streak`), и зелёным считается только день с обеими половинами (продажи И остатки).
-- [ ] **Step 5: `.env.example` и compose.** У `OURVEND_ACCOUNTING_SOURCE` (`.env.example:123`, `docker-compose.yml:75`) — комментарий: «фолбэк для панели; действующее значение задаётся в «Система», база важнее env. Без `STOCK_DATABASE_URL` игнорируется — там `own`». Значения не менять: `stock` остаётся дефолтом env до флипа. `docker-compose.standby.yml` не трогать (`STOCK_DATABASE_URL: ""` там жёстко, и после R-P8b-3 standby просто читает свой снапшот — синк на нём и так молчит).
-- [ ] **Step 6: Аддендум к спеке.** Три отклонения из Global Constraints (нет ключа `остатки_ok` — зелёность остатков выводится из `остатки_расхождений`/`остатки_сверено`; `accountingSource` стала async и требует `db`, оба `onModuleInit` — async; `SupplyService` получил второй аргумент и `SupplyModule` — `imports: [VendingModule]`) плюс четыре уточнения: (1) событие `system.retention` несёт ещё и `olderThanDays` — без границы «удалено 1680» не проверить; (2) `SYNC_RUN_RETENTION_DAYS = 365` — константа кода, не настройка: спека §3 заводит один ключ окна, и второй тумблер ради диагностической таблицы был бы лишним; (3) отдельного GET ретенции нет — конфигурация видна в `/system/config`, результат в журнале событий; (4) `ourvend.cutover_ready` не повторяется после флипа НИКОГДА (условие `source === "stock"`), а не «раз в сутки навсегда».
-- [ ] **Step 7: Полный прогон:** `pnpm -s lint && pnpm -s typecheck && pnpm -s build && pnpm -s test`; смоук на scratch-БД: `createdb mydon_p8b` → `node packages/db/dist/migrate.js` → `seed.js` → `seed-vending.js` → `backfill-product-ids.js` → `SMOKE_SCRATCH=1 node tools/smoke-import.mjs` → `node tools/smoke-core.mjs` → `node tools/smoke-panel.mjs` → `dropdb mydon_p8b`. Проверить `pnpm --filter @mydon/db db:generate` → «No schema changes» (миграций в срезе нет, и снапшот обязан это подтвердить).
-- [ ] **Step 8:** `git commit -m "docs(p8b): рунбук катовера, план поглощения, источники и аддендум спеки" -- docs/CUTOVER.md docs/PLAN_STOCK_ABSORPTION.md docs/DEPLOY.md docs/DATA_SOURCES.md docs/superpowers/specs/2026-08-26-p8b-cutover-readiness-design.md docs/superpowers/plans/2026-08-26-sloy-P8b-cutover.md .env.example deploy/docker-compose.yml`
+- [x] **Step 2: `PLAN_STOCK_ABSORPTION.md` §П8.** Пункт 5 переписать: «`STOCK_DATABASE_URL` гасится ПОСЛЕ флипа, не вместе с ним — это два разных шага (мост П3 и синк прихода переключателя не знают вовсе, `inventory-monorepo.md` §1)». Добавить подпункт «П8b — готовность к катоверу (закрыто 2026-08-2x)»: счётчик серии и сигнал `ourvend.cutover_ready`, переключатель в панели, фильтр «в строю» (+34 фантомных строки/сутки по SKLAD 4S предотвращены), сторож свежести снапшота, ретенция, рунбук `docs/CUTOVER.md`. Отдельной строкой — «сам флип НЕ выполнен: самая ранняя дата 01.09.2026».
+- [x] **Step 3: `DEPLOY.md`.** Новый раздел «Катовер учёта OurVend (П8b)» после раздела П8a: две строки-указателя — переключатель живёт в панели «Система» и рестарта не требует; последовательность и откаты — в `docs/CUTOVER.md`; ретенция ходит сама по воскресеньям 04:10 и правится ключом `SNAPSHOT_RETENTION_DAYS` (пол 90 суток), автодеплой её не запускает и не может.
+- [x] **Step 4: `DATA_SOURCES.md` §891.** Абзац «Источником `sale` служит либо синк через mydon-stock (по умолчанию), либо…» переписать: канон — собственный снапшот `ourvend_sale_snapshot`; `OURVEND_ACCOUNTING_SOURCE` теперь настройка панели, а не переменная окружения; без `STOCK_DATABASE_URL` источник `own` по определению; гейт переключения — семь зелёных дней (`GET /ourvend/parity/streak`), и зелёным считается только день с обеими половинами (продажи И остатки).
+- [x] **Step 5: `.env.example` и compose.** У `OURVEND_ACCOUNTING_SOURCE` (`.env.example:123`, `docker-compose.yml:75`) — комментарий: «фолбэк для панели; действующее значение задаётся в «Система», база важнее env. Без `STOCK_DATABASE_URL` игнорируется — там `own`». Значения не менять: `stock` остаётся дефолтом env до флипа. `docker-compose.standby.yml` не трогать (`STOCK_DATABASE_URL: ""` там жёстко, и после R-P8b-3 standby просто читает свой снапшот — синк на нём и так молчит).
+- [x] **Step 6: Аддендум к спеке.** Три отклонения из Global Constraints (нет ключа `остатки_ok` — зелёность остатков выводится из `остатки_расхождений`/`остатки_сверено`; `accountingSource` стала async и требует `db`, оба `onModuleInit` — async; `SupplyService` получил второй аргумент и `SupplyModule` — `imports: [VendingModule]`) плюс четыре уточнения: (1) событие `system.retention` несёт ещё и `olderThanDays` — без границы «удалено 1680» не проверить; (2) `SYNC_RUN_RETENTION_DAYS = 365` — константа кода, не настройка: спека §3 заводит один ключ окна, и второй тумблер ради диагностической таблицы был бы лишним; (3) отдельного GET ретенции нет — конфигурация видна в `/system/config`, результат в журнале событий; (4) `ourvend.cutover_ready` не повторяется после флипа НИКОГДА (условие `source === "stock"`), а не «раз в сутки навсегда».
+- [x] **Step 7: Полный прогон:** `pnpm -s lint && pnpm -s typecheck && pnpm -s build && pnpm -s test`; смоук на scratch-БД: `createdb mydon_p8b` → `node packages/db/dist/migrate.js` → `seed.js` → `seed-vending.js` → `backfill-product-ids.js` → `SMOKE_SCRATCH=1 node tools/smoke-import.mjs` → `node tools/smoke-core.mjs` → `node tools/smoke-panel.mjs` → `dropdb mydon_p8b`. Проверить `pnpm --filter @mydon/db db:generate` → «No schema changes» (миграций в срезе нет, и снапшот обязан это подтвердить).
+- [x] **Step 8:** `git commit -m "docs(p8b): рунбук катовера, план поглощения, источники и аддендум спеки" -- docs/CUTOVER.md docs/PLAN_STOCK_ABSORPTION.md docs/DEPLOY.md docs/DATA_SOURCES.md docs/superpowers/specs/2026-08-26-p8b-cutover-readiness-design.md docs/superpowers/plans/2026-08-26-sloy-P8b-cutover.md .env.example deploy/docker-compose.yml`
 
 ---
 

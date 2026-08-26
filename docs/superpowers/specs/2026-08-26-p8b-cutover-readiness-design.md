@@ -89,3 +89,36 @@
    этого случая уже не касается), и за текущие ташкентские сутки события
    ещё не было. После флипа звать переключать уже некуда — второй сигнал
    без адресата был бы шумом.
+
+### Рулинги волны фиксов (26.08.2026, повторный adversarial)
+
+Источники: `.superpowers/sdd/2026-08-26-sloy-P8b-cutover/fix-wave-brief.md`,
+`adversarial-prod-data.md`, `adversarial-security.md`, `final-review.md`.
+Распределение по пакетам (A — core/shared/db, B — bot/cc, C — docs) — в
+`fix-wave-brief.md`; ниже только сами решения, коротко.
+
+**Критерий и паритет:**
+
+- **R-FW-P1a** Допуск паритета остатков — `STOCK_PARITY_TOLERANCE` (ключ настроек, 3, ≥ 0): расхождение только если `own.qty > stock.qty` либо `stock.qty − own.qty` больше допуска; «в допуске» считается отдельно от «совпало».
+- **R-FW-P1b** Зелёный день = `parity(1)` (поля `день_ok`/`день_продаж_сверено`/`день_остатков_сверено`/`день_расхождений` события `ourvend.parity`); `parity(7)` остаётся 7-дневной витриной (`OurvendHealth.parity`), `parityStreak` читает поля дня — событие старой формы не зелёное.
+- **R-FW-P2** Свежесть снапшота считается РАЗДЕЛЬНО по `ourvend_sale_snapshot` и `ourvend_stock_snapshot`; застой любой из двух даёт событие, текст называет какую («продаж»/«остатков»).
+- **R-FW-P3** Паритет после флипа: в `own` при заданном `STOCK_DATABASE_URL` сверяет свой снапшот НАПРЯМУЮ с таблицами донора (`ourvend_sales`/`ourvend_machine_stock`, `parity.mode: "own-vs-donor"`); без URL — `mode: "retired"`, `note` «зеркала нет — сверять не с чем», серия не считается, `cutover_ready` не эмитится.
+
+**Безопасность и целостность (`adversarial-security.md` major 1–3, minor 4–10):**
+
+- **R-FW-S1** `parityScanLimit = min(порог + 14, 400)`; валидатор `CUTOVER_GREEN_DAYS` получает потолок ≤ 60.
+- **R-FW-S2** Пропуск «не в строю» при записи остатков — серийники в лог-строке и в payload `supply.sync` (`skippedNotInService`); `Logger.warn`, если множество изменилось относительно прошлого прогона.
+- **R-FW-S3** Ретенция — лог на каждую удалённую пачку; `system.retention` пишется в `finally` с фактически удалённым числом, `aborted: true` при обрыве.
+- **R-FW-S4** Гонка инвалидации кеша источника (сброс после коммита vs уже летящий `accountingSource()`) — задокументирована как известный риск ≤ 60 с (размер кеша), отдельным механизмом в этой волне не закрывается.
+- **R-FW-S5** `GET /system/config` для `OURVEND_ACCOUNTING_SOURCE` отдаёт `effective` — действующий источник с учётом фолбэка (`own` без `STOCK_DATABASE_URL`), панель показывает именно его.
+- **R-FW-S6** `streak()` фильтрует `event.source = 'ourvend-accounting'` (тем же источником пишет `daily()`) — событие, подделанное через `POST /events` любым носителем токена, в серию не попадает.
+- **R-FW-S7** `POST /ourvend/snapshot`: пустой день по автомату НЕ стирает существующие строки этого дня — удаление ключа `(dt, serial)` только при замене (пришли новые строки по тому же ключу).
+- **R-FW-S8** Пол `SNAPSHOT_RETENTION_DAYS` = 180 закреплён в валидаторе И в коде, не только в `help`.
+- **R-FW-S9** `machine_sale` в ретенции — оставлено без изменений (принятый риск: денежная дорожка коллектора без независимых читателей, кроме самой ретенции).
+- **R-FW-S10** `RetentionService`: крон получает `{ protect: true }` (тот же приём, что у `S3`/`ShrinkageService`).
+
+**Majors из `final-review.md` (M1–M3):**
+
+- **M1** `SalesService.onModuleInit` оборачивает чтение `accountingSource()` в `try/catch` (лог `warn`, bootstrap не прерывается отказом БД на старте); регистрация крона — безусловно.
+- **M2** `SalesSummary.source: "stock" | "own"` — явное поле режима; тексты трёх витрин (`apps/bot/src/sales-brief.ts`, `apps/cc/src/components/sales-view.tsx`, `apps/cc/src/components/reports-overview.tsx`) ветвятся по режиму, а не только по переопределённому `configured`.
+- **M3** `config-spec` добавляет `OURVEND_ACCOUNTING_SOURCE.options` пустую опцию `""` первым пунктом («— по умолчанию (env) —», сброс к фолбэку); откат в `docs/CUTOVER.md` основной формулировкой — «выбрать `stock`» (это исполнимо в UI-`select`), пустая опция — альтернатива.
