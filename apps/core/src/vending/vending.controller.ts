@@ -19,7 +19,9 @@ import {
 } from "class-validator";
 import { Transform, Type } from "class-transformer";
 import { Throttle } from "@nestjs/throttler";
+import { normalizeFiscalInput, PACKAGE_CODES, VAT_RATES } from "@mydon/shared";
 import { AnalyticsService } from "./analytics.service";
+import { ProductFiscalService } from "./product-fiscal.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { ShrinkageService } from "./shrinkage.service";
@@ -259,6 +261,42 @@ export class SetProductRulesDto {
   actor?: string;
 }
 
+/** Фискальный блок карточки снека (П6), адресованный по UUID карточки. */
+export class SetProductFiscalDto {
+  @IsUUID()
+  productId!: string;
+
+  @IsOptional()
+  @Transform(({ value }) => normalizeFiscalInput(value === null || value === undefined ? value : String(value)))
+  @IsString()
+  @Matches(/^\d{17}$/, { message: "ИКПУ должен быть 17 цифр или пусто" })
+  ikpu?: string | null;
+
+  @IsOptional()
+  @Transform(({ value }) => normalizeFiscalInput(value === null || value === undefined ? value : String(value)))
+  @IsString()
+  @Matches(/^\d{17}$/, { message: "МХИК должен быть 17 цифр или пусто" })
+  mxik?: string | null;
+
+  @IsOptional()
+  @Transform(({ value }) => normalizeFiscalInput(value === null || value === undefined ? value : String(value)))
+  @IsString()
+  @Matches(/^(\d{8}|\d{12}|\d{13})$/, { message: "Штрихкод должен быть 8/12/13 цифр или пусто" })
+  barcode?: string | null;
+
+  @IsOptional() @IsInt() @IsIn(VAT_RATES.map((rate) => Number(rate.code)))
+  vatPct?: number;
+
+  @IsOptional() @IsString() @IsIn(PACKAGE_CODES.map((item) => item.code))
+  packageCode?: string;
+
+  @IsOptional() @IsIn([true, false])
+  marked?: boolean;
+
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
 export class SyncFinishDto {
   @IsIn(["success", "partial", "failed"])
   status!: "success" | "partial" | "failed";
@@ -472,6 +510,7 @@ export class VendingController {
     private readonly vending: VendingService,
     private readonly refills: RefillService,
     private readonly refillEvents: RefillEventsService,
+    private readonly productFiscal: ProductFiscalService,
     private readonly shrinkageReport: ShrinkageService,
     private readonly analytics: AnalyticsService,
     private readonly weekly: WeeklyDigestService,
@@ -558,6 +597,13 @@ export class VendingController {
       throw new BadRequestException("нечего менять: укажи packSize, excludedFromPurchase или fixedPurchaseQty");
     }
     return this.vending.setProductRules(product, patch, actor);
+  }
+
+  /** ИКПУ, МХИК, НДС, штрихкод, ОКЕИ и маркировка товара снека. */
+  @Post("product-fiscal")
+  setProductFiscal(@Body() dto: SetProductFiscalDto) {
+    const { productId, actor, ...patch } = dto;
+    return this.productFiscal.update(productId, patch, actor ?? "panel", new Date());
   }
 
   /**

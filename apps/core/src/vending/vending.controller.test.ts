@@ -9,7 +9,13 @@ import { validate } from "class-validator";
 import { THROTTLER_LIMIT } from "@nestjs/throttler/dist/throttler.constants";
 import type { AnalyticsService } from "./analytics.service";
 import { LIST_DAYS_MAX } from "./refill-events.service";
-import { RefillEventsListDto, STOCK_COUNTS_PRODUCT_MAX, StockCountsDto, VendingController } from "./vending.controller";
+import {
+  RefillEventsListDto,
+  SetProductFiscalDto,
+  STOCK_COUNTS_PRODUCT_MAX,
+  StockCountsDto,
+  VendingController,
+} from "./vending.controller";
 import type { VendingService } from "./vending.service";
 
 describe("Вендинг Core: троттлинг GET /vending/shrinkage (N1)", () => {
@@ -72,6 +78,44 @@ describe("StockCountsDto: потолок окна — 730 суток, не 365 (
     const dto = plainToInstance(StockCountsDto, { days: "" });
     assert.deepEqual(await validate(dto), []);
     assert.equal(dto.days, undefined);
+  });
+});
+
+describe("SetProductFiscalDto: вход держит форму, а не только сервис (П6)", () => {
+  const productId = "0f8e1a4c-1111-4222-8333-444455556666";
+
+  it("16 цифр отвергнуты сообщением донора", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId, ikpu: "2202002001010032" });
+    const ошибки = await validate(dto);
+    assert.equal(ошибки.length, 1);
+    assert.deepEqual(Object.values(ошибки[0].constraints ?? {}), ["ИКПУ должен быть 17 цифр или пусто"]);
+  });
+
+  it("пустая строка гасится в null до сервиса", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId, ikpu: "  " });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.ikpu, null);
+  });
+
+  it("разделители копирования вырезаются до проверки длины", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId, ikpu: "022 0200-3001 086 002" });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.ikpu, "02202003001086002");
+  });
+
+  it("vatPct вне набора 12/0/15 отвергнут, а 0 принят", async () => {
+    assert.deepEqual(await validate(plainToInstance(SetProductFiscalDto, { productId, vatPct: 0 })), []);
+    assert.equal((await validate(plainToInstance(SetProductFiscalDto, { productId, vatPct: 7 }))).length, 1);
+  });
+
+  it("packageCode вне словаря ОКЕИ отвергнут", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId, packageCode: "1218841" });
+    assert.equal((await validate(dto)).length, 1);
+  });
+
+  it("productId — uuid: адресуемся по карточке, а не по спорному имени", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId: "Snickers 50gr", marked: true });
+    assert.equal((await validate(dto)).length, 1);
   });
 });
 
@@ -161,6 +205,7 @@ describe("Вендинг Core: сброс кеша аналитики на пр�
     const analytics = { invalidateReports: () => (сбросов.count += 1) } as unknown as AnalyticsService;
     const c = new VendingController(
       vending as VendingService,
+      {} as never,
       {} as never,
       {} as never,
       {} as never,

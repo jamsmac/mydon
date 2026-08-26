@@ -57,6 +57,7 @@ import {
   type PlanWarning,
   type PriceEntry,
   type ProductIndex,
+  type ProductFiscal,
   type ProductRule,
   type PurchaseCashSession,
   type PurchaseRow,
@@ -521,6 +522,8 @@ export interface VendingProductRow {
   isActive: boolean;
   excludedFromPurchase: boolean;
   fixedPurchaseQty: number | null;
+  /** Типизированный фискальный блок карточки снека (П6). */
+  fiscal: ProductFiscal;
 }
 
 /** Что можно поменять в правилах закупа товара. */
@@ -2167,6 +2170,14 @@ export class VendingService {
         isActive: p.isActive,
         excludedFromPurchase: p.excludedFromPurchase,
         fixedPurchaseQty: p.fixedPurchaseQty,
+        fiscal: {
+          ikpu: p.ikpu,
+          mxik: p.mxik,
+          vatPct: p.vatPct,
+          barcode: p.barcode,
+          packageCode: p.packageCode,
+          marked: p.marked,
+        },
       }))
       .sort((a, b) => a.name.localeCompare(b.name, "ru"));
   }

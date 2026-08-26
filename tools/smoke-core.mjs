@@ -130,6 +130,11 @@ const ЧТЕНИЕ = [
       for (const p of ответ) {
         if (!("salePrice" in p)) throw new Error(`у «${p.name}» нет ключа salePrice`);
         if (p.salePrice !== null && typeof p.salePrice !== "number") throw new Error(`salePrice=${p.salePrice} у «${p.name}»`);
+        const fiscalKeys = ["ikpu", "mxik", "vatPct", "barcode", "packageCode", "marked"];
+        if (p.fiscal === null || typeof p.fiscal !== "object") throw new Error(`у «${p.name}» нет блока fiscal`);
+        for (const key of fiscalKeys) {
+          if (!(key in p.fiscal)) throw new Error(`у «${p.name}» нет fiscal.${key}`);
+        }
       }
     },
   },
@@ -572,8 +577,50 @@ const P4_АВТОМАТ = "SMOKE-P4";
 const P4_ТОВАР = "Coca-Cola Classic 0,5";
 const P4_ДО = new Date(Date.now() - 2 * 3_600_000);
 const P4_ПОСЛЕ = new Date(Date.now() - 3_600_000);
+let P6_КАРТОЧКА = null;
 
 const ЗАПИСЬ = [
+  {
+    имя: "фискальный блок: правка карточки прайса",
+    path: "/vending/product-fiscal",
+    body: async () => {
+      const прайс = await читать("/vending/products");
+      P6_КАРТОЧКА = прайс[0]?.id ?? null;
+      if (!P6_КАРТОЧКА) throw new Error("в засеянном прайсе нет карточки для проверки П6");
+      return {
+        productId: P6_КАРТОЧКА,
+        ikpu: "02202003001086002",
+        vatPct: 0,
+        packageCode: "778",
+        marked: true,
+      };
+    },
+    проверить: (ответ) => {
+      if (ответ?.ok !== true) throw new Error(`правка отклонена: ${JSON.stringify(ответ)}`);
+      if (ответ.readyBefore !== false || ответ.readyAfter !== true) {
+        throw new Error(`готовность не пересекла границу: ${ответ.readyBefore}→${ответ.readyAfter}`);
+      }
+    },
+    после: async () => {
+      const прайс = await читать("/vending/products");
+      const строка = прайс.find((p) => p.id === P6_КАРТОЧКА);
+      if (строка?.fiscal?.ikpu !== "02202003001086002") throw new Error("ИКПУ не доехал до каталога");
+      if (строка.fiscal.vatPct !== 0) throw new Error("ставка 0 — законное значение, а её потеряли");
+      if (строка.fiscal.packageCode !== "778" || строка.fiscal.marked !== true) {
+        throw new Error("ОКЕИ/маркировка не сохранились");
+      }
+    },
+  },
+  {
+    имя: "фискальный блок: 16 цифр отбиты русским текстом донора",
+    path: "/vending/product-fiscal",
+    body: () => ({ productId: P6_КАРТОЧКА, ikpu: "2202002001010032" }),
+    ожидатьСтатус: 400,
+    проверить: (ответ) => {
+      const текст = JSON.stringify(ответ);
+      if (!текст.includes("17 цифр")) throw new Error(`400 без причины для владельца: ${текст}`);
+    },
+  },
   {
     имя: "приём слотов (первый снимок)",
     path: "/vending/ingest",
@@ -1789,13 +1836,36 @@ async function читать(path) {
 }
 
 async function проверитьЗапись(шаг) {
+  let body;
+  try {
+    body = typeof шаг.body === "function" ? await шаг.body() : шаг.body;
+  } catch (e) {
+    провалы.push(`POST ${шаг.path} (${шаг.имя}) — подготовка тела: ${e.message}`);
+    return;
+  }
   const r = await fetch(BASE + шаг.path, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-service-token": TOKEN },
-    body: JSON.stringify(шаг.body),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(20_000),
   });
   const текст = await r.text();
+  if (шаг.ожидатьСтатус !== undefined) {
+    if (r.status !== шаг.ожидатьСтатус) {
+      провалы.push(`POST ${шаг.path} (${шаг.имя}) → ${r.status}, ожидали ${шаг.ожидатьСтатус}: ${текст.slice(0, 300)}`);
+      return;
+    }
+    if (шаг.проверить) {
+      try {
+        шаг.проверить(JSON.parse(текст));
+      } catch (e) {
+        провалы.push(`POST ${шаг.path} (${шаг.имя}): ${e.message}`);
+        return;
+      }
+    }
+    console.log(`  ok  POST ${шаг.path} — ${шаг.имя}`);
+    return;
+  }
   // Запись, которая ОБЯЗАНА быть отвергнута на границе (мусорный ввод): 200 на
   // неё — не «сервис снисходителен», а дыра в валидации.
   if (шаг.ждёмОтказ) {

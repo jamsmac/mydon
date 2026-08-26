@@ -4,6 +4,7 @@ import { OurvendHealthService } from "../ourvend/ourvend-health.service";
 import { OurvendParityService } from "../ourvend/ourvend-parity.service";
 import { SyncStaleService } from "../ourvend/sync-stale.service";
 import { AnalyticsService } from "./analytics.service";
+import { ProductFiscalService } from "./product-fiscal.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { RetentionService } from "./retention.service";
@@ -37,6 +38,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
   controllers: [VendingController],
   providers: [
     VendingService,
+    ProductFiscalService,
     RefillService,
     RefillEventsService,
     ShrinkageService,
