@@ -253,6 +253,13 @@ const ЧТЕНИЕ = [
       if (!Array.isArray(ответ?.mismatches)) throw new Error("parity.mismatches — не массив");
       if (!Array.isArray(ответ?.stock?.mismatches)) throw new Error("parity.stock.mismatches — не массив");
       if (typeof ответ?.checked !== "number") throw new Error("parity.checked — не число");
+      // R-FW-P1a: «в допуске» — ОТДЕЛЬНОЕ число рядом с «совпало», иначе допуск
+      // становится способом не заметить убыль остатка.
+      if (typeof ответ?.stock?.withinTolerance !== "number") throw new Error("parity.stock.withinTolerance — не число");
+      if (typeof ответ?.stock?.tolerance !== "number") throw new Error("parity.stock.tolerance — не число");
+      if (!["mirror", "own-vs-donor", "retired"].includes(ответ?.mode)) {
+        throw new Error(`parity.mode=${ответ?.mode} — не один из mirror/own-vs-donor/retired`);
+      }
     },
   },
   {
@@ -339,6 +346,12 @@ const ЧТЕНИЕ = [
       for (const ключ of ["checked", "stockChecked"]) {
         if (typeof о.parity[ключ] !== "number") throw new Error(`health.parity.${ключ} — не число`);
       }
+      // R-FW-P3: С ЧЕМ сверялись. Без режима витрина не отличает «сверили с
+      // независимой стороной и всё сошлось» от «сверять было не с чем»: на
+      // засеянной базе (без STOCK_DATABASE_URL) это как раз `retired`.
+      if (!["mirror", "own-vs-donor", "retired"].includes(о.parity.mode)) {
+        throw new Error(`health.parity.mode=${о.parity.mode} — не один из mirror/own-vs-donor/retired`);
+      }
       if (о.runs.length === 0 && (о.failedStreak !== 0 || о.lastSuccessAt !== null)) {
         throw new Error("прогонов нет, а серия/успех не пусты — журнал прочитан не оттуда");
       }
@@ -389,6 +402,20 @@ const ЧТЕНИЕ = [
         if (i.source === "default" && i.value !== дефолт) throw new Error(`${ключ}=${i.value}, ждали ${дефолт}`);
       }
       if (карта.get("OURVEND_ACCOUNTING_SOURCE").kind !== "select") throw new Error("источник учёта — не select");
+      // R-FW-S5: рядом с записанным значением — ДЕЙСТВУЮЩИЙ источник. Без
+      // STOCK_DATABASE_URL (а смоук гоняется именно так) записано `stock`, а
+      // учёт уже `own`: панель, показывающая одно записанное, врёт на том
+      // самом экране, на который смотрят в дни катовера.
+      const источник = карта.get("OURVEND_ACCOUNTING_SOURCE");
+      if (!["stock", "own"].includes(источник.effective)) {
+        throw new Error(`OURVEND_ACCOUNTING_SOURCE.effective=${источник.effective} — не stock и не own`);
+      }
+      if (!process.env.STOCK_DATABASE_URL && источник.effective !== "own") {
+        throw new Error("зеркала нет, а действующий источник не own — фолбэк не применён");
+      }
+      // Пустой вариант первым — задокументированный откат шага 1 катовера.
+      if ((источник.options ?? [])[0] !== "") throw new Error("у источника учёта нет пустого варианта для сброса");
+      if (карта.get("STOCK_PARITY_TOLERANCE") === undefined) throw new Error("нет ключа STOCK_PARITY_TOLERANCE");
       if (о.some((i) => /API_KEY|TOKEN|SECRET|PASSWORD/i.test(i.key))) throw new Error("в тумблерах секрет");
     },
   },

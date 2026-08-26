@@ -478,14 +478,21 @@ export const RULES: Rule[] = [
     id: "ourvend.snapshot_stale",
     eventType: "ourvend.snapshot_stale",
     urgency: "immediate",
-    format: (c) =>
-      c.payload.hours === null || c.payload.hours === undefined
+    format: (c) => {
+      // КАКАЯ ПОЛОВИНА ВСТАЛА — В ТЕКСТЕ (R-FW-P2). Агент шлёт три отдельных
+      // POST-а, и падает обычно одна половина: «снапшот не обновлялся»
+      // отправляло бы владельца чинить весь прогон вместо упавшей Lot-сессии.
+      // Старые события половину не называют — тогда говорим о снапшоте целиком,
+      // как и раньше.
+      const что = typeof c.payload.таблица === "string" ? `(${c.payload.таблица})` : "";
+      const шапка = `⛔ Учётный снапшот OurVend${что ? ` ${что}` : ""}`;
+      return c.payload.hours === null || c.payload.hours === undefined
         ? // «Не приходил ни разу» — это не «ноль часов»: ноль читался бы как
           // «сняли только что», то есть ровно наоборот.
-          `⛔ Учётный снапшот OurVend НЕ ПРИХОДИЛ НИ РАЗУ — продажи и остатки стоят ` +
-          `(агент ourvend:accounting)`
-        : `⛔ Учётный снапшот OurVend не обновлялся ${num(c.payload.hours)} ч — продажи и остатки стоят ` +
-          `(последний съём ${c.payload.lastFetchedAt ? моментТашкента(c.payload.lastFetchedAt) : "не было"})`,
+          `${шапка} НЕ ПРИХОДИЛ НИ РАЗУ — продажи и остатки стоят (агент ourvend:accounting)`
+        : `${шапка} не обновлялся ${num(c.payload.hours)} ч — продажи и остатки стоят ` +
+          `(последний съём ${c.payload.lastFetchedAt ? моментТашкента(c.payload.lastFetchedAt) : "не было"})`;
+    },
   },
   {
     // Центральный шаг катовера: источник учёта переключили. Немедленно и с
@@ -497,9 +504,18 @@ export const RULES: Rule[] = [
     id: "ourvend.accounting_source_changed",
     eventType: "ourvend.accounting_source_changed",
     urgency: "immediate",
-    format: (c) =>
-      `⚙️ Настройка учёта OurVend переключена: ${str(c.payload.from, "не задано")} → ` +
-      `${str(c.payload.to, "не задано")} (${str(c.payload.actor, "автор не указан")})`,
+    format: (c) => {
+      const записано = str(c.payload.to, "не задано");
+      const действует = typeof c.payload.effective === "string" ? c.payload.effective : null;
+      return (
+        `⚙️ Настройка учёта OurVend переключена: ${str(c.payload.from, "не задано")} → ${записано}` +
+        // Записанное и ДЕЙСТВУЮЩЕЕ расходятся ровно тогда, когда зеркала уже
+        // нет: показать одно записанное значило бы обещать источник, которого
+        // физически не существует.
+        (действует && действует !== записано ? ` (действует: ${действует})` : "") +
+        ` (${str(c.payload.actor, "автор не указан")})`
+      );
+    },
   },
 
   // ── Рассылки ───────────────────────────────────────────────────────────────

@@ -196,7 +196,7 @@ describe("Алиасы имён продаж", () => {
 // ── Мягкая деградация без STOCK_DATABASE_URL (R-P8b-6) ───────────────────────
 
 import { createRequire } from "node:module";
-import { entity, ourvendSaleSnapshot, sale } from "@mydon/db";
+import { entity, ourvendSaleSnapshot, ourvendStockSnapshot, sale } from "@mydon/db";
 import { resetAccountingSourceCache } from "./accounting-source";
 
 /**
@@ -250,8 +250,10 @@ async function сОкружением<T>(env: Record<string, string | undefined>
 
 interface МирПродаж {
   снапшот?: StockSaleRow[];
-  /** Момент последнего съёма снапшота — для `configured` (R-P8b-5). */
+  /** Момент последнего съёма снапшота ПРОДАЖ — для `configured` (R-P8b-5). */
   снапшотAt?: Date | null;
+  /** Момент последнего съёма снапшота ОСТАТКОВ. Не задан — тот же, что у продаж. */
+  остаткиAt?: Date | null;
   автоматы?: { id: string; ref: string | null }[];
 }
 
@@ -260,6 +262,10 @@ function стендПродаж(м: МирПродаж) {
   const снапшот = м.снапшот ?? [];
   const автоматы = м.автоматы ?? [];
   const снимки = м.снапшотAt ? [{ at: м.снапшотAt }] : [];
+  // Снимки ОСТАТКОВ — по умолчанию ровесники продаж: обе половины приезжают
+  // одним прогоном агента, и `configured` в режиме `own` смотрит на ОБЕ
+  // (R-FW-P2). Задавать отдельно нужно там, где половины разъехались.
+  const снимкиОстатков = м.остаткиAt === undefined ? снимки : м.остаткиAt ? [{ at: м.остаткиAt }] : [];
   const счёт = { вставокПродаж: 0, событий: 0 };
 
   const цепочка = (rows: unknown[]) => {
@@ -277,6 +283,7 @@ function стендПродаж(м: МирПродаж) {
       from: (t: unknown) => {
         if (t === sale) return цепочка([{ n: 0, tQty: "0", tAmt: "0", yQty: "0", yAmt: "0", mQty: "0", mAmt: "0", last: null }]);
         if (t === ourvendSaleSnapshot) return цепочка(снапшот.length > 0 ? снапшот : снимки);
+        if (t === ourvendStockSnapshot) return цепочка(снимкиОстатков);
         if (t === entity) return цепочка(автоматы);
         return цепочка([]); // systemConfig и всё прочее
       },
@@ -347,6 +354,34 @@ describe("Синк продаж без STOCK_DATABASE_URL деградирует
   });
 });
 
+describe("Старт синка продаж не может уронить Core (final-review M1)", () => {
+  it("база недоступна на старте — хук РЕЗОЛВИТСЯ, крон зарегистрирован", async () => {
+    // `onModuleInit` читал источник учёта ради ОДНОЙ строки лога. Отклонённый
+    // хук прерывает bootstrap Nest целиком: не стартует ничего — ни
+    // `/ourvend/health`, ни бот, ни кроны. `DATABASE_URL` может смотреть на
+    // внешний Postgres, где `depends_on: service_healthy` из compose не
+    // работает вовсе, так что сценарий не теоретический.
+    const мёртваяБаза = {
+      select: () => ({
+        from: () => {
+          throw new Error("база не поднялась");
+        },
+      }),
+    } as never;
+    const svc = new SalesService(мёртваяБаза);
+    await svc.onModuleInit();
+    try {
+      assert.notEqual(
+        (svc as unknown as { cron: unknown }).cron,
+        null,
+        "крон обязан регистрироваться безусловно: без него синк не побежит НИКОГДА",
+      );
+    } finally {
+      svc.onApplicationShutdown();
+    }
+  });
+});
+
 describe("«Источник настроен» — это «источник ЧИТАЕМ» (R-P8b-5/6)", () => {
   /**
    * Плитка продаж рисует «появится после сбора» по `configured`. Пока флаг
@@ -377,6 +412,36 @@ describe("«Источник настроен» — это «источник Ч
       const { svc } = стендПродаж({ снапшотAt: null });
       assert.equal((await svc.summary(сейчас)).configured, false);
     });
+  });
+
+  it("own, продажи свежие, ОСТАТКИ встали — НЕ настроено (R-FW-P2)", async () => {
+    // Упала Lot-сессия: `machine_stock` заморожен, а часы продаж свежие.
+    // Плитка, которая в этот момент говорит «настроено», врёт про половину
+    // учёта.
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const { svc } = стендПродаж({
+        снапшотAt: new Date("2026-09-05T03:05:00Z"),
+        остаткиAt: new Date("2026-09-03T19:00:00Z"),
+      });
+      assert.equal((await svc.summary(сейчас)).configured, false);
+    });
+  });
+
+  it("сводка называет ДЕЙСТВУЮЩИЙ источник — витрине иначе нечем выбрать текст", async () => {
+    // `configured: false` означает разное: в `stock` — «нет переменной», в
+    // `own` — «снапшот не обновляется». Без этого поля витрина предлагала бы
+    // владельцу настроить переменную, которую шаг 3 рунбука удаляет.
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const { svc } = стендПродаж({ снапшотAt: new Date("2026-09-05T03:05:00Z") });
+      assert.equal((await svc.summary(сейчас)).source, "own");
+    });
+    await сОкружением(
+      { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+      async () => {
+        const { svc } = стендПродаж({ снапшотAt: null });
+        assert.equal((await svc.summary(сейчас)).source, "stock");
+      },
+    );
   });
 
   it("stock и переменная есть — настроено, свежесть теневого снапшота ни при чём", async () => {

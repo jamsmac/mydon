@@ -119,7 +119,19 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
   // настоящий фолбэк, чтобы витрина не нарисовала «0 из 0 — можно».
   parityStreak: 0,
   cutoverThreshold: CUTOVER_GREEN_DAYS_FALLBACK,
-  parity: { days: 0, ok: false, checked: 0, mismatches: 0, stockOk: false, stockChecked: 0, note: "здоровье сбора не посчиталось" },
+  // `mode` — самое НЕ ЗАЯВЛЯЮЩЕЕ из трёх: `retired` витрина читает как
+  // «сверка завершена, зеркала нет», а это утверждение о катовере, которого мы
+  // тут не знаем. Причина отсутствия чисел сказана в `note`, а не режимом.
+  parity: {
+    days: 0,
+    ok: false,
+    checked: 0,
+    mismatches: 0,
+    stockOk: false,
+    stockChecked: 0,
+    mode: "mirror",
+    note: "здоровье сбора не посчиталось",
+  },
 };
 
 @Injectable()

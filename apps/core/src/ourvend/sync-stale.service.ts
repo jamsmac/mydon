@@ -10,8 +10,8 @@ import {
   lastSnapshotAt,
   lastSuccessRunAt,
   rawStaleHours,
-  snapshotIsStale,
   snapshotStaleThreshold,
+  snapshotStaleVerdict,
   syncStaleThreshold,
 } from "./sync-runs";
 
@@ -186,23 +186,34 @@ export class SyncStaleService implements OnModuleInit, OnApplicationShutdown {
     threshold: number;
     stale: boolean;
     emitted: boolean;
+    /** Какая половина встала: «продаж», «остатков», «продаж и остатков». `null` — обе живы. */
+    which: string | null;
   }> {
     const [источник, threshold] = await Promise.all([
-      accountingSource(this.db),
+      // `now` ПРОБРАСЫВАЕТСЯ: кеш источника ключуется временем, и вызов без
+      // момента считал бы срок жизни кеша по стенным часам там, где весь
+      // остальной метод считается параметром.
+      accountingSource(this.db, now),
       snapshotStaleThreshold(this.db, this.logger),
     ]);
     // Порог отдаём и здесь: вызывающий (тест, ручной прогон) должен видеть, по
     // какому числу СТОРОЖ БЫ судил, даже когда судить в этом режиме не о чем.
-    if (источник !== "own") return { hours: null, threshold, stale: false, emitted: false };
+    if (источник !== "own") return { hours: null, threshold, stale: false, emitted: false, which: null };
 
-    const снимок = await lastSnapshotAt(this.db);
-    const снимокAt = снимок ? снимок.toISOString() : null;
+    // ОБЕ ПОЛОВИНЫ СНАПШОТА, РАЗДЕЛЬНО (R-FW-P2). Агент шлёт три отдельных
+    // POST-а, у Lot-сессии свой `try`: упавшие остатки замораживают
+    // `machine_stock` при свежих часах продаж, а сутки без единой продажи не
+    // двигают `fetched_at` продаж вовсе — один взгляд на продажи давал бы и
+    // пропущенную аварию, и ложную тревогу.
+    const свежесть = await lastSnapshotAt(this.db);
     // ПОКАЗ и РЕШЕНИЕ — разные числа, как у соседа: `hours` округлено до 0.1 ч
     // и едет владельцу, а порог сравнивается с сырыми часами внутри
-    // `snapshotIsStale` (той же функцией считает вердикт витрина).
+    // `snapshotStaleVerdict` (той же функцией считает вердикт витрина).
+    const вердикт = snapshotStaleVerdict(свежесть, now, threshold);
+    const снимокAt = вердикт.lastFetchedAt;
     const hours = staleHours(снимокAt, now);
-    const stale = snapshotIsStale(снимокAt, now, threshold);
-    if (!stale) return { hours, threshold, stale, emitted: false };
+    const stale = вердикт.stale;
+    if (!stale) return { hours, threshold, stale, emitted: false, which: null };
 
     // Дедуп — раз в ташкентские сутки и по СВОЕМУ типу события: у застоя сбора
     // свой, и один ключ на двоих проглатывал бы вторую тревогу в те сутки,
@@ -215,14 +226,22 @@ export class SyncStaleService implements OnModuleInit, OnApplicationShutdown {
       .from(event)
       .where(and(eq(event.type, SNAPSHOT_STALE_EVENT), gte(event.occurredAt, сутки)))
       .limit(1);
-    if (было) return { hours, threshold, stale, emitted: false };
+    if (было) return { hours, threshold, stale, emitted: false, which: вердикт.which };
 
     await this.db.insert(event).values({
       source: "system",
       type: SNAPSHOT_STALE_EVENT,
       occurredAt: now,
-      payload: { hours, lastFetchedAt: снимокAt },
+      payload: {
+        hours,
+        lastFetchedAt: снимокAt,
+        // КАКАЯ ПОЛОВИНА ВСТАЛА — словами: «снапшот не обновляется» отправляет
+        // чинить всё сразу, а встать могла одна Lot-сессия.
+        таблица: вердикт.which,
+        часы_продаж: вердикт.salesHours === null ? null : Math.round(вердикт.salesHours * 10) / 10,
+        часы_остатков: вердикт.stockHours === null ? null : Math.round(вердикт.stockHours * 10) / 10,
+      },
     });
-    return { hours, threshold, stale, emitted: true };
+    return { hours, threshold, stale, emitted: true, which: вердикт.which };
   }
 }

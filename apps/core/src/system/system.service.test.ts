@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { BadRequestException } from "@nestjs/common";
 import { event, systemConfig } from "@mydon/db";
 import { accountingSource, resetAccountingSourceCache } from "../sales/accounting-source";
@@ -60,15 +60,23 @@ describe("SystemService.set(): валидация тумблеров (§ config-
  */
 function стендНастроек(настройки: Record<string, string>) {
   const карта: Record<string, string> = { ...настройки };
-  const события: { type: string; payload: Record<string, unknown>; через: "tx" | "db" }[] = [];
+  const события: { type: string; payload: Record<string, unknown>; occurredAt?: Date; через: "tx" | "db" }[] = [];
   const записи: { таблица: "system_config" | "event" | "?"; через: "tx" | "db" }[] = [];
 
   const писатель = (через: "tx" | "db") => ({
     insert: (t: unknown) => ({
-      values: (v: { key?: string; value?: string; type?: string; payload?: Record<string, unknown> }) => {
+      values: (v: {
+        key?: string;
+        value?: string;
+        type?: string;
+        payload?: Record<string, unknown>;
+        occurredAt?: Date;
+      }) => {
         if (t === event) {
           записи.push({ таблица: "event", через });
-          события.push({ type: String(v.type), payload: v.payload ?? {}, через });
+          // `occurredAt` копится тоже: событие флипа обязано быть датировано
+          // моментом ЗАПИСИ, а не `now()` базы (конвенция ветки).
+          события.push({ type: String(v.type), payload: v.payload ?? {}, occurredAt: v.occurredAt, через });
           return Promise.resolve(undefined);
         }
         записи.push({ таблица: t === systemConfig ? "system_config" : "?", через });
@@ -110,12 +118,28 @@ async function сПеременной(имя: string, значение: string |
 }
 
 describe("Флип источника учёта пишет событие (R-P8b-3)", () => {
+  // ЗЕРКАЛО ЖИВО НА ВЕСЬ НАБОР. Без `STOCK_DATABASE_URL` действующий источник
+  // равен `own` при ЛЮБОЙ настройке, и «смена» перестаёт быть сменой — событие
+  // не эмитится по построению (это отдельный тест ниже). Изобразить настоящий
+  // флип нечем, кроме переменной.
+  const былURL = process.env.STOCK_DATABASE_URL;
+  before(() => {
+    process.env.STOCK_DATABASE_URL = "postgres://ro@stock/mydon";
+    resetAccountingSourceCache();
+  });
+  after(() => {
+    if (былURL === undefined) delete process.env.STOCK_DATABASE_URL;
+    else process.env.STOCK_DATABASE_URL = былURL;
+    resetAccountingSourceCache();
+  });
+
   it("смена stock → own: событие с from/to/actor", async () => {
     const { svc, события } = стендНастроек({ OURVEND_ACCOUNTING_SOURCE: "stock" });
     await svc.set("OURVEND_ACCOUNTING_SOURCE", "own", "owner");
     assert.equal(события.length, 1);
     assert.equal(события[0]!.type, "ourvend.accounting_source_changed");
-    assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", actor: "owner" });
+    assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", effective: "own", actor: "owner" });
+    assert.ok(события[0]!.occurredAt instanceof Date, "момент записи — явно, а не now() базы");
   });
 
   it("тумблер и событие — ОДНОЙ транзакцией, ни одной записи мимо неё", async () => {
@@ -153,14 +177,50 @@ describe("Флип источника учёта пишет событие (R-P8
       const { svc, события } = стендНастроек({ OURVEND_ACCOUNTING_SOURCE: "stock" });
       await svc.set("OURVEND_ACCOUNTING_SOURCE", "", "owner");
       assert.equal(события.length, 1);
-      assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", actor: "owner" });
+      assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", effective: "own", actor: "owner" });
     });
   });
 
   it("actor не указан — null, а не выдуманное имя", async () => {
     const { svc, события } = стендНастроек({ OURVEND_ACCOUNTING_SOURCE: "stock" });
     await svc.set("OURVEND_ACCOUNTING_SOURCE", "own");
-    assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", actor: null });
+    assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", effective: "own", actor: null });
+  });
+
+  it("БЕЗ ЗЕРКАЛА СОБЫТИЯ НЕТ: действующий источник не менялся (R-FW/final-4)", async () => {
+    // После шага 3 рунбука источник равен `own` при любой записи. Событие о
+    // «переключении» и немедленное сообщение в Telegram там врали бы фактом
+    // эмиссии: `accountingSource()` как отвечал `own`, так и отвечает.
+    const былУрл = process.env.STOCK_DATABASE_URL;
+    delete process.env.STOCK_DATABASE_URL;
+    resetAccountingSourceCache();
+    try {
+      const { svc, события, записи } = стендНастроек({ OURVEND_ACCOUNTING_SOURCE: "own" });
+      await svc.set("OURVEND_ACCOUNTING_SOURCE", "stock", "owner");
+      assert.equal(события.length, 0, "запись есть, а переключения нет — событию взяться неоткуда");
+      assert.deepEqual(записи, [{ таблица: "system_config", через: "tx" }], "сама настройка при этом сохраняется");
+    } finally {
+      if (былУрл === undefined) delete process.env.STOCK_DATABASE_URL;
+      else process.env.STOCK_DATABASE_URL = былУрл;
+      resetAccountingSourceCache();
+    }
+  });
+
+  it("панель видит ДЕЙСТВУЮЩИЙ источник рядом с записанным (R-FW-S5)", async () => {
+    // После шага 3 рунбука `value` покажет `stock` (так записано), а учёт уже
+    // свой — панель обязана показывать оба ответа, иначе экран катовера врёт.
+    const былУрл = process.env.STOCK_DATABASE_URL;
+    delete process.env.STOCK_DATABASE_URL;
+    resetAccountingSourceCache();
+    try {
+      const { svc } = стендНастроек({ OURVEND_ACCOUNTING_SOURCE: "stock" });
+      const строка = (await svc.effective()).find((i) => i.key === "OURVEND_ACCOUNTING_SOURCE");
+      assert.deepEqual([строка?.value, строка?.effective], ["stock", "own"]);
+    } finally {
+      if (былУрл === undefined) delete process.env.STOCK_DATABASE_URL;
+      else process.env.STOCK_DATABASE_URL = былУрл;
+      resetAccountingSourceCache();
+    }
   });
 
   it("другие тумблеры событий не порождают", async () => {

@@ -6,6 +6,7 @@ import {
   ACCOUNTING_SOURCE_CHANGED_EVENT,
   ACCOUNTING_SOURCE_KEY,
   resetAccountingSourceCache,
+  resolveAccountingSource,
 } from "../sales/accounting-source";
 import { type EffectiveItem, resolveAll, resolveEffective, specFor, validateConfig } from "./config-spec";
 
@@ -29,9 +30,20 @@ export class SystemService {
     return map;
   }
 
-  /** Действующие значения всех тумблеров: база важнее env, env важнее дефолта. */
+  /**
+   * Действующие значения всех тумблеров: база важнее env, env важнее дефолта.
+   *
+   * У `OURVEND_ACCOUNTING_SOURCE` рядом едет ДЕЙСТВУЮЩИЙ источник (R-FW-S5):
+   * приоритет «база > env > дефолт» отвечает на вопрос «что записано», а
+   * учёт решает второй слой — без `STOCK_DATABASE_URL` источник равен `own`
+   * независимо от записи. После шага 3 рунбука панель показывала бы `stock`
+   * там, где учёт уже свой. Считает то же чистое правило, что и сам учёт
+   * (`resolveAccountingSource`), — второй лесенки здесь не заводится.
+   */
   async effective(): Promise<EffectiveItem[]> {
-    return resolveAll(await this.overrides(), process.env);
+    return resolveAll(await this.overrides(), process.env).map((i) =>
+      i.key === ACCOUNTING_SOURCE_KEY ? { ...i, effective: resolveAccountingSource(i.value) } : i,
+    );
   }
 
   /**
@@ -39,7 +51,7 @@ export class SystemService {
    * Пустое значение удаляет запись (сброс к env/дефолту). Возвращает
    * обновлённый список действующих значений.
    */
-  async set(key: string, value: string, updatedBy?: string): Promise<EffectiveItem[]> {
+  async set(key: string, value: string, updatedBy?: string, now: Date = new Date()): Promise<EffectiveItem[]> {
     // BadRequestException — не голый Error: иначе ошибка валидации пользователя
     // уходила клиенту как 500, а не 400 (найдено внешним аудитом, P2).
     const err = validateConfig(key, value);
@@ -64,7 +76,15 @@ export class SystemService {
     const стало = наблюдаемый
       ? resolveEffective(наблюдаемый, trimmed === "" ? {} : { [key]: trimmed }, process.env).value
       : null;
-    const сменилось = стало !== null && стало !== было;
+    // СОБЫТИЕ — О СМЕНЕ ДЕЙСТВУЮЩЕГО ИСТОЧНИКА, А НЕ ЗАПИСИ В ТАБЛИЦЕ.
+    // Фолбэк «нет зеркала → own» в сравнение настроек не входит, и после шага 3
+    // рунбука ЛЮБОЕ сохранение (`stock` или `own`) писало бы «учёт переключен»
+    // и будило владельца немедленным сообщением, хотя `accountingSource()` как
+    // отвечал `own`, так и отвечает. Тревога, которая врёт фактом эмиссии, учит
+    // не читать тревоги.
+    const действовало = было === null ? null : resolveAccountingSource(было);
+    const действует = стало === null ? null : resolveAccountingSource(стало);
+    const сменилось = действует !== null && действует !== действовало;
 
     // Запись тумблера и событие — ОДНОЙ транзакцией (прецедент
     // `TasksService.create`). Двумя операторами отказ вставки события оставил
@@ -86,7 +106,14 @@ export class SystemService {
         await tx.insert(event).values({
           source: "system",
           type: ACCOUNTING_SOURCE_CHANGED_EVENT,
-          payload: { from: было, to: стало, actor: updatedBy ?? null },
+          // Момент ЗАПИСИ, а не `now()` базы — как у всех новых событий этой
+          // ветки: расхождение часов процесса с базой иначе датировало бы флип
+          // не теми сутками, по которым его потом ищут в журнале.
+          occurredAt: now,
+          // `from`/`to` — записанные значения (их владелец и видит в панели),
+          // `effective` — действующий источник: они расходятся ровно тогда,
+          // когда зеркала уже нет, и разницу надо сказать словами.
+          payload: { from: было, to: стало, effective: действует, actor: updatedBy ?? null },
         });
       }
     });
@@ -94,7 +121,10 @@ export class SystemService {
     // Сброс кеша ПОСЛЕ коммита, а не внутри транзакции: сбросив до коммита, мы
     // отдали бы соседнему читателю шанс перечитать ещё старое значение и снова
     // закешировать его на минуту — ровно та задержка, которую сброс и убирает.
-    if (сменилось) resetAccountingSourceCache();
+    // Кеш сбрасывается на ЛЮБУЮ правку наблюдаемого тумблера, а не только на
+    // смену действующего источника: запись могла поменять настройку, не меняя
+    // источник (нет зеркала), и держать в кеше прежнее СЛОВО незачем.
+    if (наблюдаемый && стало !== было) resetAccountingSourceCache();
     return this.effective();
   }
 

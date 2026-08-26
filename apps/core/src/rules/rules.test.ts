@@ -253,6 +253,22 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.match(n!.text, /продажи и остатки/);
   });
 
+  it("тревога называет ВСТАВШУЮ ПОЛОВИНУ снапшота (R-FW-P2)", () => {
+    // Упала одна Lot-сессия — чинить надо её, а не весь прогон агента.
+    const [n] = applyRules(
+      ctx("ourvend.snapshot_stale", { hours: 37, lastFetchedAt: "2026-09-03T19:00:00.000Z", таблица: "остатков" }),
+    );
+    assert.match(n!.text, /остатков/);
+  });
+
+  it("событие старой формы (без имени половины) читается по-прежнему", () => {
+    // В журнале уже лежат события без ключа `таблица`: правило обязано остаться
+    // осмысленным, а не печатать «(undefined)».
+    const [n] = applyRules(ctx("ourvend.snapshot_stale", { hours: 37, lastFetchedAt: null }));
+    assert.doesNotMatch(n!.text, /undefined/);
+    assert.match(n!.text, /37 ч/);
+  });
+
   it("снапшота не было ни разу — «не приходил», а не «0 ч»", () => {
     const [n] = applyRules(ctx("ourvend.snapshot_stale", { hours: null, lastFetchedAt: null }));
     assert.equal(n!.urgency, "immediate");
@@ -272,6 +288,20 @@ describe("Правила уведомлений (FR-2)", () => {
     // панели (скрипт, миграция): «(null)» в тревоге владелец прочтёт как сбой.
     const [n] = applyRules(ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", actor: null }));
     assert.doesNotMatch(n!.text, /null/);
+  });
+
+  it("смена источника называет ДЕЙСТВУЮЩИЙ источник, если он не равен записанному", () => {
+    // После шага 3 рунбука зеркала нет, и запись `stock` ничего не включает:
+    // текст без «действует» обещал бы источник, которого физически нет.
+    const [n] = applyRules(
+      ctx("ourvend.accounting_source_changed", { from: "own", to: "stock", effective: "own", actor: "owner" }),
+    );
+    assert.match(n!.text, /действует: own/);
+    // А когда совпадает — лишней скобки нет.
+    const [ровно] = applyRules(
+      ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", effective: "own", actor: "owner" }),
+    );
+    assert.doesNotMatch(ровно!.text, /действует/);
   });
 
   it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {

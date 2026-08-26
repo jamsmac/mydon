@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ourvendSaleSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
+import { ourvendSaleSnapshot, ourvendStockSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
 import { resetAccountingSourceCache } from "../sales/accounting-source";
 import { OurvendHealthService } from "./ourvend-health.service";
 import type { OurvendParityService } from "./ourvend-parity.service";
@@ -21,6 +21,12 @@ interface Мир {
   runs?: Прогон[];
   slots?: Снимок[];
   sales?: Снимок[];
+  /**
+   * Снимки ОСТАТКОВ. Не задано — те же, что у продаж: обе половины приезжают
+   * одним прогоном агента, и «по умолчанию они ровесники» — это про, а не
+   * упрощение. Задавать отдельно нужно ровно там, где половины разъехались.
+   */
+  stock?: Снимок[];
   productSales?: Снимок[];
   parity?: Паритет;
   streak?: Серия;
@@ -44,8 +50,9 @@ const ПАРИТЕТ_ОК: Паритет = {
   ok: true,
   mismatches: [],
   ownRows: 14,
+  mode: "mirror",
   note: null,
-  stock: { days: 7, checked: 14, ok: true, mismatches: [], note: null },
+  stock: { days: 7, checked: 14, ok: true, mismatches: [], withinTolerance: 0, tolerance: 3, note: null },
 };
 
 /**
@@ -65,7 +72,9 @@ function healthDb(м: Мир) {
         ? (м.slots ?? [])
         : t === ourvendSaleSnapshot
           ? (м.sales ?? [])
-          : t === productSale
+          : t === ourvendStockSnapshot
+            ? (м.stock ?? м.sales ?? [])
+            : t === productSale
             ? (м.productSales ?? [])
             : [];
 
@@ -216,8 +225,17 @@ describe("Здоровье сбора (R-P5b-8)", () => {
         mismatches: [
           { dt: "2026-08-24", serial: "2508160376", ownQty: 1, stockQty: 0, ownAmount: 1, stockAmount: 0, reason: "нет дня" },
         ],
+        mode: "mirror",
         note: "остатки: снимков остатков OurVend за период нет",
-        stock: { days: 7, checked: 0, ok: false, mismatches: [], note: "снимков остатков OurVend за период нет" },
+        stock: {
+          days: 7,
+          checked: 0,
+          ok: false,
+          mismatches: [],
+          withinTolerance: 0,
+          tolerance: 3,
+          note: "снимков остатков OurVend за период нет",
+        },
       },
     }).health(20, СЕЙЧАС);
 
@@ -325,22 +343,49 @@ describe("Свежесть учётного снапшота в отчёте (R-
     }
   };
 
-  it("режим own, снапшот старше порога — вердикт true рядом с лагом", async () => {
-    const h = await сервис({ sales: [{ at: new Date("2026-08-23T18:00:00Z") }] }).health(20, СЕЙЧАС);
-    assert.deepEqual([h.salesLagH, h.snapshotStale], [37, true]);
-  });
+  // РЕЖИМ `own` ЗАДАЁТСЯ ЯВНО, а не «получается сам» из-за незаданной
+  // переменной в процессе разработчика: с экспортированным `STOCK_DATABASE_URL`
+  // набор молча уехал бы в `stock`, где `snapshotStale` всегда `false`, и
+  // «снапшот свежий — false» остался бы зелёным по неправильной причине.
+  const вРежимеOwn = <T>(fn: () => Promise<T>): Promise<T> => сОкружением({ STOCK_DATABASE_URL: undefined }, fn);
 
-  it("режим own, снапшот свежий — false", async () => {
-    const h = await сервис({ sales: [{ at: new Date("2026-08-25T04:00:00Z") }] }).health(20, СЕЙЧАС);
-    assert.deepEqual([h.salesLagH, h.snapshotStale], [3, false]);
-  });
+  it("режим own, снапшот старше порога — вердикт true рядом с лагом", async () =>
+    вРежимеOwn(async () => {
+      const h = await сервис({ sales: [{ at: new Date("2026-08-23T18:00:00Z") }] }).health(20, СЕЙЧАС);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [37, true]);
+    }));
 
-  it("снимков нет вовсе — вердикт true, хотя лаг null", async () => {
-    // «Снимков нет» тревожнее «снимки старые»: агент не доехал ни разу, и
-    // после флипа учёт стоял бы с нуля — а лаг при этом честно `null`.
-    const h = await сервис({ sales: [] }).health(20, СЕЙЧАС);
-    assert.deepEqual([h.salesLagH, h.snapshotStale], [null, true]);
-  });
+  it("режим own, снапшот свежий — false", async () =>
+    вРежимеOwn(async () => {
+      const h = await сервис({ sales: [{ at: new Date("2026-08-25T04:00:00Z") }] }).health(20, СЕЙЧАС);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [3, false]);
+    }));
+
+  it("снимков нет вовсе — вердикт true, хотя лаг null", async () =>
+    вРежимеOwn(async () => {
+      // «Снимков нет» тревожнее «снимки старые»: агент не доехал ни разу, и
+      // после флипа учёт стоял бы с нуля — а лаг при этом честно `null`.
+      const h = await сервис({ sales: [] }).health(20, СЕЙЧАС);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [null, true]);
+    }));
+
+  it("ВСТАЛИ ТОЛЬКО ОСТАТКИ — вердикт true при свежих продажах (R-FW-P2)", async () =>
+    вРежимеOwn(async () => {
+      // Агент шлёт три отдельных POST-а, у Lot-сессии свой `try`: упавшие
+      // остатки замораживают `machine_stock`, а часы продаж при этом свежие.
+      // Пока сторож смотрел на одну таблицу, этой аварии не видел никто.
+      const h = await сервис({
+        sales: [{ at: new Date("2026-08-25T04:00:00Z") }],
+        stock: [{ at: new Date("2026-08-23T18:00:00Z") }],
+      }).health(20, СЕЙЧАС);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [3, true]);
+    }));
+
+  it("снимков ОСТАТКОВ нет вовсе — тоже застой", async () =>
+    вРежимеOwn(async () => {
+      const h = await сервис({ sales: [{ at: new Date("2026-08-25T04:00:00Z") }], stock: [] }).health(20, СЕЙЧАС);
+      assert.equal(h.snapshotStale, true);
+    }));
 
   it("режим stock — вердикт false при любом лаге: снапшот там теневой", async () => {
     await сОкружением(
@@ -353,11 +398,12 @@ describe("Свежесть учётного снапшота в отчёте (R-
     );
   });
 
-  it("вердикт считается по СЫРЫМ часам, а не по округлённому показу", async () => {
-    // 35 ч 59 м 49 с округляются до ровно 36.0 — сравнение по показанному
-    // числу сдвинуло бы границу на 11 секунд (авария 24.08.2026).
-    const h = await сервис({ sales: [{ at: new Date("2026-08-23T19:00:11Z") }] }).health(20, СЕЙЧАС);
-    assert.equal(h.salesLagH, 36, "витрина показывает округлённое число");
-    assert.equal(h.snapshotStale, false, "но решение принимается по сырым часам");
-  });
+  it("вердикт считается по СЫРЫМ часам, а не по округлённому показу", async () =>
+    вРежимеOwn(async () => {
+      // 35 ч 59 м 49 с округляются до ровно 36.0 — сравнение по показанному
+      // числу сдвинуло бы границу на 11 секунд (авария 24.08.2026).
+      const h = await сервис({ sales: [{ at: new Date("2026-08-23T19:00:11Z") }] }).health(20, СЕЙЧАС);
+      assert.equal(h.salesLagH, 36, "витрина показывает округлённое число");
+      assert.equal(h.snapshotStale, false, "но решение принимается по сырым часам");
+    }));
 });

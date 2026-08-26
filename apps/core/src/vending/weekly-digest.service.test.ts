@@ -188,7 +188,7 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   // переключать учёт.
   parityStreak: 0,
   cutoverThreshold: 7,
-  parity: { days: 7, ok: false, checked: 14, mismatches: 3, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
+  parity: { days: 7, ok: false, checked: 14, mismatches: 3, stockOk: false, stockChecked: 0, mode: "mirror", note: "снимков остатков нет" },
 };
 
 const сервис = (м: Мир, здоровьеПадает = false) => {

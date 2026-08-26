@@ -13,6 +13,7 @@ import { DB, type Db } from "../db/db.module";
 import { accountingSource, type AccountingSource } from "../sales/accounting-source";
 import { todayLocal } from "../sales/sales.service";
 import { VendingService } from "../vending/vending.service";
+import { openStockDb } from "./stock-db";
 
 type PurchaseRow = typeof purchase.$inferSelect;
 
@@ -236,14 +237,17 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
     this.cron = null;
   }
 
-  async sync(): Promise<{ purchases: number; stock: number }> {
+  async sync(now = new Date()): Promise<{ purchases: number; stock: number }> {
     const url = process.env.STOCK_DATABASE_URL;
-    const ownStock = (await accountingSource(this.db)) === "own";
+    // `now` — параметр: кеш источника учёта ключуется временем, и прогон обязан
+    // спрашивать настройку тем же моментом, каким считает всё остальное.
+    const ownStock = (await accountingSource(this.db, now)) === "own";
 
     // Подключение к БД mydon-stock нужно только пока жив stock-источник:
     // приход (purchases, до среза П3) и — при source=stock — остатки.
-    const { default: postgres } = await import("postgres");
-    const stock = url ? postgres(url, { prepare: false, max: 1, connect_timeout: 10 }) : null;
+    // Параметры подключения — общие с остальными читателями донора
+    // (`stock-db.ts`), чтобы сверка паритета ходила к нему на тех же условиях.
+    const stock = url ? await openStockDb(url) : null;
     try {
       // Приход: имя товара и единица разворачиваются сразу — у нас плоская строка.
       const [{ np }] = await this.db.select({ np: sql<number>`count(*)` }).from(purchase);
@@ -473,7 +477,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
    * владельцу нечем отличить «мы уже считаем сами» от «мы всё ещё читаем чужую
    * базу» — а именно этот вопрос он задаёт в дни поглощения.
    */
-  async summary(): Promise<{
+  async summary(now = new Date()): Promise<{
     purchases30: { count: number; total: number };
     emptyPositions: number;
     lowPositions: number;
@@ -503,7 +507,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
       emptyPositions,
       lowPositions,
       lastStockDt,
-      source: await accountingSource(this.db),
+      source: await accountingSource(this.db, now),
     };
   }
 }
