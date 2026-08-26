@@ -124,6 +124,23 @@ export function бэкфиллWhere(nameColumn: AnyPgColumn, idColumn: AnyPgColu
   return and(eq(nameColumn, raw), isNull(idColumn));
 }
 
+/**
+ * JS-ключ, под которым `idColumn` объявлен в СВОЕЙ ЖЕ таблице — тем же ключом
+ * `UPDATE` пишет новое значение через `set()`. Раньше `set({ productId: id })`
+ * был литералом рядом с `idColumn`, и связь между ними держалась только на
+ * `as never`: пятая цель, у которой это же поле называлось бы иначе, не то
+ * что не поймалась бы TS — молча обновила бы не ту колонку (или ни одной).
+ * Здесь ключ ИЩЕТСЯ в самой таблице; если `idColumn` вдруг не её колонка —
+ * исключение бросается сразу, до единого `UPDATE`, а не посреди записи.
+ */
+function idKeyOf(table: PgTable, idColumn: AnyPgColumn): string {
+  const запись = Object.entries(table as unknown as Record<string, unknown>).find(([, col]) => col === idColumn);
+  if (!запись) {
+    throw new Error("idColumn не найден среди колонок своей таблицы — сверьте BACKFILL_TARGETS");
+  }
+  return запись[0];
+}
+
 /** Бэкфилл одной цели. Все четыре устроены одинаково: имя товара + пустой `product_id`. */
 async function backfillTable(
   db: Database,
@@ -153,11 +170,12 @@ async function backfillTable(
       if (r.name !== null && резолв.has(r.name)) updated += 1;
     }
   } else {
+    const idKey = idKeyOf(table, idColumn);
     // Одно UPDATE на ИМЯ, а не на строку: имён десятки, строк сотни.
     for (const [raw, id] of резолв) {
       const res = (await db
         .update(table as never)
-        .set({ productId: id } as never)
+        .set({ [idKey]: id } as never)
         .where(бэкфиллWhere(nameColumn, idColumn, raw) as never)
         .returning({ id: idColumn })) as unknown[];
       updated += res.length;
@@ -174,9 +192,16 @@ export async function backfillProductIds(
   db: Database,
   opts: { dryRun?: boolean } = {},
 ): Promise<Record<BackfillTarget["key"], BackfillResult>> {
+  // `orderBy(id)`: индекс каталога (`productIndex`) собирается «последний
+  // побеждает» по НОРМАЛИЗОВАННОМУ ключу, а Postgres без ORDER BY не обязан
+  // отдавать строки в одном и том же порядке двум запросам подряд. Пара
+  // алиасов-«близнецов» на РАЗНЫЕ товары («Coca Cola» / «coca  cola» —
+  // уникальность в БД побайтовая, а не нормализованная) иначе могла бы дать
+  // разного победителя в `--dry-run` и в записи. Порядок сам по себе не
+  // «правильный» — важно, что он ОДИН И ТОТ ЖЕ на каждый прогон.
   const [products, aliases] = await Promise.all([
-    db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct),
-    db.select({ productId: vendingAlias.productId, alias: vendingAlias.alias }).from(vendingAlias),
+    db.select({ id: vendingProduct.id, name: vendingProduct.name }).from(vendingProduct).orderBy(vendingProduct.id),
+    db.select({ productId: vendingAlias.productId, alias: vendingAlias.alias }).from(vendingAlias).orderBy(vendingAlias.id),
   ]);
 
   const dryRun = opts.dryRun ?? false;
@@ -211,6 +236,17 @@ async function main(): Promise<void> {
     console.error("DATABASE_URL не задан — бэкфилл product_id выполнять негде.");
     process.exit(1);
   }
+  // Режим и адрес — ДО первого запроса. Сосед по тому же разделу DEPLOY.md
+  // (`import-stock-history.js`) без флагов НЕ пишет — противоположное
+  // умолчание рядом легко перепутать, а мышечная память «без флагов =
+  // безопасный отчёт» здесь даёт молчаливый UPDATE по проду. Печатаем ТОЛЬКО
+  // host (`new URL(url).host`), никогда полную строку DATABASE_URL с
+  // паролем — та же застава, что у смоука П8a.
+  console.log(
+    dryRun
+      ? `Режим: ПРИМЕРКА (--dry-run), записи не будет. Цель: ${new URL(url).host}`
+      : `Режим: ЗАПИСЬ${apply ? " (--apply)" : " (без флагов — умолчание)"}. Цель: ${new URL(url).host}`,
+  );
   // БЕЗ ФЛАГОВ — ЗАПИСЬ, как было. `ci.yml:82` зовёт скрипт без аргументов, и
   // весь смысл того шага — исполнить настоящий UPDATE против настоящего
   // Postgres (сценарий N2). Дефолт `--dry-run` сделал бы этот шаг зелёным и

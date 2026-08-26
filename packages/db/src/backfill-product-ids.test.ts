@@ -90,8 +90,12 @@ function стенд(имена: Partial<Record<string, (string | null)[]>>) {
   const db = {
     select: (_поля?: Record<string, unknown>) => ({
       from: (t: unknown) => {
-        if (t === vendingProduct) return Promise.resolve(ТОВАРЫ);
-        if (t === vendingAlias) return Promise.resolve(АЛИАСЫ);
+        // Каталог теперь читается с `orderBy(id)` (детерминированность
+        // «последний побеждает» между примеркой и записью) — стенд обязан
+        // подставлять `orderBy`, иначе настоящий вызов упадёт на `.orderBy is
+        // not a function`, а не молча смолчит расхождение со стендом.
+        if (t === vendingProduct) return { orderBy: () => Promise.resolve(ТОВАРЫ) };
+        if (t === vendingAlias) return { orderBy: () => Promise.resolve(АЛИАСЫ) };
         const ключ =
           t === vendingStock ? "stock" : t === machineSlot ? "slots" : t === vendingRefill ? "refills" : "stockCounts";
         const строки = (имена[ключ] ?? []).map((name) => ({ name }));
@@ -145,6 +149,17 @@ describe("Бэкфилл product_id: четыре цели, включая за�
       const выражение = текстSQL(бэкфиллWhere(t.nameColumn, t.idColumn, "Snickers"));
       assert.match(выражение, /product_id.*is null/, `${t.key}: без этого UPDATE задел бы уже привязанные строки`);
       assert.match(выражение, /product_name/, `${t.key}: фильтр по имени не пропал`);
+    }
+  });
+
+  it("idColumn каждой цели — колонка её же таблицы: set() пишет по найденному ключу, а не по захардкоженному имени", () => {
+    // Страховка для idKeyOf: если бы у пятой цели idColumn принадлежал не той
+    // таблице, что и `table`, UPDATE молча обновил бы не ту колонку (или ни
+    // одной) под литералом `productId`. Здесь связь проверена по всем
+    // текущим целям — по объекту таблицы, а не по имени поля на веру.
+    for (const t of BACKFILL_TARGETS) {
+      const запись = Object.entries(t.table as unknown as Record<string, unknown>).find(([, col]) => col === t.idColumn);
+      assert.ok(запись, `${t.key}: idColumn обязана быть колонкой своей же таблицы`);
     }
   });
 });
