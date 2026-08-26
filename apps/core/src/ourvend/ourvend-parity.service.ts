@@ -4,6 +4,7 @@ import {
   machineSerialSql,
   normalizeProductName,
   parityStreak,
+  PARITY_STREAK_WINDOW,
   tashkentDay,
   tashkentDayStartOf,
   type ParityStreak,
@@ -32,7 +33,7 @@ export const PARITY_EVENT = "ourvend.parity";
 export const CUTOVER_READY_EVENT = "ourvend.cutover_ready";
 
 /**
- * Сколько событий паритета читаем ради счёта серии.
+ * НИЖНИЙ ПОЛ окна чтения событий паритета — 60 строк.
  *
  * 14 суток окна показа плюс запас на ПОВТОРНЫЕ прогоны в одни сутки: ручной
  * `daily()` после починки — это уточнение вердикта дня, а не новый день, но
@@ -40,6 +41,20 @@ export const CUTOVER_READY_EVENT = "ourvend.cutover_ready";
  * занижать её ровно в тот день, когда сверку чинили руками.
  */
 export const PARITY_SCAN_LIMIT = 60;
+
+/**
+ * Сколько строк журнала читать при данном пороге.
+ *
+ * ОКНО ЧТЕНИЯ ОБЯЗАНО ЗАВИСЕТЬ ОТ ПОРОГА. `CUTOVER_GREEN_DAYS` правится в
+ * панели «Система» и сверху ничем не ограничен (`posNumber` в `config-spec`):
+ * поставь владелец 90 — при фиксированных 60 строках серия упёрлась бы в 60 и
+ * гейт не открылся бы НИКОГДА, причём молча. Берём порог плюс окно показа
+ * (`PARITY_STREAK_WINDOW`), но не меньше пола: `days` обязаны заполниться даже
+ * при пороге в один день.
+ */
+export function parityScanLimit(threshold: number): number {
+  return Math.max(PARITY_SCAN_LIMIT, Math.trunc(threshold) + PARITY_STREAK_WINDOW);
+}
 
 export interface ParityDayRow {
   dt: string;
@@ -353,15 +368,21 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
    * прогона тестов.
    */
   async streak(now = new Date()): Promise<ParityStreak> {
-    const [строки, порог] = await Promise.all([
-      this.db
-        .select({ occurredAt: event.occurredAt, payload: event.payload })
-        .from(event)
-        .where(eq(event.type, PARITY_EVENT))
-        .orderBy(desc(event.occurredAt))
-        .limit(PARITY_SCAN_LIMIT),
-      cutoverThreshold(this.db, this.log),
-    ]);
+    // Порог читается ПЕРВЫМ, а не рядом в `Promise.all`: от него зависит,
+    // сколько строк журнала вообще имеет смысл читать (см. `parityScanLimit`).
+    // Один лишний round-trip к `system_config` раз в сутки дешевле, чем гейт,
+    // который молча не открывается при пороге больше окна.
+    const порог = await cutoverThreshold(this.db, this.log);
+    const строки = await this.db
+      .select({ occurredAt: event.occurredAt, payload: event.payload })
+      .from(event)
+      // Фильтр по ТИПУ — в SQL, а не в памяти: `event` общая на весь Core
+      // (`sales.sync` один даёт ~150 строк в сутки), и чтение «свежих N любых»
+      // с отсевом после забило бы окно чужими событиями, а серия навсегда
+      // встала бы в ноль. Индекс `event_type_time_idx` ровно под это.
+      .where(eq(event.type, PARITY_EVENT))
+      .orderBy(desc(event.occurredAt))
+      .limit(parityScanLimit(порог));
     return parityStreak(
       строки.map((r) => ({
         occurredAt: r.occurredAt,
@@ -414,7 +435,17 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
         (p.note ? ` (${p.note})` : ""),
     );
 
-    await this.сигналКатовера(now);
+    // СВОЙ catch: вердикт уже записан и красным не стал. Упади сигнал под общим
+    // ловцом крона, в логе осталось бы «Паритет OurVend не посчитался» — то
+    // есть неправда о сверке вместо правды о сигнале, и чинить пошли бы не то.
+    try {
+      await this.сигналКатовера(now);
+    } catch (e: unknown) {
+      this.log.warn(
+        `Сигнал готовности к катоверу не отработал (сам паритет посчитан и записан): ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /**

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { event, systemConfig } from "@mydon/db";
-import { tashkentDay } from "@mydon/shared";
+import { PARITY_STREAK_WINDOW, tashkentDay } from "@mydon/shared";
+import type { SQL } from "drizzle-orm";
+// Настоящий рендер условия в SQL: проверяем ФИЛЬТР ЗАПРОСА, а не то, что
+// заглушка сумела вычитать из внутренностей drizzle.
+import { PgDialect } from "drizzle-orm/pg-core";
 import { resetAccountingSourceCache } from "../sales/accounting-source";
 import {
   computeParity,
@@ -9,6 +13,7 @@ import {
   CUTOVER_READY_EVENT,
   OurvendParityService,
   PARITY_EVENT,
+  parityScanLimit,
   type ParityDayRow,
   type ParityStockRow,
 } from "./ourvend-parity.service";
@@ -376,8 +381,15 @@ describe("Сигнал «можно переключать» (R-P8b-2)", () => {
      */
     зелёныхДо: number;
     источник: "stock" | "own";
-    /** Что уже лежит в журнале (дедуп сигнала). */
+    /**
+     * Что уже лежит в журнале: и свои события (дедуп сигнала), и ЧУЖИЕ —
+     * `event` общая на весь Core, и окно серии обязано их не видеть.
+     */
     уже?: { type: string; occurredAt: Date }[];
+    /** `CUTOVER_GREEN_DAYS` в `system_config`: от него зависит окно чтения. */
+    порог?: string;
+    /** Вставка события этого типа падает — проверка, что сигнал не топит вердикт. */
+    ломатьВставку?: string;
   }
 
   /** Значения-параметры из условия drizzle: стабу надо увидеть и тип, и границу суток. */
@@ -430,7 +442,14 @@ describe("Сигнал «можно переключать» (R-P8b-2)", () => {
       события.push({ id: `u${i}`, type: e.type, occurredAt: e.occurredAt, payload: {} });
     }
 
-    const настройки = [{ key: "OURVEND_ACCOUNTING_SOURCE", value: м.источник }];
+    const настройки = [
+      { key: "OURVEND_ACCOUNTING_SOURCE", value: м.источник },
+      ...(м.порог ? [{ key: "CUTOVER_GREEN_DAYS", value: м.порог }] : []),
+    ];
+    /** Условия `where` по журналу событий — чтобы проверить фильтр В SQL, а не в памяти. */
+    const условия: unknown[] = [];
+    /** Значения `limit` по журналу событий — окно чтения обязано расти с порогом. */
+    const лимиты: number[] = [];
     const записано: { type: string; payload: Record<string, unknown>; occurredAt?: Date }[] = [];
 
     // Обе половины сверки сходятся: событие, которое напишет `daily()`, обязано
@@ -449,6 +468,7 @@ describe("Сигнал «можно переключать» (R-P8b-2)", () => {
           let текущие: unknown[] = t === event ? [...события] : t === systemConfig ? настройки : [];
           const chain: Record<string, unknown> = {};
           chain.where = (cond?: unknown) => {
+            if (t === event) условия.push(cond);
             const п = параметры(cond);
             const типы = п.filter((v): v is string => typeof v === "string");
             const даты = п.filter((v): v is Date => v instanceof Date);
@@ -465,13 +485,17 @@ describe("Сигнал «можно переключать» (R-P8b-2)", () => {
             текущие = [...(текущие as Событие[])].sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
             return chain;
           };
-          chain.limit = async (n: number) => текущие.slice(0, n);
+          chain.limit = async (n: number) => {
+            if (t === event) лимиты.push(n);
+            return текущие.slice(0, n);
+          };
           chain.then = (res: (v: unknown) => unknown) => Promise.resolve(текущие).then(res);
           return chain;
         },
       }),
       insert: () => ({
         values: async (v: { type: string; payload: Record<string, unknown>; occurredAt?: Date }) => {
+          if (v.type === м.ломатьВставку) throw new Error("база отказала на вставке события");
           записано.push(v);
           // Событие немедленно видно и счёту серии, и дедупу — как в настоящей
           // базе. Дата берётся из самой строки: датируй стаб реальным «сейчас»
@@ -487,7 +511,7 @@ describe("Сигнал «можно переключать» (R-P8b-2)", () => {
     } as never;
 
     const реестр = { machineRegistry: async () => ({ notInService: new Map(), nameBySerial: new Map() }) } as never;
-    return { svc: new OurvendParityService(db, реестр), записано };
+    return { svc: new OurvendParityService(db, реестр), записано, условия, лимиты };
   };
 
   it("порог взят — событие с числом дней и днём начала серии", async () => {
@@ -519,6 +543,70 @@ describe("Сигнал «можно переключать» (R-P8b-2)", () => {
     const { svc, записано } = стендПаритета({ зелёныхДо: 6, источник: "stock" });
     await svc.daily(сегодня);
     assert.equal(записано.filter((e) => e.type === PARITY_EVENT).length, 1);
+    assert.equal(записано.filter((e) => e.type === CUTOVER_READY_EVENT).length, 0);
+  });
+
+  it("окно серии фильтруется по типу В SQL: чужое событие в те же сутки её не красит", async () => {
+    // `event` — общая таблица Core: один `sales.sync` даёт ~150 строк в сутки.
+    // Убери фильтр — и окно в 60 строк забьётся чужими событиями, а «позднейший
+    // за сутки» сделает день красным: серия навсегда встанет в ноль.
+    const { svc, условия } = стендПаритета({
+      зелёныхДо: 7,
+      источник: "stock",
+      // ПОЗЖЕ вердикта тех же суток — именно так чужое событие подменило бы день.
+      уже: [{ type: "sales.sync", occurredAt: new Date("2026-08-31T20:00:00+05:00") }],
+    });
+
+    const серия = await svc.streak(сегодня);
+
+    // 1. Фильтр стоит В ЗАПРОСЕ: текст SQL называет колонку, параметр — тип.
+    const { sql: текст, params } = new PgDialect().sqlToQuery(условия[0] as SQL);
+    assert.match(текст, /"type" = \$\d/, `фильтр типа не доехал до SQL: ${текст}`);
+    assert.ok(params.includes(PARITY_EVENT), `в параметрах запроса нет ${PARITY_EVENT}`);
+    // 2. И результат чужого события не видит.
+    assert.deepEqual([серия.greenDays, серия.days.length], [6, 6]);
+  });
+
+  it("вчерашний cutover_ready сегодняшний не глушит: дедуп ровно по суткам", async () => {
+    // Расширь кто-нибудь окно дедупа до недели — сигнал стал бы недельным, и
+    // владелец узнал бы о готовности через шесть дней после того, как она
+    // наступила (а серия к тому времени могла и оборваться).
+    const { svc, записано } = стендПаритета({
+      зелёныхДо: 7,
+      источник: "stock",
+      уже: [{ type: CUTOVER_READY_EVENT, occurredAt: new Date("2026-08-31T23:00:00+05:00") }],
+    });
+
+    await svc.daily(сегодня);
+
+    assert.equal(записано.filter((e) => e.type === CUTOVER_READY_EVENT).length, 1);
+  });
+
+  it("окно чтения растёт с порогом: 90 зелёных дней в 60 строк не поместятся", async () => {
+    // `CUTOVER_GREEN_DAYS` правится в панели и сверху ничем не ограничен. При
+    // фиксированных 60 строках серия упёрлась бы в 60 и гейт не открылся бы
+    // НИКОГДА — молча.
+    assert.equal(parityScanLimit(7), 60, "маленький порог не сужает окно ниже пола");
+    assert.equal(parityScanLimit(90), 90 + PARITY_STREAK_WINDOW);
+
+    const { svc, лимиты } = стендПаритета({ зелёныхДо: 1, источник: "stock", порог: "90" });
+    await svc.streak(сегодня);
+    assert.equal(лимиты[0], 90 + PARITY_STREAK_WINDOW, "порог из настроек до запроса не доехал");
+  });
+
+  it("падение сигнала не выдаёт себя за падение сверки", async () => {
+    // Вердикт УЖЕ записан и красным не стал. Упади сигнал под общим ловцом
+    // крона — в логе осталось бы «Паритет OurVend не посчитался», то есть
+    // неправда о сверке вместо правды о сигнале.
+    const { svc, записано } = стендПаритета({
+      зелёныхДо: 7,
+      источник: "stock",
+      ломатьВставку: CUTOVER_READY_EVENT,
+    });
+
+    await svc.daily(сегодня);
+
+    assert.equal(записано.filter((e) => e.type === PARITY_EVENT).length, 1, "вердикт обязан уцелеть");
     assert.equal(записано.filter((e) => e.type === CUTOVER_READY_EVENT).length, 0);
   });
 

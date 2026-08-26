@@ -120,6 +120,34 @@ describe("Серия зелёных дней паритета (R-P8b-1, R-P8b-2)
     assert.equal(s.days[0]!.ok, false);
   });
 
+  it("порог 0 не открывает катовер на пустом журнале: пол в один день стоит и здесь", () => {
+    // Функция экспортируется наружу, и её числа рисуют «✅ можно переключать» в
+    // боте и панели. Без пола `0 >= 0` дало бы разрешение на катовер при
+    // ПУСТОМ журнале — гейт, снятый опиской в настройке.
+    const пусто = parityStreak([], 0, "2026-08-26");
+    assert.deepEqual([пусто.greenDays, пусто.threshold, пусто.readyForCutover], [0, 1, false]);
+    // И зажатый порог уезжает В ОТВЕТ: витрина сравнивает поля сама, и «0 из 0»
+    // она прочла бы как «можно».
+    const один = parityStreak([дн("2026-08-26")], -5, "2026-08-26");
+    assert.deepEqual([один.greenDays, один.threshold, один.readyForCutover], [1, 1, true]);
+    assert.equal(parityStreak([], Number.NaN, "2026-08-26").threshold, 1);
+  });
+
+  it("lastRed может лежать ВНЕ окна показа — витрине это подписано в типе", () => {
+    // 20 дней подряд, самый старый — красный: строк показа 14, и красной среди
+    // них нет вовсе, а «когда в последний раз рвалось» ответить надо.
+    const дни = Array.from({ length: 20 }, (_, i) => дн(`2026-08-${String(i + 6).padStart(2, "0")}`));
+    дни[0] = красный("2026-08-06");
+    const s = parityStreak(дни, 7, "2026-08-25");
+    assert.equal(s.days.length, 14);
+    assert.equal(s.lastRed, "2026-08-06");
+    assert.equal(
+      s.days.some((d) => d.date === s.lastRed),
+      false,
+      "красный день за пределами окна — искать его в days бессмысленно",
+    );
+  });
+
   it("журнал пуст — ноль, а не «готовы»", () => {
     const s = parityStreak([], 7, "2026-08-26");
     assert.deepEqual([s.greenDays, s.readyForCutover, s.days, s.lastRed, s.since], [0, false, [], null, null]);
