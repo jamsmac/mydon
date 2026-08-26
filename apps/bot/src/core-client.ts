@@ -300,6 +300,25 @@ export class CoreError extends Error {
 }
 
 /**
+ * Текст 4xx для человека — Core уже объяснил, что не так, придумывать своё
+ * сообщение незачем (см. `redeemInvite`, откуда этот разбор тела выделен).
+ *
+ * `null` для всего, что не 4xx (сеть/5xx — там текст ничего не объясняет,
+ * повтор уместен) и для тела без `message` — вызывающий сам решает, каким
+ * общим текстом это заменить.
+ */
+export function coreClientErrorMessage(err: unknown): string | null {
+  if (!(err instanceof CoreError) || !err.isClientError) return null;
+  try {
+    const parsed = JSON.parse(err.body) as { message?: string | string[] };
+    const msg = Array.isArray(parsed.message) ? parsed.message[0] : parsed.message;
+    return msg ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Выбранная карточка — не автомат.
  *
  * Отдельный класс, а не пустая строка: «карточка не отдалась» и «карточка не
@@ -905,15 +924,8 @@ export class CoreClient {
       // Обещание «Core уже объяснил, что не так» теперь выполняется буквально:
       // из тела 4xx достаётся message Nest-исключения, а не техническое
       // «Core ответил 400 на /people/redeem», которое никому не помогает.
-      if (err instanceof CoreError && err.isClientError) {
-        try {
-          const parsed = JSON.parse(err.body) as { message?: string | string[] };
-          const msg = Array.isArray(parsed.message) ? parsed.message[0] : parsed.message;
-          if (msg) return { error: msg };
-        } catch {
-          // тело не JSON — общий текст ниже
-        }
-      }
+      const msg = coreClientErrorMessage(err);
+      if (msg) return { error: msg };
       return { error: err instanceof Error ? err.message : "Не получилось" };
     }
   }
