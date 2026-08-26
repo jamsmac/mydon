@@ -365,6 +365,27 @@ const ЧТЕНИЕ = [
     },
   },
   { path: "/entities?limit=999999", ждёмОтказ: true },
+  {
+    // П8b: тумблеры катовера обязаны доехать до панели «Система» ЧЕРЕЗ HTTP.
+    // Ключ, которого нет в белом списке, панель просто не покажет, и владелец
+    // будет искать переключатель, которого в интерфейсе нет.
+    path: "/system/config",
+    проверить: (о) => {
+      const карта = new Map((о ?? []).map((i) => [i.key, i]));
+      for (const [ключ, дефолт] of [
+        ["OURVEND_ACCOUNTING_SOURCE", "stock"],
+        ["CUTOVER_GREEN_DAYS", "7"],
+        ["SNAPSHOT_STALE_HOURS", "36"],
+        ["SNAPSHOT_RETENTION_DAYS", "180"],
+      ]) {
+        const i = карта.get(ключ);
+        if (!i) throw new Error(`в /system/config нет ключа ${ключ}`);
+        if (i.source === "default" && i.value !== дефолт) throw new Error(`${ключ}=${i.value}, ждали ${дефолт}`);
+      }
+      if (карта.get("OURVEND_ACCOUNTING_SOURCE").kind !== "select") throw new Error("источник учёта — не select");
+      if (о.some((i) => /API_KEY|TOKEN|SECRET|PASSWORD/i.test(i.key))) throw new Error("в тумблерах секрет");
+    },
+  },
 ];
 
 /**

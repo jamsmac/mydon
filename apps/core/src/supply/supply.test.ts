@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { systemConfig } from "@mydon/db";
+import { resetAccountingSourceCache } from "../sales/accounting-source";
 import { buildPurchaseUpserts, buildStockUpserts, fillFromStock, SupplyService } from "./supply.service";
 
 describe("Снабжение: подготовка строк источника", () => {
@@ -100,34 +102,60 @@ describe("Сводка снабжения: источник остатков в�
    * Плитка «остатки на такое-то число» в обоих режимах выглядит одинаково, и
    * без этого поля владельцу нечем отличить «считаем сами» от «читаем чужую
    * базу» — а в дни поглощения это его первый вопрос.
+   *
+   * После R-P8b-3 источник решает не одна переменная, а правило: нет зеркала —
+   * `own` по определению, есть зеркало — настройка панели (её здесь нет, значит
+   * дефолт `stock`).
    */
   const сводка = async (env: Record<string, string | undefined>) => {
-    const было = process.env.OURVEND_ACCOUNTING_SOURCE;
+    const было: Record<string, string | undefined> = {};
     for (const [k, v] of Object.entries(env)) {
+      было[k] = process.env[k];
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+    resetAccountingSourceCache();
     try {
       const db = {
         select: () => ({
-          from: () => ({
-            where: () => Promise.resolve([{ count: 0, total: "0" }]),
-            leftJoin: () => ({ where: () => ({ orderBy: () => Promise.resolve([]) }) }),
-          }),
+          from: (t: unknown) =>
+            t === systemConfig
+              ? Promise.resolve([])
+              : {
+                  where: () => Promise.resolve([{ count: 0, total: "0" }]),
+                  leftJoin: () => ({ where: () => ({ orderBy: () => Promise.resolve([]) }) }),
+                },
         }),
       } as never;
       return await new SupplyService(db).summary();
     } finally {
-      if (было === undefined) delete process.env.OURVEND_ACCOUNTING_SOURCE;
-      else process.env.OURVEND_ACCOUNTING_SOURCE = было;
+      for (const [k, v] of Object.entries(было)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      resetAccountingSourceCache();
     }
   };
 
-  it("по умолчанию — stock (чтение БД mydon-stock)", async () => {
-    assert.equal((await сводка({ OURVEND_ACCOUNTING_SOURCE: undefined })).source, "stock");
+  it("зеркало живо, настройки нет — stock", async () => {
+    assert.equal(
+      (await сводка({ STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: undefined }))
+        .source,
+      "stock",
+    );
   });
 
-  it("после переключения — own (собственный снапшот)", async () => {
-    assert.equal((await сводка({ OURVEND_ACCOUNTING_SOURCE: "own" })).source, "own");
+  it("зеркало живо, настройка own — own (собственный снапшот)", async () => {
+    assert.equal(
+      (await сводка({ STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "own" })).source,
+      "own",
+    );
+  });
+
+  it("зеркала нет — own, и это не «настройка не задана», а «читать нечего»", async () => {
+    assert.equal(
+      (await сводка({ STOCK_DATABASE_URL: undefined, OURVEND_ACCOUNTING_SOURCE: undefined })).source,
+      "own",
+    );
   });
 });

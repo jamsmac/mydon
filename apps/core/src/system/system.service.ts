@@ -1,7 +1,12 @@
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
-import { systemConfig } from "@mydon/db";
+import { event, systemConfig } from "@mydon/db";
 import { sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import {
+  ACCOUNTING_SOURCE_CHANGED_EVENT,
+  ACCOUNTING_SOURCE_KEY,
+  resetAccountingSourceCache,
+} from "../sales/accounting-source";
 import { type EffectiveItem, resolveAll, validateConfig } from "./config-spec";
 
 /**
@@ -40,6 +45,11 @@ export class SystemService {
     const err = validateConfig(key, value);
     if (err) throw new BadRequestException(err);
 
+    // Действующее значение ДО записи — только для наблюдаемого тумблера.
+    // Сравниваем действующее, а не сырой ввод: сброс тумблера (пустая строка)
+    // — это тоже смена, если под ним лежало другое значение из env.
+    const было = key === ACCOUNTING_SOURCE_KEY ? await this.valueOf(key) : null;
+
     const trimmed = value.trim();
     if (trimmed === "") {
       await this.db.delete(systemConfig).where(sql`${systemConfig.key} = ${key}`);
@@ -52,6 +62,29 @@ export class SystemService {
           set: { value: trimmed, updatedBy: updatedBy ?? null, updatedAt: new Date() },
         });
     }
-    return this.effective();
+
+    // Одно-единственное имя ключа зашито здесь, а не заведён общий механизм
+    // «наблюдаемых тумблеров»: событий такого рода в системе ровно одно, и
+    // обобщение на одном случае даёт лишний слой без второго потребителя.
+    const действующие = await this.effective();
+    if (было !== null) {
+      const стало = действующие.find((i) => i.key === ACCOUNTING_SOURCE_KEY)?.value ?? "";
+      if (стало !== было) {
+        // Сброс кеша ДО события: следующий прогон синка не должен ещё минуту
+        // читать прежний источник — ради этого кеш и умеет инвалидироваться.
+        resetAccountingSourceCache();
+        await this.db.insert(event).values({
+          source: "system",
+          type: ACCOUNTING_SOURCE_CHANGED_EVENT,
+          payload: { from: было, to: стало, actor: updatedBy ?? null },
+        });
+      }
+    }
+    return действующие;
+  }
+
+  /** Действующее значение одного тумблера (для сравнения «до/после»). */
+  private async valueOf(key: string): Promise<string> {
+    return (await this.effective()).find((i) => i.key === key)?.value ?? "";
   }
 }

@@ -10,7 +10,8 @@ import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, st
 import { desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
-import { accountingSource, todayLocal } from "../sales/sales.service";
+import { accountingSource, type AccountingSource } from "../sales/accounting-source";
+import { todayLocal } from "../sales/sales.service";
 
 type PurchaseRow = typeof purchase.$inferSelect;
 
@@ -166,8 +167,9 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
 
   constructor(@Inject(DB) private readonly db: Db) {}
 
-  onModuleInit(): void {
-    if (!process.env.STOCK_DATABASE_URL && accountingSource() !== "own") {
+  // async: источник учёта читается из настроек (R-P8b-3); Nest дожидается промиса.
+  async onModuleInit(): Promise<void> {
+    if (!process.env.STOCK_DATABASE_URL && (await accountingSource(this.db)) !== "own") {
       this.log.log("STOCK_DATABASE_URL не задан — синк снабжения выключен.");
       return;
     }
@@ -188,7 +190,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
 
   async sync(): Promise<{ purchases: number; stock: number }> {
     const url = process.env.STOCK_DATABASE_URL;
-    const ownStock = accountingSource() === "own";
+    const ownStock = (await accountingSource(this.db)) === "own";
     if (!url && !ownStock) return { purchases: 0, stock: 0 };
 
     // Подключение к БД mydon-stock нужно только пока жив stock-источник:
@@ -407,7 +409,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
     emptyPositions: number;
     lowPositions: number;
     lastStockDt: string | null;
-    source: ReturnType<typeof accountingSource>;
+    source: AccountingSource;
   }> {
     const d30 = new Date();
     d30.setDate(d30.getDate() - 30);
@@ -432,7 +434,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
       emptyPositions,
       lowPositions,
       lastStockDt,
-      source: accountingSource(),
+      source: await accountingSource(this.db),
     };
   }
 }

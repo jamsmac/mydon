@@ -51,6 +51,22 @@ const posNumber = (v: string): string | null => {
   return Number.isFinite(n) && n >= 1 ? null : "нужно число от 1 (окно в сутках; ноль не значит «без окна»)";
 };
 
+/**
+ * Число не ниже пола — для окна РЕТЕНЦИИ, а не для порога тревоги.
+ *
+ * Пол здесь не про «ноль бессмыслен» (это `posNumber`), а про то, что окно
+ * ретенции РЕЖЕТ данные под уже работающими отчётами: `SNAPSHOT_RETENTION_DAYS
+ * = 30` панель бы приняла, а мёртвый сток (окно до 180 суток) назавтра считал
+ * бы по обрезанной истории и молча показывал другую картину. Число ниже пола —
+ * не смелая настройка, а тихая потеря истории, и вернуть её нечем.
+ */
+const atLeast =
+  (min: number, hint: string) =>
+  (v: string): string | null => {
+    const n = Number(v.replace(",", "."));
+    return Number.isFinite(n) && n >= min ? null : hint;
+  };
+
 const urlOrEmpty = (v: string): string | null =>
   /^https?:\/\/\S+$/.test(v) ? null : "нужен URL вида http(s)://host:port";
 
@@ -222,6 +238,45 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     fallback: "6",
     help: "Сбор ходит раз в 3 часа: 6 ч = два пропущенных прогона подряд.",
     validate: posNumber,
+  },
+  // ── Вендинг: катовер учёта OurVend (П8b, R-P8b-3/7) ──
+  {
+    key: "OURVEND_ACCOUNTING_SOURCE",
+    label: "Вендинг: источник учёта OurVend",
+    kind: "select",
+    options: ["stock", "own"],
+    fallback: "stock",
+    help:
+      "stock — читаем БД mydon-stock (зеркало). own — свой снапшот (агент ourvend:accounting). " +
+      "Переключать ПОСЛЕ 7 зелёных дней паритета (бот «сверка» → строка серии). " +
+      "Без STOCK_DATABASE_URL значение игнорируется: там own по определению.",
+    validate: oneOf(["stock", "own"]),
+  },
+  {
+    key: "CUTOVER_GREEN_DAYS",
+    label: "Вендинг: зелёных дней паритета до переключения",
+    kind: "number",
+    fallback: "7",
+    help: "Семь суток подряд без расхождений и по продажам, и по остаткам.",
+    validate: posNumber,
+  },
+  {
+    key: "SNAPSHOT_STALE_HOURS",
+    label: "Вендинг: порог застоя учётного снапшота, часов",
+    kind: "number",
+    fallback: "36",
+    help:
+      "Агент снимает кабинет раз в сутки (08:05). 36 ч = пропущен один съём с запасом; " +
+      "на 72 ч учёт встанет молча.",
+    validate: posNumber,
+  },
+  {
+    key: "SNAPSHOT_RETENTION_DAYS",
+    label: "Вендинг: хранить историю снимков, дней",
+    kind: "number",
+    fallback: "180",
+    help: "Ниже 180 нельзя: столько просит отчёт о мёртвом стоке (DEAD_STOCK_DAYS_MAX).",
+    validate: atLeast(90, "нужно не меньше 90 (окна отчётов доходят до 180 суток)"),
   },
   // ── GLOBERENT: комиссия менеджера — у донора PROMACH жили ТРИ формулы,
   // перенесены все три (packages/shared/globerent/commission.ts); какая

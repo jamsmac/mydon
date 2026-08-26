@@ -12,6 +12,7 @@ import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, st
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
+import { accountingSource } from "./accounting-source";
 
 type SaleRow = typeof sale.$inferSelect;
 
@@ -82,16 +83,6 @@ export function buildUpserts(
   return { values, quarantined };
 }
 
-/**
- * Источник учётного потока OurVend (П2 плана поглощения):
- * "stock" — чтение БД mydon-stock (как раньше), "own" — собственный снапшот
- * (таблица ourvend_sale_snapshot, наполняет агент ourvend:accounting).
- * Переключение — после 7 зелёных дней паритета (GET /ourvend/parity).
- */
-export function accountingSource(env: NodeJS.ProcessEnv = process.env): "stock" | "own" {
-  return (env.OURVEND_ACCOUNTING_SOURCE ?? "").trim().toLowerCase() === "own" ? "own" : "stock";
-}
-
 /** Сегодняшняя дата по-ташкентски (в контейнере TZ=Asia/Tashkent). */
 export function todayLocal(now = new Date()): string {
   const p = (n: number) => String(n).padStart(2, "0");
@@ -126,13 +117,16 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
 
   constructor(@Inject(DB) private readonly db: Db) {}
 
-  onModuleInit(): void {
+  // async: источник учёта теперь читается из настроек (R-P8b-3), а Nest ждёт
+  // возвращённый промис — старт Core не побежит дальше с недочитанным режимом.
+  async onModuleInit(): Promise<void> {
+    const source = await accountingSource(this.db);
     const url = process.env.STOCK_DATABASE_URL;
-    if (accountingSource() === "stock" && (!url || url.length === 0)) {
+    if (source === "stock" && (!url || url.length === 0)) {
       this.log.log("STOCK_DATABASE_URL не задан — синк продаж выключен.");
       return;
     }
-    if (accountingSource() === "own") {
+    if (source === "own") {
       this.log.log("Источник продаж: собственный снапшот OurVend (ourvend_sale_snapshot).");
     }
     // Раз в 10 минут + сразу на старте. Ошибка синка не роняет Core.
@@ -160,7 +154,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     const [{ n }] = await this.db.select({ n: sql<number>`count(*)` }).from(sale);
     const firstRun = Number(n) === 0;
 
-    if (accountingSource() === "own") {
+    if ((await accountingSource(this.db)) === "own") {
       const rows = await this.db
         .select({
           dt: sql<string>`${ourvendSaleSnapshot.dt}::text`,
@@ -275,7 +269,8 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
         payload: {
           upserted,
           привязано_задним_числом: linkedCount,
-          из: accountingSource() === "own" ? "ourvend_sale_snapshot (свой)" : "mydon-stock/ourvend",
+          из:
+            (await accountingSource(this.db)) === "own" ? "ourvend_sale_snapshot (свой)" : "mydon-stock/ourvend",
         },
       });
       this.log.log(`Продажи синхронизированы: ${upserted} строк.`);
@@ -291,7 +286,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     lastSaleDt: string | null;
     configured: boolean;
   }> {
-    const configured = accountingSource() === "own" || Boolean(process.env.STOCK_DATABASE_URL);
+    const configured = (await accountingSource(this.db)) === "own" || Boolean(process.env.STOCK_DATABASE_URL);
     const today = todayLocal();
     const y = new Date();
     y.setDate(y.getDate() - 1);
