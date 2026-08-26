@@ -12,6 +12,9 @@ import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, st
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
+import { lastSnapshotAt, snapshotIsStale, snapshotStaleThreshold } from "../ourvend/sync-runs";
+import { openStockDb } from "../supply/stock-db";
+import { accountingSource, type AccountingSource } from "./accounting-source";
 
 type SaleRow = typeof sale.$inferSelect;
 
@@ -82,16 +85,6 @@ export function buildUpserts(
   return { values, quarantined };
 }
 
-/**
- * Источник учётного потока OurVend (П2 плана поглощения):
- * "stock" — чтение БД mydon-stock (как раньше), "own" — собственный снапшот
- * (таблица ourvend_sale_snapshot, наполняет агент ourvend:accounting).
- * Переключение — после 7 зелёных дней паритета (GET /ourvend/parity).
- */
-export function accountingSource(env: NodeJS.ProcessEnv = process.env): "stock" | "own" {
-  return (env.OURVEND_ACCOUNTING_SOURCE ?? "").trim().toLowerCase() === "own" ? "own" : "stock";
-}
-
 /** Сегодняшняя дата по-ташкентски (в контейнере TZ=Asia/Tashkent). */
 export function todayLocal(now = new Date()): string {
   const p = (n: number) => String(n).padStart(2, "0");
@@ -126,14 +119,42 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
 
   constructor(@Inject(DB) private readonly db: Db) {}
 
-  onModuleInit(): void {
-    const url = process.env.STOCK_DATABASE_URL;
-    if (accountingSource() === "stock" && (!url || url.length === 0)) {
-      this.log.log("STOCK_DATABASE_URL не задан — синк продаж выключен.");
-      return;
+  // async: источник учёта читается из настроек (R-P8b-3), а Nest ждёт
+  // возвращённый промис.
+  async onModuleInit(): Promise<void> {
+    // Момент старта — ОДИН на весь хук: `accountingSource` кеширует по времени,
+    // и два `new Date()` внутри одного хука были бы двумя разными «сейчас».
+    const now = new Date();
+    // ЧТЕНИЕ НАСТРОЙКИ — ПОД СВОИМ `catch`, И ЭТО НЕ ПЕРЕСТРАХОВКА.
+    // `accountingSource` идёт в `system_config`, то есть в базу. Отклонённый
+    // `onModuleInit` прерывает bootstrap Nest целиком: не стартует НИЧЕГО — ни
+    // `/ourvend/health`, ни бот, ни кроны, — и всё это ради ОДНОЙ СТРОКИ ЛОГА
+    // (сам `sync()` читает источник заново). База на старте недоступна не
+    // теоретически: `DATABASE_URL` может смотреть на внешний Postgres, где
+    // `depends_on: service_healthy` из compose не работает вовсе. Раньше сбой
+    // БД на старте стоил одну строку `warn` из `.catch` первого синка — так и
+    // оставляем.
+    let source: AccountingSource | null = null;
+    try {
+      source = await accountingSource(this.db, now);
+    } catch (e: unknown) {
+      this.log.warn(
+        `Источник продаж: не удалось прочитать настройку — ${e instanceof Error ? e.message : String(e)}. ` +
+          `Синк разберётся сам на первом прогоне.`,
+      );
     }
-    if (accountingSource() === "own") {
-      this.log.log("Источник продаж: собственный снапшот OurVend (ourvend_sale_snapshot).");
+    const url = process.env.STOCK_DATABASE_URL;
+    // «Синк продаж выключен» больше не бывает, и прежняя ветка этого условия
+    // была недостижимой: `stock` без `STOCK_DATABASE_URL` невозможен по
+    // определению (`resolveAccountingSource` в такой ситуации отвечает `own`).
+    // Оставь её — и лог обещал бы состояние, в которое код не попадает, а
+    // читатель искал бы «выключенный синк» в проде, где он всегда включён.
+    if (source === "own") {
+      this.log.log(
+        url
+          ? "Источник продаж: собственный снапшот OurVend (ourvend_sale_snapshot); зеркало ещё живо, но не читается."
+          : "Источник продаж: собственный снапшот OurVend (ourvend_sale_snapshot); зеркало погашено.",
+      );
     }
     // Раз в 10 минут + сразу на старте. Ошибка синка не роняет Core.
     this.cron = new Cron("*/10 * * * *", { timezone: "Asia/Tashkent" }, () => {
@@ -156,11 +177,11 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
    * всё целиком. Источник — либо БД mydon-stock, либо собственный снапшот
    * (форма строк одинаковая, дальше их не различить — и это цель П2).
    */
-  private async fetchSourceRows(): Promise<StockSaleRow[] | null> {
+  private async fetchSourceRows(now: Date): Promise<StockSaleRow[] | null> {
     const [{ n }] = await this.db.select({ n: sql<number>`count(*)` }).from(sale);
     const firstRun = Number(n) === 0;
 
-    if (accountingSource() === "own") {
+    if ((await accountingSource(this.db, now)) === "own") {
       const rows = await this.db
         .select({
           dt: sql<string>`${ourvendSaleSnapshot.dt}::text`,
@@ -178,8 +199,8 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     const url = process.env.STOCK_DATABASE_URL;
     if (!url) return null;
     // Отдельное короткоживущее подключение: чужая база не должна держать пул.
-    const { default: postgres } = await import("postgres");
-    const stock = postgres(url, { prepare: false, max: 1, connect_timeout: 10 });
+    // Параметры — общие для всех читателей донора (`supply/stock-db.ts`).
+    const stock = await openStockDb(url);
     try {
       // Свежее: всё, что источник трогал за последние 3 дня — дневные строки
       // дообновляются в течение дня, а перезапись upsert-ом безопасна.
@@ -197,9 +218,12 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /** Забрать свежее из источника и слить к нам (upsert по дню+автомату+товару). */
-  async sync(): Promise<{ upserted: number }> {
+  async sync(now = new Date()): Promise<{ upserted: number }> {
     {
-      const all = await this.fetchSourceRows();
+      // `now` — параметр: источник учёта кешируется по времени, и прогон,
+      // запущенный тестом «в другой момент», обязан спрашивать настройку тем же
+      // моментом, каким считает всё остальное.
+      const all = await this.fetchSourceRows(now);
       if (all === null || all.length === 0) return { upserted: 0 };
 
       const machines = await this.db
@@ -275,7 +299,8 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
         payload: {
           upserted,
           привязано_задним_числом: linkedCount,
-          из: accountingSource() === "own" ? "ourvend_sale_snapshot (свой)" : "mydon-stock/ourvend",
+          из:
+            (await accountingSource(this.db, now)) === "own" ? "ourvend_sale_snapshot (свой)" : "mydon-stock/ourvend",
         },
       });
       this.log.log(`Продажи синхронизированы: ${upserted} строк.`);
@@ -283,20 +308,73 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
-  /** Сводка для дашборда: сегодня, вчера, 30 дней. */
-  async summary(): Promise<{
+  /**
+   * Сводка для дашборда: сегодня, вчера, 30 дней.
+   *
+   * `now` — параметр, а не `new Date()` внутри: `configured` меряет свежесть
+   * снапшота, и «37 часов назад» иначе нечем проверить тестом.
+   */
+  async summary(now: Date = new Date()): Promise<{
     today: { qty: number; amount: number };
     yesterday: { qty: number; amount: number };
     days30: { qty: number; amount: number };
     lastSaleDt: string | null;
     configured: boolean;
+    /**
+     * ДЕЙСТВУЮЩИЙ источник учёта — рядом с `configured`, потому что без него
+     * флаг не переводится в текст.
+     *
+     * `configured: false` означает РАЗНОЕ в двух режимах: в `stock` — «не задан
+     * `STOCK_DATABASE_URL`», в `own` — «учётный снапшот не обновляется, продажи
+     * стоят». Витрины печатали общий текст «синк не настроен на сервере
+     * (STOCK_DATABASE_URL)» — то есть после шага 1 рунбука предлагали владельцу
+     * настроить переменную, которую шаг 3 того же рунбука УДАЛЯЕТ. Одно поле
+     * рядом дешевле второго флага: витрина выбирает текст по режиму.
+     */
+    source: AccountingSource;
   }> {
-    const configured = accountingSource() === "own" || Boolean(process.env.STOCK_DATABASE_URL);
-    const today = todayLocal();
-    const y = new Date();
+    /**
+     * `configured` — «ИСТОЧНИК ЧИТАЕМ», а не «источник выбран».
+     *
+     * Витрины (`reports-overview.tsx`, `sales-view.tsx`, бот `sales-brief.ts`)
+     * рисуют по нему «появится после сбора». Пока флаг считался как
+     * «`own` ИЛИ есть переменная», он был ТОЖДЕСТВЕННО ИСТИННЫМ: в режиме `own`
+     * первое слагаемое всегда верно, а `stock` без переменной невозможен
+     * (`resolveAccountingSource`). То есть плитка обещала «настроено» и в тот
+     * день, когда агент снапшота лежал третьи сутки, синк честно отдавал
+     * `{ upserted: 0 }` и учёт стоял молча — ровно тот случай, ради которого
+     * флаг и заведён.
+     *
+     * Теперь вопрос задаётся по режиму: у зеркала «читаем» = переменная есть, у
+     * своего снапшота «читаем» = он свежий. Свежесть — той же функцией, что у
+     * сторожа и отчёта (`snapshotIsStale`), иначе плитка гасла бы на своей
+     * границе, а тревога приходила бы на другой.
+     */
+    const источник = await accountingSource(this.db, now);
+    const configured =
+      источник === "own"
+        ? // Свежесть — ПО ПОЛОВИНЕ ПРОДАЖ, и только по ней. Сторож и
+          // `OurvendHealth.snapshotStale` смотрят на ОБЕ половины (R-FW-P2) и
+          // умеют назвать вставшую словами; этот флаг — нет: его читают три
+          // витрины ПРОДАЖ («снапшот не пришёл» на чипе журнала, «снапшота за
+          // сутки нет» в пустом журнале и у бота), и погасить их из-за
+          // упавшей Lot-сессии остатков значит сказать владельцу неправду о
+          // продажах, которые в этот момент едут. Половина остатков остаётся
+          // за сторожем, который тревожит по адресу.
+          !snapshotIsStale(
+            (await lastSnapshotAt(this.db)).sales,
+            now,
+            await snapshotStaleThreshold(this.db, this.log),
+          )
+        : Boolean(process.env.STOCK_DATABASE_URL);
+    // `now` ЦЕЛИКОМ, а не наполовину: доккомментарий обещает «параметр, а не
+    // `new Date()` внутри», и «сегодня» по стенным часам при заданном `now`
+    // сделало бы из теста проверку «примерно тех же суток».
+    const today = todayLocal(now);
+    const y = new Date(now);
     y.setDate(y.getDate() - 1);
     const yesterday = todayLocal(y);
-    const days30Since = daysAgoLocal(30);
+    const days30Since = daysAgoLocal(30, now);
 
     const [row] = await this.db
       .select({
@@ -316,6 +394,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
       days30: { qty: Number(row?.mQty ?? 0), amount: Number(row?.mAmt ?? 0) },
       lastSaleDt: row?.last ?? null,
       configured,
+      source: источник,
     };
   }
 

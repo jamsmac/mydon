@@ -1,4 +1,4 @@
-import { core, type OurvendHealth } from "../lib/core";
+import { core, type OurvendHealth, type ParityStreak } from "../lib/core";
 import { count, plural, when } from "../lib/format";
 
 /** Серия отказов, с которой сбор считается сломанным (правило `ourvend.sync_failed_streak`). */
@@ -23,6 +23,12 @@ function LagPill({ hours, fine = false }: { hours: number | null; fine?: boolean
   if (hours === null) return <span className="pill bad">снимков нет</span>;
   const текст = fine && hours * 60 < 90 ? `${один(hours * 60)} мин` : `${один(hours)} ч`;
   return <span className={`pill ${hours > HEALTH_LAG_HOURS ? "bad" : ""}`}>{текст}</span>;
+}
+
+/** «2026-08-06» → «06.08.2026». Сутки уже ташкентские — режем строкой. */
+function деньРу(dt: string): string {
+  const [y, m, d] = dt.split("-");
+  return y && m && d ? `${d}.${m}.${y}` : dt;
 }
 
 /** Вердикт одной половины паритета: что написать на пилюле и красить ли её. */
@@ -79,7 +85,7 @@ function разборПаритета(p: OurvendHealth["parity"]): { прода�
  * учётной дорожкой. Смысл секции ровно один: 12 отказов подряд с 24.08 никто
  * не заметил, потому что смотреть было некуда.
  */
-export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
+export function OurvendHealthCard({ health, streak = null }: { health: OurvendHealth; streak?: ParityStreak | null }) {
   const слотыЧ = health.slotsLagMin === null ? null : health.slotsLagMin / 60;
   // Отсутствие снимков (`null`) тревогой само по себе не считается: это уже
   // сказано красной пилюлей «снимков нет» в своей строке, и поднимать из-за
@@ -102,7 +108,37 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
       стар(слотыЧ) ||
       стар(health.salesLagH) ||
       стар(health.productSaleLagH) ||
-      застой);
+      застой ||
+      // Застой учётного снапшота (R-P8b-5) — ГОТОВЫЙ вердикт Core, а не
+      // ещё один лаг с порогом: в режиме `stock` поле всегда `false`, и
+      // сравнивать `salesLagH` с чем-то самим здесь нельзя (см. комментарий
+      // у `OurvendHealth.snapshotStale` в `@mydon/shared`).
+      health.snapshotStale);
+  // Зеркала донора нет вовсе (`mode: "retired"`, шаг 3 рунбука): сверять не с
+  // чем, серия не считается, звать переключать учёт — тем более, он уже свой
+  // (R-FW-P3). Режим `own-vs-donor` — это ЕСТЬ сверка (свой снапшот против
+  // таблиц донора), и печатается она как обычная.
+  const зеркалаНет = health.parity.mode === "retired";
+  // Серия зелёных дней паритета к порогу катовера (R-P8b-2): владельца
+  // интересует «сколько ещё ждать», порог — из ответа Core
+  // (`cutoverThreshold`, настройка `CUTOVER_GREEN_DAYS`), своей семёрки здесь нет.
+  const катоверГотов = !зеркалаНет && health.parityStreak >= health.cutoverThreshold;
+  /**
+   * «последний красный день: 06.08.2026» — ФАКТ, а не приговор серии (P4).
+   *
+   * `lastRed` ищется по всему прочитанному журналу, а показывается окно в две
+   * недели, поэтому дата почти всегда лежит ВНЕ окна: прод-красный 25.08.2026
+   * продержится в поле до конца октября, хотя серия пойдёт с 26-го. Читать
+   * его как «серия сорвана» значило бы держать гейт закрытым днём, который
+   * серия давно перешагнула. `null` — красных не было вовсе, и молчать об
+   * этом нельзя: владелец гадал бы, чист журнал или строку забыли.
+   */
+  const красныйДень =
+    streak === null
+      ? ""
+      : streak.lastRed === null
+        ? " · красных дней не было"
+        : ` · последний красный день: ${деньРу(streak.lastRed)}`;
 
   const успех =
     health.lastSuccessAt === null
@@ -148,6 +184,19 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
             <span className="pill bad">
               {health.staleHours === null ? "успехов не было" : `сбор стоит ${count(health.staleHours)} ч`}
             </span>
+          </div>
+        )}
+
+        {/* Своей красной строкой рядом с блоком застоя сбора: обе про одно
+            «данные не едут» (R-P8b-5). В режиме `stock` `snapshotStale`
+            всегда `false` — строки нет вовсе, гасить нечего, Core уже решил. */}
+        {health.snapshotStale && (
+          <div className="row">
+            <div className="t">
+              <b>Учётный снапшот</b>
+              <small>продажи и остатки считаются по своей базе — снимок с кабинета OurVend встал</small>
+            </div>
+            <span className="pill bad">учётный снапшот не обновляется</span>
           </div>
         )}
 
@@ -201,11 +250,45 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
           <div className="t">
             <b>Паритет со складским учётом</b>
             <small>
-              {`продажи и остатки за ${count(health.parity.days)} дн.${health.parity.note ? ` · ${health.parity.note}` : ""}`}
+              {зеркалаНет
+                ? "зеркало донора погашено — учёт ведёт своя база"
+                : `продажи и остатки за ${count(health.parity.days)} дн.${health.parity.note ? ` · ${health.parity.note}` : ""}`}
             </small>
           </div>
-          <span className={`pill ${паритет.продажи.bad ? "bad" : ""}`}>{паритет.продажи.текст}</span>
-          <span className={`pill ${паритет.остатки.bad ? "bad" : ""}`}>{паритет.остатки.текст}</span>
+          {/* Половины паритета на погашенном зеркале печатать НЕЛЬЗЯ:
+              «продажи: сверять нечего · остатки: снимков за период нет»
+              читается как авария сбора, хотя это штатный конец катовера.
+              Пилюля НЕЙТРАЛЬНАЯ — ни `bad`, ни `ok`: чинить нечего и
+              переключать нечего (R-FW-P3). */}
+          {зеркалаНет ? (
+            <span className="pill">сверка с зеркалом завершена — сравнивать больше не с чем</span>
+          ) : (
+            <>
+              <span className={`pill ${паритет.продажи.bad ? "bad" : ""}`}>{паритет.продажи.текст}</span>
+              <span className={`pill ${паритет.остатки.bad ? "bad" : ""}`}>{паритет.остатки.текст}</span>
+            </>
+          )}
+        </div>
+
+        <div className="row">
+          <div className="t">
+            <b>Серия зелёных дней паритета</b>
+            <small>
+              {зеркалаНет
+                ? "гейт катовера отработал — считать серию больше не по чему"
+                : `подряд без расхождений — гейт переключения учёта на свою базу${красныйДень}`}
+            </small>
+          </div>
+          <span className={`pill ${катоверГотов ? "ok" : ""}`}>
+            {зеркалаНет
+              ? "серия больше не считается — зеркало погашено"
+              : /* Прилагательное склоняется по числу: день 1 КАЖДОЙ серии —
+                   самый частый момент, когда это читают, и «1 зелёных дн.»
+                   режет глаз ровно в той строке, что отвечает «сколько ещё
+                   ждать». «дн.» — сокращение, у него форма одна. */
+                `${count(health.parityStreak)} ${plural(health.parityStreak, "зелёный", "зелёных", "зелёных")} дн. подряд из ${count(health.cutoverThreshold)}`}
+            {катоверГотов ? " — ✅ можно переключать" : ""}
+          </span>
         </div>
       </div>
 
@@ -239,7 +322,13 @@ export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
  * приём, что у `ShrinkageAlertsFailed`.
  */
 export async function OurvendHealthSection() {
-  const health = await core.ourvendHealth().catch(() => null);
+  // Серия по дням — ОТДЕЛЬНЫЙ роут: здоровье несёт счёт зелёных дней, а дату
+  // последнего красного дня (P4) отдаёт только он. Его отказ секцию не
+  // отменяет: подписи «последний красный день» просто нет.
+  const [health, streak] = await Promise.all([
+    core.ourvendHealth().catch(() => null),
+    core.ourvendParityStreak().catch(() => null),
+  ]);
   if (health === null) {
     return (
       <>
@@ -248,5 +337,5 @@ export async function OurvendHealthSection() {
       </>
     );
   }
-  return <OurvendHealthCard health={health} />;
+  return <OurvendHealthCard health={health} streak={streak} />;
 }

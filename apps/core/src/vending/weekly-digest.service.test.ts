@@ -181,8 +181,14 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   staleThresholdH: 6,
   slotsLagMin: 42,
   salesLagH: 27,
+  // Режим `stock` (зеркало ещё живо) — застой снапшота там ничего не значит.
+  snapshotStale: false,
   productSaleLagH: 27,
-  parity: { days: 7, ok: false, checked: 14, mismatches: 3, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
+  // Серия оборвана: сводка недели, в которой сбор падал, не может звать
+  // переключать учёт.
+  parityStreak: 0,
+  cutoverThreshold: 7,
+  parity: { days: 7, ok: false, checked: 14, mismatches: 3, stockOk: false, stockChecked: 0, mode: "mirror", note: "снимков остатков нет" },
 };
 
 const сервис = (м: Мир, здоровьеПадает = false) => {

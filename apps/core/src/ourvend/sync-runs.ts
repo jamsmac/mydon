@@ -1,14 +1,17 @@
 import type { Logger } from "@nestjs/common";
 import { desc, inArray } from "drizzle-orm";
-import { vendingSyncRun } from "@mydon/db";
+import { ourvendSaleSnapshot, ourvendStockSnapshot, vendingSyncRun } from "@mydon/db";
 import { tashkentInstant, type OurvendSyncRun } from "@mydon/shared";
 import type { Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
 
 /**
- * Три вопроса о сборе, которые задают ДВОЕ: отчёт о здоровье
- * (`OurvendHealthService`) и сторож застоя (`SyncStaleService`) — два к журналу
- * прогонов и один к настройкам.
+ * Вопросы о сборе и об учётном снапшоте, которые задают ДВОЕ и БОЛЬШЕ: отчёт о
+ * здоровье (`OurvendHealthService`), сторож застоя (`SyncStaleService`),
+ * счётчик серии паритета (`OurvendParityService`) и синк продаж
+ * (`SalesService`) — два к журналу прогонов, один к последнему снапшоту, два к
+ * арифметике давности и три к настройкам (пороги застоя сбора, катовера и
+ * застоя снапшота).
  *
  * Отдельный модуль, а не метод сервиса, по двум причинам. Первая: сторож не
  * может звать `health()` — внутри отчёта весь сырой SQL паритета, и гонять его
@@ -120,4 +123,208 @@ export function rawStaleHours(lastSuccessAt: string | null, now: Date): number |
   if (!at) return null;
   const мс = Math.max(0, now.getTime() - at.getTime());
   return мс / 3_600_000;
+}
+
+/** Порог катовера, если настройки нет: семь зелёных дней паритета (§П8 плана поглощения). */
+export const CUTOVER_GREEN_DAYS_FALLBACK = 7;
+
+/**
+ * Сколько зелёных дней паритета подряд открывают переключение источника учёта.
+ *
+ * ЗДЕСЬ, А НЕ У СЧЁТЧИКА, ПО ТОЙ ЖЕ ПРИЧИНЕ, ЧТО И `syncStaleThreshold`.
+ * Порог уезжает наружу (`OurvendHealth.cutoverThreshold`,
+ * `ParityStreak.threshold`), и бот с панелью рисуют «✅ можно переключать»
+ * сравнением `parityStreak >= cutoverThreshold`. Витрина обязана показывать
+ * ровно то число, по которому эмитент будит владельца событием
+ * `ourvend.cutover_ready`, — своя семёрка у каждого читателя разойдётся с
+ * базой в тот же день, когда владелец подвинет `CUTOVER_GREEN_DAYS` в панели
+ * «Система».
+ *
+ * ПОЛ В ОДИН ДЕНЬ. `readIntSetting` пропускает ноль как осознанное значение,
+ * но «ноль зелёных дней» означает разрешение на катовер при пустом журнале —
+ * то есть гейт, снятый опиской в настройке. Дробь усекается: день здесь
+ * считается целым, «2.5 дня» — описка, а не пожелание.
+ */
+export async function cutoverThreshold(db: Db, logger?: Logger): Promise<number> {
+  const настройка = await readIntSetting(db, "CUTOVER_GREEN_DAYS", CUTOVER_GREEN_DAYS_FALLBACK, logger);
+  return Math.max(1, Math.trunc(настройка));
+}
+
+/** Допуск сверки остатков, если настройки нет: три штуки (R-FW-P1a). */
+export const STOCK_PARITY_TOLERANCE_FALLBACK = 3;
+
+/**
+ * ДОПУСК СВЕРКИ ОСТАТКОВ, ШТУК (R-FW-P1a) — почему он вообще есть.
+ *
+ * Обе стороны сверки остатков — точечные чтения ОДНОГО ЖИВОГО ЭКРАНА кабинета
+ * разными агентами: зеркало снимает в 07:50, наш агент — в 08:05. Пятнадцать
+ * минут между ними — это рабочее утро автомата: любая продажа в этом окне
+ * делала бы «расхождение» из физически верных чисел. Прод-замер: чистые сутки
+ * получаются примерно в двух случаях из трёх, то есть без допуска семь зелёных
+ * дней подряд не наступили бы почти никогда — и молча.
+ *
+ * ПОЛ — НОЛЬ, И ЭТО ЗНАЧЕНИЕ, А НЕ МУСОР: `STOCK_PARITY_TOLERANCE=0`
+ * означает осознанное «сверять посимвольно», прежнее поведение до этой правки.
+ * Дробь усекается: допуск считается в штуках.
+ */
+export async function stockParityTolerance(db: Db, logger?: Logger): Promise<number> {
+  const настройка = await readIntSetting(db, "STOCK_PARITY_TOLERANCE", STOCK_PARITY_TOLERANCE_FALLBACK, logger);
+  return Math.max(0, Math.trunc(настройка));
+}
+
+/** Порог застоя учётного снапшота, если настройки нет: агент снимает кабинет раз в сутки (08:05). */
+export const SNAPSHOT_STALE_HOURS_FALLBACK = 36;
+
+/**
+ * Порог застоя УЧЁТНОГО СНАПШОТА, часов — одно число у сторожа и у витрины
+ * (R-P8b-5), ровно по той же причине, что и `syncStaleThreshold`.
+ *
+ * ЭТО ДРУГОЙ ПОРОГ, А НЕ ВТОРОЕ ИМЯ ТОГО ЖЕ. `SYNC_STALE_HOURS` меряет ПРЯМОЙ
+ * СБОР (слоты, раз в 3 часа), этот — СУТОЧНЫЙ СЪЁМ КАБИНЕТА агентом
+ * `ourvend:accounting` (08:05). Числа расходятся на порядок: шесть часов
+ * молчания коллектора — авария, шесть часов без нового снимка кабинета —
+ * обычное утро. Один порог на двоих будил бы владельца каждый день до обеда.
+ *
+ * ПОЛ В ОДИН ЧАС — как у соседа: `readIntSetting` пропускает ноль как
+ * осознанное значение, но порог «0 часов» означает тревогу в КАЖДЫЙ прогон
+ * крона (48 сообщений в сутки при живом агенте).
+ */
+export async function snapshotStaleThreshold(db: Db, logger?: Logger): Promise<number> {
+  const настройка = await readIntSetting(db, "SNAPSHOT_STALE_HOURS", SNAPSHOT_STALE_HOURS_FALLBACK, logger);
+  return Math.max(1, Math.trunc(настройка));
+}
+
+/**
+ * Свежесть учётного снапшота — ДВЕ ПОЛОВИНЫ ОТДЕЛЬНО (R-FW-P2).
+ *
+ * `null` в поле — снимков этой половины нет ВОВСЕ.
+ */
+export interface SnapshotFreshness {
+  /** Последний `fetched_at` в `ourvend_sale_snapshot`. */
+  sales: Date | null;
+  /** Последний `fetched_at` в `ourvend_stock_snapshot`. */
+  stock: Date | null;
+}
+
+/**
+ * Момент последнего съёма учётного снапшота — ПО ОБЕИМ ТАБЛИЦАМ (R-FW-P2).
+ *
+ * ПОЧЕМУ НЕ ОДНА `ourvend_sale_snapshot`. Агент `ourvend:accounting` шлёт ТРИ
+ * отдельных POST-а (продажи двумя пачками, остатки третьей), и половины падают
+ * независимо: у Lot-сессии свой `try`. Пока сторож смотрел только на продажи,
+ * упавшая Lot-сессия замораживала `machine_stock` при свежих часах — тревоги
+ * не было вовсе, а в режиме `own` это остановившийся боевой учёт остатков.
+ * Обратная сторона той же монеты: сутки без единой продажи у обеих машин
+ * (такие в журнале есть) не двигают `fetched_at` продаж, и один взгляд на
+ * продажи дал бы ЛОЖНУЮ тревогу через 36 ч.
+ *
+ * Двумя запросами «последняя строка», а не `greatest(max(), max())`: и то и
+ * другое идёт по индексу, но строку видно целиком, заглушка юнит-теста
+ * исполняет ровно тот же путь, что и Postgres (то же правило, что у трёх лагов
+ * в отчёте о здоровье), а главное — вердикту нужны обе даты ПО ОТДЕЛЬНОСТИ:
+ * тревога обязана назвать, какая именно половина встала.
+ */
+export async function lastSnapshotAt(db: Db): Promise<SnapshotFreshness> {
+  const [продажи] = await db
+    .select({ at: ourvendSaleSnapshot.fetchedAt })
+    .from(ourvendSaleSnapshot)
+    .orderBy(desc(ourvendSaleSnapshot.fetchedAt))
+    .limit(1);
+  const [остатки] = await db
+    .select({ at: ourvendStockSnapshot.fetchedAt })
+    .from(ourvendStockSnapshot)
+    .orderBy(desc(ourvendStockSnapshot.fetchedAt))
+    .limit(1);
+  return { sales: продажи?.at ?? null, stock: остатки?.at ?? null };
+}
+
+/**
+ * ВЕРДИКТ «учётный снапшот встал» — ОДНА функция на трёх читателей: сторож
+ * (`SyncStaleService.checkSnapshot`), отчёт (`OurvendHealth.snapshotStale`) и
+ * флаг «источник читаем» (`SalesService.summary().configured`).
+ *
+ * Считает по СЫРЫМ часам (`rawStaleHours`), а не по округлённому `salesLagH`:
+ * «35 ч 59 м 49 с» округляются до ровно 36.0, и сравнение по показанному
+ * числу сдвинуло бы границу на 11 секунд раньше настоящей — авария 24.08.2026
+ * началась ровно на таком сдвиге у соседнего порога.
+ *
+ * `null` (снимков нет вовсе) — ЗАСТОЙ, а не «ноль часов»: пустая таблица
+ * означает, что агент не доехал ни разу, и после флипа учёт стоял бы с нуля.
+ */
+export function snapshotIsStale(lastFetchedAt: Date | string | null | undefined, now: Date, threshold: number): boolean {
+  const at = lastFetchedAt instanceof Date ? lastFetchedAt.toISOString() : (lastFetchedAt ?? null);
+  const сырые = rawStaleHours(at, now);
+  return сырые === null || сырые >= threshold;
+}
+
+/** Как назвать половину снапшота в тексте тревоги и правила. */
+export const SNAPSHOT_SIDE_SALES = "продаж";
+export const SNAPSHOT_SIDE_STOCK = "остатков";
+
+/**
+ * ВЕРДИКТ ПО ОБЕИМ ПОЛОВИНАМ СНАПШОТА (R-FW-P2) — одна функция на трёх
+ * читателей: сторож (`SyncStaleService.checkSnapshot`), отчёт
+ * (`OurvendHealth.snapshotStale`) и флаг «источник читаем»
+ * (`SalesService.summary().configured`).
+ *
+ * ЗАСТОЙ, ЕСЛИ ВСТАЛА ЛЮБАЯ ИЗ ДВУХ. В режиме `own` продажи кормят `sale`, а
+ * остатки — `machine_stock`; молчание любой половины дольше трёх суток
+ * останавливает свою таблицу молча, без ошибки и без события. Поэтому «или», а
+ * не «и», а `which` называет виновную половину словами: «снапшот не
+ * обновлялся» без имени таблицы владелец прочитал бы как поломку служебной
+ * записи, а чинить надо конкретного агента.
+ *
+ * `hours` — возраст ХУДШЕЙ (самой старой) половины, считается по СЫРЫМ часам
+ * той же функцией `snapshotIsStale`. `null` — снимков этой половины нет вовсе,
+ * и это не ноль часов.
+ */
+export function snapshotStaleVerdict(
+  freshness: SnapshotFreshness,
+  now: Date,
+  threshold: number,
+): {
+  stale: boolean;
+  /** «продаж», «остатков» или «продаж и остатков». `null` — застоя нет. */
+  which: string | null;
+  /** Часы худшей (самой старой) половины. `null` — её снимков не было вовсе. */
+  hours: number | null;
+  /** Момент худшей половины (ISO). `null` — снимков не было вовсе. */
+  lastFetchedAt: string | null;
+  salesHours: number | null;
+  stockHours: number | null;
+} {
+  const iso = (d: Date | null) => (d ? d.toISOString() : null);
+  const продажиСтоят = snapshotIsStale(freshness.sales, now, threshold);
+  const остаткиСтоят = snapshotIsStale(freshness.stock, now, threshold);
+  const salesHours = rawStaleHours(iso(freshness.sales), now);
+  const stockHours = rawStaleHours(iso(freshness.stock), now);
+
+  const which =
+    продажиСтоят && остаткиСтоят
+      ? `${SNAPSHOT_SIDE_SALES} и ${SNAPSHOT_SIDE_STOCK}`
+      : продажиСтоят
+        ? SNAPSHOT_SIDE_SALES
+        : остаткиСтоят
+          ? SNAPSHOT_SIDE_STOCK
+          : null;
+
+  // Худшая половина — та, что старше; `null` (снимков не было вовсе) хуже
+  // любого числа. Считается ВСЕГДА, а не только при застое: `hours` — это поле
+  // ПОКАЗА («сколько уже не приходило»), и обнулять его в тишину значило бы
+  // отдавать витрине `null` там, где снимки просто свежие.
+  const кандидаты: { hours: number | null; at: string | null }[] = [
+    { hours: salesHours, at: iso(freshness.sales) },
+    { hours: stockHours, at: iso(freshness.stock) },
+  ];
+  const худшая =
+    кандидаты.find((k) => k.hours === null) ?? [...кандидаты].sort((a, b) => (b.hours ?? 0) - (a.hours ?? 0))[0];
+
+  return {
+    stale: which !== null,
+    which,
+    hours: худшая ? худшая.hours : null,
+    lastFetchedAt: худшая ? худшая.at : null,
+    salesHours,
+    stockHours,
+  };
 }

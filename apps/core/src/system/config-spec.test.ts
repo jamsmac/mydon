@@ -105,6 +105,56 @@ describe("Ключ сторожа сбора П8a (R-P8a-6)", () => {
   });
 });
 
+describe("Ключи катовера П8b (R-P8b-3, R-P8b-7)", () => {
+  it("OURVEND_ACCOUNTING_SOURCE: select с ПУСТЫМ вариантом первым, дефолт stock", () => {
+    // Пустой пункт — это задокументированный откат шага 1 катовера («очистить
+    // поле панели»). Без него редактор рисовал бы только `stock`/`own`, и
+    // инструкция отката была бы невыполнима дословно: выбор `stock` — ДРУГОЕ
+    // действие (в базе появляется строка, а не исчезает).
+    assert.equal(specFor("OURVEND_ACCOUNTING_SOURCE")?.fallback, "stock");
+    assert.deepEqual(specFor("OURVEND_ACCOUNTING_SOURCE")?.options, ["", "stock", "own"]);
+    assert.equal(specFor("OURVEND_ACCOUNTING_SOURCE")?.options?.[0], "", "пустой вариант обязан быть ПЕРВЫМ");
+    assert.equal(validateConfig("OURVEND_ACCOUNTING_SOURCE", "own"), null);
+    assert.equal(validateConfig("OURVEND_ACCOUNTING_SOURCE", ""), null, "пусто = сброс к env/дефолту");
+    assert.match(validateConfig("OURVEND_ACCOUNTING_SOURCE", "OWN") ?? "", /допустимо/);
+    assert.match(validateConfig("OURVEND_ACCOUNTING_SOURCE", "snapshot") ?? "", /допустимо/);
+  });
+
+  it("CUTOVER_GREEN_DAYS: потолок 60 — от порога зависит окно чтения журнала (R-FW-S1)", () => {
+    assert.equal(validateConfig("CUTOVER_GREEN_DAYS", "60"), null);
+    assert.match(validateConfig("CUTOVER_GREEN_DAYS", "61") ?? "", /от 1 до 60/);
+    assert.match(validateConfig("CUTOVER_GREEN_DAYS", "1000000") ?? "", /от 1 до 60/);
+  });
+
+  it("STOCK_PARITY_TOLERANCE: допуск сверки остатков, ноль допустим (R-FW-P1a)", () => {
+    // Ноль — осознанное «сверять посимвольно», а не мусор: у порогов-величин
+    // это законное значение (то же правило, что у `nonNegNumber` вообще).
+    assert.equal(specFor("STOCK_PARITY_TOLERANCE")?.fallback, "3");
+    assert.equal(validateConfig("STOCK_PARITY_TOLERANCE", "0"), null);
+    assert.equal(validateConfig("STOCK_PARITY_TOLERANCE", "5"), null);
+    assert.ok(validateConfig("STOCK_PARITY_TOLERANCE", "-1"));
+  });
+
+  it("CUTOVER_GREEN_DAYS и SNAPSHOT_STALE_HOURS: окна, ноль не значит «без окна»", () => {
+    assert.equal(specFor("CUTOVER_GREEN_DAYS")?.fallback, "7");
+    assert.equal(specFor("SNAPSHOT_STALE_HOURS")?.fallback, "36");
+    for (const k of ["CUTOVER_GREEN_DAYS", "SNAPSHOT_STALE_HOURS"]) {
+      assert.ok(validateConfig(k, "0"), `${k}: нулевое окно молча уехало бы в другое число`);
+      assert.ok(validateConfig(k, "-1"));
+    }
+  });
+
+  it("SNAPSHOT_RETENTION_DAYS: пол 180 суток — окно уже мёртвого стока стирало бы отчёты", () => {
+    // DEAD_STOCK_DAYS_MAX=180 (analytics.service.ts:89) — самый широкий живой
+    // потребитель. Ретенция в 30 суток «сохранилась бы» в панели и молча
+    // выпилила данные под уже работающим отчётом.
+    assert.equal(specFor("SNAPSHOT_RETENTION_DAYS")?.fallback, "180");
+    assert.ok(validateConfig("SNAPSHOT_RETENTION_DAYS", "30"));
+    assert.equal(validateConfig("SNAPSHOT_RETENTION_DAYS", "180"), null);
+    assert.equal(validateConfig("SNAPSHOT_RETENTION_DAYS", "365"), null);
+  });
+});
+
 describe("resolveEffective: приоритет база > env > дефолт", () => {
   const spec = specFor("AGENT_AUTONOMY_MAX")!;
 

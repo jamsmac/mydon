@@ -253,6 +253,27 @@ const ЧТЕНИЕ = [
       if (!Array.isArray(ответ?.mismatches)) throw new Error("parity.mismatches — не массив");
       if (!Array.isArray(ответ?.stock?.mismatches)) throw new Error("parity.stock.mismatches — не массив");
       if (typeof ответ?.checked !== "number") throw new Error("parity.checked — не число");
+      // R-FW-P1a: «в допуске» — ОТДЕЛЬНОЕ число рядом с «совпало», иначе допуск
+      // становится способом не заметить убыль остатка.
+      if (typeof ответ?.stock?.withinTolerance !== "number") throw new Error("parity.stock.withinTolerance — не число");
+      if (typeof ответ?.stock?.tolerance !== "number") throw new Error("parity.stock.tolerance — не число");
+      if (!["mirror", "own-vs-donor", "retired"].includes(ответ?.mode)) {
+        throw new Error(`parity.mode=${ответ?.mode} — не один из mirror/own-vs-donor/retired`);
+      }
+    },
+  },
+  {
+    // П8b: серия считается по журналу событий сырым чтением payload — заглушка
+    // юнит-теста jsonb не разбирает. На засеянной базе событий нет вовсе, и
+    // ответ обязан быть «ноль зелёных», а не пустотой без ключей.
+    path: "/ourvend/parity/streak",
+    проверить: (о) => {
+      if (typeof о?.greenDays !== "number") throw new Error("streak.greenDays — не число");
+      if (typeof о?.threshold !== "number") throw new Error("streak.threshold — не число");
+      if (typeof о?.readyForCutover !== "boolean") throw new Error("streak.readyForCutover — не булево");
+      if (!Array.isArray(о?.days)) throw new Error("streak.days — не массив");
+      if (о.lastRed !== null && typeof о.lastRed !== "string") throw new Error("streak.lastRed — не дата и не null");
+      if (о.greenDays !== 0 || о.readyForCutover !== false) throw new Error("на пустом журнале серия обязана быть нулевой");
     },
   },
   {
@@ -299,6 +320,19 @@ const ЧТЕНИЕ = [
         throw new Error(`health.staleHours=${о.staleHours} — не число и не null`);
       }
       if (typeof о.staleThresholdH !== "number") throw new Error("health.staleThresholdH — не число");
+      // П8b: гейт катовера. Ключи ОБЯЗАНЫ присутствовать — витрина рисует
+      // «N зелёных дней из 7» сравнением двух ЧИСЕЛ ответа, и пропущенный ключ
+      // она прочтёт как «поле не приехало», а не как «серии нет».
+      for (const ключ of ["parityStreak", "cutoverThreshold"]) {
+        if (typeof о[ключ] !== "number") throw new Error(`health.${ключ} — не число`);
+      }
+      if (о.cutoverThreshold < 1) throw new Error("порог катовера меньше суток — гейт снят опиской в настройке");
+      // П8b: вердикт «учётный снапшот встал» (R-P8b-5). Ключ ОБЯЗАН быть, даже
+      // когда он `false`: витрина отличает «учёт стоит» от «поле не приехало»
+      // только его наличием. На засеянной базе снимков нет вовсе — и в режиме
+      // `own` (без STOCK_DATABASE_URL другого режима не бывает) это `true`:
+      // «снимков нет» тревожнее «снимки старые».
+      if (typeof о.snapshotStale !== "boolean") throw new Error("health.snapshotStale — не булево");
       if (о.lastSuccessAt === null && о.staleHours !== null) {
         throw new Error("успехов нет, а давность посчиталась — «не было вовсе» ≠ «ноль часов»");
       }
@@ -311,6 +345,12 @@ const ЧТЕНИЕ = [
       // `ok: false` без них читается как «всё плохо, но расхождений нет».
       for (const ключ of ["checked", "stockChecked"]) {
         if (typeof о.parity[ключ] !== "number") throw new Error(`health.parity.${ключ} — не число`);
+      }
+      // R-FW-P3: С ЧЕМ сверялись. Без режима витрина не отличает «сверили с
+      // независимой стороной и всё сошлось» от «сверять было не с чем»: на
+      // засеянной базе (без STOCK_DATABASE_URL) это как раз `retired`.
+      if (!["mirror", "own-vs-donor", "retired"].includes(о.parity.mode)) {
+        throw new Error(`health.parity.mode=${о.parity.mode} — не один из mirror/own-vs-donor/retired`);
       }
       if (о.runs.length === 0 && (о.failedStreak !== 0 || о.lastSuccessAt !== null)) {
         throw new Error("прогонов нет, а серия/успех не пусты — журнал прочитан не оттуда");
@@ -344,6 +384,41 @@ const ЧТЕНИЕ = [
     },
   },
   { path: "/entities?limit=999999", ждёмОтказ: true },
+  {
+    // П8b: тумблеры катовера обязаны доехать до панели «Система» ЧЕРЕЗ HTTP.
+    // Ключ, которого нет в белом списке, панель просто не покажет, и владелец
+    // будет искать переключатель, которого в интерфейсе нет.
+    path: "/system/config",
+    проверить: (о) => {
+      const карта = new Map((о ?? []).map((i) => [i.key, i]));
+      for (const [ключ, дефолт] of [
+        ["OURVEND_ACCOUNTING_SOURCE", "stock"],
+        ["CUTOVER_GREEN_DAYS", "7"],
+        ["SNAPSHOT_STALE_HOURS", "36"],
+        ["SNAPSHOT_RETENTION_DAYS", "180"],
+      ]) {
+        const i = карта.get(ключ);
+        if (!i) throw new Error(`в /system/config нет ключа ${ключ}`);
+        if (i.source === "default" && i.value !== дефолт) throw new Error(`${ключ}=${i.value}, ждали ${дефолт}`);
+      }
+      if (карта.get("OURVEND_ACCOUNTING_SOURCE").kind !== "select") throw new Error("источник учёта — не select");
+      // R-FW-S5: рядом с записанным значением — ДЕЙСТВУЮЩИЙ источник. Без
+      // STOCK_DATABASE_URL (а смоук гоняется именно так) записано `stock`, а
+      // учёт уже `own`: панель, показывающая одно записанное, врёт на том
+      // самом экране, на который смотрят в дни катовера.
+      const источник = карта.get("OURVEND_ACCOUNTING_SOURCE");
+      if (!["stock", "own"].includes(источник.effective)) {
+        throw new Error(`OURVEND_ACCOUNTING_SOURCE.effective=${источник.effective} — не stock и не own`);
+      }
+      if (!process.env.STOCK_DATABASE_URL && источник.effective !== "own") {
+        throw new Error("зеркала нет, а действующий источник не own — фолбэк не применён");
+      }
+      // Пустой вариант первым — задокументированный откат шага 1 катовера.
+      if ((источник.options ?? [])[0] !== "") throw new Error("у источника учёта нет пустого варианта для сброса");
+      if (карта.get("STOCK_PARITY_TOLERANCE") === undefined) throw new Error("нет ключа STOCK_PARITY_TOLERANCE");
+      if (о.some((i) => /API_KEY|TOKEN|SECRET|PASSWORD/i.test(i.key))) throw new Error("в тумблерах секрет");
+    },
+  },
 ];
 
 /**

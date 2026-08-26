@@ -6,6 +6,7 @@ import { SyncStaleService } from "../ourvend/sync-stale.service";
 import { AnalyticsService } from "./analytics.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
+import { RetentionService } from "./retention.service";
 import { ShrinkageService } from "./shrinkage.service";
 import { VendingController } from "./vending.controller";
 import { VendingService } from "./vending.service";
@@ -25,6 +26,11 @@ import { WeeklyDigestService } from "./weekly-digest.service";
  * По той же причине здесь живёт и сторож застоя сбора (`SyncStaleService`,
  * П8a): он читает журнал прогонов вендинга и пишет событие — регистрируй его в
  * `OurvendModule`, и пара модулей снова стала бы циклической.
+ *
+ * Той же причиной здесь живёт и еженедельная ретенция (`RetentionService`,
+ * П8b, R-P8b-7): она чистит `slot_snapshot`/`product_sale`/`machine_sale`
+ * вендинга и журнал прогонов сбора OurVend — те же таблицы, что и сторож
+ * застоя, из того же модуля.
  */
 @Module({
   imports: [ApprovalsModule],
@@ -38,6 +44,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
     OurvendParityService,
     OurvendHealthService,
     SyncStaleService,
+    RetentionService,
     WeeklyDigestService,
   ],
   exports: [
@@ -49,6 +56,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
     OurvendParityService,
     OurvendHealthService,
     SyncStaleService,
+    RetentionService,
   ],
 })
 export class VendingModule {}

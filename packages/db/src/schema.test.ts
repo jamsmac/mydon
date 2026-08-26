@@ -95,6 +95,31 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     assert.ok(count.includes("personId"), "кто считал: строка без человека законна, но поле обязано быть");
   });
 
+  it("СТРАЖ: у целей ретенции есть индекс ПО КОЛОНКЕ ВРЕМЕНИ (0070)", () => {
+    // Ретенция чистит пачками `where <время> < cutoff order by <время> limit N`.
+    // У снимков составной индекс начинается с `machine_serial` и под это условие
+    // не годится (seq scan + сортировка на каждую пачку), у журнала прогонов
+    // индекса не было вовсе. Снять индекс — значит вернуть полный скан на
+    // растущей таблице, и заметить это будет нечем: чистка идёт раз в неделю
+    // ночью.
+    const конфиг = (t: unknown): unknown[] => {
+      const извлечь = (t as Record<symbol, unknown>)[Symbol.for("drizzle:ExtraConfigBuilder")];
+      const колонки = (t as Record<symbol, unknown>)[Symbol.for("drizzle:ExtraConfigColumns")];
+      return typeof извлечь === "function" ? ((извлечь as (c: unknown) => unknown[])(колонки) ?? []) : [];
+    };
+    const имена = (t: unknown): string[] =>
+      конфиг(t).map((i) => String((i as { config?: { name?: string } }).config?.name ?? ""));
+
+    for (const [таблица, индекс] of [
+      [schema.slotSnapshot, "slot_snapshot_captured_idx"],
+      [schema.productSale, "product_sale_captured_idx"],
+      [schema.machineSale, "machine_sale_captured_idx"],
+      [schema.vendingSyncRun, "vending_sync_run_started_idx"],
+    ] as const) {
+      assert.ok(имена(таблица).includes(индекс), `нет индекса ${индекс} — ретенция уйдёт в полный скан`);
+    }
+  });
+
   it("у ключевых таблиц есть обязательные поля", () => {
     const cols = (t: unknown) => Object.keys(t as Record<string, unknown>);
 

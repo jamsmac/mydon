@@ -1,11 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { OurvendHealth } from "../lib/core";
+import type { OurvendHealth, ParityStreak } from "../lib/core";
 import { OurvendHealthCard, OurvendHealthSection } from "./ourvend-health-view";
 
-const mocks = vi.hoisted(() => ({ ourvendHealth: vi.fn() }));
+const mocks = vi.hoisted(() => ({ ourvendHealth: vi.fn(), ourvendParityStreak: vi.fn() }));
 vi.mock("../lib/core", () => ({
-  core: { ourvendHealth: mocks.ourvendHealth },
+  core: { ourvendHealth: mocks.ourvendHealth, ourvendParityStreak: mocks.ourvendParityStreak },
   CoreUnavailable: class CoreUnavailable extends Error {
     constructor(readonly detail: string) {
       super("Core недоступен");
@@ -37,8 +37,15 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   staleThresholdH: 6,
   slotsLagMin: null,
   salesLagH: 10.7,
+  // Коллектор молчит, но учётный снапшот сам по себе ещё не встал
+  // (R-P8b-5) — это отдельный сигнал, у аварии этой фикстуры своя причина.
+  snapshotStale: false,
   productSaleLagH: 36.8,
-  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, checked: 14, stockChecked: 14, note: null },
+  // Паритет не сходится (расхождений нет, но сверка и та не идёт) — ни
+  // одного зелёного дня подряд (R-P8b-2).
+  parityStreak: 0,
+  cutoverThreshold: 7,
+  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, checked: 14, stockChecked: 14, mode: "mirror", note: null },
 };
 
 const ЗДОРОВ: OurvendHealth = {
@@ -49,8 +56,25 @@ const ЗДОРОВ: OurvendHealth = {
   staleThresholdH: 6,
   slotsLagMin: 48,
   salesLagH: 1.2,
+  snapshotStale: false,
   productSaleLagH: 2.4,
-  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, checked: 14, stockChecked: 14, note: null },
+  parityStreak: 3,
+  cutoverThreshold: 7,
+  parity: { days: 14, ok: true, mismatches: 0, stockOk: true, checked: 14, stockChecked: 14, mode: "mirror", note: null },
+};
+
+/**
+ * Серия по дням (`GET /ourvend/parity/streak`). Красный день — ВНЕ окна
+ * показа (две недели): ровно прод-случай 25.08, который держится в поле до
+ * конца октября, пока серия идёт с 26-го.
+ */
+const СЕРИЯ: ParityStreak = {
+  greenDays: 3,
+  threshold: 7,
+  readyForCutover: false,
+  days: [{ date: "2026-08-26", ok: true, salesChecked: 14, stockChecked: 68, note: null }],
+  lastRed: "2026-08-06",
+  since: "2026-08-24",
 };
 
 describe("Секция «Здоровье сбора»", () => {
@@ -73,7 +97,7 @@ describe("Секция «Здоровье сбора»", () => {
   it("паритет: продажи и остатки — две разные пилюли, расхождение красное", () => {
     render(
       <OurvendHealthCard
-        health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 3, stockOk: false, checked: 14, stockChecked: 14, note: "снапшот моложе окна" } }}
+        health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 3, stockOk: false, checked: 14, stockChecked: 14, mode: "mirror", note: "снапшот моложе окна" } }}
       />,
     );
     expect(screen.getByText("3 расхождения")).toBeVisible();
@@ -106,6 +130,7 @@ describe("Секция «Здоровье сбора»", () => {
 
   it("Core не ответил — «не проверили», а не пропавшая секция", async () => {
     mocks.ourvendHealth.mockRejectedValue(new Error("HTTP 502"));
+    mocks.ourvendParityStreak.mockRejectedValue(new Error("HTTP 502"));
     render(await OurvendHealthSection());
     expect(screen.getByText("Здоровье сбора")).toBeVisible();
     expect(screen.getByText("Здоровье сбора: не проверили (Core не ответил)")).toBeVisible();
@@ -113,8 +138,19 @@ describe("Секция «Здоровье сбора»", () => {
 
   it("ядро ответило — секция показывает карточку", async () => {
     mocks.ourvendHealth.mockResolvedValue(ЗДОРОВЬЕ);
+    mocks.ourvendParityStreak.mockResolvedValue(СЕРИЯ);
     render(await OurvendHealthSection());
     expect(screen.getByText(/12 отказов подряд/)).toBeVisible();
+  });
+
+  it("серия по дням не приехала — секция цела, подписи красного дня просто нет", async () => {
+    // Отдельный роут, отдельный отказ: здоровье сбора важнее даты старого
+    // сбоя, и терять из-за неё всю секцию нельзя.
+    mocks.ourvendHealth.mockResolvedValue(ЗДОРОВ);
+    mocks.ourvendParityStreak.mockRejectedValue(new Error("HTTP 502"));
+    render(await OurvendHealthSection());
+    expect(screen.getByText(/3 зелёных дн\. подряд из 7/)).toBeVisible();
+    expect(screen.queryByText(/последний красный день/)).toBeNull();
   });
 });
 
@@ -199,12 +235,12 @@ describe("Здоровье сбора: тексты для владельца", 
 
   it("расхождения склоняются числом", () => {
     const { unmount } = render(
-      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 1, stockOk: true, checked: 14, stockChecked: 14, note: null } }} />,
+      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 1, stockOk: true, checked: 14, stockChecked: 14, mode: "mirror", note: null } }} />,
     );
     expect(screen.getByText("1 расхождение")).toBeVisible();
     unmount();
     render(
-      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 5, stockOk: true, checked: 14, stockChecked: 14, note: null } }} />,
+      <OurvendHealthCard health={{ ...ЗДОРОВ, parity: { days: 14, ok: false, mismatches: 5, stockOk: true, checked: 14, stockChecked: 14, mode: "mirror", note: null } }} />,
     );
     expect(screen.getByText("5 расхождений")).toBeVisible();
   });
@@ -233,6 +269,7 @@ describe("Здоровье сбора: паритет по числу свере
       // 14 пар продаж сравнивались и сошлись, снимков остатков за период — ноль.
       checked: 14,
       stockChecked: 0,
+      mode: "mirror" as const,
       note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
     },
   };
@@ -268,6 +305,7 @@ describe("Здоровье сбора: паритет по числу свере
       // Ноль сравненных пар с обеих сторон — «сверять нечем», а не «сошлось»/«разошлось».
       checked: 0,
       stockChecked: 0,
+      mode: "mirror" as const,
       note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
     },
   };
@@ -313,5 +351,97 @@ describe("Здоровье сбора: паритет по числу свере
     expect(screen.getByText("продажи сходятся")).toBeVisible();
     expect(screen.getByText("продажи сходятся").className).not.toMatch(/bad/);
     expect(screen.getByText("остатки расходятся").className).toMatch(/bad/);
+  });
+});
+
+describe("Здоровье сбора: серия зелёных дней и застой учётного снапшота (П8b)", () => {
+  it("серия и порог — отдельной строкой; на пороге зелёная пилюля «можно переключать»", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, parityStreak: 7, cutoverThreshold: 7 }} />);
+    expect(screen.getByText(/7 зелёных дн\. подряд из 7/)).toBeVisible();
+    expect(screen.getByText(/можно переключать/)).toBeVisible();
+  });
+
+  it("серия ниже порога — строка есть, зова переключать нет", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, parityStreak: 3, cutoverThreshold: 7 }} />);
+    expect(screen.getByText(/3 зелёных дн\. подряд из 7/)).toBeVisible();
+    expect(screen.queryByText(/можно переключать/)).toBeNull();
+  });
+
+  it("застой учётного снапшота поднимает общую тревогу секции", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, snapshotStale: true }} />);
+    expect(screen.getByText("тревога")).toBeVisible();
+    expect(screen.getByText(/учётный снапшот не обновляется/)).toBeVisible();
+  });
+
+  it("в режиме stock застоя снапшота нет и красной пилюли тоже", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, snapshotStale: false }} />);
+    expect(screen.queryByText(/учётный снапшот/)).toBeNull();
+  });
+
+  it("один день серии — «1 зелёный дн.», а не «1 зелёных дн.»", () => {
+    // День 1 КАЖДОЙ серии — самый частый момент, когда владелец читает эту
+    // пилюлю: она отвечает «сколько ещё ждать».
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, parityStreak: 1, cutoverThreshold: 7 }} />);
+    expect(screen.getByText(/1 зелёный дн\. подряд из 7/)).toBeVisible();
+  });
+
+  it("серии нет — «0 зелёных дн. подряд из 7» нейтральной пилюлей, без зова переключать", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, parityStreak: 0, cutoverThreshold: 7 }} />);
+    const пилюля = screen.getByText(/0 зелёных дн\. подряд из 7/);
+    expect(пилюля).toBeVisible();
+    expect(пилюля.className).not.toMatch(/ok/);
+    expect(screen.queryByText(/можно переключать/)).toBeNull();
+  });
+});
+
+/** Паритет в заданном режиме сверки (R-FW-P3) поверх здоровой фикстуры. */
+const сРежимом = (mode: OurvendHealth["parity"]["mode"]): OurvendHealth["parity"] => ({
+  ...ЗДОРОВ.parity,
+  mode,
+});
+
+describe("Здоровье сбора: последний красный день и погашенное зеркало (P4, R-FW-P3)", () => {
+  it("красный день вне окна показа — подпись датой, а не «серия сорвана»", () => {
+    render(<OurvendHealthCard health={ЗДОРОВ} streak={СЕРИЯ} />);
+    const подпись = screen.getByText(/последний красный день: 06\.08\.2026/);
+    expect(подпись).toBeVisible();
+    expect(подпись.textContent ?? "").not.toMatch(/сорва|обнул|сброш/i);
+  });
+
+  it("красных дней не было — так и сказано, а не молчанием", () => {
+    render(<OurvendHealthCard health={ЗДОРОВ} streak={{ ...СЕРИЯ, lastRed: null }} />);
+    expect(screen.getByText(/красных дней не было/)).toBeVisible();
+  });
+
+  it("зеркала нет — одна нейтральная пилюля вместо половин паритета", () => {
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, parity: сРежимом("retired") }} streak={СЕРИЯ} />);
+    const пилюля = screen.getByText(/сверка с зеркалом завершена — сравнивать больше не с чем/);
+    expect(пилюля).toBeVisible();
+    // Ни красная, ни зелёная: чинить нечего и переключать нечего.
+    expect(пилюля.className).not.toMatch(/bad|ok/);
+    expect(screen.queryByText(/продажи сходятся|остатки сходятся|расхождени/)).toBeNull();
+  });
+
+  it("сверка своего снапшота с донором (после флипа) печатается как обычная", () => {
+    // `own-vs-donor` — это ЕСТЬ сверка: вторая сторона на месте, вердикт
+    // осмыслен. Гасить половины можно только там, где сравнивать не с чем.
+    render(<OurvendHealthCard health={{ ...ЗДОРОВ, parity: сРежимом("own-vs-donor") }} streak={СЕРИЯ} />);
+    expect(screen.getByText(/продажи сходятся/)).toBeVisible();
+    expect(screen.queryByText(/сравнивать больше не с чем/)).toBeNull();
+  });
+
+  it("зеркала нет — серия не считается, зова переключать нет даже на пороге", () => {
+    render(
+      <OurvendHealthCard
+        health={{ ...ЗДОРОВ, parity: сРежимом("retired"), parityStreak: 7, cutoverThreshold: 7 }}
+        streak={СЕРИЯ}
+      />,
+    );
+    const пилюля = screen.getByText(/серия больше не считается — зеркало погашено/);
+    expect(пилюля).toBeVisible();
+    expect(пилюля.className).not.toMatch(/ok/);
+    expect(screen.queryByText(/можно переключать/)).toBeNull();
+    // Старый красный день серию не объясняет — её нет.
+    expect(screen.queryByText(/последний красный день/)).toBeNull();
   });
 });

@@ -6,6 +6,7 @@ import {
 } from "../lib/core";
 import { CoreDown } from "./core-down";
 import { when } from "../lib/format";
+import { чипИсточникаПродаж } from "../lib/sales-source";
 
 /** Крупная сумма человеку: «18.4 млн», «232 тыс», «540». */
 function compactSum(n: number): { v: string; u: string } {
@@ -101,8 +102,11 @@ export async function ReportsOverview({ base }: { base: string }) {
                   <span>за 30 дней <span className="n">{compactSum(sales.days30.amount).v} {compactSum(sales.days30.amount).u}</span></span>
                 </div>
                 <div className="rcard-f">
+                  {/* «не настроен» в режиме `own` звало бы настраивать
+                      удалённую переменную: там источник настроен, это агент
+                      не принёс снапшот (M2). */}
                   <span className={`chip ${sales.configured ? "g" : "h"}`}>
-                    {sales.configured ? "источник настроен" : "не настроен"}
+                    {чипИсточникаПродаж(sales.configured, sales.source)}
                   </span>
                   <span className="sp" />
                   <span className="rlinks">
