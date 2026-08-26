@@ -43,22 +43,17 @@
  * `@mydon/shared`, что и у импорта истории склада, и та же
  * `normalizeProductName`, что и в `VendingService.productIdResolver`.
  *
- * ⚠️ ИЗВЕСТНОЕ РАСХОЖДЕНИЕ С ЖИВЫМ РЕЗОЛВЕРОМ CORE (ре-ревью волны, R1).
- * НОРМАЛИЗАЦИЯ у них одна, а ПРИОРИТЕТ — разный:
+ * ОДНО ПРАВИЛО НА ВСЕХ (R-G-1, срез «Гигиена»). Резолв имени живёт в
+ * `resolveCatalogName` (`@mydon/shared`): точное имя карточки главнее алиаса,
+ * нормализация — `normalizeProductName`, спор возвращается явно. Тем же
+ * правилом отвечают живой резолвер Core (`VendingService.resolveProduct`) и
+ * импорт истории склада. Раньше их было три с РАЗНЫМ приоритетом, и
+ * расхождение было записано здесь как долг — этот срез его закрыл.
  *
- * | кто | имя = карточка B и одновременно алиас карточки A |
- * |---|---|
- * | `VendingService.resolveProduct` (живой резолв, пишет `product_id` каждые 3 ч) | A — алиас первым |
- * | `productIndex.canon` (импорт истории) | B — имя карточки первым |
- * | `resolveProductIds` (этот скрипт) | ОТКАЗ, строка печатается как «конфликт» |
- *
- * Строже здесь НАМЕРЕННО: скрипт пишет НЕОБРАТИМОЕ (`бэкфиллWhere` держит
- * `isNull`, и ошибочную ссылку повторный прогон уже не тронет), а живой
- * резолвер переписывает своё решение следующим же сбором. На сегодняшнем
- * каталоге прода расхождение не даёт НИ ОДНОЙ разной строки — реальных
- * коллизий «алиас затеняет чужую карточку» ноль (замер 26.08), — но правило
- * живёт в двух местах, и это долг: перевод `productIdResolver` на
- * `productIndex.explain` требует своего покрытия и вынесен в бэклог.
+ * Строже здесь по-прежнему ОДНО: на споре скрипт ОТКАЗЫВАЕТСЯ привязывать
+ * (живой резолвер берёт карточку по имени и пишет warn). Причина в
+ * необратимости: `бэкфиллWhere` держит `isNull`, и ошибочную ссылку повторный
+ * прогон уже не тронет.
  *
  * ИДЕМПОТЕНТЕН: трогает только строки с `product_id IS NULL`, повторный прогон
  * обновляет ноль строк. Имена, которым карточки не нашлось, печатаются — это
@@ -78,7 +73,7 @@ import { config as loadEnv } from "dotenv";
 import { and, eq, isNull } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
-import { productIndex, type CanonSource } from "@mydon/shared";
+import { productIndex, resolveCatalogName, type CanonSource } from "@mydon/shared";
 import { createDb, type Database } from "./index";
 import { machineSlot, vendingAlias, vendingProduct, vendingRefill, vendingStock, vendingStockCount } from "./schema";
 
@@ -90,11 +85,10 @@ import { machineSlot, vendingAlias, vendingProduct, vendingRefill, vendingStock,
  * резолвится ДВУМЯ путями на разные карточки, тоже не попадает — оно уезжает
  * списком `conflicts` (R-FW-S3): привязка необратима.
  *
- * ЭТО НЕ ДОСЛОВНАЯ КОПИЯ ЖИВОГО ПРАВИЛА CORE, а НАМЕРЕННО более строгий его
- * вариант: `VendingService.resolveProduct` спрашивает алиас ПЕРВЫМ и на споре
- * молча отдаёт карточку алиаса. Нормализация у обоих одна и та же
- * (`normalizeProductName`), расходится только приоритет — подробности и причина
- * в шапке файла (⚠️ «известное расхождение»).
+ * ПРАВИЛО ЗДЕСЬ ТО ЖЕ, ЧТО У ЖИВОГО РЕЗОЛВЕРА CORE: оба зовут
+ * `resolveCatalogName` (`@mydon/shared`). Отличается только ОТВЕТ НА СПОР —
+ * скрипт отказывается привязывать, Core берёт карточку по имени и пишет warn;
+ * причина в необратимости, см. шапку файла.
  *
  * Сам индекс живёт в `@mydon/shared` (`productIndex`): тот же каталог с тем же
  * решением про алиасы читает импорт истории склада (П8a), только спрашивает у
@@ -139,7 +133,9 @@ export function resolveProductIds(
   for (const raw of names) {
     if (raw === null || raw === undefined || raw.trim() === "") continue;
     if (resolved.has(raw) || спорные.has(raw)) continue;
-    const ответ = индекс.explain(raw);
+    // ТА ЖЕ ДВЕРЬ, ЧТО У CORE (R-G-1): не `индекс.explain`, а общий резолвер —
+    // он же приносит исходное имя, из которого собирается список на разбор.
+    const ответ = resolveCatalogName(индекс, raw);
     if (ответ.kind === "hit") {
       resolved.set(raw, { id: ответ.id, canon: ответ.canon, source: ответ.source });
     } else if (ответ.kind === "conflict") {
@@ -148,7 +144,7 @@ export function resolveProductIds(
       // прогоном уже не чинится: молчаливая привязка к неверной карточке хуже
       // оставленного NULL. Имя уезжает владельцу отдельным списком.
       спорные.add(raw);
-      conflicts.push({ raw, byName: ответ.byName, byAlias: ответ.byAlias });
+      conflicts.push({ raw: ответ.raw, byName: ответ.byName, byAlias: ответ.byAlias });
     }
   }
   return { resolved, conflicts };

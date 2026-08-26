@@ -477,7 +477,7 @@ export class AnalyticsService {
   private async справочник(): Promise<Справочник> {
     const [index, registry] = await Promise.all([this.vending.loadProductIndex(), this.vending.machineRegistry()]);
     return {
-      canonOf: (raw: string) => this.vending.resolveProduct(raw, index.aliasByKey),
+      canonOf: (raw: string) => this.vending.resolveProduct(raw, index.catalog),
       products: index.productRows.map((p) => ({
         name: p.name,
         purchasePrice: p.purchasePrice === null ? null : Number(p.purchasePrice),

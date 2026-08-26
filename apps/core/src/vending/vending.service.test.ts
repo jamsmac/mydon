@@ -1296,6 +1296,69 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     assert.equal(v.productName, "Новый Товар");
   });
 
+  it("алиас, чей ключ равен имени ЧУЖОЙ карточки, строку не уводит (R-G-1)", async () => {
+    // Живой резолвер спрашивал алиас первым: строка «Fanta CAN 0,25» ложилась
+    // на «Sprite CAN 0,25». На проде таких пар ноль — фикс закрывает не
+    // сегодняшний убыток, а завтрашний алиас.
+    const rows = [slot("AH", "31", "Fanta CAN 0,25", 6, 0)];
+    const aliases: AliasRow[] = [{ productId: "p2", alias: "Fanta CAN 0,25" }];
+    const products: ProdRow[] = [
+      { id: "p1", name: "Fanta CAN 0,25", purchasePrice: null, packSize: 1 },
+      { id: "p2", name: "Sprite CAN 0,25", purchasePrice: null, packSize: 1 },
+    ];
+    const summary = await new VendingService(readDb(rows, aliases, products)).deficitSummary();
+    assert.deepEqual(
+      summary.map((s) => s.product),
+      ["Fanta CAN 0,25"],
+    );
+  });
+
+  it("имя, отличающееся только запятой, ложится на карточку, а не отдельной позицией", async () => {
+    // Три строки истории склада прода (`…0.45`, `…0.3`) до среза резолвились
+    // сырыми: алиаса нет, а имя карточки живой резолвер не спрашивал.
+    const rows = [slot("AH", "31", "Royal Pomegranate CAN 0.3", 6, 0)];
+    const products: ProdRow[] = [{ id: "p1", name: "Royal Pomegranate CAN 0,3", purchasePrice: null, packSize: 1 }];
+    const summary = await new VendingService(readDb(rows, [], products)).deficitSummary();
+    assert.deepEqual(
+      summary.map((s) => s.product),
+      ["Royal Pomegranate CAN 0,3"],
+    );
+  });
+
+  it("спор отдаёт карточку по ИМЕНИ и пишет предупреждение в лог", async () => {
+    const products: ProdRow[] = [
+      { id: "p1", name: "Fanta CAN 0,25", purchasePrice: null, packSize: 1 },
+      { id: "p2", name: "Sprite CAN 0,25", purchasePrice: null, packSize: 1 },
+    ];
+    const svc = new VendingService(readDb([], [{ productId: "p2", alias: "Fanta CAN 0,25" }], products));
+    const предупреждения: string[] = [];
+    // Логгер сервиса — private readonly поле; в тесте подменяем его целиком:
+    // проверяем НАБЛЮДАЕМОЕ («первый спор на проде будет видно»), а не вызов.
+    (svc as unknown as { logger: { warn: (m: string) => void } }).logger = {
+      warn: (m: string) => предупреждения.push(m),
+    };
+    const canon = await svc.canonResolver();
+    assert.equal(canon("Fanta CAN 0,25"), "Fanta CAN 0,25");
+    assert.equal(предупреждения.length, 1);
+    assert.match(предупреждения[0]!, /Sprite CAN 0,25/);
+  });
+
+  it("на спорном имени ссылка на карточку НЕ проставляется: NULL чинится, ошибка — нет", async () => {
+    // `бэкфиллWhere` держит `isNull(product_id)`: ошибочно проставленную
+    // ссылку повторный прогон уже не тронет, а молчаливая привязка к чужой
+    // карточке хуже оставленного NULL.
+    const products: ProdRow[] = [
+      { id: "p1", name: "Fanta CAN 0,25", purchasePrice: null, packSize: 1 },
+      { id: "p2", name: "Sprite CAN 0,25", purchasePrice: null, packSize: 1 },
+    ];
+    const { db, inserts } = writeDb([{ productId: "p2", alias: "Fanta CAN 0,25" }], products);
+    const svc = new VendingService(db);
+    await svc.ingestStock({ items: [{ product: "Fanta CAN 0,25", quantity: 5 }] });
+    const строка = строкиТаблицы(inserts, "vending_stock")[0]! as { productName: string; productId: string | null };
+    assert.equal(строка.productName, "Fanta CAN 0,25");
+    assert.equal(строка.productId, null);
+  });
+
   it("недостача при пересчёте: было 55 → стало 54, оценена по цене (реальный лист 02.08.2026)", async () => {
     const products = [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: "2090.00" }];
     const stock = [{ productName: "Montella Вода минеральная 330ml", quantity: 55 }];
