@@ -1,10 +1,19 @@
 import { Inject, Injectable, Logger, type OnApplicationShutdown, OnModuleInit } from "@nestjs/common";
 import { event, machineStock, ourvendSaleSnapshot, ourvendStockSnapshot, sale } from "@mydon/db";
-import { machineSerialSql, normalizeProductName } from "@mydon/shared";
-import { sql } from "drizzle-orm";
+import {
+  machineSerialSql,
+  normalizeProductName,
+  parityStreak,
+  tashkentDay,
+  tashkentDayStartOf,
+  type ParityStreak,
+} from "@mydon/shared";
+import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
+import { accountingSource } from "../sales/accounting-source";
 import { VendingService } from "../vending/vending.service";
+import { cutoverThreshold } from "./sync-runs";
 
 /**
  * Паритет собственного снапшота OurVend со stock-дорожкой — гейт П2.
@@ -15,6 +24,22 @@ import { VendingService } from "../vending/vending.service";
  * OURVEND_ACCOUNTING_SOURCE=own и погасить чтение чужой базы.
  * Серийники сравниваются каноном (у сторон разные формы: «c…» и голая).
  */
+
+/** Тип ежедневного вердикта сверки — им же ключуется счёт серии. */
+export const PARITY_EVENT = "ourvend.parity";
+
+/** Тип сигнала «порог взят, можно переключать учёт» — им же ключуется дедуп по суткам. */
+export const CUTOVER_READY_EVENT = "ourvend.cutover_ready";
+
+/**
+ * Сколько событий паритета читаем ради счёта серии.
+ *
+ * 14 суток окна показа плюс запас на ПОВТОРНЫЕ прогоны в одни сутки: ручной
+ * `daily()` после починки — это уточнение вердикта дня, а не новый день, но
+ * строку в журнале он занимает. Считать серию по обрезанному списку значило бы
+ * занижать её ровно в тот день, когда сверку чинили руками.
+ */
+export const PARITY_SCAN_LIMIT = 60;
 
 export interface ParityDayRow {
   dt: string;
@@ -315,8 +340,48 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     };
   }
 
-  /** Ежедневный вердикт — событием: 7 зелёных подряд открывают переключение. */
-  async daily(): Promise<void> {
+  /**
+   * Серия зелёных дней паритета и порог, по которому её судят (R-P8b-2).
+   *
+   * Читает СВОЙ ЖЕ журнал: единственный источник правды о том, каким был
+   * вердикт вчера, — событие, которое вчера и записали. Пересчитывать историю
+   * заново нельзя: `parity()` смотрит на СЕГОДНЯШНЕЕ содержимое таблиц, а
+   * снапшоты дозаливаются задним числом, и «семь зелёных подряд» задним числом
+   * нарисовались бы там, где в те дни гейт был красным.
+   *
+   * `now` — параметр: иначе «серия до сегодняшнего дня» проверялась бы датой
+   * прогона тестов.
+   */
+  async streak(now = new Date()): Promise<ParityStreak> {
+    const [строки, порог] = await Promise.all([
+      this.db
+        .select({ occurredAt: event.occurredAt, payload: event.payload })
+        .from(event)
+        .where(eq(event.type, PARITY_EVENT))
+        .orderBy(desc(event.occurredAt))
+        .limit(PARITY_SCAN_LIMIT),
+      cutoverThreshold(this.db, this.log),
+    ]);
+    return parityStreak(
+      строки.map((r) => ({
+        occurredAt: r.occurredAt,
+        // jsonb приходит как `unknown`; форма payload проверяется в чистой
+        // функции по ключам, а не типом столбца.
+        payload: (r.payload ?? {}) as Record<string, unknown>,
+      })),
+      порог,
+      tashkentDay(now),
+    );
+  }
+
+  /**
+   * Ежедневный вердикт — событием: N зелёных подряд открывают переключение.
+   *
+   * `now` — параметр по той же причине, что у `streak`: и счёт серии, и дедуп
+   * сигнала считаются ташкентскими сутками ЭТОГО момента, а не датой прогона
+   * тестов.
+   */
+  async daily(now = new Date()): Promise<void> {
     const p = await this.parity(7);
     // Событие пишем ВСЕГДА, даже когда одна половина пуста. Прежний ранний
     // выход из-за пустого снапшота продаж уносил с собой и половину по
@@ -324,7 +389,11 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     // отличить от «гейт не запускался».
     await this.db.insert(event).values({
       source: "ourvend-accounting",
-      type: "ourvend.parity",
+      type: PARITY_EVENT,
+      // Момент прогона, а не `now()` базы: серия считается ташкентскими
+      // сутками ЭТОГО момента, и расхождение часов процесса с базой иначе
+      // растащило бы вердикт и его же счёт по разным дням.
+      occurredAt: now,
       payload: {
         ok: p.ok,
         дней: p.days,
@@ -343,6 +412,50 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
       `Паритет OurVend: ${p.ok ? "ОК" : "расхождения"} — продажи ${p.mismatches.length} из ${p.checked} пар, ` +
         `остатки ${p.stock.mismatches.length} из ${p.stock.checked}.` +
         (p.note ? ` (${p.note})` : ""),
+    );
+
+    await this.сигналКатовера(now);
+  }
+
+  /**
+   * «Порог взят — можно переключать учёт» (R-P8b-2).
+   *
+   * ЗОВЁТСЯ ПОСЛЕ ЗАПИСИ ВЕРДИКТА, а не вместо: сегодняшний день входит в
+   * серию, и считать её до вставки значило бы вечно отставать на сутки.
+   *
+   * ТРИ УСЛОВИЯ, И КАЖДОЕ ЗАЩИЩАЕТ ОТ СВОЕГО.
+   * 1. `readyForCutover` — собственно гейт.
+   * 2. ИСТОЧНИК ВСЁ ЕЩЁ `stock`. После флипа звать переключать УЖЕ НЕКУДА:
+   *    серия в режиме `own` продолжает расти (паритет считается и там), и без
+   *    этого условия владелец получал бы «можно переключать» каждый день до
+   *    конца времён — ровно тот способ научить его не читать тревоги.
+   * 3. ДЕДУП ПО ТАШКЕНТСКИМ СУТКАМ — тем же приёмом, что у `SyncStaleService`
+   *    (select→insert, принятая гонка при одной реплике Core): ручной прогон
+   *    `daily()` после починки не должен давать второе «можно переключать» в
+   *    те же сутки.
+   */
+  private async сигналКатовера(now: Date): Promise<void> {
+    const серия = await this.streak(now);
+    if (!серия.readyForCutover) return;
+    if ((await accountingSource(this.db, now)) !== "stock") return;
+
+    const сутки = tashkentDayStartOf(now);
+    const [было] = await this.db
+      .select({ id: event.id })
+      .from(event)
+      .where(and(eq(event.type, CUTOVER_READY_EVENT), gte(event.occurredAt, сутки)))
+      .limit(1);
+    if (было) return;
+
+    await this.db.insert(event).values({
+      source: "ourvend-accounting",
+      type: CUTOVER_READY_EVENT,
+      occurredAt: now,
+      payload: { greenDays: серия.greenDays, since: серия.since },
+    });
+    this.log.log(
+      `Паритет OurVend зелёный ${серия.greenDays} дн. подряд (с ${серия.since ?? "?"}) при пороге ` +
+        `${серия.threshold} — можно переключать OURVEND_ACCOUNTING_SOURCE на own.`,
     );
   }
 }

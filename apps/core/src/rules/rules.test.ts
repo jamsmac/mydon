@@ -228,6 +228,21 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.match(n!.text, /НЕ БЫЛО НИ РАЗУ/);
   });
 
+  it("готовность к катоверу будит немедленно и называет ключ настройки", () => {
+    const [n] = applyRules(ctx("ourvend.cutover_ready", { greenDays: 7, since: "2026-08-26" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /7 дн/);
+    assert.match(n!.text, /2026-08-26/);
+    // Владелец идёт флипать в панель прямо из сообщения: без имени ключа он
+    // пойдёт его искать, а катовер — операция на семь дней ожидания.
+    assert.match(n!.text, /OURVEND_ACCOUNTING_SOURCE/);
+  });
+
+  it("готовность к катоверу — счётная форма: «1 день», а не «1 дней»", () => {
+    const [n] = applyRules(ctx("ourvend.cutover_ready", { greenDays: 1, since: "2026-08-26" }));
+    assert.match(n!.text, /1 день подряд/);
+  });
+
   it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {
     const [n] = applyRules(ctx("weekly-digest.no_recipients", { week: "2026-34" }));
     assert.equal(n!.urgency, "immediate");

@@ -17,7 +17,7 @@ import {
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { OurvendHealthService } from "../ourvend/ourvend-health.service";
-import { SYNC_STALE_HOURS_FALLBACK } from "../ourvend/sync-runs";
+import { CUTOVER_GREEN_DAYS_FALLBACK, SYNC_STALE_HOURS_FALLBACK } from "../ourvend/sync-runs";
 import { AnalyticsService } from "./analytics.service";
 import { parseOrderPositions } from "./vending.service";
 import { ReportCache } from "./report-cache";
@@ -111,6 +111,10 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
   slotsLagMin: null,
   salesLagH: null,
   productSaleLagH: null,
+  // «Не посчиталось» — это НЕ «готовы к переключению»: серия ноль, а порог —
+  // настоящий фолбэк, чтобы витрина не нарисовала «0 из 0 — можно».
+  parityStreak: 0,
+  cutoverThreshold: CUTOVER_GREEN_DAYS_FALLBACK,
   parity: { days: 0, ok: false, checked: 0, mismatches: 0, stockOk: false, stockChecked: 0, note: "здоровье сбора не посчиталось" },
 };
 

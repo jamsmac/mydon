@@ -182,6 +182,10 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   slotsLagMin: 42,
   salesLagH: 27,
   productSaleLagH: 27,
+  // Серия оборвана: сводка недели, в которой сбор падал, не может звать
+  // переключать учёт.
+  parityStreak: 0,
+  cutoverThreshold: 7,
   parity: { days: 7, ok: false, checked: 14, mismatches: 3, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
 };
 

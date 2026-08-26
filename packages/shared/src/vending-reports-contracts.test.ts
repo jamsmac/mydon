@@ -34,6 +34,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   slotsLagMin: 42,
   salesLagH: 3,
   productSaleLagH: 5,
+  parityStreak: 3,
+  cutoverThreshold: 7,
   parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, note: null },
 };
 
@@ -64,9 +66,11 @@ const СВОДКА: WeeklyDigest = {
 describe("Общие формы ответов Core (R-P5b-10)", () => {
   it("здоровье сбора: ровно те поля, что читают бот и панель", () => {
     assert.deepEqual(Object.keys(ЗДОРОВЬЕ).sort(), [
+      "cutoverThreshold",
       "failedStreak",
       "lastSuccessAt",
       "parity",
+      "parityStreak",
       "productSaleLagH",
       "runs",
       "salesLagH",
@@ -93,6 +97,17 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "startedAt",
       "status",
     ]);
+  });
+
+  it("гейт катовера едет числами: серия И порог, а не флаг «готово» (R-P8b-2)", () => {
+    // Витрины рисуют «N зелёных дней из 7» и «✅ можно переключать» сравнением
+    // ДВУХ полей ответа. Флаг вместо чисел не отвечает на вопрос «сколько ещё
+    // ждать», а своя семёрка у каждого читателя разошлась бы с базой в тот же
+    // день, когда владелец подвинет `CUTOVER_GREEN_DAYS` в панели «Система».
+    assert.equal(typeof ЗДОРОВЬЕ.parityStreak, "number");
+    assert.equal(typeof ЗДОРОВЬЕ.cutoverThreshold, "number");
+    const непосчиталось: OurvendHealth = { ...ЗДОРОВЬЕ, parityStreak: 0 };
+    assert.equal(непосчиталось.parityStreak < непосчиталось.cutoverThreshold, true, "ноль — не «готовы»");
   });
 
   it("лаг допускает null: «снимков нет» — не «0 мин»", () => {

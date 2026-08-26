@@ -6,9 +6,10 @@ import type { Db } from "../db/db.module";
 import { readIntSetting } from "../system/settings";
 
 /**
- * Три вопроса о сборе, которые задают ДВОЕ: отчёт о здоровье
- * (`OurvendHealthService`) и сторож застоя (`SyncStaleService`) — два к журналу
- * прогонов и один к настройкам.
+ * Пять вопросов о сборе, которые задают ДВОЕ и БОЛЬШЕ: отчёт о здоровье
+ * (`OurvendHealthService`), сторож застоя (`SyncStaleService`) и счётчик серии
+ * паритета (`OurvendParityService`) — два к журналу прогонов, один к
+ * арифметике давности и два к настройкам (пороги застоя и катовера).
  *
  * Отдельный модуль, а не метод сервиса, по двум причинам. Первая: сторож не
  * может звать `health()` — внутри отчёта весь сырой SQL паритета, и гонять его
@@ -120,4 +121,29 @@ export function rawStaleHours(lastSuccessAt: string | null, now: Date): number |
   if (!at) return null;
   const мс = Math.max(0, now.getTime() - at.getTime());
   return мс / 3_600_000;
+}
+
+/** Порог катовера, если настройки нет: семь зелёных дней паритета (§П8 плана поглощения). */
+export const CUTOVER_GREEN_DAYS_FALLBACK = 7;
+
+/**
+ * Сколько зелёных дней паритета подряд открывают переключение источника учёта.
+ *
+ * ЗДЕСЬ, А НЕ У СЧЁТЧИКА, ПО ТОЙ ЖЕ ПРИЧИНЕ, ЧТО И `syncStaleThreshold`.
+ * Порог уезжает наружу (`OurvendHealth.cutoverThreshold`,
+ * `ParityStreak.threshold`), и бот с панелью рисуют «✅ можно переключать»
+ * сравнением `parityStreak >= cutoverThreshold`. Витрина обязана показывать
+ * ровно то число, по которому эмитент будит владельца событием
+ * `ourvend.cutover_ready`, — своя семёрка у каждого читателя разойдётся с
+ * базой в тот же день, когда владелец подвинет `CUTOVER_GREEN_DAYS` в панели
+ * «Система».
+ *
+ * ПОЛ В ОДИН ДЕНЬ. `readIntSetting` пропускает ноль как осознанное значение,
+ * но «ноль зелёных дней» означает разрешение на катовер при пустом журнале —
+ * то есть гейт, снятый опиской в настройке. Дробь усекается: день здесь
+ * считается целым, «2.5 дня» — описка, а не пожелание.
+ */
+export async function cutoverThreshold(db: Db, logger?: Logger): Promise<number> {
+  const настройка = await readIntSetting(db, "CUTOVER_GREEN_DAYS", CUTOVER_GREEN_DAYS_FALLBACK, logger);
+  return Math.max(1, Math.trunc(настройка));
 }

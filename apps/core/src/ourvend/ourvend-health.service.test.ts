@@ -22,9 +22,20 @@ interface Мир {
   sales?: Снимок[];
   productSales?: Снимок[];
   parity?: Паритет;
+  streak?: Серия;
 }
 
 type Паритет = Awaited<ReturnType<OurvendParityService["parity"]>>;
+type Серия = Awaited<ReturnType<OurvendParityService["streak"]>>;
+
+const СЕРИЯ_ПО_УМОЛЧАНИЮ: Серия = {
+  greenDays: 3,
+  threshold: 7,
+  readyForCutover: false,
+  days: [],
+  lastRed: "2026-08-21",
+  since: "2026-08-22",
+};
 
 const ПАРИТЕТ_ОК: Паритет = {
   days: 7,
@@ -106,7 +117,12 @@ function healthDb(м: Мир) {
     }),
   } as never;
 
-  const parity = { parity: async () => м.parity ?? ПАРИТЕТ_ОК } as unknown as OurvendParityService;
+  const parity = {
+    parity: async () => м.parity ?? ПАРИТЕТ_ОК,
+    // Серия — отдельным вопросом к журналу событий (П8b): отчёт обязан донести
+    // до витрины и счёт, и ПОРОГ, по которому его судят.
+    streak: async () => м.streak ?? СЕРИЯ_ПО_УМОЛЧАНИЮ,
+  } as unknown as OurvendParityService;
   return { db, parity, счётчик };
 }
 
@@ -239,6 +255,21 @@ describe("Здоровье сбора (R-P5b-8)", () => {
     // бот и панель сравнивают с этим числом, и своя копия у каждого разошлась
     // бы с базой в день, когда владелец подвинет порог.
     assert.equal(h.staleThresholdH, 6);
+  });
+
+  it("серия зелёных дней и порог катовера едут в ответе (R-P8b-2)", async () => {
+    // Витрина рисует «N зелёных дней из 7» и «✅ можно переключать» по ДВУМ
+    // полям ответа: флаг вместо чисел не отвечает на вопрос «сколько ещё
+    // ждать», а своя семёрка разойдётся с базой в день, когда владелец
+    // подвинет `CUTOVER_GREEN_DAYS`.
+    const h = await сервис({ runs: [УСПЕХ("r1", "2026-08-25T06:00:00Z")] }).health(20, СЕЙЧАС);
+    assert.deepEqual([h.parityStreak, h.cutoverThreshold], [3, 7]);
+
+    const готов = await сервис({
+      runs: [УСПЕХ("r2", "2026-08-25T06:00:00Z")],
+      streak: { greenDays: 7, threshold: 7, readyForCutover: true, days: [], lastRed: null, since: "2026-08-19" },
+    }).health(20, new Date(СЕЙЧАС.getTime() + 120_000));
+    assert.equal(готов.parityStreak >= готов.cutoverThreshold, true);
   });
 
   it("успехов не было вовсе — staleHours null, а не ноль часов", async () => {

@@ -256,6 +256,20 @@ const ЧТЕНИЕ = [
     },
   },
   {
+    // П8b: серия считается по журналу событий сырым чтением payload — заглушка
+    // юнит-теста jsonb не разбирает. На засеянной базе событий нет вовсе, и
+    // ответ обязан быть «ноль зелёных», а не пустотой без ключей.
+    path: "/ourvend/parity/streak",
+    проверить: (о) => {
+      if (typeof о?.greenDays !== "number") throw new Error("streak.greenDays — не число");
+      if (typeof о?.threshold !== "number") throw new Error("streak.threshold — не число");
+      if (typeof о?.readyForCutover !== "boolean") throw new Error("streak.readyForCutover — не булево");
+      if (!Array.isArray(о?.days)) throw new Error("streak.days — не массив");
+      if (о.lastRed !== null && typeof о.lastRed !== "string") throw new Error("streak.lastRed — не дата и не null");
+      if (о.greenDays !== 0 || о.readyForCutover !== false) throw new Error("на пустом журнале серия обязана быть нулевой");
+    },
+  },
+  {
     // Верхняя граница окна сверки: без неё число доезжало до `sql.raw` в
     // сыром SQL, и запрос читал бы всю историю снимков.
     path: "/ourvend/parity?days=31",
@@ -299,6 +313,13 @@ const ЧТЕНИЕ = [
         throw new Error(`health.staleHours=${о.staleHours} — не число и не null`);
       }
       if (typeof о.staleThresholdH !== "number") throw new Error("health.staleThresholdH — не число");
+      // П8b: гейт катовера. Ключи ОБЯЗАНЫ присутствовать — витрина рисует
+      // «N зелёных дней из 7» сравнением двух ЧИСЕЛ ответа, и пропущенный ключ
+      // она прочтёт как «поле не приехало», а не как «серии нет».
+      for (const ключ of ["parityStreak", "cutoverThreshold"]) {
+        if (typeof о[ключ] !== "number") throw new Error(`health.${ключ} — не число`);
+      }
+      if (о.cutoverThreshold < 1) throw new Error("порог катовера меньше суток — гейт снят опиской в настройке");
       if (о.lastSuccessAt === null && о.staleHours !== null) {
         throw new Error("успехов нет, а давность посчиталась — «не было вовсе» ≠ «ноль часов»");
       }

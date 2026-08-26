@@ -77,7 +77,7 @@ export class OurvendHealthService {
   }
 
   private async здоровье(n: number, now: Date): Promise<OurvendHealth> {
-    const [прогоны, слоты, продажи, витрина, паритет, успех, порог] = await Promise.all([
+    const [прогоны, слоты, продажи, витрина, паритет, серияПаритета, успех, порог] = await Promise.all([
       this.db
         .select({
           id: vendingSyncRun.id,
@@ -111,6 +111,12 @@ export class OurvendHealthService {
         .orderBy(desc(productSale.capturedAt))
         .limit(1),
       this.parity.parity(PARITY_DAYS),
+      // Серия зелёных дней — рядом с сегодняшней сверкой, а не вместо неё
+      // (R-P8b-2): `parity` отвечает «сходится ли СЕЙЧАС», серия — «сколько
+      // дней подряд сходилось», и катовер открывает второе, а не первое.
+      // Порог она приносит с собой, чтобы витрина сравнивала с тем же числом,
+      // по которому будят владельца.
+      this.parity.streak(now),
       lastSuccessRunAt(this.db),
       // Порог застоя — В ОТВЕТЕ, а не только у сторожа: бот и панель рисуют
       // «⛔ сбор стоит» сравнением `staleHours >= staleThresholdH`, и своя
@@ -147,6 +153,10 @@ export class OurvendHealthService {
       slotsLagMin: лаг(слоты[0]?.at, now, МИНУТА, 0),
       salesLagH: лаг(продажи[0]?.at, now, ЧАС, 1),
       productSaleLagH: лаг(витрина[0]?.at, now, ЧАС, 1),
+      // Гейт катовера ЧИСЛАМИ, а не флагом: владелец решает не «готово/не
+      // готово», а «сколько ещё ждать», и «5 из 7» отвечает на этот вопрос.
+      parityStreak: серияПаритета.greenDays,
+      cutoverThreshold: серияПаритета.threshold,
       parity: {
         days: паритет.days,
         ok: паритет.ok,

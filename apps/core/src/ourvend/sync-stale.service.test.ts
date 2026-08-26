@@ -255,6 +255,9 @@ const ПАРИТЕТ = {
   stock: { days: 7, checked: 0, ok: true, mismatches: [], note: null },
 };
 
+/** Серия паритета «журнал пуст»: ноль зелёных дней при обычном пороге. */
+const СЕРИЯ_ПУСТО = { greenDays: 0, threshold: 7, readyForCutover: false, days: [], lastRed: null, since: null };
+
 describe("Порог застоя — ОДНО число у сторожа и у витрины (R-P8a-6)", () => {
   // Витрина рисует «⛔ сбор стоит» сравнением `staleHours >= staleThresholdH`.
   // Пока пол в час стоял только у сторожа, `SYNC_STALE_HOURS=0` из env давал
@@ -271,7 +274,12 @@ describe("Порог застоя — ОДНО число у сторожа и �
     it(`${имя}: сторож и отчёт называют ${ожидание}`, async () => {
       const мир = { lastSuccessAt: "2026-08-25T06:00:00+05:00", ...(настройки ? { настройки } : {}) };
       const { svc, db } = стенд(мир);
-      const отчёт = new OurvendHealthService(db, { parity: async () => ПАРИТЕТ } as unknown as OurvendParityService);
+      const отчёт = new OurvendHealthService(db, {
+        parity: async () => ПАРИТЕТ,
+        // Серия зелёных дней (П8b) к порогу застоя отношения не имеет — этот
+        // набор про ОДНО число у сторожа и у витрины; отдаём пустую.
+        streak: async () => СЕРИЯ_ПУСТО,
+      } as unknown as OurvendParityService);
 
       const сторож = await svc.check(СЕЙЧАС);
       const здоровье = await отчёт.health(20, СЕЙЧАС);

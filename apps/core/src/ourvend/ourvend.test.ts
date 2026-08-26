@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
+import { event, systemConfig } from "@mydon/db";
+import { tashkentDay } from "@mydon/shared";
+import { resetAccountingSourceCache } from "../sales/accounting-source";
 import {
   computeParity,
   computeStockParity,
+  CUTOVER_READY_EVENT,
   OurvendParityService,
+  PARITY_EVENT,
   type ParityDayRow,
   type ParityStockRow,
 } from "./ourvend-parity.service";
@@ -203,6 +208,20 @@ describe("Вердикт паритета: продажи и остатки вм
       db: {
         execute: () => Promise.resolve(queue.shift() ?? []),
         insert: () => ({ values: (v: Record<string, unknown>) => Promise.resolve(written.push(v)) }),
+        // Журнал событий и настройки — ПУСТЫЕ: этот стенд про сверку, а не про
+        // серию. Пустой журнал даёт `greenDays: 0`, то есть сигнал катовера
+        // молчит и сверку не заслоняет; проверяют его тесты ниже, на своём
+        // стенде с событиями.
+        select: () => ({
+          from: () => {
+            const chain: Record<string, unknown> = {};
+            chain.where = () => chain;
+            chain.orderBy = () => chain;
+            chain.limit = async () => [];
+            chain.then = (res: (v: unknown) => unknown) => Promise.resolve([]).then(res);
+            return chain;
+          },
+        }),
       } as never,
       written,
     };
@@ -322,5 +341,195 @@ describe("Вердикт паритета: продажи и остатки вм
     const payload = written[0]!.payload as Record<string, unknown>;
     assert.equal(payload.остатки_сверено, 1);
     assert.match(String(payload.примечание), /продаж/);
+  });
+});
+
+/**
+ * Сигнал «можно переключать» (R-P8b-2).
+ *
+ * Стенд отдельный от сверки: здесь проверяется не арифметика паритета (она под
+ * тестами выше и в `@mydon/shared`), а ТРИ условия эмиссии — порог, источник
+ * учёта и дедуп по ташкентским суткам.
+ */
+describe("Сигнал «можно переключать» (R-P8b-2)", () => {
+  const сегодня = new Date("2026-09-01T08:40:00+05:00");
+
+  // Зеркало донора обязано быть «настроено», иначе `resolveAccountingSource`
+  // отдаёт `own` независимо от настройки (без зеркала учёт по-другому
+  // невозможен) — и режим `stock` в тесте нечем изобразить.
+  const былURL = process.env.STOCK_DATABASE_URL;
+  before(() => {
+    process.env.STOCK_DATABASE_URL = "postgres://зеркало-для-теста";
+  });
+  after(() => {
+    if (былURL === undefined) delete process.env.STOCK_DATABASE_URL;
+    else process.env.STOCK_DATABASE_URL = былURL;
+  });
+
+  type Событие = { id: string; type: string; occurredAt: Date; payload: Record<string, unknown> };
+
+  interface Мир {
+    /**
+     * Сколько зелёных дней должно получиться ВСЕГО, считая сегодняшний, —
+     * его допишет сам `daily()`. Поэтому засеваем на один день меньше: событие
+     * за сегодня, посеянное руками, спорило бы по времени с настоящим.
+     */
+    зелёныхДо: number;
+    источник: "stock" | "own";
+    /** Что уже лежит в журнале (дедуп сигнала). */
+    уже?: { type: string; occurredAt: Date }[];
+  }
+
+  /** Значения-параметры из условия drizzle: стабу надо увидеть и тип, и границу суток. */
+  const параметры = (cond: unknown): unknown[] => {
+    const out: unknown[] = [];
+    const walk = (n: unknown): void => {
+      if (!n || typeof n !== "object") return;
+      if (n instanceof Date) {
+        out.push(n);
+        return;
+      }
+      if (Array.isArray(n)) {
+        for (const x of n) walk(x);
+        return;
+      }
+      const chunks = (n as { queryChunks?: unknown[] }).queryChunks;
+      if (Array.isArray(chunks)) {
+        for (const c of chunks) walk(c);
+        return;
+      }
+      const v = (n as { value?: unknown }).value;
+      if (typeof v === "string" || v instanceof Date) out.push(v);
+    };
+    walk(cond);
+    return out;
+  };
+
+  const зелёныйПейлоад = {
+    ok: true,
+    дней: 7,
+    сверено_пар: 14,
+    расхождений: 0,
+    остатки_сверено: 68,
+    остатки_расхождений: 0,
+    примечание: null,
+  };
+
+  /** Ташкентская дата за N суток до `сегодня` — тем же смещением, что и код (`tashkentDay`). */
+  const датаНазад = (n: number): string => tashkentDay(new Date(сегодня.getTime() - n * 86_400_000));
+
+  const стендПаритета = (м: Мир) => {
+    resetAccountingSourceCache();
+
+    const события: Событие[] = [];
+    for (let i = 1; i < м.зелёныхДо; i += 1) {
+      const d = датаНазад(i);
+      события.push({ id: `p${i}`, type: PARITY_EVENT, occurredAt: new Date(`${d}T08:40:00+05:00`), payload: { ...зелёныйПейлоад } });
+    }
+    for (const [i, e] of (м.уже ?? []).entries()) {
+      события.push({ id: `u${i}`, type: e.type, occurredAt: e.occurredAt, payload: {} });
+    }
+
+    const настройки = [{ key: "OURVEND_ACCOUNTING_SOURCE", value: м.источник }];
+    const записано: { type: string; payload: Record<string, unknown>; occurredAt?: Date }[] = [];
+
+    // Обе половины сверки сходятся: событие, которое напишет `daily()`, обязано
+    // быть зелёным — сегодняшний день входит в серию.
+    const очередь: unknown[][] = [
+      [{ dt: датаНазад(1), serial: "m1", qty: 12, amount: 144000 }],
+      [{ dt: датаНазад(1), serial: "m1", qty: 12, amount: 144000 }],
+      [{ dt: датаНазад(1), serial: "m1", product: "Fanta", qty: 6 }],
+      [{ dt: датаНазад(1), serial: "m1", product: "Fanta", qty: 6 }],
+    ];
+
+    const db = {
+      execute: () => Promise.resolve(очередь.shift() ?? []),
+      select: () => ({
+        from: (t: unknown) => {
+          let текущие: unknown[] = t === event ? [...события] : t === systemConfig ? настройки : [];
+          const chain: Record<string, unknown> = {};
+          chain.where = (cond?: unknown) => {
+            const п = параметры(cond);
+            const типы = п.filter((v): v is string => typeof v === "string");
+            const даты = п.filter((v): v is Date => v instanceof Date);
+            if (t === event) {
+              текущие = (текущие as Событие[]).filter(
+                (e) =>
+                  (типы.length === 0 || типы.includes(e.type)) &&
+                  (даты.length === 0 || e.occurredAt.getTime() >= даты[0]!.getTime()),
+              );
+            }
+            return chain;
+          };
+          chain.orderBy = () => {
+            текущие = [...(текущие as Событие[])].sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
+            return chain;
+          };
+          chain.limit = async (n: number) => текущие.slice(0, n);
+          chain.then = (res: (v: unknown) => unknown) => Promise.resolve(текущие).then(res);
+          return chain;
+        },
+      }),
+      insert: () => ({
+        values: async (v: { type: string; payload: Record<string, unknown>; occurredAt?: Date }) => {
+          записано.push(v);
+          // Событие немедленно видно и счёту серии, и дедупу — как в настоящей
+          // базе. Дата берётся из самой строки: датируй стаб реальным «сейчас»
+          // — и серия зависела бы от дня прогона тестов.
+          события.push({
+            id: `w${записано.length}`,
+            type: v.type,
+            occurredAt: v.occurredAt ?? сегодня,
+            payload: v.payload,
+          });
+        },
+      }),
+    } as never;
+
+    const реестр = { machineRegistry: async () => ({ notInService: new Map(), nameBySerial: new Map() }) } as never;
+    return { svc: new OurvendParityService(db, реестр), записано };
+  };
+
+  it("порог взят — событие с числом дней и днём начала серии", async () => {
+    const { svc, записано } = стендПаритета({ зелёныхДо: 7, источник: "stock" });
+    await svc.daily(сегодня);
+    const c = записано.find((e) => e.type === CUTOVER_READY_EVENT);
+    assert.ok(c, "события cutover_ready нет");
+    assert.deepEqual(c.payload, { greenDays: 7, since: "2026-08-26" });
+  });
+
+  it("повтор в те же ташкентские сутки — молчание", async () => {
+    const { svc, записано } = стендПаритета({
+      зелёныхДо: 7,
+      источник: "stock",
+      уже: [{ type: CUTOVER_READY_EVENT, occurredAt: new Date("2026-09-01T02:00:00+05:00") }],
+    });
+    await svc.daily(сегодня);
+    assert.equal(записано.filter((e) => e.type === CUTOVER_READY_EVENT).length, 0);
+  });
+
+  it("после флипа сигнал не повторяется НИКОГДА: звать переключать уже некуда", async () => {
+    const { svc, записано } = стендПаритета({ зелёныхДо: 9, источник: "own" });
+    await svc.daily(сегодня);
+    assert.equal(записано.filter((e) => e.type === CUTOVER_READY_EVENT).length, 0);
+    assert.equal(записано.filter((e) => e.type === PARITY_EVENT).length, 1, "сам паритет писаться не перестал");
+  });
+
+  it("шесть дней — событие ourvend.parity есть, cutover_ready нет", async () => {
+    const { svc, записано } = стендПаритета({ зелёныхДо: 6, источник: "stock" });
+    await svc.daily(сегодня);
+    assert.equal(записано.filter((e) => e.type === PARITY_EVENT).length, 1);
+    assert.equal(записано.filter((e) => e.type === CUTOVER_READY_EVENT).length, 0);
+  });
+
+  it("счёт серии читает журнал, а не пересчитывает историю заново", async () => {
+    // Снапшоты дозаливаются задним числом: пересчитай мы вчерашние дни по
+    // СЕГОДНЯШНЕМУ содержимому таблиц — «семь зелёных подряд» нарисовались бы
+    // там, где в те дни гейт был красным.
+    const { svc } = стендПаритета({ зелёныхДо: 7, источник: "stock" });
+    const серия = await svc.streak(сегодня);
+    assert.deepEqual([серия.greenDays, серия.threshold, серия.readyForCutover], [6, 7, false]);
+    assert.equal(серия.since, "2026-08-26", "сегодняшнего события ещё нет — серия стоит на вчера");
+    assert.equal(серия.days.length, 6);
   });
 });
