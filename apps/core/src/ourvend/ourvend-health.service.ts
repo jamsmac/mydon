@@ -1,12 +1,20 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { desc } from "drizzle-orm";
 import { ourvendSaleSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
-import { staleHours, type OurvendHealth, type OurvendSyncRun } from "@mydon/shared";
+import { staleHours, type OurvendHealth, type OurvendSyncRun, type ParityStreak } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
+import { accountingSource } from "../sales/accounting-source";
 import { ReportCache } from "../vending/report-cache";
 import { failedStreak, STREAK_SCAN_LIMIT } from "../vending/sync-streak";
-import { OurvendParityService } from "./ourvend-parity.service";
-import { lastSuccessRunAt, syncStaleThreshold } from "./sync-runs";
+import { OurvendParityService, parityMode, type ParityReport } from "./ourvend-parity.service";
+import {
+  CUTOVER_GREEN_DAYS_FALLBACK,
+  lastSnapshotAt,
+  lastSuccessRunAt,
+  snapshotStaleThreshold,
+  snapshotStaleVerdict,
+  syncStaleThreshold,
+} from "./sync-runs";
 
 /**
  * Здоровье сбора OurVend (R-P5b-8): прогоны, серия отказов, свежесть снимков,
@@ -77,49 +85,106 @@ export class OurvendHealthService {
   }
 
   private async здоровье(n: number, now: Date): Promise<OurvendHealth> {
-    const [прогоны, слоты, продажи, витрина, паритет, успех, порог] = await Promise.all([
-      this.db
-        .select({
-          id: vendingSyncRun.id,
-          startedAt: vendingSyncRun.startedAt,
-          finishedAt: vendingSyncRun.finishedAt,
-          status: vendingSyncRun.status,
-          machinesTotal: vendingSyncRun.machinesTotal,
-          machinesOk: vendingSyncRun.machinesOk,
-          error: vendingSyncRun.error,
-          durationMs: vendingSyncRun.durationMs,
-        })
-        .from(vendingSyncRun)
-        .orderBy(desc(vendingSyncRun.startedAt))
-        .limit(Math.max(n, STREAK_SCAN_LIMIT)),
-      // Свежесть — тремя отдельными запросами «последняя строка», а не
-      // `max()`: и то и другое идёт по индексу, но строку видно целиком, и
-      // заглушка юнит-теста исполняет ровно тот же путь, что и Postgres.
-      this.db
-        .select({ at: slotSnapshot.capturedAt })
-        .from(slotSnapshot)
-        .orderBy(desc(slotSnapshot.capturedAt))
-        .limit(1),
-      this.db
-        .select({ at: ourvendSaleSnapshot.fetchedAt })
-        .from(ourvendSaleSnapshot)
-        .orderBy(desc(ourvendSaleSnapshot.fetchedAt))
-        .limit(1),
-      this.db
-        .select({ at: productSale.capturedAt })
-        .from(productSale)
-        .orderBy(desc(productSale.capturedAt))
-        .limit(1),
-      this.parity.parity(PARITY_DAYS),
-      lastSuccessRunAt(this.db),
-      // Порог застоя — В ОТВЕТЕ, а не только у сторожа: бот и панель рисуют
-      // «⛔ сбор стоит» сравнением `staleHours >= staleThresholdH`, и своя
-      // константа у каждого разошлась бы с базой в тот же день, когда владелец
-      // подвинет порог в панели настроек (R-P8a-6). Считает его ОДНА функция
-      // на двоих (`syncStaleThreshold`) — иначе витрина показывала бы порог,
-      // по которому сторож не тревожит.
-      syncStaleThreshold(this.db, this.logger),
-    ]);
+    const [прогоны, слоты, продажи, витрина, паритет, серияПаритета, успех, порог, источник, порогСнапшота, снапшот] =
+      await Promise.all([
+        this.db
+          .select({
+            id: vendingSyncRun.id,
+            startedAt: vendingSyncRun.startedAt,
+            finishedAt: vendingSyncRun.finishedAt,
+            status: vendingSyncRun.status,
+            machinesTotal: vendingSyncRun.machinesTotal,
+            machinesOk: vendingSyncRun.machinesOk,
+            error: vendingSyncRun.error,
+            durationMs: vendingSyncRun.durationMs,
+          })
+          .from(vendingSyncRun)
+          .orderBy(desc(vendingSyncRun.startedAt))
+          .limit(Math.max(n, STREAK_SCAN_LIMIT)),
+        // Свежесть — тремя отдельными запросами «последняя строка», а не
+        // `max()`: и то и другое идёт по индексу, но строку видно целиком, и
+        // заглушка юнит-теста исполняет ровно тот же путь, что и Postgres.
+        this.db
+          .select({ at: slotSnapshot.capturedAt })
+          .from(slotSnapshot)
+          .orderBy(desc(slotSnapshot.capturedAt))
+          .limit(1),
+        this.db
+          .select({ at: ourvendSaleSnapshot.fetchedAt })
+          .from(ourvendSaleSnapshot)
+          .orderBy(desc(ourvendSaleSnapshot.fetchedAt))
+          .limit(1),
+        this.db
+          .select({ at: productSale.capturedAt })
+          .from(productSale)
+          .orderBy(desc(productSale.capturedAt))
+          .limit(1),
+        // …И ТОЖЕ ПОД СВОИМ `catch` — по той же причине, что серия ниже, но
+        // цена здесь выше. После флипа (`own`, зеркало ещё живо) `parity()`
+        // сверяется с ТАБЛИЦАМИ ДОНОРА напрямую: открывает соединение с чужой
+        // базой (`connect_timeout: 10`) и делает два запроса. Недоступный или
+        // медленный донор — рядовое событие ровно в дни катовера, а без своего
+        // `catch` он клал ВЕСЬ отчёт о здоровье: панель печатала «не
+        // проверили», бот — «отчёт не пришёл», недельная сводка уезжала в
+        // ЗДОРОВЬЕ_НЕИЗВЕСТНО. Витрина, которая гаснет целиком из-за одной из
+        // восьми своих строк, хуже витрины, которая честно говорит, какая
+        // строка не посчиталась.
+        this.parity.parity(PARITY_DAYS, now).catch(async (e: unknown): Promise<ParityReport> => {
+          const причина = e instanceof Error ? e.message : String(e);
+          this.logger.warn(`Сверка паритета не посчиталась: ${причина}`);
+          // Режим — тем же чистым правилом, что и у удавшегося прогона: без
+          // него «расхождений 0» не отличить от «сверять было не с чем».
+          // Читает он свою же базу (кеш минуты, тот же вызов уже стоит в этой
+          // пачке) — если недоступна ОНА, отчёт всё равно не соберётся.
+          const mode = parityMode(await accountingSource(this.db, now));
+          const записка = `сверка недоступна: ${причина}`;
+          return {
+            days: PARITY_DAYS,
+            checked: 0,
+            ok: false,
+            mismatches: [],
+            ownRows: 0,
+            mode,
+            note: записка,
+            stock: { days: PARITY_DAYS, checked: 0, ok: false, mismatches: [], withinTolerance: 0, tolerance: 0, note: записка },
+          };
+        }),
+        // Серия зелёных дней — рядом с сегодняшней сверкой, а не вместо неё
+        // (R-P8b-2): `parity` отвечает «сходится ли СЕЙЧАС», серия — «сколько
+        // дней подряд сходилось», и катовер открывает второе, а не первое.
+        // Порог она приносит с собой, чтобы витрина сравнивала с тем же числом,
+        // по которому будят владельца.
+        // …И ПОД СВОИМ `catch`. Отчёт о здоровье — та самая витрина, которую
+        // владелец открывает в дни катовера, и ронять её целиком из-за счёта
+        // серии нельзя: `streak()` читает общую таблицу `event` и настройку
+        // порога, то есть имеет свои поводы отказать. Тот же приём, что у
+        // сигнала в `daily()`: отказ спутника не выдаёт себя за отказ главного.
+        this.parity.streak(now).catch((e: unknown): ParityStreak => {
+          this.logger.warn(
+            `Серия зелёных дней паритета не посчиталась: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          return { greenDays: 0, threshold: CUTOVER_GREEN_DAYS_FALLBACK, readyForCutover: false, days: [], lastRed: null, since: null };
+        }),
+        lastSuccessRunAt(this.db),
+        // Порог застоя — В ОТВЕТЕ, а не только у сторожа: бот и панель рисуют
+        // «⛔ сбор стоит» сравнением `staleHours >= staleThresholdH`, и своя
+        // константа у каждого разошлась бы с базой в тот же день, когда владелец
+        // подвинет порог в панели настроек (R-P8a-6). Считает его ОДНА функция
+        // на двоих (`syncStaleThreshold`) — иначе витрина показывала бы порог,
+        // по которому сторож не тревожит.
+        syncStaleThreshold(this.db, this.logger),
+        // Режим учёта и порог свежести снапшота — ради ОДНОГО поля `snapshotStale`
+        // (R-P8b-5). Оба чтения дешёвые (`system_config` целиком, кеш источника —
+        // минута) и идут в той же пачке, а не отдельным раундом: отчёт и так
+        // держится на `Promise.all`, и последовательный `await` добавил бы
+        // задержку ровно там, где владелец обновляет страницу.
+        accountingSource(this.db, now),
+        snapshotStaleThreshold(this.db, this.logger),
+        // Свежесть — ПО ОБЕИМ половинам снапшота (R-FW-P2): продажи и остатки
+        // приезжают тремя независимыми POST-ами, и вставшая половина
+        // замораживает СВОЮ таблицу при свежих часах второй.
+        lastSnapshotAt(this.db),
+      ]);
 
     const серия = failedStreak(прогоны);
     const успехAt = успех ? успех.toISOString() : null;
@@ -146,7 +211,20 @@ export class OurvendHealthService {
       staleThresholdH: порог,
       slotsLagMin: лаг(слоты[0]?.at, now, МИНУТА, 0),
       salesLagH: лаг(продажи[0]?.at, now, ЧАС, 1),
+      // ВЕРДИКТ, а не второй порог рядом с лагом. Витрине иначе пришлось бы
+      // сравнивать три вещи: лаг, порог и РЕЖИМ УЧЁТА — в режиме `stock` тот же
+      // лаг не значит ничего (снапшот там теневой, продажи и остатки едут
+      // зеркалом), и бот с панелью рисовали бы «⛔ учёт стоит» каждый день до
+      // катовера. Считает ОДНА функция на троих (`snapshotIsStale`), и по СЫРЫМ
+      // часам: `salesLagH` выше округлён до 0.1 ч и годится только для показа —
+      // сравнивать с порогом округлённое значит двигать границу (см. длинный
+      // комментарий у `staleHours` ниже).
+      snapshotStale: источник === "own" && snapshotStaleVerdict(снапшот, now, порогСнапшота).stale,
       productSaleLagH: лаг(витрина[0]?.at, now, ЧАС, 1),
+      // Гейт катовера ЧИСЛАМИ, а не флагом: владелец решает не «готово/не
+      // готово», а «сколько ещё ждать», и «5 из 7» отвечает на этот вопрос.
+      parityStreak: серияПаритета.greenDays,
+      cutoverThreshold: серияПаритета.threshold,
       parity: {
         days: паритет.days,
         ok: паритет.ok,
@@ -161,6 +239,9 @@ export class OurvendHealthService {
         // есть только за сегодня, сверка идёт по закрытым суткам, и сверять
         // физически не по чему. Витрина обязана сказать это словами.
         stockChecked: паритет.stock.checked,
+        // С ЧЕМ сверялись — витрине словами: «расхождений 0» в режиме `retired`
+        // означает «сверять не с чем», а не «всё сошлось».
+        mode: паритет.mode,
         note: паритет.note,
       },
     };

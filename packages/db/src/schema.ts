@@ -1465,7 +1465,15 @@ export const slotSnapshot = pgTable(
     quantity: integer("quantity").default(0).notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
   },
-  (t) => [index("slot_snapshot_machine_captured_idx").on(t.machineSerial, t.capturedAt)],
+  (t) => [
+    index("slot_snapshot_machine_captured_idx").on(t.machineSerial, t.capturedAt),
+    // Индекс ПО ВРЕМЕНИ ОТДЕЛЬНО — под ретенцию (0070). Составной выше начинается
+    // с `machine_serial`, и запрос чистки `where captured_at < cutoff order by
+    // captured_at limit 5000` его использовать не может: понадобился бы seq scan
+    // с сортировкой на КАЖДУЮ пачку. Сегодня таблица маленькая, но растёт на
+    // ~1680 строк/сут, а первая непустая чистка придётся на 180 суток истории.
+    index("slot_snapshot_captured_idx").on(t.capturedAt),
+  ],
 );
 
 /** Продажи по товарам за период (для прогноза и пометки «нет продаж»). */
@@ -1491,6 +1499,8 @@ export const productSale = pgTable(
   },
   (t) => [
     index("product_sale_machine_captured_idx").on(t.machineSerial, t.capturedAt),
+    // По времени отдельно — под ретенцию (0070), см. slot_snapshot.
+    index("product_sale_captured_idx").on(t.capturedAt),
     // Ключ идемпотентности батча: повторная доставка того же сбора (тот же
     // capturedAt) по тому же автомату/товару — апдейт, а не вторая строка,
     // иначе latestSold7() задваивает продажи и прогноз (найдено внешним
@@ -1516,6 +1526,8 @@ export const machineSale = pgTable(
   (t) => [
     // Ключ идемпотентности батча — та же причина, что и у product_sale выше.
     uniqueIndex("machine_sale_batch_key").on(t.machineSerial, t.capturedAt),
+    // По времени отдельно — под ретенцию (0070), см. slot_snapshot.
+    index("machine_sale_captured_idx").on(t.capturedAt),
   ],
 );
 
@@ -1830,16 +1842,23 @@ export const vendingUnmatched = pgTable("vending_unmatched", {
 });
 
 /** Журнал запусков сбора Ourvend. */
-export const vendingSyncRun = pgTable("vending_sync_run", {
-  id: id(),
-  startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
-  finishedAt: timestamp("finished_at", { withTimezone: true }),
-  status: vendingSyncStatusEnum("status").default("running").notNull(),
-  machinesTotal: integer("machines_total").default(0).notNull(),
-  machinesOk: integer("machines_ok").default(0).notNull(),
-  error: text("error"),
-  durationMs: integer("duration_ms"),
-});
+export const vendingSyncRun = pgTable(
+  "vending_sync_run",
+  {
+    id: id(),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    status: vendingSyncStatusEnum("status").default("running").notNull(),
+    machinesTotal: integer("machines_total").default(0).notNull(),
+    machinesOk: integer("machines_ok").default(0).notNull(),
+    error: text("error"),
+    durationMs: integer("duration_ms"),
+  },
+  // Индекса не было ВООБЩЕ, а по `started_at` ходят трое: ретенция (0070),
+  // «последний успешный прогон» и «статус последнего» — обе выборки
+  // `order by started_at desc limit 1` на каждой странице здоровья сбора.
+  (t) => [index("vending_sync_run_started_idx").on(t.startedAt)],
+);
 
 // ── Кофе-вендинг: бункеры, вес, мойка, ингредиенты ──────────────────────────
 // Ручные кофемашины на точках владельца — Ourvend их не видит (нет сетевого

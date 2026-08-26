@@ -72,7 +72,15 @@ services:
       # П2 поглощения mydon-stock: источник учётного потока OurVend.
       # "stock" (по умолчанию) — чтение БД склада; "own" — собственный снапшот
       # (переключать после 7 зелёных дней GET /ourvend/parity).
+      # П8b: фолбэк под настройкой панели «Система» (system_config, база
+      # важнее env). Действующее значение и рунбук флипа — docs/CUTOVER.md.
+      # Без STOCK_DATABASE_URL игнорируется — действует own.
       OURVEND_ACCOUNTING_SOURCE: ${OURVEND_ACCOUNTING_SOURCE:-stock}
+      # Пороги катовера (П8b) — панель «Система» (system_config), СЮДА НЕ
+      # ПРОБРОШЕНЫ: CUTOVER_GREEN_DAYS (7), STOCK_PARITY_TOLERANCE (3, ≥0,
+      # допуск сверки остатков — 15-минутный разрыв между съёмом зеркала
+      # 07:50 и агента 08:05), SNAPSHOT_STALE_HOURS (36), SNAPSHOT_RETENTION_DAYS
+      # (180, панель не примет ниже 90). Дефолты — apps/core/src/system/config-spec.ts.
       # П5a: маршрут загрузки автоматов для плана закупа (серийники через
       # запятую). Пусто → по имени автомата. Правится и из панели настроек
       # (база важнее env).

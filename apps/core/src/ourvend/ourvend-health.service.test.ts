@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ourvendSaleSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
+import { ourvendSaleSnapshot, ourvendStockSnapshot, productSale, slotSnapshot, vendingSyncRun } from "@mydon/db";
+import { resetAccountingSourceCache } from "../sales/accounting-source";
 import { OurvendHealthService } from "./ourvend-health.service";
 import type { OurvendParityService } from "./ourvend-parity.service";
 
@@ -20,11 +21,35 @@ interface Мир {
   runs?: Прогон[];
   slots?: Снимок[];
   sales?: Снимок[];
+  /**
+   * Снимки ОСТАТКОВ. Не задано — те же, что у продаж: обе половины приезжают
+   * одним прогоном агента, и «по умолчанию они ровесники» — это про, а не
+   * упрощение. Задавать отдельно нужно ровно там, где половины разъехались.
+   */
+  stock?: Снимок[];
   productSales?: Снимок[];
   parity?: Паритет;
+  /**
+   * Сверка ОТКАЗАЛА (сообщение исключения). Своей ветки она заслуживает
+   * потому, что в режиме `own-vs-donor` `parity()` открывает соединение с
+   * ЧУЖОЙ базой (`connect_timeout: 10`), а недоступный донор — рядовое
+   * событие ровно в дни катовера.
+   */
+  parityError?: string;
+  streak?: Серия;
 }
 
 type Паритет = Awaited<ReturnType<OurvendParityService["parity"]>>;
+type Серия = Awaited<ReturnType<OurvendParityService["streak"]>>;
+
+const СЕРИЯ_ПО_УМОЛЧАНИЮ: Серия = {
+  greenDays: 3,
+  threshold: 7,
+  readyForCutover: false,
+  days: [],
+  lastRed: "2026-08-21",
+  since: "2026-08-22",
+};
 
 const ПАРИТЕТ_ОК: Паритет = {
   days: 7,
@@ -32,8 +57,9 @@ const ПАРИТЕТ_ОК: Паритет = {
   ok: true,
   mismatches: [],
   ownRows: 14,
+  mode: "mirror",
   note: null,
-  stock: { days: 7, checked: 14, ok: true, mismatches: [], note: null },
+  stock: { days: 7, checked: 14, ok: true, mismatches: [], withinTolerance: 0, tolerance: 3, note: null },
 };
 
 /**
@@ -53,7 +79,9 @@ function healthDb(м: Мир) {
         ? (м.slots ?? [])
         : t === ourvendSaleSnapshot
           ? (м.sales ?? [])
-          : t === productSale
+          : t === ourvendStockSnapshot
+            ? (м.stock ?? м.sales ?? [])
+            : t === productSale
             ? (м.productSales ?? [])
             : [];
 
@@ -106,12 +134,23 @@ function healthDb(м: Мир) {
     }),
   } as never;
 
-  const parity = { parity: async () => м.parity ?? ПАРИТЕТ_ОК } as unknown as OurvendParityService;
+  const parity = {
+    parity: async () => {
+      if (м.parityError !== undefined) throw new Error(м.parityError);
+      return м.parity ?? ПАРИТЕТ_ОК;
+    },
+    // Серия — отдельным вопросом к журналу событий (П8b): отчёт обязан донести
+    // до витрины и счёт, и ПОРОГ, по которому его судят.
+    streak: async () => м.streak ?? СЕРИЯ_ПО_УМОЛЧАНИЮ,
+  } as unknown as OurvendParityService;
   return { db, parity, счётчик };
 }
 
 const сервис = (м: Мир) => {
   const { db, parity } = healthDb(м);
+  // Источник учёта кеширует МОДУЛЬ, а не сервис: без сброса набор про режим
+  // `stock` получил бы режим предыдущего теста.
+  resetAccountingSourceCache();
   return new OurvendHealthService(db, parity);
 };
 
@@ -196,8 +235,17 @@ describe("Здоровье сбора (R-P5b-8)", () => {
         mismatches: [
           { dt: "2026-08-24", serial: "2508160376", ownQty: 1, stockQty: 0, ownAmount: 1, stockAmount: 0, reason: "нет дня" },
         ],
+        mode: "mirror",
         note: "остатки: снимков остатков OurVend за период нет",
-        stock: { days: 7, checked: 0, ok: false, mismatches: [], note: "снимков остатков OurVend за период нет" },
+        stock: {
+          days: 7,
+          checked: 0,
+          ok: false,
+          mismatches: [],
+          withinTolerance: 0,
+          tolerance: 3,
+          note: "снимков остатков OurVend за период нет",
+        },
       },
     }).health(20, СЕЙЧАС);
 
@@ -241,6 +289,21 @@ describe("Здоровье сбора (R-P5b-8)", () => {
     assert.equal(h.staleThresholdH, 6);
   });
 
+  it("серия зелёных дней и порог катовера едут в ответе (R-P8b-2)", async () => {
+    // Витрина рисует «N зелёных дней из 7» и «✅ можно переключать» по ДВУМ
+    // полям ответа: флаг вместо чисел не отвечает на вопрос «сколько ещё
+    // ждать», а своя семёрка разойдётся с базой в день, когда владелец
+    // подвинет `CUTOVER_GREEN_DAYS`.
+    const h = await сервис({ runs: [УСПЕХ("r1", "2026-08-25T06:00:00Z")] }).health(20, СЕЙЧАС);
+    assert.deepEqual([h.parityStreak, h.cutoverThreshold], [3, 7]);
+
+    const готов = await сервис({
+      runs: [УСПЕХ("r2", "2026-08-25T06:00:00Z")],
+      streak: { greenDays: 7, threshold: 7, readyForCutover: true, days: [], lastRed: null, since: "2026-08-19" },
+    }).health(20, new Date(СЕЙЧАС.getTime() + 120_000));
+    assert.equal(готов.parityStreak >= готов.cutoverThreshold, true);
+  });
+
   it("успехов не было вовсе — staleHours null, а не ноль часов", async () => {
     const h = await сервис({ runs: [ОТКАЗ("f1", "2026-08-25T06:00:00Z")] }).health(20, СЕЙЧАС);
     assert.deepEqual([h.lastSuccessAt, h.staleHours], [null, null]);
@@ -265,4 +328,148 @@ describe("Здоровье сбора (R-P5b-8)", () => {
     assert.equal((await сервис({ runs }).health(-5, СЕЙЧАС)).runs.length, 1);
     assert.equal((await сервис({ runs }).health(10_000, СЕЙЧАС)).runs.length, 1);
   });
+});
+
+// ── Вердикт «учётный снапшот встал» (R-P8b-5) ───────────────────────────────
+
+/** Прогон с подменённым окружением: кеш источника сбрасывается с обеих сторон. */
+const сОкружением = async <T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> => {
+  const было: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(env)) {
+    было[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  resetAccountingSourceCache();
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(было)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetAccountingSourceCache();
+  }
+};
+
+// РЕЖИМ `own` ЗАДАЁТСЯ ЯВНО, а не «получается сам» из-за незаданной
+// переменной в процессе разработчика: с экспортированным `STOCK_DATABASE_URL`
+// набор молча уехал бы в `stock`, где `snapshotStale` всегда `false`, и
+// «снапшот свежий — false» остался бы зелёным по неправильной причине.
+const вРежимеOwn = <T>(fn: () => Promise<T>): Promise<T> => сОкружением({ STOCK_DATABASE_URL: undefined }, fn);
+
+/**
+ * Шаги 1а–2 рунбука: учёт уже свой, а зеркало ещё живо. Единственный режим, в
+ * котором сверка ходит в ЧУЖУЮ базу — и, значит, единственный, в котором она
+ * может не вернуться.
+ */
+const вРежимеOwnVsDonor = <T>(fn: () => Promise<T>): Promise<T> =>
+  сОкружением({ STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "own" }, fn);
+
+describe("Свежесть учётного снапшота в отчёте (R-P8b-5)", () => {
+  it("режим own, снапшот старше порога — вердикт true рядом с лагом", async () =>
+    вРежимеOwn(async () => {
+      const h = await сервис({ sales: [{ at: new Date("2026-08-23T18:00:00Z") }] }).health(20, СЕЙЧАС);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [37, true]);
+    }));
+
+  it("режим own, снапшот свежий — false", async () =>
+    вРежимеOwn(async () => {
+      const h = await сервис({ sales: [{ at: new Date("2026-08-25T04:00:00Z") }] }).health(20, СЕЙЧАС);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [3, false]);
+    }));
+
+  it("снимков нет вовсе — вердикт true, хотя лаг null", async () =>
+    вРежимеOwn(async () => {
+      // «Снимков нет» тревожнее «снимки старые»: агент не доехал ни разу, и
+      // после флипа учёт стоял бы с нуля — а лаг при этом честно `null`.
+      const h = await сервис({ sales: [] }).health(20, СЕЙЧАС);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [null, true]);
+    }));
+
+  it("ВСТАЛИ ТОЛЬКО ОСТАТКИ — вердикт true при свежих продажах (R-FW-P2)", async () =>
+    вРежимеOwn(async () => {
+      // Агент шлёт три отдельных POST-а, у Lot-сессии свой `try`: упавшие
+      // остатки замораживают `machine_stock`, а часы продаж при этом свежие.
+      // Пока сторож смотрел на одну таблицу, этой аварии не видел никто.
+      const h = await сервис({
+        sales: [{ at: new Date("2026-08-25T04:00:00Z") }],
+        stock: [{ at: new Date("2026-08-23T18:00:00Z") }],
+      }).health(20, СЕЙЧАС);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [3, true]);
+    }));
+
+  it("снимков ОСТАТКОВ нет вовсе — тоже застой", async () =>
+    вРежимеOwn(async () => {
+      const h = await сервис({ sales: [{ at: new Date("2026-08-25T04:00:00Z") }], stock: [] }).health(20, СЕЙЧАС);
+      assert.equal(h.snapshotStale, true);
+    }));
+
+  it("режим stock — вердикт false при любом лаге: снапшот там теневой", async () => {
+    await сОкружением(
+      { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+      async () => {
+        const h = await сервис({ sales: [{ at: new Date("2026-01-01T00:00:00Z") }] }).health(20, СЕЙЧАС);
+        assert.equal(h.snapshotStale, false, "в режиме stock застой снапшота не останавливает ничего");
+        assert.ok((h.salesLagH ?? 0) > 1000, "лаг при этом показывается честно");
+      },
+    );
+  });
+
+  it("вердикт считается по СЫРЫМ часам, а не по округлённому показу", async () =>
+    вРежимеOwn(async () => {
+      // 35 ч 59 м 49 с округляются до ровно 36.0 — сравнение по показанному
+      // числу сдвинуло бы границу на 11 секунд (авария 24.08.2026).
+      const h = await сервис({ sales: [{ at: new Date("2026-08-23T19:00:11Z") }] }).health(20, СЕЙЧАС);
+      assert.equal(h.salesLagH, 36, "витрина показывает округлённое число");
+      assert.equal(h.snapshotStale, false, "но решение принимается по сырым часам");
+    }));
+});
+
+// ── Витрина переживает недоступного донора (re-review, major 1) ─────────────
+
+describe("Здоровье сбора переживает отказ сверки (re-review)", () => {
+  it("донор не ответил в режиме own-vs-donor — отчёт цел, паритет вырожден с причиной", async () =>
+    вРежимеOwnVsDonor(async () => {
+      // `parity()` в этом режиме открывает соединение с БД донора
+      // (`connect_timeout: 10`) и делает два запроса. Пока вызов стоял в
+      // `Promise.all` без своего `catch`, недоступный донор ронял ВЕСЬ отчёт —
+      // ту самую витрину, которую владелец в дни катовера и открывает: панель
+      // печатала «Здоровье сбора: не проверили», бот — «отчёт не пришёл»,
+      // недельная сводка уезжала в ЗДОРОВЬЕ_НЕИЗВЕСТНО. Ровно та цена, ради
+      // которой рядом уже закрыли `streak()`.
+      const h = await сервис({
+        runs: [УСПЕХ("r1", "2026-08-25T06:00:00Z")],
+        sales: [{ at: new Date("2026-08-25T04:00:00Z") }],
+        parityError: "connect ETIMEDOUT 10.0.0.5:5432",
+      }).health(20, СЕЙЧАС);
+
+      assert.deepEqual(
+        [h.parity.days, h.parity.ok, h.parity.checked, h.parity.mismatches, h.parity.stockOk, h.parity.stockChecked],
+        [7, false, 0, 0, false, 0],
+        "вырожденный паритет держит контракт: объект, нули, красный вердикт",
+      );
+      assert.equal(h.parity.mode, "own-vs-donor", "режим — тот, в котором сверку и пытались считать");
+      assert.equal(
+        h.parity.note,
+        "сверка недоступна: connect ETIMEDOUT 10.0.0.5:5432",
+        "причина — словами: «расхождений 0» без неё читается как «всё сошлось»",
+      );
+
+      // Всё остальное — как будто сверки и не звали: отказ спутника не выдаёт
+      // себя за отказ главного.
+      assert.deepEqual([h.parityStreak, h.cutoverThreshold], [3, 7], "серия считается своим запросом и не страдает");
+      assert.deepEqual([h.lastSuccessAt, h.staleHours, h.failedStreak], ["2026-08-25T06:00:00.000Z", 1, 0]);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [3, false]);
+    }));
+
+  it("сверка отказала в режиме stock — режим в ответе тоже честный", async () =>
+    сОкружением(
+      { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+      async () => {
+        const h = await сервис({ parityError: "deadlock detected" }).health(20, СЕЙЧАС);
+        assert.equal(h.parity.mode, "mirror");
+        assert.equal(h.parity.note, "сверка недоступна: deadlock detected");
+      },
+    ));
 });

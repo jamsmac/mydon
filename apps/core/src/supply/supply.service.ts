@@ -10,7 +10,10 @@ import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, st
 import { desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
-import { accountingSource, todayLocal } from "../sales/sales.service";
+import { accountingSource, type AccountingSource } from "../sales/accounting-source";
+import { todayLocal } from "../sales/sales.service";
+import { VendingService } from "../vending/vending.service";
+import { openStockDb } from "./stock-db";
 
 type PurchaseRow = typeof purchase.$inferSelect;
 
@@ -99,16 +102,63 @@ export function buildPurchaseUpserts(rows: StockPurchaseRow[]): {
   return { values, quarantined };
 }
 
+/**
+ * Строки снапшота → строки `machine_stock`.
+ *
+ * `notInService` — канонические серийники автоматов, про которые карточка ПРЯМО
+ * говорит `status ≠ in_service` (тот же реестр, что у паритета и плана закупа).
+ * Аргумент не задан — фильтра нет вовсе: это режим `stock`, где остатки
+ * приезжают зеркалом mydon-stock, а зеркало таких строк не даёт.
+ *
+ * ПОЧЕМУ ОТБРОШЕННАЯ СТРОКА НЕ ИДЁТ В КАРАНТИН (R-P8b-4). Карантин — про БРАК
+ * ДАННЫХ: нечисловое `qty`, которое нельзя влить нулём, не занизив остаток. А
+ * складской автомат — законные данные, просто не для этой таблицы: SKLAD 4S
+ * (`2508160360`, `status='warehouse'`) каждые сутки отдаёт 34 строки на 7028
+ * «единиц» заглушки 199. Положи их в карантин — и владелец получал бы событие
+ * `supply.quarantine` каждые десять минут о том, что склад работает нормально.
+ * Поэтому по фильтру идёт СЧЁТЧИК, а не тревога.
+ *
+ * ПОЧЕМУ ФИЛЬТР СТОИТ НА ЗАПИСИ, А НЕ НА ЧТЕНИИ СНАПШОТА. Снапшот обязан
+ * остаться ПОЛНЫМ: по нему сверяется паритет (он режет «не в строю» сам, своим
+ * гейтом) и по нему же живёт кабинетный отчёт — обрежь мы выборку, и сверка
+ * молча потеряла бы половину сравниваемых пар, а расхождение выглядело бы как
+ * «сходится».
+ */
 export function buildStockUpserts(
   rows: StockLevelRow[],
   serialToEntity: Map<string, string>,
-): { values: (typeof machineStock.$inferInsert)[]; quarantined: QuarantinedSupply[] } {
+  notInService?: ReadonlySet<string>,
+): {
+  values: (typeof machineStock.$inferInsert)[];
+  quarantined: QuarantinedSupply[];
+  skippedNotInService: number;
+  /**
+   * КАКИЕ ИМЕННО автоматы отброшены — канонические серийники, отсортированы
+   * (R-FW-S2). Одного счётчика мало: множество «не в строю» берётся из карточек,
+   * где «первая карточка выигрывает целиком», и забытый дубль со
+   * `status ≠ in_service` уводит ЖИВОЙ автомат из `machine_stock` в режиме
+   * `own`. Наружу при этом уходило число — то есть ровно тот тихий стоп, против
+   * которого весь срез.
+   */
+  skippedSerials: string[];
+} {
   const values: (typeof machineStock.$inferInsert)[] = [];
   const quarantined: QuarantinedSupply[] = [];
+  let skippedNotInService = 0;
+  const пропущенные = new Set<string>();
   for (const r of rows) {
     if (!(r.machine_serial && r.ourvend_name && r.dt)) continue;
     // Канон в ключе — по той же причине, что в buildUpserts (см. sales.service).
     const machineSerial = normalizeMachineSerial(String(r.machine_serial));
+    // Проверка «наш ли это автомат» стоит ПЕРЕД проверкой чисел: иначе
+    // заглушка складского автомата с нечисловым qty падала бы в карантин, то
+    // есть чужая строка будила бы владельца ровно тем событием, от которого её
+    // и отделяют.
+    if (notInService?.has(machineSerial)) {
+      skippedNotInService += 1;
+      пропущенные.add(machineSerial);
+      continue;
+    }
     const product = String(r.ourvend_name).slice(0, 512);
     const qty = strictNumber(r.qty);
     if (qty === null) {
@@ -124,7 +174,7 @@ export function buildStockUpserts(
       fetchedAt: new Date(r.fetched_at),
     });
   }
-  return { values, quarantined };
+  return { values, quarantined, skippedNotInService, skippedSerials: [...пропущенные].sort() };
 }
 
 /**
@@ -163,13 +213,30 @@ export function fillFromStock(
 export class SupplyService implements OnModuleInit, OnApplicationShutdown {
   private readonly log = new Logger(SupplyService.name);
   private cron: Cron | null = null;
+  /**
+   * Состав «не в строю» прошлого прогона (канон, через запятую). `null` — этот
+   * прогон первый: сравнивать не с чем, и предупреждать не о чем.
+   */
+  private прошлыйПропуск: string | null = null;
 
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    /** Реестр автоматов — тот же источник правды о «не в строю», что у паритета (R-P8b-4). */
+    private readonly vending: VendingService,
+  ) {}
 
-  onModuleInit(): void {
-    if (!process.env.STOCK_DATABASE_URL && accountingSource() !== "own") {
-      this.log.log("STOCK_DATABASE_URL не задан — синк снабжения выключен.");
-      return;
+  // async: источник учёта читается из настроек (R-P8b-3); Nest дожидается промиса.
+  async onModuleInit(): Promise<void> {
+    // «Синк снабжения выключен» больше не бывает: без `STOCK_DATABASE_URL`
+    // источник учёта равен `own` ПО ОПРЕДЕЛЕНИЮ (`resolveAccountingSource`), и
+    // прежнее условие `!URL && источник !== "own"` стало недостижимым — то есть
+    // ветка «выключен» тихо умерла, а лог о ней врал бы про состояние. Реальная
+    // разница теперь одна: читаем ли мы ещё зеркало.
+    if (!process.env.STOCK_DATABASE_URL) {
+      this.log.log(
+        "Снабжение: зеркало mydon-stock погашено — приход и дозаполнение карточек пропускаем, " +
+          "остатки берём из собственного снапшота.",
+      );
     }
     this.cron = new Cron("3-59/10 * * * *", { timezone: "Asia/Tashkent" }, () => {
       void this.sync().catch((e: unknown) =>
@@ -186,15 +253,17 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
     this.cron = null;
   }
 
-  async sync(): Promise<{ purchases: number; stock: number }> {
+  async sync(now = new Date()): Promise<{ purchases: number; stock: number }> {
     const url = process.env.STOCK_DATABASE_URL;
-    const ownStock = accountingSource() === "own";
-    if (!url && !ownStock) return { purchases: 0, stock: 0 };
+    // `now` — параметр: кеш источника учёта ключуется временем, и прогон обязан
+    // спрашивать настройку тем же моментом, каким считает всё остальное.
+    const ownStock = (await accountingSource(this.db, now)) === "own";
 
     // Подключение к БД mydon-stock нужно только пока жив stock-источник:
     // приход (purchases, до среза П3) и — при source=stock — остатки.
-    const { default: postgres } = await import("postgres");
-    const stock = url ? postgres(url, { prepare: false, max: 1, connect_timeout: 10 }) : null;
+    // Параметры подключения — общие с остальными читателями донора
+    // (`stock-db.ts`), чтобы сверка паритета ходила к нему на тех же условиях.
+    const stock = url ? await openStockDb(url) : null;
     try {
       // Приход: имя товара и единица разворачиваются сразу — у нас плоская строка.
       const [{ np }] = await this.db.select({ np: sql<number>`count(*)` }).from(purchase);
@@ -252,8 +321,20 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
         }
       }
 
+      // Реестр «не в строю» спрашиваем ТОЛЬКО в режиме `own`: в режиме `stock`
+      // остатки приезжают зеркалом, оно складских строк не отдаёт, и лишние два
+      // запроса каждые десять минут платились бы ни за что. Множество — тем же
+      // приёмом, что у паритета (`ourvend-parity.service`): ключи реестра уже
+      // канонические.
+      const неВСтрою = ownStock ? new Set((await this.vending.machineRegistry()).notInService.keys()) : undefined;
+
       const { values: pValues, quarantined: pBad } = buildPurchaseUpserts(pRows);
-      const { values: sValues, quarantined: sBad } = buildStockUpserts(sRows, serialToEntity);
+      const {
+        values: sValues,
+        quarantined: sBad,
+        skippedNotInService,
+        skippedSerials,
+      } = buildStockUpserts(sRows, serialToEntity, неВСтрою);
       // Мусорные числа не вливаем нулём — откладываем в событие, чтобы приход и
       // остатки не занижались тихо.
       const bad = [...pBad.map((q) => ({ ...q, of: "purchase" })), ...sBad.map((q) => ({ ...q, of: "stock" }))];
@@ -294,6 +375,30 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
             },
           });
       }
+
+      // Одна строка на прогон, и только когда есть что сказать: молчание тут
+      // означало бы, что строки исчезают между снапшотом и `machine_stock` без
+      // единого следа. СЕРИЙНИКИ В СТРОКЕ (R-FW-S2): «пропущено 34» не отвечает
+      // на единственный важный вопрос — чей это автомат.
+      if (skippedNotInService > 0) {
+        this.log.log(
+          `Остатки: пропущено ${skippedNotInService} строк по автоматам не в строю: ${skippedSerials.join(", ")}.`,
+        );
+      }
+      // ИЗМЕНЕНИЕ МНОЖЕСТВА — предупреждением. Состав «не в строю» меняется
+      // редко и осознанно (автомат уехал на склад). Внезапно появившийся там
+      // серийник — это либо забытый дубль карточки, либо чужая правка статуса,
+      // и в режиме `own` он молча уносит живой автомат из учёта остатков.
+      const прежние = this.прошлыйПропуск;
+      const состав = skippedSerials.join(",");
+      if (прежние !== null && прежние !== состав) {
+        this.log.warn(
+          `Остатки: множество автоматов «не в строю» изменилось: ` +
+            `[${прежние || "пусто"}] → [${состав || "пусто"}]. Проверьте карточки: дубль со статусом ` +
+            `не in_service уводит живой автомат из machine_stock.`,
+        );
+      }
+      this.прошлыйПропуск = состав;
 
       // Дозаполнение карточек автоматов из источника: тип (кофе/снеки) и точка.
       // Ревизия 2026-07-30: у 11 из 26 автоматов тип был не указан — панель
@@ -348,10 +453,21 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
         await this.db.insert(event).values({
           source: "supply-sync",
           type: "supply.sync",
-          payload: { приход: pValues.length, остатки: sValues.length },
+          payload: {
+            приход: pValues.length,
+            остатки: sValues.length,
+            // Пропуск — В ЖУРНАЛ, а не только в лог: журнал переживает ротацию
+            // контейнера, а вопрос «куда делись строки автомата» задают через
+            // недели.
+            skippedNotInService: skippedSerials,
+          },
         });
       }
-      this.log.log(`Снабжение: приход ${pValues.length}, остатки ${sValues.length}.`);
+      this.log.log(
+        `Снабжение: приход ${pValues.length}, остатки ${sValues.length}` +
+          (stock ? "" : " (зеркало погашено: приход и дозаполнение карточек пропущены)") +
+          ".",
+      );
       return { purchases: pValues.length, stock: sValues.length };
     } finally {
       if (stock) await stock.end({ timeout: 5 });
@@ -402,14 +518,17 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
    * владельцу нечем отличить «мы уже считаем сами» от «мы всё ещё читаем чужую
    * базу» — а именно этот вопрос он задаёт в дни поглощения.
    */
-  async summary(): Promise<{
+  async summary(now = new Date()): Promise<{
     purchases30: { count: number; total: number };
     emptyPositions: number;
     lowPositions: number;
     lastStockDt: string | null;
-    source: ReturnType<typeof accountingSource>;
+    source: AccountingSource;
   }> {
-    const d30 = new Date();
+    // `now` ЦЕЛИКОМ, а не наполовину: параметр заведён ради конвенции «время —
+    // аргумент», и окно, посчитанное от стенных часов при заданном `now`,
+    // разъезжается с ним ровно на границе календарного дня.
+    const d30 = new Date(now);
     d30.setDate(d30.getDate() - 30);
     const [p] = await this.db
       .select({
@@ -432,7 +551,7 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
       emptyPositions,
       lowPositions,
       lastStockDt,
-      source: accountingSource(),
+      source: await accountingSource(this.db, now),
     };
   }
 }

@@ -7,9 +7,10 @@ import { DB, type Db } from "../db/db.module";
 /**
  * Собственный учётный снапшот OurVend (П2 плана поглощения mydon-stock).
  *
- * Агент собирает кабинет и присылает дни целиком; здесь каждый (день, автомат)
- * ПЕРЕЗАПИСЫВАЕТСЯ атомарно — исчезнувшие у вендора строки не зависают
- * (перенос семантики донора app/ourvend.py: DELETE+INSERT в транзакции).
+ * Агент собирает кабинет и присылает дни целиком; здесь каждый (день, автомат),
+ * ПО КОТОРОМУ ПРИЕХАЛИ СТРОКИ, перезаписывается атомарно — исчезнувшие у
+ * вендора позиции не зависают (перенос семантики донора app/ourvend.py:
+ * DELETE+INSERT в транзакции). Пустой день сутки не стирает: см. `rewriteKeys`.
  * До переключения OURVEND_ACCOUNTING_SOURCE=own таблицы теневые: по ним
  * считается паритет со stock-дорожкой (гейт «7 дней сходимости»).
  */
@@ -79,8 +80,26 @@ export function buildSnapshotRows(
   return { clean: [...agg.values()], quarantined };
 }
 
-/** Ключи (день, автомат), которые надо перезаписать, — В ТОМ ЧИСЛЕ пустые. */
-export function rewriteKeys(days: SnapshotDay[]): { dt: string; machineSerial: string }[] {
+/**
+ * Ключи (день, автомат), которые надо перезаписать, — ПО ЧИСТЫМ СТРОКАМ
+ * (R-FW-S7).
+ *
+ * ПУСТОЙ ДЕНЬ БОЛЬШЕ НЕ СТИРАЕТ СУТКИ АВТОМАТА. Раньше ключ брался из
+ * присланных дней независимо от того, осталась ли после проверки чисел хоть
+ * одна строка: пустой ответ кабинета (или ответ, где ВСЕ строки ушли в
+ * карантин) сносил `(dt, серийник)` целиком. До катовера это была тень, а в
+ * режиме `own` — боевой учёт: сутки продаж автомата исчезали бы из `sale` без
+ * ошибки и без следа. Удаление теперь всегда ЗАМЕНА: снесли ровно те ключи, по
+ * которым что-то приехало.
+ *
+ * Обратная сторона решения принята сознательно: день, у которого вендор
+ * ЗАКОННО обнулил все строки, останется в снапшоте старым. Это видно паритетом
+ * («в нашем снапшоте есть, у второй стороны нет»), а тихая потеря суток — нет.
+ *
+ * Принимает любые строки с `dt`/`machineSerial` — и присланные дни, и чистые
+ * строки: проверка формы и канон серийника здесь всё равно свои.
+ */
+export function rewriteKeys(days: { dt: string; machineSerial: string }[]): { dt: string; machineSerial: string }[] {
   const seen = new Set<string>();
   const out: { dt: string; machineSerial: string }[] = [];
   for (const day of days) {
@@ -114,8 +133,10 @@ export class OurvendSnapshotService {
     const sales = buildSnapshotRows(input.sales ?? [], true);
     const stock = buildSnapshotRows(input.stock ?? [], false);
 
-    const saleKeys = rewriteKeys(input.sales ?? []);
-    const stockKeys = rewriteKeys(input.stock ?? []);
+    // Ключи перезаписи — ИЗ ЧИСТЫХ СТРОК, а не из присланных дней (R-FW-S7):
+    // пустой или целиком забракованный день не должен стирать сутки автомата.
+    const saleKeys = rewriteKeys(sales.clean);
+    const stockKeys = rewriteKeys(stock.clean);
 
     await this.db.transaction(async (tx) => {
       for (const k of saleKeys) {

@@ -104,8 +104,11 @@ describe("Формы аналитики приходят из @mydon/shared", ()
       staleThresholdH: 6,
       slotsLagMin: 12,
       salesLagH: 13,
+      snapshotStale: false,
       productSaleLagH: 0.2,
-      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: null },
+      parityStreak: 3,
+      cutoverThreshold: 7,
+      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, mode: "mirror", note: null },
     };
     // Локальные имена — те же типы: присваивание в обе стороны компилируется.
     const местное: OurvendSyncRun = прогон;

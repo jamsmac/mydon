@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { event, systemConfig, vendingSyncRun } from "@mydon/db";
+import { after, before, describe, it } from "node:test";
+import { event, ourvendSaleSnapshot, ourvendStockSnapshot, systemConfig, vendingSyncRun } from "@mydon/db";
+import { resetAccountingSourceCache } from "../sales/accounting-source";
 import { OurvendHealthService } from "./ourvend-health.service";
 import type { OurvendParityService } from "./ourvend-parity.service";
-import { SyncStaleService, SYNC_STALE_EVENT, SYNC_STALE_HOURS_FALLBACK } from "./sync-stale.service";
+import {
+  SyncStaleService,
+  SNAPSHOT_STALE_EVENT,
+  SNAPSHOT_STALE_HOURS_FALLBACK,
+  SYNC_STALE_EVENT,
+  SYNC_STALE_HOURS_FALLBACK,
+} from "./sync-stale.service";
 
 type Прогон = { startedAt: Date; finishedAt: Date | null; status: "running" | "success" | "partial" | "failed" };
 type Событие = { id: string; type: string; occurredAt: Date };
@@ -23,6 +30,14 @@ interface Мир {
    * и `lastRunStatus` игнорируются.
    */
   runs?: Прогон[];
+  /** Момент последнего съёма снапшота ПРОДАЖ (ISO). `null`/пусто — снапшота нет вовсе. */
+  снапшотAt?: string | null;
+  /**
+   * Момент последнего съёма снапшота ОСТАТКОВ. Не задан — тот же, что у
+   * продаж: обе половины приезжают одним прогоном агента. Задавать отдельно
+   * нужно ровно там, где половины разъехались (упала Lot-сессия).
+   */
+  остаткиAt?: string | null;
 }
 
 /** Все значения-параметры из условия drizzle: стабу надо увидеть и статус, и границу суток. */
@@ -72,6 +87,12 @@ function стенд(м: Мир) {
     }
   }
 
+  // Снапшот учёта — одна строка «последний съём»: сторож берёт её тем же
+  // запросом «последняя строка», что и отчёт о здоровье.
+  const снимки: { at: Date }[] = м.снапшотAt ? [{ at: new Date(м.снапшотAt) }] : [];
+  const остатки: { at: Date }[] =
+    м.остаткиAt === undefined ? снимки : м.остаткиAt ? [{ at: new Date(м.остаткиAt) }] : [];
+
   const события: Событие[] = (м.уже ?? []).map((e, i) => ({ id: `e${i}`, type: e.type, occurredAt: e.occurredAt }));
   const записано: { source: string; type: string; payload: Record<string, unknown>; occurredAt: Date }[] = [];
   const настройки = Object.entries(м.настройки ?? {}).map(([key, value]) => ({ key, value }));
@@ -80,7 +101,17 @@ function стенд(м: Мир) {
     select: () => ({
       from: (t: unknown) => {
         let текущие: unknown[] =
-          t === vendingSyncRun ? [...прогоны] : t === event ? [...события] : t === systemConfig ? настройки : [];
+          t === vendingSyncRun
+            ? [...прогоны]
+            : t === event
+              ? [...события]
+              : t === ourvendSaleSnapshot
+                ? [...снимки]
+                : t === ourvendStockSnapshot
+                  ? [...остатки]
+                  : t === systemConfig
+                  ? настройки
+                  : [];
         const chain: Record<string, unknown> = {};
         chain.where = (cond?: unknown) => {
           const п = параметры(cond);
@@ -99,7 +130,12 @@ function стенд(м: Мир) {
           return chain;
         };
         chain.orderBy = () => {
-          текущие = [...(текущие as Прогон[])].sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+          // Сортировка по ВРЕМЕНИ строки, каким бы оно ни называлось: у прогонов
+          // это `startedAt`, у снимков — `at`. Своя «сортировка прогонов» на
+          // снимках уронила бы стаб, а не тест.
+          const время = (r: unknown): number =>
+            t === ourvendSaleSnapshot ? (r as { at: Date }).at.getTime() : (r as Прогон).startedAt.getTime();
+          текущие = [...текущие].sort((a, b) => время(b) - время(a));
           return chain;
         };
         chain.limit = async (n: number) => текущие.slice(0, n);
@@ -117,6 +153,10 @@ function стенд(м: Мир) {
       },
     }),
   } as never;
+
+  // Источник учёта кешируется на минуту МОДУЛЕМ, а не сервисом: без сброса
+  // второй тест с тем же `now` получил бы режим первого.
+  resetAccountingSourceCache();
 
   return { svc: new SyncStaleService(db), db, события: записано, журнал: события };
 }
@@ -255,6 +295,9 @@ const ПАРИТЕТ = {
   stock: { days: 7, checked: 0, ok: true, mismatches: [], note: null },
 };
 
+/** Серия паритета «журнал пуст»: ноль зелёных дней при обычном пороге. */
+const СЕРИЯ_ПУСТО = { greenDays: 0, threshold: 7, readyForCutover: false, days: [], lastRed: null, since: null };
+
 describe("Порог застоя — ОДНО число у сторожа и у витрины (R-P8a-6)", () => {
   // Витрина рисует «⛔ сбор стоит» сравнением `staleHours >= staleThresholdH`.
   // Пока пол в час стоял только у сторожа, `SYNC_STALE_HOURS=0` из env давал
@@ -271,7 +314,12 @@ describe("Порог застоя — ОДНО число у сторожа и �
     it(`${имя}: сторож и отчёт называют ${ожидание}`, async () => {
       const мир = { lastSuccessAt: "2026-08-25T06:00:00+05:00", ...(настройки ? { настройки } : {}) };
       const { svc, db } = стенд(мир);
-      const отчёт = new OurvendHealthService(db, { parity: async () => ПАРИТЕТ } as unknown as OurvendParityService);
+      const отчёт = new OurvendHealthService(db, {
+        parity: async () => ПАРИТЕТ,
+        // Серия зелёных дней (П8b) к порогу застоя отношения не имеет — этот
+        // набор про ОДНО число у сторожа и у витрины; отдаём пустую.
+        streak: async () => СЕРИЯ_ПУСТО,
+      } as unknown as OurvendParityService);
 
       const сторож = await svc.check(СЕЙЧАС);
       const здоровье = await отчёт.health(20, СЕЙЧАС);
@@ -283,4 +331,158 @@ describe("Порог застоя — ОДНО число у сторожа и �
       assert.equal((здоровье.staleHours ?? Infinity) >= здоровье.staleThresholdH, сторож.emitted);
     });
   }
+});
+
+// ── Сторож свежести учётного снапшота (R-P8b-5) ─────────────────────────────
+
+describe("Сторож свежести учётного снапшота (R-P8b-5)", () => {
+  // Зеркало «живо» на весь набор. Без `STOCK_DATABASE_URL` резолвер источника
+  // отвечает `own` независимо от настройки (другого источника физически нет),
+  // и случай «в режиме stock не проверяем» сверялся бы сам с собой.
+  const былоURL = process.env.STOCK_DATABASE_URL;
+  before(() => {
+    process.env.STOCK_DATABASE_URL = "postgres://ro@stock/mydon";
+  });
+  after(() => {
+    if (былоURL === undefined) delete process.env.STOCK_DATABASE_URL;
+    else process.env.STOCK_DATABASE_URL = былоURL;
+    resetAccountingSourceCache();
+  });
+
+  const снапшотныйСтенд = (м: Мир & { источник: "own" | "stock" }) =>
+    стенд({ ...м, настройки: { OURVEND_ACCOUNTING_SOURCE: м.источник, ...(м.настройки ?? {}) } });
+
+  const сейчас = new Date("2026-09-05T13:00:00+05:00");
+
+  it("35 ч при пороге 36 — тишина", async () => {
+    const { svc, события } = снапшотныйСтенд({ источник: "own", снапшотAt: "2026-09-04T02:00:00+05:00" });
+    const r = await svc.checkSnapshot(сейчас);
+    assert.deepEqual([r.stale, r.emitted, r.threshold], [false, false, SNAPSHOT_STALE_HOURS_FALLBACK]);
+    assert.equal(события.length, 0);
+  });
+
+  it("37 ч — событие с часами и моментом последнего съёма", async () => {
+    const { svc, события } = снапшотныйСтенд({ источник: "own", снапшотAt: "2026-09-04T00:00:00+05:00" });
+    assert.equal((await svc.checkSnapshot(сейчас)).emitted, true);
+    assert.equal(события[0]!.type, SNAPSHOT_STALE_EVENT);
+    assert.deepEqual(события[0]!.payload, {
+      hours: 37,
+      lastFetchedAt: "2026-09-03T19:00:00.000Z",
+      // ОБЕ половины встали (стенд по умолчанию датирует их одинаково) — и
+      // текст обязан назвать обе: чинить придётся весь прогон агента.
+      таблица: "продаж и остатков",
+      часы_продаж: 37,
+      часы_остатков: 37,
+    });
+  });
+
+  it("повтор в те же ташкентские сутки — молчание, следующие сутки — снова событие", async () => {
+    const { svc, события } = снапшотныйСтенд({
+      источник: "own",
+      снапшотAt: "2026-09-04T00:00:00+05:00",
+      уже: [{ type: SNAPSHOT_STALE_EVENT, occurredAt: new Date("2026-09-05T09:00:00+05:00") }],
+    });
+    assert.equal((await svc.checkSnapshot(сейчас)).emitted, false);
+    assert.equal(события.length, 0);
+    assert.equal((await svc.checkSnapshot(new Date("2026-09-06T13:00:00+05:00"))).emitted, true);
+  });
+
+  it("в режиме stock не проверяет ничего: снапшот там теневой", async () => {
+    const { svc, события } = снапшотныйСтенд({ источник: "stock", снапшотAt: "2026-01-01T00:00:00+05:00" });
+    const r = await svc.checkSnapshot(сейчас);
+    assert.deepEqual([r.stale, r.emitted], [false, false]);
+    assert.equal(события.length, 0);
+  });
+
+  it("снапшота нет вовсе — тревога, и часы null, а не ноль", async () => {
+    // Ноль читался бы как «сняли только что» — ровно наоборот тому, что значит
+    // пустая таблица снимков (то же правило, что у застоя сбора).
+    const { svc, события } = снапшотныйСтенд({ источник: "own", снапшотAt: null });
+    assert.equal((await svc.checkSnapshot(сейчас)).emitted, true);
+    assert.equal(события[0]!.payload.hours, null);
+    assert.equal(события[0]!.payload.lastFetchedAt, null);
+  });
+
+  it("порог берётся из настройки, а не из константы", async () => {
+    const { svc } = снапшотныйСтенд({
+      источник: "own",
+      снапшотAt: "2026-09-04T02:00:00+05:00",
+      настройки: { SNAPSHOT_STALE_HOURS: "24" },
+    });
+    const r = await svc.checkSnapshot(сейчас);
+    assert.deepEqual([r.threshold, r.emitted], [24, true]);
+  });
+
+  it("порог сравнивается с СЫРЫМИ часами, а не с округлённым показом", async () => {
+    // 35 ч 59 м 49 с округляются до ровно 36.0 — сравнение по показанному
+    // числу тревожило бы на 11 секунд раньше настоящей границы (та же ошибка,
+    // что у застоя сбора 24.08.2026).
+    const { svc, события } = снапшотныйСтенд({ источник: "own", снапшотAt: "2026-09-04T01:00:11+05:00" });
+    const r = await svc.checkSnapshot(сейчас);
+    assert.equal(r.emitted, false);
+    assert.equal(r.hours, 36, "витрина всё равно показывает округлённое число");
+    assert.equal(события.length, 0);
+  });
+
+  it("ВСТАЛА ОДНА ПОЛОВИНА — тревога есть, и она называет какая (R-FW-P2)", async () => {
+    // Агент шлёт три POST-а, у Lot-сессии свой `try`: остатки могут встать при
+    // свежих продажах. Пока сторож смотрел только на продажи, замороженный
+    // `machine_stock` не видел никто.
+    const { svc, события } = снапшотныйСтенд({
+      источник: "own",
+      снапшотAt: "2026-09-05T09:00:00+05:00",
+      остаткиAt: "2026-09-04T00:00:00+05:00",
+    });
+    assert.equal((await svc.checkSnapshot(сейчас)).emitted, true);
+    assert.equal(события[0]!.payload.таблица, "остатков");
+    assert.equal(события[0]!.payload.часы_продаж, 4, "живая половина показана честно");
+    assert.equal(события[0]!.payload.hours, 37, "часы — по ВСТАВШЕЙ половине");
+  });
+
+  it("сутки без продаж не поднимают ложной тревоги, пока идут остатки", async () => {
+    // Дни без единой продажи у обеих машин в журнале есть: `fetched_at` продаж
+    // не двигается, потому что писать нечего. Снимок остатков при этом
+    // приезжает безусловно — значит агент жив.
+    const { svc, события } = снапшотныйСтенд({
+      источник: "own",
+      снапшотAt: "2026-09-05T09:00:00+05:00",
+      остаткиAt: "2026-09-05T09:00:00+05:00",
+    });
+    assert.deepEqual([(await svc.checkSnapshot(сейчас)).stale, события.length], [false, 0]);
+  });
+
+  it("нет снимков ОСТАТКОВ вовсе — застой, хотя продажи свежие", async () => {
+    const { svc } = снапшотныйСтенд({
+      источник: "own",
+      снапшотAt: "2026-09-05T09:00:00+05:00",
+      остаткиAt: null,
+    });
+    const r = await svc.checkSnapshot(сейчас);
+    assert.deepEqual([r.stale, r.which], [true, "остатков"]);
+  });
+
+  it("чужое событие тех же суток дедупом не считается", async () => {
+    const { svc, события } = снапшотныйСтенд({
+      источник: "own",
+      снапшотAt: "2026-09-04T00:00:00+05:00",
+      уже: [{ type: SYNC_STALE_EVENT, occurredAt: new Date("2026-09-05T09:00:00+05:00") }],
+    });
+    assert.equal((await svc.checkSnapshot(сейчас)).emitted, true);
+    assert.equal(события.length, 1);
+  });
+
+  it("застой СБОРА и застой СНАПШОТА — две независимые тревоги за одни сутки", async () => {
+    // Сбор слотов (каждые 3 ч) и суточный съём кабинета (08:05) делают разные
+    // агенты: живой сбор ничего не говорит о свежести учёта, и один дедуп на
+    // двоих проглотил бы вторую тревогу.
+    const { svc, события } = снапшотныйСтенд({
+      источник: "own",
+      снапшотAt: "2026-09-04T00:00:00+05:00",
+      lastSuccessAt: null,
+      lastRunStatus: null,
+    });
+    assert.equal((await svc.check(сейчас)).emitted, true);
+    assert.equal((await svc.checkSnapshot(сейчас)).emitted, true);
+    assert.deepEqual(события.map((e) => e.type), [SYNC_STALE_EVENT, SNAPSHOT_STALE_EVENT]);
+  });
 });

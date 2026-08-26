@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { CUTOVER_READY_EVENT, PARITY_EVENT } from "../ourvend/ourvend-parity.service";
+import { SNAPSHOT_STALE_EVENT } from "../ourvend/sync-stale.service";
+import { ACCOUNTING_SOURCE_CHANGED_EVENT } from "../sales/accounting-source";
+import { RETENTION_EVENT } from "../vending/retention.service";
 import { applyRules, formatAmount, immediateOnly, RULES } from "./rules";
 
 const ctx = (type: string, payload: Record<string, unknown> = {}) => ({
@@ -226,6 +230,104 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.equal(n!.urgency, "immediate");
     assert.doesNotMatch(n!.text, /0 ч/);
     assert.match(n!.text, /НЕ БЫЛО НИ РАЗУ/);
+  });
+
+  it("готовность к катоверу будит немедленно и называет ключ настройки", () => {
+    const [n] = applyRules(ctx("ourvend.cutover_ready", { greenDays: 7, since: "2026-08-26" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /7 дн/);
+    assert.match(n!.text, /2026-08-26/);
+    // Владелец идёт флипать в панель прямо из сообщения: без имени ключа он
+    // пойдёт его искать, а катовер — операция на семь дней ожидания.
+    assert.match(n!.text, /OURVEND_ACCOUNTING_SOURCE/);
+  });
+
+  it("готовность к катоверу — счётная форма: «1 день», а не «1 дней»", () => {
+    const [n] = applyRules(ctx("ourvend.cutover_ready", { greenDays: 1, since: "2026-08-26" }));
+    assert.match(n!.text, /1 день подряд/);
+  });
+
+  it("застой учётного снапшота будит немедленно и говорит, что именно встало", () => {
+    const [n] = applyRules(ctx("ourvend.snapshot_stale", { hours: 37, lastFetchedAt: "2026-09-03T19:00:00.000Z" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /37 ч/);
+    // Без «продажи и остатки» тревога читается как «сломался какой-то снимок»:
+    // владельцу нечем понять, что в режиме own это ОСТАНОВКА учёта, а не
+    // пропущенная строка в служебной таблице.
+    assert.match(n!.text, /продажи и остатки/);
+  });
+
+  it("тревога называет ВСТАВШУЮ ПОЛОВИНУ снапшота (R-FW-P2)", () => {
+    // Упала одна Lot-сессия — чинить надо её, а не весь прогон агента.
+    const [n] = applyRules(
+      ctx("ourvend.snapshot_stale", { hours: 37, lastFetchedAt: "2026-09-03T19:00:00.000Z", таблица: "остатков" }),
+    );
+    assert.match(n!.text, /остатков/);
+  });
+
+  it("событие старой формы (без имени половины) читается по-прежнему", () => {
+    // В журнале уже лежат события без ключа `таблица`: правило обязано остаться
+    // осмысленным, а не печатать «(undefined)».
+    const [n] = applyRules(ctx("ourvend.snapshot_stale", { hours: 37, lastFetchedAt: null }));
+    assert.doesNotMatch(n!.text, /undefined/);
+    assert.match(n!.text, /37 ч/);
+  });
+
+  it("снапшота не было ни разу — «не приходил», а не «0 ч»", () => {
+    const [n] = applyRules(ctx("ourvend.snapshot_stale", { hours: null, lastFetchedAt: null }));
+    assert.equal(n!.urgency, "immediate");
+    assert.doesNotMatch(n!.text, /0 ч/);
+    assert.match(n!.text, /НЕ ПРИХОДИЛ НИ РАЗУ/);
+  });
+
+  it("смена источника учёта доставляется немедленно и называет обе стороны", () => {
+    const [n] = applyRules(ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", actor: "owner" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /stock.*own/);
+    assert.match(n!.text, /owner/);
+  });
+
+  it("смена источника без автора не печатает «null»", () => {
+    // `SystemService.set` кладёт actor = null, когда правку сделали не из
+    // панели (скрипт, миграция): «(null)» в тревоге владелец прочтёт как сбой.
+    const [n] = applyRules(ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", actor: null }));
+    assert.doesNotMatch(n!.text, /null/);
+  });
+
+  it("смена источника называет ДЕЙСТВУЮЩИЙ источник, если он не равен записанному", () => {
+    // После шага 3 рунбука зеркала нет, и запись `stock` ничего не включает:
+    // текст без «действует» обещал бы источник, которого физически нет.
+    const [n] = applyRules(
+      ctx("ourvend.accounting_source_changed", { from: "own", to: "stock", effective: "own", actor: "owner" }),
+    );
+    assert.match(n!.text, /действует: own/);
+    // А когда совпадает — лишней скобки нет.
+    const [ровно] = applyRules(
+      ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", effective: "own", actor: "owner" }),
+    );
+    assert.doesNotMatch(ровно!.text, /действует/);
+  });
+
+  it("СТРАЖ: у каждой экспортируемой константы события есть правило (Task 3 minor 6)", () => {
+    // Эмитенты держат тип события константой, а правила берут его строковым
+    // литералом: переименование константы осиротило бы правило МОЛЧА, а правило
+    // — единственный путь события к владельцу. Список намеренно ручной: он же
+    // документирует, у каких событий правила нет ПО ЗАМЫСЛУ.
+    const сПравилом = [PARITY_EVENT, CUTOVER_READY_EVENT, SNAPSHOT_STALE_EVENT, ACCOUNTING_SOURCE_CHANGED_EVENT];
+    for (const тип of сПравилом) {
+      assert.ok(
+        RULES.some((r) => r.eventType === тип),
+        `событие ${тип} осталось без правила — владелец о нём не узнает`,
+      );
+    }
+    // `system.retention` — без правила осознанно: это отчёт о служебной чистке,
+    // а не новость. Если правило когда-нибудь появится, этот тест обязан
+    // упасть, чтобы решение было принято, а не просочилось.
+    assert.equal(
+      RULES.some((r) => r.eventType === RETENTION_EVENT),
+      false,
+      "у system.retention правила быть не должно — это служебная чистка, а не новость",
+    );
   });
 
   it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {

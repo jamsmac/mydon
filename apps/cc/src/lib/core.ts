@@ -7,6 +7,7 @@ import type {
   MonthlyPrice,
   OurvendHealth,
   OurvendSyncRun,
+  ParityStreak,
   PriceChangesReport,
   PriceGapReport,
 } from "@mydon/shared";
@@ -318,6 +319,7 @@ export type {
   MonthlyPrice,
   OurvendHealth,
   OurvendSyncRun,
+  ParityStreak,
   PriceChange,
   PriceChangesReport,
   PriceGapReport,
@@ -709,6 +711,19 @@ export interface SystemConfigItem {
   value: string;
   /** Откуда взято действующее значение: панель (db) / окружение / дефолт. */
   source: "db" | "env" | "default";
+  /**
+   * ДЕЙСТВУЮЩЕЕ значение с учётом фолбэков ядра — когда оно расходится с
+   * `value` (R-FW-S5).
+   *
+   * Ровно один тумблер сегодня умеет расходиться: `OURVEND_ACCOUNTING_SOURCE`
+   * без `STOCK_DATABASE_URL` действует как `own`, что бы ни было записано в
+   * базе (`accounting-source.ts`). Панель, печатающая записанное значение,
+   * говорила бы «учёт из зеркала» о системе, которая считает по своей базе.
+   *
+   * НЕОБЯЗАТЕЛЬНОЕ: у прочих ключей фолбэка нет, и Core их поле не шлёт —
+   * отсутствие значит «действует то, что в `value`», а не «неизвестно».
+   */
+  effective?: string;
 }
 
 export interface Approval {
@@ -2397,6 +2412,14 @@ export const core = {
   vendingPriceGap: (days = 14) => get<PriceGapReport & WithWarnings>(`/vending/price-gap?days=${days}`),
   /** Здоровье сбора OurVend: прогоны, серия отказов, лаги снимков, паритет (R-P5b-8). */
   ourvendHealth: (runs = 20) => get<OurvendHealth>(`/ourvend/health?runs=${runs}`),
+  /**
+   * Серия зелёных дней паритета по дням (R-P8b-2, P4).
+   *
+   * Отдельный роут, а не поле здоровья: `/ourvend/health` несёт СЧЁТ серии, а
+   * дни журнала и дату последнего красного дня считает только этот — по всему
+   * окну чтения, а не по семидневной витрине паритета.
+   */
+  ourvendParityStreak: () => get<ParityStreak>("/ourvend/parity/streak"),
   /** Журнал детектора заливок: что автомат получил и была ли запись оператора. */
   vendingRefillEvents: (days = 14) => get<VendingRefillEvent[]>(`/vending/refill-events?days=${days}`),
   /** Прайс вендинга с правилами закупа — для листа «Правила закупа». */
@@ -2676,7 +2699,17 @@ export const core = {
       yesterday: { qty: number; amount: number };
       days30: { qty: number; amount: number };
       lastSaleDt: string | null;
+      /**
+       * ИСТОЧНИК ЧИТАЕМ (переопределено в П8b): в режиме `stock` — зеркало
+       * задано, в режиме `own` — учётный снапшот свежий. Что именно чинить,
+       * говорит `source` рядом.
+       */
       configured: boolean;
+      /**
+       * Действующий источник учёта. НЕОБЯЗАТЕЛЬНОЕ: Core прошлой сборки поля
+       * не шлёт, и «неизвестно» здесь — это `stock`, каким режим и был.
+       */
+      source?: "stock" | "own";
     }>("/sales/summary"),
   sales: (days = 7, limit = 300) => get<SaleRow[]>(`/sales?days=${days}&limit=${limit}`),
   /** Продажи карточки товара: имя + алиасы источника. */

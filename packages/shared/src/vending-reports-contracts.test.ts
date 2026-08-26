@@ -33,8 +33,11 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   staleThresholdH: 6,
   slotsLagMin: 42,
   salesLagH: 3,
+  snapshotStale: false,
   productSaleLagH: 5,
-  parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, note: null },
+  parityStreak: 3,
+  cutoverThreshold: 7,
+  parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, mode: "mirror", note: null },
 };
 
 const СВОДКА: WeeklyDigest = {
@@ -64,13 +67,16 @@ const СВОДКА: WeeklyDigest = {
 describe("Общие формы ответов Core (R-P5b-10)", () => {
   it("здоровье сбора: ровно те поля, что читают бот и панель", () => {
     assert.deepEqual(Object.keys(ЗДОРОВЬЕ).sort(), [
+      "cutoverThreshold",
       "failedStreak",
       "lastSuccessAt",
       "parity",
+      "parityStreak",
       "productSaleLagH",
       "runs",
       "salesLagH",
       "slotsLagMin",
+      "snapshotStale",
       "staleHours",
       "staleThresholdH",
     ]);
@@ -78,6 +84,9 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "checked",
       "days",
       "mismatches",
+      // С ЧЕМ сверялись (R-FW-P3): без режима витрина не отличает «сошлось с
+      // независимой стороной» от «сверять было не с чем» (`retired`).
+      "mode",
       "note",
       "ok",
       "stockChecked",
@@ -95,6 +104,17 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     ]);
   });
 
+  it("гейт катовера едет числами: серия И порог, а не флаг «готово» (R-P8b-2)", () => {
+    // Витрины рисуют «N зелёных дней из 7» и «✅ можно переключать» сравнением
+    // ДВУХ полей ответа. Флаг вместо чисел не отвечает на вопрос «сколько ещё
+    // ждать», а своя семёрка у каждого читателя разошлась бы с базой в тот же
+    // день, когда владелец подвинет `CUTOVER_GREEN_DAYS` в панели «Система».
+    assert.equal(typeof ЗДОРОВЬЕ.parityStreak, "number");
+    assert.equal(typeof ЗДОРОВЬЕ.cutoverThreshold, "number");
+    const непосчиталось: OurvendHealth = { ...ЗДОРОВЬЕ, parityStreak: 0 };
+    assert.equal(непосчиталось.parityStreak < непосчиталось.cutoverThreshold, true, "ноль — не «готовы»");
+  });
+
   it("лаг допускает null: «снимков нет» — не «0 мин»", () => {
     const пусто: OurvendHealth = { ...ЗДОРОВЬЕ, slotsLagMin: null, salesLagH: null, productSaleLagH: null };
     assert.deepEqual([пусто.slotsLagMin, пусто.salesLagH, пусто.productSaleLagH], [null, null, null]);
@@ -107,6 +127,19 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.equal(typeof ЗДОРОВЬЕ.staleThresholdH, "number");
     const никогда: OurvendHealth = { ...ЗДОРОВЬЕ, lastSuccessAt: null, staleHours: null };
     assert.equal(никогда.staleHours, null, "«успехов не было вовсе» — не «ноль часов»");
+  });
+
+  it("застой учётного снапшота едет ГОТОВЫМ вердиктом, а не лагом с порогом (R-P8b-5)", () => {
+    // Витрине пришлось бы сравнивать три вещи, а не две: лаг, порог и РЕЖИМ
+    // учёта. В режиме `stock` снапшот теневой — тот же лаг там не значит
+    // ничего, и «⛔ учёт стоит» по лагу с порогом рисовалось бы на ровном
+    // месте. Поэтому здесь булево, а не второй `staleThresholdH`.
+    assert.equal(typeof ЗДОРОВЬЕ.snapshotStale, "boolean");
+    const встал: OurvendHealth = { ...ЗДОРОВЬЕ, salesLagH: 37, snapshotStale: true };
+    assert.equal(встал.snapshotStale, true);
+    // «Не посчиталось» — не «встал»: пустое здоровье обязано давать false.
+    const непосчиталось: OurvendHealth = { ...ЗДОРОВЬЕ, salesLagH: null, snapshotStale: false };
+    assert.equal(непосчиталось.snapshotStale, false);
   });
 
   it("недельная сводка: ровно те поля, что читают бот и панель", () => {
@@ -137,7 +170,16 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
   it("паритет без единой сверенной пары говорит это числом, а не «расхождений 0»", () => {
     const пусто: OurvendHealth = {
       ...ЗДОРОВЬЕ,
-      parity: { days: 7, ok: false, checked: 14, mismatches: 0, stockOk: false, stockChecked: 0, note: "снимков остатков нет" },
+      parity: {
+        days: 7,
+        ok: false,
+        checked: 14,
+        mismatches: 0,
+        stockOk: false,
+        stockChecked: 0,
+        mode: "mirror",
+        note: "снимков остатков нет",
+      },
     };
     // Ровно боевой случай 25.08: продажи сошлись 14 парами, а остатки сверять
     // было не по чему — и это ДВА разных числа, а не одно «❌ расхождений 0».

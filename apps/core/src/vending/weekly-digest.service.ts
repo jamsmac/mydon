@@ -17,7 +17,7 @@ import {
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { OurvendHealthService } from "../ourvend/ourvend-health.service";
-import { SYNC_STALE_HOURS_FALLBACK } from "../ourvend/sync-runs";
+import { CUTOVER_GREEN_DAYS_FALLBACK, SYNC_STALE_HOURS_FALLBACK } from "../ourvend/sync-runs";
 import { AnalyticsService } from "./analytics.service";
 import { parseOrderPositions } from "./vending.service";
 import { ReportCache } from "./report-cache";
@@ -110,8 +110,28 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
   staleThresholdH: SYNC_STALE_HOURS_FALLBACK,
   slotsLagMin: null,
   salesLagH: null,
+  // «Не посчитали» — это НЕ «учёт встал». Секция здоровья упала (например, на
+  // сыром SQL паритета), и выдать здесь `true` значило бы разбудить владельца
+  // тревогой о снапшоте, которого никто не спрашивал.
+  snapshotStale: false,
   productSaleLagH: null,
-  parity: { days: 0, ok: false, checked: 0, mismatches: 0, stockOk: false, stockChecked: 0, note: "здоровье сбора не посчиталось" },
+  // «Не посчиталось» — это НЕ «готовы к переключению»: серия ноль, а порог —
+  // настоящий фолбэк, чтобы витрина не нарисовала «0 из 0 — можно».
+  parityStreak: 0,
+  cutoverThreshold: CUTOVER_GREEN_DAYS_FALLBACK,
+  // `mode` — самое НЕ ЗАЯВЛЯЮЩЕЕ из трёх: `retired` витрина читает как
+  // «сверка завершена, зеркала нет», а это утверждение о катовере, которого мы
+  // тут не знаем. Причина отсутствия чисел сказана в `note`, а не режимом.
+  parity: {
+    days: 0,
+    ok: false,
+    checked: 0,
+    mismatches: 0,
+    stockOk: false,
+    stockChecked: 0,
+    mode: "mirror",
+    note: "здоровье сбора не посчиталось",
+  },
 };
 
 @Injectable()
