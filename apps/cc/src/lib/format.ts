@@ -11,7 +11,16 @@ export function when(iso: string): string {
   });
 }
 
-/** Сумма с разделителями разрядов. Валюта проекта — сум. */
+/**
+ * Сумма с разделителями разрядов. Валюта проекта — сум.
+ *
+ * ОСТАЁТСЯ С U+00A0 НАМЕРЕННО. Числа, которые владелец КОПИРУЕТ и сверяет с
+ * ботом, печатают `count()`/`amount()` — они NBSP срезают. Здесь неразрывный
+ * пробел уместен: `money()` зовут 42 раза, в основном в GLOBERENT и финансах,
+ * где число читают глазами, а не ищут поиском по странице. Снек-контур на неё
+ * больше не опирается (срез «Хвосты», R-H-3) — если новый снек-лист позовёт
+ * `money()`, это регрессия, а не выбор, и её ловит `snack-format.test.tsx`.
+ */
 export function money(amount: string | number, currency = "UZS"): string {
   const n = typeof amount === "string" ? Number(amount) : amount;
   if (!Number.isFinite(n)) return String(amount);

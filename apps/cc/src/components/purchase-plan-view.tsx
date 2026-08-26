@@ -5,18 +5,17 @@ import {
   type VendingPlanMachine,
   type VendingPlanSlot,
 } from "../lib/core";
-import { when } from "../lib/format";
+import { count, when } from "../lib/format";
 import { SubmitPurchaseButton } from "./purchase-plan-submit";
 
-const n = (v: number): string => v.toLocaleString("ru-RU");
 const day = (iso: string): string => new Date(iso).toLocaleDateString("ru-RU", { timeZone: TZ });
 
 /** Откуда закроется слот: показываем только ненулевые источники. */
 function slotSource(s: VendingPlanSlot): string {
   const parts: string[] = [];
-  if (s.fromPurchase > 0) parts.push(`закуп ${n(s.fromPurchase)}`);
-  if (s.fromStock > 0) parts.push(`склад ${n(s.fromStock)}`);
-  if (s.unfilled > 0) parts.push(`пусто ${n(s.unfilled)}`);
+  if (s.fromPurchase > 0) parts.push(`закуп ${count(s.fromPurchase)}`);
+  if (s.fromStock > 0) parts.push(`склад ${count(s.fromStock)}`);
+  if (s.unfilled > 0) parts.push(`пусто ${count(s.unfilled)}`);
   return parts.length > 0 ? parts.join(" · ") : "нечем";
 }
 
@@ -32,7 +31,7 @@ function stockByMachine(machines: VendingPlanMachine[], product: string): string
   return machines
     .map((m) => ({ name: m.name, units: m.slots.filter((sl) => sl.product === product).reduce((sum, sl) => sum + sl.fromStock, 0) }))
     .filter((x) => x.units > 0)
-    .map((x) => `${x.name} ${n(x.units)}`)
+    .map((x) => `${x.name} ${count(x.units)}`)
     .join(", ");
 }
 
@@ -65,22 +64,22 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
   return (
     <>
       <p className="lead">
-        Загрузить {n(load)} из {n(need)} нужных · со склада {n(summary.totalFromStock)} · купить{" "}
-        <b>{n(summary.totalOrder)}</b> ед ({summary.items.length} поз.)
+        Загрузить {count(load)} из {count(need)} нужных · со склада {count(summary.totalFromStock)} · купить{" "}
+        <b>{count(summary.totalOrder)}</b> ед ({summary.items.length} поз.)
         {/* «на 0 сум» читалось как «бесплатно». Ноль здесь значит одно из двух:
             покупать нечего либо ни у одной позиции нет цены — это разные вещи. */}
         {summary.costRounded > 0 ? (
           <>
             {" "}
-            на <b>{n(summary.costRounded)}</b> сум
+            на <b>{count(summary.costRounded)}</b> сум
             {summary.noPrice.length > 0 && (
-              <span className="muted"> (без {n(summary.noPrice.length)} поз. без цены — сумма неполная)</span>
+              <span className="muted"> (без {count(summary.noPrice.length)} поз. без цены — сумма неполная)</span>
             )}
           </>
         ) : (
           summary.items.length > 0 && <span className="muted"> · сумма не посчитана — ни у одной позиции нет цены</span>
         )}
-        {summary.totalUnfilled > 0 && <> · не закроется {n(summary.totalUnfilled)}</>}
+        {summary.totalUnfilled > 0 && <> · не закроется {count(summary.totalUnfilled)}</>}
       </p>
 
       <div className="rows" style={{ marginBottom: 14 }}>
@@ -90,9 +89,9 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
                 читалось как «остаток на дату» (UX#5). */}
             <b>{stock.asOf === null ? "Склад ещё не считали" : `Склад: последний пересчёт ${day(stock.asOf)}`}</b>
             <small>
-              сейчас {n(stock.totalBefore)} · увезём {n(stock.use)} · докупим сверх нужды {n(stock.back)} · станет{" "}
-              {n(stock.totalAfter)}
-              {stock.unmatched > 0 && <> · мимо расчёта {n(stock.unmatched)}</>}
+              сейчас {count(stock.totalBefore)} · увезём {count(stock.use)} · докупим сверх нужды {count(stock.back)} · станет{" "}
+              {count(stock.totalAfter)}
+              {stock.unmatched > 0 && <> · мимо расчёта {count(stock.unmatched)}</>}
             </small>
           </div>
           {stock.stale && <span className="pill bad">часть строк старее 3 дней</span>}
@@ -131,12 +130,12 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
                 <div className="t">
                   <b>{m.name}</b>
                   <small>
-                    {m.serial} · закуп {n(m.fromPurchase)} · склад {n(m.fromStock)}
-                    {m.unfilled > 0 && <> · пусто {n(m.unfilled)}</>}
+                    {m.serial} · закуп {count(m.fromPurchase)} · склад {count(m.fromStock)}
+                    {m.unfilled > 0 && <> · пусто {count(m.unfilled)}</>}
                   </small>
                 </div>
                 <span className="pill">
-                  {n(m.fromPurchase + m.fromStock)} из {n(m.need)} ед
+                  {count(m.fromPurchase + m.fromStock)} из {count(m.need)} ед
                 </span>
               </div>
             ))}
@@ -161,13 +160,13 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
                 <div className="t">
                   <b>{i.product}</b>
                   <small>
-                    нужно {n(i.need)} · склад {n(i.stock)} · купить {n(i.buy)} · заказ {n(i.order)} · сразу в автоматы{" "}
-                    {n(i.fromPurchase)} · остальное на склад {n(i.toStock)}
+                    нужно {count(i.need)} · склад {count(i.stock)} · купить {count(i.buy)} · заказ {count(i.order)} · сразу в автоматы{" "}
+                    {count(i.fromPurchase)} · остальное на склад {count(i.toStock)}
                   </small>
                 </div>
-                {i.fixedQty !== null && <span className="pill">фикс {n(i.fixedQty)}</span>}
+                {i.fixedQty !== null && <span className="pill">фикс {count(i.fixedQty)}</span>}
                 {i.noPrice && <span className="pill bad">нет цены</span>}
-                <span className="pill">{i.noPrice ? `${n(i.order)} ед` : `${n(i.costRounded)} сум`}</span>
+                <span className="pill">{i.noPrice ? `${count(i.order)} ед` : `${count(i.costRounded)} сум`}</span>
               </div>
             ))}
           </div>
@@ -195,11 +194,11 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
                 <div className="t">
                   <b>{i.product}</b>
                   <small>
-                    сейчас {n(i.stock)} · после {n(i.stockAfter)}
+                    сейчас {count(i.stock)} · после {count(i.stockAfter)}
                     {where && <> · по автоматам {where}</>}
                   </small>
                 </div>
-                <span className="pill">взять {n(i.fromStock)} ед</span>
+                <span className="pill">взять {count(i.fromStock)} ед</span>
               </div>
             ))}
           </div>
@@ -219,8 +218,8 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
                       автоматов. Дважды сказанное число читается как два разных
                       (бот печатает эту секцию так же). */}
                   <small>
-                    нужно {n(i.need)}
-                    {i.unfilled > 0 && <> · пусто {n(i.unfilled)}</>}
+                    нужно {count(i.need)}
+                    {i.unfilled > 0 && <> · пусто {count(i.unfilled)}</>}
                   </small>
                 </div>
                 <span className="pill">правило товара</span>
@@ -244,10 +243,10 @@ export function PurchasePlanTables({ plan, domain }: { plan: VendingPlan; domain
                   <div className="t">
                     <b>{s.product}</b>
                     <small>
-                      было {n(s.quantity)} из {n(s.capacity)} · нужно {n(s.need)} · {slotSource(s)}
+                      было {count(s.quantity)} из {count(s.capacity)} · нужно {count(s.need)} · {slotSource(s)}
                     </small>
                   </div>
-                  <span className="pill">{n(s.fromPurchase + s.fromStock)} ед</span>
+                  <span className="pill">{count(s.fromPurchase + s.fromStock)} ед</span>
                 </div>
               ))}
             </div>

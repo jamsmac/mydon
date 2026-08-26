@@ -249,3 +249,10 @@ describe("подпись частоты остатков", () => {
     expect(stockFreshnessNote(undefined)).toBe("обновляется каждые 10 минут");
   });
 });
+
+describe("числа усушки копируются (R-H-3)", () => {
+  it("в выводе листа нет неразрывного пробела", () => {
+    const { container } = render(<ShrinkageTables report={report} />);
+    expect(container.textContent ?? "").not.toContain("\u00a0");
+  });
+});

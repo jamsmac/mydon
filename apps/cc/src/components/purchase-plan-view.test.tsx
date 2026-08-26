@@ -123,3 +123,10 @@ describe("лист «План закупа»", () => {
     expect(кнопка).toBeDisabled();
   });
 });
+
+describe("числа плана закупа копируются (R-H-3)", () => {
+  it("в выводе листа нет неразрывного пробела", () => {
+    const { container } = render(<PurchasePlanTables plan={plan} domain="vendhub" />);
+    expect(container.textContent ?? "").not.toContain("\u00a0");
+  });
+});
