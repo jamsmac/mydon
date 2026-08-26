@@ -2472,7 +2472,10 @@ export async function runMaintenanceMonitor(
 → `42P10`), поэтому задач обслуживания не создавалось ни одной; дедуп держится
 предикатом `TASK_SOURCE_DAY_PREDICATE`, который обязаны дословно повторять И
 индекс, И спецификация конфликта; `dayKey` — только голые сутки; непустой
-`errors` прогона пишет событие `maintenance.monitor_failed`.
+`errors` прогона пишет событие `maintenance.monitor_failed`. Первый прогон
+после включения ставит РАЗОМ все накопленные к этому моменту работы (на
+проде 26.08.2026 — до 19 задач за один вызов); это не сбой и не «прорвало» —
+на следующее утро число задач расти не должно (тот же `dayKey` — тот же ключ).
 
 Логика на строку:
 
@@ -2506,8 +2509,11 @@ if (maintCron.toLowerCase() !== "off") {
 | `maintenance.blocked` | `core` | `{logId, kind, kindLabel, targetName, personId, personName, reason, day}` | Core при `outcome='failed'` или осмотре «не годен» |
 | `maintenance.done` | `core` | `{logId, planId, kind, kindLabel, targetName, partLabel, personId, personName, at}` | Core при записи факта |
 | `staff.bot_blocked` | `bot` | `{personId, personName, reason, day}` | бот при 403 |
+| `maintenance.monitor_failed` | `maintenance-monitor` | `{errorCount, errors[], tasks, day}` | агент, при непустом `errors` прогона |
 
-Событий `maintenance.due` / `soon` **нет намеренно**.
+Событий `maintenance.due` / `soon` **нет намеренно**; правила на
+`maintenance.monitor_failed` намеренно нет (R-G-6) — канал и текст
+уведомления о сбое прогона — решение владельца.
 
 Правила — в конец массива `RULES` в `/home/user/mydon/apps/core/src/rules/rules.ts`, в существующем стиле, **без изменения контракта `Rule`/`Notification`** (все адресуются владельцу):
 

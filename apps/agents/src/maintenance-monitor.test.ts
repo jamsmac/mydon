@@ -191,6 +191,24 @@ describe("Монитор графиков", () => {
     assert.equal(r.tasks, 0);
   });
 
+  it("сроки не прочитаны — событие о сбое всё равно записано (M1)", async () => {
+    // Самый тяжёлый отказ: `maintenanceDue()` падает до цикла по нормативам.
+    // Ранний `return` не имеет права обойти сторож `maintenance.monitor_failed` —
+    // иначе `select count(*) from event where type = 'maintenance.monitor_failed'`
+    // читается как «здоров» даже при мёртвом Core.
+    const { core, events } = stubCore([], {
+      maintenanceDue: async () => {
+        throw new Error("Core не поднялся");
+      },
+    });
+    const r = await runMaintenanceMonitor(core, { now: NOW });
+    const сбой = events.find((e) => e.type === "maintenance.monitor_failed");
+    assert.ok(сбой, "ранний return не имеет права обойти сторож");
+    assert.equal(сбой!.payload.tasks, 0);
+    assert.equal(сбой!.payload.errorCount, 1);
+    assert.equal(r.errors.length, 1);
+  });
+
   it("срок задачи — конец рабочего дня по Ташкенту", async () => {
     // 18:00 в Ташкенте = 13:00 UTC. Ставить полночь значит показать технику
     // «просрочено» в тот же день, когда он ещё едет на точку.
