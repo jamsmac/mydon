@@ -1,4 +1,11 @@
-import { normalizeMachineSerial, type Domain } from "@mydon/shared";
+// Формы, которые нужны САМОМУ клиенту (в сигнатурах методов ниже): реэкспорт
+// `export type … from …` имени в модуле не заводит, поэтому они ещё и здесь.
+import {
+  normalizeMachineSerial,
+  type Domain,
+  type PurchasePlan as VendingPlan,
+  type ShrinkReport,
+} from "@mydon/shared";
 import type {
   AnalyticsWarning,
   BootstrapSalePriceResult,
@@ -202,143 +209,6 @@ export interface VendingPurchase {
   totalToStock: number;
 }
 
-/** Слот автомата в плане закупа: что стоит, сколько нужно и откуда возьмём. */
-export interface VendingPlanSlot {
-  coilId: string;
-  product: string;
-  quantity: number;
-  capacity: number;
-  need: number;
-  fromPurchase: number;
-  fromStock: number;
-  unfilled: number;
-}
-
-/** Автомат в плане закупа: место в маршруте, сколько везём и раскладка по слотам. */
-export interface VendingPlanMachine {
-  serial: string;
-  name: string;
-  /** Место в маршруте обхода, с 1. */
-  routeIndex: number;
-  need: number;
-  fromPurchase: number;
-  fromStock: number;
-  unfilled: number;
-  slots: VendingPlanSlot[];
-}
-
-/** Почему числам плана можно верить не полностью. */
-export interface VendingPlanWarning {
-  code:
-    | "stock_stale"
-    | "stock_unknown_product"
-    | "machine_skipped"
-    | "no_price"
-    | "unknown_product"
-    | "sales_stale"
-    | "sales_partial"
-    | "route_unknown_serial";
-  message: string;
-}
-
-/** План закупа «что купить» (GET /vending/plan, П5a): закуп + раздача по маршруту. */
-export interface VendingPlan {
-  /** Когда посчитан (ISO) — план живёт ровно до следующего сбора. */
-  generatedAt: string;
-  stock: {
-    /** Последняя инвентаризация (ISO) или null, если склада ещё не было. */
-    asOf: string | null;
-    totalBefore: number;
-    /** Уйдёт со склада в автоматы. */
-    use: number;
-    /** Вернётся на склад из закупа (излишек упаковки). */
-    back: number;
-    totalAfter: number;
-    stale: boolean;
-    /** Штуки на складе без карточки прайса — в расчёт не вошли. */
-    unmatched: number;
-  };
-  summary: VendingPurchase;
-  machines: VendingPlanMachine[];
-  /** Порядок обхода задан настройкой (а не по имени автомата). */
-  routeConfigured: boolean;
-  warnings: VendingPlanWarning[];
-}
-
-/**
- * Усушка автомата (GET /vending/shrinkage, П4/R-P4-3).
- *
- * Типы описаны здесь, а не импортированы из Core: бот ходит в Core по HTTP и
- * не собирается вместе с ним. Импорт связал бы сборку бота со сборкой сервера
- * ради четырёх полей — и сломал бы её при любой правке внутренностей Core.
- */
-export interface ShrinkItem {
-  product: string;
-  /** Недостача за период, штук. */
-  lossUnits: number;
-  /** Она же в деньгах по закупочной цене. */
-  lossValue: number;
-  /** Излишек — в деньги НЕ входит, но виден: это тоже расхождение. */
-  surplusUnits: number;
-  daysCounted: number;
-  /** Цены нет — позиция в сумму не вошла. */
-  noPrice: boolean;
-  /** Перевалила порог: повод разбираться, а не «шум округления». */
-  alert: boolean;
-}
-
-export interface ShrinkSummary {
-  items: ShrinkItem[];
-  lossValue: number;
-  daysCounted: number;
-  /**
-   * Сутки, ИСКЛЮЧЁННЫЕ из расчёта (заливка или пропуск снимка) — не часть
-   * daysCounted, а то, что из него вычли. `daysCounted === 0` значит, что
-   * товар не считался ни дня: «недостач нет» про такой автомат говорить нельзя.
-   */
-  daysSkipped: number;
-  threshold: number;
-}
-
-/** День заливки по снимкам: что увидел детектор и что записал оператор. */
-export interface ShrinkRefillDay {
-  /** YYYY-MM-DD по Ташкенту. */
-  date: string;
-  detectedUnits: number;
-  recordedUnits: number;
-}
-
-export interface ShrinkMachine {
-  /** Серийник в каноне (без приставки «c»). */
-  serial: string;
-  name: string;
-  summary: ShrinkSummary;
-  refillDays: ShrinkRefillDay[];
-}
-
-/** Почему в отчёте чего-то нет. Каждая причина чинится в своём месте. */
-export interface ShrinkWarning {
-  code:
-    | "snapshots_stale"
-    | "no_sales_day"
-    | "machine_dead"
-    | "sales_unknown_product"
-    | "machine_error"
-    /** Ни одних суток не посчитано: всё окно было заливкой или пропуском. */
-    | "no_counted_days";
-  message: string;
-}
-
-export interface ShrinkReport {
-  /** Первый день периода, YYYY-MM-DD. */
-  from: string;
-  /** Последний — ВЧЕРА: у сегодняшних суток нет снимка на конец. */
-  to: string;
-  threshold: number;
-  machines: ShrinkMachine[];
-  warnings: ShrinkWarning[];
-}
-
 /** Правила закупа товара «было»/«стало» — как их отдаёт Core. */
 export interface VendingRulesSnapshot {
   packSize?: number;
@@ -396,6 +266,10 @@ export interface SetPriceResult {
  * Реэкспорт, а не прямой импорт из `@mydon/shared` во всех модулях бота:
  * `core-client` остаётся ЕДИНСТВЕННОЙ дверью к Core — по нему видно, какие
  * формы бот вообще получает по HTTP.
+ *
+ * Тем же приёмом сюда приехали усушка и план закупа (R-H-6): имена бота
+ * сохранены `as`-алиасами (`PurchasePlan as VendingPlan` и остальные), поэтому
+ * ни брифинг, ни мастер заливки не правятся — меняется только адрес формы.
  */
 export type {
   AnalyticsWarning,
@@ -407,6 +281,17 @@ export type {
   OurvendSyncRun,
   ParityStreak,
   SetSalePriceResult,
+  ShrinkItem,
+  ShrinkMachine,
+  ShrinkRefillDay,
+  ShrinkReport,
+  ShrinkSummary,
+  ShrinkWarning,
+  ShrinkWarningCode,
+  PurchasePlan as VendingPlan,
+  PlanMachine as VendingPlanMachine,
+  SlotPlanRow as VendingPlanSlot,
+  PlanWarning as VendingPlanWarning,
   WeeklyDigest,
   WeeklyDigestMachine,
 } from "@mydon/shared";

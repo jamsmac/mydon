@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SALE_PRICE_FACT_DAYS } from "./vending-reports";
-import type { BootstrapSalePriceResult, OurvendHealth, SetSalePriceResult, WeeklyDigest } from "./vending-reports";
+import type {
+  BootstrapSalePriceResult,
+  OurvendHealth,
+  PurchasePlan,
+  SetSalePriceResult,
+  ShrinkReport,
+  ShrinkWarningCode,
+  WeeklyDigest,
+} from "./vending-reports";
 
 /**
  * Формы ответов Core, которые читают ТРОЕ (Core, бот, панель), — R-P5b-10.
@@ -227,5 +235,77 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     };
     assert.equal(пустая.totals.pct, null);
     assert.equal(пустая.machines.length, 0);
+  });
+});
+
+/**
+ * Формы усушки и плана закупа: те же три читателя, тот же приём (R-H-6).
+ *
+ * До этого набора формы жили ТРЕМЯ копиями — в `shrinkage.service.ts`/
+ * `vending.service.ts` (Core), в `core-client.ts` (бот) и в `lib/core.ts`
+ * (панель). Копии уже разъехались: союз кодов усушки панель переписала в
+ * другом порядке, а `summary` автомата — инлайном. Структурная типизация это
+ * терпит, поэтому переименование поля в Core не ломало ни бот, ни панель — оно
+ * ломало строку в чате у владельца.
+ */
+describe("Формы усушки и плана закупа объявлены ОДИН раз (R-H-6)", () => {
+  it("ShrinkReport: ровно те поля, что читают Core, бот и панель", () => {
+    const отчёт: ShrinkReport = {
+      from: "2026-08-11",
+      to: "2026-08-24",
+      threshold: 30_000,
+      machines: [
+        {
+          serial: "2508160376",
+          name: "Olma",
+          summary: {
+            items: [{ product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true }],
+            lossValue: 99_000,
+            daysCounted: 9,
+            daysSkipped: 5,
+            threshold: 30_000,
+          },
+          refillDays: [{ date: "2026-08-19", detectedUnits: 183, recordedUnits: 0 }],
+        },
+      ],
+      warnings: [{ code: "no_counted_days", message: "все дни были заливкой" }],
+    };
+    assert.deepEqual(Object.keys(отчёт).sort(), ["from", "machines", "threshold", "to", "warnings"]);
+    assert.deepEqual(Object.keys(отчёт.machines[0]!).sort(), ["name", "refillDays", "serial", "summary"]);
+    assert.deepEqual(Object.keys(отчёт.machines[0]!.summary).sort(), ["daysCounted", "daysSkipped", "items", "lossValue", "threshold"]);
+  });
+
+  it("союз кодов усушки объявлен один раз — все шесть, и ни одного лишнего", () => {
+    // Панель держала свою копию союза в ДРУГОМ порядке (`core.ts`), Core — в
+    // своём. Структурная типизация порядок не ловит, а вот пропавший член —
+    // ловит: лишний литерал ниже не компилируется.
+    const все: ShrinkWarningCode[] = [
+      "snapshots_stale", "no_sales_day", "machine_dead",
+      "no_counted_days", "sales_unknown_product", "machine_error",
+    ];
+    assert.equal(new Set(все).size, 6);
+    // @ts-expect-error — кода `machine_sleeping` в союзе нет и заводить его
+    // можно только в shared, а не седьмой копией в панели.
+    const лишний: ShrinkWarningCode = "machine_sleeping";
+    assert.equal(лишний, "machine_sleeping");
+  });
+
+  it("PurchasePlan: ровно те поля, что читают Core, бот и панель", () => {
+    const план: PurchasePlan = {
+      generatedAt: "2026-08-25T09:00:00.000Z",
+      stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0 },
+      summary: {
+        items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
+        allocation: "purchase-first",
+        totalNeed: 0, totalCovered: 0, totalBuy: 0, totalOrder: 0,
+        costExact: 0, costRounded: 0, overpay: 0, shortfallCost: 0, costByPriceFull: 0,
+        totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+      },
+      machines: [],
+      routeConfigured: true,
+      warnings: [{ code: "sales_partial", message: "автомата нет в свежем батче продаж" }],
+    };
+    assert.deepEqual(Object.keys(план).sort(), ["generatedAt", "machines", "routeConfigured", "stock", "summary", "warnings"]);
+    assert.deepEqual(Object.keys(план.stock).sort(), ["asOf", "back", "stale", "totalAfter", "totalBefore", "unmatched", "use"]);
   });
 });

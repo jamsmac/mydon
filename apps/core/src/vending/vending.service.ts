@@ -50,11 +50,14 @@ import {
   type AnalyticsWarning,
   type CashCategoryInput,
   type MachineSlots,
+  type PlanMachine,
   type PlanogramStatus,
+  type PlanWarning,
   type PriceEntry,
   type ProductRule,
   type PurchaseCashSession,
   type PurchaseRow,
+  type PurchasePlan,
   type BootstrapSalePriceResult,
   type PurchaseSummary,
   type RetailFact,
@@ -62,7 +65,6 @@ import {
   type Runout,
   type RunoutInput,
   type Slot,
-  type SlotPlanRow,
   type StockCountRow,
   type StockCountsReport,
 } from "@mydon/shared";
@@ -495,65 +497,14 @@ export function parseOrderPositions(positions: unknown): OrderPosition[] {
   return out;
 }
 
-/** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
-export interface PlanMachine {
-  serial: string;
-  name: string;
-  /** Место в маршруте обхода, с 1. */
-  routeIndex: number;
-  need: number;
-  fromPurchase: number;
-  fromStock: number;
-  unfilled: number;
-  slots: SlotPlanRow[];
-}
-
-/** Предупреждение плана: то, из-за чего числам можно верить не полностью. */
-export interface PlanWarning {
-  code:
-    | "stock_stale"
-    /** Строки склада, которых нет в прайсе: в расчёт не вошли (C2). */
-    | "stock_unknown_product"
-    /** Автоматы не в строю: одной строкой на все — их дефицит в план не вошёл. */
-    | "machine_skipped"
-    | "no_price"
-    | "unknown_product"
-    /** Самый свежий батч продаж старше SALES_STALE_DAYS — «нет продаж» может врать (I3). */
-    | "sales_stale"
-    /** Автомата с потребностью нет в свежем батче продаж — «нет продаж» по нему ложное (I3/П5b-1). */
-    | "sales_partial"
-    /** В настройке маршрута есть серийники, которых нет среди автоматов (A4/UX#16). */
-    | "route_unknown_serial";
-  message: string;
-}
-
-/** План закупа «что купить»: закуп + раздача по маршруту и слотам (П5a). */
-export interface PurchasePlan {
-  /** Когда посчитан (ISO) — план живёт ровно до следующего сбора. */
-  generatedAt: string;
-  stock: {
-    /** Последняя инвентаризация (ISO) или null, если склада ещё не было. */
-    asOf: string | null;
-    totalBefore: number;
-    /** Уйдёт со склада в автоматы. */
-    use: number;
-    /** Вернётся на склад из закупа (излишек упаковки). */
-    back: number;
-    totalAfter: number;
-    stale: boolean;
-    /**
-     * Штуки на складе, которые в расчёт НЕ вошли: строки без карточки прайса
-     * (их имя не резолвится ни в товар, ни в алиас). В `totalBefore` не
-     * входят — иначе «станет N» не сходилось бы с арифметикой плана.
-     */
-    unmatched: number;
-  };
-  summary: PurchaseSummary;
-  machines: PlanMachine[];
-  /** Порядок обхода задан настройкой (а не по имени автомата). */
-  routeConfigured: boolean;
-  warnings: PlanWarning[];
-}
+/**
+ * Формы плана закупа — из `@mydon/shared` (`vending-reports.ts`, R-H-6).
+ *
+ * Форму объявляет тот, кто считает числа; Core её импортирует и отдаёт своим
+ * модулям отсюда же, откуда они её брали, — переезд формы не должен быть
+ * правкой каждого импортёра.
+ */
+export type { PlanMachine, PlanWarning, PurchasePlan };
 
 /** Строка прайса вендинга с правилами закупа — для редактора панели. */
 export interface VendingProductRow {

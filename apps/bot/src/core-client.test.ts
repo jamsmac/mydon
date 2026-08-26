@@ -6,7 +6,9 @@ import type {
   MonthlyPrice as SharedMonthlyPrice,
   OurvendHealth as SharedOurvendHealth,
   OurvendSyncRun as SharedOurvendSyncRun,
+  PurchasePlan as SharedPurchasePlan,
   SetSalePriceResult as SharedSetSalePriceResult,
+  ShrinkReport as SharedShrinkReport,
 } from "@mydon/shared";
 import {
   CoreClient,
@@ -18,6 +20,8 @@ import {
   type OurvendHealth,
   type OurvendSyncRun,
   type SetSalePriceResult,
+  type ShrinkReport,
+  type VendingPlan,
 } from "./core-client";
 
 /**
@@ -139,5 +143,50 @@ describe("Формы аналитики приходят из @mydon/shared", ()
     assert.equal(местноеЗдоровье.failedStreak, 0);
     assert.equal(общаяЦена.month, "2026-07");
     assert.equal(общаяТревога.code, "no_sales");
+  });
+
+  it("усушка и план закупа — те же формы: бот их читает, а не переписывает", () => {
+    // Свои копии этих форм бот держал ровно до тех пор, пока их не было в
+    // общем пакете. Разъезжались они молча: `formatShrinkage` печатал бы
+    // пустую строку там, где Core переименовал поле, — и узнал бы об этом
+    // владелец, а не сборка.
+    const усушкаОбщая: SharedShrinkReport = {
+      from: "2026-08-11",
+      to: "2026-08-24",
+      threshold: 30_000,
+      machines: [
+        {
+          serial: "2508160376",
+          name: "Olma",
+          summary: {
+            items: [{ product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true }],
+            lossValue: 99_000,
+            daysCounted: 9,
+            daysSkipped: 5,
+            threshold: 30_000,
+          },
+          refillDays: [{ date: "2026-08-19", detectedUnits: 183, recordedUnits: 0 }],
+        },
+      ],
+      warnings: [{ code: "no_counted_days", message: "все дни были заливкой" }],
+    };
+    const усушкаБота: ShrinkReport = усушкаОбщая;
+    const планОбщий: SharedPurchasePlan = {
+      generatedAt: "2026-08-25T09:00:00.000Z",
+      stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0 },
+      summary: {
+        items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
+        allocation: "purchase-first",
+        totalNeed: 0, totalCovered: 0, totalBuy: 0, totalOrder: 0,
+        costExact: 0, costRounded: 0, overpay: 0, shortfallCost: 0, costByPriceFull: 0,
+        totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+      },
+      machines: [],
+      routeConfigured: true,
+      warnings: [{ code: "sales_partial", message: "автомата нет в свежем батче продаж" }],
+    };
+    const планБота: VendingPlan = планОбщий;
+    assert.equal(усушкаБота, усушкаОбщая);
+    assert.equal(планБота, планОбщий);
   });
 });

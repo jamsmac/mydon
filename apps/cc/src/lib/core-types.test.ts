@@ -4,8 +4,18 @@ import type {
   MonthlyPrice as SharedMonthly,
   OurvendHealth as SharedHealth,
   OurvendSyncRun as SharedRun,
+  PurchasePlan as SharedPlan,
+  ShrinkReport as SharedShrink,
 } from "@mydon/shared";
-import type { AnalyticsWarning, MonthlyPrice, OurvendHealth, OurvendSyncRun, VendingSyncRun } from "./core";
+import type {
+  AnalyticsWarning,
+  MonthlyPrice,
+  OurvendHealth,
+  OurvendSyncRun,
+  VendingPlan,
+  VendingShrinkageReport,
+  VendingSyncRun,
+} from "./core";
 
 /**
  * Компиляторная сверка зеркал (N4 финального ревью П5b).
@@ -49,6 +59,42 @@ const здоровьеОбщее: SharedHealth = {
 
 const месяцОбщий: SharedMonthly = { product: "Kinder Bueno", month: "2026-07", retail: 11_000, purchase: 7_700 };
 const предупреждениеОбщее: SharedWarning = { code: "no_reference", message: "У 32 товаров эталон не задан" };
+
+const усушкаОбщая: SharedShrink = {
+  from: "2026-08-11",
+  to: "2026-08-24",
+  threshold: 30_000,
+  machines: [
+    {
+      serial: "2508160376",
+      name: "Olma",
+      summary: {
+        items: [{ product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true }],
+        lossValue: 99_000,
+        daysCounted: 9,
+        daysSkipped: 5,
+        threshold: 30_000,
+      },
+      refillDays: [{ date: "2026-08-19", detectedUnits: 183, recordedUnits: 0 }],
+    },
+  ],
+  warnings: [{ code: "no_counted_days", message: "все дни были заливкой" }],
+};
+
+const планОбщий: SharedPlan = {
+  generatedAt: "2026-08-25T09:00:00.000Z",
+  stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0 },
+  summary: {
+    items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
+    allocation: "purchase-first",
+    totalNeed: 0, totalCovered: 0, totalBuy: 0, totalOrder: 0,
+    costExact: 0, costRounded: 0, overpay: 0, shortfallCost: 0, costByPriceFull: 0,
+    totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+  },
+  machines: [],
+  routeConfigured: true,
+  warnings: [{ code: "sales_partial", message: "автомата нет в свежем батче продаж" }],
+};
 
 describe("Типы панели — реэкспорт из @mydon/shared, а не копии", () => {
   it("здоровье сбора и прогон принимаются типом панели без переписывания полей", () => {
@@ -95,5 +141,22 @@ describe("Типы панели — реэкспорт из @mydon/shared, а н
     const предупреждение: AnalyticsWarning = предупреждениеОбщее;
     expect(Object.keys(месяц).sort()).toEqual(["month", "product", "purchase", "retail"]);
     expect(Object.keys(предупреждение).sort()).toEqual(["code", "message"]);
+  });
+});
+
+describe("Усушка и план закупа — реэкспорт, а не копии (R-H-6)", () => {
+  it("общая форма усушки принимается типом панели без переписывания полей", () => {
+    // Панель звала усушку `VendingShrinkageReport`, Core — `ShrinkReport`, и
+    // союз кодов панель переписала в другом порядке. Переименование поля в
+    // Core компилятор не ловил: он видел две независимые структуры.
+    const общая: SharedShrink = усушкаОбщая;
+    const панельная: VendingShrinkageReport = общая;
+    expect(панельная).toBe(общая);
+  });
+
+  it("общий план закупа принимается типом панели: PurchasePlan и VendingPlan — одно", () => {
+    const общий: SharedPlan = планОбщий;
+    const панельный: VendingPlan = общий;
+    expect(панельный).toBe(общий);
   });
 });

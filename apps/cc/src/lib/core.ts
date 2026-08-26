@@ -1,4 +1,6 @@
 import "server-only";
+// Формы, которые нужны САМОМУ клиенту (в сигнатурах `get<…>` ниже): реэкспорт
+// `export type … from …` имени в модуле не заводит, поэтому они ещё и здесь.
 import type {
   AnalyticsWarning,
   DeadStockReport,
@@ -10,6 +12,8 @@ import type {
   ParityStreak,
   PriceChangesReport,
   PriceGapReport,
+  PurchasePlan as VendingPlan,
+  ShrinkReport as VendingShrinkageReport,
 } from "@mydon/shared";
 
 /**
@@ -157,144 +161,6 @@ export interface VendingPurchase {
   totalToStock: number;
 }
 
-/** Слот автомата в плане закупа: что стоит, сколько влезет и откуда возьмём (П5a). */
-export interface VendingPlanSlot {
-  coilId: string;
-  product: string;
-  quantity: number;
-  capacity: number;
-  need: number;
-  fromPurchase: number;
-  fromStock: number;
-  unfilled: number;
-}
-
-/** Автомат в плане закупа: место в маршруте обхода и раздача по слотам. */
-export interface VendingPlanMachine {
-  serial: string;
-  name: string;
-  /** Место в маршруте обхода, с 1. */
-  routeIndex: number;
-  need: number;
-  fromPurchase: number;
-  fromStock: number;
-  unfilled: number;
-  slots: VendingPlanSlot[];
-}
-
-/** Предупреждение плана: то, из-за чего числам можно верить не полностью. */
-export interface VendingPlanWarning {
-  code:
-    | "stock_stale"
-    /** Строки склада без карточки прайса — в расчёт не вошли. */
-    | "stock_unknown_product"
-    | "machine_skipped"
-    | "no_price"
-    | "unknown_product"
-    /** Батч продаж несвежий: «нет продаж» может быть ложным. */
-    | "sales_stale"
-    /** В батче продаж автоматов меньше, чем в расчёте. */
-    | "sales_partial"
-    /** В настройке маршрута есть серийники, которых нет среди автоматов. */
-    | "route_unknown_serial";
-  message: string;
-}
-
-/** План закупа «что купить»: закуп + раздача по маршруту и слотам (П5a). */
-export interface VendingPlan {
-  /** Когда посчитан (ISO) — план живёт ровно до следующего сбора. */
-  generatedAt: string;
-  stock: {
-    /** Последняя инвентаризация (ISO) или null, если склада ещё не было. */
-    asOf: string | null;
-    totalBefore: number;
-    /** Уйдёт со склада в автоматы. */
-    use: number;
-    /** Вернётся на склад из закупа (излишек упаковки). */
-    back: number;
-    totalAfter: number;
-    stale: boolean;
-    /** Штуки на складе без карточки прайса: в расчёт не вошли. */
-    unmatched: number;
-  };
-  summary: VendingPurchase;
-  machines: VendingPlanMachine[];
-  /** Порядок обхода задан настройкой (а не по имени автомата). */
-  routeConfigured: boolean;
-  warnings: VendingPlanWarning[];
-}
-
-/** Строка усушки по товару за период (П4, R-P4-3). */
-export interface VendingShrinkageItem {
-  product: string;
-  /** Недостача за период, шт (излишки в неё не зачитываются). */
-  lossUnits: number;
-  /** Недостача в деньгах по `purchase_price`; без цены — 0 (см. `noPrice`). */
-  lossValue: number;
-  /** Излишек за период, шт: виден, но в деньги не входит. */
-  surplusUnits: number;
-  /** По скольким дням позиция посчитана (дни заливок исключены целиком). */
-  daysCounted: number;
-  /** Цены в прайсе нет — сумма по позиции неполная. */
-  noPrice: boolean;
-  /** Потеря за порогом `threshold` — та самая, из-за которой утром приходит алерт. */
-  alert: boolean;
-}
-
-/** День заливки автомата: приход по снимкам против записи оператора. */
-export interface VendingShrinkageRefillDay {
-  /** YYYY-MM-DD по Ташкенту. */
-  date: string;
-  /** Приход по снимкам (детектор заливок). */
-  detectedUnits: number;
-  /** Сколько записал оператор в боте за эти сутки; 0 — не записал вовсе. */
-  recordedUnits: number;
-}
-
-/** Усушка одного автомата за период. */
-export interface VendingShrinkageMachine {
-  /** Серийник в каноне (без приставки «c»). */
-  serial: string;
-  name: string;
-  summary: {
-    items: VendingShrinkageItem[];
-    lossValue: number;
-    daysCounted: number;
-    /** Дни, выкинутые из расчёта (в них была заливка). */
-    daysSkipped: number;
-    threshold: number;
-  };
-  /** Дни заливок: из расчёта усушки выкинуты, но владельцу нужны. */
-  refillDays: VendingShrinkageRefillDay[];
-}
-
-/**
- * Почему в отчёте чего-то нет. Каждая причина чинится в СВОЁМ месте, поэтому
- * сводить их к одному коду нельзя (тот же перечень, что у ядра).
- */
-export interface VendingShrinkageWarning {
-  code:
-    | "snapshots_stale"
-    | "no_sales_day"
-    | "machine_dead"
-    | "sales_unknown_product"
-    | "machine_error"
-    /** Автомат в отчёте, но не посчитан ни один день — все дни были заливкой/пропущены. */
-    | "no_counted_days";
-  message: string;
-}
-
-/** Усушка автоматов по дням без заливок (П4, R-P4-3) — лист «Усушка». */
-export interface VendingShrinkageReport {
-  /** Первый день периода по Ташкенту, YYYY-MM-DD. */
-  from: string;
-  /** Последний день — ВЧЕРА: у сегодняшних суток нет снимка на конец. */
-  to: string;
-  threshold: number;
-  machines: VendingShrinkageMachine[];
-  warnings: VendingShrinkageWarning[];
-}
-
 /**
  * Аналитика снек-контура (П5b): формы отчётов живут в `@mydon/shared`
  * (`vending-reports.ts`, R-P5b-10) — их считает Core, а бот и панель
@@ -305,6 +171,11 @@ export interface VendingShrinkageReport {
  * `OurvendSyncRun` жили здесь копиями поле-в-поле (Task 4 положил их в shared
  * последним), теперь и они реэкспортируются. Своих объявлений форм отчётов в
  * панели больше НЕТ — расхождение полей ловит компилятор, а не читатель.
+ *
+ * Тем же приёмом сюда приехали план закупа и усушка (R-H-6). Имена панели
+ * сохранены `as`-алиасами, поэтому ни один лист не правится; заодно исчезли
+ * два расхождения копии с ядром — свой порядок союза кодов усушки и
+ * инлайненный `summary` автомата вместо общей `ShrinkSummary`.
  */
 export type {
   AnalyticsWarning,
@@ -324,6 +195,15 @@ export type {
   PriceChangesReport,
   PriceGapReport,
   PriceGapRow,
+  PurchasePlan as VendingPlan,
+  PlanMachine as VendingPlanMachine,
+  SlotPlanRow as VendingPlanSlot,
+  PlanWarning as VendingPlanWarning,
+  ShrinkItem as VendingShrinkageItem,
+  ShrinkMachine as VendingShrinkageMachine,
+  ShrinkRefillDay as VendingShrinkageRefillDay,
+  ShrinkReport as VendingShrinkageReport,
+  ShrinkWarning as VendingShrinkageWarning,
 } from "@mydon/shared";
 
 /**

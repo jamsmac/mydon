@@ -3,6 +3,9 @@ import { DAY } from "./expiry";
 import { normalizeMachineSerial } from "./machine-serial";
 import { tashkentDay, tashkentInstant } from "./tashkent-time";
 import { normalizeProductName, priceDeviationPct } from "./vending-calc";
+import type { PurchaseSummary } from "./vending-calc";
+import type { ShrinkSummary } from "./vending-field";
+import type { SlotPlanRow } from "./vending-plan";
 
 /**
  * Аналитика снек-контура (П5b): маржа, мёртвый сток, изменения цен, разрыв
@@ -1157,4 +1160,132 @@ export interface WeeklyDigest {
    * деградирует, а причина едет сюда — молчаливой потери секции быть не должно.
    */
   warnings: AnalyticsWarning[];
+}
+
+// ── Усушка и план закупа: формы, которые читают ТРОЕ ─────────────────────────
+
+/**
+ * Формы отчёта об усушке и плана закупа (R-H-6).
+ *
+ * Их считает Core (`shrinkage.service.ts`, `vending.service.ts`), а читают
+ * трое: сам Core, бот и панель. Пока объявления жили в трёх местах, копии
+ * расходились МОЛЧА: тип не проверка на рантайме, и разъехавшееся поле видно
+ * не сборкой, а пустой строкой в чате у владельца. Панель уже успела
+ * переписать союз кодов усушки в своём порядке, а `summary` автомата — вовсе
+ * инлайном. Теперь форму объявляет тот, кто считает числа, а бот и панель её
+ * реэкспортируют — расхождение ловит `pnpm build`, а не читатель.
+ *
+ * `ShrinkItem`/`ShrinkSummary` (`vending-field.ts`), `SlotPlanRow`
+ * (`vending-plan.ts`) и `PurchaseSummary` (`vending-calc.ts`) остаются там,
+ * где их считают: переезд ради соседства дал бы дифф без выигрыша.
+ */
+
+/** День заливки по снимкам: что увидел детектор и что записал оператор. */
+export interface ShrinkRefillDay {
+  /** Дата по Ташкенту, YYYY-MM-DD. */
+  date: string;
+  /** Приход по снимкам (детектор). */
+  detectedUnits: number;
+  /** Записано оператором в боте за эти сутки. */
+  recordedUnits: number;
+}
+
+/** Усушка одного автомата за период. */
+export interface ShrinkMachine {
+  /** Серийник в каноне (без приставки «c»). */
+  serial: string;
+  name: string;
+  summary: ShrinkSummary;
+  /** Дни заливок: из расчёта усушки они выкинуты, но владельцу нужны. */
+  refillDays: ShrinkRefillDay[];
+}
+
+/**
+ * Почему в отчёте чего-то нет. Каждая причина чинится в СВОЁМ месте, поэтому
+ * сводить их к одному коду нельзя: снимки — сбор, продажи — синк и справочник
+ * имён, автомат — источник, ошибка — код.
+ */
+export type ShrinkWarningCode =
+  | "snapshots_stale"
+  | "no_sales_day"
+  | "machine_dead"
+  /** Ни одних суток не посчитано: всё окно было заливкой или пропуском. */
+  | "no_counted_days"
+  | "sales_unknown_product"
+  | "machine_error";
+
+export interface ShrinkWarning {
+  code: ShrinkWarningCode;
+  message: string;
+}
+
+/** Усушка автоматов по дням БЕЗ заливок (П4, R-P4-3) — отчёт целиком. */
+export interface ShrinkReport {
+  /** Первый день периода по Ташкенту, YYYY-MM-DD. */
+  from: string;
+  /** Последний день — ВЧЕРА: у сегодняшних суток нет снимка на конец. */
+  to: string;
+  threshold: number;
+  machines: ShrinkMachine[];
+  warnings: ShrinkWarning[];
+}
+
+/** Автомат в плане закупа: сколько везём и как это ложится по слотам. */
+export interface PlanMachine {
+  serial: string;
+  name: string;
+  /** Место в маршруте обхода, с 1. */
+  routeIndex: number;
+  need: number;
+  fromPurchase: number;
+  fromStock: number;
+  unfilled: number;
+  slots: SlotPlanRow[];
+}
+
+/** Предупреждение плана: то, из-за чего числам можно верить не полностью. */
+export interface PlanWarning {
+  code:
+    | "stock_stale"
+    /** Строки склада, которых нет в прайсе: в расчёт не вошли (C2). */
+    | "stock_unknown_product"
+    /** Автоматы не в строю: одной строкой на все — их дефицит в план не вошёл. */
+    | "machine_skipped"
+    | "no_price"
+    | "unknown_product"
+    /** Самый свежий батч продаж старше SALES_STALE_DAYS — «нет продаж» может врать (I3). */
+    | "sales_stale"
+    /** Автомата с потребностью нет в свежем батче продаж — «нет продаж» по нему ложное (I3/П5b-1). */
+    | "sales_partial"
+    /** В настройке маршрута есть серийники, которых нет среди автоматов (A4/UX#16). */
+    | "route_unknown_serial";
+  message: string;
+}
+
+/** План закупа «что купить»: закуп + раздача по маршруту и слотам (П5a). */
+export interface PurchasePlan {
+  /** Когда посчитан (ISO) — план живёт ровно до следующего сбора. */
+  generatedAt: string;
+  stock: {
+    /** Последняя инвентаризация (ISO) или null, если склада ещё не было. */
+    asOf: string | null;
+    totalBefore: number;
+    /** Уйдёт со склада в автоматы. */
+    use: number;
+    /** Вернётся на склад из закупа (излишек упаковки). */
+    back: number;
+    totalAfter: number;
+    stale: boolean;
+    /**
+     * Штуки на складе, которые в расчёт НЕ вошли: строки без карточки прайса
+     * (их имя не резолвится ни в товар, ни в алиас). В `totalBefore` не
+     * входят — иначе «станет N» не сходилось бы с арифметикой плана.
+     */
+    unmatched: number;
+  };
+  summary: PurchaseSummary;
+  machines: PlanMachine[];
+  /** Порядок обхода задан настройкой (а не по имени автомата). */
+  routeConfigured: boolean;
+  warnings: PlanWarning[];
 }

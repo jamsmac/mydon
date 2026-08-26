@@ -18,10 +18,10 @@ const plan: VendingPlan = {
   generatedAt: "2026-08-25T04:00:00.000Z",
   stock: { asOf: "2026-08-20T15:00:00.000Z", totalBefore: 134, use: 3, back: 4, totalAfter: 135, stale: true, unmatched: 0 },
   summary: {
-    items: [{ product: "Fanta", need: 12, stock: 3, buy: 9, pack: 12, order: 12, price: 5167, costRounded: 62004, noPrice: false, noSales: false, fromPurchase: 12, fromStock: 0, unfilled: 0, toStock: 0, stockAfter: 3, excluded: false, fixedQty: null, perMachine: { "2508160376": 8, "2508160359": 4 } }],
+    items: [{ product: "Fanta", need: 12, stock: 3, covered: 3, buy: 9, surplus: 0, pack: 12, order: 12, extra: 3, price: 5167, costExact: 46503, costRounded: 62004, noPrice: false, noSales: false, fromPurchase: 12, fromStock: 0, unfilled: 0, toStock: 0, stockAfter: 3, excluded: false, fixedQty: null, perMachine: { "2508160376": 8, "2508160359": 4 } }],
     excludedNoSales: [],
-    excludedByRule: [{ product: "Qurt", need: 5, stock: 3, buy: 0, pack: 10, order: 0, price: 6800, costRounded: 0, noPrice: false, noSales: false, fromPurchase: 0, fromStock: 3, unfilled: 2, toStock: 0, stockAfter: 0, excluded: true, fixedQty: null, perMachine: { "2508160376": 5 } }],
-    noPrice: [], totalBuy: 9, totalOrder: 12, costExact: 46503, costRounded: 62004, overpay: 15501, shortfallCost: 0,
+    excludedByRule: [{ product: "Qurt", need: 5, stock: 3, covered: 3, buy: 0, surplus: 0, pack: 10, order: 0, extra: 0, price: 6800, costExact: 0, costRounded: 0, noPrice: false, noSales: false, fromPurchase: 0, fromStock: 3, unfilled: 2, toStock: 0, stockAfter: 0, excluded: true, fixedQty: null, perMachine: { "2508160376": 5 } }],
+    noPrice: [], totalNeed: 12, totalCovered: 3, totalBuy: 9, totalOrder: 12, costExact: 46503, costByPriceFull: 62004, costRounded: 62004, overpay: 15501, shortfallCost: 0,
     totalFromPurchase: 12, totalFromStock: 3, totalUnfilled: 2, totalToStock: 0, allocation: "purchase-first",
   },
   machines: [
