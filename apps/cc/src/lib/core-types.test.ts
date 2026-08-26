@@ -4,8 +4,22 @@ import type {
   MonthlyPrice as SharedMonthly,
   OurvendHealth as SharedHealth,
   OurvendSyncRun as SharedRun,
+  PurchasePlan as SharedPlan,
+  ShrinkReport as SharedShrink,
+  StockCountRow as SharedStockCountRow,
+  StockCountsReport as SharedStockCounts,
 } from "@mydon/shared";
-import type { AnalyticsWarning, MonthlyPrice, OurvendHealth, OurvendSyncRun, VendingSyncRun } from "./core";
+import type {
+  AnalyticsWarning,
+  MonthlyPrice,
+  OurvendHealth,
+  OurvendSyncRun,
+  StockCountRow,
+  StockCountsReport,
+  VendingPlan,
+  VendingShrinkageReport,
+  VendingSyncRun,
+} from "./core";
 
 /**
  * Компиляторная сверка зеркал (N4 финального ревью П5b).
@@ -49,6 +63,64 @@ const здоровьеОбщее: SharedHealth = {
 
 const месяцОбщий: SharedMonthly = { product: "Kinder Bueno", month: "2026-07", retail: 11_000, purchase: 7_700 };
 const предупреждениеОбщее: SharedWarning = { code: "no_reference", message: "У 32 товаров эталон не задан" };
+
+const усушкаОбщая: SharedShrink = {
+  from: "2026-08-11",
+  to: "2026-08-24",
+  threshold: 30_000,
+  machines: [
+    {
+      serial: "2508160376",
+      name: "Olma",
+      summary: {
+        items: [{ product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true }],
+        lossValue: 99_000,
+        daysCounted: 9,
+        daysSkipped: 5,
+        threshold: 30_000,
+      },
+      refillDays: [{ date: "2026-08-19", detectedUnits: 183, recordedUnits: 0 }],
+    },
+  ],
+  warnings: [{ code: "no_counted_days", message: "все дни были заливкой" }],
+};
+
+const планОбщий: SharedPlan = {
+  generatedAt: "2026-08-25T09:00:00.000Z",
+  stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0 },
+  summary: {
+    items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
+    allocation: "purchase-first",
+    totalNeed: 0, totalCovered: 0, totalBuy: 0, totalOrder: 0,
+    costExact: 0, costRounded: 0, overpay: 0, shortfallCost: 0, costByPriceFull: 0,
+    totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+  },
+  machines: [],
+  routeConfigured: true,
+  warnings: [{ code: "sales_partial", message: "автомата нет в свежем батче продаж" }],
+};
+
+/**
+ * История склада («Хвосты», R-H-2). `note` тут — ВСЯ пометка импорта целиком,
+ * как её пишет `importNote`: фикстура сторожа обязана быть тем, что производит
+ * код, иначе сторож охраняет выдуманную форму.
+ */
+const строкаИсторииОбщая: SharedStockCountRow = {
+  dt: "2026-06-01",
+  product: "Snickers",
+  qty: 41,
+  source: "stock-import",
+  countedAt: "2026-06-01T02:00:00.000Z",
+  note: "импорт истории mydon-stock · место: Холодильник",
+};
+
+const историяОбщая: SharedStockCounts = {
+  days: 90,
+  since: "2026-05-28",
+  product: null,
+  rows: [строкаИсторииОбщая],
+  warnings: [],
+};
 
 describe("Типы панели — реэкспорт из @mydon/shared, а не копии", () => {
   it("здоровье сбора и прогон принимаются типом панели без переписывания полей", () => {
@@ -95,5 +167,42 @@ describe("Типы панели — реэкспорт из @mydon/shared, а н
     const предупреждение: AnalyticsWarning = предупреждениеОбщее;
     expect(Object.keys(месяц).sort()).toEqual(["month", "product", "purchase", "retail"]);
     expect(Object.keys(предупреждение).sort()).toEqual(["code", "message"]);
+  });
+});
+
+describe("Усушка и план закупа — реэкспорт, а не копии (R-H-6)", () => {
+  it("форма усушки у панели и у ядра — одна и та же, сторож двусторонний", () => {
+    // Панель звала усушку `VendingShrinkageReport`, Core — `ShrinkReport`, и
+    // союз кодов панель переписала в другом порядке. Переименование поля в
+    // Core компилятор не ловил: он видел две независимые структуры.
+    //
+    // Присваивание в ОБЕ стороны — проверка ТОЖДЕСТВА форм. Одностороннее
+    // («общая → панельная») ловит переименование и лишнее обязательное поле в
+    // копии, но копия, у которой поля НЕ ХВАТАЕТ, приняла бы общее значение
+    // молча: это обычная структурная совместимость. А «недоописанная копия» —
+    // ровно тот способ разъехаться, который тут и случился с закупом.
+    const общая: SharedShrink = усушкаОбщая;
+    const панельная: VendingShrinkageReport = общая;
+    const обратно: SharedShrink = панельная;
+    expect(панельная).toBe(общая);
+    expect(обратно).toBe(общая);
+  });
+
+  it("план закупа у панели и у ядра — одно, сторож двусторонний", () => {
+    const общий: SharedPlan = планОбщий;
+    const панельный: VendingPlan = общий;
+    const обратно: SharedPlan = панельный;
+    expect(панельный).toBe(общий);
+    expect(обратно).toBe(общий);
+  });
+
+  it("история склада: `note` и `since` доезжают до типа панели, а не теряются в зеркале", () => {
+    // Оба поля добавлены аддитивно (R-H-2), и оба читает ТОЛЬКО панель. Заведись
+    // в `lib/core.ts` своё объявление без `note`, ни один тест набора полей в
+    // shared этого не увидел бы — увидит компилятор на этих двух строках.
+    const строка: StockCountRow = строкаИсторииОбщая;
+    const отчёт: StockCountsReport = историяОбщая;
+    expect(Object.keys(строка).sort()).toEqual(["countedAt", "dt", "note", "product", "qty", "source"]);
+    expect(Object.keys(отчёт).sort()).toEqual(["days", "product", "rows", "since", "warnings"]);
   });
 });

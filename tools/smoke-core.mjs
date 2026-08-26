@@ -23,8 +23,61 @@
  * Запуск: DATABASE_URL=… SERVICE_TOKEN=… node tools/smoke-core.mjs
  */
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { createServer } from "node:net";
+import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+
+const КОРЕНЬ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// `postgres` — зависимость @mydon/db, в корне монорепо её нет: резолвим оттуда,
+// где она объявлена, а не подкладываем вторую копию ради дымового прогона.
+const require = createRequire(path.join(КОРЕНЬ, "packages/db/package.json"));
+const postgres = require("postgres");
+
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  console.error("DATABASE_URL не задан — дымовой прогон Core выполнять негде.");
+  process.exit(1);
+}
+
+/** Хост базы — ЕДИНСТВЕННОЕ, что можно печатать наружу: в URL живёт пароль (R-FW-S1). */
+function хостБазы(url) {
+  try {
+    return new URL(url).host || "unix-сокет";
+  } catch {
+    return "неразбираемый URL";
+  }
+}
+
+/**
+ * Scratch ли база ПО ИМЕНИ. Та же застава, что у `smoke-import.mjs` (R-FW-S9).
+ *
+ * Проверяется ИМЯ БАЗЫ, а не хост: SSH-туннель на `localhost:5432` обходит
+ * заставу по хосту целиком, а имя боевой базы через туннель не меняется.
+ */
+function scratchПоИмени(url) {
+  try {
+    return /smoke/i.test(new URL(url).pathname.replace(/^\//, ""));
+  } catch {
+    return false;
+  }
+}
+
+// ЗАСТАВА ДО ПЕРВОЙ ЗАПИСИ (R-FW-S9). Этот прогон ПИШЕТ: фикстурные автоматы
+// SMOKE-0001, свои пересчёты склада, заявки, накладные, приёмки — и с «Хвостов»
+// пересчёты получили витрину в панели и цель ретенции, то есть ошибочный прогон
+// по проду стал видимым для владельца, а не только для `curl`. Рядом, в отчётах
+// выкатки, операторов учат `export DATABASE_URL=…`; один такой экспорт с боевой
+// строкой — и в проде появляются данные, которых никто не заводил. Сообщение
+// НЕ несёт строку подключения: в ней пароль.
+if (process.env.SMOKE_SCRATCH !== "1" && !scratchПоИмени(DATABASE_URL)) {
+  console.error(
+    `Смоук Core ПИШЕТ в базу и потому требует явного scratch: SMOKE_SCRATCH=1 либо имя базы со словом «smoke» ` +
+      `(хост ${хостБазы(DATABASE_URL)}). Так закрыт SSH-туннель на localhost:5432, которым обходятся заставы по хосту.`,
+  );
+  process.exit(1);
+}
 
 async function свободныйПорт() {
   return new Promise((resolve, reject) => {
@@ -42,6 +95,9 @@ async function свободныйПорт() {
     });
   });
 }
+
+/** Своё подключение к той же базе: сценарий ретенции сеет строку, которую HTTP-путём не датировать. */
+const sql = postgres(DATABASE_URL, { prepare: false, max: 1, onnotice: () => {} });
 
 const PORT = process.env.SMOKE_PORT ?? (await свободныйПорт());
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -80,6 +136,25 @@ const ЧТЕНИЕ = [
   "/vending/sync",
   "/vending/refill-events?days=14",
   {
+    // «Хвосты» (R-H-5): потолок ЧТЕНИЯ журнала — 90, а не чужие 30. Юнит на
+    // заглушке проверяет зажим, но не то, что DTO пропустит значение через
+    // HTTP: `@Max(30)` отдал бы 400 там, где панель рисует кнопку «90 дн».
+    path: "/vending/refill-events?days=90",
+    проверить: (о) => {
+      // R-FW-S7: ответ — ОБЪЕКТ с признаком обрезки, а не голый массив. Лист
+      // печатал `${rows.length} событий`, то есть на переполнении говорил ровно
+      // «500 событий» и выдавал обрезок за посчитанный итог.
+      if (!Array.isArray(о?.rows)) throw new Error("refill-events.rows — не массив");
+      if (typeof о?.capped !== "boolean") throw new Error(`refill-events.capped=${о?.capped} — не флаг`);
+      if (о.rows.length <= 500 && о.capped !== false) throw new Error("capped взведён на неполном списке");
+      for (const e of о.rows) {
+        for (const k of ["id", "serial", "name", "windowFrom", "windowTo", "units", "slots", "matchedRefillId"]) {
+          if (!(k in e)) throw new Error(`в событии журнала нет ключа ${k}`);
+        }
+      }
+    },
+  },
+  {
     // П8a: история пересчётов склада. Заглушка юнит-теста SQL не исполняет —
     // здесь проверяется, что окно, сортировка по `counted_at` и потолок строк
     // доезжают до настоящего Postgres. На засеянной базе истории нет, и это
@@ -90,6 +165,23 @@ const ЧТЕНИЕ = [
       if (!Array.isArray(о?.rows)) throw new Error("stock-counts.rows — не массив");
       if (!Array.isArray(о?.warnings)) throw new Error("stock-counts.warnings — не массив");
       if (о?.days !== 90) throw new Error(`stock-counts.days=${о?.days}`);
+      if (typeof о?.since !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(о.since))
+        throw new Error(`stock-counts.since=${о?.since} — не голые сутки YYYY-MM-DD`);
+      // Ключ `note` обязан ПРИСУТСТВОВАТЬ, даже когда он null: лист группирует
+      // по нему, и его отсутствие — это одна безымянная куча вместо истории.
+      //
+      // На засеянной базе истории здесь ещё нет (чтения идут ДО записей), и
+      // молчаливый `for` по пустому массиву проверял бы ровно ничего. Поэтому
+      // пустой ответ ЗДЕСЬ пропускается ВСЛУХ, а настоящая проверка поля стоит
+      // там, где строки есть по построению — сценарий двух пересчётов подряд.
+      if ((о.rows ?? []).length === 0) {
+        console.log("      (истории склада на засеянной базе нет — note проверяет сценарий двух пересчётов)");
+      } else {
+        for (const r of о.rows) {
+          if (!("note" in r)) throw new Error("в строке истории склада нет ключа note");
+          if (r.note !== null && typeof r.note !== "string") throw new Error(`note=${r.note} — не строка и не null`);
+        }
+      }
     },
   },
   {
@@ -111,6 +203,10 @@ const ЧТЕНИЕ = [
     path: "/vending/stock-counts?days=730",
     проверить: (о) => {
       if (о?.days !== 730) throw new Error(`stock-counts.days=${о?.days}, ждали 730 (потолок П8a fix wave)`);
+      // `since` едет и на границе окна: подпись листа «с ДД.ММ.ГГГГ» берётся
+      // из ответа, и на самом широком окне ей веры должно быть столько же.
+      if (typeof о?.since !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(о.since))
+        throw new Error(`stock-counts?days=730 → since=${о?.since} — не голые сутки YYYY-MM-DD`);
     },
   },
   {
@@ -219,6 +315,28 @@ const ЧТЕНИЕ = [
         throw new Error("неделя без продаж отдала процент маржи — нули выданы за результат");
       }
       if (о?.health?.parity == null) throw new Error("weekly-digest.health.parity — null (сверять нечего ≠ паритета нет)");
+      // Здоровье ЗА ОТЧЁТНУЮ НЕДЕЛЮ (R-H-9) — рядом с «сейчас», а не вместо:
+      // блок, подписанный неделей, но посчитанный моментом отправки, — дефект O7.
+      const w = о?.weekHealth;
+      if (!w) throw new Error("в сводке нет weekHealth — письмо снова говорило бы про момент отправки");
+      if (w.week !== о.week) throw new Error(`weekHealth.week=${w.week}, а письмо про ${о.week}`);
+      const разряды = ["success", "partial", "failed", "running"];
+      for (const k of [...разряды, "runs", "worstFailedStreak", "parityGreen", "parityRed"]) {
+        if (typeof w[k] !== "number") throw new Error(`weekHealth.${k} — не число`);
+      }
+      // Итог и разряды печатаются в письме ОДНОЙ строкой и обязаны сходиться.
+      const сумма = разряды.reduce((n, k) => n + w[k], 0);
+      if (w.runs !== сумма) throw new Error(`weekHealth.runs=${w.runs}, а сумма разрядов ${сумма}`);
+      for (const k of ["partialWeek", "capped"]) {
+        if (typeof w[k] !== "boolean") throw new Error(`weekHealth.${k} — не флаг`);
+      }
+      if (!Array.isArray(w.parityDays)) throw new Error("weekHealth.parityDays — не массив");
+      // `null` — «данные в неделю не приезжали ВОВСЕ», и это не ноль часов.
+      if (w.lastDataAt !== null && typeof w.lastDataAt !== "string") throw new Error("weekHealth.lastDataAt — не ISO и не null");
+      // Понедельничное письмо всегда про ЗАКОНЧЕННУЮ неделю: `?week=` текущей
+      // гасится нормализацией, и взведённый флаг тут значил бы, что она сломана.
+      if (w.partialWeek) throw new Error("weekHealth.partialWeek — сводка отдала неделю, которая ещё идёт");
+      if (typeof о?.health?.failedStreak !== "number") throw new Error("health «сейчас» пропал из сводки");
       // Секция, которая не посчиталась, обязана быть НАЗВАНА: сводка больше не
       // падает в 500 из-за здоровья сбора, и молчаливая пустота вместо секции
       // читалась бы как «там всё хорошо».
@@ -396,6 +514,11 @@ const ЧТЕНИЕ = [
         ["CUTOVER_GREEN_DAYS", "7"],
         ["SNAPSHOT_STALE_HOURS", "36"],
         ["SNAPSHOT_RETENTION_DAYS", "180"],
+        // «Хвосты» (T7 Q3): у истории склада СВОЙ ключ ретенции, и он обязан
+        // доехать до панели «Система» тем же путём. Ключ, выпавший из белого
+        // списка контроллера, панель просто не покажет — узнать об этом было
+        // бы неоткуда.
+        ["STOCK_COUNT_RETENTION_DAYS", "730"],
       ]) {
         const i = карта.get(ключ);
         if (!i) throw new Error(`в /system/config нет ключа ${ключ}`);
@@ -610,6 +733,13 @@ const ЗАПИСЬ = [
       if (!(первая.countedAt > вторая.countedAt)) throw new Error("история отдана не «свежее сверху»");
       if (первая.source !== "own" || вторая.source !== "own") {
         throw new Error(`свой пересчёт помечен не «own»: ${первая.source}/${вторая.source}`);
+      }
+      // «Хвосты» (R-H-2): у СВОЕЙ строки `note` — это КТО считал. Контроллер
+      // зовёт `ingestStock(dto)` без актора, значит доехать обязано «owner».
+      // Проверка стоит здесь, а не на шаге чтения: там на засеянной базе строк
+      // нет вовсе, и цикл по `rows` не делал бы ни одной итерации.
+      if (первая.note !== "owner" || вторая.note !== "owner") {
+        throw new Error(`note своего пересчёта: ${первая.note}/${вторая.note}, ждали owner/owner`);
       }
     },
   },
@@ -1340,6 +1470,95 @@ async function проверитьАлертыУсушки() {
   if ((await посчитать()) !== стало) throw new Error("повтор прогона задвоил события в базе");
 }
 
+/**
+ * Ретенция (R-FW-S2): единственный новый сырой SQL среза обязан исполниться
+ * НАСТОЯЩИМ Postgres.
+ *
+ * ЗАЧЕМ. Пятая цель ретенции сравнивает `date`-колонку с ГОЛЫМИ СУТКАМИ-строкой
+ * (`dt < '2024-09-06'`), потому что `date < timestamptz` уехало бы на 05:00
+ * Ташкента. Юнит-тест проверяет РЕНДЕР запроса — стенд его не выполняет; крон
+ * в смоуке не наступает. Если биндинг окажется типизирован как `text`, Postgres
+ * ответит «operator does not exist: date < text», и цель будет падать каждое
+ * воскресенье в 04:10 — молча для всех, кроме журнала событий.
+ *
+ * СЦЕНАРИЙ. Кладём в историю склада строку 800-суточной давности (порог — 730)
+ * и свежую, гоняем `POST /system/retention/run`, проверяем: старая снесена,
+ * свежая цела, событие `system.retention` записано. Прямая запись в базу — не
+ * от хорошей жизни: `?dt=` у приёма нет, историю датирует сам сервис.
+ */
+/** Все пять целей ретенции: ответ ручного прогона обязан отчитаться по КАЖДОЙ. */
+const ЦЕЛИ_РЕТЕНЦИИ = ["machine_sale", "product_sale", "slot_snapshot", "vending_stock_count", "vending_sync_run"];
+
+async function проверитьРетенцию() {
+  const ТОВАР = "Smoke Ретенция";
+  const сутки = (сдвиг) => new Date(Date.now() - сдвиг * 86_400_000).toISOString().slice(0, 10);
+  const СТАРАЯ = сутки(800);
+  const СВЕЖАЯ = сутки(1);
+
+  const убрать = () =>
+    sql`delete from vending_stock_count where product_name = ${ТОВАР}`.catch(() => {});
+  await убрать();
+  await sql`
+    insert into vending_stock_count (dt, product_name, qty, source, counted_at, note)
+    values (${СТАРАЯ}::date, ${ТОВАР}, 5, 'own', ${`${СТАРАЯ}T07:00:00Z`}::timestamptz, 'smoke'),
+           (${СВЕЖАЯ}::date, ${ТОВАР}, 7, 'own', ${`${СВЕЖАЯ}T07:00:00Z`}::timestamptz, 'smoke')`;
+
+  const [{ count: событийДо }] = await sql`select count(*)::int as count from event where type = 'system.retention'`;
+
+  /**
+   * Разбор ответа роута — ОБЩИЙ для примерки и записи (R-FW-R3).
+   *
+   * Дефект, ради которого весь роут и заводился, выглядит НЕ как 5xx: цикл
+   * обрывается в `catch`, `sweep` возвращает результат, роут отвечает 200, тело
+   * приходит валидным — и проверка одной пятой цели зеленеет, пока четыре
+   * остальные молча не чистятся. Поэтому смотрим ДВЕ вещи на каждом вызове:
+   * отчитались ВСЕ пять целей (их даёт `includeEmpty: true`) и НИ У ОДНОЙ нет
+   * `aborted`. Верните `Date` в `граница()` — шаг покраснеет.
+   */
+  const разобрать = (имя, ответ) => {
+    if (!ответ.r.ok) throw new Error(`${имя} → ${ответ.r.status}: ${ответ.text.slice(0, 300)}`);
+    const цели = ответ.json?.tables ?? [];
+    const имена = цели.map((t) => t.table).sort();
+    if (имена.join(",") !== ЦЕЛИ_РЕТЕНЦИИ.join(",")) {
+      throw new Error(`${имя}: расклад по целям ${имена.join(", ") || "(пусто)"}, ждали все пять: ${ЦЕЛИ_РЕТЕНЦИИ.join(", ")}`);
+    }
+    const битые = цели.filter((t) => t.aborted);
+    if (битые.length > 0) {
+      throw new Error(
+        `${имя}: цели оборвались ошибкой — ${битые.map((t) => `${t.table} (удалено ${t.deleted})`).join(", ")}. ` +
+          `Смотри лог Core: чаще всего это параметр границы, уехавший объектом Date вместо строки.`,
+      );
+    }
+    return цели;
+  };
+
+  try {
+    // Примерка: ТОТ ЖЕ предикат, но ни одной удалённой строки. Гоняется первой —
+    // если `date < $1` не типизируется, отсюда и прилетит отказ Postgres.
+    const примерка = await jsonRequest("POST", "/system/retention/run", { dryRun: true });
+    if (примерка.json?.dryRun !== true) throw new Error(`ответ примерки без признака режима: ${примерка.text.slice(0, 200)}`);
+    const цель = разобрать("примерка", примерка).find((t) => t.table === "vending_stock_count");
+    if (цель.deleted < 1) throw new Error(`примерка не увидела строку 800-суточной давности: deleted=${цель.deleted}`);
+    const [{ count: послеПримерки }] = await sql`select count(*)::int as count from vending_stock_count where product_name = ${ТОВАР}`;
+    if (послеПримерки !== 2) throw new Error(`примерка удалила строки: осталось ${послеПримерки} из 2`);
+
+    const прогон = await jsonRequest("POST", "/system/retention/run", {});
+    if (прогон.json?.dryRun !== false) throw new Error(`ответ прогона без признака режима: ${прогон.text.slice(0, 200)}`);
+    const снесено = разобрать("прогон", прогон).find((t) => t.table === "vending_stock_count");
+    if (снесено.deleted < 1) throw new Error(`ретенция не снесла старую строку: ${прогон.text.slice(0, 200)}`);
+    if (снесено.olderThanDays !== 730) throw new Error(`окно истории склада ${снесено.olderThanDays}, ждали 730`);
+
+    const строки = await sql`select dt::text as dt from vending_stock_count where product_name = ${ТОВАР}`;
+    if (строки.length !== 1) throw new Error(`после чистки осталось ${строки.length} строк, ждали одну свежую`);
+    if (строки[0].dt !== СВЕЖАЯ) throw new Error(`уцелела не та строка: ${строки[0].dt}, ждали ${СВЕЖАЯ}`);
+
+    const [{ count: событийПосле }] = await sql`select count(*)::int as count from event where type = 'system.retention'`;
+    if (событийПосле <= событийДо) throw new Error("событие system.retention не записано — о чистке в журнале ни следа");
+  } finally {
+    await убрать();
+  }
+}
+
 /** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
 /**
  * П5b: приёмка накладной наблюдает закупочную цену позиции
@@ -1664,6 +1883,13 @@ try {
   }
 
   try {
+    await проверитьРетенцию();
+    console.log("  ok  сценарий: ретенция — строка старше 730 суток снесена, свежая цела, событие записано");
+  } catch (e) {
+    провалы.push(`ретенция: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -1675,6 +1901,9 @@ try {
   core.kill("SIGTERM");
   await sleep(300);
   if (core.exitCode === null) core.kill("SIGKILL");
+  // Своё подключение закрываем явно: postgres.js держит сокет открытым, и без
+  // этого прогон висел бы после того, как всё сделано.
+  await sql.end({ timeout: 5 }).catch(() => {});
 }
 
 if (провалы.length > 0) {
@@ -1685,4 +1914,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 12 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 13 сценариев.`);

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parityStreak, PARITY_STREAK_WINDOW, type ParityEventRow } from "./parity-streak";
+import {
+  parityDaysInWeek,
+  parityStreak,
+  PARITY_STREAK_WINDOW,
+  type ParityDay,
+  type ParityEventRow,
+} from "./parity-streak";
 
 /**
  * Событие daily() как оно ложится в журнал: ключи русские
@@ -205,5 +211,37 @@ describe("Серия зелёных дней паритета (R-P8b-1, R-P8b-2)
     const дни = [дн("2026-08-24"), дн("2026-08-25"), дн("2026-08-26")];
     const s = parityStreak(дни, 3, "2026-08-26");
     assert.deepEqual([s.greenDays, s.threshold, s.readyForCutover], [3, 3, true]);
+  });
+});
+
+
+describe("Дни серии, попавшие в неделю (R-H-9)", () => {
+  const день = (date: string): ParityDay => ({ date, ok: true, salesChecked: 14, stockChecked: 68, note: null });
+
+  it("понедельник входит, воскресенье ПРЕДЫДУЩЕЙ недели — нет", () => {
+    const дни = ["2026-08-24", "2026-08-23", "2026-08-17"].map(день);
+    // Неделя 2026-34: пн 17.08 — вс 23.08.
+    assert.deepEqual(parityDaysInWeek(дни, "2026-08-17", "2026-08-23").map((d) => d.date), ["2026-08-23", "2026-08-17"]);
+  });
+
+  it("воскресенье СВОЕЙ недели входит: граница закрыта справа голыми сутками", () => {
+    assert.equal(parityDaysInWeek([день("2026-08-23")], "2026-08-17", "2026-08-23").length, 1);
+  });
+
+  it("неделя вне окна показа даёт ПУСТО — и это повод для предупреждения, а не тишины", () => {
+    // `days` обрезан 14 сутками: `?week=` глубже двух недель дней просто не
+    // имеет, и молчаливый пустой список читался бы как «сверки не было».
+    const дни = Array.from({ length: PARITY_STREAK_WINDOW }, (_, i) => день(`2026-08-${String(25 - i).padStart(2, "0")}`));
+    assert.deepEqual(parityDaysInWeek(дни, "2026-07-06", "2026-07-12"), []);
+  });
+
+  it("порядок входа сохраняется: свежие сверху пришли — свежие сверху и уехали", () => {
+    // Фильтр, а не сортировка: порядок задаёт `parityStreak` (свежие сверху), и
+    // вторая сортировка здесь спорила бы с ним на первом же расхождении.
+    const дни = ["2026-08-23", "2026-08-21", "2026-08-19", "2026-08-17"].map(день);
+    assert.deepEqual(
+      parityDaysInWeek(дни, "2026-08-17", "2026-08-23").map((d) => d.date),
+      ["2026-08-23", "2026-08-21", "2026-08-19", "2026-08-17"],
+    );
   });
 });

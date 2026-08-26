@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SALE_PRICE_FACT_DAYS } from "./vending-reports";
-import type { BootstrapSalePriceResult, OurvendHealth, SetSalePriceResult, WeeklyDigest } from "./vending-reports";
+import type {
+  BootstrapSalePriceResult,
+  OurvendHealth,
+  PurchasePlan,
+  SetSalePriceResult,
+  ShrinkReport,
+  ShrinkWarningCode,
+  StockCountRow,
+  StockCountsReport,
+  WeeklyDigest,
+  WeeklyHealth,
+} from "./vending-reports";
 
 /**
  * Формы ответов Core, которые читают ТРОЕ (Core, бот, панель), — R-P5b-10.
@@ -40,6 +51,30 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, mode: "mirror", note: null },
 };
 
+/**
+ * Здоровье сбора ЗА ОТЧЁТНУЮ НЕДЕЛЮ — числа недели, а не момента отправки.
+ *
+ * Стоит рядом с `ЗДОРОВЬЕ`, а не вместо него: в одном ответе едут ДВА набора
+ * чисел об одном сборе, и подмена одного другим — это ровно тот дефект,
+ * ради которого поле и заведено (R-H-9).
+ */
+const НЕДЕЛЬНОЕ_ЗДОРОВЬЕ: WeeklyHealth = {
+  week: "2026-34",
+  runs: 56,
+  success: 54,
+  partial: 1,
+  failed: 1,
+  running: 0,
+  worstFailedStreak: 1,
+  lastDataAt: "2026-08-23T03:07:00.000Z",
+  parityDays: [{ date: "2026-08-23", ok: true, salesChecked: 2, stockChecked: 68, note: null }],
+  parityGreen: 1,
+  parityRed: 0,
+  partialWeek: false,
+  capped: false,
+  journalSince: "2026-08-06",
+};
+
 const СВОДКА: WeeklyDigest = {
   week: "2026-34",
   from: "2026-08-17",
@@ -61,6 +96,7 @@ const СВОДКА: WeeklyDigest = {
     retail: [{ product: "LaimonFresh", from: 15_000, to: 12_000, pct: -20, at: "2026-08-19" }],
   },
   health: ЗДОРОВЬЕ,
+  weekHealth: НЕДЕЛЬНОЕ_ЗДОРОВЬЕ,
   warnings: [],
 };
 
@@ -159,6 +195,9 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "totals",
       "warnings",
       "week",
+      // Здоровье недели — ОТДЕЛЬНОЕ поле рядом с `health`: письмо несёт два
+      // набора чисел об одном сборе, «сейчас» и «за отчётную неделю» (R-H-9).
+      "weekHealth",
       "worstProducts",
     ]);
     assert.deepEqual(Object.keys(СВОДКА.refills).sort(), ["detectedUnits", "events", "recordedUnits"]);
@@ -189,6 +228,114 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.notEqual(пусто.parity.note, null);
   });
 
+  it("здоровье недели: ровно те поля, что читает бот (R-H-9)", () => {
+    assert.deepEqual(Object.keys(НЕДЕЛЬНОЕ_ЗДОРОВЬЕ).sort(), [
+      "capped",
+      "failed",
+      "journalSince",
+      "lastDataAt",
+      "parityDays",
+      "parityGreen",
+      "parityRed",
+      "partial",
+      "partialWeek",
+      "running",
+      "runs",
+      "success",
+      "week",
+      "worstFailedStreak",
+    ]);
+    // Подпись письма и подпись чисел обязаны совпадать: блок, подписанный
+    // неделей, но посчитанный моментом отправки, — это и есть дефект O7.
+    assert.equal(СВОДКА.weekHealth.week, СВОДКА.week);
+  });
+
+  it("`runs` — РОВНО сумма четырёх разрядов: строка письма обязана сходиться", () => {
+    const w = НЕДЕЛЬНОЕ_ЗДОРОВЬЕ;
+    assert.equal(w.runs, w.success + w.partial + w.failed + w.running);
+    // Незакрытый прогон недели виден отдельным числом, а не тонет в разнице
+    // между итогом и тремя разрядами.
+    const завис: WeeklyHealth = { ...w, running: 2, runs: w.success + w.partial + w.failed + 2 };
+    assert.equal(завис.runs - (завис.success + завис.partial + завис.failed), 2);
+  });
+
+  it("«успех» не значит две вещи: `success` — строгий статус, `lastDataAt` — донёсший данные", () => {
+    // Неделя из одних `partial`: строгий разряд успехов ноль, а данные всё
+    // это время приезжали. Под именем `lastSuccessAt` это была бы строка,
+    // спорящая с соседним числом в том же блоке письма.
+    const толькоЧастичные: WeeklyHealth = {
+      ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ,
+      runs: 3,
+      success: 0,
+      partial: 3,
+      failed: 0,
+      running: 0,
+      lastDataAt: "2026-08-23T03:07:00.000Z",
+    };
+    assert.equal(толькоЧастичные.success, 0);
+    assert.notEqual(толькоЧастичные.lastDataAt, null);
+  });
+
+  it("неполная неделя и потолок чтения названы флагами, а не молчанием", () => {
+    const идёт: WeeklyHealth = { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, partialWeek: true };
+    const обрезана: WeeklyHealth = { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, capped: true };
+    assert.equal(идёт.partialWeek, true);
+    assert.equal(обрезана.capped, true);
+    // Два РАЗНЫХ «неполно»: неполна неделя — и неполна выборка прогонов.
+    assert.equal(идёт.capped, false);
+    assert.equal(обрезана.partialWeek, false);
+  });
+
+  it("«прогонов 0» и «журнал не достаёт до недели» — разные ответы (R-FW-P5)", () => {
+    // Журнал `vending_sync_run` начинается 06.08.2026, а `?week=` пускает 104
+    // недели назад: любая неделя до этой даты отдаёт нули. Без даты начала
+    // журнала владелец прочитал бы их как «сбор не запускался».
+    const донеделя: WeeklyHealth = {
+      ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ,
+      runs: 0,
+      success: 0,
+      partial: 0,
+      failed: 0,
+      running: 0,
+      worstFailedStreak: 0,
+      lastDataAt: null,
+      journalSince: "2026-08-06",
+    };
+    assert.equal(донеделя.runs, 0);
+    assert.equal(донеделя.journalSince, "2026-08-06");
+    // Пустой журнал — это `null`, а не выдуманная дата.
+    const пусто: WeeklyHealth = { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, journalSince: null };
+    assert.equal(пусто.journalSince, null);
+  });
+
+  it("«сейчас» и «за неделю» — ДВА набора чисел в одном ответе, а не один", () => {
+    // `failedStreak` отвечает «падает ли прямо сейчас», `worstFailedStreak` —
+    // «была ли на неделе дыра». Подсунуть недельное число под старым именем
+    // значило бы соврать под подписью, которую читают бот и панель.
+    const авария: WeeklyDigest = {
+      ...СВОДКА,
+      health: { ...ЗДОРОВЬЕ, failedStreak: 2 },
+      weekHealth: { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, runs: 55, failed: 0, worstFailedStreak: 0 },
+    };
+    assert.equal(авария.health.failedStreak, 2);
+    assert.equal(авария.weekHealth.worstFailedStreak, 0);
+  });
+
+  it("данные за неделю не приезжали ВОВСЕ — `null`, а не ноль часов", () => {
+    const безДанных: WeeklyHealth = {
+      ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ,
+      runs: 1,
+      success: 0,
+      partial: 0,
+      failed: 1,
+      running: 0,
+      lastDataAt: null,
+    };
+    assert.equal(безДанных.lastDataAt, null);
+    // Прогон был — просто неуспешный: это НЕ «сбор не запускался».
+    assert.equal(безДанных.runs > 0, true);
+  });
+
   it("сводка несёт `warnings`: секция, которая не посчиталась, не исчезает молча", () => {
     const деградировала: WeeklyDigest = {
       ...СВОДКА,
@@ -217,6 +364,24 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.deepEqual(бутстрап.skipped.map((s) => s.reason).sort(), ["already_set", "inactive", "no_fact", "no_sales"]);
   });
 
+  it("история склада: пометка и первые сутки окна едут в ответе (R-H-2)", () => {
+    const строка: StockCountRow = {
+      dt: "2026-08-25",
+      product: "Sprite 250ml",
+      qty: 19,
+      source: "stock-import",
+      countedAt: "2026-08-25T04:00:00.000Z",
+      note: "2 Холодильник",
+    };
+    const отчёт: StockCountsReport = { days: 90, since: "2026-05-28", product: null, rows: [строка], warnings: [] };
+    assert.deepEqual(Object.keys(строка).sort(), ["countedAt", "dt", "note", "product", "qty", "source"]);
+    assert.deepEqual(Object.keys(отчёт).sort(), ["days", "product", "rows", "since", "warnings"]);
+    // `null` — законная пометка («её нет»), а не пропуск поля: выдумывать
+    // «Основной склад» вместо неё нельзя.
+    const безПометки: StockCountRow = { ...строка, source: "own", note: null };
+    assert.equal(безПометки.note, null);
+  });
+
   it("пустая неделя выражается типом: процент null, а не ноль", () => {
     const пустая: WeeklyDigest = {
       ...СВОДКА,
@@ -227,5 +392,86 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     };
     assert.equal(пустая.totals.pct, null);
     assert.equal(пустая.machines.length, 0);
+  });
+});
+
+/**
+ * Формы усушки и плана закупа: те же три читателя, тот же приём (R-H-6).
+ *
+ * До этого набора формы жили ТРЕМЯ копиями — в `shrinkage.service.ts`/
+ * `vending.service.ts` (Core), в `core-client.ts` (бот) и в `lib/core.ts`
+ * (панель). Копии уже разъехались: союз кодов усушки панель переписала в
+ * другом порядке, а `summary` автомата — инлайном. Структурная типизация это
+ * терпит, поэтому переименование поля в Core не ломало ни бот, ни панель — оно
+ * ломало строку в чате у владельца.
+ */
+describe("Формы усушки и плана закупа объявлены ОДИН раз (R-H-6)", () => {
+  it("ShrinkReport: ровно те поля, что читают Core, бот и панель", () => {
+    const отчёт: ShrinkReport = {
+      from: "2026-08-11",
+      to: "2026-08-24",
+      threshold: 30_000,
+      machines: [
+        {
+          serial: "2508160376",
+          name: "Olma",
+          summary: {
+            items: [{ product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true }],
+            lossValue: 99_000,
+            daysCounted: 9,
+            daysSkipped: 5,
+            threshold: 30_000,
+          },
+          refillDays: [{ date: "2026-08-19", detectedUnits: 183, recordedUnits: 0 }],
+        },
+      ],
+      warnings: [{ code: "no_counted_days", message: "все дни были заливкой" }],
+    };
+    assert.deepEqual(Object.keys(отчёт).sort(), ["from", "machines", "threshold", "to", "warnings"]);
+    assert.deepEqual(Object.keys(отчёт.machines[0]!).sort(), ["name", "refillDays", "serial", "summary"]);
+    assert.deepEqual(Object.keys(отчёт.machines[0]!.summary).sort(), ["daysCounted", "daysSkipped", "items", "lossValue", "threshold"]);
+  });
+
+  it("союз кодов усушки объявлен один раз — все шесть, и ни одного лишнего", () => {
+    // Панель держала свою копию союза в ДРУГОМ порядке (`core.ts`), Core — в
+    // своём. Структурная типизация порядок не ловит, а вот пропавший член —
+    // ловит: лишний литерал ниже не компилируется.
+    // ИСЧЕРПЫВАЮЩАЯ КАРТА, а не массив литералов (ревью T5, minor 3): массив
+    // ловит ПРОПАВШИЙ член, но седьмой член с любым новым именем не ломает в
+    // нём ничего — а союз разъезжается именно так. `Record` перестаёт
+    // собираться в ОБЕ стороны: добавили член — не хватает ключа, убрали —
+    // ключ лишний.
+    const все: Record<ShrinkWarningCode, true> = {
+      snapshots_stale: true,
+      no_sales_day: true,
+      machine_dead: true,
+      no_counted_days: true,
+      sales_unknown_product: true,
+      machine_error: true,
+    };
+    assert.equal(Object.keys(все).length, 6);
+    // @ts-expect-error — кода `machine_sleeping` в союзе нет и заводить его
+    // можно только в shared, а не седьмой копией в панели.
+    const лишний: ShrinkWarningCode = "machine_sleeping";
+    assert.equal(лишний, "machine_sleeping");
+  });
+
+  it("PurchasePlan: ровно те поля, что читают Core, бот и панель", () => {
+    const план: PurchasePlan = {
+      generatedAt: "2026-08-25T09:00:00.000Z",
+      stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0 },
+      summary: {
+        items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
+        allocation: "purchase-first",
+        totalNeed: 0, totalCovered: 0, totalBuy: 0, totalOrder: 0,
+        costExact: 0, costRounded: 0, overpay: 0, shortfallCost: 0, costByPriceFull: 0,
+        totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+      },
+      machines: [],
+      routeConfigured: true,
+      warnings: [{ code: "sales_partial", message: "автомата нет в свежем батче продаж" }],
+    };
+    assert.deepEqual(Object.keys(план).sort(), ["generatedAt", "machines", "routeConfigured", "stock", "summary", "warnings"]);
+    assert.deepEqual(Object.keys(план.stock).sort(), ["asOf", "back", "stale", "totalAfter", "totalBefore", "unmatched", "use"]);
   });
 });

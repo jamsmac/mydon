@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { бэкфиллWhere, resolveProductIds } from "./backfill-product-ids";
-import { machineSlot, vendingStock } from "./schema";
+import { BACKFILL_TARGETS, backfillProductIds, бэкфиллWhere, разобратьАргументы, resolveProductIds } from "./backfill-product-ids";
+import { machineSlot, vendingAlias, vendingProduct, vendingRefill, vendingStock, vendingStockCount } from "./schema";
 
 /**
  * Текст SQL-выражения drizzle (та же техника, что в
@@ -33,35 +33,92 @@ const АЛИАСЫ = [
 describe("Бэкфилл product_id: резолв имени тем же правилом, что у Core", () => {
   it("точное имя прайса резолвится в карточку", () => {
     const m = resolveProductIds(["Coca-Cola Classic 0,5"], ТОВАРЫ, АЛИАСЫ);
-    assert.equal(m.get("Coca-Cola Classic 0,5"), "p-cola");
+    assert.equal(m.resolved.get("Coca-Cola Classic 0,5")?.id, "p-cola");
+    assert.equal(m.resolved.get("Coca-Cola Classic 0,5")?.source, "name");
   });
 
   it("другое написание того же имени — тот же товар (нормализация, а не точное равенство)", () => {
     // Снимок присылает «COCA-COLA  CLASSIC 0,5», склад заведён «Coca-Cola
     // Classic 0,5». Посимвольное сравнение оставило бы строку с NULL.
     const m = resolveProductIds(["  COCA-COLA  CLASSIC 0,5 "], ТОВАРЫ, АЛИАСЫ);
-    assert.equal(m.get("  COCA-COLA  CLASSIC 0,5 "), "p-cola");
+    assert.equal(m.resolved.get("  COCA-COLA  CLASSIC 0,5 ")?.id, "p-cola");
   });
 
   it("алиас ведёт к карточке своего товара", () => {
     const m = resolveProductIds(["18+", "montella"], ТОВАРЫ, АЛИАСЫ);
-    assert.equal(m.get("18+"), "p-mont");
-    assert.equal(m.get("montella"), "p-mont");
+    assert.equal(m.resolved.get("18+")?.id, "p-mont");
+    assert.equal(m.resolved.get("18+")?.source, "alias");
+    assert.equal(m.resolved.get("montella")?.id, "p-mont");
   });
 
   it("неизвестное имя карточки не выдумывает — в карте его нет", () => {
     const m = resolveProductIds(["Загадка"], ТОВАРЫ, АЛИАСЫ);
-    assert.equal(m.has("Загадка"), false, "лучше NULL и строка в отчёте, чем чужая привязка");
+    assert.equal(m.resolved.has("Загадка"), false, "лучше NULL и строка в отчёте, чем чужая привязка");
   });
 
   it("пустое имя пропускается: слот без товара — это не осиротевшая привязка", () => {
     const m = resolveProductIds(["", "   ", null], ТОВАРЫ, АЛИАСЫ);
-    assert.equal(m.size, 0);
+    assert.equal(m.resolved.size, 0);
   });
 
   it("алиас на удалённый товар не резолвится в мусорный id", () => {
     const m = resolveProductIds(["18+"], [{ id: "p-cola", name: "Coca-Cola Classic 0,5" }], АЛИАСЫ);
-    assert.equal(m.has("18+"), false);
+    assert.equal(m.resolved.has("18+"), false);
+  });
+
+  it("десятичная запятая объёма не мешает: имя с точкой находит карточку с запятой (R-FW-P1)", () => {
+    // Прод 26.08: `Royal Pomegranate CAN 0.3` печаталось как «без карточки»,
+    // хотя карточка `Royal Pomegranate CAN 0,3` заведена. Инструкция «завести
+    // карточку под именем из списка» давала ВТОРОЙ прайс на ту же SKU.
+    const каталог = [{ id: "p-royal", name: "Royal Pomegranate CAN 0,3" }];
+    const m = resolveProductIds(["Royal Pomegranate CAN 0.3"], каталог, []);
+    assert.equal(m.resolved.get("Royal Pomegranate CAN 0.3")?.id, "p-royal");
+  });
+
+  it("спор алиаса с именем ЧУЖОЙ карточки: строка НЕ привязывается, спор назван (R-FW-S3)", () => {
+    // Привязка необратима: `бэкфиллWhere` держит `isNull`, и повторный прогон
+    // ошибочную строку уже не тронет. Молчаливая привязка к неверной карточке
+    // хуже оставленного NULL.
+    const товары = [
+      { id: "p-a", name: "Cola" },
+      { id: "p-b", name: "Fanta CAN 0,25" },
+    ];
+    const m = resolveProductIds(["Fanta CAN 0,25"], товары, [{ productId: "p-a", alias: "Fanta can 0.25" }]);
+    assert.equal(m.resolved.has("Fanta CAN 0,25"), false);
+    assert.deepEqual(m.conflicts, [{ raw: "Fanta CAN 0,25", byName: "Fanta CAN 0,25", byAlias: "Cola" }]);
+  });
+});
+
+describe("Бэкфилл product_id: белый список аргументов (R-FW-S1)", () => {
+  it("без флагов — запись, и строка режима это говорит", () => {
+    assert.deepEqual(разобратьАргументы([]), { ok: true, dryRun: false, режим: "Режим: ЗАПИСЬ (без флагов — умолчание)." });
+  });
+
+  it("`--apply` — та же запись, но названная явно", () => {
+    assert.deepEqual(разобратьАргументы(["--apply"]), { ok: true, dryRun: false, режим: "Режим: ЗАПИСЬ (--apply)." });
+  });
+
+  it("`--dry-run` — примерка", () => {
+    assert.deepEqual(разобратьАргументы(["--dry-run"]), {
+      ok: true,
+      dryRun: true,
+      режим: "Режим: ПРИМЕРКА (--dry-run), записи не будет.",
+    });
+  });
+
+  it("опечатка в флаге ОТБИВАЕТСЯ, а не молча пишет в прод", () => {
+    // Раньше `--dryrun` не распознавался никак: `dryRun` оставался false, и
+    // скрипт шёл ПИСАТЬ, сообщив при этом «без флагов — умолчание».
+    for (const мимо of ["--dryrun", "--dry_run", "--dry-runs", "-n", "--dry-run=1", "—dry-run"]) {
+      const ответ = разобратьАргументы([мимо]);
+      assert.equal(ответ.ok, false, `${мимо} обязан быть отвергнут`);
+      if (!ответ.ok) assert.match(ответ.error, /--dry-run/);
+    }
+  });
+
+  it("`--apply` вместе с `--dry-run` — по-прежнему отказ", () => {
+    const ответ = разобратьАргументы(["--apply", "--dry-run"]);
+    assert.equal(ответ.ok, false);
   });
 });
 
@@ -77,5 +134,101 @@ describe("Бэкфилл product_id: UPDATE не трогает уже прив�
     const где = бэкфиллWhere(machineSlot.productName, machineSlot.productId, "Snickers");
     const выражение = текстSQL(где);
     assert.match(выражение, /product_id.*is null/);
+  });
+});
+
+/**
+ * Стенд: `select` отдаёт имена по таблице, `update` только СЧИТАЕТ вызовы.
+ * Проверяемое утверждение у `--dry-run` — «резолв прошёл, записи не было», и
+ * доказывает его именно счётчик, а не отсутствие исключения.
+ */
+function стенд(имена: Partial<Record<string, (string | null)[]>>) {
+  const обновления: { таблица: unknown; id: string }[] = [];
+  const db = {
+    select: (_поля?: Record<string, unknown>) => ({
+      from: (t: unknown) => {
+        // Каталог теперь читается с `orderBy(id)` (детерминированность
+        // «последний побеждает» между примеркой и записью) — стенд обязан
+        // подставлять `orderBy`, иначе настоящий вызов упадёт на `.orderBy is
+        // not a function`, а не молча смолчит расхождение со стендом.
+        if (t === vendingProduct) return { orderBy: () => Promise.resolve(ТОВАРЫ) };
+        if (t === vendingAlias) return { orderBy: () => Promise.resolve(АЛИАСЫ) };
+        const ключ =
+          t === vendingStock ? "stock" : t === machineSlot ? "slots" : t === vendingRefill ? "refills" : "stockCounts";
+        const строки = (имена[ключ] ?? []).map((name) => ({ name }));
+        return { where: () => Promise.resolve(строки), then: (r: (v: unknown) => unknown) => Promise.resolve(строки).then(r) };
+      },
+    }),
+    update: (t: unknown) => ({
+      set: (patch: { productId: string }) => ({
+        where: () => ({ returning: async () => { обновления.push({ таблица: t, id: patch.productId }); return [{ id: patch.productId }]; } }),
+      }),
+    }),
+  } as never;
+  return { db, обновления };
+}
+
+describe("Бэкфилл product_id: четыре цели, включая заливки и историю склада (R-H-4)", () => {
+  it("цели — ровно четыре таблицы, и обе новые на месте", () => {
+    assert.deepEqual(
+      BACKFILL_TARGETS.map((t) => t.key),
+      ["stock", "slots", "refills", "stockCounts"],
+    );
+    assert.equal(BACKFILL_TARGETS.find((t) => t.key === "refills")!.table, vendingRefill);
+    assert.equal(BACKFILL_TARGETS.find((t) => t.key === "stockCounts")!.table, vendingStockCount);
+  });
+
+  it("имя заливки и имя строки истории резолвятся тем же правилом, что склад", async () => {
+    // Импорт истории (П8a) назвал владельцу 11 неопознанных имён, но привязать
+    // их после заведения карточек было нечем: бэкфилл обходил обе таблицы.
+    const { db, обновления } = стенд({ refills: ["18+"], stockCounts: ["  COCA-COLA  CLASSIC 0,5 "] });
+    const итог = await backfillProductIds(db);
+    assert.equal(итог.refills.updated, 1);
+    assert.equal(итог.stockCounts.updated, 1);
+    assert.deepEqual(обновления.map((u) => u.id).sort(), ["p-cola", "p-mont"]);
+  });
+
+  it("`--dry-run` резолвит имена и НЕ зовёт update", async () => {
+    const { db, обновления } = стенд({ refills: ["18+"], stockCounts: ["Coca-Cola Classic 0,5"] });
+    const итог = await backfillProductIds(db, { dryRun: true });
+    assert.equal(итог.refills.updated, 1, "примерка обязана посчитать то же, что записала бы");
+    assert.equal(обновления.length, 0, "примерка не пишет ни одной строки");
+  });
+
+  it("имя без карточки остаётся NULL и едет списком, а не выдуманной привязкой", async () => {
+    const { db } = стенд({ stockCounts: ["Загадка", "Coca-Cola Classic 0,5"] });
+    const итог = await backfillProductIds(db);
+    assert.deepEqual(итог.stockCounts.unresolved, ["Загадка"]);
+  });
+
+  it("карта решения едет в результате — примерке есть что показать (R-FW-S3)", async () => {
+    const { db } = стенд({ stockCounts: ["18+", "Coca-Cola Classic 0,5"] });
+    const итог = await backfillProductIds(db, { dryRun: true });
+    assert.deepEqual(
+      итог.stockCounts.resolved.map((r) => [r.raw, r.canon, r.source]),
+      [
+        ["18+", "Montella Вода минеральная 330ml", "alias"],
+        ["Coca-Cola Classic 0,5", "Coca-Cola Classic 0,5", "name"],
+      ],
+    );
+  });
+
+  it("предикат для новых целей тот же: `product_id IS NULL` на месте", () => {
+    for (const t of BACKFILL_TARGETS) {
+      const выражение = текстSQL(бэкфиллWhere(t.nameColumn, t.idColumn, "Snickers"));
+      assert.match(выражение, /product_id.*is null/, `${t.key}: без этого UPDATE задел бы уже привязанные строки`);
+      assert.match(выражение, /product_name/, `${t.key}: фильтр по имени не пропал`);
+    }
+  });
+
+  it("idColumn каждой цели — колонка её же таблицы: set() пишет по найденному ключу, а не по захардкоженному имени", () => {
+    // Страховка для idKeyOf: если бы у пятой цели idColumn принадлежал не той
+    // таблице, что и `table`, UPDATE молча обновил бы не ту колонку (или ни
+    // одной) под литералом `productId`. Здесь связь проверена по всем
+    // текущим целям — по объекту таблицы, а не по имени поля на веру.
+    for (const t of BACKFILL_TARGETS) {
+      const запись = Object.entries(t.table as unknown as Record<string, unknown>).find(([, col]) => col === t.idColumn);
+      assert.ok(запись, `${t.key}: idColumn обязана быть колонкой своей же таблицы`);
+    }
   });
 });

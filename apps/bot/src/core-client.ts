@@ -1,3 +1,5 @@
+// Формы, которые нужны САМОМУ клиенту (в сигнатурах методов ниже): реэкспорт
+// `export type … from …` имени в модуле не заводит, поэтому они ещё и здесь.
 import { normalizeMachineSerial, type Domain } from "@mydon/shared";
 import type {
   AnalyticsWarning,
@@ -9,7 +11,10 @@ import type {
   ParityStreak,
   PriceChangesReport,
   PriceGapReport,
+  PurchasePlan as VendingPlan,
+  PurchaseSummary as VendingPurchase,
   SetSalePriceResult,
+  ShrinkReport,
   WeeklyDigest,
 } from "@mydon/shared";
 
@@ -139,206 +144,6 @@ export interface VendingCashSession {
   createdAt: string;
 }
 
-/**
- * Позиция сводного закупа (§5.5) — как отдаёт Core GET /vending/purchase.
- *
- * С П5a строка несёт не только «сколько купить», но и раздачу: сколько уйдёт
- * в автоматы из новой упаковки, сколько со склада, сколько слотов останется
- * пустыми и что вернётся на склад. Поля обязательные: Core отдаёт их всегда,
- * а необязательность здесь молча превратила бы «0» и «нет данных» в одно.
- */
-export interface VendingPurchaseItem {
-  product: string;
-  /** Куда и сколько (серийник автомата → штуки). */
-  perMachine: Record<string, number>;
-  need: number;
-  /** Остаток склада по этому товару на момент расчёта. */
-  stock: number;
-  buy: number;
-  pack: number;
-  order: number;
-  price: number;
-  costRounded: number;
-  noPrice: boolean;
-  noSales: boolean;
-  /** В автоматы из закупа (новая упаковка). */
-  fromPurchase: number;
-  /** В автоматы со склада. */
-  fromStock: number;
-  /** Не заполнится. */
-  unfilled: number;
-  /** Излишек закупки → на склад. */
-  toStock: number;
-  /** Склад после раздачи. */
-  stockAfter: number;
-  /** Правило владельца «не закупать». */
-  excluded: boolean;
-  /** Фикс-количество, если задано правилом. */
-  fixedQty: number | null;
-}
-
-/** Политика раздачи закупа (П5a): сначала новая упаковка или сначала склад. */
-export type VendingAllocationPolicy = "purchase-first" | "warehouse-first";
-
-/** Сводный закуп: позиции + денежные итоги + раздача (§5.4–5.5, П5a). */
-export interface VendingPurchase {
-  items: VendingPurchaseItem[];
-  excludedNoSales: VendingPurchaseItem[];
-  /** «Убрано из закупки» правилом товара — в деньги не входит, в раздачу входит. */
-  excludedByRule: VendingPurchaseItem[];
-  noPrice: string[];
-  allocation: VendingAllocationPolicy;
-  totalBuy: number;
-  totalOrder: number;
-  costExact: number;
-  /** Куплено сверх нехватки: округление до блока + фикс-количества. */
-  overpay: number;
-  costRounded: number;
-  /** Недобор деньгами: фикс МЕНЬШЕ нехватки — купим не всё, что нужно. */
-  shortfallCost: number;
-  totalFromPurchase: number;
-  totalFromStock: number;
-  totalUnfilled: number;
-  totalToStock: number;
-}
-
-/** Слот автомата в плане закупа: что стоит, сколько нужно и откуда возьмём. */
-export interface VendingPlanSlot {
-  coilId: string;
-  product: string;
-  quantity: number;
-  capacity: number;
-  need: number;
-  fromPurchase: number;
-  fromStock: number;
-  unfilled: number;
-}
-
-/** Автомат в плане закупа: место в маршруте, сколько везём и раскладка по слотам. */
-export interface VendingPlanMachine {
-  serial: string;
-  name: string;
-  /** Место в маршруте обхода, с 1. */
-  routeIndex: number;
-  need: number;
-  fromPurchase: number;
-  fromStock: number;
-  unfilled: number;
-  slots: VendingPlanSlot[];
-}
-
-/** Почему числам плана можно верить не полностью. */
-export interface VendingPlanWarning {
-  code:
-    | "stock_stale"
-    | "stock_unknown_product"
-    | "machine_skipped"
-    | "no_price"
-    | "unknown_product"
-    | "sales_stale"
-    | "sales_partial"
-    | "route_unknown_serial";
-  message: string;
-}
-
-/** План закупа «что купить» (GET /vending/plan, П5a): закуп + раздача по маршруту. */
-export interface VendingPlan {
-  /** Когда посчитан (ISO) — план живёт ровно до следующего сбора. */
-  generatedAt: string;
-  stock: {
-    /** Последняя инвентаризация (ISO) или null, если склада ещё не было. */
-    asOf: string | null;
-    totalBefore: number;
-    /** Уйдёт со склада в автоматы. */
-    use: number;
-    /** Вернётся на склад из закупа (излишек упаковки). */
-    back: number;
-    totalAfter: number;
-    stale: boolean;
-    /** Штуки на складе без карточки прайса — в расчёт не вошли. */
-    unmatched: number;
-  };
-  summary: VendingPurchase;
-  machines: VendingPlanMachine[];
-  /** Порядок обхода задан настройкой (а не по имени автомата). */
-  routeConfigured: boolean;
-  warnings: VendingPlanWarning[];
-}
-
-/**
- * Усушка автомата (GET /vending/shrinkage, П4/R-P4-3).
- *
- * Типы описаны здесь, а не импортированы из Core: бот ходит в Core по HTTP и
- * не собирается вместе с ним. Импорт связал бы сборку бота со сборкой сервера
- * ради четырёх полей — и сломал бы её при любой правке внутренностей Core.
- */
-export interface ShrinkItem {
-  product: string;
-  /** Недостача за период, штук. */
-  lossUnits: number;
-  /** Она же в деньгах по закупочной цене. */
-  lossValue: number;
-  /** Излишек — в деньги НЕ входит, но виден: это тоже расхождение. */
-  surplusUnits: number;
-  daysCounted: number;
-  /** Цены нет — позиция в сумму не вошла. */
-  noPrice: boolean;
-  /** Перевалила порог: повод разбираться, а не «шум округления». */
-  alert: boolean;
-}
-
-export interface ShrinkSummary {
-  items: ShrinkItem[];
-  lossValue: number;
-  daysCounted: number;
-  /**
-   * Сутки, ИСКЛЮЧЁННЫЕ из расчёта (заливка или пропуск снимка) — не часть
-   * daysCounted, а то, что из него вычли. `daysCounted === 0` значит, что
-   * товар не считался ни дня: «недостач нет» про такой автомат говорить нельзя.
-   */
-  daysSkipped: number;
-  threshold: number;
-}
-
-/** День заливки по снимкам: что увидел детектор и что записал оператор. */
-export interface ShrinkRefillDay {
-  /** YYYY-MM-DD по Ташкенту. */
-  date: string;
-  detectedUnits: number;
-  recordedUnits: number;
-}
-
-export interface ShrinkMachine {
-  /** Серийник в каноне (без приставки «c»). */
-  serial: string;
-  name: string;
-  summary: ShrinkSummary;
-  refillDays: ShrinkRefillDay[];
-}
-
-/** Почему в отчёте чего-то нет. Каждая причина чинится в своём месте. */
-export interface ShrinkWarning {
-  code:
-    | "snapshots_stale"
-    | "no_sales_day"
-    | "machine_dead"
-    | "sales_unknown_product"
-    | "machine_error"
-    /** Ни одних суток не посчитано: всё окно было заливкой или пропуском. */
-    | "no_counted_days";
-  message: string;
-}
-
-export interface ShrinkReport {
-  /** Первый день периода, YYYY-MM-DD. */
-  from: string;
-  /** Последний — ВЧЕРА: у сегодняшних суток нет снимка на конец. */
-  to: string;
-  threshold: number;
-  machines: ShrinkMachine[];
-  warnings: ShrinkWarning[];
-}
-
 /** Правила закупа товара «было»/«стало» — как их отдаёт Core. */
 export interface VendingRulesSnapshot {
   packSize?: number;
@@ -396,6 +201,20 @@ export interface SetPriceResult {
  * Реэкспорт, а не прямой импорт из `@mydon/shared` во всех модулях бота:
  * `core-client` остаётся ЕДИНСТВЕННОЙ дверью к Core — по нему видно, какие
  * формы бот вообще получает по HTTP.
+ *
+ * Тем же приёмом сюда приехали усушка и план закупа (R-H-6): имена бота
+ * сохранены `as`-алиасами (`PurchasePlan as VendingPlan` и остальные), поэтому
+ * ни брифинг, ни мастер заливки не правятся — меняется только адрес формы.
+ *
+ * `VendingPurchase`/`VendingPurchaseItem` — тот же переезд, доведённый до
+ * конца. Их рукописные копии пережили R-H-6 и УЖЕ разъехались: `covered`,
+ * `surplus`, `extra`, `costExact` у позиции и `totalNeed`, `totalCovered`,
+ * `costByPriceFull` у сводки Core отдаёт, а копии о них не знали — притом что
+ * `GET /vending/purchase` и `GET /vending/plan` возвращают ОДИН И ТОТ ЖЕ
+ * объект (`PurchaseContext.summary`), и по второму маршруту он уже приезжал
+ * общей формой. Доказательство расхождения предъявила сама ветка: как только
+ * `VendingPlan.summary` стал общим, фикстуре `purchase-plan.test.ts` пришлось
+ * дорастить ровно эти семь полей.
  */
 export type {
   AnalyticsWarning,
@@ -407,8 +226,23 @@ export type {
   OurvendSyncRun,
   ParityStreak,
   SetSalePriceResult,
+  ShrinkItem,
+  ShrinkMachine,
+  ShrinkRefillDay,
+  ShrinkReport,
+  ShrinkSummary,
+  ShrinkWarning,
+  ShrinkWarningCode,
+  AllocationPolicy as VendingAllocationPolicy,
+  PurchaseItem as VendingPurchaseItem,
+  PurchaseSummary as VendingPurchase,
+  PurchasePlan as VendingPlan,
+  PlanMachine as VendingPlanMachine,
+  SlotPlanRow as VendingPlanSlot,
+  PlanWarning as VendingPlanWarning,
   WeeklyDigest,
   WeeklyDigestMachine,
+  WeeklyHealth,
 } from "@mydon/shared";
 
 /**

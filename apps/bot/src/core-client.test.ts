@@ -6,7 +6,10 @@ import type {
   MonthlyPrice as SharedMonthlyPrice,
   OurvendHealth as SharedOurvendHealth,
   OurvendSyncRun as SharedOurvendSyncRun,
+  PurchasePlan as SharedPurchasePlan,
+  PurchaseSummary as SharedPurchaseSummary,
   SetSalePriceResult as SharedSetSalePriceResult,
+  ShrinkReport as SharedShrinkReport,
 } from "@mydon/shared";
 import {
   CoreClient,
@@ -18,6 +21,9 @@ import {
   type OurvendHealth,
   type OurvendSyncRun,
   type SetSalePriceResult,
+  type ShrinkReport,
+  type VendingPlan,
+  type VendingPurchase,
 } from "./core-client";
 
 /**
@@ -139,5 +145,79 @@ describe("Формы аналитики приходят из @mydon/shared", ()
     assert.equal(местноеЗдоровье.failedStreak, 0);
     assert.equal(общаяЦена.month, "2026-07");
     assert.equal(общаяТревога.code, "no_sales");
+  });
+
+  it("усушка и план закупа — те же формы: бот их читает, а не переписывает (сторож двусторонний)", () => {
+    // Свои копии этих форм бот держал ровно до тех пор, пока их не было в
+    // общем пакете. Разъезжались они молча: `formatShrinkage` печатал бы
+    // пустую строку там, где Core переименовал поле, — и узнал бы об этом
+    // владелец, а не сборка.
+    //
+    // Присваивание идёт в ОБЕ стороны — это проверка ТОЖДЕСТВА форм.
+    // Одностороннее («общая → ботовская») ловит переименование и лишнее
+    // обязательное поле в копии, но копия, у которой поля НЕ ХВАТАЕТ, приняла
+    // бы общее значение молча: обычная структурная совместимость. Именно так
+    // разъехался закуп — семь полей копия просто не описывала.
+    const усушкаОбщая: SharedShrinkReport = {
+      from: "2026-08-11",
+      to: "2026-08-24",
+      threshold: 30_000,
+      machines: [
+        {
+          serial: "2508160376",
+          name: "Olma",
+          summary: {
+            items: [{ product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true }],
+            lossValue: 99_000,
+            daysCounted: 9,
+            daysSkipped: 5,
+            threshold: 30_000,
+          },
+          refillDays: [{ date: "2026-08-19", detectedUnits: 183, recordedUnits: 0 }],
+        },
+      ],
+      warnings: [{ code: "no_counted_days", message: "все дни были заливкой" }],
+    };
+    const усушкаБота: ShrinkReport = усушкаОбщая;
+    const планОбщий: SharedPurchasePlan = {
+      generatedAt: "2026-08-25T09:00:00.000Z",
+      stock: { asOf: "2026-08-22T09:40:00.000Z", totalBefore: 120, use: 40, back: 12, totalAfter: 92, stale: false, unmatched: 0 },
+      summary: {
+        items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
+        allocation: "purchase-first",
+        totalNeed: 0, totalCovered: 0, totalBuy: 0, totalOrder: 0,
+        costExact: 0, costRounded: 0, overpay: 0, shortfallCost: 0, costByPriceFull: 0,
+        totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+      },
+      machines: [],
+      routeConfigured: true,
+      warnings: [{ code: "sales_partial", message: "автомата нет в свежем батче продаж" }],
+    };
+    const планБота: VendingPlan = планОбщий;
+    const усушкаОбратно: SharedShrinkReport = усушкаБота;
+    const планОбратно: SharedPurchasePlan = планБота;
+    assert.equal(усушкаБота, усушкаОбщая);
+    assert.equal(планБота, планОбщий);
+    assert.equal(усушкаОбратно, усушкаОбщая);
+    assert.equal(планОбратно, планОбщий);
+  });
+
+  it("сводный закуп — та же форма, что у ядра, и сторож двусторонний", () => {
+    // `/vending/purchase` и `/vending/plan` отдают ОДИН объект
+    // (`PurchaseContext.summary`), но `VendingPurchase` пережил переезд
+    // рукописным и уже недоописывал семь полей. Присваивание в ОБЕ стороны —
+    // проверка тождества форм: одностороннее пропустило бы копию, у которой
+    // поля НЕ ХВАТАЕТ (обычная структурная совместимость), а это и есть тот
+    // самый способ разъехаться.
+    const общая: SharedPurchaseSummary = {
+      items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
+      allocation: "purchase-first",
+      totalNeed: 0, totalCovered: 0, totalBuy: 0, totalOrder: 0,
+      costExact: 0, costRounded: 0, overpay: 0, shortfallCost: 0, costByPriceFull: 0,
+      totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+    };
+    const бота: VendingPurchase = общая;
+    const обратно: SharedPurchaseSummary = бота;
+    assert.equal(обратно, общая);
   });
 });

@@ -1605,6 +1605,11 @@ export const vendingStockCount = pgTable(
       .on(t.source, t.countedAt, t.productName)
       .where(sql`${t.source} = 'own'`),
     index("vending_stock_count_product_dt_idx").on(t.productName, t.dt),
+    // Под еженедельную ретенцию (R-H-8): составной
+    // `vending_stock_count_product_dt_idx (product_name, dt)` для условия
+    // `where dt < cutoff order by dt limit 5000` не годится — ведущая
+    // колонка не та, и каждая пачка стоила бы полного скана с сортировкой.
+    index("vending_stock_count_dt_idx").on(t.dt),
   ],
 );
 

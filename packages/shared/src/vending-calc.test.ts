@@ -29,6 +29,24 @@ describe("Вендинг: нормализация имени товара (ал
     assert.equal(normalizeProductName("18+"), normalizeProductName("18+ "));
     assert.equal(normalizeProductName("Moxito КЛУБ"), normalizeProductName("moxito клуб"));
   });
+
+  it("десятичная запятая объёма сводится к точке (R-FW-P1)", () => {
+    // Прод-адверсариал 26.08: 4 из 11 «имён без карточки» отличались от уже
+    // заведённой карточки/алиаса РОВНО этим знаком.
+    assert.equal(normalizeProductName("Royal Pomegranate CAN 0,3"), normalizeProductName("Royal Pomegranate CAN 0.3"));
+    assert.equal(normalizeProductName("Fanta CAN 0,25"), "fanta can 0.25");
+    assert.equal(normalizeProductName("Flash Peach CAN 0,45"), normalizeProductName("Flash Peach CAN 0.45"));
+  });
+
+  it("сводится ТОЛЬКО запятая между цифрами — разные товары не склеиваются", () => {
+    // Запятая-разделитель в имени («Кофе, чай») цифрами не окружена и остаётся
+    // на месте: фолдинг закрывает десятичный знак, а не пунктуацию.
+    assert.equal(normalizeProductName("Кофе, чай"), "кофе, чай");
+    assert.equal(normalizeProductName("Snickers 50 ,"), "snickers 50 ,");
+    // Два РАЗНЫХ объёма одного товара остаются двумя разными ключами.
+    assert.notEqual(normalizeProductName("Flash Peach CAN 0,45"), normalizeProductName("Flash Peach CAN 0,25"));
+    assert.notEqual(normalizeProductName("Pepsi 0,5"), normalizeProductName("Pepsi 1,5"));
+  });
 });
 
 // ── §5.1–5.2 Слоты, валидность, статус, дефицит ──────────────────────────────

@@ -14,7 +14,11 @@ import {
   TZ,
   type MachineSnapshot,
   type ShrinkDayInput,
-  type ShrinkSummary,
+  type ShrinkMachine,
+  type ShrinkRefillDay,
+  type ShrinkReport,
+  type ShrinkWarning,
+  type ShrinkWarningCode,
   type Slot,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
@@ -80,51 +84,14 @@ export const LOW_STOCK_EVENT = "machine.low_stock";
 
 const DAY_MS = 86_400_000;
 
-export interface ShrinkRefillDay {
-  /** Дата по Ташкенту, YYYY-MM-DD. */
-  date: string;
-  /** Приход по снимкам (детектор). */
-  detectedUnits: number;
-  /** Записано оператором в боте за эти сутки. */
-  recordedUnits: number;
-}
-
-export interface ShrinkMachine {
-  /** Серийник в каноне (без приставки «c»). */
-  serial: string;
-  name: string;
-  summary: ShrinkSummary;
-  /** Дни заливок: из расчёта усушки они выкинуты, но владельцу нужны. */
-  refillDays: ShrinkRefillDay[];
-}
-
 /**
- * Почему в отчёте чего-то нет. Каждая причина чинится в СВОЁМ месте, поэтому
- * сводить их к одному коду нельзя: снимки — сбор, продажи — синк и справочник
- * имён, автомат — источник, ошибка — код.
+ * Формы отчёта — из `@mydon/shared` (`vending-reports.ts`, R-H-6).
+ *
+ * Форму объявляет тот, кто считает числа; Core её импортирует и отдаёт своим
+ * модулям отсюда же, откуда они её брали (контроллер, недельная сводка,
+ * брифинг) — иначе переезд формы стал бы правкой каждого импортёра.
  */
-export type ShrinkWarningCode =
-  | "snapshots_stale"
-  | "no_sales_day"
-  | "machine_dead"
-  | "no_counted_days"
-  | "sales_unknown_product"
-  | "machine_error";
-
-export interface ShrinkWarning {
-  code: ShrinkWarningCode;
-  message: string;
-}
-
-export interface ShrinkReport {
-  /** Первый день периода по Ташкенту, YYYY-MM-DD. */
-  from: string;
-  /** Последний день — ВЧЕРА: у сегодняшних суток нет снимка на конец. */
-  to: string;
-  threshold: number;
-  machines: ShrinkMachine[];
-  warnings: ShrinkWarning[];
-}
+export type { ShrinkMachine, ShrinkRefillDay, ShrinkReport, ShrinkWarning, ShrinkWarningCode };
 
 /** Итог суточного прогона алертов. */
 export interface AlertRun {

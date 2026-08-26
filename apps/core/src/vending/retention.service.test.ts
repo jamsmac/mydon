@@ -4,7 +4,7 @@ import { systemConfig } from "@mydon/db";
 import { type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { Db } from "../db/db.module";
-import { RETENTION_BATCH, RETENTION_BUDGET_MS, RetentionService, SYNC_RUN_RETENTION_DAYS } from "./retention.service";
+import { RETENTION_BATCH, RETENTION_BUDGET_MS, RETENTION_EVENT, RetentionService, SYNC_RUN_RETENTION_DAYS } from "./retention.service";
 
 const ДИАЛЕКТ = new PgDialect();
 
@@ -19,6 +19,11 @@ const ДИАЛЕКТ = new PgDialect();
 function рендер(q: SQL): string {
   const { sql: текст, params } = ДИАЛЕКТ.sqlToQuery(q);
   return `${текст} -- params: ${JSON.stringify(params)}`;
+}
+
+/** Сами параметры, а не их JSON: `Date` и ISO-строка сериализуются ОДИНАКОВО. */
+function параметры(q: SQL): unknown[] {
+  return ДИАЛЕКТ.sqlToQuery(q).params;
 }
 
 /**
@@ -40,20 +45,27 @@ function стенд(опт: {
 }) {
   const остаток: Record<string, number> = { ...опт.строк };
   const запросы: string[] = [];
+  /** Параметры каждого запроса — ТИПАМИ, а не текстом (см. `параметры`). */
+  const аргументы: unknown[][] = [];
   const события: { type: string; payload: Record<string, unknown> }[] = [];
   const настройки = Object.entries(опт.настройки ?? {}).map(([key, value]) => ({ key, value }));
 
-  const ТАБЛИЦЫ = ["slot_snapshot", "product_sale", "machine_sale", "vending_sync_run"];
+  const ТАБЛИЦЫ = ["slot_snapshot", "product_sale", "machine_sale", "vending_sync_run", "vending_stock_count"];
   const пачек: Record<string, number> = {};
 
   const db = {
     execute: async (q: SQL) => {
       const текст = рендер(q);
       запросы.push(текст);
+      аргументы.push(параметры(q));
       const t = ТАБЛИЦЫ.find((name) => текст.includes(`"${name}"`));
       if (!t) throw new Error(`стенд: не распознал таблицу в запросе: ${текст}`);
       пачек[t] = (пачек[t] ?? 0) + 1;
       if (опт.ломать?.(t, пачек[t]!)) throw new Error(`стенд: база отказала на пачке ${пачек[t]} таблицы ${t}`);
+      // Примерка (R-FW-S2) спрашивает `count(*)`, а не удаляет: postgres.js
+      // отдаёт на такой запрос МАССИВ СТРОК, и стенд обязан отвечать той же
+      // формой — иначе разбор ответа зеленел бы на подставленном `{ count }`.
+      if (текст.includes("count(*)")) return [{ n: остаток[t] ?? 0 }] as never;
       const есть = остаток[t] ?? 0;
       const пачка = Math.min(есть, RETENTION_BATCH);
       остаток[t] = есть - пачка;
@@ -77,7 +89,7 @@ function стенд(опт: {
     }),
   } as unknown as Db;
 
-  return { svc: new RetentionService(db), запросы, события };
+  return { svc: new RetentionService(db), запросы, аргументы, события };
 }
 
 describe("Еженедельная ретенция (R-P8b-7)", () => {
@@ -198,5 +210,124 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
     assert.equal(r.capped, true);
     assert.equal(r.deleted, RETENTION_BATCH);
     assert.equal(запросы.filter((q) => q.includes("slot_snapshot")).length, 1);
+  });
+});
+
+describe("Ретенция истории склада (R-H-8)", () => {
+  const вс = new Date("2026-09-06T04:10:00+05:00");
+
+  it("чистит ПЯТЬ таблиц: к четырём добавилась vending_stock_count", async () => {
+    const { svc, запросы } = стенд({
+      строк: { slot_snapshot: 1, product_sale: 1, machine_sale: 1, vending_sync_run: 1, vending_stock_count: 1 },
+    });
+    const итог = await svc.sweep(вс);
+    assert.deepEqual(итог.map((r) => r.table).sort(), [
+      "machine_sale", "product_sale", "slot_snapshot", "vending_stock_count", "vending_sync_run",
+    ]);
+    // `event` и `raw_row` по-прежнему вне ретенции: журнал событий —
+    // доказательная база (из него же считается серия паритета).
+    assert.equal(запросы.filter((q) => /\bevent\b|\braw_row\b/.test(q)).length, 0);
+  });
+
+  it("граница истории склада по умолчанию — 730 суток, а не 180 снимков", async () => {
+    const { svc } = стенд({ строк: { vending_stock_count: 1, slot_snapshot: 1 } });
+    const итог = await svc.sweep(вс);
+    assert.equal(итог.find((r) => r.table === "vending_stock_count")!.olderThanDays, 730);
+    assert.equal(итог.find((r) => r.table === "slot_snapshot")!.olderThanDays, 180);
+  });
+
+  it("пол 730 держится и против env: панель отобьёт 365, окружение — нет, а Math.max — да", async () => {
+    const { svc } = стенд({ строк: { vending_stock_count: 1 }, настройки: { STOCK_COUNT_RETENTION_DAYS: "365" } });
+    assert.equal((await svc.sweep(вс))[0]!.olderThanDays, 730);
+  });
+
+  it("720 суток окно НЕ сужают, 1095 — расширяют: ключ умеет только продлить", async () => {
+    const { svc: узкий } = стенд({ строк: { vending_stock_count: 1 }, настройки: { STOCK_COUNT_RETENTION_DAYS: "720" } });
+    assert.equal((await узкий.sweep(вс))[0]!.olderThanDays, 730);
+    const { svc: широкий } = стенд({ строк: { vending_stock_count: 1 }, настройки: { STOCK_COUNT_RETENTION_DAYS: "1095" } });
+    assert.equal((await широкий.sweep(вс))[0]!.olderThanDays, 1095);
+  });
+
+  it("граница для vending_stock_count уходит ГОЛЫМИ СУТКАМИ, а не моментом", async () => {
+    // `dt` — колонка типа `date`. Сравнение её с `timestamptz` Postgres
+    // приводит к UTC-полуночи, то есть к 05:00 по Ташкенту: строки последних
+    // пяти часов «того» дня срезались бы раньше срока (урок VendCash).
+    const { svc, запросы } = стенд({ строк: { vending_stock_count: 1 } });
+    await svc.sweep(вс);
+    const q = запросы.find((x) => x.includes('"vending_stock_count"'))!;
+    assert.match(
+      q,
+      /"vending_stock_count"\."dt" < \$/,
+      "резать обязано по dt (по нему же фильтрует лист) и СТРОГО меньше: строка на границе остаётся",
+    );
+    assert.match(q, /"2024-09-06"/, "граница обязана быть строкой YYYY-MM-DD");
+    assert.equal(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(q), false, "момента в параметрах быть не должно");
+    // Четыре старые цели по-прежнему сравниваются МОМЕНТОМ — их поведение не
+    // менялось (`cutoffAs` по умолчанию "timestamp"). Проверяем это на запросе
+    // снимков, который стенд выдаёт в том же прогоне (пустая таблица — всё
+    // равно одна пачка): иначе «голые сутки» уехали бы во все пять целей и
+    // тест бы этого не заметил.
+    const снимки = запросы.find((x) => x.includes('"slot_snapshot"'))!;
+    assert.match(снимки, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, "снимки обязаны резаться моментом, а не сутками");
+  });
+
+  it("удалять нечего — ни события, ни строки в результате: правило П8b новой целью не сломано", async () => {
+    const { svc, события } = стенд({ строк: {} });
+    assert.deepEqual(await svc.sweep(вс), []);
+    assert.equal(события.length, 0);
+  });
+});
+
+describe("Ручной прогон ретенции: примерка и полный расклад (R-FW-S2)", () => {
+  const вс = new Date("2026-09-06T04:10:00+05:00");
+
+  it("граница уезжает СТРОКОЙ, а не объектом Date — иначе драйвер падает до сервера", async () => {
+    // НАЙДЕНО СМОУКОМ ПРОТИВ ЖИВОГО POSTGRES, ради которого роут и заводился.
+    // `Date` в сыром параметре шаблона `sql` уходит в postgres.js без типа
+    // колонки, и драйвер бросает «The "string" argument must be of type string
+    // … Received an instance of Date» — то есть четыре первые цели ретенции
+    // падали КАЖДОЕ воскресенье (`aborted: true`, ноль удалённых). Прежний
+    // сторож этого не видел: `JSON.stringify` даёт для `Date` и для ISO-строки
+    // один и тот же текст, поэтому проверяем ТИП параметра.
+    const { svc, аргументы } = стенд({ строк: { slot_snapshot: 1, vending_stock_count: 1 } });
+    await svc.sweep(вс);
+    assert.ok(аргументы.length > 0, "запросов не было вовсе");
+    for (const пара of аргументы) {
+      for (const п of пара) {
+        assert.equal(п instanceof Date, false, `параметр уехал объектом Date: ${String(п)}`);
+        assert.equal(typeof п, "string", `параметр обязан быть строкой, а не ${typeof п}`);
+      }
+    }
+  });
+
+  it("`dryRun` НЕ удаляет и НЕ пишет событие, но исполняет тот же предикат", async () => {
+    const { svc, запросы, события } = стенд({ строк: { vending_stock_count: 3, slot_snapshot: 7 } });
+    const итог = await svc.sweep(вс, { dryRun: true });
+
+    assert.equal(итог.find((r) => r.table === "vending_stock_count")!.deleted, 3, "примерка обязана назвать число");
+    assert.equal(события.length, 0, "чистки не было — записи о чистке быть не может");
+    assert.equal(запросы.some((q) => /delete from/i.test(q)), false, "примерка не удаляет ни строки");
+    // Тот же самый предикат по `dt` голыми сутками — ради него роут и заведён.
+    const q = запросы.find((x) => x.includes('"vending_stock_count"'))!;
+    assert.match(q, /"vending_stock_count"\."dt" < \$/);
+    assert.match(q, /"2024-09-06"/, "граница обязана быть строкой YYYY-MM-DD и в примерке тоже");
+  });
+
+  it("`includeEmpty` отдаёт ВСЕ пять целей, включая «удалено 0» — а событий по нулям по-прежнему нет", async () => {
+    const { svc, события } = стенд({ строк: { vending_stock_count: 2 } });
+    const итог = await svc.sweep(вс, { includeEmpty: true });
+    assert.deepEqual(итог.map((r) => r.table).sort(), [
+      "machine_sale", "product_sale", "slot_snapshot", "vending_stock_count", "vending_sync_run",
+    ]);
+    assert.equal(итог.find((r) => r.table === "slot_snapshot")!.deleted, 0);
+    assert.deepEqual(события.map((e) => e.payload.table), ["vending_stock_count"], "журналу нули не нужны");
+  });
+
+  it("настоящий прогон через роут пишет ТЕ ЖЕ события, что крон", async () => {
+    const { svc, события } = стенд({ строк: { vending_stock_count: 4 } });
+    await svc.sweep(вс, { includeEmpty: true });
+    assert.equal(события.length, 1);
+    assert.equal(события[0]!.type, RETENTION_EVENT);
+    assert.deepEqual(события[0]!.payload, { table: "vending_stock_count", deleted: 4, olderThanDays: 730, aborted: false });
   });
 });

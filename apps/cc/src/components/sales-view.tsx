@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { core, type SaleRow } from "../lib/core";
+import { count } from "../lib/format";
 import { причинаБезПродаж } from "../lib/sales-source";
 
-const money = (v: string | number) => `${Number(v).toLocaleString("ru-RU")}`;
 const day = (iso: string) => {
   const [y, m, d] = iso.split("-");
   return `${d}.${m}.${y.slice(2)}`;
@@ -48,18 +48,18 @@ export async function SalesView() {
         <div className="tiles" style={{ marginBottom: 14 }}>
           <div className={`tile ${summary.today.amount === 0 ? "zero" : ""}`}>
             <div className="lab">Выручка сегодня</div>
-            <div className="v">{money(summary.today.amount)} <span className="u">сум</span></div>
-            <div className="foot"><span className="mk" />вчера: {money(summary.yesterday.amount)} сум</div>
+            <div className="v">{count(summary.today.amount)} <span className="u">сум</span></div>
+            <div className="foot"><span className="mk" />вчера: {count(summary.yesterday.amount)} сум</div>
           </div>
           <div className={`tile ${summary.today.qty === 0 ? "zero" : ""}`}>
             <div className="lab">Продано сегодня</div>
-            <div className="v">{money(summary.today.qty)}</div>
-            <div className="foot"><span className="mk" />вчера: {money(summary.yesterday.qty)}</div>
+            <div className="v">{count(summary.today.qty)}</div>
+            <div className="foot"><span className="mk" />вчера: {count(summary.yesterday.qty)}</div>
           </div>
           <div className="tile">
             <div className="lab">За 30 дней</div>
-            <div className="v">{money(summary.days30.amount)} <span className="u">сум</span></div>
-            <div className="foot"><span className="mk" />позиций: {money(summary.days30.qty)}</div>
+            <div className="v">{count(summary.days30.amount)} <span className="u">сум</span></div>
+            <div className="foot"><span className="mk" />позиций: {count(summary.days30.qty)}</div>
           </div>
           <div className={`tile ${silent.length > 0 ? "is-hot" : "zero"}`}>
             <div className="lab">Молчат 2+ дня</div>
@@ -123,7 +123,7 @@ export async function SalesView() {
                   {r.product}
                   {Number(r.qty) > 1 && <span className="dim"> ×{Number(r.qty)}</span>}
                 </td>
-                <td className="mono num">{money(r.amount)} <span className="u">сум</span></td>
+                <td className="mono num">{count(Number(r.amount))} <span className="u">сум</span></td>
                 <td className="dash">—</td>
                 <td className="dash">—</td>
                 <td>

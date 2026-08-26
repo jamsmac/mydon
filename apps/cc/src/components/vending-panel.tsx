@@ -17,6 +17,7 @@ import { SHRINKAGE_PANEL_DAYS, ShrinkageAlerts, ShrinkageAlertsFailed } from "./
 import { OurvendHealthSection } from "./ourvend-health-view";
 import { CoreDown } from "./core-down";
 import { NewEntityForm } from "./entity-new";
+import { count } from "../lib/format";
 import { typeOne } from "../lib/labels";
 
 const STATUS_LABEL: Record<VendingMachine["status"], string> = {
@@ -195,12 +196,15 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
     excludedByRule: [],
     noPrice: [],
     allocation: "purchase-first",
+    totalNeed: 0,
+    totalCovered: 0,
     totalBuy: 0,
     totalOrder: 0,
     costExact: 0,
     costRounded: 0,
     overpay: 0,
     shortfallCost: 0,
+    costByPriceFull: 0,
     totalFromPurchase: 0,
     totalFromStock: 0,
     totalUnfilled: 0,
@@ -237,7 +241,6 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
   const shrinkage = await усушка;
-  const sum = (n: number) => n.toLocaleString("ru-RU");
   const syncLine = lastSyncLine(syncRuns);
 
   const ok = ourvendMachines.filter((m) => m.status === "ok");
@@ -251,7 +254,7 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
     <>
       {hasLive ? (
         <p className="lead">
-          К пополнению: <b>{totalDeficit.toLocaleString("ru-RU")}</b> ед · заполненность {fillRate}% · автоматов в
+          К пополнению: <b>{count(totalDeficit)}</b> ед · заполненность {fillRate}% · автоматов в
           расчёте {ok.length} из {ourvendMachines.length}
         </p>
       ) : (
@@ -268,7 +271,7 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
                 <div className="t">
                   <b>{r.product}</b>
                   <small>
-                    в автоматах {r.inMachines.toLocaleString("ru-RU")} · расход {r.daily.toFixed(1)}/день
+                    в автоматах {count(r.inMachines)} · расход {r.daily.toFixed(1)}/день
                   </small>
                 </div>
                 <span className={`pill ${r.daysLeft !== null && r.daysLeft <= 1 ? "bad" : ""}`}>
@@ -292,11 +295,11 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
           <div className="section-title">Закуп</div>
           <div className="page-head">
             <p>
-              Купить <b>{sum(purchase.totalBuy)}</b> ед · с округлением до упаковок <b>{sum(purchase.totalOrder)}</b> ед
+              Купить <b>{count(purchase.totalBuy)}</b> ед · с округлением до упаковок <b>{count(purchase.totalOrder)}</b> ед
               {purchase.costRounded > 0 && (
                 <>
-                  {" "}на <b>{sum(purchase.costRounded)}</b> сум
-                  {purchase.overpay > 0 && <span className="muted"> (переплата за упаковки {sum(purchase.overpay)})</span>}
+                  {" "}на <b>{count(purchase.costRounded)}</b> сум
+                  {purchase.overpay > 0 && <span className="muted"> (переплата за упаковки {count(purchase.overpay)})</span>}
                 </>
               )}
             </p>
@@ -307,11 +310,11 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
                 <div className="t">
                   <b>{i.product}</b>
                   <small>
-                    нехватка {sum(i.buy)} · упаковка {i.pack}
-                    {i.noPrice ? " · нет цены" : ` · ${sum(i.costRounded)} сум`}
+                    нехватка {count(i.buy)} · упаковка {i.pack}
+                    {i.noPrice ? " · нет цены" : ` · ${count(i.costRounded)} сум`}
                   </small>
                 </div>
-                <span className="pill">{sum(i.order)} ед</span>
+                <span className="pill">{count(i.order)} ед</span>
               </div>
             ))}
           </div>
@@ -352,11 +355,11 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
                       {when} · {o.positions} поз.
                     </b>
                     <small>
-                      {o.costRounded > 0 ? `${sum(o.costRounded)} сум` : "без суммы"}
+                      {o.costRounded > 0 ? `${count(o.costRounded)} сум` : "без суммы"}
                       {o.createdBy ? ` · ${o.createdBy}` : ""}
                       {/* Показываем только после приёмки (§5.7) — до неё оба поля null. */}
                       {o.distributedUnits != null && o.distributedUnits > 0 && (
-                        <> · в автоматы {sum(o.distributedUnits)} ед.</>
+                        <> · в автоматы {count(o.distributedUnits)} ед.</>
                       )}
                       {o.unmatchedDistribution != null && o.unmatchedDistribution.length > 0 && (
                         <span style={{ color: "var(--hot)" }}>
@@ -390,7 +393,7 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
                 </div>
                 {m.status === "ok" ? (
                   <span className={`pill ${color(m.deficit) === "ok" ? "ok" : color(m.deficit) === "bad" ? "bad" : ""}`}>
-                    −{m.deficit.toLocaleString("ru-RU")} ед
+                    −{count(m.deficit)} ед
                   </span>
                 ) : (
                   <span className="pill">вне расчёта</span>
@@ -415,7 +418,7 @@ export async function VendingSupplyPanel({ domain = "vendhub" }: { domain?: stri
                       .join(" · ")}
                   </small>
                 </div>
-                <span className="pill">{n.total.toLocaleString("ru-RU")} ед</span>
+                <span className="pill">{count(n.total)} ед</span>
               </div>
             ))}
           </div>

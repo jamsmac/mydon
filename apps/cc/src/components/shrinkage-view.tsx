@@ -7,18 +7,13 @@ import {
   type VendingShrinkageReport,
 } from "../lib/core";
 import { CoreDown } from "./core-down";
-import { money, plural } from "../lib/format";
+import { amount, count, plural } from "../lib/format";
 
 /** Окна расчёта, между которыми переключается лист. Ядро зажимает своё. */
 export const SHRINKAGE_WINDOWS = [7, 14, 30] as const;
 /** Окно секции на вкладке «Снек»: подпись и запрос обязаны быть одним числом. */
 export const SHRINKAGE_PANEL_DAYS = 14;
 
-// toLocaleString("ru-RU") разделяет тройки разрядов U+00A0 (неразрывный
-// пробел), а не обычным пробелом — копипаста суммы в поиск или сравнение
-// строкой у владельца ломается молча (тот же баг чинит formatAmount в
-// apps/core/src/rules/rules.ts).
-const n = (v: number): string => v.toLocaleString("ru-RU").replace(/\u00a0/g, " ");
 /** Дата периода целиком: отчёт живёт неделями, год в нём не лишний. */
 const дата = (iso: string): string => {
   const [y, m, d] = iso.split("-");
@@ -50,9 +45,9 @@ const адресЛиста = (domain: string): string =>
 
 /** Подпись позиции: излишек виден, но в деньги не входит (R-P4-3). */
 function строкаПозиции(i: VendingShrinkageItem): string {
-  const части = [`потеря ${n(i.lossUnits)} шт`];
-  if (i.surplusUnits > 0) части.push(`излишек ${n(i.surplusUnits)} шт`);
-  части.push(`дней ${n(i.daysCounted)}`);
+  const части = [`потеря ${count(i.lossUnits)} шт`];
+  if (i.surplusUnits > 0) части.push(`излишек ${count(i.surplusUnits)} шт`);
+  части.push(`дней ${count(i.daysCounted)}`);
   return части.join(" · ");
 }
 
@@ -97,8 +92,8 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
   return (
     <>
       <p className="lead">
-        {`Период ${дата(report.from)} — ${дата(report.to)} · порог ${money(report.threshold)} на позицию`}
-        {естьПотери ? ` · всего ≈ ${money(всего)}` : ""}
+        {`Период ${дата(report.from)} — ${дата(report.to)} · порог ${amount(report.threshold)} на позицию`}
+        {естьПотери ? ` · всего ≈ ${amount(всего)}` : ""}
       </p>
 
       {/* Ноль автоматов в отчёте — это НЕ «потерь нет»: сбор мог лежать весь
@@ -134,14 +129,14 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
               означают разное, а пропущенные дни объясняют, почему сумма
               меньше ожидаемой. */}
           <div className="section-title">
-            {`${m.name} · дней посчитано ${n(m.summary.daysCounted)}, не в счёт из-за заливки ${n(m.summary.daysSkipped)}`}
+            {`${m.name} · дней посчитано ${count(m.summary.daysCounted)}, не в счёт из-за заливки ${count(m.summary.daysSkipped)}`}
           </div>
 
           {m.summary.daysCounted === 0 ? (
             // Не «Расхождений нет» — это ноль дней, а не ноль потерь. Длина
             // периода, а не daysSkipped (см. периодДней выше) — тот же выбор,
             // что у Core (dates.length) и бота (periodDays).
-            <p className="muted">{`Не считали — все ${n(днейПериода || m.summary.daysSkipped)} дн. периода были заливкой/пропущены`}</p>
+            <p className="muted">{`Не считали — все ${count(днейПериода || m.summary.daysSkipped)} дн. периода были заливкой/пропущены`}</p>
           ) : m.summary.items.length === 0 ? (
             <p className="muted">Расхождений нет</p>
           ) : (
@@ -157,11 +152,11 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
                     {i.alert && <span className="pill bad">⚠️ порог</span>}
                     {/* Без цены показываем штуки: «0 сум» читалось бы как
                         «потеряли на ноль», хотя товар пропал. */}
-                    <span className="pill">{i.noPrice ? `${n(i.lossUnits)} шт` : `≈ ${money(i.lossValue)}`}</span>
+                    <span className="pill">{i.noPrice ? `${count(i.lossUnits)} шт` : `≈ ${amount(i.lossValue)}`}</span>
                   </div>
                 ))}
               </div>
-              <p className="muted">{`Итого ≈ ${money(m.summary.lossValue)}`}</p>
+              <p className="muted">{`Итого ≈ ${amount(m.summary.lossValue)}`}</p>
             </>
           )}
 
@@ -172,13 +167,13 @@ export function ShrinkageTables({ report }: { report: VendingShrinkageReport }) 
                 {m.refillDays.map((d) => (
                   <div className="row" key={d.date}>
                     <div className="t">
-                      <b>{`${день(d.date)} · +${n(d.detectedUnits)} ед`}</b>
+                      <b>{`${день(d.date)} · +${count(d.detectedUnits)} ед`}</b>
                     </div>
                     {/* «записано 0» приглушено намеренно: это не тревога, а
                         обычное дело — заливку поймал детектор, человек до бота
                         не дошёл. Красным это было бы криком на каждый выезд. */}
                     <span className={d.recordedUnits === 0 ? "pill muted" : "pill"}>
-                      {`записано ${n(d.recordedUnits)}`}
+                      {`записано ${count(d.recordedUnits)}`}
                     </span>
                   </div>
                 ))}
@@ -241,7 +236,7 @@ export function ShrinkageAlerts({ report, domain }: { report: VendingShrinkageRe
           {top.map(({ machine, item }) => (
             <div className="row" key={`${machine.serial}:${item.product}`}>
               <div className="t">
-                <small>{`${machine.name} · ${item.product} −${n(item.lossUnits)} шт ≈ ${money(item.lossValue)}`}</small>
+                <small>{`${machine.name} · ${item.product} −${count(item.lossUnits)} шт ≈ ${amount(item.lossValue)}`}</small>
               </div>
             </div>
           ))}

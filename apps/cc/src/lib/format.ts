@@ -11,7 +11,16 @@ export function when(iso: string): string {
   });
 }
 
-/** Сумма с разделителями разрядов. Валюта проекта — сум. */
+/**
+ * Сумма с разделителями разрядов. Валюта проекта — сум.
+ *
+ * ОСТАЁТСЯ С U+00A0 НАМЕРЕННО. Числа, которые владелец КОПИРУЕТ и сверяет с
+ * ботом, печатают `count()`/`amount()` — они NBSP срезают. Здесь неразрывный
+ * пробел уместен: `money()` зовут 42 раза, в основном в GLOBERENT и финансах,
+ * где число читают глазами, а не ищут поиском по странице. Снек-контур на неё
+ * больше не опирается (срез «Хвосты», R-H-3) — если новый снек-лист позовёт
+ * `money()`, это регрессия, а не выбор, и её ловит `snack-format.test.tsx`.
+ */
 export function money(amount: string | number, currency = "UZS"): string {
   const n = typeof amount === "string" ? Number(amount) : amount;
   if (!Number.isFinite(n)) return String(amount);
@@ -51,11 +60,20 @@ export function hasMoney(rows: readonly { amount: string | number }[]): boolean 
  *
  * `toLocaleString("ru-RU")` разделяет тройки разрядов U+00A0, и скопированная
  * из панели сумма молча не находится ни поиском по странице, ни в боте (тот же
- * баг чинит `formatAmount` в apps/core/src/rules/rules.ts и `n` в
- * shrinkage-view.tsx). Листы отчётов П5b показывают числа, которые владелец
- * копирует и сверяет, поэтому пробел здесь обычный.
+ * баг чинит `formatAmount` в apps/core/src/rules/rules.ts). Листы отчётов П5b
+ * показывают числа, которые владелец копирует и сверяет, поэтому пробел здесь
+ * обычный; что ни один снек-лист не завёл своего форматтера мимо этого
+ * правила, держит сторож `snack-format.test.tsx`.
+ *
+ * НЕ ЧИСЛО ОТДАЁМ КАК ЕСТЬ. Часть вызывающих кормит `count()` результатом
+ * `Number(строка_из_БД)` (`sales-view.tsx`, `supply-views.tsx` — колонки
+ * `numeric`, то есть на практике парсятся всегда). Раньше на этом пути стояла
+ * `money()` со своим `Number.isFinite`; без него `toLocaleString("ru-RU")`
+ * печатает «не число» — русскую фразу, которую владелец прочитает как ЧАСТЬ
+ * ОТЧЁТА, а не как отказ разобрать данные.
  */
 export function count(v: number): string {
+  if (!Number.isFinite(v)) return String(v);
   return v.toLocaleString("ru-RU").replace(/\u00a0/g, " ");
 }
 

@@ -21,6 +21,15 @@ export const DETECT_DAYS_DEFAULT = 2;
 export const DETECT_DAYS_MAX = 30;
 /** Окно журнала по умолчанию. */
 export const LIST_DAYS_DEFAULT = 14;
+/**
+ * Потолок ЧТЕНИЯ журнала — СВОЙ, а не `DETECT_DAYS_MAX`.
+ *
+ * У детектора 30 суток — это потолок СКАНА СНИМКОВ: четверть миллиона строк в
+ * память разом (комментарий внутри `detect`). Чтение журнала — `limit(LIST_LIMIT)`
+ * по индексированной `window_to`, и держать его на чужом потолке значит
+ * показывать владельцу тридцать суток под кнопкой «90 дн».
+ */
+export const LIST_DAYS_MAX = 90;
 /** Потолок выборки журнала: 6 автоматов × 14 дней дают десятки строк, не тысячи. */
 export const LIST_LIMIT = 500;
 /** Порог детектора, если настройки нет (донор mydon-stock). */
@@ -69,6 +78,23 @@ export interface RefillEventRow {
   matchedRefillId: string | null;
 }
 
+/**
+ * Ответ `GET /vending/refill-events` — журнал за окно И признак обрезки.
+ *
+ * ОБЪЕКТ, А НЕ МАССИВ (R-FW-S7). `list()` всегда стоял под `limit(LIST_LIMIT)`
+ * и молчал об обрезке, а лист печатал `${rows.length} событий` — то есть на
+ * переполнении говорил ровно «500 событий», и это читалось как посчитанный
+ * итог. Комментарий у константы описывал старое окно («6 автоматов × 14 дней
+ * дают десятки строк»); на 90 сутках при низком `REFILL_DETECT_MIN_UNITS`
+ * пятьсот перестало быть недостижимой цифрой. Соседний лист истории склада
+ * этот же случай называет словами (`history_capped`).
+ */
+export interface RefillEventsList {
+  rows: RefillEventRow[];
+  /** Строк было БОЛЬШЕ потолка чтения (`LIST_LIMIT`) — показаны первые 500. */
+  capped: boolean;
+}
+
 /** Ключ идемпотентности события: тот же, что уникальный индекс в базе. */
 const ключ = (serial: string, windowTo: Date): string => `${normalizeMachineSerial(serial)}|${windowTo.getTime()}`;
 
@@ -107,11 +133,22 @@ export class RefillEventsService {
    * в журнал шестнадцать раз. Единственное, что повторный прогон меняет у уже
    * записанного события, — доклеивает запись оператора, если она появилась
    * после первого прохода (человек дошёл до бота через час).
+   *
+   * `now` — ПАРАМЕТР, а не стенные часы функции (R-H-7).
+   *
+   * Тот же довод, что у `VendingService.stockCounts` и `ShrinkageService.report`:
+   * прогон, пересекающий полночь Ташкента, иначе считает окно от двух разных
+   * дней. Измеримый выигрыш параметра — ДЕТЕРМИНИРОВАННЫЕ ФИКСТУРЫ: раньше
+   * окна юнит-тестов считались от стенных часов в момент загрузки файла, и
+   * набор зеленел или краснел в зависимости от часа прогона (ревью T6, minor 2:
+   * контроллер `now` не передаёт, поэтому на HTTP-пути поведение не менялось).
+   * Идемпотентность повторного прогона держит НЕ этот параметр, а уникальный
+   * индекс `(machine_serial, window_to)` плюс `onConflictDoNothing`. Сигнатура
+   * аддитивна, цена правки — ноль.
    */
-  async detect(days = DETECT_DAYS_DEFAULT): Promise<DetectResult> {
+  async detect(days = DETECT_DAYS_DEFAULT, now = new Date()): Promise<DetectResult> {
     const окно = зажать(days, DETECT_DAYS_DEFAULT, DETECT_DAYS_MAX);
-    const сейчас = new Date();
-    const от = new Date(сейчас.getTime() - окно * 86_400_000);
+    const от = new Date(now.getTime() - окно * 86_400_000);
 
     const [серии, canonOf, minUnits, реестрМашин] = await Promise.all([
       // Сначала — только СПИСОК автоматов, попавших в окно. Одним запросом на
@@ -214,7 +251,7 @@ export class RefillEventsService {
     const итог = await this.записать(события, от, machines, skipped);
     // Лента — ОТДЕЛЬНЫМ проходом и по всему окну, а не по событиям этого
     // прогона (см. `опубликоватьНесопоставленные`).
-    await this.опубликоватьНесопоставленные(от, сейчас, реестрМашин.nameBySerial);
+    await this.опубликоватьНесопоставленные(от, now, реестрМашин.nameBySerial);
     return итог;
   }
 
@@ -387,20 +424,40 @@ export class RefillEventsService {
     return строки.length;
   }
 
-  /** Журнал событий детектора за `days` суток, свежие сверху. */
-  async list(days = LIST_DAYS_DEFAULT): Promise<RefillEventRow[]> {
-    const окно = зажать(days, LIST_DAYS_DEFAULT, DETECT_DAYS_MAX);
-    const от = new Date(Date.now() - окно * 86_400_000);
-    const [строки, реестр] = await Promise.all([
+  /**
+   * Журнал событий детектора за `days` суток, свежие сверху.
+   *
+   * `now` — ПАРАМЕТР, а не стенные часы функции (R-H-7): тест границы окна
+   * обязан задавать момент явно, иначе «90 суток назад от когда» плавает
+   * вместе с временем прогона теста.
+   *
+   * Тот же довод, что у `VendingService.stockCounts` и `ShrinkageService.report`:
+   * прогон, пересекающий полночь Ташкента, иначе считает окно от двух разных
+   * дней. Плюс детерминированность фикстур: раньше они считались от стенных
+   * часов в момент загрузки файла, и набор зеленел или краснел в зависимости
+   * от часа прогона. Сигнатура аддитивна, цена правки — ноль.
+   *
+   * Отдаёт ОБЪЕКТ, а не массив (R-FW-S7): признак обрезки — часть ответа, см.
+   * `RefillEventsList`.
+   */
+  async list(days = LIST_DAYS_DEFAULT, now = new Date()): Promise<RefillEventsList> {
+    const окно = зажать(days, LIST_DAYS_DEFAULT, LIST_DAYS_MAX);
+    const от = new Date(now.getTime() - окно * 86_400_000);
+    const [прочитано, реестр] = await Promise.all([
       this.db
         .select()
         .from(vendingRefillEvent)
         .where(gte(vendingRefillEvent.windowTo, от))
         .orderBy(desc(vendingRefillEvent.windowTo))
-        .limit(LIST_LIMIT),
+        // ПОТОЛОК + 1 (R-FW-S7): по «лишней» строке видно, что список обрезан.
+        // Тем же приёмом называет обрезку история склада (`history_capped`) —
+        // без него лист печатал `500 событий` как ПОСЧИТАННЫЙ итог.
+        .limit(LIST_LIMIT + 1),
       this.vending.machineIndex(),
     ]);
-    return строки.map((r) => ({
+    const capped = прочитано.length > LIST_LIMIT;
+    const строки = capped ? прочитано.slice(0, LIST_LIMIT) : прочитано;
+    const rows = строки.map((r) => ({
       id: r.id,
       // Канон и на выдаче: строки, записанные до R-FW-10, лежат в сырой форме,
       // а отчёт об усушке и панель ключуются каноном — разнобой в одном списке
@@ -413,6 +470,7 @@ export class RefillEventsService {
       slots: r.slots,
       matchedRefillId: r.matchedRefillId,
     }));
+    return { rows, capped };
   }
 
   /**

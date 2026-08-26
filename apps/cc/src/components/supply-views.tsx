@@ -1,9 +1,8 @@
 import Link from "next/link";
 import { core, type PurchaseRow } from "../lib/core";
+import { count } from "../lib/format";
 import { SyncIntakeButton } from "./sync-intake-button";
 
-const money = (v: string | number | null) =>
-  v === null ? "—" : `${Number(v).toLocaleString("ru-RU")}`;
 const day = (iso: string) => {
   const [y, m, d] = iso.split("-");
   return `${d}.${m}.${y.slice(2)}`;
@@ -90,7 +89,7 @@ export async function PurchasesView() {
         <div className="tiles" style={{ marginBottom: 14 }}>
           <div className="tile">
             <div className="lab">Приход за 30 дней</div>
-            <div className="v">{money(summary.purchases30.total)} <span className="u">сум</span></div>
+            <div className="v">{count(summary.purchases30.total)} <span className="u">сум</span></div>
             <div className="foot"><span className="mk" />партий: {summary.purchases30.count}</div>
           </div>
         </div>
@@ -113,7 +112,7 @@ export async function PurchasesView() {
               </span>
             </span>
             <span className="cd">{day(r.dt)}</span>
-            <span className="pr">{r.total !== null ? <>{money(r.total)} <span className="u">сум</span></> : "—"}</span>
+            <span className="pr">{r.total !== null ? <>{count(Number(r.total))} <span className="u">сум</span></> : "—"}</span>
           </div>
         ))}
       </div>

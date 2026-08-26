@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
 import {
   entity,
@@ -11,7 +13,7 @@ import {
   vendingRefill,
   vendingRefillEvent,
 } from "@mydon/db";
-import { RefillEventsService } from "./refill-events.service";
+import { LIST_DAYS_MAX, LIST_LIMIT, RefillEventsService } from "./refill-events.service";
 import { VendingService } from "./vending.service";
 
 type SnapRow = {
@@ -105,7 +107,7 @@ function строкиИз(условие: unknown): string[] {
  * прогона проверяется настоящим уникальным ключом (serial, window_to), а не
  * заготовленным ответом: иначе второй прогон зеленел бы на любой реализации.
  */
-function detectDb(м: Мир) {
+function detectDb(м: Мир, опции: { онОкно?: (границы: Date[]) => void } = {}) {
   const события: EventRow[] = [...(м.events ?? [])];
   const лента: FeedRow[] = [];
   const обновления: Partial<EventRow>[] = [];
@@ -153,7 +155,11 @@ function detectDb(м: Мир) {
       return chain;
     };
     chain.orderBy = () => chain;
-    chain.limit = async () => ответ();
+    // Стенд УВАЖАЕТ `limit` (R-FW-S7): иначе признак обрезки журнала
+    // (`limit(LIST_LIMIT + 1)`) не проверялся бы ничем — стаб отдавал бы
+    // сколько угодно строк, и «показаны первые 500» зеленело бы на любой
+    // реализации.
+    chain.limit = async (n: number) => (typeof n === "number" ? ответ().slice(0, n) : ответ());
     chain.then = (res: (v: unknown) => unknown) => p().then(res);
     return chain;
   };
@@ -207,6 +213,7 @@ function detectDb(м: Мир) {
               // (плюс `is null`) — кандидаты на публикацию в ленту: окно
               // закрылось дольше допуска назад, а записи оператора так и нет.
               const границы = границыОкна(условие);
+              опции.онОкно?.(границы);
               return границы.length >= 2
                 ? события.filter(
                     (e) =>
@@ -218,6 +225,12 @@ function detectDb(м: Мир) {
             })
           : t === slotSnapshot
             ? цепочка(м.snapshots ?? [], (условие) => {
+                // Оба запроса к снимкам (список автоматов и разбор по форме)
+                // фильтруют по ОДНОЙ и той же границе `от` — читаем её тем же
+                // приёмом, что у `vendingRefillEvent`, чтобы тест мог
+                // проверить: окно построено от ПЕРЕДАННОГО `now` (R-H-7), а не
+                // от часов процесса.
+                опции.онОкно?.(границыОкна(условие));
                 // Разбор идёт по ОДНОЙ форме серийника за запрос; список
                 // автоматов окна условия по серийнику не несёт.
                 const форма = строкиИз(условие)[0];
@@ -234,12 +247,18 @@ function detectDb(м: Мир) {
 
 const ЧАС = 3_600_000;
 /**
- * Окно фикстуры — от ТЕКУЩЕГО момента: `detect(2)` смотрит на двое суток
- * назад, и снимки с прибитой датой оказались бы вне окна, как только его
- * начнут применять по-настоящему (стаб фильтрует события по дате).
+ * Фиксированный момент прогона (R-H-7): раньше окна считались от стенных
+ * часов процесса, и повторный smoke на той же базе в течение часа ронял два
+ * шага — весь набор ниже переведён на этот момент явным параметром `now`.
  */
-const T2 = new Date(Date.now() - ЧАС);
-const T1 = new Date(T2.getTime() - 3 * ЧАС);
+const СЕЙЧАС = new Date("2026-08-25T13:00:00+05:00");
+/**
+ * Окно фикстуры — фиксированное, не от текущего момента: `detect(2, СЕЙЧАС)`
+ * смотрит на двое суток назад от `СЕЙЧАС`, и оба снимка обязаны попасть в это
+ * окно (стаб фильтрует события по дате).
+ */
+const T1 = new Date("2026-08-25T04:00:00+05:00");
+const T2 = new Date(T1.getTime() + 3 * ЧАС);
 
 const снимок = (serial: string, capturedAt: Date, slots: [string, string | null, number, number][]): SnapRow[] =>
   slots.map(([coilId, productName, capacity, quantity]) => ({
@@ -265,16 +284,29 @@ const ЗАЛИВКА: SnapRow[] = [
 
 const РЕЕСТР: Ent[] = [{ id: "m-olma", name: "Olma", externalRef: "c2508160376", type: "machine" }];
 
+/** Заливка, закрывшаяся в момент `конец`: снимок за 3 ч до и снимок в `конец`. */
+const заливкаК = (конец: Date): SnapRow[] => [
+  ...снимок("2508160376", new Date(конец.getTime() - 3 * ЧАС), [["1", "Snickers", 40, 2]]),
+  ...снимок("2508160376", конец, [["1", "Snickers", 40, 14]]),
+];
+
+/**
+ * Помимо сервиса отдаёт «окна» — все границы, которые запросы `detect()`
+ * подставили в условие (снимки и журнал, `границыОкна`/`онОкно` читает их
+ * стенд выше). Тест «часы — параметр, а не часы процесса» (R-H-7) проверяет
+ * ИМЕННО первую границу первого запроса — список автоматов окна снимков.
+ */
 const сервис = (мир: Мир) => {
-  const { db, события, лента, обновления } = detectDb(мир);
-  return { svc: new RefillEventsService(db, new VendingService(db)), события, лента, обновления };
+  const окна: Date[] = [];
+  const { db, события, лента, обновления } = detectDb(мир, { онОкно: (границы) => окна.push(...границы) });
+  return { svc: new RefillEventsService(db, new VendingService(db)), события, лента, обновления, окна };
 };
 
 describe("Вендинг Core: детектор заливок по снимкам (П4)", () => {
   it("пара снимков с приходом ≥ порога даёт событие; второй прогон дубля не плодит", async () => {
     const { svc, события } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР });
 
-    const первый = await svc.detect(2);
+    const первый = await svc.detect(2, СЕЙЧАС);
     assert.equal(первый.machines, 1);
     assert.equal(первый.events, 1);
     assert.equal(первый.matched, 0);
@@ -291,7 +323,7 @@ describe("Вендинг Core: детектор заливок по снимка
     );
 
     // Крон бежит каждые 3 часа по перекрывающемуся окну — повтор обязан быть пустым.
-    const второй = await svc.detect(2);
+    const второй = await svc.detect(2, СЕЙЧАС);
     assert.equal(второй.events, 0);
     assert.equal(события.length, 1);
   });
@@ -302,7 +334,7 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
       config: [{ key: "REFILL_DETECT_MIN_UNITS", value: "20" }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.events, 0);
     assert.equal(события.length, 0, "12 единиц при пороге 20 — это не заливка, а докладка пары пружин");
   });
@@ -315,7 +347,7 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
       config: [{ key: "REFILL_DETECT_MIN_UNITS", value: "десять" }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.events, 1);
     assert.equal(события[0]!.units, 12);
   });
@@ -347,7 +379,7 @@ describe("Вендинг Core: детектор заливок по снимка
       ],
       entities: РЕЕСТР,
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.deepEqual(res.skipped, [{ serial: "sklad", reason: "dead" }], "серийник в skipped — канон, как и в журнале");
     assert.equal(res.machines, 2, "заправленный под завязку автомат — осмотрен, а не мёртв");
     assert.equal(res.events, 1);
@@ -360,7 +392,7 @@ describe("Вендинг Core: детектор заливок по снимка
       snapshots: [...ЗАЛИВКА, ...снимок("ПУСТОЙ", T1, пустые), ...снимок("ПУСТОЙ", T2, пустые)],
       entities: РЕЕСТР,
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.deepEqual(res.skipped, [{ serial: "пустой", reason: "no_slots" }]);
   });
 
@@ -378,7 +410,7 @@ describe("Вендинг Core: детектор заливок по снимка
       snapshots: [...ЗАЛИВКА, ...снимок("СМЕСЬ", T1, пустые), ...снимок("СМЕСЬ", T2, мёртвые)],
       entities: РЕЕСТР,
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.deepEqual(res.skipped, [{ serial: "смесь", reason: "dead" }]);
   });
 
@@ -389,7 +421,7 @@ describe("Вендинг Core: детектор заливок по снимка
       // Серийник записи — с приставкой «c» (так пишет бот), снимок — без неё.
       refills: [{ id: "r1", machineSerial: "c2508160376", performedAt: new Date(T2.getTime() - 30 * 60_000), qty: 12 }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.events, 1);
     assert.equal(res.matched, 1);
     assert.equal(события[0]!.matchedRefillId, "r1");
@@ -407,7 +439,7 @@ describe("Вендинг Core: детектор заливок по снимка
       // На 4 часа раньше начала окна — это уже другой выезд (допуск 3 ч).
       refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date(T1.getTime() - 4 * ЧАС), qty: 12 }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.matched, 0);
     assert.equal(события[0]!.matchedRefillId, null);
   });
@@ -415,13 +447,13 @@ describe("Вендинг Core: детектор заливок по снимка
   it("запись оператора, появившаяся ПОСЛЕ прогона, доклеивается на следующем", async () => {
     const refills: HumanRow[] = [];
     const { svc, события, обновления } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР, refills });
-    await svc.detect(2);
+    await svc.detect(2, СЕЙЧАС);
     assert.equal(события[0]!.matchedRefillId, null);
 
     // Оператор дошёл до бота через час — событие уже записано, дубля не будет,
     // и без доклейки запись осталась бы «заливкой без отчёта» навсегда.
     refills.push({ id: "r9", machineSerial: "2508160376", performedAt: new Date(T2.getTime() + ЧАС), qty: 12 });
-    const второй = await svc.detect(2);
+    const второй = await svc.detect(2, СЕЙЧАС);
     assert.equal(второй.events, 0);
     assert.equal(второй.matched, 1);
     assert.deepEqual(обновления, [{ matchedRefillId: "r9" }]);
@@ -441,7 +473,7 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
       refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date(T1.getTime() + 30 * 60_000), qty: 12 }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.events, 2);
     assert.equal(res.matched, 1, "выезд был один — подтверждать им оба окна значит удвоить отчёт");
     assert.equal(события.filter((e) => e.matchedRefillId === "r1").length, 1);
@@ -452,7 +484,7 @@ describe("Вендинг Core: детектор заливок по снимка
     // оператора ищется с `от − 3 ч`. Читая уже записанные события ровно по
     // `от`, детектор не увидел бы, что r1 уже занята, и приклеил бы её второй
     // раз — двойная отметка «подтверждено» по одному выезду.
-    const now = Date.now();
+    const now = СЕЙЧАС.getTime();
     const старое: EventRow = {
       id: "ev-old",
       machineSerial: "2508160376",
@@ -473,7 +505,7 @@ describe("Вендинг Core: детектор заливок по снимка
       events: [старое],
       refills: [{ id: "r1", machineSerial: "2508160376", performedAt: new Date(now - 49.5 * ЧАС), qty: 15 }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.events, 1);
     assert.equal(res.matched, 0, "запись уже подтвердила прошлое событие — второй раз она не считается");
     assert.equal(события.find((e) => e.id !== "ev-old")!.matchedRefillId, null);
@@ -493,27 +525,28 @@ describe("Вендинг Core: детектор заливок по снимка
       ],
       products: [{ id: "p1", name: "Montella Вода минеральная 330ml", purchasePrice: "5000", packSize: 12 }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.events, 1, "два сырых имени одного товара — это НЕ смена товара в слоте");
     assert.equal(события[0]!.slots[0]!.product, "Montella Вода минеральная 330ml");
   });
 
   it("журнал событий отдаёт окно с именем автомата", async () => {
     const { svc } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР });
-    await svc.detect(2);
-    const список = await svc.list(14);
-    assert.equal(список.length, 1);
-    assert.equal(список[0]!.serial, "2508160376");
-    assert.equal(список[0]!.name, "Olma");
-    assert.equal(список[0]!.units, 12);
-    assert.equal(список[0]!.windowFrom, T1.toISOString());
-    assert.equal(список[0]!.windowTo, T2.toISOString());
-    assert.equal(список[0]!.matchedRefillId, null);
+    await svc.detect(2, СЕЙЧАС);
+    const список = await svc.list(14, СЕЙЧАС);
+    assert.equal(список.rows.length, 1);
+    assert.equal(список.capped, false, "одна строка — обрезки нет, и лист обязан это знать");
+    assert.equal(список.rows[0]!.serial, "2508160376");
+    assert.equal(список.rows[0]!.name, "Olma");
+    assert.equal(список.rows[0]!.units, 12);
+    assert.equal(список.rows[0]!.windowFrom, T1.toISOString());
+    assert.equal(список.rows[0]!.windowTo, T2.toISOString());
+    assert.equal(список.rows[0]!.matchedRefillId, null);
   });
 
   it("снимков нет — прогон пустой, а не падение", async () => {
     const { svc } = сервис({});
-    assert.deepEqual(await svc.detect(2), { machines: 0, events: 0, matched: 0, skipped: [] });
+    assert.deepEqual(await svc.detect(2, СЕЙЧАС), { machines: 0, events: 0, matched: 0, skipped: [] });
   });
 
   it("автомат не в строю в детектор не идёт — в skipped с причиной not_in_service", async () => {
@@ -524,7 +557,7 @@ describe("Вендинг Core: детектор заливок по снимка
       entities: РЕЕСТР,
       cards: [{ entityId: "m-olma", status: "warehouse" }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.deepEqual(res.skipped, [{ serial: "2508160376", reason: "not_in_service" }]);
     assert.equal(res.machines, 0);
     assert.equal(события.length, 0);
@@ -541,7 +574,7 @@ describe("Вендинг Core: детектор заливок по снимка
       ],
       entities: РЕЕСТР,
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.machines, 1);
     assert.equal(res.events, 1);
     assert.equal(события.length, 1);
@@ -551,18 +584,12 @@ describe("Вендинг Core: детектор заливок по снимка
 });
 
 describe("Вендинг Core: лента «заливка без записи» отдельным проходом (R-FW-9)", () => {
-  /** Окно, закрывшееся `часов` назад: `MATCH_PAD_MS` = 3 ч. */
-  const окноНазад = (часов: number): SnapRow[] => {
-    const конец = new Date(Date.now() - часов * ЧАС);
-    return [
-      ...снимок("2508160376", new Date(конец.getTime() - 3 * ЧАС), [["1", "Snickers", 40, 2]]),
-      ...снимок("2508160376", конец, [["1", "Snickers", 40, 14]]),
-    ];
-  };
+  /** Окно, закрывшееся `часов` назад от `СЕЙЧАС`: `MATCH_PAD_MS` = 3 ч. */
+  const окноНазад = (часов: number): SnapRow[] => заливкаК(new Date(СЕЙЧАС.getTime() - часов * ЧАС));
 
   it("свежее окно события ленты не даёт: оператор ещё может дописать заливку", async () => {
     const { svc, события, лента } = сервис({ snapshots: окноНазад(1), entities: РЕЕСТР });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.events, 1, "в журнал заливка попала сразу");
     assert.equal(события.length, 1);
     assert.deepEqual(лента.filter((f) => f.type === "vending.refill_detected"), [], "будить владельца рано — допуск ещё не вышел");
@@ -570,7 +597,7 @@ describe("Вендинг Core: лента «заливка без записи»
 
   it("окно старше допуска и без записи — событие ленты; повтор прогона второго не пишет", async () => {
     const { svc, лента } = сервис({ snapshots: окноНазад(4), entities: РЕЕСТР });
-    await svc.detect(2);
+    await svc.detect(2, СЕЙЧАС);
     const строки = лента.filter((f) => f.type === "vending.refill_detected");
     assert.equal(строки.length, 1);
     assert.equal(строки[0]!.payload.recorded, false);
@@ -579,7 +606,7 @@ describe("Вендинг Core: лента «заливка без записи»
     assert.equal(строки[0]!.payload.units, 12);
     assert.ok(строки[0]!.payload.eventId, "eventId — ключ дедупа публикации");
 
-    await svc.detect(2);
+    await svc.detect(2, СЕЙЧАС);
     assert.equal(лента.filter((f) => f.type === "vending.refill_detected").length, 1, "второй прогон дубля ленты не даёт");
   });
 
@@ -591,8 +618,119 @@ describe("Вендинг Core: лента «заливка без записи»
       entities: РЕЕСТР,
       refills: [{ id: "r1", machineSerial: "c2508160376", performedAt: new Date(конец.getTime() - 30 * 60_000), qty: 12 }],
     });
-    const res = await svc.detect(2);
+    const res = await svc.detect(2, СЕЙЧАС);
     assert.equal(res.matched, 1);
     assert.deepEqual(лента.filter((f) => f.type === "vending.refill_detected"), []);
+  });
+});
+
+/** Одна строка журнала — границы окна тесту не важны, важен сам факт запроса. */
+const ЖУРНАЛ: EventRow[] = [
+  {
+    id: "ev-1",
+    machineSerial: "2508160376",
+    machineId: "m-olma",
+    windowFrom: new Date(СЕЙЧАС.getTime() - 5 * ЧАС),
+    windowTo: new Date(СЕЙЧАС.getTime() - 2 * ЧАС),
+    units: 12,
+    slots: [],
+    matchedRefillId: null,
+  },
+];
+
+describe("Окно ЧТЕНИЯ журнала — своё, а не потолок скана снимков (R-H-5)", () => {
+  it("`?days=90` читается целиком: 90 — потолок журнала, 30 — потолок детектора", async () => {
+    // Раньше `list()` зажимал окно чужим `DETECT_DAYS_MAX = 30`, и кнопка
+    // «90 дн» в панели показала бы тридцать суток под подписью «90».
+    const { svc, окна } = сервис({ events: ЖУРНАЛ });
+    await svc.list(90, СЕЙЧАС);
+    const от = окна.at(-1)!;
+    assert.equal(Math.round((СЕЙЧАС.getTime() - от.getTime()) / 86_400_000), 90);
+    assert.equal(LIST_DAYS_MAX, 90);
+  });
+
+  it("`?days=91` зажимается до 90, а не до 30", async () => {
+    const { svc, окна } = сервис({ events: ЖУРНАЛ });
+    await svc.list(91, СЕЙЧАС);
+    assert.equal(Math.round((СЕЙЧАС.getTime() - окна.at(-1)!.getTime()) / 86_400_000), 90);
+  });
+});
+
+/** Журнал из `n` событий, все внутри окна чтения (шаг — минута, чтобы 501 строка уместилась в 14 суток). */
+const МИНУТА = 60_000;
+const журналИз = (n: number): EventRow[] =>
+  Array.from({ length: n }, (_, i) => ({
+    id: `ev-${i}`,
+    machineSerial: "2508160376",
+    machineId: "m-olma",
+    windowFrom: new Date(СЕЙЧАС.getTime() - (i + 2) * МИНУТА),
+    windowTo: new Date(СЕЙЧАС.getTime() - (i + 1) * МИНУТА),
+    units: 12,
+    slots: [],
+    matchedRefillId: null,
+  }));
+
+describe("Журнал заливок называет обрезку словами (R-FW-S7)", () => {
+  it("строк ровно по потолку — обрезки нет", async () => {
+    const { svc } = сервис({ events: журналИз(LIST_LIMIT) });
+    const ответ = await svc.list(14, СЕЙЧАС);
+    assert.equal(ответ.rows.length, LIST_LIMIT);
+    assert.equal(ответ.capped, false, "«ровно 500» — это посчитанный результат, а не обрезка");
+  });
+
+  it("строк на одну больше потолка — `capped`, и лишняя строка не показана", async () => {
+    // Лист печатал `${rows.length} событий`, то есть на переполнении говорил
+    // ровно «500 событий» — и это читалось как итог. Соседний лист истории
+    // склада тот же случай называет словами (`history_capped`).
+    const { svc } = сервис({ events: журналИз(LIST_LIMIT + 1) });
+    const ответ = await svc.list(14, СЕЙЧАС);
+    assert.equal(ответ.rows.length, LIST_LIMIT, "показываем ровно потолок, а не потолок+1");
+    assert.equal(ответ.capped, true);
+  });
+});
+
+describe("Детектор считает от ПЕРЕДАННОГО момента (R-H-7)", () => {
+  it("окно берётся от `now`, а не от часов процесса", async () => {
+    const { svc, окна } = сервис({ snapshots: ЗАЛИВКА, entities: РЕЕСТР });
+    await svc.detect(2, СЕЙЧАС);
+    assert.equal(окна[0]!.getTime(), СЕЙЧАС.getTime() - 2 * 86_400_000);
+  });
+
+  it("в ленту публикуются только окна старше MATCH_PAD_MS от переданного `now`", async () => {
+    // Окно закрылось час назад — запись оператора ещё может появиться, и
+    // строка «заливка без записи» была бы результатом гонки, а не фактом.
+    const свежее = new Date(СЕЙЧАС.getTime() - 3_600_000);
+    const { svc, лента } = сервис({ snapshots: заливкаК(свежее), entities: РЕЕСТР });
+    await svc.detect(2, СЕЙЧАС);
+    assert.deepEqual(лента.filter((f) => f.type === "vending.refill_detected"), []);
+    // Тот же журнал, но момент сдвинут на четыре часа вперёд — окно старше
+    // допуска, и факт «записи так и не появилось» уже утверждаем.
+    const позже = new Date(СЕЙЧАС.getTime() + 4 * 3_600_000);
+    await svc.detect(2, позже);
+    assert.equal(лента.filter((f) => f.type === "vending.refill_detected").length, 1);
+  });
+
+  it("журнал читается от переданного момента: то же окно, что просили", async () => {
+    const { svc, окна } = сервис({ events: ЖУРНАЛ });
+    await svc.list(14, СЕЙЧАС);
+    assert.equal(окна.at(-1)!.getTime(), СЕЙЧАС.getTime() - 14 * 86_400_000);
+  });
+});
+
+describe("Сторож правила: часов внутри детектора нет (R-H-7)", () => {
+  it("в refill-events.service.ts нет `new Date()`/`Date.now()` вне умолчаний параметров", () => {
+    // Сторож по ИСХОДНИКУ: одно забытое `new Date()` в приватном помощнике
+    // возвращает файл к стенным часам, и ни один поведенческий тест этого не
+    // покажет — он просто снова станет флаки, а флаки-тест перезапускают.
+    // Наборы Core гоняются ПО DIST (CommonJS): `import.meta.url` там нет, а
+    // `__dirname` указывает в `apps/core/dist/vending` — исходник лежит на два
+    // уровня выше, в `src/`.
+    const код = readFileSync(path.resolve(__dirname, "../../src/vending/refill-events.service.ts"), "utf8");
+    assert.equal(код.includes("Date.now()"), false, "Date.now() внутри сервиса запрещён");
+    const часы = [...код.matchAll(/new Date\(\)/g)];
+    // Разрешены ровно два вхождения — умолчания `now` у detect и list.
+    assert.equal(часы.length, 2, "new Date() допустим только как умолчание параметра now");
+    assert.match(код, /async detect\(days = DETECT_DAYS_DEFAULT, now = new Date\(\)\)/);
+    assert.match(код, /async list\(days = LIST_DAYS_DEFAULT, now = new Date\(\)\)/);
   });
 });

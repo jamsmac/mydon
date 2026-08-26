@@ -168,8 +168,9 @@ describe("лист «Усушка»", () => {
       ],
     };
     render(<ShrinkageTables report={крупный} />);
-    // Только узлы, которые проходят через n() — money() («порог», «Итого»)
-    // U+00A0 не чинит, это вне области этого пункта.
+    // Точечная проверка узлов «шт»; «порог» и «Итого» с Task 2 тоже идут через
+    // `amount()` и NBSP не несут — их байт покрывает набор
+    // «числа усушки копируются (R-H-3)» ниже, по всему рендеру разом.
     for (const el of screen.getAllByText(/12 345 шт/)) {
       expect(el.textContent).not.toMatch(/\u00a0/);
     }
@@ -247,5 +248,12 @@ describe("подпись частоты остатков", () => {
     expect(stockFreshnessNote("stock")).toBe("обновляется каждые 10 минут");
     // Ядро поля ещё не отдаёт: молчание источника не должно менять подпись.
     expect(stockFreshnessNote(undefined)).toBe("обновляется каждые 10 минут");
+  });
+});
+
+describe("числа усушки копируются (R-H-3)", () => {
+  it("в выводе листа нет неразрывного пробела", () => {
+    const { container } = render(<ShrinkageTables report={report} />);
+    expect(container.textContent ?? "").not.toContain("\u00a0");
   });
 });
