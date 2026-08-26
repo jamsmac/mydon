@@ -44,7 +44,7 @@ const здоровьеОбщее: SharedHealth = {
   productSaleLagH: 0.2,
   parityStreak: 3,
   cutoverThreshold: 7,
-  parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: "остатки: снимков остатков OurVend за период нет" },
+  parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, mode: "mirror", note: "остатки: снимков остатков OurVend за период нет" },
 };
 
 const месяцОбщий: SharedMonthly = { product: "Kinder Bueno", month: "2026-07", retail: 11_000, purchase: 7_700 };
@@ -71,6 +71,23 @@ describe("Типы панели — реэкспорт из @mydon/shared, а н
       "staleThresholdH",
     ]);
     expect(прогонПанели).toBe(прогон);
+  });
+
+  it("паритет несёт режим сверки: витрина отличает «сравнивать не с чем» от «сошлось»", () => {
+    // `mode` (R-FW-P3) — единственное, что отличает три разных «расхождений 0»:
+    // сверку с зеркалом, сверку с донором после флипа и погашенное зеркало.
+    // Потеряйся он в зеркале типов панели — секция здоровья снова рисовала бы
+    // «остатки: снимков за период нет» там, где сверять нечего по замыслу.
+    expect(Object.keys(здоровьеОбщее.parity).sort()).toEqual([
+      "checked",
+      "days",
+      "mismatches",
+      "mode",
+      "note",
+      "ok",
+      "stockChecked",
+      "stockOk",
+    ]);
   });
 
   it("помесячная цена и предупреждение — те же формы, что у ядра", () => {

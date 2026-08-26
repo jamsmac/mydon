@@ -70,7 +70,7 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     productSaleLagH: 5,
     parityStreak: 3,
     cutoverThreshold: 7,
-    parity: { days: 7, ok: true, mismatches: 0, stockOk: true, checked: 2, stockChecked: 2, note: null },
+    parity: { days: 7, ok: true, mismatches: 0, stockOk: true, checked: 2, stockChecked: 2, mode: "mirror", note: null },
   },
   warnings: [],
 };
@@ -297,6 +297,7 @@ describe("Текст недельной сводки", () => {
           mismatches: 0,
           stockOk: false,
           checked: 0, stockChecked: 0,
+          mode: "mirror",
           note:
             "собственный снапшот продаж ещё пуст — сверять нечего (агент ещё не отработал?); " +
             "остатки: снимков остатков OurVend за период нет — сверять не по чему",

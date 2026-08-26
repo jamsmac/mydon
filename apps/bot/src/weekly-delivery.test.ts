@@ -31,7 +31,7 @@ const НЕДЕЛЯ: WeeklyDigest = {
     productSaleLagH: null,
     parityStreak: 0,
     cutoverThreshold: 7,
-    parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: null },
+    parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, mode: "mirror", note: null },
   },
   warnings: [],
 };

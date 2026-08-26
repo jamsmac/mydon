@@ -11,6 +11,19 @@ const SOURCE_LABEL: Record<SystemConfigItem["source"], string> = {
   default: "по умолчанию",
 };
 
+/**
+ * ПОЧЕМУ действующее значение расходится с записанным — по ключу тумблера
+ * (R-FW-S5).
+ *
+ * Причина у каждого фолбэка своя, и придумать её из одного лишь значения
+ * нельзя: «действует own» без «(без зеркала)» владелец прочитает как чужую
+ * правку настройки, а не как фолбэк ядра. Ключей с фолбэком сегодня ровно
+ * один; появится второй — строку допишут сюда, а не в шесть витрин.
+ */
+const EFFECTIVE_WHY: Record<string, string> = {
+  OURVEND_ACCOUNTING_SOURCE: "без зеркала",
+};
+
 /** Один тумблер: контрол по типу + строка «откуда значение» + сохранение. */
 function Row({ item }: { item: SystemConfigItem }) {
   const router = useRouter();
@@ -27,6 +40,19 @@ function Row({ item }: { item: SystemConfigItem }) {
   }
 
   const dirty = value !== item.value;
+  /**
+   * Действующее значение расходится с записанным — фолбэк ядра.
+   *
+   * Прод-случай ровно один и он на пути катовера: после шага 3 рунбука
+   * `STOCK_DATABASE_URL` удалён, и `OURVEND_ACCOUNTING_SOURCE=stock` в базе
+   * действует как `own` (`accounting-source.ts`). Панель, печатающая только
+   * записанное, сказала бы «учёт из зеркала» о системе, которая считает по
+   * своей базе, — и владелец пошёл бы искать несуществующее зеркало.
+   *
+   * Поля нет (Core прошлой сборки, тумблер без фолбэка) — подписи нет: это
+   * «действует то, что записано», а не «неизвестно».
+   */
+  const действует = item.effective !== undefined && item.effective !== item.value ? item.effective : null;
 
   return (
     <div className="row" style={{ display: "block" }}>
@@ -66,6 +92,11 @@ function Row({ item }: { item: SystemConfigItem }) {
 
       <div className="form-actions">
         <span className={`pill ${item.source === "db" ? "ok" : ""}`}>{SOURCE_LABEL[item.source]}</span>
+        {действует && (
+          <span className="pill">
+            {`действует: ${действует}${EFFECTIVE_WHY[item.key] ? ` (${EFFECTIVE_WHY[item.key]})` : ""}`}
+          </span>
+        )}
         <button type="button" className="btn primary" onClick={onSave} disabled={pending || !dirty}>
           {pending ? "Сохраняю…" : "Сохранить"}
         </button>

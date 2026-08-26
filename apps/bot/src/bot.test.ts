@@ -684,8 +684,15 @@ describe("Аналитика снека: путь владельца до Core (
           slotsLagMin: null,
           salesLagH: null,
           productSaleLagH: null,
-          parity: { days: 7, ok: false, mismatches: 3, stockOk: false, stockChecked: 0, note: null },
+          parity: { days: 7, ok: false, mismatches: 3, stockOk: false, stockChecked: 0, mode: "mirror", note: null },
         };
+      },
+      // Серия по дням едет ОТДЕЛЬНЫМ роутом (P4): «сверка» зовёт оба, и
+      // список вызовов ниже это фиксирует — молчаливая потеря одного из них
+      // означала бы отчёт без даты последнего красного дня.
+      ourvendParityStreak: async () => {
+        вызовы.push("streak");
+        return { greenDays: 0, threshold: 7, readyForCutover: false, days: [], lastRed: "2026-08-25", since: null };
       },
     } as unknown as HandlerDeps["core"];
     return { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
@@ -722,7 +729,7 @@ describe("Аналитика снека: путь владельца до Core (
     await handleMessage(111, "мёртвый сток", deps(вызовы));
     await handleMessage(111, "цены", deps(вызовы));
     await handleMessage(111, "сверка", deps(вызовы));
-    assert.deepEqual(вызовы, ["margin:30", "margin:7", "margin:90", "dead:21", "changes:30", "health:20"]);
+    assert.deepEqual(вызовы, ["margin:30", "margin:7", "margin:90", "dead:21", "changes:30", "health:20", "streak"]);
   });
 
   it("маржа отвечает разбором, а не «понял»", async () => {
@@ -790,7 +797,7 @@ describe("Аналитика снека: путь владельца до Core (
       slotsLagMin: null,
       salesLagH: null,
       productSaleLagH: null,
-      parity: { days: 7, ok: true, mismatches: 0, stockOk: true, stockChecked: 2, note: null },
+      parity: { days: 7, ok: true, mismatches: 0, stockOk: true, stockChecked: 2, mode: "mirror", note: null },
     },
   };
 

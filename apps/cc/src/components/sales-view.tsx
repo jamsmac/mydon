@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { core, type SaleRow } from "../lib/core";
+import { причинаБезПродаж } from "../lib/sales-source";
 
 const money = (v: string | number) => `${Number(v).toLocaleString("ru-RU")}`;
 const day = (iso: string) => {
@@ -34,9 +35,9 @@ export async function SalesView() {
     return (
       <div className="empty">
         <b>Продаж пока нет</b>
-        {summary?.configured
-          ? "Синк работает — данные появятся после первых продаж."
-          : "Синк продаж не настроен на сервере (STOCK_DATABASE_URL)."}
+        {/* Что чинить — по ДЕЙСТВУЮЩЕМУ источнику: в режиме `own` зеркала
+            нет и быть не должно, продажи приносит агент (M2). */}
+        {summary?.configured ? "Синк работает — данные появятся после первых продаж." : причинаБезПродаж(summary?.source)}
       </div>
     );
   }

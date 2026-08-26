@@ -33,6 +33,21 @@ describe("Сводка продаж в боте", () => {
     assert.doesNotMatch(text, /0 сум/);
   });
 
+  it("режим own — зовём чинить агента, а не задавать удалённую переменную (M2)", () => {
+    // После шага 3 рунбука катовера `STOCK_DATABASE_URL` УДАЛЕНА, и
+    // `configured: false` значит «снапшот за сутки не пришёл». Старый совет
+    // отправлял владельца заводить переменную, которую он только что снёс.
+    const text = formatSalesSummary({ ...S, configured: false, lastSaleDt: null, source: "own" });
+    assert.match(text, /ourvend:accounting/);
+    assert.match(text, /снапшота за сутки нет/);
+    assert.doesNotMatch(text, /STOCK_DATABASE_URL/);
+  });
+
+  it("режим не назван (Core прошлой сборки) — прежний текст про зеркало", () => {
+    const text = formatSalesSummary({ ...S, configured: false, lastSaleDt: null });
+    assert.match(text, /STOCK_DATABASE_URL/);
+  });
+
   it("синк настроен, но данных нет — отдельная честная фраза", () => {
     const text = formatSalesSummary({ ...S, lastSaleDt: null });
     assert.match(text, /данных ещё не приносил/);

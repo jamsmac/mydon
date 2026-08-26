@@ -9,7 +9,7 @@ import type {
   PriceChangesReport,
   PriceGapReport,
 } from "@mydon/shared";
-import type { AnalyticsWarning, BootstrapSalePriceResult, OurvendHealth } from "./core-client";
+import type { AnalyticsWarning, BootstrapSalePriceResult, OurvendHealth, ParityStreak } from "./core-client";
 import {
   BOOTSTRAP_DAYS_MAX,
   MARGIN_DAYS_DEFAULT,
@@ -20,6 +20,7 @@ import {
   паритетСтрока,
   состояниеСбора,
   строкаЗастоя,
+  строкаКрасногоДня,
   строкаСерии,
   строкаСнапшота,
   capped,
@@ -213,6 +214,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
     mismatches: 3,
     stockOk: false,
     checked: 0, stockChecked: 0,
+    // До катовера сверка идёт с зеркалом донора (R-FW-P3).
+    mode: "mirror",
     note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
   },
 };
@@ -463,6 +466,7 @@ describe("Тексты отчётов", () => {
       mismatches: 0,
       stockOk: false,
       checked: 14, stockChecked: 0,
+      mode: "mirror",
       note: "остатки: снимков остатков OurVend за период нет — сверять не по чему",
     });
     assert.match(t, /продажи ✅/);
@@ -473,7 +477,7 @@ describe("Тексты отчётов", () => {
   });
 
   it("паритет: настоящее расхождение остаётся красным", () => {
-    const t = паритетСтрока({ days: 7, ok: false, mismatches: 3, stockOk: true, checked: 14, stockChecked: 14, note: null });
+    const t = паритетСтрока({ days: 7, ok: false, mismatches: 3, stockOk: true, checked: 14, stockChecked: 14, mode: "mirror", note: null });
     assert.match(t, /продажи ❌ расхождений 3/);
     assert.match(t, /остатки ✅/);
   });
@@ -595,6 +599,12 @@ describe("«сверка»: серия зелёных дней (R-P8b-2)", () =>
   it("порог взят — сказано, что можно переключать", () => {
     assert.match(строкаСерии(h({ parityStreak: 7, cutoverThreshold: 7 })), /✅ можно переключать/);
   });
+  it("один день серии — «1 зелёный дн.», а не «1 зелёных дн.»", () => {
+    // День 1 КАЖДОЙ серии — самый частый момент, когда владелец читает эту
+    // строку: она отвечает «сколько ещё ждать». Форма «зелёных» у 3 и 7 та
+    // же, поэтому склонение видно только здесь.
+    assert.match(строкаСерии(h({ parityStreak: 1, cutoverThreshold: 7 })), /1 зелёный дн\. подряд из 7/);
+  });
   it("серии нет — так и написано, а не «0 зелёных»", () => {
     // Ноль в этой строке читается как «сегодня не сошлось», а на деле это
     // может быть «сверок ещё не было ни одной» — разные починки.
@@ -614,11 +624,23 @@ describe("«сверка»: серия зелёных дней (R-P8b-2)", () =>
 
 describe("«сверка»: застой учётного снапшота (R-P8b-5)", () => {
   const h = (over: Partial<OurvendHealth>): OurvendHealth => ({ ...ЗДОРОВЬЕ, ...over });
-  it("флаг поднят — строка ⛔ с давностью снимка", () => {
-    assert.match(строкаСнапшота(h({ snapshotStale: true, salesLagH: 41 }))!, /⛔ учётный снапшот.*41 ч/);
+  it("флаг поднят — строка ⛔ с давностью снимка, и давность НАЗВАНА половиной", () => {
+    // Застой считается по обеим таблицам снапшота (R-FW-P2), а в ответе едет
+    // возраст только продажной: без подписи «снимок продаж» свежие 0,3 ч при
+    // вставших остатках читались бы как опечатка отчёта.
+    const s = строкаСнапшота(h({ snapshotStale: true, salesLagH: 41 }))!;
+    assert.match(s, /⛔ учётный снапшот.*41 ч/);
+    assert.match(s, /снимок продаж — 41 ч/);
   });
   it("флаг снят — строки нет вовсе", () => {
     assert.equal(строкаСнапшота(h({ snapshotStale: false })), null);
+  });
+  it("снимков нет вовсе — так и сказано, а не «0 ч»", () => {
+    // Ноль часов читается как «только что сняли», то есть ровно наоборот
+    // (то же правило, что у лагов и `staleHours`).
+    const s = строкаСнапшота(h({ snapshotStale: true, salesLagH: null }))!;
+    assert.match(s, /⛔ учётный снапшот.*снимков продаж нет/);
+    assert.ok(!s.includes("0 ч"), s);
   });
   it("строка идёт сразу за строкой застоя сбора: обе про «данные не едут»", () => {
     // См. комментарий выше: части телеграм-сообщения — не строки, сравниваем
@@ -627,6 +649,91 @@ describe("«сверка»: застой учётного снапшота (R-P8
     const i = строки.findIndex((s) => /⛔ сбор стоит 9 ч/.test(s));
     assert.notEqual(i, -1);
     assert.match(строки[i + 1]!, /⛔ учётный снапшот/);
+  });
+});
+
+/** Паритет в заданном режиме сверки (R-FW-P3) поверх фикстуры здоровья. */
+const сРежимом = (mode: OurvendHealth["parity"]["mode"]): OurvendHealth["parity"] => ({
+  ...ЗДОРОВЬЕ.parity,
+  mode,
+});
+
+const СЕРИЯ: ParityStreak = {
+  greenDays: 3,
+  threshold: 7,
+  readyForCutover: false,
+  days: [
+    { date: "2026-08-26", ok: true, salesChecked: 14, stockChecked: 68, note: null },
+    { date: "2026-08-25", ok: true, salesChecked: 14, stockChecked: 68, note: null },
+    { date: "2026-08-24", ok: true, salesChecked: 14, stockChecked: 68, note: null },
+  ],
+  // Красный день ВНЕ окна показа (две недели) — ровно прод-случай: 25.08
+  // держится в поле до конца октября, серия при этом идёт с 26-го.
+  lastRed: "2026-08-06",
+  since: "2026-08-24",
+};
+
+describe("«сверка»: последний красный день — факт, а не приговор серии (P4)", () => {
+  const h = (over: Partial<OurvendHealth>): OurvendHealth => ({ ...ЗДОРОВЬЕ, ...over });
+
+  it("красный день вне окна показа печатается датой, а не «серия сорвана»", () => {
+    const s = строкаКрасногоДня(СЕРИЯ);
+    assert.match(s, /последний красный день: 06\.08/);
+    assert.ok(!/сорва|сброш|обнул/i.test(s), `серию рвать нечем: ${s}`);
+  });
+
+  it("красных дней не было — так и сказано, а не молчанием", () => {
+    assert.equal(строкаКрасногоДня({ ...СЕРИЯ, lastRed: null }), "красных дней не было");
+  });
+
+  it("строка стоит под серией — она объясняет её длину", () => {
+    const строки = formatOurvendHealth(h({ parityStreak: 3 }), СЕРИЯ).join("\n").split("\n");
+    const i = строки.findIndex((s) => /зелёных дн\. подряд/.test(s));
+    assert.notEqual(i, -1);
+    assert.match(строки[i + 1]!, /последний красный день: 06\.08/);
+  });
+
+  it("серия не приехала (отказ роута) — отчёт печатается без строки, а не падает", () => {
+    const t = formatOurvendHealth(h({ parityStreak: 3 })).join("\n");
+    assert.match(t, /зелёных дн\. подряд/);
+    assert.ok(!t.includes("последний красный день"), t);
+  });
+});
+
+describe("«сверка»: зеркала больше нет — режим retired (R-FW-P3)", () => {
+  const h = (over: Partial<OurvendHealth>): OurvendHealth => ({ ...ЗДОРОВЬЕ, ...over });
+
+  it("сверка своего снапшота с донором (после флипа) печатается как обычная — половинами", () => {
+    // `own-vs-donor` — это ЕСТЬ сверка: вторая сторона на месте, вердикт
+    // осмыслен. Гасить половины можно только там, где сравнивать не с чем.
+    const s = паритетСтрока(сРежимом("own-vs-donor"));
+    assert.match(s, /продажи|остатки/);
+    assert.ok(!s.includes("сравнивать больше не с чем"), s);
+  });
+
+  it("паритет говорит «сравнивать больше не с чем», а не «расхождений 3»", () => {
+    const s = паритетСтрока(сРежимом("retired"));
+    assert.match(s, /сверка с зеркалом завершена — сравнивать больше не с чем/);
+    assert.ok(!/❌|✅|расхождени/.test(s), `ни красного, ни зелёного вердикта здесь быть не может: ${s}`);
+  });
+
+  it("серия не считается и переключать учёт больше не зовут", () => {
+    // `parityStreak` в этом режиме приезжает нулём: серию Core не считает.
+    // Прежний текст «серии нет» читался бы как «сегодня не сошлось».
+    const s = строкаСерии(h({ parity: сРежимом("retired"), parityStreak: 0 }));
+    assert.match(s, /зеркало погашено/);
+    assert.ok(!s.includes("можно переключать"), s);
+    assert.ok(!s.includes("серии нет"), s);
+  });
+
+  it("даже на взятом пороге зова к катоверу нет — катовер уже позади", () => {
+    const s = строкаСерии(h({ parity: сРежимом("retired"), parityStreak: 7, cutoverThreshold: 7 }));
+    assert.ok(!s.includes("можно переключать"), s);
+  });
+
+  it("старый красный день в отчёт не лезет: серии, которую он объяснял бы, нет", () => {
+    const t = formatOurvendHealth(h({ parity: сРежимом("retired") }), СЕРИЯ).join("\n");
+    assert.ok(!t.includes("последний красный день"), t);
   });
 });
 
@@ -649,7 +756,7 @@ describe("Пустые состояния и предупреждения (ре�
       productSaleLagH: null,
       parityStreak: 0,
       cutoverThreshold: 7,
-      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, note: null },
+      parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, mode: "mirror", note: null },
     }).join("\n");
     assert.match(t, /Прогонов сбора за период нет — здоровье не оценить/);
     assert.ok(!t.includes("✅ Отказов подряд нет"));

@@ -6,6 +6,7 @@ import type {
   MarginReport,
   MonthlyPrice,
   OurvendHealth,
+  ParityStreak,
   PriceChangesReport,
   PriceGapReport,
   SetSalePriceResult,
@@ -404,6 +405,7 @@ export type {
   MonthlyPrice,
   OurvendHealth,
   OurvendSyncRun,
+  ParityStreak,
   SetSalePriceResult,
   WeeklyDigest,
   WeeklyDigestMachine,
@@ -604,6 +606,18 @@ export class CoreClient {
   /** Здоровье сбора OurVend: прогоны, серия отказов, лаги, паритет (R-P5b-8). */
   ourvendHealth(runs = 20): Promise<OurvendHealth> {
     return this.request<OurvendHealth>(`/ourvend/health?runs=${runs}`);
+  }
+
+  /**
+   * Серия зелёных дней паритета по дням (R-P8b-2, P4).
+   *
+   * Отдельный роут, а не поле здоровья: `/ourvend/health` несёт СЧЁТ
+   * (`parityStreak`, `cutoverThreshold`), а по дням журнала и по дате
+   * последнего красного дня отвечает только этот — считает он по всему окну
+   * чтения, а не по семидневной витрине паритета.
+   */
+  ourvendParityStreak(): Promise<ParityStreak> {
+    return this.request<ParityStreak>("/ourvend/parity/streak");
   }
 
   // ── Сигналы GLOBERENT для брифинга (перенос PROMACH) ──
