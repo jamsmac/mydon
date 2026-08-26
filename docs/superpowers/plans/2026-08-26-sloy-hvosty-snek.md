@@ -154,7 +154,7 @@ export async function StockHistoryView(
 - `history_capped` НЕ покрыт: про обрезку окна лист сам не говорит, её печатает хвост «Посчитано не всё».
 - Переключатель окна — существующий `<ReportWindow>` и его `?days=`-ссылки; они не несут `?q=`, то есть смена окна сбрасывает фильтр по товару — ровно как на трёх соседних листах П5b. Это сказано докблоком, а не оставлено сюрпризом; расширять общий компонент ради одного листа — вне охвата (R-H-1).
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/vending/vending.service.test.ts — правка набора «чтение истории склада»
 // 1) тип фикстуры и фабрика получают пометку
@@ -339,10 +339,10 @@ describe("навигация: лист «История склада»", () => {
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → RED («note» нет в ответе, `since` не существует); `pnpm --filter cc test` → RED («Cannot find module ./stock-history-view»).
-- [ ] **Step 3: Общий контракт.** `packages/shared/src/vending-reports.ts`: `note: string | null` в `StockCountRow` и `since: string` в `StockCountsReport` — с докблоками из «Interfaces (produces)» выше. Докблок `note` обязан назвать ОБА смысла и источник каждого: это единственное место, где различие записано в типе, и первый же читатель без него подпишет всё «местом».
-- [ ] **Step 4: Core.** `vending.service.ts`, `stockCounts()`: `note: vendingStockCount.note` в `select` (после `countedAt`), `note: r.note` в маппинге строк, `since` — в `return { days: дни, since, product: канон, rows: строки, warnings }`. Больше в Core ничего: окно, потолки, кеш, троттл и оба предупреждения остаются как есть (R-H-2).
-- [ ] **Step 5: Клиент панели.** `apps/cc/src/lib/core.ts`: в блок `export type { … } from "@mydon/shared"` (`:308-325`) — `StockCountRow, StockCountsReport`; рядом с `vendingDeadStock` (`:2392`):
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → RED («note» нет в ответе, `since` не существует); `pnpm --filter cc test` → RED («Cannot find module ./stock-history-view»).
+- [x] **Step 3: Общий контракт.** `packages/shared/src/vending-reports.ts`: `note: string | null` в `StockCountRow` и `since: string` в `StockCountsReport` — с докблоками из «Interfaces (produces)» выше. Докблок `note` обязан назвать ОБА смысла и источник каждого: это единственное место, где различие записано в типе, и первый же читатель без него подпишет всё «местом».
+- [x] **Step 4: Core.** `vending.service.ts`, `stockCounts()`: `note: vendingStockCount.note` в `select` (после `countedAt`), `note: r.note` в маппинге строк, `since` — в `return { days: дни, since, product: канон, rows: строки, warnings }`. Больше в Core ничего: окно, потолки, кеш, троттл и оба предупреждения остаются как есть (R-H-2).
+- [x] **Step 5: Клиент панели.** `apps/cc/src/lib/core.ts`: в блок `export type { … } from "@mydon/shared"` (`:308-325`) — `StockCountRow, StockCountsReport`; рядом с `vendingDeadStock` (`:2392`):
 ```ts
   /** История пересчётов склада (П8a). Окно зажимает ядро: 1..730, дефолт 90. */
   vendingStockCounts: (days = 90, product?: string) =>
@@ -350,7 +350,7 @@ describe("навигация: лист «История склада»", () => {
       `/vending/stock-counts?days=${days}${product ? `&product=${encodeURIComponent(product)}` : ""}`,
     ),
 ```
-- [ ] **Step 6: Лист.** `apps/cc/src/components/stock-history-view.tsx` по образцу `dead-stock-view.tsx`:
+- [x] **Step 6: Лист.** `apps/cc/src/components/stock-history-view.tsx` по образцу `dead-stock-view.tsx`:
 ```tsx
 import { core, CoreUnavailable, type StockCountRow, type StockCountsReport } from "../lib/core";
 import { CoreDown } from "./core-down";
@@ -494,7 +494,7 @@ export async function StockHistoryView({ domain, days, q }: { domain: string; da
  */
 export const COVERED_BY_STOCK_HISTORY: AnalyticsWarningCode[] = ["stock_missing"];
 ```
-- [ ] **Step 7: Навигация и страница.** `domain-nav.ts`, в `VENDHUB_GROUPS` → `reports`, сразу за `{ label: "Приход", type: "purchase" }` (`:123`):
+- [x] **Step 7: Навигация и страница.** `domain-nav.ts`, в `VENDHUB_GROUPS` → `reports`, сразу за `{ label: "Приход", type: "purchase" }` (`:123`):
 ```ts
       // «Хвосты» (R-H-2): приход отвечает «что привезли», история склада —
       // «что лежало». 460 импортированных инвентаризаций (П8a) до этого листа
@@ -508,7 +508,7 @@ export const COVERED_BY_STOCK_HISTORY: AnalyticsWarningCode[] = ["stock_missing"
   "stock_history",
 ```
 `page.tsx`: импорт рядом с `DeadStockView` (`:67`) — `import { STOCK_HISTORY_WINDOWS, StockHistoryView } from "../../../components/stock-history-view";`; разбор окна рядом с `deadStockDays` (`:699`) — `const stockHistoryDays = (STOCK_HISTORY_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 90;`; рендер рядом с `dead_stock` (`:1986`) — `{group && leaf?.type === "stock_history" && <StockHistoryView domain={domain} days={stockHistoryDays} q={q ?? ""} />}`; `"stock_history"` — в список исключений generic-книги (`:2490-2523`, рядом с `"dead_stock"`).
-- [ ] **Step 8: Смоук и документация.** В `tools/smoke-core.mjs`, шаг `/vending/stock-counts?days=90` (`:88`) дополнить:
+- [x] **Step 8: Смоук и документация.** В `tools/smoke-core.mjs`, шаг `/vending/stock-counts?days=90` (`:88`) дополнить:
 ```js
       if (typeof о?.since !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(о.since))
         throw new Error(`stock-counts.since=${о?.since} — не голые сутки YYYY-MM-DD`);
@@ -524,8 +524,8 @@ export const COVERED_BY_STOCK_HISTORY: AnalyticsWarningCode[] = ["stock_missing"
   { path: "/domain/vendhub?tab=reports:stock_history", должно: "Пересчёты склада" },
 ```
 `docs/DATA_SOURCES.md`, к абзацу «История пересчётов живёт в `vending_stock_count`» (`:961`) — дописать: где смотреть («панель → Отчёты → **История склада**», окна 30/90/365/730) и что `note` значит РАЗНОЕ у разных источников — у `source='own'` это КТО считал, у `source='stock-import'` МЕСТО донора; лист подписывает группу по источнику, и читать `note` как «склад» безусловно нельзя.
-- [ ] **Step 9:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test && pnpm --filter cc test` → GREEN. `pnpm -s typecheck`. Локально на scratch-БД: `node tools/smoke-core.mjs` — шаг истории склада зелёный.
-- [ ] **Step 10:** `git commit -m "feat(cc,core,shared): лист «История склада» — 460 инвентаризаций получили витрину (хвосты, R-H-2)" -- packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts apps/core/src/vending/vending.service.ts apps/core/src/vending/vending.service.test.ts apps/cc/src/lib/core.ts apps/cc/src/lib/domain-nav.ts apps/cc/src/components/stock-history-view.tsx apps/cc/src/components/stock-history-view.test.tsx apps/cc/src/components/report-warnings.tsx "apps/cc/src/app/domain/[domain]/page.tsx" tools/smoke-core.mjs tools/smoke-panel.mjs docs/DATA_SOURCES.md`
+- [x] **Step 9:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test && pnpm --filter cc test` → GREEN. `pnpm -s typecheck`. Локально на scratch-БД: `node tools/smoke-core.mjs` — шаг истории склада зелёный.
+- [x] **Step 10:** `git commit -m "feat(cc,core,shared): лист «История склада» — 460 инвентаризаций получили витрину (хвосты, R-H-2)" -- packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts apps/core/src/vending/vending.service.ts apps/core/src/vending/vending.service.test.ts apps/cc/src/lib/core.ts apps/cc/src/lib/domain-nav.ts apps/cc/src/components/stock-history-view.tsx apps/cc/src/components/stock-history-view.test.tsx apps/cc/src/components/report-warnings.tsx "apps/cc/src/app/domain/[domain]/page.tsx" tools/smoke-core.mjs tools/smoke-panel.mjs docs/DATA_SOURCES.md`
 
 ---
 
@@ -545,7 +545,7 @@ export const COVERED_BY_STOCK_HISTORY: AnalyticsWarningCode[] = ["stock_missing"
 - `supply-views.tsx`: локальная `money` удаляется с СОХРАНЕНИЕМ ветки `null → "—"`: `PurchaseRow.total` — `string | null`, и ноль вместо прочерка читался бы как «партия на ноль сум».
 - `vending-panel.tsx`: локальная `sum` удаляется, её вызовы и четыре голых `toLocaleString("ru-RU")` → `count`. Форматирование ДАТЫ на `:47` (`toLocaleString("ru-RU", { timeZone: … })`) не трогаем — это не форматтер чисел (см. «Отклонения» №2).
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/cc/src/lib/format.test.ts — новый файл
 import { describe, expect, it } from "vitest";
@@ -633,8 +633,8 @@ describe("числа плана закупа копируются (R-H-3)", () =
 });
 ```
 > Имена фикстуры и экспортируемой таблицы в `purchase-plan-view.test.tsx` берутся ИЗ ФАЙЛА как есть — он уже существует и уже рендерит план; новый тест только дописывает утверждение к тому, что там отрисовано.
-- [ ] **Step 2:** `pnpm --filter cc test` → RED (сторож падает на всех пяти файлах; тест байта — на усушке и плане).
-- [ ] **Step 3: Докблок `money()`.** `apps/cc/src/lib/format.ts`, заменить однострочный комментарий над `money` (`:14`):
+- [x] **Step 2:** `pnpm --filter cc test` → RED (сторож падает на всех пяти файлах; тест байта — на усушке и плане).
+- [x] **Step 3: Докблок `money()`.** `apps/cc/src/lib/format.ts`, заменить однострочный комментарий над `money` (`:14`):
 ```ts
 /**
  * Сумма с разделителями разрядов. Валюта проекта — сум.
@@ -647,10 +647,10 @@ describe("числа плана закупа копируются (R-H-3)", () =
  * `money()`, это регрессия, а не выбор, и её ловит `snack-format.test.tsx`.
  */
 ```
-- [ ] **Step 4: Усушка и план закупа.** `shrinkage-view.tsx`: `import { amount, count, plural } from "../lib/format";`, удалить локальную `n` вместе с её объясняющим комментарием (`:17-21`), `n(` → `count(`, `money(` → `amount(`. `purchase-plan-view.tsx`: `import { count, when } from "../lib/format";`, удалить `const n = …` (`:11`), `n(` → `count(`; `day` (`toLocaleDateString`) оставить.
-- [ ] **Step 5: Продажи, приход, панель вендинга.** `sales-view.tsx`: удалить `const money = …` (`:4`), `import { count } from "../lib/format";`, вызовы на числах → `count(v)`, на строках (`r.amount`) → `count(Number(r.amount))`. `supply-views.tsx`: удалить `const money = …` (`:5-6`), `import { count } from "../lib/format";`, места `:93` и `:116` → `count(Number(v))` с СОХРАНЁННОЙ веткой `null → "—"` (ноль вместо прочерка читался бы как «партия на ноль сум»). `vending-panel.tsx`: удалить `const sum = …` (`:240`), добавить `count` в существующий импорт из `../lib/format`, `sum(` → `count(`, четыре голых `X.toLocaleString("ru-RU")` (`:254`, `:271`, `:393`, `:418`) → `count(X)`.
-- [ ] **Step 6:** `pnpm --filter cc test` → GREEN; `pnpm -s typecheck`. Глазами: `pnpm --filter cc dev` + «Отчёты → Усушка» — сумма копируется и находится `Ctrl+F` по странице.
-- [ ] **Step 7:** `git commit -m "fix(cc): числа снек-листов без неразрывного пробела — сумма из панели снова находится поиском (хвосты, R-H-3)" -- apps/cc/src/lib/format.ts apps/cc/src/lib/format.test.ts apps/cc/src/components/snack-format.test.tsx apps/cc/src/components/shrinkage-view.tsx apps/cc/src/components/shrinkage-view.test.tsx apps/cc/src/components/purchase-plan-view.tsx apps/cc/src/components/purchase-plan-view.test.tsx apps/cc/src/components/sales-view.tsx apps/cc/src/components/supply-views.tsx apps/cc/src/components/vending-panel.tsx`
+- [x] **Step 4: Усушка и план закупа.** `shrinkage-view.tsx`: `import { amount, count, plural } from "../lib/format";`, удалить локальную `n` вместе с её объясняющим комментарием (`:17-21`), `n(` → `count(`, `money(` → `amount(`. `purchase-plan-view.tsx`: `import { count, when } from "../lib/format";`, удалить `const n = …` (`:11`), `n(` → `count(`; `day` (`toLocaleDateString`) оставить.
+- [x] **Step 5: Продажи, приход, панель вендинга.** `sales-view.tsx`: удалить `const money = …` (`:4`), `import { count } from "../lib/format";`, вызовы на числах → `count(v)`, на строках (`r.amount`) → `count(Number(r.amount))`. `supply-views.tsx`: удалить `const money = …` (`:5-6`), `import { count } from "../lib/format";`, места `:93` и `:116` → `count(Number(v))` с СОХРАНЁННОЙ веткой `null → "—"` (ноль вместо прочерка читался бы как «партия на ноль сум»). `vending-panel.tsx`: удалить `const sum = …` (`:240`), добавить `count` в существующий импорт из `../lib/format`, `sum(` → `count(`, четыре голых `X.toLocaleString("ru-RU")` (`:254`, `:271`, `:393`, `:418`) → `count(X)`.
+- [x] **Step 6:** `pnpm --filter cc test` → GREEN; `pnpm -s typecheck`. Глазами: `pnpm --filter cc dev` + «Отчёты → Усушка» — сумма копируется и находится `Ctrl+F` по странице.
+- [x] **Step 7:** `git commit -m "fix(cc): числа снек-листов без неразрывного пробела — сумма из панели снова находится поиском (хвосты, R-H-3)" -- apps/cc/src/lib/format.ts apps/cc/src/lib/format.test.ts apps/cc/src/components/snack-format.test.tsx apps/cc/src/components/shrinkage-view.tsx apps/cc/src/components/shrinkage-view.test.tsx apps/cc/src/components/purchase-plan-view.tsx apps/cc/src/components/purchase-plan-view.test.tsx apps/cc/src/components/sales-view.tsx apps/cc/src/components/supply-views.tsx apps/cc/src/components/vending-panel.tsx`
 
 ---
 
@@ -698,7 +698,7 @@ export async function backfillProductIds(
 - `main()`: `--apply` и `--dry-run` вместе — отказ с текстом и `exit(1)`, дословно приёмом `import-stock-history.ts:663-666`. **Без флагов — ЗАПИСЬ**, как сегодня: `.github/workflows/ci.yml:82` зовёт скрипт без аргументов, и весь смысл того шага — исполнить настоящий `UPDATE` против настоящего Postgres (сценарий N2). `--apply` — явный синоним умолчания.
 - Шапка файла дописывается: целей четыре, `vending_refill` и `vending_stock_count` добавлены потому, что импорт истории честно назвал владельцу 11 неопознанных имён (`import-stock-history.ts:624-628`), но привязать их после заведения карточек было нечем — петля «скрипт назвал проблему → владелец починил → система подхватила» была разомкнута в последнем звене.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // packages/db/src/backfill-product-ids.test.ts — дописать
 import { BACKFILL_TARGETS, backfillProductIds, бэкфиллWhere, resolveProductIds } from "./backfill-product-ids";
@@ -774,10 +774,10 @@ describe("Бэкфилл product_id: четыре цели, включая за�
 });
 ```
 > Существующие наборы файла (резолв имени, предикат `бэкфиллWhere` для `vending_stock`/`machine_slot`) НЕ трогаются — они и есть доказательство, что правило резолва не поехало.
-- [ ] **Step 2:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → RED (`BACKFILL_TARGETS` не экспортируется, `backfillProductIds` не принимает `opts`).
-- [ ] **Step 3: Обобщить типы и завести цели.** В `backfill-product-ids.ts`: импорт `import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";` и `vendingRefill`, `vendingStockCount` из `./schema`; `бэкфиллWhere(nameColumn: AnyPgColumn, idColumn: AnyPgColumn, raw: string)` — тело без изменений; `backfillTable(db, t: BackfillTarget, products, aliases, dryRun)`; `BACKFILL_TARGETS` по интерфейсу выше. Комментарий у `BACKFILL_TARGETS`: почему цели перечислены ДАННЫМИ, а не четырьмя вызовами подряд — отчёт, тест и выкаточная команда обязаны говорить об одном и том же списке, и четвёртая цель, забытая в одном из трёх мест, — это ровно тот дефект, который здесь и чинится.
-- [ ] **Step 4: Примерка.** `backfillTable` при `dryRun` считает кандидатов тем же `select … where isNull(idColumn)` и НЕ выполняет `update`. `backfillProductIds(db, opts)` возвращает `Record<key, BackfillResult>` по циклу над `BACKFILL_TARGETS`. `отчёт(что, r, dryRun)` печатает `обновлено N` либо `обновилось БЫ N`, дальше — прежний хвост `осталось NULL M (имена…)`.
-- [ ] **Step 5: Точка входа.** `main()`:
+- [x] **Step 2:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → RED (`BACKFILL_TARGETS` не экспортируется, `backfillProductIds` не принимает `opts`).
+- [x] **Step 3: Обобщить типы и завести цели.** В `backfill-product-ids.ts`: импорт `import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";` и `vendingRefill`, `vendingStockCount` из `./schema`; `бэкфиллWhere(nameColumn: AnyPgColumn, idColumn: AnyPgColumn, raw: string)` — тело без изменений; `backfillTable(db, t: BackfillTarget, products, aliases, dryRun)`; `BACKFILL_TARGETS` по интерфейсу выше. Комментарий у `BACKFILL_TARGETS`: почему цели перечислены ДАННЫМИ, а не четырьмя вызовами подряд — отчёт, тест и выкаточная команда обязаны говорить об одном и том же списке, и четвёртая цель, забытая в одном из трёх мест, — это ровно тот дефект, который здесь и чинится.
+- [x] **Step 4: Примерка.** `backfillTable` при `dryRun` считает кандидатов тем же `select … where isNull(idColumn)` и НЕ выполняет `update`. `backfillProductIds(db, opts)` возвращает `Record<key, BackfillResult>` по циклу над `BACKFILL_TARGETS`. `отчёт(что, r, dryRun)` печатает `обновлено N` либо `обновилось БЫ N`, дальше — прежний хвост `осталось NULL M (имена…)`.
+- [x] **Step 5: Точка входа.** `main()`:
 ```ts
   const apply = process.argv.includes("--apply");
   const dryRun = process.argv.includes("--dry-run");
@@ -792,7 +792,7 @@ describe("Бэкфилл product_id: четыре цели, включая за�
   const итог = await backfillProductIds(createDb(url), { dryRun });
   for (const t of BACKFILL_TARGETS) отчёт(t.name, итог[t.key], dryRun);
 ```
-- [ ] **Step 6: `docs/DEPLOY.md`.** Новый подраздел сразу после «Разовый перенос истории склада (П8a)» (после абзаца про `</dev/null`, `:121`):
+- [x] **Step 6: `docs/DEPLOY.md`.** Новый подраздел сразу после «Разовый перенос истории склада (П8a)» (после абзаца про `</dev/null`, `:121`):
 ```
 ### Разовый бэкфилл `product_id` (П4 → «Хвосты»)
 
@@ -812,8 +812,8 @@ docker exec -i mydon-core node packages/db/dist/backfill-product-ids.js --apply 
 скрипта уходит в контейнер и шаги после молча не выполняются.
 ```
 (в самом файле блок команд обрамить тройными обратными кавычками с `bash`).
-- [ ] **Step 7:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node packages/db/dist/backfill-product-ids.js --dry-run` — четыре строки отчёта со словами «обновилось БЫ»; затем без флагов — четыре строки «обновлено», повторный прогон — нули по всем четырём.
-- [ ] **Step 8:** `git commit -m "feat(db): бэкфилл product_id дотягивается до заливок и истории склада, флаги --dry-run/--apply (хвосты, R-H-4)" -- packages/db/src/backfill-product-ids.ts packages/db/src/backfill-product-ids.test.ts docs/DEPLOY.md`
+- [x] **Step 7:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node packages/db/dist/backfill-product-ids.js --dry-run` — четыре строки отчёта со словами «обновилось БЫ»; затем без флагов — четыре строки «обновлено», повторный прогон — нули по всем четырём.
+- [x] **Step 8:** `git commit -m "feat(db): бэкфилл product_id дотягивается до заливок и истории склада, флаги --dry-run/--apply (хвосты, R-H-4)" -- packages/db/src/backfill-product-ids.ts packages/db/src/backfill-product-ids.test.ts docs/DEPLOY.md`
 
 ---
 
@@ -851,7 +851,7 @@ export async function RefillEventsView({ domain, days }: { domain: string; days:
 - Пустое состояние — третье состояние: «За N дн. детектор заливок не находил. Он смотрит снимки слотов каждые 3 часа и пишет событие при приходе от `REFILL_DETECT_MIN_UNITS` единиц — пусто значит «не привозили», а не «не считали».»
 - `@Throttle` у `GET /vending/refill-events` НЕ заводим: у роута его нет сегодня, добавление лимитера — не одна из восьми задач описи (R-H-1), а выборка зажата `LIST_LIMIT = 500` по индексированной колонке.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/vending/refill-events.service.test.ts — дописать
 import { LIST_DAYS_MAX, RefillEventsService } from "./refill-events.service";
@@ -986,8 +986,8 @@ describe("навигация: лист «Журнал заливок»", () => {
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`LIST_DAYS_MAX` не экспортируется, `days=91` зажимается до 30, DTO отбивает 90); `pnpm --filter cc test` → RED («Cannot find module ./refill-events-view»).
-- [ ] **Step 3: Свой потолок чтения.** `refill-events.service.ts`: `LIST_DAYS_MAX = 90` с докблоком из «Interfaces (produces)» — рядом с `LIST_DAYS_DEFAULT`; в `list()` — `зажать(days, LIST_DAYS_DEFAULT, LIST_DAYS_MAX)`. `vending.controller.ts`: `@Max(90)` в `RefillEventsListDto` плюс докблок:
+- [x] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`LIST_DAYS_MAX` не экспортируется, `days=91` зажимается до 30, DTO отбивает 90); `pnpm --filter cc test` → RED («Cannot find module ./refill-events-view»).
+- [x] **Step 3: Свой потолок чтения.** `refill-events.service.ts`: `LIST_DAYS_MAX = 90` с докблоком из «Interfaces (produces)» — рядом с `LIST_DAYS_DEFAULT`; в `list()` — `зажать(days, LIST_DAYS_DEFAULT, LIST_DAYS_MAX)`. `vending.controller.ts`: `@Max(90)` в `RefillEventsListDto` плюс докблок:
 ```ts
 /**
  * Окно журнала детектора. Потолок 90, а НЕ 30: тридцать суток — это потолок
@@ -997,7 +997,7 @@ describe("навигация: лист «Журнал заливок»", () => {
  * шире зажима, молча отдаёт не то окно, которое просили (как у `StockCountsDto`).
  */
 ```
-- [ ] **Step 4: Лист.** `apps/cc/src/components/refill-events-view.tsx`:
+- [x] **Step 4: Лист.** `apps/cc/src/components/refill-events-view.tsx`:
 ```tsx
 import { core, CoreUnavailable, type VendingRefillEvent } from "../lib/core";
 import { CoreDown } from "./core-down";
@@ -1083,14 +1083,14 @@ export async function RefillEventsView({ domain, days }: { domain: string; days:
   );
 }
 ```
-- [ ] **Step 5: Навигация и страница.** `domain-nav.ts`, в `reports` сразу за `{ label: "Усушка", type: "shrinkage" }` (`:131`):
+- [x] **Step 5: Навигация и страница.** `domain-nav.ts`, в `reports` сразу за `{ label: "Усушка", type: "shrinkage" }` (`:131`):
 ```ts
       // «Хвосты» (R-H-5): усушка говорит, КУДА делось, журнал — ЧТО привезли.
       // Клиент `vendingRefillEvents` жил без единого вызова с самого П4.
       { label: "Журнал заливок", type: "refill_events" },
 ```
 В `TABLE_BACKED_LEAVES` — `"refill_events"` с комментарием «считается на чтении (`/vending/refill-events`), своих карточек реестра не заводит». `page.tsx`: импорт `{ REFILL_EVENT_WINDOWS, RefillEventsView }`; `const refillEventDays = (REFILL_EVENT_WINDOWS as readonly number[]).includes(Number(sp.days)) ? Number(sp.days) : 14;`; рендер `{group && leaf?.type === "refill_events" && <RefillEventsView domain={domain} days={refillEventDays} />}`; `"refill_events"` — в список исключений generic-книги.
-- [ ] **Step 6: Смоук.** В `tools/smoke-core.mjs` рядом с существующим `"/vending/refill-events?days=14"` (`:81`):
+- [x] **Step 6: Смоук.** В `tools/smoke-core.mjs` рядом с существующим `"/vending/refill-events?days=14"` (`:81`):
 ```js
   {
     // «Хвосты» (R-H-5): потолок ЧТЕНИЯ журнала — 90, а не чужие 30. Юнит на
@@ -1108,8 +1108,8 @@ export async function RefillEventsView({ domain, days }: { domain: string; days:
   },
 ```
 В `tools/smoke-panel.mjs` рядом с листами отчётов: `{ path: "/domain/vendhub?tab=reports:refill_events", должно: "Журнал заливок" }` — с комментарием, что слово берётся из содержимого листа, а не из чипа навигации.
-- [ ] **Step 7:** `pnpm --filter core build && pnpm --filter core test && pnpm --filter cc test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs` (шаг `days=90` зелёный), `node tools/smoke-panel.mjs`.
-- [ ] **Step 8:** `git commit -m "feat(cc,core): лист «Журнал заливок» и собственный потолок чтения журнала 90 суток (хвосты, R-H-5)" -- apps/core/src/vending/refill-events.service.ts apps/core/src/vending/refill-events.service.test.ts apps/core/src/vending/vending.controller.ts apps/core/src/vending/vending.controller.test.ts apps/cc/src/components/refill-events-view.tsx apps/cc/src/components/refill-events-view.test.tsx apps/cc/src/lib/domain-nav.ts "apps/cc/src/app/domain/[domain]/page.tsx" tools/smoke-core.mjs tools/smoke-panel.mjs`
+- [x] **Step 7:** `pnpm --filter core build && pnpm --filter core test && pnpm --filter cc test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs` (шаг `days=90` зелёный), `node tools/smoke-panel.mjs`.
+- [x] **Step 8:** `git commit -m "feat(cc,core): лист «Журнал заливок» и собственный потолок чтения журнала 90 суток (хвосты, R-H-5)" -- apps/core/src/vending/refill-events.service.ts apps/core/src/vending/refill-events.service.test.ts apps/core/src/vending/vending.controller.ts apps/core/src/vending/vending.controller.test.ts apps/cc/src/components/refill-events-view.tsx apps/cc/src/components/refill-events-view.test.tsx apps/cc/src/lib/domain-nav.ts "apps/cc/src/app/domain/[domain]/page.tsx" tools/smoke-core.mjs tools/smoke-panel.mjs`
 
 ---
 
@@ -1166,7 +1166,7 @@ export type {
 - Core реэкспортирует перенесённые формы из своих модулей (`export type { ShrinkReport } from "@mydon/shared"` в `shrinkage.service.ts`), чтобы внутренние импортёры Core (контроллер, недельная сводка, брифинг) импортировали оттуда же, откуда импортировали.
 - Порядок правки — ПО ОДНОМУ ПАКЕТУ ЗА РАЗ: `pnpm -s typecheck` тогда показывает ровно одну причину, а не восемь.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // packages/shared/src/vending-reports-contracts.test.ts — новый набор
 describe("Формы усушки и плана закупа объявлены ОДИН раз (R-H-6)", () => {
@@ -1257,13 +1257,13 @@ describe("Усушка и план закупа — реэкспорт, а не 
     assert.equal(усушкаБота, усушкаОбщая);
     assert.equal(планБота, планОбщий);
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (`ShrinkReport`/`PurchasePlan` в shared нет).
-- [ ] **Step 3: shared.** В `packages/shared/src/vending-reports.ts` — восемь объявлений из «Interfaces (produces)» С ПЕРЕНЕСЁННЫМИ ДОКБЛОКАМИ (докблоки — это единственное, что объясняет, почему `refillDays` живёт рядом с `summary` и почему `surplusUnits` в деньги не входит; переезд без них превратил бы формы в безымянные поля). Импорты в шапке файла: `import type { ShrinkItem, ShrinkSummary } from "./vending-field";`, `import type { SlotPlanRow } from "./vending-plan";`, `import type { PurchaseSummary } from "./vending-calc";` (файл уже импортирует из `./vending-calc`). Экспорт наружу уже обеспечен `export * from "./vending-reports"` (`index.ts:86`).
-- [ ] **Step 4: Core.** `shrinkage.service.ts`: пять объявлений (`:83-127`) → `import type { ShrinkMachine, ShrinkRefillDay, ShrinkReport, ShrinkWarning, ShrinkWarningCode } from "@mydon/shared";` + `export type { ShrinkMachine, ShrinkRefillDay, ShrinkReport, ShrinkWarning, ShrinkWarningCode };`. `vending.service.ts`: три объявления (`:499`, `:512`, `:531`) → тот же приём для `PlanMachine`, `PlanWarning`, `PurchasePlan`. Комментарий на месте реэкспорта: форму объявляет тот, кто считает числа; Core её импортирует и отдаёт своим модулям, чтобы внутренние импортёры не правились.
-- [ ] **Step 5: Бот.** `apps/bot/src/core-client.ts`: удалить локальные `VendingPlanSlot`/`VendingPlanMachine`/`VendingPlanWarning`/`VendingPlan` (`:205-263`) и `ShrinkItem`…`ShrinkReport` (`:274-341`); блок `export type { … } from "@mydon/shared"` (`:399-410`) пополнить одиннадцатью именами с `as`-алиасами по «Interfaces (produces)». Докблок блока уже говорит нужное («форму объявляет тот, кто считает числа») — дописать одну строку про усушку и план.
-- [ ] **Step 6: Панель.** `apps/cc/src/lib/core.ts`: удалить локальные `VendingPlan*` (`:160-224`) и `VendingShrinkage*` (`:227-306`); блок реэкспорта (`:308-325`) пополнить с алиасами, включая пять усушечных (`ShrinkItem as VendingShrinkageItem` и т. д.). Инлайненный `summary` исчезает вместе с копией — вызывающие не правятся.
-- [ ] **Step 7:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter bot build && pnpm -s typecheck && pnpm -s test` → GREEN. Отдельно убедиться, что дифф НЕ содержит правок вызывающих (`git diff --stat` показывает только пять файлов кода плюс три теста): любая правка листа или брифинга здесь означает, что алиас забыли.
-- [ ] **Step 8:** `git commit -m "refactor(shared,core,bot,cc): формы Shrink* и VendingPlan* объявлены один раз в @mydon/shared (хвосты, R-H-6)" -- packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts apps/core/src/vending/shrinkage.service.ts apps/core/src/vending/vending.service.ts apps/bot/src/core-client.ts apps/bot/src/core-client.test.ts apps/cc/src/lib/core.ts apps/cc/src/lib/core-types.test.ts`
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (`ShrinkReport`/`PurchasePlan` в shared нет).
+- [x] **Step 3: shared.** В `packages/shared/src/vending-reports.ts` — восемь объявлений из «Interfaces (produces)» С ПЕРЕНЕСЁННЫМИ ДОКБЛОКАМИ (докблоки — это единственное, что объясняет, почему `refillDays` живёт рядом с `summary` и почему `surplusUnits` в деньги не входит; переезд без них превратил бы формы в безымянные поля). Импорты в шапке файла: `import type { ShrinkItem, ShrinkSummary } from "./vending-field";`, `import type { SlotPlanRow } from "./vending-plan";`, `import type { PurchaseSummary } from "./vending-calc";` (файл уже импортирует из `./vending-calc`). Экспорт наружу уже обеспечен `export * from "./vending-reports"` (`index.ts:86`).
+- [x] **Step 4: Core.** `shrinkage.service.ts`: пять объявлений (`:83-127`) → `import type { ShrinkMachine, ShrinkRefillDay, ShrinkReport, ShrinkWarning, ShrinkWarningCode } from "@mydon/shared";` + `export type { ShrinkMachine, ShrinkRefillDay, ShrinkReport, ShrinkWarning, ShrinkWarningCode };`. `vending.service.ts`: три объявления (`:499`, `:512`, `:531`) → тот же приём для `PlanMachine`, `PlanWarning`, `PurchasePlan`. Комментарий на месте реэкспорта: форму объявляет тот, кто считает числа; Core её импортирует и отдаёт своим модулям, чтобы внутренние импортёры не правились.
+- [x] **Step 5: Бот.** `apps/bot/src/core-client.ts`: удалить локальные `VendingPlanSlot`/`VendingPlanMachine`/`VendingPlanWarning`/`VendingPlan` (`:205-263`) и `ShrinkItem`…`ShrinkReport` (`:274-341`); блок `export type { … } from "@mydon/shared"` (`:399-410`) пополнить одиннадцатью именами с `as`-алиасами по «Interfaces (produces)». Докблок блока уже говорит нужное («форму объявляет тот, кто считает числа») — дописать одну строку про усушку и план.
+- [x] **Step 6: Панель.** `apps/cc/src/lib/core.ts`: удалить локальные `VendingPlan*` (`:160-224`) и `VendingShrinkage*` (`:227-306`); блок реэкспорта (`:308-325`) пополнить с алиасами, включая пять усушечных (`ShrinkItem as VendingShrinkageItem` и т. д.). Инлайненный `summary` исчезает вместе с копией — вызывающие не правятся.
+- [x] **Step 7:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter bot build && pnpm -s typecheck && pnpm -s test` → GREEN. Отдельно убедиться, что дифф НЕ содержит правок вызывающих (`git diff --stat` показывает только пять файлов кода плюс три теста): любая правка листа или брифинга здесь означает, что алиас забыли.
+- [x] **Step 8:** `git commit -m "refactor(shared,core,bot,cc): формы Shrink* и VendingPlan* объявлены один раз в @mydon/shared (хвосты, R-H-6)" -- packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts apps/core/src/vending/shrinkage.service.ts apps/core/src/vending/vending.service.ts apps/bot/src/core-client.ts apps/bot/src/core-client.test.ts apps/cc/src/lib/core.ts apps/cc/src/lib/core-types.test.ts`
 
 ---
 
@@ -1296,7 +1296,7 @@ async list(days = LIST_DAYS_DEFAULT, now = new Date()): Promise<RefillEventRow[]
 - Контроллер НЕ правится: `this.refillEvents.detect(dto.days)` и `.list(dto.days)` остаются как есть — умолчание и есть «сейчас», как у `stockCounts` (`vending.controller.ts:592`).
 - После правки в файле НЕТ ни одного `new Date()` / `Date.now()` вне значений параметров по умолчанию — это утверждает сторож по исходнику.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/vending/refill-events.service.test.ts — перевести набор на фиксированные часы
 /** Фиксированный момент прогона: раньше окна считались от стенных часов, и
@@ -1362,10 +1362,10 @@ describe("Сторож правила: часов внутри детектор�
 });
 ```
 > `new Logger(RefillEventsService.name)` (`:95`) под регулярку `new Date\(\)` не попадает — сторож считает именно часы, а не конструкторы вообще.
-- [ ] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (сторож видит `new Date()` в `detect` и `Date.now()` в `list`; тесты окна падают на стенных часах).
-- [ ] **Step 3: Правка сигнатур.** `detect(days = DETECT_DAYS_DEFAULT, now = new Date())`: удалить `const сейчас = new Date()`, `const от = new Date(now.getTime() - окно * 86_400_000)`, вызов `this.опубликоватьНесопоставленные(от, now, реестрМашин.nameBySerial)`. `list(days = LIST_DAYS_DEFAULT, now = new Date())`: `const от = new Date(now.getTime() - окно * 86_400_000)`. Докблоки обеих функций дополняются абзацем из «Interfaces (produces)» — ПОЧЕМУ параметр, теми же словами, что у `stockCounts`.
-- [ ] **Step 4:** `pnpm --filter core build && pnpm --filter core test` → GREEN. Дважды подряд на scratch-БД: `node tools/smoke-core.mjs` — три шага детектора (`:441`, `:458`, `:483`) зелёные оба раза, БЕЗ ожидания следующего часа. Эти три шага не правятся: они и есть проверка того, что впрыснутые часы ничего не сломали.
-- [ ] **Step 5:** `git commit -m "refactor(core): детектор заливок берёт момент параметром — повторный smoke перестал ронять шаги (хвосты, R-H-7)" -- apps/core/src/vending/refill-events.service.ts apps/core/src/vending/refill-events.service.test.ts`
+- [x] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (сторож видит `new Date()` в `detect` и `Date.now()` в `list`; тесты окна падают на стенных часах).
+- [x] **Step 3: Правка сигнатур.** `detect(days = DETECT_DAYS_DEFAULT, now = new Date())`: удалить `const сейчас = new Date()`, `const от = new Date(now.getTime() - окно * 86_400_000)`, вызов `this.опубликоватьНесопоставленные(от, now, реестрМашин.nameBySerial)`. `list(days = LIST_DAYS_DEFAULT, now = new Date())`: `const от = new Date(now.getTime() - окно * 86_400_000)`. Докблоки обеих функций дополняются абзацем из «Interfaces (produces)» — ПОЧЕМУ параметр, теми же словами, что у `stockCounts`.
+- [x] **Step 4:** `pnpm --filter core build && pnpm --filter core test` → GREEN. Дважды подряд на scratch-БД: `node tools/smoke-core.mjs` — три шага детектора (`:441`, `:458`, `:483`) зелёные оба раза, БЕЗ ожидания следующего часа. Эти три шага не правятся: они и есть проверка того, что впрыснутые часы ничего не сломали.
+- [x] **Step 5:** `git commit -m "refactor(core): детектор заливок берёт момент параметром — повторный smoke перестал ронять шаги (хвосты, R-H-7)" -- apps/core/src/vending/refill-events.service.ts apps/core/src/vending/refill-events.service.test.ts`
 
 ---
 
@@ -1420,7 +1420,7 @@ interface RetentionTarget {
 - **Ретенция на сегодняшних данных удалит 0 строк**: самая старая инвентаризация — `dt = 2025-08-17`, порог 730 суток, первые кандидаты появятся не раньше августа 2027. Это не повод считать шаг неработающим — это ожидаемый результат, записанный в чек-лист выкатки.
 - Миграция 0071 — только индекс. Существующий `vending_stock_count_product_dt_idx (product_name, dt)` под условие `where dt < cutoff order by dt limit 5000` не годится: ведущая колонка не та.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/system/config-spec.test.ts — новый набор
 describe("Ключ ретенции истории склада (R-H-8)", () => {
@@ -1509,9 +1509,9 @@ describe("Ретенция истории склада (R-H-8)", () => {
 });
 ```
 > Стенд уже умеет распознавать таблицу по тексту запроса и отдавать настройки — правится только список `ТАБЛИЦЫ` и фикстуры `строк`. `2024-09-06` = `2026-09-06` минус 730 суток по Ташкенту; при правке `вс` пересчитать.
-- [ ] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`specFor("STOCK_COUNT_RETENTION_DAYS")` = `undefined`; пятой цели нет).
-- [ ] **Step 3: Ключ настроек.** `config-spec.ts` — блок из «Interfaces (produces)» сразу после `SNAPSHOT_RETENTION_DAYS`. Комментарий над ним: пол здесь равен ДЕФОЛТУ и равен потолку `?days=` листа истории — это не «жёсткая настройка», а признание, что окно ретенции не бывает уже окна витрины; поставив пол 365, мы завели бы тумблер, которым владелец молча режет историю ПОД уже работающим листом (дословный урок R-FW-S8, где пол снапшотов подняли с 90 до 180).
-- [ ] **Step 4: Пятая цель.** `retention.service.ts`: импорт `vendingStockCount` из `@mydon/db` и `tashkentDay` из `@mydon/shared` (там уже берётся `TZ`); `STOCK_COUNT_RETENTION_DAYS_FALLBACK = 730`; `cutoffAs?: "date" | "timestamp"` в `RetentionTarget` с докблоком; `batchQuery` подставляет границу по типу:
+- [x] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`specFor("STOCK_COUNT_RETENTION_DAYS")` = `undefined`; пятой цели нет).
+- [x] **Step 3: Ключ настроек.** `config-spec.ts` — блок из «Interfaces (produces)» сразу после `SNAPSHOT_RETENTION_DAYS`. Комментарий над ним: пол здесь равен ДЕФОЛТУ и равен потолку `?days=` листа истории — это не «жёсткая настройка», а признание, что окно ретенции не бывает уже окна витрины; поставив пол 365, мы завели бы тумблер, которым владелец молча режет историю ПОД уже работающим листом (дословный урок R-FW-S8, где пол снапшотов подняли с 90 до 180).
+- [x] **Step 4: Пятая цель.** `retention.service.ts`: импорт `vendingStockCount` из `@mydon/db` и `tashkentDay` из `@mydon/shared` (там уже берётся `TZ`); `STOCK_COUNT_RETENTION_DAYS_FALLBACK = 730`; `cutoffAs?: "date" | "timestamp"` в `RetentionTarget` с докблоком; `batchQuery` подставляет границу по типу:
 ```ts
   private batchQuery(t: RetentionTarget, cutoff: Date): SQL {
     // Голые сутки для `date`-колонок (R-H-8). `date < timestamptz` Postgres
@@ -1557,7 +1557,7 @@ describe("Ретенция истории склада (R-H-8)", () => {
       },
 ```
 Шапку сервиса дополнить: целей теперь пять, и у пятой ДРУГАЯ природа — не телеметрия, которая пересчитывается следующим сбором, а ручной труд владельца; отсюда и свой ключ, и пол, равный дефолту.
-- [ ] **Step 5: Индекс.** `packages/db/src/schema.ts`, в список индексов `vendingStockCount` (`:1593-1597`):
+- [x] **Step 5: Индекс.** `packages/db/src/schema.ts`, в список индексов `vendingStockCount` (`:1593-1597`):
 ```ts
     // Под еженедельную ретенцию (R-H-8): составной
     // `vending_stock_count_product_dt_idx (product_name, dt)` для условия
@@ -1586,9 +1586,9 @@ describe("Ретенция истории склада (R-H-8)", () => {
 CREATE INDEX IF NOT EXISTS "vending_stock_count_dt_idx" ON "vending_stock_count" USING btree ("dt");
 ```
 Снапшот drizzle обновить `pnpm --filter @mydon/db db:generate` — и проверить, что генератор не подтянул НИЧЕГО, кроме этого индекса.
-- [ ] **Step 6: Документация.** `docs/DATA_SOURCES.md`, к абзацу про `vending_stock_count` (`:961`) — дописать «сколько живёт история склада»: чистится еженедельно (воскресенье 04:10 Ташкента, событие `system.retention`), окно — `STOCK_COUNT_RETENTION_DAYS`, дефолт **730** и пол **730**; настройка умеет ТОЛЬКО ПРОДЛИТЬ хранение — урезать историю ниже окна чтения листа «История склада» нельзя ни из панели (валидатор), ни из env (`Math.max` в `sweep()`); на сегодняшних данных чистка удаляет 0 строк (самая старая `dt = 2025-08-17`). `docs/PLAN_STOCK_ABSORPTION.md`, бэклог волны П8a (`:425-428`): снять пункт «ретенция `vending_stock_count` (растёт без чистки)» — закрыт этим срезом; переформулировать пункт про уникальный индекс дедупа сторожа застоя — остаётся открытым осознанно (ценность ноль при одной реплике Core, R-FW-S7/R-H-1); пункт «`GET /vending/stock-counts` открыт без токена» ОСТАВИТЬ открытым — он уходит в П8 пп. 3–5 вместе с гашением `STOCK_DATABASE_URL` (R-H-1).
-- [ ] **Step 7:** `pnpm --filter @mydon/db build && pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node packages/db/dist/migrate.js` дважды подряд — второй прогон no-op (`IF NOT EXISTS`); `pnpm --filter @mydon/db db:generate` → «No schema changes» после коммита снапшота.
-- [ ] **Step 8:** `git commit -m "feat(core,db): ретенция истории склада своим ключом STOCK_COUNT_RETENTION_DAYS и границей по dt (хвосты, R-H-8)" -- apps/core/src/system/config-spec.ts apps/core/src/system/config-spec.test.ts apps/core/src/vending/retention.service.ts apps/core/src/vending/retention.service.test.ts packages/db/src/schema.ts packages/db/drizzle docs/DATA_SOURCES.md docs/PLAN_STOCK_ABSORPTION.md`
+- [x] **Step 6: Документация.** `docs/DATA_SOURCES.md`, к абзацу про `vending_stock_count` (`:961`) — дописать «сколько живёт история склада»: чистится еженедельно (воскресенье 04:10 Ташкента, событие `system.retention`), окно — `STOCK_COUNT_RETENTION_DAYS`, дефолт **730** и пол **730**; настройка умеет ТОЛЬКО ПРОДЛИТЬ хранение — урезать историю ниже окна чтения листа «История склада» нельзя ни из панели (валидатор), ни из env (`Math.max` в `sweep()`); на сегодняшних данных чистка удаляет 0 строк (самая старая `dt = 2025-08-17`). `docs/PLAN_STOCK_ABSORPTION.md`, бэклог волны П8a (`:425-428`): снять пункт «ретенция `vending_stock_count` (растёт без чистки)» — закрыт этим срезом; переформулировать пункт про уникальный индекс дедупа сторожа застоя — остаётся открытым осознанно (ценность ноль при одной реплике Core, R-FW-S7/R-H-1); пункт «`GET /vending/stock-counts` открыт без токена» ОСТАВИТЬ открытым — он уходит в П8 пп. 3–5 вместе с гашением `STOCK_DATABASE_URL` (R-H-1).
+- [x] **Step 7:** `pnpm --filter @mydon/db build && pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node packages/db/dist/migrate.js` дважды подряд — второй прогон no-op (`IF NOT EXISTS`); `pnpm --filter @mydon/db db:generate` → «No schema changes» после коммита снапшота.
+- [x] **Step 8:** `git commit -m "feat(core,db): ретенция истории склада своим ключом STOCK_COUNT_RETENTION_DAYS и границей по dt (хвосты, R-H-8)" -- apps/core/src/system/config-spec.ts apps/core/src/system/config-spec.test.ts apps/core/src/vending/retention.service.ts apps/core/src/vending/retention.service.test.ts packages/db/src/schema.ts packages/db/drizzle docs/DATA_SOURCES.md docs/PLAN_STOCK_ABSORPTION.md`
 
 ---
 
@@ -1682,7 +1682,7 @@ private здоровьеНедели(
 - Кеш — СУЩЕСТВУЮЩИЙ ключ `weekly-digest|<неделя>|<ташкентские сутки>`; второго кеша нет, оба вызова идут в том же `Promise.all`.
 - Бот: `здоровье(h: OurvendHealth)` → `здоровье(d: WeeklyDigest)`; печатает СНАЧАЛА числа недели, потом прежние строки «сейчас», подписанные словом «сейчас». `строкаЗастоя` и `строкаСнапшота` НЕ МЕНЯЮТСЯ ВОВСЕ — те же общие форматтеры `analytics-brief.ts`, что и в «сверке». Пустая неделя (`runs === 0`) печатает «За неделю прогонов не было — сбор не запускался», а не «отказов 0».
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // packages/shared/src/parity-streak.test.ts — дописать
 import { PARITY_STREAK_WINDOW, parityDaysInWeek, parityStreak, type ParityEventRow } from "./parity-streak";
@@ -1829,12 +1829,12 @@ describe("Блок здоровья: сначала неделя, потом «�
 });
 ```
 > Фикстуры `ДАЙДЖЕСТ_34` и `ПУСТАЯ_НЕДЕЛЯ` (`weekly-digest.test.ts:18`, `:79`) получают `weekHealth`: у первой — `{ week: "2026-34", runs: 56, success: 54, partial: 1, failed: 1, worstFailedStreak: 1, lastSuccessAt: "2026-08-23T03:07:00Z", parityDays: [...5 зелёных, 2 красных], parityGreen: 5, parityRed: 2 }`, у второй — нули, `lastSuccessAt: null`, пустые `parityDays`.
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot test` → RED (`parityDaysInWeek` и `worstFailedStreak` не существуют; `weekHealth` нет в типе).
-- [ ] **Step 3: shared.** `parity-streak.ts`: `parityDaysInWeek` по интерфейсу выше (`days.filter((d) => d.date >= from && d.date <= to)`) с докблоком — почему сравнение строк, а не арифметика дат: `YYYY-MM-DD` лексикографически совпадает с календарным порядком, и вторая арифметика дат в файле, где уже живёт `предыдущийДень`, была бы вторым правилом. `vending-reports.ts`: `WeeklyHealth` и `weekHealth` в `WeeklyDigest` по «Interfaces (produces)»; импорт `import type { ParityDay } from "./parity-streak";` (цикла нет — `parity-streak.ts` из `vending-reports.ts` ничего не тянет).
-- [ ] **Step 4: Окно прогонов.** `sync-runs.ts`: `RunWindow`, `WEEK_RUNS_LIMIT = 200`, необязательный `window` у `lastSuccessRunAt` и новая `runsInWindow`. Шапка модуля дополняется: вопросов теперь не пять, а шесть, и шестой — «что было в ЭТОЙ неделе»; своя копия запроса у письма разошлась бы с отчётом ровно на том уточнении, что успех датируется завершением прогона. Комментарий у `RunWindow`: полуинтервал `[from, to)`, потому что `lte` по концу воскресенья втянул бы полночь понедельника в обе недели.
-- [ ] **Step 5: Худшая серия.** `sync-streak.ts`: `worstFailedStreak` с докблоком из «Interfaces (produces)» — рядом с `failedStreak`, тем же приёмом «сортируем вход сами».
-- [ ] **Step 6: Сводка.** `weekly-digest.service.ts`: четвёртый аргумент конструктора `private readonly parity: OurvendParityService` (провайдер уже есть в `VendingModule`, правки модуля не нужно); `НЕДЕЛЯ_НЕИЗВЕСТНА(week)` рядом с `ЗДОРОВЬЕ_НЕИЗВЕСТНО` с тем же комментарием «не посчитали ≠ всё хорошо»; `здоровьеНедели(неделя, начало, конец, now)` под своим `catch`; оба вызова в существующем `Promise.all` (`const [текущая, предыдущая, мёртвый, цены, здоровье, недельное, работа] = await Promise.all([…])`); в ответе — `weekHealth: недельное.health`, а `warnings` собирает предупреждения ОБЕИХ секций: `[здоровье.warning, недельное.warning].filter((w): w is AnalyticsWarning => w !== null)`. Кеш — тот же ключ.
-- [ ] **Step 7: Бот.** `core-client.ts`: `WeeklyHealth` в блок реэкспорта из `@mydon/shared`. `weekly-digest.ts`: `здоровье(d: WeeklyDigest)`:
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot test` → RED (`parityDaysInWeek` и `worstFailedStreak` не существуют; `weekHealth` нет в типе).
+- [x] **Step 3: shared.** `parity-streak.ts`: `parityDaysInWeek` по интерфейсу выше (`days.filter((d) => d.date >= from && d.date <= to)`) с докблоком — почему сравнение строк, а не арифметика дат: `YYYY-MM-DD` лексикографически совпадает с календарным порядком, и вторая арифметика дат в файле, где уже живёт `предыдущийДень`, была бы вторым правилом. `vending-reports.ts`: `WeeklyHealth` и `weekHealth` в `WeeklyDigest` по «Interfaces (produces)»; импорт `import type { ParityDay } from "./parity-streak";` (цикла нет — `parity-streak.ts` из `vending-reports.ts` ничего не тянет).
+- [x] **Step 4: Окно прогонов.** `sync-runs.ts`: `RunWindow`, `WEEK_RUNS_LIMIT = 200`, необязательный `window` у `lastSuccessRunAt` и новая `runsInWindow`. Шапка модуля дополняется: вопросов теперь не пять, а шесть, и шестой — «что было в ЭТОЙ неделе»; своя копия запроса у письма разошлась бы с отчётом ровно на том уточнении, что успех датируется завершением прогона. Комментарий у `RunWindow`: полуинтервал `[from, to)`, потому что `lte` по концу воскресенья втянул бы полночь понедельника в обе недели.
+- [x] **Step 5: Худшая серия.** `sync-streak.ts`: `worstFailedStreak` с докблоком из «Interfaces (produces)» — рядом с `failedStreak`, тем же приёмом «сортируем вход сами».
+- [x] **Step 6: Сводка.** `weekly-digest.service.ts`: четвёртый аргумент конструктора `private readonly parity: OurvendParityService` (провайдер уже есть в `VendingModule`, правки модуля не нужно); `НЕДЕЛЯ_НЕИЗВЕСТНА(week)` рядом с `ЗДОРОВЬЕ_НЕИЗВЕСТНО` с тем же комментарием «не посчитали ≠ всё хорошо»; `здоровьеНедели(неделя, начало, конец, now)` под своим `catch`; оба вызова в существующем `Promise.all` (`const [текущая, предыдущая, мёртвый, цены, здоровье, недельное, работа] = await Promise.all([…])`); в ответе — `weekHealth: недельное.health`, а `warnings` собирает предупреждения ОБЕИХ секций: `[здоровье.warning, недельное.warning].filter((w): w is AnalyticsWarning => w !== null)`. Кеш — тот же ключ.
+- [x] **Step 7: Бот.** `core-client.ts`: `WeeklyHealth` в блок реэкспорта из `@mydon/shared`. `weekly-digest.ts`: `здоровье(d: WeeklyDigest)`:
 ```ts
 function здоровье(d: WeeklyDigest): string[] {
   const h = d.health;
@@ -1871,7 +1871,7 @@ function здоровье(d: WeeklyDigest): string[] {
 }
 ```
 Вызов на `:356` — `lines.push(...здоровье(d));`. Блок вырастает на две строки — это входит в бюджет частей (`WEEKLY_MAX_PARTS`, `capped`), и `формат` их уже режет.
-- [ ] **Step 8: Смоук.** В `tools/smoke-core.mjs`, шаг `/vending/weekly-digest` (`:196`) дополнить:
+- [x] **Step 8: Смоук.** В `tools/smoke-core.mjs`, шаг `/vending/weekly-digest` (`:196`) дополнить:
 ```js
       const w = о?.weekHealth;
       if (!w) throw new Error("в сводке нет weekHealth — письмо снова говорило бы про момент отправки");
@@ -1884,9 +1884,9 @@ function здоровье(d: WeeklyDigest): string[] {
       if (w.lastSuccessAt !== null && typeof w.lastSuccessAt !== "string") throw new Error("weekHealth.lastSuccessAt — не ISO и не null");
       if (typeof о?.health?.failedStreak !== "number") throw new Error("health «сейчас» пропал из сводки");
 ```
-- [ ] **Step 9:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs`.
-- [ ] **Step 10: Аддендум спеки.** В конец `docs/superpowers/specs/2026-08-26-hvosty-snek-design.md` — раздел «Аддендум после реализации» с ПЯТЬЮ отклонениями из шапки этого плана (`StockCountsReport.since`; форма сторожа снек-форматтеров; `parityDaysInWeek` в shared; четвёртый аргумент конструктора `WeeklyDigestService`; поправленная ссылка на «место донора» в `note`) — каждое одним абзацем: что в спеке, что в коде, почему.
-- [ ] **Step 11:** `git commit -m "feat(core,bot,shared): здоровье сбора в письме считается за отчётную неделю, а не на момент отправки (хвосты, R-H-9)" -- packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts packages/shared/src/parity-streak.ts packages/shared/src/parity-streak.test.ts apps/core/src/ourvend/sync-runs.ts apps/core/src/vending/sync-streak.ts apps/core/src/vending/sync-streak.test.ts apps/core/src/vending/weekly-digest.service.ts apps/core/src/vending/weekly-digest.service.test.ts apps/bot/src/core-client.ts apps/bot/src/weekly-digest.ts apps/bot/src/weekly-digest.test.ts tools/smoke-core.mjs docs/superpowers/specs/2026-08-26-hvosty-snek-design.md docs/superpowers/plans/2026-08-26-sloy-hvosty-snek.md`
+- [x] **Step 9:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs`.
+- [x] **Step 10: Аддендум спеки.** В конец `docs/superpowers/specs/2026-08-26-hvosty-snek-design.md` — раздел «Аддендум после реализации» с ПЯТЬЮ отклонениями из шапки этого плана (`StockCountsReport.since`; форма сторожа снек-форматтеров; `parityDaysInWeek` в shared; четвёртый аргумент конструктора `WeeklyDigestService`; поправленная ссылка на «место донора» в `note`) — каждое одним абзацем: что в спеке, что в коде, почему.
+- [x] **Step 11:** `git commit -m "feat(core,bot,shared): здоровье сбора в письме считается за отчётную неделю, а не на момент отправки (хвосты, R-H-9)" -- packages/shared/src/vending-reports.ts packages/shared/src/vending-reports-contracts.test.ts packages/shared/src/parity-streak.ts packages/shared/src/parity-streak.test.ts apps/core/src/ourvend/sync-runs.ts apps/core/src/vending/sync-streak.ts apps/core/src/vending/sync-streak.test.ts apps/core/src/vending/weekly-digest.service.ts apps/core/src/vending/weekly-digest.service.test.ts apps/bot/src/core-client.ts apps/bot/src/weekly-digest.ts apps/bot/src/weekly-digest.test.ts tools/smoke-core.mjs docs/superpowers/specs/2026-08-26-hvosty-snek-design.md docs/superpowers/plans/2026-08-26-sloy-hvosty-snek.md`
 
 ---
 
