@@ -40,6 +40,8 @@ import {
   normalizeProductName,
   planogramStatus,
   priceDeviationPct,
+  productIndex,
+  resolveCatalogName,
   retailFactByProduct,
   routeIssuesFrom,
   routeOrderFrom,
@@ -54,6 +56,7 @@ import {
   type PlanogramStatus,
   type PlanWarning,
   type PriceEntry,
+  type ProductIndex,
   type ProductRule,
   type PurchaseCashSession,
   type PurchaseRow,
@@ -612,6 +615,17 @@ interface PurchaseContext {
 export class VendingService {
   private readonly logger = new Logger(VendingService.name);
 
+  /**
+   * Споры каталога, о которых уже предупредили лог — по каталогу, ключ `raw`
+   * (R-G-1, гигиена m4). `resolveProduct` зовётся построчно (`resolveSlots` —
+   * до 129 слотов, `retailFacts` — окно 14 суток по `sale`): без дедупа одно
+   * спорное имя дало бы сотни-тысячи одинаковых строк за прогон, и первый
+   * спор утонул бы в собственном шуме. `WeakMap` по каталогу — новый прогон
+   * (новый `ProductIndex`) снова предупредит один раз, старый каталог не
+   * держит память вечно.
+   */
+  private readonly conflictWarned = new WeakMap<ProductIndex, Set<string>>();
+
   constructor(
     @Inject(DB) private readonly db: Db,
     @Optional() @Inject(ApprovalsService) private readonly approvals?: ApprovalRequester,
@@ -958,13 +972,13 @@ export class VendingService {
    * отдельными позициями вместо одной (тот же приём, что в `purchase()`).
    */
   async deficitSummary(): Promise<{ product: string; total: number; perMachine: Record<string, number> }[]> {
-    const { aliasByKey } = await this.loadProductIndex();
+    const { catalog } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
     const { notInService } = await this.machineRegistry();
     const { okSerials } = this.inServiceOk(byMachine, notInService);
     const ok = [...byMachine.entries()]
       .filter(([serial]) => okSerials.has(serial))
-      .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, aliasByKey) }));
+      .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, catalog) }));
     const needs = needByProduct(ok);
     needs.sort((a, b) => b.total - a.total);
     return needs.map((n) => ({ product: n.product, total: n.total, perMachine: n.perMachine }));
@@ -1088,7 +1102,7 @@ export class VendingService {
    */
   private async latestSold7(
     okSerials: Set<string>,
-    aliasByKey: Map<string, string>,
+    catalog: ProductIndex,
   ): Promise<{ byProduct: Map<string, number>; capturedAt: Date | null; serials: Set<string> }> {
     const saleRows = await this.db.select().from(productSale);
     const latest = saleRows.reduce((max, r) => Math.max(max, r.capturedAt.getTime()), 0);
@@ -1100,7 +1114,7 @@ export class VendingService {
       if (r.capturedAt.getTime() !== latest) continue;
       if (!okSerials.has(r.machineSerial)) continue;
       serials.add(r.machineSerial);
-      const name = this.resolveProduct(r.productName, aliasByKey);
+      const name = this.resolveProduct(r.productName, catalog);
       byProduct.set(name, (byProduct.get(name) ?? 0) + r.quantity);
     }
     return { byProduct, capturedAt: latest > 0 ? new Date(latest) : null, serials };
@@ -1163,7 +1177,7 @@ export class VendingService {
    * свежего собранного батча.
    */
   async forecast(criticalDays = 3): Promise<{ all: Runout[]; critical: Runout[] }> {
-    const { aliasByKey } = await this.loadProductIndex();
+    const { catalog } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
     const { notInService } = await this.machineRegistry();
     const { okSerials } = this.inServiceOk(byMachine, notInService);
@@ -1175,13 +1189,13 @@ export class VendingService {
       if (!okSerials.has(serial)) continue;
       for (const s of slots) {
         if (s.product && slotValid(s)) {
-          const name = this.resolveProduct(s.product, aliasByKey);
+          const name = this.resolveProduct(s.product, catalog);
           inByProduct.set(name, (inByProduct.get(name) ?? 0) + s.quantity);
         }
       }
     }
 
-    const { byProduct: soldByProduct } = await this.latestSold7(okSerials, aliasByKey);
+    const { byProduct: soldByProduct } = await this.latestSold7(okSerials, catalog);
 
     // Прогнозируем то, что сейчас загружено в автоматы.
     const input: RunoutInput[] = [...inByProduct.entries()].map(([product, inMachines]) => ({
@@ -1198,17 +1212,21 @@ export class VendingService {
   // реальный склад, а не «весь дефицит».
 
   /**
-   * Индекс товаров, нужный при вводе склада: карта алиасов (нормализованное
-   * имя-вариант → каноническое имя) и цены по канону — обе строятся из одной
-   * загрузки `vending_product`, чтобы не делать два похода в базу.
+   * Индекс товаров, нужный при вводе склада: индекс каталога и цены по канону —
+   * оба строятся из одной загрузки `vending_product`, чтобы не делать два
+   * похода в базу.
    *
-   * Алиасы: рукописные листы и заметки пишут товар по-разному («Montella»,
-   * «18+», «Moxito клуб»); без карты остаток лёг бы отдельной «неопознанной»
+   * Каталог: рукописные листы и заметки пишут товар по-разному («Montella»,
+   * «18+», «Moxito клуб»); без него остаток лёг бы отдельной «неопознанной»
    * строкой мимо расчёта закупа. Цены: нужны, чтобы оценить недостачу/излишек
    * при пересчёте в сумах, а не только в штуках.
    */
   async loadProductIndex(): Promise<{
-    aliasByKey: Map<string, string>;
+    /**
+     * Индекс каталога — ТОТ ЖЕ, что у бэкфилла и импорта. Заменил `aliasByKey`:
+     * карта алиасов одна отвечать на вопрос «какая это карточка» не может.
+     */
+    catalog: ProductIndex;
     priceByName: Map<string, number>;
     packByName: Map<string, number>;
     rulesByName: Map<string, ProductRule>;
@@ -1231,12 +1249,11 @@ export class VendingService {
         })
         .from(vendingProduct),
     ]);
-    const nameById = new Map(products.map((p) => [p.id, p.name]));
-    const aliasByKey = new Map<string, string>();
-    for (const a of aliases) {
-      const canonical = nameById.get(a.productId);
-      if (canonical) aliasByKey.set(normalizeProductName(a.alias), canonical);
-    }
+    // ИНДЕКС КАТАЛОГА, А НЕ КАРТА АЛИАСОВ (R-G-1). Карта отвечала только «есть
+    // ли такой алиас» и на вопрос «какая это карточка» ответить не могла — из-за
+    // чего живой резолвер и спрашивал алиас первым. Строится из ТЕХ ЖЕ двух
+    // выборок, второго похода в базу нет.
+    const catalog = productIndex(products, aliases);
     const priceByName = new Map<string, number>();
     const packByName = new Map<string, number>();
     // Правила закупа (П5a) — по канону имени: запись есть у КАЖДОГО товара
@@ -1247,7 +1264,7 @@ export class VendingService {
       packByName.set(p.name, p.packSize);
       rulesByName.set(p.name, { excluded: p.excludedFromPurchase, fixedQty: p.fixedPurchaseQty, pack: p.packSize });
     }
-    return { aliasByKey, priceByName, packByName, rulesByName, productRows: products };
+    return { catalog, priceByName, packByName, rulesByName, productRows: products };
   }
 
   /**
@@ -1267,14 +1284,19 @@ export class VendingService {
   /**
    * Резолвер «сырое имя товара → id карточки прайса» (бэкфилл `product_id`).
    *
-   * Один поход в базу на весь приём, дальше — по нормализованному ключу в
-   * памяти: приём слотов кладёт сотни строк за раз, и SELECT на каждую был бы
-   * N+1 на горячем пути крона. Неизвестное имя даёт `null` — новый товар не
-   * повод отвергнуть снимок.
+   * Один поход в базу на весь приём, дальше — по индексу каталога в памяти:
+   * приём слотов кладёт сотни строк за раз, и SELECT на каждую был бы N+1 на
+   * горячем пути крона. Неизвестное имя даёт `null` — новый товар не повод
+   * отвергнуть снимок. Правило резолва — ОБЩЕЕ (`resolveCatalogName`), то же,
+   * что у бэкфилла `product_id` и у импорта истории склада.
    */
-  private productIdResolver(index: { aliasByKey: Map<string, string>; productRows: ProductIndexRow[] }): (raw: string) => string | null {
-    const byKey = new Map(index.productRows.map((p) => [normalizeProductName(p.name), p.id]));
-    return (raw: string) => byKey.get(normalizeProductName(this.resolveProduct(raw, index.aliasByKey))) ?? null;
+  private productIdResolver(index: { catalog: ProductIndex }): (raw: string) => string | null {
+    return (raw: string) => {
+      const ответ = resolveCatalogName(index.catalog, raw);
+      // Спор и промах — одинаково `null`: строка с пустой ссылкой чинится
+      // повторным прогоном бэкфилла, ошибочная привязка к чужой карточке — нет.
+      return ответ.kind === "hit" ? ответ.id : null;
+    };
   }
 
   /** То же, но когда прайс ещё не загружен вызывающим. */
@@ -1290,31 +1312,74 @@ export class VendingService {
    * товара, и запись мимо канона («кока кола» вместо «Coca-Cola 0.5») создаёт
    * вторую строку остатка, которую закуп никогда не сложит с первой.
    * Неизвестное имя возвращается как есть, обрезанным: новый товар — не повод
-   * отказать сотруднику в записи факта.
+   * отказать сотруднику в записи факта. А вот СПОРНОЕ имя (ключ — имя одной
+   * карточки и одновременно алиас другой) отбивается `BadRequestException`:
+   * заливка списывает склад, и списание не с того товара повторный прогон уже
+   * не исправит (R-G-1).
    */
   async resolveProductRef(raw: string): Promise<{ name: string; productId: string | null }> {
     const trimmed = raw.trim();
-    const { aliasByKey } = await this.loadProductIndex();
-    const name = this.resolveProduct(trimmed, aliasByKey);
-    const [hit] = await this.db
-      .select({ id: vendingProduct.id })
-      .from(vendingProduct)
-      .where(eq(vendingProduct.name, name))
-      .limit(1);
-    return { name, productId: hit?.id ?? null };
+    const { catalog } = await this.loadProductIndex();
+    const ответ = resolveCatalogName(catalog, trimmed);
+    if (ответ.kind === "conflict") {
+      // Заливка списывает склад — это необратимо. «Одна из двух карточек»
+      // увела бы списание не с того товара, и повтор этого не починит.
+      // Лог получает тот же спор, что и путь `resolveProduct` (:warn ниже) —
+      // Nest не пишет 4xx в лог сам, а появление ПЕРВОГО спора обязано быть
+      // видно (R-G-1), а не тонуть в единственном catch полевого бота.
+      this.logger.warn(
+        `Имя «${ответ.raw}» разрешается двумя путями: карточка «${ответ.byName}» и алиас карточки «${ответ.byAlias}». Заливка отказана.`,
+      );
+      throw new BadRequestException(
+        `Имя «${ответ.raw}» разрешается двумя путями: карточка «${ответ.byName}» и алиас карточки «${ответ.byAlias}». Уберите лишний алиас.`,
+      );
+    }
+    // `id` приезжает из индекса — SELECT по имени больше не нужен (минус один
+    // запрос на каждую заливку из бота).
+    return ответ.kind === "hit" ? { name: ответ.canon, productId: ответ.id } : { name: trimmed, productId: null };
   }
 
   /**
-   * Привести имя товара к канону через алиасы; неизвестное — как есть.
+   * Привести имя товара к канону каталога; неизвестное — как есть.
+   *
+   * ОДНА ДВЕРЬ (R-G-1): правило («точное имя карточки главнее алиаса») живёт в
+   * `resolveCatalogName` (`@mydon/shared`), тем же отвечают бэкфилл `product_id`
+   * и импорт истории склада. Раньше здесь спрашивался АЛИАС первым, и строка с
+   * именем карточки B молча уезжала на карточку A.
    *
    * Публичен вместе с `loadProductIndex` ради аналитики (П5b): её отчёты берут
-   * из ОДНОГО чтения прайса и алиасы, и закупочную цену, и эталон витрины, а
+   * из ОДНОГО чтения прайса и каталог, и закупочную цену, и эталон витрины, а
    * канон обязан быть ТОТ ЖЕ, что у закупа. Своя копия этих двух строк в
    * соседнем сервисе рано или поздно разошлась бы с этой — и товар «Moxito
    * клуб» получил бы вторую строку остатка мимо закупа.
    */
-  resolveProduct(name: string, aliases: Map<string, string>): string {
-    return aliases.get(normalizeProductName(name)) ?? name;
+  resolveProduct(name: string, catalog: ProductIndex): string {
+    const ответ = resolveCatalogName(catalog, name);
+    if (ответ.kind === "hit") return ответ.canon;
+    if (ответ.kind === "conflict") {
+      // На проде таких имён 0 (замер 26.08). Появление ПЕРВОГО обязано быть
+      // видно: молча решать в пользу карточки и молчать — значит повторить ту
+      // же ошибку, из-за которой правило разъехалось на три реализации.
+      // Дедуп по каталогу (гигиена m4): эта функция зовётся построчно, и без
+      // дедупа один спор дал бы сотни-тысячи одинаковых строк за прогон.
+      let предупреждённые = this.conflictWarned.get(catalog);
+      if (!предупреждённые) {
+        предупреждённые = new Set();
+        this.conflictWarned.set(catalog, предупреждённые);
+      }
+      if (!предупреждённые.has(ответ.raw)) {
+        предупреждённые.add(ответ.raw);
+        this.logger.warn(
+          `Имя «${ответ.raw}» разрешается двумя путями: карточка «${ответ.byName}» и алиас карточки «${ответ.byAlias}». ` +
+            `Берём карточку по ИМЕНИ — уберите лишний алиас.`,
+        );
+      }
+      return ответ.byName;
+    }
+    // ПРОМАХ — СЫРОЕ ИМЯ, КАК БЫЛО. Шестнадцать вызывающих принимают `string` и
+    // отличить канон от сырого имени не могут; верни отсюда пустоту — и они
+    // начнут писать в склад и планограмму имена, которых нет.
+    return ответ.raw;
   }
 
   /**
@@ -1328,8 +1393,8 @@ export class VendingService {
    * с этой, и остаток склада перестал бы сходиться с историей автомата.
    */
   async canonResolver(): Promise<(raw: string) => string> {
-    const { aliasByKey } = await this.loadProductIndex();
-    return (raw: string) => this.resolveProduct(raw, aliasByKey);
+    const { catalog } = await this.loadProductIndex();
+    return (raw: string) => this.resolveProduct(raw, catalog);
   }
 
   /**
@@ -1348,9 +1413,9 @@ export class VendingService {
     /** Все канонические имена прайса — из них строится, КАК показывать товар. */
     names: string[];
   }> {
-    const { aliasByKey, priceByName, productRows } = await this.loadProductIndex();
+    const { catalog, priceByName, productRows } = await this.loadProductIndex();
     return {
-      canonOf: (raw: string) => this.resolveProduct(raw, aliasByKey),
+      canonOf: (raw: string) => this.resolveProduct(raw, catalog),
       priceByName,
       names: productRows.map((p) => p.name),
     };
@@ -1369,9 +1434,9 @@ export class VendingService {
     return this.serialMaps(await this.machineRows());
   }
 
-  /** Слоты автомата с именем товара, приведённым к канону через алиасы. */
-  private resolveSlots(slots: Slot[], aliases: Map<string, string>): Slot[] {
-    return slots.map((s) => (s.product ? { ...s, product: this.resolveProduct(s.product, aliases) } : s));
+  /** Слоты автомата с именем товара, приведённым к канону каталога. */
+  private resolveSlots(slots: Slot[], catalog: ProductIndex): Slot[] {
+    return slots.map((s) => (s.product ? { ...s, product: this.resolveProduct(s.product, catalog) } : s));
   }
 
   /**
@@ -1393,7 +1458,7 @@ export class VendingService {
    */
   async ingestStock(payload: IngestStockPayload, actor = "owner"): Promise<IngestStockResult> {
     const countedAt = payload.countedAt ? new Date(payload.countedAt) : new Date();
-    const [{ aliasByKey, priceByName, productRows }, personId] = await Promise.all([
+    const [{ catalog, priceByName }, personId] = await Promise.all([
       this.loadProductIndex(),
       this.известныйСотрудник(payload.personId),
     ]);
@@ -1401,7 +1466,7 @@ export class VendingService {
     // все 20 строк жили без ссылки на карточку. Переименование товара в
     // справочнике рвало связь остатка с прайсом молча. Резолвер — тот же, что
     // у приёма слотов: две карты «канон → карточка» разошлись бы.
-    const productIds = this.productIdResolver({ aliasByKey, productRows });
+    const productIds = this.productIdResolver({ catalog });
 
     // Схлопывание по канону — последняя позиция в списке побеждает (владелец
     // поправился по ходу диктовки/списка).
@@ -1409,7 +1474,7 @@ export class VendingService {
     for (const it of payload.items) {
       const raw = it.product.trim();
       if (!raw) continue;
-      finalByProduct.set(this.resolveProduct(raw, aliasByKey), it.quantity);
+      finalByProduct.set(this.resolveProduct(raw, catalog), it.quantity);
     }
 
     const adjustments: StockAdjustment[] = [];
@@ -1771,7 +1836,7 @@ export class VendingService {
    * бы продажи по другому множеству машин, чем слоты.
    */
   private async purchaseContext(): Promise<PurchaseContext> {
-    const { aliasByKey, priceByName, packByName, rulesByName } = await this.loadProductIndex();
+    const { catalog, priceByName, packByName, rulesByName } = await this.loadProductIndex();
     const byMachine = await this.slotsByMachine();
     const { notInService, nameBySerial: nameByCanon } = await this.machineRegistry();
 
@@ -1810,9 +1875,9 @@ export class VendingService {
 
     const ok = [...byMachine.entries()]
       .filter(([serial]) => okSerials.has(serial))
-      .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, aliasByKey) }));
+      .map(([machineId, slots]) => ({ machineId, slots: this.resolveSlots(slots, catalog) }));
     const needs = needByProduct(ok);
-    const sold = await this.latestSold7(okSerials, aliasByKey);
+    const sold = await this.latestSold7(okSerials, catalog);
     const soldByProduct = sold.byProduct;
 
     // Склад: имя строки приводим к канону тем же способом, что и слоты, и
@@ -1836,7 +1901,7 @@ export class VendingService {
       if (!rulesKeyByNorm.has(normalizeProductName(name))) rulesKeyByNorm.set(normalizeProductName(name), name);
     }
     for (const r of allStockRows) {
-      const canon = this.resolveProduct(r.product, aliasByKey);
+      const canon = this.resolveProduct(r.product, catalog);
       const карточка = rulesKeyByNorm.get(normalizeProductName(canon));
       // Имя строки склада приводим к имени КАРТОЧКИ: потребность, цены и
       // правила уже в нём, и без этого остаток лёг бы отдельной позицией.
@@ -2125,8 +2190,8 @@ export class VendingService {
     const name = rawProduct.trim();
     if (!name) return { ok: false, reason: "not_found" };
 
-    const { aliasByKey, productRows } = await this.loadProductIndex();
-    const canon = this.resolveProduct(name, aliasByKey);
+    const { catalog, productRows } = await this.loadProductIndex();
+    const canon = this.resolveProduct(name, catalog);
     // Сначала — среди уже загруженных строк по нормализованному ключу
     // («блок Red  Bull CAN 0,25 6» с двумя пробелами); SQL по lower() остаётся
     // запасным путём: он ловит имя, которого нет в загруженном срезе.
@@ -2332,7 +2397,7 @@ export class VendingService {
     // Прайс читаем ВСЕГДА, а не только под `distributed`: с П5b приёмка ещё
     // и наблюдает цену позиции против карточки (R-P5b-5), а без прайса
     // «было/стало» в наблюдении сравнивать не с чем.
-    const { aliasByKey, priceByName } = await this.loadProductIndex();
+    const { catalog, priceByName } = await this.loadProductIndex();
     /** Закупочная цена карточки по НОРМАЛИЗОВАННОМУ канону — «было» наблюдения. */
     const ценаКарточки = new Map<string, number>();
     for (const [имя, цена] of priceByName) ценаКарточки.set(normalizeProductName(имя), цена);
@@ -2349,7 +2414,7 @@ export class VendingService {
         // приёмку и не пускаем NaN/дробь в insert по integer-колонке
         // (найдено адверсариал-ревью).
         if (!name || typeof qty !== "number" || !Number.isInteger(qty) || qty < 0) continue;
-        const canon = this.resolveProduct(name, aliasByKey);
+        const canon = this.resolveProduct(name, catalog);
         const key = normalizeProductName(canon);
         // Суммируем, а не перезаписываем: в отличие от ingestStock (снимок,
         // последняя позиция побеждает), distributed — поток "сколько роздано";
@@ -2474,7 +2539,7 @@ export class VendingService {
         // Собираем ДО веток распределения: позиция, целиком ушедшая в
         // автоматы мимо склада, оплачена ровно так же, как любая другая.
         if (unitPrice !== null) {
-          const канон = this.resolveProduct(product, aliasByKey);
+          const канон = this.resolveProduct(product, catalog);
           наблюдения.push({
             product: канон,
             price: unitPrice,
@@ -2613,8 +2678,8 @@ export class VendingService {
     const name = rawProduct.trim();
     if (!name || !Number.isFinite(price) || price <= 0) return { ok: false, reason: "not_found" };
 
-    const { aliasByKey, productRows } = await this.loadProductIndex();
-    const canon = this.resolveProduct(name, aliasByKey);
+    const { catalog, productRows } = await this.loadProductIndex();
+    const canon = this.resolveProduct(name, catalog);
     // Как и в правилах: канон ищем по нормализованному ключу среди загруженных
     // строк, SQL по lower() — запасной путь.
     const row =
@@ -2698,11 +2763,11 @@ export class VendingService {
    */
   async retailFacts(
     days = SALE_PRICE_FACT_DAYS,
-    aliasByKey?: Map<string, string>,
+    catalog?: ProductIndex,
     now = new Date(),
   ): Promise<Map<string, RetailFact>> {
     const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
-    const aliases = aliasByKey ?? (await this.loadProductIndex()).aliasByKey;
+    const каталог = catalog ?? (await this.loadProductIndex()).catalog;
     const сегодня = tashkentDayStartOf(now).getTime();
     const from = tashkentDay(new Date(сегодня - окно * DAY));
     const to = tashkentDay(new Date(сегодня - DAY));
@@ -2727,7 +2792,7 @@ export class VendingService {
     return retailFactByProduct(
       rows
         .filter((r) => парк.ok(r.machineSerial))
-        .map((r) => ({ product: this.resolveProduct(r.product, aliases), qty: Number(r.qty), amount: Number(r.amount) })),
+        .map((r) => ({ product: this.resolveProduct(r.product, каталог), qty: Number(r.qty), amount: Number(r.amount) })),
     );
   }
 
@@ -2755,8 +2820,8 @@ export class VendingService {
       return { ok: false, reason: "invalid_price", newPrice: price, message: "эталон витрины — положительное число сум" };
     }
 
-    const { aliasByKey, productRows } = await this.loadProductIndex();
-    const canon = this.resolveProduct(name, aliasByKey);
+    const { catalog, productRows } = await this.loadProductIndex();
+    const canon = this.resolveProduct(name, catalog);
     // Как и в закупочной цене: канон ищем по нормализованному ключу среди
     // загруженных строк, SQL по lower() — запасной путь.
     const row =
@@ -2778,7 +2843,7 @@ export class VendingService {
     }
 
     const oldPrice = row.salePrice === null ? null : Number(row.salePrice);
-    const fact = (await this.retailFacts(SALE_PRICE_FACT_DAYS, aliasByKey)).get(normalizeProductName(row.name));
+    const fact = (await this.retailFacts(SALE_PRICE_FACT_DAYS, catalog)).get(normalizeProductName(row.name));
     const factPrice = fact ? fact.price : null;
     const deviation = priceDeviationPct(price, factPrice);
     if (!confirmed && deviation !== null && deviation > PRICE_SPIKE_PCT) {
@@ -2841,8 +2906,8 @@ export class VendingService {
    */
   async bootstrapSalePrice(days = SALE_PRICE_FACT_DAYS, actor = "owner"): Promise<BootstrapSalePriceResult> {
     const окно = Math.max(1, Math.trunc(Number.isFinite(days) ? days : SALE_PRICE_FACT_DAYS));
-    const { aliasByKey, productRows } = await this.loadProductIndex();
-    const facts = await this.retailFacts(окно, aliasByKey);
+    const { catalog, productRows } = await this.loadProductIndex();
+    const facts = await this.retailFacts(окно, catalog);
 
     const set: BootstrapSalePriceResult["set"] = [];
     const skipped: BootstrapSalePriceResult["skipped"] = [];

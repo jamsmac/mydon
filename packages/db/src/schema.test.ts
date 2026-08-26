@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import path from "node:path";
 import { Table, is } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { DEFAULT_MACHINE_STATUS, MACHINE_KINDS, MACHINE_STATUSES } from "@mydon/shared";
 import * as mod from "./schema";
-import { schema } from "./schema";
+import { schema, TASK_SOURCE_DAY_PREDICATE } from "./schema";
 
 /**
  * Схема Core — договор с ТЗ §7. Тест ловит случайное удаление или
@@ -170,6 +173,23 @@ describe("Перечисления схемы и словари @mydon/shared �
     // Умолчание прописано и в колонке (DEFAULT 'in_service'), и в коде.
     assert.ok(
       (mod.machineStatusEnum.enumValues as readonly string[]).includes(DEFAULT_MACHINE_STATUS),
+    );
+  });
+});
+
+describe("Предикат частичного индекса task_source_key (R-G-2)", () => {
+  it("константа дословно совпадает с миграцией 0040 — иначе вставка снова получит 42P10", () => {
+    // Индекс уже в проде, миграция — единственная запись о том, КАК он выглядит
+    // в базе. Разойдясь с ней, константа не сломает ни сборку, ни тесты
+    // схемы: сломается вставка, и ровно тем же молчаливым 500.
+    const { sql: предикат } = new PgDialect().sqlToQuery(TASK_SOURCE_DAY_PREDICATE);
+    const миграция = readFileSync(
+      path.resolve(__dirname, "../drizzle/0040_task_entity_photo_stage.sql"),
+      "utf8",
+    );
+    assert.ok(
+      миграция.includes(`WHERE ${предикат}`),
+      `предикат «${предикат}» не найден в 0040 — схема и вставка разошлись`,
     );
   });
 });

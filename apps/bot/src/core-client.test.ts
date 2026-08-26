@@ -114,6 +114,8 @@ describe("Формы аналитики приходят из @mydon/shared", ()
       productSaleLagH: 0.2,
       parityStreak: 3,
       cutoverThreshold: 7,
+      parityLastRed: "2026-08-25",
+      parityStreakSince: "2026-08-26",
       parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, mode: "mirror", note: null },
     };
     // Локальные имена — те же типы: присваивание в обе стороны компилируется.

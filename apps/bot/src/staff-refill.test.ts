@@ -22,7 +22,7 @@ import {
   type RefillDeps,
   type RefillState,
 } from "./staff-refill";
-import { NotAMachineError, type CoreClient, type PersonRow, type VendingPlan } from "./core-client";
+import { CoreError, NotAMachineError, type CoreClient, type PersonRow, type VendingPlan } from "./core-client";
 import { Conversations } from "./conversation";
 import { handleStaffCallback, handleStaffMessage } from "./staff";
 import { matchTrigger } from "./menu";
@@ -199,6 +199,25 @@ describe("Заливка автомата: запись позиции", () => {
     }) as CoreClient["createRefill"]);
     const res = await recordItem(state(), 6, PERSON, d);
     assert.match(res.reply.text, /^⚠️ Не смог записать «Coca-Cola 0\.5»/);
+  });
+
+  it("спор каталога (400) печатает текст Core и не советует повтор (гигиена, UX-major)", async () => {
+    // Раньше любая ошибка Core тонула в одном общем «попробуй ещё раз» — для
+    // детерминированного отказа (R-G-1) это неверный совет: повтор того же
+    // запроса даст тот же 400, и техник застрянет у автомата.
+    const d = deps((async () => {
+      throw new CoreError(
+        400,
+        "/vending/refills",
+        JSON.stringify({ statusCode: 400, message: "Уберите лишний алиас.", error: "Bad Request" }),
+      );
+    }) as CoreClient["createRefill"]);
+    const res = await recordItem(state(), 6, PERSON, d);
+    assert.match(res.reply.text, /Уберите лишний алиас\./);
+    assert.doesNotMatch(res.reply.text, /Попробуй ещё раз/);
+    assert.match(res.reply.text, /Повтор не поможет/i);
+    const buttons = res.reply.keyboard?.inline_keyboard.flat().map((b) => b.callback_data);
+    assert.deepEqual(buttons, ["rf:more", "rf:done"], "escape-путь остаётся — пропустить и продолжить");
   });
 
   it("после позиции предлагает продолжить обход или закончить", async () => {

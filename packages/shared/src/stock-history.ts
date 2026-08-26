@@ -337,6 +337,51 @@ export interface ProductIndex {
 }
 
 /**
+ * Ответ каталога: с ИСТОЧНИКОМ решения и с явным СПОРОМ (R-G-1).
+ *
+ * `raw` едет и в `conflict`, и в `miss` намеренно: обе ветки печатаются
+ * владельцу («это и имя карточки, и алиас другой», «карточки нет»), а второй
+ * раз исходное имя ему никто не передаёт — `resolveProductIds` уже собирает
+ * из него список на разбор.
+ */
+export type CatalogResolution =
+  | { kind: "hit"; canon: string; id: string; source: CanonSource }
+  | { kind: "conflict"; raw: string; byName: string; byAlias: string }
+  | { kind: "miss"; raw: string };
+
+/**
+ * ЕДИНСТВЕННАЯ дверь к правилу «сырое имя → карточка прайса» (R-G-1).
+ *
+ * ПРАВИЛО: точное ИМЯ карточки главнее алиаса; сравнение по
+ * `normalizeProductName` (ё→е, схлопывание пробелов, запятая между цифрами →
+ * точка); алиас на СВОЮ ЖЕ карточку спором не считается; спор («ключ — имя
+ * одной карточки и одновременно алиас другой») возвращается ЯВНО, потому что
+ * `canon: null` там значил бы «карточки нет», а это другое утверждение.
+ *
+ * ПОЧЕМУ ДВЕРЬ, А НЕ ПРОСТО `index.explain`. Правило было реализовано трижды:
+ * живой резолвер Core спрашивал АЛИАС первым (`vending.service.ts`), импорт
+ * истории — имя первым, бэкфилл на споре отказывался. Расхождение было
+ * записано в шапке `backfill-product-ids.ts` как долг; этот срез его закрывает,
+ * и дверь нужна, чтобы у следующего вызывающего не осталось повода написать
+ * свою: `explain` отдаёт ответ без исходного имени и без правила про пустую
+ * строку, и каждый дописывал бы их сам.
+ *
+ * Пустое/пробельное имя — `miss`, а не `hit` с пустым каноном: `resolveProductIds`
+ * такие строки пропускает, и «привязать пустоту» никогда не значило «нашли».
+ */
+export function resolveCatalogName(index: Pick<ProductIndex, "explain">, raw: string): CatalogResolution {
+  // Пустую строку у `explain` не спрашиваем вовсе: нормализация свела бы её к
+  // пустому ключу, и карточка с пустым именем (или алиас-пустышка) стала бы
+  // «попаданием». `raw` возвращается КАК ПРИШЁЛ — вызывающий печатает его
+  // владельцу и кладёт обратно в свою строку.
+  if (raw.trim() === "") return { kind: "miss", raw };
+  const ответ = index.explain(raw);
+  if (ответ.kind === "hit") return { kind: "hit", canon: ответ.canon, id: ответ.id, source: ответ.source };
+  if (ответ.kind === "conflict") return { kind: "conflict", raw, byName: ответ.byName, byAlias: ответ.byAlias };
+  return { kind: "miss", raw };
+}
+
+/**
  * Индекс каталога товаров — ОДНА сборка на оба вопроса, которые к нему задают.
  *
  * Вопроса ровно два, и они разные: бэкфиллу привязок нужен `id` карточки, а
@@ -384,19 +429,29 @@ export function productIndex(products: readonly ProductRow[], aliases: readonly 
     return { kind: "miss" };
   };
 
-  // `canon`/`id` СПОРА НЕ ЗНАЮТ: они отвечают по правилу приоритета (имя
-  // карточки), потому что их зовёт импорт, а «не знаю» там значит потерянную
-  // строку. Отказываться на споре — дело того, кто пишет необратимое.
+  // ОДНА ДВЕРЬ (R-G-1): `canon`/`id` отвечают ЧЕРЕЗ общий резолвер, а не
+  // повторяют его правило рядом. Раньше их две ветки («спор → byName») жили
+  // копиями, и первое же уточнение приоритета пришлось бы вносить трижды.
+  const резолв = (raw: string): CatalogResolution => resolveCatalogName({ explain }, raw);
+
   const canon: CanonIndex = (raw) => {
-    const ответ = explain(raw);
+    const ответ = резолв(raw);
     if (ответ.kind === "hit") return ответ.canon;
+    // Спор `canon` НЕ ЗНАЕТ: его зовёт импорт, и «не знаю» там значит
+    // потерянную строку. Отказываться на споре — дело того, кто пишет
+    // необратимое (`resolveProductIds`, `productIdResolver`).
     return ответ.kind === "conflict" ? ответ.byName : null;
   };
+
   return {
     canon,
     id: (raw) => {
-      const c = canon(raw);
-      return c === null ? null : (idByKey.get(normalizeProductName(c)) ?? null);
+      const ответ = резолв(raw);
+      if (ответ.kind === "hit") return ответ.id;
+      // На споре ссылка обязана указывать на ТУ ЖЕ карточку, что вернул
+      // `canon` (по ИМЕНИ): иначе импорт записал бы `product_name` одной
+      // карточки и `product_id` другой — строку, противоречащую самой себе.
+      return ответ.kind === "conflict" ? (idByKey.get(normalizeProductName(ответ.byName)) ?? null) : null;
     },
     explain,
   };

@@ -387,11 +387,66 @@ describe("Сторож свежести учётного снапшота (R-P8b
     assert.equal((await svc.checkSnapshot(new Date("2026-09-06T13:00:00+05:00"))).emitted, true);
   });
 
-  it("в режиме stock не проверяет ничего: снапшот там теневой", async () => {
-    const { svc, события } = снапшотныйСтенд({ источник: "stock", снапшотAt: "2026-01-01T00:00:00+05:00" });
+  it("в режиме stock сторож работает так же: 37 ч → событие (R-G-3)", async () => {
+    // Раньше здесь стояло «в режиме stock не проверяет ничего: снапшот там
+    // теневой». Теневой он ДЛЯ УЧЁТА, но это единственный вход в паритет, а
+    // паритет — гейт катовера: вставший агент даёт «зелёную» серию из нулей.
+    // Прод 26.08: режим `stock`, снимки приходят ежедневно в 08:05 обе
+    // половины, лаг ≈ 5,8 ч при пороге 36 — ложных тревог не будет.
+    const { svc, события } = снапшотныйСтенд({ источник: "stock", снапшотAt: "2026-09-04T00:00:00+05:00" });
     const r = await svc.checkSnapshot(сейчас);
-    assert.deepEqual([r.stale, r.emitted], [false, false]);
+    assert.deepEqual([r.stale, r.emitted], [true, true]);
+    assert.equal(события[0]!.type, SNAPSHOT_STALE_EVENT);
+    assert.equal(события[0]!.payload.часы_продаж, 37);
+  });
+
+  it("в режиме stock порог тот же: 35 ч при пороге 36 — тишина", async () => {
+    // Порог не имеет права «съехать» вместе с режимом: 36 ч — это два
+    // пропущенных суточных съёма, независимо от того, кто читает снапшот.
+    const { svc, события } = снапшотныйСтенд({ источник: "stock", снапшотAt: "2026-09-04T02:00:00+05:00" });
+    const r = await svc.checkSnapshot(сейчас);
+    assert.deepEqual([r.stale, r.emitted, r.threshold], [false, false, SNAPSHOT_STALE_HOURS_FALLBACK]);
     assert.equal(события.length, 0);
+  });
+
+  it("дедуп по ташкентским суткам действует и в stock", async () => {
+    // Крон ходит каждые полчаса: без дедупа сутки застоя дали бы 48 сообщений.
+    const { svc, события } = снапшотныйСтенд({
+      источник: "stock",
+      снапшотAt: "2026-09-04T00:00:00+05:00",
+      уже: [{ type: SNAPSHOT_STALE_EVENT, occurredAt: new Date("2026-09-05T09:00:00+05:00") }],
+    });
+    assert.equal((await svc.checkSnapshot(сейчас)).emitted, false);
+    assert.equal(события.length, 0);
+    assert.equal((await svc.checkSnapshot(new Date("2026-09-06T13:00:00+05:00"))).emitted, true);
+  });
+
+  it("сторож и витрина отвечают на РАЗНЫЕ вопросы: в stock он тревожит, а snapshotStale остаётся false", async () => {
+    // Якорь различия (R-G-3). Сторож — про АГЕНТА: приносит ли
+    // `ourvend:accounting` суточный снимок. Поле витрины — про УЧЁТ:
+    // остановился ли он от этого. В режиме `stock` не остановился — продажи и
+    // остатки едут зеркалом mydon-stock. Расклеить эти две половины молча
+    // нельзя: «⛔ учёт стоит» каждый день до катовера — ровно тот дефект,
+    // из-за которого гейт когда-то и поставили сразу в двух местах.
+    const { svc, db, события } = снапшотныйСтенд({
+      источник: "stock",
+      снапшотAt: "2026-09-04T00:00:00+05:00",
+      lastSuccessAt: "2026-09-05T12:00:00+05:00",
+    });
+    // Источник учёта кеширует МОДУЛЬ (`accounting-source.ts`, 60 с по
+    // переданному `now`), а не сервис: без сброса отчёт получил бы режим
+    // предыдущего теста набора — `own`, — и `snapshotStale` стал бы `true` по
+    // причине, к правке отношения не имеющей. Тот же приём, что в стенде
+    // `сервис()` теста здоровья.
+    resetAccountingSourceCache();
+    const отчёт = new OurvendHealthService(db, {
+      parity: async () => ПАРИТЕТ,
+      streak: async () => СЕРИЯ_ПУСТО,
+    } as unknown as OurvendParityService);
+
+    assert.equal((await svc.checkSnapshot(сейчас)).emitted, true, "сторож обязан тревожить и в stock");
+    assert.equal(события.length, 1);
+    assert.equal((await отчёт.health(20, сейчас)).snapshotStale, false, "витрина в stock молчит намеренно");
   });
 
   it("снапшота нет вовсе — тревога, и часы null, а не ноль", async () => {
