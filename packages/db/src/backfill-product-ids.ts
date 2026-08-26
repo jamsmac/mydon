@@ -40,8 +40,9 @@
  * плюс таблица алиасов), а не SQL-выражение: повторять его в миграции значит
  * завести вторую реализацию правила, которая разойдётся с Core на первом же
  * новом алиасе. Здесь используется тот же индекс каталога `productIndex` из
- * `@mydon/shared`, что и у импорта истории склада, и та же
- * `normalizeProductName`, что и в `VendingService.productIdResolver`.
+ * `@mydon/shared`, что и у импорта истории склада, и та же дверь
+ * `resolveCatalogName`, что у `VendingService.resolveProduct` и
+ * `productIdResolver`.
  *
  * ОДНО ПРАВИЛО НА ВСЕХ (R-G-1, срез «Гигиена»). Резолв имени живёт в
  * `resolveCatalogName` (`@mydon/shared`): точное имя карточки главнее алиаса,

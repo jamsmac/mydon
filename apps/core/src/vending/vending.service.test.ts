@@ -1343,6 +1343,27 @@ describe("Вендинг Core: инвентаризация склада (§5.4)
     assert.match(предупреждения[0]!, /Sprite CAN 0,25/);
   });
 
+  it("тот же спор на ОДНОМ каталоге не задваивает предупреждение (гигиена m4)", async () => {
+    // `resolveSlots`/`retailFacts` зовут резолвер построчно на сотни-тысячи
+    // строк: без дедупа одно спорное имя утопило бы первый спор в собственном
+    // шуме. Дедуп — по каталогу (`ProductIndex`), не навсегда: новый прогон
+    // (`canonResolver()` заново) предупредит снова, см. соседний тест.
+    const products: ProdRow[] = [
+      { id: "p1", name: "Fanta CAN 0,25", purchasePrice: null, packSize: 1 },
+      { id: "p2", name: "Sprite CAN 0,25", purchasePrice: null, packSize: 1 },
+    ];
+    const svc = new VendingService(readDb([], [{ productId: "p2", alias: "Fanta CAN 0,25" }], products));
+    const предупреждения: string[] = [];
+    (svc as unknown as { logger: { warn: (m: string) => void } }).logger = {
+      warn: (m: string) => предупреждения.push(m),
+    };
+    const canon = await svc.canonResolver();
+    canon("Fanta CAN 0,25");
+    canon("Fanta CAN 0,25");
+    canon("Fanta CAN 0,25");
+    assert.equal(предупреждения.length, 1, "три вызова на одном каталоге — одно предупреждение");
+  });
+
   it("на спорном имени ссылка на карточку НЕ проставляется: NULL чинится, ошибка — нет", async () => {
     // `бэкфиллWhere` держит `isNull(product_id)`: ошибочно проставленную
     // ссылку повторный прогон уже не тронет, а молчаливая привязка к чужой

@@ -4,7 +4,6 @@ import { and, eq, gte } from "drizzle-orm";
 import { event } from "@mydon/db";
 import { staleHours, tashkentDayStartOf, TZ } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
-import { accountingSource } from "../sales/accounting-source";
 import {
   lastRunStatus,
   lastSnapshotAt,
@@ -187,9 +186,6 @@ export class SyncStaleService implements OnModuleInit, OnApplicationShutdown {
    * `stock` снимки приходят ежедневно в 08:05, обе половины, лаг ≈ 5,8 ч при
    * пороге 36 ч (два пропущенных съёма подряд).
    *
-   * Режим по-прежнему читается: им подписывается событие и объясняется это
-   * различие. Убрать чтение вместе с гейтом значило бы потерять контекст.
-   *
    * `now` — параметр по той же причине, что у соседа: иначе «37 часов назад»
    * нечем проверить тестом, а дедуп сверялся бы датой прогона тестов.
    */
@@ -201,16 +197,7 @@ export class SyncStaleService implements OnModuleInit, OnApplicationShutdown {
     /** Какая половина встала: «продаж», «остатков», «продаж и остатков». `null` — обе живы. */
     which: string | null;
   }> {
-    // Возврат отброшен пустым слотом — режим больше не определяет ветвление
-    // (гейт снят, R-G-3), но вызов остаётся: см. докстринг выше «Режим
-    // по-прежнему читается».
-    const [, threshold] = await Promise.all([
-      // `now` ПРОБРАСЫВАЕТСЯ: кеш источника ключуется временем, и вызов без
-      // момента считал бы срок жизни кеша по стенным часам там, где весь
-      // остальной метод считается параметром.
-      accountingSource(this.db, now),
-      snapshotStaleThreshold(this.db, this.logger),
-    ]);
+    const threshold = await snapshotStaleThreshold(this.db, this.logger);
 
     // ОБЕ ПОЛОВИНЫ СНАПШОТА, РАЗДЕЛЬНО (R-FW-P2). Агент шлёт три отдельных
     // POST-а, у Lot-сессии свой `try`: упавшие остатки замораживают
