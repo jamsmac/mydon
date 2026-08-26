@@ -191,12 +191,73 @@ describe("Монитор графиков", () => {
     assert.equal(r.tasks, 0);
   });
 
+  it("сроки не прочитаны — событие о сбое всё равно записано (M1)", async () => {
+    // Самый тяжёлый отказ: `maintenanceDue()` падает до цикла по нормативам.
+    // Ранний `return` не имеет права обойти сторож `maintenance.monitor_failed` —
+    // иначе `select count(*) from event where type = 'maintenance.monitor_failed'`
+    // читается как «здоров» даже при мёртвом Core.
+    const { core, events } = stubCore([], {
+      maintenanceDue: async () => {
+        throw new Error("Core не поднялся");
+      },
+    });
+    const r = await runMaintenanceMonitor(core, { now: NOW });
+    const сбой = events.find((e) => e.type === "maintenance.monitor_failed");
+    assert.ok(сбой, "ранний return не имеет права обойти сторож");
+    assert.equal(сбой!.payload.tasks, 0);
+    assert.equal(сбой!.payload.errorCount, 1);
+    assert.equal(r.errors.length, 1);
+  });
+
   it("срок задачи — конец рабочего дня по Ташкенту", async () => {
     // 18:00 в Ташкенте = 13:00 UTC. Ставить полночь значит показать технику
     // «просрочено» в тот же день, когда он ещё едет на точку.
     const { core, tasks } = stubCore([row({ status: "due", nextDueOn: "2026-08-06" })]);
     await runMaintenanceMonitor(core, { now: NOW });
     assert.equal(tasks[0].due, "2026-08-06T13:00:00.000Z");
+  });
+
+  it("Core ответил 500 на один норматив — прогон не падает, остальные обработаны", async () => {
+    // Каждая строка в своём try/catch. До 26.08.2026 500 отвечал КАЖДЫЙ вызов
+    // (42P10 на вставке), и единственным следом была строка в console.log,
+    // которую съедало пересоздание контейнера деплоем.
+    let n = 0;
+    const { core, tasks } = stubCore([row({ planId: "pl-1" }), row({ planId: "pl-2" })], {
+      ensureTaskForDay: async (input: EnsureTaskInput) => {
+        n += 1;
+        if (n === 1) throw new Error("Core ответил 500 на /tasks/ensure-for-day");
+        tasks.push(input);
+        return { created: true, taskId: "t-2" };
+      },
+    });
+    const r = await runMaintenanceMonitor(core, { now: NOW });
+    assert.equal(r.errors.length, 1);
+    assert.match(r.errors[0]!, /pl-1/);
+    assert.equal(r.tasks, 1, "второй норматив обязан быть обработан");
+  });
+
+  it("прогон с ошибками пишет СОБЫТИЕ, а не строку в лог", async () => {
+    // «Монитор не смог поставить ни одной задачи» обязано переживать
+    // пересоздание контейнера: доказывать аварию 26.08 пришлось схемой и
+    // нулевыми счётчиками именно потому, что логов уже не было.
+    const { core, events } = stubCore([row()], {
+      ensureTaskForDay: async () => {
+        throw new Error("Core ответил 500 на /tasks/ensure-for-day");
+      },
+    });
+    const r = await runMaintenanceMonitor(core, { now: NOW });
+    const сбой = events.find((e) => e.type === "maintenance.monitor_failed");
+    assert.ok(сбой, "непустой errors обязан стать событием");
+    assert.equal(сбой!.payload.errorCount, 1);
+    assert.equal(сбой!.payload.tasks, 0);
+    assert.equal(сбой!.payload.day, "2026-08-06");
+    assert.equal(r.errors.length, 1);
+  });
+
+  it("чистый прогон события о сбое не пишет", async () => {
+    const { core, events } = stubCore([row()]);
+    await runMaintenanceMonitor(core, { now: NOW });
+    assert.ok(!events.some((e) => e.type === "maintenance.monitor_failed"));
   });
 });
 

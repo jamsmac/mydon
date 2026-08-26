@@ -1,5 +1,13 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { auditLog, machineCard, maintenanceLog, maintenancePlan, task, taskComment } from "@mydon/db";
+import {
+  auditLog,
+  machineCard,
+  maintenanceLog,
+  maintenancePlan,
+  task,
+  TASK_SOURCE_DAY_PREDICATE,
+  taskComment,
+} from "@mydon/db";
 import { machineIsOperational, type Domain } from "@mydon/shared";
 import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL, isNull } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
@@ -385,7 +393,15 @@ export class TasksService {
         createdBy: input.createdBy ?? "scheduler",
         entityId: input.entityId ?? null,
       })
-      .onConflictDoNothing({ target: task.source })
+      .onConflictDoNothing({
+        // ПРЕДИКАТ ОБЯЗАТЕЛЕН (R-G-2): индекс `task_source_key` ЧАСТИЧНЫЙ, и
+        // из голого `target` Postgres его не выводит — `42P10`, который фильтр
+        // исключений (класс не 22/23) отдаёт как 500. Так эта вставка не
+        // проходила НИ РАЗУ: задач от монитора в проде 0 при 19 попытках в
+        // сутки (замер 26.08.2026).
+        target: task.source,
+        where: TASK_SOURCE_DAY_PREDICATE,
+      })
       .returning();
     if (!created) return null;
 

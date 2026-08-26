@@ -412,16 +412,11 @@ export async function handleMessage(
   // по крону, и делать вид, что «сверка» ходит в кабинет, нельзя.
   if (isOurvendCheckQuery(text)) {
     try {
-      // Серия по дням — ОТДЕЛЬНЫЙ роут: здоровье несёт только счёт зелёных
-      // дней, а дату последнего красного дня (P4) отдаёт `/ourvend/parity/
-      // streak`. Его отказ «сверку» не отменяет — отчёт печатается без этой
-      // строки, а не превращается в «отчёт не пришёл»: здоровье сбора важнее
-      // даты старого сбоя.
-      const [здоровье, серия] = await Promise.all([
-        deps.core.ourvendHealth(),
-        deps.core.ourvendParityStreak().catch(() => null),
-      ]);
-      const [first, ...more] = formatOurvendHealth(здоровье, серия);
+      // ОДИН запрос: дата последнего красного дня едет полем здоровья (R-G-4).
+      // Пока их было два, отказ `/ourvend/parity/streak` молча отнимал у
+      // отчёта строку — «сверка» печаталась без неё и выглядела нормально.
+      const здоровье = await deps.core.ourvendHealth();
+      const [first, ...more] = formatOurvendHealth(здоровье);
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка сверки OurVend:", err);
