@@ -123,8 +123,10 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
    * `product_sale.captured_at`, `machine_sale.captured_at` —
    * `SNAPSHOT_RETENTION_DAYS`; `vending_sync_run.started_at` —
    * `SYNC_RUN_RETENTION_DAYS`. Таблица попадает в результат и получает событие
-   * `system.retention` ТОЛЬКО когда что-то реально удалено: «удалено 0» — не
-   * новость, ни строки в журнале, ни лишнего события за 52 воскресенья в году.
+   * `system.retention`, когда что-то реально удалено ИЛИ когда чистка
+   * оборвалась ошибкой: «удалено 0» — не новость (ни строки в журнале, ни
+   * лишнего события за 52 воскресенья в году), а «не смогли удалить» —
+   * новость, даже если снести не успели ни строки.
    */
   async sweep(now = new Date()): Promise<RetentionResult[]> {
     const snapshotDays = Math.max(
@@ -194,7 +196,12 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
             `${e instanceof Error ? e.message : String(e)}`,
         );
       } finally {
-        if (deleted > 0) {
+        // «УДАЛЕНО 0» — НЕ НОВОСТЬ, «НЕ СМОГЛИ УДАЛИТЬ» — НОВОСТЬ. Молчание при
+        // пустой таблице бережёт журнал от 52 записей ни о чём в году, но тот
+        // же порог `deleted > 0` съедал единственный отказ, о котором в журнале
+        // не оставалось ни строки: обрыв на ПЕРВОЙ пачке (блокировка, обрыв
+        // соединения) давал `aborted`, ноль удалённых — и только `warn` в логе.
+        if (deleted > 0 || aborted) {
           results.push({ table: t.name, deleted, olderThanDays: t.olderThanDays, capped, aborted });
           try {
             await this.db.insert(event).values({

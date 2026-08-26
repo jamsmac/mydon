@@ -29,6 +29,13 @@ interface Мир {
   stock?: Снимок[];
   productSales?: Снимок[];
   parity?: Паритет;
+  /**
+   * Сверка ОТКАЗАЛА (сообщение исключения). Своей ветки она заслуживает
+   * потому, что в режиме `own-vs-donor` `parity()` открывает соединение с
+   * ЧУЖОЙ базой (`connect_timeout: 10`), а недоступный донор — рядовое
+   * событие ровно в дни катовера.
+   */
+  parityError?: string;
   streak?: Серия;
 }
 
@@ -128,7 +135,10 @@ function healthDb(м: Мир) {
   } as never;
 
   const parity = {
-    parity: async () => м.parity ?? ПАРИТЕТ_ОК,
+    parity: async () => {
+      if (м.parityError !== undefined) throw new Error(м.parityError);
+      return м.parity ?? ПАРИТЕТ_ОК;
+    },
     // Серия — отдельным вопросом к журналу событий (П8b): отчёт обязан донести
     // до витрины и счёт, и ПОРОГ, по которому его судят.
     streak: async () => м.streak ?? СЕРИЯ_ПО_УМОЛЧАНИЮ,
@@ -322,33 +332,41 @@ describe("Здоровье сбора (R-P5b-8)", () => {
 
 // ── Вердикт «учётный снапшот встал» (R-P8b-5) ───────────────────────────────
 
-describe("Свежесть учётного снапшота в отчёте (R-P8b-5)", () => {
-  /** Прогон с подменённым окружением: кеш источника сбрасывается с обеих сторон. */
-  const сОкружением = async <T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> => {
-    const было: Record<string, string | undefined> = {};
-    for (const [k, v] of Object.entries(env)) {
-      было[k] = process.env[k];
+/** Прогон с подменённым окружением: кеш источника сбрасывается с обеих сторон. */
+const сОкружением = async <T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> => {
+  const было: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(env)) {
+    было[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  resetAccountingSourceCache();
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(было)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
     resetAccountingSourceCache();
-    try {
-      return await fn();
-    } finally {
-      for (const [k, v] of Object.entries(было)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-      resetAccountingSourceCache();
-    }
-  };
+  }
+};
 
-  // РЕЖИМ `own` ЗАДАЁТСЯ ЯВНО, а не «получается сам» из-за незаданной
-  // переменной в процессе разработчика: с экспортированным `STOCK_DATABASE_URL`
-  // набор молча уехал бы в `stock`, где `snapshotStale` всегда `false`, и
-  // «снапшот свежий — false» остался бы зелёным по неправильной причине.
-  const вРежимеOwn = <T>(fn: () => Promise<T>): Promise<T> => сОкружением({ STOCK_DATABASE_URL: undefined }, fn);
+// РЕЖИМ `own` ЗАДАЁТСЯ ЯВНО, а не «получается сам» из-за незаданной
+// переменной в процессе разработчика: с экспортированным `STOCK_DATABASE_URL`
+// набор молча уехал бы в `stock`, где `snapshotStale` всегда `false`, и
+// «снапшот свежий — false» остался бы зелёным по неправильной причине.
+const вРежимеOwn = <T>(fn: () => Promise<T>): Promise<T> => сОкружением({ STOCK_DATABASE_URL: undefined }, fn);
 
+/**
+ * Шаги 1а–2 рунбука: учёт уже свой, а зеркало ещё живо. Единственный режим, в
+ * котором сверка ходит в ЧУЖУЮ базу — и, значит, единственный, в котором она
+ * может не вернуться.
+ */
+const вРежимеOwnVsDonor = <T>(fn: () => Promise<T>): Promise<T> =>
+  сОкружением({ STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "own" }, fn);
+
+describe("Свежесть учётного снапшота в отчёте (R-P8b-5)", () => {
   it("режим own, снапшот старше порога — вердикт true рядом с лагом", async () =>
     вРежимеOwn(async () => {
       const h = await сервис({ sales: [{ at: new Date("2026-08-23T18:00:00Z") }] }).health(20, СЕЙЧАС);
@@ -406,4 +424,52 @@ describe("Свежесть учётного снапшота в отчёте (R-
       assert.equal(h.salesLagH, 36, "витрина показывает округлённое число");
       assert.equal(h.snapshotStale, false, "но решение принимается по сырым часам");
     }));
+});
+
+// ── Витрина переживает недоступного донора (re-review, major 1) ─────────────
+
+describe("Здоровье сбора переживает отказ сверки (re-review)", () => {
+  it("донор не ответил в режиме own-vs-donor — отчёт цел, паритет вырожден с причиной", async () =>
+    вРежимеOwnVsDonor(async () => {
+      // `parity()` в этом режиме открывает соединение с БД донора
+      // (`connect_timeout: 10`) и делает два запроса. Пока вызов стоял в
+      // `Promise.all` без своего `catch`, недоступный донор ронял ВЕСЬ отчёт —
+      // ту самую витрину, которую владелец в дни катовера и открывает: панель
+      // печатала «Здоровье сбора: не проверили», бот — «отчёт не пришёл»,
+      // недельная сводка уезжала в ЗДОРОВЬЕ_НЕИЗВЕСТНО. Ровно та цена, ради
+      // которой рядом уже закрыли `streak()`.
+      const h = await сервис({
+        runs: [УСПЕХ("r1", "2026-08-25T06:00:00Z")],
+        sales: [{ at: new Date("2026-08-25T04:00:00Z") }],
+        parityError: "connect ETIMEDOUT 10.0.0.5:5432",
+      }).health(20, СЕЙЧАС);
+
+      assert.deepEqual(
+        [h.parity.days, h.parity.ok, h.parity.checked, h.parity.mismatches, h.parity.stockOk, h.parity.stockChecked],
+        [7, false, 0, 0, false, 0],
+        "вырожденный паритет держит контракт: объект, нули, красный вердикт",
+      );
+      assert.equal(h.parity.mode, "own-vs-donor", "режим — тот, в котором сверку и пытались считать");
+      assert.equal(
+        h.parity.note,
+        "сверка недоступна: connect ETIMEDOUT 10.0.0.5:5432",
+        "причина — словами: «расхождений 0» без неё читается как «всё сошлось»",
+      );
+
+      // Всё остальное — как будто сверки и не звали: отказ спутника не выдаёт
+      // себя за отказ главного.
+      assert.deepEqual([h.parityStreak, h.cutoverThreshold], [3, 7], "серия считается своим запросом и не страдает");
+      assert.deepEqual([h.lastSuccessAt, h.staleHours, h.failedStreak], ["2026-08-25T06:00:00.000Z", 1, 0]);
+      assert.deepEqual([h.salesLagH, h.snapshotStale], [3, false]);
+    }));
+
+  it("сверка отказала в режиме stock — режим в ответе тоже честный", async () =>
+    сОкружением(
+      { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+      async () => {
+        const h = await сервис({ parityError: "deadlock detected" }).health(20, СЕЙЧАС);
+        assert.equal(h.parity.mode, "mirror");
+        assert.equal(h.parity.note, "сверка недоступна: deadlock detected");
+      },
+    ));
 });

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { describe, it } from "node:test";
 import { entity, machineStock, ourvendStockSnapshot, purchase, systemConfig } from "@mydon/db";
+import { type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import type { VendingService } from "../vending/vending.service";
 import { resetAccountingSourceCache } from "../sales/accounting-source";
 import {
@@ -199,6 +201,36 @@ describe("Сводка снабжения: источник остатков в�
     assert.equal(
       (await сводка({ STOCK_DATABASE_URL: undefined, OURVEND_ACCOUNTING_SOURCE: undefined })).source,
       "own",
+    );
+  });
+});
+
+describe("Сводка снабжения считает окно от переданного момента", () => {
+  it("граница «закупы за 30 дней» едет от `now`, а не от стенных часов", async () => {
+    // `now` — параметр по конвенции репо: половинчатая прокрутка («источник по
+    // моменту, окно по часам стенки») превращает тест в проверку «примерно тех
+    // же суток» и разъезжается ровно на границе календарного дня.
+    const диалект = new PgDialect();
+    const условия: string[] = [];
+    const db = {
+      select: () => ({
+        from: (t: unknown) =>
+          t === systemConfig
+            ? Promise.resolve([])
+            : {
+                where: (cond: SQL) => {
+                  условия.push(JSON.stringify(диалект.sqlToQuery(cond).params));
+                  return Promise.resolve([{ count: 0, total: "0" }]);
+                },
+                leftJoin: () => ({ where: () => ({ orderBy: () => Promise.resolve([]) }) }),
+              },
+      }),
+    } as never;
+
+    await new SupplyService(db, вендинг()).summary(new Date("2026-09-06T10:00:00+05:00"));
+    assert.ok(
+      условия.some((c) => c.includes("2026-08-07")),
+      `граница обязана считаться от переданного момента (06.09 − 30 сут = 07.08); было: ${условия.join(" | ")}`,
     );
   });
 });

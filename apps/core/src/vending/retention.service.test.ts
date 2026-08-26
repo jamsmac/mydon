@@ -152,6 +152,29 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
     assert.equal(события[0]!.payload.aborted, true, "и признак, что список неполон");
   });
 
+  it("ОБРЫВ НА ПЕРВОЙ ПАЧКЕ: следа тоже не теряем — deleted 0 и aborted", async () => {
+    // Блокировка или обрыв соединения на самом первом DELETE: снести не успели
+    // ничего, но чистка ОТКАЗАЛА. `finally` писал событие только при
+    // `deleted > 0` — то есть единственный отказ, о котором в журнале не
+    // оставалось ни строки, был как раз самый ранний. «Удалено 0» и правда не
+    // новость; «не смогли удалить» — новость.
+    const { svc, события } = стенд({
+      строк: { slot_snapshot: RETENTION_BATCH * 3 },
+      ломать: (таблица, пачка) => таблица === "slot_snapshot" && пачка === 1,
+    });
+
+    const r = await svc.sweep(вс);
+    const снимки = r.find((x) => x.table === "slot_snapshot")!;
+    assert.deepEqual([снимки.deleted, снимки.aborted, снимки.capped], [0, true, false]);
+    assert.equal(события.length, 1, "ровно одно событие — про отказавшую цель, остальные чистить нечего");
+    assert.deepEqual(события[0]!.payload, {
+      table: "slot_snapshot",
+      deleted: 0,
+      olderThanDays: 180,
+      aborted: true,
+    });
+  });
+
   it("обрыв одной цели не уносит остальные: у каждой своя таблица", async () => {
     const { svc } = стенд({
       строк: { slot_snapshot: 10, vending_sync_run: 5 },

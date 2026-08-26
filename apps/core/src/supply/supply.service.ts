@@ -525,7 +525,10 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
     lastStockDt: string | null;
     source: AccountingSource;
   }> {
-    const d30 = new Date();
+    // `now` ЦЕЛИКОМ, а не наполовину: параметр заведён ради конвенции «время —
+    // аргумент», и окно, посчитанное от стенных часов при заданном `now`,
+    // разъезжается с ним ровно на границе календарного дня.
+    const d30 = new Date(now);
     d30.setDate(d30.getDate() - 30);
     const [p] = await this.db
       .select({

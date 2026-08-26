@@ -6,7 +6,7 @@ import { DB, type Db } from "../db/db.module";
 import { accountingSource } from "../sales/accounting-source";
 import { ReportCache } from "../vending/report-cache";
 import { failedStreak, STREAK_SCAN_LIMIT } from "../vending/sync-streak";
-import { OurvendParityService } from "./ourvend-parity.service";
+import { OurvendParityService, parityMode, type ParityReport } from "./ourvend-parity.service";
 import {
   CUTOVER_GREEN_DAYS_FALLBACK,
   lastSnapshotAt,
@@ -119,7 +119,36 @@ export class OurvendHealthService {
           .from(productSale)
           .orderBy(desc(productSale.capturedAt))
           .limit(1),
-        this.parity.parity(PARITY_DAYS, now),
+        // …И ТОЖЕ ПОД СВОИМ `catch` — по той же причине, что серия ниже, но
+        // цена здесь выше. После флипа (`own`, зеркало ещё живо) `parity()`
+        // сверяется с ТАБЛИЦАМИ ДОНОРА напрямую: открывает соединение с чужой
+        // базой (`connect_timeout: 10`) и делает два запроса. Недоступный или
+        // медленный донор — рядовое событие ровно в дни катовера, а без своего
+        // `catch` он клал ВЕСЬ отчёт о здоровье: панель печатала «не
+        // проверили», бот — «отчёт не пришёл», недельная сводка уезжала в
+        // ЗДОРОВЬЕ_НЕИЗВЕСТНО. Витрина, которая гаснет целиком из-за одной из
+        // восьми своих строк, хуже витрины, которая честно говорит, какая
+        // строка не посчиталась.
+        this.parity.parity(PARITY_DAYS, now).catch(async (e: unknown): Promise<ParityReport> => {
+          const причина = e instanceof Error ? e.message : String(e);
+          this.logger.warn(`Сверка паритета не посчиталась: ${причина}`);
+          // Режим — тем же чистым правилом, что и у удавшегося прогона: без
+          // него «расхождений 0» не отличить от «сверять было не с чем».
+          // Читает он свою же базу (кеш минуты, тот же вызов уже стоит в этой
+          // пачке) — если недоступна ОНА, отчёт всё равно не соберётся.
+          const mode = parityMode(await accountingSource(this.db, now));
+          const записка = `сверка недоступна: ${причина}`;
+          return {
+            days: PARITY_DAYS,
+            checked: 0,
+            ok: false,
+            mismatches: [],
+            ownRows: 0,
+            mode,
+            note: записка,
+            stock: { days: PARITY_DAYS, checked: 0, ok: false, mismatches: [], withinTolerance: 0, tolerance: 0, note: записка },
+          };
+        }),
         // Серия зелёных дней — рядом с сегодняшней сверкой, а не вместо неё
         // (R-P8b-2): `parity` отвечает «сходится ли СЕЙЧАС», серия — «сколько
         // дней подряд сходилось», и катовер открывает второе, а не первое.

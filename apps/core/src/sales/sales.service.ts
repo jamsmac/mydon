@@ -12,7 +12,7 @@ import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, st
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
-import { lastSnapshotAt, snapshotStaleThreshold, snapshotStaleVerdict } from "../ourvend/sync-runs";
+import { lastSnapshotAt, snapshotIsStale, snapshotStaleThreshold } from "../ourvend/sync-runs";
 import { openStockDb } from "../supply/stock-db";
 import { accountingSource, type AccountingSource } from "./accounting-source";
 
@@ -353,11 +353,19 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     const источник = await accountingSource(this.db, now);
     const configured =
       источник === "own"
-        ? // Свежесть — ПО ОБЕИМ половинам снапшота (R-FW-P2): продажи кормят
-          // `sale`, остатки — `machine_stock`, и вставшая половина
-          // останавливает свою таблицу молча.
-          !snapshotStaleVerdict(await lastSnapshotAt(this.db), now, await snapshotStaleThreshold(this.db, this.log))
-            .stale
+        ? // Свежесть — ПО ПОЛОВИНЕ ПРОДАЖ, и только по ней. Сторож и
+          // `OurvendHealth.snapshotStale` смотрят на ОБЕ половины (R-FW-P2) и
+          // умеют назвать вставшую словами; этот флаг — нет: его читают три
+          // витрины ПРОДАЖ («снапшот не пришёл» на чипе журнала, «снапшота за
+          // сутки нет» в пустом журнале и у бота), и погасить их из-за
+          // упавшей Lot-сессии остатков значит сказать владельцу неправду о
+          // продажах, которые в этот момент едут. Половина остатков остаётся
+          // за сторожем, который тревожит по адресу.
+          !snapshotIsStale(
+            (await lastSnapshotAt(this.db)).sales,
+            now,
+            await snapshotStaleThreshold(this.db, this.log),
+          )
         : Boolean(process.env.STOCK_DATABASE_URL);
     // `now` ЦЕЛИКОМ, а не наполовину: доккомментарий обещает «параметр, а не
     // `new Date()` внутри», и «сегодня» по стенным часам при заданном `now`

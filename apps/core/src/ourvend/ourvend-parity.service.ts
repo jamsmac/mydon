@@ -13,7 +13,7 @@ import {
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
-import { accountingSource } from "../sales/accounting-source";
+import { accountingSource, type AccountingSource } from "../sales/accounting-source";
 import { openStockDb, type StockDb } from "../supply/stock-db";
 import { VendingService } from "../vending/vending.service";
 import { cutoverThreshold, stockParityTolerance } from "./sync-runs";
@@ -285,6 +285,23 @@ export function computeStockParity(
 // панель, и вторая копия union'а разошлась бы с ответом Core в первый же день.
 export type { ParityMode };
 
+/**
+ * С ЧЕМ СВЕРЯЕМСЯ — ЧИСТЫМ ПРАВИЛОМ, отдельно от самой сверки.
+ *
+ * Режим нужен не только удавшемуся прогону: отчёт о здоровье обязан назвать
+ * его и тогда, когда сверка ОТКАЗАЛА (донор не ответил), — иначе витрина
+ * печатает «расхождений 0» без единого слова о том, с чем именно сверять не
+ * вышло. Вторая копия условия у второго читателя разошлась бы с этой ровно на
+ * шаге 3 рунбука, где `own` перестаёт значить `own-vs-donor`.
+ */
+export function parityMode(
+  source: AccountingSource,
+  stockDatabaseUrl: string | undefined = process.env.STOCK_DATABASE_URL,
+): ParityMode {
+  if (source !== "own") return "mirror";
+  return (stockDatabaseUrl ?? "").trim() === "" ? "retired" : "own-vs-donor";
+}
+
 /** Ежедневный вердикт сверки целиком — обе половины и режим. */
 export interface ParityReport {
   days: number;
@@ -369,7 +386,7 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     // часам там, где вызывающий уже держит свой момент.
     const источник = await accountingSource(this.db, now);
     const url = (process.env.STOCK_DATABASE_URL ?? "").trim();
-    const mode: ParityMode = источник === "own" ? (url === "" ? "retired" : "own-vs-donor") : "mirror";
+    const mode = parityMode(источник, url);
     const допуск = await stockParityTolerance(this.db, this.log);
 
     if (mode === "retired") {
