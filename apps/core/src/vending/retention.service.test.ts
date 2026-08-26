@@ -21,6 +21,11 @@ function рендер(q: SQL): string {
   return `${текст} -- params: ${JSON.stringify(params)}`;
 }
 
+/** Сами параметры, а не их JSON: `Date` и ISO-строка сериализуются ОДИНАКОВО. */
+function параметры(q: SQL): unknown[] {
+  return ДИАЛЕКТ.sqlToQuery(q).params;
+}
+
 /**
  * Стенд: `execute` симулирует DELETE-пачку по таблице, которую называет
  * рендер запроса, отдавая `{ count }` и укорачивая остаток строк — тот же
@@ -40,6 +45,8 @@ function стенд(опт: {
 }) {
   const остаток: Record<string, number> = { ...опт.строк };
   const запросы: string[] = [];
+  /** Параметры каждого запроса — ТИПАМИ, а не текстом (см. `параметры`). */
+  const аргументы: unknown[][] = [];
   const события: { type: string; payload: Record<string, unknown> }[] = [];
   const настройки = Object.entries(опт.настройки ?? {}).map(([key, value]) => ({ key, value }));
 
@@ -50,6 +57,7 @@ function стенд(опт: {
     execute: async (q: SQL) => {
       const текст = рендер(q);
       запросы.push(текст);
+      аргументы.push(параметры(q));
       const t = ТАБЛИЦЫ.find((name) => текст.includes(`"${name}"`));
       if (!t) throw new Error(`стенд: не распознал таблицу в запросе: ${текст}`);
       пачек[t] = (пачек[t] ?? 0) + 1;
@@ -81,7 +89,7 @@ function стенд(опт: {
     }),
   } as unknown as Db;
 
-  return { svc: new RetentionService(db), запросы, события };
+  return { svc: new RetentionService(db), запросы, аргументы, события };
 }
 
 describe("Еженедельная ретенция (R-P8b-7)", () => {
@@ -272,6 +280,25 @@ describe("Ретенция истории склада (R-H-8)", () => {
 
 describe("Ручной прогон ретенции: примерка и полный расклад (R-FW-S2)", () => {
   const вс = new Date("2026-09-06T04:10:00+05:00");
+
+  it("граница уезжает СТРОКОЙ, а не объектом Date — иначе драйвер падает до сервера", async () => {
+    // НАЙДЕНО СМОУКОМ ПРОТИВ ЖИВОГО POSTGRES, ради которого роут и заводился.
+    // `Date` в сыром параметре шаблона `sql` уходит в postgres.js без типа
+    // колонки, и драйвер бросает «The "string" argument must be of type string
+    // … Received an instance of Date» — то есть четыре первые цели ретенции
+    // падали КАЖДОЕ воскресенье (`aborted: true`, ноль удалённых). Прежний
+    // сторож этого не видел: `JSON.stringify` даёт для `Date` и для ISO-строки
+    // один и тот же текст, поэтому проверяем ТИП параметра.
+    const { svc, аргументы } = стенд({ строк: { slot_snapshot: 1, vending_stock_count: 1 } });
+    await svc.sweep(вс);
+    assert.ok(аргументы.length > 0, "запросов не было вовсе");
+    for (const пара of аргументы) {
+      for (const п of пара) {
+        assert.equal(п instanceof Date, false, `параметр уехал объектом Date: ${String(п)}`);
+        assert.equal(typeof п, "string", `параметр обязан быть строкой, а не ${typeof п}`);
+      }
+    }
+  });
 
   it("`dryRun` НЕ удаляет и НЕ пишет событие, но исполняет тот же предикат", async () => {
     const { svc, запросы, события } = стенд({ строк: { vending_stock_count: 3, slot_snapshot: 7 } });

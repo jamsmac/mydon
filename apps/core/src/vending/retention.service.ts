@@ -146,12 +146,30 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
     this.cron = null;
   }
 
+  /**
+   * Граница возраста — ВСЕГДА СТРОКОЙ, никогда объектом `Date` (R-FW-S2).
+   *
+   * Голые сутки `YYYY-MM-DD` для `date`-колонок (R-H-8): `date < timestamptz`
+   * Postgres приводит к UTC-полуночи = 05:00 Ташкента, и цель резала бы на пять
+   * часов раньше срока — та самая ловушка, которой стоил урок VendCash.
+   *
+   * ISO-строка для `timestamptz`-колонок — И ЭТО НЕ КОСМЕТИКА. `Date` в СЫРОМ
+   * параметре шаблона `sql` уезжает в postgres.js без типа колонки, и драйвер
+   * падает ещё до сервера: «The "string" argument must be of type string …
+   * Received an instance of Date». Юнит-стенд запрос не выполняет, а
+   * рендер `JSON.stringify(params)` даёт для `Date` и для ISO-строки ОДИН И ТОТ
+   * ЖЕ текст — поэтому четыре первые цели ретенции падали каждое воскресенье
+   * (`aborted: true`, ноль удалённых), и увидеть это можно было только в
+   * журнале событий. Нашёл — новый шаг смоука против живого Postgres, ради
+   * которого роут `POST /system/retention/run` и заводился.
+   */
+  private граница(t: RetentionTarget, cutoff: Date): string {
+    return t.cutoffAs === "date" ? tashkentDay(cutoff) : cutoff.toISOString();
+  }
+
   /** Пачка DELETE по подзапросу PK, отсортированному по колонке возраста — старейшие строки первыми. */
   private batchQuery(t: RetentionTarget, cutoff: Date): SQL {
-    // Голые сутки для `date`-колонок (R-H-8). `date < timestamptz` Postgres
-    // приводит к UTC-полуночи = 05:00 Ташкента, и цель резала бы на пять часов
-    // раньше срока — та самая ловушка, которой стоил урок VendCash.
-    const граница: string | Date = t.cutoffAs === "date" ? tashkentDay(cutoff) : cutoff;
+    const граница = this.граница(t, cutoff);
     return sql`
       delete from ${t.table}
       where ${t.idCol} in (
@@ -171,8 +189,7 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
    * этот SQL хоть раз выполнил живой Postgres, а не заглушка юнит-теста.
    */
   private countQuery(t: RetentionTarget, cutoff: Date): SQL {
-    const граница: string | Date = t.cutoffAs === "date" ? tashkentDay(cutoff) : cutoff;
-    return sql`select count(*)::int as n from ${t.table} where ${t.ageCol} < ${граница}`;
+    return sql`select count(*)::int as n from ${t.table} where ${t.ageCol} < ${this.граница(t, cutoff)}`;
   }
 
   /**
