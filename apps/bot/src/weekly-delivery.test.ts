@@ -49,6 +49,7 @@ const НЕДЕЛЯ: WeeklyDigest = {
     parityRed: 0,
     partialWeek: false,
     capped: false,
+    journalSince: null,
   },
   warnings: [],
 };

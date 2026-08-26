@@ -1,11 +1,6 @@
 // Формы, которые нужны САМОМУ клиенту (в сигнатурах методов ниже): реэкспорт
 // `export type … from …` имени в модуле не заводит, поэтому они ещё и здесь.
-import {
-  normalizeMachineSerial,
-  type Domain,
-  type PurchasePlan as VendingPlan,
-  type ShrinkReport,
-} from "@mydon/shared";
+import { normalizeMachineSerial, type Domain } from "@mydon/shared";
 import type {
   AnalyticsWarning,
   BootstrapSalePriceResult,
@@ -16,7 +11,10 @@ import type {
   ParityStreak,
   PriceChangesReport,
   PriceGapReport,
+  PurchasePlan as VendingPlan,
+  PurchaseSummary as VendingPurchase,
   SetSalePriceResult,
+  ShrinkReport,
   WeeklyDigest,
 } from "@mydon/shared";
 
@@ -146,69 +144,6 @@ export interface VendingCashSession {
   createdAt: string;
 }
 
-/**
- * Позиция сводного закупа (§5.5) — как отдаёт Core GET /vending/purchase.
- *
- * С П5a строка несёт не только «сколько купить», но и раздачу: сколько уйдёт
- * в автоматы из новой упаковки, сколько со склада, сколько слотов останется
- * пустыми и что вернётся на склад. Поля обязательные: Core отдаёт их всегда,
- * а необязательность здесь молча превратила бы «0» и «нет данных» в одно.
- */
-export interface VendingPurchaseItem {
-  product: string;
-  /** Куда и сколько (серийник автомата → штуки). */
-  perMachine: Record<string, number>;
-  need: number;
-  /** Остаток склада по этому товару на момент расчёта. */
-  stock: number;
-  buy: number;
-  pack: number;
-  order: number;
-  price: number;
-  costRounded: number;
-  noPrice: boolean;
-  noSales: boolean;
-  /** В автоматы из закупа (новая упаковка). */
-  fromPurchase: number;
-  /** В автоматы со склада. */
-  fromStock: number;
-  /** Не заполнится. */
-  unfilled: number;
-  /** Излишек закупки → на склад. */
-  toStock: number;
-  /** Склад после раздачи. */
-  stockAfter: number;
-  /** Правило владельца «не закупать». */
-  excluded: boolean;
-  /** Фикс-количество, если задано правилом. */
-  fixedQty: number | null;
-}
-
-/** Политика раздачи закупа (П5a): сначала новая упаковка или сначала склад. */
-export type VendingAllocationPolicy = "purchase-first" | "warehouse-first";
-
-/** Сводный закуп: позиции + денежные итоги + раздача (§5.4–5.5, П5a). */
-export interface VendingPurchase {
-  items: VendingPurchaseItem[];
-  excludedNoSales: VendingPurchaseItem[];
-  /** «Убрано из закупки» правилом товара — в деньги не входит, в раздачу входит. */
-  excludedByRule: VendingPurchaseItem[];
-  noPrice: string[];
-  allocation: VendingAllocationPolicy;
-  totalBuy: number;
-  totalOrder: number;
-  costExact: number;
-  /** Куплено сверх нехватки: округление до блока + фикс-количества. */
-  overpay: number;
-  costRounded: number;
-  /** Недобор деньгами: фикс МЕНЬШЕ нехватки — купим не всё, что нужно. */
-  shortfallCost: number;
-  totalFromPurchase: number;
-  totalFromStock: number;
-  totalUnfilled: number;
-  totalToStock: number;
-}
-
 /** Правила закупа товара «было»/«стало» — как их отдаёт Core. */
 export interface VendingRulesSnapshot {
   packSize?: number;
@@ -270,6 +205,16 @@ export interface SetPriceResult {
  * Тем же приёмом сюда приехали усушка и план закупа (R-H-6): имена бота
  * сохранены `as`-алиасами (`PurchasePlan as VendingPlan` и остальные), поэтому
  * ни брифинг, ни мастер заливки не правятся — меняется только адрес формы.
+ *
+ * `VendingPurchase`/`VendingPurchaseItem` — тот же переезд, доведённый до
+ * конца. Их рукописные копии пережили R-H-6 и УЖЕ разъехались: `covered`,
+ * `surplus`, `extra`, `costExact` у позиции и `totalNeed`, `totalCovered`,
+ * `costByPriceFull` у сводки Core отдаёт, а копии о них не знали — притом что
+ * `GET /vending/purchase` и `GET /vending/plan` возвращают ОДИН И ТОТ ЖЕ
+ * объект (`PurchaseContext.summary`), и по второму маршруту он уже приезжал
+ * общей формой. Доказательство расхождения предъявила сама ветка: как только
+ * `VendingPlan.summary` стал общим, фикстуре `purchase-plan.test.ts` пришлось
+ * дорастить ровно эти семь полей.
  */
 export type {
   AnalyticsWarning,
@@ -288,6 +233,9 @@ export type {
   ShrinkSummary,
   ShrinkWarning,
   ShrinkWarningCode,
+  AllocationPolicy as VendingAllocationPolicy,
+  PurchaseItem as VendingPurchaseItem,
+  PurchaseSummary as VendingPurchase,
   PurchasePlan as VendingPlan,
   PlanMachine as VendingPlanMachine,
   SlotPlanRow as VendingPlanSlot,

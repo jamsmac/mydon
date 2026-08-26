@@ -7,6 +7,7 @@ import type {
   OurvendHealth as SharedOurvendHealth,
   OurvendSyncRun as SharedOurvendSyncRun,
   PurchasePlan as SharedPurchasePlan,
+  PurchaseSummary as SharedPurchaseSummary,
   SetSalePriceResult as SharedSetSalePriceResult,
   ShrinkReport as SharedShrinkReport,
 } from "@mydon/shared";
@@ -22,6 +23,7 @@ import {
   type SetSalePriceResult,
   type ShrinkReport,
   type VendingPlan,
+  type VendingPurchase,
 } from "./core-client";
 
 /**
@@ -188,5 +190,24 @@ describe("Формы аналитики приходят из @mydon/shared", ()
     const планБота: VendingPlan = планОбщий;
     assert.equal(усушкаБота, усушкаОбщая);
     assert.equal(планБота, планОбщий);
+  });
+
+  it("сводный закуп — та же форма, что у ядра, и сторож двусторонний", () => {
+    // `/vending/purchase` и `/vending/plan` отдают ОДИН объект
+    // (`PurchaseContext.summary`), но `VendingPurchase` пережил переезд
+    // рукописным и уже недоописывал семь полей. Присваивание в ОБЕ стороны —
+    // проверка тождества форм: одностороннее пропустило бы копию, у которой
+    // поля НЕ ХВАТАЕТ (обычная структурная совместимость), а это и есть тот
+    // самый способ разъехаться.
+    const общая: SharedPurchaseSummary = {
+      items: [], excludedNoSales: [], excludedByRule: [], noPrice: [],
+      allocation: "purchase-first",
+      totalNeed: 0, totalCovered: 0, totalBuy: 0, totalOrder: 0,
+      costExact: 0, costRounded: 0, overpay: 0, shortfallCost: 0, costByPriceFull: 0,
+      totalFromPurchase: 0, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+    };
+    const бота: VendingPurchase = общая;
+    const обратно: SharedPurchaseSummary = бота;
+    assert.equal(обратно, общая);
   });
 });
