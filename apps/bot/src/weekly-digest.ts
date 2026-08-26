@@ -20,7 +20,7 @@ import {
   товарСтрока,
 } from "./analytics-brief";
 import { formatBriefingNotes, type BriefingNote } from "./briefing";
-import type { PersonRow, WeeklyDigest, WeeklyHealth } from "./core-client";
+import type { AnalyticsWarning, PersonRow, WeeklyDigest, WeeklyHealth } from "./core-client";
 import { RU, TG_BUDGET, chunk } from "./purchase-plan";
 
 /**
@@ -459,11 +459,39 @@ function разделы(d: WeeklyDigest): string[] {
     цены("🏷 Витринные", p.retail, lines);
   }
 
-  lines.push(...здоровье(d));
+  const блокЗдоровья = здоровье(d);
+  lines.push(...блокЗдоровья);
   // Секция могла деградировать (Core ловит её падение и пишет причину в
   // `warnings`): молчаливая дыра в письме читается как «данных нет».
-  lines.push(...предупреждения(d.warnings));
+  lines.push(...предупреждения(безПовторовБлока(d.warnings, блокЗдоровья)));
   return lines;
+}
+
+/** Текст для сравнения: без хвостовой точки и регистра — это одна и та же фраза. */
+const голыйТекст = (s: string): string => s.trim().replace(/[.!]+$/u, "").toLowerCase();
+
+/**
+ * Хвост «Посчитано не всё» без того, что блок здоровья УЖЕ сказал своей
+ * строкой.
+ *
+ * Живой случай: неделя раньше начала журнала прогонов. Блок печатает правду
+ * НА МЕСТЕ лжи («сбор не запускался» → «журнал прогонов начинается с …»), а
+ * ядро ту же фразу шлёт предупреждением — и владелец читает одно и то же
+ * дважды в одном письме (D4).
+ *
+ * Гасить по КОДУ нельзя: под `health_unavailable` едут ещё отказ паритета и
+ * отказ самого счёта недели, и они обязаны доехать. Поэтому сравниваем по
+ * ТЕКСТУ — тем же приёмом, каким `предупреждения()` уже гасит повтор одной
+ * причины по автоматам. Формулировка ядра разъедется — вернётся прежнее
+ * поведение (фраза напечатается дважды), а не пропажа сигнала: ошибка в
+ * безопасную сторону.
+ */
+function безПовторовБлока(
+  warnings: AnalyticsWarning[] | undefined,
+  блок: readonly string[],
+): AnalyticsWarning[] {
+  const сказано = блок.map(голыйТекст);
+  return (warnings ?? []).filter((w) => !сказано.some((строка) => строка.includes(голыйТекст(w.message))));
 }
 
 /**
