@@ -29,10 +29,12 @@
  * обновляет ноль строк. Имена, которым карточки не нашлось, печатаются — это
  * не ошибка выкатки, а список на разбор владельцу.
  *
- * Флаги: `--dry-run` резолвит и печатает отчёт «обновилось бы N», но НЕ
- * пишет; `--apply` — явный синоним записи. БЕЗ ФЛАГОВ — тоже запись (см.
- * `main()`): так вызывает `.github/workflows/ci.yml`, и весь смысл этого шага
- * CI — исполнить настоящий UPDATE против настоящего Postgres (сценарий N2).
+ * Флаги: `--dry-run` резолвит и печатает отчёт «обновилось бы N» ВМЕСТЕ С
+ * КАРТОЙ решения, но НЕ пишет; `--apply` — явный синоним записи. БЕЗ ФЛАГОВ —
+ * тоже запись (см. `main()`): так вызывает `.github/workflows/ci.yml`, и весь
+ * смысл этого шага CI — исполнить настоящий UPDATE против настоящего Postgres
+ * (сценарий N2). Ничего, кроме этих двух строк, не принимается: опечатка в
+ * флаге отбивается кодом 1 ДО первого запроса (`разобратьАргументы`, R-FW-S1).
  *
  * Запуск (при выкатке): `node packages/db/dist/backfill-product-ids.js [--dry-run|--apply]`
  */
@@ -41,35 +43,74 @@ import { config as loadEnv } from "dotenv";
 import { and, eq, isNull } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
-import { productIndex } from "@mydon/shared";
+import { productIndex, type CanonSource } from "@mydon/shared";
 import { createDb, type Database } from "./index";
 import { machineSlot, vendingAlias, vendingProduct, vendingRefill, vendingStock, vendingStockCount } from "./schema";
 
 /**
- * Сырое имя → id карточки товара. Правило дословно повторяет Core: сначала
- * алиас (по нормализованному ключу) приводит имя к канону, затем канон ищется
- * в прайсе — тоже по нормализованному ключу. Имя, которому карточки нет, в
- * карту НЕ попадает: NULL и строка в отчёте честнее выдуманной привязки.
+ * Сырое имя → карточка товара. Правило дословно повторяет Core: сначала ТОЧНОЕ
+ * имя карточки (по нормализованному ключу), и только потом алиас — приоритет
+ * живёт в `productIndex` и здесь не дублируется. Имя, которому карточки нет, в
+ * карту НЕ попадает: NULL и строка в отчёте честнее выдуманной привязки. Имя,
+ * которое резолвится ДВУМЯ путями на разные карточки, тоже не попадает — оно
+ * уезжает списком `conflicts` (R-FW-S3): привязка необратима.
  *
  * Сам индекс живёт в `@mydon/shared` (`productIndex`): тот же каталог с тем же
  * решением про алиасы читает импорт истории склада (П8a), только спрашивает у
  * него не id, а каноническое имя. Две копии сборки разошлись бы на первом же
  * новом алиасе.
  */
+export interface ResolvedName {
+  /** Карточка прайса. */
+  id: string;
+  /** Каноническое имя карточки — то, что владелец видит в прайсе. */
+  canon: string;
+  /** Чем нашлось: точным именем карточки или алиасом. */
+  source: CanonSource;
+}
+
+/** Имя, которое резолвится ДВУМЯ путями на РАЗНЫЕ карточки. Привязывать нечем. */
+export interface NameConflict {
+  /** Сырое имя строки, как оно лежит в таблице. */
+  raw: string;
+  /** Карточка, чьё ИМЯ совпало. */
+  byName: string;
+  /** Карточка, на которую указывает алиас с тем же ключом. */
+  byAlias: string;
+}
+
+export interface ResolveResult {
+  /** Сырое имя → карточка. Спорные имена сюда НЕ попадают. */
+  resolved: Map<string, ResolvedName>;
+  /** Споры — в порядке первой встречи, для отчёта владельцу. */
+  conflicts: NameConflict[];
+}
+
 export function resolveProductIds(
   names: (string | null | undefined)[],
   products: { id: string; name: string }[],
   aliases: { productId: string; alias: string }[],
-): Map<string, string> {
+): ResolveResult {
   const индекс = productIndex(products, aliases);
-  const out = new Map<string, string>();
+  const resolved = new Map<string, ResolvedName>();
+  const conflicts: NameConflict[] = [];
+  const спорные = new Set<string>();
   for (const raw of names) {
     if (raw === null || raw === undefined || raw.trim() === "") continue;
-    if (out.has(raw)) continue;
-    const id = индекс.id(raw);
-    if (id) out.set(raw, id);
+    if (resolved.has(raw) || спорные.has(raw)) continue;
+    const ответ = индекс.explain(raw);
+    if (ответ.kind === "hit") {
+      resolved.set(raw, { id: ответ.id, canon: ответ.canon, source: ответ.source });
+    } else if (ответ.kind === "conflict") {
+      // СПОРНОЕ ИМЯ НЕ ПРИВЯЗЫВАЕТСЯ (R-FW-S3). `бэкфиллWhere` держит
+      // `isNull(idColumn)`, поэтому ошибочно проставленная ссылка повторным
+      // прогоном уже не чинится: молчаливая привязка к неверной карточке хуже
+      // оставленного NULL. Имя уезжает владельцу отдельным списком.
+      спорные.add(raw);
+      conflicts.push({ raw, byName: ответ.byName, byAlias: ответ.byAlias });
+    }
   }
-  return out;
+  return { resolved, conflicts };
 }
 
 export interface BackfillResult {
@@ -77,6 +118,15 @@ export interface BackfillResult {
   updated: number;
   /** Осталось без привязки — по именам, отсортировано. */
   unresolved: string[];
+  /**
+   * Карта решения: `raw → канон (источник)`, в порядке встречи имён.
+   *
+   * Печатается в примерке (R-FW-S3): проба, у которой на выходе одно число,
+   * не даёт сверить НИЧЕГО, а привязка необратима.
+   */
+  resolved: { raw: string; canon: string; source: CanonSource }[];
+  /** Имена, где алиас спорит с именем чужой карточки: привязка не сделана намеренно. */
+  conflicts: NameConflict[];
 }
 
 /**
@@ -155,7 +205,7 @@ async function backfillTable(
     .from(table as never)
     .where(isNull(idColumn))) as { name: string | null }[];
 
-  const резолв = resolveProductIds(
+  const { resolved: резолв, conflicts } = resolveProductIds(
     rows.map((r) => r.name),
     products,
     aliases,
@@ -172,7 +222,7 @@ async function backfillTable(
   } else {
     const idKey = idKeyOf(table, idColumn);
     // Одно UPDATE на ИМЯ, а не на строку: имён десятки, строк сотни.
-    for (const [raw, id] of резолв) {
+    for (const [raw, { id }] of резолв) {
       const res = (await db
         .update(table as never)
         .set({ [idKey]: id } as never)
@@ -182,10 +232,18 @@ async function backfillTable(
     }
   }
 
+  // Спорное имя — НЕ «неразобранное»: причина другая, и владельцу нужно
+  // сделать другое (развести алиас и карточку, а не завести карточку).
+  const спорные = new Set(conflicts.map((c) => c.raw));
   const unresolved = [
-    ...new Set(rows.map((r) => r.name).filter((n): n is string => n !== null && n.trim() !== "" && !резолв.has(n))),
+    ...new Set(
+      rows
+        .map((r) => r.name)
+        .filter((n): n is string => n !== null && n.trim() !== "" && !резолв.has(n) && !спорные.has(n)),
+    ),
   ].sort((a, b) => a.localeCompare(b, "ru"));
-  return { updated, unresolved };
+  const resolved = [...резолв].map(([raw, r]) => ({ raw, canon: r.canon, source: r.source }));
+  return { updated, unresolved, resolved, conflicts };
 }
 
 export async function backfillProductIds(
@@ -219,17 +277,83 @@ function отчёт(что: string, r: BackfillResult, dryRun: boolean): void {
       : ` (${r.unresolved.slice(0, 20).join(", ")}${r.unresolved.length > 20 ? ` и ещё ${r.unresolved.length - 20}` : ""})`;
   const глагол = dryRun ? "обновилось БЫ" : "обновлено";
   console.log(`${что}: ${глагол} ${r.updated} / осталось NULL ${r.unresolved.length}${хвост}`);
+  // СПОР — ОТДЕЛЬНОЙ СТРОКОЙ, а не в списке «осталось NULL»: чинится он
+  // по-другому (развести алиас и карточку), и утонув среди неразобранных
+  // имён он читался бы как «карточки нет».
+  for (const c of r.conflicts) {
+    console.log(
+      `  конфликт: «${c.raw}» — это и имя карточки «${c.byName}», и алиас карточки «${c.byAlias}». ` +
+        `Строка НЕ привязана: уберите лишний алиас и прогоните ещё раз.`,
+    );
+  }
+}
+
+/** Сколько пар карты печатать в примерке: отчёт обязан оставаться читаемым. */
+const КАРТА_МАКС = 50;
+
+/** Карта решения — только в примерке: сверять её надо ДО того, как привязка стала необратимой. */
+function картаРешения(что: string, r: BackfillResult): void {
+  if (r.resolved.length === 0) return;
+  console.log(`  ${что} — как разобрано (${r.resolved.length}):`);
+  for (const п of r.resolved.slice(0, КАРТА_МАКС)) {
+    console.log(`    ${п.raw} → ${п.canon} (источник: ${п.source === "name" ? "имя карточки" : "алиас"})`);
+  }
+  if (r.resolved.length > КАРТА_МАКС) console.log(`    … и ещё ${r.resolved.length - КАРТА_МАКС}`);
+}
+
+/** Ровно два флага, и ничего кроме них. */
+const ЗНАЕМ_ФЛАГИ = ["--dry-run", "--apply"];
+
+/**
+ * Разбор аргументов БЕЛЫМ СПИСКОМ и строка режима одним местом (R-FW-S1).
+ *
+ * Раньше распознавались ровно две строки, а всё остальное — `--dryrun`,
+ * `--dry_run`, `-n`, `--dry-run=1`, типографское `—dry-run` после копипасты из
+ * `DEPLOY.md` — не распознавалось никак: `dryRun` оставался `false`, и скрипт
+ * шёл ПИСАТЬ в прод. Хуже самого факта была строка режима: оператор, набравший
+ * `--dryrun`, читал «ЗАПИСЬ (без флагов — умолчание)», то есть ОТЧЁТ
+ * подтверждал ему неверную картину.
+ *
+ * Умолчание «без флагов = запись» сохраняется: `ci.yml` зовёт скрипт без
+ * аргументов, и весь смысл того шага — настоящий UPDATE. Закрыт ровно тот
+ * путь, где оператор думал, что попросил примерку.
+ *
+ * Чистой функцией, а не внутри `main()`: строку режима, которая обязана НЕ
+ * врать, надо чем-то проверять.
+ */
+export function разобратьАргументы(
+  argv: string[],
+): { ok: true; dryRun: boolean; режим: string } | { ok: false; error: string } {
+  const чужие = argv.filter((a) => !ЗНАЕМ_ФЛАГИ.includes(a));
+  if (чужие.length > 0) {
+    return {
+      ok: false,
+      error: `Неизвестные аргументы: ${чужие.join(" ")}. Допустимо только --dry-run или --apply (без флагов — ЗАПИСЬ).`,
+    };
+  }
+  const apply = argv.includes("--apply");
+  const dryRun = argv.includes("--dry-run");
+  if (apply && dryRun) {
+    return {
+      ok: false,
+      error: "--apply и --dry-run вместе не имеют смысла: первый пишет, второй обещает не писать. Выберите один.",
+    };
+  }
+  if (dryRun) return { ok: true, dryRun: true, режим: "Режим: ПРИМЕРКА (--dry-run), записи не будет." };
+  return { ok: true, dryRun: false, режим: `Режим: ЗАПИСЬ${apply ? " (--apply)" : " (без флагов — умолчание)"}.` };
 }
 
 async function main(): Promise<void> {
   loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
-  const apply = process.argv.includes("--apply");
-  const dryRun = process.argv.includes("--dry-run");
-  if (apply && dryRun) {
-    console.error("--apply и --dry-run вместе не имеют смысла: первый пишет, второй обещает не писать. Выберите один.");
+  // БЕЛЫЙ СПИСОК — ДО ПЕРВОГО ЗАПРОСА: опечатка в флаге не имеет права стать
+  // молчаливой записью в прод.
+  const флаги = разобратьАргументы(process.argv.slice(2));
+  if (!флаги.ok) {
+    console.error(флаги.error);
     process.exit(1);
   }
+  const dryRun = флаги.dryRun;
 
   const url = process.env.DATABASE_URL;
   if (!url) {
@@ -242,17 +366,15 @@ async function main(): Promise<void> {
   // безопасный отчёт» здесь даёт молчаливый UPDATE по проду. Печатаем ТОЛЬКО
   // host (`new URL(url).host`), никогда полную строку DATABASE_URL с
   // паролем — та же застава, что у смоука П8a.
-  console.log(
-    dryRun
-      ? `Режим: ПРИМЕРКА (--dry-run), записи не будет. Цель: ${new URL(url).host}`
-      : `Режим: ЗАПИСЬ${apply ? " (--apply)" : " (без флагов — умолчание)"}. Цель: ${new URL(url).host}`,
-  );
+  console.log(`${флаги.режим} Цель: ${new URL(url).host}`);
   // БЕЗ ФЛАГОВ — ЗАПИСЬ, как было. `ci.yml:82` зовёт скрипт без аргументов, и
   // весь смысл того шага — исполнить настоящий UPDATE против настоящего
   // Postgres (сценарий N2). Дефолт `--dry-run` сделал бы этот шаг зелёным и
   // пустым: он проверял бы, что скрипт не падает, и ничего больше.
   const итог = await backfillProductIds(createDb(url), { dryRun });
   for (const t of BACKFILL_TARGETS) отчёт(t.name, итог[t.key], dryRun);
+  // Карта — ПОСЛЕ итогов и только в примерке: в записи сверять уже поздно.
+  if (dryRun) for (const t of BACKFILL_TARGETS) картаРешения(t.name, итог[t.key]);
   // Как в seed.ts/seed-vending.ts: postgres.js держит соединение открытым, и
   // без явного выхода ручной шаг выкатки висит после того, как всё сделано.
   process.exit(0);

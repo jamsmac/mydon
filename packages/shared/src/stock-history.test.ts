@@ -44,6 +44,66 @@ describe("Индекс каталога: одна сборка на два во�
     assert.equal(КАТАЛОГ.canon("Карточку удалили"), null);
     assert.equal(КАТАЛОГ.id("Карточку удалили"), null);
   });
+
+  it("объём с запятой и с точкой — одна карточка (R-FW-P1)", () => {
+    assert.equal(КАТАЛОГ.canon("Coca-Cola Classic CAN 0.25"), "Coca-Cola Classic CAN 0,25");
+    assert.equal(КАТАЛОГ.id("Coca-Cola Classic CAN 0.25"), "p-cola");
+  });
+});
+
+/**
+ * Спор алиаса с именем ЧУЖОЙ карточки: нормализация гасит регистр, пробелы,
+ * ё/е и десятичный знак, а уникальность в БД побайтовая — совпасть проще, чем
+ * кажется (R-FW-S3).
+ */
+const СПОРНЫЙ = productIndex(
+  [
+    { id: "p-a", name: "Cola" },
+    { id: "p-b", name: "Fanta CAN 0,25" },
+  ],
+  // Алиас товара A написан ровно так же, как ИМЯ карточки B.
+  [{ productId: "p-a", alias: "Fanta can 0.25" }],
+);
+
+describe("Индекс каталога: точное имя карточки главнее алиаса (R-FW-S3)", () => {
+  it("имя карточки побеждает чужой алиас с тем же ключом", () => {
+    assert.equal(СПОРНЫЙ.canon("Fanta CAN 0,25"), "Fanta CAN 0,25");
+    assert.equal(СПОРНЫЙ.id("Fanta CAN 0,25"), "p-b");
+  });
+
+  it("`explain` называет спор словами — писать необратимую ссылку по нему нельзя", () => {
+    assert.deepEqual(СПОРНЫЙ.explain("Fanta CAN 0,25"), {
+      kind: "conflict",
+      byName: "Fanta CAN 0,25",
+      byAlias: "Cola",
+    });
+  });
+
+  it("алиас на СВОЮ карточку спором не считается", () => {
+    const свой = productIndex([{ id: "p-b", name: "Fanta CAN 0,25" }], [{ productId: "p-b", alias: "fanta can 0.25" }]);
+    assert.deepEqual(свой.explain("Fanta CAN 0,25"), {
+      kind: "hit",
+      canon: "Fanta CAN 0,25",
+      id: "p-b",
+      source: "name",
+    });
+  });
+
+  it("`explain` называет ИСТОЧНИК решения: имя карточки или алиас", () => {
+    assert.deepEqual(КАТАЛОГ.explain("CocaCola Classic CAN 250ml"), {
+      kind: "hit",
+      canon: "Coca-Cola Classic CAN 0,25",
+      id: "p-cola",
+      source: "alias",
+    });
+    assert.deepEqual(КАТАЛОГ.explain("TUC Sour cream"), {
+      kind: "hit",
+      canon: "TUC Sour cream",
+      id: "p-tuc",
+      source: "name",
+    });
+    assert.deepEqual(КАТАЛОГ.explain("Загадка"), { kind: "miss" });
+  });
 });
 
 describe("Мост ourvend_name: второй ТОЧНЫЙ ключ (R-FW-P1)", () => {

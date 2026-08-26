@@ -72,6 +72,7 @@ const НЕДЕЛЬНОЕ_ЗДОРОВЬЕ: WeeklyHealth = {
   parityRed: 0,
   partialWeek: false,
   capped: false,
+  journalSince: "2026-08-06",
 };
 
 const СВОДКА: WeeklyDigest = {
@@ -231,6 +232,7 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.deepEqual(Object.keys(НЕДЕЛЬНОЕ_ЗДОРОВЬЕ).sort(), [
       "capped",
       "failed",
+      "journalSince",
       "lastDataAt",
       "parityDays",
       "parityGreen",
@@ -282,6 +284,28 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     // Два РАЗНЫХ «неполно»: неполна неделя — и неполна выборка прогонов.
     assert.equal(идёт.capped, false);
     assert.equal(обрезана.partialWeek, false);
+  });
+
+  it("«прогонов 0» и «журнал не достаёт до недели» — разные ответы (R-FW-P5)", () => {
+    // Журнал `vending_sync_run` начинается 06.08.2026, а `?week=` пускает 104
+    // недели назад: любая неделя до этой даты отдаёт нули. Без даты начала
+    // журнала владелец прочитал бы их как «сбор не запускался».
+    const донеделя: WeeklyHealth = {
+      ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ,
+      runs: 0,
+      success: 0,
+      partial: 0,
+      failed: 0,
+      running: 0,
+      worstFailedStreak: 0,
+      lastDataAt: null,
+      journalSince: "2026-08-06",
+    };
+    assert.equal(донеделя.runs, 0);
+    assert.equal(донеделя.journalSince, "2026-08-06");
+    // Пустой журнал — это `null`, а не выдуманная дата.
+    const пусто: WeeklyHealth = { ...НЕДЕЛЬНОЕ_ЗДОРОВЬЕ, journalSince: null };
+    assert.equal(пусто.journalSince, null);
   });
 
   it("«сейчас» и «за неделю» — ДВА набора чисел в одном ответе, а не один", () => {
@@ -412,11 +436,20 @@ describe("Формы усушки и плана закупа объявлены 
     // Панель держала свою копию союза в ДРУГОМ порядке (`core.ts`), Core — в
     // своём. Структурная типизация порядок не ловит, а вот пропавший член —
     // ловит: лишний литерал ниже не компилируется.
-    const все: ShrinkWarningCode[] = [
-      "snapshots_stale", "no_sales_day", "machine_dead",
-      "no_counted_days", "sales_unknown_product", "machine_error",
-    ];
-    assert.equal(new Set(все).size, 6);
+    // ИСЧЕРПЫВАЮЩАЯ КАРТА, а не массив литералов (ревью T5, minor 3): массив
+    // ловит ПРОПАВШИЙ член, но седьмой член с любым новым именем не ломает в
+    // нём ничего — а союз разъезжается именно так. `Record` перестаёт
+    // собираться в ОБЕ стороны: добавили член — не хватает ключа, убрали —
+    // ключ лишний.
+    const все: Record<ShrinkWarningCode, true> = {
+      snapshots_stale: true,
+      no_sales_day: true,
+      machine_dead: true,
+      no_counted_days: true,
+      sales_unknown_product: true,
+      machine_error: true,
+    };
+    assert.equal(Object.keys(все).length, 6);
     // @ts-expect-error — кода `machine_sleeping` в союзе нет и заводить его
     // можно только в shared, а не седьмой копией в панели.
     const лишний: ShrinkWarningCode = "machine_sleeping";

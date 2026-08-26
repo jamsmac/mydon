@@ -301,12 +301,39 @@ export function resolveProductName(
 export interface ProductRow { id: string; name: string }
 export interface AliasRow { productId: string; alias: string }
 
-/** Индекс каталога: одна сборка — два ответа. */
+/** Чем нашлась карточка: точным ИМЕНЕМ прайса или алиасом владельца. */
+export type CanonSource = "name" | "alias";
+
+/**
+ * Полный ответ индекса — с ИСТОЧНИКОМ решения и с отдельным «спором».
+ *
+ * `canon`/`id` отвечают одним значением и на спор ответить не могут: `null`
+ * там значил бы «карточки нет», а это другое утверждение. Отчёт, который
+ * ПОКАЗЫВАЕТ владельцу, почему строка привязана (или почему НЕ привязана),
+ * спрашивает `explain`.
+ */
+export type CanonAnswer =
+  | { kind: "hit"; canon: string; id: string; source: CanonSource }
+  /** Ключ разрешается ДВУМЯ путями на РАЗНЫЕ карточки: имя одной = алиас другой. */
+  | { kind: "conflict"; byName: string; byAlias: string }
+  | { kind: "miss" };
+
+/** Индекс каталога: одна сборка — три ответа. */
 export interface ProductIndex {
   /** Сырое имя → каноническое ИМЯ прайса. `null` — карточки нет. */
   canon: CanonIndex;
   /** Сырое имя → id карточки. `null` — карточки нет. */
   id: (raw: string) => string | null;
+  /**
+   * Тот же резолв, но с источником и со «спором» (R-FW-S3).
+   *
+   * Нужен тому, кто пишет НЕОБРАТИМОЕ: бэкфилл `product_id` трогает только
+   * строки с NULL, поэтому ошибочная привязка повторным прогоном уже не
+   * чинится — на спорном имени он обязан ОТКАЗАТЬСЯ и назвать спор владельцу.
+   * Импорт истории пишет `product_name` (запись повторяема) и обязан ответить
+   * хоть что-то, поэтому ему хватает `canon` с правилом «имя карточки главнее».
+   */
+  explain: (raw: string) => CanonAnswer;
 }
 
 /**
@@ -334,9 +361,36 @@ export function productIndex(products: readonly ProductRow[], aliases: readonly 
   const canonByKey = new Map(products.map((p) => [normalizeProductName(p.name), p.name]));
   const idByKey = new Map(products.map((p) => [normalizeProductName(p.name), p.id]));
 
-  const canon: CanonIndex = (raw) => {
+  // ТОЧНОЕ ИМЯ КАРТОЧКИ ГЛАВНЕЕ АЛИАСА (R-FW-S3). Было наоборот, и алиас,
+  // чей нормализованный ключ совпал с ИМЕНЕМ другой карточки, молча уводил
+  // ВСЕ строки этого имени на чужой товар. Имя карточки — то, что владелец
+  // видит в прайсе; алиас — вспомогательное написание, и перекрывать им
+  // прямое попадание нельзя.
+  const explain = (raw: string): CanonAnswer => {
     const key = normalizeProductName(raw);
-    return aliasByKey.get(key) ?? canonByKey.get(key) ?? null;
+    const своё = canonByKey.get(key);
+    const поАлиасу = aliasByKey.get(key);
+    if (своё !== undefined) {
+      // Алиас на СВОЮ же карточку — не спор: оба пути дают один и тот же товар.
+      if (поАлиасу !== undefined && поАлиасу !== своё) {
+        return { kind: "conflict", byName: своё, byAlias: поАлиасу };
+      }
+      return { kind: "hit", canon: своё, id: idByKey.get(key) ?? "", source: "name" };
+    }
+    if (поАлиасу !== undefined) {
+      const id = idByKey.get(normalizeProductName(поАлиасу));
+      if (id !== undefined) return { kind: "hit", canon: поАлиасу, id, source: "alias" };
+    }
+    return { kind: "miss" };
+  };
+
+  // `canon`/`id` СПОРА НЕ ЗНАЮТ: они отвечают по правилу приоритета (имя
+  // карточки), потому что их зовёт импорт, а «не знаю» там значит потерянную
+  // строку. Отказываться на споре — дело того, кто пишет необратимое.
+  const canon: CanonIndex = (raw) => {
+    const ответ = explain(raw);
+    if (ответ.kind === "hit") return ответ.canon;
+    return ответ.kind === "conflict" ? ответ.byName : null;
   };
   return {
     canon,
@@ -344,6 +398,7 @@ export function productIndex(products: readonly ProductRow[], aliases: readonly 
       const c = canon(raw);
       return c === null ? null : (idByKey.get(normalizeProductName(c)) ?? null);
     },
+    explain,
   };
 }
 
