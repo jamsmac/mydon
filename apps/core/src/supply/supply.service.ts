@@ -132,10 +132,20 @@ export function buildStockUpserts(
   values: (typeof machineStock.$inferInsert)[];
   quarantined: QuarantinedSupply[];
   skippedNotInService: number;
+  /**
+   * КАКИЕ ИМЕННО автоматы отброшены — канонические серийники, отсортированы
+   * (R-FW-S2). Одного счётчика мало: множество «не в строю» берётся из карточек,
+   * где «первая карточка выигрывает целиком», и забытый дубль со
+   * `status ≠ in_service` уводит ЖИВОЙ автомат из `machine_stock` в режиме
+   * `own`. Наружу при этом уходило число — то есть ровно тот тихий стоп, против
+   * которого весь срез.
+   */
+  skippedSerials: string[];
 } {
   const values: (typeof machineStock.$inferInsert)[] = [];
   const quarantined: QuarantinedSupply[] = [];
   let skippedNotInService = 0;
+  const пропущенные = new Set<string>();
   for (const r of rows) {
     if (!(r.machine_serial && r.ourvend_name && r.dt)) continue;
     // Канон в ключе — по той же причине, что в buildUpserts (см. sales.service).
@@ -146,6 +156,7 @@ export function buildStockUpserts(
     // и отделяют.
     if (notInService?.has(machineSerial)) {
       skippedNotInService += 1;
+      пропущенные.add(machineSerial);
       continue;
     }
     const product = String(r.ourvend_name).slice(0, 512);
@@ -163,7 +174,7 @@ export function buildStockUpserts(
       fetchedAt: new Date(r.fetched_at),
     });
   }
-  return { values, quarantined, skippedNotInService };
+  return { values, quarantined, skippedNotInService, skippedSerials: [...пропущенные].sort() };
 }
 
 /**
@@ -202,6 +213,11 @@ export function fillFromStock(
 export class SupplyService implements OnModuleInit, OnApplicationShutdown {
   private readonly log = new Logger(SupplyService.name);
   private cron: Cron | null = null;
+  /**
+   * Состав «не в строю» прошлого прогона (канон, через запятую). `null` — этот
+   * прогон первый: сравнивать не с чем, и предупреждать не о чем.
+   */
+  private прошлыйПропуск: string | null = null;
 
   constructor(
     @Inject(DB) private readonly db: Db,
@@ -313,11 +329,12 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
       const неВСтрою = ownStock ? new Set((await this.vending.machineRegistry()).notInService.keys()) : undefined;
 
       const { values: pValues, quarantined: pBad } = buildPurchaseUpserts(pRows);
-      const { values: sValues, quarantined: sBad, skippedNotInService } = buildStockUpserts(
-        sRows,
-        serialToEntity,
-        неВСтрою,
-      );
+      const {
+        values: sValues,
+        quarantined: sBad,
+        skippedNotInService,
+        skippedSerials,
+      } = buildStockUpserts(sRows, serialToEntity, неВСтрою);
       // Мусорные числа не вливаем нулём — откладываем в событие, чтобы приход и
       // остатки не занижались тихо.
       const bad = [...pBad.map((q) => ({ ...q, of: "purchase" })), ...sBad.map((q) => ({ ...q, of: "stock" }))];
@@ -361,10 +378,27 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
 
       // Одна строка на прогон, и только когда есть что сказать: молчание тут
       // означало бы, что строки исчезают между снапшотом и `machine_stock` без
-      // единого следа.
+      // единого следа. СЕРИЙНИКИ В СТРОКЕ (R-FW-S2): «пропущено 34» не отвечает
+      // на единственный важный вопрос — чей это автомат.
       if (skippedNotInService > 0) {
-        this.log.log(`Остатки: пропущено ${skippedNotInService} строк по автоматам не в строю.`);
+        this.log.log(
+          `Остатки: пропущено ${skippedNotInService} строк по автоматам не в строю: ${skippedSerials.join(", ")}.`,
+        );
       }
+      // ИЗМЕНЕНИЕ МНОЖЕСТВА — предупреждением. Состав «не в строю» меняется
+      // редко и осознанно (автомат уехал на склад). Внезапно появившийся там
+      // серийник — это либо забытый дубль карточки, либо чужая правка статуса,
+      // и в режиме `own` он молча уносит живой автомат из учёта остатков.
+      const прежние = this.прошлыйПропуск;
+      const состав = skippedSerials.join(",");
+      if (прежние !== null && прежние !== состав) {
+        this.log.warn(
+          `Остатки: множество автоматов «не в строю» изменилось: ` +
+            `[${прежние || "пусто"}] → [${состав || "пусто"}]. Проверьте карточки: дубль со статусом ` +
+            `не in_service уводит живой автомат из machine_stock.`,
+        );
+      }
+      this.прошлыйПропуск = состав;
 
       // Дозаполнение карточек автоматов из источника: тип (кофе/снеки) и точка.
       // Ревизия 2026-07-30: у 11 из 26 автоматов тип был не указан — панель
@@ -419,7 +453,14 @@ export class SupplyService implements OnModuleInit, OnApplicationShutdown {
         await this.db.insert(event).values({
           source: "supply-sync",
           type: "supply.sync",
-          payload: { приход: pValues.length, остатки: sValues.length },
+          payload: {
+            приход: pValues.length,
+            остатки: sValues.length,
+            // Пропуск — В ЖУРНАЛ, а не только в лог: журнал переживает ротацию
+            // контейнера, а вопрос «куда делись строки автомата» задают через
+            // недели.
+            skippedNotInService: skippedSerials,
+          },
         });
       }
       this.log.log(

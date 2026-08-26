@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { CUTOVER_READY_EVENT, PARITY_EVENT } from "../ourvend/ourvend-parity.service";
+import { SNAPSHOT_STALE_EVENT } from "../ourvend/sync-stale.service";
+import { ACCOUNTING_SOURCE_CHANGED_EVENT } from "../sales/accounting-source";
+import { RETENTION_EVENT } from "../vending/retention.service";
 import { applyRules, formatAmount, immediateOnly, RULES } from "./rules";
 
 const ctx = (type: string, payload: Record<string, unknown> = {}) => ({
@@ -302,6 +306,28 @@ describe("Правила уведомлений (FR-2)", () => {
       ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", effective: "own", actor: "owner" }),
     );
     assert.doesNotMatch(ровно!.text, /действует/);
+  });
+
+  it("СТРАЖ: у каждой экспортируемой константы события есть правило (Task 3 minor 6)", () => {
+    // Эмитенты держат тип события константой, а правила берут его строковым
+    // литералом: переименование константы осиротило бы правило МОЛЧА, а правило
+    // — единственный путь события к владельцу. Список намеренно ручной: он же
+    // документирует, у каких событий правила нет ПО ЗАМЫСЛУ.
+    const сПравилом = [PARITY_EVENT, CUTOVER_READY_EVENT, SNAPSHOT_STALE_EVENT, ACCOUNTING_SOURCE_CHANGED_EVENT];
+    for (const тип of сПравилом) {
+      assert.ok(
+        RULES.some((r) => r.eventType === тип),
+        `событие ${тип} осталось без правила — владелец о нём не узнает`,
+      );
+    }
+    // `system.retention` — без правила осознанно: это отчёт о служебной чистке,
+    // а не новость. Если правило когда-нибудь появится, этот тест обязан
+    // упасть, чтобы решение было принято, а не просочилось.
+    assert.equal(
+      RULES.some((r) => r.eventType === RETENTION_EVENT),
+      false,
+      "у system.retention правила быть не должно — это служебная чистка, а не новость",
+    );
   });
 
   it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {

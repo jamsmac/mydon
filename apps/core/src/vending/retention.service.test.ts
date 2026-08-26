@@ -27,13 +27,24 @@ function рендер(q: SQL): string {
  * приём, что у `count` в `sales.service.ts` (`linked`). `select` отдаёт
  * настройки ретенции. `insert` копит записанные события.
  */
-function стенд(опт: { строк: Record<string, number>; настройки?: Record<string, string> }) {
+function стенд(опт: {
+  строк: Record<string, number>;
+  настройки?: Record<string, string>;
+  /**
+   * Ломает пачку: получает имя таблицы и НОМЕР пачки по этой таблице (с 1).
+   * Вернул `true` — запрос падает. Нужен, чтобы проверить обрыв ПОСЕРЕДИНЕ
+   * цикла: событие о чистке пишется в `finally`, и без этого крючка ветку
+   * «строки снесены, а в журнале ни следа» проверить нечем.
+   */
+  ломать?: (таблица: string, пачка: number) => boolean;
+}) {
   const остаток: Record<string, number> = { ...опт.строк };
   const запросы: string[] = [];
   const события: { type: string; payload: Record<string, unknown> }[] = [];
   const настройки = Object.entries(опт.настройки ?? {}).map(([key, value]) => ({ key, value }));
 
   const ТАБЛИЦЫ = ["slot_snapshot", "product_sale", "machine_sale", "vending_sync_run"];
+  const пачек: Record<string, number> = {};
 
   const db = {
     execute: async (q: SQL) => {
@@ -41,6 +52,8 @@ function стенд(опт: { строк: Record<string, number>; настрой
       запросы.push(текст);
       const t = ТАБЛИЦЫ.find((name) => текст.includes(`"${name}"`));
       if (!t) throw new Error(`стенд: не распознал таблицу в запросе: ${текст}`);
+      пачек[t] = (пачек[t] ?? 0) + 1;
+      if (опт.ломать?.(t, пачек[t]!)) throw new Error(`стенд: база отказала на пачке ${пачек[t]} таблицы ${t}`);
       const есть = остаток[t] ?? 0;
       const пачка = Math.min(есть, RETENTION_BATCH);
       остаток[t] = есть - пачка;
@@ -86,10 +99,14 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
     assert.equal(итог.find((r) => r.table === "vending_sync_run")!.olderThanDays, SYNC_RUN_RETENTION_DAYS);
   });
 
-  it("пол 90 суток держится и против env: панель такое отобьёт, окружение — нет", async () => {
+  it("пол 180 суток держится и против env: панель такое отобьёт, окружение — нет", async () => {
     const { svc } = стенд({ строк: { slot_snapshot: 1 }, настройки: { SNAPSHOT_RETENTION_DAYS: "7" } });
-    // Неделя хранения снесла бы данные под отчётом о мёртвом стоке (окно до 180).
-    assert.equal((await svc.sweep(вс))[0]!.olderThanDays, 90);
+    // Неделя хранения снесла бы данные под отчётом о мёртвом стоке (окно 180).
+    assert.equal((await svc.sweep(вс))[0]!.olderThanDays, 180);
+    // И 90 — тоже ниже пола: признание footgun'а в тексте help защитой не было
+    // (R-FW-S8), а вернуть срезанную историю нечем.
+    const { svc: svc90 } = стенд({ строк: { slot_snapshot: 1 }, настройки: { SNAPSHOT_RETENTION_DAYS: "90" } });
+    assert.equal((await svc90.sweep(вс))[0]!.olderThanDays, 180);
   });
 
   it("удаляет ПАЧКАМИ, а не одним DELETE на 36 тысяч строк", async () => {
@@ -110,7 +127,41 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
     const { svc, события } = стенд({ строк: { slot_snapshot: 42 } });
     await svc.sweep(вс);
     assert.equal(события[0]!.type, "system.retention");
-    assert.deepEqual(события[0]!.payload, { table: "slot_snapshot", deleted: 42, olderThanDays: 180 });
+    assert.deepEqual(события[0]!.payload, {
+      table: "slot_snapshot",
+      deleted: 42,
+      olderThanDays: 180,
+      aborted: false,
+    });
+  });
+
+  it("ОБРЫВ НА ПАЧКЕ: событие всё равно пишется, с фактическим числом и aborted (R-FW-S3)", async () => {
+    // Пачки коммитятся сами по себе, а событие писалось ПОСЛЕ цикла: падение на
+    // третьей пачке означало снесённые безвозвратно строки и ни следа в
+    // журнале — при том что эта запись и есть единственное свидетельство
+    // чистки.
+    const { svc, события } = стенд({
+      строк: { slot_snapshot: RETENTION_BATCH * 3 },
+      ломать: (таблица, пачка) => таблица === "slot_snapshot" && пачка === 3,
+    });
+
+    const r = await svc.sweep(вс);
+    const снимки = r.find((x) => x.table === "slot_snapshot")!;
+    assert.deepEqual([снимки.deleted, снимки.aborted], [RETENTION_BATCH * 2, true]);
+    assert.equal(события[0]!.payload.deleted, RETENTION_BATCH * 2, "в журнале — ФАКТИЧЕСКИ удалённое число");
+    assert.equal(события[0]!.payload.aborted, true, "и признак, что список неполон");
+  });
+
+  it("обрыв одной цели не уносит остальные: у каждой своя таблица", async () => {
+    const { svc } = стенд({
+      строк: { slot_snapshot: 10, vending_sync_run: 5 },
+      ломать: (таблица) => таблица === "slot_snapshot",
+    });
+    const r = await svc.sweep(вс);
+    assert.ok(
+      r.some((x) => x.table === "vending_sync_run"),
+      "журнал прогонов обязан почиститься, даже когда снимки не дались",
+    );
   });
 
   it("бюджет: обрыв по времени выполнения ставит capped и не докапывает пачками следующего воскресенья", async () => {

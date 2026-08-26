@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { describe, it } from "node:test";
 import { entity, machineStock, ourvendStockSnapshot, purchase, systemConfig } from "@mydon/db";
 import type { VendingService } from "../vending/vending.service";
@@ -11,13 +12,39 @@ import {
   type StockLevelRow,
 } from "./supply.service";
 
+/**
+ * Донор-заглушка: подменяет экспорт модуля `postgres` в кеше `require` — тот
+ * самый, который открывает общий хелпер `stock-db.ts`. Нужна там, где режим
+ * `stock` заставляет синк идти в чужую базу, а сети в тестах нет.
+ */
+function подменённыйДонор(): { restore: () => void } {
+  const req = createRequire(__filename);
+  const id = req.resolve("postgres");
+  req("postgres"); // прогреваем кеш, чтобы подменять запись настоящего модуля
+  const запись = req.cache[id]!;
+  const было = запись.exports;
+  const клиент = Object.assign(() => Promise.resolve([]), {
+    end: () => Promise.resolve(undefined),
+    unsafe: () => Promise.resolve([]),
+  });
+  запись.exports = () => клиент;
+  return {
+    restore: () => {
+      запись.exports = было;
+    },
+  };
+}
+
 /** Реестр «не в строю» — единственное, что синку снабжения нужно от вендинга. */
-const вендинг = (неВСтрою: string[] = []): VendingService =>
+const вендинг = (неВСтрою: string[] = [], счётчик?: { n: number }): VendingService =>
   ({
-    machineRegistry: async () => ({
-      notInService: new Map(неВСтрою.map((s) => [s, { name: s, status: "warehouse" }])),
-      nameBySerial: new Map<string, string>(),
-    }),
+    machineRegistry: async () => {
+      if (счётчик) счётчик.n += 1;
+      return {
+        notInService: new Map(неВСтрою.map((s) => [s, { name: s, status: "warehouse" }])),
+        nameBySerial: new Map<string, string>(),
+      };
+    },
   }) as unknown as VendingService;
 
 describe("Снабжение: подготовка строк источника", () => {
@@ -207,6 +234,20 @@ describe("Остатки в режиме own: только автоматы в �
     assert.deepEqual([r.values.length, r.skippedNotInService], [0, 1]);
   });
 
+  it("наружу едут СЕРИЙНИКИ, а не только счётчик (R-FW-S2)", () => {
+    // Множество «не в строю» берётся из карточек, где «первая карточка
+    // выигрывает целиком»: забытый дубль со `status ≠ in_service` уводит ЖИВОЙ
+    // автомат из `machine_stock`. Число «пропущено 34» на вопрос «чей это
+    // автомат» не отвечает — а это единственный важный вопрос.
+    const r = buildStockUpserts(
+      [снимок("2508160360", "Заглушка", 199), снимок("C2508160360", "Заглушка", 199), снимок("2508160376", "TUC", 6)],
+      new Map(),
+      new Set(["2508160360"]),
+    );
+    assert.deepEqual([r.values.length, r.skippedNotInService], [1, 2]);
+    assert.deepEqual(r.skippedSerials, ["2508160360"], "серийники — канон и без дублей");
+  });
+
   it("без множества (режим stock) поведение прежнее — зеркало таких строк не даёт", () => {
     const r = buildStockUpserts([снимок("2508160360", "Заглушка", 199)], new Map());
     assert.deepEqual([r.values.length, r.skippedNotInService], [1, 0]);
@@ -292,7 +333,20 @@ function стендСинка(м: МирСинка) {
     execute: async () => ({ count: 0 }),
   } as never;
 
-  return { svc: new SupplyService(db, вендинг(м.неВСтрою ?? [])), счёт };
+  const обращения = { n: 0 };
+  const svc = new SupplyService(db, вендинг(м.неВСтрою ?? [], обращения));
+  // Логгер подменяется целиком: строка «пропущено N …» — буквальное
+  // обязательство R-P8b-4 и единственный след пропажи строк между снапшотом и
+  // `machine_stock`; без чтения лога её можно было удалить, не уронив тестов.
+  const строки: string[] = [];
+  const собрать = (m: unknown) => {
+    строки.push(String(m));
+  };
+  (svc as unknown as { log: { log: (m: unknown) => void; warn: (m: unknown) => void } }).log = {
+    log: собрать,
+    warn: собрать,
+  };
+  return { svc, счёт, обращенийКРеестру: () => обращения.n, строкиЛога: () => [...строки] };
 }
 
 /** Прогон с подменённым окружением: кеш источника учёта сбрасывается с обеих сторон. */
@@ -348,6 +402,79 @@ describe("Синк снабжения без STOCK_DATABASE_URL деградир
     });
   });
 
+  it("в режиме stock реестр не спрашивается ВООБЩЕ — два лишних запроса каждые 10 минут", async () => {
+    // «Не в строю» нужен только собственному снапшоту: зеркало складских строк
+    // не отдаёт. Без прогона в режиме `stock` мутация «спрашивать всегда»
+    // осталась бы зелёной, а прод платил бы за неё каждые десять минут.
+    await сОкружением(
+      { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+      async () => {
+        const донор = подменённыйДонор();
+        try {
+          const { svc, обращенийКРеестру } = стендСинка({ неВСтрою: ["2508160360"] });
+          await svc.sync();
+          assert.equal(обращенийКРеестру(), 0, "в режиме stock реестр спрашивать не за чем");
+        } finally {
+          донор.restore();
+        }
+      },
+    );
+  });
+
+  it("пропуск «не в строю» ОБЪЯВЛЯЕТСЯ строкой лога — иначе строки исчезают без следа", async () => {
+    // Строка лога — буквальное обязательство R-P8b-4 и единственный след
+    // пропажи строк между снапшотом и `machine_stock`. Без теста её можно было
+    // удалить, не уронив ни одной проверки.
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const { svc, строкиЛога } = стендСинка({
+        снапшот: [строка, { ...строка, machine_serial: "2508160360", ourvend_name: "Заглушка", qty: 199 }],
+        неВСтрою: ["2508160360"],
+      });
+      await svc.sync();
+      const пропуск = строкиЛога().filter((l) => l.includes("пропущено"));
+      assert.equal(пропуск.length, 1, "ровно одна строка на прогон");
+      assert.match(пропуск[0]!, /2508160360/, "и она называет серийник, а не только число");
+    });
+
+    // Пропускать нечего — молчим: строка «пропущено 0» приучила бы её не читать.
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const { svc, строкиЛога } = стендСинка({ снапшот: [строка] });
+      await svc.sync();
+      assert.equal(строкиЛога().filter((l) => l.includes("пропущено")).length, 0);
+    });
+  });
+
+  it("ИЗМЕНЕНИЕ множества «не в строю» — предупреждением, а не тишиной (R-FW-S2)", async () => {
+    // Состав меняется редко и осознанно. Внезапно появившийся там серийник —
+    // это забытый дубль карточки или чужая правка статуса, и в режиме `own` он
+    // молча уносит живой автомат из учёта остатков.
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const { svc, строкиЛога } = стендСинка({
+        снапшот: [строка, { ...строка, machine_serial: "2508160360", ourvend_name: "Заглушка", qty: 199 }],
+        неВСтрою: ["2508160360"],
+      });
+      await svc.sync();
+      assert.equal(строкиЛога().filter((l) => l.includes("изменилось")).length, 0, "первый прогон сравнивать не с чем");
+      await svc.sync();
+      assert.equal(строкиЛога().filter((l) => l.includes("изменилось")).length, 0, "тот же состав — молчим");
+    });
+  });
+
+  it("состав «не в строю» ИЗМЕНИЛСЯ между прогонами — предупреждение с обоими списками", async () => {
+    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
+      const снимки = [строка, { ...строка, machine_serial: "2508160360", ourvend_name: "Заглушка", qty: 199 }];
+      const { svc, строкиЛога } = стендСинка({ снапшот: снимки, неВСтрою: [] });
+      await svc.sync();
+      // Второй прогон — тот же сервис, но реестр «переобулся»: карточка автомата
+      // получила статус warehouse (или всплыл её дубль).
+      (svc as unknown as { vending: unknown }).vending = вендинг(["2508160360"]);
+      await svc.sync();
+      const тревога = строкиЛога().filter((l) => l.includes("изменилось"));
+      assert.equal(тревога.length, 1);
+      assert.match(тревога[0]!, /\[пусто\] → \[2508160360\]/);
+    });
+  });
+
   it("снапшота нет вовсе — ноль строк и ни одного исключения", async () => {
     await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
       const { svc, счёт } = стендСинка({ снапшот: [] });
@@ -356,17 +483,11 @@ describe("Синк снабжения без STOCK_DATABASE_URL деградир
     });
   });
 
-  it("мост П3 включается ровно в момент гашения переменной", async () => {
-    // mirrorAlive = Boolean(STOCK_DATABASE_URL) — обратный гейт: пока
-    // переменная есть, receiveOrder не пишет purchase сам (vending.service.ts),
-    // иначе тот же физический закуп попал бы в журнал дважды — зеркалом и
-    // мостом. Гашение переменной — единственный переключатель, и проверять тут
-    // надо именно ЕГО, а не приёмку целиком.
-    await сОкружением({ STOCK_DATABASE_URL: "postgres://ro@stock/mydon" }, async () => {
-      assert.equal(Boolean(process.env.STOCK_DATABASE_URL), true, "зеркало живо — мост молчит");
-    });
-    await сОкружением({ STOCK_DATABASE_URL: undefined }, async () => {
-      assert.equal(Boolean(process.env.STOCK_DATABASE_URL), false, "зеркало погашено — мост пишет приход сам");
-    });
-  });
+  // Теста «мост П3 включается в момент гашения переменной» здесь НЕТ намеренно.
+  // Он проверял `Boolean(process.env.STOCK_DATABASE_URL)` сразу после того, как
+  // сам эту переменную и выставил: ни `receiveOrder`, ни `mirrorAlive` он не
+  // звал, то есть мутация `const mirrorAlive = true` его бы не уронила. Ложный
+  // сигнал «мост покрыт здесь» вреднее отсутствия теста. Настоящее покрытие
+  // обеих сторон гейта живёт в `apps/core/src/vending/vending.service.test.ts`
+  // («мост П3»), там же, где сам `mirrorAlive`.
 });

@@ -19,7 +19,7 @@ import {
   type ParityDayRow,
   type ParityStockRow,
 } from "./ourvend-parity.service";
-import { buildSnapshotRows, rewriteKeys, type SnapshotDay } from "./ourvend-snapshot.service";
+import { buildSnapshotRows, OurvendSnapshotService, rewriteKeys, type SnapshotDay } from "./ourvend-snapshot.service";
 
 /** Прогон с подменённым окружением: кеш источника учёта сбрасывается с обеих сторон. */
 async function сОкружением<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -109,14 +109,51 @@ describe("Снапшот OurVend: построчная проверка прис
     assert.equal(quarantined.length, 0);
   });
 
-  it("ключи перезаписи включают дни БЕЗ строк — пустой день стирает старое", () => {
+  it("ключи перезаписи — только по ЧИСТЫМ строкам: пустой день сутки не стирает (R-FW-S7)", () => {
+    // Пустой (или целиком забракованный) ответ кабинета сносил `(dt, серийник)`
+    // целиком. До катовера это была тень, в режиме `own` — боевой учёт: сутки
+    // продаж автомата исчезали бы из `sale` без ошибки и без следа.
     const days: SnapshotDay[] = [
       { dt: "2026-08-23", machineSerial: "A", rows: [] },
       { dt: "2026-08-23", machineSerial: "A", rows: [] },
       { dt: "2026-08-23", machineSerial: "B", rows: [{ product: "X", qty: 1, amount: 1 }] },
     ];
-    const keys = rewriteKeys(days);
-    assert.equal(keys.length, 2, "дубли ключей схлопываются, пустые дни остаются");
+    const { clean } = buildSnapshotRows(days, true);
+    const keys = rewriteKeys(clean);
+    assert.deepEqual(keys, [{ dt: "2026-08-23", machineSerial: "b" }], "стираем только то, что заменяем");
+  });
+
+  it("день, у которого ВСЕ строки ушли в карантин, тоже не стирается", () => {
+    const days: SnapshotDay[] = [{ dt: "2026-08-23", machineSerial: "A", rows: [{ product: "X", qty: "N/A" }] }];
+    const { clean, quarantined } = buildSnapshotRows(days, true);
+    assert.equal(quarantined.length, 1);
+    assert.deepEqual(rewriteKeys(clean), [], "иначе брак в ответе кабинета сносил бы сутки автомата");
+  });
+
+  it("apply(): пустой день не выполняет ни одного DELETE", async () => {
+    // Проверяется СЕРВИС, а не только чистая функция: удаление живёт в
+    // транзакции, и обойти `rewriteKeys` там было бы нечем видно.
+    const удаления: unknown[] = [];
+    const tx = {
+      delete: (t: unknown) => ({
+        where: async () => {
+          удаления.push(t);
+        },
+      }),
+      insert: () => ({ values: async () => undefined }),
+    };
+    const db = {
+      transaction: async (fn: (h: unknown) => Promise<unknown>) => fn(tx),
+      insert: () => ({ values: async () => undefined }),
+    } as never;
+    const svc = new OurvendSnapshotService(db);
+
+    const пусто = await svc.apply({ sales: [{ dt: "2026-08-23", machineSerial: "A", rows: [] }] });
+    assert.deepEqual([удаления.length, пусто.saleDays, пусто.saleRows], [0, 0, 0]);
+
+    // А непустой — стирает и заменяет, как и раньше.
+    await svc.apply({ sales: [{ dt: "2026-08-23", machineSerial: "A", rows: [{ product: "X", qty: 1, amount: 1 }] }] });
+    assert.equal(удаления.length, 1);
   });
 });
 
