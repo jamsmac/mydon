@@ -1,0 +1,259 @@
+# Катовер учёта OurVend: `stock` → `own` (П8b)
+
+Рунбук по R-P8b-8. Переключает **источник данных `sale`/`machine_stock`** с
+зеркала `mydon-stock` (`STOCK_DATABASE_URL`) на собственный учётный снапшот
+Core (`ourvend_sale_snapshot`/`ourvend_stock_snapshot`, наполняет агент
+`ourvend:accounting`, 08:05 Ташкент). Готовность считает код (серия зелёных
+дней паритета, `docs/superpowers/specs/2026-08-26-p8b-cutover-readiness-design.md`,
+R-P8b-1/2) — этот документ описывает, что делать РУКАМИ, когда код скажет «пора».
+
+**Кто исполняет:** владелец, на хосте `46.62.144.36` (`ssh root@46.62.144.36`),
+Core слушает `http://127.0.0.1:3001`. Записи в `.env` — только шаг 3; шаг 1 —
+запись в панели («Система»), не в файле.
+
+**Самая ранняя физически возможная дата флипа — 2026-09-01, 08:40 Ташкент**
+(семь зелёных суток подряд, считая от первой ПОЛНОЙ сверки 26.08.2026 —
+прод-событие 25.08 писала старая сборка без половины по остаткам и зелёным
+не считается, `docs/superpowers/specs/2026-08-26-p8b-cutover-readiness-design.md`
+§1). Флипать раньше этой даты нет смысла: серии физически ещё не будет.
+
+## Чего в этом документе нет
+
+- Самого флипа выполненным — его делает владелец, не раньше даты выше.
+- Вывода панели `:8080` и бота `@mydonvendbot`, заморозки БД `mydon-stock`,
+  удаления `external`-сети — это П8 плана поглощения, пп. 3–5, **шаг 4** ниже
+  и только ПОСЛЕ этого рунбука (R-P8b-9).
+
+---
+
+## Шаг 0. Дождаться сигнала
+
+Событие `ourvend.cutover_ready` приходит в Telegram немедленно, как только
+серия берёт порог (правило `immediate` в `apps/core/src/rules/rules.ts`).
+Ждать сообщения не обязательно — проверить руками в любой момент:
+
+```bash
+curl -s http://127.0.0.1:3001/ourvend/parity/streak | jq '{greenDays, threshold, readyForCutover, lastRed}'
+```
+
+Ожидаемо при готовности: `{"greenDays": 7, "threshold": 7, "readyForCutover": true, "lastRed": <дата вне серии или null>}`.
+
+- `readyForCutover: false` → рано, не флипать. Смотреть `days` (последние 14
+  суток) — какой день красный или пропущен.
+- `lastRed` указывает на дату ВНУТРИ текущей серии (например, серия
+  началась 26.08, а `lastRed` = 27.08) → счётчик врёт себе противоречит,
+  это баг подсчёта, а не сигнал готовности — не флипать, разбираться с
+  событием `ourvend.parity` того дня (`event where type='ourvend.parity' and
+  occurred_at::date = '<дата>'`) прежде чем доверять серии.
+- То же можно увидеть в боте («сверка») и панели («Снек» → «Здоровье
+  сбора») — строка «паритет: N зелёных дн. подряд из 7».
+
+**Октат:** ничего не делать, это шаг только для чтения.
+
+---
+
+## Шаг 1. Флип (ЗАПИСЬ)
+
+Панель → **«Система»** → «Вендинг: источник учёта OurVend»
+(`OURVEND_ACCOUNTING_SOURCE`) → выставить `own` → Сохранить.
+
+**Рестарт НЕ НУЖЕН.** Значение читается настройкой из `system_config` с
+кешем ≤ 60 с (`apps/core/src/sales/accounting-source.ts`, `ACCOUNTING_SOURCE_CACHE_MS`)
+— ближайший прогон синка продаж/снабжения (крон `*/10`) увидит `own` в
+пределах минуты.
+
+**Проверка сразу после сохранения:** в журнале обязана появиться ровно одна
+новая строка события:
+
+```bash
+curl -s http://127.0.0.1:3001/system/config | jq '.[] | select(.key=="OURVEND_ACCOUNTING_SOURCE")'
+# ожидаем: value: "own", source: "db"
+/opt/backups/db_access.sh query \
+  "select payload from event where type='ourvend.accounting_source_changed' order by occurred_at desc limit 1"
+# ожидаем: {"from":"stock","to":"own","actor":"<имя вошедшего>"}
+```
+
+**Откат:** то же поле панели → очистить (пустой ввод удаляет значение из
+базы) → Сохранить. Настройка пропадает из `system_config`, действует
+фолбэк — env `OURVEND_ACCOUNTING_SOURCE=stock` из `.env`/compose (см.
+«Что НЕ трогать» — сам env-ключ на этом шаге не трогаем, он и есть путь
+отката). Событие смены `{from:"own", to:"stock"}` появится тем же образом.
+
+---
+
+## Шаг 1а. Проверка следующим утром (после 08:40 Ташкент)
+
+Дать агенту `ourvend:accounting` и синкам Core отработать текущие сутки
+целиком, затем проверить:
+
+```bash
+curl -s http://127.0.0.1:3001/supply/summary | jq '.source'
+# ожидаем: "own"
+curl -s http://127.0.0.1:3001/ourvend/parity/streak | jq '{greenDays, readyForCutover}'
+# серия НЕ должна оборваться — в режиме own сверка становится проверкой
+# идемпотентности (снапшот сверяется с sale, которую теперь сам же наполняет)
+```
+
+**Числа `sale` за вчера.** По прод-инвентарю (`.superpowers/sdd/2026-08-26-sloy-P8b-cutover/inventory-prod.md`
+§2) 264 пары `sale` × `ourvend_sale_snapshot` за 14 дней сходились 1:1, и
+`buildUpserts` (`apps/core/src/sales/sales.service.ts`) в режиме `own`
+пишет тот же `source: "ourvend"` и тот же уникальный ключ, что и зеркало —
+значит новых строк по вчерашнему дню быть НЕ ДОЛЖНО, только UPDATE:
+
+```bash
+/opt/backups/db_access.sh query \
+  "select count(*) from sale where dt = current_date - 1 and source='ourvend'"
+# сверить, что число НЕ выросло относительно вчерашнего замера (та же
+# граница, что уже писало зеркало — импорт заменяет, не добавляет)
+```
+
+**Числа `machine_stock` за вчера — 68 строк** (2 автомата в строю × 34
+позиции). Строк по SKLAD 4S (`2508160360`) — **ноль**: фильтр «в строю»
+(R-P8b-4, `buildStockUpserts` в `apps/core/src/supply/supply.service.ts`)
+отбрасывает автоматы не в строю на записи, а не на чтении снапшота.
+
+```bash
+/opt/backups/db_access.sh query \
+  "select count(*) from machine_stock where dt = current_date - 1"
+# ожидаем: 68
+/opt/backups/db_access.sh query \
+  "select count(*) from machine_stock where dt = current_date - 1 and machine_serial in ('2508160360','c2508160360')"
+# ожидаем: 0
+docker logs mydon-core 2>&1 | grep "Остатки: пропущено"
+# ожидаем строку вида «Остатки: пропущено 34 строк по автоматам не в строю»
+```
+
+Если по SKLAD 4S строки ЕСТЬ — фильтр не сработал, откатывать шаг 1
+(см. выше) и разбираться прежде чем идти на шаг 2: без фильтра `machine_stock`
+получает +34 фантомных строки/сутки на 7028 «единиц» заглушки.
+
+**Откат при любом расхождении** — как в шаге 1 (очистить настройку в
+панели). Расхождение важнее графика: лучше остаться на день дольше в
+`stock`, чем перевести учёт по неверным числам.
+
+---
+
+## Шаг 2. Три зелёных дня в `own`
+
+Ничего не делать руками — только наблюдать минимум 3 календарных суток
+после успешного шага 1а:
+
+- `GET /ourvend/parity/streak` продолжает расти (паритет считается и в
+  режиме `own` — сверка снапшота с тем, что снапшот сам же наполнил, это
+  нормальная проверка идемпотентности, не тавтология).
+- Сторож застоя снапшота молчит: `GET /ourvend/health?runs=20` →
+  `snapshotStale: false`. Если `true` — событие `ourvend.snapshot_stale`
+  уже пришло в Telegram (`⛔ Учётный снапшот OurVend не обновлялся N ч`);
+  чинить агент `ourvend:accounting`, к шагу 3 не переходить.
+
+**Откат** — тот же, что в шаге 1: очистить `OURVEND_ACCOUNTING_SOURCE` в
+панели, вернуться в `stock`.
+
+---
+
+## Шаг 3. Гашение `STOCK_DATABASE_URL` (ЗАПИСЬ в `.env` хоста)
+
+Выполнять только после шага 2 (минимум 3 подтверждённых зелёных дня в
+`own`). Это ВТОРОЙ, отдельный от флипа шаг — переключатель
+`OURVEND_ACCOUNTING_SOURCE` и мост П3 (`receiveOrder → purchase`) не знают
+друг о друге вовсе, они завязаны на разные вещи: настройку и на сам факт
+присутствия переменной (`.superpowers/sdd/2026-08-26-sloy-P8b-cutover/inventory-monorepo.md`
+§1).
+
+```bash
+ssh root@46.62.144.36
+sed -i '/^STOCK_DATABASE_URL=/d' /opt/mydon-app/.env
+cd /opt/mydon-app
+docker compose -f deploy/docker-compose.yml --env-file .env up -d mydon-core
+```
+
+**Последствия, которые нужно УВИДЕТЬ, а не предположить:**
+
+1. **Зеркало закупок останавливается.** Оно и так заморожено с 29.07 —
+   у всех 342 строк `purchase(source='stock')` `created_at = 2026-07-15`.
+   Терять нечего.
+   ```bash
+   /opt/backups/db_access.sh query "select count(*) from purchase where source='stock'"
+   # ожидаем: 342, без изменений
+   ```
+2. **Мост П3 включается.** `mirrorAlive = Boolean(STOCK_DATABASE_URL)` —
+   без переменной он `false`, и `receiveOrder` начинает писать
+   `purchase(source='vending-order')` сам. Двойного счёта не будет:
+   `vending_purchase_order` пока пуст.
+   ```bash
+   docker logs mydon-core 2>&1 | grep -i "Источник продаж"
+   # ожидаем: «Источник продаж: собственный снапшот OurVend
+   # (ourvend_sale_snapshot).» — без STOCK_DATABASE_URL режим own теперь и
+   # по фолбэку, не только по настройке
+   ```
+3. **Дозаполнение `entity.attrs` из донора прекращается** (тип/точка
+   карточки машины). Реестр уже заполнен (31 карточка, прод-инвентарь §3)
+   — новых карточек взять неоткуда не значит потерять существующие.
+4. **`GET /ourvend/health` без ошибок**, `GET /supply/summary` →
+   `source: "own"` (теперь ещё и по фолбэку, не только по настройке
+   панели — если кто-то по ошибке очистит настройку панели, источник
+   всё равно останется `own`, потому что зеркала физически нет).
+   ```bash
+   curl -s http://127.0.0.1:3001/ourvend/health?runs=20 | jq '{parityStreak, snapshotStale}'
+   curl -s http://127.0.0.1:3001/supply/summary | jq '.source'
+   ```
+
+**Откат:** вернуть строку `STOCK_DATABASE_URL=<прежнее значение read-only
+пользователя>` в `/opt/mydon-app/.env`, пересоздать `mydon-core` той же
+командой `up -d`. Донор (`mydon-stock`) всё это время жив и не трогается —
+откат безопасен в любой момент до его физической заморозки (шаг 4 ниже).
+
+---
+
+## Шаг 4. Дальше — П8 плана поглощения, пп. 3–5
+
+Вне охвата этого рунбука (R-P8b-9), выполнять ПОСЛЕ подтверждённого шага 3
+и отдельным решением владельца — не автоматически следом:
+
+3. Вывод панели `:8080` и бота `@mydonvendbot` (`docs/PLAN_STOCK_ABSORPTION.md` §П8).
+4. Заморозка БД `mydon-stock` как архива (том **не удалять** — единственный
+   путь отката на этом этапе).
+5. Чистка: `STOCK_DATABASE_URL` из compose/`.env.example`, `external`-сеть
+   `mydon-stock_default`, упоминания в докладах `/gaps`,
+   `docs/DATA_SOURCES.md` §«канон продаж».
+
+---
+
+## Чего НЕ делать ни на одном из шагов 0–3
+
+- **Не трогать `external`-сеть compose** `mydon-stock_default`
+  (`deploy/docker-compose.yml`, секция `networks: stock:`, подключена
+  только к `mydon-core`). Снятие сети — П8 п.5, шаг 4 выше, и только после
+  подтверждённого шага 3.
+- **Не удалять и не останавливать БД донора `mydon-stock`.** Она остаётся
+  живой и доступной весь катовер — единственный путь отката на шагах 1–3.
+- **Не гасить `STOCK_DATABASE_URL` одновременно с флипом шага 1.** Это
+  два разных шага намеренно: флип переключает только `sale`/`machine_stock`,
+  гашение переменной — отдельно приход (`purchase`) и мост П3. Совместив
+  их, теряется возможность откатить один шаг, не откатывая оба.
+- **Не полагаться на `readyForCutover` без чтения `days`.** Счётчик — код,
+  не оракул; расхождение конкретного дня важнее агрегата.
+
+---
+
+## Ожидаемые числа — сводка
+
+| Проверка | Команда | Число |
+|---|---|---|
+| Серия при готовности | `GET /ourvend/parity/streak` | `greenDays: 7`, `readyForCutover: true` |
+| `sale` за вчера (режим `own`) | `select count(*) from sale where dt=current_date-1` | без изменений (UPDATE, не INSERT) |
+| `machine_stock` за вчера | `select count(*) from machine_stock where dt=current_date-1` | **68** (2 автомата × 34 позиции) |
+| `machine_stock` по SKLAD 4S (`2508160360`) | тот же запрос + `machine_serial in (...)` | **0** |
+| Лог фильтра «в строю» | `docker logs mydon-core \| grep "Остатки: пропущено"` | «пропущено 34 строк» (если снапшот донора всё ещё несёт SKLAD 4S) |
+| `purchase(source='stock')` после шага 3 | `select count(*) from purchase where source='stock'` | **342**, без изменений (зеркало заморожено с 29.07) |
+| `vending_purchase_order` после шага 3 | `select count(*) from vending_purchase_order` | **0** — двойного счёта моста П3 нет |
+| Событие смены источника | `event where type='ourvend.accounting_source_changed'` | ровно одна новая строка на каждый флип |
+
+---
+
+**Связанные документы:** `docs/PLAN_STOCK_ABSORPTION.md` §П8 (план
+поглощения целиком); `docs/DEPLOY.md` (переменные окружения, новые ключи
+панели «Система»); `docs/DATA_SOURCES.md` §«канон продаж OurVend»;
+`docs/superpowers/specs/2026-08-26-p8b-cutover-readiness-design.md`
+(рулинги R-P8b-1…9 и аддендум); `.superpowers/sdd/2026-08-26-sloy-P8b-cutover/inventory-prod.md`
+(прод-факты на 26.08.2026, откуда взяты числа 264/68/34/342 выше).
