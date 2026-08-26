@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
+import { Logger } from "@nestjs/common";
 import { systemConfig } from "@mydon/db";
 import {
   ACCOUNTING_SOURCE_CACHE_MS,
@@ -61,6 +62,34 @@ describe("Источник учёта (R-P8b-3)", () => {
 
   it("мусор в настройке — stock, а не отказ: учёт не должен вставать из-за опечатки", () => {
     assert.equal(resolveAccountingSource("snapshot", ЗЕРКАЛО), "stock");
+  });
+
+  it("мусор в env не остаётся молчаливым: строка в лог + stock", async (t: TestContext) => {
+    // PUT такое режет `oneOf`, а env — не режет никто: OURVEND_ACCOUNTING_SOURCE
+    // =snapsot в .env даст stock, и при этом панель покажет в select вариант,
+    // которого в списке нет. Прецедент репо — readIntSetting.
+    const предупреждения: string[] = [];
+    t.mock.method(Logger.prototype, "warn", (m: unknown) => {
+      предупреждения.push(String(m));
+    });
+    await сОкружением({ ...ЗЕРКАЛО, OURVEND_ACCOUNTING_SOURCE: undefined }, async () => {
+      assert.equal(await accountingSource(стенд({ OURVEND_ACCOUNTING_SOURCE: "snapsot" })), "stock");
+    });
+    assert.equal(предупреждения.length, 1, "непонятное значение обязано попасть в лог");
+    assert.match(предупреждения[0]!, /snapsot/);
+    assert.match(предупреждения[0]!, /stock, own/);
+  });
+
+  it("понятные значения лог не засоряют — предупреждение только на мусор", async (t: TestContext) => {
+    const предупреждения: string[] = [];
+    t.mock.method(Logger.prototype, "warn", (m: unknown) => {
+      предупреждения.push(String(m));
+    });
+    await сОкружением({ ...ЗЕРКАЛО, OURVEND_ACCOUNTING_SOURCE: undefined }, async () => {
+      assert.equal(await accountingSource(стенд({ OURVEND_ACCOUNTING_SOURCE: "own" })), "own");
+      assert.equal(await accountingSource(стенд({}), new Date(Date.now() + 61_000)), "stock");
+    });
+    assert.deepEqual(предупреждения, []);
   });
 
   it("база важнее env: панель перекрывает переменную контейнера", async () => {

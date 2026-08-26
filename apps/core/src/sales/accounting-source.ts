@@ -1,3 +1,4 @@
+import { Logger } from "@nestjs/common";
 import type { Db } from "../db/db.module";
 import { settingValue } from "../system/settings";
 
@@ -47,15 +48,33 @@ export const ACCOUNTING_SOURCE_CACHE_MS = 60_000;
 /**
  * Чистое правило: действующее значение настройки + окружение → источник.
  *
- * Про базу и кеш не знает НИЧЕГО — этим и проверяется: приоритет «база > env >
- * дефолт» целиком лежит на `settingValue`/`resolveEffective`, второй лесенки
- * здесь нет. Мусор в настройке (опечатка владельца) читается как `stock`, а не
- * как отказ: учёт не должен вставать из-за неверно набранного слова.
+ * Про базу, кеш и логи не знает НИЧЕГО — этим и проверяется: приоритет «база >
+ * env > дефолт» целиком лежит на `settingValue`/`resolveEffective`, второй
+ * лесенки здесь нет. Мусор в настройке (опечатка владельца) читается как
+ * `stock`, а не как отказ: учёт не должен вставать из-за неверно набранного
+ * слова — но и молчать о нём нельзя, поэтому рядом живёт `непонятноеЗначение`,
+ * а предупреждение пишет `accountingSource`.
  */
 export function resolveAccountingSource(setting: string, env: NodeJS.ProcessEnv = process.env): AccountingSource {
   if ((env.STOCK_DATABASE_URL ?? "").trim() === "") return "own";
   return setting.trim().toLowerCase() === "own" ? "own" : "stock";
 }
+
+/**
+ * Значение, которого панель показать не может: ни `stock`, ни `own`, ни пусто.
+ *
+ * `PUT /system/config` такое режет валидатором `oneOf`, а env — не режет никто:
+ * `OURVEND_ACCOUNTING_SOURCE=snapsot` в `.env` или в `docker-compose` даст
+ * молчаливый `stock`, и при этом панель покажет в `select` вариант `snapsot`,
+ * которого в списке нет. Прецедент репо — `readIntSetting`: «непрочитанное
+ * значение — НЕ тихий фолбэк».
+ */
+function непонятноеЗначение(setting: string): boolean {
+  const v = setting.trim().toLowerCase();
+  return v !== "" && v !== "stock" && v !== "own";
+}
+
+const log = new Logger("accounting-source");
 
 let кеш: { at: number; value: AccountingSource } | null = null;
 
@@ -69,7 +88,16 @@ let кеш: { at: number; value: AccountingSource } | null = null;
 export async function accountingSource(db: Db, now: Date = new Date()): Promise<AccountingSource> {
   const t = now.getTime();
   if (кеш && t - кеш.at < ACCOUNTING_SOURCE_CACHE_MS && t >= кеш.at) return кеш.value;
-  const value = resolveAccountingSource(await settingValue(db, ACCOUNTING_SOURCE_KEY));
+  const setting = await settingValue(db, ACCOUNTING_SOURCE_KEY);
+  const value = resolveAccountingSource(setting);
+  // Предупреждение здесь, а не в чистом правиле: кеш держит его на одну строку
+  // в минуту, а не на строку в каждый вызов синка.
+  if (непонятноеЗначение(setting)) {
+    log.warn(
+      `Настройка ${ACCOUNTING_SOURCE_KEY}=«${setting.trim()}» не понята (допустимо: stock, own) — ` +
+        `источник ${value}. Панель покажет это значение в select, которого в списке нет.`,
+    );
+  }
   кеш = { at: t, value };
   return value;
 }

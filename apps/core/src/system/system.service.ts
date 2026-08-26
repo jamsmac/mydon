@@ -7,7 +7,7 @@ import {
   ACCOUNTING_SOURCE_KEY,
   resetAccountingSourceCache,
 } from "../sales/accounting-source";
-import { type EffectiveItem, resolveAll, validateConfig } from "./config-spec";
+import { type EffectiveItem, resolveAll, resolveEffective, specFor, validateConfig } from "./config-spec";
 
 /**
  * Глобальные тумблеры системы (активация: мозг/RAG/пауза/бюджет).
@@ -48,39 +48,54 @@ export class SystemService {
     // Действующее значение ДО записи — только для наблюдаемого тумблера.
     // Сравниваем действующее, а не сырой ввод: сброс тумблера (пустая строка)
     // — это тоже смена, если под ним лежало другое значение из env.
-    const было = key === ACCOUNTING_SOURCE_KEY ? await this.valueOf(key) : null;
-
-    const trimmed = value.trim();
-    if (trimmed === "") {
-      await this.db.delete(systemConfig).where(sql`${systemConfig.key} = ${key}`);
-    } else {
-      await this.db
-        .insert(systemConfig)
-        .values({ key, value: trimmed, updatedBy: updatedBy ?? null })
-        .onConflictDoUpdate({
-          target: systemConfig.key,
-          set: { value: trimmed, updatedBy: updatedBy ?? null, updatedAt: new Date() },
-        });
-    }
-
+    //
     // Одно-единственное имя ключа зашито здесь, а не заведён общий механизм
     // «наблюдаемых тумблеров»: событий такого рода в системе ровно одно, и
     // обобщение на одном случае даёт лишний слой без второго потребителя.
-    const действующие = await this.effective();
-    if (было !== null) {
-      const стало = действующие.find((i) => i.key === ACCOUNTING_SOURCE_KEY)?.value ?? "";
-      if (стало !== было) {
-        // Сброс кеша ДО события: следующий прогон синка не должен ещё минуту
-        // читать прежний источник — ради этого кеш и умеет инвалидироваться.
-        resetAccountingSourceCache();
-        await this.db.insert(event).values({
+    const наблюдаемый = key === ACCOUNTING_SOURCE_KEY ? specFor(key) : undefined;
+    const было = наблюдаемый ? await this.valueOf(key) : null;
+
+    const trimmed = value.trim();
+
+    // Действующее значение ПОСЛЕ записи считаем ТЕМ ЖЕ резолвером, но по уже
+    // известной записи: читать из транзакции свою же незакоммиченную строку —
+    // лишний рейс в базу ради того, что мы только что туда положили. Второй
+    // лесенки приоритетов здесь не появляется — `resolveEffective` одна.
+    const стало = наблюдаемый
+      ? resolveEffective(наблюдаемый, trimmed === "" ? {} : { [key]: trimmed }, process.env).value
+      : null;
+    const сменилось = стало !== null && стало !== было;
+
+    // Запись тумблера и событие — ОДНОЙ транзакцией (прецедент
+    // `TasksService.create`). Двумя операторами отказ вставки события оставил
+    // бы флип совершённым и неозвученным: учёт уже читает другой источник, а в
+    // журнале об этом ни строки.
+    await this.db.transaction(async (tx) => {
+      if (trimmed === "") {
+        await tx.delete(systemConfig).where(sql`${systemConfig.key} = ${key}`);
+      } else {
+        await tx
+          .insert(systemConfig)
+          .values({ key, value: trimmed, updatedBy: updatedBy ?? null })
+          .onConflictDoUpdate({
+            target: systemConfig.key,
+            set: { value: trimmed, updatedBy: updatedBy ?? null, updatedAt: new Date() },
+          });
+      }
+      if (сменилось) {
+        await tx.insert(event).values({
           source: "system",
           type: ACCOUNTING_SOURCE_CHANGED_EVENT,
           payload: { from: было, to: стало, actor: updatedBy ?? null },
         });
       }
-    }
-    return действующие;
+    });
+
+    // Сброс кеша ПОСЛЕ коммита, а не внутри транзакции: сбросив до коммита, мы
+    // отдали бы соседнему читателю шанс перечитать ещё старое значение и снова
+    // закешировать его на минуту — ровно та задержка, которую сброс и убирает.
+    if (сменилось) resetAccountingSourceCache();
+    return this.effective();
   }
 
   /** Действующее значение одного тумблера (для сравнения «до/после»). */
