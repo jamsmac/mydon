@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { VendingRefillEvent } from "../lib/core";
 import { VENDHUB_GROUPS, isTableBackedLeaf } from "../lib/domain-nav";
-import { REFILL_EVENT_WINDOWS, RefillEventsTable, RefillEventsView } from "./refill-events-view";
+import { REFILL_EVENT_WINDOWS, RefillEventsTable, RefillEventsView, лидЖурнала } from "./refill-events-view";
 
 const mocks = vi.hoisted(() => ({ vendingRefillEvents: vi.fn() }));
 vi.mock("../lib/core", () => ({
@@ -101,6 +101,19 @@ describe("Лист «Журнал заливок» (R-H-5)", () => {
     render(await RefillEventsView({ domain: "vendhub", days: 90 }));
     const лид = screen.getByText(/Приход по снимкам за 90 дн\./);
     expect(лид.textContent).toContain("показаны последние 2 события — сузьте окно");
+  });
+
+  it("боевая обрезка пришпилена ЧИСЛОМ ПОТОЛКА: 500 событий, а не «сколько дала фикстура»", () => {
+    // Правило писано ради `LIST_LIMIT = 500` (`refill-events.service.ts`):
+    // именно это число лист печатал как посчитанный за окно итог. Утверждение
+    // на двух событиях проверяло бы форму, но не тот случай, ради которого
+    // правило и появилось.
+    const пятьсот = Array.from({ length: 500 }, (_, i) => ({ ...СОБЫТИЯ[0]!, id: `ev-${i}` }));
+    expect(лидЖурнала(90, пятьсот, true)).toBe(
+      "Приход по снимкам за 90 дн. · показаны последние 500 событий — сузьте окно",
+    );
+    // Ровно те же 500 без обрезки — это посчитанный итог, и говорится он иначе.
+    expect(лидЖурнала(90, пятьсот, false)).toBe("Приход по снимкам за 90 дн. · 500 событий");
   });
 
   it("окна листа — те, что сервер отдаёт целиком после поднятия потолка", () => {

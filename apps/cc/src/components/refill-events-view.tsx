@@ -82,8 +82,13 @@ export function RefillEventsTable({ rows }: { rows: VendingRefillEvent[] }) {
  * «500 событий» читалось бы как посчитанный за окно итог: молчаливый предел
  * — это число, которое врёт ровно в тот момент, когда владельцу важнее всего
  * знать, что он видит не всё.
+ *
+ * ЭКСПОРТИРУЕТСЯ ради теста: боевой случай обрезки — это ровно 500 событий, и
+ * пришпилить его текст рендером такой фикстуры дороже, чем вызовом чистой
+ * функции. Тест на двух событиях пришпиливал бы не то число, ради которого
+ * правило и писано.
  */
-function лидЖурнала(days: number, rows: VendingRefillEvent[], capped: boolean): string {
+export function лидЖурнала(days: number, rows: readonly VendingRefillEvent[], capped: boolean): string {
   const n = rows.length;
   const событий = `${count(n)} ${plural(n, "событие", "события", "событий")}`;
   const охват = capped ? `показаны последние ${событий} — сузьте окно` : событий;

@@ -162,26 +162,34 @@ function ПустаяИстория({ days }: { days: number }) {
   );
 }
 
+/**
+ * Лид листа целиком. Отдельной ЭКСПОРТИРУЕМОЙ функцией, а не выражением внутри
+ * компонента: боевой случай обрезки — это 2000 строк, и пришпилить его текст
+ * рендером такой фикстуры дороже, чем вызовом чистой функции. Тест на две
+ * строчки фикстуры пришпиливал бы не то число, ради которого правило и писано.
+ */
+export function лидИстории(report: StockCountsReport): string {
+  const обрезано = report.warnings.some((w) => w.code === "history_capped");
+  const окно = подписьОкна(report, обрезано);
+  const n = report.rows.length;
+  // Счёт строк при обрезке уже назван самой подписью окна («показаны последние
+  // 2000 записей»): второй раз тем же числом лид сказал бы то же самое.
+  return [
+    `Пересчёты склада за ${count(report.days)} дн.`,
+    ...(окно === null ? [] : [окно]),
+    ...(обрезано ? [] : [`${count(n)} ${plural(n, "строка", "строки", "строк")}`]),
+    ...(report.product ? [`товар «${report.product}»`] : []),
+  ].join(" · ");
+}
+
 export function StockHistoryTables({ report }: { report: StockCountsReport }) {
   const дни = groupStockCounts(report.rows);
   const пусто = report.rows.length === 0;
   const фильтр = report.product;
-  const обрезано = report.warnings.some((w) => w.code === "history_capped");
-  const окно = подписьОкна(report, обрезано);
-  // Счёт строк при обрезке уже назван самой подписью окна («показаны последние
-  // 2000 записей»): второй раз тем же числом лид сказал бы то же самое.
-  const части = [
-    `Пересчёты склада за ${count(report.days)} дн.`,
-    ...(окно === null ? [] : [окно]),
-    ...(обрезано
-      ? []
-      : [`${count(report.rows.length)} ${plural(report.rows.length, "строка", "строки", "строк")}`]),
-    ...(фильтр ? [`товар «${фильтр}»`] : []),
-  ];
 
   return (
     <>
-      <p className="lead">{части.join(" · ")}</p>
+      <p className="lead">{лидИстории(report)}</p>
 
       {пусто ? (
         фильтр ? (
@@ -241,7 +249,10 @@ export function StockHistoryTables({ report }: { report: StockCountsReport }) {
  * одинаково у всех отчётов, и именно поэтому оно не сюрприз.
  */
 export async function StockHistoryView({ domain, days, q }: { domain: string; days: number; q: string }) {
-  const товар = q.trim();
+  // Обрезаем по потолку DTO Core (`@MaxLength(512)` у `q`, рулинг S10): длинный
+  // `?q=` из адресной строки иначе получает 400, а панель показывает владельцу
+  // экран «Core недоступен» — то есть врёт про ядро там, где виноват адрес.
+  const товар = q.trim().slice(0, 512);
   let report: StockCountsReport;
   try {
     report = await core.vendingStockCounts(days, товар === "" ? undefined : товар);
@@ -257,6 +268,7 @@ export async function StockHistoryView({ domain, days, q }: { domain: string; da
         <input
           type="search"
           name="q"
+          maxLength={512}
           defaultValue={товар}
           placeholder="Товар — как его называет прайс или автомат…"
           aria-label="Фильтр истории по товару"

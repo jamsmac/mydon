@@ -4,7 +4,13 @@ import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { StockCountsReport } from "../lib/core";
 import { VENDHUB_GROUPS, isTableBackedLeaf } from "../lib/domain-nav";
-import { STOCK_HISTORY_WINDOWS, StockHistoryTables, StockHistoryView, groupStockCounts } from "./stock-history-view";
+import {
+  STOCK_HISTORY_WINDOWS,
+  StockHistoryTables,
+  StockHistoryView,
+  groupStockCounts,
+  лидИстории,
+} from "./stock-history-view";
 
 const mocks = vi.hoisted(() => ({ vendingStockCounts: vi.fn() }));
 // В одном файле с таблицами живёт серверный `StockHistoryView`, а он тянет
@@ -203,6 +209,37 @@ describe("Лист «История склада» (R-H-2)", () => {
     expect(лид.textContent).not.toContain("с 28.05.2026");
   });
 
+  it("боевая обрезка пришпилена ЧИСЛОМ ПОТОЛКА: 2000 строк, а не «сколько дала фикстура»", () => {
+    // Правило писано ради `STOCK_COUNTS_MAX = 2000` (`vending.service.ts`), и
+    // утверждение на четырёх строках проверяло бы форму, но не то число, из-за
+    // которого шапка листа и начала врать. Фикстура строится ровно на потолок;
+    // рендер для этого не нужен — лид считает чистая функция.
+    const rows = Array.from({ length: 2000 }, (_, i) => ({
+      ...ИСТОРИЯ.rows[0]!,
+      // Самые свежие сверху, как их отдаёт Core (`counted_at desc`): самая
+      // ранняя ПОКАЗАННАЯ строка — последняя, её дату лид и печатает.
+      dt: i === 1999 ? "2026-03-12" : "2026-08-25",
+    }));
+    const лид = лидИстории({
+      ...ИСТОРИЯ,
+      days: 730,
+      since: "2024-05-28",
+      rows,
+      warnings: [
+        { code: "history_capped", message: "Показаны первые 2000 строк истории — сузь окно или задай товар" },
+      ],
+    });
+    expect(лид).toBe(
+      "Пересчёты склада за 730 дн. · показаны последние 2 000 записей, с 12.03.2026 — сузьте окно или задайте товар",
+    );
+  });
+
+  it("необрезанный лид пришпилен целиком, вместе с фильтром по товару", () => {
+    expect(лидИстории({ ...ИСТОРИЯ, product: "Snickers" })).toBe(
+      "Пересчёты склада за 90 дн. · с 28.05.2026 · 4 строки · товар «Snickers»",
+    );
+  });
+
   it("обрезка названа В ЛИДЕ и не повторяется хвостом «Посчитано не всё»", () => {
     // Одну причину владелец читает один раз: раз лид уже сказал про обрезку в
     // том месте, где она меняет смысл шапки, хвост её дублировать не должен.
@@ -275,6 +312,18 @@ describe("Лист «История склада» (R-H-2)", () => {
     expect(форма.getAttribute("action")).toBe("/domain/vendhub");
     expect(форма.querySelector<HTMLInputElement>('input[name="days"]')!.value).toBe("365");
     expect(форма.querySelector<HTMLInputElement>('input[name="tab"]')!.value).toBe("reports:stock_history");
+  });
+
+  it("длинный `?q=` обрезается по потолку DTO ядра, а не превращается в «Core недоступен» (S10)", async () => {
+    // 400 от `@MaxLength(512)` панель показала бы как отказ ЯДРА — то есть
+    // соврала бы про ядро там, где виноват адрес. Поле тоже знает потолок,
+    // иначе форма отправила бы то, что ядро всё равно не примет.
+    mocks.vendingStockCounts.mockResolvedValueOnce(ИСТОРИЯ);
+    render(await StockHistoryView({ domain: "vendhub", days: 90, q: `  ${"Ф".repeat(600)}  ` }));
+    const поле = screen.getByLabelText("Фильтр истории по товару");
+    expect((поле as HTMLInputElement).value).toHaveLength(512);
+    expect(поле.getAttribute("maxlength")).toBe("512");
+    expect(mocks.vendingStockCounts).toHaveBeenCalledWith(90, "Ф".repeat(512));
   });
 
   it("Core не ответил — лист говорит это, а не рисует пустую историю", async () => {
