@@ -11,7 +11,7 @@ import {
   vendingRefill,
   vendingRefillEvent,
 } from "@mydon/db";
-import { RefillEventsService } from "./refill-events.service";
+import { LIST_DAYS_MAX, RefillEventsService } from "./refill-events.service";
 import { VendingService } from "./vending.service";
 
 type SnapRow = {
@@ -105,7 +105,7 @@ function строкиИз(условие: unknown): string[] {
  * прогона проверяется настоящим уникальным ключом (serial, window_to), а не
  * заготовленным ответом: иначе второй прогон зеленел бы на любой реализации.
  */
-function detectDb(м: Мир) {
+function detectDb(м: Мир, опции: { онОкно?: (границы: Date[]) => void } = {}) {
   const события: EventRow[] = [...(м.events ?? [])];
   const лента: FeedRow[] = [];
   const обновления: Partial<EventRow>[] = [];
@@ -207,6 +207,7 @@ function detectDb(м: Мир) {
               // (плюс `is null`) — кандидаты на публикацию в ленту: окно
               // закрылось дольше допуска назад, а записи оператора так и нет.
               const границы = границыОкна(условие);
+              опции.онОкно?.(границы);
               return границы.length >= 2
                 ? события.filter(
                     (e) =>
@@ -268,6 +269,18 @@ const РЕЕСТР: Ent[] = [{ id: "m-olma", name: "Olma", externalRef: "c250816
 const сервис = (мир: Мир) => {
   const { db, события, лента, обновления } = detectDb(мир);
   return { svc: new RefillEventsService(db, new VendingService(db)), события, лента, обновления };
+};
+
+/**
+ * Тонкая обёртка над тем же стендом: помимо сервиса отдаёт «окна» — все
+ * границы, которые запрос `list()` подставил в условие (`границыОкна`, уже
+ * читает их стенд выше). Тест «своего потолка чтения» (R-H-5) проверяет
+ * ИМЕННО эту границу, а не форму ответа.
+ */
+const сервисЧтения = (мир: Мир) => {
+  const окна: Date[] = [];
+  const { db, события, лента, обновления } = detectDb(мир, { онОкно: (границы) => окна.push(...границы) });
+  return { svc: new RefillEventsService(db, new VendingService(db)), окна, события, лента, обновления };
 };
 
 describe("Вендинг Core: детектор заливок по снимкам (П4)", () => {
@@ -594,5 +607,44 @@ describe("Вендинг Core: лента «заливка без записи»
     const res = await svc.detect(2);
     assert.equal(res.matched, 1);
     assert.deepEqual(лента.filter((f) => f.type === "vending.refill_detected"), []);
+  });
+});
+
+/**
+ * `СЕЙЧАС` появляется здесь и остаётся: Task 6 переводит на него весь набор
+ * (сейчас файл берёт «сейчас» неявно — `T2 = new Date(Date.now() - ЧАС)`,
+ * `Date.now()` внутри стенда публикации, — но здесь `list()` уже принимает
+ * его параметром, и тест обязан зафиксировать момент явно).
+ */
+const СЕЙЧАС = new Date();
+/** Одна строка журнала — границы окна тесту не важны, важен сам факт запроса. */
+const ЖУРНАЛ: EventRow[] = [
+  {
+    id: "ev-1",
+    machineSerial: "2508160376",
+    machineId: "m-olma",
+    windowFrom: new Date(СЕЙЧАС.getTime() - 5 * ЧАС),
+    windowTo: new Date(СЕЙЧАС.getTime() - 2 * ЧАС),
+    units: 12,
+    slots: [],
+    matchedRefillId: null,
+  },
+];
+
+describe("Окно ЧТЕНИЯ журнала — своё, а не потолок скана снимков (R-H-5)", () => {
+  it("`?days=90` читается целиком: 90 — потолок журнала, 30 — потолок детектора", async () => {
+    // Раньше `list()` зажимал окно чужим `DETECT_DAYS_MAX = 30`, и кнопка
+    // «90 дн» в панели показала бы тридцать суток под подписью «90».
+    const { svc, окна } = сервисЧтения({ events: ЖУРНАЛ });
+    await svc.list(90, СЕЙЧАС);
+    const от = окна.at(-1)!;
+    assert.equal(Math.round((СЕЙЧАС.getTime() - от.getTime()) / 86_400_000), 90);
+    assert.equal(LIST_DAYS_MAX, 90);
+  });
+
+  it("`?days=91` зажимается до 90, а не до 30", async () => {
+    const { svc, окна } = сервисЧтения({ events: ЖУРНАЛ });
+    await svc.list(91, СЕЙЧАС);
+    assert.equal(Math.round((СЕЙЧАС.getTime() - окна.at(-1)!.getTime()) / 86_400_000), 90);
   });
 });

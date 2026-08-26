@@ -80,6 +80,20 @@ const ЧТЕНИЕ = [
   "/vending/sync",
   "/vending/refill-events?days=14",
   {
+    // «Хвосты» (R-H-5): потолок ЧТЕНИЯ журнала — 90, а не чужие 30. Юнит на
+    // заглушке проверяет зажим, но не то, что DTO пропустит значение через
+    // HTTP: `@Max(30)` отдал бы 400 там, где панель рисует кнопку «90 дн».
+    path: "/vending/refill-events?days=90",
+    проверить: (о) => {
+      if (!Array.isArray(о)) throw new Error("refill-events — не массив");
+      for (const e of о) {
+        for (const k of ["id", "serial", "name", "windowFrom", "windowTo", "units", "slots", "matchedRefillId"]) {
+          if (!(k in e)) throw new Error(`в событии журнала нет ключа ${k}`);
+        }
+      }
+    },
+  },
+  {
     // П8a: история пересчётов склада. Заглушка юнит-теста SQL не исполняет —
     // здесь проверяется, что окно, сортировка по `counted_at` и потолок строк
     // доезжают до настоящего Postgres. На засеянной базе истории нет, и это

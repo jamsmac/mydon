@@ -21,6 +21,15 @@ export const DETECT_DAYS_DEFAULT = 2;
 export const DETECT_DAYS_MAX = 30;
 /** Окно журнала по умолчанию. */
 export const LIST_DAYS_DEFAULT = 14;
+/**
+ * Потолок ЧТЕНИЯ журнала — СВОЙ, а не `DETECT_DAYS_MAX`.
+ *
+ * У детектора 30 суток — это потолок СКАНА СНИМКОВ: четверть миллиона строк в
+ * память разом (комментарий внутри `detect`). Чтение журнала — `limit(LIST_LIMIT)`
+ * по индексированной `window_to`, и держать его на чужом потолке значит
+ * показывать владельцу тридцать суток под кнопкой «90 дн».
+ */
+export const LIST_DAYS_MAX = 90;
 /** Потолок выборки журнала: 6 автоматов × 14 дней дают десятки строк, не тысячи. */
 export const LIST_LIMIT = 500;
 /** Порог детектора, если настройки нет (донор mydon-stock). */
@@ -387,10 +396,16 @@ export class RefillEventsService {
     return строки.length;
   }
 
-  /** Журнал событий детектора за `days` суток, свежие сверху. */
-  async list(days = LIST_DAYS_DEFAULT): Promise<RefillEventRow[]> {
-    const окно = зажать(days, LIST_DAYS_DEFAULT, DETECT_DAYS_MAX);
-    const от = new Date(Date.now() - окно * 86_400_000);
+  /**
+   * Журнал событий детектора за `days` суток, свежие сверху.
+   *
+   * `now` — параметр, а не `Date.now()` внутри: тест границы окна обязан
+   * задавать момент явно, иначе «90 суток назад от когда» плавает вместе с
+   * временем прогона теста.
+   */
+  async list(days = LIST_DAYS_DEFAULT, now = new Date()): Promise<RefillEventRow[]> {
+    const окно = зажать(days, LIST_DAYS_DEFAULT, LIST_DAYS_MAX);
+    const от = new Date(now.getTime() - окно * 86_400_000);
     const [строки, реестр] = await Promise.all([
       this.db
         .select()

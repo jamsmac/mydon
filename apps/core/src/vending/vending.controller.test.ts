@@ -8,7 +8,7 @@ import { validate } from "class-validator";
 // требует N1: сверено с `node_modules/@nestjs/throttler` (throttler@6.5.0).
 import { THROTTLER_LIMIT } from "@nestjs/throttler/dist/throttler.constants";
 import type { AnalyticsService } from "./analytics.service";
-import { StockCountsDto, VendingController } from "./vending.controller";
+import { RefillEventsListDto, StockCountsDto, VendingController } from "./vending.controller";
 import type { VendingService } from "./vending.service";
 
 describe("Вендинг Core: троттлинг GET /vending/shrinkage (N1)", () => {
@@ -71,6 +71,20 @@ describe("StockCountsDto: потолок окна — 730 суток, не 365 (
     const dto = plainToInstance(StockCountsDto, { days: "" });
     assert.deepEqual(await validate(dto), []);
     assert.equal(dto.days, undefined);
+  });
+});
+
+describe("RefillEventsListDto: потолок ЧТЕНИЯ журнала — 90 суток, не 30 (R-H-5)", () => {
+  it("90 — законная верхняя граница", async () => {
+    assert.deepEqual(await validate(plainToInstance(RefillEventsListDto, { days: "90" })), []);
+  });
+
+  it("91 — уже за границей, отказ", async () => {
+    assert.ok((await validate(plainToInstance(RefillEventsListDto, { days: "91" }))).length > 0);
+  });
+
+  it("30 — больше не особая граница: потолок скана снимков не потолок чтения", async () => {
+    assert.deepEqual(await validate(plainToInstance(RefillEventsListDto, { days: "30" })), []);
   });
 });
 
