@@ -1,3 +1,4 @@
+import { placeFromImportNote } from "@mydon/shared";
 import { core, CoreUnavailable, type StockCountRow, type StockCountsReport } from "../lib/core";
 import { CoreDown } from "./core-down";
 import { ReportWindow } from "./report-window";
@@ -48,11 +49,31 @@ export function groupStockCounts(rows: readonly StockCountRow[]): StockHistoryDa
 /**
  * Что значит пометка — ЗАВИСИТ ОТ ИСТОЧНИКА (R-H-2). У `own` это ЧЕЛОВЕК
  * (`ingestStock` пишет в `note` актора), у `stock-import` — МЕСТО донора
- * («2 Холодильник»). Общий заголовок «место» поставил бы имя оператора в
+ * («Холодильник»). Общий заголовок «место» поставил бы имя оператора в
  * колонку склада, и владелец завёл бы «Рустам» в справочник локаций.
  */
 function видПометки(source: string): string {
   return source === "stock-import" ? "место" : "кто считал";
+}
+
+/**
+ * Заголовок группы — то, что владелец читает как ОТВЕТ, а не служебная строка.
+ *
+ * В `note` импортированной строки лежит вся пометка целиком («импорт истории
+ * mydon-stock · место: Холодильник»): API отдаёт данные сырыми, и правильно
+ * делает. Но заголовком тут стоит имя МЕСТА, поэтому префикс снимает
+ * `placeFromImportNote` — обратная к той самой функции, что пометку и писала
+ * (`packages/shared/src/stock-history.ts`). Своей копии префикса витрина не
+ * заводит: разъехавшись, копия молча перестала бы сокращать заголовки.
+ *
+ * Не разобралось — печатаем `note` КАК ЕСТЬ. Импорт без места («импорт истории
+ * mydon-stock» без хвоста) — законный случай, и подставлять вместо него
+ * «Основной склад» значило бы выдумать место, которого в данных нет.
+ */
+function заголовокГруппы(g: StockHistoryGroup): string {
+  if (g.note === null) return "без пометки";
+  if (g.source !== "stock-import") return g.note;
+  return placeFromImportNote(g.note) ?? g.note;
 }
 
 export function StockHistoryTables({ report }: { report: StockCountsReport }) {
@@ -87,13 +108,21 @@ export function StockHistoryTables({ report }: { report: StockCountsReport }) {
             <div className="section-title">{day(d.dt)}</div>
             {d.groups.map((g) => (
               <div key={`${g.source}|${g.note ?? ""}`}>
-                <div className="t">
-                  <b>{g.note ?? "без пометки"}</b>
-                  <small>{видПометки(g.source)}</small>
+                {/* `.rcard-h` — единственный заголовок «имя + подпись справа»,
+                    объявленный в `globals.css` ВНЕ `.row` (`:325-327`). Голый
+                    `.t` там существует только как `.row .t`, то есть вне строки
+                    не даёт ничего; `.section-title` не годится — его
+                    `text-transform: uppercase` сделал бы из «Рустам» «РУСТАМ». */}
+                <div className="rcard-h" style={{ margin: "14px 0 8px" }}>
+                  <span className="t">{заголовокГруппы(g)}</span>
+                  <span className="ts">{видПометки(g.source)}</span>
                 </div>
                 <div className="rows">
-                  {g.rows.map((r) => (
-                    <div className="row" key={`${r.countedAt}|${r.product}`}>
+                  {/* Индекс в ключе не украшение: у импортированных строк
+                      `counted_at` — полдень тех же суток (`noonAt(dt)`), и две
+                      строки одного дня/товара/места дали бы React дубль ключа. */}
+                  {g.rows.map((r, i) => (
+                    <div className="row" key={`${r.countedAt}|${r.product}|${i}`}>
                       <div className="t">
                         <b>{r.product}</b>
                         <small>{when(r.countedAt)}</small>
@@ -115,12 +144,17 @@ export function StockHistoryTables({ report }: { report: StockCountsReport }) {
 
 /**
  * Лист «История склада»: один поход в ядро, окно — из адреса (`?days=`),
- * фильтр по товару — из общего поля поиска страницы (`?q=`).
+ * фильтр по товару — из адреса же (`?q=`), и поле для него лист рисует САМ.
  *
- * Смена окна СБРАСЫВАЕТ фильтр: `ReportWindow` строит ссылки только с `?days=`,
- * как на всех трёх листах П5b. Расширять общий переключатель ради одного листа
- * — вне охвата среза (R-H-1); поведение одинаково у всех отчётов, и именно
- * поэтому оно не сюрприз.
+ * Своя форма, а не общее поле страницы: общего поля у страницы нет вовсе —
+ * поиск рисуют книги (`ListShell` при `searchHrefBase`), а лист отчёта книгой
+ * не является. Без формы ветка «По этому товару истории нет» и весь смысл
+ * `COVERED_BY_STOCK_HISTORY` включались бы только руками собранным адресом.
+ *
+ * Форма ОКНО СОХРАНЯЕТ (скрытое `days`), а `ReportWindow` фильтр СБРАСЫВАЕТ:
+ * его ссылки несут только `?days=`, как на всех трёх листах П5b. Расширять
+ * общий переключатель ради одного листа — вне охвата среза (R-H-1); поведение
+ * одинаково у всех отчётов, и именно поэтому оно не сюрприз.
  */
 export async function StockHistoryView({ domain, days, q }: { domain: string; days: number; q: string }) {
   const товар = q.trim();
@@ -133,6 +167,20 @@ export async function StockHistoryView({ domain, days, q }: { domain: string; da
   return (
     <>
       <ReportWindow domain={domain} tab={TAB} days={days} windows={STOCK_HISTORY_WINDOWS} />
+      <form className="search" action={`/domain/${domain}`} method="get">
+        <input type="hidden" name="tab" value={TAB} />
+        <input type="hidden" name="days" value={days} />
+        <input
+          type="search"
+          name="q"
+          defaultValue={товар}
+          placeholder="Товар — как его называет прайс или автомат…"
+          aria-label="Фильтр истории по товару"
+        />
+        <button className="btn" type="submit" style={{ flex: "none", padding: "0 18px" }}>
+          Найти
+        </button>
+      </form>
       <StockHistoryTables report={report} />
     </>
   );

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  canonicalProductName, decodeHtml, mapRefill, mapStockCount, productIndex, reconcilePurchases,
-  resolveProductName, stripMergedMarker, type DonorPurchaseRow, type PurchaseFacts,
+  canonicalProductName, decodeHtml, importNote, mapRefill, mapStockCount, placeFromImportNote, productIndex,
+  reconcilePurchases, resolveProductName, stripMergedMarker, type DonorPurchaseRow, type PurchaseFacts,
 } from "./stock-history";
 
 /** Прайс mydon: канон знает только то, что реально есть в справочнике. */
@@ -180,6 +180,35 @@ describe("Место складской инвентаризации в note (R-
   it("две строки одного дня из разных мест читаются как разные, а не как двойной ввод", () => {
     const основной = пересчёт("Склад (основной)"), холодильник = пересчёт("Oq apparat (склад)");
     assert.ok(основной.ok && холодильник.ok && основной.row.note !== холодильник.row.note);
+  });
+});
+
+describe("Место из пометки импорта: обратная к importNote (R-H-2)", () => {
+  it("круг замыкается: место, уехавшее в note, читается из note обратно", () => {
+    // Правило записи и правило разбора стоят рядом ИМЕННО ради этого теста:
+    // разъехавшись, они не упали бы нигде — заголовок листа просто перестал бы
+    // сокращаться, и заметить это было бы нечем.
+    for (const место of ["Холодильник", "Склад (основной)", "Oq apparat (склад)"]) {
+      assert.equal(placeFromImportNote(importNote(место)), место, место);
+    }
+  });
+
+  it("пометка импорта БЕЗ места места не выдаёт: null, а не пустая строка и не «Основной склад»", () => {
+    assert.equal(placeFromImportNote(importNote(null)), null);
+    assert.equal(placeFromImportNote("импорт истории mydon-stock"), null);
+  });
+
+  it("своя пометка местом не притворяется: у `own` в note стоит ЧЕЛОВЕК", () => {
+    // Лист различает смыслы по `source`, но и разбор обязан молчать: прочитай
+    // он «Рустам» как место — оператор уехал бы в заголовок склада.
+    assert.equal(placeFromImportNote("Рустам"), null);
+    assert.equal(placeFromImportNote(""), null);
+    assert.equal(placeFromImportNote("место: Холодильник"), null);
+  });
+
+  it("разбор берёт весь хвост: имя места с разделителем внутри не режется", () => {
+    const место = "Склад · место: дальний";
+    assert.equal(placeFromImportNote(importNote(место)), место);
   });
 });
 

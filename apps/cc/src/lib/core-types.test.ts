@@ -6,12 +6,16 @@ import type {
   OurvendSyncRun as SharedRun,
   PurchasePlan as SharedPlan,
   ShrinkReport as SharedShrink,
+  StockCountRow as SharedStockCountRow,
+  StockCountsReport as SharedStockCounts,
 } from "@mydon/shared";
 import type {
   AnalyticsWarning,
   MonthlyPrice,
   OurvendHealth,
   OurvendSyncRun,
+  StockCountRow,
+  StockCountsReport,
   VendingPlan,
   VendingShrinkageReport,
   VendingSyncRun,
@@ -96,6 +100,28 @@ const планОбщий: SharedPlan = {
   warnings: [{ code: "sales_partial", message: "автомата нет в свежем батче продаж" }],
 };
 
+/**
+ * История склада («Хвосты», R-H-2). `note` тут — ВСЯ пометка импорта целиком,
+ * как её пишет `importNote`: фикстура сторожа обязана быть тем, что производит
+ * код, иначе сторож охраняет выдуманную форму.
+ */
+const строкаИсторииОбщая: SharedStockCountRow = {
+  dt: "2026-06-01",
+  product: "Snickers",
+  qty: 41,
+  source: "stock-import",
+  countedAt: "2026-06-01T02:00:00.000Z",
+  note: "импорт истории mydon-stock · место: Холодильник",
+};
+
+const историяОбщая: SharedStockCounts = {
+  days: 90,
+  since: "2026-05-28",
+  product: null,
+  rows: [строкаИсторииОбщая],
+  warnings: [],
+};
+
 describe("Типы панели — реэкспорт из @mydon/shared, а не копии", () => {
   it("здоровье сбора и прогон принимаются типом панели без переписывания полей", () => {
     const здоровье: OurvendHealth = здоровьеОбщее;
@@ -158,5 +184,15 @@ describe("Усушка и план закупа — реэкспорт, а не 
     const общий: SharedPlan = планОбщий;
     const панельный: VendingPlan = общий;
     expect(панельный).toBe(общий);
+  });
+
+  it("история склада: `note` и `since` доезжают до типа панели, а не теряются в зеркале", () => {
+    // Оба поля добавлены аддитивно (R-H-2), и оба читает ТОЛЬКО панель. Заведись
+    // в `lib/core.ts` своё объявление без `note`, ни один тест набора полей в
+    // shared этого не увидел бы — увидит компилятор на этих двух строках.
+    const строка: StockCountRow = строкаИсторииОбщая;
+    const отчёт: StockCountsReport = историяОбщая;
+    expect(Object.keys(строка).sort()).toEqual(["countedAt", "dt", "note", "product", "qty", "source"]);
+    expect(Object.keys(отчёт).sort()).toEqual(["days", "product", "rows", "since", "warnings"]);
   });
 });
