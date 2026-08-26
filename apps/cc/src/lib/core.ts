@@ -13,6 +13,7 @@ import type {
   PriceChangesReport,
   PriceGapReport,
   PurchasePlan as VendingPlan,
+  PurchaseSummary as VendingPurchase,
   ShrinkReport as VendingShrinkageReport,
   StockCountsReport,
 } from "@mydon/shared";
@@ -104,64 +105,6 @@ export interface VendingRunout {
   daysLeft: number | null;
 }
 
-/** Позиция сводного закупа (§5.5) с раздачей и правилами товара (П5a). */
-export interface VendingPurchaseItem {
-  product: string;
-  /** Потребность по автоматам — из чего сложилось `need`. */
-  perMachine: Record<string, number>;
-  need: number;
-  /** Остаток склада на момент расчёта. */
-  stock: number;
-  buy: number;
-  pack: number;
-  order: number;
-  price: number;
-  costRounded: number;
-  noPrice: boolean;
-  noSales: boolean;
-  /** В автоматы из новой упаковки. */
-  fromPurchase: number;
-  /** В автоматы со склада. */
-  fromStock: number;
-  /** Не заполнится ничем. */
-  unfilled: number;
-  /** Излишек закупки, который ляжет на склад. */
-  toStock: number;
-  /** Склад после раздачи: stock − fromStock + toStock. */
-  stockAfter: number;
-  /** Правило товара «убрано из закупки». */
-  excluded: boolean;
-  /** Фикс-количество закупки, если задано правилом. */
-  fixedQty: number | null;
-}
-
-/** Сводный закуп: позиции + денежные итоги (§5.4–5.5) + итоги раздачи (П5a). */
-export interface VendingPurchase {
-  items: VendingPurchaseItem[];
-  excludedNoSales: VendingPurchaseItem[];
-  /** Убраны правилом товара: в деньги не входят, в раздачу входят. */
-  excludedByRule: VendingPurchaseItem[];
-  noPrice: string[];
-  /** Порядок раздачи, применённый к расчёту. */
-  allocation: "purchase-first" | "warehouse-first";
-  totalBuy: number;
-  totalOrder: number;
-  costExact: number;
-  costRounded: number;
-  /** Куплено сверх нехватки: округление до блока + фикс-количества. */
-  overpay: number;
-  /** Недобор деньгами: фикс МЕНЬШЕ нехватки — купим не всё, что нужно. */
-  shortfallCost: number;
-  /**
-   * Итоги раздачи — по ВСЕМ позициям (items + excludedByRule +
-   * excludedNoSales): это штуки, а не деньги.
-   */
-  totalFromPurchase: number;
-  totalFromStock: number;
-  totalUnfilled: number;
-  totalToStock: number;
-}
-
 /**
  * Аналитика снек-контура (П5b): формы отчётов живут в `@mydon/shared`
  * (`vending-reports.ts`, R-P5b-10) — их считает Core, а бот и панель
@@ -177,6 +120,15 @@ export interface VendingPurchase {
  * сохранены `as`-алиасами, поэтому ни один лист не правится; заодно исчезли
  * два расхождения копии с ядром — свой порядок союза кодов усушки и
  * инлайненный `summary` автомата вместо общей `ShrinkSummary`.
+ *
+ * `VendingPurchase`/`VendingPurchaseItem` — тот же переезд, доведённый до
+ * конца. Их рукописные копии пережили R-H-6 и УЖЕ разъехались: `covered`,
+ * `surplus`, `extra`, `costExact` у позиции и `totalNeed`, `totalCovered`,
+ * `costByPriceFull` у сводки Core отдаёт, а копия панели о них не знала —
+ * притом что `GET /vending/purchase` и `GET /vending/plan` возвращают ОДИН И
+ * ТОТ ЖЕ объект (`PurchaseContext.summary`). Рантайма это не ломало
+ * (структурная типизация лишние поля терпит), но переименование поля в Core
+ * увидел бы владелец пустой строкой в панели, а не компилятор.
  */
 export type {
   AnalyticsWarning,
@@ -196,6 +148,8 @@ export type {
   PriceChangesReport,
   PriceGapReport,
   PriceGapRow,
+  PurchaseItem as VendingPurchaseItem,
+  PurchaseSummary as VendingPurchase,
   PurchasePlan as VendingPlan,
   PlanMachine as VendingPlanMachine,
   SlotPlanRow as VendingPlanSlot,
@@ -233,6 +187,19 @@ export interface VendingRefillEvent {
   slots: { coilId: string; product: string; before: number; after: number; delta: number }[];
   /** id человеческой записи, если она нашлась; null — заливку никто не записал. */
   matchedRefillId: string | null;
+}
+
+/**
+ * Журнал заливок за окно ВМЕСТЕ с признаком обрезки.
+ *
+ * `capped` — «ответ упёрся в потолок строк»: показан свежий хвост окна, а не
+ * всё окно. Без этого признака лист печатал бы предел (`LIST_LIMIT`) как
+ * посчитанный итог — ровно та молчаливая ложь, которую соседний лист истории
+ * склада уже называет словами (`history_capped`).
+ */
+export interface VendingRefillEvents {
+  rows: VendingRefillEvent[];
+  capped: boolean;
 }
 
 /** Строка прайса вендинга с правилами закупа — для листа «Правила закупа». */
@@ -2309,7 +2276,19 @@ export const core = {
    */
   ourvendParityStreak: () => get<ParityStreak>("/ourvend/parity/streak"),
   /** Журнал детектора заливок: что автомат получил и была ли запись оператора. */
-  vendingRefillEvents: (days = 14) => get<VendingRefillEvent[]>(`/vending/refill-events?days=${days}`),
+  /**
+   * Журнал заливок. Ответ читается в ДВУХ формах намеренно: старый Core отдаёт
+   * голый массив, новый — объект с признаком обрезки. Форму с провода никто не
+   * валидирует, и жёсткое `ответ.rows` на откаченном образе ядра дало бы не
+   * «лист без предупреждения», а 500 вместо листа.
+   */
+  vendingRefillEvents: async (days = 14): Promise<VendingRefillEvents> => {
+    const ответ = await get<VendingRefillEvent[] | { rows?: VendingRefillEvent[]; capped?: boolean }>(
+      `/vending/refill-events?days=${days}`,
+    );
+    if (Array.isArray(ответ)) return { rows: ответ, capped: false };
+    return { rows: ответ.rows ?? [], capped: ответ.capped === true };
+  },
   /** Прайс вендинга с правилами закупа — для листа «Правила закупа». */
   vendingProducts: () => get<VendingProductRow[]>("/vending/products"),
   /** Отправить актуальный закуп на утверждение владельцу (та же заявка, что из бота). */

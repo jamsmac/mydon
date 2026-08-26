@@ -68,6 +68,41 @@ describe("Лист «Журнал заливок» (R-H-5)", () => {
     expect(screen.getByText(/не привозили/)).toBeVisible();
   });
 
+  it("порог детектора назван ЧЕЛОВЕЧЕСКИМ именем настройки, а не ключом из `.env`", () => {
+    // `REFILL_DETECT_MIN_UNITS` заглавными посреди русской фразы — то же
+    // «идентификатор вместо ответа», что лист истории склада уже убрал.
+    const { container } = render(<RefillEventsTable rows={[]} />);
+    expect(screen.getByText(/«Вендинг: порог детектора заливки»/)).toBeVisible();
+    expect(container.textContent ?? "").not.toContain("REFILL_DETECT_MIN_UNITS");
+  });
+
+  it("ни одна подпись листа не печатает техническую строку", () => {
+    const { container } = render(<RefillEventsTable rows={СОБЫТИЯ} />);
+    const текст = container.textContent ?? "";
+    for (const техническое of ["REFILL_DETECT_MIN_UNITS", "mydon-stock", "owner", "matched_refill_id", "LIST_LIMIT"]) {
+      expect(текст).not.toContain(техническое);
+    }
+  });
+
+  it("лид не повторяет имя вкладки и называет охват", async () => {
+    // Название «Журнал заливок» уже стоит во вкладках сверху; шесть соседних
+    // листов своё имя в лиде не повторяют — этот был единственным исключением.
+    mocks.vendingRefillEvents.mockResolvedValueOnce({ rows: СОБЫТИЯ, capped: false });
+    render(await RefillEventsView({ domain: "vendhub", days: 90 }));
+    const лид = screen.getByText(/Приход по снимкам за 90 дн\./);
+    expect(лид.textContent).toContain("2 события");
+    expect(лид.textContent).not.toContain("Журнал заливок");
+  });
+
+  it("журнал упёрся в потолок строк — лид говорит это, а не печатает 500 как посчитанный итог", async () => {
+    // Молчаливая обрезка: «500 событий» читается как полный счёт за окно.
+    // Сосед (история склада) ровно этот случай называет словами.
+    mocks.vendingRefillEvents.mockResolvedValueOnce({ rows: СОБЫТИЯ, capped: true });
+    render(await RefillEventsView({ domain: "vendhub", days: 90 }));
+    const лид = screen.getByText(/Приход по снимкам за 90 дн\./);
+    expect(лид.textContent).toContain("показаны последние 2 события — сузьте окно");
+  });
+
   it("окна листа — те, что сервер отдаёт целиком после поднятия потолка", () => {
     expect(REFILL_EVENT_WINDOWS).toEqual([14, 30, 90]);
   });

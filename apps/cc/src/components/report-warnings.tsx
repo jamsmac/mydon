@@ -54,7 +54,12 @@ export const COVERED_BY_DEAD_STOCK: AnalyticsWarningCode[] = ["unknown_cost"];
 export const COVERED_BY_PRICE_GAP: AnalyticsWarningCode[] = ["no_reference"];
 /**
  * История склада сама объясняет пустоту по ЗАДАННОМУ товару своим третьим
- * состоянием. `history_capped` НЕ покрыт: про обрезку окна лист не говорит
- * ничего, и молчать о ней нельзя — показан хвост, а не всё окно.
+ * состоянием, а обрезку окна — ЛИДОМ (`подписьОкна`, UX-3).
+ *
+ * `history_capped` попал сюда не «за компанию»: обрезка меняет смысл ШАПКИ
+ * листа («с 28.05.2024» перестаёт быть правдой), поэтому сказать о ней надо
+ * там же, наверху, а не предупреждением под всеми карточками — к нему
+ * владелец доходит, уже поверив заголовку. Раз лид её называет, хвост её
+ * дублировать не должен: одну причину читают один раз.
  */
-export const COVERED_BY_STOCK_HISTORY: AnalyticsWarningCode[] = ["stock_missing"];
+export const COVERED_BY_STOCK_HISTORY: AnalyticsWarningCode[] = ["stock_missing", "history_capped"];

@@ -30,7 +30,7 @@ const plan: VendingPlan = {
   ],
   routeConfigured: false,
   warnings: [{ code: "stock_stale", message: "Склад инвентаризирован 20.08.2026 — обнови: «склад …»" }],
-} as VendingPlan;
+};
 
 describe("лист «План закупа»", () => {
   it("показывает итоги, маршрут, таблицы купить/склад/убрано и слоты по автоматам", () => {
@@ -87,20 +87,20 @@ describe("лист «План закупа»", () => {
         costRounded: 0,
         noPrice: ["Fanta"],
       },
-    } as VendingPlan;
+    };
     render(<PurchasePlanTables plan={безЦены} domain="vendhub" />);
     expect(screen.getByText(/сумма не посчитана — ни у одной позиции нет цены/)).toBeVisible();
     expect(screen.queryByText(/на 0 сум/)).toBeNull();
   });
 
   it("часть позиций без цены — сумма помечена неполной (UX#6)", () => {
-    const частично = { ...plan, summary: { ...plan.summary, noPrice: ["Qurt"] } } as VendingPlan;
+    const частично = { ...plan, summary: { ...plan.summary, noPrice: ["Qurt"] } };
     render(<PurchasePlanTables plan={частично} domain="vendhub" />);
     expect(screen.getByText(/без 1 поз\. без цены — сумма неполная/)).toBeVisible();
   });
 
   it("нечего закупать — кнопки «Оформить закуп» нет вовсе (UX#23)", () => {
-    const пусто = { ...plan, summary: { ...plan.summary, items: [], totalUnfilled: 0 } } as VendingPlan;
+    const пусто = { ...plan, summary: { ...plan.summary, items: [], totalUnfilled: 0 } };
     render(<PurchasePlanTables plan={пусто} domain="vendhub" />);
     expect(screen.queryByRole("button", { name: "Оформить закуп" })).toBeNull();
     // И «пусто 0» не печатаем: ноль здесь — не сигнал.

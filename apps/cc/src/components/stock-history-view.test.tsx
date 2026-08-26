@@ -78,10 +78,34 @@ describe("Лист «История склада» (R-H-2)", () => {
     expect(дни[1]!.groups).toHaveLength(2);
   });
 
-  it("пометка импортированной строки подписана «место», своей — «кто считал»", () => {
-    render(<StockHistoryTables report={ИСТОРИЯ} />);
-    expect(within(screen.getByText("owner").closest("div")!).getByText("кто считал")).toBeVisible();
+  it("подпись «место» — у импорта; «кто считал» — только там, где в пометке ИМЯ", () => {
+    // Подпись «кто считал» — обещание, что рядом стоит человек. Над системным
+    // литералом `owner` (единственное, что сегодня пишет `ingestStock`) она
+    // читалась бы как «человека зовут owner», поэтому у переведённых заголовков
+    // подписи нет вовсе, а у именной пометки — есть.
+    const сИменем: StockCountsReport = {
+      ...ИСТОРИЯ,
+      rows: [{ ...ИСТОРИЯ.rows[0]!, note: "Рустам" }, ИСТОРИЯ.rows[2]!],
+    };
+    render(<StockHistoryTables report={сИменем} />);
+    expect(within(screen.getByText("Рустам").closest("div")!).getByText("кто считал")).toBeVisible();
     expect(within(screen.getByText("Холодильник").closest("div")!).getByText("место")).toBeVisible();
+  });
+
+  it("свой пересчёт с литералом `owner` в заголовке назван «владелец», без подписи «кто считал»", () => {
+    render(<StockHistoryTables report={ИСТОРИЯ} />);
+    expect(screen.getByText("владелец")).toBeVisible();
+    expect(screen.queryByText("owner")).toBeNull();
+    expect(within(screen.getByText("владелец").closest("div")!).queryByText("кто считал")).toBeNull();
+  });
+
+  it("свой пересчёт без пометки назван источником — «инвентаризация MYDON», а не «без пометки»", () => {
+    render(
+      <StockHistoryTables
+        report={{ ...ИСТОРИЯ, rows: [{ ...ИСТОРИЯ.rows[0]!, note: null }] }}
+      />,
+    );
+    expect(screen.getByText("инвентаризация MYDON")).toBeVisible();
   });
 
   it("в заголовке импортированной группы стоит МЕСТО, а не технический префикс пометки", () => {
@@ -95,7 +119,10 @@ describe("Лист «История склада» (R-H-2)", () => {
     expect(screen.queryByText(/импорт истории mydon-stock/)).toBeNull();
   });
 
-  it("импорт БЕЗ места печатается как есть: выдумывать «Основной склад» нельзя", () => {
+  it("импорт БЕЗ места назван «место не указано» — ни выдумки, ни технической строки донора", () => {
+    // Раньше здесь печаталась сырая пометка целиком, и владелец читал в
+    // заголовке имя чужого проекта. Выдумывать «Основной склад» по-прежнему
+    // нельзя: донор место не сохранил, и лист говорит ровно это.
     render(
       <StockHistoryTables
         report={{
@@ -104,13 +131,37 @@ describe("Лист «История склада» (R-H-2)", () => {
         }}
       />,
     );
-    expect(screen.getByText("импорт истории mydon-stock")).toBeVisible();
+    expect(screen.getByText("место не указано")).toBeVisible();
+    expect(screen.queryByText(/mydon-stock/)).toBeNull();
+  });
+
+  it("ни одна подпись листа не печатает техническую строку: ни донора, ни литерала роли, ни ключа настройки", () => {
+    // Сторож на весь рендер, а не на один заголовок: техническая строка
+    // пролезает туда, куда её никто не звал, — в подпись группы, в пустое
+    // состояние, в лид.
+    const { container } = render(
+      <StockHistoryTables
+        report={{
+          ...ИСТОРИЯ,
+          rows: [
+            { ...ИСТОРИЯ.rows[0]!, note: null },
+            { ...ИСТОРИЯ.rows[1]! },
+            { ...ИСТОРИЯ.rows[2]!, note: "импорт истории mydon-stock" },
+            ИСТОРИЯ.rows[3]!,
+          ],
+        }}
+      />,
+    );
+    const текст = container.textContent ?? "";
+    for (const техническое of ["mydon-stock", "owner", "stock-import", "STOCK_COUNT", "REFILL_DETECT_MIN_UNITS"]) {
+      expect(текст).not.toContain(техническое);
+    }
   });
 
   it("заголовок группы носит класс, который globals.css стилизует ВНЕ `.row`", () => {
     // Голый `.t` объявлен только как `.row .t`: заголовок, стоящий НАД
-    // карточкой `.rows`, получил бы от него ровно ничего — «owner» и «кто
-    // считал» слиплись бы в строку неоформленного текста. jsdom CSS не
+    // карточкой `.rows`, получил бы от него ровно ничего — «Холодильник» и
+    // «место» слиплись бы в строку неоформленного текста. jsdom CSS не
     // применяет, поэтому сторож утверждает про класс и про сам файл стилей.
     render(<StockHistoryTables report={ИСТОРИЯ} />);
     const подпись = screen.getByText("Холодильник").closest("div")!;
@@ -130,27 +181,84 @@ describe("Лист «История склада» (R-H-2)", () => {
     expect(screen.getByText(/Пересчёты склада за 90 дн\. · с 28\.05\.2026 · 4 строки/)).toBeVisible();
   });
 
-  it("пустая история без фильтра — третье состояние «пересчёты копятся сами», а не зелёная галка", () => {
-    render(<StockHistoryTables report={{ ...ИСТОРИЯ, rows: [] }} />);
-    expect(screen.getByText("Инвентаризаций за окно нет")).toBeVisible();
-    expect(screen.getByText(/Пересчёты копятся сами/)).toBeVisible();
+  it("обрезанная история НЕ утверждает «с {since}»: лид называет хвост и его настоящую границу", () => {
+    // При `history_capped` Core отдаёт свежие 2000 строк (`counted_at desc` +
+    // потолок), и до первых суток окна показанное НЕ доходит. «с 28.05.2026»
+    // наверху листа — прямая ложь, и предупреждение в самом хвосте её не
+    // отменяет: шапку владелец читает первой.
+    render(
+      <StockHistoryTables
+        report={{
+          ...ИСТОРИЯ,
+          days: 730,
+          warnings: [
+            { code: "history_capped", message: "Показаны первые 2000 строк истории — сузь окно или задай товар" },
+          ],
+        }}
+      />,
+    );
+    const лид = screen.getByText(/Пересчёты склада за 730 дн\./);
+    expect(лид.textContent).toContain("показаны последние 4 записи, с 01.06.2026");
+    expect(лид.textContent).toContain("сузьте окно или задайте товар");
+    expect(лид.textContent).not.toContain("с 28.05.2026");
   });
 
-  it("`history_capped` показывается хвостом «Посчитано не всё», `stock_missing` — нет: лист его покрыл", () => {
+  it("обрезка названа В ЛИДЕ и не повторяется хвостом «Посчитано не всё»", () => {
+    // Одну причину владелец читает один раз: раз лид уже сказал про обрезку в
+    // том месте, где она меняет смысл шапки, хвост её дублировать не должен.
+    render(
+      <StockHistoryTables
+        report={{
+          ...ИСТОРИЯ,
+          warnings: [
+            { code: "history_capped", message: "Показаны первые 2000 строк истории — сузь окно или задай товар" },
+          ],
+        }}
+      />,
+    );
+    expect(screen.queryByText(/Показаны первые 2000 строк/)).toBeNull();
+  });
+
+  it("ответ СТАРОГО Core без `since` не роняет лист: окно просто не подписано датой", () => {
+    // `since` — новое обязательное поле ответа, а форма с провода никем не
+    // валидируется: откат образа Core при живой панели дал бы `undefined.slice`
+    // и 500 вместо листа.
+    const безSince = { ...ИСТОРИЯ, since: undefined } as unknown as StockCountsReport;
+    render(<StockHistoryTables report={безSince} />);
+    const лид = screen.getByText(/Пересчёты склада за 90 дн\./);
+    expect(лид.textContent).toContain("4 строки");
+    expect(лид.textContent).not.toMatch(/· с /);
+  });
+
+  it("пустая история без фильтра называет ОКНО и путь наружу, а не «вы никогда не считали»", () => {
+    // «Инвентаризаций за окно нет» звучало как приговор складу, хотя причина
+    // обычно проще: последний счёт был раньше 90 дней, а кнопки окна стоят
+    // прямо над этим блоком.
+    render(<StockHistoryTables report={{ ...ИСТОРИЯ, rows: [] }} />);
+    expect(screen.getByText("За 90 дн. инвентаризаций нет")).toBeVisible();
+    expect(screen.getByText(/расширьте окно кнопками выше \(365 или 730 дн\.\)/)).toBeVisible();
+    // Свои пересчёты попадают в историю не «всегда», а с появления таблицы:
+    // счёт 25.08.2026 в неё уже не попал, и обещать его нельзя.
+    expect(screen.getByText(/свои пересчёты копятся с 26\.08\.2026/)).toBeVisible();
+  });
+
+  it("на самом широком окне пустое состояние не советует расширять его дальше", () => {
+    render(<StockHistoryTables report={{ ...ИСТОРИЯ, days: 730, rows: [] }} />);
+    expect(screen.getByText("За 730 дн. инвентаризаций нет")).toBeVisible();
+    expect(screen.queryByText(/расширьте окно/)).toBeNull();
+  });
+
+  it("`stock_missing` хвостом не показывается: лист покрыл его своим состоянием", () => {
     render(
       <StockHistoryTables
         report={{
           ...ИСТОРИЯ,
           rows: [],
           product: "Загадка",
-          warnings: [
-            { code: "history_capped", message: "Показаны первые 2000 строк истории — сузь окно или задай товар" },
-            { code: "stock_missing", message: "Истории пересчётов по «Загадка» за окно нет" },
-          ],
+          warnings: [{ code: "stock_missing", message: "Истории пересчётов по «Загадка» за окно нет" }],
         }}
       />,
     );
-    expect(screen.getByText(/Показаны первые 2000 строк/)).toBeVisible();
     expect(screen.queryByText(/Истории пересчётов по «Загадка»/)).toBeNull();
   });
 

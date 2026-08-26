@@ -1,4 +1,4 @@
-import { core, CoreUnavailable, type VendingRefillEvent } from "../lib/core";
+import { core, CoreUnavailable, type VendingRefillEvent, type VendingRefillEvents } from "../lib/core";
 import { CoreDown } from "./core-down";
 import { ReportWindow } from "./report-window";
 import { count, plural, when } from "../lib/format";
@@ -32,7 +32,12 @@ export function RefillEventsTable({ rows }: { rows: VendingRefillEvent[] }) {
     return (
       <div className="empty">
         <b>Заливок за окно не найдено</b>
-        {"Детектор смотрит снимки слотов каждые 3 часа и пишет событие при приходе от порога REFILL_DETECT_MIN_UNITS — пусто значит «не привозили», а не «не считали»."}
+        {/* Порог назван ЧЕЛОВЕЧЕСКИМ именем настройки, а не ключом `.env`:
+            заглавный латинский идентификатор посреди русской фразы владелец
+            прочитать не может — он не читает код и `config-spec.ts` не
+            открывал. Имя взято оттуда же, откуда его видно в «Системе»
+            (`label` ключа), и остаётся правдой при смене значения. */}
+        {"Детектор смотрит снимки слотов каждые 3 часа и пишет событие, когда приход в слот достиг порога детектора (настройка «Вендинг: порог детектора заливки», по умолчанию 10 шт) — пусто значит «не привозили», а не «не считали»."}
       </div>
     );
   }
@@ -66,21 +71,38 @@ export function RefillEventsTable({ rows }: { rows: VendingRefillEvent[] }) {
   );
 }
 
+/**
+ * Охват журнала в лиде.
+ *
+ * Имя вкладки («Журнал заливок») лид НЕ повторяет: оно уже стоит во вкладках
+ * сверху, и все шесть соседних листов начинают сразу с охвата — этот был
+ * единственным исключением.
+ *
+ * Обрезка названа словами. `list()` в Core берёт свежие строки с потолком, и
+ * «500 событий» читалось бы как посчитанный за окно итог: молчаливый предел
+ * — это число, которое врёт ровно в тот момент, когда владельцу важнее всего
+ * знать, что он видит не всё.
+ */
+function лидЖурнала(days: number, rows: VendingRefillEvent[], capped: boolean): string {
+  const n = rows.length;
+  const событий = `${count(n)} ${plural(n, "событие", "события", "событий")}`;
+  const охват = capped ? `показаны последние ${событий} — сузьте окно` : событий;
+  return `Приход по снимкам за ${count(days)} дн. · ${охват}`;
+}
+
 /** Лист «Журнал заливок»: один поход в ядро, окно — из адреса (`?days=`). */
 export async function RefillEventsView({ domain, days }: { domain: string; days: number }) {
-  let rows: VendingRefillEvent[];
+  let ответ: VendingRefillEvents;
   try {
-    rows = await core.vendingRefillEvents(days);
+    ответ = await core.vendingRefillEvents(days);
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
   return (
     <>
       <ReportWindow domain={domain} tab={TAB} days={days} windows={REFILL_EVENT_WINDOWS} />
-      <p className="lead">
-        {`Журнал заливок · приход по снимкам за ${count(days)} дн. · ${count(rows.length)} ${plural(rows.length, "событие", "события", "событий")}`}
-      </p>
-      <RefillEventsTable rows={rows} />
+      <p className="lead">{лидЖурнала(days, ответ.rows, ответ.capped)}</p>
+      <RefillEventsTable rows={ответ.rows} />
     </>
   );
 }
