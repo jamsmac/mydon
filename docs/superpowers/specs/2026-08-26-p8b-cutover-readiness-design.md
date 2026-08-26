@@ -101,12 +101,12 @@
 
 - **R-FW-P1a** Допуск паритета остатков — `STOCK_PARITY_TOLERANCE` (ключ настроек, 3, ≥ 0): расхождение только если `own.qty > stock.qty` либо `stock.qty − own.qty` больше допуска; «в допуске» считается отдельно от «совпало».
 - **R-FW-P1b** Зелёный день = `parity(1)` (поля `день_ok`/`день_продаж_сверено`/`день_остатков_сверено`/`день_расхождений` события `ourvend.parity`); `parity(7)` остаётся 7-дневной витриной (`OurvendHealth.parity`), `parityStreak` читает поля дня — событие старой формы не зелёное.
-- **R-FW-P2** Свежесть снапшота считается РАЗДЕЛЬНО по `ourvend_sale_snapshot` и `ourvend_stock_snapshot`; застой любой из двух даёт событие, текст называет какую («продаж»/«остатков»).
-- **R-FW-P3** Паритет после флипа: в `own` при заданном `STOCK_DATABASE_URL` сверяет свой снапшот НАПРЯМУЮ с таблицами донора (`ourvend_sales`/`ourvend_machine_stock`, `parity.mode: "own-vs-donor"`); без URL — `mode: "retired"`, `note` «зеркала нет — сверять не с чем», серия не считается, `cutover_ready` не эмитится.
+- **R-FW-P2** Свежесть снапшота считается РАЗДЕЛЬНО по `ourvend_sale_snapshot` и `ourvend_stock_snapshot`; застой любой из двух даёт событие, текст называет какую («продаж»/«остатков»/«продаж и остатков»).
+- **R-FW-P3** Паритет после флипа: в `own` при заданном `STOCK_DATABASE_URL` сверяет свой снапшот НАПРЯМУЮ с таблицами донора (`ourvend_sales`/`ourvend_machine_stock`, `parity.mode: "own-vs-donor"`); без URL — `mode: "retired"`, `note` «зеркала нет — сверять не с чем: учёт свой, донор погашен», серия не считается, `cutover_ready` не эмитится.
 
 **Безопасность и целостность (`adversarial-security.md` major 1–3, minor 4–10):**
 
-- **R-FW-S1** `parityScanLimit = min(порог + 14, 400)`; валидатор `CUTOVER_GREEN_DAYS` получает потолок ≤ 60.
+- **R-FW-S1** `parityScanLimit = min(400, max(60, порог + 14))`; валидатор `CUTOVER_GREEN_DAYS` получает потолок ≤ 60 (вторая линия — env мимо валидатора).
 - **R-FW-S2** Пропуск «не в строю» при записи остатков — серийники в лог-строке и в payload `supply.sync` (`skippedNotInService`); `Logger.warn`, если множество изменилось относительно прошлого прогона.
 - **R-FW-S3** Ретенция — лог на каждую удалённую пачку; `system.retention` пишется в `finally` с фактически удалённым числом, `aborted: true` при обрыве.
 - **R-FW-S4** Гонка инвалидации кеша источника (сброс после коммита vs уже летящий `accountingSource()`) — задокументирована как известный риск ≤ 60 с (размер кеша), отдельным механизмом в этой волне не закрывается.
@@ -121,4 +121,4 @@
 
 - **M1** `SalesService.onModuleInit` оборачивает чтение `accountingSource()` в `try/catch` (лог `warn`, bootstrap не прерывается отказом БД на старте); регистрация крона — безусловно.
 - **M2** `SalesSummary.source: "stock" | "own"` — явное поле режима; тексты трёх витрин (`apps/bot/src/sales-brief.ts`, `apps/cc/src/components/sales-view.tsx`, `apps/cc/src/components/reports-overview.tsx`) ветвятся по режиму, а не только по переопределённому `configured`.
-- **M3** `config-spec` добавляет `OURVEND_ACCOUNTING_SOURCE.options` пустую опцию `""` первым пунктом («— по умолчанию (env) —», сброс к фолбэку); откат в `docs/CUTOVER.md` основной формулировкой — «выбрать `stock`» (это исполнимо в UI-`select`), пустая опция — альтернатива.
+- **M3** `config-spec` добавляет `OURVEND_ACCOUNTING_SOURCE.options` пустую опцию `""` первым пунктом (в списке подписана «— выкл —», сброс к фолбэку — значение удаляется из `system_config`, действует env/дефолт); откат в `docs/CUTOVER.md` основной формулировкой — «выбрать `stock`» (это исполнимо в UI-`select`), пустая опция — альтернатива.

@@ -481,8 +481,9 @@ read-token для денежных GET (сегодня чтения Core отк�
   `max(fetched_at)` таблиц `ourvend_sale_snapshot` и `ourvend_stock_snapshot`:
   если агент `ourvend:accounting` не приносит суточный снимок кабинета
   дольше `SNAPSHOT_STALE_HOURS` (36 ч) хотя бы по одной из них, событие
-  `ourvend.snapshot_stale` называет, какая («продаж»/«остатков»), вместо
-  тихой остановки `sale`/`machine_stock` без единой ошибки;
+  `ourvend.snapshot_stale` называет, какая («продаж»/«остатков»/«продаж
+  и остатков»), вместо тихой остановки `sale`/`machine_stock` без
+  единой ошибки;
 - **еженедельная ретенция** (`slot_snapshot`, `product_sale`,
   `machine_sale`, `vending_sync_run` — вс 04:10 Ташкент, `event`/`raw_row`
   не трогаются);

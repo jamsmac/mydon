@@ -178,8 +178,9 @@ env, кеш чтения ≤ 60 с) — переключается без рес
 `"own-vs-donor"` — источник `own`, но `STOCK_DATABASE_URL` ещё задан, и
 сверка идёт с таблицами донора (`ourvend_sales`/`ourvend_machine_stock`)
 напрямую, а не с `sale`/`machine_stock`; `"retired"` — переменная снята
-(шаг 3 `docs/CUTOVER.md`), зеркала нет, сверять больше не с чем: серия
-не считается и `ourvend.cutover_ready` не эмитится. Отдельного GET на
+(шаг 3 `docs/CUTOVER.md`), `note`: «зеркала нет — сверять не с чем: учёт
+свой, донор погашен»; серия не считается и `ourvend.cutover_ready` не
+эмитится. Отдельного GET на
 ретенцию нет — конфигурация видна в `GET /system/config`, результат
 каждого прогона — в журнале событий, `system.retention {table, deleted,
 olderThanDays}`.
