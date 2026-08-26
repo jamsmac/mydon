@@ -1486,6 +1486,9 @@ async function проверитьАлертыУсушки() {
  * свежая цела, событие `system.retention` записано. Прямая запись в базу — не
  * от хорошей жизни: `?dt=` у приёма нет, историю датирует сам сервис.
  */
+/** Все пять целей ретенции: ответ ручного прогона обязан отчитаться по КАЖДОЙ. */
+const ЦЕЛИ_РЕТЕНЦИИ = ["machine_sale", "product_sale", "slot_snapshot", "vending_stock_count", "vending_sync_run"];
+
 async function проверитьРетенцию() {
   const ТОВАР = "Smoke Ретенция";
   const сутки = (сдвиг) => new Date(Date.now() - сдвиг * 86_400_000).toISOString().slice(0, 10);
@@ -1502,22 +1505,47 @@ async function проверитьРетенцию() {
 
   const [{ count: событийДо }] = await sql`select count(*)::int as count from event where type = 'system.retention'`;
 
+  /**
+   * Разбор ответа роута — ОБЩИЙ для примерки и записи (R-FW-R3).
+   *
+   * Дефект, ради которого весь роут и заводился, выглядит НЕ как 5xx: цикл
+   * обрывается в `catch`, `sweep` возвращает результат, роут отвечает 200, тело
+   * приходит валидным — и проверка одной пятой цели зеленеет, пока четыре
+   * остальные молча не чистятся. Поэтому смотрим ДВЕ вещи на каждом вызове:
+   * отчитались ВСЕ пять целей (их даёт `includeEmpty: true`) и НИ У ОДНОЙ нет
+   * `aborted`. Верните `Date` в `граница()` — шаг покраснеет.
+   */
+  const разобрать = (имя, ответ) => {
+    if (!ответ.r.ok) throw new Error(`${имя} → ${ответ.r.status}: ${ответ.text.slice(0, 300)}`);
+    const цели = ответ.json?.tables ?? [];
+    const имена = цели.map((t) => t.table).sort();
+    if (имена.join(",") !== ЦЕЛИ_РЕТЕНЦИИ.join(",")) {
+      throw new Error(`${имя}: расклад по целям ${имена.join(", ") || "(пусто)"}, ждали все пять: ${ЦЕЛИ_РЕТЕНЦИИ.join(", ")}`);
+    }
+    const битые = цели.filter((t) => t.aborted);
+    if (битые.length > 0) {
+      throw new Error(
+        `${имя}: цели оборвались ошибкой — ${битые.map((t) => `${t.table} (удалено ${t.deleted})`).join(", ")}. ` +
+          `Смотри лог Core: чаще всего это параметр границы, уехавший объектом Date вместо строки.`,
+      );
+    }
+    return цели;
+  };
+
   try {
     // Примерка: ТОТ ЖЕ предикат, но ни одной удалённой строки. Гоняется первой —
     // если `date < $1` не типизируется, отсюда и прилетит отказ Postgres.
     const примерка = await jsonRequest("POST", "/system/retention/run", { dryRun: true });
-    if (!примерка.r.ok) throw new Error(`примерка → ${примерка.r.status}: ${примерка.text.slice(0, 300)}`);
     if (примерка.json?.dryRun !== true) throw new Error(`ответ примерки без признака режима: ${примерка.text.slice(0, 200)}`);
-    const цель = (примерка.json.tables ?? []).find((t) => t.table === "vending_stock_count");
-    if (!цель) throw new Error("в ответе нет цели vending_stock_count — расклад обязан быть по ВСЕМ пяти таблицам");
+    const цель = разобрать("примерка", примерка).find((t) => t.table === "vending_stock_count");
     if (цель.deleted < 1) throw new Error(`примерка не увидела строку 800-суточной давности: deleted=${цель.deleted}`);
     const [{ count: послеПримерки }] = await sql`select count(*)::int as count from vending_stock_count where product_name = ${ТОВАР}`;
     if (послеПримерки !== 2) throw new Error(`примерка удалила строки: осталось ${послеПримерки} из 2`);
 
     const прогон = await jsonRequest("POST", "/system/retention/run", {});
-    if (!прогон.r.ok) throw new Error(`прогон → ${прогон.r.status}: ${прогон.text.slice(0, 300)}`);
-    const снесено = (прогон.json.tables ?? []).find((t) => t.table === "vending_stock_count");
-    if (!снесено || снесено.deleted < 1) throw new Error(`ретенция не снесла старую строку: ${прогон.text.slice(0, 200)}`);
+    if (прогон.json?.dryRun !== false) throw new Error(`ответ прогона без признака режима: ${прогон.text.slice(0, 200)}`);
+    const снесено = разобрать("прогон", прогон).find((t) => t.table === "vending_stock_count");
+    if (снесено.deleted < 1) throw new Error(`ретенция не снесла старую строку: ${прогон.text.slice(0, 200)}`);
     if (снесено.olderThanDays !== 730) throw new Error(`окно истории склада ${снесено.olderThanDays}, ждали 730`);
 
     const строки = await sql`select dt::text as dt from vending_stock_count where product_name = ${ТОВАР}`;

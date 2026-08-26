@@ -9,7 +9,7 @@ import { validate } from "class-validator";
 import { THROTTLER_LIMIT } from "@nestjs/throttler/dist/throttler.constants";
 import type { AnalyticsService } from "./analytics.service";
 import { LIST_DAYS_MAX } from "./refill-events.service";
-import { RefillEventsListDto, StockCountsDto, VendingController } from "./vending.controller";
+import { RefillEventsListDto, STOCK_COUNTS_PRODUCT_MAX, StockCountsDto, VendingController } from "./vending.controller";
 import type { VendingService } from "./vending.service";
 
 describe("Вендинг Core: троттлинг GET /vending/shrinkage (N1)", () => {
@@ -119,13 +119,30 @@ describe("RefillEventsListDto: потолок ЧТЕНИЯ журнала — 90
   });
 });
 
-describe("StockCountsDto: длина `product` совпадает с тем, что режет панель (R-FW-S10)", () => {
-  it("512 символов — законны, 513 — отказ", async () => {
-    // Лист «История склада» шлёт сюда `?q=`, и запрос длиннее границы давал
-    // 400, который панель показывала экраном «ядро недоступно». Граница у
-    // обеих сторон обязана быть одним числом — 512.
-    assert.deepEqual(await validate(plainToInstance(StockCountsDto, { product: "я".repeat(512) })), []);
-    assert.ok((await validate(plainToInstance(StockCountsDto, { product: "я".repeat(513) }))).length > 0);
+describe("StockCountsDto: длинный запрос ЗАЖИМАЕТСЯ, а не отбивается (R-FW-S10)", () => {
+  it("512 символов проходят как есть", async () => {
+    const dto = plainToInstance(StockCountsDto, { product: "я".repeat(STOCK_COUNTS_PRODUCT_MAX) });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.product?.length, STOCK_COUNTS_PRODUCT_MAX);
+  });
+
+  it("вставленный абзац НЕ даёт 400 — он режется по той же границе", async () => {
+    // Лист «История склада» шлёт сюда содержимое поля поиска. Пока длина
+    // отбивалась, вставленный из буфера абзац давал 400, а панель подменяла
+    // весь лист экраном «Core недоступен» — живое ядро выглядело упавшим.
+    const dto = plainToInstance(StockCountsDto, { product: `  ${"я".repeat(5000)}  ` });
+    assert.deepEqual(await validate(dto), [], "длина запроса больше не повод отказывать");
+    assert.equal(dto.product?.length, STOCK_COUNTS_PRODUCT_MAX);
+  });
+
+  it("короткий запрос не портится: только `trim`, без обрезки", async () => {
+    const dto = plainToInstance(StockCountsDto, { product: "  Montella pet 0.33 " });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.product, "Montella pet 0.33");
+  });
+
+  it("`@MaxLength` держит ту же константу, что и зажим — договор и зажим не расходятся", async () => {
+    assert.equal(STOCK_COUNTS_PRODUCT_MAX, 512);
   });
 });
 
