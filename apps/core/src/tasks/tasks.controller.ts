@@ -1,5 +1,5 @@
 import { Body, ConflictException, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
-import { IsIn, IsISO8601, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, ValidateIf } from "class-validator";
+import { IsIn, IsISO8601, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength, ValidateIf } from "class-validator";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { TasksService } from "./tasks.service";
 
@@ -109,8 +109,15 @@ export class EditTaskDto {
 
 /** Постановка повторяющейся задачи на день — от монитора графиков. */
 export class EnsureForDayDto extends CreateTaskDto {
-  /** Календарный день по Ташкенту: часть ключа идемпотентности. */
+  /**
+   * Календарный день по Ташкенту — ЧАСТЬ КЛЮЧА ИДЕМПОТЕНТНОСТИ.
+   *
+   * `@IsISO8601` пропускает и полную дату-время; такой `source`
+   * (`maint:<plan>:2026-08-26T06:00:00Z`) не попадает под предикат частичного
+   * индекса, и дедуп выключается МОЛЧА — дубли пойдут без единой ошибки.
+   */
   @IsISO8601({ strict: true }, { message: "dayKey: дата YYYY-MM-DD" })
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: "dayKey: только голые сутки YYYY-MM-DD, без времени" })
   dayKey!: string;
 }
 

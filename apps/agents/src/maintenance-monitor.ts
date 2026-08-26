@@ -221,6 +221,29 @@ export async function runMaintenanceMonitor(
     }
   }
 
+  // СБОЙ ПРОГОНА — СОБЫТИЕ, А НЕ СТРОКА В ЛОГЕ. `result.errors` уезжали только
+  // в `console.log` крона (`index.ts:447`), а логи контейнера живут до первого
+  // деплоя: аварию 26.08.2026 («ни одной задачи ТО не поставлено ни разу»)
+  // пришлось доказывать схемой и нулевыми счётчиками, потому что строк уже не
+  // было. Под своим `try/catch`: сторож, который роняет прогон, хуже
+  // отсутствующего.
+  if (result.errors.length > 0) {
+    try {
+      await core.recordEvent({
+        source: "maintenance-monitor",
+        type: "maintenance.monitor_failed",
+        payload: {
+          errorCount: result.errors.length,
+          errors: result.errors.slice(0, 20),
+          tasks: result.tasks,
+          day: today,
+        },
+      });
+    } catch (err) {
+      result.errors.push(`событие о сбое не записано: ${String(err)}`);
+    }
+  }
+
   return result;
 }
 

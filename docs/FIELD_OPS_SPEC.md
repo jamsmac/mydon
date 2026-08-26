@@ -2467,6 +2467,13 @@ export async function runMaintenanceMonitor(
 ): Promise<{ tasks: number; overdue: number; unclaimed: number; errors: string[] }>
 ```
 
+До 26.08.2026 `POST /tasks/ensure-for-day` отвечал 500 на КАЖДУЮ вставку
+(`on conflict ("source") do nothing` против ЧАСТИЧНОГО индекса `task_source_key`
+→ `42P10`), поэтому задач обслуживания не создавалось ни одной; дедуп держится
+предикатом `TASK_SOURCE_DAY_PREDICATE`, который обязаны дословно повторять И
+индекс, И спецификация конфликта; `dayKey` — только голые сутки; непустой
+`errors` прогона пишет событие `maintenance.monitor_failed`.
+
 Логика на строку:
 
 - `status === "unknown"` → пропустить (это дефект настройки, о нём владелец узнаёт на экране, а не пушем в 6 утра).

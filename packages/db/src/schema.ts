@@ -168,6 +168,22 @@ export const person = pgTable("person", {
   createdAt: createdAt(),
 });
 
+/**
+ * Предикат ЧАСТИЧНОГО индекса `task_source_key` — ОДНО значение на схему и на
+ * вставку (R-G-2).
+ *
+ * `ensureForDay` обязан повторить его в `onConflictDoNothing({ target, where })`:
+ * без `where` drizzle печатает `on conflict ("source") do nothing`, Postgres не
+ * может вывести из этого ЧАСТИЧНЫЙ индекс и отвечает `42P10`; класс `42` не
+ * подходит ни под `22*`, ни под `23*` в `pg-exception.filter.ts:28`, поэтому
+ * наружу уходил 500 — и задач обслуживания не создавалось НИ ОДНОЙ (замер
+ * прода 26.08.2026: строк с датой в `source` — 0, при 19 попытках в сутки).
+ *
+ * Экспортируется, а не копируется строкой рядом со вставкой: разошедшийся
+ * предикат — тот же `42P10`, но уже без единого признака в коде.
+ */
+export const TASK_SOURCE_DAY_PREDICATE = sql`source ~ ':[0-9]{4}-[0-9]{2}-[0-9]{2}$'`;
+
 // ── task: задачи (исполнитель — человек или агент) ──
 export const task = pgTable(
   "task",
@@ -236,10 +252,13 @@ export const task = pgTable(
      * Индекс ЧАСТИЧНЫЙ — только по источникам с датой на конце. Обычные
      * source ("ourvend", "sales-sync", "owner", "agent:<имя>") повторяются
      * у сотен задач на законных основаниях, и глобальный unique их сломал бы.
+     *
+     * Предикат вынесен в `TASK_SOURCE_DAY_PREDICATE` — его обязана дословно
+     * повторять спецификация `ON CONFLICT` в `ensureForDay`, иначе `42P10`.
      */
     uniqueIndex("task_source_key")
       .on(t.source)
-      .where(sql`source ~ ':[0-9]{4}-[0-9]{2}-[0-9]{2}$'`),
+      .where(TASK_SOURCE_DAY_PREDICATE),
     uniqueIndex("task_client_key").on(t.clientKey),
   ],
 );

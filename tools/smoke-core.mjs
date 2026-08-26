@@ -1559,6 +1559,47 @@ async function проверитьРетенцию() {
   }
 }
 
+/**
+ * Идемпотентная постановка задачи на день — против НАСТОЯЩЕГО Postgres (R-G-2).
+ *
+ * Юнит-стенд `stubDb` возвращает заготовленный ответ и SQL не исполняет:
+ * `ensureForDay` был «покрыт тестами» и при этом не работал НИ РАЗУ —
+ * `on conflict ("source") do nothing` против ЧАСТИЧНОГО индекса даёт `42P10`,
+ * а тот превращается в 500. Увидеть это может только живая база.
+ */
+async function проверитьЗадачиТО() {
+  const сутки = (сдвиг) =>
+    new Date(Date.now() + сдвиг * 86_400_000).toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+  // Ключ уникален на прогон, но ОДИН на первые два вызова: дедуп проверяется
+  // повтором того же ключа, а не разными.
+  const ключ = `smoke:maint:${Date.now()}`;
+  const тело = (dayKey) => ({
+    title: "Дымовая мойка миксера",
+    ownerKind: "human",
+    source: ключ,
+    dayKey,
+    createdBy: "agent:smoke",
+  });
+
+  const первый = await jsonRequest("POST", "/tasks/ensure-for-day", тело(сутки(0)));
+  if (!первый.r.ok) throw new Error(`создание → ${первый.r.status}: ${первый.text.slice(0, 200)}`);
+  if (!первый.json?.id) throw new Error(`первая постановка не вернула id: ${первый.text.slice(0, 200)}`);
+
+  const повтор = await jsonRequest("POST", "/tasks/ensure-for-day", тело(сутки(0)));
+  if (!повтор.r.ok) throw new Error(`повтор → ${повтор.r.status}: ${повтор.text.slice(0, 200)}`);
+  if (повтор.json?.id) throw new Error("повтор в тот же день создал ВТОРУЮ задачу — дедуп не работает");
+
+  const завтра = await jsonRequest("POST", "/tasks/ensure-for-day", тело(сутки(1)));
+  if (!завтра.r.ok) throw new Error(`следующий день → ${завтра.r.status}: ${завтра.text.slice(0, 200)}`);
+  if (!завтра.json?.id) throw new Error("на следующий день задача обязана появиться заново");
+  if (завтра.json.id === первый.json.id) throw new Error("вернулась вчерашняя задача — ключ дня не участвует");
+
+  // Полная дата-время не имеет права попасть в ключ: такой source уходит
+  // из-под предиката индекса, и дедуп выключается молча.
+  const время = await jsonRequest("POST", "/tasks/ensure-for-day", тело(`${сутки(0)}T06:00:00.000Z`));
+  if (время.r.ok) throw new Error("dayKey с временем принят — предикат индекса перестанет ловить дубли");
+}
+
 /** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
 /**
  * П5b: приёмка накладной наблюдает закупочную цену позиции
@@ -1890,6 +1931,13 @@ try {
   }
 
   try {
+    await проверитьЗадачиТО();
+    console.log("  ok  сценарий: задача ТО на день — создание, повтор без дубля, следующий день");
+  } catch (e) {
+    провалы.push(`задачи ТО: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -1914,4 +1962,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 13 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 14 сценариев.`);
