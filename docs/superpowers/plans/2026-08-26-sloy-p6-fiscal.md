@@ -159,13 +159,13 @@ T3 и T7 параллельными не бывают: они правят од�
 - `vendingCashSession` сегодня объявлена без второго аргумента (`pgTable("vending_cash_session", {…})`, `schema.ts:1827`) — у неё нет списка индексов вовсе. Он добавляется третьим аргументом-стрелкой, как у соседей.
 - Самоссылка колонки (`reverses_id` → `id` той же таблицы) требует явной аннотации возвращаемого типа `(): AnyPgColumn =>` — иначе TS ругается на циклический вывод. `AnyPgColumn` импортируется из `drizzle-orm/pg-core`.
 
-- [ ] **Step 1: Номер миграции — командой, а не из спеки.**
+- [x] **Step 1: Номер миграции — командой, а не из спеки.**
 ```bash
 ls packages/db/drizzle/*.sql | sed -E 's#.*/([0-9]{4})_.*#\1#' | sort -n | tail -1
 node -e 'const j=require("./packages/db/drizzle/meta/_journal.json");console.log("последняя запись журнала:",j.entries.at(-1).idx,j.entries.at(-1).tag)'
 ```
 Оба числа обязаны совпасть. Следующий свободный = последнее + 1, дополненное до четырёх цифр. Это число дальше подставляется вместо `<NNNN>` везде, включая имя снапшота и трейлер коммита. **После каждого `git rebase origin/main` команду повторить:** П7 и «Инкассации» идут параллельно, и занятый номер обнаруживается сторожем шага 4, а не в проде.
-- [ ] **Step 2: Сторож цепочки миграций RED.** Создать `packages/db/src/migrations.test.ts`:
+- [x] **Step 2: Сторож цепочки миграций RED.** Создать `packages/db/src/migrations.test.ts`:
 ```ts
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -228,7 +228,7 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
 });
 ```
 > Этот набор ЗЕЛЁН на сегодняшнем дереве (72 файла ↔ 72 записи, `idx` 0…71) — он и должен быть зелёным: его работа начинается на rebase, а не сейчас.
-- [ ] **Step 3: Сторожи схемы RED.** Дописать в `packages/db/src/schema.test.ts`, внутрь набора «Схема MYDON Core (ТЗ §7)», после теста стр. 74:
+- [x] **Step 3: Сторожи схемы RED.** Дописать в `packages/db/src/schema.test.ts`, внутрь набора «Схема MYDON Core (ТЗ §7)», после теста стр. 74:
 ```ts
   it("вендинг: у карточки прайса есть ФИСКАЛЬНЫЙ БЛОК из шести полей (П6, R-P6-5)", () => {
     const prod = Object.keys(schema.vendingProduct as unknown as Record<string, unknown>);
@@ -272,14 +272,14 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
   });
 ```
 > Помощники `конфиг`/`имена` объявлены внутри теста стр. 98 — при добавлении третьего потребителя поднять их на уровень `describe` (одна правка отступов, тела не меняются). `readFileSync`/`path` дописать в импорты файла.
-- [ ] **Step 4:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → RED (нет фискальных полей, нет сторно-индексов; сторож CHECK **зелёный** — `check(...)` ещё на месте, значит он пока и не должен падать… нет: тест утверждает ОТСУТСТВИЕ строки, и сейчас он КРАСНЫЙ. Это правильный RED).
-- [ ] **Step 5: Правка схемы.** В `packages/db/src/schema.ts`:
+- [x] **Step 4:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → RED (нет фискальных полей, нет сторно-индексов; сторож CHECK **зелёный** — `check(...)` ещё на месте, значит он пока и не должен падать… нет: тест утверждает ОТСУТСТВИЕ строки, и сейчас он КРАСНЫЙ. Это правильный RED).
+- [x] **Step 5: Правка схемы.** В `packages/db/src/schema.ts`:
   - импорт `import { type AnyPgColumn } from "drizzle-orm/pg-core";` (или дописать `AnyPgColumn` в существующий импорт);
   - шесть полей в `vendingProduct` — между `fixedPurchaseQty` и `isActive`, с докблоками из «Interfaces (produces)» дословно;
   - `vendingRefill`: поле `reversesId` после `createdBy`; в списке индексов — частичный `vending_refill_reverses_idx`; **строка `check("vending_refill_qty_positive", sql\`${t.qty} > 0\`)` УДАЛЯЕТСЯ** и заменяется комментарием;
   - `vendingStockCount`: поле `reversesId` после `note`; `uniqueIndex("vending_stock_count_storno_key")` в конце списка;
   - `vendingCashSession`: поля `source` (после `remainder`) и `reversesId` (после `createdBy`), плюс НОВЫЙ третий аргумент `(t) => [uniqueIndex("vending_cash_session_storno_key")…]`.
-- [ ] **Step 6: Сгенерировать миграцию и заменить её тело.**
+- [x] **Step 6: Сгенерировать миграцию и заменить её тело.**
 ```bash
 pnpm --filter @mydon/db db:generate     # создаст <NNNN>_<случайный_тег>.sql + meta/<NNNN>_snapshot.json + запись журнала
 ```
@@ -343,8 +343,8 @@ ALTER TABLE "vending_cash_session" ADD COLUMN IF NOT EXISTS "reverses_id" uuid R
 CREATE UNIQUE INDEX IF NOT EXISTS "vending_cash_session_storno_key"
   ON "vending_cash_session" USING btree ("reverses_id") WHERE "source" = 'storno';
 ```
-- [ ] **Step 7: Снапшот не должен разойтись.** `pnpm --filter @mydon/db db:generate` ещё раз → ожидание `No schema changes, nothing to generate`. Если генератор снова хочет миграцию — значит `check(...)` вернулся в схему либо колонка объявлена не так, как её ставит SQL.
-- [ ] **Step 8:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → GREEN; `pnpm -s typecheck`. На scratch-БД проверить, что миграция ИДЕМПОТЕНТНА и что CHECK работает в обе стороны:
+- [x] **Step 7: Снапшот не должен разойтись.** `pnpm --filter @mydon/db db:generate` ещё раз → ожидание `No schema changes, nothing to generate`. Если генератор снова хочет миграцию — значит `check(...)` вернулся в схему либо колонка объявлена не так, как её ставит SQL.
+- [x] **Step 8:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → GREEN; `pnpm -s typecheck`. На scratch-БД проверить, что миграция ИДЕМПОТЕНТНА и что CHECK работает в обе стороны:
 ```bash
 createdb mydon_p6_smoke
 DATABASE_URL=postgresql://…/mydon_p6_smoke node packages/db/dist/migrate.js   # «Миграции применены.»
@@ -355,7 +355,7 @@ psql mydon_p6_smoke -c "insert into vending_product (name, ikpu) values ('T','12
 psql mydon_p6_smoke -c "select vat_pct, package_code from vending_product limit 1"                 # ожидание: 12 | 796
 dropdb mydon_p6_smoke
 ```
-- [ ] **Step 9:** `git commit -m "feat(db): фискальные поля карточки снека и сторно снек-записей — миграция <NNNN>, сторож цепочки миграций (П6, R-P6-5/R-P6-6/R-P6-10)" -- packages/db/drizzle packages/db/src/schema.ts packages/db/src/schema.test.ts packages/db/src/migrations.test.ts`
+- [x] **Step 9:** `git commit -m "feat(db): фискальные поля карточки снека и сторно снек-записей — миграция <NNNN>, сторож цепочки миграций (П6, R-P6-5/R-P6-6/R-P6-10)" -- packages/db/drizzle packages/db/src/schema.ts packages/db/src/schema.test.ts packages/db/src/migrations.test.ts`
 
 ---
 
@@ -436,7 +436,7 @@ export function classifyIkpu(
 - `classifyIkpu` возвращает `unknown` в ДВУХ случаях: кода нет в справочнике донора; справочник и суффикс `000000` расходятся. Оба — в отчёт, не в базу.
 - Метки словарей — подписи из `dictionary_entries` донора (ОКЕИ). Коды — несущие (по ним стоит `@IsIn`), метки — витринные: если формулировка донора отличается, побеждает донор.
 
-- [ ] **Step 1: Тесты RED.** Создать `packages/shared/src/fiscal.test.ts`:
+- [x] **Step 1: Тесты RED.** Создать `packages/shared/src/fiscal.test.ts`:
 ```ts
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -564,8 +564,8 @@ describe("Категорийный ИКПУ решает справочник д
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (модуля нет).
-- [ ] **Step 3: Реализация.** Создать `packages/shared/src/fiscal.ts` по «Interfaces (produces)». Тела, которые задают поведение:
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (модуля нет).
+- [x] **Step 3: Реализация.** Создать `packages/shared/src/fiscal.ts` по «Interfaces (produces)». Тела, которые задают поведение:
 ```ts
 /** Ставки НДС (словарь `vat` донора: 12 стандарт, 0 нулевая, 15 специальная). */
 export const VAT_RATES: readonly DictEntry[] = [
@@ -651,7 +651,7 @@ export function classifyIkpu(code: string, dict: ReadonlyMap<string, string>) {
 }
 ```
 `fiscalFlaws` повторяет язык `fiscalGaps` (`sources.ts:222`): пустой ИКПУ → `{flaw:"нет", why:"код не выяснен"}`; непустой не той длины → `{flaw:"неверно", why:\`должно быть ${IKPU_DIGITS} цифр, а тут N\`}`; не только цифры → `«в коде есть не только цифры»`. `packageCode`/`vatPct` вне словаря → `"неверно"`. `mxik`/`barcode` дают дыру только когда они НЕПУСТЫ и неверны (пустых у нас 0 из 62 с обеих сторон — «нет» тут значило бы «все карточки дырявые»). `marked` дырой не бывает никогда.
-- [ ] **Step 4: Барель.** В `packages/shared/src/index.ts` после строки 50 (`export * from "./sources";`):
+- [x] **Step 4: Барель.** В `packages/shared/src/index.ts` после строки 50 (`export * from "./sources";`):
 ```ts
 // Фискальный блок карточки СНЕКА (П6). Рядом с ./sources намеренно: там
 // живёт `fiscalGaps` по `entity.attrs` (контур реестра/кофе), здесь —
@@ -659,8 +659,8 @@ export function classifyIkpu(code: string, dict: ReadonlyMap<string, string>) {
 // союз `FiscalFlaw`, и оба берутся ОТТУДА, а не объявляются заново.
 export * from "./fiscal";
 ```
-- [ ] **Step 5:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → GREEN; `pnpm -s typecheck` (проверяет заодно, что барель не сломался: TS2308 вылез бы именно здесь).
-- [ ] **Step 6:** `git commit -m "feat(shared): фискальный блок карточки снека — контракт, словари ОКЕИ/НДС/КИЗ и валидаторы одним модулем (П6, R-P6-6/R-P6-9)" -- packages/shared/src/fiscal.ts packages/shared/src/fiscal.test.ts packages/shared/src/index.ts`
+- [x] **Step 5:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → GREEN; `pnpm -s typecheck` (проверяет заодно, что барель не сломался: TS2308 вылез бы именно здесь).
+- [x] **Step 6:** `git commit -m "feat(shared): фискальный блок карточки снека — контракт, словари ОКЕИ/НДС/КИЗ и валидаторы одним модулем (П6, R-P6-6/R-P6-9)" -- packages/shared/src/fiscal.ts packages/shared/src/fiscal.test.ts packages/shared/src/index.ts`
 
 ---
 
@@ -711,7 +711,7 @@ export class SetProductFiscalDto { productId!: string; ikpu?: string | null; mxi
 - **Адресация по `productId`, а не по имени** (в отличие от `product-price` и `product-rules`): резолв по алиасу добавил бы путь, где спорное имя молча уводит 17-значный код на чужую карточку (`productIndex.explain → conflict`, `packages/shared/src/stock-history.ts:315`).
 - **`now` — параметром.** Проверка `updatedAt` не должна зависеть от стенных часов; контроллер передаёт `new Date()`, и это единственное место, где часы читаются.
 
-- [ ] **Step 1: Тесты сервиса RED.** Создать `apps/core/src/vending/product-fiscal.service.test.ts`:
+- [x] **Step 1: Тесты сервиса RED.** Создать `apps/core/src/vending/product-fiscal.service.test.ts`:
 ```ts
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -840,7 +840,7 @@ describe("Фискальный блок карточки: единственны
   });
 });
 ```
-- [ ] **Step 2: Тесты DTO RED.** Дописать в `apps/core/src/vending/vending.controller.test.ts`:
+- [x] **Step 2: Тесты DTO RED.** Дописать в `apps/core/src/vending/vending.controller.test.ts`:
 ```ts
 describe("SetProductFiscalDto: вход держит форму, а не только сервис (П6)", () => {
   it("16 цифр отвергнуты СООБЩЕНИЕМ ДОНОРА — владелец уже читает его в mydon-stock", async () => {
@@ -874,7 +874,7 @@ describe("SetProductFiscalDto: вход держит форму, а не тол�
   });
 });
 ```
-- [ ] **Step 3: Тесты правила RED.** Дописать в `apps/core/src/rules/rules.test.ts`:
+- [x] **Step 3: Тесты правила RED.** Дописать в `apps/core/src/rules/rules.test.ts`:
 ```ts
 describe("Правило фискальной готовности (П6)", () => {
   const ctx = (readyBefore: boolean, readyAfter: boolean) => ({
@@ -907,8 +907,8 @@ describe("Правило фискальной готовности (П6)", () =>
 });
 ```
 > Проверку `vending.record_cancelled` в этом же наборе дописывает T7 — она красная до него и в T3 не заводится.
-- [ ] **Step 4:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → RED.
-- [ ] **Step 5: Сервис.** Создать `apps/core/src/vending/product-fiscal.service.ts`. Ядро метода:
+- [x] **Step 4:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → RED.
+- [x] **Step 5: Сервис.** Создать `apps/core/src/vending/product-fiscal.service.ts`. Ядро метода:
 ```ts
   async update(productId: string, patch: ProductFiscalPatch, actor: string, now: Date): Promise<FiscalUpdateResult> {
     const тронуто = (Object.keys(patch) as (keyof ProductFiscalPatch)[]).filter((k) => patch[k] !== undefined);
@@ -956,7 +956,7 @@ describe("Правило фискальной готовности (П6)", () =>
     return { ok: true, product: row.name, before, after, readyBefore, readyAfter };
   }
 ```
-- [ ] **Step 6: Чтение каталога.** В `vending.service.ts`: `import type { ProductFiscal } from "@mydon/shared";`, поле `fiscal` в `VendingProductRow` (докблок из «Interfaces»), и в `products()` — `select` уже берёт `*` (`this.db.select().from(vendingProduct)`), поэтому добирать колонки не надо; в маппинг добавляется:
+- [x] **Step 6: Чтение каталога.** В `vending.service.ts`: `import type { ProductFiscal } from "@mydon/shared";`, поле `fiscal` в `VendingProductRow` (докблок из «Interfaces»), и в `products()` — `select` уже берёт `*` (`this.db.select().from(vendingProduct)`), поэтому добирать колонки не надо; в маппинг добавляется:
 ```ts
         fiscal: {
           ikpu: p.ikpu,
@@ -967,7 +967,7 @@ describe("Правило фискальной готовности (П6)", () =>
           marked: p.marked,
         },
 ```
-- [ ] **Step 7: DTO и роут.** В `vending.controller.ts` — рядом с `SetProductRulesDto` (`:243`):
+- [x] **Step 7: DTO и роут.** В `vending.controller.ts` — рядом с `SetProductRulesDto` (`:243`):
 ```ts
 /**
  * Фискальный блок карточки снека (П6). Адресуемся по `productId`, а не по
@@ -1017,7 +1017,7 @@ export class SetProductFiscalDto {
   }
 ```
 Конструктор контроллера (`:470`) получает `private readonly productFiscal: ProductFiscalService`; `vending.module.ts` — `ProductFiscalService` в `providers` (в `exports` не нужен: вне модуля потребителей нет).
-- [ ] **Step 8: Правило.** В `apps/core/src/rules/rules.ts`, в блок «Снек-автоматы: полевой контур (П4)» (после правила `vending.refill_detected`, `:421-429`):
+- [x] **Step 8: Правило.** В `apps/core/src/rules/rules.ts`, в блок «Снек-автоматы: полевой контур (П4)» (после правила `vending.refill_detected`, `:421-429`):
 ```ts
   {
     // Только ПЕРЕСЕЧЕНИЕ границы «чек соберётся»: 52 карточки × 6 полей
@@ -1034,7 +1034,7 @@ export class SetProductFiscalDto {
         : `🧾 Чек больше не соберётся: ${str(c.payload.product)} — проверь фискальные поля`,
   },
 ```
-- [ ] **Step 9: Смоук.** В `tools/smoke-core.mjs`: в шаг чтения `/vending/products` (`:127`) добавить `проверить`, что у строки есть блок `fiscal` с шестью ключами; в массив `ЗАПИСЬ` — два шага:
+- [x] **Step 9: Смоук.** В `tools/smoke-core.mjs`: в шаг чтения `/vending/products` (`:127`) добавить `проверить`, что у строки есть блок `fiscal` с шестью ключами; в массив `ЗАПИСЬ` — два шага:
 ```js
   {
     // Фискальная правка (П6). Юнит-заглушка БД CHECK'и не исполняет, а весь
@@ -1069,8 +1069,8 @@ export class SetProductFiscalDto {
   },
 ```
 `P6_КАРТОЧКА` берётся ПЕРЕД массивом — первым `id` из `/vending/products` засеянного прайса (`seed-vending.js` в цепочке CI). Если шаг `ЗАПИСЬ` сегодня не умеет ждать 400, добавить поддержку `ожидатьСтатус` в `проверитьЗапись` (`:1734`) одной веткой: сегодня он трактует не-2xx как провал, и «ожидаемый отказ» выразить нечем.
-- [ ] **Step 10: Счётчик сценариев.** Поднять число в последней строке `tools/smoke-core.mjs` (`console.log(\`…, 13 сценариев.\`)`), если добавлялись `проверить*`-функции; в этой задаче добавлены только шаги массива `ЗАПИСЬ`, и он считается сам — проверить глазами, что строка отчёта не врёт.
-- [ ] **Step 11: `docs/DATA_SOURCES.md`.** После абзаца «Правило живёт в `packages/shared` (`fiscalGaps`)…» (`:248-250`) — новый абзац:
+- [x] **Step 10: Счётчик сценариев.** Поднять число в последней строке `tools/smoke-core.mjs` (`console.log(\`…, 13 сценариев.\`)`), если добавлялись `проверить*`-функции; в этой задаче добавлены только шаги массива `ЗАПИСЬ`, и он считается сам — проверить глазами, что строка отчёта не врёт.
+- [x] **Step 11: `docs/DATA_SOURCES.md`.** После абзаца «Правило живёт в `packages/shared` (`fiscalGaps`)…» (`:248-250`) — новый абзац:
 ```
 С П6 у фискальных полей ДВА дома, и это осознанно. `entity(type='product').attrs`
 («ИКПУ», «упаковка», «НДС», «штрихкод») обслуживает карточки РЕЕСТРА — туда
@@ -1086,8 +1086,8 @@ export class SetProductFiscalDto {
 (`POST /vending/product-fiscal`), след — `audit_log` с `action =
 vending.product.set_fiscal` и полным `before`/`after`.
 ```
-- [ ] **Step 12:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `createdb` → `migrate.js` → `seed.js` → `seed-vending.js` → `SMOKE_SCRATCH=1 node tools/smoke-core.mjs` → ожидание: оба новых шага записи зелёные, `dropdb`.
-- [ ] **Step 13:** `git commit -m "feat(core): фискальный блок карточки снека — единственный писатель, POST /vending/product-fiscal, блок fiscal в каталоге и правило в брифинг (П6, R-P6-5)" -- apps/core/src/vending/product-fiscal.service.ts apps/core/src/vending/product-fiscal.service.test.ts apps/core/src/vending/vending.service.ts apps/core/src/vending/vending.controller.ts apps/core/src/vending/vending.controller.test.ts apps/core/src/vending/vending.module.ts apps/core/src/rules/rules.ts apps/core/src/rules/rules.test.ts tools/smoke-core.mjs docs/DATA_SOURCES.md`
+- [x] **Step 12:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `createdb` → `migrate.js` → `seed.js` → `seed-vending.js` → `SMOKE_SCRATCH=1 node tools/smoke-core.mjs` → ожидание: оба новых шага записи зелёные, `dropdb`.
+- [x] **Step 13:** `git commit -m "feat(core): фискальный блок карточки снека — единственный писатель, POST /vending/product-fiscal, блок fiscal в каталоге и правило в брифинг (П6, R-P6-5)" -- apps/core/src/vending/product-fiscal.service.ts apps/core/src/vending/product-fiscal.service.test.ts apps/core/src/vending/vending.service.ts apps/core/src/vending/vending.controller.ts apps/core/src/vending/vending.controller.test.ts apps/core/src/vending/vending.module.ts apps/core/src/rules/rules.ts apps/core/src/rules/rules.test.ts tools/smoke-core.mjs docs/DATA_SOURCES.md`
 
 ---
 
@@ -1138,7 +1138,7 @@ export function ProductFiscalForm({
 - **Пустое поле nullable-типа → `null` (сброс)**; пустой `<select>` невозможен по построению. При `reason === "invalid"` сообщение — ПЕРВАЯ строка `errors`, чтобы владелец видел ПРИЧИНУ, а не «Не получилось».
 - **Открытая правка показывает `RuleForm` и `ProductFiscalForm` друг под другом одним блоком** «карточка товара», и обе — под тем же `key={editingRow.id}` (иначе переключение «Править» на соседнюю строку не переприменит `defaultValue` — находка 1 ревью П5a, `product-rules-panel.tsx:122-127`).
 
-- [ ] **Step 1: Тесты RED.** Создать `apps/cc/src/components/product-fiscal-form.test.tsx`:
+- [x] **Step 1: Тесты RED.** Создать `apps/cc/src/components/product-fiscal-form.test.tsx`:
 ```tsx
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -1262,10 +1262,10 @@ describe("Форма «Фискальные данные»", () => {
   });
 ```
 (в шапке файла — `ProductFiscal as SharedProductFiscal` в импорте из `@mydon/shared` и `VendingProductRow` в импорте из `./core`).
-- [ ] **Step 2: Фикстуры.** В `product-rules-panel.test.tsx` обеим строкам `rows` добавить `fiscal`: у `p1` — заполненный блок (`ikpu: "01806001001086002"`, `packageCode: "796"`), у `p2` — `ikpu: null` (одна дыра). Без этого файл не собирается: поле обязательное.
-- [ ] **Step 3:** `pnpm --filter cc test` → RED.
-- [ ] **Step 4: Клиент и типы.** `apps/cc/src/lib/core.ts`: импорт типа, поле `fiscal` в `VendingProductRow`, тип `VendingFiscalResult`, клиент `setVendingProductFiscal` рядом с `setVendingProductRules` (`:2300`).
-- [ ] **Step 5: Server action.** В `apps/cc/src/app/vending/actions.ts` после `saveVendingProductRules`:
+- [x] **Step 2: Фикстуры.** В `product-rules-panel.test.tsx` обеим строкам `rows` добавить `fiscal`: у `p1` — заполненный блок (`ikpu: "01806001001086002"`, `packageCode: "796"`), у `p2` — `ikpu: null` (одна дыра). Без этого файл не собирается: поле обязательное.
+- [x] **Step 3:** `pnpm --filter cc test` → RED.
+- [x] **Step 4: Клиент и типы.** `apps/cc/src/lib/core.ts`: импорт типа, поле `fiscal` в `VendingProductRow`, тип `VendingFiscalResult`, клиент `setVendingProductFiscal` рядом с `setVendingProductRules` (`:2300`).
+- [x] **Step 5: Server action.** В `apps/cc/src/app/vending/actions.ts` после `saveVendingProductRules`:
 ```ts
 /**
  * Фискальный блок товара (лист «Правила закупа», П6).
@@ -1308,13 +1308,13 @@ export async function saveVendingProductFiscal(domain: string, form: FormData): 
   }
 }
 ```
-- [ ] **Step 6: Форма.** Создать `apps/cc/src/components/product-fiscal-form.tsx` — клиентский компонент, скопированный по структуре с `RuleForm` (`product-rules-panel.tsx:26-78`): `"use client"`, `useRouter`, `useState`, `useTransition`, `<form className="form card" onSubmit={…}>`. Поля:
+- [x] **Step 6: Форма.** Создать `apps/cc/src/components/product-fiscal-form.tsx` — клиентский компонент, скопированный по структуре с `RuleForm` (`product-rules-panel.tsx:26-78`): `"use client"`, `useRouter`, `useState`, `useTransition`, `<form className="form card" onSubmit={…}>`. Поля:
   - `<input name="ikpu" inputMode="numeric" defaultValue={row.fiscal.ikpu ?? ""}>` с `<span>ИКПУ</span>`, аналогично `mxik` («МХИК») и `barcode` («Штрихкод (EAN)»);
   - `<select name="vatPct">` по `VAT_RATES` (`<span>Ставка НДС</span>`), `<select name="packageCode">` по `PACKAGE_CODES` (`<span>Код упаковки (ОКЕИ)</span>` + `<small className="hint">единица измерения, не идентификатор каталога</small>`), `<select name="marked">` по `MARKING` (значения `"0"`/`"1"`);
   - скрытое `<input type="hidden" name="productId" value={row.id}>`;
   - кнопка `Сохранить фискальные данные` (подпись отличается от соседней «Сохранить» намеренно: в одном блоке две формы, и роль по имени обязана быть однозначной для читалки и для теста);
   - хвост: `fiscalFlaws(row.fiscal)` строкой на дыру — «ИКПУ: должно быть 17 цифр, а тут 16».
-- [ ] **Step 7: Чип и второй блок.** В `product-rules-panel.tsx`:
+- [x] **Step 7: Чип и второй блок.** В `product-rules-panel.tsx`:
 ```tsx
               {/* Чип фискальной готовности — та же формулировка, что на
                   карточке реестра (`product-card-sections.tsx:38-45`): владелец
@@ -1335,8 +1335,8 @@ export async function saveVendingProductFiscal(domain: string, form: FormData): 
       )}
 ```
 > `key` переезжает на обёртку, а не дублируется на обеих формах: причина прежняя (`:122-127`) — переключение «Править» без «Отмена» обязано ПЕРЕМОНТИРОВАТЬ неуправляемые поля, и одна обёртка делает это для обеих.
-- [ ] **Step 8:** `pnpm --filter cc test` → GREEN; `pnpm -s typecheck && pnpm -s lint`.
-- [ ] **Step 9:** `git commit -m "feat(cc): секция «Фискальные данные» в карточке снека и чип готовности на листе правил закупа (П6, R-P6-5)" -- apps/cc/src/lib/core.ts apps/cc/src/lib/core-types.test.ts apps/cc/src/app/vending/actions.ts apps/cc/src/components/product-fiscal-form.tsx apps/cc/src/components/product-fiscal-form.test.tsx apps/cc/src/components/product-rules-panel.tsx apps/cc/src/components/product-rules-panel.test.tsx`
+- [x] **Step 8:** `pnpm --filter cc test` → GREEN; `pnpm -s typecheck && pnpm -s lint`.
+- [x] **Step 9:** `git commit -m "feat(cc): секция «Фискальные данные» в карточке снека и чип готовности на листе правил закупа (П6, R-P6-5)" -- apps/cc/src/lib/core.ts apps/cc/src/lib/core-types.test.ts apps/cc/src/app/vending/actions.ts apps/cc/src/components/product-fiscal-form.tsx apps/cc/src/components/product-fiscal-form.test.tsx apps/cc/src/components/product-rules-panel.tsx apps/cc/src/components/product-rules-panel.test.tsx`
 
 ---
 
@@ -1624,7 +1624,7 @@ export async function importFiscal(
 - **Границы транзакции.** Одна транзакция на весь `--apply` (как у `RecordCancelService` в Task 7, ниже) — при отказе посреди записи репорт по уже собранному плану печатается ДО текста ошибки (`ImportWriteFailure`-подобный класс, приём `import-stock-history.ts:131`), а сама транзакция откатывается целиком: частичная фискальная правка хуже, чем «ничего не записалось, попробуй снова» — в отличие от `import-stock-history.ts`, где пачки идемпотентны и повтор дожимает остаток, здесь план строится ЗАРАНЕЕ одним снимком БД, и повторный прогон после отказа пересчитает его заново, а не продолжит с середины.
 - **Карта решения и отчёт** — по образцу `картаРешения`/`отчёт` (`backfill-product-ids.ts:333`/`:311`): потолок печати 50 строк на каждое поле, разделы `skipped` группируются по причине с текстом ПОЧЕМУ, `ИТОГИ(json)` последней строкой (приём `import-stock-history.ts:645`) с полями `{ apply, ikpu, barcode, marked, packSizeMismatches, unresolved }` — по нему сверяется выкатка.
 
-- [ ] **Step 1: Тесты RED.** Создать `packages/db/src/import-fiscal.test.ts`:
+- [x] **Step 1: Тесты RED.** Создать `packages/db/src/import-fiscal.test.ts`:
 ```ts
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -1751,10 +1751,10 @@ describe("Перенос фискального блока: приоритет �
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → RED (модуля нет).
-- [ ] **Step 3: `planFiscalImport` — чистая функция решения.** Реализовать в `import-fiscal.ts` по сигнатуре из «Interfaces (produces)»: для каждой `priceCard` найти сопоставленную `registryCard` через `priceIndex.explain(registryCard.name)` (`kind: "hit"` и `id === priceCard.id`); для каждого `donorProduct` резолвить имя (`name`, при `miss` — `ourvend_name`) тем же индексом; при `ikpu`/`barcode` уже непустых на `priceCard` — конфликт при расхождении, пропуск (без записи в `skipped`) при совпадении. Держать функцию БЕЗ побочных эффектов — только маппинг входных структур в план; вся история дефектов уже в тестах Step 1.
-- [ ] **Step 4:** `pnpm --filter @mydon/db test` → GREEN на `planFiscalImport`.
-- [ ] **Step 5: Донорский ридер и `importFiscal`.** Дописать в `import-fiscal.ts`:
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → RED (модуля нет).
+- [x] **Step 3: `planFiscalImport` — чистая функция решения.** Реализовать в `import-fiscal.ts` по сигнатуре из «Interfaces (produces)»: для каждой `priceCard` найти сопоставленную `registryCard` через `priceIndex.explain(registryCard.name)` (`kind: "hit"` и `id === priceCard.id`); для каждого `donorProduct` резолвить имя (`name`, при `miss` — `ourvend_name`) тем же индексом; при `ikpu`/`barcode` уже непустых на `priceCard` — конфликт при расхождении, пропуск (без записи в `skipped`) при совпадении. Держать функцию БЕЗ побочных эффектов — только маппинг входных структур в план; вся история дефектов уже в тестах Step 1.
+- [x] **Step 4:** `pnpm --filter @mydon/db test` → GREEN на `planFiscalImport`.
+- [x] **Step 5: Донорский ридер и `importFiscal`.** Дописать в `import-fiscal.ts`:
 ```ts
 import postgres from "postgres";
 
@@ -1815,8 +1815,8 @@ export async function importFiscal(
 }
 ```
 `планВОтчёт` — маленькая чистая функция, собирающая `FiscalImportReport` из `план` плюс фактические счётчики (`written`), с картой решения (`raw → canon → value`) и `skipped` по каждому полю; `ImportFiscalWriteFailure` — класс по образцу `ImportWriteFailure` (`import-stock-history.ts:131`), несёт частичный отчёт и исходную ошибку. `WHERE isNull(...)`/`eq(..., false)` в самом UPDATE — та же страховка, что у `бэкфиллWhere` (`backfill-product-ids.ts:211`): между расчётом плана и записью могло пройти время (панель), и повторная проверка в SQL не даёт затереть то, что успели вписать руками.
-- [ ] **Step 6: Отчёт и точка входа.** Дописать `formatFiscalReport(r: FiscalImportReport): string` (режим первой строкой, таблица «поле · к записи · записано · пропущено», карта решения потолком 50 — `картаРешения`-приём, `ИТОГИ(json)` последней строкой) и `main()` — разбор флагов через `разобратьАргументы` (импорт из `./backfill-product-ids`), коды возврата 1/2, `sqlFiscalDonor`, вызов `importFiscal`, `process.exit(0)`, `require.main === module` — один в один структура `import-stock-history.ts:659-703`.
-- [ ] **Step 7: Тест непустого пути записи и идемпотентности.** Дописать в `import-fiscal.test.ts` (стаб БД в файле, тем же приёмом, что у `tasks.test.ts` — `select`/`update`/`transaction` цепочки-заглушки):
+- [x] **Step 6: Отчёт и точка входа.** Дописать `formatFiscalReport(r: FiscalImportReport): string` (режим первой строкой, таблица «поле · к записи · записано · пропущено», карта решения потолком 50 — `картаРешения`-приём, `ИТОГИ(json)` последней строкой) и `main()` — разбор флагов через `разобратьАргументы` (импорт из `./backfill-product-ids`), коды возврата 1/2, `sqlFiscalDonor`, вызов `importFiscal`, `process.exit(0)`, `require.main === module` — один в один структура `import-stock-history.ts:659-703`.
+- [x] **Step 7: Тест непустого пути записи и идемпотентности.** Дописать в `import-fiscal.test.ts` (стаб БД в файле, тем же приёмом, что у `tasks.test.ts` — `select`/`update`/`transaction` цепочки-заглушки):
 ```ts
 describe("Идемпотентность и границы записи", () => {
   it("--dry-run не пишет ни одной строки — update не вызывается вовсе", async () => {
@@ -1851,9 +1851,9 @@ describe("Флаги и коды возврата (переиспользуют 
   });
 });
 ```
-- [ ] **Step 8:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → GREEN; `pnpm -s typecheck && pnpm -s lint`.
-- [ ] **Step 9: Скрипт запуска и документация.** В `packages/db/package.json` рядом с `"db:import:stock-history": "node dist/import-stock-history.js"` добавить `"db:import:fiscal": "node dist/import-fiscal.js"`. В `docs/DEPLOY.md` — новый пункт рунбука рядом с существующим переносом истории склада: те же два прогона, `</dev/null` в хвосте, ожидаемые числа из §9 плана (раздел «Выкатка» ниже).
-- [ ] **Step 10:** `git commit -m "feat(db): разовый перенос фискальных полей mydon-stock — ИКПУ/штрихкод/маркировка, приоритет entity.attrs, категорийные коды в отчёт (П6, R-P6-9/R-P6-14)" -- packages/db/src/import-fiscal.ts packages/db/src/import-fiscal.test.ts packages/db/package.json docs/DEPLOY.md`
+- [x] **Step 8:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → GREEN; `pnpm -s typecheck && pnpm -s lint`.
+- [x] **Step 9: Скрипт запуска и документация.** В `packages/db/package.json` рядом с `"db:import:stock-history": "node dist/import-stock-history.js"` добавить `"db:import:fiscal": "node dist/import-fiscal.js"`. В `docs/DEPLOY.md` — новый пункт рунбука рядом с существующим переносом истории склада: те же два прогона, `</dev/null` в хвосте, ожидаемые числа из §9 плана (раздел «Выкатка» ниже).
+- [x] **Step 10:** `git commit -m "feat(db): разовый перенос фискальных полей mydon-stock — ИКПУ/штрихкод/маркировка, приоритет entity.attrs, категорийные коды в отчёт (П6, R-P6-9/R-P6-14)" -- packages/db/src/import-fiscal.ts packages/db/src/import-fiscal.test.ts packages/db/package.json docs/DEPLOY.md`
 
 ---
 
