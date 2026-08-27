@@ -71,6 +71,8 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     productSaleLagH: 5,
     parityStreak: 3,
     cutoverThreshold: 7,
+    parityLastRed: null,
+    parityStreakSince: "2026-08-21",
     parity: { days: 7, ok: true, mismatches: 0, stockOk: true, checked: 2, stockChecked: 2, mode: "mirror", note: null },
   },
   // Числа ЗА НЕДЕЛЮ, о которой письмо: сбор ходит раз в 3 ч (8 прогонов в
@@ -337,6 +339,8 @@ describe("Текст недельной сводки", () => {
         productSaleLagH: null,
         parityStreak: 0,
         cutoverThreshold: 7,
+        parityLastRed: null,
+        parityStreakSince: null,
         parity: {
           days: 7,
           ok: false,

@@ -120,6 +120,43 @@ export function priorityOf(status: DueStatus): "normal" | "high" {
 }
 
 /**
+ * СБОЙ ПРОГОНА — СОБЫТИЕ, А НЕ СТРОКА В ЛОГЕ. `result.errors` уезжали только
+ * в `console.log` крона (`index.ts:447`), а логи контейнера живут до первого
+ * деплоя: аварию 26.08.2026 («ни одной задачи ТО не поставлено ни разу»)
+ * пришлось доказывать схемой и нулевыми счётчиками, потому что строк уже не
+ * было. Под своим `try/catch`: сторож, который роняет прогон, хуже
+ * отсутствующего.
+ *
+ * Отдельная функция, а не хвост перед одним `return`: `runMaintenanceMonitor`
+ * выходит РАНО, если `maintenanceDue()` сам упал (Core не поднялся, битый
+ * запрос) — и это САМЫЙ тяжёлый отказ прогона. Вызов ПЕРЕД ОБОИМИ `return`
+ * закрывает именно этот путь (ревью Task 2, M1): раньше он проходил мимо
+ * эмиссии, и `select count(*) from event where type = 'maintenance.monitor_failed'`
+ * читался как «здоров» даже при мёртвом Core.
+ */
+async function записатьСбойПрогона(
+  core: MaintenanceMonitorCoreClient,
+  result: MaintenanceMonitorResult,
+  today: string,
+): Promise<void> {
+  if (result.errors.length === 0) return;
+  try {
+    await core.recordEvent({
+      source: "maintenance-monitor",
+      type: "maintenance.monitor_failed",
+      payload: {
+        errorCount: result.errors.length,
+        errors: result.errors.slice(0, 20),
+        tasks: result.tasks,
+        day: today,
+      },
+    });
+  } catch (err) {
+    result.errors.push(`событие о сбое не записано: ${String(err)}`);
+  }
+}
+
+/**
  * Один проход. Сбой на одном нормативе не должен ронять остальные — каждый
  * обрабатывается в своём try/catch, ошибки копятся в `errors`.
  */
@@ -136,6 +173,7 @@ export async function runMaintenanceMonitor(
     rows = await core.maintenanceDue();
   } catch (err) {
     result.errors.push(`сроки не прочитаны: ${String(err)}`);
+    await записатьСбойПрогона(core, result, today);
     return result;
   }
 
@@ -221,6 +259,7 @@ export async function runMaintenanceMonitor(
     }
   }
 
+  await записатьСбойПрогона(core, result, today);
   return result;
 }
 

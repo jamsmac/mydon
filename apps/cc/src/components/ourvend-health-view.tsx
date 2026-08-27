@@ -1,4 +1,4 @@
-import { core, type OurvendHealth, type ParityStreak } from "../lib/core";
+import { core, type OurvendHealth } from "../lib/core";
 import { count, plural, when } from "../lib/format";
 
 /** Серия отказов, с которой сбор считается сломанным (правило `ourvend.sync_failed_streak`). */
@@ -85,7 +85,7 @@ function разборПаритета(p: OurvendHealth["parity"]): { прода�
  * учётной дорожкой. Смысл секции ровно один: 12 отказов подряд с 24.08 никто
  * не заметил, потому что смотреть было некуда.
  */
-export function OurvendHealthCard({ health, streak = null }: { health: OurvendHealth; streak?: ParityStreak | null }) {
+export function OurvendHealthCard({ health }: { health: OurvendHealth }) {
   const слотыЧ = health.slotsLagMin === null ? null : health.slotsLagMin / 60;
   // Отсутствие снимков (`null`) тревогой само по себе не считается: это уже
   // сказано красной пилюлей «снимков нет» в своей строке, и поднимать из-за
@@ -124,21 +124,22 @@ export function OurvendHealthCard({ health, streak = null }: { health: OurvendHe
   // (`cutoverThreshold`, настройка `CUTOVER_GREEN_DAYS`), своей семёрки здесь нет.
   const катоверГотов = !зеркалаНет && health.parityStreak >= health.cutoverThreshold;
   /**
-   * «последний красный день: 06.08.2026» — ФАКТ, а не приговор серии (P4).
+   * «последний красный день: 06.08.2026» — ФАКТ, а не приговор серии (P4, R-G-4).
    *
-   * `lastRed` ищется по всему прочитанному журналу, а показывается окно в две
-   * недели, поэтому дата почти всегда лежит ВНЕ окна: прод-красный 25.08.2026
-   * продержится в поле до конца октября, хотя серия пойдёт с 26-го. Читать
-   * его как «серия сорвана» значило бы держать гейт закрытым днём, который
-   * серия давно перешагнула. `null` — красных не было вовсе, и молчать об
-   * этом нельзя: владелец гадал бы, чист журнал или строку забыли.
+   * `health.parityLastRed` едет полем `/ourvend/health` (Core считает его в
+   * том же `Promise.all`, что и серию), а не отдельным вторым запросом:
+   * ветки «серия не пришла» больше нет, поле есть всегда. `lastRed` ищется
+   * по всему прочитанному журналу, а показывается окно в две недели, поэтому
+   * дата почти всегда лежит ВНЕ окна: прод-красный 25.08.2026 продержится в
+   * поле до конца октября, хотя серия пойдёт с 26-го. Читать его как «серия
+   * сорвана» значило бы держать гейт закрытым днём, который серия давно
+   * перешагнула. `null` — красных не было вовсе, и молчать об этом нельзя:
+   * владелец гадал бы, чист журнал или строку забыли.
    */
   const красныйДень =
-    streak === null
-      ? ""
-      : streak.lastRed === null
-        ? " · красных дней не было"
-        : ` · последний красный день: ${деньРу(streak.lastRed)}`;
+    health.parityLastRed === null
+      ? " · красных дней не было"
+      : ` · последний красный день: ${деньРу(health.parityLastRed)}`;
 
   const успех =
     health.lastSuccessAt === null
@@ -322,13 +323,9 @@ export function OurvendHealthCard({ health, streak = null }: { health: OurvendHe
  * приём, что у `ShrinkageAlertsFailed`.
  */
 export async function OurvendHealthSection() {
-  // Серия по дням — ОТДЕЛЬНЫЙ роут: здоровье несёт счёт зелёных дней, а дату
-  // последнего красного дня (P4) отдаёт только он. Его отказ секцию не
-  // отменяет: подписи «последний красный день» просто нет.
-  const [health, streak] = await Promise.all([
-    core.ourvendHealth().catch(() => null),
-    core.ourvendParityStreak().catch(() => null),
-  ]);
+  // ОДИН запрос: дата последнего красного дня едет полем здоровья (R-G-4).
+  // Второго роута (`/ourvend/parity/streak`) тут больше нет — ломаться нечему.
+  const health = await core.ourvendHealth().catch(() => null);
   if (health === null) {
     return (
       <>
@@ -337,5 +334,5 @@ export async function OurvendHealthSection() {
       </>
     );
   }
-  return <OurvendHealthCard health={health} streak={streak} />;
+  return <OurvendHealthCard health={health} />;
 }

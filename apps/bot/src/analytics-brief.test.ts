@@ -9,7 +9,7 @@ import type {
   PriceChangesReport,
   PriceGapReport,
 } from "@mydon/shared";
-import type { AnalyticsWarning, BootstrapSalePriceResult, OurvendHealth, ParityStreak } from "./core-client";
+import type { AnalyticsWarning, BootstrapSalePriceResult, OurvendHealth } from "./core-client";
 import {
   BOOTSTRAP_DAYS_MAX,
   MARGIN_DAYS_DEFAULT,
@@ -206,6 +206,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   // Расхождения есть — ни одного зелёного дня подряд (R-P8b-2).
   parityStreak: 0,
   cutoverThreshold: 7,
+  parityLastRed: "2026-08-25",
+  parityStreakSince: null,
   // Заметка — в той же форме, что её собирает Core: половина остатков
   // подписана префиксом «остатки:» (`ourvend-parity.service.ts`).
   parity: {
@@ -658,45 +660,39 @@ const сРежимом = (mode: OurvendHealth["parity"]["mode"]): OurvendHealth[
   mode,
 });
 
-const СЕРИЯ: ParityStreak = {
-  greenDays: 3,
-  threshold: 7,
-  readyForCutover: false,
-  days: [
-    { date: "2026-08-26", ok: true, salesChecked: 14, stockChecked: 68, note: null },
-    { date: "2026-08-25", ok: true, salesChecked: 14, stockChecked: 68, note: null },
-    { date: "2026-08-24", ok: true, salesChecked: 14, stockChecked: 68, note: null },
-  ],
-  // Красный день ВНЕ окна показа (две недели) — ровно прод-случай: 25.08
-  // держится в поле до конца октября, серия при этом идёт с 26-го.
-  lastRed: "2026-08-06",
-  since: "2026-08-24",
-};
-
-describe("«сверка»: последний красный день — факт, а не приговор серии (P4)", () => {
+describe("«сверка»: последний красный день — факт, а не приговор серии (P4, R-G-4)", () => {
   const h = (over: Partial<OurvendHealth>): OurvendHealth => ({ ...ЗДОРОВЬЕ, ...over });
 
   it("красный день вне окна показа печатается датой, а не «серия сорвана»", () => {
-    const s = строкаКрасногоДня(СЕРИЯ);
+    const s = строкаКрасногоДня(h({ parityLastRed: "2026-08-06" }));
     assert.match(s, /последний красный день: 06\.08/);
     assert.ok(!/сорва|сброш|обнул/i.test(s), `серию рвать нечем: ${s}`);
   });
 
   it("красных дней не было — так и сказано, а не молчанием", () => {
-    assert.equal(строкаКрасногоДня({ ...СЕРИЯ, lastRed: null }), "красных дней не было");
+    assert.equal(строкаКрасногоДня(h({ parityLastRed: null })), "красных дней не было");
   });
 
   it("строка стоит под серией — она объясняет её длину", () => {
-    const строки = formatOurvendHealth(h({ parityStreak: 3 }), СЕРИЯ).join("\n").split("\n");
+    const строки = formatOurvendHealth(h({ parityStreak: 3, parityLastRed: "2026-08-06" })).join("\n").split("\n");
     const i = строки.findIndex((s) => /зелёных дн\. подряд/.test(s));
     assert.notEqual(i, -1);
     assert.match(строки[i + 1]!, /последний красный день: 06\.08/);
   });
 
-  it("серия не приехала (отказ роута) — отчёт печатается без строки, а не падает", () => {
-    const t = formatOurvendHealth(h({ parityStreak: 3 })).join("\n");
-    assert.match(t, /зелёных дн\. подряд/);
-    assert.ok(!t.includes("последний красный день"), t);
+  it("строка про красный день печатается из ЗДОРОВЬЯ, без второго запроса (R-G-4)", () => {
+    const строки = formatOurvendHealth(h({ parityLastRed: "2026-08-25" }));
+    assert.ok(строки.join("\n").includes("последний красный день: 25.08"));
+  });
+
+  it("красных не было — так и сказано: молчание владелец прочитал бы как потерянную строку", () => {
+    const строки = formatOurvendHealth(h({ parityLastRed: null }));
+    assert.ok(строки.join("\n").includes("красных дней не было"));
+  });
+
+  it("в режиме retired строки про красный день нет: серии там нет вовсе", () => {
+    const строки = formatOurvendHealth(h({ parityLastRed: "2026-08-25", parity: сРежимом("retired") }));
+    assert.ok(!строки.join("\n").includes("красный день"));
   });
 });
 
@@ -732,7 +728,7 @@ describe("«сверка»: зеркала больше нет — режим re
   });
 
   it("старый красный день в отчёт не лезет: серии, которую он объяснял бы, нет", () => {
-    const t = formatOurvendHealth(h({ parity: сРежимом("retired") }), СЕРИЯ).join("\n");
+    const t = formatOurvendHealth(h({ parity: сРежимом("retired"), parityLastRed: "2026-08-06" })).join("\n");
     assert.ok(!t.includes("последний красный день"), t);
   });
 });
@@ -756,6 +752,8 @@ describe("Пустые состояния и предупреждения (ре�
       productSaleLagH: null,
       parityStreak: 0,
       cutoverThreshold: 7,
+      parityLastRed: null,
+      parityStreakSince: null,
       parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, mode: "mirror", note: null },
     }).join("\n");
     assert.match(t, /Прогонов сбора за период нет — здоровье не оценить/);

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { task, TASK_SOURCE_DAY_PREDICATE } from "@mydon/db";
 import { TasksService } from "./tasks.service";
 
 type Row = Record<string, unknown>;
@@ -18,6 +20,8 @@ interface StubOpts {
    * работает прежний одиночный selectResult/existing.
    */
   selects?: Row[][];
+  /** Куда складывать аргумент `onConflictDoNothing` — иначе фикс регрессирует так же незаметно. */
+  conflicts?: { target?: unknown; where?: unknown }[];
 }
 
 /**
@@ -45,7 +49,10 @@ function stubDb(opts: StubOpts) {
       opts.inserted?.push(row);
       const returning = async () => (opts.insertConflict ? [] : [row]);
       return {
-        onConflictDoNothing: () => ({ returning }),
+        onConflictDoNothing: (cfg?: { target?: unknown; where?: unknown }) => {
+          opts.conflicts?.push({ target: cfg?.target, where: cfg?.where });
+          return { returning };
+        },
         returning,
         // `await db.insert(x).values(y)` без returning — запись в журнал.
         then: (res: (v: unknown) => unknown) => Promise.resolve([row]).then(res),
@@ -153,6 +160,36 @@ describe("Задачи", () => {
       entityId: "33333333-3333-4333-8333-333333333333",
     });
     assert.equal(inserted[0]?.entityId, "33333333-3333-4333-8333-333333333333");
+  });
+});
+
+describe("Дедуп задач на день держится ЧАСТИЧНЫМ индексом (R-G-2)", () => {
+  it("вставка называет и колонку, и ПРЕДИКАТ индекса — иначе Postgres отвечает 42P10", async () => {
+    // Без `where` drizzle печатает `on conflict ("source") do nothing`, и
+    // частичный индекс `task_source_key` из такой спецификации не выводится.
+    // Прод 26.08: задач от монитора 0 за всё время при 19 попытках в сутки.
+    const conflicts: { target?: unknown; where?: unknown }[] = [];
+    await makeTasks(stubDb({ conflicts })).ensureForDay({
+      title: "Мойка миксера",
+      ownerKind: "human",
+      source: "maint:pl-1",
+      dayKey: "2026-08-26",
+    });
+    assert.equal(conflicts.length, 1);
+    assert.equal(conflicts[0]!.target, task.source, "конфликт объявлен по той же колонке, что индекс");
+    assert.equal(
+      conflicts[0]!.where,
+      TASK_SOURCE_DAY_PREDICATE,
+      "предикат — ТО ЖЕ значение, что у индекса в схеме, а не его копия строкой",
+    );
+  });
+
+  it("предикат рендерится литералом, без единого параметра", () => {
+    // `index_predicate` в `ON CONFLICT` сравнивается с предикатом индекса, а
+    // не исполняется как фильтр: `$1` вместо литерала снова дал бы 42P10.
+    const { sql: текст, params } = new PgDialect().sqlToQuery(TASK_SOURCE_DAY_PREDICATE);
+    assert.equal(текст, "source ~ ':[0-9]{4}-[0-9]{2}-[0-9]{2}$'");
+    assert.deepEqual(params, [], "параметр в предикате ломает вывод частичного индекса");
   });
 });
 
