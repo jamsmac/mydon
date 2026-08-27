@@ -364,3 +364,15 @@ describe("Правило фискальной готовности (П6)", () =>
     assert.ok(RULE_EVENT_TYPES.includes("vending.product_fiscal_changed"));
   });
 });
+
+describe("Правило сторно снек-записи (П6)", () => {
+  it("каждое сторно попадает в брифинг с готовой подписью", () => {
+    const [note] = applyRules(ctx("vending.record_cancelled", {
+      label: "↩️ Отмена заправки автомата 2508160376: Snickers ×6",
+      cancelledBy: "person:00000000-0000-4000-8000-000000000001",
+    }));
+    assert.equal(note?.urgency, "briefing");
+    assert.match(note?.text ?? "", /Отмена заправки/);
+    assert.ok(RULE_EVENT_TYPES.includes("vending.record_cancelled"));
+  });
+});

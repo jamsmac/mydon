@@ -234,7 +234,11 @@ export async function handleMessage(
       };
     }
     try {
-      const res = await deps.core.recordVendingCash(session.receivedAmount, session.categories);
+      // Проводка автора (Task 7, Отклонение №9): не нашли карточку — запись
+      // уходит без автора, как раньше (не ошибка, «мои записи» её не увидит).
+      const person = await deps.core.personByChat(String(chatId)).catch(() => null);
+      const createdBy = person && !("found" in person) ? `person:${person.id}` : undefined;
+      const res = await deps.core.recordVendingCash(session.receivedAmount, session.categories, createdBy);
       return { text: formatCashAck(res) };
     } catch (err) {
       console.error("Ошибка записи кассы закупа:", err);
@@ -554,7 +558,11 @@ export async function handleMessage(
   if (isStockCommand(text)) {
     const items = parseStockItems(text);
     try {
-      const res = await deps.core.setVendingStock(items);
+      // Проводка автора (Task 7, Отклонение №9): не нашли карточку — запись
+      // уходит без автора, как раньше (не ошибка, «мои записи» её не увидит).
+      const person = await deps.core.personByChat(String(chatId)).catch(() => null);
+      const personId = person && !("found" in person) ? person.id : undefined;
+      const res = await deps.core.setVendingStock(items, personId);
       return { text: formatStockAck(items, res.adjustments) };
     } catch (err) {
       console.error("Ошибка записи остатков склада:", err);

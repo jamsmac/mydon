@@ -116,7 +116,10 @@ export function formatCashSessions(sessions: VendingCashSession[]): string {
   }
   const lines = sessions.slice(0, 10).map((s) => {
     const when = new Date(s.createdAt).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
-    return `• ${when} — получил ${RU(s.receivedAmount)}, потратил ${RU(s.totalSpent)}, остаток ${RU(s.remainder)}`;
+    // Сторно несёт отрицательные суммы («получил −150 000») — без своей
+    // пометки строка читалась бы как обычный (и странный) поход на базар.
+    const bullet = s.source === "storno" ? "↩️ Отмена" : "•";
+    return `${bullet} ${when} — получил ${RU(s.receivedAmount)}, потратил ${RU(s.totalSpent)}, остаток ${RU(s.remainder)}`;
   });
   if (sessions.length > 10) lines.push(`…и ещё ${sessions.length - 10}`);
   return ["💰 Кассы закупа:", "", ...lines].join("\n");

@@ -245,6 +245,9 @@ describe("Касса закупа: гейт по префиксу — не пр�
         spies.received += 1;
         return { received: false, replenished: 0, units: 0, reason: "не должно было вызваться" };
       },
+      // Task 7 резолвит автора перед записью кассы. Карточки в этом
+      // регрессионном тесте нет — проверяем прежний совместимый путь без неё.
+      personByChat: async () => ({ found: false }),
       recordVendingCash: async (
         receivedAmount: number,
         categories: { name: string; amount: number }[],
@@ -261,6 +264,7 @@ describe("Касса закупа: гейт по префиксу — не пр�
           })),
           totalSpent,
           remainder: receivedAmount - totalSpent,
+          source: "own",
           createdBy: "owner",
           createdAt: new Date().toISOString(),
         };

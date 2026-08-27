@@ -110,6 +110,7 @@ const планОбщий: SharedPlan = {
  * код, иначе сторож охраняет выдуманную форму.
  */
 const строкаИсторииОбщая: SharedStockCountRow = {
+  id: "00000000-0000-4000-8000-000000000001",
   dt: "2026-06-01",
   product: "Snickers",
   qty: 41,
@@ -232,7 +233,7 @@ describe("Усушка и план закупа — реэкспорт, а не 
     // shared этого не увидел бы — увидит компилятор на этих двух строках.
     const строка: StockCountRow = строкаИсторииОбщая;
     const отчёт: StockCountsReport = историяОбщая;
-    expect(Object.keys(строка).sort()).toEqual(["countedAt", "dt", "note", "product", "qty", "source"]);
+    expect(Object.keys(строка).sort()).toEqual(["countedAt", "dt", "id", "note", "product", "qty", "source"]);
     expect(Object.keys(отчёт).sort()).toEqual(["days", "product", "rows", "since", "warnings"]);
   });
 });

@@ -250,6 +250,48 @@ describe("Отчёты файлами", () => {
 });
 
 describe("Порядок разбора сообщения сотрудника", () => {
+  it("«Мои записи» открываются текстом через общий реестр меню", async () => {
+    const { core } = stubCore({
+      myRecords: async () => [{
+        kind: "refill",
+        id: "33333333-3333-4333-8333-333333333333",
+        createdAt: "2026-08-26T10:00:00Z",
+        label: "🍫 Заправка автомата Olma: Snickers ×6",
+      }],
+    });
+    const res = await handleStaffMessage(555, "мои записи", ME, {
+      core,
+      conversations: new Conversations(),
+    });
+    assert.match(res.reply.text, /твои последние записи/i);
+    assert.match(res.reply.keyboard!.inline_keyboard[0]![0]!.callback_data, /^mr:a:r:/);
+  });
+
+  it("«Мои записи»: первый callback только спрашивает, второй выполняет сторно", async () => {
+    const id = "33333333-3333-4333-8333-333333333333";
+    const calls: string[] = [];
+    const { core } = stubCore({
+      myRecords: async () => [{
+        kind: "refill",
+        id,
+        createdAt: "2026-08-26T10:00:00Z",
+        label: "🍫 Заправка автомата Olma: Snickers ×6",
+      }],
+      cancelVendingRecord: async () => {
+        calls.push("cancel");
+        return { ok: true, kind: "refill", stornoId: "s1", label: "↩️ Отмена", alreadyCancelled: false };
+      },
+    });
+    const deps = { core, conversations: new Conversations() };
+    const ask = await handleStaffCallback(555, `mr:a:r:${id}`, ME, deps);
+    assert.equal(calls.length, 0, "выбор строки не должен сразу её отменять");
+    assert.equal(ask.keyboard!.inline_keyboard.length, 2, "подтверждение и отказ — в разных рядах");
+
+    const cancel = await handleStaffCallback(555, `mr:c:r:${id}`, ME, deps);
+    assert.equal(cancel.answer, "Отменено");
+    assert.deepEqual(calls, ["cancel"]);
+  });
+
   it("отчёт «сделал заливку» идёт в мастер, а не открывает список задач", async () => {
     // Триггер задач — /задач|дела|.../, и «с-дела-л» в него попадает. Активный
     // мастер разбирается раньше триггеров, иначе отчёт открывал бы список,

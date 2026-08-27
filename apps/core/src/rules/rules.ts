@@ -438,6 +438,12 @@ export const RULES: Rule[] = [
         ? `🧾 Чек соберётся: ${str(c.payload.product)} — фискальные поля заполнены`
         : `🧾 Чек больше не соберётся: ${str(c.payload.product)} — проверь фискальные поля`,
   },
+  {
+    id: "vending.record_cancelled",
+    eventType: "vending.record_cancelled",
+    urgency: "briefing",
+    format: (c) => `${str(c.payload.label)} — отменил ${str(c.payload.cancelledBy)}`,
+  },
 
   // ── Снек-автоматы: аналитика и здоровье сбора (П5b) ───────────────────────
   {

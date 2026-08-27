@@ -13,7 +13,9 @@ import {
   sale,
   systemConfig,
   vendingAlias,
+  vendingCashSession,
   vendingProduct,
+  vendingRefill,
   vendingStock,
   vendingStockCount,
 } from "@mydon/db";
@@ -1654,6 +1656,8 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
     source: string;
     countedAt: Date;
     note: string | null;
+    /** Оригинал, который сторнирует эта строка (Task 7, R-P6-10). */
+    reversesId?: string | null;
   };
 
   let seq = 0;
@@ -1663,6 +1667,7 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
     qty: number,
     source = "own",
     note: string | null = null,
+    reversesId: string | null = null,
   ): ИсторияRow => ({
     id: `sc-${String(++seq).padStart(4, "0")}`,
     dt,
@@ -1671,6 +1676,7 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
     source,
     countedAt: new Date(`${dt}T09:00:00+05:00`),
     note,
+    reversesId,
   });
 
   /** Ключи сортировки, которые сервис отдал drizzle: тест сверяет ИХ, а не догадку стенда. */
@@ -1687,10 +1693,22 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
           let текущие = rows;
           const chain: Record<string, unknown> = {};
           chain.where = (cond?: unknown) => {
-            const п = параметрыSQL(cond).filter((v): v is string => typeof v === "string");
+            // «storno» — литерал условия видимости (Task 7, R-P6-10), а не
+            // значение фильтра по товару: без исключения параметрыSQL примет
+            // его за `имя` и погасит всю выдачу без фильтра по товару.
+            const п = параметрыSQL(cond).filter((v): v is string => typeof v === "string" && v !== "storno");
             const дата = п.find((v) => /^\d{4}-\d{2}-\d{2}$/.test(v));
             const имя = п.find((v) => !/^\d{4}-\d{2}-\d{2}$/.test(v));
-            текущие = текущие.filter((r) => (дата === undefined || r.dt >= дата) && (имя === undefined || r.productName === имя));
+            // Видимость строки: сама не сторно И на неё не ссылается чужая
+            // сторно-метка — то же условие, что `видимаяСтрока` в сервисе.
+            const отменённые = new Set(rows.filter((r) => r.source === "storno" && r.reversesId).map((r) => r.reversesId));
+            текущие = текущие.filter(
+              (r) =>
+                (дата === undefined || r.dt >= дата) &&
+                (имя === undefined || r.productName === имя) &&
+                r.source !== "storno" &&
+                !отменённые.has(r.id),
+            );
             return chain;
           };
           chain.orderBy = (...ключи: unknown[]) => {
@@ -1734,9 +1752,10 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
   });
 
   it("окно, порядок «свежее сверху» и форма строки", async () => {
+    const свежая = строка("2026-08-25", "Montella Вода минеральная 330ml", 7);
     const db = historyDb([
       строка("2026-08-25", "Sprite 250ml", 19),
-      строка("2026-08-25", "Montella Вода минеральная 330ml", 7),
+      свежая,
       строка("2026-01-01", "Montella Вода минеральная 330ml", 3, "stock-import"),
     ]);
     const о = await new VendingService(db).stockCounts(90, undefined, СЕЙЧАС);
@@ -1745,6 +1764,7 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
     assert.equal(о.product, null);
     assert.deepEqual(о.rows.map((r) => r.product), ["Montella Вода минеральная 330ml", "Sprite 250ml"]);
     assert.deepEqual(о.rows[0], {
+      id: свежая.id,
       dt: "2026-08-25",
       product: "Montella Вода минеральная 330ml",
       qty: 7,
@@ -1860,6 +1880,24 @@ describe("Вендинг Core: чтение истории склада (R-P8a-3
       ["2026-08-25", "2026-08-24"],
       "days=2 — сегодня и вчера, позавчера ещё не входит",
     );
+  });
+
+  describe("Сторно уходит из истории целиком (Task 7, R-P6-10)", () => {
+    it("отменённая строка и её сторно-метка обе пропадают, живая соседняя остаётся", async () => {
+      const живая = строка("2026-08-25", "Sprite 250ml", 19);
+      const оригинал = строка("2026-08-25", "TUC Sour cream", 6);
+      const метка = строка("2026-08-25", "TUC Sour cream", 6, "storno", "отмена", оригинал.id);
+      const db = historyDb([живая, оригинал, метка]);
+      const о = await new VendingService(db).stockCounts(90, undefined, СЕЙЧАС);
+      assert.deepEqual(о.rows.map((r) => r.product), ["Sprite 250ml"], "и оригинал, и метка исчезли из чтения");
+    });
+
+    it("id едет в ответе — ключ группы для «Моих записей»", async () => {
+      const строкa = строка("2026-08-25", "Sprite 250ml", 19);
+      const db = historyDb([строкa]);
+      const о = await new VendingService(db).stockCounts(90, undefined, СЕЙЧАС);
+      assert.equal(о.rows[0]?.id, строкa.id);
+    });
   });
 });
 
@@ -2293,7 +2331,9 @@ describe("Вендинг Core: касса закупа (§5.8)", () => {
       insert: () => ({
         values: (v: Record<string, unknown>) => {
           inserted.push(v);
-          return { returning: async () => [{ id: "cs1", createdAt: new Date("2026-08-02T12:00:00Z"), ...v }] };
+          // `source` не передаётся вызовом — колонка default 'own' (Task 1);
+          // стаб достраивает его так же, как достраивает createdAt.
+          return { returning: async () => [{ id: "cs1", createdAt: new Date("2026-08-02T12:00:00Z"), source: "own", ...v }] };
         },
       }),
     } as never;
@@ -2311,6 +2351,7 @@ describe("Вендинг Core: касса закупа (§5.8)", () => {
     assert.equal(res.totalSpent, 1_497_530);
     assert.equal(res.remainder, 902_470);
     assert.equal(res.id, "cs1");
+    assert.equal(res.source, "own");
     // В базу уходят СТРОКОВЫЕ numeric (toFixed) — Postgres numeric ожидает текст, не число.
     assert.equal(inserted[0]!.receivedAmount, "2400000.00");
     assert.equal(inserted[0]!.remainder, "902470.00");
@@ -2334,6 +2375,7 @@ describe("Вендинг Core: касса закупа (§5.8)", () => {
         categories: [{ name: "базар", lines: [], subtotal: 100 }],
         totalSpent: "1497530.00",
         remainder: "902470.00",
+        source: "own",
         createdBy: "owner",
         createdAt: new Date("2026-08-02T10:00:00Z"),
       },
@@ -2343,6 +2385,119 @@ describe("Вендинг Core: касса закупа (§5.8)", () => {
     assert.equal(list[0]!.receivedAmount, 2_400_000);
     assert.equal(list[0]!.remainder, 902_470);
     assert.equal(list[0]!.createdAt, "2026-08-02T10:00:00.000Z");
+    assert.equal(list[0]!.source, "own");
+  });
+
+  it("cashSessions() отдаёт source сторно-строки — бот отличит отмену от обычной записи (Task 7)", async () => {
+    const rows = [
+      {
+        id: "cs3",
+        receivedAmount: "-2400000.00",
+        categories: [],
+        totalSpent: "-1497530.00",
+        remainder: "-902470.00",
+        source: "storno",
+        createdBy: "person:1",
+        createdAt: new Date("2026-08-02T11:00:00Z"),
+      },
+    ];
+    const db = { select: () => ({ from: () => ({ orderBy: () => ({ limit: async () => rows }) }) }) } as never;
+    const list = await new VendingService(db).cashSessions();
+    assert.equal(list[0]!.source, "storno");
+  });
+});
+
+/**
+ * «Мои записи» (Task 7, бот): три независимых источника, слитые и
+ * отсортированные в JS — `select().from().where().orderBy().limit()` для
+ * заправки/кассы (различаются по ссылке на таблицу) и `db.execute(sql...)`
+ * для группы пересчёта (CTE, тот же приём, что у `ourvend-parity.service.ts`).
+ */
+describe("Вендинг Core: «Мои записи» (Task 7)", () => {
+  function myRecordsDb(opts: {
+    refills?: Record<string, unknown>[];
+    cash?: Record<string, unknown>[];
+    stockGroups?: Record<string, unknown>[];
+    onExecute?: (query: unknown) => void;
+  }) {
+    return {
+      select: () => ({
+        from: (t: unknown) => ({
+          where: () => ({
+            orderBy: () => ({
+              limit: async (n: number) =>
+                (t === vendingRefill ? (opts.refills ?? []) : t === vendingCashSession ? (opts.cash ?? []) : []).slice(0, n),
+            }),
+          }),
+        }),
+      }),
+      execute: async (query: unknown) => {
+        opts.onExecute?.(query);
+        return opts.stockGroups ?? [];
+      },
+    } as never;
+  }
+
+  it("пустая история — пустой список, а не ошибка", async () => {
+    const list = await new VendingService(myRecordsDb({})).myRecords("p1");
+    assert.deepEqual(list, []);
+  });
+
+  it("представитель группы считается через text: PostgreSQL не умеет min(uuid)", async () => {
+    let query: unknown;
+    await new VendingService(myRecordsDb({ onExecute: (value) => { query = value; } })).myRecords("p1");
+    assert.match(текстSQL(query), /min\(id::text\)::uuid/);
+  });
+
+  it("три источника сливаются и сортируются по created_at, свежее сверху", async () => {
+    const db = myRecordsDb({
+      refills: [
+        {
+          id: "r1",
+          serial: "2508160376",
+          product: "Snickers 50gr",
+          qty: 6,
+          createdAt: new Date("2026-08-25T10:00:00Z"),
+        },
+      ],
+      cash: [
+        { id: "cs1", receivedAmount: "2400000.00", createdAt: new Date("2026-08-26T08:00:00Z") },
+      ],
+      stockGroups: [{ id: "sc1", countedAt: new Date("2026-08-24T09:00:00Z"), positions: 3 }],
+    });
+    const list = await new VendingService(db).myRecords("p1");
+    assert.deepEqual(
+      list.map((r) => r.kind),
+      ["cash", "refill", "stock_count"],
+      "свежее сверху: касса (26.08) → заправка (25.08) → пересчёт (24.08)",
+    );
+  });
+
+  it("готовые русские подписи — тот же язык, что у ленты «Действия»", async () => {
+    const db = myRecordsDb({
+      refills: [{ id: "r1", serial: "2508160376", product: "Snickers 50gr", qty: 6, createdAt: new Date() }],
+      cash: [{ id: "cs1", receivedAmount: "2400000.00", createdAt: new Date() }],
+      stockGroups: [{ id: "sc1", countedAt: new Date(), positions: 3 }],
+    });
+    const [cash, refill, stock] = (await new VendingService(db).myRecords("p1")).sort((a, b) => a.kind.localeCompare(b.kind));
+    assert.equal(cash!.label, "💰 Касса закупа: получил 2400000 сум");
+    assert.equal(refill!.label, "🍫 Заправка автомата 2508160376: Snickers 50gr ×6");
+    assert.equal(stock!.label, "📦 Пересчёт склада: 3 позиций");
+  });
+
+  it("лимит режет итог и клэмпится в границы 1..15", async () => {
+    const refills = Array.from({ length: 20 }, (_, i) => ({
+      id: `r${i}`,
+      serial: "2508160376",
+      product: "X",
+      qty: 1,
+      createdAt: new Date(2026, 7, i + 1),
+    }));
+    const list = await new VendingService(myRecordsDb({ refills })).myRecords("p1", 2);
+    assert.equal(list.length, 2);
+
+    const clamped = await new VendingService(myRecordsDb({ refills })).myRecords("p1", 999);
+    assert.equal(clamped.length, 15, "999 клэмпится к потолку 15, а не читает всё подряд");
   });
 });
 

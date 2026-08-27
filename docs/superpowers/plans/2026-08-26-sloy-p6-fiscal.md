@@ -1931,7 +1931,7 @@ export async function handleMyRecordsCallback(
 
     const stockGroups = (await this.db.execute(sql`
       with groups as (
-        select min(id) as id, counted_at as "countedAt", count(*)::int as positions
+        select min(id::text)::uuid as id, counted_at as "countedAt", count(*)::int as positions
         from ${vendingStockCount}
         where source = 'own' and person_id = ${personId}
         group by counted_at, person_id
@@ -1946,7 +1946,13 @@ export async function handleMyRecordsCallback(
       limit ${limit}
     `)) as unknown as MyRecordStockRow[];
     ```
-    `min(id)` как ключ группы — тот же приём, что R-FW-P2 уже использует у `stockCounts()` (`:1707-1712`, комментарий «ТРЕТИЙ КЛЮЧ — PK»): `id` — случайный `uuid` (`packages/db/src/schema.ts:43`, `defaultRandom()`), поэтому `min(id)` детерминирован ПОВТОРНО (одно и то же значение при двух чтениях), но НЕ хронологичен — это тот же компромисс, что уже принят в кодовой базе, а не новое допущение. Отмена атомарна (Task 7, ветка `stock_count` — вся транзакция), поэтому у ВСЕХ строк группы одна судьба: проверка через `reverses_id = g.id` (представитель группы) равносильна проверке всей группы. `label` — `📦 Пересчёт склада: N позиций` (N = `positions`).
+    `min(id::text)::uuid` как ключ группы — UUID сначала приводится к тексту,
+    потому что PostgreSQL 15 не определяет агрегат `min(uuid)`. Получившийся
+    ключ детерминирован ПОВТОРНО (одно и то же значение при двух чтениях), но
+    НЕ хронологичен. Отмена атомарна (Task 7, ветка `stock_count` — вся
+    транзакция), поэтому у ВСЕХ строк группы одна судьба: проверка через
+    `reverses_id = g.id` (представитель группы) равносильна проверке всей
+    группы. `label` — `📦 Пересчёт склада: N позиций` (N = `positions`).
   - Три массива сливаются в JS (`[...refills, ...cash, ...stockGroups].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit)`), а не одним SQL `UNION` — источники разной формы (id/label уже посчитаны раздельно), и `UNION` по трём разнородным `select`ам менее читаем, чем три коротких запроса + сортировка в коде.
 - **`config-spec.ts`**: новая запись в `CONFIG_SPECS` (после блока «Вендинг: катовер учёта OurVend», `:260-338`) — `{ key: "SNACK_CANCEL_WINDOW_HOURS", label: "Вендинг: окно самостоятельной отмены записи, часов", kind: "number", fallback: "24", help: "Сколько часов автор может сам отменить свою запись (заправку, пересчёт, кассу). Владелец (system.admin) отменяет без лимита. 24 ч — правило донора mydon-stock, у нас оно новое: если мешает — поднимай, а не обходи.", validate: inRange(1, 720) }`.
 - **`actions.service.ts`**: запрос `snackRefills` (`121-131`) добирает `source: vendingRefill.source`; `ActionRow.kind` (`39-51`) получает `"vending_refill_cancelled"`; цикл `for (const r of snackRefills)` (`262-269`) ветвится: `r.source === "storno" ? "↩️ Отмена заправки автомата ${r.serial}: ${r.product} ×${Math.abs(r.qty)}" : "🍫 Заправка автомата ${r.serial}: ${r.product} ×${r.qty}"`; в `push(...)` четвёртый аргумент (kind) тоже становится условным: `r.source === "storno" ? "vending_refill_cancelled" : "vending_refill"`. `personIdOf` не трогается.

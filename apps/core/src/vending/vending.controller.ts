@@ -1,4 +1,15 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  NotFoundException,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
@@ -22,6 +33,7 @@ import { Throttle } from "@nestjs/throttler";
 import { normalizeFiscalInput, PACKAGE_CODES, VAT_RATES } from "@mydon/shared";
 import { AnalyticsService } from "./analytics.service";
 import { ProductFiscalService } from "./product-fiscal.service";
+import { RecordCancelService, type CancelKind, type CancelResult } from "./record-cancel.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { ShrinkageService } from "./shrinkage.service";
@@ -433,6 +445,21 @@ export class StockCountsDto {
   product?: string;
 }
 
+/** Автор сторно определяется карточкой сотрудника, а не доверенным списком ролей из бота. */
+export class CancelRecordDto {
+  @IsUUID()
+  personId!: string;
+}
+
+/** Параметры экрана «Мои записи»; 15 — одновременно UX- и SQL-потолок. */
+export class MyRecordsDto {
+  @IsUUID()
+  person!: string;
+
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(15)
+  limit?: number;
+}
+
 /**
  * Окна отчётов аналитики снека (П5b). Границы стоят на ВХОДЕ, а не только в
  * сервисе: `?days=100000` иначе доехал бы до выборки продаж и был бы зажат уже
@@ -511,6 +538,7 @@ export class VendingController {
     private readonly refills: RefillService,
     private readonly refillEvents: RefillEventsService,
     private readonly productFiscal: ProductFiscalService,
+    private readonly recordCancel: RecordCancelService,
     private readonly shrinkageReport: ShrinkageService,
     private readonly analytics: AnalyticsService,
     private readonly weekly: WeeklyDigestService,
@@ -675,9 +703,19 @@ export class VendingController {
     return this.vending.recordCashSession(dto.receivedAmount, dto.categories, dto.createdBy);
   }
 
+  @Post("cash/:id/cancel")
+  cancelCash(@Param("id", ParseUUIDPipe) id: string, @Body() dto: CancelRecordDto) {
+    return this.cancelRecord("cash", id, dto.personId);
+  }
+
   @Get("cash")
   cashSessions() {
     return this.vending.cashSessions();
+  }
+
+  @Get("my-records")
+  myRecords(@Query() dto: MyRecordsDto) {
+    return this.vending.myRecords(dto.person, dto.limit);
   }
 
   // ── Журнал сбора: коллектор открывает запуск, потом закрывает итогом ───────
@@ -705,6 +743,16 @@ export class VendingController {
       ...dto,
       performedAt: dto.performedAt ? new Date(dto.performedAt) : undefined,
     });
+  }
+
+  @Post("refills/:id/cancel")
+  cancelRefill(@Param("id", ParseUUIDPipe) id: string, @Body() dto: CancelRecordDto) {
+    return this.cancelRecord("refill", id, dto.personId);
+  }
+
+  @Post("stock-counts/:id/cancel")
+  cancelStockCount(@Param("id", ParseUUIDPipe) id: string, @Body() dto: CancelRecordDto) {
+    return this.cancelRecord("stock_count", id, dto.personId);
   }
 
   /** Товары, стоящие в автомате по зеркалу — кнопки мастера заливки в боте. */
@@ -836,6 +884,22 @@ export class VendingController {
       from: from ? new Date(from) : undefined,
       to: to ? new Date(to) : undefined,
       limit: Number.isFinite(n) && n > 0 ? n : undefined,
+    });
+  }
+
+  private async cancelRecord(kind: CancelKind, id: string, personId: string): Promise<CancelResult> {
+    const result = await this.recordCancel.cancel(kind, id, { personId, ref: `person:${personId}` }, new Date());
+    if (result.ok) return result;
+    if (result.reason === "not_found") {
+      throw new NotFoundException({ reason: result.reason, message: "Запись не найдена" });
+    }
+    if (result.reason === "not_yours") {
+      throw new ForbiddenException({ reason: result.reason, message: "Отменять можно только свои записи" });
+    }
+    throw new ForbiddenException({
+      reason: result.reason,
+      hours: result.hours,
+      message: `Записи старше ${result.hours} часов отменяет владелец`,
     });
   }
 }

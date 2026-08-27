@@ -12,6 +12,7 @@ import type {
   ShrinkReport as SharedShrinkReport,
 } from "@mydon/shared";
 import {
+  CancelVendingRecordError,
   CoreClient,
   NotAMachineError,
   type AnalyticsWarning,
@@ -48,8 +49,83 @@ function стубFetch(row: Partial<EntityRow>): { urls: string[] } {
   return { urls };
 }
 
+/** Подмена fetch: запоминает URL и тело запроса, отдаёт готовый JSON-ответ. */
+function стубFetchТело(status: number, body: unknown): { calls: { url: string; init?: RequestInit }[] } {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    } as unknown as Response;
+  }) as typeof globalThis.fetch;
+  return { calls };
+}
+
 afterEach(() => {
   globalThis.fetch = настоящийFetch;
+});
+
+/**
+ * Проводка автора (Task 7, Отклонение №9): `personId`/`createdBy` уезжают в
+ * тело POST, только когда бот их резолвил — старое поведение (без автора)
+ * не должно измениться для тех, у кого карточки нет.
+ */
+describe("Проводка автора: setVendingStock/recordVendingCash (Task 7)", () => {
+  it("setVendingStock шлёт personId, когда передан", async () => {
+    const { calls } = стубFetchТело(200, { items: 1, adjustments: [] });
+    const core = new CoreClient("http://core", 1000, "");
+    await core.setVendingStock([{ product: "Snickers", quantity: 5 }], "p1");
+    const body = JSON.parse(String(calls[0]!.init!.body)) as { personId?: string };
+    assert.equal(body.personId, "p1");
+  });
+
+  it("recordVendingCash шлёт createdBy, когда передан", async () => {
+    const { calls } = стубFetchТело(200, {
+      id: "cs1", receivedAmount: 100_000, categories: [], totalSpent: 0, remainder: 100_000,
+      source: "own", createdBy: "person:p1", createdAt: "2026-08-26T10:00:00Z",
+    });
+    const core = new CoreClient("http://core", 1000, "");
+    await core.recordVendingCash(100_000, [], "person:p1");
+    const body = JSON.parse(String(calls[0]!.init!.body)) as { createdBy?: string };
+    assert.equal(body.createdBy, "person:p1");
+  });
+
+  it("оба поля не попадают в тело, когда не переданы (обратная совместимость)", async () => {
+    const stockFetch = стубFetchТело(200, { items: 1, adjustments: [] });
+    const core = new CoreClient("http://core", 1000, "");
+    await core.setVendingStock([{ product: "Snickers", quantity: 5 }]);
+    const stockBody = JSON.parse(String(stockFetch.calls[0]!.init!.body)) as Record<string, unknown>;
+    assert.ok(!("personId" in stockBody));
+
+    const cashFetch = стубFetchТело(200, {
+      id: "cs1", receivedAmount: 100_000, categories: [], totalSpent: 0, remainder: 100_000,
+      source: "own", createdBy: "owner", createdAt: "2026-08-26T10:00:00Z",
+    });
+    await core.recordVendingCash(100_000, []);
+    const cashBody = JSON.parse(String(cashFetch.calls[0]!.init!.body)) as Record<string, unknown>;
+    assert.ok(!("createdBy" in cashBody));
+  });
+});
+
+describe("cancelVendingRecord: отказ Core разбирается в структурную причину (Task 7)", () => {
+  it("403 too_old — CancelVendingRecordError с распознанными reason/hours", async () => {
+    стубFetchТело(403, { reason: "too_old", hours: 24, message: "Записи старше 24 часов отменяет владелец" });
+    const core = new CoreClient("http://core", 1000, "");
+    await assert.rejects(
+      () => core.cancelVendingRecord("refill", "r1", "p1"),
+      (e: unknown) => e instanceof CancelVendingRecordError && e.status === 403 && e.body.reason === "too_old" && e.body.hours === 24,
+    );
+  });
+
+  it("путь маршрута зависит от вида записи", async () => {
+    const { calls } = стубFetchТело(200, { ok: true, kind: "stock_count", stornoId: "s1", label: "…", alreadyCancelled: false });
+    const core = new CoreClient("http://core", 1000, "");
+    await core.cancelVendingRecord("stock_count", "c1", "p1");
+    assert.equal(calls[0]!.url, "http://core/vending/stock-counts/c1/cancel");
+  });
 });
 
 describe("Серийник автомата по карточке", () => {

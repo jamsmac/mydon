@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Logger, Optional } from "@nestjs/common";
-import { and, desc, eq, gte, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, ne, notInArray, sql } from "drizzle-orm";
 import {
   approval,
   auditLog,
@@ -15,6 +15,7 @@ import {
   slotSnapshot,
   vendingAlias,
   vendingCashSession,
+  vendingRefill,
   vendingProduct,
   vendingPurchaseOrder,
   vendingStock,
@@ -76,6 +77,7 @@ import { DB, type Db } from "../db/db.module";
 import { ApprovalsService } from "../approvals/approvals.service";
 import { settingValue } from "../system/settings";
 import { failedStreak, FAILED_STREAK_ALERT, STREAK_SCAN_LIMIT } from "./sync-streak";
+import type { CancelKind } from "./record-cancel.service";
 
 /**
  * Вендинг: приём собранных данных и расчёт дефицита (ТЗ Фаза 1).
@@ -326,8 +328,23 @@ export interface PurchaseOrderRow {
 /** Касса закупа для ответа/списка — снимок §5.8 + кто и когда записал. */
 export interface CashSessionRow extends PurchaseCashSession {
   id: string;
+  source: string;
   createdBy: string | null;
   createdAt: string;
+}
+
+/** Одна отменяемая запись сотрудника для экрана бота «Мои записи». */
+export interface MyRecordRow {
+  kind: CancelKind;
+  id: string;
+  createdAt: string;
+  label: string;
+}
+
+interface MyRecordStockRow {
+  id: string;
+  countedAt: Date;
+  positions: number;
 }
 
 /** Итог приёмки накладной на склад. */
@@ -1689,12 +1706,20 @@ export class VendingService {
     // пустую историю по товару, который считают каждую неделю.
     const канон = запрошено === "" ? null : (await this.canonResolver())(запрошено);
 
+    const видимаяСтрока = and(
+      ne(vendingStockCount.source, "storno"),
+      sql`not exists (
+        select 1 from ${vendingStockCount} s2
+        where s2.source = 'storno' and s2.reverses_id = ${vendingStockCount.id}
+      )`,
+    );
     const условие = канон === null
-      ? gte(vendingStockCount.dt, since)
-      : and(gte(vendingStockCount.dt, since), eq(vendingStockCount.productName, канон));
+      ? and(gte(vendingStockCount.dt, since), видимаяСтрока)
+      : and(gte(vendingStockCount.dt, since), eq(vendingStockCount.productName, канон), видимаяСтрока);
 
     const rows = await this.db
       .select({
+        id: vendingStockCount.id,
         dt: vendingStockCount.dt,
         productName: vendingStockCount.productName,
         qty: vendingStockCount.qty,
@@ -1736,6 +1761,7 @@ export class VendingService {
     }
 
     const строки: StockCountRow[] = показать.map((r) => ({
+      id: r.id,
       dt: r.dt,
       product: r.productName,
       qty: Number(r.qty),
@@ -3014,7 +3040,7 @@ export class VendingService {
         createdBy,
       })
       .returning();
-    return { ...session, id: row.id, createdBy: row.createdBy, createdAt: row.createdAt.toISOString() };
+    return { ...session, id: row.id, source: row.source, createdBy: row.createdBy, createdAt: row.createdAt.toISOString() };
   }
 
   /** Последние кассы закупа (для панели/бота — история походов на базар). */
@@ -3030,9 +3056,95 @@ export class VendingService {
       categories: r.categories, // типизировано на колонке ($type<CashCategorySummary[]>) — каста не нужно
       totalSpent: Number(r.totalSpent),
       remainder: Number(r.remainder),
+      source: r.source,
       createdBy: r.createdBy,
       createdAt: r.createdAt.toISOString(),
     }));
+  }
+
+  /** Последние собственные записи, которые ещё можно выбрать для сторно. */
+  async myRecords(personId: string, limit = 15): Promise<MyRecordRow[]> {
+    const взять = Math.min(Math.max(limit, 1), 15);
+    const actorRef = `person:${personId}`;
+
+    const [refillRows, cashRows, stockGroups] = await Promise.all([
+      this.db
+        .select({
+          id: vendingRefill.id,
+          serial: vendingRefill.machineSerial,
+          product: vendingRefill.productName,
+          qty: vendingRefill.qty,
+          createdAt: vendingRefill.createdAt,
+        })
+        .from(vendingRefill)
+        .where(and(
+          eq(vendingRefill.personId, personId),
+          ne(vendingRefill.source, "storno"),
+          sql`not exists (
+            select 1 from ${vendingRefill} s2
+            where s2.client_key = 'storno:' || ${vendingRefill.id}::text
+          )`,
+        ))
+        .orderBy(desc(vendingRefill.createdAt))
+        .limit(взять),
+      this.db
+        .select({
+          id: vendingCashSession.id,
+          receivedAmount: vendingCashSession.receivedAmount,
+          createdAt: vendingCashSession.createdAt,
+        })
+        .from(vendingCashSession)
+        .where(and(
+          eq(vendingCashSession.createdBy, actorRef),
+          ne(vendingCashSession.source, "storno"),
+          sql`not exists (
+            select 1 from ${vendingCashSession} s2
+            where s2.source = 'storno' and s2.reverses_id = ${vendingCashSession.id}
+          )`,
+        ))
+        .orderBy(desc(vendingCashSession.createdAt))
+        .limit(взять),
+      this.db.execute(sql`
+        with groups as (
+          -- PostgreSQL не определяет min(uuid): сравниваем стабильное
+          -- текстовое представление и возвращаем настоящий uuid наружу.
+          select min(id::text)::uuid as id, counted_at as "countedAt", count(*)::int as positions
+          from ${vendingStockCount}
+          where source = 'own' and person_id = ${personId}
+          group by counted_at, person_id
+        )
+        select g.id, g."countedAt", g.positions
+        from groups g
+        where not exists (
+          select 1 from ${vendingStockCount} s
+          where s.source = 'storno' and s.reverses_id = g.id
+        )
+        order by g."countedAt" desc
+        limit ${взять}
+      `) as unknown as Promise<MyRecordStockRow[]>,
+    ]);
+
+    const records: MyRecordRow[] = [
+      ...refillRows.map((r) => ({
+        kind: "refill" as const,
+        id: r.id,
+        createdAt: r.createdAt.toISOString(),
+        label: `🍫 Заправка автомата ${r.serial}: ${r.product} ×${r.qty}`,
+      })),
+      ...cashRows.map((r) => ({
+        kind: "cash" as const,
+        id: r.id,
+        createdAt: r.createdAt.toISOString(),
+        label: `💰 Касса закупа: получил ${Number(r.receivedAmount)} сум`,
+      })),
+      ...stockGroups.map((r) => ({
+        kind: "stock_count" as const,
+        id: r.id,
+        createdAt: new Date(r.countedAt).toISOString(),
+        label: `📦 Пересчёт склада: ${Number(r.positions)} позиций`,
+      })),
+    ];
+    return records.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, взять);
   }
 
   // ── Журнал сбора Ourvend ──────────────────────────────────────────────────

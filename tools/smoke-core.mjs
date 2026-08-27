@@ -1663,6 +1663,140 @@ async function проверитьЗадачиТО() {
   if (время.r.ok) throw new Error("dayKey с временем принят — предикат индекса перестанет ловить дубли");
 }
 
+/**
+ * П6 Task 7: три разных формы сторно и общая витрина «Мои записи» против
+ * настоящего Postgres. Заглушки unit-тестов не проверяют partial unique
+ * индексы, CTE группировки пересчёта и арифметику отрицательной кассы.
+ */
+async function проверитьСторноСнекЗаписей() {
+  const метка = Date.now();
+  const actorRef = (id) => `person:${id}`;
+
+  const сотрудник = await jsonRequest("POST", "/people", {
+    name: `Дымовой сотрудник сторно ${метка}`,
+    role: "оператор",
+    domain: "vendhub",
+  });
+  if (!сотрудник.r.ok || !сотрудник.json?.id) {
+    throw new Error(`сотрудник → ${сотрудник.r.status}: ${сотрудник.text.slice(0, 200)}`);
+  }
+  const personId = сотрудник.json.id;
+
+  const прайс = await jsonRequest("GET", "/vending/products");
+  if (!прайс.r.ok || !Array.isArray(прайс.json) || прайс.json.length < 2) {
+    throw new Error("для сторно нужны хотя бы две засеянные карточки товара");
+  }
+  const товарА = прайс.json[0].name;
+  const товарБ = прайс.json.find((row) => row.name !== товарА)?.name;
+  if (!товарА || !товарБ) throw new Error("прайс не дал два разных товара");
+
+  // 1. Заправка — дельта: +4 в автомат, сторно -4, склад вернулся к 10.
+  const начальныйСклад = await jsonRequest("POST", "/vending/stock", {
+    items: [{ product: товарА, quantity: 10 }],
+  });
+  if (!начальныйСклад.r.ok) {
+    throw new Error(`начальный склад → ${начальныйСклад.r.status}: ${начальныйСклад.text.slice(0, 200)}`);
+  }
+  const serial = `SMOKE-P6-${метка}`;
+  const refill = await jsonRequest("POST", "/vending/refills", {
+    machineSerial: serial,
+    productName: товарА,
+    qty: 4,
+    personId,
+    performedAt: new Date().toISOString(),
+    clientKey: `smoke-p6-refill-${метка}`,
+    source: "bot",
+    createdBy: actorRef(personId),
+  });
+  const refillId = refill.json?.refill?.id;
+  if (!refill.r.ok || !refillId || refill.json.stockLeft !== 6) {
+    throw new Error(`заправка → ${refill.r.status}: ${refill.text.slice(0, 240)}`);
+  }
+  const refillCancel = await jsonRequest("POST", `/vending/refills/${refillId}/cancel`, { personId });
+  if (!refillCancel.r.ok || refillCancel.json?.ok !== true || refillCancel.json?.alreadyCancelled !== false) {
+    throw new Error(`сторно заправки → ${refillCancel.r.status}: ${refillCancel.text.slice(0, 240)}`);
+  }
+  const refillRows = await читать(
+    `/vending/refills?machineSerial=${encodeURIComponent(serial)}&personId=${encodeURIComponent(personId)}&limit=10`,
+  );
+  const refillSum = refillRows.reduce((sum, row) => sum + Number(row.qty), 0);
+  if (refillRows.length !== 2 || refillSum !== 0) {
+    throw new Error(`журнал заправки после сторно: строк ${refillRows.length}, сумма qty=${refillSum}`);
+  }
+  const stockAfterRefill = await читать("/vending/stock");
+  const stockRow = stockAfterRefill.find((row) => row.product === товарА);
+  if (stockRow?.quantity !== 10) {
+    throw new Error(`склад после сторно заправки=${stockRow?.quantity}, ждали 10`);
+  }
+
+  // 2. Пересчёт — единица отмены ВЕСЬ ввод; ни оригиналы, ни метки чтение
+  // истории не показывает. Текущий vending_stock при этом не меняется.
+  const countedAt = new Date(Date.now() + 1000).toISOString();
+  const count = await jsonRequest("POST", "/vending/stock", {
+    countedAt,
+    personId,
+    items: [
+      { product: товарА, quantity: 13 },
+      { product: товарБ, quantity: 5 },
+    ],
+  });
+  if (!count.r.ok) throw new Error(`пересчёт → ${count.r.status}: ${count.text.slice(0, 200)}`);
+  const beforeCount = await читать(`/vending/stock-counts?days=1&product=${encodeURIComponent(товарА)}`);
+  const countRow = beforeCount.rows.find((row) => new Date(row.countedAt).getTime() === new Date(countedAt).getTime());
+  if (!countRow?.id) throw new Error("строка дымового пересчёта не вернулась в истории");
+  const countCancel = await jsonRequest("POST", `/vending/stock-counts/${countRow.id}/cancel`, { personId });
+  if (!countCancel.r.ok || countCancel.json?.ok !== true) {
+    throw new Error(`сторно пересчёта → ${countCancel.r.status}: ${countCancel.text.slice(0, 240)}`);
+  }
+  const afterCount = await читать("/vending/stock-counts?days=1");
+  if (afterCount.rows.some((row) => new Date(row.countedAt).getTime() === new Date(countedAt).getTime())) {
+    throw new Error("отменённый ввод пересчёта остался в GET stock-counts");
+  }
+
+  // 3. Касса — противознак по всему леджеру; чтение намеренно показывает
+  // обе строки, но их сумма обязана быть нулевой.
+  const cash = await jsonRequest("POST", "/vending/cash", {
+    receivedAmount: 1000,
+    categories: [{ name: "дымовой закуп", lines: [{ label: "товар", amount: 300 }] }],
+    createdBy: actorRef(personId),
+  });
+  if (!cash.r.ok || !cash.json?.id) {
+    throw new Error(`касса → ${cash.r.status}: ${cash.text.slice(0, 200)}`);
+  }
+  const cashCancel = await jsonRequest("POST", `/vending/cash/${cash.json.id}/cancel`, { personId });
+  if (!cashCancel.r.ok || cashCancel.json?.ok !== true || !cashCancel.json?.stornoId) {
+    throw new Error(`сторно кассы → ${cashCancel.r.status}: ${cashCancel.text.slice(0, 240)}`);
+  }
+  const cashRows = await читать("/vending/cash");
+  const pair = cashRows.filter((row) => row.id === cash.json.id || row.id === cashCancel.json.stornoId);
+  const sums = pair.reduce(
+    (acc, row) => ({
+      received: acc.received + Number(row.receivedAmount),
+      spent: acc.spent + Number(row.totalSpent),
+      remainder: acc.remainder + Number(row.remainder),
+    }),
+    { received: 0, spent: 0, remainder: 0 },
+  );
+  if (pair.length !== 2 || sums.received !== 0 || sums.spent !== 0 || sums.remainder !== 0) {
+    throw new Error(`касса после сторно: строк ${pair.length}, суммы ${JSON.stringify(sums)}`);
+  }
+  if (!pair.some((row) => row.source === "own") || !pair.some((row) => row.source === "storno")) {
+    throw new Error(`касса не различает обычную и сторно-строку: ${pair.map((row) => row.source).join("/")}`);
+  }
+
+  // 4. Общая витрина не длиннее 15 и не возвращает ни одну из трёх уже
+  // отменённых единиц учёта.
+  const mine = await читать(`/vending/my-records?person=${encodeURIComponent(personId)}`);
+  const cancelled = new Set([refillId, countRow.id, cash.json.id]);
+  if (!Array.isArray(mine) || mine.length > 15) {
+    throw new Error(`my-records: получено ${Array.isArray(mine) ? mine.length : "не массив"}, потолок 15`);
+  }
+  const leaked = mine.filter((row) => cancelled.has(row.id));
+  if (leaked.length > 0) {
+    throw new Error(`my-records вернул отменённые записи: ${leaked.map((row) => row.id).join(", ")}`);
+  }
+}
+
 /** Глобальный guard обязан реально вернуть 429, а не только присутствовать в модуле. */
 /**
  * П5b: приёмка накладной наблюдает закупочную цену позиции
@@ -2024,6 +2158,16 @@ try {
   }
 
   try {
+    await проверитьСторноСнекЗаписей();
+    console.log("  ok  сценарий: сторно заправки — сумма qty ноль, склад вернулся");
+    console.log("  ok  сценарий: сторно пересчёта — оригинал и метки скрыты из истории");
+    console.log("  ok  сценарий: сторно кассы — две строки, сумма журнала ноль");
+    console.log("  ok  сценарий: «Мои записи» — потолок 15, отменённых нет");
+  } catch (e) {
+    провалы.push(`сторно снек-записей: ${e.message}`);
+  }
+
+  try {
     await проверитьRateLimit();
     console.log("  ok  сценарий: глобальный rate limit отвечает 429");
   } catch (e) {
@@ -2048,4 +2192,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 14 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 18 сценариев.`);

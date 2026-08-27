@@ -5,6 +5,7 @@ import { OurvendParityService } from "../ourvend/ourvend-parity.service";
 import { SyncStaleService } from "../ourvend/sync-stale.service";
 import { AnalyticsService } from "./analytics.service";
 import { ProductFiscalService } from "./product-fiscal.service";
+import { RecordCancelService } from "./record-cancel.service";
 import { RefillEventsService } from "./refill-events.service";
 import { RefillService } from "./refill.service";
 import { RetentionService } from "./retention.service";
@@ -39,6 +40,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
   providers: [
     VendingService,
     ProductFiscalService,
+    RecordCancelService,
     RefillService,
     RefillEventsService,
     ShrinkageService,
@@ -51,6 +53,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
   ],
   exports: [
     VendingService,
+    RecordCancelService,
     RefillService,
     RefillEventsService,
     ShrinkageService,
