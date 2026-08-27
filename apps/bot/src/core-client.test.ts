@@ -10,6 +10,7 @@ import type {
   PurchaseSummary as SharedPurchaseSummary,
   SetSalePriceResult as SharedSetSalePriceResult,
   ShrinkReport as SharedShrinkReport,
+  ProductFiscal as SharedProductFiscal,
 } from "@mydon/shared";
 import {
   CancelVendingRecordError,
@@ -23,6 +24,7 @@ import {
   type OurvendSyncRun,
   type SetSalePriceResult,
   type ShrinkReport,
+  type VendingProductCard,
   type VendingPlan,
   type VendingPurchase,
 } from "./core-client";
@@ -66,6 +68,30 @@ function стубFetchТело(status: number, body: unknown): { calls: { url: s
 
 afterEach(() => {
   globalThis.fetch = настоящийFetch;
+});
+
+it("фискальный блок строки прайса — ТОТ ЖЕ тип, что в @mydon/shared", () => {
+  const блок: SharedProductFiscal = {
+    ikpu: null,
+    mxik: null,
+    vatPct: 12,
+    barcode: null,
+    packageCode: "796",
+    marked: false,
+  };
+  const строка: VendingProductCard = {
+    id: "p1",
+    name: "Snickers 50gr",
+    category: "snack",
+    purchasePrice: 7000,
+    salePrice: 15000,
+    packSize: 10,
+    isActive: true,
+    excludedFromPurchase: false,
+    fixedPurchaseQty: null,
+    fiscal: блок,
+  };
+  assert.equal(строка.fiscal.vatPct, 12);
 });
 
 /**

@@ -11,6 +11,7 @@ import type {
   ParityStreak,
   PriceChangesReport,
   PriceGapReport,
+  ProductFiscal,
   PurchasePlan as VendingPlan,
   PurchaseSummary as VendingPurchase,
   SetSalePriceResult,
@@ -144,6 +145,25 @@ export interface VendingCashSession {
   source: string;
   createdBy: string | null;
   createdAt: string;
+}
+
+/**
+ * Строка прайса для КАРТОЧКИ (П6) — ровно те поля, которые она печатает.
+ *
+ * Полный тип строки каталога намеренно не дублируется из Core: общим между
+ * слоями остаётся фискальный блок `ProductFiscal`.
+ */
+export interface VendingProductCard {
+  id: string;
+  name: string;
+  category: "drink" | "snack" | "other";
+  purchasePrice: number | null;
+  salePrice: number | null;
+  packSize: number;
+  isActive: boolean;
+  excludedFromPurchase: boolean;
+  fixedPurchaseQty: number | null;
+  fiscal: ProductFiscal;
 }
 
 /** Правила закупа товара «было»/«стало» — как их отдаёт Core. */
@@ -1191,8 +1211,12 @@ export class CoreClient {
     return normalizeMachineSerial(row.externalRef);
   }
 
-  /** Прайс вендинга — для поиска товара по названию, когда его нет в зеркале. */
-  vendingProducts(): Promise<{ id: string; name: string; isActive: boolean }[]> {
+  /**
+   * Прайс вендинга — для поиска товара по названию, когда его нет в зеркале.
+   * Возврат расширен под карточку (П6). Существующий мастер заливки берёт
+   * только `name`/`isActive`, поэтому расширение для него безопасно.
+   */
+  vendingProducts(): Promise<VendingProductCard[]> {
     return this.request("/vending/products");
   }
 

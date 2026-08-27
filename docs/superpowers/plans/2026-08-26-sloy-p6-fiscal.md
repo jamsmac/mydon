@@ -1384,7 +1384,7 @@ export const PRODUCT_CARD_HINT: string;
 - **Пустое поле печатается как «—», а не пропускается:** «не выясняли» — это ответ, а исчезнувшая строка читается как «всё в порядке».
 - **Правка фискальных полей из бота — ВНЕ ОХВАТА, и тривиальной части здесь нет.** 17-значный код, набранный на телефоне в подвале, — ровно тот ввод, который производит «заполнено, но неверно»; у цены есть гейт ±20 % (`setProductPrice`, `vending.service.ts:2612`), у ИКПУ гейта нет и быть не может: второй такой же код неотличим от опечатки.
 
-- [ ] **Step 1: Тесты RED.** Создать `apps/bot/src/product-card.test.ts`:
+- [x] **Step 1: Тесты RED.** Создать `apps/bot/src/product-card.test.ts`:
 ```ts
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -1461,9 +1461,9 @@ describe("Печать карточки товара", () => {
     assert.equal(строка.fiscal.vatPct, 12);
   });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter bot build && pnpm --filter bot test` → RED.
-- [ ] **Step 3: Клиент.** В `apps/bot/src/core-client.ts` объявить `VendingProductCard` (импорт `ProductFiscal` из `@mydon/shared`) и расширить возврат `vendingProducts()`. Докблок метода дописать: «Возврат расширен под карточку (П6). Существующий потребитель (`staff-refill.ts:763`) берёт два поля и не правится: расширение типа для него безопасно».
-- [ ] **Step 4: Модуль карточки.** Создать `apps/bot/src/product-card.ts`. `formatProductCard` — одно сообщение:
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter bot build && pnpm --filter bot test` → RED.
+- [x] **Step 3: Клиент.** В `apps/bot/src/core-client.ts` объявить `VendingProductCard` (импорт `ProductFiscal` из `@mydon/shared`) и расширить возврат `vendingProducts()`. Докблок метода дописать: «Возврат расширен под карточку (П6). Существующий потребитель (`staff-refill.ts:763`) берёт два поля и не правится: расширение типа для него безопасно».
+- [x] **Step 4: Модуль карточки.** Создать `apps/bot/src/product-card.ts`. `formatProductCard` — одно сообщение:
 ```
 🧾 Snickers 50gr (снек)
 Закуп 7 000 сум · витрина 15 000 сум · блок 10 · фикс 48 · закупаем
@@ -1479,7 +1479,7 @@ describe("Печать карточки товара", () => {
 ✅ Чек соберётся.
 ```
 Для дырявой карточки хвост заменяется на `⚠️ Чек не соберётся:` и по строке на дыру из `fiscalFlaws` («• ИКПУ: код не выяснен»). Правку из бота НЕ предлагаем ни словом — вместо этого хвост: «Править фискальные поля — в панели: VendHub → Правила закупа → Править.»
-- [ ] **Step 5: Роутинг.** В `apps/bot/src/handler.ts` — ветка ПЕРЕД `if (isRuleCommand(text))` (`:259`):
+- [x] **Step 5: Роутинг.** В `apps/bot/src/handler.ts` — ветка ПЕРЕД `if (isRuleCommand(text))` (`:259`):
 ```ts
   // Карточка товара — ЧТЕНИЕ (П6). До parseIntent и до правил закупа: префикс
   // «карточка …» ни с чем не пересекается, а «новая карточка» — чужой поток и
@@ -1501,8 +1501,8 @@ describe("Печать карточки товара", () => {
     }
   }
 ```
-- [ ] **Step 6:** `pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck && pnpm -s lint`.
-- [ ] **Step 7:** `git commit -m "feat(bot): «карточка <товар>» печатает фискальный блок и дыры (П6, R-P6-5)" -- apps/bot/src/product-card.ts apps/bot/src/product-card.test.ts apps/bot/src/core-client.ts apps/bot/src/core-client.test.ts apps/bot/src/handler.ts`
+- [x] **Step 6:** `pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck && pnpm -s lint`.
+- [x] **Step 7:** `git commit -m "feat(bot): «карточка <товар>» печатает фискальный блок и дыры (П6, R-P6-5)" -- apps/bot/src/product-card.ts apps/bot/src/product-card.test.ts apps/bot/src/core-client.ts apps/bot/src/core-client.test.ts apps/bot/src/handler.ts`
 
 ---
 
@@ -1961,7 +1961,7 @@ export async function handleMyRecordsCallback(
 - **`menu.ts`** (после `fix`, `:144`): `{ id: "mine", label: "✏️ Мои записи", perm: "tasks.own", ready: true, match: isMyRecordsTrigger }`. «↩️ Ошибся — исправить» (кофе, DELETE) НЕ трогается и не сливается — разные контракты (R-P6-3).
 - **Смоук** (`tools/smoke-core.mjs`): фискальная правка уже добавлена Task 3; здесь — три сценария сторно (`POST refills/cancel` → сумма `qty` по автомату = 0, склад вернулся; `POST stock-counts/cancel` → `GET stock-counts` не показывает ни оригинал, ни метку; `POST cash/cancel` → `GET cash` показывает обе строки, сумма журнала = 0) плюс `GET my-records` (не больше 15, отменённых нет). Счётчик сценариев в последней строке файла поднимается на число добавленных `assert`.
 
-- [ ] **Step 1: Тесты RED — `record-cancel.service.test.ts`.** Стаб БД тем же приёмом, что у `tasks.test.ts` (см. Task 5 этого плана и `apps/core/src/tasks/tasks.test.ts` в дереве). Создать `apps/core/src/vending/record-cancel.service.test.ts`:
+- [x] **Step 1: Тесты RED — `record-cancel.service.test.ts`.** Стаб БД тем же приёмом, что у `tasks.test.ts` (см. Task 5 этого плана и `apps/core/src/tasks/tasks.test.ts` в дереве). Создать `apps/core/src/vending/record-cancel.service.test.ts`:
 ```ts
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -2114,12 +2114,12 @@ describe("Права доступа (R-P6-12)", () => {
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/db build && pnpm --filter core build && pnpm --filter core test` → RED (модуля нет).
-- [ ] **Step 3: `RecordCancelService`.** Реализовать по «Interfaces (produces)» и списку веток выше; права — читать `person` по `actor.personId` (`db.select().from(person).where(eq(person.id, actor.personId)).limit(1)`), `can(row?.roles ?? [], "system.admin")`; окно — `readIntSetting(this.db, "SNACK_CANCEL_WINDOW_HOURS", 24)`.
-- [ ] **Step 4:** `pnpm --filter core test` → GREEN на `record-cancel.service.test.ts`.
-- [ ] **Step 5: Контроллер, сервис, правило, настройка.** Внести правки из «Поведение» выше в `vending.controller.ts` (+`vending.controller.test.ts`: «пустой `personId` — 400», «отмена без прав автора — 403 not_yours», «`MyRecordsDto.limit` вне 1..15 — 400»), `vending.service.ts` (`stockCounts()`, `cashSessions()`, `CashSessionRow`, `myRecords()`), `vending.module.ts` (добавить `RecordCancelService` в `providers`, рядом с `ProductFiscalService` из Task 3), `rules.ts` (правило `vending.record_cancelled`, без `when` — редкое событие по построению, владелец узнаёт о каждой), `config-spec.ts` (`SNACK_CANCEL_WINDOW_HOURS`, +`config-spec.test.ts`: «валидация принимает 1..720, отвергает 0 и 721»).
-- [ ] **Step 6:** `pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`.
-- [ ] **Step 7: Лента «Действия».** Внести правку `actions.service.ts` (запрос + `push`) из «Поведение» выше. Дописать в `actions.service.test.ts`:
+- [x] **Step 2:** `pnpm --filter @mydon/db build && pnpm --filter core build && pnpm --filter core test` → RED (модуля нет).
+- [x] **Step 3: `RecordCancelService`.** Реализовать по «Interfaces (produces)» и списку веток выше; права — читать `person` по `actor.personId` (`db.select().from(person).where(eq(person.id, actor.personId)).limit(1)`), `can(row?.roles ?? [], "system.admin")`; окно — `readIntSetting(this.db, "SNACK_CANCEL_WINDOW_HOURS", 24)`.
+- [x] **Step 4:** `pnpm --filter core test` → GREEN на `record-cancel.service.test.ts`.
+- [x] **Step 5: Контроллер, сервис, правило, настройка.** Внести правки из «Поведение» выше в `vending.controller.ts` (+`vending.controller.test.ts`: «пустой `personId` — 400», «отмена без прав автора — 403 not_yours», «`MyRecordsDto.limit` вне 1..15 — 400»), `vending.service.ts` (`stockCounts()`, `cashSessions()`, `CashSessionRow`, `myRecords()`), `vending.module.ts` (добавить `RecordCancelService` в `providers`, рядом с `ProductFiscalService` из Task 3), `rules.ts` (правило `vending.record_cancelled`, без `when` — редкое событие по построению, владелец узнаёт о каждой), `config-spec.ts` (`SNACK_CANCEL_WINDOW_HOURS`, +`config-spec.test.ts`: «валидация принимает 1..720, отвергает 0 и 721»).
+- [x] **Step 6:** `pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`.
+- [x] **Step 7: Лента «Действия».** Внести правку `actions.service.ts` (запрос + `push`) из «Поведение» выше. Дописать в `actions.service.test.ts`:
 ```ts
 it("сторно-заправка подписана «Отмена заправки», а не заправкой на минус", () => {
   // вставить в фикстуру vendingRefill строку source='storno', qty=-6,
@@ -2131,10 +2131,10 @@ it("автор сторно-строки — тот, кто отменил (crea
   // (унаследовано от original через spread, затем перезаписано), не оригинала
 });
 ```
-- [ ] **Step 8:** `pnpm --filter core test` → GREEN.
-- [ ] **Step 9: Бот — проводка автора.** Внести правку `core-client.ts` (`setVendingStock`/`recordVendingCash`) и `handler.ts` (резолв `person` в двух ветках) из «Поведение» выше. Дописать в `core-client.test.ts`: «`setVendingStock` шлёт `personId`, когда передан», «`recordVendingCash` шлёт `createdBy`, когда передан», «оба поля не попадают в тело, когда не переданы (обратная совместимость)».
-- [ ] **Step 10:** `pnpm --filter bot build && pnpm --filter bot test` → GREEN.
-- [ ] **Step 11: Бот — экран «Мои записи».** Создать `apps/bot/src/my-records.ts` и `apps/bot/src/my-records.test.ts` по «Interfaces (produces)» и «Поведение» выше, тестами:
+- [x] **Step 8:** `pnpm --filter core test` → GREEN.
+- [x] **Step 9: Бот — проводка автора.** Внести правку `core-client.ts` (`setVendingStock`/`recordVendingCash`) и `handler.ts` (резолв `person` в двух ветках) из «Поведение» выше. Дописать в `core-client.test.ts`: «`setVendingStock` шлёт `personId`, когда передан», «`recordVendingCash` шлёт `createdBy`, когда передан», «оба поля не попадают в тело, когда не переданы (обратная совместимость)».
+- [x] **Step 10:** `pnpm --filter bot build && pnpm --filter bot test` → GREEN.
+- [x] **Step 11: Бот — экран «Мои записи».** Создать `apps/bot/src/my-records.ts` и `apps/bot/src/my-records.test.ts` по «Interfaces (produces)» и «Поведение» выше, тестами:
 ```ts
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -2178,13 +2178,13 @@ describe("Триггер и разбор callback", () => {
 });
 ```
 `CoreClient.cancelVendingRecord`/`myRecords` (см. Step 9 клиент — добавляются здесь же в `core-client.ts`, метод `myRecords(personId): Promise<MyRecordRow[]>` → `GET /vending/my-records?person=<id>`, `cancelVendingRecord(kind, id, personId): Promise<CancelResult>` → `POST /vending/{refills|stock-counts|cash}/:id/cancel`, отказ `403` бросает исключение с `.status`/`.body` — тот же паттерн, что у существующих ошибок Core в `core-client.ts` (`class CoreError`/аналог, если уже есть — переиспользуется, не заводится второй).
-- [ ] **Step 12: Меню и роутинг.** `menu.ts` — пункт `mine` из «Поведение» выше; `menu.test.ts`: «пункт „✏️ Мои записи“ доступен любому подключённому (`tasks.own` — базовое право)», «„↩️ Ошибся — исправить“ остался на месте». `staff.ts` — роутинг триггера/callback рядом с обработкой `isCoffeeFixTrigger`/`parseCoffeeFixCallback` (тот же приём подключения нового потока к общему циклу сотрудника, что у coffee-fix).
-- [ ] **Step 13:** `pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck && pnpm -s lint`.
-- [ ] **Step 14: История касс — подпись отмены.** `cash-intake.ts:formatCashSessions` (`113-123`) — ветка `source==="storno"`; `cash-intake.test.ts`: «сторно-касса подписана «↩️ Отмена», а не обычной записью».
-- [ ] **Step 15: Смоук.** Дописать в `tools/smoke-core.mjs` четыре сценария из «Поведение» выше (три сторно + `my-records`), поднять счётчик сценариев в последней строке файла на добавленное число `assert`.
-- [ ] **Step 16:** Полный прогон: `pnpm -s typecheck && pnpm -s lint && TURBO_FORCE=true pnpm -s test`; smoke на scratch-БД (`createdb → migrate.js → seed.js → seed-vending.js → backfill-product-ids.js → smoke-import.mjs → smoke-core.mjs → dropdb`).
-- [ ] **Step 17:** `docs/PLAN_STOCK_ABSORPTION.md` §П6 — отметить закрытыми фискальный блок, журналы и «Мои записи» (EAV-конструктор и гранулярные права — решением R-P6-4, не оставлять открытыми).
-- [ ] **Step 18:** `git commit -m "feat(core,bot): сторно снек-записей (заправка/пересчёт/касса) сторнирующей строкой, «Мои записи» в боте, проводка автора, подпись в ленте «Действия» (П6, R-P6-3/R-P6-10…R-P6-13)" -- apps/core/src/vending apps/core/src/rules apps/core/src/system/config-spec.ts apps/core/src/system/config-spec.test.ts apps/core/src/registry/actions.service.ts apps/core/src/registry/actions.service.test.ts apps/bot/src/my-records.ts apps/bot/src/my-records.test.ts apps/bot/src/menu.ts apps/bot/src/menu.test.ts apps/bot/src/staff.ts apps/bot/src/core-client.ts apps/bot/src/core-client.test.ts apps/bot/src/handler.ts apps/bot/src/cash-intake.ts apps/bot/src/cash-intake.test.ts packages/shared/src/vending-reports.ts tools/smoke-core.mjs docs/PLAN_STOCK_ABSORPTION.md`
+- [x] **Step 12: Меню и роутинг.** `menu.ts` — пункт `mine` из «Поведение» выше; `menu.test.ts`: «пункт „✏️ Мои записи“ доступен любому подключённому (`tasks.own` — базовое право)», «„↩️ Ошибся — исправить“ остался на месте». `staff.ts` — роутинг триггера/callback рядом с обработкой `isCoffeeFixTrigger`/`parseCoffeeFixCallback` (тот же приём подключения нового потока к общему циклу сотрудника, что у coffee-fix).
+- [x] **Step 13:** `pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck && pnpm -s lint`.
+- [x] **Step 14: История касс — подпись отмены.** `cash-intake.ts:formatCashSessions` (`113-123`) — ветка `source==="storno"`; `cash-intake.test.ts`: «сторно-касса подписана «↩️ Отмена», а не обычной записью».
+- [x] **Step 15: Смоук.** Дописать в `tools/smoke-core.mjs` четыре сценария из «Поведение» выше (три сторно + `my-records`), поднять счётчик сценариев в последней строке файла на добавленное число `assert`.
+- [x] **Step 16:** Полный прогон: `pnpm -s typecheck && pnpm -s lint && TURBO_FORCE=true pnpm -s test`; smoke на scratch-БД (`createdb → migrate.js → seed.js → seed-vending.js → backfill-product-ids.js → smoke-import.mjs → smoke-core.mjs → dropdb`).
+- [x] **Step 17:** `docs/PLAN_STOCK_ABSORPTION.md` §П6 — отметить закрытыми фискальный блок, журналы и «Мои записи» (EAV-конструктор и гранулярные права — решением R-P6-4, не оставлять открытыми).
+- [x] **Step 18:** `git commit -m "feat(core,bot): сторно снек-записей (заправка/пересчёт/касса) сторнирующей строкой, «Мои записи» в боте, проводка автора, подпись в ленте «Действия» (П6, R-P6-3/R-P6-10…R-P6-13)" -- apps/core/src/vending apps/core/src/rules apps/core/src/system/config-spec.ts apps/core/src/system/config-spec.test.ts apps/core/src/registry/actions.service.ts apps/core/src/registry/actions.service.test.ts apps/bot/src/my-records.ts apps/bot/src/my-records.test.ts apps/bot/src/menu.ts apps/bot/src/menu.test.ts apps/bot/src/staff.ts apps/bot/src/core-client.ts apps/bot/src/core-client.test.ts apps/bot/src/handler.ts apps/bot/src/cash-intake.ts apps/bot/src/cash-intake.test.ts packages/shared/src/vending-reports.ts tools/smoke-core.mjs docs/PLAN_STOCK_ABSORPTION.md`
 
 ---
 
