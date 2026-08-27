@@ -29,6 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Env sanity (.env.example)
+        run: |
+          node --test tools/check-env-example.test.mjs
+          node tools/check-env-example.mjs
+
       - uses: pnpm/action-setup@v4
         with:
           version: 10.19.0

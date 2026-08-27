@@ -1,4 +1,10 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from "@nestjs/common";
 import { auditLog, person, staffInvite } from "@mydon/db";
 import {
   generateInviteCode,
@@ -13,6 +19,9 @@ import { DB, type Db } from "../db/db.module";
 
 type PersonRow = typeof person.$inferSelect;
 
+/** Ниже этой длины хеш приглашения подбирается по радужной таблице. */
+const MIN_PEPPER_LENGTH = 16;
+
 /**
  * Приглашения сотрудников.
  *
@@ -20,9 +29,12 @@ type PersonRow = typeof person.$inferSelect;
  * и любой, кто его займёт, получал доступ к чужой карточке со всеми задачами.
  * Приглашение знает только тот, кому его дали лично.
  *
- * Перец берётся из окружения. Пустой перец не считается ошибкой запуска —
- * иначе обновление уронило бы Core на живом сервере, — но громко сообщается
- * в лог: хеши без перца подбираются по радужной таблице.
+ * Перец берётся из окружения. Пустой/короткий перец НЕ роняет старт Core —
+ * иначе обновление уронило бы весь Core на живом сервере ради одной функции —
+ * но и не даёт issue()/redeem() работать вслепую: без перца выпущенный код
+ * (или принятый чужой) защищён не лучше открытого текста, поэтому сама
+ * функция приглашений отказывает явной ошибкой, а не тихо ослабленным хешем
+ * (структурный аудит 27.08.2026, P0 #2).
  */
 @Injectable()
 export class InvitesService {
@@ -30,10 +42,20 @@ export class InvitesService {
 
   constructor(@Inject(DB) private readonly db: Db) {
     this.pepper = process.env.INVITE_PEPPER ?? "";
-    if (this.pepper.length < 16) {
+    if (this.pepper.length < MIN_PEPPER_LENGTH) {
       console.warn(
-        "INVITE_PEPPER не задан или короче 16 символов — коды приглашений слабо защищены. " +
+        "INVITE_PEPPER не задан или короче 16 символов — приглашения отключены до его настройки. " +
           "Задайте случайную строку в .env.",
+      );
+    }
+  }
+
+  /** Fail closed: без надёжного перца ни выпуск, ни погашение приглашения не идут. */
+  private assertPepperConfigured(): void {
+    if (this.pepper.length < MIN_PEPPER_LENGTH) {
+      throw new ServiceUnavailableException(
+        "Приглашения сотрудников временно недоступны: INVITE_PEPPER не настроен на сервере. " +
+          "Обратитесь к владельцу.",
       );
     }
   }
@@ -47,6 +69,7 @@ export class InvitesService {
     roles: string[],
     actorRef = "owner",
   ): Promise<{ code: string; expiresAt: Date; person: PersonRow }> {
+    this.assertPepperConfigured();
     const clean = normalizeRoles(roles);
     const code = generateInviteCode();
     const expiresAt = inviteExpiry();
@@ -59,7 +82,13 @@ export class InvitesService {
       await tx
         .update(staffInvite)
         .set({ revokedAt: new Date() })
-        .where(and(eq(staffInvite.personId, personId), isNull(staffInvite.usedAt), isNull(staffInvite.revokedAt)));
+        .where(
+          and(
+            eq(staffInvite.personId, personId),
+            isNull(staffInvite.usedAt),
+            isNull(staffInvite.revokedAt),
+          ),
+        );
 
       const [created] = await tx
         .insert(staffInvite)
@@ -92,13 +121,20 @@ export class InvitesService {
    * строкой означало бы время ответа, зависящее от числа приглашений.
    */
   async redeem(code: string, chatId: string): Promise<PersonRow> {
+    this.assertPepperConfigured();
     const hash = hashInviteCode(code, this.pepper);
 
     return this.db.transaction(async (tx) => {
       const [invite] = await tx
         .select()
         .from(staffInvite)
-        .where(and(eq(staffInvite.codeHash, hash), isNull(staffInvite.usedAt), isNull(staffInvite.revokedAt)))
+        .where(
+          and(
+            eq(staffInvite.codeHash, hash),
+            isNull(staffInvite.usedAt),
+            isNull(staffInvite.revokedAt),
+          ),
+        )
         .limit(1);
       // Одна формулировка на «нет такого» и «уже погашено»: разные ответы
       // подсказали бы перебирающему, что код существует.
@@ -107,7 +143,11 @@ export class InvitesService {
         throw new BadRequestException("Приглашение просрочено — попроси новое");
       }
 
-      const [target] = await tx.select().from(person).where(eq(person.id, invite.personId)).limit(1);
+      const [target] = await tx
+        .select()
+        .from(person)
+        .where(eq(person.id, invite.personId))
+        .limit(1);
       if (!target || target.active !== "yes") {
         // Транзакция откатится: неактивная карточка не должна сжигать
         // приглашение — иначе владельцу придётся выпускать его заново.
@@ -158,7 +198,13 @@ export class InvitesService {
       await tx
         .update(staffInvite)
         .set({ revokedAt: new Date() })
-        .where(and(eq(staffInvite.personId, personId), isNull(staffInvite.usedAt), isNull(staffInvite.revokedAt)));
+        .where(
+          and(
+            eq(staffInvite.personId, personId),
+            isNull(staffInvite.usedAt),
+            isNull(staffInvite.revokedAt),
+          ),
+        );
 
       const [after] = await tx
         .update(person)
