@@ -23,3 +23,8 @@ Task 6: DONE at 3c1ae20 (довершён восстановленный чер�
 Ветка НЕ смержена с origin/main (main ушёл вперёд на П6 — 1b40a8e).
 Слияние — по чек-листу «Выкатка», не раньше готовности всех 8 задач.
 Продолжаю с Task 7.
+
+Task 7: DONE at d769d46 — bot 746/746, cc 240/240 (5 новых в awaiting-block.test.tsx),
+core 1310/1310, typecheck 17/17, lint 17/17, live scratch-Postgres:
+tools/smoke-panel.mjs 29/29 страниц (оба шага /tasks зелёные).
+Продолжаю с Task 8 (последняя).
