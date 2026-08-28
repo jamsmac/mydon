@@ -156,7 +156,7 @@ export class SetQualityDto {
 - `assertCan` в `edit()` спрашивается ТОЛЬКО когда `ownerRef` реально меняется: правка срока или приоритета права назначения не требует. Для сравнения `edit()` получает чтение строки ДО транзакции (`this.byId(id)`), и это же чтение переиспользует T2 для гашения отметки.
 - Текст отказа один на оба права: «Это может менеджер. Попроси владельца проставить роль.» — сотрудник должен понять, что чинится это ролью, а не повтором нажатия.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // packages/shared/src/roles.test.ts — новый набор в конец файла
 describe("Права на назначение и приёмку задач (П7, R-P7-3)", () => {
@@ -297,8 +297,8 @@ describe("Права актора на приёмку и назначение (�
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (`effectiveRoles`/`LEGACY_ROLE_MAP` не экспортируются, `can(["manager"], "tasks.assign")` = false). `pnpm --filter core build && pnpm --filter core test` → RED (`rate` четвёртого поведения не знает, `edit` актора не проверяет).
-- [ ] **Step 3: Общий слой.** `packages/shared/src/roles.ts`:
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (`effectiveRoles`/`LEGACY_ROLE_MAP` не экспортируются, `can(["manager"], "tasks.assign")` = false). `pnpm --filter core build && pnpm --filter core test` → RED (`rate` четвёртого поведения не знает, `edit` актора не проверяет).
+- [x] **Step 3: Общий слой.** `packages/shared/src/roles.ts`:
 ```ts
 export const PERMISSIONS = [
   "tasks.own", // свои задачи: смотреть, брать, закрывать
@@ -326,7 +326,7 @@ export function effectiveRoles(p: { roles?: readonly string[] | null; role?: str
   return legacy && !known.includes(legacy) ? [...known, legacy] : known;
 }
 ```
-- [ ] **Step 4: Бот перестаёт держать свою копию.** `apps/bot/src/weekly-digest.ts`: удалить блок `ЛЕГАСИ_РОЛИ` (`:74-80`) вместе с его комментарием, добавить `effectiveRoles` в существующий импорт из `@mydon/shared`, и переписать `ролиРассылки`:
+- [x] **Step 4: Бот перестаёт держать свою копию.** `apps/bot/src/weekly-digest.ts`: удалить блок `ЛЕГАСИ_РОЛИ` (`:74-80`) вместе с его комментарием, добавить `effectiveRoles` в существующий импорт из `@mydon/shared`, и переписать `ролиРассылки`:
 ```ts
 /**
  * Роль рассылки у карточки: массив `roles` или легаси-текст `role`.
@@ -340,7 +340,7 @@ function ролиРассылки(p: PersonRow): boolean {
 }
 ```
 `WEEKLY_ROLES` и `РОЛИ_РАССЫЛКИ` остаются как есть: множество получателей сводки — вопрос рассылки, а не прав.
-- [ ] **Step 5: Проверка права в Core.** `apps/core/src/tasks/tasks.service.ts`: в импорты — `ForbiddenException` из `@nestjs/common`, `person` из `@mydon/db`, `can, effectiveRoles, type Permission` из `@mydon/shared`. Рядом с `machineIsOperationalCheck` (`:344`):
+- [x] **Step 5: Проверка права в Core.** `apps/core/src/tasks/tasks.service.ts`: в импорты — `ForbiddenException` из `@nestjs/common`, `person` из `@mydon/db`, `can, effectiveRoles, type Permission` из `@mydon/shared`. Рядом с `machineIsOperationalCheck` (`:344`):
 ```ts
   /** Актор с правами: панель ходит от владельца, бот — от карточки сотрудника. */
   private static readonly ACTOR_PERSON = /^person:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -376,7 +376,7 @@ function ролиРассылки(p: PersonRow): boolean {
     if (!can(effectiveRoles(p), perm)) throw new ForbiddenException(ОТКАЗ);
   }
 ```
-- [ ] **Step 6: Применение права.** `rate()` — первой строкой тела `await this.assertCan(actorRef, "tasks.confirm");` (до транзакции: отказ не должен открывать транзакцию). `edit()` — перед `return this.db.transaction(...)`:
+- [x] **Step 6: Применение права.** `rate()` — первой строкой тела `await this.assertCan(actorRef, "tasks.confirm");` (до транзакции: отказ не должен открывать транзакцию). `edit()` — перед `return this.db.transaction(...)`:
 ```ts
     // Строку читаем ДО транзакции: право `tasks.assign` требуется только при
     // РЕАЛЬНОЙ смене исполнителя, а правка срока или приоритета к назначению
@@ -390,7 +390,7 @@ function ролиРассылки(p: PersonRow): boolean {
     }
 ```
 `byId` уже кидает `NotFoundException` для отсутствующей задачи — прежнее поведение `edit()` сохраняется.
-- [ ] **Step 7: Контроллер даёт актора оценке.** `apps/core/src/tasks/tasks.controller.ts`: в `SetQualityDto` — поле `actor` из «Interfaces (produces)»; в обработчике (`:232-235`):
+- [x] **Step 7: Контроллер даёт актора оценке.** `apps/core/src/tasks/tasks.controller.ts`: в `SetQualityDto` — поле `actor` из «Interfaces (produces)»; в обработчике (`:232-235`):
 ```ts
   /**
    * Оценка сделанной задачи. «Переделать» возвращает её в работу.
@@ -405,8 +405,8 @@ function ролиРассылки(p: PersonRow): boolean {
     return this.tasks.rate(id, dto.quality, dto.actor ?? "owner");
   }
 ```
-- [ ] **Step 8:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter bot test` → GREEN. Отдельно убедиться, что `apps/bot/src/weekly-digest.test.ts` зелёный БЕЗ правок (`git diff --name-only` его не показывает): это и есть доказательство, что переезд карты поведения не изменил. `pnpm -s typecheck`.
-- [ ] **Step 9:** `git commit -m "feat(shared,core,bot): права tasks.assign и tasks.confirm, легаси-карта ролей переезжает в @mydon/shared (П7, R-P7-3/R-P7-12)" -- packages/shared/src/roles.ts packages/shared/src/roles.test.ts apps/bot/src/weekly-digest.ts apps/core/src/tasks/tasks.service.ts apps/core/src/tasks/tasks.controller.ts apps/core/src/tasks/tasks.test.ts`
+- [x] **Step 8:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter bot test` → GREEN. Отдельно убедиться, что `apps/bot/src/weekly-digest.test.ts` зелёный БЕЗ правок (`git diff --name-only` его не показывает): это и есть доказательство, что переезд карты поведения не изменил. `pnpm -s typecheck`.
+- [x] **Step 9:** `git commit -m "feat(shared,core,bot): права tasks.assign и tasks.confirm, легаси-карта ролей переезжает в @mydon/shared (П7, R-P7-3/R-P7-12)" -- packages/shared/src/roles.ts packages/shared/src/roles.test.ts apps/bot/src/weekly-digest.ts apps/core/src/tasks/tasks.service.ts apps/core/src/tasks/tasks.controller.ts apps/core/src/tasks/tasks.test.ts`
 
 ---
 
@@ -485,7 +485,7 @@ export interface TaskRow {
 - Событие `task.confirmed` пишется вставкой в `event` ВНУТРИ транзакции (см. «Отклонения» №4). Правила у него нет и не будет: приёмка — не тревога, а `immediate` превратило бы каждое «👌 Принять» в сообщение владельцу о его же решении (§7 спеки).
 - В ленте действий выборка `task_done` (`:231`, `eq(task.status,"done")`) **не меняется ни на байт** — это прямое следствие R-P7-6.
 
-- [ ] **Step 1: Тесты RED — схема и цепочка миграций.**
+- [x] **Step 1: Тесты RED — схема и цепочка миграций.**
 ```ts
 // packages/db/src/schema.test.ts — в набор «Перечисления схемы и словари»
   /**
@@ -579,7 +579,7 @@ describe("Цепочка миграций Drizzle", () => {
   });
 });
 ```
-- [ ] **Step 2: Тесты RED — общий слой и Core.**
+- [x] **Step 2: Тесты RED — общий слой и Core.**
 ```ts
 // packages/shared/src/tasks.test.ts — новый набор в конец файла
 describe("Производное состояние задачи (П7, R-P7-6)", () => {
@@ -728,8 +728,8 @@ describe("Лента действий: приёмка работы (П7)", () =>
   });
 });
 ```
-- [ ] **Step 3:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → RED (`confirmedAt` в схеме нет, `migrations.test.js` не существует); `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (`taskState` не экспортируется); `pnpm --filter core build && pnpm --filter core test` → RED (`confirm`/`awaitingConfirmation` не существуют).
-- [ ] **Step 4: Номер миграции и SQL.** СНАЧАЛА `ls packages/db/drizzle | tail -3`. На момент письма последняя — `0071_stock_count_retention_idx.sql`, то есть свободен `0072`; **П6 и «Инкассации» идут параллельно и могут занять его первыми** — тогда берётся следующий свободный, а файл переименовывается ВМЕСТЕ с записью в `meta/_journal.json` и снапшотом (перегенерацией), чужой файл не трогается. Содержимое (имя — от смысла, не от номера):
+- [x] **Step 3:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test` → RED (`confirmedAt` в схеме нет, `migrations.test.js` не существует); `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (`taskState` не экспортируется); `pnpm --filter core build && pnpm --filter core test` → RED (`confirm`/`awaitingConfirmation` не существуют).
+- [x] **Step 4: Номер миграции и SQL.** СНАЧАЛА `ls packages/db/drizzle | tail -3`. На момент письма последняя — `0071_stock_count_retention_idx.sql`, то есть свободен `0072`; **П6 и «Инкассации» идут параллельно и могут занять его первыми** — тогда берётся следующий свободный, а файл переименовывается ВМЕСТЕ с записью в `meta/_journal.json` и снапшотом (перегенерацией), чужой файл не трогается. Содержимое (имя — от смысла, не от номера):
 ```sql
 -- Приёмка задачи менеджером и отметка «тебе поручили» (срез П7, R-P7-6/R-P7-10).
 --
@@ -768,7 +768,7 @@ CREATE INDEX IF NOT EXISTS "task_awaiting_idx"
     ON "task" ("completed_at")
  WHERE "confirmed_at" IS NULL;
 ```
-- [ ] **Step 5: Схема.** `packages/db/src/schema.ts`, `task`: три колонки из «Interfaces (produces)» сразу за `closedBy` (`:214`); в список индексов (`:227-243`), после `task_client_key`:
+- [x] **Step 5: Схема.** `packages/db/src/schema.ts`, `task`: три колонки из «Interfaces (produces)» сразу за `closedBy` (`:214`); в список индексов (`:227-243`), после `task_client_key`:
 ```ts
     // Оба индекса ЧАСТИЧНЫЕ и зеркалят миграцию П7: расхождение схемы и SQL
     // приводит к тому, что следующая генерация попыталась бы создать их заново.
@@ -778,7 +778,7 @@ CREATE INDEX IF NOT EXISTS "task_awaiting_idx"
     index("task_awaiting_idx").on(t.completedAt).where(sql`confirmed_at is null`),
 ```
 Затем `pnpm --filter @mydon/db db:generate` — снапшот обязан лечь в коммит ВМЕСТЕ с файлом миграции; повторный `db:generate` после коммита должен сказать «No schema changes».
-- [ ] **Step 6: Общий слой.** `packages/shared/src/tasks.ts`, в конец файла:
+- [x] **Step 6: Общий слой.** `packages/shared/src/tasks.ts`, в конец файла:
 ```ts
 /**
  * Что показать человеку. Пять состояний против четырёх в БД: `confirmed` —
@@ -807,7 +807,7 @@ export const TASK_STATE_LABELS: Record<TaskState, string> = {
   cancelled: "Отменена",
 };
 ```
-- [ ] **Step 7: Core — приёмка и список.** `apps/core/src/tasks/tasks.service.ts`: в импорт из `@mydon/db` добавить `event`; после `release()` (`:483`):
+- [x] **Step 7: Core — приёмка и список.** `apps/core/src/tasks/tasks.service.ts`: в импорт из `@mydon/db` добавить `event`; после `release()` (`:483`):
 ```ts
   /** Сколько «ждущих приёмки» отдаём разом: экран бота и блок панели читают один список. */
   static readonly AWAITING_LIMIT = 100;
@@ -886,7 +886,7 @@ export const TASK_STATE_LABELS: Record<TaskState, string> = {
       .limit(limit);
   }
 ```
-- [ ] **Step 8: Маршруты.** `apps/core/src/tasks/tasks.controller.ts`: в `ListTasksDto` — `/** "1" — сделанные, но ещё не принятые. */ @IsOptional() @IsIn(["1"]) awaiting?: string;`; после `SetQualityDto` — `ConfirmTaskDto`; в `list()` (`:206`) ветка ПЕРЕД `unassigned`:
+- [x] **Step 8: Маршруты.** `apps/core/src/tasks/tasks.controller.ts`: в `ListTasksDto` — `/** "1" — сделанные, но ещё не принятые. */ @IsOptional() @IsIn(["1"]) awaiting?: string;`; после `SetQualityDto` — `ConfirmTaskDto`; в `list()` (`:206`) ветка ПЕРЕД `unassigned`:
 ```ts
     // «Ждут приёмки» — отдельная выборка по той же причине, что и свободные:
     // «не принято» это `confirmed_at IS NULL`, а не значение статуса, и через
@@ -909,7 +909,7 @@ export const TASK_STATE_LABELS: Record<TaskState, string> = {
   }
 ```
 (`Throttle` добавляется в импорт из `@nestjs/throttler`.)
-- [ ] **Step 9: Лента «Действия».** `apps/core/src/registry/actions.service.ts`: в союз `kind` (`:39-51`) — `| "task_confirmed"` сразу за `"task_done"`; в деструктуризацию (`:93-105`) — `confirmed` сразу за `done`; в `Promise.all` тем же местом — выборка:
+- [x] **Step 9: Лента «Действия».** `apps/core/src/registry/actions.service.ts`: в союз `kind` (`:39-51`) — `| "task_confirmed"` сразу за `"task_done"`; в деструктуризацию (`:93-105`) — `confirmed` сразу за `done`; в `Promise.all` тем же местом — выборка:
 ```ts
       // Приёмка работы. Отдельной строкой, а не заменой «Закрыл задачу»:
       // закрыл и принял — разные люди и разные моменты, и владельцу нужно
@@ -926,7 +926,7 @@ export const TASK_STATE_LABELS: Record<TaskState, string> = {
       push(r.at, "task_confirmed", personIdOf(r.by), `👌 Принял работу: ${r.title}`);
     }
 ```
-- [ ] **Step 10: Зеркала и смоук.** `apps/bot/src/core-client.ts` (`TaskRow`, `:61-74`) и `apps/cc/src/lib/core.ts` (`Task`, `:1134-1154`) получают поля из «Interfaces (produces)» с докблоками (`closedBy` обязан объяснить, зачем он вееру: из адресатов «подтвердите» исключается тот, кто закрыл). `tools/smoke-core.mjs`, шаг `"/tasks"` (`:481`) превращается в объект и рядом встают два новых:
+- [x] **Step 10: Зеркала и смоук.** `apps/bot/src/core-client.ts` (`TaskRow`, `:61-74`) и `apps/cc/src/lib/core.ts` (`Task`, `:1134-1154`) получают поля из «Interfaces (produces)» с докблоками (`closedBy` обязан объяснить, зачем он вееру: из адресатов «подтвердите» исключается тот, кто закрыл). `tools/smoke-core.mjs`, шаг `"/tasks"` (`:481`) превращается в объект и рядом встают два новых:
 ```js
   {
     path: "/tasks",
@@ -952,8 +952,8 @@ export const TASK_STATE_LABELS: Record<TaskState, string> = {
     },
   },
 ```
-- [ ] **Step 11:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test && pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter cc test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node packages/db/dist/migrate.js` ДВАЖДЫ подряд — второй прогон no-op (`IF NOT EXISTS`); `pnpm --filter @mydon/db db:generate` → «No schema changes»; `node tools/smoke-core.mjs` — шаги `/tasks` и `/tasks?awaiting=1` зелёные. Отдельно: миграция обязана пройти на базе, где `task` НЕ пуста, — иначе бэкфилл `assign_notified_at` не проверен ничем; перед `migrate.js` вставить в scratch-БД пару задач с `owner_ref` и убедиться, что после миграции `select count(*) from task where owner_ref is not null and assign_notified_at is null` = 0.
-- [ ] **Step 12:** `git commit -m "feat(db,core,shared): состояние «подтверждено менеджером» колонками, приёмка задачи и окно awaiting=1 (П7, R-P7-5/R-P7-6)" -- packages/db/src/schema.ts packages/db/src/schema.test.ts packages/db/src/migrations.test.ts packages/db/drizzle packages/shared/src/tasks.ts packages/shared/src/tasks.test.ts apps/core/src/tasks/tasks.service.ts apps/core/src/tasks/tasks.controller.ts apps/core/src/tasks/tasks.test.ts apps/core/src/registry/actions.service.ts apps/core/src/registry/actions.service.test.ts apps/bot/src/core-client.ts apps/cc/src/lib/core.ts tools/smoke-core.mjs`
+- [x] **Step 11:** `pnpm --filter @mydon/db build && pnpm --filter @mydon/db test && pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter cc test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node packages/db/dist/migrate.js` ДВАЖДЫ подряд — второй прогон no-op (`IF NOT EXISTS`); `pnpm --filter @mydon/db db:generate` → «No schema changes»; `node tools/smoke-core.mjs` — шаги `/tasks` и `/tasks?awaiting=1` зелёные. Отдельно: миграция обязана пройти на базе, где `task` НЕ пуста, — иначе бэкфилл `assign_notified_at` не проверен ничем; перед `migrate.js` вставить в scratch-БД пару задач с `owner_ref` и убедиться, что после миграции `select count(*) from task where owner_ref is not null and assign_notified_at is null` = 0.
+- [x] **Step 12:** `git commit -m "feat(db,core,shared): состояние «подтверждено менеджером» колонками, приёмка задачи и окно awaiting=1 (П7, R-P7-5/R-P7-6)" -- packages/db/src/schema.ts packages/db/src/schema.test.ts packages/db/src/migrations.test.ts packages/db/drizzle packages/shared/src/tasks.ts packages/shared/src/tasks.test.ts apps/core/src/tasks/tasks.service.ts apps/core/src/tasks/tasks.controller.ts apps/core/src/tasks/tasks.test.ts apps/core/src/registry/actions.service.ts apps/core/src/registry/actions.service.test.ts apps/bot/src/core-client.ts apps/cc/src/lib/core.ts tools/smoke-core.mjs`
 
 ---
 
@@ -1037,7 +1037,7 @@ export class TaskBridgeService implements OnModuleInit, OnApplicationShutdown {
 - **Полевая задача рождается свободной, инфраструктурная — адресной** (R-P7-8): чинить сбор кабинета полевому оператору нечем, в пуле такая задача либо провисит, либо будет взята тем, кто не может её закрыть. Получателей нет — тоже в пул, плюс `warn` и событие `tasks.no_confirmers`.
 - **Крон один, работ будет две.** В этой задаче — одна (`run`), под своим `catch`; вторая (`emitOverdue`) приходит в Task 5. Один таймер вместо двух — потому что страж `cron-shutdown.test.ts` описывает сервис с ОДНИМ полем `cron`, а образец «один таймер, две проверки, раздельные `catch`» уже написан в `sync-stale.service.ts:69-80`.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/tasks/task-bridge.test.ts — новый файл
 import assert from "node:assert/strict";
@@ -1339,8 +1339,8 @@ describe("Тумблеры моста задач (П7, R-P7-13)", () => {
     // остальных.
     ["task-bridge", () => new TaskBridgeService({} as never, {} as never, {} as never, {} as never)],
 ```
-- [ ] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`./task-bridge.service` не существует, `specFor("TASK_BRIDGE_ENABLED")` = `undefined`).
-- [ ] **Step 3: Тумблеры.** `apps/core/src/system/config-spec.ts`, новый блок сразу за блоком «Вендинг: полевой контур»:
+- [x] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`./task-bridge.service` не существует, `specFor("TASK_BRIDGE_ENABLED")` = `undefined`).
+- [x] **Step 3: Тумблеры.** `apps/core/src/system/config-spec.ts`, новый блок сразу за блоком «Вендинг: полевой контур»:
 ```ts
   // ── Задачи: мост «событие → задача» (П7, R-P7-13) ──
   {
@@ -1365,7 +1365,7 @@ describe("Тумблеры моста задач (П7, R-P7-13)", () => {
     validate: inRange(1, 200),
   },
 ```
-- [ ] **Step 4: Сервис — таблица источников и утилиты.** `apps/core/src/tasks/task-bridge.service.ts`, верх файла: докблок модуля (почему мост живёт в Core и зовёт метод, а не маршрут — §2.4 спеки: единственный существующий мост молчит в проде 20 дней, а его отказ выглядит как «работ не подошло»), константы из «Interfaces (produces)», `nextMorning`:
+- [x] **Step 4: Сервис — таблица источников и утилиты.** `apps/core/src/tasks/task-bridge.service.ts`, верх файла: докблок модуля (почему мост живёт в Core и зовёт метод, а не маршрут — §2.4 спеки: единственный существующий мост молчит в проде 20 дней, а его отказ выглядит как «работ не подошло»), константы из «Interfaces (produces)», `nextMorning`:
 ```ts
 /**
  * Срок автозадачи — СЛЕДУЮЩЕЕ ташкентское утро, 10:00.
@@ -1390,7 +1390,7 @@ function перечислить(items: string[]): string {
     : `${items.slice(0, ПОЗИЦИЙ_В_ОПИСАНИИ).join(", ")} …и ещё ${items.length - ПОЗИЦИЙ_В_ОПИСАНИИ}`;
 }
 ```
-- [ ] **Step 5: Сервис — прогон.** Шаги ровно в этом порядке:
+- [x] **Step 5: Сервис — прогон.** Шаги ровно в этом порядке:
   1. `TASK_BRIDGE_ENABLED !== "1"` → `{ …нули, disabled: true }`, одна строка в лог, выход. Читаем ЯВНО: `(await settingValue(this.db, "TASK_BRIDGE_ENABLED")).trim() === "1"` — `settingValue` возвращает `""` для неизвестного ключа, и «пусто = включено» было бы ложью; фолбэк `"1"` отдаёт сам `resolveEffective`.
   2. `events.list({ types: BRIDGE_EVENT_TYPES, since: new Date(now.getTime() - BRIDGE_WINDOW_MS), limit: BRIDGE_EVENTS_LIMIT })`.
   3. Группировка в `Map<ключ, { src, serial, day, payloads }>` — одна задача на автомат в сутки; ключ `${src.key}:${сущность}:${tashkentDay(e.occurredAt)}`, сущность — `serial` для `scope:"machine"` и `"system"` для `scope:"system"`; событие без серийника у `machine`-источника пропускается с `warn` (payload без ключевого поля — это дефект эмитента, и молчать о нём нельзя).
@@ -1420,7 +1420,7 @@ function перечислить(items: string[]): string {
     return rows.filter((p) => can(effectiveRoles(p), "tasks.confirm")).map((p) => ({ id: p.id }));
   }
 ```
-- [ ] **Step 6: Крон и регистрация.** В сервисе:
+- [x] **Step 6: Крон и регистрация.** В сервисе:
 ```ts
   /**
    * 06:15 Ташкента. После монитора ТО (06:00) — чтобы не спорить с ним за одни
@@ -1459,9 +1459,9 @@ function перечислить(items: string[]): string {
 })
 export class TasksModule {}
 ```
-- [ ] **Step 7: Документация.** `docs/DATA_SOURCES.md`, новый раздел «### Задачи из событий (П7)» после блока про историю склада вендинга: пять источников таблицей (тип события → ключ → заголовок), правило ключа `<источник>:<сущность>:<дата Ташкента СОБЫТИЯ>` и почему дата события, а не прогона; крон 06:15 и почему именно он (между монитором ТО и дайджестом); обе настройки с их значениями по умолчанию и тем, что `TASK_BRIDGE_ENABLED=0` — это откат без деплоя; где смотреть результат (`task.source`, событие `task.auto_created`, `select split_part(source,':',1), count(*) …`); честная оговорка про ожидаемый объём — по 14-суточному замеру ленты это 0–3 задачи в первое утро, и ноль законен.
-- [ ] **Step 8:** `pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs` — существующие шаги задач и настроек зелёные; `GET /system/config` содержит оба тумблера с `source: "default"`.
-- [ ] **Step 9:** `git commit -m "feat(core): мост «событие → задача» — пять источников, крон 06:15, потолок и тумблер отката (П7, R-P7-2/R-P7-4/R-P7-7/R-P7-13)" -- apps/core/src/tasks/task-bridge.service.ts apps/core/src/tasks/task-bridge.test.ts apps/core/src/tasks/tasks.module.ts apps/core/src/system/config-spec.ts apps/core/src/system/config-spec.test.ts apps/core/src/cron-shutdown.test.ts docs/DATA_SOURCES.md`
+- [x] **Step 7: Документация.** `docs/DATA_SOURCES.md`, новый раздел «### Задачи из событий (П7)» после блока про историю склада вендинга: пять источников таблицей (тип события → ключ → заголовок), правило ключа `<источник>:<сущность>:<дата Ташкента СОБЫТИЯ>` и почему дата события, а не прогона; крон 06:15 и почему именно он (между монитором ТО и дайджестом); обе настройки с их значениями по умолчанию и тем, что `TASK_BRIDGE_ENABLED=0` — это откат без деплоя; где смотреть результат (`task.source`, событие `task.auto_created`, `select split_part(source,':',1), count(*) …`); честная оговорка про ожидаемый объём — по 14-суточному замеру ленты это 0–3 задачи в первое утро, и ноль законен.
+- [x] **Step 8:** `pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs` — существующие шаги задач и настроек зелёные; `GET /system/config` содержит оба тумблера с `source: "default"`.
+- [x] **Step 9:** `git commit -m "feat(core): мост «событие → задача» — пять источников, крон 06:15, потолок и тумблер отката (П7, R-P7-2/R-P7-4/R-P7-7/R-P7-13)" -- apps/core/src/tasks/task-bridge.service.ts apps/core/src/tasks/task-bridge.test.ts apps/core/src/tasks/tasks.module.ts apps/core/src/system/config-spec.ts apps/core/src/system/config-spec.test.ts apps/core/src/cron-shutdown.test.ts docs/DATA_SOURCES.md`
 
 ---
 
@@ -1526,7 +1526,7 @@ async function sendAssignNotices(now?: Date): Promise<void>;
 - Недоступен (`TelegramError.isUnreachable`) → `reportUnreachable` **и отметка**, чтобы цикл не долбил Telegram на каждом тике (дословный образец `index.ts:695-700`).
 - `assignUnnotified` момента не принимает: в запросе нет ни одного временнóго предиката (см. «Отклонения» №2).
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // packages/shared/src/tashkent-time.test.ts — новый набор
 describe("Час ташкентских суток", () => {
@@ -1756,8 +1756,8 @@ describe("Пуш «тебе поручили» (П7, R-P7-10/R-P7-11)", () => {
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (`tashkentHour` нет); `pnpm --filter core build && pnpm --filter core test` → RED (`assignUnnotified` нет, `claim` третьего аргумента не знает); `pnpm --filter bot build && pnpm --filter bot test` → RED («Cannot find module ./push-hours», «./tasks-push»).
-- [ ] **Step 3: Час Ташкента и тихие часы.** `packages/shared/src/tashkent-time.ts` — `tashkentHour` из «Interfaces (produces)»:
+- [x] **Step 2:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test` → RED (`tashkentHour` нет); `pnpm --filter core build && pnpm --filter core test` → RED (`assignUnnotified` нет, `claim` третьего аргумента не знает); `pnpm --filter bot build && pnpm --filter bot test` → RED («Cannot find module ./push-hours», «./tasks-push»).
+- [x] **Step 3: Час Ташкента и тихие часы.** `packages/shared/src/tashkent-time.ts` — `tashkentHour` из «Interfaces (produces)»:
 ```ts
 export function tashkentHour(at: Date): number {
   return new Date(at.getTime() + СМЕЩЕНИЕ_МС).getUTCHours();
@@ -1770,7 +1770,7 @@ export function внутриРабочихЧасов(now: Date): boolean {
   return час >= PUSH_HOURS.from && час < PUSH_HOURS.to;
 }
 ```
-- [ ] **Step 4: Core — выборка и отметка.** `apps/core/src/tasks/tasks.service.ts`, рядом с `redoUnnotified` (`:542`):
+- [x] **Step 4: Core — выборка и отметка.** `apps/core/src/tasks/tasks.service.ts`, рядом с `redoUnnotified` (`:542`):
 ```ts
   /**
    * Кому ещё не сказали, что на него повесили задачу (R-P7-10).
@@ -1804,9 +1804,9 @@ export function внутриРабочихЧасов(now: Date): boolean {
   }
 ```
 Четыре точки: в `create()` — комментарий над `.values({…})`, что NULL — это умолчание колонки и оно означает «пуш положен»; в `edit()` после блока `if (patch.ownerRef !== undefined)` — сброс при реальной смене; в `claim(id, personId, now = new Date())` — `assignNotifiedAt: now` в `.set(...)` (сигнатура получает третий параметр с умолчанием, контроллер не правится); в `release()` — `assignNotifiedAt: null` в `.set(...)`.
-- [ ] **Step 5: Маршруты.** `apps/core/src/tasks/tasks.controller.ts`, рядом с `redo-unnotified` (`:194`) — `@Get("assign-unnotified")` (ОБЯЗАТЕЛЬНО выше параметрического `:id`, иначе перехват), и рядом с `redo-notified` (`:237`) — `@Post(":id/assign-notified")`, отвечающий `{ ok: true }`, как сосед.
-- [ ] **Step 6: Клиент бота.** `apps/bot/src/core-client.ts`, рядом с `redoUnnotified`/`markRedoNotified` (`:733-740`): `assignUnnotified()` → `GET /tasks/assign-unnotified`, `markAssignNotified(id)` → `POST /tasks/${id}/assign-notified`, с докблоками про порядок «доставили → отметили».
-- [ ] **Step 7: Петля бота.** Новый модуль `apps/bot/src/tasks-push.ts` с `доставитьНазначения(deps, now)` по форме стенда из Step 1 (зависимости инъекцией — иначе шаги, каждый из которых необратим, проверяются только живым Telegram) и текстом:
+- [x] **Step 5: Маршруты.** `apps/core/src/tasks/tasks.controller.ts`, рядом с `redo-unnotified` (`:194`) — `@Get("assign-unnotified")` (ОБЯЗАТЕЛЬНО выше параметрического `:id`, иначе перехват), и рядом с `redo-notified` (`:237`) — `@Post(":id/assign-notified")`, отвечающий `{ ok: true }`, как сосед.
+- [x] **Step 6: Клиент бота.** `apps/bot/src/core-client.ts`, рядом с `redoUnnotified`/`markRedoNotified` (`:733-740`): `assignUnnotified()` → `GET /tasks/assign-unnotified`, `markAssignNotified(id)` → `POST /tasks/${id}/assign-notified`, с докблоками про порядок «доставили → отметили».
+- [x] **Step 7: Петля бота.** Новый модуль `apps/bot/src/tasks-push.ts` с `доставитьНазначения(deps, now)` по форме стенда из Step 1 (зависимости инъекцией — иначе шаги, каждый из которых необратим, проверяются только живым Telegram) и текстом:
 ```ts
   const текст = `📌 Тебе поручили: ${t.title}\n${dueLabel(t.due, now)}`;
 ```
@@ -1840,7 +1840,7 @@ export function внутриРабочихЧасов(now: Date): boolean {
     void sendAssignNotices().catch((err: unknown) => console.error("Назначения:", err));
   }, assignEveryMs).unref();
 ```
-- [ ] **Step 8: Смоук.** В `tools/smoke-core.mjs`, рядом с шагами задач:
+- [x] **Step 8: Смоук.** В `tools/smoke-core.mjs`, рядом с шагами задач:
 ```js
   // Окно «кому ещё не сказали» (П7): частичный индекс `task_assign_pending_idx`
   // и условие по трём колонкам — юнит-заглушка SQL не исполняет.
@@ -1851,8 +1851,8 @@ export function внутриРабочихЧасов(now: Date): boolean {
     },
   },
 ```
-- [ ] **Step 9:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs` — шаг `/tasks/assign-unnotified` зелёный.
-- [ ] **Step 10:** `git commit -m "feat(core,bot,shared): пуш «тебе поручили» со своей отметкой и тихими часами (П7, R-P7-10/R-P7-11)" -- packages/shared/src/tashkent-time.ts packages/shared/src/tashkent-time.test.ts apps/core/src/tasks/tasks.service.ts apps/core/src/tasks/tasks.controller.ts apps/core/src/tasks/tasks.test.ts apps/bot/src/push-hours.ts apps/bot/src/push-hours.test.ts apps/bot/src/tasks-push.ts apps/bot/src/tasks-push.test.ts apps/bot/src/core-client.ts apps/bot/src/index.ts tools/smoke-core.mjs`
+- [x] **Step 9:** `pnpm --filter @mydon/shared build && pnpm --filter @mydon/shared test && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs` — шаг `/tasks/assign-unnotified` зелёный.
+- [x] **Step 10:** `git commit -m "feat(core,bot,shared): пуш «тебе поручили» со своей отметкой и тихими часами (П7, R-P7-10/R-P7-11)" -- packages/shared/src/tashkent-time.ts packages/shared/src/tashkent-time.test.ts apps/core/src/tasks/tasks.service.ts apps/core/src/tasks/tasks.controller.ts apps/core/src/tasks/tasks.test.ts apps/bot/src/push-hours.ts apps/bot/src/push-hours.test.ts apps/bot/src/tasks-push.ts apps/bot/src/tasks-push.test.ts apps/bot/src/core-client.ts apps/bot/src/index.ts tools/smoke-core.mjs`
 
 ---
 
@@ -1901,7 +1901,7 @@ async emitOverdue(now?: Date): Promise<{ emitted: number; capped: boolean }>;
 - Строку в брифинге (`registry.service.ts:200-208`) менять не нужно — она уже считает просрочку; в приёмке сверяем, что число и поток сигналов сходятся.
 - Вторая работа встаёт в ТОТ ЖЕ крон под СВОИМ `catch`: падение выборки просрочки не должно гасить мост, и наоборот.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/core/src/tasks/task-bridge.test.ts — новый набор в конец файла
 describe("Эмитент просрочки (П7, R-P7-5, T7)", () => {
@@ -2005,8 +2005,8 @@ describe("Эмитент просрочки (П7, R-P7-5, T7)", () => {
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`emitOverdue` не существует, конструктор принимает четыре аргумента).
-- [ ] **Step 3: Пятый аргумент и вторая работа.** `apps/core/src/tasks/task-bridge.service.ts`: конструктор получает `private readonly rules: RulesService` пятым параметром; константы `OVERDUE_MAX_EVENTS` / `OVERDUE_EVENT`; метод `emitOverdue` с докблоком из «Interfaces (produces)»:
+- [x] **Step 2:** `pnpm --filter core build && pnpm --filter core test` → RED (`emitOverdue` не существует, конструктор принимает четыре аргумента).
+- [x] **Step 3: Пятый аргумент и вторая работа.** `apps/core/src/tasks/task-bridge.service.ts`: конструктор получает `private readonly rules: RulesService` пятым параметром; константы `OVERDUE_MAX_EVENTS` / `OVERDUE_EVENT`; метод `emitOverdue` с докблоком из «Interfaces (produces)»:
 ```ts
   async emitOverdue(now = new Date()): Promise<{ emitted: number; capped: boolean }> {
     const граница = tashkentDayStartOf(now);
@@ -2058,9 +2058,9 @@ describe("Эмитент просрочки (П7, R-P7-5, T7)", () => {
         this.logger.warn(`Эмитент просрочки не отработал: ${e instanceof Error ? e.message : String(e)}`),
       );
 ```
-- [ ] **Step 4: Модуль, страж и арность существующих стендов.** `apps/core/src/tasks/tasks.module.ts` — `RulesModule` в `imports` с комментарием, что он нужен ради одноразовых ключей дедупа (`RulesService.claim`), а не ради правил как таковых. `apps/core/src/cron-shutdown.test.ts` — строка `task-bridge` получает пятый `{} as never`. В `task-bridge.test.ts` стенд моста (`стенд`, Task 3 Step 1) получает пятым аргументом `{ claim: async () => true } as never`: конструктор вырос, и тесты моста обязаны собраться — правка механическая, но пропустить её значит уронить ВСЮ волну на компиляции.
-- [ ] **Step 5:** `pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs` — существующие шаги правил и брифинга зелёные.
-- [ ] **Step 6:** `git commit -m "feat(core): эмитент task.overdue со второго дня просрочки — мёртвое правило оживает (П7, R-P7-5)" -- apps/core/src/tasks/task-bridge.service.ts apps/core/src/tasks/task-bridge.test.ts apps/core/src/tasks/tasks.module.ts apps/core/src/cron-shutdown.test.ts`
+- [x] **Step 4: Модуль, страж и арность существующих стендов.** `apps/core/src/tasks/tasks.module.ts` — `RulesModule` в `imports` с комментарием, что он нужен ради одноразовых ключей дедупа (`RulesService.claim`), а не ради правил как таковых. `apps/core/src/cron-shutdown.test.ts` — строка `task-bridge` получает пятый `{} as never`. В `task-bridge.test.ts` стенд моста (`стенд`, Task 3 Step 1) получает пятым аргументом `{ claim: async () => true } as never`: конструктор вырос, и тесты моста обязаны собраться — правка механическая, но пропустить её значит уронить ВСЮ волну на компиляции.
+- [x] **Step 5:** `pnpm --filter core build && pnpm --filter core test` → GREEN; `pnpm -s typecheck`. На scratch-БД: `node tools/smoke-core.mjs` — существующие шаги правил и брифинга зелёные.
+- [x] **Step 6:** `git commit -m "feat(core): эмитент task.overdue со второго дня просрочки — мёртвое правило оживает (П7, R-P7-5)" -- apps/core/src/tasks/task-bridge.service.ts apps/core/src/tasks/task-bridge.test.ts apps/core/src/tasks/tasks.module.ts apps/core/src/cron-shutdown.test.ts`
 
 ---
 
@@ -2150,7 +2150,7 @@ rateTask(id: string, quality: "excellent" | "accepted" | "redo", actor: string):
 - Веер подчиняется тихим часам (R-P7-11): вне окна ключи не занимаются и сообщения не уходят.
 - Правило `tasks.no_confirmers` в `RULE_EVENT_TYPES` руками не вписывается — список выводится из `RULES` (`rules.ts:601`); тест это утверждает (урок П5b N5: правило без записи не подберётся `/rules/pending`).
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/bot/src/task-confirm.test.ts — новый файл
 import assert from "node:assert/strict";
@@ -2387,11 +2387,11 @@ describe("Правила задач (П7)", () => {
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter bot build && pnpm --filter bot test` → RED («Cannot find module ./task-confirm»); `pnpm --filter core build && pnpm --filter core test` → RED (`tasks.no_confirmers` нет в `RULE_EVENT_TYPES`).
-- [ ] **Step 3: Правило.** `apps/core/src/rules/rules.ts` — блок из «Interfaces (produces)» сразу за `task.overdue` (`:358-363`), с комментарием: зеркало `weekly-digest.no_recipients` — отказ рассылки виден только тому, кто читает логи контейнера, то есть никому.
-- [ ] **Step 4: Модуль веера.** `apps/bot/src/task-confirm.ts` — все экспорты из «Interfaces (produces)» с докблоками. `confirmRecipients` считает право общим `can(effectiveRoles(p), "tasks.confirm")` (не своим списком ролей — иначе бот и Core разойдутся); момент закрытия печатается через `TZ`-форматирование, уже принятое в боте.
-- [ ] **Step 5: Клиент Core.** `apps/bot/src/core-client.ts`: `awaitingTasks()` → `GET /tasks?awaiting=1`; `confirmTask(id, actor)` → `POST /tasks/${id}/confirm { actor }`; `rateTask(id, quality, actor)` → `POST /tasks/${id}/quality { quality, actor }`. У `rateTask` докблок: актор обязателен, иначе журнал припишет оценку менеджера владельцу.
-- [ ] **Step 6: Разбор нажатий и текста.** `apps/bot/src/staff.ts`: в `handleStaffCallback` (`:626`) — ДО общего разбора задач:
+- [x] **Step 2:** `pnpm --filter bot build && pnpm --filter bot test` → RED («Cannot find module ./task-confirm»); `pnpm --filter core build && pnpm --filter core test` → RED (`tasks.no_confirmers` нет в `RULE_EVENT_TYPES`).
+- [x] **Step 3: Правило.** `apps/core/src/rules/rules.ts` — блок из «Interfaces (produces)» сразу за `task.overdue` (`:358-363`), с комментарием: зеркало `weekly-digest.no_recipients` — отказ рассылки виден только тому, кто читает логи контейнера, то есть никому.
+- [x] **Step 4: Модуль веера.** `apps/bot/src/task-confirm.ts` — все экспорты из «Interfaces (produces)» с докблоками. `confirmRecipients` считает право общим `can(effectiveRoles(p), "tasks.confirm")` (не своим списком ролей — иначе бот и Core разойдутся); момент закрытия печатается через `TZ`-форматирование, уже принятое в боте.
+- [x] **Step 5: Клиент Core.** `apps/bot/src/core-client.ts`: `awaitingTasks()` → `GET /tasks?awaiting=1`; `confirmTask(id, actor)` → `POST /tasks/${id}/confirm { actor }`; `rateTask(id, quality, actor)` → `POST /tasks/${id}/quality { quality, actor }`. У `rateTask` докблок: актор обязателен, иначе журнал припишет оценку менеджера владельцу.
+- [x] **Step 6: Разбор нажатий и текста.** `apps/bot/src/staff.ts`: в `handleStaffCallback` (`:626`) — ДО общего разбора задач:
 ```ts
   // Пространство «tc:» — приёмка П7. Проверяется раньше `t:`, потому что
   // префиксы разные, но фолбэк «эта кнопка устарела» ниже съел бы незнакомое.
@@ -2411,7 +2411,7 @@ describe("Правила задач (П7)", () => {
     return { reply: { text: confirmRedoStepHint(conv.step) } };
   }
 ```
-- [ ] **Step 7: Петля.** `apps/bot/src/index.ts`, рядом с петлёй назначений:
+- [x] **Step 7: Петля.** `apps/bot/src/index.ts`, рядом с петлёй назначений:
 ```ts
   /**
    * Веер «выполнена — подтвердите». Опрос раз в минуту: закрытие задачи не
@@ -2442,8 +2442,8 @@ describe("Правила задач (П7)", () => {
     void sendConfirmRequests().catch((err: unknown) => console.error("Подтверждения:", err));
   }, confirmEveryMs).unref();
 ```
-- [ ] **Step 8:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck`.
-- [ ] **Step 9:** `git commit -m "feat(bot,core): веер менеджерам «выполнена — подтвердите», возврат в работу с причиной, правило tasks.no_confirmers (П7, R-P7-9)" -- apps/bot/src/task-confirm.ts apps/bot/src/task-confirm.test.ts apps/bot/src/index.ts apps/bot/src/core-client.ts apps/bot/src/staff.ts apps/core/src/rules/rules.ts apps/core/src/rules/rules.test.ts`
+- [x] **Step 8:** `pnpm --filter @mydon/shared build && pnpm --filter core build && pnpm --filter core test && pnpm --filter bot build && pnpm --filter bot test` → GREEN; `pnpm -s typecheck`.
+- [x] **Step 9:** `git commit -m "feat(bot,core): веер менеджерам «выполнена — подтвердите», возврат в работу с причиной, правило tasks.no_confirmers (П7, R-P7-9)" -- apps/bot/src/task-confirm.ts apps/bot/src/task-confirm.test.ts apps/bot/src/index.ts apps/bot/src/core-client.ts apps/bot/src/staff.ts apps/core/src/rules/rules.ts apps/core/src/rules/rules.test.ts`
 
 ---
 
@@ -2490,7 +2490,7 @@ export function AwaitingBlock({ tasks, names }: { tasks: Task[]; names: Map<stri
 - Панель показывает блок ВСЕГДА (панель = владелец, у него право есть по определению) — пустой блок рисуется третьим состоянием, а не исчезает: исчезнувший блок неотличим от «ещё не выкатили».
 - Карточка задачи печатает «Принято: <кто>, <когда>», когда `confirmedAt` есть.
 
-- [ ] **Step 1: Тесты RED.**
+- [x] **Step 1: Тесты RED.**
 ```ts
 // apps/bot/src/menu.test.ts — правки существующих наборов
   it("пункт «Ждут подтверждения» не виден оператору ни кнопкой, ни словом", () => {
@@ -2629,8 +2629,8 @@ describe("Блок «Ждут подтверждения» (П7, T6)", () => {
   });
 });
 ```
-- [ ] **Step 2:** `pnpm --filter bot build && pnpm --filter bot test` → RED (пункта `confirm` нет, `formatAwaitingScreen` не существует); `pnpm --filter cc test` → RED («Cannot find module ./awaiting-block»).
-- [ ] **Step 3: Меню и экран бота.** `apps/bot/src/menu.ts` — пункт из «Interfaces (produces)» в ряд «редкое», рядом с «🆕 Новая карточка», с комментарием про выбор значка. `apps/bot/src/task-confirm.ts` — `formatAwaitingScreen` по образцу `tasksKeyboard` (`staff.ts:145-159`): нумерованный список (заголовок, кто закрыл, когда, первая строка отчёта), у каждой строки — ряд из пары `tc:<id>:ok` / `tc:<id>:redo`; пусто → третье состояние без клавиатуры. `apps/bot/src/staff.ts`, `startMenuItem`:
+- [x] **Step 2:** `pnpm --filter bot build && pnpm --filter bot test` → RED (пункта `confirm` нет, `formatAwaitingScreen` не существует); `pnpm --filter cc test` → RED («Cannot find module ./awaiting-block»).
+- [x] **Step 3: Меню и экран бота.** `apps/bot/src/menu.ts` — пункт из «Interfaces (produces)» в ряд «редкое», рядом с «🆕 Новая карточка», с комментарием про выбор значка. `apps/bot/src/task-confirm.ts` — `formatAwaitingScreen` по образцу `tasksKeyboard` (`staff.ts:145-159`): нумерованный список (заголовок, кто закрыл, когда, первая строка отчёта), у каждой строки — ряд из пары `tc:<id>:ok` / `tc:<id>:redo`; пусто → третье состояние без клавиатуры. `apps/bot/src/staff.ts`, `startMenuItem`:
 ```ts
     case "confirm": {
       const [tasks, people] = await Promise.all([
@@ -2640,7 +2640,7 @@ describe("Блок «Ждут подтверждения» (П7, T6)", () => {
       return { reply: formatAwaitingScreen(tasks, new Map(people.map((p) => [p.id, p.name]))) };
     }
 ```
-- [ ] **Step 4: Клиент и экшен панели.** `apps/cc/src/lib/core.ts`, в блок `// ── Задачи ──` рядом с `rateTask` — `confirmTask` из «Interfaces (produces)». `apps/cc/src/app/tasks/actions.ts`, рядом с `rateTask` (`:96`):
+- [x] **Step 4: Клиент и экшен панели.** `apps/cc/src/lib/core.ts`, в блок `// ── Задачи ──` рядом с `rateTask` — `confirmTask` из «Interfaces (produces)». `apps/cc/src/app/tasks/actions.ts`, рядом с `rateTask` (`:96`):
 ```ts
 /**
  * Приёмка работы. «Переделать» живёт отдельно — это `rateTask(id, "redo")`:
@@ -2659,8 +2659,8 @@ export async function confirmTask(id: string): Promise<ActionResult> {
   return { ok: true };
 }
 ```
-- [ ] **Step 5: Блок панели.** `apps/cc/src/components/awaiting-block.tsx` — клиентский компонент по образцу `task-row.tsx` (`useTransition` + `useRouter().refresh()` + локальный `error`), заголовок «Ждут подтверждения» со счётчиком, строка задачи: заголовок, «закрыл <имя> · <когда>», первая строка отчёта, кнопки «Принять» (`confirmTask`) и «Переделать» (`rateTask(id, "redo")`), под блоком — текст ошибки. Пусто → `<div className="empty"><b>Ничего не ждёт приёмки</b>{"Как только кто-то закроет задачу, она появится здесь."}</div>`.
-- [ ] **Step 6: Страница и карточка.** `apps/cc/src/app/tasks/page.tsx`:
+- [x] **Step 5: Блок панели.** `apps/cc/src/components/awaiting-block.tsx` — клиентский компонент по образцу `task-row.tsx` (`useTransition` + `useRouter().refresh()` + локальный `error`), заголовок «Ждут подтверждения» со счётчиком, строка задачи: заголовок, «закрыл <имя> · <когда>», первая строка отчёта, кнопки «Принять» (`confirmTask`) и «Переделать» (`rateTask(id, "redo")`), под блоком — текст ошибки. Пусто → `<div className="empty"><b>Ничего не ждёт приёмки</b>{"Как только кто-то закроет задачу, она появится здесь."}</div>`.
+- [x] **Step 6: Страница и карточка.** `apps/cc/src/app/tasks/page.tsx`:
 ```tsx
     [open, awaiting, people, agents] = await Promise.all([
       core.tasks({ open: "1" }),
@@ -2673,14 +2673,14 @@ export async function confirmTask(id: string): Promise<ActionResult> {
     ]);
 ```
 и `<AwaitingBlock tasks={awaiting} names={new Map(people.map((p) => [p.id, p.name]))} />` перед блоком групп. `apps/cc/src/app/tasks/[id]/page.tsx` — в шапку, когда `task.confirmedAt !== null`: строка «Принято: <кто>, <когда>», где «кто» — имя из `peopleById` по `personIdOf`-подобному разбору `confirmedBy` (`owner` печатается как «владелец»).
-- [ ] **Step 7: Смоук панели.** `tools/smoke-panel.mjs`, рядом с существующим `{ path: "/tasks", должно: "Задачи" }`:
+- [x] **Step 7: Смоук панели.** `tools/smoke-panel.mjs`, рядом с существующим `{ path: "/tasks", должно: "Задачи" }`:
 ```js
   // П7: блок приёмки рисуется ВСЕГДА, в том числе пустым (третье состояние),
   // поэтому слово находится и на засеянной базе без задач.
   { path: "/tasks", должно: "Ждут подтверждения" },
 ```
-- [ ] **Step 8:** `pnpm --filter @mydon/shared build && pnpm --filter bot build && pnpm --filter bot test && pnpm --filter cc test` → GREEN; `pnpm -s typecheck`; `pnpm -s lint`. На scratch-БД: `node tools/smoke-panel.mjs` — оба шага `/tasks` зелёные.
-- [ ] **Step 9:** `git commit -m "feat(bot,cc): экран «ждут подтверждения» в боте и блок приёмки в панели (П7, T6)" -- apps/bot/src/menu.ts apps/bot/src/menu.test.ts apps/bot/src/staff.ts apps/bot/src/task-confirm.ts apps/bot/src/task-confirm.test.ts apps/cc/src/lib/core.ts apps/cc/src/components/awaiting-block.tsx apps/cc/src/components/awaiting-block.test.tsx apps/cc/src/app/tasks/page.tsx apps/cc/src/app/tasks/actions.ts "apps/cc/src/app/tasks/[id]/page.tsx" tools/smoke-panel.mjs`
+- [x] **Step 8:** `pnpm --filter @mydon/shared build && pnpm --filter bot build && pnpm --filter bot test && pnpm --filter cc test` → GREEN; `pnpm -s typecheck`; `pnpm -s lint`. На scratch-БД: `node tools/smoke-panel.mjs` — оба шага `/tasks` зелёные.
+- [x] **Step 9:** `git commit -m "feat(bot,cc): экран «ждут подтверждения» в боте и блок приёмки в панели (П7, T6)" -- apps/bot/src/menu.ts apps/bot/src/menu.test.ts apps/bot/src/staff.ts apps/bot/src/task-confirm.ts apps/bot/src/task-confirm.test.ts apps/cc/src/lib/core.ts apps/cc/src/components/awaiting-block.tsx apps/cc/src/components/awaiting-block.test.tsx apps/cc/src/app/tasks/page.tsx apps/cc/src/app/tasks/actions.ts "apps/cc/src/app/tasks/[id]/page.tsx" tools/smoke-panel.mjs`
 
 ---
 
@@ -2694,7 +2694,7 @@ export async function confirmTask(id: string): Promise<ActionResult> {
 
 **Interfaces (produces):** только текст. Три раздела документации и один аддендум спеки.
 
-- [ ] **Step 1: `docs/DEPLOY.md`.** Новый подраздел «Проверка после выката П7 (задачи)» с ДВУМЯ пунктами:
+- [x] **Step 1: `docs/DEPLOY.md`.** Новый подраздел «Проверка после выката П7 (задачи)» с ДВУМЯ пунктами:
 ```bash
 # 1. Бэкфилл отметки «тебе поручили» — СРАЗУ после деплоя, до первого крона 06:15.
 docker exec -i mydon-core psql "$DATABASE_URL" -c \
@@ -2703,11 +2703,11 @@ docker exec -i mydon-core psql "$DATABASE_URL" -c \
 # старым задачам; чинить ДО наступления следующего утра.
 ```
 плюс абзац «Откат моста задач»: `TASK_BRIDGE_ENABLED = 0` в панели настроек, деплой не нужен — тумблер читается из базы на каждом прогоне, база важнее env. `</dev/null` в каждом `docker exec` обязателен: без него остаток скрипта уходит в контейнер и шаги после молча не выполняются (`DEPLOY.md:120`).
-- [ ] **Step 2: `docs/AGENTS_ACTIVATION.md`.** Два новых раздела.
+- [x] **Step 2: `docs/AGENTS_ACTIVATION.md`.** Два новых раздела.
   «## Кроны Core» — таблица: `15 6 * * *` Asia/Tashkent, `TaskBridgeService`, две работы (мост «событие → задача» и эмитент `task.overdue`), каждая под своим `catch`; почему 06:15 (после монитора ТО 06:00, до дайджеста 07:00 и брифинга 07:30); тумблеры `TASK_BRIDGE_ENABLED` / `TASK_BRIDGE_MAX_PER_RUN`; где смотреть — логи Core (не агентов: у агентов контейнер перезапускается и логи прошлого удаляются).
   «## Петли бота» — таблица: «тебе поручили» (`ASSIGN_NOTIFY_INTERVAL_MS`, 60 с), «выполнена — подтвердите» (`CONFIRM_NOTIFY_INTERVAL_MS`, 60 с), существующие возвраты (`REDO_NOTIFY_INTERVAL_MS`) и напоминания (`REMIND_INTERVAL_MS`); тихие часы 7:00–22:00 действуют ТОЛЬКО на две новых, и почему (R-P7-11).
-- [ ] **Step 3: `docs/PLAN_STOCK_ABSORPTION.md`.** §П7 переписывается целиком: строка «В монорепо модуля задач нет» неверна с большим запасом — таблица `task` на 23 колонки, спутник `task_comment`, 19 маршрутов Core, полный контур в боте, две страницы панели, исполнение задач агентами и хук «закрыл задачу ТО → журнал обслуживания»; донорские `tasks` — **0 строк за всю историю**, переносить «проверенный практикой контур» неоткуда. Настоящая проблема была в том, что модуль никто не кормил; срез П7 достроил мост, подтверждение и уведомления. Отдельной строкой остаётся «Гигиена» (#16) — починка монитора графиков ТО, чей HTTP-путь молчит в проде.
-- [ ] **Step 4: Аддендум спеки.** В конец `docs/superpowers/specs/2026-08-26-p7-tasks-design.md` — раздел «Аддендум после реализации» с ШЕСТЬЮ отклонениями из шапки этого плана, каждое одним абзацем: что в спеке, что в коде, почему.
+- [x] **Step 3: `docs/PLAN_STOCK_ABSORPTION.md`.** §П7 переписывается целиком: строка «В монорепо модуля задач нет» неверна с большим запасом — таблица `task` на 23 колонки, спутник `task_comment`, 19 маршрутов Core, полный контур в боте, две страницы панели, исполнение задач агентами и хук «закрыл задачу ТО → журнал обслуживания»; донорские `tasks` — **0 строк за всю историю**, переносить «проверенный практикой контур» неоткуда. Настоящая проблема была в том, что модуль никто не кормил; срез П7 достроил мост, подтверждение и уведомления. Отдельной строкой остаётся «Гигиена» (#16) — починка монитора графиков ТО, чей HTTP-путь молчит в проде.
+- [x] **Step 4: Аддендум спеки.** В конец `docs/superpowers/specs/2026-08-26-p7-tasks-design.md` — раздел «Аддендум после реализации» с ШЕСТЬЮ отклонениями из шапки этого плана, каждое одним абзацем: что в спеке, что в коде, почему.
 - [ ] **Step 5: Замер (после мержа и трёх суток, только чтение).** Запросы выполняет владелец; результат вписывается сюда же, в `docs/PLAN_STOCK_ABSORPTION.md`:
 ```sql
 -- 1. Какие источники моста дали задачи (исключаем автозадачи монитора ТО).
@@ -2733,8 +2733,8 @@ select type, count(*) from event
  group by 1;
 ```
 **Приёмка.** `task.auto_created` = 0 при НЕПУСТОМ результате запроса 4 — срез **не принят**, разбирается как дефект (это ровно §2.4 спеки, повторённая на новом мосту). Оба нуля — мост исправен, парк молчит: это вопрос к сбору, не к П7. Доля подтверждённых на четырёх ручных задачах бессмысленна, но следующий замер будет с чем сравнивать.
-- [ ] **Step 6:** `pnpm -s lint && pnpm -s typecheck && pnpm -s build && pnpm -s test` — полный прогон перед PR.
-- [ ] **Step 7:** `git commit -m "docs(p7): рунбуки кронов и петель, проверка бэкфилла, откат моста, контрольный замер и аддендум спеки (П7, T8)" -- docs/DEPLOY.md docs/AGENTS_ACTIVATION.md docs/PLAN_STOCK_ABSORPTION.md docs/superpowers/specs/2026-08-26-p7-tasks-design.md docs/superpowers/plans/2026-08-26-sloy-p7-tasks.md`
+- [x] **Step 6:** `pnpm -s lint && pnpm -s typecheck && pnpm -s build && pnpm -s test` — полный прогон перед PR.
+- [x] **Step 7:** `git commit -m "docs(p7): рунбуки кронов и петель, проверка бэкфилла, откат моста, контрольный замер и аддендум спеки (П7, T8)" -- docs/DEPLOY.md docs/AGENTS_ACTIVATION.md docs/PLAN_STOCK_ABSORPTION.md docs/superpowers/specs/2026-08-26-p7-tasks-design.md docs/superpowers/plans/2026-08-26-sloy-p7-tasks.md`
 
 ---
 
