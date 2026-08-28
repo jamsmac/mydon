@@ -108,6 +108,8 @@ export class TasksService {
       const ownerRef = (input.ownerRef ?? "").trim();
       const [created] = await tx
         .insert(task)
+        // assignNotifiedAt остаётся NULL по умолчанию: если исполнитель задан,
+        // это означает «пуш о назначении ещё положен».
         .values({
           title: input.title,
           description: input.description ?? null,
@@ -357,6 +359,7 @@ export class TasksService {
     const before = await this.byId(id);
     if (set.ownerRef !== undefined && set.ownerRef !== before.ownerRef) {
       await this.assertCan(actorRef, "tasks.assign");
+      set.assignNotifiedAt = null;
     }
 
     return this.db.transaction(async (tx) => {
@@ -482,11 +485,12 @@ export class TasksService {
    * внутри самого UPDATE. Проигравший получает null и увидит имя победителя,
    * а не ошибку.
    */
-  async claim(id: string, personId: string): Promise<TaskRow | null> {
+  async claim(id: string, personId: string, now = new Date()): Promise<TaskRow | null> {
     return this.db.transaction(async (tx) => {
       const [claimed] = await tx
         .update(task)
-        .set({ ownerKind: "human", ownerRef: personId })
+        // Человек взял задачу сам — рассказывать ему о собственном действии не надо.
+        .set({ ownerKind: "human", ownerRef: personId, assignNotifiedAt: now })
         .where(and(eq(task.id, id), eq(task.ownerKind, "human"), isNull(task.ownerRef)))
         .returning();
       if (!claimed) return null;
@@ -518,7 +522,11 @@ export class TasksService {
 
       const [freed] = await tx
         .update(task)
-        .set({ ownerRef: null, status: before.status === "in_progress" ? "todo" : before.status })
+        .set({
+          ownerRef: null,
+          status: before.status === "in_progress" ? "todo" : before.status,
+          assignNotifiedAt: null,
+        })
         .where(eq(task.id, id))
         .returning();
 
@@ -676,6 +684,34 @@ export class TasksService {
    *  превращаться в «сотрудник так и не узнал». */
   async markRedoNotified(id: string): Promise<void> {
     await this.db.update(task).set({ redoNotifiedAt: new Date() }).where(eq(task.id, id));
+  }
+
+  /**
+   * Кому ещё не сказали, что на него повесили задачу (R-P7-10).
+   *
+   * Зеркало `redoUnnotified`: та же пара «спросить кого — отметить доставку».
+   * Момента здесь нет: в условии нет ни одного временнóго предиката.
+   */
+  assignUnnotified(limit = 50): Promise<TaskRow[]> {
+    return this.db
+      .select()
+      .from(task)
+      .where(
+        and(
+          eq(task.ownerKind, "human"),
+          isNotNull(task.ownerRef),
+          ne(task.status, "done"),
+          ne(task.status, "cancelled"),
+          isNull(task.assignNotifiedAt),
+        ),
+      )
+      .limit(limit);
+  }
+
+  /** Отметка ставится ПОСЛЕ доставки: сбой сети не должен превращаться в
+   *  «сотрудник так и не узнал». */
+  async markAssignNotified(id: string, now = new Date()): Promise<void> {
+    await this.db.update(task).set({ assignNotifiedAt: now }).where(eq(task.id, id));
   }
 
   async addComment(taskId: string, authorRef: string, body: string): Promise<CommentRow> {

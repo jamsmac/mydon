@@ -42,6 +42,7 @@ import { handleAfterPhoto } from "./field-work";
 import { summarizeActions } from "./owner-actions";
 import { asStaffMode } from "./as-staff";
 import { InvalidTokenError, TelegramApi, TelegramError, type TgUpdate } from "./telegram";
+import { доставитьНазначения } from "./tasks-push";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
@@ -705,10 +706,37 @@ async function main(): Promise<void> {
     }
   }
 
+  /**
+   * «Тебе поручили»: задача назначена — исполнитель должен узнать сразу, а не
+   * в 07:00 дайджестом и не через полчаса напоминанием о сроке.
+   * Сначала доставка, потом отметка; ночью отметка не ставится — пуш ждёт утра.
+   */
+  async function sendAssignNotices(now = new Date()): Promise<void> {
+    await доставитьНазначения(
+      {
+        assignUnnotified: () => deps.core.assignUnnotified(),
+        people: () => deps.core.people(),
+        markAssignNotified: (id) => deps.core.markAssignNotified(id).then(() => undefined),
+        send: async (chat, text, keyboard) => {
+          await tg.sendMessage(chat, text, keyboard);
+        },
+        reportUnreachable: (personId, reason) => reportUnreachable(personId, reason),
+        isUnreachable: (error) => error instanceof TelegramError && error.isUnreachable,
+        reportFailure: (message, error) => console.error(`${message}:`, error),
+      },
+      now,
+    );
+  }
+
   const redoEveryMs = Number(process.env.REDO_NOTIFY_INTERVAL_MS ?? 60_000);
   setInterval(() => {
     void sendRedoNotices().catch((err: unknown) => console.error("Переделки:", err));
   }, redoEveryMs).unref();
+
+  const assignEveryMs = Number(process.env.ASSIGN_NOTIFY_INTERVAL_MS ?? 60_000);
+  setInterval(() => {
+    void sendAssignNotices().catch((err: unknown) => console.error("Назначения:", err));
+  }, assignEveryMs).unref();
 
   const remindEveryMs = Number(process.env.REMIND_INTERVAL_MS ?? 30 * 60_000);
   setInterval(() => {

@@ -68,3 +68,14 @@ export function tashkentDay(at: Date): string {
 export function tashkentDayStartOf(at: Date): Date {
   return tashkentDayStart(tashkentDay(at))!;
 }
+
+/**
+ * Час ташкентских суток (0–23) для момента.
+ *
+ * Живёт здесь, а не у потребителя: вторая копия смещения зоны в коде — ровно
+ * та развилка, на которой донор VendCash уехал на пять часов (R-FW-11).
+ * `toLocaleString` не годится: он зависит от набора ICU в рантайме.
+ */
+export function tashkentHour(at: Date): number {
+  return new Date(at.getTime() + СМЕЩЕНИЕ_МС).getUTCHours();
+}

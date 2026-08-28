@@ -218,6 +218,12 @@ export class TasksController {
     return this.tasks.redoUnnotified();
   }
 
+  /** Кому сообщить о новом назначении. До маршрута :id — иначе перехват. */
+  @Get("assign-unnotified")
+  assignUnnotified() {
+    return this.tasks.assignUnnotified();
+  }
+
   @Get("workload")
   workload() {
     return this.tasks.workload();
@@ -267,6 +273,12 @@ export class TasksController {
   @Post(":id/redo-notified")
   async markRedoNotified(@Param("id", ParseUUIDPipe) id: string) {
     await this.tasks.markRedoNotified(id);
+    return { ok: true };
+  }
+
+  @Post(":id/assign-notified")
+  async markAssignNotified(@Param("id", ParseUUIDPipe) id: string) {
+    await this.tasks.markAssignNotified(id);
     return { ok: true };
   }
 

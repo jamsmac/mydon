@@ -507,6 +507,13 @@ const ЧТЕНИЕ = [
       if (!Array.isArray(ответ)) throw new Error("ожидали массив ждущих приёмки");
     },
   },
+  {
+    // Окно «кому ещё не сказали» (П7): условие исполняется живым Postgres.
+    path: "/tasks/assign-unnotified",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ)) throw new Error("ожидали массив назначенных без отметки");
+    },
+  },
   "/people",
   "/approvals",
   {

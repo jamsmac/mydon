@@ -765,6 +765,16 @@ export class CoreClient {
     return this.request(`/tasks/${id}/redo-notified`, { method: "POST" });
   }
 
+  /** Задачи, о новом назначении которых исполнителю ещё не сообщили. */
+  assignUnnotified(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks/assign-unnotified");
+  }
+
+  /** Отметка «о назначении сообщили» — только ПОСЛЕ фактической доставки. */
+  markAssignNotified(id: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/assign-notified`, { method: "POST" });
+  }
+
   /** Автоматы направления — для клавиатуры инкассации. */
   /**
    * Автоматы реестра. По умолчанию — ВЕСЬ парк.
