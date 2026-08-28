@@ -19,37 +19,45 @@ function actorLabel(e: AuditEntry, people: Map<string, string>): string {
 }
 
 /** Понятное имя действия: в журнале коды, а читать его будет не программист. */
+export const ACTION_LABELS: Record<string, string> = {
+  "entity.create": "завёл карточку",
+  "entity.update": "изменил карточку",
+  "entity.approve": "утвердил карточку",
+  "entity.delete": "удалил карточку",
+  "approval.request": "попросил разрешения",
+  "approval.approved": "одобрил",
+  "approval.rejected": "отклонил",
+  "approval.clarify": "отправил на уточнение",
+  "claim.confirmed": "заявленное подтвердилось",
+  "claim.refuted": "заявленное НЕ подтвердилось",
+  "task.create": "поставил задачу",
+  "task.claimed": "взял задачу",
+  "task.done": "закрыл задачу",
+  "task.edit": "изменил задачу",
+  "task.rated": "оценил работу",
+  "collection.collected": "снял выручку",
+  "collection.received": "принял инкассацию",
+  "collection.cancelled": "отменил инкассацию",
+  /**
+   * Разовая правка среза «правда о пробеле»: 247 перенесённых строк стояли на
+   * пять часов раньше реальности. Записей за один момент много — первый экран
+   * `/audit` они займут целиком, и это объявлено в чек-листе выкатки (R-I-5);
+   * отбор по действию у эндпоинта есть (`?action=`).
+   */
+  "collection.time_corrected": "поправил время инкассации (перенос VendCash, +5 часов)",
+  "maintenance.log_created": "записал работу по обслуживанию",
+  "maintenance.log_closed": "закрыл работу по обслуживанию",
+  "maintenance.log_removed": "удалил запись обслуживания",
+  "maintenance.part_swapped": "заменил узел",
+  "vending.stock.recount": "пересчитал склад",
+  "coffee.refill.delete": "удалил запись заливки",
+  "coffee.return.delete": "удалил запись возврата",
+  "coffee.consumable.delete": "удалил запись расходников",
+  "person.link_telegram": "привязал Telegram",
+};
+
 function describe(action: string): string {
-  const map: Record<string, string> = {
-    "entity.create": "завёл карточку",
-    "entity.update": "изменил карточку",
-    "entity.approve": "утвердил карточку",
-    "entity.delete": "удалил карточку",
-    "approval.request": "попросил разрешения",
-    "approval.approved": "одобрил",
-    "approval.rejected": "отклонил",
-    "approval.clarify": "отправил на уточнение",
-    "claim.confirmed": "заявленное подтвердилось",
-    "claim.refuted": "заявленное НЕ подтвердилось",
-    "task.create": "поставил задачу",
-    "task.claimed": "взял задачу",
-    "task.done": "закрыл задачу",
-    "task.edit": "изменил задачу",
-    "task.rated": "оценил работу",
-    "collection.collected": "снял выручку",
-    "collection.received": "принял инкассацию",
-    "collection.cancelled": "отменил инкассацию",
-    "maintenance.log_created": "записал работу по обслуживанию",
-    "maintenance.log_closed": "закрыл работу по обслуживанию",
-    "maintenance.log_removed": "удалил запись обслуживания",
-    "maintenance.part_swapped": "заменил узел",
-    "vending.stock.recount": "пересчитал склад",
-    "coffee.refill.delete": "удалил запись заливки",
-    "coffee.return.delete": "удалил запись возврата",
-    "coffee.consumable.delete": "удалил запись расходников",
-    "person.link_telegram": "привязал Telegram",
-  };
-  return map[action] ?? action;
+  return ACTION_LABELS[action] ?? action;
 }
 
 export default async function Audit() {
