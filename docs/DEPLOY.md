@@ -150,6 +150,103 @@ docker exec mydon-stock-db-1 pg_dump -U mydon mydon | gzip > /opt/backups/stock-
 Детали, ожидаемые числа отчёта и рулинги — `docs/superpowers/specs/2026-08-25-p8a-stock-history-design.md`
 (§6 «Выкатка», аддендумы, включая «Уточнения после adversarial»).
 
+### Архив донора VendCash (срез «правда о пробеле»)
+
+Донор жив, продолжает копить (последняя строка 30.06.2026) и в любой момент
+может быть погашен владельцем. Всё, чего в MYDON нет вовсе — GPS 246 сборов,
+`distance_from_machine`, `collection_history` (502 строки), приёмщики (385
+строк `manager_id`), `machine_locations` (31) — живёт только там. Архив
+снимается ПЕРВЫМ, до любой правки данных.
+
+```bash
+# 1. Строка подключения донора читается ЛОКАЛЬНО (railway CLI уже авторизован
+#    под владельцем) и никуда не печатается.
+railway link -p "VendHub Cash bot"
+export VENDCASH_URL=$(railway variables -s Postgres --kv | sed -n 's/^DATABASE_PUBLIC_URL=//p')
+
+# 2. Дамп снимает клиент 17-й версии — тот же образ, которым ходит db_access.sh:
+#    локальный pg_dump 15 сервер 17 не возьмёт, а `| gzip` спрячет отказ пустым
+#    файлом (урок П8a). Строка подключения уходит ОКРУЖЕНИЕМ, а не аргументом:
+#    в argv её видит любой `ps`.
+docker run --rm -e VENDCASH_URL --entrypoint sh postgres:17-alpine \
+  -c 'pg_dump --no-owner --no-privileges "$VENDCASH_URL"' \
+  | gzip > ./vendcash-archive-$(date +%F).sql.gz
+
+# 3. Проверка РАЗМЕРОМ, а не кодом возврата. Ожидание — единицы мегабайт (база 35 МБ).
+ls -lh ./vendcash-archive-*.sql.gz
+
+# 4. Архив переезжает на хост прода; строка подключения донора туда НЕ едет.
+scp ./vendcash-archive-$(date +%F).sql.gz mydon:/opt/backups/
+ssh mydon 'ls -lh /opt/backups/vendcash-archive-*.sql.gz'
+```
+
+Автоматизировать разовое снятие дампа чужой базы не будем: это код, который
+запустят один раз. После архива Railway-проект можно гасить — решение владельца
+становится обратимым.
+
+### Разовые шаги среза «правда о пробеле»
+
+Миграция `0074_collection_client_key` заводит колонку и уникальный индекс, но
+ключи в неё не приносит — их пишет отдельный **идемпотентный** скрипт, и
+автодеплой его НЕ запускает. Порядок обязателен и не переставляется: сначала
+ключи (доказательство происхождения), потом время.
+
+```bash
+# 0. Бэкап базы перед ПЕРВОЙ записью (R-I-6). У helper'а нет ключа -t: dump
+#    берёт схемы public и drizzle целиком, и это правильный бэкап — а откат
+#    247 отметок времени идёт не из него, а из audit_log.before.
+/opt/backups/db_access.sh dump | gzip > /opt/backups/pre-inkass-timefix-$(date +%F).sql.gz
+ls -lh /opt/backups/pre-inkass-timefix-*.sql.gz
+
+# 1. Ключи. VENDCASH_URL получен на шаге архива и передаётся РОВНО на эти две
+#    команды: в боевом .env его нет и быть не должно.
+docker exec -i -e VENDCASH_DATABASE_URL="$VENDCASH_URL" mydon-core \
+  node packages/db/dist/backfill-collection-keys.js --dry-run </dev/null
+docker exec -i -e VENDCASH_DATABASE_URL="$VENDCASH_URL" mydon-core \
+  node packages/db/dist/backfill-collection-keys.js --apply   </dev/null
+
+# 2. Время. Донор здесь не нужен вовсе: множество доказано ключом в MYDON.
+docker exec -i mydon-core node packages/db/dist/fix-collection-time.js --dry-run </dev/null
+docker exec -i mydon-core node packages/db/dist/fix-collection-time.js --apply   </dev/null
+```
+
+`</dev/null` в конце каждой команды обязателен: без него остаток скрипта уходит
+в контейнер и шаги после молча не выполняются.
+
+**Ожидание примерки ключей:** сопоставлено **374**, к записи **374**, без пары
+**12 + 12** (автомат с расходящимся кодом `3be8c71f0000` / `3be8c71e0000`,
+решение владельца), неоднозначно **0 либо 2** (тройной дубль на `fa86d006…`
+30.01.2026 12:46 — единственный кандидат; различаются ли у двух его строк
+секунды, скажет примерка), расхождение статуса — **1 строка** (30.06.2026).
+Любое другое число — **остановка выкатки**, а не флаг. Повторный `--apply`
+обязан дать «записано 0».
+
+**Ожидание правки времени:** найдено **247**, к правке **247**; ташкентские часы
+до 4–14, после 9–19; суммы по статусам до и после совпадают до копейки; сутки
+до и после совпадают (полночь не пересекает ни одна строка). Третий прогон
+обязан ОТКАЗАТЬ кодом 3 по отметке события — это и есть проверка защиты от
+двойного сдвига. Скрипт откажется работать и в том случае, если хоть одна
+строка `source='import'` осталась без ключа: чинить время у строк, происхождение
+которых не доказано, нельзя.
+
+Проверочный запрос распределения часов (до и после):
+
+```bash
+/opt/backups/db_access.sh query "
+select source,
+       min(extract(hour from collected_at at time zone 'Asia/Tashkent'))::int  as ч_мин,
+       max(extract(hour from collected_at at time zone 'Asia/Tashkent'))::int  as ч_макс,
+       round(avg(extract(hour from collected_at at time zone 'Asia/Tashkent'))::numeric, 1) as ч_сред,
+       count(*)                                                                as строк,
+       coalesce(sum(amount) filter (where status = 'received'), 0)             as принято
+  from collection group by source order by source"
+```
+
+**Откат правки времени** — из `audit_log`, а не восстановлением дампа:
+в `before` лежит полная строка каждой из 247 записей
+(`action = 'collection.time_corrected'`). Восстанавливать 70 таблиц ради отката
+247 отметок времени — это откат всей базы, а не откат правки.
+
 ### Разовый перенос фискальных полей снека (П6)
 
 После миграции 0072 типизированные поля прайса доступны: НДС и ОКЕИ уже имеют
