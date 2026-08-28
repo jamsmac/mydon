@@ -27,7 +27,7 @@ describe("Core cron shutdown", () => {
     // Ретенция ходит по крону вс 04:10 (П8b, R-P8b-7) — тот же риск, что и у
     // остальных: непойманный `Cron` держит event loop открытым после shutdown.
     ["retention", () => new RetentionService({} as never)],
-    ["task-bridge", () => new TaskBridgeService({} as never, {} as never, {} as never, {} as never)],
+    ["task-bridge", () => new TaskBridgeService({} as never, {} as never, {} as never, {} as never, {} as never)],
   ] as const) {
     it(`останавливает ${name} cron и освобождает event loop`, () => {
       const service = create() as unknown as CronOwner;

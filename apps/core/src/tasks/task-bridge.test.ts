@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { BRIDGE_EVENT_TYPES, BRIDGE_SOURCES, TaskBridgeService, nextMorning } from "./task-bridge.service";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { BRIDGE_EVENT_TYPES, BRIDGE_SOURCES, OVERDUE_MAX_EVENTS, TaskBridgeService, nextMorning } from "./task-bridge.service";
 
 type Row = Record<string, unknown>;
 const NOW = new Date("2026-08-26T06:15:00+05:00");
@@ -38,7 +39,7 @@ function fixture(opts: { events: Row[]; settings?: Row[]; people?: Row[]; confli
       firstIdBySerial: new Map([[SERIAL, CARD]]),
     }),
   } as never;
-  const service = new TaskBridgeService(db, tasks, events, vending);
+  const service = new TaskBridgeService(db, tasks, events, vending, { claim: async () => true } as never);
   (service as unknown as { людиСПравом: () => Promise<Row[]> }).людиСПравом = async () => opts.people ?? [];
   (service as unknown as { logger: { warn: (message: string) => void; log: () => void } }).logger = {
     warn: (message) => warnings.push(message),
@@ -177,5 +178,100 @@ describe("Мост событие → задача (П7)", () => {
     assert.deepEqual(BRIDGE_SOURCES.map((source) => source.key).sort(), [
       "low_stock", "refill_unconfirmed", "shrinkage", "sync_failed", "sync_stale",
     ]);
+  });
+});
+
+describe("Эмитент просрочки (П7, R-P7-5, T7)", () => {
+  const СЕЙЧАС = new Date("2026-08-26T06:15:00+05:00");
+
+  function стендПросрочки(opts: { задачи: Row[]; занятые?: Set<string> }) {
+    const записанные: Row[] = [];
+    const заявки: string[] = [];
+    const параметры = { limit: 0 };
+    const условия: unknown[] = [];
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: (condition: unknown) => {
+            условия.push(condition);
+            return {
+            orderBy: () => ({ limit: async (value: number) => { параметры.limit = value; return opts.задачи; } }),
+            };
+          },
+        }),
+      }),
+    } as never;
+    const events = { record: async (value: Row) => { записанные.push(value); return value; } } as never;
+    const rules = {
+      claim: async (key: string) => {
+        заявки.push(key);
+        return !(opts.занятые?.has(key) ?? false);
+      },
+    } as never;
+    const service = new TaskBridgeService(db, {} as never, events, {} as never, rules);
+    return { service, записанные, заявки, параметры, условия };
+  }
+
+  const просрочка = (id: string, due: string, over: Row = {}): Row => ({
+    id,
+    title: `Задача ${id}`,
+    due: new Date(due),
+    ownerRef: null,
+    status: "todo",
+    ...over,
+  });
+
+  it("задача, просроченная сегодня, события не даёт — первый день за ботом", async () => {
+    const st = стендПросрочки({ задачи: [просрочка("t1", "2026-08-26T09:00:00+05:00")] });
+    assert.equal((await st.service.emitOverdue(СЕЙЧАС)).emitted, 0);
+    assert.deepEqual(st.записанные, []);
+  });
+
+  it("задача, просроченная вчера, даёт событие один раз в сутки", async () => {
+    const st = стендПросрочки({ задачи: [просрочка("t1", "2026-08-25T18:00:00+05:00")] });
+    assert.equal((await st.service.emitOverdue(СЕЙЧАС)).emitted, 1);
+    assert.deepEqual(st.заявки, ["task-overdue:2026-08-26:t1"]);
+    const payload = st.записанные[0]!.payload as Row;
+    assert.equal(payload.title, "Задача t1");
+    assert.equal(payload.daysOverdue, 1);
+  });
+
+  it("повторный прогон в те же сутки события не даёт — ключ занят", async () => {
+    const key = "task-overdue:2026-08-26:t1";
+    const st = стендПросрочки({
+      задачи: [просрочка("t1", "2026-08-25T18:00:00+05:00")],
+      занятые: new Set([key]),
+    });
+    assert.equal((await st.service.emitOverdue(СЕЙЧАС)).emitted, 0);
+    assert.deepEqual(st.записанные, []);
+  });
+
+  it("двадцать первая просрочка не эмитится, capped=true", async () => {
+    const rows = Array.from({ length: OVERDUE_MAX_EVENTS + 1 }, (_, i) =>
+      просрочка(`t${i}`, "2026-08-20T18:00:00+05:00"),
+    );
+    const st = стендПросрочки({ задачи: rows });
+    const result = await st.service.emitOverdue(СЕЙЧАС);
+    assert.equal(result.emitted, OVERDUE_MAX_EVENTS);
+    assert.equal(result.capped, true);
+    assert.equal(st.параметры.limit, OVERDUE_MAX_EVENTS + 1);
+  });
+
+  it("ровно двадцать просрочек — не обрезка", async () => {
+    const rows = Array.from({ length: OVERDUE_MAX_EVENTS }, (_, i) =>
+      просрочка(`t${i}`, "2026-08-20T18:00:00+05:00"),
+    );
+    const result = await стендПросрочки({ задачи: rows }).service.emitOverdue(СЕЙЧАС);
+    assert.equal(result.emitted, OVERDUE_MAX_EVENTS);
+    assert.equal(result.capped, false);
+  });
+
+  it("закрытые статусы отсекает сам SQL-запрос", async () => {
+    const st = стендПросрочки({ задачи: [] });
+    await st.service.emitOverdue(СЕЙЧАС);
+    const query = new PgDialect().sqlToQuery(st.условия[0] as Parameters<PgDialect["sqlToQuery"]>[0]);
+    assert.match(query.sql, /due/);
+    assert.match(query.sql, /status/);
+    assert.deepEqual(query.params.slice(-2), ["done", "cancelled"]);
   });
 });

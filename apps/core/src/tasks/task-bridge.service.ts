@@ -1,10 +1,11 @@
 import { Inject, Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
-import { person } from "@mydon/db";
+import { person, task } from "@mydon/db";
 import { can, effectiveRoles, normalizeMachineSerial, tashkentDay, tashkentDayStartOf, TZ } from "@mydon/shared";
 import { Cron } from "croner";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNotNull, lt, ne } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
+import { RulesService } from "../rules/rules.service";
 import { readIntSetting, settingValue } from "../system/settings";
 import { VendingService } from "../vending/vending.service";
 import { TasksService } from "./tasks.service";
@@ -95,6 +96,9 @@ export const BRIDGE_EVENTS_LIMIT = 500;
 export const AUTO_CREATED_EVENT = "task.auto_created";
 export const BRIDGE_RUN_EVENT = "task.bridge_run";
 export const TASK_BRIDGE_MAX_PER_RUN_FALLBACK = 20;
+/** Потолок immediate-событий просрочки за один прогон. */
+export const OVERDUE_MAX_EVENTS = 20;
+export const OVERDUE_EVENT = "task.overdue";
 
 export interface BridgeRun {
   events: number;
@@ -126,6 +130,7 @@ export class TaskBridgeService implements OnModuleInit, OnApplicationShutdown {
     private readonly tasks: TasksService,
     private readonly events: EventsService,
     private readonly vending: VendingService,
+    private readonly rules: RulesService,
   ) {}
 
   async run(now = new Date()): Promise<BridgeRun> {
@@ -250,10 +255,66 @@ export class TaskBridgeService implements OnModuleInit, OnApplicationShutdown {
     return rows.filter((row) => can(effectiveRoles(row), "tasks.confirm")).map((row) => ({ id: row.id }));
   }
 
+  /**
+   * Просрочка → событие `task.overdue`, раз в ташкентские сутки на задачу.
+   *
+   * Первый календарный день просрочки остаётся существующему напоминанию бота;
+   * правило подключается со следующего дня, чтобы не присылать два одинаковых
+   * сигнала в одно утро. Дедуп — атомарной заявкой по известному заранее ключу.
+   */
+  async emitOverdue(now = new Date()): Promise<{ emitted: number; capped: boolean }> {
+    const граница = tashkentDayStartOf(now);
+    const строки = await this.db
+      .select({ id: task.id, title: task.title, due: task.due, ownerRef: task.ownerRef })
+      .from(task)
+      .where(
+        and(
+          isNotNull(task.due),
+          lt(task.due, граница),
+          ne(task.status, "done"),
+          ne(task.status, "cancelled"),
+        ),
+      )
+      .orderBy(asc(task.due))
+      .limit(OVERDUE_MAX_EVENTS + 1);
+
+    const capped = строки.length > OVERDUE_MAX_EVENTS;
+    const день = tashkentDay(now);
+    let emitted = 0;
+    for (const t of строки.slice(0, OVERDUE_MAX_EVENTS)) {
+      // Запрос обязан это гарантировать; проверка также не даёт ошибочной
+      // строке драйвера породить раннее событие.
+      if (t.due === null || t.due >= граница) continue;
+      if (!(await this.rules.claim(`task-overdue:${день}:${t.id}`))) continue;
+      await this.events.record({
+        source: "tasks",
+        type: OVERDUE_EVENT,
+        occurredAt: now,
+        payload: {
+          taskId: t.id,
+          title: t.title,
+          due: t.due.toISOString(),
+          ownerRef: t.ownerRef,
+          daysOverdue: Math.max(1, Math.round((граница.getTime() - t.due.getTime()) / 86_400_000)),
+        },
+      });
+      emitted += 1;
+    }
+    if (capped) {
+      this.logger.warn(
+        `Просроченных задач больше ${OVERDUE_MAX_EVENTS}: показано ${OVERDUE_MAX_EVENTS}, остальные молчат до разбора`,
+      );
+    }
+    return { emitted, capped };
+  }
+
   onModuleInit(): void {
     this.cron = new Cron("15 6 * * *", { timezone: TZ }, () => {
       void this.run().catch((error: unknown) =>
         this.logger.warn(`Мост «событие → задача» не отработал: ${error instanceof Error ? error.message : String(error)}`),
+      );
+      void this.emitOverdue().catch((error: unknown) =>
+        this.logger.warn(`Эмитент просрочки не отработал: ${error instanceof Error ? error.message : String(error)}`),
       );
     });
   }
