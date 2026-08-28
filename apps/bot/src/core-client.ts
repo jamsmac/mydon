@@ -775,6 +775,30 @@ export class CoreClient {
     return this.request(`/tasks/${id}/assign-notified`, { method: "POST" });
   }
 
+  /** Сделанные задачи, которые ещё ждут приёмки менеджером. */
+  awaitingTasks(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks?awaiting=1");
+  }
+
+  confirmTask(id: string, actor: string): Promise<TaskRow> {
+    return this.request<TaskRow>(`/tasks/${id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ actor }),
+    });
+  }
+
+  /** Актор обязателен: иначе журнал ошибочно припишет оценку владельцу. */
+  rateTask(
+    id: string,
+    quality: "excellent" | "accepted" | "redo",
+    actor: string,
+  ): Promise<TaskRow> {
+    return this.request<TaskRow>(`/tasks/${id}/quality`, {
+      method: "POST",
+      body: JSON.stringify({ quality, actor }),
+    });
+  }
+
   /** Автоматы направления — для клавиатуры инкассации. */
   /**
    * Автоматы реестра. По умолчанию — ВЕСЬ парк.
