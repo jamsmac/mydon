@@ -48,6 +48,12 @@ DO $$ BEGIN
     ADD CONSTRAINT "vending_refill_reverses_id_vending_refill_id_fk"
     FOREIGN KEY ("reverses_id") REFERENCES "public"."vending_refill"("id");
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;--> statement-breakpoint
+-- Без NOT VALID, как и CHECK'и vending_product выше: пересборка индекса
+-- (0070/0071) — I/O на диске, и там счёт строк решал, безопасен ли
+-- некокуррентный CREATE INDEX. Здесь Postgres под ACCESS EXCLUSIVE лишь
+-- сравнивает два уже вычитанных столбца по каждой строке — дешёвая
+-- последовательная проверка, а не построение структуры; лок пропорционален
+-- размеру таблицы, но кратно дешевле на строку, чем индекс.
 ALTER TABLE "vending_refill" DROP CONSTRAINT IF EXISTS "vending_refill_qty_positive";--> statement-breakpoint
 ALTER TABLE "vending_refill" ADD CONSTRAINT "vending_refill_qty_positive"
   CHECK (("source" = 'storno' AND "qty" < 0) OR ("source" <> 'storno' AND "qty" > 0));--> statement-breakpoint
