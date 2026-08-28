@@ -313,6 +313,9 @@ async function main(): Promise<void> {
 if (require.main === module) {
   main().catch((err: unknown) => {
     console.error("Правка времени инкассаций упала:", err instanceof Error ? err.message : err);
-    process.exitCode = 1;
+    // process.exitCode = 1 здесь НЕ хватило бы: postgres.js держит соединение
+    // открытым, и без явного выхода ручной шаг выкатки висел бы после уже
+    // напечатанной ошибки — не отличить от «ещё считает».
+    process.exit(1);
   });
 }

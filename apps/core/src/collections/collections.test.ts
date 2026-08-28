@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, it } from "node:test";
+import path from "node:path";
 import { collection as collectionTable, coffeeOrder as coffeeOrderTable, entity as entityTable, sale as saleTable } from "@mydon/db";
 import { CollectionsService } from "./collections.service";
 
@@ -83,6 +85,29 @@ describe("Инкассация: ключ идемпотентности (R-I-2)"
     const a = await s.create({ machineId: "m1", operatorId: "p1", clientKey: "bot:collect:p1:m1:2026-08-26T09:07" });
     const b = await s.create({ machineId: "m1", operatorId: "p1", clientKey: "bot:collect:p1:m1:2026-08-26T17:31" });
     assert.notEqual((a as unknown as Row).clientKey, (b as unknown as Row).clientKey);
+  });
+
+  it("писатель `collection` в Core ровно один — второй не имеет права появиться без ключа незаметно", () => {
+    // Поведенческие тесты выше проверяют ЭТОТ путь. Они ничего не скажут про
+    // новый сервис, который начнёт писать инкассации своим insert'ом мимо
+    // clientKey — а именно так ключ идемпотентности и перестаёт работать.
+    // Исходники читаются относительно dist: тесты пакета исполняются оттуда.
+    const корень = path.resolve(__dirname, "..", "..", "src");
+    const файлы: string[] = [];
+    const обойти = (dir: string) => {
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, d.name);
+        if (d.isDirectory()) обойти(p);
+        else if (d.name.endsWith(".ts") && !d.name.endsWith(".test.ts")) файлы.push(p);
+      }
+    };
+    обойти(корень);
+    const писатели = файлы.filter((f) => /\binsert\(\s*collection\s*\)/.test(readFileSync(f, "utf8")));
+    assert.deepEqual(
+      писатели.map((f) => path.relative(корень, f)),
+      ["collections/collections.service.ts"],
+      "появился второй писатель collection — он обязан принимать clientKey и звать onConflictDoNothing",
+    );
   });
 });
 

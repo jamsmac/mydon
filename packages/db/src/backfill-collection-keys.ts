@@ -284,7 +284,7 @@ export function sqlDonor(url: string, schema = "public"): { reader: DonorReader;
   const reader: DonorReader = {
     collections: async () =>
       (await client`
-        select c.id::text as id, m.code as machine_code, c.collected_at::text as collected_at,
+        select c.id::text as id, m.code as "machineCode", c.collected_at::text as "collectedAt",
                c.amount::text as amount, c.status::text as status
           from ${client(schema)}.collections c
           left join ${client(schema)}.machines m on m.id = c.machine_id
@@ -328,6 +328,9 @@ async function main(): Promise<void> {
 if (require.main === module) {
   main().catch((err: unknown) => {
     console.error("Бэкфилл ключей инкассации упал:", err instanceof Error ? err.message : err);
-    process.exitCode = 1;
+    // process.exitCode = 1 здесь НЕ хватило бы: postgres.js держит соединение
+    // MYDON открытым (finally выше закрывает только донора), и без явного
+    // выхода ручной шаг выкатки висел бы после уже напечатанной ошибки.
+    process.exit(1);
   });
 }
