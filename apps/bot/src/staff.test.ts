@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  collectionClientKey,
   formatMyTasks,
   handleStaffCallback,
   handleStaffMessage,
@@ -557,5 +558,39 @@ describe("Аудит 18.08: раскладка и честные ошибки", 
     const done = await handleIntakeCallback(7, { kind: "num", press: { kind: "done" } }, ME, deps);
     assert.deepEqual(calls, ["intake:12"]);
     assert.match(done.edit!.text, /Приход записан/);
+  });
+});
+
+describe("Инкассация из бота: ключ идемпотентности (R-I-2)", () => {
+  const MACHINE = "33333333-3333-4333-8333-333333333333";
+
+  it("кнопка инкассации шлёт ключ `bot:collect:<человек>:<автомат>:<минута>`", async () => {
+    const ключи: (string | undefined)[] = [];
+    const { core } = stubCore({
+      createCollection: async (_m: string, _p: string, clientKey?: string) => {
+        ключи.push(clientKey);
+        return { id: "c1", collectedAt: "2026-08-26T09:07:11.000Z" };
+      },
+    });
+    const deps = { core, conversations: new Conversations() } as never;
+    await handleStaffCallback(555, `c:${MACHINE}`, ME, deps, new Date("2026-08-26T09:07:11.000Z"));
+    assert.deepEqual(ключи, [`bot:collect:${ME.id}:${MACHINE}:2026-08-26T14:07`]);
+  });
+
+  it("повторное нажатие внутри той же минуты несёт ТОТ ЖЕ ключ", () => {
+    // Клиент Core рвёт запрос по таймауту 10 с (`core-client.ts:322/329`),
+    // человек видит ошибку и жмёт снова — сегодня это вторая инкассация.
+    const a = collectionClientKey(ME.id, MACHINE, new Date("2026-08-26T09:07:00.000Z"));
+    const b = collectionClientKey(ME.id, MACHINE, new Date("2026-08-26T09:07:59.999Z"));
+    assert.equal(a, b);
+  });
+
+  it("часы — параметр, а не стенные: два вызова с одним `now` дают один ключ", () => {
+    const now = new Date("2026-08-26T09:07:30.000Z");
+    assert.equal(collectionClientKey(ME.id, MACHINE, now), collectionClientKey(ME.id, MACHINE, now));
+    assert.notEqual(
+      collectionClientKey(ME.id, MACHINE, now),
+      collectionClientKey(ME.id, MACHINE, new Date("2026-08-26T09:08:30.000Z")),
+    );
   });
 });

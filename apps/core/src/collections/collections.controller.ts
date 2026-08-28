@@ -17,6 +17,9 @@ export class CreateCollectionDto {
 
   @IsOptional() @IsString() @MaxLength(1000)
   notes?: string;
+
+  @IsOptional() @IsString() @MaxLength(200)
+  clientKey?: string;
 }
 
 export class ReceiveCollectionDto {

@@ -47,8 +47,15 @@ export function tashkentDayEnd(v: string): Date | null {
   return toDate(`${m[0]}T23:59:59.999${ЗОНА}`);
 }
 
-/** Смещение Ташкента в миллисекундах: постоянное, перехода на летнее время нет. */
-const СМЕЩЕНИЕ_МС = 5 * 3_600_000;
+/**
+ * Смещение Ташкента в миллисекундах: постоянное, перехода на летнее время нет.
+ *
+ * ЭКСПОРТИРУЕТСЯ, чтобы разовая правка времени (`fix-collection-time.ts`) брала
+ * «пять часов» ОТСЮДА. Написать в скрипте `5 * 3_600_000` или в SQL
+ * `interval '5 hours'` — значит завести вторую константу зоны; ровно на этой
+ * развилке донор VendCash уехал на пять часов (см. шапку файла).
+ */
+export const TASHKENT_OFFSET_MS = 5 * 3_600_000;
 
 /**
  * Момент → ташкентские сутки `YYYY-MM-DD`.
@@ -61,7 +68,7 @@ const СМЕЩЕНИЕ_МС = 5 * 3_600_000;
  * а формат нужен сортируемый и байт-в-байт как `date` в базе.
  */
 export function tashkentDay(at: Date): string {
-  return new Date(at.getTime() + СМЕЩЕНИЕ_МС).toISOString().slice(0, 10);
+  return new Date(at.getTime() + TASHKENT_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 /** Момент → начало ЕГО ташкентских суток. */
@@ -77,5 +84,19 @@ export function tashkentDayStartOf(at: Date): Date {
  * `toLocaleString` не годится: он зависит от набора ICU в рантайме.
  */
 export function tashkentHour(at: Date): number {
-  return new Date(at.getTime() + СМЕЩЕНИЕ_МС).getUTCHours();
+  return new Date(at.getTime() + TASHKENT_OFFSET_MS).getUTCHours();
+}
+
+/**
+ * Момент → ташкентская МИНУТА `YYYY-MM-DDTHH:mm`.
+ *
+ * Единица, в которой повтор нажатия совпадает: клиент Core рвёт запрос по
+ * таймауту 10 с, человек видит ошибку и жмёт кнопку снова. Двух РАЗНЫХ сборов
+ * одного автомата одним человеком внутри одной минуты не бывает.
+ */
+export function tashkentMinute(at: Date): string {
+  // `toLocaleString` здесь не годится по той же причине, что у `tashkentDay`:
+  // он зависит от набора ICU в рантайме, а строка нужна сортируемая и
+  // байт-в-байт одинаковая на всех машинах.
+  return new Date(at.getTime() + TASHKENT_OFFSET_MS).toISOString().slice(0, 16);
 }

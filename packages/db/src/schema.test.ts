@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import path from "node:path";
 import { Table, is } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
+import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import { DEFAULT_MACHINE_STATUS, MACHINE_KINDS, MACHINE_STATUSES } from "@mydon/shared";
 import * as mod from "./schema";
-import { schema, TASK_SOURCE_DAY_PREDICATE } from "./schema";
+import { collection, schema, TASK_SOURCE_DAY_PREDICATE } from "./schema";
 
 /**
  * Схема Core — договор с ТЗ §7. Тест ловит случайное удаление или
@@ -251,5 +251,21 @@ describe("Предикат частичного индекса task_source_key (
       миграция.includes(`WHERE ${предикат}`),
       `предикат «${предикат}» не найден в 0040 — схема и вставка разошлись`,
     );
+  });
+});
+
+describe("Инкассация: ключ идемпотентности (R-I-2)", () => {
+  it("у `collection` есть `clientKey` — без него повторный перенос удвоил бы 386 строк", () => {
+    const cfg = getTableConfig(collection);
+    const колонка = cfg.columns.find((c) => c.name === "client_key");
+    assert.ok(колонка, "колонки client_key нет");
+    assert.equal(колонка!.notNull, false, "ключ обязан быть nullable: у своих строк источника вне MYDON нет");
+  });
+
+  it("индекс по ключу УНИКАЛЬНЫЙ — иначе колонка была бы украшением", () => {
+    const cfg = getTableConfig(collection);
+    const индекс = cfg.indexes.find((i) => i.config.name === "collection_client_key");
+    assert.ok(индекс, "индекса collection_client_key нет");
+    assert.equal(индекс!.config.unique, true);
   });
 });

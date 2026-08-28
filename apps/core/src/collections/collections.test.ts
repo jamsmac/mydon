@@ -8,37 +8,83 @@ type Row = Record<string, unknown>;
 /**
  * Заглушка транзакции. Хитрость: create() сначала ищет автомат (entity),
  * receive/cancel ищут саму инкассацию — здесь это разводится флагом.
+ *
+ * `конфликт` — вторая инкассация с тем же `clientKey`: `onConflictDoNothing`
+ * возвращает пустой `returning()`, и `create()` обязана сама дочитать уже
+ * лежащую строку отдельным `select`. Разводится счётчиком: заглушка таблиц
+ * не различает, ПЕРВЫЙ это select (ищет автомат) или ВТОРОЙ (ищет повтор).
  */
-function stub(opts: { machine?: Row | null; existing?: Row | null }) {
+function stub(opts: { machine?: Row | null; existing?: Row | null; конфликт?: Row }) {
   const audit: Row[] = [];
-  const rows = () => (opts.machine !== undefined ? (opts.machine ? [opts.machine] : []) : opts.existing ? [opts.existing] : []);
-  const withFor = () =>
-    Object.assign(Promise.resolve(rows()), {
-      limit: async () => rows(),
-      for: async () => rows(),
-    });
+  let выборок = 0;
+  const базовые = () =>
+    opts.machine !== undefined ? (opts.machine ? [opts.machine] : []) : opts.existing ? [opts.existing] : [];
+  const withFor = (r: Row[]) =>
+    Object.assign(Promise.resolve(r), { limit: async () => r, for: async () => r });
   const tx = {
-    select: () => ({ from: () => ({ where: () => withFor() }) }),
-    insert: (t: unknown) => ({
+    select: () => {
+      выборок += 1;
+      const строки = opts.конфликт && выборок > 1 ? [opts.конфликт] : базовые();
+      return { from: () => ({ where: () => withFor(строки) }) };
+    },
+    insert: () => ({
       values: (v: Row) => {
-        if ((t as { _?: { name?: string } })?._?.name === "audit_log" || audit.length >= 0) {
-          // считаем записи журнала по признаку поля action
-          if (typeof v.action === "string") audit.push(v);
-        }
-        return Object.assign(Promise.resolve(undefined), {
-          returning: async () => [{ id: "c1", ...v }],
+        if (typeof v.action === "string") audit.push(v);
+        const конфликт = opts.конфликт != null && v.clientKey === opts.конфликт.clientKey;
+        const хвост = { returning: async () => (конфликт ? [] : [{ id: "c1", ...v }]) };
+        return Object.assign(Promise.resolve(undefined), хвост, {
+          onConflictDoNothing: () => Object.assign(Promise.resolve(undefined), хвост),
         });
       },
     }),
     update: () => ({
-      set: (v: Row) => ({
-        where: () => ({ returning: async () => [{ ...(opts.existing ?? {}), ...v }] }),
-      }),
+      set: (v: Row) => ({ where: () => ({ returning: async () => [{ ...(opts.existing ?? {}), ...v }] }) }),
     }),
   };
   const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
   return { db, audit };
 }
+
+describe("Инкассация: ключ идемпотентности (R-I-2)", () => {
+  it("`create` без ключа пишет строку и `NULL` в `client_key` — ключ обязателен только там, где его дал клиент", async () => {
+    const { db } = stub({ machine: { id: "m1", type: "machine" } });
+    const c = await new CollectionsService(db).create({ machineId: "m1", operatorId: "p1" });
+    assert.equal((c as unknown as Row).clientKey, null);
+  });
+
+  it("`create` кладёт переданный ключ полем, а не выдумывает свой", async () => {
+    // Синтетический `mydon:collection:<uuid>` уникален по построению и не
+    // защищает НИ ОТ ЧЕГО: повтор нажатия получил бы новый uuid и лёг бы
+    // второй строкой — ровно то, против чего ключ заводят.
+    const { db } = stub({ machine: { id: "m1", type: "machine" } });
+    const c = await new CollectionsService(db).create({ machineId: "m1", operatorId: "p1", clientKey: "bot:collect:p1:m1:2026-08-26T14:07" });
+    assert.equal((c as unknown as Row).clientKey, "bot:collect:p1:m1:2026-08-26T14:07");
+  });
+
+  it("повтор с тем же `clientKey` возвращает ПЕРВУЮ строку, второй строки нет", async () => {
+    const первая = { id: "c1", clientKey: "bot:collect:p1:m1:2026-08-26T14:07", collectedAt: new Date("2026-08-26T09:07:00Z") };
+    const { db } = stub({ machine: { id: "m1", type: "machine" }, конфликт: первая });
+    const c = await new CollectionsService(db).create({ machineId: "m1", operatorId: "p1", clientKey: первая.clientKey });
+    assert.equal(c.id, "c1");
+    // Момент ПЕРВОГО сбора, а не времени повторного нажатия: человек увидит,
+    // что уже записано, и не станет писать второй раз.
+    assert.equal(String(c.collectedAt), String(первая.collectedAt));
+  });
+
+  it("повтор с тем же `clientKey` не пишет вторую запись в `audit_log`", async () => {
+    const первая = { id: "c1", clientKey: "bot:collect:p1:m1:2026-08-26T14:07" };
+    const { db, audit } = stub({ machine: { id: "m1", type: "machine" }, конфликт: первая });
+    await new CollectionsService(db).create({ machineId: "m1", operatorId: "p1", clientKey: первая.clientKey });
+    assert.equal(audit.filter((a) => a.action === "collection.collected").length, 0, "о том же событии журнал пишут один раз");
+  });
+
+  it("разные нажатия (разные ключи) дают две инкассации — за сутки бывает два сбора", async () => {
+    const s = new CollectionsService(stub({ machine: { id: "m1", type: "machine" } }).db);
+    const a = await s.create({ machineId: "m1", operatorId: "p1", clientKey: "bot:collect:p1:m1:2026-08-26T09:07" });
+    const b = await s.create({ machineId: "m1", operatorId: "p1", clientKey: "bot:collect:p1:m1:2026-08-26T17:31" });
+    assert.notEqual((a as unknown as Row).clientKey, (b as unknown as Row).clientKey);
+  });
+});
 
 describe("Инкассация", () => {
   it("сбор фиксируется временем «сейчас» и следом в журнале", async () => {

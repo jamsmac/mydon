@@ -914,14 +914,20 @@ export class CoreClient {
     );
   }
 
-  /** Оператор зафиксировал сбор денег с автомата. */
+  /**
+   * Оператор зафиксировал сбор денег с автомата.
+   *
+   * `clientKey` генерируется КЛИЕНТОМ — как у заливки (`createRefill` ниже):
+   * сгенерируй его сервер, и повтор того же нажатия стал бы новой инкассацией.
+   */
   createCollection(
     machineId: string,
     operatorId: string,
+    clientKey?: string,
   ): Promise<{ id: string; collectedAt: string }> {
     return this.request<{ id: string; collectedAt: string }>("/collections", {
       method: "POST",
-      body: JSON.stringify({ machineId, operatorId }),
+      body: JSON.stringify({ machineId, operatorId, ...(clientKey ? { clientKey } : {}) }),
     });
   }
 
