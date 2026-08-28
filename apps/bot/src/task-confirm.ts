@@ -98,6 +98,32 @@ export async function handleConfirmRedoReason(
   return { text: `↩ Вернул в работу «${String(conv.data.title ?? "задачу")}». Причина сохранена в комментариях.` };
 }
 
+/** Экран «ждут подтверждения»: нумерованный список и пара кнопок на строку. */
+export function formatAwaitingScreen(
+  tasks: readonly TaskRow[],
+  names: ReadonlyMap<string, string>,
+  now = new Date(),
+): StaffReply {
+  if (tasks.length === 0) {
+    return { text: "Ничего не ждёт приёмки. Как только кто-то закроет задачу, она появится здесь." };
+  }
+  const строки = tasks.map((t, i) => {
+    const closerId = t.closedBy?.startsWith("person:") ? t.closedBy.slice("person:".length) : t.ownerRef;
+    const closerName = (closerId ? names.get(closerId) : null) ?? "сотрудник";
+    const report = t.resultNote?.trim() ? t.resultNote.trim().split("\n")[0] : "Отчёта нет.";
+    return `${i + 1}. ${t.title}\nЗакрыл: ${closerName} · ${момент(t.completedAt, now)}\n${report}`;
+  });
+  return {
+    text: строки.join("\n\n"),
+    keyboard: {
+      inline_keyboard: tasks.map((t) => [
+        { text: "👌 Принять", callback_data: `tc:${t.id}:ok` },
+        { text: "↩ Вернуть в работу", callback_data: `tc:${t.id}:redo` },
+      ]),
+    },
+  };
+}
+
 export interface ConfirmCallbackResult {
   answer: string;
   message?: StaffReply;

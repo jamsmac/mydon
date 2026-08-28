@@ -7,6 +7,7 @@ import {
   NO_CONFIRMERS_EVENT,
   confirmKey,
   confirmRecipients,
+  formatAwaitingScreen,
   formatConfirmRequest,
   handleConfirmCallback,
   handleConfirmRedoReason,
@@ -218,5 +219,36 @@ describe("Решение менеджера", () => {
       conversations: new Conversations(), core,
     });
     assert.match(result.message!.text, /может менеджер/);
+  });
+});
+
+describe("Экран «ждут подтверждения» (П7, T6)", () => {
+  it("печатает нумерованный список и пару кнопок на строку", () => {
+    const ВТОРАЯ = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const r = formatAwaitingScreen(
+      [задача(), задача({ id: ВТОРАЯ, title: "Инкассация Kaffit-04" })],
+      new Map([[ЗАКРЫЛ, "Рустам"]]),
+      РАБОЧЕЕ,
+    );
+    assert.match(r.text, /1\. Пополнить Olma/);
+    assert.match(r.text, /2\. Инкассация Kaffit-04/);
+    assert.match(r.text, /Рустам/, "владелец должен видеть, чью работу принимает");
+    const ряды = r.keyboard!.inline_keyboard;
+    assert.equal(ряды.length, 2);
+    assert.deepEqual(ряды[0]!.map((b) => b.callback_data), [`tc:${ЗАДАЧА}:ok`, `tc:${ЗАДАЧА}:redo`]);
+  });
+
+  it("пустой экран говорит «ничего не ждёт приёмки» и что случится дальше", () => {
+    // Третье состояние, а не зелёная галка: «ноль» и «сломалось» обязаны
+    // выглядеть по-разному.
+    const r = formatAwaitingScreen([], new Map(), РАБОЧЕЕ);
+    assert.match(r.text, /Ничего не ждёт приёмки/);
+    assert.match(r.text, /появится здесь/);
+    assert.equal(r.keyboard, undefined, "кнопок без строк не бывает");
+  });
+
+  it("исполнитель без карточки не ломает экран — печатается ссылка, а не пусто", () => {
+    const r = formatAwaitingScreen([задача({ closedBy: "person:кто-то" })], new Map(), РАБОЧЕЕ);
+    assert.match(r.text, /Пополнить Olma/);
   });
 });

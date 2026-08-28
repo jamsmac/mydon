@@ -90,6 +90,7 @@ import {
   CONFIRM_CANCEL,
   REDO_FLOW,
   confirmRedoStepHint,
+  formatAwaitingScreen,
   handleConfirmCallback,
   handleConfirmRedoReason,
   parseConfirmCallback,
@@ -617,6 +618,13 @@ async function startMenuItem(
       return { reply: await startSchedules(chatId, deps) };
     case "mrefill":
       return { reply: await startMachineRefill(chatId, person, deps) };
+    case "confirm": {
+      const [tasks, people] = await Promise.all([
+        deps.core.awaitingTasks(),
+        deps.core.people().catch(() => [] as PersonRow[]),
+      ]);
+      return { reply: formatAwaitingScreen(tasks, new Map(people.map((p) => [p.id, p.name]))) };
+    }
     default:
       // Пункт объявлен ready, но обработчика нет — это ошибка сборки меню,
       // а не сотрудника. Говорим ровно то же, что и про неготовый поток.

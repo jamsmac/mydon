@@ -109,6 +109,23 @@ export async function rateTask(
   return { ok: true };
 }
 
+/**
+ * Приёмка работы. «Переделать» живёт отдельно — это `rateTask(id, "redo")`:
+ * у них разные последствия, и одна кнопка на оба означала бы, что владелец
+ * возвращает задачу в работу, думая, что закрывает вопрос.
+ */
+export async function confirmTask(id: string): Promise<ActionResult> {
+  try {
+    await core.confirmTask(id);
+  } catch (err) {
+    return fail(err);
+  }
+  revalidatePath("/tasks");
+  revalidatePath(`/tasks/${id}`);
+  revalidatePath("/team");
+  return { ok: true };
+}
+
 /** Смена статуса без закрытия: «взял в работу», «отменить». */
 export async function changeStatus(
   id: string,

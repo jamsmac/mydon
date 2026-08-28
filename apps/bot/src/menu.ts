@@ -142,6 +142,15 @@ export const STAFF_MENU: readonly MenuItem[] = [
   // Ряд 7 — редкое.
   { id: "new", label: "🆕 Новая карточка", perm: "registry.propose", ready: true, match: isRegisterTrigger },
   { id: "fix", label: "↩️ Ошибся — исправить", perm: "tasks.own", ready: true, match: isCoffeeFixTrigger },
+  // «🧾», не «📋» и не «✅»: первый занят «Мои задачи», второй — кнопкой
+  // «Выполнил» — то же правило значков, что у «🧮» и «🍫».
+  {
+    id: "confirm",
+    label: "🧾 Ждут подтверждения",
+    perm: "tasks.confirm",
+    ready: true,
+    match: (t) => /^(ждут подтвер|подтвержд|на подтвержд|приёмк|приемк)/i.test(t.trim()),
+  },
 ];
 
 /**
