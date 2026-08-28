@@ -263,6 +263,14 @@ export class TaskBridgeService implements OnModuleInit, OnApplicationShutdown {
    * сигнала в одно утро. Дедуп — атомарной заявкой по известному заранее ключу.
    */
   async emitOverdue(now = new Date()): Promise<{ emitted: number; capped: boolean }> {
+    // Тот же тумблер, что у run(): DEPLOY.md обещает владельцу, что
+    // TASK_BRIDGE_ENABLED=0 останавливает ОБЕ работы крона без деплоя —
+    // молчание здесь означало бы, что откат в проде не делает того, что
+    // написано в рунбуке.
+    if ((await settingValue(this.db, "TASK_BRIDGE_ENABLED")).trim() !== "1") {
+      this.logger.log("Эмитент task.overdue выключен настройкой.");
+      return { emitted: 0, capped: false };
+    }
     const граница = tashkentDayStartOf(now);
     const строки = await this.db
       .select({ id: task.id, title: task.title, due: task.due, ownerRef: task.ownerRef })

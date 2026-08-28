@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { PgDialect } from "drizzle-orm/pg-core";
+import { systemConfig, task as taskTable } from "@mydon/db";
 import { BRIDGE_EVENT_TYPES, BRIDGE_SOURCES, OVERDUE_MAX_EVENTS, TaskBridgeService, nextMorning } from "./task-bridge.service";
 
 type Row = Record<string, unknown>;
@@ -184,21 +185,28 @@ describe("Мост событие → задача (П7)", () => {
 describe("Эмитент просрочки (П7, R-P7-5, T7)", () => {
   const СЕЙЧАС = new Date("2026-08-26T06:15:00+05:00");
 
-  function стендПросрочки(opts: { задачи: Row[]; занятые?: Set<string> }) {
+  function стендПросрочки(opts: { задачи: Row[]; занятые?: Set<string>; settings?: Row[] }) {
     const записанные: Row[] = [];
     const заявки: string[] = [];
     const параметры = { limit: 0 };
     const условия: unknown[] = [];
     const db = {
       select: () => ({
-        from: () => ({
-          where: (condition: unknown) => {
-            условия.push(condition);
-            return {
-            orderBy: () => ({ limit: async (value: number) => { параметры.limit = value; return opts.задачи; } }),
-            };
-          },
-        }),
+        from: (t: unknown) => {
+          // settingValue() зовёт select().from(systemConfig) БЕЗ .where() —
+          // тот же стенд обязан отвечать и на этот запрос, и на выборку
+          // просроченных задач, иначе тест выключенного эмитента не собрать.
+          if (t === systemConfig) return Promise.resolve(opts.settings ?? []);
+          if (t !== taskTable) throw new Error("стенд не знает эту таблицу");
+          return {
+            where: (condition: unknown) => {
+              условия.push(condition);
+              return {
+              orderBy: () => ({ limit: async (value: number) => { параметры.limit = value; return opts.задачи; } }),
+              };
+            },
+          };
+        },
       }),
     } as never;
     const events = { record: async (value: Row) => { записанные.push(value); return value; } } as never;
@@ -225,6 +233,20 @@ describe("Эмитент просрочки (П7, R-P7-5, T7)", () => {
     const st = стендПросрочки({ задачи: [просрочка("t1", "2026-08-26T09:00:00+05:00")] });
     assert.equal((await st.service.emitOverdue(СЕЙЧАС)).emitted, 0);
     assert.deepEqual(st.записанные, []);
+  });
+
+  it("TASK_BRIDGE_ENABLED=0 гасит и эмитент просрочки — DEPLOY.md обещает откат ОБЕИХ работ", async () => {
+    // Найдено adversarial-ревью PR #220: run() уже проверял тумблер, emitOverdue()
+    // — нет, и рунбук откатa молчал бы наполовину при аварийном стопе.
+    const st = стендПросрочки({
+      задачи: [просрочка("t1", "2026-08-20T09:00:00+05:00")],
+      settings: [{ key: "TASK_BRIDGE_ENABLED", value: "0" }],
+    });
+    const result = await st.service.emitOverdue(СЕЙЧАС);
+    assert.equal(result.emitted, 0);
+    assert.equal(result.capped, false);
+    assert.deepEqual(st.записанные, []);
+    assert.deepEqual(st.заявки, [], "выключенный эмитент не должен даже пытаться занять ключ дедупа");
   });
 
   it("задача, просроченная вчера, даёт событие один раз в сутки", async () => {
