@@ -175,6 +175,21 @@ describe("Перечисления схемы и словари @mydon/shared �
       (mod.machineStatusEnum.enumValues as readonly string[]).includes(DEFAULT_MACHINE_STATUS),
     );
   });
+
+  /** Приёмка — отметка поверх done, а не пятое состояние PostgreSQL. */
+  it("СТРАЖ: task_status остаётся четырёхзначным (R-P7-6)", () => {
+    assert.deepEqual(
+      [...mod.taskStatusEnum.enumValues].sort(),
+      ["cancelled", "done", "in_progress", "todo"],
+    );
+  });
+
+  it("у task есть отметки приёмки и доставки назначения", () => {
+    const columns = Object.keys(schema.task);
+    for (const column of ["confirmedAt", "confirmedBy", "assignNotifiedAt"]) {
+      assert.ok(columns.includes(column), `в task нет ${column} — миграция и схема разошлись`);
+    }
+  });
 });
 
 describe("Предикат частичного индекса task_source_key (R-G-2)", () => {

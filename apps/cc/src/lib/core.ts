@@ -1150,6 +1150,11 @@ export interface Task {
   /** Оценка владельца после «сделано»: excellent / accepted / redo. */
   quality: "excellent" | "accepted" | "redo" | null;
   completedAt: string | null;
+  /** Кто фактически закрыл: веер приёмки исключает его из адресатов. */
+  closedBy: string | null;
+  confirmedAt: string | null;
+  confirmedBy: string | null;
+  assignNotifiedAt: string | null;
   createdAt: string;
 }
 

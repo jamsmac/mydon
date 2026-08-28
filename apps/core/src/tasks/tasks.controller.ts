@@ -1,4 +1,5 @@
 import { Body, ConflictException, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 import { IsIn, IsISO8601, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength, ValidateIf } from "class-validator";
 import { DOMAINS, type Domain } from "@mydon/shared";
 import { TasksService } from "./tasks.service";
@@ -65,6 +66,10 @@ export class ListTasksDto {
   /** "1" — только свободные: их разбирают из общего пула. */
   @IsOptional() @IsIn(["1"])
   unassigned?: string;
+
+  /** "1" — сделанные, но ещё не принятые. */
+  @IsOptional() @IsIn(["1"])
+  awaiting?: string;
 }
 
 export class SetStatusDto {
@@ -131,6 +136,12 @@ export class SetQualityDto {
   @IsIn(["excellent", "accepted", "redo"])
   quality!: "excellent" | "accepted" | "redo";
 
+  /** `owner` | `person:<uuid>` — от него зависит право приёмки. */
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
+}
+
+export class ConfirmTaskDto {
   /** `owner` | `person:<uuid>` — от него зависит право приёмки. */
   @IsOptional() @IsString() @MaxLength(128)
   actor?: string;
@@ -214,6 +225,7 @@ export class TasksController {
 
   @Get()
   list(@Query() filter: ListTasksDto) {
+    if (filter.awaiting === "1") return this.tasks.awaitingConfirmation();
     // Свободные — отдельная выборка: «ничей» это IS NULL, а не значение
     // ownerRef, и через общий фильтр по равенству его не выразить.
     if (filter.unassigned === "1") return this.tasks.unassigned();
@@ -243,6 +255,13 @@ export class TasksController {
   @Post(":id/quality")
   rate(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetQualityDto) {
     return this.tasks.rate(id, dto.quality, dto.actor ?? "owner");
+  }
+
+  /** Приёмка работы менеджером. */
+  @Throttle({ burst: { limit: 12, ttl: 60_000 }, sustained: { limit: 12, ttl: 60_000 } })
+  @Post(":id/confirm")
+  confirm(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ConfirmTaskDto) {
+    return this.tasks.confirm(id, dto.actor ?? "owner");
   }
 
   @Post(":id/redo-notified")

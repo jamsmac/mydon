@@ -505,6 +505,13 @@
       "when": 1787718914660,
       "tag": "0071_stock_count_retention_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1787940829343,
+      "tag": "0072_task_confirmation",
+      "breakpoints": true
     }
   ]
 }

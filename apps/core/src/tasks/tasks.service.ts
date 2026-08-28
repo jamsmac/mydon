@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
   auditLog,
+  event,
   machineCard,
   maintenanceLog,
   maintenancePlan,
@@ -67,6 +68,9 @@ export interface WorkloadRow {
  */
 @Injectable()
 export class TasksService {
+  /** Максимум строк на экране приёмки. */
+  static readonly AWAITING_LIMIT = 100;
+
   /** Актор с правами: панель ходит от владельца, бот — от карточки сотрудника. */
   private static readonly ACTOR_PERSON = /^person:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
@@ -528,6 +532,69 @@ export class TasksService {
       });
       return freed;
     });
+  }
+
+  /**
+   * Приёмка сделанной работы менеджером. Статус остаётся `done`: приёмка —
+   * отдельный факт поверх закрытия. Условие в UPDATE делает два одновременных
+   * нажатия идемпотентными на уровне БД.
+   */
+  async confirm(id: string, actorRef: string, now = new Date()): Promise<TaskRow> {
+    await this.assertCan(actorRef, "tasks.confirm");
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx.select().from(task).where(eq(task.id, id)).limit(1);
+      if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
+      if (row.status !== "done") {
+        throw new BadRequestException("Подтвердить можно только сделанную задачу");
+      }
+
+      const patch: Record<string, unknown> = { confirmedAt: now, confirmedBy: actorRef };
+      if (row.quality === null) patch.quality = "accepted";
+
+      const [updated] = await tx
+        .update(task)
+        .set(patch)
+        .where(and(eq(task.id, id), isNull(task.confirmedAt)))
+        .returning();
+      if (!updated) {
+        // В гонке начальный SELECT мог увидеть старую строку. Возвращаем
+        // актуальную принятую запись, но не пишем второй аудит и событие.
+        const [current] = await tx.select().from(task).where(eq(task.id, id)).limit(1);
+        return current ?? row;
+      }
+
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "task.confirmed",
+        target: id,
+        before: row,
+        after: updated,
+      });
+      await tx.insert(event).values({
+        source: "tasks",
+        type: "task.confirmed",
+        occurredAt: now,
+        payload: {
+          taskId: id,
+          title: updated.title,
+          ownerRef: updated.ownerRef,
+          confirmedBy: actorRef,
+          quality: updated.quality,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /** Сделанные людьми, но ещё не принятые; дольше ожидающие идут первыми. */
+  awaitingConfirmation(limit = TasksService.AWAITING_LIMIT): Promise<TaskRow[]> {
+    return this.db
+      .select()
+      .from(task)
+      .where(and(eq(task.status, "done"), isNull(task.confirmedAt), eq(task.ownerKind, "human")))
+      .orderBy(asc(task.completedAt))
+      .limit(limit);
   }
 
   // ── Переписка по задаче ────────────────────────────────────────────────────

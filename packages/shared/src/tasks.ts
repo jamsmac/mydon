@@ -154,3 +154,22 @@ export function priorityLabel(p: TaskLike["priority"]): string | null {
   if (p === "low") return "не спешит";
   return null;
 }
+
+/** `confirmed` — не статус БД, а приёмка поверх `done`. */
+export type TaskState = "todo" | "in_progress" | "done" | "confirmed" | "cancelled";
+
+const DB_TASK_STATES = new Set(["todo", "in_progress", "done", "cancelled"]);
+
+/** Что показать человеку; одно правило для бота и панели. */
+export function taskState(task: { status: string; confirmedAt: string | null }): TaskState {
+  if (task.status === "done" && task.confirmedAt !== null) return "confirmed";
+  return DB_TASK_STATES.has(task.status) ? (task.status as TaskState) : "todo";
+}
+
+export const TASK_STATE_LABELS: Record<TaskState, string> = {
+  todo: "Не начата",
+  in_progress: "В работе",
+  done: "Выполнена",
+  confirmed: "Подтверждено",
+  cancelled: "Отменена",
+};

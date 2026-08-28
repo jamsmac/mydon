@@ -489,7 +489,24 @@ const ЧТЕНИЕ = [
   },
   "/coffee/locations",
   "/coffee/placements",
-  "/tasks",
+  {
+    path: "/tasks",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ)) throw new Error("ожидали массив задач");
+      const строка = ответ[0];
+      if (строка) {
+        for (const key of ["confirmedAt", "confirmedBy", "assignNotifiedAt", "closedBy"]) {
+          if (!(key in строка)) throw new Error(`в строке задачи нет ${key}`);
+        }
+      }
+    },
+  },
+  {
+    path: "/tasks?awaiting=1",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ)) throw new Error("ожидали массив ждущих приёмки");
+    },
+  },
   "/people",
   "/approvals",
   {

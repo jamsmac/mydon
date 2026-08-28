@@ -228,6 +228,19 @@ export const task = pgTable(
      * из панели, и лента действий не должна приписывать это сотруднику.
      */
     closedBy: text("closed_by"),
+    /**
+     * Когда менеджер ПРИНЯЛ работу. Не пятое значение `task_status`
+     * намеренно: существующие фильтры считают закрытой ровно `done`.
+     * Приёмка — отметка поверх закрытия, как `quality` и `closed_by`.
+     */
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+    /** Кто принял: `person:<id>` | `owner`. */
+    confirmedBy: text("confirmed_by"),
+    /**
+     * Когда исполнителю сказали «тебе поручили». Отметка ставится после
+     * доставки; NULL означает, что уведомление ещё нужно отправить.
+     */
+    assignNotifiedAt: timestamp("assign_notified_at", { withTimezone: true }),
     /** Когда исполнителю уже напомнили — чтобы не слать одно и то же дважды. */
     remindedAt: timestamp("reminded_at", { withTimezone: true }),
     /**
@@ -260,6 +273,12 @@ export const task = pgTable(
       .on(t.source)
       .where(TASK_SOURCE_DAY_PREDICATE),
     uniqueIndex("task_client_key").on(t.clientKey),
+    // Оба индекса частичные и зеркалят миграцию П7. Иначе следующая
+    // генерация миграции попыталась бы создать их заново.
+    index("task_assign_pending_idx")
+      .on(t.ownerRef)
+      .where(sql`assign_notified_at is null and owner_ref is not null`),
+    index("task_awaiting_idx").on(t.completedAt).where(sql`confirmed_at is null`),
   ],
 );
 

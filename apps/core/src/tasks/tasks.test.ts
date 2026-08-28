@@ -582,3 +582,101 @@ describe("Права актора на приёмку и назначение (�
     assert.equal((await makeTasks(db).edit("t1", { ownerRef: OPERATOR }, `person:${OPERATOR}`)).id, "t1");
   });
 });
+
+describe("Приёмка работы менеджером (П7, R-P7-5/R-P7-6)", () => {
+  const NOW = new Date("2026-08-26T10:00:00+05:00");
+
+  function confirmationDb(row: Row, succeeds = true) {
+    const patches: Row[] = [];
+    const inserted: Row[] = [];
+    const current = { ...row };
+    const selectChain = () => {
+      const result = async () => [current];
+      return Object.assign(result(), { limit: result });
+    };
+    const tx = {
+      select: () => ({ from: () => ({ where: selectChain }) }),
+      update: () => ({
+        set: (patch: Row) => {
+          patches.push(patch);
+          return {
+            where: () => ({
+              returning: async () => {
+                if (!succeeds) return [];
+                Object.assign(current, patch);
+                return [current];
+              },
+            }),
+          };
+        },
+      }),
+      insert: () => ({ values: async (value: Row) => { inserted.push(value); return []; } }),
+    };
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx),
+    } as never;
+    return { db, patches, inserted };
+  }
+
+  it("отказывает для незавершённой задачи", async () => {
+    const { db } = confirmationDb({ id: "t1", status: "todo", quality: null, confirmedAt: null });
+    await assert.rejects(() => makeTasks(db).confirm("t1", "owner", NOW), /только сделанную/);
+  });
+
+  it("не меняет status и ставит accepted только при отсутствии оценки", async () => {
+    const blank = confirmationDb({ id: "t1", title: "Пополнить Olma", ownerRef: "p1", status: "done", quality: null, confirmedAt: null });
+    const accepted = await makeTasks(blank.db).confirm("t1", "owner", NOW);
+    assert.equal(accepted.status, "done");
+    assert.equal("status" in blank.patches[0]!, false);
+    assert.equal(blank.patches[0]!.quality, "accepted");
+    assert.equal(blank.patches[0]!.confirmedAt, NOW);
+
+    const rated = confirmationDb({ id: "t2", title: "Проверить Olma", ownerRef: "p1", status: "done", quality: "excellent", confirmedAt: null });
+    await makeTasks(rated.db).confirm("t2", "owner", NOW);
+    assert.equal("quality" in rated.patches[0]!, false, "excellent нельзя понижать до accepted");
+  });
+
+  it("успех пишет один аудит и одно событие task.confirmed", async () => {
+    const fixture = confirmationDb({ id: "t1", title: "Пополнить Olma", ownerRef: "p1", status: "done", quality: null, confirmedAt: null });
+    await makeTasks(fixture.db).confirm("t1", "owner", NOW);
+    assert.ok(fixture.inserted.some((value) => value.action === "task.confirmed"));
+    const eventRow = fixture.inserted.find((value) => value.type === "task.confirmed");
+    assert.ok(eventRow);
+    assert.equal((eventRow.payload as Row).title, "Пополнить Olma");
+    assert.equal(eventRow.occurredAt, NOW);
+  });
+
+  it("повтор не пишет дубль и возвращает уже принятую строку", async () => {
+    const fixture = confirmationDb({ id: "t1", status: "done", quality: "accepted", confirmedAt: "2026-08-26T04:00:00.000Z" }, false);
+    const result = await makeTasks(fixture.db).confirm("t1", "owner", NOW);
+    assert.equal(result.confirmedAt, "2026-08-26T04:00:00.000Z");
+    assert.deepEqual(fixture.inserted, []);
+  });
+});
+
+describe("Список ждущих подтверждения (П7)", () => {
+  it("ограничен и строится по confirmed_at, старейшее первым", async () => {
+    const conditions: unknown[] = [];
+    let limit = 0;
+    const rows = [
+      { id: "t1", completedAt: "2026-08-20T05:00:00.000Z" },
+      { id: "t2", completedAt: "2026-08-25T05:00:00.000Z" },
+    ];
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: (condition: unknown) => {
+            conditions.push(condition);
+            return { orderBy: () => ({ limit: async (value: number) => { limit = value; return rows; } }) };
+          },
+        }),
+      }),
+    } as never;
+    const result = await makeTasks(db).awaitingConfirmation();
+    assert.deepEqual(result.map((row) => row.id), ["t1", "t2"]);
+    assert.equal(limit, TasksService.AWAITING_LIMIT);
+    const query = new PgDialect().sqlToQuery(conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0]);
+    assert.match(query.sql, /confirmed_at/);
+  });
+});

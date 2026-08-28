@@ -69,6 +69,13 @@ export interface TaskRow {
   priority: "low" | "normal" | "high" | "urgent";
   due: string | null;
   resultNote: string | null;
+  quality: "excellent" | "accepted" | "redo" | null;
+  completedAt: string | null;
+  /** Кто фактически закрыл: веер приёмки исключает его из адресатов. */
+  closedBy: string | null;
+  confirmedAt: string | null;
+  confirmedBy: string | null;
+  assignNotifiedAt: string | null;
   /** По какому объекту работа: автомат, точка, склад. */
   entityId: string | null;
 }
