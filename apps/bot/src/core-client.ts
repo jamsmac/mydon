@@ -11,6 +11,7 @@ import type {
   ParityStreak,
   PriceChangesReport,
   PriceGapReport,
+  ProductFiscal,
   PurchasePlan as VendingPlan,
   PurchaseSummary as VendingPurchase,
   SetSalePriceResult,
@@ -140,8 +141,29 @@ export interface VendingCashSession {
   categories: VendingCashCategory[];
   totalSpent: number;
   remainder: number;
+  /** 'own' — обычная запись, 'storno' — отмена (Task 7, R-P6-10). */
+  source: string;
   createdBy: string | null;
   createdAt: string;
+}
+
+/**
+ * Строка прайса для КАРТОЧКИ (П6) — ровно те поля, которые она печатает.
+ *
+ * Полный тип строки каталога намеренно не дублируется из Core: общим между
+ * слоями остаётся фискальный блок `ProductFiscal`.
+ */
+export interface VendingProductCard {
+  id: string;
+  name: string;
+  category: "drink" | "snack" | "other";
+  purchasePrice: number | null;
+  salePrice: number | null;
+  packSize: number;
+  isActive: boolean;
+  excludedFromPurchase: boolean;
+  fixedPurchaseQty: number | null;
+  fiscal: ProductFiscal;
 }
 
 /** Правила закупа товара «было»/«стало» — как их отдаёт Core. */
@@ -335,6 +357,43 @@ export class NotAMachineError extends Error {
   }
 }
 
+/** Три вида снек-записи, которые умеет отменять `RecordCancelService` (Core, Task 7). */
+export type CancelKind = "refill" | "stock_count" | "cash";
+
+/** Одна отменяемая запись сотрудника — экран бота «Мои записи» (Task 7). */
+export interface MyRecordRow {
+  kind: CancelKind;
+  /** Для stock_count — id ПЕРВОЙ строки ввода (R-P6-11), не строки-товара. */
+  id: string;
+  createdAt: string;
+  /** Готовая русская строка — тот же язык, что у ленты «Действия». */
+  label: string;
+}
+
+/** Ответ Core на POST /vending/{refills|stock-counts|cash}/:id/cancel. */
+export type CancelResult =
+  | { ok: true; kind: CancelKind; stornoId: string; label: string; alreadyCancelled: boolean }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "not_yours" }
+  | { ok: false; reason: "too_old"; hours: number };
+
+/**
+ * Отказ Core в отмене (403/404): `body` — уже РАЗОБРАННОЕ тело ответа
+ * (`{reason, hours?, message}`), а не сырая строка, как у `CoreError.body`.
+ * Отдельный класс, а не переиспользование `CoreError` как есть: только у
+ * этого вызова обработчику бота нужны структурные `reason`/`hours`, а не
+ * текст — придумывать общий разбор тела для ВСЕХ ошибок Core не стали.
+ */
+export class CancelVendingRecordError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: { reason?: string; hours?: number; message?: string },
+  ) {
+    super(body.message ?? `Core ответил ${status} на отмену записи`);
+    this.name = "CancelVendingRecordError";
+  }
+}
+
 /** Тонкий клиент к MYDON Core. Бот не ходит в БД напрямую — только через API. */
 export class CoreClient {
   constructor(
@@ -503,13 +562,17 @@ export class CoreClient {
    * delta<0, излишек при delta>0), пусто — если товар вводится впервые или
    * количество не изменилось.
    */
-  setVendingStock(items: { product: string; quantity: number }[]): Promise<{
+  setVendingStock(
+    items: { product: string; quantity: number }[],
+    /** Проводка автора (Task 7, Отклонение №9) — не шлём, если карточка не резолвилась. */
+    personId?: string,
+  ): Promise<{
     items: number;
     adjustments: VendingStockAdjustment[];
   }> {
     return this.request("/vending/stock", {
       method: "POST",
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ items, ...(personId ? { personId } : {}) }),
     });
   }
 
@@ -520,6 +583,8 @@ export class CoreClient {
   recordVendingCash(
     receivedAmount: number,
     categories: { name: string; amount: number }[],
+    /** Проводка автора (Task 7, Отклонение №9) — не шлём, если карточка не резолвилась. */
+    createdBy?: string,
   ): Promise<VendingCashSession> {
     return this.request<VendingCashSession>("/vending/cash", {
       method: "POST",
@@ -529,6 +594,7 @@ export class CoreClient {
           name: c.name,
           lines: [{ label: c.name, amount: c.amount }],
         })),
+        ...(createdBy ? { createdBy } : {}),
       }),
     });
   }
@@ -536,6 +602,39 @@ export class CoreClient {
   /** Прошлые кассы закупа — свежие сверху (§5.8). */
   vendingCashSessions(): Promise<VendingCashSession[]> {
     return this.request<VendingCashSession[]>("/vending/cash");
+  }
+
+  /** Последние отменяемые записи автора — экран бота «Мои записи» (Task 7). */
+  myRecords(personId: string, limit?: number): Promise<MyRecordRow[]> {
+    const l = limit ? `&limit=${limit}` : "";
+    return this.request<MyRecordRow[]>(`/vending/my-records?person=${encodeURIComponent(personId)}${l}`);
+  }
+
+  /**
+   * Сторно снек-записи (заправка/пересчёт/касса, Task 7, R-P6-10). Права
+   * читает Core: 403 несёт причину (`not_yours`/`too_old`) и, для второй,
+   * число часов окна — бот называет ЕГО, а не свою константу.
+   */
+  async cancelVendingRecord(kind: CancelKind, id: string, personId: string): Promise<CancelResult> {
+    const path =
+      kind === "refill" ? "refills" : kind === "stock_count" ? "stock-counts" : "cash";
+    try {
+      return await this.request<CancelResult>(`/vending/${path}/${id}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ personId }),
+      });
+    } catch (err) {
+      if (err instanceof CoreError && err.isClientError) {
+        let body: { reason?: string; hours?: number; message?: string } = {};
+        try {
+          body = JSON.parse(err.body) as typeof body;
+        } catch {
+          // Тело не JSON (сеть/прокси) — причину не знаем, статус остаётся.
+        }
+        throw new CancelVendingRecordError(err.status, body);
+      }
+      throw err;
+    }
   }
 
   /** Накладные закупа (материализованы при одобрении, §5.7). */
@@ -1112,8 +1211,12 @@ export class CoreClient {
     return normalizeMachineSerial(row.externalRef);
   }
 
-  /** Прайс вендинга — для поиска товара по названию, когда его нет в зеркале. */
-  vendingProducts(): Promise<{ id: string; name: string; isActive: boolean }[]> {
+  /**
+   * Прайс вендинга — для поиска товара по названию, когда его нет в зеркале.
+   * Возврат расширен под карточку (П6). Существующий мастер заливки берёт
+   * только `name`/`isActive`, поэтому расширение для него безопасно.
+   */
+  vendingProducts(): Promise<VendingProductCard[]> {
     return this.request("/vending/products");
   }
 

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
 import { Cron } from "croner";
-import { and, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, ne } from "drizzle-orm";
 import { event, sale, slotSnapshot, vendingRefill, vendingRefillEvent } from "@mydon/db";
 import {
   hasProduct,
@@ -285,7 +285,10 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       this.db
         .select({ machineSerial: vendingRefill.machineSerial, performedAt: vendingRefill.performedAt, qty: vendingRefill.qty })
         .from(vendingRefill)
-        .where(gte(vendingRefill.performedAt, периодОт)),
+        // Сторно (П6): дельта висит на времени ОТМЕНЫ, а не заливки — попав
+        // сюда, увела бы «записаноПоДням» другого дня и родила бы фиктивную
+        // недостачу/излишек в отчёте усушки.
+        .where(and(gte(vendingRefill.performedAt, периодОт), ne(vendingRefill.source, "storno"))),
     ]);
 
     // Продажи по (автомат, сутки) → НОРМАЛИЗОВАННЫЙ ключ товара. Отсутствие

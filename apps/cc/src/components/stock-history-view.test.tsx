@@ -40,9 +40,10 @@ const ИСТОРИЯ: StockCountsReport = {
   since: "2026-05-28",
   product: null,
   rows: [
-    { dt: "2026-08-25", product: "Sprite 250ml", qty: 19, source: "own", countedAt: "2026-08-25T09:40:00+05:00", note: "owner" },
-    { dt: "2026-08-25", product: "TUC Sour cream", qty: 6, source: "own", countedAt: "2026-08-25T09:40:00+05:00", note: "owner" },
+    { id: "00000000-0000-4000-8000-000000000001", dt: "2026-08-25", product: "Sprite 250ml", qty: 19, source: "own", countedAt: "2026-08-25T09:40:00+05:00", note: "owner" },
+    { id: "00000000-0000-4000-8000-000000000002", dt: "2026-08-25", product: "TUC Sour cream", qty: 6, source: "own", countedAt: "2026-08-25T09:40:00+05:00", note: "owner" },
     {
+      id: "00000000-0000-4000-8000-000000000003",
       dt: "2026-06-01",
       product: "Montella Вода минеральная 330ml",
       qty: 3,
@@ -51,6 +52,7 @@ const ИСТОРИЯ: StockCountsReport = {
       note: "импорт истории mydon-stock · место: Холодильник",
     },
     {
+      id: "00000000-0000-4000-8000-000000000004",
       dt: "2026-06-01",
       product: "Snickers",
       qty: 41,

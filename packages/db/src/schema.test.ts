@@ -32,6 +32,18 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
   // agent — настройки агентов; task_comment — переписка и отчёты по задачам.
   const SERVICE = ["agent", "taskComment"];
 
+  // Извлечение состава индексов таблицы через внутренний символ drizzle —
+  // единственный способ увидеть частичный/составной индекс без БД (интроспекция
+  // «на бумаге»). Поднято на уровень describe: изначально жило внутри одного
+  // теста (стр. 101), третий потребитель (сторно-индексы) заставил вынести.
+  const конфиг = (t: unknown): unknown[] => {
+    const извлечь = (t as Record<symbol, unknown>)[Symbol.for("drizzle:ExtraConfigBuilder")];
+    const колонки = (t as Record<symbol, unknown>)[Symbol.for("drizzle:ExtraConfigColumns")];
+    return typeof извлечь === "function" ? ((извлечь as (c: unknown) => unknown[])(колонки) ?? []) : [];
+  };
+  const имена = (t: unknown): string[] =>
+    конфиг(t).map((i) => String((i as { config?: { name?: string } }).config?.name ?? ""));
+
   it("содержит все 11 таблиц реестра", () => {
     for (const name of REQUIRED) {
       assert.ok(name in schema, `в схеме нет таблицы ${name}`);
@@ -98,6 +110,47 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     assert.ok(count.includes("personId"), "кто считал: строка без человека законна, но поле обязано быть");
   });
 
+  it("вендинг: у карточки прайса есть ФИСКАЛЬНЫЙ БЛОК из шести полей (П6, R-P6-5)", () => {
+    const prod = Object.keys(schema.vendingProduct as unknown as Record<string, unknown>);
+    for (const поле of ["ikpu", "mxik", "vatPct", "barcode", "packageCode", "marked"]) {
+      assert.ok(prod.includes(поле), `нет фискального поля ${поле} — чек по карточке не собрать`);
+    }
+    // `vat_pct` и `package_code` НЕ nullable: пустой ставки не бывает (R-P6-8),
+    // пустой единицы измерения — тоже. Проверяем через сам столбец, а не через
+    // список имён: notNull() — это и есть отличие «0 %» от «не выясняли».
+    const колонки = (schema.vendingProduct as unknown as { vatPct: { notNull: boolean }; packageCode: { notNull: boolean }; ikpu: { notNull: boolean } });
+    assert.equal(колонки.vatPct.notNull, true, "ставка НДС обязана иметь значение всегда");
+    assert.equal(колонки.packageCode.notNull, true, "код упаковки обязан иметь значение всегда");
+    assert.equal(колонки.ikpu.notNull, false, "ИКПУ, наоборот, обязан уметь быть пустым: «не выясняли» — это ответ");
+  });
+
+  it("СТРАЖ: CHECK «qty» заливки живёт в SQL-миграции, а не в drizzle-схеме (R-P6-6)", () => {
+    // У сторно qty < 0, и старый check(«qty > 0») его бы отверг. Переопределение
+    // стоит в SQL; объяви его здесь — и генератор выпустил бы ЕЩЁ ОДНУ миграцию
+    // ради ограничения, которое уже поставлено, а снапшот разошёлся бы с файлом
+    // (та же причина записана у fixedPurchaseQty, schema.ts:1394-1405).
+    const исходник = readFileSync(path.join(__dirname, "..", "src", "schema.ts"), "utf8");
+    assert.ok(
+      !/check\(\s*"vending_refill_qty_positive"/.test(исходник),
+      "CHECK вернулся в схему — при следующем db:generate появится миграция-призрак",
+    );
+  });
+
+  it("сторно-индексы ЧАСТИЧНЫЕ: уникальность только при source='storno'", () => {
+    // Сплошной unique(reverses_id) не нужен и вреден: у обычных строк он NULL
+    // (в Postgres NULL уникальности не мешает), но частичность — это ДОГОВОР,
+    // что вторая сторно-строка на тот же оригинал невозможна, и повторное
+    // нажатие кнопки в боте безвредно. У пересчёта своего client_key нет —
+    // вся идемпотентность держится ровно на этом индексе.
+    for (const [таблица, индекс] of [
+      [schema.vendingStockCount, "vending_stock_count_storno_key"],
+      [schema.vendingCashSession, "vending_cash_session_storno_key"],
+      [schema.vendingRefill, "vending_refill_reverses_idx"],
+    ] as const) {
+      assert.ok(имена(таблица).includes(индекс), `нет индекса ${индекс}`);
+    }
+  });
+
   it("СТРАЖ: у целей ретенции есть индекс ПО КОЛОНКЕ ВРЕМЕНИ (0070/0071)", () => {
     // Ретенция чистит пачками `where <время> < cutoff order by <время> limit N`.
     // У снимков составной индекс начинается с `machine_serial` и под это условие
@@ -105,14 +158,6 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     // индекса не было вовсе. Снять индекс — значит вернуть полный скан на
     // растущей таблице, и заметить это будет нечем: чистка идёт раз в неделю
     // ночью.
-    const конфиг = (t: unknown): unknown[] => {
-      const извлечь = (t as Record<symbol, unknown>)[Symbol.for("drizzle:ExtraConfigBuilder")];
-      const колонки = (t as Record<symbol, unknown>)[Symbol.for("drizzle:ExtraConfigColumns")];
-      return typeof извлечь === "function" ? ((извлечь as (c: unknown) => unknown[])(колонки) ?? []) : [];
-    };
-    const имена = (t: unknown): string[] =>
-      конфиг(t).map((i) => String((i as { config?: { name?: string } }).config?.name ?? ""));
-
     for (const [таблица, индекс] of [
       [schema.slotSnapshot, "slot_snapshot_captured_idx"],
       [schema.productSale, "product_sale_captured_idx"],

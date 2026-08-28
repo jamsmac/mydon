@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { validateFiscalPatch } from "@mydon/shared";
 import { core, CoreUnavailable } from "../../lib/core";
 
 export interface ActionResult {
@@ -63,6 +64,54 @@ export async function saveVendingProductRules(domain: string, form: FormData): P
     // Имя из ОТВЕТА Core (канон после алиасов), а не из формы: владелец должен
     // видеть, под какой карточкой правило записано (UX#25).
     return { ok: true, message: `Правило «${res.product ?? product}» сохранено` };
+  } catch (err) {
+    return failure(err);
+  }
+}
+
+/**
+ * Фискальный блок товара (лист «Правила закупа», П6).
+ *
+ * Пустое текстовое поле — СБРОС (`null`), а не «не трогать». Три словарных
+ * поля едут всегда: их select по построению не бывает пустым. Причина отказа
+ * остаётся точной — владелец должен видеть, что именно не так с кодом.
+ */
+export async function saveVendingProductFiscal(domain: string, form: FormData): Promise<ActionResult> {
+  const productId = String(form.get("productId") ?? "").trim();
+  if (productId === "") return { ok: false, message: "Не указана карточка товара" };
+
+  const text = (name: string): string | null => {
+    const raw = String(form.get(name) ?? "").trim();
+    return raw === "" ? null : raw;
+  };
+  const vatRaw = form.get("vatPct");
+  const markedRaw = String(form.get("marked") ?? "").trim();
+  if (markedRaw !== "0" && markedRaw !== "1") {
+    return { ok: false, message: "Маркировка — выбери значение из списка" };
+  }
+  const patch = {
+    ikpu: text("ikpu"),
+    mxik: text("mxik"),
+    barcode: text("barcode"),
+    // `Number(null) === 0`, а 0 — законная ставка. На границе server action
+    // отсутствующий select обязан стать ошибкой, а не молчаливой льготой.
+    vatPct: vatRaw === null || String(vatRaw).trim() === "" ? Number.NaN : Number(vatRaw),
+    packageCode: String(form.get("packageCode") ?? ""),
+    marked: markedRaw === "1",
+  };
+  const errors = validateFiscalPatch(patch);
+  if (errors.length > 0) return { ok: false, message: errors[0] };
+
+  try {
+    const res = await core.setVendingProductFiscal({ productId, ...patch, actor: "panel" });
+    if (!res.ok) {
+      return {
+        ok: false,
+        message: res.reason === "invalid" ? (res.errors[0] ?? "Фискальные данные не прошли проверку") : "Карточка товара не найдена",
+      };
+    }
+    revalidatePath(`/domain/${domain}`);
+    return { ok: true, message: `Фискальные данные «${res.product}» сохранены` };
   } catch (err) {
     return failure(err);
   }

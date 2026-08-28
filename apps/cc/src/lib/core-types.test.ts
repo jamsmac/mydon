@@ -5,6 +5,7 @@ import type {
   OurvendHealth as SharedHealth,
   OurvendSyncRun as SharedRun,
   PurchasePlan as SharedPlan,
+  ProductFiscal as SharedProductFiscal,
   ShrinkReport as SharedShrink,
   StockCountRow as SharedStockCountRow,
   StockCountsReport as SharedStockCounts,
@@ -16,6 +17,7 @@ import type {
   OurvendSyncRun,
   StockCountRow,
   StockCountsReport,
+  VendingProductRow,
   VendingPlan,
   VendingShrinkageReport,
   VendingSyncRun,
@@ -108,6 +110,7 @@ const планОбщий: SharedPlan = {
  * код, иначе сторож охраняет выдуманную форму.
  */
 const строкаИсторииОбщая: SharedStockCountRow = {
+  id: "00000000-0000-4000-8000-000000000001",
   dt: "2026-06-01",
   product: "Snickers",
   qty: 41,
@@ -125,6 +128,30 @@ const историяОбщая: SharedStockCounts = {
 };
 
 describe("Типы панели — реэкспорт из @mydon/shared, а не копии", () => {
+  it("`VendingProductRow` панели несёт тот же `ProductFiscal`, что и shared", () => {
+    const блокОбщий: SharedProductFiscal = {
+      ikpu: "02202003001086002",
+      mxik: null,
+      vatPct: 12,
+      barcode: null,
+      packageCode: "796",
+      marked: false,
+    };
+    const строка: VendingProductRow = {
+      id: "p1",
+      name: "Snickers 50gr",
+      category: "snack",
+      purchasePrice: 7000,
+      salePrice: 15000,
+      packSize: 10,
+      isActive: true,
+      excludedFromPurchase: false,
+      fixedPurchaseQty: 48,
+      fiscal: блокОбщий,
+    };
+    expect(строка.fiscal.packageCode).toBe("796");
+  });
+
   it("здоровье сбора и прогон принимаются типом панели без переписывания полей", () => {
     const здоровье: OurvendHealth = здоровьеОбщее;
     const прогон: OurvendSyncRun = прогонОбщий;
@@ -206,7 +233,7 @@ describe("Усушка и план закупа — реэкспорт, а не 
     // shared этого не увидел бы — увидит компилятор на этих двух строках.
     const строка: StockCountRow = строкаИсторииОбщая;
     const отчёт: StockCountsReport = историяОбщая;
-    expect(Object.keys(строка).sort()).toEqual(["countedAt", "dt", "note", "product", "qty", "source"]);
+    expect(Object.keys(строка).sort()).toEqual(["countedAt", "dt", "id", "note", "product", "qty", "source"]);
     expect(Object.keys(отчёт).sort()).toEqual(["days", "product", "rows", "since", "warnings"]);
   });
 });

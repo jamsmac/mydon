@@ -1,6 +1,7 @@
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { ForbiddenException, NotFoundException } from "@nestjs/common";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
 // Константа не входит в публичный экспорт пакета (`dist/index.js` её не
@@ -8,8 +9,17 @@ import { validate } from "class-validator";
 // требует N1: сверено с `node_modules/@nestjs/throttler` (throttler@6.5.0).
 import { THROTTLER_LIMIT } from "@nestjs/throttler/dist/throttler.constants";
 import type { AnalyticsService } from "./analytics.service";
+import type { CancelResult, RecordCancelService } from "./record-cancel.service";
 import { LIST_DAYS_MAX } from "./refill-events.service";
-import { RefillEventsListDto, STOCK_COUNTS_PRODUCT_MAX, StockCountsDto, VendingController } from "./vending.controller";
+import {
+  CancelRecordDto,
+  MyRecordsDto,
+  RefillEventsListDto,
+  SetProductFiscalDto,
+  STOCK_COUNTS_PRODUCT_MAX,
+  StockCountsDto,
+  VendingController,
+} from "./vending.controller";
 import type { VendingService } from "./vending.service";
 
 describe("Вендинг Core: троттлинг GET /vending/shrinkage (N1)", () => {
@@ -72,6 +82,113 @@ describe("StockCountsDto: потолок окна — 730 суток, не 365 (
     const dto = plainToInstance(StockCountsDto, { days: "" });
     assert.deepEqual(await validate(dto), []);
     assert.equal(dto.days, undefined);
+  });
+});
+
+describe("SetProductFiscalDto: вход держит форму, а не только сервис (П6)", () => {
+  const productId = "0f8e1a4c-1111-4222-8333-444455556666";
+
+  it("16 цифр отвергнуты сообщением донора", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId, ikpu: "2202002001010032" });
+    const ошибки = await validate(dto);
+    assert.equal(ошибки.length, 1);
+    assert.deepEqual(Object.values(ошибки[0].constraints ?? {}), ["ИКПУ должен быть 17 цифр или пусто"]);
+  });
+
+  it("пустая строка гасится в null до сервиса", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId, ikpu: "  " });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.ikpu, null);
+  });
+
+  it("разделители копирования вырезаются до проверки длины", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId, ikpu: "022 0200-3001 086 002" });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.ikpu, "02202003001086002");
+  });
+
+  it("vatPct вне набора 12/0/15 отвергнут, а 0 принят", async () => {
+    assert.deepEqual(await validate(plainToInstance(SetProductFiscalDto, { productId, vatPct: 0 })), []);
+    assert.equal((await validate(plainToInstance(SetProductFiscalDto, { productId, vatPct: 7 }))).length, 1);
+  });
+
+  it("packageCode вне словаря ОКЕИ отвергнут", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId, packageCode: "1218841" });
+    assert.equal((await validate(dto)).length, 1);
+  });
+
+  it("productId — uuid: адресуемся по карточке, а не по спорному имени", async () => {
+    const dto = plainToInstance(SetProductFiscalDto, { productId: "Snickers 50gr", marked: true });
+    assert.equal((await validate(dto)).length, 1);
+  });
+});
+
+describe("DTO сторно и «Моих записей» (П6)", () => {
+  const personId = "0f8e1a4c-1111-4222-8333-444455556666";
+
+  it("personId обязателен и должен быть UUID", async () => {
+    assert.ok((await validate(plainToInstance(CancelRecordDto, {}))).length > 0);
+    assert.ok((await validate(plainToInstance(CancelRecordDto, { personId: "owner" }))).length > 0);
+    assert.deepEqual(await validate(plainToInstance(CancelRecordDto, { personId })), []);
+  });
+
+  it("limit принимает 1..15 и отвергает выход за границы", async () => {
+    assert.deepEqual(await validate(plainToInstance(MyRecordsDto, { person: personId, limit: "1" })), []);
+    assert.deepEqual(await validate(plainToInstance(MyRecordsDto, { person: personId, limit: "15" })), []);
+    assert.ok((await validate(plainToInstance(MyRecordsDto, { person: personId, limit: "0" }))).length > 0);
+    assert.ok((await validate(plainToInstance(MyRecordsDto, { person: personId, limit: "16" }))).length > 0);
+  });
+});
+
+/**
+ * Проводка ответа `RecordCancelService` в HTTP-статусы (R-P6-12): запрос
+ * корректен (`personId` — валидный UUID), отказ — по правам, а не по форме
+ * входа, поэтому `not_yours`/`too_old` — 403, а не 400.
+ */
+describe("Вендинг Core: сторно — статусы отказа (П6)", () => {
+  const контроллер = (cancel: CancelResult) => {
+    const recordCancel = { cancel: async () => cancel } as unknown as RecordCancelService;
+    const c = new VendingController(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      recordCancel,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    return c;
+  };
+
+  it("отмена без прав автора — 403 not_yours, а не 400", async () => {
+    const c = контроллер({ ok: false, reason: "not_yours" });
+    await assert.rejects(
+      () => c.cancelRefill("r1", { personId: "0f8e1a4c-1111-4222-8333-444455556666" }),
+      (e: unknown) => e instanceof ForbiddenException && (e.getResponse() as { reason: string }).reason === "not_yours",
+    );
+  });
+
+  it("окно истекло — 403 too_old с числом часов в сообщении", async () => {
+    const c = контроллер({ ok: false, reason: "too_old", hours: 24 });
+    await assert.rejects(
+      () => c.cancelStockCount("c1", { personId: "0f8e1a4c-1111-4222-8333-444455556666" }),
+      (e: unknown) => e instanceof ForbiddenException && /24 часов/.test((e.getResponse() as { message: string }).message),
+    );
+  });
+
+  it("запись не найдена — 404, а не 403", async () => {
+    const c = контроллер({ ok: false, reason: "not_found" });
+    await assert.rejects(
+      () => c.cancelCash("cash1", { personId: "0f8e1a4c-1111-4222-8333-444455556666" }),
+      (e: unknown) => e instanceof NotFoundException,
+    );
+  });
+
+  it("успех уходит как есть — не оборачивается в исключение", async () => {
+    const c = контроллер({ ok: true, kind: "refill", stornoId: "s1", label: "…", alreadyCancelled: false });
+    const res = await c.cancelRefill("r1", { personId: "0f8e1a4c-1111-4222-8333-444455556666" });
+    assert.equal(res.ok, true);
   });
 });
 
@@ -161,6 +278,8 @@ describe("Вендинг Core: сброс кеша аналитики на пр�
     const analytics = { invalidateReports: () => (сбросов.count += 1) } as unknown as AnalyticsService;
     const c = new VendingController(
       vending as VendingService,
+      {} as never,
+      {} as never,
       {} as never,
       {} as never,
       {} as never,

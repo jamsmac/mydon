@@ -25,7 +25,8 @@
     "db:seed:vending": "node dist/seed-vending.js",
     "db:seed:coffee": "node dist/seed-coffee.js",
     "db:backfill:product-ids": "node dist/backfill-product-ids.js",
-    "db:import:stock-history": "node dist/import-stock-history.js"
+    "db:import:stock-history": "node dist/import-stock-history.js",
+    "db:import:fiscal": "node dist/import-fiscal.js"
   },
   "dependencies": {
     "@mydon/shared": "workspace:*",

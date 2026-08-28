@@ -11,7 +11,7 @@ import {
   notesToAck,
   msUntilBriefing,
 } from "./briefing";
-import { CoreError } from "./core-client";
+import { CoreError, type VendingProductCard } from "./core-client";
 import { handleMessage, parseApprovalCallback, type HandlerDeps } from "./handler";
 import { parseIntent } from "./intent";
 import { parseAllowlist, RateLimiter } from "./security/access";
@@ -245,6 +245,9 @@ describe("Касса закупа: гейт по префиксу — не пр�
         spies.received += 1;
         return { received: false, replenished: 0, units: 0, reason: "не должно было вызваться" };
       },
+      // Task 7 резолвит автора перед записью кассы. Карточки в этом
+      // регрессионном тесте нет — проверяем прежний совместимый путь без неё.
+      personByChat: async () => ({ found: false }),
       recordVendingCash: async (
         receivedAmount: number,
         categories: { name: string; amount: number }[],
@@ -261,6 +264,7 @@ describe("Касса закупа: гейт по префиксу — не пр�
           })),
           totalSpent,
           remainder: receivedAmount - totalSpent,
+          source: "own",
           createdBy: "owner",
           createdAt: new Date().toISOString(),
         };
@@ -289,6 +293,75 @@ describe("Касса закупа: гейт по префиксу — не пр�
     assert.equal(spies.received, 0, "receiveVendingOrder не должен был вызваться");
     assert.equal(spies.cash, 0);
     assert.match(reply?.text ?? "", /Не понял формат кассы/);
+  });
+});
+
+describe("Бот: карточка товара — чтение до общего разбора (П6)", () => {
+  const row: VendingProductCard = {
+    id: "p1",
+    name: "Snickers 50gr",
+    category: "snack",
+    purchasePrice: 7000,
+    salePrice: 15000,
+    packSize: 10,
+    isActive: true,
+    excludedFromPurchase: false,
+    fixedPurchaseQty: null,
+    fiscal: {
+      ikpu: "01806001001086002",
+      mxik: null,
+      vatPct: 12,
+      barcode: null,
+      packageCode: "796",
+      marked: false,
+    },
+  };
+
+  function deps(products: VendingProductCard[], calls: string[]): HandlerDeps {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingProducts: async () => {
+        calls.push("products");
+        return products;
+      },
+    } as unknown as HandlerDeps["core"];
+    return { core, allowlist: parseAllowlist("111"), limiter: new RateLimiter() };
+  }
+
+  it("ищет по канону имени и печатает карточку", async () => {
+    const calls: string[] = [];
+    const reply = await handleMessage(111, "карточка  SNICKERS   50GR", deps([row], calls));
+    assert.deepEqual(calls, ["products"]);
+    assert.match(reply?.text ?? "", /Snickers 50gr/);
+    assert.match(reply?.text ?? "", /Фискальные данные/);
+  });
+
+  it("голая команда отвечает подсказкой и не вызывает Core", async () => {
+    const calls: string[] = [];
+    const reply = await handleMessage(111, "карточка", deps([row], calls));
+    assert.deepEqual(calls, []);
+    assert.match(reply?.text ?? "", /карточка <товар>/);
+  });
+
+  it("не найденный товар отвечает той же формулировкой, что правила закупа", async () => {
+    const reply = await handleMessage(111, "карточка Mars", deps([row], []));
+    assert.equal(
+      reply?.text,
+      "Товар «Mars» не найден в прайсе вендинга. Имя должно совпадать с карточкой или алиасом.",
+    );
+  });
+
+  it("сбой Core не проваливает команду в LLM", async () => {
+    const core = {
+      ...({} as HandlerDeps["core"]),
+      vendingProducts: async () => Promise.reject(new Error("core down")),
+    } as unknown as HandlerDeps["core"];
+    const reply = await handleMessage(111, "карточка Mars", {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+    });
+    assert.match(reply?.text ?? "", /Не удалось получить карточку товара/);
   });
 });
 

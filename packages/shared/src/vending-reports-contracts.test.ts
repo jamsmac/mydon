@@ -379,6 +379,7 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
 
   it("история склада: пометка и первые сутки окна едут в ответе (R-H-2)", () => {
     const строка: StockCountRow = {
+      id: "00000000-0000-4000-8000-000000000001",
       dt: "2026-08-25",
       product: "Sprite 250ml",
       qty: 19,
@@ -387,7 +388,7 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       note: "2 Холодильник",
     };
     const отчёт: StockCountsReport = { days: 90, since: "2026-05-28", product: null, rows: [строка], warnings: [] };
-    assert.deepEqual(Object.keys(строка).sort(), ["countedAt", "dt", "note", "product", "qty", "source"]);
+    assert.deepEqual(Object.keys(строка).sort(), ["countedAt", "dt", "id", "note", "product", "qty", "source"]);
     assert.deepEqual(Object.keys(отчёт).sort(), ["days", "product", "rows", "since", "warnings"]);
     // `null` — законная пометка («её нет»), а не пропуск поля: выдумывать
     // «Основной склад» вместо неё нельзя.

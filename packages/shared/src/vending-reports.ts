@@ -1077,6 +1077,8 @@ export function staleHours(lastSuccessAt: string | null, now: Date): number | nu
  * от чужих.
  */
 export interface StockCountRow {
+  /** Идентификатор строки; для `own` служит ключом отмены всего ввода. */
+  id: string;
   /** Сутки пересчёта, `YYYY-MM-DD` по Ташкенту. */
   dt: string;
   product: string;
