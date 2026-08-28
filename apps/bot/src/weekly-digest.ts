@@ -1,4 +1,4 @@
-import { isoWeekFromKey } from "@mydon/shared";
+import { effectiveRoles, isoWeekFromKey } from "@mydon/shared";
 import type { StaffRole, WeekDelta } from "@mydon/shared";
 import {
   PCT,
@@ -59,31 +59,14 @@ export const WEEKLY_ROLES: readonly StaffRole[] = ["owner", "manager"];
 const РОЛИ_РАССЫЛКИ: ReadonlySet<string> = new Set<string>(WEEKLY_ROLES);
 
 /**
- * Легаси-поле `person.role` — свободный текст, которым владельца пометили ДО
- * появления массива `roles`.
+ * Роль рассылки у карточки: массив `roles` или легаси-текст `role`.
  *
- * Читаем его как запасной ключ рассылки, потому что на проде (25.08.2026) в
- * `roles` лежат только storekeeper/technician/operator/collector, а владелец
- * помечен ровно так: `role='владелец'`. Требовать один `roles` значило бы не
- * отправить понедельничную сводку НИКОМУ — и узнать об этом никогда.
- *
- * Правами это поле по-прежнему НЕ управляет (меню и команды смотрят только в
- * `roles`): здесь оно решает единственный вопрос «кому показать деньги парка»,
- * и цена описки в нём — лишний получатель сводки, а не лишние права.
+ * Карту легаси-ролей держит `@mydon/shared` (П7, R-P7-12): по ней теперь
+ * считает и Core, а две копии ответа на вопрос «кто менеджер» дали бы кнопку,
+ * которую Core отвергает 403-м.
  */
-const ЛЕГАСИ_РОЛИ: ReadonlyMap<string, StaffRole> = new Map([
-  ["владелец", "owner"],
-  ["собственник", "owner"],
-  ["owner", "owner"],
-  ["менеджер", "manager"],
-  ["manager", "manager"],
-]);
-
-/** Роль рассылки у карточки: массив `roles` или легаси-текст `role`. */
 function ролиРассылки(p: PersonRow): boolean {
-  if ((p.roles ?? []).some((r) => РОЛИ_РАССЫЛКИ.has(r))) return true;
-  const легаси = (p.role ?? "").trim().toLowerCase();
-  return легаси !== "" && ЛЕГАСИ_РОЛИ.has(легаси);
+  return effectiveRoles(p).some((r) => РОЛИ_РАССЫЛКИ.has(r));
 }
 
 /**

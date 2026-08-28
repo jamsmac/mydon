@@ -12,6 +12,8 @@ import type {
   ParityStreak,
   PriceChangesReport,
   PriceGapReport,
+  ProductFiscal,
+  ProductFiscalPatch,
   PurchasePlan as VendingPlan,
   PurchaseSummary as VendingPurchase,
   ShrinkReport as VendingShrinkageReport,
@@ -218,6 +220,8 @@ export interface VendingProductRow {
   isActive: boolean;
   excludedFromPurchase: boolean;
   fixedPurchaseQty: number | null;
+  /** Фискальный блок карточки снека (П6). Форма — `ProductFiscalForm`. */
+  fiscal: ProductFiscal;
 }
 
 /** Итог правки правил закупа товара (П5a). */
@@ -227,6 +231,12 @@ export interface VendingRulesResult {
   /** Каноническое имя товара (после алиасов). */
   product?: string;
 }
+
+/** Итог правки фискального блока карточки снека (П6). */
+export type VendingFiscalResult =
+  | { ok: true; product: string; readyBefore: boolean; readyAfter: boolean }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "invalid"; errors: string[] };
 
 /** Итог отправки закупа на утверждение владельцу (§5.7). */
 export interface VendingSubmitResult {
@@ -1150,6 +1160,11 @@ export interface Task {
   /** Оценка владельца после «сделано»: excellent / accepted / redo. */
   quality: "excellent" | "accepted" | "redo" | null;
   completedAt: string | null;
+  /** Кто фактически закрыл: веер приёмки исключает его из адресатов. */
+  closedBy: string | null;
+  confirmedAt: string | null;
+  confirmedBy: string | null;
+  assignNotifiedAt: string | null;
   createdAt: string;
 }
 
@@ -2156,6 +2171,8 @@ export const core = {
   createTask: (input: Record<string, unknown>) => send<Task>("/tasks", "POST", input),
   rateTask: (id: string, quality: "excellent" | "accepted" | "redo") =>
     send<Task>(`/tasks/${id}/quality`, "POST", { quality }),
+  /** Приёмка работы. Панель ходит от владельца — сегодняшнее поведение. */
+  confirmTask: (id: string) => send<Task>(`/tasks/${id}/confirm`, "POST", { actor: "owner" }),
   setTaskStatus: (id: string, input: Record<string, unknown>) =>
     send<Task>(`/tasks/${id}`, "PATCH", input),
   editTask: (id: string, input: Record<string, unknown>) =>
@@ -2268,11 +2285,12 @@ export const core = {
   /** Здоровье сбора OurVend: прогоны, серия отказов, лаги снимков, паритет (R-P5b-8). */
   ourvendHealth: (runs = 20) => get<OurvendHealth>(`/ourvend/health?runs=${runs}`),
   /**
-   * Серия зелёных дней паритета по дням (R-P8b-2, P4).
+   * Серия зелёных дней паритета ПОФАКТОРНО, по дням (R-P8b-2, R-G-4).
    *
-   * Отдельный роут, а не поле здоровья: `/ourvend/health` несёт СЧЁТ серии, а
-   * дни журнала и дату последнего красного дня считает только этот — по всему
-   * окну чтения, а не по семидневной витрине паритета.
+   * Роут отвечает `days[]` — пофакторный разбор 14 дней, которого в здоровье
+   * нет и быть не должно. Счёт серии (`parityStreak`, `cutoverThreshold`) и
+   * ОБЕ даты (`parityLastRed`, `parityStreakSince`) едут в `/ourvend/health`
+   * — второй вызов за ними больше не нужен.
    */
   ourvendParityStreak: () => get<ParityStreak>("/ourvend/parity/streak"),
   /** Журнал детектора заливок: что автомат получил и была ли запись оператора. */
@@ -2305,6 +2323,9 @@ export const core = {
     fixedPurchaseQty?: number;
     actor?: string;
   }) => send<VendingRulesResult>("/vending/product-rules", "POST", input),
+  /** Фискальный блок товара: пишет только панель, только по id карточки. */
+  setVendingProductFiscal: (input: { productId: string; actor?: string } & ProductFiscalPatch) =>
+    send<VendingFiscalResult>("/vending/product-fiscal", "POST", input),
   vendingOrders: () => get<VendingOrder[]>("/vending/orders"),
   vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
   /** Журнал заливок построчно (по слоту) — источник ленты «Обслуживание» (снек). */

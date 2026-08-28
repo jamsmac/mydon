@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { tashkentDay, tashkentDayEnd, tashkentDayStart, tashkentDayStartOf, tashkentInstant } from "./tashkent-time";
+import { tashkentDay, tashkentDayEnd, tashkentDayStart, tashkentDayStartOf, tashkentHour, tashkentInstant } from "./tashkent-time";
 
 describe("Время источника: разбор явный, не по TZ процесса (R-K8)", () => {
   it("строка без зоны — ташкентские часы, а не часы процесса", () => {
@@ -32,5 +32,17 @@ describe("Время источника: разбор явный, не по TZ �
   it("момент → начало его ташкентских суток", () => {
     assert.equal(tashkentDayStartOf(new Date("2026-06-08T18:59:59.999Z")).toISOString(), "2026-06-07T19:00:00.000Z");
     assert.equal(tashkentDayStartOf(new Date("2026-06-08T19:00:00.000Z")).toISOString(), "2026-06-08T19:00:00.000Z");
+  });
+});
+
+describe("Час ташкентских суток", () => {
+  it("полночь UTC — это пять утра в Ташкенте", () => {
+    assert.equal(tashkentHour(new Date("2026-08-26T00:00:00.000Z")), 5);
+  });
+
+  it("границы суток не съезжают", () => {
+    assert.equal(tashkentHour(new Date("2026-08-26T00:00:00+05:00")), 0);
+    assert.equal(tashkentHour(new Date("2026-08-26T23:59:59+05:00")), 23);
+    assert.equal(tashkentHour(new Date("2026-08-25T19:00:00.000Z")), 0);
   });
 });

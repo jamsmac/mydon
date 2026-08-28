@@ -89,6 +89,7 @@ describe("Касса закупа: подтверждение и история"
     ],
     totalSpent: 1_497_530,
     remainder: 902_470,
+    source: "own",
     createdBy: "owner",
     createdAt: "2026-08-02T12:00:00Z",
     ...o,
@@ -125,5 +126,13 @@ describe("Касса закупа: подтверждение и история"
     const t = formatCashSessions([session(), session({ id: "cs2", receivedAmount: 100_000, totalSpent: 40_000, remainder: 60_000 })]);
     assert.match(t, /получил 2\s?400\s?000, потратил 1\s?497\s?530, остаток 902\s?470/);
     assert.match(t, /получил 100\s?000, потратил 40\s?000, остаток 60\s?000/);
+  });
+
+  it("сторно-касса подписана «↩️ Отмена», а не обычной записью (Task 7)", () => {
+    const t = formatCashSessions([
+      session({ id: "cs3", source: "storno", receivedAmount: -2_400_000, totalSpent: -1_497_530, remainder: -902_470 }),
+    ]);
+    assert.match(t, /↩️ Отмена.*получил -?2\s?400\s?000/);
+    assert.doesNotMatch(t, /^• .*получил -?2\s?400\s?000/m, "сторно не должна остаться помеченной как обычная запись «•»");
   });
 });

@@ -32,6 +32,12 @@ const TASK: TaskRow = {
   priority: "normal",
   due: null,
   resultNote: null,
+  quality: null,
+  completedAt: null,
+  closedBy: null,
+  confirmedAt: null,
+  confirmedBy: null,
+  assignNotifiedAt: null,
   entityId: null,
 };
 

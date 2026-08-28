@@ -11,6 +11,7 @@ import type {
   ParityStreak,
   PriceChangesReport,
   PriceGapReport,
+  ProductFiscal,
   PurchasePlan as VendingPlan,
   PurchaseSummary as VendingPurchase,
   SetSalePriceResult,
@@ -69,6 +70,13 @@ export interface TaskRow {
   priority: "low" | "normal" | "high" | "urgent";
   due: string | null;
   resultNote: string | null;
+  quality: "excellent" | "accepted" | "redo" | null;
+  completedAt: string | null;
+  /** Кто фактически закрыл: веер приёмки исключает его из адресатов. */
+  closedBy: string | null;
+  confirmedAt: string | null;
+  confirmedBy: string | null;
+  assignNotifiedAt: string | null;
   /** По какому объекту работа: автомат, точка, склад. */
   entityId: string | null;
 }
@@ -140,8 +148,29 @@ export interface VendingCashSession {
   categories: VendingCashCategory[];
   totalSpent: number;
   remainder: number;
+  /** 'own' — обычная запись, 'storno' — отмена (Task 7, R-P6-10). */
+  source: string;
   createdBy: string | null;
   createdAt: string;
+}
+
+/**
+ * Строка прайса для КАРТОЧКИ (П6) — ровно те поля, которые она печатает.
+ *
+ * Полный тип строки каталога намеренно не дублируется из Core: общим между
+ * слоями остаётся фискальный блок `ProductFiscal`.
+ */
+export interface VendingProductCard {
+  id: string;
+  name: string;
+  category: "drink" | "snack" | "other";
+  purchasePrice: number | null;
+  salePrice: number | null;
+  packSize: number;
+  isActive: boolean;
+  excludedFromPurchase: boolean;
+  fixedPurchaseQty: number | null;
+  fiscal: ProductFiscal;
 }
 
 /** Правила закупа товара «было»/«стало» — как их отдаёт Core. */
@@ -300,6 +329,25 @@ export class CoreError extends Error {
 }
 
 /**
+ * Текст 4xx для человека — Core уже объяснил, что не так, придумывать своё
+ * сообщение незачем (см. `redeemInvite`, откуда этот разбор тела выделен).
+ *
+ * `null` для всего, что не 4xx (сеть/5xx — там текст ничего не объясняет,
+ * повтор уместен) и для тела без `message` — вызывающий сам решает, каким
+ * общим текстом это заменить.
+ */
+export function coreClientErrorMessage(err: unknown): string | null {
+  if (!(err instanceof CoreError) || !err.isClientError) return null;
+  try {
+    const parsed = JSON.parse(err.body) as { message?: string | string[] };
+    const msg = Array.isArray(parsed.message) ? parsed.message[0] : parsed.message;
+    return msg ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Выбранная карточка — не автомат.
  *
  * Отдельный класс, а не пустая строка: «карточка не отдалась» и «карточка не
@@ -313,6 +361,43 @@ export class NotAMachineError extends Error {
   ) {
     super(`Карточка ${entityId} — не автомат (${type})`);
     this.name = "NotAMachineError";
+  }
+}
+
+/** Три вида снек-записи, которые умеет отменять `RecordCancelService` (Core, Task 7). */
+export type CancelKind = "refill" | "stock_count" | "cash";
+
+/** Одна отменяемая запись сотрудника — экран бота «Мои записи» (Task 7). */
+export interface MyRecordRow {
+  kind: CancelKind;
+  /** Для stock_count — id ПЕРВОЙ строки ввода (R-P6-11), не строки-товара. */
+  id: string;
+  createdAt: string;
+  /** Готовая русская строка — тот же язык, что у ленты «Действия». */
+  label: string;
+}
+
+/** Ответ Core на POST /vending/{refills|stock-counts|cash}/:id/cancel. */
+export type CancelResult =
+  | { ok: true; kind: CancelKind; stornoId: string; label: string; alreadyCancelled: boolean }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "not_yours" }
+  | { ok: false; reason: "too_old"; hours: number };
+
+/**
+ * Отказ Core в отмене (403/404): `body` — уже РАЗОБРАННОЕ тело ответа
+ * (`{reason, hours?, message}`), а не сырая строка, как у `CoreError.body`.
+ * Отдельный класс, а не переиспользование `CoreError` как есть: только у
+ * этого вызова обработчику бота нужны структурные `reason`/`hours`, а не
+ * текст — придумывать общий разбор тела для ВСЕХ ошибок Core не стали.
+ */
+export class CancelVendingRecordError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: { reason?: string; hours?: number; message?: string },
+  ) {
+    super(body.message ?? `Core ответил ${status} на отмену записи`);
+    this.name = "CancelVendingRecordError";
   }
 }
 
@@ -443,12 +528,12 @@ export class CoreClient {
   }
 
   /**
-   * Серия зелёных дней паритета по дням (R-P8b-2, P4).
+   * Серия зелёных дней паритета ПОФАКТОРНО, по дням (R-P8b-2, R-G-4).
    *
-   * Отдельный роут, а не поле здоровья: `/ourvend/health` несёт СЧЁТ
-   * (`parityStreak`, `cutoverThreshold`), а по дням журнала и по дате
-   * последнего красного дня отвечает только этот — считает он по всему окну
-   * чтения, а не по семидневной витрине паритета.
+   * Роут отвечает `days[]` — пофакторный разбор 14 дней, которого в здоровье
+   * нет и быть не должно. Счёт серии (`parityStreak`, `cutoverThreshold`) и
+   * ОБЕ даты (`parityLastRed`, `parityStreakSince`) едут в `/ourvend/health`
+   * — второй вызов за ними больше не нужен.
    */
   ourvendParityStreak(): Promise<ParityStreak> {
     return this.request<ParityStreak>("/ourvend/parity/streak");
@@ -484,13 +569,17 @@ export class CoreClient {
    * delta<0, излишек при delta>0), пусто — если товар вводится впервые или
    * количество не изменилось.
    */
-  setVendingStock(items: { product: string; quantity: number }[]): Promise<{
+  setVendingStock(
+    items: { product: string; quantity: number }[],
+    /** Проводка автора (Task 7, Отклонение №9) — не шлём, если карточка не резолвилась. */
+    personId?: string,
+  ): Promise<{
     items: number;
     adjustments: VendingStockAdjustment[];
   }> {
     return this.request("/vending/stock", {
       method: "POST",
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ items, ...(personId ? { personId } : {}) }),
     });
   }
 
@@ -501,6 +590,8 @@ export class CoreClient {
   recordVendingCash(
     receivedAmount: number,
     categories: { name: string; amount: number }[],
+    /** Проводка автора (Task 7, Отклонение №9) — не шлём, если карточка не резолвилась. */
+    createdBy?: string,
   ): Promise<VendingCashSession> {
     return this.request<VendingCashSession>("/vending/cash", {
       method: "POST",
@@ -510,6 +601,7 @@ export class CoreClient {
           name: c.name,
           lines: [{ label: c.name, amount: c.amount }],
         })),
+        ...(createdBy ? { createdBy } : {}),
       }),
     });
   }
@@ -517,6 +609,39 @@ export class CoreClient {
   /** Прошлые кассы закупа — свежие сверху (§5.8). */
   vendingCashSessions(): Promise<VendingCashSession[]> {
     return this.request<VendingCashSession[]>("/vending/cash");
+  }
+
+  /** Последние отменяемые записи автора — экран бота «Мои записи» (Task 7). */
+  myRecords(personId: string, limit?: number): Promise<MyRecordRow[]> {
+    const l = limit ? `&limit=${limit}` : "";
+    return this.request<MyRecordRow[]>(`/vending/my-records?person=${encodeURIComponent(personId)}${l}`);
+  }
+
+  /**
+   * Сторно снек-записи (заправка/пересчёт/касса, Task 7, R-P6-10). Права
+   * читает Core: 403 несёт причину (`not_yours`/`too_old`) и, для второй,
+   * число часов окна — бот называет ЕГО, а не свою константу.
+   */
+  async cancelVendingRecord(kind: CancelKind, id: string, personId: string): Promise<CancelResult> {
+    const path =
+      kind === "refill" ? "refills" : kind === "stock_count" ? "stock-counts" : "cash";
+    try {
+      return await this.request<CancelResult>(`/vending/${path}/${id}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({ personId }),
+      });
+    } catch (err) {
+      if (err instanceof CoreError && err.isClientError) {
+        let body: { reason?: string; hours?: number; message?: string } = {};
+        try {
+          body = JSON.parse(err.body) as typeof body;
+        } catch {
+          // Тело не JSON (сеть/прокси) — причину не знаем, статус остаётся.
+        }
+        throw new CancelVendingRecordError(err.status, body);
+      }
+      throw err;
+    }
   }
 
   /** Накладные закупа (материализованы при одобрении, §5.7). */
@@ -739,6 +864,40 @@ export class CoreClient {
     return this.request(`/tasks/${id}/redo-notified`, { method: "POST" });
   }
 
+  /** Задачи, о новом назначении которых исполнителю ещё не сообщили. */
+  assignUnnotified(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks/assign-unnotified");
+  }
+
+  /** Отметка «о назначении сообщили» — только ПОСЛЕ фактической доставки. */
+  markAssignNotified(id: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/assign-notified`, { method: "POST" });
+  }
+
+  /** Сделанные задачи, которые ещё ждут приёмки менеджером. */
+  awaitingTasks(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks?awaiting=1");
+  }
+
+  confirmTask(id: string, actor: string): Promise<TaskRow> {
+    return this.request<TaskRow>(`/tasks/${id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ actor }),
+    });
+  }
+
+  /** Актор обязателен: иначе журнал ошибочно припишет оценку владельцу. */
+  rateTask(
+    id: string,
+    quality: "excellent" | "accepted" | "redo",
+    actor: string,
+  ): Promise<TaskRow> {
+    return this.request<TaskRow>(`/tasks/${id}/quality`, {
+      method: "POST",
+      body: JSON.stringify({ quality, actor }),
+    });
+  }
+
   /** Автоматы направления — для клавиатуры инкассации. */
   /**
    * Автоматы реестра. По умолчанию — ВЕСЬ парк.
@@ -905,15 +1064,8 @@ export class CoreClient {
       // Обещание «Core уже объяснил, что не так» теперь выполняется буквально:
       // из тела 4xx достаётся message Nest-исключения, а не техническое
       // «Core ответил 400 на /people/redeem», которое никому не помогает.
-      if (err instanceof CoreError && err.isClientError) {
-        try {
-          const parsed = JSON.parse(err.body) as { message?: string | string[] };
-          const msg = Array.isArray(parsed.message) ? parsed.message[0] : parsed.message;
-          if (msg) return { error: msg };
-        } catch {
-          // тело не JSON — общий текст ниже
-        }
-      }
+      const msg = coreClientErrorMessage(err);
+      if (msg) return { error: msg };
       return { error: err instanceof Error ? err.message : "Не получилось" };
     }
   }
@@ -1100,8 +1252,12 @@ export class CoreClient {
     return normalizeMachineSerial(row.externalRef);
   }
 
-  /** Прайс вендинга — для поиска товара по названию, когда его нет в зеркале. */
-  vendingProducts(): Promise<{ id: string; name: string; isActive: boolean }[]> {
+  /**
+   * Прайс вендинга — для поиска товара по названию, когда его нет в зеркале.
+   * Возврат расширен под карточку (П6). Существующий мастер заливки берёт
+   * только `name`/`isActive`, поэтому расширение для него безопасно.
+   */
+  vendingProducts(): Promise<VendingProductCard[]> {
     return this.request("/vending/products");
   }
 

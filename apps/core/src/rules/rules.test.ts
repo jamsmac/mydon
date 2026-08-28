@@ -4,7 +4,7 @@ import { CUTOVER_READY_EVENT, PARITY_EVENT } from "../ourvend/ourvend-parity.ser
 import { SNAPSHOT_STALE_EVENT } from "../ourvend/sync-stale.service";
 import { ACCOUNTING_SOURCE_CHANGED_EVENT } from "../sales/accounting-source";
 import { RETENTION_EVENT } from "../vending/retention.service";
-import { applyRules, formatAmount, immediateOnly, RULES } from "./rules";
+import { applyRules, formatAmount, immediateOnly, RULE_EVENT_TYPES, RULES } from "./rules";
 
 const ctx = (type: string, payload: Record<string, unknown> = {}) => ({
   source: "test",
@@ -336,5 +336,54 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.match(n!.text, /получателей нет/);
     assert.match(n!.text, /owner\/manager/);
     assert.match(n!.text, /неделя 2026-34/);
+  });
+
+  it("веер подтверждений без адресатов — немедленная тревога с названием задачи (П7, tasks.no_confirmers)", () => {
+    // Урок П5b N5, тот же класс дефекта: событие без правила уходит в лог
+    // контейнера и владелец о нём не узнает — эмитент лежит в
+    // apps/bot/src/task-confirm.ts (разослатьПодтверждения), правило здесь.
+    const [n] = applyRules(ctx("tasks.no_confirmers", { taskId: "t1", title: "Пополнить Olma" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /Пополнить Olma/);
+    assert.match(n!.text, /подтвердить её некому/);
+    assert.match(n!.text, /Менеджер.*Владелец/);
+  });
+});
+
+describe("Правило фискальной готовности (П6)", () => {
+  const fiscalCtx = (readyBefore: boolean, readyAfter: boolean) => ({
+    type: "vending.product_fiscal_changed",
+    payload: { product: "Lit Energy Blueberry CAN 0,45", readyBefore, readyAfter },
+  });
+
+  it("молчит, пока готовность не изменилась", () => {
+    assert.deepEqual(applyRules(fiscalCtx(true, true) as never), []);
+    assert.deepEqual(applyRules(fiscalCtx(false, false) as never), []);
+  });
+
+  it("переход готовности в обе стороны даёт заметку", () => {
+    const вверх = applyRules(fiscalCtx(false, true) as never);
+    assert.equal(вверх.length, 1);
+    assert.equal(вверх[0].urgency, "briefing");
+    assert.match(вверх[0].text, /Чек соберётся/);
+    const вниз = applyRules(fiscalCtx(true, false) as never);
+    assert.equal(вниз.length, 1);
+    assert.match(вниз[0].text, /Чек больше не соберётся/);
+  });
+
+  it("новый тип попал в RULE_EVENT_TYPES", () => {
+    assert.ok(RULE_EVENT_TYPES.includes("vending.product_fiscal_changed"));
+  });
+});
+
+describe("Правило сторно снек-записи (П6)", () => {
+  it("каждое сторно попадает в брифинг с готовой подписью", () => {
+    const [note] = applyRules(ctx("vending.record_cancelled", {
+      label: "↩️ Отмена заправки автомата 2508160376: Snickers ×6",
+      cancelledBy: "person:00000000-0000-4000-8000-000000000001",
+    }));
+    assert.equal(note?.urgency, "briefing");
+    assert.match(note?.text ?? "", /Отмена заправки/);
+    assert.ok(RULE_EVENT_TYPES.includes("vending.record_cancelled"));
   });
 });

@@ -4,13 +4,50 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { VendingProductRow } from "../lib/core";
 import { ProductRulesPanel } from "./product-rules-panel";
 
-const mocks = vi.hoisted(() => ({ saveVendingProductRules: vi.fn(), refresh: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  refresh: vi.fn(),
+  saveVendingProductFiscal: vi.fn(),
+  saveVendingProductRules: vi.fn(),
+}));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
-vi.mock("../app/vending/actions", () => ({ saveVendingProductRules: mocks.saveVendingProductRules, submitVendingPurchase: vi.fn() }));
+vi.mock("../app/vending/actions", () => ({
+  saveVendingProductFiscal: mocks.saveVendingProductFiscal,
+  saveVendingProductRules: mocks.saveVendingProductRules,
+  submitVendingPurchase: vi.fn(),
+}));
 
 const rows: VendingProductRow[] = [
-  { id: "p1", name: "Snickers 50gr", category: "snack", purchasePrice: 7000, salePrice: 15000, packSize: 10, isActive: true, excludedFromPurchase: false, fixedPurchaseQty: 48 },
-  { id: "p2", name: "Twix 50gr", category: "snack", purchasePrice: 7000, salePrice: null, packSize: 10, isActive: true, excludedFromPurchase: true, fixedPurchaseQty: null },
+  {
+    id: "p1",
+    name: "Snickers 50gr",
+    category: "snack",
+    purchasePrice: 7000,
+    salePrice: 15000,
+    packSize: 10,
+    isActive: true,
+    excludedFromPurchase: false,
+    fixedPurchaseQty: 48,
+    fiscal: {
+      ikpu: "01806001001086002",
+      mxik: null,
+      vatPct: 12,
+      barcode: null,
+      packageCode: "796",
+      marked: false,
+    },
+  },
+  {
+    id: "p2",
+    name: "Twix 50gr",
+    category: "snack",
+    purchasePrice: 7000,
+    salePrice: null,
+    packSize: 10,
+    isActive: true,
+    excludedFromPurchase: true,
+    fixedPurchaseQty: null,
+    fiscal: { ikpu: null, mxik: null, vatPct: 12, barcode: null, packageCode: "796", marked: false },
+  },
 ];
 
 describe("лист «Правила закупа»", () => {
@@ -58,6 +95,21 @@ describe("лист «Правила закупа»", () => {
     expect(screen.getByRole("button", { name: "Править Snickers 50gr" })).toHaveTextContent("Править");
     expect(screen.getAllByRole("button", { name: /^Править / })).toHaveLength(2);
   });
+
+  it("строка товара показывает чип «чек соберётся» / «дыр: N»", () => {
+    render(<ProductRulesPanel domain="vendhub" products={rows} />);
+    expect(screen.getByText("чек соберётся")).toBeVisible();
+    expect(screen.getByText("дыр: 1")).toBeVisible();
+  });
+
+  it("правка открывает обе формы одним блоком карточки товара", async () => {
+    const user = userEvent.setup();
+    render(<ProductRulesPanel domain="vendhub" products={rows} />);
+    await user.click(screen.getByRole("button", { name: "Править Snickers 50gr" }));
+    expect(screen.getByLabelText("Блок, шт")).toBeVisible();
+    expect(screen.getByLabelText("ИКПУ")).toBeVisible();
+  });
+
   it("переключение строки без «Отмена» перемонтирует форму — не сохраняет чужие правки", async () => {
     const user = userEvent.setup();
     render(<ProductRulesPanel domain="vendhub" products={rows} />);
@@ -65,10 +117,12 @@ describe("лист «Правила закупа»", () => {
     const pack = screen.getByLabelText("Блок, шт");
     await user.clear(pack);
     await user.type(pack, "12");
+    await user.type(screen.getByLabelText("ИКПУ"), "12345678901234567");
 
     await user.click(screen.getByRole("button", { name: "Править Twix 50gr" }));
 
     expect(screen.getByLabelText("Блок, шт")).toHaveValue("10");
+    expect(screen.getByLabelText("ИКПУ")).toHaveValue("");
     expect(screen.getByLabelText("Убрать из закупки (грузить только со склада)")).toBeChecked();
     expect(screen.getByDisplayValue("Twix 50gr")).toBeInTheDocument();
   });

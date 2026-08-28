@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   BASELINE,
   can,
+  effectiveRoles,
+  LEGACY_ROLE_MAP,
   normalizeRoles,
   PERMISSIONS,
   permissionsOf,
@@ -87,6 +89,38 @@ describe("Матрица прав", () => {
     assert.equal(rolesLabel(["operator", "technician"]), "Оператор, Техник");
     assert.equal(rolesLabel([]), "роли не заданы");
     assert.equal(rolesLabel(["мусор"]), "роли не заданы");
+  });
+});
+
+describe("Права на назначение и приёмку задач (П7, R-P7-3)", () => {
+  it("менеджер может назначать и подтверждать, оператор — нет", () => {
+    assert.equal(can(["manager"], "tasks.assign"), true);
+    assert.equal(can(["manager"], "tasks.confirm"), true);
+    assert.equal(can(["operator"], "tasks.assign"), false);
+    assert.equal(can(["operator"], "tasks.confirm"), false);
+    assert.equal(can(["owner"], "tasks.confirm"), true, "владелец получает права списком PERMISSIONS");
+  });
+
+  it("`tasks.own` остаётся у сотрудника без ролей — новые права его не заперли", () => {
+    assert.equal(can([], "tasks.own"), true);
+    assert.equal(can([], "tasks.confirm"), false);
+    assert.deepEqual([...BASELINE], ["tasks.own"]);
+  });
+
+  it("effectiveRoles: легаси `role='владелец'` даёт owner, мусор — ничего", () => {
+    assert.deepEqual(effectiveRoles({ roles: [], role: "владелец" }), ["owner"]);
+    assert.deepEqual(effectiveRoles({ roles: null, role: "Менеджер" }), ["manager"]);
+    assert.deepEqual(effectiveRoles({ roles: ["operator"], role: "кладовщик" }), ["operator"]);
+    assert.deepEqual(effectiveRoles({ roles: ["operator"], role: null }), ["operator"]);
+    assert.deepEqual(effectiveRoles({ roles: ["выдумка"], role: "" }), []);
+  });
+
+  it("effectiveRoles не задваивает роль, если она есть и в массиве, и в легаси", () => {
+    assert.deepEqual(effectiveRoles({ roles: ["owner"], role: "владелец" }), ["owner"]);
+  });
+
+  it("LEGACY_ROLE_MAP отдаёт только owner и manager — правами это поле не управляет шире", () => {
+    assert.deepEqual([...new Set(LEGACY_ROLE_MAP.values())].sort(), ["manager", "owner"]);
   });
 });
 

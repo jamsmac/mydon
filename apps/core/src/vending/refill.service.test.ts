@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { BadRequestException } from "@nestjs/common";
 import { RefillService } from "./refill.service";
 import type { VendingService } from "./vending.service";
 
@@ -92,6 +93,29 @@ describe("Заливка автомата", () => {
     const refill = inserted.find((r) => r.clientKey === "k1")!;
     assert.equal(refill.qty, 6);
     assert.equal(refill.machineSerial, "MU-7");
+  });
+
+  it("спорное имя — отказ, заливка не пишется (R-G-1)", async () => {
+    // Заливка НЕОБРАТИМА для склада: она списывает остаток. Записать её на
+    // «одну из двух карточек» значит увести списание не с того товара, и
+    // повторный прогон этого не исправит.
+    const vending = {
+      resolveProductRef: async () => {
+        throw new BadRequestException("имя «Fanta CAN 0,25» разрешается двумя путями");
+      },
+    } as unknown as VendingService;
+    const inserted: Row[] = [];
+    await assert.rejects(
+      () =>
+        new RefillService(stubDb({ inserted }), vending).create({
+          machineSerial: "2508160376",
+          productName: "Fanta CAN 0,25",
+          qty: 3,
+          clientKey: "k1",
+        }),
+      /двумя путями/,
+    );
+    assert.equal(inserted.length, 0, "отказ обязан случиться ДО записи");
   });
 
   it("имя товара приводится к канону справочника", async () => {

@@ -48,6 +48,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   productSaleLagH: 5,
   parityStreak: 3,
   cutoverThreshold: 7,
+  parityLastRed: "2026-08-25",
+  parityStreakSince: "2026-08-26",
   parity: { days: 7, ok: true, checked: 14, mismatches: 0, stockOk: true, stockChecked: 24, mode: "mirror", note: null },
 };
 
@@ -107,7 +109,9 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       "failedStreak",
       "lastSuccessAt",
       "parity",
+      "parityLastRed",
       "parityStreak",
+      "parityStreakSince",
       "productSaleLagH",
       "runs",
       "salesLagH",
@@ -149,6 +153,15 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
     assert.equal(typeof ЗДОРОВЬЕ.cutoverThreshold, "number");
     const непосчиталось: OurvendHealth = { ...ЗДОРОВЬЕ, parityStreak: 0 };
     assert.equal(непосчиталось.parityStreak < непосчиталось.cutoverThreshold, true, "ноль — не «готовы»");
+  });
+
+  it("дата последнего красного дня и начало серии — поля ЗДОРОВЬЯ, а не второго запроса (R-G-4)", () => {
+    // `null` — законные значения: «красных не было» и «серии нет». Витрина
+    // обязана печатать их словами, а не молчать.
+    const чисто: OurvendHealth = { ...ЗДОРОВЬЕ, parityLastRed: null, parityStreakSince: null };
+    assert.equal(чисто.parityLastRed, null);
+    assert.equal(чисто.parityStreakSince, null);
+    assert.match(ЗДОРОВЬЕ.parityLastRed!, /^\d{4}-\d{2}-\d{2}$/, "голые сутки, а не ISO-момент");
   });
 
   it("лаг допускает null: «снимков нет» — не «0 мин»", () => {
@@ -366,6 +379,7 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
 
   it("история склада: пометка и первые сутки окна едут в ответе (R-H-2)", () => {
     const строка: StockCountRow = {
+      id: "00000000-0000-4000-8000-000000000001",
       dt: "2026-08-25",
       product: "Sprite 250ml",
       qty: 19,
@@ -374,7 +388,7 @@ describe("Общие формы ответов Core (R-P5b-10)", () => {
       note: "2 Холодильник",
     };
     const отчёт: StockCountsReport = { days: 90, since: "2026-05-28", product: null, rows: [строка], warnings: [] };
-    assert.deepEqual(Object.keys(строка).sort(), ["countedAt", "dt", "note", "product", "qty", "source"]);
+    assert.deepEqual(Object.keys(строка).sort(), ["countedAt", "dt", "id", "note", "product", "qty", "source"]);
     assert.deepEqual(Object.keys(отчёт).sort(), ["days", "product", "rows", "since", "warnings"]);
     // `null` — законная пометка («её нет»), а не пропуск поля: выдумывать
     // «Основной склад» вместо неё нельзя.

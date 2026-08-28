@@ -1,4 +1,5 @@
 import { core, CoreUnavailable, type AgentCard, type Person, type Task } from "../../lib/core";
+import { AwaitingBlock } from "../../components/awaiting-block";
 import { CoreDown } from "../../components/core-down";
 import { QuickAdd } from "../../components/task-quick-add";
 import { TaskRow } from "../../components/task-row";
@@ -12,11 +13,16 @@ export const dynamic = "force-dynamic";
  */
 export default async function Tasks() {
   let open: Task[];
+  let awaiting: Task[];
   let people: Person[] = [];
   let agents: AgentCard[] = [];
   try {
-    [open, people, agents] = await Promise.all([
+    [open, awaiting, people, agents] = await Promise.all([
       core.tasks({ open: "1" }),
+      // Второй список: `done` без отметки приёмки не показывает никто —
+      // ни `/tasks` (там `open=1`), ни лента. Именно он требует решения
+      // владельца прямо сейчас, поэтому блок стоит НАД группами срочности.
+      core.tasks({ awaiting: "1" }),
       core.people(),
       core.agents(),
     ]);
@@ -44,6 +50,8 @@ export default async function Tasks() {
       </div>
 
       <QuickAdd people={people} agents={agents.map((a) => ({ name: a.name, status: a.status }))} />
+
+      <AwaitingBlock tasks={awaiting} names={new Map(people.map((p) => [p.id, p.name]))} />
 
       {groups.length === 0 ? (
         <div className="empty">

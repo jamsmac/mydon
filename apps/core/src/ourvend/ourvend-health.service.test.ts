@@ -37,6 +37,8 @@ interface Мир {
    */
   parityError?: string;
   streak?: Серия;
+  /** Серия не посчиталась: отчёт обязан выжить и отдать оба поля как `null`. */
+  streakError?: string;
 }
 
 type Паритет = Awaited<ReturnType<OurvendParityService["parity"]>>;
@@ -141,7 +143,10 @@ function healthDb(м: Мир) {
     },
     // Серия — отдельным вопросом к журналу событий (П8b): отчёт обязан донести
     // до витрины и счёт, и ПОРОГ, по которому его судят.
-    streak: async () => м.streak ?? СЕРИЯ_ПО_УМОЛЧАНИЮ,
+    streak: async () => {
+      if (м.streakError !== undefined) throw new Error(м.streakError);
+      return м.streak ?? СЕРИЯ_ПО_УМОЛЧАНИЮ;
+    },
   } as unknown as OurvendParityService;
   return { db, parity, счётчик };
 }
@@ -302,6 +307,28 @@ describe("Здоровье сбора (R-P5b-8)", () => {
       streak: { greenDays: 7, threshold: 7, readyForCutover: true, days: [], lastRed: null, since: "2026-08-19" },
     }).health(20, new Date(СЕЙЧАС.getTime() + 120_000));
     assert.equal(готов.parityStreak >= готов.cutoverThreshold, true);
+  });
+
+  it("дата последнего красного дня и начало серии едут в здоровье — БЕЗ второго запроса (R-G-4)", async () => {
+    // Серия уже считается внутри этого же `Promise.all`; до среза «Гигиена»
+    // наружу брались только `greenDays` и `threshold`, а обе даты выбрасывались.
+    const h = await сервис({
+      runs: [УСПЕХ("r1", "2026-08-25T06:00:00Z")],
+      streak: { greenDays: 3, threshold: 7, readyForCutover: false, days: [], lastRed: "2026-08-25", since: "2026-08-26" },
+    }).health(20, СЕЙЧАС);
+    assert.equal(h.parityLastRed, "2026-08-25");
+    assert.equal(h.parityStreakSince, "2026-08-26");
+    assert.equal(h.parityStreak, 3, "счёт серии не изменился");
+  });
+
+  it("серия не посчиталась — оба поля null, а отчёт жив", async () => {
+    // Отчёт о здоровье — та витрина, которую владелец открывает в дни
+    // катовера; ронять её из-за спутника нельзя, это уже решено своим `catch`.
+    const h = await сервис({
+      runs: [УСПЕХ("r1", "2026-08-25T06:00:00Z")],
+      streakError: "журнал событий недоступен",
+    }).health(20, СЕЙЧАС);
+    assert.deepEqual([h.parityLastRed, h.parityStreakSince, h.parityStreak], [null, null, 0]);
   });
 
   it("успехов не было вовсе — staleHours null, а не ноль часов", async () => {

@@ -66,6 +66,14 @@ describe("config-spec: белый список тумблеров", () => {
     assert.match(validateConfig("REFILL_DETECT_MIN_UNITS", "-1") ?? "", /неотрицательное/);
     assert.match(validateConfig("REFILL_DETECT_MIN_UNITS", "abc") ?? "", /неотрицательное/);
   });
+
+  it("окно самостоятельной отмены: от часа до 30 суток", () => {
+    assert.equal(specFor("SNACK_CANCEL_WINDOW_HOURS")?.fallback, "24");
+    assert.equal(validateConfig("SNACK_CANCEL_WINDOW_HOURS", "1"), null);
+    assert.equal(validateConfig("SNACK_CANCEL_WINDOW_HOURS", "720"), null);
+    assert.match(validateConfig("SNACK_CANCEL_WINDOW_HOURS", "0") ?? "", /от 1 до 720/);
+    assert.match(validateConfig("SNACK_CANCEL_WINDOW_HOURS", "721") ?? "", /от 1 до 720/);
+  });
 });
 
 /**
@@ -213,5 +221,28 @@ describe("resolveEffective: приоритет база > env > дефолт", (
     assert.ok(all.every((i) => typeof i.value === "string" && i.source));
     // Секретов среди ключей нет.
     assert.ok(!all.some((i) => /API_KEY|TOKEN|SECRET|PASSWORD/i.test(i.key)));
+  });
+});
+
+describe("Тумблеры моста задач (П7)", () => {
+  it("TASK_BRIDGE_ENABLED — только 0 и 1, по умолчанию включён", () => {
+    assert.equal(validateConfig("TASK_BRIDGE_ENABLED", "0"), null);
+    assert.equal(validateConfig("TASK_BRIDGE_ENABLED", "1"), null);
+    assert.match(validateConfig("TASK_BRIDGE_ENABLED", "да") ?? "", /допустимо/);
+    assert.equal(specFor("TASK_BRIDGE_ENABLED")?.fallback, "1");
+  });
+
+  it("TASK_BRIDGE_MAX_PER_RUN ограничен диапазоном 1..200", () => {
+    assert.match(validateConfig("TASK_BRIDGE_MAX_PER_RUN", "0") ?? "", /от 1 до 200/);
+    assert.match(validateConfig("TASK_BRIDGE_MAX_PER_RUN", "201") ?? "", /от 1 до 200/);
+    assert.equal(validateConfig("TASK_BRIDGE_MAX_PER_RUN", "20"), null);
+    assert.equal(validateConfig("TASK_BRIDGE_MAX_PER_RUN", ""), null);
+    assert.equal(specFor("TASK_BRIDGE_MAX_PER_RUN")?.fallback, "20");
+  });
+
+  it("у обоих тумблеров есть пояснение для владельца", () => {
+    for (const key of ["TASK_BRIDGE_ENABLED", "TASK_BRIDGE_MAX_PER_RUN"]) {
+      assert.ok((specFor(key)?.help ?? "").length > 40, `${key}: help пустой`);
+    }
   });
 });

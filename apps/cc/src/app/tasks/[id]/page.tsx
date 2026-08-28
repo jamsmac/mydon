@@ -4,6 +4,7 @@ import { CoreDown } from "../../../components/core-down";
 import { PhotoGallery } from "../../../components/photo-gallery";
 import { TaskDetail } from "../../../components/task-detail";
 import { TaskEdit, type OwnerOption } from "../../../components/task-edit";
+import { when } from "../../../lib/format";
 import { dueLabel } from "@mydon/shared";
 
 export const dynamic = "force-dynamic";
@@ -75,6 +76,16 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           {ownerName}
           {task.ownerKind === "agent" ? " · агент" : ""} · {dueLabel(task.due)}
         </p>
+        {task.confirmedAt !== null && (
+          <p>
+            Принято:{" "}
+            {task.confirmedBy === "owner"
+              ? "владелец"
+              : (peopleById[task.confirmedBy?.startsWith("person:") ? task.confirmedBy.slice("person:".length) : ""] ??
+                "сотрудник")}
+            , {when(task.confirmedAt)}
+          </p>
+        )}
       </div>
 
       {photos.length > 0 && <PhotoGallery attachments={photos} />}

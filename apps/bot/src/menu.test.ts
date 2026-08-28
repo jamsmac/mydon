@@ -183,8 +183,16 @@ describe("Урезанный доступ", () => {
     // В базовое входит и «Поломка»: увидевший сломанный автомат должен уметь
     // сказать об этом, какие бы роли ему ни забыли проставить.
     const labels = menuKeyboard([]).keyboard.flat().map((b) => b.text);
-    assert.deepEqual(labels, ["📋 Мои задачи", "⚠️ Поломка", "↩️ Ошибся — исправить"]);
+    assert.deepEqual(labels, ["📋 Мои задачи", "⚠️ Поломка", "↩️ Ошибся — исправить", "✏️ Мои записи"]);
     assert.ok(!labels.includes("📥 Инкассация"), "деньги базовым правом не даются");
+  });
+
+  it("«Мои записи» доступны любому подключённому, а кофейное исправление осталось отдельно", () => {
+    const labels = menuKeyboard([]).keyboard.flat().map((button) => button.text);
+    assert.ok(labels.includes("✏️ Мои записи"), "tasks.own — базовое право подключённого");
+    assert.ok(labels.includes("↩️ Ошибся — исправить"), "кофейный DELETE-поток нельзя слить со снек-сторно");
+    assert.equal(matchTrigger("мои записи", [])?.id, "mine");
+    assert.equal(matchTrigger("ошибся", [])?.id, "fix");
   });
 });
 
@@ -257,5 +265,21 @@ describe("Фиксы финального ревью 18.08: живые фраз�
     assert.equal(isCoffeeRefillTrigger("залил воду"), false);
     assert.equal(isCoffeeRefillTrigger("залил кофе"), true);
     assert.equal(isCoffeeRefillTrigger("заливка"), true);
+  });
+});
+
+describe("Пункт «Ждут подтверждения» (П7, T6)", () => {
+  it("пункт не виден оператору ни кнопкой, ни словом", () => {
+    // Один фильтр на три входа: спрятанный кнопкой, но доступный словом
+    // пункт сделал бы всю модель прав косметикой.
+    assert.equal(menuFor(ALL).some((i) => i.id === "confirm"), false, "у ALL нет manager/owner");
+    assert.equal(matchTrigger2("ждут подтверждения"), null);
+    assert.equal(matchTrigger2("приёмка"), null);
+  });
+
+  it("менеджеру пункт виден и ловится словом", () => {
+    assert.equal(menuFor(["manager"]).some((i) => i.id === "confirm"), true);
+    assert.equal(matchTrigger("подтверждение", ["manager"])?.id, "confirm");
+    assert.equal(matchTrigger("приемка", ["owner"])?.id, "confirm");
   });
 });

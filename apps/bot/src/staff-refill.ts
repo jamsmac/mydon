@@ -1,5 +1,5 @@
 import { normalizeMachineSerial, normalizeProductName } from "@mydon/shared";
-import { NotAMachineError, type CoreClient, type PersonRow, type VendingPlan } from "./core-client";
+import { coreClientErrorMessage, NotAMachineError, type CoreClient, type PersonRow, type VendingPlan } from "./core-client";
 import type { Conversations } from "./conversation";
 import { pickObject } from "./machine-picker";
 import { cutAt } from "./purchase-plan";
@@ -324,12 +324,19 @@ export async function recordItem(
     // Лог обязателен: это единственная мутация мастера, и её сбой не виден
     // нигде, кроме сообщения одному человеку в поле.
     console.error(`[refill] позиция «${product}» не записана:`, err);
+    // Клиентская ошибка (400 и т.п., например спор каталога R-G-1) —
+    // ДЕТЕРМИНИРОВАННАЯ: тот же запрос повторно даст тот же отказ, и текст
+    // Core уже объясняет, что не так, а не «попробуй ещё раз», которое для
+    // такой ошибки не совет, а тупик (гигиена, UX-ревью).
+    const текстОшибки = coreClientErrorMessage(err);
     return {
       state,
       // Знак в начале обязателен: кнопки под сбоем и под успехом одинаковые, и
       // техник, листающий чат бегло, отличает их только по первому символу.
       reply: {
-        text: `⚠️ Не смог записать «${product}». Попробуй ещё раз или продолжи — записанное сохранено.`,
+        text: текстОшибки
+          ? `⚠️ Не смог записать «${product}»: ${текстОшибки}\nПовтор не поможет — это не сбой связи. Пропусти позицию (кнопка ниже) и передай владельцу.`
+          : `⚠️ Не смог записать «${product}». Попробуй ещё раз или продолжи — записанное сохранено.`,
         keyboard: afterItemKeyboard(),
       },
     };

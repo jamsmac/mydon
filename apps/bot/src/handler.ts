@@ -1,6 +1,6 @@
 import { answer, type ContextSearch, type LlmResolver } from "@mydon/assistant";
 import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
-import { DOMAIN_LABELS } from "@mydon/shared";
+import { DOMAIN_LABELS, normalizeProductName } from "@mydon/shared";
 import {
   approvalKeyboard,
   collectGloberentSignals,
@@ -34,6 +34,12 @@ import {
   parseReceiveDistribution,
 } from "./purchase-brief";
 import { formatRuleResult, isRuleCommand, parseRuleCommand, ruleCommandHint } from "./product-rules";
+import {
+  PRODUCT_CARD_HINT,
+  formatProductCard,
+  isProductCardTrigger,
+  parseProductCardCommand,
+} from "./product-card";
 import { formatPurchasePlan, isPlanCommand } from "./purchase-plan";
 import {
   BOOTSTRAP_DAYS_MAX,
@@ -234,7 +240,11 @@ export async function handleMessage(
       };
     }
     try {
-      const res = await deps.core.recordVendingCash(session.receivedAmount, session.categories);
+      // Проводка автора (Task 7, Отклонение №9): не нашли карточку — запись
+      // уходит без автора, как раньше (не ошибка, «мои записи» её не увидит).
+      const person = await deps.core.personByChat(String(chatId)).catch(() => null);
+      const createdBy = person && !("found" in person) ? `person:${person.id}` : undefined;
+      const res = await deps.core.recordVendingCash(session.receivedAmount, session.categories, createdBy);
       return { text: formatCashAck(res) };
     } catch (err) {
       console.error("Ошибка записи кассы закупа:", err);
@@ -250,6 +260,27 @@ export async function handleMessage(
     } catch (err) {
       console.error("Ошибка чтения касс закупа:", err);
       return { text: "Не удалось получить кассы закупа из MYDON Core. Попробуй ещё раз чуть позже." };
+    }
+  }
+
+  // Карточка товара — ЧТЕНИЕ (П6). До parseIntent и правил закупа: этот
+  // префикс ни с чем не пересекается, а «новая карточка» — чужой поток.
+  if (isProductCardTrigger(text)) {
+    const имя = parseProductCardCommand(text);
+    if (имя === null) return { text: PRODUCT_CARD_HINT };
+    try {
+      const прайс = await deps.core.vendingProducts();
+      const ключ = normalizeProductName(имя);
+      const строка = прайс.find((product) => normalizeProductName(product.name) === ключ);
+      if (!строка) {
+        return {
+          text: `Товар «${имя}» не найден в прайсе вендинга. Имя должно совпадать с карточкой или алиасом.`,
+        };
+      }
+      return { text: formatProductCard(строка) };
+    } catch (err) {
+      console.error("Ошибка чтения карточки товара:", err);
+      return { text: "Не удалось получить карточку товара из MYDON Core. Попробуй ещё раз чуть позже." };
     }
   }
 
@@ -412,16 +443,11 @@ export async function handleMessage(
   // по крону, и делать вид, что «сверка» ходит в кабинет, нельзя.
   if (isOurvendCheckQuery(text)) {
     try {
-      // Серия по дням — ОТДЕЛЬНЫЙ роут: здоровье несёт только счёт зелёных
-      // дней, а дату последнего красного дня (P4) отдаёт `/ourvend/parity/
-      // streak`. Его отказ «сверку» не отменяет — отчёт печатается без этой
-      // строки, а не превращается в «отчёт не пришёл»: здоровье сбора важнее
-      // даты старого сбоя.
-      const [здоровье, серия] = await Promise.all([
-        deps.core.ourvendHealth(),
-        deps.core.ourvendParityStreak().catch(() => null),
-      ]);
-      const [first, ...more] = formatOurvendHealth(здоровье, серия);
+      // ОДИН запрос: дата последнего красного дня едет полем здоровья (R-G-4).
+      // Пока их было два, отказ `/ourvend/parity/streak` молча отнимал у
+      // отчёта строку — «сверка» печаталась без неё и выглядела нормально.
+      const здоровье = await deps.core.ourvendHealth();
+      const [first, ...more] = formatOurvendHealth(здоровье);
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка сверки OurVend:", err);
@@ -559,7 +585,11 @@ export async function handleMessage(
   if (isStockCommand(text)) {
     const items = parseStockItems(text);
     try {
-      const res = await deps.core.setVendingStock(items);
+      // Проводка автора (Task 7, Отклонение №9): не нашли карточку — запись
+      // уходит без автора, как раньше (не ошибка, «мои записи» её не увидит).
+      const person = await deps.core.personByChat(String(chatId)).catch(() => null);
+      const personId = person && !("found" in person) ? person.id : undefined;
+      const res = await deps.core.setVendingStock(items, personId);
       return { text: formatStockAck(items, res.adjustments) };
     } catch (err) {
       console.error("Ошибка записи остатков склада:", err);

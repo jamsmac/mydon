@@ -48,6 +48,13 @@ import {
 } from "./coffee-returns";
 import { handleCoffeeFixCallback, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
 import {
+  askCancel,
+  handleMyRecordsCallback,
+  parseMyRecordsCallback,
+  parseMyRecordsSelection,
+  startMyRecords,
+} from "./my-records";
+import {
   handleRefillCallback,
   handleRefillCount,
   handleRefillProductText,
@@ -86,6 +93,15 @@ import {
   startTaskDone,
   taskDoneStepHint,
 } from "./task-done";
+import {
+  CONFIRM_CANCEL,
+  REDO_FLOW,
+  confirmRedoStepHint,
+  formatAwaitingScreen,
+  handleConfirmCallback,
+  handleConfirmRedoReason,
+  parseConfirmCallback,
+} from "./task-confirm";
 import {
   helpText,
   matchMenuLabel,
@@ -375,6 +391,12 @@ ${reply.text}`;
   // Активный визард забирает ввод по шагу (название/факт — текстом, остальное —
   // кнопками и фото). Идёт прежде отчётов и триггеров, иначе визард перебьётся.
   const conv = deps.conversations.get(chatId);
+  if (conv?.flow === REDO_FLOW) {
+    if (conv.step === "reason" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await handleConfirmRedoReason(chatId, clean, person, deps) };
+    }
+    return { reply: { text: confirmRedoStepHint(conv.step) } };
+  }
   if (conv?.flow === "register") {
     if (conv.step === "name" && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: await handleRegisterName(chatId, clean, person, deps) };
@@ -591,6 +613,8 @@ async function startMenuItem(
       return { reply: await startCoffeeConsumable(chatId, deps) };
     case "fix":
       return { reply: await startCoffeeFix(person, deps) };
+    case "mine":
+      return { reply: await startMyRecords(person, deps) };
     case "part":
       return { reply: await startPartReplace(chatId, person, deps) };
     case "clean":
@@ -603,6 +627,13 @@ async function startMenuItem(
       return { reply: await startSchedules(chatId, deps) };
     case "mrefill":
       return { reply: await startMachineRefill(chatId, person, deps) };
+    case "confirm": {
+      const [tasks, people] = await Promise.all([
+        deps.core.awaitingTasks(),
+        deps.core.people().catch(() => [] as PersonRow[]),
+      ]);
+      return { reply: formatAwaitingScreen(tasks, new Map(people.map((p) => [p.id, p.name]))) };
+    }
     default:
       // Пункт объявлен ready, но обработчика нет — это ошибка сборки меню,
       // а не сотрудника. Говорим ровно то же, что и про неготовый поток.
@@ -611,14 +642,16 @@ async function startMenuItem(
 }
 
 /** Ответ мастера → ответ обработчика кнопки. Четыре копии этого не нужны. */
-function unwrap(res: { answer: string; message?: StaffReply }): {
+function unwrap(res: { answer: string; message?: StaffReply; recipientNote?: { chat: number; text: string } }): {
   answer: string;
   message?: string;
   keyboard?: StaffReply["keyboard"];
+  recipientNote?: { chat: number; text: string };
 } {
   return {
     answer: res.answer,
     ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    ...(res.recipientNote ? { recipientNote: res.recipientNote } : {}),
   };
 }
 
@@ -633,9 +666,24 @@ export async function handleStaffCallback(
   message?: string;
   keyboard?: StaffReply["keyboard"];
   ownerNote?: string;
+  /** Сообщение исполнителю после решения менеджера. */
+  recipientNote?: { chat: number; text: string };
   /** Перерисовать исходное сообщение вместо отправки нового. */
   edit?: { text: string; keyboard?: StaffReply["keyboard"] };
 }> {
+  // Пространство `tc:` — приёмка П7. Старый callback отмены не должен гасить
+  // другой активный мастер, поэтому сначала сверяем, что он ещё наш.
+  if (data === CONFIRM_CANCEL) {
+    const current = deps.conversations.get(chatId);
+    if (current?.flow !== REDO_FLOW) {
+      return { answer: "Кнопка устарела", message: "Эта отмена уже не действует." };
+    }
+    deps.conversations.clear(chatId);
+    return { answer: "Отменил", message: "Ок, задача осталась на рассмотрении." };
+  }
+  const confirm = parseConfirmCallback(data);
+  if (confirm) return unwrap(await handleConfirmCallback(chatId, confirm, person, deps));
+
   // Inline-дубль меню (m:<id>) — тот же обработчик, что у кнопки снизу.
   const menuHit = parseMenuCallback(data);
   if (menuHit) {
@@ -884,6 +932,22 @@ export async function handleStaffCallback(
   const coffeeFix = parseCoffeeFixCallback(data);
   if (coffeeFix) {
     const res = await handleCoffeeFixCallback(coffeeFix, person, deps);
+    return { answer: res.answer, ...(res.message ? { message: res.message } : {}) };
+  }
+
+  // «Мои записи» — намеренно два callback-пространства. Первый тап только
+  // раскрывает выбранную строку (`mr:a`), второй подтверждает сторно (`mr:c`).
+  // Если трактовать один и тот же callback обоими способами, подтверждение
+  // либо не будет достигнуто, либо первый же тап отменит запись.
+  const myRecordsSelection = parseMyRecordsSelection(data);
+  if (myRecordsSelection) {
+    const reply = await askCancel(myRecordsSelection, person, deps);
+    return { answer: "Проверь запись", message: reply.text, ...(reply.keyboard ? { keyboard: reply.keyboard } : {}) };
+  }
+
+  const myRecords = parseMyRecordsCallback(data);
+  if (myRecords) {
+    const res = await handleMyRecordsCallback(myRecords, person, deps);
     return { answer: res.answer, ...(res.message ? { message: res.message } : {}) };
   }
 

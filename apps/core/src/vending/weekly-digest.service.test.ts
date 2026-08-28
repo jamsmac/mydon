@@ -279,6 +279,8 @@ const ЗДОРОВЬЕ: OurvendHealth = {
   // переключать учёт.
   parityStreak: 0,
   cutoverThreshold: 7,
+  parityLastRed: "2026-08-24",
+  parityStreakSince: null,
   parity: { days: 7, ok: false, checked: 14, mismatches: 3, stockOk: false, stockChecked: 0, mode: "mirror", note: "снимков остатков нет" },
 };
 

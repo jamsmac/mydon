@@ -39,6 +39,7 @@ export interface ActionRow {
   kind:
     | "coffee_refill"
     | "vending_refill"
+    | "vending_refill_cancelled"
     | "container_return"
     | "consumable"
     | "wash"
@@ -47,6 +48,7 @@ export interface ActionRow {
     | "intake"
     | "stock_adjustment"
     | "task_done"
+    | "task_confirmed"
     | "task_created"
     | "entity_draft";
   /** Готовая русская строка с деталями — единый вид для бота и панели. */
@@ -101,6 +103,7 @@ export class ActionsService {
       collections,
       moves,
       done,
+      confirmed,
       created,
       drafts,
     ] = await Promise.all([
@@ -126,6 +129,7 @@ export class ActionsService {
           product: vendingRefill.productName,
           qty: vendingRefill.qty,
           serial: vendingRefill.machineSerial,
+          source: vendingRefill.source,
         })
         .from(vendingRefill)
         .where(and(gte(vendingRefill.performedAt, lo), lt(vendingRefill.performedAt, hi))),
@@ -231,6 +235,11 @@ export class ActionsService {
             eq(task.status, "done"),
           ),
         ),
+      // Закрыть и принять могут разные люди — это две строки ленты.
+      this.db
+        .select({ at: task.confirmedAt, by: task.confirmedBy, title: task.title })
+        .from(task)
+        .where(and(isNotNull(task.confirmedAt), gte(task.confirmedAt, lo), lt(task.confirmedAt, hi))),
       this.db
         .select({ at: task.createdAt, by: task.createdBy, title: task.title })
         .from(task)
@@ -262,9 +271,11 @@ export class ActionsService {
     for (const r of snackRefills) {
       push(
         r.at,
-        "vending_refill",
+        r.source === "storno" ? "vending_refill_cancelled" : "vending_refill",
         r.pid ?? personIdOf(r.by),
-        `🍫 Заправка автомата ${r.serial}: ${r.product} ×${r.qty}`,
+        r.source === "storno"
+          ? `↩️ Отмена заправки автомата ${r.serial}: ${r.product} ×${Math.abs(r.qty)}`
+          : `🍫 Заправка автомата ${r.serial}: ${r.product} ×${r.qty}`,
       );
     }
     for (const r of returns) {
@@ -323,6 +334,9 @@ export class ActionsService {
           ? r.ref
           : null;
       push(r.at, "task_done", pid, `✅ Закрыл задачу: ${r.title}`);
+    }
+    for (const r of confirmed) {
+      push(r.at, "task_confirmed", personIdOf(r.by), `👌 Принял работу: ${r.title}`);
     }
     for (const r of created) {
       push(r.at, "task_created", personIdOf(r.by), `⚠️ Завёл заявку: ${r.title}`);

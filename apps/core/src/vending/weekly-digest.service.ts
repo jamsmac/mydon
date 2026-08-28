@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { and, eq, gte, lt } from "drizzle-orm";
+import { and, eq, gte, lt, ne } from "drizzle-orm";
 import { vendingPurchaseOrder, vendingRefill, vendingRefillEvent, vendingStockCount } from "@mydon/db";
 import {
   dayNumber,
@@ -132,6 +132,10 @@ const ЗДОРОВЬЕ_НЕИЗВЕСТНО: OurvendHealth = {
   // настоящий фолбэк, чтобы витрина не нарисовала «0 из 0 — можно».
   parityStreak: 0,
   cutoverThreshold: CUTOVER_GREEN_DAYS_FALLBACK,
+  // «Не посчитали» ≠ «красных не было»: причину говорит `note` рядом, а не
+  // молчание полей.
+  parityLastRed: null,
+  parityStreakSince: null,
   // `mode` — самое НЕ ЗАЯВЛЯЮЩЕЕ из трёх: `retired` витрина читает как
   // «сверка завершена, зеркала нет», а это утверждение о катовере, которого мы
   // тут не знаем. Причина отсутствия чисел сказана в `note`, а не режимом.
@@ -524,7 +528,15 @@ export class WeeklyDigestService {
       this.db
         .select({ qty: vendingRefill.qty })
         .from(vendingRefill)
-        .where(and(gte(vendingRefill.performedAt, начало), lt(vendingRefill.performedAt, конец))),
+        // Сторно (П6): висит на времени отмены, а не заливки — без фильтра
+        // попадёт в чужую неделю и исказит недельный счётчик заливок.
+        .where(
+          and(
+            gte(vendingRefill.performedAt, начало),
+            lt(vendingRefill.performedAt, конец),
+            ne(vendingRefill.source, "storno"),
+          ),
+        ),
       this.db
         .select({ positions: vendingPurchaseOrder.positions })
         .from(vendingPurchaseOrder)
