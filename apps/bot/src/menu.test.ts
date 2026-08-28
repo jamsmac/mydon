@@ -183,8 +183,16 @@ describe("Урезанный доступ", () => {
     // В базовое входит и «Поломка»: увидевший сломанный автомат должен уметь
     // сказать об этом, какие бы роли ему ни забыли проставить.
     const labels = menuKeyboard([]).keyboard.flat().map((b) => b.text);
-    assert.deepEqual(labels, ["📋 Мои задачи", "⚠️ Поломка", "↩️ Ошибся — исправить"]);
+    assert.deepEqual(labels, ["📋 Мои задачи", "⚠️ Поломка", "↩️ Ошибся — исправить", "✏️ Мои записи"]);
     assert.ok(!labels.includes("📥 Инкассация"), "деньги базовым правом не даются");
+  });
+
+  it("«Мои записи» доступны любому подключённому, а кофейное исправление осталось отдельно", () => {
+    const labels = menuKeyboard([]).keyboard.flat().map((button) => button.text);
+    assert.ok(labels.includes("✏️ Мои записи"), "tasks.own — базовое право подключённого");
+    assert.ok(labels.includes("↩️ Ошибся — исправить"), "кофейный DELETE-поток нельзя слить со снек-сторно");
+    assert.equal(matchTrigger("мои записи", [])?.id, "mine");
+    assert.equal(matchTrigger("ошибся", [])?.id, "fix");
   });
 });
 

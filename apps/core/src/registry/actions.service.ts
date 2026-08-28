@@ -39,6 +39,7 @@ export interface ActionRow {
   kind:
     | "coffee_refill"
     | "vending_refill"
+    | "vending_refill_cancelled"
     | "container_return"
     | "consumable"
     | "wash"
@@ -128,6 +129,7 @@ export class ActionsService {
           product: vendingRefill.productName,
           qty: vendingRefill.qty,
           serial: vendingRefill.machineSerial,
+          source: vendingRefill.source,
         })
         .from(vendingRefill)
         .where(and(gte(vendingRefill.performedAt, lo), lt(vendingRefill.performedAt, hi))),
@@ -269,9 +271,11 @@ export class ActionsService {
     for (const r of snackRefills) {
       push(
         r.at,
-        "vending_refill",
+        r.source === "storno" ? "vending_refill_cancelled" : "vending_refill",
         r.pid ?? personIdOf(r.by),
-        `🍫 Заправка автомата ${r.serial}: ${r.product} ×${r.qty}`,
+        r.source === "storno"
+          ? `↩️ Отмена заправки автомата ${r.serial}: ${r.product} ×${Math.abs(r.qty)}`
+          : `🍫 Заправка автомата ${r.serial}: ${r.product} ×${r.qty}`,
       );
     }
     for (const r of returns) {

@@ -207,6 +207,14 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     fallback: "10",
     validate: nonNegNumber,
   },
+  {
+    key: "SNACK_CANCEL_WINDOW_HOURS",
+    label: "Вендинг: окно самостоятельной отмены записи, часов",
+    kind: "number",
+    fallback: "24",
+    help: "Сколько часов автор может сам отменить свою запись (заправку, пересчёт, кассу). Владелец (system.admin) отменяет без лимита. 24 ч — правило донора mydon-stock, у нас оно новое: если мешает — поднимай, а не обходи.",
+    validate: inRange(1, 720),
+  },
   // ── Задачи: мост «событие → задача» (П7) ──
   {
     key: "TASK_BRIDGE_ENABLED",

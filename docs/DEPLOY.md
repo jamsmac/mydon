@@ -150,6 +150,33 @@ docker exec mydon-stock-db-1 pg_dump -U mydon mydon | gzip > /opt/backups/stock-
 Детали, ожидаемые числа отчёта и рулинги — `docs/superpowers/specs/2026-08-25-p8a-stock-history-design.md`
 (§6 «Выкатка», аддендумы, включая «Уточнения после adversarial»).
 
+### Разовый перенос фискальных полей снека (П6)
+
+После миграции 0072 типизированные поля прайса доступны: НДС и ОКЕИ уже имеют
+безопасные умолчания, а ИКПУ/МХИК/штрихкод пусты. ИКПУ и штрихкод заполняет
+отдельный скрипт сначала из `entity.attrs` MYDON; затем он дополняет только
+SKU-уровневый ИКПУ и флаг маркировки из донора. Категорийные коды, конфликты
+и расхождения `pack_size` он только печатает. Без флагов скрипт тоже работает в режиме
+примерки; запись разрешает только явный `--apply`.
+
+```bash
+docker exec -i mydon-core node packages/db/dist/import-fiscal.js --dry-run </dev/null
+docker exec -i mydon-core node packages/db/dist/import-fiscal.js --apply   </dev/null
+docker exec -i mydon-core node packages/db/dist/import-fiscal.js --apply   </dev/null
+```
+
+До первого `--apply` сверить отчёт: `conflict` — около 7 строк,
+`length_defect` — одна (`Coca-Cola ZeroS CAN 0.25`), `category` — около 24,
+`unresolvedDonorNames` — около 22, `marked` — не более 27,
+`packSizeMismatches` — 5 расхождений из 9 сопоставленных пар. ИКПУ к записи
+должно быть не меньше 11. Расхождение означает, что данные изменились после
+описи; его разбирают до записи, а не обходят флагом. Второй `--apply` обязан
+дать нули по `ikpu`, `barcode` и `marked` — доказательство идемпотентности.
+
+Оба URL скрипт использует только через окружение и печатает лишь хосты;
+`STOCK_DATABASE_URL` открывается только для SELECT. `</dev/null>` обязателен
+у каждого `docker exec -i`.
+
 ### Разовый бэкфилл `product_id` (П4 → «Хвосты»)
 
 Скрипт идемпотентен (трогает только строки с `product_id IS NULL`) и

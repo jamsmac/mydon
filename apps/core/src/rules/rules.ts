@@ -435,6 +435,24 @@ export const RULES: Rule[] = [
       `🍫 Заливка без записи: ${str(c.payload.name)} +${num(c.payload.units)} шт ${времяТашкента(c.payload.windowTo)} — ` +
       `оформи в боте «Заполнил автомат»`,
   },
+  {
+    // В брифинг идёт только пересечение границы готовности, а не каждая
+    // рутинная правка одного из шести полей карточки.
+    id: "vending.product_fiscal_changed",
+    eventType: "vending.product_fiscal_changed",
+    urgency: "briefing",
+    when: (c) => c.payload.readyBefore !== c.payload.readyAfter,
+    format: (c) =>
+      c.payload.readyAfter === true
+        ? `🧾 Чек соберётся: ${str(c.payload.product)} — фискальные поля заполнены`
+        : `🧾 Чек больше не соберётся: ${str(c.payload.product)} — проверь фискальные поля`,
+  },
+  {
+    id: "vending.record_cancelled",
+    eventType: "vending.record_cancelled",
+    urgency: "briefing",
+    format: (c) => `${str(c.payload.label)} — отменил ${str(c.payload.cancelledBy)}`,
+  },
 
   // ── Снек-автоматы: аналитика и здоровье сбора (П5b) ───────────────────────
   {

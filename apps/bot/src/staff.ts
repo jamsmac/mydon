@@ -48,6 +48,13 @@ import {
 } from "./coffee-returns";
 import { handleCoffeeFixCallback, parseCoffeeFixCallback, startCoffeeFix } from "./coffee-fix";
 import {
+  askCancel,
+  handleMyRecordsCallback,
+  parseMyRecordsCallback,
+  parseMyRecordsSelection,
+  startMyRecords,
+} from "./my-records";
+import {
   handleRefillCallback,
   handleRefillCount,
   handleRefillProductText,
@@ -606,6 +613,8 @@ async function startMenuItem(
       return { reply: await startCoffeeConsumable(chatId, deps) };
     case "fix":
       return { reply: await startCoffeeFix(person, deps) };
+    case "mine":
+      return { reply: await startMyRecords(person, deps) };
     case "part":
       return { reply: await startPartReplace(chatId, person, deps) };
     case "clean":
@@ -923,6 +932,22 @@ export async function handleStaffCallback(
   const coffeeFix = parseCoffeeFixCallback(data);
   if (coffeeFix) {
     const res = await handleCoffeeFixCallback(coffeeFix, person, deps);
+    return { answer: res.answer, ...(res.message ? { message: res.message } : {}) };
+  }
+
+  // «Мои записи» — намеренно два callback-пространства. Первый тап только
+  // раскрывает выбранную строку (`mr:a`), второй подтверждает сторно (`mr:c`).
+  // Если трактовать один и тот же callback обоими способами, подтверждение
+  // либо не будет достигнуто, либо первый же тап отменит запись.
+  const myRecordsSelection = parseMyRecordsSelection(data);
+  if (myRecordsSelection) {
+    const reply = await askCancel(myRecordsSelection, person, deps);
+    return { answer: "Проверь запись", message: reply.text, ...(reply.keyboard ? { keyboard: reply.keyboard } : {}) };
+  }
+
+  const myRecords = parseMyRecordsCallback(data);
+  if (myRecords) {
+    const res = await handleMyRecordsCallback(myRecords, person, deps);
     return { answer: res.answer, ...(res.message ? { message: res.message } : {}) };
   }
 

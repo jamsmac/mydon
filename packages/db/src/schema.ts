@@ -20,6 +20,7 @@ import {
   date,
   uniqueIndex,
   check,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { CashCategorySummary, RecipeLine } from "@mydon/shared";
 
@@ -1445,6 +1446,27 @@ export const vendingProduct = pgTable("vending_product", {
    * SQL 0066 (пока не применена) или заводить новую миграцию.
    */
   fixedPurchaseQty: integer("fixed_purchase_qty"),
+  /** ИКПУ, 17 цифр. NULL — код не выясняли. CHECK живёт в SQL миграции. */
+  ikpu: text("ikpu"),
+  /** МХИК, 17 цифр. Правило донора (`validate_fiscal`), не проверенная нами норма (R-P6-3). */
+  mxik: text("mxik"),
+  /**
+   * Ставка НДС, целые проценты. Умолчание 12 ПЕРЕНЕСЕНО от донора
+   * (`vat_rate NUMERIC NOT NULL DEFAULT 12`) и НЕ является решением о карточке
+   * (R-P6-8): ноль в Узбекистане записывается ЯВНО, а пустого здесь не бывает.
+   */
+  vatPct: integer("vat_pct").default(12).notNull(),
+  /** EAN: 8, 12 или 13 цифр. NULL — не выясняли. */
+  barcode: text("barcode"),
+  /**
+   * Код ОКЕИ («796» штука). НЕ идентификатор упаковки каталога Multikassa —
+   * те семизначные (`1218841`) и живут в `entity.attrs["упаковка"]` (R-P6-7).
+   * Сложив их в одну колонку, получили бы поле, где два числа значат разное,
+   * а выглядят одинаково.
+   */
+  packageCode: text("package_code").default("796").notNull(),
+  /** Требует маркировки (КИЗ). `false` значит И «не требуется», И «не выясняли» — различить нечем. */
+  marked: boolean("marked").default(false).notNull(),
   isActive: boolean("is_active").default(true).notNull(),
   createdAt: createdAt(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -1635,6 +1657,8 @@ export const vendingStockCount = pgTable(
     /** Кто считал. NULL законен (импорт, безымянный пересчёт), поле — нет. */
     personId: uuid("person_id").references(() => person.id),
     note: text("note"),
+    /** Оригинал, который эта строка сторнирует (R-P6-10). NULL — обычный пересчёт. */
+    reversesId: uuid("reverses_id").references((): AnyPgColumn => vendingStockCount.id),
     createdAt: createdAt(),
   },
   (t) => [
@@ -1648,6 +1672,7 @@ export const vendingStockCount = pgTable(
     // `where dt < cutoff order by dt limit 5000` не годится — ведущая
     // колонка не та, и каждая пачка стоила бы полного скана с сортировкой.
     index("vending_stock_count_dt_idx").on(t.dt),
+    uniqueIndex("vending_stock_count_storno_key").on(t.reversesId).where(sql`${t.source} = 'storno'`),
   ],
 );
 
@@ -1767,13 +1792,18 @@ export const vendingRefill = pgTable(
     source: text("source").default("bot").notNull(),
     note: text("note"),
     createdBy: text("created_by"),
+    /** Оригинал, который эта строка сторнирует (R-P6-10). NULL — обычная заливка. */
+    reversesId: uuid("reverses_id").references((): AnyPgColumn => vendingRefill.id),
     createdAt: createdAt(),
   },
   (t) => [
     index("vending_refill_machine_idx").on(t.machineSerial, desc(t.performedAt)),
     index("vending_refill_person_idx").on(t.personId, desc(t.performedAt)),
     uniqueIndex("vending_refill_client_key").on(t.clientKey),
-    check("vending_refill_qty_positive", sql`${t.qty} > 0`),
+    index("vending_refill_reverses_idx").on(t.reversesId).where(sql`${t.reversesId} is not null`),
+    // CHECK «qty» живёт в SQL миграции 0072, а НЕ здесь: у сторно qty < 0, и
+    // выразить это в drizzle-схеме значило бы выпустить ещё одну миграцию ради
+    // ограничения, которое 0072 уже ставит (та же причина, что у fixedPurchaseQty).
   ],
 );
 
@@ -1862,17 +1892,27 @@ export const vendingPurchaseOrder = pgTable("vending_purchase_order", {
  * арифметика уже посчитана владельцем от руки; здесь снимок статей с
  * подытогами и итоговый остаток — не леджер, одна запись на один поход.
  */
-export const vendingCashSession = pgTable("vending_cash_session", {
-  id: id(),
-  receivedAmount: numeric("received_amount", { precision: 14, scale: 2 }).notNull(),
-  /** Статьи с подытогами: [{name, lines: [{label, qty?, unitPrice?, amount}], subtotal}]. */
-  categories: jsonb("categories").$type<CashCategorySummary[]>().default([]).notNull(),
-  totalSpent: numeric("total_spent", { precision: 14, scale: 2 }).notNull(),
-  /** receivedAmount − totalSpent. Может быть отрицательным — перерасход не скрываем. */
-  remainder: numeric("remainder", { precision: 14, scale: 2 }).notNull(),
-  createdBy: text("created_by"),
-  createdAt: createdAt(),
-});
+export const vendingCashSession = pgTable(
+  "vending_cash_session",
+  {
+    id: id(),
+    receivedAmount: numeric("received_amount", { precision: 14, scale: 2 }).notNull(),
+    /** Статьи с подытогами: [{name, lines: [{label, qty?, unitPrice?, amount}], subtotal}]. */
+    categories: jsonb("categories").$type<CashCategorySummary[]>().default([]).notNull(),
+    totalSpent: numeric("total_spent", { precision: 14, scale: 2 }).notNull(),
+    /** receivedAmount − totalSpent. Может быть отрицательным — перерасход не скрываем. */
+    remainder: numeric("remainder", { precision: 14, scale: 2 }).notNull(),
+    /** Откуда строка: 'own' (поход на базар) | 'storno' (отмена). Колонки не было вовсе. */
+    source: text("source").default("own").notNull(),
+    createdBy: text("created_by"),
+    /** Оригинал, который эта строка сторнирует (R-P6-10). NULL — обычная запись. */
+    reversesId: uuid("reverses_id").references((): AnyPgColumn => vendingCashSession.id),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("vending_cash_session_storno_key").on(t.reversesId).where(sql`${t.source} = 'storno'`),
+  ],
+);
 
 /** Неопознанные имена товаров — на разбор менеджеру (не роняют сбор). */
 export const vendingUnmatched = pgTable("vending_unmatched", {

@@ -12,6 +12,8 @@ import type {
   ParityStreak,
   PriceChangesReport,
   PriceGapReport,
+  ProductFiscal,
+  ProductFiscalPatch,
   PurchasePlan as VendingPlan,
   PurchaseSummary as VendingPurchase,
   ShrinkReport as VendingShrinkageReport,
@@ -218,6 +220,8 @@ export interface VendingProductRow {
   isActive: boolean;
   excludedFromPurchase: boolean;
   fixedPurchaseQty: number | null;
+  /** Фискальный блок карточки снека (П6). Форма — `ProductFiscalForm`. */
+  fiscal: ProductFiscal;
 }
 
 /** Итог правки правил закупа товара (П5a). */
@@ -227,6 +231,12 @@ export interface VendingRulesResult {
   /** Каноническое имя товара (после алиасов). */
   product?: string;
 }
+
+/** Итог правки фискального блока карточки снека (П6). */
+export type VendingFiscalResult =
+  | { ok: true; product: string; readyBefore: boolean; readyAfter: boolean }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "invalid"; errors: string[] };
 
 /** Итог отправки закупа на утверждение владельцу (§5.7). */
 export interface VendingSubmitResult {
@@ -2313,6 +2323,9 @@ export const core = {
     fixedPurchaseQty?: number;
     actor?: string;
   }) => send<VendingRulesResult>("/vending/product-rules", "POST", input),
+  /** Фискальный блок товара: пишет только панель, только по id карточки. */
+  setVendingProductFiscal: (input: { productId: string; actor?: string } & ProductFiscalPatch) =>
+    send<VendingFiscalResult>("/vending/product-fiscal", "POST", input),
   vendingOrders: () => get<VendingOrder[]>("/vending/orders"),
   vendingSyncRuns: () => get<VendingSyncRun[]>("/vending/sync"),
   /** Журнал заливок построчно (по слоту) — источник ленты «Обслуживание» (снек). */

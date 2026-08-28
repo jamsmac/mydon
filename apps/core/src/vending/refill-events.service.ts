@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { and, desc, eq, gte, isNull, lte } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lte, ne } from "drizzle-orm";
 import { event, slotSnapshot, vendingRefill, vendingRefillEvent } from "@mydon/db";
 import {
   deadMachine,
@@ -272,7 +272,14 @@ export class RefillEventsService {
         .select({ id: vendingRefill.id, machineSerial: vendingRefill.machineSerial, performedAt: vendingRefill.performedAt, qty: vendingRefill.qty })
         .from(vendingRefill)
         // Запись могла быть сделана до начала окна снимков — на ширину допуска.
-        .where(gte(vendingRefill.performedAt, new Date(от.getTime() - MATCH_PAD_MS))),
+        // Сторно (П6) сюда не пускаем: отрицательная дельта на времени отмены
+        // иначе перебьёт живую заливку в сопоставлении по близости времени.
+        .where(
+          and(
+            gte(vendingRefill.performedAt, new Date(от.getTime() - MATCH_PAD_MS)),
+            ne(vendingRefill.source, "storno"),
+          ),
+        ),
       // Шире окна снимков РОВНО на допуск сопоставления: запись оператора
       // ищется с `от − 3ч`, и событие чуть старше `от`, к которому она уже
       // приклеена, обязано попасть в «занятые». Иначе та же запись подтвердит

@@ -509,8 +509,15 @@
     {
       "idx": 72,
       "version": "7",
-      "when": 1787940829343,
-      "tag": "0072_task_confirmation",
+      "when": 1787766398303,
+      "tag": "0072_product_fiscal_and_storno",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1787948230573,
+      "tag": "0073_task_confirmation",
       "breakpoints": true
     }
   ]

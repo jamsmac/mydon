@@ -66,6 +66,14 @@ describe("config-spec: белый список тумблеров", () => {
     assert.match(validateConfig("REFILL_DETECT_MIN_UNITS", "-1") ?? "", /неотрицательное/);
     assert.match(validateConfig("REFILL_DETECT_MIN_UNITS", "abc") ?? "", /неотрицательное/);
   });
+
+  it("окно самостоятельной отмены: от часа до 30 суток", () => {
+    assert.equal(specFor("SNACK_CANCEL_WINDOW_HOURS")?.fallback, "24");
+    assert.equal(validateConfig("SNACK_CANCEL_WINDOW_HOURS", "1"), null);
+    assert.equal(validateConfig("SNACK_CANCEL_WINDOW_HOURS", "720"), null);
+    assert.match(validateConfig("SNACK_CANCEL_WINDOW_HOURS", "0") ?? "", /от 1 до 720/);
+    assert.match(validateConfig("SNACK_CANCEL_WINDOW_HOURS", "721") ?? "", /от 1 до 720/);
+  });
 });
 
 /**

@@ -7,6 +7,7 @@ import { isCoffeeRefillTrigger, isCoffeeWashTrigger } from "./coffee-refill";
 import { isRefillTrigger } from "./staff-refill";
 import { isCoffeeConsumableTrigger } from "./coffee-returns";
 import { isCoffeeFixTrigger } from "./coffee-fix";
+import { isMyRecordsTrigger } from "./my-records";
 
 /**
  * Меню сотрудника: один реестр и для кнопок, и для текстовых триггеров.
@@ -142,6 +143,10 @@ export const STAFF_MENU: readonly MenuItem[] = [
   // Ряд 7 — редкое.
   { id: "new", label: "🆕 Новая карточка", perm: "registry.propose", ready: true, match: isRegisterTrigger },
   { id: "fix", label: "↩️ Ошибся — исправить", perm: "tasks.own", ready: true, match: isCoffeeFixTrigger },
+  // Отдельный пункт от «Ошибся — исправить»: тот отменяет ПОСЛЕДНЮЮ запись
+  // кофейного контура сразу, этот — выбирает ИЗ СПИСКА снек-записей за
+  // последние 24 ч (заправка/пересчёт/касса) с явным подтверждением (R-P6-3).
+  { id: "mine", label: "✏️ Мои записи", perm: "tasks.own", ready: true, match: isMyRecordsTrigger },
   // «🧾», не «📋» и не «✅»: первый занят «Мои задачи», второй — кнопкой
   // «Выполнил» — то же правило значков, что у «🧮» и «🍫».
   {

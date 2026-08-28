@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { and, eq, gte, lt } from "drizzle-orm";
+import { and, eq, gte, lt, ne } from "drizzle-orm";
 import { vendingPurchaseOrder, vendingRefill, vendingRefillEvent, vendingStockCount } from "@mydon/db";
 import {
   dayNumber,
@@ -528,7 +528,15 @@ export class WeeklyDigestService {
       this.db
         .select({ qty: vendingRefill.qty })
         .from(vendingRefill)
-        .where(and(gte(vendingRefill.performedAt, начало), lt(vendingRefill.performedAt, конец))),
+        // Сторно (П6): висит на времени отмены, а не заливки — без фильтра
+        // попадёт в чужую неделю и исказит недельный счётчик заливок.
+        .where(
+          and(
+            gte(vendingRefill.performedAt, начало),
+            lt(vendingRefill.performedAt, конец),
+            ne(vendingRefill.source, "storno"),
+          ),
+        ),
       this.db
         .select({ positions: vendingPurchaseOrder.positions })
         .from(vendingPurchaseOrder)

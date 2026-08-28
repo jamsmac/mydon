@@ -28,3 +28,33 @@ Task 7: DONE at d769d46 — bot 746/746, cc 240/240 (5 новых в awaiting-bl
 core 1310/1310, typecheck 17/17, lint 17/17, live scratch-Postgres:
 tools/smoke-panel.mjs 29/29 страниц (оба шага /tasks зелёные).
 Продолжаю с Task 8 (последняя).
+
+## Мерж origin/main (29.08, после мержа П6 #219)
+
+`git merge origin/main` — 6 конфликтов: apps/bot/src/menu.ts (два независимых
+пункта меню — оставлены оба), apps/core/src/registry/actions.service.test.ts
+(две независимые группы тестов — объединены), apps/core/src/system/config-spec.ts
+(два независимых блока тумблеров — оставлены оба), packages/db/src/migrations.test.ts
+(add/add — обе ветки завели один и тот же файл-сторож независимо; взял версию
+origin/main — она строже: проверяет обе стороны файл↔журнал и padStart номера).
+
+**Коллизия номера миграции:** обе ветки заняли 0072 (`0072_product_fiscal_and_storno`
+у П6, уже смерженного в origin/main, и `0072_task_confirmation` у П7). Как и
+предупреждал план (Выкатка п.2): переименовал файл П7 в `0073_task_confirmation.sql`.
+Снапшот и запись журнала НЕ писал руками — прогнал `pnpm --filter @mydon/db
+db:generate` от P6-baseline (временно откатив journal до idx 72), сверил
+автосгенерированный SQL с моим рукописным: набор колонок/индексов совпал
+буквально, но автогенератор потерял BACKFILL UPDATE (`assign_notified_at =
+created_at` для старых назначенных задач) и `IF NOT EXISTS` — то, что
+`docs/DEPLOY.md` прямо требует проверять после выката. Оставил свой SQL,
+взял только корректный снапшот/journal-запись автогенератора (`prevId` верно
+цепляется к id снапшота П6). Проверено дважды на живом Postgres: полная
+цепочка 0–73 с нуля, и отдельно — бэкфилл на БД с уже существующей
+`owner_ref`-задачей (before: assign_notified_at=NULL, after: = created_at;
+свободная задача осталась NULL; 0 незабэкфилленных строк).
+
+Полный прогон после мержа: lint 17/17, typecheck 17/17, build 21/21, test
+21/21 (shared 811, db 118, connectors 80, assistant 46, documents 5, agents 274,
+bot 777, core 1356, cc 253 — 0 fail). Живой scratch-Postgres: smoke-core.mjs
+46 чтений/19 записей/18 сценариев, smoke-panel.mjs 29/29 страниц — обе ветки
+(сторно П6 + мост/приёмка П7) работают вместе без конфликтов на уровне SQL.

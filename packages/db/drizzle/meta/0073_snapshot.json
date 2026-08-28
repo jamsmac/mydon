@@ -1,6 +1,6 @@
 {
-  "id": "8891d54c-55c5-420a-8a92-491cfba29743",
-  "prevId": "f8c0980a-ba97-4b1f-8dec-3b069866dbb3",
+  "id": "c396d272-2b15-4af1-aee6-59266f9babf6",
+  "prevId": "8891d54c-55c5-420a-8a92-491cfba29743",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -8165,6 +8165,24 @@
           "primaryKey": false,
           "notNull": false
         },
+        "confirmed_at": {
+          "name": "confirmed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "confirmed_by": {
+          "name": "confirmed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "assign_notified_at": {
+          "name": "assign_notified_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "reminded_at": {
           "name": "reminded_at",
           "type": "timestamp with time zone",
@@ -8264,6 +8282,38 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "task_assign_pending_idx": {
+          "name": "task_assign_pending_idx",
+          "columns": [
+            {
+              "expression": "owner_ref",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "assign_notified_at is null and owner_ref is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "task_awaiting_idx": {
+          "name": "task_awaiting_idx",
+          "columns": [
+            {
+              "expression": "completed_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "confirmed_at is null",
           "concurrently": false,
           "method": "btree",
           "with": {}

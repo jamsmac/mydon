@@ -2,9 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { fiscalFlaws, fiscalReady } from "@mydon/shared";
 import type { VendingProductRow } from "../lib/core";
 import { count } from "../lib/format";
 import { saveVendingProductRules } from "../app/vending/actions";
+import { ProductFiscalForm } from "./product-fiscal-form";
 
 /**
  * Лист «Правила закупа» (П5a): блок, исключение из закупки, фикс-количество
@@ -107,6 +109,11 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
                   {p.salePrice === null ? "эталон не задан" : `витрина ${count(p.salePrice)} сум`}
                 </small>
               </div>
+              {fiscalReady(p.fiscal) ? (
+                <span className="pill ok">чек соберётся</span>
+              ) : (
+                <span className="pill bad">дыр: {count(fiscalFlaws(p.fiscal).length)}</span>
+              )}
               {p.excludedFromPurchase && <span className="pill bad">исключён</span>}
               {p.fixedPurchaseQty !== null && <span className="pill">фикс {count(p.fixedPurchaseQty)}</span>}
               {/* Имя товара — в aria-label, а не в подписи: в списке из 48
@@ -124,7 +131,10 @@ export function ProductRulesPanel({ domain, products }: { domain: string; produc
         // ПЕРЕМОНТИРОВАТЬ форму: без key React переиспользует смонтированные
         // неуправляемые input'ы и не переприменяет defaultValue/defaultChecked,
         // и правки сохранились бы под чужим именем товара (ревью, находка 1).
-        <RuleForm key={editingRow.id} domain={domain} row={editingRow} onDone={close} />
+        <div key={editingRow.id}>
+          <RuleForm domain={domain} row={editingRow} onDone={close} />
+          <ProductFiscalForm domain={domain} row={editingRow} onDone={close} />
+        </div>
       )}
       {saved && editingRow === null && <p className="ok-text">{saved}</p>}
       <p className="hint" style={{ marginTop: 8 }}>
