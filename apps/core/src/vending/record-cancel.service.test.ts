@@ -33,12 +33,21 @@ interface StubOptions {
 function stub(opts: StubOptions) {
   const inserted: { table: unknown; row: Record<string, unknown> }[] = [];
   let seq = 0;
+  let lockCalls = 0;
 
-  const end = (rows: Record<string, unknown>[]) => ({
-    then: (resolve: (value: Record<string, unknown>[]) => unknown, reject?: (reason: unknown) => unknown) =>
-      Promise.resolve(rows).then(resolve, reject),
-    limit: async (n: number) => rows.slice(0, n),
-  });
+  const end = (rows: Record<string, unknown>[]) => {
+    const chain = {
+      then: (resolve: (value: Record<string, unknown>[]) => unknown, reject?: (reason: unknown) => unknown) =>
+        Promise.resolve(rows).then(resolve, reject),
+      limit: async (n: number) => rows.slice(0, n),
+      orderBy: () => chain,
+      for: async () => {
+        lockCalls += 1;
+        return rows;
+      },
+    };
+    return chain;
+  };
   const selected = (table: unknown) => {
     if (table === person) return { where: () => end([{ id: AUTHOR.personId, roles: opts.roles ?? [] }]) };
     if (table === systemConfig) {
@@ -84,6 +93,7 @@ function stub(opts: StubOptions) {
       transaction: async (cb: (value: typeof tx) => unknown) => cb(tx),
     } as never,
     rows: (table: unknown) => inserted.filter((item) => item.table === table).map((item) => item.row),
+    lockCallCount: () => lockCalls,
   };
 }
 
@@ -155,6 +165,7 @@ describe("Сторно пересчёта — метка на весь ввод 
     assert.equal(result.ok, true);
     assert.deepEqual(s.rows(vendingStockCount).map((row) => row.qty), ["19.00", "5.00"]);
     assert.equal(s.rows(vendingStock).length, 0);
+    assert.equal(s.lockCallCount(), 1, "весь ввод сериализуется одним стабильным замком группы");
   });
 });
 

@@ -154,18 +154,35 @@ export class RecordCancelService {
         const access = denied(isAdmin, original.personId === actor.personId, original.createdAt, now, hours);
         if (access) return access;
 
+        const groupCondition = and(
+          eq(vendingStockCount.source, "own"),
+          eq(vendingStockCount.countedAt, original.countedAt),
+          original.personId === null
+            ? isNull(vendingStockCount.personId)
+            : eq(vendingStockCount.personId, original.personId),
+        );
+        // У пересчёта несколько строк и отдельный уникальный ключ на каждую.
+        // Без общей блокировки два параллельных запроса могли поделить строки
+        // между собой: оба считались бы «первой» отменой и оба писали событие.
+        // Стабильный минимальный UUID — замок всей группы независимо от того,
+        // по id какой позиции пришёл запрос.
+        const [representative] = await tx
+          .select({ id: vendingStockCount.id })
+          .from(vendingStockCount)
+          .where(groupCondition)
+          .orderBy(vendingStockCount.id)
+          .limit(1);
+        if (!representative) return { ok: false, reason: "not_found" };
+        await tx
+          .select({ id: vendingStockCount.id })
+          .from(vendingStockCount)
+          .where(eq(vendingStockCount.id, representative.id))
+          .for("update");
+
         const group = await tx
           .select()
           .from(vendingStockCount)
-          .where(
-            and(
-              eq(vendingStockCount.source, "own"),
-              eq(vendingStockCount.countedAt, original.countedAt),
-              original.personId === null
-                ? isNull(vendingStockCount.personId)
-                : eq(vendingStockCount.personId, original.personId),
-            ),
-          );
+          .where(groupCondition);
         const created: (typeof vendingStockCount.$inferSelect)[] = [];
         for (const row of group) {
           const [storno] = await tx
