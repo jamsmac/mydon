@@ -1,14 +1,15 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
   auditLog,
   machineCard,
   maintenanceLog,
   maintenancePlan,
+  person,
   task,
   TASK_SOURCE_DAY_PREDICATE,
   taskComment,
 } from "@mydon/db";
-import { machineIsOperational, type Domain } from "@mydon/shared";
+import { can, effectiveRoles, machineIsOperational, type Domain, type Permission } from "@mydon/shared";
 import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL, isNull } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { MaintenanceService, todayInTz } from "../maintenance/maintenance.service";
@@ -66,10 +67,33 @@ export interface WorkloadRow {
  */
 @Injectable()
 export class TasksService {
+  /** Актор с правами: панель ходит от владельца, бот — от карточки сотрудника. */
+  private static readonly ACTOR_PERSON = /^person:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly maintenance: MaintenanceService,
   ) {}
+
+  /**
+   * Проверяет право актора на действие, но не подменяет аутентификацию.
+   * `actorRef` приходит от держателя SERVICE_TOKEN: это защита от промаха и
+   * от доступной вручную кнопки, а не доверие произвольному внешнему клиенту.
+   */
+  private async assertCan(actorRef: string, perm: Permission): Promise<void> {
+    if (actorRef === "owner") return;
+    const denial = "Это может менеджер. Попроси владельца проставить роль.";
+    const match = TasksService.ACTOR_PERSON.exec(actorRef);
+    if (!match) throw new ForbiddenException(denial);
+    const [actor] = await this.db
+      .select({ roles: person.roles, role: person.role, active: person.active })
+      .from(person)
+      .where(eq(person.id, match[1]!))
+      .limit(1);
+    if (!actor || actor.active !== "yes" || !can(effectiveRoles(actor), perm)) {
+      throw new ForbiddenException(denial);
+    }
+  }
 
   /** Создание вместе с записью в журнал — одной транзакцией. */
   async create(input: CreateTaskInput, actorRef = "system"): Promise<TaskRow> {
@@ -323,6 +347,14 @@ export class TasksService {
 
     if (Object.keys(set).length === 0) return this.byId(id);
 
+    // Право назначения требуется только при реальной смене исполнителя:
+    // правка срока, текста или повторная отправка того же ownerRef не должны
+    // запираться за менеджерской ролью.
+    const before = await this.byId(id);
+    if (set.ownerRef !== undefined && set.ownerRef !== before.ownerRef) {
+      await this.assertCan(actorRef, "tasks.assign");
+    }
+
     return this.db.transaction(async (tx) => {
       const [updated] = await tx.update(task).set(set).where(eq(task.id, id)).returning();
       if (!updated) throw new NotFoundException(`Задача ${id} не найдена`);
@@ -518,6 +550,7 @@ export class TasksService {
    * отмечается делом, а не забытым флажком.
    */
   async rate(id: string, quality: "excellent" | "accepted" | "redo", actorRef = "owner"): Promise<TaskRow> {
+    await this.assertCan(actorRef, "tasks.confirm");
     return this.db.transaction(async (tx) => {
       const [row] = await tx.select().from(task).where(eq(task.id, id));
       if (!row) throw new NotFoundException(`Задача ${id} не найдена`);

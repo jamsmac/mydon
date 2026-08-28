@@ -130,6 +130,10 @@ export class ClaimTaskDto {
 export class SetQualityDto {
   @IsIn(["excellent", "accepted", "redo"])
   quality!: "excellent" | "accepted" | "redo";
+
+  /** `owner` | `person:<uuid>` — от него зависит право приёмки. */
+  @IsOptional() @IsString() @MaxLength(128)
+  actor?: string;
 }
 
 export class AddCommentDto {
@@ -238,7 +242,7 @@ export class TasksController {
   /** Оценка сделанной задачи. «Переделать» возвращает её в работу. */
   @Post(":id/quality")
   rate(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetQualityDto) {
-    return this.tasks.rate(id, dto.quality);
+    return this.tasks.rate(id, dto.quality, dto.actor ?? "owner");
   }
 
   @Post(":id/redo-notified")

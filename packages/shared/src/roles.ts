@@ -37,6 +37,10 @@ export const ROLE_LABELS: Record<StaffRole, string> = {
  */
 export const PERMISSIONS = [
   "tasks.own", // свои задачи: смотреть, брать, закрывать
+  // Два права П7 (R-P7-3). Ровно два: третье право без третьего сотрудника
+  // стало бы косметикой, и матрица снова начала бы врать.
+  "tasks.assign", // назначать задачи другим и переназначать
+  "tasks.confirm", // принимать выполненное и возвращать в работу
   "maintenance.view", // графики и осмотры
   "parts.replace", // замена узлов
   "coffee.wash", // мойка бункеров и чистка автоматов
@@ -82,6 +86,8 @@ export const ROLE_PERMISSIONS: Record<StaffRole, readonly Permission[]> = {
   storekeeper: ["tasks.own", "stock.intake", "stock.count", "registry.propose"],
   manager: [
     "tasks.own",
+    "tasks.assign",
+    "tasks.confirm",
     "maintenance.view",
     "parts.replace",
     "coffee.wash",
@@ -129,4 +135,32 @@ export function normalizeRoles(input: unknown): StaffRole[] {
 export function rolesLabel(roles: readonly string[] | null | undefined): string {
   const known = normalizeRoles(roles ?? []);
   return known.length > 0 ? known.map((r) => ROLE_LABELS[r]).join(", ") : "роли не заданы";
+}
+
+/**
+ * Легаси-поле `person.role` — свободный текст, которым владельца пометили ДО
+ * появления массива `roles`. На проде (25.08.2026) ролей owner/manager нет ни
+ * у кого, а владелец помечен ровно так: `role='владелец'`. Требовать один
+ * `roles` значило бы не дать право подтверждения НИКОМУ.
+ *
+ * Живёт в общем пакете, а не в боте: по этой карте теперь считает и Core, а
+ * разошедшиеся ответы на вопрос «кто менеджер» дали бы кнопку, которую Core
+ * отвергает 403-м.
+ */
+export const LEGACY_ROLE_MAP: ReadonlyMap<string, StaffRole> = new Map<string, StaffRole>([
+  ["владелец", "owner"],
+  ["собственник", "owner"],
+  ["owner", "owner"],
+  ["менеджер", "manager"],
+  ["manager", "manager"],
+]);
+
+/** Роли карточки: массив `roles` плюс легаси-текст `role`. */
+export function effectiveRoles(p: {
+  roles?: readonly string[] | null;
+  role?: string | null;
+}): StaffRole[] {
+  const known = normalizeRoles(p.roles ?? []);
+  const legacy = LEGACY_ROLE_MAP.get((p.role ?? "").trim().toLowerCase());
+  return legacy && !known.includes(legacy) ? [...known, legacy] : known;
 }

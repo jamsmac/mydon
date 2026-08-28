@@ -365,7 +365,10 @@ describe("Правка полей задачи (edit)", () => {
       insert: () => ({ values: async () => [] }),
       select: () => ({ from: () => ({ where: async () => [] }) }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
     await assert.rejects(() => makeTasks(db).edit("нет", { priority: "high" }), /не найдена/);
   });
 });
@@ -488,5 +491,94 @@ describe("Хук «закрыл задачу ТО → факт в журнале
     const s = makeTasks(stubDb({ updateResult: { id: "t1", status: "done", source: "manual", resultNote: null } }));
     const t = await s.setStatus("t1", "done");
     assert.equal(t.status, "done");
+  });
+});
+
+describe("Права актора на приёмку и назначение (П7, R-P7-12)", () => {
+  const OPERATOR = "22222222-2222-4222-8222-222222222222";
+  const MANAGER = "33333333-3333-4333-8333-333333333333";
+
+  /**
+   * Заглушка прав. `верхние` — очередь ответов на `db.select()` вне
+   * транзакции: `edit()` сначала читает задачу, затем карточку актора.
+   */
+  function правовойStub(верхние: Row[][], задача: Row) {
+    const очередь = [...верхние];
+    const tx = {
+      select: () => ({ from: () => ({ where: async () => [задача] }) }),
+      update: () => ({ set: () => ({ where: () => ({ returning: async () => [задача] }) }) }),
+      insert: () => ({ values: async () => [] }),
+    };
+    return {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => очередь.shift() ?? [] }) }) }),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
+  }
+
+  it("оценка от оператора — 403, и текст объясняет, что чинится ролью", async () => {
+    const db = правовойStub(
+      [[{ id: OPERATOR, roles: ["operator"], role: null, active: "yes" }]],
+      { id: "t1", status: "done", quality: null, resultNote: "готово" },
+    );
+    await assert.rejects(
+      () => makeTasks(db).rate("t1", "redo", `person:${OPERATOR}`),
+      /Это может менеджер/,
+    );
+  });
+
+  it("оценка от менеджера проходит — роль из массива", async () => {
+    const db = правовойStub(
+      [[{ id: MANAGER, roles: ["manager"], role: null, active: "yes" }]],
+      { id: "t1", status: "done", quality: null, resultNote: "готово" },
+    );
+    const t = await makeTasks(db).rate("t1", "accepted", `person:${MANAGER}`);
+    assert.equal(t.id, "t1");
+  });
+
+  it("оценка от владельца проходит без похода в карточку", async () => {
+    const db = правовойStub([], { id: "t1", status: "done", quality: null, resultNote: "готово" });
+    assert.equal((await makeTasks(db).rate("t1", "excellent")).id, "t1");
+  });
+
+  it("уволенный менеджер прав не имеет — карточка осталась, доступ нет", async () => {
+    const db = правовойStub(
+      [[{ id: MANAGER, roles: ["manager"], role: null, active: "no" }]],
+      { id: "t1", status: "done", quality: null, resultNote: "готово" },
+    );
+    await assert.rejects(
+      () => makeTasks(db).rate("t1", "accepted", `person:${MANAGER}`),
+      /Это может менеджер/,
+    );
+  });
+
+  it("актор не в форме `person:<uuid>` отвергается, а не считается владельцем", async () => {
+    const db = правовойStub([], { id: "t1", status: "done", quality: null, resultNote: "г" });
+    await assert.rejects(() => makeTasks(db).rate("t1", "accepted", "менеджер"), /Это может менеджер/);
+  });
+
+  it("правка срока прав назначения не требует, смена исполнителя — требует", async () => {
+    const задача = { id: "t1", ownerKind: "human", ownerRef: OPERATOR, priority: "normal", due: null };
+    const срок = правовойStub([[задача]], задача);
+    const t = await makeTasks(срок).edit(
+      "t1",
+      { due: new Date("2026-08-27T05:00:00Z") },
+      `person:${OPERATOR}`,
+    );
+    assert.equal(t.id, "t1");
+
+    const смена = правовойStub(
+      [[задача], [{ id: OPERATOR, roles: ["operator"], role: null, active: "yes" }]],
+      задача,
+    );
+    await assert.rejects(
+      () => makeTasks(смена).edit("t1", { ownerRef: MANAGER }, `person:${OPERATOR}`),
+      /Это может менеджер/,
+    );
+  });
+
+  it("переназначение на того же человека права не требует — смены нет", async () => {
+    const задача = { id: "t1", ownerKind: "human", ownerRef: OPERATOR, priority: "normal" };
+    const db = правовойStub([[задача]], задача);
+    assert.equal((await makeTasks(db).edit("t1", { ownerRef: OPERATOR }, `person:${OPERATOR}`)).id, "t1");
   });
 });
