@@ -202,6 +202,42 @@ export async function fixCollectionTime(
   let правлено = 0;
   if (opts.apply) {
     await db.transaction(async (tx) => {
+      // Заставы 1–4 выше читали ВНЕ транзакции — между тем чтением и этой
+      // строкой мог успеть закоммититься другой запуск того же скрипта
+      // (двойной клик, повтор в CI, второй терминал): застава 2/3 его бы не
+      // увидела, и оба прогона сдвинули бы одни и те же строки. Advisory-лок
+      // (транзакционный — снимается сам при COMMIT/ROLLBACK, живой сессией
+      // не владеет) не даёт второй транзакции пройти дальше этой строки,
+      // пока первая не закоммитится; затем перечитываем заставы 2/3 УЖЕ
+      // внутри лока — если первый прогон успел вставить событие/аудит, второй
+      // увидит это здесь и откажет, а не сдвинет тот же журнал повторно.
+      const [{ lock }] = await tx.execute<{ lock: boolean }>(
+        sql`select pg_try_advisory_xact_lock(7264110573) as lock`,
+      );
+      if (!lock) {
+        throw new FixTimeRefusal(
+          "другой прогон fix-collection-time уже идёт (advisory-лок занят) — дождись его завершения и проверь event/audit_log, прежде чем повторять.",
+        );
+      }
+      const [{ n: событийВнутри }] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(event)
+        .where(eq(event.type, EVENT_TYPE));
+      if (Number(событийВнутри) > 0) {
+        throw new FixTimeRefusal(
+          `в event уже есть отметка ${EVENT_TYPE} (появилась только что, параллельным прогоном) — повторный сдвиг дал бы +10 часов.`,
+        );
+      }
+      const [{ n: аудитаВнутри }] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(auditLog)
+        .where(eq(auditLog.action, AUDIT_ACTION));
+      if (Number(аудитаВнутри) > 0) {
+        throw new FixTimeRefusal(
+          `в audit_log уже есть запись ${AUDIT_ACTION} (появилась только что, параллельным прогоном) — повторный сдвиг дал бы +10 часов.`,
+        );
+      }
+
       for (const r of множество) {
         const collectedAt = new Date(r.collectedAt.getTime() + TASHKENT_OFFSET_MS);
         const receivedAt = r.receivedAt ? new Date(r.receivedAt.getTime() + TASHKENT_OFFSET_MS) : null;
