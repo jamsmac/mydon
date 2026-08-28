@@ -337,6 +337,17 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.match(n!.text, /owner\/manager/);
     assert.match(n!.text, /неделя 2026-34/);
   });
+
+  it("веер подтверждений без адресатов — немедленная тревога с названием задачи (П7, tasks.no_confirmers)", () => {
+    // Урок П5b N5, тот же класс дефекта: событие без правила уходит в лог
+    // контейнера и владелец о нём не узнает — эмитент лежит в
+    // apps/bot/src/task-confirm.ts (разослатьПодтверждения), правило здесь.
+    const [n] = applyRules(ctx("tasks.no_confirmers", { taskId: "t1", title: "Пополнить Olma" }));
+    assert.equal(n!.urgency, "immediate");
+    assert.match(n!.text, /Пополнить Olma/);
+    assert.match(n!.text, /подтвердить её некому/);
+    assert.match(n!.text, /Менеджер.*Владелец/);
+  });
 });
 
 describe("Правило фискальной готовности (П6)", () => {

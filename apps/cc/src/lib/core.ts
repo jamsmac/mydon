@@ -1160,6 +1160,11 @@ export interface Task {
   /** Оценка владельца после «сделано»: excellent / accepted / redo. */
   quality: "excellent" | "accepted" | "redo" | null;
   completedAt: string | null;
+  /** Кто фактически закрыл: веер приёмки исключает его из адресатов. */
+  closedBy: string | null;
+  confirmedAt: string | null;
+  confirmedBy: string | null;
+  assignNotifiedAt: string | null;
   createdAt: string;
 }
 
@@ -2166,6 +2171,8 @@ export const core = {
   createTask: (input: Record<string, unknown>) => send<Task>("/tasks", "POST", input),
   rateTask: (id: string, quality: "excellent" | "accepted" | "redo") =>
     send<Task>(`/tasks/${id}/quality`, "POST", { quality }),
+  /** Приёмка работы. Панель ходит от владельца — сегодняшнее поведение. */
+  confirmTask: (id: string) => send<Task>(`/tasks/${id}/confirm`, "POST", { actor: "owner" }),
   setTaskStatus: (id: string, input: Record<string, unknown>) =>
     send<Task>(`/tasks/${id}`, "PATCH", input),
   editTask: (id: string, input: Record<string, unknown>) =>

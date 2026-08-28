@@ -267,3 +267,19 @@ describe("Фиксы финального ревью 18.08: живые фраз�
     assert.equal(isCoffeeRefillTrigger("заливка"), true);
   });
 });
+
+describe("Пункт «Ждут подтверждения» (П7, T6)", () => {
+  it("пункт не виден оператору ни кнопкой, ни словом", () => {
+    // Один фильтр на три входа: спрятанный кнопкой, но доступный словом
+    // пункт сделал бы всю модель прав косметикой.
+    assert.equal(menuFor(ALL).some((i) => i.id === "confirm"), false, "у ALL нет manager/owner");
+    assert.equal(matchTrigger2("ждут подтверждения"), null);
+    assert.equal(matchTrigger2("приёмка"), null);
+  });
+
+  it("менеджеру пункт виден и ловится словом", () => {
+    assert.equal(menuFor(["manager"]).some((i) => i.id === "confirm"), true);
+    assert.equal(matchTrigger("подтверждение", ["manager"])?.id, "confirm");
+    assert.equal(matchTrigger("приемка", ["owner"])?.id, "confirm");
+  });
+});

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { dueLabel, groupByUrgency, parseDue, priorityLabel, type TaskLike } from "./tasks";
+import { TASK_STATE_LABELS, dueLabel, groupByUrgency, parseDue, priorityLabel, taskState, type TaskLike } from "./tasks";
 
 // Фиксированный «сейчас»: среда, 29 июля 2026, 12:00 — иначе тесты про
 // «завтра» и дни недели ломались бы в зависимости от дня прогона.
@@ -56,6 +56,27 @@ describe("Срок словами (владелец не воюет с кале�
   it("непонятное — не срок, а не выдуманная дата", () => {
     assert.equal(parseDue("когда-нибудь потом", NOW), null);
     assert.equal(parseDue("", NOW), null);
+  });
+});
+
+describe("Производное состояние задачи (П7, R-P7-6)", () => {
+  it("done с приёмкой становится confirmed, без приёмки остаётся done", () => {
+    assert.equal(taskState({ status: "done", confirmedAt: "2026-08-26T05:00:00.000Z" }), "confirmed");
+    assert.equal(taskState({ status: "done", confirmedAt: null }), "done");
+  });
+
+  it("не подменяет текущее состояние старой отметкой приёмки", () => {
+    assert.equal(taskState({ status: "cancelled", confirmedAt: "2026-08-26T05:00:00.000Z" }), "cancelled");
+    assert.equal(taskState({ status: "in_progress", confirmedAt: null }), "in_progress");
+    assert.equal(taskState({ status: "todo", confirmedAt: null }), "todo");
+    assert.equal(taskState({ status: "unexpected", confirmedAt: null }), "todo");
+  });
+
+  it("у каждого состояния есть русская подпись", () => {
+    for (const state of ["todo", "in_progress", "done", "confirmed", "cancelled"] as const) {
+      assert.ok(TASK_STATE_LABELS[state], `${state} без подписи`);
+    }
+    assert.equal(TASK_STATE_LABELS.confirmed, "Подтверждено");
   });
 });
 

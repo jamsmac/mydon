@@ -494,7 +494,31 @@ const ЧТЕНИЕ = [
   },
   "/coffee/locations",
   "/coffee/placements",
-  "/tasks",
+  {
+    path: "/tasks",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ)) throw new Error("ожидали массив задач");
+      const строка = ответ[0];
+      if (строка) {
+        for (const key of ["confirmedAt", "confirmedBy", "assignNotifiedAt", "closedBy"]) {
+          if (!(key in строка)) throw new Error(`в строке задачи нет ${key}`);
+        }
+      }
+    },
+  },
+  {
+    path: "/tasks?awaiting=1",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ)) throw new Error("ожидали массив ждущих приёмки");
+    },
+  },
+  {
+    // Окно «кому ещё не сказали» (П7): условие исполняется живым Postgres.
+    path: "/tasks/assign-unnotified",
+    проверить: (ответ) => {
+      if (!Array.isArray(ответ)) throw new Error("ожидали массив назначенных без отметки");
+    },
+  },
   "/people",
   "/approvals",
   {
@@ -535,6 +559,8 @@ const ЧТЕНИЕ = [
         // списка контроллера, панель просто не покажет — узнать об этом было
         // бы неоткуда.
         ["STOCK_COUNT_RETENTION_DAYS", "730"],
+        ["TASK_BRIDGE_ENABLED", "1"],
+        ["TASK_BRIDGE_MAX_PER_RUN", "20"],
       ]) {
         const i = карта.get(ключ);
         if (!i) throw new Error(`в /system/config нет ключа ${ключ}`);

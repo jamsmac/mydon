@@ -27,6 +27,12 @@ function task(over: Partial<TaskRow> = {}): TaskRow {
     priority: "normal",
     due: null,
     resultNote: null,
+    quality: null,
+    completedAt: null,
+    closedBy: null,
+    confirmedAt: null,
+    confirmedBy: null,
+    assignNotifiedAt: null,
     entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     ...over,
   };

@@ -365,7 +365,10 @@ describe("Правка полей задачи (edit)", () => {
       insert: () => ({ values: async () => [] }),
       select: () => ({ from: () => ({ where: async () => [] }) }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
     await assert.rejects(() => makeTasks(db).edit("нет", { priority: "high" }), /не найдена/);
   });
 });
@@ -488,5 +491,302 @@ describe("Хук «закрыл задачу ТО → факт в журнале
     const s = makeTasks(stubDb({ updateResult: { id: "t1", status: "done", source: "manual", resultNote: null } }));
     const t = await s.setStatus("t1", "done");
     assert.equal(t.status, "done");
+  });
+});
+
+describe("Права актора на приёмку и назначение (П7, R-P7-12)", () => {
+  const OPERATOR = "22222222-2222-4222-8222-222222222222";
+  const MANAGER = "33333333-3333-4333-8333-333333333333";
+
+  /**
+   * Заглушка прав. `верхние` — очередь ответов на `db.select()` вне
+   * транзакции: `edit()` сначала читает задачу, затем карточку актора.
+   */
+  function правовойStub(верхние: Row[][], задача: Row) {
+    const очередь = [...верхние];
+    const tx = {
+      select: () => ({ from: () => ({ where: async () => [задача] }) }),
+      update: () => ({ set: () => ({ where: () => ({ returning: async () => [задача] }) }) }),
+      insert: () => ({ values: async () => [] }),
+    };
+    return {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => очередь.shift() ?? [] }) }) }),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
+  }
+
+  it("оценка от оператора — 403, и текст объясняет, что чинится ролью", async () => {
+    const db = правовойStub(
+      [[{ id: OPERATOR, roles: ["operator"], role: null, active: "yes" }]],
+      { id: "t1", status: "done", quality: null, resultNote: "готово" },
+    );
+    await assert.rejects(
+      () => makeTasks(db).rate("t1", "redo", `person:${OPERATOR}`),
+      /Это может менеджер/,
+    );
+  });
+
+  it("оценка от менеджера проходит — роль из массива", async () => {
+    const db = правовойStub(
+      [[{ id: MANAGER, roles: ["manager"], role: null, active: "yes" }]],
+      { id: "t1", status: "done", quality: null, resultNote: "готово" },
+    );
+    const t = await makeTasks(db).rate("t1", "accepted", `person:${MANAGER}`);
+    assert.equal(t.id, "t1");
+  });
+
+  it("оценка от владельца проходит без похода в карточку", async () => {
+    const db = правовойStub([], { id: "t1", status: "done", quality: null, resultNote: "готово" });
+    assert.equal((await makeTasks(db).rate("t1", "excellent")).id, "t1");
+  });
+
+  it("уволенный менеджер прав не имеет — карточка осталась, доступ нет", async () => {
+    const db = правовойStub(
+      [[{ id: MANAGER, roles: ["manager"], role: null, active: "no" }]],
+      { id: "t1", status: "done", quality: null, resultNote: "готово" },
+    );
+    await assert.rejects(
+      () => makeTasks(db).rate("t1", "accepted", `person:${MANAGER}`),
+      /Это может менеджер/,
+    );
+  });
+
+  it("актор не в форме `person:<uuid>` отвергается, а не считается владельцем", async () => {
+    const db = правовойStub([], { id: "t1", status: "done", quality: null, resultNote: "г" });
+    await assert.rejects(() => makeTasks(db).rate("t1", "accepted", "менеджер"), /Это может менеджер/);
+  });
+
+  it("правка срока прав назначения не требует, смена исполнителя — требует", async () => {
+    const задача = { id: "t1", ownerKind: "human", ownerRef: OPERATOR, priority: "normal", due: null };
+    const срок = правовойStub([[задача]], задача);
+    const t = await makeTasks(срок).edit(
+      "t1",
+      { due: new Date("2026-08-27T05:00:00Z") },
+      `person:${OPERATOR}`,
+    );
+    assert.equal(t.id, "t1");
+
+    const смена = правовойStub(
+      [[задача], [{ id: OPERATOR, roles: ["operator"], role: null, active: "yes" }]],
+      задача,
+    );
+    await assert.rejects(
+      () => makeTasks(смена).edit("t1", { ownerRef: MANAGER }, `person:${OPERATOR}`),
+      /Это может менеджер/,
+    );
+  });
+
+  it("переназначение на того же человека права не требует — смены нет", async () => {
+    const задача = { id: "t1", ownerKind: "human", ownerRef: OPERATOR, priority: "normal" };
+    const db = правовойStub([[задача]], задача);
+    assert.equal((await makeTasks(db).edit("t1", { ownerRef: OPERATOR }, `person:${OPERATOR}`)).id, "t1");
+  });
+});
+
+describe("Приёмка работы менеджером (П7, R-P7-5/R-P7-6)", () => {
+  const NOW = new Date("2026-08-26T10:00:00+05:00");
+
+  function confirmationDb(row: Row, succeeds = true) {
+    const patches: Row[] = [];
+    const inserted: Row[] = [];
+    const current = { ...row };
+    const selectChain = () => {
+      const result = async () => [current];
+      return Object.assign(result(), { limit: result });
+    };
+    const tx = {
+      select: () => ({ from: () => ({ where: selectChain }) }),
+      update: () => ({
+        set: (patch: Row) => {
+          patches.push(patch);
+          return {
+            where: () => ({
+              returning: async () => {
+                if (!succeeds) return [];
+                Object.assign(current, patch);
+                return [current];
+              },
+            }),
+          };
+        },
+      }),
+      insert: () => ({ values: async (value: Row) => { inserted.push(value); return []; } }),
+    };
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx),
+    } as never;
+    return { db, patches, inserted };
+  }
+
+  it("отказывает для незавершённой задачи", async () => {
+    const { db } = confirmationDb({ id: "t1", status: "todo", quality: null, confirmedAt: null });
+    await assert.rejects(() => makeTasks(db).confirm("t1", "owner", NOW), /только сделанную/);
+  });
+
+  it("не меняет status и ставит accepted только при отсутствии оценки", async () => {
+    const blank = confirmationDb({ id: "t1", title: "Пополнить Olma", ownerRef: "p1", status: "done", quality: null, confirmedAt: null });
+    const accepted = await makeTasks(blank.db).confirm("t1", "owner", NOW);
+    assert.equal(accepted.status, "done");
+    assert.equal("status" in blank.patches[0]!, false);
+    assert.equal(blank.patches[0]!.quality, "accepted");
+    assert.equal(blank.patches[0]!.confirmedAt, NOW);
+
+    const rated = confirmationDb({ id: "t2", title: "Проверить Olma", ownerRef: "p1", status: "done", quality: "excellent", confirmedAt: null });
+    await makeTasks(rated.db).confirm("t2", "owner", NOW);
+    assert.equal("quality" in rated.patches[0]!, false, "excellent нельзя понижать до accepted");
+  });
+
+  it("успех пишет один аудит и одно событие task.confirmed", async () => {
+    const fixture = confirmationDb({ id: "t1", title: "Пополнить Olma", ownerRef: "p1", status: "done", quality: null, confirmedAt: null });
+    await makeTasks(fixture.db).confirm("t1", "owner", NOW);
+    assert.ok(fixture.inserted.some((value) => value.action === "task.confirmed"));
+    const eventRow = fixture.inserted.find((value) => value.type === "task.confirmed");
+    assert.ok(eventRow);
+    assert.equal((eventRow.payload as Row).title, "Пополнить Olma");
+    assert.equal(eventRow.occurredAt, NOW);
+  });
+
+  it("повтор не пишет дубль и возвращает уже принятую строку", async () => {
+    const fixture = confirmationDb({ id: "t1", status: "done", quality: "accepted", confirmedAt: "2026-08-26T04:00:00.000Z" }, false);
+    const result = await makeTasks(fixture.db).confirm("t1", "owner", NOW);
+    assert.equal(result.confirmedAt, "2026-08-26T04:00:00.000Z");
+    assert.deepEqual(fixture.inserted, []);
+  });
+});
+
+describe("Список ждущих подтверждения (П7)", () => {
+  it("ограничен и строится по confirmed_at, старейшее первым", async () => {
+    const conditions: unknown[] = [];
+    let limit = 0;
+    const rows = [
+      { id: "t1", completedAt: "2026-08-20T05:00:00.000Z" },
+      { id: "t2", completedAt: "2026-08-25T05:00:00.000Z" },
+    ];
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: (condition: unknown) => {
+            conditions.push(condition);
+            return { orderBy: () => ({ limit: async (value: number) => { limit = value; return rows; } }) };
+          },
+        }),
+      }),
+    } as never;
+    const result = await makeTasks(db).awaitingConfirmation();
+    assert.deepEqual(result.map((row) => row.id), ["t1", "t2"]);
+    assert.equal(limit, TasksService.AWAITING_LIMIT);
+    const query = new PgDialect().sqlToQuery(conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0]);
+    assert.match(query.sql, /confirmed_at/);
+  });
+});
+
+describe("Отметка «тебе поручили» (П7, R-P7-10)", () => {
+  const PERSON = "11111111-1111-4111-8111-111111111111";
+  const ДРУГОЙ = "22222222-2222-4222-8222-222222222222";
+  const СЕЙЧАС = new Date("2026-08-26T10:00:00+05:00");
+
+  function editDb(existing: Row) {
+    const captured: Row[] = [];
+    const tx = {
+      update: () => ({
+        set: (patch: Row) => {
+          captured.push(patch);
+          return { where: () => ({ returning: async () => [{ ...existing, ...patch }] }) };
+        },
+      }),
+      insert: () => ({ values: async () => [] }),
+    };
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [existing] }) }) }),
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx),
+    } as never;
+    return { db, captured };
+  }
+
+  it("созданное назначение оставляет отметку NULL по умолчанию", async () => {
+    const inserted: Row[] = [];
+    await makeTasks(stubDb({ inserted })).create({ title: "Пополнить Olma", ownerKind: "human", ownerRef: PERSON });
+    assert.equal("assignNotifiedAt" in inserted[0]!, false, "NULL должен дать default схемы");
+  });
+
+  it("«взял сам» гасит пуш", async () => {
+    const patches: Row[] = [];
+    const tx = {
+      update: () => ({
+        set: (patch: Row) => {
+          patches.push(patch);
+          return { where: () => ({ returning: async () => [{ id: "t1", ownerRef: PERSON }] }) };
+        },
+      }),
+      insert: () => ({ values: async () => [] }),
+    };
+    const db = { transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx) } as never;
+    await makeTasks(db).claim("t1", PERSON, СЕЙЧАС);
+    assert.equal(patches[0]!.assignNotifiedAt, СЕЙЧАС);
+  });
+
+  it("возврат в пул возвращает отметку в NULL", async () => {
+    const patches: Row[] = [];
+    const before = { id: "t1", ownerRef: PERSON, status: "in_progress" };
+    const tx = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [before] }) }) }),
+      update: () => ({
+        set: (patch: Row) => {
+          patches.push(patch);
+          return { where: () => ({ returning: async () => [{ ...before, ...patch }] }) };
+        },
+      }),
+      insert: () => ({ values: async () => [] }),
+    };
+    const db = { transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx) } as never;
+    await makeTasks(db).release("t1", PERSON);
+    assert.equal(patches[0]!.assignNotifiedAt, null);
+  });
+
+  it("смена исполнителя сбрасывает отметку, правка срока и тот же исполнитель — нет", async () => {
+    const existing = { id: "t1", ownerKind: "human", ownerRef: PERSON, priority: "normal", due: null };
+    const смена = editDb(existing);
+    await makeTasks(смена.db).edit("t1", { ownerRef: ДРУГОЙ });
+    assert.equal(смена.captured[0]!.assignNotifiedAt, null);
+
+    const срок = editDb(existing);
+    await makeTasks(срок.db).edit("t1", { due: new Date("2026-08-27T05:00:00Z") });
+    assert.equal("assignNotifiedAt" in срок.captured[0]!, false);
+
+    const тотЖе = editDb(existing);
+    await makeTasks(тотЖе.db).edit("t1", { ownerRef: PERSON });
+    assert.equal("assignNotifiedAt" in тотЖе.captured[0]!, false);
+  });
+
+  it("assign-unnotified спрашивает назначенные и незакрытые без отметки", async () => {
+    const conditions: unknown[] = [];
+    let limit = 0;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: (condition: unknown) => {
+            conditions.push(condition);
+            return { limit: async (value: number) => { limit = value; return [{ id: "t1", ownerRef: PERSON }]; } };
+          },
+        }),
+      }),
+    } as never;
+    const rows = await makeTasks(db).assignUnnotified();
+    assert.deepEqual(rows.map((row) => row.id), ["t1"]);
+    assert.equal(limit, 50);
+    const query = new PgDialect().sqlToQuery(conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0]);
+    assert.match(query.sql, /assign_notified_at/);
+    assert.match(query.sql, /owner_ref/);
+    assert.match(query.sql, /status/);
+  });
+
+  it("отметка сохраняет переданный момент", async () => {
+    const patches: Row[] = [];
+    const db = {
+      update: () => ({ set: (patch: Row) => { patches.push(patch); return { where: async () => [] }; } }),
+    } as never;
+    await makeTasks(db).markAssignNotified("t1", СЕЙЧАС);
+    assert.equal(patches[0]!.assignNotifiedAt, СЕЙЧАС);
   });
 });

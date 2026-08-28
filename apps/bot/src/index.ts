@@ -42,6 +42,8 @@ import { handleAfterPhoto } from "./field-work";
 import { summarizeActions } from "./owner-actions";
 import { asStaffMode } from "./as-staff";
 import { InvalidTokenError, TelegramApi, TelegramError, type TgUpdate } from "./telegram";
+import { доставитьНазначения } from "./tasks-push";
+import { разослатьПодтверждения } from "./task-confirm";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
 
@@ -705,10 +707,63 @@ async function main(): Promise<void> {
     }
   }
 
+  /**
+   * «Тебе поручили»: задача назначена — исполнитель должен узнать сразу, а не
+   * в 07:00 дайджестом и не через полчаса напоминанием о сроке.
+   * Сначала доставка, потом отметка; ночью отметка не ставится — пуш ждёт утра.
+   */
+  async function sendAssignNotices(now = new Date()): Promise<void> {
+    await доставитьНазначения(
+      {
+        assignUnnotified: () => deps.core.assignUnnotified(),
+        people: () => deps.core.people(),
+        markAssignNotified: (id) => deps.core.markAssignNotified(id).then(() => undefined),
+        send: async (chat, text, keyboard) => {
+          await tg.sendMessage(chat, text, keyboard);
+        },
+        reportUnreachable: (personId, reason) => reportUnreachable(personId, reason),
+        isUnreachable: (error) => error instanceof TelegramError && error.isUnreachable,
+        reportFailure: (message, error) => console.error(`${message}:`, error),
+      },
+      now,
+    );
+  }
+
+  /** Веер «выполнена — подтвердите»: закрытие не должно ждать дайджеста. */
+  async function sendConfirmRequests(now = new Date()): Promise<void> {
+    await разослатьПодтверждения(
+      {
+        awaitingTasks: () => deps.core.awaitingTasks(),
+        people: () => deps.core.people(),
+        claimNotification: (key) => deps.core.claimNotification(key),
+        recordEvent: (type, payload) => deps.core.recordEvent(type, payload).then(() => undefined),
+        send: async (chat, text, keyboard) => {
+          await tg.sendMessage(chat, text, keyboard);
+        },
+        ownerChats: allowlist,
+        sendOwner: async (chat, text) => {
+          await tg.sendMessage(chat, text);
+        },
+        warn: (message) => console.warn(message),
+      },
+      now,
+    );
+  }
+
   const redoEveryMs = Number(process.env.REDO_NOTIFY_INTERVAL_MS ?? 60_000);
   setInterval(() => {
     void sendRedoNotices().catch((err: unknown) => console.error("Переделки:", err));
   }, redoEveryMs).unref();
+
+  const assignEveryMs = Number(process.env.ASSIGN_NOTIFY_INTERVAL_MS ?? 60_000);
+  setInterval(() => {
+    void sendAssignNotices().catch((err: unknown) => console.error("Назначения:", err));
+  }, assignEveryMs).unref();
+
+  const confirmEveryMs = Number(process.env.CONFIRM_NOTIFY_INTERVAL_MS ?? 60_000);
+  setInterval(() => {
+    void sendConfirmRequests().catch((err: unknown) => console.error("Подтверждения:", err));
+  }, confirmEveryMs).unref();
 
   const remindEveryMs = Number(process.env.REMIND_INTERVAL_MS ?? 30 * 60_000);
   setInterval(() => {
@@ -961,6 +1016,11 @@ ${DECIDED_LABEL[parsed.decision]}`);
           if (!edited) await tg.sendMessage(chatId, res.edit.text, res.edit.keyboard);
         }
         if (res.message) await tg.sendMessage(chatId, res.message, res.keyboard);
+        if (res.recipientNote) {
+          await tg.sendMessage(res.recipientNote.chat, res.recipientNote.text).catch((err: unknown) =>
+            console.error("Исполнитель не получил итог приёмки:", err),
+          );
+        }
         // Владелец узнаёт о сборе сразу — деньги в пути, приём ждёт в панели.
         if (res.ownerNote) {
           for (const ownerChat of allowlist) {

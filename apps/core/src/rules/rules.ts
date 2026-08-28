@@ -361,6 +361,15 @@ export const RULES: Rule[] = [
     urgency: "immediate",
     format: (c) => `⏰ Просрочена задача: ${str(c.payload.title)}`,
   },
+  {
+    id: "tasks.no_confirmers",
+    eventType: "tasks.no_confirmers",
+    urgency: "immediate",
+    format: (c) =>
+      `🟡 Задача «${str(c.payload.title)}» выполнена, но подтвердить её некому: ` +
+      `ни у кого нет роли «Менеджер» или «Владелец» с привязанным Telegram. ` +
+      `Проставь роль в карточке сотрудника.`,
+  },
 
   // ── Кофе-бункеры: проактивный мониторинг (порт monitor-stock донора) ──
   // Как и infra.disk: одно и то же событие, два правила по порогу — тяжёлый

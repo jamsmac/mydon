@@ -1,14 +1,16 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
   auditLog,
+  event,
   machineCard,
   maintenanceLog,
   maintenancePlan,
+  person,
   task,
   TASK_SOURCE_DAY_PREDICATE,
   taskComment,
 } from "@mydon/db";
-import { machineIsOperational, type Domain } from "@mydon/shared";
+import { can, effectiveRoles, machineIsOperational, type Domain, type Permission } from "@mydon/shared";
 import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL, isNull } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { MaintenanceService, todayInTz } from "../maintenance/maintenance.service";
@@ -66,10 +68,36 @@ export interface WorkloadRow {
  */
 @Injectable()
 export class TasksService {
+  /** Максимум строк на экране приёмки. */
+  static readonly AWAITING_LIMIT = 100;
+
+  /** Актор с правами: панель ходит от владельца, бот — от карточки сотрудника. */
+  private static readonly ACTOR_PERSON = /^person:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly maintenance: MaintenanceService,
   ) {}
+
+  /**
+   * Проверяет право актора на действие, но не подменяет аутентификацию.
+   * `actorRef` приходит от держателя SERVICE_TOKEN: это защита от промаха и
+   * от доступной вручную кнопки, а не доверие произвольному внешнему клиенту.
+   */
+  private async assertCan(actorRef: string, perm: Permission): Promise<void> {
+    if (actorRef === "owner") return;
+    const denial = "Это может менеджер. Попроси владельца проставить роль.";
+    const match = TasksService.ACTOR_PERSON.exec(actorRef);
+    if (!match) throw new ForbiddenException(denial);
+    const [actor] = await this.db
+      .select({ roles: person.roles, role: person.role, active: person.active })
+      .from(person)
+      .where(eq(person.id, match[1]!))
+      .limit(1);
+    if (!actor || actor.active !== "yes" || !can(effectiveRoles(actor), perm)) {
+      throw new ForbiddenException(denial);
+    }
+  }
 
   /** Создание вместе с записью в журнал — одной транзакцией. */
   async create(input: CreateTaskInput, actorRef = "system"): Promise<TaskRow> {
@@ -80,6 +108,8 @@ export class TasksService {
       const ownerRef = (input.ownerRef ?? "").trim();
       const [created] = await tx
         .insert(task)
+        // assignNotifiedAt остаётся NULL по умолчанию: если исполнитель задан,
+        // это означает «пуш о назначении ещё положен».
         .values({
           title: input.title,
           description: input.description ?? null,
@@ -323,6 +353,15 @@ export class TasksService {
 
     if (Object.keys(set).length === 0) return this.byId(id);
 
+    // Право назначения требуется только при реальной смене исполнителя:
+    // правка срока, текста или повторная отправка того же ownerRef не должны
+    // запираться за менеджерской ролью.
+    const before = await this.byId(id);
+    if (set.ownerRef !== undefined && set.ownerRef !== before.ownerRef) {
+      await this.assertCan(actorRef, "tasks.assign");
+      set.assignNotifiedAt = null;
+    }
+
     return this.db.transaction(async (tx) => {
       const [updated] = await tx.update(task).set(set).where(eq(task.id, id)).returning();
       if (!updated) throw new NotFoundException(`Задача ${id} не найдена`);
@@ -446,11 +485,12 @@ export class TasksService {
    * внутри самого UPDATE. Проигравший получает null и увидит имя победителя,
    * а не ошибку.
    */
-  async claim(id: string, personId: string): Promise<TaskRow | null> {
+  async claim(id: string, personId: string, now = new Date()): Promise<TaskRow | null> {
     return this.db.transaction(async (tx) => {
       const [claimed] = await tx
         .update(task)
-        .set({ ownerKind: "human", ownerRef: personId })
+        // Человек взял задачу сам — рассказывать ему о собственном действии не надо.
+        .set({ ownerKind: "human", ownerRef: personId, assignNotifiedAt: now })
         .where(and(eq(task.id, id), eq(task.ownerKind, "human"), isNull(task.ownerRef)))
         .returning();
       if (!claimed) return null;
@@ -482,7 +522,11 @@ export class TasksService {
 
       const [freed] = await tx
         .update(task)
-        .set({ ownerRef: null, status: before.status === "in_progress" ? "todo" : before.status })
+        .set({
+          ownerRef: null,
+          status: before.status === "in_progress" ? "todo" : before.status,
+          assignNotifiedAt: null,
+        })
         .where(eq(task.id, id))
         .returning();
 
@@ -496,6 +540,69 @@ export class TasksService {
       });
       return freed;
     });
+  }
+
+  /**
+   * Приёмка сделанной работы менеджером. Статус остаётся `done`: приёмка —
+   * отдельный факт поверх закрытия. Условие в UPDATE делает два одновременных
+   * нажатия идемпотентными на уровне БД.
+   */
+  async confirm(id: string, actorRef: string, now = new Date()): Promise<TaskRow> {
+    await this.assertCan(actorRef, "tasks.confirm");
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx.select().from(task).where(eq(task.id, id)).limit(1);
+      if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
+      if (row.status !== "done") {
+        throw new BadRequestException("Подтвердить можно только сделанную задачу");
+      }
+
+      const patch: Record<string, unknown> = { confirmedAt: now, confirmedBy: actorRef };
+      if (row.quality === null) patch.quality = "accepted";
+
+      const [updated] = await tx
+        .update(task)
+        .set(patch)
+        .where(and(eq(task.id, id), isNull(task.confirmedAt)))
+        .returning();
+      if (!updated) {
+        // В гонке начальный SELECT мог увидеть старую строку. Возвращаем
+        // актуальную принятую запись, но не пишем второй аудит и событие.
+        const [current] = await tx.select().from(task).where(eq(task.id, id)).limit(1);
+        return current ?? row;
+      }
+
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef,
+        action: "task.confirmed",
+        target: id,
+        before: row,
+        after: updated,
+      });
+      await tx.insert(event).values({
+        source: "tasks",
+        type: "task.confirmed",
+        occurredAt: now,
+        payload: {
+          taskId: id,
+          title: updated.title,
+          ownerRef: updated.ownerRef,
+          confirmedBy: actorRef,
+          quality: updated.quality,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /** Сделанные людьми, но ещё не принятые; дольше ожидающие идут первыми. */
+  awaitingConfirmation(limit = TasksService.AWAITING_LIMIT): Promise<TaskRow[]> {
+    return this.db
+      .select()
+      .from(task)
+      .where(and(eq(task.status, "done"), isNull(task.confirmedAt), eq(task.ownerKind, "human")))
+      .orderBy(asc(task.completedAt))
+      .limit(limit);
   }
 
   // ── Переписка по задаче ────────────────────────────────────────────────────
@@ -518,6 +625,7 @@ export class TasksService {
    * отмечается делом, а не забытым флажком.
    */
   async rate(id: string, quality: "excellent" | "accepted" | "redo", actorRef = "owner"): Promise<TaskRow> {
+    await this.assertCan(actorRef, "tasks.confirm");
     return this.db.transaction(async (tx) => {
       const [row] = await tx.select().from(task).where(eq(task.id, id));
       if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
@@ -576,6 +684,34 @@ export class TasksService {
    *  превращаться в «сотрудник так и не узнал». */
   async markRedoNotified(id: string): Promise<void> {
     await this.db.update(task).set({ redoNotifiedAt: new Date() }).where(eq(task.id, id));
+  }
+
+  /**
+   * Кому ещё не сказали, что на него повесили задачу (R-P7-10).
+   *
+   * Зеркало `redoUnnotified`: та же пара «спросить кого — отметить доставку».
+   * Момента здесь нет: в условии нет ни одного временнóго предиката.
+   */
+  assignUnnotified(limit = 50): Promise<TaskRow[]> {
+    return this.db
+      .select()
+      .from(task)
+      .where(
+        and(
+          eq(task.ownerKind, "human"),
+          isNotNull(task.ownerRef),
+          ne(task.status, "done"),
+          ne(task.status, "cancelled"),
+          isNull(task.assignNotifiedAt),
+        ),
+      )
+      .limit(limit);
+  }
+
+  /** Отметка ставится ПОСЛЕ доставки: сбой сети не должен превращаться в
+   *  «сотрудник так и не узнал». */
+  async markAssignNotified(id: string, now = new Date()): Promise<void> {
+    await this.db.update(task).set({ assignNotifiedAt: now }).where(eq(task.id, id));
   }
 
   async addComment(taskId: string, authorRef: string, body: string): Promise<CommentRow> {

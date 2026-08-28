@@ -94,6 +94,15 @@ import {
   taskDoneStepHint,
 } from "./task-done";
 import {
+  CONFIRM_CANCEL,
+  REDO_FLOW,
+  confirmRedoStepHint,
+  formatAwaitingScreen,
+  handleConfirmCallback,
+  handleConfirmRedoReason,
+  parseConfirmCallback,
+} from "./task-confirm";
+import {
   helpText,
   matchMenuLabel,
   matchTrigger,
@@ -382,6 +391,12 @@ ${reply.text}`;
   // Активный визард забирает ввод по шагу (название/факт — текстом, остальное —
   // кнопками и фото). Идёт прежде отчётов и триггеров, иначе визард перебьётся.
   const conv = deps.conversations.get(chatId);
+  if (conv?.flow === REDO_FLOW) {
+    if (conv.step === "reason" && clean.length > 0 && !clean.startsWith("/")) {
+      return { reply: await handleConfirmRedoReason(chatId, clean, person, deps) };
+    }
+    return { reply: { text: confirmRedoStepHint(conv.step) } };
+  }
   if (conv?.flow === "register") {
     if (conv.step === "name" && clean.length > 0 && !clean.startsWith("/")) {
       return { reply: await handleRegisterName(chatId, clean, person, deps) };
@@ -612,6 +627,13 @@ async function startMenuItem(
       return { reply: await startSchedules(chatId, deps) };
     case "mrefill":
       return { reply: await startMachineRefill(chatId, person, deps) };
+    case "confirm": {
+      const [tasks, people] = await Promise.all([
+        deps.core.awaitingTasks(),
+        deps.core.people().catch(() => [] as PersonRow[]),
+      ]);
+      return { reply: formatAwaitingScreen(tasks, new Map(people.map((p) => [p.id, p.name]))) };
+    }
     default:
       // Пункт объявлен ready, но обработчика нет — это ошибка сборки меню,
       // а не сотрудника. Говорим ровно то же, что и про неготовый поток.
@@ -620,14 +642,16 @@ async function startMenuItem(
 }
 
 /** Ответ мастера → ответ обработчика кнопки. Четыре копии этого не нужны. */
-function unwrap(res: { answer: string; message?: StaffReply }): {
+function unwrap(res: { answer: string; message?: StaffReply; recipientNote?: { chat: number; text: string } }): {
   answer: string;
   message?: string;
   keyboard?: StaffReply["keyboard"];
+  recipientNote?: { chat: number; text: string };
 } {
   return {
     answer: res.answer,
     ...(res.message ? { message: res.message.text, keyboard: res.message.keyboard } : {}),
+    ...(res.recipientNote ? { recipientNote: res.recipientNote } : {}),
   };
 }
 
@@ -642,9 +666,24 @@ export async function handleStaffCallback(
   message?: string;
   keyboard?: StaffReply["keyboard"];
   ownerNote?: string;
+  /** Сообщение исполнителю после решения менеджера. */
+  recipientNote?: { chat: number; text: string };
   /** Перерисовать исходное сообщение вместо отправки нового. */
   edit?: { text: string; keyboard?: StaffReply["keyboard"] };
 }> {
+  // Пространство `tc:` — приёмка П7. Старый callback отмены не должен гасить
+  // другой активный мастер, поэтому сначала сверяем, что он ещё наш.
+  if (data === CONFIRM_CANCEL) {
+    const current = deps.conversations.get(chatId);
+    if (current?.flow !== REDO_FLOW) {
+      return { answer: "Кнопка устарела", message: "Эта отмена уже не действует." };
+    }
+    deps.conversations.clear(chatId);
+    return { answer: "Отменил", message: "Ок, задача осталась на рассмотрении." };
+  }
+  const confirm = parseConfirmCallback(data);
+  if (confirm) return unwrap(await handleConfirmCallback(chatId, confirm, person, deps));
+
   // Inline-дубль меню (m:<id>) — тот же обработчик, что у кнопки снизу.
   const menuHit = parseMenuCallback(data);
   if (menuHit) {

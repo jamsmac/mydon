@@ -70,6 +70,13 @@ export interface TaskRow {
   priority: "low" | "normal" | "high" | "urgent";
   due: string | null;
   resultNote: string | null;
+  quality: "excellent" | "accepted" | "redo" | null;
+  completedAt: string | null;
+  /** Кто фактически закрыл: веер приёмки исключает его из адресатов. */
+  closedBy: string | null;
+  confirmedAt: string | null;
+  confirmedBy: string | null;
+  assignNotifiedAt: string | null;
   /** По какому объекту работа: автомат, точка, склад. */
   entityId: string | null;
 }
@@ -855,6 +862,40 @@ export class CoreClient {
   /** Отметка «о переделке сообщили» — ставится ПОСЛЕ фактической отправки. */
   markRedoNotified(id: string): Promise<unknown> {
     return this.request(`/tasks/${id}/redo-notified`, { method: "POST" });
+  }
+
+  /** Задачи, о новом назначении которых исполнителю ещё не сообщили. */
+  assignUnnotified(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks/assign-unnotified");
+  }
+
+  /** Отметка «о назначении сообщили» — только ПОСЛЕ фактической доставки. */
+  markAssignNotified(id: string): Promise<unknown> {
+    return this.request(`/tasks/${id}/assign-notified`, { method: "POST" });
+  }
+
+  /** Сделанные задачи, которые ещё ждут приёмки менеджером. */
+  awaitingTasks(): Promise<TaskRow[]> {
+    return this.request<TaskRow[]>("/tasks?awaiting=1");
+  }
+
+  confirmTask(id: string, actor: string): Promise<TaskRow> {
+    return this.request<TaskRow>(`/tasks/${id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ actor }),
+    });
+  }
+
+  /** Актор обязателен: иначе журнал ошибочно припишет оценку владельцу. */
+  rateTask(
+    id: string,
+    quality: "excellent" | "accepted" | "redo",
+    actor: string,
+  ): Promise<TaskRow> {
+    return this.request<TaskRow>(`/tasks/${id}/quality`, {
+      method: "POST",
+      body: JSON.stringify({ quality, actor }),
+    });
   }
 
   /** Автоматы направления — для клавиатуры инкассации. */

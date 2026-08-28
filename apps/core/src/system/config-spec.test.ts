@@ -223,3 +223,26 @@ describe("resolveEffective: приоритет база > env > дефолт", (
     assert.ok(!all.some((i) => /API_KEY|TOKEN|SECRET|PASSWORD/i.test(i.key)));
   });
 });
+
+describe("Тумблеры моста задач (П7)", () => {
+  it("TASK_BRIDGE_ENABLED — только 0 и 1, по умолчанию включён", () => {
+    assert.equal(validateConfig("TASK_BRIDGE_ENABLED", "0"), null);
+    assert.equal(validateConfig("TASK_BRIDGE_ENABLED", "1"), null);
+    assert.match(validateConfig("TASK_BRIDGE_ENABLED", "да") ?? "", /допустимо/);
+    assert.equal(specFor("TASK_BRIDGE_ENABLED")?.fallback, "1");
+  });
+
+  it("TASK_BRIDGE_MAX_PER_RUN ограничен диапазоном 1..200", () => {
+    assert.match(validateConfig("TASK_BRIDGE_MAX_PER_RUN", "0") ?? "", /от 1 до 200/);
+    assert.match(validateConfig("TASK_BRIDGE_MAX_PER_RUN", "201") ?? "", /от 1 до 200/);
+    assert.equal(validateConfig("TASK_BRIDGE_MAX_PER_RUN", "20"), null);
+    assert.equal(validateConfig("TASK_BRIDGE_MAX_PER_RUN", ""), null);
+    assert.equal(specFor("TASK_BRIDGE_MAX_PER_RUN")?.fallback, "20");
+  });
+
+  it("у обоих тумблеров есть пояснение для владельца", () => {
+    for (const key of ["TASK_BRIDGE_ENABLED", "TASK_BRIDGE_MAX_PER_RUN"]) {
+      assert.ok((specFor(key)?.help ?? "").length > 40, `${key}: help пустой`);
+    }
+  });
+});
