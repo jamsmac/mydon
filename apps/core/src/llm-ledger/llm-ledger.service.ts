@@ -16,6 +16,7 @@ import {
 } from "@mydon/shared";
 import { and, eq, gt, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { resolveConfigValue } from "../system/config-spec";
 import type {
   LlmTokenUsageDto,
   ReleaseLlmDto,
@@ -51,6 +52,12 @@ type SpendRow = typeof llmSpend.$inferSelect;
 interface CapValue {
   nano: bigint;
   error?: string;
+}
+
+export interface LlmAdmissionPolicy {
+  enabled: boolean;
+  reservationCapNano: bigint;
+  denial?: string;
 }
 
 interface Exposure {
@@ -142,6 +149,8 @@ export class LlmLedgerService {
 
       const config = await configMap(tx);
       const globalCap = parseCap(globalCapValue(config, process.env), "глобальный LLM-потолок");
+      const admission = resolveLlmAdmissionPolicy(config, process.env);
+      const requestPolicyDenial = flatOpenAiPriceTierDenial(request);
 
       if (prior) {
         const priorAgent = prior.agentId ? await agentById(tx, prior.agentId) : undefined;
@@ -151,9 +160,42 @@ export class LlmLedgerService {
               `потолок агента ${prior.agentName ?? prior.agentId}`,
             )
           : undefined;
-        const exposure = await readExposure(tx, prior.day, prior.agentId);
-        const snapshot = budget(prior.day, globalCap.nano, exposure, perAgentCap?.nano);
+        const exposureDay = prior.day === day ? prior.day : day;
+        const exposure = await readExposure(tx, exposureDay, prior.agentId);
+        const snapshot = budget(exposureDay, globalCap.nano, exposure, perAgentCap?.nano);
         const currentAction = budgetAction(priorAgent?.budgetOnExceeded);
+        const globalExposureDenial =
+          exposure.global > globalCap.nano
+            ? `Текущая LLM-экспозиция $${nanoToUsd(exposure.global)} выше нового дневного потолка $${nanoToUsd(globalCap.nano)}`
+            : undefined;
+        const agentExposureDenial =
+          perAgentCap && (exposure.agent ?? 0n) > perAgentCap.nano
+            ? `Текущая LLM-экспозиция агента ${prior.agentName ?? prior.agentId} выше нового дневного потолка`
+            : undefined;
+        const currentPolicyDenial =
+          admission.denial ??
+          requestPolicyDenial ??
+          globalCap.error ??
+          perAgentCap?.error ??
+          (prior.day !== day
+            ? `LLM-reserve относится к ташкентским суткам ${prior.day}; повтор в текущих сутках ${day} запрещён`
+            : undefined) ??
+          globalExposureDenial ??
+          agentExposureDenial ??
+          reservationLimitDenial(
+            usdToNano(prior.reservedUsd, "ceil"),
+            admission.reservationCapNano,
+          );
+        if (currentPolicyDenial) {
+          return {
+            allowed: false,
+            status: prior.status,
+            action: currentAction,
+            reason: currentPolicyDenial,
+            replayBlocked: true,
+            budget: snapshot,
+          };
+        }
         if (prior.requestHash !== requestHash) {
           return {
             allowed: false,
@@ -185,6 +227,75 @@ export class LlmLedgerService {
             budget: snapshot,
           };
         }
+        const priceRows = await activeProviderPrices(tx, request.provider, now);
+        const activePriceRow = selectCatalogPrice(priceRows, request.model);
+        if (!activePriceRow) {
+          return {
+            allowed: false,
+            status: prior.status,
+            action: currentAction,
+            reason: `В Core больше нет действующей цены ${request.provider}/${request.model}; replay запрещён`,
+            replayBlocked: true,
+            budget: snapshot,
+          };
+        }
+        const activePrice = snapshotOf(activePriceRow);
+        let storedPrice: LedgerPriceSnapshot;
+        try {
+          storedPrice = parseSnapshot(prior.priceSnapshot);
+        } catch {
+          return {
+            allowed: false,
+            status: prior.status,
+            action: currentAction,
+            reason: "Сохранённый LLM price snapshot повреждён; replay запрещён",
+            replayBlocked: true,
+            budget: snapshot,
+          };
+        }
+        if (
+          prior.priceId !== activePriceRow.id ||
+          hashLedgerPayload(storedPrice) !== hashLedgerPayload(activePrice)
+        ) {
+          return {
+            allowed: false,
+            status: prior.status,
+            action: currentAction,
+            reason: `Действующая цена ${request.provider}/${request.model} изменилась после reserve; replay запрещён`,
+            replayBlocked: true,
+            budget: snapshot,
+          };
+        }
+        let currentRouteReserveNano: bigint;
+        try {
+          currentRouteReserveNano = reserveProviderRouteCostNano(
+            activePrice,
+            priceRows.map(snapshotOf),
+            request,
+          );
+        } catch (error) {
+          return {
+            allowed: false,
+            status: prior.status,
+            action: currentAction,
+            reason:
+              error instanceof Error
+                ? `Действующий LLM-тариф непригоден для replay: ${error.message}`
+                : "Действующий LLM-тариф непригоден для replay",
+            replayBlocked: true,
+            budget: snapshot,
+          };
+        }
+        if (currentRouteReserveNano > usdToNano(prior.reservedUsd, "ceil")) {
+          return {
+            allowed: false,
+            status: prior.status,
+            action: currentAction,
+            reason: `Текущий консервативный reserve $${nanoToUsd(currentRouteReserveNano)} выше сохранённого $${prior.reservedUsd}; replay запрещён`,
+            replayBlocked: true,
+            budget: snapshot,
+          };
+        }
         return allowedResponse(prior, true, snapshot, currentAction);
       }
 
@@ -207,6 +318,8 @@ export class LlmLedgerService {
 
       let reserveNano = 0n;
       let denial =
+        admission.denial ??
+        requestPolicyDenial ??
         globalCap.error ??
         perAgentCap?.error ??
         resolvedAgent.error ??
@@ -222,6 +335,9 @@ export class LlmLedgerService {
         } catch (error) {
           denial = error instanceof Error ? error.message : "Тариф LLM непригоден для резерва";
         }
+      }
+      if (!denial) {
+        denial = reservationLimitDenial(reserveNano, admission.reservationCapNano);
       }
       if (!denial && exposure.global + reserveNano > globalCap.nano) {
         denial = `Дневной LLM-потолок исчерпан: резерв $${nanoToUsd(reserveNano)} не помещается`;
@@ -408,6 +524,48 @@ export class LlmLedgerService {
       return { status: "released", replay: false };
     }
   }
+}
+
+/**
+ * Единый fail-closed policy для всех reserve-потребителей Core.
+ * Значения резолвятся тем же DB > env > fallback правилом, что и UI.
+ */
+export function resolveLlmAdmissionPolicy(
+  config: Record<string, string>,
+  env: Record<string, string | undefined>,
+): LlmAdmissionPolicy {
+  const enabled = resolveConfigValue("LLM_ENABLED", config, env) === "1";
+  const cap = parseCap(
+    resolveConfigValue("LLM_MAX_RESERVATION_USD", config, env),
+    "максимум одного LLM-reserve",
+  );
+  return {
+    enabled,
+    reservationCapNano: cap.nano,
+    ...(!enabled
+      ? { denial: "LLM выключен: LLM_ENABLED должен быть равен 1" }
+      : cap.error
+        ? { denial: cap.error }
+        : {}),
+  };
+}
+
+/** Плоский каталог пока не умеет surcharge всего GPT-5.6 Sol request после 272K input. */
+export function flatOpenAiPriceTierDenial(
+  request: Pick<ReserveLlmDto, "provider" | "model" | "inputTokenCeiling">,
+): string | undefined {
+  return request.provider === "openai" &&
+    request.model === "gpt-5.6-sol" &&
+    request.inputTokenCeiling > 272_000
+    ? "OpenAI gpt-5.6-sol: inputTokenCeiling выше 272000 заблокирован, пока каталог не умеет tier surcharge"
+    : undefined;
+}
+
+/** Равный cap reserve допустим; отклоняем только строгое превышение. */
+export function reservationLimitDenial(reserveNano: bigint, capNano: bigint): string | undefined {
+  return reserveNano > capNano
+    ? `Один LLM-reserve $${nanoToUsd(reserveNano)} превышает потолок $${nanoToUsd(capNano)}`
+    : undefined;
 }
 
 async function lock(tx: Tx, key: string): Promise<void> {

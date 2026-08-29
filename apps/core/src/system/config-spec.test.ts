@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { resolveAll, resolveEffective, specFor, validateConfig } from "./config-spec";
+import {
+  LLM_PROFILE_KEYS,
+  resolveAll,
+  resolveConfigValue,
+  resolveEffective,
+  specFor,
+  validateConfig,
+} from "./config-spec";
 
 describe("config-spec: белый список тумблеров", () => {
   it("ключ вне списка отклоняется (нельзя протащить секрет/произвольный env)", () => {
@@ -25,11 +32,9 @@ describe("config-spec: белый список тумблеров", () => {
     assert.match(validateConfig("AGENT_DAILY_BUDGET_USD", "-1") ?? "", /неотрицательное/);
     assert.equal(validateConfig("LLM_GLOBAL_DAILY_BUDGET_USD", "12.75"), null);
     assert.match(validateConfig("LLM_GLOBAL_DAILY_BUDGET_USD", "-0.01") ?? "", /неотрицательное/);
-    assert.equal(
-      specFor("LLM_GLOBAL_DAILY_BUDGET_USD")?.fallback,
-      undefined,
-      "без своего дефолта ledger может отличить пустое значение и взять legacy-лимит",
-    );
+    assert.equal(specFor("LLM_GLOBAL_DAILY_BUDGET_USD")?.fallback, "10");
+    assert.equal(validateConfig("LLM_MAX_RESERVATION_USD", "3"), null);
+    assert.match(validateConfig("LLM_MAX_RESERVATION_USD", "-0.01") ?? "", /неотрицательное/);
     assert.equal(validateConfig("EMBED_BASE_URL", "http://100.1.2.3:8080"), null);
     assert.match(validateConfig("EMBED_BASE_URL", "ftp://x") ?? "", /URL/);
     assert.equal(validateConfig("LLM_PRICE_PROVIDER_ID", "omniroute-anthropic"), null);
@@ -46,6 +51,61 @@ describe("config-spec: белый список тумблеров", () => {
     assert.match(validateConfig("LLM_PROVIDER", "codex-cli") ?? "", /допустимо/);
     assert.match(validateConfig("LLM_PROVIDER", "gemini-cli") ?? "", /допустимо/);
     assert.match(validateConfig("LLM_PROVIDER", "gpt") ?? "", /допустимо/);
+  });
+
+  it("LLM-профиль экспортирует ровно восемь несекретных полей и безопасные дефолты", () => {
+    assert.deepEqual(LLM_PROFILE_KEYS, [
+      "LLM_ENABLED",
+      "LLM_ROUTE",
+      "LLM_MODEL",
+      "LLM_BASE_URL",
+      "LLM_PRICE_PROVIDER_ID",
+      "LLM_FALLBACK_MODELS",
+      "LLM_GLOBAL_DAILY_BUDGET_USD",
+      "LLM_MAX_RESERVATION_USD",
+    ]);
+    assert.ok(
+      LLM_PROFILE_KEYS.every((key) => specFor(key)),
+      "каждому полю нужна config-spec",
+    );
+    assert.ok(!LLM_PROFILE_KEYS.some((key) => /API_KEY|TOKEN|SECRET|PASSWORD/i.test(key)));
+    assert.deepEqual(
+      LLM_PROFILE_KEYS.map((key) => [key, resolveConfigValue(key, {}, {})]),
+      [
+        ["LLM_ENABLED", "0"],
+        ["LLM_ROUTE", "codex-subscription"],
+        ["LLM_MODEL", "gpt-5.6-sol"],
+        ["LLM_BASE_URL", "https://api.openai.com/v1"],
+        ["LLM_PRICE_PROVIDER_ID", "openai"],
+        ["LLM_FALLBACK_MODELS", ""],
+        ["LLM_GLOBAL_DAILY_BUDGET_USD", "10"],
+        ["LLM_MAX_RESERVATION_USD", "3"],
+      ],
+    );
+  });
+
+  it("LLM_ROUTE принимает только subscription или официальный OpenAI API", () => {
+    assert.equal(validateConfig("LLM_ROUTE", "codex-subscription"), null);
+    assert.equal(validateConfig("LLM_ROUTE", "openai-api"), null);
+    assert.match(validateConfig("LLM_ROUTE", "custom-http") ?? "", /допустимо/);
+    assert.match(validateConfig("LLM_ROUTE", "gpt") ?? "", /допустимо/);
+  });
+
+  it("новый budget default не перекрывает явный legacy budget владельца", () => {
+    assert.equal(
+      resolveConfigValue("LLM_GLOBAL_DAILY_BUDGET_USD", { AGENT_GLOBAL_BUDGET_USD: "5" }, {}),
+      "5",
+    );
+    assert.equal(
+      resolveConfigValue(
+        "LLM_GLOBAL_DAILY_BUDGET_USD",
+        { AGENT_GLOBAL_BUDGET_USD: "5" },
+        { LLM_GLOBAL_DAILY_BUDGET_USD: "10" },
+      ),
+      "10",
+      "явно заданный новый ключ сильнее legacy-группы",
+    );
+    assert.equal(resolveConfigValue("LLM_GLOBAL_DAILY_BUDGET_USD", {}, {}), "10");
   });
 
   it("маршрут вендинга: серийники через запятую, без «c» и без букв (A7)", () => {

@@ -55,11 +55,19 @@ services:
       # Core повторно проверяет потолок атомарно в commit agent outcome.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
       # Единый Core-ledger — единственная денежная граница для всех LLM-клиентов.
-      # Legacy AGENT_GLOBAL_BUDGET_USD остаётся только переходным fallback.
-      # Без default: на существующей установке пустой новый ключ обязан отдать
-      # приоритет legacy-лимиту из system_config, а не тихо заменить его на $5.
+      # Несекретный профиль нужен Core и для UI, и для единого admission policy.
+      # API key намеренно остаётся только у Agents и сюда не передаётся.
+      LLM_ENABLED: ${LLM_ENABLED:-0}
+      LLM_ROUTE: ${LLM_ROUTE:-codex-subscription}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.6-sol}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-openai}
+      LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-}
+      # Пустой новый ключ сохраняет явный legacy cap существующей установки;
+      # при отсутствии обоих Core использует новый fallback $10.
       LLM_GLOBAL_DAILY_BUDGET_USD: ${LLM_GLOBAL_DAILY_BUDGET_USD:-}
-      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-5}
+      LLM_MAX_RESERVATION_USD: ${LLM_MAX_RESERVATION_USD:-3}
+      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-}
       AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
       # Перец для хешей приглашений сотрудников. В БД лежит только хеш кода;
       # без перца 47 бит кода предвычисляются радужной таблицей один раз, и
@@ -182,19 +190,20 @@ services:
       # Учётный снапшот OurVend (П2 поглощения): суточные продажи + остатки.
       # 08:05 — после съёма stock (07:50), чтобы паритет сверял одни сутки.
       OURVEND_ACCOUNTING_CRON: ${OURVEND_ACCOUNTING_CRON:-5 8 * * *}
-      # Мозг агентов (см. docs/AGENTS_ACTIVATION.md). Всё пусто → LLM-путь спит.
-      # Subscription v1 разрешает только Claude CLI с явным OAuth token;
-      # Codex/Gemini fail-closed, пока их auth mode нельзя доказать локально.
+      # Мозг Agents (см. docs/AGENTS_ACTIVATION.md). LLM_ENABLED=0 → путь спит.
+      # Codex subscription видна как предпочтение, но runtime fail-closed.
+      LLM_ENABLED: ${LLM_ENABLED:-0}
+      LLM_ROUTE: ${LLM_ROUTE:-codex-subscription}
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       # Не URL/секрет: exact provider из llm_model_price для денежного профиля.
-      LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-}
+      LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-openai}
       # HTTP считается платным и требует Core-ledger. local допустим только
       # для явно бесплатного локального runtime.
       LLM_HTTP_BILLING_MODE: ${LLM_HTTP_BILLING_MODE:-metered}
-      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.6-sol}
       LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-}
       # Семантическая память (RAG, #6b). Пусто → память спит (дельта-память
       # по сигнатуре остаётся). Держать endpoint только в Tailscale.

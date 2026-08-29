@@ -3,7 +3,8 @@ import { after, before, describe, it } from "node:test";
 import { BadRequestException } from "@nestjs/common";
 import { event, systemConfig } from "@mydon/db";
 import { accountingSource, resetAccountingSourceCache } from "../sales/accounting-source";
-import { SystemService } from "./system.service";
+import { LLM_PROFILE_KEYS } from "./config-spec";
+import { SystemService, validateLlmProfileState } from "./system.service";
 
 /** Стаб БД: select() отдаёт пустой список оверрайдов, insert/delete — no-op. */
 function stubDb(rows: { key: string; value: string }[] = []) {
@@ -26,7 +27,10 @@ describe("SystemService.set(): валидация тумблеров (§ config-
     await assert.rejects(
       () => svc.set("НЕСУЩЕСТВУЮЩИЙ_КЛЮЧ", "x"),
       (err: unknown) => {
-        assert.ok(err instanceof BadRequestException, "должен быть BadRequestException, а не обычный Error");
+        assert.ok(
+          err instanceof BadRequestException,
+          "должен быть BadRequestException, а не обычный Error",
+        );
         return true;
       },
     );
@@ -46,6 +50,191 @@ describe("SystemService.set(): валидация тумблеров (§ config-
     assert.ok(Array.isArray(result));
     assert.ok(result.some((r) => r.key === "AGENT_AUTONOMY_MAX"));
   });
+
+  it("LLM-поле нельзя записать через старый одиночный endpoint", async () => {
+    const svc = new SystemService(stubDb());
+    await assert.rejects(
+      () => svc.set("LLM_ENABLED", "1", "owner"),
+      (err: unknown) =>
+        err instanceof BadRequestException && /llm-profile/.test(String(err.message)),
+    );
+  });
+});
+
+function стендLlmПрофиля(начальные: Record<string, string> = {}) {
+  const карта: Record<string, string> = { ...начальные };
+  const записи: { key: string; value: string; updatedBy: string | null; через: "tx" | "db" }[] = [];
+  const сбросы: { через: "tx" | "db" }[] = [];
+  const замки: { через: "tx" | "db" }[] = [];
+  let транзакций = 0;
+
+  const писатель = (через: "tx" | "db") => ({
+    execute: async () => {
+      замки.push({ через });
+    },
+    select: () => ({
+      from: async () => Object.entries(карта).map(([key, value]) => ({ key, value })),
+    }),
+    insert: (table: unknown) => ({
+      values: (row: { key: string; value: string; updatedBy: string | null }) => {
+        assert.equal(table, systemConfig);
+        return {
+          onConflictDoUpdate: async () => {
+            карта[row.key] = row.value;
+            записи.push({ key: row.key, value: row.value, updatedBy: row.updatedBy, через });
+          },
+        };
+      },
+    }),
+    delete: () => ({
+      where: async () => {
+        сбросы.push({ через });
+      },
+    }),
+  });
+  const db = {
+    ...писатель("db"),
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      транзакций += 1;
+      return fn(писатель("tx"));
+    },
+  } as never;
+  return {
+    svc: new SystemService(db),
+    карта,
+    записи,
+    сбросы,
+    замки,
+    транзакций: () => транзакций,
+  };
+}
+
+async function безLlmEnv(тело: () => Promise<void>): Promise<void> {
+  const было = new Map<string, string | undefined>();
+  for (const key of LLM_PROFILE_KEYS) {
+    было.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  try {
+    await тело();
+  } finally {
+    for (const key of LLM_PROFILE_KEYS) {
+      const value = было.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+describe("SystemService.setLlmProfile(): атомарный несекретный профиль", () => {
+  it("openai-api и enabled пишутся одной транзакцией", async () => {
+    await безLlmEnv(async () => {
+      const { svc, карта, записи, сбросы, замки, транзакций } = стендLlmПрофиля();
+      const result = await svc.setLlmProfile(
+        [
+          { key: "LLM_ENABLED", value: "1" },
+          { key: "LLM_ROUTE", value: "openai-api" },
+          { key: "LLM_MODEL", value: "gpt-5.6-sol" },
+          { key: "LLM_BASE_URL", value: "https://api.openai.com/v1" },
+          { key: "LLM_PRICE_PROVIDER_ID", value: "openai" },
+          { key: "LLM_FALLBACK_MODELS", value: "" },
+          { key: "LLM_GLOBAL_DAILY_BUDGET_USD", value: "10" },
+          { key: "LLM_MAX_RESERVATION_USD", value: "3" },
+        ],
+        "owner:panel",
+      );
+
+      assert.equal(транзакций(), 1);
+      assert.deepEqual(замки, [{ через: "tx" }]);
+      assert.ok(
+        записи.every((row) => row.через === "tx"),
+        "ни одного write мимо tx",
+      );
+      assert.deepEqual(
+        записи.map(({ key, value, updatedBy }) => ({ key, value, updatedBy })),
+        [
+          { key: "LLM_ENABLED", value: "1", updatedBy: "owner:panel" },
+          { key: "LLM_ROUTE", value: "openai-api", updatedBy: "owner:panel" },
+          { key: "LLM_MODEL", value: "gpt-5.6-sol", updatedBy: "owner:panel" },
+          {
+            key: "LLM_BASE_URL",
+            value: "https://api.openai.com/v1",
+            updatedBy: "owner:panel",
+          },
+          { key: "LLM_PRICE_PROVIDER_ID", value: "openai", updatedBy: "owner:panel" },
+          { key: "LLM_GLOBAL_DAILY_BUDGET_USD", value: "10", updatedBy: "owner:panel" },
+          { key: "LLM_MAX_RESERVATION_USD", value: "3", updatedBy: "owner:panel" },
+        ],
+      );
+      assert.deepEqual(сбросы, [{ через: "tx" }], "пустой fallback сбрасывается в той же tx");
+      assert.equal(карта.LLM_ENABLED, "1");
+      assert.deepEqual(
+        result.map((item) => item.key),
+        [...LLM_PROFILE_KEYS],
+      );
+    });
+  });
+
+  it("секреты, чужие ключи и дубликаты отклоняет до транзакции", async () => {
+    await безLlmEnv(async () => {
+      for (const items of [
+        [{ key: "LLM_API_KEY", value: "sk-secret" }],
+        [{ key: "AGENT_DAILY_BUDGET_USD", value: "3" }],
+        [
+          { key: "LLM_MODEL", value: "gpt-5.6-sol" },
+          { key: "LLM_MODEL", value: "gpt-5.6-sol" },
+        ],
+      ]) {
+        const { svc, записи, транзакций } = стендLlmПрофиля();
+        await assert.rejects(() => svc.setLlmProfile(items), BadRequestException);
+        assert.equal(транзакций(), 0);
+        assert.deepEqual(записи, []);
+      }
+    });
+  });
+
+  it("не включает codex-subscription и не пишет половину пачки", async () => {
+    await безLlmEnv(async () => {
+      const { svc, записи, карта } = стендLlmПрофиля();
+      await assert.rejects(
+        () =>
+          svc.setLlmProfile([
+            { key: "LLM_MODEL", value: "gpt-5.6-sol" },
+            { key: "LLM_ENABLED", value: "1" },
+          ]),
+        /codex-subscription/,
+      );
+      assert.deepEqual(записи, []);
+      assert.deepEqual(карта, {});
+    });
+  });
+
+  it("openai-api принимает только exact endpoint и pricing provider", () => {
+    assert.match(
+      validateLlmProfileState(
+        { LLM_ROUTE: "openai-api", LLM_BASE_URL: "https://proxy.invalid/v1" },
+        {},
+      ) ?? "",
+      /exact LLM_BASE_URL/,
+    );
+    assert.match(
+      validateLlmProfileState({ LLM_ROUTE: "openai-api", LLM_PRICE_PROVIDER_ID: "custom" }, {}) ??
+        "",
+      /exact LLM_PRICE_PROVIDER_ID/,
+    );
+    assert.equal(
+      validateLlmProfileState(
+        {
+          LLM_ROUTE: "openai-api",
+          LLM_BASE_URL: "https://api.openai.com/v1",
+          LLM_PRICE_PROVIDER_ID: "openai",
+          LLM_ENABLED: "1",
+        },
+        {},
+      ),
+      null,
+    );
+  });
 });
 
 /**
@@ -60,7 +249,12 @@ describe("SystemService.set(): валидация тумблеров (§ config-
  */
 function стендНастроек(настройки: Record<string, string>) {
   const карта: Record<string, string> = { ...настройки };
-  const события: { type: string; payload: Record<string, unknown>; occurredAt?: Date; через: "tx" | "db" }[] = [];
+  const события: {
+    type: string;
+    payload: Record<string, unknown>;
+    occurredAt?: Date;
+    через: "tx" | "db";
+  }[] = [];
   const записи: { таблица: "system_config" | "event" | "?"; через: "tx" | "db" }[] = [];
 
   const писатель = (через: "tx" | "db") => ({
@@ -76,7 +270,12 @@ function стендНастроек(настройки: Record<string, string>) 
           записи.push({ таблица: "event", через });
           // `occurredAt` копится тоже: событие флипа обязано быть датировано
           // моментом ЗАПИСИ, а не `now()` базы (конвенция ветки).
-          события.push({ type: String(v.type), payload: v.payload ?? {}, occurredAt: v.occurredAt, через });
+          события.push({
+            type: String(v.type),
+            payload: v.payload ?? {},
+            occurredAt: v.occurredAt,
+            через,
+          });
           return Promise.resolve(undefined);
         }
         записи.push({ таблица: t === systemConfig ? "system_config" : "?", через });
@@ -97,7 +296,9 @@ function стендНастроек(настройки: Record<string, string>) 
   });
 
   const db = {
-    select: () => ({ from: async () => Object.entries(карта).map(([key, value]) => ({ key, value })) }),
+    select: () => ({
+      from: async () => Object.entries(карта).map(([key, value]) => ({ key, value })),
+    }),
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(писатель("tx")),
     ...писатель("db"),
   } as never;
@@ -105,7 +306,11 @@ function стендНастроек(настройки: Record<string, string>) 
 }
 
 /** Подменить переменную окружения на время одного теста. */
-async function сПеременной(имя: string, значение: string | undefined, тело: () => Promise<void>): Promise<void> {
+async function сПеременной(
+  имя: string,
+  значение: string | undefined,
+  тело: () => Promise<void>,
+): Promise<void> {
   const было = process.env[имя];
   if (значение === undefined) delete process.env[имя];
   else process.env[имя] = значение;
@@ -138,7 +343,12 @@ describe("Флип источника учёта пишет событие (R-P8
     await svc.set("OURVEND_ACCOUNTING_SOURCE", "own", "owner");
     assert.equal(события.length, 1);
     assert.equal(события[0]!.type, "ourvend.accounting_source_changed");
-    assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", effective: "own", actor: "owner" });
+    assert.deepEqual(события[0]!.payload, {
+      from: "stock",
+      to: "own",
+      effective: "own",
+      actor: "owner",
+    });
     assert.ok(события[0]!.occurredAt instanceof Date, "момент записи — явно, а не now() базы");
   });
 
@@ -177,14 +387,24 @@ describe("Флип источника учёта пишет событие (R-P8
       const { svc, события } = стендНастроек({ OURVEND_ACCOUNTING_SOURCE: "stock" });
       await svc.set("OURVEND_ACCOUNTING_SOURCE", "", "owner");
       assert.equal(события.length, 1);
-      assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", effective: "own", actor: "owner" });
+      assert.deepEqual(события[0]!.payload, {
+        from: "stock",
+        to: "own",
+        effective: "own",
+        actor: "owner",
+      });
     });
   });
 
   it("actor не указан — null, а не выдуманное имя", async () => {
     const { svc, события } = стендНастроек({ OURVEND_ACCOUNTING_SOURCE: "stock" });
     await svc.set("OURVEND_ACCOUNTING_SOURCE", "own");
-    assert.deepEqual(события[0]!.payload, { from: "stock", to: "own", effective: "own", actor: null });
+    assert.deepEqual(события[0]!.payload, {
+      from: "stock",
+      to: "own",
+      effective: "own",
+      actor: null,
+    });
   });
 
   it("БЕЗ ЗЕРКАЛА СОБЫТИЯ НЕТ: действующий источник не менялся (R-FW/final-4)", async () => {
@@ -198,7 +418,11 @@ describe("Флип источника учёта пишет событие (R-P8
       const { svc, события, записи } = стендНастроек({ OURVEND_ACCOUNTING_SOURCE: "own" });
       await svc.set("OURVEND_ACCOUNTING_SOURCE", "stock", "owner");
       assert.equal(события.length, 0, "запись есть, а переключения нет — событию взяться неоткуда");
-      assert.deepEqual(записи, [{ таблица: "system_config", через: "tx" }], "сама настройка при этом сохраняется");
+      assert.deepEqual(
+        записи,
+        [{ таблица: "system_config", через: "tx" }],
+        "сама настройка при этом сохраняется",
+      );
     } finally {
       if (былУрл === undefined) delete process.env.STOCK_DATABASE_URL;
       else process.env.STOCK_DATABASE_URL = былУрл;

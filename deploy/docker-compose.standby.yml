@@ -28,9 +28,19 @@ services:
       OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
       # Та же серверная граница agent actions, что на primary Core.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
-      # Пусто сохраняет переходный fallback на legacy-лимит в system_config.
+      # Несекретный профиль нужен Core и для UI, и для единого admission policy.
+      # API key намеренно остаётся только у Agents и сюда не передаётся.
+      LLM_ENABLED: ${LLM_ENABLED:-0}
+      LLM_ROUTE: ${LLM_ROUTE:-codex-subscription}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.6-sol}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-openai}
+      LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-}
+      # Пустой новый ключ сохраняет явный legacy cap существующей установки;
+      # при отсутствии обоих Core использует новый fallback $10.
       LLM_GLOBAL_DAILY_BUDGET_USD: ${LLM_GLOBAL_DAILY_BUDGET_USD:-}
-      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-5}
+      LLM_MAX_RESERVATION_USD: ${LLM_MAX_RESERVATION_USD:-3}
+      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-}
       AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
       INVITE_PEPPER: ${INVITE_PEPPER:-}
       STAFF_LINK_BY_USERNAME: ${STAFF_LINK_BY_USERNAME:-0}
@@ -148,14 +158,16 @@ services:
       # каждые три часа с machines_ok=0 (24.08.2026).
       CORE_INGEST_TIMEOUT_MS: ${CORE_INGEST_TIMEOUT_MS:-60000}
       OURVEND_ACCOUNTING_CRON: ${OURVEND_ACCOUNTING_CRON:-5 8 * * *}
+      LLM_ENABLED: ${LLM_ENABLED:-0}
+      LLM_ROUTE: ${LLM_ROUTE:-codex-subscription}
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       # Не URL/секрет: exact provider из llm_model_price для денежного профиля.
-      LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-}
+      LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-openai}
       LLM_HTTP_BILLING_MODE: ${LLM_HTTP_BILLING_MODE:-metered}
-      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.6-sol}
       LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-}
       EMBED_BASE_URL: ${EMBED_BASE_URL:-}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
