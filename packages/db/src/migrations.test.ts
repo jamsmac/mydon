@@ -174,4 +174,17 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
     assert.match(sql, /"agent_task_llm_authorization_job_granted_key"/);
     assert.equal((sql.match(/ON DELETE restrict/g) ?? []).length, 5);
   });
+
+  it("0078 сеет bounded GPT-5.6 Sol promo price и не затирает owner override", () => {
+    const sql = readFileSync(path.join(ПАПКА, "0078_openai_gpt_56_sol.sql"), "utf8");
+
+    assert.match(sql, /'openai', 'gpt-5\.6-sol', 'metered', 'tokens'/);
+    assert.match(sql, /4, 20, 0\.4, 5, 5/);
+    assert.match(sql, /'2026-11-22T00:00:00\+00:00'/);
+    assert.match(sql, /WHERE NOT EXISTS/);
+    assert.match(sql, /"valid_from" <= '2026-08-30T00:00:00\+05:00'/);
+    assert.match(sql, /"valid_to" IS NULL OR "valid_to" > '2026-08-30T00:00:00\+05:00'/);
+    assert.doesNotMatch(sql, /ON CONFLICT \("provider", "model"\)/);
+    assert.match(sql, />272K-input tier/);
+  });
 });

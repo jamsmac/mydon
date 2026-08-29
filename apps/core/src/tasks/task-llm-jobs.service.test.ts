@@ -270,9 +270,16 @@ function ensureInput(user = USER) {
   };
 }
 
-function harness(options: { denied?: boolean; spendDay?: string | (() => string) } = {}) {
+function harness(
+  options: {
+    denied?: boolean;
+    reauthorizationDenialReason?: string;
+    spendDay?: string | (() => string);
+  } = {},
+) {
   const state = baseState();
   let reserveCalls = 0;
+  const reserveDtos: Row[] = [];
   const ledger = {
     reserveInTx: async (
       _tx: unknown,
@@ -288,19 +295,28 @@ function harness(options: { denied?: boolean; spendDay?: string | (() => string)
         ? await ledgerOptions.requestKeyForDay(stableDay)
         : String(dto.requestKey);
       dto = { ...dto, requestKey };
+      reserveDtos.push(structuredClone(dto));
+      const deniedNow =
+        options.denied || (options.reauthorizationDenialReason !== undefined && reserveCalls > 1);
       let spend = state.spends.find((row) => row.requestKey === dto.requestKey);
       if (!spend) {
         spend = {
           id: `spend-${state.spends.length + 1}`,
           requestKey: dto.requestKey,
           day: stableDay,
-          status: options.denied ? "denied" : "reserved",
+          status: deniedNow ? "denied" : "reserved",
         };
         state.spends.push(spend);
       }
       const budget = { day: spend.day, globalCapUsd: 5, globalExposureUsd: 0, remainingUsd: 5 };
-      return options.denied
-        ? { allowed: false, status: "denied", action: "pause", reason: "budget", budget }
+      return deniedNow
+        ? {
+            allowed: false,
+            status: spend.status,
+            action: "pause",
+            reason: options.reauthorizationDenialReason ?? "budget",
+            budget,
+          }
         : {
             allowed: true,
             status: "reserved",
@@ -322,16 +338,17 @@ function harness(options: { denied?: boolean; spendDay?: string | (() => string)
     },
   };
   const service = new TaskLlmJobsService(memoryDb(state), ledger as never);
-  return { state, ledger, service, reserveCalls: () => reserveCalls };
+  return { state, ledger, service, reserveCalls: () => reserveCalls, reserveDtos };
 }
 
 describe("durable task LLM job state machine", () => {
   it("ensures one reservation, restores the same dispatch grant and durably replays completion", async () => {
-    const { state, ledger, service } = harness();
+    const { state, ledger, service, reserveCalls, reserveDtos } = harness();
     const ensured = await service.ensure(TASK_ID, ensureInput(), NOW);
     assert.equal(ensured.status, "ready");
     assert.equal(state.jobs.length, 1);
     assert.equal(state.spends.length, 1);
+    assert.equal(reserveCalls(), 1);
 
     const firstClaim = await service.claimDispatch(
       TASK_ID,
@@ -341,6 +358,12 @@ describe("durable task LLM job state machine", () => {
     );
     assert.equal(firstClaim.granted, true);
     assert.equal(firstClaim.replay, false);
+    assert.equal(reserveCalls(), 2, "first ready claim must reauthorize the original spend");
+    assert.deepEqual(
+      reserveDtos[1],
+      reserveDtos[0],
+      "claim must exact-replay the same requestKey and immutable reserve payload",
+    );
     const replayClaim = await service.claimDispatch(
       TASK_ID,
       ensured.jobId,
@@ -354,6 +377,11 @@ describe("durable task LLM job state machine", () => {
     );
     assert.equal(replayClaim.granted, true);
     assert.equal(replayClaim.replay, true);
+    assert.equal(
+      reserveCalls(),
+      2,
+      "dispatching replay must not reauthorize or touch the provider grant",
+    );
     await assert.rejects(
       () =>
         service.claimDispatch(
@@ -398,6 +426,75 @@ describe("durable task LLM job state machine", () => {
         }),
       /another token/,
     );
+  });
+
+  it("blocks the task before provider dispatch when current replay policy denies", async () => {
+    const { state, service, reserveCalls } = harness({
+      reauthorizationDenialReason: "LLM disabled after ensure",
+    });
+    const ensured = await service.ensure(TASK_ID, ensureInput(), NOW);
+    assert.equal(ensured.status, "ready");
+
+    await assert.rejects(
+      () =>
+        service.claimDispatch(
+          TASK_ID,
+          ensured.jobId,
+          {
+            agentName: "coach",
+            runId: RUN_ID,
+            executionAttemptId: ATTEMPT_ID,
+            dispatchToken: TOKEN_A,
+          },
+          NOW,
+        ),
+      /reauthorization denied: LLM disabled after ensure/,
+    );
+
+    assert.equal(reserveCalls(), 2, "claim performs the second ledger reserve before wire grant");
+    assert.equal(
+      state.jobs[0]?.status,
+      "ready",
+      "ready -> dispatching must not happen after denial",
+    );
+    assert.equal(state.jobs[0]?.dispatchCount, 0);
+    assert.equal(state.jobs[0]?.dispatchToken, null);
+    assert.equal(state.task.status, "todo");
+    assert.equal(state.task.agentRunId, null);
+    assert.match(String(state.task.agentExecutionBlockedReason), /LLM disabled after ensure/);
+  });
+
+  it("blocks ready dispatch when the daily cap was lowered below current exposure", async () => {
+    const { state, service, reserveCalls } = harness({
+      reauthorizationDenialReason:
+        "Current LLM exposure $4.000000000 is above the lowered daily cap $3.000000000",
+    });
+    const ensured = await service.ensure(TASK_ID, ensureInput(), NOW);
+    assert.equal(ensured.status, "ready");
+
+    await assert.rejects(
+      () =>
+        service.claimDispatch(
+          TASK_ID,
+          ensured.jobId,
+          {
+            agentName: "coach",
+            runId: RUN_ID,
+            executionAttemptId: ATTEMPT_ID,
+            dispatchToken: TOKEN_A,
+          },
+          NOW,
+        ),
+      /reauthorization denied: Current LLM exposure.*lowered daily cap/,
+    );
+
+    assert.equal(reserveCalls(), 2, "claim replays ledger policy after the cap change");
+    assert.equal(state.jobs[0]?.status, "ready");
+    assert.equal(state.jobs[0]?.dispatchCount, 0);
+    assert.equal(state.jobs[0]?.dispatchToken, null);
+    assert.equal(state.task.status, "todo");
+    assert.equal(state.task.agentRunId, null);
+    assert.match(String(state.task.agentExecutionBlockedReason), /lowered daily cap/);
   });
 
   it("unknown never redispatches but accepts late evidence under the original token", async () => {
@@ -475,7 +572,10 @@ describe("durable task LLM job state machine", () => {
 
       assert.equal(late.status, "succeeded", "late evidence itself remains durable");
       assert.equal(state.task.status, closedStatus, "owner terminal status is authoritative");
-      assert.equal(state.task.agentExecutionBlockedReason, "execution_unknown: awaiting late evidence");
+      assert.equal(
+        state.task.agentExecutionBlockedReason,
+        "execution_unknown: awaiting late evidence",
+      );
     });
   }
 

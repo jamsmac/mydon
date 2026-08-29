@@ -597,6 +597,22 @@ export interface SystemConfigItem {
   effective?: string;
 }
 
+/** Не-секретные поля атомарного LLM-профиля на экране «Система». */
+export type LlmProfileKey =
+  | "LLM_ENABLED"
+  | "LLM_ROUTE"
+  | "LLM_MODEL"
+  | "LLM_BASE_URL"
+  | "LLM_PRICE_PROVIDER_ID"
+  | "LLM_FALLBACK_MODELS"
+  | "LLM_GLOBAL_DAILY_BUDGET_USD"
+  | "LLM_MAX_RESERVATION_USD";
+
+export interface LlmProfileUpdate {
+  items: Array<{ key: LlmProfileKey; value: string }>;
+  updatedBy?: string;
+}
+
 export interface Approval {
   id: string;
   agent: string;
@@ -2466,6 +2482,9 @@ export const core = {
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),
   saveSystemConfig: (input: { key: string; value: string; updatedBy?: string }) =>
     send<SystemConfigItem[]>("/system/config", "PUT", input),
+  /** Один Core-коммит для всего LLM-профиля: частичных настроек не бывает. */
+  saveLlmProfile: (input: LlmProfileUpdate) =>
+    send<SystemConfigItem[]>("/system/config/llm-profile", "PUT", input),
   pendingApprovals: () => get<Approval[]>("/approvals/pending"),
   allApprovals: () => get<Approval[]>("/approvals"),
   audit: (limit = 40) => get<AuditEntry[]>(`/audit?limit=${limit}`),

@@ -1,6 +1,8 @@
 import { core, CoreUnavailable, type SystemConfigItem } from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
+import { LlmSettings } from "../../components/llm-settings";
 import { SystemEditor } from "../../components/system-editor";
+import { genericSystemConfigItems, llmProfileFromSystemConfig } from "../../lib/llm-profile";
 
 export const dynamic = "force-dynamic";
 
@@ -17,28 +19,27 @@ export default async function SystemPage() {
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
+  const llmProfile = llmProfileFromSystemConfig(items);
+  const genericItems = genericSystemConfigItems(items);
 
   return (
     <>
       <div className="page-head">
         <h1>Система · Активация</h1>
         <p>
-          Глобальные тумблеры агентов. Правки перекрывают окружение и действуют без пересборки —
-          агенты подхватывают их при перечитке. Секреты (API-ключи) сюда не входят: они остаются
-          в <code>.env</code>.
+          Не-секретные настройки активации. Правки перекрывают окружение и переживают пересборку.
+          API-ключи остаются только в окружении сервера.
         </p>
       </div>
 
-      <SystemEditor items={items} />
+      <LlmSettings initial={llmProfile} />
 
-      <div className="section-title">Что остаётся на сервере</div>
-      <div className="row" style={{ display: "block" }}>
-        <p className="hint" style={{ margin: 0 }}>
-          Для пути подписки нужно один раз установить и авторизовать CLI (<code>claude</code>/
-          <code>codex</code>/<code>gemini</code>) в контейнере агентов; для памяти — поднять
-          embed-endpoint в Tailscale. Подробности — в <code>docs/AGENTS_ACTIVATION.md</code>.
-        </p>
-      </div>
+      {genericItems.length > 0 && (
+        <>
+          <div className="section-title">Остальные настройки</div>
+          <SystemEditor items={genericItems} />
+        </>
+      )}
     </>
   );
 }

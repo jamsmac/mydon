@@ -622,6 +622,41 @@ a.rowlink:hover { background: var(--surf-2); }
 .err-text { color: var(--err); font-size: 13px; }
 .ok-text { color: var(--ok); font-size: 13px; }
 
+/* Атомарный LLM-профиль: статус готовности не смешан с самими настройками. */
+.llm-card { margin-bottom: 26px; }
+.llm-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.llm-card-head .section-title { margin: 0 0 5px; }
+.llm-summary { margin: 0; color: var(--tx); font-size: 15px; font-weight: 650; }
+.llm-form { gap: 16px; }
+.form .llm-toggle {
+  flex-direction: row; align-items: flex-start; gap: 11px; padding: 12px 13px;
+  border: 1px solid var(--line); border-radius: var(--r-s); background: var(--surf-2);
+}
+.form .llm-toggle input {
+  width: 18px; height: 18px; min-width: 18px; margin: 1px 0 0; padding: 0;
+  accent-color: var(--accent); background: transparent;
+}
+.form .llm-toggle .llm-toggle-copy { display: flex; flex-direction: column; gap: 3px; letter-spacing: normal; text-transform: none; color: var(--tx); }
+.llm-toggle-copy strong { font-size: 14px; }
+.llm-toggle-copy small { color: var(--tx-2); font-size: 12px; line-height: 1.45; }
+.llm-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.llm-budget-copy { margin: -7px 0 0; line-height: 1.5; }
+.llm-readiness { padding: 13px; border: 1px solid var(--line); border-radius: var(--r-s); background: var(--bg); }
+.llm-readiness > b { display: block; margin-bottom: 9px; font-size: 13px; }
+.llm-readiness-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
+.llm-readiness-row .pill { flex: 0 0 auto; }
+.llm-readiness p { margin: 9px 0 0; line-height: 1.5; }
+.llm-advanced { border-top: 1px solid var(--line-soft); padding-top: 12px; }
+.llm-advanced summary { color: var(--tx-2); cursor: pointer; font-size: 13px; font-weight: 600; }
+.llm-advanced[open] summary { margin-bottom: 13px; }
+.llm-advanced > label { margin-top: 12px; }
+.llm-legacy-copy { margin: 10px 0 0; }
+@media (max-width: 420px) {
+  .llm-card-head { flex-direction: column; }
+  .llm-readiness-row { align-items: flex-start; flex-direction: column; }
+  .llm-readiness-row .pill { white-space: normal; overflow-wrap: anywhere; }
+}
+
 .search { display: flex; gap: 9px; margin-bottom: 16px; }
 .search input { flex: 1; height: 42px; background: var(--surf); border: 1px solid var(--line); border-radius: var(--r-s); color: var(--tx); padding: 0 13px; font-size: 14.5px; outline: none; min-width: 0; }
 .search input:focus { border-color: var(--accent); }
@@ -687,6 +722,7 @@ a.rowlink:hover { background: var(--surf-2); }
   .fab-panel { top: 0; left: auto; width: 420px; height: 100%; border-radius: 0; border-top: none; border-left: 1px solid var(--accent-line); }
   .toast { bottom: 96px; }
   .two { display: grid; grid-template-columns: 1.35fr 1fr; gap: 16px; align-items: start; }
+  .llm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 

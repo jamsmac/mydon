@@ -12,6 +12,8 @@ import {
 } from "./model-gateway";
 
 const KEYS = [
+  "LLM_ENABLED",
+  "LLM_ROUTE",
   "LLM_PROVIDER",
   "LLM_MODEL",
   "LLM_FALLBACK_MODELS",
@@ -131,6 +133,38 @@ describe("harnessPreset — CLI dispatch отключён", () => {
 });
 
 describe("HttpModelGateway — metered OpenAI-compatible", () => {
+  it("пинит official OpenAI к Standard tier и current output ceiling", () => {
+    const official = new HttpModelGateway(
+      "https://api.openai.com/v1",
+      "openai",
+      "fixture-key",
+      1000,
+      "metered",
+    );
+    assert.deepEqual(official.buildRequestPayload("gpt-5.6-sol", { prompt: "p", maxTokens: 99 }), {
+      model: "gpt-5.6-sol",
+      messages: [{ role: "user", content: "p" }],
+      max_completion_tokens: 99,
+      service_tier: "default",
+    });
+
+    const compatible = new HttpModelGateway(
+      "https://gateway.invalid/v1",
+      "fixture-provider",
+      "",
+      1000,
+      "metered",
+    );
+    assert.deepEqual(
+      compatible.buildRequestPayload("legacy-model", { prompt: "p", maxTokens: 99 }),
+      {
+        model: "legacy-model",
+        messages: [{ role: "user", content: "p" }],
+        max_tokens: 99,
+      },
+    );
+  });
+
   it("binds endpoint profile to a canonical secret-free base URL hash", () => {
     const plain = new HttpModelGateway("HTTPS://Gateway.Invalid:443/v1", "fixture-provider");
     const slash = new HttpModelGateway("https://gateway.invalid/v1/", "fixture-provider");
@@ -257,6 +291,63 @@ describe("HttpModelGateway — metered OpenAI-compatible", () => {
     assert.equal(result.usage, undefined);
   });
 
+  it("разделяет OpenAI prompt_tokens на uncached и cached input", async () => {
+    const gateway = new HttpModelGateway(
+      "https://api.openai.com/v1",
+      "openai",
+      "fixture-key",
+      1000,
+      "metered",
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "answer" } }],
+            usage: {
+              prompt_tokens: 100,
+              completion_tokens: 7,
+              prompt_tokens_details: { cached_tokens: 40 },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+
+    assert.deepEqual((await gateway.call("gpt-5.6-sol", { prompt: "p" })).usage, {
+      inputTokens: 60,
+      outputTokens: 7,
+      cacheReadInputTokens: 40,
+    });
+  });
+
+  it("отделяет GPT-5.6 cache writes от uncached input", async () => {
+    const gateway = new HttpModelGateway(
+      "https://api.openai.com/v1",
+      "openai",
+      "fixture-key",
+      1000,
+      "metered",
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "answer" } }],
+            usage: {
+              prompt_tokens: 100,
+              completion_tokens: 7,
+              prompt_tokens_details: { cached_tokens: 40, cache_write_tokens: 10 },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+
+    assert.deepEqual((await gateway.call("gpt-5.6-sol", { prompt: "p" })).usage, {
+      inputTokens: 50,
+      outputTokens: 7,
+      cacheReadInputTokens: 40,
+      cacheCreationInputTokens: 10,
+    });
+  });
+
   it("передаёт cache creation 5m/1h breakdown, когда compatible gateway его даёт", async () => {
     const fetchImpl: typeof fetch = async () =>
       new Response(
@@ -337,5 +428,76 @@ describe("HttpModelGateway — metered OpenAI-compatible", () => {
     const local = modelGatewayFromEnv();
     assert.equal(local?.provider, "");
     assert.equal(local?.billingMode, "local");
+  });
+
+  it("панельный LLM_ENABLED=0 гасит даже полностью заданный HTTP-маршрут", () => {
+    process.env.LLM_ENABLED = "0";
+    process.env.LLM_ROUTE = "openai-api";
+    process.env.LLM_BASE_URL = "https://api.openai.com/v1";
+    process.env.LLM_MODEL = "gpt-5.6-sol";
+    process.env.LLM_PRICE_PROVIDER_ID = "openai";
+    process.env.LLM_API_KEY = "secret";
+
+    assert.equal(modelGatewayFromEnv(), null);
+    assert.match(llmPosture(), /LLM_ENABLED=0/);
+  });
+
+  it("предпочтительная Codex subscription остаётся fail-closed", () => {
+    process.env.LLM_ENABLED = "1";
+    process.env.LLM_ROUTE = "codex-subscription";
+
+    assert.throws(() => modelGatewayFromEnv(), /Codex\/ChatGPT subscription.*заблокирована/);
+    assert.match(llmPosture(), /Codex\/ChatGPT subscription.*заблокирована/);
+  });
+
+  it("OpenAI API route не создаёт gateway без серверного ключа", () => {
+    process.env.LLM_ENABLED = "1";
+    process.env.LLM_ROUTE = "openai-api";
+    process.env.LLM_BASE_URL = "https://api.openai.com/v1";
+    process.env.LLM_MODEL = "gpt-5.6-sol";
+    process.env.LLM_PRICE_PROVIDER_ID = "openai";
+
+    assert.throws(() => modelGatewayFromEnv(), /LLM_API_KEY.*заблокирован/);
+    assert.match(llmPosture(), /LLM_API_KEY.*заблокирован/);
+  });
+
+  it("OpenAI API route принимает только exact official endpoint/provider и ключ", () => {
+    process.env.LLM_ENABLED = "1";
+    process.env.LLM_ROUTE = "openai-api";
+    process.env.LLM_BASE_URL = "https://api.openai.com/v1";
+    process.env.LLM_MODEL = "gpt-5.6-sol";
+    process.env.LLM_PRICE_PROVIDER_ID = "openai";
+    process.env.LLM_API_KEY = "server-secret";
+
+    const gateway = modelGatewayFromEnv();
+    assert.equal(gateway?.provider, "openai");
+    assert.equal(gateway?.billingMode, "metered");
+    assert.match(llmPosture(), /price provider=openai/);
+
+    process.env.LLM_BASE_URL = "https://proxy.invalid/v1";
+    assert.throws(() => modelGatewayFromEnv(), /api\.openai\.com/);
+  });
+
+  it("явный openai-api заменяет скрытый legacy LLM_PROVIDER", () => {
+    process.env.LLM_ENABLED = "1";
+    process.env.LLM_ROUTE = "openai-api";
+    process.env.LLM_PROVIDER = "claude-cli";
+    process.env.LLM_BASE_URL = "https://api.openai.com/v1";
+    process.env.LLM_MODEL = "gpt-5.6-sol";
+    process.env.LLM_PRICE_PROVIDER_ID = "openai";
+    process.env.LLM_API_KEY = "server-secret";
+
+    assert.ok(modelGatewayFromEnv() instanceof HttpModelGateway);
+    assert.match(llmPosture(), /price provider=openai/);
+  });
+
+  it("неизвестный явный route не обходит legacy fail-closed режим", () => {
+    process.env.LLM_ROUTE = "custom-http";
+    process.env.LLM_BASE_URL = "https://gateway.invalid/v1";
+    process.env.LLM_MODEL = "custom-model";
+    process.env.LLM_PRICE_PROVIDER_ID = "custom";
+
+    assert.throws(() => modelGatewayFromEnv(), /Неизвестный LLM_ROUTE/);
+    assert.match(llmPosture(), /неизвестный LLM_ROUTE/);
   });
 });

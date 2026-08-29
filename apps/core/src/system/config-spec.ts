@@ -108,6 +108,34 @@ const priceProviderId = (v: string): string | null =>
  */
 export const LLM_PROVIDERS = ["", "claude-cli", "claude-subscription"] as const;
 
+/**
+ * Атомарно редактируемый несекретный LLM-профиль.
+ *
+ * Список — единственный контракт Core для пакетного endpoint: ни API-ключ,
+ * ни legacy CLI/custom-route не могут попасть в него через произвольный key.
+ */
+export const LLM_PROFILE_KEYS = [
+  "LLM_ENABLED",
+  "LLM_ROUTE",
+  "LLM_MODEL",
+  "LLM_BASE_URL",
+  "LLM_PRICE_PROVIDER_ID",
+  "LLM_FALLBACK_MODELS",
+  "LLM_GLOBAL_DAILY_BUDGET_USD",
+  "LLM_MAX_RESERVATION_USD",
+] as const;
+export type LlmProfileKey = (typeof LLM_PROFILE_KEYS)[number];
+
+const LLM_PROFILE_KEY_SET: ReadonlySet<string> = new Set(LLM_PROFILE_KEYS);
+
+export function isLlmProfileKey(key: string): key is LlmProfileKey {
+  return LLM_PROFILE_KEY_SET.has(key);
+}
+
+export const LLM_ROUTES = ["codex-subscription", "openai-api"] as const;
+export const OPENAI_LLM_BASE_URL = "https://api.openai.com/v1";
+export const OPENAI_LLM_PRICE_PROVIDER_ID = "openai";
+
 export const CONFIG_SPECS: ConfigSpec[] = [
   {
     key: "AGENT_AUTONOMY_MAX",
@@ -134,12 +162,69 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     validate: nonNegNumber,
   },
   {
+    key: "LLM_ENABLED",
+    label: "LLM: платные вызовы включены",
+    kind: "bool",
+    fallback: "0",
+    help: "0 — Core отклоняет любой reserve; URL и модель сами по себе вызов не включают.",
+    validate: oneOf(["0", "1"]),
+  },
+  {
+    key: "LLM_ROUTE",
+    label: "LLM: маршрут оплаты",
+    kind: "select",
+    options: [...LLM_ROUTES],
+    fallback: "codex-subscription",
+    help: "Codex subscription пока нельзя включить: runtime не доказывает безопасную subscription-авторизацию.",
+    validate: oneOf([...LLM_ROUTES]),
+  },
+  {
+    key: "LLM_MODEL",
+    label: "LLM: модель",
+    kind: "text",
+    fallback: "gpt-5.6-sol",
+    placeholder: "gpt-5.6-sol",
+    validate: shortText(128),
+  },
+  {
+    key: "LLM_BASE_URL",
+    label: "LLM: HTTP-шлюз",
+    kind: "text",
+    fallback: OPENAI_LLM_BASE_URL,
+    placeholder: OPENAI_LLM_BASE_URL,
+    help: "Профиль openai-api принимает только официальный OpenAI endpoint. API-ключ остаётся только в env.",
+    validate: urlOrEmpty,
+  },
+  {
+    key: "LLM_PRICE_PROVIDER_ID",
+    label: "LLM: pricing provider ID",
+    kind: "text",
+    fallback: OPENAI_LLM_PRICE_PROVIDER_ID,
+    placeholder: OPENAI_LLM_PRICE_PROVIDER_ID,
+    help: "Exact provider route из llm_model_price. Для профиля openai-api значение обязано равняться openai.",
+    validate: priceProviderId,
+  },
+  {
+    key: "LLM_FALLBACK_MODELS",
+    label: "LLM: резервные модели (через запятую)",
+    kind: "text",
+    placeholder: "model-a, model-b",
+    validate: shortText(512),
+  },
+  {
     key: "LLM_GLOBAL_DAILY_BUDGET_USD",
     label: "LLM: единый потолок в день, $",
     kind: "number",
-    help:
-      "Общий потолок Agents, Bot, CC, Documents и embeddings. " +
-      "Пусто — временный фолбэк на AGENT_GLOBAL_BUDGET_USD.",
+    fallback: "10",
+    help: "Общий потолок Agents, Bot, CC, Documents и embeddings. Пусто — сброс к env/legacy/дефолту $10.",
+    validate: nonNegNumber,
+  },
+  {
+    key: "LLM_MAX_RESERVATION_USD",
+    label: "LLM: максимум одного reserve, $",
+    kind: "number",
+    fallback: "3",
+    help: "Серверный потолок одного физического provider call; равный лимиту reserve разрешён.",
     validate: nonNegNumber,
   },
   {
@@ -157,36 +242,6 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     options: [...LLM_PROVIDERS],
     help: "Пусто — LLM-путь спит. Все CLI-варианты пока fail-closed: preflight не доказывает отключённые usage credits до model turn. Для агентов используйте metered HTTP через Core ledger.",
     validate: oneOf([...LLM_PROVIDERS]),
-  },
-  {
-    key: "LLM_BASE_URL",
-    label: "Мозг: HTTP-шлюз (OpenAI-совместимый)",
-    kind: "text",
-    placeholder: "http://100.x.y.z:port",
-    help: "Рабочий LLM-путь агентов. Держать ТОЛЬКО в Tailscale. Не ключ — endpoint.",
-    validate: urlOrEmpty,
-  },
-  {
-    key: "LLM_PRICE_PROVIDER_ID",
-    label: "Мозг: pricing provider ID",
-    kind: "text",
-    placeholder: "например anthropic",
-    help: "Exact provider route из llm_model_price: каталог обязан содержать все SKU, куда gateway может маршрутизировать. Не URL/секрет; без ID вызов заблокирован.",
-    validate: priceProviderId,
-  },
-  {
-    key: "LLM_MODEL",
-    label: "Мозг: модель",
-    kind: "text",
-    placeholder: "например claude-sonnet-4",
-    validate: shortText(128),
-  },
-  {
-    key: "LLM_FALLBACK_MODELS",
-    label: "Мозг: резервные модели (через запятую)",
-    kind: "text",
-    placeholder: "model-a, model-b",
-    validate: shortText(512),
   },
   {
     key: "EMBED_BASE_URL",
@@ -477,12 +532,24 @@ export function resolveEffective(
 ): EffectiveItem {
   const dbVal = (db[spec.key] ?? "").trim();
   const envVal = (env[spec.key] ?? "").trim();
+  // Новый глобальный budget — группа-переименование. Явное старое решение
+  // владельца нельзя молча поднять с $5 до нового default $10 при rollout.
+  // Источник остаётся db/env, но наружу значение едет уже под новым ключом:
+  // первый атомарный save формы тем самым безопасно завершает миграцию.
+  const legacyDbVal =
+    spec.key === "LLM_GLOBAL_DAILY_BUDGET_USD" ? (db.AGENT_GLOBAL_BUDGET_USD ?? "").trim() : "";
+  const legacyEnvVal =
+    spec.key === "LLM_GLOBAL_DAILY_BUDGET_USD" ? (env.AGENT_GLOBAL_BUDGET_USD ?? "").trim() : "";
   const [value, source]: [string, EffectiveItem["source"]] =
     dbVal !== ""
       ? [dbVal, "db"]
       : envVal !== ""
         ? [envVal, "env"]
-        : [spec.fallback ?? "", "default"];
+        : legacyDbVal !== ""
+          ? [legacyDbVal, "db"]
+          : legacyEnvVal !== ""
+            ? [legacyEnvVal, "env"]
+            : [spec.fallback ?? "", "default"];
   return {
     key: spec.key,
     label: spec.label,
@@ -493,6 +560,21 @@ export function resolveEffective(
     value,
     source,
   };
+}
+
+/**
+ * Действующее значение из той же спеки, которую видит панель.
+ * Серверные policy-проверки обязаны использовать его, а не дублировать
+ * дефолты: иначе UI и fail-closed ledger могут решить по-разному.
+ */
+export function resolveConfigValue(
+  key: string,
+  db: Record<string, string>,
+  env: Record<string, string | undefined>,
+): string {
+  const spec = specFor(key);
+  if (!spec) throw new Error(`Неизвестный config key «${key}»`);
+  return resolveEffective(spec, db, env).value;
 }
 
 /** Все тумблеры с действующими значениями — для панели и для оверлея агентов. */

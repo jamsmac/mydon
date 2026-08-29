@@ -8,7 +8,59 @@ import {
   resetAccountingSourceCache,
   resolveAccountingSource,
 } from "../sales/accounting-source";
-import { type EffectiveItem, resolveAll, resolveEffective, specFor, validateConfig } from "./config-spec";
+import {
+  type EffectiveItem,
+  isLlmProfileKey,
+  LLM_PROFILE_KEYS,
+  OPENAI_LLM_BASE_URL,
+  OPENAI_LLM_PRICE_PROVIDER_ID,
+  resolveAll,
+  resolveConfigValue,
+  resolveEffective,
+  specFor,
+  validateConfig,
+} from "./config-spec";
+
+export interface LlmProfileUpdate {
+  key: string;
+  value: string;
+}
+
+const LLM_PROFILE_LOCK_KEY = "system-config:llm-profile";
+
+/**
+ * Межполевая проверка уже разрешённых по отдельности значений.
+ * `openai-api` не даёт форме превратить Core в SSRF-proxy или оторвать
+ * billing catalog от физического endpoint. Subscription остаётся видимым
+ * предпочтительным маршрутом, но fail-closed до отдельного runtime slice.
+ */
+export function validateLlmProfileState(
+  overrides: Record<string, string>,
+  env: Record<string, string | undefined>,
+): string | null {
+  for (const key of LLM_PROFILE_KEYS) {
+    const value = resolveConfigValue(key, overrides, env);
+    const error = validateConfig(key, value);
+    if (error) return `LLM-профиль: ${key}: ${error}`;
+  }
+
+  const enabled = resolveConfigValue("LLM_ENABLED", overrides, env);
+  const route = resolveConfigValue("LLM_ROUTE", overrides, env);
+  if (enabled === "1" && route === "codex-subscription") {
+    return "LLM-маршрут codex-subscription пока нельзя включить: subscription runtime fail-closed";
+  }
+  if (route === "openai-api") {
+    const baseUrl = resolveConfigValue("LLM_BASE_URL", overrides, env);
+    if (baseUrl !== OPENAI_LLM_BASE_URL) {
+      return `LLM-маршрут openai-api требует exact LLM_BASE_URL=${OPENAI_LLM_BASE_URL}`;
+    }
+    const priceProvider = resolveConfigValue("LLM_PRICE_PROVIDER_ID", overrides, env);
+    if (priceProvider !== OPENAI_LLM_PRICE_PROVIDER_ID) {
+      return `LLM-маршрут openai-api требует exact LLM_PRICE_PROVIDER_ID=${OPENAI_LLM_PRICE_PROVIDER_ID}`;
+    }
+  }
+  return null;
+}
 
 /**
  * Глобальные тумблеры системы (активация: мозг/RAG/пауза/бюджет).
@@ -51,11 +103,21 @@ export class SystemService {
    * Пустое значение удаляет запись (сброс к env/дефолту). Возвращает
    * обновлённый список действующих значений.
    */
-  async set(key: string, value: string, updatedBy?: string, now: Date = new Date()): Promise<EffectiveItem[]> {
+  async set(
+    key: string,
+    value: string,
+    updatedBy?: string,
+    now: Date = new Date(),
+  ): Promise<EffectiveItem[]> {
     // BadRequestException — не голый Error: иначе ошибка валидации пользователя
     // уходила клиенту как 500, а не 400 (найдено внешним аудитом, P2).
     const err = validateConfig(key, value);
     if (err) throw new BadRequestException(err);
+    if (isLlmProfileKey(key)) {
+      throw new BadRequestException(
+        "LLM-профиль нельзя менять по одному полю; используйте PUT /system/config/llm-profile",
+      );
+    }
 
     // Действующее значение ДО записи — только для наблюдаемого тумблера.
     // Сравниваем действующее, а не сырой ввод: сброс тумблера (пустая строка)
@@ -126,6 +188,78 @@ export class SystemService {
     // источник (нет зеркала), и держать в кеше прежнее СЛОВО незачем.
     if (наблюдаемый && стало !== было) resetAccountingSourceCache();
     return this.effective();
+  }
+
+  /**
+   * Атомарно записать одну или несколько частей LLM-профиля.
+   * Вся пачка сначала валидируется как будущее effective-состояние и
+   * только потом пишется одной транзакцией: ошибка в одном поле не
+   * оставляет половину нового маршрута в базе.
+   */
+  async setLlmProfile(
+    items: readonly LlmProfileUpdate[],
+    updatedBy?: string,
+    now: Date = new Date(),
+  ): Promise<EffectiveItem[]> {
+    if (items.length === 0) throw new BadRequestException("LLM-профиль: список items пуст");
+
+    const seen = new Set<string>();
+    const normalized = items.map(({ key, value }) => {
+      if (!isLlmProfileKey(key)) {
+        throw new BadRequestException(`Ключ «${key}» не входит в несекретный LLM-профиль`);
+      }
+      if (seen.has(key)) throw new BadRequestException(`LLM-профиль: дублируется ключ «${key}»`);
+      seen.add(key);
+      const error = validateConfig(key, value);
+      if (error) throw new BadRequestException(error);
+      return { key, value: value.trim() };
+    });
+
+    await this.db.transaction(async (tx) => {
+      // Две частичные пачки не должны обе пройти проверку по одному
+      // старому snapshot и сложить в итоге enabled subscription или
+      // openai-api с custom URL. Замок держит read -> validate -> writes одной
+      // линеаризуемой операцией до commit.
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${LLM_PROFILE_LOCK_KEY}, 0))`,
+      );
+      const rows = await tx.select().from(systemConfig);
+      const prospective: Record<string, string> = {};
+      for (const row of rows) prospective[row.key] = row.value;
+      for (const item of normalized) {
+        if (item.value === "") delete prospective[item.key];
+        else prospective[item.key] = item.value;
+      }
+
+      const profileError = validateLlmProfileState(prospective, process.env);
+      if (profileError) throw new BadRequestException(profileError);
+
+      for (const item of normalized) {
+        if (item.value === "") {
+          await tx.delete(systemConfig).where(sql`${systemConfig.key} = ${item.key}`);
+        } else {
+          await tx
+            .insert(systemConfig)
+            .values({
+              key: item.key,
+              value: item.value,
+              updatedBy: updatedBy ?? null,
+              updatedAt: now,
+            })
+            .onConflictDoUpdate({
+              target: systemConfig.key,
+              set: {
+                value: item.value,
+                updatedBy: updatedBy ?? null,
+                updatedAt: now,
+              },
+            });
+        }
+      }
+    });
+
+    const effective = await this.effective();
+    return effective.filter((item) => isLlmProfileKey(item.key));
   }
 
   /** Действующее значение одного тумблера (для сравнения «до/после»). */

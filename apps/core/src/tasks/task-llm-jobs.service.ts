@@ -24,7 +24,7 @@ import {
 import { and, eq } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { LlmLedgerService } from "../llm-ledger/llm-ledger.service";
-import type { SettleLlmDto } from "../llm-ledger/llm-ledger.dto";
+import type { ReserveLlmDto, SettleLlmDto } from "../llm-ledger/llm-ledger.dto";
 import {
   assertBoundedProviderPayload,
   canonicalJsonHash,
@@ -180,25 +180,7 @@ export class TaskLlmJobsService {
         try {
           reservation = await this.ledger.reserveInTx(
             tx,
-            {
-              requestKey,
-              traceKey: `task:${taskId}:execution:${input.executionAttemptId}`,
-              consumer: job.kind === "embedding" ? "embeddings" : "agents",
-              feature: job.feature,
-              agentName: execution.agentName,
-              provider: job.provider,
-              model: job.model,
-              inputTokenCeiling: job.inputTokenCeiling,
-              outputTokenCeiling: job.outputTokenCeiling,
-              metadata: {
-                taskId,
-                executionAttemptId: execution.executionAttemptId,
-                taskLlmJobId: job.id,
-                stepKey: job.stepKey,
-                providerAttemptNo: job.providerAttemptNo,
-                operationHash: job.operationHash,
-              },
-            },
+            this.reservePayload(taskId, execution, job, requestKey),
             {
               requestKeyForDay: async (ledgerDay) => {
                 authorizationDay = ledgerDay;
@@ -401,6 +383,49 @@ export class TaskLlmJobsService {
           };
         }
 
+        // The job lock is already held, so this preserves the global order
+        // task -> execution -> job -> ledger. Fetching requestKey is read-only;
+        // reserveInTx itself acquires provider -> request -> budget locks and
+        // row-locks the spend. A settings change after ensure must therefore
+        // fail closed before the first provider wire leaves this transaction.
+        if (!job.spendId) {
+          return this.blockTask(tx, lockedTask, "Ready LLM job has no ledger spend", now);
+        }
+        const [authorizedSpend] = await tx
+          .select({ requestKey: llmSpend.requestKey })
+          .from(llmSpend)
+          .where(eq(llmSpend.id, job.spendId))
+          .limit(1);
+        if (!authorizedSpend) {
+          return this.blockTask(tx, lockedTask, "Ready LLM job lost its ledger spend", now);
+        }
+        const reauthorization = await this.ledger.reserveInTx(
+          tx,
+          this.reservePayload(taskId, execution, job, authorizedSpend.requestKey),
+        );
+        if (!reauthorization.allowed) {
+          return this.blockTask(
+            tx,
+            lockedTask,
+            `LLM dispatch reauthorization denied: ${reauthorization.reason ?? "current ledger policy rejected the replay"}`,
+            now,
+          );
+        }
+        const replayReservation = reauthorization.reservation;
+        if (
+          !replayReservation ||
+          !replayReservation.replay ||
+          replayReservation.id !== job.spendId ||
+          replayReservation.requestKey !== authorizedSpend.requestKey
+        ) {
+          return this.blockTask(
+            tx,
+            lockedTask,
+            "LLM dispatch reauthorization did not exact-replay the original spend",
+            now,
+          );
+        }
+
         const [dispatching] = await tx
           .update(agentTaskLlmJob)
           .set({
@@ -570,10 +595,7 @@ export class TaskLlmJobsService {
                   eq(task.status, "todo"),
                   eq(task.agentExecutionAttemptId, execution.executionAttemptId),
                   eq(task.agentExecutionBlockedAt, lockedTask.agentExecutionBlockedAt),
-                  eq(
-                    task.agentExecutionBlockedReason,
-                    lockedTask.agentExecutionBlockedReason,
-                  ),
+                  eq(task.agentExecutionBlockedReason, lockedTask.agentExecutionBlockedReason),
                 ),
               );
           }
@@ -789,6 +811,34 @@ export class TaskLlmJobsService {
       endpointProfile: input.endpointProfile.trim(),
       requestPayload,
     });
+  }
+
+  /** One canonical payload for initial authorization and pre-wire reauthorization. */
+  private reservePayload(
+    taskId: string,
+    execution: ExecutionRow,
+    job: JobRow,
+    requestKey: string,
+  ): ReserveLlmDto {
+    return {
+      requestKey,
+      traceKey: `task:${taskId}:execution:${execution.executionAttemptId}`,
+      consumer: job.kind === "embedding" ? "embeddings" : "agents",
+      feature: job.feature,
+      agentName: execution.agentName,
+      provider: job.provider,
+      model: job.model,
+      inputTokenCeiling: job.inputTokenCeiling,
+      outputTokenCeiling: job.outputTokenCeiling,
+      metadata: {
+        taskId,
+        executionAttemptId: execution.executionAttemptId,
+        taskLlmJobId: job.id,
+        stepKey: job.stepKey,
+        providerAttemptNo: job.providerAttemptNo,
+        operationHash: job.operationHash,
+      },
+    };
   }
 
   private jobMismatch(

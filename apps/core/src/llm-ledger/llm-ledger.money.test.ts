@@ -253,6 +253,7 @@ describe("LLM-ledger: idempotency и лимиты", () => {
       agentCapValue(null, { AGENT_DAILY_BUDGET_USD: "2" }, { AGENT_DAILY_BUDGET_USD: "3" }),
       "2",
     );
+    assert.equal(globalCapValue({}, {}), "10", "новая установка и UI должны видеть один дефолт");
   });
 
   it("settlement разрешает dated canonical id только Anthropic и без qualifiers", () => {

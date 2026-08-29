@@ -124,8 +124,39 @@ export interface ModelGateway {
  */
 const CLI_PROVIDERS = new Set(["claude-cli", "claude-subscription"]);
 const UNSAFE_SUBSCRIPTION_PROVIDERS = new Set(["codex-cli", "gemini-cli", "cli"]);
+const OPENAI_API_ROUTE = "openai-api";
+const CODEX_SUBSCRIPTION_ROUTE = "codex-subscription";
+const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 const CLI_SUBSCRIPTION_DISABLED_REASON =
   "Claude CLI subscription заблокирована: auth status не доказывает, что usage credits/overage выключены";
+const CODEX_SUBSCRIPTION_DISABLED_REASON =
+  "Codex/ChatGPT subscription в MYDON пока заблокирована: runtime не доказывает pre-turn billing mode; для production выберите OpenAI API";
+
+function enabledSetting(): "legacy" | "off" | "on" {
+  const value = (process.env.LLM_ENABLED ?? "").trim();
+  if (value === "") return "legacy";
+  if (value === "0") return "off";
+  if (value === "1") return "on";
+  throw new Error("LLM_ENABLED должен быть 0 или 1; LLM-вызовы заблокированы");
+}
+
+function configuredRoute(): string {
+  return (process.env.LLM_ROUTE ?? "").trim().toLowerCase();
+}
+
+function assertOpenAiApiRoute(baseUrl: string, priceProviderId: string): void {
+  if (baseUrl.replace(/\/$/, "") !== OPENAI_API_BASE_URL) {
+    throw new Error(`LLM_ROUTE=${OPENAI_API_ROUTE} требует ${OPENAI_API_BASE_URL}`);
+  }
+  if (priceProviderId !== "openai") {
+    throw new Error(`LLM_ROUTE=${OPENAI_API_ROUTE} требует LLM_PRICE_PROVIDER_ID=openai`);
+  }
+  if (!(process.env.LLM_API_KEY ?? "").trim()) {
+    throw new Error(
+      "LLM_API_KEY не задан на сервере; OpenAI API provider call заблокирован до HTTP",
+    );
+  }
+}
 
 /** Провайдер — подписочный CLI-харнесс (claude -p), а не HTTP. */
 export function isCliProvider(provider: string | undefined = process.env.LLM_PROVIDER): boolean {
@@ -169,11 +200,43 @@ function nonNegativeInt(value: unknown): number | undefined {
 function reportedUsage(data: unknown): LlmTokenUsage | undefined {
   const raw = (data as { usage?: Record<string, unknown> })?.usage;
   if (!raw) return undefined;
-  const inputTokens = nonNegativeInt(raw.prompt_tokens ?? raw.input_tokens);
+  const totalInputTokens = nonNegativeInt(raw.prompt_tokens ?? raw.input_tokens);
   const outputTokens = nonNegativeInt(raw.completion_tokens ?? raw.output_tokens);
-  if (inputTokens === undefined || outputTokens === undefined) return undefined;
-  const cacheReadInputTokens = nonNegativeInt(raw.cache_read_input_tokens);
-  const cacheCreationInputTokens = nonNegativeInt(raw.cache_creation_input_tokens);
+  if (totalInputTokens === undefined || outputTokens === undefined) return undefined;
+  const promptDetails =
+    raw.prompt_tokens_details !== null && typeof raw.prompt_tokens_details === "object"
+      ? (raw.prompt_tokens_details as Record<string, unknown>)
+      : undefined;
+  const openAiCachedTokens = nonNegativeInt(promptDetails?.cached_tokens);
+  const openAiCacheWriteTokens = nonNegativeInt(promptDetails?.cache_write_tokens);
+  const directCacheReadTokens = nonNegativeInt(raw.cache_read_input_tokens);
+  if (
+    directCacheReadTokens !== undefined &&
+    openAiCachedTokens !== undefined &&
+    directCacheReadTokens !== openAiCachedTokens
+  ) {
+    return undefined;
+  }
+  const cacheReadInputTokens = directCacheReadTokens ?? openAiCachedTokens;
+  const directCacheCreationTokens = nonNegativeInt(raw.cache_creation_input_tokens);
+  if (
+    directCacheCreationTokens !== undefined &&
+    openAiCacheWriteTokens !== undefined &&
+    directCacheCreationTokens !== openAiCacheWriteTokens
+  ) {
+    return undefined;
+  }
+  const cacheCreationInputTokens = directCacheCreationTokens ?? openAiCacheWriteTokens;
+  const openAiClassifiedInput = (openAiCachedTokens ?? 0) + (openAiCacheWriteTokens ?? 0);
+  if (
+    (cacheReadInputTokens !== undefined && cacheReadInputTokens > totalInputTokens) ||
+    openAiClassifiedInput > totalInputTokens
+  ) {
+    return undefined;
+  }
+  // OpenAI prompt_tokens includes cache reads and writes, while the shared
+  // ledger contract keeps all three input classes disjoint (as Anthropic does).
+  const inputTokens = totalInputTokens - openAiClassifiedInput;
   const cacheCreation =
     raw.cache_creation !== null && typeof raw.cache_creation === "object"
       ? (raw.cache_creation as Record<string, unknown>)
@@ -217,13 +280,25 @@ export class HttpModelGateway implements ModelGateway {
   }
 
   buildRequestPayload(model: string, req: ModelRequest): Record<string, unknown> {
+    const officialOpenAi = this.provider === "openai";
     return {
       model,
       messages: [
         ...(req.system ? [{ role: "system", content: req.system }] : []),
         { role: "user", content: req.prompt },
       ],
-      ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
+      // GPT-5.6 uses the current Chat Completions ceiling. Keep max_tokens for
+      // legacy compatible gateways whose adapter contract predates OpenAI's
+      // replacement parameter.
+      ...(req.maxTokens
+        ? officialOpenAi
+          ? { max_completion_tokens: req.maxTokens }
+          : { max_tokens: req.maxTokens }
+        : {}),
+      // The Core catalog contains Standard API prices. Explicitly pin that
+      // physical tier so a project-level auto/Fast preference cannot make the
+      // provider charge more than the pre-wire reservation.
+      ...(officialOpenAi ? { service_tier: "default" } : {}),
     };
   }
 
@@ -386,14 +461,34 @@ export function harnessPreset(
  * Подключение модели — сознательное действие владельца, а не поведение по умолчанию.
  */
 export function modelGatewayFromEnv(): ModelGateway | null {
-  const configuredProvider = (process.env.LLM_PROVIDER ?? "").trim().toLowerCase();
-  if (UNSAFE_SUBSCRIPTION_PROVIDERS.has(configuredProvider)) {
+  const enabled = enabledSetting();
+  if (enabled === "off") return null;
+  const route = configuredRoute();
+  if (route && route !== CODEX_SUBSCRIPTION_ROUTE && route !== OPENAI_API_ROUTE) {
+    throw new Error(`Неизвестный LLM_ROUTE=${route}; вызовы заблокированы`);
+  }
+  if (route === CODEX_SUBSCRIPTION_ROUTE) {
+    throw new Error(CODEX_SUBSCRIPTION_DISABLED_REASON);
+  }
+  if (enabled === "on" && route !== OPENAI_API_ROUTE) {
     throw new Error(
-      `LLM_PROVIDER=${configuredProvider} заблокирован: subscription auth mode не доказан, как и безопасный pre-turn billing mode; используйте metered HTTP через Core ledger`,
+      `LLM_ENABLED=1 требует явный LLM_ROUTE=${OPENAI_API_ROUTE}; вызовы заблокированы`,
     );
   }
-  if (isCliProvider()) {
-    throw new Error(CLI_SUBSCRIPTION_DISABLED_REASON);
+  // Явный новый route заменяет legacy LLM_PROVIDER. Иначе сохранённый когда-то
+  // claude-cli (поле скрыто из новой формы) навсегда блокировал бы openai-api,
+  // хотя владелец атомарно выбрал новый профиль. Legacy проверяем только пока
+  // LLM_ROUTE не задан.
+  if (!route) {
+    const configuredProvider = (process.env.LLM_PROVIDER ?? "").trim().toLowerCase();
+    if (UNSAFE_SUBSCRIPTION_PROVIDERS.has(configuredProvider)) {
+      throw new Error(
+        `LLM_PROVIDER=${configuredProvider} заблокирован: subscription auth mode не доказан, как и безопасный pre-turn billing mode; используйте metered HTTP через Core ledger`,
+      );
+    }
+    if (isCliProvider(configuredProvider)) {
+      throw new Error(CLI_SUBSCRIPTION_DISABLED_REASON);
+    }
   }
   const baseUrl = (process.env.LLM_BASE_URL ?? "").trim();
   if (baseUrl) {
@@ -403,6 +498,12 @@ export function modelGatewayFromEnv(): ModelGateway | null {
       throw new Error(
         "LLM_PRICE_PROVIDER_ID обязателен для metered HTTP: provider call заблокирован до reserve",
       );
+    }
+    if (route === OPENAI_API_ROUTE) {
+      if (billingMode !== "metered") {
+        throw new Error(`LLM_ROUTE=${OPENAI_API_ROUTE} не допускает local billing bypass`);
+      }
+      assertOpenAiApiRoute(baseUrl, priceProviderId);
     }
     return new HttpModelGateway(
       baseUrl,
@@ -417,12 +518,33 @@ export function modelGatewayFromEnv(): ModelGateway | null {
 
 /** Строка для стартового лога: включён ли LLM-путь и как. */
 export function llmPosture(): string {
-  const configuredProvider = (process.env.LLM_PROVIDER ?? "").trim().toLowerCase();
-  if (UNSAFE_SUBSCRIPTION_PROVIDERS.has(configuredProvider)) {
-    return `ОШИБКА конфигурации: ${configuredProvider} не имеет доказанного subscription auth mode; вызовы заблокированы`;
+  let enabled: "legacy" | "off" | "on";
+  try {
+    enabled = enabledSetting();
+  } catch (error) {
+    return `ОШИБКА конфигурации: ${error instanceof Error ? error.message : String(error)}`;
   }
-  if (isCliProvider(configuredProvider)) {
-    return `ОШИБКА конфигурации: ${CLI_SUBSCRIPTION_DISABLED_REASON}`;
+  if (enabled === "off") {
+    return "LLM-путь выключен владельцем (LLM_ENABLED=0)";
+  }
+  const route = configuredRoute();
+  if (route && route !== CODEX_SUBSCRIPTION_ROUTE && route !== OPENAI_API_ROUTE) {
+    return `ОШИБКА конфигурации: неизвестный LLM_ROUTE=${route}; вызовы заблокированы`;
+  }
+  if (route === CODEX_SUBSCRIPTION_ROUTE) {
+    return `ОШИБКА конфигурации: ${CODEX_SUBSCRIPTION_DISABLED_REASON}`;
+  }
+  if (enabled === "on" && route !== OPENAI_API_ROUTE) {
+    return `ОШИБКА конфигурации: LLM_ENABLED=1 требует LLM_ROUTE=${OPENAI_API_ROUTE}; вызовы заблокированы`;
+  }
+  if (!route) {
+    const configuredProvider = (process.env.LLM_PROVIDER ?? "").trim().toLowerCase();
+    if (UNSAFE_SUBSCRIPTION_PROVIDERS.has(configuredProvider)) {
+      return `ОШИБКА конфигурации: ${configuredProvider} не имеет доказанного subscription auth mode; вызовы заблокированы`;
+    }
+    if (isCliProvider(configuredProvider)) {
+      return `ОШИБКА конфигурации: ${CLI_SUBSCRIPTION_DISABLED_REASON}`;
+    }
   }
   const chain = resolveModelChain();
   if (chain.length === 0) {
@@ -436,6 +558,16 @@ export function llmPosture(): string {
   const priceProviderId = (process.env.LLM_PRICE_PROVIDER_ID ?? "").trim();
   if (billingMode === "metered" && !priceProviderId) {
     return "ОШИБКА конфигурации: LLM_PRICE_PROVIDER_ID не задан; metered HTTP-вызовы заблокированы до provider";
+  }
+  if (route === OPENAI_API_ROUTE) {
+    try {
+      if (billingMode !== "metered") {
+        throw new Error(`LLM_ROUTE=${OPENAI_API_ROUTE} не допускает local billing bypass`);
+      }
+      assertOpenAiApiRoute(baseUrl, priceProviderId);
+    } catch (error) {
+      return `ОШИБКА конфигурации: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
   const via =
     billingMode === "local"

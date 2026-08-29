@@ -234,7 +234,7 @@ export function globalCapValue(
     env.LLM_GLOBAL_DAILY_BUDGET_USD,
     db.AGENT_GLOBAL_BUDGET_USD,
     env.AGENT_GLOBAL_BUDGET_USD,
-    "5",
+    "10",
   );
 }
 

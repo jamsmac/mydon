@@ -29,6 +29,14 @@ INGEST_KEY=<случайный ключ для приёма внешних со�
 SERVICE_TOKEN=<случайный токен: openssl rand -hex 32>
 AGENT_AUTONOMY_MAX=T0
 AGENTS_SCHEDULES_PAUSED=1
+LLM_ENABLED=0
+LLM_ROUTE=codex-subscription
+LLM_MODEL=gpt-5.6-sol
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_PRICE_PROVIDER_ID=openai
+LLM_GLOBAL_DAILY_BUDGET_USD=10
+LLM_MAX_RESERVATION_USD=3
+LLM_API_KEY=
 ```
 
 `SERVICE_TOKEN` обязателен. Core отклоняет любую запись (POST/PATCH/PUT/DELETE)
@@ -40,9 +48,11 @@ AGENTS_SCHEDULES_PAUSED=1
 `AGENT_AUTONOMY_MAX=T0` и `AGENTS_SCHEDULES_PAUSED=1` — осознанные значения:
 агенты только предлагают и не запускаются по расписанию, пока владелец не решит иначе.
 
-Мозг, память и бюджет агентов включаются отдельными тумблерами `.env` —
-их карта и сценарии в `docs/AGENTS_ACTIVATION.md`. Все они уже прокинуты в
-контейнер `mydon-agents` (`deploy/docker-compose.yml`) и по умолчанию спят.
+Мозг, память и бюджет агентов включаются отдельным атомарным профилем из панели
+или тумблерами `.env` — их карта и сценарии в `docs/AGENTS_ACTIVATION.md`.
+Первоначально выбраны GPT-5.6 Sol и предпочтённая подписка, но `LLM_ENABLED=0`:
+никакого платного вызова нет. Рабочий `openai-api` требует серверный
+`LLM_API_KEY`; ключ не хранится и не показывается в панели.
 
 Для managed PostgreSQL используется `DATABASE_MODE=external`. `DATABASE_URL`
 должен вести через session pooler и используется только Core; прямой TLS URL
@@ -100,20 +110,21 @@ Production-скрипты запускают эти команды однора�
 образа до переключения сервисов. `migrate.js` печатает ошибку PostgreSQL и
 проблемный запрос; `drizzle-kit migrate` для операционного запуска не используем.
 
-### Rollout LLM-ledger, task checkpoint и durable provider result: 0075 → 0077
+### Rollout LLM-ledger, task checkpoint и GPT-5.6 Sol: 0075 → 0078
 
 Эти миграции выкатываются строго по journal: сначала `0075_llm_ledger`, затем
-`0076_agent_execution_outbox`, затем `0077_nebulous_silk_fever`. 0075 создаёт
-финансовый ledger и устойчивую денежную попытку задачи; 0076 добавляет durable
-task checkpoint, атомарный commit и Notion outbox; 0077 создаёт durable
-provider jobs/authorizations/results и переводит execution в двухфазный
-`active → ready`. Нельзя выборочно применять позднюю миграцию без предыдущих
+`0076_agent_execution_outbox`, `0077_nebulous_silk_fever` и
+`0078_openai_gpt_56_sol`. 0075 создаёт финансовый ledger и устойчивую денежную
+попытку задачи; 0076 добавляет durable task checkpoint, атомарный commit и
+Notion outbox; 0077 создаёт durable provider jobs/authorizations/results и
+переводит execution в двухфазный `active → ready`; 0078 добавляет dated-тариф
+`openai/gpt-5.6-sol`. Нельзя выборочно применять позднюю миграцию без предыдущих
 или запускать новый Agents против старого Core.
 
 > **Первая выкатка 0077 — только ручная.** `auto-deploy.sh` сразу
 > перезапускается из временной копии **до** `git reset`; поэтому commit,
-> который впервые добавляет порядок `stop Agents → migrate → Core health →
-> Agents`, сам ещё выполнялся бы старой копией. До merge остановить
+> который впервые добавляет порядок `stop Agents → migrate → Core health → Agents`,
+> сам ещё выполнялся бы старой копией. До merge остановить
 > `mydon-autodeploy.timer` и дождаться остановки `mydon-autodeploy.service`; после
 > merge запустить **новый** `deploy/deploy.sh`, проверить схему/Core/Agents
 > и только затем вернуть timer. На всех следующих commit новый
@@ -124,8 +135,8 @@ provider jobs/authorizations/results и переводит execution в двух
 1. Поставить расписания на паузу и остановить `mydon-agents`, чтобы во время
    смены контракта не было нового task claim.
 2. Убедиться, что pre-migration backup создан и не пуст.
-3. Новым образом выполнить `migrate.js`: journal сам применит 0075, 0076 и
-   0077. Не запускать SQL-файлы вручную или в обратном порядке.
+3. Новым образом выполнить `migrate.js`: journal сам применит 0075–0078. Не
+   запускать SQL-файлы вручную или в обратном порядке.
 4. Поднять **Core раньше Agents**, дождаться health и проверить наличие ledger,
    execution/outbox и всех трёх таблиц provider job.
 5. Только после этого поднять новый `mydon-agents`; затем снять паузу и
@@ -145,6 +156,12 @@ select provider, model, billing_kind, valid_from, valid_to
   from llm_model_price
  order by provider, model, valid_from"
 ```
+
+До `LLM_ENABLED=1` запрос должен вернуть одну активную строку
+`openai | gpt-5.6-sol | metered` с `valid_to = 2026-11-22T00:00:00Z`; затем
+проверить серверный ключ, exact endpoint, суточный лимит `$10` и потолок одного
+reserve `$3`. До истечения promotional-тарифа нужна новая dated-миграция;
+без неё Core намеренно заблокирует reserve. Сам ключ командами проверки не печатать.
 
 После первого task-run проверить, что checkpoint появляется до outcome, а
 Notion intent — только вместе с committed outcome:
