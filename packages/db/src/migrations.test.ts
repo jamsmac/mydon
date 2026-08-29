@@ -175,7 +175,7 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
     assert.equal((sql.match(/ON DELETE restrict/g) ?? []).length, 5);
   });
 
-  it("0078 сеет bounded GPT-5.6 Sol promo price и не затирает owner override", () => {
+  it("0078 seeds a bounded GPT-5.6 Sol promotional price without overwriting an owner override", () => {
     const sql = readFileSync(path.join(ПАПКА, "0078_openai_gpt_56_sol.sql"), "utf8");
 
     assert.match(sql, /'openai', 'gpt-5\.6-sol', 'metered', 'tokens'/);

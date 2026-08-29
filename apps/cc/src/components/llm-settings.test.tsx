@@ -22,7 +22,7 @@ describe("атомарная LLM-форма", () => {
     expect(screen.getByLabelText(/^Модель/)).toHaveValue("gpt-5.6-sol");
     expect(screen.getByLabelText(/^Общий потолок/)).toHaveValue(10);
     expect(screen.getByLabelText(/^Потолок одного/)).toHaveValue(3);
-    expect(screen.getByText("runtime unsupported / fail-closed")).toBeVisible();
+    expect(screen.getByText("Пока не поддерживается — вызовы заблокированы")).toBeVisible();
     expect(screen.getByText(/Автоматического переключения.*нет/)).toBeVisible();
     expect(screen.getByText(/Подписка ChatGPT не оплачивает OpenAI API/)).toBeVisible();
     expect(container.querySelector('input[type="password"]')).toBeNull();
@@ -84,10 +84,10 @@ describe("атомарная LLM-форма", () => {
     await user.clear(call);
     await user.type(call, "1.75");
     await user.click(screen.getByText("Расширенные настройки"));
-    const baseUrl = screen.getByLabelText(/^OpenAI-compatible base URL/);
+    const baseUrl = screen.getByLabelText(/^Базовый URL OpenAI-совместимого API/);
     await user.clear(baseUrl);
     await user.type(baseUrl, "https://gateway.invalid/v1");
-    const provider = screen.getByLabelText(/^Pricing provider ID/);
+    const provider = screen.getByLabelText(/^ID провайдера тарифов/);
     await user.clear(provider);
     await user.type(provider, "custom-provider");
     const fallbacks = screen.getByLabelText(/^Резервные модели/);

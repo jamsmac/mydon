@@ -47,16 +47,16 @@ export function validateLlmProfileState(
   const enabled = resolveConfigValue("LLM_ENABLED", overrides, env);
   const route = resolveConfigValue("LLM_ROUTE", overrides, env);
   if (enabled === "1" && route === "codex-subscription") {
-    return "LLM-маршрут codex-subscription пока нельзя включить: subscription runtime fail-closed";
+    return "LLM-маршрут codex-subscription пока нельзя включить: среда выполнения не подтверждает безопасную оплату через подписку, поэтому вызовы заблокированы";
   }
   if (route === "openai-api") {
     const baseUrl = resolveConfigValue("LLM_BASE_URL", overrides, env);
     if (baseUrl !== OPENAI_LLM_BASE_URL) {
-      return `LLM-маршрут openai-api требует exact LLM_BASE_URL=${OPENAI_LLM_BASE_URL}`;
+      return `LLM-маршрут openai-api требует точное значение LLM_BASE_URL=${OPENAI_LLM_BASE_URL}`;
     }
     const priceProvider = resolveConfigValue("LLM_PRICE_PROVIDER_ID", overrides, env);
     if (priceProvider !== OPENAI_LLM_PRICE_PROVIDER_ID) {
-      return `LLM-маршрут openai-api требует exact LLM_PRICE_PROVIDER_ID=${OPENAI_LLM_PRICE_PROVIDER_ID}`;
+      return `LLM-маршрут openai-api требует точное значение LLM_PRICE_PROVIDER_ID=${OPENAI_LLM_PRICE_PROVIDER_ID}`;
     }
   }
   return null;

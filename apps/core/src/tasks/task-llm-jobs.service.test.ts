@@ -55,7 +55,11 @@ interface MemoryState {
   audits: Row[];
 }
 
-function baseState(): MemoryState {
+function baseState(provider = "openai"): MemoryState {
+  const executionPlan = {
+    ...PLAN,
+    steps: PLAN.steps.map((step) => ({ ...step, provider })),
+  };
   const taskRow: Row = {
     id: TASK_ID,
     title: "Review",
@@ -87,8 +91,8 @@ function baseState(): MemoryState {
       schemaVersion: 2,
       taskInputHash: durableTaskInputHash(taskRow as never),
       workflowVersion: 1,
-      executionPlan: PLAN,
-      executionPlanHash: canonicalJsonHash(PLAN),
+      executionPlan,
+      executionPlanHash: canonicalJsonHash(executionPlan),
       startedAt: NOW,
       checkpointKind: null,
       checkpointPayload: null,
@@ -243,7 +247,7 @@ function memoryDb(state: MemoryState) {
   } as never;
 }
 
-function ensureInput(user = USER) {
+function ensureInput(user = USER, provider = "openai") {
   return {
     agentName: "coach",
     runId: RUN_ID,
@@ -255,19 +259,50 @@ function ensureInput(user = USER) {
     adapter: "openai-compatible",
     adapterVersion: 1,
     endpointProfile: CHAT_PROFILE,
-    provider: "openai",
+    provider,
     model: "primary",
     inputTokenCeiling: inputTokenCeiling(`${SYSTEM}\n\n${user}`),
     outputTokenCeiling: 512,
-    requestPayload: {
-      model: "primary",
-      messages: [
-        { role: "system", content: SYSTEM },
-        { role: "user", content: user },
-      ],
-      max_tokens: 512,
-    },
+    requestPayload:
+      provider === "openai"
+        ? {
+            model: "primary",
+            messages: [
+              { role: "system", content: SYSTEM },
+              { role: "user", content: user },
+            ],
+            max_completion_tokens: 512,
+            service_tier: "default",
+          }
+        : {
+            model: "primary",
+            messages: [
+              { role: "system", content: SYSTEM },
+              { role: "user", content: user },
+            ],
+            max_tokens: 512,
+          },
   };
+}
+
+function replaceStoredPayload(state: MemoryState, requestPayload: Record<string, unknown>): string {
+  const job = state.jobs[0];
+  assert.ok(job);
+  const operationHash = canonicalJsonHash({
+    schemaVersion: 1,
+    executionId: state.execution.id,
+    workflowVersion: state.execution.workflowVersion,
+    stepKey: job.stepKey,
+    providerAttemptNo: job.providerAttemptNo,
+    adapter: job.adapter,
+    adapterVersion: job.adapterVersion,
+    provider: job.provider,
+    endpointProfile: job.endpointProfile,
+    requestPayload,
+  });
+  job.requestPayload = requestPayload;
+  job.operationHash = operationHash;
+  return operationHash;
 }
 
 function harness(
@@ -275,9 +310,10 @@ function harness(
     denied?: boolean;
     reauthorizationDenialReason?: string;
     spendDay?: string | (() => string);
+    provider?: string;
   } = {},
 ) {
-  const state = baseState();
+  const state = baseState(options.provider);
   let reserveCalls = 0;
   const reserveDtos: Row[] = [];
   const ledger = {
@@ -342,6 +378,123 @@ function harness(
 }
 
 describe("durable task LLM job state machine", () => {
+  it("accepts the current OpenAI envelope and keeps max_tokens for compatible providers", async () => {
+    const openAi = harness();
+    const openAiInput = ensureInput();
+    const openAiJob = await openAi.service.ensure(TASK_ID, openAiInput, NOW);
+    assert.equal(openAiJob.status, "ready");
+    assert.deepEqual(openAi.state.jobs[0]?.requestPayload, openAiInput.requestPayload);
+
+    const compatible = harness({ provider: "compatible-provider" });
+    const compatibleInput = ensureInput(USER, "compatible-provider");
+    const compatibleJob = await compatible.service.ensure(TASK_ID, compatibleInput, NOW);
+    assert.equal(compatibleJob.status, "ready");
+    assert.deepEqual(compatible.state.jobs[0]?.requestPayload, compatibleInput.requestPayload);
+  });
+
+  it("rejects unsafe new OpenAI and non-OpenAI envelopes before persistence", async () => {
+    const current = ensureInput();
+    const messages = current.requestPayload.messages;
+    const invalidOpenAi: Array<[Record<string, unknown>, RegExp]> = [
+      [{ model: "primary", messages, max_tokens: 512 }, /max_tokens is not allowlisted/],
+      [
+        { model: "primary", messages, max_completion_tokens: 512 },
+        /service_tier must equal default/,
+      ],
+      [
+        {
+          model: "primary",
+          messages,
+          max_completion_tokens: 512,
+          service_tier: "auto",
+        },
+        /service_tier must equal default/,
+      ],
+      [
+        {
+          model: "primary",
+          messages,
+          max_completion_tokens: 511,
+          service_tier: "default",
+        },
+        /max_completion_tokens must equal outputTokenCeiling/,
+      ],
+      [
+        {
+          model: "primary",
+          messages,
+          max_tokens: 512,
+          max_completion_tokens: 512,
+          service_tier: "default",
+        },
+        /max_tokens is not allowlisted/,
+      ],
+    ];
+    for (const [requestPayload, expected] of invalidOpenAi) {
+      const { state, service } = harness();
+      await assert.rejects(
+        () => service.ensure(TASK_ID, { ...current, requestPayload }, NOW),
+        expected,
+      );
+      assert.equal(state.jobs.length, 0);
+    }
+
+    const compatible = harness({ provider: "compatible-provider" });
+    const compatibleInput = ensureInput(USER, "compatible-provider");
+    await assert.rejects(
+      () =>
+        compatible.service.ensure(
+          TASK_ID,
+          {
+            ...compatibleInput,
+            requestPayload: {
+              model: "primary",
+              messages,
+              max_completion_tokens: 512,
+              service_tier: "default",
+            },
+          },
+          NOW,
+        ),
+      /max_completion_tokens is not allowlisted/,
+    );
+    assert.equal(compatible.state.jobs.length, 0);
+  });
+
+  it("blocks a stored legacy OpenAI max_tokens envelope before provider dispatch", async () => {
+    const legacyPayload = {
+      model: "primary",
+      messages: [
+        { role: "system", content: SYSTEM },
+        { role: "user", content: USER },
+      ],
+      max_tokens: 512,
+    };
+    const legacy = harness();
+    const ensured = await legacy.service.ensure(TASK_ID, ensureInput(), NOW);
+    replaceStoredPayload(legacy.state, legacyPayload);
+
+    await assert.rejects(
+      () =>
+        legacy.service.claimDispatch(
+          TASK_ID,
+          ensured.jobId,
+          {
+            agentName: "coach",
+            runId: RUN_ID,
+            executionAttemptId: ATTEMPT_ID,
+            dispatchToken: TOKEN_A,
+          },
+          NOW,
+        ),
+      /cannot be dispatched safely; owner retry is required/,
+    );
+    assert.equal(legacy.state.task.agentExecutionBlockedAt, NOW);
+    assert.equal(legacy.state.jobs[0]?.status, "ready");
+    assert.equal(legacy.state.jobs[0]?.dispatchCount, 0);
+    assert.equal(legacy.reserveCalls(), 1, "legacy payload is blocked before reauthorization");
+  });
+
   it("ensures one reservation, restores the same dispatch grant and durably replays completion", async () => {
     const { state, ledger, service, reserveCalls, reserveDtos } = harness();
     const ensured = await service.ensure(TASK_ID, ensureInput(), NOW);
