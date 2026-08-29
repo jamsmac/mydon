@@ -2799,6 +2799,9 @@ const env = {
   OWNER_ACTION_TOKEN: OWNER_TOKEN,
   INGEST_KEY: "smoke-ingest",
   HEALTH_MIN_STORAGE_MB: "0",
+  // Smoke выше проверяет арифметику LLM-ledger, поэтому явно включает её
+  // только в scratch-процессе. Production default остаётся fail-closed (`0`).
+  LLM_ENABLED: "1",
   // Детерминированная граница для сценария LLM-ledger выше.
   LLM_GLOBAL_DAILY_BUDGET_USD: "1",
   // Два commit одного агента должны поделить один атомарный action-slot.
