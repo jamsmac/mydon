@@ -1,6 +1,6 @@
-import { answer, type ContextSearch, type LlmResolver } from "@mydon/assistant";
+import { answer, llmLedgerErrorText, type ContextSearch, type LlmResolver } from "@mydon/assistant";
 import type { DocumentRequest, GeneratedDocument } from "@mydon/documents";
-import { DOMAIN_LABELS, normalizeProductName } from "@mydon/shared";
+import { DOMAIN_LABELS, normalizeProductName, type LlmCallContext } from "@mydon/shared";
 import {
   approvalKeyboard,
   collectGloberentSignals,
@@ -33,7 +33,12 @@ import {
   parsePriceCommand,
   parseReceiveDistribution,
 } from "./purchase-brief";
-import { formatRuleResult, isRuleCommand, parseRuleCommand, ruleCommandHint } from "./product-rules";
+import {
+  formatRuleResult,
+  isRuleCommand,
+  parseRuleCommand,
+  ruleCommandHint,
+} from "./product-rules";
 import {
   PRODUCT_CARD_HINT,
   formatProductCard,
@@ -72,7 +77,11 @@ import {
 } from "./analytics-brief";
 import { formatShrinkage, isShrinkageQuery, parseShrinkageDays } from "./shrinkage-brief";
 import { planReport } from "./reports";
-import { consumptionPeriod, formatCoffeeConsumption, isCoffeeConsumptionQuery } from "./coffee-report";
+import {
+  consumptionPeriod,
+  formatCoffeeConsumption,
+  isCoffeeConsumptionQuery,
+} from "./coffee-report";
 import { handleActionsQuery, isActionsQuery } from "./owner-actions";
 import {
   WEEKLY_NOTES_WINDOW_MS,
@@ -86,7 +95,10 @@ import { formatStockAck, isStockCommand, parseStockItems } from "./stock-intake"
 import type { RateLimiter } from "./security/access";
 import { isAllowed } from "./security/access";
 
-export type DocumentBuilder = (req: DocumentRequest) => Promise<GeneratedDocument>;
+export type DocumentBuilder = (
+  req: DocumentRequest,
+  context?: LlmCallContext,
+) => Promise<GeneratedDocument>;
 
 export interface HandlerDeps {
   core: CoreClient;
@@ -208,6 +220,7 @@ export async function handleMessage(
   text: string,
   deps: HandlerDeps,
   now: number = Date.now(),
+  updateId: number | string = `${chatId}:${now}`,
 ): Promise<Reply | null> {
   // Здесь обрабатывается только владелец. Сообщения сотрудников маршрутизирует
   // цикл бота: у них свой, узкий режим (см. staff.ts) — только свои задачи.
@@ -218,6 +231,12 @@ export async function handleMessage(
   if (!deps.limiter.allow(chatId, now)) {
     return { text: "Слишком много запросов подряд. Подожди минуту." };
   }
+  const requestKey = `telegram:update:${String(updateId)}`;
+  const llmContext: LlmCallContext = {
+    requestKey,
+    traceKey: requestKey,
+    metadata: { chatId: String(chatId) },
+  };
 
   // Касса закупа — мутация; СТРОГО до приёмки накладной: «касса закупа:
   // получил N, …» содержит и «получил», и «закуп» — isPurchaseReceiveCommand
@@ -244,11 +263,17 @@ export async function handleMessage(
       // уходит без автора, как раньше (не ошибка, «мои записи» её не увидит).
       const person = await deps.core.personByChat(String(chatId)).catch(() => null);
       const createdBy = person && !("found" in person) ? `person:${person.id}` : undefined;
-      const res = await deps.core.recordVendingCash(session.receivedAmount, session.categories, createdBy);
+      const res = await deps.core.recordVendingCash(
+        session.receivedAmount,
+        session.categories,
+        createdBy,
+      );
       return { text: formatCashAck(res) };
     } catch (err) {
       console.error("Ошибка записи кассы закупа:", err);
-      return { text: "Не удалось записать кассу закупа в MYDON Core. Попробуй ещё раз чуть позже." };
+      return {
+        text: "Не удалось записать кассу закупа в MYDON Core. Попробуй ещё раз чуть позже.",
+      };
     }
   }
 
@@ -259,7 +284,9 @@ export async function handleMessage(
       return { text: formatCashSessions(sessions) };
     } catch (err) {
       console.error("Ошибка чтения касс закупа:", err);
-      return { text: "Не удалось получить кассы закупа из MYDON Core. Попробуй ещё раз чуть позже." };
+      return {
+        text: "Не удалось получить кассы закупа из MYDON Core. Попробуй ещё раз чуть позже.",
+      };
     }
   }
 
@@ -280,7 +307,9 @@ export async function handleMessage(
       return { text: formatProductCard(строка) };
     } catch (err) {
       console.error("Ошибка чтения карточки товара:", err);
-      return { text: "Не удалось получить карточку товара из MYDON Core. Попробуй ещё раз чуть позже." };
+      return {
+        text: "Не удалось получить карточку товара из MYDON Core. Попробуй ещё раз чуть позже.",
+      };
     }
   }
 
@@ -324,7 +353,9 @@ export async function handleMessage(
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка плана закупа:", err);
-      return { text: "Не удалось получить план закупа из MYDON Core. Попробуй ещё раз чуть позже." };
+      return {
+        text: "Не удалось получить план закупа из MYDON Core. Попробуй ещё раз чуть позже.",
+      };
     }
   }
 
@@ -333,7 +364,9 @@ export async function handleMessage(
   // держится для всех команд, иначе очередь начинает зависеть от везения.
   if (isShrinkageQuery(text)) {
     try {
-      const [first, ...more] = formatShrinkage(await deps.core.vendingShrinkage(parseShrinkageDays(text)));
+      const [first, ...more] = formatShrinkage(
+        await deps.core.vendingShrinkage(parseShrinkageDays(text)),
+      );
       return { text: first, more };
     } catch (err) {
       console.error("Ошибка отчёта об усушке:", err);
@@ -357,7 +390,8 @@ export async function handleMessage(
     // «цена продажи TUC -15000» — не «формат непонятен»: формат как раз
     // понятен, не бывает такой цены. Подсказка формата отправила бы владельца
     // повторять ту же команду (S8).
-    if (cmd === null) return { text: isNonPositiveSalePrice(text) ? NON_POSITIVE_PRICE_HINT : SALE_PRICE_HINT };
+    if (cmd === null)
+      return { text: isNonPositiveSalePrice(text) ? NON_POSITIVE_PRICE_HINT : SALE_PRICE_HINT };
     try {
       const res = await deps.core.setVendingSalePrice(cmd.product, cmd.price, cmd.confirmed);
       return { text: formatSalePriceResult(res) };
@@ -368,7 +402,9 @@ export async function handleMessage(
       if (err instanceof CoreError && err.status === 400) {
         return { text: `${SALE_PRICE_HINT}\n\nCore отверг запрос: ${coreReason(err.body)}` };
       }
-      return { text: "Не удалось записать эталон витрины в MYDON Core. Попробуй ещё раз чуть позже." };
+      return {
+        text: "Не удалось записать эталон витрины в MYDON Core. Попробуй ещё раз чуть позже.",
+      };
     }
   }
 
@@ -377,14 +413,18 @@ export async function handleMessage(
   if (isSalePriceBootstrapCommand(text)) {
     try {
       const w = окно(text, SALE_PRICE_FACT_DAYS, BOOTSTRAP_DAYS_MAX);
-      const [first, ...more] = formatSalePriceBootstrap(await deps.core.bootstrapVendingSalePrice(w.days));
+      const [first, ...more] = formatSalePriceBootstrap(
+        await deps.core.bootstrapVendingSalePrice(w.days),
+      );
       return { text: сНоткой(w.note, first), more };
     } catch (err) {
       console.error("Ошибка бутстрапа эталона витрины:", err);
       if (err instanceof CoreError && err.status === 400) {
         return { text: `Core отверг запрос: ${coreReason(err.body)}` };
       }
-      return { text: "Не удалось проставить эталон витрины в MYDON Core. Попробуй ещё раз чуть позже." };
+      return {
+        text: "Не удалось проставить эталон витрины в MYDON Core. Попробуй ещё раз чуть позже.",
+      };
     }
   }
 
@@ -460,7 +500,8 @@ export async function handleMessage(
   // живёт в Core; здесь только разбор и повтор со словом «точно».
   if (isPriceCommand(text)) {
     const cmd = parsePriceCommand(text);
-    if (cmd === null) return { text: isNonPositivePrice(text) ? NON_POSITIVE_PRICE_HINT : PRICE_COMMAND_HINT };
+    if (cmd === null)
+      return { text: isNonPositivePrice(text) ? NON_POSITIVE_PRICE_HINT : PRICE_COMMAND_HINT };
     try {
       const res = await deps.core.setVendingPrice(cmd.product, cmd.price, cmd.confirmed);
       return { text: formatPriceResult(res) };
@@ -536,10 +577,12 @@ export async function handleMessage(
         // молчать о нём нельзя: недельный канал — единственная доставка
         // `urgency:"weekly"`, и вечно падающий `/rules/pending` неотличим от
         // «сигналов нет».
-        deps.core.briefingNotifications(new Date(Date.now() - WEEKLY_NOTES_WINDOW_MS)).catch((err: unknown) => {
-          console.error("Недельные сигналы правил не получены из Core:", err);
-          return null;
-        }),
+        deps.core
+          .briefingNotifications(new Date(Date.now() - WEEKLY_NOTES_WINDOW_MS))
+          .catch((err: unknown) => {
+            console.error("Недельные сигналы правил не получены из Core:", err);
+            return null;
+          }),
       ]);
       // Отметки о доставке здесь НЕТ намеренно: `ack` необратим, а команду
       // владелец может повторить хоть десять раз. Пусть сигнал ещё раз придёт
@@ -551,7 +594,9 @@ export async function handleMessage(
       if (err instanceof CoreError && err.status === 400) {
         return { text: `${WEEKLY_WEEK_HINT}\n\nCore отверг запрос: ${coreReason(err.body)}` };
       }
-      return { text: "Не удалось получить итоги недели из MYDON Core. Попробуй ещё раз чуть позже." };
+      return {
+        text: "Не удалось получить итоги недели из MYDON Core. Попробуй ещё раз чуть позже.",
+      };
     }
   }
 
@@ -576,7 +621,9 @@ export async function handleMessage(
       return { text: formatCoffeeConsumption(rep) };
     } catch (err) {
       console.error("Ошибка отчёта о расходе кофе:", err);
-      return { text: "Не удалось получить расход кофе из MYDON Core. Попробуй ещё раз чуть позже." };
+      return {
+        text: "Не удалось получить расход кофе из MYDON Core. Попробуй ещё раз чуть позже.",
+      };
     }
   }
 
@@ -663,7 +710,9 @@ export async function handleMessage(
         if (o.totals.length === 0) {
           return { text: `По направлению ${label} обязательств в реестре пока нет.` };
         }
-        return { text: `Обязательства ${label}: позиций ${o.totals.length}, просрочено ${o.overdue.length}.` };
+        return {
+          text: `Обязательства ${label}: позиций ${o.totals.length}, просрочено ${o.overdue.length}.`,
+        };
       }
 
       case "report": {
@@ -678,17 +727,24 @@ export async function handleMessage(
         }
 
         const plan = await planReport(
-          { format: intent.format, topic: intent.topic, ...(intent.domain ? { domain: intent.domain } : {}) },
+          {
+            format: intent.format,
+            topic: intent.topic,
+            ...(intent.domain ? { domain: intent.domain } : {}),
+          },
           deps.core,
         );
         if (plan.emptyReason) return { text: plan.emptyReason };
 
-        const doc = await deps.buildDocument({
-          kind: plan.kind,
-          instruction: plan.instruction,
-          data: plan.data,
-          filename: plan.filename,
-        });
+        const doc = await deps.buildDocument(
+          {
+            kind: plan.kind,
+            instruction: plan.instruction,
+            data: plan.data,
+            filename: plan.filename,
+          },
+          llmContext,
+        );
         return {
           text: doc.summary.length > 0 ? doc.summary : "Готово.",
           document: { filename: doc.filename, content: doc.content },
@@ -736,6 +792,7 @@ export async function handleMessage(
         if (!deps.llm) return { text: HELP };
         const reply = await answer(text, deps.core, {
           llm: deps.llm,
+          llmContext,
           ...(deps.context ? { context: deps.context } : {}),
         });
         return reply.approvalId
@@ -744,6 +801,14 @@ export async function handleMessage(
       }
     }
   } catch (err) {
+    const ledgerText = llmLedgerErrorText(err);
+    if (ledgerText !== null) {
+      console.warn(
+        "Платный запрос бота заблокирован LLM-ledger:",
+        err instanceof Error ? err.message : err,
+      );
+      return { text: ledgerText };
+    }
     // Наружу — понятная фраза, детали только в лог.
     console.error("Ошибка обработки сообщения:", err);
     return { text: "Не удалось получить данные из MYDON Core. Попробуй ещё раз чуть позже." };

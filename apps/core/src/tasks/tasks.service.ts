@@ -1,17 +1,52 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import {
+  approval,
   auditLog,
   event,
+  llmSpend,
   machineCard,
   maintenanceLog,
   maintenancePlan,
+  outboxDelivery,
   person,
   task,
+  taskAgentExecution,
   TASK_SOURCE_DAY_PREDICATE,
   taskComment,
 } from "@mydon/db";
-import { can, effectiveRoles, machineIsOperational, type Domain, type Permission } from "@mydon/shared";
-import { and, asc, desc, eq, isNotNull, lt, ne, sql, type SQL, isNull } from "drizzle-orm";
+import {
+  can,
+  effectiveRoles,
+  machineIsOperational,
+  tashkentDay,
+  tashkentDayStartOf,
+  type Domain,
+  type Permission,
+} from "@mydon/shared";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
+import { appConfig } from "../config";
 import { DB, type Db } from "../db/db.module";
 import { MaintenanceService, todayInTz } from "../maintenance/maintenance.service";
 
@@ -23,8 +58,250 @@ const MAINT_SOURCE = /^maint:([0-9a-f][0-9a-f-]{34}[0-9a-f]):\d{4}-\d{2}-\d{2}$/
 
 type TaskRow = typeof task.$inferSelect;
 type CommentRow = typeof taskComment.$inferSelect;
+type TaskAgentExecutionRow = typeof taskAgentExecution.$inferSelect;
 type Status = "todo" | "in_progress" | "done" | "cancelled";
 type Priority = "low" | "normal" | "high" | "urgent";
+type Tier = "T0" | "T1" | "T2" | "T3" | "T4";
+type JsonObject = Record<string, unknown>;
+
+export interface AgentRunFenceInput {
+  agentName: string;
+  runId: string;
+  executionAttemptId: string;
+}
+
+export interface AgentRunCheckpointInput extends AgentRunFenceInput {
+  skill: string;
+  kind: "no_signal" | "proposal";
+  action?: string;
+  facts?: JsonObject;
+  next?: string[];
+}
+
+export interface AgentRunCommitInput extends AgentRunFenceInput {
+  kind: "no_signal" | "no_change" | "approval_requested" | "executed";
+  note: string;
+  action?: string;
+  facts?: JsonObject;
+  next?: string[];
+  tier?: Tier;
+  memorySignature?: string;
+  executionDetail?: string;
+}
+
+export interface AgentCheckpointView {
+  id: string;
+  executionAttemptId: string;
+  skill: string;
+  kind: "no_signal" | "proposal";
+  action?: string;
+  facts?: JsonObject;
+  next?: string[];
+  taskInputHash: string;
+  checkpointHash: string;
+  createdAt: string;
+}
+
+export interface AgentRunCheckpointResult {
+  checkpointed: true;
+  replay: boolean;
+  checkpoint: AgentCheckpointView;
+}
+
+export interface AgentRunCommitResult {
+  committed: boolean;
+  capped: boolean;
+  replay: boolean;
+  taskId: string;
+  executionAttemptId: string;
+  status: "done" | "todo" | "blocked";
+  resultNote?: string;
+  approvalId?: string;
+  outboxDeliveryId?: string;
+  retryAt?: string;
+}
+
+type ClaimedAgentRun = TaskRow & { agentCheckpoint: AgentCheckpointView | null };
+
+/** JSON canonicalization for hashes and persisted replay payloads. */
+function canonicalValue(value: unknown): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new BadRequestException("JSON содержит нечисловое значение");
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map((item) => canonicalValue(item));
+  if (typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) {
+      if (source[key] !== undefined) {
+        // Own data property keeps `__proto__` in canonical JSON without
+        // mutating the prototype. A regular prototype is intentional:
+        // Drizzle 0.45 cannot accept null-prototype objects in `.values()`.
+        Object.defineProperty(result, key, {
+          value: canonicalValue(source[key]),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+    }
+    return result;
+  }
+  throw new BadRequestException("JSON содержит неподдерживаемое значение");
+}
+
+function canonicalHash(value: unknown): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalValue(value)))
+    .digest("hex");
+}
+
+function jsonObject(value: unknown): JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonObject)
+    : {};
+}
+
+function normalizedOptionalText(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizedNext(value: string[] | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.map((item) => item.trim()).filter((item) => item.length > 0);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function taskInputHash(row: TaskRow): string {
+  return canonicalHash({
+    schemaVersion: 1,
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    ownerKind: row.ownerKind,
+    ownerRef: row.ownerRef,
+    domain: row.domain,
+    entityId: row.entityId,
+    priority: row.priority,
+    due: row.due,
+    source: row.source,
+    createdBy: row.createdBy,
+  });
+}
+
+function checkpointPayload(input: AgentRunCheckpointInput): JsonObject {
+  const action = normalizedOptionalText(input.action);
+  const next = normalizedNext(input.next);
+  return canonicalValue({
+    kind: input.kind,
+    ...(action !== undefined ? { action } : {}),
+    ...(input.facts !== undefined ? { facts: input.facts } : {}),
+    ...(next !== undefined ? { next } : {}),
+  }) as JsonObject;
+}
+
+function commitPayload(input: AgentRunCommitInput): JsonObject {
+  const action = normalizedOptionalText(input.action);
+  const next = normalizedNext(input.next);
+  const memorySignature = normalizedOptionalText(input.memorySignature);
+  const executionDetail = normalizedOptionalText(input.executionDetail);
+  return canonicalValue({
+    kind: input.kind,
+    note: input.note.trim(),
+    ...(action !== undefined ? { action } : {}),
+    ...(input.facts !== undefined ? { facts: input.facts } : {}),
+    ...(next !== undefined ? { next } : {}),
+    ...(input.tier !== undefined ? { tier: input.tier } : {}),
+    ...(memorySignature !== undefined ? { memorySignature } : {}),
+    ...(executionDetail !== undefined ? { executionDetail } : {}),
+  }) as JsonObject;
+}
+
+function checkpointView(row: TaskAgentExecutionRow): AgentCheckpointView {
+  const payload = jsonObject(row.checkpointPayload);
+  const kind = row.checkpointKind;
+  if (kind !== "no_signal" && kind !== "proposal") {
+    throw new Error(`Неизвестный checkpoint kind ${kind}`);
+  }
+  return {
+    id: row.id,
+    executionAttemptId: row.executionAttemptId,
+    skill: row.skill,
+    kind,
+    ...(typeof payload.action === "string" ? { action: payload.action } : {}),
+    ...(payload.facts !== undefined ? { facts: jsonObject(payload.facts) } : {}),
+    ...(Array.isArray(payload.next)
+      ? { next: payload.next.filter((item): item is string => typeof item === "string") }
+      : {}),
+    taskInputHash: row.taskInputHash,
+    checkpointHash: row.checkpointHash,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+const SECRET_FACT_KEY =
+  /(?:^|[_-])(token|secret|password|passphrase|authorization|cookie|api[_-]?key)(?:$|[_-])/i;
+
+function redactReportSecrets(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactReportSecrets(item));
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) {
+      Object.defineProperty(result, key, {
+        value: SECRET_FACT_KEY.test(key) ? "[REDACTED]" : redactReportSecrets(source[key]),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return result;
+  }
+  return value;
+}
+
+function reportFact(value: unknown): string {
+  const safe = redactReportSecrets(value);
+  if (typeof safe === "string") return safe;
+  if (safe === null || typeof safe === "number" || typeof safe === "boolean") return String(safe);
+  return JSON.stringify(canonicalValue(safe));
+}
+
+function notionReportPayload(
+  execution: TaskAgentExecutionRow,
+  outcomeKind: "approval_requested" | "executed",
+  action: string,
+  facts: JsonObject,
+): JsonObject {
+  const [year, month, day] = tashkentDay(execution.createdAt).split("-");
+  const report = {
+    title: `${action.slice(0, 80)} — ${day}.${month}.${year}`,
+    author: execution.agentName,
+    blocks: [
+      { heading: "Что нашёл", paragraphs: [action] },
+      {
+        heading: "На чём это основано",
+        bullets: Object.keys(facts)
+          .sort()
+          .filter((key) => !SECRET_FACT_KEY.test(key))
+          .map((key) => `${key}: ${reportFact(facts[key])}`),
+      },
+      {
+        paragraphs: [
+          outcomeKind === "executed"
+            ? `Навык: ${execution.skill}. Агент исполнил действие в пределах действующего порога автономии.`
+            : `Навык: ${execution.skill}. Решение принимает владелец — агент только предлагает.`,
+        ],
+      },
+    ],
+  };
+  return canonicalValue({ report }) as JsonObject;
+}
 
 export interface CreateTaskInput {
   title: string;
@@ -70,14 +347,49 @@ export interface WorkloadRow {
 export class TasksService {
   /** Максимум строк на экране приёмки. */
   static readonly AWAITING_LIMIT = 100;
+  /** После этого падение worker не блокирует задачу навсегда. */
+  static readonly AGENT_RUN_LEASE_MS = 15 * 60_000;
 
   /** Актор с правами: панель ходит от владельца, бот — от карточки сотрудника. */
-  private static readonly ACTOR_PERSON = /^person:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+  private static readonly ACTOR_PERSON =
+    /^person:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly maintenance: MaintenanceService,
   ) {}
+
+  private async lockTask(tx: Tx, id: string): Promise<TaskRow> {
+    const [row] = await tx.select().from(task).where(eq(task.id, id)).for("update");
+    if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
+    return row;
+  }
+
+  private assertAgentRunFence(row: TaskRow, input: AgentRunFenceInput): void {
+    const agentName = input.agentName.trim();
+    if (
+      row.ownerKind !== "agent" ||
+      row.ownerRef !== agentName ||
+      row.agentRunId !== input.runId ||
+      row.agentExecutionAttemptId !== input.executionAttemptId ||
+      row.status === "done" ||
+      row.status === "cancelled"
+    ) {
+      throw new ConflictException("Прогон агента уже закрыт или заменён новой generation");
+    }
+  }
+
+  private async lockExecution(
+    tx: Tx,
+    executionAttemptId: string,
+  ): Promise<TaskAgentExecutionRow | undefined> {
+    const [row] = await tx
+      .select()
+      .from(taskAgentExecution)
+      .where(eq(taskAgentExecution.executionAttemptId, executionAttemptId))
+      .for("update");
+    return row;
+  }
 
   /**
    * Проверяет право актора на действие, но не подменяет аутентификацию.
@@ -171,13 +483,15 @@ export class TasksService {
       conditions.push(ne(task.status, "cancelled"));
     }
 
-    return this.db
-      .select()
-      .from(task)
-      .where(conditions.length ? and(...conditions) : undefined)
-      // Сначала срочное и с ближайшим сроком: список читается сверху вниз.
-      .orderBy(asc(task.due), desc(task.priority), asc(task.createdAt))
-      .limit(300);
+    return (
+      this.db
+        .select()
+        .from(task)
+        .where(conditions.length ? and(...conditions) : undefined)
+        // Сначала срочное и с ближайшим сроком: список читается сверху вниз.
+        .orderBy(asc(task.due), desc(task.priority), asc(task.createdAt))
+        .limit(300)
+    );
   }
 
   async byId(id: string): Promise<TaskRow> {
@@ -189,6 +503,741 @@ export class TasksService {
   /** Задачи одного исполнителя — то, что сотрудник видит в боте. */
   mine(ownerKind: "human" | "agent", ownerRef: string): Promise<TaskRow[]> {
     return this.list({ ownerKind, ownerRef, openOnly: true });
+  }
+
+  /**
+   * Атомарно забрать одну назначенную агенту задачу в конкретный прогон.
+   *
+   * UPDATE с lease-предикатом — сама точка конкурентного выбора: при двух
+   * worker PostgreSQL повторно проверит WHERE после row-lock, и второй получит
+   * null, не дойдя до LLM. Протухший lease получает новый UUID и generation.
+   */
+  async claimAgentRun(
+    id: string,
+    agentName: string,
+    now = new Date(),
+  ): Promise<ClaimedAgentRun | null> {
+    const runId = randomUUID();
+    const executionAttemptId = randomUUID();
+    const staleBefore = new Date(now.getTime() - TasksService.AGENT_RUN_LEASE_MS);
+    return this.db.transaction(async (tx) => {
+      const [claimed] = await tx
+        .update(task)
+        .set({
+          status: "in_progress",
+          agentRunId: runId,
+          agentExecutionAttemptId: sql`coalesce(${task.agentExecutionAttemptId}, ${executionAttemptId}::uuid)`,
+          agentExecutionRetryAt: null,
+          agentRunGeneration: sql`${task.agentRunGeneration} + 1`,
+          agentRunClaimedAt: now,
+        })
+        .where(
+          and(
+            eq(task.id, id),
+            eq(task.ownerKind, "agent"),
+            eq(task.ownerRef, agentName),
+            ne(task.status, "done"),
+            ne(task.status, "cancelled"),
+            isNull(task.agentExecutionBlockedAt),
+            or(isNull(task.agentExecutionRetryAt), lte(task.agentExecutionRetryAt, now)),
+            or(
+              isNull(task.agentRunId),
+              isNull(task.agentRunClaimedAt),
+              lte(task.agentRunClaimedAt, staleBefore),
+            ),
+          ),
+        )
+        .returning();
+      if (!claimed) return null;
+
+      await tx.insert(auditLog).values({
+        actorKind: "agent",
+        actorRef: `agent:${agentName}`,
+        action: "task.agent_run.claimed",
+        target: id,
+        after: claimed,
+      });
+      const [ready] = await tx
+        .select()
+        .from(taskAgentExecution)
+        .where(
+          and(
+            eq(taskAgentExecution.taskId, id),
+            eq(taskAgentExecution.executionAttemptId, claimed.agentExecutionAttemptId!),
+            eq(taskAgentExecution.status, "ready"),
+          ),
+        )
+        .limit(1);
+      return { ...claimed, agentCheckpoint: ready ? checkpointView(ready) : null };
+    });
+  }
+
+  /**
+   * Durable граница сразу после результата навыка и до любых side effects.
+   * runId только ограждает текущего worker; идентичность результата —
+   * executionAttemptId + canonical checkpoint hash.
+   */
+  async checkpointAgentRun(
+    id: string,
+    input: AgentRunCheckpointInput,
+    now = new Date(),
+  ): Promise<AgentRunCheckpointResult> {
+    const agentName = input.agentName.trim();
+    const skill = input.skill.trim();
+    if (skill.length === 0) throw new BadRequestException("skill не может быть пустым");
+    const payload = checkpointPayload(input);
+    if (input.kind === "proposal" && typeof payload.action !== "string") {
+      throw new BadRequestException("proposal обязан содержать action");
+    }
+    if (typeof payload.action === "string" && payload.action.length > 512) {
+      throw new BadRequestException("action не может быть длиннее 512 символов");
+    }
+
+    return this.db.transaction(async (tx) => {
+      const lockedTask = await this.lockTask(tx, id);
+      this.assertAgentRunFence(lockedTask, { ...input, agentName });
+      const inputHash = taskInputHash(lockedTask);
+      const hash = canonicalHash({
+        schemaVersion: 1,
+        taskId: id,
+        executionAttemptId: input.executionAttemptId,
+        agentName,
+        skill,
+        taskInputHash: inputHash,
+        checkpoint: payload,
+      });
+
+      const existing = await this.lockExecution(tx, input.executionAttemptId);
+      if (existing) {
+        if (
+          existing.taskId !== id ||
+          existing.agentName !== agentName ||
+          existing.checkpointHash !== hash
+        ) {
+          throw new ConflictException("executionAttemptId уже связан с другим checkpoint payload");
+        }
+        if (existing.status !== "ready") {
+          throw new ConflictException(
+            existing.status === "committed"
+              ? "Результат этой попытки уже committed"
+              : "Эта попытка была abandoned владельцем",
+          );
+        }
+        return { checkpointed: true, replay: true, checkpoint: checkpointView(existing) };
+      }
+
+      const [created] = await tx
+        .insert(taskAgentExecution)
+        .values({
+          taskId: id,
+          executionAttemptId: input.executionAttemptId,
+          agentName,
+          skill,
+          schemaVersion: 1,
+          taskInputHash: inputHash,
+          checkpointKind: input.kind,
+          checkpointPayload: payload,
+          checkpointHash: hash,
+          status: "ready",
+          updatedAt: now,
+        })
+        .returning();
+      if (!created) throw new Error("Checkpoint не сохранился");
+      return { checkpointed: true, replay: false, checkpoint: checkpointView(created) };
+    });
+  }
+
+  private assertOutcomeMatchesCheckpoint(
+    execution: TaskAgentExecutionRow,
+    outcome: JsonObject,
+  ): void {
+    const checkpoint = jsonObject(execution.checkpointPayload);
+    const outcomeKind = outcome.kind;
+    if (execution.checkpointKind === "no_signal") {
+      if (outcomeKind !== "no_signal") {
+        throw new ConflictException("no_signal checkpoint нельзя commit как действие");
+      }
+      return;
+    }
+    if (execution.checkpointKind !== "proposal") {
+      throw new ConflictException("Неизвестный kind сохранённого checkpoint");
+    }
+    if (
+      outcomeKind !== "no_change" &&
+      outcomeKind !== "approval_requested" &&
+      outcomeKind !== "executed"
+    ) {
+      throw new ConflictException("proposal checkpoint нельзя commit как no_signal");
+    }
+    if (typeof outcome.action !== "string") {
+      throw new BadRequestException("Результат proposal обязан содержать action");
+    }
+    const checkpointProposal = canonicalHash({
+      action: checkpoint.action,
+      ...(checkpoint.facts !== undefined ? { facts: checkpoint.facts } : {}),
+      ...(checkpoint.next !== undefined ? { next: checkpoint.next } : {}),
+    });
+    const committedProposal = canonicalHash({
+      action: outcome.action,
+      ...(outcome.facts !== undefined ? { facts: outcome.facts } : {}),
+      ...(outcome.next !== undefined ? { next: outcome.next } : {}),
+    });
+    if (checkpointProposal !== committedProposal) {
+      throw new ConflictException("Commit payload не совпадает с durable checkpoint");
+    }
+    if (outcomeKind === "approval_requested" && outcome.tier === undefined) {
+      throw new BadRequestException("approval_requested обязан содержать tier");
+    }
+  }
+
+  private async actionCapReached(tx: Tx, agentName: string, now: Date): Promise<boolean> {
+    const cap = appConfig.agentDailyActionCap;
+    if (cap <= 0) return false;
+    const day = tashkentDay(now);
+    const dayStart = tashkentDayStartOf(now);
+    const nextDay = new Date(dayStart.getTime() + 86_400_000);
+    const lockKey = `agent-action-cap:${agentName}:${day}`;
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+    const [row] = await tx
+      .select({ count: sql<number>`count(*)` })
+      .from(event)
+      .where(
+        and(
+          eq(event.source, `agent:${agentName}`),
+          eq(event.type, "agent.action"),
+          gte(event.occurredAt, dayStart),
+          lt(event.occurredAt, nextDay),
+        ),
+      );
+    return Number(row?.count ?? 0) >= cap;
+  }
+
+  private replayCommittedExecution(
+    execution: TaskAgentExecutionRow,
+    outcomeHash: string,
+  ): AgentRunCommitResult {
+    if (execution.outcomeHash !== outcomeHash) {
+      throw new ConflictException("Committed execution уже имеет другой outcome payload");
+    }
+    const stored = jsonObject(execution.outcomePayload);
+    const input = jsonObject(stored.input);
+    const result = jsonObject(stored.result);
+    if (typeof input.note !== "string") {
+      throw new Error("Committed execution не содержит сохранённый resultNote");
+    }
+    return {
+      committed: true,
+      capped: false,
+      replay: true,
+      taskId: execution.taskId,
+      executionAttemptId: execution.executionAttemptId,
+      status: "done",
+      resultNote: input.note,
+      ...(execution.approvalId !== null ? { approvalId: execution.approvalId } : {}),
+      ...(typeof result.outboxDeliveryId === "string"
+        ? { outboxDeliveryId: result.outboxDeliveryId }
+        : {}),
+    };
+  }
+
+  /**
+   * Единственная atomic commit-точка outcome: task, approval/events/memory,
+   * maintenance hook и Notion outbox либо фиксируются все, либо ни один.
+   */
+  async commitAgentRun(
+    id: string,
+    input: AgentRunCommitInput,
+    now = new Date(),
+  ): Promise<AgentRunCommitResult> {
+    const agentName = input.agentName.trim();
+    const outcome = commitPayload(input);
+    if (typeof outcome.note !== "string" || outcome.note.length === 0) {
+      throw new BadRequestException("note не может быть пустым");
+    }
+    const resultNote = outcome.note;
+
+    return this.db.transaction(async (tx) => {
+      // Единый lock order для checkpoint/commit/retry: task → execution.
+      const lockedTask = await this.lockTask(tx, id);
+      const execution = await this.lockExecution(tx, input.executionAttemptId);
+      if (!execution || execution.taskId !== id || execution.agentName !== agentName) {
+        throw new ConflictException("Durable checkpoint этой попытки не найден");
+      }
+
+      const hash = canonicalHash({
+        schemaVersion: 1,
+        taskId: id,
+        agentName,
+        executionAttemptId: input.executionAttemptId,
+        checkpointHash: execution.checkpointHash,
+        outcome,
+      });
+      if (execution.status === "committed") {
+        return this.replayCommittedExecution(execution, hash);
+      }
+      if (execution.status === "abandoned") {
+        throw new ConflictException("Execution abandoned владельцем; нужен новый claim");
+      }
+
+      this.assertAgentRunFence(lockedTask, { ...input, agentName });
+      if (execution.taskInputHash !== taskInputHash(lockedTask)) {
+        const reason = "Задача изменилась после durable checkpoint; нужен owner retry";
+        const [blocked] = await tx
+          .update(task)
+          .set({
+            status: "todo",
+            agentRunId: null,
+            agentRunClaimedAt: null,
+            agentExecutionRetryAt: null,
+            agentExecutionBlockedAt: now,
+            agentExecutionBlockedReason: reason,
+          })
+          .where(
+            and(
+              eq(task.id, id),
+              eq(task.agentRunId, input.runId),
+              eq(task.agentExecutionAttemptId, input.executionAttemptId),
+              ne(task.status, "done"),
+              ne(task.status, "cancelled"),
+            ),
+          )
+          .returning();
+        if (!blocked) throw new ConflictException("Lease потерян во время input-hash проверки");
+        await tx.insert(auditLog).values({
+          actorKind: "agent",
+          actorRef: `agent:${agentName}`,
+          action: "task.agent_execution.blocked",
+          target: id,
+          before: lockedTask,
+          after: blocked,
+        });
+        return {
+          committed: false,
+          capped: false,
+          replay: false,
+          taskId: id,
+          executionAttemptId: input.executionAttemptId,
+          status: "blocked",
+        };
+      }
+      this.assertOutcomeMatchesCheckpoint(execution, outcome);
+
+      const actionOutcome = outcome.kind === "approval_requested" || outcome.kind === "executed";
+      if (actionOutcome && (await this.actionCapReached(tx, agentName, now))) {
+        const retryAt = new Date(tashkentDayStartOf(now).getTime() + 86_400_000);
+        const [released] = await tx
+          .update(task)
+          .set({
+            status: "todo",
+            agentRunId: null,
+            agentRunClaimedAt: null,
+            agentExecutionRetryAt: retryAt,
+            agentExecutionBlockedAt: null,
+            agentExecutionBlockedReason: null,
+          })
+          .where(
+            and(
+              eq(task.id, id),
+              eq(task.agentRunId, input.runId),
+              eq(task.agentExecutionAttemptId, input.executionAttemptId),
+              ne(task.status, "done"),
+              ne(task.status, "cancelled"),
+            ),
+          )
+          .returning();
+        if (!released) throw new ConflictException("Lease потерян во время cap-check");
+        await tx.insert(auditLog).values({
+          actorKind: "agent",
+          actorRef: `agent:${agentName}`,
+          action: "task.agent_run.action_capped",
+          target: id,
+          before: lockedTask,
+          after: released,
+        });
+        return {
+          committed: false,
+          capped: true,
+          replay: false,
+          taskId: id,
+          executionAttemptId: input.executionAttemptId,
+          status: "todo",
+          retryAt: retryAt.toISOString(),
+        };
+      }
+
+      const action = typeof outcome.action === "string" ? outcome.action : undefined;
+      const facts = outcome.facts !== undefined ? jsonObject(outcome.facts) : {};
+      const next = Array.isArray(outcome.next)
+        ? outcome.next.filter((item): item is string => typeof item === "string")
+        : undefined;
+      const source = `agent:${agentName}`;
+      const keyBase = `task:${id}:execution:${input.executionAttemptId}`;
+      let approvalId: string | undefined;
+
+      await tx.insert(event).values({
+        source,
+        type: "agent.run",
+        payload: canonicalValue({
+          taskId: id,
+          executionAttemptId: input.executionAttemptId,
+          skill: execution.skill,
+          outcome: outcome.kind,
+          ...(outcome.tier !== undefined ? { tier: outcome.tier } : {}),
+        }),
+        clientKey: `${keyBase}:event:agent-run`,
+        occurredAt: now,
+      });
+
+      if (outcome.kind === "approval_requested") {
+        const [createdApproval] = await tx
+          .insert(approval)
+          .values({
+            agent: agentName,
+            action: action!,
+            tier: outcome.tier as Tier,
+            payload: canonicalValue({
+              taskId: id,
+              executionAttemptId: input.executionAttemptId,
+              skill: execution.skill,
+              facts,
+              ...(next !== undefined ? { next } : {}),
+            }),
+            clientKey: `${keyBase}:approval`,
+          })
+          .returning();
+        if (!createdApproval) throw new Error("Approval не сохранился");
+        approvalId = createdApproval.id;
+        await tx.insert(event).values({
+          source,
+          type: "approval.requested",
+          payload: { approvalId, action, tier: outcome.tier },
+          clientKey: `${keyBase}:event:approval-requested`,
+          occurredAt: now,
+        });
+        await tx.insert(auditLog).values({
+          actorKind: "agent",
+          actorRef: agentName,
+          action: "approval.request",
+          target: approvalId,
+          after: createdApproval,
+        });
+      }
+
+      if (actionOutcome) {
+        await tx.insert(event).values({
+          source,
+          type: "agent.action",
+          payload: canonicalValue({
+            taskId: id,
+            executionAttemptId: input.executionAttemptId,
+            skill: execution.skill,
+            action,
+            ...(approvalId !== undefined ? { approvalId } : {}),
+            ...(outcome.kind === "executed" ? { executed: true } : {}),
+            ...(outcome.executionDetail !== undefined ? { verified: outcome.executionDetail } : {}),
+          }),
+          clientKey: `${keyBase}:event:agent-action`,
+          occurredAt: now,
+        });
+        if (typeof outcome.memorySignature === "string") {
+          await tx.insert(event).values({
+            source,
+            type: `agent.memory:${execution.skill}`,
+            payload: { signature: outcome.memorySignature },
+            clientKey: `${keyBase}:event:memory`,
+            occurredAt: now,
+          });
+        }
+      }
+
+      let outboxDeliveryId: string | undefined;
+      if (actionOutcome) {
+        const payload = notionReportPayload(
+          execution,
+          outcome.kind as "approval_requested" | "executed",
+          action!,
+          facts,
+        );
+        const [delivery] = await tx
+          .insert(outboxDelivery)
+          .values({
+            key: `${keyBase}:notion-report`,
+            taskAgentExecutionId: execution.id,
+            destination: "notion-report",
+            payload,
+            payloadHash: canonicalHash(payload),
+            status: "pending",
+          })
+          .returning();
+        if (!delivery) throw new Error("Notion outbox intent не сохранился");
+        outboxDeliveryId = delivery.id;
+      }
+
+      const [closedTask] = await tx
+        .update(task)
+        .set({
+          status: "done",
+          resultNote,
+          completedAt: now,
+          closedBy: source,
+          agentRunId: null,
+          agentRunClaimedAt: null,
+          agentExecutionRetryAt: null,
+          agentExecutionBlockedAt: null,
+          agentExecutionBlockedReason: null,
+        })
+        .where(
+          and(
+            eq(task.id, id),
+            eq(task.agentRunId, input.runId),
+            eq(task.agentExecutionAttemptId, input.executionAttemptId),
+            ne(task.status, "done"),
+            ne(task.status, "cancelled"),
+          ),
+        )
+        .returning();
+      if (!closedTask) throw new ConflictException("Lease потерян перед atomic commit");
+      await tx.insert(auditLog).values({
+        actorKind: "agent",
+        actorRef: source,
+        action: "task.done",
+        target: id,
+        before: lockedTask,
+        after: closedTask,
+      });
+      await this.recordMaintenanceFact(tx, closedTask, source);
+
+      const durableResult = {
+        taskId: id,
+        executionAttemptId: input.executionAttemptId,
+        ...(approvalId !== undefined ? { approvalId } : {}),
+        ...(outboxDeliveryId !== undefined ? { outboxDeliveryId } : {}),
+      };
+      const [committed] = await tx
+        .update(taskAgentExecution)
+        .set({
+          status: "committed",
+          outcomePayload: canonicalValue({ input: outcome, result: durableResult }),
+          outcomeHash: hash,
+          approvalId: approvalId ?? null,
+          committedAt: now,
+          updatedAt: now,
+        })
+        .where(and(eq(taskAgentExecution.id, execution.id), eq(taskAgentExecution.status, "ready")))
+        .returning();
+      if (!committed) throw new ConflictException("Checkpoint уже завершён другим commit");
+
+      return {
+        committed: true,
+        capped: false,
+        replay: false,
+        taskId: id,
+        executionAttemptId: input.executionAttemptId,
+        status: "done",
+        resultNote,
+        ...(approvalId !== undefined ? { approvalId } : {}),
+        ...(outboxDeliveryId !== undefined ? { outboxDeliveryId } : {}),
+      };
+    });
+  }
+
+  /**
+   * Освободить только СВОЙ прогон. UUID в WHERE — CAS: worker старой
+   * generation не может снять lease, который уже перехватил новый worker.
+   */
+  async releaseAgentRun(
+    id: string,
+    agentName: string,
+    runId: string,
+    executionAttemptId: string,
+    reason?: "budget_denied" | "execution_unknown" | "action_capped" | "unsupported",
+    detail?: string,
+    now = new Date(),
+  ): Promise<TaskRow | null> {
+    return this.db.transaction(async (tx) => {
+      const nextTashkentDay = new Date(tashkentDayStartOf(now).getTime() + 86_400_000);
+      let safeBudgetRetry = false;
+      if (reason === "budget_denied") {
+        const prefix = `task:${id}:execution:${executionAttemptId}:%`;
+        const [started] = await tx
+          .select({ id: llmSpend.id })
+          .from(llmSpend)
+          .where(and(sql`${llmSpend.requestKey} like ${prefix}`, ne(llmSpend.status, "denied")))
+          .limit(1);
+        safeBudgetRetry = started === undefined;
+      }
+      const shouldBlock =
+        reason === "execution_unknown" ||
+        reason === "unsupported" ||
+        (reason === "budget_denied" && !safeBudgetRetry);
+      const blockedReason =
+        detail?.trim().slice(0, 1000) ||
+        (reason === "budget_denied"
+          ? "budget denial после уже начатой metered-попытки"
+          : reason === "unsupported"
+            ? "у агента нет подходящего навыка; нужен owner retry"
+            : "исход предыдущей metered-попытки неизвестен");
+      const [released] = await tx
+        .update(task)
+        .set({
+          status: "todo",
+          agentRunId: null,
+          agentRunClaimedAt: null,
+          ...(reason === "budget_denied" && safeBudgetRetry
+            ? {
+                // Denial доказал, что provider dispatch не было. Новую
+                // попытку разрешаем только после смены ledger-day, иначе
+                // минутный poll плодил бы вечные denied rows.
+                agentExecutionAttemptId: null,
+                agentExecutionRetryAt: nextTashkentDay,
+                agentExecutionBlockedAt: null,
+                agentExecutionBlockedReason: null,
+              }
+            : {}),
+          ...(reason === "action_capped"
+            ? {
+                // Outcome уже может лежать в durable checkpoint. Attempt не
+                // вращаем: после полуночи claim вернёт тот же результат и не
+                // вызовет provider повторно.
+                agentExecutionRetryAt: nextTashkentDay,
+                agentExecutionBlockedAt: null,
+                agentExecutionBlockedReason: null,
+              }
+            : {}),
+          ...(shouldBlock
+            ? {
+                agentExecutionBlockedAt: now,
+                agentExecutionBlockedReason: blockedReason,
+              }
+            : {}),
+        })
+        .where(
+          and(
+            eq(task.id, id),
+            eq(task.ownerKind, "agent"),
+            eq(task.ownerRef, agentName),
+            eq(task.agentRunId, runId),
+            eq(task.agentExecutionAttemptId, executionAttemptId),
+            ne(task.status, "done"),
+            ne(task.status, "cancelled"),
+          ),
+        )
+        .returning();
+      if (!released) return null;
+
+      await tx.insert(auditLog).values({
+        actorKind: "agent",
+        actorRef: `agent:${agentName}`,
+        action: "task.agent_run.released",
+        target: id,
+        after: released,
+      });
+      return released;
+    });
+  }
+
+  /**
+   * Продлить lease только текущей generation. Без heartbeat длинный
+   * LLM/embedding-прогон выглядел бы stale через 15 минут, хотя worker жив.
+   */
+  async heartbeatAgentRun(
+    id: string,
+    agentName: string,
+    runId: string,
+    now = new Date(),
+  ): Promise<boolean> {
+    const [renewed] = await this.db
+      .update(task)
+      .set({ agentRunClaimedAt: now })
+      .where(
+        and(
+          eq(task.id, id),
+          eq(task.ownerKind, "agent"),
+          eq(task.ownerRef, agentName),
+          eq(task.agentRunId, runId),
+          ne(task.status, "done"),
+          ne(task.status, "cancelled"),
+        ),
+      )
+      .returning({ id: task.id });
+    return renewed !== undefined;
+  }
+
+  /**
+   * Явное решение владельца начать новую оплачиваемую попытку после replay.
+   * Автоматика этого не делает: без durable result/outbox она не знает,
+   * завершился ли прошлый provider call и был ли его ответ доставлен.
+   */
+  async retryBlockedAgentExecution(id: string): Promise<TaskRow> {
+    return this.db.transaction(async (tx) => {
+      const before = await this.lockTask(tx, id);
+      if (
+        before.ownerKind !== "agent" ||
+        before.agentExecutionBlockedAt === null ||
+        before.status === "done" ||
+        before.status === "cancelled"
+      ) {
+        throw new ConflictException("У задачи нет заблокированной LLM-попытки для retry");
+      }
+
+      if (before.agentExecutionAttemptId !== null) {
+        const execution = await this.lockExecution(tx, before.agentExecutionAttemptId);
+        if (execution?.status === "ready") {
+          const [abandoned] = await tx
+            .update(taskAgentExecution)
+            .set({
+              status: "abandoned",
+              abandonedAt: new Date(),
+              abandonReason: "owner_retry_after_block",
+              updatedAt: new Date(),
+            })
+            .where(
+              and(eq(taskAgentExecution.id, execution.id), eq(taskAgentExecution.status, "ready")),
+            )
+            .returning();
+          if (!abandoned) {
+            throw new ConflictException("Checkpoint уже завершён другим commit");
+          }
+        }
+      }
+
+      const [updated] = await tx
+        .update(task)
+        .set({
+          status: "todo",
+          agentRunId: null,
+          agentRunClaimedAt: null,
+          agentExecutionAttemptId: null,
+          agentExecutionRetryAt: null,
+          agentExecutionBlockedAt: null,
+          agentExecutionBlockedReason: null,
+        })
+        .where(
+          and(
+            eq(task.id, id),
+            eq(task.ownerKind, "agent"),
+            isNotNull(task.agentExecutionBlockedAt),
+            ...(before.agentExecutionAttemptId !== null
+              ? [eq(task.agentExecutionAttemptId, before.agentExecutionAttemptId)]
+              : [isNull(task.agentExecutionAttemptId)]),
+            ne(task.status, "done"),
+            ne(task.status, "cancelled"),
+          ),
+        )
+        .returning();
+      if (!updated) {
+        throw new ConflictException("Заблокированная попытка изменилась во время retry");
+      }
+      await tx.insert(auditLog).values({
+        actorKind: "human",
+        actorRef: "owner",
+        action: "task.agent_execution.retry",
+        target: id,
+        before,
+        after: updated,
+      });
+      return updated;
+    });
   }
 
   /** Просроченное: срок прошёл, а задача ещё не закрыта. */
@@ -213,6 +1262,7 @@ export class TasksService {
     status: Status,
     actorRef = "owner",
     resultNote?: string,
+    expectedAgentRunId?: string,
   ): Promise<TaskRow> {
     return this.db.transaction(async (tx) => {
       // Отчёт и время закрытия проставляются только при закрытии: иначе
@@ -228,15 +1278,30 @@ export class TasksService {
         }
       }
 
+      const conditions: SQL[] = [eq(task.id, id), ne(task.status, status)];
+      if (expectedAgentRunId) {
+        conditions.push(eq(task.agentRunId, expectedAgentRunId));
+        conditions.push(ne(task.status, "done"), ne(task.status, "cancelled"));
+      }
       const [updated] = await tx
         .update(task)
         .set(patch)
-        .where(and(eq(task.id, id), ne(task.status, status)))
+        .where(and(...conditions))
         .returning();
 
       if (!updated) {
         const [row] = await tx.select().from(task).where(eq(task.id, id));
         if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
+        if (expectedAgentRunId) {
+          if (row.agentRunId !== expectedAgentRunId) {
+            throw new ConflictException("Прогон агента уже заменён новой generation");
+          }
+          if (row.status !== status) {
+            throw new ConflictException(
+              `Задача уже в статусе ${row.status}; прогон не может её закрыть`,
+            );
+          }
+        }
         return row; // статус уже такой — повторное нажатие не ошибка
       }
 
@@ -357,9 +1422,26 @@ export class TasksService {
     // правка срока, текста или повторная отправка того же ownerRef не должны
     // запираться за менеджерской ролью.
     const before = await this.byId(id);
-    if (set.ownerRef !== undefined && set.ownerRef !== before.ownerRef) {
+    const ownerRefChanged = set.ownerRef !== undefined && set.ownerRef !== before.ownerRef;
+    const ownerKindChanged = set.ownerKind !== undefined && set.ownerKind !== before.ownerKind;
+    if (ownerRefChanged) {
       await this.assertCan(actorRef, "tasks.assign");
       set.assignNotifiedAt = null;
+      set.agentRunId = null;
+      set.agentRunClaimedAt = null;
+    }
+    if (ownerKindChanged) {
+      set.agentRunId = null;
+      set.agentRunClaimedAt = null;
+    }
+    if ((ownerRefChanged || ownerKindChanged) && before.agentExecutionAttemptId != null) {
+      // Общий SERVICE_TOKEN не вращает оплачиваемую attempt. Но и отдавать
+      // новому агенту checkpoint прежнего нельзя: claim должен стоять до
+      // явного owner-only retry, который abandon-ит ready history.
+      set.agentExecutionRetryAt = null;
+      set.agentExecutionBlockedAt = new Date();
+      set.agentExecutionBlockedReason =
+        "Исполнитель изменён после начала LLM-попытки; нужен owner retry";
     }
 
     return this.db.transaction(async (tx) => {
@@ -624,7 +1706,11 @@ export class TasksService {
    * остаётся в переписке, а напоминания включаются заново. Так качество
    * отмечается делом, а не забытым флажком.
    */
-  async rate(id: string, quality: "excellent" | "accepted" | "redo", actorRef = "owner"): Promise<TaskRow> {
+  async rate(
+    id: string,
+    quality: "excellent" | "accepted" | "redo",
+    actorRef = "owner",
+  ): Promise<TaskRow> {
     await this.assertCan(actorRef, "tasks.confirm");
     return this.db.transaction(async (tx) => {
       const [row] = await tx.select().from(task).where(eq(task.id, id));
@@ -639,6 +1725,20 @@ export class TasksService {
         patch.completedAt = null;
         patch.remindedAt = null; // напоминания должны включиться заново
         patch.redoNotifiedAt = null; // и сообщение о возврате должно уйти снова
+        // Redo создаёт новую worker generation, но НЕ новый денежный attempt.
+        // Если прошлый metered call уже существовал, replay поставит block, а
+        // новую оплату разрешит только owner-token endpoint agent-run/retry.
+        patch.agentRunId = null;
+        patch.agentRunClaimedAt = null;
+        if (row.ownerKind === "agent" && row.agentExecutionAttemptId !== null) {
+          // Committed history immutable, а reuse старого attempt дал бы
+          // заведомый ledger replay. Общий SERVICE_TOKEN не вращает оплату:
+          // задача ждёт явного owner-only /agent-run/retry.
+          patch.agentExecutionRetryAt = null;
+          patch.agentExecutionBlockedAt = new Date();
+          patch.agentExecutionBlockedReason =
+            "Redo требует новой оплачиваемой попытки через owner retry";
+        }
       }
       const [updated] = await tx.update(task).set(patch).where(eq(task.id, id)).returning();
 
@@ -776,7 +1876,9 @@ export class TasksService {
           sql<number>`count(*) filter (where ${task.status} = 'done' and ${task.completedAt} >= ${weekAgo}::timestamptz)`.as(
             "done_last_7d",
           ),
-        excellent: sql<number>`count(*) filter (where ${task.quality} = 'excellent')`.as("excellent"),
+        excellent: sql<number>`count(*) filter (where ${task.quality} = 'excellent')`.as(
+          "excellent",
+        ),
         redo: sql<number>`count(*) filter (where ${task.quality} = 'redo')`.as("redo"),
         doneOnTime:
           sql<number>`count(*) filter (where ${task.status} = 'done' and ${task.due} is not null and ${task.completedAt} <= ${task.due})`.as(

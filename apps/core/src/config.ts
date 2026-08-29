@@ -33,6 +33,25 @@ export const appConfig = {
   get serviceToken(): string {
     return process.env.SERVICE_TOKEN ?? "";
   },
+  /**
+   * Только для явного подтверждения владельцем потенциально повторной оплаты.
+   * Не передаётся Bot/Agents/CC и при пустом значении всегда закрыт.
+   */
+  get ownerActionToken(): string {
+    return process.env.OWNER_ACTION_TOKEN ?? "";
+  },
+  /**
+   * Последняя, серверная граница количества agent.action за ташкентские сутки.
+   * Ноль явно отключает cap; пустое/битое значение не должно случайно снять
+   * production-ограничение, поэтому возвращаем документированный default 50.
+   */
+  get agentDailyActionCap(): number {
+    const raw = process.env.AGENT_DAILY_ACTION_CAP?.trim();
+    if (raw === "0") return 0;
+    if (!raw) return 50;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 50;
+  },
   /** Фактический пояс процесса — сообщаем то, что есть, а не то, что хотелось бы. */
   get tz(): string {
     return Intl.DateTimeFormat().resolvedOptions().timeZone;

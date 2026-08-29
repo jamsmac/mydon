@@ -32,7 +32,10 @@ describe("чат помощника", () => {
     await user.type(screen.getByLabelText("Вопрос помощнику"), "Что оплатить сегодня?");
     await user.click(screen.getByRole("button", { name: "→" }));
 
-    expect(mocks.ask).toHaveBeenCalledWith("Что оплатить сегодня?");
+    expect(mocks.ask).toHaveBeenCalledWith("Что оплатить сегодня?", expect.any(String));
+    expect(mocks.ask.mock.calls[0]?.[1]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     expect(await screen.findByText("Нужно твоё решение")).toBeVisible();
     expect(screen.getByRole("link", { name: /Открыть очередь решений/ })).toHaveAttribute(
       "href",

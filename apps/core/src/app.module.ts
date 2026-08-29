@@ -19,8 +19,10 @@ import { HealthController } from "./health.controller";
 import { HistoryModule } from "./history/history.module";
 import { ImportsModule } from "./imports/imports.module";
 import { KpModule } from "./kp/kp.module";
+import { LlmLedgerModule } from "./llm-ledger/llm-ledger.module";
 import { MaintenanceModule } from "./maintenance/maintenance.module";
 import { NotesModule } from "./notes/notes.module";
+import { OutboxModule } from "./outbox/outbox.module";
 import { PeopleModule } from "./people/people.module";
 import { PreordersModule } from "./preorders/preorders.module";
 import { RawModule } from "./raw/raw.module";
@@ -69,7 +71,9 @@ import { VerificationModule } from "./verification/verification.module";
     HistoryModule,
     ImportsModule,
     KpModule,
+    LlmLedgerModule,
     NotesModule,
+    OutboxModule,
     PeopleModule,
     PreordersModule,
     RawModule,

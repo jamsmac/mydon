@@ -1,7 +1,8 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { ConflictException, Inject, Injectable } from "@nestjs/common";
 import { event } from "@mydon/db";
 import { and, desc, eq, gte, inArray, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { hashLedgerPayload } from "../llm-ledger/llm-ledger.money";
 
 type EventRow = typeof event.$inferSelect;
 
@@ -10,6 +11,8 @@ export interface RecordEventInput {
   type: string;
   payload?: Record<string, unknown>;
   occurredAt?: Date;
+  /** Stable key одного логического эффекта; exact retry возвращает ту же строку. */
+  clientKey?: string;
 }
 
 /**
@@ -21,16 +24,38 @@ export class EventsService {
   constructor(@Inject(DB) private readonly db: Db) {}
 
   async record(input: RecordEventInput): Promise<EventRow> {
-    const [created] = await this.db
-      .insert(event)
-      .values({
-        source: input.source,
-        type: input.type,
-        payload: input.payload ?? {},
-        ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
-      })
-      .returning();
-    return created;
+    return this.db.transaction(async (tx) => {
+      const payload = input.payload ?? {};
+      const [created] = await tx
+        .insert(event)
+        .values({
+          source: input.source,
+          type: input.type,
+          payload,
+          clientKey: input.clientKey ?? null,
+          ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
+        })
+        .onConflictDoNothing({ target: event.clientKey })
+        .returning();
+      if (created) return created;
+
+      const [existing] = await tx
+        .select()
+        .from(event)
+        .where(eq(event.clientKey, input.clientKey!))
+        .limit(1);
+      if (!existing) throw new Error("Идемпотентное событие ещё сохраняется — повтори запрос");
+      const expected = hashLedgerPayload({ source: input.source, type: input.type, payload });
+      const actual = hashLedgerPayload({
+        source: existing.source,
+        type: existing.type,
+        payload: existing.payload,
+      });
+      if (expected !== actual) {
+        throw new ConflictException("clientKey события уже использован другим payload");
+      }
+      return existing;
+    });
   }
 
   /**

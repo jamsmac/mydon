@@ -1,8 +1,30 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { CliModelGateway, type CliSpawn, harnessPreset, isCliProvider, resolveModelChain } from "./model-gateway";
+import {
+  CliModelGateway,
+  HttpModelGateway,
+  harnessPreset,
+  isCliProvider,
+  llmPosture,
+  modelGatewayFromEnv,
+  resolveModelChain,
+  subscriptionCliEnv,
+} from "./model-gateway";
 
-const KEYS = ["LLM_MODEL", "LLM_FALLBACK_MODELS", "LLM_BASE_URL", "LLM_API_KEY"] as const;
+const KEYS = [
+  "LLM_PROVIDER",
+  "LLM_MODEL",
+  "LLM_FALLBACK_MODELS",
+  "LLM_BASE_URL",
+  "LLM_API_KEY",
+  "LLM_HTTP_BILLING_MODE",
+  "LLM_PRICE_PROVIDER_ID",
+  "LLM_CLI_CMD",
+  "LLM_CLI_BASE_ARGS",
+  "LLM_CLI_PROMPT_VIA",
+  "LLM_CLI_MODEL_FLAG",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+] as const;
 const saved: Record<string, string | undefined> = {};
 for (const k of KEYS) saved[k] = process.env[k];
 beforeEach(() => {
@@ -17,7 +39,11 @@ afterEach(() => {
 
 describe("resolveModelChain", () => {
   it("основная + запасные по порядку, без дублей и пустых", () => {
-    assert.deepEqual(resolveModelChain("gpt-x", "cheap, cheap, free ,"), ["gpt-x", "cheap", "free"]);
+    assert.deepEqual(resolveModelChain("gpt-x", "cheap, cheap, free ,"), [
+      "gpt-x",
+      "cheap",
+      "free",
+    ]);
   });
 
   it("только основная", () => {
@@ -33,100 +59,193 @@ describe("resolveModelChain", () => {
     assert.deepEqual(resolveModelChain("m1", "m1, m2"), ["m1", "m2"]);
   });
 
-  it("CLI-подписка без модели → цепочка [default]", () => {
-    assert.deepEqual(resolveModelChain(undefined, undefined, "claude-cli"), ["default"]);
-    assert.deepEqual(resolveModelChain(undefined, undefined, "http"), [], "не-CLI без модели — пусто");
+  it("выключенная CLI-подписка не добавляет неявную модель", () => {
+    assert.deepEqual(resolveModelChain(undefined, undefined, "claude-cli"), []);
+    assert.deepEqual(
+      resolveModelChain(undefined, undefined, "http"),
+      [],
+      "не-CLI без модели — пусто",
+    );
   });
 });
 
 describe("isCliProvider", () => {
-  it("распознаёт подписочные CLI-провайдеры", () => {
+  it("разрешает только Claude CLI с доказуемым OAuth mode", () => {
     assert.equal(isCliProvider("claude-cli"), true);
     assert.equal(isCliProvider("claude-subscription"), true);
-    assert.equal(isCliProvider(" CLI "), true);
+    assert.equal(isCliProvider("codex-cli"), false);
+    assert.equal(isCliProvider("gemini-cli"), false);
+    assert.equal(isCliProvider(" CLI "), false);
     assert.equal(isCliProvider("http"), false);
     assert.equal(isCliProvider(undefined), false);
   });
 });
 
-describe("CliModelGateway — подписочный claude -p", () => {
-  /** Фейковый spawner: ловит вход и отдаёт заданный результат. */
-  function fakeSpawn(result: { code?: number; stdout?: string; stderr?: string; throw?: string }) {
-    const seen: { cmd: string; args: string[]; input: string }[] = [];
-    const spawn: CliSpawn = async (cmd, args, input) => {
-      seen.push({ cmd, args, input });
-      if (result.throw) throw new Error(result.throw);
-      return { code: result.code ?? 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+describe("subscriptionCliEnv", () => {
+  it("не передаёт платные API credentials в подписочный CLI", () => {
+    const source: NodeJS.ProcessEnv = {
+      PATH: "/bin",
+      HOME: "/tmp/test-home",
+      CLAUDE_CODE_OAUTH_TOKEN: "subscription-oauth",
+      ANTHROPIC_API_KEY: "paid-anthropic",
+      OPENAI_API_KEY: "paid-openai",
+      GEMINI_API_KEY: "paid-gemini",
+      GOOGLE_API_KEY: "paid-google",
+      LLM_API_KEY: "paid-gateway",
+      LLM_BASE_URL: "https://paid.invalid",
+      CLAUDE_CODE_USE_BEDROCK: "1",
     };
-    return { spawn, seen };
-  }
 
-  it("успех: stdout → text, costUsd 0 (подписка)", async () => {
-    const { spawn, seen } = fakeSpawn({ stdout: "  ответ модели  " });
-    const gw = new CliModelGateway("claude", ["-p"], spawn);
-    const res = await gw.call("default", { system: "страж", prompt: "задача" });
-    assert.equal(res.ok, true);
-    assert.equal(res.text, "ответ модели");
-    assert.equal(res.costUsd, 0);
-    // Промпт ушёл в STDIN (system+prompt), не в argv.
-    assert.match(seen[0].input, /страж[\s\S]*задача/);
-    assert.deepEqual(seen[0].args, ["-p"], "default → без --model");
-  });
-
-  it("конкретная модель → --model в args", async () => {
-    const { spawn, seen } = fakeSpawn({ stdout: "ok" });
-    await new CliModelGateway("claude", ["-p"], spawn).call("sonnet", { prompt: "x" });
-    assert.deepEqual(seen[0].args, ["-p", "--model", "sonnet"]);
-  });
-
-  it("ненулевой код → ok=false со stderr", async () => {
-    const { spawn } = fakeSpawn({ code: 1, stderr: "не залогинен" });
-    const res = await new CliModelGateway("claude", ["-p"], spawn).call("default", { prompt: "x" });
-    assert.equal(res.ok, false);
-    assert.match(res.error ?? "", /код 1/);
-    assert.match(res.error ?? "", /не залогинен/);
-  });
-
-  it("сбой запуска (CLI нет) → ok=false, не падает", async () => {
-    const { spawn } = fakeSpawn({ throw: "ENOENT" });
-    const res = await new CliModelGateway("claude", ["-p"], spawn).call("default", { prompt: "x" });
-    assert.equal(res.ok, false);
-    assert.match(res.error ?? "", /ENOENT/);
-  });
-
-  it("promptVia=arg — промпт уходит аргументом, stdin пуст; свой modelFlag", async () => {
-    const { spawn, seen } = fakeSpawn({ stdout: "ok" });
-    // Как codex/gemini: промпт последним аргументом, модель через -m.
-    await new CliModelGateway("codex", ["exec"], spawn, 120_000, "arg", "-m").call("gpt-x", { prompt: "задача" });
-    assert.deepEqual(seen[0].args, ["exec", "-m", "gpt-x", "задача"]);
-    assert.equal(seen[0].input, "", "в arg-режиме stdin пуст");
+    assert.deepEqual(subscriptionCliEnv(source), {
+      PATH: "/bin",
+      HOME: "/tmp/test-home",
+      CLAUDE_CODE_OAUTH_TOKEN: "subscription-oauth",
+    });
+    assert.equal(source.ANTHROPIC_API_KEY, "paid-anthropic", "исходное окружение не мутируется");
   });
 });
 
-describe("harnessPreset — харнессы claude/codex/gemini", () => {
-  it("claude → claude -p, stdin, --model", () => {
-    const p = harnessPreset("claude-cli");
-    assert.equal(p?.cmd, "claude");
-    assert.deepEqual(p?.baseArgs, ["-p"]);
-    assert.equal(p?.modelFlag, "--model");
+describe("CliModelGateway — fail-closed без overage preflight", () => {
+  it("ни прямой вызов, ни OAuth не запускают CLI child", async () => {
+    let spawned = false;
+    const result = await new CliModelGateway("claude", ["-p"], async () => {
+      spawned = true;
+      return { code: 0, stdout: "не должен запуститься", stderr: "" };
+    }).call("default", { prompt: "x" });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /usage credits\/overage/);
+    assert.equal(spawned, false);
   });
-  it("codex → codex exec, -m", () => {
-    const p = harnessPreset("codex-cli");
-    assert.equal(p?.cmd, "codex");
-    assert.deepEqual(p?.baseArgs, ["exec"]);
-    assert.equal(p?.modelFlag, "-m");
-  });
-  it("gemini → gemini, -m", () => {
-    const p = harnessPreset("gemini-cli");
-    assert.equal(p?.cmd, "gemini");
-    assert.equal(p?.modelFlag, "-m");
-  });
-  it("все три — подписочные CLI-провайдеры (claudexor их ротирует)", () => {
-    assert.equal(isCliProvider("codex-cli"), true);
-    assert.equal(isCliProvider("gemini-cli"), true);
-  });
-  it("не-CLI провайдер → null пресет", () => {
+});
+
+describe("harnessPreset — CLI dispatch отключён", () => {
+  it("не возвращает executable preset ни для одного CLI", () => {
+    assert.equal(harnessPreset("claude-cli"), null);
+    assert.equal(harnessPreset("claude-subscription"), null);
+    assert.equal(harnessPreset("codex-cli"), null);
+    assert.equal(harnessPreset("gemini-cli"), null);
     assert.equal(harnessPreset("http"), null);
     assert.equal(harnessPreset(undefined), null);
+  });
+});
+
+describe("HttpModelGateway — metered OpenAI-compatible", () => {
+  it("сохраняет standard usage/id/model, а отсутствующую цену не подменяет нулём", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl-1",
+          model: "resolved-model",
+          choices: [{ message: { content: "ответ" } }],
+          usage: {
+            prompt_tokens: 17,
+            completion_tokens: 5,
+            total_tokens: 22,
+            cache_creation_input_tokens: 7,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const gateway = new HttpModelGateway(
+      "https://gateway.invalid",
+      "fixture-provider",
+      "",
+      1000,
+      "metered",
+      fetchImpl,
+    );
+    const result = await gateway.call("alias", { prompt: "p", maxTokens: 99 });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.usage, {
+      inputTokens: 17,
+      outputTokens: 5,
+      cacheCreationInputTokens: 7,
+    });
+    assert.equal(result.providerRequestId, "chatcmpl-1");
+    assert.equal(result.resolvedModel, "resolved-model");
+    assert.equal("costUsd" in result, false, "нет provider cost ≠ $0");
+  });
+
+  it("передаёт cache creation 5m/1h breakdown, когда compatible gateway его даёт", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "ответ" } }],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            cache_creation_input_tokens: 7,
+            cache_creation: {
+              ephemeral_5m_input_tokens: 3,
+              ephemeral_1h_input_tokens: 4,
+            },
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const gateway = new HttpModelGateway(
+      "https://gateway.invalid",
+      "fixture-provider",
+      "",
+      1000,
+      "metered",
+      fetchImpl,
+    );
+    assert.deepEqual((await gateway.call("model", { prompt: "p" })).usage, {
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheCreationInputTokens: 7,
+      cacheCreation5mInputTokens: 3,
+      cacheCreation1hInputTokens: 4,
+    });
+  });
+
+  it("HTTP по умолчанию metered; local только явный", () => {
+    assert.equal(new HttpModelGateway("http://local", "fixture-provider").billingMode, "metered");
+    assert.equal(new HttpModelGateway("http://local", "", "", 1000, "local").billingMode, "local");
+  });
+
+  it("fromEnv блокирует metered без LLM_PRICE_PROVIDER_ID до HTTP", () => {
+    process.env.LLM_BASE_URL = "https://gateway.invalid";
+    process.env.LLM_MODEL = "priced-model";
+    process.env.LLM_HTTP_BILLING_MODE = "metered";
+
+    assert.throws(() => modelGatewayFromEnv(), /LLM_PRICE_PROVIDER_ID.*заблокирован/);
+    assert.match(llmPosture(), /LLM_PRICE_PROVIDER_ID.*заблокированы/);
+  });
+
+  it("fromEnv fail-closed блокирует codex/gemini subscription presets", () => {
+    process.env.LLM_PROVIDER = "codex-cli";
+    assert.throws(() => modelGatewayFromEnv(), /subscription auth mode не доказан/);
+    assert.match(llmPosture(), /вызовы заблокированы/);
+
+    process.env.LLM_PROVIDER = "gemini-cli";
+    assert.throws(() => modelGatewayFromEnv(), /subscription auth mode не доказан/);
+  });
+
+  it("fromEnv блокирует Claude CLI даже с OAuth: overage не доказан", () => {
+    process.env.LLM_PROVIDER = "claude-cli";
+    assert.throws(() => modelGatewayFromEnv(), /usage credits\/overage/);
+    assert.match(llmPosture(), /usage credits\/overage/);
+
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "subscription-oauth";
+    assert.throws(() => modelGatewayFromEnv(), /usage credits\/overage/);
+  });
+
+  it("fromEnv передаёт exact pricing profile; local разрешён без него", () => {
+    process.env.LLM_BASE_URL = "https://gateway.invalid";
+    process.env.LLM_MODEL = "priced-model";
+    process.env.LLM_PRICE_PROVIDER_ID = "omniroute-anthropic";
+    const metered = modelGatewayFromEnv();
+    assert.equal(metered?.provider, "omniroute-anthropic");
+    assert.equal(metered?.billingMode, "metered");
+    assert.match(llmPosture(), /price provider=omniroute-anthropic/);
+
+    process.env.LLM_HTTP_BILLING_MODE = "local";
+    delete process.env.LLM_PRICE_PROVIDER_ID;
+    const local = modelGatewayFromEnv();
+    assert.equal(local?.provider, "");
+    assert.equal(local?.billingMode, "local");
   });
 });

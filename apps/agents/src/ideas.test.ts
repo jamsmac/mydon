@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ChannelPost } from "@mydon/connectors";
 import type { EmbeddingGateway } from "./embedding";
-import { assessIdeas, buildIdeasProposal, readIdeaChannels, type ChannelDigest, type IdeasMemory } from "./ideas";
+import {
+  assessIdeas,
+  buildIdeasProposal,
+  readIdeaChannels,
+  type ChannelDigest,
+  type IdeasMemory,
+} from "./ideas";
 import type { ModelGateway, ModelRequest } from "./model-gateway";
 
 function post(num: number, text: string, links: string[] = []): ChannelPost {
@@ -29,7 +35,13 @@ describe("buildIdeasProposal", () => {
 
   it("дайджест: сортировка по свежести, latestNum для дельта-памяти", () => {
     const digests: ChannelDigest[] = [
-      { channel: "promtjam", posts: [post(414, "OmniRoute\nAI-gateway", ["https://omni.example"]), post(420, "claudexor ротация квот")] },
+      {
+        channel: "promtjam",
+        posts: [
+          post(414, "OmniRoute\nAI-gateway", ["https://omni.example"]),
+          post(420, "claudexor ротация квот"),
+        ],
+      },
     ];
     const p = buildIdeasProposal(digests);
     assert.ok(p);
@@ -52,9 +64,13 @@ describe("buildIdeasProposal", () => {
 });
 
 describe("assessIdeas — оценка моделью (первый LLM-навык)", () => {
+  const OPTS = { agentName: "knowledge-curator", requestKey: "ideas-test" } as const;
+
   function fakeGateway(text: string, ok = true): { gateway: ModelGateway; seen: ModelRequest[] } {
     const seen: ModelRequest[] = [];
     const gateway: ModelGateway = {
+      provider: "test-local",
+      billingMode: "local",
       call: async (model, req) => {
         seen.push(req);
         return { text, model, costUsd: 0, ok };
@@ -65,12 +81,16 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
 
   it("нет постов → null (нечего оценивать)", async () => {
     const { gateway } = fakeGateway("x");
-    assert.equal(await assessIdeas(gateway, [{ channel: "promtjam", posts: [] }]), null);
+    assert.equal(await assessIdeas(gateway, [{ channel: "promtjam", posts: [] }], OPTS), null);
   });
 
   it("оценка модели → предложение; посты идут как обёрнутый недоверенный контент", async () => {
     const { gateway, seen } = fakeGateway("1. claudexor — в LLM-путь\n2. Lightpanda — веб-скан");
-    const p = await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(420, "claudexor ротация")] }]);
+    const p = await assessIdeas(
+      gateway,
+      [{ channel: "promtjam", posts: [post(420, "claudexor ротация")] }],
+      OPTS,
+    );
     assert.ok(p);
     assert.match(p.action, /Оценка идей канала/);
     assert.match(String(p.facts.assessment), /claudexor/);
@@ -81,12 +101,20 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
 
   it("модель не ответила → null (не выдаём пустую оценку за работу)", async () => {
     const { gateway } = fakeGateway("", false);
-    assert.equal(await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(1, "идея")] }]), null);
+    assert.equal(
+      await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(1, "идея")] }], OPTS),
+      null,
+    );
   });
 
   // ── Семантическая память (RAG, #6b): дедуп уже разобранных идей ──────────────
   function fakeEmbedder(map: Record<string, number[]>): EmbeddingGateway {
-    return { embed: async (t) => map[t] ?? [0, 0, 1] };
+    return {
+      provider: "test-local",
+      billingMode: "local",
+      model: "fake",
+      embed: async (t) => ({ vector: map[t] ?? [0, 0, 1] }),
+    };
   }
   function fakeCore(seed: { type: string; payload: unknown }[] = []) {
     const events = [...seed];
@@ -96,7 +124,8 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
         recordEvent: async (i: { type: string; payload?: unknown }) => {
           events.push({ type: i.type, payload: i.payload });
         },
-        listEvents: async (type: string) => events.filter((e) => e.type === type).map((e) => ({ payload: e.payload })),
+        listEvents: async (type: string) =>
+          events.filter((e) => e.type === type).map((e) => ({ payload: e.payload })),
       } as never,
     };
   }
@@ -106,7 +135,11 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
     const { client, events } = fakeCore();
     const emb = fakeEmbedder({ "новая фишка": [1, 0, 0] });
     const memory: IdeasMemory = { core: client, embedder: emb, namespace: "ideas" };
-    const p = await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(7, "новая фишка")] }], { memory });
+    const p = await assessIdeas(
+      gateway,
+      [{ channel: "promtjam", posts: [post(7, "новая фишка")] }],
+      { ...OPTS, memory },
+    );
     assert.ok(p);
     assert.equal(p.facts.priorHits, 0, "в пустой памяти совпадений нет");
     const remembered = events.filter((e) => e.type === "agent.embed:ideas");
@@ -117,7 +150,10 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
     const { gateway, seen } = fakeGateway("1. что-то новое");
     // В памяти уже лежит «claudexor ротация» с вектором [1,0,0].
     const stored = [
-      { type: "agent.embed:ideas", payload: { id: "promtjam/1", text: "claudexor ротация квот", vector: [1, 0, 0] } },
+      {
+        type: "agent.embed:ideas",
+        payload: { id: "promtjam/1", text: "claudexor ротация квот", vector: [1, 0, 0] },
+      },
     ];
     const { client } = fakeCore(stored);
     // Новый пост про claudexor — эмбеддер даёт близкий вектор (косинус ≈ 1 ≥ 0.85).
@@ -129,7 +165,7 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
     const p = await assessIdeas(
       gateway,
       [{ channel: "promtjam", posts: [post(9, "claudexor снова про ротацию")] }],
-      { memory },
+      { ...OPTS, memory },
     );
     assert.ok(p);
     assert.equal(p.facts.priorHits, 1, "нашли одну уже разобранную похожую идею");

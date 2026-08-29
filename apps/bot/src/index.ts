@@ -8,7 +8,7 @@ import {
   type LlmResolver,
 } from "@mydon/assistant";
 import { createDocumentBuilder } from "@mydon/documents";
-import { dueLabel, parseStartPayload, rolesLabel, TZ } from "@mydon/shared";
+import { CoreLlmLedgerClient, dueLabel, parseStartPayload, rolesLabel, TZ } from "@mydon/shared";
 import {
   BRIEFING_NOTES_WINDOW_MS,
   collectGloberentSignals,
@@ -73,6 +73,10 @@ async function main(): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
   const allowlist = parseAllowlist(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
+  const serviceToken = process.env.SERVICE_TOKEN ?? "";
+  const core = new CoreClient(coreUrl, 10_000, serviceToken);
+  // Один центральный ledger-клиент для всех платных путей бота.
+  const llmLedger = new CoreLlmLedgerClient({ baseUrl: coreUrl, serviceToken });
 
   // LLM-слой. Два пути входа: подписка Claude владельца (CLAUDE_CODE_OAUTH_TOKEN)
   // и API-ключ (ANTHROPIC_API_KEY). Заданы оба — сначала подписка, при её сбое
@@ -81,7 +85,13 @@ async function main(): Promise<void> {
     ? { model: process.env.MYDON_ASSISTANT_MODEL }
     : {};
   const apiLlm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
-    ? createLlmResolver({ apiKey: process.env.ANTHROPIC_API_KEY, ...modelOverride })
+    ? createLlmResolver({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+        ledger: llmLedger,
+        consumer: "bot",
+        feature: "assistant",
+        ...modelOverride,
+      })
     : undefined;
   // Таймаут короче обычного (обычный ответ ~4с): бот разбирает сообщения по
   // одному, и зависший вопрос заморозил бы кнопки и чаты всех остальных.
@@ -96,6 +106,8 @@ async function main(): Promise<void> {
   const buildDocument = process.env.ANTHROPIC_API_KEY
     ? createDocumentBuilder({
         apiKey: process.env.ANTHROPIC_API_KEY,
+        ledger: llmLedger,
+        feature: "bot.report",
         ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),
       })
     : undefined;
@@ -105,7 +117,7 @@ async function main(): Promise<void> {
   const context = createContextSearch({ baseUrl: coreUrl });
 
   const deps: HandlerDeps = {
-    core: new CoreClient(coreUrl, 10_000, process.env.SERVICE_TOKEN ?? ""),
+    core,
     context,
     allowlist,
     limiter: new RateLimiter(),
@@ -208,7 +220,10 @@ async function main(): Promise<void> {
         }
         const res = await deps.core.redeemInvite(code, String(chatId));
         if ("error" in res) {
-          await tg.sendMessage(chatId, "Ссылка не сработала: она одноразовая и живёт сутки. Попроси новую.");
+          await tg.sendMessage(
+            chatId,
+            "Ссылка не сработала: она одноразовая и живёт сутки. Попроси новую.",
+          );
           return;
         }
         await tg.sendMessage(
@@ -260,7 +275,10 @@ async function main(): Promise<void> {
       // «записано» — так теряются возвраты и комментарии. Ответ шлём с
       // собственной страховкой: упадёт и он — хуже уже не станет.
       await tg
-        .sendMessage(chatId, "⚠️ Сервер не ответил — сообщение не обработано. Отправь его ещё раз через минуту.")
+        .sendMessage(
+          chatId,
+          "⚠️ Сервер не ответил — сообщение не обработано. Отправь его ещё раз через минуту.",
+        )
         .catch(() => undefined);
     }
   }
@@ -285,7 +303,10 @@ async function main(): Promise<void> {
         // Свой это или чужой — не узнать; молчать нельзя: снимок «до» второй
         // раз не сделать. Постороннему этот редкий ответ ничего не выдаёт.
         await tg
-          .sendMessage(chatId, "⚠️ Фото не сохранилось — сервер не ответил. Отправь его ещё раз через минуту.")
+          .sendMessage(
+            chatId,
+            "⚠️ Фото не сохранилось — сервер не ответил. Отправь его ещё раз через минуту.",
+          )
           .catch(() => undefined);
         return;
       }
@@ -375,7 +396,10 @@ async function main(): Promise<void> {
         day: "2-digit",
         month: "2-digit",
       });
-      await tg.sendMessage(chatId, `🧾 Чек прикреплён к накладной от ${when} (${target.positions} поз.).`);
+      await tg.sendMessage(
+        chatId,
+        `🧾 Чек прикреплён к накладной от ${when} (${target.positions} поз.).`,
+      );
     } catch (err) {
       console.error("Чек владельца не обработан:", err);
       await tg
@@ -389,7 +413,17 @@ async function main(): Promise<void> {
     const to = isoDate(new Date());
     const from = isoDate(new Date(Date.now() - 3 * 86_400_000));
     const yesterday = isoDate(new Date(Date.now() - 86_400_000));
-    const [b, approvals, purchase, fillStatus, reconcile, washSchedule, globerent, staffActions, ruleNotes] = await Promise.all([
+    const [
+      b,
+      approvals,
+      purchase,
+      fillStatus,
+      reconcile,
+      washSchedule,
+      globerent,
+      staffActions,
+      ruleNotes,
+    ] = await Promise.all([
       deps.core.briefing(),
       // Согласования — деградируемый блок: их сбой не должен стоить владельцу
       // всего брифинга. Раньше он был обязательным, и одна ошибка в 07:30
@@ -409,13 +443,19 @@ async function main(): Promise<void> {
       // недельное (см. BRIEFING_NOTES_WINDOW_MS): повтор отсекает Core по
       // notification_delivery, а узкое окно теряло бы сигнал после первой же
       // неудачной отправки.
-      deps.core.briefingNotifications(new Date(Date.now() - BRIEFING_NOTES_WINDOW_MS)).catch(() => null),
+      deps.core
+        .briefingNotifications(new Date(Date.now() - BRIEFING_NOTES_WINDOW_MS))
+        .catch(() => null),
     ]);
     const coffee =
       fillStatus || reconcile || washSchedule
         ? {
             underfill: fillStatus?.filter((r) => r.status === "underfill").length ?? 0,
-            anomaly: reconcile?.reduce((n, g) => n + g.rows.filter((r) => r.reconcile.status === "anomaly").length, 0) ?? 0,
+            anomaly:
+              reconcile?.reduce(
+                (n, g) => n + g.rows.filter((r) => r.reconcile.status === "anomaly").length,
+                0,
+              ) ?? 0,
             overdueWash: washSchedule?.filter((r) => r.status === "overdue").length ?? 0,
           }
         : undefined;
@@ -528,12 +568,15 @@ async function main(): Promise<void> {
   };
 
   const scheduleDigest = (): void => {
-    setTimeout(() => {
-      void (async () => {
-        await withRetries("Дайджест сотрудникам не отправлен", sendStaffDigest);
-        scheduleDigest();
-      })();
-    }, msUntilBriefing(new Date(), 7, 0));
+    setTimeout(
+      () => {
+        void (async () => {
+          await withRetries("Дайджест сотрудникам не отправлен", sendStaffDigest);
+          scheduleDigest();
+        })();
+      },
+      msUntilBriefing(new Date(), 7, 0),
+    );
   };
   scheduleDigest();
 
@@ -872,7 +915,8 @@ async function main(): Promise<void> {
             : "Вернул режим владельца.",
           asStaff.has(chatId) ? undefined : { remove_keyboard: true },
         );
-        if (asStaff.has(chatId)) await routeStaffMessage(chatId, "/start", u.message.from?.username);
+        if (asStaff.has(chatId))
+          await routeStaffMessage(chatId, "/start", u.message.from?.username);
         return;
       }
 
@@ -889,7 +933,7 @@ async function main(): Promise<void> {
           }
           return;
         }
-        const reply = await handleMessage(chatId, u.message.text, deps);
+        const reply = await handleMessage(chatId, u.message.text, deps, Date.now(), u.update_id);
         if (reply) {
           await tg.sendMessage(chatId, reply.text, reply.keyboard);
           // Длинный ответ (план закупа) приходит частями: у Telegram предел на
@@ -913,7 +957,10 @@ async function main(): Promise<void> {
               await tg.sendDocument(chatId, reply.document.filename, reply.document.content);
             } catch (err) {
               console.error("Файл не отправлен:", err);
-              await tg.sendMessage(chatId, "Файл получился, но отправить не вышло. Повтори запрос.");
+              await tg.sendMessage(
+                chatId,
+                "Файл получился, но отправить не вышло. Повтори запрос.",
+              );
             }
           }
         }
@@ -968,9 +1015,13 @@ async function main(): Promise<void> {
           const msg = u.callback_query.message;
           if (msg?.message_id !== undefined && typeof msg.text === "string") {
             try {
-              await tg.editMessage(chatId, msg.message_id, `${msg.text}
+              await tg.editMessage(
+                chatId,
+                msg.message_id,
+                `${msg.text}
 
-${DECIDED_LABEL[parsed.decision]}`);
+${DECIDED_LABEL[parsed.decision]}`,
+              );
             } catch {
               // Не переписалось (старое сообщение) — решение всё равно записано.
             }
@@ -978,9 +1029,10 @@ ${DECIDED_LABEL[parsed.decision]}`);
         } catch (err) {
           console.error("Решение не записано:", err);
           // Самая частая причина — уже решено (в панели или тут же раньше).
-          const detail = err instanceof Error && err.message.includes("уже закрыт")
-            ? "Уже решено раньше — карточка устарела"
-            : "Не удалось записать решение";
+          const detail =
+            err instanceof Error && err.message.includes("уже закрыт")
+              ? "Уже решено раньше — карточка устарела"
+              : "Не удалось записать решение";
           await tg.answerCallback(u.callback_query.id, detail);
         }
         return;
@@ -1017,9 +1069,9 @@ ${DECIDED_LABEL[parsed.decision]}`);
         }
         if (res.message) await tg.sendMessage(chatId, res.message, res.keyboard);
         if (res.recipientNote) {
-          await tg.sendMessage(res.recipientNote.chat, res.recipientNote.text).catch((err: unknown) =>
-            console.error("Исполнитель не получил итог приёмки:", err),
-          );
+          await tg
+            .sendMessage(res.recipientNote.chat, res.recipientNote.text)
+            .catch((err: unknown) => console.error("Исполнитель не получил итог приёмки:", err));
         }
         // Владелец узнаёт о сборе сразу — деньги в пути, приём ждёт в панели.
         if (res.ownerNote) {

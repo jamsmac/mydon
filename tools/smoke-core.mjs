@@ -102,7 +102,32 @@ const sql = postgres(DATABASE_URL, { prepare: false, max: 1, onnotice: () => {} 
 const PORT = process.env.SMOKE_PORT ?? (await свободныйПорт());
 const BASE = `http://127.0.0.1:${PORT}`;
 const TOKEN = process.env.SERVICE_TOKEN ?? "smoke-token";
+const OWNER_TOKEN = `${TOKEN}:owner-only`;
 const СТАРТ_ТАЙМАУТ_МС = 60_000;
+
+/** Route-level guard должен реально быть зарегистрирован Nest-ом. */
+async function проверитьOwnerActionGuard() {
+  const id = "00000000-0000-4000-8000-000000000001";
+  const withoutOwner = await fetch(`${BASE}/tasks/${id}/agent-run/retry`, {
+    method: "POST",
+    headers: { "x-service-token": TOKEN },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (withoutOwner.status !== 401) {
+    throw new Error(`retry с одним SERVICE_TOKEN дал ${withoutOwner.status}, ожидали 401`);
+  }
+  const withOwner = await fetch(`${BASE}/tasks/${id}/agent-run/retry`, {
+    method: "POST",
+    headers: {
+      "x-service-token": TOKEN,
+      "x-owner-action-token": OWNER_TOKEN,
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (withOwner.status !== 404) {
+    throw new Error(`retry с двумя токенами не дошёл до service: ${withOwner.status}, ожидали 404`);
+  }
+}
 
 /** Пути, каждый из которых доходит до базы. Читающие — безопасны и идемпотентны. */
 const ЧТЕНИЕ = [
@@ -126,12 +151,15 @@ const ЧТЕНИЕ = [
     // ключа: пропущенный ключ панель прочтёт как «эталон не пришёл».
     path: "/vending/products",
     проверить: (ответ) => {
-      if (!Array.isArray(ответ) || ответ.length === 0) throw new Error("прайс вендинга пуст — засеян ли seed-vending?");
+      if (!Array.isArray(ответ) || ответ.length === 0)
+        throw new Error("прайс вендинга пуст — засеян ли seed-vending?");
       for (const p of ответ) {
         if (!("salePrice" in p)) throw new Error(`у «${p.name}» нет ключа salePrice`);
-        if (p.salePrice !== null && typeof p.salePrice !== "number") throw new Error(`salePrice=${p.salePrice} у «${p.name}»`);
+        if (p.salePrice !== null && typeof p.salePrice !== "number")
+          throw new Error(`salePrice=${p.salePrice} у «${p.name}»`);
         const fiscalKeys = ["ikpu", "mxik", "vatPct", "barcode", "packageCode", "marked"];
-        if (p.fiscal === null || typeof p.fiscal !== "object") throw new Error(`у «${p.name}» нет блока fiscal`);
+        if (p.fiscal === null || typeof p.fiscal !== "object")
+          throw new Error(`у «${p.name}» нет блока fiscal`);
         for (const key of fiscalKeys) {
           if (!(key in p.fiscal)) throw new Error(`у «${p.name}» нет fiscal.${key}`);
         }
@@ -150,10 +178,21 @@ const ЧТЕНИЕ = [
       // печатал `${rows.length} событий`, то есть на переполнении говорил ровно
       // «500 событий» и выдавал обрезок за посчитанный итог.
       if (!Array.isArray(о?.rows)) throw new Error("refill-events.rows — не массив");
-      if (typeof о?.capped !== "boolean") throw new Error(`refill-events.capped=${о?.capped} — не флаг`);
-      if (о.rows.length <= 500 && о.capped !== false) throw new Error("capped взведён на неполном списке");
+      if (typeof о?.capped !== "boolean")
+        throw new Error(`refill-events.capped=${о?.capped} — не флаг`);
+      if (о.rows.length <= 500 && о.capped !== false)
+        throw new Error("capped взведён на неполном списке");
       for (const e of о.rows) {
-        for (const k of ["id", "serial", "name", "windowFrom", "windowTo", "units", "slots", "matchedRefillId"]) {
+        for (const k of [
+          "id",
+          "serial",
+          "name",
+          "windowFrom",
+          "windowTo",
+          "units",
+          "slots",
+          "matchedRefillId",
+        ]) {
           if (!(k in e)) throw new Error(`в событии журнала нет ключа ${k}`);
         }
       }
@@ -180,11 +219,14 @@ const ЧТЕНИЕ = [
       // пустой ответ ЗДЕСЬ пропускается ВСЛУХ, а настоящая проверка поля стоит
       // там, где строки есть по построению — сценарий двух пересчётов подряд.
       if ((о.rows ?? []).length === 0) {
-        console.log("      (истории склада на засеянной базе нет — note проверяет сценарий двух пересчётов)");
+        console.log(
+          "      (истории склада на засеянной базе нет — note проверяет сценарий двух пересчётов)",
+        );
       } else {
         for (const r of о.rows) {
           if (!("note" in r)) throw new Error("в строке истории склада нет ключа note");
-          if (r.note !== null && typeof r.note !== "string") throw new Error(`note=${r.note} — не строка и не null`);
+          if (r.note !== null && typeof r.note !== "string")
+            throw new Error(`note=${r.note} — не строка и не null`);
         }
       }
     },
@@ -207,7 +249,8 @@ const ЧТЕНИЕ = [
     // не режется старой границей.
     path: "/vending/stock-counts?days=730",
     проверить: (о) => {
-      if (о?.days !== 730) throw new Error(`stock-counts.days=${о?.days}, ждали 730 (потолок П8a fix wave)`);
+      if (о?.days !== 730)
+        throw new Error(`stock-counts.days=${о?.days}, ждали 730 (потолок П8a fix wave)`);
       // `since` едет и на границе окна: подпись листа «с ДД.ММ.ГГГГ» берётся
       // из ответа, и на самом широком окне ей веры должно быть столько же.
       if (typeof о?.since !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(о.since))
@@ -220,8 +263,10 @@ const ЧТЕНИЕ = [
     // сами» от «читаем чужую базу» (П2/П4 поглощения).
     path: "/supply/summary",
     проверить: (ответ) => {
-      if (!["own", "stock"].includes(ответ?.source)) throw new Error(`supply.summary.source=${ответ?.source}`);
-      if (typeof ответ?.emptyPositions !== "number") throw new Error("supply.summary.emptyPositions — не число");
+      if (!["own", "stock"].includes(ответ?.source))
+        throw new Error(`supply.summary.source=${ответ?.source}`);
+      if (typeof ответ?.emptyPositions !== "number")
+        throw new Error("supply.summary.emptyPositions — не число");
     },
   },
   {
@@ -244,8 +289,10 @@ const ЧТЕНИЕ = [
       for (const ключ of ["machines", "products", "unknownProducts", "excluded", "warnings"]) {
         if (!Array.isArray(о?.[ключ])) throw new Error(`margin.${ключ} — не массив`);
       }
-      if (typeof о?.totals?.revenue !== "number") throw new Error("margin.totals.revenue — не число");
-      if (typeof о?.lowPct !== "number") throw new Error("margin.lowPct — не число (порог не прочитан из настроек)");
+      if (typeof о?.totals?.revenue !== "number")
+        throw new Error("margin.totals.revenue — не число");
+      if (typeof о?.lowPct !== "number")
+        throw new Error("margin.lowPct — не число (порог не прочитан из настроек)");
       if (о.machines.length === 0 && !о.warnings.some((w) => w.code === "no_sales")) {
         throw new Error("пустая маржа без предупреждения no_sales — нули выданы за результат");
       }
@@ -296,21 +343,28 @@ const ЧТЕНИЕ = [
     // и сводка ОБЯЗАНА назвать это пустотой, а не нулевой маржой.
     path: "/vending/weekly-digest",
     проверить: (о) => {
-      if (!/^\d{4}-\d{2}$/.test(о?.week)) throw new Error(`weekly-digest.week=${о?.week} — не ключ ISO-недели`);
-      if (!/^\d{4}-\d{2}$/.test(о?.previousWeek)) throw new Error("weekly-digest.previousWeek — не ключ ISO-недели");
+      if (!/^\d{4}-\d{2}$/.test(о?.week))
+        throw new Error(`weekly-digest.week=${о?.week} — не ключ ISO-недели`);
+      if (!/^\d{4}-\d{2}$/.test(о?.previousWeek))
+        throw new Error("weekly-digest.previousWeek — не ключ ISO-недели");
       for (const ключ of ["from", "to"]) {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(о?.[ключ])) throw new Error(`weekly-digest.${ключ} — не ташкентские сутки`);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(о?.[ключ]))
+          throw new Error(`weekly-digest.${ключ} — не ташкентские сутки`);
       }
-      if (о.from >= о.to) throw new Error("weekly-digest: понедельник недели не раньше воскресенья");
+      if (о.from >= о.to)
+        throw new Error("weekly-digest: понедельник недели не раньше воскресенья");
       for (const ключ of ["machines", "topProducts", "worstProducts"]) {
         if (!Array.isArray(о?.[ключ])) throw new Error(`weekly-digest.${ключ} — не массив`);
       }
-      if (!Array.isArray(о?.deadStock?.rows)) throw new Error("weekly-digest.deadStock.rows — не массив");
+      if (!Array.isArray(о?.deadStock?.rows))
+        throw new Error("weekly-digest.deadStock.rows — не массив");
       for (const ключ of ["purchase", "retail"]) {
-        if (!Array.isArray(о?.priceChanges?.[ключ])) throw new Error(`weekly-digest.priceChanges.${ключ} — не массив`);
+        if (!Array.isArray(о?.priceChanges?.[ключ]))
+          throw new Error(`weekly-digest.priceChanges.${ключ} — не массив`);
       }
       for (const ключ of ["refills", "intake", "stocktakes"]) {
-        if (typeof о?.[ключ] !== "object" || о[ключ] === null) throw new Error(`weekly-digest.${ключ} — не объект`);
+        if (typeof о?.[ключ] !== "object" || о[ключ] === null)
+          throw new Error(`weekly-digest.${ключ} — не объект`);
       }
       if (о.stocktakes.lastCountedAt !== null && typeof о.stocktakes.lastCountedAt !== "string") {
         throw new Error("weekly-digest.stocktakes.lastCountedAt — не ISO и не null");
@@ -319,11 +373,13 @@ const ЧТЕНИЕ = [
       if (о.machines.length === 0 && о.totals.pct !== null) {
         throw new Error("неделя без продаж отдала процент маржи — нули выданы за результат");
       }
-      if (о?.health?.parity == null) throw new Error("weekly-digest.health.parity — null (сверять нечего ≠ паритета нет)");
+      if (о?.health?.parity == null)
+        throw new Error("weekly-digest.health.parity — null (сверять нечего ≠ паритета нет)");
       // Здоровье ЗА ОТЧЁТНУЮ НЕДЕЛЮ (R-H-9) — рядом с «сейчас», а не вместо:
       // блок, подписанный неделей, но посчитанный моментом отправки, — дефект O7.
       const w = о?.weekHealth;
-      if (!w) throw new Error("в сводке нет weekHealth — письмо снова говорило бы про момент отправки");
+      if (!w)
+        throw new Error("в сводке нет weekHealth — письмо снова говорило бы про момент отправки");
       if (w.week !== о.week) throw new Error(`weekHealth.week=${w.week}, а письмо про ${о.week}`);
       const разряды = ["success", "partial", "failed", "running"];
       for (const k of [...разряды, "runs", "worstFailedStreak", "parityGreen", "parityRed"]) {
@@ -337,11 +393,14 @@ const ЧТЕНИЕ = [
       }
       if (!Array.isArray(w.parityDays)) throw new Error("weekHealth.parityDays — не массив");
       // `null` — «данные в неделю не приезжали ВОВСЕ», и это не ноль часов.
-      if (w.lastDataAt !== null && typeof w.lastDataAt !== "string") throw new Error("weekHealth.lastDataAt — не ISO и не null");
+      if (w.lastDataAt !== null && typeof w.lastDataAt !== "string")
+        throw new Error("weekHealth.lastDataAt — не ISO и не null");
       // Понедельничное письмо всегда про ЗАКОНЧЕННУЮ неделю: `?week=` текущей
       // гасится нормализацией, и взведённый флаг тут значил бы, что она сломана.
-      if (w.partialWeek) throw new Error("weekHealth.partialWeek — сводка отдала неделю, которая ещё идёт");
-      if (typeof о?.health?.failedStreak !== "number") throw new Error("health «сейчас» пропал из сводки");
+      if (w.partialWeek)
+        throw new Error("weekHealth.partialWeek — сводка отдала неделю, которая ещё идёт");
+      if (typeof о?.health?.failedStreak !== "number")
+        throw new Error("health «сейчас» пропал из сводки");
       // Секция, которая не посчиталась, обязана быть НАЗВАНА: сводка больше не
       // падает в 500 из-за здоровья сбора, и молчаливая пустота вместо секции
       // читалась бы как «там всё хорошо».
@@ -362,9 +421,11 @@ const ЧТЕНИЕ = [
     // гарантированно мимо кеша (adversarial-security, п. 2).
     path: "/vending/weekly-digest?week=1990-01",
     проверить: (о) => {
-      if (о?.week === "1990-01") throw new Error("неделя из 1990-го посчиталась — граница диапазона не действует");
+      if (о?.week === "1990-01")
+        throw new Error("неделя из 1990-го посчиталась — граница диапазона не действует");
       if (!/^\d{4}-\d{2}$/.test(о?.week)) throw new Error(`weekly-digest.week=${о?.week}`);
-      if (о.from < "2024-01-01") throw new Error(`окно ${о.from} старше двух лет — нормализация промахнулась`);
+      if (о.from < "2024-01-01")
+        throw new Error(`окно ${о.from} старше двух лет — нормализация промахнулась`);
     },
   },
   {
@@ -374,12 +435,15 @@ const ЧТЕНИЕ = [
     path: "/ourvend/parity?days=7",
     проверить: (ответ) => {
       if (!Array.isArray(ответ?.mismatches)) throw new Error("parity.mismatches — не массив");
-      if (!Array.isArray(ответ?.stock?.mismatches)) throw new Error("parity.stock.mismatches — не массив");
+      if (!Array.isArray(ответ?.stock?.mismatches))
+        throw new Error("parity.stock.mismatches — не массив");
       if (typeof ответ?.checked !== "number") throw new Error("parity.checked — не число");
       // R-FW-P1a: «в допуске» — ОТДЕЛЬНОЕ число рядом с «совпало», иначе допуск
       // становится способом не заметить убыль остатка.
-      if (typeof ответ?.stock?.withinTolerance !== "number") throw new Error("parity.stock.withinTolerance — не число");
-      if (typeof ответ?.stock?.tolerance !== "number") throw new Error("parity.stock.tolerance — не число");
+      if (typeof ответ?.stock?.withinTolerance !== "number")
+        throw new Error("parity.stock.withinTolerance — не число");
+      if (typeof ответ?.stock?.tolerance !== "number")
+        throw new Error("parity.stock.tolerance — не число");
       if (!["mirror", "own-vs-donor", "retired"].includes(ответ?.mode)) {
         throw new Error(`parity.mode=${ответ?.mode} — не один из mirror/own-vs-donor/retired`);
       }
@@ -393,10 +457,13 @@ const ЧТЕНИЕ = [
     проверить: (о) => {
       if (typeof о?.greenDays !== "number") throw new Error("streak.greenDays — не число");
       if (typeof о?.threshold !== "number") throw new Error("streak.threshold — не число");
-      if (typeof о?.readyForCutover !== "boolean") throw new Error("streak.readyForCutover — не булево");
+      if (typeof о?.readyForCutover !== "boolean")
+        throw new Error("streak.readyForCutover — не булево");
       if (!Array.isArray(о?.days)) throw new Error("streak.days — не массив");
-      if (о.lastRed !== null && typeof о.lastRed !== "string") throw new Error("streak.lastRed — не дата и не null");
-      if (о.greenDays !== 0 || о.readyForCutover !== false) throw new Error("на пустом журнале серия обязана быть нулевой");
+      if (о.lastRed !== null && typeof о.lastRed !== "string")
+        throw new Error("streak.lastRed — не дата и не null");
+      if (о.greenDays !== 0 || о.readyForCutover !== false)
+        throw new Error("на пустом журнале серия обязана быть нулевой");
     },
   },
   {
@@ -429,7 +496,8 @@ const ЧТЕНИЕ = [
       if (!Array.isArray(о?.runs)) throw new Error("health.runs — не массив");
       if (typeof о?.failedStreak !== "number") throw new Error("health.failedStreak — не число");
       for (const ключ of ["slotsLagMin", "salesLagH", "productSaleLagH"]) {
-        if (о?.[ключ] !== null && typeof о?.[ключ] !== "number") throw new Error(`health.${ключ} — не число и не null`);
+        if (о?.[ключ] !== null && typeof о?.[ключ] !== "number")
+          throw new Error(`health.${ключ} — не число и не null`);
       }
       if (о.lastSuccessAt !== null && typeof о.lastSuccessAt !== "string") {
         throw new Error("health.lastSuccessAt — не ISO и не null");
@@ -442,14 +510,16 @@ const ЧТЕНИЕ = [
       if (о.staleHours !== null && typeof о.staleHours !== "number") {
         throw new Error(`health.staleHours=${о.staleHours} — не число и не null`);
       }
-      if (typeof о.staleThresholdH !== "number") throw new Error("health.staleThresholdH — не число");
+      if (typeof о.staleThresholdH !== "number")
+        throw new Error("health.staleThresholdH — не число");
       // П8b: гейт катовера. Ключи ОБЯЗАНЫ присутствовать — витрина рисует
       // «N зелёных дней из 7» сравнением двух ЧИСЕЛ ответа, и пропущенный ключ
       // она прочтёт как «поле не приехало», а не как «серии нет».
       for (const ключ of ["parityStreak", "cutoverThreshold"]) {
         if (typeof о[ключ] !== "number") throw new Error(`health.${ключ} — не число`);
       }
-      if (о.cutoverThreshold < 1) throw new Error("порог катовера меньше суток — гейт снят опиской в настройке");
+      if (о.cutoverThreshold < 1)
+        throw new Error("порог катовера меньше суток — гейт снят опиской в настройке");
       // Гигиена R-G-4: дата последнего красного дня паритета и начало текущей
       // серии едут ЭТИМ ЖЕ полем ответа, а не вторым запросом к
       // /ourvend/parity/streak. Ключи ОБЯЗАНЫ присутствовать, даже когда они
@@ -470,7 +540,8 @@ const ЧТЕНИЕ = [
       if (о.lastSuccessAt === null && о.staleHours !== null) {
         throw new Error("успехов нет, а давность посчиталась — «не было вовсе» ≠ «ноль часов»");
       }
-      if (о?.parity == null) throw new Error("health.parity — null (сверять нечего ≠ паритета нет)");
+      if (о?.parity == null)
+        throw new Error("health.parity — null (сверять нечего ≠ паритета нет)");
       if (typeof о.parity.days !== "number" || typeof о.parity.mismatches !== "number") {
         throw new Error("health.parity.days/mismatches — не числа");
       }
@@ -484,12 +555,15 @@ const ЧТЕНИЕ = [
       // независимой стороной и всё сошлось» от «сверять было не с чем»: на
       // засеянной базе (без STOCK_DATABASE_URL) это как раз `retired`.
       if (!["mirror", "own-vs-donor", "retired"].includes(о.parity.mode)) {
-        throw new Error(`health.parity.mode=${о.parity.mode} — не один из mirror/own-vs-donor/retired`);
+        throw new Error(
+          `health.parity.mode=${о.parity.mode} — не один из mirror/own-vs-donor/retired`,
+        );
       }
       if (о.runs.length === 0 && (о.failedStreak !== 0 || о.lastSuccessAt !== null)) {
         throw new Error("прогонов нет, а серия/успех не пусты — журнал прочитан не оттуда");
       }
-      if (о.runs.length > 20) throw new Error("health.runs длиннее запрошенного — граница ?runs= не действует");
+      if (о.runs.length > 20)
+        throw new Error("health.runs длиннее запрошенного — граница ?runs= не действует");
     },
   },
   "/coffee/locations",
@@ -564,24 +638,31 @@ const ЧТЕНИЕ = [
       ]) {
         const i = карта.get(ключ);
         if (!i) throw new Error(`в /system/config нет ключа ${ключ}`);
-        if (i.source === "default" && i.value !== дефолт) throw new Error(`${ключ}=${i.value}, ждали ${дефолт}`);
+        if (i.source === "default" && i.value !== дефолт)
+          throw new Error(`${ключ}=${i.value}, ждали ${дефолт}`);
       }
-      if (карта.get("OURVEND_ACCOUNTING_SOURCE").kind !== "select") throw new Error("источник учёта — не select");
+      if (карта.get("OURVEND_ACCOUNTING_SOURCE").kind !== "select")
+        throw new Error("источник учёта — не select");
       // R-FW-S5: рядом с записанным значением — ДЕЙСТВУЮЩИЙ источник. Без
       // STOCK_DATABASE_URL (а смоук гоняется именно так) записано `stock`, а
       // учёт уже `own`: панель, показывающая одно записанное, врёт на том
       // самом экране, на который смотрят в дни катовера.
       const источник = карта.get("OURVEND_ACCOUNTING_SOURCE");
       if (!["stock", "own"].includes(источник.effective)) {
-        throw new Error(`OURVEND_ACCOUNTING_SOURCE.effective=${источник.effective} — не stock и не own`);
+        throw new Error(
+          `OURVEND_ACCOUNTING_SOURCE.effective=${источник.effective} — не stock и не own`,
+        );
       }
       if (!process.env.STOCK_DATABASE_URL && источник.effective !== "own") {
         throw new Error("зеркала нет, а действующий источник не own — фолбэк не применён");
       }
       // Пустой вариант первым — задокументированный откат шага 1 катовера.
-      if ((источник.options ?? [])[0] !== "") throw new Error("у источника учёта нет пустого варианта для сброса");
-      if (карта.get("STOCK_PARITY_TOLERANCE") === undefined) throw new Error("нет ключа STOCK_PARITY_TOLERANCE");
-      if (о.some((i) => /API_KEY|TOKEN|SECRET|PASSWORD/i.test(i.key))) throw new Error("в тумблерах секрет");
+      if ((источник.options ?? [])[0] !== "")
+        throw new Error("у источника учёта нет пустого варианта для сброса");
+      if (карта.get("STOCK_PARITY_TOLERANCE") === undefined)
+        throw new Error("нет ключа STOCK_PARITY_TOLERANCE");
+      if (о.some((i) => /API_KEY|TOKEN|SECRET|PASSWORD/i.test(i.key)))
+        throw new Error("в тумблерах секрет");
     },
   },
 ];
@@ -624,14 +705,18 @@ const ЗАПИСЬ = [
     проверить: (ответ) => {
       if (ответ?.ok !== true) throw new Error(`правка отклонена: ${JSON.stringify(ответ)}`);
       if (ответ.readyBefore !== false || ответ.readyAfter !== true) {
-        throw new Error(`готовность не пересекла границу: ${ответ.readyBefore}→${ответ.readyAfter}`);
+        throw new Error(
+          `готовность не пересекла границу: ${ответ.readyBefore}→${ответ.readyAfter}`,
+        );
       }
     },
     после: async () => {
       const прайс = await читать("/vending/products");
       const строка = прайс.find((p) => p.id === P6_КАРТОЧКА);
-      if (строка?.fiscal?.ikpu !== "02202003001086002") throw new Error("ИКПУ не доехал до каталога");
-      if (строка.fiscal.vatPct !== 0) throw new Error("ставка 0 — законное значение, а её потеряли");
+      if (строка?.fiscal?.ikpu !== "02202003001086002")
+        throw new Error("ИКПУ не доехал до каталога");
+      if (строка.fiscal.vatPct !== 0)
+        throw new Error("ставка 0 — законное значение, а её потеряли");
       if (строка.fiscal.packageCode !== "778" || строка.fiscal.marked !== true) {
         throw new Error("ОКЕИ/маркировка не сохранились");
       }
@@ -724,11 +809,13 @@ const ЗАПИСЬ = [
     body: { days: 1 },
     проверить: (о) => {
       for (const key of ["machines", "events", "matched"]) {
-        if (typeof о?.[key] !== "number" || о[key] < 0) throw new Error(`detect.${key}=${о?.[key]}`);
+        if (typeof о?.[key] !== "number" || о[key] < 0)
+          throw new Error(`detect.${key}=${о?.[key]}`);
       }
       if (!Array.isArray(о.skipped)) throw new Error("detect.skipped — не массив");
       for (const s of о.skipped) {
-        if (!["dead", "uncalibrated", "no_slots"].includes(s?.reason)) throw new Error(`skipped.reason=${s?.reason}`);
+        if (!["dead", "uncalibrated", "no_slots"].includes(s?.reason))
+          throw new Error(`skipped.reason=${s?.reason}`);
       }
       if (о.events < 1) throw new Error(`детектор не увидел заливку: events=${о.events}`);
       if (о.matched !== 0) throw new Error(`записи оператора ещё нет, а matched=${о.matched}`);
@@ -789,7 +876,8 @@ const ЗАПИСЬ = [
       const строки = await читать("/vending/stock");
       const строка = строки.find((r) => r.product === P4_ТОВАР);
       if (!строка) throw new Error(`строка склада «${P4_ТОВАР}» не найдена`);
-      if (строка.quantity !== 7) throw new Error(`пересчёт не применился: quantity=${строка.quantity}`);
+      if (строка.quantity !== 7)
+        throw new Error(`пересчёт не применился: quantity=${строка.quantity}`);
       // Строго: прогон обязан идти по базе с прайсом (`seed-vending.js` в
       // шаге CI). Молчаливое «прайса нет, проверку пропустили» — это способ
       // однажды перестать проверять и не заметить.
@@ -806,7 +894,9 @@ const ЗАПИСЬ = [
       const история = await читать(`/vending/stock-counts?product=${encodeURIComponent(P4_ТОВАР)}`);
       const свои = история.rows.filter((r) => r.product === P4_ТОВАР);
       if (свои.length < 2) {
-        throw new Error(`история пересчётов «${P4_ТОВАР}»: строк ${свои.length}, ожидали два пересчёта подряд`);
+        throw new Error(
+          `история пересчётов «${P4_ТОВАР}»: строк ${свои.length}, ожидали два пересчёта подряд`,
+        );
       }
       const [первая, вторая] = свои; // ответ отсортирован «свежее сверху»
       // Количества именно ЭТОГО прогона, а не «сколько всего строк»: смоук
@@ -814,7 +904,8 @@ const ЗАПИСЬ = [
       if (первая.qty !== 7 || вторая.qty !== 5) {
         throw new Error(`два свежих пересчёта дали ${первая.qty}/${вторая.qty}, ожидали 7/5`);
       }
-      if (!(первая.countedAt > вторая.countedAt)) throw new Error("история отдана не «свежее сверху»");
+      if (!(первая.countedAt > вторая.countedAt))
+        throw new Error("история отдана не «свежее сверху»");
       if (первая.source !== "own" || вторая.source !== "own") {
         throw new Error(`свой пересчёт помечен не «own»: ${первая.source}/${вторая.source}`);
       }
@@ -877,15 +968,18 @@ const ЗАПИСЬ = [
     body: { days: 14 },
     проверить: (о) => {
       if (!Array.isArray(о.set)) throw new Error("set — не массив");
-      if (!Array.isArray(о.skipped) || о.skipped.length === 0) throw new Error("skipped пуст: пропущенных обязаны назвать");
+      if (!Array.isArray(о.skipped) || о.skipped.length === 0)
+        throw new Error("skipped пуст: пропущенных обязаны назвать");
       // Причин пропуска ЧЕТЫРЕ, и гейт выкатки обязан знать все: `inactive`
       // (товар снят с продажи) и `no_fact` (продажи есть, а цена из них не
       // выводится) законны ровно так же, как две первые. Первый снятый товар
       // в прайсе иначе красил бы CI по чужому поводу.
       const ПРИЧИНЫ = ["already_set", "no_sales", "no_fact", "inactive"];
       const чужие = о.skipped.filter((s) => !ПРИЧИНЫ.includes(s.reason));
-      if (чужие.length > 0) throw new Error(`неизвестная причина пропуска: ${JSON.stringify(чужие[0])}`);
-      if (!о.skipped.some((s) => s.reason === "no_sales")) throw new Error("ждали товары без факта витрины");
+      if (чужие.length > 0)
+        throw new Error(`неизвестная причина пропуска: ${JSON.stringify(чужие[0])}`);
+      if (!о.skipped.some((s) => s.reason === "no_sales"))
+        throw new Error("ждали товары без факта витрины");
     },
   },
   {
@@ -897,7 +991,8 @@ const ЗАПИСЬ = [
     проверить: (о) => {
       if (о.ok !== true) throw new Error(`ожидали ok, получили ${JSON.stringify(о)}`);
       if (о.newPrice !== 15000) throw new Error(`newPrice=${о.newPrice}`);
-      if (о.factPrice !== null) throw new Error(`факта витрины на засеянной базе быть не должно: ${о.factPrice}`);
+      if (о.factPrice !== null)
+        throw new Error(`факта витрины на засеянной базе быть не должно: ${о.factPrice}`);
     },
     // Ответ записи не показывает, что стало со строкой: проверяем ТЕМ ЖЕ
     // путём, которым прайс читает панель.
@@ -905,7 +1000,8 @@ const ЗАПИСЬ = [
       const прайс = await читать("/vending/products");
       const строка = прайс.find((p) => p.name === P4_ТОВАР);
       if (!строка) throw new Error(`товара «${P4_ТОВАР}» нет в прайсе`);
-      if (строка.salePrice !== 15000) throw new Error(`эталон не доехал до прайса: salePrice=${строка.salePrice}`);
+      if (строка.salePrice !== 15000)
+        throw new Error(`эталон не доехал до прайса: salePrice=${строка.salePrice}`);
     },
   },
   {
@@ -926,8 +1022,10 @@ const ЗАПИСЬ = [
     path: "/vending/sale-price",
     body: { product: P4_ТОВАР, price: 30000 },
     проверить: (о) => {
-      if (о.ok !== true) throw new Error(`ожидали ok без факта витрины, получили ${JSON.stringify(о)}`);
-      if (о.oldPrice !== 15000) throw new Error(`oldPrice=${о.oldPrice} — прошлый эталон не прочитан`);
+      if (о.ok !== true)
+        throw new Error(`ожидали ok без факта витрины, получили ${JSON.stringify(о)}`);
+      if (о.oldPrice !== 15000)
+        throw new Error(`oldPrice=${о.oldPrice} — прошлый эталон не прочитан`);
       if (о.newPrice !== 30000) throw new Error(`newPrice=${о.newPrice}`);
     },
   },
@@ -1205,6 +1303,516 @@ async function jsonRequest(method, path, body, auth = true) {
     }
   }
   return { r, text, json };
+}
+
+/**
+ * Durable task execution поверх единого LLM-ledger.
+ *
+ * Здесь важен настоящий PostgreSQL: два task-row разные, поэтому только
+ * advisory lock дневного action-cap может не дать двум commit одновременно
+ * создать второй approval/action. Заодно сценарий проходит весь outbox CAS.
+ */
+async function проверитьAgentExecutionOutbox() {
+  const marker = `agent-execution-smoke-${Date.now()}`;
+  const agentName = marker;
+
+  async function prepare(suffix, facts) {
+    const created = await jsonRequest("POST", "/tasks", {
+      title: `Smoke durable execution ${suffix}`,
+      description: `immutable input ${suffix}`,
+      ownerKind: "agent",
+      ownerRef: agentName,
+      createdBy: "smoke",
+      clientKey: `${marker}:task:${suffix}`,
+    });
+    if (!created.r.ok || typeof created.json?.id !== "string") {
+      throw new Error(`create task ${suffix} → ${created.r.status}: ${created.text.slice(0, 240)}`);
+    }
+
+    const claimed = await jsonRequest("POST", `/tasks/${created.json.id}/agent-run/claim`, {
+      agentName,
+    });
+    if (
+      !claimed.r.ok ||
+      claimed.json?.claimed !== true ||
+      typeof claimed.json?.runId !== "string" ||
+      typeof claimed.json?.executionAttemptId !== "string"
+    ) {
+      throw new Error(`claim ${suffix} → ${claimed.r.status}: ${claimed.text.slice(0, 240)}`);
+    }
+
+    const fence = {
+      agentName,
+      runId: claimed.json.runId,
+      executionAttemptId: claimed.json.executionAttemptId,
+    };
+    const checkpointBody = {
+      ...fence,
+      skill: "watch-receivables",
+      kind: "proposal",
+      action: `Smoke action ${suffix}`,
+      facts,
+      next: [`check ${suffix}`],
+    };
+    const checkpoint = await jsonRequest(
+      "POST",
+      `/tasks/${created.json.id}/agent-run/checkpoint`,
+      checkpointBody,
+    );
+    if (
+      !checkpoint.r.ok ||
+      checkpoint.json?.checkpointed !== true ||
+      checkpoint.json?.replay !== false ||
+      checkpoint.json?.checkpoint?.executionAttemptId !== fence.executionAttemptId
+    ) {
+      throw new Error(
+        `checkpoint ${suffix} → ${checkpoint.r.status}: ${checkpoint.text.slice(0, 300)}`,
+      );
+    }
+
+    return {
+      taskId: created.json.id,
+      fence,
+      checkpointBody,
+      commitBody: {
+        ...fence,
+        kind: "approval_requested",
+        note: `Smoke proposal ${suffix} committed`,
+        action: checkpointBody.action,
+        facts,
+        next: checkpointBody.next,
+        tier: "T2",
+        memorySignature: `${marker}:memory:${suffix}`,
+      },
+    };
+  }
+
+  const first = await prepare("a", { overdue: 2, amount: 100 });
+
+  // Exact checkpoint replay — та же execution row. Другой payload под тем же
+  // attempt обязан получить 409 до появления любого эффекта.
+  const checkpointReplay = await jsonRequest(
+    "POST",
+    `/tasks/${first.taskId}/agent-run/checkpoint`,
+    first.checkpointBody,
+  );
+  if (!checkpointReplay.r.ok || checkpointReplay.json?.replay !== true) {
+    throw new Error(`checkpoint replay не распознан: ${checkpointReplay.text.slice(0, 240)}`);
+  }
+  const checkpointMismatch = await jsonRequest(
+    "POST",
+    `/tasks/${first.taskId}/agent-run/checkpoint`,
+    { ...first.checkpointBody, action: `${first.checkpointBody.action} changed` },
+  );
+  if (checkpointMismatch.r.status !== 409) {
+    throw new Error(`checkpoint mismatch дал ${checkpointMismatch.r.status}, ожидали 409`);
+  }
+
+  const second = await prepare("b", { overdue: 3, amount: 200 });
+  const commits = await Promise.all([
+    jsonRequest("POST", `/tasks/${first.taskId}/agent-run/commit`, first.commitBody),
+    jsonRequest("POST", `/tasks/${second.taskId}/agent-run/commit`, second.commitBody),
+  ]);
+  for (const item of commits) {
+    if (!item.r.ok) {
+      throw new Error(`concurrent commit → ${item.r.status}: ${item.text.slice(0, 300)}`);
+    }
+  }
+  const committed = commits.filter((item) => item.json?.committed === true);
+  const capped = commits.filter((item) => item.json?.capped === true);
+  if (committed.length !== 1 || capped.length !== 1) {
+    throw new Error(
+      `action cap race: committed=${committed.length}, capped=${capped.length}, ` +
+        `responses=${JSON.stringify(commits.map((item) => item.json)).slice(0, 600)}`,
+    );
+  }
+  const winnerIndex = commits[0] === committed[0] ? 0 : 1;
+  const winner = winnerIndex === 0 ? first : second;
+  const winnerResult = committed[0].json;
+  if (
+    typeof winnerResult?.approvalId !== "string" ||
+    typeof winnerResult?.outboxDeliveryId !== "string"
+  ) {
+    throw new Error(`commit не вернул durable IDs: ${JSON.stringify(winnerResult)}`);
+  }
+
+  // Потерянный HTTP response: точный повтор возвращает те же IDs, даже когда
+  // task уже done и lease очищен. runId не участвует в logical outcome hash.
+  const replay = await jsonRequest(
+    "POST",
+    `/tasks/${winner.taskId}/agent-run/commit`,
+    winner.commitBody,
+  );
+  if (
+    !replay.r.ok ||
+    replay.json?.replay !== true ||
+    replay.json?.approvalId !== winnerResult.approvalId ||
+    replay.json?.outboxDeliveryId !== winnerResult.outboxDeliveryId
+  ) {
+    throw new Error(`commit replay потерял итог: ${replay.text.slice(0, 360)}`);
+  }
+  const commitMismatch = await jsonRequest("POST", `/tasks/${winner.taskId}/agent-run/commit`, {
+    ...winner.commitBody,
+    note: `${winner.commitBody.note} changed`,
+  });
+  if (commitMismatch.r.status !== 409) {
+    throw new Error(`commit mismatch дал ${commitMismatch.r.status}, ожидали 409`);
+  }
+
+  const [effectCounts] = await sql`
+    select
+      (select count(*)::int from approval where id = ${winnerResult.approvalId}::uuid) as approvals,
+      (select count(*)::int from event
+        where client_key = ${`task:${winner.taskId}:execution:${winner.fence.executionAttemptId}:event:agent-action`}) as actions,
+      (select count(*)::int from outbox_delivery
+        where id = ${winnerResult.outboxDeliveryId}::uuid) as deliveries
+  `;
+  if (
+    effectCounts?.approvals !== 1 ||
+    effectCounts?.actions !== 1 ||
+    effectCounts?.deliveries !== 1
+  ) {
+    throw new Error(`atomic effects не единичны: ${JSON.stringify(effectCounts)}`);
+  }
+
+  const claimedDelivery = await jsonRequest("POST", "/outbox/claim", {
+    destination: "notion-report",
+    workerRef: marker,
+  });
+  const delivery = claimedDelivery.json?.delivery;
+  if (
+    !claimedDelivery.r.ok ||
+    delivery?.id !== winnerResult.outboxDeliveryId ||
+    delivery?.status !== "dispatching" ||
+    typeof delivery?.leaseToken !== "string"
+  ) {
+    throw new Error(`outbox claim не вернул intent: ${claimedDelivery.text.slice(0, 360)}`);
+  }
+  const completed = await jsonRequest("POST", `/outbox/${delivery.id}/complete`, {
+    leaseToken: delivery.leaseToken,
+    status: "skipped",
+    error: "smoke: provider disabled",
+  });
+  if (!completed.r.ok || completed.json?.status !== "skipped") {
+    throw new Error(`outbox complete → ${completed.r.status}: ${completed.text.slice(0, 300)}`);
+  }
+  const completedReplay = await jsonRequest("POST", `/outbox/${delivery.id}/complete`, {
+    leaseToken: delivery.leaseToken,
+    status: "skipped",
+    error: "smoke: provider disabled",
+  });
+  if (!completedReplay.r.ok || completedReplay.json?.id !== delivery.id) {
+    throw new Error(`outbox terminal replay → ${completedReplay.r.status}`);
+  }
+
+  // Изменение task input после checkpoint не применяет устаревший результат.
+  // Owner-only retry оставляет ready row как abandoned и вращает attempt.
+  const changedAgent = `${marker}-changed`;
+  const changedTask = await jsonRequest("POST", "/tasks", {
+    title: "Smoke mutable input",
+    description: "before",
+    ownerKind: "agent",
+    ownerRef: changedAgent,
+    clientKey: `${marker}:changed-task`,
+  });
+  const changedClaim = await jsonRequest("POST", `/tasks/${changedTask.json.id}/agent-run/claim`, {
+    agentName: changedAgent,
+  });
+  const changedFence = {
+    agentName: changedAgent,
+    runId: changedClaim.json.runId,
+    executionAttemptId: changedClaim.json.executionAttemptId,
+  };
+  const changedCheckpoint = await jsonRequest(
+    "POST",
+    `/tasks/${changedTask.json.id}/agent-run/checkpoint`,
+    { ...changedFence, skill: "morning-digest", kind: "no_signal" },
+  );
+  if (!changedCheckpoint.r.ok) {
+    throw new Error(`changed checkpoint → ${changedCheckpoint.r.status}`);
+  }
+  const edit = await jsonRequest("PATCH", `/tasks/${changedTask.json.id}/edit`, {
+    description: "after",
+  });
+  if (!edit.r.ok) throw new Error(`edit after checkpoint → ${edit.r.status}`);
+  const blocked = await jsonRequest("POST", `/tasks/${changedTask.json.id}/agent-run/commit`, {
+    ...changedFence,
+    kind: "no_signal",
+    note: "stale result must not apply",
+  });
+  if (!blocked.r.ok || blocked.json?.status !== "blocked" || blocked.json?.committed !== false) {
+    throw new Error(`input mismatch не заблокирован: ${blocked.text.slice(0, 320)}`);
+  }
+  const retried = await fetch(`${BASE}/tasks/${changedTask.json.id}/agent-run/retry`, {
+    method: "POST",
+    headers: {
+      "x-service-token": TOKEN,
+      "x-owner-action-token": OWNER_TOKEN,
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const retriedBody = await retried.json();
+  if (
+    !retried.ok ||
+    retriedBody.agentExecutionAttemptId !== null ||
+    retriedBody.agentExecutionBlockedAt !== null
+  ) {
+    throw new Error(`owner retry не сбросил attempt: ${JSON.stringify(retriedBody).slice(0, 300)}`);
+  }
+  const [abandoned] = await sql`
+    select status from task_agent_execution
+    where execution_attempt_id = ${changedFence.executionAttemptId}::uuid
+  `;
+  if (abandoned?.status !== "abandoned") {
+    throw new Error(`owner retry не сохранил abandoned history: ${JSON.stringify(abandoned)}`);
+  }
+
+  // Redo committed задачи также требует явной новой оплачиваемой попытки, но
+  // immutable committed row остаётся доказательством прежнего результата.
+  const redo = await jsonRequest("POST", `/tasks/${winner.taskId}/quality`, { quality: "redo" });
+  if (!redo.r.ok || redo.json?.agentExecutionBlockedAt === null) {
+    throw new Error(`redo agent task не поставил owner block: ${redo.text.slice(0, 300)}`);
+  }
+  const redoRetry = await fetch(`${BASE}/tasks/${winner.taskId}/agent-run/retry`, {
+    method: "POST",
+    headers: {
+      "x-service-token": TOKEN,
+      "x-owner-action-token": OWNER_TOKEN,
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!redoRetry.ok) {
+    throw new Error(
+      `owner retry после redo → ${redoRetry.status}: ${(await redoRetry.text()).slice(0, 240)}`,
+    );
+  }
+  const [history] = await sql`
+    select status from task_agent_execution
+    where execution_attempt_id = ${winner.fence.executionAttemptId}::uuid
+  `;
+  if (history?.status !== "committed") {
+    throw new Error(`redo изменил immutable committed history: ${JSON.stringify(history)}`);
+  }
+}
+
+/**
+ * Единый LLM-ledger: настоящий advisory-lock, идемпотентность и in-flight
+ * exposure. Юнит со stub-БД не может доказать, что два процесса не пройдут
+ * один и тот же остаток одновременно — поэтому критическая гонка живёт здесь.
+ *
+ * У Core в smoke-окружении глобальный потолок ровно $1. Для seed-цены Opus 5
+ * выход стоит $25/MTok: 24 000 output tokens = резерв $0.60.
+ */
+async function проверитьLlmLedger() {
+  const marker = `smoke-${Date.now()}`;
+  const reserve = (attempt, outputTokenCeiling) =>
+    jsonRequest("POST", "/llm-ledger/reservations", {
+      requestKey: `${marker}:${attempt}`,
+      traceKey: marker,
+      consumer: "cc",
+      feature: "assistant",
+      provider: "anthropic",
+      model: "claude-opus-5",
+      inputTokenCeiling: 0,
+      outputTokenCeiling,
+      metadata: { smoke: true },
+    });
+
+  // Documents не может занизить reserve input ceiling до нуля: Core добавляет
+  // server-owned 128k overhead и один container 5m minimum. При cap=$1 такой
+  // запрос должен быть denied ещё до provider.
+  const documentUnderstated = await jsonRequest("POST", "/llm-ledger/reservations", {
+    requestKey: `${marker}:documents-understated`,
+    traceKey: marker,
+    consumer: "documents",
+    feature: "smoke.document",
+    provider: "anthropic",
+    model: "claude-opus-5",
+    inputTokenCeiling: 0,
+    outputTokenCeiling: 0,
+    metadata: {
+      smoke: true,
+      _llmLedger: { codeExecution: { exact: true, monthlyFreePoolApplied: true } },
+    },
+  });
+  if (
+    !documentUnderstated.r.ok ||
+    documentUnderstated.json?.allowed !== false ||
+    !String(documentUnderstated.json?.reason ?? "").includes("1.284166667")
+  ) {
+    throw new Error(
+      `Documents ceiling=0 обошёл server overhead: ${documentUnderstated.text.slice(0, 300)}`,
+    );
+  }
+
+  // По отдельности оба запроса помещаются в $1, вместе ($1.20) — нет.
+  // Promise.all даёт двум соединениям шанс одновременно дойти до транзакции;
+  // advisory-lock обязан сериализовать расчёт exposure.
+  const pair = await Promise.all([reserve("race-a", 24_000), reserve("race-b", 24_000)]);
+  for (const item of pair) {
+    if (!item.r.ok) {
+      throw new Error(`конкурентный reserve → ${item.r.status}: ${item.text.slice(0, 200)}`);
+    }
+  }
+  const allowed = pair.filter((item) => item.json?.allowed === true);
+  const denied = pair.filter((item) => item.json?.allowed === false);
+  if (allowed.length !== 1 || denied.length !== 1) {
+    throw new Error(
+      `гонка прошла неверно: allowed=${allowed.length}, denied=${denied.length}, ` +
+        `ответы=${JSON.stringify(pair.map((item) => item.json)).slice(0, 500)}`,
+    );
+  }
+  const first = allowed[0].json;
+  if (Math.abs(first.reservation.reservedUsd - 0.6) > 1e-9) {
+    throw new Error(`резерв Opus рассчитан как ${first.reservation.reservedUsd}, ожидали 0.6`);
+  }
+
+  // Тот же ключ и то же тело — replay той же строки, а не новая трата.
+  const winningAttempt = first.reservation.requestKey.endsWith("race-a") ? "race-a" : "race-b";
+  const replay = await reserve(winningAttempt, 24_000);
+  if (
+    !replay.r.ok ||
+    replay.json?.allowed !== true ||
+    replay.json?.reservation?.id !== first.reservation.id ||
+    replay.json?.reservation?.replay !== true
+  ) {
+    throw new Error(`идемпотентный replay не вернул reservation: ${replay.text.slice(0, 300)}`);
+  }
+
+  // Тот же ключ с другим денежным телом — машинно-читаемый block, не тихое
+  // переиспользование и не временная транспортная ошибка worker.
+  const mismatch = await reserve(winningAttempt, 20_000);
+  if (!mismatch.r.ok || mismatch.json?.allowed !== false || mismatch.json?.replayBlocked !== true) {
+    throw new Error(`idempotency mismatch не заблокирован: ${mismatch.text.slice(0, 300)}`);
+  }
+
+  // Факт $0.10 заменяет резерв $0.60 и освобождает $0.50 в тех же сутках.
+  const settled = await jsonRequest(
+    "POST",
+    `/llm-ledger/reservations/${first.reservation.id}/settle`,
+    {
+      outcome: "success",
+      providerRequestId: `${marker}:provider:1`,
+      resolvedModel: "claude-opus-5",
+      usage: { inputTokens: 0, outputTokens: 4_000 },
+    },
+  );
+  if (!settled.r.ok || settled.json?.status !== "settled") {
+    throw new Error(`settle → ${settled.r.status}: ${settled.text.slice(0, 240)}`);
+  }
+
+  // Закрытый requestKey — не временная 409 транспорта. Core возвращает
+  // машинно-читаемый replayBlocked, чтобы worker остановил execution attempt
+  // до явного решения владельца и не крутил повтор каждую минуту.
+  const closedReplay = await reserve(winningAttempt, 24_000);
+  if (
+    !closedReplay.r.ok ||
+    closedReplay.json?.allowed !== false ||
+    closedReplay.json?.status !== "settled" ||
+    closedReplay.json?.replayBlocked !== true
+  ) {
+    throw new Error(`закрытый replay не заблокирован: ${closedReplay.text.slice(0, 300)}`);
+  }
+
+  // release законен только до отправки и сразу освобождает exposure.
+  const releasable = await reserve("release", 20_000); // $0.50, итого $0.60
+  if (!releasable.r.ok || releasable.json?.allowed !== true) {
+    throw new Error(`reserve перед release не прошёл: ${releasable.text.slice(0, 240)}`);
+  }
+  const released = await jsonRequest(
+    "POST",
+    `/llm-ledger/reservations/${releasable.json.reservation.id}/release`,
+    { reason: "smoke:not_sent" },
+  );
+  if (!released.r.ok || released.json?.status !== "released") {
+    throw new Error(`release → ${released.r.status}: ${released.text.slice(0, 240)}`);
+  }
+
+  // Неизвестный исход после отправки не освобождает деньги: даже с partial
+  // usage computed actual — лишь lower bound, весь резерв $0.80 остаётся
+  // exposure. Вместе с settled $0.10 это $0.90.
+  const unknown = await reserve("unknown", 32_000);
+  if (!unknown.r.ok || unknown.json?.allowed !== true) {
+    throw new Error(`reserve unknown → ${unknown.r.status}: ${unknown.text.slice(0, 240)}`);
+  }
+  const failed = await jsonRequest(
+    "POST",
+    `/llm-ledger/reservations/${unknown.json.reservation.id}/settle`,
+    {
+      outcome: "unknown",
+      usage: { inputTokens: 0, outputTokens: 1 },
+      reason: "smoke:timeout_after_dispatch_with_partial_usage",
+    },
+  );
+  if (!failed.r.ok || failed.json?.status !== "failed") {
+    throw new Error(`unknown settle → ${failed.r.status}: ${failed.text.slice(0, 240)}`);
+  }
+  const over = await reserve("over-cap", 8_000); // ещё $0.20 → $1.10
+  if (!over.r.ok || over.json?.allowed !== false || over.json?.status !== "denied") {
+    throw new Error(`unknown reservation не удержал потолок: ${over.text.slice(0, 300)}`);
+  }
+  const deniedReplay = await reserve("over-cap", 8_000);
+  if (
+    !deniedReplay.r.ok ||
+    deniedReplay.json?.allowed !== false ||
+    deniedReplay.json?.status !== "denied" ||
+    deniedReplay.json?.reason !== over.json?.reason
+  ) {
+    throw new Error(`denied replay потерял исходный ответ: ${deniedReplay.text.slice(0, 300)}`);
+  }
+
+  // Цена — server-owned. Неизвестную модель нельзя вызвать с «нулевой» ценой.
+  const unknownPrice = await jsonRequest("POST", "/llm-ledger/reservations", {
+    requestKey: `${marker}:unknown-price`,
+    traceKey: marker,
+    consumer: "cc",
+    feature: "assistant",
+    provider: "anthropic",
+    model: "claude-does-not-exist",
+    inputTokenCeiling: 1,
+    outputTokenCeiling: 1,
+  });
+  if (!unknownPrice.r.ok || unknownPrice.json?.allowed !== false) {
+    throw new Error(
+      `неизвестная цена не закрылась fail-closed: ${unknownPrice.text.slice(0, 240)}`,
+    );
+  }
+
+  // Circuit относится ко времени ОБНАРУЖЕНИЯ anomaly, а не к billing day
+  // исходного reserve. Имитируем reserve до полуночи: переносим только его day
+  // на вчера, затем обнаруживаем missing resolvedModel сегодня.
+  const boundary = await reserve("circuit-boundary", 1);
+  if (!boundary.r.ok || boundary.json?.allowed !== true) {
+    throw new Error(`reserve для circuit boundary не прошёл: ${boundary.text.slice(0, 240)}`);
+  }
+  await sql`
+    update llm_spend
+       set day = (${boundary.json.reservation.day}::date - 1)
+     where id = ${boundary.json.reservation.id}::uuid
+  `;
+  const anomaly = await jsonRequest(
+    "POST",
+    `/llm-ledger/reservations/${boundary.json.reservation.id}/settle`,
+    {
+      outcome: "success",
+      usage: { inputTokens: 0, outputTokens: 1 },
+      // resolvedModel намеренно отсутствует: successful response без physical
+      // SKU должен открыть circuit в день settlement.
+    },
+  );
+  if (!anomaly.r.ok || anomaly.json?.status !== "failed") {
+    throw new Error(`boundary anomaly не сохранена: ${anomaly.text.slice(0, 240)}`);
+  }
+  const afterCircuit = await reserve("after-current-day-circuit", 1);
+  if (
+    !afterCircuit.r.ok ||
+    afterCircuit.json?.allowed !== false ||
+    !String(afterCircuit.json?.reason ?? "").includes("заблокирован")
+  ) {
+    throw new Error(
+      `вчерашний billing day не открыл сегодняшний circuit: ${afterCircuit.text.slice(0, 300)}`,
+    );
+  }
 }
 
 /** Согласование должно атомарно создать уже утверждённую карточку. */
@@ -1487,19 +2095,27 @@ async function проверитьУсушку() {
 
   const { r, text, json } = await jsonRequest("GET", "/vending/shrinkage?days=2");
   if (!r.ok) throw new Error(`отчёт → ${r.status}: ${text.slice(0, 200)}`);
-  const автомат = json.machines.find((m) => String(m.serial).toLowerCase() === серийник.toLowerCase());
-  if (!автомат) throw new Error(`автомата ${серийник} нет в отчёте — выборка снимков по автомату не отработала`);
+  const автомат = json.machines.find(
+    (m) => String(m.serial).toLowerCase() === серийник.toLowerCase(),
+  );
+  if (!автомат)
+    throw new Error(
+      `автомата ${серийник} нет в отчёте — выборка снимков по автомату не отработала`,
+    );
   if (!Array.isArray(автомат.refillDays)) throw new Error("refillDays — не массив");
   // Продажи по дням (`sale`) в смоук-базу положить нечем: их наполняет синк из
   // чужой БД, которого здесь нет. Значит день ОБЯЗАН быть пропущен с причиной —
   // молчаливый «ноль усушки» тут был бы худшим из исходов.
-  if (автомат.summary.daysCounted !== 0) throw new Error(`день без продаж посчитан: daysCounted=${автомат.summary.daysCounted}`);
+  if (автомат.summary.daysCounted !== 0)
+    throw new Error(`день без продаж посчитан: daysCounted=${автомат.summary.daysCounted}`);
   if (!json.warnings.some((w) => w.code === "no_sales_day" && w.message.includes(автомат.name))) {
     throw new Error("нет предупреждения no_sales_day — день пропущен молча");
   }
   // «Ни одного посчитанного дня» — отдельная строка: без неё панель и бот
   // сказали бы «недостач нет» там, где расчёт не дал ничего.
-  if (!json.warnings.some((w) => w.code === "no_counted_days" && w.message.includes(автомат.name))) {
+  if (
+    !json.warnings.some((w) => w.code === "no_counted_days" && w.message.includes(автомат.name))
+  ) {
     throw new Error("нет предупреждения no_counted_days при daysCounted=0");
   }
 }
@@ -1515,7 +2131,10 @@ async function проверитьУсушку() {
 async function проверитьАлертыУсушки() {
   const серийник = "SMOKE-LOW";
   const посчитать = async () => {
-    const { r, text, json } = await jsonRequest("GET", `/events/count?type=${encodeURIComponent("machine.low_stock")}`);
+    const { r, text, json } = await jsonRequest(
+      "GET",
+      `/events/count?type=${encodeURIComponent("machine.low_stock")}`,
+    );
     if (!r.ok) throw new Error(`счётчик событий → ${r.status}: ${text.slice(0, 200)}`);
     return json.count;
   };
@@ -1536,21 +2155,27 @@ async function проверитьАлертыУсушки() {
 
   const было = await посчитать();
   const первый = await jsonRequest("POST", "/vending/shrinkage/alerts");
-  if (!первый.r.ok) throw new Error(`прогон алертов → ${первый.r.status}: ${первый.text.slice(0, 200)}`);
+  if (!первый.r.ok)
+    throw new Error(`прогон алертов → ${первый.r.status}: ${первый.text.slice(0, 200)}`);
   if (typeof первый.json?.alerts !== "number" || typeof первый.json?.lowStock !== "number") {
     throw new Error(`ответ прогона без счётчиков: ${первый.text.slice(0, 200)}`);
   }
-  if (первый.json.lowStock < 1) throw new Error(`пустой автомат не дал алерта: lowStock=${первый.json.lowStock}`);
+  if (первый.json.lowStock < 1)
+    throw new Error(`пустой автомат не дал алерта: lowStock=${первый.json.lowStock}`);
   const стало = await посчитать();
   if (стало !== было + первый.json.lowStock) {
-    throw new Error(`событий записано ${стало - было}, а прогон отчитался о ${первый.json.lowStock}`);
+    throw new Error(
+      `событий записано ${стало - было}, а прогон отчитался о ${первый.json.lowStock}`,
+    );
   }
 
   // Второй прогон в те же сутки: дедуп читает уже записанные события ИЗ БАЗЫ,
   // а не из памяти процесса, — именно этот запрос здесь и проверяется.
   const второй = await jsonRequest("POST", "/vending/shrinkage/alerts");
-  if (!второй.r.ok) throw new Error(`повтор прогона → ${второй.r.status}: ${второй.text.slice(0, 200)}`);
-  if (второй.json.alerts !== 0) throw new Error(`повтор записал ${второй.json.alerts} событий вместо нуля`);
+  if (!второй.r.ok)
+    throw new Error(`повтор прогона → ${второй.r.status}: ${второй.text.slice(0, 200)}`);
+  if (второй.json.alerts !== 0)
+    throw new Error(`повтор записал ${второй.json.alerts} событий вместо нуля`);
   if ((await посчитать()) !== стало) throw new Error("повтор прогона задвоил события в базе");
 }
 
@@ -1571,7 +2196,13 @@ async function проверитьАлертыУсушки() {
  * от хорошей жизни: `?dt=` у приёма нет, историю датирует сам сервис.
  */
 /** Все пять целей ретенции: ответ ручного прогона обязан отчитаться по КАЖДОЙ. */
-const ЦЕЛИ_РЕТЕНЦИИ = ["machine_sale", "product_sale", "slot_snapshot", "vending_stock_count", "vending_sync_run"];
+const ЦЕЛИ_РЕТЕНЦИИ = [
+  "machine_sale",
+  "product_sale",
+  "slot_snapshot",
+  "vending_stock_count",
+  "vending_sync_run",
+];
 
 async function проверитьРетенцию() {
   const ТОВАР = "Smoke Ретенция";
@@ -1587,7 +2218,8 @@ async function проверитьРетенцию() {
     values (${СТАРАЯ}::date, ${ТОВАР}, 5, 'own', ${`${СТАРАЯ}T07:00:00Z`}::timestamptz, 'smoke'),
            (${СВЕЖАЯ}::date, ${ТОВАР}, 7, 'own', ${`${СВЕЖАЯ}T07:00:00Z`}::timestamptz, 'smoke')`;
 
-  const [{ count: событийДо }] = await sql`select count(*)::int as count from event where type = 'system.retention'`;
+  const [{ count: событийДо }] =
+    await sql`select count(*)::int as count from event where type = 'system.retention'`;
 
   /**
    * Разбор ответа роута — ОБЩИЙ для примерки и записи (R-FW-R3).
@@ -1604,7 +2236,9 @@ async function проверитьРетенцию() {
     const цели = ответ.json?.tables ?? [];
     const имена = цели.map((t) => t.table).sort();
     if (имена.join(",") !== ЦЕЛИ_РЕТЕНЦИИ.join(",")) {
-      throw new Error(`${имя}: расклад по целям ${имена.join(", ") || "(пусто)"}, ждали все пять: ${ЦЕЛИ_РЕТЕНЦИИ.join(", ")}`);
+      throw new Error(
+        `${имя}: расклад по целям ${имена.join(", ") || "(пусто)"}, ждали все пять: ${ЦЕЛИ_РЕТЕНЦИИ.join(", ")}`,
+      );
     }
     const битые = цели.filter((t) => t.aborted);
     if (битые.length > 0) {
@@ -1620,24 +2254,36 @@ async function проверитьРетенцию() {
     // Примерка: ТОТ ЖЕ предикат, но ни одной удалённой строки. Гоняется первой —
     // если `date < $1` не типизируется, отсюда и прилетит отказ Postgres.
     const примерка = await jsonRequest("POST", "/system/retention/run", { dryRun: true });
-    if (примерка.json?.dryRun !== true) throw new Error(`ответ примерки без признака режима: ${примерка.text.slice(0, 200)}`);
+    if (примерка.json?.dryRun !== true)
+      throw new Error(`ответ примерки без признака режима: ${примерка.text.slice(0, 200)}`);
     const цель = разобрать("примерка", примерка).find((t) => t.table === "vending_stock_count");
-    if (цель.deleted < 1) throw new Error(`примерка не увидела строку 800-суточной давности: deleted=${цель.deleted}`);
-    const [{ count: послеПримерки }] = await sql`select count(*)::int as count from vending_stock_count where product_name = ${ТОВАР}`;
-    if (послеПримерки !== 2) throw new Error(`примерка удалила строки: осталось ${послеПримерки} из 2`);
+    if (цель.deleted < 1)
+      throw new Error(`примерка не увидела строку 800-суточной давности: deleted=${цель.deleted}`);
+    const [{ count: послеПримерки }] =
+      await sql`select count(*)::int as count from vending_stock_count where product_name = ${ТОВАР}`;
+    if (послеПримерки !== 2)
+      throw new Error(`примерка удалила строки: осталось ${послеПримерки} из 2`);
 
     const прогон = await jsonRequest("POST", "/system/retention/run", {});
-    if (прогон.json?.dryRun !== false) throw new Error(`ответ прогона без признака режима: ${прогон.text.slice(0, 200)}`);
+    if (прогон.json?.dryRun !== false)
+      throw new Error(`ответ прогона без признака режима: ${прогон.text.slice(0, 200)}`);
     const снесено = разобрать("прогон", прогон).find((t) => t.table === "vending_stock_count");
-    if (снесено.deleted < 1) throw new Error(`ретенция не снесла старую строку: ${прогон.text.slice(0, 200)}`);
-    if (снесено.olderThanDays !== 730) throw new Error(`окно истории склада ${снесено.olderThanDays}, ждали 730`);
+    if (снесено.deleted < 1)
+      throw new Error(`ретенция не снесла старую строку: ${прогон.text.slice(0, 200)}`);
+    if (снесено.olderThanDays !== 730)
+      throw new Error(`окно истории склада ${снесено.olderThanDays}, ждали 730`);
 
-    const строки = await sql`select dt::text as dt from vending_stock_count where product_name = ${ТОВАР}`;
-    if (строки.length !== 1) throw new Error(`после чистки осталось ${строки.length} строк, ждали одну свежую`);
-    if (строки[0].dt !== СВЕЖАЯ) throw new Error(`уцелела не та строка: ${строки[0].dt}, ждали ${СВЕЖАЯ}`);
+    const строки =
+      await sql`select dt::text as dt from vending_stock_count where product_name = ${ТОВАР}`;
+    if (строки.length !== 1)
+      throw new Error(`после чистки осталось ${строки.length} строк, ждали одну свежую`);
+    if (строки[0].dt !== СВЕЖАЯ)
+      throw new Error(`уцелела не та строка: ${строки[0].dt}, ждали ${СВЕЖАЯ}`);
 
-    const [{ count: событийПосле }] = await sql`select count(*)::int as count from event where type = 'system.retention'`;
-    if (событийПосле <= событийДо) throw new Error("событие system.retention не записано — о чистке в журнале ни следа");
+    const [{ count: событийПосле }] =
+      await sql`select count(*)::int as count from event where type = 'system.retention'`;
+    if (событийПосле <= событийДо)
+      throw new Error("событие system.retention не записано — о чистке в журнале ни следа");
   } finally {
     await убрать();
   }
@@ -1653,7 +2299,9 @@ async function проверитьРетенцию() {
  */
 async function проверитьЗадачиТО() {
   const сутки = (сдвиг) =>
-    new Date(Date.now() + сдвиг * 86_400_000).toLocaleDateString("en-CA", { timeZone: "Asia/Tashkent" });
+    new Date(Date.now() + сдвиг * 86_400_000).toLocaleDateString("en-CA", {
+      timeZone: "Asia/Tashkent",
+    });
   // Ключ уникален на прогон, но ОДИН на первые два вызова: дедуп проверяется
   // повтором того же ключа, а не разными.
   const ключ = `smoke:maint:${Date.now()}`;
@@ -1667,26 +2315,37 @@ async function проверитьЗадачиТО() {
 
   const первый = await jsonRequest("POST", "/tasks/ensure-for-day", тело(сутки(0)));
   if (!первый.r.ok) throw new Error(`создание → ${первый.r.status}: ${первый.text.slice(0, 200)}`);
-  if (!первый.json?.id) throw new Error(`первая постановка не вернула id: ${первый.text.slice(0, 200)}`);
+  if (!первый.json?.id)
+    throw new Error(`первая постановка не вернула id: ${первый.text.slice(0, 200)}`);
 
   const повтор = await jsonRequest("POST", "/tasks/ensure-for-day", тело(сутки(0)));
   if (!повтор.r.ok) throw new Error(`повтор → ${повтор.r.status}: ${повтор.text.slice(0, 200)}`);
-  if (повтор.json?.id) throw new Error("повтор в тот же день создал ВТОРУЮ задачу — дедуп не работает");
+  if (повтор.json?.id)
+    throw new Error("повтор в тот же день создал ВТОРУЮ задачу — дедуп не работает");
 
   // Пустой ответ повтора доказывает «конфликт погашен» лишь косвенно — прямой
   // счётчик строк отличает его от гипотетического «не вставилось по другой причине».
-  const [{ count: строкВБазе }] = await sql`select count(*)::int as count from task where source = ${`${ключ}:${сутки(0)}`}`;
-  if (строкВБазе !== 1) throw new Error(`после повтора в базе ${строкВБазе} строк с этим source, ждали 1`);
+  const [{ count: строкВБазе }] =
+    await sql`select count(*)::int as count from task where source = ${`${ключ}:${сутки(0)}`}`;
+  if (строкВБазе !== 1)
+    throw new Error(`после повтора в базе ${строкВБазе} строк с этим source, ждали 1`);
 
   const завтра = await jsonRequest("POST", "/tasks/ensure-for-day", тело(сутки(1)));
-  if (!завтра.r.ok) throw new Error(`следующий день → ${завтра.r.status}: ${завтра.text.slice(0, 200)}`);
+  if (!завтра.r.ok)
+    throw new Error(`следующий день → ${завтра.r.status}: ${завтра.text.slice(0, 200)}`);
   if (!завтра.json?.id) throw new Error("на следующий день задача обязана появиться заново");
-  if (завтра.json.id === первый.json.id) throw new Error("вернулась вчерашняя задача — ключ дня не участвует");
+  if (завтра.json.id === первый.json.id)
+    throw new Error("вернулась вчерашняя задача — ключ дня не участвует");
 
   // Полная дата-время не имеет права попасть в ключ: такой source уходит
   // из-под предиката индекса, и дедуп выключается молча.
-  const время = await jsonRequest("POST", "/tasks/ensure-for-day", тело(`${сутки(0)}T06:00:00.000Z`));
-  if (время.r.ok) throw new Error("dayKey с временем принят — предикат индекса перестанет ловить дубли");
+  const время = await jsonRequest(
+    "POST",
+    "/tasks/ensure-for-day",
+    тело(`${сутки(0)}T06:00:00.000Z`),
+  );
+  if (время.r.ok)
+    throw new Error("dayKey с временем принят — предикат индекса перестанет ловить дубли");
 }
 
 /**
@@ -1721,7 +2380,9 @@ async function проверитьСторноСнекЗаписей() {
     items: [{ product: товарА, quantity: 10 }],
   });
   if (!начальныйСклад.r.ok) {
-    throw new Error(`начальный склад → ${начальныйСклад.r.status}: ${начальныйСклад.text.slice(0, 200)}`);
+    throw new Error(
+      `начальный склад → ${начальныйСклад.r.status}: ${начальныйСклад.text.slice(0, 200)}`,
+    );
   }
   const serial = `SMOKE-P6-${метка}`;
   const refill = await jsonRequest("POST", "/vending/refills", {
@@ -1738,16 +2399,26 @@ async function проверитьСторноСнекЗаписей() {
   if (!refill.r.ok || !refillId || refill.json.stockLeft !== 6) {
     throw new Error(`заправка → ${refill.r.status}: ${refill.text.slice(0, 240)}`);
   }
-  const refillCancel = await jsonRequest("POST", `/vending/refills/${refillId}/cancel`, { personId });
-  if (!refillCancel.r.ok || refillCancel.json?.ok !== true || refillCancel.json?.alreadyCancelled !== false) {
-    throw new Error(`сторно заправки → ${refillCancel.r.status}: ${refillCancel.text.slice(0, 240)}`);
+  const refillCancel = await jsonRequest("POST", `/vending/refills/${refillId}/cancel`, {
+    personId,
+  });
+  if (
+    !refillCancel.r.ok ||
+    refillCancel.json?.ok !== true ||
+    refillCancel.json?.alreadyCancelled !== false
+  ) {
+    throw new Error(
+      `сторно заправки → ${refillCancel.r.status}: ${refillCancel.text.slice(0, 240)}`,
+    );
   }
   const refillRows = await читать(
     `/vending/refills?machineSerial=${encodeURIComponent(serial)}&personId=${encodeURIComponent(personId)}&limit=10`,
   );
   const refillSum = refillRows.reduce((sum, row) => sum + Number(row.qty), 0);
   if (refillRows.length !== 2 || refillSum !== 0) {
-    throw new Error(`журнал заправки после сторно: строк ${refillRows.length}, сумма qty=${refillSum}`);
+    throw new Error(
+      `журнал заправки после сторно: строк ${refillRows.length}, сумма qty=${refillSum}`,
+    );
   }
   const stockAfterRefill = await читать("/vending/stock");
   const stockRow = stockAfterRefill.find((row) => row.product === товарА);
@@ -1767,15 +2438,27 @@ async function проверитьСторноСнекЗаписей() {
     ],
   });
   if (!count.r.ok) throw new Error(`пересчёт → ${count.r.status}: ${count.text.slice(0, 200)}`);
-  const beforeCount = await читать(`/vending/stock-counts?days=1&product=${encodeURIComponent(товарА)}`);
-  const countRow = beforeCount.rows.find((row) => new Date(row.countedAt).getTime() === new Date(countedAt).getTime());
+  const beforeCount = await читать(
+    `/vending/stock-counts?days=1&product=${encodeURIComponent(товарА)}`,
+  );
+  const countRow = beforeCount.rows.find(
+    (row) => new Date(row.countedAt).getTime() === new Date(countedAt).getTime(),
+  );
   if (!countRow?.id) throw new Error("строка дымового пересчёта не вернулась в истории");
-  const countCancel = await jsonRequest("POST", `/vending/stock-counts/${countRow.id}/cancel`, { personId });
+  const countCancel = await jsonRequest("POST", `/vending/stock-counts/${countRow.id}/cancel`, {
+    personId,
+  });
   if (!countCancel.r.ok || countCancel.json?.ok !== true) {
-    throw new Error(`сторно пересчёта → ${countCancel.r.status}: ${countCancel.text.slice(0, 240)}`);
+    throw new Error(
+      `сторно пересчёта → ${countCancel.r.status}: ${countCancel.text.slice(0, 240)}`,
+    );
   }
   const afterCount = await читать("/vending/stock-counts?days=1");
-  if (afterCount.rows.some((row) => new Date(row.countedAt).getTime() === new Date(countedAt).getTime())) {
+  if (
+    afterCount.rows.some(
+      (row) => new Date(row.countedAt).getTime() === new Date(countedAt).getTime(),
+    )
+  ) {
     throw new Error("отменённый ввод пересчёта остался в GET stock-counts");
   }
 
@@ -1789,12 +2472,16 @@ async function проверитьСторноСнекЗаписей() {
   if (!cash.r.ok || !cash.json?.id) {
     throw new Error(`касса → ${cash.r.status}: ${cash.text.slice(0, 200)}`);
   }
-  const cashCancel = await jsonRequest("POST", `/vending/cash/${cash.json.id}/cancel`, { personId });
+  const cashCancel = await jsonRequest("POST", `/vending/cash/${cash.json.id}/cancel`, {
+    personId,
+  });
   if (!cashCancel.r.ok || cashCancel.json?.ok !== true || !cashCancel.json?.stornoId) {
     throw new Error(`сторно кассы → ${cashCancel.r.status}: ${cashCancel.text.slice(0, 240)}`);
   }
   const cashRows = await читать("/vending/cash");
-  const pair = cashRows.filter((row) => row.id === cash.json.id || row.id === cashCancel.json.stornoId);
+  const pair = cashRows.filter(
+    (row) => row.id === cash.json.id || row.id === cashCancel.json.stornoId,
+  );
   const sums = pair.reduce(
     (acc, row) => ({
       received: acc.received + Number(row.receivedAmount),
@@ -1807,7 +2494,9 @@ async function проверитьСторноСнекЗаписей() {
     throw new Error(`касса после сторно: строк ${pair.length}, суммы ${JSON.stringify(sums)}`);
   }
   if (!pair.some((row) => row.source === "own") || !pair.some((row) => row.source === "storno")) {
-    throw new Error(`касса не различает обычную и сторно-строку: ${pair.map((row) => row.source).join("/")}`);
+    throw new Error(
+      `касса не различает обычную и сторно-строку: ${pair.map((row) => row.source).join("/")}`,
+    );
   }
 
   // 4. Общая витрина не длиннее 15 и не возвращает ни одну из трёх уже
@@ -1815,11 +2504,15 @@ async function проверитьСторноСнекЗаписей() {
   const mine = await читать(`/vending/my-records?person=${encodeURIComponent(personId)}`);
   const cancelled = new Set([refillId, countRow.id, cash.json.id]);
   if (!Array.isArray(mine) || mine.length > 15) {
-    throw new Error(`my-records: получено ${Array.isArray(mine) ? mine.length : "не массив"}, потолок 15`);
+    throw new Error(
+      `my-records: получено ${Array.isArray(mine) ? mine.length : "не массив"}, потолок 15`,
+    );
   }
   const leaked = mine.filter((row) => cancelled.has(row.id));
   if (leaked.length > 0) {
-    throw new Error(`my-records вернул отменённые записи: ${leaked.map((row) => row.id).join(", ")}`);
+    throw new Error(
+      `my-records вернул отменённые записи: ${leaked.map((row) => row.id).join(", ")}`,
+    );
   }
 }
 
@@ -1842,7 +2535,10 @@ async function проверитьНаблюдениеЦен() {
   const БЕЗ_ЦЕНЫ = "Fanta C 0,5";
   const ТИП = "vending.purchase_price_observed";
   const посчитать = async () => {
-    const { r, text, json } = await jsonRequest("GET", `/events/count?type=${encodeURIComponent(ТИП)}`);
+    const { r, text, json } = await jsonRequest(
+      "GET",
+      `/events/count?type=${encodeURIComponent(ТИП)}`,
+    );
     if (!r.ok) throw new Error(`счётчик наблюдений → ${r.status}: ${text.slice(0, 200)}`);
     return json.count;
   };
@@ -1866,24 +2562,36 @@ async function проверитьНаблюдениеЦен() {
       },
     },
   });
-  if (!заявка.r.ok) throw new Error(`заявка закупа → ${заявка.r.status}: ${заявка.text.slice(0, 200)}`);
+  if (!заявка.r.ok)
+    throw new Error(`заявка закупа → ${заявка.r.status}: ${заявка.text.slice(0, 200)}`);
   const заявкаId = заявка.json?.id;
   if (!заявкаId) throw new Error(`заявка без id: ${заявка.text.slice(0, 200)}`);
 
-  const решение = await jsonRequest("POST", `/approvals/${заявкаId}/decide`, { decision: "approved", actor: "smoke" });
-  if (!решение.r.ok) throw new Error(`согласование → ${решение.r.status}: ${решение.text.slice(0, 200)}`);
+  const решение = await jsonRequest("POST", `/approvals/${заявкаId}/decide`, {
+    decision: "approved",
+    actor: "smoke",
+  });
+  if (!решение.r.ok)
+    throw new Error(`согласование → ${решение.r.status}: ${решение.text.slice(0, 200)}`);
 
   const накладные = await читать("/vending/orders");
   const накладная = накладные.find((o) => o.approvalId === заявкаId);
   if (!накладная) throw new Error("одобренная заявка не породила накладную");
 
-  const приёмка = await jsonRequest("POST", "/vending/orders/receive", { orderId: накладная.id, receivedBy: "smoke" });
-  if (!приёмка.r.ok) throw new Error(`приёмка → ${приёмка.r.status}: ${приёмка.text.slice(0, 200)}`);
-  if (приёмка.json?.received !== true) throw new Error(`приёмка отказала: ${приёмка.text.slice(0, 200)}`);
+  const приёмка = await jsonRequest("POST", "/vending/orders/receive", {
+    orderId: накладная.id,
+    receivedBy: "smoke",
+  });
+  if (!приёмка.r.ok)
+    throw new Error(`приёмка → ${приёмка.r.status}: ${приёмка.text.slice(0, 200)}`);
+  if (приёмка.json?.received !== true)
+    throw new Error(`приёмка отказала: ${приёмка.text.slice(0, 200)}`);
 
   const стало = await посчитать();
   if (стало !== было + 1) {
-    throw new Error(`наблюдений записано ${стало - было}, ждали ровно одно (позиция без цены его не даёт)`);
+    throw new Error(
+      `наблюдений записано ${стало - было}, ждали ровно одно (позиция без цены его не даёт)`,
+    );
   }
 
   const события = await читать(`/events?type=${encodeURIComponent(ТИП)}`);
@@ -1892,7 +2600,9 @@ async function проверитьНаблюдениеЦен() {
   if (наше.payload.product !== С_ЦЕНОЙ) throw new Error(`product=${наше.payload.product}`);
   if (наше.payload.price !== 6500) throw new Error(`price=${наше.payload.price}`);
   if (typeof наше.payload.oldPrice !== "number") {
-    throw new Error(`oldPrice не взялся из прайса (значит «было» сравнивать не с чем): ${наше.payload.oldPrice}`);
+    throw new Error(
+      `oldPrice не взялся из прайса (значит «было» сравнивать не с чем): ${наше.payload.oldPrice}`,
+    );
   }
 }
 
@@ -1913,23 +2623,38 @@ async function проверитьОтсечкуСклада() {
     name: "Дымовой склад-заглушка",
     externalRef: "SMOKE-SKLAD",
   });
-  if (!создание.r.ok) throw new Error(`карточка склада → ${создание.r.status}: ${создание.text.slice(0, 200)}`);
+  if (!создание.r.ok)
+    throw new Error(`карточка склада → ${создание.r.status}: ${создание.text.slice(0, 200)}`);
   const id = создание.json?.id;
   if (!id) throw new Error(`карточка без id: ${создание.text.slice(0, 200)}`);
 
-  const статус = await jsonRequest("PATCH", `/entities/${id}/machine-status`, { status: "warehouse", actor: "smoke" });
-  if (!статус.r.ok) throw new Error(`статус карточки → ${статус.r.status}: ${статус.text.slice(0, 200)}`);
+  const статус = await jsonRequest("PATCH", `/entities/${id}/machine-status`, {
+    status: "warehouse",
+    actor: "smoke",
+  });
+  if (!статус.r.ok)
+    throw new Error(`статус карточки → ${статус.r.status}: ${статус.text.slice(0, 200)}`);
   if (статус.json?.status !== "warehouse") throw new Error(`статус=${статус.json?.status}`);
 
   // Кеш отчётов живёт пять минут: без сброса GET ниже ответил бы из памяти и
   // SQL с исключениями так и не выполнился бы (ровно та дыра, ради которой
   // сценарий и написан).
-  const сброс = await jsonRequest("POST", "/vending/sale-price", { product: P4_ТОВАР, price: 15000, confirmed: true });
-  if (!сброс.r.ok || сброс.json?.ok !== true) throw new Error(`сброс кеша через эталон → ${сброс.text.slice(0, 200)}`);
+  const сброс = await jsonRequest("POST", "/vending/sale-price", {
+    product: P4_ТОВАР,
+    price: 15000,
+    confirmed: true,
+  });
+  if (!сброс.r.ok || сброс.json?.ok !== true)
+    throw new Error(`сброс кеша через эталон → ${сброс.text.slice(0, 200)}`);
 
-  for (const путь of ["/vending/price-gap?days=14", "/vending/dead-stock?days=21", "/vending/price-changes?days=30"]) {
+  for (const путь of [
+    "/vending/price-gap?days=14",
+    "/vending/dead-stock?days=21",
+    "/vending/price-changes?days=30",
+  ]) {
     const { r, text, json } = await jsonRequest("GET", путь);
-    if (!r.ok) throw new Error(`${путь} с непустым списком исключений → ${r.status}: ${text.slice(0, 200)}`);
+    if (!r.ok)
+      throw new Error(`${путь} с непустым списком исключений → ${r.status}: ${text.slice(0, 200)}`);
     if (!Array.isArray(json?.warnings)) throw new Error(`${путь}: warnings — не массив`);
   }
 }
@@ -2012,7 +2737,9 @@ async function проверитьЗапись(шаг) {
   const текст = await r.text();
   if (шаг.ожидатьСтатус !== undefined) {
     if (r.status !== шаг.ожидатьСтатус) {
-      провалы.push(`POST ${шаг.path} (${шаг.имя}) → ${r.status}, ожидали ${шаг.ожидатьСтатус}: ${текст.slice(0, 300)}`);
+      провалы.push(
+        `POST ${шаг.path} (${шаг.имя}) → ${r.status}, ожидали ${шаг.ожидатьСтатус}: ${текст.slice(0, 300)}`,
+      );
       return;
     }
     if (шаг.проверить) {
@@ -2069,8 +2796,13 @@ const env = {
   ...process.env,
   PORT,
   SERVICE_TOKEN: TOKEN,
+  OWNER_ACTION_TOKEN: OWNER_TOKEN,
   INGEST_KEY: "smoke-ingest",
   HEALTH_MIN_STORAGE_MB: "0",
+  // Детерминированная граница для сценария LLM-ledger выше.
+  LLM_GLOBAL_DAILY_BUDGET_USD: "1",
+  // Два commit одного агента должны поделить один атомарный action-slot.
+  AGENT_DAILY_ACTION_CAP: "1",
   NODE_ENV: "test",
 };
 delete env.STOCK_DATABASE_URL;
@@ -2091,6 +2823,13 @@ try {
 
   for (const path of ЧТЕНИЕ) await проверитьЧтение(path);
   for (const шаг of ЗАПИСЬ) await проверитьЗапись(шаг);
+
+  try {
+    await проверитьOwnerActionGuard();
+    console.log("  ok  owner-only retry требует второй зарегистрированный guard");
+  } catch (e) {
+    провалы.push(`owner action guard: ${e.message}`);
+  }
 
   try {
     await проверитьМеста();
@@ -2143,7 +2882,9 @@ try {
 
   try {
     await проверитьУсушку();
-    console.log("  ok  сценарий: усушка — снимки на границах суток, день без продаж пропущен с причиной");
+    console.log(
+      "  ok  сценарий: усушка — снимки на границах суток, день без продаж пропущен с причиной",
+    );
   } catch (e) {
     провалы.push(`усушка: ${e.message}`);
   }
@@ -2157,21 +2898,27 @@ try {
 
   try {
     await проверитьНаблюдениеЦен();
-    console.log("  ok  сценарий: приёмка наблюдает закупочную цену позиции (без цены — наблюдения нет)");
+    console.log(
+      "  ok  сценарий: приёмка наблюдает закупочную цену позиции (без цены — наблюдения нет)",
+    );
   } catch (e) {
     провалы.push(`наблюдение цен: ${e.message}`);
   }
 
   try {
     await проверитьОтсечкуСклада();
-    console.log("  ok  сценарий: автомат не в строю отсекается в SQL (not in), отчёты считаются заново");
+    console.log(
+      "  ok  сценарий: автомат не в строю отсекается в SQL (not in), отчёты считаются заново",
+    );
   } catch (e) {
     провалы.push(`отсечка склада: ${e.message}`);
   }
 
   try {
     await проверитьРетенцию();
-    console.log("  ok  сценарий: ретенция — строка старше 730 суток снесена, свежая цела, событие записано");
+    console.log(
+      "  ok  сценарий: ретенция — строка старше 730 суток снесена, свежая цела, событие записано",
+    );
   } catch (e) {
     провалы.push(`ретенция: ${e.message}`);
   }
@@ -2199,6 +2946,20 @@ try {
   } catch (e) {
     провалы.push(`rate limit: ${e.message}`);
   }
+
+  try {
+    await проверитьLlmLedger();
+    console.log("  ok  сценарий: LLM-ledger — гонка, replay, settle, release, unknown exposure");
+  } catch (e) {
+    провалы.push(`LLM-ledger: ${e.message}`);
+  }
+
+  try {
+    await проверитьAgentExecutionOutbox();
+    console.log("  ok  сценарий: task checkpoint/commit — cap race, replay, outbox, owner retry");
+  } catch (e) {
+    провалы.push(`agent execution/outbox: ${e.message}`);
+  }
 } catch (e) {
   провалы.push(`старт: ${e.message}`);
 } finally {
@@ -2218,4 +2979,4 @@ if (провалы.length > 0) {
   process.exit(1);
 }
 
-console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 18 сценариев.`);
+console.log(`\nВсё прошло: ${ЧТЕНИЕ.length} чтений, ${ЗАПИСЬ.length} записей, 20 сценариев.`);

@@ -73,7 +73,12 @@ describe("ApprovalsService.decide", () => {
       insert: () => ({
         values: (v: unknown) => {
           inserts.push(1);
-          return { returning: async () => [{ id: "new-1", ...(v as Row) }] };
+          const returning = async () => [{ id: "new-1", ...(v as Row) }];
+          return {
+            returning,
+            onConflictDoNothing: () => ({ returning }),
+            then: (resolve: (value: unknown) => unknown) => Promise.resolve(undefined).then(resolve),
+          };
         },
       }),
     };
@@ -88,6 +93,50 @@ describe("ApprovalsService.decide", () => {
       inserts.length,
       3,
       "должны быть запрос, событие и запись журнала — все в одной транзакции",
+    );
+  });
+
+  it("clientKey возвращает прежнее согласование и запрещает другой payload", async () => {
+    const existing = {
+      id: "a-existing",
+      agent: "test",
+      action: "действие",
+      tier: "T3",
+      payload: { x: 1 },
+      clientKey: "task:t:approval",
+    };
+    const tx = {
+      insert: () => ({
+        values: () => ({
+          onConflictDoNothing: () => ({ returning: async () => [] }),
+        }),
+      }),
+      select: () => ({
+        from: () => ({ where: () => ({ limit: async () => [existing] }) }),
+      }),
+    };
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
+    const service = new ApprovalsService(db, noopAudit, noopEvents);
+    const replay = await service.request({
+      agent: "test",
+      action: "действие",
+      tier: "T3",
+      payload: { x: 1 },
+      clientKey: "task:t:approval",
+    });
+    assert.equal(replay.id, "a-existing");
+    await assert.rejects(
+      () =>
+        service.request({
+          agent: "test",
+          action: "другое",
+          tier: "T3",
+          payload: { x: 1 },
+          clientKey: "task:t:approval",
+        }),
+      /уже использован другим payload/,
     );
   });
 });

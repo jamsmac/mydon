@@ -61,7 +61,11 @@ describe("Клиент агентов к Core: срок ожидания при�
     await Promise.resolve();
     const signal = сигналы[0]!;
     mock.timers.tick(10_000);
-    assert.equal(signal.aborted, false, "на десятой секунде приём обрывался — из-за этого и падал сбор");
+    assert.equal(
+      signal.aborted,
+      false,
+      "на десятой секунде приём обрывался — из-за этого и падал сбор",
+    );
     mock.timers.tick(49_999);
     assert.equal(signal.aborted, false);
     mock.timers.tick(1);
@@ -74,7 +78,12 @@ describe("Клиент агентов к Core: срок ожидания при�
     mock.timers.enable({ apis: ["setTimeout"] });
     const core = new AgentsCoreClient("http://core");
     void core
-      .ingestVendingSales({ periodStart: "2026-08-24T00:00:00Z", periodEnd: "2026-08-24T04:00:00Z", productSales: [], machineSales: [] })
+      .ingestVendingSales({
+        periodStart: "2026-08-24T00:00:00Z",
+        periodEnd: "2026-08-24T04:00:00Z",
+        productSales: [],
+        machineSales: [],
+      })
       .catch(() => {});
     void core.detectRefillEvents(2).catch(() => {});
     await Promise.resolve();
@@ -115,5 +124,165 @@ describe("Клиент агентов к Core: срок ожидания при�
     assert.equal(signal.aborted, false);
     mock.timers.tick(60_000);
     assert.equal(signal.aborted, true);
+  });
+});
+
+describe("Клиент durable agent-run", () => {
+  it("claim/release/heartbeat передают Core exact runId", async () => {
+    const RUN_ID = "11111111-1111-4111-8111-111111111111";
+    const EXECUTION_ID = "22222222-2222-4222-8222-222222222222";
+    const requests: { path: string; body: unknown }[] = [];
+    const responses = [
+      {
+        claimed: true,
+        runId: RUN_ID,
+        executionAttemptId: EXECUTION_ID,
+        generation: 3,
+        claimedAt: "2026-08-29T10:00:00.000Z",
+      },
+      { renewed: true },
+      { released: true },
+    ];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      requests.push({
+        path: new URL(String(url)).pathname,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof globalThis.fetch;
+
+    const core = new AgentsCoreClient("http://core");
+    assert.deepEqual(await core.claimAgentTask("t1", "receivables"), {
+      runId: RUN_ID,
+      executionAttemptId: EXECUTION_ID,
+      generation: 3,
+      claimedAt: "2026-08-29T10:00:00.000Z",
+    });
+    assert.equal(await core.heartbeatAgentTask("t1", "receivables", RUN_ID), true);
+    assert.equal(
+      await core.releaseAgentTask(
+        "t1",
+        "receivables",
+        RUN_ID,
+        EXECUTION_ID,
+        "unsupported",
+        "нет навыка",
+      ),
+      true,
+    );
+    assert.deepEqual(requests, [
+      {
+        path: "/tasks/t1/agent-run/claim",
+        body: { agentName: "receivables" },
+      },
+      {
+        path: "/tasks/t1/agent-run/heartbeat",
+        body: { agentName: "receivables", runId: RUN_ID },
+      },
+      {
+        path: "/tasks/t1/agent-run/release",
+        body: {
+          agentName: "receivables",
+          runId: RUN_ID,
+          executionAttemptId: EXECUTION_ID,
+          reason: "unsupported",
+          detail: "нет навыка",
+        },
+      },
+    ]);
+  });
+
+  it("unwrap checkpoint, маппит commit outcomes и обслуживает outbox lease", async () => {
+    const RUN_ID = "11111111-1111-4111-8111-111111111111";
+    const EXECUTION_ID = "22222222-2222-4222-8222-222222222222";
+    const CHECKPOINT_ID = "33333333-3333-4333-8333-333333333333";
+    const DELIVERY_ID = "44444444-4444-4444-8444-444444444444";
+    const checkpoint = {
+      id: CHECKPOINT_ID,
+      skill: "watch-receivables",
+      kind: "proposal" as const,
+      action: "Разобрать долг",
+      facts: { overdue: 1 },
+    };
+    const delivery = {
+      id: DELIVERY_ID,
+      key: "task:t1:notion",
+      destination: "notion-report",
+      payload: { report: {} },
+      leaseToken: "lease-1",
+    };
+    const requests: { path: string; body: Record<string, unknown> }[] = [];
+    const responses: unknown[] = [
+      { checkpointed: true, replay: false, checkpoint },
+      { committed: true, capped: false, replay: false, status: "done", approvalId: "appr-1" },
+      { committed: false, capped: true, replay: false, status: "todo" },
+      { committed: false, capped: false, replay: false, status: "blocked" },
+      { delivery },
+      { id: DELIVERY_ID, status: "sent" },
+    ];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      requests.push({
+        path: new URL(String(url)).pathname,
+        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {},
+      });
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof globalThis.fetch;
+
+    const core = new AgentsCoreClient("http://core");
+    assert.deepEqual(
+      await core.checkpointAgentTask("t1", {
+        agentName: "receivables",
+        runId: RUN_ID,
+        executionAttemptId: EXECUTION_ID,
+        skill: checkpoint.skill,
+        kind: checkpoint.kind,
+        action: checkpoint.action,
+        facts: checkpoint.facts,
+      }),
+      checkpoint,
+    );
+    const commitInput = {
+      agentName: "receivables",
+      runId: RUN_ID,
+      executionAttemptId: EXECUTION_ID,
+      outcome: "approval_requested" as const,
+      note: "Вынес на решение",
+      action: checkpoint.action,
+      facts: checkpoint.facts,
+    };
+    assert.deepEqual(await core.commitAgentTaskOutcome("t1", commitInput), {
+      status: "committed",
+      replay: false,
+      approvalId: "appr-1",
+    });
+    assert.deepEqual(await core.commitAgentTaskOutcome("t1", commitInput), {
+      status: "capped",
+      replay: false,
+    });
+    assert.deepEqual(await core.commitAgentTaskOutcome("t1", commitInput), {
+      status: "blocked",
+      replay: false,
+    });
+    assert.deepEqual(await core.claimOutbox("notion-report", "agents:test"), delivery);
+    await core.completeOutbox(DELIVERY_ID, "lease-1", "sent", { providerRef: "page-1" });
+
+    assert.equal(requests[0]?.path, "/tasks/t1/agent-run/checkpoint");
+    assert.equal(requests[1]?.path, "/tasks/t1/agent-run/commit");
+    assert.equal(requests[1]?.body.kind, "approval_requested");
+    assert.equal("outcome" in (requests[1]?.body ?? {}), false, "wire contract uses kind");
+    assert.deepEqual(requests[4], {
+      path: "/outbox/claim",
+      body: { destination: "notion-report", workerRef: "agents:test" },
+    });
+    assert.deepEqual(requests[5], {
+      path: `/outbox/${DELIVERY_ID}/complete`,
+      body: { leaseToken: "lease-1", status: "sent", providerRef: "page-1" },
+    });
   });
 });

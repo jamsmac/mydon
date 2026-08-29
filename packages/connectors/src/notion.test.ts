@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { notion, toBlocks } from "./notion";
+import { NotionError, notion, toBlocks } from "./notion";
 
 describe("Отчёт в Notion", () => {
   it("собирает заголовки, абзацы и списки", () => {
     const blocks = toBlocks({
       title: "Дебиторка",
       author: "mydon-finance",
-      blocks: [{ heading: "Итог", paragraphs: ["Просрочено 12 позиций."], bullets: ["Olma — 5 млн"] }],
+      blocks: [
+        { heading: "Итог", paragraphs: ["Просрочено 12 позиций."], bullets: ["Olma — 5 млн"] },
+      ],
     }) as { type: string }[];
     const types = blocks.map((b) => b.type);
     assert.ok(types.includes("heading_2"));
@@ -42,5 +44,30 @@ describe("Отчёт в Notion", () => {
       notion.configured({ NOTION_TOKEN: "x", NOTION_PARENT_PAGE_ID: "y" } as NodeJS.ProcessEnv),
       true,
     );
+  });
+
+  it("сохраняет HTTP status и Retry-After для безопасной классификации outbox", async () => {
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ code: "rate_limited", message: "slow down" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "Retry-After": "2" },
+      })) as typeof globalThis.fetch;
+    try {
+      await assert.rejects(
+        notion.publish(
+          { title: "T", author: "agent", blocks: [] },
+          { token: "token", parentPageId: "page" },
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof NotionError);
+          assert.equal(error.status, 429);
+          assert.equal(error.retryAfterMs, 2_000);
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
   });
 });

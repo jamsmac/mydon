@@ -1,11 +1,34 @@
+import { createHash, randomUUID } from "node:crypto";
 import type { AutonomyTier } from "@mydon/shared";
-import type { AgentsCoreClient } from "./core-client";
+import {
+  LlmBudgetDeniedError,
+  LlmLedgerUnavailableError,
+  LlmReplayBlockedError,
+  isLlmLedgerBlockingError,
+} from "@mydon/shared";
+import type {
+  AgentTaskCheckpoint,
+  AgentTaskCommittedOutcome,
+  AgentsCoreClient,
+} from "./core-client";
 import { EXECUTORS } from "./executors";
 import { checkLimit, dailyCap, startOfTashkentDay } from "./limits";
 import { signature } from "./memory";
 import { effectiveActionTier, explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
-import { SKILLS } from "./skills";
+import { SKILLS, type SkillRunContext } from "./skills";
+
+/** Everything Core needs to atomically fence and commit a task outcome. */
+export interface TaskCommitIntent {
+  outcome: AgentTaskCommittedOutcome;
+  note: string;
+  action?: string;
+  facts?: Record<string, unknown>;
+  next?: string[];
+  tier?: AutonomyTier;
+  memorySignature?: string;
+  executionDetail?: string;
+}
 
 export interface RunResult {
   agent: string;
@@ -14,13 +37,51 @@ export interface RunResult {
   approvalId?: string;
   reason: string;
   /** Почему пропущено — вызывающий отличает «нет повода» от «потолок исчерпан». */
-  skipReason?: "inactive" | "not_implemented" | "no_signal" | "capped" | "no_change";
+  skipReason?:
+    | "inactive"
+    | "not_implemented"
+    | "no_signal"
+    | "capped"
+    | "no_change"
+    | "budget_denied"
+    | "execution_unknown"
+    | "ledger_unavailable";
   /** Предложение навыка (текст и факты) — чтобы отчёт по задаче не звал навык
    *  повторно (иначе первый прогон и отчёт могут разойтись). */
   action?: string;
   facts?: Record<string, unknown>;
   /** Подсказки «что дальше» (follow-up) от навыка. */
   next?: string[];
+  /** Task-mode never writes approval/event/memory/task status itself. */
+  commit?: TaskCommitIntent;
+}
+
+/** Bounded stable key for retry-safe cron events. Task events are committed by Core. */
+function eventClientKey(requestKey: string, effect: string): string {
+  const hash = createHash("sha256").update(`${requestKey}:${effect}`).digest("hex");
+  return `agent-event:${hash}`;
+}
+
+/** Stable approval key shared by every replica handling the same cron occurrence. */
+function approvalClientKey(requestKey: string): string {
+  const hash = createHash("sha256").update(`${requestKey}:approval`).digest("hex");
+  return `agent-approval:${hash}`;
+}
+
+function checkpointProposal(checkpoint: AgentTaskCheckpoint): {
+  action: string;
+  facts: Record<string, unknown>;
+  next?: string[];
+} | null {
+  if (checkpoint.kind === "no_signal") return null;
+  if (typeof checkpoint.action !== "string" || checkpoint.action.trim() === "") {
+    throw new Error(`Task checkpoint ${checkpoint.id} не содержит proposal.action`);
+  }
+  return {
+    action: checkpoint.action,
+    facts: checkpoint.facts ?? {},
+    ...(checkpoint.next && checkpoint.next.length ? { next: checkpoint.next } : {}),
+  };
 }
 
 /**
@@ -42,6 +103,7 @@ export async function runSkill(
   /** Минимальный тир навыка (frontmatter `requires-approval`). Не задан —
    *  тир берётся только из карточки агента (поведение как раньше). */
   skillFloor?: AutonomyTier,
+  invocation?: SkillRunContext,
 ): Promise<RunResult> {
   if (agent.status !== "active") {
     return {
@@ -53,19 +115,38 @@ export async function runSkill(
     };
   }
 
+  const context: SkillRunContext = invocation ?? {
+    requestKey: `agent:${agent.name}:${skill}:${randomUUID()}`,
+    traceKey: `agent:${agent.name}:${skill}`,
+  };
+
   // Эффективный тир — floor из карточки агента и объявленного тира навыка
   // (строже побеждает). Раньше рантайм читал только карточку и молча игнорировал
   // `requires-approval` навыка — навык мог исполниться ниже собственного уровня.
   const tier = effectiveActionTier(agent.autonomyDefault, skillFloor);
-  await core.recordEvent({
-    source: `agent:${agent.name}`,
-    type: "agent.run",
-    payload: { skill, tier },
-  });
+  const taskMode = context.task;
+  const existingCheckpoint = taskMode?.checkpoint;
+  if (existingCheckpoint && existingCheckpoint.skill !== skill) {
+    throw new Error(
+      `Task checkpoint ${existingCheckpoint.id} привязан к ${existingCheckpoint.skill}, а не ${skill}`,
+    );
+  }
+
+  // Cron keeps the old direct event path. A durable task defers every internal
+  // effect to Core commit; even agent.run must not precede its checkpoint.
+  if (!taskMode) {
+    await context.assertLease?.();
+    await core.recordEvent({
+      source: `agent:${agent.name}`,
+      type: "agent.run",
+      payload: { skill, tier },
+      clientKey: eventClientKey(context.requestKey, "run"),
+    });
+  }
 
   // Навык ещё не реализован — честно говорим об этом, а не изображаем работу.
   const impl = SKILLS[skill];
-  if (impl === undefined) {
+  if (impl === undefined && existingCheckpoint === undefined) {
     return {
       agent: agent.name,
       skill,
@@ -75,14 +156,70 @@ export async function runSkill(
     };
   }
 
-  const proposal = await impl(agent, core);
+  let proposal;
+  try {
+    if (existingCheckpoint) {
+      // Takeover resumes the immutable Core result and never calls skill/LLM.
+      proposal = checkpointProposal(existingCheckpoint);
+      await context.assertLease?.();
+    } else {
+      proposal = await impl!(agent, core, context);
+      // Provider/embedding мог ответить уже после takeover. Core's
+      // checkpoint endpoint repeats this CAS inside its transaction.
+      await context.assertLease?.();
+      if (taskMode) {
+        await taskMode.saveCheckpoint(
+          proposal === null
+            ? { skill, kind: "no_signal" }
+            : {
+                skill,
+                kind: "proposal",
+                action: proposal.action,
+                facts: proposal.facts,
+                ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
+              },
+        );
+      }
+    }
+  } catch (error) {
+    if (!isLlmLedgerBlockingError(error)) throw error;
+    if (error instanceof LlmReplayBlockedError) {
+      return {
+        agent: agent.name,
+        skill,
+        outcome: "skipped",
+        skipReason: "execution_unknown",
+        reason: `Повтор уже принятого LLM-вызова заблокирован: ${error.message}`,
+      };
+    }
+    if (error instanceof LlmBudgetDeniedError) {
+      return {
+        agent: agent.name,
+        skill,
+        outcome: "skipped",
+        skipReason: "budget_denied",
+        reason: `LLM-бюджет не разрешил вызов (${error.action}): ${error.message}`,
+      };
+    }
+    // instanceof оставляем явным: тип ошибки не должен слиться с no_signal.
+    const unavailable = error as LlmLedgerUnavailableError;
+    return {
+      agent: agent.name,
+      skill,
+      outcome: "skipped",
+      skipReason: "ledger_unavailable",
+      reason: `LLM-ledger недоступен — платный вызов не выполнен: ${unavailable.message}`,
+    };
+  }
   if (proposal === null) {
+    const note = "Проверил — по данным MYDON повода для действий нет.";
     return {
       agent: agent.name,
       skill,
       outcome: "skipped",
       skipReason: "no_signal",
       reason: "повода нет: по данным Core предлагать нечего",
+      ...(taskMode ? { commit: { outcome: "no_signal", note } } : {}),
     };
   }
 
@@ -95,6 +232,7 @@ export async function runSkill(
   const sig = signature(proposal.facts);
   const lastSig = await core.recallMemory(source, skill);
   if (lastSig === sig) {
+    const note = "Проверил — с прошлого раза ничего не изменилось.";
     return {
       agent: agent.name,
       skill,
@@ -103,6 +241,18 @@ export async function runSkill(
       reason: "с прошлого раза ничего не изменилось — не повторяю предложение",
       action: proposal.action,
       facts: proposal.facts,
+      ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
+      ...(taskMode
+        ? {
+            commit: {
+              outcome: "no_change",
+              note,
+              action: proposal.action,
+              facts: proposal.facts,
+              ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
+            },
+          }
+        : {}),
     };
   }
 
@@ -110,7 +260,7 @@ export async function runSkill(
   // или исполнит. Потолок написали давно (Ф9), но в рантайме не применяли —
   // теперь применяем. Использование берём из журнала Core, а не из памяти.
   const cap = dailyCap();
-  if (cap > 0) {
+  if (!taskMode && cap > 0) {
     const used = await core.countAgentActions(`agent:${agent.name}`, startOfTashkentDay());
     const limit = checkLimit(used, cap);
     if (!limit.allowed) {
@@ -136,16 +286,24 @@ export async function runSkill(
   const isBreakGlass = (agent.breakGlass ?? []).includes(skill);
 
   const executor = EXECUTORS[skill];
-  if (executor && !isBreakGlass && !requiresApproval(tier, threshold)) {
+  // Task executors mutate Core (notes/cards) and cannot share the task commit
+  // transaction. Until each executor has its own durable outbox, task mode
+  // must fail safe into approval instead of risking a duplicate effect after
+  // crash/takeover. Cron keeps its established direct-execution behaviour.
+  if (!taskMode && executor && !isBreakGlass && !requiresApproval(tier, threshold)) {
+    await context.assertLease?.();
     const exec = await executor(agent, proposal, core);
     if (exec.ok) {
+      await context.assertLease?.();
       await core.recordEvent({
         source: `agent:${agent.name}`,
         type: "agent.action",
         payload: { skill, action: proposal.action, executed: true, verified: exec.detail },
+        clientKey: eventClientKey(context.requestKey, "action"),
       });
       // Подача состоялась (исполнено) — запоминаем повод, чтобы не повторять его.
-      await core.rememberMemory(source, skill, sig);
+      await context.assertLease?.();
+      await core.rememberMemory(source, skill, sig, eventClientKey(context.requestKey, "memory"));
       return {
         agent: agent.name,
         skill,
@@ -161,10 +319,38 @@ export async function runSkill(
   // Действие идёт через согласование: порог не разрешает исполнение, или у
   // навыка нет исполнителя, или исполнитель не подтвердил результат. Порог
   // сохраняем в payload и reason — он в силе, когда исполнитель появится.
+  const approvalReason = isBreakGlass
+    ? `break-glass: навык «${skill}» всегда идёт через согласование`
+    : requiresApproval(tier, threshold)
+      ? explainPolicy(tier, threshold)
+      : "порог допускает исполнение, но исполнителя навыка ещё нет — вынесено на согласование";
+  if (taskMode) {
+    return {
+      agent: agent.name,
+      skill,
+      outcome: "approval_requested",
+      action: proposal.action,
+      facts: proposal.facts,
+      ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
+      reason: approvalReason,
+      commit: {
+        outcome: "approval_requested",
+        note: `${proposal.action}\n\nВынес на твоё решение.`,
+        action: proposal.action,
+        facts: proposal.facts,
+        ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
+        tier,
+        memorySignature: sig,
+      },
+    };
+  }
+
+  await context.assertLease?.();
   const approval = await core.requestApproval({
     agent: agent.name,
     action: proposal.action,
     tier,
+    clientKey: approvalClientKey(context.requestKey),
     // Факты кладём рядом с предложением: по ним проверяется «по следам»,
     // что агент не выдумал повод.
     payload: {
@@ -174,13 +360,16 @@ export async function runSkill(
       ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
     },
   });
+  await context.assertLease?.();
   await core.recordEvent({
     source: `agent:${agent.name}`,
     type: "agent.action",
     payload: { skill, action: proposal.action, approvalId: approval.id },
+    clientKey: eventClientKey(context.requestKey, "action"),
   });
   // Подача состоялась (вынесено владельцу) — запоминаем повод, чтобы не повторять.
-  await core.rememberMemory(source, skill, sig);
+  await context.assertLease?.();
+  await core.rememberMemory(source, skill, sig, eventClientKey(context.requestKey, "memory"));
   return {
     agent: agent.name,
     skill,
@@ -189,10 +378,6 @@ export async function runSkill(
     action: proposal.action,
     facts: proposal.facts,
     ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),
-    reason: isBreakGlass
-      ? `break-glass: навык «${skill}» всегда идёт через согласование`
-      : requiresApproval(tier, threshold)
-        ? explainPolicy(tier, threshold)
-        : "порог допускает исполнение, но исполнителя навыка ещё нет — вынесено на согласование",
+    reason: approvalReason,
   };
 }

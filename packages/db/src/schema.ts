@@ -40,6 +40,40 @@ export const approvalDecisionEnum = pgEnum("approval_decision", [
 export const taskPriorityEnum = pgEnum("task_priority", ["low", "normal", "high", "urgent"]);
 export const moneyDirectionEnum = pgEnum("money_direction", ["in", "out"]);
 export const actorKindEnum = pgEnum("actor_kind", ["human", "agent", "system"]);
+export const llmBillingKindEnum = pgEnum("llm_billing_kind", ["metered", "subscription"]);
+export const llmSettlementKindEnum = pgEnum("llm_settlement_kind", ["tokens", "provider_reported"]);
+export const llmSpendStatusEnum = pgEnum("llm_spend_status", [
+  "reserved",
+  "settled",
+  "failed",
+  "released",
+  "denied",
+]);
+export const llmSettlementOutcomeEnum = pgEnum("llm_settlement_outcome", [
+  "success",
+  "provider_error",
+  "unknown",
+]);
+export const llmLedgerConsumerEnum = pgEnum("llm_ledger_consumer", [
+  "agents",
+  "bot",
+  "cc",
+  "documents",
+  "embeddings",
+]);
+export const taskAgentExecutionStatusEnum = pgEnum("task_agent_execution_status", [
+  "ready",
+  "committed",
+  "abandoned",
+]);
+export const outboxDeliveryStatusEnum = pgEnum("outbox_delivery_status", [
+  "pending",
+  "dispatching",
+  "sent",
+  "skipped",
+  "unknown",
+  "dead",
+]);
 
 const id = () => uuid("id").defaultRandom().primaryKey();
 const createdAt = () => timestamp("created_at", { withTimezone: true }).defaultNow().notNull();
@@ -210,6 +244,25 @@ export const task = pgTable(
      */
     entityId: uuid("entity_id").references(() => entity.id),
     status: taskStatusEnum("status").default("todo").notNull(),
+    /**
+     * Lease одного физического worker, отдельно от денежной попытки.
+     *
+     * runId меняется при stale takeover и служит CAS-владением; устойчивый
+     * executionAttemptId сохраняется между takeover и становится базой
+     * requestKey metered LLM. Поэтому падение после оплаченного ответа не
+     * разрешает новому worker второй платный dispatch через ledger replay.
+     * Новый executionAttemptId
+     * появляется только у новой задачи или после явного redo/переназначения.
+     */
+    agentRunId: uuid("agent_run_id"),
+    agentExecutionAttemptId: uuid("agent_execution_attempt_id"),
+    /** После безопасного pre-provider budget denial — не раньше новых суток. */
+    agentExecutionRetryAt: timestamp("agent_execution_retry_at", { withTimezone: true }),
+    /** Неизвестный исход/replay требует явного retry владельца. */
+    agentExecutionBlockedAt: timestamp("agent_execution_blocked_at", { withTimezone: true }),
+    agentExecutionBlockedReason: text("agent_execution_blocked_reason"),
+    agentRunGeneration: integer("agent_run_generation").default(0).notNull(),
+    agentRunClaimedAt: timestamp("agent_run_claimed_at", { withTimezone: true }),
     /** Срочность — чтобы список сортировался по важности, а не по алфавиту. */
     priority: taskPriorityEnum("priority").default("normal").notNull(),
     due: timestamp("due", { withTimezone: true }),
@@ -270,16 +323,17 @@ export const task = pgTable(
      * Предикат вынесен в `TASK_SOURCE_DAY_PREDICATE` — его обязана дословно
      * повторять спецификация `ON CONFLICT` в `ensureForDay`, иначе `42P10`.
      */
-    uniqueIndex("task_source_key")
-      .on(t.source)
-      .where(TASK_SOURCE_DAY_PREDICATE),
+    uniqueIndex("task_source_key").on(t.source).where(TASK_SOURCE_DAY_PREDICATE),
     uniqueIndex("task_client_key").on(t.clientKey),
     // Оба индекса частичные и зеркалят миграцию П7. Иначе следующая
     // генерация миграции попыталась бы создать их заново.
     index("task_assign_pending_idx")
       .on(t.ownerRef)
       .where(sql`assign_notified_at is null and owner_ref is not null`),
-    index("task_awaiting_idx").on(t.completedAt).where(sql`confirmed_at is null`),
+    index("task_awaiting_idx")
+      .on(t.completedAt)
+      .where(sql`confirmed_at is null`),
+    check("task_agent_run_generation_nonnegative", sql`${t.agentRunGeneration} >= 0`),
   ],
 );
 
@@ -805,16 +859,22 @@ export const taskComment = pgTable(
 );
 
 // ── approval: запрос на согласование действия агента ──
-export const approval = pgTable("approval", {
-  id: id(),
-  agent: text("agent").notNull(),
-  action: text("action").notNull(),
-  tier: approvalTierEnum("tier").notNull(),
-  payload: jsonb("payload").default({}).notNull(),
-  decision: approvalDecisionEnum("decision").default("pending").notNull(),
-  decidedAt: timestamp("decided_at", { withTimezone: true }),
-  createdAt: createdAt(),
-});
+export const approval = pgTable(
+  "approval",
+  {
+    id: id(),
+    agent: text("agent").notNull(),
+    action: text("action").notNull(),
+    tier: approvalTierEnum("tier").notNull(),
+    payload: jsonb("payload").default({}).notNull(),
+    decision: approvalDecisionEnum("decision").default("pending").notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** Идемпотентность повторного commit одного agent outcome. */
+    clientKey: text("client_key"),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("approval_client_key").on(t.clientKey)],
+);
 
 // ── event: всё, что произошло (шина событий) ──
 export const event = pgTable(
@@ -824,10 +884,86 @@ export const event = pgTable(
     source: text("source").notNull(),
     type: text("type").notNull(),
     payload: jsonb("payload").default({}).notNull(),
+    /** Идемпотентность повторного commit одного agent outcome. */
+    clientKey: text("client_key"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).defaultNow().notNull(),
     createdAt: createdAt(),
   },
-  (t) => [index("event_type_time_idx").on(t.type, t.occurredAt)],
+  (t) => [
+    index("event_type_time_idx").on(t.type, t.occurredAt),
+    uniqueIndex("event_client_key").on(t.clientKey),
+  ],
+);
+
+// ── Durable agent outcome и transactional outbox ──
+export const taskAgentExecution = pgTable(
+  "task_agent_execution",
+  {
+    id: id(),
+    taskId: uuid("task_id")
+      .references(() => task.id, { onDelete: "cascade" })
+      .notNull(),
+    executionAttemptId: uuid("execution_attempt_id").notNull(),
+    agentName: text("agent_name").notNull(),
+    skill: text("skill").notNull(),
+    schemaVersion: integer("schema_version").default(1).notNull(),
+    taskInputHash: text("task_input_hash").notNull(),
+    checkpointKind: text("checkpoint_kind").notNull(),
+    checkpointPayload: jsonb("checkpoint_payload").notNull(),
+    checkpointHash: text("checkpoint_hash").notNull(),
+    status: taskAgentExecutionStatusEnum("status").default("ready").notNull(),
+    outcomePayload: jsonb("outcome_payload"),
+    outcomeHash: text("outcome_hash"),
+    approvalId: uuid("approval_id").references(() => approval.id),
+    committedAt: timestamp("committed_at", { withTimezone: true }),
+    abandonedAt: timestamp("abandoned_at", { withTimezone: true }),
+    abandonReason: text("abandon_reason"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("task_agent_execution_attempt_key").on(t.executionAttemptId),
+    index("task_agent_execution_task_idx").on(t.taskId),
+    index("task_agent_execution_status_idx").on(t.status),
+    check("task_agent_execution_schema_version_positive", sql`${t.schemaVersion} > 0`),
+    check(
+      "task_agent_execution_terminal_fields_consistent",
+      sql`(${t.status} = 'ready' and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'committed' and ${t.outcomePayload} is not null and ${t.outcomeHash} is not null and ${t.committedAt} is not null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'abandoned' and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is not null and ${t.abandonReason} is not null)`,
+    ),
+  ],
+);
+
+export const outboxDelivery = pgTable(
+  "outbox_delivery",
+  {
+    id: id(),
+    key: text("key").notNull(),
+    taskAgentExecutionId: uuid("task_agent_execution_id")
+      .references(() => taskAgentExecution.id, { onDelete: "cascade" })
+      .notNull(),
+    destination: text("destination").notNull(),
+    payload: jsonb("payload").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    status: outboxDeliveryStatusEnum("status").default("pending").notNull(),
+    attempts: integer("attempts").default(0).notNull(),
+    leaseToken: uuid("lease_token"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    providerRef: text("provider_ref"),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("outbox_delivery_key").on(t.key),
+    index("outbox_delivery_destination_status_created_idx").on(
+      t.destination,
+      t.status,
+      t.createdAt,
+    ),
+    index("outbox_delivery_execution_idx").on(t.taskAgentExecutionId),
+    check("outbox_delivery_attempts_nonnegative", sql`${t.attempts} >= 0`),
+  ],
 );
 
 // ── geo_point: типизированные координаты карточки ──
@@ -1391,6 +1527,134 @@ export const systemConfig = pgTable("system_config", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ── LLM-ledger: версионируемый прайс и одна строка на физическую попытку провайдера ──
+// Клиенты не передают цены и лимиты. Core берёт активную строку
+// каталога и копирует её в price_snapshot: после смены тарифа старая трата
+// остаётся воспроизводимой. USD храним до 1e-9: на малых token-usage
+// два знака после запятой превращали бы реальную трату в ноль.
+export const llmModelPrice = pgTable(
+  "llm_model_price",
+  {
+    id: id(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    billingKind: llmBillingKindEnum("billing_kind").default("metered").notNull(),
+    settlementKind: llmSettlementKindEnum("settlement_kind").default("tokens").notNull(),
+    inputUsdPerMtok: numeric("input_usd_per_mtok", { precision: 24, scale: 9 })
+      .default("0")
+      .notNull(),
+    outputUsdPerMtok: numeric("output_usd_per_mtok", { precision: 24, scale: 9 })
+      .default("0")
+      .notNull(),
+    cacheReadUsdPerMtok: numeric("cache_read_usd_per_mtok", { precision: 24, scale: 9 })
+      .default("0")
+      .notNull(),
+    cacheWrite5mUsdPerMtok: numeric("cache_write_5m_usd_per_mtok", { precision: 24, scale: 9 })
+      .default("0")
+      .notNull(),
+    cacheWrite1hUsdPerMtok: numeric("cache_write_1h_usd_per_mtok", { precision: 24, scale: 9 })
+      .default("0")
+      .notNull(),
+    fixedRequestUsd: numeric("fixed_request_usd", { precision: 24, scale: 9 })
+      .default("0")
+      .notNull(),
+    /** Верхняя оценка для provider_reported, когда заранее нет token-формулы. */
+    reservationCeilingUsd: numeric("reservation_ceiling_usd", { precision: 24, scale: 9 }),
+    /** Lower bound: 5 минут по $0.05/ч на один Messages request с code execution. */
+    codeExecutionUsdPerRequest: numeric("code_execution_usd_per_request", {
+      precision: 24,
+      scale: 9,
+    })
+      .default("0")
+      .notNull(),
+    validFrom: timestamp("valid_from", { withTimezone: true }).defaultNow().notNull(),
+    validTo: timestamp("valid_to", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("llm_model_price_active_provider_model_idx")
+      .on(t.provider, t.model)
+      .where(sql`${t.validTo} is null`),
+    index("llm_model_price_lookup_idx").on(t.provider, t.model, t.validFrom),
+    check(
+      "llm_model_price_valid_range",
+      sql`${t.validTo} is null or ${t.validTo} > ${t.validFrom}`,
+    ),
+    check(
+      "llm_model_price_nonnegative",
+      sql`${t.inputUsdPerMtok} >= 0 and ${t.outputUsdPerMtok} >= 0 and ${t.cacheReadUsdPerMtok} >= 0 and ${t.cacheWrite5mUsdPerMtok} >= 0 and ${t.cacheWrite1hUsdPerMtok} >= 0 and ${t.fixedRequestUsd} >= 0 and (${t.reservationCeilingUsd} is null or ${t.reservationCeilingUsd} >= 0) and ${t.codeExecutionUsdPerRequest} >= 0`,
+    ),
+  ],
+);
+
+export const llmSpend = pgTable(
+  "llm_spend",
+  {
+    id: id(),
+    /** Стабильный ключ одной физической попытки, глобально уникален. */
+    requestKey: text("request_key").notNull(),
+    /** SHA-256 канонического reserve-payload: тот же ключ нельзя переиграть. */
+    requestHash: text("request_hash").notNull(),
+    /** SHA-256 первого settlement; точный retry безопасен, иной — 409. */
+    settlementHash: text("settlement_hash"),
+    traceKey: text("trace_key"),
+    consumer: llmLedgerConsumerEnum("consumer").notNull(),
+    feature: text("feature").notNull(),
+    /** UUID и имя — оба snapshot; FK намеренно нет, чтобы архив агента не менял финслед. */
+    agentId: uuid("agent_id"),
+    agentName: text("agent_name"),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    resolvedModel: text("resolved_model"),
+    priceId: uuid("price_id").references(() => llmModelPrice.id),
+    priceSnapshot: jsonb("price_snapshot").default({}).notNull(),
+    status: llmSpendStatusEnum("status").notNull(),
+    outcome: llmSettlementOutcomeEnum("outcome"),
+    day: date("day").notNull(),
+    inputTokenCeiling: integer("input_token_ceiling").notNull(),
+    outputTokenCeiling: integer("output_token_ceiling").notNull(),
+    reservedUsd: numeric("reserved_usd", { precision: 24, scale: 9 }).default("0").notNull(),
+    actualUsd: numeric("actual_usd", { precision: 24, scale: 9 }),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    cacheReadInputTokens: integer("cache_read_input_tokens"),
+    cacheCreationInputTokens: integer("cache_creation_input_tokens"),
+    cacheCreation5mInputTokens: integer("cache_creation_5m_input_tokens"),
+    cacheCreation1hInputTokens: integer("cache_creation_1h_input_tokens"),
+    codeExecutionRequests: integer("code_execution_requests"),
+    providerRequestId: text("provider_request_id"),
+    reason: text("reason"),
+    metadata: jsonb("metadata").default({}).notNull(),
+    reservedAt: timestamp("reserved_at", { withTimezone: true }),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    deniedAt: timestamp("denied_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("llm_spend_request_key_idx").on(t.requestKey),
+    uniqueIndex("llm_spend_provider_request_id_idx")
+      .on(t.provider, t.providerRequestId)
+      .where(sql`${t.providerRequestId} is not null`),
+    index("llm_spend_day_status_idx").on(t.day, t.status),
+    index("llm_spend_agent_day_idx").on(t.agentId, t.day),
+    index("llm_spend_trace_key_idx").on(t.traceKey),
+    index("llm_spend_provider_failed_at_idx")
+      .on(t.provider, t.failedAt)
+      .where(sql`${t.failedAt} is not null`),
+    check(
+      "llm_spend_money_nonnegative",
+      sql`${t.reservedUsd} >= 0 and (${t.actualUsd} is null or ${t.actualUsd} >= 0)`,
+    ),
+    check(
+      "llm_spend_tokens_nonnegative",
+      sql`${t.inputTokenCeiling} >= 0 and ${t.outputTokenCeiling} >= 0 and (${t.inputTokens} is null or ${t.inputTokens} >= 0) and (${t.outputTokens} is null or ${t.outputTokens} >= 0) and (${t.cacheReadInputTokens} is null or ${t.cacheReadInputTokens} >= 0) and (${t.cacheCreationInputTokens} is null or ${t.cacheCreationInputTokens} >= 0) and (${t.cacheCreation5mInputTokens} is null or ${t.cacheCreation5mInputTokens} >= 0) and (${t.cacheCreation1hInputTokens} is null or ${t.cacheCreation1hInputTokens} >= 0) and (${t.codeExecutionRequests} is null or ${t.codeExecutionRequests} >= 0)`,
+    ),
+  ],
+);
+
 // ── Вендинг-операции (ТЗ «Вендинг-операции», §4) ─────────────────────────────
 // Перенос Ourvend-скрипта в продукт. Машины и товары живут в общем реестре
 // (entity), склад — в stock_movement; здесь — вендинг-специфика: слоты с
@@ -1673,7 +1937,9 @@ export const vendingStockCount = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    uniqueIndex("vending_stock_count_src_key").on(t.source, t.extId).where(sql`${t.extId} is not null`),
+    uniqueIndex("vending_stock_count_src_key")
+      .on(t.source, t.extId)
+      .where(sql`${t.extId} is not null`),
     uniqueIndex("vending_stock_count_own_key")
       .on(t.source, t.countedAt, t.productName)
       .where(sql`${t.source} = 'own'`),
@@ -1683,7 +1949,9 @@ export const vendingStockCount = pgTable(
     // `where dt < cutoff order by dt limit 5000` не годится — ведущая
     // колонка не та, и каждая пачка стоила бы полного скана с сортировкой.
     index("vending_stock_count_dt_idx").on(t.dt),
-    uniqueIndex("vending_stock_count_storno_key").on(t.reversesId).where(sql`${t.source} = 'storno'`),
+    uniqueIndex("vending_stock_count_storno_key")
+      .on(t.reversesId)
+      .where(sql`${t.source} = 'storno'`),
   ],
 );
 
@@ -1811,7 +2079,9 @@ export const vendingRefill = pgTable(
     index("vending_refill_machine_idx").on(t.machineSerial, desc(t.performedAt)),
     index("vending_refill_person_idx").on(t.personId, desc(t.performedAt)),
     uniqueIndex("vending_refill_client_key").on(t.clientKey),
-    index("vending_refill_reverses_idx").on(t.reversesId).where(sql`${t.reversesId} is not null`),
+    index("vending_refill_reverses_idx")
+      .on(t.reversesId)
+      .where(sql`${t.reversesId} is not null`),
     // CHECK «qty» живёт в SQL миграции 0072, а НЕ здесь: у сторно qty < 0, и
     // выразить это в drizzle-схеме значило бы выпустить ещё одну миграцию ради
     // ограничения, которое 0072 уже ставит (та же причина, что у fixedPurchaseQty).
@@ -1921,7 +2191,9 @@ export const vendingCashSession = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    uniqueIndex("vending_cash_session_storno_key").on(t.reversesId).where(sql`${t.source} = 'storno'`),
+    uniqueIndex("vending_cash_session_storno_key")
+      .on(t.reversesId)
+      .where(sql`${t.source} = 'storno'`),
   ],
 );
 
@@ -2858,6 +3130,8 @@ export const schema = {
   taskComment,
   approval,
   event,
+  taskAgentExecution,
+  outboxDelivery,
   document,
   moneyFlow,
   // Финансовый контур: курс валют к суму (перенос паттерна PROMACH).
@@ -2878,6 +3152,9 @@ export const schema = {
   note,
   auditLog,
   agent,
+  // Единый денежный журнал всех метрируемых LLM-вызовов.
+  llmModelPrice,
+  llmSpend,
   // Операционные таблицы VendHub (движения, сырьё, инкассация).
   collection,
   sale,

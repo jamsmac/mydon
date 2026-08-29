@@ -8,6 +8,7 @@ import {
   withLlmFallback,
   type LlmResolver,
 } from "@mydon/assistant";
+import { CoreLlmLedgerClient, type LlmCallContext } from "@mydon/shared";
 import { assistantCore } from "../../lib/assistant-core";
 import { coreWriteHeaders } from "../../lib/core";
 
@@ -17,6 +18,10 @@ export interface AskResult {
 }
 
 const BASE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
+const llmLedger = new CoreLlmLedgerClient({
+  baseUrl: BASE,
+  serviceToken: process.env.SERVICE_TOKEN ?? "",
+});
 
 // LLM-слой. Два пути входа, включаются тем, что задано в окружении:
 //   • подписка Claude владельца (CLAUDE_CODE_OAUTH_TOKEN) — без платного ключа;
@@ -27,7 +32,13 @@ const modelOverride = process.env.MYDON_ASSISTANT_MODEL
   ? { model: process.env.MYDON_ASSISTANT_MODEL }
   : {};
 const apiLlm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
-  ? createLlmResolver({ apiKey: process.env.ANTHROPIC_API_KEY, ...modelOverride })
+  ? createLlmResolver({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      ledger: llmLedger,
+      consumer: "cc",
+      feature: "assistant",
+      ...modelOverride,
+    })
   : undefined;
 const subLlm: LlmResolver | undefined = process.env.CLAUDE_CODE_OAUTH_TOKEN
   ? createSubscriptionResolver(modelOverride)
@@ -58,14 +69,24 @@ async function remember(question: string): Promise<void> {
   }
 }
 
-export async function ask(question: string): Promise<AskResult> {
+export async function ask(question: string, requestId: string): Promise<AskResult> {
   const clean = question.trim();
   if (!clean) return { text: "Спроси что-нибудь — например «брифинг» или «что просрочено»." };
+  const cleanRequestId = requestId.trim();
+  if (!/^[a-zA-Z0-9:_-]{8,128}$/.test(cleanRequestId)) {
+    return {
+      text: "Не удалось безопасно идентифицировать платный ИИ-запрос. Обнови страницу и попробуй ещё раз.",
+    };
+  }
+  const requestKey = `cc:request:${cleanRequestId}`;
+  const llmContext: LlmCallContext = { requestKey, traceKey: requestKey };
 
   try {
-    const reply = await answer(clean, assistantCore, llm ? { llm, context } : {});
+    const reply = await answer(clean, assistantCore, llm ? { llm, context, llmContext } : {});
     void remember(clean);
-    return reply.approvalId ? { text: reply.text, approvalId: reply.approvalId } : { text: reply.text };
+    return reply.approvalId
+      ? { text: reply.text, approvalId: reply.approvalId }
+      : { text: reply.text };
   } catch (err) {
     return {
       text:

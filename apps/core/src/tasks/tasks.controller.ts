@@ -1,7 +1,32 @@
-import { Body, ConflictException, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
+import {
+  Body,
+  ConflictException,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
-import { IsIn, IsISO8601, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength, ValidateIf } from "class-validator";
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsIn,
+  IsISO8601,
+  IsNotEmpty,
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  MaxLength,
+  ValidateIf,
+} from "class-validator";
 import { DOMAINS, type Domain } from "@mydon/shared";
+import { OwnerActionGuard } from "../common/owner-action.guard";
 import { TasksService } from "./tasks.service";
 
 const STATUSES = ["todo", "in_progress", "done", "cancelled"] as const;
@@ -10,65 +35,90 @@ const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 type Priority = (typeof PRIORITIES)[number];
 
 export class CreateTaskDto {
-  @IsString() @IsNotEmpty() @MaxLength(512)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(512)
   title!: string;
 
   @IsIn(["human", "agent"], { message: "ownerKind: human или agent" })
   ownerKind!: "human" | "agent";
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   ownerRef?: string;
 
-  @IsOptional() @IsIn([...DOMAINS])
+  @IsOptional()
+  @IsIn([...DOMAINS])
   domain?: Domain;
 
-  @IsOptional() @IsISO8601({}, { message: "due: дата в формате ISO" })
+  @IsOptional()
+  @IsISO8601({}, { message: "due: дата в формате ISO" })
   due?: string;
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   source?: string;
 
-  @IsOptional() @IsString() @MaxLength(4000)
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
   description?: string;
 
-  @IsOptional() @IsIn([...PRIORITIES])
+  @IsOptional()
+  @IsIn([...PRIORITIES])
   priority?: Priority;
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   createdBy?: string;
 
   /** Ключ идемпотентности: повтор того же нажатия несёт то же значение. */
-  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
   clientKey?: string;
 
   /** По какому объекту работа: автомат, точка, склад. */
-  @IsOptional() @IsUUID()
+  @IsOptional()
+  @IsUUID()
   entityId?: string;
 }
 
 export class ListTasksDto {
-  @IsOptional() @IsIn([...STATUSES])
+  @IsOptional()
+  @IsIn([...STATUSES])
   status?: Status;
 
-  @IsOptional() @IsIn([...DOMAINS])
+  @IsOptional()
+  @IsIn([...DOMAINS])
   domain?: Domain;
 
-  @IsOptional() @IsIn(["human", "agent"])
+  @IsOptional()
+  @IsIn(["human", "agent"])
   ownerKind?: "human" | "agent";
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   ownerRef?: string;
 
   /** "1" — только незакрытые: закрытое не должно засорять рабочий список. */
-  @IsOptional() @IsIn(["1"])
+  @IsOptional()
+  @IsIn(["1"])
   open?: string;
 
   /** "1" — только свободные: их разбирают из общего пула. */
-  @IsOptional() @IsIn(["1"])
+  @IsOptional()
+  @IsIn(["1"])
   unassigned?: string;
 
   /** "1" — сделанные, но ещё не принятые. */
-  @IsOptional() @IsIn(["1"])
+  @IsOptional()
+  @IsIn(["1"])
   awaiting?: string;
 }
 
@@ -76,39 +126,63 @@ export class SetStatusDto {
   @IsIn([...STATUSES])
   status!: Status;
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   actor?: string;
 
   /** Отчёт при закрытии: без него «сделано» ничего не значит. */
-  @IsOptional() @IsString() @MaxLength(2000)
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
   resultNote?: string;
+
+  /** CAS для agent-worker: закрыть задачу может только текущая generation. */
+  @IsOptional()
+  @IsUUID()
+  agentRunId?: string;
 }
 
 export class EditTaskDto {
-  @IsOptional() @IsString() @IsNotEmpty() @MaxLength(512)
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(512)
   title?: string;
 
-  @IsOptional() @IsString() @MaxLength(4000)
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
   description?: string;
 
-  @IsOptional() @IsIn(["human", "agent"], { message: "ownerKind: human или agent" })
+  @IsOptional()
+  @IsIn(["human", "agent"], { message: "ownerKind: human или agent" })
   ownerKind?: "human" | "agent";
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   ownerRef?: string;
 
-  @IsOptional() @IsIn([...PRIORITIES])
+  @IsOptional()
+  @IsIn([...PRIORITIES])
   priority?: Priority;
 
   // Пустая строка допустима — это снятие срока. Иначе — ISO-дата.
-  @IsOptional() @ValidateIf((o: EditTaskDto) => o.due !== "") @IsISO8601({}, { message: "due: дата в формате ISO" })
+  @IsOptional()
+  @ValidateIf((o: EditTaskDto) => o.due !== "")
+  @IsISO8601({}, { message: "due: дата в формате ISO" })
   due?: string;
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   actor?: string;
 
   // Пустая строка допустима — это отвязка от объекта. Иначе — uuid.
-  @IsOptional() @ValidateIf((o: EditTaskDto) => o.entityId !== "") @IsUUID()
+  @IsOptional()
+  @ValidateIf((o: EditTaskDto) => o.entityId !== "")
+  @IsUUID()
   entityId?: string;
 }
 
@@ -132,26 +206,132 @@ export class ClaimTaskDto {
   personId!: string;
 }
 
+/** Durable lease для worker, исполняющего задачу агента. */
+export class ClaimAgentRunDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  agentName!: string;
+}
+
+/** Heartbeat/release lease только его текущим владельцем (CAS по runId). */
+export class AgentRunLeaseDto extends ClaimAgentRunDto {
+  @IsUUID()
+  runId!: string;
+}
+
+export class AgentRunFenceDto extends AgentRunLeaseDto {
+  @IsUUID()
+  executionAttemptId!: string;
+}
+
+export class AgentRunCheckpointDto extends AgentRunFenceDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  skill!: string;
+
+  @IsIn(["no_signal", "proposal"])
+  kind!: "no_signal" | "proposal";
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  action?: string;
+
+  @IsOptional()
+  @IsObject()
+  facts?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(1000, { each: true })
+  next?: string[];
+}
+
+export class AgentRunCommitDto extends AgentRunFenceDto {
+  @IsIn(["no_signal", "no_change", "approval_requested", "executed"])
+  kind!: "no_signal" | "no_change" | "approval_requested" | "executed";
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2000)
+  note!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  action?: string;
+
+  @IsOptional()
+  @IsObject()
+  facts?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(1000, { each: true })
+  next?: string[];
+
+  @IsOptional()
+  @IsIn(["T0", "T1", "T2", "T3", "T4"])
+  tier?: "T0" | "T1" | "T2" | "T3" | "T4";
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(512)
+  memorySignature?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
+  executionDetail?: string;
+}
+
+export class ReleaseAgentRunDto extends AgentRunFenceDto {
+  /** Core сам проверит, был ли до denial хоть один начатый reserve. */
+  @IsOptional()
+  @IsIn(["budget_denied", "execution_unknown", "action_capped", "unsupported"])
+  reason?: "budget_denied" | "execution_unknown" | "action_capped" | "unsupported";
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  detail?: string;
+}
+
 export class SetQualityDto {
   @IsIn(["excellent", "accepted", "redo"])
   quality!: "excellent" | "accepted" | "redo";
 
   /** `owner` | `person:<uuid>` — от него зависит право приёмки. */
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   actor?: string;
 }
 
 export class ConfirmTaskDto {
   /** `owner` | `person:<uuid>` — от него зависит право приёмки. */
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   actor?: string;
 }
 
 export class AddCommentDto {
-  @IsString() @IsNotEmpty() @MaxLength(2000)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2000)
   body!: string;
 
-  @IsOptional() @IsString() @MaxLength(128)
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
   author?: string;
 }
 
@@ -309,9 +489,76 @@ export class TasksController {
     return freed;
   }
 
+  /**
+   * Один атомарный claim на задачу агента. Проигранная гонка —
+   * обычный результат worker, поэтому 200 + claimed:false, а не 409.
+   */
+  @Post(":id/agent-run/claim")
+  async claimAgentRun(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ClaimAgentRunDto) {
+    const claimed = await this.tasks.claimAgentRun(id, dto.agentName);
+    if (!claimed) return { claimed: false as const };
+    return {
+      claimed: true as const,
+      runId: claimed.agentRunId!,
+      executionAttemptId: claimed.agentExecutionAttemptId!,
+      generation: claimed.agentRunGeneration,
+      claimedAt: claimed.agentRunClaimedAt!.toISOString(),
+      checkpoint: claimed.agentCheckpoint,
+    };
+  }
+
+  /** Durable provider/skill result, before approval/event/memory/task effects. */
+  @Post(":id/agent-run/checkpoint")
+  checkpointAgentRun(@Param("id", ParseUUIDPipe) id: string, @Body() dto: AgentRunCheckpointDto) {
+    return this.tasks.checkpointAgentRun(id, dto);
+  }
+
+  /** Atomic application of a previously checkpointed agent outcome. */
+  @Post(":id/agent-run/commit")
+  commitAgentRun(@Param("id", ParseUUIDPipe) id: string, @Body() dto: AgentRunCommitDto) {
+    return this.tasks.commitAgentRun(id, dto);
+  }
+
+  /** CAS-release: старый worker не снимет lease новой generation. */
+  @Post(":id/agent-run/release")
+  async releaseAgentRun(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ReleaseAgentRunDto) {
+    const released = await this.tasks.releaseAgentRun(
+      id,
+      dto.agentName,
+      dto.runId,
+      dto.executionAttemptId,
+      dto.reason,
+      dto.detail,
+    );
+    return { released: released !== null };
+  }
+
+  /**
+   * Только явный owner retry создаёт новый executionAttemptId. Общего
+   * SERVICE_TOKEN недостаточно: он есть у самого Agents worker.
+   */
+  @Post(":id/agent-run/retry")
+  @UseGuards(OwnerActionGuard)
+  retryAgentRun(@Param("id", ParseUUIDPipe) id: string) {
+    return this.tasks.retryBlockedAgentExecution(id);
+  }
+
+  /** Lease живого worker не должен стать stale во время длинного LLM-вызова. */
+  @Post(":id/agent-run/heartbeat")
+  async heartbeatAgentRun(@Param("id", ParseUUIDPipe) id: string, @Body() dto: AgentRunLeaseDto) {
+    const renewed = await this.tasks.heartbeatAgentRun(id, dto.agentName, dto.runId);
+    return { renewed };
+  }
+
   @Patch(":id")
   setStatus(@Param("id", ParseUUIDPipe) id: string, @Body() dto: SetStatusDto) {
-    return this.tasks.setStatus(id, dto.status, dto.actor ?? "owner", dto.resultNote);
+    return this.tasks.setStatus(
+      id,
+      dto.status,
+      dto.actor ?? "owner",
+      dto.resultNote,
+      dto.agentRunId,
+    );
   }
 
   /** Правка полей задачи (переназначение, приоритет, срок, заголовок, описание). */
@@ -328,7 +575,9 @@ export class TasksController {
         // "" → снять срок; иначе ISO-строка → дата.
         ...(dto.due !== undefined ? { due: dto.due === "" ? null : new Date(dto.due) } : {}),
         // "" → отвязать от объекта; иначе uuid.
-        ...(dto.entityId !== undefined ? { entityId: dto.entityId === "" ? null : dto.entityId } : {}),
+        ...(dto.entityId !== undefined
+          ? { entityId: dto.entityId === "" ? null : dto.entityId }
+          : {}),
       },
       dto.actor ?? "owner",
     );
