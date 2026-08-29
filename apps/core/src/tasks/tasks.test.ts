@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
+  agentTaskLlmJob,
   approval,
   auditLog,
   event,
@@ -11,7 +12,7 @@ import {
   TASK_SOURCE_DAY_PREDICATE,
   taskComment,
 } from "@mydon/db";
-import { TasksService } from "./tasks.service";
+import { durableTaskInputHash, TasksService } from "./tasks.service";
 
 type Row = Record<string, unknown>;
 
@@ -104,11 +105,13 @@ const stubMaintenance = {
   },
 } as never;
 
-const makeTasks = (db: never) => new TasksService(db, stubMaintenance);
+const makeTasks = (db: never, llmLedger?: never) =>
+  new TasksService(db, stubMaintenance, llmLedger);
 
 interface AgentRunDbState {
   task: Row;
   execution?: Row;
+  jobs: Row[];
   approvals: Row[];
   events: Row[];
   deliveries: Row[];
@@ -116,19 +119,25 @@ interface AgentRunDbState {
   comments: Row[];
   actionCount?: number;
   advisoryLocks: unknown[];
+  lockOrder: string[];
 }
 
 /** Минимальная stateful БД для checkpoint/commit: таблицы различаются по identity. */
 function agentRunDb(state: AgentRunDbState) {
   let sequence = 0;
   const nextId = (prefix: string) => `${prefix}-${++sequence}`;
-  const resultChain = (rows: Row[]) => {
+  const resultChain = (rows: Row[], lockName?: string) => {
     const result = async () => rows;
-    return Object.assign(result(), { limit: result, for: result });
+    const forUpdate = async () => {
+      if (lockName) state.lockOrder.push(lockName);
+      return rows;
+    };
+    return Object.assign(result(), { limit: result, for: forUpdate });
   };
   const rowsFor = (tableRef: unknown): Row[] => {
     if (tableRef === task) return [state.task];
     if (tableRef === taskAgentExecution) return state.execution ? [state.execution] : [];
+    if (tableRef === agentTaskLlmJob) return state.jobs;
     if (tableRef === event) {
       return [
         {
@@ -141,7 +150,19 @@ function agentRunDb(state: AgentRunDbState) {
   };
   const tx = {
     select: (_selection?: unknown) => ({
-      from: (tableRef: unknown) => ({ where: () => resultChain(rowsFor(tableRef)) }),
+      from: (tableRef: unknown) => ({
+        where: () =>
+          resultChain(
+            rowsFor(tableRef),
+            tableRef === task
+              ? "task"
+              : tableRef === taskAgentExecution
+                ? "execution"
+                : tableRef === agentTaskLlmJob
+                  ? "jobs"
+                  : undefined,
+          ),
+      }),
     }),
     update: (tableRef: unknown) => ({
       set: (patch: Row) => ({
@@ -155,7 +176,29 @@ function agentRunDb(state: AgentRunDbState) {
               Object.assign(state.execution, patch);
               return [{ ...state.execution }];
             }
+            if (tableRef === agentTaskLlmJob && state.jobs[0]) {
+              Object.assign(state.jobs[0], patch);
+              return [{ ...state.jobs[0] }];
+            }
             return [];
+          },
+          then: (resolve: (value: Row[]) => unknown, reject?: (reason: unknown) => unknown) => {
+            const apply = async () => {
+              if (tableRef === task) {
+                Object.assign(state.task, patch);
+                return [{ ...state.task }];
+              }
+              if (tableRef === taskAgentExecution && state.execution) {
+                Object.assign(state.execution, patch);
+                return [{ ...state.execution }];
+              }
+              if (tableRef === agentTaskLlmJob && state.jobs[0]) {
+                Object.assign(state.jobs[0], patch);
+                return [{ ...state.jobs[0] }];
+              }
+              return [];
+            };
+            return apply().then(resolve, reject);
           },
         }),
       }),
@@ -258,11 +301,13 @@ function agentRunState(): AgentRunDbState {
       completedAt: null,
     },
     approvals: [],
+    jobs: [],
     events: [],
     deliveries: [],
     audits: [],
     comments: [],
     advisoryLocks: [],
+    lockOrder: [],
   };
 }
 
@@ -388,6 +433,7 @@ describe("Durable claim задачи агента", () => {
     const inserted: Row[] = [];
     const claimedRow = {
       id: TASK,
+      title: "Current claimed title",
       ownerKind: "agent",
       ownerRef: "receivables",
       status: "in_progress",
@@ -402,6 +448,7 @@ describe("Durable claim задачи агента", () => {
 
     assert.equal(result?.agentRunGeneration, 8);
     assert.equal(result?.agentExecutionAttemptId, EXECUTION);
+    assert.deepEqual(result?.taskInput, { title: "Current claimed title" });
     assert.equal(updates.length, 1, "claim не должен быть select-then-update");
     const patch = updates[0]!.patch;
     assert.equal(patch.status, "in_progress");
@@ -449,6 +496,43 @@ describe("Durable claim задачи агента", () => {
       "stale cutoff ровно 15 минут",
     );
     assert.ok(inserted.some((row) => row.action === "task.agent_run.claimed"));
+  });
+
+  it("claim долговечно блокирует malformed stored execution", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    const claimedRow = {
+      id: TASK,
+      ownerKind: "agent",
+      ownerRef: "receivables",
+      status: "in_progress",
+      agentRunId: NEW_RUN,
+      agentExecutionAttemptId: EXECUTION,
+      agentRunGeneration: 8,
+      agentRunClaimedAt: NOW,
+    };
+    await assert.rejects(
+      () =>
+        makeTasks(
+          stubDb({
+            updateResult: claimedRow,
+            updates,
+            selects: [
+              [
+                {
+                  id: "execution-1",
+                  executionAttemptId: EXECUTION,
+                  executionPlan: null,
+                },
+              ],
+            ],
+          }),
+        ).claimAgentRun(TASK, "receivables", NOW),
+      /cannot be resumed safely/,
+    );
+    assert.equal(updates.length, 2);
+    assert.equal(updates[1]?.patch.status, "todo");
+    assert.equal(updates[1]?.patch.agentRunId, null);
+    assert.equal(updates[1]?.patch.agentExecutionBlockedAt, NOW);
   });
 
   it("из двух concurrent claim только один получает runId", async () => {
@@ -550,6 +634,11 @@ describe("Durable claim задачи агента", () => {
     const inserted: Row[] = [];
     const conditions: unknown[] = [];
     const tx = {
+      select: () => ({
+        from: () => ({
+          where: () => ({ for: async () => [{ ...current }] }),
+        }),
+      }),
       update: () => ({
         set: (patch: Row) => ({
           where: (condition: unknown) => {
@@ -596,11 +685,11 @@ describe("Durable claim задачи агента", () => {
     );
     assert.equal(inserted.filter((row) => row.action === "task.agent_run.released").length, 1);
 
-    const oldQuery = new PgDialect().sqlToQuery(
+    const releaseQuery = new PgDialect().sqlToQuery(
       conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0],
     );
-    assert.match(oldQuery.sql, /agent_run_id/);
-    assert.ok(oldQuery.params.includes(OLD_RUN));
+    assert.match(releaseQuery.sql, /agent_run_id/);
+    assert.ok(releaseQuery.params.includes(NEW_RUN));
   });
 
   it("budget denial безопасно ротирует attempt только с новых ташкентских суток", async () => {
@@ -608,6 +697,20 @@ describe("Durable claim задачи агента", () => {
     const selectConditions: unknown[] = [];
     await makeTasks(
       stubDb({
+        selects: [
+          [
+            {
+              id: TASK,
+              ownerKind: "agent",
+              ownerRef: "receivables",
+              status: "in_progress",
+              agentRunId: NEW_RUN,
+              agentExecutionAttemptId: EXECUTION,
+            },
+          ],
+          [],
+          [],
+        ],
         updateResult: {
           id: TASK,
           status: "todo",
@@ -627,9 +730,12 @@ describe("Durable claim задачи агента", () => {
       "2026-08-29T19:00:00.000Z",
       "полночь 30 августа в Ташкенте = 19:00Z 29 августа",
     );
-    const spendProbe = new PgDialect().sqlToQuery(
-      selectConditions[0] as Parameters<PgDialect["sqlToQuery"]>[0],
-    );
+    const spendProbe = selectConditions
+      .map((condition) =>
+        new PgDialect().sqlToQuery(condition as Parameters<PgDialect["sqlToQuery"]>[0]),
+      )
+      .find((query) => query.params.includes("denied"));
+    assert.ok(spendProbe);
     assert.ok(spendProbe.params.includes("denied"));
     assert.ok(spendProbe.params.includes("released"));
   });
@@ -638,7 +744,20 @@ describe("Durable claim задачи агента", () => {
     const updates: NonNullable<StubOpts["updates"]> = [];
     await makeTasks(
       stubDb({
-        selectResult: [{ id: "spend-1" }],
+        selects: [
+          [
+            {
+              id: TASK,
+              ownerKind: "agent",
+              ownerRef: "receivables",
+              status: "in_progress",
+              agentRunId: NEW_RUN,
+              agentExecutionAttemptId: EXECUTION,
+            },
+          ],
+          [],
+          [{ id: "spend-1" }],
+        ],
         updateResult: { id: TASK, status: "todo", agentExecutionAttemptId: EXECUTION },
         updates,
       }),
@@ -662,6 +781,19 @@ describe("Durable claim задачи агента", () => {
     const updates: NonNullable<StubOpts["updates"]> = [];
     await makeTasks(
       stubDb({
+        selects: [
+          [
+            {
+              id: TASK,
+              ownerKind: "agent",
+              ownerRef: "receivables",
+              status: "in_progress",
+              agentRunId: NEW_RUN,
+              agentExecutionAttemptId: EXECUTION,
+            },
+          ],
+          [],
+        ],
         updateResult: { id: TASK, status: "todo", agentExecutionAttemptId: EXECUTION },
         updates,
       }),
@@ -686,6 +818,137 @@ describe("Durable claim задачи агента", () => {
     );
     assert.equal(patch.agentExecutionBlockedAt, NOW);
     assert.equal(patch.agentExecutionBlockedReason, "нет подходящего навыка");
+  });
+
+  it("lost complete response не блокирует уже terminal job и сохраняет attempt", async () => {
+    const state = agentRunState();
+    state.execution = {
+      id: "execution-1",
+      taskId: AGENT_TASK_ID,
+      executionAttemptId: AGENT_ATTEMPT_ID,
+      agentName: "receivables",
+      skill: "watch-receivables",
+      status: "active",
+      taskInputHash: durableTaskInputHash(state.task as never),
+    };
+    state.jobs.push({ id: "job-1", status: "succeeded", taskAgentExecutionId: "execution-1" });
+
+    const released = await makeTasks(agentRunDb(state)).releaseAgentRun(
+      AGENT_TASK_ID,
+      "receivables",
+      AGENT_RUN_ID,
+      AGENT_ATTEMPT_ID,
+      "execution_unknown",
+      "оба HTTP-ответа complete потеряны",
+      AGENT_NOW,
+    );
+    assert.equal(released?.agentExecutionAttemptId, AGENT_ATTEMPT_ID);
+    assert.equal(released?.agentExecutionBlockedAt, null);
+    assert.equal(state.execution.status, "active");
+    assert.equal(state.jobs[0]?.status, "succeeded");
+  });
+
+  it("workflow change блокирует даже terminal job, owner retry ротирует attempt", async () => {
+    const state = agentRunState();
+    state.execution = {
+      id: "execution-1",
+      taskId: AGENT_TASK_ID,
+      executionAttemptId: AGENT_ATTEMPT_ID,
+      agentName: "receivables",
+      skill: "watch-receivables",
+      status: "active",
+      taskInputHash: durableTaskInputHash(state.task as never),
+    };
+    state.jobs.push({ id: "job-1", status: "succeeded", taskAgentExecutionId: "execution-1" });
+
+    const released = await makeTasks(agentRunDb(state)).releaseAgentRun(
+      AGENT_TASK_ID,
+      "receivables",
+      AGENT_RUN_ID,
+      AGENT_ATTEMPT_ID,
+      "workflow_changed",
+      "endpoint route changed",
+      AGENT_NOW,
+    );
+    assert.equal(released?.agentExecutionAttemptId, AGENT_ATTEMPT_ID);
+    assert.equal(released?.agentExecutionBlockedAt, AGENT_NOW);
+    assert.equal(released?.agentExecutionBlockedReason, "workflow_changed: endpoint route changed");
+    assert.equal(state.execution.status, "active");
+
+    await makeTasks(agentRunDb(state)).retryBlockedAgentExecution(AGENT_TASK_ID);
+    assert.equal(state.execution.status, "abandoned");
+    assert.equal(state.task.agentExecutionAttemptId, null);
+    assert.equal(state.task.agentExecutionBlockedAt, null);
+  });
+
+  it("denial второго durable step сохраняет result первого и attempt до новых суток", async () => {
+    const state = agentRunState();
+    state.execution = {
+      id: "execution-1",
+      taskId: AGENT_TASK_ID,
+      executionAttemptId: AGENT_ATTEMPT_ID,
+      agentName: "receivables",
+      skill: "watch-receivables",
+      status: "active",
+      taskInputHash: durableTaskInputHash(state.task as never),
+    };
+    state.jobs.push(
+      { id: "job-1", status: "succeeded", taskAgentExecutionId: "execution-1" },
+      { id: "job-2", status: "waiting_budget", taskAgentExecutionId: "execution-1" },
+    );
+
+    const released = await makeTasks(agentRunDb(state)).releaseAgentRun(
+      AGENT_TASK_ID,
+      "receivables",
+      AGENT_RUN_ID,
+      AGENT_ATTEMPT_ID,
+      "budget_denied",
+      undefined,
+      AGENT_NOW,
+    );
+    assert.equal(released?.agentExecutionAttemptId, AGENT_ATTEMPT_ID);
+    assert.equal(released?.agentExecutionBlockedAt, null);
+    assert.equal(
+      (released?.agentExecutionRetryAt as Date).toISOString(),
+      "2026-08-29T19:00:00.000Z",
+    );
+    assert.equal(state.jobs[0]?.status, "succeeded");
+  });
+
+  it("owner retry не abandons живой dispatch; после deadline фиксирует unknown", async () => {
+    const future = agentRunState();
+    future.task.status = "todo";
+    future.task.agentRunId = null;
+    future.task.agentRunClaimedAt = null;
+    future.task.agentExecutionBlockedAt = AGENT_NOW;
+    future.execution = {
+      id: "execution-1",
+      taskId: AGENT_TASK_ID,
+      executionAttemptId: AGENT_ATTEMPT_ID,
+      agentName: "receivables",
+      skill: "watch-receivables",
+      status: "active",
+      taskInputHash: durableTaskInputHash(future.task as never),
+    };
+    future.jobs.push({
+      id: "job-1",
+      status: "dispatching",
+      taskAgentExecutionId: "execution-1",
+      dispatchDeadlineAt: new Date("2099-01-01T00:00:00.000Z"),
+    });
+    await assert.rejects(
+      () => makeTasks(agentRunDb(future)).retryBlockedAgentExecution(AGENT_TASK_ID),
+      /still in flight/,
+    );
+    assert.equal(future.execution.status, "active");
+    assert.equal(future.jobs[0]?.status, "dispatching");
+
+    future.jobs[0]!.dispatchDeadlineAt = new Date("2000-01-01T00:00:00.000Z");
+    await makeTasks(agentRunDb(future)).retryBlockedAgentExecution(AGENT_TASK_ID);
+    assert.equal(future.jobs[0]?.status, "unknown");
+    assert.equal(future.jobs[0]?.requestPayload, null);
+    assert.equal(future.execution.status, "abandoned");
+    assert.equal(future.task.agentExecutionAttemptId, null);
   });
 
   it("owner retry снимает block без checkpoint и только тогда разрешает новый attempt", async () => {
@@ -735,10 +998,151 @@ describe("Durable claim задачи агента", () => {
       () => service.setStatus(TASK, "done", "agent:receivables", "готово", OLD_RUN),
       /заменён новой generation/,
     );
-    const query = new PgDialect().sqlToQuery(
-      updates[0]!.condition as Parameters<PgDialect["sqlToQuery"]>[0],
+    assert.equal(updates.length, 0, "stale generation отсекается под task lock до UPDATE");
+  });
+});
+
+describe("Terminal task cleanup durable LLM jobs", () => {
+  function withActiveExecution(state: AgentRunDbState): void {
+    state.execution = {
+      id: "execution-terminal-cleanup",
+      taskId: AGENT_TASK_ID,
+      executionAttemptId: AGENT_ATTEMPT_ID,
+      agentName: "receivables",
+      skill: "watch-receivables",
+      status: "active",
+      taskInputHash: durableTaskInputHash(state.task as never),
+    };
+  }
+
+  it("ready reserve releases once, clears payload, and follows task->execution->jobs->ledger", async () => {
+    const state = agentRunState();
+    withActiveExecution(state);
+    state.jobs.push({
+      id: "job-ready",
+      status: "ready",
+      taskAgentExecutionId: state.execution!.id,
+      spendId: "spend-ready",
+      requestPayload: { messages: [{ role: "user", content: "sensitive" }] },
+    });
+    const releases: Row[] = [];
+    const ledger = {
+      releaseInTx: async (_tx: unknown, id: string, dto: Row, options: Row) => {
+        state.lockOrder.push("ledger");
+        releases.push({ id, dto, options });
+        return { status: "released", replay: false };
+      },
+    } as never;
+    const service = makeTasks(agentRunDb(state), ledger);
+
+    await service.setStatus(AGENT_TASK_ID, "done");
+    await service.setStatus(AGENT_TASK_ID, "done");
+
+    assert.equal(state.task.status, "done");
+    assert.equal(state.jobs[0]?.status, "cancelled");
+    assert.equal(state.jobs[0]?.requestPayload, null);
+    assert.equal(releases.length, 1, "idempotent repeat не снимает резерв дважды");
+    assert.deepEqual(releases[0]?.options, { allowTaskJobSpend: true });
+    assert.deepEqual(state.lockOrder, [
+      "task",
+      "execution",
+      "jobs",
+      "ledger",
+      "task",
+      "execution",
+      "jobs",
+    ]);
+    assert.equal(state.audits.filter((row) => row.action === "task.done").length, 1);
+  });
+
+  it("waiting_budget cancels and clears payload without touching ledger", async () => {
+    const state = agentRunState();
+    withActiveExecution(state);
+    state.jobs.push({
+      id: "job-waiting",
+      status: "waiting_budget",
+      taskAgentExecutionId: state.execution!.id,
+      spendId: null,
+      requestPayload: { prompt: "sensitive" },
+    });
+    const ledger = {
+      releaseInTx: async () => {
+        throw new Error("waiting_budget must not release ledger spend");
+      },
+    } as never;
+
+    await makeTasks(agentRunDb(state), ledger).setStatus(AGENT_TASK_ID, "cancelled");
+
+    assert.equal(state.task.status, "cancelled");
+    assert.equal(state.jobs[0]?.status, "cancelled");
+    assert.equal(state.jobs[0]?.requestPayload, null);
+    assert.deepEqual(state.lockOrder, ["task", "execution", "jobs"]);
+  });
+
+  it("dispatching evidence remains untouched when task becomes terminal", async () => {
+    const state = agentRunState();
+    withActiveExecution(state);
+    const payload = { prompt: "already sent" };
+    state.jobs.push({
+      id: "job-dispatching",
+      status: "dispatching",
+      taskAgentExecutionId: state.execution!.id,
+      spendId: "spend-dispatching",
+      requestPayload: payload,
+    });
+    const ledger = {
+      releaseInTx: async () => {
+        throw new Error("dispatching spend must retain unknown-cost evidence");
+      },
+    } as never;
+
+    await makeTasks(agentRunDb(state), ledger).setStatus(AGENT_TASK_ID, "done");
+
+    assert.equal(state.task.status, "done");
+    assert.equal(state.jobs[0]?.status, "dispatching");
+    assert.equal(state.jobs[0]?.requestPayload, payload);
+    assert.deepEqual(state.lockOrder, ["task", "execution", "jobs"]);
+  });
+
+  it("multiple ready jobs fail closed before release or terminal task mutation", async () => {
+    const state = agentRunState();
+    withActiveExecution(state);
+    state.jobs.push(
+      {
+        id: "job-ready-1",
+        status: "ready",
+        taskAgentExecutionId: state.execution!.id,
+        spendId: "spend-1",
+        requestPayload: { prompt: "one" },
+      },
+      {
+        id: "job-ready-2",
+        status: "ready",
+        taskAgentExecutionId: state.execution!.id,
+        spendId: "spend-2",
+        requestPayload: { prompt: "two" },
+      },
     );
-    assert.ok(query.params.includes(OLD_RUN));
+    let releaseCalls = 0;
+    const ledger = {
+      releaseInTx: async () => {
+        releaseCalls += 1;
+        return { status: "released", replay: false };
+      },
+    } as never;
+
+    await assert.rejects(
+      () => makeTasks(agentRunDb(state), ledger).setStatus(AGENT_TASK_ID, "cancelled"),
+      /несколько ready LLM jobs/,
+    );
+
+    assert.equal(state.task.status, "in_progress");
+    assert.deepEqual(
+      state.jobs.map((job) => job.status),
+      ["ready", "ready"],
+    );
+    assert.equal(releaseCalls, 0);
+    assert.deepEqual(state.lockOrder, ["task", "execution", "jobs"]);
   });
 });
 
@@ -748,6 +1152,13 @@ describe("Durable checkpoint и atomic agent outcome", () => {
     runId: AGENT_RUN_ID,
     executionAttemptId: AGENT_ATTEMPT_ID,
   };
+
+  it("task input hash видит изменение ненулевого срока", () => {
+    const earlier = agentRunState().task;
+    earlier.due = new Date("2026-08-30T09:00:00.000Z");
+    const later = { ...earlier, due: new Date("2026-08-31T09:00:00.000Z") };
+    assert.notEqual(durableTaskInputHash(earlier as never), durableTaskInputHash(later as never));
+  });
 
   it("checkpoint каноничен: порядок facts не важен, другой payload даёт 409", async () => {
     const state = agentRunState();
@@ -843,6 +1254,35 @@ describe("Durable checkpoint и atomic agent outcome", () => {
     assert.equal(state.task.agentExecutionBlockedAt, AGENT_NOW);
     assert.equal(state.execution?.status, "ready", "owner retry ещё может abandon checkpoint");
     assert.equal(state.events.length, 0, "business effects до решения владельца не применяются");
+  });
+
+  it("checkpoint долговечно блокирует drift canonical plan hash", async () => {
+    const state = agentRunState();
+    state.execution = {
+      id: "execution-1",
+      taskId: AGENT_TASK_ID,
+      executionAttemptId: AGENT_ATTEMPT_ID,
+      agentName: "receivables",
+      skill: "watch-receivables",
+      schemaVersion: 2,
+      status: "active",
+      taskInputHash: durableTaskInputHash(state.task as never),
+      workflowVersion: 1,
+      executionPlan: { version: 1, steps: [] },
+      executionPlanHash: "0".repeat(64),
+    };
+    await assert.rejects(
+      () =>
+        makeTasks(agentRunDb(state)).checkpointAgentRun(
+          AGENT_TASK_ID,
+          { ...fence, skill: "watch-receivables", kind: "no_signal" },
+          AGENT_NOW,
+        ),
+      /canonical hash is inconsistent/,
+    );
+    assert.equal(state.task.status, "todo");
+    assert.equal(state.task.agentRunId, null);
+    assert.equal(state.task.agentExecutionBlockedAt, AGENT_NOW);
   });
 
   it("cap проверяется под advisory lock и оставляет proposal checkpoint на завтра", async () => {
@@ -1269,8 +1709,8 @@ describe("Хук «закрыл задачу ТО → факт в журнале
           resultNote: "промыл",
           entityId: ENTITY,
         },
-        // очередь: план найден → сегодня ещё не отмечено.
-        selects: [[план], []],
+        // очередь: task lock → план найден → сегодня ещё не отмечено.
+        selects: [[{ id: "t1", status: "in_progress", ownerKind: "human" }], [план], []],
       }),
       maintSpy(calls),
     );
@@ -1297,7 +1737,11 @@ describe("Хук «закрыл задачу ТО → факт в журнале
           source: `maint:${PLAN}:2026-08-01`,
           resultNote: null,
         },
-        selects: [[план], [{ id: "уже" }]],
+        selects: [
+          [{ id: "t1", status: "in_progress", ownerKind: "human" }],
+          [план],
+          [{ id: "уже" }],
+        ],
       }),
       maintSpy(calls),
     );
@@ -1315,7 +1759,7 @@ describe("Хук «закрыл задачу ТО → факт в журнале
           source: `maint:${PLAN}:2026-08-01`,
           resultNote: null,
         },
-        selects: [[]],
+        selects: [[{ id: "t1", status: "in_progress", ownerKind: "human" }], []],
       }),
       maintSpy(calls),
     );
@@ -1327,7 +1771,10 @@ describe("Хук «закрыл задачу ТО → факт в журнале
   it("обычная задача (source не maint:*) журнал обслуживания не трогает", async () => {
     // makeTasks с бросающей заглушкой: дойди хук до createLog — тест упал бы.
     const s = makeTasks(
-      stubDb({ updateResult: { id: "t1", status: "done", source: "manual", resultNote: null } }),
+      stubDb({
+        existing: { id: "t1", status: "in_progress", ownerKind: "human" },
+        updateResult: { id: "t1", status: "done", source: "manual", resultNote: null },
+      }),
     );
     const t = await s.setStatus("t1", "done");
     assert.equal(t.status, "done");

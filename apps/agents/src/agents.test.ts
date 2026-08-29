@@ -13,6 +13,7 @@ import { loadAgents } from "./registry";
 import { runSkill } from "./runner";
 import { EXECUTORS } from "./executors";
 import { runAgentTasks } from "./task-worker";
+import { TaskLlmWorkflowChangedError } from "./task-llm-session";
 import { SKILLS } from "./skills";
 import type { AgentDefinition } from "./registry";
 
@@ -632,6 +633,7 @@ describe("Задачи агента и дневной потолок", () => {
   function stub(over: Record<string, unknown> = {}) {
     const statuses: { id: string; status: string; runId?: string }[] = [];
     const comments: string[] = [];
+    const starts: { id: string; input: Record<string, unknown> }[] = [];
     const checkpoints: { id: string; input: Record<string, unknown> }[] = [];
     const commits: { id: string; input: Record<string, unknown> }[] = [];
     const releases: {
@@ -639,7 +641,7 @@ describe("Задачи агента и дневной потолок", () => {
       agentName: string;
       runId: string;
       executionAttemptId: string;
-      reason?: "budget_denied" | "execution_unknown" | "unsupported";
+      reason?: "budget_denied" | "execution_unknown" | "workflow_changed" | "unsupported";
       detail?: string;
     }[] = [];
     const claims: { id: string; agentName: string; runId: string }[] = [];
@@ -657,6 +659,7 @@ describe("Задачи агента и дневной потолок", () => {
     return {
       statuses,
       comments,
+      starts,
       checkpoints,
       commits,
       releases,
@@ -674,7 +677,25 @@ describe("Задачи агента и дневной потолок", () => {
             executionAttemptId: "99999999-9999-4999-8999-999999999999",
             generation,
             claimedAt: new Date().toISOString(),
+            taskInputHash: "task-input-hash",
+            taskInput: { title: "проверь дебиторку" },
             ...(storedCheckpoint ? { checkpoint: storedCheckpoint } : {}),
+          };
+        },
+        startAgentTaskExecution: async (id: string, input: Record<string, unknown>) => {
+          starts.push({ id, input });
+          return {
+            started: true as const,
+            replay: generation > 1,
+            execution: {
+              id: "88888888-8888-4888-8888-888888888888",
+              status: storedCheckpoint ? ("ready" as const) : ("active" as const),
+              skill: String(input.skill),
+              workflowVersion: Number(input.workflowVersion),
+              plan: input.plan,
+              planHash: "plan-hash",
+              ...(storedCheckpoint ? { checkpoint: storedCheckpoint } : {}),
+            },
           };
         },
         checkpointAgentTask: async (id: string, input: Record<string, unknown>) => {
@@ -700,7 +721,7 @@ describe("Задачи агента и дневной потолок", () => {
           agentName: string,
           runId: string,
           executionAttemptId: string,
-          reason?: "budget_denied" | "execution_unknown" | "unsupported",
+          reason?: "budget_denied" | "execution_unknown" | "workflow_changed" | "unsupported",
           detail?: string,
         ) => {
           releases.push({
@@ -774,6 +795,7 @@ describe("Задачи агента и дневной потолок", () => {
           executionAttemptId: "22222222-2222-4222-8222-222222222222",
           generation: 1,
           claimedAt: "2026-08-29T10:00:00.000Z",
+          taskInput: { title: "проверь дебиторку" },
         };
       },
       releaseAgentTask: async (
@@ -813,16 +835,60 @@ describe("Задачи агента и дневной потолок", () => {
     const prev = process.env.AGENT_DAILY_ACTION_CAP;
     process.env.AGENT_DAILY_ACTION_CAP = "5";
     try {
-      const { client, statuses, checkpoints, commits } = stub();
+      const { client, statuses, starts, checkpoints, commits } = stub();
       const res = await runAgentTasks(agent, client, "T0");
       assert.equal(res[0].outcome, "proposed");
       assert.deepEqual(statuses, []);
+      assert.equal(starts.length, 1, "execution starts before skill checkpoint");
+      assert.equal(starts[0]?.input.claimedTaskInputHash, "task-input-hash");
+      assert.deepEqual(starts[0]?.input.plan, { version: 1, steps: [] });
       assert.equal(checkpoints.length, 1);
       assert.equal(commits.length, 1);
       assert.equal(commits[0]?.input.outcome, "approval_requested");
     } finally {
       if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
       else process.env.AGENT_DAILY_ACTION_CAP = prev;
+    }
+  });
+
+  it("skill matching uses the atomic claim title, never the stale list title", async () => {
+    const watch = SKILLS["watch-receivables"];
+    const stock = SKILLS["monitor-stock"];
+    const calls: string[] = [];
+    SKILLS["watch-receivables"] = async () => {
+      calls.push("watch-receivables");
+      return null;
+    };
+    SKILLS["monitor-stock"] = async () => {
+      calls.push("monitor-stock");
+      return null;
+    };
+    try {
+      const { client, starts } = stub({
+        myTasks: async () => [
+          { id: "t1", title: "проверь дебиторку", status: "todo", ownerRef: "receivables" },
+        ],
+        claimAgentTask: async () => ({
+          runId: "11111111-1111-4111-8111-111111111111",
+          executionAttemptId: "22222222-2222-4222-8222-222222222222",
+          generation: 1,
+          claimedAt: "2026-08-29T10:00:00.000Z",
+          taskInputHash: "current-task-input-hash",
+          taskInput: { title: "проверь остатки автоматов" },
+        }),
+      });
+      const dualSkillAgent = {
+        ...agent,
+        skills: ["watch-receivables", "monitor-stock"],
+      };
+
+      await runAgentTasks(dualSkillAgent, client, "T0");
+
+      assert.deepEqual(calls, ["monitor-stock"]);
+      assert.equal(starts[0]?.input.skill, "monitor-stock");
+    } finally {
+      SKILLS["watch-receivables"] = watch;
+      SKILLS["monitor-stock"] = stock;
     }
   });
 
@@ -891,6 +957,24 @@ describe("Задачи агента и дневной потолок", () => {
       assert.deepEqual(statuses, []);
       assert.equal(releases.length, 1);
       assert.equal(releases[0]?.reason, "execution_unknown");
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
+  });
+
+  it("immutable LLM route change blocks with workflow_changed instead of replay loop", async () => {
+    const original = SKILLS["watch-receivables"];
+    SKILLS["watch-receivables"] = async () => {
+      throw new TaskLlmWorkflowChangedError("provider endpoint changed");
+    };
+    try {
+      const { client, statuses, releases } = stub();
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "skipped");
+      assert.match(res[0].note, /workflow.*изменился/i);
+      assert.deepEqual(statuses, []);
+      assert.equal(releases.length, 1);
+      assert.equal(releases[0]?.reason, "workflow_changed");
     } finally {
       SKILLS["watch-receivables"] = original;
     }

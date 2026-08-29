@@ -116,6 +116,18 @@ describe("DTO durable agent-run", () => {
       ),
       [],
     );
+    assert.deepEqual(
+      await validate(
+        plainToInstance(ReleaseAgentRunDto, {
+          agentName: "receivables",
+          runId: RUN_ID,
+          executionAttemptId: EXECUTION_ID,
+          reason: "workflow_changed",
+          detail: "endpoint route changed",
+        }),
+      ),
+      [],
+    );
   });
 
   it("checkpoint принимает только typed result и режет action по контракту approvals", async () => {

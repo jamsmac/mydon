@@ -62,6 +62,16 @@ ALERTED_F="$BACKUP_DIR/.alerted-sha"
 ALERTED_AT_F="$BACKUP_DIR/.alerted-at"
 COMPOSE=(docker compose -f deploy/docker-compose.yml --env-file .env)
 
+# Rollout fence for components that may issue paid provider calls. A stopped
+# container keeps the exact old image id even after `mydon:latest` is rebuilt,
+# so it is the only safe automatic recovery before the first migration attempt.
+# From invocation onward the result can be ambiguous (for example a lost Docker
+# response after PostgreSQL committed), so every failure leaves Agents stopped:
+# an old/new Core ambiguity must never turn into an automatic provider dispatch.
+AGENTS_STOPPED_FOR_ROLLOUT=0
+AGENTS_WAS_RUNNING=0
+MIGRATION_STARTED=0
+
 # umask: pre-деплойные дампы и файлы состояния не должны рождаться 644.
 umask 077
 # StrictHostKeyChecking=yes: ключи github.com пинует setup-autodeploy.sh из
@@ -139,6 +149,26 @@ mark_success() {
 # Ctrl-C/стоп таймера, не сбой деплоя.
 on_exit() {
   rc="$1"
+  if [ "$rc" -ne 0 ] && [ "$AGENTS_STOPPED_FOR_ROLLOUT" -eq 1 ]; then
+    if [ "$MIGRATION_STARTED" -eq 0 ] && [ "$AGENTS_WAS_RUNNING" -eq 1 ]; then
+      # No migration invocation happened: resume the stopped container itself,
+      # not `compose up` (the shared tag already points at the new image).
+      if docker start mydon-agents >/dev/null 2>&1; then
+        log "rollout прерван до migration attempt — вернул старый container mydon-agents"
+      else
+        log "ВНИМАНИЕ: не удалось вернуть старый mydon-agents"
+      fi
+    else
+      # Once migration was invoked, its outcome may be ambiguous. Fail closed
+      # even if Agents was already brought up and a later name/health/marker
+      # check failed.
+      if "${COMPOSE[@]}" stop mydon-agents >/dev/null 2>&1; then
+        log "rollout прерван после migration start/commit — mydon-agents оставлен на паузе"
+      else
+        log "ВНИМАНИЕ: не удалось остановить mydon-agents после сбоя rollout"
+      fi
+    fi
+  fi
   rm -f "$AUTODEPLOY_COPY"
   case "$rc" in 0 | 130 | 143) return 0 ;; esac
   mkdir -p "$BACKUP_DIR" 2>/dev/null || return 0
@@ -323,6 +353,17 @@ GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 export GIT_SHA
 "${COMPOSE[@]}" build
 
+# 3а. До migration гасим именно Agents. Старый Core/Bot/CC продолжают
+#     отвечать на additive-схеме, но новый task/provider claim не начнётся.
+#     Факт прежнего running-состояния нужен EXIT trap: если rollout
+#     прервётся до первой migration attempt, можно вернуть ровно
+#     старый stopped container. После invocation всегда fail-closed.
+if [ "$(docker inspect -f '{{.State.Running}}' mydon-agents 2>/dev/null || true)" = "true" ]; then
+  AGENTS_WAS_RUNNING=1
+fi
+AGENTS_STOPPED_FOR_ROLLOUT=1
+"${COMPOSE[@]}" stop mydon-agents
+
 # 4. Миграции схемы — одноразовым контейнером из НОВОГО образа, ДО
 #    переключения работающих контейнеров на новый код. Раньше `up -d --build`
 #    сразу заменял контейнеры новым образом, а миграции гонялись ПОСЛЕ —
@@ -336,33 +377,27 @@ export GIT_SHA
 #    ничего (спиннер затирает строку, исключение теряется). Полевой контур
 #    из-за этого три дня не разворачивался, а в журнале было только «ОШИБКА
 #    (строка 128)». Свой скрипт печатает сообщение постгреса и сам запрос.
+MIGRATION_STARTED=1
 "${COMPOSE[@]}" run --rm --name "mydon-core-migrate-$DEPLOY_ID" mydon-core node packages/db/dist/migrate.js
 
 # 4а. Структурный сид идемпотентен и заводит только направления. Он должен
 #     пройти до переключения: новый код не должен стартовать без нового org.
 "${COMPOSE[@]}" run --rm --name "mydon-core-seed-$DEPLOY_ID" mydon-core node packages/db/dist/seed.js
 
-# 5. Переключаем контейнеры на собранный образ.
-"${COMPOSE[@]}" up -d
-
-# Interrupted Compose replacement can leave a healthy service under a
-# temporary name such as <id>_mydon-core. Compose still resolves exec by
-# labels, but cron/guards deliberately address the fixed production names.
-# Repair only the affected service, then require the exact name and state.
-for service in mydon-db mydon-core mydon-bot mydon-agents mydon-cc; do
-  state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' "$service" 2>/dev/null || true)"
-  if [ "$state" != "/$service|running" ]; then
-    log "восстанавливаю production-имя $service (было: ${state:-нет контейнера})"
-    "${COMPOSE[@]}" up -d --no-deps --force-recreate "$service"
-  fi
-done
-for service in mydon-db mydon-core mydon-bot mydon-agents mydon-cc; do
-  state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' "$service" 2>/dev/null || true)"
-  if [ "$state" != "/$service|running" ]; then
-    log "ОШИБКА: контейнер $service не запущен под точным production-именем (${state:-не найден})"
-    exit 1
-  fi
-done
+# 5. Переключаем только Core. Agents всё ещё stopped: depends_on
+#    гарантирует лишь start, а не API readiness, поэтому общий `up -d`
+#    для этого rollout запрещён.
+"${COMPOSE[@]}" up -d --no-deps mydon-core
+core_state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' mydon-core 2>/dev/null || true)"
+if [ "$core_state" != "/mydon-core|running" ]; then
+  log "восстанавливаю production-имя mydon-core (было: ${core_state:-нет контейнера})"
+  "${COMPOSE[@]}" up -d --no-deps --force-recreate mydon-core
+fi
+core_state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' mydon-core 2>/dev/null || true)"
+if [ "$core_state" != "/mydon-core|running" ]; then
+  log "ОШИБКА: mydon-core не запущен под production-именем (${core_state:-не найден})"
+  exit 1
+fi
 
 # 6. Проверка здоровья Core. Провал — деплой считается неуспешным (ненулевой
 #    код завершения), а не тихим предупреждением: раньше systemd показывал
@@ -384,14 +419,48 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 if [ -n "$health_ok" ]; then
-  mark_success
-  log "деплой ok: $REMOTE (health поднялся с попытки $attempt)"
+  log "Core health ok с попытки $attempt — переключаю клиенты"
 else
   log "ОШИБКА: health не ok спустя минуту после деплоя $REMOTE — контейнеры уже переключены, нужна ручная проверка"
   exit 1
 fi
 
+# 6а. Обновляем остальных клиентов и только после них поднимаем
+#     Agents. Каждый repair до Agents сохраняет гарантию «Agents last».
+for service in mydon-bot mydon-cc; do
+  "${COMPOSE[@]}" up -d --no-deps "$service"
+  state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' "$service" 2>/dev/null || true)"
+  if [ "$state" != "/$service|running" ]; then
+    log "восстанавливаю production-имя $service (было: ${state:-нет контейнера})"
+    "${COMPOSE[@]}" up -d --no-deps --force-recreate "$service"
+  fi
+  state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' "$service" 2>/dev/null || true)"
+  if [ "$state" != "/$service|running" ]; then
+    log "ОШИБКА: $service не запущен под production-именем (${state:-не найден})"
+    exit 1
+  fi
+done
+
+"${COMPOSE[@]}" up -d --no-deps mydon-agents
+agents_state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' mydon-agents 2>/dev/null || true)"
+if [ "$agents_state" != "/mydon-agents|running" ]; then
+  log "восстанавливаю production-имя mydon-agents (было: ${agents_state:-нет контейнера})"
+  "${COMPOSE[@]}" up -d --no-deps --force-recreate mydon-agents
+fi
+
+for service in mydon-db mydon-core mydon-bot mydon-cc mydon-agents; do
+  state="$(docker inspect -f '{{.Name}}|{{.State.Status}}' "$service" 2>/dev/null || true)"
+  if [ "$state" != "/$service|running" ]; then
+    log "ОШИБКА: контейнер $service не запущен под точным production-именем (${state:-не найден})"
+    exit 1
+  fi
+done
+
 # 7. Уборка висячих слоёв, чтобы диск не кончился.
 docker image prune -f >/dev/null 2>&1 || true
 docker builder prune -f --keep-storage 1GB >/dev/null 2>&1 || true
-log "готово"
+# Marker is deliberately after Agents startup and every final state check. If
+# anything above fails, on_exit records a retryable failure and stops Agents;
+# a premature marker would make the next timer tick incorrectly exit early.
+mark_success
+log "деплой ok: $REMOTE (Core health с попытки $attempt; Agents поднят после Core)"

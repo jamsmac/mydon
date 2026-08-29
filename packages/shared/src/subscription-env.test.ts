@@ -75,6 +75,23 @@ describe("sanitizeSubscriptionEnv", () => {
         apiProvider: "firstParty",
       }),
     );
+    for (const apiKeySource of [null, "", "   "]) {
+      assert.doesNotThrow(() =>
+        assertClaudeSubscriptionAccount({
+          tokenSource: "CLAUDE_CODE_OAUTH_TOKEN",
+          apiProvider: "firstParty",
+          apiKeySource,
+        }),
+      );
+      assert.doesNotThrow(() =>
+        assertClaudeCliSubscriptionStatus({
+          loggedIn: true,
+          authMethod: "oauth_token",
+          apiProvider: "firstParty",
+          apiKeySource,
+        }),
+      );
+    }
 
     for (const account of [
       { tokenSource: "CLAUDE_CODE_OAUTH_TOKEN", apiProvider: "bedrock" },
@@ -86,6 +103,28 @@ describe("sanitizeSubscriptionEnv", () => {
       },
     ]) {
       assert.throws(() => assertClaudeSubscriptionAccount(account), /auth не доказан/);
+    }
+
+    for (const apiKeySource of [{ source: "future" }, 0, false, true]) {
+      assert.throws(
+        () =>
+          assertClaudeSubscriptionAccount({
+            tokenSource: "CLAUDE_CODE_OAUTH_TOKEN",
+            apiProvider: "firstParty",
+            apiKeySource,
+          }),
+        /auth не доказан/,
+      );
+      assert.throws(
+        () =>
+          assertClaudeCliSubscriptionStatus({
+            loggedIn: true,
+            authMethod: "oauth_token",
+            apiProvider: "firstParty",
+            apiKeySource,
+          }),
+        /auth не доказан/,
+      );
     }
     for (const status of [
       { loggedIn: false, authMethod: "oauth_token", apiProvider: "firstParty" },

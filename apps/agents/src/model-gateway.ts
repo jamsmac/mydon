@@ -1,5 +1,54 @@
+import { createHash } from "node:crypto";
 import { requireClaudeSubscriptionEnv, type LlmTokenUsage } from "@mydon/shared";
 import { httpBillingMode } from "./llm-ledger";
+
+export const OPENAI_COMPATIBLE_ADAPTER = "openai-compatible";
+export const OPENAI_COMPATIBLE_ADAPTER_VERSION = 1 as const;
+export const CHAT_ENDPOINT_PROFILE = "openai-chat-completions";
+
+export interface BoundHttpEndpoint {
+  /** Canonical URL actually used on the provider wire; never persisted in Core. */
+  baseUrl: string;
+  /** Secret-free route identity safe to persist in an immutable workflow plan. */
+  endpointProfile: string;
+}
+
+/**
+ * Bind a durable route to the actual HTTP origin/path without persisting its
+ * raw URL. Query, fragment and credentials are forbidden because they often
+ * contain secrets and make route identity ambiguous.
+ */
+export function bindHttpEndpoint(baseProfile: string, rawBaseUrl: string): BoundHttpEndpoint {
+  const source = rawBaseUrl.trim();
+  if (source.includes("?") || source.includes("#")) {
+    throw new Error("LLM HTTP base URL cannot contain query or fragment components");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(source);
+  } catch {
+    throw new Error("LLM HTTP base URL must be an absolute http(s) URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("LLM HTTP base URL must use http or https");
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Error("LLM HTTP base URL cannot contain credentials");
+  }
+
+  // URL serialization canonicalizes scheme/host/default port. Removing the
+  // single trailing slash mirrors the exact base used by dispatch below.
+  const baseUrl = parsed.toString().replace(/\/$/, "");
+  const digest = createHash("sha256").update(baseUrl, "utf8").digest("hex");
+  return {
+    baseUrl,
+    endpointProfile: `${baseProfile}:sha256:${digest}`,
+  };
+}
+
+export const DEFINITIVE_PROVIDER_REJECTION_STATUSES = new Set([
+  400, 401, 403, 404, 409, 413, 415, 422, 429,
+]);
 
 /**
  * Шлюз к языковой модели (шаг дорожной карты #3).
@@ -39,7 +88,14 @@ export interface ModelResult {
   resolvedModel?: string;
   ok: boolean;
   error?: string;
+  /** Only definitive HTTP rejection outcomes expose their status to Core. */
+  statusCode?: number;
 }
+
+export type ExactProviderOutcome<T> =
+  | { outcome: "success"; result: T }
+  | { outcome: "provider_rejection"; result: T }
+  | { outcome: "unknown"; result: T };
 
 export type ModelBillingMode = "metered" | "subscription" | "local";
 
@@ -50,6 +106,15 @@ export interface ModelGateway {
   /** HTTP по умолчанию metered; бесплатность всегда явная. */
   readonly billingMode: ModelBillingMode;
   call(model: string, req: ModelRequest): Promise<ModelResult>;
+  /** Durable task mode: provider JSON body built once, then stored by Core. */
+  readonly adapter?: string;
+  readonly adapterVersion?: number;
+  readonly endpointProfile?: string;
+  buildRequestPayload?(model: string, req: ModelRequest): Record<string, unknown>;
+  /** Dispatches the exact object returned by Core without rebuilding it. */
+  dispatchExact?(
+    requestPayload: Record<string, unknown>,
+  ): Promise<ExactProviderOutcome<ModelResult>>;
 }
 
 /**
@@ -97,8 +162,7 @@ function reportedCost(data: unknown): number | undefined {
 }
 
 function nonNegativeInt(value: unknown): number | undefined {
-  const n = Number(value);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 /** OpenAI и совместимые шлюзы используют prompt/completion_tokens. */
@@ -131,41 +195,66 @@ function reportedUsage(data: unknown): LlmTokenUsage | undefined {
  * `POST {baseUrl}/chat/completions` в формате OpenAI (OmniRoute, LM Studio, …).
  */
 export class HttpModelGateway implements ModelGateway {
+  readonly adapter = OPENAI_COMPATIBLE_ADAPTER;
+  readonly adapterVersion = OPENAI_COMPATIBLE_ADAPTER_VERSION;
+  readonly endpointProfile: string;
+  private readonly baseUrl: string;
+
   constructor(
-    private readonly baseUrl: string,
+    baseUrl: string,
     readonly provider: string,
     private readonly apiKey = "",
     private readonly timeoutMs = 30_000,
     readonly billingMode: ModelBillingMode = "metered",
     private readonly fetchImpl: typeof fetch = fetch,
   ) {
+    const endpoint = bindHttpEndpoint(CHAT_ENDPOINT_PROFILE, baseUrl);
+    this.baseUrl = endpoint.baseUrl;
+    this.endpointProfile = endpoint.endpointProfile;
     if (billingMode === "metered" && provider.trim() === "") {
       throw new Error("Metered HttpModelGateway требует явный price provider id");
     }
   }
 
-  async call(model: string, req: ModelRequest): Promise<ModelResult> {
+  buildRequestPayload(model: string, req: ModelRequest): Record<string, unknown> {
+    return {
+      model,
+      messages: [
+        ...(req.system ? [{ role: "system", content: req.system }] : []),
+        { role: "user", content: req.prompt },
+      ],
+      ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
+    };
+  }
+
+  async dispatchExact(
+    requestPayload: Record<string, unknown>,
+  ): Promise<ExactProviderOutcome<ModelResult>> {
+    const requestedModel =
+      typeof requestPayload.model === "string" ? requestPayload.model : "unknown";
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const res = await this.fetchImpl(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: "POST",
         signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
         },
-        body: JSON.stringify({
-          model,
-          messages: [
-            ...(req.system ? [{ role: "system", content: req.system }] : []),
-            { role: "user", content: req.prompt },
-          ],
-          ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
-        }),
+        body: JSON.stringify(requestPayload),
       });
       if (!res.ok) {
-        return { text: "", model, ok: false, error: `шлюз ответил ${res.status}` };
+        const result: ModelResult = {
+          text: "",
+          model: requestedModel,
+          ok: false,
+          error: `шлюз ответил ${res.status}`,
+          statusCode: res.status,
+        };
+        return DEFINITIVE_PROVIDER_REJECTION_STATUSES.has(res.status)
+          ? { outcome: "provider_rejection", result }
+          : { outcome: "unknown", result };
       }
       const data = (await res.json()) as {
         id?: unknown;
@@ -175,27 +264,48 @@ export class HttpModelGateway implements ModelGateway {
         choices?: { message?: { content?: unknown } }[];
       };
       const text = data?.choices?.[0]?.message?.content;
+      if (typeof text !== "string" || text.trim().length === 0 || text.length > 256_000) {
+        return {
+          outcome: "unknown",
+          result: {
+            text: "",
+            model: requestedModel,
+            ok: false,
+            error: "provider вернул невалидный 2xx chat response",
+          },
+        };
+      }
       const costUsd = reportedCost(data);
       const usage = reportedUsage(data);
       return {
-        text: typeof text === "string" ? text : "",
-        model,
-        ok: true,
-        ...(costUsd !== undefined ? { costUsd } : {}),
-        ...(usage !== undefined ? { usage } : {}),
-        ...(typeof data.id === "string" ? { providerRequestId: data.id } : {}),
-        ...(typeof data.model === "string" ? { resolvedModel: data.model } : {}),
+        outcome: "success",
+        result: {
+          text,
+          model: requestedModel,
+          ok: true,
+          ...(costUsd !== undefined ? { costUsd } : {}),
+          ...(usage !== undefined ? { usage } : {}),
+          ...(typeof data.id === "string" ? { providerRequestId: data.id } : {}),
+          ...(typeof data.model === "string" ? { resolvedModel: data.model } : {}),
+        },
       };
     } catch (err) {
       return {
-        text: "",
-        model,
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
+        outcome: "unknown",
+        result: {
+          text: "",
+          model: requestedModel,
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        },
       };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async call(model: string, req: ModelRequest): Promise<ModelResult> {
+    return (await this.dispatchExact(this.buildRequestPayload(model, req))).result;
   }
 }
 

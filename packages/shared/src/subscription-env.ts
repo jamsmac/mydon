@@ -142,13 +142,20 @@ function authRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** API credential source must be absent, never merely an unfamiliar shape. */
+function apiKeySourceIsAbsent(value: unknown): boolean {
+  return (
+    value === undefined || value === null || (typeof value === "string" && value.trim() === "")
+  );
+}
+
 /** Validate `Query.accountInfo()` before iterating the Agent SDK query. */
 export function assertClaudeSubscriptionAccount(value: unknown): void {
   const account = authRecord(value);
   if (
     account.apiProvider !== "firstParty" ||
     account.tokenSource !== "CLAUDE_CODE_OAUTH_TOKEN" ||
-    (typeof account.apiKeySource === "string" && account.apiKeySource.trim() !== "")
+    !apiKeySourceIsAbsent(account.apiKeySource)
   ) {
     throw new Error(
       "Claude subscription auth не доказан: нужны firstParty + CLAUDE_CODE_OAUTH_TOKEN без apiKeySource",
@@ -195,7 +202,7 @@ export function assertClaudeCliSubscriptionStatus(value: unknown): void {
     status.loggedIn !== true ||
     status.authMethod !== "oauth_token" ||
     status.apiProvider !== "firstParty" ||
-    (typeof status.apiKeySource === "string" && status.apiKeySource.trim() !== "")
+    !apiKeySourceIsAbsent(status.apiKeySource)
   ) {
     throw new Error(
       "Claude CLI subscription auth не доказан: нужны loggedIn oauth_token + firstParty без apiKeySource",

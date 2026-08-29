@@ -139,6 +139,7 @@ describe("Клиент durable agent-run", () => {
         executionAttemptId: EXECUTION_ID,
         generation: 3,
         claimedAt: "2026-08-29T10:00:00.000Z",
+        taskInput: { title: "Проверь дебиторку" },
       },
       { renewed: true },
       { released: true },
@@ -160,6 +161,7 @@ describe("Клиент durable agent-run", () => {
       executionAttemptId: EXECUTION_ID,
       generation: 3,
       claimedAt: "2026-08-29T10:00:00.000Z",
+      taskInput: { title: "Проверь дебиторку" },
     });
     assert.equal(await core.heartbeatAgentTask("t1", "receivables", RUN_ID), true);
     assert.equal(
@@ -283,6 +285,124 @@ describe("Клиент durable agent-run", () => {
     assert.deepEqual(requests[5], {
       path: `/outbox/${DELIVERY_ID}/complete`,
       body: { leaseToken: "lease-1", status: "sent", providerRef: "page-1" },
+    });
+  });
+
+  it("v3 start/ensure/claim/complete передают exact durable provider wire", async () => {
+    const plan = {
+      version: 1 as const,
+      steps: [
+        {
+          stepKey: "coach-review:eval",
+          kind: "chat" as const,
+          feature: "coach-review:eval",
+          adapter: "openai-compatible",
+          adapterVersion: 1,
+          endpointProfile: "openai-chat-completions",
+          provider: "openai",
+          models: ["m1"],
+        },
+      ],
+    };
+    const requestPayload = { model: "m1", messages: [{ role: "user", content: "p" }] };
+    const requests: { path: string; body: Record<string, unknown> }[] = [];
+    const result = {
+      kind: "success" as const,
+      payload: { text: "done", resolvedModel: "m1" },
+      resultHash: "result-hash",
+    };
+    const responses: unknown[] = [
+      {
+        started: true,
+        replay: false,
+        execution: {
+          id: "execution-1",
+          status: "active",
+          skill: "coach-review",
+          workflowVersion: 1,
+          plan,
+          planHash: "plan-hash",
+        },
+      },
+      { jobId: "job-1", status: "ready", operationHash: "operation-hash" },
+      {
+        granted: true,
+        replay: false,
+        status: "dispatching",
+        operationHash: "operation-hash",
+        requestPayload,
+      },
+      { status: "succeeded", replay: false, result },
+    ];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      requests.push({
+        path: new URL(String(url)).pathname,
+        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {},
+      });
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof globalThis.fetch;
+
+    const core = new AgentsCoreClient("http://core");
+    await core.startAgentTaskExecution("t1", {
+      agentName: "coach",
+      runId: "run-1",
+      executionAttemptId: "attempt-1",
+      claimedTaskInputHash: "input-hash",
+      skill: "coach-review",
+      workflowVersion: 1,
+      plan,
+    });
+    await core.ensureAgentTaskLlmJob("t1", {
+      agentName: "coach",
+      runId: "run-1",
+      executionAttemptId: "attempt-1",
+      stepKey: "coach-review:eval",
+      providerAttemptNo: 1,
+      kind: "chat",
+      feature: "coach-review:eval",
+      adapter: "openai-compatible",
+      adapterVersion: 1,
+      endpointProfile: "openai-chat-completions",
+      provider: "openai",
+      model: "m1",
+      inputTokenCeiling: 100,
+      outputTokenCeiling: 20,
+      requestPayload,
+    });
+    await core.claimAgentTaskLlmDispatch("t1", "job-1", {
+      agentName: "coach",
+      runId: "run-1",
+      executionAttemptId: "attempt-1",
+      dispatchToken: "dispatch-1",
+    });
+    await core.completeAgentTaskLlmJob("t1", "job-1", {
+      dispatchToken: "dispatch-1",
+      outcome: "success",
+      result: { text: "done", resolvedModel: "m1" },
+    });
+
+    assert.deepEqual(
+      requests.map((request) => request.path),
+      [
+        "/tasks/t1/agent-run/start",
+        "/tasks/t1/agent-run/llm-jobs/ensure",
+        "/tasks/t1/agent-run/llm-jobs/job-1/claim-dispatch",
+        "/tasks/t1/agent-run/llm-jobs/job-1/complete",
+      ],
+    );
+    assert.deepEqual(requests[2]?.body, {
+      agentName: "coach",
+      runId: "run-1",
+      executionAttemptId: "attempt-1",
+      dispatchToken: "dispatch-1",
+    });
+    assert.deepEqual(requests[3]?.body, {
+      dispatchToken: "dispatch-1",
+      outcome: "success",
+      result: { text: "done", resolvedModel: "m1" },
     });
   });
 });

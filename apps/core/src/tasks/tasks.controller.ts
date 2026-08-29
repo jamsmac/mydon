@@ -15,6 +15,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsIn,
+  IsInt,
   IsISO8601,
   IsNotEmpty,
   IsObject,
@@ -23,6 +24,8 @@ import {
   IsUUID,
   Matches,
   MaxLength,
+  Max,
+  Min,
   ValidateIf,
 } from "class-validator";
 import { DOMAINS, type Domain } from "@mydon/shared";
@@ -225,6 +228,25 @@ export class AgentRunFenceDto extends AgentRunLeaseDto {
   executionAttemptId!: string;
 }
 
+export class AgentRunStartDto extends AgentRunFenceDto {
+  @IsString()
+  @Matches(/^[0-9a-f]{64}$/)
+  claimedTaskInputHash!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  skill!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  workflowVersion!: number;
+
+  @IsObject()
+  plan!: Record<string, unknown>;
+}
+
 export class AgentRunCheckpointDto extends AgentRunFenceDto {
   @IsString()
   @IsNotEmpty()
@@ -295,8 +317,19 @@ export class AgentRunCommitDto extends AgentRunFenceDto {
 export class ReleaseAgentRunDto extends AgentRunFenceDto {
   /** Core сам проверит, был ли до denial хоть один начатый reserve. */
   @IsOptional()
-  @IsIn(["budget_denied", "execution_unknown", "action_capped", "unsupported"])
-  reason?: "budget_denied" | "execution_unknown" | "action_capped" | "unsupported";
+  @IsIn([
+    "budget_denied",
+    "execution_unknown",
+    "workflow_changed",
+    "action_capped",
+    "unsupported",
+  ])
+  reason?:
+    | "budget_denied"
+    | "execution_unknown"
+    | "workflow_changed"
+    | "action_capped"
+    | "unsupported";
 
   @IsOptional()
   @IsString()
@@ -503,8 +536,17 @@ export class TasksController {
       executionAttemptId: claimed.agentExecutionAttemptId!,
       generation: claimed.agentRunGeneration,
       claimedAt: claimed.agentRunClaimedAt!.toISOString(),
-      checkpoint: claimed.agentCheckpoint,
+      taskInputHash: claimed.taskInputHash,
+      taskInput: claimed.taskInput,
+      execution: claimed.agentExecution,
+      checkpoint: claimed.agentExecution?.checkpoint ?? null,
     };
+  }
+
+  /** Durable execution root is created before any provider dispatch. */
+  @Post(":id/agent-run/start")
+  startAgentRun(@Param("id", ParseUUIDPipe) id: string, @Body() dto: AgentRunStartDto) {
+    return this.tasks.startAgentRun(id, dto);
   }
 
   /** Durable provider/skill result, before approval/event/memory/task effects. */

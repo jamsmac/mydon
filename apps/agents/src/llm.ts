@@ -6,6 +6,7 @@ import {
   type LlmReservation,
 } from "@mydon/shared";
 import { resolveModelChain, type ModelGateway, type ModelResult } from "./model-gateway";
+import type { TaskLlmSession } from "./task-llm-session";
 import { systemGuard, wrapUntrusted } from "./untrusted";
 
 /**
@@ -41,6 +42,8 @@ export interface CallModelInput {
   assertLease?: () => Promise<void>;
   /** Нужен только metered-шлюзу; его отсутствие закрывает вызов. */
   ledger?: LlmLedger;
+  /** Task-mode stores provider grant/result in Core instead of legacy reserve. */
+  taskLlm?: TaskLlmSession;
 }
 
 export interface CallModelResult {
@@ -121,61 +124,82 @@ export async function callModel(
   input: CallModelInput,
   chain: string[] = resolveModelChain(),
 ): Promise<CallModelResult> {
-  if (chain.length === 0) {
+  // Защита от инъекций: страж в system, недоверенный контент обёрнут.
+  const system = [systemGuard(), input.system].filter(Boolean).join("\n\n");
+  const prompt = buildPrompt(input);
+  const maxTokens = outputCeiling(input.maxTokens);
+  const metered = gateway.billingMode === "metered";
+  const effectiveChain = input.taskLlm
+    ? input.taskLlm.modelsForChat(input.feature, gateway, chain)
+    : chain;
+  if (effectiveChain.length === 0) {
     return {
       ok: false,
       text: "",
       reason: "модель не настроена (LLM_MODEL пуст) — LLM-путь выключен",
     };
   }
-
-  // Защита от инъекций: страж в system, недоверенный контент обёрнут.
-  const system = [systemGuard(), input.system].filter(Boolean).join("\n\n");
-  const prompt = buildPrompt(input);
-  const maxTokens = outputCeiling(input.maxTokens);
-  const metered = gateway.billingMode === "metered";
-  if (metered && input.ledger === undefined) {
+  if (metered && input.ledger === undefined && input.taskLlm === undefined) {
     throw new LlmLedgerUnavailableError("Metered LLM не получил клиент Core ledger");
   }
 
   let last: ModelResult | null = null;
   let lastLedgerWarning: string | undefined;
-  for (let i = 0; i < chain.length; i += 1) {
-    const model = chain[i];
+  for (let i = 0; i < effectiveChain.length; i += 1) {
+    const model = effectiveChain[i];
     // Не разрешаем stale worker ни reserve, ни прямой local/subscription dispatch.
     await input.assertLease?.();
     if (metered) {
-      // input.ledger проверен выше; локальная константа убирает optional из типа.
-      const ledger = input.ledger!;
-      const reservation = await ledger.reserve({
-        consumer: "agents",
-        feature: input.feature,
-        agentName: input.agentName,
-        provider: gateway.provider,
-        model,
-        requestKey: `${input.requestKey}:attempt:${i + 1}`,
-        traceKey: input.traceKey ?? input.requestKey,
-        inputTokenCeiling: inputTokenCeiling(`${system}\n\n${prompt}`),
-        outputTokenCeiling: maxTokens,
-        metadata: { attempt: i + 1, chainLength: chain.length },
-      });
-
-      // Core вернул существующую резервацию для того же requestKey. Без
-      // idempotency key на provider API нельзя понять, был ли запрос уже
-      // отправлен предыдущим процессом, поэтому повторный dispatch запрещён.
-      if (reservation.replay) {
-        throw new LlmReplayBlockedError(
-          reservation.requestKey,
-          `LLM-ledger вернул replay для ${reservation.requestKey}; повторный provider call запрещён`,
+      if (input.taskLlm) {
+        last = await input.taskLlm.callChat(
+          gateway,
+          input.feature,
+          model,
+          i + 1,
+          { system, prompt, maxTokens },
+          inputTokenCeiling(`${system}\n\n${prompt}`),
+          maxTokens,
         );
-      }
+        lastLedgerWarning = last.ok
+          ? !last.resolvedModel
+            ? "provider не сообщил resolvedModel; Core открыл circuit"
+            : !last.usage && last.costUsd === undefined
+              ? "provider не сообщил usage/cost; Core сохранил резерв"
+              : undefined
+          : undefined;
+      } else {
+        // input.ledger проверен выше; локальная константа убирает optional из типа.
+        const ledger = input.ledger!;
+        const reservation = await ledger.reserve({
+          consumer: "agents",
+          feature: input.feature,
+          agentName: input.agentName,
+          provider: gateway.provider,
+          model,
+          requestKey: `${input.requestKey}:attempt:${i + 1}`,
+          traceKey: input.traceKey ?? input.requestKey,
+          inputTokenCeiling: inputTokenCeiling(`${system}\n\n${prompt}`),
+          outputTokenCeiling: maxTokens,
+          metadata: { attempt: i + 1, chainLength: effectiveChain.length },
+        });
 
-      try {
-        last = await gateway.call(model, { system, prompt, maxTokens });
-      } catch (error) {
-        last = { text: "", model, ok: false, error: message(error) };
+        // Core вернул существующую резервацию для того же requestKey. Без
+        // idempotency key на provider API нельзя понять, был ли запрос уже
+        // отправлен предыдущим процессом, поэтому повторный dispatch запрещён.
+        if (reservation.replay) {
+          throw new LlmReplayBlockedError(
+            reservation.requestKey,
+            `LLM-ledger вернул replay для ${reservation.requestKey}; повторный provider call запрещён`,
+          );
+        }
+
+        try {
+          last = await gateway.call(model, { system, prompt, maxTokens });
+        } catch (error) {
+          last = { text: "", model, ok: false, error: message(error) };
+        }
+        lastLedgerWarning = await accountProviderResult(ledger, reservation, last, model);
       }
-      lastLedgerWarning = await accountProviderResult(ledger, reservation, last, model);
     } else {
       try {
         last = await gateway.call(model, { system, prompt, maxTokens });

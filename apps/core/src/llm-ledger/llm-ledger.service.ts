@@ -6,7 +6,7 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from "@nestjs/common";
-import { agent, llmModelPrice, llmSpend, systemConfig } from "@mydon/db";
+import { agent, agentTaskLlmJob, llmModelPrice, llmSpend, systemConfig } from "@mydon/db";
 import {
   tashkentDay,
   tashkentDayStartOf,
@@ -39,7 +39,11 @@ import {
   type LedgerPriceSnapshot,
 } from "./llm-ledger.money";
 
-type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+export type LlmLedgerTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+export interface LlmLedgerReserveInTxOptions {
+  requestKeyForDay?: (day: string) => Promise<string> | string;
+}
+type Tx = LlmLedgerTx;
 type AgentRow = typeof agent.$inferSelect;
 type PriceRow = typeof llmModelPrice.$inferSelect;
 type SpendRow = typeof llmSpend.$inferSelect;
@@ -75,21 +79,59 @@ export class LlmLedgerService {
   constructor(@Inject(DB) private readonly db: Db) {}
 
   async reserve(dto: ReserveLlmDto): Promise<LlmReserveResponse> {
-    const request = normalizeReserve(dto);
-    const requestHash = hashLedgerPayload(request);
+    return this.db.transaction((tx) => this.reserveInTx(tx, dto));
+  }
 
-    return this.db.transaction(async (tx) => {
+  /** Internal composition point for task job + financial authorization. */
+  async reserveInTx(
+    tx: LlmLedgerTx,
+    dto: ReserveLlmDto,
+    options: LlmLedgerReserveInTxOptions = {},
+  ): Promise<LlmReserveResponse> {
+    let request = normalizeReserve(dto);
+
+    {
       // Все ledger-операции держат один порядок: provider -> request -> budget.
       // Это линеаризует provider circuit и idempotency, не создавая цикла с
       // settlement/release на историческом billing day.
       await lock(tx, `llm-provider-circuit:${request.provider}`);
-      await lock(tx, `llm-request:${request.requestKey}`);
-      // request_key уникален не только внутри суток. Дневной lock выбирается
-      // после потенциального ожидания и перепроверяется после его получения:
-      // вчерашний timestamp не должен авторизовать вызов уже в новых сутках.
-      const { now, day } = await stabilizeLedgerDay((currentDay) =>
-        lock(tx, `llm-budget:${currentDay}`),
-      );
+      let now: Date;
+      let day: string;
+      if (options.requestKeyForDay) {
+        // Task jobs derive their idempotency key from the ledger day. Acquire
+        // each candidate request lock before its budget lock, then re-check
+        // the clock after both waits. Old locks are harmless if midnight
+        // advances; this order cannot form request<->budget lock inversion.
+        let cursor = new Date();
+        for (;;) {
+          const candidateDay = tashkentDay(cursor);
+          const requestKey = await options.requestKeyForDay(candidateDay);
+          request = normalizeReserve({ ...dto, requestKey });
+          await lock(tx, `llm-request:${request.requestKey}`);
+          const afterRequestLock = new Date();
+          if (tashkentDay(afterRequestLock) !== candidateDay) {
+            cursor = afterRequestLock;
+            continue;
+          }
+          await lock(tx, `llm-budget:${candidateDay}`);
+          const afterBudgetLock = new Date();
+          if (tashkentDay(afterBudgetLock) === candidateDay) {
+            now = afterBudgetLock;
+            day = candidateDay;
+            break;
+          }
+          cursor = afterBudgetLock;
+        }
+      } else {
+        await lock(tx, `llm-request:${request.requestKey}`);
+        // request_key уникален не только внутри суток. Дневной lock выбирается
+        // после потенциального ожидания и перепроверяется после его получения:
+        // вчерашний timestamp не должен авторизовать вызов уже в новых сутках.
+        ({ now, day } = await stabilizeLedgerDay((currentDay) =>
+          lock(tx, `llm-budget:${currentDay}`),
+        ));
+      }
+      const requestHash = hashLedgerPayload(request);
 
       const [prior] = await tx
         .select()
@@ -246,22 +288,33 @@ export class LlmLedgerService {
         budget(day, globalCap.nano, after, perAgentCap?.nano),
         action,
       );
-    });
+    }
   }
 
   async settle(
     id: string,
     dto: SettleLlmDto,
   ): Promise<{ status: "settled" | "failed"; replay: boolean }> {
+    return this.db.transaction((tx) => this.settleInTx(tx, id, dto));
+  }
+
+  /** Internal composition point for immutable result + financial settlement. */
+  async settleInTx(
+    tx: LlmLedgerTx,
+    id: string,
+    dto: SettleLlmDto,
+    options: { allowTaskJobSpend?: boolean } = {},
+  ): Promise<{ status: "settled" | "failed"; replay: boolean }> {
     const settlement = normalizeSettlement(dto);
     const settlementHash = hashLedgerPayload(settlement);
 
-    return this.db.transaction(async (tx) => {
+    {
       const hint = await spendHint(tx, id);
       await lock(tx, `llm-provider-circuit:${hint.provider}`);
       await lock(tx, `llm-request:${hint.requestKey}`);
       await lock(tx, `llm-budget:${hint.day}`);
       const row = await spendForUpdate(tx, id);
+      if (!options.allowTaskJobSpend) await assertNotTaskJobSpend(tx, id);
       const detectedAt = new Date();
 
       if (row.status === "settled" || row.status === "failed") {
@@ -319,17 +372,28 @@ export class LlmLedgerService {
       // failed + actual=null намеренно оставляет exposure=reserved_usd:
       // неизвестный сетевой исход не доказывает, что провайдер не списал деньги.
       return { status: success ? "settled" : "failed", replay: false };
-    });
+    }
   }
 
   async release(id: string, dto: ReleaseLlmDto): Promise<{ status: "released"; replay: boolean }> {
+    return this.db.transaction((tx) => this.releaseInTx(tx, id, dto));
+  }
+
+  /** Internal composition point for job cancellation + reservation release. */
+  async releaseInTx(
+    tx: LlmLedgerTx,
+    id: string,
+    dto: ReleaseLlmDto,
+    options: { allowTaskJobSpend?: boolean } = {},
+  ): Promise<{ status: "released"; replay: boolean }> {
     const reason = dto.reason.trim();
-    return this.db.transaction(async (tx) => {
+    {
       const hint = await spendHint(tx, id);
       await lock(tx, `llm-provider-circuit:${hint.provider}`);
       await lock(tx, `llm-request:${hint.requestKey}`);
       await lock(tx, `llm-budget:${hint.day}`);
       const row = await spendForUpdate(tx, id);
+      if (!options.allowTaskJobSpend) await assertNotTaskJobSpend(tx, id);
 
       if (row.status === "released" && row.reason === reason) {
         return { status: "released", replay: true };
@@ -342,7 +406,7 @@ export class LlmLedgerService {
         .set({ status: "released", reason, releasedAt: new Date(), updatedAt: new Date() })
         .where(eq(llmSpend.id, id));
       return { status: "released", replay: false };
-    });
+    }
   }
 }
 
@@ -790,6 +854,19 @@ async function spendForUpdate(tx: Tx, id: string): Promise<SpendRow> {
   const [row] = await tx.select().from(llmSpend).where(eq(llmSpend.id, id)).limit(1).for("update");
   if (!row) throw new NotFoundException(`LLM-резерв ${id} не найден`);
   return row;
+}
+
+async function assertNotTaskJobSpend(tx: Tx, id: string): Promise<void> {
+  const [linked] = await tx
+    .select({ id: agentTaskLlmJob.id })
+    .from(agentTaskLlmJob)
+    .where(eq(agentTaskLlmJob.spendId, id))
+    .limit(1);
+  if (linked) {
+    throw new ConflictException(
+      "Task LLM reservation can only be closed through the durable task job API",
+    );
+  }
 }
 
 function mergeSettlementMetadata(

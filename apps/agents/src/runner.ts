@@ -17,6 +17,7 @@ import { signature } from "./memory";
 import { effectiveActionTier, explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
 import { SKILLS, type SkillRunContext } from "./skills";
+import { TaskLlmWorkflowChangedError } from "./task-llm-session";
 
 /** Everything Core needs to atomically fence and commit a task outcome. */
 export interface TaskCommitIntent {
@@ -45,6 +46,7 @@ export interface RunResult {
     | "no_change"
     | "budget_denied"
     | "execution_unknown"
+    | "workflow_changed"
     | "ledger_unavailable";
   /** Предложение навыка (текст и факты) — чтобы отчёт по задаче не звал навык
    *  повторно (иначе первый прогон и отчёт могут разойтись). */
@@ -182,6 +184,15 @@ export async function runSkill(
       }
     }
   } catch (error) {
+    if (error instanceof TaskLlmWorkflowChangedError) {
+      return {
+        agent: agent.name,
+        skill,
+        outcome: "skipped",
+        skipReason: "workflow_changed",
+        reason: `LLM workflow изменился после старта execution: ${error.message}`,
+      };
+    }
     if (!isLlmLedgerBlockingError(error)) throw error;
     if (error instanceof LlmReplayBlockedError) {
       return {

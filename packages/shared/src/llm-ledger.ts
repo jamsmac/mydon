@@ -15,6 +15,9 @@ export type LlmBudgetAction = (typeof LLM_BUDGET_ACTIONS)[number];
 export const LLM_SETTLEMENT_OUTCOMES = ["success", "provider_error", "unknown"] as const;
 export type LlmSettlementOutcome = (typeof LLM_SETTLEMENT_OUTCOMES)[number];
 
+export const LLM_SPEND_STATUSES = ["reserved", "settled", "failed", "released", "denied"] as const;
+export type LlmSpendStatus = (typeof LLM_SPEND_STATUSES)[number];
+
 /** Стабильная идентичность пользовательского запроса, заданная сурфейсом. */
 export interface LlmCallContext {
   /** Идемпотентный ключ физической попытки провайдера. */
@@ -97,7 +100,7 @@ export interface LlmLedger {
 
 export interface LlmReserveResponse {
   allowed: boolean;
-  status: string;
+  status: LlmSpendStatus;
   action: LlmBudgetAction;
   reason?: string;
   /**
@@ -188,7 +191,7 @@ export class CoreLlmLedgerClient implements LlmLedger {
 
   async reserve(request: LlmReserveRequest): Promise<LlmReservation> {
     const body = await this.post("/llm-ledger/reservations", request);
-    const response = parseReserveResponse(body);
+    const response = parseReserveResponse(body, request.requestKey);
     if (response.replayBlocked) {
       throw new LlmReplayBlockedError(
         request.requestKey,
@@ -271,7 +274,7 @@ export class CoreLlmLedgerClient implements LlmLedger {
   }
 }
 
-function parseReserveResponse(value: unknown): LlmReserveResponse {
+function parseReserveResponse(value: unknown, expectedRequestKey: string): LlmReserveResponse {
   if (value === null || typeof value !== "object") {
     throw new LlmLedgerUnavailableError("LLM-ledger вернул пустой ответ reserve");
   }
@@ -282,7 +285,7 @@ function parseReserveResponse(value: unknown): LlmReserveResponse {
   const budget = parseBudget(raw.budget);
   if (
     typeof allowed !== "boolean" ||
-    typeof status !== "string" ||
+    !isSpendStatus(status) ||
     !isBudgetAction(action) ||
     (raw.replayBlocked !== undefined && typeof raw.replayBlocked !== "boolean")
   ) {
@@ -290,6 +293,19 @@ function parseReserveResponse(value: unknown): LlmReserveResponse {
   }
 
   const reservation = raw.reservation === undefined ? undefined : parseReservation(raw.reservation);
+  const replayBlocked = raw.replayBlocked === true;
+  const allowedShapeIsValid =
+    allowed &&
+    status === "reserved" &&
+    !replayBlocked &&
+    reservation !== undefined &&
+    reservation.requestKey === expectedRequestKey &&
+    reservation.day === budget.day;
+  const deniedShapeIsValid =
+    !allowed && reservation === undefined && (replayBlocked || status === "denied");
+  if (!allowedShapeIsValid && !deniedShapeIsValid) {
+    throw new LlmLedgerUnavailableError("LLM-ledger вернул противоречивый ответ reserve");
+  }
   return {
     allowed,
     status,
@@ -351,6 +367,10 @@ function parseReservation(value: unknown): Omit<LlmReservation, "budget"> {
 
 function isBudgetAction(value: unknown): value is LlmBudgetAction {
   return typeof value === "string" && (LLM_BUDGET_ACTIONS as readonly string[]).includes(value);
+}
+
+function isSpendStatus(value: unknown): value is LlmSpendStatus {
+  return typeof value === "string" && (LLM_SPEND_STATUSES as readonly string[]).includes(value);
 }
 
 function isNonNegativeNumber(value: unknown): value is number {
