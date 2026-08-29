@@ -29,6 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Env sanity (.env.example)
+        run: |
+          node --test tools/check-env-example.test.mjs
+          node tools/check-env-example.mjs
+
       - uses: pnpm/action-setup@v4
         with:
           version: 10.19.0
@@ -161,6 +166,14 @@ jobs:
         env:
           DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
         run: node packages/db/dist/migration-0062.integration.js
+
+      # 0064 необратимо канонизирует серийники и удаляет конфликтные строки.
+      # Чистая цепочка не проверяет точные суммы и выбор выжившего снимка,
+      # поэтому прогон стартует на 0063 с намеренно конфликтными данными.
+      - name: Migration data merge (0063 to 0064)
+        env:
+          DATABASE_URL: postgresql://mydon:mydon@127.0.0.1:5432/mydon
+        run: node packages/db/dist/migration-0064.integration.js
 
       # Раньше continue-on-error:true молча прятал 5 high-уязвимостей —
       # шаг всегда зеленел, даже когда pnpm audit падал кодом 1 (найдено
