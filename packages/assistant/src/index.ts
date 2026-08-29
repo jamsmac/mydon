@@ -1,4 +1,12 @@
-import { DOMAIN_LABELS, DOMAINS, type Domain } from "@mydon/shared";
+import {
+  DOMAIN_LABELS,
+  DOMAINS,
+  LlmBudgetDeniedError,
+  LlmLedgerUnavailableError,
+  LlmReplayBlockedError,
+  type Domain,
+  type LlmCallContext,
+} from "@mydon/shared";
 import { DOMAIN_HINT, parseIntent, type Intent } from "./intent";
 
 export { parseIntent, DOMAIN_HINT };
@@ -99,7 +107,11 @@ export type LlmResolution =
   | { kind: "answer"; text: string } // готовый фактический ответ по снимку
   | { kind: "none" }; // не удалось понять
 
-export type LlmResolver = (question: string, snapshot: LlmSnapshot) => Promise<LlmResolution>;
+export type LlmResolver = (
+  question: string,
+  snapshot: LlmSnapshot,
+  context?: LlmCallContext,
+) => Promise<LlmResolution>;
 
 /**
  * Поиск по прошлым разговорам и знаниям.
@@ -120,8 +132,24 @@ export interface ContextHit {
 export interface AnswerOptions {
   /** Если задан — непонятые вопросы уходят в LLM. Нет ключа/резолвера → подсказка. */
   llm?: LlmResolver;
+  /** Идемпотентная идентичность запроса для денежного ledger. */
+  llmContext?: LlmCallContext;
   /** Поиск по истории и заметкам: помощник отвечает, зная контекст. */
   context?: ContextSearch;
+}
+
+/** Честный текст для денежного отказа; null — это не ledger-ошибка. */
+export function llmLedgerErrorText(error: unknown): string | null {
+  if (error instanceof LlmBudgetDeniedError) {
+    return `Платный ИИ-запрос не выполнен: ${error.reason}`;
+  }
+  if (error instanceof LlmLedgerUnavailableError) {
+    return "Не удалось проверить лимит расходов на ИИ, поэтому платный запрос не выполнен. Попробуй позже.";
+  }
+  if (error instanceof LlmReplayBlockedError) {
+    return "Этот платный ИИ-запрос уже был принят, но готовый ответ не сохранён. Повтори его как новый запрос.";
+  }
+  return null;
 }
 
 const HELP = [
@@ -154,13 +182,18 @@ function actionLabel(action: string): string {
 
 /** Компактный снимок для заземления LLM-ответа. Собирается только при непонятом
  * вопросе — на распознанные правилами вопросы лишних обращений к Core нет. */
-async function buildSnapshot(core: AssistantCore, context: ContextHit[] = []): Promise<LlmSnapshot> {
+async function buildSnapshot(
+  core: AssistantCore,
+  context: ContextHit[] = [],
+): Promise<LlmSnapshot> {
   const [briefing, approvals, recent, coffee] = await Promise.all([
     core.briefing(),
     core.pendingApprovals(),
     core.recent(5),
     // Кофе — дополнение: нет метода или он упал → снимок без кофе, не ошибка.
-    core.coffeeConsumption30d ? core.coffeeConsumption30d().catch(() => null) : Promise.resolve(null),
+    core.coffeeConsumption30d
+      ? core.coffeeConsumption30d().catch(() => null)
+      : Promise.resolve(null),
   ]);
   return {
     briefing,
@@ -214,12 +247,23 @@ export async function answer(
       }
     }
     const snapshot = await buildSnapshot(core, context);
-    res = await opts.llm(intent.text, snapshot);
+    res = await opts.llm(intent.text, snapshot, opts.llmContext);
   } catch (err) {
+    const ledgerText = llmLedgerErrorText(err);
+    if (ledgerText !== null) {
+      console.warn(
+        "LLM-вызов заблокирован денежным ledger:",
+        err instanceof Error ? err.message : err,
+      );
+      return { text: ledgerText };
+    }
     // LLM недоступен (нет ключа, сеть, лимит) — не роняем помощника, даём
     // подсказку. Но след в журнале обязателен: иначе «кончился лимит подписки»
     // неотличим от «вопрос не понят», и владелец не узнает о поломке.
-    console.error("LLM-слой не ответил, отвечаю подсказкой:", err instanceof Error ? err.message : err);
+    console.error(
+      "LLM-слой не ответил, отвечаю подсказкой:",
+      err instanceof Error ? err.message : err,
+    );
     return { text: HELP };
   }
 

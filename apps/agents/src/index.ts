@@ -2,14 +2,16 @@ import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import { Cron } from "croner";
 import { TZ } from "@mydon/shared";
-import { budgetPosture } from "./budget";
 import { coachPosture } from "./coach";
 import { runCoffeeMonitor } from "./coffee-monitor";
 import { runMaintenanceMonitor } from "./maintenance-monitor";
 import { AgentsCoreClient } from "./core-client";
+import { embeddingPosture } from "./embedding";
 import { runGloberentMonitor } from "./globerent-monitor";
 import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
+import { drainNotionOutbox } from "./outbox-dispatcher";
 import { autonomyThreshold } from "./policy";
+import { agentTaskIntervalMs, singleFlight } from "./polling";
 import { runOurvendAccounting } from "./ourvend-accounting";
 import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
 import { loadAgents, type AgentDefinition } from "./registry";
@@ -77,13 +79,19 @@ function fromCore(row: {
         .map((s) => ({ name: String(s.name), url: String(s.url) }))
     : [];
   const breakGlass = Array.isArray(row.breakGlass)
-    ? (row.breakGlass as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+    ? (row.breakGlass as unknown[]).filter(
+        (s): s is string => typeof s === "string" && s.length > 0,
+      )
     : [];
   const ideaChannels = Array.isArray(row.ideaChannels)
-    ? (row.ideaChannels as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+    ? (row.ideaChannels as unknown[]).filter(
+        (s): s is string => typeof s === "string" && s.length > 0,
+      )
     : [];
   const onExceeded =
-    row.budgetOnExceeded === "pause" || row.budgetOnExceeded === "downgrade" || row.budgetOnExceeded === "ask"
+    row.budgetOnExceeded === "pause" ||
+    row.budgetOnExceeded === "downgrade" ||
+    row.budgetOnExceeded === "ask"
       ? row.budgetOnExceeded
       : undefined;
 
@@ -174,7 +182,9 @@ async function main(): Promise<void> {
     try {
       const seed = await core.seedAgents(fromFiles.map(toPassport));
       if (seed.seeded > 0) {
-        console.log(`Паспорта перенесены в базу: заведено ${seed.seeded}, уже было ${seed.skipped}.`);
+        console.log(
+          `Паспорта перенесены в базу: заведено ${seed.seeded}, уже было ${seed.skipped}.`,
+        );
       }
       // Тумблеры системы накладываем вместе с настройками агентов: обе правки
       // владельца живут в базе и подхватываются одной перечиткой.
@@ -210,9 +220,18 @@ async function main(): Promise<void> {
     `MYDON Agents: паспортов ${agents.length}, активных ${agents.filter((a) => a.status === "active").length}, ` +
       `порог автономии ${threshold}${threshold === "T0" ? " (всё через согласование)" : ""}.`,
   );
-  console.log(`Бюджет: ${budgetPosture()}.`);
+  console.log(
+    "Бюджет LLM: metered HTTP авторизует единый Core ledger; только явно local HTTP обходит USD-cap; CLI subscription заблокирована.",
+  );
   console.log(`Модель: ${llmPosture()}.`);
-  console.log(`${coachPosture(modelGatewayFromEnv() !== null)}.`);
+  console.log(`${embeddingPosture()}.`);
+  let modelGatewayReady = false;
+  try {
+    modelGatewayReady = modelGatewayFromEnv() !== null;
+  } catch {
+    // llmPosture выше уже напечатал точный отсутствующий pricing profile.
+  }
+  console.log(`${coachPosture(modelGatewayReady)}.`);
 
   // Пауза расписаний — «живой» тумблер: владелец снимает её из панели (оверлей
   // кладёт значение в env), и перечитка включает расписания без рестарта. Раньше
@@ -258,18 +277,38 @@ async function main(): Promise<void> {
       const key = jobKey(j);
       if (cronJobs.has(key)) continue;
       try {
-        const job = new Cron(j.cron, { timezone: TZ, name: `${j.agent}:${j.skill}` }, () => {
+        // Храним ИМЕННО плановый fire time, а не фактический Date.now() внутри
+        // callback. При задержке event loop и на двух репликах это остаётся один
+        // occurrence id; 6-field cron-тиki в одной минуте при этом не схлопнутся.
+        let expectedOccurrence: Date | null = null;
+        const job = new Cron(j.cron, { timezone: TZ, name: `${j.agent}:${j.skill}` }, (self) => {
+          const occurrence = expectedOccurrence ?? self.currentRun() ?? new Date();
+          expectedOccurrence = self.nextRun();
           void (async () => {
             const current = agents.find((a) => a.name === j.agent && a.status === "active");
             if (!current) return; // агента отключили — расписание догаснет на след. перечитке
             try {
-              const result = await runSkill(current, j.skill, core, threshold, skillFloors.get(j.skill));
+              const traceKey = `cron:${j.agent}:${j.skill}:${j.cron}`;
+              const result = await runSkill(
+                current,
+                j.skill,
+                core,
+                threshold,
+                skillFloors.get(j.skill),
+                {
+                  // Одновременный дубль одного планового тика получает тот же
+                  // ключ; ledger replay не даст второму процессу вызвать API.
+                  requestKey: `${traceKey}:${occurrence.toISOString()}`,
+                  traceKey,
+                },
+              );
               console.log(`[${result.agent}/${result.skill}] ${result.outcome} — ${result.reason}`);
             } catch (err) {
               console.error(`[${j.agent}/${j.skill}] сбой:`, err);
             }
           })();
         });
+        expectedOccurrence = job.nextRun();
         cronJobs.set(key, job);
       } catch (err) {
         console.warn(
@@ -293,47 +332,61 @@ async function main(): Promise<void> {
    * проход — не снимок на старте.
    */
   async function pollAgentTasks(): Promise<void> {
-    if (schedulesPaused()) return; // на паузе агент не берёт и поручённые задачи (как раньше)
-    for (const agent of agents.filter((a) => a.status === "active")) {
-      try {
-        const results = await runAgentTasks(agent, core, threshold, skillFloors);
-        for (const r of results) {
-          console.log(`[${agent.name}] задача ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`);
+    if (!schedulesPaused()) {
+      for (const agent of agents.filter((a) => a.status === "active")) {
+        try {
+          const results = await runAgentTasks(agent, core, threshold, skillFloors);
+          for (const r of results) {
+            console.log(`[${agent.name}] задача ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`);
+          }
+        } catch (err) {
+          console.error(`[${agent.name}] задачи не обработаны:`, err);
         }
-      } catch (err) {
-        console.error(`[${agent.name}] задачи не обработаны:`, err);
       }
+    }
+
+    // Delivery — уже committed работа, а не новое агентское решение.
+    // Пауза расписаний не должна оставлять durable outbox навсегда pending.
+    try {
+      const delivered = await drainNotionOutbox(core);
+      if (delivered.claimed > 0) {
+        console.log(
+          `[notion-outbox] взято ${delivered.claimed}: sent=${delivered.sent}, ` +
+            `skipped=${delivered.skipped}, unknown=${delivered.unknown}, dead=${delivered.dead}`,
+        );
+      }
+    } catch (err) {
+      console.error("[notion-outbox] доставка не обработана:", err);
     }
   }
 
   // Перечитка настроек раз в 10 минут: правки владельца в карточке агента
   // начинают действовать сами, без перезапуска контейнера. Заодно это лечит
   // случай «Core поднялся позже нас». После перечитки — примиряем расписания.
-  setInterval(
-    () => {
-      void (async () => {
-        const loaded = await loadFromCore(); // заодно накладывает свежие тумблеры системы
-        if (loaded === null) return;
-        const changed = JSON.stringify(loaded) !== JSON.stringify(agents);
-        agents = loaded;
-        if (!fromCoreOk) {
-          fromCoreOk = true;
-          console.log("Связь с Core появилась — настройки агентов взяты из базы.");
-        } else if (changed) {
-          console.log("Настройки агентов обновлены из базы.");
-        }
-        // Пауза — «живой» тумблер: реагируем на её смену, даже если карточки не менялись.
-        const pausedNow = schedulesPaused();
-        const pauseFlipped = pausedNow !== lastPaused;
-        if (pauseFlipped) {
-          lastPaused = pausedNow;
-          console.log(pausedNow ? "Расписания поставлены на паузу." : "Пауза снята — включаю расписания.");
-        }
-        if (changed || pauseFlipped) reconcileSchedules();
-      })();
-    },
-    10 * 60_000,
-  ).unref();
+  setInterval(() => {
+    void (async () => {
+      const loaded = await loadFromCore(); // заодно накладывает свежие тумблеры системы
+      if (loaded === null) return;
+      const changed = JSON.stringify(loaded) !== JSON.stringify(agents);
+      agents = loaded;
+      if (!fromCoreOk) {
+        fromCoreOk = true;
+        console.log("Связь с Core появилась — настройки агентов взяты из базы.");
+      } else if (changed) {
+        console.log("Настройки агентов обновлены из базы.");
+      }
+      // Пауза — «живой» тумблер: реагируем на её смену, даже если карточки не менялись.
+      const pausedNow = schedulesPaused();
+      const pauseFlipped = pausedNow !== lastPaused;
+      if (pauseFlipped) {
+        lastPaused = pausedNow;
+        console.log(
+          pausedNow ? "Расписания поставлены на паузу." : "Пауза снята — включаю расписания.",
+        );
+      }
+      if (changed || pauseFlipped) reconcileSchedules();
+    })();
+  }, 10 * 60_000).unref();
 
   reconcileSchedules();
 
@@ -369,7 +422,10 @@ async function main(): Promise<void> {
       });
       console.log(`Сбор вендинга (ourvend:sync) включён: "${vendingCron}" (${TZ}).`);
     } catch (err) {
-      console.warn(`Расписание сбора вендинга "${vendingCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
+      console.warn(
+        `Расписание сбора вендинга "${vendingCron}" не принято: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
   } else if (!vendingConfig) {
     console.log("Сбор вендинга выключен: не заданы OURVEND_ACCOUNT/OURVEND_PASSWORD.");
@@ -396,7 +452,9 @@ async function main(): Promise<void> {
           }
         })();
       });
-      console.log(`Учётный снапшот OurVend (ourvend:accounting) включён: "${accountingCron}" (${TZ}).`);
+      console.log(
+        `Учётный снапшот OurVend (ourvend:accounting) включён: "${accountingCron}" (${TZ}).`,
+      );
     } catch (err) {
       console.warn(
         `Расписание учётного снапшота "${accountingCron}" не принято: ` +
@@ -424,9 +482,14 @@ async function main(): Promise<void> {
           }
         })();
       });
-      console.log(`Мониторинг кофе-бункеров (coffee:monitor) включён: "${coffeeMonitorCron}" (${TZ}).`);
+      console.log(
+        `Мониторинг кофе-бункеров (coffee:monitor) включён: "${coffeeMonitorCron}" (${TZ}).`,
+      );
     } catch (err) {
-      console.warn(`Расписание мониторинга кофе-бункеров "${coffeeMonitorCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
+      console.warn(
+        `Расписание мониторинга кофе-бункеров "${coffeeMonitorCron}" не принято: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
   }
 
@@ -475,9 +538,14 @@ async function main(): Promise<void> {
           }
         })();
       });
-      console.log(`Монитор конвейера GLOBERENT (globerent:monitor) включён: "${grMonitorCron}" (${TZ}).`);
+      console.log(
+        `Монитор конвейера GLOBERENT (globerent:monitor) включён: "${grMonitorCron}" (${TZ}).`,
+      );
     } catch (err) {
-      console.warn(`Расписание монитора GLOBERENT "${grMonitorCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
+      console.warn(
+        `Расписание монитора GLOBERENT "${grMonitorCron}" не принято: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
   }
 
@@ -504,15 +572,24 @@ async function main(): Promise<void> {
       });
       console.log(`Автокурс ЦБ РУз (fx:refresh) включён: "${fxRefreshCron}" (${TZ}).`);
     } catch (err) {
-      console.warn(`Расписание автокурса "${fxRefreshCron}" не принято: ` + (err instanceof Error ? err.message : String(err)));
+      console.warn(
+        `Расписание автокурса "${fxRefreshCron}" не принято: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
   }
 
-  const taskEveryMs = Number(process.env.AGENT_TASK_INTERVAL_MS ?? 5 * 60_000);
+  const taskEveryMs = agentTaskIntervalMs(process.env.AGENT_TASK_INTERVAL_MS);
+  const pollAgentTasksSingleFlight = singleFlight(pollAgentTasks);
+  const triggerAgentTaskPoll = (): void => {
+    void pollAgentTasksSingleFlight().catch((err: unknown) =>
+      console.error("Задачи агентов:", err),
+    );
+  };
   setInterval(() => {
-    void pollAgentTasks().catch((err: unknown) => console.error("Задачи агентов:", err));
+    triggerAgentTaskPoll();
   }, taskEveryMs).unref();
-  void pollAgentTasks(); // первый проход сразу при старте
+  triggerAgentTaskPoll(); // первый проход сразу при старте
 
   console.log(`Запланировано заданий: ${cronJobs.size} (часовой пояс ${TZ}).`);
   // Держим процесс живым всегда: расписания могут появиться после перечитки,

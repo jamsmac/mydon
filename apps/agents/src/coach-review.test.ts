@@ -5,15 +5,28 @@ import type { ModelGateway, ModelRequest } from "./model-gateway";
 
 /** Полный вердикт по рубрике. safety=2 → блок; низкие баллы → improve. */
 function verdict(scores: Partial<Record<string, number>>): string {
-  const full = { correctness: 5, completeness: 5, safety: 5, format: 5, autonomy: 5, efficiency: 5, ...scores };
+  const full = {
+    correctness: 5,
+    completeness: 5,
+    safety: 5,
+    format: 5,
+    autonomy: 5,
+    efficiency: 5,
+    ...scores,
+  };
   return JSON.stringify({ scores: full, notes: "надо конкретнее" });
 }
 
 /** Фейковый шлюз: отдаёт ответы по очереди (EVAL, затем PROPOSE). */
-function fakeGateway(responses: { text: string; ok?: boolean }[]): { gateway: ModelGateway; calls: ModelRequest[] } {
+function fakeGateway(responses: { text: string; ok?: boolean }[]): {
+  gateway: ModelGateway;
+  calls: ModelRequest[];
+} {
   let i = 0;
   const calls: ModelRequest[] = [];
   const gateway: ModelGateway = {
+    provider: "test-local",
+    billingMode: "local",
     call: async (model, req) => {
       calls.push(req);
       const r = responses[Math.min(i, responses.length - 1)];
@@ -23,6 +36,8 @@ function fakeGateway(responses: { text: string; ok?: boolean }[]): { gateway: Mo
   };
   return { gateway, calls };
 }
+
+const OPTS = { agentName: "coach-agent", requestKey: "coach-test" } as const;
 
 const DIFF = [
   "mydon-finance/skills/watch-receivables.md",
@@ -35,8 +50,15 @@ const DIFF = [
 
 function deps(over: Partial<CoachDeps> = {}): CoachDeps {
   return {
-    latestAction: async () => ({ source: "agent:mydon-finance", skill: "watch-receivables", action: "разобрать дебиторку" }),
-    readSkill: () => ({ content: "инструкция\nстарый шаг\nконец", rel: "mydon-finance/skills/watch-receivables.md" }),
+    latestAction: async () => ({
+      source: "agent:mydon-finance",
+      skill: "watch-receivables",
+      action: "разобрать дебиторку",
+    }),
+    readSkill: () => ({
+      content: "инструкция\nстарый шаг\nконец",
+      rel: "mydon-finance/skills/watch-receivables.md",
+    }),
     selfSource: "agent:coach-agent",
     ...over,
   };
@@ -45,25 +67,38 @@ function deps(over: Partial<CoachDeps> = {}): CoachDeps {
 describe("runCoachReview — EVAL/PROPOSE", () => {
   it("нет действий → null", async () => {
     const { gateway } = fakeGateway([{ text: "x" }]);
-    assert.equal(await runCoachReview(gateway, deps({ latestAction: async () => null })), null);
+    assert.equal(
+      await runCoachReview(gateway, deps({ latestAction: async () => null }), OPTS),
+      null,
+    );
   });
 
   it("не судит сам себя", async () => {
     const { gateway, calls } = fakeGateway([{ text: verdict({}) }]);
-    const res = await runCoachReview(gateway, deps({ latestAction: async () => ({ source: "agent:coach-agent", skill: "coach-review", action: "..." }) }));
+    const res = await runCoachReview(
+      gateway,
+      deps({
+        latestAction: async () => ({
+          source: "agent:coach-agent",
+          skill: "coach-review",
+          action: "...",
+        }),
+      }),
+      OPTS,
+    );
     assert.equal(res, null);
     assert.equal(calls.length, 0, "своё действие — судью не зовём");
   });
 
   it("вердикт отличный → null (не шумим)", async () => {
     const { gateway, calls } = fakeGateway([{ text: verdict({}) }]);
-    assert.equal(await runCoachReview(gateway, deps()), null);
+    assert.equal(await runCoachReview(gateway, deps(), OPTS), null);
     assert.equal(calls.length, 1, "только EVAL, PROPOSE не нужен");
   });
 
   it("безопасность 1–2 → эскалация, без правки", async () => {
     const { gateway, calls } = fakeGateway([{ text: verdict({ safety: 2 }) }]);
-    const res = await runCoachReview(gateway, deps());
+    const res = await runCoachReview(gateway, deps(), OPTS);
     assert.ok(res);
     assert.match(res.action, /критично по безопасности/);
     assert.equal(res.facts.outcome, "safety-block");
@@ -71,8 +106,11 @@ describe("runCoachReview — EVAL/PROPOSE", () => {
   });
 
   it("слабо + файл найден → предложение правки SKILL.md (EVAL+PROPOSE)", async () => {
-    const { gateway, calls } = fakeGateway([{ text: verdict({ correctness: 2, completeness: 2, format: 2, efficiency: 2 }) }, { text: DIFF }]);
-    const res = await runCoachReview(gateway, deps());
+    const { gateway, calls } = fakeGateway([
+      { text: verdict({ correctness: 2, completeness: 2, format: 2, efficiency: 2 }) },
+      { text: DIFF },
+    ]);
+    const res = await runCoachReview(gateway, deps(), OPTS);
     assert.ok(res);
     assert.match(res.action, /предлагает правку навыка/);
     assert.match(String(res.facts.diff), /SEARCH/);
@@ -84,19 +122,21 @@ describe("runCoachReview — EVAL/PROPOSE", () => {
   });
 
   it("слабо, но файл навыка не найден → сообщаем, правку не выдумываем", async () => {
-    const { gateway } = fakeGateway([{ text: verdict({ correctness: 2, completeness: 2, format: 2, autonomy: 2 }) }]);
-    const res = await runCoachReview(gateway, deps({ readSkill: () => null }));
+    const { gateway } = fakeGateway([
+      { text: verdict({ correctness: 2, completeness: 2, format: 2, autonomy: 2 }) },
+    ]);
+    const res = await runCoachReview(gateway, deps({ readSkill: () => null }), OPTS);
     assert.ok(res);
     assert.match(res.action, /файл навыка не найден/);
   });
 
   it("судья не ответил → null (не выдумываем оценку)", async () => {
     const { gateway } = fakeGateway([{ text: "", ok: false }]);
-    assert.equal(await runCoachReview(gateway, deps()), null);
+    assert.equal(await runCoachReview(gateway, deps(), OPTS), null);
   });
 
   it("судья вернул мусор вместо JSON → null", async () => {
     const { gateway } = fakeGateway([{ text: "не смог оценить" }]);
-    assert.equal(await runCoachReview(gateway, deps()), null);
+    assert.equal(await runCoachReview(gateway, deps(), OPTS), null);
   });
 });

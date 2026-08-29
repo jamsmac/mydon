@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
 import type { AgentsCoreClient } from "./core-client";
-import { cosineSimilarity, type EmbeddingGateway } from "./embedding";
+import {
+  cosineSimilarity,
+  embedWithLedger,
+  type EmbeddingCallContext,
+  type EmbeddingGateway,
+} from "./embedding";
 
 /**
  * Семантическая память (RAG, шаг #6b): агент вспоминает ПОХОЖИЕ прошлые случаи
@@ -21,6 +27,13 @@ export interface Recalled {
   score: number;
 }
 
+function semanticEventKey(requestKey: string, namespace: string, id: string): string {
+  const hash = createHash("sha256")
+    .update(`${requestKey}:${namespace}:${id}`)
+    .digest("hex");
+  return `agent-semantic:${hash}`;
+}
+
 /** Запомнить факт в семантическую память. false — если эмбеддинг не получен. */
 export async function rememberSemantic(
   core: AgentsCoreClient,
@@ -28,13 +41,18 @@ export async function rememberSemantic(
   namespace: string,
   id: string,
   text: string,
+  context: EmbeddingCallContext,
 ): Promise<boolean> {
-  const vector = await embedder.embed(text);
+  const vector = await embedWithLedger(embedder, text, context);
   if (vector === null) return false;
+  // Embedding мог завершиться уже после takeover task lease. Не даём
+  // stale generation записать дубль памяти после ответа provider.
+  await context.assertLease?.();
   await core.recordEvent({
     source: `mem:${namespace}`,
     type: `agent.embed:${namespace}`,
     payload: { id, text, vector },
+    clientKey: semanticEventKey(context.requestKey, namespace, id),
   });
   return true;
 }
@@ -48,9 +66,10 @@ export async function recallSemantic(
   embedder: EmbeddingGateway,
   namespace: string,
   query: string,
+  context: EmbeddingCallContext,
   k = 3,
 ): Promise<Recalled[]> {
-  const qv = await embedder.embed(query);
+  const qv = await embedWithLedger(embedder, query, context);
   if (qv === null) return [];
 
   const events = await core.listEvents(`agent.embed:${namespace}`);

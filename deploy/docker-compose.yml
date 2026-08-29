@@ -49,6 +49,18 @@ services:
       # (панель/бот/агенты). Пусто → ВСЕ мутации отклоняются 401 (fail-closed),
       # Core предупреждает на старте.
       SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      # Второй секрет только у Core: разрешает owner-only повтор после
+      # неизвестного LLM outcome. Bot/Agents/CC его не получают.
+      OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
+      # Core повторно проверяет потолок атомарно в commit agent outcome.
+      AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
+      # Единый Core-ledger — единственная денежная граница для всех LLM-клиентов.
+      # Legacy AGENT_GLOBAL_BUDGET_USD остаётся только переходным fallback.
+      # Без default: на существующей установке пустой новый ключ обязан отдать
+      # приоритет legacy-лимиту из system_config, а не тихо заменить его на $5.
+      LLM_GLOBAL_DAILY_BUDGET_USD: ${LLM_GLOBAL_DAILY_BUDGET_USD:-}
+      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-5}
+      AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
       # Перец для хешей приглашений сотрудников. В БД лежит только хеш кода;
       # без перца 47 бит кода предвычисляются радужной таблицей один раз, и
       # утёкший дамп staff_invite становится пачкой рабочих приглашений.
@@ -170,26 +182,26 @@ services:
       # Учётный снапшот OurVend (П2 поглощения): суточные продажи + остатки.
       # 08:05 — после съёма stock (07:50), чтобы паритет сверял одни сутки.
       OURVEND_ACCOUNTING_CRON: ${OURVEND_ACCOUNTING_CRON:-5 8 * * *}
-      # Бюджет: subscription — метрируемых трат нет, потолок спит.
-      AGENT_BILLING_MODE: ${AGENT_BILLING_MODE:-subscription}
-      AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
-      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-5}
-      # Мозг агентов (см. docs/AGENTS_ACTIVATION.md). Всё пусто → LLM-путь спит,
-      # навыки детерминированы. Подписка (claude-cli/codex-cli/gemini-cli) требует
-      # ещё и сам CLI в образе + его авторизацию; HTTP-путь — только в Tailscale.
+      # Мозг агентов (см. docs/AGENTS_ACTIVATION.md). Всё пусто → LLM-путь спит.
+      # Subscription v1 разрешает только Claude CLI с явным OAuth token;
+      # Codex/Gemini fail-closed, пока их auth mode нельзя доказать локально.
       LLM_PROVIDER: ${LLM_PROVIDER:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Не URL/секрет: exact provider из llm_model_price для денежного профиля.
+      LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-}
+      # HTTP считается платным и требует Core-ledger. local допустим только
+      # для явно бесплатного локального runtime.
+      LLM_HTTP_BILLING_MODE: ${LLM_HTTP_BILLING_MODE:-metered}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-}
-      LLM_CLI_CMD: ${LLM_CLI_CMD:-}
-      LLM_CLI_BASE_ARGS: ${LLM_CLI_BASE_ARGS:-}
-      LLM_CLI_PROMPT_VIA: ${LLM_CLI_PROMPT_VIA:-}
-      LLM_CLI_MODEL_FLAG: ${LLM_CLI_MODEL_FLAG:-}
       # Семантическая память (RAG, #6b). Пусто → память спит (дельта-память
       # по сигнатуре остаётся). Держать endpoint только в Tailscale.
       EMBED_BASE_URL: ${EMBED_BASE_URL:-}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_PRICE_PROVIDER_ID: ${EMBED_PRICE_PROVIDER_ID:-}
+      EMBED_BILLING_MODE: ${EMBED_BILLING_MODE:-metered}
       EMBED_MODEL: ${EMBED_MODEL:-}
       # Notion: отчёты агентов туда, куда владелец и так смотрит.
       # Пусто → агенты работают, но в Notion не пишут.

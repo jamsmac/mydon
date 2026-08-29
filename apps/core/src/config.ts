@@ -33,6 +33,25 @@ export const appConfig = {
   get serviceToken(): string {
     return process.env.SERVICE_TOKEN ?? "";
   },
+  /**
+   * Used only for explicit owner confirmation of a potentially repeated charge.
+   * Never shared with Bot/Agents/CC and always fail-closed when empty.
+   */
+  get ownerActionToken(): string {
+    return process.env.OWNER_ACTION_TOKEN ?? "";
+  },
+  /**
+   * Final server-side limit for agent.action events per Tashkent day.
+   * Zero explicitly disables the cap. Empty or invalid input must not
+   * accidentally remove the production limit, so the documented default is 50.
+   */
+  get agentDailyActionCap(): number {
+    const raw = process.env.AGENT_DAILY_ACTION_CAP?.trim();
+    if (raw === "0") return 0;
+    if (!raw) return 50;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 50;
+  },
   /** Фактический пояс процесса — сообщаем то, что есть, а не то, что хотелось бы. */
   get tz(): string {
     return Intl.DateTimeFormat().resolvedOptions().timeZone;

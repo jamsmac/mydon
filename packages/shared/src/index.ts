@@ -158,3 +158,9 @@ export * from "./bank-statement";
  * (срез K, задача 7).
  */
 export * from "./tashkent-time";
+
+/** Единый денежный протокол платных LLM-вызовов через MYDON Core. */
+export * from "./llm-ledger";
+
+/** Subscription child не должен унаследовать credentials платных backend-ов. */
+export * from "./subscription-env";

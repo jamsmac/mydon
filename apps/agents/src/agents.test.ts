@@ -3,6 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import {
+  LlmBudgetDeniedError,
+  LlmLedgerUnavailableError,
+  LlmReplayBlockedError,
+} from "@mydon/shared";
 import { autonomyThreshold, explainPolicy, requiresApproval, tierRank } from "./policy";
 import { loadAgents } from "./registry";
 import { runSkill } from "./runner";
@@ -16,7 +21,11 @@ const AGENTS_DIR = path.resolve(__dirname, "../agents");
 describe("Политика автономии (ответ владельца Ф6: всё вручную)", () => {
   it("при пороге T0 согласования требует ЛЮБОЕ действие", () => {
     for (const tier of ["T0", "T1", "T2", "T3", "T4"] as const) {
-      assert.equal(requiresApproval(tier, "T0"), true, `уровень ${tier} должен требовать согласования`);
+      assert.equal(
+        requiresApproval(tier, "T0"),
+        true,
+        `уровень ${tier} должен требовать согласования`,
+      );
     }
   });
 
@@ -84,7 +93,10 @@ describe("Паспорта агентов (перенесены как есть)
 
   it("статусы боевых паспортов — только из допустимого набора", () => {
     for (const a of agents) {
-      assert.ok(["active", "paused", "draft", "deprecated"].includes(a.status), `${a.name}: ${a.status}`);
+      assert.ok(
+        ["active", "paused", "draft", "deprecated"].includes(a.status),
+        `${a.name}: ${a.status}`,
+      );
     }
   });
 
@@ -118,7 +130,11 @@ describe("Прогон навыка", () => {
   /** Заглушка Core: по умолчанию данных нет — как на пустой базе владельца. */
   function stubCore(over: Record<string, unknown> = {}) {
     const calls: string[] = [];
-    const captured: { action?: string; payload?: Record<string, unknown> } = {};
+    const captured: {
+      action?: string;
+      payload?: Record<string, unknown>;
+      clientKey?: string;
+    } = {};
     return {
       calls,
       captured,
@@ -126,10 +142,15 @@ describe("Прогон навыка", () => {
         recordEvent: async () => {
           calls.push("event");
         },
-        requestApproval: async (input: { action: string; payload?: Record<string, unknown> }) => {
+        requestApproval: async (input: {
+          action: string;
+          payload?: Record<string, unknown>;
+          clientKey?: string;
+        }) => {
           calls.push("approval");
           captured.action = input.action;
           if (input.payload) captured.payload = input.payload;
+          if (input.clientKey) captured.clientKey = input.clientKey;
           return { id: "appr-1" };
         },
         briefing: async () => EMPTY_BRIEFING,
@@ -154,7 +175,11 @@ describe("Прогон навыка", () => {
     const res = await runSkill(base, "watch-receivables", client, "T0");
     assert.equal(res.outcome, "skipped");
     assert.match(res.reason, /повода нет/);
-    assert.deepEqual(calls, ["event"], "событие о прогоне есть, а пустого согласования быть не должно");
+    assert.deepEqual(
+      calls,
+      ["event"],
+      "событие о прогоне есть, а пустого согласования быть не должно",
+    );
   });
 
   it("есть просрочка — при T0 выносит ПРЕДМЕТНОЕ предложение с фактами", async () => {
@@ -162,7 +187,16 @@ describe("Прогон навыка", () => {
       obligations: async () => ({
         domain: "globerent",
         totals: [],
-        overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+        overdue: [
+          {
+            id: "m1",
+            amount: "5000000",
+            currency: "UZS",
+            date: "2026-05-01",
+            direction: "in",
+            status: "plan",
+          },
+        ],
         overdueTotal: 3,
         overdueTruncated: false,
       }),
@@ -172,9 +206,89 @@ describe("Прогон навыка", () => {
     assert.equal(res.approvalId, "appr-1");
     // event(agent.run) → approval → event(agent.action, для дневного потолка)
     assert.deepEqual(calls, ["event", "approval", "event"]);
-    assert.match(captured.action ?? "", /дебиторк/i, "формулировка должна быть по делу, а не именем навыка");
+    assert.match(
+      captured.action ?? "",
+      /дебиторк/i,
+      "формулировка должна быть по делу, а не именем навыка",
+    );
     assert.match(captured.action ?? "", /3 позиц/, "владельцу нужна конкретика: сколько позиций");
-    assert.equal((captured.payload?.facts as Record<string, unknown>)?.overdueTotal, 3, "факты кладутся для проверки по следам");
+    assert.equal(
+      (captured.payload?.facts as Record<string, unknown>)?.overdueTotal,
+      3,
+      "факты кладутся для проверки по следам",
+    );
+  });
+
+  it("две cron-реплики передают Core один stable clientKey согласования", async () => {
+    const approvalKeys: string[] = [];
+    const { client } = stubCore({
+      obligations: async () => ({
+        domain: "globerent",
+        totals: [],
+        overdue: [
+          {
+            id: "m1",
+            amount: "5000000",
+            currency: "UZS",
+            date: "2026-05-01",
+            direction: "in",
+            status: "plan",
+          },
+        ],
+        overdueTotal: 1,
+        overdueTruncated: false,
+      }),
+      requestApproval: async (input: { clientKey?: string }) => {
+        approvalKeys.push(input.clientKey ?? "");
+        return { id: "appr-shared" };
+      },
+    });
+    const occurrence = {
+      requestKey: "cron:test-agent:watch-receivables:0 8 * * *:2026-08-29T03:00:00.000Z",
+      traceKey: "cron:test-agent:watch-receivables:0 8 * * *",
+    };
+
+    await Promise.all([
+      runSkill(base, "watch-receivables", client, "T0", undefined, occurrence),
+      runSkill(base, "watch-receivables", client, "T0", undefined, occurrence),
+    ]);
+
+    assert.equal(approvalKeys.length, 2);
+    assert.ok(approvalKeys[0]?.startsWith("agent-approval:"));
+    assert.equal(approvalKeys[0], approvalKeys[1]);
+  });
+
+  it("lease потерян после ответа навыка — stale generation не создаёт approval/event/memory", async () => {
+    const { client, calls } = stubCore({
+      obligations: async () => ({
+        domain: "globerent",
+        totals: [],
+        overdue: [
+          {
+            id: "m1",
+            amount: "5000000",
+            currency: "UZS",
+            date: "2026-05-01",
+            direction: "in",
+            status: "plan",
+          },
+        ],
+        overdueTotal: 1,
+        overdueTruncated: false,
+      }),
+    });
+    let checks = 0;
+    const res = await runSkill(base, "watch-receivables", client, "T0", undefined, {
+      requestKey: "run-lease-lost",
+      assertLease: async () => {
+        checks += 1;
+        if (checks === 2) throw new LlmLedgerUnavailableError("task lease lost");
+      },
+    });
+
+    assert.equal(res.outcome, "skipped");
+    assert.equal(res.skipReason, "ledger_unavailable");
+    assert.deepEqual(calls, ["event"], "после takeover нет побочных записей");
   });
 
   it("нереализованный навык честно помечается, а не изображает работу", async () => {
@@ -200,7 +314,16 @@ describe("Прогон навыка", () => {
       obligations: async () => ({
         domain: "globerent",
         totals: [],
-        overdue: [{ id: "m1", amount: "1000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+        overdue: [
+          {
+            id: "m1",
+            amount: "1000",
+            currency: "UZS",
+            date: "2026-05-01",
+            direction: "in",
+            status: "plan",
+          },
+        ],
         overdueTotal: 1,
         overdueTruncated: false,
       }),
@@ -215,7 +338,16 @@ describe("Прогон навыка", () => {
   const OVERDUE = {
     domain: "globerent",
     totals: [],
-    overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+    overdue: [
+      {
+        id: "m1",
+        amount: "5000000",
+        currency: "UZS",
+        date: "2026-05-01",
+        direction: "in",
+        status: "plan",
+      },
+    ],
     overdueTotal: 1,
     overdueTruncated: false,
   };
@@ -223,7 +355,10 @@ describe("Прогон навыка", () => {
   it("исполнитель есть и порог позволяет — исполняет и проверяет, без согласования", async () => {
     const { client, calls } = stubCore({ obligations: async () => OVERDUE });
     // Регистрируем временный исполнитель, подтверждающий результат.
-    EXECUTORS["watch-receivables"] = async () => ({ ok: true, detail: "напоминание создано и перечитано" });
+    EXECUTORS["watch-receivables"] = async () => ({
+      ok: true,
+      detail: "напоминание создано и перечитано",
+    });
     try {
       const res = await runSkill(base, "watch-receivables", client, "T2");
       assert.equal(res.outcome, "executed");
@@ -237,7 +372,10 @@ describe("Прогон навыка", () => {
 
   it("исполнитель не подтвердил результат — не врём, выносим на согласование", async () => {
     const { client, calls } = stubCore({ obligations: async () => OVERDUE });
-    EXECUTORS["watch-receivables"] = async () => ({ ok: false, detail: "перечитка эффекта не нашла" });
+    EXECUTORS["watch-receivables"] = async () => ({
+      ok: false,
+      detail: "перечитка эффекта не нашла",
+    });
     try {
       const res = await runSkill(base, "watch-receivables", client, "T2");
       assert.equal(res.outcome, "approval_requested");
@@ -256,7 +394,16 @@ describe("Прогон навыка", () => {
         obligations: async () => ({
           domain: "globerent",
           totals: [],
-          overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+          overdue: [
+            {
+              id: "m1",
+              amount: "5000000",
+              currency: "UZS",
+              date: "2026-05-01",
+              direction: "in",
+              status: "plan",
+            },
+          ],
           overdueTotal: 3,
           overdueTruncated: false,
         }),
@@ -282,7 +429,16 @@ describe("Прогон навыка", () => {
         obligations: async () => ({
           domain: "globerent",
           totals: [],
-          overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+          overdue: [
+            {
+              id: "m1",
+              amount: "5000000",
+              currency: "UZS",
+              date: "2026-05-01",
+              direction: "in",
+              status: "plan",
+            },
+          ],
           overdueTotal: 2,
           overdueTruncated: false,
         }),
@@ -296,16 +452,91 @@ describe("Прогон навыка", () => {
       else process.env.AGENT_DAILY_ACTION_CAP = prev;
     }
   });
+
+  it("task-mode сохраняет checkpoint до effects и не запускает non-durable executor", async () => {
+    const { client, calls } = stubCore({ obligations: async () => OVERDUE });
+    const order: string[] = [];
+    let executorCalls = 0;
+    EXECUTORS["watch-receivables"] = async () => {
+      executorCalls += 1;
+      order.push("executor");
+      return { ok: true, detail: "effect" };
+    };
+    try {
+      const res = await runSkill(base, "watch-receivables", client, "T2", undefined, {
+        requestKey: "task:t1:execution:e1",
+        traceKey: "task:t1:test",
+        assertLease: async () => undefined,
+        task: {
+          saveCheckpoint: async (checkpoint) => {
+            order.push("checkpoint");
+            return { id: "cp-1", ...checkpoint };
+          },
+        },
+      });
+      assert.deepEqual(order, ["checkpoint"]);
+      assert.equal(executorCalls, 0, "executor ждёт отдельного durable outbox");
+      assert.deepEqual(calls, [], "approval/event/memory делает только Core commit");
+      assert.equal(res.commit?.outcome, "approval_requested");
+    } finally {
+      delete EXECUTORS["watch-receivables"];
+    }
+  });
+
+  it("task resume читает durable proposal и не вызывает skill/LLM", async () => {
+    const original = SKILLS["watch-receivables"];
+    let skillCalls = 0;
+    let checkpointWrites = 0;
+    SKILLS["watch-receivables"] = async () => {
+      skillCalls += 1;
+      return null;
+    };
+    try {
+      const { client, calls } = stubCore();
+      const res = await runSkill(base, "watch-receivables", client, "T0", undefined, {
+        requestKey: "task:t1:execution:e1",
+        task: {
+          checkpoint: {
+            id: "cp-1",
+            skill: "watch-receivables",
+            kind: "proposal",
+            action: "Разобрать долг",
+            facts: { overdue: 1 },
+          },
+          saveCheckpoint: async () => {
+            checkpointWrites += 1;
+            throw new Error("resume не должен перезаписывать checkpoint");
+          },
+        },
+      });
+      assert.equal(skillCalls, 0);
+      assert.equal(checkpointWrites, 0);
+      assert.deepEqual(calls, []);
+      assert.equal(res.commit?.outcome, "approval_requested");
+      assert.equal(res.commit?.action, "Разобрать долг");
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
+  });
 });
 
 describe("Навыки агентов, подключённые к Core", () => {
   const agent: AgentDefinition = {
-    name: "a", business: "vendhub", status: "active", autonomyDefault: "T1",
-    schedule: [], skills: [], dir: "/tmp",
+    name: "a",
+    business: "vendhub",
+    status: "active",
+    autonomyDefault: "T1",
+    schedule: [],
+    skills: [],
+    dir: "/tmp",
   };
   const briefing = {
-    overdueMoney: 0, idleMachines: 0, pendingApprovals: 0,
-    contractsDueSoon: 0, contractsBadDate: 0, overdueTasks: 0,
+    overdueMoney: 0,
+    idleMachines: 0,
+    pendingApprovals: 0,
+    contractsDueSoon: 0,
+    contractsBadDate: 0,
+    overdueTasks: 0,
   };
 
   it("monitor-stock молчит, когда все автоматы работают", async () => {
@@ -336,12 +567,28 @@ describe("Навыки агентов, подключённые к Core", () => 
   it("watch-receivables показывает сумму и что список урезан", async () => {
     const core = {
       obligations: async () => ({
-        domain: "globerent", totals: [],
+        domain: "globerent",
+        totals: [],
         overdue: [
-          { id: "1", amount: "1500000", currency: "UZS", date: "2026-01-10", direction: "in", status: "plan" },
-          { id: "2", amount: "500000", currency: "UZS", date: "2026-02-10", direction: "in", status: "plan" },
+          {
+            id: "1",
+            amount: "1500000",
+            currency: "UZS",
+            date: "2026-01-10",
+            direction: "in",
+            status: "plan",
+          },
+          {
+            id: "2",
+            amount: "500000",
+            currency: "UZS",
+            date: "2026-02-10",
+            direction: "in",
+            status: "plan",
+          },
         ],
-        overdueTotal: 250, overdueTruncated: true,
+        overdueTotal: 250,
+        overdueTruncated: true,
       }),
     } as never;
     const p = await SKILLS["watch-receivables"]({ ...agent, business: "globerent" }, core);
@@ -367,22 +614,114 @@ describe("Задачи агента и дневной потолок", () => {
   const overdue = {
     domain: "globerent",
     totals: [],
-    overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+    overdue: [
+      {
+        id: "m1",
+        amount: "5000000",
+        currency: "UZS",
+        date: "2026-05-01",
+        direction: "in",
+        status: "plan",
+      },
+    ],
     overdueTotal: 1,
     overdueTruncated: false,
   };
 
-  /** Заглушка Core под задачи: пишем, какие статусы проставлены. */
+  /** Заглушка Core под durable checkpoint/commit задачи. */
   function stub(over: Record<string, unknown> = {}) {
-    const statuses: { id: string; status: string }[] = [];
+    const statuses: { id: string; status: string; runId?: string }[] = [];
     const comments: string[] = [];
+    const checkpoints: { id: string; input: Record<string, unknown> }[] = [];
+    const commits: { id: string; input: Record<string, unknown> }[] = [];
+    const releases: {
+      id: string;
+      agentName: string;
+      runId: string;
+      executionAttemptId: string;
+      reason?: "budget_denied" | "execution_unknown" | "unsupported";
+      detail?: string;
+    }[] = [];
+    const claims: { id: string; agentName: string; runId: string }[] = [];
+    let generation = 0;
+    let storedCheckpoint:
+      | {
+          id: string;
+          skill: string;
+          kind: "no_signal" | "proposal";
+          action?: string;
+          facts?: Record<string, unknown>;
+          next?: string[];
+        }
+      | undefined;
     return {
       statuses,
       comments,
+      checkpoints,
+      commits,
+      releases,
+      claims,
       client: {
-        myTasks: async () => [{ id: "t1", title: "проверь дебиторку", status: "todo", ownerRef: "receivables" }],
-        setTaskStatus: async (id: string, status: string) => {
-          statuses.push({ id, status });
+        myTasks: async () => [
+          { id: "t1", title: "проверь дебиторку", status: "todo", ownerRef: "receivables" },
+        ],
+        claimAgentTask: async (id: string, agentName: string) => {
+          generation += 1;
+          const runId = `00000000-0000-4000-8000-${String(generation).padStart(12, "0")}`;
+          claims.push({ id, agentName, runId });
+          return {
+            runId,
+            executionAttemptId: "99999999-9999-4999-8999-999999999999",
+            generation,
+            claimedAt: new Date().toISOString(),
+            ...(storedCheckpoint ? { checkpoint: storedCheckpoint } : {}),
+          };
+        },
+        checkpointAgentTask: async (id: string, input: Record<string, unknown>) => {
+          checkpoints.push({ id, input });
+          storedCheckpoint = {
+            id: "33333333-3333-4333-8333-333333333333",
+            skill: String(input.skill),
+            kind: input.kind as "no_signal" | "proposal",
+            ...(typeof input.action === "string" ? { action: input.action } : {}),
+            ...(input.facts && typeof input.facts === "object"
+              ? { facts: input.facts as Record<string, unknown> }
+              : {}),
+            ...(Array.isArray(input.next) ? { next: input.next as string[] } : {}),
+          };
+          return storedCheckpoint;
+        },
+        commitAgentTaskOutcome: async (id: string, input: Record<string, unknown>) => {
+          commits.push({ id, input });
+          return { status: "committed" as const, approvalId: "appr-1", replay: false };
+        },
+        releaseAgentTask: async (
+          id: string,
+          agentName: string,
+          runId: string,
+          executionAttemptId: string,
+          reason?: "budget_denied" | "execution_unknown" | "unsupported",
+          detail?: string,
+        ) => {
+          releases.push({
+            id,
+            agentName,
+            runId,
+            executionAttemptId,
+            ...(reason ? { reason } : {}),
+            ...(detail ? { detail } : {}),
+          });
+          return true;
+        },
+        heartbeatAgentTask: async () => true,
+        setTaskStatus: async (
+          id: string,
+          status: string,
+          _actor: string,
+          _note?: string,
+          runId?: string,
+        ) => {
+          statuses.push({ id, status, ...(runId ? { runId } : {}) });
         },
         addTaskComment: async (_id: string, body: string) => {
           comments.push(body);
@@ -398,58 +737,215 @@ describe("Задачи агента и дневной потолок", () => {
     };
   }
 
-  it("потолок исчерпан — задача НЕ берётся в работу и не помечается сделанной", async () => {
+  it("атомарный Core cap сохраняет checkpoint и не делает второй release", async () => {
     const prev = process.env.AGENT_DAILY_ACTION_CAP;
     process.env.AGENT_DAILY_ACTION_CAP = "3";
     try {
-      // Уже 3 действия за сутки при потолке 3 — исчерпано ещё до захода в задачу.
-      const { client, statuses } = stub({ countAgentActions: async () => 3 });
+      const { client, statuses, releases, checkpoints } = stub({
+        commitAgentTaskOutcome: async () => ({ status: "capped" as const, replay: false }),
+      });
       const res = await runAgentTasks(agent, client, "T0");
       assert.equal(res.length, 1);
       assert.equal(res[0].outcome, "skipped");
       assert.match(res[0].note, /потолок действий исчерпан/);
-      assert.deepEqual(statuses, [], "капнутую задачу нельзя даже переводить в работу");
+      assert.deepEqual(statuses, [], "worker не меняет task status вне commit");
+      assert.equal(checkpoints.length, 1, "proposal должен пережить перенос на новый день");
+      assert.equal(releases.length, 0, "Core уже атомарно снял lease и назначил retryAt");
     } finally {
       if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
       else process.env.AGENT_DAILY_ACTION_CAP = prev;
     }
+  });
+
+  it("задача без навыка durable-блокируется один раз и не плодит comment/release на poll", async () => {
+    const unsupportedAgent = { ...agent, skills: [] };
+    const releases: {
+      reason?: string;
+      detail?: string;
+    }[] = [];
+    let blocked = false;
+    let claimCalls = 0;
+    const { client, comments, checkpoints, commits } = stub({
+      claimAgentTask: async () => {
+        claimCalls += 1;
+        if (blocked) return null;
+        return {
+          runId: "11111111-1111-4111-8111-111111111111",
+          executionAttemptId: "22222222-2222-4222-8222-222222222222",
+          generation: 1,
+          claimedAt: "2026-08-29T10:00:00.000Z",
+        };
+      },
+      releaseAgentTask: async (
+        _id: string,
+        _agentName: string,
+        _runId: string,
+        _executionAttemptId: string,
+        reason?: string,
+        detail?: string,
+      ) => {
+        releases.push({ ...(reason ? { reason } : {}), ...(detail ? { detail } : {}) });
+        blocked = reason === "unsupported";
+        return true;
+      },
+    });
+
+    const first = await runAgentTasks(unsupportedAgent, client, "T0");
+    const second = await runAgentTasks(unsupportedAgent, client, "T0");
+
+    assert.equal(first[0]?.outcome, "returned");
+    assert.match(first[0]?.note ?? "", /Не умею/);
+    assert.equal(second[0]?.outcome, "skipped");
+    assert.equal(claimCalls, 2, "список open может содержать blocked задачу");
+    assert.deepEqual(releases, [
+      {
+        reason: "unsupported",
+        detail:
+          "Не умею это делать. Мои навыки: нет. Уточни или переназначь задачу, затем запусти owner retry.",
+      },
+    ]);
+    assert.deepEqual(comments, [], "отдельный неидемпотентный comment не нужен");
+    assert.deepEqual(checkpoints, []);
+    assert.deepEqual(commits, []);
   });
 
   it("под потолком — задача проходит: предложение владельцу, задача закрыта", async () => {
     const prev = process.env.AGENT_DAILY_ACTION_CAP;
     process.env.AGENT_DAILY_ACTION_CAP = "5";
     try {
-      const { client, statuses } = stub({ countAgentActions: async () => 0 });
+      const { client, statuses, checkpoints, commits } = stub();
       const res = await runAgentTasks(agent, client, "T0");
       assert.equal(res[0].outcome, "proposed");
-      assert.deepEqual(
-        statuses.map((s) => s.status),
-        ["in_progress", "done"],
-        "нормальный путь: взял в работу и закрыл отчётом",
-      );
+      assert.deepEqual(statuses, []);
+      assert.equal(checkpoints.length, 1);
+      assert.equal(commits.length, 1);
+      assert.equal(commits[0]?.input.outcome, "approval_requested");
     } finally {
       if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
       else process.env.AGENT_DAILY_ACTION_CAP = prev;
     }
   });
 
-  it("runSkill скипнул действие — задача НЕ выдаётся за сделанную", async () => {
-    // Потолок в task-worker пройден (used=0), но внутри runSkill свежий счёт Core
-    // уже упёрся в потолок — действие не состоялось. Задачу закрывать нельзя.
-    const prev = process.env.AGENT_DAILY_ACTION_CAP;
-    process.env.AGENT_DAILY_ACTION_CAP = "1";
-    try {
-      let calls = 0;
-      const { client, statuses } = stub({
-        // Первый счёт (в task-worker) — 0, второй (в runSkill) — 1: догнало.
-        countAgentActions: async () => (calls++ === 0 ? 0 : 1),
+  it("input-hash mismatch блокирует attempt без release stale lease", async () => {
+    const { client, statuses, releases, checkpoints } = stub({
+      commitAgentTaskOutcome: async () => ({ status: "blocked" as const, replay: false }),
+    });
+    const res = await runAgentTasks(agent, client, "T0");
+    assert.equal(res[0].outcome, "skipped");
+    assert.match(res[0].note, /задача изменилась/i);
+    assert.equal(checkpoints.length, 1);
+    assert.deepEqual(statuses, []);
+    assert.deepEqual(releases, []);
+  });
+
+  it("LLM budget denial отличается от no_signal и не закрывает поручение", async () => {
+    const original = SKILLS["watch-receivables"];
+    SKILLS["watch-receivables"] = async () => {
+      throw new LlmBudgetDeniedError("pause", "дневной лимит исчерпан", {
+        day: "2026-08-29",
+        globalCapUsd: 5,
+        globalExposureUsd: 5,
+        remainingUsd: 0,
       });
+    };
+    try {
+      const { client, statuses, releases } = stub();
       const res = await runAgentTasks(agent, client, "T0");
       assert.equal(res[0].outcome, "skipped");
-      assert.ok(!statuses.some((s) => s.status === "done"), "скипнутую задачу нельзя закрывать");
+      assert.match(res[0].note, /LLM-бюджет/);
+      assert.ok(!statuses.some((s) => s.status === "done"), "budget denial не равен «повода нет»");
+      assert.equal(releases.length, 1, "budget_denied освобождает claim");
+      assert.equal(releases[0]?.reason, "budget_denied");
     } finally {
-      if (prev === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
-      else process.env.AGENT_DAILY_ACTION_CAP = prev;
+      SKILLS["watch-receivables"] = original;
+    }
+  });
+
+  it("LLM-ledger unavailable освобождает claim и не закрывает задачу", async () => {
+    const original = SKILLS["watch-receivables"];
+    SKILLS["watch-receivables"] = async () => {
+      throw new LlmLedgerUnavailableError("Core ledger unavailable");
+    };
+    try {
+      const { client, statuses, releases } = stub();
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "skipped");
+      assert.match(res[0].note, /LLM-ledger/);
+      assert.deepEqual(statuses, []);
+      assert.equal(releases.length, 1);
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
+  });
+
+  it("закрытый LLM replay блокирует execution attempt до решения владельца", async () => {
+    const original = SKILLS["watch-receivables"];
+    SKILLS["watch-receivables"] = async () => {
+      throw new LlmReplayBlockedError("task:t1:execution:attempt-1");
+    };
+    try {
+      const { client, statuses, releases } = stub();
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "skipped");
+      assert.match(res[0].note, /повтор.*заблокирован/i);
+      assert.deepEqual(statuses, []);
+      assert.equal(releases.length, 1);
+      assert.equal(releases[0]?.reason, "execution_unknown");
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
+  });
+
+  it("проигравший claim не доходит до навыка и LLM", async () => {
+    const original = SKILLS["watch-receivables"];
+    let skillCalls = 0;
+    SKILLS["watch-receivables"] = async () => {
+      skillCalls += 1;
+      return null;
+    };
+    try {
+      const { client, statuses, releases } = stub({ claimAgentTask: async () => null });
+      const res = await runAgentTasks(agent, client, "T0");
+      assert.equal(res[0].outcome, "skipped");
+      assert.match(res[0].note, /другой worker/);
+      assert.equal(skillCalls, 0);
+      assert.deepEqual(statuses, []);
+      assert.deepEqual(releases, []);
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
+  });
+
+  it("stale takeover берёт checkpoint и не вызывает навык/LLM второй раз", async () => {
+    const original = SKILLS["watch-receivables"];
+    const contexts: { requestKey: string; traceKey?: string }[] = [];
+    SKILLS["watch-receivables"] = async (_agent, _core, context) => {
+      assert.ok(context);
+      contexts.push(context);
+      return null;
+    };
+    try {
+      let commitCalls = 0;
+      const { client, checkpoints } = stub({
+        commitAgentTaskOutcome: async () => {
+          commitCalls += 1;
+          if (commitCalls === 1) throw new Error("commit response lost");
+          return { status: "committed" as const, replay: true };
+        },
+      });
+      await assert.rejects(runAgentTasks(agent, client, "T0"), /commit response lost/);
+      const resumed = await runAgentTasks(agent, client, "T0");
+      assert.equal(resumed[0]?.outcome, "done");
+      assert.equal(contexts.length, 1, "resume не вызывает skill implementation");
+      assert.equal(
+        contexts[0].requestKey,
+        "task:t1:execution:99999999-9999-4999-8999-999999999999",
+      );
+      assert.equal(contexts[0].traceKey, "task:t1:receivables:watch-receivables");
+      assert.equal(checkpoints.length, 1, "takeover не перезаписывает checkpoint");
+      assert.equal(commitCalls, 2, "потеря commit response разрешает exact replay commit");
+    } finally {
+      SKILLS["watch-receivables"] = original;
     }
   });
 
@@ -457,10 +953,11 @@ describe("Задачи агента и дневной потолок", () => {
     const prev = process.env.AGENT_DAILY_ACTION_CAP;
     delete process.env.AGENT_DAILY_ACTION_CAP;
     try {
-      const { client, statuses } = stub();
+      const { client, statuses, commits } = stub();
       const res = await runAgentTasks(agent, client, "T0");
       assert.equal(res[0].outcome, "proposed");
-      assert.deepEqual(statuses.map((s) => s.status), ["in_progress", "done"]);
+      assert.deepEqual(statuses, []);
+      assert.equal(commits.length, 1);
     } finally {
       if (prev !== undefined) process.env.AGENT_DAILY_ACTION_CAP = prev;
     }
@@ -480,7 +977,16 @@ describe("Дельта-память: не повторяем то же само�
   const OVERDUE = {
     domain: "globerent",
     totals: [],
-    overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
+    overdue: [
+      {
+        id: "m1",
+        amount: "5000000",
+        currency: "UZS",
+        date: "2026-05-01",
+        direction: "in",
+        status: "plan",
+      },
+    ],
     overdueTotal: 1,
     overdueTruncated: false,
   };
@@ -541,21 +1047,43 @@ describe("Дельта-память: не повторяем то же само�
 
 describe("Break-glass — навык всегда через согласование", () => {
   const base: AgentDefinition = {
-    name: "bg", business: "globerent", status: "active", autonomyDefault: "T4",
-    schedule: [], skills: ["watch-receivables"], breakGlass: ["watch-receivables"], dir: "/tmp",
+    name: "bg",
+    business: "globerent",
+    status: "active",
+    autonomyDefault: "T4",
+    schedule: [],
+    skills: ["watch-receivables"],
+    breakGlass: ["watch-receivables"],
+    dir: "/tmp",
   };
   const OVERDUE = {
-    domain: "globerent", totals: [],
-    overdue: [{ id: "m1", amount: "5000000", currency: "UZS", date: "2026-05-01", direction: "in", status: "plan" }],
-    overdueTotal: 1, overdueTruncated: false,
+    domain: "globerent",
+    totals: [],
+    overdue: [
+      {
+        id: "m1",
+        amount: "5000000",
+        currency: "UZS",
+        date: "2026-05-01",
+        direction: "in",
+        status: "plan",
+      },
+    ],
+    overdueTotal: 1,
+    overdueTruncated: false,
   };
   function core() {
     const calls: string[] = [];
     return {
       calls,
       client: {
-        recordEvent: async () => { calls.push("event"); },
-        requestApproval: async () => { calls.push("approval"); return { id: "a1" }; },
+        recordEvent: async () => {
+          calls.push("event");
+        },
+        requestApproval: async () => {
+          calls.push("approval");
+          return { id: "a1" };
+        },
         obligations: async () => OVERDUE,
         countAgentActions: async () => 0,
         recallMemory: async () => null,

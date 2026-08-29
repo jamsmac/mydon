@@ -20,6 +20,12 @@ export class RequestApprovalDto {
   @IsOptional()
   @IsObject()
   payload?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(256)
+  clientKey?: string;
 }
 
 export class DecideDto {

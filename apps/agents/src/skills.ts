@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Domain } from "@mydon/shared";
 import { runCoachReview } from "./coach-review";
-import type { AgentsCoreClient } from "./core-client";
+import type { AgentTaskCheckpoint, AgentsCoreClient } from "./core-client";
 import { embeddingGatewayFromEnv } from "./embedding";
+import { llmLedgerFromEnv } from "./llm-ledger";
 import type { AgentDefinition } from "./registry";
 import { assessIdeas, buildIdeasProposal, readIdeaChannels, type IdeasMemory } from "./ideas";
 import { modelGatewayFromEnv } from "./model-gateway";
@@ -36,8 +38,52 @@ export interface Proposal {
   next?: string[];
 }
 
+export interface TaskSkillCheckpointDraft {
+  skill: string;
+  kind: "no_signal" | "proposal";
+  action?: string;
+  facts?: Record<string, unknown>;
+  next?: string[];
+}
+
+/** Durable task-only context. Cron invocations intentionally omit it. */
+export interface TaskSkillRunContext {
+  /** Existing Core checkpoint returned by claim after crash/takeover. */
+  checkpoint?: AgentTaskCheckpoint;
+  /** CAS-fenced persistence; must finish before any task side effect. */
+  saveCheckpoint: (checkpoint: TaskSkillCheckpointDraft) => Promise<AgentTaskCheckpoint>;
+}
+
 /** Навык: читает Core и либо предлагает дело, либо честно молчит (null). */
-export type Skill = (agent: AgentDefinition, core: AgentsCoreClient) => Promise<Proposal | null>;
+export interface SkillRunContext {
+  /** Уникальная основа физического прогона навыка. */
+  requestKey: string;
+  /** Стабильная корреляция задачи/крона. */
+  traceKey?: string;
+  /** Fail-closed CAS перед каждым provider dispatch durable task-run. */
+  assertLease?: () => Promise<void>;
+  /** Есть только у порученной Core task; включает checkpoint/resume. */
+  task?: TaskSkillRunContext;
+}
+
+export type Skill = (
+  agent: AgentDefinition,
+  core: AgentsCoreClient,
+  context?: SkillRunContext,
+) => Promise<Proposal | null>;
+
+function runContext(
+  agent: AgentDefinition,
+  skill: string,
+  context: SkillRunContext | undefined,
+): SkillRunContext {
+  return (
+    context ?? {
+      requestKey: `agent:${agent.name}:${skill}:${randomUUID()}`,
+      traceKey: `agent:${agent.name}:${skill}`,
+    }
+  );
+}
 
 function asDomain(business: string): Domain {
   const known = ["globerent", "vendhub", "personal", "mydon"];
@@ -99,7 +145,8 @@ const morningDigest: Skill = async (_agent, core) => {
   if (b.contractsDueSoon > 0) alarms.push(`договоры на исходе: ${b.contractsDueSoon}`);
   if (b.overdueTasks > 0) alarms.push(`просроченные задачи: ${b.overdueTasks}`);
   // Нераспознанные даты — «известная неизвестность»: молчать о них нельзя.
-  if (b.contractsBadDate > 0) alarms.push(`договоров с нераспознанной датой: ${b.contractsBadDate}`);
+  if (b.contractsBadDate > 0)
+    alarms.push(`договоров с нераспознанной датой: ${b.contractsBadDate}`);
 
   if (alarms.length === 0) return null; // тревог нет — не дёргаем владельца
 
@@ -126,7 +173,8 @@ const scanIdeas: Skill = async (agent) => {
 };
 
 // ── knowledge-curator: ОЦЕНКА идей моделью (первый LLM-навык, Stage 0) ────────
-const assessIdeasSkill: Skill = async (agent, core) => {
+const assessIdeasSkill: Skill = async (agent, core, context) => {
+  const call = runContext(agent, "assess-ideas", context);
   const gateway = modelGatewayFromEnv();
   if (gateway === null) return null; // LLM-путь выключен — навык спит
   const channels = agent.ideaChannels ?? [];
@@ -134,11 +182,19 @@ const assessIdeasSkill: Skill = async (agent, core) => {
   const digests = await readIdeaChannels(channels);
   // Есть embed-шлюз → включаем семантический дедуп идей; нет → память спит.
   const embedder = embeddingGatewayFromEnv();
-  const memory: IdeasMemory | undefined = embedder ? { core, embedder, namespace: "ideas" } : undefined;
+  const memory: IdeasMemory | undefined = embedder
+    ? { core, embedder, namespace: "ideas" }
+    : undefined;
+  const needsLedger = gateway.billingMode === "metered" || embedder?.billingMode === "metered";
+  const ledger = needsLedger ? llmLedgerFromEnv() : undefined;
   return assessIdeas(gateway, digests, {
-    ...(agent.budgetPerDayUsd !== undefined ? { perDayUsd: agent.budgetPerDayUsd } : {}),
-    ...(agent.budgetOnExceeded !== undefined ? { strategy: agent.budgetOnExceeded } : {}),
+    agentName: agent.name,
+    requestKey: call.requestKey,
+    ...(call.traceKey ? { traceKey: call.traceKey } : {}),
+    ...(call.assertLease ? { assertLease: call.assertLease } : {}),
+    ...(ledger ? { ledger } : {}),
     ...(memory ? { memory } : {}),
+    ...(call.task ? { deferMemoryWrites: true } : {}),
   });
 };
 
@@ -154,7 +210,8 @@ function readSkillFile(skill: string): { content: string; rel: string } | null {
   }
 }
 
-const coachReview: Skill = async (agent, core) => {
+const coachReview: Skill = async (agent, core, context) => {
+  const call = runContext(agent, "coach-review", context);
   const gateway = modelGatewayFromEnv();
   if (gateway === null) return null; // судья не подключён — навык спит
   return runCoachReview(
@@ -165,8 +222,11 @@ const coachReview: Skill = async (agent, core) => {
       selfSource: `agent:${agent.name}`,
     },
     {
-      ...(agent.budgetPerDayUsd !== undefined ? { perDayUsd: agent.budgetPerDayUsd } : {}),
-      ...(agent.budgetOnExceeded !== undefined ? { strategy: agent.budgetOnExceeded } : {}),
+      agentName: agent.name,
+      requestKey: call.requestKey,
+      ...(call.traceKey ? { traceKey: call.traceKey } : {}),
+      ...(call.assertLease ? { assertLease: call.assertLease } : {}),
+      ...(gateway.billingMode === "metered" ? { ledger: llmLedgerFromEnv() } : {}),
     },
   );
 };

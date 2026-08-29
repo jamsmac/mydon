@@ -24,6 +24,14 @@ services:
       # Mutations are fail-closed without it: /health would look fine while the
       # whole control plane rejects every write with 401. Require it up front.
       SERVICE_TOKEN: ${SERVICE_TOKEN:?SERVICE_TOKEN is required (mutations are fail-closed without it)}
+      # Не пробрасывать workers/CC: только владелец снимает LLM replay block.
+      OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
+      # Та же серверная граница agent actions, что на primary Core.
+      AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
+      # Пусто сохраняет переходный fallback на legacy-лимит в system_config.
+      LLM_GLOBAL_DAILY_BUDGET_USD: ${LLM_GLOBAL_DAILY_BUDGET_USD:-}
+      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-5}
+      AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
       INVITE_PEPPER: ${INVITE_PEPPER:-}
       STAFF_LINK_BY_USERNAME: ${STAFF_LINK_BY_USERNAME:-0}
       HEALTH_STORAGE_PATH: /
@@ -140,20 +148,19 @@ services:
       # каждые три часа с machines_ok=0 (24.08.2026).
       CORE_INGEST_TIMEOUT_MS: ${CORE_INGEST_TIMEOUT_MS:-60000}
       OURVEND_ACCOUNTING_CRON: ${OURVEND_ACCOUNTING_CRON:-5 8 * * *}
-      AGENT_BILLING_MODE: ${AGENT_BILLING_MODE:-subscription}
-      AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
-      AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-5}
       LLM_PROVIDER: ${LLM_PROVIDER:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Не URL/секрет: exact provider из llm_model_price для денежного профиля.
+      LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-}
+      LLM_HTTP_BILLING_MODE: ${LLM_HTTP_BILLING_MODE:-metered}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-}
-      LLM_CLI_CMD: ${LLM_CLI_CMD:-}
-      LLM_CLI_BASE_ARGS: ${LLM_CLI_BASE_ARGS:-}
-      LLM_CLI_PROMPT_VIA: ${LLM_CLI_PROMPT_VIA:-}
-      LLM_CLI_MODEL_FLAG: ${LLM_CLI_MODEL_FLAG:-}
       EMBED_BASE_URL: ${EMBED_BASE_URL:-}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_PRICE_PROVIDER_ID: ${EMBED_PRICE_PROVIDER_ID:-}
+      EMBED_BILLING_MODE: ${EMBED_BILLING_MODE:-metered}
       EMBED_MODEL: ${EMBED_MODEL:-}
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_PARENT_PAGE_ID: ${NOTION_PARENT_PAGE_ID:-}

@@ -367,7 +367,11 @@ export interface CoffeeReconcileRow {
   expectedGrams: number | null;
   costActual: number | null;
   costExpected: number | null;
-  reconcile: { status: "ok" | "anomaly" | "unknown"; deltaGrams: number | null; deltaRatio: number | null };
+  reconcile: {
+    status: "ok" | "anomaly" | "unknown";
+    deltaGrams: number | null;
+    deltaRatio: number | null;
+  };
 }
 
 export interface CoffeeLocationReconcileGroup {
@@ -515,7 +519,14 @@ export interface NormFactPeriodRow {
   чашек: number;
   /** Из `чашек` — сколько не дали вклада в `норма` (ревью 1.1/1.2): товар не опознан, состав не разобран, или единица — не граммы. */
   чашекБезНормы: number;
-  полнота: "полный" | "позиция неоднозначна" | "тара не откалибрована" | "нет тары" | "размещение неполно" | "рецепт неизвестен" | "нормы нет";
+  полнота:
+    | "полный"
+    | "позиция неоднозначна"
+    | "тара не откалибрована"
+    | "нет тары"
+    | "размещение неполно"
+    | "рецепт неизвестен"
+    | "нормы нет";
   разница: number | null;
 }
 
@@ -659,7 +670,13 @@ export interface ActionRow {
 export interface Obligations {
   domain: string;
   /** Свод по обязательствам. Валюта обязательна: без неё суммы складывать нельзя. */
-  totals: { direction: "in" | "out"; status: string; currency: string; count: number; amount: string }[];
+  totals: {
+    direction: "in" | "out";
+    status: string;
+    currency: string;
+    count: number;
+    amount: string;
+  }[];
   overdue: { id: string; amount: string; currency: string; date: string; status: string }[];
   /** Всего просрочек (список может быть усечён — тогда это больше его длины). */
   overdueTotal: number;
@@ -1110,7 +1127,11 @@ export function coreWriteHeaders(hasJsonBody = true): Record<string, string> {
 }
 
 /** Запись в Core. Ошибку отдаём словами: её увидит владелец, а не разработчик. */
-async function send<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
+async function send<T>(
+  path: string,
+  method: "POST" | "PUT" | "PATCH" | "DELETE",
+  body?: unknown,
+): Promise<T> {
   let res: Response;
   const headers = coreWriteHeaders(body !== undefined);
   try {
@@ -1165,6 +1186,9 @@ export interface Task {
   confirmedAt: string | null;
   confirmedBy: string | null;
   assignNotifiedAt: string | null;
+  /** Durable stop: автоматика не создаёт новую LLM-попытку до owner retry. */
+  agentExecutionBlockedAt?: string | null;
+  agentExecutionBlockedReason?: string | null;
   createdAt: string;
 }
 
@@ -2054,7 +2078,9 @@ export interface Attachment {
  * идут через неё же, как и выгрузки. Отдаём тело и тип, а стримингом займётся
  * маршрут.
  */
-export async function coreBytes(path: string): Promise<{ body: ArrayBuffer; contentType: string | null }> {
+export async function coreBytes(
+  path: string,
+): Promise<{ body: ArrayBuffer; contentType: string | null }> {
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, { cache: "no-store", signal: AbortSignal.timeout(15000) });
@@ -2191,7 +2217,8 @@ export const core = {
     const qs = new URLSearchParams(params).toString();
     return get<MaintenanceLogRow[]>(`/maintenance/log${qs ? `?${qs}` : ""}`);
   },
-  machineParts: (machineId: string) => get<MachinePart[]>(`/maintenance/parts?machineId=${machineId}`),
+  machineParts: (machineId: string) =>
+    get<MachinePart[]>(`/maintenance/parts?machineId=${machineId}`),
   /** Узлы вне автоматов: склад, мойка, сушка, ремонт. */
   machinePartsStorage: () => get<MachinePart[]>("/maintenance/parts/storage"),
   /** История экземпляров по серийнику и/или модели — все периоды в обе стороны. */
@@ -2216,7 +2243,9 @@ export const core = {
   createPerson: (input: Record<string, unknown>) => send<Person>("/people", "POST", input),
   /** Выпустить приглашение. Код возвращается ОДИН раз — в БД только хеш. */
   invitePerson: (id: string, roles: string[]) =>
-    send<{ code: string; expiresAt: string; name: string }>(`/people/${id}/invite`, "POST", { roles }),
+    send<{ code: string; expiresAt: string; name: string }>(`/people/${id}/invite`, "POST", {
+      roles,
+    }),
   /** Отозвать доступ: снять привязку и роли, погасить живые приглашения. */
   revokePerson: (id: string) => send<Person>(`/people/${id}/revoke`, "POST", {}),
   setPersonRoles: (id: string, roles: string[]) =>
@@ -2257,7 +2286,8 @@ export const core = {
   // ── Вендинг: автоматы и дефицит ──
   vendingMachines: () => get<VendingMachine[]>("/vending/machines"),
   vendingDeficit: () => get<VendingNeed[]>("/vending/deficit"),
-  vendingForecast: () => get<{ all: VendingRunout[]; critical: VendingRunout[] }>("/vending/forecast"),
+  vendingForecast: () =>
+    get<{ all: VendingRunout[]; critical: VendingRunout[] }>("/vending/forecast"),
   vendingPurchase: () => get<VendingPurchase>("/vending/purchase"),
   /** План закупа «что купить»: закуп + раздача по маршруту и слотам (П5a). */
   vendingPlan: () => get<VendingPlan>("/vending/plan"),
@@ -2271,7 +2301,8 @@ export const core = {
    * цены 1..180) — панель зовёт их значениями своих переключателей.
    */
   vendingMargin: (days = 30) => get<MarginReport & WithWarnings>(`/vending/margin?days=${days}`),
-  vendingDeadStock: (days = 21) => get<DeadStockReport & WithWarnings>(`/vending/dead-stock?days=${days}`),
+  vendingDeadStock: (days = 21) =>
+    get<DeadStockReport & WithWarnings>(`/vending/dead-stock?days=${days}`),
   /** История пересчётов склада (П8a). Окно зажимает ядро: 1..730, дефолт 90. */
   vendingStockCounts: (days = 90, product?: string) =>
     get<StockCountsReport>(
@@ -2279,9 +2310,12 @@ export const core = {
     ),
   /** `monthly` — донорская динамика по месяцам, её просит только панель (R-P5b-5). */
   vendingPriceChanges: (days = 30) =>
-    get<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings>(`/vending/price-changes?days=${days}`),
+    get<PriceChangesReport & { monthly: MonthlyPrice[] } & WithWarnings>(
+      `/vending/price-changes?days=${days}`,
+    ),
   /** Факт витрины против эталона владельца. Окно — своё, короткое (R-P5b-6). */
-  vendingPriceGap: (days = 14) => get<PriceGapReport & WithWarnings>(`/vending/price-gap?days=${days}`),
+  vendingPriceGap: (days = 14) =>
+    get<PriceGapReport & WithWarnings>(`/vending/price-gap?days=${days}`),
   /** Здоровье сбора OurVend: прогоны, серия отказов, лаги снимков, паритет (R-P5b-8). */
   ourvendHealth: (runs = 20) => get<OurvendHealth>(`/ourvend/health?runs=${runs}`),
   /**
@@ -2301,9 +2335,9 @@ export const core = {
    * «лист без предупреждения», а 500 вместо листа.
    */
   vendingRefillEvents: async (days = 14): Promise<VendingRefillEvents> => {
-    const ответ = await get<VendingRefillEvent[] | { rows?: VendingRefillEvent[]; capped?: boolean }>(
-      `/vending/refill-events?days=${days}`,
-    );
+    const ответ = await get<
+      VendingRefillEvent[] | { rows?: VendingRefillEvent[]; capped?: boolean }
+    >(`/vending/refill-events?days=${days}`);
     if (Array.isArray(ответ)) return { rows: ответ, capped: false };
     return { rows: ответ.rows ?? [], capped: ответ.capped === true };
   },
@@ -2359,41 +2393,62 @@ export const core = {
     enteredDate: string;
     createdBy?: string;
   }) => send<{ id: string }>("/coffee/refill", "POST", input),
-  recentCoffeeRefills: (limit = 20) => get<CoffeeRefillRow[]>(`/coffee/refill/recent?limit=${limit}`),
+  recentCoffeeRefills: (limit = 20) =>
+    get<CoffeeRefillRow[]>(`/coffee/refill/recent?limit=${limit}`),
   coffeeLocationSummary: () => get<CoffeeLocationSummaryRow[]>("/coffee/summary"),
-  recordCoffeeConsumable: (input: { locationId: string; loggedDate: string; water?: number; cups?: number; lids?: number }) =>
-    send<{ ok: true }>("/coffee/consumables", "POST", input),
+  recordCoffeeConsumable: (input: {
+    locationId: string;
+    loggedDate: string;
+    water?: number;
+    cups?: number;
+    lids?: number;
+  }) => send<{ ok: true }>("/coffee/consumables", "POST", input),
   coffeeConsumablesSummary: () => get<CoffeeConsumableRow[]>("/coffee/consumables"),
   coffeeContainerReturns: (limit = 200) =>
     get<CoffeeContainerReturnRow[]>(`/coffee/container-return?limit=${limit}`),
   coffeePlacements: (locationId?: string) =>
-    get<CoffeePlacementRow[]>(
-      `/coffee/placements${locationId ? `?locationId=${locationId}` : ""}`,
-    ),
+    get<CoffeePlacementRow[]>(`/coffee/placements${locationId ? `?locationId=${locationId}` : ""}`),
   coffeeContainerConsumption: (from: string, to: string) =>
     get<CoffeeContainerConsumptionReport>(`/coffee/container-consumption?from=${from}&to=${to}`),
   coffeeNormFact: (from: string, to: string) =>
     get<NormFactReport>(`/coffee/norm-fact?from=${from}&to=${to}`),
-  recordCoffeeWash: (input: { locationId: string; position?: number; note?: string; performedBy?: string }) =>
-    send<{ id: string }>("/coffee/wash", "POST", input),
+  recordCoffeeWash: (input: {
+    locationId: string;
+    position?: number;
+    note?: string;
+    performedBy?: string;
+  }) => send<{ id: string }>("/coffee/wash", "POST", input),
   coffeeWashHistory: (locationId?: string, limit = 50) =>
-    get<CoffeeWashRow[]>(`/coffee/wash?limit=${limit}${locationId ? `&locationId=${locationId}` : ""}`),
+    get<CoffeeWashRow[]>(
+      `/coffee/wash?limit=${limit}${locationId ? `&locationId=${locationId}` : ""}`,
+    ),
   coffeeStockLevels: () => get<CoffeeStockLevelRow[]>("/coffee/stock"),
-  ingestCoffeeStock: (input: { countedAt?: string; items: { ingredientId: string; quantity: number }[] }) =>
-    send<{ items: number; adjustments: unknown[] }>("/coffee/stock", "POST", input),
+  ingestCoffeeStock: (input: {
+    countedAt?: string;
+    items: { ingredientId: string; quantity: number }[];
+  }) => send<{ items: number; adjustments: unknown[] }>("/coffee/stock", "POST", input),
   coffeeMachineCandidates: () => get<CoffeeMachineCandidate[]>("/coffee/machines"),
   /** Снять аппарат с места. Адресуется аппаратом: мест с двумя аппаратами хватает. */
   unlinkCoffeeMachine: (entityId: string) =>
     send<{ ok: true }>(`/coffee/machine-link/${entityId}`, "DELETE"),
-  createCoffeeLocation: (name: string) => send<{ id: string }>("/coffee/locations", "POST", { name }),
+  createCoffeeLocation: (name: string) =>
+    send<{ id: string }>("/coffee/locations", "POST", { name }),
   updateCoffeeLocation: (id: string, patch: { name?: string; isActive?: boolean }) =>
     send<{ ok: true }>(`/coffee/locations/${id}`, "PUT", patch),
   deleteCoffeeRefill: (id: string) => send<{ ok: true }>(`/coffee/refill/${id}`, "DELETE"),
-  deleteCoffeeContainerReturn: (id: string) => send<{ ok: true }>(`/coffee/container-return/${id}`, "DELETE"),
+  deleteCoffeeContainerReturn: (id: string) =>
+    send<{ ok: true }>(`/coffee/container-return/${id}`, "DELETE"),
   linkCoffeeLocation: (locationId: string, entityId: string | null) =>
-    send<{ ok: true }>("/coffee/location-link", "PUT", { locationId, ...(entityId !== null ? { entityId } : {}) }),
+    send<{ ok: true }>("/coffee/location-link", "PUT", {
+      locationId,
+      ...(entityId !== null ? { entityId } : {}),
+    }),
   autoLinkCoffeeLocations: () =>
-    send<{ linked: number; ambiguous: string[]; unmatched: string[] }>("/coffee/location-link/auto", "POST", {}),
+    send<{ linked: number; ambiguous: string[]; unmatched: string[] }>(
+      "/coffee/location-link/auto",
+      "POST",
+      {},
+    ),
   coffeeWashScheduleStatus: () => get<CoffeeWashScheduleStatusRow[]>("/coffee/wash-schedule"),
   coffeeWashSchedules: () => get<CoffeeWashScheduleRow[]>("/coffee/wash-schedule/all"),
   setCoffeeWashSchedule: (input: {
@@ -2404,7 +2459,8 @@ export const core = {
     isActive?: boolean;
     notes?: string;
   }) => send<CoffeeWashScheduleRow>("/coffee/wash-schedule", "POST", input),
-  removeCoffeeWashSchedule: (id: string) => send<{ ok: true }>(`/coffee/wash-schedule/${id}`, "DELETE"),
+  removeCoffeeWashSchedule: (id: string) =>
+    send<{ ok: true }>(`/coffee/wash-schedule/${id}`, "DELETE"),
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),
@@ -2415,7 +2471,9 @@ export const core = {
   audit: (limit = 40) => get<AuditEntry[]>(`/audit?limit=${limit}`),
   /** Лента действий сотрудников: «кто что сделал» за период (даты по Ташкенту). */
   actions: (from: string, to: string, personId?: string) =>
-    get<ActionRow[]>(`/registry/actions?from=${from}&to=${to}${personId ? `&person=${personId}` : ""}`),
+    get<ActionRow[]>(
+      `/registry/actions?from=${from}&to=${to}${personId ? `&person=${personId}` : ""}`,
+    ),
   obligations: (domain: string) => get<Obligations>(`/registry/obligations/${domain}`),
   byType: (domain: string, type: string) => get<Entity[]>(`/registry/${domain}/${type}`),
   search: (q: string, domain?: string) => {
@@ -2497,14 +2555,14 @@ export const core = {
       noWarehouse: "нет" | "неоднозначно" | null;
     }>("/stock/sync-intake", "POST", {}),
   /** Завести партию прихода (§4.3 + документ Р3/Р4) и связанное приходное движение. */
-  createBatch: (input: Record<string, unknown>) => send<StockBatchRow>("/stock/batch", "POST", input),
+  createBatch: (input: Record<string, unknown>) =>
+    send<StockBatchRow>("/stock/batch", "POST", input),
   /** Список партий с остатком (леджер) и флагом срока; фильтры необязательны. */
   stockBatches: (params: { ingredientId?: string; warehouseId?: string; flag?: string } = {}) => {
     const qs = new URLSearchParams(
-      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== "")) as Record<
-        string,
-        string
-      >,
+      Object.fromEntries(
+        Object.entries(params).filter(([, v]) => v !== undefined && v !== ""),
+      ) as Record<string, string>,
     ).toString();
     return get<{ rows: StockBatchRow[] }>(`/stock/batches${qs ? `?${qs}` : ""}`);
   },
@@ -2519,8 +2577,12 @@ export const core = {
    * прогон (R-D7). `closeOn` — дата инвентаризации: партии закрываются
    * расходом того же объёма, остаток ингредиента не задваивается (R-D1).
    */
-  importBatches: (input: { source: string; dryRun?: boolean; closeOn?: string | null; items: ImportBatchItem[] }) =>
-    send<ImportBatchesReport>("/stock/batches/import", "POST", input),
+  importBatches: (input: {
+    source: string;
+    dryRun?: boolean;
+    closeOn?: string | null;
+    items: ImportBatchItem[];
+  }) => send<ImportBatchesReport>("/stock/batches/import", "POST", input),
   pendingEntities: () =>
     get<{ cards: Entity[]; fields: (EntityDraft & { entityName: string; entityType: string })[] }>(
       "/entities/pending",
@@ -2563,7 +2625,9 @@ export const core = {
     send<CollectionRow>(`/collections/${id}/cancel`, "POST", { manager: "owner" }),
   /** Сверка по автоматам за период: наличная выручка против изъятого (R-K11). */
   reconcileCollections: (from: string, to: string) =>
-    get<ReconcileResult>(`/collections/reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+    get<ReconcileResult>(
+      `/collections/reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    ),
   /**
    * Проданные чашки кофе — факт из панели производителя.
    *
@@ -2614,7 +2678,8 @@ export const core = {
   removeSaleAlias: (id: string) => send<{ ok: boolean }>(`/sales/alias/${id}`, "DELETE"),
   /** Весь словарь алиасов — для резолвинга имён в лентах прихода/остатков. */
   salesAliases: () => get<{ id: string; name: string; entityId: string }[]>("/sales/aliases"),
-  salesDaily: (days = 30) => get<{ dt: string; qty: number; amount: number }[]>(`/sales/daily?days=${days}`),
+  salesDaily: (days = 30) =>
+    get<{ dt: string; qty: number; amount: number }[]>(`/sales/daily?days=${days}`),
   salesSilent: (days = 2) =>
     get<{ machineId: string | null; serial: string; name: string | null; lastDt: string }[]>(
       `/sales/silent?days=${days}`,
@@ -2637,9 +2702,16 @@ export const core = {
   purchases: (days = 30, limit = 300) =>
     get<PurchaseRow[]>(`/supply/purchases?days=${days}&limit=${limit}`),
   machineStockLevels: () =>
-    get<{ machineSerial: string; machineId: string | null; machineName: string | null; dt: string; product: string; qty: number }[]>(
-      "/supply/machine-stock",
-    ),
+    get<
+      {
+        machineSerial: string;
+        machineId: string | null;
+        machineName: string | null;
+        dt: string;
+        product: string;
+        qty: number;
+      }[]
+    >("/supply/machine-stock"),
   /** Сводка реестра: сколько каких записей в каждом направлении. */
   registryOverview: () => get<{ domain: string; type: string; n: number }[]>("/registry/overview"),
 
@@ -2729,7 +2801,9 @@ export const core = {
     send<ImportBankStatementReport>("/finance/bank-statement", "POST", input),
   /** Сверка кассы за период (R-K6): изъято по системе против сдано в банк (символ 0200), помесячно + разрывы. */
   cashReconcile: (from: string, to: string) =>
-    get<CashReconcileReport>(`/finance/cash-reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+    get<CashReconcileReport>(
+      `/finance/cash-reconcile?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    ),
   /**
    * Реестр пробелов (срез К, задача 5): что нельзя посчитать прямо сейчас,
    * вычисляется на каждом чтении (R-K4) — пустой массив здесь означает, что
@@ -2749,7 +2823,9 @@ export const core = {
       size?: number;
       decoders: RawDecoder[];
       drift?: RawDrift | null;
-    }>(`/raw/report/${encodeURIComponent(source)}/${encodeURIComponent(report)}/rows${qs ? `?${qs}` : ""}`);
+    }>(
+      `/raw/report/${encodeURIComponent(source)}/${encodeURIComponent(report)}/rows${qs ? `?${qs}` : ""}`,
+    );
   },
   rawStays: (source: string, report: string) =>
     get<{ machines: MachineStays[] }>(

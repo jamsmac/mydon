@@ -1,5 +1,6 @@
 import type { EnsureTaskInput, MaintenanceDueRow } from "./maintenance-monitor";
 import type { AutonomyTier, Domain } from "@mydon/shared";
+import type { ClaimedOutboxDelivery } from "./outbox-dispatcher";
 
 /** Сводка Core — на её основе навыки решают, есть ли повод что-то предлагать. */
 export interface AgentsBriefing {
@@ -28,6 +29,63 @@ export interface AgentsObligations {
   overdue: OverdueRow[];
   overdueTotal: number;
   overdueTruncated: boolean;
+}
+
+export type AgentTaskCheckpointKind = "no_signal" | "proposal";
+
+/** Durable результат чистой фазы навыка, сохранённый до любых effects. */
+export interface AgentTaskCheckpoint {
+  id: string;
+  skill: string;
+  kind: AgentTaskCheckpointKind;
+  action?: string;
+  facts?: Record<string, unknown>;
+  next?: string[];
+}
+
+export interface CheckpointAgentTaskInput {
+  agentName: string;
+  runId: string;
+  executionAttemptId: string;
+  skill: string;
+  kind: AgentTaskCheckpointKind;
+  action?: string;
+  facts?: Record<string, unknown>;
+  next?: string[];
+}
+
+export type AgentTaskCommittedOutcome =
+  "no_signal" | "no_change" | "approval_requested" | "executed";
+
+export interface CommitAgentTaskOutcomeInput {
+  agentName: string;
+  runId: string;
+  executionAttemptId: string;
+  outcome: AgentTaskCommittedOutcome;
+  note: string;
+  action?: string;
+  facts?: Record<string, unknown>;
+  next?: string[];
+  tier?: AutonomyTier;
+  memorySignature?: string;
+  executionDetail?: string;
+}
+
+export interface CommitAgentTaskOutcomeResult {
+  status: "committed" | "capped" | "blocked";
+  approvalId?: string;
+  replay?: boolean;
+}
+
+/** Durable lease, которым Core отдал agent-task одному worker. */
+export interface AgentTaskClaim {
+  runId: string;
+  /** Не меняется при stale takeover: база idempotency key платных вызовов. */
+  executionAttemptId: string;
+  generation: number;
+  claimedAt: string;
+  /** Есть после crash/takeover: навык нельзя вызывать повторно. */
+  checkpoint?: AgentTaskCheckpoint;
 }
 
 /**
@@ -60,7 +118,11 @@ export class AgentsCoreClient {
     private readonly ingestTimeoutMs = 60_000,
   ) {}
 
-  private async request<T>(path: string, init?: RequestInit, timeoutMs = this.timeoutMs): Promise<T> {
+  private async request<T>(
+    path: string,
+    init?: RequestInit,
+    timeoutMs = this.timeoutMs,
+  ): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -86,6 +148,8 @@ export class AgentsCoreClient {
     action: string;
     tier: AutonomyTier;
     payload?: Record<string, unknown>;
+    /** Stable logical effect key; Core deduplicates concurrent cron replicas by it. */
+    clientKey?: string;
   }): Promise<{ id: string }> {
     return this.request<{ id: string }>("/approvals", {
       method: "POST",
@@ -98,6 +162,8 @@ export class AgentsCoreClient {
     source: string;
     type: string;
     payload?: Record<string, unknown>;
+    /** Stable logical effect key; Core deduplicates retries by it. */
+    clientKey?: string;
   }): Promise<unknown> {
     return this.request("/events", { method: "POST", body: JSON.stringify(input) });
   }
@@ -207,15 +273,157 @@ export class AgentsCoreClient {
     return this.request(`/tasks?${qs.toString()}`);
   }
 
+  /**
+   * Атомарно забрать задачу. null означает, что другой worker уже
+   * владеет ею; в этом случае до LLM доходить нельзя.
+   */
+  async claimAgentTask(id: string, agentName: string): Promise<AgentTaskClaim | null> {
+    const response = await this.request<
+      | { claimed: false }
+      | {
+          claimed: true;
+          runId: string;
+          executionAttemptId: string;
+          generation: number;
+          claimedAt: string;
+          checkpoint?: AgentTaskCheckpoint | null;
+        }
+    >(`/tasks/${id}/agent-run/claim`, {
+      method: "POST",
+      body: JSON.stringify({ agentName }),
+    });
+    return response.claimed
+      ? {
+          runId: response.runId,
+          executionAttemptId: response.executionAttemptId,
+          generation: response.generation,
+          claimedAt: response.claimedAt,
+          ...(response.checkpoint ? { checkpoint: response.checkpoint } : {}),
+        }
+      : null;
+  }
+
+  /**
+   * Зафиксировать proposal/no-signal под CAS-fence до approval,
+   * memory, executor и любого внешнего effect.
+   */
+  async checkpointAgentTask(
+    id: string,
+    input: CheckpointAgentTaskInput,
+  ): Promise<AgentTaskCheckpoint> {
+    const response = await this.request<{
+      checkpointed: true;
+      replay: boolean;
+      checkpoint: AgentTaskCheckpoint;
+    }>(`/tasks/${id}/agent-run/checkpoint`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return response.checkpoint;
+  }
+
+  /**
+   * Атомарный Core commit: fence + action cap + internal effects +
+   * task result + external outbox. Повтор возвращает тот же итог.
+   */
+  async commitAgentTaskOutcome(
+    id: string,
+    input: CommitAgentTaskOutcomeInput,
+  ): Promise<CommitAgentTaskOutcomeResult> {
+    const { outcome, ...fenceAndPayload } = input;
+    const response = await this.request<{
+      committed: boolean;
+      capped: boolean;
+      replay: boolean;
+      status: "done" | "todo" | "blocked";
+      approvalId?: string;
+    }>(`/tasks/${id}/agent-run/commit`, {
+      method: "POST",
+      // Core names the wire field `kind`; `outcome` is the Agents-facing API.
+      body: JSON.stringify({ ...fenceAndPayload, kind: outcome }),
+    });
+    if (response.status === "blocked") {
+      return { status: "blocked", replay: response.replay };
+    }
+    if (response.capped) return { status: "capped", replay: response.replay };
+    if (!response.committed) {
+      throw new Error(`Core не зафиксировал outcome задачи ${id}`);
+    }
+    return {
+      status: "committed",
+      replay: response.replay,
+      ...(response.approvalId ? { approvalId: response.approvalId } : {}),
+    };
+  }
+
+  /** Забрать один durable external-effect intent для отдельного dispatcher. */
+  async claimOutbox(destination: string, workerRef: string): Promise<ClaimedOutboxDelivery | null> {
+    const response = await this.request<{ delivery: ClaimedOutboxDelivery | null }>(
+      "/outbox/claim",
+      { method: "POST", body: JSON.stringify({ destination, workerRef }) },
+    );
+    return response.delivery;
+  }
+
+  /** CAS-завершение outbox delivery по lease token; exact retry безопасен. */
+  completeOutbox(
+    id: string,
+    leaseToken: string,
+    status: "sent" | "skipped" | "unknown" | "dead",
+    options: { providerRef?: string; error?: string } = {},
+  ): Promise<unknown> {
+    return this.request(`/outbox/${id}/complete`, {
+      method: "POST",
+      body: JSON.stringify({ leaseToken, status, ...options }),
+    });
+  }
+
+  /** Вернуть задачу в очередь; false — lease уже перешёл новой generation. */
+  async releaseAgentTask(
+    id: string,
+    agentName: string,
+    runId: string,
+    executionAttemptId: string,
+    reason?: "budget_denied" | "execution_unknown" | "unsupported",
+    detail?: string,
+  ): Promise<boolean> {
+    const response = await this.request<{ released: boolean }>(`/tasks/${id}/agent-run/release`, {
+      method: "POST",
+      body: JSON.stringify({
+        agentName,
+        runId,
+        executionAttemptId,
+        ...(reason ? { reason } : {}),
+        ...(detail ? { detail } : {}),
+      }),
+    });
+    return response.released;
+  }
+
+  /** CAS-heartbeat: false означает, что generation уже перехватил другой worker. */
+  async heartbeatAgentTask(id: string, agentName: string, runId: string): Promise<boolean> {
+    const response = await this.request<{ renewed: boolean }>(`/tasks/${id}/agent-run/heartbeat`, {
+      method: "POST",
+      body: JSON.stringify({ agentName, runId }),
+    });
+    return response.renewed;
+  }
+
   setTaskStatus(
     id: string,
     status: "in_progress" | "done" | "cancelled",
     actor: string,
     resultNote?: string,
+    agentRunId?: string,
   ): Promise<unknown> {
     return this.request(`/tasks/${id}`, {
       method: "PATCH",
-      body: JSON.stringify({ status, actor, ...(resultNote ? { resultNote } : {}) }),
+      body: JSON.stringify({
+        status,
+        actor,
+        ...(resultNote ? { resultNote } : {}),
+        ...(agentRunId ? { agentRunId } : {}),
+      }),
     });
   }
 
@@ -280,8 +488,18 @@ export class AgentsCoreClient {
   }
 
   /** Запомнить сигнатуру текущего результата навыка (после успешной подачи). */
-  rememberMemory(source: string, skill: string, signature: string): Promise<unknown> {
-    return this.recordEvent({ source, type: `agent.memory:${skill}`, payload: { signature } });
+  rememberMemory(
+    source: string,
+    skill: string,
+    signature: string,
+    clientKey?: string,
+  ): Promise<unknown> {
+    return this.recordEvent({
+      source,
+      type: `agent.memory:${skill}`,
+      payload: { signature },
+      ...(clientKey ? { clientKey } : {}),
+    });
   }
 
   /**
@@ -408,10 +626,26 @@ export class AgentsCoreClient {
 
   /** Отдать пачку дней продаж и/или снимков остатков (перезапись днями). */
   pushOurvendSnapshot(payload: {
-    sales?: { dt: string; machineSerial: string; rows: { product: string; qty: number; amount: number }[] }[];
+    sales?: {
+      dt: string;
+      machineSerial: string;
+      rows: { product: string; qty: number; amount: number }[];
+    }[];
     stock?: { dt: string; machineSerial: string; rows: { product: string; qty: number }[] }[];
-  }): Promise<{ saleDays: number; saleRows: number; stockDays: number; stockRows: number; quarantined: number }> {
-    return this.request<{ saleDays: number; saleRows: number; stockDays: number; stockRows: number; quarantined: number }>(
+  }): Promise<{
+    saleDays: number;
+    saleRows: number;
+    stockDays: number;
+    stockRows: number;
+    quarantined: number;
+  }> {
+    return this.request<{
+      saleDays: number;
+      saleRows: number;
+      stockDays: number;
+      stockRows: number;
+      quarantined: number;
+    }>(
       "/ourvend/snapshot",
       { method: "POST", body: JSON.stringify(payload) },
       // Та же работа и та же база: пачка суток, каждые — с удалением прежних

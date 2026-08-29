@@ -1,4 +1,10 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import {
   approval,
   auditLog,
@@ -16,6 +22,7 @@ import { DOMAINS, type Domain } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
 import { AuditService } from "../audit/audit.service";
 import { EventsService } from "../events/events.service";
+import { hashLedgerPayload } from "../llm-ledger/llm-ledger.money";
 
 type ApprovalRow = typeof approval.$inferSelect;
 /** Тип транзакции drizzle: выводится из сигнатуры db.transaction. */
@@ -28,6 +35,8 @@ export interface RequestApprovalInput {
   action: string;
   tier: Tier;
   payload?: Record<string, unknown>;
+  /** Stable key for one logical agent request. */
+  clientKey?: string;
 }
 
 /**
@@ -53,13 +62,43 @@ export class ApprovalsService {
           action: input.action,
           tier: input.tier,
           payload: input.payload ?? {},
+          clientKey: input.clientKey ?? null,
         })
+        .onConflictDoNothing({ target: approval.clientKey })
         .returning();
+
+      if (!created) {
+        const [existing] = await tx
+          .select()
+          .from(approval)
+          .where(eq(approval.clientKey, input.clientKey!))
+          .limit(1);
+        if (!existing) {
+          throw new Error("Идемпотентное согласование ещё сохраняется — повтори запрос");
+        }
+        const expected = hashLedgerPayload({
+          agent: input.agent,
+          action: input.action,
+          tier: input.tier,
+          payload: input.payload ?? {},
+        });
+        const actual = hashLedgerPayload({
+          agent: existing.agent,
+          action: existing.action,
+          tier: existing.tier,
+          payload: existing.payload,
+        });
+        if (expected !== actual) {
+          throw new ConflictException("clientKey согласования уже использован другим payload");
+        }
+        return existing;
+      }
 
       await tx.insert(event).values({
         source: `agent:${input.agent}`,
         type: "approval.requested",
         payload: { approvalId: created.id, action: input.action, tier: input.tier },
+        clientKey: input.clientKey ? `${input.clientKey}:requested` : null,
       });
       await tx.insert(auditLog).values({
         actorKind: "agent",

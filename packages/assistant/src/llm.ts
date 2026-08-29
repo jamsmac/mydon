@@ -18,12 +18,30 @@
 
 // import type — стирается на сборке: типы есть, рантайм-импорта нет (SDK ленив).
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Tool, ToolUseBlock } from "@anthropic-ai/sdk/resources/messages";
-import { DOMAINS, type Domain } from "@mydon/shared";
+import type { Message, Tool, ToolUseBlock } from "@anthropic-ai/sdk/resources/messages";
+import {
+  DOMAINS,
+  inputTokenCeiling,
+  LlmLedgerUnavailableError,
+  LlmReplayBlockedError,
+  type Domain,
+  type LlmCallContext,
+  type LlmLedger,
+  type LlmLedgerConsumer,
+  type LlmTokenUsage,
+} from "@mydon/shared";
 import type { LlmResolution, LlmResolver, LlmSnapshot } from "./index";
+
+type LlmAnthropicClient = Pick<Anthropic, "messages">;
 
 export interface LlmConfig {
   apiKey: string;
+  /** Единый денежный ledger. Платный API без него не вызывается. */
+  ledger: LlmLedger;
+  /** Кто создаёт трату: bot, cc и т. д. */
+  consumer: LlmLedgerConsumer;
+  /** Стабильное имя сценария в ledger. */
+  feature: string;
   /** По умолчанию claude-opus-5. */
   model?: string;
   /** Потолок токенов на ответ (не расход — только ограничение). */
@@ -31,6 +49,8 @@ export interface LlmConfig {
   /** Таймаут запроса, мс. По умолчанию 20с — чтобы сетевой сбой не подвешивал
    *  панель/бота (у SDK по умолчанию ~10 минут). */
   timeoutMs?: number;
+  /** Тестовый seam: production всегда использует ленивый SDK-клиент. */
+  clientFactory?: () => Promise<LlmAnthropicClient>;
 }
 
 /** Действия, которые может выбрать модель: 7 намерений + «ответить»/«не понял». */
@@ -125,7 +145,9 @@ export function buildUserContent(question: string, s: LlmSnapshot): string {
     ...(s.coffee
       ? [
           `- расход кофе-ингредиентов за 30 дней (по возвратам наборов): ${s.coffee.totalGrams} г` +
-            (s.coffee.totalCost !== null ? `, себестоимость ${Math.round(s.coffee.totalCost)} сум` : ", цены не заведены") +
+            (s.coffee.totalCost !== null
+              ? `, себестоимость ${Math.round(s.coffee.totalCost)} сум`
+              : ", цены не заведены") +
             (s.coffee.topLocation !== null ? `, больше всего — ${s.coffee.topLocation}` : ""),
         ]
       : []),
@@ -183,7 +205,9 @@ export function mapToResolution(input: unknown): LlmResolution {
     case "obligations":
       // Без домена нельзя честно ответить: ремап на «просрочки» отвечал бы на
       // ДРУГОЙ вопрос (общий долг вместо обязательств направления). Лучше подсказка.
-      return domain ? { kind: "intent", intent: { kind: "obligations", domain } } : { kind: "none" };
+      return domain
+        ? { kind: "intent", intent: { kind: "obligations", domain } }
+        : { kind: "none" };
     case "search":
       return query.length >= 2
         ? { kind: "intent", intent: { kind: "search", query, ...(domain ? { domain } : {}) } }
@@ -206,39 +230,158 @@ export function createLlmResolver(config: LlmConfig): LlmResolver {
   const timeout = config.timeoutMs ?? 20_000;
 
   // Клиент и SDK создаются один раз, лениво — при первом вопросе.
-  // timeout+maxRetries: сетевой сбой даёт быстрый отказ (answer() → подсказка),
-  // а не зависание на дефолтных ~10 минутах SDK. Худший случай ~40с.
-  let clientPromise: Promise<Anthropic> | null = null;
-  function client(): Promise<Anthropic> {
+  // timeout даёт быстрый отказ; SDK-retry выключен, чтобы один
+  // reservation соответствовал ровно одной физической попытке провайдера.
+  let clientPromise: Promise<LlmAnthropicClient> | null = null;
+  function client(): Promise<LlmAnthropicClient> {
     if (clientPromise === null) {
-      clientPromise = import("@anthropic-ai/sdk").then(
-        (m) => new m.default({ apiKey: config.apiKey, timeout, maxRetries: 1 }),
-      );
+      const pending = config.clientFactory
+        ? config.clientFactory()
+        : import("@anthropic-ai/sdk").then(
+            // Скрытый retry нельзя отдельно зарезервировать и учесть.
+            (m) => new m.default({ apiKey: config.apiKey, timeout, maxRetries: 0 }),
+          );
+      clientPromise = pending.catch((error) => {
+        // Не кэшируем rejected Promise навсегда: импорт/инициализация
+        // могут восстановиться к следующей независимой попытке.
+        clientPromise = null;
+        throw error;
+      });
     }
     return clientPromise;
   }
 
-  return async (question, snapshot) => {
-    const c = await client();
-    const resp = await c.messages.create({
+  return async (question, snapshot, context) => {
+    const attempt = paidAttempt(context, "anthropic-api");
+    const userContent = buildUserContent(question, snapshot);
+    const reservation = await config.ledger.reserve({
+      ...attempt,
+      consumer: config.consumer,
+      feature: config.feature,
+      provider: "anthropic",
       model,
-      max_tokens: maxTokens,
-      // Маршрутизации размышление не нужно, а форс tool_choice ГАРАНТИРУЕТ вызов
-      // инструмента: модель не уйдёт в прозу (иначе понятный вопрос терялся бы в
-      // none→подсказку). На Opus 5 форс совместим только с выключенным thinking —
-      // это же снимает риск, что adaptive-размышление съест бюджет max_tokens.
-      thinking: { type: "disabled" },
-      tool_choice: { type: "tool", name: "classify_question" },
-      system: SYSTEM,
-      messages: [{ role: "user", content: buildUserContent(question, snapshot) }],
-      tools: [CLASSIFY_TOOL as Tool],
+      inputTokenCeiling: inputTokenCeiling(
+        [SYSTEM, userContent, JSON.stringify(CLASSIFY_SCHEMA)].join("\n"),
+      ),
+      outputTokenCeiling: maxTokens,
     });
 
+    // Core возвращает replay для уже существующего requestKey. Результат
+    // провайдера ledger не хранит, поэтому повторный Anthropic-вызов
+    // списал бы деньги второй раз под одной резервацией.
+    if (reservation.replay) {
+      throw new LlmReplayBlockedError(
+        reservation.requestKey,
+        "Этот платный LLM-запрос уже был принят; повторный вызов заблокирован",
+      );
+    }
+
+    let c: LlmAnthropicClient;
+    try {
+      c = await client();
+    } catch (error) {
+      // SDK ещё не получил запрос: это единственная ветка, где reservation
+      // можно честно освободить. Сбой release не маскирует исходную ошибку —
+      // незакрытая строка всё равно останется консервативным exposure.
+      await config.ledger
+        .release(reservation.id, "anthropic_client_init_failed_before_send")
+        .catch(() => undefined);
+      throw error;
+    }
+
+    let resp: Message;
+    try {
+      resp = await c.messages.create({
+        model,
+        max_tokens: maxTokens,
+        // Маршрутизации размышление не нужно, а форс tool_choice ГАРАНТИРУЕТ вызов
+        // инструмента: модель не уйдёт в прозу (иначе понятный вопрос терялся бы в
+        // none→подсказку). На Opus 5 форс совместим только с выключенным thinking —
+        // это же снимает риск, что adaptive-размышление съест бюджет max_tokens.
+        thinking: { type: "disabled" },
+        tool_choice: { type: "tool", name: "classify_question" },
+        system: SYSTEM,
+        messages: [{ role: "user", content: userContent }],
+        tools: [CLASSIFY_TOOL as Tool],
+      });
+    } catch (error) {
+      // После reserve нельзя доказать, успел ли провайдер принять запрос.
+      // Резерв остаётся exposure, а не освобождается как будто траты не было.
+      // Сбой Core не должен подменить исходную ошибку провайдера.
+      await config.ledger
+        .fail(reservation.id, {
+          outcome: "unknown",
+          reason: errorMessage(error),
+        })
+        .catch(() => undefined);
+      throw error;
+    }
+
+    // Деньги уже потрачены: фиксируем usage ДО любого разбора content.
+    try {
+      await config.ledger.settle(reservation.id, {
+        outcome: "success",
+        providerRequestId: resp.id,
+        resolvedModel: String(resp.model),
+        usage: anthropicUsage(resp.usage),
+      });
+    } catch (error) {
+      // Ответ уже оплачен: сбой учёта не должен выбросить полезный результат.
+      // Незакрытый reservation останется полной exposure и fail-closed
+      // защитит следующий вызов; оператор увидит причину в логе.
+      console.warn("LLM-ledger не подтвердил оплаченный ответ Assistant:", errorMessage(error));
+    }
+
     // Как в planner.ts: ищем блок вызова нашего инструмента и читаем его input.
-    const call = resp.content.find(
+    const toolCall = resp.content.find(
       (b): b is ToolUseBlock => b.type === "tool_use" && b.name === "classify_question",
     );
-    if (call === undefined) return { kind: "none" };
-    return mapToResolution(call.input);
+    if (toolCall === undefined) return { kind: "none" };
+    return mapToResolution(toolCall.input);
   };
+}
+
+function paidAttempt(context: LlmCallContext | undefined, suffix: string): LlmCallContext {
+  if (!context || context.requestKey.trim() === "") {
+    throw new LlmLedgerUnavailableError("Платный LLM-вызов не получил идемпотентный requestKey");
+  }
+  return {
+    requestKey: `${context.requestKey}:${suffix}`,
+    traceKey: context.traceKey ?? context.requestKey,
+    ...(context.metadata ? { metadata: context.metadata } : {}),
+  };
+}
+
+function anthropicUsage(usage: {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number | null;
+    ephemeral_1h_input_tokens?: number | null;
+  } | null;
+}): LlmTokenUsage {
+  const cacheCreation = usage.cache_creation;
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+    ...(usage.cache_creation_input_tokens !== undefined &&
+    usage.cache_creation_input_tokens !== null
+      ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
+      : {}),
+    ...(cacheCreation?.ephemeral_5m_input_tokens !== undefined &&
+    cacheCreation.ephemeral_5m_input_tokens !== null
+      ? { cacheCreation5mInputTokens: cacheCreation.ephemeral_5m_input_tokens }
+      : {}),
+    ...(cacheCreation?.ephemeral_1h_input_tokens !== undefined &&
+    cacheCreation.ephemeral_1h_input_tokens !== null
+      ? { cacheCreation1hInputTokens: cacheCreation.ephemeral_1h_input_tokens }
+      : {}),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }

@@ -6,7 +6,9 @@ describe("config-spec: белый список тумблеров", () => {
   it("ключ вне списка отклоняется (нельзя протащить секрет/произвольный env)", () => {
     assert.match(validateConfig("LLM_API_KEY", "sk-123") ?? "", /неизвестный ключ/);
     assert.match(validateConfig("SERVICE_TOKEN", "x") ?? "", /неизвестный ключ/);
+    assert.match(validateConfig("AGENT_BILLING_MODE", "metered") ?? "", /неизвестный ключ/);
     assert.equal(specFor("LLM_API_KEY"), undefined);
+    assert.equal(specFor("AGENT_BILLING_MODE"), undefined);
   });
 
   it("пустое значение = сброс, всегда допустимо", () => {
@@ -21,9 +23,28 @@ describe("config-spec: белый список тумблеров", () => {
     assert.match(validateConfig("AGENTS_SCHEDULES_PAUSED", "yes") ?? "", /допустимо/);
     assert.equal(validateConfig("AGENT_DAILY_BUDGET_USD", "3.5"), null);
     assert.match(validateConfig("AGENT_DAILY_BUDGET_USD", "-1") ?? "", /неотрицательное/);
+    assert.equal(validateConfig("LLM_GLOBAL_DAILY_BUDGET_USD", "12.75"), null);
+    assert.match(validateConfig("LLM_GLOBAL_DAILY_BUDGET_USD", "-0.01") ?? "", /неотрицательное/);
+    assert.equal(
+      specFor("LLM_GLOBAL_DAILY_BUDGET_USD")?.fallback,
+      undefined,
+      "без своего дефолта ledger может отличить пустое значение и взять legacy-лимит",
+    );
     assert.equal(validateConfig("EMBED_BASE_URL", "http://100.1.2.3:8080"), null);
     assert.match(validateConfig("EMBED_BASE_URL", "ftp://x") ?? "", /URL/);
+    assert.equal(validateConfig("LLM_PRICE_PROVIDER_ID", "omniroute-anthropic"), null);
+    assert.equal(validateConfig("EMBED_PRICE_PROVIDER_ID", "openai"), null);
+    assert.equal(specFor("LLM_PRICE_PROVIDER_ID")?.kind, "text");
+    assert.equal(specFor("EMBED_PRICE_PROVIDER_ID")?.kind, "text");
+    assert.match(validateConfig("LLM_PRICE_PROVIDER_ID", "https://gateway") ?? "", /provider ID/);
+    assert.match(
+      validateConfig("EMBED_PRICE_PROVIDER_ID", "Provider With Spaces") ?? "",
+      /provider ID/,
+    );
     assert.equal(validateConfig("LLM_PROVIDER", "claude-cli"), null);
+    assert.equal(validateConfig("LLM_PROVIDER", "claude-subscription"), null);
+    assert.match(validateConfig("LLM_PROVIDER", "codex-cli") ?? "", /допустимо/);
+    assert.match(validateConfig("LLM_PROVIDER", "gemini-cli") ?? "", /допустимо/);
     assert.match(validateConfig("LLM_PROVIDER", "gpt") ?? "", /допустимо/);
   });
 
@@ -35,7 +56,10 @@ describe("config-spec: белый список тумблеров", () => {
     assert.equal(validateConfig("VENDING_ROUTE_ORDER", "2508160376"), null);
     assert.match(validateConfig("VENDING_ROUTE_ORDER", "c2508160376") ?? "", /серийники/);
     assert.match(validateConfig("VENDING_ROUTE_ORDER", "abc") ?? "", /серийники/);
-    assert.match(validateConfig("VENDING_ROUTE_ORDER", "2508160376,,2508160359") ?? "", /серийники/);
+    assert.match(
+      validateConfig("VENDING_ROUTE_ORDER", "2508160376,,2508160359") ?? "",
+      /серийники/,
+    );
   });
 
   it("окна аналитики не принимают ноль, пороги в процентах — принимают", () => {
@@ -93,7 +117,8 @@ describe("Ключи аналитики П5b (R-P5b-11)", () => {
   ] as const) {
     it(`${key}: в белом списке, дефолт ${fallback}, отрицательное отвергается`, () => {
       assert.equal(specFor(key)?.fallback, fallback);
-      if (нольЗаконен) assert.equal(validateConfig(key, "0"), null); // ноль — значение владельца, не мусор
+      if (нольЗаконен)
+        assert.equal(validateConfig(key, "0"), null); // ноль — значение владельца, не мусор
       else assert.ok(validateConfig(key, "0"), "нулевое окно молча уехало бы в другое число");
       assert.ok(validateConfig(key, "-1"));
       assert.ok(validateConfig(key, "двадцать"));
@@ -121,9 +146,17 @@ describe("Ключи катовера П8b (R-P8b-3, R-P8b-7)", () => {
     // действие (в базе появляется строка, а не исчезает).
     assert.equal(specFor("OURVEND_ACCOUNTING_SOURCE")?.fallback, "stock");
     assert.deepEqual(specFor("OURVEND_ACCOUNTING_SOURCE")?.options, ["", "stock", "own"]);
-    assert.equal(specFor("OURVEND_ACCOUNTING_SOURCE")?.options?.[0], "", "пустой вариант обязан быть ПЕРВЫМ");
+    assert.equal(
+      specFor("OURVEND_ACCOUNTING_SOURCE")?.options?.[0],
+      "",
+      "пустой вариант обязан быть ПЕРВЫМ",
+    );
     assert.equal(validateConfig("OURVEND_ACCOUNTING_SOURCE", "own"), null);
-    assert.equal(validateConfig("OURVEND_ACCOUNTING_SOURCE", ""), null, "пусто = сброс к env/дефолту");
+    assert.equal(
+      validateConfig("OURVEND_ACCOUNTING_SOURCE", ""),
+      null,
+      "пусто = сброс к env/дефолту",
+    );
     assert.match(validateConfig("OURVEND_ACCOUNTING_SOURCE", "OWN") ?? "", /допустимо/);
     assert.match(validateConfig("OURVEND_ACCOUNTING_SOURCE", "snapshot") ?? "", /допустимо/);
   });
@@ -183,8 +216,14 @@ describe("Ключ ретенции истории склада (R-H-8)", () => 
   it("это ОТДЕЛЬНЫЙ ключ, а не второе имя SNAPSHOT_RETENTION_DAYS", () => {
     // Снимки (180) пересчитываются следующим сбором; инвентаризация склада —
     // ручной труд владельца, её не восстановить ничем.
-    assert.notEqual(specFor("STOCK_COUNT_RETENTION_DAYS")?.fallback, specFor("SNAPSHOT_RETENTION_DAYS")?.fallback);
-    assert.match(specFor("STOCK_COUNT_RETENTION_DAYS")?.help ?? "", /История склада|Увеличить можно/);
+    assert.notEqual(
+      specFor("STOCK_COUNT_RETENTION_DAYS")?.fallback,
+      specFor("SNAPSHOT_RETENTION_DAYS")?.fallback,
+    );
+    assert.match(
+      specFor("STOCK_COUNT_RETENTION_DAYS")?.help ?? "",
+      /История склада|Увеличить можно/,
+    );
   });
 });
 

@@ -20,6 +20,12 @@ export class CreateEventDto {
   @IsOptional()
   @IsISO8601()
   occurredAt?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(256)
+  clientKey?: string;
 }
 
 /**
@@ -53,6 +59,7 @@ export class EventsController {
       type: dto.type,
       payload: dto.payload,
       ...(dto.occurredAt ? { occurredAt: new Date(dto.occurredAt) } : {}),
+      ...(dto.clientKey ? { clientKey: dto.clientKey } : {}),
     });
   }
 

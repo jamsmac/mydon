@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { LlmLedgerUnavailableError, type LlmCallContext } from "@mydon/shared";
 import {
   collectGloberentSignals,
   countStuckDeals,
@@ -83,7 +84,10 @@ describe("Брифинг", () => {
     const text = formatBriefing(base, [], { positions: 3, costRounded: 84000, fromStock: 5 });
     assert.match(text, /🛒 К закупу: 3 поз\. на ~84\s?000 сум · со склада 5 — «оформить закуп»/);
     // Склад пуст — хвоста нет: «со склада 0» читалось бы как отдельный сигнал.
-    assert.doesNotMatch(formatBriefing(base, [], { positions: 3, costRounded: 84000, fromStock: 0 }), /со склада/);
+    assert.doesNotMatch(
+      formatBriefing(base, [], { positions: 3, costRounded: 84000, fromStock: 0 }),
+      /со склада/,
+    );
   });
 
   it("без закупа (0 позиций) строки нет", () => {
@@ -204,6 +208,7 @@ describe("Доступ к боту", () => {
       contractsDueSoon: 0,
     }),
     pendingApprovals: async () => [],
+    recent: async () => [],
   } as unknown as HandlerDeps["core"];
 
   it("чужому чату не отвечает вовсе", async () => {
@@ -234,6 +239,77 @@ describe("Доступ к боту", () => {
     await handleMessage(111, "брифинг", deps, 1000);
     const second = await handleMessage(111, "брифинг", deps, 1001);
     assert.match(second?.text ?? "", /Слишком много/);
+  });
+
+  it("telegram update_id доходит до assistant как стабильный requestKey", async () => {
+    let seen: LlmCallContext | undefined;
+    const deps: HandlerDeps = {
+      core: coreStub,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+      llm: async (_question, _snapshot, context) => {
+        seen = context;
+        return { kind: "answer", text: "ок" };
+      },
+    };
+
+    const reply = await handleMessage(111, "абырвалг", deps, 1_000, 987_654);
+    assert.equal(reply?.text, "ок");
+    assert.deepEqual(seen, {
+      requestKey: "telegram:update:987654",
+      traceKey: "telegram:update:987654",
+      metadata: { chatId: "111" },
+    });
+  });
+
+  it("документ получает тот же стабильный telegram update_id", async () => {
+    let seen: LlmCallContext | undefined;
+    const core = {
+      ...coreStub,
+      obligations: async () => ({
+        totals: [{ status: "overdue", count: 1 }],
+        overdue: [{ id: "o1", amount: "100" }],
+        overdueTotal: 1,
+        overdueTruncated: false,
+      }),
+    } as unknown as HandlerDeps["core"];
+    const deps: HandlerDeps = {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+      buildDocument: async (_request, context) => {
+        seen = context;
+        return { filename: "отчёт.xlsx", content: Buffer.from("x"), summary: "готово" };
+      },
+    };
+
+    const reply = await handleMessage(111, "excel по долгам", deps, 1_000, 987_655);
+    assert.equal(reply?.document?.filename, "отчёт.xlsx");
+    assert.equal(seen?.requestKey, "telegram:update:987655");
+  });
+
+  it("ledger недоступен — документ не маскируется ошибкой Core", async () => {
+    const core = {
+      ...coreStub,
+      obligations: async () => ({
+        totals: [{ status: "overdue", count: 1 }],
+        overdue: [{ id: "o1", amount: "100" }],
+        overdueTotal: 1,
+        overdueTruncated: false,
+      }),
+    } as unknown as HandlerDeps["core"];
+    const deps: HandlerDeps = {
+      core,
+      allowlist: parseAllowlist("111"),
+      limiter: new RateLimiter(),
+      buildDocument: async () => {
+        throw new LlmLedgerUnavailableError("core ledger down");
+      },
+    };
+
+    const reply = await handleMessage(111, "excel по долгам", deps, 1_000, 987_656);
+    assert.match(reply?.text ?? "", /лимит расходов на ИИ/);
+    assert.doesNotMatch(reply?.text ?? "", /данные из MYDON Core/);
   });
 });
 
@@ -390,9 +466,17 @@ describe("Бот: правила закупа и план — путь до Core
     await handleMessage(111, "блок Red Bull 6", d);
     assert.deepEqual(
       calls.map((c) => c.patch),
-      [{ excludedFromPurchase: true }, { excludedFromPurchase: false }, { fixedPurchaseQty: 48 }, { packSize: 6 }],
+      [
+        { excludedFromPurchase: true },
+        { excludedFromPurchase: false },
+        { fixedPurchaseQty: 48 },
+        { packSize: 6 },
+      ],
     );
-    assert.deepEqual(calls.map((c) => c.product), ["Twix", "Twix", "Snickers", "Red Bull"]);
+    assert.deepEqual(
+      calls.map((c) => c.product),
+      ["Twix", "Twix", "Snickers", "Red Bull"],
+    );
   });
 
   it("нераспознанная команда правил в Core не уходит — только подсказка с причиной", async () => {
@@ -429,7 +513,11 @@ describe("Бот: правила закупа и план — путь до Core
     const core = {
       ...({} as HandlerDeps["core"]),
       setVendingProductRules: async () => {
-        throw new CoreError(400, "/vending/product-rules", "<html>413 Request Entity Too Large</html>");
+        throw new CoreError(
+          400,
+          "/vending/product-rules",
+          "<html>413 Request Entity Too Large</html>",
+        );
       },
     } as unknown as HandlerDeps["core"];
     const reply = await handleMessage(111, "блок TUC 6", {
@@ -458,23 +546,74 @@ describe("Бот: правила закупа и план — путь до Core
   it("«план закупа» отдаёт остальные части в more (иначе владелец получит одну сводку)", async () => {
     const plan = {
       generatedAt: "2026-08-25T04:00:00.000Z",
-      stock: { asOf: null, totalBefore: 0, use: 0, back: 0, totalAfter: 0, stale: true, unmatched: 0 },
+      stock: {
+        asOf: null,
+        totalBefore: 0,
+        use: 0,
+        back: 0,
+        totalAfter: 0,
+        stale: true,
+        unmatched: 0,
+      },
       summary: {
         items: [
           {
-            product: "Fanta", need: 12, stock: 0, buy: 12, pack: 12, order: 12, price: 5167, costRounded: 62004,
-            noPrice: false, noSales: false, fromPurchase: 12, fromStock: 0, unfilled: 0, toStock: 0, stockAfter: 0,
-            excluded: false, fixedQty: null, perMachine: { "2508160376": 12 },
+            product: "Fanta",
+            need: 12,
+            stock: 0,
+            buy: 12,
+            pack: 12,
+            order: 12,
+            price: 5167,
+            costRounded: 62004,
+            noPrice: false,
+            noSales: false,
+            fromPurchase: 12,
+            fromStock: 0,
+            unfilled: 0,
+            toStock: 0,
+            stockAfter: 0,
+            excluded: false,
+            fixedQty: null,
+            perMachine: { "2508160376": 12 },
           },
         ],
-        excludedNoSales: [], excludedByRule: [], noPrice: [], allocation: "purchase-first",
-        totalBuy: 12, totalOrder: 12, costExact: 62004, costRounded: 62004, overpay: 0, shortfallCost: 0,
-        totalFromPurchase: 12, totalFromStock: 0, totalUnfilled: 0, totalToStock: 0,
+        excludedNoSales: [],
+        excludedByRule: [],
+        noPrice: [],
+        allocation: "purchase-first",
+        totalBuy: 12,
+        totalOrder: 12,
+        costExact: 62004,
+        costRounded: 62004,
+        overpay: 0,
+        shortfallCost: 0,
+        totalFromPurchase: 12,
+        totalFromStock: 0,
+        totalUnfilled: 0,
+        totalToStock: 0,
       },
       machines: [
         {
-          serial: "2508160376", name: "Olma", routeIndex: 1, need: 12, fromPurchase: 12, fromStock: 0, unfilled: 0,
-          slots: [{ coilId: "3", product: "Fanta", quantity: 0, capacity: 12, need: 12, fromPurchase: 12, fromStock: 0, unfilled: 0 }],
+          serial: "2508160376",
+          name: "Olma",
+          routeIndex: 1,
+          need: 12,
+          fromPurchase: 12,
+          fromStock: 0,
+          unfilled: 0,
+          slots: [
+            {
+              coilId: "3",
+              product: "Fanta",
+              quantity: 0,
+              capacity: 12,
+              need: 12,
+              fromPurchase: 12,
+              fromStock: 0,
+              unfilled: 0,
+            },
+          ],
         },
       ],
       routeConfigured: false,
@@ -513,7 +652,15 @@ describe("Усушка автоматов: путь владельца до Core
         name: "Olma",
         summary: {
           items: [
-            { product: "Kinder Bueno", lossUnits: 9, lossValue: 99_000, surplusUnits: 0, daysCounted: 9, noPrice: false, alert: true },
+            {
+              product: "Kinder Bueno",
+              lossUnits: 9,
+              lossValue: 99_000,
+              surplusUnits: 0,
+              daysCounted: 9,
+              noPrice: false,
+              alert: true,
+            },
           ],
           lossValue: 99_000,
           daysCounted: 9,
@@ -624,7 +771,10 @@ describe("Брифинг: несрочные сигналы правил", () =>
     // то есть и сводка, и согласования, и сигналы разом.
     const briefingText = "б".repeat(3000);
     const staffLine = "с".repeat(200);
-    const many = Array.from({ length: 12 }, (_, i) => ({ key: `e${i}:r`, text: `сигнал ${i} ` + "х".repeat(120) }));
+    const many = Array.from({ length: 12 }, (_, i) => ({
+      key: `e${i}:r`,
+      text: `сигнал ${i} ` + "х".repeat(120),
+    }));
     const block = formatBriefingNotes(many, 12, notesBudget(briefingText, staffLine));
     assert.ok(block, "что-то показать всё же удалось");
     assert.ok(block.shownKeys.length < 12, "влезло не всё");
@@ -693,7 +843,14 @@ describe("Аналитика снека: путь владельца до Core (
       },
     ],
     products: [],
-    totals: { qty: 545, revenue: 5_882_000, cogs: 4_260_615, margin: 1_621_385, pct: 27.6, unknownUnits: 0 },
+    totals: {
+      qty: 545,
+      revenue: 5_882_000,
+      cogs: 4_260_615,
+      margin: 1_621_385,
+      pct: 27.6,
+      unknownUnits: 0,
+    },
     unknownUnits: 0,
     unknownProducts: [],
     excluded: [],
@@ -709,7 +866,14 @@ describe("Аналитика снека: путь владельца до Core (
       },
       vendingDeadStock: async (days: number) => {
         вызовы.push(`dead:${days}`);
-        return { days, since: "2026-08-04", warehouse: [], machines: [], totalValue: 0, noPriceCount: 0 };
+        return {
+          days,
+          since: "2026-08-04",
+          warehouse: [],
+          machines: [],
+          totalValue: 0,
+          noPriceCount: 0,
+        };
       },
       vendingPriceChanges: async (days: number) => {
         вызовы.push(`changes:${days}`);
@@ -757,7 +921,15 @@ describe("Аналитика снека: путь владельца до Core (
           slotsLagMin: null,
           salesLagH: null,
           productSaleLagH: null,
-          parity: { days: 7, ok: false, mismatches: 3, stockOk: false, stockChecked: 0, mode: "mirror", note: null },
+          parity: {
+            days: 7,
+            ok: false,
+            mismatches: 3,
+            stockOk: false,
+            stockChecked: 0,
+            mode: "mirror",
+            note: null,
+          },
         };
       },
     } as unknown as HandlerDeps["core"];
@@ -795,7 +967,14 @@ describe("Аналитика снека: путь владельца до Core (
     await handleMessage(111, "мёртвый сток", deps(вызовы));
     await handleMessage(111, "цены", deps(вызовы));
     await handleMessage(111, "сверка", deps(вызовы));
-    assert.deepEqual(вызовы, ["margin:30", "margin:7", "margin:90", "dead:21", "changes:30", "health:20"]);
+    assert.deepEqual(вызовы, [
+      "margin:30",
+      "margin:7",
+      "margin:90",
+      "dead:21",
+      "changes:30",
+      "health:20",
+    ]);
   });
 
   it("маржа отвечает разбором, а не «понял»", async () => {
@@ -837,7 +1016,11 @@ describe("Аналитика снека: путь владельца до Core (
     const core = {
       ...({} as HandlerDeps["core"]),
       setVendingSalePrice: async () => {
-        throw new CoreError(400, "/vending/sale-price", '{"message":["product should not be empty"]}');
+        throw new CoreError(
+          400,
+          "/vending/sale-price",
+          '{"message":["product should not be empty"]}',
+        );
       },
     } as unknown as HandlerDeps["core"];
     const reply = await handleMessage(111, "цена продажи TUC 15000", {
@@ -872,7 +1055,15 @@ describe("Аналитика снека: путь владельца до Core (
       slotsLagMin: null,
       salesLagH: null,
       productSaleLagH: null,
-      parity: { days: 7, ok: true, mismatches: 0, stockOk: true, stockChecked: 2, mode: "mirror", note: null },
+      parity: {
+        days: 7,
+        ok: true,
+        mismatches: 0,
+        stockOk: true,
+        stockChecked: 2,
+        mode: "mirror",
+        note: null,
+      },
     },
     // Здоровье за отчётную неделю (R-H-9): без него форматтер сводки печатать
     // нечего — блок начинается с чисел недели, а не с чисел момента.
@@ -966,7 +1157,11 @@ describe("Аналитика снека: путь владельца до Core (
     const core = {
       ...({} as HandlerDeps["core"]),
       vendingMargin: async () => {
-        throw new CoreError(400, "/vending/margin", '{"message":["days must not be greater than 90"]}');
+        throw new CoreError(
+          400,
+          "/vending/margin",
+          '{"message":["days must not be greater than 90"]}',
+        );
       },
     } as unknown as HandlerDeps["core"];
     const reply = await handleMessage(111, "маржа за 90 дней", {

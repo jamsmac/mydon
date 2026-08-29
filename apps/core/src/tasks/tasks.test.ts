@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { task, TASK_SOURCE_DAY_PREDICATE } from "@mydon/db";
+import {
+  approval,
+  auditLog,
+  event,
+  outboxDelivery,
+  task,
+  taskAgentExecution,
+  TASK_SOURCE_DAY_PREDICATE,
+  taskComment,
+} from "@mydon/db";
 import { TasksService } from "./tasks.service";
 
 type Row = Record<string, unknown>;
@@ -22,6 +31,10 @@ interface StubOpts {
   selects?: Row[][];
   /** Куда складывать аргумент `onConflictDoNothing` — иначе фикс регрессирует так же незаметно. */
   conflicts?: { target?: unknown; where?: unknown }[];
+  /** Патч и CAS-предикат UPDATE — для проверки durable claim. */
+  updates?: { patch: Row; condition: unknown }[];
+  /** Captured SELECT predicates for SQL-level assertions. */
+  selectConditions?: unknown[];
 }
 
 /**
@@ -37,10 +50,11 @@ function stubDb(opts: StubOpts) {
   // where() и awaitable, и с .limit() — сервис использует оба варианта.
   // Ответ мемоизируется на цепочку: и await, и .limit() видят ОДИН элемент
   // очереди, иначе каждая цепочка съедала бы два.
-  const whereChain = () => {
+  const whereChain = (condition?: unknown) => {
+    if (condition !== undefined) opts.selectConditions?.push(condition);
     let memo: Row[] | null = null;
     const result = async () => (memo ??= rowsOf());
-    return Object.assign(result(), { limit: result });
+    return Object.assign(result(), { limit: result, for: result });
   };
 
   const insert = () => ({
@@ -63,7 +77,12 @@ function stubDb(opts: StubOpts) {
   const tx = {
     select: () => ({ from: () => ({ where: whereChain }) }),
     update: () => ({
-      set: () => ({ where: () => ({ returning: async () => (opts.updateResult ? [opts.updateResult] : []) }) }),
+      set: (patch: Row) => ({
+        where: (condition: unknown) => {
+          opts.updates?.push({ patch, condition });
+          return { returning: async () => (opts.updateResult ? [opts.updateResult] : []) };
+        },
+      }),
     }),
     insert,
   };
@@ -86,6 +105,166 @@ const stubMaintenance = {
 } as never;
 
 const makeTasks = (db: never) => new TasksService(db, stubMaintenance);
+
+interface AgentRunDbState {
+  task: Row;
+  execution?: Row;
+  approvals: Row[];
+  events: Row[];
+  deliveries: Row[];
+  audits: Row[];
+  comments: Row[];
+  actionCount?: number;
+  advisoryLocks: unknown[];
+}
+
+/** Минимальная stateful БД для checkpoint/commit: таблицы различаются по identity. */
+function agentRunDb(state: AgentRunDbState) {
+  let sequence = 0;
+  const nextId = (prefix: string) => `${prefix}-${++sequence}`;
+  const resultChain = (rows: Row[]) => {
+    const result = async () => rows;
+    return Object.assign(result(), { limit: result, for: result });
+  };
+  const rowsFor = (tableRef: unknown): Row[] => {
+    if (tableRef === task) return [state.task];
+    if (tableRef === taskAgentExecution) return state.execution ? [state.execution] : [];
+    if (tableRef === event) {
+      return [
+        {
+          count:
+            state.actionCount ?? state.events.filter((row) => row.type === "agent.action").length,
+        },
+      ];
+    }
+    return [];
+  };
+  const tx = {
+    select: (_selection?: unknown) => ({
+      from: (tableRef: unknown) => ({ where: () => resultChain(rowsFor(tableRef)) }),
+    }),
+    update: (tableRef: unknown) => ({
+      set: (patch: Row) => ({
+        where: () => ({
+          returning: async () => {
+            if (tableRef === task) {
+              Object.assign(state.task, patch);
+              return [{ ...state.task }];
+            }
+            if (tableRef === taskAgentExecution && state.execution) {
+              Object.assign(state.execution, patch);
+              return [{ ...state.execution }];
+            }
+            return [];
+          },
+        }),
+      }),
+    }),
+    insert: (tableRef: unknown) => ({
+      values: (input: Row | Row[]) => {
+        const values = Array.isArray(input) ? input : [input];
+        const created = values.map((value) => {
+          if (tableRef === taskAgentExecution) {
+            const row = {
+              id: nextId("execution"),
+              status: "ready",
+              outcomePayload: null,
+              outcomeHash: null,
+              approvalId: null,
+              committedAt: null,
+              abandonedAt: null,
+              abandonReason: null,
+              createdAt: new Date("2026-08-29T10:16:00.000Z"),
+              updatedAt: new Date("2026-08-29T10:16:00.000Z"),
+              ...value,
+            };
+            state.execution = row;
+            return row;
+          }
+          if (tableRef === approval) {
+            const row = { id: nextId("approval"), decision: "pending", ...value };
+            state.approvals.push(row);
+            return row;
+          }
+          if (tableRef === event) {
+            const row = { id: nextId("event"), ...value };
+            state.events.push(row);
+            return row;
+          }
+          if (tableRef === outboxDelivery) {
+            const row = { id: nextId("delivery"), ...value };
+            state.deliveries.push(row);
+            return row;
+          }
+          if (tableRef === auditLog) {
+            const row = { id: nextId("audit"), ...value };
+            state.audits.push(row);
+            return row;
+          }
+          if (tableRef === taskComment) {
+            const row = { id: nextId("comment"), ...value };
+            state.comments.push(row);
+            return row;
+          }
+          return { id: nextId("row"), ...value };
+        });
+        const returning = async () => created;
+        return {
+          returning,
+          then: (resolve: (value: Row[]) => unknown, reject?: (reason: unknown) => unknown) =>
+            returning().then(resolve, reject),
+        };
+      },
+    }),
+    execute: async (query: unknown) => {
+      state.advisoryLocks.push(query);
+      return [];
+    },
+  };
+  return {
+    transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx),
+  } as never;
+}
+
+const AGENT_TASK_ID = "11111111-1111-4111-8111-111111111111";
+const AGENT_RUN_ID = "33333333-3333-4333-8333-333333333333";
+const AGENT_ATTEMPT_ID = "44444444-4444-4444-8444-444444444444";
+const AGENT_NOW = new Date("2026-08-29T10:15:00.000Z");
+
+function agentRunState(): AgentRunDbState {
+  return {
+    task: {
+      id: AGENT_TASK_ID,
+      title: "Проверить дебиторку",
+      description: "Показать просроченные платежи",
+      ownerKind: "agent",
+      ownerRef: "receivables",
+      domain: "vendhub",
+      entityId: null,
+      status: "in_progress",
+      agentRunId: AGENT_RUN_ID,
+      agentExecutionAttemptId: AGENT_ATTEMPT_ID,
+      agentExecutionRetryAt: null,
+      agentExecutionBlockedAt: null,
+      agentExecutionBlockedReason: null,
+      agentRunGeneration: 1,
+      agentRunClaimedAt: AGENT_NOW,
+      priority: "normal",
+      due: null,
+      source: null,
+      createdBy: "owner",
+      resultNote: null,
+      quality: null,
+      completedAt: null,
+    },
+    approvals: [],
+    events: [],
+    deliveries: [],
+    audits: [],
+    comments: [],
+    advisoryLocks: [],
+  };
+}
 
 describe("Задачи", () => {
   it("создаётся вместе с записью в журнал", async () => {
@@ -176,7 +355,11 @@ describe("Дедуп задач на день держится ЧАСТИЧНЫ�
       dayKey: "2026-08-26",
     });
     assert.equal(conflicts.length, 1);
-    assert.equal(conflicts[0]!.target, task.source, "конфликт объявлен по той же колонке, что индекс");
+    assert.equal(
+      conflicts[0]!.target,
+      task.source,
+      "конфликт объявлен по той же колонке, что индекс",
+    );
     assert.equal(
       conflicts[0]!.where,
       TASK_SOURCE_DAY_PREDICATE,
@@ -193,14 +376,609 @@ describe("Дедуп задач на день держится ЧАСТИЧНЫ�
   });
 });
 
+describe("Durable claim задачи агента", () => {
+  const TASK = "11111111-1111-4111-8111-111111111111";
+  const OLD_RUN = "22222222-2222-4222-8222-222222222222";
+  const NEW_RUN = "33333333-3333-4333-8333-333333333333";
+  const EXECUTION = "44444444-4444-4444-8444-444444444444";
+  const NOW = new Date("2026-08-29T10:15:00.000Z");
+
+  it("claim делает один атомарный UPDATE, выдаёт UUID и пускает stale lease через 15 минут", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    const inserted: Row[] = [];
+    const claimedRow = {
+      id: TASK,
+      ownerKind: "agent",
+      ownerRef: "receivables",
+      status: "in_progress",
+      agentRunId: NEW_RUN,
+      agentExecutionAttemptId: EXECUTION,
+      agentRunGeneration: 8,
+      agentRunClaimedAt: NOW,
+    };
+    const result = await makeTasks(
+      stubDb({ updateResult: claimedRow, updates, inserted }),
+    ).claimAgentRun(TASK, "receivables", NOW);
+
+    assert.equal(result?.agentRunGeneration, 8);
+    assert.equal(result?.agentExecutionAttemptId, EXECUTION);
+    assert.equal(updates.length, 1, "claim не должен быть select-then-update");
+    const patch = updates[0]!.patch;
+    assert.equal(patch.status, "in_progress");
+    assert.match(
+      String(patch.agentRunId),
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    assert.equal(patch.agentRunClaimedAt, NOW);
+
+    const attempt = new PgDialect().sqlToQuery(
+      patch.agentExecutionAttemptId as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
+    assert.match(attempt.sql, /coalesce\(.*agent_execution_attempt_id/);
+    assert.ok(
+      attempt.params.some(
+        (value) =>
+          typeof value === "string" &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value),
+      ),
+      "первая попытка получает UUID, stale takeover сохраняет существующий через coalesce",
+    );
+
+    const generation = new PgDialect().sqlToQuery(
+      patch.agentRunGeneration as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
+    assert.match(
+      generation.sql,
+      /agent_run_generation.*\+/,
+      "generation инкрементируется в том же UPDATE",
+    );
+
+    const query = new PgDialect().sqlToQuery(
+      updates[0]!.condition as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
+    assert.match(query.sql, /agent_run_id.*is null/);
+    assert.match(query.sql, /agent_execution_retry_at.*is null/);
+    assert.match(query.sql, /agent_execution_retry_at.*<=/);
+    assert.match(query.sql, /agent_execution_blocked_at.*is null/);
+    assert.match(query.sql, /agent_run_claimed_at.*<=/);
+    const staleCutoff = new Date(NOW.getTime() - 15 * 60_000).toISOString();
+    assert.ok(
+      query.params.some((value) =>
+        value instanceof Date ? value.toISOString() === staleCutoff : value === staleCutoff,
+      ),
+      "stale cutoff ровно 15 минут",
+    );
+    assert.ok(inserted.some((row) => row.action === "task.agent_run.claimed"));
+  });
+
+  it("из двух concurrent claim только один получает runId", async () => {
+    let available = true;
+    const inserted: Row[] = [];
+    const tx = {
+      update: () => ({
+        set: (patch: Row) => ({
+          where: () => ({
+            returning: async () => {
+              if (!available) return [];
+              available = false;
+              return [
+                {
+                  id: TASK,
+                  ownerKind: "agent",
+                  ownerRef: "receivables",
+                  status: "in_progress",
+                  ...patch,
+                  agentRunGeneration: 1,
+                },
+              ];
+            },
+          }),
+        }),
+      }),
+      insert: () => ({
+        values: async (value: Row) => {
+          inserted.push(value);
+          return [];
+        },
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: async () => [] }),
+        }),
+      }),
+    };
+    const db = {
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> =>
+        callback(tx),
+    } as never;
+    const service = makeTasks(db);
+    const claims = await Promise.all([
+      service.claimAgentRun(TASK, "receivables", NOW),
+      service.claimAgentRun(TASK, "receivables", NOW),
+    ]);
+    assert.equal(claims.filter(Boolean).length, 1);
+    assert.equal(inserted.filter((row) => row.action === "task.agent_run.claimed").length, 1);
+  });
+
+  it("heartbeat продлевает только активный runId", async () => {
+    const renewedAt = new Date("2026-08-29T10:20:00.000Z");
+    const current: Row = {
+      id: TASK,
+      ownerKind: "agent",
+      ownerRef: "receivables",
+      status: "in_progress",
+      agentRunId: NEW_RUN,
+      agentRunClaimedAt: NOW,
+    };
+    const db = {
+      update: () => ({
+        set: (patch: Row) => ({
+          where: (condition: unknown) => {
+            const query = new PgDialect().sqlToQuery(
+              condition as Parameters<PgDialect["sqlToQuery"]>[0],
+            );
+            const expected = query.params.find((value) => value === OLD_RUN || value === NEW_RUN);
+            return {
+              returning: async () => {
+                if (expected !== current.agentRunId) return [];
+                Object.assign(current, patch);
+                return [{ id: TASK }];
+              },
+            };
+          },
+        }),
+      }),
+    } as never;
+    const service = makeTasks(db);
+    assert.equal(await service.heartbeatAgentRun(TASK, "receivables", OLD_RUN, renewedAt), false);
+    assert.equal(current.agentRunClaimedAt, NOW);
+    assert.equal(await service.heartbeatAgentRun(TASK, "receivables", NEW_RUN, renewedAt), true);
+    assert.equal(current.agentRunClaimedAt, renewedAt, "живой длинный run не станет stale");
+  });
+
+  it("release сравнивает runId: старый worker не снимает lease новой generation", async () => {
+    const current: Row = {
+      id: TASK,
+      ownerKind: "agent",
+      ownerRef: "receivables",
+      status: "in_progress",
+      agentRunId: NEW_RUN,
+      agentExecutionAttemptId: EXECUTION,
+      agentRunGeneration: 2,
+      agentRunClaimedAt: NOW,
+    };
+    const inserted: Row[] = [];
+    const conditions: unknown[] = [];
+    const tx = {
+      update: () => ({
+        set: (patch: Row) => ({
+          where: (condition: unknown) => {
+            conditions.push(condition);
+            const query = new PgDialect().sqlToQuery(
+              condition as Parameters<PgDialect["sqlToQuery"]>[0],
+            );
+            const expectedRunId = query.params.find(
+              (value) => value === OLD_RUN || value === NEW_RUN,
+            );
+            return {
+              returning: async () => {
+                if (expectedRunId !== current.agentRunId) return [];
+                Object.assign(current, patch);
+                return [{ ...current }];
+              },
+            };
+          },
+        }),
+      }),
+      insert: () => ({
+        values: async (value: Row) => {
+          inserted.push(value);
+          return [];
+        },
+      }),
+    };
+    const db = {
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> =>
+        callback(tx),
+    } as never;
+    const service = makeTasks(db);
+
+    assert.equal(await service.releaseAgentRun(TASK, "receivables", OLD_RUN, EXECUTION), null);
+    assert.equal(current.agentRunId, NEW_RUN, "старый runId не изменил строку");
+    const released = await service.releaseAgentRun(TASK, "receivables", NEW_RUN, EXECUTION);
+    assert.equal(released?.agentRunId, null);
+    assert.equal(released?.status, "todo");
+    assert.equal(current.agentRunGeneration, 2, "release не обнуляет generation");
+    assert.equal(
+      current.agentExecutionAttemptId,
+      EXECUTION,
+      "automatic release сохраняет денежную попытку против double dispatch",
+    );
+    assert.equal(inserted.filter((row) => row.action === "task.agent_run.released").length, 1);
+
+    const oldQuery = new PgDialect().sqlToQuery(
+      conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
+    assert.match(oldQuery.sql, /agent_run_id/);
+    assert.ok(oldQuery.params.includes(OLD_RUN));
+  });
+
+  it("budget denial безопасно ротирует attempt только с новых ташкентских суток", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    const selectConditions: unknown[] = [];
+    await makeTasks(
+      stubDb({
+        updateResult: {
+          id: TASK,
+          status: "todo",
+          agentRunId: null,
+          agentExecutionAttemptId: null,
+          agentExecutionRetryAt: new Date("2026-08-29T19:00:00.000Z"),
+        },
+        updates,
+        selectConditions,
+      }),
+    ).releaseAgentRun(TASK, "receivables", NEW_RUN, EXECUTION, "budget_denied", undefined, NOW);
+
+    const patch = updates[0]!.patch;
+    assert.equal(patch.agentExecutionAttemptId, null);
+    assert.equal(
+      (patch.agentExecutionRetryAt as Date).toISOString(),
+      "2026-08-29T19:00:00.000Z",
+      "полночь 30 августа в Ташкенте = 19:00Z 29 августа",
+    );
+    const spendProbe = new PgDialect().sqlToQuery(
+      selectConditions[0] as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
+    assert.ok(spendProbe.params.includes("denied"));
+    assert.ok(spendProbe.params.includes("released"));
+  });
+
+  it("budget denial после начатого reserve блокирует, а не ротирует execution", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    await makeTasks(
+      stubDb({
+        selectResult: [{ id: "spend-1" }],
+        updateResult: { id: TASK, status: "todo", agentExecutionAttemptId: EXECUTION },
+        updates,
+      }),
+    ).releaseAgentRun(
+      TASK,
+      "receivables",
+      NEW_RUN,
+      EXECUTION,
+      "budget_denied",
+      "второй reserve отклонён",
+      NOW,
+    );
+
+    const patch = updates[0]!.patch;
+    assert.equal("agentExecutionAttemptId" in patch, false, "начатый execution не вращается");
+    assert.equal(patch.agentExecutionBlockedAt, NOW);
+    assert.equal(patch.agentExecutionBlockedReason, "второй reserve отклонён");
+  });
+
+  it("unsupported атомарно снимает lease и блокирует claim до owner retry", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    await makeTasks(
+      stubDb({
+        updateResult: { id: TASK, status: "todo", agentExecutionAttemptId: EXECUTION },
+        updates,
+      }),
+    ).releaseAgentRun(
+      TASK,
+      "receivables",
+      NEW_RUN,
+      EXECUTION,
+      "unsupported",
+      "нет подходящего навыка",
+      NOW,
+    );
+
+    const patch = updates[0]!.patch;
+    assert.equal(patch.status, "todo");
+    assert.equal(patch.agentRunId, null);
+    assert.equal(patch.agentRunClaimedAt, null);
+    assert.equal(
+      "agentExecutionAttemptId" in patch,
+      false,
+      "attempt очищает только owner-only retry",
+    );
+    assert.equal(patch.agentExecutionBlockedAt, NOW);
+    assert.equal(patch.agentExecutionBlockedReason, "нет подходящего навыка");
+  });
+
+  it("owner retry снимает block без checkpoint и только тогда разрешает новый attempt", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    const inserted: Row[] = [];
+    const updated = await makeTasks(
+      stubDb({
+        selects: [
+          [
+            {
+              id: TASK,
+              ownerKind: "agent",
+              status: "todo",
+              agentExecutionAttemptId: EXECUTION,
+              agentExecutionBlockedAt: NOW,
+            },
+          ],
+          [],
+        ],
+        updateResult: {
+          id: TASK,
+          ownerKind: "agent",
+          status: "todo",
+          agentExecutionAttemptId: null,
+          agentExecutionBlockedAt: null,
+        },
+        updates,
+        inserted,
+      }),
+    ).retryBlockedAgentExecution(TASK);
+
+    assert.equal(updated.agentExecutionAttemptId, null);
+    assert.equal(updates[0]!.patch.agentExecutionBlockedAt, null);
+    assert.equal(updates.length, 1, "без checkpoint нечего abandon-ить");
+    assert.ok(inserted.some((row) => row.action === "task.agent_execution.retry"));
+  });
+
+  it("старая generation не может закрыть задачу после stale takeover", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    const service = makeTasks(
+      stubDb({
+        existing: { id: TASK, status: "in_progress", agentRunId: NEW_RUN },
+        updates,
+      }),
+    );
+    await assert.rejects(
+      () => service.setStatus(TASK, "done", "agent:receivables", "готово", OLD_RUN),
+      /заменён новой generation/,
+    );
+    const query = new PgDialect().sqlToQuery(
+      updates[0]!.condition as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
+    assert.ok(query.params.includes(OLD_RUN));
+  });
+});
+
+describe("Durable checkpoint и atomic agent outcome", () => {
+  const fence = {
+    agentName: "receivables",
+    runId: AGENT_RUN_ID,
+    executionAttemptId: AGENT_ATTEMPT_ID,
+  };
+
+  it("checkpoint каноничен: порядок facts не важен, другой payload даёт 409", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    const first = await service.checkpointAgentRun(
+      AGENT_TASK_ID,
+      {
+        ...fence,
+        skill: "watch-receivables",
+        kind: "proposal",
+        action: "Напомнить об оплате",
+        facts: { overdue: 3, amount: 1500 },
+      },
+      AGENT_NOW,
+    );
+    const replay = await service.checkpointAgentRun(AGENT_TASK_ID, {
+      ...fence,
+      skill: "watch-receivables",
+      kind: "proposal",
+      action: "Напомнить об оплате",
+      facts: { amount: 1500, overdue: 3 },
+    });
+    assert.equal(first.replay, false);
+    assert.equal(replay.replay, true);
+    assert.equal(replay.checkpoint.checkpointHash, first.checkpoint.checkpointHash);
+    await assert.rejects(
+      () =>
+        service.checkpointAgentRun(AGENT_TASK_ID, {
+          ...fence,
+          skill: "watch-receivables",
+          kind: "proposal",
+          action: "Уже другое действие",
+        }),
+      /другим checkpoint payload/,
+    );
+  });
+
+  it("no_signal commit атомарно закрывает task, пишет agent.run и replay не зависит от runId", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await service.checkpointAgentRun(AGENT_TASK_ID, {
+      ...fence,
+      skill: "watch-receivables",
+      kind: "no_signal",
+    });
+    const input = {
+      ...fence,
+      kind: "no_signal" as const,
+      note: "Проверил — повода нет.",
+    };
+    const committed = await service.commitAgentRun(AGENT_TASK_ID, input, AGENT_NOW);
+    assert.equal(committed.status, "done");
+    assert.equal(state.task.status, "done");
+    assert.equal(state.execution?.status, "committed");
+    const runEvent = state.events.find((row) => row.type === "agent.run");
+    assert.equal(
+      runEvent?.clientKey,
+      `task:${AGENT_TASK_ID}:execution:${AGENT_ATTEMPT_ID}:event:agent-run`,
+    );
+    assert.equal(
+      state.events.some((row) => row.type === "agent.action"),
+      false,
+    );
+
+    const replay = await service.commitAgentRun(AGENT_TASK_ID, {
+      ...input,
+      runId: "55555555-5555-4555-8555-555555555555",
+    });
+    assert.equal(replay.replay, true, "takeover generation не меняет identity outcome");
+    await assert.rejects(
+      () => service.commitAgentRun(AGENT_TASK_ID, { ...input, note: "Другой исход" }),
+      /другой outcome payload/,
+    );
+  });
+
+  it("изменение task input блокирует attempt и снимает lease без hot-loop", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await service.checkpointAgentRun(AGENT_TASK_ID, {
+      ...fence,
+      skill: "watch-receivables",
+      kind: "no_signal",
+    });
+    state.task.title = "Владелец изменил задачу";
+    const result = await service.commitAgentRun(
+      AGENT_TASK_ID,
+      { ...fence, kind: "no_signal", note: "Повода нет" },
+      AGENT_NOW,
+    );
+    assert.equal(result.status, "blocked");
+    assert.equal(state.task.status, "todo");
+    assert.equal(state.task.agentRunId, null);
+    assert.equal(state.task.agentExecutionBlockedAt, AGENT_NOW);
+    assert.equal(state.execution?.status, "ready", "owner retry ещё может abandon checkpoint");
+    assert.equal(state.events.length, 0, "business effects до решения владельца не применяются");
+  });
+
+  it("cap проверяется под advisory lock и оставляет proposal checkpoint на завтра", async () => {
+    const previous = process.env.AGENT_DAILY_ACTION_CAP;
+    process.env.AGENT_DAILY_ACTION_CAP = "1";
+    try {
+      const state = agentRunState();
+      state.actionCount = 1;
+      const service = makeTasks(agentRunDb(state));
+      const proposal = {
+        ...fence,
+        skill: "watch-receivables",
+        kind: "proposal" as const,
+        action: "Напомнить об оплате",
+        facts: { overdue: 3 },
+      };
+      await service.checkpointAgentRun(AGENT_TASK_ID, proposal);
+      const result = await service.commitAgentRun(
+        AGENT_TASK_ID,
+        {
+          ...fence,
+          kind: "approval_requested",
+          note: "Вынес на решение",
+          action: proposal.action,
+          facts: proposal.facts,
+          tier: "T1",
+        },
+        AGENT_NOW,
+      );
+      assert.equal(result.capped, true);
+      assert.equal(result.retryAt, "2026-08-29T19:00:00.000Z");
+      assert.equal(state.execution?.status, "ready");
+      assert.equal(state.task.agentExecutionAttemptId, AGENT_ATTEMPT_ID);
+      assert.equal(state.approvals.length, 0);
+      assert.equal(state.events.length, 0);
+      assert.equal(state.deliveries.length, 0);
+      assert.equal(state.advisoryLocks.length, 1);
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
+      else process.env.AGENT_DAILY_ACTION_CAP = previous;
+    }
+  });
+
+  it("approval/action/memory/task/outbox/execution фиксируются одним commit со stable keys", async () => {
+    const previous = process.env.AGENT_DAILY_ACTION_CAP;
+    process.env.AGENT_DAILY_ACTION_CAP = "50";
+    try {
+      const state = agentRunState();
+      state.actionCount = 0;
+      const service = makeTasks(agentRunDb(state));
+      const facts = {
+        overdue: 3,
+        api_token: "не должен попасть в Notion",
+        apiToken: "camelCase API token",
+        nested: { clientSecret: "nested camelCase secret", visible: "safe value" },
+      };
+      await service.checkpointAgentRun(AGENT_TASK_ID, {
+        ...fence,
+        skill: "watch-receivables",
+        kind: "proposal",
+        action: "Напомнить об оплате",
+        facts,
+        next: ["Проверить завтра"],
+      });
+      const result = await service.commitAgentRun(
+        AGENT_TASK_ID,
+        {
+          ...fence,
+          kind: "approval_requested",
+          note: "Вынес на решение владельца",
+          action: "Напомнить об оплате",
+          facts,
+          next: ["Проверить завтра"],
+          tier: "T1",
+          memorySignature: "sig-1",
+        },
+        AGENT_NOW,
+      );
+      assert.equal(result.committed, true);
+      assert.equal(state.approvals.length, 1);
+      assert.deepEqual(
+        state.events.map((row) => row.type),
+        ["agent.run", "approval.requested", "agent.action", "agent.memory:watch-receivables"],
+      );
+      assert.equal(state.deliveries[0]?.destination, "notion-report");
+      assert.equal(
+        state.deliveries[0]?.key,
+        `task:${AGENT_TASK_ID}:execution:${AGENT_ATTEMPT_ID}:notion-report`,
+      );
+      const report = (state.deliveries[0]?.payload as { report?: { blocks?: unknown[] } })?.report;
+      assert.ok(report);
+      assert.doesNotMatch(JSON.stringify(report), /не должен попасть в Notion/);
+      assert.doesNotMatch(JSON.stringify(report), /camelCase API token/);
+      assert.doesNotMatch(JSON.stringify(report), /nested camelCase secret/);
+      assert.match(JSON.stringify(report), /safe value/);
+      assert.equal(state.execution?.approvalId, result.approvalId);
+      assert.equal(state.execution?.status, "committed");
+      assert.equal(state.task.resultNote, "Вынес на решение владельца");
+      assert.equal(state.advisoryLocks.length, 1);
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_DAILY_ACTION_CAP;
+      else process.env.AGENT_DAILY_ACTION_CAP = previous;
+    }
+  });
+
+  it("redo committed agent task блокирует reuse, owner retry даёт новый attempt, history immutable", async () => {
+    const state = agentRunState();
+    state.task.status = "done";
+    state.task.agentRunId = null;
+    state.task.resultNote = "Прошлый результат";
+    state.execution = {
+      id: "execution-committed",
+      taskId: AGENT_TASK_ID,
+      executionAttemptId: AGENT_ATTEMPT_ID,
+      agentName: "receivables",
+      skill: "watch-receivables",
+      status: "committed",
+    };
+    const service = makeTasks(agentRunDb(state));
+    await service.rate(AGENT_TASK_ID, "redo");
+    assert.ok(state.task.agentExecutionBlockedAt instanceof Date);
+    assert.equal(state.task.agentExecutionAttemptId, AGENT_ATTEMPT_ID);
+
+    await service.retryBlockedAgentExecution(AGENT_TASK_ID);
+    assert.equal(state.task.agentExecutionAttemptId, null);
+    assert.equal(state.task.agentExecutionBlockedAt, null);
+    assert.equal(state.execution.status, "committed", "историческую execution row не меняем");
+  });
+});
+
 describe("Общий пул свободных задач", () => {
   const PERSON = "11111111-1111-4111-8111-111111111111";
 
   it("взять свободную задачу — исполнителем становится нажавший", async () => {
     const inserted: Row[] = [];
-    const s = makeTasks(
-      stubDb({ updateResult: { id: "t1", ownerRef: PERSON }, inserted }),
-    );
+    const s = makeTasks(stubDb({ updateResult: { id: "t1", ownerRef: PERSON }, inserted }));
     const claimed = await s.claim("t1", PERSON);
     assert.equal(claimed?.ownerRef, PERSON);
     assert.ok(
@@ -261,13 +1039,25 @@ describe("Оценка сделанной задачи", () => {
       }),
       insert: () => ({ values: async () => [] }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
 
     const s = makeTasks(db);
     const updated = await s.rate("t1", "redo");
     assert.equal(updated.status, "in_progress");
     assert.equal(captured[0].completedAt, null, "время закрытия должно сброситься");
     assert.equal(captured[0].remindedAt, null, "напоминания должны включиться заново");
+    assert.equal(captured[0].agentRunId, null, "redo должен дать новую generation");
+    assert.equal(
+      "agentExecutionAttemptId" in captured[0],
+      false,
+      "общий SERVICE_TOKEN redo не вращает оплачиваемую попытку",
+    );
+    assert.equal("agentExecutionRetryAt" in captured[0], false);
+    assert.equal("agentExecutionBlockedAt" in captured[0], false);
+    assert.equal("agentExecutionBlockedReason" in captured[0], false);
+    assert.equal(captured[0].agentRunClaimedAt, null);
   });
 
   it("«отлично» не меняет статус — только отметка качества", async () => {
@@ -283,7 +1073,9 @@ describe("Оценка сделанной задачи", () => {
       }),
       insert: () => ({ values: async () => [] }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
 
     const s = makeTasks(db);
     const updated = await s.rate("t1", "excellent");
@@ -299,7 +1091,9 @@ describe("Оценка сделанной задачи", () => {
       update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
       insert: () => ({ values: async () => [] }),
     };
-    const db = { transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx) } as never;
+    const db = {
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
+    } as never;
 
     const s = makeTasks(db);
     await assert.rejects(() => s.rate("t1", "excellent"), /только сделанную/);
@@ -328,7 +1122,12 @@ describe("Правка полей задачи (edit)", () => {
   }
 
   it("переназначает исполнителя и меняет приоритет — трогает только эти поля", async () => {
-    const { db, captured } = editStub({ id: "t1", ownerKind: "human", ownerRef: null, priority: "normal" });
+    const { db, captured } = editStub({
+      id: "t1",
+      ownerKind: "human",
+      ownerRef: null,
+      priority: "normal",
+    });
     const t = await makeTasks(db).edit("t1", {
       ownerKind: "agent",
       ownerRef: "vendhub-ops",
@@ -338,6 +1137,12 @@ describe("Правка полей задачи (edit)", () => {
     assert.equal(captured[0].ownerRef, "vendhub-ops");
     assert.equal(captured[0].priority, "high");
     assert.equal("status" in captured[0], false, "статус правкой полей не трогаем");
+    assert.equal(
+      "agentExecutionAttemptId" in captured[0],
+      false,
+      "переназначение с общим SERVICE_TOKEN не вращает денежный attempt",
+    );
+    assert.equal("agentExecutionBlockedAt" in captured[0], false);
   });
 
   it("пустое описание/исполнитель → снятие (null)", async () => {
@@ -345,6 +1150,27 @@ describe("Правка полей задачи (edit)", () => {
     await makeTasks(db).edit("t1", { description: "  ", ownerRef: "" });
     assert.equal(captured[0].description, null);
     assert.equal(captured[0].ownerRef, null);
+  });
+
+  it("переназначение не отдаёт новому агенту checkpoint старого", async () => {
+    const attempt = "11111111-1111-4111-8111-111111111111";
+    const { db, captured } = editStub({
+      id: "t1",
+      ownerKind: "agent",
+      ownerRef: "old-agent",
+      agentExecutionAttemptId: attempt,
+    });
+
+    await makeTasks(db).edit("t1", { ownerRef: "new-agent" });
+
+    assert.equal(
+      "agentExecutionAttemptId" in captured[0],
+      false,
+      "SERVICE_TOKEN не вращает attempt",
+    );
+    assert.ok(captured[0].agentExecutionBlockedAt instanceof Date);
+    assert.match(String(captured[0].agentExecutionBlockedReason), /owner retry/);
+    assert.equal(captured[0].agentRunId, null);
   });
 
   it("пустой заголовок отклоняется", async () => {
@@ -411,7 +1237,9 @@ describe("Страховка: автомату вне эксплуатации �
 
   it("задача без объекта проверку не проходит вовсе", async () => {
     const s = makeTasks(stubDb({}));
-    assert.ok(await s.ensureForDay({ title: "Инвентаризация", ownerKind: "human", dayKey: "2026-08-08" }));
+    assert.ok(
+      await s.ensureForDay({ title: "Инвентаризация", ownerKind: "human", dayKey: "2026-08-08" }),
+    );
   });
 });
 
@@ -463,7 +1291,12 @@ describe("Хук «закрыл задачу ТО → факт в журнале
     const calls: Row[] = [];
     const s = new TasksService(
       stubDb({
-        updateResult: { id: "t1", status: "done", source: `maint:${PLAN}:2026-08-01`, resultNote: null },
+        updateResult: {
+          id: "t1",
+          status: "done",
+          source: `maint:${PLAN}:2026-08-01`,
+          resultNote: null,
+        },
         selects: [[план], [{ id: "уже" }]],
       }),
       maintSpy(calls),
@@ -476,7 +1309,12 @@ describe("Хук «закрыл задачу ТО → факт в журнале
     const calls: Row[] = [];
     const s = new TasksService(
       stubDb({
-        updateResult: { id: "t1", status: "done", source: `maint:${PLAN}:2026-08-01`, resultNote: null },
+        updateResult: {
+          id: "t1",
+          status: "done",
+          source: `maint:${PLAN}:2026-08-01`,
+          resultNote: null,
+        },
         selects: [[]],
       }),
       maintSpy(calls),
@@ -488,7 +1326,9 @@ describe("Хук «закрыл задачу ТО → факт в журнале
 
   it("обычная задача (source не maint:*) журнал обслуживания не трогает", async () => {
     // makeTasks с бросающей заглушкой: дойди хук до createLog — тест упал бы.
-    const s = makeTasks(stubDb({ updateResult: { id: "t1", status: "done", source: "manual", resultNote: null } }));
+    const s = makeTasks(
+      stubDb({ updateResult: { id: "t1", status: "done", source: "manual", resultNote: null } }),
+    );
     const t = await s.setStatus("t1", "done");
     assert.equal(t.status, "done");
   });
@@ -510,16 +1350,20 @@ describe("Права актора на приёмку и назначение (�
       insert: () => ({ values: async () => [] }),
     };
     return {
-      select: () => ({ from: () => ({ where: () => ({ limit: async () => очередь.shift() ?? [] }) }) }),
+      select: () => ({
+        from: () => ({ where: () => ({ limit: async () => очередь.shift() ?? [] }) }),
+      }),
       transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
     } as never;
   }
 
   it("оценка от оператора — 403, и текст объясняет, что чинится ролью", async () => {
-    const db = правовойStub(
-      [[{ id: OPERATOR, roles: ["operator"], role: null, active: "yes" }]],
-      { id: "t1", status: "done", quality: null, resultNote: "готово" },
-    );
+    const db = правовойStub([[{ id: OPERATOR, roles: ["operator"], role: null, active: "yes" }]], {
+      id: "t1",
+      status: "done",
+      quality: null,
+      resultNote: "готово",
+    });
     await assert.rejects(
       () => makeTasks(db).rate("t1", "redo", `person:${OPERATOR}`),
       /Это может менеджер/,
@@ -527,10 +1371,12 @@ describe("Права актора на приёмку и назначение (�
   });
 
   it("оценка от менеджера проходит — роль из массива", async () => {
-    const db = правовойStub(
-      [[{ id: MANAGER, roles: ["manager"], role: null, active: "yes" }]],
-      { id: "t1", status: "done", quality: null, resultNote: "готово" },
-    );
+    const db = правовойStub([[{ id: MANAGER, roles: ["manager"], role: null, active: "yes" }]], {
+      id: "t1",
+      status: "done",
+      quality: null,
+      resultNote: "готово",
+    });
     const t = await makeTasks(db).rate("t1", "accepted", `person:${MANAGER}`);
     assert.equal(t.id, "t1");
   });
@@ -541,10 +1387,12 @@ describe("Права актора на приёмку и назначение (�
   });
 
   it("уволенный менеджер прав не имеет — карточка осталась, доступ нет", async () => {
-    const db = правовойStub(
-      [[{ id: MANAGER, roles: ["manager"], role: null, active: "no" }]],
-      { id: "t1", status: "done", quality: null, resultNote: "готово" },
-    );
+    const db = правовойStub([[{ id: MANAGER, roles: ["manager"], role: null, active: "no" }]], {
+      id: "t1",
+      status: "done",
+      quality: null,
+      resultNote: "готово",
+    });
     await assert.rejects(
       () => makeTasks(db).rate("t1", "accepted", `person:${MANAGER}`),
       /Это может менеджер/,
@@ -553,11 +1401,20 @@ describe("Права актора на приёмку и назначение (�
 
   it("актор не в форме `person:<uuid>` отвергается, а не считается владельцем", async () => {
     const db = правовойStub([], { id: "t1", status: "done", quality: null, resultNote: "г" });
-    await assert.rejects(() => makeTasks(db).rate("t1", "accepted", "менеджер"), /Это может менеджер/);
+    await assert.rejects(
+      () => makeTasks(db).rate("t1", "accepted", "менеджер"),
+      /Это может менеджер/,
+    );
   });
 
   it("правка срока прав назначения не требует, смена исполнителя — требует", async () => {
-    const задача = { id: "t1", ownerKind: "human", ownerRef: OPERATOR, priority: "normal", due: null };
+    const задача = {
+      id: "t1",
+      ownerKind: "human",
+      ownerRef: OPERATOR,
+      priority: "normal",
+      due: null,
+    };
     const срок = правовойStub([[задача]], задача);
     const t = await makeTasks(срок).edit(
       "t1",
@@ -579,7 +1436,10 @@ describe("Права актора на приёмку и назначение (�
   it("переназначение на того же человека права не требует — смены нет", async () => {
     const задача = { id: "t1", ownerKind: "human", ownerRef: OPERATOR, priority: "normal" };
     const db = правовойStub([[задача]], задача);
-    assert.equal((await makeTasks(db).edit("t1", { ownerRef: OPERATOR }, `person:${OPERATOR}`)).id, "t1");
+    assert.equal(
+      (await makeTasks(db).edit("t1", { ownerRef: OPERATOR }, `person:${OPERATOR}`)).id,
+      "t1",
+    );
   });
 });
 
@@ -610,11 +1470,17 @@ describe("Приёмка работы менеджером (П7, R-P7-5/R-P7-6)"
           };
         },
       }),
-      insert: () => ({ values: async (value: Row) => { inserted.push(value); return []; } }),
+      insert: () => ({
+        values: async (value: Row) => {
+          inserted.push(value);
+          return [];
+        },
+      }),
     };
     const db = {
       select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
-      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx),
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> =>
+        callback(tx),
     } as never;
     return { db, patches, inserted };
   }
@@ -625,20 +1491,41 @@ describe("Приёмка работы менеджером (П7, R-P7-5/R-P7-6)"
   });
 
   it("не меняет status и ставит accepted только при отсутствии оценки", async () => {
-    const blank = confirmationDb({ id: "t1", title: "Пополнить Olma", ownerRef: "p1", status: "done", quality: null, confirmedAt: null });
+    const blank = confirmationDb({
+      id: "t1",
+      title: "Пополнить Olma",
+      ownerRef: "p1",
+      status: "done",
+      quality: null,
+      confirmedAt: null,
+    });
     const accepted = await makeTasks(blank.db).confirm("t1", "owner", NOW);
     assert.equal(accepted.status, "done");
     assert.equal("status" in blank.patches[0]!, false);
     assert.equal(blank.patches[0]!.quality, "accepted");
     assert.equal(blank.patches[0]!.confirmedAt, NOW);
 
-    const rated = confirmationDb({ id: "t2", title: "Проверить Olma", ownerRef: "p1", status: "done", quality: "excellent", confirmedAt: null });
+    const rated = confirmationDb({
+      id: "t2",
+      title: "Проверить Olma",
+      ownerRef: "p1",
+      status: "done",
+      quality: "excellent",
+      confirmedAt: null,
+    });
     await makeTasks(rated.db).confirm("t2", "owner", NOW);
     assert.equal("quality" in rated.patches[0]!, false, "excellent нельзя понижать до accepted");
   });
 
   it("успех пишет один аудит и одно событие task.confirmed", async () => {
-    const fixture = confirmationDb({ id: "t1", title: "Пополнить Olma", ownerRef: "p1", status: "done", quality: null, confirmedAt: null });
+    const fixture = confirmationDb({
+      id: "t1",
+      title: "Пополнить Olma",
+      ownerRef: "p1",
+      status: "done",
+      quality: null,
+      confirmedAt: null,
+    });
     await makeTasks(fixture.db).confirm("t1", "owner", NOW);
     assert.ok(fixture.inserted.some((value) => value.action === "task.confirmed"));
     const eventRow = fixture.inserted.find((value) => value.type === "task.confirmed");
@@ -648,7 +1535,10 @@ describe("Приёмка работы менеджером (П7, R-P7-5/R-P7-6)"
   });
 
   it("повтор не пишет дубль и возвращает уже принятую строку", async () => {
-    const fixture = confirmationDb({ id: "t1", status: "done", quality: "accepted", confirmedAt: "2026-08-26T04:00:00.000Z" }, false);
+    const fixture = confirmationDb(
+      { id: "t1", status: "done", quality: "accepted", confirmedAt: "2026-08-26T04:00:00.000Z" },
+      false,
+    );
     const result = await makeTasks(fixture.db).confirm("t1", "owner", NOW);
     assert.equal(result.confirmedAt, "2026-08-26T04:00:00.000Z");
     assert.deepEqual(fixture.inserted, []);
@@ -668,15 +1558,27 @@ describe("Список ждущих подтверждения (П7)", () => {
         from: () => ({
           where: (condition: unknown) => {
             conditions.push(condition);
-            return { orderBy: () => ({ limit: async (value: number) => { limit = value; return rows; } }) };
+            return {
+              orderBy: () => ({
+                limit: async (value: number) => {
+                  limit = value;
+                  return rows;
+                },
+              }),
+            };
           },
         }),
       }),
     } as never;
     const result = await makeTasks(db).awaitingConfirmation();
-    assert.deepEqual(result.map((row) => row.id), ["t1", "t2"]);
+    assert.deepEqual(
+      result.map((row) => row.id),
+      ["t1", "t2"],
+    );
     assert.equal(limit, TasksService.AWAITING_LIMIT);
-    const query = new PgDialect().sqlToQuery(conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0]);
+    const query = new PgDialect().sqlToQuery(
+      conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
     assert.match(query.sql, /confirmed_at/);
   });
 });
@@ -699,14 +1601,19 @@ describe("Отметка «тебе поручили» (П7, R-P7-10)", () => {
     };
     const db = {
       select: () => ({ from: () => ({ where: () => ({ limit: async () => [existing] }) }) }),
-      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx),
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> =>
+        callback(tx),
     } as never;
     return { db, captured };
   }
 
   it("созданное назначение оставляет отметку NULL по умолчанию", async () => {
     const inserted: Row[] = [];
-    await makeTasks(stubDb({ inserted })).create({ title: "Пополнить Olma", ownerKind: "human", ownerRef: PERSON });
+    await makeTasks(stubDb({ inserted })).create({
+      title: "Пополнить Olma",
+      ownerKind: "human",
+      ownerRef: PERSON,
+    });
     assert.equal("assignNotifiedAt" in inserted[0]!, false, "NULL должен дать default схемы");
   });
 
@@ -721,7 +1628,10 @@ describe("Отметка «тебе поручили» (П7, R-P7-10)", () => {
       }),
       insert: () => ({ values: async () => [] }),
     };
-    const db = { transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx) } as never;
+    const db = {
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> =>
+        callback(tx),
+    } as never;
     await makeTasks(db).claim("t1", PERSON, СЕЙЧАС);
     assert.equal(patches[0]!.assignNotifiedAt, СЕЙЧАС);
   });
@@ -739,13 +1649,22 @@ describe("Отметка «тебе поручили» (П7, R-P7-10)", () => {
       }),
       insert: () => ({ values: async () => [] }),
     };
-    const db = { transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> => callback(tx) } as never;
+    const db = {
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> =>
+        callback(tx),
+    } as never;
     await makeTasks(db).release("t1", PERSON);
     assert.equal(patches[0]!.assignNotifiedAt, null);
   });
 
   it("смена исполнителя сбрасывает отметку, правка срока и тот же исполнитель — нет", async () => {
-    const existing = { id: "t1", ownerKind: "human", ownerRef: PERSON, priority: "normal", due: null };
+    const existing = {
+      id: "t1",
+      ownerKind: "human",
+      ownerRef: PERSON,
+      priority: "normal",
+      due: null,
+    };
     const смена = editDb(existing);
     await makeTasks(смена.db).edit("t1", { ownerRef: ДРУГОЙ });
     assert.equal(смена.captured[0]!.assignNotifiedAt, null);
@@ -767,15 +1686,25 @@ describe("Отметка «тебе поручили» (П7, R-P7-10)", () => {
         from: () => ({
           where: (condition: unknown) => {
             conditions.push(condition);
-            return { limit: async (value: number) => { limit = value; return [{ id: "t1", ownerRef: PERSON }]; } };
+            return {
+              limit: async (value: number) => {
+                limit = value;
+                return [{ id: "t1", ownerRef: PERSON }];
+              },
+            };
           },
         }),
       }),
     } as never;
     const rows = await makeTasks(db).assignUnnotified();
-    assert.deepEqual(rows.map((row) => row.id), ["t1"]);
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      ["t1"],
+    );
     assert.equal(limit, 50);
-    const query = new PgDialect().sqlToQuery(conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0]);
+    const query = new PgDialect().sqlToQuery(
+      conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
     assert.match(query.sql, /assign_notified_at/);
     assert.match(query.sql, /owner_ref/);
     assert.match(query.sql, /status/);
@@ -784,7 +1713,12 @@ describe("Отметка «тебе поручили» (П7, R-P7-10)", () => {
   it("отметка сохраняет переданный момент", async () => {
     const patches: Row[] = [];
     const db = {
-      update: () => ({ set: (patch: Row) => { patches.push(patch); return { where: async () => [] }; } }),
+      update: () => ({
+        set: (patch: Row) => {
+          patches.push(patch);
+          return { where: async () => [] };
+        },
+      }),
     } as never;
     await makeTasks(db).markAssignNotified("t1", СЕЙЧАС);
     assert.equal(patches[0]!.assignNotifiedAt, СЕЙЧАС);

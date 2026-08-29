@@ -1,5 +1,5 @@
 import { telegram, type ChannelPost } from "@mydon/connectors";
-import type { BudgetStrategy } from "./budget";
+import { isLlmLedgerBlockingError, type LlmLedger } from "@mydon/shared";
 import type { AgentsCoreClient } from "./core-client";
 import type { EmbeddingGateway } from "./embedding";
 import { callModel } from "./llm";
@@ -75,7 +75,16 @@ const SEEN_THRESHOLD = 0.85;
 export async function assessIdeas(
   gateway: ModelGateway,
   digests: ChannelDigest[],
-  opts: { perDayUsd?: number; strategy?: BudgetStrategy; memory?: IdeasMemory } = {},
+  opts: {
+    agentName: string;
+    requestKey: string;
+    traceKey?: string;
+    assertLease?: () => Promise<void>;
+    ledger?: LlmLedger;
+    memory?: IdeasMemory;
+    /** Task-mode commits internal effects through Core after its checkpoint. */
+    deferMemoryWrites?: boolean;
+  },
 ): Promise<Proposal | null> {
   const posts = digests.flatMap((d) => d.posts.map((p) => `[${p.id}] ${p.text}`));
   if (posts.length === 0) return null;
@@ -90,8 +99,24 @@ export async function assessIdeas(
       .flatMap((d) => d.posts.map((p) => p.text.split("\n")[0]))
       .join(" · ")
       .slice(0, 1000);
-    const prior = await recallSemantic(mem.core, mem.embedder, namespace, query, 5);
-    seen = prior.filter((r) => r.score >= SEEN_THRESHOLD).map((r) => ({ text: r.text, score: r.score }));
+    const prior = await recallSemantic(
+      mem.core,
+      mem.embedder,
+      namespace,
+      query,
+      {
+        ledger: opts.ledger,
+        agentName: opts.agentName,
+        feature: "assess-ideas:recall",
+        requestKey: `${opts.requestKey}:embed:recall`,
+        traceKey: opts.traceKey ?? opts.requestKey,
+        ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
+      },
+      5,
+    );
+    seen = prior
+      .filter((r) => r.score >= SEEN_THRESHOLD)
+      .map((r) => ({ text: r.text, score: r.score }));
   }
 
   // Прошлые идеи — тоже внешний текст: кладём в недоверенный блок под маркером,
@@ -116,19 +141,39 @@ export async function assessIdeas(
         "что это и в какой слой встроить. Коротко, по делу, без воды. Если фишка совпадает с блоком " +
         "«РАНЕЕ РАЗОБРАННОЕ», не включай её повторно.",
       untrustedContext: untrusted,
-      ...(opts.perDayUsd !== undefined ? { perDayUsd: opts.perDayUsd } : {}),
-      ...(opts.strategy !== undefined ? { strategy: opts.strategy } : {}),
+      agentName: opts.agentName,
+      feature: "assess-ideas",
+      requestKey: `${opts.requestKey}:llm`,
+      traceKey: opts.traceKey ?? opts.requestKey,
+      ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
+      ...(opts.ledger ? { ledger: opts.ledger } : {}),
     },
     chain.length ? chain : ["default"],
   );
   if (!res.ok || res.text.trim().length === 0) return null;
 
   // Запомнить разобранные посты — для дедупа на будущих прогонах.
-  if (mem) {
-    for (const d of digests) {
-      for (const p of d.posts) {
-        await rememberSemantic(mem.core, mem.embedder, namespace, p.id, p.text.slice(0, 1000));
+  let memoryWarning: string | undefined;
+  if (mem && !opts.deferMemoryWrites) {
+    try {
+      for (const d of digests) {
+        for (const p of d.posts) {
+          await rememberSemantic(mem.core, mem.embedder, namespace, p.id, p.text.slice(0, 1000), {
+            ledger: opts.ledger,
+            agentName: opts.agentName,
+            feature: "assess-ideas:remember",
+            requestKey: `${opts.requestKey}:embed:remember:${p.id}`,
+            traceKey: opts.traceKey ?? opts.requestKey,
+            ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
+          });
+        }
       }
+    } catch (error) {
+      if (!isLlmLedgerBlockingError(error)) throw error;
+      // Основной LLM-ответ уже оплачен и готов. Недоступная ДОПОЛНИТЕЛЬНАЯ
+      // семантическая запись не должна выбросить результат и заставить
+      // следующий прогон снова платить за ту же оценку.
+      memoryWarning = `семантическая память не дополнена: ${error.message}`;
     }
   }
 
@@ -138,7 +183,9 @@ export async function assessIdeas(
     facts: {
       assessment: res.text.slice(0, 4000),
       ...(res.model !== undefined ? { model: res.model } : {}),
-      costUsd: res.costUsd,
+      ...(res.costUsd !== undefined ? { costUsd: res.costUsd } : {}),
+      ...(res.ledgerWarning ? { ledgerWarning: res.ledgerWarning } : {}),
+      ...(memoryWarning ? { memoryWarning } : {}),
       channels: digests.map((d) => d.channel),
       posts: posts.length,
       priorHits: seen.length,
@@ -169,7 +216,10 @@ export function buildIdeasProposal(digests: ChannelDigest[]): Proposal | null {
   return {
     action:
       `Идеи из каналов (${names}): ${all.length} постов. ` +
-      `Свежие: ${top.slice(0, 3).map((t) => title(t.post)).join(" · ")}.${tail}`,
+      `Свежие: ${top
+        .slice(0, 3)
+        .map((t) => title(t.post))
+        .join(" · ")}.${tail}`,
     facts: {
       channels: digests.map((d) => ({
         channel: d.channel,

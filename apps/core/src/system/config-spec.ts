@@ -48,7 +48,9 @@ const nonNegNumber = (v: string): string | null => {
  */
 const posNumber = (v: string): string | null => {
   const n = Number(v.replace(",", "."));
-  return Number.isFinite(n) && n >= 1 ? null : "нужно число от 1 (окно в сутках; ноль не значит «без окна»)";
+  return Number.isFinite(n) && n >= 1
+    ? null
+    : "нужно число от 1 (окно в сутках; ноль не значит «без окна»)";
 };
 
 /**
@@ -93,8 +95,18 @@ const shortText =
   (v: string): string | null =>
     v.length <= max ? null : `слишком длинно (максимум ${max})`;
 
-/** Пути мозга: подписочные харнессы (HTTP-путь задаётся через LLM_BASE_URL). */
-export const LLM_PROVIDERS = ["", "claude-cli", "codex-cli", "gemini-cli"] as const;
+/** Literal id колонки llm_model_price.provider: не URL, не API key. */
+const priceProviderId = (v: string): string | null =>
+  /^[a-z0-9][a-z0-9._-]{0,63}$/.test(v)
+    ? null
+    : "нужен provider ID до 64 символов: строчные буквы, цифры, точка, _ или - (не URL/секрет)";
+
+/**
+ * Subscription bypass is allowed only where auth mode is locally provable:
+ * explicit Claude OAuth plus disabled settings sources. Codex/Gemini persisted
+ * auth may be API/Vertex-backed, so the first ledger version fails them closed.
+ */
+export const LLM_PROVIDERS = ["", "claude-cli", "claude-subscription"] as const;
 
 export const CONFIG_SPECS: ConfigSpec[] = [
   {
@@ -115,15 +127,6 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     validate: oneOf(["0", "1"]),
   },
   {
-    key: "AGENT_BILLING_MODE",
-    label: "Режим бюджета",
-    kind: "select",
-    options: ["subscription", "metered"],
-    fallback: "subscription",
-    help: "subscription — метрируемых трат нет, потолок спит. metered — потолок активен.",
-    validate: oneOf(["subscription", "metered"]),
-  },
-  {
     key: "AGENT_DAILY_BUDGET_USD",
     label: "Потолок на агента в день, $",
     kind: "number",
@@ -131,18 +134,28 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     validate: nonNegNumber,
   },
   {
+    key: "LLM_GLOBAL_DAILY_BUDGET_USD",
+    label: "LLM: единый потолок в день, $",
+    kind: "number",
+    help:
+      "Общий потолок Agents, Bot, CC, Documents и embeddings. " +
+      "Пусто — временный фолбэк на AGENT_GLOBAL_BUDGET_USD.",
+    validate: nonNegNumber,
+  },
+  {
     key: "AGENT_GLOBAL_BUDGET_USD",
-    label: "Общий потолок в день, $",
+    label: "Агенты: старый общий потолок, $",
     kind: "number",
     fallback: "5",
+    help: "Переходный фолбэк. Новый LLM-ledger предпочитает LLM_GLOBAL_DAILY_BUDGET_USD.",
     validate: nonNegNumber,
   },
   {
     key: "LLM_PROVIDER",
-    label: "Мозг: подписочный харнесс",
+    label: "Мозг: CLI-подписка (заблокирована)",
     kind: "select",
     options: [...LLM_PROVIDERS],
-    help: "Пусто — LLM-путь спит (детерминированные навыки). Требует CLI в контейнере + авторизацию.",
+    help: "Пусто — LLM-путь спит. Все CLI-варианты пока fail-closed: preflight не доказывает отключённые usage credits до model turn. Для агентов используйте metered HTTP через Core ledger.",
     validate: oneOf([...LLM_PROVIDERS]),
   },
   {
@@ -150,8 +163,16 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     label: "Мозг: HTTP-шлюз (OpenAI-совместимый)",
     kind: "text",
     placeholder: "http://100.x.y.z:port",
-    help: "Альтернатива подписке. Держать ТОЛЬКО в Tailscale. Не ключ — endpoint.",
+    help: "Рабочий LLM-путь агентов. Держать ТОЛЬКО в Tailscale. Не ключ — endpoint.",
     validate: urlOrEmpty,
+  },
+  {
+    key: "LLM_PRICE_PROVIDER_ID",
+    label: "Мозг: pricing provider ID",
+    kind: "text",
+    placeholder: "например anthropic",
+    help: "Exact provider route из llm_model_price: каталог обязан содержать все SKU, куда gateway может маршрутизировать. Не URL/секрет; без ID вызов заблокирован.",
+    validate: priceProviderId,
   },
   {
     key: "LLM_MODEL",
@@ -176,6 +197,14 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     validate: urlOrEmpty,
   },
   {
+    key: "EMBED_PRICE_PROVIDER_ID",
+    label: "Память (RAG): pricing provider ID",
+    kind: "text",
+    placeholder: "например openai",
+    help: "Exact provider route для embeddings; в каталоге должны быть все возможные routed SKU. Не URL/API-ключ; без ID вызов заблокирован.",
+    validate: priceProviderId,
+  },
+  {
     key: "EMBED_MODEL",
     label: "Память (RAG): модель эмбеддингов",
     kind: "text",
@@ -189,7 +218,10 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     kind: "text",
     placeholder: "2508160376,2508160359",
     help: "Первый автомат маршрута получает закуп первым. Пусто — по имени автомата.",
-    validate: (v) => (/^\s*\d{6,}(\s*,\s*\d{6,})*\s*$/.test(v) ? null : "серийники (без «c») через запятую, например 2508160376,2508160359"),
+    validate: (v) =>
+      /^\s*\d{6,}(\s*,\s*\d{6,})*\s*$/.test(v)
+        ? null
+        : "серийники (без «c») через запятую, например 2508160376,2508160359",
   },
   // ── Вендинг: полевой контур (П4) ──
   {
@@ -446,7 +478,11 @@ export function resolveEffective(
   const dbVal = (db[spec.key] ?? "").trim();
   const envVal = (env[spec.key] ?? "").trim();
   const [value, source]: [string, EffectiveItem["source"]] =
-    dbVal !== "" ? [dbVal, "db"] : envVal !== "" ? [envVal, "env"] : [spec.fallback ?? "", "default"];
+    dbVal !== ""
+      ? [dbVal, "db"]
+      : envVal !== ""
+        ? [envVal, "env"]
+        : [spec.fallback ?? "", "default"];
   return {
     key: spec.key,
     label: spec.label,

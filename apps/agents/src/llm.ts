@@ -1,20 +1,24 @@
-import { resolveBudget, type BudgetStrategy } from "./budget";
+import {
+  LlmLedgerUnavailableError,
+  LlmReplayBlockedError,
+  inputTokenCeiling,
+  type LlmLedger,
+  type LlmReservation,
+} from "@mydon/shared";
 import { resolveModelChain, type ModelGateway, type ModelResult } from "./model-gateway";
 import { systemGuard, wrapUntrusted } from "./untrusted";
 
 /**
- * Единая точка обращения агента к модели (шаг дорожной карты #3).
+ * Единая точка обращения агента к модели.
  *
- * Порядок — это и есть безопасность:
- *   1. БЮДЖЕТ до вызова. На подписке спит (трат нет); при metered исчерпание
- *      останавливает вызов ещё до траты (см. budget.ts).
- *   2. ЗАЩИТА ОТ ИНЪЕКЦИЙ. Внешний контент всегда оборачивается, а системный
- *      страж запрещает модели исполнять инструкции из данных.
- *   3. МАРШРУТИЗАЦИЯ С FALLBACK. Пробуем модели по цепочке; первая ответившая
- *      даёт результат. Никакой модели в цепочке — путь честно выключен.
- *
- * Стоимость берём из ответа шлюза (если он её сообщил), а не выдумываем.
+ * Для metered HTTP бюджет авторизует только Core ledger. Процесс агентов
+ * не читает и не суммирует траты сам: перед КАЖДОЙ физической
+ * fallback-попыткой он берёт атомарный reserve, после — settle/fail.
+ * Явно local HTTP денежный ledger не уменьшает. Subscription CLI
+ * заблокирована, пока не умеет доказать отключённый overage до model turn.
  */
+
+export const DEFAULT_MAX_TOKENS = 2_048;
 
 export interface CallModelInput {
   /** Задача для модели (доверенная часть — формулирует навык/агент). */
@@ -23,24 +27,30 @@ export interface CallModelInput {
   untrustedContext?: string;
   /** Доп. системная инструкция навыка (кладётся после стража). */
   system?: string;
-  /** Потолок токенов ответа. */
+  /** Потолок токенов ответа; незаданный/битый берёт безопасный default. */
   maxTokens?: number;
-  // ── Бюджет ──
-  /** Дневной потолок агента из паспорта ($). Не задан → безопасный дефолт $5. */
-  perDayUsd?: number;
-  /** Стратегия при исчерпании (паспорт on_exceeded). */
-  strategy?: BudgetStrategy;
-  /** Траты агента за сутки (при metered — из журнала Core; на подписке 0). */
-  agentSpentUsd?: number;
-  /** Траты всех агентов за сутки (глобальный потолок). */
-  globalSpentUsd?: number;
+  /** Карточка агента даёт Core его индивидуальный cap/strategy. */
+  agentName: string;
+  /** Навык/функция для финансового следа. */
+  feature: string;
+  /** Идемпотентная основа вызова; callModel добавит attempt:N. */
+  requestKey: string;
+  /** Объединяет попытки одной задачи. */
+  traceKey?: string;
+  /** Durable task lease: проверяется перед КАЖДОЙ fallback-попыткой. */
+  assertLease?: () => Promise<void>;
+  /** Нужен только metered-шлюзу; его отсутствие закрывает вызов. */
+  ledger?: LlmLedger;
 }
 
 export interface CallModelResult {
   ok: boolean;
   text: string;
   model?: string;
-  costUsd: number;
+  /** Provider-reported cost; отсутствие не означает нуль. */
+  costUsd?: number;
+  /** Ответ не маскируем, если он уже оплачен, а settle Core не ответил. */
+  ledgerWarning?: string;
   /** Человеко-понятная причина — в лог и трейс. */
   reason: string;
 }
@@ -52,43 +62,145 @@ export function buildPrompt(input: Pick<CallModelInput, "prompt" | "untrustedCon
     : input.prompt;
 }
 
+function outputCeiling(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : DEFAULT_MAX_TOKENS;
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Provider уже получил запрос: сбой settle не может отменить трату и не
+ * должен спрятать полезный ответ. Резерв остаётся exposure и fail-closed
+ * защищает следующий reserve; в результат кладём явное warning.
+ */
+async function accountProviderResult(
+  ledger: LlmLedger,
+  reservation: LlmReservation,
+  result: ModelResult,
+  requestedModel: string,
+): Promise<string | undefined> {
+  try {
+    if (!result.ok) {
+      await ledger.fail(reservation.id, {
+        outcome: "unknown",
+        ...(result.providerRequestId ? { providerRequestId: result.providerRequestId } : {}),
+        ...(result.resolvedModel ? { resolvedModel: result.resolvedModel } : {}),
+        ...(result.usage ? { usage: result.usage } : {}),
+        ...(result.costUsd !== undefined ? { providerReportedUsd: result.costUsd } : {}),
+        reason: result.error ?? `provider error (${requestedModel})`,
+      });
+      return undefined;
+    }
+
+    // Report any successful physical response as success, without inventing
+    // fields. Core owns anomaly classification, lower-bound pricing and circuit.
+    await ledger.settle(reservation.id, {
+      outcome: "success",
+      ...(result.usage ? { usage: result.usage } : {}),
+      ...(result.providerRequestId ? { providerRequestId: result.providerRequestId } : {}),
+      ...(result.resolvedModel ? { resolvedModel: result.resolvedModel } : {}),
+      ...(result.costUsd !== undefined ? { providerReportedUsd: result.costUsd } : {}),
+    });
+    if (!result.resolvedModel) {
+      return "provider не сообщил resolvedModel; Core открыл circuit";
+    }
+    return !result.usage && result.costUsd === undefined
+      ? "provider не сообщил usage/cost; Core сохранил резерв"
+      : undefined;
+  } catch (error) {
+    return `LLM-ledger не подтвердил итог: ${message(error)}`;
+  }
+}
+
 export async function callModel(
   gateway: ModelGateway,
   input: CallModelInput,
   chain: string[] = resolveModelChain(),
 ): Promise<CallModelResult> {
-  // 1. Бюджет ДО вызова.
-  const budget = resolveBudget({
-    agentSpentUsd: input.agentSpentUsd ?? 0,
-    globalSpentUsd: input.globalSpentUsd ?? 0,
-    perDayUsd: input.perDayUsd,
-    strategy: input.strategy,
-  });
-  if (!budget.allowed) {
-    return { ok: false, text: "", costUsd: 0, reason: `бюджет (${budget.action}): ${budget.reason}` };
-  }
-
   if (chain.length === 0) {
-    return { ok: false, text: "", costUsd: 0, reason: "модель не настроена (LLM_MODEL пуст) — LLM-путь выключен" };
+    return {
+      ok: false,
+      text: "",
+      reason: "модель не настроена (LLM_MODEL пуст) — LLM-путь выключен",
+    };
   }
 
-  // 2. Защита от инъекций: страж в system, недоверенный контент обёрнут.
+  // Защита от инъекций: страж в system, недоверенный контент обёрнут.
   const system = [systemGuard(), input.system].filter(Boolean).join("\n\n");
   const prompt = buildPrompt(input);
+  const maxTokens = outputCeiling(input.maxTokens);
+  const metered = gateway.billingMode === "metered";
+  if (metered && input.ledger === undefined) {
+    throw new LlmLedgerUnavailableError("Metered LLM не получил клиент Core ledger");
+  }
 
-  // 3. Маршрутизация с fallback.
   let last: ModelResult | null = null;
-  for (const model of chain) {
-    last = await gateway.call(model, { system, prompt, maxTokens: input.maxTokens });
+  let lastLedgerWarning: string | undefined;
+  for (let i = 0; i < chain.length; i += 1) {
+    const model = chain[i];
+    // Не разрешаем stale worker ни reserve, ни прямой local/subscription dispatch.
+    await input.assertLease?.();
+    if (metered) {
+      // input.ledger проверен выше; локальная константа убирает optional из типа.
+      const ledger = input.ledger!;
+      const reservation = await ledger.reserve({
+        consumer: "agents",
+        feature: input.feature,
+        agentName: input.agentName,
+        provider: gateway.provider,
+        model,
+        requestKey: `${input.requestKey}:attempt:${i + 1}`,
+        traceKey: input.traceKey ?? input.requestKey,
+        inputTokenCeiling: inputTokenCeiling(`${system}\n\n${prompt}`),
+        outputTokenCeiling: maxTokens,
+        metadata: { attempt: i + 1, chainLength: chain.length },
+      });
+
+      // Core вернул существующую резервацию для того же requestKey. Без
+      // idempotency key на provider API нельзя понять, был ли запрос уже
+      // отправлен предыдущим процессом, поэтому повторный dispatch запрещён.
+      if (reservation.replay) {
+        throw new LlmReplayBlockedError(
+          reservation.requestKey,
+          `LLM-ledger вернул replay для ${reservation.requestKey}; повторный provider call запрещён`,
+        );
+      }
+
+      try {
+        last = await gateway.call(model, { system, prompt, maxTokens });
+      } catch (error) {
+        last = { text: "", model, ok: false, error: message(error) };
+      }
+      lastLedgerWarning = await accountProviderResult(ledger, reservation, last, model);
+    } else {
+      try {
+        last = await gateway.call(model, { system, prompt, maxTokens });
+      } catch (error) {
+        last = { text: "", model, ok: false, error: message(error) };
+      }
+    }
+
     if (last.ok) {
-      return { ok: true, text: last.text, model: last.model, costUsd: last.costUsd, reason: `ответ модели ${last.model}` };
+      return {
+        ok: true,
+        text: last.text,
+        model: last.resolvedModel ?? last.model,
+        ...(last.costUsd !== undefined ? { costUsd: last.costUsd } : {}),
+        ...(lastLedgerWarning ? { ledgerWarning: lastLedgerWarning } : {}),
+        reason: `ответ модели ${last.resolvedModel ?? last.model}`,
+      };
     }
   }
   return {
     ok: false,
     text: "",
     ...(last?.model !== undefined ? { model: last.model } : {}),
-    costUsd: last?.costUsd ?? 0,
+    ...(last?.costUsd !== undefined ? { costUsd: last.costUsd } : {}),
+    ...(lastLedgerWarning ? { ledgerWarning: lastLedgerWarning } : {}),
     reason: `все модели цепочки не ответили: ${last?.error ?? "нет причины"}`,
   };
 }

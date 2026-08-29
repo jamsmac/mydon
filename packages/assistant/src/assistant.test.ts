@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { answer, parseIntent, type AssistantCore, type LlmResolver, type LlmSnapshot } from "./index";
+import { LlmBudgetDeniedError, LlmReplayBlockedError, type LlmCallContext } from "@mydon/shared";
+import {
+  answer,
+  parseIntent,
+  type AssistantCore,
+  type LlmResolver,
+  type LlmSnapshot,
+} from "./index";
 
 // Заглушка Core: возвращает заданное, чтобы проверить именно логику помощника.
 function fakeCore(over: Partial<AssistantCore> = {}): AssistantCore {
@@ -76,7 +83,9 @@ describe("Ответы помощника", () => {
     const r = await answer(
       "согласования",
       fakeCore({
-        pendingApprovals: async () => [{ id: "a1", agent: "vendhub-ops", action: "Заказать зёрна", tier: "T3" }],
+        pendingApprovals: async () => [
+          { id: "a1", agent: "vendhub-ops", action: "Заказать зёрна", tier: "T3" },
+        ],
       }),
     );
     assert.equal(r.approvalId, "a1");
@@ -88,8 +97,18 @@ describe("Ответы помощника", () => {
       "что было",
       fakeCore({
         recent: async () => [
-          { actorKind: "human", action: "approval.approved", actorRef: "panel", ts: "2026-07-28T10:00:00Z" },
-          { actorKind: "agent", action: "approval.request", actorRef: "vendhub-ops", ts: "2026-07-28T09:00:00Z" },
+          {
+            actorKind: "human",
+            action: "approval.approved",
+            actorRef: "panel",
+            ts: "2026-07-28T10:00:00Z",
+          },
+          {
+            actorKind: "agent",
+            action: "approval.request",
+            actorRef: "vendhub-ops",
+            ts: "2026-07-28T09:00:00Z",
+          },
         ],
       }),
     );
@@ -112,7 +131,10 @@ describe("LLM-слой: вопросы вне готовых правил", () =
   });
 
   it("резолвер может ответить словами — отдаём его текст", async () => {
-    const llm: LlmResolver = async () => ({ kind: "answer", text: "Тревог нет, можешь не спешить." });
+    const llm: LlmResolver = async () => ({
+      kind: "answer",
+      text: "Тревог нет, можешь не спешить.",
+    });
     const r = await answer(question, fakeCore(), { llm });
     assert.match(r.text, /можешь не спешить/);
   });
@@ -120,9 +142,19 @@ describe("LLM-слой: вопросы вне готовых правил", () =
   it("резолвер может распознать намерение — Core собирает честный ответ", async () => {
     // LLM понял «непонятный» вопрос как «автоматы простаивают».
     const llm: LlmResolver = async () => ({ kind: "intent", intent: { kind: "machines" } });
-    const r = await answer(question, fakeCore({
-      briefing: async () => ({ overdueMoney: 0, idleMachines: 3, pendingApprovals: 0, contractsDueSoon: 0, overdueTasks: 0 }),
-    }), { llm });
+    const r = await answer(
+      question,
+      fakeCore({
+        briefing: async () => ({
+          overdueMoney: 0,
+          idleMachines: 3,
+          pendingApprovals: 0,
+          contractsDueSoon: 0,
+          overdueTasks: 0,
+        }),
+      }),
+      { llm },
+    );
     assert.match(r.text, /Простаивают автоматы: 3/);
   });
 
@@ -132,17 +164,74 @@ describe("LLM-слой: вопросы вне готовых правил", () =
       seen.push(snapshot);
       return { kind: "answer", text: "ок" };
     };
-    await answer(question, fakeCore({
-      briefing: async () => ({ overdueMoney: 5, idleMachines: 1, pendingApprovals: 0, contractsDueSoon: 2, overdueTasks: 0 }),
-      pendingApprovals: async () => [{ id: "a1", agent: "x", action: "y", tier: "T3" }],
-      recent: async () => [{ actorKind: "human", action: "approval.approved", actorRef: "panel", ts: "2026-07-28T10:00:00Z" }],
-    }), { llm });
+    await answer(
+      question,
+      fakeCore({
+        briefing: async () => ({
+          overdueMoney: 5,
+          idleMachines: 1,
+          pendingApprovals: 0,
+          contractsDueSoon: 2,
+          overdueTasks: 0,
+        }),
+        pendingApprovals: async () => [{ id: "a1", agent: "x", action: "y", tier: "T3" }],
+        recent: async () => [
+          {
+            actorKind: "human",
+            action: "approval.approved",
+            actorRef: "panel",
+            ts: "2026-07-28T10:00:00Z",
+          },
+        ],
+      }),
+      { llm },
+    );
     assert.equal(seen.length, 1, "снимок должен дойти до резолвера");
     const s = seen[0]!;
     assert.equal(s.briefing.overdueMoney, 5);
     assert.equal(s.pendingApprovals, 1);
     assert.deepEqual(s.recentLabels, ["ты одобрил"]);
     assert.match(s.domains, /vendhub/);
+  });
+
+  it("идемпотентный context сурфейса доходит до резолвера", async () => {
+    let seen: LlmCallContext | undefined;
+    const llmContext: LlmCallContext = {
+      requestKey: "telegram:update:42",
+      traceKey: "telegram:update:42",
+    };
+    const llm: LlmResolver = async (_q, _snapshot, context) => {
+      seen = context;
+      return { kind: "answer", text: "ок" };
+    };
+
+    await answer(question, fakeCore(), { llm, llmContext });
+    assert.equal(seen, llmContext);
+  });
+
+  it("ledger-отказ назван честно, а не маскируется подсказкой", async () => {
+    const llm: LlmResolver = async () => {
+      throw new LlmBudgetDeniedError("pause", "дневной лимит исчерпан", {
+        day: "2026-08-29",
+        globalCapUsd: 5,
+        globalExposureUsd: 5,
+        remainingUsd: 0,
+      });
+    };
+
+    const r = await answer(question, fakeCore(), { llm });
+    assert.match(r.text, /ИИ-запрос не выполнен/);
+    assert.match(r.text, /лимит исчерпан/);
+  });
+
+  it("закрытый replay просит новый запрос и не маскируется общей подсказкой", async () => {
+    const llm: LlmResolver = async () => {
+      throw new LlmReplayBlockedError("telegram:update:42:anthropic-api");
+    };
+
+    const r = await answer(question, fakeCore(), { llm });
+    assert.match(r.text, /уже был принят/);
+    assert.match(r.text, /новый запрос/);
   });
 
   it("падение резолвера не роняет помощника — откат к подсказке", async () => {

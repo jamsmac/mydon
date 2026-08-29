@@ -60,14 +60,20 @@ CLAUDE_CODE_OAUTH_TOKEN=<токен подписки — команда: claude 
 ANTHROPIC_API_KEY=<платный API-ключ с console.anthropic.com>
 ```
 
-- **Подписка** — та же, что у Claude Code на Маке, отдельно не оплачивается.
-  Токен выдаёт команда `claude setup-token` (запускается на Маке, вход через
-  браузер; токен действует год). Расход идёт в лимиты подписки.
+- **Подписка** — та же, что у Claude Code на Маке. Токен выдаёт команда
+  `claude setup-token` (запускается на Маке, вход через браузер). Перед
+  каждым real prompt Assistant SDK проверяет first-party OAuth, `system/init`
+  и `rate_limits.extra_usage.is_enabled === false`. Если usage credits включены,
+  статус недоступен или форма ответа изменилась, подписочный prompt
+  не уходит. Anthropic тарифицирует usage credits отдельно по API-ценам.
 - **API-ключ** — платный, поштучно за запросы. Нужен ТОЛЬКО для документов
   (Excel/Word-отчёты агентов): их делают серверные навыки Anthropic, которых
   в подписке нет. Для вопросов-ответов помощника не обязателен.
-- Заданы **оба** — вопросы идут через подписку, а при её сбое или исчерпании
-  лимита незаметно отвечает API-ключ.
+- Заданы **оба** — вопросы идут через подписку только при доказанно
+  выключенных usage credits. Иначе отвечает API-путь, который до вызова
+  резервирует единый Core USD-бюджет.
+
+[Официально о usage credits и API-тарифах](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans).
 
 После правки `.env` перезапустить панель и бота:
 
@@ -93,6 +99,77 @@ docker exec -i mydon-core node packages/db/dist/seed.js    # только 5 на
 Production-скрипты запускают эти команды одноразовыми контейнерами из нового
 образа до переключения сервисов. `migrate.js` печатает ошибку PostgreSQL и
 проблемный запрос; `drizzle-kit migrate` для операционного запуска не используем.
+
+### Rollout LLM-ledger и task checkpoint: 0075 → 0076
+
+Эти миграции выкатываются строго по journal: сначала `0075_llm_ledger`, затем
+`0076_agent_execution_outbox`. 0075 создаёт финансовый ledger и устойчивую
+денежную попытку задачи; 0076 добавляет durable task checkpoint, атомарный
+commit и Notion outbox. Нельзя выборочно применить 0076 к базе без 0075 или
+запустить новый Agents против старого Core.
+
+Порядок controlled rollout:
+
+1. Поставить расписания на паузу и остановить `mydon-agents`, чтобы во время
+   смены контракта не было нового task claim.
+2. Убедиться, что pre-migration backup создан и не пуст.
+3. Новым образом выполнить `migrate.js`: journal сам применит 0075 и затем 0076. Не запускать SQL-файлы вручную в обратном порядке.
+4. Поднять **Core раньше Agents**, дождаться health и проверить наличие обеих
+   таблиц и ценового каталога.
+5. Только после этого поднять новый `mydon-agents`; затем снять паузу и
+   наблюдать task checkpoint и Notion outbox.
+
+Минимальная проверка схемы после шага 3:
+
+```bash
+/opt/backups/db_access.sh query "
+select to_regclass('public.llm_spend')             as llm_spend,
+       to_regclass('public.task_agent_execution')  as task_agent_execution,
+       to_regclass('public.outbox_delivery')       as outbox_delivery;
+select provider, model, billing_kind, valid_from, valid_to
+  from llm_model_price
+ order by provider, model, valid_from"
+```
+
+После первого task-run проверить, что checkpoint появляется до outcome, а
+Notion intent — только вместе с committed outcome:
+
+```bash
+/opt/backups/db_access.sh query "
+select e.id, e.execution_attempt_id, e.status, e.checkpoint_kind,
+       e.committed_at, d.status as delivery_status, d.attempts,
+       d.provider_ref, d.last_error
+  from task_agent_execution e
+  left join outbox_delivery d on d.task_agent_execution_id = e.id
+ order by e.created_at desc
+ limit 20"
+```
+
+Гарантия начинается после успешного checkpoint: stale takeover переигрывает
+сохранённый checkpoint, а commit атомарно фиксирует внутренние эффекты и Notion
+intent. Окно `provider response → checkpoint` **не exactly-once**: падение там
+может оставить оплаченный, но не сохранённый ответ, и ledger заблокирует
+автоматический повтор как `execution_unknown`. Cron, Assistant, Documents и
+Telegram пока не используют этот checkpoint/outbox slice.
+
+Notion dispatcher переводит `pending → dispatching` до внешнего запроса и
+завершает строку как `sent`, `skipped`, `unknown` или `dead`. Просроченный более
+чем на 15 минут `dispatching` при следующем claim становится `unknown`; назад в
+`pending` он автоматически не возвращается. При `dispatching` сначала ждать
+активный worker, а после таймаута восстановить один dispatcher и сверить Notion.
+Только явный `429` повторяется bounded внутри того же claim по `Retry-After`.
+`409`, `5xx`, timeout и обрыв сразу становятся `unknown` без повтора. При `unknown` вручную
+искать созданную страницу; слепой retry и прямой UPDATE статуса запрещены.
+Подробная таблица состояний — в
+[`AGENTS_ACTIVATION.md`](AGENTS_ACTIVATION.md).
+
+**Rollback только кодовый и additive.** Сначала снова остановить Agents и
+вернуть их предыдущий совместимый образ, затем при необходимости вернуть Core.
+Таблицы, enums, `approval.client_key` и `event.client_key` из 0076, а также
+ledger 0075 **не удалять и не откатывать DROP-миграцией**: старый код их
+игнорирует, а строки checkpoint/outbox нужны для аудита и последующего
+forward-fix. `pending`/`dispatching`/`unknown` при rollback не чистить; перед
+повторным включением dispatcher разобрать неоднозначные строки по runbook выше.
 
 ### Разовый перенос истории склада (П8a)
 
@@ -421,14 +498,14 @@ env, кеш чтения ≤ 60 с) — переключается без рес
 приоритетный уровень после `OURVEND_ACCOUNTING_SOURCE`, `VENDING_ROUTE_ORDER`,
 `SYNC_STALE_HOURS`):
 
-| Ключ | Дефолт | Что регулирует |
-|---|---|---|
-| `OURVEND_ACCOUNTING_SOURCE` | `stock` | источник `sale`/`machine_stock`; без `STOCK_DATABASE_URL` действует `own` независимо от значения |
-| `CUTOVER_GREEN_DAYS` | `7` | порог серии зелёных дней паритета для сигнала `ourvend.cutover_ready` |
-| `STOCK_PARITY_TOLERANCE` | `3`, не может быть отрицательной | допуск сверки остатков: зеркало (07:50) и агент (08:05) видят один и тот же живой экран автомата с разницей 15 мин, продажа внутри этого окна — не расхождение, если `stock.qty − own.qty` не превышает порог |
-| `SNAPSHOT_STALE_HOURS` | `36` | порог сторожа застоя учётного снапшота (`ourvend.snapshot_stale`, в ОБОИХ режимах учёта: сторож следит за АГЕНТОМ, а не за учётом; поле витрины `health.snapshotStale` остаётся own-only), считается РАЗДЕЛЬНО по `ourvend_sale_snapshot` и `ourvend_stock_snapshot` — застой любой из двух таблиц эмитит событие, текст называет какую |
-| `SNAPSHOT_RETENTION_DAYS` | `180`, панель не примет ниже `180` | окно еженедельной ретенции снимков |
-| `STOCK_COUNT_RETENTION_DAYS` | `730`, панель не примет ниже `730` (только продлить) | окно ретенции истории инвентаризаций склада (`vending_stock_count`, срез «Хвосты», R-H-8) |
+| Ключ                         | Дефолт                                               | Что регулирует                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OURVEND_ACCOUNTING_SOURCE`  | `stock`                                              | источник `sale`/`machine_stock`; без `STOCK_DATABASE_URL` действует `own` независимо от значения                                                                                                                                                                                                                                        |
+| `CUTOVER_GREEN_DAYS`         | `7`                                                  | порог серии зелёных дней паритета для сигнала `ourvend.cutover_ready`                                                                                                                                                                                                                                                                   |
+| `STOCK_PARITY_TOLERANCE`     | `3`, не может быть отрицательной                     | допуск сверки остатков: зеркало (07:50) и агент (08:05) видят один и тот же живой экран автомата с разницей 15 мин, продажа внутри этого окна — не расхождение, если `stock.qty − own.qty` не превышает порог                                                                                                                           |
+| `SNAPSHOT_STALE_HOURS`       | `36`                                                 | порог сторожа застоя учётного снапшота (`ourvend.snapshot_stale`, в ОБОИХ режимах учёта: сторож следит за АГЕНТОМ, а не за учётом; поле витрины `health.snapshotStale` остаётся own-only), считается РАЗДЕЛЬНО по `ourvend_sale_snapshot` и `ourvend_stock_snapshot` — застой любой из двух таблиц эмитит событие, текст называет какую |
+| `SNAPSHOT_RETENTION_DAYS`    | `180`, панель не примет ниже `180`                   | окно еженедельной ретенции снимков                                                                                                                                                                                                                                                                                                      |
+| `STOCK_COUNT_RETENTION_DAYS` | `730`, панель не примет ниже `730` (только продлить) | окно ретенции истории инвентаризаций склада (`vending_stock_count`, срез «Хвосты», R-H-8)                                                                                                                                                                                                                                               |
 
 На проде `OURVEND_ACCOUNTING_SOURCE` до первой правки владельца в панели
 показывает `source: "env"`, не `"default"`: `deploy/docker-compose.yml`
@@ -466,9 +543,11 @@ aborted }`; `capped` в неё НЕ входит (это поле есть то�
 `@Throttle({ burst: { limit: 2, ttl: 60_000 } })` — 2 запроса в минуту: это не
 чтение, а цикл DELETE с бюджетом, и два прогона подряд незачем. Тело
 необязательное — `{ dryRun?: boolean }`, умолчание `false`. Ответ:
+
 ```json
 { "dryRun": boolean, "tables": [{ "table": string, "deleted": number, "olderThanDays": number, "capped": boolean, "aborted": boolean }] }
 ```
+
 `tables` — ВСЕ пять целей разом, включая «удалено 0» (крон о нулях молчит,
 ручной вызов — нет, иначе пустой ответ читался бы как «ничего не сработало»).
 `dryRun: true` — те же запросы и тот же предикат, но `count(*)` вместо
@@ -585,11 +664,11 @@ deploy-ключом; если появился новый коммит — де�
 
 **Сколько ждать.** Раньше любой коммит стоил ~5 минут полной пересборки; теперь:
 
-| Что изменилось в коммите | Что делает деплой | Время |
-|---|---|---|
-| только `data/`, `docs/`, `*.md` | `git reset`, и всё | ~5 с |
-| код одного приложения | пересборка только его (кеш turbo), рестарт | ~40 с |
-| зависимости, Dockerfile, схема БД | полная сборка, миграции, рестарт | ~5 мин |
+| Что изменилось в коммите          | Что делает деплой                          | Время  |
+| --------------------------------- | ------------------------------------------ | ------ |
+| только `data/`, `docs/`, `*.md`   | `git reset`, и всё                         | ~5 с   |
+| код одного приложения             | пересборка только его (кеш turbo), рестарт | ~40 с  |
+| зависимости, Dockerfile, схема БД | полная сборка, миграции, рестарт           | ~5 мин |
 
 Держится это на трёх вещах: сиды и выгрузки приезжают в контейнер **томом**
 `../data:/app/data:ro` (в образе их нет — см. `.dockerignore`), кеш turbo живёт
@@ -600,6 +679,7 @@ deploy-ключом; если появился новый коммит — де�
 
 **Обновить только данные** (после мержа сида): дождаться тика таймера и звать
 импорт — пересборки не будет.
+
 ```
 journalctl -u mydon-autodeploy -n 5 --no-pager   # «только данные/документы»
 docker compose -f deploy/docker-compose.yml --env-file .env exec -T mydon-core \
@@ -614,11 +694,13 @@ deploy-ключ, делает `/opt/mydon-app` git-репозиторием `mai
 Публичную часть ключа один раз добавить в GitHub → Deploy keys (read-only).
 
 **Наблюдать/управлять:**
+
 ```
 journalctl -u mydon-autodeploy -n 50        # что делал автодеплой
 systemctl list-timers mydon-autodeploy      # когда следующий тик
 systemctl stop mydon-autodeploy.timer       # временно выключить
 ```
+
 Бэкапы перед миграциями: `/opt/backups/mydon-autodeploy/pre_*.sql.gz` (последние 10).
 
 После обновления git-копии auto-deploy также устанавливает актуальные

@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { OwnerActionGuard } from "../common/owner-action.guard";
 import { EventsModule } from "../events/events.module";
 import { MaintenanceModule } from "../maintenance/maintenance.module";
 import { RulesModule } from "../rules/rules.module";
@@ -13,7 +14,7 @@ import { TasksService } from "./tasks.service";
   // исполнения правил внутри модуля задач.
   imports: [MaintenanceModule, EventsModule, VendingModule, RulesModule],
   controllers: [TasksController],
-  providers: [TasksService, TaskBridgeService],
+  providers: [TasksService, TaskBridgeService, OwnerActionGuard],
   exports: [TasksService],
 })
 export class TasksModule {}

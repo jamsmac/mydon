@@ -14,7 +14,10 @@ const SUGGESTIONS = ["брифинг", "что просрочено", "каки�
 
 export function Chat() {
   const [msgs, setMsgs] = useState<Msg[]>([
-    { who: "mydon", text: "Спрашивай обычными словами. Например: «брифинг», «найди Olma», «что я решал»." },
+    {
+      who: "mydon",
+      text: "Спрашивай обычными словами. Например: «брифинг», «найди Olma», «что я решал».",
+    },
   ]);
   const [input, setInput] = useState("");
   const [pending, startTransition] = useTransition();
@@ -23,17 +26,17 @@ export function Chat() {
   function send(text: string) {
     const q = text.trim();
     if (!q || pending) return;
+    // Один id живёт всю попытку server action: повтор не создаст
+    // вторую reservation и не спишет один вопрос дважды.
+    const requestId = crypto.randomUUID();
     setMsgs((m) => [...m, { who: "you", text: q }]);
     setInput("");
     startTransition(async () => {
       try {
-        const reply = await ask(q);
+        const reply = await ask(q, requestId);
         setMsgs((m) => [...m, { who: "mydon", text: reply.text, approvalId: reply.approvalId }]);
       } catch {
-        setMsgs((m) => [
-          ...m,
-          { who: "mydon", text: "Помощник не ответил — попробуй ещё раз." },
-        ]);
+        setMsgs((m) => [...m, { who: "mydon", text: "Помощник не ответил — попробуй ещё раз." }]);
       }
       requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: "smooth" }));
     });

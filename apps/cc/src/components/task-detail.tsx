@@ -90,6 +90,19 @@ export function TaskDetail({
 
         {task.description && <p className="task-desc">{task.description}</p>}
 
+        {task.agentExecutionBlockedAt && (
+          <div className="result-box">
+            <div className="result-title">Агент ждёт решения владельца</div>
+            <p>
+              {task.agentExecutionBlockedReason ??
+                "Автоматический повтор остановлен, чтобы не дублировать оплату или действие."}
+            </p>
+            <small>
+              Уточни или переназначь задачу; новую попытку после проверки разрешает owner retry.
+            </small>
+          </div>
+        )}
+
         {task.resultNote ? (
           <div className="result-box">
             <div className="result-title">Отчёт о выполнении</div>
@@ -104,16 +117,28 @@ export function TaskDetail({
                 </div>
               ) : (
                 <div className="form-actions">
-                  <button type="button" className="btn" disabled={pending}
-                    onClick={() => act(() => rateTask(task.id, "excellent"))}>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={pending}
+                    onClick={() => act(() => rateTask(task.id, "excellent"))}
+                  >
                     ⭐ Отлично
                   </button>
-                  <button type="button" className="btn" disabled={pending}
-                    onClick={() => act(() => rateTask(task.id, "accepted"))}>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={pending}
+                    onClick={() => act(() => rateTask(task.id, "accepted"))}
+                  >
                     Принято
                   </button>
-                  <button type="button" className="btn" disabled={pending}
-                    onClick={() => act(() => rateTask(task.id, "redo"))}>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={pending}
+                    onClick={() => act(() => rateTask(task.id, "redo"))}
+                  >
                     ↩ Переделать
                   </button>
                 </div>

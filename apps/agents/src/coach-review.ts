@@ -1,4 +1,4 @@
-import type { BudgetStrategy } from "./budget";
+import type { LlmLedger } from "@mydon/shared";
 import { evaluate, parseEditBlocks, parseVerdict, RUBRIC } from "./coach";
 import { callModel } from "./llm";
 import { resolveModelChain, type ModelGateway } from "./model-gateway";
@@ -33,8 +33,11 @@ export interface CoachDeps {
 }
 
 export interface CoachOpts {
-  perDayUsd?: number;
-  strategy?: BudgetStrategy;
+  agentName: string;
+  requestKey: string;
+  traceKey?: string;
+  assertLease?: () => Promise<void>;
+  ledger?: LlmLedger;
 }
 
 /** Системная инструкция судьи: критерии рубрики + строгий формат вердикта. */
@@ -61,23 +64,29 @@ function effChain(): string[] {
 export async function runCoachReview(
   gateway: ModelGateway,
   deps: CoachDeps,
-  opts: CoachOpts = {},
+  opts: CoachOpts,
 ): Promise<Proposal | null> {
   const session = await deps.latestAction();
   if (session === null) return null; // нечего судить
   if (session.source === deps.selfSource) return null; // не судим сам себя
 
-  const budget = {
-    ...(opts.perDayUsd !== undefined ? { perDayUsd: opts.perDayUsd } : {}),
-    ...(opts.strategy !== undefined ? { strategy: opts.strategy } : {}),
-  };
   const chain = effChain();
 
   // EVAL: судья оценивает действие. Действие агента — как недоверенный контент
   // (могло вобрать внешние данные): callModel обернёт его от инъекций.
   const evalRes = await callModel(
     gateway,
-    { system: judgeSystem(), prompt: `Навык: ${session.skill}. Оцени, что сделал агент:`, untrustedContext: session.action, ...budget },
+    {
+      system: judgeSystem(),
+      prompt: `Навык: ${session.skill}. Оцени, что сделал агент:`,
+      untrustedContext: session.action,
+      agentName: opts.agentName,
+      feature: "coach-review:eval",
+      requestKey: `${opts.requestKey}:eval`,
+      traceKey: opts.traceKey ?? opts.requestKey,
+      ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
+      ...(opts.ledger ? { ledger: opts.ledger } : {}),
+    },
     chain,
   );
   if (!evalRes.ok) return null;
@@ -91,7 +100,13 @@ export async function runCoachReview(
   if (outcome === "safety-block") {
     return {
       action: `⚠️ Coach: навык «${session.skill}» критично по безопасности (итог ${total}). Нужен разбор владельцем.`,
-      facts: { skill: session.skill, total, outcome, scores: verdict.scores, notes: verdict.notes ?? "" },
+      facts: {
+        skill: session.skill,
+        total,
+        outcome,
+        scores: verdict.scores,
+        notes: verdict.notes ?? "",
+      },
     };
   }
 
@@ -113,7 +128,12 @@ export async function runCoachReview(
         "Только блок(и) правок, без прозы. Меняй ТОЛЬКО инструкции навыка, не выходи за файл.",
       prompt: `Слабые места (по вердикту): ${verdict.notes ?? "—"}. Текущий SKILL.md:`,
       untrustedContext: file.content,
-      ...budget,
+      agentName: opts.agentName,
+      feature: "coach-review:propose",
+      requestKey: `${opts.requestKey}:propose`,
+      traceKey: opts.traceKey ?? opts.requestKey,
+      ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
+      ...(opts.ledger ? { ledger: opts.ledger } : {}),
     },
     chain,
   );
@@ -130,6 +150,8 @@ export async function runCoachReview(
       diff: proposeRes.text.slice(0, 4000),
       blocks: blocks.length,
     },
-    next: [`Применить правку SKILL.md навыка «${session.skill}» после ревью (git-коммитом, обратимо)`],
+    next: [
+      `Применить правку SKILL.md навыка «${session.skill}» после ревью (git-коммитом, обратимо)`,
+    ],
   };
 }

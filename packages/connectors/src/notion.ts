@@ -39,9 +39,26 @@ export interface NotionReport {
 }
 
 export class NotionError extends Error {
-  constructor(readonly reason: string) {
+  constructor(
+    readonly reason: string,
+    /** HTTP status is required by the outbox dispatcher to distinguish safe retries. */
+    readonly status?: number,
+    /** Provider-requested delay parsed from Retry-After, when present. */
+    readonly retryAfterMs?: number,
+  ) {
     super(reason);
+    this.name = "NotionError";
   }
+}
+
+function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
+  if (value === null) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) return undefined;
+  return Math.max(0, at - now);
 }
 
 /** Notion режет текст блока по 2000 символов — режем сами, а не теряем хвост. */
@@ -153,7 +170,7 @@ export const notion = {
         } catch {
           // тело не JSON — оставляем код
         }
-        throw new NotionError(detail);
+        throw new NotionError(detail, res.status, parseRetryAfter(res.headers.get("retry-after")));
       }
 
       const body = (await res.json()) as { id: string; url?: string };
