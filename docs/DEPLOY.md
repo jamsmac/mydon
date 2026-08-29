@@ -100,22 +100,34 @@ Production-скрипты запускают эти команды однора�
 образа до переключения сервисов. `migrate.js` печатает ошибку PostgreSQL и
 проблемный запрос; `drizzle-kit migrate` для операционного запуска не используем.
 
-### Rollout LLM-ledger и task checkpoint: 0075 → 0076
+### Rollout LLM-ledger, task checkpoint и durable provider result: 0075 → 0077
 
 Эти миграции выкатываются строго по journal: сначала `0075_llm_ledger`, затем
-`0076_agent_execution_outbox`. 0075 создаёт финансовый ledger и устойчивую
-денежную попытку задачи; 0076 добавляет durable task checkpoint, атомарный
-commit и Notion outbox. Нельзя выборочно применить 0076 к базе без 0075 или
-запустить новый Agents против старого Core.
+`0076_agent_execution_outbox`, затем `0077_nebulous_silk_fever`. 0075 создаёт
+финансовый ledger и устойчивую денежную попытку задачи; 0076 добавляет durable
+task checkpoint, атомарный commit и Notion outbox; 0077 создаёт durable
+provider jobs/authorizations/results и переводит execution в двухфазный
+`active → ready`. Нельзя выборочно применять позднюю миграцию без предыдущих
+или запускать новый Agents против старого Core.
+
+> **Первая выкатка 0077 — только ручная.** `auto-deploy.sh` сразу
+> перезапускается из временной копии **до** `git reset`; поэтому commit,
+> который впервые добавляет порядок `stop Agents → migrate → Core health →
+> Agents`, сам ещё выполнялся бы старой копией. До merge остановить
+> `mydon-autodeploy.timer` и дождаться остановки `mydon-autodeploy.service`; после
+> merge запустить **новый** `deploy/deploy.sh`, проверить схему/Core/Agents
+> и только затем вернуть timer. На всех следующих commit новый
+> `auto-deploy.sh` уже действует.
 
 Порядок controlled rollout:
 
 1. Поставить расписания на паузу и остановить `mydon-agents`, чтобы во время
    смены контракта не было нового task claim.
 2. Убедиться, что pre-migration backup создан и не пуст.
-3. Новым образом выполнить `migrate.js`: journal сам применит 0075 и затем 0076. Не запускать SQL-файлы вручную в обратном порядке.
-4. Поднять **Core раньше Agents**, дождаться health и проверить наличие обеих
-   таблиц и ценового каталога.
+3. Новым образом выполнить `migrate.js`: journal сам применит 0075, 0076 и
+   0077. Не запускать SQL-файлы вручную или в обратном порядке.
+4. Поднять **Core раньше Agents**, дождаться health и проверить наличие ledger,
+   execution/outbox и всех трёх таблиц provider job.
 5. Только после этого поднять новый `mydon-agents`; затем снять паузу и
    наблюдать task checkpoint и Notion outbox.
 
@@ -125,7 +137,10 @@ commit и Notion outbox. Нельзя выборочно применить 0076
 /opt/backups/db_access.sh query "
 select to_regclass('public.llm_spend')             as llm_spend,
        to_regclass('public.task_agent_execution')  as task_agent_execution,
-       to_regclass('public.outbox_delivery')       as outbox_delivery;
+       to_regclass('public.outbox_delivery')       as outbox_delivery,
+       to_regclass('public.agent_task_llm_job')    as agent_task_llm_job,
+       to_regclass('public.agent_task_llm_authorization') as agent_task_llm_authorization,
+       to_regclass('public.agent_task_llm_result') as agent_task_llm_result;
 select provider, model, billing_kind, valid_from, valid_to
   from llm_model_price
  order by provider, model, valid_from"
@@ -145,12 +160,14 @@ select e.id, e.execution_attempt_id, e.status, e.checkpoint_kind,
  limit 20"
 ```
 
-Гарантия начинается после успешного checkpoint: stale takeover переигрывает
-сохранённый checkpoint, а commit атомарно фиксирует внутренние эффекты и Notion
-intent. Окно `provider response → checkpoint` **не exactly-once**: падение там
-может оставить оплаченный, но не сохранённый ответ, и ledger заблокирует
-автоматический повтор как `execution_unknown`. Cron, Assistant, Documents и
-Telegram пока не используют этот checkpoint/outbox slice.
+Принятый Core provider result теперь durable ещё до checkpoint: stale takeover
+читает его и не повторяет оплаченный job. Честная граница остаётся между
+`dispatch grant → provider wire → durable complete`: без provider idempotency
+падение в этом окне переводит job в `unknown` и запрещает автоматический
+dispatch/fallback. Смена endpoint/provider/adapter/billing после start даёт
+`workflow_changed` **до** provider wire и требует owner retry с новым execution
+attempt. Cron, Assistant, Documents и Telegram пока не используют этот
+task-scoped provider-result/outbox slice.
 
 Notion dispatcher переводит `pending → dispatching` до внешнего запроса и
 завершает строку как `sent`, `skipped`, `unknown` или `dead`. Просроченный более
@@ -163,10 +180,13 @@ Notion dispatcher переводит `pending → dispatching` до внешне
 Подробная таблица состояний — в
 [`AGENTS_ACTIVATION.md`](AGENTS_ACTIVATION.md).
 
-**Rollback только кодовый и additive.** Сначала снова остановить Agents и
-вернуть их предыдущий совместимый образ, затем при необходимости вернуть Core.
-Таблицы, enums, `approval.client_key` и `event.client_key` из 0076, а также
-ledger 0075 **не удалять и не откатывать DROP-миграцией**: старый код их
+**Rollback только кодовый и additive.** Сначала снова остановить Agents.
+Если в 0077 есть `active|dispatching|unknown` execution/job, старые Agents/Core
+не поднимать: они не умеют безопасно resume эти состояния. Оставить
+новый Core, сверить provider evidence и закрыть/owner-retry каждую
+неоднозначную попытку; только при нуле таких строк возвращать
+предыдущие образы. Таблицы, enums и колонки 0075–0077, включая
+`agent_task_llm_*`, **не удалять и не откатывать DROP-миграцией**: старый код их
 игнорирует, а строки checkpoint/outbox нужны для аудита и последующего
 forward-fix. `pending`/`dispatching`/`unknown` при rollback не чистить; перед
 повторным включением dispatcher разобрать неоднозначные строки по runbook выше.

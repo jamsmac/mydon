@@ -6,9 +6,12 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
 import {
   approval,
+  agentTaskLlmJob,
+  agentTaskLlmResult,
   auditLog,
   event,
   llmSpend,
@@ -48,7 +51,15 @@ import {
 } from "drizzle-orm";
 import { appConfig } from "../config";
 import { DB, type Db } from "../db/db.module";
+import { LlmLedgerService } from "../llm-ledger/llm-ledger.service";
 import { MaintenanceService, todayInTz } from "../maintenance/maintenance.service";
+import {
+  canonicalJsonHash,
+  canonicalJsonValue,
+  normalizeTaskLlmExecutionPlan,
+  parseStoredTaskLlmExecutionPlan,
+  type TaskLlmExecutionPlan,
+} from "./task-llm-contract";
 
 /** Транзакция Drizzle — та же, что даёт `db.transaction(async (tx) => …)`. */
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -68,6 +79,13 @@ export interface AgentRunFenceInput {
   agentName: string;
   runId: string;
   executionAttemptId: string;
+}
+
+export interface AgentRunStartInput extends AgentRunFenceInput {
+  claimedTaskInputHash: string;
+  skill: string;
+  workflowVersion: number;
+  plan: unknown;
 }
 
 export interface AgentRunCheckpointInput extends AgentRunFenceInput {
@@ -102,6 +120,24 @@ export interface AgentCheckpointView {
   createdAt: string;
 }
 
+export interface AgentExecutionView {
+  id: string;
+  status: "active" | "ready" | "committed" | "abandoned";
+  skill: string;
+  workflowVersion: number;
+  plan: TaskLlmExecutionPlan;
+  planHash: string;
+  taskInputHash: string;
+  startedAt: string;
+  checkpoint?: AgentCheckpointView;
+}
+
+export interface AgentRunStartResult {
+  started: true;
+  replay: boolean;
+  execution: AgentExecutionView;
+}
+
 export interface AgentRunCheckpointResult {
   checkpointed: true;
   replay: boolean;
@@ -121,7 +157,11 @@ export interface AgentRunCommitResult {
   retryAt?: string;
 }
 
-type ClaimedAgentRun = TaskRow & { agentCheckpoint: AgentCheckpointView | null };
+type ClaimedAgentRun = TaskRow & {
+  taskInputHash: string;
+  taskInput: { title: string };
+  agentExecution: AgentExecutionView | null;
+};
 
 /** JSON canonicalization for hashes and persisted replay payloads. */
 function canonicalValue(value: unknown): unknown {
@@ -177,7 +217,7 @@ function normalizedNext(value: string[] | undefined): string[] | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function taskInputHash(row: TaskRow): string {
+export function durableTaskInputHash(row: TaskRow): string {
   return canonicalHash({
     schemaVersion: 1,
     id: row.id,
@@ -188,7 +228,7 @@ function taskInputHash(row: TaskRow): string {
     domain: row.domain,
     entityId: row.entityId,
     priority: row.priority,
-    due: row.due,
+    due: row.due?.toISOString() ?? null,
     source: row.source,
     createdBy: row.createdBy,
   });
@@ -226,7 +266,7 @@ function checkpointView(row: TaskAgentExecutionRow): AgentCheckpointView {
   const payload = jsonObject(row.checkpointPayload);
   const kind = row.checkpointKind;
   if (kind !== "no_signal" && kind !== "proposal") {
-    throw new Error(`Неизвестный checkpoint kind ${kind}`);
+    throw new Error(`Неизвестный checkpoint kind ${String(kind)}`);
   }
   return {
     id: row.id,
@@ -239,8 +279,24 @@ function checkpointView(row: TaskAgentExecutionRow): AgentCheckpointView {
       ? { next: payload.next.filter((item): item is string => typeof item === "string") }
       : {}),
     taskInputHash: row.taskInputHash,
-    checkpointHash: row.checkpointHash,
+    checkpointHash: row.checkpointHash!,
     createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function executionView(row: TaskAgentExecutionRow): AgentExecutionView {
+  return {
+    id: row.id,
+    status: row.status,
+    skill: row.skill,
+    workflowVersion: row.workflowVersion,
+    plan: parseStoredTaskLlmExecutionPlan(row.executionPlan),
+    planHash: row.executionPlanHash,
+    taskInputHash: row.taskInputHash,
+    startedAt: row.startedAt.toISOString(),
+    ...(row.status === "ready" || row.status === "committed"
+      ? { checkpoint: checkpointView(row) }
+      : {}),
   };
 }
 
@@ -364,6 +420,7 @@ export class TasksService {
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly maintenance: MaintenanceService,
+    @Optional() private readonly llmLedger?: LlmLedgerService,
   ) {}
 
   private async lockTask(tx: Tx, id: string): Promise<TaskRow> {
@@ -396,6 +453,43 @@ export class TasksService {
       .where(eq(taskAgentExecution.executionAttemptId, executionAttemptId))
       .for("update");
     return row;
+  }
+
+  private async blockAgentExecution(
+    tx: Tx,
+    before: TaskRow,
+    reason: string,
+    now: Date,
+  ): Promise<{ durableConflict: string }> {
+    const boundedReason = reason.slice(0, 1000);
+    const [blocked] = await tx
+      .update(task)
+      .set({
+        status: "todo",
+        agentRunId: null,
+        agentRunClaimedAt: null,
+        agentExecutionRetryAt: null,
+        agentExecutionBlockedAt: now,
+        agentExecutionBlockedReason: boundedReason,
+      })
+      .where(
+        and(
+          eq(task.id, before.id),
+          eq(task.agentRunId, before.agentRunId!),
+          eq(task.agentExecutionAttemptId, before.agentExecutionAttemptId!),
+        ),
+      )
+      .returning();
+    if (!blocked) throw new ConflictException("Agent run changed while it was being blocked");
+    await tx.insert(auditLog).values({
+      actorKind: "system",
+      actorRef: "task-execution",
+      action: "task.agent_execution.blocked",
+      target: before.id,
+      before,
+      after: blocked,
+    });
+    return { durableConflict: boundedReason };
   }
 
   /**
@@ -527,7 +621,7 @@ export class TasksService {
     const runId = randomUUID();
     const executionAttemptId = randomUUID();
     const staleBefore = new Date(now.getTime() - TasksService.AGENT_RUN_LEASE_MS);
-    return this.db.transaction(async (tx) => {
+    const result = await this.db.transaction(async (tx) => {
       const [claimed] = await tx
         .update(task)
         .set({
@@ -564,19 +658,144 @@ export class TasksService {
         target: id,
         after: claimed,
       });
-      const [ready] = await tx
+      const [execution] = await tx
         .select()
         .from(taskAgentExecution)
         .where(
           and(
             eq(taskAgentExecution.taskId, id),
             eq(taskAgentExecution.executionAttemptId, claimed.agentExecutionAttemptId!),
-            eq(taskAgentExecution.status, "ready"),
           ),
         )
         .limit(1);
-      return { ...claimed, agentCheckpoint: ready ? checkpointView(ready) : null };
+      let agentExecution: AgentExecutionView | null = null;
+      if (execution) {
+        try {
+          const storedPlan = parseStoredTaskLlmExecutionPlan(execution.executionPlan);
+          if (
+            execution.workflowVersion !== storedPlan.version ||
+            canonicalJsonHash(storedPlan) !== execution.executionPlanHash
+          ) {
+            return this.blockAgentExecution(
+              tx,
+              claimed,
+              "Stored execution plan version or canonical hash is inconsistent",
+              now,
+            );
+          }
+          agentExecution = executionView(execution);
+        } catch {
+          return this.blockAgentExecution(
+            tx,
+            claimed,
+            "Stored durable execution cannot be resumed safely",
+            now,
+          );
+        }
+      }
+      return {
+        ...claimed,
+        taskInputHash: durableTaskInputHash(claimed),
+        // This snapshot comes from the same UPDATE ... RETURNING row as the
+        // lease/hash. Workers must not choose a skill from their older list
+        // response after claim.
+        taskInput: { title: claimed.title },
+        agentExecution,
+      };
     });
+    if (result !== null && "durableConflict" in result) {
+      throw new ConflictException(result.durableConflict);
+    }
+    return result;
+  }
+
+  /**
+   * Creates the durable execution root before any provider operation. The
+   * worker must echo the hash returned by claim so an intervening task edit
+   * cannot silently change the workflow input.
+   */
+  async startAgentRun(
+    id: string,
+    input: AgentRunStartInput,
+    now = new Date(),
+  ): Promise<AgentRunStartResult> {
+    const agentName = input.agentName.trim();
+    const skill = input.skill.trim();
+    if (skill.length === 0) throw new BadRequestException("skill не может быть пустым");
+    const plan = normalizeTaskLlmExecutionPlan(input.plan);
+    if (!Number.isInteger(input.workflowVersion) || input.workflowVersion !== plan.version) {
+      throw new BadRequestException("workflowVersion must equal plan.version");
+    }
+    const planHash = canonicalJsonHash(plan);
+
+    const result = await this.db.transaction(async (tx) => {
+      const lockedTask = await this.lockTask(tx, id);
+      this.assertAgentRunFence(lockedTask, { ...input, agentName });
+      const inputHash = durableTaskInputHash(lockedTask);
+      if (input.claimedTaskInputHash !== inputHash) {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Task changed after claim; execution start is blocked",
+          now,
+        );
+      }
+
+      const existing = await this.lockExecution(tx, input.executionAttemptId);
+      if (existing) {
+        let storedPlanHash: string | undefined;
+        try {
+          storedPlanHash = canonicalJsonHash(parseStoredTaskLlmExecutionPlan(existing.executionPlan));
+        } catch {
+          storedPlanHash = undefined;
+        }
+        if (
+          existing.taskId !== id ||
+          existing.agentName !== agentName ||
+          existing.skill !== skill ||
+          existing.taskInputHash !== inputHash ||
+          existing.workflowVersion !== input.workflowVersion ||
+          existing.executionPlanHash !== planHash ||
+          storedPlanHash !== existing.executionPlanHash
+        ) {
+          return this.blockAgentExecution(
+            tx,
+            lockedTask,
+            "executionAttemptId is already linked to a different task input, skill or plan",
+            now,
+          );
+        }
+        if (existing.status === "abandoned") {
+          throw new ConflictException("Execution was abandoned by owner retry");
+        }
+        return { started: true as const, replay: true, execution: executionView(existing) };
+      }
+
+      const [created] = await tx
+        .insert(taskAgentExecution)
+        .values({
+          taskId: id,
+          executionAttemptId: input.executionAttemptId,
+          agentName,
+          skill,
+          schemaVersion: 2,
+          taskInputHash: inputHash,
+          workflowVersion: input.workflowVersion,
+          executionPlan: plan,
+          executionPlanHash: planHash,
+          startedAt: now,
+          checkpointKind: null,
+          checkpointPayload: null,
+          checkpointHash: null,
+          status: "active",
+          updatedAt: now,
+        })
+        .returning();
+      if (!created) throw new Error("Durable task execution did not persist");
+      return { started: true as const, replay: false, execution: executionView(created) };
+    });
+    if ("durableConflict" in result) throw new ConflictException(result.durableConflict);
+    return result;
   }
 
   /**
@@ -592,66 +811,212 @@ export class TasksService {
     const agentName = input.agentName.trim();
     const skill = input.skill.trim();
     if (skill.length === 0) throw new BadRequestException("skill не может быть пустым");
-    const payload = checkpointPayload(input);
-    if (input.kind === "proposal" && typeof payload.action !== "string") {
+    const requestedPayload = checkpointPayload(input);
+    if (input.kind === "proposal" && typeof requestedPayload.action !== "string") {
       throw new BadRequestException("proposal обязан содержать action");
     }
-    if (typeof payload.action === "string" && payload.action.length > 512) {
+    if (typeof requestedPayload.action === "string" && requestedPayload.action.length > 512) {
       throw new BadRequestException("action не может быть длиннее 512 символов");
     }
 
-    return this.db.transaction(async (tx) => {
+    const result = await this.db.transaction(async (tx) => {
       const lockedTask = await this.lockTask(tx, id);
       this.assertAgentRunFence(lockedTask, { ...input, agentName });
-      const inputHash = taskInputHash(lockedTask);
-      const hash = canonicalHash({
-        schemaVersion: 1,
-        taskId: id,
-        executionAttemptId: input.executionAttemptId,
-        agentName,
-        skill,
-        taskInputHash: inputHash,
-        checkpoint: payload,
-      });
+      const inputHash = durableTaskInputHash(lockedTask);
+      let existing = await this.lockExecution(tx, input.executionAttemptId);
+      let legacyBridge = false;
+      if (!existing) {
+        // Rolling deploy bridge: an old Agents worker can have claimed before
+        // /start existed. Only schemaVersion=1 + empty plan may use this path.
+        const emptyPlan = { version: 1 as const, steps: [] };
+        const [created] = await tx
+          .insert(taskAgentExecution)
+          .values({
+            taskId: id,
+            executionAttemptId: input.executionAttemptId,
+            agentName,
+            skill,
+            schemaVersion: 1,
+            taskInputHash: inputHash,
+            workflowVersion: 1,
+            executionPlan: emptyPlan,
+            executionPlanHash: canonicalJsonHash(emptyPlan),
+            startedAt: now,
+            checkpointKind: null,
+            checkpointPayload: null,
+            checkpointHash: null,
+            status: "active",
+            updatedAt: now,
+          })
+          .returning();
+        if (!created) throw new Error("Legacy durable execution bridge did not persist");
+        existing = created;
+        legacyBridge = true;
+      }
+      if (existing.taskId !== id || existing.agentName !== agentName) {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Durable execution belongs to another task or agent",
+          now,
+        );
+      }
+      if (existing.skill !== skill) {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Checkpoint skill does not match the durable execution plan",
+          now,
+        );
+      }
+      if (existing.taskInputHash !== inputHash) {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Task changed after execution start; checkpoint is blocked",
+          now,
+        );
+      }
+      let storedPlanHash: string | undefined;
+      let storedPlanVersion: number | undefined;
+      try {
+        const storedPlan = parseStoredTaskLlmExecutionPlan(existing.executionPlan);
+        storedPlanHash = canonicalJsonHash(storedPlan);
+        storedPlanVersion = storedPlan.version;
+      } catch {
+        storedPlanHash = undefined;
+      }
+      if (
+        storedPlanVersion !== existing.workflowVersion ||
+        storedPlanHash !== existing.executionPlanHash
+      ) {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Stored execution plan version or canonical hash is inconsistent",
+          now,
+        );
+      }
+      const manifest = legacyBridge ? [] : await this.terminalLlmJobManifest(tx, existing.id);
+      const payload = (legacyBridge
+        ? requestedPayload
+        : canonicalJsonValue({ ...requestedPayload, llmJobs: manifest })) as JsonObject;
+      const hash = legacyBridge
+        ? canonicalHash({
+            schemaVersion: 1,
+            taskId: id,
+            executionAttemptId: input.executionAttemptId,
+            agentName,
+            skill,
+            taskInputHash: inputHash,
+            checkpoint: payload,
+          })
+        : canonicalHash({
+            schemaVersion: 2,
+            taskId: id,
+            executionAttemptId: input.executionAttemptId,
+            agentName,
+            skill,
+            taskInputHash: inputHash,
+            executionPlanHash: existing.executionPlanHash,
+            checkpoint: payload,
+          });
 
-      const existing = await this.lockExecution(tx, input.executionAttemptId);
-      if (existing) {
-        if (
-          existing.taskId !== id ||
-          existing.agentName !== agentName ||
-          existing.checkpointHash !== hash
-        ) {
+      if (existing.status === "ready") {
+        if (existing.schemaVersion === 1 && manifest.length === 0) {
+          const legacyHash = canonicalHash({
+            schemaVersion: 1,
+            taskId: id,
+            executionAttemptId: input.executionAttemptId,
+            agentName,
+            skill,
+            taskInputHash: inputHash,
+            checkpoint: requestedPayload,
+          });
+          if (existing.checkpointHash === legacyHash) {
+            return {
+              checkpointed: true as const,
+              replay: true,
+              checkpoint: checkpointView(existing),
+            };
+          }
+        }
+        if (existing.checkpointHash !== hash) {
           throw new ConflictException("executionAttemptId уже связан с другим checkpoint payload");
         }
-        if (existing.status !== "ready") {
-          throw new ConflictException(
-            existing.status === "committed"
-              ? "Результат этой попытки уже committed"
-              : "Эта попытка была abandoned владельцем",
-          );
-        }
-        return { checkpointed: true, replay: true, checkpoint: checkpointView(existing) };
+        return {
+          checkpointed: true as const,
+          replay: true,
+          checkpoint: checkpointView(existing),
+        };
+      }
+      if (existing.status !== "active") {
+        throw new ConflictException(
+          existing.status === "committed"
+            ? "Результат этой попытки уже committed"
+            : "Эта попытка была abandoned владельцем",
+        );
       }
 
-      const [created] = await tx
-        .insert(taskAgentExecution)
-        .values({
-          taskId: id,
-          executionAttemptId: input.executionAttemptId,
-          agentName,
-          skill,
-          schemaVersion: 1,
-          taskInputHash: inputHash,
+      const [ready] = await tx
+        .update(taskAgentExecution)
+        .set({
           checkpointKind: input.kind,
           checkpointPayload: payload,
           checkpointHash: hash,
           status: "ready",
           updatedAt: now,
         })
+        .where(and(eq(taskAgentExecution.id, existing.id), eq(taskAgentExecution.status, "active")))
         .returning();
-      if (!created) throw new Error("Checkpoint не сохранился");
-      return { checkpointed: true, replay: false, checkpoint: checkpointView(created) };
+      if (!ready) throw new ConflictException("Execution changed while checkpoint was persisted");
+      return {
+        checkpointed: true as const,
+        replay: false,
+        checkpoint: checkpointView(ready),
+      };
     });
+    if ("durableConflict" in result) throw new ConflictException(result.durableConflict);
+    return result;
+  }
+
+  private async terminalLlmJobManifest(tx: Tx, executionId: string): Promise<unknown[]> {
+    const jobs = await tx
+      .select()
+      .from(agentTaskLlmJob)
+      .where(eq(agentTaskLlmJob.taskAgentExecutionId, executionId));
+    jobs.sort(
+      (left, right) =>
+        left.stepKey.localeCompare(right.stepKey) || left.providerAttemptNo - right.providerAttemptNo,
+    );
+    const manifest: unknown[] = [];
+    for (const job of jobs) {
+      if (job.status !== "succeeded" && job.status !== "rejected" && job.status !== "cancelled") {
+        throw new ConflictException(
+          `LLM job ${job.id} is ${job.status}; checkpoint requires terminal provider evidence`,
+        );
+      }
+      const [result] =
+        job.status === "cancelled"
+          ? []
+          : await tx
+              .select()
+              .from(agentTaskLlmResult)
+              .where(eq(agentTaskLlmResult.jobId, job.id))
+              .limit(1);
+      if (job.status !== "cancelled" && !result) {
+        throw new ConflictException(`LLM job ${job.id} has no immutable result`);
+      }
+      manifest.push({
+        jobId: job.id,
+        stepKey: job.stepKey,
+        providerAttemptNo: job.providerAttemptNo,
+        status: job.status,
+        operationHash: job.operationHash,
+        resultHash: result?.resultHash ?? null,
+      });
+    }
+    return manifest;
   }
 
   private assertOutcomeMatchesCheckpoint(
@@ -787,7 +1152,7 @@ export class TasksService {
       }
 
       this.assertAgentRunFence(lockedTask, { ...input, agentName });
-      if (execution.taskInputHash !== taskInputHash(lockedTask)) {
+      if (execution.taskInputHash !== durableTaskInputHash(lockedTask)) {
         const reason = "Задача изменилась после durable checkpoint; нужен owner retry";
         const [blocked] = await tx
           .update(task)
@@ -1057,35 +1422,96 @@ export class TasksService {
     agentName: string,
     runId: string,
     executionAttemptId: string,
-    reason?: "budget_denied" | "execution_unknown" | "action_capped" | "unsupported",
+    reason?:
+      | "budget_denied"
+      | "execution_unknown"
+      | "workflow_changed"
+      | "action_capped"
+      | "unsupported",
     detail?: string,
     now = new Date(),
   ): Promise<TaskRow | null> {
     return this.db.transaction(async (tx) => {
-      const nextTashkentDay = new Date(tashkentDayStartOf(now).getTime() + 86_400_000);
-      let safeBudgetRetry = false;
-      if (reason === "budget_denied") {
-        const prefix = `task:${id}:execution:${executionAttemptId}:%`;
-        const [started] = await tx
-          .select({ id: llmSpend.id })
-          .from(llmSpend)
-          .where(
-            and(
-              sql`${llmSpend.requestKey} like ${prefix}`,
-              ne(llmSpend.status, "denied"),
-              ne(llmSpend.status, "released"),
-            ),
-          )
-          .limit(1);
-        safeBudgetRetry = started === undefined;
+      // Shared lock order for every v3 path: task -> execution -> jobs -> ledger.
+      const lockedTask = await this.lockTask(tx, id);
+      if (
+        lockedTask.ownerKind !== "agent" ||
+        lockedTask.ownerRef !== agentName ||
+        lockedTask.agentRunId !== runId ||
+        lockedTask.agentExecutionAttemptId !== executionAttemptId ||
+        lockedTask.status === "done" ||
+        lockedTask.status === "cancelled"
+      ) {
+        return null;
       }
+      const nextTashkentDay = new Date(tashkentDayStartOf(now).getTime() + 86_400_000);
+      const execution = await this.lockExecution(tx, executionAttemptId);
+      const durableJobs =
+        execution?.status === "active"
+          ? await tx
+              .select()
+              .from(agentTaskLlmJob)
+              .where(eq(agentTaskLlmJob.taskAgentExecutionId, execution.id))
+          : [];
+      let safeBudgetRetry = false;
+      let durableBudgetRetry = false;
+      if (reason === "budget_denied") {
+        durableBudgetRetry = durableJobs.some((job) => job.status === "waiting_budget");
+        if (!durableBudgetRetry) {
+          const prefix = `task:${id}:execution:${executionAttemptId}:%`;
+          const [started] = await tx
+            .select({ id: llmSpend.id })
+            .from(llmSpend)
+            .where(
+              and(
+                sql`${llmSpend.requestKey} like ${prefix}`,
+                ne(llmSpend.status, "denied"),
+                ne(llmSpend.status, "released"),
+              ),
+            )
+            .limit(1);
+          safeBudgetRetry = started === undefined;
+        }
+      }
+      if (reason === "execution_unknown") {
+        for (const job of durableJobs) {
+          if (job.status !== "dispatching") continue;
+          await tx
+            .update(agentTaskLlmJob)
+            .set({
+              status: "unknown",
+              requestPayload: null,
+              unknownAt: now,
+              lastError: "Worker lost durable completion response",
+              updatedAt: now,
+            })
+            .where(
+              and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, "dispatching")),
+            );
+          job.status = "unknown";
+        }
+      }
+      const durableOutcomeKnown =
+        durableJobs.length > 0 &&
+        durableJobs.every(
+          (job) =>
+            job.status === "succeeded" ||
+            job.status === "rejected" ||
+            job.status === "cancelled",
+        );
       const shouldBlock =
-        reason === "execution_unknown" ||
+        (reason === "execution_unknown" && !durableOutcomeKnown) ||
+        reason === "workflow_changed" ||
         reason === "unsupported" ||
-        (reason === "budget_denied" && !safeBudgetRetry);
+        (reason === "budget_denied" && !safeBudgetRetry && !durableBudgetRetry);
+      const detailText = detail?.trim().slice(0, 900);
       const blockedReason =
-        detail?.trim().slice(0, 1000) ||
-        (reason === "budget_denied"
+        reason === "execution_unknown"
+          ? `execution_unknown: ${detailText || "исход предыдущей metered-попытки неизвестен"}`
+          : reason === "workflow_changed"
+            ? `workflow_changed: ${detailText || "immutable LLM workflow больше не совпадает с runtime"}`
+          : detailText ||
+            (reason === "budget_denied"
           ? "budget denial после уже начатой metered-попытки"
           : reason === "unsupported"
             ? "у агента нет подходящего навыка; нужен owner retry"
@@ -1096,7 +1522,16 @@ export class TasksService {
           status: "todo",
           agentRunId: null,
           agentRunClaimedAt: null,
-          ...(reason === "budget_denied" && safeBudgetRetry
+          ...(reason === "budget_denied" && durableBudgetRetry
+            ? {
+                // A denied later step resumes the same durable execution on
+                // the next ledger day; completed earlier results stay reusable.
+                agentExecutionRetryAt: nextTashkentDay,
+                agentExecutionBlockedAt: null,
+                agentExecutionBlockedReason: null,
+              }
+            : {}),
+          ...(reason === "budget_denied" && safeBudgetRetry && !durableBudgetRetry
             ? {
                 // Denial доказал, что provider dispatch не было. Новую
                 // попытку разрешаем только после смены ledger-day, иначе
@@ -1183,6 +1618,7 @@ export class TasksService {
    */
   async retryBlockedAgentExecution(id: string): Promise<TaskRow> {
     return this.db.transaction(async (tx) => {
+      const retryNow = new Date();
       const before = await this.lockTask(tx, id);
       if (
         before.ownerKind !== "agent" ||
@@ -1195,17 +1631,116 @@ export class TasksService {
 
       if (before.agentExecutionAttemptId !== null) {
         const execution = await this.lockExecution(tx, before.agentExecutionAttemptId);
-        if (execution?.status === "ready") {
+        if (execution?.status === "active" || execution?.status === "ready") {
+          const jobs = await tx
+            .select()
+            .from(agentTaskLlmJob)
+            .where(eq(agentTaskLlmJob.taskAgentExecutionId, execution.id));
+          for (const job of jobs) {
+            if (job.status !== "dispatching") continue;
+            if (
+              job.dispatchDeadlineAt === null ||
+              job.dispatchDeadlineAt.getTime() > retryNow.getTime()
+            ) {
+              throw new ConflictException(
+                "Provider dispatch is still in flight; retry is forbidden until its deadline",
+              );
+            }
+            const [unknown] = await tx
+              .update(agentTaskLlmJob)
+              .set({
+                status: "unknown",
+                requestPayload: null,
+                unknownAt: retryNow,
+                lastError: "Owner retry after expired dispatch grant",
+                updatedAt: retryNow,
+              })
+              .where(
+                and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, "dispatching")),
+              )
+              .returning();
+            if (!unknown) throw new ConflictException("LLM dispatch changed during owner retry");
+            Object.assign(job, unknown);
+          }
+
+          const reusableTerminalExecution =
+            execution.status === "active" &&
+            execution.taskInputHash === durableTaskInputHash(before) &&
+            before.agentExecutionBlockedReason?.startsWith("execution_unknown:") === true &&
+            jobs.length > 0 &&
+            jobs.every(
+              (job) =>
+                job.status === "succeeded" ||
+                job.status === "rejected" ||
+                job.status === "cancelled",
+            );
+          if (reusableTerminalExecution) {
+            const [resumable] = await tx
+              .update(task)
+              .set({
+                status: "todo",
+                agentRunId: null,
+                agentRunClaimedAt: null,
+                agentExecutionRetryAt: null,
+                agentExecutionBlockedAt: null,
+                agentExecutionBlockedReason: null,
+              })
+              .where(
+                and(
+                  eq(task.id, id),
+                  eq(task.agentExecutionAttemptId, execution.executionAttemptId),
+                  isNotNull(task.agentExecutionBlockedAt),
+                ),
+              )
+              .returning();
+            if (!resumable) throw new ConflictException("Blocked execution changed during resume");
+            await tx.insert(auditLog).values({
+              actorKind: "human",
+              actorRef: "owner",
+              action: "task.agent_execution.resume",
+              target: id,
+              before,
+              after: resumable,
+            });
+            return resumable;
+          }
+
+          for (const job of jobs) {
+            if (job.status === "ready") {
+              if (!job.spendId || !this.llmLedger) {
+                throw new ConflictException("Cannot safely release durable LLM reservation");
+              }
+              await this.llmLedger.releaseInTx(tx, job.spendId, {
+                reason: "owner retry before provider dispatch",
+              }, { allowTaskJobSpend: true });
+            }
+            if (job.status === "ready" || job.status === "waiting_budget") {
+              const [cancelled] = await tx
+                .update(agentTaskLlmJob)
+                .set({
+                  status: "cancelled",
+                  requestPayload: null,
+                  cancelledAt: retryNow,
+                  lastError: "owner_retry_after_block",
+                  updatedAt: retryNow,
+                })
+                .where(
+                  and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, job.status)),
+                )
+                .returning();
+              if (!cancelled) throw new ConflictException("LLM job changed during owner retry");
+            }
+          }
           const [abandoned] = await tx
             .update(taskAgentExecution)
             .set({
               status: "abandoned",
-              abandonedAt: new Date(),
+              abandonedAt: retryNow,
               abandonReason: "owner_retry_after_block",
-              updatedAt: new Date(),
+              updatedAt: retryNow,
             })
             .where(
-              and(eq(taskAgentExecution.id, execution.id), eq(taskAgentExecution.status, "ready")),
+              and(eq(taskAgentExecution.id, execution.id), eq(taskAgentExecution.status, execution.status)),
             )
             .returning();
           if (!abandoned) {
@@ -1266,9 +1801,10 @@ export class TasksService {
   /**
    * Смена статуса.
    *
-   * Условие «статус ещё не такой» стоит в самом UPDATE: два одновременных
-   * нажатия «Готово» иначе оба отчитались бы об успехе, а в журнале осталась
-   * бы одна запись с непонятным автором.
+   * Task row сначала блокируется: это сериализует два одновременных
+   * нажатия «Готово» и задаёт единый lock order для durable LLM cleanup.
+   * UPDATE дополнительно CAS-ограждён статусом из locked snapshot, а повторное
+   * уже terminal действие выполняет только repair cleanup и не дублирует аудит.
    */
   async setStatus(
     id: string,
@@ -1278,6 +1814,32 @@ export class TasksService {
     expectedAgentRunId?: string,
   ): Promise<TaskRow> {
     return this.db.transaction(async (tx) => {
+      // Terminal owner actions participate in the durable execution lock order:
+      // task -> execution -> jobs -> ledger.  Lock the task even for an
+      // idempotent repeated click so it can repair an undispatched job left by
+      // an older deployment or an interrupted request.
+      const before = await this.lockTask(tx, id);
+      if (expectedAgentRunId && before.agentRunId !== expectedAgentRunId) {
+        throw new ConflictException("Прогон агента уже заменён новой generation");
+      }
+      if (
+        expectedAgentRunId &&
+        before.status !== status &&
+        (before.status === "done" || before.status === "cancelled")
+      ) {
+        throw new ConflictException(
+          `Задача уже в статусе ${before.status}; прогон не может её закрыть`,
+        );
+      }
+
+      if (status === "done" || status === "cancelled") {
+        await this.cancelUndispatchedTaskLlmJobs(tx, before, status, new Date());
+      }
+
+      // Cleanup above deliberately also runs when the task already has this
+      // terminal status.  The task transition/audit itself remains idempotent.
+      if (before.status === status) return before;
+
       // Отчёт и время закрытия проставляются только при закрытии: иначе
       // «взял в работу» затирал бы отчёт о прошлом выполнении.
       const patch: Record<string, unknown> = { status };
@@ -1291,7 +1853,7 @@ export class TasksService {
         }
       }
 
-      const conditions: SQL[] = [eq(task.id, id), ne(task.status, status)];
+      const conditions: SQL[] = [eq(task.id, id), eq(task.status, before.status)];
       if (expectedAgentRunId) {
         conditions.push(eq(task.agentRunId, expectedAgentRunId));
         conditions.push(ne(task.status, "done"), ne(task.status, "cancelled"));
@@ -1302,21 +1864,7 @@ export class TasksService {
         .where(and(...conditions))
         .returning();
 
-      if (!updated) {
-        const [row] = await tx.select().from(task).where(eq(task.id, id));
-        if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
-        if (expectedAgentRunId) {
-          if (row.agentRunId !== expectedAgentRunId) {
-            throw new ConflictException("Прогон агента уже заменён новой generation");
-          }
-          if (row.status !== status) {
-            throw new ConflictException(
-              `Задача уже в статусе ${row.status}; прогон не может её закрыть`,
-            );
-          }
-        }
-        return row; // статус уже такой — повторное нажатие не ошибка
-      }
+      if (!updated) throw new ConflictException("Задача изменилась во время смены статуса");
 
       await tx.insert(auditLog).values({
         actorKind: "human",
@@ -1327,13 +1875,78 @@ export class TasksService {
       });
 
       // Закрытие авто-задачи ТО — это и есть факт работы: он ложится в журнал
-      // обслуживания и двигает якорь норматива в ТОЙ ЖЕ транзакции. Guard
-      // «статус ещё не такой» выше делает повторное «Готово» безопасным.
+      // обслуживания и двигает якорь норматива в ТОЙ ЖЕ транзакции. Idempotent return
+      // до UPDATE и аудита выше делает повторное «Готово» безопасным.
       if (status === "done") {
         await this.recordMaintenanceFact(tx, updated, actorRef);
       }
       return updated;
     });
+  }
+
+  /**
+   * A terminal task must not retain a provider request that has not crossed
+   * the dispatch boundary.  Dispatching/unknown/terminal jobs are evidence and
+   * remain immutable here: only the provider result protocol may resolve them.
+   */
+  private async cancelUndispatchedTaskLlmJobs(
+    tx: Tx,
+    lockedTask: TaskRow,
+    terminalStatus: "done" | "cancelled",
+    now: Date,
+  ): Promise<void> {
+    if (lockedTask.ownerKind !== "agent" || lockedTask.agentExecutionAttemptId === null) return;
+
+    const execution = await this.lockExecution(tx, lockedTask.agentExecutionAttemptId);
+    if (!execution) return;
+    if (execution.taskId !== lockedTask.id) {
+      throw new ConflictException("LLM execution не принадлежит закрываемой задаче");
+    }
+
+    const jobs = await tx
+      .select()
+      .from(agentTaskLlmJob)
+      .where(eq(agentTaskLlmJob.taskAgentExecutionId, execution.id))
+      .for("update");
+    const readyJobs = jobs.filter((job) => job.status === "ready");
+    // A sequential durable workflow can expose only one undispatched reserve.
+    // Releasing several providers while holding transaction-scoped advisory
+    // locks can invert another task's provider/budget order, so anomalous state
+    // is intentionally fail-closed and leaves the task transition uncommitted.
+    if (readyJobs.length > 1) {
+      throw new ConflictException("Execution содержит несколько ready LLM jobs; закрытие заблокировано");
+    }
+
+    const ready = readyJobs[0];
+    if (ready) {
+      if (!ready.spendId || !this.llmLedger) {
+        throw new ConflictException("Cannot safely release durable LLM reservation");
+      }
+      await this.llmLedger.releaseInTx(
+        tx,
+        ready.spendId,
+        { reason: `task_${terminalStatus}_before_provider_dispatch` },
+        { allowTaskJobSpend: true },
+      );
+    }
+
+    for (const job of jobs) {
+      if (job.status !== "ready" && job.status !== "waiting_budget") continue;
+      const [cancelled] = await tx
+        .update(agentTaskLlmJob)
+        .set({
+          status: "cancelled",
+          requestPayload: null,
+          cancelledAt: now,
+          lastError: `task_${terminalStatus}_before_provider_dispatch`,
+          updatedAt: now,
+        })
+        .where(and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, job.status)))
+        .returning();
+      if (!cancelled) {
+        throw new ConflictException("LLM job changed during terminal task cleanup");
+      }
+    }
   }
 
   /**

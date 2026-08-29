@@ -211,14 +211,39 @@ pricing profile существует и Core разрешает reserve до pro
 Ничего не задано → это не поломка: агенты работают детерминированно, очередь
 остаётся сигналом, а не лентой.
 
-## Durable checkpoint и Notion outbox (миграция 0076)
+## Durable provider result, checkpoint и Notion outbox (миграции 0076–0077)
 
 Этот контур действует только для **задачи, порученной агенту через Core**. После
-успешного ответа checkpoint endpoint Core хранит неизменяемый результат навыка
-(`proposal` либо `no_signal`), его hash, исходный task-input hash и устойчивый
-`executionAttemptId`. Если worker упал или lease перехватил другой worker,
-следующий claim получает этот checkpoint и продолжает с него: навык и LLM
-повторно не запускаются.
+claim worker сначала создаёт в Core `active` execution: фиксируются исходный
+task-input hash, versioned workflow plan и устойчивый `executionAttemptId`.
+Каждый metered chat/embedding шаг получает отдельный durable job. До HTTP-вызова
+Core сохраняет точный provider JSON без auth/secrets и выдаёт один dispatch
+token; после ответа одной транзакцией сохраняет immutable result и settlement
+денежного резерва. Exact payload очищается в terminal state, а operation/result
+hash остаются для аудита.
+
+Plan привязывает каждый metered шаг к secret-free профилю маршрута вида
+`openai-chat-completions:sha256:<hash>` или
+`openai-embeddings:sha256:<hash>`. Hash считается от canonical effective
+HTTP(S) base URL; raw URL не попадает в Core. Credentials, query, fragment и
+не-HTTP(S) URL запрещены. Если после start изменился endpoint, provider,
+adapter, billing mode или gateway, Agents не обращается к провайдеру и
+освобождает claim с причиной `workflow_changed`. Core сохраняет стабильный
+durable block; автоматический takeover его не обходит.
+
+Если worker упал **после** durable complete, следующий claim получает сохранённый
+result и продолжает тот же workflow без повторной оплаты. Поздний ответ вправе
+сохранить worker старой generation по исходному dispatch token, но его старый
+`runId` всё равно не пройдёт checkpoint/commit fence и не применит эффекты
+задачи. Отказ бюджета на позднем шаге тоже не стирает уже готовые ранние шаги:
+на новых ташкентских сутках повторяется только server-side authorization этого
+job, а не provider-вызовы законченных job.
+
+После вычисления checkpoint endpoint хранит неизменяемый результат навыка
+(`proposal` либо `no_signal`), manifest всех provider jobs, его hash, исходный
+task-input hash и execution plan hash. Если worker упал или lease перехватил
+другой worker, следующий claim получает этот checkpoint: навык и LLM повторно
+не запускаются.
 
 Следующий шаг — один атомарный commit в PostgreSQL. Fence текущей generation,
 результат и статус задачи, применимые event/memory/approval и intent публикации
@@ -228,17 +253,21 @@ pricing profile существует и Core разрешает reserve до pro
 commit отдельным dispatcher, поэтому сбой Notion не откатывает выполненную
 задачу и не теряет её внутренний результат.
 
-Граница гарантии находится **после подтверждённого checkpoint**. Между ответом
-LLM/provider и приёмом checkpoint Core нет общей транзакции и нет
-exactly-once: процесс может получить платный ответ и умереть до записи. Ledger
-не даёт автоматике вслепую сделать второй оплачиваемый вызов, но восстановить
-не записанный provider output не может; такая попытка остаётся
-`execution_unknown` до решения владельца.
+Честная граница гарантии теперь раньше checkpoint: Core выдаёт не более одного
+application dispatch grant на physical job, а принятый Core result повторно
+читается без provider. Это всё ещё **не exactly-once**: без provider idempotency
+или status API остаётся окно `dispatch grant → wire → durable complete`. Если
+процесс умер в нём, job становится `unknown`; автоматический dispatch/fallback
+запрещён, даже если пакет фактически не успел уйти. Late result с тем же token
+может закрыть unknown, иначе дальнейшую оплату разрешает только владелец после
+сверки.
 
 В этот slice пока **не входят** cron-запуски навыков, Assistant, Documents и
-доставка Telegram. У них нет task checkpoint/atomic commit из 0076. Notion
-report — единственный внешний destination нового outbox; наличие таблиц не
-означает, что Telegram или документы уже получили durable delivery.
+доставка Telegram. Local/subscription task gateways также не получают USD-job:
+v3 покрывает только metered HTTP chat/embedding. У остальных поверхностей нет
+task-scoped provider result из 0077. Notion report — единственный внешний
+destination outbox 0076; наличие таблиц не означает, что Telegram или документы
+уже получили durable delivery.
 
 ### Состояния Notion outbox
 
@@ -273,11 +302,14 @@ docker logs --since 30m mydon-agents 2>&1 | grep -i 'notion\|outbox'
 
 ## Если задача durable-заблокирована
 
-Причина видна в карточке и `agent_execution_blocked_reason`. Block возникает, если
-ledger уже видел физическую LLM-попытку без durable output, после checkpoint
-изменили задачу/исполнителя, владелец вернул committed-работу на redo или у
-агента нет подходящего навыка. Автоматика намеренно не вращает execution attempt:
-это могло бы повторить оплату или применить устаревший результат.
+Причина видна в карточке и `agent_execution_blocked_reason`. Block возникает,
+если durable job стал `unknown`, exact operation/result hash не совпал, после
+start/checkpoint изменили задачу или plan, владелец вернул committed-работу на
+redo, runtime route/config разошёлся с plan (`workflow_changed`) либо у агента
+нет подходящего навыка. Автоматика намеренно не вращает execution attempt: это
+могло бы повторить оплату или применить устаревший результат. Для
+`workflow_changed` owner retry всегда оставляет старый attempt для аудита и
+создаёт новый с актуальным route profile, даже когда его jobs уже terminal.
 
 1. При первичной настройке создать отдельный секрет, например
    `openssl rand -hex 32`, и записать его как `OWNER_ACTION_TOKEN` в `.env`.

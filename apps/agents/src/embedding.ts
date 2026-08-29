@@ -6,6 +6,16 @@ import {
   type LlmTokenUsage,
 } from "@mydon/shared";
 import { httpBillingMode } from "./llm-ledger";
+import {
+  DEFINITIVE_PROVIDER_REJECTION_STATUSES,
+  OPENAI_COMPATIBLE_ADAPTER,
+  OPENAI_COMPATIBLE_ADAPTER_VERSION,
+  bindHttpEndpoint,
+  type ExactProviderOutcome,
+} from "./model-gateway";
+import type { TaskLlmSession } from "./task-llm-session";
+
+export const EMBEDDING_ENDPOINT_PROFILE = "openai-embeddings";
 
 /**
  * Шлюз эмбеддингов для семантической памяти.
@@ -24,6 +34,7 @@ export interface EmbeddingResult {
   providerRequestId?: string;
   resolvedModel?: string;
   error?: string;
+  statusCode?: number;
 }
 
 export interface EmbeddingGateway {
@@ -31,6 +42,13 @@ export interface EmbeddingGateway {
   readonly billingMode: EmbeddingBillingMode;
   readonly model: string;
   embed(text: string): Promise<EmbeddingResult>;
+  readonly adapter?: string;
+  readonly adapterVersion?: number;
+  readonly endpointProfile?: string;
+  buildRequestPayload?(model: string, text: string): Record<string, unknown>;
+  dispatchExact?(
+    requestPayload: Record<string, unknown>,
+  ): Promise<ExactProviderOutcome<EmbeddingResult>>;
 }
 
 export interface EmbeddingCallContext {
@@ -41,11 +59,12 @@ export interface EmbeddingCallContext {
   traceKey?: string;
   /** Durable task lease: проверить CAS до reserve/provider. */
   assertLease?: () => Promise<void>;
+  /** Durable provider coordinator, only for metered task-mode calls. */
+  taskLlm?: TaskLlmSession;
 }
 
 function nonNegativeInt(value: unknown): number | undefined {
-  const n = Number(value);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function reportedUsage(data: unknown): LlmTokenUsage | undefined {
@@ -66,8 +85,13 @@ function reportedCost(data: unknown): number | undefined {
 
 /** OpenAI-совместимый HTTP-шлюз (`POST {base}/embeddings`). */
 export class HttpEmbeddingGateway implements EmbeddingGateway {
+  readonly adapter = OPENAI_COMPATIBLE_ADAPTER;
+  readonly adapterVersion = OPENAI_COMPATIBLE_ADAPTER_VERSION;
+  readonly endpointProfile: string;
+  private readonly baseUrl: string;
+
   constructor(
-    private readonly baseUrl: string,
+    baseUrl: string,
     readonly provider: string,
     private readonly apiKey = "",
     readonly model = "text-embedding-3-small",
@@ -75,25 +99,43 @@ export class HttpEmbeddingGateway implements EmbeddingGateway {
     readonly billingMode: EmbeddingBillingMode = "metered",
     private readonly fetchImpl: typeof fetch = fetch,
   ) {
+    const endpoint = bindHttpEndpoint(EMBEDDING_ENDPOINT_PROFILE, baseUrl);
+    this.baseUrl = endpoint.baseUrl;
+    this.endpointProfile = endpoint.endpointProfile;
     if (billingMode === "metered" && provider.trim() === "") {
       throw new Error("Metered HttpEmbeddingGateway требует явный price provider id");
     }
   }
 
-  async embed(text: string): Promise<EmbeddingResult> {
+  buildRequestPayload(model: string, text: string): Record<string, unknown> {
+    return { model, input: text };
+  }
+
+  async dispatchExact(
+    requestPayload: Record<string, unknown>,
+  ): Promise<ExactProviderOutcome<EmbeddingResult>> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const res = await this.fetchImpl(`${this.baseUrl.replace(/\/$/, "")}/embeddings`, {
+      const res = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
         method: "POST",
         signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
         },
-        body: JSON.stringify({ model: this.model, input: text }),
+        body: JSON.stringify(requestPayload),
       });
-      if (!res.ok) return { vector: null, error: `шлюз ответил ${res.status}` };
+      if (!res.ok) {
+        const result: EmbeddingResult = {
+          vector: null,
+          error: `шлюз ответил ${res.status}`,
+          statusCode: res.status,
+        };
+        return DEFINITIVE_PROVIDER_REJECTION_STATUSES.has(res.status)
+          ? { outcome: "provider_rejection", result }
+          : { outcome: "unknown", result };
+      }
       const data = (await res.json()) as {
         id?: unknown;
         model?: unknown;
@@ -102,23 +144,43 @@ export class HttpEmbeddingGateway implements EmbeddingGateway {
         data?: { embedding?: unknown }[];
       };
       const raw = data?.data?.[0]?.embedding;
-      const vector = Array.isArray(raw) ? raw.map(Number) : null;
-      const valid = vector !== null && vector.every(Number.isFinite) ? vector : null;
+      const valid =
+        Array.isArray(raw) &&
+        raw.length > 0 &&
+        raw.length <= 16_384 &&
+        raw.every((value) => typeof value === "number" && Number.isFinite(value))
+          ? (raw as number[])
+          : null;
+      if (valid === null) {
+        return {
+          outcome: "unknown",
+          result: { vector: null, error: "provider не вернул валидный embedding" },
+        };
+      }
       const usage = reportedUsage(data);
       const costUsd = reportedCost(data);
       return {
-        vector: valid,
-        ...(usage ? { usage } : {}),
-        ...(costUsd !== undefined ? { costUsd } : {}),
-        ...(typeof data.id === "string" ? { providerRequestId: data.id } : {}),
-        ...(typeof data.model === "string" ? { resolvedModel: data.model } : {}),
-        ...(valid === null ? { error: "provider не вернул валидный embedding" } : {}),
+        outcome: "success",
+        result: {
+          vector: valid,
+          ...(usage ? { usage } : {}),
+          ...(costUsd !== undefined ? { costUsd } : {}),
+          ...(typeof data.id === "string" ? { providerRequestId: data.id } : {}),
+          ...(typeof data.model === "string" ? { resolvedModel: data.model } : {}),
+        },
       };
     } catch (error) {
-      return { vector: null, error: error instanceof Error ? error.message : String(error) };
+      return {
+        outcome: "unknown",
+        result: { vector: null, error: error instanceof Error ? error.message : String(error) },
+      };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async embed(text: string): Promise<EmbeddingResult> {
+    return (await this.dispatchExact(this.buildRequestPayload(this.model, text))).result;
   }
 }
 
@@ -134,6 +196,12 @@ export async function embedWithLedger(
   // Вызов стоит перед local и metered ветками: stale worker не
   // должен уйти provider-у даже при локальном billing mode.
   await context.assertLease?.();
+  const durable = context.taskLlm?.usesDurableEmbedding(gateway, context.feature) ?? false;
+  if (durable) {
+    return (
+      await context.taskLlm!.embed(gateway, text, context.feature, inputTokenCeiling(text, 256))
+    ).vector;
+  }
   if (gateway.billingMode === "local") return (await gateway.embed(text)).vector;
   if (!context.ledger) {
     throw new LlmLedgerUnavailableError("Metered embeddings не получили клиент Core ledger");

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import type { ChannelPost } from "@mydon/connectors";
 import type { LlmLedger } from "@mydon/shared";
 import type { EmbeddingGateway } from "./embedding";
@@ -66,6 +66,16 @@ describe("buildIdeasProposal", () => {
 
 describe("assessIdeas — оценка моделью (первый LLM-навык)", () => {
   const OPTS = { agentName: "knowledge-curator", requestKey: "ideas-test" } as const;
+  const previousModel = process.env.LLM_MODEL;
+
+  before(() => {
+    process.env.LLM_MODEL = "test-model";
+  });
+
+  after(() => {
+    if (previousModel === undefined) delete process.env.LLM_MODEL;
+    else process.env.LLM_MODEL = previousModel;
+  });
 
   function fakeGateway(text: string, ok = true): { gateway: ModelGateway; seen: ModelRequest[] } {
     const seen: ModelRequest[] = [];
@@ -106,6 +116,45 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
       await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(1, "идея")] }], OPTS),
       null,
     );
+  });
+
+  it("пустой LLM_MODEL не подставляет default и не вызывает metered provider", async () => {
+    const configuredModel = process.env.LLM_MODEL;
+    delete process.env.LLM_MODEL;
+    let providerCalls = 0;
+    let reserves = 0;
+    const gateway: ModelGateway = {
+      provider: "priced-provider",
+      billingMode: "metered",
+      call: async (model) => {
+        providerCalls += 1;
+        return { text: "не должен вызываться", model, ok: true };
+      },
+    };
+    const ledger: LlmLedger = {
+      reserve: async () => {
+        reserves += 1;
+        throw new Error("reserve не должен вызываться без явной модели");
+      },
+      settle: async () => undefined,
+      fail: async () => undefined,
+      release: async () => undefined,
+    };
+
+    try {
+      assert.equal(
+        await assessIdeas(gateway, [{ channel: "promtjam", posts: [post(1, "идея")] }], {
+          ...OPTS,
+          ledger,
+        }),
+        null,
+      );
+      assert.equal(reserves, 0);
+      assert.equal(providerCalls, 0);
+    } finally {
+      if (configuredModel === undefined) delete process.env.LLM_MODEL;
+      else process.env.LLM_MODEL = configuredModel;
+    }
   });
 
   // ── Семантическая память (RAG, #6b): дедуп уже разобранных идей ──────────────

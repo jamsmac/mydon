@@ -62,9 +62,28 @@ export const llmLedgerConsumerEnum = pgEnum("llm_ledger_consumer", [
   "embeddings",
 ]);
 export const taskAgentExecutionStatusEnum = pgEnum("task_agent_execution_status", [
+  "active",
   "ready",
   "committed",
   "abandoned",
+]);
+export const agentTaskLlmJobStatusEnum = pgEnum("agent_task_llm_job_status", [
+  "waiting_budget",
+  "ready",
+  "dispatching",
+  "succeeded",
+  "rejected",
+  "unknown",
+  "cancelled",
+]);
+export const agentTaskLlmJobKindEnum = pgEnum("agent_task_llm_job_kind", ["chat", "embedding"]);
+export const agentTaskLlmAuthorizationDecisionEnum = pgEnum(
+  "agent_task_llm_authorization_decision",
+  ["denied", "granted"],
+);
+export const agentTaskLlmResultKindEnum = pgEnum("agent_task_llm_result_kind", [
+  "success",
+  "provider_rejection",
 ]);
 export const outboxDeliveryStatusEnum = pgEnum("outbox_delivery_status", [
   "pending",
@@ -908,9 +927,15 @@ export const taskAgentExecution = pgTable(
     skill: text("skill").notNull(),
     schemaVersion: integer("schema_version").default(1).notNull(),
     taskInputHash: text("task_input_hash").notNull(),
-    checkpointKind: text("checkpoint_kind").notNull(),
-    checkpointPayload: jsonb("checkpoint_payload").notNull(),
-    checkpointHash: text("checkpoint_hash").notNull(),
+    workflowVersion: integer("workflow_version").default(1).notNull(),
+    executionPlan: jsonb("execution_plan").default({ version: 1, steps: [] }).notNull(),
+    executionPlanHash: text("execution_plan_hash")
+      .default("a5dd3ce7993c63ad01d8a9a45922bc5f17d2c41c5f21a10671ec8c05c5ffc4aa")
+      .notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    checkpointKind: text("checkpoint_kind"),
+    checkpointPayload: jsonb("checkpoint_payload"),
+    checkpointHash: text("checkpoint_hash"),
     status: taskAgentExecutionStatusEnum("status").default("ready").notNull(),
     outcomePayload: jsonb("outcome_payload"),
     outcomeHash: text("outcome_hash"),
@@ -926,9 +951,15 @@ export const taskAgentExecution = pgTable(
     index("task_agent_execution_task_idx").on(t.taskId),
     index("task_agent_execution_status_idx").on(t.status),
     check("task_agent_execution_schema_version_positive", sql`${t.schemaVersion} > 0`),
+    check("task_agent_execution_workflow_version_positive", sql`${t.workflowVersion} > 0`),
+    check(
+      "task_agent_execution_plan_bounded",
+      sql`jsonb_typeof(${t.executionPlan}) = 'object' and octet_length(${t.executionPlan}::text) <= 65536`,
+    ),
+    check("task_agent_execution_plan_hash_format", sql`${t.executionPlanHash} ~ '^[0-9a-f]{64}$'`),
     check(
       "task_agent_execution_terminal_fields_consistent",
-      sql`(${t.status} = 'ready' and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'committed' and ${t.outcomePayload} is not null and ${t.outcomeHash} is not null and ${t.committedAt} is not null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'abandoned' and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is not null and ${t.abandonReason} is not null)`,
+      sql`(${t.status} = 'active' and ${t.checkpointKind} is null and ${t.checkpointPayload} is null and ${t.checkpointHash} is null and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'ready' and ${t.checkpointKind} is not null and ${t.checkpointPayload} is not null and ${t.checkpointHash} is not null and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'committed' and ${t.checkpointKind} is not null and ${t.checkpointPayload} is not null and ${t.checkpointHash} is not null and ${t.outcomePayload} is not null and ${t.outcomeHash} is not null and ${t.committedAt} is not null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'abandoned' and ((${t.checkpointKind} is null and ${t.checkpointPayload} is null and ${t.checkpointHash} is null) or (${t.checkpointKind} is not null and ${t.checkpointPayload} is not null and ${t.checkpointHash} is not null)) and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is not null and ${t.abandonReason} is not null)`,
     ),
   ],
 );
@@ -1660,6 +1691,130 @@ export const llmSpend = pgTable(
 // (entity), склад — в stock_movement; здесь — вендинг-специфика: слоты с
 // ВМЕСТИМОСТЬЮ (её нет в machine_stock), снапшоты, продажи за период, прайс и
 // алиасы имён вендора. Числа Ourvend приходят строками — в базе храним числами.
+
+// ── Durable provider jobs task-mode Agents ──
+// Provider credentials remain in Agents. Core persists the exact secret-free
+// request body, one application-level dispatch grant and the immutable result.
+export const agentTaskLlmJob = pgTable(
+  "agent_task_llm_job",
+  {
+    id: id(),
+    taskAgentExecutionId: uuid("task_agent_execution_id")
+      .references(() => taskAgentExecution.id, { onDelete: "restrict" })
+      .notNull(),
+    stepKey: text("step_key").notNull(),
+    providerAttemptNo: integer("provider_attempt_no").notNull(),
+    kind: agentTaskLlmJobKindEnum("kind").notNull(),
+    feature: text("feature").notNull(),
+    adapter: text("adapter").notNull(),
+    adapterVersion: integer("adapter_version").notNull(),
+    endpointProfile: text("endpoint_profile").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    inputTokenCeiling: integer("input_token_ceiling").notNull(),
+    outputTokenCeiling: integer("output_token_ceiling").notNull(),
+    /** Server-derived identity of one physical fallback attempt. */
+    jobKey: text("job_key").notNull(),
+    /** SHA-256 of the canonical operation envelope including exact provider body. */
+    operationHash: text("operation_hash").notNull(),
+    /** Exact provider JSON body, without auth/secrets; cleared at every terminal state. */
+    requestPayload: jsonb("request_payload"),
+    /** First granted spend only; denied daily authorizations remain in the child table. */
+    spendId: uuid("spend_id").references(() => llmSpend.id, { onDelete: "restrict" }),
+    status: agentTaskLlmJobStatusEnum("status").default("waiting_budget").notNull(),
+    /** Application-level provider dispatch can be granted at most once. */
+    dispatchCount: integer("dispatch_count").default(0).notNull(),
+    dispatchToken: uuid("dispatch_token"),
+    dispatchRunId: uuid("dispatch_run_id"),
+    dispatchGrantedAt: timestamp("dispatch_granted_at", { withTimezone: true }),
+    dispatchDeadlineAt: timestamp("dispatch_deadline_at", { withTimezone: true }),
+    unknownAt: timestamp("unknown_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("agent_task_llm_job_job_key").on(t.jobKey),
+    uniqueIndex("agent_task_llm_job_execution_step_attempt_key").on(
+      t.taskAgentExecutionId,
+      t.stepKey,
+      t.providerAttemptNo,
+    ),
+    uniqueIndex("agent_task_llm_job_spend_key")
+      .on(t.spendId)
+      .where(sql`${t.spendId} is not null`),
+    index("agent_task_llm_job_execution_idx").on(t.taskAgentExecutionId),
+    index("agent_task_llm_job_status_idx").on(t.status),
+    index("agent_task_llm_job_status_deadline_idx").on(t.status, t.dispatchDeadlineAt),
+    check(
+      "agent_task_llm_job_attempt_version_positive",
+      sql`${t.providerAttemptNo} > 0 and ${t.adapterVersion} > 0`,
+    ),
+    check(
+      "agent_task_llm_job_token_ceilings_nonnegative",
+      sql`${t.inputTokenCeiling} >= 0 and ${t.outputTokenCeiling} >= 0`,
+    ),
+    check(
+      "agent_task_llm_job_dispatch_count_range",
+      sql`${t.dispatchCount} >= 0 and ${t.dispatchCount} <= 1`,
+    ),
+    check("agent_task_llm_job_operation_hash_format", sql`${t.operationHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "agent_task_llm_job_request_payload_bounded",
+      sql`${t.requestPayload} is null or (jsonb_typeof(${t.requestPayload}) = 'object' and octet_length(${t.requestPayload}::text) <= 1048576)`,
+    ),
+    check(
+      "agent_task_llm_job_state_fields_consistent",
+      sql`(${t.status} = 'waiting_budget' and ${t.spendId} is null and ${t.requestPayload} is not null and ${t.dispatchCount} = 0 and ${t.dispatchToken} is null and ${t.dispatchRunId} is null and ${t.dispatchGrantedAt} is null and ${t.dispatchDeadlineAt} is null and ${t.unknownAt} is null and ${t.completedAt} is null and ${t.cancelledAt} is null) or (${t.status} = 'ready' and ${t.spendId} is not null and ${t.requestPayload} is not null and ${t.dispatchCount} = 0 and ${t.dispatchToken} is null and ${t.dispatchRunId} is null and ${t.dispatchGrantedAt} is null and ${t.dispatchDeadlineAt} is null and ${t.unknownAt} is null and ${t.completedAt} is null and ${t.cancelledAt} is null) or (${t.status} = 'dispatching' and ${t.spendId} is not null and ${t.requestPayload} is not null and ${t.dispatchCount} = 1 and ${t.dispatchToken} is not null and ${t.dispatchRunId} is not null and ${t.dispatchGrantedAt} is not null and ${t.dispatchDeadlineAt} is not null and ${t.unknownAt} is null and ${t.completedAt} is null and ${t.cancelledAt} is null) or (${t.status} in ('succeeded', 'rejected') and ${t.spendId} is not null and ${t.requestPayload} is null and ${t.dispatchCount} = 1 and ${t.dispatchToken} is not null and ${t.dispatchRunId} is not null and ${t.dispatchGrantedAt} is not null and ${t.dispatchDeadlineAt} is not null and ${t.completedAt} is not null and ${t.cancelledAt} is null) or (${t.status} = 'unknown' and ${t.spendId} is not null and ${t.requestPayload} is null and ${t.dispatchCount} = 1 and ${t.dispatchToken} is not null and ${t.dispatchRunId} is not null and ${t.dispatchGrantedAt} is not null and ${t.dispatchDeadlineAt} is not null and ${t.unknownAt} is not null and ${t.completedAt} is null and ${t.cancelledAt} is null) or (${t.status} = 'cancelled' and ${t.requestPayload} is null and ${t.dispatchCount} = 0 and ${t.dispatchToken} is null and ${t.dispatchRunId} is null and ${t.dispatchGrantedAt} is null and ${t.dispatchDeadlineAt} is null and ${t.unknownAt} is null and ${t.completedAt} is null and ${t.cancelledAt} is not null)`,
+    ),
+  ],
+);
+
+export const agentTaskLlmAuthorization = pgTable(
+  "agent_task_llm_authorization",
+  {
+    id: id(),
+    jobId: uuid("job_id")
+      .references(() => agentTaskLlmJob.id, { onDelete: "restrict" })
+      .notNull(),
+    day: date("day").notNull(),
+    spendId: uuid("spend_id")
+      .references(() => llmSpend.id, { onDelete: "restrict" })
+      .notNull(),
+    decision: agentTaskLlmAuthorizationDecisionEnum("decision").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("agent_task_llm_authorization_job_day_key").on(t.jobId, t.day),
+    uniqueIndex("agent_task_llm_authorization_spend_key").on(t.spendId),
+    uniqueIndex("agent_task_llm_authorization_job_granted_key")
+      .on(t.jobId)
+      .where(sql`${t.decision} = 'granted'`),
+    index("agent_task_llm_authorization_day_decision_idx").on(t.day, t.decision),
+  ],
+);
+
+export const agentTaskLlmResult = pgTable(
+  "agent_task_llm_result",
+  {
+    jobId: uuid("job_id")
+      .primaryKey()
+      .references(() => agentTaskLlmJob.id, { onDelete: "restrict" }),
+    kind: agentTaskLlmResultKindEnum("kind").notNull(),
+    payload: jsonb("payload").notNull(),
+    resultHash: text("result_hash").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    check("agent_task_llm_result_hash_format", sql`${t.resultHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "agent_task_llm_result_payload_bounded",
+      sql`jsonb_typeof(${t.payload}) = 'object' and octet_length(${t.payload}::text) <= 1048576`,
+    ),
+  ],
+);
 
 export const vendingCategoryEnum = pgEnum("vending_category", ["drink", "snack", "other"]);
 export const vendingAliasSourceEnum = pgEnum("vending_alias_source", [
@@ -3155,6 +3310,9 @@ export const schema = {
   // Единый денежный журнал всех метрируемых LLM-вызовов.
   llmModelPrice,
   llmSpend,
+  agentTaskLlmJob,
+  agentTaskLlmAuthorization,
+  agentTaskLlmResult,
   // Операционные таблицы VendHub (движения, сырьё, инкассация).
   collection,
   sale,

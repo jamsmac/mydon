@@ -74,6 +74,39 @@ function ledgerFake() {
 }
 
 describe("HTTP embeddings + LLM-ledger", () => {
+  it("binds embedding endpoint profile to the canonical base URL", () => {
+    const plain = new HttpEmbeddingGateway("https://gateway.invalid/v1", "fixture-provider");
+    const slash = new HttpEmbeddingGateway("https://gateway.invalid/v1/", "fixture-provider");
+    const different = new HttpEmbeddingGateway("https://other.invalid/v1", "fixture-provider");
+
+    assert.equal(plain.endpointProfile, slash.endpointProfile);
+    assert.notEqual(plain.endpointProfile, different.endpointProfile);
+    assert.match(plain.endpointProfile, /^openai-embeddings:sha256:[0-9a-f]{64}$/);
+    assert.equal(plain.endpointProfile.includes("gateway.invalid"), false);
+  });
+
+  it("invalid 2xx embedding is unknown and exact dispatch does not rebuild the envelope", async () => {
+    let body = "";
+    const gateway = new HttpEmbeddingGateway(
+      "https://gateway.invalid",
+      "fixture-provider",
+      "",
+      "embed-model",
+      1000,
+      "metered",
+      async (_url, init) => {
+        body = String(init?.body);
+        return new Response(JSON.stringify({ data: [{ embedding: [1, "2"] }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    );
+    const exact = { model: "stored-model", input: "stored-input", dimensions: 2 };
+    assert.equal((await gateway.dispatchExact(exact)).outcome, "unknown");
+    assert.deepEqual(JSON.parse(body), exact);
+  });
+
   it("reserve denial не вызывает embedding provider", async () => {
     let calls = 0;
     const gateway: EmbeddingGateway = {

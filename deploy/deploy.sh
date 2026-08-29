@@ -19,6 +19,9 @@ if [ -n "$(git -C "$LOCAL_DIR" status --porcelain --untracked-files=normal 2>/de
 fi
 DEPLOY_ID="${GIT_SHA//[^a-zA-Z0-9_.-]/-}-$$"
 AUTODEPLOY_TIMER_WAS_ACTIVE=0
+AGENTS_STOPPED_FOR_ROLLOUT=0
+AGENTS_WAS_RUNNING=0
+MIGRATION_STARTED=0
 
 say() { printf "\n\033[1;34m▸ %s\033[0m\n" "$1"; }
 resume_autodeploy() {
@@ -27,7 +30,32 @@ resume_autodeploy() {
       printf 'ВНИМАНИЕ: не удалось снова запустить mydon-autodeploy.timer\n' >&2
   fi
 }
-trap resume_autodeploy EXIT
+rollout_cleanup() {
+  rc="$1"
+  if [ "$rc" -ne 0 ] && [ "$AGENTS_STOPPED_FOR_ROLLOUT" -eq 1 ]; then
+    if [ "$MIGRATION_STARTED" -eq 0 ] && [ "$AGENTS_WAS_RUNNING" -eq 1 ]; then
+      # Resume the stopped container itself: unlike `compose up`, this keeps the
+      # exact old image id after the shared mydon:latest tag has been rebuilt.
+      # This is allowed only before the first migration invocation.
+      if ssh "$HOST" 'docker start mydon-agents >/dev/null 2>&1'; then
+        printf 'Выкатка прервана до migration attempt: вернут старый container mydon-agents.\n' >&2
+      else
+        printf 'ВНИМАНИЕ: не удалось вернуть старый mydon-agents.\n' >&2
+      fi
+    else
+      # Once migration was invoked, its result may be ambiguous (for example
+      # SSH can drop after PostgreSQL committed). Fail closed, including a late
+      # failure after new Agents was already started.
+      if ssh "$HOST" "cd '$REMOTE_DIR' && docker compose -f deploy/docker-compose.yml --env-file .env stop mydon-agents >/dev/null 2>&1"; then
+        printf 'Выкатка прервана после migration start/commit: mydon-agents оставлен на паузе.\n' >&2
+      else
+        printf 'ВНИМАНИЕ: не удалось остановить mydon-agents после сбоя rollout.\n' >&2
+      fi
+    fi
+  fi
+  resume_autodeploy
+}
+trap 'rollout_cleanup $?' EXIT
 
 say "1/8 Проверка связи и предпосылок"
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" '
@@ -210,8 +238,24 @@ ssh "$HOST" "
 "
 
 say "5/8 Применение схемы БД новым образом"
+# Agents stops before migration while the old Core/Bot/CC remain available.
+# Only a failure before the first migration attempt may resume this exact
+# stopped container (and therefore its immutable old image id). From invocation
+# onward an ambiguous result is fail-closed and leaves Agents stopped.
+if [ "$(ssh "$HOST" "docker inspect -f '{{.State.Running}}' mydon-agents 2>/dev/null || true")" = "true" ]; then
+  AGENTS_WAS_RUNNING=1
+fi
+AGENTS_STOPPED_FOR_ROLLOUT=1
+ssh "$HOST" "
+  set -e
+  cd '$REMOTE_DIR'
+  docker compose -f deploy/docker-compose.yml --env-file .env stop mydon-agents
+"
 # node dist/migrate.js, а не drizzle-kit: последний при отказе SQL молчит и
 # выходит кодом 1 — отладить такой деплой нечем (см. комментарий в auto-deploy.sh).
+# Fence before the SSH invocation: a transport failure can hide a committed DB
+# transaction, so any attempted migration must keep Agents stopped.
+MIGRATION_STARTED=1
 ssh "$HOST" "
   set -e
   cd '$REMOTE_DIR'
@@ -245,12 +289,14 @@ ssh "$HOST" "
         ;;
     esac
   fi
-  docker compose -f deploy/docker-compose.yml --env-file .env up -d
+  # Core switches alone. Agents remains stopped until the new Core passes its
+  # API health fence; Compose depends_on guarantees only process start.
+  docker compose -f deploy/docker-compose.yml --env-file .env up -d --no-deps mydon-core
   # Interrupted Compose replacement can leave a healthy service under a
   # temporary name such as <id>_mydon-core. Compose still resolves exec by
   # labels, but cron/guards deliberately address the fixed production names.
   # Repair only the affected service, then require the exact name and state.
-  for service in mydon-db mydon-core mydon-bot mydon-agents mydon-cc; do
+  for service in mydon-core; do
     state=\$(docker inspect -f '{{.Name}}|{{.State.Status}}' \"\$service\" 2>/dev/null || true)
     if [ \"\$state\" != \"/\$service|running\" ]; then
       echo \"  восстанавливаю production-имя \$service (было: \${state:-нет контейнера})\"
@@ -258,7 +304,7 @@ ssh "$HOST" "
         up -d --no-deps --force-recreate \"\$service\"
     fi
   done
-  for service in mydon-db mydon-core mydon-bot mydon-agents mydon-cc; do
+  for service in mydon-core; do
     state=\$(docker inspect -f '{{.Name}}|{{.State.Status}}' \"\$service\" 2>/dev/null || true)
     [ \"\$state\" = \"/\$service|running\" ] || {
       echo \"Контейнер \$service не запущен под точным production-именем (\${state:-не найден})\" >&2
@@ -275,6 +321,39 @@ ssh "$HOST" "
     sleep 2
   done
   [ -n \"\$health_ok\" ] || { echo 'Core не стал healthy за 60 секунд'; exit 1; }
+
+  # All other clients switch before Agents. Repairs stay inside their phase,
+  # preserving the invariant that no later service starts after Agents.
+  for service in mydon-bot mydon-cc; do
+    docker compose -f deploy/docker-compose.yml --env-file .env up -d --no-deps \"\$service\"
+    state=\$(docker inspect -f '{{.Name}}|{{.State.Status}}' \"\$service\" 2>/dev/null || true)
+    if [ \"\$state\" != \"/\$service|running\" ]; then
+      echo \"  восстанавливаю production-имя \$service (было: \${state:-нет контейнера})\"
+      docker compose -f deploy/docker-compose.yml --env-file .env \
+        up -d --no-deps --force-recreate \"\$service\"
+    fi
+    state=\$(docker inspect -f '{{.Name}}|{{.State.Status}}' \"\$service\" 2>/dev/null || true)
+    [ \"\$state\" = \"/\$service|running\" ] || {
+      echo \"Контейнер \$service не запущен под production-именем (\${state:-не найден})\" >&2
+      exit 1
+    }
+  done
+
+  docker compose -f deploy/docker-compose.yml --env-file .env up -d --no-deps mydon-agents
+  agents_state=\$(docker inspect -f '{{.Name}}|{{.State.Status}}' mydon-agents 2>/dev/null || true)
+  if [ \"\$agents_state\" != '/mydon-agents|running' ]; then
+    echo \"  восстанавливаю production-имя mydon-agents (было: \${agents_state:-нет контейнера})\"
+    docker compose -f deploy/docker-compose.yml --env-file .env \
+      up -d --no-deps --force-recreate mydon-agents
+  fi
+
+  for service in mydon-db mydon-core mydon-bot mydon-cc mydon-agents; do
+    state=\$(docker inspect -f '{{.Name}}|{{.State.Status}}' \"\$service\" 2>/dev/null || true)
+    [ \"\$state\" = \"/\$service|running\" ] || {
+      echo \"Контейнер \$service не запущен под точным production-именем (\${state:-не найден})\" >&2
+      exit 1
+    }
+  done
 "
 
 say "7.5/8 Уборка: старые слои и кэш сборки"

@@ -31,7 +31,8 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
   // оставался под охраной, а новые служебные добавлялись осознанно.
   // agent — настройки агентов; task_comment — переписка и отчёты по задачам;
   // llm_* — версионный прайс и единый финансовый журнал LLM;
-  // taskAgentExecution/outboxDelivery — durable outcome и его доставки.
+  // taskAgentExecution/outboxDelivery — durable outcome и его доставки;
+  // agentTaskLlm* — durable provider dispatch/result task-mode Agents.
   const SERVICE = [
     "agent",
     "taskComment",
@@ -39,6 +40,9 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     "llmSpend",
     "taskAgentExecution",
     "outboxDelivery",
+    "agentTaskLlmJob",
+    "agentTaskLlmAuthorization",
+    "agentTaskLlmResult",
   ];
 
   // Извлечение состава индексов таблицы через внутренний символ drizzle —
@@ -177,6 +181,7 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
 
   it("durable agent outcome и outbox имеют полный fencing-контракт", () => {
     assert.deepEqual(mod.taskAgentExecutionStatusEnum.enumValues, [
+      "active",
       "ready",
       "committed",
       "abandoned",
@@ -196,6 +201,11 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       "executionAttemptId",
       "schemaVersion",
       "taskInputHash",
+      "workflowVersion",
+      "executionPlan",
+      "executionPlanHash",
+      "startedAt",
+      "checkpointKind",
       "checkpointPayload",
       "checkpointHash",
       "status",
@@ -218,10 +228,18 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     const executionChecks = getTableConfig(schema.taskAgentExecution).checks.map((c) => c.name);
     for (const name of [
       "task_agent_execution_schema_version_positive",
+      "task_agent_execution_workflow_version_positive",
+      "task_agent_execution_plan_bounded",
+      "task_agent_execution_plan_hash_format",
       "task_agent_execution_terminal_fields_consistent",
     ]) {
       assert.ok(executionChecks.includes(name), `нет CHECK ${name}`);
     }
+    assert.equal(
+      schema.taskAgentExecution.executionPlanHash.default,
+      "a5dd3ce7993c63ad01d8a9a45922bc5f17d2c41c5f21a10671ec8c05c5ffc4aa",
+      "rolling deploy: Core v2 должен вставить execution без нового поля",
+    );
 
     const outboxColumns = Object.keys(schema.outboxDelivery);
     for (const column of [
@@ -265,6 +283,100 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       assert.equal(clientKey.notNull, false, `${indexName}: client_key обязан быть nullable`);
       assert.ok(имена(table).includes(indexName), `${indexName}: нет UNIQUE-индекса`);
     }
+  });
+
+  it("durable task LLM job фиксирует dispatch, daily authorization и immutable result", () => {
+    assert.deepEqual(mod.agentTaskLlmJobStatusEnum.enumValues, [
+      "waiting_budget",
+      "ready",
+      "dispatching",
+      "succeeded",
+      "rejected",
+      "unknown",
+      "cancelled",
+    ]);
+    assert.deepEqual(mod.agentTaskLlmJobKindEnum.enumValues, ["chat", "embedding"]);
+    assert.deepEqual(mod.agentTaskLlmAuthorizationDecisionEnum.enumValues, ["denied", "granted"]);
+    assert.deepEqual(mod.agentTaskLlmResultKindEnum.enumValues, ["success", "provider_rejection"]);
+
+    const jobColumns = Object.keys(schema.agentTaskLlmJob);
+    for (const column of [
+      "taskAgentExecutionId",
+      "stepKey",
+      "providerAttemptNo",
+      "kind",
+      "feature",
+      "adapter",
+      "adapterVersion",
+      "endpointProfile",
+      "provider",
+      "model",
+      "inputTokenCeiling",
+      "outputTokenCeiling",
+      "jobKey",
+      "operationHash",
+      "requestPayload",
+      "spendId",
+      "status",
+      "dispatchCount",
+      "dispatchToken",
+      "dispatchRunId",
+      "dispatchGrantedAt",
+      "dispatchDeadlineAt",
+      "unknownAt",
+      "completedAt",
+      "cancelledAt",
+      "lastError",
+    ]) {
+      assert.ok(jobColumns.includes(column), `agent_task_llm_job не хранит ${column}`);
+    }
+    assert.equal(schema.agentTaskLlmJob.requestPayload.notNull, false);
+    assert.equal(schema.agentTaskLlmJob.spendId.notNull, false);
+    for (const name of [
+      "agent_task_llm_job_job_key",
+      "agent_task_llm_job_execution_step_attempt_key",
+      "agent_task_llm_job_spend_key",
+      "agent_task_llm_job_execution_idx",
+      "agent_task_llm_job_status_idx",
+      "agent_task_llm_job_status_deadline_idx",
+    ]) {
+      assert.ok(имена(schema.agentTaskLlmJob).includes(name), `нет индекса ${name}`);
+    }
+    const jobChecks = getTableConfig(schema.agentTaskLlmJob).checks.map((c) => c.name);
+    for (const name of [
+      "agent_task_llm_job_attempt_version_positive",
+      "agent_task_llm_job_token_ceilings_nonnegative",
+      "agent_task_llm_job_dispatch_count_range",
+      "agent_task_llm_job_operation_hash_format",
+      "agent_task_llm_job_request_payload_bounded",
+      "agent_task_llm_job_state_fields_consistent",
+    ]) {
+      assert.ok(jobChecks.includes(name), `нет CHECK ${name}`);
+    }
+
+    const authorizationColumns = Object.keys(schema.agentTaskLlmAuthorization);
+    for (const column of ["id", "jobId", "day", "spendId", "decision", "createdAt"]) {
+      assert.ok(
+        authorizationColumns.includes(column),
+        `agent_task_llm_authorization не хранит ${column}`,
+      );
+    }
+    for (const name of [
+      "agent_task_llm_authorization_job_day_key",
+      "agent_task_llm_authorization_spend_key",
+      "agent_task_llm_authorization_job_granted_key",
+      "agent_task_llm_authorization_day_decision_idx",
+    ]) {
+      assert.ok(имена(schema.agentTaskLlmAuthorization).includes(name), `нет индекса ${name}`);
+    }
+
+    const resultColumns = Object.keys(schema.agentTaskLlmResult);
+    for (const column of ["jobId", "kind", "payload", "resultHash", "receivedAt"]) {
+      assert.ok(resultColumns.includes(column), `agent_task_llm_result не хранит ${column}`);
+    }
+    const resultChecks = getTableConfig(schema.agentTaskLlmResult).checks.map((c) => c.name);
+    assert.ok(resultChecks.includes("agent_task_llm_result_hash_format"));
+    assert.ok(resultChecks.includes("agent_task_llm_result_payload_bounded"));
   });
 
   it("вендинг: слот хранит ВМЕСТИМОСТЬ и остаток — основу расчёта дефицита", () => {

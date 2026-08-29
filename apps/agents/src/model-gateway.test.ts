@@ -131,6 +131,74 @@ describe("harnessPreset — CLI dispatch отключён", () => {
 });
 
 describe("HttpModelGateway — metered OpenAI-compatible", () => {
+  it("binds endpoint profile to a canonical secret-free base URL hash", () => {
+    const plain = new HttpModelGateway("HTTPS://Gateway.Invalid:443/v1", "fixture-provider");
+    const slash = new HttpModelGateway("https://gateway.invalid/v1/", "fixture-provider");
+    const different = new HttpModelGateway("https://other.invalid/v1", "fixture-provider");
+
+    assert.equal(plain.endpointProfile, slash.endpointProfile);
+    assert.notEqual(plain.endpointProfile, different.endpointProfile);
+    assert.match(plain.endpointProfile, /^openai-chat-completions:sha256:[0-9a-f]{64}$/);
+    assert.equal(plain.endpointProfile.includes("gateway.invalid"), false);
+  });
+
+  it("rejects ambiguous or secret-bearing provider base URLs", () => {
+    for (const baseUrl of [
+      "ftp://gateway.invalid/v1",
+      "https://user:secret@gateway.invalid/v1",
+      "https://gateway.invalid/v1?api-version=1",
+      "https://gateway.invalid/v1#fragment",
+      "/relative/v1",
+    ]) {
+      assert.throws(() => new HttpModelGateway(baseUrl, "fixture-provider"), /base URL/);
+    }
+  });
+
+  it("exact dispatch classifies only allowlisted 4xx as rejection and never retries transport", async () => {
+    const cases = [
+      { status: 429, outcome: "provider_rejection" },
+      { status: 408, outcome: "unknown" },
+      { status: 503, outcome: "unknown" },
+    ] as const;
+    for (const testCase of cases) {
+      let calls = 0;
+      let body = "";
+      const gateway = new HttpModelGateway(
+        "https://gateway.invalid",
+        "fixture-provider",
+        "",
+        1000,
+        "metered",
+        async (_url, init) => {
+          calls += 1;
+          body = String(init?.body);
+          return new Response("error", { status: testCase.status });
+        },
+      );
+      const exact = { model: "m", messages: [{ role: "user", content: "exact" }] };
+      const outcome = await gateway.dispatchExact(exact);
+      assert.equal(outcome.outcome, testCase.outcome);
+      assert.equal(calls, 1);
+      assert.deepEqual(JSON.parse(body), exact);
+    }
+  });
+
+  it("invalid 2xx response is ambiguous unknown, not a fallback-safe rejection", async () => {
+    const gateway = new HttpModelGateway(
+      "https://gateway.invalid",
+      "fixture-provider",
+      "",
+      1000,
+      "metered",
+      async () =>
+        new Response(JSON.stringify({ choices: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    assert.equal((await gateway.dispatchExact({ model: "m", messages: [] })).outcome, "unknown");
+  });
+
   it("сохраняет standard usage/id/model, а отсутствующую цену не подменяет нулём", async () => {
     const fetchImpl: typeof fetch = async () =>
       new Response(
@@ -165,6 +233,28 @@ describe("HttpModelGateway — metered OpenAI-compatible", () => {
     assert.equal(result.providerRequestId, "chatcmpl-1");
     assert.equal(result.resolvedModel, "resolved-model");
     assert.equal("costUsd" in result, false, "нет provider cost ≠ $0");
+  });
+
+  it("does not coerce fractional or string token counts into durable usage", async () => {
+    const gateway = new HttpModelGateway(
+      "https://gateway.invalid",
+      "fixture-provider",
+      "",
+      1000,
+      "metered",
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "answer" } }],
+            usage: { prompt_tokens: "17", completion_tokens: 4.9 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+
+    const result = await gateway.call("model", { prompt: "p" });
+    assert.equal(result.ok, true);
+    assert.equal(result.usage, undefined);
   });
 
   it("передаёт cache creation 5m/1h breakdown, когда compatible gateway его даёт", async () => {

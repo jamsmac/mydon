@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Domain } from "@mydon/shared";
+import { LlmLedgerUnavailableError, type Domain } from "@mydon/shared";
 import { runCoachReview } from "./coach-review";
 import type { AgentTaskCheckpoint, AgentsCoreClient } from "./core-client";
 import { embeddingGatewayFromEnv } from "./embedding";
@@ -9,6 +9,7 @@ import { llmLedgerFromEnv } from "./llm-ledger";
 import type { AgentDefinition } from "./registry";
 import { assessIdeas, buildIdeasProposal, readIdeaChannels, type IdeasMemory } from "./ideas";
 import { modelGatewayFromEnv } from "./model-gateway";
+import type { TaskLlmSession } from "./task-llm-session";
 import { loadSkillMeta } from "./skill-loader";
 import { buildWebProposal, readWebSources } from "./web-read";
 
@@ -52,6 +53,8 @@ export interface TaskSkillRunContext {
   checkpoint?: AgentTaskCheckpoint;
   /** CAS-fenced persistence; must finish before any task side effect. */
   saveCheckpoint: (checkpoint: TaskSkillCheckpointDraft) => Promise<AgentTaskCheckpoint>;
+  /** Core-owned provider jobs/results for metered task calls. */
+  llm?: TaskLlmSession;
 }
 
 /** Навык: читает Core и либо предлагает дело, либо честно молчит (null). */
@@ -185,7 +188,12 @@ const assessIdeasSkill: Skill = async (agent, core, context) => {
   const memory: IdeasMemory | undefined = embedder
     ? { core, embedder, namespace: "ideas" }
     : undefined;
-  const needsLedger = gateway.billingMode === "metered" || embedder?.billingMode === "metered";
+  const taskLlm = call.task?.llm;
+  const hasMeteredRoute = gateway.billingMode === "metered" || embedder?.billingMode === "metered";
+  if (call.task && hasMeteredRoute && !taskLlm) {
+    throw new LlmLedgerUnavailableError("Task-mode metered route не получил durable LLM session");
+  }
+  const needsLedger = call.task === undefined && hasMeteredRoute;
   const ledger = needsLedger ? llmLedgerFromEnv() : undefined;
   return assessIdeas(gateway, digests, {
     agentName: agent.name,
@@ -193,6 +201,7 @@ const assessIdeasSkill: Skill = async (agent, core, context) => {
     ...(call.traceKey ? { traceKey: call.traceKey } : {}),
     ...(call.assertLease ? { assertLease: call.assertLease } : {}),
     ...(ledger ? { ledger } : {}),
+    ...(taskLlm ? { taskLlm } : {}),
     ...(memory ? { memory } : {}),
     ...(call.task ? { deferMemoryWrites: true } : {}),
   });
@@ -214,6 +223,9 @@ const coachReview: Skill = async (agent, core, context) => {
   const call = runContext(agent, "coach-review", context);
   const gateway = modelGatewayFromEnv();
   if (gateway === null) return null; // судья не подключён — навык спит
+  if (call.task && gateway.billingMode === "metered" && !call.task.llm) {
+    throw new LlmLedgerUnavailableError("Task-mode metered coach не получил durable LLM session");
+  }
   return runCoachReview(
     gateway,
     {
@@ -226,7 +238,10 @@ const coachReview: Skill = async (agent, core, context) => {
       requestKey: call.requestKey,
       ...(call.traceKey ? { traceKey: call.traceKey } : {}),
       ...(call.assertLease ? { assertLease: call.assertLease } : {}),
-      ...(gateway.billingMode === "metered" ? { ledger: llmLedgerFromEnv() } : {}),
+      ...(call.task?.llm ? { taskLlm: call.task.llm } : {}),
+      ...(gateway.billingMode === "metered" && !call.task?.llm
+        ? { ledger: llmLedgerFromEnv() }
+        : {}),
     },
   );
 };

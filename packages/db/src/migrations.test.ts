@@ -117,4 +117,61 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
     assert.match(sql, /CREATE UNIQUE INDEX "event_client_key"/);
     assert.doesNotMatch(sql, /ALTER TABLE "task"/, "0076 не должна менять существующий task");
   });
+
+  it("0077 безопасно добавляет active execution и durable task LLM jobs", () => {
+    const sql = readFileSync(path.join(ПАПКА, "0077_nebulous_silk_fever.sql"), "utf8");
+
+    assert.match(
+      sql,
+      /CREATE TYPE "public"\."task_agent_execution_status" AS ENUM\('active', 'ready', 'committed', 'abandoned'\)/,
+    );
+    assert.doesNotMatch(
+      sql,
+      /ALTER TYPE "public"\."task_agent_execution_status" ADD VALUE/,
+      "новое enum-значение нельзя использовать в той же drizzle-транзакции",
+    );
+    const dropConsistency = sql.indexOf(
+      'DROP CONSTRAINT "task_agent_execution_terminal_fields_consistent"',
+    );
+    const dropCheckpointNotNull = sql.indexOf('ALTER COLUMN "checkpoint_kind" DROP NOT NULL');
+    const addConsistency = sql.lastIndexOf(
+      'ADD CONSTRAINT "task_agent_execution_terminal_fields_consistent"',
+    );
+    assert.ok(dropConsistency >= 0 && dropConsistency < dropCheckpointNotNull);
+    assert.ok(dropCheckpointNotNull < addConsistency);
+    assert.match(sql, /"execution_plan_hash" text;/);
+    assert.match(
+      sql,
+      /"execution_plan_hash" = 'a5dd3ce7993c63ad01d8a9a45922bc5f17d2c41c5f21a10671ec8c05c5ffc4aa'/,
+    );
+    assert.match(sql, /"started_at" = "created_at"/);
+    const hashBackfill = sql.indexOf(
+      "\"execution_plan_hash\" = 'a5dd3ce7993c63ad01d8a9a45922bc5f17d2c41c5f21a10671ec8c05c5ffc4aa'",
+    );
+    const hashDefault = sql.indexOf(
+      "ALTER COLUMN \"execution_plan_hash\" SET DEFAULT 'a5dd3ce7993c63ad01d8a9a45922bc5f17d2c41c5f21a10671ec8c05c5ffc4aa'",
+    );
+    const hashNotNull = sql.indexOf('ALTER COLUMN "execution_plan_hash" SET NOT NULL');
+    assert.ok(
+      hashBackfill >= 0 && hashBackfill < hashDefault && hashDefault < hashNotNull,
+      "rolling deploy: backfill -> DEFAULT -> NOT NULL",
+    );
+
+    for (const table of [
+      "agent_task_llm_job",
+      "agent_task_llm_authorization",
+      "agent_task_llm_result",
+    ]) {
+      assert.match(sql, new RegExp(`CREATE TABLE "${table}"`));
+    }
+    assert.match(sql, /"endpoint_profile" text NOT NULL/);
+    assert.match(sql, /"request_payload" jsonb,/);
+    assert.match(sql, /"agent_task_llm_job_execution_step_attempt_key"/);
+    assert.match(sql, /"agent_task_llm_job_spend_key"/);
+    assert.match(sql, /"agent_task_llm_job_state_fields_consistent" CHECK/);
+    assert.match(sql, /"agent_task_llm_result_hash_format" CHECK/);
+    assert.match(sql, /"agent_task_llm_authorization_job_day_key"/);
+    assert.match(sql, /"agent_task_llm_authorization_job_granted_key"/);
+    assert.equal((sql.match(/ON DELETE restrict/g) ?? []).length, 5);
+  });
 });

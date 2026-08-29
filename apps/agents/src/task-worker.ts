@@ -3,6 +3,8 @@ import type { AgentsCoreClient } from "./core-client";
 import type { AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { hasSkill } from "./skills";
+import { TaskLlmSession } from "./task-llm-session";
+import { buildTaskLlmWorkflowPlan } from "./task-llm-workflow";
 
 /**
  * Задачи, поручённые агенту (решение владельца: «агент берёт и делает»).
@@ -126,7 +128,11 @@ export async function runAgentTasks(
 
       // A durable checkpoint is authoritative after crash/takeover even if the
       // task title or the agent's current skill list changed in the meantime.
-      const skill = claim.checkpoint?.skill ?? matchSkill(agent, t.title);
+      const claimedCheckpoint = claim.execution?.checkpoint ?? claim.checkpoint;
+      const skill =
+        claim.execution?.skill ??
+        claimedCheckpoint?.skill ??
+        matchSkill(agent, claim.taskInput.title);
       if (skill === null) {
         // Честный отказ пишем в durable block самой задачи.
         // Отдельный comment здесь неидемпотентен: потеря ответа
@@ -157,6 +163,39 @@ export async function runAgentTasks(
         continue;
       }
 
+      if (!claim.taskInputHash) {
+        throw new LlmLedgerUnavailableError(
+          `Core claim задачи ${t.id} не содержит taskInputHash для durable execution`,
+        );
+      }
+      const requestedPlan = claim.execution?.plan ?? buildTaskLlmWorkflowPlan(skill);
+      const started = await core.startAgentTaskExecution(t.id, {
+        agentName: agent.name,
+        runId,
+        executionAttemptId,
+        claimedTaskInputHash: claim.taskInputHash,
+        skill,
+        workflowVersion: claim.execution?.workflowVersion ?? requestedPlan.version,
+        plan: requestedPlan,
+      });
+      const execution = started.execution;
+      if (
+        execution.skill !== skill ||
+        execution.status === "abandoned" ||
+        execution.status === "committed" ||
+        (execution.status === "ready" && execution.checkpoint === undefined)
+      ) {
+        throw new LlmLedgerUnavailableError(
+          `Core вернул несовместимую execution ${execution.id} (${execution.skill}/${execution.status})`,
+        );
+      }
+      const checkpoint = execution.checkpoint ?? claimedCheckpoint;
+      const taskLlm = new TaskLlmSession(
+        core,
+        { taskId: t.id, agentName: agent.name, runId, executionAttemptId },
+        execution.plan,
+      );
+
       const traceKey = `task:${t.id}:${agent.name}:${skill}`;
       const run = await runSkill(agent, skill, core, threshold, skillFloors?.get(skill), {
         // executionAttemptId рождает Core один раз и переживает stale takeover.
@@ -166,7 +205,8 @@ export async function runAgentTasks(
         traceKey,
         assertLease,
         task: {
-          ...(claim.checkpoint ? { checkpoint: claim.checkpoint } : {}),
+          ...(checkpoint ? { checkpoint } : {}),
+          llm: taskLlm,
           saveCheckpoint: (checkpoint) =>
             core.checkpointAgentTask(t.id, {
               agentName: agent.name,
@@ -245,7 +285,9 @@ export async function runAgentTasks(
         agent.name,
         runId,
         executionAttemptId,
-        run.skipReason === "budget_denied" || run.skipReason === "execution_unknown"
+        run.skipReason === "budget_denied" ||
+          run.skipReason === "execution_unknown" ||
+          run.skipReason === "workflow_changed"
           ? run.skipReason
           : undefined,
         run.reason,

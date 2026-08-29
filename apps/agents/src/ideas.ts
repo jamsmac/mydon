@@ -6,6 +6,7 @@ import { callModel } from "./llm";
 import { recallSemantic, rememberSemantic } from "./memory-rag";
 import { resolveModelChain, type ModelGateway } from "./model-gateway";
 import type { Proposal } from "./skills";
+import type { TaskLlmSession } from "./task-llm-session";
 
 /**
  * Идеи из Telegram-каналов владельца (ингестор @promtjam).
@@ -81,6 +82,7 @@ export async function assessIdeas(
     traceKey?: string;
     assertLease?: () => Promise<void>;
     ledger?: LlmLedger;
+    taskLlm?: TaskLlmSession;
     memory?: IdeasMemory;
     /** Task-mode commits internal effects through Core after its checkpoint. */
     deferMemoryWrites?: boolean;
@@ -111,6 +113,7 @@ export async function assessIdeas(
         requestKey: `${opts.requestKey}:embed:recall`,
         traceKey: opts.traceKey ?? opts.requestKey,
         ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
+        ...(opts.taskLlm ? { taskLlm: opts.taskLlm } : {}),
       },
       5,
     );
@@ -127,8 +130,8 @@ export async function assessIdeas(
         .join("\n")}`
     : posts.join("\n\n---\n\n");
 
-  // Шлюз есть → путь включён. Нет явной модели в env → «default» (харнесс/шлюз
-  // возьмёт свою), иначе callModel бы отказал на пустой цепочке.
+  // Пустая цепочка означает явный fail-closed posture: даже настроенный HTTP
+  // gateway не вправе сам выбрать SKU и сделать неожиданный платный вызов.
   const chain = resolveModelChain();
   const res = await callModel(
     gateway,
@@ -147,8 +150,9 @@ export async function assessIdeas(
       traceKey: opts.traceKey ?? opts.requestKey,
       ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
       ...(opts.ledger ? { ledger: opts.ledger } : {}),
+      ...(opts.taskLlm ? { taskLlm: opts.taskLlm } : {}),
     },
-    chain.length ? chain : ["default"],
+    chain,
   );
   if (!res.ok || res.text.trim().length === 0) return null;
 
@@ -165,6 +169,7 @@ export async function assessIdeas(
             requestKey: `${opts.requestKey}:embed:remember:${p.id}`,
             traceKey: opts.traceKey ?? opts.requestKey,
             ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
+            ...(opts.taskLlm ? { taskLlm: opts.taskLlm } : {}),
           });
         }
       }

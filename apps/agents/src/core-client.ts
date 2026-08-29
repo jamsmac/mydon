@@ -1,6 +1,13 @@
 import type { EnsureTaskInput, MaintenanceDueRow } from "./maintenance-monitor";
-import type { AutonomyTier, Domain } from "@mydon/shared";
+import type {
+  AutonomyTier,
+  Domain,
+  LlmBudgetAction,
+  LlmBudgetSnapshot,
+  LlmTokenUsage,
+} from "@mydon/shared";
 import type { ClaimedOutboxDelivery } from "./outbox-dispatcher";
+import type { TaskLlmJobKind, TaskLlmWorkflowPlan } from "./task-llm-workflow";
 
 /** Сводка Core — на её основе навыки решают, есть ли повод что-то предлагать. */
 export interface AgentsBriefing {
@@ -41,6 +48,18 @@ export interface AgentTaskCheckpoint {
   action?: string;
   facts?: Record<string, unknown>;
   next?: string[];
+}
+
+export type AgentTaskExecutionStatus = "active" | "ready" | "committed" | "abandoned";
+
+export interface AgentTaskExecution {
+  id: string;
+  status: AgentTaskExecutionStatus;
+  skill: string;
+  workflowVersion: number;
+  plan: TaskLlmWorkflowPlan;
+  planHash: string;
+  checkpoint?: AgentTaskCheckpoint;
 }
 
 export interface CheckpointAgentTaskInput {
@@ -84,8 +103,121 @@ export interface AgentTaskClaim {
   executionAttemptId: string;
   generation: number;
   claimedAt: string;
+  /** Snapshot hash minted by Core at claim and repeated by /start. */
+  taskInputHash?: string;
+  /** Atomic claim snapshot; list results are stale after the lease is won. */
+  taskInput: { title: string };
+  /** Present after execution /start, including active takeover resume. */
+  execution?: AgentTaskExecution;
   /** Есть после crash/takeover: навык нельзя вызывать повторно. */
   checkpoint?: AgentTaskCheckpoint;
+}
+
+export interface StartAgentTaskExecutionInput {
+  agentName: string;
+  runId: string;
+  executionAttemptId: string;
+  claimedTaskInputHash: string;
+  skill: string;
+  workflowVersion: number;
+  plan: TaskLlmWorkflowPlan;
+}
+
+export interface StartAgentTaskExecutionResult {
+  started: true;
+  replay: boolean;
+  execution: AgentTaskExecution;
+}
+
+export type TaskLlmJobStatus =
+  "waiting_budget" | "ready" | "dispatching" | "succeeded" | "rejected" | "unknown" | "cancelled";
+
+export interface TaskLlmStoredResult {
+  kind: "success" | "provider_rejection";
+  payload: Record<string, unknown>;
+  resultHash: string;
+}
+
+export interface EnsureAgentTaskLlmJobInput {
+  agentName: string;
+  runId: string;
+  executionAttemptId: string;
+  stepKey: string;
+  providerAttemptNo: number;
+  kind: TaskLlmJobKind;
+  feature: string;
+  adapter: string;
+  adapterVersion: number;
+  endpointProfile: string;
+  provider: string;
+  model: string;
+  inputTokenCeiling: number;
+  outputTokenCeiling: number;
+  requestPayload: Record<string, unknown>;
+}
+
+export interface TaskLlmBudgetDenial {
+  action: LlmBudgetAction;
+  reason: string;
+  budget: LlmBudgetSnapshot;
+}
+
+export interface EnsureAgentTaskLlmJobResult {
+  jobId: string;
+  status: TaskLlmJobStatus;
+  operationHash: string;
+  result?: TaskLlmStoredResult;
+  denial?: TaskLlmBudgetDenial;
+}
+
+export interface ClaimAgentTaskLlmDispatchInput {
+  agentName: string;
+  runId: string;
+  executionAttemptId: string;
+  dispatchToken: string;
+}
+
+export interface ClaimAgentTaskLlmDispatchResult {
+  granted: boolean;
+  replay: boolean;
+  status: TaskLlmJobStatus;
+  operationHash: string;
+  requestPayload?: Record<string, unknown>;
+  result?: TaskLlmStoredResult;
+}
+
+export interface TaskLlmCompletionPayload {
+  text?: string;
+  vector?: number[];
+  error?: string;
+  statusCode?: number;
+  usage?: LlmTokenUsage;
+  providerRequestId?: string;
+  resolvedModel?: string;
+  providerReportedUsd?: number;
+}
+
+export interface CompleteAgentTaskLlmJobInput {
+  dispatchToken: string;
+  outcome: "success" | "provider_rejection" | "unknown";
+  result?: TaskLlmCompletionPayload;
+}
+
+export interface CompleteAgentTaskLlmJobResult {
+  status: TaskLlmJobStatus;
+  replay: boolean;
+  result?: TaskLlmStoredResult;
+}
+
+/** HTTP response from Core was explicit (and therefore not a lost response). */
+export class AgentsCoreHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly path: string,
+  ) {
+    super(`Core ответил ${status} на ${path}`);
+    this.name = "AgentsCoreHttpError";
+  }
 }
 
 /**
@@ -135,7 +267,7 @@ export class AgentsCoreClient {
           ...(init?.headers ?? {}),
         },
       });
-      if (!res.ok) throw new Error(`Core ответил ${res.status} на ${path}`);
+      if (!res.ok) throw new AgentsCoreHttpError(res.status, path);
       return (await res.json()) as T;
     } finally {
       clearTimeout(timer);
@@ -286,21 +418,80 @@ export class AgentsCoreClient {
           executionAttemptId: string;
           generation: number;
           claimedAt: string;
+          taskInputHash?: string;
+          taskInput?: { title?: unknown };
+          execution?: AgentTaskExecution | null;
           checkpoint?: AgentTaskCheckpoint | null;
         }
     >(`/tasks/${id}/agent-run/claim`, {
       method: "POST",
       body: JSON.stringify({ agentName }),
     });
-    return response.claimed
-      ? {
-          runId: response.runId,
-          executionAttemptId: response.executionAttemptId,
-          generation: response.generation,
-          claimedAt: response.claimedAt,
-          ...(response.checkpoint ? { checkpoint: response.checkpoint } : {}),
-        }
-      : null;
+    if (!response.claimed) return null;
+    const claimedTitle = response.taskInput?.title;
+    if (
+      typeof claimedTitle !== "string" ||
+      claimedTitle.trim().length === 0 ||
+      claimedTitle.length > 512
+    ) {
+      throw new Error(`Core claim задачи ${id} не содержит валидный taskInput.title`);
+    }
+    return {
+      runId: response.runId,
+      executionAttemptId: response.executionAttemptId,
+      generation: response.generation,
+      claimedAt: response.claimedAt,
+      taskInput: { title: claimedTitle },
+      ...(response.taskInputHash ? { taskInputHash: response.taskInputHash } : {}),
+      ...(response.execution ? { execution: response.execution } : {}),
+      ...(response.checkpoint ? { checkpoint: response.checkpoint } : {}),
+    };
+  }
+
+  /** Create or exact-resume the immutable workflow execution before provider work. */
+  startAgentTaskExecution(
+    id: string,
+    input: StartAgentTaskExecutionInput,
+  ): Promise<StartAgentTaskExecutionResult> {
+    return this.request(`/tasks/${id}/agent-run/start`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Ensure one physical provider attempt and its budget authorization. */
+  ensureAgentTaskLlmJob(
+    id: string,
+    input: EnsureAgentTaskLlmJobInput,
+  ): Promise<EnsureAgentTaskLlmJobResult> {
+    return this.request(`/tasks/${id}/agent-run/llm-jobs/ensure`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** CAS grant; callers may retry only the same token after a lost response. */
+  claimAgentTaskLlmDispatch(
+    taskId: string,
+    jobId: string,
+    input: ClaimAgentTaskLlmDispatchInput,
+  ): Promise<ClaimAgentTaskLlmDispatchResult> {
+    return this.request(`/tasks/${taskId}/agent-run/llm-jobs/${jobId}/claim-dispatch`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Late completion is token-fenced, not current-run-fenced. */
+  completeAgentTaskLlmJob(
+    taskId: string,
+    jobId: string,
+    input: CompleteAgentTaskLlmJobInput,
+  ): Promise<CompleteAgentTaskLlmJobResult> {
+    return this.request(`/tasks/${taskId}/agent-run/llm-jobs/${jobId}/complete`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   }
 
   /**
@@ -384,7 +575,7 @@ export class AgentsCoreClient {
     agentName: string,
     runId: string,
     executionAttemptId: string,
-    reason?: "budget_denied" | "execution_unknown" | "unsupported",
+    reason?: "budget_denied" | "execution_unknown" | "workflow_changed" | "unsupported",
     detail?: string,
   ): Promise<boolean> {
     const response = await this.request<{ released: boolean }>(`/tasks/${id}/agent-run/release`, {

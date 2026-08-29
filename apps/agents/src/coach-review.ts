@@ -3,6 +3,7 @@ import { evaluate, parseEditBlocks, parseVerdict, RUBRIC } from "./coach";
 import { callModel } from "./llm";
 import { resolveModelChain, type ModelGateway } from "./model-gateway";
 import type { Proposal } from "./skills";
+import type { TaskLlmSession } from "./task-llm-session";
 
 /**
  * Coach EVAL/PROPOSE — судья к coach-скелету (петля самоулучшения).
@@ -38,6 +39,7 @@ export interface CoachOpts {
   traceKey?: string;
   assertLease?: () => Promise<void>;
   ledger?: LlmLedger;
+  taskLlm?: TaskLlmSession;
 }
 
 /** Системная инструкция судьи: критерии рубрики + строгий формат вердикта. */
@@ -86,6 +88,7 @@ export async function runCoachReview(
       traceKey: opts.traceKey ?? opts.requestKey,
       ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
       ...(opts.ledger ? { ledger: opts.ledger } : {}),
+      ...(opts.taskLlm ? { taskLlm: opts.taskLlm } : {}),
     },
     chain,
   );
@@ -134,6 +137,7 @@ export async function runCoachReview(
       traceKey: opts.traceKey ?? opts.requestKey,
       ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
       ...(opts.ledger ? { ledger: opts.ledger } : {}),
+      ...(opts.taskLlm ? { taskLlm: opts.taskLlm } : {}),
     },
     chain,
   );
