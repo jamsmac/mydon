@@ -134,7 +134,8 @@ describe("task LLM bounded contract", () => {
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        max_tokens: 512,
+        max_completion_tokens: 512,
+        service_tier: "default",
       },
     };
     await assert.rejects(

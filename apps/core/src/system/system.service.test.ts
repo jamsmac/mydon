@@ -215,12 +215,12 @@ describe("SystemService.setLlmProfile(): атомарный несекретны
         { LLM_ROUTE: "openai-api", LLM_BASE_URL: "https://proxy.invalid/v1" },
         {},
       ) ?? "",
-      /exact LLM_BASE_URL/,
+      /точное значение LLM_BASE_URL/,
     );
     assert.match(
       validateLlmProfileState({ LLM_ROUTE: "openai-api", LLM_PRICE_PROVIDER_ID: "custom" }, {}) ??
         "",
-      /exact LLM_PRICE_PROVIDER_ID/,
+      /точное значение LLM_PRICE_PROVIDER_ID/,
     );
     assert.equal(
       validateLlmProfileState(

@@ -91,7 +91,7 @@ export class TaskLlmJobsService {
     now = new Date(),
   ): Promise<EnsureResponse> {
     const requestPayload = assertBoundedProviderPayload(input.requestPayload);
-    this.assertProviderPayload(input, requestPayload);
+    this.assertProviderPayload(input, requestPayload, "new");
     if (input.inputTokenCeiling + input.outputTokenCeiling > 100_000_000) {
       throw new BadRequestException("Combined token ceiling exceeds 100000000");
     }
@@ -888,7 +888,7 @@ export class TaskLlmJobsService {
     if (job.requestPayload === null)
       throw new ConflictException("Stored provider payload is missing");
     const payload = assertBoundedProviderPayload(job.requestPayload);
-    this.assertProviderPayload(job, payload);
+    this.assertProviderPayload(job, payload, "stored");
     const hash = canonicalJsonHash({
       schemaVersion: 1,
       executionId: execution.id,
@@ -908,12 +908,27 @@ export class TaskLlmJobsService {
   }
 
   private assertProviderPayload(
-    input: Pick<EnsureTaskLlmJobDto, "kind" | "model" | "inputTokenCeiling" | "outputTokenCeiling">,
+    input: Pick<
+      EnsureTaskLlmJobDto,
+      "kind" | "provider" | "model" | "inputTokenCeiling" | "outputTokenCeiling"
+    >,
     payload: Record<string, unknown>,
+    source: "new" | "stored",
   ): void {
+    const officialOpenAiChat =
+      input.kind === "chat" && input.provider.trim().toLowerCase() === "openai";
+    const storedOpenAiPayload = officialOpenAiChat && source === "stored";
     const allowedKeys =
       input.kind === "chat"
-        ? new Set(["model", "messages", "max_tokens"])
+        ? officialOpenAiChat
+          ? new Set([
+              "model",
+              "messages",
+              "max_completion_tokens",
+              "service_tier",
+              ...(storedOpenAiPayload ? ["max_tokens"] : []),
+            ])
+          : new Set(["model", "messages", "max_tokens"])
         : new Set(["model", "input"]);
     const unknownKey = Object.keys(payload).find((key) => !allowedKeys.has(key));
     if (unknownKey) {
@@ -951,7 +966,37 @@ export class TaskLlmJobsService {
           throw new BadRequestException("requestPayload.messages contains unsupported fields");
         }
       }
-      if (
+      if (officialOpenAiChat) {
+        const hasCurrentCeiling = Object.prototype.hasOwnProperty.call(
+          payload,
+          "max_completion_tokens",
+        );
+        const hasLegacyCeiling = Object.prototype.hasOwnProperty.call(payload, "max_tokens");
+        if (hasCurrentCeiling && hasLegacyCeiling) {
+          throw new BadRequestException(
+            "Stored OpenAI requestPayload cannot contain both token ceiling fields",
+          );
+        }
+        if (hasLegacyCeiling) {
+          throw new BadRequestException(
+            "Stored legacy OpenAI requestPayload.max_tokens cannot be dispatched safely; owner retry is required",
+          );
+        } else {
+          if (
+            !Number.isInteger(payload.max_completion_tokens) ||
+            payload.max_completion_tokens !== input.outputTokenCeiling
+          ) {
+            throw new BadRequestException(
+              "requestPayload.max_completion_tokens must equal outputTokenCeiling for provider openai",
+            );
+          }
+          if (payload.service_tier !== "default") {
+            throw new BadRequestException(
+              "requestPayload.service_tier must equal default for provider openai",
+            );
+          }
+        }
+      } else if (
         !Number.isInteger(payload.max_tokens) ||
         payload.max_tokens !== input.outputTokenCeiling
       ) {

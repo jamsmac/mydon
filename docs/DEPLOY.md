@@ -152,13 +152,55 @@ select to_regclass('public.llm_spend')             as llm_spend,
        to_regclass('public.agent_task_llm_job')    as agent_task_llm_job,
        to_regclass('public.agent_task_llm_authorization') as agent_task_llm_authorization,
        to_regclass('public.agent_task_llm_result') as agent_task_llm_result;
-select provider, model, billing_kind, valid_from, valid_to
+do \$\$
+declare
+  active_price_count integer;
+  exact_price_count integer;
+begin
+  select count(*),
+         count(*) filter (
+           where billing_kind = 'metered'
+             and settlement_kind = 'tokens'
+             and input_usd_per_mtok = 4
+             and output_usd_per_mtok = 20
+             and cache_read_usd_per_mtok = 0.4
+             and cache_write_5m_usd_per_mtok = 5
+             and cache_write_1h_usd_per_mtok = 5
+             and fixed_request_usd = 0
+             and reservation_ceiling_usd is null
+             and code_execution_usd_per_request = 0
+             and valid_to = '2026-11-22T00:00:00+00:00'::timestamptz
+         )
+    into active_price_count, exact_price_count
+    from llm_model_price
+   where provider = 'openai'
+     and model = 'gpt-5.6-sol'
+     and valid_from <= now()
+     and (valid_to is null or valid_to > now());
+  if active_price_count <> 1 or exact_price_count <> 1 then
+    raise exception
+      'ожидалась одна активная точная цена openai/gpt-5.6-sol, найдено всего %, точных %',
+      active_price_count, exact_price_count;
+  end if;
+end
+\$\$;
+select provider, model, billing_kind, settlement_kind,
+       input_usd_per_mtok, output_usd_per_mtok,
+       cache_read_usd_per_mtok, cache_write_5m_usd_per_mtok,
+       cache_write_1h_usd_per_mtok, fixed_request_usd,
+       reservation_ceiling_usd, code_execution_usd_per_request,
+       valid_from, valid_to
   from llm_model_price
- order by provider, model, valid_from"
+ where provider = 'openai'
+   and model = 'gpt-5.6-sol'
+   and valid_from <= now()
+   and (valid_to is null or valid_to > now())"
 ```
 
 До `LLM_ENABLED=1` запрос должен вернуть одну активную строку
-`openai | gpt-5.6-sol | metered` с `valid_to = 2026-11-22T00:00:00Z`; затем
+`openai | gpt-5.6-sol | metered | tokens` со ставками
+`4 | 20 | 0.4 | 5 | 5 | 0 | NULL | 0` и
+`valid_to = 2026-11-22T00:00:00Z`; затем
 проверить серверный ключ, exact endpoint, суточный лимит `$10` и потолок одного
 reserve `$3`. До истечения promotional-тарифа нужна новая dated-миграция;
 без неё Core намеренно заблокирует reserve. Сам ключ командами проверки не печатать.

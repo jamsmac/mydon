@@ -182,6 +182,17 @@ function reservePolicyTx(
   return { tx, inserted };
 }
 
+async function withoutLlmEnabledEnv<T>(body: () => Promise<T>): Promise<T> {
+  const previous = process.env.LLM_ENABLED;
+  delete process.env.LLM_ENABLED;
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) delete process.env.LLM_ENABLED;
+    else process.env.LLM_ENABLED = previous;
+  }
+}
+
 describe("LLM-ledger settlement invariants", () => {
   it("LLM по умолчанию fail-closed; DB важнее env, cap по умолчанию $3", () => {
     const defaults = resolveLlmAdmissionPolicy({}, {});
@@ -208,12 +219,14 @@ describe("LLM-ledger settlement invariants", () => {
   });
 
   it("reserveInTx центрально пишет denied, когда LLM_ENABLED не равен 1", async () => {
-    const { tx, inserted } = reservePolicyTx({});
-    const response = await new LlmLedgerService({} as never).reserveInTx(tx, RESERVE_REQUEST);
-    assert.equal(response.allowed, false);
-    assert.match(response.reason ?? "", /LLM_ENABLED/);
-    assert.equal(inserted.length, 1);
-    assert.equal(inserted[0]?.status, "denied");
+    await withoutLlmEnabledEnv(async () => {
+      const { tx, inserted } = reservePolicyTx({});
+      const response = await new LlmLedgerService({} as never).reserveInTx(tx, RESERVE_REQUEST);
+      assert.equal(response.allowed, false);
+      assert.match(response.reason ?? "", /LLM_ENABLED/);
+      assert.equal(inserted.length, 1);
+      assert.equal(inserted[0]?.status, "denied");
+    });
   });
 
   it("reserveInTx применяет per-reservation cap до дневного лимита", async () => {

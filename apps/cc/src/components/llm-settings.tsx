@@ -35,7 +35,7 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
   const activation = !enabled
     ? { text: "Не активно", className: "" }
     : draft.LLM_ROUTE === "codex-subscription"
-      ? { text: "Runtime не готов", className: "bad" }
+      ? { text: "Среда выполнения не готова", className: "bad" }
       : { text: "Готовность неизвестна", className: "" };
 
   return (
@@ -121,7 +121,7 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
               placeholder="gpt-5.6-sol"
               onChange={(event) => set("LLM_MODEL", event.currentTarget.value)}
             />
-            <small className="hint">ID API; первоначально — GPT-5.6 Sol.</small>
+            <small className="hint">Идентификатор модели в API; первоначально — GPT-5.6 Sol.</small>
           </label>
         </div>
 
@@ -140,7 +140,7 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
             />
           </label>
           <label>
-            <span>Потолок одного физического provider-вызова, $</span>
+            <span>Потолок одного физического вызова провайдера, $</span>
             <input
               name="LLM_MAX_RESERVATION_USD"
               value={draft.LLM_MAX_RESERVATION_USD}
@@ -154,24 +154,24 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
           </label>
         </div>
         <p className="hint llm-budget-copy">
-          Лимиты денег действуют в общем Core ledger для всех LLM-клиентов. $3 ограничивает каждый
-          отдельный reserve/provider call, а не всю многошаговую задачу. Модель и подключение в этой
-          карточке относятся к Agents.
+          Лимиты денег действуют в едином реестре расходов Core для всех LLM-клиентов. $3
+          ограничивает каждое отдельное резервирование и вызов провайдера, а не всю многошаговую
+          задачу. Модель и подключение в этой карточке относятся к агентам.
         </p>
 
         <div className="llm-readiness" aria-label="Готовность подключения">
           <b>Готовность подключения</b>
           <div className="llm-readiness-row">
             <span>Codex / подписка ChatGPT</span>
-            <span className="pill bad">runtime unsupported / fail-closed</span>
+            <span className="pill bad">Пока не поддерживается — вызовы заблокированы</span>
           </div>
           <div className="llm-readiness-row">
-            <span>OpenAI API key в server env</span>
-            <span className="pill">неизвестно до preflight</span>
+            <span>Ключ OpenAI API в окружении сервера</span>
+            <span className="pill">неизвестно до предварительной проверки</span>
           </div>
           <p className="hint">
-            Ключ хранится только в окружении процесса Agents и не попадает в БД, панель или браузер.
-            Подписка ChatGPT не оплачивает OpenAI API.
+            Ключ хранится только в окружении процесса агентов и не попадает в БД, панель или
+            браузер. Подписка ChatGPT не оплачивает OpenAI API.
           </p>
         </div>
 
@@ -179,7 +179,7 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
           <summary>Расширенные настройки</summary>
           <div className="llm-grid">
             <label>
-              <span>OpenAI-compatible base URL</span>
+              <span>Базовый URL OpenAI-совместимого API</span>
               <input
                 name="LLM_BASE_URL"
                 value={draft.LLM_BASE_URL}
@@ -189,11 +189,11 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
                 onChange={(event) => set("LLM_BASE_URL", event.currentTarget.value)}
               />
               <small className="hint">
-                Для маршрута OpenAI API Core принимает только официальный endpoint.
+                Для маршрута OpenAI API Core принимает только официальный адрес.
               </small>
             </label>
             <label>
-              <span>Pricing provider ID</span>
+              <span>ID провайдера тарифов</span>
               <input
                 name="LLM_PRICE_PROVIDER_ID"
                 value={draft.LLM_PRICE_PROVIDER_ID}

@@ -160,9 +160,8 @@ export class LlmLedgerService {
               `потолок агента ${prior.agentName ?? prior.agentId}`,
             )
           : undefined;
-        const exposureDay = prior.day === day ? prior.day : day;
-        const exposure = await readExposure(tx, exposureDay, prior.agentId);
-        const snapshot = budget(exposureDay, globalCap.nano, exposure, perAgentCap?.nano);
+        const exposure = await readExposure(tx, day, prior.agentId);
+        const snapshot = budget(day, globalCap.nano, exposure, perAgentCap?.nano);
         const currentAction = budgetAction(priorAgent?.budgetOnExceeded);
         const globalExposureDenial =
           exposure.global > globalCap.nano

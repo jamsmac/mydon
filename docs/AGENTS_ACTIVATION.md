@@ -79,7 +79,7 @@ Tailscale**; официальный OpenAI API вызывается напрям
    чего вызовы fail-closed до новой dated-миграции с актуальной ценой.
 2. Создать API-ключ в OpenAI Platform и записать его **только** в серверный
    `.env`; значение никогда не вводится и не возвращается через панель:
-   ```
+   ```dotenv
    LLM_API_KEY=<секрет>
    LLM_BASE_URL=https://api.openai.com/v1
    LLM_PRICE_PROVIDER_ID=openai
