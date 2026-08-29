@@ -34,16 +34,16 @@ export const appConfig = {
     return process.env.SERVICE_TOKEN ?? "";
   },
   /**
-   * Только для явного подтверждения владельцем потенциально повторной оплаты.
-   * Не передаётся Bot/Agents/CC и при пустом значении всегда закрыт.
+   * Used only for explicit owner confirmation of a potentially repeated charge.
+   * Never shared with Bot/Agents/CC and always fail-closed when empty.
    */
   get ownerActionToken(): string {
     return process.env.OWNER_ACTION_TOKEN ?? "";
   },
   /**
-   * Последняя, серверная граница количества agent.action за ташкентские сутки.
-   * Ноль явно отключает cap; пустое/битое значение не должно случайно снять
-   * production-ограничение, поэтому возвращаем документированный default 50.
+   * Final server-side limit for agent.action events per Tashkent day.
+   * Zero explicitly disables the cap. Empty or invalid input must not
+   * accidentally remove the production limit, so the documented default is 50.
    */
   get agentDailyActionCap(): number {
     const raw = process.env.AGENT_DAILY_ACTION_CAP?.trim();

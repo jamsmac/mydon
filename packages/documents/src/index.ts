@@ -110,12 +110,18 @@ export function createDocumentBuilder(config: DocumentsConfig) {
   let clientPromise: Promise<DocumentsAnthropicClient> | null = null;
   function client(): Promise<DocumentsAnthropicClient> {
     if (clientPromise === null) {
-      clientPromise = config.clientFactory
+      const pending = config.clientFactory
         ? config.clientFactory()
         : import("@anthropic-ai/sdk").then(
             // Один reservation — одна физическая попытка; скрытые retry запрещены.
             (m) => new m.default({ apiKey: config.apiKey, timeout, maxRetries: 0 }),
           );
+      clientPromise = pending.catch((error) => {
+        // Не кэшируем rejected Promise навсегда: импорт/инициализация
+        // могут восстановиться к следующей независимой попытке.
+        clientPromise = null;
+        throw error;
+      });
     }
     return clientPromise;
   }
@@ -181,10 +187,13 @@ export function createDocumentBuilder(config: DocumentsConfig) {
       } as never);
     } catch (error) {
       // Запрос мог дойти до провайдера, поэтому release здесь небезопасен.
-      await config.ledger.fail(reservation.id, {
-        outcome: "unknown",
-        reason: errorMessage(error),
-      });
+      // Сбой Core не должен подменить исходную ошибку провайдера.
+      await config.ledger
+        .fail(reservation.id, {
+          outcome: "unknown",
+          reason: errorMessage(error),
+        })
+        .catch(() => undefined);
       throw error;
     }
 

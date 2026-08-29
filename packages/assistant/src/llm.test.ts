@@ -244,6 +244,34 @@ describe("LLM: конструирование резолвера", () => {
     });
   });
 
+  it("после временного сбоя инициализации создаёт клиент заново", async () => {
+    let factoryCalls = 0;
+    const providerError = new Error("вторая попытка дошла до Anthropic");
+    const resolver = createLlmResolver({
+      apiKey: "sk-ant-test",
+      ledger: fakeLedger(),
+      consumer: "bot",
+      feature: "assistant",
+      clientFactory: async () => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) throw new Error("временный сбой SDK");
+        return {
+          messages: { create: async () => Promise.reject(providerError) },
+        } as never;
+      },
+    });
+
+    await assert.rejects(
+      () => resolver("первый вопрос", paidSnapshot, { requestKey: "telegram:update:init-1" }),
+      /временный сбой SDK/,
+    );
+    await assert.rejects(
+      () => resolver("второй вопрос", paidSnapshot, { requestKey: "telegram:update:init-2" }),
+      (error) => error === providerError,
+    );
+    assert.equal(factoryCalls, 2);
+  });
+
   it("settle пишет usage до разбора content", async () => {
     const events: string[] = [];
     let settlement: LlmSettlementRequest | null = null;
@@ -349,24 +377,26 @@ describe("LLM: конструирование резолвера", () => {
 
   it("неизвестная ошибка провайдера оставляет failed exposure", async () => {
     let failed: LlmSettlementRequest | null = null;
+    const providerError = new Error("сетевой исход неизвестен");
     const resolver = createLlmResolver({
       apiKey: "sk-ant-test",
       ledger: fakeLedger({
         fail: async (_id, request) => {
           failed = { ...request, outcome: request.outcome ?? "unknown" };
+          throw new Error("Core не принял fail");
         },
       }),
       consumer: "bot",
       feature: "assistant",
       clientFactory: async () =>
         ({
-          messages: { create: async () => Promise.reject(new Error("сетевой исход неизвестен")) },
+          messages: { create: async () => Promise.reject(providerError) },
         }) as never,
     });
 
     await assert.rejects(
       () => resolver("вопрос", paidSnapshot, { requestKey: "telegram:update:43" }),
-      /сетевой исход/,
+      (error) => error === providerError,
     );
     assert.deepEqual(failed, { outcome: "unknown", reason: "сетевой исход неизвестен" });
   });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ChannelPost } from "@mydon/connectors";
+import type { LlmLedger } from "@mydon/shared";
 import type { EmbeddingGateway } from "./embedding";
 import {
   assessIdeas,
@@ -144,6 +145,53 @@ describe("assessIdeas — оценка моделью (первый LLM-навы
     assert.equal(p.facts.priorHits, 0, "в пустой памяти совпадений нет");
     const remembered = events.filter((e) => e.type === "agent.embed:ideas");
     assert.equal(remembered.length, 1, "разобранный пост записан в семантическую память");
+  });
+
+  it("память: ledger requestKey привязан к id поста, а не его позиции", async () => {
+    const { gateway } = fakeGateway("1. идеи — в ядро");
+    const { client } = fakeCore();
+    const requestKeys: string[] = [];
+    let reservation = 0;
+    const ledger: LlmLedger = {
+      reserve: async (request) => {
+        requestKeys.push(request.requestKey);
+        reservation += 1;
+        return {
+          id: `reservation-${reservation}`,
+          requestKey: request.requestKey,
+          day: "2026-08-29",
+          reservedUsd: 0,
+          replay: false,
+          budget: {
+            day: "2026-08-29",
+            globalCapUsd: 5,
+            globalExposureUsd: 0,
+            remainingUsd: 5,
+          },
+        };
+      },
+      settle: async () => undefined,
+      fail: async () => undefined,
+      release: async () => undefined,
+    };
+    const embedder: EmbeddingGateway = {
+      provider: "test-metered",
+      billingMode: "metered",
+      model: "fake",
+      embed: async () => ({ vector: [1, 0, 0] }),
+    };
+
+    await assessIdeas(
+      gateway,
+      [{ channel: "promtjam", posts: [post(9, "девятая"), post(7, "седьмая")] }],
+      { ...OPTS, ledger, memory: { core: client, embedder } },
+    );
+
+    assert.deepEqual(requestKeys, [
+      "ideas-test:embed:recall",
+      "ideas-test:embed:remember:promtjam/9",
+      "ideas-test:embed:remember:promtjam/7",
+    ]);
   });
 
   it("память: похожую уже разобранную идею помечает и просит не повторять", async () => {

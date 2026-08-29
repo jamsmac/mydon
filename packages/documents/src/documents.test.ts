@@ -162,6 +162,44 @@ describe("Конструирование строителя документов
     });
   });
 
+  it("после временного сбоя инициализации создаёт клиент заново", async () => {
+    let factoryCalls = 0;
+    const providerError = new Error("вторая попытка дошла до Anthropic");
+    const build = createDocumentBuilder({
+      apiKey: "sk-ant-test",
+      ledger: fakeLedger(),
+      feature: "bot.report",
+      clientFactory: async () => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) throw new Error("временный сбой SDK");
+        return {
+          beta: {
+            messages: { create: async () => Promise.reject(providerError) },
+            files: {},
+          },
+        } as never;
+      },
+    });
+
+    await assert.rejects(
+      () =>
+        build(
+          { kind: "xlsx", instruction: "первый документ" },
+          { requestKey: "telegram:update:init-1" },
+        ),
+      /временный сбой SDK/,
+    );
+    await assert.rejects(
+      () =>
+        build(
+          { kind: "xlsx", instruction: "второй документ" },
+          { requestKey: "telegram:update:init-2" },
+        ),
+      (error) => error === providerError,
+    );
+    assert.equal(factoryCalls, 2);
+  });
+
   it("settle происходит до поиска файла и download", async () => {
     const events: string[] = [];
     let settlement: LlmSettlementRequest | null = null;
@@ -323,18 +361,20 @@ describe("Конструирование строителя документов
 
   it("ошибка провайдера оставляет failed exposure", async () => {
     let failed: LlmSettlementRequest | null = null;
+    const providerError = new Error("таймаут Anthropic");
     const build = createDocumentBuilder({
       apiKey: "sk-ant-test",
       ledger: fakeLedger({
         fail: async (_id, request) => {
           failed = { ...request, outcome: request.outcome ?? "unknown" };
+          throw new Error("Core не принял fail");
         },
       }),
       feature: "bot.report",
       clientFactory: async () =>
         ({
           beta: {
-            messages: { create: async () => Promise.reject(new Error("таймаут Anthropic")) },
+            messages: { create: async () => Promise.reject(providerError) },
             files: {},
           },
         }) as never,
@@ -342,7 +382,7 @@ describe("Конструирование строителя документов
 
     await assert.rejects(
       () => build({ kind: "xlsx", instruction: "таблица" }, { requestKey: "telegram:update:45" }),
-      /таймаут Anthropic/,
+      (error) => error === providerError,
     );
     assert.deepEqual(failed, { outcome: "unknown", reason: "таймаут Anthropic" });
   });

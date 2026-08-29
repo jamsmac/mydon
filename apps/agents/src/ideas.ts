@@ -155,16 +155,14 @@ export async function assessIdeas(
   // Запомнить разобранные посты — для дедупа на будущих прогонах.
   let memoryWarning: string | undefined;
   if (mem && !opts.deferMemoryWrites) {
-    let memoryAttempt = 0;
     try {
       for (const d of digests) {
         for (const p of d.posts) {
-          memoryAttempt += 1;
           await rememberSemantic(mem.core, mem.embedder, namespace, p.id, p.text.slice(0, 1000), {
             ledger: opts.ledger,
             agentName: opts.agentName,
             feature: "assess-ideas:remember",
-            requestKey: `${opts.requestKey}:embed:remember:${memoryAttempt}`,
+            requestKey: `${opts.requestKey}:embed:remember:${p.id}`,
             traceKey: opts.traceKey ?? opts.requestKey,
             ...(opts.assertLease ? { assertLease: opts.assertLease } : {}),
           });

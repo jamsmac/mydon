@@ -96,7 +96,7 @@ describe("ApprovalsService.decide", () => {
     );
   });
 
-  it("clientKey возвращает прежнее согласование и запрещает другой payload", async () => {
+  it("returns the existing approval for clientKey and rejects a different payload", async () => {
     const existing = {
       id: "a-existing",
       agent: "test",

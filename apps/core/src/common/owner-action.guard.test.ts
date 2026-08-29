@@ -18,12 +18,12 @@ describe("OwnerActionGuard", () => {
     else process.env.SERVICE_TOKEN = previousService;
   });
 
-  it("fail-closed без отдельного owner token", () => {
+  it("fails closed without a separate owner token", () => {
     delete process.env.OWNER_ACTION_TOKEN;
     assert.throws(() => new OwnerActionGuard().canActivate(context()), /токен действия владельца/);
   });
 
-  it("не принимает общий service token или неверный owner token", () => {
+  it("rejects the shared service token and an incorrect owner token", () => {
     process.env.SERVICE_TOKEN = "shared";
     process.env.OWNER_ACTION_TOKEN = "owner-secret";
     assert.throws(
@@ -35,7 +35,7 @@ describe("OwnerActionGuard", () => {
     );
   });
 
-  it("fail-closed, если owner token ошибочно равен общему service token", () => {
+  it("fails closed when the owner token equals the shared service token", () => {
     process.env.SERVICE_TOKEN = "same-secret";
     process.env.OWNER_ACTION_TOKEN = "same-secret";
     assert.throws(
@@ -47,7 +47,7 @@ describe("OwnerActionGuard", () => {
     );
   });
 
-  it("принимает только точный x-owner-action-token", () => {
+  it("accepts only an exact x-owner-action-token", () => {
     process.env.SERVICE_TOKEN = "shared";
     process.env.OWNER_ACTION_TOKEN = "owner-secret";
     assert.equal(

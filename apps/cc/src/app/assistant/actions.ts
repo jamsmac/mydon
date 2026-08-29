@@ -5,6 +5,7 @@ import {
   createContextSearch,
   createLlmResolver,
   createSubscriptionResolver,
+  llmLedgerErrorText,
   withLlmFallback,
   type LlmResolver,
 } from "@mydon/assistant";
@@ -88,6 +89,8 @@ export async function ask(question: string, requestId: string): Promise<AskResul
       ? { text: reply.text, approvalId: reply.approvalId }
       : { text: reply.text };
   } catch (err) {
+    const ledgerText = llmLedgerErrorText(err);
+    if (ledgerText !== null) return { text: ledgerText };
     return {
       text:
         "Не удалось получить данные из MYDON Core. " +

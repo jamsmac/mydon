@@ -35,7 +35,7 @@ export interface RequestApprovalInput {
   action: string;
   tier: Tier;
   payload?: Record<string, unknown>;
-  /** Stable key одного логического запроса агента. */
+  /** Stable key for one logical agent request. */
   clientKey?: string;
 }
 

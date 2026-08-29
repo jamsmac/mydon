@@ -247,6 +247,13 @@ function checkpointView(row: TaskAgentExecutionRow): AgentCheckpointView {
 const SECRET_FACT_KEY =
   /(?:^|[_-])(token|secret|password|passphrase|authorization|cookie|api[_-]?key)(?:$|[_-])/i;
 
+function isSecretFactKey(key: string): boolean {
+  const separated = key
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/([a-z\d])([A-Z])/g, "$1_$2");
+  return SECRET_FACT_KEY.test(separated);
+}
+
 function redactReportSecrets(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => redactReportSecrets(item));
   if (value !== null && typeof value === "object") {
@@ -254,7 +261,7 @@ function redactReportSecrets(value: unknown): unknown {
     const result: Record<string, unknown> = {};
     for (const key of Object.keys(source).sort()) {
       Object.defineProperty(result, key, {
-        value: SECRET_FACT_KEY.test(key) ? "[REDACTED]" : redactReportSecrets(source[key]),
+        value: isSecretFactKey(key) ? "[REDACTED]" : redactReportSecrets(source[key]),
         enumerable: true,
         configurable: true,
         writable: true,
@@ -288,7 +295,7 @@ function notionReportPayload(
         heading: "На чём это основано",
         bullets: Object.keys(facts)
           .sort()
-          .filter((key) => !SECRET_FACT_KEY.test(key))
+          .filter((key) => !isSecretFactKey(key))
           .map((key) => `${key}: ${reportFact(facts[key])}`),
       },
       {
@@ -1062,7 +1069,13 @@ export class TasksService {
         const [started] = await tx
           .select({ id: llmSpend.id })
           .from(llmSpend)
-          .where(and(sql`${llmSpend.requestKey} like ${prefix}`, ne(llmSpend.status, "denied")))
+          .where(
+            and(
+              sql`${llmSpend.requestKey} like ${prefix}`,
+              ne(llmSpend.status, "denied"),
+              ne(llmSpend.status, "released"),
+            ),
+          )
           .limit(1);
         safeBudgetRetry = started === undefined;
       }

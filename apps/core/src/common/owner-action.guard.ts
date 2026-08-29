@@ -10,10 +10,11 @@ function secretEquals(left: string, right: string): boolean {
 }
 
 /**
- * Вторая дверь для необратимых owner-only операций.
+ * Second gate for irreversible owner-only operations.
  *
- * SERVICE_TOKEN намеренно недостаточен: он есть у Bot/Agents/CC. В частности,
- * worker не должен сам снять `execution_unknown` и разрешить повторную оплату.
+ * SERVICE_TOKEN is intentionally insufficient because Bot/Agents/CC have it.
+ * In particular, a worker must not clear `execution_unknown` and authorize a
+ * repeated charge by itself.
  */
 @Injectable()
 export class OwnerActionGuard implements CanActivate {

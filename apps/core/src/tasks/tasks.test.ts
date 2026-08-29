@@ -33,6 +33,8 @@ interface StubOpts {
   conflicts?: { target?: unknown; where?: unknown }[];
   /** Патч и CAS-предикат UPDATE — для проверки durable claim. */
   updates?: { patch: Row; condition: unknown }[];
+  /** Captured SELECT predicates for SQL-level assertions. */
+  selectConditions?: unknown[];
 }
 
 /**
@@ -48,7 +50,8 @@ function stubDb(opts: StubOpts) {
   // where() и awaitable, и с .limit() — сервис использует оба варианта.
   // Ответ мемоизируется на цепочку: и await, и .limit() видят ОДИН элемент
   // очереди, иначе каждая цепочка съедала бы два.
-  const whereChain = () => {
+  const whereChain = (condition?: unknown) => {
+    if (condition !== undefined) opts.selectConditions?.push(condition);
     let memo: Row[] | null = null;
     const result = async () => (memo ??= rowsOf());
     return Object.assign(result(), { limit: result, for: result });
@@ -602,6 +605,7 @@ describe("Durable claim задачи агента", () => {
 
   it("budget denial безопасно ротирует attempt только с новых ташкентских суток", async () => {
     const updates: NonNullable<StubOpts["updates"]> = [];
+    const selectConditions: unknown[] = [];
     await makeTasks(
       stubDb({
         updateResult: {
@@ -612,6 +616,7 @@ describe("Durable claim задачи агента", () => {
           agentExecutionRetryAt: new Date("2026-08-29T19:00:00.000Z"),
         },
         updates,
+        selectConditions,
       }),
     ).releaseAgentRun(TASK, "receivables", NEW_RUN, EXECUTION, "budget_denied", undefined, NOW);
 
@@ -622,6 +627,11 @@ describe("Durable claim задачи агента", () => {
       "2026-08-29T19:00:00.000Z",
       "полночь 30 августа в Ташкенте = 19:00Z 29 августа",
     );
+    const spendProbe = new PgDialect().sqlToQuery(
+      selectConditions[0] as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
+    assert.ok(spendProbe.params.includes("denied"));
+    assert.ok(spendProbe.params.includes("released"));
   });
 
   it("budget denial после начатого reserve блокирует, а не ротирует execution", async () => {
@@ -883,7 +893,12 @@ describe("Durable checkpoint и atomic agent outcome", () => {
       const state = agentRunState();
       state.actionCount = 0;
       const service = makeTasks(agentRunDb(state));
-      const facts = { overdue: 3, api_token: "не должен попасть в Notion" };
+      const facts = {
+        overdue: 3,
+        api_token: "не должен попасть в Notion",
+        apiToken: "camelCase API token",
+        nested: { clientSecret: "nested camelCase secret", visible: "safe value" },
+      };
       await service.checkpointAgentRun(AGENT_TASK_ID, {
         ...fence,
         skill: "watch-receivables",
@@ -920,6 +935,9 @@ describe("Durable checkpoint и atomic agent outcome", () => {
       const report = (state.deliveries[0]?.payload as { report?: { blocks?: unknown[] } })?.report;
       assert.ok(report);
       assert.doesNotMatch(JSON.stringify(report), /не должен попасть в Notion/);
+      assert.doesNotMatch(JSON.stringify(report), /camelCase API token/);
+      assert.doesNotMatch(JSON.stringify(report), /nested camelCase secret/);
+      assert.match(JSON.stringify(report), /safe value/);
       assert.equal(state.execution?.approvalId, result.approvalId);
       assert.equal(state.execution?.status, "committed");
       assert.equal(state.task.resultNote, "Вынес на решение владельца");

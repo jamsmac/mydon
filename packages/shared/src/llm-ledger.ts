@@ -244,7 +244,15 @@ export class CoreLlmLedgerClient implements LlmLedger {
       });
     }
 
-    const text = await response.text();
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (cause) {
+      throw new LlmLedgerUnavailableError(
+        `Не удалось прочитать ответ LLM-ledger (HTTP ${response.status})`,
+        { cause },
+      );
+    }
     let parsed: unknown = null;
     if (text.trim() !== "") {
       try {

@@ -235,12 +235,18 @@ export function createLlmResolver(config: LlmConfig): LlmResolver {
   let clientPromise: Promise<LlmAnthropicClient> | null = null;
   function client(): Promise<LlmAnthropicClient> {
     if (clientPromise === null) {
-      clientPromise = config.clientFactory
+      const pending = config.clientFactory
         ? config.clientFactory()
         : import("@anthropic-ai/sdk").then(
             // Скрытый retry нельзя отдельно зарезервировать и учесть.
             (m) => new m.default({ apiKey: config.apiKey, timeout, maxRetries: 0 }),
           );
+      clientPromise = pending.catch((error) => {
+        // Не кэшируем rejected Promise навсегда: импорт/инициализация
+        // могут восстановиться к следующей независимой попытке.
+        clientPromise = null;
+        throw error;
+      });
     }
     return clientPromise;
   }
@@ -301,10 +307,13 @@ export function createLlmResolver(config: LlmConfig): LlmResolver {
     } catch (error) {
       // После reserve нельзя доказать, успел ли провайдер принять запрос.
       // Резерв остаётся exposure, а не освобождается как будто траты не было.
-      await config.ledger.fail(reservation.id, {
-        outcome: "unknown",
-        reason: errorMessage(error),
-      });
+      // Сбой Core не должен подменить исходную ошибку провайдера.
+      await config.ledger
+        .fail(reservation.id, {
+          outcome: "unknown",
+          reason: errorMessage(error),
+        })
+        .catch(() => undefined);
       throw error;
     }
 

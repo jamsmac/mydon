@@ -3,8 +3,8 @@ import { ReleaseLlmDto, ReserveLlmDto, SettleLlmDto } from "./llm-ledger.dto";
 import { LlmLedgerService } from "./llm-ledger.service";
 
 /**
- * Все маршруты мутируют финансовый журнал, поэтому глобальный
- * ServiceTokenGuard закрывает их fail-closed при пустом/неверном SERVICE_TOKEN.
+ * Every route mutates the financial ledger, so the global ServiceTokenGuard
+ * fails closed when SERVICE_TOKEN is empty or incorrect.
  */
 @Controller("llm-ledger")
 export class LlmLedgerController {

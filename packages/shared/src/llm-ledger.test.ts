@@ -128,6 +128,28 @@ describe("CoreLlmLedgerClient", () => {
     });
     await assert.rejects(() => client.reserve(request), LlmLedgerUnavailableError);
   });
+
+  it("типизирует отказ чтения response body как недоступность ledger", async () => {
+    const response = new Response(null, { status: 200 });
+    Object.defineProperty(response, "text", {
+      value: async () => {
+        throw new Error("body stream aborted");
+      },
+    });
+    const client = new CoreLlmLedgerClient({
+      baseUrl: "http://core",
+      serviceToken: "secret",
+      fetchImpl: async () => response,
+    });
+
+    await assert.rejects(
+      () => client.reserve(request),
+      (error: unknown) =>
+        error instanceof LlmLedgerUnavailableError &&
+        error.cause instanceof Error &&
+        error.cause.message === "body stream aborted",
+    );
+  });
 });
 
 describe("inputTokenCeiling", () => {

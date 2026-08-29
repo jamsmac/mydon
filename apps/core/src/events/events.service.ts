@@ -11,7 +11,7 @@ export interface RecordEventInput {
   type: string;
   payload?: Record<string, unknown>;
   occurredAt?: Date;
-  /** Stable key одного логического эффекта; exact retry возвращает ту же строку. */
+  /** Stable key for one logical effect; an exact retry returns the same row. */
   clientKey?: string;
 }
 
@@ -45,11 +45,20 @@ export class EventsService {
         .where(eq(event.clientKey, input.clientKey!))
         .limit(1);
       if (!existing) throw new Error("Идемпотентное событие ещё сохраняется — повтори запрос");
-      const expected = hashLedgerPayload({ source: input.source, type: input.type, payload });
+      // When the caller omits occurredAt it accepts the timestamp assigned by
+      // the original insert. An explicit timestamp remains part of identity.
+      const expectedOccurredAt = input.occurredAt ?? existing.occurredAt;
+      const expected = hashLedgerPayload({
+        source: input.source,
+        type: input.type,
+        payload,
+        occurredAt: expectedOccurredAt.toISOString(),
+      });
       const actual = hashLedgerPayload({
         source: existing.source,
         type: existing.type,
         payload: existing.payload,
+        occurredAt: existing.occurredAt.toISOString(),
       });
       if (expected !== actual) {
         throw new ConflictException("clientKey события уже использован другим payload");
