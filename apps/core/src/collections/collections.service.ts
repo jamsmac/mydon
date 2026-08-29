@@ -104,6 +104,8 @@ export interface CreateCollectionInput {
   collectedAt?: string;
   source?: "realtime" | "manual_history" | "import";
   notes?: string;
+  /** Ключ идемпотентности ОТ КЛИЕНТА. Нет ключа — нет дедупа, и это законно (R-I-2). */
+  clientKey?: string;
 }
 
 /** Строка списка: с именами автомата и оператора — панель и бот не делают лишних запросов. */
@@ -140,8 +142,23 @@ export class CollectionsService {
           collectedAt: input.collectedAt ? new Date(input.collectedAt) : new Date(),
           source: input.source ?? "realtime",
           notes: input.notes ?? null,
+          clientKey: input.clientKey ?? null,
         })
+        .onConflictDoNothing({ target: collection.clientKey })
         .returning();
+
+      // Повтор по clientKey: сбор уже записан первой попыткой — возвращаем ту
+      // же строку и НЕ пишем второй `audit_log`. Бот покажет момент ПЕРВОГО
+      // сбора: человеку важно увидеть, что записано, а не когда он нажал ещё раз.
+      if (!created) {
+        const [existing] = await tx
+          .select()
+          .from(collection)
+          .where(eq(collection.clientKey, input.clientKey!))
+          .limit(1);
+        if (!existing) throw new BadRequestException("Повтор инкассации ещё сохраняется — нажми ещё раз");
+        return existing;
+      }
 
       await tx.insert(auditLog).values({
         actorKind: input.operatorId ? "human" : "system",

@@ -76,6 +76,7 @@ import type { SQL } from "drizzle-orm";
 import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
 import { productIndex, resolveCatalogName, type CanonSource } from "@mydon/shared";
 import { createDb, type Database } from "./index";
+import { разобратьФлаги } from "./script-flags";
 import { machineSlot, vendingAlias, vendingProduct, vendingRefill, vendingStock, vendingStockCount } from "./schema";
 
 /**
@@ -339,9 +340,6 @@ function картаРешения(что: string, r: BackfillResult): void {
   if (r.resolved.length > КАРТА_МАКС) console.log(`    … и ещё ${r.resolved.length - КАРТА_МАКС}`);
 }
 
-/** Ровно два флага, и ничего кроме них. */
-const ЗНАЕМ_ФЛАГИ = ["--dry-run", "--apply"];
-
 /**
  * Разбор аргументов БЕЛЫМ СПИСКОМ и строка режима одним местом (R-FW-S1).
  *
@@ -362,23 +360,11 @@ const ЗНАЕМ_ФЛАГИ = ["--dry-run", "--apply"];
 export function разобратьАргументы(
   argv: string[],
 ): { ok: true; dryRun: boolean; режим: string } | { ok: false; error: string } {
-  const чужие = argv.filter((a) => !ЗНАЕМ_ФЛАГИ.includes(a));
-  if (чужие.length > 0) {
-    return {
-      ok: false,
-      error: `Неизвестные аргументы: ${чужие.join(" ")}. Допустимо только --dry-run или --apply (без флагов — ЗАПИСЬ).`,
-    };
-  }
-  const apply = argv.includes("--apply");
-  const dryRun = argv.includes("--dry-run");
-  if (apply && dryRun) {
-    return {
-      ok: false,
-      error: "--apply и --dry-run вместе не имеют смысла: первый пишет, второй обещает не писать. Выберите один.",
-    };
-  }
-  if (dryRun) return { ok: true, dryRun: true, режим: "Режим: ПРИМЕРКА (--dry-run), записи не будет." };
-  return { ok: true, dryRun: false, режим: `Режим: ЗАПИСЬ${apply ? " (--apply)" : " (без флагов — умолчание)"}.` };
+  const r = разобратьФлаги(argv, { безФлагов: "запись" });
+  // `числа` наружу НЕ проливается: числовых флагов у этого скрипта нет, а его
+  // тесты сверяют объект целиком (`assert.deepEqual`) — лишний ключ покрасил бы
+  // их без единой смысловой правки.
+  return r.ok ? { ok: true, dryRun: r.dryRun, режим: r.режим } : r;
 }
 
 async function main(): Promise<void> {

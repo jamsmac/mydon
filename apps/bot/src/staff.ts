@@ -1,4 +1,4 @@
-import { can, dueLabel, TZ } from "@mydon/shared";
+import { can, dueLabel, tashkentMinute, TZ } from "@mydon/shared";
 import type { CoreClient, PersonRow, TaskRow } from "./core-client";
 import type { Conversations } from "./conversation";
 import { nextLocationKeyboard, parseVisitCallback, visitFromFlow, visitKeyboard, visitSummary } from "./coffee-visit";
@@ -253,6 +253,17 @@ export function machinesKeyboard(machines: { id: string; name: string }[]): Staf
 export function parseCollectCallback(data: string): { machineId: string } | null {
   const m = /^c:([0-9a-f-]{36})$/.exec(data);
   return m ? { machineId: m[1] } : null;
+}
+
+/**
+ * Ключ идемпотентности инкассации из бота (срез «правда о пробеле», R-I-2).
+ *
+ * Единица — ташкентская МИНУТА: клиент Core рвёт запрос по таймауту 10 с,
+ * человек видит ошибку и жмёт кнопку снова. Двух РАЗНЫХ сборов одного
+ * автомата одним человеком внутри одной минуты не бывает.
+ */
+export function collectionClientKey(personId: string, machineId: string, now: Date): string {
+  return `bot:collect:${personId}:${machineId}:${tashkentMinute(now)}`;
 }
 
 /**
@@ -661,6 +672,7 @@ export async function handleStaffCallback(
   data: string,
   person: PersonRow,
   deps: StaffDeps,
+  now: Date = new Date(),
 ): Promise<{
   answer: string;
   message?: string;
@@ -965,7 +977,11 @@ export async function handleStaffCallback(
     if (!can(person.roles, "cash.collect")) {
       return { answer: "Недоступно", message: "Инкассация тебе сейчас недоступна. Скажи владельцу." };
     }
-    const created = await deps.core.createCollection(collect.machineId, person.id);
+    const created = await deps.core.createCollection(
+      collect.machineId,
+      person.id,
+      collectionClientKey(person.id, collect.machineId, now),
+    );
     const when = formatCollectedAt(created.collectedAt);
     return {
       answer: "Сбор записан",

@@ -327,11 +327,22 @@ export const collection = pgTable(
      * вводом истории). Пусто здесь — законно, а не пробел в данных.
      */
     denominations: jsonb("denominations"),
+    /**
+     * Ключ идемпотентности — идентичность строки В ИСТОЧНИКЕ, а не подпись каждой
+     * строки (R-I-2). Заполнен там, где источник существует вне MYDON:
+     * `vendcash:collection:<uuid донора>` у 386 перенесённых,
+     * `bot:collect:<personId>:<machineId>:<минута>` у нажатий кнопки в боте.
+     * NULL — законное состояние: у строки, рождённой внутри MYDON без ключа от
+     * клиента, источника вне системы нет. Синтетический серверный ключ здесь
+     * запрещён: он уникален по построению и не защищает НИ ОТ ЧЕГО.
+     */
+    clientKey: text("client_key"),
     createdAt: createdAt(),
   },
   (t) => [
     index("collection_machine_date_idx").on(t.machineId, t.collectedAt),
     index("collection_status_idx").on(t.status),
+    uniqueIndex("collection_client_key").on(t.clientKey),
   ],
 );
 

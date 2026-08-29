@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { tashkentDay, tashkentDayEnd, tashkentDayStart, tashkentDayStartOf, tashkentHour, tashkentInstant } from "./tashkent-time";
+import {
+  TASHKENT_OFFSET_MS,
+  tashkentDay,
+  tashkentDayEnd,
+  tashkentDayStart,
+  tashkentDayStartOf,
+  tashkentHour,
+  tashkentInstant,
+  tashkentMinute,
+} from "./tashkent-time";
 
 describe("Время источника: разбор явный, не по TZ процесса (R-K8)", () => {
   it("строка без зоны — ташкентские часы, а не часы процесса", () => {
@@ -44,5 +53,27 @@ describe("Час ташкентских суток", () => {
     assert.equal(tashkentHour(new Date("2026-08-26T00:00:00+05:00")), 0);
     assert.equal(tashkentHour(new Date("2026-08-26T23:59:59+05:00")), 23);
     assert.equal(tashkentHour(new Date("2026-08-25T19:00:00.000Z")), 0);
+  });
+});
+
+describe("Ташкентская минута и смещение (срез «правда о пробеле»)", () => {
+  it("минута режется по Ташкенту, а не по часам процесса", () => {
+    assert.equal(tashkentMinute(new Date("2026-01-30T06:40:42.626Z")), "2026-01-30T11:40");
+    assert.equal(tashkentMinute(new Date("2026-01-30T18:59:59.999Z")), "2026-01-30T23:59");
+    assert.equal(tashkentMinute(new Date("2026-01-30T19:00:00.000Z")), "2026-01-31T00:00");
+  });
+
+  it("секунды в минуту не входят — повтор нажатия внутри минуты даёт ТУ ЖЕ строку", () => {
+    const a = tashkentMinute(new Date("2026-01-30T06:40:00.000Z"));
+    const b = tashkentMinute(new Date("2026-01-30T06:40:59.999Z"));
+    assert.equal(a, b);
+  });
+
+  it("смещение экспортировано и равно ровно пяти часам — второй копии в репозитории быть не должно", () => {
+    assert.equal(TASHKENT_OFFSET_MS, 5 * 3_600_000);
+    // Тот же сдвиг, что применяет `tashkentDay`: если однажды разойдутся,
+    // разовая правка времени уедет не туда, а тест это скажет.
+    const at = new Date("2026-06-08T20:30:00.000Z");
+    assert.equal(new Date(at.getTime() + TASHKENT_OFFSET_MS).toISOString().slice(0, 10), tashkentDay(at));
   });
 });
