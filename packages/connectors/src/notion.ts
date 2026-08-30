@@ -149,7 +149,12 @@ export const notion = {
         body: JSON.stringify({
           parent: { page_id: config.parentPageId },
           properties: {
-            title: [{ type: "text", text: { content: report.title } }],
+            // A page property is an object keyed by its property type. The
+            // rich-text array by itself looks plausible, but Notion rejects
+            // that shape with HTTP 400 before creating the child page.
+            title: {
+              title: [{ type: "text", text: { content: report.title } }],
+            },
           },
           children: toBlocks(report),
         }),

@@ -18,7 +18,7 @@ export const SOLUTION_SEARCH_SNAPSHOT_KIND = "solution-search-v1" as const;
 export const SOLUTION_SEARCH_SNAPSHOT_MAX_BYTES = 64 * 1024;
 export const SOLUTION_SEARCH_MAX_CANDIDATES = 3;
 
-const SEARCH_ITEMS_PER_QUERY = 6;
+const SEARCH_ITEMS_PER_QUERY = 10;
 const MODEL_MAX_TOKENS = 192;
 const SNAPSHOT_README_CHARS = 4_000;
 const SNAPSHOT_MANIFEST_CHARS = 1_200;
@@ -144,8 +144,125 @@ export interface SolutionSearchSnapshot extends Record<string, unknown> {
 }
 
 interface DomainQueryRule {
-  matches: RegExp;
+  matches: (brief: string) => boolean;
   queries: readonly [string, string];
+}
+
+const TELEGRAM_CRM_RELEVANCE_POLICY = "telegram-crm-v1" as const;
+const TELEGRAM_CRM_REQUIRED_SIGNALS = ["telegram", "crm_or_leads"] as const;
+
+type TelegramCrmRequiredSignal = (typeof TELEGRAM_CRM_REQUIRED_SIGNALS)[number];
+
+interface TelegramCrmCandidateDecision {
+  accepted: boolean;
+  telegram: boolean;
+  crmOrLeads: boolean;
+  missing: TelegramCrmRequiredSignal[];
+  metadataAnchor: boolean;
+}
+
+interface TelegramCrmCandidateAudit {
+  id: number;
+  fullName: string;
+  accepted: boolean;
+  telegram: boolean;
+  crmOrLeads: boolean;
+  metadataAnchor: boolean;
+  missing: TelegramCrmRequiredSignal[];
+}
+
+interface TelegramCrmGateAudit extends Record<string, unknown> {
+  policy: typeof TELEGRAM_CRM_RELEVANCE_POLICY;
+  active: true;
+  required: TelegramCrmRequiredSignal[];
+  checked: number;
+  accepted: number;
+  rejected: number;
+  candidates: TelegramCrmCandidateAudit[];
+  rejectedByReason: {
+    missingTelegram: number;
+    missingCrmOrLeads: number;
+    missingMetadataAnchor: number;
+  };
+}
+
+interface AppliedRelevanceGate {
+  active: boolean;
+  candidates: SolutionCandidateSnapshot[];
+  audit?: TelegramCrmGateAudit;
+}
+
+function normalizedSignalText(value: string): string {
+  return (
+    value
+      .normalize("NFKC")
+      .toLowerCase()
+      .match(/[\p{L}\p{N}]+/gu) ?? []
+  ).join(" ");
+}
+
+function signalTokens(value: string): Set<string> {
+  const normalized = normalizedSignalText(value);
+  return new Set(normalized === "" ? [] : normalized.split(" "));
+}
+
+function containsSignalPhrase(normalized: string, phrase: string): boolean {
+  return ` ${normalized} `.includes(` ${phrase} `);
+}
+
+function hasTelegramSignal(value: string): boolean {
+  const tokens = signalTokens(value);
+  if (tokens.has("telegram") || tokens.has("tg") || tokens.has("тг")) return true;
+  return [...tokens].some((token) =>
+    /^(?:телеграм|телеграма|телеграме|телеграмом|телеграму)$/.test(token),
+  );
+}
+
+function hasCrmOrLeadSignal(value: string): boolean {
+  const normalized = normalizedSignalText(value);
+  const tokens = signalTokens(normalized);
+  if (tokens.has("crm") || tokens.has("срм") || tokens.has("leads")) return true;
+  if (
+    [
+      "customer relationship management",
+      "lead management",
+      "lead qualification",
+      "lead capture",
+      "lead generation",
+      "sales lead",
+      "sales leads",
+      "sales pipeline",
+      "воронка продаж",
+      "воронки продаж",
+      "воронку продаж",
+    ].some((phrase) => containsSignalPhrase(normalized, phrase))
+  ) {
+    return true;
+  }
+  return [...tokens].some(
+    (token) =>
+      /^(?:лид|лида|лиду|лидом|лиде|лиды|лидов|лидам|лидами|лидах)$/.test(token) ||
+      token.startsWith("лидогенерац"),
+  );
+}
+
+function hasTelegramCrmIntent(input: SolutionSearchInput): boolean {
+  const brief = `${input.title} ${input.description ?? ""}`;
+  return hasTelegramSignal(brief) && hasCrmOrLeadSignal(brief);
+}
+
+function hasTelegramQuerySignal(brief: string): boolean {
+  if (hasTelegramSignal(brief)) return true;
+  const tokens = signalTokens(brief);
+  return ["tg", "bot", "bots", "бот", "бота", "боты", "ботов"].some((token) => tokens.has(token));
+}
+
+function hasCrmQuerySignal(brief: string): boolean {
+  if (hasCrmOrLeadSignal(brief)) return true;
+  const tokens = signalTokens(brief);
+  return ["sales", "lead", "leads", "pipeline", "продаж", "воронка", "воронки"].some((token) =>
+    tokens.has(token),
+  );
 }
 
 /**
@@ -154,43 +271,53 @@ interface DomainQueryRule {
  */
 const DOMAIN_QUERY_RULES: readonly DomainQueryRule[] = [
   {
-    matches:
-      /(?:telegram|telegram|tg|\u0442\u0435\u043b\u0435\u0433\u0440\u0430\u043c|\u0431\u043e\u0442)/u,
+    matches: hasTelegramQuerySignal,
     queries: ["telegram bot automation", "telegram crm integration"],
   },
   {
-    matches:
-      /(?:crm|sales|lead|pipeline|\u0441\u0440\u043c|\u043f\u0440\u043e\u0434\u0430\u0436|\u043b\u0438\u0434|\u0432\u043e\u0440\u043e\u043d\u043a)/u,
+    matches: hasCrmQuerySignal,
     queries: ["crm sales automation", "lead management crm"],
   },
   {
-    matches:
-      /(?:inventory|warehouse|stock|\u0441\u043a\u043b\u0430\u0434|\u043e\u0441\u0442\u0430\u0442\u043a|\u0443\u0447\u0451\u0442|\u0443\u0447\u0435\u0442)/u,
+    matches: (brief) =>
+      /(?:inventory|warehouse|stock|\u0441\u043a\u043b\u0430\u0434|\u043e\u0441\u0442\u0430\u0442\u043a|\u0443\u0447\u0451\u0442|\u0443\u0447\u0435\u0442)/u.test(
+        brief,
+      ),
     queries: ["inventory warehouse management", "stock accounting erp"],
   },
   {
-    matches:
-      /(?:workflow|n8n|automation|\u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0437|\u043f\u0440\u043e\u0446\u0435\u0441\u0441)/u,
+    matches: (brief) =>
+      /(?:workflow|n8n|automation|\u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0437|\u043f\u0440\u043e\u0446\u0435\u0441\u0441)/u.test(
+        brief,
+      ),
     queries: ["workflow automation", "n8n workflow templates"],
   },
   {
-    matches:
-      /(?:marketing|seo|campaign|\u043c\u0430\u0440\u043a\u0435\u0442\u0438\u043d\u0433|\u0440\u0435\u043a\u043b\u0430\u043c|\u043a\u0430\u043c\u043f\u0430\u043d)/u,
+    matches: (brief) =>
+      /(?:marketing|seo|campaign|\u043c\u0430\u0440\u043a\u0435\u0442\u0438\u043d\u0433|\u0440\u0435\u043a\u043b\u0430\u043c|\u043a\u0430\u043c\u043f\u0430\u043d)/u.test(
+        brief,
+      ),
     queries: ["marketing automation", "open source campaign management"],
   },
   {
-    matches:
-      /(?:competitor|intelligence|monitoring|\u043a\u043e\u043d\u043a\u0443\u0440\u0435\u043d\u0442|\u0440\u0430\u0437\u0432\u0435\u0434\u043a|\u043c\u043e\u043d\u0438\u0442\u043e\u0440)/u,
+    matches: (brief) =>
+      /(?:competitor|intelligence|monitoring|\u043a\u043e\u043d\u043a\u0443\u0440\u0435\u043d\u0442|\u0440\u0430\u0437\u0432\u0435\u0434\u043a|\u043c\u043e\u043d\u0438\u0442\u043e\u0440)/u.test(
+        brief,
+      ),
     queries: ["competitive intelligence", "competitor monitoring"],
   },
   {
-    matches:
-      /(?:tender|procurement|\u0442\u0435\u043d\u0434\u0435\u0440|\u0437\u0430\u043a\u0443\u043f\u043a)/u,
+    matches: (brief) =>
+      /(?:tender|procurement|\u0442\u0435\u043d\u0434\u0435\u0440|\u0437\u0430\u043a\u0443\u043f\u043a)/u.test(
+        brief,
+      ),
     queries: ["tender procurement platform", "procurement automation"],
   },
   {
-    matches:
-      /(?:accounting|invoice|finance|\u0431\u0443\u0445\u0433\u0430\u043b\u0442|\u0441\u0447\u0451\u0442|\u0441\u0447\u0435\u0442|\u0444\u0438\u043d\u0430\u043d\u0441)/u,
+    matches: (brief) =>
+      /(?:accounting|invoice|finance|\u0431\u0443\u0445\u0433\u0430\u043b\u0442|\u0441\u0447\u0451\u0442|\u0441\u0447\u0435\u0442|\u0444\u0438\u043d\u0430\u043d\u0441)/u.test(
+        brief,
+      ),
     queries: ["open source accounting erp", "invoice automation"],
   },
 ] as const;
@@ -200,7 +327,12 @@ const SEARCH_QUALIFIERS = "in:name,description,readme stars:>=30 archived:false"
 /** Deterministic one-or-two-query route; no task text is copied into a query. */
 export function buildSolutionQueries(input: SolutionSearchInput): string[] {
   const brief = `${input.title} ${input.description ?? ""}`.normalize("NFKC").toLowerCase();
-  const matched = DOMAIN_QUERY_RULES.filter((rule) => rule.matches.test(brief));
+  if (hasTelegramCrmIntent(input)) {
+    return ["telegram crm", "telegram lead management"].map(
+      (base) => `${base} ${SEARCH_QUALIFIERS}`,
+    );
+  }
+  const matched = DOMAIN_QUERY_RULES.filter((rule) => rule.matches(brief));
   const bases: string[] = [];
   if (matched.length === 0) {
     bases.push("open source business automation");
@@ -313,6 +445,14 @@ async function readCandidate(
   };
 }
 
+function repositoryMetadataSignalCount(repository: GitHubRepositoryEvidence): number {
+  // Owner is intentionally excluded: an organization name must not make an
+  // unrelated repository look relevant. Only candidate-owned product fields
+  // may influence this bounded preselection hint.
+  const metadata = [repository.name, repository.description ?? "", ...repository.topics].join("\n");
+  return Number(hasTelegramSignal(metadata)) + Number(hasCrmOrLeadSignal(metadata));
+}
+
 async function gatherSnapshot(
   connector: SolutionSearchGitHubPort,
   input: SolutionSearchInput,
@@ -358,12 +498,19 @@ async function gatherSnapshot(
     }
   }
 
-  const pool = [...found.values()].sort(
-    (left, right) =>
+  const applyTelegramCrmHint = hasTelegramCrmIntent(input);
+  const pool = [...found.values()].sort((left, right) => {
+    const metadataSignalDifference = applyTelegramCrmHint
+      ? repositoryMetadataSignalCount(right.repository) -
+        repositoryMetadataSignalCount(left.repository)
+      : 0;
+    return (
+      metadataSignalDifference ||
       right.repository.stars - left.repository.stars ||
       left.firstSeenOrder - right.firstSeenOrder ||
-      left.repository.id - right.repository.id,
-  );
+      left.repository.id - right.repository.id
+    );
+  });
   const selected: typeof pool = [];
   const selectedIds = new Set<number>();
   const take = (candidate: (typeof pool)[number] | undefined): void => {
@@ -382,10 +529,12 @@ async function gatherSnapshot(
         candidate.queryIndexes.includes(queryIndex) && !selectedIds.has(candidate.repository.id),
     );
     take(
-      eligible.find(
-        (candidate) =>
-          candidate.queryIndexes.length === 1 && candidate.queryIndexes[0] === queryIndex,
-      ) ?? eligible[0],
+      applyTelegramCrmHint
+        ? eligible[0]
+        : (eligible.find(
+            (candidate) =>
+              candidate.queryIndexes.length === 1 && candidate.queryIndexes[0] === queryIndex,
+          ) ?? eligible[0]),
     );
   }
   for (const candidate of pool) {
@@ -732,6 +881,79 @@ function parseStoredSnapshot(record: SolutionSnapshotRecord): SolutionSearchSnap
   return parseSolutionSnapshot(record.payload);
 }
 
+function telegramCrmCandidateDecision(
+  candidate: SolutionCandidateSnapshot,
+): TelegramCrmCandidateDecision {
+  const metadata = [candidate.name, candidate.description ?? "", ...candidate.topics].join("\n");
+  const readme = candidate.readme.status === "available" ? candidate.readme.excerpt : "";
+  const telegramInMetadata = hasTelegramSignal(metadata);
+  const crmOrLeadsInMetadata = hasCrmOrLeadSignal(metadata);
+  const hasTelegram = telegramInMetadata || hasTelegramSignal(readme);
+  const hasCrmOrLeads = crmOrLeadsInMetadata || hasCrmOrLeadSignal(readme);
+  const metadataAnchor = telegramInMetadata || crmOrLeadsInMetadata;
+  const missing: TelegramCrmRequiredSignal[] = [];
+  if (!hasTelegram) missing.push("telegram");
+  if (!hasCrmOrLeads) missing.push("crm_or_leads");
+  return {
+    accepted: missing.length === 0 && metadataAnchor,
+    telegram: hasTelegram,
+    crmOrLeads: hasCrmOrLeads,
+    missing,
+    metadataAnchor,
+  };
+}
+
+function applyRelevanceGate(
+  input: SolutionSearchInput,
+  candidates: SolutionCandidateSnapshot[],
+): AppliedRelevanceGate {
+  if (!hasTelegramCrmIntent(input)) return { active: false, candidates };
+
+  const accepted: SolutionCandidateSnapshot[] = [];
+  let missingTelegram = 0;
+  let missingCrmOrLeads = 0;
+  let missingMetadataAnchor = 0;
+  const candidateAudit: TelegramCrmCandidateAudit[] = [];
+  for (const candidate of candidates) {
+    const decision = telegramCrmCandidateDecision(candidate);
+    candidateAudit.push({
+      id: candidate.id,
+      fullName: candidate.fullName,
+      accepted: decision.accepted,
+      telegram: decision.telegram,
+      crmOrLeads: decision.crmOrLeads,
+      metadataAnchor: decision.metadataAnchor,
+      missing: [...decision.missing],
+    });
+    if (decision.accepted) {
+      accepted.push(candidate);
+      continue;
+    }
+    if (decision.missing.includes("telegram")) missingTelegram += 1;
+    if (decision.missing.includes("crm_or_leads")) missingCrmOrLeads += 1;
+    if (!decision.metadataAnchor) missingMetadataAnchor += 1;
+  }
+
+  return {
+    active: true,
+    candidates: accepted,
+    audit: {
+      policy: TELEGRAM_CRM_RELEVANCE_POLICY,
+      active: true,
+      required: [...TELEGRAM_CRM_REQUIRED_SIGNALS],
+      checked: candidates.length,
+      accepted: accepted.length,
+      rejected: candidates.length - accepted.length,
+      candidates: candidateAudit,
+      rejectedByReason: {
+        missingTelegram,
+        missingCrmOrLeads,
+        missingMetadataAnchor,
+      },
+    },
+  };
+}
+
 interface ModelScores {
   readiness: number;
   cis: number;
@@ -953,12 +1175,17 @@ function ownerReport(
   ranked: RankedSolution[],
   modelResult: CallModelResult | null,
   modelRankingValid: boolean,
+  relevanceGate: AppliedRelevanceGate,
 ): string {
   const lines = [
     `# GitHub-\u0440\u0435\u0448\u0435\u043d\u0438\u044f: ${safeTaskLabel(input.title)}`,
   ];
   if (modelResult === null) {
-    lines.push("LLM ranking not called: no candidates.");
+    lines.push(
+      relevanceGate.audit && relevanceGate.audit.checked > 0
+        ? `LLM ranking not called: no candidates passed ${TELEGRAM_CRM_RELEVANCE_POLICY}.`
+        : "LLM ranking not called: no candidates.",
+    );
   } else if (modelResult.ok && modelRankingValid) {
     lines.push("LLM ranking valid.");
   } else if (modelResult.ok) {
@@ -969,6 +1196,11 @@ function ownerReport(
   lines.push(
     `Coverage: GitHub ${snapshot.retrievedAt}, status=${snapshot.searchStatus}. Gaps: ${snapshot.coverageGaps.join("; ")}. CVE/security advisories not checked.`,
   );
+  if (relevanceGate.audit) {
+    lines.push(
+      `Relevance gate ${TELEGRAM_CRM_RELEVANCE_POLICY}: accepted ${relevanceGate.audit.accepted}/${relevanceGate.audit.checked}; required persisted evidence of Telegram + CRM/leads with a metadata anchor.`,
+    );
+  }
   if (snapshot.searchStatus === "partial") {
     const categories = new Set<SolutionSearchIssueCategory>(
       snapshot.searchIssues.map((issue) => issue.category),
@@ -986,6 +1218,16 @@ function ownerReport(
   if (snapshot.searchStatus === "error") {
     lines.push(
       "\u041f\u043e\u0438\u0441\u043a GitHub \u043d\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d. \u042d\u0442\u043e \u043e\u0448\u0438\u0431\u043a\u0430 \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u044f, \u0430 \u043d\u0435 \u0434\u043e\u043a\u0430\u0437\u0430\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0438\u044f \u0440\u0435\u0448\u0435\u043d\u0438\u0439.",
+    );
+  } else if (
+    ranked.length === 0 &&
+    relevanceGate.audit !== undefined &&
+    relevanceGate.audit.checked > 0
+  ) {
+    lines.push(
+      snapshot.searchStatus === "partial"
+        ? "GitHub evidence неполны: в доступном срезе ни один кандидат не доказал одновременно Telegram + CRM/лиды. Это не доказывает отсутствие решений."
+        : "GitHub вернул кандидатов, но ни один не доказал одновременно Telegram + CRM/лиды по сохранённым metadata/README; отклонённые репозитории не рекомендуются.",
     );
   } else if (ranked.length === 0 && snapshot.searchStatus === "partial") {
     lines.push(
@@ -1026,12 +1268,21 @@ function ownerReport(
   return bounded.join("\n");
 }
 
-function noCandidateAction(snapshot: SolutionSearchSnapshot): string {
+function noCandidateAction(
+  snapshot: SolutionSearchSnapshot,
+  relevanceGate: AppliedRelevanceGate,
+): string {
   if (snapshot.searchStatus === "error") {
     return "\u041f\u043e\u0438\u0441\u043a GitHub \u043d\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d: \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u043d\u0435 \u043e\u0442\u0432\u0435\u0442\u0438\u043b. \u042d\u0442\u043e \u043d\u0435 \u043e\u0437\u043d\u0430\u0447\u0430\u0435\u0442, \u0447\u0442\u043e \u0433\u043e\u0442\u043e\u0432\u044b\u0445 \u0440\u0435\u0448\u0435\u043d\u0438\u0439 \u043d\u0435\u0442.";
   }
   if (snapshot.searchStatus === "partial") {
+    if (relevanceGate.audit && relevanceGate.audit.checked > 0) {
+      return "Поиск GitHub завершён частично: в неполном срезе ни один кандидат не доказал одновременно Telegram + CRM/лиды. Нужен повтор после восстановления источника.";
+    }
     return "\u041f\u043e\u0438\u0441\u043a GitHub \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d \u0447\u0430\u0441\u0442\u0438\u0447\u043d\u043e: \u0432 \u043d\u0435\u043f\u043e\u043b\u043d\u043e\u043c \u0441\u0440\u0435\u0437\u0435 \u043a\u0430\u043d\u0434\u0438\u0434\u0430\u0442\u043e\u0432 \u043d\u0435\u0442. \u041d\u0443\u0436\u0435\u043d \u043f\u043e\u0432\u0442\u043e\u0440 \u043f\u043e\u0441\u043b\u0435 \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0430.";
+  }
+  if (relevanceGate.audit && relevanceGate.audit.checked > 0) {
+    return "GitHub вернул кандидатов, но ни один не доказал одновременно Telegram + CRM/лиды по сохранённым metadata/README. LLM ranking не вызывался; отклонённые репозитории не рекомендуются.";
   }
   return "\u0412 \u043f\u043e\u043a\u0440\u044b\u0442\u043e\u043c GitHub-\u0441\u0440\u0435\u0437\u0435 \u043a\u0430\u043d\u0434\u0438\u0434\u0430\u0442\u043e\u0432 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e. YouTube, SaaS \u0438 n8n.io \u043d\u0435 \u0438\u0441\u043a\u0430\u043b\u0438; \u044d\u0442\u043e \u043d\u0435 \u0432\u044b\u0432\u043e\u0434 \u043e \u0432\u0441\u0451\u043c \u0440\u044b\u043d\u043a\u0435.";
 }
@@ -1057,8 +1308,12 @@ function noCandidateNextSteps(snapshot: SolutionSearchSnapshot): string[] {
   ];
 }
 
-function modelFacts(result: CallModelResult | null, valid: boolean): Record<string, unknown> {
-  if (result === null) return { called: false, valid: false, fallback: "no candidates" };
+function modelFacts(
+  result: CallModelResult | null,
+  valid: boolean,
+  noCandidateReason = "no candidates",
+): Record<string, unknown> {
+  if (result === null) return { called: false, valid: false, fallback: noCandidateReason };
   return {
     called: true,
     valid,
@@ -1099,10 +1354,18 @@ export async function findSolutions(
   // Never continue from the pre-save object: an idempotent Core save may have
   // returned the immutable snapshot created by a previous worker.
   const snapshot = parseStoredSnapshot(stored);
+  const relevanceGate = applyRelevanceGate(input, snapshot.candidates);
+  // This derived view is authoritative for every downstream consumer. Raw
+  // rejected candidates remain available only in the bounded gate audit; they
+  // can never enter the provider prompt, ranking, report or recommendation.
+  const rankableSnapshot: SolutionSearchSnapshot = {
+    ...snapshot,
+    candidates: relevanceGate.candidates,
+  };
 
   let modelResult: CallModelResult | null = null;
   let scores: Map<number, ModelScores> | null = null;
-  if (snapshot.candidates.length > 0) {
+  if (rankableSnapshot.candidates.length > 0) {
     modelResult = await callModel(
       gateway,
       {
@@ -1110,7 +1373,7 @@ export async function findSolutions(
           "\u041e\u0446\u0435\u043d\u0438 \u0442\u043e\u043b\u044c\u043a\u043e readiness, cis, relevance \u043f\u043e 1..5 \u0438 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u043e evidence. \u041d\u0435\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0435 RU/CIS-\u043b\u043e\u043a\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044e, \u043e\u043f\u043b\u0430\u0442\u0443, \u0445\u043e\u0441\u0442\u0438\u043d\u0433 \u0438 compliance \u0441\u0447\u0438\u0442\u0430\u0439 unknown, \u043d\u0435 \u0444\u0430\u043a\u0442\u043e\u043c. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0435\u0440\u0435\u0434\u0430\u043d\u043d\u044b\u0435 ID; \u043d\u0435 \u043f\u0440\u0438\u0434\u0443\u043c\u044b\u0432\u0430\u0439 \u0444\u0430\u043a\u0442\u044b \u0438 URL.",
         prompt:
           '\u0412\u0435\u0440\u043d\u0438 \u0441\u0442\u0440\u043e\u0433\u043e JSON: {"rankings":[{"id":1,"readiness":1,"cis":1,"relevance":1}]}. \u041f\u043e \u043e\u0434\u043d\u043e\u0439 \u0437\u0430\u043f\u0438\u0441\u0438 \u043d\u0430 \u043a\u0430\u0436\u0434\u044b\u0439 ID.',
-        untrustedContext: modelEvidence(input, snapshot),
+        untrustedContext: modelEvidence(input, rankableSnapshot),
         maxTokens: MODEL_MAX_TOKENS,
         reasoningEffort: "none",
         agentName: options.agentName,
@@ -1125,18 +1388,18 @@ export async function findSolutions(
     if (modelResult.ok) {
       scores = parseModelScores(
         modelResult.text,
-        snapshot.candidates.map((candidate) => candidate.id),
+        rankableSnapshot.candidates.map((candidate) => candidate.id),
       );
     }
   }
 
-  const ranked = rankSolutions(snapshot, scores);
-  const report = ownerReport(input, snapshot, ranked, modelResult, scores !== null);
+  const ranked = rankSolutions(rankableSnapshot, scores);
+  const report = ownerReport(input, snapshot, ranked, modelResult, scores !== null, relevanceGate);
   const snapshotHash =
     stored.hash !== undefined && /^[0-9a-f]{64}$/.test(stored.hash) ? stored.hash : undefined;
   const action =
     ranked.length === 0
-      ? noCandidateAction(snapshot)
+      ? noCandidateAction(snapshot, relevanceGate)
       : `\u041e\u0442\u0440\u0430\u043d\u0436\u0438\u0440\u043e\u0432\u0430\u043d\u043e ${ranked.length} \u043f\u0443\u0431\u043b\u0438\u0447\u043d\u044b\u0445 GitHub-\u0440\u0435\u043f\u043e\u0437\u0438\u0442\u043e\u0440\u0438\u0435\u0432. \u041b\u0438\u0434\u0435\u0440: ${ranked[0].candidate.fullName} (${ranked[0].total}/25). \u042d\u0442\u043e \u0440\u0430\u0437\u0432\u0435\u0434\u043a\u0430 T1; \u043d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u0443\u0441\u0442\u0430\u043d\u0430\u0432\u043b\u0438\u0432\u0430\u043b\u043e\u0441\u044c \u0438 \u043d\u0435 \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u043b\u043e\u0441\u044c.`;
 
   return {
@@ -1182,7 +1445,14 @@ export async function findSolutions(
         })),
         searchIssues: snapshot.searchIssues,
       },
-      model: modelFacts(modelResult, scores !== null),
+      ...(relevanceGate.audit ? { relevanceGate: relevanceGate.audit } : {}),
+      model: modelFacts(
+        modelResult,
+        scores !== null,
+        relevanceGate.audit && relevanceGate.audit.checked > 0
+          ? "no relevant candidates"
+          : "no candidates",
+      ),
     },
     next: ranked.length === 0 ? noCandidateNextSteps(snapshot) : [...NEXT_STEPS],
   };

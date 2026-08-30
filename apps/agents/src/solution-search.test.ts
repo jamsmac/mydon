@@ -223,10 +223,34 @@ describe("solution-scout query routing", () => {
       description: "https://different.invalid",
     });
     assert.deepEqual(first, second, "task URL and qualifiers never enter the query");
-    assert.equal(first.length, 2);
+    assert.deepEqual(first, [
+      "telegram crm in:name,description,readme stars:>=30 archived:false",
+      "telegram lead management in:name,description,readme stars:>=30 archived:false",
+    ]);
     assert.ok(first.every((query) => query.length <= 256));
     assert.ok(first.every((query) => query.endsWith("stars:>=30 archived:false")));
     assert.doesNotMatch(first.join(" "), /evil|stars:0|archived:true/);
+  });
+
+  it("uses boundary-aware intent signals instead of substrings and ambiguous lead", () => {
+    const work = buildSolutionQueries({ title: "Работа с CRM" });
+    assert.deepEqual(work, [
+      "crm sales automation in:name,description,readme stars:>=30 archived:false",
+      "lead management crm in:name,description,readme stars:>=30 archived:false",
+    ]);
+    assert.doesNotMatch(work.join(" "), /telegram/);
+
+    const ambiguous = buildSolutionQueries({
+      title: "Telegram tooling for a lead developer and CI pipeline",
+    });
+    assert.doesNotMatch(ambiguous.join("\n"), /^telegram crm /m);
+    assert.doesNotMatch(ambiguous.join("\n"), /^telegram lead management /m);
+
+    const leader = buildSolutionQueries({ title: "Telegram leader tooling" });
+    assert.deepEqual(leader, [
+      "telegram bot automation in:name,description,readme stars:>=30 archived:false",
+      "telegram crm integration in:name,description,readme stars:>=30 archived:false",
+    ]);
   });
 });
 
@@ -235,8 +259,9 @@ describe("solution-scout durable retrieval and ranking", () => {
     const order: string[] = [];
     const repo = repository(101);
     const connector = fakeConnector({
-      searchRepositories: async () => {
+      searchRepositories: async (_query, options) => {
         order.push("search");
+        assert.equal(options?.items, 10);
         return search([repo]);
       },
       getReadme: async () => {
@@ -285,12 +310,19 @@ describe("solution-scout durable retrieval and ranking", () => {
   });
 
   it("reserves a candidate slot for a unique hit from the second domain query", async () => {
+    const telegramCrmEvidence: Partial<GitHubRepositoryEvidence> = {
+      description: "Telegram CRM for lead qualification",
+      topics: ["telegram", "crm", "lead-management"],
+    };
     const firstQuery = [
-      repository(201, "owner/first-a", { stars: 1_000 }),
-      repository(202, "owner/first-b", { stars: 900 }),
-      repository(203, "owner/first-c", { stars: 800 }),
+      repository(201, "owner/first-a", { ...telegramCrmEvidence, stars: 1_000 }),
+      repository(202, "owner/first-b", { ...telegramCrmEvidence, stars: 900 }),
+      repository(203, "owner/first-c", { ...telegramCrmEvidence, stars: 800 }),
     ];
-    const secondQueryHit = repository(204, "owner/second-domain", { stars: 1 });
+    const secondQueryHit = repository(204, "owner/second-domain", {
+      ...telegramCrmEvidence,
+      stars: 1,
+    });
     let queryCalls = 0;
     let saved: unknown;
     const connector = fakeConnector({
@@ -332,6 +364,355 @@ describe("solution-scout durable retrieval and ranking", () => {
     );
     const evidence = result.facts.evidence as { candidates: Array<{ id: number }> };
     assert.ok(evidence.candidates.some((candidate) => candidate.id === 204));
+  });
+
+  it("filters high-star unrelated repositories before the only model ranking", async () => {
+    const cline = repository(301, "cline/cline", {
+      description: "Autonomous coding agent",
+      topics: ["coding-agent"],
+      stars: 100_000,
+    });
+    const ollama = repository(302, "ollama/ollama", {
+      description: "Run large language models locally",
+      topics: ["llm"],
+      stars: 90_000,
+    });
+    const relevant = repository(303, "acme/telegram-lead-crm", {
+      description: "Telegram CRM for lead qualification",
+      topics: ["telegram", "crm", "lead-management"],
+      stars: 40,
+    });
+    const firstNoise = Array.from({ length: 8 }, (_, index) =>
+      repository(310 + index, `noise/first-${index}`, {
+        description: "General developer tooling",
+        topics: ["developer-tools"],
+        stars: 8_000 - index,
+      }),
+    );
+    const secondNoise = Array.from({ length: 8 }, (_, index) =>
+      repository(320 + index, `noise/second-${index}`, {
+        description: "General workflow tooling",
+        topics: ["workflow"],
+        stars: 7_000 - index,
+      }),
+    );
+    const firstSearchPage = [cline, ...firstNoise, relevant];
+    const secondSearchPage = [ollama, ...secondNoise, relevant];
+    assert.equal(firstSearchPage.indexOf(relevant), 9, "relevant hit is behind the old top-6");
+    assert.equal(secondSearchPage.indexOf(relevant), 9, "relevant hit is behind the old top-6");
+    let searchCalls = 0;
+    let saved: unknown;
+    const connector = fakeConnector({
+      searchRepositories: async (_query, options) => {
+        assert.equal(options?.items, 10);
+        searchCalls += 1;
+        return searchCalls === 1 ? search(firstSearchPage) : search(secondSearchPage);
+      },
+      getReadme: async (owner, name) => {
+        const repo = [cline, ollama, relevant].find(
+          (candidate) => candidate.owner === owner && candidate.name === name,
+        );
+        if (!repo) throw new Error("unknown fixture repository");
+        if (repo.id === ollama.id) return readme(repo, "Telegram bot integration example");
+        return readme(repo);
+      },
+    });
+    const { gateway, calls } = fakeGateway(
+      '{"rankings":[{"id":303,"readiness":4,"cis":3,"relevance":5}]}',
+    );
+
+    const result = await withModel(() =>
+      findSolutions(
+        gateway,
+        connector,
+        { title: "Найди Telegram CRM для квалификации лидов" },
+        {
+          agentName: "solution-scout",
+          requestKey: "task:strict-gate",
+          snapshotPort: {
+            save: async (kind, payload) => {
+              saved = payload;
+              return { kind, payload, hash: "d".repeat(64) };
+            },
+          },
+          now: () => new Date(NOW),
+        },
+      ),
+    );
+
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].prompt, /acme\/telegram-lead-crm/);
+    assert.doesNotMatch(calls[0].prompt, /cline\/cline|ollama\/ollama/);
+    assert.deepEqual(
+      parseSolutionSnapshot(saved).candidates.map((candidate) => candidate.id),
+      [303, 302, 301],
+      "metadata coverage precedes stars, while raw bounded evidence remains durable",
+    );
+    const evidence = result.facts.evidence as { candidates: Array<{ id: number }> };
+    assert.deepEqual(
+      evidence.candidates.map((candidate) => candidate.id),
+      [303],
+    );
+    assert.match(result.action, /acme\/telegram-lead-crm/);
+    assert.doesNotMatch(
+      `${result.action}\n${String(result.facts.ownerReport)}`,
+      /cline\/cline|ollama\/ollama/,
+    );
+    assert.deepEqual(result.facts.relevanceGate, {
+      policy: "telegram-crm-v1",
+      active: true,
+      required: ["telegram", "crm_or_leads"],
+      checked: 3,
+      accepted: 1,
+      rejected: 2,
+      candidates: [
+        {
+          id: 303,
+          fullName: "acme/telegram-lead-crm",
+          accepted: true,
+          telegram: true,
+          crmOrLeads: true,
+          metadataAnchor: true,
+          missing: [],
+        },
+        {
+          id: 302,
+          fullName: "ollama/ollama",
+          accepted: false,
+          telegram: true,
+          crmOrLeads: false,
+          metadataAnchor: false,
+          missing: ["crm_or_leads"],
+        },
+        {
+          id: 301,
+          fullName: "cline/cline",
+          accepted: false,
+          telegram: false,
+          crmOrLeads: false,
+          metadataAnchor: false,
+          missing: ["telegram", "crm_or_leads"],
+        },
+      ],
+      rejectedByReason: {
+        missingTelegram: 1,
+        missingCrmOrLeads: 2,
+        missingMetadataAnchor: 2,
+      },
+    });
+  });
+
+  it("does not call the model when every candidate fails the authoritative gate", async () => {
+    const telegramOnly = candidateSnapshot(401, "acme/telegram-bot", {
+      description: "Telegram bot automation",
+      topics: ["telegram", "bot"],
+    });
+    const crmOnly = candidateSnapshot(402, "acme/sales-crm", {
+      description: "CRM for sales teams",
+      topics: ["crm", "sales"],
+    });
+    const payload = snapshot([telegramOnly, crmOnly], {
+      queries: buildSolutionQueries({ title: "Telegram CRM" }),
+    });
+    const { gateway, calls } = fakeGateway("must not run");
+
+    const result = await withModel(() =>
+      findSolutions(
+        gateway,
+        fakeConnector(),
+        { title: "Telegram CRM для лидов" },
+        {
+          agentName: "solution-scout",
+          requestKey: "task:strict-gate-empty",
+          snapshotPort: storedPort(payload),
+        },
+      ),
+    );
+
+    assert.equal(calls.length, 0);
+    assert.deepEqual((result.facts.evidence as { candidates: unknown[] }).candidates, []);
+    assert.match(result.action, /ни один не доказал.*Telegram \+ CRM\/лиды/u);
+    assert.match(String(result.facts.ownerReport), /accepted 0\/2/);
+    assert.doesNotMatch(
+      `${result.action}\n${String(result.facts.ownerReport)}\n${result.next?.join("\n") ?? ""}`,
+      /acme\/telegram-bot|acme\/sales-crm|лидер|pilot/iu,
+    );
+    assert.deepEqual(result.facts.model, {
+      called: false,
+      valid: false,
+      fallback: "no relevant candidates",
+    });
+    const gate = result.facts.relevanceGate as {
+      checked: number;
+      accepted: number;
+      rejected: number;
+      candidates: Array<{ id: number; accepted: boolean; missing: string[] }>;
+    };
+    assert.equal(gate.checked, 2);
+    assert.equal(gate.accepted, 0);
+    assert.equal(gate.rejected, 2);
+    assert.deepEqual(
+      gate.candidates.map(({ id, accepted, missing }) => ({ id, accepted, missing })),
+      [
+        { id: 401, accepted: false, missing: ["crm_or_leads"] },
+        { id: 402, accepted: false, missing: ["telegram"] },
+      ],
+    );
+  });
+
+  it("activates the strict gate for TG/тг and standalone plural leads", async () => {
+    const telegramOnly = candidateSnapshot(405, "acme/telegram-bot", {
+      description: "Telegram bot automation",
+      topics: ["telegram", "bot"],
+    });
+    const crmOnly = candidateSnapshot(406, "acme/sales-crm", {
+      description: "CRM for sales teams",
+      topics: ["crm", "sales"],
+    });
+
+    for (const title of ["TG CRM", "ТГ CRM", "Telegram leads"]) {
+      const payload = snapshot([telegramOnly, crmOnly], {
+        queries: buildSolutionQueries({ title }),
+      });
+      const { gateway, calls } = fakeGateway("must not run");
+      const result = await withModel(() =>
+        findSolutions(
+          gateway,
+          fakeConnector(),
+          { title },
+          {
+            agentName: "solution-scout",
+            requestKey: `task:strict-boundary:${title}`,
+            snapshotPort: storedPort(payload),
+          },
+        ),
+      );
+
+      assert.equal(calls.length, 0, `${title} must gate before model/ledger`);
+      assert.deepEqual(
+        (result.facts.evidence as { candidates: unknown[] }).candidates,
+        [],
+        `${title} must filter candidates which each prove only one required signal`,
+      );
+      const gate = result.facts.relevanceGate as {
+        policy: string;
+        active: boolean;
+        checked: number;
+        accepted: number;
+        rejected: number;
+      };
+      assert.deepEqual(
+        {
+          policy: gate.policy,
+          active: gate.active,
+          checked: gate.checked,
+          accepted: gate.accepted,
+          rejected: gate.rejected,
+        },
+        {
+          policy: "telegram-crm-v1",
+          active: true,
+          checked: 2,
+          accepted: 0,
+          rejected: 2,
+        },
+      );
+      assert.match(result.action, /ни один не доказал.*Telegram \+ CRM\/лиды/u);
+    }
+  });
+
+  it("replays the stored snapshot and deterministically gates before model evidence", async () => {
+    const accepted = candidateSnapshot(411, "acme/tg-sales", {
+      description: "Telegram assistant for sales teams",
+      topics: ["telegram"],
+      readme: {
+        status: "available",
+        sha: SHA,
+        path: "README.md",
+        excerpt: "Lead qualification and lead management workflow",
+        truncated: false,
+      },
+    });
+    const readmeOnly = candidateSnapshot(412, "acme/general-automation", {
+      description: "General workflow automation",
+      topics: ["automation"],
+      readme: {
+        status: "available",
+        sha: SHA,
+        path: "README.md",
+        excerpt: "Telegram CRM and lead qualification examples",
+        truncated: false,
+      },
+    });
+    const payload = snapshot([accepted, readmeOnly], {
+      queries: buildSolutionQueries({ title: "Телеграм квалификация лидов" }),
+    });
+    const connector = fakeConnector({
+      searchRepositories: async () => {
+        throw new Error("stored replay must not search");
+      },
+      getReadme: async () => {
+        throw new Error("stored replay must not read README");
+      },
+      fetchManifest: async () => {
+        throw new Error("stored replay must not read manifests");
+      },
+    });
+    const { gateway, calls } = fakeGateway(
+      '{"rankings":[{"id":411,"readiness":4,"cis":4,"relevance":5}]}',
+    );
+
+    const result = await withModel(() =>
+      findSolutions(
+        gateway,
+        connector,
+        { title: "Телеграм: квалификация лидов" },
+        {
+          agentName: "solution-scout",
+          requestKey: "task:strict-gate-replay",
+          snapshotPort: storedPort(payload),
+        },
+      ),
+    );
+
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].prompt, /acme\/tg-sales/);
+    assert.doesNotMatch(calls[0].prompt, /acme\/general-automation/);
+    assert.deepEqual(
+      (result.facts.evidence as { candidates: Array<{ id: number }> }).candidates.map(
+        (candidate) => candidate.id,
+      ),
+      [411],
+    );
+    const gate = result.facts.relevanceGate as {
+      candidates: Array<{
+        id: number;
+        accepted: boolean;
+        telegram: boolean;
+        crmOrLeads: boolean;
+        metadataAnchor: boolean;
+      }>;
+    };
+    assert.deepEqual(gate.candidates, [
+      {
+        id: 411,
+        fullName: "acme/tg-sales",
+        accepted: true,
+        telegram: true,
+        crmOrLeads: true,
+        metadataAnchor: true,
+        missing: [],
+      },
+      {
+        id: 412,
+        fullName: "acme/general-automation",
+        accepted: false,
+        telegram: true,
+        crmOrLeads: true,
+        metadataAnchor: false,
+        missing: [],
+      },
+    ]);
   });
 
   it("uses a valid existing snapshot with zero connector traffic and zero save", async () => {
