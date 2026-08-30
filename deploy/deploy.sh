@@ -164,6 +164,11 @@ EOF
   # их хостовые копии жили в /opt/mydon-stock и деплоем не обновлялись.
   install -o root -g root -m 700 deploy/guards/disk_guard.sh /opt/backups/disk_guard.sh
   install -o root -g root -m 700 deploy/guards/healthz_guard.sh /opt/backups/healthz_guard.sh
+  # Durable producer-side LLM accounting: явно создаём частные
+  # host-каталоги до compose, а не полагаемся на bind-mount mkdir.
+  install -d -o root -g root -m 700 /opt/mydon-data/llm-close \
+    /opt/mydon-data/llm-close/agents /opt/mydon-data/llm-close/bot \
+    /opt/mydon-data/llm-close/cc
   # Корневой сертификат Supabase — для sslmode=verify-full в admin-пути
   # (db_access.sh монтирует его в клиентский контейнер). Публичный сертификат,
   # пин сверен по двум независимым сетевым путям 2026-08-24.

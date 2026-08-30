@@ -3,12 +3,16 @@ import { describe, it } from "node:test";
 import { BadRequestException, ConflictException } from "@nestjs/common";
 import { agentTaskLlmJob, llmModelPrice, llmSpend, systemConfig } from "@mydon/db";
 import { tashkentDay } from "@mydon/shared";
+import { plainToInstance } from "class-transformer";
+import { validate } from "class-validator";
+import { RecoverPreDispatchLlmDto } from "./llm-ledger.dto";
 import type { ReleaseLlmDto, ReserveLlmDto, SettleLlmDto } from "./llm-ledger.dto";
 import { hashLedgerPayload, usdToNano, type LedgerPriceSnapshot } from "./llm-ledger.money";
 import {
   classifySettlementAnomaly,
   consumerRequiresAgent,
   flatOpenAiPriceTierDenial,
+  LLM_PRE_DISPATCH_RECOVERY_REASON,
   LLM_STUCK_RESERVATION_THRESHOLD_MINUTES,
   LlmLedgerService,
   llmMonitoringFrame,
@@ -213,6 +217,54 @@ function terminalSpendTx(row: Record<string, unknown>) {
   return { tx, updateCount: () => updates };
 }
 
+function preDispatchRecoveryTx(
+  row: Record<string, unknown> | undefined,
+  options: { taskLinked?: boolean } = {},
+) {
+  const updates: Record<string, unknown>[] = [];
+  let locks = 0;
+  const tx = {
+    execute: async () => {
+      locks += 1;
+    },
+    select: (fields?: Record<string, unknown>) => ({
+      from: (table: unknown) => {
+        if (table === agentTaskLlmJob) {
+          return {
+            where: () => ({
+              limit: async () => (options.taskLinked ? [{ id: "task-job" }] : []),
+            }),
+          };
+        }
+        assert.equal(table, llmSpend);
+        if (fields !== undefined) {
+          return {
+            where: () => ({
+              limit: async () =>
+                row ? [{ day: row.day, provider: row.provider }] : [],
+            }),
+          };
+        }
+        return {
+          where: () => ({
+            limit: () => ({ for: async () => (row ? [row] : []) }),
+          }),
+        };
+      },
+    }),
+    update: (table: unknown) => {
+      assert.equal(table, llmSpend);
+      return {
+        set: (values: Record<string, unknown>) => {
+          updates.push(values);
+          return { where: async () => undefined };
+        },
+      };
+    },
+  } as never;
+  return { tx, updates, lockCount: () => locks };
+}
+
 interface MonitoringFixture {
   config?: Record<string, string>;
   daily?: {
@@ -312,6 +364,96 @@ async function withoutLlmEnabledEnv<T>(body: () => Promise<T>): Promise<T> {
 }
 
 describe("LLM-ledger settlement invariants", () => {
+  it("recover-pre-dispatch DTO принимает requestKey до 256 знаков", async () => {
+    const valid = plainToInstance(RecoverPreDispatchLlmDto, { requestKey: "r".repeat(256) });
+    const tooLong = plainToInstance(RecoverPreDispatchLlmDto, { requestKey: "r".repeat(257) });
+    const blank = plainToInstance(RecoverPreDispatchLlmDto, { requestKey: "   " });
+
+    assert.deepEqual(await validate(valid), []);
+    assert.ok((await validate(tooLong)).some((error) => error.property === "requestKey"));
+    assert.ok((await validate(blank)).some((error) => error.property === "requestKey"));
+  });
+
+  it("recover-pre-dispatch безопасно повторяется для отсутствующего spend", async () => {
+    const fixture = preDispatchRecoveryTx(undefined);
+    const result = await new LlmLedgerService({} as never).recoverPreDispatchInTx(fixture.tx, {
+      requestKey: "missing-request",
+    });
+
+    assert.deepEqual(result, { status: "missing", replay: true });
+    assert.equal(fixture.lockCount(), 0);
+    assert.deepEqual(fixture.updates, []);
+  });
+
+  it("recover-pre-dispatch освобождает reserved non-task с фиксированной причиной", async () => {
+    const row = {
+      id: "recover-spend",
+      requestKey: "  uncertain-reserve  ",
+      day: "2026-08-30",
+      provider: "openai",
+      status: "reserved",
+    };
+    const fixture = preDispatchRecoveryTx(row);
+    const db = {
+      transaction: async (body: (tx: never) => Promise<unknown>) => body(fixture.tx),
+    } as never;
+
+    const result = await new LlmLedgerService(db).recoverPreDispatch({
+      requestKey: "  uncertain-reserve  ",
+    });
+
+    assert.deepEqual(result, { status: "released", replay: false });
+    assert.equal(fixture.lockCount(), 3, "provider -> request -> day locks");
+    assert.equal(fixture.updates.length, 1);
+    assert.equal(fixture.updates[0]?.status, "released");
+    assert.equal(fixture.updates[0]?.reason, LLM_PRE_DISPATCH_RECOVERY_REASON);
+    assert.ok(fixture.updates[0]?.releasedAt instanceof Date);
+    assert.equal(fixture.updates[0]?.releasedAt, fixture.updates[0]?.updatedAt);
+  });
+
+  it("recover-pre-dispatch не переписывает terminal spend", async () => {
+    for (const status of ["denied", "released", "settled", "failed"] as const) {
+      const fixture = preDispatchRecoveryTx({
+        id: `recover-${status}`,
+        requestKey: `recover-${status}`,
+        day: "2026-08-30",
+        provider: "openai",
+        status,
+      });
+
+      const result = await new LlmLedgerService({} as never).recoverPreDispatchInTx(fixture.tx, {
+        requestKey: `recover-${status}`,
+      });
+
+      assert.deepEqual(result, { status, replay: true });
+      assert.equal(fixture.lockCount(), 3);
+      assert.deepEqual(fixture.updates, []);
+    }
+  });
+
+  it("recover-pre-dispatch запрещает закрывать task-job spend", async () => {
+    const fixture = preDispatchRecoveryTx(
+      {
+        id: "recover-task-spend",
+        requestKey: "recover-task-spend",
+        day: "2026-08-30",
+        provider: "openai",
+        status: "reserved",
+      },
+      { taskLinked: true },
+    );
+
+    await assert.rejects(
+      () =>
+        new LlmLedgerService({} as never).recoverPreDispatchInTx(fixture.tx, {
+          requestKey: "recover-task-spend",
+        }),
+      (error: unknown) => error instanceof ConflictException && error.getStatus() === 409,
+    );
+    assert.equal(fixture.lockCount(), 3);
+    assert.deepEqual(fixture.updates, []);
+  });
+
   it("settle exact replay returns the stored result without a second write", async () => {
     const price = policyPrice();
     const spendId = "spend-settle-exact-replay";

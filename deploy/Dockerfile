@@ -28,6 +28,7 @@ COPY packages/connectors/package.json ./packages/connectors/
 COPY packages/assistant/package.json ./packages/assistant/
 COPY packages/documents/package.json ./packages/documents/
 COPY packages/history/package.json ./packages/history/
+COPY packages/llm-ledger-outbox/package.json ./packages/llm-ledger-outbox/
 RUN pnpm install --frozen-lockfile
 
 # ── Сборка ──
@@ -35,7 +36,7 @@ FROM deps AS build
 COPY . .
 # Кеш turbo живёт между сборками (BuildKit cache mount, не слой образа):
 # `COPY . .` инвалидируется любой правкой, и без кеша каждый деплой собирал
-# все 11 пакетов заново (~50 с, дольше всего — Next.js панели). С кешем
+# все 12 пакетов заново (~50 с, дольше всего — Next.js панели). С кешем
 # пересобирается только тронутое, остальное turbo достаёт готовым.
 RUN --mount=type=cache,target=/app/.turbo,sharing=locked pnpm build
 

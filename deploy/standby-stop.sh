@@ -24,3 +24,11 @@ if [ -n "$(ls -A "$STANDBY_ATTACHMENTS_DIR" 2>/dev/null)" ]; then
   printf 'НАПОМИНАНИЕ: в %s есть вложения, загруженные за время аварии — перенесите их на primary в /opt/mydon-data/attachments (docs/DATABASE_DR.md).\n' \
     "$STANDBY_ATTACHMENTS_DIR"
 fi
+unfinished=$(llm_outbox_unfinished_count)
+if [ "$unfinished" = unknown ]; then
+  printf 'ВНИМАНИЕ: settlement spool не проверен — STANDBY_LLM_OUTBOX_DIR задаёт небезопасный путь. Не запускайте primary workers до ручной проверки.\n' >&2
+elif [ "$unfinished" -gt 0 ]; then
+  outbox_dir="${STANDBY_LLM_OUTBOX_DIR:-$HOME/.local/state/mydon-standby/llm-close}"
+  printf 'ВНИМАНИЕ: в standby settlement spool осталось %s pending/processing/dead записей (%s). Не запускайте primary workers, пока очередь не дренирована или не перенесена по runbook docs/DATABASE_DR.md.\n' \
+    "$unfinished" "$outbox_dir" >&2
+fi

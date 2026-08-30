@@ -8,6 +8,7 @@ import {
   type LlmResolver,
 } from "@mydon/assistant";
 import { createDocumentBuilder } from "@mydon/documents";
+import { DurableLlmLedger, FileLlmSettlementOutbox } from "@mydon/llm-ledger-outbox";
 import { CoreLlmLedgerClient, dueLabel, parseStartPayload, rolesLabel, TZ } from "@mydon/shared";
 import {
   BRIEFING_NOTES_WINDOW_MS,
@@ -74,9 +75,17 @@ async function main(): Promise<void> {
   const allowlist = parseAllowlist(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
   const coreUrl = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
   const serviceToken = process.env.SERVICE_TOKEN ?? "";
+  const anthropicApiKey = (process.env.ANTHROPIC_API_KEY ?? "").trim();
   const core = new CoreClient(coreUrl, 10_000, serviceToken);
-  // Один центральный ledger-клиент для всех платных путей бота.
-  const llmLedger = new CoreLlmLedgerClient({ baseUrl: coreUrl, serviceToken });
+  // Один central ledger для всех metered путей. Producer-side spool обязателен:
+  // без него оплаченный ответ мог пережить процесс, а exact accounting — нет.
+  const outboxRoot = (process.env.LLM_LEDGER_OUTBOX_ROOT ?? "").trim();
+  const llmLedger = anthropicApiKey
+    ? new DurableLlmLedger(
+        new CoreLlmLedgerClient({ baseUrl: coreUrl, serviceToken }),
+        new FileLlmSettlementOutbox({ rootDir: outboxRoot, producer: "bot" }),
+      )
+    : undefined;
 
   // LLM-слой. Два пути входа: подписка Claude владельца (CLAUDE_CODE_OAUTH_TOKEN)
   // и API-ключ (ANTHROPIC_API_KEY). Заданы оба — сначала подписка, при её сбое
@@ -84,9 +93,9 @@ async function main(): Promise<void> {
   const modelOverride = process.env.MYDON_ASSISTANT_MODEL
     ? { model: process.env.MYDON_ASSISTANT_MODEL }
     : {};
-  const apiLlm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
+  const apiLlm: LlmResolver | undefined = anthropicApiKey && llmLedger
     ? createLlmResolver({
-        apiKey: process.env.ANTHROPIC_API_KEY,
+        apiKey: anthropicApiKey,
         ledger: llmLedger,
         consumer: "bot",
         feature: "assistant",
@@ -103,9 +112,9 @@ async function main(): Promise<void> {
 
   // Документы (Excel, Word) через готовые навыки Anthropic. Ключ тот же, что
   // и у помощника: нет ключа — файлов не делаем, но бот работает дальше.
-  const buildDocument = process.env.ANTHROPIC_API_KEY
+  const buildDocument = anthropicApiKey && llmLedger
     ? createDocumentBuilder({
-        apiKey: process.env.ANTHROPIC_API_KEY,
+        apiKey: anthropicApiKey,
         ledger: llmLedger,
         feature: "bot.report",
         ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),

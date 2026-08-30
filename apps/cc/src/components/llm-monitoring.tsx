@@ -89,7 +89,14 @@ export function LlmMonitoring({ monitoring }: { monitoring: LlmLedgerMonitoring 
     );
   }
 
-  const { budget, failuresToday, latestCompleted, openCircuits, stuckReservations } = monitoring;
+  const {
+    budget,
+    failuresToday,
+    latestCompleted,
+    openCircuits,
+    settlementOutbox,
+    stuckReservations,
+  } = monitoring;
   const model = latestCompleted?.resolvedModel ?? latestCompleted?.requestedModel ?? "—";
   const cost = latestCost(latestCompleted);
   const cap = budget.globalCapUsd;
@@ -107,6 +114,24 @@ export function LlmMonitoring({ monitoring }: { monitoring: LlmLedgerMonitoring 
     : cap === 0
       ? "лимит $0.00"
       : utilizationLabel;
+  const outboxBusy =
+    settlementOutbox.pendingCount > 0 ||
+    settlementOutbox.retryingCount > 0 ||
+    settlementOutbox.processingCount > 0;
+  const outboxEmpty = outboxBusy === false && settlementOutbox.deadCount === 0;
+  const outboxPillClass =
+    !settlementOutbox.available || settlementOutbox.deadCount > 0 ? "bad" : outboxEmpty ? "ok" : "";
+  const outboxPill = !settlementOutbox.available
+    ? "не проверен"
+    : settlementOutbox.deadCount > 0
+      ? `сбой · ${settlementOutbox.deadCount}`
+      : outboxEmpty
+        ? "пусто"
+        : `в очереди · ${
+            settlementOutbox.pendingCount +
+            settlementOutbox.retryingCount +
+            settlementOutbox.processingCount
+          }`;
 
   return (
     <section className="llm-monitoring" aria-labelledby="llm-monitoring-title">
@@ -178,6 +203,44 @@ export function LlmMonitoring({ monitoring }: { monitoring: LlmLedgerMonitoring 
       )}
 
       <div className="rows llm-monitoring-diagnostics">
+        <div className="row llm-settlement-outbox-row">
+          <div className="t">
+            <b>Очередь закрытия ledger</b>
+            {!settlementOutbox.available ? (
+              <small>
+                Локальную очередь производителей прочитать не удалось. Нулевые счётчики не означают,
+                что очередь пуста.
+              </small>
+            ) : outboxEmpty ? (
+              <small>Очередь пуста: все закрывающие операции подтверждены Core.</small>
+            ) : (
+              <small>
+                Ожидают: {settlementOutbox.pendingCount} · на повторе:{" "}
+                {settlementOutbox.retryingCount} · в обработке: {settlementOutbox.processingCount} ·
+                неисправимы: {settlementOutbox.deadCount}.
+              </small>
+            )}
+            {settlementOutbox.available && (
+              <>
+                <small>
+                  Точный итог: {settlementOutbox.exactCount} · защитный unknown:{" "}
+                  {settlementOutbox.fallbackCount} · на повторе:{" "}
+                  {settlementOutbox.retryingCount} · потолок попыток:{" "}
+                  {settlementOutbox.maxAttempts}.
+                </small>
+                {(settlementOutbox.oldestPendingAt !== null ||
+                  settlementOutbox.nextRetryAt !== null) && (
+                  <small>
+                    Старейшая: {formatDateTime(settlementOutbox.oldestPendingAt)} · следующий
+                    повтор: {formatDateTime(settlementOutbox.nextRetryAt)}
+                  </small>
+                )}
+              </>
+            )}
+          </div>
+          <span className={`pill ${outboxPillClass}`.trim()}>{outboxPill}</span>
+        </div>
+
         <div className="row">
           <div className="t">
             <b>Зависшие резервы</b>

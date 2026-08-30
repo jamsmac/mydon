@@ -26,6 +26,7 @@ export STANDBY_PANEL_PORT="$PANEL_PORT"
 export STANDBY_PANEL_BIND="${STANDBY_PANEL_BIND:-$(tailscale ip -4 | head -1)}"
 [ -n "$STANDBY_PANEL_BIND" ] || fail "не найден Tailscale IPv4"
 attachments_init
+llm_outbox_init
 GIT_SHA=$(repo_git_sha "$ROOT")
 export GIT_SHA
 compose_init "$COMPOSE_FILE" "$ENV_FILE"

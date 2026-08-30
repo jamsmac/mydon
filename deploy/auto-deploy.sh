@@ -320,6 +320,11 @@ install -o root -g root -m 700 deploy/restore_test_mydon.sh /opt/backups/restore
 # самого расписания на эти пути — разовый deploy/setup-guards.sh.
 install -o root -g root -m 700 deploy/guards/disk_guard.sh /opt/backups/disk_guard.sh
 install -o root -g root -m 700 deploy/guards/healthz_guard.sh /opt/backups/healthz_guard.sh
+# Compose не должен молча создавать settlement bind-mount с широкими
+# правами: это финансовый durable state трёх producers.
+install -d -o root -g root -m 700 /opt/mydon-data/llm-close \
+  /opt/mydon-data/llm-close/agents /opt/mydon-data/llm-close/bot \
+  /opt/mydon-data/llm-close/cc
 # Корневой сертификат Supabase для verify-full в admin-пути (#205): без него
 # db_access.sh с sslmode=verify-* падал бы — cert ставил только ручной
 # deploy.sh, а прод обновляется автодеплоем.

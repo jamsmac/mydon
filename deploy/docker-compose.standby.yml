@@ -45,6 +45,7 @@ services:
       LLM_MAX_RESERVATION_USD: ${LLM_MAX_RESERVATION_USD:-3}
       AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-}
       AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
+      LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
       INVITE_PEPPER: ${INVITE_PEPPER:-}
       STAFF_LINK_BY_USERNAME: ${STAFF_LINK_BY_USERNAME:-0}
       HEALTH_STORAGE_PATH: /
@@ -70,6 +71,7 @@ services:
       # Старые вложения primary сюда НЕ реплицируются — standby-promote.sh
       # предупреждает об этом отдельно.
       - ${STANDBY_ATTACHMENTS_DIR:?STANDBY_ATTACHMENTS_DIR is required (standby-*.sh export it)}:/data/attachments
+      - ${STANDBY_LLM_OUTBOX_DIR:?STANDBY_LLM_OUTBOX_DIR is required (standby-*.sh export it)}:/data/llm-close:ro
       - ../data:/app/data:ro
     ports:
       - "127.0.0.1:${STANDBY_CORE_PORT:-3101}:3001"
@@ -108,6 +110,9 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
+      LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
+    volumes:
+      - ${STANDBY_LLM_OUTBOX_DIR:?STANDBY_LLM_OUTBOX_DIR is required (standby-*.sh export it)}/cc:/data/llm-close/cc
     command: ["node_modules/.bin/next", "start", "-p", "3002"]
     ports:
       - "${STANDBY_PANEL_BIND:-127.0.0.1}:${STANDBY_PANEL_PORT:-3102}:3002"
@@ -131,6 +136,9 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
+      LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
+    volumes:
+      - ${STANDBY_LLM_OUTBOX_DIR:?STANDBY_LLM_OUTBOX_DIR is required (standby-*.sh export it)}/bot:/data/llm-close/bot
     command: ["node", "apps/bot/dist/index.js"]
 
   agents:
@@ -180,4 +188,7 @@ services:
       EMBED_MODEL: ${EMBED_MODEL:-}
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_PARENT_PAGE_ID: ${NOTION_PARENT_PAGE_ID:-}
+      LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
+    volumes:
+      - ${STANDBY_LLM_OUTBOX_DIR:?STANDBY_LLM_OUTBOX_DIR is required (standby-*.sh export it)}:/data/llm-close
     command: ["node", "apps/agents/dist/index.js"]
