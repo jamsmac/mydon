@@ -1,14 +1,20 @@
-import { Body, Controller, Param, ParseUUIDPipe, Post } from "@nestjs/common";
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from "@nestjs/common";
 import { ReleaseLlmDto, ReserveLlmDto, SettleLlmDto } from "./llm-ledger.dto";
 import { LlmLedgerService } from "./llm-ledger.service";
 
 /**
- * Every route mutates the financial ledger, so the global ServiceTokenGuard
- * fails closed when SERVICE_TOKEN is empty or incorrect.
+ * The global ServiceTokenGuard protects financial mutations. Core GET routes
+ * are readable only inside the private network, so monitoring additionally
+ * returns no raw provider reasons, metadata or request identifiers.
  */
 @Controller("llm-ledger")
 export class LlmLedgerController {
   constructor(private readonly ledger: LlmLedgerService) {}
+
+  @Get("monitoring")
+  monitoring() {
+    return this.ledger.monitoring();
+  }
 
   @Post("reservations")
   reserve(@Body() dto: ReserveLlmDto) {

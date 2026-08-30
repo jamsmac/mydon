@@ -622,6 +622,38 @@ a.rowlink:hover { background: var(--surf-2); }
 .err-text { color: var(--err); font-size: 13px; }
 .ok-text { color: var(--ok); font-size: 13px; }
 
+/* Ledger: деньги и защитные состояния читаются одной приборной лентой. */
+.llm-monitoring { margin-bottom: 26px; }
+.llm-monitoring-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 11px; }
+.llm-monitoring-head .section-title { margin: 0 0 5px; }
+.llm-monitoring-head p { margin: 0; color: var(--tx-2); font-size: 12.5px; }
+.llm-monitoring-day { flex: 0 0 auto; font-family: var(--fm); font-size: 11px; color: var(--tx-2); border: 1px solid var(--line); background: var(--surf); border-radius: 999px; padding: 3px 9px; }
+.llm-monitoring-kpis { margin-bottom: 10px; }
+.llm-monitoring-kpis .tile .foot { align-items: flex-start; min-height: 40px; overflow-wrap: anywhere; }
+.llm-monitoring-kpis .llm-kpi-model .v { white-space: normal; overflow-wrap: anywhere; }
+.llm-budget-rail { background: var(--surf); border: 1px solid var(--line); border-radius: var(--r); padding: 11px 14px 12px; margin-bottom: 10px; }
+.llm-budget-rail-copy { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: var(--tx-2); font-size: 11.5px; }
+.llm-budget-rail-copy b { color: var(--tx); font-family: var(--fm); font-variant-numeric: tabular-nums; }
+.llm-budget-rail progress { appearance: none; display: block; width: 100%; height: 6px; overflow: hidden; border: 0; border-radius: 999px; background: var(--surf-2); }
+.llm-budget-rail progress::-webkit-progress-bar { background: var(--surf-2); border-radius: 999px; }
+.llm-budget-rail progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; }
+.llm-budget-rail progress::-moz-progress-bar { background: var(--accent); border-radius: 999px; }
+.llm-budget-rail.is-hot { border-color: var(--hot-line); }
+.llm-budget-rail.is-hot .llm-budget-rail-copy b { color: var(--hot); }
+.llm-budget-rail.is-hot progress::-webkit-progress-value { background: var(--hot); }
+.llm-budget-rail.is-hot progress::-moz-progress-bar { background: var(--hot); }
+.llm-monitoring-config-error { margin: 0 0 10px; }
+.llm-monitoring-unavailable { margin-bottom: 0; }
+.llm-monitoring-unavailable span { display: block; }
+.llm-monitoring-diagnostics .row { align-items: flex-start; }
+.llm-monitoring-diagnostics .row > .pill { flex: 0 0 auto; margin-top: 1px; }
+.llm-monitoring-diagnostics .t small { line-height: 1.45; overflow-wrap: anywhere; }
+.llm-circuit-list { display: grid; gap: 8px; margin-top: 7px; }
+.llm-circuit-entry { display: grid; gap: 2px; color: var(--tx-2); overflow-wrap: anywhere; }
+.llm-circuit-entry code { color: var(--tx); font-family: var(--fm); font-size: 12px; }
+.llm-circuit-entry > span { font-size: 12.5px; line-height: 1.4; }
+.llm-monitoring-generated { margin: 8px 2px 0; text-align: right; }
+
 /* Атомарный LLM-профиль: статус готовности не смешан с самими настройками. */
 .llm-card { margin-bottom: 26px; }
 .llm-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
@@ -652,6 +684,10 @@ a.rowlink:hover { background: var(--surf-2); }
 .llm-advanced > label { margin-top: 12px; }
 .llm-legacy-copy { margin: 10px 0 0; }
 @media (max-width: 420px) {
+  .llm-monitoring-head { flex-direction: column; }
+  .llm-monitoring-day { align-self: flex-start; }
+  .llm-monitoring-diagnostics .row { gap: 8px; }
+  .llm-monitoring-diagnostics .row > .pill { white-space: normal; text-align: center; }
   .llm-card-head { flex-direction: column; }
   .llm-readiness-row { align-items: flex-start; flex-direction: column; }
   .llm-readiness-row .pill { white-space: normal; overflow-wrap: anywhere; }

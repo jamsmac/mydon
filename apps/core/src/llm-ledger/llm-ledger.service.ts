@@ -12,9 +12,10 @@ import {
   tashkentDayStartOf,
   type LlmBudgetAction,
   type LlmBudgetSnapshot,
+  type LlmLedgerMonitoring,
   type LlmReserveResponse,
 } from "@mydon/shared";
-import { and, eq, gt, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { resolveConfigValue } from "../system/config-spec";
 import type {
@@ -67,6 +68,15 @@ interface Exposure {
 
 type NormalizedSettlement = ReturnType<typeof normalizeSettlement>;
 
+export const LLM_STUCK_RESERVATION_THRESHOLD_MINUTES = 5;
+
+export interface LlmMonitoringFrame {
+  day: string;
+  start: Date;
+  end: Date;
+  staleBefore: Date;
+}
+
 export interface SettlementAnomaly {
   kind: "missing_resolved_model" | "resolved_model_mismatch" | "missing_usage_or_cost";
   circuitOpen: boolean;
@@ -84,6 +94,162 @@ export interface SettlementAnomaly {
 @Injectable()
 export class LlmLedgerService {
   constructor(@Inject(DB) private readonly db: Db) {}
+
+  /**
+   * Read-only, secret-free operational view of the financial ledger.
+   *
+   * The clock is captured once so a request crossing Tashkent midnight cannot
+   * combine yesterday's budget with today's failures/circuit state. The
+   * optional argument is intentionally available for deterministic tests.
+   */
+  async monitoring(at: Date = new Date()): Promise<LlmLedgerMonitoring> {
+    const frame = llmMonitoringFrame(at);
+    const completedAt = sql`coalesce(${llmSpend.settledAt}, ${llmSpend.failedAt})`;
+    const reservedAt = sql`coalesce(${llmSpend.reservedAt}, ${llmSpend.createdAt})`;
+
+    const [
+      configRows,
+      dailyRows,
+      latestRows,
+      stuckRows,
+      failureRows,
+      lastFailureRows,
+      circuitRows,
+    ] = await Promise.all([
+      this.db.select().from(systemConfig),
+      this.db
+        .select({
+          knownCostUsd: sql<string>`coalesce(sum(
+            case
+              when ${llmSpend.status} in ('settled', 'failed')
+                then coalesce(${llmSpend.actualUsd}, 0)
+              else 0
+            end
+          ), 0)::text`,
+          globalExposureUsd: exposureSumSql(),
+          reservedUsd: sql<string>`coalesce(sum(
+            case when ${llmSpend.status} = 'reserved' then ${llmSpend.reservedUsd} else 0 end
+          ), 0)::text`,
+        })
+        .from(llmSpend)
+        .where(eq(llmSpend.day, frame.day)),
+      this.db
+        .select({
+          provider: llmSpend.provider,
+          consumer: llmSpend.consumer,
+          feature: llmSpend.feature,
+          requestedModel: llmSpend.model,
+          resolvedModel: llmSpend.resolvedModel,
+          status: llmSpend.status,
+          outcome: llmSpend.outcome,
+          actualUsd: llmSpend.actualUsd,
+          cacheCreationInputTokens: llmSpend.cacheCreationInputTokens,
+          cacheCreation5mInputTokens: llmSpend.cacheCreation5mInputTokens,
+          cacheCreation1hInputTokens: llmSpend.cacheCreation1hInputTokens,
+          metadata: llmSpend.metadata,
+          settledAt: llmSpend.settledAt,
+          failedAt: llmSpend.failedAt,
+        })
+        .from(llmSpend)
+        .where(or(eq(llmSpend.status, "settled"), eq(llmSpend.status, "failed")))
+        .orderBy(sql`${completedAt} desc nulls last`, asc(llmSpend.id))
+        .limit(1),
+      this.db
+        .select({
+          count: sql<number>`count(*)::int`,
+          reservedUsd: sql<string>`coalesce(sum(${llmSpend.reservedUsd}), 0)::text`,
+          oldestReservedAt: sql<Date | string | null>`min(${reservedAt})`,
+        })
+        .from(llmSpend)
+        .where(
+          and(
+            eq(llmSpend.status, "reserved"),
+            // Keep a timestamp column on the left so Drizzle applies its Date
+            // encoder. Comparing the raw coalesce SQL to a Date leaves the
+            // parameter unencoded and postgres-js rejects it before the query.
+            or(
+              and(isNotNull(llmSpend.reservedAt), lte(llmSpend.reservedAt, frame.staleBefore)),
+              and(isNull(llmSpend.reservedAt), lte(llmSpend.createdAt, frame.staleBefore)),
+            ),
+          ),
+        ),
+      this.db
+        .select({
+          count: sql<number>`count(*)::int`,
+          providerErrorCount: sql<number>`count(*) filter (
+            where ${llmSpend.outcome} = 'provider_error'
+          )::int`,
+          unknownCount: sql<number>`count(*) filter (
+            where ${llmSpend.outcome} = 'unknown'
+          )::int`,
+        })
+        .from(llmSpend)
+        .where(failureWindowCondition(frame)),
+      this.db
+        .select({
+          failedAt: llmSpend.failedAt,
+          provider: llmSpend.provider,
+          requestedModel: llmSpend.model,
+          resolvedModel: llmSpend.resolvedModel,
+          outcome: llmSpend.outcome,
+        })
+        .from(llmSpend)
+        .where(failureWindowCondition(frame))
+        .orderBy(sql`${llmSpend.failedAt} desc nulls last`, asc(llmSpend.id))
+        .limit(1),
+      this.db
+        .select({
+          provider: llmSpend.provider,
+          failedAt: llmSpend.failedAt,
+        })
+        .from(llmSpend)
+        .where(
+          and(
+            failureWindowCondition(frame),
+            eq(llmSpend.outcome, "unknown"),
+            sql`${llmSpend.metadata} -> '_llmLedger' ->> 'circuitOpen' = 'true'`,
+          ),
+        )
+        .orderBy(asc(llmSpend.failedAt), asc(llmSpend.provider)),
+    ]);
+
+    const config = rowsToConfig(configRows);
+    const globalCap = parseCap(globalCapValue(config, process.env), "глобальный LLM-потолок");
+    const daily = dailyRows[0];
+    const knownCost = moneyNano(daily?.knownCostUsd);
+    const exposure = moneyNano(daily?.globalExposureUsd);
+    const reserved = moneyNano(daily?.reservedUsd);
+    const remaining = globalCap.nano > exposure ? globalCap.nano - exposure : 0n;
+    const stuck = stuckRows[0];
+    const failures = failureRows[0];
+
+    return {
+      generatedAt: at.toISOString(),
+      day: frame.day,
+      budget: {
+        globalCapUsd: nanoToNumber(globalCap.nano),
+        knownCostUsd: nanoToNumber(knownCost),
+        globalExposureUsd: nanoToNumber(exposure),
+        reservedUsd: nanoToNumber(reserved),
+        remainingUsd: nanoToNumber(remaining),
+        ...(globalCap.error ? { configError: globalCap.error } : {}),
+      },
+      latestCompleted: monitoringLatestCompleted(latestRows[0]),
+      stuckReservations: {
+        thresholdMinutes: LLM_STUCK_RESERVATION_THRESHOLD_MINUTES,
+        count: nonNegativeCount(stuck?.count),
+        reservedUsd: nanoToNumber(moneyNano(stuck?.reservedUsd)),
+        oldestReservedAt: nullableIso(stuck?.oldestReservedAt),
+      },
+      failuresToday: {
+        count: nonNegativeCount(failures?.count),
+        providerErrorCount: nonNegativeCount(failures?.providerErrorCount),
+        unknownCount: nonNegativeCount(failures?.unknownCount),
+        last: monitoringLastFailure(lastFailureRows[0]),
+      },
+      openCircuits: monitoringOpenCircuits(circuitRows, frame.end),
+    };
+  }
 
   async reserve(dto: ReserveLlmDto): Promise<LlmReserveResponse> {
     return this.db.transaction((tx) => this.reserveInTx(tx, dto));
@@ -594,9 +760,158 @@ export async function stabilizeLedgerDay(
 
 async function configMap(tx: Tx): Promise<Record<string, string>> {
   const rows = await tx.select().from(systemConfig);
+  return rowsToConfig(rows);
+}
+
+function rowsToConfig(rows: ReadonlyArray<{ key: string; value: string }>): Record<string, string> {
   const map: Record<string, string> = {};
   for (const row of rows) map[row.key] = row.value;
   return map;
+}
+
+function failureWindowCondition(frame: Pick<LlmMonitoringFrame, "start" | "end">) {
+  return and(
+    eq(llmSpend.status, "failed"),
+    or(eq(llmSpend.outcome, "provider_error"), eq(llmSpend.outcome, "unknown")),
+    gte(llmSpend.failedAt, frame.start),
+    lt(llmSpend.failedAt, frame.end),
+  );
+}
+
+interface MonitoringLatestRow {
+  provider: string;
+  consumer: SpendRow["consumer"];
+  feature: string;
+  requestedModel: string;
+  resolvedModel: string | null;
+  status: SpendRow["status"];
+  outcome: SpendRow["outcome"];
+  actualUsd: string | null;
+  cacheCreationInputTokens: number | null;
+  cacheCreation5mInputTokens: number | null;
+  cacheCreation1hInputTokens: number | null;
+  metadata: unknown;
+  settledAt: Date | null;
+  failedAt: Date | null;
+}
+
+function monitoringLatestCompleted(
+  row: MonitoringLatestRow | undefined,
+): LlmLedgerMonitoring["latestCompleted"] {
+  if (!row || (row.status !== "settled" && row.status !== "failed")) return null;
+  const completedAt = row.status === "settled" ? row.settledAt : row.failedAt;
+  const completedAtIso = nullableIso(completedAt);
+  if (!completedAtIso) return null;
+  const hasCost = row.actualUsd !== null;
+  const hasLowerBound =
+    row.consumer === "documents" || ledgerMetadataBoolean(row.metadata, "lowerBound");
+  const hasAggregateOnlyCacheCost =
+    row.cacheCreationInputTokens !== null &&
+    row.cacheCreationInputTokens !== undefined &&
+    row.cacheCreationInputTokens > 0 &&
+    row.cacheCreation5mInputTokens == null &&
+    row.cacheCreation1hInputTokens == null;
+  const costBasis = !hasCost
+    ? "unknown"
+    : hasLowerBound && hasAggregateOnlyCacheCost
+      ? "estimate"
+      : hasLowerBound
+        ? "lower_bound"
+        : hasAggregateOnlyCacheCost
+          ? "upper_bound"
+          : "actual";
+  return {
+    provider: row.provider,
+    consumer: row.consumer,
+    feature: row.feature,
+    requestedModel: row.requestedModel,
+    resolvedModel: row.resolvedModel,
+    status: row.status,
+    outcome: row.outcome,
+    costUsd: hasCost ? nanoToNumber(moneyNano(row.actualUsd)) : null,
+    costBasis,
+    completedAt: completedAtIso,
+  };
+}
+
+interface MonitoringFailureRow {
+  failedAt: Date | null;
+  provider: string;
+  requestedModel: string;
+  resolvedModel: string | null;
+  outcome: SpendRow["outcome"];
+}
+
+function monitoringLastFailure(
+  row: MonitoringFailureRow | undefined,
+): LlmLedgerMonitoring["failuresToday"]["last"] {
+  const failedAt = nullableIso(row?.failedAt);
+  if (!row || !failedAt || (row.outcome !== "provider_error" && row.outcome !== "unknown")) {
+    return null;
+  }
+  return {
+    failedAt,
+    provider: row.provider,
+    requestedModel: row.requestedModel,
+    resolvedModel: row.resolvedModel,
+    outcome: row.outcome,
+    reason:
+      row.outcome === "provider_error" ? "Provider вернул ошибку" : "Исход запроса неизвестен",
+  };
+}
+
+interface MonitoringCircuitRow {
+  provider: string;
+  failedAt: Date | null;
+}
+
+function monitoringOpenCircuits(
+  rows: readonly MonitoringCircuitRow[],
+  resetsAt: Date,
+): LlmLedgerMonitoring["openCircuits"] {
+  const byProvider = new Map<string, { openedAt: string; reason: string | null }>();
+  for (const row of rows) {
+    const openedAt = nullableIso(row.failedAt);
+    if (!openedAt) continue;
+    const prior = byProvider.get(row.provider);
+    if (!prior || openedAt < prior.openedAt) {
+      byProvider.set(row.provider, { openedAt, reason: "Аномалия модели открыла circuit" });
+    }
+  }
+  const resetIso = resetsAt.toISOString();
+  return [...byProvider.entries()]
+    .map(([provider, value]) => ({
+      provider,
+      openedAt: value.openedAt,
+      resetsAt: resetIso,
+      reason: value.reason,
+    }))
+    .sort(
+      (left, right) =>
+        left.openedAt.localeCompare(right.openedAt) || left.provider.localeCompare(right.provider),
+    );
+}
+
+function ledgerMetadataBoolean(metadata: unknown, key: string): boolean {
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  const internal = (metadata as Record<string, unknown>)._llmLedger;
+  if (internal === null || typeof internal !== "object" || Array.isArray(internal)) return false;
+  return (internal as Record<string, unknown>)[key] === true;
+}
+
+function moneyNano(value: string | number | null | undefined): bigint {
+  return usdToNano(value ?? "0", "ceil");
+}
+
+function nonNegativeCount(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 0;
+}
+
+function nullableIso(value: Date | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
 async function resolveAgent(
@@ -642,6 +957,17 @@ async function activeProviderPrices(tx: Tx, provider: string, at: Date): Promise
 export function providerCircuitWindow(at: Date): { start: Date; end: Date } {
   const start = tashkentDayStartOf(at);
   return { start, end: new Date(start.getTime() + 86_400_000) };
+}
+
+/** One coherent Tashkent-day frame for every monitoring query. */
+export function llmMonitoringFrame(at: Date): LlmMonitoringFrame {
+  const { start, end } = providerCircuitWindow(at);
+  return {
+    day: tashkentDay(at),
+    start,
+    end,
+    staleBefore: new Date(at.getTime() - LLM_STUCK_RESERVATION_THRESHOLD_MINUTES * 60_000),
+  };
 }
 
 async function providerCircuit(tx: Tx, at: Date, provider: string): Promise<string | undefined> {
@@ -825,20 +1151,25 @@ async function sumExposure(tx: Tx, day: string, agentId?: string): Promise<bigin
   if (agentId) conditions.push(eq(llmSpend.agentId, agentId));
   const [row] = await tx
     .select({
-      value: sql<string>`coalesce(sum(
-        case
-          when ${llmSpend.status} = 'reserved' then ${llmSpend.reservedUsd}
-          when ${llmSpend.status} = 'settled' then coalesce(${llmSpend.actualUsd}, 0)
-          when ${llmSpend.status} = 'failed' and ${llmSpend.outcome} = 'unknown'
-            then greatest(${llmSpend.reservedUsd}, coalesce(${llmSpend.actualUsd}, 0))
-          when ${llmSpend.status} = 'failed' then coalesce(${llmSpend.actualUsd}, ${llmSpend.reservedUsd})
-          else 0
-        end
-      ), 0)::text`,
+      value: exposureSumSql(),
     })
     .from(llmSpend)
     .where(and(...conditions));
   return usdToNano(row?.value ?? "0", "ceil");
+}
+
+/** Keep monitoring and admission on the exact same conservative exposure formula. */
+function exposureSumSql() {
+  return sql<string>`coalesce(sum(
+    case
+      when ${llmSpend.status} = 'reserved' then ${llmSpend.reservedUsd}
+      when ${llmSpend.status} = 'settled' then coalesce(${llmSpend.actualUsd}, 0)
+      when ${llmSpend.status} = 'failed' and ${llmSpend.outcome} = 'unknown'
+        then greatest(${llmSpend.reservedUsd}, coalesce(${llmSpend.actualUsd}, 0))
+      when ${llmSpend.status} = 'failed' then coalesce(${llmSpend.actualUsd}, ${llmSpend.reservedUsd})
+      else 0
+    end
+  ), 0)::text`;
 }
 
 function budget(
