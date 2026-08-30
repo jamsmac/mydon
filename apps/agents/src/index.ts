@@ -11,7 +11,12 @@ import { runGloberentMonitor } from "./globerent-monitor";
 import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
 import { drainNotionOutbox } from "./outbox-dispatcher";
 import { autonomyThreshold } from "./policy";
-import { agentTaskIntervalMs, singleFlight } from "./polling";
+import {
+  agentSchedulesPaused,
+  agentTaskIntervalMs,
+  assignedAgentTasksPaused,
+  singleFlight,
+} from "./polling";
 import { runOurvendAccounting } from "./ourvend-accounting";
 import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
 import { loadAgents, type AgentDefinition } from "./registry";
@@ -237,10 +242,17 @@ async function main(): Promise<void> {
   // кладёт значение в env), и перечитка включает расписания без рестарта. Раньше
   // проверка была разовой на старте и уводила процесс в вечный idle — снять
   // паузу можно было только перезапуском.
-  const schedulesPaused = (): boolean => process.env.AGENTS_SCHEDULES_PAUSED === "1";
-  let lastPaused = schedulesPaused();
-  if (lastPaused) {
+  const schedulesPaused = (): boolean => agentSchedulesPaused(process.env);
+  const tasksPaused = (): boolean => assignedAgentTasksPaused(process.env);
+  let lastSchedulesPaused = schedulesPaused();
+  let lastTasksPaused = tasksPaused();
+  if (lastSchedulesPaused) {
     console.log("AGENTS_SCHEDULES_PAUSED=1 — расписания на паузе. Слежу за снятием (панель/env).");
+  }
+  if (lastTasksPaused) {
+    console.log(
+      "AGENTS_TASKS_PAUSED=1 — назначенные агентам задачи на паузе. Слежу за снятием (панель/env).",
+    );
   }
 
   // Запущенные cron-задания по ключу «агент навык расписание». Перечитка
@@ -332,10 +344,13 @@ async function main(): Promise<void> {
    * проход — не снимок на старте.
    */
   async function pollAgentTasks(): Promise<void> {
-    if (!schedulesPaused()) {
+    if (!tasksPaused()) {
       for (const agent of agents.filter((a) => a.status === "active")) {
+        if (tasksPaused()) break;
         try {
-          const results = await runAgentTasks(agent, core, threshold, skillFloors);
+          const results = await runAgentTasks(agent, core, threshold, skillFloors, {
+            canClaim: () => !tasksPaused(),
+          });
           for (const r of results) {
             console.log(`[${agent.name}] задача ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`);
           }
@@ -346,7 +361,7 @@ async function main(): Promise<void> {
     }
 
     // Delivery — уже committed работа, а не новое агентское решение.
-    // Пауза расписаний не должна оставлять durable outbox навсегда pending.
+    // Ни одна из пауз не должна оставлять durable outbox навсегда pending.
     try {
       const delivered = await drainNotionOutbox(core);
       if (delivered.claimed > 0) {
@@ -376,15 +391,27 @@ async function main(): Promise<void> {
         console.log("Настройки агентов обновлены из базы.");
       }
       // Пауза — «живой» тумблер: реагируем на её смену, даже если карточки не менялись.
-      const pausedNow = schedulesPaused();
-      const pauseFlipped = pausedNow !== lastPaused;
-      if (pauseFlipped) {
-        lastPaused = pausedNow;
+      const schedulesPausedNow = schedulesPaused();
+      const schedulesPauseFlipped = schedulesPausedNow !== lastSchedulesPaused;
+      if (schedulesPauseFlipped) {
+        lastSchedulesPaused = schedulesPausedNow;
         console.log(
-          pausedNow ? "Расписания поставлены на паузу." : "Пауза снята — включаю расписания.",
+          schedulesPausedNow
+            ? "Расписания поставлены на паузу."
+            : "Пауза cron снята — включаю расписания.",
         );
       }
-      if (changed || pauseFlipped) reconcileSchedules();
+      const tasksPausedNow = tasksPaused();
+      const tasksPauseFlipped = tasksPausedNow !== lastTasksPaused;
+      if (tasksPauseFlipped) {
+        lastTasksPaused = tasksPausedNow;
+        console.log(
+          tasksPausedNow
+            ? "Назначенные агентам задачи поставлены на паузу."
+            : "Пауза назначенных задач снята — worker возьмёт их в ближайший poll.",
+        );
+      }
+      if (changed || schedulesPauseFlipped) reconcileSchedules();
     })();
   }, 10 * 60_000).unref();
 

@@ -22,6 +22,14 @@ export interface TaskRunResult {
   note: string;
 }
 
+export interface RunAgentTasksOptions {
+  /**
+   * Admission guard checked immediately before every new claim. A task whose
+   * claim already succeeded remains in-flight and is allowed to finish.
+   */
+  canClaim?: () => boolean;
+}
+
 /** Заведомо меньше 15-минутного stale lease Core. */
 export const AGENT_RUN_HEARTBEAT_MS = 60_000;
 
@@ -62,6 +70,7 @@ export async function runAgentTasks(
   /** Карта «навык → минимальный тир» (floor). Не задана — тир берётся только
    *  из карточки агента; гейт по навыку не применяется. */
   skillFloors?: Map<string, AutonomyTier>,
+  options: RunAgentTasksOptions = {},
 ): Promise<TaskRunResult[]> {
   if (agent.status !== "active") return [];
 
@@ -69,6 +78,10 @@ export async function runAgentTasks(
   const results: TaskRunResult[] = [];
 
   for (const t of tasks) {
+    // Pause is an admission gate, not cancellation: finish an already claimed
+    // task, then re-check before taking the next one from the same snapshot.
+    if (options.canClaim?.() === false) break;
+
     // Core — единственная точка конкурентного выбора. Два worker могут
     // увидеть одну задачу в myTasks(), но лишь один получит durable runId.
     const claim = await core.claimAgentTask(t.id, agent.name);

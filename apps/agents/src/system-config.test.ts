@@ -24,7 +24,24 @@ describe("overlayEnv: тумблеры системы поверх окруже�
     assert.equal(env.AGENTS_SCHEDULES_PAUSED, "0", "снята пауза из панели");
     // Следующая перечитка после сброса: source=env, value=исходный env "1".
     overlayEnv(env, [{ key: "AGENTS_SCHEDULES_PAUSED", value: "1", source: "env" }]);
-    assert.equal(env.AGENTS_SCHEDULES_PAUSED, "1", "вернулись к env, а не застряли на значении базы");
+    assert.equal(
+      env.AGENTS_SCHEDULES_PAUSED,
+      "1",
+      "вернулись к env, а не застряли на значении базы",
+    );
+  });
+
+  it("паузы cron и назначенных задач накладываются независимо", () => {
+    const env: Record<string, string | undefined> = {
+      AGENTS_SCHEDULES_PAUSED: "1",
+      AGENTS_TASKS_PAUSED: "1",
+    };
+    overlayEnv(env, [
+      { key: "AGENTS_SCHEDULES_PAUSED", value: "1", source: "db" },
+      { key: "AGENTS_TASKS_PAUSED", value: "0", source: "db" },
+    ]);
+    assert.equal(env.AGENTS_SCHEDULES_PAUSED, "1", "cron остался на паузе");
+    assert.equal(env.AGENTS_TASKS_PAUSED, "0", "только назначенные задачи разрешены");
   });
 
   it("дефолт Core не затирает наш .env: тумблера нет у Core, но есть у нас", () => {

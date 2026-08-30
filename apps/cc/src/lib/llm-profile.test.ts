@@ -39,8 +39,12 @@ describe("LLM-профиль из /system/config", () => {
       item("LLM_PROVIDER", "claude-cli"),
       item("AGENT_GLOBAL_BUDGET_USD", "5"),
       item("AGENTS_SCHEDULES_PAUSED", "1"),
+      item("AGENTS_TASKS_PAUSED", "1"),
     ]);
 
-    expect(generic.map((row) => row.key)).toEqual(["AGENTS_SCHEDULES_PAUSED"]);
+    expect(generic.map((row) => row.key)).toEqual([
+      "AGENTS_SCHEDULES_PAUSED",
+      "AGENTS_TASKS_PAUSED",
+    ]);
   });
 });

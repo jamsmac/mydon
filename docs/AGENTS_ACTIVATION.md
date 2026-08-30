@@ -44,7 +44,8 @@ Tailscale**; официальный OpenAI API вызывается напрям
 | **GPT-5.6 Sol по OpenAI API**       | `LLM_ROUTE=openai-api`, `LLM_MODEL=gpt-5.6-sol`, `LLM_BASE_URL`, `LLM_PRICE_PROVIDER_ID` | Выбран, но LLM выключен                          | Разрешён только exact `https://api.openai.com/v1` + `provider=openai` + серверный `LLM_API_KEY`; иной endpoint/provider блокируется до provider       |
 | **Семантическая память** (RAG, #6b) | `EMBED_BASE_URL`, `EMBED_MODEL`, `EMBED_PRICE_PROVIDER_ID`, `EMBED_BILLING_MODE`         | Память спит; остаётся дельта-память по сигнатуре | То же fail-closed правило pricing profile; HTTP по умолчанию `metered` через Core-ledger                                                              |
 | **Ингестор канала**                 | `ideaChannels` в паспорте `knowledge-curator` (уже `promtjam`)                           | Навык молчит                                     | Читает публичное превью канала, приносит дайджест «что перенять»                                                                                      |
-| **Расписания**                      | `AGENTS_SCHEDULES_PAUSED=0`                                                              | `1` — расписания на паузе                        | Агенты работают по графику из паспортов                                                                                                               |
+| **Расписания**                      | `AGENTS_SCHEDULES_PAUSED=0`                                                              | `1` — cron на паузе                              | Агенты работают по графику из паспортов; на порученные задачи этот тумблер не влияет                                                                  |
+| **Порученные задачи**               | `AGENTS_TASKS_PAUSED=0`                                                                  | `1` — task-worker на паузе                       | Agents забирает и выполняет задачи, порученные через Core; cron остаётся под отдельной паузой                                                         |
 | **Бюджет**                          | `LLM_GLOBAL_DAILY_BUDGET_USD`, `LLM_MAX_RESERVATION_USD`, `AGENT_DAILY_BUDGET_USD`       | `$10`/сутки глобально, `$3` на один reserve      | Core атомарно учитывает все metered-поверхности; `$3` — предел **каждого физического provider-вызова**, а не накопительный предел многошаговой задачи |
 | **Потолок автономии**               | `AGENT_AUTONOMY_MAX`                                                                     | `T0` — только предлагает                         | Выше → часть действий без согласования (осторожно)                                                                                                    |
 
@@ -218,7 +219,9 @@ rollout миграции проверь значение ключа в productio
 проверки: (1) `LLM_ENABLED=1`, (2) выбран рабочий `openai-api`, а не
 заблокированный `codex-subscription`, (3) `LLM_API_KEY` задан только на сервере,
 (4) `ideaChannels`/`webSources` в паспорте не пусты, (5) канал/сайт реально
-читается, (6) `AGENTS_SCHEDULES_PAUSED=0`, (7) pricing profile существует,
+читается, (6) нужный контур снят с паузы:
+`AGENTS_SCHEDULES_PAUSED=0` для cron или `AGENTS_TASKS_PAUSED=0` для порученной задачи,
+(7) pricing profile существует,
 расчётный reserve не превышает `$3`, и Core разрешает его до provider.
 
 Ничего не задано → это не поломка: агенты работают детерминированно, очередь

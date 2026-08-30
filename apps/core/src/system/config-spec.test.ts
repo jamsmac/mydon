@@ -28,6 +28,11 @@ describe("config-spec: белый список тумблеров", () => {
     assert.match(validateConfig("AGENT_AUTONOMY_MAX", "T9") ?? "", /допустимо/);
     assert.equal(validateConfig("AGENTS_SCHEDULES_PAUSED", "0"), null);
     assert.match(validateConfig("AGENTS_SCHEDULES_PAUSED", "yes") ?? "", /допустимо/);
+    assert.equal(validateConfig("AGENTS_TASKS_PAUSED", "0"), null);
+    assert.match(validateConfig("AGENTS_TASKS_PAUSED", "yes") ?? "", /допустимо/);
+    assert.equal(specFor("AGENTS_TASKS_PAUSED")?.fallback, "1");
+    assert.equal(specFor("AGENTS_TASKS_PAUSED")?.label, "Назначенные агентам задачи на паузе");
+    assert.match(specFor("AGENTS_TASKS_PAUSED")?.help ?? "", /на cron-расписания не влияет/i);
     assert.equal(validateConfig("AGENT_DAILY_BUDGET_USD", "3.5"), null);
     assert.match(validateConfig("AGENT_DAILY_BUDGET_USD", "-1") ?? "", /неотрицательное/);
     assert.equal(validateConfig("LLM_GLOBAL_DAILY_BUDGET_USD", "12.75"), null);

@@ -54,6 +54,10 @@ services:
       OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
       # Core повторно проверяет потолок атомарно в commit agent outcome.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
+      # Core возвращает панели effective значения env; DB-настройки
+      # остаются сильнее. Agents получает те же defaults ниже.
+      AGENTS_SCHEDULES_PAUSED: ${AGENTS_SCHEDULES_PAUSED:-1}
+      AGENTS_TASKS_PAUSED: ${AGENTS_TASKS_PAUSED:-1}
       # Единый Core-ledger — единственная денежная граница для всех LLM-клиентов.
       # Несекретный профиль нужен Core и для UI, и для единого admission policy.
       # API key намеренно остаётся только у Agents и сюда не передаётся.
@@ -165,7 +169,9 @@ services:
       SERVICE_TOKEN: ${SERVICE_TOKEN:-}
       # Порог автономии: T0 — агенты только предлагают (ответ владельца Ф6)
       AGENT_AUTONOMY_MAX: ${AGENT_AUTONOMY_MAX:-T0}
+      # Две независимые паузы: cron и task-worker через Core.
       AGENTS_SCHEDULES_PAUSED: ${AGENTS_SCHEDULES_PAUSED:-1}
+      AGENTS_TASKS_PAUSED: ${AGENTS_TASKS_PAUSED:-1}
       # Потолок действий на агента и период опроса задач.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
       AGENT_TASK_INTERVAL_MS: ${AGENT_TASK_INTERVAL_MS:-60000}
