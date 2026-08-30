@@ -1,5 +1,5 @@
 import { LlmLedgerUnavailableError, type AutonomyTier } from "@mydon/shared";
-import type { AgentsCoreClient } from "./core-client";
+import type { AgentsCoreClient, AgentTaskInvocation } from "./core-client";
 import type { AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { hasSkill } from "./skills";
@@ -23,6 +23,8 @@ export interface TaskRunResult {
 }
 
 export interface RunAgentTasksOptions {
+  /** Assigned owner work and scheduled system occurrences are separate queues. */
+  invocation?: AgentTaskInvocation;
   /**
    * Admission guard checked immediately before every new claim. A task whose
    * claim already succeeded remains in-flight and is allowed to finish.
@@ -86,7 +88,7 @@ export async function runAgentTasks(
 ): Promise<TaskRunResult[]> {
   if (agent.status !== "active") return [];
 
-  const tasks = await core.myTasks(agent.name);
+  const tasks = await core.myTasks(agent.name, options.invocation ?? "assigned");
   const results: TaskRunResult[] = [];
 
   for (const t of tasks) {
@@ -96,7 +98,11 @@ export async function runAgentTasks(
 
     // Core — единственная точка конкурентного выбора. Два worker могут
     // увидеть одну задачу в myTasks(), но лишь один получит durable runId.
-    const claim = await core.claimAgentTask(t.id, agent.name);
+    const claim = await core.claimAgentTask(
+      t.id,
+      agent.name,
+      options.invocation ?? "assigned",
+    );
     if (claim === null) {
       results.push({
         taskId: t.id,

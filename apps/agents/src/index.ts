@@ -5,7 +5,7 @@ import { TZ } from "@mydon/shared";
 import { coachPosture } from "./coach";
 import { runCoffeeMonitor } from "./coffee-monitor";
 import { runMaintenanceMonitor } from "./maintenance-monitor";
-import { AgentsCoreClient } from "./core-client";
+import { AgentsCoreClient, AgentsCoreHttpError } from "./core-client";
 import { embeddingPosture } from "./embedding";
 import { runGloberentMonitor } from "./globerent-monitor";
 import { drainLlmSettlementOutboxFromEnv } from "./llm-ledger";
@@ -22,10 +22,12 @@ import { runOurvendAccounting } from "./ourvend-accounting";
 import { ourvendConfigFromEnv, runOurvendSync } from "./ourvend-sync";
 import { loadAgents, type AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
-import { desiredJobs, jobKey } from "./schedule";
+import { desiredJobs, jobKey, scheduledInvocationMode } from "./schedule";
+import { ScheduledOccurrenceRetryQueue } from "./scheduled-occurrence-queue";
 import { loadSkillMeta, skillTierFloors } from "./skill-loader";
 import { hasSkill } from "./skills";
 import { applySystemOverrides } from "./system-config";
+import { buildTaskLlmWorkflowPlan } from "./task-llm-workflow";
 import { runAgentTasks } from "./task-worker";
 
 loadEnv({ path: path.resolve(__dirname, "../../../.env"), quiet: true });
@@ -261,7 +263,12 @@ async function main(): Promise<void> {
   // новые — заводим. Раньше набор считался ОДИН раз, и правки владельца в
   // карточке (пауза агента, новое расписание) не действовали до перезапуска.
   const cronJobs = new Map<string, Cron>();
+  const pendingScheduledOccurrences = new ScheduledOccurrenceRetryQueue();
   let lastNotWired = "";
+  // Wired after pollers are created. A cron fire before then is still durable
+  // in Core and the startup recovery poll will claim it.
+  let triggerScheduledTaskPoll = (): void => {};
+  let triggerScheduledOccurrenceFlush = (): void => {};
 
   function reconcileSchedules(): void {
     // На паузе желаемый набор пуст: гасим все задания и ничего не заводим.
@@ -298,9 +305,19 @@ async function main(): Promise<void> {
           const occurrence = expectedOccurrence ?? self.currentRun() ?? new Date();
           expectedOccurrence = self.nextRun();
           void (async () => {
+            if (schedulesPaused()) return;
             const current = agents.find((a) => a.name === j.agent && a.status === "active");
             if (!current) return; // агента отключили — расписание догаснет на след. перечитке
             try {
+              const mode = scheduledInvocationMode(
+                j.skill,
+                () => buildTaskLlmWorkflowPlan(j.skill).steps.length > 0,
+              );
+              if (mode === "durable-task") {
+                pendingScheduledOccurrences.enqueue(j, occurrence);
+                triggerScheduledOccurrenceFlush();
+                return;
+              }
               const traceKey = `cron:${j.agent}:${j.skill}:${j.cron}`;
               const result = await runSkill(
                 current,
@@ -344,22 +361,77 @@ async function main(): Promise<void> {
    * не дожидаясь своего расписания. Список активных берём СВЕЖИЙ на каждый
    * проход — не снимок на старте.
    */
-  async function pollAgentTasks(): Promise<void> {
-    if (!tasksPaused()) {
-      for (const agent of agents.filter((a) => a.status === "active")) {
-        if (tasksPaused()) break;
-        try {
-          const results = await runAgentTasks(agent, core, threshold, skillFloors, {
-            canClaim: () => !tasksPaused(),
-          });
-          for (const r of results) {
-            console.log(`[${agent.name}] задача ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`);
-          }
-        } catch (err) {
-          console.error(`[${agent.name}] задачи не обработаны:`, err);
+  async function pollTaskQueue(
+    invocation: "assigned" | "scheduled",
+    paused: () => boolean,
+  ): Promise<void> {
+    if (paused()) return;
+    for (const agent of agents.filter((a) => a.status === "active")) {
+      if (paused()) break;
+      try {
+        const results = await runAgentTasks(agent, core, threshold, skillFloors, {
+          invocation,
+          canClaim: () => !paused(),
+        });
+        for (const r of results) {
+          const queue = invocation === "scheduled" ? "cron" : "задача";
+          console.log(
+            `[${agent.name}] ${queue} ${r.taskId.slice(0, 8)} → ${r.outcome}: ${r.note}`,
+          );
         }
+      } catch (err) {
+        console.error(
+          `[${agent.name}] ${invocation === "scheduled" ? "cron-задачи" : "задачи"} не обработаны:`,
+          err,
+        );
       }
     }
+  }
+
+  async function pollScheduledAgentTasks(): Promise<void> {
+    await pollTaskQueue("scheduled", schedulesPaused);
+  }
+
+  async function flushScheduledOccurrences(): Promise<void> {
+    if (schedulesPaused() || pendingScheduledOccurrences.size === 0) return;
+    const result = await pendingScheduledOccurrences.flush(async ({ job, scheduledAt }) => {
+      try {
+        const ensured = await core.ensureScheduledAgentTask({
+          agentName: job.agent,
+          skill: job.skill,
+          cron: job.cron,
+          scheduledAt: scheduledAt.toISOString(),
+        });
+        console.log(
+          `[${job.agent}/${job.skill}] cron occurrence ${ensured.taskId.slice(0, 8)} ` +
+            `${ensured.created ? "materialized" : "replayed"} → durable task`,
+        );
+        triggerScheduledTaskPoll();
+      } catch (error) {
+        // An explicit 4xx means Core rejected this occurrence permanently
+        // (schedule removed, invalid/stale fire time, immutable conflict).
+        // Dropping it is safer than an infinite retry storm; transport/5xx
+        // remains in the queue for the next poll.
+        if (error instanceof AgentsCoreHttpError && error.status >= 400 && error.status < 500) {
+          console.error(
+            `[${job.agent}/${job.skill}] cron occurrence отклонён Core (${error.status}); повтор отменён`,
+          );
+          return;
+        }
+        throw error;
+      }
+    });
+    for (const failure of result.failed) {
+      console.error(
+        `[${failure.occurrence.job.agent}/${failure.occurrence.job.skill}] ` +
+          "cron occurrence пока не materialized; повторю:",
+        failure.error,
+      );
+    }
+  }
+
+  async function pollAgentTasks(): Promise<void> {
+    await pollTaskQueue("assigned", tasksPaused);
 
     // Accounting intent — уже совершённый provider side effect. Он обязан
     // дрениться и при паузе расписаний, и при паузе назначенных задач.
@@ -627,15 +699,31 @@ async function main(): Promise<void> {
 
   const taskEveryMs = agentTaskIntervalMs(process.env.AGENT_TASK_INTERVAL_MS);
   const pollAgentTasksSingleFlight = singleFlight(pollAgentTasks);
+  const pollScheduledAgentTasksSingleFlight = singleFlight(pollScheduledAgentTasks);
+  const flushScheduledOccurrencesSingleFlight = singleFlight(flushScheduledOccurrences);
   const triggerAgentTaskPoll = (): void => {
     void pollAgentTasksSingleFlight().catch((err: unknown) =>
       console.error("Задачи агентов:", err),
     );
   };
+  triggerScheduledTaskPoll = (): void => {
+    void pollScheduledAgentTasksSingleFlight().catch((err: unknown) =>
+      console.error("Cron-задачи агентов:", err),
+    );
+  };
+  triggerScheduledOccurrenceFlush = (): void => {
+    void flushScheduledOccurrencesSingleFlight().catch((err: unknown) =>
+      console.error("Материализация cron-задач:", err),
+    );
+  };
   setInterval(() => {
     triggerAgentTaskPoll();
+    triggerScheduledOccurrenceFlush();
+    triggerScheduledTaskPoll();
   }, taskEveryMs).unref();
   triggerAgentTaskPoll(); // первый проход сразу при старте
+  triggerScheduledOccurrenceFlush();
+  triggerScheduledTaskPoll(); // recovery materialized occurrences after a crash/restart
 
   console.log(`Запланировано заданий: ${cronJobs.size} (часовой пояс ${TZ}).`);
   // Держим процесс живым всегда: расписания могут появиться после перечитки,

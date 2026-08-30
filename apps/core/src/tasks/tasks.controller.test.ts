@@ -8,6 +8,7 @@ import {
   AgentRunCommitDto,
   AgentRunInputSnapshotDto,
   ClaimAgentRunDto,
+  EnsureAgentScheduleDto,
   EnsureForDayDto,
   ReleaseAgentRunDto,
   SetStatusDto,
@@ -40,6 +41,38 @@ describe("EnsureForDayDto: dayKey — только голые сутки", () =>
       assert.equal(ошибки[0]?.property, "dayKey", "иначе дедуп молча перестаёт работать");
     });
   }
+});
+
+describe("EnsureAgentScheduleDto: exact planned occurrence", () => {
+  const valid = {
+    agentName: "coach-agent",
+    skill: "coach-review",
+    cron: "0 10 * * 1",
+    scheduledAt: "2026-08-31T05:00:00.000Z",
+  };
+
+  it("принимает только UTC fire time и bounded identity", async () => {
+    assert.deepEqual(await validate(plainToInstance(EnsureAgentScheduleDto, valid)), []);
+    const errors = await validate(
+      plainToInstance(EnsureAgentScheduleDto, {
+        ...valid,
+        scheduledAt: "2026-08-31T10:00:00+05:00",
+      }),
+    );
+    assert.ok(errors.some((error) => error.property === "scheduledAt"));
+  });
+
+  it("отбивает невалидное имя и длинный cron", async () => {
+    const errors = await validate(
+      plainToInstance(EnsureAgentScheduleDto, {
+        ...valid,
+        agentName: "Coach Agent",
+        cron: "x".repeat(65),
+      }),
+    );
+    assert.ok(errors.some((error) => error.property === "agentName"));
+    assert.ok(errors.some((error) => error.property === "cron"));
+  });
 });
 
 describe("DTO durable agent-run", () => {

@@ -1,8 +1,9 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { approval, entity, machineCard, moneyFlow, org, task } from "@mydon/db";
 import { TZ, type Domain } from "@mydon/shared";
-import { and, asc, count, desc, eq, lt, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
+import { AGENT_SCHEDULE_SOURCE } from "../tasks/agent-schedule";
 
 export interface ObligationsSummary {
   domain: Domain;
@@ -200,7 +201,14 @@ export class RegistryService {
     const [overdueTasks] = await this.db
       .select({ n: count() })
       .from(task)
-      .where(and(lt(task.due, now), ne(task.status, "done"), ne(task.status, "cancelled")));
+      .where(
+        and(
+          lt(task.due, now),
+          ne(task.status, "done"),
+          ne(task.status, "cancelled"),
+          or(isNull(task.source), ne(task.source, AGENT_SCHEDULE_SOURCE)),
+        ),
+      );
 
     return {
       generatedAt: now.toISOString(),

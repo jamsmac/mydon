@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable } from "@nestjs/common";
 import { event } from "@mydon/db";
-import { and, desc, eq, gte, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lte, or, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { hashLedgerPayload } from "../llm-ledger/llm-ledger.money";
 
@@ -76,18 +76,43 @@ export class EventsService {
    * 500 строк и окно «за неделю» превращалось в 37 часов — молча, с виду
    * здоровым ответом. Фильтр обязан стоять в SQL, до лимита.
    */
-  async list(filter: { type?: string; types?: readonly string[]; since?: Date; limit?: number } = {}): Promise<EventRow[]> {
+  async list(
+    filter: {
+      type?: string;
+      types?: readonly string[];
+      since?: Date;
+      until?: Date;
+      /** Strict tuple cursor used by ordered notification catch-up. */
+      after?: { occurredAt: Date; id: string };
+      order?: "asc" | "desc";
+      limit?: number;
+    } = {},
+  ): Promise<EventRow[]> {
     const conditions: SQL[] = [];
     if (filter.type) conditions.push(eq(event.type, filter.type));
     if (filter.types && filter.types.length > 0) conditions.push(inArray(event.type, [...filter.types]));
     if (filter.since) conditions.push(gte(event.occurredAt, filter.since));
+    if (filter.until) conditions.push(lte(event.occurredAt, filter.until));
+    if (filter.after) {
+      conditions.push(
+        or(
+          gt(event.occurredAt, filter.after.occurredAt),
+          and(eq(event.occurredAt, filter.after.occurredAt), gt(event.id, filter.after.id)),
+        )!,
+      );
+    }
+
+    const oldestFirst = filter.order === "asc";
 
     return this.db
       .select()
       .from(event)
       .where(conditions.length ? and(...conditions) : undefined)
-      .orderBy(desc(event.occurredAt))
-      .limit(Math.min(filter.limit ?? 100, 500));
+      .orderBy(
+        oldestFirst ? asc(event.occurredAt) : desc(event.occurredAt),
+        oldestFirst ? asc(event.id) : desc(event.id),
+      )
+      .limit(Math.min(filter.limit ?? 100, 1_000));
   }
 
   /**

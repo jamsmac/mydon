@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { desiredJobs, jobKey } from "./schedule";
+import { desiredJobs, jobKey, scheduledInvocationMode } from "./schedule";
 import type { AgentDefinition } from "./registry";
 
 const agent = (over: Partial<AgentDefinition> = {}): AgentDefinition => ({
@@ -57,5 +57,25 @@ describe("Планирование заданий агентов", () => {
     const after = desiredJobs([agent({ status: "paused" })], wiredAll).jobs.map(jobKey);
     assert.notDeepEqual(before, after);
     assert.equal(after.length, 0);
+  });
+
+  it("coach-review всегда идёт через durable task, даже до проверки route", () => {
+    let routeChecked = false;
+    assert.equal(
+      scheduledInvocationMode("coach-review", () => {
+        routeChecked = true;
+        return false;
+      }),
+      "durable-task",
+    );
+    assert.equal(routeChecked, false);
+  });
+
+  it("legacy cron fail-closed, если его workflow стал metered", () => {
+    assert.equal(scheduledInvocationMode("morning-digest", () => false), "legacy");
+    assert.throws(
+      () => scheduledInvocationMode("future-metered-skill", () => true),
+      /blocked until it is allowlisted/,
+    );
   });
 });

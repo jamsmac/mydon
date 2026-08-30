@@ -205,4 +205,26 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
     assert.match(sql, /task_agent_execution_input_snapshot_hash_format/);
     assert.match(sql, /\^\[0-9a-f\]\{64\}\$/);
   });
+
+  it("0080 indexes minute LLM alerts and the open durable schedule queue", () => {
+    const sql = readFileSync(path.join(ПАПКА, "0080_llm_alert_schedule_indexes.sql"), "utf8");
+
+    for (const name of [
+      "llm_spend_alert_unknown_idx",
+      "llm_spend_stuck_reserved_at_idx",
+      "llm_spend_stuck_created_at_idx",
+      "agent_task_llm_job_alert_unknown_idx",
+      "outbox_delivery_alert_terminal_idx",
+      "task_agent_schedule_open_queue_idx",
+    ]) {
+      assert.match(sql, new RegExp(`CREATE INDEX "${name}"`), `нет индекса ${name}`);
+    }
+    assert.match(sql, /"status" = 'failed'.*"outcome" = 'unknown'/);
+    assert.match(sql, /"status" = 'reserved'.*"reserved_at" is not null/);
+    assert.match(sql, /"status" = 'reserved'.*"reserved_at" is null/);
+    assert.match(sql, /"status" = 'unknown'/);
+    assert.match(sql, /"status" = 'unknown' or .*"status" = 'dead'/);
+    assert.match(sql, /"source" = 'agent-schedule'/);
+    assert.match(sql, /"status" <> 'done'.*"status" <> 'cancelled'/);
+  });
 });

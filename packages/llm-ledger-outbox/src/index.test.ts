@@ -34,6 +34,7 @@ import {
   FileLlmSettlementOutbox,
   LlmSettlementConflictError,
   LlmSettlementOutboxError,
+  readLlmSettlementOutboxAlertMonitoring,
   readLlmSettlementOutboxMonitoring,
   type LlmSettlementHandle,
 } from "./index";
@@ -388,6 +389,132 @@ test("successful reserve fallback waits for grace period then only fails unknown
   assert.equal(delegate.reserveCalls, 1);
 });
 
+test("alert monitoring includes fallback exactly at five-minute boundary without leaking intent", async (t) => {
+  const rootDir = await temporaryRoot(t);
+  let now = new Date(INITIAL_TIME);
+  const clock = () => new Date(now);
+  const delegate = new FakeLedger();
+  await new DurableLlmLedger(
+    delegate,
+    new FileLlmSettlementOutbox({ rootDir, producer: "bot", clock }),
+  ).reserve(reserveRequest("request-secret-alert"));
+
+  now = new Date(INITIAL_TIME.getTime() + 5 * 60_000 - 1);
+  assert.deepEqual(await readLlmSettlementOutboxAlertMonitoring({ rootDir, clock }), {
+    available: true,
+    complete: true,
+    unresolvedDeadCount: 0,
+    incidents: [],
+  });
+
+  now = new Date(INITIAL_TIME.getTime() + 5 * 60_000);
+  const snapshot = await readLlmSettlementOutboxAlertMonitoring({ rootDir, clock });
+  assert.equal(snapshot.available, true);
+  assert.equal(snapshot.complete, true);
+  assert.equal(snapshot.incidents.length, 1);
+  assert.deepEqual(
+    { ...snapshot.incidents[0], fingerprint: "<sha256>" },
+    {
+      fingerprint: "<sha256>",
+      producer: "bot",
+      state: "fallback_stuck",
+      recordKind: "fallback",
+      operation: "fail",
+      category: null,
+      occurredAt: INITIAL_TIME.toISOString(),
+    },
+  );
+  assert.match(snapshot.incidents[0]!.fingerprint, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(
+    JSON.stringify(snapshot),
+    /request-secret-alert|reservation-request-secret-alert|pending|processing|\/tmp\//,
+  );
+});
+
+test("active rename race marks the alert snapshot incomplete instead of recovering", async (t) => {
+  const rootDir = await temporaryRoot(t);
+  let now = new Date(INITIAL_TIME);
+  const clock = () => new Date(now);
+  const delegate = new FakeLedger();
+  await new DurableLlmLedger(
+    delegate,
+    new FileLlmSettlementOutbox({ rootDir, producer: "bot", clock }),
+  ).reserve(reserveRequest("request-active-rename"));
+  now = new Date(INITIAL_TIME.getTime() + 5 * 60_000);
+
+  const pendingDir = join(rootDir, "bot", "pending");
+  const processingDir = join(rootDir, "bot", "processing");
+  const [filename] = await readdir(pendingDir);
+  assert.ok(filename);
+  const raced = await readLlmSettlementOutboxAlertMonitoring({
+    rootDir,
+    clock,
+    testHooks: {
+      afterStateFilesCollected: async () => {
+        await rename(join(pendingDir, filename), join(processingDir, filename));
+      },
+    },
+  });
+
+  assert.equal(raced.available, true);
+  assert.equal(raced.complete, false);
+  assert.deepEqual(raced.incidents, []);
+  const stable = await readLlmSettlementOutboxAlertMonitoring({ rootDir, clock });
+  assert.equal(stable.complete, true);
+  assert.equal(stable.incidents.length, 1);
+});
+
+test("rename between state-directory passes cannot disappear from a healthy snapshot", async (t) => {
+  const rootDir = await temporaryRoot(t);
+  let now = new Date(INITIAL_TIME);
+  const clock = () => new Date(now);
+  await new DurableLlmLedger(
+    new FakeLedger(),
+    new FileLlmSettlementOutbox({ rootDir, producer: "bot", clock }),
+  ).reserve(reserveRequest("request-between-passes"));
+  now = new Date(INITIAL_TIME.getTime() + 5 * 60_000);
+  const pendingDir = join(rootDir, "bot", "pending");
+  const processingDir = join(rootDir, "bot", "processing");
+  const [filename] = await readdir(pendingDir);
+  assert.ok(filename);
+
+  const raced = await readLlmSettlementOutboxAlertMonitoring({
+    rootDir,
+    clock,
+    testHooks: {
+      afterFirstStateFilesPass: async () => {
+        await rename(join(pendingDir, filename), join(processingDir, filename));
+      },
+    },
+  });
+
+  assert.equal(raced.available, true);
+  assert.equal(raced.complete, false);
+  assert.equal(raced.incidents.length, 1, "second pass still sees the moved fallback");
+});
+
+test("dead removal race is unknown and never creates a synthetic permanent incident", async (t) => {
+  const rootDir = await temporaryRoot(t);
+  const deadDir = join(rootDir, "bot", "dead");
+  await mkdir(deadDir, { recursive: true });
+  const deadPath = join(deadDir, "removed-during-scan.json");
+  await writeFile(deadPath, "not-json", "utf8");
+
+  const raced = await readLlmSettlementOutboxAlertMonitoring({
+    rootDir,
+    testHooks: {
+      afterStateFilesCollected: async () => {
+        await rm(deadPath);
+      },
+    },
+  });
+
+  assert.equal(raced.available, true);
+  assert.equal(raced.complete, false);
+  assert.equal(raced.unresolvedDeadCount, 1);
+  assert.deepEqual(raced.incidents, []);
+});
+
 test("max-attempt fallback dead keeps intent and blocks a second exact record", async (t) => {
   const rootDir = await temporaryRoot(t);
   let now = new Date(INITIAL_TIME);
@@ -430,6 +557,29 @@ test("max-attempt fallback dead keeps intent and blocks a second exact record", 
   const monitoring = await readLlmSettlementOutboxMonitoring({ rootDir, clock });
   assert.equal(monitoring.deadCount, 1);
   assert.equal(monitoring.exactCount, 0);
+
+  const alerting = await readLlmSettlementOutboxAlertMonitoring({ rootDir, clock });
+  assert.equal(alerting.available, true);
+  assert.equal(alerting.complete, true);
+  assert.equal(alerting.unresolvedDeadCount, 1);
+  assert.equal(alerting.incidents.length, 1);
+  assert.deepEqual(
+    { ...alerting.incidents[0], fingerprint: "<sha256>", occurredAt: "<time>" },
+    {
+      fingerprint: "<sha256>",
+      producer: "bot",
+      state: "dead",
+      recordKind: "fallback",
+      operation: "fail",
+      category: "attempts_exhausted",
+      occurredAt: "<time>",
+    },
+  );
+  assert.match(alerting.incidents[0]!.fingerprint, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(
+    JSON.stringify(alerting),
+    /request-fallback-dead|reservation-request-fallback-dead|settlement_outbox_fallback|\/tmp\//,
+  );
 });
 
 test("checksum mismatch is dead-lettered without recovery call", async (t) => {

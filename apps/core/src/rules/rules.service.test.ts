@@ -48,14 +48,22 @@ function журнал(события: Событие[]) {
         chain.where = (cond?: unknown) => {
           const п = параметры(cond);
           const типы = п.filter((v): v is string => typeof v === "string");
-          const since = п.find((v): v is Date => v instanceof Date);
+          const даты = п.filter((v): v is Date => v instanceof Date);
+          const since = даты[0];
+          const until = даты[1];
           текущие = текущие.filter(
-            (e) => (типы.length === 0 || типы.includes(e.type)) && (!since || e.occurredAt >= since),
+            (e) =>
+              (типы.length === 0 || типы.includes(e.type)) &&
+              (!since || e.occurredAt >= since) &&
+              (!until || e.occurredAt <= until),
           );
           return chain;
         };
         chain.orderBy = () => {
-          текущие = [...текущие].sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
+          текущие = [...текущие].sort(
+            (a, b) =>
+              a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id),
+          );
           return chain;
         };
         chain.limit = async (n: number) => текущие.slice(0, n);

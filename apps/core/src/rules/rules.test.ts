@@ -4,7 +4,14 @@ import { CUTOVER_READY_EVENT, PARITY_EVENT } from "../ourvend/ourvend-parity.ser
 import { SNAPSHOT_STALE_EVENT } from "../ourvend/sync-stale.service";
 import { ACCOUNTING_SOURCE_CHANGED_EVENT } from "../sales/accounting-source";
 import { RETENTION_EVENT } from "../vending/retention.service";
-import { applyRules, formatAmount, immediateOnly, RULE_EVENT_TYPES, RULES } from "./rules";
+import {
+  applyRules,
+  formatAmount,
+  immediateOnly,
+  MAX_NOTIFICATION_TEXT,
+  RULE_EVENT_TYPES,
+  RULES,
+} from "./rules";
 
 const ctx = (type: string, payload: Record<string, unknown> = {}) => ({
   source: "test",
@@ -385,5 +392,105 @@ describe("Правило сторно снек-записи (П6)", () => {
     assert.equal(note?.urgency, "briefing");
     assert.match(note?.text ?? "", /Отмена заправки/);
     assert.ok(RULE_EVENT_TYPES.includes("vending.record_cancelled"));
+  });
+});
+
+describe("LLM operational alerts", () => {
+  it("unknown/dead доставляются немедленно и не печатают fingerprint", () => {
+    const [unknown] = applyRules(
+      ctx("llm.incident.unknown", {
+        kind: "provider_job",
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        feature: "coach-review",
+        fingerprint: "f".repeat(64),
+      }),
+    );
+    assert.equal(unknown?.urgency, "immediate");
+    assert.match(unknown?.text ?? "", /provider job.*openai.*gpt-5\.6-sol/);
+    assert.match(unknown?.text ?? "", /заблокирован/);
+    assert.doesNotMatch(unknown?.text ?? "", /f{32}/);
+
+    const [dead] = applyRules(
+      ctx("llm.incident.dead", {
+        kind: "delivery",
+        destination: "notion-report",
+        attempts: 3,
+      }),
+    );
+    assert.equal(dead?.urgency, "immediate");
+    assert.match(dead?.text ?? "", /notion-report.*dead.*3/);
+  });
+
+  it("форматирует stuck, circuit и ровно 80% бюджета", () => {
+    const [stuck] = applyRules(
+      ctx("llm.incident.stuck", {
+        kind: "stuck_reservations",
+        count: 2,
+        reservedUsd: 3.25,
+        thresholdMinutes: 5,
+      }),
+    );
+    assert.match(stuck?.text ?? "", /2.*\$3\.25.*5 мин/);
+
+    const [circuit] = applyRules(
+      ctx("llm.incident.circuit_open", {
+        providers: ["openai", "anthropic"],
+        resetsAt: "2026-08-31T19:00:00.000Z",
+      }),
+    );
+    assert.match(circuit?.text ?? "", /openai, anthropic/);
+    assert.match(circuit?.text ?? "", /fail-closed/);
+
+    const [budget] = applyRules(
+      ctx("llm.incident.budget", {
+        percent: 80,
+        globalExposureUsd: 8,
+        globalCapUsd: 10,
+        remainingUsd: 2,
+      }),
+    );
+    assert.match(budget?.text ?? "", /80%.*\$8.*\$10/);
+  });
+
+  it("восстановление агрегата — отдельное срочное событие", () => {
+    const [note] = applyRules(
+      ctx("llm.incident.recovered", { kind: "settlement_spool", fingerprint: "a".repeat(64) }),
+    );
+    assert.equal(note?.urgency, "immediate");
+    assert.match(note?.text ?? "", /spool.*здоров/);
+    assert.doesNotMatch(note?.text ?? "", /a{32}/);
+    for (const type of [
+      "llm.incident.unknown",
+      "llm.incident.dead",
+      "llm.incident.stuck",
+      "llm.incident.circuit_open",
+      "llm.incident.budget",
+      "llm.incident.recovered",
+    ]) {
+      assert.ok(RULE_EVENT_TYPES.includes(type), `${type} не попал в SQL-фильтр`);
+    }
+  });
+
+  it("даже вредный provider/model не делает Telegram-текст недоставляемым", () => {
+    const [unknown] = applyRules(
+      ctx("llm.incident.unknown", {
+        kind: "provider_job",
+        provider: "p".repeat(10_000),
+        model: "m".repeat(10_000),
+        feature: "f".repeat(10_000),
+      }),
+    );
+    const [circuit] = applyRules(
+      ctx("llm.incident.circuit_open", {
+        providers: Array.from({ length: 100 }, (_, index) => `${index}-${"x".repeat(500)}`),
+        resetsAt: "r".repeat(10_000),
+      }),
+    );
+    assert.ok((unknown?.text.length ?? Infinity) < 1_000);
+    assert.ok((circuit?.text.length ?? Infinity) < 1_000);
+
+    const [legacy] = applyRules(ctx("infra.backup_failed", { detail: "x".repeat(10_000) }));
+    assert.ok((legacy?.text.length ?? Infinity) <= MAX_NOTIFICATION_TEXT + 1);
   });
 });

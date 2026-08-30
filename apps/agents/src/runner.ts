@@ -144,8 +144,9 @@ export async function runSkill(
     );
   }
 
-  // Cron keeps the old direct event path. A durable task defers every internal
-  // effect to Core commit; even agent.run must not precede its checkpoint.
+  // Legacy non-metered cron/manual invocations keep the direct event path.
+  // A durable scheduled task defers every internal effect to Core commit;
+  // even agent.run must not precede its checkpoint.
   if (!taskMode) {
     await context.assertLease?.();
     await core.recordEvent({
@@ -310,7 +311,8 @@ export async function runSkill(
   // Task executors mutate Core (notes/cards) and cannot share the task commit
   // transaction. Until each executor has its own durable outbox, task mode
   // must fail safe into approval instead of risking a duplicate effect after
-  // crash/takeover. Cron keeps its established direct-execution behaviour.
+  // crash/takeover. Only the explicitly retained legacy non-metered cron path
+  // keeps direct-execution behaviour.
   if (!taskMode && executor && !isBreakGlass && !requiresApproval(tier, threshold)) {
     await context.assertLease?.();
     const exec = await executor(agent, proposal, core);

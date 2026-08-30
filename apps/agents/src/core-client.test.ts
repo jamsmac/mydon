@@ -128,6 +128,48 @@ describe("Клиент агентов к Core: срок ожидания при�
 });
 
 describe("Клиент durable agent-run", () => {
+  it("разделяет assigned/scheduled queues и materialize payload без client key", async () => {
+    const requests: { url: URL; body: unknown }[] = [];
+    const responses: unknown[] = [[], [], {
+      taskId: "task-1",
+      clientKey: `agent-schedule:v1:${"a".repeat(64)}`,
+      scheduledAt: "2026-08-31T05:00:00.000Z",
+      created: true,
+      replay: false,
+    }];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      requests.push({
+        url: new URL(String(url)),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof globalThis.fetch;
+
+    const core = new AgentsCoreClient("http://core");
+    await core.myTasks("coach-agent");
+    await core.myTasks("coach-agent", "scheduled");
+    const ensured = await core.ensureScheduledAgentTask({
+      agentName: "coach-agent",
+      skill: "coach-review",
+      cron: "0 10 * * 1",
+      scheduledAt: "2026-08-31T05:00:00.000Z",
+    });
+
+    assert.equal(requests[0]!.url.searchParams.get("agentInvocation"), "assigned");
+    assert.equal(requests[1]!.url.searchParams.get("agentInvocation"), "scheduled");
+    assert.equal(requests[2]!.url.pathname, "/tasks/agent-schedule/ensure");
+    assert.deepEqual(requests[2]!.body, {
+      agentName: "coach-agent",
+      skill: "coach-review",
+      cron: "0 10 * * 1",
+      scheduledAt: "2026-08-31T05:00:00.000Z",
+    });
+    assert.equal(ensured.created, true);
+  });
+
   it("claim/release/heartbeat передают Core exact runId", async () => {
     const RUN_ID = "11111111-1111-4111-8111-111111111111";
     const EXECUTION_ID = "22222222-2222-4222-8222-222222222222";
@@ -198,7 +240,7 @@ describe("Клиент durable agent-run", () => {
     assert.deepEqual(requests, [
       {
         path: "/tasks/t1/agent-run/claim",
-        body: { agentName: "receivables" },
+        body: { agentName: "receivables", invocation: "assigned" },
       },
       {
         path: "/tasks/t1/agent-run/heartbeat",

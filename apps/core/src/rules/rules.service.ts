@@ -7,6 +7,8 @@ import { applyRules, immediateOnly, RULES, RULE_EVENT_TYPES, type Notification }
 
 export interface PendingNotifications {
   since: string;
+  /** Fixed upper bound of this catch-up scan; newer events belong to the next scan. */
+  until: string;
   /** Сколько событий ПОД ПРАВИЛА нашлось в окне (шум крона сюда не входит). */
   events: number;
   /**
@@ -16,7 +18,14 @@ export interface PendingNotifications {
    * ровно так на проде «сигналы за 14 суток» тихо превратились в 37 часов.
    */
   truncated: boolean;
+  /** Strict oldest-first cursor for the next page when `truncated=true`. */
+  nextCursor: { occurredAt: string; eventId: string } | null;
   notifications: (Notification & { eventId: string; occurredAt: string })[];
+}
+
+export interface PendingNotificationsPage {
+  until: Date;
+  after?: { occurredAt: Date; eventId: string };
 }
 
 /**
@@ -90,12 +99,38 @@ export class RulesService {
    * памяти бота: перезапуск бота не задвоит тревоги, а окно `since` может
    * перекрываться без риска повторной отправки.
    */
-  async pending(since: Date, onlyImmediate = false): Promise<PendingNotifications> {
+  async pending(
+    since: Date,
+    onlyImmediate = false,
+    page?: PendingNotificationsPage,
+  ): Promise<PendingNotifications> {
     // Фильтр по типам стоит В SQL, до лимита: иначе 500 свежайших строк
     // выбирает шум крона, а события правил остаются за окном (прод: 4315
     // событий за 14 суток, из них 4180 — `sales.sync`/`supply.sync`).
-    const events = await this.events.list({ since, types: RULE_EVENT_TYPES, limit: PENDING_EVENTS_LIMIT });
-    const truncated = events.length >= PENDING_EVENTS_LIMIT;
+    const upper = page?.until ?? new Date();
+    const candidates = await this.events.list(
+      page
+        ? {
+            since,
+            until: upper,
+            ...(page.after
+              ? { after: { occurredAt: page.after.occurredAt, id: page.after.eventId } }
+              : {}),
+            types: RULE_EVENT_TYPES,
+            order: "asc",
+            limit: PENDING_EVENTS_LIMIT + 1,
+          }
+        : { since, types: RULE_EVENT_TYPES, limit: PENDING_EVENTS_LIMIT },
+    );
+    const truncated = page
+      ? candidates.length > PENDING_EVENTS_LIMIT
+      : candidates.length >= PENDING_EVENTS_LIMIT;
+    const events = page ? candidates.slice(0, PENDING_EVENTS_LIMIT) : candidates;
+    const last = events.at(-1);
+    const nextCursor =
+      page && truncated && last
+        ? { occurredAt: last.occurredAt.toISOString(), eventId: last.id }
+        : null;
     const out: PendingNotifications["notifications"] = [];
 
     for (const e of events) {
@@ -118,14 +153,23 @@ export class RulesService {
       if (delivered.size > 0) {
         return {
           since: since.toISOString(),
+          until: upper.toISOString(),
           events: events.length,
           truncated,
+          nextCursor,
           notifications: out.filter((n) => !delivered.has(this.key(n.eventId, n.ruleId))),
         };
       }
     }
 
-    return { since: since.toISOString(), events: events.length, truncated, notifications: out };
+    return {
+      since: since.toISOString(),
+      until: upper.toISOString(),
+      events: events.length,
+      truncated,
+      nextCursor,
+      notifications: out,
+    };
   }
 
   /** Проверка правила на выдуманном событии — без записи в шину. */

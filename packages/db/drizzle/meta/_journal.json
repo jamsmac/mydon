@@ -561,6 +561,13 @@
       "when": 1788041600000,
       "tag": "0079_task_agent_input_snapshot",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1788128000000,
+      "tag": "0080_llm_alert_schedule_indexes",
+      "breakpoints": true
     }
   ]
 }
