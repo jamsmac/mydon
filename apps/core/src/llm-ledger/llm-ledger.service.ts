@@ -15,7 +15,7 @@ import {
   type LlmLedgerMonitoring,
   type LlmReserveResponse,
 } from "@mydon/shared";
-import { and, asc, eq, gt, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { resolveConfigValue } from "../system/config-spec";
 import type {
@@ -161,7 +161,18 @@ export class LlmLedgerService {
           oldestReservedAt: sql<Date | string | null>`min(${reservedAt})`,
         })
         .from(llmSpend)
-        .where(and(eq(llmSpend.status, "reserved"), lte(reservedAt, frame.staleBefore))),
+        .where(
+          and(
+            eq(llmSpend.status, "reserved"),
+            // Keep a timestamp column on the left so Drizzle applies its Date
+            // encoder. Comparing the raw coalesce SQL to a Date leaves the
+            // parameter unencoded and postgres-js rejects it before the query.
+            or(
+              and(isNotNull(llmSpend.reservedAt), lte(llmSpend.reservedAt, frame.staleBefore)),
+              and(isNull(llmSpend.reservedAt), lte(llmSpend.createdAt, frame.staleBefore)),
+            ),
+          ),
+        ),
       this.db
         .select({
           count: sql<number>`count(*)::int`,
