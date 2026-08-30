@@ -235,29 +235,41 @@ export interface CoreLlmLedgerConfig {
   serviceToken: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  /** Exact close retries, including the first attempt. Clamped to 1..5. */
+  closeRetryAttempts?: number;
+  /** Initial exponential backoff for close retries. Clamped to 0..1000 ms. */
+  closeRetryBaseDelayMs?: number;
+  /** Test seam for bounded close-retry waits. */
+  closeRetryWaitImpl?: (delayMs: number) => Promise<void>;
 }
 
 /**
  * HTTP-адаптер единственного ledger в Core.
  *
- * Он намеренно не делает автоматических retry: повтор сетевой ошибки settle
- * может быть безопасен благодаря идемпотентности Core, но retry reserve после
- * неизвестного ответа должен оставаться решением вызывающего кода с тем же
- * requestKey, а не скрытым поведением транспорта.
+ * Reserve всегда делает ровно одну HTTP-попытку: после потери ответа нельзя
+ * скрыто решать, можно ли вызывающему продолжать provider dispatch. Settle/fail/release,
+ * напротив, идемпотентны в Core по exact payload, поэтому их транспорт ограниченно
+ * повторяет тот же path и тот же сериализованный JSON.
  */
 export class CoreLlmLedgerClient implements LlmLedger {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly closeRetryAttempts: number;
+  private readonly closeRetryBaseDelayMs: number;
+  private readonly closeRetryWaitImpl: (delayMs: number) => Promise<void>;
 
   constructor(private readonly config: CoreLlmLedgerConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.timeoutMs = config.timeoutMs ?? 5_000;
     this.fetchImpl = config.fetchImpl ?? fetch;
+    this.closeRetryAttempts = boundedInteger(config.closeRetryAttempts, 3, 1, 5);
+    this.closeRetryBaseDelayMs = boundedInteger(config.closeRetryBaseDelayMs, 100, 0, 1_000);
+    this.closeRetryWaitImpl = config.closeRetryWaitImpl ?? wait;
   }
 
   async reserve(request: LlmReserveRequest): Promise<LlmReservation> {
-    const body = await this.post("/llm-ledger/reservations", request);
+    const body = await this.postOnce("/llm-ledger/reservations", serializeBody(request));
     const response = parseReserveResponse(body, request.requestKey);
     if (response.replayBlocked) {
       throw new LlmReplayBlockedError(
@@ -277,7 +289,7 @@ export class CoreLlmLedgerClient implements LlmLedger {
   }
 
   async settle(reservationId: string, request: LlmSettlementRequest): Promise<void> {
-    await this.post(
+    await this.close(
       `/llm-ledger/reservations/${encodeURIComponent(reservationId)}/settle`,
       request,
     );
@@ -291,12 +303,34 @@ export class CoreLlmLedgerClient implements LlmLedger {
   }
 
   async release(reservationId: string, reason: string): Promise<void> {
-    await this.post(`/llm-ledger/reservations/${encodeURIComponent(reservationId)}/release`, {
+    await this.close(`/llm-ledger/reservations/${encodeURIComponent(reservationId)}/release`, {
       reason,
     });
   }
 
-  private async post(path: string, body: unknown): Promise<unknown> {
+  private async close(path: string, body: unknown): Promise<unknown> {
+    // Serialize once so every retry is byte-for-byte the same operation.
+    const serializedBody = serializeBody(body);
+    for (let attempt = 1; attempt <= this.closeRetryAttempts; attempt += 1) {
+      try {
+        return await this.postOnce(path, serializedBody);
+      } catch (error) {
+        const exhausted = attempt === this.closeRetryAttempts;
+        if (!(error instanceof LlmLedgerRequestError) || !error.retryable || exhausted) {
+          throw error;
+        }
+        const exponentialBackoffMs = this.closeRetryBaseDelayMs * 2 ** (attempt - 1);
+        const delayMs = Math.min(
+          Math.max(exponentialBackoffMs, error.retryAfterMs ?? 0),
+          MAX_CLOSE_RETRY_DELAY_MS,
+        );
+        await this.closeRetryWaitImpl(delayMs);
+      }
+    }
+    throw new LlmLedgerUnavailableError("LLM-ledger: close retry завершился без ответа");
+  }
+
+  private async postOnce(path: string, serializedBody: string): Promise<unknown> {
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -305,40 +339,238 @@ export class CoreLlmLedgerClient implements LlmLedger {
           "Content-Type": "application/json",
           ...(this.config.serviceToken ? { "x-service-token": this.config.serviceToken } : {}),
         },
-        body: JSON.stringify(body),
+        body: serializedBody,
+        // A consumed/aborted signal cannot be reused by a retry.
         signal: AbortSignal.timeout(this.timeoutMs),
       });
-    } catch (cause) {
-      throw new LlmLedgerUnavailableError("Не удалось связаться с LLM-ledger в Core", {
-        cause,
-      });
+    } catch {
+      // Fetch errors are deliberately not retained as cause: a custom transport
+      // may include headers or the request body in its error text.
+      throw new LlmLedgerRequestError("Не удалось связаться с LLM-ledger в Core", true);
     }
+
+    const retryAfterMs = retryableHttpStatus(response.status)
+      ? parseRetryAfter(response.headers.get("retry-after"))
+      : undefined;
 
     let text: string;
     try {
       text = await response.text();
-    } catch (cause) {
-      throw new LlmLedgerUnavailableError(
+    } catch {
+      throw new LlmLedgerRequestError(
         `Не удалось прочитать ответ LLM-ledger (HTTP ${response.status})`,
-        { cause },
+        response.ok || retryableHttpStatus(response.status),
+        retryAfterMs,
       );
     }
     let parsed: unknown = null;
     if (text.trim() !== "") {
       try {
         parsed = JSON.parse(text);
-      } catch (cause) {
-        throw new LlmLedgerUnavailableError(`LLM-ledger вернул не-JSON (HTTP ${response.status})`, {
-          cause,
-        });
+      } catch {
+        throw new LlmLedgerRequestError(
+          `LLM-ledger вернул не-JSON (HTTP ${response.status})`,
+          response.ok || retryableHttpStatus(response.status),
+          retryAfterMs,
+        );
       }
     }
     if (!response.ok) {
-      const reason = errorMessage(parsed) ?? `HTTP ${response.status}`;
-      throw new LlmLedgerUnavailableError(`LLM-ledger отказал: ${reason}`);
+      // Do not echo a potentially sensitive proxy/Core body into caller logs.
+      throw new LlmLedgerRequestError(
+        `LLM-ledger отказал (HTTP ${response.status})`,
+        retryableHttpStatus(response.status),
+        retryAfterMs,
+      );
     }
     return parsed;
   }
+}
+
+const MAX_CLOSE_RETRY_DELAY_MS = 2_000;
+
+class LlmLedgerRequestError extends LlmLedgerUnavailableError {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+  }
+}
+
+function retryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599);
+}
+
+const HTTP_WEEKDAY = "(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)";
+const HTTP_WEEKDAY_LONG = "(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)";
+const HTTP_MONTH = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)";
+const IMF_FIXDATE_PATTERN = new RegExp(
+  `^${HTTP_WEEKDAY}, (\\d{2}) (${HTTP_MONTH}) (\\d{4}) (\\d{2}):(\\d{2}):(\\d{2}) GMT$`,
+);
+const RFC850_DATE_PATTERN = new RegExp(
+  `^${HTTP_WEEKDAY_LONG}, (\\d{2})-(${HTTP_MONTH})-(\\d{2}) (\\d{2}):(\\d{2}):(\\d{2}) GMT$`,
+);
+const ASCTIME_DATE_PATTERN = new RegExp(
+  `^${HTTP_WEEKDAY} (${HTTP_MONTH}) ((?:\\d{2})|(?: [1-9])) (\\d{2}):(\\d{2}):(\\d{2}) (\\d{4})$`,
+);
+const HTTP_MONTH_INDEX: ReadonlyMap<string, number> = new Map([
+  ["Jan", 0],
+  ["Feb", 1],
+  ["Mar", 2],
+  ["Apr", 3],
+  ["May", 4],
+  ["Jun", 5],
+  ["Jul", 6],
+  ["Aug", 7],
+  ["Sep", 8],
+  ["Oct", 9],
+  ["Nov", 10],
+  ["Dec", 11],
+]);
+
+function parseRetryAfter(value: string | null, nowMs = Date.now()): number | undefined {
+  if (value === null) return undefined;
+  const normalized = value.trim();
+  if (normalized === "") return undefined;
+
+  if (/^\d+$/.test(normalized)) {
+    const seconds = Number(normalized);
+    if (!Number.isFinite(seconds)) return undefined;
+    return Math.min(seconds * 1_000, Number.MAX_SAFE_INTEGER);
+  }
+
+  const imfFixdateMatch = IMF_FIXDATE_PATTERN.exec(normalized);
+  const rfc850Match = RFC850_DATE_PATTERN.exec(normalized);
+  const asctimeMatch = ASCTIME_DATE_PATTERN.exec(normalized);
+  if (imfFixdateMatch === null && rfc850Match === null && asctimeMatch === null) return undefined;
+
+  const timestamp = imfFixdateMatch
+    ? parseHttpTimestamp(
+        imfFixdateMatch[1],
+        imfFixdateMatch[2],
+        imfFixdateMatch[3],
+        imfFixdateMatch[4],
+        imfFixdateMatch[5],
+        imfFixdateMatch[6],
+      )
+    : rfc850Match
+      ? parseRfc850Timestamp(rfc850Match, nowMs)
+      : parseHttpTimestamp(
+          asctimeMatch?.[2],
+          asctimeMatch?.[1],
+          asctimeMatch?.[6],
+          asctimeMatch?.[3],
+          asctimeMatch?.[4],
+          asctimeMatch?.[5],
+        );
+  if (!Number.isFinite(timestamp)) return undefined;
+  return Math.max(0, timestamp - nowMs);
+}
+
+function parseRfc850Timestamp(match: RegExpExecArray, nowMs: number): number {
+  const shortYear = Number(match[3]);
+  const now = new Date(nowMs);
+  let year = Math.floor(now.getUTCFullYear() / 100) * 100 + shortYear;
+  let timestamp = parseHttpTimestamp(
+    match[1],
+    match[2],
+    String(year),
+    match[4],
+    match[5],
+    match[6],
+  );
+  const fiftyYearsAhead = new Date(nowMs);
+  fiftyYearsAhead.setUTCFullYear(fiftyYearsAhead.getUTCFullYear() + 50);
+  if (timestamp > fiftyYearsAhead.getTime()) {
+    year -= 100;
+    timestamp = parseHttpTimestamp(match[1], match[2], String(year), match[4], match[5], match[6]);
+  }
+  return timestamp;
+}
+
+function parseHttpTimestamp(
+  dayValue: string | undefined,
+  monthValue: string | undefined,
+  yearValue: string | undefined,
+  hourValue: string | undefined,
+  minuteValue: string | undefined,
+  secondValue: string | undefined,
+): number {
+  const day = Number(dayValue);
+  const month = HTTP_MONTH_INDEX.get(monthValue ?? "");
+  const year = Number(yearValue);
+  const hour = Number(hourValue);
+  const minute = Number(minuteValue);
+  const second = Number(secondValue);
+  if (
+    month === undefined ||
+    !Number.isInteger(year) ||
+    day < 1 ||
+    day > 31 ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 60
+  ) {
+    return Number.NaN;
+  }
+  return utcTimestamp(year, month, day, hour, minute, second);
+}
+
+function utcTimestamp(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+): number {
+  const ordinarySecond = Math.min(second, 59);
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(year, month, day);
+  parsed.setUTCHours(hour, minute, ordinarySecond, 0);
+  const timestamp = parsed.getTime();
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month ||
+    parsed.getUTCDate() !== day ||
+    parsed.getUTCHours() !== hour ||
+    parsed.getUTCMinutes() !== minute ||
+    parsed.getUTCSeconds() !== ordinarySecond
+  ) {
+    return Number.NaN;
+  }
+  // HTTP permits 23:59:60 for a leap second; represent it as the next instant.
+  return timestamp + (second === 60 ? 1_000 : 0);
+}
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value === undefined || !Number.isInteger(value)) return fallback;
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
+function serializeBody(body: unknown): string {
+  try {
+    const serialized = JSON.stringify(body);
+    if (serialized === undefined) {
+      throw new TypeError("JSON.stringify returned undefined");
+    }
+    return serialized;
+  } catch {
+    // A user-supplied toJSON error may contain request data; do not retain it as cause.
+    throw new LlmLedgerUnavailableError("LLM-ledger: не удалось сериализовать запрос");
+  }
+}
+
+async function wait(delayMs: number): Promise<void> {
+  if (delayMs <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 }
 
 function parseReserveResponse(value: unknown, expectedRequestKey: string): LlmReserveResponse {
@@ -442,17 +674,6 @@ function isSpendStatus(value: unknown): value is LlmSpendStatus {
 
 function isNonNegativeNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-
-function errorMessage(value: unknown): string | null {
-  if (value === null || typeof value !== "object") return null;
-  const message = (value as Record<string, unknown>).message;
-  if (typeof message === "string") return message;
-  if (Array.isArray(message)) {
-    const parts = message.filter((item): item is string => typeof item === "string");
-    return parts.length > 0 ? parts.join("; ") : null;
-  }
-  return null;
 }
 
 /**

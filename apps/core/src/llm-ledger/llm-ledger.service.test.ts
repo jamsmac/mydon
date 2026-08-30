@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { BadRequestException } from "@nestjs/common";
-import { llmModelPrice, llmSpend, systemConfig } from "@mydon/db";
+import { BadRequestException, ConflictException } from "@nestjs/common";
+import { agentTaskLlmJob, llmModelPrice, llmSpend, systemConfig } from "@mydon/db";
 import { tashkentDay } from "@mydon/shared";
-import type { ReserveLlmDto } from "./llm-ledger.dto";
+import type { ReleaseLlmDto, ReserveLlmDto, SettleLlmDto } from "./llm-ledger.dto";
 import { hashLedgerPayload, usdToNano, type LedgerPriceSnapshot } from "./llm-ledger.money";
 import {
   classifySettlementAnomaly,
@@ -184,6 +184,35 @@ function reservePolicyTx(
   return { tx, inserted };
 }
 
+/** Terminal spend double: closing-operation replay must not issue a second UPDATE. */
+function terminalSpendTx(row: Record<string, unknown>) {
+  let updates = 0;
+  const tx = {
+    execute: async () => undefined,
+    select: (fields?: Record<string, unknown>) => ({
+      from: (table: unknown) => {
+        if (table === agentTaskLlmJob) {
+          return { where: () => ({ limit: async () => [] }) };
+        }
+        assert.equal(table, llmSpend);
+        if (fields) {
+          return { where: () => ({ limit: async () => [row] }) };
+        }
+        return {
+          where: () => ({
+            limit: () => ({ for: async () => [row] }),
+          }),
+        };
+      },
+    }),
+    update: () => {
+      updates += 1;
+      throw new Error("terminal replay must not update llm_spend");
+    },
+  } as never;
+  return { tx, updateCount: () => updates };
+}
+
 interface MonitoringFixture {
   config?: Record<string, string>;
   daily?: {
@@ -283,6 +312,101 @@ async function withoutLlmEnabledEnv<T>(body: () => Promise<T>): Promise<T> {
 }
 
 describe("LLM-ledger settlement invariants", () => {
+  it("settle exact replay returns the stored result without a second write", async () => {
+    const price = policyPrice();
+    const spendId = "spend-settle-exact-replay";
+    const body: SettleLlmDto = {
+      outcome: "success",
+      providerRequestId: "provider-response-1",
+      resolvedModel: "gpt-5.6-sol",
+      usage: { inputTokens: 120, outputTokens: 30 },
+      metadata: { attempt: 1 },
+    };
+    const row = {
+      ...priorReservation(RESERVE_REQUEST, price),
+      id: spendId,
+      provider: RESERVE_REQUEST.provider,
+      status: "settled",
+      settlementHash: hashLedgerPayload(normalizeSettlement(body)),
+    };
+    const fixture = terminalSpendTx(row);
+
+    const result = await new LlmLedgerService({} as never).settleInTx(fixture.tx, spendId, body);
+
+    assert.deepEqual(result, { status: "settled", replay: true });
+    assert.equal(fixture.updateCount(), 0);
+  });
+
+  it("settle replay with a different settlement is a 409 conflict", async () => {
+    const price = policyPrice();
+    const spendId = "spend-settle-mismatch";
+    const original: SettleLlmDto = {
+      outcome: "success",
+      providerRequestId: "provider-response-1",
+      resolvedModel: "gpt-5.6-sol",
+      usage: { inputTokens: 120, outputTokens: 30 },
+    };
+    const row = {
+      ...priorReservation(RESERVE_REQUEST, price),
+      id: spendId,
+      provider: RESERVE_REQUEST.provider,
+      status: "settled",
+      settlementHash: hashLedgerPayload(normalizeSettlement(original)),
+    };
+    const fixture = terminalSpendTx(row);
+
+    await assert.rejects(
+      () =>
+        new LlmLedgerService({} as never).settleInTx(fixture.tx, spendId, {
+          ...original,
+          usage: { inputTokens: 120, outputTokens: 31 },
+        }),
+      (error: unknown) => error instanceof ConflictException && error.getStatus() === 409,
+    );
+    assert.equal(fixture.updateCount(), 0);
+  });
+
+  it("release exact replay returns the stored result without a second write", async () => {
+    const price = policyPrice();
+    const spendId = "spend-release-exact-replay";
+    const body: ReleaseLlmDto = { reason: "provider_not_called" };
+    const row = {
+      ...priorReservation(RESERVE_REQUEST, price),
+      id: spendId,
+      provider: RESERVE_REQUEST.provider,
+      status: "released",
+      reason: body.reason,
+    };
+    const fixture = terminalSpendTx(row);
+
+    const result = await new LlmLedgerService({} as never).releaseInTx(fixture.tx, spendId, body);
+
+    assert.deepEqual(result, { status: "released", replay: true });
+    assert.equal(fixture.updateCount(), 0);
+  });
+
+  it("release replay with a different reason is a 409 conflict", async () => {
+    const price = policyPrice();
+    const spendId = "spend-release-mismatch";
+    const row = {
+      ...priorReservation(RESERVE_REQUEST, price),
+      id: spendId,
+      provider: RESERVE_REQUEST.provider,
+      status: "released",
+      reason: "provider_not_called",
+    };
+    const fixture = terminalSpendTx(row);
+
+    await assert.rejects(
+      () =>
+        new LlmLedgerService({} as never).releaseInTx(fixture.tx, spendId, {
+          reason: "different_pre_dispatch_reason",
+        }),
+      (error: unknown) => error instanceof ConflictException && error.getStatus() === 409,
+    );
+    assert.equal(fixture.updateCount(), 0);
+  });
+
   it("LLM по умолчанию fail-closed; DB важнее env, cap по умолчанию $3", () => {
     const defaults = resolveLlmAdmissionPolicy({}, {});
     assert.equal(defaults.enabled, false);

@@ -152,7 +152,21 @@ Core возвращает действие карточки агента (`pause
 Если провайдер уже вернул полезный ответ, а `settle` не дошёл до Core,
 Assistant, Documents, Agents chat и embeddings не выбрасывают уже оплаченный
 результат. Незакрытый reserve остаётся exposure и защищает лимит; сбой пишется
-в лог. Транспортный retry settlement/outbox — отдельная следующая фаза.
+в лог.
+
+Следующая bounded-фаза добавила общий transport retry закрывающих операций:
+`settle`, `fail` и `release` повторяют тот же URL и byte-identical JSON только
+при неоднозначном/временном транспортном исходе (`network/timeout`, ошибка
+чтения ответа, HTTP `408/425/429/5xx`). Число попыток и backoff ограничены, а
+каждая попытка получает новый timeout. Валидный `Retry-After` учитывается, но
+также ограничен верхней границей ожидания. Обычные `4xx`, включая конфликт
+`409`, не повторяются. `reserve` по-прежнему имеет ровно одну transport-попытку:
+скрытый retry после потерянного ответа мог бы разрешить вызывающему повторный
+provider dispatch, которого ledger v1 доказать не умеет.
+
+Это предотвращает большинство новых transient-зависаний, но не является
+durable settlement outbox: если все bounded-попытки исчерпаны или процесс
+погиб до них, резерв остаётся fail-closed exposure и виден в мониторинге.
 
 ## Durable execution задач агента
 
@@ -197,8 +211,9 @@ reserve сохраняет тот же attempt: если Core успел соз�
 - Max-route reserve защищает только исчерпывающий каталог `provider`. Новый SKU,
   на который gateway умеет маршрутизировать, обязан появиться в каталоге до
   включения маршрута.
-- Автоматического retry settlement и HTTP-admin изменения прайса нет. Прайс
-  версионируется миграциями; прошлые строки не редактируются.
+- Durable settlement outbox и HTTP-admin изменения прайса отсутствуют.
+  Закрывающие ledger-операции имеют только bounded exact transport retry;
+  прайс версионируется миграциями, прошлые строки не редактируются.
 
 ## Приёмка
 
@@ -210,6 +225,8 @@ reserve сохраняет тот же attempt: если Core успел соз�
 - граница суток считается в `Asia/Tashkent`;
 - при отказе ledger провайдерский fake не получает ни одного вызова;
 - Bot, CC, Documents, Agents chat и embeddings используют один Core API.
+- `settle/fail/release` exact-retry после неоднозначного transport-сбоя, но
+  `reserve` никогда не получает скрытую вторую попытку;
 - closed replay и payload mismatch блокируют execution, а не hot-loop;
 - снять block нельзя одним общим `SERVICE_TOKEN`;
 - task lease takeover сохраняет execution attempt и не даёт второй metered
