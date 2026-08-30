@@ -5,6 +5,7 @@ import type {
   AnalyticsWarning,
   DeadStockReport,
   DenominationCounts,
+  LlmLedgerMonitoring,
   MarginReport,
   MonthlyPrice,
   OurvendHealth,
@@ -137,6 +138,7 @@ export type {
   AnalyticsWarningCode,
   DeadRow,
   DeadStockReport,
+  LlmLedgerMonitoring,
   MarginExcluded,
   MarginMachine,
   MarginProduct,
@@ -2480,6 +2482,7 @@ export const core = {
 
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),
+  llmLedgerMonitoring: () => get<LlmLedgerMonitoring>("/llm-ledger/monitoring"),
   saveSystemConfig: (input: { key: string; value: string; updatedBy?: string }) =>
     send<SystemConfigItem[]>("/system/config", "PUT", input),
   /** Один Core-коммит для всего LLM-профиля: частичных настроек не бывает. */

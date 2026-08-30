@@ -617,6 +617,41 @@ const ЧТЕНИЕ = [
   },
   { path: "/entities?limit=999999", ждёмОтказ: true },
   {
+    // LLM-мониторинг содержит несколько агрегатов и JSONB-предикат circuit.
+    // Его нельзя проверять только через `/system`: страница намеренно
+    // деградирует в «не проверили» и остаётся 200 при сбое этого отдельного GET.
+    // Прямой путь заставляет настоящий Postgres выполнить весь новый SQL.
+    path: "/llm-ledger/monitoring",
+    проверить: (о) => {
+      if (о === null || typeof о !== "object" || Array.isArray(о))
+        throw new Error("monitoring — не объект");
+      if (typeof о.generatedAt !== "string" || !Number.isFinite(Date.parse(о.generatedAt)))
+        throw new Error(`monitoring.generatedAt=${о.generatedAt} — не ISO-время`);
+      if (typeof о.day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(о.day))
+        throw new Error(`monitoring.day=${о.day} — не сутки YYYY-MM-DD`);
+      for (const ключ of [
+        "globalCapUsd",
+        "knownCostUsd",
+        "globalExposureUsd",
+        "reservedUsd",
+        "remainingUsd",
+      ]) {
+        if (!Number.isFinite(о.budget?.[ключ]) || о.budget[ключ] < 0)
+          throw new Error(`monitoring.budget.${ключ}=${о.budget?.[ключ]} — не сумма`);
+      }
+      if (!Number.isInteger(о.stuckReservations?.count) || о.stuckReservations.count < 0)
+        throw new Error("monitoring.stuckReservations.count — не неотрицательное целое");
+      if (!Number.isInteger(о.failuresToday?.count) || о.failuresToday.count < 0)
+        throw new Error("monitoring.failuresToday.count — не неотрицательное целое");
+      if (!Array.isArray(о.openCircuits)) throw new Error("monitoring.openCircuits — не массив");
+      const текст = JSON.stringify(о);
+      if (
+        /"(?:requestKey|traceKey|providerRequestId|priceSnapshot|metadata|_llmLedger)"/.test(текст)
+      )
+        throw new Error("monitoring вернул внутренний идентификатор или metadata");
+    },
+  },
+  {
     // П8b: тумблеры катовера обязаны доехать до панели «Система» ЧЕРЕЗ HTTP.
     // Ключ, которого нет в белом списке, панель просто не покажет, и владелец
     // будет искать переключатель, которого в интерфейсе нет.

@@ -1,5 +1,11 @@
-import { core, CoreUnavailable, type SystemConfigItem } from "../../lib/core";
+import {
+  core,
+  CoreUnavailable,
+  type LlmLedgerMonitoring,
+  type SystemConfigItem,
+} from "../../lib/core";
 import { CoreDown } from "../../components/core-down";
+import { LlmMonitoring } from "../../components/llm-monitoring";
 import { LlmSettings } from "../../components/llm-settings";
 import { SystemEditor } from "../../components/system-editor";
 import { genericSystemConfigItems, llmProfileFromSystemConfig } from "../../lib/llm-profile";
@@ -14,8 +20,12 @@ export const dynamic = "force-dynamic";
  */
 export default async function SystemPage() {
   let items: SystemConfigItem[];
+  let monitoring: LlmLedgerMonitoring | null;
   try {
-    items = await core.systemConfig();
+    [items, monitoring] = await Promise.all([
+      core.systemConfig(),
+      core.llmLedgerMonitoring().catch((): null => null),
+    ]);
   } catch (err) {
     return <CoreDown detail={err instanceof CoreUnavailable ? err.detail : String(err)} />;
   }
@@ -31,6 +41,8 @@ export default async function SystemPage() {
           API-ключи остаются только в окружении сервера.
         </p>
       </div>
+
+      <LlmMonitoring monitoring={monitoring} />
 
       <LlmSettings initial={llmProfile} />
 

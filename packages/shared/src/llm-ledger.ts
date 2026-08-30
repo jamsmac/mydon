@@ -18,6 +18,73 @@ export type LlmSettlementOutcome = (typeof LLM_SETTLEMENT_OUTCOMES)[number];
 export const LLM_SPEND_STATUSES = ["reserved", "settled", "failed", "released", "denied"] as const;
 export type LlmSpendStatus = (typeof LLM_SPEND_STATUSES)[number];
 
+export type LlmMonitoringCostBasis =
+  "actual" | "lower_bound" | "upper_bound" | "estimate" | "unknown";
+
+/**
+ * Secret-free operational snapshot for the System panel.
+ *
+ * `knownCostUsd` is the settled amount accounted from provider facts. It may
+ * combine exact costs with explicitly marked lower/upper estimates. It
+ * deliberately does not substitute a reserve when the provider outcome is
+ * unknown. Budget admission continues to use the more conservative
+ * `globalExposureUsd`.
+ */
+export interface LlmLedgerMonitoring {
+  generatedAt: string;
+  /** Current calendar day in Asia/Tashkent. */
+  day: string;
+  budget: {
+    globalCapUsd: number;
+    knownCostUsd: number;
+    globalExposureUsd: number;
+    /** Reservations that are still open on the current ledger day. */
+    reservedUsd: number;
+    remainingUsd: number;
+    /** Present when the cap is invalid; monitoring and admission fail closed. */
+    configError?: string;
+  };
+  latestCompleted: {
+    provider: string;
+    consumer: LlmLedgerConsumer;
+    feature: string;
+    requestedModel: string;
+    resolvedModel: string | null;
+    status: "settled" | "failed";
+    outcome: LlmSettlementOutcome | null;
+    costUsd: number | null;
+    costBasis: LlmMonitoringCostBasis;
+    completedAt: string;
+  } | null;
+  stuckReservations: {
+    thresholdMinutes: number;
+    count: number;
+    reservedUsd: number;
+    oldestReservedAt: string | null;
+  };
+  failuresToday: {
+    count: number;
+    providerErrorCount: number;
+    unknownCount: number;
+    last: {
+      failedAt: string;
+      provider: string;
+      requestedModel: string;
+      resolvedModel: string | null;
+      outcome: "provider_error" | "unknown";
+      /** Fixed safe category, never the stored provider error text. */
+      reason: string | null;
+    } | null;
+  };
+  openCircuits: Array<{
+    provider: string;
+    openedAt: string;
+    resetsAt: string;
+    /** Fixed safe category, never raw settlement metadata/reason. */
+    reason: string | null;
+  }>;
+}
+
 /** Стабильная идентичность пользовательского запроса, заданная сурфейсом. */
 export interface LlmCallContext {
   /** Идемпотентный ключ физической попытки провайдера. */

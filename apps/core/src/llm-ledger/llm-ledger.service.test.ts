@@ -9,7 +9,9 @@ import {
   classifySettlementAnomaly,
   consumerRequiresAgent,
   flatOpenAiPriceTierDenial,
+  LLM_STUCK_RESERVATION_THRESHOLD_MINUTES,
   LlmLedgerService,
+  llmMonitoringFrame,
   normalizeSettlement,
   normalizeUsage,
   providerCircuitWindow,
@@ -180,6 +182,93 @@ function reservePolicyTx(
     }),
   } as never;
   return { tx, inserted };
+}
+
+interface MonitoringFixture {
+  config?: Record<string, string>;
+  daily?: {
+    knownCostUsd: string;
+    globalExposureUsd: string;
+    reservedUsd: string;
+  };
+  latest?: Record<string, unknown> | null;
+  stuck?: {
+    count: number | string;
+    reservedUsd: string;
+    oldestReservedAt: Date | string | null;
+  };
+  failures?: {
+    count: number | string;
+    providerErrorCount: number | string;
+    unknownCount: number | string;
+  };
+  lastFailure?: Record<string, unknown> | null;
+  circuits?: Array<Record<string, unknown>>;
+}
+
+/** Узкий read-only DB double для проверки безопасного monitoring snapshot. */
+function monitoringDb(fixture: MonitoringFixture) {
+  return {
+    select: (fields?: Record<string, unknown>) => ({
+      from: (table: unknown) => {
+        if (table === systemConfig) {
+          return Promise.resolve(
+            Object.entries(fixture.config ?? {}).map(([key, value]) => ({ key, value })),
+          );
+        }
+        assert.equal(table, llmSpend);
+        const keys = Object.keys(fields ?? {});
+        if (keys.includes("knownCostUsd")) {
+          return {
+            where: async () => [
+              fixture.daily ?? {
+                knownCostUsd: "0",
+                globalExposureUsd: "0",
+                reservedUsd: "0",
+              },
+            ],
+          };
+        }
+        if (keys.includes("feature")) {
+          return {
+            where: () => ({
+              orderBy: () => ({
+                limit: async () => (fixture.latest ? [fixture.latest] : []),
+              }),
+            }),
+          };
+        }
+        if (keys.includes("oldestReservedAt")) {
+          return {
+            where: async () => [
+              fixture.stuck ?? { count: 0, reservedUsd: "0", oldestReservedAt: null },
+            ],
+          };
+        }
+        if (keys.includes("providerErrorCount")) {
+          return {
+            where: async () => [
+              fixture.failures ?? { count: 0, providerErrorCount: 0, unknownCount: 0 },
+            ],
+          };
+        }
+        if (keys.includes("requestedModel")) {
+          return {
+            where: () => ({
+              orderBy: () => ({
+                limit: async () => (fixture.lastFailure ? [fixture.lastFailure] : []),
+              }),
+            }),
+          };
+        }
+        return {
+          where: () => ({
+            orderBy: async () => fixture.circuits ?? [],
+          }),
+        };
+      },
+    }),
+  } as never;
 }
 
 async function withoutLlmEnabledEnv<T>(body: () => Promise<T>): Promise<T> {
@@ -495,6 +584,298 @@ describe("LLM-ledger settlement invariants", () => {
     const window = providerCircuitWindow(new Date("2026-08-28T19:00:01.000Z"));
     assert.equal(window.start.toISOString(), "2026-08-28T19:00:00.000Z");
     assert.equal(window.end.toISOString(), "2026-08-29T19:00:00.000Z");
+  });
+
+  it("monitoring фиксирует единый день, reset и stale boundary на ташкентской полуночи", () => {
+    const before = llmMonitoringFrame(new Date("2026-08-30T18:59:59.999Z"));
+    assert.equal(before.day, "2026-08-30");
+    assert.equal(before.start.toISOString(), "2026-08-29T19:00:00.000Z");
+    assert.equal(before.end.toISOString(), "2026-08-30T19:00:00.000Z");
+    assert.equal(before.staleBefore.toISOString(), "2026-08-30T18:54:59.999Z");
+    assert.equal(LLM_STUCK_RESERVATION_THRESHOLD_MINUTES, 5);
+
+    const after = llmMonitoringFrame(new Date("2026-08-30T19:00:00.000Z"));
+    assert.equal(after.day, "2026-08-31");
+    assert.equal(after.start.toISOString(), "2026-08-30T19:00:00.000Z");
+    assert.equal(after.end.toISOString(), "2026-08-31T19:00:00.000Z");
+  });
+
+  it("monitoring честно разделяет факт, exposure и reserve и дедуплицирует circuit", async () => {
+    const secret = "sk-do-not-return";
+    const service = new LlmLedgerService(
+      monitoringDb({
+        config: { LLM_GLOBAL_DAILY_BUDGET_USD: "10" },
+        daily: {
+          knownCostUsd: "1.250000001",
+          globalExposureUsd: "3.750000002",
+          reservedUsd: "2.500000001",
+        },
+        latest: {
+          provider: "openai",
+          consumer: "cc",
+          feature: "assistant",
+          requestedModel: "gpt-5.6-sol",
+          resolvedModel: "gpt-5.6-sol-2026-08-01",
+          status: "failed",
+          outcome: "unknown",
+          actualUsd: "0.000000001",
+          metadata: { secret, _llmLedger: { lowerBound: true } },
+          settledAt: null,
+          failedAt: new Date("2026-08-30T18:58:00.000Z"),
+        },
+        stuck: {
+          count: "2",
+          reservedUsd: "2.500000001",
+          oldestReservedAt: "2026-08-29T10:00:00.000Z",
+        },
+        failures: { count: "3", providerErrorCount: "1", unknownCount: "2" },
+        lastFailure: {
+          failedAt: new Date("2026-08-30T18:58:00.000Z"),
+          provider: "openai",
+          requestedModel: "gpt-5.6-sol",
+          resolvedModel: null,
+          outcome: "unknown",
+          reason: `provider result unknown: ${secret}`,
+        },
+        circuits: [
+          {
+            provider: "openai",
+            failedAt: new Date("2026-08-30T18:50:00.000Z"),
+            reason: "later anomaly",
+          },
+          {
+            provider: "anthropic",
+            failedAt: new Date("2026-08-30T18:45:00.000Z"),
+            reason: null,
+          },
+          {
+            provider: "openai",
+            failedAt: new Date("2026-08-30T18:40:00.000Z"),
+            reason: "first anomaly",
+          },
+        ],
+      }),
+    );
+
+    const snapshot = await service.monitoring(new Date("2026-08-30T18:59:00.000Z"));
+    assert.deepEqual(snapshot.budget, {
+      globalCapUsd: 10,
+      knownCostUsd: 1.250000001,
+      globalExposureUsd: 3.750000002,
+      reservedUsd: 2.500000001,
+      remainingUsd: 6.249999998,
+    });
+    assert.deepEqual(snapshot.latestCompleted, {
+      provider: "openai",
+      consumer: "cc",
+      feature: "assistant",
+      requestedModel: "gpt-5.6-sol",
+      resolvedModel: "gpt-5.6-sol-2026-08-01",
+      status: "failed",
+      outcome: "unknown",
+      costUsd: 0.000000001,
+      costBasis: "lower_bound",
+      completedAt: "2026-08-30T18:58:00.000Z",
+    });
+    assert.deepEqual(snapshot.stuckReservations, {
+      thresholdMinutes: 5,
+      count: 2,
+      reservedUsd: 2.500000001,
+      oldestReservedAt: "2026-08-29T10:00:00.000Z",
+    });
+    assert.equal(snapshot.failuresToday.count, 3);
+    assert.equal(snapshot.failuresToday.last?.reason, "Исход запроса неизвестен");
+    assert.deepEqual(snapshot.openCircuits, [
+      {
+        provider: "openai",
+        openedAt: "2026-08-30T18:40:00.000Z",
+        resetsAt: "2026-08-30T19:00:00.000Z",
+        reason: "Аномалия модели открыла circuit",
+      },
+      {
+        provider: "anthropic",
+        openedAt: "2026-08-30T18:45:00.000Z",
+        resetsAt: "2026-08-30T19:00:00.000Z",
+        reason: "Аномалия модели открыла circuit",
+      },
+    ]);
+    assert.doesNotMatch(JSON.stringify(snapshot), /sk-do-not-return|requestKey|_llmLedger/);
+  });
+
+  it("monitoring fail-closed показывает invalid cap и не подменяет unknown cost резервом", async () => {
+    const service = new LlmLedgerService(
+      monitoringDb({
+        config: { LLM_GLOBAL_DAILY_BUDGET_USD: "not-money" },
+        daily: {
+          knownCostUsd: "0",
+          globalExposureUsd: "2",
+          reservedUsd: "2",
+        },
+        latest: {
+          provider: "anthropic",
+          consumer: "documents",
+          feature: "render",
+          requestedModel: "claude-opus-5",
+          resolvedModel: null,
+          status: "failed",
+          outcome: "unknown",
+          actualUsd: null,
+          metadata: null,
+          settledAt: null,
+          failedAt: new Date("2026-08-30T10:00:00.000Z"),
+        },
+      }),
+    );
+
+    const snapshot = await service.monitoring(new Date("2026-08-30T12:00:00.000Z"));
+    assert.equal(snapshot.budget.globalCapUsd, 0);
+    assert.equal(snapshot.budget.remainingUsd, 0);
+    assert.match(snapshot.budget.configError ?? "", /не является неотрицательной суммой/);
+    assert.equal(snapshot.latestCompleted?.costUsd, null);
+    assert.equal(snapshot.latestCompleted?.costBasis, "unknown");
+  });
+
+  it("успешный Documents settlement остаётся lower bound, а не мнимым итогом", async () => {
+    const snapshot = await new LlmLedgerService(
+      monitoringDb({
+        latest: {
+          provider: "anthropic",
+          consumer: "documents",
+          feature: "document:pdf",
+          requestedModel: "claude-opus-5",
+          resolvedModel: "claude-opus-5",
+          status: "settled",
+          outcome: "success",
+          actualUsd: "0.125000001",
+          metadata: {},
+          settledAt: new Date("2026-08-30T11:59:00.000Z"),
+          failedAt: null,
+        },
+      }),
+    ).monitoring(new Date("2026-08-30T12:00:00.000Z"));
+
+    assert.equal(snapshot.latestCompleted?.costUsd, 0.125000001);
+    assert.equal(snapshot.latestCompleted?.costBasis, "lower_bound");
+  });
+
+  it("aggregate-only cache creation показывается как верхняя граница", async () => {
+    const snapshot = await new LlmLedgerService(
+      monitoringDb({
+        latest: {
+          provider: "anthropic",
+          consumer: "agents",
+          feature: "assistant",
+          requestedModel: "claude-opus-5",
+          resolvedModel: "claude-opus-5",
+          status: "settled",
+          outcome: "success",
+          actualUsd: "0.250000001",
+          cacheCreationInputTokens: 10,
+          cacheCreation5mInputTokens: null,
+          cacheCreation1hInputTokens: null,
+          metadata: {},
+          settledAt: new Date("2026-08-30T11:59:00.000Z"),
+          failedAt: null,
+        },
+      }),
+    ).monitoring(new Date("2026-08-30T12:00:00.000Z"));
+
+    assert.equal(snapshot.latestCompleted?.costUsd, 0.250000001);
+    assert.equal(snapshot.latestCompleted?.costBasis, "upper_bound");
+  });
+
+  it("нулевой aggregate-only cache не превращает точную цену в границу", async () => {
+    const snapshot = await new LlmLedgerService(
+      monitoringDb({
+        latest: {
+          provider: "anthropic",
+          consumer: "agents",
+          feature: "assistant",
+          requestedModel: "claude-opus-5",
+          resolvedModel: "claude-opus-5",
+          status: "settled",
+          outcome: "success",
+          actualUsd: "0.125",
+          cacheCreationInputTokens: 0,
+          cacheCreation5mInputTokens: null,
+          cacheCreation1hInputTokens: null,
+          metadata: {},
+          settledAt: new Date("2026-08-30T11:59:00.000Z"),
+          failedAt: null,
+        },
+      }),
+    ).monitoring(new Date("2026-08-30T12:00:00.000Z"));
+
+    assert.equal(snapshot.latestCompleted?.costBasis, "actual");
+  });
+
+  it("aggregate-only cache вместе с lower bound отмечает сумму как оценку", async () => {
+    const snapshot = await new LlmLedgerService(
+      monitoringDb({
+        latest: {
+          provider: "anthropic",
+          consumer: "documents",
+          feature: "document:pdf",
+          requestedModel: "claude-opus-5",
+          resolvedModel: "claude-opus-5",
+          status: "settled",
+          outcome: "success",
+          actualUsd: "0.250000001",
+          cacheCreationInputTokens: 10,
+          cacheCreation5mInputTokens: null,
+          cacheCreation1hInputTokens: null,
+          metadata: {},
+          settledAt: new Date("2026-08-30T11:59:00.000Z"),
+          failedAt: null,
+        },
+      }),
+    ).monitoring(new Date("2026-08-30T12:00:00.000Z"));
+
+    assert.equal(snapshot.latestCompleted?.costBasis, "estimate");
+  });
+
+  it("ошибка сегодня видна по failedAt, даже если reserve относился ко вчерашнему billing day", async () => {
+    const snapshot = await new LlmLedgerService(
+      monitoringDb({
+        daily: { knownCostUsd: "0", globalExposureUsd: "0", reservedUsd: "0" },
+        failures: { count: 1, providerErrorCount: 1, unknownCount: 0 },
+        lastFailure: {
+          day: "2026-08-29",
+          failedAt: new Date("2026-08-30T08:00:00.000Z"),
+          provider: "openai",
+          requestedModel: "gpt-5.6-sol",
+          resolvedModel: "gpt-5.6-sol",
+          outcome: "provider_error",
+          reason: "HTTP 429",
+        },
+      }),
+    ).monitoring(new Date("2026-08-30T12:00:00.000Z"));
+
+    assert.equal(snapshot.day, "2026-08-30");
+    assert.equal(snapshot.failuresToday.count, 1);
+    assert.equal(snapshot.failuresToday.last?.failedAt, "2026-08-30T08:00:00.000Z");
+    assert.equal(snapshot.failuresToday.last?.outcome, "provider_error");
+  });
+
+  it("monitoring defensive mapping исключает denied/released из latest", async () => {
+    const latestBase = {
+      provider: "openai",
+      consumer: "bot",
+      feature: "chat",
+      requestedModel: "gpt-5.6-sol",
+      resolvedModel: null,
+      outcome: null,
+      actualUsd: null,
+      metadata: {},
+      settledAt: null,
+      failedAt: null,
+    };
+    for (const status of ["denied", "released"] as const) {
+      const snapshot = await new LlmLedgerService(
+        monitoringDb({ latest: { ...latestBase, status } }),
+      ).monitoring(new Date("2026-08-30T12:00:00.000Z"));
+      assert.equal(snapshot.latestCompleted, null);
+    }
   });
 
   it("missing/mismatched provider model открывает circuit; exact/dated Anthropic проходит", () => {
