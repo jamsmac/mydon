@@ -85,6 +85,17 @@ describe("callModel", () => {
     assert.equal(calls[0].req.maxTokens, 2048, "default maxTokens всегда уходит provider-у");
   });
 
+  it("передаёт явный reasoning budget в exact model request", async () => {
+    const { gateway, calls } = fakeGateway({ "gpt-5.6-sol": { text: "готово" } });
+    await callModel(
+      gateway,
+      { prompt: "сделай", reasoningEffort: "none", maxTokens: 192, ...BASE },
+      ["gpt-5.6-sol"],
+    );
+    assert.equal(calls[0].req.reasoningEffort, "none");
+    assert.equal(calls[0].req.maxTokens, 192);
+  });
+
   it("fallback: каждая metered-попытка имеет свой reserve/requestKey", async () => {
     const { gateway, calls } = fakeGateway(
       {

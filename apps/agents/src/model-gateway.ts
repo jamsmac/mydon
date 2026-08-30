@@ -64,6 +64,9 @@ export const DEFINITIVE_PROVIDER_REJECTION_STATUSES = new Set([
  * ноль живых зависимостей, пока владелец сознательно не подключит модель.
  */
 
+/** Поддерживаемые Chat Completions значения reasoning_effort. */
+export type ModelReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 /** Запрос к модели. */
 export interface ModelRequest {
   /** Системная роль (страж инъекций + инструкция навыка). */
@@ -72,6 +75,8 @@ export interface ModelRequest {
   prompt: string;
   /** Потолок токенов ответа. */
   maxTokens?: number;
+  /** Явный reasoning budget; шлюз передаёт его только поддерживаемым OpenAI-моделям. */
+  reasoningEffort?: ModelReasoningEffort;
 }
 
 /** Результат вызова модели. */
@@ -281,6 +286,7 @@ export class HttpModelGateway implements ModelGateway {
 
   buildRequestPayload(model: string, req: ModelRequest): Record<string, unknown> {
     const officialOpenAi = this.provider === "openai";
+    const supportsReasoningEffort = officialOpenAi && /^gpt-5\.6(?:-|$)/.test(model);
     return {
       model,
       messages: [
@@ -294,6 +300,9 @@ export class HttpModelGateway implements ModelGateway {
         ? officialOpenAi
           ? { max_completion_tokens: req.maxTokens }
           : { max_tokens: req.maxTokens }
+        : {}),
+      ...(supportsReasoningEffort && req.reasoningEffort
+        ? { reasoning_effort: req.reasoningEffort }
         : {}),
       // The Core catalog contains Standard API prices. Explicitly pin that
       // physical tier so a project-level auto/Fast preference cannot make the

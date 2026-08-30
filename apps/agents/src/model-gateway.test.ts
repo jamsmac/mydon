@@ -141,12 +141,33 @@ describe("HttpModelGateway — metered OpenAI-compatible", () => {
       1000,
       "metered",
     );
-    assert.deepEqual(official.buildRequestPayload("gpt-5.6-sol", { prompt: "p", maxTokens: 99 }), {
-      model: "gpt-5.6-sol",
-      messages: [{ role: "user", content: "p" }],
-      max_completion_tokens: 99,
-      service_tier: "default",
-    });
+    assert.deepEqual(
+      official.buildRequestPayload("gpt-5.6-sol", {
+        prompt: "p",
+        maxTokens: 99,
+        reasoningEffort: "none",
+      }),
+      {
+        model: "gpt-5.6-sol",
+        messages: [{ role: "user", content: "p" }],
+        max_completion_tokens: 99,
+        reasoning_effort: "none",
+        service_tier: "default",
+      },
+    );
+    assert.deepEqual(
+      official.buildRequestPayload("legacy-model", {
+        prompt: "p",
+        maxTokens: 99,
+        reasoningEffort: "none",
+      }),
+      {
+        model: "legacy-model",
+        messages: [{ role: "user", content: "p" }],
+        max_completion_tokens: 99,
+        service_tier: "default",
+      },
+    );
 
     const compatible = new HttpModelGateway(
       "https://gateway.invalid/v1",

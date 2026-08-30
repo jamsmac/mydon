@@ -5,6 +5,7 @@ import { useState, useTransition } from "react";
 import { addComment, changeStatus, completeTask, rateTask } from "../app/tasks/actions";
 import type { Task, TaskComment } from "../lib/core";
 import { when } from "../lib/format";
+import { SafeReportText } from "./safe-report-text";
 
 const QUALITY_LABEL = {
   excellent: "⭐ отлично",
@@ -106,7 +107,9 @@ export function TaskDetail({
         {task.resultNote ? (
           <div className="result-box">
             <div className="result-title">Отчёт о выполнении</div>
-            <p>{task.resultNote}</p>
+            <p>
+              <SafeReportText text={task.resultNote} />
+            </p>
             {task.completedAt && <small>Закрыта {when(task.completedAt)}</small>}
             {task.status === "done" &&
               (task.quality ? (

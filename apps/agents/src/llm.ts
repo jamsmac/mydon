@@ -5,7 +5,13 @@ import {
   type LlmLedger,
   type LlmReservation,
 } from "@mydon/shared";
-import { resolveModelChain, type ModelGateway, type ModelResult } from "./model-gateway";
+import {
+  resolveModelChain,
+  type ModelGateway,
+  type ModelReasoningEffort,
+  type ModelRequest,
+  type ModelResult,
+} from "./model-gateway";
 import type { TaskLlmSession } from "./task-llm-session";
 import { systemGuard, wrapUntrusted } from "./untrusted";
 
@@ -30,6 +36,8 @@ export interface CallModelInput {
   system?: string;
   /** Потолок токенов ответа; незаданный/битый берёт безопасный default. */
   maxTokens?: number;
+  /** Явный reasoning budget для поддерживаемого провайдером model route. */
+  reasoningEffort?: ModelReasoningEffort;
   /** Карточка агента даёт Core его индивидуальный cap/strategy. */
   agentName: string;
   /** Навык/функция для финансового следа. */
@@ -128,6 +136,12 @@ export async function callModel(
   const system = [systemGuard(), input.system].filter(Boolean).join("\n\n");
   const prompt = buildPrompt(input);
   const maxTokens = outputCeiling(input.maxTokens);
+  const request: ModelRequest = {
+    system,
+    prompt,
+    maxTokens,
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+  };
   const metered = gateway.billingMode === "metered";
   const effectiveChain = input.taskLlm
     ? input.taskLlm.modelsForChat(input.feature, gateway, chain)
@@ -156,7 +170,7 @@ export async function callModel(
           input.feature,
           model,
           i + 1,
-          { system, prompt, maxTokens },
+          request,
           inputTokenCeiling(`${system}\n\n${prompt}`),
           maxTokens,
         );
@@ -194,7 +208,7 @@ export async function callModel(
         }
 
         try {
-          last = await gateway.call(model, { system, prompt, maxTokens });
+          last = await gateway.call(model, request);
         } catch (error) {
           last = { text: "", model, ok: false, error: message(error) };
         }
@@ -202,7 +216,7 @@ export async function callModel(
       }
     } else {
       try {
-        last = await gateway.call(model, { system, prompt, maxTokens });
+        last = await gateway.call(model, request);
       } catch (error) {
         last = { text: "", model, ok: false, error: message(error) };
       }

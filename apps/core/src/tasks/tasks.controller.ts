@@ -247,6 +247,16 @@ export class AgentRunStartDto extends AgentRunFenceDto {
   plan!: Record<string, unknown>;
 }
 
+export class AgentRunInputSnapshotDto extends AgentRunFenceDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  kind!: string;
+
+  @IsObject()
+  payload!: Record<string, unknown>;
+}
+
 export class AgentRunCheckpointDto extends AgentRunFenceDto {
   @IsString()
   @IsNotEmpty()
@@ -321,6 +331,7 @@ export class ReleaseAgentRunDto extends AgentRunFenceDto {
     "budget_denied",
     "execution_unknown",
     "workflow_changed",
+    "route_unavailable",
     "action_capped",
     "unsupported",
   ])
@@ -328,6 +339,7 @@ export class ReleaseAgentRunDto extends AgentRunFenceDto {
     | "budget_denied"
     | "execution_unknown"
     | "workflow_changed"
+    | "route_unavailable"
     | "action_capped"
     | "unsupported";
 
@@ -547,6 +559,15 @@ export class TasksController {
   @Post(":id/agent-run/start")
   startAgentRun(@Param("id", ParseUUIDPipe) id: string, @Body() dto: AgentRunStartDto) {
     return this.tasks.startAgentRun(id, dto);
+  }
+
+  /** Immutable public retrieval evidence, persisted before a dependent LLM call. */
+  @Post(":id/agent-run/input-snapshot")
+  inputSnapshotAgentRun(
+    @Param("id", ParseUUIDPipe) id: string,
+    @Body() dto: AgentRunInputSnapshotDto,
+  ) {
+    return this.tasks.ensureAgentRunInputSnapshot(id, dto);
   }
 
   /** Durable provider/skill result, before approval/event/memory/task effects. */

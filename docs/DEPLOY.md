@@ -50,7 +50,8 @@ LLM_API_KEY=
 `AGENTS_TASKS_PAUSED=1` — осознанные fail-closed значения:
 агенты только предлагают, cron-расписания не запускаются, а
 task-worker не забирает порученные через Core задачи. Паузы независимы:
-для ручного canary можно снять только `AGENTS_TASKS_PAUSED`, оставив cron на паузе.
+для ручного canary можно снять только `AGENTS_TASKS_PAUSED`, не меняя
+текущее effective-значение паузы cron.
 При обновлении старой установки новый task-тумблер тоже начинает с безопасного
 `1`: даже если cron раньше уже работал, назначенные задачи не возобновятся до
 явного `AGENTS_TASKS_PAUSED=0` в панели или `.env`.
@@ -125,16 +126,18 @@ Production-скрипты запускают эти команды однора�
 образа до переключения сервисов. `migrate.js` печатает ошибку PostgreSQL и
 проблемный запрос; `drizzle-kit migrate` для операционного запуска не используем.
 
-### Rollout LLM-ledger, task checkpoint и GPT-5.6 Sol: 0075 → 0078
+### Rollout LLM-ledger, task snapshot/checkpoint и GPT-5.6 Sol: 0075 → 0079
 
 Эти миграции выкатываются строго по journal: сначала `0075_llm_ledger`, затем
 `0076_agent_execution_outbox`, `0077_nebulous_silk_fever` и
-`0078_openai_gpt_56_sol`. 0075 создаёт финансовый ledger и устойчивую денежную
+`0078_openai_gpt_56_sol`, потом `0079_task_agent_input_snapshot`. 0075 создаёт
+финансовый ledger и устойчивую денежную
 попытку задачи; 0076 добавляет durable task checkpoint, атомарный commit и
 Notion outbox; 0077 создаёт durable provider jobs/authorizations/results и
 переводит execution в двухфазный `active → ready`; 0078 добавляет dated-тариф
-`openai/gpt-5.6-sol`. Нельзя выборочно применять позднюю миграцию без предыдущих
-или запускать новый Agents против старого Core.
+`openai/gpt-5.6-sol`; 0079 добавляет в execution bounded immutable public
+retrieval snapshot до зависимого LLM-шага. Нельзя выборочно применять
+позднюю миграцию без предыдущих или запускать новый Agents против старого Core.
 
 > **Первая выкатка 0077 — только ручная.** `auto-deploy.sh` сразу
 > перезапускается из временной копии **до** `git reset`; поэтому commit,
@@ -147,20 +150,22 @@ Notion outbox; 0077 создаёт durable provider jobs/authorizations/results 
 
 Порядок controlled rollout:
 
-1. Выставить обе независимые паузы:
-   `AGENTS_SCHEDULES_PAUSED=1` и `AGENTS_TASKS_PAUSED=1`, затем остановить
-   `mydon-agents`. Первая блокирует cron, вторая — новый task claim;
-   одна пауза расписаний больше не останавливает очередь задач.
+1. Зафиксировать текущее effective-значение
+   `AGENTS_SCHEDULES_PAUSED` и не менять его в этом rollout. В текущем
+   production schedules включены (`0`) и остаются включёнными. Выставить
+   только `AGENTS_TASKS_PAUSED=1`, затем остановить `mydon-agents`. Пауза
+   task-worker блокирует новый task claim; пауза расписаний — отдельный
+   контур.
 2. Убедиться, что pre-migration backup создан и не пуст.
-3. Новым образом выполнить `migrate.js`: journal сам применит 0075–0078. Не
+3. Новым образом выполнить `migrate.js`: journal сам применит 0075–0079. Не
    запускать SQL-файлы вручную или в обратном порядке.
 4. Поднять **Core раньше Agents**, дождаться health и проверить наличие ledger,
    execution/outbox и всех трёх таблиц provider job.
 5. Только после этого поднять новый `mydon-agents`. Для первого
    canary снять только паузу порученных задач
-   (`AGENTS_TASKS_PAUSED=0`), оставить `AGENTS_SCHEDULES_PAUSED=1` и
-   наблюдать task checkpoint и Notion outbox. Cron включать отдельно
-   только после успешной проверки.
+   (`AGENTS_TASKS_PAUSED=0`), проверить, что зафиксированное
+   `AGENTS_SCHEDULES_PAUSED=0` не изменилось, и наблюдать task snapshot/checkpoint и
+   Notion outbox.
 
 Минимальная проверка схемы после шага 3:
 
@@ -172,6 +177,16 @@ select to_regclass('public.llm_spend')             as llm_spend,
        to_regclass('public.agent_task_llm_job')    as agent_task_llm_job,
        to_regclass('public.agent_task_llm_authorization') as agent_task_llm_authorization,
        to_regclass('public.agent_task_llm_result') as agent_task_llm_result;
+select column_name
+  from information_schema.columns
+ where table_schema = 'public'
+   and table_name = 'task_agent_execution'
+   and column_name in (
+     'input_snapshot_kind',
+     'input_snapshot_payload',
+     'input_snapshot_hash'
+   )
+ order by column_name;
 do \$\$
 declare
   active_price_count integer;
@@ -217,12 +232,18 @@ select provider, model, billing_kind, settlement_kind,
    and (valid_to is null or valid_to > now())"
 ```
 
+Второй `select` обязан вернуть ровно три поля snapshot; их отсутствие
+означает, что 0079 не доехала. Agents до устранения не включать.
+
 До `LLM_ENABLED=1` запрос должен вернуть одну активную строку
 `openai | gpt-5.6-sol | metered | tokens` со ставками
 `4 | 20 | 0.4 | 5 | 5 | 0 | NULL | 0` и
 `valid_to = 2026-11-22T00:00:00Z`; затем
 проверить серверный ключ, exact endpoint, суточный лимит `$10` и потолок одного
-reserve `$3`. До истечения promotional-тарифа нужна новая dated-миграция;
+reserve `$3`. Для первого canary дополнительно проверить effective
+`LLM_FALLBACK_MODELS=''`: иначе definitive rejection основной модели может
+создать второй оплачиваемый job, и условие «ровно один» заранее не выполнено.
+До истечения promotional-тарифа нужна новая dated-миграция;
 без неё Core намеренно заблокирует reserve. Сам ключ командами проверки не печатать.
 
 После первого task-run проверить, что checkpoint появляется до outcome, а
@@ -230,14 +251,57 @@ Notion intent — только вместе с committed outcome:
 
 ```bash
 /opt/backups/db_access.sh query "
-select e.id, e.execution_attempt_id, e.status, e.checkpoint_kind,
-       e.committed_at, d.status as delivery_status, d.attempts,
-       d.provider_ref, d.last_error
-  from task_agent_execution e
+select t.id as task_id, t.title, t.description, t.domain,
+       e.id, e.execution_attempt_id, e.status,
+       e.input_snapshot_kind, e.input_snapshot_hash,
+       octet_length(e.input_snapshot_payload::text) as input_snapshot_bytes,
+       e.checkpoint_kind,
+       e.checkpoint_payload #>> '{facts,model,called}' as model_called,
+       e.checkpoint_payload #>> '{facts,model,valid}' as model_ranking_valid,
+       e.committed_at,
+       d.status as delivery_status, d.attempts, d.provider_ref, d.last_error
+  from task t
+  join task_agent_execution e on e.task_id = t.id
   left join outbox_delivery d on d.task_agent_execution_id = e.id
- order by e.created_at desc
- limit 20"
+ where t.id = '<task-id>'
+ order by e.created_at desc;
+
+select j.step_key, j.provider_attempt_no, j.status as job_status,
+       j.dispatch_count, j.provider, j.model,
+       s.feature, s.status as spend_status, s.actual_usd,
+       s.input_tokens, s.output_tokens, s.outcome
+  from task_agent_execution e
+  join agent_task_llm_job j on j.task_agent_execution_id = e.id
+  left join llm_spend s on s.id = j.spend_id
+ where e.task_id = '<task-id>'
+ order by j.created_at"
 ```
+
+Для первого `solution-scout` canary проходной результат — одна
+`committed` execution с `input_snapshot_kind = 'solution-search-v1'`, непустым
+hash и snapshot не больше 65 536 bytes, а также
+`model_called = 'true'` и `model_ranking_valid = 'true'`. Успешный provider job
+с отклонённым JSON (`valid = false`) не проходит canary и не должен маскироваться
+детерминированным fallback. Второй запрос должен вернуть ровно
+одну строку `find-solution:rank`: `job_status = 'succeeded'`,
+`dispatch_count = 1`, `feature = 'find-solution:rank'`, `spend_status = 'settled'`.
+Целевой actual расход — не больше примерно `$0.01`; это проверка
+факта после settlement, а не новый hard-cap вместо `$10/$3`. Любая вторая
+строка job, неизвестная стоимость или заметное превышение цели — отказ
+canary, а не повод сразу повторить paid call.
+
+В панели `Система · LLM-мониторинг` одновременно сверить последнюю
+модель/стоимость, нуль зависших резервов и ошибок, закрытый circuit и пустую
+очередь закрытия ledger. Notion outbox после dispatcher должен быть
+`sent` или честным `skipped`, если Notion не настроен; `unknown`/`dead` и
+просроченный `dispatching` не считаются успехом.
+
+При любом несхождении сразу вернуть `AGENTS_TASKS_PAUSED=1`, оставить
+зафиксированное `AGENTS_SCHEDULES_PAUSED=0` без изменений и не чистить
+durable rows. Повтор разрешается только
+по процедуре owner retry после сверки evidence. Полный порядок одного canary и
+обязательные coverage gaps — в
+[`AGENTS_ACTIVATION.md`](AGENTS_ACTIVATION.md).
 
 Принятый Core provider result теперь durable ещё до checkpoint: stale takeover
 читает его и не повторяет оплаченный job. Честная граница остаётся между
@@ -264,9 +328,10 @@ Notion dispatcher переводит `pending → dispatching` до внешне
 не поднимать: они не умеют безопасно resume эти состояния. Оставить
 новый Core, сверить provider evidence и закрыть/owner-retry каждую
 неоднозначную попытку; только при нуле таких строк возвращать
-предыдущие образы. Таблицы, enums и колонки 0075–0077, включая
-`agent_task_llm_*`, **не удалять и не откатывать DROP-миграцией**: старый код их
-игнорирует, а строки checkpoint/outbox нужны для аудита и последующего
+предыдущие образы. Таблицы, enums и колонки 0075–0079, включая
+`agent_task_llm_*`, а также snapshot-колонки 0079, **не удалять и не откатывать
+DROP-миграцией**: старый код их игнорирует, а строки snapshot/checkpoint/outbox нужны для
+аудита и последующего
 forward-fix. `pending`/`dispatching`/`unknown` при rollback не чистить; перед
 повторным включением dispatcher разобрать неоднозначные строки по runbook выше.
 

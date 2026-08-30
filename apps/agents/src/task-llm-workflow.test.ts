@@ -91,6 +91,22 @@ describe("versioned task LLM workflow plan", () => {
     assert.ok(plan.steps.every((step) => step.models.length === 3));
   });
 
+  it("find-solution persists one paid ranking step after durable retrieval", () => {
+    configureChat();
+    const plan = buildTaskLlmWorkflowPlan("find-solution");
+    assert.equal(plan.version, 1);
+    assert.deepEqual(
+      plan.steps.map((step) => ({ stepKey: step.stepKey, kind: step.kind, models: step.models })),
+      [
+        {
+          stepKey: "find-solution:rank",
+          kind: "chat",
+          models: ["m1", "m2", "m3"],
+        },
+      ],
+    );
+  });
+
   it("deterministic and explicitly local routes keep an empty durable provider plan", () => {
     configureChat();
     process.env.LLM_HTTP_BILLING_MODE = "local";

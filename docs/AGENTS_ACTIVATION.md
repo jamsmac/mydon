@@ -67,8 +67,13 @@ MYDON машиночитаемый pre-turn режим «included-only». Поэ
 
 [Официальные правила лимитов и ChatGPT credits для Codex](https://learn.chatgpt.com/docs/pricing).
 
-Что оживает после настройки HTTP: навык `assess-ideas` (оценка фишек канала моделью) и петля coach
-(EVAL/PROPOSE). Без шлюза оба честно спят.
+Что оживает после настройки HTTP: навык `assess-ideas` (оценка фишек
+канала моделью), петля coach (EVAL/PROPOSE) и `find-solution`
+агента `solution-scout` для порученных Core-задач. Без шлюза `assess-ideas`
+и coach честно спят. Порученная `find-solution` задача не превращается
+в ложный `no_signal`: она остаётся открытой, worker сообщает
+`ledger_unavailable` и не делает provider call. Одна лишь настройка HTTP также
+не снимает паузу порученных задач.
 
 ---
 
@@ -109,6 +114,63 @@ HTTP-вызова; никакого неявного `openai-compatible` или 
 отсутствие `usage.cost` не считается доказательством нулевой цены. Core сам
 классифицирует неполный или несовместимый settlement и при routing anomaly
 открывает provider circuit до ручной сверки либо новых ташкентских суток.
+
+## Сценарий 1в — безопасный canary `solution-scout`
+
+`find-solution` оживает только для задачи, которая в Core поручена
+агенту `solution-scout`. Вход задачи атомарный: `title`, опциональные
+`description` и `domain` входят в один `taskInput` и его hash. Если задачу
+изменили после старта execution, старый результат не коммитится.
+
+Поиск первого среза идёт по публичному GitHub через GET-only connector с
+фиксированным хостом `api.github.com`. Он не переходит по `homepage`,
+README-ссылкам или редиректам. Для public-вызова новый секрет не нужен:
+не копируй GitHub CLI токен ни в панель, ни в production `.env`. Rate limit
+или частичный отказ источника должен попасть в coverage gaps, а не маскироваться
+под «ничего не найдено».
+
+Порядок одного canary:
+
+1. Убедиться, что миграция `0079_task_agent_input_snapshot` применена, Core и
+   Agents healthy, `LLM_ENABLED=1`, маршрут — `openai-api / gpt-5.6-sol`,
+   effective `LLM_FALLBACK_MODELS` пуст, а глобальный потолок автономии
+   остаётся `T0`. Непустая fallback-chain может законно создать второй
+   provider job после definitive rejection и потому не допускается в этом
+   одноразовом canary.
+2. Зафиксировать текущее effective-значение `AGENTS_SCHEDULES_PAUSED` и не менять
+   его ради canary: пауза cron и task-worker — разные контуры. В текущем
+   production schedules не на паузе (`0`), и в этом rollout они остаются
+   в том же состоянии. Снять только `AGENTS_TASKS_PAUSED` и поручить
+   `solution-scout` ровно одну тестовую задачу с короткими `title`,
+   `description` и выбранным `domain`. В очереди не должно быть других
+   порученных агентам задач.
+3. До платного шага Core должен сохранить immutable snapshot с kind
+   `solution-search-v1`. После него допускается ровно один physical
+   ranking job `find-solution:rank` через durable LLM-ledger. Операционная
+   цель первого canary — фактическая стоимость около `$0.01`: для этого
+   шага используется `max_completion_tokens=192` и поддерживаемый GPT-5.6 Sol
+   `reasoning_effort=none`, причём оба параметра входят в сохранённый exact
+   provider request. Это не
+   заменяет ledger-cap `$10/$3`, а ограничивается одним коротким job. Второй
+   paid job в этом canary не запускать.
+4. В карточке задачи принять только T1 proposal: ранжированный отчёт с
+   canonical `https://github.com/<owner>/<repo>` links и честными coverage gaps.
+   Canary считается успешным только при `facts.model.called=true` и
+   `facts.model.valid=true`; `LLM output invalid/rejected; deterministic fallback`
+   — диагностический результат, а не успешная проверка GPT-ranking.
+   Для этого среза обязательно указать: GitHub-only; SaaS-каталоги,
+   `n8n.io` и YouTube не искались; dependency/security advisory review
+   incomplete; CVE не проверялись. Это отчёт, а не разрешение установить
+   или запустить найденный код.
+5. В `Система · LLM-мониторинг` сверить фактическую стоимость и модель,
+   нулевые зависшие резервы и ошибки, закрытый circuit и пустую очередь
+   закрытия ledger. В БД дополнительно сверить snapshot, один ranking job,
+   один связанный `llm_spend` и Notion outbox по командам из
+   [`DEPLOY.md`](DEPLOY.md).
+6. Если хоть одна проверка не сошлась, не повторять paid call: сразу
+   вернуть `AGENTS_TASKS_PAUSED=1`, не менять зафиксированное значение
+   `AGENTS_SCHEDULES_PAUSED` и разобрать
+   сохранённые evidence. Пауза task-worker не стирает snapshot/job/spend/outbox.
 
 ## Preflight перед включением Bot / CC / Documents
 
@@ -227,11 +289,21 @@ rollout миграции проверь значение ключа в productio
 Ничего не задано → это не поломка: агенты работают детерминированно, очередь
 остаётся сигналом, а не лентой.
 
-## Durable provider result, checkpoint и Notion outbox (миграции 0076–0077)
+## Durable provider result, retrieval snapshot, checkpoint и Notion outbox (миграции 0076–0079)
 
 Этот контур действует только для **задачи, порученной агенту через Core**. После
 claim worker сначала создаёт в Core `active` execution: фиксируются исходный
-task-input hash, versioned workflow plan и устойчивый `executionAttemptId`.
+task-input hash (`title` + `description` + `domain`), versioned workflow plan и
+устойчивый `executionAttemptId`.
+
+Для навыка с волатильным read-only retrieval миграция 0079 добавляет ещё
+одну границу до provider dispatch: first-write-wins `inputSnapshot` в той же
+execution. Core канонизирует публичный JSON, ограничивает его 64 KiB,
+хэширует и на exact replay возвращает те же evidence; иной payload для того
+же execution отклоняется. `solution-scout` сохраняет так `solution-search-v1`
+после fixed-host GitHub retrieval и до единственного paid ranking. Падение в этом
+окне больше не повторяет поиск и не меняет prompt перед повтором.
+
 Каждый metered chat/embedding шаг получает отдельный durable job. До HTTP-вызова
 Core сохраняет точный provider JSON без auth/secrets и выдаёт один dispatch
 token; после ответа одной транзакцией сохраняет immutable result и settlement

@@ -39,7 +39,9 @@ export const vhm24 = {
   status: "planned" as const,
   note: "REST API существует, связать. Нужны VHM24_API_URL/VHM24_API_KEY.",
   async fetchMachines(): Promise<never> {
-    throw new Error("VHM24 connector не реализован (см. Ф5): заполните VHM24_API_URL/VHM24_API_KEY.");
+    throw new Error(
+      "VHM24 connector не реализован (см. Ф5): заполните VHM24_API_URL/VHM24_API_KEY.",
+    );
   },
 } satisfies ConnectorMeta & Record<string, unknown>;
 
@@ -68,6 +70,7 @@ export * from "./cowork";
 
 // Чтение страниц сайтов — источник новых данных (решение владельца 2026-07-28).
 export * from "./web";
+export * from "./github";
 export * from "./telegram";
 export * from "./ourvend";
 

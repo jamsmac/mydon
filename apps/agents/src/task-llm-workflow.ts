@@ -72,7 +72,10 @@ function embeddingStep(
  */
 export function buildTaskLlmWorkflowPlan(skill: string): TaskLlmWorkflowPlan {
   const steps: TaskLlmWorkflowStep[] = [];
-  const chat = skill === "assess-ideas" || skill === "coach-review" ? modelGatewayFromEnv() : null;
+  const chat =
+    skill === "assess-ideas" || skill === "coach-review" || skill === "find-solution"
+      ? modelGatewayFromEnv()
+      : null;
   const models = boundedModels(resolveModelChain());
 
   if (skill === "assess-ideas") {
@@ -102,6 +105,11 @@ export function buildTaskLlmWorkflowPlan(skill: string): TaskLlmWorkflowPlan {
     }
     steps.push(chatStep("coach-review:eval", chat.provider, chat.endpointProfile, models));
     steps.push(chatStep("coach-review:propose", chat.provider, chat.endpointProfile, models));
+  } else if (skill === "find-solution" && chat?.billingMode === "metered" && models.length > 0) {
+    if (!chat.endpointProfile) {
+      throw new Error("Metered chat gateway has no durable endpoint profile");
+    }
+    steps.push(chatStep("find-solution:rank", chat.provider, chat.endpointProfile, models));
   }
 
   return { version: TASK_LLM_WORKFLOW_VERSION, steps };

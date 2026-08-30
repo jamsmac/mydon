@@ -5,6 +5,7 @@ import { useState, useTransition } from "react";
 import { confirmTask, rateTask } from "../app/tasks/actions";
 import { when } from "../lib/format";
 import type { Task } from "../lib/core";
+import { SafeReportText } from "./safe-report-text";
 
 /**
  * Блок «Ждут подтверждения»: то, что требует решения СЕЙЧАС, поэтому рисуется
@@ -17,7 +18,9 @@ export function AwaitingBlock({ tasks, names }: { tasks: Task[]; names: Map<stri
   const [error, setError] = useState<string | null>(null);
 
   function closerName(task: Task): string {
-    const id = task.closedBy?.startsWith("person:") ? task.closedBy.slice("person:".length) : task.ownerRef;
+    const id = task.closedBy?.startsWith("person:")
+      ? task.closedBy.slice("person:".length)
+      : task.ownerRef;
     return (id ? names.get(id) : null) ?? "сотрудник";
   }
 
@@ -61,12 +64,26 @@ export function AwaitingBlock({ tasks, names }: { tasks: Task[]; names: Map<stri
               <div className="tm">
                 Закрыл: {closerName(task)} · {task.completedAt ? when(task.completedAt) : "—"}
               </div>
-              {task.resultNote ? <div className="report">{task.resultNote}</div> : null}
+              {task.resultNote ? (
+                <div className="report">
+                  <SafeReportText text={task.resultNote} />
+                </div>
+              ) : null}
               <div className="actions">
-                <button type="button" className="btn primary" onClick={() => onConfirm(task.id)} disabled={pending}>
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={() => onConfirm(task.id)}
+                  disabled={pending}
+                >
                   Принять
                 </button>
-                <button type="button" className="btn" onClick={() => onRedo(task.id)} disabled={pending}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => onRedo(task.id)}
+                  disabled={pending}
+                >
                   Переделать
                 </button>
               </div>
