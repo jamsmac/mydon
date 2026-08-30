@@ -93,6 +93,7 @@ if [ "${STANDBY_START_WORKERS:-0}" = 1 ]; then
 fi
 
 attachments_init
+llm_outbox_init
 export STANDBY_CORE_PORT="$CORE_PORT"
 export STANDBY_PANEL_PORT="$PANEL_PORT"
 export STANDBY_PANEL_BIND="${STANDBY_PANEL_BIND:-$(tailscale ip -4 | head -1)}"

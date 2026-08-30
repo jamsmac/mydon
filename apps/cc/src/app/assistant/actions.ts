@@ -9,6 +9,7 @@ import {
   withLlmFallback,
   type LlmResolver,
 } from "@mydon/assistant";
+import { DurableLlmLedger, FileLlmSettlementOutbox } from "@mydon/llm-ledger-outbox";
 import { CoreLlmLedgerClient, type LlmCallContext } from "@mydon/shared";
 import { assistantCore } from "../../lib/assistant-core";
 import { coreWriteHeaders } from "../../lib/core";
@@ -19,10 +20,19 @@ export interface AskResult {
 }
 
 const BASE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
-const llmLedger = new CoreLlmLedgerClient({
-  baseUrl: BASE,
-  serviceToken: process.env.SERVICE_TOKEN ?? "",
-});
+const anthropicApiKey = (process.env.ANTHROPIC_API_KEY ?? "").trim();
+const llmLedger = anthropicApiKey
+  ? new DurableLlmLedger(
+      new CoreLlmLedgerClient({
+        baseUrl: BASE,
+        serviceToken: process.env.SERVICE_TOKEN ?? "",
+      }),
+      new FileLlmSettlementOutbox({
+        rootDir: (process.env.LLM_LEDGER_OUTBOX_ROOT ?? "").trim(),
+        producer: "cc",
+      }),
+    )
+  : undefined;
 
 // LLM-слой. Два пути входа, включаются тем, что задано в окружении:
 //   • подписка Claude владельца (CLAUDE_CODE_OAUTH_TOKEN) — без платного ключа;
@@ -32,9 +42,9 @@ const llmLedger = new CoreLlmLedgerClient({
 const modelOverride = process.env.MYDON_ASSISTANT_MODEL
   ? { model: process.env.MYDON_ASSISTANT_MODEL }
   : {};
-const apiLlm: LlmResolver | undefined = process.env.ANTHROPIC_API_KEY
+const apiLlm: LlmResolver | undefined = anthropicApiKey && llmLedger
   ? createLlmResolver({
-      apiKey: process.env.ANTHROPIC_API_KEY,
+      apiKey: anthropicApiKey,
       ledger: llmLedger,
       consumer: "cc",
       feature: "assistant",

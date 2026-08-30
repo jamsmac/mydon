@@ -16,6 +16,7 @@
     "@anthropic-ai/sdk": "^0.115.0",
     "@mydon/assistant": "workspace:*",
     "@mydon/documents": "workspace:*",
+    "@mydon/llm-ledger-outbox": "workspace:*",
     "@mydon/shared": "workspace:*",
     "dotenv": "^16.4.7"
   },

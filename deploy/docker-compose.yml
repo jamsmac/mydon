@@ -73,6 +73,8 @@ services:
       LLM_MAX_RESERVATION_USD: ${LLM_MAX_RESERVATION_USD:-3}
       AGENT_GLOBAL_BUDGET_USD: ${AGENT_GLOBAL_BUDGET_USD:-}
       AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-5}
+      # Только агрегированный read-only обзор producer-side settlement spool.
+      LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
       # Перец для хешей приглашений сотрудников. В БД лежит только хеш кода;
       # без перца 47 бит кода предвычисляются радужной таблицей один раз, и
       # утёкший дамп staff_invite становится пачкой рабочих приглашений.
@@ -122,6 +124,8 @@ services:
       - /opt/mydon-data/history:/data/history:ro
       # Вложения (фото/чеки), когда S3 не настроен — переживают пересборку.
       - /opt/mydon-data/attachments:/data/attachments
+      # Settlement spool создают Bot/CC/Agents; Core только считает агрегаты.
+      - /opt/mydon-data/llm-close:/data/llm-close:ro
       # Сиды и выгрузки — из рабочей копии репозитория, а не из образа:
       # обновление данных сводится к `git pull`, без пересборки и рестарта.
       # Только чтение: импортёры данные читают, писать в них некому.
@@ -153,6 +157,10 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
+      LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
+    volumes:
+      # Exact accounting intent переживает restart/recreate контейнера.
+      - /opt/mydon-data/llm-close/bot:/data/llm-close/bot
     command: ["node", "apps/bot/dist/index.js"]
 
   mydon-agents:
@@ -175,6 +183,7 @@ services:
       # Потолок действий на агента и период опроса задач.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
       AGENT_TASK_INTERVAL_MS: ${AGENT_TASK_INTERVAL_MS:-60000}
+      LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
       # Монитор графиков обслуживания: ставит задачи на подходящие к сроку
       # работы. 06:00 — ДО дайджеста сотрудникам (07:00) и брифинга владельца
       # (07:30): к моменту рассылки задачи уже должны стоять. "off" выключает.
@@ -222,6 +231,9 @@ services:
       # Пусто → агенты работают, но в Notion не пишут.
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_PARENT_PAGE_ID: ${NOTION_PARENT_PAGE_ID:-}
+    volumes:
+      # Agents пишет свой spool и единолично дренит все producer-каталоги.
+      - /opt/mydon-data/llm-close:/data/llm-close
     command: ["node", "apps/agents/dist/index.js"]
 
   # Веб-панель (оболочка Command Center). Наружу не публикуется:
@@ -254,6 +266,10 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MYDON_ASSISTANT_MODEL: ${MYDON_ASSISTANT_MODEL:-}
+      LLM_LEDGER_OUTBOX_ROOT: /data/llm-close
+    volumes:
+      # Server actions сначала fsync-ят exact settlement на host.
+      - /opt/mydon-data/llm-close/cc:/data/llm-close/cc
     command: ["node_modules/.bin/next", "start", "-p", "3002"]
     # Панель нужна владельцу с телефона и компьютера — значит адрес Tailscale,
     # а не только localhost. В интернет (eth0) порт по-прежнему не смотрит:

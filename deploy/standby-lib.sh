@@ -52,6 +52,50 @@ attachments_init() {
   export STANDBY_ATTACHMENTS_DIR
 }
 
+# Producer-side ledger spool — тоже host-local durable state. Core читает
+# общий корень read-only, Agents дренит все producer-каталоги, а
+# Bot/CC могут писать только в свои подкаталоги.
+llm_outbox_init() {
+  STANDBY_LLM_OUTBOX_DIR="${STANDBY_LLM_OUTBOX_DIR:-$HOME/.local/state/mydon-standby/llm-close}"
+  # chmod по ошибочному `/`/$HOME сломал бы host раньше, чем compose
+  # успел бы отказать. Требуем отдельный абсолютный `llm-close`.
+  STANDBY_LLM_OUTBOX_DIR="${STANDBY_LLM_OUTBOX_DIR%/}"
+  case "$STANDBY_LLM_OUTBOX_DIR" in
+    /*/llm-close) ;;
+    *) fail "STANDBY_LLM_OUTBOX_DIR должен быть отдельным абсолютным каталогом .../llm-close" ;;
+  esac
+  [ ! -L "$STANDBY_LLM_OUTBOX_DIR" ] || fail "$STANDBY_LLM_OUTBOX_DIR не может быть symlink"
+  mkdir -p "$STANDBY_LLM_OUTBOX_DIR/bot" "$STANDBY_LLM_OUTBOX_DIR/cc" ||
+    fail "не создать $STANDBY_LLM_OUTBOX_DIR"
+  [ ! -L "$STANDBY_LLM_OUTBOX_DIR/bot" ] || fail "$STANDBY_LLM_OUTBOX_DIR/bot не может быть symlink"
+  [ ! -L "$STANDBY_LLM_OUTBOX_DIR/cc" ] || fail "$STANDBY_LLM_OUTBOX_DIR/cc не может быть symlink"
+  chmod 700 "$STANDBY_LLM_OUTBOX_DIR" "$STANDBY_LLM_OUTBOX_DIR/bot" "$STANDBY_LLM_OUTBOX_DIR/cc" ||
+    fail "не закрыть права $STANDBY_LLM_OUTBOX_DIR"
+  export STANDBY_LLM_OUTBOX_DIR
+}
+
+# Read-only check for the emergency stop path: never creates/chmods anything.
+# Prints `unknown` for an unsafe path instead of traversing a broad host tree.
+llm_outbox_unfinished_count() {
+  outbox_dir="${STANDBY_LLM_OUTBOX_DIR:-$HOME/.local/state/mydon-standby/llm-close}"
+  outbox_dir="${outbox_dir%/}"
+  case "$outbox_dir" in
+    /*/llm-close) ;;
+    *) printf 'unknown\n'; return 0 ;;
+  esac
+  if [ -L "$outbox_dir" ]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [ ! -d "$outbox_dir" ]; then
+    printf '0\n'
+    return 0
+  fi
+  find -P "$outbox_dir" -type f \
+    \( -path '*/pending/*.json' -o -path '*/processing/*.json' -o -path '*/dead/*.json' \) \
+    -print 2>/dev/null | awk 'END { print NR + 0 }'
+}
+
 # `docker ps` с честной ошибкой: раньше `docker ps | grep -c … || true`
 # превращал упавший docker-демон в «0 контейнеров», и финальная проверка
 # «всё остановлено» проходила вакуумно.

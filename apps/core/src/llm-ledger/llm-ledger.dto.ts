@@ -23,6 +23,14 @@ import type {
 
 const MAX_TOKEN_COUNT = 100_000_000;
 
+export class RecoverPreDispatchLlmDto {
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
+  @MaxLength(256)
+  requestKey!: string;
+}
+
 export class ReserveLlmDto implements LlmReserveRequest {
   @IsString()
   @IsNotEmpty()

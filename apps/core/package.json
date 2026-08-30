@@ -17,6 +17,7 @@
     "@mydon/connectors": "workspace:*",
     "@mydon/db": "workspace:*",
     "@mydon/history": "workspace:*",
+    "@mydon/llm-ledger-outbox": "workspace:*",
     "@mydon/shared": "workspace:*",
     "@nestjs/common": "^11.0.13",
     "@nestjs/core": "^11.0.13",

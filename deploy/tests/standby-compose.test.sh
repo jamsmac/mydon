@@ -50,9 +50,24 @@ printf '%s\n' \
 chmod 600 "$ENV_FILE"
 ATT_DIR="$TMP/attachments"
 mkdir -p "$ATT_DIR"
+LLM_OUTBOX_DIR="$TMP/llm-close"
+STANDBY_LLM_OUTBOX_DIR="$LLM_OUTBOX_DIR"
+llm_outbox_init
+[ "$(file_mode "$LLM_OUTBOX_DIR")" = 700 ] || fail "llm outbox root должен иметь права 700"
+if (STANDBY_LLM_OUTBOX_DIR=/; llm_outbox_init) >"$TMP/unsafe-outbox.out" 2>&1; then
+  fail "llm_outbox_init принял опасный корневой каталог"
+fi
+grep -q '.../llm-close' "$TMP/unsafe-outbox.out"
+mkdir -p "$LLM_OUTBOX_DIR/bot/pending"
+touch "$LLM_OUTBOX_DIR/bot/pending/test.json"
+[ "$(llm_outbox_unfinished_count)" = 1 ] || fail "standby spool не видит pending запись"
+rm "$LLM_OUTBOX_DIR/bot/pending/test.json"
+(STANDBY_LLM_OUTBOX_DIR=/; [ "$(llm_outbox_unfinished_count)" = unknown ]) ||
+  fail "read-only spool check принял опасный корневой каталог"
 
 rendered=$(
   STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+    STANDBY_LLM_OUTBOX_DIR="$LLM_OUTBOX_DIR" \
     run_clean docker compose -f "$COMPOSE_YML" --env-file "$ENV_FILE" config
 )
 printf '%s' "$rendered" | grep -q 'runtime-secret'
@@ -66,6 +81,7 @@ done
 
 rendered_json=$(
   STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+    STANDBY_LLM_OUTBOX_DIR="$LLM_OUTBOX_DIR" \
     run_clean docker compose -f "$COMPOSE_YML" --env-file "$ENV_FILE" --profile workers \
       config --format json
 )
@@ -75,6 +91,18 @@ printf '%s' "$rendered_json" | node -e '
   for (const service of ["core", "cc", "bot", "agents"]) {
     if (config.services[service]?.init !== true) {
       throw new Error(service + " must run behind Docker init");
+    }
+  }
+  const expectedTargets = {
+    core: ["/data/llm-close", true],
+    cc: ["/data/llm-close/cc", false],
+    bot: ["/data/llm-close/bot", false],
+    agents: ["/data/llm-close", false],
+  };
+  for (const [service, [target, readOnly]] of Object.entries(expectedTargets)) {
+    const mount = (config.services[service].volumes ?? []).find(volume => volume.target === target);
+    if (!mount || Boolean(mount.read_only) !== readOnly) {
+      throw new Error(service + " has unsafe/missing settlement outbox mount");
     }
   }
 '
@@ -159,11 +187,13 @@ printf '%s\n---SPLIT---\n%s' "$rendered_json" "$production_json" | node -e '
 
 default_services=$(
   STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+    STANDBY_LLM_OUTBOX_DIR="$LLM_OUTBOX_DIR" \
     run_clean docker compose -f "$COMPOSE_YML" --env-file "$ENV_FILE" config --services | sort
 )
 [ "$default_services" = $'cc\ncore' ]
 worker_services=$(
   STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+    STANDBY_LLM_OUTBOX_DIR="$LLM_OUTBOX_DIR" \
     run_clean docker compose -f "$COMPOSE_YML" --env-file "$ENV_FILE" --profile workers \
       config --services | sort
 )
@@ -172,6 +202,7 @@ worker_services=$(
 MISSING_ENV="$TMP/missing.env"
 printf 'SERVICE_TOKEN=still-not-enough\n' > "$MISSING_ENV"
 if STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+  STANDBY_LLM_OUTBOX_DIR="$LLM_OUTBOX_DIR" \
   run_clean docker compose -f "$COMPOSE_YML" --env-file "$MISSING_ENV" config --quiet \
   >"$TMP/missing.out" 2>&1; then
   printf 'standby accepted a missing DATABASE_URL\n' >&2
@@ -182,6 +213,7 @@ grep -q 'DATABASE_URL is required' "$TMP/missing.out"
 NO_TOKEN_ENV="$TMP/no-token.env"
 printf 'DATABASE_URL=postgresql://runtime-user:runtime-secret@db.example.test/postgres\n' > "$NO_TOKEN_ENV"
 if STANDBY_PANEL_BIND=127.0.0.1 STANDBY_ATTACHMENTS_DIR="$ATT_DIR" \
+  STANDBY_LLM_OUTBOX_DIR="$LLM_OUTBOX_DIR" \
   run_clean docker compose -f "$COMPOSE_YML" --env-file "$NO_TOKEN_ENV" config --quiet \
   >"$TMP/no-token.out" 2>&1; then
   printf 'standby accepted an empty SERVICE_TOKEN (read-only control plane)\n' >&2

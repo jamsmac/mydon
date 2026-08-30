@@ -205,6 +205,28 @@ rsync -av ~/.local/state/mydon-standby/attachments/ \
   root@<primary-tailscale-ip>:/opt/mydon-data/attachments/
 ```
 
+### LLM settlement spool при failback
+
+Очередь финансового закрытия LLM тоже host-local. На standby она живёт в
+`~/.local/state/mydon-standby/llm-close` (или `STANDBY_LLM_OUTBOX_DIR`).
+Перед возвратом primary workers:
+
+1. Оставить primary workers остановленными.
+2. По панели standby «Система» дождаться `pending=0`, `retrying=0`,
+   `processing=0`, `dead=0`. Agents дренит accounting независимо от пауз
+   расписаний и задач.
+3. Только после пустой очереди выполнить `./deploy/standby-stop.sh`,
+   затем запускать primary. Stop сам ничего не копирует и при
+   непустом spool печатает жёсткое предупреждение.
+
+Если standby нужно остановить до дренирования, не копировать producer-каталоги
+поверх одноимённых primary-каталогов. Скопировать их под новыми
+именами `standby-bot`, `standby-cc`, `standby-agents` в
+`/opt/mydon-data/llm-close/`, сохранив права/mtime, и лишь затем
+запустить primary Agents. Дрейнер обходит все producer-имена, а новый
+namespace исключает затирание одноимённых файлов. Любой `dead` требует
+ручного разбора; его нельзя удалять ради зелёного индикатора.
+
 Drill 2026-08-24 подтвердил managed DB (`dbOk=true`), CC HTTP 200 и чистую
 остановку Core/CC. Отдельная проверка профиля workers подтвердила завершение
 Core, CC, Bot и Agents без `SIGKILL`/кода `137`; все Node-сервисы запускаются

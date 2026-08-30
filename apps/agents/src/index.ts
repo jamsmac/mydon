@@ -8,6 +8,7 @@ import { runMaintenanceMonitor } from "./maintenance-monitor";
 import { AgentsCoreClient } from "./core-client";
 import { embeddingPosture } from "./embedding";
 import { runGloberentMonitor } from "./globerent-monitor";
+import { drainLlmSettlementOutboxFromEnv } from "./llm-ledger";
 import { llmPosture, modelGatewayFromEnv } from "./model-gateway";
 import { drainNotionOutbox } from "./outbox-dispatcher";
 import { autonomyThreshold } from "./policy";
@@ -358,6 +359,24 @@ async function main(): Promise<void> {
           console.error(`[${agent.name}] задачи не обработаны:`, err);
         }
       }
+    }
+
+    // Accounting intent — уже совершённый provider side effect. Он обязан
+    // дрениться и при паузе расписаний, и при паузе назначенных задач.
+    try {
+      const drained = await drainLlmSettlementOutboxFromEnv();
+      if (drained && drained.claimedCount > 0) {
+        console.log(
+          `[llm-settlement-outbox] взято ${drained.claimedCount}: ` +
+            `completed=${drained.completedCount}, retry=${drained.retryScheduledCount}, ` +
+            `dead=${drained.deadLetteredCount}, reclaimed=${drained.reclaimedCount}`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        "[llm-settlement-outbox] accounting delivery не обработан:",
+        err instanceof Error ? err.message : String(err),
+      );
     }
 
     // Delivery — уже committed работа, а не новое агентское решение.

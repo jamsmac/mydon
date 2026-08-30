@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { agent, agentTaskLlmJob, llmModelPrice, llmSpend, systemConfig } from "@mydon/db";
+import { readLlmSettlementOutboxMonitoring } from "@mydon/llm-ledger-outbox";
 import {
   tashkentDay,
   tashkentDayStartOf,
@@ -14,12 +15,15 @@ import {
   type LlmBudgetSnapshot,
   type LlmLedgerMonitoring,
   type LlmReserveResponse,
+  type LlmSettlementOutboxMonitoring,
+  type LlmSpendStatus,
 } from "@mydon/shared";
 import { and, asc, eq, gt, gte, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { resolveConfigValue } from "../system/config-spec";
 import type {
   LlmTokenUsageDto,
+  RecoverPreDispatchLlmDto,
   ReleaseLlmDto,
   ReserveLlmDto,
   SettleLlmDto,
@@ -69,6 +73,13 @@ interface Exposure {
 type NormalizedSettlement = ReturnType<typeof normalizeSettlement>;
 
 export const LLM_STUCK_RESERVATION_THRESHOLD_MINUTES = 5;
+export const LLM_PRE_DISPATCH_RECOVERY_REASON =
+  "settlement_outbox_reserve_uncertain_before_provider_dispatch";
+
+export interface LlmPreDispatchRecoveryResult {
+  status: LlmSpendStatus | "missing";
+  replay: boolean;
+}
 
 export interface LlmMonitoringFrame {
   day: string;
@@ -115,6 +126,7 @@ export class LlmLedgerService {
       failureRows,
       lastFailureRows,
       circuitRows,
+      settlementOutbox,
     ] = await Promise.all([
       this.db.select().from(systemConfig),
       this.db
@@ -211,6 +223,7 @@ export class LlmLedgerService {
           ),
         )
         .orderBy(asc(llmSpend.failedAt), asc(llmSpend.provider)),
+      settlementOutboxMonitoring(at),
     ]);
 
     const config = rowsToConfig(configRows);
@@ -226,6 +239,7 @@ export class LlmLedgerService {
     return {
       generatedAt: at.toISOString(),
       day: frame.day,
+      settlementOutbox,
       budget: {
         globalCapUsd: nanoToNumber(globalCap.nano),
         knownCostUsd: nanoToNumber(knownCost),
@@ -253,6 +267,52 @@ export class LlmLedgerService {
 
   async reserve(dto: ReserveLlmDto): Promise<LlmReserveResponse> {
     return this.db.transaction((tx) => this.reserveInTx(tx, dto));
+  }
+
+  /**
+   * Closes an ambiguous reserve only when the caller knows provider dispatch
+   * never happened. The endpoint intentionally accepts requestKey rather than
+   * reservation id because a lost reserve response never revealed that id.
+   */
+  async recoverPreDispatch(
+    dto: RecoverPreDispatchLlmDto,
+  ): Promise<LlmPreDispatchRecoveryResult> {
+    return this.db.transaction((tx) => this.recoverPreDispatchInTx(tx, dto));
+  }
+
+  async recoverPreDispatchInTx(
+    tx: LlmLedgerTx,
+    dto: RecoverPreDispatchLlmDto,
+  ): Promise<LlmPreDispatchRecoveryResult> {
+    const requestKey = dto.requestKey.trim();
+    const hint = await preDispatchRecoveryHint(tx, requestKey);
+    if (!hint) return { status: "missing", replay: true };
+
+    // Same global order as reserve/settle/release. The hint columns are
+    // immutable, and the row is re-read FOR UPDATE after all advisory locks.
+    await lock(tx, `llm-provider-circuit:${hint.provider}`);
+    await lock(tx, `llm-request:${requestKey}`);
+    await lock(tx, `llm-budget:${hint.day}`);
+
+    const row = await spendByRequestKeyForUpdate(tx, requestKey);
+    if (!row) return { status: "missing", replay: true };
+    await assertNotTaskJobSpend(tx, row.id);
+
+    if (row.status !== "reserved") {
+      return { status: row.status, replay: true };
+    }
+
+    const now = new Date();
+    await tx
+      .update(llmSpend)
+      .set({
+        status: "released",
+        reason: LLM_PRE_DISPATCH_RECOVERY_REASON,
+        releasedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(llmSpend.id, row.id));
+    return { status: "released", replay: false };
   }
 
   /** Internal composition point for task job + financial authorization. */
@@ -970,6 +1030,35 @@ export function llmMonitoringFrame(at: Date): LlmMonitoringFrame {
   };
 }
 
+async function settlementOutboxMonitoring(
+  at: Date,
+): Promise<LlmSettlementOutboxMonitoring> {
+  const rootDir = (process.env.LLM_LEDGER_OUTBOX_ROOT ?? "").trim();
+  if (rootDir === "") return unavailableSettlementOutboxMonitoring();
+  try {
+    return await readLlmSettlementOutboxMonitoring({ rootDir, clock: () => at });
+  } catch {
+    // Monitoring must stay secret-free and must not take the System page down
+    // when a read-only host mount is temporarily unavailable.
+    return unavailableSettlementOutboxMonitoring();
+  }
+}
+
+function unavailableSettlementOutboxMonitoring(): LlmSettlementOutboxMonitoring {
+  return {
+    available: false,
+    pendingCount: 0,
+    retryingCount: 0,
+    processingCount: 0,
+    deadCount: 0,
+    fallbackCount: 0,
+    exactCount: 0,
+    oldestPendingAt: null,
+    nextRetryAt: null,
+    maxAttempts: 0,
+  };
+}
+
 async function providerCircuit(tx: Tx, at: Date, provider: string): Promise<string | undefined> {
   const { start, end } = providerCircuitWindow(at);
   const [row] = await tx
@@ -1335,6 +1424,28 @@ async function spendHint(
     .where(eq(llmSpend.id, id))
     .limit(1);
   if (!row) throw new NotFoundException(`LLM-резерв ${id} не найден`);
+  return row;
+}
+
+async function preDispatchRecoveryHint(
+  tx: Tx,
+  requestKey: string,
+): Promise<{ day: string; provider: string } | undefined> {
+  const [row] = await tx
+    .select({ day: llmSpend.day, provider: llmSpend.provider })
+    .from(llmSpend)
+    .where(eq(llmSpend.requestKey, requestKey))
+    .limit(1);
+  return row;
+}
+
+async function spendByRequestKeyForUpdate(tx: Tx, requestKey: string): Promise<SpendRow | undefined> {
+  const [row] = await tx
+    .select()
+    .from(llmSpend)
+    .where(eq(llmSpend.requestKey, requestKey))
+    .limit(1)
+    .for("update");
   return row;
 }
 

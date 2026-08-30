@@ -21,6 +21,20 @@ export type LlmSpendStatus = (typeof LLM_SPEND_STATUSES)[number];
 export type LlmMonitoringCostBasis =
   "actual" | "lower_bound" | "upper_bound" | "estimate" | "unknown";
 
+/** Secret-free health summary of the durable settlement outbox. */
+export interface LlmSettlementOutboxMonitoring {
+  available: boolean;
+  pendingCount: number;
+  retryingCount: number;
+  processingCount: number;
+  deadCount: number;
+  fallbackCount: number;
+  exactCount: number;
+  oldestPendingAt: string | null;
+  nextRetryAt: string | null;
+  maxAttempts: number;
+}
+
 /**
  * Secret-free operational snapshot for the System panel.
  *
@@ -34,6 +48,7 @@ export interface LlmLedgerMonitoring {
   generatedAt: string;
   /** Current calendar day in Asia/Tashkent. */
   day: string;
+  settlementOutbox: LlmSettlementOutboxMonitoring;
   budget: {
     globalCapUsd: number;
     knownCostUsd: number;
@@ -165,6 +180,14 @@ export interface LlmLedger {
   release(reservationId: string, reason: string): Promise<void>;
 }
 
+/**
+ * Recovery port for a reserve whose HTTP outcome was ambiguous, but whose
+ * provider request was definitely not dispatched.
+ */
+export interface LlmLedgerReserveRecovery {
+  recoverPreDispatch(requestKey: string): Promise<void>;
+}
+
 export interface LlmReserveResponse {
   allowed: boolean;
   status: LlmSpendStatus;
@@ -200,6 +223,25 @@ export class LlmLedgerUnavailableError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = "LlmLedgerUnavailableError";
+  }
+}
+
+/**
+ * Safe public classification for an exact close/recovery operation.
+ *
+ * It never retains a response body, service token, request payload or the
+ * original transport error as `cause`, so consumers may use it for retry/dead
+ * routing without leaking ledger secrets into logs or durable records.
+ */
+export class LlmLedgerCloseError extends LlmLedgerUnavailableError {
+  readonly retryable: boolean;
+  readonly httpStatus?: number;
+
+  constructor(message: string, retryable: boolean, httpStatus?: number) {
+    super(message);
+    this.name = "LlmLedgerCloseError";
+    this.retryable = retryable;
+    if (httpStatus !== undefined) this.httpStatus = httpStatus;
   }
 }
 
@@ -251,7 +293,7 @@ export interface CoreLlmLedgerConfig {
  * напротив, идемпотентны в Core по exact payload, поэтому их транспорт ограниченно
  * повторяет тот же path и тот же сериализованный JSON.
  */
-export class CoreLlmLedgerClient implements LlmLedger {
+export class CoreLlmLedgerClient implements LlmLedger, LlmLedgerReserveRecovery {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
@@ -308,26 +350,52 @@ export class CoreLlmLedgerClient implements LlmLedger {
     });
   }
 
+  async recoverPreDispatch(requestKey: string): Promise<void> {
+    const response = await this.close("/llm-ledger/reservations/recover-pre-dispatch", {
+      requestKey,
+    });
+    if (!isUnknownRecord(response) || typeof response.status !== "string") {
+      throw new LlmLedgerCloseError("LLM-ledger: неверный ответ reserve recovery", true);
+    }
+    // A missing row is not proof that the original reserve can never commit.
+    // Keep the durable marker and retry later instead of acknowledging it.
+    if (response.status === "missing") {
+      throw new LlmLedgerCloseError("LLM-ledger: reserve ещё не найден для recovery", true);
+    }
+    if (!LLM_SPEND_STATUSES.includes(response.status as LlmSpendStatus)) {
+      throw new LlmLedgerCloseError("LLM-ledger: неизвестный статус reserve recovery", true);
+    }
+  }
+
   private async close(path: string, body: unknown): Promise<unknown> {
     // Serialize once so every retry is byte-for-byte the same operation.
-    const serializedBody = serializeBody(body);
+    let serializedBody: string;
+    try {
+      serializedBody = serializeBody(body);
+    } catch (error) {
+      throw closeError(error, false);
+    }
     for (let attempt = 1; attempt <= this.closeRetryAttempts; attempt += 1) {
       try {
         return await this.postOnce(path, serializedBody);
       } catch (error) {
         const exhausted = attempt === this.closeRetryAttempts;
         if (!(error instanceof LlmLedgerRequestError) || !error.retryable || exhausted) {
-          throw error;
+          throw closeError(error);
         }
         const exponentialBackoffMs = this.closeRetryBaseDelayMs * 2 ** (attempt - 1);
         const delayMs = Math.min(
           Math.max(exponentialBackoffMs, error.retryAfterMs ?? 0),
           MAX_CLOSE_RETRY_DELAY_MS,
         );
-        await this.closeRetryWaitImpl(delayMs);
+        try {
+          await this.closeRetryWaitImpl(delayMs);
+        } catch {
+          throw new LlmLedgerCloseError("LLM-ledger: не удалось дождаться close retry", true);
+        }
       }
     }
-    throw new LlmLedgerUnavailableError("LLM-ledger: close retry завершился без ответа");
+    throw new LlmLedgerCloseError("LLM-ledger: close retry завершился без ответа", true);
   }
 
   private async postOnce(path: string, serializedBody: string): Promise<unknown> {
@@ -361,6 +429,7 @@ export class CoreLlmLedgerClient implements LlmLedger {
         `Не удалось прочитать ответ LLM-ledger (HTTP ${response.status})`,
         response.ok || retryableHttpStatus(response.status),
         retryAfterMs,
+        response.status,
       );
     }
     let parsed: unknown = null;
@@ -372,6 +441,7 @@ export class CoreLlmLedgerClient implements LlmLedger {
           `LLM-ledger вернул не-JSON (HTTP ${response.status})`,
           response.ok || retryableHttpStatus(response.status),
           retryAfterMs,
+          response.status,
         );
       }
     }
@@ -381,6 +451,7 @@ export class CoreLlmLedgerClient implements LlmLedger {
         `LLM-ledger отказал (HTTP ${response.status})`,
         retryableHttpStatus(response.status),
         retryAfterMs,
+        response.status,
       );
     }
     return parsed;
@@ -394,9 +465,28 @@ class LlmLedgerRequestError extends LlmLedgerUnavailableError {
     message: string,
     readonly retryable: boolean,
     readonly retryAfterMs?: number,
+    readonly httpStatus?: number,
   ) {
     super(message);
   }
+}
+
+function closeError(error: unknown, defaultRetryable = true): LlmLedgerCloseError {
+  if (error instanceof LlmLedgerRequestError) {
+    // Auth drift is not worth an immediate HTTP hot-loop, but it is recoverable
+    // after SERVICE_TOKEN/config repair. Mark it durable-retryable for outbox.
+    const durableRetryable =
+      error.retryable || error.httpStatus === 401 || error.httpStatus === 403;
+    return new LlmLedgerCloseError(error.message, durableRetryable, error.httpStatus);
+  }
+  if (error instanceof LlmLedgerUnavailableError) {
+    return new LlmLedgerCloseError(error.message, defaultRetryable);
+  }
+  return new LlmLedgerCloseError("LLM-ledger: close operation failed", defaultRetryable);
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function retryableHttpStatus(status: number): boolean {

@@ -1,5 +1,10 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from "@nestjs/common";
-import { ReleaseLlmDto, ReserveLlmDto, SettleLlmDto } from "./llm-ledger.dto";
+import {
+  RecoverPreDispatchLlmDto,
+  ReleaseLlmDto,
+  ReserveLlmDto,
+  SettleLlmDto,
+} from "./llm-ledger.dto";
 import { LlmLedgerService } from "./llm-ledger.service";
 
 /**
@@ -19,6 +24,11 @@ export class LlmLedgerController {
   @Post("reservations")
   reserve(@Body() dto: ReserveLlmDto) {
     return this.ledger.reserve(dto);
+  }
+
+  @Post("reservations/recover-pre-dispatch")
+  recoverPreDispatch(@Body() dto: RecoverPreDispatchLlmDto) {
+    return this.ledger.recoverPreDispatch(dto);
   }
 
   @Post("reservations/:id/settle")

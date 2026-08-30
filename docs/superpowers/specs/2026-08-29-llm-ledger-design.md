@@ -164,9 +164,53 @@ Assistant, Documents, Agents chat и embeddings не выбрасывают уж
 скрытый retry после потерянного ответа мог бы разрешить вызывающему повторный
 provider dispatch, которого ledger v1 доказать не умеет.
 
-Это предотвращает большинство новых transient-зависаний, но не является
-durable settlement outbox: если все bounded-попытки исчерпаны или процесс
-погиб до них, резерв остаётся fail-closed exposure и виден в мониторинге.
+Это предотвращает большинство новых transient-зависаний. Bounded retry
+остаётся быстрым первым контуром, а переживающий рестарт durable-контур
+описан ниже.
+
+## Durable settlement outbox legacy-потребителей
+
+Bot, CC и cron-пути Agents закрывают ledger через producer-side
+single-host spool. Это не транзакционный outbox Core: точное знание о
+provider result сначала возникает в процессе-потребителе, поэтому
+сетевой endpoint сам по себе не мог закрыть crash-window.
+
+Жизненный цикл одной legacy-попытки:
+
+1. **Pre-reserve.** До одной HTTP-попытки `reserve` producer создаёт
+   durable-запись на основе `requestKey`. `reserve` по-прежнему никогда не
+   повторяется скрыто.
+2. **Fallback после reserve.** Получив reservation id, producer атомарно
+   заменяет запись на консервативный `fail(outcome=unknown)`. Provider
+   dispatch запрещён, пока этот fallback не зафиксирован успешным
+   `fsync`. После crash такая запись не освобождает деньги, а закрывает
+   reservation как неизвестный исход.
+3. **Exact перед close.** Когда provider вернул usage/ошибку или клиент
+   доказал, что dispatch не начинался, producer сначала заменяет fallback
+   на exact `settle`, `fail` или `release`, и только потом зовёт Core.
+4. **Атомарная запись.** Каждая смена состояния пишется во временный
+   файл в той же файловой системе, делает `fsync` файла, `rename` и `fsync`
+   каталога. Только успешный конечный `fsync` образует durable-границу.
+5. **Доставка.** Быстрый путь сразу пытается закрыть Core тем же exact
+   payload. После потери ответа запись удаляется только после exact replay,
+   подтверждённого Core.
+
+Каждый producer пишет в свой persistent-каталог; общий drainer обходит все
+каталоги независимо от `AGENTS_SCHEDULES_PAUSED` и `AGENTS_TASKS_PAUSED`.
+Пауза новых работ не может превратить уже потраченные деньги в вечный
+pending. Service token, provider credentials, prompt и output в spool не пишутся.
+
+Состояния доставки типизированы: `pending`, `retrying`, `processing`,
+`dead`. Network/timeout, `408/425/429/5xx` повторяются с bounded backoff;
+неисправимый payload, превышение общего потолка попыток и exact-conflict
+становятся `dead`, а не hot-loop. Мониторинг агрегирует pending/retrying/
+processing/dead, fallback/exact, старейшую запись и следующий retry;
+reservation id и payload в UI не возвращаются. Недоступный spool показывается
+как «не проверен», а не как нуль.
+
+Это at-least-once exact delivery, а не exactly-once claim: два drainer могут
+одновременно повторить один close. Безопасность даёт exact-idempotency Core,
+а не недоказанная локальная блокировка.
 
 ## Durable execution задач агента
 
@@ -197,6 +241,15 @@ reserve сохраняет тот же attempt: если Core успел соз�
 
 - Ledger гарантирует monetary at-most-once для metered попытки, но не хранит
   provider output. Автоматически повторить закрытый/replayed вызов нельзя.
+- Durable-гарантия начинается только после успешного `fsync`. Если процесс
+  погиб между provider response и exact-записью, точные usage/cost могут
+  потеряться; прежний durable fallback закроет резерв как `unknown`.
+- Settlement spool хранит только финансовое закрытие. Оплаченный текст,
+  файл, вектор и доставка артефакта им не восстанавливаются.
+- Spool охватывает только legacy Bot/CC/Agents. Durable task-mode Agents
+  закрывает spend в своей Core-транзакции и в эту очередь не попадает.
+- Persistent volume переживает restart/recreate на одном production-host, но не
+  является HA-репликацией и не переезжает на standby сам.
 - Subscription/local пути сознательно не входят в USD-ledger. Их повтор после
   crash/takeover может потратить квоту подписки или повторить side effect.
 - Нет durable result/artifact outbox: сбой Telegram/скачивания после успешного
@@ -211,9 +264,8 @@ reserve сохраняет тот же attempt: если Core успел соз�
 - Max-route reserve защищает только исчерпывающий каталог `provider`. Новый SKU,
   на который gateway умеет маршрутизировать, обязан появиться в каталоге до
   включения маршрута.
-- Durable settlement outbox и HTTP-admin изменения прайса отсутствуют.
-  Закрывающие ledger-операции имеют только bounded exact transport retry;
-  прайс версионируется миграциями, прошлые строки не редактируются.
+- HTTP-admin для изменения прайса отсутствует. Прайс версионируется миграциями,
+  прошлые строки не редактируются.
 
 ## Приёмка
 
@@ -227,6 +279,12 @@ reserve сохраняет тот же attempt: если Core успел соз�
 - Bot, CC, Documents, Agents chat и embeddings используют один Core API.
 - `settle/fail/release` exact-retry после неоднозначного transport-сбоя, но
   `reserve` никогда не получает скрытую вторую попытку;
+- без успешного durable fallback `fsync` provider не вызывается;
+- exact close переживает process restart и удаляется только после
+  подтверждённого Core replay;
+- drainer доставляет очередь при любой комбинации пауз расписаний/задач;
+- monitoring отличает пустую очередь от недоступного spool и не возвращает
+  id/payload;
 - closed replay и payload mismatch блокируют execution, а не hot-loop;
 - снять block нельзя одним общим `SERVICE_TOKEN`;
 - task lease takeover сохраняет execution attempt и не даёт второй metered

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   CoreLlmLedgerClient,
   LlmBudgetDeniedError,
+  LlmLedgerCloseError,
   LlmLedgerUnavailableError,
   LlmReplayBlockedError,
   inputTokenCeiling,
@@ -599,7 +600,7 @@ describe("CoreLlmLedgerClient", () => {
     }
   });
 
-  it("settle не повторяет обычные 4xx, особенно 409, и не раскрывает body/секрет", async () => {
+  it("settle не hot-loop-ит 4xx, но auth drift оставляет outbox retryable", async () => {
     const terminalStatuses = [400, 401, 403, 404, 409, 422];
     for (const status of terminalStatuses) {
       let calls = 0;
@@ -624,7 +625,9 @@ describe("CoreLlmLedgerClient", () => {
             metadata: { opaque: requestSecret },
           }),
         (error: unknown) => {
-          assert.ok(error instanceof LlmLedgerUnavailableError);
+          assert.ok(error instanceof LlmLedgerCloseError);
+          assert.equal(error.retryable, status === 401 || status === 403);
+          assert.equal(error.httpStatus, status);
           assert.equal(error.message, `LLM-ledger отказал (HTTP ${status})`);
           assert.doesNotMatch(error.message, new RegExp(requestSecret));
           assert.doesNotMatch(error.message, new RegExp(serviceSecret));
@@ -655,7 +658,10 @@ describe("CoreLlmLedgerClient", () => {
 
     await assert.rejects(
       () => client.settle(reservation.id, { outcome: "success" }),
-      LlmLedgerUnavailableError,
+      (error: unknown) =>
+        error instanceof LlmLedgerCloseError &&
+        !error.retryable &&
+        error.httpStatus === 409,
     );
     assert.equal(calls, 1);
     assert.deepEqual(waits, []);
@@ -707,6 +713,82 @@ describe("CoreLlmLedgerClient", () => {
     ]);
   });
 
+  it("recoverPreDispatch повторяет exact requestKey через отдельный close endpoint", async () => {
+    const urls: string[] = [];
+    const bodies: string[] = [];
+    const client = new CoreLlmLedgerClient({
+      baseUrl: "http://core/",
+      serviceToken: "secret",
+      closeRetryAttempts: 2,
+      closeRetryBaseDelayMs: 0,
+      fetchImpl: async (url, init) => {
+        urls.push(String(url));
+        bodies.push(String(init?.body));
+        return urls.length === 1
+          ? new Response("{}", { status: 503 })
+          : new Response('{"status":"released","replay":false}', { status: 200 });
+      },
+    });
+
+    await client.recoverPreDispatch(request.requestKey);
+
+    assert.deepEqual(urls, [
+      "http://core/llm-ledger/reservations/recover-pre-dispatch",
+      "http://core/llm-ledger/reservations/recover-pre-dispatch",
+    ]);
+    assert.deepEqual(bodies, [
+      JSON.stringify({ requestKey: request.requestKey }),
+      JSON.stringify({ requestKey: request.requestKey }),
+    ]);
+  });
+
+  it("recoverPreDispatch не подтверждает missing до появления исходного reserve", async () => {
+    const client = new CoreLlmLedgerClient({
+      baseUrl: "http://core",
+      serviceToken: "secret",
+      closeRetryAttempts: 1,
+      fetchImpl: async () =>
+        new Response('{"status":"missing","replay":true}', { status: 200 }),
+    });
+
+    await assert.rejects(
+      () => client.recoverPreDispatch(request.requestKey),
+      (error: unknown) => {
+        assert.ok(error instanceof LlmLedgerCloseError);
+        assert.equal(error.retryable, true);
+        assert.doesNotMatch(error.message, new RegExp(request.requestKey));
+        return true;
+      },
+    );
+  });
+
+  it("exhausted retryable HTTP ошибка сохраняет безопасную close-классификацию", async () => {
+    let calls = 0;
+    const client = new CoreLlmLedgerClient({
+      baseUrl: "http://core",
+      serviceToken: "service-secret",
+      closeRetryAttempts: 2,
+      closeRetryBaseDelayMs: 0,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response('{"message":"response-secret"}', { status: 503 });
+      },
+    });
+
+    await assert.rejects(
+      () => client.release(reservation.id, "request-secret"),
+      (error: unknown) => {
+        assert.ok(error instanceof LlmLedgerCloseError);
+        assert.equal(error.retryable, true);
+        assert.equal(error.httpStatus, 503);
+        assert.equal(error.cause, undefined);
+        assert.doesNotMatch(error.message, /service-secret|response-secret|request-secret/);
+        return true;
+      },
+    );
+    assert.equal(calls, 2);
+  });
+
   it("close retry ограничен пятью попытками даже при большем конфиге", async () => {
     let calls = 0;
     const transportSecret = "transport-echoed-secret";
@@ -729,7 +811,9 @@ describe("CoreLlmLedgerClient", () => {
           metadata: { opaque: requestSecret },
         }),
       (error: unknown) => {
-        assert.ok(error instanceof LlmLedgerUnavailableError);
+        assert.ok(error instanceof LlmLedgerCloseError);
+        assert.equal(error.retryable, true);
+        assert.equal(error.httpStatus, undefined);
         assert.equal(error.message, "Не удалось связаться с LLM-ledger в Core");
         assert.doesNotMatch(error.message, new RegExp(transportSecret));
         assert.doesNotMatch(error.message, new RegExp(requestSecret));

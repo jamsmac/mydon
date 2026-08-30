@@ -1,25 +1,25 @@
 {
-  "name": "@mydon/agents",
+  "name": "@mydon/llm-ledger-outbox",
   "version": "0.0.0",
   "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
-    "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
-    "clean": "rm -rf dist .turbo *.tsbuildinfo",
     "test": "find dist -name '*.test.js' -print0 | xargs -0 --no-run-if-empty node --test",
-    "check:passports": "node dist/check-passports.js",
-    "coach:apply": "node dist/apply-coach-edit.js"
+    "clean": "rm -rf dist .turbo *.tsbuildinfo"
   },
   "dependencies": {
-    "@mydon/connectors": "workspace:*",
-    "@mydon/llm-ledger-outbox": "workspace:*",
-    "@mydon/shared": "workspace:*",
-    "croner": "^9.0.0",
-    "dotenv": "^16.4.7",
-    "yaml": "^2.6.1"
+    "@mydon/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",

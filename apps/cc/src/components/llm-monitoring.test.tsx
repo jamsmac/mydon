@@ -44,6 +44,18 @@ const monitoring: LlmLedgerMonitoring = {
       reason: "upstream timeout",
     },
   },
+  settlementOutbox: {
+    available: true,
+    pendingCount: 0,
+    retryingCount: 0,
+    processingCount: 0,
+    deadCount: 0,
+    fallbackCount: 0,
+    exactCount: 0,
+    oldestPendingAt: null,
+    nextRetryAt: null,
+    maxAttempts: 8,
+  },
   openCircuits: [
     {
       provider: "openai",
@@ -154,6 +166,85 @@ describe("LLM-мониторинг", () => {
     expect(screen.getByText("3 ошибки провайдера за сутки")).toBeVisible();
     expect(screen.getByText(/повтор после/)).toBeVisible();
     expect(screen.getByText("открыт · 1")).toBeVisible();
+  });
+
+  it("зелёным показывает пустую durable-очередь закрытия", () => {
+    const { container } = render(<LlmMonitoring monitoring={monitoring} />);
+    const row = container.querySelector(".llm-settlement-outbox-row");
+
+    expect(row).toHaveTextContent("Очередь пуста: все закрывающие операции подтверждены Core");
+    expect(row?.querySelector(".pill.ok")).toHaveTextContent("пусто");
+    expect(row).toHaveTextContent(
+      "Точный итог: 0 · защитный unknown: 0 · на повторе: 0 · потолок попыток: 8",
+    );
+  });
+
+  it("выносит pending, retry, fallback, exact и dead без id и payload", () => {
+    const { container } = render(
+      <LlmMonitoring
+        monitoring={{
+          ...monitoring,
+          settlementOutbox: {
+            available: true,
+            pendingCount: 3,
+            retryingCount: 2,
+            processingCount: 1,
+            deadCount: 1,
+            fallbackCount: 2,
+            exactCount: 2,
+            oldestPendingAt: "2026-08-30T06:20:00.000Z",
+            nextRetryAt: "2026-08-30T06:40:00.000Z",
+            maxAttempts: 8,
+          },
+        }}
+      />,
+    );
+    const row = container.querySelector(".llm-settlement-outbox-row");
+
+    expect(row).toHaveTextContent("Ожидают: 3 · на повторе: 2 · в обработке: 1 · неисправимы: 1");
+    expect(row).toHaveTextContent(
+      "Точный итог: 2 · защитный unknown: 2 · на повторе: 2 · потолок попыток: 8",
+    );
+    expect(row).toHaveTextContent(/Старейшая: .+ · следующий повтор: .+/);
+    expect(row?.querySelector(".pill.bad")).toHaveTextContent("сбой · 1");
+    expect(row).not.toHaveTextContent("reservationId");
+    expect(row).not.toHaveTextContent("payload");
+  });
+
+  it("не выдаёт недоступный spool за пустую очередь", () => {
+    const { container } = render(
+      <LlmMonitoring
+        monitoring={{
+          ...monitoring,
+          settlementOutbox: { ...monitoring.settlementOutbox, available: false },
+        }}
+      />,
+    );
+    const row = container.querySelector(".llm-settlement-outbox-row");
+
+    expect(row).toHaveTextContent("Локальную очередь производителей прочитать не удалось");
+    expect(row).toHaveTextContent("Нулевые счётчики не означают, что очередь пуста");
+    expect(row?.querySelector(".pill.bad")).toHaveTextContent("не проверен");
+    expect(row).not.toHaveTextContent("Очередь пуста:");
+  });
+
+  it("считает retrying запись работающей очередью, даже когда новых pending нет", () => {
+    const { container } = render(
+      <LlmMonitoring
+        monitoring={{
+          ...monitoring,
+          settlementOutbox: {
+            ...monitoring.settlementOutbox,
+            retryingCount: 1,
+            maxAttempts: 32,
+          },
+        }}
+      />,
+    );
+    const row = container.querySelector(".llm-settlement-outbox-row");
+
+    expect(row?.querySelector(".pill:not(.ok):not(.bad)")).toHaveTextContent("в очереди · 1");
+    expect(row).not.toHaveTextContent("Очередь пуста:");
   });
 
   it("считает нулевой лимит жёсткой защитой и выдерживает circuit без причины", () => {
