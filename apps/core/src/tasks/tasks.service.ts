@@ -75,6 +75,10 @@ type Priority = "low" | "normal" | "high" | "urgent";
 type Tier = "T0" | "T1" | "T2" | "T3" | "T4";
 type JsonObject = Record<string, unknown>;
 
+export const AGENT_RUN_INPUT_SNAPSHOT_MAX_BYTES = 65_536;
+/** Короткая пауза конфигурации: не крутим poll, но и не ждём новых суток. */
+export const AGENT_ROUTE_UNAVAILABLE_BACKOFF_MS = 60_000;
+
 export interface AgentRunFenceInput {
   agentName: string;
   runId: string;
@@ -86,6 +90,11 @@ export interface AgentRunStartInput extends AgentRunFenceInput {
   skill: string;
   workflowVersion: number;
   plan: unknown;
+}
+
+export interface AgentRunInputSnapshotInput extends AgentRunFenceInput {
+  kind: string;
+  payload: JsonObject;
 }
 
 export interface AgentRunCheckpointInput extends AgentRunFenceInput {
@@ -120,6 +129,12 @@ export interface AgentCheckpointView {
   createdAt: string;
 }
 
+export interface AgentInputSnapshotView {
+  kind: string;
+  payload: JsonObject;
+  hash: string;
+}
+
 export interface AgentExecutionView {
   id: string;
   status: "active" | "ready" | "committed" | "abandoned";
@@ -129,6 +144,7 @@ export interface AgentExecutionView {
   planHash: string;
   taskInputHash: string;
   startedAt: string;
+  inputSnapshot?: AgentInputSnapshotView;
   checkpoint?: AgentCheckpointView;
 }
 
@@ -142,6 +158,12 @@ export interface AgentRunCheckpointResult {
   checkpointed: true;
   replay: boolean;
   checkpoint: AgentCheckpointView;
+}
+
+export interface AgentRunInputSnapshotResult {
+  snapshotted: true;
+  replay: boolean;
+  snapshot: AgentInputSnapshotView;
 }
 
 export interface AgentRunCommitResult {
@@ -159,7 +181,7 @@ export interface AgentRunCommitResult {
 
 type ClaimedAgentRun = TaskRow & {
   taskInputHash: string;
-  taskInput: { title: string };
+  taskInput: { title: string; description?: string; domain?: Domain };
   agentExecution: AgentExecutionView | null;
 };
 
@@ -197,6 +219,83 @@ function canonicalHash(value: unknown): string {
   return createHash("sha256")
     .update(JSON.stringify(canonicalValue(value)))
     .digest("hex");
+}
+
+const FORBIDDEN_PUBLIC_SNAPSHOT_KEY =
+  /(?:^|_)(?:authorization|cookie|headers?|password|passphrase|secret|token|credential|api_key|private_key)(?:_|$)/;
+
+function normalizedJsonKey(key: string): string {
+  return key
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/([a-z\d])([A-Z])/g, "$1_$2")
+    .replace(/[-\s]+/g, "_")
+    .toLowerCase();
+}
+
+function assertPublicSnapshotJson(value: unknown, seen = new WeakSet<object>()): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new BadRequestException("input snapshot содержит нечисловое значение");
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new BadRequestException("input snapshot содержит цикл");
+    seen.add(value);
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) {
+        throw new BadRequestException("input snapshot содержит разреженный массив");
+      }
+      assertPublicSnapshotJson(value[index], seen);
+    }
+    seen.delete(value);
+    return;
+  }
+  if (typeof value !== "object") {
+    throw new BadRequestException("input snapshot должен содержать только public JSON");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new BadRequestException("input snapshot должен быть plain JSON object");
+  }
+  if (seen.has(value)) throw new BadRequestException("input snapshot содержит цикл");
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new BadRequestException("input snapshot должен содержать только строковые JSON keys");
+  }
+  seen.add(value);
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_PUBLIC_SNAPSHOT_KEY.test(normalizedJsonKey(key))) {
+      throw new BadRequestException(`input snapshot содержит запрещённое поле ${key}`);
+    }
+    if (item === undefined) {
+      throw new BadRequestException("input snapshot содержит undefined");
+    }
+    assertPublicSnapshotJson(item, seen);
+  }
+  seen.delete(value);
+}
+
+function normalizeInputSnapshot(kind: unknown, payload: unknown): AgentInputSnapshotView {
+  if (typeof kind !== "string") throw new BadRequestException("input snapshot kind обязателен");
+  const normalizedKind = kind.trim();
+  if (normalizedKind.length === 0 || normalizedKind.length > 128) {
+    throw new BadRequestException("input snapshot kind должен содержать от 1 до 128 символов");
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new BadRequestException("input snapshot payload должен быть plain JSON object");
+  }
+  assertPublicSnapshotJson(payload);
+  const canonicalPayload = canonicalValue(payload) as JsonObject;
+  const serialized = JSON.stringify(canonicalPayload);
+  if (Buffer.byteLength(serialized, "utf8") > AGENT_RUN_INPUT_SNAPSHOT_MAX_BYTES) {
+    throw new BadRequestException("input snapshot payload превышает 64 KiB");
+  }
+  return {
+    kind: normalizedKind,
+    payload: canonicalPayload,
+    hash: canonicalHash({ schemaVersion: 1, kind: normalizedKind, payload: canonicalPayload }),
+  };
 }
 
 function jsonObject(value: unknown): JsonObject {
@@ -284,7 +383,44 @@ function checkpointView(row: TaskAgentExecutionRow): AgentCheckpointView {
   };
 }
 
+function inputSnapshotView(row: TaskAgentExecutionRow): AgentInputSnapshotView | undefined {
+  if (
+    row.inputSnapshotKind == null &&
+    row.inputSnapshotPayload == null &&
+    row.inputSnapshotHash == null
+  ) {
+    return undefined;
+  }
+  if (
+    row.inputSnapshotKind == null ||
+    row.inputSnapshotPayload == null ||
+    row.inputSnapshotHash == null
+  ) {
+    throw new Error("Stored input snapshot fields are inconsistent");
+  }
+  const snapshot = normalizeInputSnapshot(row.inputSnapshotKind, row.inputSnapshotPayload);
+  if (snapshot.hash !== row.inputSnapshotHash) {
+    throw new Error("Stored input snapshot canonical hash is inconsistent");
+  }
+  return snapshot;
+}
+
+export function solutionSearchInputSnapshotConflict(
+  row: TaskAgentExecutionRow,
+): string | undefined {
+  if (row.skill !== "find-solution") return undefined;
+  try {
+    const snapshot = inputSnapshotView(row);
+    if (snapshot?.kind === "solution-search-v1") return undefined;
+  } catch {
+    // The caller turns stored corruption into the same durable fail-closed
+    // outcome as a missing/wrong-kind snapshot.
+  }
+  return "find-solution requires a consistent solution-search-v1 input snapshot";
+}
+
 function executionView(row: TaskAgentExecutionRow): AgentExecutionView {
+  const inputSnapshot = inputSnapshotView(row);
   return {
     id: row.id,
     status: row.status,
@@ -294,6 +430,7 @@ function executionView(row: TaskAgentExecutionRow): AgentExecutionView {
     planHash: row.executionPlanHash,
     taskInputHash: row.taskInputHash,
     startedAt: row.startedAt.toISOString(),
+    ...(inputSnapshot ? { inputSnapshot } : {}),
     ...(row.status === "ready" || row.status === "committed"
       ? { checkpoint: checkpointView(row) }
       : {}),
@@ -699,7 +836,11 @@ export class TasksService {
         // This snapshot comes from the same UPDATE ... RETURNING row as the
         // lease/hash. Workers must not choose a skill from their older list
         // response after claim.
-        taskInput: { title: claimed.title },
+        taskInput: {
+          title: claimed.title,
+          ...(claimed.description ? { description: claimed.description } : {}),
+          ...(claimed.domain ? { domain: claimed.domain } : {}),
+        },
         agentExecution,
       };
     });
@@ -745,7 +886,9 @@ export class TasksService {
       if (existing) {
         let storedPlanHash: string | undefined;
         try {
-          storedPlanHash = canonicalJsonHash(parseStoredTaskLlmExecutionPlan(existing.executionPlan));
+          storedPlanHash = canonicalJsonHash(
+            parseStoredTaskLlmExecutionPlan(existing.executionPlan),
+          );
         } catch {
           storedPlanHash = undefined;
         }
@@ -793,6 +936,134 @@ export class TasksService {
         .returning();
       if (!created) throw new Error("Durable task execution did not persist");
       return { started: true as const, replay: false, execution: executionView(created) };
+    });
+    if ("durableConflict" in result) throw new ConflictException(result.durableConflict);
+    return result;
+  }
+
+  /**
+   * First-write-wins boundary for volatile retrieval evidence. A stale worker
+   * may replay only the exact canonical snapshot; a takeover reads the same
+   * snapshot from the execution view and never has to repeat external IO.
+   */
+  async ensureAgentRunInputSnapshot(
+    id: string,
+    input: AgentRunInputSnapshotInput,
+    now = new Date(),
+  ): Promise<AgentRunInputSnapshotResult> {
+    const agentName = input.agentName.trim();
+    const requested = normalizeInputSnapshot(input.kind, input.payload);
+
+    const result = await this.db.transaction(async (tx) => {
+      const lockedTask = await this.lockTask(tx, id);
+      this.assertAgentRunFence(lockedTask, { ...input, agentName });
+      const execution = await this.lockExecution(tx, input.executionAttemptId);
+      if (!execution) {
+        throw new ConflictException("Durable execution must start before input snapshot");
+      }
+      if (execution.taskId !== id || execution.agentName !== agentName) {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Durable execution belongs to another task or agent",
+          now,
+        );
+      }
+      const inputHash = durableTaskInputHash(lockedTask);
+      if (execution.taskInputHash !== inputHash) {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Task changed after execution start; input snapshot is blocked",
+          now,
+        );
+      }
+
+      try {
+        const storedPlan = parseStoredTaskLlmExecutionPlan(execution.executionPlan);
+        if (
+          storedPlan.version !== execution.workflowVersion ||
+          canonicalJsonHash(storedPlan) !== execution.executionPlanHash
+        ) {
+          return this.blockAgentExecution(
+            tx,
+            lockedTask,
+            "Stored execution plan version or canonical hash is inconsistent",
+            now,
+          );
+        }
+      } catch {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Stored durable execution cannot accept an input snapshot safely",
+          now,
+        );
+      }
+
+      if (execution.status === "abandoned" || execution.status === "committed") {
+        throw new ConflictException(
+          execution.status === "committed"
+            ? "Результат этой попытки уже committed"
+            : "Эта попытка была abandoned владельцем",
+        );
+      }
+
+      let stored: AgentInputSnapshotView | undefined;
+      try {
+        stored = inputSnapshotView(execution);
+      } catch {
+        return this.blockAgentExecution(
+          tx,
+          lockedTask,
+          "Stored input snapshot canonical hash or payload is inconsistent",
+          now,
+        );
+      }
+      if (stored) {
+        if (stored.kind !== requested.kind || stored.hash !== requested.hash) {
+          throw new ConflictException(
+            "executionAttemptId уже связан с другим input snapshot payload",
+          );
+        }
+        return {
+          snapshotted: true as const,
+          replay: true,
+          snapshot: stored,
+        };
+      }
+      if (execution.status !== "active") {
+        throw new ConflictException("Input snapshot можно создать только для active execution");
+      }
+
+      const [persisted] = await tx
+        .update(taskAgentExecution)
+        .set({
+          inputSnapshotKind: requested.kind,
+          inputSnapshotPayload: requested.payload,
+          inputSnapshotHash: requested.hash,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(taskAgentExecution.id, execution.id),
+            eq(taskAgentExecution.status, "active"),
+            isNull(taskAgentExecution.inputSnapshotKind),
+            isNull(taskAgentExecution.inputSnapshotPayload),
+            isNull(taskAgentExecution.inputSnapshotHash),
+          ),
+        )
+        .returning();
+      if (!persisted) {
+        throw new ConflictException("Execution changed while input snapshot was persisted");
+      }
+      const snapshot = inputSnapshotView(persisted);
+      if (!snapshot) throw new Error("Input snapshot did not persist");
+      return {
+        snapshotted: true as const,
+        replay: false,
+        snapshot,
+      };
     });
     if ("durableConflict" in result) throw new ConflictException(result.durableConflict);
     return result;
@@ -897,10 +1168,16 @@ export class TasksService {
           now,
         );
       }
+      const snapshotConflict = solutionSearchInputSnapshotConflict(existing);
+      if (snapshotConflict) {
+        return this.blockAgentExecution(tx, lockedTask, snapshotConflict, now);
+      }
       const manifest = legacyBridge ? [] : await this.terminalLlmJobManifest(tx, existing.id);
-      const payload = (legacyBridge
-        ? requestedPayload
-        : canonicalJsonValue({ ...requestedPayload, llmJobs: manifest })) as JsonObject;
+      const payload = (
+        legacyBridge
+          ? requestedPayload
+          : canonicalJsonValue({ ...requestedPayload, llmJobs: manifest })
+      ) as JsonObject;
       const hash = legacyBridge
         ? canonicalHash({
             schemaVersion: 1,
@@ -987,7 +1264,8 @@ export class TasksService {
       .where(eq(agentTaskLlmJob.taskAgentExecutionId, executionId));
     jobs.sort(
       (left, right) =>
-        left.stepKey.localeCompare(right.stepKey) || left.providerAttemptNo - right.providerAttemptNo,
+        left.stepKey.localeCompare(right.stepKey) ||
+        left.providerAttemptNo - right.providerAttemptNo,
     );
     const manifest: unknown[] = [];
     for (const job of jobs) {
@@ -1426,6 +1704,7 @@ export class TasksService {
       | "budget_denied"
       | "execution_unknown"
       | "workflow_changed"
+      | "route_unavailable"
       | "action_capped"
       | "unsupported",
     detail?: string,
@@ -1473,6 +1752,12 @@ export class TasksService {
           safeBudgetRetry = started === undefined;
         }
       }
+      // route_unavailable is an admission result, not an execution result.
+      // It may schedule an automatic retry only before the durable execution
+      // root exists. Once /start won the race, silently reusing this reason
+      // could reinterpret an immutable plan or hide a provider attempt.
+      const safeRouteRetry =
+        reason === "route_unavailable" && execution === undefined && durableJobs.length === 0;
       if (reason === "execution_unknown") {
         for (const job of durableJobs) {
           if (job.status !== "dispatching") continue;
@@ -1485,9 +1770,7 @@ export class TasksService {
               lastError: "Worker lost durable completion response",
               updatedAt: now,
             })
-            .where(
-              and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, "dispatching")),
-            );
+            .where(and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, "dispatching")));
           job.status = "unknown";
         }
       }
@@ -1495,14 +1778,13 @@ export class TasksService {
         durableJobs.length > 0 &&
         durableJobs.every(
           (job) =>
-            job.status === "succeeded" ||
-            job.status === "rejected" ||
-            job.status === "cancelled",
+            job.status === "succeeded" || job.status === "rejected" || job.status === "cancelled",
         );
       const shouldBlock =
         (reason === "execution_unknown" && !durableOutcomeKnown) ||
         reason === "workflow_changed" ||
         reason === "unsupported" ||
+        (reason === "route_unavailable" && !safeRouteRetry) ||
         (reason === "budget_denied" && !safeBudgetRetry && !durableBudgetRetry);
       const detailText = detail?.trim().slice(0, 900);
       const blockedReason =
@@ -1510,12 +1792,18 @@ export class TasksService {
           ? `execution_unknown: ${detailText || "исход предыдущей metered-попытки неизвестен"}`
           : reason === "workflow_changed"
             ? `workflow_changed: ${detailText || "immutable LLM workflow больше не совпадает с runtime"}`
-          : detailText ||
-            (reason === "budget_denied"
-          ? "budget denial после уже начатой metered-попытки"
-          : reason === "unsupported"
-            ? "у агента нет подходящего навыка; нужен owner retry"
-            : "исход предыдущей metered-попытки неизвестен");
+            : reason === "route_unavailable"
+              ? `route_unavailable: ${
+                  safeRouteRetry
+                    ? detailText || "required metered route пока не настроен"
+                    : "release rejected after durable execution start; owner retry required"
+                }`
+              : detailText ||
+                (reason === "budget_denied"
+                  ? "budget denial после уже начатой metered-попытки"
+                  : reason === "unsupported"
+                    ? "у агента нет подходящего навыка; нужен owner retry"
+                    : "исход предыдущей metered-попытки неизвестен");
       const [released] = await tx
         .update(task)
         .set({
@@ -1548,6 +1836,17 @@ export class TasksService {
                 // вращаем: после полуночи claim вернёт тот же результат и не
                 // вызовет provider повторно.
                 agentExecutionRetryAt: nextTashkentDay,
+                agentExecutionBlockedAt: null,
+                agentExecutionBlockedReason: null,
+              }
+            : {}),
+          ...(reason === "route_unavailable" && safeRouteRetry
+            ? {
+                // Keep the unstarted attempt id: after the route is enabled,
+                // /start can attach the first immutable plan to that same id.
+                // A minute is long enough to stop poll thrash but short enough
+                // for an operator configuration change to take effect quickly.
+                agentExecutionRetryAt: new Date(now.getTime() + AGENT_ROUTE_UNAVAILABLE_BACKOFF_MS),
                 agentExecutionBlockedAt: null,
                 agentExecutionBlockedReason: null,
               }
@@ -1655,9 +1954,7 @@ export class TasksService {
                 lastError: "Owner retry after expired dispatch grant",
                 updatedAt: retryNow,
               })
-              .where(
-                and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, "dispatching")),
-              )
+              .where(and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, "dispatching")))
               .returning();
             if (!unknown) throw new ConflictException("LLM dispatch changed during owner retry");
             Object.assign(job, unknown);
@@ -1710,9 +2007,14 @@ export class TasksService {
               if (!job.spendId || !this.llmLedger) {
                 throw new ConflictException("Cannot safely release durable LLM reservation");
               }
-              await this.llmLedger.releaseInTx(tx, job.spendId, {
-                reason: "owner retry before provider dispatch",
-              }, { allowTaskJobSpend: true });
+              await this.llmLedger.releaseInTx(
+                tx,
+                job.spendId,
+                {
+                  reason: "owner retry before provider dispatch",
+                },
+                { allowTaskJobSpend: true },
+              );
             }
             if (job.status === "ready" || job.status === "waiting_budget") {
               const [cancelled] = await tx
@@ -1724,9 +2026,7 @@ export class TasksService {
                   lastError: "owner_retry_after_block",
                   updatedAt: retryNow,
                 })
-                .where(
-                  and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, job.status)),
-                )
+                .where(and(eq(agentTaskLlmJob.id, job.id), eq(agentTaskLlmJob.status, job.status)))
                 .returning();
               if (!cancelled) throw new ConflictException("LLM job changed during owner retry");
             }
@@ -1740,7 +2040,10 @@ export class TasksService {
               updatedAt: retryNow,
             })
             .where(
-              and(eq(taskAgentExecution.id, execution.id), eq(taskAgentExecution.status, execution.status)),
+              and(
+                eq(taskAgentExecution.id, execution.id),
+                eq(taskAgentExecution.status, execution.status),
+              ),
             )
             .returning();
           if (!abandoned) {
@@ -1914,7 +2217,9 @@ export class TasksService {
     // locks can invert another task's provider/budget order, so anomalous state
     // is intentionally fail-closed and leaves the task transition uncommitted.
     if (readyJobs.length > 1) {
-      throw new ConflictException("Execution содержит несколько ready LLM jobs; закрытие заблокировано");
+      throw new ConflictException(
+        "Execution содержит несколько ready LLM jobs; закрытие заблокировано",
+      );
     }
 
     const ready = readyJobs[0];

@@ -12,7 +12,11 @@ import {
   TASK_SOURCE_DAY_PREDICATE,
   taskComment,
 } from "@mydon/db";
-import { durableTaskInputHash, TasksService } from "./tasks.service";
+import {
+  AGENT_ROUTE_UNAVAILABLE_BACKOFF_MS,
+  durableTaskInputHash,
+  TasksService,
+} from "./tasks.service";
 
 type Row = Record<string, unknown>;
 
@@ -434,6 +438,8 @@ describe("Durable claim задачи агента", () => {
     const claimedRow = {
       id: TASK,
       title: "Current claimed title",
+      description: "Current claimed brief",
+      domain: "globerent",
       ownerKind: "agent",
       ownerRef: "receivables",
       status: "in_progress",
@@ -448,7 +454,11 @@ describe("Durable claim задачи агента", () => {
 
     assert.equal(result?.agentRunGeneration, 8);
     assert.equal(result?.agentExecutionAttemptId, EXECUTION);
-    assert.deepEqual(result?.taskInput, { title: "Current claimed title" });
+    assert.deepEqual(result?.taskInput, {
+      title: "Current claimed title",
+      description: "Current claimed brief",
+      domain: "globerent",
+    });
     assert.equal(updates.length, 1, "claim не должен быть select-then-update");
     const patch = updates[0]!.patch;
     assert.equal(patch.status, "in_progress");
@@ -738,6 +748,69 @@ describe("Durable claim задачи агента", () => {
     assert.ok(spendProbe);
     assert.ok(spendProbe.params.includes("denied"));
     assert.ok(spendProbe.params.includes("released"));
+  });
+
+  it("route unavailable до /start сохраняет attempt и даёт минутный auto-retry", async () => {
+    const state = agentRunState();
+
+    const released = await makeTasks(agentRunDb(state)).releaseAgentRun(
+      AGENT_TASK_ID,
+      "receivables",
+      AGENT_RUN_ID,
+      AGENT_ATTEMPT_ID,
+      "route_unavailable",
+      "find-solution:rank is not configured",
+      AGENT_NOW,
+    );
+
+    assert.equal(released?.status, "todo");
+    assert.equal(released?.agentRunId, null);
+    assert.equal(released?.agentExecutionAttemptId, AGENT_ATTEMPT_ID);
+    assert.equal(released?.agentExecutionBlockedAt, null);
+    assert.equal(released?.agentExecutionBlockedReason, null);
+    assert.equal(
+      (released?.agentExecutionRetryAt as Date).toISOString(),
+      new Date(AGENT_NOW.getTime() + AGENT_ROUTE_UNAVAILABLE_BACKOFF_MS).toISOString(),
+    );
+    assert.equal(state.execution, undefined, "release не создаёт empty execution");
+  });
+
+  it("route unavailable после durable /start fail-closed блокирует без rotation", async () => {
+    const state = agentRunState();
+    state.execution = {
+      id: "execution-1",
+      taskId: AGENT_TASK_ID,
+      executionAttemptId: AGENT_ATTEMPT_ID,
+      agentName: "receivables",
+      skill: "find-solution",
+      status: "active",
+      taskInputHash: durableTaskInputHash(state.task as never),
+    };
+    state.jobs.push({
+      id: "job-1",
+      status: "succeeded",
+      taskAgentExecutionId: "execution-1",
+    });
+
+    const released = await makeTasks(agentRunDb(state)).releaseAgentRun(
+      AGENT_TASK_ID,
+      "receivables",
+      AGENT_RUN_ID,
+      AGENT_ATTEMPT_ID,
+      "route_unavailable",
+      "stale worker claimed the route was off",
+      AGENT_NOW,
+    );
+
+    assert.equal(released?.agentExecutionAttemptId, AGENT_ATTEMPT_ID);
+    assert.equal(released?.agentExecutionRetryAt, null);
+    assert.equal(released?.agentExecutionBlockedAt, AGENT_NOW);
+    assert.equal(
+      released?.agentExecutionBlockedReason,
+      "route_unavailable: release rejected after durable execution start; owner retry required",
+    );
+    assert.equal(state.execution.status, "active");
+    assert.equal(state.jobs[0]?.status, "succeeded");
   });
 
   it("budget denial после начатого reserve блокирует, а не ротирует execution", async () => {
@@ -1143,6 +1216,221 @@ describe("Terminal task cleanup durable LLM jobs", () => {
     );
     assert.equal(releaseCalls, 0);
     assert.deepEqual(state.lockOrder, ["task", "execution", "jobs"]);
+  });
+});
+
+describe("Durable agent input snapshot", () => {
+  const fence = {
+    agentName: "receivables",
+    runId: AGENT_RUN_ID,
+    executionAttemptId: AGENT_ATTEMPT_ID,
+  };
+  const plan = { version: 1 as const, steps: [] };
+
+  async function start(service: TasksService, state: AgentRunDbState, runId = AGENT_RUN_ID) {
+    return service.startAgentRun(
+      AGENT_TASK_ID,
+      {
+        ...fence,
+        runId,
+        claimedTaskInputHash: durableTaskInputHash(state.task as never),
+        skill: "find-solution",
+        workflowVersion: 1,
+        plan,
+      },
+      AGENT_NOW,
+    );
+  }
+
+  it("creates once and replays the exact canonical public JSON", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await start(service, state);
+
+    const first = await service.ensureAgentRunInputSnapshot(
+      AGENT_TASK_ID,
+      {
+        ...fence,
+        kind: "solution-search-v1",
+        payload: { coverage: { github: "ok" }, candidates: [{ id: "gh:one", stars: 12 }] },
+      },
+      AGENT_NOW,
+    );
+    const replay = await service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+      ...fence,
+      kind: " solution-search-v1 ",
+      payload: { candidates: [{ stars: 12, id: "gh:one" }], coverage: { github: "ok" } },
+    });
+
+    assert.equal(first.replay, false);
+    assert.equal(replay.replay, true);
+    assert.equal(replay.snapshot.hash, first.snapshot.hash);
+    assert.equal(state.execution?.inputSnapshotKind, "solution-search-v1");
+    assert.deepEqual(state.execution?.inputSnapshotPayload, first.snapshot.payload);
+    assert.match(String(state.execution?.inputSnapshotHash), /^[0-9a-f]{64}$/);
+  });
+
+  it("first write wins: another kind or payload gets 409 and cannot replace evidence", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await start(service, state);
+    const original = await service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+      ...fence,
+      kind: "solution-search-v1",
+      payload: { candidates: [{ id: "gh:one" }] },
+    });
+
+    await assert.rejects(
+      () =>
+        service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+          ...fence,
+          kind: "solution-search-v1",
+          payload: { candidates: [{ id: "gh:two" }] },
+        }),
+      /другим input snapshot payload/,
+    );
+    await assert.rejects(
+      () =>
+        service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+          ...fence,
+          kind: "solution-search-v2",
+          payload: original.snapshot.payload,
+        }),
+      /другим input snapshot payload/,
+    );
+    assert.equal(state.execution?.inputSnapshotHash, original.snapshot.hash);
+  });
+
+  it("task input drift blocks snapshot and releases the lease for owner retry", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await start(service, state);
+    state.task.description = "Владелец изменил критерии поиска";
+
+    await assert.rejects(
+      () =>
+        service.ensureAgentRunInputSnapshot(
+          AGENT_TASK_ID,
+          { ...fence, kind: "solution-search-v1", payload: { candidates: [] } },
+          AGENT_NOW,
+        ),
+      /Task changed after execution start/,
+    );
+    assert.equal(state.task.status, "todo");
+    assert.equal(state.task.agentRunId, null);
+    assert.equal(state.task.agentExecutionBlockedAt, AGENT_NOW);
+    assert.equal(state.execution?.inputSnapshotHash, undefined);
+  });
+
+  it("rejects oversized, non-plain and secret-bearing payloads before persistence", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await start(service, state);
+
+    await assert.rejects(
+      () =>
+        service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+          ...fence,
+          kind: "solution-search-v1",
+          payload: { body: "я".repeat(33_000) },
+        }),
+      /64 KiB/,
+    );
+    await assert.rejects(
+      () =>
+        service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+          ...fence,
+          kind: "solution-search-v1",
+          payload: { requestHeaders: { authorization: "Bearer must-not-persist" } },
+        }),
+      /запрещённое поле/,
+    );
+    await assert.rejects(
+      () =>
+        service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+          ...fence,
+          kind: "solution-search-v1",
+          payload: { apiToken: "must-not-persist" },
+        }),
+      /запрещённое поле/,
+    );
+    await assert.rejects(
+      () =>
+        service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+          ...fence,
+          kind: "solution-search-v1",
+          payload: new Date() as never,
+        }),
+      /plain JSON object/,
+    );
+    assert.equal(state.execution?.inputSnapshotHash, undefined);
+  });
+
+  it("stale takeover reuses the stored snapshot with a new runId and no new write", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await start(service, state);
+    const first = await service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+      ...fence,
+      kind: "solution-search-v1",
+      payload: { candidates: [{ id: "gh:one", url: "https://github.com/acme/one" }] },
+    });
+
+    const takeoverRunId = "55555555-5555-4555-8555-555555555555";
+    state.task.agentRunId = takeoverRunId;
+    const resumed = await start(service, state, takeoverRunId);
+    assert.equal(resumed.replay, true);
+    assert.deepEqual(resumed.execution.inputSnapshot, first.snapshot);
+
+    const replay = await service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+      ...fence,
+      runId: takeoverRunId,
+      kind: first.snapshot.kind,
+      payload: first.snapshot.payload,
+    });
+    assert.equal(replay.replay, true);
+    assert.equal(replay.snapshot.hash, first.snapshot.hash);
+  });
+
+  it("find-solution cannot checkpoint without the required snapshot", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await start(service, state);
+
+    await assert.rejects(
+      () =>
+        service.checkpointAgentRun(
+          AGENT_TASK_ID,
+          { ...fence, skill: "find-solution", kind: "no_signal" },
+          AGENT_NOW,
+        ),
+      /consistent solution-search-v1 input snapshot/,
+    );
+    assert.equal(state.execution?.status, "active");
+    assert.equal(state.execution?.checkpointPayload, null);
+    assert.equal(state.execution?.checkpointHash, null);
+    assert.equal(state.task.status, "todo");
+  });
+
+  it("find-solution checkpoints after the valid snapshot is durable", async () => {
+    const state = agentRunState();
+    const service = makeTasks(agentRunDb(state));
+    await start(service, state);
+    await service.ensureAgentRunInputSnapshot(AGENT_TASK_ID, {
+      ...fence,
+      kind: "solution-search-v1",
+      payload: { candidates: [], coverage: { github: "failed" } },
+    });
+
+    const checkpoint = await service.checkpointAgentRun(
+      AGENT_TASK_ID,
+      { ...fence, skill: "find-solution", kind: "no_signal" },
+      AGENT_NOW,
+    );
+    assert.equal(checkpoint.checkpointed, true);
+    assert.equal(checkpoint.replay, false);
+    assert.equal(state.execution?.status, "ready");
+    assert.match(String(state.execution?.checkpointHash), /^[0-9a-f]{64}$/);
   });
 });
 

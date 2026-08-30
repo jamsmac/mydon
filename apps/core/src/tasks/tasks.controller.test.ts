@@ -6,6 +6,7 @@ import { validate } from "class-validator";
 import {
   AgentRunCheckpointDto,
   AgentRunCommitDto,
+  AgentRunInputSnapshotDto,
   ClaimAgentRunDto,
   EnsureForDayDto,
   ReleaseAgentRunDto,
@@ -128,6 +129,18 @@ describe("DTO durable agent-run", () => {
       ),
       [],
     );
+    assert.deepEqual(
+      await validate(
+        plainToInstance(ReleaseAgentRunDto, {
+          agentName: "solution-scout",
+          runId: RUN_ID,
+          executionAttemptId: EXECUTION_ID,
+          reason: "route_unavailable",
+          detail: "find-solution:rank is not configured",
+        }),
+      ),
+      [],
+    );
   });
 
   it("checkpoint принимает только typed result и режет action по контракту approvals", async () => {
@@ -148,6 +161,26 @@ describe("DTO durable agent-run", () => {
       action: "x".repeat(513),
     });
     assert.ok((await validate(tooLong)).some((error) => error.property === "action"));
+  });
+
+  it("input snapshot требует fence, bounded kind и object payload", async () => {
+    const valid = plainToInstance(AgentRunInputSnapshotDto, {
+      agentName: "solution-scout",
+      runId: RUN_ID,
+      executionAttemptId: EXECUTION_ID,
+      kind: "solution-search-v1",
+      payload: { candidates: [] },
+    });
+    assert.deepEqual(await validate(valid), []);
+
+    const invalid = plainToInstance(AgentRunInputSnapshotDto, {
+      ...valid,
+      kind: "x".repeat(129),
+      payload: [],
+    });
+    const errors = await validate(invalid);
+    assert.ok(errors.some((error) => error.property === "kind"));
+    assert.ok(errors.some((error) => error.property === "payload"));
   });
 
   it("commit требует fence, outcome kind и непустой note", async () => {

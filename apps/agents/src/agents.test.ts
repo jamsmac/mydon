@@ -101,6 +101,13 @@ describe("Паспорта агентов (перенесены как есть)
     }
   });
 
+  it("solution-scout active и его первый task-навык подключён к runtime", () => {
+    const scout = agents.find((agent) => agent.name === "solution-scout");
+    assert.equal(scout?.status, "active");
+    assert.deepEqual(scout?.skills, ["find-solution"]);
+    assert.equal(typeof SKILLS["find-solution"], "function");
+  });
+
   it("несуществующий каталог даёт ошибку, а не падение", () => {
     const res = loadAgents("/нет/такого/пути");
     assert.equal(res.agents.length, 0);
@@ -484,6 +491,30 @@ describe("Прогон навыка", () => {
     }
   });
 
+  it("task-mode puts a bounded ownerReport into the visible task result note", async () => {
+    const original = SKILLS["watch-receivables"];
+    const ownerReport = `Найдено решение\nhttps://github.com/example/repository\n${"x".repeat(2100)}`;
+    SKILLS["watch-receivables"] = async () => ({
+      action: "Проверить найденное решение",
+      facts: { ownerReport },
+    });
+    try {
+      const { client } = stubCore();
+      const result = await runSkill(base, "watch-receivables", client, "T0", undefined, {
+        requestKey: "task:t1:execution:e1",
+        task: {
+          saveCheckpoint: async (checkpoint) => ({ id: "cp-report", ...checkpoint }),
+        },
+      });
+
+      assert.equal(result.commit?.note.length, 2000);
+      assert.match(result.commit?.note ?? "", /https:\/\/github\.com\/example\/repository/);
+      assert.doesNotMatch(result.commit?.note ?? "", /Вынес на твоё решение/);
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
+  });
+
   it("task resume читает durable proposal и не вызывает skill/LLM", async () => {
     const original = SKILLS["watch-receivables"];
     let skillCalls = 0;
@@ -641,7 +672,12 @@ describe("Задачи агента и дневной потолок", () => {
       agentName: string;
       runId: string;
       executionAttemptId: string;
-      reason?: "budget_denied" | "execution_unknown" | "workflow_changed" | "unsupported";
+      reason?:
+        | "budget_denied"
+        | "execution_unknown"
+        | "workflow_changed"
+        | "route_unavailable"
+        | "unsupported";
       detail?: string;
     }[] = [];
     const claims: { id: string; agentName: string; runId: string }[] = [];
@@ -721,7 +757,12 @@ describe("Задачи агента и дневной потолок", () => {
           agentName: string,
           runId: string,
           executionAttemptId: string,
-          reason?: "budget_denied" | "execution_unknown" | "workflow_changed" | "unsupported",
+          reason?:
+            | "budget_denied"
+            | "execution_unknown"
+            | "workflow_changed"
+            | "route_unavailable"
+            | "unsupported",
           detail?: string,
         ) => {
           releases.push({
@@ -918,6 +959,201 @@ describe("Задачи агента и дневной потолок", () => {
     } finally {
       SKILLS["watch-receivables"] = watch;
       SKILLS["monitor-stock"] = stock;
+    }
+  });
+
+  it("find-solution получает atomic description/domain и immutable snapshot из execution", async () => {
+    const original = SKILLS["find-solution"];
+    const snapshot = {
+      kind: "solution-search-v1",
+      payload: { version: 1 },
+      hash: "a".repeat(64),
+    };
+    let calls = 0;
+    SKILLS["find-solution"] = async (_agent, _core, context) => {
+      calls += 1;
+      assert.equal(context?.taskInput?.description, "Найди готовое решение для CRM");
+      assert.equal(context?.taskInput?.domain, "vendhub");
+      assert.deepEqual(context?.task?.inputSnapshot, snapshot);
+      assert.equal(typeof context?.task?.saveInputSnapshot, "function");
+      return null;
+    };
+    try {
+      const { client } = stub({
+        claimAgentTask: async () => ({
+          runId: "11111111-1111-4111-8111-111111111111",
+          executionAttemptId: "22222222-2222-4222-8222-222222222222",
+          generation: 1,
+          claimedAt: "2026-08-29T10:00:00.000Z",
+          taskInputHash: "current-task-input-hash",
+          taskInput: {
+            title: "проверь варианты",
+            description: "Найди готовое решение для CRM",
+            domain: "vendhub",
+          },
+          execution: {
+            id: "88888888-8888-4888-8888-888888888888",
+            status: "active" as const,
+            skill: "find-solution",
+            workflowVersion: 1,
+            plan: {
+              version: 1 as const,
+              steps: [
+                {
+                  stepKey: "find-solution:rank",
+                  kind: "chat" as const,
+                  feature: "find-solution:rank",
+                  adapter: "openai-compatible",
+                  adapterVersion: 1,
+                  endpointProfile: "openai-chat-completions:sha256:test",
+                  provider: "openai",
+                  models: ["gpt-5.6-sol"],
+                },
+              ],
+            },
+            planHash: "plan-hash",
+            inputSnapshot: snapshot,
+          },
+        }),
+        startAgentTaskExecution: async (_id: string, input: Record<string, unknown>) => ({
+          started: true as const,
+          replay: true,
+          execution: {
+            id: "88888888-8888-4888-8888-888888888888",
+            status: "active" as const,
+            skill: String(input.skill),
+            workflowVersion: Number(input.workflowVersion),
+            plan: input.plan,
+            planHash: "plan-hash",
+            inputSnapshot: snapshot,
+          },
+        }),
+      });
+      const solutionScout = { ...agent, name: "solution-scout", skills: ["find-solution"] };
+
+      const result = await runAgentTasks(solutionScout, client, "T0");
+
+      assert.equal(calls, 1);
+      assert.equal(result[0]?.outcome, "done");
+    } finally {
+      if (original === undefined) delete SKILLS["find-solution"];
+      else SKILLS["find-solution"] = original;
+    }
+  });
+
+  it("find-solution off→backoff→on создаёт первый plan без owner retry и workflow_changed", async () => {
+    const originalSkill = SKILLS["find-solution"];
+    const envKeys = [
+      "LLM_ENABLED",
+      "LLM_ROUTE",
+      "LLM_PROVIDER",
+      "LLM_BASE_URL",
+      "LLM_API_KEY",
+      "LLM_MODEL",
+      "LLM_FALLBACK_MODELS",
+      "LLM_HTTP_BILLING_MODE",
+      "LLM_PRICE_PROVIDER_ID",
+    ] as const;
+    const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+    const attemptId = "99999999-9999-4999-8999-999999999999";
+    const releaseReasons: string[] = [];
+    const started: Record<string, unknown>[] = [];
+    let clockMs = 0;
+    let retryAtMs = 0;
+    let generation = 0;
+
+    SKILLS["find-solution"] = async () => null;
+    try {
+      process.env.LLM_ENABLED = "0";
+      const { client } = stub({
+        myTasks: async () => [
+          {
+            id: "t1",
+            title: "Найди готовое решение",
+            status: "todo",
+            ownerRef: "solution-scout",
+          },
+        ],
+        claimAgentTask: async () => {
+          if (clockMs < retryAtMs) return null;
+          generation += 1;
+          return {
+            runId: `00000000-0000-4000-8000-${String(generation).padStart(12, "0")}`,
+            executionAttemptId: attemptId,
+            generation,
+            claimedAt: new Date(clockMs).toISOString(),
+            taskInputHash: "solution-input-hash",
+            taskInput: { title: "Найди готовое решение" },
+          };
+        },
+        releaseAgentTask: async (
+          _id: string,
+          _agentName: string,
+          _runId: string,
+          executionAttemptId: string,
+          reason?: string,
+        ) => {
+          assert.equal(executionAttemptId, attemptId);
+          if (reason) releaseReasons.push(reason);
+          if (reason === "route_unavailable") retryAtMs = clockMs + 60_000;
+          return true;
+        },
+        startAgentTaskExecution: async (_id: string, input: Record<string, unknown>) => {
+          started.push(input);
+          return {
+            started: true as const,
+            replay: false,
+            execution: {
+              id: "88888888-8888-4888-8888-888888888888",
+              status: "active" as const,
+              skill: String(input.skill),
+              workflowVersion: Number(input.workflowVersion),
+              plan: input.plan,
+              planHash: "plan-hash",
+            },
+          };
+        },
+      });
+      const scout = { ...agent, name: "solution-scout", skills: ["find-solution"] };
+
+      const routeOff = await runAgentTasks(scout, client, "T0");
+      assert.match(routeOff[0]?.note ?? "", /60 секунд/);
+      assert.deepEqual(releaseReasons, ["route_unavailable"]);
+      assert.equal(started.length, 0, "route off не создаёт empty execution");
+
+      const beforeRetryAt = await runAgentTasks(scout, client, "T0");
+      assert.equal(beforeRetryAt[0]?.outcome, "skipped");
+      assert.deepEqual(releaseReasons, ["route_unavailable"], "backoff не poll-thrash");
+
+      clockMs = 60_000;
+      process.env.LLM_ENABLED = "1";
+      process.env.LLM_ROUTE = "openai-api";
+      process.env.LLM_PROVIDER = "openai";
+      process.env.LLM_BASE_URL = "https://api.openai.com/v1";
+      process.env.LLM_API_KEY = "test-key";
+      process.env.LLM_MODEL = "gpt-5.6-sol";
+      process.env.LLM_FALLBACK_MODELS = "";
+      process.env.LLM_HTTP_BILLING_MODE = "metered";
+      process.env.LLM_PRICE_PROVIDER_ID = "openai";
+
+      const routeOn = await runAgentTasks(scout, client, "T0");
+
+      assert.equal(routeOn[0]?.outcome, "done");
+      assert.equal(started.length, 1);
+      assert.equal(started[0]?.executionAttemptId, attemptId, "attempt не ротирован");
+      assert.deepEqual(
+        (started[0]?.plan as { steps: { stepKey: string }[] }).steps.map((step) => step.stepKey),
+        ["find-solution:rank"],
+      );
+      assert.ok(!releaseReasons.includes("workflow_changed"));
+    } finally {
+      if (originalSkill === undefined) delete SKILLS["find-solution"];
+      else SKILLS["find-solution"] = originalSkill;
+      for (const key of envKeys) {
+        const value = originalEnv.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 

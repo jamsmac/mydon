@@ -59,7 +59,23 @@ export interface AgentTaskExecution {
   workflowVersion: number;
   plan: TaskLlmWorkflowPlan;
   planHash: string;
+  inputSnapshot?: AgentTaskInputSnapshot;
   checkpoint?: AgentTaskCheckpoint;
+}
+
+/** Immutable public retrieval evidence persisted by Core before paid ranking. */
+export interface AgentTaskInputSnapshot {
+  kind: string;
+  payload: Record<string, unknown>;
+  hash: string;
+}
+
+export interface EnsureAgentTaskInputSnapshotInput {
+  agentName: string;
+  runId: string;
+  executionAttemptId: string;
+  kind: string;
+  payload: Record<string, unknown>;
 }
 
 export interface CheckpointAgentTaskInput {
@@ -106,7 +122,7 @@ export interface AgentTaskClaim {
   /** Snapshot hash minted by Core at claim and repeated by /start. */
   taskInputHash?: string;
   /** Atomic claim snapshot; list results are stale after the lease is won. */
-  taskInput: { title: string };
+  taskInput: { title: string; description?: string; domain?: Domain };
   /** Present after execution /start, including active takeover resume. */
   execution?: AgentTaskExecution;
   /** Есть после crash/takeover: навык нельзя вызывать повторно. */
@@ -419,7 +435,7 @@ export class AgentsCoreClient {
           generation: number;
           claimedAt: string;
           taskInputHash?: string;
-          taskInput?: { title?: unknown };
+          taskInput?: { title?: unknown; description?: unknown; domain?: unknown };
           execution?: AgentTaskExecution | null;
           checkpoint?: AgentTaskCheckpoint | null;
         }
@@ -429,6 +445,8 @@ export class AgentsCoreClient {
     });
     if (!response.claimed) return null;
     const claimedTitle = response.taskInput?.title;
+    const claimedDescription = response.taskInput?.description;
+    const claimedDomain = response.taskInput?.domain;
     if (
       typeof claimedTitle !== "string" ||
       claimedTitle.trim().length === 0 ||
@@ -436,12 +454,31 @@ export class AgentsCoreClient {
     ) {
       throw new Error(`Core claim задачи ${id} не содержит валидный taskInput.title`);
     }
+    if (
+      claimedDescription !== undefined &&
+      (typeof claimedDescription !== "string" || claimedDescription.length > 4000)
+    ) {
+      throw new Error(`Core claim задачи ${id} содержит невалидный taskInput.description`);
+    }
+    if (
+      claimedDomain !== undefined &&
+      (typeof claimedDomain !== "string" ||
+        !(["globerent", "vendhub", "personal", "mydon"] as const).includes(claimedDomain as Domain))
+    ) {
+      throw new Error(`Core claim задачи ${id} содержит невалидный taskInput.domain`);
+    }
     return {
       runId: response.runId,
       executionAttemptId: response.executionAttemptId,
       generation: response.generation,
       claimedAt: response.claimedAt,
-      taskInput: { title: claimedTitle },
+      taskInput: {
+        title: claimedTitle,
+        ...(typeof claimedDescription === "string" && claimedDescription.length > 0
+          ? { description: claimedDescription }
+          : {}),
+        ...(claimedDomain !== undefined ? { domain: claimedDomain as Domain } : {}),
+      },
       ...(response.taskInputHash ? { taskInputHash: response.taskInputHash } : {}),
       ...(response.execution ? { execution: response.execution } : {}),
       ...(response.checkpoint ? { checkpoint: response.checkpoint } : {}),
@@ -457,6 +494,22 @@ export class AgentsCoreClient {
       method: "POST",
       body: JSON.stringify(input),
     });
+  }
+
+  /** Persist or exact-replay public retrieval evidence before a dependent paid call. */
+  async ensureAgentTaskInputSnapshot(
+    id: string,
+    input: EnsureAgentTaskInputSnapshotInput,
+  ): Promise<AgentTaskInputSnapshot> {
+    const response = await this.request<{
+      snapshotted: true;
+      replay: boolean;
+      snapshot: AgentTaskInputSnapshot;
+    }>(`/tasks/${id}/agent-run/input-snapshot`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return response.snapshot;
   }
 
   /** Ensure one physical provider attempt and its budget authorization. */
@@ -575,7 +628,12 @@ export class AgentsCoreClient {
     agentName: string,
     runId: string,
     executionAttemptId: string,
-    reason?: "budget_denied" | "execution_unknown" | "workflow_changed" | "unsupported",
+    reason?:
+      | "budget_denied"
+      | "execution_unknown"
+      | "workflow_changed"
+      | "route_unavailable"
+      | "unsupported",
     detail?: string,
   ): Promise<boolean> {
     const response = await this.request<{ released: boolean }>(`/tasks/${id}/agent-run/release`, {

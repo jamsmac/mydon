@@ -139,9 +139,14 @@ describe("Клиент durable agent-run", () => {
         executionAttemptId: EXECUTION_ID,
         generation: 3,
         claimedAt: "2026-08-29T10:00:00.000Z",
-        taskInput: { title: "Проверь дебиторку" },
+        taskInput: {
+          title: "Найди готовое решение",
+          description: "Telegram-бот для квалификации лидов в Узбекистане",
+          domain: "mydon",
+        },
       },
       { renewed: true },
+      { released: true },
       { released: true },
     ];
     globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
@@ -161,7 +166,11 @@ describe("Клиент durable agent-run", () => {
       executionAttemptId: EXECUTION_ID,
       generation: 3,
       claimedAt: "2026-08-29T10:00:00.000Z",
-      taskInput: { title: "Проверь дебиторку" },
+      taskInput: {
+        title: "Найди готовое решение",
+        description: "Telegram-бот для квалификации лидов в Узбекистане",
+        domain: "mydon",
+      },
     });
     assert.equal(await core.heartbeatAgentTask("t1", "receivables", RUN_ID), true);
     assert.equal(
@@ -172,6 +181,17 @@ describe("Клиент durable agent-run", () => {
         EXECUTION_ID,
         "unsupported",
         "нет навыка",
+      ),
+      true,
+    );
+    assert.equal(
+      await core.releaseAgentTask(
+        "t1",
+        "receivables",
+        RUN_ID,
+        EXECUTION_ID,
+        "route_unavailable",
+        "find-solution:rank is not configured",
       ),
       true,
     );
@@ -194,7 +214,38 @@ describe("Клиент durable agent-run", () => {
           detail: "нет навыка",
         },
       },
+      {
+        path: "/tasks/t1/agent-run/release",
+        body: {
+          agentName: "receivables",
+          runId: RUN_ID,
+          executionAttemptId: EXECUTION_ID,
+          reason: "route_unavailable",
+          detail: "find-solution:rank is not configured",
+        },
+      },
     ]);
+  });
+
+  it("fail-closed отклоняет неизвестный domain в atomic task input", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          claimed: true,
+          runId: "run-1",
+          executionAttemptId: "attempt-1",
+          generation: 1,
+          claimedAt: "2026-08-29T10:00:00.000Z",
+          taskInput: { title: "Найди решение", domain: "external" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof globalThis.fetch;
+
+    const core = new AgentsCoreClient("http://core");
+    await assert.rejects(
+      core.claimAgentTask("t1", "solution-scout"),
+      /невалидный taskInput\.domain/,
+    );
   });
 
   it("unwrap checkpoint, маппит commit outcomes и обслуживает outbox lease", async () => {
@@ -288,7 +339,7 @@ describe("Клиент durable agent-run", () => {
     });
   });
 
-  it("v3 start/ensure/claim/complete передают exact durable provider wire", async () => {
+  it("v3 start/snapshot/ensure/claim/complete передают exact durable provider wire", async () => {
     const plan = {
       version: 1 as const,
       steps: [
@@ -311,6 +362,11 @@ describe("Клиент durable agent-run", () => {
       payload: { text: "done", resolvedModel: "m1" },
       resultHash: "result-hash",
     };
+    const inputSnapshot = {
+      kind: "solution-search-v1",
+      payload: { queries: ["telegram crm language:TypeScript"] },
+      hash: "snapshot-hash",
+    };
     const responses: unknown[] = [
       {
         started: true,
@@ -324,6 +380,7 @@ describe("Клиент durable agent-run", () => {
           planHash: "plan-hash",
         },
       },
+      { snapshotted: true, replay: false, snapshot: inputSnapshot },
       { jobId: "job-1", status: "ready", operationHash: "operation-hash" },
       {
         granted: true,
@@ -355,6 +412,16 @@ describe("Клиент durable agent-run", () => {
       workflowVersion: 1,
       plan,
     });
+    assert.deepEqual(
+      await core.ensureAgentTaskInputSnapshot("t1", {
+        agentName: "coach",
+        runId: "run-1",
+        executionAttemptId: "attempt-1",
+        kind: inputSnapshot.kind,
+        payload: inputSnapshot.payload,
+      }),
+      inputSnapshot,
+    );
     await core.ensureAgentTaskLlmJob("t1", {
       agentName: "coach",
       runId: "run-1",
@@ -388,18 +455,26 @@ describe("Клиент durable agent-run", () => {
       requests.map((request) => request.path),
       [
         "/tasks/t1/agent-run/start",
+        "/tasks/t1/agent-run/input-snapshot",
         "/tasks/t1/agent-run/llm-jobs/ensure",
         "/tasks/t1/agent-run/llm-jobs/job-1/claim-dispatch",
         "/tasks/t1/agent-run/llm-jobs/job-1/complete",
       ],
     );
-    assert.deepEqual(requests[2]?.body, {
+    assert.deepEqual(requests[1]?.body, {
+      agentName: "coach",
+      runId: "run-1",
+      executionAttemptId: "attempt-1",
+      kind: "solution-search-v1",
+      payload: inputSnapshot.payload,
+    });
+    assert.deepEqual(requests[3]?.body, {
       agentName: "coach",
       runId: "run-1",
       executionAttemptId: "attempt-1",
       dispatchToken: "dispatch-1",
     });
-    assert.deepEqual(requests[3]?.body, {
+    assert.deepEqual(requests[4]?.body, {
       dispatchToken: "dispatch-1",
       outcome: "success",
       result: { text: "done", resolvedModel: "m1" },

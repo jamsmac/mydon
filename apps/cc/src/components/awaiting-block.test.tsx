@@ -7,7 +7,10 @@ import { AwaitingBlock } from "./awaiting-block";
 const mocks = vi.hoisted(() => ({ confirmTask: vi.fn(), rateTask: vi.fn(), refresh: vi.fn() }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
-vi.mock("../app/tasks/actions", () => ({ confirmTask: mocks.confirmTask, rateTask: mocks.rateTask }));
+vi.mock("../app/tasks/actions", () => ({
+  confirmTask: mocks.confirmTask,
+  rateTask: mocks.rateTask,
+}));
 
 const ЗАДАЧА: Task = {
   id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -43,6 +46,18 @@ describe("Блок «Ждут подтверждения» (П7, T6)", () => {
     expect(screen.getByText(/Загрузил 40 позиций/)).toBeVisible();
     expect(screen.getByRole("button", { name: "Принять" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Переделать" })).toBeVisible();
+  });
+
+  it("показывает canonical GitHub URL как безопасную ссылку, а прочие URL — как текст", () => {
+    const resultNote =
+      "Вариант\nhttps://github.com/acme/telegram-crm\nЗапрос: https://example.com/from-task";
+    render(<AwaitingBlock tasks={[{ ...ЗАДАЧА, resultNote }]} names={ИМЕНА} />);
+
+    expect(
+      screen.getByRole("link", { name: "https://github.com/acme/telegram-crm" }),
+    ).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.queryByRole("link", { name: "https://example.com/from-task" })).toBeNull();
+    expect(screen.getByText(/https:\/\/example\.com\/from-task/u)).toBeVisible();
   });
 
   it("пусто — третье состояние, а не зелёная галка и не исчезнувший блок", () => {

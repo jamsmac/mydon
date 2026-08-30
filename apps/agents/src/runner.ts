@@ -86,6 +86,16 @@ function checkpointProposal(checkpoint: AgentTaskCheckpoint): {
   };
 }
 
+/** A skill may place a bounded owner-facing report in facts without widening action. */
+function taskResultNote(proposal: { action: string; facts: Record<string, unknown> }): string {
+  const report = proposal.facts.ownerReport;
+  const body =
+    typeof report === "string" && report.trim().length > 0
+      ? report.trim()
+      : `${proposal.action}\n\nВынес на твоё решение.`;
+  return body.slice(0, 2000);
+}
+
 /**
  * Прогон одного навыка агента (Фаза К3: агенты подключены к Core).
  *
@@ -346,7 +356,7 @@ export async function runSkill(
       reason: approvalReason,
       commit: {
         outcome: "approval_requested",
-        note: `${proposal.action}\n\nВынес на твоё решение.`,
+        note: taskResultNote(proposal),
         action: proposal.action,
         facts: proposal.facts,
         ...(proposal.next && proposal.next.length ? { next: proposal.next } : {}),

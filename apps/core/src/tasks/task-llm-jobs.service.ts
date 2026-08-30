@@ -38,7 +38,7 @@ import type {
   CompleteTaskLlmJobDto,
   EnsureTaskLlmJobDto,
 } from "./task-llm-jobs.dto";
-import { durableTaskInputHash } from "./tasks.service";
+import { durableTaskInputHash, solutionSearchInputSnapshotConflict } from "./tasks.service";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type TaskRow = typeof task.$inferSelect;
@@ -127,6 +127,8 @@ export class TaskLlmJobsService {
 
         const planConflict = this.planConflict(execution, input);
         if (planConflict) return this.blockTask(tx, lockedTask, planConflict, now);
+        const snapshotConflict = this.solutionRankSnapshotConflict(execution, input);
+        if (snapshotConflict) return this.blockTask(tx, lockedTask, snapshotConflict, now);
         const operationHash = this.operationHash(execution, input, requestPayload);
         const jobKey = `task-llm:${execution.id}:${input.stepKey}:${input.providerAttemptNo}`;
 
@@ -333,6 +335,8 @@ export class TaskLlmJobsService {
         }
         const storedPlanConflict = this.storedJobPlanConflict(execution, job);
         if (storedPlanConflict) return this.blockTask(tx, lockedTask, storedPlanConflict, now);
+        const snapshotConflict = this.solutionRankSnapshotConflict(execution, job);
+        if (snapshotConflict) return this.blockTask(tx, lockedTask, snapshotConflict, now);
         let verifiedPayload: Record<string, unknown> | undefined;
         if (job.status === "ready" || job.status === "dispatching") {
           try {
@@ -792,6 +796,23 @@ export class TaskLlmJobsService {
       return "Stored LLM job no longer matches its immutable execution plan";
     }
     return undefined;
+  }
+
+  private solutionRankSnapshotConflict(
+    execution: ExecutionRow,
+    operation: Pick<JobRow, "kind" | "stepKey" | "feature">,
+  ): string | undefined {
+    if (
+      operation.kind !== "chat" ||
+      operation.stepKey !== "find-solution:rank" ||
+      operation.feature.trim() !== "find-solution:rank"
+    ) {
+      return undefined;
+    }
+    if (execution.skill !== "find-solution") {
+      return "find-solution:rank requires a find-solution execution";
+    }
+    return solutionSearchInputSnapshotConflict(execution);
   }
 
   private operationHash(

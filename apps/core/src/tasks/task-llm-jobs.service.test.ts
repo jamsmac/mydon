@@ -285,6 +285,64 @@ function ensureInput(user = USER, provider = "openai") {
   };
 }
 
+const SOLUTION_SNAPSHOT_PAYLOAD = {
+  schemaVersion: 1,
+  candidates: [{ id: "gh:one", url: "https://github.com/acme/one" }],
+};
+
+function configureSolutionRank(
+  state: MemoryState,
+  snapshot: "valid" | "missing" | "bad-hash" = "valid",
+): void {
+  const provider = state.execution.executionPlan.steps[0].provider;
+  const executionPlan = {
+    version: 1,
+    steps: [
+      {
+        stepKey: "find-solution:rank",
+        kind: "chat",
+        feature: "find-solution:rank",
+        adapter: "openai-compatible",
+        adapterVersion: 1,
+        endpointProfile: CHAT_PROFILE,
+        provider,
+        models: ["primary", "fallback"],
+      },
+    ],
+  };
+  state.task.ownerRef = "solution-scout";
+  state.execution.agentName = "solution-scout";
+  state.execution.skill = "find-solution";
+  state.execution.taskInputHash = durableTaskInputHash(state.task as never);
+  state.execution.executionPlan = executionPlan;
+  state.execution.executionPlanHash = canonicalJsonHash(executionPlan);
+  if (snapshot === "missing") {
+    state.execution.inputSnapshotKind = null;
+    state.execution.inputSnapshotPayload = null;
+    state.execution.inputSnapshotHash = null;
+    return;
+  }
+  state.execution.inputSnapshotKind = "solution-search-v1";
+  state.execution.inputSnapshotPayload = SOLUTION_SNAPSHOT_PAYLOAD;
+  state.execution.inputSnapshotHash =
+    snapshot === "bad-hash"
+      ? "0".repeat(64)
+      : canonicalJsonHash({
+          schemaVersion: 1,
+          kind: "solution-search-v1",
+          payload: SOLUTION_SNAPSHOT_PAYLOAD,
+        });
+}
+
+function solutionRankInput() {
+  return {
+    ...ensureInput(),
+    agentName: "solution-scout",
+    stepKey: "find-solution:rank",
+    feature: "find-solution:rank",
+  };
+}
+
 function replaceStoredPayload(state: MemoryState, requestPayload: Record<string, unknown>): string {
   const job = state.jobs[0];
   assert.ok(job);
@@ -378,6 +436,96 @@ function harness(
 }
 
 describe("durable task LLM job state machine", () => {
+  for (const snapshot of ["missing", "bad-hash"] as const) {
+    it(`find-solution rank ${snapshot} fails before job creation or reserve`, async () => {
+      const { state, service, reserveCalls } = harness();
+      configureSolutionRank(state, snapshot);
+
+      await assert.rejects(
+        () => service.ensure(TASK_ID, solutionRankInput(), NOW),
+        /consistent solution-search-v1 input snapshot/,
+      );
+
+      assert.equal(state.jobs.length, 0);
+      assert.equal(state.authorizations.length, 0);
+      assert.equal(state.spends.length, 0);
+      assert.equal(reserveCalls(), 0);
+      assert.equal(state.task.status, "todo");
+      assert.equal(state.task.agentRunId, null);
+    });
+  }
+
+  it("reserved find-solution rank route cannot bypass the guard under another skill", async () => {
+    const { state, service, reserveCalls } = harness();
+    configureSolutionRank(state);
+    state.execution.skill = "coach-review";
+
+    await assert.rejects(
+      () => service.ensure(TASK_ID, solutionRankInput(), NOW),
+      /find-solution:rank requires a find-solution execution/,
+    );
+    assert.equal(state.jobs.length, 0);
+    assert.equal(state.spends.length, 0);
+    assert.equal(reserveCalls(), 0);
+  });
+
+  it("find-solution rank rechecks snapshot before dispatch grant", async () => {
+    const { state, service, reserveCalls } = harness();
+    configureSolutionRank(state);
+    const ensured = await service.ensure(TASK_ID, solutionRankInput(), NOW);
+    assert.equal(ensured.status, "ready");
+    assert.equal(reserveCalls(), 1);
+
+    state.execution.inputSnapshotKind = null;
+    state.execution.inputSnapshotPayload = null;
+    state.execution.inputSnapshotHash = null;
+    await assert.rejects(
+      () =>
+        service.claimDispatch(
+          TASK_ID,
+          ensured.jobId,
+          {
+            agentName: "solution-scout",
+            runId: RUN_ID,
+            executionAttemptId: ATTEMPT_ID,
+            dispatchToken: TOKEN_A,
+          },
+          NOW,
+        ),
+      /consistent solution-search-v1 input snapshot/,
+    );
+
+    assert.equal(reserveCalls(), 1, "missing snapshot must fail before ledger reauthorization");
+    assert.equal(state.jobs[0]?.status, "ready");
+    assert.equal(state.jobs[0]?.dispatchCount, 0);
+    assert.equal(state.jobs[0]?.dispatchToken, null);
+  });
+
+  it("find-solution rank with a valid snapshot reaches reserve and dispatch", async () => {
+    const { state, service, reserveCalls } = harness();
+    configureSolutionRank(state);
+    const ensured = await service.ensure(TASK_ID, solutionRankInput(), NOW);
+    assert.equal(ensured.status, "ready");
+    assert.equal(state.jobs.length, 1);
+    assert.equal(state.spends.length, 1);
+    assert.equal(reserveCalls(), 1);
+
+    const dispatch = await service.claimDispatch(
+      TASK_ID,
+      ensured.jobId,
+      {
+        agentName: "solution-scout",
+        runId: RUN_ID,
+        executionAttemptId: ATTEMPT_ID,
+        dispatchToken: TOKEN_A,
+      },
+      NOW,
+    );
+    assert.equal(dispatch.granted, true);
+    assert.equal(dispatch.replay, false);
+    assert.equal(reserveCalls(), 2);
+  });
+
   it("accepts the current OpenAI envelope and keeps max_tokens for compatible providers", async () => {
     const openAi = harness();
     const openAiInput = ensureInput();

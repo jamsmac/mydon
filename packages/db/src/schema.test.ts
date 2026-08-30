@@ -205,6 +205,9 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       "executionPlan",
       "executionPlanHash",
       "startedAt",
+      "inputSnapshotKind",
+      "inputSnapshotPayload",
+      "inputSnapshotHash",
       "checkpointKind",
       "checkpointPayload",
       "checkpointHash",
@@ -231,6 +234,10 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       "task_agent_execution_workflow_version_positive",
       "task_agent_execution_plan_bounded",
       "task_agent_execution_plan_hash_format",
+      "task_agent_execution_input_snapshot_consistent",
+      "task_agent_execution_input_snapshot_kind_bounded",
+      "task_agent_execution_input_snapshot_payload_bounded",
+      "task_agent_execution_input_snapshot_hash_format",
       "task_agent_execution_terminal_fields_consistent",
     ]) {
       assert.ok(executionChecks.includes(name), `нет CHECK ${name}`);

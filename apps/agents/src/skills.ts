@@ -1,14 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { GitHubConnector } from "@mydon/connectors";
 import { LlmLedgerUnavailableError, type Domain } from "@mydon/shared";
 import { runCoachReview } from "./coach-review";
-import type { AgentTaskCheckpoint, AgentsCoreClient } from "./core-client";
+import type { AgentTaskCheckpoint, AgentTaskInputSnapshot, AgentsCoreClient } from "./core-client";
 import { embeddingGatewayFromEnv } from "./embedding";
 import { llmLedgerFromEnv } from "./llm-ledger";
 import type { AgentDefinition } from "./registry";
 import { assessIdeas, buildIdeasProposal, readIdeaChannels, type IdeasMemory } from "./ideas";
 import { modelGatewayFromEnv } from "./model-gateway";
+import { findSolutions } from "./solution-search";
 import type { TaskLlmSession } from "./task-llm-session";
 import { loadSkillMeta } from "./skill-loader";
 import { buildWebProposal, readWebSources } from "./web-read";
@@ -51,6 +53,13 @@ export interface TaskSkillCheckpointDraft {
 export interface TaskSkillRunContext {
   /** Existing Core checkpoint returned by claim after crash/takeover. */
   checkpoint?: AgentTaskCheckpoint;
+  /** Existing immutable public retrieval evidence returned by start/takeover. */
+  inputSnapshot?: AgentTaskInputSnapshot;
+  /** First-write-wins Core persistence before a dependent paid ranking call. */
+  saveInputSnapshot?: (input: {
+    kind: string;
+    payload: Record<string, unknown>;
+  }) => Promise<AgentTaskInputSnapshot>;
   /** CAS-fenced persistence; must finish before any task side effect. */
   saveCheckpoint: (checkpoint: TaskSkillCheckpointDraft) => Promise<AgentTaskCheckpoint>;
   /** Core-owned provider jobs/results for metered task calls. */
@@ -65,6 +74,8 @@ export interface SkillRunContext {
   traceKey?: string;
   /** Fail-closed CAS перед каждым provider dispatch durable task-run. */
   assertLease?: () => Promise<void>;
+  /** Atomic Core snapshot used by task-only skills; never use the stale list row. */
+  taskInput?: { title: string; description?: string; domain?: Domain };
   /** Есть только у порученной Core task; включает checkpoint/resume. */
   task?: TaskSkillRunContext;
 }
@@ -207,6 +218,55 @@ const assessIdeasSkill: Skill = async (agent, core, context) => {
   });
 };
 
+// ── solution-scout: bounded GitHub research + one durable ranking step ───────
+const findSolutionSkill: Skill = async (agent, _core, context) => {
+  const call = runContext(agent, "find-solution", context);
+  if (!call.task) return null; // First slice is intentionally assigned-task only.
+  if (!call.taskInput) {
+    throw new LlmLedgerUnavailableError(
+      "Task-mode solution-scout не получил atomic taskInput из Core claim",
+    );
+  }
+
+  const gateway = modelGatewayFromEnv();
+  if (gateway === null) {
+    throw new LlmLedgerUnavailableError(
+      "Task-mode solution-scout не получил настроенный LLM route",
+    );
+  }
+  if (gateway.billingMode === "metered" && !call.task.llm) {
+    throw new LlmLedgerUnavailableError(
+      "Task-mode metered solution-scout не получил durable LLM session",
+    );
+  }
+
+  const saveInputSnapshot = call.task.saveInputSnapshot;
+  if (!call.task.inputSnapshot && !saveInputSnapshot) {
+    throw new LlmLedgerUnavailableError(
+      "Task-mode solution-scout не получил Core input-snapshot boundary",
+    );
+  }
+
+  return findSolutions(gateway, new GitHubConnector(), call.taskInput, {
+    agentName: agent.name,
+    requestKey: call.requestKey,
+    ...(call.traceKey ? { traceKey: call.traceKey } : {}),
+    ...(call.assertLease ? { assertLease: call.assertLease } : {}),
+    ...(call.task.llm ? { taskLlm: call.task.llm } : {}),
+    snapshotPort: {
+      ...(call.task.inputSnapshot ? { existing: call.task.inputSnapshot } : {}),
+      save: async (kind, payload) => {
+        if (!saveInputSnapshot) {
+          throw new LlmLedgerUnavailableError(
+            "Core input-snapshot boundary недоступен для новой retrieval попытки",
+          );
+        }
+        return saveInputSnapshot({ kind, payload });
+      },
+    },
+  });
+};
+
 // ── coach-agent: судья + предложение правки навыка (EVAL/PROPOSE) ────────────
 /** Читатель SKILL.md по имени навыка — из каталога агентов на диске. */
 function readSkillFile(skill: string): { content: string; rel: string } | null {
@@ -258,6 +318,7 @@ export const SKILLS: Record<string, Skill> = {
   "scan-ideas": scanIdeas,
   "assess-ideas": assessIdeasSkill,
   "coach-review": coachReview,
+  "find-solution": findSolutionSkill,
 };
 
 export function hasSkill(name: string): boolean {

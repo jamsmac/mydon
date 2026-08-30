@@ -4,7 +4,7 @@ import type { AgentDefinition } from "./registry";
 import { runSkill } from "./runner";
 import { hasSkill } from "./skills";
 import { TaskLlmSession } from "./task-llm-session";
-import { buildTaskLlmWorkflowPlan } from "./task-llm-workflow";
+import { buildTaskLlmWorkflowPlan, type TaskLlmWorkflowPlan } from "./task-llm-workflow";
 
 /**
  * Задачи, поручённые агенту (решение владельца: «агент берёт и делает»).
@@ -33,6 +33,17 @@ export interface RunAgentTasksOptions {
 /** Заведомо меньше 15-минутного stale lease Core. */
 export const AGENT_RUN_HEARTBEAT_MS = 60_000;
 
+/** find-solution не имеет бесплатного/local ranking fallback. */
+function hasFindSolutionRankRoute(plan: TaskLlmWorkflowPlan): boolean {
+  const matches = plan.steps.filter((step) => step.stepKey === "find-solution:rank");
+  return (
+    matches.length === 1 &&
+    matches[0]?.kind === "chat" &&
+    matches[0].feature === "find-solution:rank" &&
+    matches[0].models.length > 0
+  );
+}
+
 /** По заголовку задачи ищем навык агента, который её закрывает. */
 export function matchSkill(agent: AgentDefinition, title: string): string | null {
   const text = title.toLowerCase();
@@ -48,6 +59,7 @@ export function matchSkill(agent: AgentDefinition, title: string): string | null
     "read-sources": /источник|сайт|страниц|прочит|разведк|рынок|тендер|цен[аы]/,
     "scan-ideas": /иде[яйи]|канал|что нового|фишк|перенять|promtjam/,
     "coach-review": /обзор|оцени агент|самоулучшен|coach|разбор недел/,
+    "find-solution": /найд|готов.{0,12}решен|инструмент|автоматизац|шаблон|github|n8n|saas/,
   };
   for (const skill of agent.skills) {
     const re = HINTS[skill];
@@ -145,7 +157,10 @@ export async function runAgentTasks(
       const skill =
         claim.execution?.skill ??
         claimedCheckpoint?.skill ??
-        matchSkill(agent, claim.taskInput.title);
+        matchSkill(
+          agent,
+          [claim.taskInput.title, claim.taskInput.description].filter(Boolean).join("\n"),
+        );
       if (skill === null) {
         // Честный отказ пишем в durable block самой задачи.
         // Отдельный comment здесь неидемпотентен: потеря ответа
@@ -181,7 +196,53 @@ export async function runAgentTasks(
           `Core claim задачи ${t.id} не содержит taskInputHash для durable execution`,
         );
       }
-      const requestedPlan = claim.execution?.plan ?? buildTaskLlmWorkflowPlan(skill);
+      let requestedPlan: TaskLlmWorkflowPlan;
+      let routeError: string | undefined;
+      if (claim.execution) {
+        requestedPlan = claim.execution.plan;
+      } else {
+        try {
+          requestedPlan = buildTaskLlmWorkflowPlan(skill);
+        } catch (error) {
+          if (skill !== "find-solution") throw error;
+          requestedPlan = { version: 1, steps: [] };
+          routeError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      if (skill === "find-solution" && !hasFindSolutionRankRoute(requestedPlan)) {
+        // Do not create an empty immutable execution while the route is off.
+        // Core keeps this unstarted attempt and applies a bounded retryAt, so
+        // enabling the route later can create its first plan without an owner
+        // retry or a false workflow_changed conflict.
+        const detail = (
+          routeError
+            ? `find-solution metered route is unavailable: ${routeError}`
+            : "find-solution requires metered workflow step find-solution:rank"
+        ).slice(0, 1000);
+        const released = await core.releaseAgentTask(
+          t.id,
+          agent.name,
+          runId,
+          executionAttemptId,
+          "route_unavailable",
+          detail,
+        );
+        if (!released) {
+          leaseLost = true;
+          results.push({
+            taskId: t.id,
+            outcome: "skipped",
+            note: "generation задачи изменилась до route backoff",
+          });
+          continue;
+        }
+        results.push({
+          taskId: t.id,
+          outcome: "skipped",
+          note: "LLM-маршрут find-solution пока недоступен; Core отложил повтор на 60 секунд.",
+        });
+        continue;
+      }
       const started = await core.startAgentTaskExecution(t.id, {
         agentName: agent.name,
         runId,
@@ -217,9 +278,18 @@ export async function runAgentTasks(
         requestKey: `task:${t.id}:execution:${executionAttemptId}`,
         traceKey,
         assertLease,
+        taskInput: claim.taskInput,
         task: {
           ...(checkpoint ? { checkpoint } : {}),
+          ...(execution.inputSnapshot ? { inputSnapshot: execution.inputSnapshot } : {}),
           llm: taskLlm,
+          saveInputSnapshot: (input) =>
+            core.ensureAgentTaskInputSnapshot(t.id, {
+              agentName: agent.name,
+              runId,
+              executionAttemptId,
+              ...input,
+            }),
           saveCheckpoint: (checkpoint) =>
             core.checkpointAgentTask(t.id, {
               agentName: agent.name,

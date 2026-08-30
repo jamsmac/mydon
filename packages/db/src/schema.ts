@@ -933,6 +933,9 @@ export const taskAgentExecution = pgTable(
       .default("a5dd3ce7993c63ad01d8a9a45922bc5f17d2c41c5f21a10671ec8c05c5ffc4aa")
       .notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    inputSnapshotKind: text("input_snapshot_kind"),
+    inputSnapshotPayload: jsonb("input_snapshot_payload"),
+    inputSnapshotHash: text("input_snapshot_hash"),
     checkpointKind: text("checkpoint_kind"),
     checkpointPayload: jsonb("checkpoint_payload"),
     checkpointHash: text("checkpoint_hash"),
@@ -957,6 +960,22 @@ export const taskAgentExecution = pgTable(
       sql`jsonb_typeof(${t.executionPlan}) = 'object' and octet_length(${t.executionPlan}::text) <= 65536`,
     ),
     check("task_agent_execution_plan_hash_format", sql`${t.executionPlanHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "task_agent_execution_input_snapshot_consistent",
+      sql`(${t.inputSnapshotKind} is null and ${t.inputSnapshotPayload} is null and ${t.inputSnapshotHash} is null) or (${t.inputSnapshotKind} is not null and ${t.inputSnapshotPayload} is not null and ${t.inputSnapshotHash} is not null)`,
+    ),
+    check(
+      "task_agent_execution_input_snapshot_kind_bounded",
+      sql`${t.inputSnapshotKind} is null or (char_length(btrim(${t.inputSnapshotKind})) between 1 and 128)`,
+    ),
+    check(
+      "task_agent_execution_input_snapshot_payload_bounded",
+      sql`${t.inputSnapshotPayload} is null or (jsonb_typeof(${t.inputSnapshotPayload}) = 'object' and octet_length(${t.inputSnapshotPayload}::text) <= 65536)`,
+    ),
+    check(
+      "task_agent_execution_input_snapshot_hash_format",
+      sql`${t.inputSnapshotHash} is null or ${t.inputSnapshotHash} ~ '^[0-9a-f]{64}$'`,
+    ),
     check(
       "task_agent_execution_terminal_fields_consistent",
       sql`(${t.status} = 'active' and ${t.checkpointKind} is null and ${t.checkpointPayload} is null and ${t.checkpointHash} is null and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'ready' and ${t.checkpointKind} is not null and ${t.checkpointPayload} is not null and ${t.checkpointHash} is not null and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'committed' and ${t.checkpointKind} is not null and ${t.checkpointPayload} is not null and ${t.checkpointHash} is not null and ${t.outcomePayload} is not null and ${t.outcomeHash} is not null and ${t.committedAt} is not null and ${t.abandonedAt} is null and ${t.abandonReason} is null) or (${t.status} = 'abandoned' and ((${t.checkpointKind} is null and ${t.checkpointPayload} is null and ${t.checkpointHash} is null) or (${t.checkpointKind} is not null and ${t.checkpointPayload} is not null and ${t.checkpointHash} is not null)) and ${t.outcomePayload} is null and ${t.outcomeHash} is null and ${t.committedAt} is null and ${t.abandonedAt} is not null and ${t.abandonReason} is not null)`,

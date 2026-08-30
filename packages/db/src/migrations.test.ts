@@ -187,4 +187,22 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
     assert.doesNotMatch(sql, /ON CONFLICT \("provider", "model"\)/);
     assert.match(sql, />272K-input tier/);
   });
+
+  it("0079 adds a nullable, bounded and all-or-none durable input snapshot", () => {
+    const sql = readFileSync(path.join(ПАПКА, "0079_task_agent_input_snapshot.sql"), "utf8");
+
+    assert.match(sql, /ADD COLUMN "input_snapshot_kind" text;/);
+    assert.match(sql, /ADD COLUMN "input_snapshot_payload" jsonb;/);
+    assert.match(sql, /ADD COLUMN "input_snapshot_hash" text;/);
+    assert.doesNotMatch(sql, /ADD COLUMN "input_snapshot_(?:kind|payload|hash)"[^;]*NOT NULL/);
+    assert.match(sql, /task_agent_execution_input_snapshot_consistent/);
+    assert.match(sql, /task_agent_execution_input_snapshot_kind_bounded/);
+    assert.match(sql, /char_length\(btrim\([^)]*input_snapshot_kind/);
+    assert.match(sql, /between 1 and 128/);
+    assert.match(sql, /task_agent_execution_input_snapshot_payload_bounded/);
+    assert.match(sql, /jsonb_typeof\([^)]*input_snapshot_payload/);
+    assert.match(sql, /octet_length\([^)]*input_snapshot_payload[^)]*::text\) <= 65536/);
+    assert.match(sql, /task_agent_execution_input_snapshot_hash_format/);
+    assert.match(sql, /\^\[0-9a-f\]\{64\}\$/);
+  });
 });
