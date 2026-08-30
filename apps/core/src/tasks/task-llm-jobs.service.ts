@@ -48,6 +48,22 @@ type ResultRow = typeof agentTaskLlmResult.$inferSelect;
 type AuthorizationRow = typeof agentTaskLlmAuthorization.$inferSelect;
 
 const DISPATCH_GRANT_MS = 2 * 60_000;
+const OPENAI_GPT_56_REASONING_EFFORTS = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+type OpenAiGpt56ReasoningEffort = (typeof OPENAI_GPT_56_REASONING_EFFORTS)[number];
+
+function isOpenAiGpt56ReasoningEffort(value: unknown): value is OpenAiGpt56ReasoningEffort {
+  return (
+    typeof value === "string" &&
+    (OPENAI_GPT_56_REASONING_EFFORTS as readonly string[]).includes(value)
+  );
+}
 
 interface EnsureResponse {
   jobId: string;
@@ -946,6 +962,7 @@ export class TaskLlmJobsService {
               "model",
               "messages",
               "max_completion_tokens",
+              "reasoning_effort",
               "service_tier",
               ...(storedOpenAiPayload ? ["max_tokens"] : []),
             ])
@@ -1015,6 +1032,18 @@ export class TaskLlmJobsService {
             throw new BadRequestException(
               "requestPayload.service_tier must equal default for provider openai",
             );
+          }
+          if (payload.reasoning_effort !== undefined) {
+            if (!/^gpt-5\.6(?:-|$)/.test(input.model.trim())) {
+              throw new BadRequestException(
+                "requestPayload.reasoning_effort is supported only for GPT-5.6 OpenAI models",
+              );
+            }
+            if (!isOpenAiGpt56ReasoningEffort(payload.reasoning_effort)) {
+              throw new BadRequestException(
+                "requestPayload.reasoning_effort must be one of: none, low, medium, high, xhigh, max",
+              );
+            }
           }
         }
       } else if (
