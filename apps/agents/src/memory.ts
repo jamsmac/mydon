@@ -1,3 +1,18 @@
+import { createHash } from "node:crypto";
+
+const MAX_MEMORY_SIGNATURE_LENGTH = 512;
+
+function canonicalSignature(facts: Record<string, unknown>): string {
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(facts).sort()) sorted[key] = facts[key];
+  return JSON.stringify(sorted);
+}
+
+function boundedSignature(canonical: string): string {
+  if (canonical.length <= MAX_MEMORY_SIGNATURE_LENGTH) return canonical;
+  return `sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
+}
+
 /**
  * Дельта-память агента (шаг дорожной карты #6).
  *
@@ -16,7 +31,16 @@
  * влияет. По ней runner сравнивает «то же самое или изменилось».
  */
 export function signature(facts: Record<string, unknown>): string {
-  const sorted: Record<string, unknown> = {};
-  for (const key of Object.keys(facts).sort()) sorted[key] = facts[key];
-  return JSON.stringify(sorted);
+  return boundedSignature(canonicalSignature(facts));
+}
+
+/**
+ * Dual-read for signatures written before large payloads became hashed.
+ * New writes are always bounded; an old raw cron value remains readable
+ * without generating a duplicate action after rollout.
+ */
+export function matchesSignature(stored: string | null, facts: Record<string, unknown>): boolean {
+  if (stored === null) return false;
+  const canonical = canonicalSignature(facts);
+  return stored === canonical || stored === boundedSignature(canonical);
 }

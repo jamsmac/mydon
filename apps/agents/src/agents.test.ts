@@ -1265,26 +1265,31 @@ describe("Задачи агента и дневной потолок", () => {
     }
   });
 
-  it("stale takeover берёт checkpoint и не вызывает навык/LLM второй раз", async () => {
+  it("stale takeover берёт large checkpoint и commit-ит bounded signature без второго вызова навыка/LLM", async () => {
     const original = SKILLS["watch-receivables"];
     const contexts: { requestKey: string; traceKey?: string }[] = [];
     SKILLS["watch-receivables"] = async (_agent, _core, context) => {
       assert.ok(context);
       contexts.push(context);
-      return null;
+      return {
+        action: "Вынести большой отчёт на решение владельца",
+        facts: { ownerReport: "x".repeat(1_000), evidence: { candidates: [1, 2, 3] } },
+      };
     };
     try {
       let commitCalls = 0;
+      const commitSignatures: string[] = [];
       const { client, checkpoints } = stub({
-        commitAgentTaskOutcome: async () => {
+        commitAgentTaskOutcome: async (_id: string, input: Record<string, unknown>) => {
           commitCalls += 1;
+          commitSignatures.push(String(input.memorySignature));
           if (commitCalls === 1) throw new Error("commit response lost");
           return { status: "committed" as const, replay: true };
         },
       });
       await assert.rejects(runAgentTasks(agent, client, "T0"), /commit response lost/);
       const resumed = await runAgentTasks(agent, client, "T0");
-      assert.equal(resumed[0]?.outcome, "done");
+      assert.equal(resumed[0]?.outcome, "proposed");
       assert.equal(contexts.length, 1, "resume не вызывает skill implementation");
       assert.equal(
         contexts[0].requestKey,
@@ -1293,6 +1298,10 @@ describe("Задачи агента и дневной потолок", () => {
       assert.equal(contexts[0].traceKey, "task:t1:receivables:watch-receivables");
       assert.equal(checkpoints.length, 1, "takeover не перезаписывает checkpoint");
       assert.equal(commitCalls, 2, "потеря commit response разрешает exact replay commit");
+      assert.equal(commitSignatures.length, 2);
+      assert.equal(commitSignatures[0], commitSignatures[1]);
+      assert.match(commitSignatures[0] ?? "", /^sha256:[0-9a-f]{64}$/);
+      assert.ok((commitSignatures[0]?.length ?? Infinity) <= 512);
     } finally {
       SKILLS["watch-receivables"] = original;
     }
@@ -1391,6 +1400,25 @@ describe("Дельта-память: не повторяем то же само�
     const { client } = memCore("СИГНАТУРА-НЕ-СОВПАДАЕТ");
     const res = await runSkill(base, "watch-receivables", client, "T0");
     assert.equal(res.outcome, "approval_requested");
+  });
+
+  it("старая raw-сигнатура >512 читается как тот же повод без повторного approval", async () => {
+    const original = SKILLS["watch-receivables"];
+    const facts = { a: "x".repeat(1_000), b: 2 };
+    SKILLS["watch-receivables"] = async () => ({ action: "Проверить", facts });
+    try {
+      const legacyRaw = JSON.stringify(facts);
+      const { client, remembered, calls } = memCore(legacyRaw);
+      const res = await runSkill(base, "watch-receivables", client, "T0");
+
+      assert.ok(legacyRaw.length > 512);
+      assert.equal(res.outcome, "skipped");
+      assert.equal(res.skipReason, "no_change");
+      assert.deepEqual(calls, ["event"]);
+      assert.deepEqual(remembered, []);
+    } finally {
+      SKILLS["watch-receivables"] = original;
+    }
   });
 });
 

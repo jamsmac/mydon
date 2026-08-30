@@ -205,6 +205,14 @@ describe("DTO durable agent-run", () => {
     const errors = await validate(invalid);
     assert.ok(errors.some((error) => error.property === "kind"));
     assert.ok(errors.some((error) => error.property === "note"));
+
+    const oversizedSignature = plainToInstance(AgentRunCommitDto, {
+      ...valid,
+      memorySignature: "x".repeat(513),
+    });
+    assert.ok(
+      (await validate(oversizedSignature)).some((error) => error.property === "memorySignature"),
+    );
   });
 
   it("agentRunId в PATCH status опционален, но если передан — только UUID", async () => {

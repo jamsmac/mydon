@@ -13,7 +13,7 @@ import type {
 } from "./core-client";
 import { EXECUTORS } from "./executors";
 import { checkLimit, dailyCap, startOfTashkentDay } from "./limits";
-import { signature } from "./memory";
+import { matchesSignature, signature } from "./memory";
 import { effectiveActionTier, explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
 import { SKILLS, type SkillRunContext } from "./skills";
@@ -252,7 +252,7 @@ export async function runSkill(
   const source = `agent:${agent.name}`;
   const sig = signature(proposal.facts);
   const lastSig = await core.recallMemory(source, skill);
-  if (lastSig === sig) {
+  if (matchesSignature(lastSig, proposal.facts)) {
     const note = "Проверил — с прошлого раза ничего не изменилось.";
     return {
       agent: agent.name,
