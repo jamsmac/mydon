@@ -343,6 +343,36 @@ function solutionRankInput() {
   };
 }
 
+function gpt56SolutionRankInput() {
+  const base = solutionRankInput();
+  const model = "gpt-5.6-sol";
+  const maxTokens = 192;
+  const messages = [
+    { role: "system", content: SYSTEM },
+    { role: "user", content: USER },
+  ];
+  return {
+    ...base,
+    model,
+    inputTokenCeiling: inputTokenCeiling(`${SYSTEM}\n\n${USER}`),
+    outputTokenCeiling: maxTokens,
+    requestPayload: {
+      model,
+      messages,
+      max_completion_tokens: maxTokens,
+      reasoning_effort: "none",
+      service_tier: "default",
+    },
+  };
+}
+
+function setSolutionRankModels(state: MemoryState, models: string[]): void {
+  const plan = structuredClone(state.execution.executionPlan);
+  plan.steps[0].models = models;
+  state.execution.executionPlan = plan;
+  state.execution.executionPlanHash = canonicalJsonHash(plan);
+}
+
 function replaceStoredPayload(state: MemoryState, requestPayload: Record<string, unknown>): string {
   const job = state.jobs[0];
   assert.ok(job);
@@ -526,6 +556,31 @@ describe("durable task LLM job state machine", () => {
     assert.equal(reserveCalls(), 2);
   });
 
+  it("accepts the exact GPT-5.6 Sol find-solution reasoning envelope", async () => {
+    const { state, service } = harness();
+    configureSolutionRank(state);
+    const input = gpt56SolutionRankInput();
+    setSolutionRankModels(state, [input.model]);
+
+    const ensured = await service.ensure(TASK_ID, input, NOW);
+    assert.equal(ensured.status, "ready");
+    assert.deepEqual(state.jobs[0]?.requestPayload, input.requestPayload);
+
+    const dispatch = await service.claimDispatch(
+      TASK_ID,
+      ensured.jobId,
+      {
+        agentName: "solution-scout",
+        runId: RUN_ID,
+        executionAttemptId: ATTEMPT_ID,
+        dispatchToken: TOKEN_A,
+      },
+      NOW,
+    );
+    assert.equal(dispatch.granted, true);
+    assert.deepEqual(dispatch.requestPayload, input.requestPayload);
+  });
+
   it("accepts the current OpenAI envelope and keeps max_tokens for compatible providers", async () => {
     const openAi = harness();
     const openAiInput = ensureInput();
@@ -571,6 +626,16 @@ describe("durable task LLM job state machine", () => {
         {
           model: "primary",
           messages,
+          max_completion_tokens: 512,
+          reasoning_effort: "none",
+          service_tier: "default",
+        },
+        /reasoning_effort is supported only for GPT-5\.6 OpenAI models/,
+      ],
+      [
+        {
+          model: "primary",
+          messages,
           max_tokens: 512,
           max_completion_tokens: 512,
           service_tier: "default",
@@ -607,6 +672,74 @@ describe("durable task LLM job state machine", () => {
       /max_completion_tokens is not allowlisted/,
     );
     assert.equal(compatible.state.jobs.length, 0);
+
+    await assert.rejects(
+      () =>
+        compatible.service.ensure(
+          TASK_ID,
+          {
+            ...compatibleInput,
+            requestPayload: {
+              ...compatibleInput.requestPayload,
+              reasoning_effort: "none",
+            },
+          },
+          NOW,
+        ),
+      /reasoning_effort is not allowlisted/,
+    );
+    assert.equal(compatible.state.jobs.length, 0);
+  });
+
+  it("rejects GPT-5.6 minimal reasoning before persistence", async () => {
+    const { state, service } = harness();
+    configureSolutionRank(state);
+    const input = gpt56SolutionRankInput();
+    setSolutionRankModels(state, [input.model]);
+
+    await assert.rejects(
+      () =>
+        service.ensure(
+          TASK_ID,
+          {
+            ...input,
+            requestPayload: { ...input.requestPayload, reasoning_effort: "minimal" },
+          },
+          NOW,
+        ),
+      /reasoning_effort must be one of: none, low, medium, high, xhigh, max/,
+    );
+    assert.equal(state.jobs.length, 0);
+  });
+
+  it("blocks stored GPT-5.6 minimal reasoning before provider dispatch", async () => {
+    const { state, service, reserveCalls } = harness();
+    configureSolutionRank(state);
+    const input = gpt56SolutionRankInput();
+    setSolutionRankModels(state, [input.model]);
+    const ensured = await service.ensure(TASK_ID, input, NOW);
+    assert.equal(reserveCalls(), 1);
+    replaceStoredPayload(state, { ...input.requestPayload, reasoning_effort: "minimal" });
+
+    await assert.rejects(
+      () =>
+        service.claimDispatch(
+          TASK_ID,
+          ensured.jobId,
+          {
+            agentName: "solution-scout",
+            runId: RUN_ID,
+            executionAttemptId: ATTEMPT_ID,
+            dispatchToken: TOKEN_A,
+          },
+          NOW,
+        ),
+      /reasoning_effort must be one of: none, low, medium, high, xhigh, max/,
+    );
+    assert.equal(reserveCalls(), 1, "stored mismatch must fail before reauthorization");
+    assert.equal(state.jobs[0]?.dispatchCount, 0);
+    assert.equal(state.task.status, "todo");
+    assert.equal(state.task.agentExecutionBlockedReason !== null, true);
   });
 
   it("blocks a stored legacy OpenAI max_tokens envelope before provider dispatch", async () => {
