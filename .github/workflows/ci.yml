@@ -202,6 +202,7 @@ jobs:
             deploy/watchdog-liveness.sh deploy/deploy-failure-alert.sh \
             deploy/tests/auto-deploy-gate.test.sh deploy/tests/watchdog-liveness.test.sh \
             deploy/tests/deploy-rollout-order.test.sh \
+            deploy/tests/docker-build-context.test.sh \
             deploy/tests/fake-crontab.sh deploy/tests/setup-guards.test.sh \
             deploy/tests/guards-env.test.sh
           bash deploy/tests/db-access.test.sh
@@ -209,6 +210,7 @@ jobs:
           bash deploy/tests/standby-compose.test.sh
           bash deploy/tests/auto-deploy-gate.test.sh
           bash deploy/tests/deploy-rollout-order.test.sh
+          bash deploy/tests/docker-build-context.test.sh
           bash deploy/tests/watchdog-liveness.test.sh
           bash deploy/tests/setup-guards.test.sh
           bash deploy/tests/guards-env.test.sh

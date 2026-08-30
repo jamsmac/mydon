@@ -95,7 +95,7 @@ say "2/8 Копирование кода (без node_modules, dist, .git)"
 # --delete НЕ используем осознанно: он удаляет в приёмнике всё, чего нет в источнике.
 rsync -az \
   --exclude node_modules --exclude dist --exclude .next --exclude .turbo \
-  --exclude .git --exclude '.env' --exclude '*.tsbuildinfo' \
+  --exclude .git --exclude '.env*' --exclude '*.tsbuildinfo' \
   "$LOCAL_DIR/" "$HOST:$REMOTE_DIR/"
 
 say "3/8 Настройка окружения и cron-скриптов на сервере"
