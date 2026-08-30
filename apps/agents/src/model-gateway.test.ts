@@ -442,7 +442,7 @@ describe("HttpModelGateway — metered OpenAI-compatible", () => {
     assert.match(llmPosture(), /LLM_ENABLED=0/);
   });
 
-  it("предпочтительная Codex subscription остаётся fail-closed", () => {
+  it("Codex subscription остаётся fail-closed без доказательства источника оплаты", () => {
     process.env.LLM_ENABLED = "1";
     process.env.LLM_ROUTE = "codex-subscription";
 
@@ -476,6 +476,16 @@ describe("HttpModelGateway — metered OpenAI-compatible", () => {
 
     process.env.LLM_BASE_URL = "https://proxy.invalid/v1";
     assert.throws(() => modelGatewayFromEnv(), /api\.openai\.com/);
+
+    process.env.LLM_BASE_URL = "https://api.openai.com/v1";
+    process.env.LLM_PRICE_PROVIDER_ID = "custom";
+    assert.throws(() => modelGatewayFromEnv(), /LLM_PRICE_PROVIDER_ID=openai/);
+    assert.match(llmPosture(), /LLM_PRICE_PROVIDER_ID=openai/);
+
+    process.env.LLM_PRICE_PROVIDER_ID = "openai";
+    process.env.LLM_HTTP_BILLING_MODE = "local";
+    assert.throws(() => modelGatewayFromEnv(), /local billing bypass/);
+    assert.match(llmPosture(), /local billing bypass/);
   });
 
   it("явный openai-api заменяет скрытый legacy LLM_PROVIDER", () => {

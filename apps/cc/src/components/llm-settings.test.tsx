@@ -18,15 +18,35 @@ describe("атомарная LLM-форма", () => {
     const { container } = render(<LlmSettings initial={{ ...DEFAULT_LLM_PROFILE }} />);
 
     expect(screen.getByLabelText(/^Использовать LLM/)).not.toBeChecked();
-    expect(screen.getByLabelText(/^Маршрут/)).toHaveValue("codex-subscription");
+    expect(screen.getByText("Не активно")).toBeVisible();
+    expect(screen.getByLabelText(/^Маршрут/)).toHaveValue("openai-api");
     expect(screen.getByLabelText(/^Модель/)).toHaveValue("gpt-5.6-sol");
     expect(screen.getByLabelText(/^Общий потолок/)).toHaveValue(10);
     expect(screen.getByLabelText(/^Потолок одного/)).toHaveValue(3);
-    expect(screen.getByText("Пока не поддерживается — вызовы заблокированы")).toBeVisible();
+    expect(screen.getByText("Заблокировано — источник оплаты не проверяется")).toBeVisible();
     expect(screen.getByText(/Автоматического переключения.*нет/)).toBeVisible();
-    expect(screen.getByText(/Подписка ChatGPT не оплачивает OpenAI API/)).toBeVisible();
+    expect(screen.getByText(/не отличает включённый лимит от.*ChatGPT credits/)).toBeVisible();
     expect(container.querySelector('input[type="password"]')).toBeNull();
     expect(container.querySelector('[name="LLM_API_KEY"]')).toBeNull();
+  });
+
+  it("различает статус рабочего API и заблокированной subscription", () => {
+    const { unmount } = render(
+      <LlmSettings initial={{ ...DEFAULT_LLM_PROFILE, LLM_ENABLED: "1" }} />,
+    );
+    expect(screen.getByText("Готовность неизвестна")).toBeVisible();
+
+    unmount();
+    render(
+      <LlmSettings
+        initial={{
+          ...DEFAULT_LLM_PROFILE,
+          LLM_ENABLED: "1",
+          LLM_ROUTE: "codex-subscription",
+        }}
+      />,
+    );
+    expect(screen.getByText("Среда выполнения не готова")).toBeVisible();
   });
 
   it("передаёт все восемь полей одной server action", async () => {

@@ -130,7 +130,7 @@ const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 const CLI_SUBSCRIPTION_DISABLED_REASON =
   "Claude CLI subscription заблокирована: auth status не доказывает, что usage credits/overage выключены";
 const CODEX_SUBSCRIPTION_DISABLED_REASON =
-  "Codex/ChatGPT subscription в MYDON пока заблокирована: runtime не доказывает pre-turn billing mode; для production выберите OpenAI API";
+  "Codex/ChatGPT subscription в MYDON заблокирована: login status не доказывает, что следующий turn не израсходует ChatGPT credits; для production выберите OpenAI API";
 
 function enabledSetting(): "legacy" | "off" | "on" {
   const value = (process.env.LLM_ENABLED ?? "").trim();

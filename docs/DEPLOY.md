@@ -30,7 +30,7 @@ SERVICE_TOKEN=<случайный токен: openssl rand -hex 32>
 AGENT_AUTONOMY_MAX=T0
 AGENTS_SCHEDULES_PAUSED=1
 LLM_ENABLED=0
-LLM_ROUTE=codex-subscription
+LLM_ROUTE=openai-api
 LLM_MODEL=gpt-5.6-sol
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_PRICE_PROVIDER_ID=openai
@@ -50,9 +50,17 @@ LLM_API_KEY=
 
 Мозг, память и бюджет агентов включаются отдельным атомарным профилем из панели
 или тумблерами `.env` — их карта и сценарии в `docs/AGENTS_ACTIVATION.md`.
-Первоначально выбраны GPT-5.6 Sol и предпочтённая подписка, но `LLM_ENABLED=0`:
-никакого платного вызова нет. Рабочий `openai-api` требует серверный
-`LLM_API_KEY`; ключ не хранится и не показывается в панели.
+Первоначально выбраны рабочий `openai-api`, GPT-5.6 Sol и лимиты `$10/$3`, но
+`LLM_ENABLED=0`: никакого платного вызова нет. Маршрут требует серверный
+`LLM_API_KEY`; ключ не хранится и не показывается в панели. Codex subscription
+остаётся видимым, но заблокированным вариантом: login status не отличает
+включённый лимит от расходования ChatGPT credits.
+
+При обновлении существующей установки сохранённый `system_config` и явный
+`LLM_ROUTE` в `.env` имеют приоритет над новым default. Такой профиль не
+переписывается миграцией: сначала при `LLM_ENABLED=0` атомарно выбрать в панели
+`openai-api / gpt-5.6-sol / $10 / $3`, затем установить серверный ключ и только
+после preflight включать LLM.
 
 Для managed PostgreSQL используется `DATABASE_MODE=external`. `DATABASE_URL`
 должен вести через session pooler и используется только Core; прямой TLS URL

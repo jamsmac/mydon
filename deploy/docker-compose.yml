@@ -58,7 +58,7 @@ services:
       # Несекретный профиль нужен Core и для UI, и для единого admission policy.
       # API key намеренно остаётся только у Agents и сюда не передаётся.
       LLM_ENABLED: ${LLM_ENABLED:-0}
-      LLM_ROUTE: ${LLM_ROUTE:-codex-subscription}
+      LLM_ROUTE: ${LLM_ROUTE:-openai-api}
       LLM_MODEL: ${LLM_MODEL:-gpt-5.6-sol}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
       LLM_PRICE_PROVIDER_ID: ${LLM_PRICE_PROVIDER_ID:-openai}
@@ -191,9 +191,9 @@ services:
       # 08:05 — после съёма stock (07:50), чтобы паритет сверял одни сутки.
       OURVEND_ACCOUNTING_CRON: ${OURVEND_ACCOUNTING_CRON:-5 8 * * *}
       # Мозг Agents (см. docs/AGENTS_ACTIVATION.md). LLM_ENABLED=0 → путь спит.
-      # Codex subscription видна как предпочтение, но runtime fail-closed.
+      # Рабочий default — OpenAI API; Codex subscription остаётся fail-closed.
       LLM_ENABLED: ${LLM_ENABLED:-0}
-      LLM_ROUTE: ${LLM_ROUTE:-codex-subscription}
+      LLM_ROUTE: ${LLM_ROUTE:-openai-api}
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}

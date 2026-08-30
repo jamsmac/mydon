@@ -16,7 +16,7 @@ vi.mock("../../lib/core", () => ({
 function profileForm(enabled = true): FormData {
   const form = new FormData();
   if (enabled) form.set("LLM_ENABLED", "1");
-  form.set("LLM_ROUTE", "codex-subscription");
+  form.set("LLM_ROUTE", "openai-api");
   form.set("LLM_MODEL", "gpt-5.6-sol");
   form.set("LLM_BASE_URL", "https://api.openai.com/v1");
   form.set("LLM_PRICE_PROVIDER_ID", "openai");
@@ -40,7 +40,7 @@ describe("saveLlmProfile", () => {
     expect(mocks.saveLlmProfile).toHaveBeenCalledWith({
       items: [
         { key: "LLM_ENABLED", value: "1" },
-        { key: "LLM_ROUTE", value: "codex-subscription" },
+        { key: "LLM_ROUTE", value: "openai-api" },
         { key: "LLM_MODEL", value: "gpt-5.6-sol" },
         { key: "LLM_BASE_URL", value: "https://api.openai.com/v1" },
         { key: "LLM_PRICE_PROVIDER_ID", value: "openai" },

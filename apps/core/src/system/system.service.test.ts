@@ -200,6 +200,7 @@ describe("SystemService.setLlmProfile(): атомарный несекретны
         () =>
           svc.setLlmProfile([
             { key: "LLM_MODEL", value: "gpt-5.6-sol" },
+            { key: "LLM_ROUTE", value: "codex-subscription" },
             { key: "LLM_ENABLED", value: "1" },
           ]),
         /codex-subscription/,

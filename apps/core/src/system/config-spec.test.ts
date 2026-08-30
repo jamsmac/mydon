@@ -73,7 +73,7 @@ describe("config-spec: белый список тумблеров", () => {
       LLM_PROFILE_KEYS.map((key) => [key, resolveConfigValue(key, {}, {})]),
       [
         ["LLM_ENABLED", "0"],
-        ["LLM_ROUTE", "codex-subscription"],
+        ["LLM_ROUTE", "openai-api"],
         ["LLM_MODEL", "gpt-5.6-sol"],
         ["LLM_BASE_URL", "https://api.openai.com/v1"],
         ["LLM_PRICE_PROVIDER_ID", "openai"],
