@@ -29,6 +29,7 @@ INGEST_KEY=<случайный ключ для приёма внешних со�
 SERVICE_TOKEN=<случайный токен: openssl rand -hex 32>
 AGENT_AUTONOMY_MAX=T0
 AGENTS_SCHEDULES_PAUSED=1
+AGENTS_TASKS_PAUSED=1
 LLM_ENABLED=0
 LLM_ROUTE=openai-api
 LLM_MODEL=gpt-5.6-sol
@@ -45,8 +46,14 @@ LLM_API_KEY=
 месте, но ДО первого `up -d`: иначе панель и бот поднимутся с пустым токеном и
 запись откажет, пока контейнеры не пересоздадут.
 
-`AGENT_AUTONOMY_MAX=T0` и `AGENTS_SCHEDULES_PAUSED=1` — осознанные значения:
-агенты только предлагают и не запускаются по расписанию, пока владелец не решит иначе.
+`AGENT_AUTONOMY_MAX=T0`, `AGENTS_SCHEDULES_PAUSED=1` и
+`AGENTS_TASKS_PAUSED=1` — осознанные fail-closed значения:
+агенты только предлагают, cron-расписания не запускаются, а
+task-worker не забирает порученные через Core задачи. Паузы независимы:
+для ручного canary можно снять только `AGENTS_TASKS_PAUSED`, оставив cron на паузе.
+При обновлении старой установки новый task-тумблер тоже начинает с безопасного
+`1`: даже если cron раньше уже работал, назначенные задачи не возобновятся до
+явного `AGENTS_TASKS_PAUSED=0` в панели или `.env`.
 
 Мозг, память и бюджет агентов включаются отдельным атомарным профилем из панели
 или тумблерами `.env` — их карта и сценарии в `docs/AGENTS_ACTIVATION.md`.
@@ -140,15 +147,20 @@ Notion outbox; 0077 создаёт durable provider jobs/authorizations/results 
 
 Порядок controlled rollout:
 
-1. Поставить расписания на паузу и остановить `mydon-agents`, чтобы во время
-   смены контракта не было нового task claim.
+1. Выставить обе независимые паузы:
+   `AGENTS_SCHEDULES_PAUSED=1` и `AGENTS_TASKS_PAUSED=1`, затем остановить
+   `mydon-agents`. Первая блокирует cron, вторая — новый task claim;
+   одна пауза расписаний больше не останавливает очередь задач.
 2. Убедиться, что pre-migration backup создан и не пуст.
 3. Новым образом выполнить `migrate.js`: journal сам применит 0075–0078. Не
    запускать SQL-файлы вручную или в обратном порядке.
 4. Поднять **Core раньше Agents**, дождаться health и проверить наличие ledger,
    execution/outbox и всех трёх таблиц provider job.
-5. Только после этого поднять новый `mydon-agents`; затем снять паузу и
-   наблюдать task checkpoint и Notion outbox.
+5. Только после этого поднять новый `mydon-agents`. Для первого
+   canary снять только паузу порученных задач
+   (`AGENTS_TASKS_PAUSED=0`), оставить `AGENTS_SCHEDULES_PAUSED=1` и
+   наблюдать task checkpoint и Notion outbox. Cron включать отдельно
+   только после успешной проверки.
 
 Минимальная проверка схемы после шага 3:
 

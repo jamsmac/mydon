@@ -7,6 +7,30 @@ export const MIN_AGENT_TASK_INTERVAL_MS = 1_000;
 /** В Node большая задержка переполняет 32-bit timer и превращается в 1 мс. */
 export const MAX_AGENT_TASK_INTERVAL_MS = 2_147_483_647;
 
+export interface AgentPauseEnv {
+  AGENTS_SCHEDULES_PAUSED?: string;
+  AGENTS_TASKS_PAUSED?: string;
+}
+
+/**
+ * Паузы fail-closed: только точное `0` разрешает соответствующий вид работы.
+ * Так отсутствие или мусор в env не запускают агентов до того, как Core успел
+ * отдать безопасный fallback из панели.
+ */
+function pauseEnabled(raw: string | undefined): boolean {
+  return raw?.trim() !== "0";
+}
+
+/** Управляет только cron-навыками из паспортов агентов. */
+export function agentSchedulesPaused(env: AgentPauseEnv = process.env): boolean {
+  return pauseEnabled(env.AGENTS_SCHEDULES_PAUSED);
+}
+
+/** Управляет только задачами, которые владелец назначил агенту через Core/UI. */
+export function assignedAgentTasksPaused(env: AgentPauseEnv = process.env): boolean {
+  return pauseEnabled(env.AGENTS_TASKS_PAUSED);
+}
+
 /**
  * Превращает AGENT_TASK_INTERVAL_MS в безопасную задержку setInterval.
  * Мусор, ноль и отрицательные числа не означают «как можно чаще» —

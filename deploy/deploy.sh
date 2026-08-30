@@ -47,7 +47,7 @@ rollout_cleanup() {
       # SSH can drop after PostgreSQL committed). Fail closed, including a late
       # failure after new Agents was already started.
       if ssh "$HOST" "cd '$REMOTE_DIR' && docker compose -f deploy/docker-compose.yml --env-file .env stop mydon-agents >/dev/null 2>&1"; then
-        printf 'Выкатка прервана после migration start/commit: mydon-agents оставлен на паузе.\n' >&2
+        printf 'Выкатка прервана после migration start/commit: контейнер mydon-agents оставлен остановленным.\n' >&2
       else
         printf 'ВНИМАНИЕ: не удалось остановить mydon-agents после сбоя rollout.\n' >&2
       fi
@@ -128,6 +128,7 @@ INVITE_PEPPER=\$INVITE_PEPPER
 CORE_API_URL=http://mydon-core:3001
 AGENT_AUTONOMY_MAX=T0
 AGENTS_SCHEDULES_PAUSED=1
+AGENTS_TASKS_PAUSED=1
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_CHAT_IDS=
 # LLM помощника: подписка Claude (claude setup-token) и/или API-ключ.

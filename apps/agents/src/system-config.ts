@@ -7,17 +7,16 @@ import type { AgentsCoreClient } from "./core-client";
  * панели → они лежат в базе Core с приоритетом над `.env`. Агенты тянут
  * ДЕЙСТВУЮЩИЕ значения (база важнее env) и накладывают их на `process.env`, чтобы
  * существующие читатели (modelGatewayFromEnv, embeddingGatewayFromEnv, budget,
- * порог автономии, пауза расписаний) видели правку без рестарта контейнера.
+ * порог автономии, паузы cron/назначенных задач) видели правку без рестарта контейнера.
  *
- * ВАЖНО про «env» и «default» в ответе Core. Core считает действующее значение
- * по СВОЕМУ окружению, а тумблеры активации раздаются другим контейнерам:
- * `AGENTS_SCHEDULES_PAUSED` живёт у `mydon-agents`, у `mydon-core` его нет
- * вовсе. Поэтому по такому ключу Core честно отвечает `source: "default"` со
- * значением из `CONFIG_SPECS.fallback` — и это НЕ «владелец так решил», а
- * «Core не в курсе». Накладывать такое значение нельзя: раньше накладывали, и
- * fallback `"1"` затирал заданный владельцем `AGENTS_SCHEDULES_PAUSED=0`.
- * Расписания активных агентов молча не заводились (в логе — «Запланировано
- * заданий: 0»), а `.env` по этим ключам был декоративен.
+ * ВАЖНО про «env» и «default» в ответе Core. Штатный Compose теперь передаёт
+ * обе паузы и Core, и Agents, чтобы панель показывала тот же env-default.
+ * Но старый Core или частичная/custom-установка может не получить один из
+ * ключей и честно ответить `source: "default"` из `CONFIG_SPECS.fallback`.
+ * Это НЕ «владелец так решил», а «Core не знает env другого процесса».
+ * Накладывать такой default поверх собственного env нельзя: раньше fallback
+ * `"1"` затирал заданный владельцем `AGENTS_SCHEDULES_PAUSED=0`, расписания
+ * молча не заводились, а `.env` становился декоративным.
  *
  * Отсюда правило: значение из базы (`source: "db"`) — единственный явный выбор
  * владельца, оно перекрывает окружение. Всё остальное возвращает ключ к
@@ -45,7 +44,10 @@ const baselines = new WeakMap<object, Map<string, string | undefined>>();
  * значение пишем как "" — читатели трактуют его как «не задано» (путь спит).
  * Возвращает, сколько тумблеров реально задано владельцем (source=db).
  */
-export function overlayEnv(env: Record<string, string | undefined>, items: EffectiveConfigItem[]): number {
+export function overlayEnv(
+  env: Record<string, string | undefined>,
+  items: EffectiveConfigItem[],
+): number {
   let baseline = baselines.get(env);
   if (baseline === undefined) {
     baseline = new Map();

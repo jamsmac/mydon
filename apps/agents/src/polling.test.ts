@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  agentSchedulesPaused,
   agentTaskIntervalMs,
+  assignedAgentTasksPaused,
   DEFAULT_AGENT_TASK_INTERVAL_MS,
   MAX_AGENT_TASK_INTERVAL_MS,
   MIN_AGENT_TASK_INTERVAL_MS,
@@ -9,6 +11,37 @@ import {
 } from "./polling";
 
 describe("Polling задач агентов", () => {
+  it("разделяет паузу cron и назначенных задач", () => {
+    assert.equal(
+      agentSchedulesPaused({ AGENTS_SCHEDULES_PAUSED: "1", AGENTS_TASKS_PAUSED: "0" }),
+      true,
+    );
+    assert.equal(
+      assignedAgentTasksPaused({ AGENTS_SCHEDULES_PAUSED: "1", AGENTS_TASKS_PAUSED: "0" }),
+      false,
+      "назначенные задачи работают при остановленных cron",
+    );
+
+    assert.equal(
+      agentSchedulesPaused({ AGENTS_SCHEDULES_PAUSED: "0", AGENTS_TASKS_PAUSED: "1" }),
+      false,
+    );
+    assert.equal(
+      assignedAgentTasksPaused({ AGENTS_SCHEDULES_PAUSED: "0", AGENTS_TASKS_PAUSED: "1" }),
+      true,
+      "cron работает без claim назначенных задач",
+    );
+  });
+
+  it("оба контура fail-closed при пустом или битом env", () => {
+    for (const raw of [undefined, "", "   ", "1", "yes"]) {
+      assert.equal(agentSchedulesPaused({ AGENTS_SCHEDULES_PAUSED: raw }), true, String(raw));
+      assert.equal(assignedAgentTasksPaused({ AGENTS_TASKS_PAUSED: raw }), true, String(raw));
+    }
+    assert.equal(agentSchedulesPaused({ AGENTS_SCHEDULES_PAUSED: " 0 " }), false);
+    assert.equal(assignedAgentTasksPaused({ AGENTS_TASKS_PAUSED: " 0 " }), false);
+  });
+
   it("invalid, zero и negative интервалы возвращает к default, а не к 1 ms", () => {
     for (const raw of [undefined, "", "   ", "NaN", "Infinity", "0", "-1"]) {
       assert.equal(agentTaskIntervalMs(raw), DEFAULT_AGENT_TASK_INTERVAL_MS, String(raw));

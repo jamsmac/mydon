@@ -28,6 +28,9 @@ services:
       OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
       # Та же серверная граница agent actions, что на primary Core.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
+      # Core отдаёт панели точные env-defaults; значения из DB сильнее.
+      AGENTS_SCHEDULES_PAUSED: ${AGENTS_SCHEDULES_PAUSED:-1}
+      AGENTS_TASKS_PAUSED: ${AGENTS_TASKS_PAUSED:-1}
       # Несекретный профиль нужен Core и для UI, и для единого admission policy.
       # API key намеренно остаётся только у Agents и сюда не передаётся.
       LLM_ENABLED: ${LLM_ENABLED:-0}
@@ -146,6 +149,7 @@ services:
       SERVICE_TOKEN: ${SERVICE_TOKEN:-}
       AGENT_AUTONOMY_MAX: ${AGENT_AUTONOMY_MAX:-T0}
       AGENTS_SCHEDULES_PAUSED: ${AGENTS_SCHEDULES_PAUSED:-1}
+      AGENTS_TASKS_PAUSED: ${AGENTS_TASKS_PAUSED:-1}
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
       AGENT_TASK_INTERVAL_MS: ${AGENT_TASK_INTERVAL_MS:-60000}
       MAINTENANCE_MONITOR_CRON: ${MAINTENANCE_MONITOR_CRON:-0 6 * * *}

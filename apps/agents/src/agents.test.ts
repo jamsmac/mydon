@@ -778,6 +778,35 @@ describe("Задачи агента и дневной потолок", () => {
     }
   });
 
+  it("пауза после текущей задачи запрещает следующий claim того же poll", async () => {
+    let paused = false;
+    const { client, claims } = stub({
+      myTasks: async () => [
+        { id: "t1", title: "проверь дебиторку", status: "todo", ownerRef: "receivables" },
+        { id: "t2", title: "проверь дебиторку", status: "todo", ownerRef: "receivables" },
+      ],
+      commitAgentTaskOutcome: async () => {
+        paused = true;
+        return { status: "committed" as const, approvalId: "appr-1", replay: false };
+      },
+    });
+
+    const res = await runAgentTasks(agent, client, "T0", undefined, {
+      canClaim: () => !paused,
+    });
+
+    assert.deepEqual(
+      claims.map((claim) => claim.id),
+      ["t1"],
+      "после включения паузы worker не должен claim-ить вторую задачу",
+    );
+    assert.deepEqual(
+      res.map((result) => result.taskId),
+      ["t1"],
+      "уже claim-нутая задача завершилась, новая не началась",
+    );
+  });
+
   it("задача без навыка durable-блокируется один раз и не плодит comment/release на poll", async () => {
     const unsupportedAgent = { ...agent, skills: [] };
     const releases: {
