@@ -2,13 +2,14 @@ import { Inject, Injectable, Logger, type OnApplicationShutdown, type OnModuleIn
 import { person, task } from "@mydon/db";
 import { can, effectiveRoles, normalizeMachineSerial, tashkentDay, tashkentDayStartOf, TZ } from "@mydon/shared";
 import { Cron } from "croner";
-import { and, asc, eq, isNotNull, lt, ne } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, lt, ne, or } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { EventsService } from "../events/events.service";
 import { RulesService } from "../rules/rules.service";
 import { readIntSetting, settingValue } from "../system/settings";
 import { VendingService } from "../vending/vending.service";
 import { TasksService } from "./tasks.service";
+import { AGENT_SCHEDULE_SOURCE } from "./agent-schedule";
 
 type Payload = Record<string, unknown>;
 type TaskPriority = "low" | "normal" | "high" | "urgent";
@@ -281,6 +282,7 @@ export class TaskBridgeService implements OnModuleInit, OnApplicationShutdown {
           lt(task.due, граница),
           ne(task.status, "done"),
           ne(task.status, "cancelled"),
+          or(isNull(task.source), ne(task.source, AGENT_SCHEDULE_SOURCE)),
         ),
       )
       .orderBy(asc(task.due))

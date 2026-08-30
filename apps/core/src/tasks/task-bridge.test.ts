@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { systemConfig, task as taskTable } from "@mydon/db";
 import { BRIDGE_EVENT_TYPES, BRIDGE_SOURCES, OVERDUE_MAX_EVENTS, TaskBridgeService, nextMorning } from "./task-bridge.service";
+import { AGENT_SCHEDULE_SOURCE } from "./agent-schedule";
 
 type Row = Record<string, unknown>;
 const NOW = new Date("2026-08-26T06:15:00+05:00");
@@ -294,6 +295,15 @@ describe("Эмитент просрочки (П7, R-P7-5, T7)", () => {
     const query = new PgDialect().sqlToQuery(st.условия[0] as Parameters<PgDialect["sqlToQuery"]>[0]);
     assert.match(query.sql, /due/);
     assert.match(query.sql, /status/);
-    assert.deepEqual(query.params.slice(-2), ["done", "cancelled"]);
+    assert.deepEqual(query.params.slice(-3), ["done", "cancelled", AGENT_SCHEDULE_SOURCE]);
+  });
+
+  it("служебные occurrence расписания не превращает в пользовательскую просрочку", async () => {
+    const st = стендПросрочки({ задачи: [] });
+    await st.service.emitOverdue(СЕЙЧАС);
+    const query = new PgDialect().sqlToQuery(st.условия[0] as Parameters<PgDialect["sqlToQuery"]>[0]);
+    assert.match(query.sql, /source/);
+    assert.ok(query.sql.includes("is null"));
+    assert.equal(query.params.at(-1), AGENT_SCHEDULE_SOURCE);
   });
 });

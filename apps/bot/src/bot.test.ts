@@ -1097,7 +1097,14 @@ describe("Аналитика снека: путь владельца до Core (
       },
       briefingNotifications: async () => {
         вызовы.push("pending");
-        return { since: "", events: 0, notifications: [] };
+        return {
+          since: "",
+          until: "",
+          events: 0,
+          truncated: false,
+          nextCursor: null,
+          notifications: [],
+        };
       },
       actions: async (from: string, to: string) => {
         вызовы.push(`actions:${from}:${to}`);

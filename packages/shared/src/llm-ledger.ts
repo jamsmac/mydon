@@ -36,6 +36,32 @@ export interface LlmSettlementOutboxMonitoring {
 }
 
 /**
+ * One secret-free settlement-spool incident suitable for an operational
+ * alert. The fingerprint is a second SHA-256 over safe file identity metadata;
+ * request keys, reservation ids, payloads and filesystem paths never leave the
+ * producer-local spool.
+ */
+export interface LlmSettlementOutboxAlertIncident {
+  fingerprint: string;
+  producer: string;
+  state: "fallback_stuck" | "dead";
+  recordKind: "pre_reserve" | "fallback" | "exact" | "corrupt";
+  operation: "recover_pre_dispatch" | "settle" | "fail" | "release" | "unknown";
+  category: "attempts_exhausted" | "corrupt" | "exact_conflict" | "terminal_close" | null;
+  occurredAt: string;
+}
+
+/** Availability is explicit so a missing/read-only mount cannot look healthy. */
+export interface LlmSettlementOutboxAlertMonitoring {
+  available: boolean;
+  /** False when a concurrent rename or transient I/O error made the snapshot incomplete. */
+  complete: boolean;
+  /** Dead files remain unresolved until an operator reconciles/removes them. */
+  unresolvedDeadCount: number;
+  incidents: LlmSettlementOutboxAlertIncident[];
+}
+
+/**
  * Secret-free operational snapshot for the System panel.
  *
  * `knownCostUsd` is the settled amount accounted from provider facts. It may

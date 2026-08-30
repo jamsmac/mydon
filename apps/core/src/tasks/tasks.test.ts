@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
+  agent,
   agentTaskLlmJob,
   approval,
   auditLog,
@@ -15,8 +16,10 @@ import {
 import {
   AGENT_ROUTE_UNAVAILABLE_BACKOFF_MS,
   durableTaskInputHash,
+  isAssignedTaskSql,
   TasksService,
 } from "./tasks.service";
+import { AGENT_SCHEDULE_SOURCE } from "./agent-schedule";
 
 type Row = Record<string, unknown>;
 
@@ -111,6 +114,63 @@ const stubMaintenance = {
 
 const makeTasks = (db: never, llmLedger?: never) =>
   new TasksService(db, stubMaintenance, llmLedger);
+
+/** Stateful unique-index fixture for durable cron occurrence materialization. */
+function agentScheduleDb(overrides: Partial<Row> = {}) {
+  const configuredAgent: Row = {
+    id: "agent-1",
+    name: "coach-agent",
+    status: "active",
+    archivedAt: null,
+    skills: ["coach-review"],
+    schedule: [{ skill: "coach-review", cron: "0 10 * * 1" }],
+    ...overrides,
+  };
+  let storedTask: Row | undefined;
+  const audits: Row[] = [];
+  const tx = {
+    select: () => ({
+      from: (tableRef: unknown) => ({
+        where: () => ({
+          limit: async () =>
+            tableRef === agent ? [configuredAgent] : storedTask === undefined ? [] : [storedTask],
+        }),
+      }),
+    }),
+    insert: (tableRef: unknown) => ({
+      values: (value: Row) => {
+        if (tableRef === task) {
+          const returning = async () => {
+            if (storedTask !== undefined) return [];
+            storedTask = { id: "scheduled-task-1", ...value };
+            return [storedTask];
+          };
+          return {
+            onConflictDoNothing: () => ({ returning }),
+          };
+        }
+        audits.push(value);
+        return {
+          then: (resolve: (rows: Row[]) => unknown) => Promise.resolve([value]).then(resolve),
+        };
+      },
+    }),
+  };
+  return {
+    db: {
+      transaction: async <T>(callback: (value: typeof tx) => Promise<T>): Promise<T> =>
+        callback(tx),
+    } as never,
+    audits,
+    get task(): Row | undefined {
+      return storedTask;
+    },
+    mutateTask(patch: Row): void {
+      if (storedTask === undefined) throw new Error("scheduled task was not created");
+      Object.assign(storedTask, patch);
+    },
+  };
+}
 
 interface AgentRunDbState {
   task: Row;
@@ -391,6 +451,104 @@ describe("Задачи", () => {
   });
 });
 
+describe("Durable cron occurrence tasks", () => {
+  const occurrence = {
+    agentName: "coach-agent",
+    skill: "coach-review",
+    cron: "0 10 * * 1",
+    scheduledAt: new Date("2026-08-31T05:00:00.000Z"),
+  };
+  const observedAt = new Date("2026-08-31T05:00:30.000Z");
+
+  it("два ensure дают одну задачу, server-derived bounded key и exact replay", async () => {
+    const fixture = agentScheduleDb();
+    const service = makeTasks(fixture.db);
+    const first = await service.ensureAgentSchedule(occurrence, observedAt);
+    const replay = await service.ensureAgentSchedule(occurrence, observedAt);
+
+    assert.equal(first.created, true);
+    assert.equal(first.replay, false);
+    assert.deepEqual(replay, { ...first, created: false, replay: true });
+    assert.match(first.clientKey, /^agent-schedule:v1:[0-9a-f]{64}$/);
+    assert.ok(first.clientKey.length <= 128);
+    assert.equal(fixture.task?.source, AGENT_SCHEDULE_SOURCE);
+    assert.equal(fixture.task?.ownerRef, "coach-agent");
+    assert.equal((fixture.task?.due as Date).toISOString(), occurrence.scheduledAt.toISOString());
+    assert.equal(
+      fixture.audits.filter((row) => row.action === "task.agent_schedule.materialized").length,
+      1,
+      "exact replay must not duplicate the materialization audit",
+    );
+  });
+
+  it("не принимает тот же ключ после изменения immutable payload", async () => {
+    const fixture = agentScheduleDb();
+    const service = makeTasks(fixture.db);
+    await service.ensureAgentSchedule(occurrence, observedAt);
+    fixture.mutateTask({ description: "tampered" });
+    await assert.rejects(service.ensureAgentSchedule(occurrence, observedAt), /immutable payload/);
+  });
+
+  it("проверяет active agent, owned skill и exact configured cron", async () => {
+    await assert.rejects(
+      makeTasks(agentScheduleDb({ status: "paused" }).db).ensureAgentSchedule(
+        occurrence,
+        observedAt,
+      ),
+      /не активен/,
+    );
+    await assert.rejects(
+      makeTasks(agentScheduleDb({ skills: ["morning-digest"] }).db).ensureAgentSchedule(
+        occurrence,
+        observedAt,
+      ),
+      /не закреплён/,
+    );
+    await assert.rejects(
+      makeTasks(agentScheduleDb({ schedule: [] }).db).ensureAgentSchedule(occurrence, observedAt),
+      /не активно/,
+    );
+  });
+
+  it("отбивает off-grid, слишком старый и будущий occurrence", async () => {
+    const service = makeTasks(agentScheduleDb().db);
+    await assert.rejects(
+      service.ensureAgentSchedule(
+        { ...occurrence, scheduledAt: new Date("2026-08-31T05:01:00.000Z") },
+        observedAt,
+      ),
+      /не является текущим fire time/,
+    );
+    await assert.rejects(
+      service.ensureAgentSchedule(occurrence, new Date("2026-08-31T05:16:00.001Z")),
+      /не является текущим fire time/,
+    );
+    await assert.rejects(
+      service.ensureAgentSchedule(occurrence, new Date("2026-08-31T04:58:59.999Z")),
+      /не является текущим fire time/,
+    );
+  });
+
+  it("generic create не может подделать системную очередь расписаний", async () => {
+    await assert.rejects(
+      makeTasks(stubDb({})).create({
+        title: "Обойти паузу",
+        ownerKind: "agent",
+        ownerRef: "coach-agent",
+        source: AGENT_SCHEDULE_SOURCE,
+      }),
+      /зарезервирован/,
+    );
+  });
+
+  it("assigned predicate оставляет NULL source, но отсекает system occurrences", () => {
+    const { sql: text, params } = new PgDialect().sqlToQuery(isAssignedTaskSql());
+    assert.match(text, /"source" is null/);
+    assert.match(text, /"source" <> \$1/);
+    assert.deepEqual(params, [AGENT_SCHEDULE_SOURCE]);
+  });
+});
+
 describe("Дедуп задач на день держится ЧАСТИЧНЫМ индексом (R-G-2)", () => {
   it("вставка называет и колонку, и ПРЕДИКАТ индекса — иначе Postgres отвечает 42P10", async () => {
     // Без `where` drizzle печатает `on conflict ("source") do nothing`, и
@@ -498,6 +656,8 @@ describe("Durable claim задачи агента", () => {
     assert.match(query.sql, /agent_execution_retry_at.*<=/);
     assert.match(query.sql, /agent_execution_blocked_at.*is null/);
     assert.match(query.sql, /agent_run_claimed_at.*<=/);
+    assert.match(query.sql, /source.*is null/);
+    assert.ok(query.params.includes(AGENT_SCHEDULE_SOURCE));
     const staleCutoff = new Date(NOW.getTime() - 15 * 60_000).toISOString();
     assert.ok(
       query.params.some((value) =>
@@ -506,6 +666,38 @@ describe("Durable claim задачи агента", () => {
       "stale cutoff ровно 15 минут",
     );
     assert.ok(inserted.some((row) => row.action === "task.agent_run.claimed"));
+  });
+
+  it("scheduled claim требует системный source и уже наступивший due", async () => {
+    const updates: NonNullable<StubOpts["updates"]> = [];
+    const claimedRow = {
+      id: TASK,
+      title: "По расписанию: coach-review",
+      description: "Системный запуск навыка coach-review",
+      domain: null,
+      ownerKind: "agent",
+      ownerRef: "coach-agent",
+      status: "in_progress",
+      source: AGENT_SCHEDULE_SOURCE,
+      due: NOW,
+      agentRunId: NEW_RUN,
+      agentExecutionAttemptId: EXECUTION,
+      agentRunGeneration: 1,
+      agentRunClaimedAt: NOW,
+    };
+
+    await makeTasks(stubDb({ updateResult: claimedRow, updates })).claimAgentRun(
+      TASK,
+      "coach-agent",
+      NOW,
+      "scheduled",
+    );
+    const query = new PgDialect().sqlToQuery(
+      updates[0]!.condition as Parameters<PgDialect["sqlToQuery"]>[0],
+    );
+    assert.match(query.sql, /source.*=/);
+    assert.match(query.sql, /due.*<=/);
+    assert.ok(query.params.includes(AGENT_SCHEDULE_SOURCE));
   });
 
   it("claim долговечно блокирует malformed stored execution", async () => {

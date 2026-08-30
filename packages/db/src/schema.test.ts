@@ -156,6 +156,13 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       имена(schema.llmSpend).includes("llm_spend_provider_failed_at_idx"),
       "provider circuit по settlement-day требует индекс provider/failed_at",
     );
+    for (const name of [
+      "llm_spend_alert_unknown_idx",
+      "llm_spend_stuck_reserved_at_idx",
+      "llm_spend_stuck_created_at_idx",
+    ]) {
+      assert.ok(имена(schema.llmSpend).includes(name), `нет monitoring-индекса ${name}`);
+    }
   });
 
   it("agent-task разделяет lease worker и устойчивую оплачиваемую попытку", () => {
@@ -176,6 +183,10 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     assert.ok(
       columns.includes("agentExecutionBlockedReason"),
       "владелец должен видеть причину ручного retry",
+    );
+    assert.ok(
+      имена(schema.task).includes("task_agent_schedule_open_queue_idx"),
+      "durable scheduled queue не должна сканировать закрытые задачи",
     );
   });
 
@@ -269,6 +280,7 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       "outbox_delivery_key",
       "outbox_delivery_destination_status_created_idx",
       "outbox_delivery_execution_idx",
+      "outbox_delivery_alert_terminal_idx",
     ]) {
       assert.ok(имена(schema.outboxDelivery).includes(name), `нет индекса ${name}`);
     }
@@ -346,6 +358,7 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       "agent_task_llm_job_execution_idx",
       "agent_task_llm_job_status_idx",
       "agent_task_llm_job_status_deadline_idx",
+      "agent_task_llm_job_alert_unknown_idx",
     ]) {
       assert.ok(имена(schema.agentTaskLlmJob).includes(name), `нет индекса ${name}`);
     }

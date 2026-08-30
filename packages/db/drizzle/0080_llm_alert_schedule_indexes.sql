@@ -1,0 +1,6 @@
+CREATE INDEX "llm_spend_alert_unknown_idx" ON "llm_spend" USING btree ("created_at" DESC,"id") WHERE "llm_spend"."status" = 'failed' and "llm_spend"."outcome" = 'unknown';--> statement-breakpoint
+CREATE INDEX "llm_spend_stuck_reserved_at_idx" ON "llm_spend" USING btree ("reserved_at") WHERE "llm_spend"."status" = 'reserved' and "llm_spend"."reserved_at" is not null;--> statement-breakpoint
+CREATE INDEX "llm_spend_stuck_created_at_idx" ON "llm_spend" USING btree ("created_at") WHERE "llm_spend"."status" = 'reserved' and "llm_spend"."reserved_at" is null;--> statement-breakpoint
+CREATE INDEX "agent_task_llm_job_alert_unknown_idx" ON "agent_task_llm_job" USING btree ("created_at" DESC,"id") WHERE "agent_task_llm_job"."status" = 'unknown';--> statement-breakpoint
+CREATE INDEX "outbox_delivery_alert_terminal_idx" ON "outbox_delivery" USING btree ("created_at" DESC,"id") WHERE "outbox_delivery"."status" = 'unknown' or "outbox_delivery"."status" = 'dead';--> statement-breakpoint
+CREATE INDEX "task_agent_schedule_open_queue_idx" ON "task" USING btree ("owner_kind","owner_ref","due","priority" DESC,"created_at") WHERE "task"."source" = 'agent-schedule' and "task"."status" <> 'done' and "task"."status" <> 'cancelled';

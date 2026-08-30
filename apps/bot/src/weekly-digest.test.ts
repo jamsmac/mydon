@@ -22,17 +22,72 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
   to: "2026-08-23",
   previousWeek: "2026-33",
   machines: [
-    { serial: "2508160376", name: "Olma Администрация", qty: 412, revenue: 1_487_000, margin: 421_310, pct: 28.3 },
-    { serial: "2508160377", name: "Olma Цех", qty: 187, revenue: 670_000, margin: 186_285, pct: 27.8 },
+    {
+      serial: "2508160376",
+      name: "Olma Администрация",
+      qty: 412,
+      revenue: 1_487_000,
+      margin: 421_310,
+      pct: 28.3,
+    },
+    {
+      serial: "2508160377",
+      name: "Olma Цех",
+      qty: 187,
+      revenue: 670_000,
+      margin: 186_285,
+      pct: 27.8,
+    },
   ],
-  totals: { qty: 599, revenue: 2_157_000, cogs: 1_549_405, margin: 607_595, pct: 28.2, unknownUnits: 0 },
-  delta: { qty: -63, revenue: -441_000, margin: -171_000, qtyPct: -9.5, revenuePct: -17, marginPct: -22 },
+  totals: {
+    qty: 599,
+    revenue: 2_157_000,
+    cogs: 1_549_405,
+    margin: 607_595,
+    pct: 28.2,
+    unknownUnits: 0,
+  },
+  delta: {
+    qty: -63,
+    revenue: -441_000,
+    margin: -171_000,
+    qtyPct: -9.5,
+    revenuePct: -17,
+    marginPct: -22,
+  },
   topProducts: [
-    { product: "TUC Sour cream", qty: 96, revenue: 384_000, cogs: 268_800, margin: 115_200, pct: 30, unknownUnits: 0, low: false },
-    { product: "Snickers", qty: 74, revenue: 296_000, cogs: 222_000, margin: 74_000, pct: 25, unknownUnits: 0, low: false },
+    {
+      product: "TUC Sour cream",
+      qty: 96,
+      revenue: 384_000,
+      cogs: 268_800,
+      margin: 115_200,
+      pct: 30,
+      unknownUnits: 0,
+      low: false,
+    },
+    {
+      product: "Snickers",
+      qty: 74,
+      revenue: 296_000,
+      cogs: 222_000,
+      margin: 74_000,
+      pct: 25,
+      unknownUnits: 0,
+      low: false,
+    },
   ],
   worstProducts: [
-    { product: "LaimonFresh", qty: 18, revenue: 216_000, cogs: 219_600, margin: -3_600, pct: -1.7, unknownUnits: 0, low: true },
+    {
+      product: "LaimonFresh",
+      qty: 18,
+      revenue: 216_000,
+      cogs: 219_600,
+      margin: -3_600,
+      pct: -1.7,
+      unknownUnits: 0,
+      low: true,
+    },
   ],
   refills: { events: 3, detectedUnits: 183, recordedUnits: 0 },
   intake: { orders: 2, units: 540, amount: 4_100_000 },
@@ -40,12 +95,21 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
   deadStock: {
     rows: [
       { product: "Fanta 0.5", qty: 24, value: 168_000, noPrice: false },
-      { product: "Halls", qty: 30, value: 122_500, noPrice: false, serial: "2508160376", machineName: "Olma Администрация" },
+      {
+        product: "Halls",
+        qty: 30,
+        value: 122_500,
+        noPrice: false,
+        serial: "2508160376",
+        machineName: "Olma Администрация",
+      },
     ],
     totalValue: 290_500,
   },
   priceChanges: {
-    purchase: [{ product: "TUC Sour cream", from: 2_600, to: 2_800, pct: 7.7, at: "2026-08-18T06:12:00Z" }],
+    purchase: [
+      { product: "TUC Sour cream", from: 2_600, to: 2_800, pct: 7.7, at: "2026-08-18T06:12:00Z" },
+    ],
     retail: [{ product: "LaimonFresh", from: 15_000, to: 12_000, pct: -20, at: "2026-08-19" }],
   },
   health: {
@@ -73,7 +137,16 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     cutoverThreshold: 7,
     parityLastRed: null,
     parityStreakSince: "2026-08-21",
-    parity: { days: 7, ok: true, mismatches: 0, stockOk: true, checked: 2, stockChecked: 2, mode: "mirror", note: null },
+    parity: {
+      days: 7,
+      ok: true,
+      mismatches: 0,
+      stockOk: true,
+      checked: 2,
+      stockChecked: 2,
+      mode: "mirror",
+      note: null,
+    },
   },
   // Числа ЗА НЕДЕЛЮ, о которой письмо: сбор ходит раз в 3 ч (8 прогонов в
   // сутки), на неделе один частичный и один отказ — прод-порядок.
@@ -89,10 +162,22 @@ const ДАЙДЖЕСТ_34: WeeklyDigest = {
     parityDays: [
       { date: "2026-08-23", ok: true, salesChecked: 2, stockChecked: 68, note: null },
       { date: "2026-08-22", ok: true, salesChecked: 2, stockChecked: 68, note: null },
-      { date: "2026-08-21", ok: false, salesChecked: 2, stockChecked: 0, note: "снимков остатков нет" },
+      {
+        date: "2026-08-21",
+        ok: false,
+        salesChecked: 2,
+        stockChecked: 0,
+        note: "снимков остатков нет",
+      },
       { date: "2026-08-20", ok: true, salesChecked: 2, stockChecked: 68, note: null },
       { date: "2026-08-19", ok: true, salesChecked: 2, stockChecked: 68, note: null },
-      { date: "2026-08-18", ok: false, salesChecked: 0, stockChecked: 0, note: "сверять не по чему" },
+      {
+        date: "2026-08-18",
+        ok: false,
+        salesChecked: 0,
+        stockChecked: 0,
+        note: "сверять не по чему",
+      },
       { date: "2026-08-17", ok: true, salesChecked: 2, stockChecked: 68, note: null },
     ],
     parityGreen: 5,
@@ -115,7 +200,14 @@ const ПУСТАЯ_НЕДЕЛЯ: WeeklyDigest = {
   previousWeek: "2026-34",
   machines: [],
   totals: { qty: 0, revenue: 0, cogs: 0, margin: 0, pct: null, unknownUnits: 0 },
-  delta: { qty: -599, revenue: -2_157_000, margin: -607_595, qtyPct: -100, revenuePct: -100, marginPct: -100 },
+  delta: {
+    qty: -599,
+    revenue: -2_157_000,
+    margin: -607_595,
+    qtyPct: -100,
+    revenuePct: -100,
+    marginPct: -100,
+  },
   topProducts: [],
   worstProducts: [],
   refills: { events: 0, detectedUnits: 0, recordedUnits: 0 },
@@ -145,7 +237,10 @@ const ПУСТАЯ_НЕДЕЛЯ: WeeklyDigest = {
 describe("Расписание недельной сводки (R-P5b-7)", () => {
   it("понедельник 08:05 по Ташкенту, а не по TZ процесса", () => {
     // вт 25.08 07:00 Ташкента → ждать до пн 31.08 08:05 = 6 сут 1 ч 5 мин
-    assert.equal(msUntilWeekly(new Date("2026-08-25T02:00:00Z"), 1, 8, 5), ((6 * 24 + 1) * 60 + 5) * 60_000);
+    assert.equal(
+      msUntilWeekly(new Date("2026-08-25T02:00:00Z"), 1, 8, 5),
+      ((6 * 24 + 1) * 60 + 5) * 60_000,
+    );
     // пн 24.08 08:00 Ташкента → 5 минут
     assert.equal(msUntilWeekly(new Date("2026-08-24T03:00:00Z"), 1, 8, 5), 5 * 60_000);
   });
@@ -172,7 +267,10 @@ describe("Получатели и дедуп недельной сводки", (
       { id: "4", name: "Уволен", roles: ["owner"], tgChatId: "13", active: "no" },
       { id: "5", name: "Без чата", roles: ["owner"], tgChatId: null, active: "yes" },
     ] as unknown as PersonRow[];
-    assert.deepEqual(weeklyRecipients(люди).map((p) => p.id), ["1", "2"]);
+    assert.deepEqual(
+      weeklyRecipients(люди).map((p) => p.id),
+      ["1", "2"],
+    );
   });
 
   it("легаси-роль «владелец» тоже получает сводку (прод, п.1)", () => {
@@ -184,8 +282,22 @@ describe("Получатели и дедуп недельной сводки", (
     // Правами это поле по-прежнему не управляет: цена описки здесь — лишний
     // получатель сводки, а не лишние права в боте.
     const люди = [
-      { id: "6", name: "Владелец текстом", role: "владелец", roles: [], tgChatId: "14", active: "yes" },
-      { id: "7", name: "Английский owner", role: "Owner", roles: [], tgChatId: "15", active: "yes" },
+      {
+        id: "6",
+        name: "Владелец текстом",
+        role: "владелец",
+        roles: [],
+        tgChatId: "14",
+        active: "yes",
+      },
+      {
+        id: "7",
+        name: "Английский owner",
+        role: "Owner",
+        roles: [],
+        tgChatId: "15",
+        active: "yes",
+      },
     ] as unknown as PersonRow[];
     assert.deepEqual(
       weeklyRecipients(люди).map((p) => p.id),
@@ -197,8 +309,22 @@ describe("Получатели и дедуп недельной сводки", (
     // Сверка ТОЧНАЯ, а не по вхождению: «менеджер по закупу» — кладовщик, и
     // деньги парка ему в чат уходить не должны.
     const люди = [
-      { id: "8", name: "Снабженец", role: "менеджер по закупу", roles: [], tgChatId: "16", active: "yes" },
-      { id: "9", name: "Оператор", role: "оператор", roles: ["operator"], tgChatId: "17", active: "yes" },
+      {
+        id: "8",
+        name: "Снабженец",
+        role: "менеджер по закупу",
+        roles: [],
+        tgChatId: "16",
+        active: "yes",
+      },
+      {
+        id: "9",
+        name: "Оператор",
+        role: "оператор",
+        roles: ["operator"],
+        tgChatId: "17",
+        active: "yes",
+      },
     ] as unknown as PersonRow[];
     assert.deepEqual(weeklyRecipients(люди), []);
   });
@@ -247,14 +373,37 @@ describe("Сигналы правил недельной срочности", ()
   it("берём только запрошенную срочность, ключ — событие и правило", () => {
     const pending = {
       since: "2026-08-11T00:00:00Z",
+      until: "2026-08-18T00:00:00Z",
       events: 3,
+      truncated: false,
+      nextCursor: null,
       notifications: [
-        { ruleId: "sales.drop", urgency: "weekly", text: "📉 Продажи ниже плана", eventId: "e1" },
-        { ruleId: "shrink", urgency: "briefing", text: "усушка", eventId: "e2" },
-        { ruleId: "sync", urgency: "immediate", text: "сбор стоит", eventId: "e3" },
+        {
+          ruleId: "sales.drop",
+          urgency: "weekly",
+          text: "📉 Продажи ниже плана",
+          eventId: "e1",
+          occurredAt: "2026-08-17T00:00:00Z",
+        },
+        {
+          ruleId: "shrink",
+          urgency: "briefing",
+          text: "усушка",
+          eventId: "e2",
+          occurredAt: "2026-08-17T00:00:01Z",
+        },
+        {
+          ruleId: "sync",
+          urgency: "immediate",
+          text: "сбор стоит",
+          eventId: "e3",
+          occurredAt: "2026-08-17T00:00:02Z",
+        },
       ],
     };
-    assert.deepEqual(pendingNotes(pending, "weekly"), [{ key: "e1:sales.drop", text: "📉 Продажи ниже плана" }]);
+    assert.deepEqual(pendingNotes(pending, "weekly"), [
+      { key: "e1:sales.drop", text: "📉 Продажи ниже плана" },
+    ]);
     // Каждый канал забирает ТОЛЬКО свою срочность: возьми недельный канал
     // брифинговые сигналы — утренний брифинг их больше не увидит (ack общий).
     assert.deepEqual(pendingNotes(pending, "briefing"), [{ key: "e2:shrink", text: "усушка" }]);
@@ -288,7 +437,10 @@ describe("Текст недельной сводки", () => {
   });
 
   it("сигналы urgency=weekly подмешиваются, ключи — только показанных", () => {
-    const notes = Array.from({ length: 30 }, (_, i) => ({ key: `e${i}:sales.drop`, text: `📉 Продажи ниже плана на ${i}%` }));
+    const notes = Array.from({ length: 30 }, (_, i) => ({
+      key: `e${i}:sales.drop`,
+      text: `📉 Продажи ниже плана на ${i}%`,
+    }));
     const { parts, shownKeys } = formatWeeklyDigest(ДАЙДЖЕСТ_34, notes);
     assert.ok(shownKeys.length > 0, "сигналы обязаны дойти до владельца");
     assert.ok(shownKeys.length < notes.length, "невлезшее обязано остаться недоставленным");
@@ -315,7 +467,9 @@ describe("Текст недельной сводки", () => {
         pct: 30,
       })),
     };
-    const { parts, shownKeys } = formatWeeklyDigest(толстая, [{ key: "e1:sales.drop", text: "📉 Продажи ниже плана" }]);
+    const { parts, shownKeys } = formatWeeklyDigest(толстая, [
+      { key: "e1:sales.drop", text: "📉 Продажи ниже плана" },
+    ]);
     assert.equal(shownKeys.length, 0);
     assert.ok(parts.length <= 3);
     assert.match(parts[parts.length - 1]!, /остальное на вкладке «Снек» в панели/);
@@ -346,7 +500,8 @@ describe("Текст недельной сводки", () => {
           ok: false,
           mismatches: 0,
           stockOk: false,
-          checked: 0, stockChecked: 0,
+          checked: 0,
+          stockChecked: 0,
           mode: "mirror",
           note:
             "собственный снапшот продаж ещё пуст — сверять нечего (агент ещё не отработал?); " +
@@ -471,8 +626,14 @@ const ДО_ЖУРНАЛА = {
   to: "2026-08-02",
   weekHealth: { ...ПУСТАЯ_НЕДЕЛЯ.weekHealth, week: "2026-31", journalSince: "2026-08-06" },
   warnings: [
-    { code: "journal_short", message: "Журнал прогонов начинается с 06.08.2026 — за эту неделю данных нет." },
-    { code: "health_unavailable", message: "Дни паритета за эту неделю вне окна счёта серии (14 дней)." },
+    {
+      code: "journal_short",
+      message: "Журнал прогонов начинается с 06.08.2026 — за эту неделю данных нет.",
+    },
+    {
+      code: "health_unavailable",
+      message: "Дни паритета за эту неделю вне окна счёта серии (14 дней).",
+    },
   ],
 } as unknown as WeeklyDigest;
 
@@ -501,12 +662,18 @@ describe("Блок здоровья: сначала неделя, потом «�
       ...ДАЙДЖЕСТ_34,
       weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, parityGreen: 1, parityRed: 1 },
     };
-    assert.match(formatWeeklyDigest(одинИодин, []).parts.join("\n"), /Паритет недели: 1 зелёный \/ 1 красный/);
+    assert.match(
+      formatWeeklyDigest(одинИодин, []).parts.join("\n"),
+      /Паритет недели: 1 зелёный \/ 1 красный/,
+    );
     const двоеИпятеро: WeeklyDigest = {
       ...ДАЙДЖЕСТ_34,
       weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, parityGreen: 2, parityRed: 5 },
     };
-    assert.match(formatWeeklyDigest(двоеИпятеро, []).parts.join("\n"), /Паритет недели: 2 зелёных \/ 5 красных/);
+    assert.match(
+      formatWeeklyDigest(двоеИпятеро, []).parts.join("\n"),
+      /Паритет недели: 2 зелёных \/ 5 красных/,
+    );
   });
 
   it("неполная неделя подписана прямо в строке чисел", () => {
@@ -515,7 +682,10 @@ describe("Блок здоровья: сначала неделя, потом «�
       ...ДАЙДЖЕСТ_34,
       weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, partialWeek: true },
     };
-    assert.match(formatWeeklyDigest(идёт, []).parts.join("\n"), /худшая серия 1 \(неделя ещё идёт\)/);
+    assert.match(
+      formatWeeklyDigest(идёт, []).parts.join("\n"),
+      /худшая серия 1 \(неделя ещё идёт\)/,
+    );
   });
 
   it("обрезанный журнал прогонов назван ОДИН раз — в «Посчитано не всё», а не ещё и хвостом чисел", () => {
@@ -526,7 +696,10 @@ describe("Блок здоровья: сначала неделя, потом «�
       ...ДАЙДЖЕСТ_34,
       weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, capped: true },
       warnings: [
-        { code: "history_capped", message: "Прогонов за неделю больше 200 — счёт по самым свежим прогонам окна." },
+        {
+          code: "history_capped",
+          message: "Прогонов за неделю больше 200 — счёт по самым свежим прогонам окна.",
+        },
       ],
     };
     const текст = formatWeeklyDigest(обрезан, []).parts.join("\n");
@@ -538,7 +711,14 @@ describe("Блок здоровья: сначала неделя, потом «�
   it("прогоны были, а данных нет — сказано словами, а не «не было» после двоеточия", () => {
     const безДанных: WeeklyDigest = {
       ...ДАЙДЖЕСТ_34,
-      weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, runs: 3, success: 0, partial: 0, failed: 3, lastDataAt: null },
+      weekHealth: {
+        ...ДАЙДЖЕСТ_34.weekHealth,
+        runs: 3,
+        success: 0,
+        partial: 0,
+        failed: 3,
+        lastDataAt: null,
+      },
     };
     const текст = formatWeeklyDigest(безДанных, []).parts.join("\n");
     assert.match(текст, /Данные за неделю не приезжали ни разу/);
@@ -615,7 +795,10 @@ describe("Блок здоровья: сначала неделя, потом «�
       ...ДАЙДЖЕСТ_34,
       weekHealth: { ...ДАЙДЖЕСТ_34.weekHealth, journalSince: "2026-08-06" },
     } as unknown as WeeklyDigest;
-    assert.equal(/журнал прогонов начинается/.test(formatWeeklyDigest(после, []).parts.join("\n")), false);
+    assert.equal(
+      /журнал прогонов начинается/.test(formatWeeklyDigest(после, []).parts.join("\n")),
+      false,
+    );
   });
 
   it("данные недели — свой момент, а не общий «последний успех»", () => {
@@ -643,6 +826,9 @@ describe("Блок здоровья: сначала неделя, потом «�
   it("строка застоя и строка снапшота не изменились: два отчёта об одних числах говорят одно", () => {
     const h = { ...ДАЙДЖЕСТ_34.health, staleHours: 9, staleThresholdH: 6 };
     const текст = formatWeeklyDigest({ ...ДАЙДЖЕСТ_34, health: h }, []).parts.join("\n");
-    assert.ok(текст.includes(строкаЗастоя(h)!), "письмо обязано печатать ТОТ ЖЕ форматтер, что «сверка»");
+    assert.ok(
+      текст.includes(строкаЗастоя(h)!),
+      "письмо обязано печатать ТОТ ЖЕ форматтер, что «сверка»",
+    );
   });
 });

@@ -300,8 +300,17 @@ export interface ActionRow {
 
 export interface PendingNotifications {
   since: string;
+  until: string;
   events: number;
-  notifications: { ruleId: string; urgency: string; text: string; eventId: string }[];
+  truncated: boolean;
+  nextCursor: { occurredAt: string; eventId: string } | null;
+  notifications: {
+    ruleId: string;
+    urgency: string;
+    text: string;
+    eventId: string;
+    occurredAt: string;
+  }[];
 }
 
 /**
@@ -755,10 +764,22 @@ export class CoreClient {
   }
 
   /** Уведомления, которые правила сочли срочными, с момента `since` (FR-2). */
-  pendingNotifications(since: Date): Promise<PendingNotifications> {
-    return this.request<PendingNotifications>(
-      `/rules/pending?immediate=1&since=${encodeURIComponent(since.toISOString())}`,
-    );
+  pendingNotifications(
+    since: Date,
+    page?: {
+      until: Date;
+      after?: { occurredAt: string; eventId: string };
+    },
+  ): Promise<PendingNotifications> {
+    const query = new URLSearchParams({ immediate: "1", since: since.toISOString() });
+    if (page) {
+      query.set("until", page.until.toISOString());
+      if (page.after) {
+        query.set("afterAt", page.after.occurredAt);
+        query.set("afterId", page.after.eventId);
+      }
+    }
+    return this.request<PendingNotifications>(`/rules/pending?${query.toString()}`);
   }
 
   /**

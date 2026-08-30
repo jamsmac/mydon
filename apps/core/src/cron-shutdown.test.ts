@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { LlmAlertMonitorService } from "./llm-ledger/llm-alert-monitor.service";
 import { OurvendParityService } from "./ourvend/ourvend-parity.service";
 import { SyncStaleService } from "./ourvend/sync-stale.service";
 import { SalesService } from "./sales/sales.service";
@@ -28,6 +29,7 @@ describe("Core cron shutdown", () => {
     // остальных: непойманный `Cron` держит event loop открытым после shutdown.
     ["retention", () => new RetentionService({} as never)],
     ["task-bridge", () => new TaskBridgeService({} as never, {} as never, {} as never, {} as never, {} as never)],
+    ["llm-alert-monitor", () => new LlmAlertMonitorService({} as never, {} as never, {} as never)],
   ] as const) {
     it(`останавливает ${name} cron и освобождает event loop`, () => {
       const service = create() as unknown as CronOwner;

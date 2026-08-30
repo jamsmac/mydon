@@ -352,6 +352,11 @@ export const task = pgTable(
     index("task_awaiting_idx")
       .on(t.completedAt)
       .where(sql`confirmed_at is null`),
+    index("task_agent_schedule_open_queue_idx")
+      .on(t.ownerKind, t.ownerRef, t.due, t.priority.desc(), t.createdAt)
+      .where(
+        sql`${t.source} = 'agent-schedule' and ${t.status} <> 'done' and ${t.status} <> 'cancelled'`,
+      ),
     check("task_agent_run_generation_nonnegative", sql`${t.agentRunGeneration} >= 0`),
   ],
 );
@@ -1012,6 +1017,9 @@ export const outboxDelivery = pgTable(
       t.createdAt,
     ),
     index("outbox_delivery_execution_idx").on(t.taskAgentExecutionId),
+    index("outbox_delivery_alert_terminal_idx")
+      .on(t.createdAt.desc(), t.id)
+      .where(sql`${t.status} = 'unknown' or ${t.status} = 'dead'`),
     check("outbox_delivery_attempts_nonnegative", sql`${t.attempts} >= 0`),
   ],
 );
@@ -1694,6 +1702,15 @@ export const llmSpend = pgTable(
     index("llm_spend_provider_failed_at_idx")
       .on(t.provider, t.failedAt)
       .where(sql`${t.failedAt} is not null`),
+    index("llm_spend_alert_unknown_idx")
+      .on(t.createdAt.desc(), t.id)
+      .where(sql`${t.status} = 'failed' and ${t.outcome} = 'unknown'`),
+    index("llm_spend_stuck_reserved_at_idx")
+      .on(t.reservedAt)
+      .where(sql`${t.status} = 'reserved' and ${t.reservedAt} is not null`),
+    index("llm_spend_stuck_created_at_idx")
+      .on(t.createdAt)
+      .where(sql`${t.status} = 'reserved' and ${t.reservedAt} is null`),
     check(
       "llm_spend_money_nonnegative",
       sql`${t.reservedUsd} >= 0 and (${t.actualUsd} is null or ${t.actualUsd} >= 0)`,
@@ -1767,6 +1784,9 @@ export const agentTaskLlmJob = pgTable(
     index("agent_task_llm_job_execution_idx").on(t.taskAgentExecutionId),
     index("agent_task_llm_job_status_idx").on(t.status),
     index("agent_task_llm_job_status_deadline_idx").on(t.status, t.dispatchDeadlineAt),
+    index("agent_task_llm_job_alert_unknown_idx")
+      .on(t.createdAt.desc(), t.id)
+      .where(sql`${t.status} = 'unknown'`),
     check(
       "agent_task_llm_job_attempt_version_positive",
       sql`${t.providerAttemptNo} > 0 and ${t.adapterVersion} > 0`,

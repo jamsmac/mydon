@@ -31,6 +31,8 @@ export interface Rule {
   format: (ctx: RuleContext) => string;
 }
 
+export const MAX_NOTIFICATION_TEXT = 3_500;
+
 const str = (v: unknown, fallback = "—"): string =>
   v === undefined || v === null || v === "" ? fallback : String(v);
 
@@ -96,6 +98,26 @@ const МАКС_ЧУЖОГО_ТЕКСТА = 300;
 
 const обрезать = (текст: string, макс = МАКС_ЧУЖОГО_ТЕКСТА): string =>
   текст.length <= макс ? текст : `${текст.slice(0, макс)}…`;
+
+const usd = (value: unknown): string => {
+  const amount = num(value);
+  return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 9 })}`;
+};
+
+const безопасноеИмя = (value: unknown): string => обрезать(str(value), 80);
+
+const безопасныйСписок = (value: unknown): string =>
+  Array.isArray(value)
+    ? value.slice(0, 8).map((item) => безопасноеИмя(item)).join(", ") || "—"
+    : безопасноеИмя(value);
+
+const чтоВосстановилось = (kind: unknown): string => {
+  if (kind === "stuck_reservations") return "зависшие LLM-резервы закрыты";
+  if (kind === "settlement_spool") return "settlement spool снова здоров";
+  if (kind === "circuit") return "LLM circuit закрыт";
+  if (kind === "budget") return "LLM-расход снова ниже 80% бюджета";
+  return "LLM-контур снова здоров";
+};
 
 /**
  * Счётная форма русского существительного: «3 раза», «12 раз», «21 раз».
@@ -218,6 +240,62 @@ export const RULES: Rule[] = [
     eventType: "watchdog.down",
     urgency: "immediate",
     format: (c) => `🚨 Недоступен ${str(c.payload.target, "сервер")}`,
+  },
+  {
+    id: "llm.incident.unknown",
+    eventType: "llm.incident.unknown",
+    urgency: "immediate",
+    format: (c) => {
+      if (c.payload.kind === "delivery") {
+        return `🚨 LLM: исход доставки в ${безопасноеИмя(c.payload.destination)} неизвестен. Повтор заблокирован до сверки.`;
+      }
+      const object = c.payload.kind === "provider_job" ? "provider job" : "расхода";
+      return (
+        `🚨 LLM: исход ${object} неизвестен — ` +
+        `${безопасноеИмя(c.payload.provider)} / ${безопасноеИмя(c.payload.model)} ` +
+        `(${безопасноеИмя(c.payload.feature)}). Повторный dispatch заблокирован.`
+      );
+    },
+  },
+  {
+    id: "llm.incident.dead",
+    eventType: "llm.incident.dead",
+    urgency: "immediate",
+    format: (c) =>
+      c.payload.kind === "delivery"
+        ? `☠️ LLM: доставка в ${безопасноеИмя(c.payload.destination)} попала в dead после ${num(c.payload.attempts)} попыток.`
+        : `☠️ LLM settlement spool: dead у producer=${безопасноеИмя(c.payload.producer)} (${безопасноеИмя(c.payload.category)}). Нужна ручная сверка.`,
+  },
+  {
+    id: "llm.incident.stuck",
+    eventType: "llm.incident.stuck",
+    urgency: "immediate",
+    format: (c) =>
+      c.payload.kind === "settlement_spool"
+        ? `⏳ LLM settlement spool: ${num(c.payload.count)} fallback старше ${num(c.payload.thresholdMinutes)} мин. Producer: ${безопасныйСписок(c.payload.producers)}.`
+        : `⏳ LLM: зависло резервов: ${num(c.payload.count)} на ${usd(c.payload.reservedUsd)}; старше ${num(c.payload.thresholdMinutes)} мин.`,
+  },
+  {
+    id: "llm.incident.circuit_open",
+    eventType: "llm.incident.circuit_open",
+    urgency: "immediate",
+    format: (c) =>
+      `🛑 LLM circuit открыт: ${безопасныйСписок(c.payload.providers)}. ` +
+      `Новые вызовы закрыты fail-closed до ${безопасноеИмя(c.payload.resetsAt)}.`,
+  },
+  {
+    id: "llm.incident.budget",
+    eventType: "llm.incident.budget",
+    urgency: "immediate",
+    format: (c) =>
+      `💰 LLM-бюджет: ${num(c.payload.percent)}% — ${usd(c.payload.globalExposureUsd)} из ${usd(c.payload.globalCapUsd)}. ` +
+      `Осталось ${usd(c.payload.remainingUsd)}.`,
+  },
+  {
+    id: "llm.incident.recovered",
+    eventType: "llm.incident.recovered",
+    urgency: "immediate",
+    format: (c) => `✅ LLM: ${чтоВосстановилось(c.payload.kind)}.`,
   },
 
   // ── Аналитика ──
@@ -633,7 +711,11 @@ export function applyRules(ctx: RuleContext, rules: Rule[] = RULES): Notificatio
     if (rule.eventType !== ctx.type) continue;
     try {
       if (rule.when && !rule.when(ctx)) continue;
-      out.push({ ruleId: rule.id, urgency: rule.urgency, text: rule.format(ctx) });
+      out.push({
+        ruleId: rule.id,
+        urgency: rule.urgency,
+        text: обрезать(rule.format(ctx), MAX_NOTIFICATION_TEXT),
+      });
     } catch {
       // Битое правило не должно ронять доставку остальных уведомлений.
       out.push({

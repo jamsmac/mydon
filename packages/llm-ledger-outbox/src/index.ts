@@ -22,6 +22,8 @@ import {
   type LlmLedgerReserveRecovery,
   type LlmReservation,
   type LlmReserveRequest,
+  type LlmSettlementOutboxAlertIncident,
+  type LlmSettlementOutboxAlertMonitoring,
   type LlmSettlementOutboxMonitoring,
   type LlmSettlementRequest,
 } from "@mydon/shared";
@@ -159,6 +161,22 @@ export interface ReadLlmSettlementOutboxMonitoringOptions {
   maxAttempts?: number;
   /** Kept as an explicit seam so monitoring tests never depend on wall clock. */
   clock?: () => Date;
+}
+
+export interface ReadLlmSettlementOutboxAlertMonitoringOptions {
+  rootDir: string;
+  /** A fallback at this exact age is already stuck. */
+  stuckAfterMs?: number;
+  /** Rotate immutable dead incidents without rereading their entire contents. */
+  deadOffset?: number;
+  maxDeadIncidents?: number;
+  /** Explicit seam keeps the age boundary deterministic in tests. */
+  clock?: () => Date;
+  /** Test-only interleaving seams around the consistency snapshot. */
+  testHooks?: {
+    afterFirstStateFilesPass?: () => Promise<void>;
+    afterStateFilesCollected?: () => Promise<void>;
+  };
 }
 
 export interface LlmSettlementOutboxDrainResult {
@@ -1033,6 +1051,191 @@ export async function readLlmSettlementOutboxMonitoring(
   }
 }
 
+/**
+ * Secret-free incident projection for proactive alerting.
+ *
+ * This deliberately lives beside the spool decoder: callers never receive a
+ * request key, reservation id, body, raw filename or absolute path. Even the
+ * stable identity exposed to Core is a fresh SHA-256 fingerprint.
+ */
+export async function readLlmSettlementOutboxAlertMonitoring(
+  options: ReadLlmSettlementOutboxAlertMonitoringOptions,
+): Promise<LlmSettlementOutboxAlertMonitoring> {
+  const clock = options.clock ?? (() => new Date());
+  const now = clock();
+  const stuckAfterMs = boundedInteger(options.stuckAfterMs, 5 * 60_000, 1, 24 * 60 * 60_000);
+  const unavailable: LlmSettlementOutboxAlertMonitoring = {
+    available: false,
+    complete: false,
+    unresolvedDeadCount: 0,
+    incidents: [],
+  };
+
+  try {
+    const rootDir = normalizedOutboxRoot(options.rootDir);
+    const rootStats = await stat(rootDir);
+    if (!rootStats.isDirectory()) return unavailable;
+
+    const incidents: LlmSettlementOutboxAlertIncident[] = [];
+    const stateSnapshot = await collectAlertStateFiles(
+      rootDir,
+      options.testHooks?.afterFirstStateFilesPass,
+    );
+    await options.testHooks?.afterStateFilesCollected?.();
+    let complete = stateSnapshot.complete;
+    const active = stateSnapshot.files.filter((file) => file.state !== "dead");
+    for (const file of active) {
+      let record: StoredRecord;
+      try {
+        record = await readStoredRecord(file.path);
+      } catch {
+        // The drainer owns corrupt-active classification and will move it to
+        // dead. A rename/read race also lands here. In either case the snapshot
+        // is not safe evidence for aggregate recovery.
+        complete = false;
+        continue;
+      }
+      if (record.kind !== "fallback") continue;
+      if (Date.parse(record.createdAt) + stuckAfterMs > now.getTime()) continue;
+      const producer = safeProducerForStateFile(file.path);
+      incidents.push({
+        fingerprint: spoolAlertFingerprint(producer, "fallback_stuck", record.recordId),
+        producer,
+        state: "fallback_stuck",
+        recordKind: record.kind,
+        operation: record.operation,
+        category: null,
+        occurredAt: record.createdAt,
+      });
+    }
+
+    const deadFiles = stateSnapshot.files
+      .filter((file) => file.state === "dead")
+      .sort((left, right) => left.path.localeCompare(right.path));
+    const deadOffset = boundedInteger(options.deadOffset, 0, 0, Number.MAX_SAFE_INTEGER);
+    const maxDeadIncidents = boundedInteger(
+      options.maxDeadIncidents,
+      DEFAULT_MAX_RECORDS,
+      1,
+      10_000,
+    );
+    const normalizedDeadOffset = deadFiles.length === 0 ? 0 : deadOffset % deadFiles.length;
+    for (const file of deadFiles.slice(
+      normalizedDeadOffset,
+      normalizedDeadOffset + maxDeadIncidents,
+    )) {
+      const producer = safeProducerForStateFile(file.path);
+      let dead: DeadRecord;
+      try {
+        const candidate = await readDeadRecordIfExists(file.path);
+        if (candidate === null) {
+          complete = false;
+          continue;
+        }
+        dead = candidate;
+      } catch (error) {
+        if (!(error instanceof LlmSettlementOutboxError)) {
+          // A transient filesystem failure is unknown, not a permanent corrupt
+          // incident. Retrying the same page avoids two different fingerprints.
+          complete = false;
+          continue;
+        }
+        // A decoded/size validation failure is a real corrupt dead record. Only
+        // its hashed basename participates in identity; the basename never exits.
+        dead = {
+          version: RECORD_VERSION,
+          state: "corrupt",
+          recordId: digest(`malformed-dead:${basename(file.path)}`),
+          deadAt: file.stats.mtime.toISOString(),
+          category: "corrupt",
+        };
+      }
+      const identity = dead.state === "dead" ? dead.source.recordId : dead.recordId;
+      incidents.push({
+        fingerprint: spoolAlertFingerprint(producer, "dead", identity),
+        producer,
+        state: "dead",
+        recordKind: dead.state === "dead" ? dead.source.kind : "corrupt",
+        operation: dead.state === "dead" ? dead.source.operation : "unknown",
+        category: dead.category,
+        occurredAt: dead.deadAt,
+      });
+    }
+
+    incidents.sort(
+      (left, right) =>
+        left.occurredAt.localeCompare(right.occurredAt) ||
+        left.fingerprint.localeCompare(right.fingerprint),
+    );
+    return {
+      available: true,
+      complete,
+      unresolvedDeadCount: deadFiles.length,
+      incidents,
+    };
+  } catch {
+    return unavailable;
+  }
+}
+
+interface AlertStateFilesSnapshot {
+  complete: boolean;
+  files: StateFile[];
+}
+
+/** One traversal keeps the minute monitor bounded by spool size, not state count. */
+async function collectAlertStateFiles(
+  rootDir: string,
+  afterFirstPass?: () => Promise<void>,
+): Promise<AlertStateFilesSnapshot> {
+  const first = await collectAlertStateFilesPass(rootDir);
+  await afterFirstPass?.();
+  const second = await collectAlertStateFilesPass(rootDir);
+  return {
+    complete: first.complete && second.complete && sameStateFileSnapshot(first.files, second.files),
+    files: second.files,
+  };
+}
+
+async function collectAlertStateFilesPass(rootDir: string): Promise<AlertStateFilesSnapshot> {
+  const files: StateFile[] = [];
+  let complete = true;
+  await walk(rootDir);
+  return { complete, files };
+
+  async function walk(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const state = basename(directory);
+    if (isStateDirectory(state)) {
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+        const path = join(directory, entry.name);
+        try {
+          files.push({ path, state, stats: await stat(path) });
+        } catch (error) {
+          if (!isNodeError(error, "ENOENT")) throw error;
+          complete = false;
+        }
+      }
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (entry.name === "locks" || entry.name.startsWith(".stale-")) continue;
+      await walk(join(directory, entry.name));
+    }
+  }
+}
+
+function sameStateFileSnapshot(left: StateFile[], right: StateFile[]): boolean {
+  if (left.length !== right.length) return false;
+  const identity = (file: StateFile) =>
+    `${file.state}\0${file.path}\0${file.stats.size}\0${file.stats.mtimeMs}`;
+  const leftIdentities = left.map(identity).sort();
+  const rightIdentities = right.map(identity).sort();
+  return leftIdentities.every((value, index) => value === rightIdentities[index]);
+}
+
 async function dispatchRecord(
   ledger: LlmLedger & LlmLedgerReserveRecovery,
   record: StoredRecord,
@@ -1653,6 +1856,19 @@ function canonicalJson(value: unknown): string {
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function safeProducerForStateFile(path: string): string {
+  const candidate = basename(dirname(dirname(path)));
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(candidate) ? candidate : "unknown";
+}
+
+function spoolAlertFingerprint(
+  producer: string,
+  state: LlmSettlementOutboxAlertIncident["state"],
+  identity: string,
+): string {
+  return digest(canonicalJson({ version: 1, producer, state, identity }));
 }
 
 function constantTimeTextEqual(left: string, right: string): boolean {

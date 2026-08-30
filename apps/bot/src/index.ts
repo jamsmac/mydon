@@ -93,15 +93,16 @@ async function main(): Promise<void> {
   const modelOverride = process.env.MYDON_ASSISTANT_MODEL
     ? { model: process.env.MYDON_ASSISTANT_MODEL }
     : {};
-  const apiLlm: LlmResolver | undefined = anthropicApiKey && llmLedger
-    ? createLlmResolver({
-        apiKey: anthropicApiKey,
-        ledger: llmLedger,
-        consumer: "bot",
-        feature: "assistant",
-        ...modelOverride,
-      })
-    : undefined;
+  const apiLlm: LlmResolver | undefined =
+    anthropicApiKey && llmLedger
+      ? createLlmResolver({
+          apiKey: anthropicApiKey,
+          ledger: llmLedger,
+          consumer: "bot",
+          feature: "assistant",
+          ...modelOverride,
+        })
+      : undefined;
   // Таймаут короче обычного (обычный ответ ~4с): бот разбирает сообщения по
   // одному, и зависший вопрос заморозил бы кнопки и чаты всех остальных.
   const subLlm: LlmResolver | undefined = process.env.CLAUDE_CODE_OAUTH_TOKEN
@@ -112,14 +113,17 @@ async function main(): Promise<void> {
 
   // Документы (Excel, Word) через готовые навыки Anthropic. Ключ тот же, что
   // и у помощника: нет ключа — файлов не делаем, но бот работает дальше.
-  const buildDocument = anthropicApiKey && llmLedger
-    ? createDocumentBuilder({
-        apiKey: anthropicApiKey,
-        ledger: llmLedger,
-        feature: "bot.report",
-        ...(process.env.MYDON_ASSISTANT_MODEL ? { model: process.env.MYDON_ASSISTANT_MODEL } : {}),
-      })
-    : undefined;
+  const buildDocument =
+    anthropicApiKey && llmLedger
+      ? createDocumentBuilder({
+          apiKey: anthropicApiKey,
+          ledger: llmLedger,
+          feature: "bot.report",
+          ...(process.env.MYDON_ASSISTANT_MODEL
+            ? { model: process.env.MYDON_ASSISTANT_MODEL }
+            : {}),
+        })
+      : undefined;
 
   // Память помощника: заметки и история разговоров через Core. Работает всегда —
   // не настроено на стороне Core, вернётся пусто, и ответ будет как раньше.
@@ -825,39 +829,44 @@ async function main(): Promise<void> {
   // Срочные уведомления (FR-2): опрос правил и доставка владельцу
   const notifier = new Notifier(deps.core);
   const notifyEveryMs = Number(process.env.NOTIFY_INTERVAL_MS ?? 60_000);
-  setInterval(() => {
-    void (async () => {
-      try {
-        const items = await notifier.collect();
-        // Отправляем каждое отдельно: сбой одного не роняет остальные и не
-        // отмечает недоставленное. Отмечаем ПОСЛЕ успешной отправки — иначе при
-        // сбое sendMessage сигнал бы потерялся.
-        const delivered: string[] = [];
-        for (const { key, text } of items) {
-          // По-чатно: раньше сбой ПЕРВОГО чата не давал ack, и работающие
-          // чаты получали то же срочное уведомление заново каждую минуту —
-          // бесконечные дубли, а чаты после упавшего не получали ничего.
-          // Ack — если дошло хотя бы одному владельцу.
-          let deliveredAny = false;
-          for (const chatId of allowlist) {
-            try {
-              await tg.sendMessage(chatId, text);
-              deliveredAny = true;
-            } catch (err) {
-              console.error("Уведомление в чат не доставлено:", err);
-            }
+  let notificationDeliveryRunning = false;
+  async function deliverImmediateNotifications(): Promise<void> {
+    if (notificationDeliveryRunning) return;
+    notificationDeliveryRunning = true;
+    try {
+      const items = await notifier.collect();
+      // Доставляем и подтверждаем строго oldest-first. При первом полном
+      // отказе останавливаем партию: recovery не должен обогнать свой open.
+      for (const { key, text } of items) {
+        // По-чатно: раньше сбой ПЕРВОГО чата не давал ack, и работающие
+        // чаты получали то же срочное уведомление заново каждую минуту —
+        // бесконечные дубли, а чаты после упавшего не получали ничего.
+        // Ack — если дошло хотя бы одному владельцу.
+        let deliveredAny = false;
+        for (const chatId of allowlist) {
+          try {
+            await tg.sendMessage(chatId, text);
+            deliveredAny = true;
+          } catch (err) {
+            console.error("Уведомление в чат не доставлено:", err);
           }
-          if (deliveredAny) delivered.push(key);
         }
+        if (!deliveredAny) break;
         try {
-          await notifier.ack(delivered);
+          await notifier.ack([key]);
         } catch (err) {
           console.error("Отметку о доставке не сохранить (повторю):", err);
+          break;
         }
-      } catch (err) {
-        console.error("Уведомления не доставлены:", err);
       }
-    })();
+    } catch (err) {
+      console.error("Уведомления не доставлены:", err);
+    } finally {
+      notificationDeliveryRunning = false;
+    }
+  }
+  setInterval(() => {
+    void deliverImmediateNotifications();
   }, notifyEveryMs).unref();
 
   /**

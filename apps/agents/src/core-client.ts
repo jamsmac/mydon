@@ -129,6 +129,23 @@ export interface AgentTaskClaim {
   checkpoint?: AgentTaskCheckpoint;
 }
 
+export type AgentTaskInvocation = "assigned" | "scheduled";
+
+export interface EnsureScheduledAgentTaskInput {
+  agentName: string;
+  skill: string;
+  cron: string;
+  scheduledAt: string;
+}
+
+export interface EnsureScheduledAgentTaskResult {
+  taskId: string;
+  clientKey: string;
+  scheduledAt: string;
+  created: boolean;
+  replay: boolean;
+}
+
 export interface StartAgentTaskExecutionInput {
   agentName: string;
   runId: string;
@@ -416,16 +433,36 @@ export class AgentsCoreClient {
   /** Открытые задачи, поставленные этому агенту. */
   myTasks(
     agentName: string,
+    invocation: AgentTaskInvocation = "assigned",
   ): Promise<{ id: string; title: string; status: string; ownerRef: string | null }[]> {
-    const qs = new URLSearchParams({ ownerKind: "agent", ownerRef: agentName, open: "1" });
+    const qs = new URLSearchParams({
+      ownerKind: "agent",
+      ownerRef: agentName,
+      open: "1",
+      agentInvocation: invocation,
+    });
     return this.request(`/tasks?${qs.toString()}`);
+  }
+
+  /** Materialize or exact-replay one planned cron occurrence in Core. */
+  ensureScheduledAgentTask(
+    input: EnsureScheduledAgentTaskInput,
+  ): Promise<EnsureScheduledAgentTaskResult> {
+    return this.request("/tasks/agent-schedule/ensure", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   }
 
   /**
    * Атомарно забрать задачу. null означает, что другой worker уже
    * владеет ею; в этом случае до LLM доходить нельзя.
    */
-  async claimAgentTask(id: string, agentName: string): Promise<AgentTaskClaim | null> {
+  async claimAgentTask(
+    id: string,
+    agentName: string,
+    invocation: AgentTaskInvocation = "assigned",
+  ): Promise<AgentTaskClaim | null> {
     const response = await this.request<
       | { claimed: false }
       | {
@@ -441,7 +478,7 @@ export class AgentsCoreClient {
         }
     >(`/tasks/${id}/agent-run/claim`, {
       method: "POST",
-      body: JSON.stringify({ agentName }),
+      body: JSON.stringify({ agentName, invocation }),
     });
     if (!response.claimed) return null;
     const claimedTitle = response.taskInput?.title;

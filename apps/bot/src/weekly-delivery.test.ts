@@ -33,7 +33,16 @@ const НЕДЕЛЯ: WeeklyDigest = {
     cutoverThreshold: 7,
     parityLastRed: null,
     parityStreakSince: null,
-    parity: { days: 7, ok: false, mismatches: 0, stockOk: false, checked: 0, stockChecked: 0, mode: "mirror", note: null },
+    parity: {
+      days: 7,
+      ok: false,
+      mismatches: 0,
+      stockOk: false,
+      checked: 0,
+      stockChecked: 0,
+      mode: "mirror",
+      note: null,
+    },
   },
   // Здоровье за отчётную неделю (R-H-9): доставке важны неделя и непустой
   // текст, поэтому нули — но поле обязательное, и молчаливо его не бывает.
@@ -64,8 +73,19 @@ const ЛЮДИ = [
 
 const СИГНАЛ = {
   since: "2026-08-11T00:00:00Z",
+  until: "2026-08-18T00:00:00Z",
   events: 1,
-  notifications: [{ ruleId: "sales.drop", urgency: "weekly", text: "📉 Продажи ниже плана", eventId: "e1" }],
+  truncated: false,
+  nextCursor: null,
+  notifications: [
+    {
+      ruleId: "sales.drop",
+      urgency: "weekly",
+      text: "📉 Продажи ниже плана",
+      eventId: "e1",
+      occurredAt: "2026-08-17T00:00:00Z",
+    },
+  ],
 };
 
 /** Стенд: журнал вызовов, живой набор занятых ключей, управляемый отказ чата. */
@@ -124,7 +144,11 @@ describe("Доставка недельной сводки (R-P5b-7)", () => {
     const первый = стенд({ занято });
     await deliverWeeklyDigest({ core: первый.core, send: первый.send, log: первый.log });
     const второй = стенд({ занято });
-    const итог = await deliverWeeklyDigest({ core: второй.core, send: второй.send, log: второй.log });
+    const итог = await deliverWeeklyDigest({
+      core: второй.core,
+      send: второй.send,
+      log: второй.log,
+    });
     assert.equal(итог.delivered, 0);
     assert.equal(итог.skipped, 2);
     assert.ok(!второй.журнал.some((c) => c.startsWith("send:")), "второй прогон обязан молчать");
@@ -153,7 +177,10 @@ describe("Доставка недельной сводки (R-P5b-7)", () => {
     assert.equal(итог.delivered, 1); // чат 11 получил
     assert.equal(итог.acked, 1);
     assert.ok(s.журнал.includes("ack:e1:sales.drop"));
-    assert.ok(s.предупреждения.some((m) => /не доставлена/.test(m)), "провал чата обязан быть в логе");
+    assert.ok(
+      s.предупреждения.some((m) => /не доставлена/.test(m)),
+      "провал чата обязан быть в логе",
+    );
   });
 
   it("не дошло НИКОМУ — ack не уходит: сигнал остаётся недоставленным", async () => {
@@ -203,8 +230,22 @@ describe("Доставка недельной сводки (R-P5b-7)", () => {
     // а владелец помечен текстовым `role='владелец'`. Требовать только `roles`
     // значило бы не отправить сводку НИКОМУ и узнать об этом никогда.
     const люди = [
-      { id: "p1", name: "Владелец", role: "владелец", roles: ["collector"], tgChatId: "10", active: "yes" },
-      { id: "p2", name: "Бывший менеджер", role: "менеджер", roles: [], tgChatId: "11", active: "no" },
+      {
+        id: "p1",
+        name: "Владелец",
+        role: "владелец",
+        roles: ["collector"],
+        tgChatId: "10",
+        active: "yes",
+      },
+      {
+        id: "p2",
+        name: "Бывший менеджер",
+        role: "менеджер",
+        roles: [],
+        tgChatId: "11",
+        active: "no",
+      },
     ] as unknown as PersonRow[];
     const s = стенд({ people: люди });
     const итог = await deliverWeeklyDigest({ core: s.core, send: s.send, log: s.log });
@@ -233,7 +274,11 @@ describe("Доставка недельной сводки (R-P5b-7)", () => {
     const первый = стенд({ занято });
     await deliverWeeklyDigest({ core: первый.core, send: первый.send, log: первый.log });
     const второй = стенд({ занято });
-    const итог = await deliverWeeklyDigest({ core: второй.core, send: второй.send, log: второй.log });
+    const итог = await deliverWeeklyDigest({
+      core: второй.core,
+      send: второй.send,
+      log: второй.log,
+    });
     assert.equal(итог.skipped, 2);
     assert.ok(второй.предупреждения.some((m) => /уже доставлен/i.test(m)));
   });

@@ -9,6 +9,7 @@ import {
   Optional,
 } from "@nestjs/common";
 import {
+  agent,
   approval,
   agentTaskLlmJob,
   agentTaskLlmResult,
@@ -53,6 +54,7 @@ import { appConfig } from "../config";
 import { DB, type Db } from "../db/db.module";
 import { LlmLedgerService } from "../llm-ledger/llm-ledger.service";
 import { MaintenanceService, todayInTz } from "../maintenance/maintenance.service";
+import { AGENT_SCHEDULE_SOURCE, isCurrentCronOccurrence } from "./agent-schedule";
 import {
   canonicalJsonHash,
   canonicalJsonValue,
@@ -519,6 +521,102 @@ export interface CreateTaskInput {
   clientKey?: string;
 }
 
+export interface EnsureAgentScheduleInput {
+  agentName: string;
+  skill: string;
+  cron: string;
+  scheduledAt: Date;
+}
+
+export interface EnsureAgentScheduleResult {
+  taskId: string;
+  clientKey: string;
+  scheduledAt: string;
+  created: boolean;
+  replay: boolean;
+}
+
+interface AgentScheduleTaskIdentity {
+  title: string;
+  description: string;
+  ownerKind: "agent";
+  ownerRef: string;
+  domain: null;
+  entityId: null;
+  due: Date;
+  source: typeof AGENT_SCHEDULE_SOURCE;
+  priority: "normal";
+  createdBy: typeof AGENT_SCHEDULE_SOURCE;
+  clientKey: string;
+}
+
+/** NULL-safe exclusion: SQL `source <> value` alone would also drop NULL. */
+export function isAssignedTaskSql(): SQL {
+  return or(isNull(task.source), ne(task.source, AGENT_SCHEDULE_SOURCE))!;
+}
+
+function assertPublicTaskSource(source: string | undefined): void {
+  if (source === AGENT_SCHEDULE_SOURCE) {
+    throw new BadRequestException(
+      `source "${AGENT_SCHEDULE_SOURCE}" зарезервирован для Core cron materialization`,
+    );
+  }
+}
+
+function agentScheduleIdentity(input: EnsureAgentScheduleInput): AgentScheduleTaskIdentity {
+  const scheduledAt = new Date(input.scheduledAt);
+  if (!Number.isFinite(scheduledAt.getTime())) {
+    throw new BadRequestException("scheduledAt должен быть корректной датой");
+  }
+  const canonicalOccurrence = {
+    schemaVersion: 1,
+    agentName: input.agentName,
+    skill: input.skill,
+    cron: input.cron,
+    scheduledAt: scheduledAt.toISOString(),
+  };
+  const digest = createHash("sha256")
+    .update(JSON.stringify(canonicalOccurrence))
+    .digest("hex");
+  const clientKey = `agent-schedule:v1:${digest}`;
+  return {
+    title: `По расписанию: ${input.skill}`,
+    description:
+      `Системный запуск навыка ${input.skill}.\n` +
+      `Cron: ${input.cron}\n` +
+      `Плановое время UTC: ${scheduledAt.toISOString()}`,
+    ownerKind: "agent",
+    ownerRef: input.agentName,
+    domain: null,
+    entityId: null,
+    due: scheduledAt,
+    source: AGENT_SCHEDULE_SOURCE,
+    priority: "normal",
+    createdBy: AGENT_SCHEDULE_SOURCE,
+    clientKey,
+  };
+}
+
+function assertAgentScheduleReplay(row: TaskRow, expected: AgentScheduleTaskIdentity): void {
+  const exact =
+    row.title === expected.title &&
+    row.description === expected.description &&
+    row.ownerKind === expected.ownerKind &&
+    row.ownerRef === expected.ownerRef &&
+    row.domain === expected.domain &&
+    row.entityId === expected.entityId &&
+    row.due?.toISOString() === expected.due.toISOString() &&
+    row.source === expected.source &&
+    row.priority === expected.priority &&
+    row.createdBy === expected.createdBy &&
+    row.clientKey === expected.clientKey;
+  if (!exact) {
+    throw new ConflictException(
+      "Ключ cron occurrence уже занят задачей с другим immutable payload",
+    );
+  }
+}
+
 /** Сводка по исполнителю — «картина по людям» из контроля задач. */
 export interface WorkloadRow {
   ownerKind: "human" | "agent";
@@ -651,6 +749,7 @@ export class TasksService {
 
   /** Создание вместе с записью в журнал — одной транзакцией. */
   async create(input: CreateTaskInput, actorRef = "system"): Promise<TaskRow> {
+    assertPublicTaskSource(input.source);
     return this.db.transaction(async (tx) => {
       // Пустая строка от клиента (нет активного человека под рукой) не должна
       // осесть в базе как «занятая» задача — те же правила, что у PATCH
@@ -701,6 +800,97 @@ export class TasksService {
     });
   }
 
+  /**
+   * Creates one durable task per exact planned cron occurrence.
+   *
+   * The caller cannot choose the idempotency key. A SHA-256 key is derived
+   * from the canonical occurrence, while a conflict is accepted only when all
+   * persisted immutable fields match exactly. Hash collisions and task edits
+   * therefore fail closed instead of silently aliasing another invocation.
+   */
+  async ensureAgentSchedule(
+    input: EnsureAgentScheduleInput,
+    observedAt = new Date(),
+  ): Promise<EnsureAgentScheduleResult> {
+    const expected = agentScheduleIdentity(input);
+    if (!isCurrentCronOccurrence(input.cron, expected.due, observedAt)) {
+      throw new ConflictException(
+        "scheduledAt не является текущим fire time указанного cron в Asia/Tashkent",
+      );
+    }
+    return this.db.transaction(async (tx) => {
+      const [configuredAgent] = await tx
+        .select()
+        .from(agent)
+        .where(eq(agent.name, input.agentName))
+        .limit(1);
+      if (!configuredAgent) {
+        throw new NotFoundException(`Агент "${input.agentName}" не найден`);
+      }
+      if (configuredAgent.status !== "active" || configuredAgent.archivedAt !== null) {
+        throw new ConflictException(`Агент "${input.agentName}" не активен`);
+      }
+      const skills = Array.isArray(configuredAgent.skills)
+        ? configuredAgent.skills.filter((item): item is string => typeof item === "string")
+        : [];
+      if (!skills.includes(input.skill)) {
+        throw new ConflictException(
+          `Навык "${input.skill}" не закреплён за агентом "${input.agentName}"`,
+        );
+      }
+      const schedule = Array.isArray(configuredAgent.schedule) ? configuredAgent.schedule : [];
+      const configured = schedule.some((item) => {
+        if (item === null || typeof item !== "object" || Array.isArray(item)) return false;
+        const row = item as Record<string, unknown>;
+        return row.skill === input.skill && row.cron === input.cron;
+      });
+      if (!configured) {
+        throw new ConflictException(
+          `Расписание "${input.cron}" для ${input.agentName}/${input.skill} не активно`,
+        );
+      }
+
+      const [created] = await tx
+        .insert(task)
+        .values(expected)
+        .onConflictDoNothing({ target: task.clientKey })
+        .returning();
+      if (created) {
+        await tx.insert(auditLog).values({
+          actorKind: "system",
+          actorRef: AGENT_SCHEDULE_SOURCE,
+          action: "task.agent_schedule.materialized",
+          target: created.id,
+          after: created,
+        });
+        return {
+          taskId: created.id,
+          clientKey: expected.clientKey,
+          scheduledAt: expected.due.toISOString(),
+          created: true,
+          replay: false,
+        };
+      }
+
+      const [existing] = await tx
+        .select()
+        .from(task)
+        .where(eq(task.clientKey, expected.clientKey))
+        .limit(1);
+      if (!existing) {
+        throw new ConflictException("Cron occurrence ещё сохраняется — повторите запрос");
+      }
+      assertAgentScheduleReplay(existing, expected);
+      return {
+        taskId: existing.id,
+        clientKey: expected.clientKey,
+        scheduledAt: expected.due.toISOString(),
+        created: false,
+        replay: true,
+      };
+    });
+  }
+
   async list(
     filter: {
       status?: Status;
@@ -708,9 +898,15 @@ export class TasksService {
       ownerKind?: "human" | "agent";
       ownerRef?: string;
       openOnly?: boolean;
+      agentInvocation?: "assigned" | "scheduled";
     } = {},
   ): Promise<TaskRow[]> {
     const conditions: SQL[] = [];
+    conditions.push(
+      filter.agentInvocation === "scheduled"
+        ? and(eq(task.source, AGENT_SCHEDULE_SOURCE), lte(task.due, new Date()))!
+        : isAssignedTaskSql(),
+    );
     if (filter.status) conditions.push(eq(task.status, filter.status));
     if (filter.domain) conditions.push(eq(task.domain, filter.domain));
     if (filter.ownerKind) conditions.push(eq(task.ownerKind, filter.ownerKind));
@@ -754,6 +950,7 @@ export class TasksService {
     id: string,
     agentName: string,
     now = new Date(),
+    invocation: "assigned" | "scheduled" = "assigned",
   ): Promise<ClaimedAgentRun | null> {
     const runId = randomUUID();
     const executionAttemptId = randomUUID();
@@ -774,6 +971,9 @@ export class TasksService {
             eq(task.id, id),
             eq(task.ownerKind, "agent"),
             eq(task.ownerRef, agentName),
+            invocation === "scheduled"
+              ? and(eq(task.source, AGENT_SCHEDULE_SOURCE), lte(task.due, now))!
+              : isAssignedTaskSql(),
             ne(task.status, "done"),
             ne(task.status, "cancelled"),
             isNull(task.agentExecutionBlockedAt),
@@ -2096,7 +2296,14 @@ export class TasksService {
     return this.db
       .select()
       .from(task)
-      .where(and(lt(task.due, new Date()), ne(task.status, "done"), ne(task.status, "cancelled")))
+      .where(
+        and(
+          isAssignedTaskSql(),
+          lt(task.due, new Date()),
+          ne(task.status, "done"),
+          ne(task.status, "cancelled"),
+        ),
+      )
       .orderBy(asc(task.due))
       .limit(100);
   }
@@ -2411,6 +2618,7 @@ export class TasksService {
   }
 
   async ensureForDay(input: CreateTaskInput & { dayKey: string }): Promise<TaskRow | null> {
+    assertPublicTaskSource(input.source);
     // Автомату вне эксплуатации повторяющиеся задачи не ставим.
     //
     // Правило соблюдает монитор графиков — он спрашивает состояние и
@@ -2768,6 +2976,7 @@ export class TasksService {
       .from(task)
       .where(
         and(
+          isAssignedTaskSql(),
           isNotNull(task.due),
           lt(task.due, until),
           ne(task.status, "done"),
@@ -2821,6 +3030,7 @@ export class TasksService {
           ),
       })
       .from(task)
+      .where(isAssignedTaskSql())
       .groupBy(task.ownerKind, task.ownerRef);
 
     return rows.map((r) => ({

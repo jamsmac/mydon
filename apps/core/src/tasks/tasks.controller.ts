@@ -123,6 +123,11 @@ export class ListTasksDto {
   @IsOptional()
   @IsIn(["1"])
   awaiting?: string;
+
+  /** System cron occurrences are an audit queue, not the owner's task list. */
+  @IsOptional()
+  @IsIn(["assigned", "scheduled"])
+  agentInvocation?: "assigned" | "scheduled";
 }
 
 export class SetStatusDto {
@@ -203,6 +208,28 @@ export class EnsureForDayDto extends CreateTaskDto {
   dayKey!: string;
 }
 
+/** Materialize one exact planned cron occurrence as a durable agent task. */
+export class EnsureAgentScheduleDto {
+  @IsString()
+  @Matches(/^[a-z][a-z0-9-]{1,63}$/)
+  agentName!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  skill!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  cron!: string;
+
+  /** Croner sends the planned UTC fire time, never callback wall-clock time. */
+  @IsISO8601({ strict: true }, { message: "scheduledAt: ISO UTC date-time" })
+  @Matches(/Z$/, { message: "scheduledAt: UTC timestamp ending in Z" })
+  scheduledAt!: string;
+}
+
 /** Кто берёт задачу из общего пула или возвращает её обратно. */
 export class ClaimTaskDto {
   @IsUUID()
@@ -215,6 +242,10 @@ export class ClaimAgentRunDto {
   @IsNotEmpty()
   @MaxLength(128)
   agentName!: string;
+
+  @IsOptional()
+  @IsIn(["assigned", "scheduled"])
+  invocation?: "assigned" | "scheduled";
 }
 
 /** Heartbeat/release lease только его текущим владельцем (CAS по runId). */
@@ -423,6 +454,17 @@ export class TasksController {
     });
   }
 
+  /** Durable, exact-replay materialization of one metered cron occurrence. */
+  @Post("agent-schedule/ensure")
+  ensureAgentSchedule(@Body() dto: EnsureAgentScheduleDto) {
+    return this.tasks.ensureAgentSchedule({
+      agentName: dto.agentName,
+      skill: dto.skill,
+      cron: dto.cron,
+      scheduledAt: new Date(dto.scheduledAt),
+    });
+  }
+
   // Объявлены ВЫШЕ параметрических маршрутов, иначе "overdue" уедет в :id.
   @Get("overdue")
   overdue() {
@@ -540,7 +582,12 @@ export class TasksController {
    */
   @Post(":id/agent-run/claim")
   async claimAgentRun(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ClaimAgentRunDto) {
-    const claimed = await this.tasks.claimAgentRun(id, dto.agentName);
+    const claimed = await this.tasks.claimAgentRun(
+      id,
+      dto.agentName,
+      new Date(),
+      dto.invocation ?? "assigned",
+    );
     if (!claimed) return { claimed: false as const };
     return {
       claimed: true as const,
