@@ -32,7 +32,7 @@ const LLM_PROFILE_LOCK_KEY = "system-config:llm-profile";
  * Межполевая проверка уже разрешённых по отдельности значений.
  * `openai-api` не даёт форме превратить Core в SSRF-proxy или оторвать
  * billing catalog от физического endpoint. Subscription остаётся видимым
- * предпочтительным маршрутом, но fail-closed до отдельного runtime slice.
+ * недоступным вариантом, но fail-closed до доказуемого pre-turn billing mode.
  */
 export function validateLlmProfileState(
   overrides: Record<string, string>,
@@ -47,7 +47,7 @@ export function validateLlmProfileState(
   const enabled = resolveConfigValue("LLM_ENABLED", overrides, env);
   const route = resolveConfigValue("LLM_ROUTE", overrides, env);
   if (enabled === "1" && route === "codex-subscription") {
-    return "LLM-маршрут codex-subscription пока нельзя включить: среда выполнения не подтверждает безопасную оплату через подписку, поэтому вызовы заблокированы";
+    return "LLM-маршрут codex-subscription нельзя включить: Codex CLI подтверждает вход, но не доказывает до запроса, будет использован включённый лимит или платные ChatGPT credits; вызовы заблокированы";
   }
   if (route === "openai-api") {
     const baseUrl = resolveConfigValue("LLM_BASE_URL", overrides, env);

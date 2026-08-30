@@ -6,13 +6,13 @@
 
 ## Топология
 
-| Роль | Размещение | Назначение |
-|---|---|---|
-| Primary PostgreSQL 17 | Supabase, Frankfurt | Единственная активная БД приложения |
-| Runtime connection | Supabase session pooler, TLS | `DATABASE_URL` только для Core |
-| Administrative connection | прямой endpoint, TLS | `DATABASE_ADMIN_URL` только для host scripts |
-| Recovery PostgreSQL 17 | `mydon-db` на Hetzner | не реплика; цель восстановления и cutover rollback |
-| Offsite | Telegram + Backblaze B2 | независимые ежедневные дампы и секреты |
+| Роль                      | Размещение                   | Назначение                                         |
+| ------------------------- | ---------------------------- | -------------------------------------------------- |
+| Primary PostgreSQL 17     | Supabase, Frankfurt          | Единственная активная БД приложения                |
+| Runtime connection        | Supabase session pooler, TLS | `DATABASE_URL` только для Core                     |
+| Administrative connection | прямой endpoint, TLS         | `DATABASE_ADMIN_URL` только для host scripts       |
+| Recovery PostgreSQL 17    | `mydon-db` на Hetzner        | не реплика; цель восстановления и cutover rollback |
+| Offsite                   | Telegram + Backblaze B2      | независимые ежедневные дампы и секреты             |
 
 Проект Supabase: `MYDON Production`, ref `ftwvgzwpjdxywadkphdq`, регион
 `eu-central-1`. Пароли в git и документации отсутствуют. Внешние credentials
@@ -143,7 +143,12 @@ standby-env, не во время аварии (drill напоминает об 
 `HEARTBEAT_GIST_OWNER`.
 Для профиля workers: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`.
 Рекомендуемые: `INGEST_KEY`, `INVITE_PEPPER`, `TELEGRAM_BOT_USERNAME`,
-LLM/Notion/OURVEND-ключи — по мере надобности их функций.
+`LLM_API_KEY`, `NOTION_TOKEN` и OURVEND-ключи — по мере надобности их функций.
+Если standby должен поднимать Agents с LLM, перенести также несекретный профиль
+`LLM_ENABLED`, `LLM_ROUTE`, `LLM_MODEL`, `LLM_BASE_URL`,
+`LLM_PRICE_PROVIDER_ID`, `LLM_GLOBAL_DAILY_BUDGET_USD` и
+`LLM_MAX_RESERVATION_USD`. Ключ получает только контейнер Agents; Core хранит
+и применяет денежные лимиты, но `LLM_API_KEY` ему не передаётся.
 
 Требования к standby-машине: Docker Engine ≥ 25 (Docker Desktop ≥ 4.27) и
 Compose ≥ 2.20.2 — иначе `start_interval` в healthcheck игнорируется или

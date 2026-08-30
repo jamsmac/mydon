@@ -16,12 +16,12 @@ export type LlmProfileValues = Record<LlmProfileKey, string>;
 
 /**
  * Безопасный первый экран: профиль уже виден владельцу, но вызовы
- * выключены. Codex subscription — желаемый маршрут, а не ложное
- * утверждение о готовом runtime.
+ * выключены. Рабочий маршрут заранее привязан к официальному OpenAI API,
+ * но без серверного ключа и явного LLM_ENABLED=1 расход невозможен.
  */
 export const DEFAULT_LLM_PROFILE: LlmProfileValues = {
   LLM_ENABLED: "0",
-  LLM_ROUTE: "codex-subscription",
+  LLM_ROUTE: "openai-api",
   LLM_MODEL: "gpt-5.6-sol",
   LLM_BASE_URL: "https://api.openai.com/v1",
   LLM_PRICE_PROVIDER_ID: "openai",

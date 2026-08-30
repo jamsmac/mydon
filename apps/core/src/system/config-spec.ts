@@ -174,8 +174,8 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     label: "LLM: маршрут оплаты",
     kind: "select",
     options: [...LLM_ROUTES],
-    fallback: "codex-subscription",
-    help: "Codex subscription пока нельзя включить: runtime не доказывает безопасную subscription-авторизацию.",
+    fallback: "openai-api",
+    help: "Рабочий маршрут по умолчанию — официальный OpenAI API. Codex subscription остаётся fail-closed: CLI не доказывает источник оплаты следующего запроса.",
     validate: oneOf([...LLM_ROUTES]),
   },
   {

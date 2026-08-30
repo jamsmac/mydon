@@ -104,11 +104,14 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
               {!ROUTE_LABELS[draft.LLM_ROUTE] && (
                 <option value={draft.LLM_ROUTE}>Текущий: {draft.LLM_ROUTE}</option>
               )}
-              <option value="codex-subscription">Codex / подписка ChatGPT (предпочтительно)</option>
-              <option value="openai-api">OpenAI API (отдельная оплата)</option>
+              <option value="openai-api">OpenAI API (рабочий маршрут)</option>
+              <option value="codex-subscription">
+                Codex / подписка ChatGPT (заблокировано: возможны credits)
+              </option>
             </select>
             <small className="hint" id="llm-route-help">
-              Автоматического переключения между подпиской и API нет.
+              Автоматического переключения между подпиской и API нет. Подписочный маршрут нельзя
+              включить, пока Codex CLI не умеет доказать режим «только включённый лимит» до запроса.
             </small>
           </label>
 
@@ -163,7 +166,7 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
           <b>Готовность подключения</b>
           <div className="llm-readiness-row">
             <span>Codex / подписка ChatGPT</span>
-            <span className="pill bad">Пока не поддерживается — вызовы заблокированы</span>
+            <span className="pill bad">Заблокировано — источник оплаты не проверяется</span>
           </div>
           <div className="llm-readiness-row">
             <span>Ключ OpenAI API в окружении сервера</span>
@@ -171,7 +174,9 @@ export function LlmSettings({ initial }: { initial: LlmProfileValues }) {
           </div>
           <p className="hint">
             Ключ хранится только в окружении процесса агентов и не попадает в БД, панель или
-            браузер. Подписка ChatGPT не оплачивает OpenAI API.
+            браузер. Вход через ChatGPT подтверждает аккаунт, но не отличает включённый лимит от
+            расходования ChatGPT credits; поэтому такой вызов не записывается в ledger как ложные
+            $0.
           </p>
         </div>
 

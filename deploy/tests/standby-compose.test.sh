@@ -15,6 +15,10 @@ trap 'rm -rf "$TMP"' EXIT
 run_clean() {
   env -u DATABASE_URL -u DATABASE_ADMIN_URL -u SERVICE_TOKEN -u POSTGRES_PASSWORD \
     -u B2_APPLICATION_KEY -u BACKUP_ENC_PASSPHRASE \
+    -u LLM_API_KEY -u LLM_ENABLED -u LLM_ROUTE -u LLM_MODEL -u LLM_BASE_URL \
+    -u LLM_PRICE_PROVIDER_ID -u LLM_GLOBAL_DAILY_BUDGET_USD \
+    -u LLM_MAX_RESERVATION_USD -u LLM_HTTP_BILLING_MODE \
+    -u AGENT_GLOBAL_BUDGET_USD \
     -u STANDBY_CONFIRM_PRODUCTION_DOWN -u STANDBY_START_WORKERS \
     -u STANDBY_ALLOW_SPLIT_BRAIN -u STANDBY_ALLOW_UNKNOWN_SHA -u STANDBY_SKIP_BUILD \
     -u STANDBY_ENV_FILE -u GIT_SHA \
@@ -113,6 +117,42 @@ printf '%s\n---SPLIT---\n%s' "$rendered_json" "$production_json" | node -e '
         "env drift " + s + "/" + p + ": только в production=[" + prodOnly +
           "] только в standby=[" + standbyOnly + "]"
       );
+    }
+  }
+
+  // Fresh primary и standby должны видеть один безопасный рабочий профиль:
+  // OpenAI API + Sol + выключенный рубильник. Subscription не может снова
+  // стать default только в одном compose-файле.
+  for (const [services, coreName, agentsName, label] of [
+    [standby, "core", "agents", "standby"],
+    [prod, "mydon-core", "mydon-agents", "production"],
+  ]) {
+    const coreEnv = services[coreName].environment ?? {};
+    const agentsEnv = services[agentsName].environment ?? {};
+    for (const [name, env] of [[coreName, coreEnv], [agentsName, agentsEnv]]) {
+      if (env.LLM_ENABLED !== "0" || env.LLM_ROUTE !== "openai-api" || env.LLM_MODEL !== "gpt-5.6-sol") {
+        throw new Error(label + "/" + name + " has unsafe LLM defaults");
+      }
+      if (env.LLM_BASE_URL !== "https://api.openai.com/v1" || env.LLM_PRICE_PROVIDER_ID !== "openai") {
+        throw new Error(label + "/" + name + " must bind the official OpenAI pricing route");
+      }
+    }
+    if (agentsEnv.LLM_HTTP_BILLING_MODE !== "metered") {
+      throw new Error(label + "/" + agentsName + " must use the Core metered ledger");
+    }
+    if (!("LLM_API_KEY" in agentsEnv)) {
+      throw new Error(label + "/" + agentsName + " must receive the server-only LLM_API_KEY slot");
+    }
+    for (const name of Object.keys(services)) {
+      if (name !== agentsName && "LLM_API_KEY" in (services[name].environment ?? {})) {
+        throw new Error(label + "/" + name + " must not receive LLM_API_KEY");
+      }
+    }
+    if (coreEnv.LLM_GLOBAL_DAILY_BUDGET_USD !== "" || coreEnv.LLM_MAX_RESERVATION_USD !== "3") {
+      throw new Error(label + "/" + coreName + " must own the shared 10/3 USD ledger policy");
+    }
+    if ("LLM_GLOBAL_DAILY_BUDGET_USD" in agentsEnv || "LLM_MAX_RESERVATION_USD" in agentsEnv) {
+      throw new Error(label + "/" + agentsName + " must not enforce a second global ledger policy");
     }
   }
 '

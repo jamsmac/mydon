@@ -252,6 +252,31 @@ describe("LLM-ledger settlement invariants", () => {
     assert.equal(equal.inserted[0]?.reservedUsd, "3.000000000");
   });
 
+  it("глобальный $10 cap разрешает ровно остаток и отклоняет один nano сверху", async () => {
+    const config = {
+      LLM_ENABLED: "1",
+      LLM_MAX_RESERVATION_USD: "3",
+      LLM_GLOBAL_DAILY_BUDGET_USD: "10",
+    };
+
+    const exact = reservePolicyTx(config, "3", { exposureUsd: "7" });
+    const allowed = await new LlmLedgerService({} as never).reserveInTx(exact.tx, {
+      ...RESERVE_REQUEST,
+      requestKey: "core-policy-global-cap-exact",
+    });
+    assert.equal(allowed.allowed, true);
+    assert.equal(exact.inserted[0]?.status, "reserved");
+
+    const over = reservePolicyTx(config, "3", { exposureUsd: "7.000000001" });
+    const denied = await new LlmLedgerService({} as never).reserveInTx(over.tx, {
+      ...RESERVE_REQUEST,
+      requestKey: "core-policy-global-cap-over",
+    });
+    assert.equal(denied.allowed, false);
+    assert.match(denied.reason ?? "", /Дневной LLM-потолок/);
+    assert.equal(over.inserted[0]?.status, "denied");
+  });
+
   it("ledger replay отзывает reserve, когда дневной cap опустили ниже текущей exposure", async () => {
     const price = policyPrice();
     const prior = priorReservation(RESERVE_REQUEST, price, {
@@ -274,6 +299,31 @@ describe("LLM-ledger settlement invariants", () => {
     assert.equal(response.allowed, false);
     assert.equal(response.status, "reserved");
     assert.match(response.reason ?? "", /экспозиция.*выше.*дневного потолка/);
+    assert.equal(replay.inserted.length, 0, "replay не создаёт второй spend");
+  });
+
+  it("ledger replay отзывает reserve после снижения потолка одного вызова", async () => {
+    const price = policyPrice({ outputUsdPerMtok: "3" });
+    const prior = priorReservation(RESERVE_REQUEST, price, {
+      reservedUsd: "3.000000000",
+    });
+    const replay = reservePolicyTx(
+      {
+        LLM_ENABLED: "1",
+        LLM_MAX_RESERVATION_USD: "2.999999999",
+        LLM_GLOBAL_DAILY_BUDGET_USD: "10",
+      },
+      "3",
+      { prior, exposureUsd: "3", prices: [price] },
+    );
+
+    const response = await new LlmLedgerService({} as never).reserveInTx(
+      replay.tx,
+      RESERVE_REQUEST,
+    );
+    assert.equal(response.allowed, false);
+    assert.equal(response.status, "reserved");
+    assert.match(response.reason ?? "", /превышает потолок/);
     assert.equal(replay.inserted.length, 0, "replay не создаёт второй spend");
   });
 
