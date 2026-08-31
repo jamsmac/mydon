@@ -54,6 +54,7 @@ import { appConfig } from "../config";
 import { DB, type Db } from "../db/db.module";
 import { LlmLedgerService } from "../llm-ledger/llm-ledger.service";
 import { MaintenanceService, todayInTz } from "../maintenance/maintenance.service";
+import { PARITY_ISSUE_SOURCE } from "../ourvend/parity-issue-identity";
 import { AGENT_SCHEDULE_SOURCE, isCurrentCronOccurrence } from "./agent-schedule";
 import {
   canonicalJsonHash,
@@ -556,9 +557,17 @@ export function isAssignedTaskSql(): SQL {
 }
 
 function assertPublicTaskSource(source: string | undefined): void {
-  if (source === AGENT_SCHEDULE_SOURCE) {
+  if (source === AGENT_SCHEDULE_SOURCE || source === PARITY_ISSUE_SOURCE) {
     throw new BadRequestException(
-      `source "${AGENT_SCHEDULE_SOURCE}" зарезервирован для Core cron materialization`,
+      `source "${source}" зарезервирован для Core`,
+    );
+  }
+}
+
+function assertPublicTaskClientKey(clientKey: string | undefined): void {
+  if (clientKey?.startsWith(`${PARITY_ISSUE_SOURCE}:`)) {
+    throw new BadRequestException(
+      `clientKey с префиксом "${PARITY_ISSUE_SOURCE}:" зарезервирован для Core`,
     );
   }
 }
@@ -645,6 +654,10 @@ export interface WorkloadRow {
 export class TasksService {
   /** Максимум строк на экране приёмки. */
   static readonly AWAITING_LIMIT = 100;
+  /** Прежний лимит общего списка остаётся API-default и потолком страницы. */
+  static readonly LIST_DEFAULT_LIMIT = 300;
+  static readonly LIST_MAX_LIMIT = 300;
+  static readonly LIST_MAX_OFFSET = 100_000;
   /** После этого падение worker не блокирует задачу навсегда. */
   static readonly AGENT_RUN_LEASE_MS = 15 * 60_000;
 
@@ -750,6 +763,7 @@ export class TasksService {
   /** Создание вместе с записью в журнал — одной транзакцией. */
   async create(input: CreateTaskInput, actorRef = "system"): Promise<TaskRow> {
     assertPublicTaskSource(input.source);
+    assertPublicTaskClientKey(input.clientKey);
     return this.db.transaction(async (tx) => {
       // Пустая строка от клиента (нет активного человека под рукой) не должна
       // осесть в базе как «занятая» задача — те же правила, что у PATCH
@@ -899,6 +913,8 @@ export class TasksService {
       ownerRef?: string;
       openOnly?: boolean;
       agentInvocation?: "assigned" | "scheduled";
+      limit?: number;
+      offset?: number;
     } = {},
   ): Promise<TaskRow[]> {
     const conditions: SQL[] = [];
@@ -923,8 +939,9 @@ export class TasksService {
         .from(task)
         .where(conditions.length ? and(...conditions) : undefined)
         // Сначала срочное и с ближайшим сроком: список читается сверху вниз.
-        .orderBy(asc(task.due), desc(task.priority), asc(task.createdAt))
-        .limit(300)
+        .orderBy(asc(task.due), desc(task.priority), asc(task.createdAt), asc(task.id))
+        .limit(filter.limit ?? TasksService.LIST_DEFAULT_LIMIT)
+        .offset(filter.offset ?? 0)
     );
   }
 
@@ -2329,6 +2346,15 @@ export class TasksService {
       // idempotent repeated click so it can repair an undispatched job left by
       // an older deployment or an interrupted request.
       const before = await this.lockTask(tx, id);
+      if (
+        before.source === PARITY_ISSUE_SOURCE &&
+        before.status !== status &&
+        (status === "done" || status === "cancelled" || before.status === "done" || before.status === "cancelled")
+      ) {
+        throw new BadRequestException(
+          "Задача сверки OurVend закроется или переоткроется автоматически после повторной сверки",
+        );
+      }
       if (expectedAgentRunId && before.agentRunId !== expectedAgentRunId) {
         throw new ConflictException("Прогон агента уже заменён новой generation");
       }
@@ -2530,6 +2556,7 @@ export class TasksService {
       ownerKind?: "human" | "agent";
       ownerRef?: string | null;
       priority?: Priority;
+      domain?: Domain;
       due?: Date | null;
       entityId?: string | null;
     },
@@ -2551,6 +2578,7 @@ export class TasksService {
       set.ownerRef = r.length > 0 ? r : null;
     }
     if (patch.priority !== undefined) set.priority = patch.priority;
+    if (patch.domain !== undefined) set.domain = patch.domain;
     if (patch.due !== undefined) set.due = patch.due;
     if (patch.entityId !== undefined) set.entityId = patch.entityId;
 
@@ -2560,6 +2588,11 @@ export class TasksService {
     // правка срока, текста или повторная отправка того же ownerRef не должны
     // запираться за менеджерской ролью.
     const before = await this.byId(id);
+    if (before.source === PARITY_ISSUE_SOURCE && patch.ownerKind === "agent") {
+      throw new BadRequestException(
+        "Задачу сверки OurVend нельзя назначить агенту: она закроется только по факту повторной сверки",
+      );
+    }
     const ownerRefChanged = set.ownerRef !== undefined && set.ownerRef !== before.ownerRef;
     const ownerKindChanged = set.ownerKind !== undefined && set.ownerKind !== before.ownerKind;
     if (ownerRefChanged) {
@@ -2682,7 +2715,7 @@ export class TasksService {
   // Это нормальное состояние, а не дефект настройки.
 
   /** Свободные задачи: никто не взял, но работа стоит. */
-  unassigned(limit = 50): Promise<TaskRow[]> {
+  unassigned(limit = 50, offset = 0): Promise<TaskRow[]> {
     return this.db
       .select()
       .from(task)
@@ -2694,8 +2727,9 @@ export class TasksService {
           ne(task.status, "cancelled"),
         ),
       )
-      .orderBy(asc(task.due), desc(task.priority), asc(task.createdAt))
-      .limit(limit);
+      .orderBy(asc(task.due), desc(task.priority), asc(task.createdAt), asc(task.id))
+      .limit(limit)
+      .offset(offset);
   }
 
   /**
@@ -2817,13 +2851,14 @@ export class TasksService {
   }
 
   /** Сделанные людьми, но ещё не принятые; дольше ожидающие идут первыми. */
-  awaitingConfirmation(limit = TasksService.AWAITING_LIMIT): Promise<TaskRow[]> {
+  awaitingConfirmation(limit = TasksService.AWAITING_LIMIT, offset = 0): Promise<TaskRow[]> {
     return this.db
       .select()
       .from(task)
       .where(and(eq(task.status, "done"), isNull(task.confirmedAt), eq(task.ownerKind, "human")))
-      .orderBy(asc(task.completedAt))
-      .limit(limit);
+      .orderBy(asc(task.completedAt), asc(task.createdAt), asc(task.id))
+      .limit(limit)
+      .offset(offset);
   }
 
   // ── Переписка по задаче ────────────────────────────────────────────────────
@@ -2856,6 +2891,11 @@ export class TasksService {
       if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
       if (row.status !== "done") {
         throw new BadRequestException("Оценить можно только сделанную задачу");
+      }
+      if (row.source === PARITY_ISSUE_SOURCE && quality === "redo") {
+        throw new BadRequestException(
+          "Задачу сверки OurVend переоткроет сама повторная сверка, если расхождение вернётся",
+        );
       }
 
       const patch: Record<string, unknown> = { quality };

@@ -5,6 +5,7 @@ import { useState, useTransition } from "react";
 import { confirmTask, rateTask } from "../app/tasks/actions";
 import { when } from "../lib/format";
 import type { Task } from "../lib/core";
+import { groupTasksByDirection } from "../lib/task-directions";
 import { SafeReportText } from "./safe-report-text";
 
 /**
@@ -48,6 +49,8 @@ export function AwaitingBlock({ tasks, names }: { tasks: Task[]; names: Map<stri
     });
   }
 
+  const directionGroups = groupTasksByDirection(tasks);
+
   return (
     <div className="awaiting-block">
       <h3>Ждут подтверждения{tasks.length > 0 ? ` (${tasks.length})` : ""}</h3>
@@ -57,39 +60,47 @@ export function AwaitingBlock({ tasks, names }: { tasks: Task[]; names: Map<stri
           {"Как только кто-то закроет задачу, она появится здесь."}
         </div>
       ) : (
-        <div className="awaiting-rows">
-          {tasks.map((task) => (
-            <div key={task.id} className="awaiting-row">
-              <div className="tt">{task.title}</div>
-              <div className="tm">
-                Закрыл: {closerName(task)} · {task.completedAt ? when(task.completedAt) : "—"}
-              </div>
-              {task.resultNote ? (
-                <div className="report">
-                  <SafeReportText text={task.resultNote} />
+        directionGroups.map((direction) => (
+          <section key={direction.key} className="awaiting-direction">
+            <h4 className="section-title task-urgency-title">
+              {direction.label}
+              <span className="group-count">{direction.tasks.length}</span>
+            </h4>
+            <div className="awaiting-rows">
+              {direction.tasks.map((task) => (
+                <div key={task.id} className="awaiting-row">
+                  <div className="tt">{task.title}</div>
+                  <div className="tm">
+                    Закрыл: {closerName(task)} · {task.completedAt ? when(task.completedAt) : "—"}
+                  </div>
+                  {task.resultNote ? (
+                    <div className="report">
+                      <SafeReportText text={task.resultNote} />
+                    </div>
+                  ) : null}
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="btn primary"
+                      onClick={() => onConfirm(task.id)}
+                      disabled={pending}
+                    >
+                      Принять
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => onRedo(task.id)}
+                      disabled={pending}
+                    >
+                      Переделать
+                    </button>
+                  </div>
                 </div>
-              ) : null}
-              <div className="actions">
-                <button
-                  type="button"
-                  className="btn primary"
-                  onClick={() => onConfirm(task.id)}
-                  disabled={pending}
-                >
-                  Принять
-                </button>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => onRedo(task.id)}
-                  disabled={pending}
-                >
-                  Переделать
-                </button>
-              </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </section>
+        ))
       )}
       {error && <span className="err-text">{error}</span>}
     </div>

@@ -20,6 +20,7 @@ import type {
   ShrinkReport as VendingShrinkageReport,
   StockCountsReport,
 } from "@mydon/shared";
+import { collectAllTaskPages } from "./task-pagination";
 
 /**
  * Клиент MYDON Core для оболочки.
@@ -2206,6 +2207,20 @@ export const core = {
   tasks: (params: Record<string, string> = {}) => {
     const qs = new URLSearchParams(params).toString();
     return get<Task[]>(`/tasks${qs ? `?${qs}` : ""}`);
+  },
+  /** Доска не обрезается на API-limit: забираем все стабильно отсортированные страницы. */
+  taskBoard: (params: Record<string, string> = {}) => {
+    const filters = { ...params };
+    delete filters.limit;
+    delete filters.offset;
+    return collectAllTaskPages(({ limit, offset }) => {
+      const qs = new URLSearchParams({
+        ...filters,
+        limit: String(limit),
+        offset: String(offset),
+      }).toString();
+      return get<Task[]>(`/tasks?${qs}`);
+    });
   },
   task: (id: string) => get<Task>(`/tasks/${id}`),
   taskComments: (id: string) => get<TaskComment[]>(`/tasks/${id}/comments`),

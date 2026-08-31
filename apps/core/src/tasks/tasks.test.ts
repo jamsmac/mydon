@@ -20,6 +20,7 @@ import {
   TasksService,
 } from "./tasks.service";
 import { AGENT_SCHEDULE_SOURCE } from "./agent-schedule";
+import { PARITY_ISSUE_SOURCE } from "../ourvend/parity-issue-identity";
 
 type Row = Record<string, unknown>;
 
@@ -394,6 +395,32 @@ describe("Задачи", () => {
     await assert.rejects(() => s.setStatus("нет", "done"), /не найдена/);
   });
 
+  it("жизненный цикл parity task нельзя подменить ручным статусом", async () => {
+    const open = makeTasks(stubDb({ existing: {
+      id: "parity-open",
+      source: PARITY_ISSUE_SOURCE,
+      status: "todo",
+    } }));
+    await assert.rejects(
+      () => open.setStatus("parity-open", "done"),
+      /автоматически после повторной сверки/,
+    );
+    await assert.rejects(
+      () => open.setStatus("parity-open", "cancelled"),
+      /автоматически после повторной сверки/,
+    );
+
+    const resolved = makeTasks(stubDb({ existing: {
+      id: "parity-resolved",
+      source: PARITY_ISSUE_SOURCE,
+      status: "done",
+    } }));
+    await assert.rejects(
+      () => resolved.setStatus("parity-resolved", "todo"),
+      /автоматически после повторной сверки/,
+    );
+  });
+
   it("повторяющаяся задача не дублируется в тот же день", async () => {
     // Дубль отсекает БД (частичный уникальный индекс task_source_key), а не
     // предварительный select: два тика монитора в одну секунду проходили
@@ -538,6 +565,29 @@ describe("Durable cron occurrence tasks", () => {
         source: AGENT_SCHEDULE_SOURCE,
       }),
       /зарезервирован/,
+    );
+  });
+
+  it("generic create не может подделать machine-owned parity issue", async () => {
+    await assert.rejects(
+      makeTasks(stubDb({})).create({
+        title: "Ложная сверка",
+        ownerKind: "human",
+        source: PARITY_ISSUE_SOURCE,
+      }),
+      /зарезервирован/,
+    );
+  });
+
+  it("generic create не может занять предсказуемый parity clientKey", async () => {
+    await assert.rejects(
+      makeTasks(stubDb({})).create({
+        title: "DoS системной задачи",
+        ownerKind: "human",
+        source: "manual",
+        clientKey: `${PARITY_ISSUE_SOURCE}:ourvend.parity.sales:${"0".repeat(64)}`,
+      }),
+      /clientKey.*зарезервирован/,
     );
   });
 
@@ -2018,6 +2068,19 @@ describe("Оценка сделанной задачи", () => {
     const s = makeTasks(db);
     await assert.rejects(() => s.rate("t1", "excellent"), /только сделанную/);
   });
+
+  it("redo не переоткрывает уже закрытую machine-owned parity task", async () => {
+    const service = makeTasks(stubDb({ existing: {
+      id: "parity-resolved",
+      source: PARITY_ISSUE_SOURCE,
+      status: "done",
+      ownerKind: "human",
+    } }));
+    await assert.rejects(
+      () => service.rate("parity-resolved", "redo"),
+      /переоткроет сама повторная сверка/,
+    );
+  });
 });
 
 describe("Правка полей задачи (edit)", () => {
@@ -2063,6 +2126,36 @@ describe("Правка полей задачи (edit)", () => {
       "переназначение с общим SERVICE_TOKEN не вращает денежный attempt",
     );
     assert.equal("agentExecutionBlockedAt" in captured[0], false);
+  });
+
+  it("parity issue нельзя назначить LLM-агенту", async () => {
+    const { db, captured } = editStub({
+      id: "parity-1",
+      source: PARITY_ISSUE_SOURCE,
+      ownerKind: "human",
+      ownerRef: null,
+    });
+
+    await assert.rejects(
+      () => makeTasks(db).edit("parity-1", { ownerKind: "agent", ownerRef: "vendhub-ops" }),
+      /нельзя назначить агенту/,
+    );
+    assert.equal(captured.length, 0, "ни owner, ни LLM attempt не меняются");
+  });
+
+  it("переносит задачу в другое направление", async () => {
+    const { db, captured } = editStub({
+      id: "t1",
+      domain: "vendhub",
+      ownerKind: "human",
+      ownerRef: null,
+    });
+
+    const updated = await makeTasks(db).edit("t1", { domain: "globerent" });
+
+    assert.equal(updated.domain, "globerent");
+    assert.equal(captured[0].domain, "globerent");
+    assert.equal("ownerRef" in captured[0], false);
   });
 
   it("пустое описание/исполнитель → снятие (null)", async () => {
@@ -2472,10 +2565,47 @@ describe("Приёмка работы менеджером (П7, R-P7-5/R-P7-6)"
   });
 });
 
-describe("Список ждущих подтверждения (П7)", () => {
+describe("Постраничные списки задач", () => {
+  it("общий список передаёт limit/offset и имеет уникальный tie-breaker", async () => {
+    let limit = 0;
+    let offset = 0;
+    let orderColumns = 0;
+    const rows = [{ id: "t1" }, { id: "t2" }];
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            orderBy: (...columns: unknown[]) => {
+              orderColumns = columns.length;
+              return {
+                limit: (value: number) => {
+                  limit = value;
+                  return {
+                    offset: async (valueOffset: number) => {
+                      offset = valueOffset;
+                      return rows;
+                    },
+                  };
+                },
+              };
+            },
+          }),
+        }),
+      }),
+    } as never;
+
+    const result = await makeTasks(db).list({ openOnly: true, limit: 40, offset: 80 });
+    assert.deepEqual(result, rows);
+    assert.equal(limit, 40);
+    assert.equal(offset, 80);
+    assert.equal(orderColumns, 4, "id — последний уникальный tie-breaker");
+  });
+
   it("ограничен и строится по confirmed_at, старейшее первым", async () => {
     const conditions: unknown[] = [];
     let limit = 0;
+    let offset = -1;
+    let orderColumns = 0;
     const rows = [
       { id: "t1", completedAt: "2026-08-20T05:00:00.000Z" },
       { id: "t2", completedAt: "2026-08-25T05:00:00.000Z" },
@@ -2486,23 +2616,33 @@ describe("Список ждущих подтверждения (П7)", () => {
           where: (condition: unknown) => {
             conditions.push(condition);
             return {
-              orderBy: () => ({
-                limit: async (value: number) => {
-                  limit = value;
-                  return rows;
-                },
-              }),
+              orderBy: (...columns: unknown[]) => {
+                orderColumns = columns.length;
+                return {
+                  limit: (value: number) => {
+                    limit = value;
+                    return {
+                      offset: async (valueOffset: number) => {
+                        offset = valueOffset;
+                        return rows;
+                      },
+                    };
+                  },
+                };
+              },
             };
           },
         }),
       }),
     } as never;
-    const result = await makeTasks(db).awaitingConfirmation();
+    const result = await makeTasks(db).awaitingConfirmation(25, 50);
     assert.deepEqual(
       result.map((row) => row.id),
       ["t1", "t2"],
     );
-    assert.equal(limit, TasksService.AWAITING_LIMIT);
+    assert.equal(limit, 25);
+    assert.equal(offset, 50);
+    assert.equal(orderColumns, 3, "completedAt + createdAt + id дают стабильный порядок");
     const query = new PgDialect().sqlToQuery(
       conditions[0] as Parameters<PgDialect["sqlToQuery"]>[0],
     );

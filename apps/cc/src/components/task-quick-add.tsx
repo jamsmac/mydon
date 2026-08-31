@@ -2,13 +2,14 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { DOMAIN_LABELS, DOMAINS } from "@mydon/shared";
 import { quickAddTask } from "../app/tasks/actions";
 import type { Person } from "../lib/core";
 
 /**
  * Быстрая постановка задачи одной строкой.
  *
- * Минимум полей: что сделать, кому, к какому сроку. Срок пишется словами
+ * Минимум полей: что сделать, направление, кому, к какому сроку. Срок пишется словами
  * («завтра», «пн», «через 3 дня») — владелец не должен воевать с календарём.
  * Всё остальное настраивается потом в карточке: длинная форма на входе
  * отбивает желание пользоваться системой вообще.
@@ -57,7 +58,24 @@ export function QuickAdd({
       />
 
       <div className="qa-row">
-        <select name="owner" className="qa-owner" defaultValue="">
+        <select
+          name="domain"
+          className="qa-domain"
+          defaultValue=""
+          required
+          aria-label="Направление"
+        >
+          <option value="" disabled>
+            Направление
+          </option>
+          {DOMAINS.map((domain) => (
+            <option key={domain} value={domain}>
+              {DOMAIN_LABELS[domain]}
+            </option>
+          ))}
+        </select>
+
+        <select name="owner" className="qa-owner" defaultValue="" aria-label="Исполнитель">
           <option value="" disabled>
             Кому поручить
           </option>

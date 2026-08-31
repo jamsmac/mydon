@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CUTOVER_READY_EVENT, PARITY_EVENT } from "../ourvend/ourvend-parity.service";
+import {
+  PARITY_ISSUES_FAILED_EVENT,
+  PARITY_ISSUES_OPENED_EVENT,
+  PARITY_ISSUES_RESOLVED_EVENT,
+} from "../ourvend/parity-issue-identity";
 import { SNAPSHOT_STALE_EVENT } from "../ourvend/sync-stale.service";
 import { ACCOUNTING_SOURCE_CHANGED_EVENT } from "../sales/accounting-source";
 import { RETENTION_EVENT } from "../vending/retention.service";
@@ -287,6 +292,34 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.match(n!.text, /НЕ ПРИХОДИЛ НИ РАЗУ/);
   });
 
+  it("красный паритет называет и продажи, и остатки", () => {
+    const [n] = applyRules(
+      ctx(PARITY_EVENT, {
+        ok: false,
+        сверено_пар: 14,
+        расхождений: 0,
+        остатки_сверено: 120,
+        остатки_расхождений: 3,
+      }),
+    );
+    assert.equal(n!.urgency, "briefing");
+    assert.match(n!.text, /продажи — 0/);
+    assert.match(n!.text, /остатки — 3/);
+    assert.match(n!.text, /задачи VendHub/);
+  });
+
+  it("переходы живых расхождений доставляются сразу", () => {
+    const [opened] = applyRules(ctx(PARITY_ISSUES_OPENED_EVENT, { count: 3, reopened: 1 }));
+    assert.equal(opened!.urgency, "immediate");
+    assert.match(opened!.text, /3 задачи/);
+    assert.match(opened!.text, /Задачи → VendHub/);
+    assert.match(opened!.text, /повторно открыто 1/);
+
+    const [resolved] = applyRules(ctx(PARITY_ISSUES_RESOLVED_EVENT, { count: 2 }));
+    assert.equal(resolved!.urgency, "immediate");
+    assert.match(resolved!.text, /автоматически закрыто 2 задачи/);
+  });
+
   it("смена источника учёта доставляется немедленно и называет обе стороны", () => {
     const [n] = applyRules(ctx("ourvend.accounting_source_changed", { from: "stock", to: "own", actor: "owner" }));
     assert.equal(n!.urgency, "immediate");
@@ -320,7 +353,15 @@ describe("Правила уведомлений (FR-2)", () => {
     // литералом: переименование константы осиротило бы правило МОЛЧА, а правило
     // — единственный путь события к владельцу. Список намеренно ручной: он же
     // документирует, у каких событий правила нет ПО ЗАМЫСЛУ.
-    const сПравилом = [PARITY_EVENT, CUTOVER_READY_EVENT, SNAPSHOT_STALE_EVENT, ACCOUNTING_SOURCE_CHANGED_EVENT];
+    const сПравилом = [
+      PARITY_EVENT,
+      CUTOVER_READY_EVENT,
+      PARITY_ISSUES_FAILED_EVENT,
+      PARITY_ISSUES_OPENED_EVENT,
+      PARITY_ISSUES_RESOLVED_EVENT,
+      SNAPSHOT_STALE_EVENT,
+      ACCOUNTING_SOURCE_CHANGED_EVENT,
+    ];
     for (const тип of сПравилом) {
       assert.ok(
         RULES.some((r) => r.eventType === тип),
@@ -335,6 +376,16 @@ describe("Правила уведомлений (FR-2)", () => {
       false,
       "у system.retention правила быть не должно — это служебная чистка, а не новость",
     );
+  });
+
+  it("отказ parity projection сразу объясняет, что вердикт есть, а задачи устарели", () => {
+    const [note] = applyRules(ctx(PARITY_ISSUES_FAILED_EVENT, {
+      error: "operational_issue unavailable",
+    }));
+    assert.equal(note?.urgency, "immediate");
+    assert.match(note?.text ?? "", /сверка .* посчитана/i);
+    assert.match(note?.text ?? "", /список задач не обновился/i);
+    assert.match(note?.text ?? "", /operational_issue unavailable/);
   });
 
   it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {

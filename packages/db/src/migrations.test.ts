@@ -227,4 +227,20 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
     assert.match(sql, /"source" = 'agent-schedule'/);
     assert.match(sql, /"status" <> 'done'.*"status" <> 'cancelled'/);
   });
+
+  it("0081 adds durable operational issues linked one-to-one with tasks", () => {
+    const migration = readFileSync(path.join(ПАПКА, "0081_operational_issue.sql"), "utf8");
+    assert.match(migration, /CREATE TYPE "public"\."operational_issue_status" AS ENUM\('open', 'resolved'\)/);
+    assert.match(migration, /CREATE TABLE "operational_issue"/);
+    assert.match(migration, /CREATE TABLE "operational_projection_state"/);
+    assert.match(migration, /"watermark" timestamp with time zone NOT NULL/);
+    assert.match(migration, /"task_id" uuid NOT NULL/);
+    assert.match(migration, /REFERENCES "public"\."task"\("id"\) ON DELETE restrict/);
+    assert.match(migration, /CREATE UNIQUE INDEX "operational_issue_kind_fingerprint_key"/);
+    assert.match(migration, /CREATE UNIQUE INDEX "operational_issue_task_key"/);
+    assert.match(migration, /CREATE INDEX "operational_issue_open_domain_idx".*WHERE .*"status" = 'open'/s);
+    assert.match(migration, /CREATE INDEX "operational_issue_open_kind_date_idx".*WHERE .*"status" = 'open'/s);
+    assert.match(migration, /CREATE INDEX "operational_issue_kind_date_idx"/);
+    assert.match(migration, /operational_issue_resolution_consistent/);
+  });
 });

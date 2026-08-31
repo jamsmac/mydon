@@ -43,6 +43,8 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
     "agentTaskLlmJob",
     "agentTaskLlmAuthorization",
     "agentTaskLlmResult",
+    "operationalIssue",
+    "operationalProjectionState",
   ];
 
   // Извлечение состава индексов таблицы через внутренний символ drizzle —
@@ -188,6 +190,55 @@ describe("Схема MYDON Core (ТЗ §7)", () => {
       имена(schema.task).includes("task_agent_schedule_open_queue_idx"),
       "durable scheduled queue не должна сканировать закрытые задачи",
     );
+  });
+
+  it("operational issue держит живую проблему и её единственную task", () => {
+    assert.deepEqual(mod.operationalIssueStatusEnum.enumValues, ["open", "resolved"]);
+    const columns = Object.keys(schema.operationalIssue);
+    for (const column of [
+      "domain",
+      "kind",
+      "fingerprint",
+      "scopeDate",
+      "scopeKey",
+      "status",
+      "episode",
+      "taskId",
+      "payload",
+      "firstSeenAt",
+      "lastSeenAt",
+      "resolvedAt",
+      "updatedAt",
+    ]) {
+      assert.ok(columns.includes(column), `operational_issue не хранит ${column}`);
+    }
+    for (const name of [
+      "operational_issue_kind_fingerprint_key",
+      "operational_issue_task_key",
+      "operational_issue_open_domain_idx",
+      "operational_issue_open_kind_date_idx",
+      "operational_issue_kind_date_idx",
+      "operational_issue_scope_date_idx",
+    ]) {
+      assert.ok(имена(schema.operationalIssue).includes(name), `нет индекса ${name}`);
+    }
+    const checks = getTableConfig(schema.operationalIssue).checks.map((c) => c.name);
+    for (const name of [
+      "operational_issue_episode_positive",
+      "operational_issue_fingerprint_sha256",
+      "operational_issue_resolution_consistent",
+    ]) {
+      assert.ok(checks.includes(name), `нет CHECK ${name}`);
+    }
+  });
+
+  it("operational projection state не даёт старому снимку перезаписать новый", () => {
+    const columns = Object.keys(schema.operationalProjectionState);
+    for (const column of ["key", "watermark", "updatedAt"]) {
+      assert.ok(columns.includes(column), `operational_projection_state не хранит ${column}`);
+    }
+    const checks = getTableConfig(schema.operationalProjectionState).checks.map((c) => c.name);
+    assert.ok(checks.includes("operational_projection_state_key_nonempty"));
   });
 
   it("durable agent outcome и outbox имеют полный fencing-контракт", () => {

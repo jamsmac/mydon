@@ -50,7 +50,9 @@ function stubCore(over: Record<string, unknown> = {}) {
       return { id: "log-2" };
     },
     createTask: async (i: Record<string, unknown>) => {
-      calls.push(`task:${String(i.priority)}:${String(i.title)}:owner=${String(i.ownerRef ?? "-")}`);
+      calls.push(
+        `task:${String(i.priority)}:${String(i.title)}:owner=${String(i.ownerRef ?? "-")}:domain=${String(i.domain ?? "-")}`,
+      );
       return { id: "task-1" };
     },
     uploadPhoto: async (i: Record<string, unknown>) => {
@@ -293,7 +295,8 @@ describe("Поломка", () => {
     const res = await handleProblemCallback(1, { kind: "urgency", urgency: "1" }, ME, deps);
 
     assert.match(calls[0], /^task:urgent:Купюры не берёт/);
-    assert.match(calls[0], /owner=-$/, "исполнителя быть не должно");
+    assert.match(calls[0], /owner=-:/, "исполнителя быть не должно");
+    assert.match(calls[0], /domain=vendhub$/, "поломка должна попасть в VendHub");
     assert.ok(
       !calls.some((c) => c.startsWith("log:")),
       "заявка — не выполненная работа",

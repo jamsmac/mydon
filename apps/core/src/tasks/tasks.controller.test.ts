@@ -8,11 +8,74 @@ import {
   AgentRunCommitDto,
   AgentRunInputSnapshotDto,
   ClaimAgentRunDto,
+  EditTaskDto,
   EnsureAgentScheduleDto,
   EnsureForDayDto,
+  ListTasksDto,
   ReleaseAgentRunDto,
   SetStatusDto,
+  TasksController,
 } from "./tasks.controller";
+
+describe("ListTasksDto: pagination", () => {
+  it("преобразует query-строки в bounded числа", async () => {
+    const dto = plainToInstance(ListTasksDto, { limit: "300", offset: "900" });
+    assert.deepEqual(await validate(dto), []);
+    assert.equal(dto.limit, 300);
+    assert.equal(dto.offset, 900);
+  });
+
+  it("отбивает нулевой/чрезмерный limit и отрицательный offset", async () => {
+    for (const input of [
+      { limit: "0" },
+      { limit: "301" },
+      { limit: "1.5" },
+      { offset: "-1" },
+      { offset: "100001" },
+    ]) {
+      const errors = await validate(plainToInstance(ListTasksDto, input));
+      assert.ok(errors.some((error) => error.property === Object.keys(input)[0]));
+    }
+  });
+
+  it("передаёт pagination в общую и awaiting-выборки", () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const service = {
+      list: (...args: unknown[]) => calls.push({ method: "list", args }),
+      awaitingConfirmation: (...args: unknown[]) =>
+        calls.push({ method: "awaitingConfirmation", args }),
+      unassigned: (...args: unknown[]) => calls.push({ method: "unassigned", args }),
+    };
+    const controller = new TasksController(service as never);
+
+    controller.list({ open: "1", domain: "vendhub", limit: 40, offset: 80 });
+    controller.list({ awaiting: "1", limit: 25, offset: 50 });
+    controller.list({ unassigned: "1", limit: 10, offset: 20 });
+
+    assert.deepEqual(calls, [
+      {
+        method: "list",
+        args: [{ domain: "vendhub", limit: 40, offset: 80, openOnly: true }],
+      },
+      { method: "awaitingConfirmation", args: [25, 50] },
+      { method: "unassigned", args: [10, 20] },
+    ]);
+  });
+});
+
+describe("EditTaskDto: направление", () => {
+  it("принимает канон и пропущенное поле", async () => {
+    assert.deepEqual(await validate(plainToInstance(EditTaskDto, {})), []);
+    assert.deepEqual(await validate(plainToInstance(EditTaskDto, { domain: "vendhub" })), []);
+  });
+
+  it("отбивает null и неизвестное направление", async () => {
+    for (const domain of [null, "legacy"]) {
+      const errors = await validate(plainToInstance(EditTaskDto, { domain }));
+      assert.ok(errors.some((error) => error.property === "domain"));
+    }
+  });
+});
 
 /**
  * `dayKey` — ЧАСТЬ КЛЮЧА ИДЕМПОТЕНТНОСТИ, а не просто дата (R-G-2).

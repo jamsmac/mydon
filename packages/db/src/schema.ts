@@ -28,6 +28,7 @@ import type { CashCategorySummary, RecipeLine } from "@mydon/shared";
 export const domainEnum = pgEnum("domain", ["globerent", "vendhub", "personal", "mydon"]);
 export const ownerKindEnum = pgEnum("owner_kind", ["human", "agent"]);
 export const taskStatusEnum = pgEnum("task_status", ["todo", "in_progress", "done", "cancelled"]);
+export const operationalIssueStatusEnum = pgEnum("operational_issue_status", ["open", "resolved"]);
 /** Оценка сделанной задачи владельцем: качество должно отмечаться, а не подразумеваться. */
 export const taskQualityEnum = pgEnum("task_quality", ["excellent", "accepted", "redo"]);
 export const approvalTierEnum = pgEnum("approval_tier", ["T0", "T1", "T2", "T3", "T4"]);
@@ -359,6 +360,72 @@ export const task = pgTable(
       ),
     check("task_agent_run_generation_nonnegative", sql`${t.agentRunGeneration} >= 0`),
   ],
+);
+
+/**
+ * Durable operational problem projected into the ordinary task board.
+ *
+ * `task` is the surface where a person fixes the data; this row is the
+ * machine-owned lifecycle that prevents a manual close or a rolling report
+ * window from losing an unresolved problem.  The same fingerprint keeps the
+ * same task through repeated observations and later recurrence episodes.
+ */
+export const operationalIssue = pgTable(
+  "operational_issue",
+  {
+    id: id(),
+    domain: domainEnum("domain").notNull(),
+    kind: text("kind").notNull(),
+    /** SHA-256 of the exact, normalized business identity. */
+    fingerprint: text("fingerprint").notNull(),
+    /** Business date of the fact being checked, not the observation date. */
+    scopeDate: date("scope_date").notNull(),
+    /** Authoritative recovery scope (for parity: date + machine). */
+    scopeKey: text("scope_key").notNull(),
+    status: operationalIssueStatusEnum("status").default("open").notNull(),
+    /** Incremented every time a resolved/manually closed problem becomes live again. */
+    episode: integer("episode").default(1).notNull(),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => task.id, { onDelete: "restrict" }),
+    payload: jsonb("payload").default({}).notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("operational_issue_kind_fingerprint_key").on(t.kind, t.fingerprint),
+    uniqueIndex("operational_issue_task_key").on(t.taskId),
+    index("operational_issue_open_domain_idx")
+      .on(t.domain, t.lastSeenAt)
+      .where(sql`${t.status} = 'open'`),
+    index("operational_issue_open_kind_date_idx")
+      .on(t.kind, t.scopeDate)
+      .where(sql`${t.status} = 'open'`),
+    index("operational_issue_kind_date_idx").on(t.kind, t.scopeDate),
+    index("operational_issue_scope_date_idx").on(t.scopeDate),
+    check("operational_issue_episode_positive", sql`${t.episode} >= 1`),
+    check("operational_issue_kind_nonempty", sql`char_length(btrim(${t.kind})) > 0`),
+    check("operational_issue_scope_key_nonempty", sql`char_length(btrim(${t.scopeKey})) > 0`),
+    check("operational_issue_fingerprint_sha256", sql`${t.fingerprint} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "operational_issue_resolution_consistent",
+      sql`(${t.status} = 'open' and ${t.resolvedAt} is null) or (${t.status} = 'resolved' and ${t.resolvedAt} is not null)`,
+    ),
+  ],
+);
+
+/** Monotonic watermark for projections whose source report is built before its write lock. */
+export const operationalProjectionState = pgTable(
+  "operational_projection_state",
+  {
+    key: text("key").primaryKey(),
+    watermark: timestamp("watermark", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [check("operational_projection_state_key_nonempty", sql`char_length(btrim(${t.key})) > 0`)],
 );
 
 // ── collection: инкассация автоматов (перенос VendCash внутрь MYDON) ──
@@ -3321,6 +3388,8 @@ export const schema = {
   entityDraft,
   person,
   task,
+  operationalIssue,
+  operationalProjectionState,
   taskComment,
   approval,
   event,
