@@ -651,6 +651,93 @@ describe("Дедуп задач на день держится ЧАСТИЧНЫ�
   });
 });
 
+describe("ensureForDay: задача, аудит и task.auto_created — одной транзакцией (П7)", () => {
+  /**
+   * Заглушка с настоящей семантикой commit/rollback: вставки копятся в буфер
+   * транзакции и «фиксируются» в `persisted` только когда колбэк дошёл до конца.
+   * Бросок внутри транзакции очищает буфер — как ROLLBACK в Postgres. `failOn`
+   * роняет вставку в указанную таблицу (модель падения на шаге события).
+   */
+  function atomicStub(opts: { failOn?: unknown } = {}) {
+    const persisted: { table: unknown; value: Row }[] = [];
+    const pending: { table: unknown; value: Row }[] = [];
+    const emptyWhere = () => {
+      const rows = async () => [] as Row[];
+      return Object.assign(rows(), { limit: rows, for: rows });
+    };
+    const makeInsert = (sink: { table: unknown; value: Row }[]) => (table: unknown) => ({
+      values: (value: Row) => {
+        if (opts.failOn !== undefined && table === opts.failOn) {
+          throw new Error("событие task.auto_created не записалось");
+        }
+        const row = { id: "t1", ...value };
+        sink.push({ table, value });
+        const returning = async () => [row];
+        return {
+          onConflictDoNothing: () => ({ returning }),
+          returning,
+          then: (res: (rows: Row[]) => unknown) => Promise.resolve([row]).then(res),
+        };
+      },
+    });
+    const tx = {
+      select: () => ({ from: () => ({ where: emptyWhere }) }),
+      insert: makeInsert(pending),
+    };
+    const db = {
+      select: tx.select,
+      insert: makeInsert(persisted),
+      transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => {
+        pending.length = 0;
+        try {
+          const out = await cb(tx);
+          persisted.push(...pending);
+          return out;
+        } catch (error) {
+          pending.length = 0;
+          throw error;
+        }
+      },
+    } as never;
+    return { db, persisted };
+  }
+
+  const followup = (created: { id: string }) => ({
+    source: "task-bridge",
+    type: "task.auto_created",
+    payload: { taskId: created.id },
+  });
+
+  it("успех пишет задачу, её аудит и событие в одной транзакции", async () => {
+    const { db, persisted } = atomicStub();
+    const s = makeTasks(db);
+    const created = await s.ensureForDay(
+      { title: "Разобраться с недостачей", ownerKind: "human", source: "shrinkage:2508160376", dayKey: "2026-08-26" },
+      followup,
+    );
+    assert.ok(created);
+    assert.deepEqual(persisted.map((r) => r.table), [task, auditLog, event]);
+    assert.equal((persisted[1]!.value as Row).action, "task.create");
+    assert.equal((persisted[2]!.value as Row).type, "task.auto_created");
+  });
+
+  it("сбой на шаге события откатывает и задачу, и её аудит", async () => {
+    // Краш между «задача создана» и «событие записано» раньше оставлял задачу
+    // без task.auto_created — лента «Действия» и дедуп моста разъезжались.
+    const { db, persisted } = atomicStub({ failOn: event });
+    const s = makeTasks(db);
+    await assert.rejects(
+      () =>
+        s.ensureForDay(
+          { title: "Разобраться с недостачей", ownerKind: "human", source: "shrinkage:2508160376", dayKey: "2026-08-26" },
+          followup,
+        ),
+      /не записалось/,
+    );
+    assert.deepEqual(persisted, [], "при крахе на событии не должно остаться ни задачи, ни записи в журнале");
+  });
+});
+
 describe("Durable claim задачи агента", () => {
   const TASK = "11111111-1111-4111-8111-111111111111";
   const OLD_RUN = "22222222-2222-4222-8222-222222222222";

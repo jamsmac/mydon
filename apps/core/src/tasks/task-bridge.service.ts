@@ -340,37 +340,43 @@ export class TaskBridgeService implements OnModuleInit, OnApplicationShutdown {
       const entityId = serial ? registry?.firstIdBySerial.get(serial) : undefined;
       const name = serial ? (registry?.nameBySerial.get(serial) ?? serial) : "OurVend";
       const priority = group.src.priority(group.payloads);
-      const result = await this.tasks.ensureForDay({
-        title: group.src.title(name, group.payloads),
-        description: group.src.description(name, group.payloads),
-        ownerKind: "human",
-        ...(group.src.scope === "system" && managerId ? { ownerRef: managerId } : {}),
-        source: `${group.src.key}:${serial ?? "system"}`,
-        dayKey: group.day,
-        due: nextMorning(now),
-        priority,
-        ...(entityId ? { entityId } : {}),
-        domain: "vendhub",
-        createdBy: "task-bridge",
-      });
+      // Задача, её аудит и `task.auto_created` пишутся ОДНОЙ транзакцией внутри
+      // ensureForDay: краш между «задача создана» и «событие записано» раньше
+      // мог оставить задачу без события — лента «Действия» и дедуп моста
+      // разъезжались. Событие строится по фактически созданной строке.
+      const result = await this.tasks.ensureForDay(
+        {
+          title: group.src.title(name, group.payloads),
+          description: group.src.description(name, group.payloads),
+          ownerKind: "human",
+          ...(group.src.scope === "system" && managerId ? { ownerRef: managerId } : {}),
+          source: `${group.src.key}:${serial ?? "system"}`,
+          dayKey: group.day,
+          due: nextMorning(now),
+          priority,
+          ...(entityId ? { entityId } : {}),
+          domain: "vendhub",
+          createdBy: "task-bridge",
+        },
+        (createdTask) => ({
+          source: "task-bridge",
+          type: AUTO_CREATED_EVENT,
+          occurredAt: now,
+          payload: {
+            taskId: createdTask.id,
+            key,
+            eventType: group.src.type,
+            serial,
+            entityId: entityId ?? null,
+            day: group.day,
+          },
+        }),
+      );
       if (!result) {
         skipped += 1;
         continue;
       }
       created += 1;
-      await this.events.record({
-        source: "task-bridge",
-        type: AUTO_CREATED_EVENT,
-        occurredAt: now,
-        payload: {
-          taskId: result.id,
-          key,
-          eventType: group.src.type,
-          serial,
-          entityId: entityId ?? null,
-          day: group.day,
-        },
-      });
     }
 
     return { events: rows.length, created, skipped, capped, disabled: false };
