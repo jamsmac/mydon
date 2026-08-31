@@ -61,6 +61,7 @@ const ПАРИТЕТ_ОК: Паритет = {
   ownRows: 14,
   mode: "mirror",
   note: null,
+  coverage: { salesScopes: [], stockScopes: [] },
   stock: { days: 7, checked: 14, ok: true, mismatches: [], withinTolerance: 0, tolerance: 3, note: null },
 };
 

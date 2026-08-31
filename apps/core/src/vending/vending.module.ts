@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ApprovalsModule } from "../approvals/approvals.module";
 import { OurvendHealthService } from "../ourvend/ourvend-health.service";
 import { OurvendParityService } from "../ourvend/ourvend-parity.service";
+import { ParityIssueService } from "../ourvend/parity-issue.service";
 import { SyncStaleService } from "../ourvend/sync-stale.service";
 import { AnalyticsService } from "./analytics.service";
 import { ProductFiscalService } from "./product-fiscal.service";
@@ -46,6 +47,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
     ShrinkageService,
     AnalyticsService,
     OurvendParityService,
+    ParityIssueService,
     OurvendHealthService,
     SyncStaleService,
     RetentionService,
@@ -59,6 +61,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
     ShrinkageService,
     AnalyticsService,
     OurvendParityService,
+    ParityIssueService,
     OurvendHealthService,
     SyncStaleService,
     RetentionService,

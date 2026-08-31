@@ -44,7 +44,8 @@ describe("QuickAdd", () => {
 
     const title = screen.getByPlaceholderText("Что нужно сделать?");
     await user.type(title, "Проверить автомат");
-    await user.selectOptions(screen.getByRole("combobox"), "human:person-1");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Направление" }), "vendhub");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Исполнитель" }), "human:person-1");
     await user.type(screen.getByPlaceholderText(/Когда\?/), "завтра");
     await user.click(screen.getByTitle("Срочно"));
     await user.click(screen.getByRole("button", { name: "Поставить" }));
@@ -52,11 +53,13 @@ describe("QuickAdd", () => {
     await waitFor(() => expect(mocks.quickAddTask).toHaveBeenCalledOnce());
     const form = mocks.quickAddTask.mock.calls[0]?.[0] as FormData;
     expect(form.get("title")).toBe("Проверить автомат");
+    expect(form.get("domain")).toBe("vendhub");
     expect(form.get("owner")).toBe("human:person-1");
     expect(form.get("due")).toBe("завтра");
     expect(form.get("priority")).toBe("urgent");
     await waitFor(() => expect(mocks.refresh).toHaveBeenCalledOnce());
     expect(title).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "Направление" })).toHaveValue("");
     expect(screen.getByTitle("Срочно")).not.toHaveClass("on");
   });
 
@@ -67,7 +70,8 @@ describe("QuickAdd", () => {
     render(<QuickAdd people={[person]} agents={[]} />);
     const title = screen.getByPlaceholderText("Что нужно сделать?");
     await user.type(title, "Снять показания");
-    await user.selectOptions(screen.getByRole("combobox"), "human:person-1");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Направление" }), "vendhub");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Исполнитель" }), "human:person-1");
     await user.click(screen.getByRole("button", { name: "Поставить" }));
 
     expect(await screen.findByText("Core временно недоступен")).toBeVisible();
@@ -79,5 +83,19 @@ describe("QuickAdd", () => {
     render(<QuickAdd people={[]} agents={[]} />);
 
     expect(screen.getByText(/Сотрудников пока нет/)).toBeVisible();
+  });
+
+  it("требует canonical-направление", () => {
+    render(<QuickAdd people={[person]} agents={[]} />);
+
+    const direction = screen.getByRole("combobox", { name: "Направление" });
+    expect(direction).toBeRequired();
+    expect(Array.from(direction.querySelectorAll("option")).map((option) => option.value)).toEqual([
+      "",
+      "globerent",
+      "vendhub",
+      "personal",
+      "mydon",
+    ]);
   });
 });

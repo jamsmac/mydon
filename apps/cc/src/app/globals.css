@@ -587,6 +587,9 @@ a.prow:hover { border-color: var(--accent-line); }
   font-size: 10.5px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase;
   color: var(--tx-3); margin: 26px 0 11px; font-family: var(--fm);
 }
+.task-direction-title { color: var(--tx); font-size: 12px; margin-bottom: 8px; }
+.task-urgency-title { margin: 12px 0 7px; }
+.task-urgency-group + .task-urgency-group { margin-top: 16px; }
 .group-count { font-family: var(--fm); font-size: 10.5px; color: var(--tx-2); border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; }
 
 .rows { background: var(--surf); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }

@@ -1152,6 +1152,7 @@ export class CoreClient {
   createTask(input: {
     title: string;
     ownerKind: "human" | "agent";
+    domain: Domain;
     entityId?: string;
     description?: string;
     priority?: "low" | "normal" | "high" | "urgent";

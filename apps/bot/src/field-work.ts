@@ -861,6 +861,7 @@ export async function handleProblemCallback(
   const task = await deps.core.createTask({
     title: `${SYMPTOM_LABELS[symptom]} — ${name}`,
     ownerKind: "human",
+    domain: "vendhub",
     entityId,
     description: `Заявка от ${person.name}. Срочность: ${URGENCY_LABELS[cb.urgency]}`,
     priority: URGENCY_PRIORITY[cb.urgency],

@@ -99,7 +99,7 @@ describe("SQL-двойник правила", () => {
   it("собирает выражение по колонке", () => {
     assert.equal(
       machineSerialSql("e.external_ref"),
-      "regexp_replace(lower(coalesce(e.external_ref, '')), '^c([0-9]{10})$', '\\1')",
+      "regexp_replace(lower(btrim(coalesce(e.external_ref, ''))), '^c([0-9]{10})$', '\\1')",
     );
   });
 });

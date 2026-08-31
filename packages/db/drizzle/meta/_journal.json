@@ -568,6 +568,13 @@
       "when": 1788128000000,
       "tag": "0080_llm_alert_schedule_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1788214400000,
+      "tag": "0081_operational_issue",
+      "breakpoints": true
     }
   ]
 }

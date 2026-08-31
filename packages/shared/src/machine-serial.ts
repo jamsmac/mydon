@@ -80,5 +80,5 @@ export const MACHINE_SERIAL_SQL_REGEX = `^c([0-9]{${OURVEND_SERIAL_DIGITS}})$`;
 
 /** Кусок SQL: приведение колонки к каноническому виду. */
 export function machineSerialSql(column: string): string {
-  return `regexp_replace(lower(coalesce(${column}, '')), '${MACHINE_SERIAL_SQL_REGEX}', '\\1')`;
+  return `regexp_replace(lower(btrim(coalesce(${column}, ''))), '${MACHINE_SERIAL_SQL_REGEX}', '\\1')`;
 }

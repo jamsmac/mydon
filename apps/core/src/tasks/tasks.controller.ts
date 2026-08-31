@@ -11,6 +11,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
+import { Type } from "class-transformer";
 import {
   ArrayMaxSize,
   IsArray,
@@ -128,6 +129,24 @@ export class ListTasksDto {
   @IsOptional()
   @IsIn(["assigned", "scheduled"])
   agentInvocation?: "assigned" | "scheduled";
+
+  /** Размер одной страницы; без параметра API сохраняет прежний лимит. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: "limit должен быть целым числом" })
+  @Min(1, { message: "limit не может быть меньше 1" })
+  @Max(TasksService.LIST_MAX_LIMIT, {
+    message: `limit не может быть больше ${TasksService.LIST_MAX_LIMIT}`,
+  })
+  limit?: number;
+
+  /** Смещение для постраничного чтения доски. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: "offset должен быть целым числом" })
+  @Min(0, { message: "offset не может быть отрицательным" })
+  @Max(TasksService.LIST_MAX_OFFSET, { message: "offset слишком велик" })
+  offset?: number;
 }
 
 export class SetStatusDto {
@@ -175,6 +194,12 @@ export class EditTaskDto {
   @IsOptional()
   @IsIn([...PRIORITIES])
   priority?: Priority;
+
+  // Unlike IsOptional, this skips only an omitted field: explicit null must
+  // not clear a direction behind the typed UI's back.
+  @ValidateIf((_dto: EditTaskDto, value: unknown) => value !== undefined)
+  @IsIn([...DOMAINS])
+  domain?: Domain;
 
   // Пустая строка допустима — это снятие срока. Иначе — ISO-дата.
   @IsOptional()
@@ -498,12 +523,27 @@ export class TasksController {
 
   @Get()
   list(@Query() filter: ListTasksDto) {
-    if (filter.awaiting === "1") return this.tasks.awaitingConfirmation();
+    if (filter.awaiting === "1") {
+      return this.tasks.awaitingConfirmation(
+        filter.limit ?? TasksService.AWAITING_LIMIT,
+        filter.offset ?? 0,
+      );
+    }
     // Свободные — отдельная выборка: «ничей» это IS NULL, а не значение
     // ownerRef, и через общий фильтр по равенству его не выразить.
-    if (filter.unassigned === "1") return this.tasks.unassigned();
+    if (filter.unassigned === "1") {
+      return this.tasks.unassigned(filter.limit ?? 50, filter.offset ?? 0);
+    }
     return this.tasks.list({
-      ...filter,
+      ...(filter.status !== undefined ? { status: filter.status } : {}),
+      ...(filter.domain !== undefined ? { domain: filter.domain } : {}),
+      ...(filter.ownerKind !== undefined ? { ownerKind: filter.ownerKind } : {}),
+      ...(filter.ownerRef !== undefined ? { ownerRef: filter.ownerRef } : {}),
+      ...(filter.agentInvocation !== undefined
+        ? { agentInvocation: filter.agentInvocation }
+        : {}),
+      ...(filter.limit !== undefined ? { limit: filter.limit } : {}),
+      ...(filter.offset !== undefined ? { offset: filter.offset } : {}),
       ...(filter.open === "1" ? { openOnly: true } : {}),
     });
   }
@@ -682,6 +722,7 @@ export class TasksController {
         ...(dto.ownerKind !== undefined ? { ownerKind: dto.ownerKind } : {}),
         ...(dto.ownerRef !== undefined ? { ownerRef: dto.ownerRef } : {}),
         ...(dto.priority !== undefined ? { priority: dto.priority } : {}),
+        ...(dto.domain !== undefined ? { domain: dto.domain } : {}),
         // "" → снять срок; иначе ISO-строка → дата.
         ...(dto.due !== undefined ? { due: dto.due === "" ? null : new Date(dto.due) } : {}),
         // "" → отвязать от объекта; иначе uuid.

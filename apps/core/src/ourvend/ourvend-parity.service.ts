@@ -1,7 +1,14 @@
-import { Inject, Injectable, Logger, type OnApplicationShutdown, OnModuleInit } from "@nestjs/common";
+import {
+  Inject,
+  Injectable,
+  Logger,
+  type OnApplicationShutdown,
+  OnModuleInit,
+} from "@nestjs/common";
 import { event, machineStock, ourvendSaleSnapshot, ourvendStockSnapshot, sale } from "@mydon/db";
 import {
   machineSerialSql,
+  normalizeMachineSerial,
   normalizeProductName,
   parityStreak,
   PARITY_STREAK_WINDOW,
@@ -16,6 +23,12 @@ import { DB, type Db } from "../db/db.module";
 import { accountingSource, type AccountingSource } from "../sales/accounting-source";
 import { openStockDb, type StockDb } from "../supply/stock-db";
 import { VendingService } from "../vending/vending.service";
+import { parityIssueScope } from "./parity-issue-identity";
+import {
+  PARITY_ISSUE_SOURCE,
+  PARITY_ISSUES_FAILED_EVENT,
+  ParityIssueService,
+} from "./parity-issue.service";
 import { cutoverThreshold, stockParityTolerance } from "./sync-runs";
 
 /**
@@ -75,8 +88,45 @@ export const PARITY_SCAN_LIMIT = 60;
  */
 export const PARITY_SCAN_LIMIT_MAX = 400;
 
+/**
+ * Operational issues are rechecked from their oldest still-open date.
+ * The bound is deliberately much wider than the public 30-day report while
+ * still preventing a corrupt date from turning one daily cron into an
+ * unbounded donor scan. An older issue is kept open, never falsely resolved.
+ */
+export const PARITY_ISSUE_RECHECK_MAX_DAYS = 3_650;
+
+/**
+ * A resolved issue may recur at an already closed business date. Rechecking a
+ * fixed 30-day horizon catches ordinary late edits without turning all
+ * resolved history into a permanent, ever-growing donor scan.
+ */
+export const PARITY_ISSUE_RECURRENCE_DAYS = 30;
+
 export function parityScanLimit(threshold: number): number {
   return Math.min(PARITY_SCAN_LIMIT_MAX, Math.max(PARITY_SCAN_LIMIT, Math.trunc(threshold) + PARITY_STREAK_WINDOW));
+}
+
+/** Stable authoritative coverage key shared with the durable issue projection. */
+export function paritySalesScope(dt: string, serial: string): string {
+  return parityIssueScope(dt, serial);
+}
+
+/**
+ * Grow the internal recheck window with the oldest unresolved issue. Public
+ * GET /ourvend/parity remains capped at 30 days by the controller/service.
+ */
+export function parityIssueWindowDays(oldestOpenDate: string | null, now = new Date()): number {
+  if (!oldestOpenDate || !/^\d{4}-\d{2}-\d{2}$/.test(oldestOpenDate)) {
+    return PARITY_ISSUE_RECURRENCE_DAYS;
+  }
+  const today = Date.parse(`${tashkentDay(now)}T00:00:00.000Z`);
+  const oldest = Date.parse(`${oldestOpenDate}T00:00:00.000Z`);
+  if (!Number.isFinite(today) || !Number.isFinite(oldest) || oldest >= today) {
+    return PARITY_ISSUE_RECURRENCE_DAYS;
+  }
+  const days = Math.ceil((today - oldest) / 86_400_000);
+  return Math.min(PARITY_ISSUE_RECHECK_MAX_DAYS, Math.max(PARITY_ISSUE_RECURRENCE_DAYS, days));
 }
 
 export interface ParityDayRow {
@@ -94,6 +144,18 @@ export interface ParityMismatch {
   ownAmount: number;
   stockAmount: number;
   reason: string;
+}
+
+/** Never let PostgreSQL `NaN`/infinity leak into JSON or compare as equality. */
+function finiteParityValue(value: number): number {
+  return Number.isFinite(value) ? value : 0;
+}
+
+function invalidParityNumbers(values: readonly (readonly [label: string, value: number])[]): string | null {
+  const invalid = values
+    .filter(([, value]) => !Number.isFinite(value))
+    .map(([label, value]) => `${label}=${String(value)}`);
+  return invalid.length > 0 ? `некорректные числовые значения: ${invalid.join(", ")}` : null;
 }
 
 /** exported для тестов: чистое сравнение двух агрегатов. */
@@ -115,23 +177,29 @@ export function computeParity(
       mismatches.push({
         dt: o.dt,
         serial: o.serial,
-        ownQty: o.qty,
+        ownQty: finiteParityValue(o.qty),
         stockQty: 0,
-        ownAmount: o.amount,
+        ownAmount: finiteParityValue(o.amount),
         stockAmount: 0,
         reason: "у stock-дорожки нет этого дня/автомата",
       });
       continue;
     }
-    if (!close(o.qty, s.qty) || !close(o.amount, s.amount)) {
+    const invalid = invalidParityNumbers([
+      ["наши штуки", o.qty],
+      ["stock штуки", s.qty],
+      ["наша сумма", o.amount],
+      ["stock сумма", s.amount],
+    ]);
+    if (invalid || !close(o.qty, s.qty) || !close(o.amount, s.amount)) {
       mismatches.push({
         dt: o.dt,
         serial: o.serial,
-        ownQty: o.qty,
-        stockQty: s.qty,
-        ownAmount: o.amount,
-        stockAmount: s.amount,
-        reason: "суммы расходятся",
+        ownQty: finiteParityValue(o.qty),
+        stockQty: finiteParityValue(s.qty),
+        ownAmount: finiteParityValue(o.amount),
+        stockAmount: finiteParityValue(s.amount),
+        reason: invalid ?? "суммы расходятся",
       });
     }
   }
@@ -141,9 +209,9 @@ export function computeParity(
       dt: s.dt,
       serial: s.serial,
       ownQty: 0,
-      stockQty: s.qty,
+      stockQty: finiteParityValue(s.qty),
       ownAmount: 0,
-      stockAmount: s.amount,
+      stockAmount: finiteParityValue(s.amount),
       reason: "в нашем снапшоте нет этого дня/автомата",
     });
   }
@@ -165,6 +233,33 @@ export interface ParityStockMismatch {
   own: number;
   stock: number;
   reason: string;
+}
+
+/**
+ * Raw snapshots may contain two spellings of the same product. Comparison
+ * must sum them before building a Map; otherwise the last donor row wins while
+ * every own row is counted separately, producing an order-dependent mismatch.
+ */
+export function aggregateParityStockRows(rows: readonly ParityStockRow[]): ParityStockRow[] {
+  const aggregated = new Map<string, ParityStockRow>();
+  for (const row of rows) {
+    const serial = normalizeMachineSerial(row.serial);
+    const normalizedProduct = normalizeProductName(row.product);
+    const product = row.product.trim() || row.product;
+    const key = `${row.dt}|${serial}|${normalizedProduct}`;
+    const current = aggregated.get(key);
+    if (current) {
+      current.qty += row.qty;
+      // Stable display independent of source row order; identity remains the
+      // normalized name above, this is only what the owner sees in the task.
+      if (product < current.product) current.product = product;
+    } else {
+      aggregated.set(key, { dt: row.dt, serial, product, qty: row.qty });
+    }
+  }
+  return [...aggregated.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, row]) => row);
 }
 
 /**
@@ -220,8 +315,12 @@ export function computeStockParity(
    */
   tolerance = 0,
 ): { checked: number; mismatches: ParityStockMismatch[]; withinTolerance: number } {
-  own = own.filter((r) => !notInService.has(r.serial));
-  stockSide = stockSide.filter((r) => !notInService.has(r.serial));
+  own = aggregateParityStockRows(
+    own.filter((r) => !notInService.has(normalizeMachineSerial(r.serial))),
+  );
+  stockSide = aggregateParityStockRows(
+    stockSide.filter((r) => !notInService.has(normalizeMachineSerial(r.serial))),
+  );
   const общие = new Set(
     [...new Set(own.map((r) => r.serial))].filter((s) => stockSide.some((r) => r.serial === s)),
   );
@@ -244,9 +343,24 @@ export function computeStockParity(
         dt: o.dt,
         serial: o.serial,
         product: o.product,
-        own: o.qty,
+        own: finiteParityValue(o.qty),
         stock: 0,
         reason: "у stock-дорожки нет этой позиции",
+      });
+      continue;
+    }
+    const invalid = invalidParityNumbers([
+      ["наш остаток", o.qty],
+      ["stock остаток", s.qty],
+    ]);
+    if (invalid) {
+      mismatches.push({
+        dt: o.dt,
+        serial: o.serial,
+        product: o.product,
+        own: finiteParityValue(o.qty),
+        stock: finiteParityValue(s.qty),
+        reason: invalid,
       });
       continue;
     }
@@ -274,7 +388,7 @@ export function computeStockParity(
       serial: s.serial,
       product: s.product,
       own: 0,
-      stock: s.qty,
+      stock: finiteParityValue(s.qty),
       reason: "в нашем снапшоте нет этой позиции",
     });
   }
@@ -311,6 +425,14 @@ export interface ParityReport {
   ownRows: number;
   mode: ParityMode;
   note: string | null;
+  /**
+   * Exact scopes that were authoritatively observable during this run.
+   * Absence from `mismatches` means recovery only when the same scope is here.
+   */
+  coverage: {
+    salesScopes: string[];
+    stockScopes: string[];
+  };
   /** Вторая половина гейта: остатки автоматов (связь №1, П4). */
   stock: {
     days: number;
@@ -341,6 +463,8 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     @Inject(DB) private readonly db: Db,
     /** Реестр автоматов — тот же источник правды о «не в строю», что у плана закупа. */
     private readonly vending: VendingService,
+    /** Optional in isolated unit fixtures; Nest production wiring is required and fail-closed. */
+    private readonly parityIssues?: ParityIssueService,
   ) {}
 
   onModuleInit(): void {
@@ -381,6 +505,11 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
    */
   async parity(days = 7, now = new Date()): Promise<ParityReport> {
     const n = Math.min(Math.max(Math.trunc(days) || 7, 1), 30);
+    return this.parityWindow(n, now);
+  }
+
+  /** Internal range may grow beyond the public 30-day diagnostic endpoint. */
+  private async parityWindow(n: number, now: Date): Promise<ParityReport> {
     // `now` — параметр по той же причине, что у `streak()`: кеш источника учёта
     // ключуется временем, и вызов без момента считал бы его срок по стенным
     // часам там, где вызывающий уже держит свой момент.
@@ -399,6 +528,7 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
         ownRows: 0,
         mode,
         note: записка,
+        coverage: { salesScopes: [], stockScopes: [] },
         stock: { days: n, checked: 0, ok: false, mismatches: [], withinTolerance: 0, tolerance: допуск, note: записка },
       };
     }
@@ -441,6 +571,22 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     const ownStock = ownStockRaw.map((r) => ({ ...r, qty: Number(r.qty) }));
     const stockStock = другая.stock.map((r) => ({ ...r, qty: Number(r.qty) }));
     const остатки = computeStockParity(ownStock, stockStock, new Set(notInService.keys()), допуск);
+    const salesScopes = [...new Set([...own, ...stockSide].map((row) => paritySalesScope(row.dt, row.serial)))].sort();
+    const activeOwnStockScopes = new Set(
+      ownStock
+        .filter((row) => !notInService.has(normalizeMachineSerial(row.serial)))
+        .map((row) => paritySalesScope(row.dt, row.serial)),
+    );
+    const activeStockScopes = new Set(
+      stockStock
+        .filter((row) => !notInService.has(normalizeMachineSerial(row.serial)))
+        .map((row) => paritySalesScope(row.dt, row.serial)),
+    );
+    // apply() performs delete+FULL replace for each (date,machine), so a scope
+    // present on BOTH sides is authoritative for the whole product set. A SKU
+    // absent from both full snapshots is an agreed deletion/zero and may close;
+    // a whole machine/day absent on either side remains unobserved and open.
+    const stockScopes = [...activeOwnStockScopes].filter((scope) => activeStockScopes.has(scope)).sort();
     // НЕ СВЕРИЛИ НИ ОДНОЙ ПАРЫ — ЭТО НЕ «ОК». Гейт открывает переключение
     // источника учёта, и «зелёный» без единой сравненной строки — ровно тот
     // случай «заглушка врёт», ради которого заводили смоук против живого
@@ -481,6 +627,7 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
       ownRows: own.length,
       mode,
       note,
+      coverage: { salesScopes, stockScopes },
       stock,
     };
   }
@@ -673,6 +820,51 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
         день_примечание: день.note,
       },
     });
+
+    // Durable tasks are a projection of the FULL report, not of the event
+    // samples (those are intentionally capped at 50). As an issue ages, keep
+    // widening the internal scan so a late correction can still close it.
+    // Any failure leaves existing tasks open and does not rewrite the truthful
+    // parity verdict already stored above.
+    if (this.parityIssues) {
+      try {
+        // Open issues widen the scan until they can be proved fixed. Resolved
+        // history is deliberately bounded by the 30-day baseline above: this
+        // guarantees recent recurrence without rescanning all history forever.
+        const oldest = await this.parityIssues.oldestOpenDate();
+        const issueDays = parityIssueWindowDays(oldest, now);
+        const issueReport = issueDays === p.days ? p : await this.parityWindow(issueDays, now);
+        await this.parityIssues.reconcile(issueReport, now);
+      } catch (e: unknown) {
+        const message = (e instanceof Error ? e.message : String(e)).slice(0, 1000);
+        this.log.warn(
+          `Живые задачи паритета не обновились; старые оставлены открытыми: ` +
+            message,
+        );
+        try {
+          await this.db
+            .insert(event)
+            .values({
+              source: PARITY_ISSUE_SOURCE,
+              type: PARITY_ISSUES_FAILED_EVENT,
+              clientKey: `${PARITY_ISSUE_SOURCE}:failed:${tashkentDay(now)}`,
+              occurredAt: now,
+              payload: {
+                error: message,
+                days: p.days,
+                salesMismatches: p.mismatches.length,
+                stockMismatches: p.stock.mismatches.length,
+              },
+            })
+            .onConflictDoNothing({ target: event.clientKey });
+        } catch (alertError: unknown) {
+          this.log.warn(
+            `Событие об отказе parity projection не записалось: ` +
+              `${alertError instanceof Error ? alertError.message : String(alertError)}`,
+          );
+        }
+      }
+    }
     this.log.log(
       `Паритет OurVend (${p.mode}): ${p.ok ? "ОК" : "расхождения"} — продажи ${p.mismatches.length} из ${p.checked} пар, ` +
         `остатки ${p.stock.mismatches.length} из ${p.stock.checked}` +

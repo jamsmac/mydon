@@ -48,6 +48,26 @@ describe("Блок «Ждут подтверждения» (П7, T6)", () => {
     expect(screen.getByRole("button", { name: "Переделать" })).toBeVisible();
   });
 
+  it("группирует приёмку по направлениям и оставляет null видимым последним", () => {
+    const { container } = render(
+      <AwaitingBlock
+        tasks={[
+          { ...ЗАДАЧА, id: "task-null", title: "Legacy", domain: null },
+          { ...ЗАДАЧА, id: "task-vendhub" },
+          { ...ЗАДАЧА, id: "task-globerent", title: "GR", domain: "globerent" },
+        ]}
+        names={ИМЕНА}
+      />,
+    );
+
+    expect(
+      Array.from(container.querySelectorAll(".awaiting-direction > .section-title")).map(
+        (node) => node.textContent,
+      ),
+    ).toEqual(["GLOBERENT1", "VendHub1", "Без направления1"]);
+    expect(screen.getByText("Legacy")).toBeVisible();
+  });
+
   it("показывает canonical GitHub URL как безопасную ссылку, а прочие URL — как текст", () => {
     const resultNote =
       "Вариант\nhttps://github.com/acme/telegram-crm\nЗапрос: https://example.com/from-task";

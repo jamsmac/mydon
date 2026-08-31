@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { core, CoreUnavailable } from "../../lib/core";
-import { parseDue } from "@mydon/shared";
+import { DOMAINS, parseDue } from "@mydon/shared";
 
 export interface ActionResult {
   ok: boolean;
@@ -20,6 +20,10 @@ export async function quickAddTask(form: FormData): Promise<ActionResult> {
   const title = String(form.get("title") ?? "").trim();
   if (title.length < 2) return { ok: false, error: "Напиши, что нужно сделать" };
 
+  const rawDomain = String(form.get("domain") ?? "").trim();
+  const domain = DOMAINS.find((candidate) => candidate === rawDomain);
+  if (!domain) return { ok: false, error: "Выбери направление" };
+
   const owner = String(form.get("owner") ?? "").trim(); // "human:<id>" | "agent:<name>"
   const [kind, ...rest] = owner.split(":");
   const ownerRef = rest.join(":");
@@ -32,6 +36,7 @@ export async function quickAddTask(form: FormData): Promise<ActionResult> {
   try {
     await core.createTask({
       title,
+      domain,
       ownerKind: kind,
       ownerRef,
       priority: String(form.get("priority") ?? "normal"),
@@ -143,7 +148,7 @@ export async function changeStatus(
 
 /**
  * Правка полей задачи: переназначить исполнителя, приоритет, срок, заголовок,
- * описание. Меняются только переданные поля. Исполнитель приходит строкой
+ * описание и направление. Меняются только переданные поля. Исполнитель приходит строкой
  * "human:<id>" | "agent:<name>" | "" (снять). Срок — словами (parseDue) или
  * пусто (снять).
  */
@@ -153,6 +158,7 @@ export async function editTask(
     title?: string;
     description?: string;
     owner?: string;
+    domain?: string;
     priority?: "low" | "normal" | "high" | "urgent";
     due?: string;
   },
@@ -166,6 +172,11 @@ export async function editTask(
   }
   if (patch.description !== undefined) body.description = patch.description.trim();
   if (patch.priority !== undefined) body.priority = patch.priority;
+  if (patch.domain !== undefined) {
+    const domain = DOMAINS.find((candidate) => candidate === patch.domain);
+    if (!domain) return { ok: false, error: "Выбери направление" };
+    body.domain = domain;
+  }
 
   if (patch.owner !== undefined) {
     const [kind, ...rest] = patch.owner.split(":");

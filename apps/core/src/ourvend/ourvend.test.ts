@@ -14,12 +14,16 @@ import {
   OurvendParityService,
   PARITY_EVENT,
   PARITY_EVENT_SOURCE,
+  PARITY_ISSUE_RECURRENCE_DAYS,
   PARITY_SCAN_LIMIT_MAX,
+  parityIssueWindowDays,
   parityScanLimit,
+  paritySalesScope,
   type ParityDayRow,
   type ParityStockRow,
 } from "./ourvend-parity.service";
 import { buildSnapshotRows, OurvendSnapshotService, rewriteKeys, type SnapshotDay } from "./ourvend-snapshot.service";
+import { PARITY_ISSUES_FAILED_EVENT } from "./parity-issue.service";
 
 /** Прогон с подменённым окружением: кеш источника учёта сбрасывается с обеих сторон. */
 async function сОкружением<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -197,6 +201,25 @@ describe("Паритет собственного снапшота со stock-д
     const stock = [row("2026-08-23", "m1", 12, 144000)];
     assert.equal(computeParity(own, stock).mismatches.length, 0);
   });
+
+  it("NaN/±Infinity в продажах fail-closed на любой стороне и не текут в JSON", () => {
+    for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const cases = [
+        computeParity([row("2026-08-23", "m1", invalid, 100)], [row("2026-08-23", "m1", 5, 100)]),
+        computeParity([row("2026-08-23", "m1", 5, 100)], [row("2026-08-23", "m1", invalid, 100)]),
+        computeParity([row("2026-08-23", "m1", 5, invalid)], [row("2026-08-23", "m1", 5, 100)]),
+        computeParity([row("2026-08-23", "m1", 5, 100)], [row("2026-08-23", "m1", 5, invalid)]),
+      ];
+      for (const result of cases) {
+        assert.equal(result.mismatches.length, 1, `${String(invalid)} не может выглядеть как равенство`);
+        const mismatch = result.mismatches[0]!;
+        assert.match(mismatch.reason, /некорректные числовые/);
+        for (const value of [mismatch.ownQty, mismatch.stockQty, mismatch.ownAmount, mismatch.stockAmount]) {
+          assert.equal(Number.isFinite(value), true, "payload с нечислом не сохраняем");
+        }
+      }
+    }
+  });
 });
 
 describe("Паритет ОСТАТКОВ автоматов (гашение связи №1, П4)", () => {
@@ -247,6 +270,72 @@ describe("Паритет ОСТАТКОВ автоматов (гашение с�
     const own = [s("2026-08-24", "m1", "Red  Bull", 6)];
     const stock = [s("2026-08-24", "m1", "red bull", 6)];
     assert.equal(computeStockParity(own, stock).mismatches.length, 0);
+  });
+
+  it("дубли алиасов сначала суммируются, а не заменяют друг друга в Map", () => {
+    const own = [
+      s("2026-08-24", "m1", "Red  Bull", 2),
+      s("2026-08-24", "m1", "red bull", 3),
+    ];
+    const equalStock = [
+      s("2026-08-24", "m1", "RED BULL", 1),
+      s("2026-08-24", "m1", "red   bull", 4),
+    ];
+    const equal = computeStockParity(own, equalStock);
+    assert.equal(equal.checked, 1, "один нормализованный товар = одна сверенная позиция");
+    assert.deepEqual(equal.mismatches, []);
+
+    const different = computeStockParity(own, [
+      s("2026-08-24", "m1", "RED BULL", 1),
+      s("2026-08-24", "m1", "red   bull", 3),
+    ]);
+    assert.equal(different.mismatches.length, 1, "дубли не создают два alert");
+    assert.deepEqual(
+      { own: different.mismatches[0]?.own, stock: different.mismatches[0]?.stock },
+      { own: 5, stock: 4 },
+      "обе стороны сравниваются по сумме, а не по последней строке",
+    );
+  });
+
+  it("NaN/±Infinity в остатках fail-closed на обеих сторонах", () => {
+    for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      for (const result of [
+        computeStockParity([s("2026-08-24", "m1", "Fanta", invalid)], [s("2026-08-24", "m1", "Fanta", 5)]),
+        computeStockParity([s("2026-08-24", "m1", "Fanta", 5)], [s("2026-08-24", "m1", "Fanta", invalid)]),
+      ]) {
+        assert.equal(result.mismatches.length, 1, `${String(invalid)} не закрывает расхождение`);
+        const mismatch = result.mismatches[0]!;
+        assert.match(mismatch.reason, /некорректные числовые/);
+        assert.equal(Number.isFinite(mismatch.own), true);
+        assert.equal(Number.isFinite(mismatch.stock), true);
+      }
+    }
+  });
+});
+
+describe("Окно повторной проверки parity issues", () => {
+  const now = new Date("2026-08-31T08:00:00+05:00");
+
+  it("без открытой проблемы держит 30 дней для рецидива недавно закрытых", () => {
+    assert.equal(parityIssueWindowDays(null, now), PARITY_ISSUE_RECURRENCE_DAYS);
+    assert.equal(parityIssueWindowDays("2026-08-30", now), PARITY_ISSUE_RECURRENCE_DAYS);
+  });
+
+  it("расширяется до даты самой старой открытой проблемы", () => {
+    assert.equal(parityIssueWindowDays("2026-08-01", now), 30);
+    assert.equal(parityIssueWindowDays("2026-06-01", now), 91);
+  });
+
+  it("некорректная или будущая дата не расширяет тяжёлый запрос", () => {
+    assert.equal(parityIssueWindowDays("not-a-date", now), PARITY_ISSUE_RECURRENCE_DAYS);
+    assert.equal(parityIssueWindowDays("2026-09-01", now), PARITY_ISSUE_RECURRENCE_DAYS);
+  });
+
+  it("ключ покрытия нормализует серийник", () => {
+    assert.equal(
+      paritySalesScope("2026-08-30", "C2508160376"),
+      paritySalesScope("2026-08-30", "2508160376"),
+    );
   });
 });
 
@@ -346,7 +435,22 @@ describe("Вердикт паритета: продажи и остатки вм
           if (/from "machine_stock"/.test(текст)) return Promise.resolve(таблицы.mirrorStock ?? []);
           return Promise.resolve([]);
         },
-        insert: () => ({ values: (v: Record<string, unknown>) => Promise.resolve(written.push(v)) }),
+        insert: () => ({
+          values: (v: Record<string, unknown>) => {
+            let committed = false;
+            const commit = () => {
+              if (committed) return 0;
+              committed = true;
+              const duplicate = typeof v.clientKey === "string" && written.some((row) => row.clientKey === v.clientKey);
+              return duplicate ? 0 : written.push(v);
+            };
+            return {
+              then: (resolve: (value: number) => unknown, reject?: (reason: unknown) => unknown) =>
+                Promise.resolve(commit()).then(resolve, reject),
+              onConflictDoNothing: async () => commit(),
+            };
+          },
+        }),
         // Журнал событий и настройки — ПУСТЫЕ: этот стенд про сверку, а не про
         // серию. Пустой журнал даёт `greenDays: 0`, то есть сигнал катовера
         // молчит и сверку не заслоняет; проверяют его тесты ниже, на своём
@@ -387,6 +491,8 @@ describe("Вердикт паритета: продажи и остатки вм
     assert.equal(p.stock.checked, 1);
     assert.equal(p.stock.ok, false);
     assert.equal(p.ok, false, "переключать источник нельзя, пока расходится хоть одна половина");
+    assert.deepEqual(p.coverage.salesScopes, ["2026-08-24|m1"]);
+    assert.deepEqual(p.coverage.stockScopes, ["2026-08-24|m1"]);
   });
 
   it("обе половины чистые — вердикт зелёный, и обе попадают в суточное событие", async () => {
@@ -491,6 +597,7 @@ describe("Вердикт паритета: продажи и остатки вм
 
     assert.equal(p.stock.checked, 1, "сверили только рабочий автомат");
     assert.deepEqual(p.stock.mismatches, []);
+    assert.deepEqual(p.coverage.stockScopes, ["2026-08-24|m1"], "склад не даёт ложного recovery coverage");
     assert.equal(p.stock.ok, true);
   });
 
@@ -505,6 +612,7 @@ describe("Вердикт паритета: продажи и остатки вм
     assert.equal(p.stock.checked, 0);
     assert.equal(p.stock.ok, false);
     assert.equal(p.ok, false);
+    assert.deepEqual(p.coverage.stockScopes, [], "без общего автомата старую проблему закрывать нельзя");
   });
 
   it("пустой снапшот продаж не отменяет запись сводки — иначе половина по остаткам теряется", async () => {
@@ -517,6 +625,29 @@ describe("Вердикт паритета: продажи и остатки вм
     const payload = written[0]!.payload as Record<string, unknown>;
     assert.equal(payload.остатки_сверено, 1);
     assert.match(String(payload.примечание), /продаж/);
+  });
+
+  it("отказ projection не стирает вердикт и даёт отдельный daily-deduped alert", async () => {
+    const written: Record<string, unknown>[] = [];
+    const остатки = [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }];
+    const { db } = stubDb({ ...продажиОК, ownStock: остатки, mirrorStock: остатки }, written);
+    const projection = {
+      oldestOpenDate: async () => null,
+      reconcile: async () => {
+        throw new Error("operational_issue unavailable");
+      },
+    } as never;
+    const svc = new OurvendParityService(db, реестрБезСклада(), projection);
+    const now = new Date("2026-08-31T08:40:00+05:00");
+
+    await svc.daily(now);
+    await svc.daily(now);
+
+    assert.equal(written.filter((row) => row.type === PARITY_EVENT).length, 2, "правдивый вердикт остаётся");
+    const failures = written.filter((row) => row.type === PARITY_ISSUES_FAILED_EVENT);
+    assert.equal(failures.length, 1, "один аварийный alert на ташкентские сутки");
+    assert.equal(failures[0]?.clientKey, "ourvend-parity-issue:failed:2026-08-31");
+    assert.match(String((failures[0]?.payload as { error?: string }).error), /operational_issue/);
   });
 });
 

@@ -146,6 +146,7 @@ export class OurvendHealthService {
             ownRows: 0,
             mode,
             note: записка,
+            coverage: { salesScopes: [], stockScopes: [] },
             stock: { days: PARITY_DAYS, checked: 0, ok: false, mismatches: [], withinTolerance: 0, tolerance: 0, note: записка },
           };
         }),

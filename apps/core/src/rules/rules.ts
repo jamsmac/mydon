@@ -1,4 +1,9 @@
 import { tashkentDay, tashkentInstant, TZ, type NotifyUrgency } from "@mydon/shared";
+import {
+  PARITY_ISSUES_FAILED_EVENT,
+  PARITY_ISSUES_OPENED_EVENT,
+  PARITY_ISSUES_RESOLVED_EVENT,
+} from "../ourvend/parity-issue-identity";
 
 /**
  * Правила уведомлений (ТЗ FR-2): событие → правило → сообщение.
@@ -397,8 +402,10 @@ export const RULES: Rule[] = [
     urgency: "briefing",
     format: (c) =>
       c.payload.ok === true
-        ? `✅ Паритет OurVend: сходится (пар ${str(c.payload.сверено_пар, "?")})`
-        : `⚠️ Паритет OurVend: расхождений ${str(c.payload.расхождений, "?")} из ${str(c.payload.сверено_пар, "?")} пар — переключать источник рано`,
+        ? `✅ Паритет OurVend: сходится (продажи ${str(c.payload.сверено_пар, "?")}, остатки ${str(c.payload.остатки_сверено, "?")})`
+        : `⚠️ Паритет OurVend: продажи — ${str(c.payload.расхождений, "?")} расхождений, ` +
+          `остатки — ${str(c.payload.остатки_расхождений, "?")}. ` +
+          `Переключать источник рано; отдельное уведомление подтвердит, обновились ли задачи VendHub`,
   },
   {
     // Гейт П8b: серия зелёных дней взяла порог. Немедленно и ровно один раз в
@@ -414,6 +421,42 @@ export const RULES: Rule[] = [
       `✅ Паритет OurVend зелёный ${num(c.payload.greenDays)} ` +
       `${счёт(num(c.payload.greenDays), "день", "дня", "дней")} подряд (с ${str(c.payload.since, "?")}) — ` +
       `можно переключать учёт на свой снапшот: Система → OURVEND_ACCOUNTING_SOURCE = own`,
+  },
+  {
+    // Transition-only signal. The durable state is the VendHub task; an
+    // unchanged red comparison produces no second Telegram notification.
+    id: PARITY_ISSUES_OPENED_EVENT,
+    eventType: PARITY_ISSUES_OPENED_EVENT,
+    urgency: "immediate",
+    format: (c) => {
+      const count = num(c.payload.count);
+      const reopened = num(c.payload.reopened);
+      return (
+        `⚠️ Сверка OurVend: ${count} ${счёт(count, "задача", "задачи", "задач")} ` +
+        `на исправление в Задачи → VendHub` +
+        (reopened > 0 ? `; повторно открыто ${reopened}` : "")
+      );
+    },
+  },
+  {
+    id: PARITY_ISSUES_RESOLVED_EVENT,
+    eventType: PARITY_ISSUES_RESOLVED_EVENT,
+    urgency: "immediate",
+    format: (c) => {
+      const count = num(c.payload.count);
+      return `✅ Сверка OurVend: исправлено и автоматически закрыто ${count} ${счёт(count, "задача", "задачи", "задач")}.`;
+    },
+  },
+  {
+    // The parity verdict is already durable when task projection fails. Say
+    // exactly what is stale so an operator neither trusts old tasks nor
+    // mistakes this alert for a failed source comparison.
+    id: PARITY_ISSUES_FAILED_EVENT,
+    eventType: PARITY_ISSUES_FAILED_EVENT,
+    urgency: "immediate",
+    format: (c) =>
+      `❌ Сверка OurVend посчитана, но список задач не обновился. ` +
+      `Старые задачи оставлены как есть. ${обрезать(str(c.payload.error, "неизвестная ошибка"), 700)}`.trim(),
   },
   {
     // Мусорные числа в снапшоте не вливаются нулём — но и молчать о них нельзя.
