@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { entity, machineCard, machinePlacement, maintenancePlan, task } from "@mydon/db";
 import { EntitiesService, nameMatches } from "./entities.service";
 
@@ -579,5 +580,110 @@ describe("Состояние автомата", () => {
     const { db } = statusDb({ entityRow: { id: "e1", type: "contractor", name: "ООО Ромашка" } });
     const s = new EntitiesService(db, auditStub());
     await assert.rejects(() => s.setMachineStatus("e1", "repair", "owner"), /только автоматам/);
+  });
+});
+
+/**
+ * Личный контур (org.code='personal') не утекает через domain-less чтения при
+ * ужесточении (R-P5-6). PersonalDomainGuard гейтит только явный `domain=personal`;
+ * find/byId/pending без домена он пропускает — эти тесты закрывают обход.
+ *
+ * Фильтрация personal делается на уровне SQL (WHERE), поэтому find/pending
+ * проверяются по СГЕНЕРИРОВАННОМУ условию: при excludePersonal=false его нет
+ * вовсе (выдача прода не меняется), при true — оно вырезает personal. byId
+ * решает в коде (404 как для несуществующей), поэтому проверяется сквозным
+ * поведением.
+ */
+describe("Личный контур в domain-less чтениях (R-P5-6)", () => {
+  function captureWhereDb(rows: Record<string, unknown>[] = []) {
+    const captured: unknown[] = [];
+    const chain: Record<string, unknown> = {};
+    Object.assign(chain, {
+      from: () => chain,
+      leftJoin: () => chain,
+      innerJoin: () => chain,
+      where: (c: unknown) => {
+        captured.push(c);
+        return chain;
+      },
+      orderBy: () => chain,
+      limit: () => chain,
+      then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
+        Promise.resolve(rows).then(res, rej),
+    });
+    const db = { select: () => chain } as never;
+    return { db, captured };
+  }
+  const render = (node: unknown): string => new PgDialect().sqlToQuery(node as never).sql;
+  const service = (db: never) => new EntitiesService(db, { record: async () => undefined } as never);
+
+  it("find: флаг выключен (excludePersonal=false) — фильтра personal нет, выдача как сегодня", async () => {
+    const { db, captured } = captureWhereDb([]);
+    await service(db).find({});
+    assert.equal(captured[0], undefined, "без флага WHERE не добавляет исключение personal");
+  });
+
+  it("find: excludePersonal=true — WHERE вырезает org.code='personal'", async () => {
+    const { db, captured } = captureWhereDb([]);
+    await service(db).find({}, true);
+    const text = render(captured[0]);
+    assert.match(text, /not exists/i);
+    assert.match(text, /personal/);
+  });
+
+  it("pending: excludePersonal=true — и карточки, и предложенные значения без personal", async () => {
+    const { db, captured } = captureWhereDb([]);
+    await service(db).pending(true);
+    assert.match(render(captured[0]), /personal/);
+    assert.match(render(captured[1]), /personal/);
+  });
+
+  it("pending: флаг выключен — карточки только по approvedAt, fields без фильтра (как сегодня)", async () => {
+    const { db, captured } = captureWhereDb([]);
+    await service(db).pending();
+    assert.doesNotMatch(render(captured[0]), /personal/);
+    assert.equal(captured[1], undefined, "fields без флага не фильтруется");
+  });
+
+  it("byId: excludePersonal=true + карточка personal → 404 как несуществующая", async () => {
+    const { db } = captureWhereDb([{ id: "p1", domain: "personal", attrs: {} }]);
+    await assert.rejects(() => service(db).byId("p1", true), /не найдена/);
+  });
+
+  it("byId: флаг выключен — карточка personal видна (как сегодня)", async () => {
+    const { db } = captureWhereDb([{ id: "p1", domain: "personal", attrs: {} }]);
+    const row = await service(db).byId("p1");
+    assert.equal(row.domain, "personal");
+  });
+
+  it("byId: excludePersonal=true + карточка не-personal → отдаётся", async () => {
+    const { db } = captureWhereDb([{ id: "v1", domain: "vendhub", attrs: {} }]);
+    const row = await service(db).byId("v1", true);
+    assert.equal(row.domain, "vendhub");
+  });
+
+  // drafts/recipe — тот же by-id sub-read, что byId: закрытая byId личная
+  // карточка (404, чтобы скрыть существование) не должна раскрывать
+  // предложенные значения и состав через соседний маршрут.
+  it("drafts: excludePersonal=true + карточка personal → 404 (черновики по id закрыты)", async () => {
+    const { db } = captureWhereDb([{ id: "p1", domain: "personal", attrs: {} }]);
+    await assert.rejects(() => service(db).drafts("p1", true), /не найдена/);
+  });
+
+  it("drafts: флаг выключен — черновики отдаются без резолва карточки (как сегодня)", async () => {
+    const { db } = captureWhereDb([{ id: "d1", entityId: "p1", field: "price" }]);
+    const rows = (await service(db).drafts("p1")) as { id: string }[];
+    assert.equal(rows[0]?.id, "d1");
+  });
+
+  it("recipe: excludePersonal=true + карточка personal → 404 (состав/цены по id закрыты)", async () => {
+    const { db } = captureWhereDb([{ id: "p1", domain: "personal", attrs: {} }]);
+    await assert.rejects(() => service(db).recipeOf("p1", true), /не найдена/);
+  });
+
+  it("recipe: флаг выключен — рецепт отдаётся без гейта personal (как сегодня)", async () => {
+    const { db } = captureWhereDb([{ id: "v1", domain: "vendhub", attrs: {} }]);
+    const recipe = await service(db).recipeOf("v1");
+    assert.equal(recipe.productId, "v1");
   });
 });

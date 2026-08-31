@@ -2906,3 +2906,159 @@ describe("Отметка «тебе поручили» (П7, R-P7-10)", () => {
     assert.equal(patches[0]!.assignNotifiedAt, СЕЙЧАС);
   });
 });
+
+/**
+ * Личные задачи (domain='personal') не утекают через `GET /tasks` без домена при
+ * ужесточении (R-P5-6). PersonalDomainGuard гейтит только явный `domain=personal`;
+ * domain-less list он пропускал. Controller передаёт excludePersonal=true, только
+ * когда флаг включён И запрос не owner-authed. Фильтр — на уровне SQL, поэтому
+ * проверяем сгенерированное WHERE: при false его нет (выдача прода не меняется),
+ * при true — `domain is distinct from 'personal'` (не вычёркивает NULL-domain).
+ */
+describe("Личные задачи в domain-less list (R-P5-6)", () => {
+  function captureWhereDb() {
+    let where: unknown;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: (condition: unknown) => {
+            where = condition;
+            return {
+              orderBy: () => ({
+                limit: () => ({ offset: async () => [] }),
+              }),
+            };
+          },
+        }),
+      }),
+    } as never;
+    return { db, get where() { return where; } };
+  }
+  const render = (node: unknown): string => new PgDialect().sqlToQuery(node as never).sql;
+
+  it("excludePersonal=false (флаг выключен) — WHERE не упоминает personal, выдача как сегодня", async () => {
+    const cap = captureWhereDb();
+    await makeTasks(cap.db).list({ openOnly: true });
+    assert.doesNotMatch(render(cap.where), /personal/);
+  });
+
+  it("excludePersonal=true — WHERE добавляет `domain is distinct from 'personal'`", async () => {
+    const cap = captureWhereDb();
+    await makeTasks(cap.db).list({ openOnly: true }, true);
+    const text = render(cap.where);
+    assert.match(text, /is distinct from/i);
+    assert.match(text, /personal/);
+  });
+});
+
+/**
+ * by-id чтения задачи (GET /tasks/:id и /:id/comments) — прямой аналог обхода
+ * domain-less list: при ужесточении и не-owner запросе личная задача обязана
+ * отдавать 404 (как несуществующая), а её тред — не читаться по id. Дефолт
+ * excludePersonal=false → внутренние вызовы и выдача прода не меняются.
+ */
+describe("by-id чтения задач не утекают personal (R-P5-6)", () => {
+  const ID = "33333333-3333-4333-8333-333333333333";
+
+  function taskDb(rows: Row[]) {
+    return {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => rows,
+            orderBy: () => ({ limit: async () => rows }),
+          }),
+        }),
+      }),
+    } as never;
+  }
+
+  it("byId: excludePersonal=true + personal → 404 как несуществующая", async () => {
+    await assert.rejects(
+      () => makeTasks(taskDb([{ id: ID, domain: "personal" }])).byId(ID, true),
+      /не найдена/,
+    );
+  });
+
+  it("byId: флаг выключен — personal видна (как сегодня)", async () => {
+    const row = await makeTasks(taskDb([{ id: ID, domain: "personal" }])).byId(ID);
+    assert.equal(row.domain, "personal");
+  });
+
+  it("byId: excludePersonal=true + не-personal → отдаётся", async () => {
+    const row = await makeTasks(taskDb([{ id: "t1", domain: "vendhub" }])).byId("t1", true);
+    assert.equal(row.domain, "vendhub");
+  });
+
+  it("comments: excludePersonal=true + задача personal → 404 ДО выдачи треда", async () => {
+    // Первый select — это byId: он видит personal-задачу и бросает 404 раньше,
+    // чем дело дойдёт до select переписки. Иначе тред утёк бы по id.
+    await assert.rejects(
+      () => makeTasks(taskDb([{ id: ID, domain: "personal" }])).comments(ID, true),
+      /не найдена/,
+    );
+  });
+
+  it("comments: флаг выключен — тред отдаётся без резолва задачи (как сегодня)", async () => {
+    const thread = [{ id: "c1", taskId: ID, body: "привет" }];
+    const result = await makeTasks(taskDb(thread)).comments(ID);
+    assert.deepEqual(result, thread);
+  });
+});
+
+/**
+ * awaiting/unassigned — отдельные выборки, но тот же domain-less обход GET
+ * /tasks: excludePersonal обязан вырезать personal и в них. Проверяем по
+ * сгенерированному WHERE: при false его нет (выдача прода не меняется), при
+ * true — `domain is distinct from 'personal'` (не вычёркивает NULL-domain).
+ */
+describe("awaiting/unassigned не утекают personal (R-P5-6)", () => {
+  function captureWhereDb() {
+    let where: unknown;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: (condition: unknown) => {
+            where = condition;
+            return { orderBy: () => ({ limit: () => ({ offset: async () => [] }) }) };
+          },
+        }),
+      }),
+    } as never;
+    return {
+      db,
+      get where() {
+        return where;
+      },
+    };
+  }
+  const render = (node: unknown): string => new PgDialect().sqlToQuery(node as never).sql;
+
+  it("unassigned: флаг выключен — WHERE без personal (как сегодня)", async () => {
+    const cap = captureWhereDb();
+    await makeTasks(cap.db).unassigned();
+    assert.doesNotMatch(render(cap.where), /personal/);
+  });
+
+  it("unassigned: excludePersonal=true — WHERE добавляет `is distinct from 'personal'`", async () => {
+    const cap = captureWhereDb();
+    await makeTasks(cap.db).unassigned(50, 0, true);
+    const text = render(cap.where);
+    assert.match(text, /is distinct from/i);
+    assert.match(text, /personal/);
+  });
+
+  it("awaitingConfirmation: флаг выключен — WHERE без personal (как сегодня)", async () => {
+    const cap = captureWhereDb();
+    await makeTasks(cap.db).awaitingConfirmation();
+    assert.doesNotMatch(render(cap.where), /personal/);
+  });
+
+  it("awaitingConfirmation: excludePersonal=true — WHERE вырезает personal", async () => {
+    const cap = captureWhereDb();
+    await makeTasks(cap.db).awaitingConfirmation(100, 0, true);
+    const text = render(cap.where);
+    assert.match(text, /is distinct from/i);
+    assert.match(text, /personal/);
+  });
+});
