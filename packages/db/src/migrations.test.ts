@@ -2,22 +2,33 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { generateDrizzleJson, generateMigration } from "drizzle-kit/api";
+import type { DrizzleSnapshotJSON } from "drizzle-kit/api";
+import * as схема from "./schema";
 
 /**
- * Сторож ЦЕПОЧКИ миграций, а не их содержания.
+ * Сторож ЦЕПОЧКИ миграций: журнал ↔ файлы ↔ снапшоты ↔ schema.ts.
  *
- * Ловит ровно один класс аварии: две ветки взяли один номер. Мигратор
- * drizzle идёт по `_journal.json`, а не по каталогу, поэтому файл без записи
- * НЕ применится вовсе (и это будет видно только в проде, когда колонки нет), а
- * запись без файла роняет автодеплой на ровном месте. Оба случая рождаются в
- * rebase и оба невидимы для `pnpm build`.
+ * Ловит два класса аварии.
+ *
+ * 1. Две ветки взяли один номер. Мигратор drizzle идёт по `_journal.json`,
+ *    а не по каталогу, поэтому файл без записи НЕ применится вовсе (и это
+ *    будет видно только в проде, когда колонки нет), а запись без файла
+ *    роняет автодеплой на ровном месте. Оба случая рождаются в rebase и оба
+ *    невидимы для `pnpm build`.
+ *
+ * 2. Дыра в снапшотах. Рукописная миграция, добавленная в журнал без
+ *    `drizzle-kit generate`, оставляет head-снапшот позади schema.ts —
+ *    следующий `generate` диффит против устаревшего состояния и порождает
+ *    миграцию, заново объявляющую существующие enum/таблицы/индексы. На
+ *    проде такая миграция падает на первом же `CREATE`. Ровно это случилось
+ *    с дырами 0049–0055 и 0079–0082 (восстановлены 31.08.2026), поэтому
+ *    теперь: снапшот обязан существовать на КАЖДУЮ запись журнала, цепочка
+ *    prevId → id — быть непрерывной, а head-снапшот — совпадать со schema.ts
+ *    (сверка тем же движком, что и `drizzle-kit generate`, но in-process).
  *
  * Папка считается от расположения файла (`dist/../drizzle`), а не от cwd, —
  * тот же приём, что в `migrate.ts:33`: тесты зовут и из корня, и из пакета.
- *
- * Снапшоты (`meta/<NNNN>_snapshot.json`) НЕ проверяются намеренно: их 65 на 72
- * миграции — у семи рукописных (`0049`…`0055`) снапшота нет, и такая проверка
- * была бы красной с рождения, то есть её бы отключили в первый же день.
  */
 const ПАПКА = path.resolve(__dirname, "..", "drizzle");
 
@@ -29,6 +40,25 @@ interface ЗаписьЖурнала {
 function журнал(): ЗаписьЖурнала[] {
   const raw = readFileSync(path.join(ПАПКА, "meta", "_journal.json"), "utf8");
   return (JSON.parse(raw) as { entries: ЗаписьЖурнала[] }).entries;
+}
+
+function имяСнапшота(idx: number): string {
+  return `${String(idx).padStart(4, "0")}_snapshot.json`;
+}
+
+function снапшот(idx: number): DrizzleSnapshotJSON {
+  const файл = path.join(ПАПКА, "meta", имяСнапшота(idx));
+  let raw: string;
+  try {
+    raw = readFileSync(файл, "utf8");
+  } catch {
+    assert.fail(
+      `нет снапшота ${имяСнапшота(idx)} — миграция добавлена в журнал без ` +
+        "drizzle-kit generate; следующий generate продиффит schema.ts против " +
+        "устаревшего head и породит битую миграцию",
+    );
+  }
+  return JSON.parse(raw) as DrizzleSnapshotJSON;
 }
 
 describe("Цепочка миграций: файл ↔ журнал (сторож номера)", () => {
@@ -66,6 +96,55 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
 
   it("теги уникальны", () => {
     assert.equal(new Set(записи.map((e) => e.tag)).size, записи.length);
+  });
+
+  it("на каждую запись журнала есть снапшот version 7 / postgresql", () => {
+    for (const e of записи) {
+      const s = снапшот(e.idx);
+      assert.equal(s.version, "7", `${имяСнапшота(e.idx)}: неожиданный version ${s.version}`);
+      assert.equal(s.dialect, "postgresql", `${имяСнапшота(e.idx)}: неожиданный dialect`);
+    }
+  });
+
+  it("лишних снапшотов нет: каждый meta/*_snapshot.json отвечает записи журнала", () => {
+    const наДиске = readdirSync(path.join(ПАПКА, "meta"))
+      .filter((f) => f.endsWith("_snapshot.json"))
+      .map((f) => f.slice(0, 4));
+    assert.deepEqual(
+      наДиске.sort(),
+      записи.map((e) => String(e.idx).padStart(4, "0")),
+      "снапшот без записи журнала собьёт нумерацию следующего generate",
+    );
+  });
+
+  it("цепочка prevId → id непрерывна, id уникальны", () => {
+    const ids = записи.map((e) => снапшот(e.idx).id);
+    assert.equal(new Set(ids).size, ids.length, "дубль id снапшота — цепочка склеена неверно");
+    for (let i = 1; i < записи.length; i++) {
+      assert.equal(
+        снапшот(i).prevId,
+        ids[i - 1],
+        `${имяСнапшота(i)}: prevId не указывает на снапшот ${имяСнапшота(i - 1)} — ` +
+          "в lineage дыра или перестановка",
+      );
+    }
+  });
+
+  it("head-снапшот совпадает со schema.ts: drizzle-kit generate не породит миграцию", async () => {
+    // Тот же дифф-движок, что у `drizzle-kit generate`, но in-process.
+    // Непустой список statements значит: head-снапшот отстал от schema.ts, и
+    // следующий автогенерированный файл заново объявит существующие объекты —
+    // на проде он упадёт на первом CREATE. Чинить регенерацией снапшота,
+    // а не правкой этого теста.
+    const head = снапшот(записи.length - 1);
+    const текущий = generateDrizzleJson({ ...схема }, head.id);
+    const statements = await generateMigration(head, текущий);
+    assert.deepEqual(
+      statements,
+      [],
+      "schema.ts разошёлся с head-снапшотом — прогоните drizzle-kit generate " +
+        "и закоммитьте миграцию вместе со снапшотом",
+    );
   });
 
   it("0075 сеет текущие Anthropic-модели с раздельными 5m/1h cache-тарифами", () => {

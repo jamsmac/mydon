@@ -1,6 +1,6 @@
 {
-  "id": "99935730-a42c-446f-8aa5-a5550e3ddf12",
-  "prevId": "8b68a839-ac51-4619-8322-b35addf40223",
+  "id": "8b68a839-ac51-4619-8322-b35addf40223",
+  "prevId": "7b11374d-8d6c-4137-a41e-1f815b2f87b8",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3610,15 +3610,7 @@
           "name": "machine_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
-        },
-        "location": {
-          "name": "location",
-          "type": "part_location",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'machine'"
+          "notNull": true
         },
         "part_kind": {
           "name": "part_kind",
@@ -3747,23 +3739,7 @@
             }
           ],
           "isUnique": true,
-          "where": "removed_on is null and machine_id is not null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "machine_part_serial_idx": {
-          "name": "machine_part_serial_idx",
-          "columns": [
-            {
-              "expression": "serial_number",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "serial_number is not null",
+          "where": "removed_on is null",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -3821,10 +3797,6 @@
         "machine_part_dates": {
           "name": "machine_part_dates",
           "value": "\"machine_part\".\"removed_on\" is null or \"machine_part\".\"removed_on\" >= \"machine_part\".\"installed_on\""
-        },
-        "machine_part_location_matches": {
-          "name": "machine_part_location_matches",
-          "value": "(\"machine_part\".\"machine_id\" is not null and \"machine_part\".\"location\" = 'machine') or (\"machine_part\".\"machine_id\" is null and \"machine_part\".\"location\" <> 'machine')"
         }
       },
       "isRLSEnabled": false
@@ -8591,9 +8563,7 @@
         "inspection",
         "calibration",
         "repair",
-        "other",
-        "part_install",
-        "part_remove"
+        "other"
       ]
     },
     "public.maintenance_outcome": {
@@ -8646,17 +8616,6 @@
         "spiral",
         "elevator",
         "other"
-      ]
-    },
-    "public.part_location": {
-      "name": "part_location",
-      "schema": "public",
-      "values": [
-        "machine",
-        "warehouse",
-        "washing",
-        "drying",
-        "repair"
       ]
     },
     "public.part_swap_reason": {
