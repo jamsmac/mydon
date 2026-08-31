@@ -84,4 +84,44 @@ out=$(run 2>&1) || fail "тик после сбоя нового пуша обя
 printf '%s' "$out" | grep -q 'ретрай через' || fail "сбой до git reset не ушёл в кулдаун: $out"
 printf '%s' "$out" | grep -q 'бэкап' && fail "кулдаун не удержал повторный дамп: $out"
 
+# 7. ЗАСТАВА ПУБЛИКАЦИИ ПАНЕЛИ стоит в РАБОЧЕМ пути и ДО переключения
+#    контейнеров (статическая проверка порядка: иначе застава могла бы снова
+#    остаться только в ручном deploy.sh, которым по документации пользуются
+#    как исключением). Переключение — поэтапный rollout, поэтому сверяем с
+#    ПЕРВЫМ `up -d`: любой из них уже трогает контейнеры.
+gate_line=$(grep -n "^panel_bind=" "$ROOT/deploy/auto-deploy.sh" | head -1 | cut -d: -f1)
+# shellcheck disable=SC2016  # ${COMPOSE[@]} тут ИСКОМЫЙ ТЕКСТ, не подстановка
+up_line=$(grep -n '^"\${COMPOSE\[@\]}" up -d' "$ROOT/deploy/auto-deploy.sh" | head -1 | cut -d: -f1)
+[ -n "$gate_line" ] || fail "в auto-deploy.sh нет заставы PANEL_BIND"
+[ -n "$up_line" ] || fail "в auto-deploy.sh не найден шаг переключения контейнеров"
+[ "$gate_line" -lt "$up_line" ] || fail "застава PANEL_BIND стоит ПОСЛЕ up -d — порт уже опубликован"
+grep -q 'деплой остановлен (панель ушла бы в интернет)' "$ROOT/deploy/auto-deploy.sh" \
+  || fail "застава PANEL_BIND не объясняет причину отказа"
+
+# 8. Застава ЖИВЬЁМ: она стоит до бэкапа, и фикстура до неё доходит. Разбор
+#    .env обязан совпадать с compose (проверено на docker 28.3.3): compose
+#    принимает `export KEY=…`/пробелы вокруг `=` и срезает кавычки/CR.
+# 8а. Fail-open класс: `export PANEL_BIND=0.0.0.0` compose видит (панель ушла
+#     бы в интернет), а узкий grep '^PANEL_BIND=' — нет: застава молча
+#     пропускала. Обязана остановить деплой, причём ДО бэкапа (дешёвый отказ:
+#     агенты живы, pg_dump не молотится).
+printf 'export PANEL_BIND=0.0.0.0\n' > "$TMP/app/.env"
+printf '%s\n' "$(( $(date +%s) - 700 ))" > "$BACKUP/.fail-at"
+set +e; out=$(run 2>&1); rc=$?; set -e
+[ "$rc" -ne 0 ] || fail "застава пропустила export PANEL_BIND=0.0.0.0"
+printf '%s' "$out" | grep -q 'панель ушла бы в интернет' || fail "нет отказа заставы: $out"
+printf '%s' "$out" | grep -q 'бэкап' && fail "застава сработала ПОСЛЕ бэкапа — отказ дороже необходимого: $out"
+
+# 8б. Fail-closed класс: значение в кавычках и с CRLF легитимно (compose их
+#     срезает — так панель на проде и работает). Застава обязана пропустить,
+#     прогон честно идёт дальше и падает на бэкапе.
+printf 'PANEL_BIND="100.81.197.68"\r\n' > "$TMP/app/.env"
+printf '%s\n' "$(( $(date +%s) - 700 ))" > "$BACKUP/.fail-at"
+set +e; out=$(run 2>&1); rc=$?; set -e
+[ "$rc" -ne 0 ] || fail "прогон 8б обязан дойти до бэкапа и упасть там"
+printf '%s' "$out" | grep -q 'панель ушла бы в интернет' \
+  && fail "застава заблокировала легитимный Tailscale-адрес в кавычках: $out"
+printf '%s' "$out" | grep -q 'бэкап базы не удался' || fail "прогон 8б не дошёл до бэкапа: $out"
+rm -f "$TMP/app/.env"
+
 printf 'auto-deploy-gate tests: ok\n'

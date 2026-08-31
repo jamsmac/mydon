@@ -15,11 +15,19 @@ cat > "$TMP/bin/curl" <<'FAKE'
 # Фейковый curl: gist отдаёт заготовленное тело, Telegram — режим из env.
 out=""
 prev=""
+config_stdin=0
 for a in "$@"; do
   [ "$prev" = "-o" ] && out="$a"
+  case "$a" in -K- | --config) config_stdin=1 ;; esac
   prev="$a"
 done
-case "$*" in
+# АДРЕС МОЖЕТ ПРИЕХАТЬ НЕ АРГУМЕНТОМ: скрипты отдают URL и заголовки с
+# токенами через config-stdin (`-K-`), чтобы секрет не светился в `ps`.
+# Тогда сопоставлять надо и по прочитанной конфигурации, иначе стенд
+# «не узнаёт» штатный вызов.
+cfg=""
+[ "$config_stdin" = 1 ] && cfg="$(cat)"
+case "$* $cfg" in
   *api.github.com/gists*)
     cat "$FAKE_GIST_BODY" > "$out"
     printf '200'
@@ -34,7 +42,7 @@ case "$*" in
     exit 0
     ;;
 esac
-echo "fake-curl: неожиданный вызов: $*" >&2
+echo "fake-curl: неожиданный вызов: $* $cfg" >&2
 exit 9
 FAKE
 chmod +x "$TMP/bin/curl"

@@ -62,11 +62,18 @@ trap 'rm -f "$body"' EXIT
 # И выходит ненулём. Перетираем код при ЛЮБОМ ненулевом выходе curl: transfer,
 # оборвавшийся ПОСЛЕ заголовков (истёк --max-time на теле), печатает 200 при
 # битом теле — это тоже «недоступен», а не валидный ответ.
+# ТОКЕН НЕ В АРГУМЕНТАХ: заголовок уходит через config-stdin (`-K-`), иначе
+# PAT (Gists: read AND write — им можно подделать свежесть heartbeat.json и
+# ослепить dead-man switch) виден любому процессу через `ps auxww` до 20 с
+# (--max-time) на каждом 15-минутном тике. Кавычки/бэкслеши в значении —
+# escape-последовательности синтаксиса curl-конфига: без экранирования токен
+# с `"` молча обрезается по кавычке (полный идиом — standby-lib.sh).
+gh_token_esc="$(printf '%s' "$HEARTBEAT_GH_TOKEN" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 if ! code="$(curl -sS -o "$body" -w '%{http_code}' \
-  -H "Authorization: Bearer $HEARTBEAT_GH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   --max-time 20 \
-  "https://api.github.com/gists/$HEARTBEAT_GIST_ID")"; then
+  "https://api.github.com/gists/$HEARTBEAT_GIST_ID" \
+  -K- <<< "header = \"Authorization: Bearer $gh_token_esc\"")"; then
   code=000
 fi
 
@@ -163,7 +170,8 @@ send() {
     echo "WATCHDOG_BOT_TOKEN/WATCHDOG_CHAT_IDS не заданы — тревога только в лог: $1"
     return 0
   fi
-  local chat resp delivered=1
+  local chat resp delivered=1 bot_token_esc
+  bot_token_esc="$(printf '%s' "$WATCHDOG_BOT_TOKEN" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
   IFS=',' read -ra chats <<< "$WATCHDOG_CHAT_IDS"
   for chat in "${chats[@]}"; do
     chat="$(echo "$chat" | tr -d '[:space:]')"
@@ -173,10 +181,17 @@ send() {
     # сам по себе на это не падает. Найдено на практике на соседнем скрипте
     # (heartbeat.sh) — та же ошибка молча превращала неудачу в «отправлено».
     # Поэтому проверяем поле "ok" в самом ответе, а не только код завершения.
+    # ТОКЕН НЕ В АРГУМЕНТАХ: URL уходит через config-stdin (`-K-`),
+    # иначе полный `https://api.telegram.org/bot<токен>/sendMessage` видит
+    # любой процесс через `ps auxww`, а сторож крутится по таймеру каждые
+    # 15 минут — окно наблюдения практически постоянное. Значение экранируем
+    # (полный идиом — standby-lib.sh): кавычки/бэкслеши в curl-конфиге —
+    # escape-последовательности, и токен с `"` молча обрезал бы URL — вечный
+    # «Telegram отклонил»-ретрай, тревога не доставляется никогда.
     resp="$(curl -sS -X POST --max-time 15 \
       -H "Content-Type: application/json" \
       -d "$(python3 -c 'import json,sys; print(json.dumps({"chat_id": sys.argv[1], "text": sys.argv[2]}))' "$chat" "$1")" \
-      "https://api.telegram.org/bot${WATCHDOG_BOT_TOKEN}/sendMessage")" || {
+      -K- <<< "url = \"https://api.telegram.org/bot${bot_token_esc}/sendMessage\"")" || {
       echo "тревога не отправлена в $chat: сеть недоступна"
       continue
     }
