@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { collection, moneyFlow } from "@mydon/db";
+import { collection, fxRate, moneyFlow, org } from "@mydon/db";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { FinanceService } from "./finance.service";
 
 type Row = Record<string, unknown>;
@@ -453,5 +455,129 @@ describe("FinanceService.cashReconcile — изъято по системе vs �
     const report = await svc.cashReconcile("2026-06-01", "2026-06-30");
     assert.equal(report.deposited, 5000000, "отменённый взнос не должен попасть в сумму сданного");
     assert.equal(report.depositedCount, 1);
+  });
+});
+
+/**
+ * Стаб БД для `summary`: org (лукап направления), money_flow (лента с
+ * leftJoin на entity) и fx_rate (курсы, пусто). `.where()` money_flow РЕАЛЬНО
+ * фильтрует строки (evalDrizzleCondition) и ЗАПОМИНАЕТ условие — тест дальше
+ * рендерит его настоящим `PgDialect` и проверяет параметры так, как их увидел
+ * бы драйвер (тот же приём, что в ourvend.test.ts, #248).
+ */
+function summaryDb(seed: { orgs?: Row[]; moneyFlows?: Row[] }) {
+  const captured: { where?: unknown } = {};
+  const tables = new Map<unknown, Row[]>([
+    [org, seed.orgs ?? []],
+    [moneyFlow, seed.moneyFlows ?? []],
+    [fxRate, []],
+  ]);
+  const db = {
+    select: (_cols?: unknown) => ({
+      from: (t: unknown) => {
+        const rows = tables.get(t) ?? [];
+        if (t === moneyFlow) {
+          return {
+            leftJoin: () => ({
+              where: (cond?: unknown) => {
+                captured.where = cond;
+                const matched = rows.filter((r) => evalDrizzleCondition(cond, r));
+                return {
+                  orderBy: () => ({
+                    limit: () =>
+                      Promise.resolve(matched.map((r) => ({ flow: r, counterpartyEntityName: null }))),
+                  }),
+                };
+              },
+            }),
+          };
+        }
+        return {
+          // org: select().from(org).where() — await-ится напрямую.
+          where: (cond?: unknown) =>
+            Promise.resolve(rows.filter((r) => evalDrizzleCondition(cond, r))),
+          // fx_rate: select().from(fxRate).orderBy().limit().
+          orderBy: () => ({ limit: () => Promise.resolve(rows) }),
+        };
+      },
+    }),
+  } as never;
+  return { db, captured };
+}
+
+describe("FinanceService.summary — свод не падает и фильтрует факты по ташкентской границе (аудит 31.08, пункт 6)", () => {
+  const orgs = [{ id: "org-glob", code: "globerent" }];
+  const flow = (over: Row): Row => ({
+    id: `mf-${JSON.stringify(over).length}`,
+    orgId: "org-glob",
+    direction: "in",
+    status: "actual",
+    amount: "1",
+    currency: "UZS",
+    rate: null,
+    amountUzs: null,
+    dueDate: null,
+    counterpartyId: null,
+    counterparty: null,
+    date: new Date("2026-08-01T10:00:00+05:00"),
+    ...over,
+  });
+
+  it("граница фактов уезжает в запрос СТРОКОЙ, не голым Date (голый Date в sql-шаблоне ронял Bind у postgres.js — «Финансовый свод недоступен» при живых 783 строках)", async () => {
+    const { db, captured } = summaryDb({ orgs, moneyFlows: [] });
+    const svc = new FinanceService(db);
+    await svc.summary("globerent", new Date("2026-08-31T12:00:00+05:00"));
+    const { params } = new PgDialect().sqlToQuery(captured.where as SQL);
+    assert.ok(
+      params.every((p) => !(p instanceof Date)),
+      "ни один параметр не должен доехать до драйвера Date-объектом: drizzle отключает у postgres.js сериализатор timestamptz",
+    );
+    // 366 ташкентских суток назад от 31.08.2026 = 30.08.2025, началом суток
+    // Ташкента (00:00+05:00 = 19:00Z накануне) — column-encoder отдал ISO.
+    assert.ok(
+      params.includes("2025-08-29T19:00:00.000Z"),
+      `граница — начало ташкентских суток 2025-08-30, среди параметров: ${JSON.stringify(params)}`,
+    );
+  });
+
+  it("фильтр по границе: старый план живёт, факт в окне и ровно НА границе — в своде, факт старше окна и cancelled — нет", async () => {
+    const { db } = summaryDb({
+      orgs,
+      moneyFlows: [
+        // План 2023 года — долг живёт годами, граница фактов его не касается.
+        flow({ status: "planned", amount: "500000", date: new Date("2023-01-10T10:00:00+05:00") }),
+        // Факт внутри окна.
+        flow({ amount: "111" }),
+        // Факт ровно на границе — 00:00 ташкентских суток 30.08.2025 (gte, включительно).
+        flow({ amount: "7", date: new Date("2025-08-30T00:00:00+05:00") }),
+        // Факт на миг СТАРШЕ границы — вне свода.
+        flow({ amount: "999999", date: new Date("2025-08-29T23:59:59.999+05:00") }),
+        // Отменённая запись — вне свода при любой дате.
+        flow({ status: "cancelled", amount: "555" }),
+        // Чужое направление — вне свода.
+        flow({ orgId: "org-other", amount: "333" }),
+      ],
+    });
+    const svc = new FinanceService(db);
+    const s = await svc.summary("globerent", new Date("2026-08-31T12:00:00+05:00"));
+    assert.equal(s.receivables.total.count, 1, "старое обязательство остаётся в агинге");
+    assert.equal(s.receivables.total.uzs, 500000);
+    const inflow = s.months.reduce((acc, m) => acc + m.inflowUzs, 0);
+    assert.equal(inflow, 111 + 7, "в кэш-флоу — только факты из окна, граница включительно");
+  });
+
+  it("полночь Ташкента: «сегодня» и граница считаются от ташкентских суток, а не от UTC-суток сервера", async () => {
+    // 20:30Z 30.08 = 01:30 Ташкента 31.08 — по UTC ещё «вчера».
+    const { db, captured } = summaryDb({ orgs, moneyFlows: [] });
+    const svc = new FinanceService(db);
+    const s = await svc.summary("globerent", new Date("2026-08-30T20:30:00.000Z"));
+    assert.equal(s.today, "2026-08-31", "сегодня — ташкентские сутки, не UTC");
+    const { params } = new PgDialect().sqlToQuery(captured.where as SQL);
+    // От ташкентского 31.08 граница = 30.08.2025 00:00+05:00; счёт от UTC-суток
+    // дал бы 29.08.2025 (сдвиг на сутки в окне 00:00–05:00 Ташкента).
+    assert.ok(
+      params.includes("2025-08-29T19:00:00.000Z"),
+      `граница от ташкентского дня: ${JSON.stringify(params)}`,
+    );
   });
 });
