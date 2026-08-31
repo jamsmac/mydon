@@ -1,4 +1,15 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
@@ -15,6 +26,7 @@ import {
 } from "class-validator";
 import { Type } from "class-transformer";
 import { Cron } from "croner";
+import { OwnerMutationGuard } from "../common/owner-mutation.guard";
 import { AgentsService } from "./agents.service";
 
 const STATUSES = ["active", "paused", "draft", "deprecated"] as const;
@@ -105,6 +117,12 @@ export class UpdateAgentDto extends CreateAgentDto {
   declare name: string;
 }
 
+/** Смена автономии агента — отдельное owner-действие (R-P5-5). */
+export class SetAutonomyDto {
+  @IsIn([...TIERS], { message: "autonomyDefault: один из T0..T4" })
+  autonomyDefault!: (typeof TIERS)[number];
+}
+
 /**
  * Карточка агента (запрос владельца: настройки пополняются, меняются, удаляются).
  * Источник истины — база: правки переживают обновление системы.
@@ -145,8 +163,26 @@ export class AgentsController {
     this.assertCrons(dto.schedule);
     const patch = this.toInput(dto);
     // Имя неизменяемо — молча отбрасываем, если пришло.
-    const { name: _ignored, ...rest } = patch;
+    // Автономию из общего patch тоже отбрасываем: её меняет ТОЛЬКО отдельный
+    // owner-эндпоинт ниже (R-P5-5), иначе держатель общего SERVICE_TOKEN
+    // (в т.ч. сам Agents worker) поднял бы себе тир любым patch'ем карточки.
+    const { name: _ignored, autonomyDefault: _autonomy, ...rest } = patch;
     return this.agents.update(name, rest);
+  }
+
+  /**
+   * Смена автономии агента — owner-действие под вторым поясом (R-P5-5).
+   *
+   * Отдельным маршрутом, а не полем общего patch: под owner-guard попадает
+   * ТОЛЬКО повышение/понижение тира, а не любая правка карточки. Guard
+   * пропускает, пока ужесточение выключено (по умолчанию) — панель меняет тир
+   * под общим SERVICE_TOKEN, как сегодня; при включённом флаге нужен отдельный
+   * OWNER_ACTION_TOKEN.
+   */
+  @Patch(":name/autonomy")
+  @UseGuards(OwnerMutationGuard)
+  setAutonomy(@Param("name") name: string, @Body() dto: SetAutonomyDto) {
+    return this.agents.update(name, { autonomyDefault: dto.autonomyDefault });
   }
 
   /** Удаление = архивация: история агента остаётся объяснимой. */

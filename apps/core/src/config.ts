@@ -41,6 +41,17 @@ export const appConfig = {
     return process.env.OWNER_ACTION_TOKEN ?? "";
   },
   /**
+   * Аварийный env kill-switch ужесточения owner-identity (P5, R-P5-6).
+   *
+   * Значение "0" ВСЕГДА выключает ужесточение — даже если тумблер
+   * OWNER_IDENTITY_ENFORCED в базе стоит "1", — чтобы ошибка настройки не
+   * заперла владельца снаружи собственной панели. Пусто — решают база/дефолт
+   * (по умолчанию ужесточение выключено, и мерж среза не меняет поведение).
+   */
+  get ownerIdentityEnforcedEnv(): string {
+    return process.env.OWNER_IDENTITY_ENFORCED?.trim() ?? "";
+  },
+  /**
    * Final server-side limit for agent.action events per Tashkent day.
    * Zero explicitly disables the cap. Empty or invalid input must not
    * accidentally remove the production limit, so the documented default is 50.
