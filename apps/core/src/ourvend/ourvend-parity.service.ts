@@ -107,6 +107,22 @@ export function parityScanLimit(threshold: number): number {
   return Math.min(PARITY_SCAN_LIMIT_MAX, Math.max(PARITY_SCAN_LIMIT, Math.trunc(threshold) + PARITY_STREAK_WINDOW));
 }
 
+/** Сутки в миллисекундах: у Ташкента нет перехода на летнее время. */
+const DAY_MS = 86_400_000;
+
+/**
+ * Окно сверки — ГОТОВЫЕ ташкентские сутки, посчитанные в приложении.
+ *
+ * Обе стороны (наша база и донорская) получают ОДНИ И ТЕ ЖЕ строки-даты, а не
+ * считают `current_date` каждая у себя: см. комментарий в `parityWindow()`.
+ */
+interface ParityWindow {
+  /** Включительно. */
+  from: string;
+  /** Исключительно (сегодняшние сутки). */
+  to: string;
+}
+
 /** Stable authoritative coverage key shared with the durable issue projection. */
 export function paritySalesScope(dt: string, serial: string): string {
   return parityIssueScope(dt, serial);
@@ -538,12 +554,29 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
     // приведённые.
     const canon = (col: string) => sql.raw(machineSerialSql(col));
 
+    // ГРАНИЦЫ ОКНА СЧИТАЮТСЯ ЗДЕСЬ, ОДИН РАЗ, И ЕДУТ В ЗАПРОСЫ ПАРАМЕТРАМИ.
+    // `current_date` — это сутки СЕРВЕРА БАЗЫ: он берётся из GUC `timezone`
+    // соединения, а зону не задаёт ни `createDb` (`packages/db`), ни
+    // `openStockDb`, и прод — внешний managed Postgres, то есть обычно UTC. В
+    // окне 00:00–05:00 Ташкента окно съезжало на сутки; хуже того, в режиме
+    // `own-vs-donor` НАША и ДОНОРСКАЯ базы — разные серверы, их `current_date`
+    // могли разъехаться между собой и покрасить гейт катовера ложным красным.
+    // Зона теперь из кода (`@mydon/shared`), тем же приёмом, что во всех
+    // суточных отчётах вендинга.
+    const окно = {
+      // Включительно — первая дата окна.
+      from: tashkentDay(new Date(tashkentDayStartOf(now).getTime() - n * DAY_MS)),
+      // ИСКЛЮЧИТЕЛЬНО — сегодняшние сутки: последний сверяемый день — вчерашний
+      // (сегодняшний снимок ещё доливается, сравнивать его нечестно).
+      to: tashkentDay(now),
+    };
+
     const ownRaw = (await this.db.execute(sql`
       select dt::text as dt, ${canon("machine_serial")} as serial,
              sum(qty)::float as qty, sum(amount)::float as amount
       from ${ourvendSaleSnapshot}
-      where dt >= (current_date - ${sql.raw(String(n))}::int)
-        and dt < current_date
+      where dt >= ${окно.from}::date
+        and dt < ${окно.to}::date
       group by 1, 2
     `)) as unknown as ParityDayRow[];
 
@@ -556,12 +589,12 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
       select dt::text as dt, ${canon("machine_serial")} as serial, product,
              sum(qty)::float as qty
       from ${ourvendStockSnapshot}
-      where dt >= (current_date - ${sql.raw(String(n))}::int)
-        and dt < current_date
+      where dt >= ${окно.from}::date
+        and dt < ${окно.to}::date
       group by 1, 2, 3
     `)) as unknown as ParityStockRow[];
 
-    const другая = mode === "mirror" ? await this.сторонаЗеркала(n) : await this.сторонаДонора(n, url);
+    const другая = mode === "mirror" ? await this.сторонаЗеркала(окно) : await this.сторонаДонора(окно, url);
 
     const own = ownRaw.map((r) => ({ ...r, qty: Number(r.qty), amount: Number(r.amount) }));
     const stockSide = другая.sales.map((r) => ({ ...r, qty: Number(r.qty), amount: Number(r.amount) }));
@@ -640,16 +673,19 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
    * снапшоте нет», а не исчезнуть из сверки. Дни до внедрения снапшота
    * отсекаются его минимальной датой — иначе вся история до старта была бы
    * вечным красным.
+   *
+   * Окно приезжает ГОТОВЫМ, посчитанным один раз в `parityWindow()`: обе
+   * стороны обязаны сверять ОДНИ И ТЕ ЖЕ сутки, а не каждая свои.
    */
-  private async сторонаЗеркала(n: number): Promise<{ sales: ParityDayRow[]; stock: ParityStockRow[] }> {
+  private async сторонаЗеркала(окно: ParityWindow): Promise<{ sales: ParityDayRow[]; stock: ParityStockRow[] }> {
     const canon = (col: string) => sql.raw(machineSerialSql(col));
     const sales = (await this.db.execute(sql`
       select dt::text as dt, ${canon("machine_serial")} as serial,
              sum(qty)::float as qty, sum(amount)::float as amount
       from ${sale}
       where source = 'ourvend'
-        and dt >= (current_date - ${sql.raw(String(n))}::int)
-        and dt < current_date
+        and dt >= ${окно.from}::date
+        and dt < ${окно.to}::date
         and dt >= (select min(dt) from ${ourvendSaleSnapshot})
       group by 1, 2
     `)) as unknown as ParityDayRow[];
@@ -657,8 +693,8 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
       select dt::text as dt, ${canon("machine_serial")} as serial, product,
              sum(qty)::float as qty
       from ${machineStock}
-      where dt >= (current_date - ${sql.raw(String(n))}::int)
-        and dt < current_date
+      where dt >= ${окно.from}::date
+        and dt < ${окно.to}::date
         and dt >= (select min(dt) from ${ourvendStockSnapshot})
       group by 1, 2, 3
     `)) as unknown as ParityStockRow[];
@@ -678,12 +714,17 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
    * стороне донора нечем. Смысл границы тот же, что у зеркальной стороны —
    * история до внедрения снапшота не должна быть вечным красным.
    *
+   * ГРАНИЦЫ ОКНА — ТОЖЕ ПАРАМЕТРЫ, и посчитаны они в `parityWindow()`. У
+   * донора свой сервер и свой `current_date`: считай он сутки сам, наше окно и
+   * его окно разъезжались бы между собой при любой разнице зон соединений —
+   * гейт катовера краснел бы от арифметики, а не от расхождения чисел.
+   *
    * `unsafe` — потому что канон серийника это выражение SQL (общий хелпер
    * `machineSerialSql`), а тегированный шаблон `postgres` подставил бы его
    * строкой-параметром. Внутрь текста запроса не попадает НИЧЕГО от
-   * пользователя: `n` — зажатое целое, даты — параметры `$1`/`$2`.
+   * пользователя: все даты — параметры `$1`…`$3`.
    */
-  private async сторонаДонора(n: number, url: string): Promise<{ sales: ParityDayRow[]; stock: ParityStockRow[] }> {
+  private async сторонаДонора(окно: ParityWindow, url: string): Promise<{ sales: ParityDayRow[]; stock: ParityStockRow[] }> {
     const [границы] = (await this.db.execute(sql`
       select (select min(dt)::text from ${ourvendSaleSnapshot}) as sale_min,
              (select min(dt)::text from ${ourvendStockSnapshot}) as stock_min
@@ -695,19 +736,19 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
         `select dt::text as dt, ${machineSerialSql("machine_serial")} as serial,
                 sum(qty)::float as qty, sum(amount)::float as amount
            from ourvend_sales
-          where dt >= (current_date - $1::int) and dt < current_date
-            and ($2::date is null or dt >= $2::date)
+          where dt >= $1::date and dt < $2::date
+            and ($3::date is null or dt >= $3::date)
           group by 1, 2`,
-        [n, границы?.sale_min ?? null],
+        [окно.from, окно.to, границы?.sale_min ?? null],
       )) as unknown as ParityDayRow[];
       const stock = (await донор.unsafe(
         `select dt::text as dt, ${machineSerialSql("machine_serial")} as serial,
                 ourvend_name as product, sum(qty)::float as qty
            from ourvend_machine_stock
-          where dt >= (current_date - $1::int) and dt < current_date
-            and ($2::date is null or dt >= $2::date)
+          where dt >= $1::date and dt < $2::date
+            and ($3::date is null or dt >= $3::date)
           group by 1, 2, 3`,
-        [n, границы?.stock_min ?? null],
+        [окно.from, окно.to, границы?.stock_min ?? null],
       )) as unknown as ParityStockRow[];
       return { sales, stock };
     } finally {
@@ -771,7 +812,7 @@ export class OurvendParityService implements OnModuleInit, OnApplicationShutdown
   async daily(now = new Date()): Promise<void> {
     const p = await this.parity(7, now);
     // ВТОРОЙ ПРОГОН — НА ОДИН ДЕНЬ, И ОН ЖЕ СУДИТ ГЕЙТ (P1b, уточнение
-    // R-P8b-1). Окно `parity(7)` берёт `dt >= current_date - 7`, то есть день
+    // R-P8b-1). Окно `parity(7)` берёт `dt >= сегодня − 7`, то есть день
     // X входит в вердикты X+1…X+7: одна продажа в пятнадцатиминутном разрыве
     // между съёмами красила бы гейт НЕДЕЛЮ, и «семь зелёных подряд» на
     // прод-данных выпадали бы примерно в 9 % месяцев. Грязный день обязан

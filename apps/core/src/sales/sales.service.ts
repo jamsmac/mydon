@@ -8,7 +8,14 @@ import {
   OnModuleInit,
 } from "@nestjs/common";
 import { auditLog, entity, event, ourvendSaleSnapshot, productNameAlias, sale } from "@mydon/db";
-import { MACHINE_SERIAL_SQL_REGEX, machineSerialKeys, normalizeMachineSerial, strictNumber } from "@mydon/shared";
+import {
+  MACHINE_SERIAL_SQL_REGEX,
+  machineSerialKeys,
+  normalizeMachineSerial,
+  strictNumber,
+  tashkentDay,
+  tashkentDayStartOf,
+} from "@mydon/shared";
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { Cron } from "croner";
 import { DB, type Db } from "../db/db.module";
@@ -85,21 +92,33 @@ export function buildUpserts(
   return { values, quarantined };
 }
 
-/** Сегодняшняя дата по-ташкентски (в контейнере TZ=Asia/Tashkent). */
+/** Сутки в миллисекундах: у Ташкента нет перехода на летнее время. */
+const DAY_MS = 86_400_000;
+
+/**
+ * Сегодняшняя дата ТАШКЕНТСКИМИ сутками — зоной из кода, а не часами процесса.
+ *
+ * `getFullYear`/`getMonth`/`getDate` читали момент часами ПРОЦЕССА: правильность
+ * держалась на переменной `TZ` в контейнере, а не на коде. Внешний Postgres, cron
+ * в UTC, локальный прогон разработчика — и «сегодня» витрины продаж уезжало на
+ * сутки в окне 00:00–05:00 Ташкента. Зона зашита в `@mydon/shared`
+ * (`tashkent-time.ts`) ровно затем, чтобы второй её копии в коде не было.
+ */
 export function todayLocal(now = new Date()): string {
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+  return tashkentDay(now);
 }
 
 /**
  * Граница «N календарных дат назад, включая сегодня» — today−(N−1), не
  * today−N: иначе `>=` этой границы захватывает N+1 дату вместо N (найдено
  * внешним аудитом, P2: «30 дней» на деле считали 31 дату).
+ *
+ * Правило окна прежнее, изменился только счёт суток: отсчёт идёт от НАЧАЛА
+ * ташкентских суток момента — той же конвенцией, что у отчётов вендинга
+ * (`since = tashkentDayStartOf(now) − (N−1) × сутки`).
  */
 export function daysAgoLocal(days: number, now = new Date()): string {
-  const d = new Date(now);
-  d.setDate(d.getDate() - (days - 1));
-  return todayLocal(d);
+  return tashkentDay(new Date(tashkentDayStartOf(now).getTime() - (days - 1) * DAY_MS));
 }
 
 /**
@@ -371,9 +390,9 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
     // `new Date()` внутри», и «сегодня» по стенным часам при заданном `now`
     // сделало бы из теста проверку «примерно тех же суток».
     const today = todayLocal(now);
-    const y = new Date(now);
-    y.setDate(y.getDate() - 1);
-    const yesterday = todayLocal(y);
+    // Вчера — тоже ТАШКЕНТСКИЕ сутки: `setDate` сдвигал календарь ПРОЦЕССА, и
+    // при `TZ=UTC` плитка «вчера» до 05:00 показывала позавчерашний день.
+    const yesterday = tashkentDay(new Date(tashkentDayStartOf(now).getTime() - DAY_MS));
     const days30Since = daysAgoLocal(30, now);
 
     const [row] = await this.db
@@ -676,8 +695,9 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
 
   /** Автоматы, молчащие N дней: продажи были раньше, а теперь нет — сигнал связи. */
   async silent(daysQuiet = 2): Promise<{ machineId: string | null; serial: string; name: string | null; lastDt: string }[]> {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - daysQuiet);
+    // Порог — ТАШКЕНТСКИЕ сутки минус N: `setDate` считал бы их календарём
+    // процесса, и до 05:00 сторож молчал бы на сутки дольше положенного.
+    const cutoff = todayLocal(new Date(tashkentDayStartOf(new Date()).getTime() - daysQuiet * DAY_MS));
     const rows = await this.db
       .select({
         serial: sale.machineSerial,
@@ -688,7 +708,7 @@ export class SalesService implements OnModuleInit, OnApplicationShutdown {
       .from(sale)
       .leftJoin(entity, eq(entity.id, sale.machineId))
       .groupBy(sale.machineSerial, sale.machineId, entity.name)
-      .having(sql`max(${sale.dt}) < ${todayLocal(cutoff)}`);
+      .having(sql`max(${sale.dt}) < ${cutoff}`);
     return rows;
   }
 }

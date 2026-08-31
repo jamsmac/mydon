@@ -524,17 +524,20 @@ describe("Вердикт паритета: продажи и остатки вм
     // Поэтому серия судится полями `день_*` из `parity(1)`.
     const диалект = new PgDialect();
     const записано: Record<string, unknown>[] = [];
-    const неделя = (текст: string) => /current_date - 7::int/.test(текст);
+    const сейчас = new Date("2026-08-25T20:30:00.000Z"); // 26.08, 01:30 Ташкента
+    // Окно едет ПАРАМЕТРАМИ (`$1::date`), а не текстом `current_date - 7`:
+    // недельный прогон опознаётся по нижней границе окна.
+    const неделя = (params: unknown[]) => params[0] === "2026-08-19";
     const db = {
       execute: (q: SQL) => {
-        const текст = диалект.sqlToQuery(q).sql;
+        const { sql: текст, params } = диалект.sqlToQuery(q);
         const продажи = /from "ourvend_sale_snapshot"\s+where/.test(текст) || /from "sale"/.test(текст);
         const остатки = /from "ourvend_stock_snapshot"\s+where/.test(текст) || /from "machine_stock"/.test(текст);
         if (продажи) {
           const строки = [{ dt: "2026-08-24", serial: "m1", qty: 12, amount: 144000 }];
           // В недельном окне у зеркала лишний день — недельный вердикт красный.
           return Promise.resolve(
-            неделя(текст) && /from "sale"/.test(текст)
+            неделя(params) && /from "sale"/.test(текст)
               ? [...строки, { dt: "2026-08-20", serial: "m1", qty: 5, amount: 60000 }]
               : строки,
           );
@@ -555,7 +558,7 @@ describe("Вердикт паритета: продажи и остатки вм
       }),
     } as never;
 
-    await new OurvendParityService(db, реестрБезСклада()).daily();
+    await new OurvendParityService(db, реестрБезСклада()).daily(сейчас);
     const payload = записано[0]!.payload as Record<string, unknown>;
     assert.equal(payload.ok, false, "недельная витрина честно красная");
     assert.equal(payload.расхождений, 1);
@@ -700,11 +703,18 @@ describe("С чем сверяем после флипа: режимы пари�
       { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "own" },
       async () => {
         const запросы: string[] = [];
+        // Момент — 01:30 Ташкента, то есть ещё 25.08 по UTC: именно в этом окне
+        // `current_date` донора и наш расходились на сутки.
+        const сейчас = new Date("2026-08-25T20:30:00.000Z");
         const svc = new OurvendParityService(своя([{ key: "OURVEND_ACCOUNTING_SOURCE", value: "own" }]), реестр());
         (svc as unknown as { открытьДонора: (url: string) => Promise<unknown> }).открытьДонора = async () => ({
           unsafe: (q: string, params: unknown[]) => {
             запросы.push(q);
-            assert.deepEqual(params, [7, "2026-08-11"], "окно и нижняя граница едут ПАРАМЕТРАМИ");
+            assert.deepEqual(
+              params,
+              ["2026-08-19", "2026-08-26", "2026-08-11"],
+              "ОБЕ границы окна и нижняя граница истории едут ПАРАМЕТРАМИ — ташкентскими сутками",
+            );
             return Promise.resolve(
               /ourvend_machine_stock/.test(q)
                 ? [{ dt: "2026-08-24", serial: "m1", product: "Fanta", qty: 6 }]
@@ -714,7 +724,7 @@ describe("С чем сверяем после флипа: режимы пари�
           end: async () => undefined,
         });
 
-        const p = await svc.parity(7);
+        const p = await svc.parity(7, сейчас);
         assert.equal(p.mode, "own-vs-donor");
         assert.deepEqual([p.ok, p.checked, p.stock.checked], [true, 1, 1]);
         // Читаем ИМЕННО таблицы донора — иначе сверка доказывала бы
@@ -741,6 +751,98 @@ describe("С чем сверяем после флипа: режимы пари�
         assert.equal(p.mode, "mirror");
       },
     );
+  });
+});
+
+/**
+ * ОКНО СВЕРКИ — ТАШКЕНТСКИЕ СУТКИ ПРИЛОЖЕНИЯ, А НЕ `current_date` БАЗЫ.
+ *
+ * `current_date` считается по GUC `timezone` соединения, а зону не задаёт ни
+ * `createDb` (`packages/db`), ни `openStockDb`; прод — внешний managed Postgres,
+ * то есть обычно UTC. В окне 00:00–05:00 Ташкента окно съезжало на сутки, а в
+ * режиме `own-vs-donor` наша и донорская базы — РАЗНЫЕ серверы: их окна могли
+ * разъехаться между собой и покрасить гейт катовера ложным красным.
+ *
+ * Проверяется это единственным доступным способом — тем, что границы приезжают
+ * в запрос ПАРАМЕТРАМИ и посчитаны они от момента прогона: зону соединения
+ * заглушкой не изобразить, а «в тексте запроса нет `current_date`» — ровно то
+ * утверждение, которое чинит дефект.
+ */
+describe("Окно паритета не зависит от зоны соединения с БД", () => {
+  const реестр = () =>
+    ({ machineRegistry: async () => ({ notInService: new Map(), nameBySerial: new Map() }) }) as never;
+
+  /** Стенд, запоминающий текст и параметры КАЖДОГО запроса сверки. */
+  const стенд = () => {
+    const диалект = new PgDialect();
+    const запросы: { текст: string; params: unknown[] }[] = [];
+    const db = {
+      execute: (q: SQL) => {
+        const { sql: текст, params } = диалект.sqlToQuery(q);
+        запросы.push({ текст, params });
+        return Promise.resolve([]);
+      },
+      insert: () => ({ values: () => Promise.resolve([]) }),
+      select: () => ({
+        from: () => {
+          const chain: Record<string, unknown> = {};
+          chain.where = () => chain;
+          chain.orderBy = () => chain;
+          chain.groupBy = () => chain;
+          chain.limit = async () => [];
+          chain.then = (res: (v: unknown) => unknown) => Promise.resolve([]).then(res);
+          return chain;
+        },
+      }),
+    } as never;
+    return { db, запросы };
+  };
+
+  /** Запросы окна: те, где границы стоят параметрами `$n::date`. */
+  const окна = (запросы: { текст: string; params: unknown[] }[]) =>
+    запросы.filter((з) => /\$\d+::date/.test(з.текст));
+
+  it("границы окна едут параметрами — ташкентскими сутками момента, `current_date` в запросах нет", async () => {
+    // 20:30 UTC — это 01:30 УЖЕ 26 августа в Ташкенте. База в UTC ответила бы
+    // `current_date = 2026-08-25`, и окно съехало бы на сутки в обе границы.
+    const сейчас = new Date("2026-08-25T20:30:00.000Z");
+    const { db, запросы } = стенд();
+    await сОкружением(
+      { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+      async () => {
+        assert.equal((await new OurvendParityService(db, реестр()).parity(7, сейчас)).mode, "mirror");
+      },
+    );
+
+    const окно = окна(запросы);
+    assert.equal(окно.length, 4, "две наши таблицы и две зеркальные — все четыре по одному окну");
+    for (const з of окно) {
+      assert.ok(!/current_date/.test(з.текст), `сутки БАЗЫ в запросе сверки: ${з.текст}`);
+      assert.deepEqual(
+        з.params.slice(0, 2),
+        ["2026-08-19", "2026-08-26"],
+        `окно съехало: ${з.текст} ${JSON.stringify(з.params)}`,
+      );
+    }
+  });
+
+  it("семантика окна прежняя: `parity(1)` — это ровно вчерашние сутки, сегодняшние не входят", async () => {
+    const сейчас = new Date("2026-08-25T20:30:00.000Z");
+    const { db, запросы } = стенд();
+    await сОкружением(
+      { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+      async () => {
+        await new OurvendParityService(db, реестр()).parity(1, сейчас);
+      },
+    );
+
+    for (const з of окна(запросы)) {
+      // Нижняя граница включительная, верхняя — исключительная: сегодняшний
+      // снимок ещё доливается, сравнивать его нечестно.
+      assert.deepEqual(з.params.slice(0, 2), ["2026-08-25", "2026-08-26"]);
+      assert.match(з.текст, /dt >= \$\d+::date/);
+      assert.match(з.текст, /dt < \$\d+::date/);
+    }
   });
 });
 
