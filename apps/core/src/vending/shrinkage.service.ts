@@ -1,4 +1,11 @@
-import { Inject, Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
+import {
+  Inject,
+  Injectable,
+  Logger,
+  Optional,
+  type OnApplicationShutdown,
+  type OnModuleInit,
+} from "@nestjs/common";
 import { Cron } from "croner";
 import { and, eq, gte, inArray, lte, ne } from "drizzle-orm";
 import { event, sale, slotSnapshot, vendingRefill, vendingRefillEvent } from "@mydon/db";
@@ -19,10 +26,16 @@ import {
   type ShrinkReport,
   type ShrinkWarning,
   type ShrinkWarningCode,
-  type Slot,
 } from "@mydon/shared";
 import { DB, type Db } from "../db/db.module";
-import { readIntSetting } from "../system/settings";
+import { readIntSetting, settingValue } from "../system/settings";
+import {
+  LowStockIssueService,
+  VENDING_LOW_STOCK_ISSUES_FAILED_EVENT,
+  VENDING_LOW_STOCK_ISSUE_SOURCE,
+  type LowStockIssueInput,
+  type LowStockIssueReport,
+} from "./low-stock-issue.service";
 import { skipReasonOf, type SkipReason } from "./refill-events.service";
 import { ReportCache, clamp, listInline } from "./report-cache";
 import { VendingService } from "./vending.service";
@@ -142,7 +155,10 @@ interface ShrinkContext {
   priceByKey: Map<string, number>;
   /** Нормализованный ключ → как показывать товар владельцу. */
   display: Map<string, string>;
-  registry: { notInService: Map<string, { name: string; status: string }>; nameBySerial: Map<string, string> };
+  registry: {
+    notInService: Map<string, { name: string; status: string }>;
+    nameBySerial: Map<string, string>;
+  };
 }
 
 /**
@@ -177,6 +193,7 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly vending: VendingService,
+    @Optional() private readonly lowStockIssues?: LowStockIssueService,
   ) {}
 
   /**
@@ -186,7 +203,9 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
   onModuleInit(): void {
     this.cron = new Cron("35 8 * * *", { timezone: TZ }, () => {
       void this.alertDaily().catch((e: unknown) =>
-        this.logger.warn(`Алерты усушки не посчитались: ${e instanceof Error ? e.message : String(e)}`),
+        this.logger.warn(
+          `Алерты усушки не посчитались: ${e instanceof Error ? e.message : String(e)}`,
+        ),
       );
     });
   }
@@ -215,7 +234,9 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
    */
   async report(days = SHRINK_DAYS_DEFAULT, now = new Date()): Promise<ShrinkReport> {
     const окно = clamp(days, SHRINK_DAYS_DEFAULT, SHRINK_DAYS_MAX);
-    return this.кеш.get(`${окно}|${tashkentDay(now)}`, async () => this.построить(окно, now, await this.контекст()));
+    return this.кеш.get(`${окно}|${tashkentDay(now)}`, async () =>
+      this.построить(окно, now, await this.контекст()),
+    );
   }
 
   /**
@@ -271,7 +292,12 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       // продажи в день, когда источник переименуют, — а нулевые продажи
       // выглядят как недостача во весь остаток.
       this.db
-        .select({ dt: sale.dt, machineSerial: sale.machineSerial, product: sale.product, qty: sale.qty })
+        .select({
+          dt: sale.dt,
+          machineSerial: sale.machineSerial,
+          product: sale.product,
+          qty: sale.qty,
+        })
         .from(sale)
         .where(and(gte(sale.dt, from), lte(sale.dt, to))),
       this.db
@@ -283,7 +309,11 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
         .from(vendingRefillEvent)
         .where(gte(vendingRefillEvent.windowTo, периодОт)),
       this.db
-        .select({ machineSerial: vendingRefill.machineSerial, performedAt: vendingRefill.performedAt, qty: vendingRefill.qty })
+        .select({
+          machineSerial: vendingRefill.machineSerial,
+          performedAt: vendingRefill.performedAt,
+          qty: vendingRefill.qty,
+        })
         .from(vendingRefill)
         // Сторно (П6): дельта висит на времени ОТМЕНЫ, а не заливки — попав
         // сюда, увела бы «записаноПоДням» другого дня и родила бы фиктивную
@@ -313,8 +343,16 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       продажиАвтомата.set(canonSerial, набор);
     }
 
-    const приходПоДням = сумма(события, (r) => `${normalizeMachineSerial(r.machineSerial)}|${tashkentDay(r.windowTo)}`, (r) => r.units);
-    const записаноПоДням = сумма(записи, (r) => `${normalizeMachineSerial(r.machineSerial)}|${tashkentDay(r.performedAt)}`, (r) => r.qty);
+    const приходПоДням = сумма(
+      события,
+      (r) => `${normalizeMachineSerial(r.machineSerial)}|${tashkentDay(r.windowTo)}`,
+      (r) => r.units,
+    );
+    const записаноПоДням = сумма(
+      записи,
+      (r) => `${normalizeMachineSerial(r.machineSerial)}|${tashkentDay(r.performedAt)}`,
+      (r) => r.qty,
+    );
 
     // Серийники сводим к канону ДО чтения снимков: «c2508160376» и
     // «2508160376» — один автомат, и раньше вторая форма молча выбрасывалась
@@ -376,8 +414,12 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       }
     }
 
-    machines.sort((a, b) => b.summary.lossValue - a.summary.lossValue || a.name.localeCompare(b.name, "ru"));
-    warnings.sort((a, b) => a.code.localeCompare(b.code) || a.message.localeCompare(b.message, "ru"));
+    machines.sort(
+      (a, b) => b.summary.lossValue - a.summary.lossValue || a.name.localeCompare(b.name, "ru"),
+    );
+    warnings.sort(
+      (a, b) => a.code.localeCompare(b.code) || a.message.localeCompare(b.message, "ru"),
+    );
     return { from, to, threshold, machines, warnings };
   }
 
@@ -400,13 +442,17 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     const slotKeys = new Set<string>();
 
     const снимки: MachineSnapshot[] = [];
-    for (const форма of формы) снимки.push(...(await this.снимкиАвтомата(форма, since, ctx, slotKeys)));
+    for (const форма of формы)
+      снимки.push(...(await this.снимкиАвтомата(форма, since, ctx, slotKeys)));
     снимки.sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
     if (снимки.length === 0) {
       // Серийник только что пришёл из выборки по ЭТОМУ ЖЕ окну — пусто здесь
       // означает, что снимки удалили между двумя запросами. Молчать нельзя:
       // автомат просто исчез бы из отчёта.
-      warnings.push({ code: "machine_error", message: `${name}: снимки исчезли между выборками (гонка со сбором)` });
+      warnings.push({
+        code: "machine_error",
+        message: `${name}: снимки исчезли между выборками (гонка со сбором)`,
+      });
       return { machine: null, warnings, slotKeys };
     }
 
@@ -416,7 +462,10 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     // одно и то же — «по автомату сказать нечего».
     const причина = skipReasonOf(снимки);
     if (причина) {
-      warnings.push({ code: "machine_dead", message: `${name}: ${ПРИЧИНА[причина]} — усушка не считается` });
+      warnings.push({
+        code: "machine_dead",
+        message: `${name}: ${ПРИЧИНА[причина]} — усушка не считается`,
+      });
       return { machine: null, warnings, slotKeys };
     }
 
@@ -428,7 +477,11 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     for (const date of dates) {
       const приход = данные.приходПоДням.get(`${canon}|${date}`) ?? 0;
       if (приход > 0) {
-        refillDays.push({ date, detectedUnits: приход, recordedUnits: данные.записаноПоДням.get(`${canon}|${date}`) ?? 0 });
+        refillDays.push({
+          date,
+          detectedUnits: приход,
+          recordedUnits: данные.записаноПоДням.get(`${canon}|${date}`) ?? 0,
+        });
       }
       const начало = ближайший(снимки, началоСуток(date));
       const конец = ближайший(снимки, началоСуток(date) + DAY_MS);
@@ -455,7 +508,10 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     const summary = shrinkageByDay(дни, ctx.priceByKey, данные.threshold);
     // Наружу товар уходит ЧЕЛОВЕЧЕСКИМ именем: нормализованный ключ («red
     // bull») нужен только для сшивки, показывать его владельцу нельзя.
-    const items = summary.items.map((i) => ({ ...i, product: ctx.display.get(i.product) ?? i.product }));
+    const items = summary.items.map((i) => ({
+      ...i,
+      product: ctx.display.get(i.product) ?? i.product,
+    }));
 
     // Одна строка на автомат, а не на день: 26 автоматов × 14 дней дали бы
     // триста предупреждений, среди которых не видно ни одного. Дат в строке —
@@ -468,7 +524,10 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       });
     }
     if (безПродаж.length > 0) {
-      warnings.push({ code: "no_sales_day", message: `${name}: нет продаж за ${listInline(безПродаж)} — дни не считались` });
+      warnings.push({
+        code: "no_sales_day",
+        message: `${name}: нет продаж за ${listInline(безПродаж)} — дни не считались`,
+      });
     }
     // «Ни одного посчитанного дня» — это НЕ «недостач нет». Автомат, у
     // которого весь период оказался заливкой (или снимками/продажами без
@@ -480,7 +539,11 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
         message: `${name}: не считали — все ${dates.length} дн. периода были заливкой/пропущены`,
       });
     }
-    return { machine: { serial: canon, name, summary: { ...summary, items }, refillDays }, warnings, slotKeys };
+    return {
+      machine: { serial: canon, name, summary: { ...summary, items }, refillDays },
+      warnings,
+      slotKeys,
+    };
   }
 
   /**
@@ -504,7 +567,7 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     const сутки = tashkentDayStartOf(now);
     const окноПовтора = new Date(now.getTime() - LOW_STOCK_REPEAT_MS);
 
-    const [написанное, поСерийникам] = await Promise.all([
+    const [написанное, пачкиПоКанону] = await Promise.all([
       // Одним запросом за оба окна — берём БОЛЬШЕЕ (окно повтора «остатка»),
       // а суточную границу усушки прикладываем в памяти: два запроса к той же
       // таблице за пересекающиеся окна дороже, чем лишние строки за трое суток.
@@ -520,7 +583,7 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       // Планограмма — только СВЕЖАЯ (см. `LOW_STOCK_FRESH_MS`), и той же
       // выборкой, что у плана закупа: две реализации «слоты по автоматам»
       // разошлись бы в правилах валидности.
-      this.vending.slotsByMachine(new Date(now.getTime() - LOW_STOCK_FRESH_MS)),
+      this.vending.latestSlotBatches(new Date(now.getTime() - LOW_STOCK_FRESH_MS)),
     ]);
 
     const занято = new Set<string>();
@@ -532,7 +595,9 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       } else {
         // Ключ «заканчивается» включает ОСТАТОК: та же позиция с другим
         // числом — другая новость, и глушить её прошлым событием нельзя.
-        занято.add(`${e.type}|${String(p.serial ?? p.machine)}|${String(p.product)}|${String(p.left)}`);
+        занято.add(
+          `${e.type}|${String(p.serial ?? p.machine)}|${String(p.product)}|${String(p.left)}`,
+        );
       }
     }
 
@@ -540,7 +605,11 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
     let lowStock = 0;
     let обрезано = false;
     /** `null` — потолок прогона исчерпан (обрезка), `false` — дедуп. */
-    const добавить = (type: string, ключ: string, payload: Record<string, unknown>): boolean | null => {
+    const добавить = (
+      type: string,
+      ключ: string,
+      payload: Record<string, unknown>,
+    ): boolean | null => {
       if (занято.has(ключ)) return false;
       if (строки.length >= ALERT_MAX_EVENTS) {
         обрезано = true;
@@ -550,6 +619,63 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       строки.push({ source: "system", type, payload });
       return true;
     };
+
+    // «Заканчивается» считается по ПЛАНОГРАММЕ (`machine_slot`), а не по
+    // усушке: это разные вопросы. Товар может не усыхать вовсе и при этом
+    // кончиться, и наоборот.
+    // Полную картину собираем ДО лимита Telegram-событий. Лимит 50
+    // защищает брифинг от шума, но не имеет права скрыть живую задачу.
+    const авторитетныеСерийники: string[] = [];
+    const низкиеОстатки: (LowStockIssueInput & { machine: string })[] = [];
+    for (const [canon, пачка] of пачкиПоКанону) {
+      if (ctx.registry.notInService.has(canon)) continue;
+      // Тот же судья, что у детектора и у отчёта: заглушка источника и
+      // неоткалиброванная планограмма «заканчивается» не значат.
+      if (skipReasonOf([{ serial: canon, capturedAt: пачка.syncedAt, slots: пачка.slots }]))
+        continue;
+      // `planogramStatus=ok` допускает до половины невалидных позиций. Для
+      // алерта это безопасно: валидный low SKU всё равно виден. Для автозакрытия
+      // это не доказательство: исчезнувший SKU может как раз лежать в битом
+      // слоте. Поэтому observations из читаемых слотов сохраняем, а authoritative
+      // coverage даём только полностью валидному набору назначенных слотов.
+      const назначенныеСлоты = пачка.slots.filter(hasProduct);
+      if (назначенныеСлоты.every((slot) => slotValid(slot))) {
+        авторитетныеСерийники.push(canon);
+      }
+      const name = ctx.registry.nameBySerial.get(canon) ?? canon;
+      const поТовару = new Map<string, { qty: number; cap: number }>();
+      for (const s of пачка.slots) {
+        if (!hasProduct(s) || !slotValid(s)) continue;
+        const ключ = ключТовара(ctx, s.product!);
+        const a = поТовару.get(ключ) ?? { qty: 0, cap: 0 };
+        a.qty += Math.min(s.quantity, s.capacity);
+        a.cap += s.capacity;
+        поТовару.set(ключ, a);
+      }
+      for (const [ключ, a] of поТовару) {
+        if (a.cap < LOW_STOCK_MIN_CAPACITY || a.qty > LOW_STOCK_LEFT) continue;
+        const product = ctx.display.get(ключ) ?? ключ;
+        низкиеОстатки.push({
+          machine: name,
+          serial: canon,
+          product,
+          productKey: ключ,
+          left: a.qty,
+          capacity: a.cap,
+        });
+      }
+    }
+
+    await this.projectLowStockIssues(
+      {
+        items: низкиеОстатки,
+        coverage: {
+          authoritativeSerials: авторитетныеСерийники,
+          inactiveSerials: [...ctx.registry.notInService.keys()],
+        },
+      },
+      now,
+    );
 
     for (const m of отчёт.machines) {
       for (const item of m.summary.items) {
@@ -567,47 +693,24 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
       if (обрезано) break;
     }
 
-    // «Заканчивается» считается по ПЛАНОГРАММЕ (`machine_slot`), а не по
-    // усушке: это разные вопросы. Товар может не усыхать вовсе и при этом
-    // кончиться, и наоборот.
-    const поКанону = new Map<string, Slot[]>();
-    for (const [serial, список] of поСерийникам) {
-      const canon = normalizeMachineSerial(serial);
-      поКанону.set(canon, [...(поКанону.get(canon) ?? []), ...список]);
-    }
-    for (const [canon, список] of поКанону) {
+    for (const item of низкиеОстатки) {
       if (обрезано) break;
-      if (ctx.registry.notInService.has(canon)) continue;
-      // Тот же судья, что у детектора и у отчёта: заглушка источника и
-      // неоткалиброванная планограмма «заканчивается» не значат.
-      if (skipReasonOf([{ serial: canon, capturedAt: now, slots: список }])) continue;
-      const name = ctx.registry.nameBySerial.get(canon) ?? canon;
-      const поТовару = new Map<string, { qty: number; cap: number }>();
-      for (const s of список) {
-        if (!hasProduct(s) || !slotValid(s)) continue;
-        const ключ = ключТовара(ctx, s.product!);
-        const a = поТовару.get(ключ) ?? { qty: 0, cap: 0 };
-        a.qty += Math.min(s.quantity, s.capacity);
-        a.cap += s.capacity;
-        поТовару.set(ключ, a);
-      }
-      for (const [ключ, a] of поТовару) {
-        if (обрезано) break;
-        if (a.cap < LOW_STOCK_MIN_CAPACITY || a.qty > LOW_STOCK_LEFT) continue;
-        const product = ctx.display.get(ключ) ?? ключ;
-        // Ключ дедупа — СЕРИЙНИК и ОСТАТОК, а не отображаемое имя: два
-        // автомата, названные одинаково, гасили бы алерты друг друга, а
-        // изменившийся остаток обязан пройти, не дожидаясь трёх суток.
-        if (
-          добавить(LOW_STOCK_EVENT, `${LOW_STOCK_EVENT}|${canon}|${product}|${a.qty}`, {
-            machine: name,
-            serial: canon,
-            product,
-            left: a.qty,
-          })
-        ) {
-          lowStock += 1;
-        }
+      // Ключ дедупа — СЕРИЙНИК и ОСТАТОК, а не отображаемое имя: два
+      // автомата, названные одинаково, гасили бы алерты друг друга, а
+      // изменившийся остаток обязан пройти, не дожидаясь трёх суток.
+      if (
+        добавить(
+          LOW_STOCK_EVENT,
+          `${LOW_STOCK_EVENT}|${item.serial}|${item.product}|${item.left}`,
+          {
+            machine: item.machine,
+            serial: item.serial,
+            product: item.product,
+            left: item.left,
+          },
+        )
+      ) {
+        lowStock += 1;
       }
     }
     if (обрезано) {
@@ -618,6 +721,49 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
 
     if (строки.length > 0) await this.db.insert(event).values(строки);
     return { alerts: строки.length, lowStock };
+  }
+
+  /**
+   * Обновить machine-owned lifecycle, не превращая сбой проекции в потерю
+   * обычных Telegram-событий. Старые задачи при ошибке остаются открытыми, а
+   * отдельное failure-событие делает отказ видимым в правилах/мониторинге.
+   */
+  private async projectLowStockIssues(report: LowStockIssueReport, now: Date): Promise<void> {
+    if (!this.lowStockIssues) return;
+    if ((await settingValue(this.db, "TASK_BRIDGE_ENABLED")).trim() !== "1") return;
+    try {
+      await this.lowStockIssues.reconcile(report, now);
+    } catch (err: unknown) {
+      const message = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
+      this.logger.warn(
+        `Живые задачи низкого остатка не обновились; старые оставлены открытыми: ${message}`,
+      );
+      try {
+        await this.db
+          .insert(event)
+          .values({
+            source: VENDING_LOW_STOCK_ISSUE_SOURCE,
+            type: VENDING_LOW_STOCK_ISSUES_FAILED_EVENT,
+            clientKey: `${VENDING_LOW_STOCK_ISSUE_SOURCE}:failed:${tashkentDay(now)}`,
+            // `now` захвачен до тяжёлого отчёта. Пишем время фактической
+            // доставки, иначе notifier может уже передвинуть cursor за старую
+            // метку и никогда не увидеть failure-событие.
+            occurredAt: new Date(),
+            payload: {
+              error: message,
+              observed: report.items.length,
+              authoritativeMachines: report.coverage.authoritativeSerials.length,
+              inactiveMachines: report.coverage.inactiveSerials.length,
+            },
+          })
+          .onConflictDoNothing({ target: event.clientKey });
+      } catch (eventError: unknown) {
+        this.logger.warn(
+          `Событие о сбое low-stock projection не записано: ` +
+            (eventError instanceof Error ? eventError.message : String(eventError)),
+        );
+      }
+    }
   }
 
   /**
@@ -657,7 +803,12 @@ export class ShrinkageService implements OnModuleInit, OnApplicationShutdown {
         ключ = ключТовара(ctx, сырое);
         slotKeys.add(ключ);
       }
-      снимок.slots.push({ coilId: r.coilId, product: ключ, capacity: r.capacity, quantity: r.quantity });
+      снимок.slots.push({
+        coilId: r.coilId,
+        product: ключ,
+        capacity: r.capacity,
+        quantity: r.quantity,
+      });
     }
     return [...поМоменту.values()].sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
   }
@@ -700,7 +851,11 @@ function ближайший(снимки: MachineSnapshot[], граница: num
   return дистанция <= SNAPSHOT_STALE_MS ? лучший : null;
 }
 
-function сумма<T>(rows: T[], ключ: (r: T) => string, значение: (r: T) => number): Map<string, number> {
+function сумма<T>(
+  rows: T[],
+  ключ: (r: T) => string,
+  значение: (r: T) => number,
+): Map<string, number> {
   const out = new Map<string, number>();
   for (const r of rows) {
     const k = ключ(r);
@@ -708,4 +863,3 @@ function сумма<T>(rows: T[], ключ: (r: T) => string, значение: 
   }
   return out;
 }
-

@@ -58,6 +58,8 @@ export interface MaintenanceDueRow {
 export interface EnsureTaskInput {
   title: string;
   ownerKind: "human";
+  /** Maintenance belongs to the VendHub operating direction. */
+  domain: "vendhub";
   ownerRef?: string;
   entityId: string;
   description?: string;
@@ -200,6 +202,7 @@ export async function runMaintenanceMonitor(
         const created = await core.ensureTaskForDay({
           title: taskTitle(row),
           ownerKind: "human",
+          domain: "vendhub",
           // Пусто — задача свободная, её разберут из общего пула.
           ...(row.assigneeId ? { ownerRef: row.assigneeId } : {}),
           entityId: row.targetId,

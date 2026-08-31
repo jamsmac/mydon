@@ -55,6 +55,7 @@ import { DB, type Db } from "../db/db.module";
 import { LlmLedgerService } from "../llm-ledger/llm-ledger.service";
 import { MaintenanceService, todayInTz } from "../maintenance/maintenance.service";
 import { PARITY_ISSUE_SOURCE } from "../ourvend/parity-issue-identity";
+import { VENDING_LOW_STOCK_ISSUE_SOURCE } from "../vending/low-stock-issue-identity";
 import { AGENT_SCHEDULE_SOURCE, isCurrentCronOccurrence } from "./agent-schedule";
 import {
   canonicalJsonHash,
@@ -556,18 +557,29 @@ export function isAssignedTaskSql(): SQL {
   return or(isNull(task.source), ne(task.source, AGENT_SCHEDULE_SOURCE))!;
 }
 
+const MANAGED_OPERATIONAL_TASK_SOURCES = new Set<string>([
+  PARITY_ISSUE_SOURCE,
+  VENDING_LOW_STOCK_ISSUE_SOURCE,
+]);
+
+function isManagedOperationalTaskSource(source: string | null | undefined): boolean {
+  return source != null && MANAGED_OPERATIONAL_TASK_SOURCES.has(source);
+}
+
 function assertPublicTaskSource(source: string | undefined): void {
-  if (source === AGENT_SCHEDULE_SOURCE || source === PARITY_ISSUE_SOURCE) {
-    throw new BadRequestException(
-      `source "${source}" зарезервирован для Core`,
-    );
+  if (source === AGENT_SCHEDULE_SOURCE || isManagedOperationalTaskSource(source)) {
+    throw new BadRequestException(`source "${source}" зарезервирован для Core`);
   }
 }
 
 function assertPublicTaskClientKey(clientKey: string | undefined): void {
-  if (clientKey?.startsWith(`${PARITY_ISSUE_SOURCE}:`)) {
+  const reservedSource =
+    clientKey == null
+      ? undefined
+      : [...MANAGED_OPERATIONAL_TASK_SOURCES].find((source) => clientKey.startsWith(`${source}:`));
+  if (reservedSource) {
     throw new BadRequestException(
-      `clientKey с префиксом "${PARITY_ISSUE_SOURCE}:" зарезервирован для Core`,
+      `clientKey с префиксом "${reservedSource}:" зарезервирован для Core`,
     );
   }
 }
@@ -584,9 +596,7 @@ function agentScheduleIdentity(input: EnsureAgentScheduleInput): AgentScheduleTa
     cron: input.cron,
     scheduledAt: scheduledAt.toISOString(),
   };
-  const digest = createHash("sha256")
-    .update(JSON.stringify(canonicalOccurrence))
-    .digest("hex");
+  const digest = createHash("sha256").update(JSON.stringify(canonicalOccurrence)).digest("hex");
   const clientKey = `agent-schedule:v1:${digest}`;
   return {
     title: `По расписанию: ${input.skill}`,
@@ -2347,12 +2357,15 @@ export class TasksService {
       // an older deployment or an interrupted request.
       const before = await this.lockTask(tx, id);
       if (
-        before.source === PARITY_ISSUE_SOURCE &&
+        isManagedOperationalTaskSource(before.source) &&
         before.status !== status &&
-        (status === "done" || status === "cancelled" || before.status === "done" || before.status === "cancelled")
+        (status === "done" ||
+          status === "cancelled" ||
+          before.status === "done" ||
+          before.status === "cancelled")
       ) {
         throw new BadRequestException(
-          "Задача сверки OurVend закроется или переоткроется автоматически после повторной сверки",
+          "Операционная задача закроется или переоткроется автоматически после повторной проверки",
         );
       }
       if (expectedAgentRunId && before.agentRunId !== expectedAgentRunId) {
@@ -2588,9 +2601,9 @@ export class TasksService {
     // правка срока, текста или повторная отправка того же ownerRef не должны
     // запираться за менеджерской ролью.
     const before = await this.byId(id);
-    if (before.source === PARITY_ISSUE_SOURCE && patch.ownerKind === "agent") {
+    if (isManagedOperationalTaskSource(before.source) && patch.ownerKind === "agent") {
       throw new BadRequestException(
-        "Задачу сверки OurVend нельзя назначить агенту: она закроется только по факту повторной сверки",
+        "Операционную задачу нельзя назначить агенту: её жизненным циклом управляет Core",
       );
     }
     const ownerRefChanged = set.ownerRef !== undefined && set.ownerRef !== before.ownerRef;
@@ -2892,9 +2905,9 @@ export class TasksService {
       if (row.status !== "done") {
         throw new BadRequestException("Оценить можно только сделанную задачу");
       }
-      if (row.source === PARITY_ISSUE_SOURCE && quality === "redo") {
+      if (isManagedOperationalTaskSource(row.source) && quality === "redo") {
         throw new BadRequestException(
-          "Задачу сверки OurVend переоткроет сама повторная сверка, если расхождение вернётся",
+          "Операционную задачу переоткроет Core, если проблема вернётся",
         );
       }
 

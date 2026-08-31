@@ -10,6 +10,11 @@ import { SNAPSHOT_STALE_EVENT } from "../ourvend/sync-stale.service";
 import { ACCOUNTING_SOURCE_CHANGED_EVENT } from "../sales/accounting-source";
 import { RETENTION_EVENT } from "../vending/retention.service";
 import {
+  VENDING_LOW_STOCK_ISSUES_FAILED_EVENT,
+  VENDING_LOW_STOCK_ISSUES_OPENED_EVENT,
+  VENDING_LOW_STOCK_ISSUES_RESOLVED_EVENT,
+} from "../vending/low-stock-issue-identity";
+import {
   applyRules,
   formatAmount,
   immediateOnly,
@@ -359,6 +364,7 @@ describe("Правила уведомлений (FR-2)", () => {
       PARITY_ISSUES_FAILED_EVENT,
       PARITY_ISSUES_OPENED_EVENT,
       PARITY_ISSUES_RESOLVED_EVENT,
+      VENDING_LOW_STOCK_ISSUES_FAILED_EVENT,
       SNAPSHOT_STALE_EVENT,
       ACCOUNTING_SOURCE_CHANGED_EVENT,
     ];
@@ -376,6 +382,16 @@ describe("Правила уведомлений (FR-2)", () => {
       false,
       "у system.retention правила быть не должно — это служебная чистка, а не новость",
     );
+    for (const тип of [
+      VENDING_LOW_STOCK_ISSUES_OPENED_EVENT,
+      VENDING_LOW_STOCK_ISSUES_RESOLVED_EVENT,
+    ]) {
+      assert.equal(
+        RULES.some((r) => r.eventType === тип),
+        false,
+        `событие ${тип} audit-only: Telegram уже получает machine.low_stock`,
+      );
+    }
   });
 
   it("отказ parity projection сразу объясняет, что вердикт есть, а задачи устарели", () => {
@@ -386,6 +402,21 @@ describe("Правила уведомлений (FR-2)", () => {
     assert.match(note?.text ?? "", /сверка .* посчитана/i);
     assert.match(note?.text ?? "", /список задач не обновился/i);
     assert.match(note?.text ?? "", /operational_issue unavailable/);
+  });
+
+  it("отказ low-stock projection сразу даёт actionable Telegram-тревогу", () => {
+    const [note] = applyRules(
+      ctx(VENDING_LOW_STOCK_ISSUES_FAILED_EVENT, {
+        error: "operational_issue unavailable",
+        observed: 4,
+      }),
+    );
+    assert.equal(note?.urgency, "immediate");
+    assert.match(note?.text ?? "", /задачи низкого остатка не обновились/i);
+    assert.match(note?.text ?? "", /проверь лог mydon-core/i);
+    assert.match(note?.text ?? "", /повтори расчёт/i);
+    assert.match(note?.text ?? "", /operational_issue unavailable/);
+    assert.ok(RULE_EVENT_TYPES.includes(VENDING_LOW_STOCK_ISSUES_FAILED_EVENT));
   });
 
   it("недельная сводка без получателей — немедленная тревога с номером недели (N5)", () => {

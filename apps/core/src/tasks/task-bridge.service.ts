@@ -38,15 +38,6 @@ function list(items: string[]): string {
 
 export const BRIDGE_SOURCES: readonly BridgeSource[] = [
   {
-    type: "machine.low_stock",
-    key: "low_stock",
-    scope: "machine",
-    priority: () => "high",
-    title: (name) => `Пополнить ${name}: заканчивается товар`,
-    description: (_name, payloads) =>
-      `Заканчивается: ${list(payloads.map((p) => `${text(p.product, "товар")} — остаток ${String(p.left ?? "?")}`))}.`,
-  },
-  {
     type: "vending.refill_detected",
     key: "refill_unconfirmed",
     scope: "machine",

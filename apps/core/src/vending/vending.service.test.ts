@@ -192,6 +192,8 @@ function writeDb(
   const stockRowsWithCountedAt = stockRows.map((r) => ({ countedAt: new Date(0), ...(r as object) }));
   /** Слоты, убранные как исчезнувшие: возвращаем то, что задали тестом. */
   const pruneRows: { id: string }[] = [];
+  /** SQL-условия уборки: проверяем timestamp fence без мока Postgres. */
+  const pruneConditions: unknown[] = [];
   /** Ветка конфликта: что именно апсерт пишет поверх существующей строки. */
   const conflicts: { table: string; set: Record<string, unknown> }[] = [];
   /** Ветка «конфликт — молча мимо»: по какому ключу история отбивает повтор. */
@@ -234,8 +236,9 @@ function writeDb(
   let call = 0;
   const db = {
     delete: () => ({
-      where: () => ({
+      where: (condition: unknown) => ({
         returning: async () => {
+          pruneConditions.push(condition);
           if (pruneFails) throw new Error("уборка не удалась (тест)");
           return pruneRows.splice(0, pruneRows.length);
         },
@@ -270,7 +273,7 @@ function writeDb(
     }),
     transaction: async <T>(cb: (t: typeof tx) => Promise<T>): Promise<T> => cb(tx),
   } as never;
-  return { db, inserts, conflicts, dedup, pruneRows, failPrune };
+  return { db, inserts, conflicts, dedup, pruneRows, pruneConditions, failPrune };
 }
 /**
  * Текст SQL-фрагмента drizzle, РЕКУРСИВНО по вложенным фрагментам.
@@ -2513,6 +2516,20 @@ describe("Зеркало слотов умеет сокращаться", () => 
       machines: [{ serial: "2508160376", slots: [{ coilId: "1", product: "Twix", capacity: 11, quantity: 9 }] }],
     });
     assert.equal(res.pruned, 2);
+  });
+
+  it("опоздавший batch не удаляет слоты более свежего снимка", async () => {
+    const { db, pruneConditions } = writeDb();
+    const capturedAt = "2026-08-30T04:00:00.000Z";
+    await new VendingService(db).ingestSlots({
+      capturedAt,
+      machines: [{ serial: "M1", slots: [{ coilId: "A", product: "Twix", capacity: 11, quantity: 9 }] }],
+    });
+
+    assert.equal(pruneConditions.length, 1);
+    const sql = текстSQL(pruneConditions[0]);
+    assert.match(sql, /synced_at/);
+    assert.match(sql, /<=/);
   });
 
   it("пустой список слотов планограмму НЕ стирает", async () => {

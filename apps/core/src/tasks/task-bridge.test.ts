@@ -53,28 +53,28 @@ function fixture(opts: { events: Row[]; settings?: Row[]; people?: Row[]; confli
 describe("Мост событие → задача (П7)", () => {
   it("агрегирует несколько товаров одного автомата за сутки в одну задачу", async () => {
     const f = fixture({ events: [
-      event("machine.low_stock", { serial: SERIAL, product: "Fanta", left: 1 }),
-      event("machine.low_stock", { serial: SERIAL, product: "Cola", left: 2 }),
-      event("machine.low_stock", { serial: SERIAL, product: "Snickers", left: 0 }),
+      event("vending.shrinkage_alert", { serial: SERIAL, product: "Fanta", left: 1 }),
+      event("vending.shrinkage_alert", { serial: SERIAL, product: "Cola", left: 2 }),
+      event("vending.shrinkage_alert", { serial: SERIAL, product: "Snickers", left: 0 }),
     ] });
     const result = await f.service.run(NOW);
     assert.equal(result.created, 1);
-    assert.equal(f.created[0]!.source, `low_stock:${SERIAL}:2026-08-26`);
-    assert.match(String(f.created[0]!.title), /Пополнить Olma/);
+    assert.equal(f.created[0]!.source, `shrinkage:${SERIAL}:2026-08-26`);
+    assert.match(String(f.created[0]!.title), /Разобраться с недостачей: Olma/);
     assert.match(String(f.created[0]!.description), /Fanta/);
     assert.match(String(f.created[0]!.description), /Snickers/);
   });
 
   it("два автомата дают две задачи, повтор по ключу — skipped", async () => {
     const two = fixture({ events: [
-      event("machine.low_stock", { serial: SERIAL, product: "Fanta", left: 1 }),
-      event("machine.low_stock", { serial: OTHER, product: "Cola", left: 2 }),
+      event("vending.shrinkage_alert", { serial: SERIAL, product: "Fanta", left: 1 }),
+      event("vending.shrinkage_alert", { serial: OTHER, product: "Cola", left: 2 }),
     ] });
     assert.equal((await two.service.run(NOW)).created, 2);
 
     const duplicate = fixture({
-      events: [event("machine.low_stock", { serial: SERIAL, product: "Fanta", left: 1 })],
-      conflicts: new Set([`low_stock:${SERIAL}:2026-08-26`]),
+      events: [event("vending.shrinkage_alert", { serial: SERIAL, product: "Fanta", left: 1 })],
+      conflicts: new Set([`shrinkage:${SERIAL}:2026-08-26`]),
     });
     const result = await duplicate.service.run(NOW);
     assert.equal(result.created, 0);
@@ -84,21 +84,21 @@ describe("Мост событие → задача (П7)", () => {
 
   it("ключ использует ташкентский день самого события", async () => {
     const f = fixture({ events: [
-      event("machine.low_stock", { serial: SERIAL, product: "Fanta", left: 1 }, "2026-08-25T23:50:00+05:00"),
+      event("vending.shrinkage_alert", { serial: SERIAL, product: "Fanta", left: 1 }, "2026-08-25T23:50:00+05:00"),
     ] });
     await f.service.run(NOW);
-    assert.equal(f.created[0]!.source, `low_stock:${SERIAL}:2026-08-25`);
+    assert.equal(f.created[0]!.source, `shrinkage:${SERIAL}:2026-08-25`);
   });
 
   it("потолок громко режет 21-й ключ", async () => {
     const events = Array.from({ length: 21 }, (_, i) =>
-      event("machine.low_stock", { serial: `250816${String(i).padStart(4, "0")}`, product: "Fanta", left: 1 }),
+      event("vending.shrinkage_alert", { serial: `250816${String(i).padStart(4, "0")}`, product: "Fanta", left: 1 }),
     );
     const f = fixture({ events });
     const result = await f.service.run(NOW);
     assert.equal(result.created, 20);
     assert.equal(result.capped, true);
-    assert.match(f.warnings[0]!, /low_stock:2508160020/);
+    assert.match(f.warnings[0]!, /shrinkage:2508160020/);
     assert.ok(f.recorded.some((row) => row.type === "task.bridge_run"));
   });
 
@@ -126,7 +126,7 @@ describe("Мост событие → задача (П7)", () => {
   });
 
   it("без карточки задача всё равно создаётся, но без entityId", async () => {
-    const f = fixture({ events: [event("machine.low_stock", { serial: OTHER, product: "Fanta", left: 1 })] });
+    const f = fixture({ events: [event("vending.shrinkage_alert", { serial: OTHER, product: "Fanta", left: 1 })] });
     await f.service.run(NOW);
     assert.equal(f.created[0]!.entityId, undefined);
     assert.match(String(f.created[0]!.title), new RegExp(OTHER));
@@ -157,14 +157,22 @@ describe("Мост событие → задача (П7)", () => {
 
   it("полевая задача остаётся свободной и пишет task.auto_created", async () => {
     const f = fixture({
-      events: [event("machine.low_stock", { serial: SERIAL, product: "Fanta", left: 1 })],
+      events: [event("vending.shrinkage_alert", { serial: SERIAL, product: "Fanta", left: 1 })],
       people: [{ id: MANAGER }],
     });
     await f.service.run(NOW);
     assert.equal(f.created[0]!.ownerRef, undefined);
     const recorded = f.recorded.find((row) => row.type === "task.auto_created");
     assert.ok(recorded);
-    assert.equal((recorded.payload as Row).key, `low_stock:${SERIAL}:2026-08-26`);
+    assert.equal((recorded.payload as Row).key, `shrinkage:${SERIAL}:2026-08-26`);
+  });
+
+  it("machine.low_stock не материализуется мостом: lifecycle ведёт durable projector", async () => {
+    const f = fixture({ events: [event("machine.low_stock", { serial: SERIAL, product: "Fanta", left: 1 })] });
+    const result = await f.service.run(NOW);
+    assert.equal(BRIDGE_EVENT_TYPES.includes("machine.low_stock"), false);
+    assert.equal(result.created, 0);
+    assert.deepEqual(f.created, []);
   });
 
   it("nextMorning даёт 10:00 следующего ташкентского дня", () => {
@@ -175,10 +183,10 @@ describe("Мост событие → задача (П7)", () => {
     );
   });
 
-  it("список типов выводится из единой таблицы пяти источников", () => {
+  it("список типов выводится из единой таблицы четырёх источников", () => {
     assert.deepEqual([...BRIDGE_EVENT_TYPES].sort(), BRIDGE_SOURCES.map((source) => source.type).sort());
     assert.deepEqual(BRIDGE_SOURCES.map((source) => source.key).sort(), [
-      "low_stock", "refill_unconfirmed", "shrinkage", "sync_failed", "sync_stale",
+      "refill_unconfirmed", "shrinkage", "sync_failed", "sync_stale",
     ]);
   });
 });

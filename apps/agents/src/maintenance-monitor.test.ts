@@ -73,6 +73,7 @@ describe("Монитор графиков", () => {
     assert.equal(tasks[0].source, "maint:pl-1");
     assert.equal(tasks[0].dayKey, "2026-08-06");
     assert.equal(tasks[0].entityId, row().targetId);
+    assert.equal(tasks[0].domain, "vendhub");
   });
 
   it("«норматив не задан» не порождает ни задачи, ни события", async () => {

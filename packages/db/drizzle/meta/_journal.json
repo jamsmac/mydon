@@ -575,6 +575,13 @@
       "when": 1788214400000,
       "tag": "0081_operational_issue",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1788300800000,
+      "tag": "0082_maintenance_task_domain",
+      "breakpoints": true
     }
   ]
 }
