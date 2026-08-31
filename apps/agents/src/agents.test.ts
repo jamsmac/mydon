@@ -299,6 +299,130 @@ describe("Прогон навыка", () => {
     assert.deepEqual(calls, ["event"], "после takeover нет побочных записей");
   });
 
+  it("morning-digest: волатильные поля брифинга не ломают дельта-память — повтор той же сводки молчит", async () => {
+    // Прод-регрессия (20–23.08): ответ /registry/briefing несёт поля вне типа
+    // AgentsBriefing — generatedAt (новый каждый запуск) и pendingApprovals
+    // (растёт из-за самих согласований). Пока facts собирались как `{ ...b }`,
+    // сигнатура дельта-памяти не совпадала никогда, и владелец получал
+    // одинаковое согласование каждый день заново.
+    const memory = new Map<string, string>();
+    let runNo = 0;
+    const { client } = stubCore({
+      briefing: async () => {
+        runNo += 1;
+        return {
+          ...EMPTY_BRIEFING,
+          overdueMoney: 2,
+          idleMachines: 10,
+          // Волатильная часть рантайм-ответа: меняется при каждом запуске.
+          generatedAt: `2026-08-2${runNo}T02:30:00.000Z`,
+          tz: "Asia/Tashkent",
+          pendingApprovals: runNo,
+        };
+      },
+      recallMemory: async (source: string, skill: string) =>
+        memory.get(`${source}:${skill}`) ?? null,
+      rememberMemory: async (source: string, skill: string, sig: string) => {
+        memory.set(`${source}:${skill}`, sig);
+      },
+    });
+
+    const first = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(first.outcome, "approval_requested");
+    assert.ok(first.facts, "у предложения должны быть факты");
+    assert.equal("generatedAt" in first.facts, false, "волатильное поле не должно попадать в факты");
+    assert.equal("pendingApprovals" in first.facts, false, "счётчик согласований растёт из-за самого бага");
+
+    const second = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(second.outcome, "skipped");
+    assert.equal(second.skipReason, "no_change", "та же сводка не подаётся повторно");
+  });
+
+  it("morning-digest: содержательное изменение (idleMachines 10 → 11) подаётся заново", async () => {
+    const memory = new Map<string, string>();
+    let idleMachines = 10;
+    let runNo = 0;
+    const { client } = stubCore({
+      briefing: async () => {
+        runNo += 1;
+        return {
+          ...EMPTY_BRIEFING,
+          idleMachines,
+          generatedAt: `2026-08-2${runNo}T02:30:00.000Z`,
+          pendingApprovals: runNo,
+        };
+      },
+      recallMemory: async (source: string, skill: string) =>
+        memory.get(`${source}:${skill}`) ?? null,
+      rememberMemory: async (source: string, skill: string, sig: string) => {
+        memory.set(`${source}:${skill}`, sig);
+      },
+    });
+
+    const first = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(first.outcome, "approval_requested");
+
+    idleMachines = 11; // повод реально изменился — молчать нельзя
+    const changed = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(changed.outcome, "approval_requested");
+    assert.equal(changed.facts?.idleMachines, 11);
+  });
+
+  it("morning-digest: повод исчез и вернулся — подаётся заново, а не глотается старой памятью", async () => {
+    // День 1: автомат X простаивает → согласование, сигнатура запомнена.
+    // День 2: всё починено → no_signal; сигнатура подачи обязана затереться.
+    // День 5: встал ДРУГОЙ автомат — счётчики совпали со днём 1. Без сброса
+    // памяти при no_signal это глоталось бы как no_change (TTL у памяти нет),
+    // и владелец не узнал бы о новом инциденте из канала согласований.
+    const memory = new Map<string, string>();
+    let rememberCount = 0;
+    let idleMachines = 1;
+    const { client } = stubCore({
+      briefing: async () => ({ ...EMPTY_BRIEFING, idleMachines }),
+      recallMemory: async (source: string, skill: string) =>
+        memory.get(`${source}:${skill}`) ?? null,
+      rememberMemory: async (source: string, skill: string, sig: string) => {
+        rememberCount += 1;
+        memory.set(`${source}:${skill}`, sig);
+      },
+    });
+
+    const day1 = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(day1.outcome, "approval_requested");
+    assert.equal(rememberCount, 1, "после подачи сигнатура запомнена");
+
+    idleMachines = 0; // всё починили — тревог нет
+    const day2 = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(day2.skipReason, "no_signal");
+    assert.equal(rememberCount, 2, "исчезнувший повод затирает сигнатуру подачи");
+
+    const day3 = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(day3.skipReason, "no_signal");
+    assert.equal(rememberCount, 2, "повторная тишина не пишет в журнал заново");
+
+    idleMachines = 1; // сломался ДРУГОЙ автомат — счётчик тот же, что в день 1
+    const day5 = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(
+      day5.outcome,
+      "approval_requested",
+      "новый инцидент не должен глотаться устаревшей сигнатурой",
+    );
+  });
+
+  it("no_signal без прежней памяти ничего не пишет — тихие дни не плодят события", async () => {
+    let rememberCount = 0;
+    const { client } = stubCore({
+      rememberMemory: async () => {
+        rememberCount += 1;
+      },
+    });
+    const first = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(first.skipReason, "no_signal");
+    const second = await runSkill(base, "morning-digest", client, "T0");
+    assert.equal(second.skipReason, "no_signal");
+    assert.equal(rememberCount, 0, "затирать нечего — журнал Core не растёт");
+  });
+
   it("нереализованный навык честно помечается, а не изображает работу", async () => {
     const { client, calls } = stubCore();
     const res = await runSkill(base, "draft-reminder", client, "T0");
