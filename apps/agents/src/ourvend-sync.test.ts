@@ -339,6 +339,101 @@ describe("ourvend:sync — коллектор вендинга", () => {
     const res = await runOurvendSync(core, CFG, { connector, now: clock });
     assert.equal(res.status, "failed");
     assert.equal(res.machinesOk, 0);
+    assert.match(String(res.error), /ни одного автомата из 1 не собрано/);
+  });
+
+  it("приём пропустил ВСЕ собранные автоматы → failed, а не success с заметкой", async () => {
+    // Поехал формат вендора: каждый автомат отдал неправдоподобное число
+    // слотов, Core пропустил все (slots = 0), `failures` пусты — и прогон
+    // закрывался зелёным. Планограмма заморожена, streak и сторож застоя
+    // молчат: тот же «успех без данных», снято — ещё не принято.
+    const { core, calls } = stubCore();
+    core.ingestVendingSlots = async (payload) => {
+      calls.ingests.push(payload);
+      calls.order.push("ingest");
+      return {
+        machines: 0,
+        slots: 0,
+        skipped: payload.machines.map((m) => ({ serial: m.serial, slots: m.slots.length, reason: "слишком много слотов" })),
+      };
+    };
+    const connector = stubConnector({
+      machines: [
+        { serial: "AH", alias: "AH" },
+        { serial: "Olma", alias: "Olma" },
+      ],
+      slots: { AH: [slot("31", "Montella", 6, 2)], Olma: [slot("40", "Fanta", 6, 3)] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "failed");
+    assert.equal(res.machinesOk, 2, "съём коннектором честный — не принял именно Core");
+    assert.equal(res.slots, 0);
+    assert.match(String(res.error), /не принял ни одного слота с 2 собранных автоматов/, `причина невнятна: ${res.error}`);
+    assert.match(String(res.error), /автомат AH пропущен/, "пропуски приёма обязаны остаться в тексте");
+    // Итог обязан лечь в журнал именно отказом: по нему считается серия.
+    assert.equal((calls.finishes[0] as { status: string }).status, "failed");
+  });
+
+  it("приём принял ноль слотов БЕЗ пропусков (все списки пустые) → тоже failed", async () => {
+    // Вендор отдал по каждому автомату пустой список слотов: исключений нет,
+    // skipped пуст, но принятых данных — ноль. Планограмма не обновлена.
+    const { core, calls } = stubCore();
+    const connector = stubConnector({
+      machines: [{ serial: "AH", alias: "AH" }],
+      slots: { AH: [] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "failed");
+    assert.equal(res.slots, 0);
+    assert.match(String(res.error), /не принял ни одного слота с 1 собранных автоматов/);
+    assert.equal((calls.finishes[0] as { status: string }).status, "failed");
+  });
+
+  it("пропущена ЧАСТЬ автоматов, слоты остальных приняты — статус не падает (как раньше)", async () => {
+    // Частичный пропуск — не «успех без данных»: планограмма обновилась.
+    // Пропажа видна заметкой в тексте зелёного прогона.
+    const { core, calls } = stubCore();
+    core.ingestVendingSlots = async (payload) => {
+      calls.ingests.push(payload);
+      calls.order.push("ingest");
+      return {
+        machines: 1,
+        slots: 1,
+        skipped: [{ serial: "Olma", slots: 900, reason: "слишком много слотов" }],
+      };
+    };
+    const connector = stubConnector({
+      machines: [
+        { serial: "AH", alias: "AH" },
+        { serial: "Olma", alias: "Olma" },
+      ],
+      slots: { AH: [slot("31", "Montella", 6, 2)], Olma: [slot("40", "Fanta", 6, 3)] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "success");
+    assert.match(String(res.error), /автомат Olma пропущен/);
+  });
+
+  it("ПУСТОЙ СПИСОК АВТОМАТОВ → failed с внятной причиной, а не success", async () => {
+    // Логин и список прошли, а список приехал пустым: сменилась группа, у
+    // учётки отобрали права, кабинет отдал пустой ответ. `failures.length === 0`
+    // давало `success` — журнал зелен, `failedStreak` обнулён, сторож застоя
+    // молчит навсегда, хотя не собрано НИЧЕГО.
+    const { core, calls } = stubCore();
+    const connector = stubConnector({ machines: [], slots: {} });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "failed");
+    assert.equal(res.machinesTotal, 0);
+    assert.equal(res.machinesOk, 0);
+    assert.match(String(res.error), /пустой список автоматов/, `причина невнятна: ${res.error}`);
+    assert.equal(calls.ingests.length, 0, "приёму нечего отдавать");
+    // Итог обязан лечь в журнал именно отказом: по нему считается серия.
+    assert.equal((calls.finishes[0] as { status: string }).status, "failed");
+    assert.match(String((calls.finishes[0] as { error?: string }).error), /пустой список автоматов/);
   });
 });
 

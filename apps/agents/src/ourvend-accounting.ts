@@ -5,6 +5,7 @@ import {
   type AccountingSaleRow,
   type RawLotRow,
 } from "@mydon/connectors";
+import { normalizeMachineSerial } from "@mydon/shared";
 import type { OurvendSyncConfig } from "./ourvend-sync";
 
 /**
@@ -114,7 +115,10 @@ export async function runOurvendAccounting(
     const status = await core.ourvendSnapshotStatus();
     // Вотермарки ПОМАШИННЫЕ: сбой одной машины не двигает её окно догона
     // вслед за здоровыми — следующий прогон дотянет именно её дни.
-    for (const p of status.perMachineSale) watermarks.set(p.machineSerial, p.last);
+    // Ключ — ОБЩИЙ КАНОН (`normalizeMachineSerial`), тем же приёмом, что при
+    // чтении ниже: в снапшоте серийники уже канонические, но приводить их
+    // обязаны обе стороны карты — иначе канон живёт только у одной.
+    for (const p of status.perMachineSale) watermarks.set(normalizeMachineSerial(p.machineSerial), p.last);
     await connector.login();
     machines = await connector.listMachines(config.groupId);
   } catch (err) {
@@ -137,8 +141,13 @@ export async function runOurvendAccounting(
   const saleEntries: { dt: string; machineSerial: string; rows: { product: string; qty: number; amount: number }[] }[] = [];
   const salesOkSerials = new Set<string>();
   for (const m of machines) {
-    // В таблице снапшота серийник хранится каноном (нижний регистр, без «c»).
-    const lastDt = watermarks.get(m.serial.trim().toLowerCase()) ?? null;
+    // В таблице снапшота серийник хранится каноном — ОБЩЕЙ функцией
+    // `normalizeMachineSerial` (@mydon/shared), а не своим урезанным правилом.
+    // `trim().toLowerCase()` не срезал ведущую «c», и серийник вида
+    // «C2508160376» из кабинета не находил свою вотермарку: окно продаж падало
+    // на пол в 14 суток, то есть +14 запросов к вендору на автомат КАЖДЫЙ
+    // прогон, а перезапись дней делала промах невидимым в данных.
+    const lastDt = watermarks.get(normalizeMachineSerial(m.serial)) ?? null;
     const { from, to } = salesWindow(lastDt, yesterday);
     const days = windowDays(from, to);
     try {

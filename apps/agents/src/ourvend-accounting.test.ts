@@ -136,6 +136,43 @@ describe("runOurvendAccounting", () => {
     assert.ok(spans.includes("2508160359:2026-08-21..2026-08-23"), "отставшая — догоняет свои дни");
   });
 
+  it("вотермарка находится для ОБОИХ форматов серийника: «C…» из кабинета и «c…» из снапшота", async () => {
+    // В системе живут два написания одного серийника: «c2508160376»
+    // (mydon-stock) и «2508160376» (Ourvend). `trim().toLowerCase()` ведущую
+    // «c» не срезал: автомат из кабинета не находил свою вотермарку, и окно
+    // продаж падало на пол в 14 суток — +14 запросов к вендору на автомат
+    // КАЖДЫЙ прогон. Канон держит `normalizeMachineSerial`, и приводить к нему
+    // обязаны ОБЕ стороны карты «серийник → вотермарка».
+    const { core } = stubCore({
+      lastSaleDt: "2026-08-23",
+      lastStockDt: null,
+      perMachineSale: [
+        { machineSerial: "2508160376", last: "2026-08-23" }, // канон в снапшоте
+        { machineSerial: "c2508160359", last: "2026-08-23" }, // легаси-«c» в снапшоте
+      ],
+    });
+    const spans: string[] = [];
+    const connector = stubConnector({
+      listMachines: async () => [
+        { serial: "C2508160376", alias: "Olma" }, // кабинет отдал с ведущей «C»
+        { serial: "2508160359", alias: "School" }, // кабинет отдал каноном
+      ],
+      getAccountingSales: async (serial, from, to) => {
+        spans.push(`${serial}:${from.toISOString().slice(0, 10)}..${to.toISOString().slice(0, 10)}`);
+        return [];
+      },
+    });
+    await runOurvendAccounting(core, { account: "a", password: "p", groupId: "g" }, { connector, now: NOW });
+    assert.ok(
+      spans.includes("C2508160376:2026-08-23..2026-08-23"),
+      `«C…» из кабинета не нашёл вотермарку — окно упало на пол 14 суток: ${spans.join(", ")}`,
+    );
+    assert.ok(
+      spans.includes("2508160359:2026-08-23..2026-08-23"),
+      `легаси-«c» в снапшоте не сведён к канону: ${spans.join(", ")}`,
+    );
+  });
+
   it("сбой одной машины не роняет съём: partial, остальное доставлено", async () => {
     const { core, pushes } = stubCore({ lastSaleDt: "2026-08-22", lastStockDt: null });
     const connector = stubConnector({
