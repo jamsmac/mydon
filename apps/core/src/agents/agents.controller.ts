@@ -7,6 +7,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUrl,
   Matches,
   MaxLength,
   Min,
@@ -32,7 +33,16 @@ export class WebSourceDto {
   @IsString() @IsNotEmpty() @MaxLength(128)
   name!: string;
 
-  @IsString() @IsNotEmpty() @MaxLength(512)
+  // Только http(s) с явной схемой: агент ходит по этому адресу сам, поэтому
+  // file:, gopher: и прочее сюда не попадает. Приватные адреса отсекает уже
+  // коннектор web (проверка после разрешения имени) — здесь нечего проверять,
+  // DNS в контроллере не спросить.
+  @IsString()
+  @MaxLength(512)
+  @IsUrl(
+    { protocols: ["http", "https"], require_protocol: true },
+    { message: "url: нужен адрес http(s) с явной схемой (например https://example.uz/prices)" },
+  )
   url!: string;
 }
 
