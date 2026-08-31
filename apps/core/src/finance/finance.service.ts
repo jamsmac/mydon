@@ -7,8 +7,8 @@ import {
 } from "@nestjs/common";
 import { cbu } from "@mydon/connectors";
 import { auditLog, collection, entity, fxRate, moneyFlow, org } from "@mydon/db";
-import { MONEY_CATEGORIES, TZ, type Domain } from "@mydon/shared";
-import { and, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
+import { MONEY_CATEGORIES, TZ, tashkentDayStartOf, type Domain } from "@mydon/shared";
+import { and, desc, eq, gte, inArray, lte, ne, or } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import {
   aging,
@@ -42,6 +42,10 @@ export const FLOW_CATEGORIES = MONEY_CATEGORIES;
 const METHODS = ["bank", "cash"] as const;
 const CURRENCY_RE = /^[A-Z]{3}$/;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+/** Сутки в миллисекундах: у Ташкента нет перехода на летнее время. */
+const DAY_MS = 86_400_000;
+/** Глубина фактов в своде: 366 суток — «последние 12 месяцев» с запасом на високосный год. */
+const SUMMARY_FACT_DAYS = 366;
 
 export interface CreateFlowInput {
   /**
@@ -724,12 +728,25 @@ export class FinanceService {
     }));
   }
 
-  /** Финансовый свод направления: агинг, «к сроку», термометр, кэш-флоу, курс. */
-  async summary(domain: Domain): Promise<FinanceSummary> {
+  /**
+   * Финансовый свод направления: агинг, «к сроку», термометр, кэш-флоу, курс.
+   *
+   * `now` — параметр с дефолтом (как в `SalesService.summary`): «сегодня» и
+   * граница фактов считаются от ОДНОГО момента, и тесты задают его явно.
+   */
+  async summary(domain: Domain, now: Date = new Date()): Promise<FinanceSummary> {
     const orgId = await this.orgId(domain);
-    const today = dayKey(new Date(), TZ);
-    const yearAgo = new Date();
-    yearAgo.setDate(yearAgo.getDate() - 366);
+    const today = dayKey(now, TZ);
+    // Граница фактов — начало ТАШКЕНТСКИХ суток «366 суток назад», посчитанное
+    // в приложении shared-хелпером (тот же приём, что окна сверок, #248), и
+    // уходящее в запрос через `gte()` — column-encoder колонки сам превращает
+    // Date в ISO-строку. Голый `new Date()` в sql-шаблоне здесь РОНЯЛ весь
+    // запрос: параметр сырого шаблона минует column-encoder (noopEncoder), а
+    // drizzle отключает у postgres.js сериализатор timestamptz
+    // (transparentParser в construct()) — Date-объект доезжал до Bind как есть
+    // и падал TypeError'ом ещё ДО отправки в Postgres. Панель показывала
+    // «Финансовый свод недоступен» при 783 живых строках money_flow.
+    const factsFrom = new Date(tashkentDayStartOf(now).getTime() - SUMMARY_FACT_DAYS * DAY_MS);
 
     // Открытые планы нужны все (долг живёт годами), факты — за 12 месяцев.
     const rows = await this.db
@@ -739,7 +756,10 @@ export class FinanceService {
       .where(
         and(
           eq(moneyFlow.orgId, orgId),
-          sql`(${moneyFlow.status} = 'planned' or (${moneyFlow.status} = 'actual' and ${moneyFlow.date} >= ${yearAgo}))`,
+          or(
+            eq(moneyFlow.status, "planned"),
+            and(eq(moneyFlow.status, "actual"), gte(moneyFlow.date, factsFrom)),
+          ),
         ),
       )
       .orderBy(desc(moneyFlow.date))
