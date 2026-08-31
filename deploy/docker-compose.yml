@@ -4,6 +4,17 @@
 #
 # Запуск:  docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
 
+# ПОТОЛОК ЖУРНАЛОВ КОНТЕЙНЕРОВ. Дефолт docker — json-file БЕЗ ограничения:
+# логи растут, пока не кончится диск, а его на хосте 38 ГБ и уже ~70 % занято.
+# `deploy/guards/disk_guard.sh` о заполнении сообщит, но потолка не поставит, а
+# `docker logs mydon-core` — штатный инструмент рунбука (docs/CUTOVER.md), то
+# есть журналы должны быть, просто не бесконечные. 20 МБ × 5 файлов на сервис.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   # Локальная rollback/recovery БД. В production Core может использовать
   # внешний managed PostgreSQL через DATABASE_URL, но этот контейнер сохраняем
@@ -11,6 +22,7 @@ services:
   mydon-db:
     image: postgres:17-alpine
     container_name: mydon-db
+    logging: *logging
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-mydon}
@@ -34,6 +46,7 @@ services:
         GIT_SHA: ${GIT_SHA:-unknown}
     image: mydon:latest
     container_name: mydon-core
+    logging: *logging
     restart: unless-stopped
     init: true
     depends_on:
@@ -131,6 +144,32 @@ services:
       # Только чтение: импортёры данные читают, писать в них некому.
       - ../data:/app/data:ro
     command: ["node", "apps/core/dist/main.js"]
+    # ЗДОРОВЬЕ ЯДРА — ТАКОЕ ЖЕ, КАК У STANDBY (docker-compose.standby.yml).
+    # Без него `depends_on: mydon-core` у бота, агентов и панели ждал только
+    # СТАРТА процесса, а не готовности: воркеры успевали дёрнуть Core до того,
+    # как он поднял БД и крон, и `docker ps` (его читает deploy/heartbeat.sh)
+    # никогда не показывал приложения как (healthy).
+    # READINESS, а не строгое здоровье: любой HTTP-ответ (200 ok / 503
+    # degraded) означает «Nest поднялся, API отвечает» — воркеры могут
+    # стартовать и ретраить. Требование status==='ok' здесь (degraded = 503,
+    # см. health.controller.ts) роняло бы рунбучный `docker compose ... up -d`
+    # через ~65с «dependency failed to start» ровно во время
+    # degraded-инцидента (диск ниже HEALTH_MIN_STORAGE_MB — реальный сценарий
+    # при 38 ГБ ~70%), когда панель нужнее всего. Строгий 'ok' остаётся
+    # заботой health-fence деплоя (auto-deploy.sh шаг 6) и heartbeat.sh.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3001/health').then(()=>process.exit(0)).catch(()=>process.exit(1))
+      # Частые пробы нужны только на старте: start_interval даёт 3s внутри
+      # start_period, а установившийся режим не гоняет node каждые 5 секунд.
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 3s
     networks:
       - default
       - stock
@@ -141,10 +180,12 @@ services:
   mydon-bot:
     image: mydon:latest
     container_name: mydon-bot
+    logging: *logging
     restart: unless-stopped
     init: true
     depends_on:
-      - mydon-core
+      mydon-core:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       TZ: Asia/Tashkent
@@ -166,10 +207,12 @@ services:
   mydon-agents:
     image: mydon:latest
     container_name: mydon-agents
+    logging: *logging
     restart: unless-stopped
     init: true
     depends_on:
-      - mydon-core
+      mydon-core:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       TZ: Asia/Tashkent
@@ -241,10 +284,12 @@ services:
   mydon-cc:
     image: mydon:latest
     container_name: mydon-cc
+    logging: *logging
     restart: unless-stopped
     init: true
     depends_on:
-      - mydon-core
+      mydon-core:
+        condition: service_healthy
     working_dir: /app/apps/cc
     environment:
       NODE_ENV: production

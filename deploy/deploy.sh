@@ -283,8 +283,10 @@ ssh "$HOST" "
   cd '$REMOTE_DIR'
   # PANEL_BIND обязан быть localhost или Tailscale (100.64.0.0/10): опечатка
   # 0.0.0.0 молча опубликовала бы панель в интернет, причём docker-proxy
-  # обходит ufw (ТЗ §6).
-  pb=\$(grep '^PANEL_BIND=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  # обходит ufw (ТЗ §6). Разбор — по правилам compose, как в auto-deploy.sh:
+  # compose принимает 'export PANEL_BIND=…' и пробелы вокруг '=' (узкий grep
+  # их не видел — fail-open), а кавычки и CR срезает (иначе fail-closed).
+  pb=\$(grep -E '^[[:space:]]*(export[[:space:]]+)?PANEL_BIND[[:space:]]*=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d \"'\\\"[:space:]\" || true)
   if [ -n \"\$pb\" ]; then
     case \"\$pb\" in
       127.0.0.1) ;;

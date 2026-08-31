@@ -56,12 +56,21 @@ trap 'rm -f "$resp"' EXIT
 # лежит, хотя сервер был жив и исправно (как ему казалось) отчитывался.
 # `|| echo 000` давал «000000»: при сбое curl сам печатает 000 из -w И
 # выходит ненулём (тот же фикс, что в watchdog-liveness.sh).
+# ТОКЕН НЕ В АРГУМЕНТАХ: заголовок с ним уходит через config-stdin (`-K-`),
+# иначе `Authorization: Bearer <PAT>` видит любой процесс через `ps auxww` —
+# а heartbeat крутится по таймеру каждые 2 минуты, то есть окно наблюдения
+# практически постоянное. Значение экранируем — полный идиом standby-lib.sh:
+# кавычки и бэкслеши внутри двойных кавычек curl-конфига — это
+# escape-последовательности, и токен с `"` без экранирования молча
+# обрезается по кавычке (проверено: заголовок доезжает усечённым) — ложный
+# 401 вместо heartbeat.
+gh_token_esc="$(printf '%s' "$HEARTBEAT_GH_TOKEN" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 if ! code="$(curl -sS -o "$resp" -w '%{http_code}' -X PATCH \
-  -H "Authorization: Bearer $HEARTBEAT_GH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   --max-time 20 \
   -d "$body" \
-  "https://api.github.com/gists/$HEARTBEAT_GIST_ID")"; then
+  "https://api.github.com/gists/$HEARTBEAT_GIST_ID" \
+  -K- <<< "header = \"Authorization: Bearer $gh_token_esc\"")"; then
   code=000
 fi
 

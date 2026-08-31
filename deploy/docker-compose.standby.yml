@@ -4,6 +4,17 @@
 # Bot/Agents unless the explicit "workers" profile is enabled.
 name: mydon-standby
 
+# ПОТОЛОК ЖУРНАЛОВ КОНТЕЙНЕРОВ. Дефолт docker — json-file БЕЗ ограничения:
+# логи растут, пока не кончится диск, а его на хосте 38 ГБ и уже ~70 % занято.
+# `deploy/guards/disk_guard.sh` о заполнении сообщит, но потолка не поставит, а
+# `docker logs mydon-core` — штатный инструмент рунбука (docs/CUTOVER.md), то
+# есть журналы должны быть, просто не бесконечные. 20 МБ × 5 файлов на сервис.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   core:
     build:
@@ -13,6 +24,7 @@ services:
         GIT_SHA: ${GIT_SHA:-unknown}
     image: mydon:standby
     container_name: mydon-standby-core
+    logging: *logging
     restart: unless-stopped
     init: true
     environment:
@@ -75,12 +87,17 @@ services:
       - ../data:/app/data:ro
     ports:
       - "127.0.0.1:${STANDBY_CORE_PORT:-3101}:3001"
+    # READINESS, а не строгое здоровье — как в deploy/docker-compose.yml (см.
+    # обоснование там): degraded = HTTP 503, и строгий status==='ok' ронял бы
+    # `up -d` для cc/workers через «dependency failed to start» ровно во время
+    # инцидента — а standby поднимают только во время инцидентов. Строгий 'ok'
+    # проверяет сам drill (standby-lib.sh, wait_core_health: status=ok И dbOk).
     healthcheck:
       test:
         - CMD
         - node
         - -e
-        - fetch('http://127.0.0.1:3001/health').then(async r=>{const d=await r.json();process.exit(r.ok&&d.status==='ok'?0:1)}).catch(()=>process.exit(1))
+        - fetch('http://127.0.0.1:3001/health').then(()=>process.exit(0)).catch(()=>process.exit(1))
       # Частые пробы нужны только на старте: start_interval даёт 3s внутри
       # start_period, а установившийся режим не гоняет node каждые 5 секунд.
       interval: 30s
@@ -92,6 +109,7 @@ services:
   cc:
     image: mydon:standby
     container_name: mydon-standby-cc
+    logging: *logging
     restart: unless-stopped
     init: true
     depends_on:
@@ -121,6 +139,7 @@ services:
     profiles: ["workers"]
     image: mydon:standby
     container_name: mydon-standby-bot
+    logging: *logging
     restart: unless-stopped
     init: true
     depends_on:
@@ -145,6 +164,7 @@ services:
     profiles: ["workers"]
     image: mydon:standby
     container_name: mydon-standby-agents
+    logging: *logging
     restart: unless-stopped
     init: true
     depends_on:

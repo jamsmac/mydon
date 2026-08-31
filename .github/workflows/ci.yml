@@ -5,9 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+# Права токена сужены явно, как в watchdog.yml: CI ничего не пишет в репозиторий.
+permissions:
+  contents: read
+
+# Быстрая серия пушей в main запускала параллельные тяжёлые прогоны (один смоук
+# до 8 минут). Держим последний, предыдущий отменяем.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Дефолт GitHub — 360 минут: висячая сборка жгла бы минуты шесть часов.
+    timeout-minutes: 30
     env:
       TZ: Asia/Tashkent
     services:
@@ -183,28 +195,37 @@ jobs:
       - name: Audit (high+)
         run: pnpm audit --audit-level high
 
+      # ОБРАЗ И COMPOSE СОБИРАЮТСЯ В CI, а не впервые на проде. До этого шага
+      # поломки deploy/Dockerfile и docker-compose.yml обнаруживал только
+      # автодеплой: он падает на `compose build` ДО миграций (прод при этом
+      # жив, но ни один коммит не выкатывается), а причину приходилось искать
+      # по тревоге в Telegram. Так пойман класс «сборка ходит в интернет»:
+      # `next/font/google` роняла `next build` при недостижимых Google Fonts.
+      - name: Docker image builds
+        run: |
+          docker build -f deploy/Dockerfile -t mydon:ci .
+          # Конфигурация compose разбирается с теми же обязательными
+          # переменными, что в бою (:? в файле) — значения фиктивные, ничего
+          # не поднимается.
+          POSTGRES_PASSWORD=ci DATABASE_URL=postgresql://ci@127.0.0.1:5432/ci \
+            docker compose -f deploy/docker-compose.yml config >/dev/null
+          DATABASE_URL=postgresql://ci@127.0.0.1:5432/ci SERVICE_TOKEN=ci \
+            STANDBY_ATTACHMENTS_DIR=/tmp/ci-attachments \
+            STANDBY_LLM_OUTBOX_DIR=/tmp/ci-llm-close \
+            docker compose -f deploy/docker-compose.standby.yml config >/dev/null
+
       - name: Operations scripts
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq rclone
           bash -n deploy/guards/*.sh deploy/*.sh deploy/tests/*.sh
-          shellcheck deploy/guards/db_access.sh deploy/guards/b2_offsite.sh \
-            deploy/guards/backup_extra.sh deploy/restore_test_mydon.sh \
-            deploy/guards/disk_guard.sh deploy/guards/healthz_guard.sh \
-            deploy/deploy.sh deploy/auto-deploy.sh deploy/setup-b2-offsite.sh \
-            deploy/setup-guards.sh \
-            deploy/b2-recovery-drill-macos.sh deploy/standby-lib.sh \
-            deploy/standby-drill.sh \
-            deploy/standby-promote.sh deploy/standby-stop.sh \
-            deploy/tests/fake-rclone.sh deploy/tests/fake-docker-db.sh \
-            deploy/tests/b2-offsite.test.sh deploy/tests/db-access.test.sh \
-            deploy/tests/standby-compose.test.sh \
-            deploy/watchdog-liveness.sh deploy/deploy-failure-alert.sh \
-            deploy/tests/auto-deploy-gate.test.sh deploy/tests/watchdog-liveness.test.sh \
-            deploy/tests/deploy-rollout-order.test.sh \
-            deploy/tests/docker-build-context.test.sh \
-            deploy/tests/fake-crontab.sh deploy/tests/setup-guards.test.sh \
-            deploy/tests/guards-env.test.sh
+          # ПОИСК ПО КАТАЛОГУ, А НЕ РУКОПИСНЫЙ СПИСОК: перечисление молча
+          # пропускало четыре скрипта — deploy/heartbeat.sh (от него зависит
+          # внешний сторож), setup-autodeploy.sh (root-таймер автодеплоя),
+          # setup-heartbeat.sh и guards/backup_offsite.sh, — и любой НОВЫЙ
+          # скрипт по умолчанию оставался непроверенным. `bash -n` выше уже
+          # ходит теми же тремя маршрутами.
+          shellcheck deploy/guards/*.sh deploy/*.sh deploy/tests/*.sh
           bash deploy/tests/db-access.test.sh
           bash deploy/tests/b2-offsite.test.sh
           bash deploy/tests/standby-compose.test.sh
