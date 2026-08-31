@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
-import { Golos_Text, IBM_Plex_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { core } from "../lib/core";
 import { Sidebar, TabBar } from "../components/nav";
 import { FloatingChat } from "../components/floating-chat";
@@ -9,26 +9,53 @@ import { HeaderActions } from "../components/header-actions";
 import { Background } from "../components/bg/background";
 import "./globals.css";
 
-// Шрифты фирменные (ТЗ). next/font забирает их на сборке и раздаёт со своего
-// сервера — в рантайме наружу не ходим, панель работает и без интернета.
+// Шрифты фирменные (ТЗ) — ЛОКАЛЬНЫЕ ФАЙЛЫ, а не `next/font/google`.
+// Почему так: `next/font/google` забирает шрифт ПО СЕТИ НА СБОРКЕ, и Next 16 с
+// Turbopack при недостижимом `fonts.googleapis.com` не предупреждает, а роняет
+// сборку («next/font: error: Failed to fetch `Golos Text` from Google Fonts»).
+// `.dockerignore` исключает `**/.next`, поэтому кеша шрифтов в контексте сборки
+// нет никогда — каждая сборка ходила в интернет заново, и любой сбой доступа
+// останавливал автодеплой на шаге `compose build` (до миграций и переключения
+// контейнеров: прод при этом жив, но ни один коммит не выкатывается) и заодно
+// весь CI. Теперь файлы лежат в репозитории (`src/fonts`, OFL — лицензии рядом),
+// и сборка не зависит от сети вовсе.
+//
+// Начертания те же, что раньше подключались из Google. Кириллица и латиница
+// СЛИТЫ В ОДИН ФАЙЛ на начертание (fontsource-подмножества latin/latin-ext/
+// cyrillic/cyrillic-ext, объединённые fontTools): `next/font/local` не умеет
+// `unicode-range` на отдельный `src`, а двумя файлами одного веса браузер брал
+// бы первый и кириллица снова уезжала бы в системный запасной шрифт — ровно тот
+// дефект, из-за которого Syne заменили на Golos Text.
+//
 // Golos Text вместо Syne + Manrope. Syne подключался ТОЛЬКО с латиницей, а на
 // нём висели ВСЕ заголовки — и в них русский текст. То есть кириллические
 // заголовки уже сейчас рендерились не Syne, а системным запасным шрифтом:
 // дефект был виден глазом как «типографика какая-то не такая», но не читался
 // как ошибка. Golos Text — русская гарнитура, кириллица у неё родная.
-const golosDisplay = Golos_Text({
-  subsets: ["latin", "cyrillic"],
-  weight: ["600", "700"],
+const golosDisplay = localFont({
+  src: [
+    { path: "../fonts/golos-text-600.woff2", weight: "600", style: "normal" },
+    { path: "../fonts/golos-text-700.woff2", weight: "700", style: "normal" },
+  ],
+  display: "swap",
   variable: "--font-display",
 });
-const golosBody = Golos_Text({
-  subsets: ["latin", "cyrillic"],
-  weight: ["400", "500", "600"],
+const golosBody = localFont({
+  src: [
+    { path: "../fonts/golos-text-400.woff2", weight: "400", style: "normal" },
+    { path: "../fonts/golos-text-500.woff2", weight: "500", style: "normal" },
+    { path: "../fonts/golos-text-600.woff2", weight: "600", style: "normal" },
+  ],
+  display: "swap",
   variable: "--font-body",
 });
-const mono = IBM_Plex_Mono({
-  subsets: ["latin", "cyrillic"],
-  weight: ["400", "500", "600"],
+const mono = localFont({
+  src: [
+    { path: "../fonts/ibm-plex-mono-400.woff2", weight: "400", style: "normal" },
+    { path: "../fonts/ibm-plex-mono-500.woff2", weight: "500", style: "normal" },
+    { path: "../fonts/ibm-plex-mono-600.woff2", weight: "600", style: "normal" },
+  ],
+  display: "swap",
   variable: "--font-mono",
 });
 
