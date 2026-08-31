@@ -47,6 +47,39 @@ const IMAGE_EXT: Record<string, string> = {
   "image/heic": ".heic",
 };
 
+/**
+ * Типы, которые панель показывает inline в `<img>`, — ключи IMAGE_EXT.
+ *
+ * Замкнутый список, а не префикс `image/`: SVG — тоже `image/*`, но при
+ * прямом переходе исполняет вложенный `<script>` на нашем origin, и `nosniff`
+ * этому не мешает — тип заявлен верно, браузеру нечего угадывать. Список
+ * закрыт и при отдаче, а не только при загрузке: строки, записанные до
+ * белого списка (или мимо `upload()`), при отдаче иначе не перепроверялись бы.
+ * Зеркало этого списка живёт в панели: apps/cc/src/app/api/attachments/[id]/raw.
+ */
+export const INLINE_IMAGE_MIMES: ReadonlySet<string> = new Set(Object.keys(IMAGE_EXT));
+
+/**
+ * Что ещё принимаем к чеку и документу: только PDF. Бот и панель кладут в
+ * вложения фотографии (`kind=photo`), чек с телефона — тоже фото; PDF нужен
+ * счёту и акту, которые приходят файлом.
+ */
+const DOC_EXT: Record<string, string> = {
+  "application/pdf": ".pdf",
+};
+
+/**
+ * Расширение для разрешённого типа или `undefined` — отказ.
+ *
+ * Список закрыт для ВСЕХ видов вложения, а не только для фото: `mime` уезжает
+ * в БД и возвращается заголовком `Content-Type` при отдаче байтов, поэтому
+ * принятый `text/html` был бы сохранённым XSS на origin панели.
+ */
+function allowedExt(kind: string, mimetype: string): string | undefined {
+  const mime = mimetype.toLowerCase();
+  return kind === "photo" ? IMAGE_EXT[mime] : (IMAGE_EXT[mime] ?? DOC_EXT[mime]);
+}
+
 @Injectable()
 export class AttachmentsService {
   constructor(
@@ -54,7 +87,7 @@ export class AttachmentsService {
     private readonly storage: StorageService,
   ) {}
 
-  /** Загрузить файл, привязать к записи. Фото проверяем на тип изображения. */
+  /** Загрузить файл, привязать к записи. Тип файла проверяем по белому списку. */
   async upload(
     input: {
       ownerType: string;
@@ -67,11 +100,15 @@ export class AttachmentsService {
   ): Promise<AttachmentMeta> {
     if (!file || file.size === 0) throw new BadRequestException("Файл не получен");
     const kind = input.kind ?? "photo";
-    const ext = IMAGE_EXT[file.mimetype.toLowerCase()];
-    if (kind === "photo" && ext === undefined) {
-      throw new BadRequestException(`Не изображение: ${file.mimetype}`);
+    const ext = allowedExt(kind, file.mimetype);
+    if (ext === undefined) {
+      throw new BadRequestException(
+        kind === "photo"
+          ? `Не изображение: ${file.mimetype}`
+          : `Недопустимый тип файла для «${kind}»: ${file.mimetype}. Принимаем изображение или PDF`,
+      );
     }
-    const key = this.storage.keyFor(input.ownerType, input.ownerId, ext ?? "");
+    const key = this.storage.keyFor(input.ownerType, input.ownerId, ext);
     await this.storage.put(key, file.buffer, file.mimetype);
 
     const [row] = await this.db

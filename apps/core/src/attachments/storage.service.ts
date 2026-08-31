@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -60,7 +60,7 @@ export class StorageService {
       );
       return;
     }
-    const full = path.join(this.localDir, key);
+    const full = this.localPath(key);
     await fs.mkdir(path.dirname(full), { recursive: true });
     await fs.writeFile(full, bytes);
   }
@@ -85,7 +85,24 @@ export class StorageService {
       const arr = await res.Body!.transformToByteArray();
       return Buffer.from(arr);
     }
-    return fs.readFile(path.join(this.localDir, key));
+    return fs.readFile(this.localPath(key));
+  }
+
+  /**
+   * Путь ключа на диске — с проверкой, что он остался внутри тома.
+   *
+   * Защита в глубину: ключ собирается из типа владельца (форма загрузки) и
+   * приходит из БД, поэтому «..» в нём здесь отсекается ещё раз, даже если
+   * валидация DTO когда-нибудь ослабнет. `resolve` схлопывает переходы вверх,
+   * так что путь мимо тома видно до записи и до чтения.
+   */
+  private localPath(key: string): string {
+    const root = path.resolve(this.localDir);
+    const full = path.resolve(root, key);
+    if (!full.startsWith(root + path.sep)) {
+      throw new BadRequestException(`Ключ файла ведёт за пределы хранилища: ${key}`);
+    }
+    return full;
   }
 
   /** Настроено ли внешнее хранилище (S3/MinIO). Локальная отдача — только у диска. */

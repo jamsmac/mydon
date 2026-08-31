@@ -13,18 +13,38 @@ import {
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
-import { IsIn, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
+import { IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength } from "class-validator";
 import { Public } from "../common/public.decorator";
 import {
   ATTACHMENT_STAGES,
   AttachmentsService,
+  INLINE_IMAGE_MIMES,
   type AttachmentStage,
   type UploadedFile as UF,
 } from "./attachments.service";
 
+/**
+ * Картинку показываем в `<img>`, всё прочее отдаём вложением.
+ *
+ * Сверяем с замкнутым списком, а не с префиксом `image/`: SVG — тоже
+ * `image/*`, но при прямом переходе исполняет вложенный скрипт, и `nosniff`
+ * не спасает — тип заявлен верно. Параметры (`;charset=...`) отбрасываем.
+ */
+export function isImageMime(mime: string | null): boolean {
+  if (mime === null) return false;
+  return INLINE_IMAGE_MIMES.has(mime.toLowerCase().split(";")[0].trim());
+}
+
 /** Куда привязать файл и что это. */
 export class UploadDto {
-  @IsString() @MaxLength(32)
+  // Тип владельца попадает в ключ файла в хранилище, а ключ — в путь на диске.
+  // Поэтому закрытый шаблон, а не свободная строка: «../» в типе писало бы файл
+  // мимо тома.
+  @IsString()
+  @Matches(/^[a-z][a-z0-9_]{0,31}$/, {
+    message:
+      "ownerType: латиница в нижнем регистре, цифры и подчёркивание, до 32 символов (например vending_purchase_order)",
+  })
   ownerType!: string;
 
   @IsUUID()
@@ -81,12 +101,22 @@ export class AttachmentsController {
   /**
    * Отдать сам файл — для локального хранилища (у S3 ссылка presigned, и панель
    * ходит прямо в него). Открыт на чтение: панель кладёт это в `<img>`.
+   *
+   * `nosniff` — всегда: браузеру нельзя угадывать тип по содержимому, иначе
+   * файл, принятый как картинка, исполнился бы как HTML на origin панели. Всё,
+   * что не картинка из замкнутого списка, отдаём вложением, а не документом в
+   * том же origin. CSP `sandbox` — страховка второй линии: даже если строка с
+   * исполняемым типом (легаси до белого списка) уйдёт inline, скрипты в ней
+   * при прямом переходе не выполнятся; показу в `<img>` заголовок не мешает.
    */
   @Public()
   @Get(":id/raw")
   async raw(@Param("id", ParseUUIDPipe) id: string, @Res() res: Response) {
     const { bytes, mime } = await this.attachments.raw(id);
     if (mime) res.setHeader("Content-Type", mime);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    if (!isImageMime(mime)) res.setHeader("Content-Disposition", "attachment");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
     res.setHeader("Cache-Control", "private, max-age=3600");
     res.send(bytes);
   }
