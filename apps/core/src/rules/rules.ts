@@ -4,6 +4,7 @@ import {
   PARITY_ISSUES_OPENED_EVENT,
   PARITY_ISSUES_RESOLVED_EVENT,
 } from "../ourvend/parity-issue-identity";
+import { VENDING_LOW_STOCK_ISSUES_FAILED_EVENT } from "../vending/low-stock-issue-identity";
 
 /**
  * Правила уведомлений (ТЗ FR-2): событие → правило → сообщение.
@@ -457,6 +458,19 @@ export const RULES: Rule[] = [
     format: (c) =>
       `❌ Сверка OurVend посчитана, но список задач не обновился. ` +
       `Старые задачи оставлены как есть. ${обрезать(str(c.payload.error, "неизвестная ошибка"), 700)}`.trim(),
+  },
+  {
+    // Opened/resolved transitions remain audit-only: the existing
+    // `machine.low_stock` briefing already tells the owner what to refill.
+    // Projection failure is different: without this immediate rule stale
+    // tasks look healthy and can stay open or closed on an obsolete snapshot.
+    id: VENDING_LOW_STOCK_ISSUES_FAILED_EVENT,
+    eventType: VENDING_LOW_STOCK_ISSUES_FAILED_EVENT,
+    urgency: "immediate",
+    format: (c) =>
+      `❌ Задачи низкого остатка не обновились; старые задачи оставлены как есть. ` +
+      `Проверь лог mydon-core и повтори расчёт алертов. ` +
+      обрезать(str(c.payload.error, "неизвестная ошибка"), 700),
   },
   {
     // Мусорные числа в снапшоте не вливаются нулём — но и молчать о них нельзя.

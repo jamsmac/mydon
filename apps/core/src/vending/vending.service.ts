@@ -594,6 +594,19 @@ export interface MachineIndex {
   firstIdBySerial: Map<string, string>;
 }
 
+/**
+ * Последняя целая пачка planogram-зеркала по каноническому серийнику.
+ *
+ * `machine_slot` обновляется upsert-ом до отдельного prune. Поэтому строки
+ * исчезнувших пружин могут короткое время оставаться рядом с новой пачкой,
+ * но у них другой `synced_at`. Для решений, которые могут автоматически
+ * закрыть задачу, смешивать эти две версии нельзя.
+ */
+export interface LatestSlotBatch {
+  syncedAt: Date;
+  slots: Slot[];
+}
+
 /** Остаток склада строкой: имя, штуки и когда считали. */
 interface StockRow {
   product: string;
@@ -722,6 +735,7 @@ export class VendingService {
    */
   private async pruneVanishedSlots(
     machines: IngestMachineInput[],
+    capturedAt: Date,
   ): Promise<{ pruned: number; pruneErrors: { serial: string; error: string }[] }> {
     let pruned = 0;
     const pruneErrors: { serial: string; error: string }[] = [];
@@ -735,7 +749,17 @@ export class VendingService {
         const живые = m.slots.map((s) => s.coilId);
         const убрано = await this.db
           .delete(machineSlot)
-          .where(and(eq(machineSlot.machineSerial, m.serial), notInArray(machineSlot.coilId, живые)))
+          .where(
+            and(
+              eq(machineSlot.machineSerial, m.serial),
+              notInArray(machineSlot.coilId, живые),
+              // Опоздавший batch не имеет права удалять слоты,
+              // которые уже пришли более свежим снимком. Upsert выше
+              // защищён тем же timestamp fence; prune обязан быть
+              // симметричен, иначе старый {A,C} снесёт новый B.
+              lte(machineSlot.syncedAt, capturedAt),
+            ),
+          )
           .returning({ id: machineSlot.id });
         pruned += убрано.length;
       } catch (err) {
@@ -904,7 +928,7 @@ export class VendingService {
     //
     // Сбой уборки больше не стоит нам снимка: он записывается событием и
     // возвращается вызывающему, а планограмма остаётся свежей.
-    const { pruned, pruneErrors } = await this.pruneVanishedSlots(accepted);
+    const { pruned, pruneErrors } = await this.pruneVanishedSlots(accepted, capturedAt);
 
     if (pruneErrors.length > 0) {
       await this.db.insert(event).values({
@@ -952,6 +976,56 @@ export class VendingService {
       byMachine.set(r.machineSerial, list);
     }
     return byMachine;
+  }
+
+  /**
+   * Только строки последнего батча каждого канонического автомата.
+   *
+   * Это authoritative view для lifecycle-задач: свежесть доказывает, что
+   * источник жив, а одинаковый `synced_at` — что старые ещё не удалённые
+   * строки не попали в решение вместе с новой планограммой.
+   */
+  async latestSlotBatches(freshSince: Date): Promise<Map<string, LatestSlotBatch>> {
+    const rows = await this.db
+      .select({
+        machineSerial: machineSlot.machineSerial,
+        coilId: machineSlot.coilId,
+        productName: machineSlot.productName,
+        capacity: machineSlot.capacity,
+        quantity: machineSlot.quantity,
+        syncedAt: machineSlot.syncedAt,
+      })
+      .from(machineSlot)
+      .where(gte(machineSlot.syncedAt, freshSince));
+
+    const latestAt = new Map<string, number>();
+    for (const row of rows) {
+      const serial = normalizeMachineSerial(row.machineSerial);
+      latestAt.set(serial, Math.max(latestAt.get(serial) ?? 0, row.syncedAt.getTime()));
+    }
+
+    const staged = new Map<string, { syncedAt: Date; slots: Map<string, Slot> }>();
+    for (const row of rows) {
+      const serial = normalizeMachineSerial(row.machineSerial);
+      const latest = latestAt.get(serial);
+      if (latest === undefined || row.syncedAt.getTime() !== latest) continue;
+      const batch = staged.get(serial) ?? { syncedAt: row.syncedAt, slots: new Map<string, Slot>() };
+      batch.slots.set(row.coilId, {
+        coilId: row.coilId,
+        product: row.productName,
+        capacity: row.capacity,
+        quantity: row.quantity,
+      });
+      staged.set(serial, batch);
+    }
+    const batches = new Map<string, LatestSlotBatch>();
+    for (const [serial, batch] of staged) {
+      batches.set(serial, {
+        syncedAt: batch.syncedAt,
+        slots: [...batch.slots.values()].sort((a, b) => a.coilId.localeCompare(b.coilId)),
+      });
+    }
+    return batches;
   }
 
   /**

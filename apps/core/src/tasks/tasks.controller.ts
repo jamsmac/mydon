@@ -469,6 +469,7 @@ export class TasksController {
       title: dto.title,
       ownerKind: dto.ownerKind,
       dayKey: dto.dayKey,
+      ...(dto.domain ? { domain: dto.domain } : {}),
       ...(dto.ownerRef ? { ownerRef: dto.ownerRef } : {}),
       ...(dto.entityId ? { entityId: dto.entityId } : {}),
       ...(dto.description ? { description: dto.description } : {}),

@@ -21,8 +21,10 @@ import {
 } from "./tasks.service";
 import { AGENT_SCHEDULE_SOURCE } from "./agent-schedule";
 import { PARITY_ISSUE_SOURCE } from "../ourvend/parity-issue-identity";
+import { VENDING_LOW_STOCK_ISSUE_SOURCE } from "../vending/low-stock-issue-identity";
 
 type Row = Record<string, unknown>;
+const MANAGED_OPERATIONAL_SOURCES = [PARITY_ISSUE_SOURCE, VENDING_LOW_STOCK_ISSUE_SOURCE] as const;
 
 interface StubOpts {
   existing?: Row;
@@ -395,30 +397,42 @@ describe("Задачи", () => {
     await assert.rejects(() => s.setStatus("нет", "done"), /не найдена/);
   });
 
-  it("жизненный цикл parity task нельзя подменить ручным статусом", async () => {
-    const open = makeTasks(stubDb({ existing: {
-      id: "parity-open",
-      source: PARITY_ISSUE_SOURCE,
-      status: "todo",
-    } }));
-    await assert.rejects(
-      () => open.setStatus("parity-open", "done"),
-      /автоматически после повторной сверки/,
-    );
-    await assert.rejects(
-      () => open.setStatus("parity-open", "cancelled"),
-      /автоматически после повторной сверки/,
-    );
+  it("жизненный цикл managed operational task нельзя подменить ручным статусом", async () => {
+    for (const source of MANAGED_OPERATIONAL_SOURCES) {
+      const openId = `${source}-open`;
+      const open = makeTasks(
+        stubDb({
+          existing: {
+            id: openId,
+            source,
+            status: "todo",
+          },
+        }),
+      );
+      await assert.rejects(
+        () => open.setStatus(openId, "done"),
+        /автоматически после повторной проверки/,
+      );
+      await assert.rejects(
+        () => open.setStatus(openId, "cancelled"),
+        /автоматически после повторной проверки/,
+      );
 
-    const resolved = makeTasks(stubDb({ existing: {
-      id: "parity-resolved",
-      source: PARITY_ISSUE_SOURCE,
-      status: "done",
-    } }));
-    await assert.rejects(
-      () => resolved.setStatus("parity-resolved", "todo"),
-      /автоматически после повторной сверки/,
-    );
+      const resolvedId = `${source}-resolved`;
+      const resolved = makeTasks(
+        stubDb({
+          existing: {
+            id: resolvedId,
+            source,
+            status: "done",
+          },
+        }),
+      );
+      await assert.rejects(
+        () => resolved.setStatus(resolvedId, "todo"),
+        /автоматически после повторной проверки/,
+      );
+    }
   });
 
   it("повторяющаяся задача не дублируется в тот же день", async () => {
@@ -568,27 +582,31 @@ describe("Durable cron occurrence tasks", () => {
     );
   });
 
-  it("generic create не может подделать machine-owned parity issue", async () => {
-    await assert.rejects(
-      makeTasks(stubDb({})).create({
-        title: "Ложная сверка",
-        ownerKind: "human",
-        source: PARITY_ISSUE_SOURCE,
-      }),
-      /зарезервирован/,
-    );
+  it("generic create не может подделать managed operational issue", async () => {
+    for (const source of MANAGED_OPERATIONAL_SOURCES) {
+      await assert.rejects(
+        makeTasks(stubDb({})).create({
+          title: "Ложная операционная проблема",
+          ownerKind: "human",
+          source,
+        }),
+        /зарезервирован/,
+      );
+    }
   });
 
-  it("generic create не может занять предсказуемый parity clientKey", async () => {
-    await assert.rejects(
-      makeTasks(stubDb({})).create({
-        title: "DoS системной задачи",
-        ownerKind: "human",
-        source: "manual",
-        clientKey: `${PARITY_ISSUE_SOURCE}:ourvend.parity.sales:${"0".repeat(64)}`,
-      }),
-      /clientKey.*зарезервирован/,
-    );
+  it("generic create не может занять предсказуемый managed operational clientKey", async () => {
+    for (const source of MANAGED_OPERATIONAL_SOURCES) {
+      await assert.rejects(
+        makeTasks(stubDb({})).create({
+          title: "DoS системной задачи",
+          ownerKind: "human",
+          source: "manual",
+          clientKey: `${source}:${"0".repeat(64)}`,
+        }),
+        /clientKey.*зарезервирован/,
+      );
+    }
   });
 
   it("assigned predicate оставляет NULL source, но отсекает system occurrences", () => {
@@ -2069,17 +2087,24 @@ describe("Оценка сделанной задачи", () => {
     await assert.rejects(() => s.rate("t1", "excellent"), /только сделанную/);
   });
 
-  it("redo не переоткрывает уже закрытую machine-owned parity task", async () => {
-    const service = makeTasks(stubDb({ existing: {
-      id: "parity-resolved",
-      source: PARITY_ISSUE_SOURCE,
-      status: "done",
-      ownerKind: "human",
-    } }));
-    await assert.rejects(
-      () => service.rate("parity-resolved", "redo"),
-      /переоткроет сама повторная сверка/,
-    );
+  it("redo не переоткрывает уже закрытую managed operational task", async () => {
+    for (const source of MANAGED_OPERATIONAL_SOURCES) {
+      const id = `${source}-resolved`;
+      const service = makeTasks(
+        stubDb({
+          existing: {
+            id,
+            source,
+            status: "done",
+            ownerKind: "human",
+          },
+        }),
+      );
+      await assert.rejects(
+        () => service.rate(id, "redo"),
+        /переоткроет Core, если проблема вернётся/,
+      );
+    }
   });
 });
 
@@ -2128,19 +2153,22 @@ describe("Правка полей задачи (edit)", () => {
     assert.equal("agentExecutionBlockedAt" in captured[0], false);
   });
 
-  it("parity issue нельзя назначить LLM-агенту", async () => {
-    const { db, captured } = editStub({
-      id: "parity-1",
-      source: PARITY_ISSUE_SOURCE,
-      ownerKind: "human",
-      ownerRef: null,
-    });
+  it("managed operational issue нельзя назначить LLM-агенту", async () => {
+    for (const source of MANAGED_OPERATIONAL_SOURCES) {
+      const id = `${source}-1`;
+      const { db, captured } = editStub({
+        id,
+        source,
+        ownerKind: "human",
+        ownerRef: null,
+      });
 
-    await assert.rejects(
-      () => makeTasks(db).edit("parity-1", { ownerKind: "agent", ownerRef: "vendhub-ops" }),
-      /нельзя назначить агенту/,
-    );
-    assert.equal(captured.length, 0, "ни owner, ни LLM attempt не меняются");
+      await assert.rejects(
+        () => makeTasks(db).edit(id, { ownerKind: "agent", ownerRef: "vendhub-ops" }),
+        /нельзя назначить агенту/,
+      );
+      assert.equal(captured.length, 0, "ни owner, ни LLM attempt не меняются");
+    }
   });
 
   it("переносит задачу в другое направление", async () => {

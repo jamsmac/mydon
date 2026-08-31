@@ -5,6 +5,7 @@ import { OurvendParityService } from "../ourvend/ourvend-parity.service";
 import { ParityIssueService } from "../ourvend/parity-issue.service";
 import { SyncStaleService } from "../ourvend/sync-stale.service";
 import { AnalyticsService } from "./analytics.service";
+import { LowStockIssueService } from "./low-stock-issue.service";
 import { ProductFiscalService } from "./product-fiscal.service";
 import { RecordCancelService } from "./record-cancel.service";
 import { RefillEventsService } from "./refill-events.service";
@@ -45,6 +46,7 @@ import { WeeklyDigestService } from "./weekly-digest.service";
     RefillService,
     RefillEventsService,
     ShrinkageService,
+    LowStockIssueService,
     AnalyticsService,
     OurvendParityService,
     ParityIssueService,

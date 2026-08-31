@@ -243,4 +243,18 @@ describe("Цепочка миграций: файл ↔ журнал (сторо
     assert.match(migration, /CREATE INDEX "operational_issue_kind_date_idx"/);
     assert.match(migration, /operational_issue_resolution_consistent/);
   });
+
+  it("0082 backfills only verified VendHub maintenance-monitor tasks", () => {
+    const migration = readFileSync(path.join(ПАПКА, "0082_maintenance_task_domain.sql"), "utf8");
+    assert.match(migration, /UPDATE "task" AS t/);
+    assert.match(migration, /SET "domain" = 'vendhub'/);
+    assert.match(migration, /t\."domain" IS NULL/);
+    assert.match(migration, /t\."created_by" = 'agent:maintenance-monitor'/);
+    assert.match(migration, /t\."owner_kind" = 'human'/);
+    assert.match(migration, /JOIN "maintenance_plan"|FROM "maintenance_plan"/);
+    assert.match(migration, /split_part\(t\."source", ':', 2\) = mp\."id"::text/);
+    assert.match(migration, /t\."entity_id" = mp\."entity_id"/);
+    assert.match(migration, /o\."code" = 'vendhub'/);
+    assert.match(migration, /\^maint:/);
+  });
 });

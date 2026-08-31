@@ -106,6 +106,27 @@ describe("EnsureForDayDto: dayKey — только голые сутки", () =>
   }
 });
 
+describe("TasksController.ensureForDay: направление", () => {
+  it("пробрасывает validated domain в TasksService", () => {
+    let received: Record<string, unknown> | undefined;
+    const controller = new TasksController({
+      ensureForDay: (input: Record<string, unknown>) => {
+        received = input;
+        return null;
+      },
+    } as never);
+
+    controller.ensureForDay({
+      title: "Мойка миксера",
+      ownerKind: "human",
+      domain: "vendhub",
+      dayKey: "2026-08-26",
+    });
+
+    assert.equal(received?.domain, "vendhub");
+  });
+});
+
 describe("EnsureAgentScheduleDto: exact planned occurrence", () => {
   const valid = {
     agentName: "coach-agent",
