@@ -511,43 +511,46 @@ export class TasksController {
     });
   }
 
-  // ГРАНИЦА СРЕЗА (R-P5-6 закрывает domain-less list/by-id; кросс-доменные
-  // агрегаты — follow-up R-P5-7): overdue/due-soon/workload/redo-unnotified/
-  // assign-unnotified отдают personal-задачи заодно со всеми и при ужесточении
-  // остаются открытыми в tailnet. Это ОСОЗНАННО не закрыто здесь: их читают
-  // рассыльщики напоминаний и приёмки, которым личные задачи владельца нужны,
-  // — глухой excludePersonal-фильтр молча погасил бы напоминания по personal.
-  // Правильное закрытие — per-consumer в R-P5-7, а не «уже безопасно».
+  // R-P5-7a закрывает кросс-доменные агрегаты: overdue/due-soon/workload/
+  // redo-unnotified/assign-unnotified теперь гейтятся тем же excludePersonal,
+  // что и list/by-id — при ужесточении и не-owner запросе личный контур не
+  // утекает наружу. ВАЖНО: рассыльщики напоминаний/приёмок/назначений живут в
+  // apps/bot и ходят сюда по HTTP (core-client.request шлёт только x-service-token,
+  // owner-action-токена у бота нет) — значит они проходят ЭТОТ гейт, а не зовут
+  // сервис напрямую. При enforcement=ON бот получает excludePersonal=TRUE и
+  // личные задачи в рассылке теряет — осознанный компромисс: настоящий
+  // per-consumer доступ потребовал бы завести x-owner-action-token в бот.
+  // Флаг enforcement выключен по умолчанию → excludePersonal=false → SQL прежний.
 
   // Объявлены ВЫШЕ параметрических маршрутов, иначе "overdue" уедет в :id.
   @Get("overdue")
-  overdue() {
-    return this.tasks.overdue();
+  async overdue(@Req() req: Request) {
+    return this.tasks.overdue(await this.excludePersonal(req));
   }
 
   /** Кому пора напомнить — читает рассыльщик напоминаний. */
   @Get("due-soon")
-  dueSoon(@Query("hours") hours?: string) {
+  async dueSoon(@Req() req: Request, @Query("hours") hours?: string) {
     const h = Number(hours);
-    return this.tasks.dueSoon(Number.isFinite(h) && h > 0 ? h : 24);
+    return this.tasks.dueSoon(Number.isFinite(h) && h > 0 ? h : 24, await this.excludePersonal(req));
   }
 
   /** Картина по людям и агентам: висит / просрочено / сделано за неделю. */
   /** Кому сообщить о возврате на доработку. До маршрута :id — иначе перехват. */
   @Get("redo-unnotified")
-  redoUnnotified() {
-    return this.tasks.redoUnnotified();
+  async redoUnnotified(@Req() req: Request) {
+    return this.tasks.redoUnnotified(await this.excludePersonal(req));
   }
 
   /** Кому сообщить о новом назначении. До маршрута :id — иначе перехват. */
   @Get("assign-unnotified")
-  assignUnnotified() {
-    return this.tasks.assignUnnotified();
+  async assignUnnotified(@Req() req: Request) {
+    return this.tasks.assignUnnotified(50, await this.excludePersonal(req));
   }
 
   @Get("workload")
-  workload() {
-    return this.tasks.workload();
+  async workload(@Req() req: Request) {
+    return this.tasks.workload(await this.excludePersonal(req));
   }
 
   @Get()

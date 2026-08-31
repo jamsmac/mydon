@@ -2347,18 +2347,22 @@ export class TasksService {
   }
 
   /** Просроченное: срок прошёл, а задача ещё не закрыта. */
-  async overdue(): Promise<TaskRow[]> {
+  async overdue(excludePersonal = false): Promise<TaskRow[]> {
+    const conditions: SQL[] = [
+      isAssignedTaskSql(),
+      lt(task.due, new Date()),
+      ne(task.status, "done"),
+      ne(task.status, "cancelled"),
+    ];
+    // При ужесточении и не-owner запросе личный контур вырезается (тот же
+    // domain-less обход, что и голый list). `is distinct from`, а не
+    // `<> 'personal'`: domain бывает NULL, и `NULL <> …` вычеркнуло бы задачу
+    // без направления. Внутренние вызыватели (боты/крон) идут на дефолте false.
+    if (excludePersonal) conditions.push(sql`${task.domain} is distinct from 'personal'`);
     return this.db
       .select()
       .from(task)
-      .where(
-        and(
-          isAssignedTaskSql(),
-          lt(task.due, new Date()),
-          ne(task.status, "done"),
-          ne(task.status, "cancelled"),
-        ),
-      )
+      .where(and(...conditions))
       .orderBy(asc(task.due))
       .limit(100);
   }
@@ -3030,20 +3034,25 @@ export class TasksService {
   }
 
   /** Кому ещё не сообщили о возврате на доработку — бот заберёт и доставит. */
-  redoUnnotified(): Promise<TaskRow[]> {
+  redoUnnotified(excludePersonal = false): Promise<TaskRow[]> {
+    const conditions: SQL[] = [
+      eq(task.quality, "redo"),
+      ne(task.status, "done"),
+      ne(task.status, "cancelled"),
+      isNull(task.redoNotifiedAt),
+      eq(task.ownerKind, "human"),
+      isNotNull(task.ownerRef),
+    ];
+    // `is distinct from`, а не `<> 'personal'`: domain бывает NULL. Дефолт false
+    // оставляет личные задачи прямому in-process вызову, НО реальный рассыльщик
+    // приёмок (бот) ходит сюда по HTTP через гейт контроллера и owner-action-токен
+    // не шлёт: при enforcement=ON он получает excludePersonal=TRUE и личные задачи
+    // теряет. Это осознанный компромисс, а не персональное исключение для бота.
+    if (excludePersonal) conditions.push(sql`${task.domain} is distinct from 'personal'`);
     return this.db
       .select()
       .from(task)
-      .where(
-        and(
-          eq(task.quality, "redo"),
-          ne(task.status, "done"),
-          ne(task.status, "cancelled"),
-          isNull(task.redoNotifiedAt),
-          eq(task.ownerKind, "human"),
-          isNotNull(task.ownerRef),
-        ),
-      )
+      .where(and(...conditions))
       .limit(50);
   }
 
@@ -3059,19 +3068,24 @@ export class TasksService {
    * Зеркало `redoUnnotified`: та же пара «спросить кого — отметить доставку».
    * Момента здесь нет: в условии нет ни одного временнóго предиката.
    */
-  assignUnnotified(limit = 50): Promise<TaskRow[]> {
+  assignUnnotified(limit = 50, excludePersonal = false): Promise<TaskRow[]> {
+    const conditions: SQL[] = [
+      eq(task.ownerKind, "human"),
+      isNotNull(task.ownerRef),
+      ne(task.status, "done"),
+      ne(task.status, "cancelled"),
+      isNull(task.assignNotifiedAt),
+    ];
+    // `is distinct from`, а не `<> 'personal'`: domain бывает NULL. Дефолт false
+    // оставляет личные задачи прямому in-process вызову, НО реальный рассыльщик
+    // назначений (бот) ходит сюда по HTTP через гейт контроллера и owner-action-токен
+    // не шлёт: при enforcement=ON он получает excludePersonal=TRUE и личные задачи
+    // теряет. Это осознанный компромисс, а не персональное исключение для бота.
+    if (excludePersonal) conditions.push(sql`${task.domain} is distinct from 'personal'`);
     return this.db
       .select()
       .from(task)
-      .where(
-        and(
-          eq(task.ownerKind, "human"),
-          isNotNull(task.ownerRef),
-          ne(task.status, "done"),
-          ne(task.status, "cancelled"),
-          isNull(task.assignNotifiedAt),
-        ),
-      )
+      .where(and(...conditions))
       .limit(limit);
   }
 
@@ -3097,21 +3111,26 @@ export class TasksService {
    * и раньше мы про неё не напоминали. `remindedAt` — защита от повторов:
    * без неё сотрудник получал бы одно и то же напоминание каждый час.
    */
-  dueSoon(withinHours = 24): Promise<TaskRow[]> {
+  dueSoon(withinHours = 24, excludePersonal = false): Promise<TaskRow[]> {
     const until = new Date(Date.now() + withinHours * 3600_000);
+    const conditions: SQL[] = [
+      isAssignedTaskSql(),
+      isNotNull(task.due),
+      lt(task.due, until),
+      ne(task.status, "done"),
+      ne(task.status, "cancelled"),
+      sql`${task.remindedAt} is null`,
+    ];
+    // `is distinct from`, а не `<> 'personal'`: domain бывает NULL. Дефолт false
+    // оставляет личные задачи прямому in-process вызову, НО реальный рассыльщик
+    // напоминаний (бот) ходит сюда по HTTP через гейт контроллера и owner-action-токен
+    // не шлёт: при enforcement=ON он получает excludePersonal=TRUE и личные задачи
+    // теряет. Это осознанный компромисс, а не персональное исключение для бота.
+    if (excludePersonal) conditions.push(sql`${task.domain} is distinct from 'personal'`);
     return this.db
       .select()
       .from(task)
-      .where(
-        and(
-          isAssignedTaskSql(),
-          isNotNull(task.due),
-          lt(task.due, until),
-          ne(task.status, "done"),
-          ne(task.status, "cancelled"),
-          sql`${task.remindedAt} is null`,
-        ),
-      )
+      .where(and(...conditions))
       .orderBy(asc(task.due))
       .limit(50);
   }
@@ -3125,10 +3144,15 @@ export class TasksService {
    * Картина по людям и агентам: что висит, что просрочено, что сделано за неделю.
    * Один запрос вместо трёх на каждого исполнителя — список может быть длинным.
    */
-  async workload(): Promise<WorkloadRow[]> {
+  async workload(excludePersonal = false): Promise<WorkloadRow[]> {
     // Дату передаём строкой с явным приведением: без ::timestamptz PostgreSQL
     // не может вывести тип параметра внутри count(case ...) и падает.
     const weekAgo = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
+    // Агрегат по строкам task — фильтр личного контура применяем ДО группировки,
+    // иначе personal-задачи попали бы в счётчики по исполнителям. Внутренние
+    // вызыватели идут на дефолте false. `is distinct from`: domain бывает NULL.
+    const conditions: SQL[] = [isAssignedTaskSql()];
+    if (excludePersonal) conditions.push(sql`${task.domain} is distinct from 'personal'`);
     const rows = await this.db
       .select({
         ownerKind: task.ownerKind,
@@ -3158,7 +3182,7 @@ export class TasksService {
           ),
       })
       .from(task)
-      .where(isAssignedTaskSql())
+      .where(and(...conditions))
       .groupBy(task.ownerKind, task.ownerRef);
 
     return rows.map((r) => ({

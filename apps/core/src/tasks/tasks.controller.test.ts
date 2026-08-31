@@ -175,6 +175,118 @@ describe("by-id и awaiting/unassigned чтения не утекают personal
   });
 });
 
+describe("Агрегатные чтения не утекают personal (R-P5-7a)", () => {
+  function aggregateService(calls: Array<{ method: string; args: unknown[] }>) {
+    return {
+      overdue: (...args: unknown[]) => calls.push({ method: "overdue", args }),
+      dueSoon: (...args: unknown[]) => calls.push({ method: "dueSoon", args }),
+      workload: (...args: unknown[]) => calls.push({ method: "workload", args }),
+      redoUnnotified: (...args: unknown[]) => calls.push({ method: "redoUnnotified", args }),
+      assignUnnotified: (...args: unknown[]) =>
+        calls.push({ method: "assignUnnotified", args }),
+    };
+  }
+
+  async function callAll(controller: TasksController, request: Request) {
+    await controller.overdue(request);
+    await controller.dueSoon(request);
+    await controller.redoUnnotified(request);
+    await controller.assignUnnotified(request);
+    await controller.workload(request);
+  }
+
+  it("флаг выключен — все пять агрегатов получают excludePersonal=false", async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const controller = new TasksController(aggregateService(calls) as never, fakeDb());
+
+    await callAll(controller, req());
+
+    assert.deepEqual(calls, [
+      { method: "overdue", args: [false] },
+      { method: "dueSoon", args: [24, false] },
+      { method: "redoUnnotified", args: [false] },
+      { method: "assignUnnotified", args: [50, false] },
+      { method: "workload", args: [false] },
+    ]);
+  });
+
+  it("флаг включён + нет owner-токена → excludePersonal=true; с owner-токеном снова false", async () => {
+    const prevOwner = process.env.OWNER_ACTION_TOKEN;
+    const prevService = process.env.SERVICE_TOKEN;
+    process.env.SERVICE_TOKEN = "shared";
+    process.env.OWNER_ACTION_TOKEN = "owner-secret";
+    try {
+      const calls: Array<{ method: string; args: unknown[] }> = [];
+      const controller = new TasksController(
+        aggregateService(calls) as never,
+        fakeDb([{ key: "OWNER_IDENTITY_ENFORCED", value: "1" }]),
+      );
+
+      await callAll(controller, req());
+      assert.deepEqual(calls, [
+        { method: "overdue", args: [true] },
+        { method: "dueSoon", args: [24, true] },
+        { method: "redoUnnotified", args: [true] },
+        { method: "assignUnnotified", args: [50, true] },
+        { method: "workload", args: [true] },
+      ]);
+
+      // Тот же путь с валидным owner-токеном — личный контур снова виден.
+      calls.length = 0;
+      await callAll(controller, req({ "x-owner-action-token": "owner-secret" }));
+      assert.deepEqual(calls, [
+        { method: "overdue", args: [false] },
+        { method: "dueSoon", args: [24, false] },
+        { method: "redoUnnotified", args: [false] },
+        { method: "assignUnnotified", args: [50, false] },
+        { method: "workload", args: [false] },
+      ]);
+    } finally {
+      if (prevOwner === undefined) delete process.env.OWNER_ACTION_TOKEN;
+      else process.env.OWNER_ACTION_TOKEN = prevOwner;
+      if (prevService === undefined) delete process.env.SERVICE_TOKEN;
+      else process.env.SERVICE_TOKEN = prevService;
+    }
+  });
+
+  // Контракт бот-рассыльщиков: apps/bot/core-client.request шлёт ТОЛЬКО
+  // x-service-token и никогда x-owner-action-token. Значит под enforcement=ON
+  // рассыльщики напоминаний/приёмок/назначений проходят этот же гейт с
+  // excludePersonal=TRUE и личные задачи из рассылки выпадают. Фиксируем это
+  // осознанное поведение, чтобы комментарии сервиса/контроллера не разошлись с
+  // реальностью (было ложное «рассыльщик зовёт на дефолте false»).
+  it("enforcement=ON: бот с одним service-токеном теряет personal в рассылках", async () => {
+    const prevOwner = process.env.OWNER_ACTION_TOKEN;
+    const prevService = process.env.SERVICE_TOKEN;
+    process.env.SERVICE_TOKEN = "shared";
+    process.env.OWNER_ACTION_TOKEN = "owner-secret";
+    try {
+      const calls: Array<{ method: string; args: unknown[] }> = [];
+      const controller = new TasksController(
+        aggregateService(calls) as never,
+        fakeDb([{ key: "OWNER_IDENTITY_ENFORCED", value: "1" }]),
+      );
+
+      // Ровно то, что кладёт core-client: общий service-токен, owner-токена нет.
+      const botRequest = req({ "x-service-token": "shared" });
+      await controller.dueSoon(botRequest);
+      await controller.redoUnnotified(botRequest);
+      await controller.assignUnnotified(botRequest);
+
+      assert.deepEqual(calls, [
+        { method: "dueSoon", args: [24, true] },
+        { method: "redoUnnotified", args: [true] },
+        { method: "assignUnnotified", args: [50, true] },
+      ]);
+    } finally {
+      if (prevOwner === undefined) delete process.env.OWNER_ACTION_TOKEN;
+      else process.env.OWNER_ACTION_TOKEN = prevOwner;
+      if (prevService === undefined) delete process.env.SERVICE_TOKEN;
+      else process.env.SERVICE_TOKEN = prevService;
+    }
+  });
+});
+
 describe("EditTaskDto: направление", () => {
   it("принимает канон и пропущенное поле", async () => {
     assert.deepEqual(await validate(plainToInstance(EditTaskDto, {})), []);
