@@ -22,11 +22,16 @@ function fixture(opts: { events: Row[]; settings?: Row[]; people?: Row[]; confli
   const warnings: string[] = [];
   const db = { select: () => ({ from: async () => opts.settings ?? [] }) } as never;
   const tasks = {
-    ensureForDay: async (input: Row) => {
+    // Мост создаёт задачу и пишет `task.auto_created` ОДНОЙ транзакцией внутри
+    // ensureForDay: событие приходит followup-колбэком по фактической строке.
+    // Конфликт (дубль дня) не создаёт задачу — и колбэк не зовём, событие не
+    // пишется, ровно как rollback транзакции в проде.
+    ensureForDay: async (input: Row, followup?: (created: Row) => Row) => {
       const key = `${String(input.source)}:${String(input.dayKey)}`;
       if (opts.conflicts?.has(key)) return null;
       const row = { id: `t-${created.length + 1}`, ...input, source: key };
       created.push(row);
+      if (followup) recorded.push(followup(row));
       return row;
     },
   } as never;

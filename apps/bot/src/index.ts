@@ -792,6 +792,7 @@ async function main(): Promise<void> {
         awaitingTasks: () => deps.core.awaitingTasks(),
         people: () => deps.core.people(),
         claimNotification: (key) => deps.core.claimNotification(key),
+        releaseNotification: (key) => deps.core.releaseNotification(key),
         recordEvent: (type, payload) => deps.core.recordEvent(type, payload).then(() => undefined),
         send: async (chat, text, keyboard) => {
           await tg.sendMessage(chat, text, keyboard);

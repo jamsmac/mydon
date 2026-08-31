@@ -135,7 +135,12 @@ export class InvitesService {
             isNull(staffInvite.revokedAt),
           ),
         )
-        .limit(1);
+        .limit(1)
+        // Блокируем строку приглашения на время транзакции (SELECT ... FOR UPDATE):
+        // вторая параллельная попытка активации (два быстрых нажатия, гонка ботов)
+        // ждёт коммита первой, перечитывает строку и видит usedAt → падает на
+        // isNull-условии, а не привязывает второй chat_id к тому же сотруднику.
+        .for("update");
       // Одна формулировка на «нет такого» и «уже погашено»: разные ответы
       // подсказали бы перебирающему, что код существует.
       if (!invite) throw new BadRequestException("Приглашение не найдено или уже использовано");
@@ -173,8 +178,14 @@ export class InvitesService {
       const [used] = await tx
         .update(staffInvite)
         .set({ usedAt: new Date(), usedByChatId: chatId })
-        .where(eq(staffInvite.id, invite.id))
+        // isNull-guard в WHERE — второй пояс к FOR UPDATE: гасим строку только
+        // если она ещё не погашена. Если гонка успела её погасить, UPDATE
+        // не заденет ни одной строки и returning() будет пуст.
+        .where(and(eq(staffInvite.id, invite.id), isNull(staffInvite.usedAt)))
         .returning();
+      // Пустой returning() = приглашение уже погасила параллельная транзакция.
+      // Та же формулировка, что и на «нет такого»: деталей гонки не раскрываем.
+      if (!used) throw new BadRequestException("Приглашение не найдено или уже использовано");
 
       await tx.insert(auditLog).values({
         actorKind: "human",

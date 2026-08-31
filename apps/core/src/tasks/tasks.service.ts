@@ -523,6 +523,19 @@ export interface CreateTaskInput {
   clientKey?: string;
 }
 
+/**
+ * Событие, которое {@link TasksService.ensureForDay} пишет ТОЙ ЖЕ транзакцией,
+ * что и созданную задачу с её записью в журнал. Так у моста «событие → задача»
+ * `task.auto_created` появляется атомарно вместе с задачей — либо всё, либо
+ * ничего.
+ */
+export interface EnsureForDayFollowupEvent {
+  source: string;
+  type: string;
+  payload?: Record<string, unknown>;
+  occurredAt?: Date;
+}
+
 export interface EnsureAgentScheduleInput {
   agentName: string;
   skill: string;
@@ -2663,7 +2676,10 @@ export class TasksService {
     return machineIsOperational(card?.status);
   }
 
-  async ensureForDay(input: CreateTaskInput & { dayKey: string }): Promise<TaskRow | null> {
+  async ensureForDay(
+    input: CreateTaskInput & { dayKey: string },
+    followupEvent?: (created: TaskRow) => EnsureForDayFollowupEvent,
+  ): Promise<TaskRow | null> {
     assertPublicTaskSource(input.source);
     // Автомату вне эксплуатации повторяющиеся задачи не ставим.
     //
@@ -2679,46 +2695,68 @@ export class TasksService {
     if (input.entityId && !(await this.machineIsOperationalCheck(input.entityId))) return null;
 
     const source = `${input.source ?? "recurring"}:${input.dayKey}`;
-    // Было select-then-insert: два тика монитора в одну секунду проходили
-    // проверку оба и создавали две задачи на один день. Ставку делает БД —
-    // частичный уникальный индекс task_source_key (миграция 0040).
     // ownerRef: та же нормализация "" → null, что в create() и PATCH — пустая
     // строка от клиента не должна осесть «занятой» задачей.
     const ownerRef = (input.ownerRef ?? "").trim();
-    const [created] = await this.db
-      .insert(task)
-      .values({
-        title: input.title,
-        description: input.description ?? null,
-        ownerKind: input.ownerKind,
-        ownerRef: ownerRef.length > 0 ? ownerRef : null,
-        domain: input.domain ?? null,
-        due: input.due ?? null,
-        source,
-        priority: input.priority ?? "normal",
-        createdBy: input.createdBy ?? "scheduler",
-        entityId: input.entityId ?? null,
-      })
-      .onConflictDoNothing({
-        // ПРЕДИКАТ ОБЯЗАТЕЛЕН (R-G-2): индекс `task_source_key` ЧАСТИЧНЫЙ, и
-        // из голого `target` Postgres его не выводит — `42P10`, который фильтр
-        // исключений (класс не 22/23) отдаёт как 500. Так эта вставка не
-        // проходила НИ РАЗУ: задач от монитора в проде 0 при 19 попытках в
-        // сутки (замер 26.08.2026).
-        target: task.source,
-        where: TASK_SOURCE_DAY_PREDICATE,
-      })
-      .returning();
-    if (!created) return null;
+    // Задача, её запись в журнал и следующее событие (у моста —
+    // `task.auto_created`) рождаются ОДНОЙ транзакцией. Краш между шагами
+    // оставлял бы рассинхрон: задача есть, а события/аудита нет (или наоборот)
+    // — лента «Действия» и дедуп моста разъехались бы. Дедуп «одна задача на
+    // источник в день» держит ЧАСТИЧНЫЙ уникальный индекс task_source_key
+    // (миграция 0040): конфликт возвращает null и откатывает всю транзакцию,
+    // поэтому событие пишется РОВНО когда задача действительно создана.
+    return this.db.transaction(async (tx) => {
+      // Было select-then-insert: два тика монитора в одну секунду проходили
+      // проверку оба и создавали две задачи на один день. Ставку делает БД.
+      const [created] = await tx
+        .insert(task)
+        .values({
+          title: input.title,
+          description: input.description ?? null,
+          ownerKind: input.ownerKind,
+          ownerRef: ownerRef.length > 0 ? ownerRef : null,
+          domain: input.domain ?? null,
+          due: input.due ?? null,
+          source,
+          priority: input.priority ?? "normal",
+          createdBy: input.createdBy ?? "scheduler",
+          entityId: input.entityId ?? null,
+        })
+        .onConflictDoNothing({
+          // ПРЕДИКАТ ОБЯЗАТЕЛЕН (R-G-2): индекс `task_source_key` ЧАСТИЧНЫЙ, и
+          // из голого `target` Postgres его не выводит — `42P10`, который фильтр
+          // исключений (класс не 22/23) отдаёт как 500. Так эта вставка не
+          // проходила НИ РАЗУ: задач от монитора в проде 0 при 19 попытках в
+          // сутки (замер 26.08.2026).
+          target: task.source,
+          where: TASK_SOURCE_DAY_PREDICATE,
+        })
+        .returning();
+      if (!created) return null;
 
-    await this.db.insert(auditLog).values({
-      actorKind: "system",
-      actorRef: "scheduler",
-      action: "task.create",
-      target: created.id,
-      after: created,
+      await tx.insert(auditLog).values({
+        actorKind: "system",
+        actorRef: "scheduler",
+        action: "task.create",
+        target: created.id,
+        after: created,
+      });
+
+      // Событие пишем прямой вставкой в той же транзакции (как invites.redeem
+      // пишет auditLog): EventsService.record открыл бы СВОЮ транзакцию и
+      // вынес бы событие за пределы атомарности задачи. clientKey у авто-
+      // события нет — идемпотентность держит дедуп самой задачи выше.
+      if (followupEvent) {
+        const spec = followupEvent(created);
+        await tx.insert(event).values({
+          source: spec.source,
+          type: spec.type,
+          payload: spec.payload ?? {},
+          ...(spec.occurredAt ? { occurredAt: spec.occurredAt } : {}),
+        });
+      }
+      return created;
     });
-    return created;
   }
 
   // ── Общий пул: свободные задачи ────────────────────────────────────────────

@@ -3,6 +3,7 @@ import { CoreError, type CoreClient, type PersonRow, type TaskRow } from "./core
 import type { Conversations } from "./conversation";
 import { внутриРабочихЧасов } from "./push-hours";
 import type { StaffReply } from "./staff";
+import { TelegramError } from "./telegram";
 
 export const CONFIRM_CANCEL = "tc:x";
 export const REDO_FLOW = "task-redo";
@@ -174,11 +175,34 @@ export interface ConfirmDeps {
   awaitingTasks(): Promise<TaskRow[]>;
   people(): Promise<PersonRow[]>;
   claimNotification(key: string): Promise<boolean>;
+  /**
+   * Освободить ранее занятый ключ рассылки, чтобы следующий прогон занял его
+   * заново. Нужно, когда отправка после `claimNotification` сорвалась
+   * транзиентно: без освобождения метка «уведомлён» осталась бы стоять, и
+   * запрос приёмки потерялся бы навсегда.
+   */
+  releaseNotification(key: string): Promise<void>;
   recordEvent(type: string, payload: Record<string, unknown>): Promise<void>;
   send(chat: number, text: string, keyboard?: StaffReply["keyboard"]): Promise<void>;
   ownerChats: Iterable<number>;
   sendOwner(chat: number, text: string): Promise<void>;
   warn(message: string): void;
+}
+
+function текстОшибки(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Стоит ли переотправлять после этого сбоя. Транзиентный (сеть, 429, 5xx) —
+ * да: результат ещё не известен, следующий прогон может пройти. Перманентный
+ * `TelegramError.isUnreachable` (403: бот заблокирован/чат удалён) — нет:
+ * результат уже известен, а метку снимать нельзя, иначе каждый тик планировщика
+ * (≈60 с) вечно бьёт в тот же недоступный чат по одному 403 на пару
+ * «задача × адресат». Контракт TelegramError.isUnreachable — тот же принцип.
+ */
+function стоитПовторить(error: unknown): boolean {
+  return !(error instanceof TelegramError && error.isUnreachable);
 }
 
 /** Доставка веера менеджерам с отдельным ключом на каждого адресата. */
@@ -191,15 +215,37 @@ export async function разослатьПодтверждения(deps: Confirm
   for (const task of tasks) {
     const recipients = eligible.filter((person) => task.closedBy !== `person:${person.id}`);
     if (recipients.length === 0) {
-      if (!(await deps.claimNotification(ownerFallbackKey(task.id)))) continue;
+      const fallbackKey = ownerFallbackKey(task.id);
+      if (!(await deps.claimNotification(fallbackKey))) continue;
       const warning = `Задача «${task.title}» выполнена, но подтвердить её некому. Проставь роль менеджера или владельца с Telegram.`;
       deps.warn(warning);
       await deps.recordEvent(NO_CONFIRMERS_EVENT, { taskId: task.id, title: task.title }).catch((error: unknown) =>
-        deps.warn(`Событие ${NO_CONFIRMERS_EVENT} не записано: ${error instanceof Error ? error.message : String(error)}`),
+        deps.warn(`Событие ${NO_CONFIRMERS_EVENT} не записано: ${текстОшибки(error)}`),
       );
+      let адресатов = 0;
+      let доставлено = false;
+      let естьТранзиентныйСбой = false;
       for (const chat of deps.ownerChats) {
-        await deps.sendOwner(chat, `🟡 ${warning}`).catch((error: unknown) =>
-          deps.warn(`Владельцу (${chat}) не отправлено: ${error instanceof Error ? error.message : String(error)}`),
+        адресатов += 1;
+        try {
+          await deps.sendOwner(chat, `🟡 ${warning}`);
+          доставлено = true;
+        } catch (error: unknown) {
+          deps.warn(`Владельцу (${chat}) не отправлено: ${текстОшибки(error)}`);
+          if (стоитПовторить(error)) естьТранзиентныйСбой = true;
+        }
+      }
+      // Один ключ `owner-fallback` на всех владельцев: семантика «хотя бы одному
+      // дошло» — это одно предупреждение об одной задаче, дублировать его каждому
+      // владельцу не нужно, и второй прогон при частичной доставке молчит (не
+      // переотправляет уже дошедшим). Освобождаем ключ, только если ни одному не
+      // дошло И был транзиентный сбой (есть смысл повторить). Если единственный
+      // сбой перманентный (владелец заблокировал бота) — ключ держим, иначе
+      // каждый тик планировщика вечно писал бы событие + warn + повторный send в
+      // недоступный чат. Когда адресатов нет вовсе, повторять нечего — держим.
+      if (адресатов > 0 && !доставлено && естьТранзиентныйСбой) {
+        await deps.releaseNotification(fallbackKey).catch((error: unknown) =>
+          deps.warn(`Метка ${fallbackKey} не освобождена после сбоя отправки владельцу: ${текстОшибки(error)}`),
         );
       }
       continue;
@@ -214,10 +260,22 @@ export async function разослатьПодтверждения(deps: Confirm
         deps.warn(`Запрос приёмки ${task.id}: chat_id «${recipient.tgChatId}» у ${recipient.name} не число.`);
         continue;
       }
-      if (!(await deps.claimNotification(confirmKey(task.id, recipient.id)))) continue;
-      await deps.send(chat, message.text, message.keyboard).catch((error: unknown) =>
-        deps.warn(`Запрос приёмки ${task.id} не доставлен ${recipient.name}: ${error instanceof Error ? error.message : String(error)}`),
-      );
+      const key = confirmKey(task.id, recipient.id);
+      if (!(await deps.claimNotification(key))) continue;
+      try {
+        await deps.send(chat, message.text, message.keyboard);
+      } catch (error: unknown) {
+        deps.warn(`Запрос приёмки ${task.id} не доставлен ${recipient.name}: ${текстОшибки(error)}`);
+        // Только транзиентный сбой Telegram: снимаем метку, чтобы следующий
+        // прогон переотправил, иначе запрос приёмки потерялся бы навсегда. При
+        // перманентном (403 «бот заблокирован/чат удалён») метку держим — иначе
+        // планировщик каждую минуту вечно бил бы 403 в тот же недоступный чат.
+        if (стоитПовторить(error)) {
+          await deps.releaseNotification(key).catch((releaseError: unknown) =>
+            deps.warn(`Метка ${key} не освобождена после сбоя отправки: ${текстОшибки(releaseError)}`),
+          );
+        }
+      }
     }
   }
 }

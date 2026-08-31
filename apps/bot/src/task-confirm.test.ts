@@ -16,6 +16,10 @@ import {
   разослатьПодтверждения,
   startConfirmRedo,
 } from "./task-confirm";
+import { TelegramError } from "./telegram";
+
+/** 403 «бот заблокирован» — перманентный сбой, повторять бессмысленно. */
+const заблокирован = () => new TelegramError("sendMessage", 403, "Forbidden: bot was blocked by the user");
 
 const РАБОЧЕЕ = new Date("2026-08-26T10:00:00+05:00");
 const НОЧЬ = new Date("2026-08-26T23:40:00+05:00");
@@ -98,26 +102,56 @@ describe("Текст и кнопки «подтвердите»", () => {
 });
 
 describe("Рассылка веера", () => {
-  function стенд(opts: { задачи: TaskRow[]; люди: PersonRow[]; занятые?: Set<string> }) {
+  function стенд(opts: {
+    задачи: TaskRow[];
+    люди: PersonRow[];
+    занятые?: Iterable<string>;
+    /** Чаты, куда `send` бросает (транзиентный сбой Telegram). Мутабельно. */
+    сбойОтправки?: Set<number>;
+    /** Чаты, куда `send` бросает перманентный 403 «заблокирован». Мутабельно. */
+    заблокированныеОтправки?: Set<number>;
+    /** Чаты владельцев, куда `sendOwner` бросает. Мутабельно. */
+    сбойВладельцу?: Set<number>;
+    /** Чаты владельцев, куда `sendOwner` бросает перманентный 403. Мутабельно. */
+    заблокированныеВладельцу?: Set<number>;
+  }) {
     const ключи: string[] = [];
     const отправлено: { chat: number; text: string }[] = [];
     const владельцу: string[] = [];
     const события: { type: string; payload: Record<string, unknown> }[] = [];
     const предупреждения: string[] = [];
+    const освобождённые: string[] = [];
+    // Ключи-метки живут в одном множестве, как в Core: claim ставит, release
+    // снимает, повторный claim того же ключа даёт false — пока его не сняли.
+    const метки = new Set<string>(opts.занятые ?? []);
     const deps = {
       awaitingTasks: async () => opts.задачи,
       people: async () => opts.люди,
       claimNotification: async (key: string) => {
         ключи.push(key);
-        return !(opts.занятые?.has(key) ?? false);
+        if (метки.has(key)) return false;
+        метки.add(key);
+        return true;
+      },
+      releaseNotification: async (key: string) => {
+        освобождённые.push(key);
+        метки.delete(key);
       },
       recordEvent: async (type: string, payload: Record<string, unknown>) => { события.push({ type, payload }); },
-      send: async (chat: number, text: string) => { отправлено.push({ chat, text }); },
+      send: async (chat: number, text: string) => {
+        if (opts.заблокированныеОтправки?.has(chat)) throw заблокирован();
+        if (opts.сбойОтправки?.has(chat)) throw new Error(`send fail ${chat}`);
+        отправлено.push({ chat, text });
+      },
       ownerChats: [999],
-      sendOwner: async (chat: number, text: string) => { владельцу.push(`${chat}|${text}`); },
+      sendOwner: async (chat: number, text: string) => {
+        if (opts.заблокированныеВладельцу?.has(chat)) throw заблокирован();
+        if (opts.сбойВладельцу?.has(chat)) throw new Error(`owner fail ${chat}`);
+        владельцу.push(`${chat}|${text}`);
+      },
       warn: (message: string) => предупреждения.push(message),
     };
-    return { deps, ключи, отправлено, владельцу, события, предупреждения };
+    return { deps, ключи, отправлено, владельцу, события, предупреждения, освобождённые };
   }
 
   it("закрывший задачу себе запрос приёмки не получает", async () => {
@@ -160,6 +194,91 @@ describe("Рассылка веера", () => {
     await разослатьПодтверждения(st.deps, НОЧЬ);
     assert.deepEqual(st.отправлено, []);
     assert.deepEqual(st.ключи, []);
+  });
+
+  it("сбой отправки освобождает метку — следующий прогон переотправит", async () => {
+    const сбой = new Set([500]);
+    const st = стенд({
+      задачи: [задача()],
+      люди: [человек({ id: "m1", roles: ["manager"], tgChatId: "500" })],
+      сбойОтправки: сбой,
+    });
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    // Отправка сорвалась, но метка снята — запрос приёмки не потерян.
+    assert.equal(st.отправлено.length, 0);
+    assert.deepEqual(st.освобождённые, [confirmKey(ЗАДАЧА, "m1")]);
+
+    сбой.clear();
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    // Метка снова свободна → claim проходит → сообщение доставлено.
+    assert.deepEqual(st.отправлено.map((row) => row.chat), [500]);
+  });
+
+  it("перманентный 403 держит метку — недоступный чат не долбим каждый тик", async () => {
+    const st = стенд({
+      задачи: [задача()],
+      люди: [человек({ id: "m1", roles: ["manager"], tgChatId: "500" })],
+      заблокированныеОтправки: new Set([500]),
+    });
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    // Бот заблокирован: доставки нет, но метку НЕ снимаем — результат известен.
+    assert.equal(st.отправлено.length, 0);
+    assert.deepEqual(st.освобождённые, []);
+
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    // Второй прогон: метка занята → повторного 403 в тот же чат нет.
+    assert.deepEqual(st.ключи, [confirmKey(ЗАДАЧА, "m1"), confirmKey(ЗАДАЧА, "m1")]);
+    assert.equal(st.отправлено.length, 0);
+  });
+
+  it("успешная отправка держит метку — повтор молчит", async () => {
+    const st = стенд({
+      задачи: [задача()],
+      люди: [человек({ id: "m1", roles: ["manager"], tgChatId: "500" })],
+    });
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    assert.deepEqual(st.отправлено.map((row) => row.chat), [500]);
+    assert.deepEqual(st.освобождённые, []);
+
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    // Метка занята и не освобождалась → второй отправки нет.
+    assert.deepEqual(st.отправлено.map((row) => row.chat), [500]);
+    assert.deepEqual(st.освобождённые, []);
+  });
+
+  it("сбой всем владельцам освобождает запасной ключ — следующий прогон повторит", async () => {
+    const сбой = new Set([999]);
+    const st = стенд({
+      задачи: [задача()],
+      люди: [человек({ id: "c", roles: ["operator"] })],
+      сбойВладельцу: сбой,
+    });
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    // Владельцу не дошло, но запасной ключ снят — предупреждение не потеряно.
+    assert.equal(st.владельцу.length, 0);
+    assert.deepEqual(st.освобождённые, [ownerFallbackKey(ЗАДАЧА)]);
+
+    сбой.clear();
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    assert.equal(st.владельцу.length, 1);
+    // Повторное событие «некому подтвердить» — приемлемая цена за доставку.
+    assert.deepEqual(st.события.map((entry) => entry.type), [NO_CONFIRMERS_EVENT, NO_CONFIRMERS_EVENT]);
+  });
+
+  it("владелец заблокировал бота — запасной ключ держим, событие не дублируем", async () => {
+    const st = стенд({
+      задачи: [задача()],
+      люди: [человек({ id: "c", roles: ["operator"] })],
+      заблокированныеВладельцу: new Set([999]),
+    });
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    // Единственный владелец недоступен навсегда → ключ НЕ снимаем.
+    assert.equal(st.владельцу.length, 0);
+    assert.deepEqual(st.освобождённые, []);
+
+    await разослатьПодтверждения(st.deps, РАБОЧЕЕ);
+    // Второй прогон: ключ занят → без повторного события, warn и 403 владельцу.
+    assert.deepEqual(st.события.map((entry) => entry.type), [NO_CONFIRMERS_EVENT]);
   });
 });
 
