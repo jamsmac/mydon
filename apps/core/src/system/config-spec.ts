@@ -137,6 +137,23 @@ export const OPENAI_LLM_BASE_URL = "https://api.openai.com/v1";
 export const OPENAI_LLM_PRICE_PROVIDER_ID = "openai";
 
 export const CONFIG_SPECS: ConfigSpec[] = [
+  // ── Доступ: ужесточение owner-identity (P5, R-P5-4/5/6) ──
+  {
+    key: "OWNER_IDENTITY_ENFORCED",
+    label: "Доступ: ужесточение owner-identity",
+    kind: "bool",
+    fallback: "0",
+    help:
+      "0 (по умолчанию) — поведение как сегодня: GET личного контура открыт в tailnet, " +
+      "а owner-действия (согласования, приглашение/отзыв доступа, роли, автономия агента) " +
+      "идут под общим SERVICE_TOKEN. 1 — Core дополнительно требует отдельный " +
+      "OWNER_ACTION_TOKEN на GET домена personal и на эти мутации; прочие домены " +
+      "(vendhub, globerent, mydon) не трогаются. Включать ТОЛЬКО после того, как владелец " +
+      "убедился, что OWNER_ACTION_TOKEN доходит до панели. Аварийный выход: " +
+      "OWNER_IDENTITY_ENFORCED=0 в .env выключает ужесточение всегда, даже если здесь стоит 1 — " +
+      "чтобы ошибка настройки не отрезала владельца от собственной панели.",
+    validate: oneOf(["0", "1"]),
+  },
   {
     key: "AGENT_AUTONOMY_MAX",
     label: "Глобальный порог автономии",

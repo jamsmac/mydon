@@ -62,9 +62,24 @@ services:
       # (панель/бот/агенты). Пусто → ВСЕ мутации отклоняются 401 (fail-closed),
       # Core предупреждает на старте.
       SERVICE_TOKEN: ${SERVICE_TOKEN:-}
-      # Второй секрет только у Core: разрешает owner-only повтор после
-      # неизвестного LLM outcome. Bot/Agents/CC его не получают.
+      # Второй секрет «второго пояса» owner-only операций. Держат Core и CC
+      # (панель), Bot/Agents его НЕ получают. До P5 применялся только к снятию
+      # LLM replay-блока; с P5 им же CC подтверждает approvals/роли/автономию.
       OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
+      # P5 web-identity (R-P5-2/4/5/6). Один флаг гейтит И GET личного контура,
+      # И owner-only мутации (approvals/роли/автономия) под второй пояс. Core
+      # заголовку serve НЕ доверяет — только OWNER_ACTION_TOKEN (заголовок читает
+      # лишь CC за serve). ШТАТНЫЙ включатель — тумблер панели «Система» (DB,
+      # config-spec); ЭТА env — АВАРИЙНЫЙ kill-switch: "0" ВСЕГДА выключает
+      # ужесточение, даже если в базе стоит "1" (чтобы ошибка настройки не
+      # заперла владельца). ПУСТО (default) → решает база/дефолт = выкл: мерж
+      # среза поведение прода не меняет. НЕ ставить сюда "0" по умолчанию — это
+      # заблокировало бы тумблер панели.
+      OWNER_IDENTITY_ENFORCED: ${OWNER_IDENTITY_ENFORCED:-}
+      # Зарезервировано под будущее раздельное ужесточение чтения. Текущая
+      # сборка гейтит чтение personal тем же OWNER_IDENTITY_ENFORCED (см. выше);
+      # эта переменная кодом пока не читается. Пусто → без эффекта.
+      OWNER_READS_ENFORCED: ${OWNER_READS_ENFORCED:-}
       # Core повторно проверяет потолок атомарно в commit agent outcome.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
       # Core возвращает панели effective значения env; DB-настройки
@@ -298,6 +313,26 @@ services:
       HOSTNAME: 0.0.0.0
       CORE_API_URL: http://mydon-core:3001
       SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      # P5 web-identity. CC — единственный, кто читает Tailscale-User-Login
+      # (он стоит за `tailscale serve`, см. ports ниже). Owner-only действия CC
+      # подтверждает Core этим вторым поясом — ТОЛЬКО когда действие инициировал
+      # владелец. Bot/Agents токена не имеют. Core заголовку не доверяет (R-P5-2).
+      OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
+      # Логин владельца в tailnet (email). Резолвер сопоставляет с ним заголовок
+      # serve. Пусто → владелец не распознаётся; задавать ДО включения флагов.
+      OWNER_TAILSCALE_LOGIN: ${OWNER_TAILSCALE_LOGIN:-}
+      # ВНИМАНИЕ: у CC этот флаг работает НЕ как у Core. CC тумблер панели (DB)
+      # НЕ читает — только env и ТОЛЬКО значение "1" (apps/cc/src/lib/owner.ts:
+      # ownerEnforcementEnabled). При "1" CC гейтит роут /domain/personal
+      # (notFound/redirect не-владельцу) — это defense-in-depth ПОВЕРХ
+      # авторитетного data-гейта Core. Пусто/иное → route-гейт CC ВЫКЛ; personal
+      # при этом всё равно защищён 403 самого Core (его включает тумблер панели),
+      # так что утечки нет — просто без честного отказа на CC-слое. "0" —
+      # kill-switch (как у mydon-core), выключает и Core, и CC. Чтобы поднять и
+      # route-гейт CC, поставить "1" ДОПОЛНИТЕЛЬНО к тумблеру панели.
+      OWNER_IDENTITY_ENFORCED: ${OWNER_IDENTITY_ENFORCED:-}
+      # Зарезервировано (кодом пока не читается), см. mydon-core.
+      OWNER_READS_ENFORCED: ${OWNER_READS_ENFORCED:-}
       # Приём выгрузок файлом с экрана «Источники». Ключ тот же, что у Core:
       # оболочка кладёт строки тем же приёмом, что и скрипт, и правила у всех
       # одни. Пусто → загрузка файлом выключена, и экран об этом говорит.
@@ -316,10 +351,14 @@ services:
       # Server actions сначала fsync-ят exact settlement на host.
       - /opt/mydon-data/llm-close/cc:/data/llm-close/cc
     command: ["node_modules/.bin/next", "start", "-p", "3002"]
-    # Панель нужна владельцу с телефона и компьютера — значит адрес Tailscale,
-    # а не только localhost. В интернет (eth0) порт по-прежнему не смотрит:
-    # PANEL_BIND задаёт конкретный интерфейс. По умолчанию — localhost, чтобы
-    # случайная выкладка без .env не открыла панель шире, чем задумано.
+    # Доступ к панели — через `tailscale serve` (P5, R-P5-2): serve на самом
+    # хосте терминирует HTTPS, проставляет доверенный Tailscale-User-Login и
+    # проксирует на 127.0.0.1:3002. Поэтому за serve PANEL_BIND ОБЯЗАН быть
+    # 127.0.0.1 (loopback) — иначе :3002 доступен напрямую в обход serve и
+    # заголовок подделываем. Прямой Tailscale-IP допустим ТОЛЬКО транзитно, до
+    # перевода за serve (см. deploy/tailscale-serve-panel.sh, docs/DEPLOY.md).
+    # 0.0.0.0 деплой отклоняет (панель ушла бы в интернет, docker-proxy минует ufw).
+    # По умолчанию — localhost, чтобы выкладка без .env не открыла панель шире.
     ports:
       - "${PANEL_BIND:-127.0.0.1}:3002:3002"
 

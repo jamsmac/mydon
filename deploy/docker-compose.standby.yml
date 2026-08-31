@@ -38,6 +38,12 @@ services:
       SERVICE_TOKEN: ${SERVICE_TOKEN:?SERVICE_TOKEN is required (mutations are fail-closed without it)}
       # Не пробрасывать workers/CC: только владелец снимает LLM replay block.
       OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
+      # P5 web-identity: тот же авторитетный флаг, что на primary Core (штатно
+      # решает тумблер панели «Система» в базе; ЭТА env — только kill-switch
+      # "0", пусто → база/дефолт = выкл). OWNER_READS_ENFORCED зарезервирован,
+      # кодом пока не читается. Держим паритет env-поверхности с primary Core.
+      OWNER_IDENTITY_ENFORCED: ${OWNER_IDENTITY_ENFORCED:-}
+      OWNER_READS_ENFORCED: ${OWNER_READS_ENFORCED:-}
       # Та же серверная граница agent actions, что на primary Core.
       AGENT_DAILY_ACTION_CAP: ${AGENT_DAILY_ACTION_CAP:-50}
       # Core отдаёт панели точные env-defaults; значения из DB сильнее.
@@ -123,6 +129,15 @@ services:
       HOSTNAME: 0.0.0.0
       CORE_API_URL: http://core:3001
       SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      # P5 web-identity — паритет env-поверхности с production mydon-cc. Owner-
+      # only действия CC подтверждает Core вторым поясом (Bot/Agents токена не
+      # имеют). У CC route-гейт /domain/personal env-only: включается ТОЛЬКО
+      # OWNER_IDENTITY_ENFORCED=1 (тумблер панели CC не читает); "0" — kill-
+      # switch. OWNER_READS_ENFORCED зарезервирован, кодом пока не читается.
+      OWNER_ACTION_TOKEN: ${OWNER_ACTION_TOKEN:-}
+      OWNER_TAILSCALE_LOGIN: ${OWNER_TAILSCALE_LOGIN:-}
+      OWNER_IDENTITY_ENFORCED: ${OWNER_IDENTITY_ENFORCED:-}
+      OWNER_READS_ENFORCED: ${OWNER_READS_ENFORCED:-}
       INGEST_KEY: ${INGEST_KEY:-}
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}

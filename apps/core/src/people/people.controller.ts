@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from "@nestjs/common";
 import {
   ArrayMaxSize,
   IsArray,
@@ -11,6 +11,7 @@ import {
   MaxLength,
 } from "class-validator";
 import { DOMAINS, STAFF_ROLES, type Domain } from "@mydon/shared";
+import { OwnerMutationGuard } from "../common/owner-mutation.guard";
 import { InvitesService } from "./invites.service";
 import { PeopleService } from "./people.service";
 
@@ -99,8 +100,14 @@ export class PeopleController {
   /**
    * Выпустить приглашение. Код возвращается ОДИН раз — в БД лежит только хеш,
    * и «покажи ещё раз» невозможно by design.
+   *
+   * Owner-действие (R-P5-5): выдача доступа и ролей — из того же множества, что
+   * смена ролей. Guard пропускает, пока ужесточение выключено (по умолчанию):
+   * сегодня приглашение штатно зовёт бот, когда владелец добавляет сотрудника в
+   * Telegram (общий SERVICE_TOKEN).
    */
   @Post(":id/invite")
+  @UseGuards(OwnerMutationGuard)
   async invite(@Param("id", ParseUUIDPipe) id: string, @Body() dto: InviteDto) {
     const res = await this.invites.issue(id, dto.roles ?? [], dto.actor ?? "owner");
     return { code: res.code, expiresAt: res.expiresAt.toISOString(), name: res.person.name };
@@ -112,14 +119,24 @@ export class PeopleController {
     return this.invites.redeem(dto.code, dto.chatId);
   }
 
-  /** Отозвать доступ: снять привязку, погасить приглашения, снять роли. */
+  /**
+   * Отозвать доступ: снять привязку, погасить приглашения, снять роли.
+   * Owner-действие (R-P5-5) — снятие ролей и доступа. Guard пропускает, пока
+   * ужесточение выключено: сегодня отзыв штатно зовёт бот (общий SERVICE_TOKEN).
+   */
   @Post(":id/revoke")
+  @UseGuards(OwnerMutationGuard)
   revoke(@Param("id", ParseUUIDPipe) id: string, @Body() dto: ActorDto) {
     return this.invites.revoke(id, dto.actor ?? "owner");
   }
 
-  /** Проставить роли уже подключённому сотруднику. */
+  /**
+   * Проставить роли уже подключённому сотруднику.
+   * Owner-действие (R-P5-5) — прямая смена ролей. Guard пропускает, пока
+   * ужесточение выключено; сегодня зовёт только панель (общий SERVICE_TOKEN).
+   */
   @Post(":id/roles")
+  @UseGuards(OwnerMutationGuard)
   setRoles(@Param("id", ParseUUIDPipe) id: string, @Body() dto: RolesDto) {
     return this.invites.setRoles(id, dto.roles, dto.actor ?? "owner");
   }

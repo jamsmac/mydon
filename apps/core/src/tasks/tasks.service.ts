@@ -939,6 +939,7 @@ export class TasksService {
       limit?: number;
       offset?: number;
     } = {},
+    excludePersonal = false,
   ): Promise<TaskRow[]> {
     const conditions: SQL[] = [];
     conditions.push(
@@ -948,6 +949,12 @@ export class TasksService {
     );
     if (filter.status) conditions.push(eq(task.status, filter.status));
     if (filter.domain) conditions.push(eq(task.domain, filter.domain));
+    // Личные задачи не утекают через domain-less чтение при ужесточении (R-P5-6).
+    // Controller включает это, только если флаг включён И запрос НЕ owner-authed;
+    // при выключенном флаге условие не добавляется — выдача прода не меняется.
+    // `is distinct from`, а не `<> 'personal'`: task.domain бывает NULL, и
+    // `NULL <> …` вычеркнуло бы задачу без направления — а личной она не является.
+    if (excludePersonal) conditions.push(sql`${task.domain} is distinct from 'personal'`);
     if (filter.ownerKind) conditions.push(eq(task.ownerKind, filter.ownerKind));
     if (filter.ownerRef) conditions.push(eq(task.ownerRef, filter.ownerRef));
     // «Открытые» — то, что реально в работе; закрытое не должно засорять список.
@@ -968,9 +975,17 @@ export class TasksService {
     );
   }
 
-  async byId(id: string): Promise<TaskRow> {
+  async byId(id: string, excludePersonal = false): Promise<TaskRow> {
     const [row] = await this.db.select().from(task).where(eq(task.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Задача ${id} не найдена`);
+    // Личная задача при ужесточении и не-owner запросе — как несуществующая:
+    // тот же 404, что и для отсутствующей, чтобы by-id чтение не выдавало самим
+    // кодом ответа факт, что запись есть (иначе оно стало бы каналом утечки —
+    // тот же обход, что закрыт в entities.byId). Дефолт false → внутренние
+    // вызовы (edit, mine, comments) и выдача прода не меняются.
+    if (excludePersonal && row.domain === "personal") {
+      throw new NotFoundException(`Задача ${id} не найдена`);
+    }
     return row;
   }
 
@@ -2766,18 +2781,22 @@ export class TasksService {
   // Это нормальное состояние, а не дефект настройки.
 
   /** Свободные задачи: никто не взял, но работа стоит. */
-  unassigned(limit = 50, offset = 0): Promise<TaskRow[]> {
+  unassigned(limit = 50, offset = 0, excludePersonal = false): Promise<TaskRow[]> {
+    const conditions: SQL[] = [
+      eq(task.ownerKind, "human"),
+      isNull(task.ownerRef),
+      ne(task.status, "done"),
+      ne(task.status, "cancelled"),
+    ];
+    // `GET /tasks?unassigned=1` — тот же domain-less обход, что и голый list:
+    // при ужесточении и не-owner запросе личный контур вырезается, иначе он
+    // утекал бы в общий пул. `is distinct from`, а не `<> 'personal'`: domain
+    // бывает NULL, и `NULL <> …` вычеркнуло бы задачу без направления.
+    if (excludePersonal) conditions.push(sql`${task.domain} is distinct from 'personal'`);
     return this.db
       .select()
       .from(task)
-      .where(
-        and(
-          eq(task.ownerKind, "human"),
-          isNull(task.ownerRef),
-          ne(task.status, "done"),
-          ne(task.status, "cancelled"),
-        ),
-      )
+      .where(and(...conditions))
       .orderBy(asc(task.due), desc(task.priority), asc(task.createdAt), asc(task.id))
       .limit(limit)
       .offset(offset);
@@ -2902,11 +2921,24 @@ export class TasksService {
   }
 
   /** Сделанные людьми, но ещё не принятые; дольше ожидающие идут первыми. */
-  awaitingConfirmation(limit = TasksService.AWAITING_LIMIT, offset = 0): Promise<TaskRow[]> {
+  awaitingConfirmation(
+    limit = TasksService.AWAITING_LIMIT,
+    offset = 0,
+    excludePersonal = false,
+  ): Promise<TaskRow[]> {
+    const conditions: SQL[] = [
+      eq(task.status, "done"),
+      isNull(task.confirmedAt),
+      eq(task.ownerKind, "human"),
+    ];
+    // `GET /tasks?awaiting=1` — тот же domain-less обход, что и голый list:
+    // при ужесточении и не-owner запросе личные задачи не должны попадать в
+    // очередь приёмки. `is distinct from` не вычёркивает NULL-domain.
+    if (excludePersonal) conditions.push(sql`${task.domain} is distinct from 'personal'`);
     return this.db
       .select()
       .from(task)
-      .where(and(eq(task.status, "done"), isNull(task.confirmedAt), eq(task.ownerKind, "human")))
+      .where(and(...conditions))
       .orderBy(asc(task.completedAt), asc(task.createdAt), asc(task.id))
       .limit(limit)
       .offset(offset);
@@ -2914,7 +2946,12 @@ export class TasksService {
 
   // ── Переписка по задаче ────────────────────────────────────────────────────
 
-  comments(taskId: string): Promise<CommentRow[]> {
+  async comments(taskId: string, excludePersonal = false): Promise<CommentRow[]> {
+    // by-id чтение переписки — тот же обход, что by-id чтение самой задачи:
+    // сначала резолвим задачу через personal-aware byId, чтобы личная задача
+    // отдала 404 ДО того, как её тред станет виден не-владельцу на tailnet.
+    // Дефолт false → существование задачи здесь не проверяется (как сегодня).
+    if (excludePersonal) await this.byId(taskId, true);
     return this.db
       .select()
       .from(taskComment)

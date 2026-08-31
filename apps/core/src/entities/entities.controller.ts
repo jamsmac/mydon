@@ -1,11 +1,14 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Query, Req } from "@nestjs/common";
 import { ArrayMaxSize, IsArray, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
+import type { Request } from "express";
 import {
   MACHINE_KINDS,
   MACHINE_STATUSES,
   type MachineKind,
   type MachineStatus,
 } from "@mydon/shared";
+import { DB, type Db } from "../db/db.module";
+import { isOwnerIdentityEnforced, ownerTokenValid } from "../common/owner-enforcement";
 import { EntitiesService } from "./entities.service";
 import { CreateEntityDto, FindEntitiesDto, UpdateEntityDto } from "./entity.dto";
 
@@ -79,7 +82,23 @@ export class ApproveBatchDto {
 
 @Controller("entities")
 export class EntitiesController {
-  constructor(private readonly entities: EntitiesService) {}
+  constructor(
+    private readonly entities: EntitiesService,
+    @Inject(DB) private readonly db: Db,
+  ) {}
+
+  /**
+   * Исключать ли личный контур из domain-less чтения.
+   *
+   * Тот же механизм, что у PersonalDomainGuard (R-P5-6): ужесточение включено И
+   * запрос НЕ доказан owner-токеном. Гейт ловит только явный `domain=personal`,
+   * а generic-эндпоинты (find/byId/pending без домена) он пропускает — здесь мы
+   * закрываем именно этот обход. Флаг выключен (дефолт) → false → выдача прода
+   * не меняется.
+   */
+  private async excludePersonal(req: Request): Promise<boolean> {
+    return (await isOwnerIdentityEnforced(this.db)) && !ownerTokenValid(req);
+  }
 
   @Post()
   create(@Body() dto: CreateEntityDto) {
@@ -93,8 +112,8 @@ export class EntitiesController {
   }
 
   @Get()
-  find(@Query() filter: FindEntitiesDto) {
-    return this.entities.find(filter);
+  async find(@Query() filter: FindEntitiesDto, @Req() req: Request) {
+    return this.entities.find(filter, await this.excludePersonal(req));
   }
 
   /**
@@ -104,25 +123,25 @@ export class EntitiesController {
    * идентификатор и вернуло бы ошибку разбора.
    */
   @Get("pending")
-  pending() {
-    return this.entities.pending();
+  async pending(@Req() req: Request) {
+    return this.entities.pending(await this.excludePersonal(req));
   }
 
   @Get(":id")
-  byId(@Param("id", ParseUUIDPipe) id: string) {
-    return this.entities.byId(id);
+  async byId(@Param("id", ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.entities.byId(id, await this.excludePersonal(req));
   }
 
   /** Предложенные значения полей карточки. */
   @Get(":id/drafts")
-  drafts(@Param("id", ParseUUIDPipe) id: string) {
-    return this.entities.drafts(id);
+  async drafts(@Param("id", ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.entities.drafts(id, await this.excludePersonal(req));
   }
 
   /** Рецепт товара: состав, цены ингредиентов и себестоимость. */
   @Get(":id/recipe")
-  recipe(@Param("id", ParseUUIDPipe) id: string) {
-    return this.entities.recipeOf(id);
+  async recipe(@Param("id", ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.entities.recipeOf(id, await this.excludePersonal(req));
   }
 
   /** Предложить значение поля. В карточку оно не попадёт до утверждения. */

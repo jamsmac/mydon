@@ -1,8 +1,10 @@
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { Request } from "express";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
+import type { Db } from "../db/db.module";
 import {
   AgentRunCheckpointDto,
   AgentRunCommitDto,
@@ -16,6 +18,16 @@ import {
   SetStatusDto,
   TasksController,
 } from "./tasks.controller";
+
+/** Db-заглушка для excludePersonal: settingValue = `select().from(systemConfig)`. */
+function fakeDb(rows: { key: string; value: string }[] = []): Db {
+  return { select: () => ({ from: () => Promise.resolve(rows) }) } as unknown as Db;
+}
+
+/** Запрос с заголовками — owner-токен читается из `x-owner-action-token`. */
+function req(headers: Record<string, string> = {}): Request {
+  return { headers } as unknown as Request;
+}
 
 describe("ListTasksDto: pagination", () => {
   it("преобразует query-строки в bounded числа", async () => {
@@ -38,7 +50,7 @@ describe("ListTasksDto: pagination", () => {
     }
   });
 
-  it("передаёт pagination в общую и awaiting-выборки", () => {
+  it("передаёт pagination в общую и awaiting-выборки", async () => {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const service = {
       list: (...args: unknown[]) => calls.push({ method: "list", args }),
@@ -46,20 +58,120 @@ describe("ListTasksDto: pagination", () => {
         calls.push({ method: "awaitingConfirmation", args }),
       unassigned: (...args: unknown[]) => calls.push({ method: "unassigned", args }),
     };
-    const controller = new TasksController(service as never);
+    // Флаг ужесточения выключен (пустая база, нет owner-токена) → excludePersonal=false.
+    const controller = new TasksController(service as never, fakeDb());
 
-    controller.list({ open: "1", domain: "vendhub", limit: 40, offset: 80 });
-    controller.list({ awaiting: "1", limit: 25, offset: 50 });
-    controller.list({ unassigned: "1", limit: 10, offset: 20 });
+    await controller.list({ open: "1", domain: "vendhub", limit: 40, offset: 80 }, req());
+    await controller.list({ awaiting: "1", limit: 25, offset: 50 }, req());
+    await controller.list({ unassigned: "1", limit: 10, offset: 20 }, req());
 
     assert.deepEqual(calls, [
       {
         method: "list",
-        args: [{ domain: "vendhub", limit: 40, offset: 80, openOnly: true }],
+        // Второй аргумент — excludePersonal: при выключенном флаге строго false.
+        args: [{ domain: "vendhub", limit: 40, offset: 80, openOnly: true }, false],
       },
-      { method: "awaitingConfirmation", args: [25, 50] },
-      { method: "unassigned", args: [10, 20] },
+      // Третий аргумент — excludePersonal: при выключенном флаге строго false,
+      // и он обязан доходить до awaiting/unassigned (тот же domain-less обход).
+      { method: "awaitingConfirmation", args: [25, 50, false] },
+      { method: "unassigned", args: [10, 20, false] },
     ]);
+  });
+
+  it("флаг включён + нет owner-токена → excludePersonal=true в общей выборке", async () => {
+    const prevOwner = process.env.OWNER_ACTION_TOKEN;
+    const prevService = process.env.SERVICE_TOKEN;
+    process.env.SERVICE_TOKEN = "shared";
+    process.env.OWNER_ACTION_TOKEN = "owner-secret";
+    try {
+      const calls: Array<{ method: string; args: unknown[] }> = [];
+      const service = { list: (...args: unknown[]) => calls.push({ method: "list", args }) };
+      const controller = new TasksController(service as never, fakeDb([{ key: "OWNER_IDENTITY_ENFORCED", value: "1" }]));
+
+      await controller.list({ open: "1" }, req());
+      assert.deepEqual(calls, [{ method: "list", args: [{ openOnly: true }, true] }]);
+
+      // Тот же запрос с валидным owner-токеном — excludePersonal снова false.
+      calls.length = 0;
+      await controller.list({ open: "1" }, req({ "x-owner-action-token": "owner-secret" }));
+      assert.deepEqual(calls, [{ method: "list", args: [{ openOnly: true }, false] }]);
+    } finally {
+      if (prevOwner === undefined) delete process.env.OWNER_ACTION_TOKEN;
+      else process.env.OWNER_ACTION_TOKEN = prevOwner;
+      if (prevService === undefined) delete process.env.SERVICE_TOKEN;
+      else process.env.SERVICE_TOKEN = prevService;
+    }
+  });
+});
+
+describe("by-id и awaiting/unassigned чтения не утекают personal (R-P5-6)", () => {
+  const ID = "33333333-3333-4333-8333-333333333333";
+
+  it("флаг выключен — byId/comments/awaiting/unassigned получают excludePersonal=false", async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const service = {
+      byId: (...args: unknown[]) => calls.push({ method: "byId", args }),
+      comments: (...args: unknown[]) => calls.push({ method: "comments", args }),
+      awaitingConfirmation: (...args: unknown[]) =>
+        calls.push({ method: "awaitingConfirmation", args }),
+      unassigned: (...args: unknown[]) => calls.push({ method: "unassigned", args }),
+    };
+    const controller = new TasksController(service as never, fakeDb());
+
+    await controller.byId(ID, req());
+    await controller.comments(ID, req());
+    await controller.list({ awaiting: "1" }, req());
+    await controller.list({ unassigned: "1" }, req());
+
+    assert.deepEqual(calls, [
+      { method: "byId", args: [ID, false] },
+      { method: "comments", args: [ID, false] },
+      { method: "awaitingConfirmation", args: [100, 0, false] },
+      { method: "unassigned", args: [50, 0, false] },
+    ]);
+  });
+
+  it("флаг включён + нет owner-токена — все by-id/aggregate чтения получают excludePersonal=true", async () => {
+    const prevOwner = process.env.OWNER_ACTION_TOKEN;
+    const prevService = process.env.SERVICE_TOKEN;
+    process.env.SERVICE_TOKEN = "shared";
+    process.env.OWNER_ACTION_TOKEN = "owner-secret";
+    try {
+      const calls: Array<{ method: string; args: unknown[] }> = [];
+      const service = {
+        byId: (...args: unknown[]) => calls.push({ method: "byId", args }),
+        comments: (...args: unknown[]) => calls.push({ method: "comments", args }),
+        awaitingConfirmation: (...args: unknown[]) =>
+          calls.push({ method: "awaitingConfirmation", args }),
+        unassigned: (...args: unknown[]) => calls.push({ method: "unassigned", args }),
+      };
+      const controller = new TasksController(
+        service as never,
+        fakeDb([{ key: "OWNER_IDENTITY_ENFORCED", value: "1" }]),
+      );
+
+      await controller.byId(ID, req());
+      await controller.comments(ID, req());
+      await controller.list({ awaiting: "1" }, req());
+      await controller.list({ unassigned: "1" }, req());
+
+      assert.deepEqual(calls, [
+        { method: "byId", args: [ID, true] },
+        { method: "comments", args: [ID, true] },
+        { method: "awaitingConfirmation", args: [100, 0, true] },
+        { method: "unassigned", args: [50, 0, true] },
+      ]);
+
+      // Тот же запрос с валидным owner-токеном — excludePersonal снова false.
+      calls.length = 0;
+      await controller.byId(ID, req({ "x-owner-action-token": "owner-secret" }));
+      assert.deepEqual(calls, [{ method: "byId", args: [ID, false] }]);
+    } finally {
+      if (prevOwner === undefined) delete process.env.OWNER_ACTION_TOKEN;
+      else process.env.OWNER_ACTION_TOKEN = prevOwner;
+      if (prevService === undefined) delete process.env.SERVICE_TOKEN;
+      else process.env.SERVICE_TOKEN = prevService;
+    }
   });
 });
 
@@ -109,12 +221,15 @@ describe("EnsureForDayDto: dayKey — только голые сутки", () =>
 describe("TasksController.ensureForDay: направление", () => {
   it("пробрасывает validated domain в TasksService", () => {
     let received: Record<string, unknown> | undefined;
-    const controller = new TasksController({
-      ensureForDay: (input: Record<string, unknown>) => {
-        received = input;
-        return null;
-      },
-    } as never);
+    const controller = new TasksController(
+      {
+        ensureForDay: (input: Record<string, unknown>) => {
+          received = input;
+          return null;
+        },
+      } as never,
+      fakeDb(),
+    );
 
     controller.ensureForDay({
       title: "Мойка миксера",

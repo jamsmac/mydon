@@ -22,6 +22,7 @@ import type {
 } from "@mydon/shared";
 import { MAX_FIND_LIMIT } from "@mydon/shared";
 import { collectAllTaskPages } from "./task-pagination";
+import { resolveOwner } from "./owner";
 
 /**
  * Клиент MYDON Core для оболочки.
@@ -33,6 +34,27 @@ import { collectAllTaskPages } from "./task-pagination";
 const BASE = process.env.CORE_API_URL ?? "http://127.0.0.1:3001";
 /** Внутренний токен Core: панель ходит на сервере, ключ наружу не уходит. */
 const SERVICE_TOKEN = process.env.SERVICE_TOKEN ?? "";
+/**
+ * Второй пояс Core (R-P5-5): необратимые owner-only действия Core принимает
+ * ТОЛЬКО с этим токеном (`OwnerActionGuard`). Его нет у Bot/Agents — только у
+ * CC и у самого владельца. Панель проставляет его лишь когда серверный контекст
+ * подтвердил, что смотрит владелец (см. `ownerActionHeaders`); из общего
+ * SERVICE_TOKEN он НЕ выводится.
+ */
+const OWNER_ACTION_TOKEN = process.env.OWNER_ACTION_TOKEN ?? "";
+
+/**
+ * Заголовок owner-токена — но ТОЛЬКО когда серверный контекст подтверждает
+ * владельца (заголовок serve совпал с OWNER_TAILSCALE_LOGIN). Иначе пусто:
+ * обычные, не-owner вызовы owner-токен не несут. От флага
+ * `OWNER_IDENTITY_ENFORCED` НЕ зависит — проставить второй пояс владельцу
+ * безопасно всегда; флаг гейтит только отказ роутов (R-P5-6).
+ */
+async function ownerActionHeaders(): Promise<Record<string, string>> {
+  if (!OWNER_ACTION_TOKEN) return {};
+  const { isOwner } = await resolveOwner();
+  return isOwner ? { "x-owner-action-token": OWNER_ACTION_TOKEN } : {};
+}
 
 export class CoreUnavailable extends Error {
   constructor(readonly detail: string) {
@@ -40,12 +62,17 @@ export class CoreUnavailable extends Error {
   }
 }
 
-async function get<T>(path: string): Promise<T> {
+async function get<T>(path: string, opts: { owner?: boolean } = {}): Promise<T> {
   let res: Response;
+  // Личные чтения (R-P5-4): когда Core начнёт гейтить домен `personal`, только
+  // owner-токен пропустит владельца. Токен идёт лишь если серверный контекст
+  // подтвердил владельца; чужому/анониму заголовка не будет — как и задумано.
+  const headers = opts.owner ? await ownerActionHeaders() : undefined;
   try {
     res = await fetch(`${BASE}${path}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
+      ...(headers ? { headers } : {}),
     });
   } catch (err) {
     throw new CoreUnavailable(err instanceof Error ? err.message : String(err));
@@ -1146,14 +1173,31 @@ export function coreWriteHeaders(hasJsonBody = true): Record<string, string> {
   return headers;
 }
 
+/**
+ * Заголовки owner-only мутации: сервисный токен + второй пояс (R-P5-5).
+ *
+ * Для owner-only действий, которые ходят в Core не через `send()` (свой разбор
+ * ответа — например `decideApproval`). Owner-токен добавляется поверх сервисных
+ * заголовков ТОЛЬКО когда серверный контекст подтвердил владельца.
+ */
+export async function coreOwnerWriteHeaders(hasJsonBody = true): Promise<Record<string, string>> {
+  return { ...coreWriteHeaders(hasJsonBody), ...(await ownerActionHeaders()) };
+}
+
 /** Запись в Core. Ошибку отдаём словами: её увидит владелец, а не разработчик. */
 async function send<T>(
   path: string,
   method: "POST" | "PUT" | "PATCH" | "DELETE",
   body?: unknown,
+  opts: { owner?: boolean } = {},
 ): Promise<T> {
   let res: Response;
-  const headers = coreWriteHeaders(body !== undefined);
+  // Owner-only мутации (R-P5-5: approvals-решения, роли person, автономия
+  // агентов) несут второй пояс. Токен подставится лишь при подтверждённом
+  // владельце — обычные мутации идут только с сервисным токеном, как сейчас.
+  const headers = opts.owner
+    ? { ...coreWriteHeaders(body !== undefined), ...(await ownerActionHeaders()) }
+    : coreWriteHeaders(body !== undefined);
   try {
     res = await fetch(`${BASE}${path}`, {
       method,
@@ -2205,22 +2249,31 @@ export const core = {
   agents: () => get<AgentCard[]>("/agents"),
 
   // ── Задачи ──
+  // Личный контур (R-P5-4/R-P5-6): `/tasks?domain=personal` Core гейтит тем же
+  // PersonalDomainGuard, что и реестр. Owner-токен несём симметрично
+  // entitiesOf/obligations — иначе под enforcement страница личного контура
+  // грузит реестр владельца, но его же вкладка «Задачи» молча 403-ит (Promise.all
+  // с people() падает атомарно и роняет ещё и «Команду»). Токен проставится лишь
+  // при подтверждённом владельце; для прочих доменов owner=false — как сейчас.
   tasks: (params: Record<string, string> = {}) => {
     const qs = new URLSearchParams(params).toString();
-    return get<Task[]>(`/tasks${qs ? `?${qs}` : ""}`);
+    return get<Task[]>(`/tasks${qs ? `?${qs}` : ""}`, { owner: params.domain === "personal" });
   },
   /** Доска не обрезается на API-limit: забираем все стабильно отсортированные страницы. */
   taskBoard: (params: Record<string, string> = {}) => {
     const filters = { ...params };
     delete filters.limit;
     delete filters.offset;
+    // Тот же личный-контур инвариант, что и у tasks(): доска по domain=personal
+    // проходит PersonalDomainGuard, потому owner-токен идёт при personal.
+    const owner = filters.domain === "personal";
     return collectAllTaskPages(({ limit, offset }) => {
       const qs = new URLSearchParams({
         ...filters,
         limit: String(limit),
         offset: String(offset),
       }).toString();
-      return get<Task[]>(`/tasks?${qs}`);
+      return get<Task[]>(`/tasks?${qs}`, { owner });
     });
   },
   task: (id: string) => get<Task>(`/tasks/${id}`),
@@ -2275,21 +2328,29 @@ export const core = {
   people: (all = false) => get<Person[]>(`/people${all ? "?all=1" : ""}`),
   person: (id: string) => get<Person>(`/people/${id}`),
   createPerson: (input: Record<string, unknown>) => send<Person>("/people", "POST", input),
+  // Выдача/отзыв доступа и смена ролей person — owner-only (R-P5-5): второй
+  // пояс, а не общий SERVICE_TOKEN. Bot/Agents этих путей не проходят.
   /** Выпустить приглашение. Код возвращается ОДИН раз — в БД только хеш. */
   invitePerson: (id: string, roles: string[]) =>
-    send<{ code: string; expiresAt: string; name: string }>(`/people/${id}/invite`, "POST", {
-      roles,
-    }),
+    send<{ code: string; expiresAt: string; name: string }>(
+      `/people/${id}/invite`,
+      "POST",
+      { roles },
+      { owner: true },
+    ),
   /** Отозвать доступ: снять привязку и роли, погасить живые приглашения. */
-  revokePerson: (id: string) => send<Person>(`/people/${id}/revoke`, "POST", {}),
+  revokePerson: (id: string) => send<Person>(`/people/${id}/revoke`, "POST", {}, { owner: true }),
   setPersonRoles: (id: string, roles: string[]) =>
-    send<Person>(`/people/${id}/roles`, "POST", { roles }),
+    send<Person>(`/people/${id}/roles`, "POST", { roles }, { owner: true }),
   updatePerson: (id: string, input: Record<string, unknown>) =>
     send<Person>(`/people/${id}`, "PATCH", input),
   agent: (name: string) => get<AgentCard>(`/agents/${encodeURIComponent(name)}`),
-  createAgent: (input: Record<string, unknown>) => send<AgentCard>("/agents", "POST", input),
+  // Создание/правка агента задаёт порог автономии (autonomyDefault) — owner-only
+  // (R-P5-5): изменение автономии идёт под вторым поясом.
+  createAgent: (input: Record<string, unknown>) =>
+    send<AgentCard>("/agents", "POST", input, { owner: true }),
   updateAgent: (name: string, patch: Record<string, unknown>) =>
-    send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "PATCH", patch),
+    send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "PATCH", patch, { owner: true }),
   archiveAgent: (name: string) => send<AgentCard>(`/agents/${encodeURIComponent(name)}`, "DELETE"),
 
   // ── Карточка автомата: вид и состояние ──
@@ -2499,8 +2560,10 @@ export const core = {
   // ── Система: глобальные тумблеры активации (мозг/RAG/пауза/бюджет) ──
   systemConfig: () => get<SystemConfigItem[]>("/system/config"),
   llmLedgerMonitoring: () => get<LlmLedgerMonitoring>("/llm-ledger/monitoring"),
+  // Системные тумблеры включают порог автономии агентов (AGENT_AUTONOMY_MAX) —
+  // owner-only (R-P5-5): изменение порога автономии идёт под вторым поясом.
   saveSystemConfig: (input: { key: string; value: string; updatedBy?: string }) =>
-    send<SystemConfigItem[]>("/system/config", "PUT", input),
+    send<SystemConfigItem[]>("/system/config", "PUT", input, { owner: true }),
   /** Один Core-коммит для всего LLM-профиля: частичных настроек не бывает. */
   saveLlmProfile: (input: LlmProfileUpdate) =>
     send<SystemConfigItem[]>("/system/config/llm-profile", "PUT", input),
@@ -2512,12 +2575,21 @@ export const core = {
     get<ActionRow[]>(
       `/registry/actions?from=${from}&to=${to}${personId ? `&person=${personId}` : ""}`,
     ),
-  obligations: (domain: string) => get<Obligations>(`/registry/obligations/${domain}`),
+  // Личный контур (R-P5-4): реестр и обязательства домена `personal` Core будет
+  // отдавать только владельцу. Owner-токен несём лишь на personal-чтениях —
+  // прочие домены GET открыты в tailnet как сейчас. Токен проставится только
+  // при подтверждённом владельце (ownerActionHeaders), иначе заголовка нет.
+  obligations: (domain: string) =>
+    get<Obligations>(`/registry/obligations/${domain}`, { owner: domain === "personal" }),
   byType: (domain: string, type: string) => get<Entity[]>(`/registry/${domain}/${type}`),
+  // Поиск с domain=personal Core гейтит PersonalDomainGuard'ом (R-P5-4): без
+  // owner-токена ассистент/палитра владельца по личному контуру под enforcement
+  // получили бы 403. Токен идёт лишь при personal и подтверждённом владельце —
+  // симметрично entitiesOf/obligations; поиск без домена не трогаем.
   search: (q: string, domain?: string) => {
     const p = new URLSearchParams({ q });
     if (domain) p.set("domain", domain);
-    return get<Entity[]>(`/entities?${p.toString()}`);
+    return get<Entity[]>(`/entities?${p.toString()}`, { owner: domain === "personal" });
   },
   /**
    * Реестр направления целиком: страница направления строит на нём и списки,
@@ -2526,7 +2598,10 @@ export const core = {
    * панель молча показывала 500 записей и 459 счетов из 704 (аудит 31.08,
    * п. 6) — усечение без признака усечения читалось как полный реестр.
    */
-  entitiesOf: (domain: string) => get<Entity[]>(`/entities?domain=${domain}&limit=${MAX_FIND_LIMIT}`),
+  entitiesOf: (domain: string) =>
+    get<Entity[]>(`/entities?domain=${domain}&limit=${MAX_FIND_LIMIT}`, {
+      owner: domain === "personal",
+    }),
   entitiesOfType: (domain: string, type: string) =>
     get<Entity[]>(
       `/entities?domain=${domain}&type=${encodeURIComponent(type)}&limit=${MAX_FIND_LIMIT}`,

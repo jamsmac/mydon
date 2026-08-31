@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from "@nestjs/common";
 import { IsIn, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from "class-validator";
 import { AUTONOMY_TIERS, type AutonomyTier } from "@mydon/shared";
+import { OwnerMutationGuard } from "../common/owner-mutation.guard";
 import { ApprovalsService } from "./approvals.service";
 
 export class RequestApprovalDto {
@@ -68,7 +69,13 @@ export class ApprovalsController {
     return this.approvals.pending();
   }
 
+  /**
+   * Решение по согласованию — owner-действие (R-P5-5), под вторым поясом.
+   * Guard пропускает, пока ужесточение выключено (по умолчанию): сегодня decide
+   * штатно зовёт бот, когда владелец жмёт кнопку в Telegram (общий SERVICE_TOKEN).
+   */
   @Post(":id/decide")
+  @UseGuards(OwnerMutationGuard)
   decide(@Param("id", ParseUUIDPipe) id: string, @Body() dto: DecideDto) {
     return this.approvals.decide(id, dto.decision, dto.actor ?? "owner");
   }

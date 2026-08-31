@@ -154,6 +154,26 @@ export function nameMatches(query: string): SQL {
 }
 
 /**
+ * Условие «карточка НЕ из личного контура» (org.code='personal') — R-P5-6.
+ *
+ * PersonalDomainGuard гейтит только запросы с явным `domain=personal`, а
+ * domain-less чтения (find/byId/pending без домена) отдавали personal-строки
+ * заодно со всеми — обход MVP-A: не-владелец на tailnet читал недвижимость,
+ * транспорт, накопления, дёрнув Core напрямую БЕЗ домена. Controller включает
+ * это условие (excludePersonal), только когда ужесточение включено И запрос НЕ
+ * owner-authed — при выключенном флаге условие не добавляется вовсе, и выдача
+ * прода не меняется.
+ *
+ * Коррелированный `not exists`, а не `orgId <> personalId`: `entity.orgId`
+ * бывает NULL (осиротевшая карточка без направления), и `NULL <> …` вычеркнуло
+ * бы её из выдачи — а личной она не является. `not exists` оставляет NULL-orgId
+ * и вырезает ровно личный контур.
+ */
+function notPersonalOrg(): SQL {
+  return sql`not exists (select 1 from ${org} where ${org.id} = ${entity.orgId} and ${org.code} = 'personal')`;
+}
+
+/**
  * Единый реестр сущностей (ТЗ FR-5): контрагенты, договоры, автоматы, техника, объекты.
  * Одна карточка на сущность вместо дублей в пяти местах.
  */
@@ -341,7 +361,13 @@ export class EntitiesService {
   }
 
   /** Предложенные значения карточки. Пусто — предлагать нечего. */
-  async drafts(entityId: string) {
+  async drafts(entityId: string, excludePersonal = false) {
+    // Черновики — тот же класс данных, что pending.fields (защищён отдельно):
+    // by-id чтение соседним маршрутом. byId ужесточён до 404 для personal, чтобы
+    // скрыть само существование карточки, — здесь резолвим карточку через тот же
+    // personal-aware byId, иначе не-владелец, которому byId закрыл карточку, всё
+    // равно прочитал бы её предложенные значения. Дефолт false → как сегодня.
+    if (excludePersonal) await this.byId(entityId, true);
     return this.db
       .select()
       .from(entityDraft)
@@ -350,14 +376,21 @@ export class EntitiesService {
   }
 
   /** Всё, что ждёт слова владельца: карточки и предложенные значения. */
-  async pending(): Promise<{
+  async pending(excludePersonal = false): Promise<{
     cards: EntityRow[];
     fields: (typeof entityDraft.$inferSelect & { entityName: string; entityType: string })[];
   }> {
+    // При ужесточении и не-owner запросе личный контур вырезается из очереди —
+    // и из карточек, и из предложенных значений (иначе personal-черновик утёк
+    // бы через `fields`). Флаг выключен → условие не добавляется, выдача прежняя.
     const cards = await this.db
       .select()
       .from(entity)
-      .where(sql`${entity.approvedAt} is null`)
+      .where(
+        excludePersonal
+          ? and(sql`${entity.approvedAt} is null`, notPersonalOrg())
+          : sql`${entity.approvedAt} is null`,
+      )
       .orderBy(desc(entity.createdAt));
     const fields = await this.db
       .select({
@@ -376,6 +409,7 @@ export class EntitiesService {
       })
       .from(entityDraft)
       .innerJoin(entity, eq(entity.id, entityDraft.entityId))
+      .where(excludePersonal ? notPersonalOrg() : undefined)
       .orderBy(entity.name);
     return { cards, fields };
   }
@@ -476,6 +510,7 @@ export class EntitiesService {
 
   async find(
     filter: FindEntitiesDto,
+    excludePersonal = false,
   ): Promise<(EntityRow & { domain: string | null; geo: Geo | null })[]> {
     const conditions: SQL[] = [];
     // Фильтр по id раньше объявлялся, но не применялся: клиент получал весь
@@ -484,6 +519,9 @@ export class EntitiesService {
     if (filter.domain) conditions.push(eq(entity.orgId, await this.orgIdByDomain(filter.domain)));
     if (filter.type) conditions.push(eq(entity.type, filter.type));
     if (filter.q) conditions.push(nameMatches(filter.q));
+    // Личный контур не утекает через domain-less чтение при ужесточении (R-P5-6).
+    // Явный `domain=personal` сюда не попадает — его owner-гейтит PersonalDomainGuard.
+    if (excludePersonal) conditions.push(notPersonalOrg());
     // Только автоматы в строю. Условие повторяет `machineIsOperational`: пустая
     // карточка считается рабочей, поэтому сравнивается coalesce, а не status —
     // иначе аппарат без карточки молча выпал бы из списка вместо того, чтобы
@@ -531,7 +569,10 @@ export class EntitiesService {
     );
   }
 
-  async byId(id: string): Promise<EntityRow & { domain: string | null; geo: Geo | null }> {
+  async byId(
+    id: string,
+    excludePersonal = false,
+  ): Promise<EntityRow & { domain: string | null; geo: Geo | null }> {
     const [row] = await this.db
       .select({
         id: entity.id,
@@ -554,6 +595,12 @@ export class EntitiesService {
       .leftJoin(org, eq(org.id, entity.orgId))
       .where(eq(entity.id, id));
     if (!row) throw new NotFoundException(`Сущность ${id} не найдена`);
+    // Личная карточка при ужесточении и не-owner запросе — как несуществующая:
+    // тот же 404, что и для отсутствующей, чтобы byId не выдавал самим кодом
+    // ответа факт, что запись есть (иначе он стал бы каналом утечки).
+    if (excludePersonal && row.domain === "personal") {
+      throw new NotFoundException(`Сущность ${id} не найдена`);
+    }
     const geos = await this.geoFor([id]);
     return { ...(row as EntityRow & { domain: string | null }), geo: geos.get(id) ?? null };
   }
@@ -685,7 +732,10 @@ export class EntitiesService {
    * расходился). Ингредиент без цены не обнуляется молча — строка помечена
    * непосчитанной, и итог честно неполон.
    */
-  async recipeOf(productId: string): Promise<{
+  async recipeOf(
+    productId: string,
+    excludePersonal = false,
+  ): Promise<{
     productId: string;
     lines: {
       ingredientId: string;
@@ -701,6 +751,11 @@ export class EntitiesService {
     total: number;
     unresolved: number;
   }> {
+    // Рецепт — тот же by-id sub-read, что drafts: личная карточка, закрытая
+    // byId (404, чтобы скрыть существование), не должна раскрывать состав и
+    // цены через соседний маршрут. Резолвим через personal-aware byId. Дефолт
+    // false → выдача прода не меняется.
+    if (excludePersonal) await this.byId(productId, true);
     const [card] = await this.db.select().from(entity).where(eq(entity.id, productId));
     if (!card) throw new NotFoundException("Карточки нет");
     const lines = parseRecipe(card.attrs as Record<string, unknown>);

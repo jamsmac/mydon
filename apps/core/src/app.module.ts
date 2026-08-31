@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
+import { PersonalDomainGuard } from "./common/personal-domain.guard";
 import { ServiceTokenGuard } from "./common/service-token.guard";
 import { AgentsModule } from "./agents/agents.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
@@ -85,6 +86,9 @@ import { VerificationModule } from "./verification/verification.module";
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: ServiceTokenGuard },
+    // Личный контур за identity (R-P5-4): гейтит только запросы с domain=personal
+    // и только при включённом OWNER_IDENTITY_ENFORCED; иначе — как сегодня.
+    { provide: APP_GUARD, useClass: PersonalDomainGuard },
   ],
 })
 export class AppModule {}

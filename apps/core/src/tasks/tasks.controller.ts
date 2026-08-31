@@ -3,14 +3,17 @@ import {
   ConflictException,
   Controller,
   Get,
+  Inject,
   Param,
   ParseUUIDPipe,
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
+import type { Request } from "express";
 import { Type } from "class-transformer";
 import {
   ArrayMaxSize,
@@ -30,6 +33,8 @@ import {
   ValidateIf,
 } from "class-validator";
 import { DOMAINS, type Domain } from "@mydon/shared";
+import { DB, type Db } from "../db/db.module";
+import { isOwnerIdentityEnforced, ownerTokenValid } from "../common/owner-enforcement";
 import { OwnerActionGuard } from "../common/owner-action.guard";
 import { TasksService } from "./tasks.service";
 
@@ -438,7 +443,22 @@ export class AddCommentDto {
 
 @Controller("tasks")
 export class TasksController {
-  constructor(private readonly tasks: TasksService) {}
+  constructor(
+    private readonly tasks: TasksService,
+    @Inject(DB) private readonly db: Db,
+  ) {}
+
+  /**
+   * Исключать ли личные задачи из domain-less чтения.
+   *
+   * Тот же механизм, что у PersonalDomainGuard (R-P5-6): ужесточение включено И
+   * запрос НЕ доказан owner-токеном. `GET /tasks` без `domain` отдавал задачи
+   * всех доменов, включая personal — здесь закрываем этот обход. Флаг выключен
+   * (дефолт) → false → выдача прода не меняется.
+   */
+  private async excludePersonal(req: Request): Promise<boolean> {
+    return (await isOwnerIdentityEnforced(this.db)) && !ownerTokenValid(req);
+  }
 
   @Post()
   create(@Body() dto: CreateTaskDto) {
@@ -491,6 +511,14 @@ export class TasksController {
     });
   }
 
+  // ГРАНИЦА СРЕЗА (R-P5-6 закрывает domain-less list/by-id; кросс-доменные
+  // агрегаты — follow-up R-P5-7): overdue/due-soon/workload/redo-unnotified/
+  // assign-unnotified отдают personal-задачи заодно со всеми и при ужесточении
+  // остаются открытыми в tailnet. Это ОСОЗНАННО не закрыто здесь: их читают
+  // рассыльщики напоминаний и приёмки, которым личные задачи владельца нужны,
+  // — глухой excludePersonal-фильтр молча погасил бы напоминания по personal.
+  // Правильное закрытие — per-consumer в R-P5-7, а не «уже безопасно».
+
   // Объявлены ВЫШЕ параметрических маршрутов, иначе "overdue" уедет в :id.
   @Get("overdue")
   overdue() {
@@ -523,40 +551,52 @@ export class TasksController {
   }
 
   @Get()
-  list(@Query() filter: ListTasksDto) {
+  async list(@Query() filter: ListTasksDto, @Req() req: Request) {
+    // awaiting/unassigned — отдельные выборки, но тот же domain-less обход, что
+    // и голый list: excludePersonal обязан пробрасываться и в них, иначе
+    // `GET /tasks?awaiting=1` / `?unassigned=1` отдавали бы личные задачи
+    // не-владельцу при ужесточении в обход фильтра общего списка.
     if (filter.awaiting === "1") {
       return this.tasks.awaitingConfirmation(
         filter.limit ?? TasksService.AWAITING_LIMIT,
         filter.offset ?? 0,
+        await this.excludePersonal(req),
       );
     }
     // Свободные — отдельная выборка: «ничей» это IS NULL, а не значение
     // ownerRef, и через общий фильтр по равенству его не выразить.
     if (filter.unassigned === "1") {
-      return this.tasks.unassigned(filter.limit ?? 50, filter.offset ?? 0);
+      return this.tasks.unassigned(
+        filter.limit ?? 50,
+        filter.offset ?? 0,
+        await this.excludePersonal(req),
+      );
     }
-    return this.tasks.list({
-      ...(filter.status !== undefined ? { status: filter.status } : {}),
-      ...(filter.domain !== undefined ? { domain: filter.domain } : {}),
-      ...(filter.ownerKind !== undefined ? { ownerKind: filter.ownerKind } : {}),
-      ...(filter.ownerRef !== undefined ? { ownerRef: filter.ownerRef } : {}),
-      ...(filter.agentInvocation !== undefined
-        ? { agentInvocation: filter.agentInvocation }
-        : {}),
-      ...(filter.limit !== undefined ? { limit: filter.limit } : {}),
-      ...(filter.offset !== undefined ? { offset: filter.offset } : {}),
-      ...(filter.open === "1" ? { openOnly: true } : {}),
-    });
+    return this.tasks.list(
+      {
+        ...(filter.status !== undefined ? { status: filter.status } : {}),
+        ...(filter.domain !== undefined ? { domain: filter.domain } : {}),
+        ...(filter.ownerKind !== undefined ? { ownerKind: filter.ownerKind } : {}),
+        ...(filter.ownerRef !== undefined ? { ownerRef: filter.ownerRef } : {}),
+        ...(filter.agentInvocation !== undefined
+          ? { agentInvocation: filter.agentInvocation }
+          : {}),
+        ...(filter.limit !== undefined ? { limit: filter.limit } : {}),
+        ...(filter.offset !== undefined ? { offset: filter.offset } : {}),
+        ...(filter.open === "1" ? { openOnly: true } : {}),
+      },
+      await this.excludePersonal(req),
+    );
   }
 
   @Get(":id")
-  byId(@Param("id", ParseUUIDPipe) id: string) {
-    return this.tasks.byId(id);
+  async byId(@Param("id", ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.tasks.byId(id, await this.excludePersonal(req));
   }
 
   @Get(":id/comments")
-  comments(@Param("id", ParseUUIDPipe) id: string) {
-    return this.tasks.comments(id);
+  async comments(@Param("id", ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.tasks.comments(id, await this.excludePersonal(req));
   }
 
   @Post(":id/comments")
