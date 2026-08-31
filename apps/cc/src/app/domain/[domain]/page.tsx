@@ -42,6 +42,7 @@ import {
   type TnvedRate,
 } from "../../../lib/core";
 import { CoreDown } from "../../../components/core-down";
+import { ownerEnforcementEnabled, personalGateBlocks, resolveOwner } from "../../../lib/owner";
 import { groupsFor, isTableBackedLeaf } from "../../../lib/domain-nav";
 import { NewEntityForm } from "../../../components/entity-new";
 import { CollectionsView } from "../../../components/collections-view";
@@ -161,6 +162,15 @@ export default async function DomainPage({
   }
   const { tab, q, cat, inc, vid } = sp;
   if (!isDomain(domain)) notFound();
+
+  // Гейт личного контура (R-P5-4, R-P5-6). При включённом enforcement и
+  // пришедшем serve-заголовке не-владельцу личный контур не отдаём — честный
+  // notFound(), а не пустая страница. Флаг ВЫКЛ или заголовка нет (прямой bind
+  // без serve) → как сейчас, владельца не запираем. Прочие домены не трогаем.
+  if (domain === "personal") {
+    const identity = await resolveOwner();
+    if (personalGateBlocks(domain, identity, ownerEnforcementEnabled())) notFound();
+  }
 
   const groups = groupsFor(domain);
   const active = tab ?? "overview";
