@@ -13,7 +13,7 @@ import type {
 } from "./core-client";
 import { EXECUTORS } from "./executors";
 import { checkLimit, dailyCap, startOfTashkentDay } from "./limits";
-import { matchesSignature, signature } from "./memory";
+import { NO_SIGNAL_SIGNATURE, matchesSignature, signature } from "./memory";
 import { effectiveActionTier, explainPolicy, requiresApproval } from "./policy";
 import type { AgentDefinition } from "./registry";
 import { SKILLS, type SkillRunContext } from "./skills";
@@ -233,7 +233,27 @@ export async function runSkill(
       reason: `LLM-ledger недоступен — платный вызов не выполнен: ${unavailable.message}`,
     };
   }
+  const source = `agent:${agent.name}`;
   if (proposal === null) {
+    // «Повод исчез» — тоже изменение повода: сигнатуру последней подачи
+    // затираем сторожевым значением. Иначе тот же набор фактов, вернувшийся
+    // после полного разрешения (встал ДРУГОЙ автомат, а idleMachines снова 1),
+    // молча глотался бы как no_change — и владелец не узнал бы о новом
+    // инциденте. Пишем только когда есть что затирать: тихие дни не раздувают
+    // журнал Core. Task-mode ничего не пишет сам (память коммитит Core, и
+    // только при подаче) — сброс для task-пути требует отдельного среза в Core.
+    if (!taskMode) {
+      const lastSig = await core.recallMemory(source, skill);
+      if (lastSig !== null && lastSig !== NO_SIGNAL_SIGNATURE) {
+        await context.assertLease?.();
+        await core.rememberMemory(
+          source,
+          skill,
+          NO_SIGNAL_SIGNATURE,
+          eventClientKey(context.requestKey, "memory"),
+        );
+      }
+    }
     const note = "Проверил — по данным MYDON повода для действий нет.";
     return {
       agent: agent.name,
@@ -250,7 +270,6 @@ export async function runSkill(
   // «одобрить» не глядя). Сигнатуру прошлого повода читаем из журнала Core.
   // Запоминаем НИЖЕ — только после успешной подачи, чтобы перекрытый потолком
   // или несостоявшийся повод не «забылся».
-  const source = `agent:${agent.name}`;
   const sig = signature(proposal.facts);
   const lastSig = await core.recallMemory(source, skill);
   if (matchesSignature(lastSig, proposal.facts)) {

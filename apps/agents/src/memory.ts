@@ -2,6 +2,16 @@ import { createHash } from "node:crypto";
 
 const MAX_MEMORY_SIGNATURE_LENGTH = 512;
 
+/**
+ * Сторожевая сигнатура «повода нет». Runner пишет её при no_signal, затирая
+ * сигнатуру последней подачи: «повод исчез» — тоже изменение повода. Иначе
+ * тот же набор фактов, вернувшийся после полного разрешения (встал ДРУГОЙ
+ * автомат, а idleMachines снова 1), молча глотался бы устаревшей памятью как
+ * no_change — TTL у памяти нет. Значение не пересекается с signature(): та
+ * всегда отдаёт JSON-объект («{…}») либо префикс sha256:.
+ */
+export const NO_SIGNAL_SIGNATURE = "no-signal";
+
 function canonicalSignature(facts: Record<string, unknown>): string {
   const sorted: Record<string, unknown> = {};
   for (const key of Object.keys(facts).sort()) sorted[key] = facts[key];

@@ -166,7 +166,25 @@ const morningDigest: Skill = async (_agent, core) => {
 
   return {
     action: `Разобрать за день: ${alarms.join("; ")}.`,
-    facts: { ...b },
+    // Только содержательные счётчики, от которых построены тревоги. Раньше здесь
+    // было `{ ...b }` — spread копировал ВЕСЬ рантайм-ответ Core, включая поля
+    // вне типа AgentsBriefing: generatedAt (уникален каждый запуск) и
+    // pendingApprovals (растёт из-за самих согласований). Дельта-память считает
+    // сигнатуру от facts целиком (runner.ts), поэтому сигнатура не совпадала
+    // никогда — и одна и та же сводка подавалась владельцу каждый день заново.
+    // Ограничение (осознанный компромисс): счётчики не различают состав —
+    // ротация при неизменном числе (A оплачен, но просрочился новый C:
+    // overdueMoney по-прежнему 2) даёт ту же сигнатуру и глотается
+    // дельта-памятью. Точнее не из чего: брифинг Core отдаёт только
+    // количества. Бэклог: добавить в /registry/briefing стабильные
+    // различительные поля (oldestOverdueDate, отсортированные id) и сюда.
+    facts: {
+      overdueMoney: b.overdueMoney,
+      idleMachines: b.idleMachines,
+      contractsDueSoon: b.contractsDueSoon,
+      overdueTasks: b.overdueTasks,
+      contractsBadDate: b.contractsBadDate,
+    },
   };
 };
 
