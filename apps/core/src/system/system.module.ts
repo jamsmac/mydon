@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { SystemOwnerGuard } from "../common/system-owner.guard";
 import { VendingModule } from "../vending/vending.module";
 import { RetentionController } from "./retention.controller";
 import { SystemController } from "./system.controller";
@@ -14,7 +15,9 @@ import { SystemService } from "./system.service";
   // чистит ретенция и снимки, и продажи, и журнал прогонов. Сам сервис —
   // провайдер `VendingModule` и оттуда экспортирован.
   controllers: [SystemController, RetentionController],
-  providers: [SystemService],
+  // `SystemOwnerGuard` — второй пояс owner-действий на PUT /system/config[/llm-profile];
+  // регистрируем как провайдера, чтобы Nest резолвил его через DI (как OwnerMutationGuard).
+  providers: [SystemService, SystemOwnerGuard],
   exports: [SystemService],
 })
 export class SystemModule {}

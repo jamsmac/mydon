@@ -73,6 +73,27 @@ describe("core.ts — owner-токен только для owner-действи�
     for (const h of cap.headers) expect(h["x-owner-action-token"]).toBe("owner-secret-token");
   });
 
+  it("saveSystemConfig и saveLlmProfile владельцем несут owner-токен (админ-поверхность /system)", async () => {
+    mocks.resolveOwner.mockResolvedValue({ isOwner: true, login: "owner@x.com" });
+    const cap = stubFetch();
+    await core.saveSystemConfig({ key: "AGENT_AUTONOMY_MAX", value: "T2" });
+    await core.saveLlmProfile({ items: [{ key: "LLM_ROUTE", value: "openai-api" }] });
+    expect(cap.urls[0]).toContain("/system/config");
+    expect(cap.urls[1]).toContain("/system/config/llm-profile");
+    for (const h of cap.headers) {
+      expect(h["x-service-token"]).toBe("shared-service-token");
+      expect(h["x-owner-action-token"]).toBe("owner-secret-token");
+    }
+  });
+
+  it("saveLlmProfile НЕ владельцем → owner-токена нет (честный 403 от SystemOwnerGuard)", async () => {
+    mocks.resolveOwner.mockResolvedValue({ isOwner: false, login: null });
+    const cap = stubFetch();
+    await core.saveLlmProfile({ items: [{ key: "LLM_ROUTE", value: "openai-api" }] });
+    expect(cap.headers[0]["x-service-token"]).toBe("shared-service-token");
+    expect(cap.headers[0]["x-owner-action-token"]).toBeUndefined();
+  });
+
   it("owner-only чтение личного контура несёт owner-токен, чужой домен — нет", async () => {
     mocks.resolveOwner.mockResolvedValue({ isOwner: true, login: "owner@x.com" });
     const cap = stubFetch();

@@ -417,6 +417,81 @@ describe("ourvend:sync — коллектор вендинга", () => {
     assert.match(String(res.error), /автомат Olma пропущен/);
   });
 
+  it("finishVendingSync падает дважды → застревание видимо (journalError + error-лог), сбор НЕ падает", async () => {
+    // catch {} раньше глотал отказ закрытия журнала: запись сбора висела
+    // «running» навсегда, а cron логировал исходный успех — застрявший прогон
+    // невидим, сторож застоя молчит. Теперь: короткий повтор, а если и он упал
+    // — флаг наверх + error-лог с id прогона.
+    const { core, calls } = stubCore();
+    let attempts = 0;
+    core.finishVendingSync = async (id, input) => {
+      attempts += 1;
+      calls.finishes.push({ id, ...input });
+      throw new Error("Core недоступен");
+    };
+    const errLogs: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      errLogs.push(args.map(String).join(" "));
+    };
+    let res;
+    try {
+      const connector = stubConnector({
+        machines: [{ serial: "AH", alias: "AH" }],
+        slots: { AH: [slot("31", "Montella", 6, 2)] },
+      });
+      res = await runOurvendSync(core, CFG, { connector, now: clock });
+    } finally {
+      console.error = origError;
+    }
+
+    // Данные собраны — сам сбор не провалили из-за отказа журнала.
+    assert.equal(res.status, "success");
+    assert.equal(res.slots, 1);
+    // Застревание видимо: флаг наверх с текстом отказа.
+    assert.equal(res.journalError, "Core недоступен");
+    // Повтор был: ровно две попытки закрыть журнал.
+    assert.equal(attempts, 2, "должен быть один короткий повтор закрытия");
+    // Error-лог с id прогона и текстом отказа.
+    assert.ok(
+      errLogs.some((l) => l.includes("run-1") && /не закрыт/i.test(l) && l.includes("Core недоступен")),
+      `нет error-лога о незакрытом журнале: ${JSON.stringify(errLogs)}`,
+    );
+  });
+
+  it("finishVendingSync падает один раз, повтор проходит → journalError нет, сбор success", async () => {
+    // Сеть/Core мигнули на первой попытке — повтор закрывает журнал, запись не
+    // зависает «running», флаг наверх не поднимается.
+    const { core, calls } = stubCore();
+    let attempts = 0;
+    core.finishVendingSync = async (id, input) => {
+      attempts += 1;
+      calls.finishes.push({ id, ...input });
+      if (attempts === 1) throw new Error("временный сбой сети");
+      return { ok: true };
+    };
+    const connector = stubConnector({
+      machines: [{ serial: "AH", alias: "AH" }],
+      slots: { AH: [slot("31", "Montella", 6, 2)] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+
+    assert.equal(res.status, "success");
+    assert.equal(res.journalError, undefined, "успешный повтор — застревания нет");
+    assert.equal(attempts, 2, "первая попытка упала, вторая прошла");
+  });
+
+  it("успешное закрытие журнала с первого раза → journalError нет (как раньше)", async () => {
+    const { core } = stubCore();
+    const connector = stubConnector({
+      machines: [{ serial: "AH", alias: "AH" }],
+      slots: { AH: [slot("31", "Montella", 6, 2)] },
+    });
+    const res = await runOurvendSync(core, CFG, { connector, now: clock });
+    assert.equal(res.status, "success");
+    assert.equal(res.journalError, undefined);
+  });
+
   it("ПУСТОЙ СПИСОК АВТОМАТОВ → failed с внятной причиной, а не success", async () => {
     // Логин и список прошли, а список приехал пустым: сменилась группа, у
     // учётки отобрали права, кабинет отдал пустой ответ. `failures.length === 0`
