@@ -2564,9 +2564,13 @@ export const core = {
   // owner-only (R-P5-5): изменение порога автономии идёт под вторым поясом.
   saveSystemConfig: (input: { key: string; value: string; updatedBy?: string }) =>
     send<SystemConfigItem[]>("/system/config", "PUT", input, { owner: true }),
-  /** Один Core-коммит для всего LLM-профиля: частичных настроек не бывает. */
+  /**
+   * Один Core-коммит для всего LLM-профиля: частичных настроек не бывает.
+   * owner-only (R-P5-5): маршрут/модель/бюджеты LLM — админ-поверхность владельца,
+   * поэтому под вторым поясом (`SystemOwnerGuard`), как и `saveSystemConfig`.
+   */
   saveLlmProfile: (input: LlmProfileUpdate) =>
-    send<SystemConfigItem[]>("/system/config/llm-profile", "PUT", input),
+    send<SystemConfigItem[]>("/system/config/llm-profile", "PUT", input, { owner: true }),
   pendingApprovals: () => get<Approval[]>("/approvals/pending"),
   allApprovals: () => get<Approval[]>("/approvals"),
   audit: (limit = 40) => get<AuditEntry[]>(`/audit?limit=${limit}`),

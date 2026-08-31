@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Put } from "@nestjs/common";
+import { Body, Controller, Get, Put, UseGuards } from "@nestjs/common";
 import { Type } from "class-transformer";
 import {
   ArrayMaxSize,
@@ -11,6 +11,7 @@ import {
   MaxLength,
   ValidateNested,
 } from "class-validator";
+import { SystemOwnerGuard } from "../common/system-owner.guard";
 import { AnalyticsService } from "../vending/analytics.service";
 import { LLM_PROFILE_KEYS } from "./config-spec";
 import { SystemService } from "./system.service";
@@ -59,7 +60,9 @@ export class SetLlmProfileDto {
 }
 
 /**
- * Глобальные тумблеры системы. Мутация (PUT) закрыта общим ServiceTokenGuard.
+ * Глобальные тумблеры системы. Мутация (PUT) закрыта общим ServiceTokenGuard,
+ * а поверх — независимым `SystemOwnerGuard` (второй пояс, привязанный к наличию
+ * `OWNER_ACTION_TOKEN`, а не к флагу enforcement: сам флаг пишется здесь же).
  * Секретов здесь нет — только не-секретная активация из белого списка.
  */
 @Controller("system/config")
@@ -85,6 +88,7 @@ export class SystemController {
    * пересчёт на редкую правку настроек.
    */
   @Put()
+  @UseGuards(SystemOwnerGuard)
   async set(@Body() dto: SetConfigDto) {
     const итог = await this.system.set(dto.key, dto.value, dto.updatedBy);
     this.analytics.invalidateReports();
@@ -94,9 +98,11 @@ export class SystemController {
   /**
    * Профиль пишется одним commit: модель, route и лимиты не могут
    * на мгновение стать взаимно несогласованными. Global ServiceTokenGuard закрывает
-   * PUT так же, как остальные мутации Core.
+   * PUT так же, как остальные мутации Core; `SystemOwnerGuard` добавляет второй
+   * пояс (owner-токен), когда он задан — маршрут и бюджеты LLM меняет только владелец.
    */
   @Put("llm-profile")
+  @UseGuards(SystemOwnerGuard)
   async setLlmProfile(@Body() dto: SetLlmProfileDto) {
     const итог = await this.system.setLlmProfile(dto.items, dto.updatedBy);
     this.analytics.invalidateReports();
