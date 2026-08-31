@@ -143,6 +143,7 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
       table: "slot_snapshot",
       deleted: 42,
       olderThanDays: 180,
+      capped: false,
       aborted: false,
     });
   });
@@ -183,6 +184,7 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
       table: "slot_snapshot",
       deleted: 0,
       olderThanDays: 180,
+      capped: false,
       aborted: true,
     });
   });
@@ -210,6 +212,53 @@ describe("Еженедельная ретенция (R-P8b-7)", () => {
     assert.equal(r.capped, true);
     assert.equal(r.deleted, RETENTION_BATCH);
     assert.equal(запросы.filter((q) => q.includes("slot_snapshot")).length, 1);
+  });
+
+  it("`capped` ДОЕЗЖАЕТ ДО ЖУРНАЛА: обрезанный бюджетом прогон отличим от полного", async () => {
+    // В ответе роута `capped` был, а в событии — нет: журнал (а он объявлен
+    // единственным свидетельством чистки) писал «удалено 5000, aborted: false»
+    // и для полной чистки, и для прогона, который снёс первую пачку из десяти и
+    // ушёл ждать воскресенья. Ответ роута живёт до конца запроса, событие — год.
+    const { svc, события } = стенд({ строк: { slot_snapshot: RETENTION_BATCH * 3 } });
+    let тик = 0;
+    (svc as unknown as { clock: () => number }).clock = () => (тик++ < 2 ? 0 : RETENTION_BUDGET_MS + 1);
+    await svc.sweep(вс);
+    assert.deepEqual(события[0]!.payload, {
+      table: "slot_snapshot",
+      deleted: RETENTION_BATCH,
+      olderThanDays: 180,
+      capped: true,
+      aborted: false,
+    });
+  });
+
+  it("бюджет исчерпан ДО первой пачки цели — событие всё равно пишется: «не успели» не молчит", async () => {
+    // Воскресный прогон потратил весь бюджет на бэклог slot_snapshot: остальные
+    // цели выходят из цикла на первой же проверке часов с нулём удалённых.
+    // Порог `deleted > 0 || aborted` не давал им события — при затяжном бэклоге
+    // product_sale/machine_sale/vending_sync_run/vending_stock_count неделями
+    // оставались бы нечищенными без следа в журнале, объявленном единственным
+    // свидетельством чистки. Асимметрии больше нет: `aborted` при нуле писал
+    // событие, теперь и `capped` при нуле пишет — оба случая «не доехали».
+    const { svc, события, запросы } = стенд({ строк: { product_sale: RETENTION_BATCH } });
+    let тик = 0;
+    // 1-й вызов clock — расчёт дедлайна; все последующие — уже за бюджетом:
+    // ни одна цель не успевает выполнить ни одной пачки.
+    (svc as unknown as { clock: () => number }).clock = () => (тик++ < 1 ? 0 : RETENTION_BUDGET_MS + 1);
+    const r = await svc.sweep(вс);
+    assert.equal(запросы.length, 0, "бюджета не осталось — ни одного DELETE быть не должно");
+    assert.equal(события.length, 5, "КАЖДАЯ недоехавшая цель оставляет след в журнале");
+    for (const с of события) {
+      assert.deepEqual(
+        [с.payload.deleted, с.payload.capped, с.payload.aborted],
+        [0, true, false],
+        `событие ${String(с.payload.table)} обязано говорить «не успели», а не молчать`,
+      );
+    }
+    // И в ответе прогона недоехавшая цель видна без includeEmpty — той же
+    // логикой «не доехали — новость», что и в журнале.
+    const продажи = r.find((x) => x.table === "product_sale")!;
+    assert.deepEqual([продажи.deleted, продажи.capped, продажи.aborted], [0, true, false]);
   });
 });
 
@@ -328,6 +377,12 @@ describe("Ручной прогон ретенции: примерка и пол
     await svc.sweep(вс, { includeEmpty: true });
     assert.equal(события.length, 1);
     assert.equal(события[0]!.type, RETENTION_EVENT);
-    assert.deepEqual(события[0]!.payload, { table: "vending_stock_count", deleted: 4, olderThanDays: 730, aborted: false });
+    assert.deepEqual(события[0]!.payload, {
+      table: "vending_stock_count",
+      deleted: 4,
+      olderThanDays: 730,
+      capped: false,
+      aborted: false,
+    });
   });
 });

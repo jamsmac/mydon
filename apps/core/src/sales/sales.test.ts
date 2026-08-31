@@ -2,6 +2,29 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { buildUpserts, daysAgoLocal, todayLocal, type StockSaleRow } from "./sales.service";
 
+/**
+ * Прогон с НАСТОЯЩЕЙ зоной процесса — гард против возврата к календарю процесса.
+ *
+ * «Прогнать пакет с TZ=UTC» для этого файла ничего не доказывает: `config.ts`
+ * выполняет `process.env.TZ = "Asia/Tashkent"` при импорте, а этот файл
+ * импортирует `sales.service` → `db.module` → `config` — то есть процесс
+ * тестов живёт в Ташкенте НЕЗАВИСИМО от окружения запуска (проверено: offset
+ * −300 после импорта под `TZ=UTC`). Полуночные тесты на этом были инертны:
+ * возврат `todayLocal`/`daysAgoLocal` к `getFullYear`/`getDate`/`setDate`
+ * проходил их зелёными. Node перечитывает `TZ` при присваивании, поэтому гард
+ * флипает зону процесса САМ — на календаре процесса такие тесты теперь падают.
+ */
+async function вЗонеПроцесса<T>(tz: string, fn: () => T | Promise<T>): Promise<T> {
+  const было = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return await fn();
+  } finally {
+    if (было === undefined) delete process.env.TZ;
+    else process.env.TZ = было;
+  }
+}
+
 describe("Продажи: подготовка строк из mydon-stock", () => {
   const map = new Map([["72ac181f0000", "ent-1"]]);
 
@@ -68,29 +91,50 @@ describe("Продажи: подготовка строк из mydon-stock", () 
     assert.equal(quarantined.length, 0);
   });
 
-  it("todayLocal отдаёт дату YYYY-MM-DD по локальному времени контейнера", () => {
-    const d = new Date(2026, 6, 29, 23, 59); // 29 июля, поздний вечер
-    assert.equal(todayLocal(d), "2026-07-29");
+  it("todayLocal отдаёт дату YYYY-MM-DD по ТАШКЕНТСКИМ суткам, а не по часам процесса", async () => {
+    // 20:30 UTC — это 01:30 УЖЕ следующих суток в Ташкенте: прежний
+    // `getDate()` отдавал здесь 29 июля, то есть витрина продаж до 05:00
+    // показывала вчерашний день как сегодняшний. Зону UTC тест выставляет
+    // САМ (`вЗонеПроцесса`): полагаться на `TZ` запуска нельзя — импорт
+    // `config.ts` уже перепинил процесс на Ташкент.
+    await вЗонеПроцесса("UTC", () => {
+      assert.equal(todayLocal(new Date("2026-07-29T20:30:00.000Z")), "2026-07-30");
+      // И наоборот: 23:59 ташкентских — ещё те же сутки, границу не перескочили.
+      assert.equal(todayLocal(new Date("2026-07-29T23:59:00.000+05:00")), "2026-07-29");
+    });
   });
 
   it("daysAgoLocal(30) от 03.08 — это 05.07, ровно 30 календарных дат 05.07–03.08 (найдено внешним аудитом, P2)", () => {
-    const now = new Date(2026, 7, 3); // 3 августа
+    const now = new Date("2026-08-03T00:30:00.000+05:00"); // 3 августа, ночь в Ташкенте
     assert.equal(daysAgoLocal(30, now), "2026-07-05");
     // Проверка счётом: 03.08 − 05.07 включительно с обеих сторон = 30 дат.
-    const from = new Date(2026, 6, 5);
-    const to = new Date(2026, 7, 3);
-    const days = Math.round((to.getTime() - from.getTime()) / 86_400_000) + 1;
-    assert.equal(days, 30);
+    const from = Date.parse("2026-07-05T00:00:00.000+05:00");
+    const to = Date.parse("2026-08-03T00:00:00.000+05:00");
+    assert.equal(Math.round((to - from) / 86_400_000) + 1, 30);
   });
 
   it("daysAgoLocal(7) от 03.08 — это 28.07, не 27.07 (старая граница today−N давала 8 дат вместо 7)", () => {
-    const now = new Date(2026, 7, 3);
+    const now = new Date("2026-08-03T00:30:00.000+05:00");
     assert.equal(daysAgoLocal(7, now), "2026-07-28");
   });
 
   it("daysAgoLocal(1) — граница «сегодня» (N=1 значит только сегодняшняя дата)", () => {
-    const now = new Date(2026, 7, 3);
+    const now = new Date("2026-08-03T00:30:00.000+05:00");
     assert.equal(daysAgoLocal(1, now), todayLocal(now));
+    assert.equal(daysAgoLocal(1, now), "2026-08-03");
+  });
+
+  it("окно отсчитывается от НАЧАЛА ташкентских суток: 01:30 ночи не сдвигает границу", async () => {
+    // Прежний `setDate` сдвигал КАЛЕНДАРЬ ПРОЦЕССА: при `TZ=UTC` этот момент
+    // был ещё 2 августа, и «30 дней» уезжали на 04.07 — на дату раньше.
+    // Зона UTC — самим тестом: без флипа возврат к `setDate` зеленел бы на
+    // Ташкенте, закреплённом `config.ts` при импорте.
+    await вЗонеПроцесса("UTC", () => {
+      assert.equal(daysAgoLocal(30, new Date("2026-08-02T20:30:00.000Z")), "2026-07-05");
+      // Полдень тех же суток обязан дать ТУ ЖЕ границу — окно считается сутками,
+      // а не «минус 29 × 24 часа от момента».
+      assert.equal(daysAgoLocal(30, new Date("2026-08-03T12:00:00.000+05:00")), "2026-07-05");
+    });
   });
 });
 
@@ -197,6 +241,8 @@ describe("Алиасы имён продаж", () => {
 
 import { createRequire } from "node:module";
 import { entity, ourvendSaleSnapshot, ourvendStockSnapshot, sale } from "@mydon/db";
+import { type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { resetAccountingSourceCache } from "./accounting-source";
 
 /**
@@ -473,5 +519,90 @@ describe("«Источник настроен» — это «источник Ч
         assert.equal((await svc.summary(сейчас)).configured, true);
       },
     );
+  });
+});
+
+// ── Сутки витрин — ташкентские, а не часы процесса ───────────────────────────
+
+import { tashkentDay, tashkentDayStartOf } from "@mydon/shared";
+
+const ДИАЛЕКТ = new PgDialect();
+
+/**
+ * Стенд витрин, запоминающий ПАРАМЕТРЫ отрендеренных условий.
+ *
+ * Даты витрин в ответе не видны (`summary` отдаёт суммы, `daily` — строки БД),
+ * поэтому «какие сутки спросили» проверяется единственным честным способом —
+ * по параметрам запроса.
+ */
+function стендВитрин() {
+  const params: unknown[] = [];
+  // Условия рендерятся настоящим `PgDialect` (приём из
+  // `retention.service.test.ts`): проверяем, ЧТО уехало в запрос, а не то, что
+  // заглушка сумела вычитать из внутренностей drizzle. Колонки (`sale.dt` в
+  // списке полей) параметров не несут и отличаются от выражений наличием
+  // `queryChunks`.
+  const запомнить = (в: unknown): void => {
+    if (в !== null && typeof в === "object" && "queryChunks" in в) {
+      params.push(...ДИАЛЕКТ.sqlToQuery(в as SQL).params);
+    }
+  };
+  const цепочка = (rows: unknown[]) => {
+    const chain: Record<string, unknown> = {};
+    chain.where = (в: unknown) => (запомнить(в), chain);
+    chain.having = (в: unknown) => (запомнить(в), chain);
+    chain.leftJoin = () => chain;
+    chain.groupBy = () => chain;
+    chain.orderBy = () => chain;
+    chain.limit = async () => rows;
+    chain.then = (res: (v: unknown) => unknown) => Promise.resolve(rows).then(res);
+    return chain;
+  };
+  const сводка = { tQty: "0", tAmt: "0", yQty: "0", yAmt: "0", mQty: "0", mAmt: "0", last: null };
+  const db = {
+    select: (поля?: Record<string, unknown>) => ({
+      from: (t: unknown) => {
+        for (const в of Object.values(поля ?? {})) запомнить(в);
+        return цепочка(t === sale ? [сводка] : []);
+      },
+    }),
+  } as never;
+  return { svc: new SalesService(db), params };
+}
+
+describe("Сутки витрин продаж — ташкентские, когда процесс ЖИВЁТ в UTC (зону флипает тест)", () => {
+  it("summary спрашивает ташкентские сегодня/вчера/−30, а не сутки процесса", async () => {
+    // 20:30 UTC — это 01:30 УЖЕ 26 августа в Ташкенте: прежний `getDate()`
+    // спрашивал у базы 25-е как «сегодня» — плитка «сегодня» до 05:00
+    // показывала вчерашнюю выручку, «вчера» — позавчерашнюю. Зона UTC не из
+    // окружения запуска (его перепинивает `config.ts` при импорте), а
+    // выставлена самим тестом — на календаре процесса эти параметры стали бы
+    // 25/24/27, и assert упал бы.
+    const сейчас = new Date("2026-08-25T20:30:00.000Z");
+    await вЗонеПроцесса("UTC", () =>
+      сОкружением(
+        { STOCK_DATABASE_URL: "postgres://ro@stock/mydon", OURVEND_ACCOUNTING_SOURCE: "stock" },
+        async () => {
+          const { svc, params } = стендВитрин();
+          await svc.summary(сейчас);
+          assert.deepEqual(
+            [...new Set(params)],
+            ["2026-08-26", "2026-08-25", "2026-07-28"],
+            "сегодня, вчера и граница 30 дат — ташкентскими сутками",
+          );
+        },
+      ),
+    );
+  });
+
+  it("daily берёт границу от НАЧАЛА ташкентских суток момента", async () => {
+    // Ожидание считается независимо — теми же общими функциями зоны, что и
+    // остальные суточные отчёты; своей копии смещения в тесте нет.
+    const ожидание = tashkentDay(new Date(tashkentDayStartOf(new Date()).getTime() - 29 * 86_400_000));
+    await вЗонеПроцесса("UTC", async () => {
+      const { svc, params } = стендВитрин();
+      await svc.daily(30);
+      assert.deepEqual(params, [ожидание], "одна граница окна — ташкентская дата today−29");
+    });
   });
 });
