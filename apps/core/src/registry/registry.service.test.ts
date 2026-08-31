@@ -1,8 +1,22 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { approval, entity, machineCard, moneyFlow, org, task } from "@mydon/db";
 import { MAX_FIND_LIMIT } from "@mydon/shared";
 import { RegistryService } from "./registry.service";
+
+/** Рендер WHERE-узла в SQL — так же, как в tasks.test.ts / entities.test.ts. */
+const renderSql = (node: unknown): string => new PgDialect().sqlToQuery(node as never).sql;
+
+/**
+ * Упоминает ли предикат личный контур. Часть гейтов — сырой `sql\`… 'personal'\``
+ * (литерал в тексте), а `overview` использует `ne(org.code, "personal")`, где
+ * drizzle выносит значение в параметр ($1). Поэтому смотрим И текст, И параметры.
+ */
+function mentionsPersonal(node: unknown): boolean {
+  const q = new PgDialect().sqlToQuery(node as never);
+  return /personal/.test(q.sql) || q.params.some((p) => p === "personal");
+}
 
 /**
  * Стаб под `byType`: сначала запрос организации (from(org)), затем выборка
@@ -200,5 +214,118 @@ describe("Брифинг: различитель состава тревог м�
     ).briefing(МОМЕНТ);
     assert.equal(b.contractsDueSoon, 2, "карточка dup + договор dup — две позиции, не одна");
     assert.notEqual(b.alarmComposition.contractsDueSoon, "");
+  });
+});
+
+/**
+ * Стаб, ЗАХВАТЫВАЮЩИЙ предикат WHERE каждого тревожного подзапроса брифинга.
+ * Гард полноты (personal-read-surfaces.guard.test.ts) лишь проверяет, что
+ * подстрока `excludePersonal` есть в файле; он НЕ ловит регресс, снявший
+ * moneyGate/entityGate/taskGate/machineGate из конкретного `and(...)`. Здесь мы
+ * рендерим сам предикат: при флаге ВКЛ каждая категория обязана нести гейт
+ * personal, при выключенном — не нести (SQL прода не меняется).
+ */
+function captureBriefingDb() {
+  const captured = {
+    money: [] as unknown[], // overdueMoney (from moneyFlow, без innerJoin)
+    typed: [] as unknown[], // договоры по graph (from moneyFlow + innerJoin grContract)
+    machine: [] as unknown[], // idleMachines (from machineCard)
+    entity: [] as unknown[], // карточки-договоры + кривые даты (from entity, ×2)
+    task: [] as unknown[], // overdueTasks (from task)
+  };
+  const sink = (bucket: unknown[]) => ({
+    where: async (c: unknown) => {
+      bucket.push(c);
+      return [];
+    },
+  });
+  const db = {
+    select: () => ({
+      from: (t: unknown) => {
+        if (t === moneyFlow)
+          return {
+            where: async (c: unknown) => {
+              captured.money.push(c);
+              return [];
+            },
+            innerJoin: () => sink(captured.typed),
+          };
+        if (t === machineCard) return sink(captured.machine);
+        if (t === approval) return { where: async () => [{ n: 0 }] };
+        if (t === entity) return sink(captured.entity);
+        if (t === task) return sink(captured.task);
+        return { where: async () => [] };
+      },
+    }),
+  } as never;
+  return { captured, db };
+}
+
+const МОМЕНТ_ГЕЙТА = new Date("2026-08-31T09:00:00+05:00");
+
+describe("Брифинг: гейт личного контура вшит в SQL, а не только в имя параметра (R-P5-7b)", () => {
+  it("флаг выключен (дефолт) — ни один WHERE не упоминает personal (выдача как сегодня)", async () => {
+    const { captured, db } = captureBriefingDb();
+    await new RegistryService(db).briefing(МОМЕНТ_ГЕЙТА);
+    const all = [
+      ...captured.money,
+      ...captured.typed,
+      ...captured.machine,
+      ...captured.entity,
+      ...captured.task,
+    ];
+    assert.ok(all.length > 0, "подзапросы должны были выполниться");
+    for (const node of all) assert.ok(!mentionsPersonal(node), "WHERE без флага не режет personal");
+  });
+
+  it("excludePersonal=true — деньги/договоры/автоматы/карточки/задачи вырезают personal в SQL", async () => {
+    const { captured, db } = captureBriefingDb();
+    await new RegistryService(db).briefing(МОМЕНТ_ГЕЙТА, true);
+    // Каждая тревожная категория несёт свой гейт; снятие проводки любого —
+    // moneyGate/entityGate/taskGate/machineGate — роняет ровно свой assert.
+    const категории: [string, unknown[]][] = [
+      ["overdueMoney", captured.money],
+      ["contractsDueSoon(typed)", captured.typed],
+      ["idleMachines", captured.machine],
+      ["contracts(entity)", captured.entity],
+      ["overdueTasks", captured.task],
+    ];
+    for (const [имя, nodes] of категории) {
+      assert.ok(nodes.length > 0, `${имя}: подзапрос не выполнился`);
+      for (const node of nodes)
+        assert.ok(mentionsPersonal(node), `${имя}: WHERE потерял гейт personal`);
+    }
+  });
+});
+
+/** Стаб, захватывающий предикат WHERE у `overview` (единственный `.where`). */
+function captureOverviewDb() {
+  let captured: unknown;
+  const chain: Record<string, unknown> = {
+    where: (c: unknown) => {
+      captured = c;
+      return chain;
+    },
+    groupBy: () => chain,
+    orderBy: async () => [],
+  };
+  const db = {
+    select: () => ({ from: () => ({ innerJoin: () => chain }) }),
+  } as never;
+  return { getCaptured: () => captured, db };
+}
+
+describe("Сводка реестра: гейт personal вшит в SQL (R-P5-7b)", () => {
+  it("флаг выключен (дефолт) — WHERE не режет personal (undefined, SQL прежний)", async () => {
+    const { getCaptured, db } = captureOverviewDb();
+    await new RegistryService(db).overview();
+    assert.equal(getCaptured(), undefined, "без флага overview не добавляет фильтра personal");
+  });
+
+  it("excludePersonal=true — WHERE исключает org.code='personal'", async () => {
+    const { getCaptured, db } = captureOverviewDb();
+    await new RegistryService(db).overview(true);
+    assert.ok(mentionsPersonal(getCaptured()), "overview с флагом обязан исключить personal");
+    assert.match(renderSql(getCaptured()), /"org"\."code"/, "фильтр именно по коду направления");
   });
 });

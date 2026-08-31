@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, eq, gte, inArray, isNotNull, lt } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, lt, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import {
   coffeeConsumableLog,
@@ -9,6 +9,7 @@ import {
   collection,
   entity,
   maintenanceLog,
+  org,
   person,
   stockMovement,
   task,
@@ -75,6 +76,28 @@ export function personIdOf(ref: string | null | undefined): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * Условие «задача НЕ из личного контура» — NULL-safe `is distinct from`.
+ *
+ * Тот же оператор, что в tasks.service: `task.domain` бывает NULL (задача без
+ * направления), и `<> 'personal'` вычеркнул бы её из ленты, хотя личной она не
+ * является. `is distinct from` оставляет NULL и режет ровно personal.
+ */
+function taskNotPersonal(): SQL {
+  return sql`${task.domain} is distinct from 'personal'`;
+}
+
+/**
+ * Условие «карточка НЕ из личного контура» (org.code='personal') — R-P5-7b.
+ *
+ * Коррелированный `not exists`, а не `orgId <> personalId`: `entity.orgId`
+ * бывает NULL (осиротевшая карточка), и `NULL <> …` вычеркнуло бы её, хотя
+ * личной она не является. Совпадает с notPersonalOrg в entities.service.
+ */
+function entityNotPersonal(): SQL {
+  return sql`not exists (select 1 from ${org} where ${org.id} = ${entity.orgId} and ${org.code} = 'personal')`;
+}
+
 @Injectable()
 export class ActionsService {
   constructor(@Inject(DB) private readonly db: Db) {}
@@ -83,9 +106,21 @@ export class ActionsService {
    * Действия сотрудников за [from..to] (даты YYYY-MM-DD по Ташкенту,
    * включительно). `personId` — сузить до одного человека.
    */
-  async actions(from: string, to: string, personId?: string): Promise<ActionRow[]> {
+  async actions(
+    from: string,
+    to: string,
+    personId?: string,
+    excludePersonal = false,
+  ): Promise<ActionRow[]> {
     const lo = dayStart(from);
     const hi = nextDayStart(to);
+    // При ужесточении и не-owner запросе задачи/карточки личного контура не
+    // должны утекать заголовками в ленту (R-P5-7a). Полевые доменные вводы
+    // (заливки, инкассации, склад) личными не бывают по построению, поэтому
+    // гейт нужен только task- и entity-подзапросам. Флаг выключен (дефолт) →
+    // undefined → SQL прежний.
+    const taskGate = excludePersonal ? taskNotPersonal() : undefined;
+    const entityGate = excludePersonal ? entityNotPersonal() : undefined;
 
     const place = alias(entity, "place");
     const obj = alias(entity, "obj");
@@ -233,21 +268,22 @@ export class ActionsService {
             lt(task.completedAt, hi),
             eq(task.ownerKind, "human"),
             eq(task.status, "done"),
+            taskGate,
           ),
         ),
       // Закрыть и принять могут разные люди — это две строки ленты.
       this.db
         .select({ at: task.confirmedAt, by: task.confirmedBy, title: task.title })
         .from(task)
-        .where(and(isNotNull(task.confirmedAt), gte(task.confirmedAt, lo), lt(task.confirmedAt, hi))),
+        .where(and(isNotNull(task.confirmedAt), gte(task.confirmedAt, lo), lt(task.confirmedAt, hi), taskGate)),
       this.db
         .select({ at: task.createdAt, by: task.createdBy, title: task.title })
         .from(task)
-        .where(and(gte(task.createdAt, lo), lt(task.createdAt, hi))),
+        .where(and(gte(task.createdAt, lo), lt(task.createdAt, hi), taskGate)),
       this.db
         .select({ at: entity.createdAt, by: entity.createdFrom, name: entity.name, type: entity.type })
         .from(entity)
-        .where(and(gte(entity.createdAt, lo), lt(entity.createdAt, hi))),
+        .where(and(gte(entity.createdAt, lo), lt(entity.createdAt, hi), entityGate)),
     ]);
 
     const people = new Map(peopleRows.map((p) => [p.id, p.name]));

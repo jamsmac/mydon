@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { person, vendingRefill } from "@mydon/db";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { entity, person, task, vendingRefill } from "@mydon/db";
 import { ActionsService, personIdOf, type ActionRow } from "./actions.service";
+
+/** Рендер WHERE-узла в SQL — так же, как в tasks.test.ts / entities.test.ts. */
+const renderSql = (node: unknown): string => new PgDialect().sqlToQuery(node as never).sql;
 
 describe("Лента действий: разбор автора", () => {
   it("person:/staff: дают uuid, всё прочее — null", () => {
@@ -121,5 +125,58 @@ describe("Лента действий: сторно снек-заправки п
     const rows = await new ActionsService(db).actions("2026-08-26", "2026-08-26");
     assert.equal(rows[0]!.kind, "vending_refill");
     assert.match(rows[0]!.label, /^🍫 Заправка/);
+  });
+});
+
+/**
+ * Стаб, ЗАХВАТЫВАЮЩИЙ предикат WHERE task/entity-подзапросов ленты. Гард полноты
+ * (personal-read-surfaces.guard.test.ts) лишь проверяет наличие подстроки
+ * `excludePersonal` в файле; он НЕ ловит регресс, снявший taskGate/entityGate из
+ * конкретного `and(...)`. Здесь рендерим сам предикат: при флаге ВКЛ каждый
+ * из четырёх owner-facing подзапросов (закрытые/принятые/заведённые задачи и
+ * заведённые карточки) обязан нести гейт personal, при выключенном — не нести.
+ * `person` читается без where (лента людей) — стаб отдаёт его thenable-пустым.
+ */
+function captureActionsDb() {
+  const captured = { task: [] as unknown[], entity: [] as unknown[] };
+  const node = (bucket?: unknown[]) => {
+    const p = Promise.resolve([] as unknown[]);
+    return {
+      then: p.then.bind(p),
+      where: async (c: unknown) => {
+        bucket?.push(c);
+        return [];
+      },
+      innerJoin: () => ({ where: async () => [] }),
+    };
+  };
+  const db = {
+    select: () => ({
+      from: (t: unknown) =>
+        t === task ? node(captured.task) : t === entity ? node(captured.entity) : node(),
+    }),
+  } as never;
+  return { captured, db };
+}
+
+describe("Лента действий: гейт личного контура вшит в SQL, а не только в имя параметра (R-P5-7a)", () => {
+  it("флаг выключен (дефолт) — WHERE задач/карточек не упоминает personal (лента как сегодня)", async () => {
+    const { captured, db } = captureActionsDb();
+    await new ActionsService(db).actions("2026-08-26", "2026-08-26");
+    assert.equal(captured.task.length, 3, "три task-подзапроса: закрытые, принятые, заведённые");
+    assert.equal(captured.entity.length, 1, "один entity-подзапрос: заведённые карточки");
+    for (const c of [...captured.task, ...captured.entity])
+      assert.doesNotMatch(renderSql(c), /personal/);
+  });
+
+  it("excludePersonal=true — каждый task/entity-подзапрос вырезает personal", async () => {
+    const { captured, db } = captureActionsDb();
+    await new ActionsService(db).actions("2026-08-26", "2026-08-26", undefined, true);
+    assert.equal(captured.task.length, 3);
+    assert.equal(captured.entity.length, 1);
+    for (const c of captured.task)
+      assert.match(renderSql(c), /personal/, "task-подзапрос ленты потерял гейт personal");
+    for (const c of captured.entity)
+      assert.match(renderSql(c), /personal/, "entity-подзапрос ленты потерял гейт personal");
   });
 });

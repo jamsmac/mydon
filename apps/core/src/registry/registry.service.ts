@@ -2,9 +2,33 @@ import { createHash } from "node:crypto";
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { approval, entity, grContract, machineCard, moneyFlow, org, task } from "@mydon/db";
 import { MAX_FIND_LIMIT, TZ, type Domain } from "@mydon/shared";
-import { and, asc, count, desc, eq, gte, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, isNotNull, isNull, lt, ne, or, sql, type SQL } from "drizzle-orm";
 import { DB, type Db } from "../db/db.module";
 import { AGENT_SCHEDULE_SOURCE } from "../tasks/agent-schedule";
+
+/**
+ * Предикаты «строка НЕ из личного контура» (R-P5-7b).
+ *
+ * briefing/overview считают тревоги по ВСЕМ доменам, включая personal, и при
+ * ужесточении отдавали бы не-владельцу число просрочек/задач личного контура.
+ * Гейт по видимости (excludePersonal), а не глухой: владелец с owner-токеном
+ * своё видит. Коррелированный `not exists`, а не `orgId <> personalId` —
+ * `orgId` бывает NULL (осиротевшая строка), и `NULL <> …` вычеркнул бы её,
+ * хотя личной она не является. Для task — NULL-safe `is distinct from`.
+ */
+function moneyNotPersonal(): SQL {
+  return sql`not exists (select 1 from ${org} where ${org.id} = ${moneyFlow.orgId} and ${org.code} = 'personal')`;
+}
+function entityNotPersonal(): SQL {
+  return sql`not exists (select 1 from ${org} where ${org.id} = ${entity.orgId} and ${org.code} = 'personal')`;
+}
+function taskNotPersonal(): SQL {
+  return sql`${task.domain} is distinct from 'personal'`;
+}
+/** Автомат личного контура: карточка ссылается на entity личной org. */
+function machineNotPersonal(): SQL {
+  return sql`not exists (select 1 from ${entity} join ${org} on ${org.id} = ${entity.orgId} where ${entity.id} = ${machineCard.entityId} and ${org.code} = 'personal')`;
+}
 
 export interface ObligationsSummary {
   domain: Domain;
@@ -128,11 +152,14 @@ export class RegistryService {
    * Сводка реестра: сколько каких записей в каждом направлении.
    * Владелец видит «GLOBERENT: контрагенты ×205, договоры ×496», а не пустой поиск.
    */
-  async overview() {
+  async overview(excludePersonal = false) {
     return this.db
       .select({ domain: org.code, type: entity.type, n: count() })
       .from(entity)
       .innerJoin(org, eq(org.id, entity.orgId))
+      // org уже в join — тут достаточно прямого сравнения кода направления,
+      // not exists не нужен. Флаг выключен (дефолт) → undefined → SQL прежний.
+      .where(excludePersonal ? ne(org.code, "personal") : undefined)
       .groupBy(org.code, entity.type)
       .orderBy(org.code, entity.type);
   }
@@ -157,8 +184,17 @@ export class RegistryService {
    * Данные утреннего брифинга (FR-6). Все четыре тревоги владельца из Ф11.
    * `now` — параметром: границы горизонта проверяемы тестом, а не часами машины.
    */
-  async briefing(now: Date = new Date()): Promise<Briefing> {
+  async briefing(now: Date = new Date(), excludePersonal = false): Promise<Briefing> {
     const soon = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+    // При ужесточении и не-owner запросе тревоги личного контура (деньги,
+    // задачи, договоры, автоматы) в сводку не входят — гейт по видимости, не
+    // глухой: owner-токен всё это видит. Флаг выключен (дефолт) → undefined →
+    // предикат не добавляется, SQL и все четыре числа прежние (R-P5-7b).
+    const moneyGate = excludePersonal ? moneyNotPersonal() : undefined;
+    const entityGate = excludePersonal ? entityNotPersonal() : undefined;
+    const taskGate = excludePersonal ? taskNotPersonal() : undefined;
+    const machineGate = excludePersonal ? machineNotPersonal() : undefined;
 
     // Даты сравниваем КАК СТРОКИ, без приведения к timestamptz.
     //
@@ -190,6 +226,7 @@ export class RegistryService {
             and(isNotNull(moneyFlow.dueDate), lt(moneyFlow.dueDate, today)),
             and(isNull(moneyFlow.dueDate), lt(moneyFlow.date, now)),
           ),
+          moneyGate,
         ),
       );
 
@@ -203,7 +240,7 @@ export class RegistryService {
     const idleMachineRows = await this.db
       .select({ id: machineCard.entityId })
       .from(machineCard)
-      .where(ne(machineCard.status, "in_service"));
+      .where(and(ne(machineCard.status, "in_service"), machineGate));
 
     const [pendingApprovals] = await this.db
       .select({ n: count() })
@@ -220,6 +257,7 @@ export class RegistryService {
           // последняя возможность его продлить, о нём обязательно нужно сказать.
           sql`(${entity.attrs} ->> 'endDate') >= ${today}`,
           sql`(${entity.attrs} ->> 'endDate') < ${horizon}`,
+          entityGate,
         ),
       );
 
@@ -244,6 +282,7 @@ export class RegistryService {
           eq(moneyFlow.direction, "in"),
           gte(moneyFlow.dueDate, today),
           lt(moneyFlow.dueDate, horizon),
+          moneyGate,
         ),
       );
     // distinct по договору: у одного договора может быть несколько planned-строк
@@ -266,6 +305,7 @@ export class RegistryService {
           eq(entity.type, "contract"),
           sql`(${entity.attrs} ->> 'endDate') is not null`,
           sql`(${entity.attrs} ->> 'endDate') !~ '^\\d{4}-\\d{2}-\\d{2}'`,
+          entityGate,
         ),
       );
 
@@ -280,6 +320,7 @@ export class RegistryService {
           ne(task.status, "done"),
           ne(task.status, "cancelled"),
           or(isNull(task.source), ne(task.source, AGENT_SCHEDULE_SOURCE)),
+          taskGate,
         ),
       );
 
